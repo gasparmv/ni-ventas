@@ -32,8 +32,52 @@ const STATE = {
   view: 'dashboard',
   selected: null,
   dashMonths: null,   // null = mes actual; Set('YYYY-MM') = filtro activo; 'all' = todos
-  dashChartIdx: 0     // 0 = ventas acumuladas, 1 = semanal stacked por canal
+  dashChartIdx: 0,    // 0 = ventas acumuladas, 1 = semanal stacked por canal
+  done: new Set(),    // ids de seguimientos marcados como hechos (persistido en localStorage)
+  segPvFilter: 'all'  // all | D30 | D60 | D90
 };
+
+// ============ TOUCHPOINTS / DONE ============
+function loadDone() {
+  try { STATE.done = new Set(JSON.parse(localStorage.getItem('niventas.done') || '[]')); }
+  catch(e) { STATE.done = new Set(); }
+}
+function saveDone() { localStorage.setItem('niventas.done', JSON.stringify(Array.from(STATE.done))); }
+function isDone(id) { return STATE.done.has(id); }
+function toggleDone(id) {
+  if (STATE.done.has(id)) STATE.done.delete(id);
+  else STATE.done.add(id);
+  saveDone();
+  render();
+}
+function nextWedAfter(d, minDays) {
+  let dt = addDays(d, minDays);
+  while (dt.getDay() !== 3) dt = addDays(dt, 1);
+  return dt;
+}
+function presupuestoTouchpoints(sent) {
+  const s = new Date(sent); s.setHours(0,0,0,0);
+  const dow = s.getDay(); // 0=dom, 1=lun ... 6=sab
+  let f1;
+  if (dow >= 1 && dow <= 3) {
+    f1 = addDays(s, 5 - dow); // Mon→Fri (4d), Tue→Fri (3d), Wed→Fri (2d)
+  } else {
+    f1 = nextWedAfter(s, 4); // Thu/Fri/Sat/Sun → próximo miércoles ≥4d después
+  }
+  const f2 = nextWedAfter(f1, 5);
+  const f3 = addDays(f2, 7);
+  return [
+    { id: 'F1', label: 'F1', due: f1 },
+    { id: 'F2', label: 'F2', due: f2 },
+    { id: 'F3', label: 'F3', due: f3 }
+  ];
+}
+function touchpointState(due) {
+  const days = daysBetween(due, TODAY); // <0=futuro, 0=hoy, >0=pasado
+  if (days < -1) return 'future';
+  if (days <= 1) return 'due';
+  return 'overdue';
+}
 
 const DASH_CHARTS = [
   { id: 'cumulative', title: (lbl) => `Ventas acumuladas · ${lbl}` },
@@ -373,44 +417,59 @@ function postventaMilestones(pedido) {
   });
 }
 
-function getSeguimientosWeek() {
-  // Esta semana = desde miércoles más cercano para atrás 7 días, mirando presupuestos abiertos + post-venta now/overdue
-  const list = [];
-  // Presupuestos abiertos en último ciclo
+function presupuestosActivos() {
+  // Devuelve presupuestos no cerrados, con sus 3 touchpoints + el "actual" (primer no-hecho)
+  const out = [];
   for (const ppto of STATE.presupuestos) {
     const st = presupuestoStatus(ppto);
-    if (st.state === 'abierto' && st.days <= 30) {
-      list.push({
-        kind: 'presupuesto',
-        cliente: ppto.nombre,
-        fecha: ppto.fecha,
-        diasAbierto: st.days,
-        precio: ppto.precio,
-        wa: '',
-        ppto
-      });
-    }
+    if (st.state === 'cerrado' || st.state === 'futuro') continue;
+    const tps = presupuestoTouchpoints(ppto.fecha).map(tp => ({
+      ...tp,
+      doneId: `ppto:${ppto.idx}|${ppto.sheet}|${tp.id}`,
+      done: isDone(`ppto:${ppto.idx}|${ppto.sheet}|${tp.id}`),
+      state: touchpointState(tp.due)
+    }));
+    if (tps.every(t => t.done)) continue;
+    const currentIdx = tps.findIndex(t => !t.done);
+    out.push({ ppto, tps, currentIdx, current: tps[currentIdx], diasAbierto: st.days });
   }
-  // Post-venta milestones
+  return out.sort((a, b) => a.current.due - b.current.due);
+}
+
+function postventasActivos() {
+  const out = [];
   for (const ped of STATE.pedidos) {
     const ms = postventaMilestones(ped);
     for (const m of ms) {
-      if (m.state === 'now' || m.state === 'overdue') {
-        // Try to get phone from ENVIO
-        const tel = extractPhone(ped.envio);
-        list.push({
-          kind: 'postventa',
-          cliente: ped.cartel,
-          fecha: m.due,
-          milestone: m,
-          dias: m.days,
-          tel,
-          pedido: ped
-        });
-      }
+      if (m.state === 'pending-delivery') continue;
+      const doneId = `pv:${ped.idx}|${m.id}`;
+      const done = isDone(doneId);
+      const tel = extractPhone(ped.envio);
+      out.push({ pedido: ped, milestone: m, doneId, done, tel });
     }
   }
-  return list.sort((a,b) => (a.fecha) - (b.fecha));
+  return out;
+}
+
+function getSeguimientosWeek() {
+  // Items "calientes" para badge sidebar y alertas dashboard
+  const list = [];
+  for (const it of presupuestosActivos()) {
+    if (it.current.state === 'future') continue;
+    list.push({
+      kind: 'presupuesto', cliente: it.ppto.nombre, fecha: it.current.due,
+      diasAbierto: it.diasAbierto, precio: it.ppto.precio, ppto: it.ppto, item: it
+    });
+  }
+  for (const it of postventasActivos()) {
+    if (it.done) continue;
+    if (it.milestone.state !== 'now' && it.milestone.state !== 'overdue') continue;
+    list.push({
+      kind: 'postventa', cliente: it.pedido.cartel, fecha: it.milestone.due,
+      milestone: it.milestone, dias: it.milestone.days, tel: it.tel, pedido: it.pedido
+    });
+  }
+  return list.sort((a, b) => a.fecha - b.fecha);
 }
 
 function extractPhone(envio) {
@@ -780,60 +839,155 @@ function renderPresupuestos() {
 }
 
 // ---------- SEGUIMIENTOS ----------
-let segTab = 'all'; // all | presupuestos | postventa
+let segTab = 'presupuestos'; // presupuestos | postventa
 function bindSeguimientos() {
   document.querySelectorAll('[data-stab]').forEach(el => {
     el.onclick = () => { segTab = el.dataset.stab; render(); };
   });
+  document.querySelectorAll('[data-pv-filter]').forEach(el => {
+    el.onclick = () => { STATE.segPvFilter = el.dataset.pvFilter; render(); };
+  });
+  document.querySelectorAll('[data-toggle-done]').forEach(el => {
+    el.onclick = (e) => { e.stopPropagation(); toggleDone(el.dataset.toggleDone); };
+  });
 }
+
+function tpStateLabel(tp) {
+  if (tp.done) return 'hecho';
+  const d = daysBetween(tp.due, TODAY);
+  if (d < -1) return `en ${-d}d`;
+  if (d === 0) return 'HOY';
+  if (d === -1) return 'mañana';
+  if (d === 1) return 'ayer';
+  return `vencido ${d}d`;
+}
+function tpClass(tp) {
+  if (tp.done) return 'tp-done';
+  if (tp.state === 'future') return 'tp-future';
+  if (tp.state === 'due') return 'tp-due';
+  return 'tp-overdue';
+}
+
 function renderSeguimientos() {
-  const all = getSeguimientosWeek();
-  const ppts = all.filter(s=>s.kind==='presupuesto');
-  const pvs  = all.filter(s=>s.kind==='postventa');
-  let list = all;
-  if (segTab === 'presupuestos') list = ppts;
-  else if (segTab === 'postventa') list = pvs;
+  const ppts = presupuestosActivos();
+  const pvs  = postventasActivos().filter(p => !p.done);
+
+  // Counts to show on tabs
+  const pptsHot = ppts.filter(p => p.current.state !== 'future').length;
+  const pvsHot  = pvs.filter(p => p.milestone.state === 'now' || p.milestone.state === 'overdue').length;
+
+  let body;
+  if (segTab === 'presupuestos') body = renderSegPresupuestos(ppts);
+  else body = renderSegPostventa(pvs);
+
   return `
     <div class="page-head">
-      <div><div class="eyebrow">Esta semana · ${all.length} acciones</div><h1>Seguimientos</h1></div>
+      <div>
+        <div class="eyebrow">${pptsHot + pvsHot} acciones calientes</div>
+        <h1>Seguimientos</h1>
+      </div>
       <div class="actions"><button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
     </div>
-    <div class="table-wrap">
-      <div class="table-toolbar">
-        <button class="btn btn-ghost ${segTab==='all'?'btn-cyan':''}" data-stab="all">Todos · ${all.length}</button>
-        <button class="btn btn-ghost ${segTab==='presupuestos'?'btn-cyan':''}" data-stab="presupuestos">Presupuestos · ${ppts.length}</button>
-        <button class="btn btn-ghost ${segTab==='postventa'?'btn-cyan':''}" data-stab="postventa">Post-venta · ${pvs.length}</button>
-      </div>
-      ${list.length === 0 ? '<div class="loading">✨ Nada para seguir esta semana</div>' :
-        `<table class="t">
-          <thead><tr><th>Tipo</th><th>Cliente</th><th>Detalle</th><th>Días</th><th></th></tr></thead>
-          <tbody>
-            ${list.map(s => {
-              if (s.kind === 'presupuesto') {
-                const tel = ''; // no tel column in cotizador
-                return `<tr>
-                  <td><span class="pill cyan">Presupuesto</span></td>
-                  <td class="cliente">${escapeHtml(s.cliente)}</td>
-                  <td class="muted">${fmtMoney(s.precio)} · enviado ${fmtDate(s.fecha)}</td>
-                  <td class="num">${s.diasAbierto}d</td>
-                  <td><span class="muted" style="font-size:11px">Buscar tel en pedidos para enviar wa</span></td>
-                </tr>`;
-              } else {
-                const m = s.milestone;
-                const link = s.tel ? waLink(s.tel, m.template(s.cliente.split(' ')[0])) : '';
-                return `<tr>
-                  <td><span class="pill ${m.tagClass}">${m.id}</span></td>
-                  <td class="cliente">${escapeHtml(s.cliente)}</td>
-                  <td class="muted">${m.label} · vence ${fmtDate(s.fecha)}</td>
-                  <td class="num">${s.dias > 0 ? '+'+s.dias : s.dias === 0 ? 'hoy' : s.dias}</td>
-                  <td>${link ? `<a class="btn btn-primary" target="_blank" href="${escapeHtml(link)}">📱 WhatsApp</a>` : '<span class="muted">sin tel</span>'}</td>
-                </tr>`;
-              }
-            }).join('')}
-          </tbody>
-        </table>`
-      }
+    <div class="seg-tabs">
+      <button class="seg-tab ${segTab==='presupuestos'?'active':''}" data-stab="presupuestos">
+        <span class="seg-tab-label">Presupuestos a cerrar</span>
+        <span class="seg-tab-count">${pptsHot}<span class="muted" style="font-size:10px">/${ppts.length}</span></span>
+      </button>
+      <button class="seg-tab ${segTab==='postventa'?'active':''}" data-stab="postventa">
+        <span class="seg-tab-label">Post-venta · retargeting</span>
+        <span class="seg-tab-count">${pvsHot}<span class="muted" style="font-size:10px">/${pvs.length}</span></span>
+      </button>
     </div>
+    ${body}
+  `;
+}
+
+function renderSegPresupuestos(items) {
+  if (items.length === 0) return '<div class="loading">✨ No hay presupuestos pendientes de seguimiento</div>';
+  // Orden: primero overdue, luego due (hoy/mañana), luego future
+  const order = { overdue: 0, due: 1, future: 2 };
+  items.sort((a,b) => order[a.current.state] - order[b.current.state] || a.current.due - b.current.due);
+  return `
+    <div class="seg-help">
+      Cadencia: enviado lun/mar/mié → <b>F1 viernes</b> · <b>F2 mié siguiente</b> · <b>F3 mié posterior</b>. Si se envió jue/vie/sáb/dom, F1 cae el primer miércoles.
+    </div>
+    <div class="seg-list">
+      ${items.map(it => {
+        const p = it.ppto;
+        return `
+          <div class="seg-card ${tpClass(it.current)}">
+            <div class="seg-row-top">
+              <div>
+                <div class="seg-cliente">${escapeHtml(p.nombre)}</div>
+                <div class="seg-meta">${fmtMoney(p.precio)} · enviado ${fmtDate(p.fecha)} · ${it.diasAbierto}d abierto</div>
+              </div>
+              <div class="seg-current ${tpClass(it.current)}">
+                <div class="seg-current-id">${it.current.id}</div>
+                <div class="seg-current-when">${tpStateLabel(it.current)}</div>
+              </div>
+            </div>
+            <div class="seg-tps">
+              ${it.tps.map((tp, i) => `
+                <div class="tp-pill ${tpClass(tp)} ${i===it.currentIdx?'is-current':''}" data-toggle-done="${tp.doneId}" title="Marcar como hecho">
+                  <span class="tp-check">${tp.done ? '✓' : i===it.currentIdx ? '●' : '○'}</span>
+                  <span class="tp-id">${tp.id}</span>
+                  <span class="tp-date">${fmtDate(tp.due)}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>`;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderSegPostventa(items) {
+  const filtered = STATE.segPvFilter === 'all' ? items : items.filter(it => it.milestone.id === STATE.segPvFilter);
+  const counts = { all: items.length, D30: 0, D60: 0, D90: 0 };
+  for (const it of items) counts[it.milestone.id]++;
+  // Orden: overdue → now → future. Pero "future" lo escondemos por defecto excepto si filtra.
+  const order = { overdue: 0, now: 1, future: 2 };
+  filtered.sort((a,b) => order[a.milestone.state] - order[b.milestone.state] || a.milestone.due - b.milestone.due);
+
+  return `
+    <div class="seg-filters">
+      <button class="ps-chip ${STATE.segPvFilter==='all'?'active':''}" data-pv-filter="all">Todos · ${counts.all}</button>
+      <button class="ps-chip tp-d30 ${STATE.segPvFilter==='D30'?'active':''}" data-pv-filter="D30">D30 foto · ${counts.D30}</button>
+      <button class="ps-chip tp-d60 ${STATE.segPvFilter==='D60'?'active':''}" data-pv-filter="D60">D60 referidos · ${counts.D60}</button>
+      <button class="ps-chip tp-d90 ${STATE.segPvFilter==='D90'?'active':''}" data-pv-filter="D90">D90 2do cartel · ${counts.D90}</button>
+    </div>
+    ${filtered.length === 0 ? '<div class="loading">Nada en este filtro</div>' :
+      `<div class="seg-list">
+        ${filtered.map(it => {
+          const m = it.milestone;
+          const days = m.days;
+          const stateText = days > 0 ? `vencido ${days}d` : days === 0 ? 'HOY' : `en ${-days}d`;
+          const stClass = m.state === 'overdue' ? 'tp-overdue' : m.state === 'now' ? 'tp-due' : 'tp-future';
+          const tel = it.tel;
+          const link = tel ? waLink(tel, m.template(it.pedido.cartel.split(' ')[0])) : '';
+          return `
+            <div class="seg-card ${stClass}">
+              <div class="seg-row-top">
+                <div>
+                  <div class="seg-cliente">${escapeHtml(it.pedido.cartel)}
+                    <span class="pill ${m.tagClass}" style="margin-left:8px">${m.id}</span>
+                  </div>
+                  <div class="seg-meta">${escapeHtml(m.label)} · vence ${fmtDate(m.due)}${tel ? '' : ' · sin tel'}</div>
+                </div>
+                <div class="seg-current ${stClass}">
+                  <div class="seg-current-id">${m.id}</div>
+                  <div class="seg-current-when">${stateText}</div>
+                </div>
+              </div>
+              <div class="seg-actions">
+                ${link ? `<a class="btn btn-primary" target="_blank" href="${escapeHtml(link)}">📱 Mandar WhatsApp</a>` : '<span class="muted" style="font-size:12px">No se pudo extraer tel del envío</span>'}
+                <button class="btn ${it.done?'btn-cyan':'btn-ghost'}" data-toggle-done="${it.doneId}">
+                  ${it.done ? '✓ Hecho' : 'Marcar como hecho'}
+                </button>
+              </div>
+            </div>`;
+        }).join('')}
+      </div>`}
   `;
 }
 
@@ -1231,6 +1385,7 @@ window.loadAll = loadAll;
 window.closeDrawer = closeDrawer;
 
 // ---------- INIT ----------
+loadDone();
 const initView = location.hash.replace('#','') || 'dashboard';
 STATE.view = initView;
 loadAll();
