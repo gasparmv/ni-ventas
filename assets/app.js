@@ -33,20 +33,46 @@ const STATE = {
   selected: null,
   dashMonths: null,   // null = mes actual; Set('YYYY-MM') = filtro activo; 'all' = todos
   dashChartIdx: 0,    // 0 = ventas acumuladas, 1 = semanal stacked por canal
-  done: new Set(),    // ids de seguimientos marcados como hechos (persistido en localStorage)
+  done: new Map(),    // id -> ISO timestamp en que se marcó (persistido en localStorage)
   segPvFilter: 'all'  // all | D30 | D60 | D90
 };
 
 // ============ TOUCHPOINTS / DONE ============
 function loadDone() {
-  try { STATE.done = new Set(JSON.parse(localStorage.getItem('niventas.done') || '[]')); }
-  catch(e) { STATE.done = new Set(); }
+  try {
+    const raw = JSON.parse(localStorage.getItem('niventas.done') || '{}');
+    if (Array.isArray(raw)) {
+      // formato viejo: array de ids sin timestamp
+      STATE.done = new Map(raw.map(id => [id, null]));
+    } else if (raw && typeof raw === 'object') {
+      STATE.done = new Map(Object.entries(raw));
+    } else {
+      STATE.done = new Map();
+    }
+  } catch(e) { STATE.done = new Map(); }
 }
-function saveDone() { localStorage.setItem('niventas.done', JSON.stringify(Array.from(STATE.done))); }
+function saveDone() {
+  const obj = {};
+  for (const [k, v] of STATE.done) obj[k] = v;
+  localStorage.setItem('niventas.done', JSON.stringify(obj));
+}
 function isDone(id) { return STATE.done.has(id); }
+function getDoneAt(id) {
+  const v = STATE.done.get(id);
+  return v ? new Date(v) : null;
+}
+function fmtDoneAt(d) {
+  if (!d) return '';
+  const days = daysBetween(d, TODAY);
+  const hhmm = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  if (days === 0) return `hoy ${hhmm}`;
+  if (days === 1) return `ayer ${hhmm}`;
+  if (days <= 6) return `hace ${days}d`;
+  return d.toLocaleDateString('es-AR', {day:'2-digit', month:'2-digit'});
+}
 function toggleDone(id) {
   if (STATE.done.has(id)) STATE.done.delete(id);
-  else STATE.done.add(id);
+  else STATE.done.set(id, new Date().toISOString());
   saveDone();
   render();
 }
@@ -423,12 +449,16 @@ function presupuestosActivos() {
   for (const ppto of STATE.presupuestos) {
     const st = presupuestoStatus(ppto);
     if (st.state === 'cerrado' || st.state === 'futuro') continue;
-    const tps = presupuestoTouchpoints(ppto.fecha).map(tp => ({
-      ...tp,
-      doneId: `ppto:${ppto.idx}|${ppto.sheet}|${tp.id}`,
-      done: isDone(`ppto:${ppto.idx}|${ppto.sheet}|${tp.id}`),
-      state: touchpointState(tp.due)
-    }));
+    const tps = presupuestoTouchpoints(ppto.fecha).map(tp => {
+      const doneId = `ppto:${ppto.idx}|${ppto.sheet}|${tp.id}`;
+      return {
+        ...tp,
+        doneId,
+        done: isDone(doneId),
+        doneAt: getDoneAt(doneId),
+        state: touchpointState(tp.due)
+      };
+    });
     if (tps.every(t => t.done)) continue;
     const currentIdx = tps.findIndex(t => !t.done);
     out.push({ ppto, tps, currentIdx, current: tps[currentIdx], diasAbierto: st.days });
@@ -444,8 +474,9 @@ function postventasActivos() {
       if (m.state === 'pending-delivery') continue;
       const doneId = `pv:${ped.idx}|${m.id}`;
       const done = isDone(doneId);
+      const doneAt = getDoneAt(doneId);
       const tel = extractPhone(ped.envio);
-      out.push({ pedido: ped, milestone: m, doneId, done, tel });
+      out.push({ pedido: ped, milestone: m, doneId, done, doneAt, tel });
     }
   }
   return out;
@@ -856,6 +887,67 @@ function bindSeguimientos() {
   document.querySelectorAll('[data-toggle-done]').forEach(el => {
     el.onclick = (e) => { e.stopPropagation(); toggleDone(el.dataset.toggleDone); };
   });
+  document.querySelectorAll('[data-export-csv]').forEach(el => el.onclick = () => {
+    if (el.dataset.exportCsv === 'presupuestos') exportSegPresupuestos();
+    else exportSegPostventa();
+  });
+}
+
+function downloadCSV(filename, rows) {
+  const csv = rows.map(r => r.map(cell => {
+    const s = String(cell == null ? '' : cell);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }).join(',')).join('\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 100);
+}
+
+function todayKey() {
+  const d = TODAY;
+  return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function exportSegPresupuestos() {
+  const items = presupuestosActivos();
+  const headers = ['Cliente','Hoja','Fecha enviado','Días abierto','Monto','F1 vence','F1 hecho','F1 marcado en','F2 vence','F2 hecho','F2 marcado en','F3 vence','F3 hecho','F3 marcado en'];
+  const rows = [headers];
+  for (const it of items) {
+    const p = it.ppto;
+    const r = [p.nombre, p.sheet, fmtDate(p.fecha), it.diasAbierto, p.precio];
+    for (const tp of it.tps) {
+      r.push(fmtDate(tp.due));
+      r.push(tp.done ? 'sí' : 'no');
+      r.push(tp.doneAt ? tp.doneAt.toLocaleString('es-AR') : '');
+    }
+    rows.push(r);
+  }
+  downloadCSV(`seguimientos-presupuestos-${todayKey()}.csv`, rows);
+}
+
+function exportSegPostventa() {
+  const items = postventasActivos();
+  const headers = ['Cliente','Milestone','Vence','Días','Hecho','Marcado en','Tel','Estado pedido','Fecha pedido','Precio'];
+  const rows = [headers];
+  for (const it of items) {
+    rows.push([
+      it.pedido.cartel,
+      it.milestone.id,
+      fmtDate(it.milestone.due),
+      it.milestone.days,
+      it.done ? 'sí' : 'no',
+      it.doneAt ? it.doneAt.toLocaleString('es-AR') : '',
+      it.tel || '',
+      it.pedido.estadoPedido || '',
+      fmtDate(it.pedido.fecha),
+      it.pedido.precio + it.pedido.precioDimmer
+    ]);
+  }
+  downloadCSV(`seguimientos-postventa-${todayKey()}.csv`, rows);
 }
 
 function tpStateLabel(tp) {
@@ -892,7 +984,10 @@ function renderSeguimientos() {
         <div class="eyebrow">${pptsHot + pvsHot} acciones calientes</div>
         <h1>Seguimientos</h1>
       </div>
-      <div class="actions"><button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
+      <div class="actions">
+        <button class="btn btn-ghost" data-export-csv="${segTab}">⬇ CSV</button>
+        <button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button>
+      </div>
     </div>
     <div class="seg-tabs">
       <button class="seg-tab ${segTab==='presupuestos'?'active':''}" data-stab="presupuestos">
@@ -934,10 +1029,10 @@ function renderSegPresupuestos(items) {
             </div>
             <div class="seg-tps">
               ${it.tps.map((tp, i) => `
-                <div class="tp-pill ${tpClass(tp)} ${i===it.currentIdx?'is-current':''}" data-toggle-done="${tp.doneId}" title="Marcar como hecho">
+                <div class="tp-pill ${tpClass(tp)} ${i===it.currentIdx?'is-current':''}" data-toggle-done="${tp.doneId}" title="${tp.done && tp.doneAt ? 'Marcado el ' + tp.doneAt.toLocaleString('es-AR') : 'Marcar como hecho'}">
                   <span class="tp-check">${tp.done ? '✓' : i===it.currentIdx ? '●' : '○'}</span>
                   <span class="tp-id">${tp.id}</span>
-                  <span class="tp-date">${fmtDate(tp.due)}</span>
+                  <span class="tp-date">${tp.done && tp.doneAt ? '✓ ' + fmtDoneAt(tp.doneAt) : fmtDate(tp.due)}</span>
                 </div>
               `).join('')}
             </div>
