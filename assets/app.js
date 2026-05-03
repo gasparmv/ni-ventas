@@ -774,8 +774,13 @@ function renderTablePedidos() {
 }
 function pillEstadoPago(s) {
   const x = (s||'').toLowerCase();
-  if (x.includes('pag') || x.includes('cobra')) return `<span class="pill green">${escapeHtml(s)}</span>`;
-  if (x.includes('1') || x.includes('seña') || x.includes('parc')) return `<span class="pill amber">${escapeHtml(s)}</span>`;
+  // "primer pago" / "1er pago" → rojo (falta cobrar resto)
+  if (x.includes('primer') || x.includes('1er') || x.includes('1°') || /\b1\b/.test(x)) return `<span class="pill red">${escapeHtml(s)}</span>`;
+  // Cobro completo → verde
+  if (x.includes('cobrad') || x.includes('total') || x === 'pagado' || x.includes('100')) return `<span class="pill green">${escapeHtml(s)}</span>`;
+  // Seña / parcial → amber
+  if (x.includes('seña') || x.includes('sena') || x.includes('parc')) return `<span class="pill amber">${escapeHtml(s)}</span>`;
+  // 2do / restante / pendiente → amber
   if (x.includes('2do') || x.includes('rest') || x.includes('pend')) return `<span class="pill amber">${escapeHtml(s)}</span>`;
   return `<span class="pill muted">${escapeHtml(s||'—')}</span>`;
 }
