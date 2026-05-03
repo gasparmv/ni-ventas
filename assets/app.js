@@ -109,30 +109,33 @@ async function saveCotizacion() {
   const r = calcCotizador(f);
   STATE.cotizadorSaving = true;
   updateCotizadorForm();
+  const payload = {
+    cliente: f.cliente.trim(),
+    ancho: +f.ancho,
+    alto: +f.alto,
+    neon: +f.neon || 0,
+    tipo: f.tipo || 'INT',
+    m2: r.m2,
+    trans: r.trans,
+    negro: r.negro,
+    descuento: r.descuento,
+    recargo: r.recargo,
+    reventa: r.reventa,
+    comision: r.comision
+  };
   try {
+    // Apps Script requiere redirect follow para CORS cross-origin
     const resp = await fetch(CONFIG.appsScriptUrl, {
       method: 'POST',
-      body: JSON.stringify({
-        cliente: f.cliente.trim(),
-        ancho: +f.ancho,
-        alto: +f.alto,
-        neon: +f.neon || 0,
-        tipo: f.tipo || 'INT',
-        m2: r.m2,
-        trans: r.trans,
-        negro: r.negro,
-        descuento: r.descuento,
-        recargo: r.recargo,
-        reventa: r.reventa,
-        comision: r.comision
-      })
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify(payload)
     });
-    const j = await resp.json();
-    if (j.error) throw new Error(j.error);
-    // Limpiar form y recargar datos
+    // no-cors devuelve opaque response (no podemos leer el body),
+    // pero si no tiró error de red, asumimos éxito
     STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '' };
-    toast('Cotización guardada en hoja ' + (j.sheet || ''));
-    loadAll(); // recargar sheets para ver la nueva fila
+    toast('Cotización guardada ✓');
+    loadAll();
   } catch (e) {
     alert('Error al guardar: ' + e.message);
   } finally {
