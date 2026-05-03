@@ -11,6 +11,7 @@ const CONFIG = {
   cotizadorSheets: ['Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'],
   matchPriceTolerance: 0.20,   // ±20%
   presupuestoFollowupDays: 7,  // miércoles a miércoles
+  presupuestoCutoff: '2026-04-27',   // presupuestos anteriores quedan dados por vencidos / fuera del seguimiento activo
   postventaMilestones: [
     { id: 'D30', days: 30, label: 'Foto / feedback', tagClass: 'tag-d30',
       template: (n) => `Holaa ${n}, cómo va? cómo te quedó el cartel?\n\nsi tenés una foto cuando puedas pasame, nos re sirve mostrar como queda en el local 🤙` },
@@ -442,8 +443,10 @@ function postventaMilestones(pedido) {
 
 function presupuestosActivos() {
   // Devuelve presupuestos no cerrados, con sus 3 touchpoints + el "actual" (primer no-hecho)
+  const cutoff = parseDate(CONFIG.presupuestoCutoff);
   const out = [];
   for (const ppto of STATE.presupuestos) {
+    if (cutoff && ppto.fecha < cutoff) continue; // anteriores al cutoff: dados por vencidos
     const st = presupuestoStatus(ppto);
     if (st.state === 'cerrado' || st.state === 'futuro') continue;
     const tps = presupuestoTouchpoints(ppto.fecha).map(tp => {
