@@ -687,6 +687,63 @@ table.t td.cliente { font-weight: 600; }
   margin-left: auto;
 }
 
+/* ============ USER PICKER ============ */
+.user-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.user-pick-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: var(--tr-xwide);
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+.user-pick-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.user-chip {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  padding: 4px 9px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  letter-spacing: var(--tr-wide);
+  cursor: pointer;
+  transition: all var(--dur-fast);
+}
+.user-chip:hover { border-color: var(--neon-cyan); color: var(--neon-cyan); }
+.user-chip.active {
+  background: var(--neon-cyan);
+  color: var(--ink-050);
+  border-color: var(--neon-cyan);
+  box-shadow: var(--glow-cyan-sm);
+  font-weight: 700;
+}
+.user-chip.add { color: var(--fg-faint); padding: 4px 8px; }
+
+/* ============ HEATMAP ============ */
+.heatmap {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(1, 1fr);
+  gap: 3px;
+  padding: 4px 0;
+}
+.hm-cell {
+  width: 100%;
+  height: 28px;
+  border-radius: 3px;
+  border: 1px solid rgba(255,255,255,0.04);
+}
+
 /* ============ SEGUIMIENTOS ============ */
 .seg-tabs {
   display: grid;

@@ -1,0 +1,10 @@
+name = "ni-ventas-tracker"
+main = "worker.js"
+compatibility_date = "2026-05-01"
+
+# La D1 binding se completa con el ID que devuelve `wrangler d1 create`.
+# Reemplazá <DB_ID> tras correr el comando del README.
+[[d1_databases]]
+binding = "DB"
+database_name = "ni-ventas"
+database_id = "<DB_ID>"

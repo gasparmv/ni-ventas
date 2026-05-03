@@ -5,6 +5,8 @@
  */
 
 const CONFIG = {
+  trackerUrl: '',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
+  defaultUsers: ['Gaspar', 'Joaquín'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -35,8 +37,44 @@ const STATE = {
   dashMonths: null,   // null = mes actual; Set('YYYY-MM') = filtro activo; 'all' = todos
   dashChartIdx: 0,    // 0 = ventas acumuladas, 1 = semanal stacked por canal
   done: new Map(),    // id -> ISO timestamp en que se marcó (persistido en localStorage)
-  segPvFilter: 'all'  // all | D30 | D60 | D90
+  segPvFilter: 'all', // all | D30 | D60 | D90
+  user: null,         // usuario activo (string)
+  users: [],          // lista de usuarios (default + agregados)
+  activity: { rows: [], loading: false, error: null }
 };
+
+// ============ USUARIO ============
+function loadUser() {
+  try {
+    STATE.users = JSON.parse(localStorage.getItem('niventas.users') || 'null') || CONFIG.defaultUsers.slice();
+  } catch(e) { STATE.users = CONFIG.defaultUsers.slice(); }
+  STATE.user = localStorage.getItem('niventas.user') || null;
+}
+function saveUser() {
+  localStorage.setItem('niventas.users', JSON.stringify(STATE.users));
+  if (STATE.user) localStorage.setItem('niventas.user', STATE.user);
+  else localStorage.removeItem('niventas.user');
+}
+function setUser(name) { STATE.user = name; saveUser(); render(); }
+function addUser() {
+  const name = (prompt('Nombre del nuevo usuario:') || '').trim();
+  if (!name) return;
+  if (!STATE.users.includes(name)) STATE.users.push(name);
+  STATE.user = name;
+  saveUser();
+  render();
+}
+
+async function trackEvent(action, itemId, itemKind, undo = false) {
+  if (!CONFIG.trackerUrl || !STATE.user) return;
+  try {
+    await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: STATE.user, action, itemId, itemKind, undo })
+    });
+  } catch (e) { console.warn('tracker offline:', e.message); }
+}
 
 // ============ TOUCHPOINTS / DONE ============
 function loadDone() {
@@ -72,9 +110,13 @@ function fmtDoneAt(d) {
   return d.toLocaleDateString('es-AR', {day:'2-digit', month:'2-digit'});
 }
 function toggleDone(id) {
-  if (STATE.done.has(id)) STATE.done.delete(id);
+  const wasDone = STATE.done.has(id);
+  if (wasDone) STATE.done.delete(id);
   else STATE.done.set(id, new Date().toISOString());
   saveDone();
+  // Tracking remoto (no bloquea la UI)
+  const kind = id.startsWith('ppto:') ? 'presupuesto' : id.startsWith('pv:') ? 'postventa' : '';
+  trackEvent('toggle_done', id, kind, wasDone);
   render();
 }
 function nextWedAfter(d, minDays) {
@@ -546,6 +588,7 @@ function render() {
     else if (v === 'pedidos')   document.getElementById('main').innerHTML = renderPedidos();
     else if (v === 'presupuestos') document.getElementById('main').innerHTML = renderPresupuestos();
     else if (v === 'seguimientos') document.getElementById('main').innerHTML = renderSeguimientos();
+    else if (v === 'actividad')    document.getElementById('main').innerHTML = renderActividad();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
   bindNav();
@@ -554,6 +597,7 @@ function render() {
   if (STATE.view === 'presupuestos') bindPresupuestos();
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') drawCharts();
+  if (STATE.view === 'actividad') bindActividad();
 }
 
 function renderShell() {
@@ -568,6 +612,13 @@ function renderShell() {
         <img class="brand-logo" src="assets/logo.svg" alt="Neon Infinito">
         <span class="b-sub">· VENTAS</span>
       </div>
+      <div class="user-pick">
+        <div class="user-pick-label">Usuario</div>
+        <div class="user-pick-chips">
+          ${STATE.users.map(u => `<button class="user-chip ${STATE.user===u?'active':''}" data-set-user="${escapeHtml(u)}">${escapeHtml(u)}</button>`).join('')}
+          <button class="user-chip add" data-add-user>+</button>
+        </div>
+      </div>
       <nav class="nav">
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
@@ -575,6 +626,7 @@ function renderShell() {
         <button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>
+        <button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot"></span> Live · Sheet 2026<br>
@@ -1450,9 +1502,146 @@ function drawDonut(canvasId, legendId, data, colors) {
   ).join('');
 }
 
+// ---------- ACTIVIDAD ----------
+let actFilter = { user: '', range: '7d' }; // range: 7d | 30d | all
+
+async function loadActivity() {
+  if (!CONFIG.trackerUrl) {
+    STATE.activity = { rows: [], loading: false, error: 'Tracker no configurado. Pegá la URL del Worker en CONFIG.trackerUrl.' };
+    render();
+    return;
+  }
+  STATE.activity.loading = true; STATE.activity.error = null; render();
+  try {
+    const params = new URLSearchParams();
+    if (actFilter.user) params.set('user', actFilter.user);
+    if (actFilter.range !== 'all') {
+      const days = actFilter.range === '7d' ? 7 : 30;
+      const from = new Date(); from.setDate(from.getDate() - days);
+      params.set('from', from.toISOString());
+    }
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/report?' + params.toString());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    STATE.activity = { rows: j.rows || [], loading: false, error: null };
+  } catch (e) {
+    STATE.activity = { rows: [], loading: false, error: e.message };
+  }
+  render();
+}
+
+function bindActividad() {
+  document.querySelectorAll('[data-act-range]').forEach(b => b.onclick = () => { actFilter.range = b.dataset.actRange; loadActivity(); });
+  document.querySelectorAll('[data-act-user]').forEach(b => b.onclick = () => { actFilter.user = b.dataset.actUser; loadActivity(); });
+  if (!STATE.activity.rows.length && !STATE.activity.error && !STATE.activity.loading) loadActivity();
+}
+
+function renderActividad() {
+  const { rows, loading, error } = STATE.activity;
+
+  // Resumen por usuario
+  const byUser = new Map();
+  for (const r of rows) {
+    if (!byUser.has(r.user)) byUser.set(r.user, { total: 0, ppto: 0, pv: 0, last: null });
+    const u = byUser.get(r.user);
+    u.total++;
+    if (r.item_kind === 'presupuesto') u.ppto++;
+    else if (r.item_kind === 'postventa') u.pv++;
+    if (!u.last || r.ts > u.last) u.last = r.ts;
+  }
+
+  // Heatmap por día (últimos N días)
+  const days = actFilter.range === 'all' ? 30 : (actFilter.range === '7d' ? 7 : 30);
+  const dayMap = new Map();
+  for (const r of rows) {
+    const k = r.ts.slice(0,10);
+    dayMap.set(k, (dayMap.get(k) || 0) + 1);
+  }
+  const dayList = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const dt = addDays(TODAY, -i);
+    const k = dt.toISOString().slice(0,10);
+    dayList.push({ date: dt, count: dayMap.get(k) || 0 });
+  }
+  const maxDay = Math.max(1, ...dayList.map(d => d.count));
+
+  return `
+    <div class="page-head">
+      <div><div class="eyebrow">Tracking de seguimientos</div><h1>Actividad</h1></div>
+      <div class="actions"><button class="btn btn-ghost" onclick="loadActivity()">↻ Recargar</button></div>
+    </div>
+
+    ${!CONFIG.trackerUrl ? `<div class="error" style="margin-bottom:var(--s-4)">
+      Tracker remoto no configurado. Editá <code>assets/app.js</code> → <code>CONFIG.trackerUrl</code> con la URL del Worker.
+    </div>` : ''}
+
+    <div class="seg-filters" style="margin-bottom:var(--s-4)">
+      <button class="ps-chip ${actFilter.range==='7d'?'active':''}" data-act-range="7d">Últimos 7 días</button>
+      <button class="ps-chip ${actFilter.range==='30d'?'active':''}" data-act-range="30d">Últimos 30 días</button>
+      <button class="ps-chip ${actFilter.range==='all'?'active':''}" data-act-range="all">Todo</button>
+      <span style="width:1px;background:var(--border);margin:0 6px"></span>
+      <button class="ps-chip ${actFilter.user===''?'active':''}" data-act-user="">Todos</button>
+      ${STATE.users.map(u => `<button class="ps-chip ${actFilter.user===u?'active':''}" data-act-user="${escapeHtml(u)}">${escapeHtml(u)}</button>`).join('')}
+    </div>
+
+    ${loading ? '<div class="loading"><div class="spinner"></div></div>' : ''}
+    ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
+
+    ${!loading && !error ? `
+      <div class="kpi-grid">
+        ${(byUser.size === 0
+          ? '<div class="kpi"><div class="kpi-label">Sin actividad</div><div class="kpi-value" style="font-size:24px">—</div></div>'
+          : Array.from(byUser.entries()).map(([user, u]) => `
+            <div class="kpi">
+              <div class="kpi-label">${escapeHtml(user)}</div>
+              <div class="kpi-value">${u.total}</div>
+              <div class="kpi-delta">${u.ppto} ppto · ${u.pv} post-venta · último ${fmtDoneAt(new Date(u.last))}</div>
+            </div>
+          `).join('')
+        )}
+      </div>
+
+      <div class="card" style="margin-bottom:var(--s-5)">
+        <div class="card-h"><h3>Actividad por día</h3></div>
+        <div class="heatmap">
+          ${dayList.map(d => {
+            const intensity = d.count / maxDay;
+            const op = d.count === 0 ? 0.05 : 0.2 + intensity * 0.8;
+            return `<div class="hm-cell" style="background:rgba(255,24,48,${op})" title="${fmtDate(d.date)}: ${d.count}"></div>`;
+          }).join('')}
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <div class="table-toolbar">
+          <div>Eventos</div>
+          <div class="right">${rows.length} filas</div>
+        </div>
+        ${rows.length === 0 ? '<div class="loading muted">Sin eventos en el rango seleccionado</div>' :
+          `<table class="t">
+            <thead><tr><th>Cuándo</th><th>Usuario</th><th>Tipo</th><th>Acción</th><th>Item</th></tr></thead>
+            <tbody>
+              ${rows.slice(0, 200).map(r => `<tr>
+                <td class="num">${new Date(r.ts).toLocaleString('es-AR')}</td>
+                <td class="cliente">${escapeHtml(r.user)}</td>
+                <td>${r.item_kind === 'presupuesto' ? '<span class="pill cyan">PPTO</span>' : r.item_kind === 'postventa' ? '<span class="pill red">POST-V</span>' : '<span class="pill muted">—</span>'}</td>
+                <td><span class="muted" style="font-size:12px">${escapeHtml(r.action)}</span></td>
+                <td><span class="muted" style="font-size:11px">${escapeHtml(r.item_id || '')}</span></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>`}
+      </div>
+    ` : ''}
+  `;
+}
+window.loadActivity = loadActivity;
+
 // ---------- COMMON ----------
 function bindNav() {
   document.querySelectorAll('.nav-item').forEach(b => b.onclick = () => setView(b.dataset.view));
+  document.querySelectorAll('[data-set-user]').forEach(b => b.onclick = () => setUser(b.dataset.setUser));
+  const addBtn = document.querySelector('[data-add-user]');
+  if (addBtn) addBtn.onclick = () => addUser();
 }
 function bindCommon() {
   document.querySelectorAll('[data-action="seg-cliente"]').forEach(b => b.onclick = () => {
@@ -1487,6 +1676,7 @@ window.closeDrawer = closeDrawer;
 
 // ---------- INIT ----------
 loadDone();
+loadUser();
 const initView = location.hash.replace('#','') || 'dashboard';
 STATE.view = initView;
 loadAll();
