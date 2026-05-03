@@ -30,7 +30,8 @@ const STATE = {
   loaded: false,
   error: null,
   view: 'dashboard',
-  selected: null
+  selected: null,
+  dashMonths: null   // null = mes actual; Set('YYYY-MM') = filtro activo; 'all' = todos
 };
 
 const TODAY = new Date(); TODAY.setHours(0,0,0,0);
@@ -275,6 +276,45 @@ function pedidosDelMes(month = null) {
   return STATE.pedidos.filter(p => getMonth(p.fecha) === m);
 }
 
+function getDashMonths() {
+  // Returns array of 'YYYY-MM' currently selected for the dashboard, or null = all
+  if (STATE.dashMonths === 'all') return null;
+  if (STATE.dashMonths instanceof Set && STATE.dashMonths.size > 0) return Array.from(STATE.dashMonths);
+  return [getCurrentMonth()];
+}
+function pedidosDash() {
+  const months = getDashMonths();
+  if (!months) return STATE.pedidos.slice();
+  const set = new Set(months);
+  return STATE.pedidos.filter(p => set.has(getMonth(p.fecha)));
+}
+function dashMonthsLabel() {
+  const months = getDashMonths();
+  if (!months) return 'Todos los meses';
+  if (months.length === 1) {
+    const [y,m] = months[0].split('-');
+    return new Date(parseInt(y), parseInt(m)-1, 1).toLocaleDateString('es-AR', {month:'long', year:'numeric'});
+  }
+  return `${months.length} meses`;
+}
+function availableMonths() {
+  const set = new Set(STATE.pedidos.map(p => getMonth(p.fecha)).filter(Boolean));
+  return Array.from(set).sort().reverse();
+}
+function toggleDashMonth(m) {
+  if (STATE.dashMonths === 'all' || STATE.dashMonths === null) {
+    // start fresh from current selection visualized
+    const base = getDashMonths();
+    STATE.dashMonths = new Set(base || availableMonths());
+  }
+  if (STATE.dashMonths.has(m)) STATE.dashMonths.delete(m);
+  else STATE.dashMonths.add(m);
+  if (STATE.dashMonths.size === 0) STATE.dashMonths = null; // back to default
+  render();
+}
+function setDashAll() { STATE.dashMonths = 'all'; render(); }
+function setDashCurrent() { STATE.dashMonths = null; render(); }
+
 function presupuestoStatus(ppto) {
   const match = STATE.matched.get(ppto.idx + '|' + ppto.sheet);
   if (match) return { state: 'cerrado', pedido: match };
@@ -404,8 +444,8 @@ function renderShell() {
   return `
     <aside class="sidebar">
       <div class="brand">
-        <span class="b-mark">N</span><span class="b-mark">E</span><span class="b-mark">O</span><span class="b-mark">N</span>
-        <span class="b-sub" style="margin-left:8px">· VENTAS</span>
+        <img class="brand-logo" src="assets/logo.png" alt="Neon Infinito">
+        <span class="b-sub">· VENTAS</span>
       </div>
       <nav class="nav">
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
@@ -441,7 +481,7 @@ function renderError() {
 
 // ---------- DASHBOARD ----------
 function renderDashboard() {
-  const cur = pedidosDelMes();
+  const cur = pedidosDash();
   const totalMes = cur.reduce((a,p)=>a+p.precio+p.precioDimmer, 0);
   const aov = cur.length ? totalMes / cur.length : 0;
   const cobrado = cur.reduce((a,p)=>a+p.pagado, 0);
@@ -449,7 +489,26 @@ function renderDashboard() {
   const sgts = getSeguimientosWeek();
   const pptosAbiertos = sgts.filter(s=>s.kind==='presupuesto');
   const postvenSgs = sgts.filter(s=>s.kind==='postventa');
+  const months = availableMonths();
+  const selected = getDashMonths(); // null = todos, array = filtro
+  const isAll = STATE.dashMonths === 'all';
+  const isDefault = STATE.dashMonths === null;
   return `
+    <div class="period-selector">
+      <span class="ps-label">Período</span>
+      <div class="ps-chips">
+        <button class="ps-chip ${isDefault?'active':''}" data-period="current">Mes actual</button>
+        <button class="ps-chip ${isAll?'active':''}" data-period="all">Todos</button>
+        ${months.map(m => {
+          const [y,mm] = m.split('-');
+          const label = new Date(parseInt(y), parseInt(mm)-1, 1).toLocaleDateString('es-AR', {month:'short'}).replace('.','');
+          const active = !isAll && !isDefault && STATE.dashMonths instanceof Set && STATE.dashMonths.has(m);
+          return `<button class="ps-chip ${active?'active':''}" data-period-m="${m}">${label} ${y.slice(2)}</button>`;
+        }).join('')}
+      </div>
+      <span class="ps-meta">${dashMonthsLabel()} · ${cur.length} pedidos</span>
+    </div>
+
     <div class="page-head">
       <div>
         <div class="eyebrow">${new Date().toLocaleDateString('es-AR', {day:'2-digit', month:'long', year:'numeric'})}</div>
@@ -465,12 +524,12 @@ function renderDashboard() {
       <div class="kpi"><div class="kpi-label">Ventas mes</div><div class="kpi-value">${fmtMoney(totalMes)}</div><div class="kpi-delta">${cur.length} pedidos</div></div>
       <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${fmtMoney(aov)}</div><div class="kpi-delta">AOV mes</div></div>
       <div class="kpi"><div class="kpi-label">% Cobrado</div><div class="kpi-value">${pctCobrado}%</div><div class="kpi-delta">${fmtMoney(cobrado)} / ${fmtMoney(totalMes)}</div></div>
-      <div class="kpi cyan"><div class="kpi-label">Total año</div><div class="kpi-value">${fmtMoney(STATE.pedidos.reduce((a,p)=>a+p.precio+p.precioDimmer,0))}</div><div class="kpi-delta">${STATE.pedidos.length} pedidos</div></div>
+      <div class="kpi cyan"><div class="kpi-label">Total año</div><div class="kpi-value">${fmtMoney(STATE.pedidos.reduce((a,p)=>a+p.precio+p.precioDimmer,0))}</div><div class="kpi-delta">${STATE.pedidos.length} pedidos · año</div></div>
     </div>
 
     <div class="chart-grid">
       <div class="card">
-        <div class="card-h"><h3>Ventas por día · mes actual</h3></div>
+        <div class="card-h"><h3>Ventas por día · ${escapeHtml(dashMonthsLabel())}</h3></div>
         <div class="chart-canvas" id="chart-line"></div>
       </div>
       <div class="card">
@@ -937,7 +996,7 @@ function drawCharts() {
   drawDonut('chart-canal',  'legend-canal',  byField('canalAd'),       ['var(--neon-red)', 'var(--neon-cyan)', 'var(--warning)', 'var(--success)', 'var(--ink-500)', 'var(--ink-600)']);
 }
 function byField(f) {
-  const cur = pedidosDelMes();
+  const cur = pedidosDash();
   const m = new Map();
   for (const p of cur) {
     const k = (p[f] || '—').trim() || '—';
@@ -947,21 +1006,43 @@ function byField(f) {
 }
 function drawLine() {
   const el = document.getElementById('chart-line'); if (!el) return;
-  const cur = pedidosDelMes();
+  const cur = pedidosDash();
   const byDay = new Map();
   for (const p of cur) {
     const k = p.fecha.toISOString().slice(0,10);
     byDay.set(k, (byDay.get(k)||0) + p.precio + p.precioDimmer);
   }
-  // Build all days of current month
-  const now = new Date();
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+  // Build day axis: union of selected months (or current month if default), or full year if 'all'
+  const months = getDashMonths();
   const data = [];
-  for (let d = 1; d <= daysInMonth; d++) {
-    const dt = new Date(now.getFullYear(), now.getMonth(), d);
-    const k = dt.toISOString().slice(0,10);
-    data.push({ d, val: byDay.get(k) || 0 });
+  if (!months) {
+    // 'all' = pedidos por mes
+    const byMonth = new Map();
+    for (const p of cur) {
+      const k = getMonth(p.fecha);
+      byMonth.set(k, (byMonth.get(k)||0) + p.precio + p.precioDimmer);
+    }
+    const sorted = Array.from(byMonth.keys()).sort();
+    sorted.forEach((k, i) => {
+      const [y,m] = k.split('-');
+      data.push({ d: new Date(parseInt(y), parseInt(m)-1, 1).toLocaleDateString('es-AR',{month:'short'}).replace('.',''), val: byMonth.get(k) });
+    });
+  } else {
+    const sortedMonths = months.slice().sort();
+    for (const ym of sortedMonths) {
+      const [y,m] = ym.split('-');
+      const yr = parseInt(y), mo = parseInt(m)-1;
+      const dim = new Date(yr, mo+1, 0).getDate();
+      for (let d = 1; d <= dim; d++) {
+        const dt = new Date(yr, mo, d);
+        const k = dt.toISOString().slice(0,10);
+        const label = sortedMonths.length > 1 ? `${d}/${mo+1}` : d;
+        data.push({ d: label, val: byDay.get(k) || 0 });
+      }
+    }
   }
+  if (data.length === 0) { el.innerHTML = '<div class="loading muted">sin datos</div>'; return; }
+  const daysInMonth = data.length;
   const max = Math.max(1, ...data.map(p=>p.val));
   const W = el.clientWidth, H = 200, P = 30;
   const x = (i) => P + (i / (data.length-1)) * (W - P*2);
@@ -974,8 +1055,8 @@ function drawLine() {
     <path class="area" d="${area}"/>
     <polyline class="line" points="${pts}"/>
     ${data.map((p,i) => p.val > 0 ? `<circle class="point" cx="${x(i).toFixed(1)}" cy="${y(p.val).toFixed(1)}" r="3"><title>${p.d}: ${fmtMoney(p.val)}</title></circle>` : '').join('')}
-    <text class="label" x="${P}" y="${H-8}">1</text>
-    <text class="label" x="${W-P}" y="${H-8}" text-anchor="end">${daysInMonth}</text>
+    <text class="label" x="${P}" y="${H-8}">${data[0].d}</text>
+    <text class="label" x="${W-P}" y="${H-8}" text-anchor="end">${data[data.length-1].d}</text>
     <text class="label" x="${P-5}" y="${P+4}" text-anchor="end">${fmtMoney(max)}</text>
   </svg>`;
 }
@@ -1008,6 +1089,11 @@ function bindNav() {
 }
 function bindCommon() {
   document.querySelectorAll('[data-action="seg-cliente"]').forEach(b => b.onclick = () => openDrawerCliente(b.dataset.cliente));
+  document.querySelectorAll('[data-period]').forEach(b => b.onclick = () => {
+    if (b.dataset.period === 'all') setDashAll();
+    else setDashCurrent();
+  });
+  document.querySelectorAll('[data-period-m]').forEach(b => b.onclick = () => toggleDashMonth(b.dataset.periodM));
 }
 
 function uniq(arr) { return Array.from(new Set(arr)); }
