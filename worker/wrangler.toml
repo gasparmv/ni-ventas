@@ -7,4 +7,4 @@ compatibility_date = "2026-05-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "ni-ventas"
-database_id = "<DB_ID>"
+database_id = "bf9f0a63-0a68-45bd-b65b-d78ab61f0924"

@@ -5,7 +5,7 @@
  */
 
 const CONFIG = {
-  trackerUrl: '',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
+  trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
   defaultUsers: ['Gaspar', 'Joaquín'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
