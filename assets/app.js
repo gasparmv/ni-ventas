@@ -40,6 +40,7 @@ const STATE = {
   segPvFilter: 'all', // all | D30 | D60 | D90
   user: null,         // usuario activo (string)
   users: [],          // lista de usuarios (default + agregados)
+  token: null,        // token de admin (Gaspar) si está logueado
   activity: { rows: [], loading: false, error: null }
 };
 
@@ -49,13 +50,71 @@ function loadUser() {
     STATE.users = JSON.parse(localStorage.getItem('niventas.users') || 'null') || CONFIG.defaultUsers.slice();
   } catch(e) { STATE.users = CONFIG.defaultUsers.slice(); }
   STATE.user = localStorage.getItem('niventas.user') || null;
+  STATE.token = localStorage.getItem('niventas.token') || null;
 }
 function saveUser() {
   localStorage.setItem('niventas.users', JSON.stringify(STATE.users));
   if (STATE.user) localStorage.setItem('niventas.user', STATE.user);
   else localStorage.removeItem('niventas.user');
 }
-function setUser(name) { STATE.user = name; saveUser(); render(); }
+function saveToken(t) {
+  STATE.token = t;
+  if (t) localStorage.setItem('niventas.token', t);
+  else localStorage.removeItem('niventas.token');
+}
+async function setUser(name) {
+  // Si elige Gaspar y no hay token válido, pedir password
+  if (name === 'Gaspar' && !STATE.token) {
+    const ok = await loginPrompt();
+    if (!ok) return;
+  }
+  STATE.user = name;
+  saveUser();
+  render();
+}
+async function loginPrompt() {
+  if (!CONFIG.trackerUrl) {
+    alert('El backend de auth no está configurado. Ver CONFIG.trackerUrl.');
+    return false;
+  }
+  const pw = prompt('Contraseña de admin:');
+  if (!pw) return false;
+  try {
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: 'Gaspar', password: pw })
+    });
+    if (r.status === 401) { alert('Contraseña incorrecta'); return false; }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    saveToken(j.token);
+    return true;
+  } catch (e) {
+    alert('Error de login: ' + e.message);
+    return false;
+  }
+}
+async function logout() {
+  if (CONFIG.trackerUrl && STATE.token) {
+    try {
+      await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/auth/logout', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + STATE.token }
+      });
+    } catch(e) {}
+  }
+  saveToken(null);
+  // Si estaba como Gaspar, lo dejo sin usuario para que tenga que re-loguearse
+  if (STATE.user === 'Gaspar') { STATE.user = null; saveUser(); }
+  // Si estaba en vista admin, salir
+  if (STATE.view === 'admin') setView('dashboard');
+  else render();
+}
+function isAdmin() { return !!STATE.token && STATE.user === 'Gaspar'; }
+function authHeaders() {
+  return STATE.token ? { 'Authorization': 'Bearer ' + STATE.token } : {};
+}
 function addUser() {
   const name = (prompt('Nombre del nuevo usuario:') || '').trim();
   if (!name) return;
@@ -589,6 +648,7 @@ function render() {
     else if (v === 'presupuestos') document.getElementById('main').innerHTML = renderPresupuestos();
     else if (v === 'seguimientos') document.getElementById('main').innerHTML = renderSeguimientos();
     else if (v === 'actividad')    document.getElementById('main').innerHTML = renderActividad();
+    else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
   bindNav();
@@ -598,6 +658,7 @@ function render() {
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') drawCharts();
   if (STATE.view === 'actividad') bindActividad();
+  if (STATE.view === 'admin') bindAdmin();
 }
 
 function renderShell() {
@@ -613,10 +674,14 @@ function renderShell() {
         <span class="b-sub">· VENTAS</span>
       </div>
       <div class="user-pick">
-        <div class="user-pick-label">Usuario</div>
+        <div class="user-pick-label">Usuario ${isAdmin() ? '<span class="admin-tag">admin</span>' : ''}</div>
         <div class="user-pick-chips">
-          ${STATE.users.map(u => `<button class="user-chip ${STATE.user===u?'active':''}" data-set-user="${escapeHtml(u)}">${escapeHtml(u)}</button>`).join('')}
+          ${STATE.users.map(u => {
+            const locked = u === 'Gaspar' && !STATE.token;
+            return `<button class="user-chip ${STATE.user===u?'active':''}" data-set-user="${escapeHtml(u)}">${locked?'🔒 ':''}${escapeHtml(u)}</button>`;
+          }).join('')}
           <button class="user-chip add" data-add-user>+</button>
+          ${isAdmin() ? '<button class="user-chip add" data-logout title="Cerrar sesión">⎋</button>' : ''}
         </div>
       </div>
       <nav class="nav">
@@ -627,6 +692,7 @@ function renderShell() {
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>
         <button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>
+        ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot"></span> Live · Sheet 2026<br>
@@ -1636,12 +1702,123 @@ function renderActividad() {
 }
 window.loadActivity = loadActivity;
 
+// ---------- ADMIN ----------
+let adminData = { rows: [], loading: false, error: null, range: '7d' };
+
+async function loadAdminActivity() {
+  if (!isAdmin()) { adminData.error = 'No autorizado'; render(); return; }
+  adminData.loading = true; adminData.error = null; render();
+  try {
+    const params = new URLSearchParams({ user: 'Joaquín' });
+    if (adminData.range !== 'all') {
+      const days = adminData.range === '7d' ? 7 : 30;
+      const from = new Date(); from.setDate(from.getDate() - days);
+      params.set('from', from.toISOString());
+    }
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/admin/activity?' + params.toString(), {
+      headers: authHeaders()
+    });
+    if (r.status === 401) { saveToken(null); throw new Error('Sesión expirada — re-logueate'); }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    adminData = { rows: j.rows || [], loading: false, error: null, range: adminData.range };
+  } catch (e) {
+    adminData = { rows: [], loading: false, error: e.message, range: adminData.range };
+  }
+  render();
+}
+
+function bindAdmin() {
+  document.querySelectorAll('[data-admin-range]').forEach(b => b.onclick = () => { adminData.range = b.dataset.adminRange; loadAdminActivity(); });
+  if (!adminData.rows.length && !adminData.error && !adminData.loading && isAdmin()) loadAdminActivity();
+}
+
+function renderAdmin() {
+  if (!isAdmin()) {
+    return `<div class="page-head"><h1>Admin</h1></div><div class="error">No autorizado. Logueate como Gaspar.</div>`;
+  }
+  const { rows, loading, error, range } = adminData;
+  const total = rows.length;
+  const ppto = rows.filter(r => r.item_kind === 'presupuesto').length;
+  const pv   = rows.filter(r => r.item_kind === 'postventa').length;
+  const days = range === 'all' ? 30 : (range === '7d' ? 7 : 30);
+  const dayMap = new Map();
+  for (const r of rows) {
+    const k = r.ts.slice(0,10);
+    dayMap.set(k, (dayMap.get(k) || 0) + 1);
+  }
+  const dayList = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const dt = addDays(TODAY, -i);
+    const k = dt.toISOString().slice(0,10);
+    dayList.push({ date: dt, count: dayMap.get(k) || 0 });
+  }
+  const maxDay = Math.max(1, ...dayList.map(d => d.count));
+
+  return `
+    <div class="page-head">
+      <div><div class="eyebrow">Panel privado · solo Gaspar</div><h1>Admin</h1></div>
+      <div class="actions"><button class="btn btn-ghost" onclick="loadAdminActivity()">↻ Recargar</button></div>
+    </div>
+
+    <div class="card" style="margin-bottom:var(--s-4)">
+      <div class="card-h"><h3>Performance de Joaquín</h3></div>
+      <div class="seg-filters" style="margin-bottom:var(--s-3)">
+        <button class="ps-chip ${range==='7d'?'active':''}" data-admin-range="7d">7 días</button>
+        <button class="ps-chip ${range==='30d'?'active':''}" data-admin-range="30d">30 días</button>
+        <button class="ps-chip ${range==='all'?'active':''}" data-admin-range="all">Todo</button>
+      </div>
+      ${loading ? '<div class="loading"><div class="spinner"></div></div>' : ''}
+      ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
+      ${!loading && !error ? `
+        <div class="kpi-grid" style="margin-bottom:var(--s-3)">
+          <div class="kpi"><div class="kpi-label">Total acciones</div><div class="kpi-value">${total}</div></div>
+          <div class="kpi cyan"><div class="kpi-label">Presupuestos</div><div class="kpi-value">${ppto}</div></div>
+          <div class="kpi"><div class="kpi-label">Post-venta</div><div class="kpi-value">${pv}</div></div>
+        </div>
+        <div class="heatmap">
+          ${dayList.map(d => {
+            const intensity = d.count / maxDay;
+            const op = d.count === 0 ? 0.05 : 0.2 + intensity * 0.8;
+            return `<div class="hm-cell" style="background:rgba(143,212,222,${op})" title="${fmtDate(d.date)}: ${d.count}"></div>`;
+          }).join('')}
+        </div>
+        ${rows.length === 0 ? '<div class="loading muted" style="padding:24px">Sin actividad de Joaquín en este rango</div>' :
+          `<details style="margin-top:var(--s-3)"><summary style="cursor:pointer;font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);letter-spacing:var(--tr-wide);text-transform:uppercase">Ver eventos detallados (${rows.length})</summary>
+            <table class="t" style="margin-top:var(--s-2)">
+              <thead><tr><th>Cuándo</th><th>Tipo</th><th>Acción</th></tr></thead>
+              <tbody>${rows.slice(0,100).map(r => `<tr>
+                <td class="num">${new Date(r.ts).toLocaleString('es-AR')}</td>
+                <td>${r.item_kind === 'presupuesto' ? '<span class="pill cyan">PPTO</span>' : '<span class="pill red">POST-V</span>'}</td>
+                <td><span class="muted" style="font-size:12px">${escapeHtml(r.action)}</span></td>
+              </tr>`).join('')}</tbody>
+            </table>
+          </details>`
+        }
+      ` : ''}
+    </div>
+
+    <div class="card admin-soon">
+      <div class="card-h"><h3>Próximamente</h3></div>
+      <div class="muted" style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s-3);font-size:13px">
+        <div>📊 Costos y margen real por pedido</div>
+        <div>💰 Comisiones acumuladas a pagar</div>
+        <div>📝 Notas privadas por cliente</div>
+        <div>📧 Reporte semanal automático</div>
+      </div>
+    </div>
+  `;
+}
+window.loadAdminActivity = loadAdminActivity;
+
 // ---------- COMMON ----------
 function bindNav() {
   document.querySelectorAll('.nav-item').forEach(b => b.onclick = () => setView(b.dataset.view));
   document.querySelectorAll('[data-set-user]').forEach(b => b.onclick = () => setUser(b.dataset.setUser));
   const addBtn = document.querySelector('[data-add-user]');
   if (addBtn) addBtn.onclick = () => addUser();
+  const logoutBtn = document.querySelector('[data-logout]');
+  if (logoutBtn) logoutBtn.onclick = () => logout();
 }
 function bindCommon() {
   document.querySelectorAll('[data-action="seg-cliente"]').forEach(b => b.onclick = () => {

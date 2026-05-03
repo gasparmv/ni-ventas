@@ -728,6 +728,19 @@ table.t td.cliente { font-weight: 600; }
   font-weight: 700;
 }
 .user-chip.add { color: var(--fg-faint); padding: 4px 8px; }
+.admin-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 8px;
+  letter-spacing: var(--tr-xwide);
+  text-transform: uppercase;
+  color: var(--ink-050);
+  background: var(--neon-red);
+  border-radius: var(--r-pill);
+  font-weight: 700;
+  box-shadow: var(--glow-red-sm);
+}
 
 /* ============ HEATMAP ============ */
 .heatmap {
