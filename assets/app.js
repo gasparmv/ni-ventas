@@ -456,7 +456,6 @@ function render() {
     else if (v === 'pedidos')   document.getElementById('main').innerHTML = renderPedidos();
     else if (v === 'presupuestos') document.getElementById('main').innerHTML = renderPresupuestos();
     else if (v === 'seguimientos') document.getElementById('main').innerHTML = renderSeguimientos();
-    else if (v === 'clientes')  document.getElementById('main').innerHTML = renderClientes();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
   bindNav();
@@ -464,7 +463,6 @@ function render() {
   if (STATE.view === 'pedidos') bindPedidos();
   if (STATE.view === 'presupuestos') bindPresupuestos();
   if (STATE.view === 'seguimientos') bindSeguimientos();
-  if (STATE.view === 'clientes') bindClientes();
   if (STATE.view === 'dashboard') drawCharts();
 }
 
@@ -487,7 +485,6 @@ function renderShell() {
         <button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>
-        <button class="nav-item ${v==='clientes'?'active':''}" data-view="clientes"><span class="icon">⌬</span> Clientes</button>
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot"></span> Live · Sheet 2026<br>
@@ -651,7 +648,7 @@ function renderPedidos() {
     </div>
     <div class="table-wrap">
       <div class="table-toolbar">
-        <input type="text" placeholder="Buscar cliente…" data-pf="search">
+        <input type="text" placeholder="Buscar (cliente, tel, número, canal, productor…)" data-pf="search" value="${escapeHtml(pedidoFilter.search)}">
         <select data-pf="mes"><option value="">Todos los meses</option>${meses.map(m=>`<option ${pedidoFilter.mes===m?'selected':''}>${m}</option>`).join('')}</select>
         <select data-pf="estadoPago"><option value="">Pago: todos</option>${estadosPago.map(s=>`<option ${pedidoFilter.estadoPago===s?'selected':''}>${escapeHtml(s)}</option>`).join('')}</select>
         <select data-pf="estadoPedido"><option value="">Pedido: todos</option>${estadosPed.map(s=>`<option ${pedidoFilter.estadoPedido===s?'selected':''}>${escapeHtml(s)}</option>`).join('')}</select>
@@ -666,7 +663,11 @@ function renderTablePedidos() {
   const wrap = document.getElementById('table-pedidos');
   if (!wrap) return;
   const filtered = STATE.pedidos.filter(p => {
-    if (pedidoFilter.search && !normName(p.cartel).includes(normName(pedidoFilter.search))) return false;
+    if (pedidoFilter.search) {
+      const q = normName(pedidoFilter.search);
+      const blob = normName([p.cartel, p.envio, p.numero, p.plataforma, p.canalAd, p.productor, p.aclaracion, p.colores, p.base].join(' '));
+      if (!blob.includes(q)) return false;
+    }
     if (pedidoFilter.estadoPago && p.estadoPago !== pedidoFilter.estadoPago) return false;
     if (pedidoFilter.estadoPedido && p.estadoPedido !== pedidoFilter.estadoPedido) return false;
     if (pedidoFilter.canal && p.canalAd !== pedidoFilter.canal) return false;
@@ -836,68 +837,6 @@ function renderSeguimientos() {
   `;
 }
 
-// ---------- CLIENTES ----------
-let clienteSearch = '';
-function bindClientes() {
-  const inp = document.querySelector('[data-cs]');
-  if (inp) inp.oninput = () => { clienteSearch = inp.value; renderClienteTable(); };
-}
-function renderClientes() {
-  return `
-    <div class="page-head"><div><div class="eyebrow">Vista por cliente con timeline</div><h1>Clientes</h1></div></div>
-    <div class="table-wrap">
-      <div class="table-toolbar">
-        <input type="text" placeholder="Buscar cliente…" data-cs value="${escapeHtml(clienteSearch)}">
-        <div class="right" id="cli-count">…</div>
-      </div>
-      <div id="cli-table"></div>
-    </div>
-  `;
-}
-function renderClienteTable() {
-  const wrap = document.getElementById('cli-table');
-  if (!wrap) return;
-  // Group pedidos+presupuestos by normalized name
-  const groups = new Map();
-  for (const p of STATE.pedidos) {
-    const k = normName(p.cartel);
-    if (!groups.has(k)) groups.set(k, { name: p.cartel, pedidos: [], presupuestos: [] });
-    groups.get(k).pedidos.push(p);
-  }
-  for (const ppto of STATE.presupuestos) {
-    const k = normName(ppto.nombre);
-    if (!groups.has(k)) groups.set(k, { name: ppto.nombre, pedidos: [], presupuestos: [] });
-    groups.get(k).presupuestos.push(ppto);
-  }
-  let arr = Array.from(groups.values());
-  if (clienteSearch) arr = arr.filter(g => normName(g.name).includes(normName(clienteSearch)));
-  arr.sort((a,b) => {
-    const fa = Math.max(...[...a.pedidos.map(p=>p.fecha.getTime()), ...a.presupuestos.map(p=>p.fecha.getTime())]);
-    const fb = Math.max(...[...b.pedidos.map(p=>p.fecha.getTime()), ...b.presupuestos.map(p=>p.fecha.getTime())]);
-    return fb - fa;
-  });
-  const cnt = document.getElementById('cli-count'); if (cnt) cnt.textContent = `${arr.length} clientes`;
-  wrap.innerHTML = arr.length === 0 ? '<div class="loading">Sin resultados</div>' :
-    `<table class="t">
-      <thead><tr><th>Cliente</th><th>Pedidos</th><th>Total facturado</th><th>Presupuestos abiertos</th><th>Última actividad</th></tr></thead>
-      <tbody>
-        ${arr.slice(0, 200).map(g => {
-          const total = g.pedidos.reduce((a,p)=>a+p.precio+p.precioDimmer,0);
-          const pptosAbiertos = g.presupuestos.filter(p => presupuestoStatus(p).state === 'abierto').length;
-          const last = Math.max(...[...g.pedidos.map(p=>p.fecha.getTime()), ...g.presupuestos.map(p=>p.fecha.getTime())]);
-          return `<tr data-cliente="${escapeHtml(g.name)}">
-            <td class="cliente">${escapeHtml(g.name)}</td>
-            <td class="num">${g.pedidos.length}</td>
-            <td class="num">${fmtMoney(total)}</td>
-            <td class="num">${pptosAbiertos > 0 ? `<span class="pill amber">${pptosAbiertos}</span>` : '—'}</td>
-            <td class="num">${fmtDate(new Date(last))}</td>
-          </tr>`;
-        }).join('')}
-      </tbody>
-    </table>`;
-  document.querySelectorAll('tr[data-cliente]').forEach(el => el.onclick = () => openDrawerCliente(el.dataset.cliente));
-}
-
 // ---------- DRAWER ----------
 function openDrawerPedido(idx) {
   const p = STATE.pedidos.find(p => p.idx === idx);
@@ -963,58 +902,6 @@ function openDrawerPedido(idx) {
               ${link && (m.state === 'now' || m.state === 'overdue') ? `<a class="btn btn-primary" target="_blank" href="${escapeHtml(link)}" style="margin-top:8px;font-size:12px">📱 Mandar mensaje</a>` : ''}
             </div>`;
           }).join('')}
-        </div>
-      </div>
-    </div>
-  `;
-  document.getElementById('drawer').classList.add('open');
-  document.getElementById('drawer-bg').classList.add('open');
-  document.getElementById('drawer-bg').onclick = closeDrawer;
-}
-
-function openDrawerCliente(name) {
-  const k = normName(name);
-  const peds = STATE.pedidos.filter(p => normName(p.cartel) === k).sort((a,b)=>a.fecha-b.fecha);
-  const ppts = STATE.presupuestos.filter(p => normName(p.nombre) === k).sort((a,b)=>a.fecha-b.fecha);
-  const total = peds.reduce((a,p)=>a+p.precio+p.precioDimmer,0);
-  // Build combined timeline
-  const events = [];
-  for (const ppto of ppts) {
-    const st = presupuestoStatus(ppto);
-    events.push({ date: ppto.fecha, kind: 'ppto', title: 'Presupuesto', desc: `${fmtMoney(ppto.precio)} · ${st.state === 'cerrado' ? '✓ cerró' : st.state === 'abierto' ? `abierto ${st.days}d` : st.state}`, state: st.state === 'cerrado' ? 'done' : 'now' });
-  }
-  for (const ped of peds) {
-    events.push({ date: ped.fecha, kind: 'venta', title: 'Pedido cerrado', desc: `${fmtMoney(ped.precio+ped.precioDimmer)} · ${ped.estadoPedido}`, state: 'done' });
-    const ms = postventaMilestones(ped);
-    for (const m of ms) {
-      let st = 'future';
-      if (m.state === 'now') st = 'now';
-      else if (m.state === 'overdue') st = 'future';
-      events.push({ date: m.due, kind: 'pv', title: `${m.id} · ${m.label}`, desc: m.entregado ? '' : 'esperando entrega', state: st, milestone: m, pedido: ped });
-    }
-  }
-  events.sort((a,b) => a.date - b.date);
-  const tel = peds.length ? extractPhone(peds[peds.length-1].envio) : '';
-  document.getElementById('drawer').innerHTML = `
-    <div class="drawer-h">
-      <h2>${escapeHtml(name)}</h2>
-      <button class="close" onclick="closeDrawer()">×</button>
-    </div>
-    <div class="drawer-body">
-      <div class="kpi-grid" style="margin-bottom:var(--s-4)">
-        <div class="kpi"><div class="kpi-label">Pedidos</div><div class="kpi-value" style="font-size:24px">${peds.length}</div></div>
-        <div class="kpi cyan"><div class="kpi-label">Total</div><div class="kpi-value" style="font-size:24px">${fmtMoney(total)}</div></div>
-        <div class="kpi"><div class="kpi-label">Presupuestos</div><div class="kpi-value" style="font-size:24px">${ppts.length}</div></div>
-      </div>
-      <div class="drawer-section">
-        <h4>Timeline</h4>
-        <div class="timeline">
-          ${events.map(e => `<div class="tl-item ${e.state}">
-            <div class="tl-date">${fmtDate(e.date)}</div>
-            <div class="tl-title">${escapeHtml(e.title)}</div>
-            <div class="tl-desc">${escapeHtml(e.desc)}</div>
-            ${e.kind === 'pv' && e.state === 'now' && tel ? `<a class="btn btn-primary" target="_blank" href="${escapeHtml(waLink(tel, e.milestone.template(name.split(' ')[0])))}" style="margin-top:6px;font-size:12px">📱 WhatsApp</a>` : ''}
-          </div>`).join('')}
         </div>
       </div>
     </div>
@@ -1313,7 +1200,10 @@ function bindNav() {
   document.querySelectorAll('.nav-item').forEach(b => b.onclick = () => setView(b.dataset.view));
 }
 function bindCommon() {
-  document.querySelectorAll('[data-action="seg-cliente"]').forEach(b => b.onclick = () => openDrawerCliente(b.dataset.cliente));
+  document.querySelectorAll('[data-action="seg-cliente"]').forEach(b => b.onclick = () => {
+    pedidoFilter.search = b.dataset.cliente;
+    setView('pedidos');
+  });
   document.querySelectorAll('[data-period]').forEach(b => b.onclick = () => {
     if (b.dataset.period === 'all') setDashAll();
     else setDashCurrent();
@@ -1348,4 +1238,4 @@ loadAll();
 // Re-bind table when pedidos view rendered after data loads
 function rerenderTablePedidosIfNeeded() { if (STATE.view === 'pedidos') renderTablePedidos(); }
 const _origRender = render;
-render = function() { _origRender.apply(this, arguments); if (STATE.view === 'pedidos' && STATE.loaded) renderTablePedidos(); if (STATE.view === 'clientes' && STATE.loaded) renderClienteTable(); };
+render = function() { _origRender.apply(this, arguments); if (STATE.view === 'pedidos' && STATE.loaded) renderTablePedidos(); };
