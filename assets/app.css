@@ -188,6 +188,7 @@ button { font-family: inherit; cursor: pointer; }
 }
 .btn-cyan:hover { background: var(--neon-cyan-glow); box-shadow: var(--glow-cyan-sm); }
 .btn-ghost { background: transparent; }
+.btn-ghost.btn-cyan { background: var(--neon-cyan); color: var(--ink-050); border-color: var(--neon-cyan); }
 .btn .icon { font-size: 14px; }
 
 /* ============ CARDS ============ */
