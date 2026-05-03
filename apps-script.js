@@ -34,7 +34,7 @@ function doPost(e) {
 
     // Columnas: A=Fecha, B=m2, C=diseño, D=alto, E=ancho, F=neon, G=tipo,
     //           H=transparente, I=negro, J=descuento, K=recargo, L=reventa,
-    //           M=vacía, N=vacía, O=5% joaco
+    //           M=vacía, N=vacía, O=5% joaco, P=teléfono
     const row = [
       fecha,
       data.m2 || 0,
@@ -50,12 +50,23 @@ function doPost(e) {
       data.reventa || 0,
       '', // M vacía
       '', // N vacía
-      data.comision || 0  // O = 5% Joaco
+      data.comision || 0,  // O = 5% Joaco
+      data.telefono || ''  // P = Teléfono
     ];
 
-    sheet.appendRow(row);
+    // Insertar después de la última fila con datos en columna C
+    var colC = sheet.getRange('C:C').getValues();
+    var lastDataRow = 0;
+    for (var i = colC.length - 1; i >= 0; i--) {
+      if (colC[i][0] !== '' && colC[i][0] !== null) {
+        lastDataRow = i + 1;
+        break;
+      }
+    }
+    var insertRow = lastDataRow + 1;
+    sheet.getRange(insertRow, 1, 1, row.length).setValues([row]);
 
-    return ContentService.createTextOutput(JSON.stringify({ ok: true, sheet: SHEET_NAME, row: sheet.getLastRow() }))
+    return ContentService.createTextOutput(JSON.stringify({ ok: true, sheet: SHEET_NAME, row: insertRow }))
       .setMimeType(ContentService.MimeType.JSON);
 
   } catch (err) {

@@ -39,7 +39,11 @@ const CONFIG = {
     descuento_min_m2: 100,
     recargo_5: 2,             // m2 ≤ 5  → trans × 2
     recargo_125: 1.5,         // m2 ≤ 12.5 → trans × 1.5
-    recargo_25: 1.15          // m2 < 25 → trans × 1.15
+    recargo_25: 1.15,         // m2 < 25 → trans × 1.15
+    // Controladores opcionales
+    ctrl_slim: 18700,
+    ctrl_remoto: 25000,
+    ctrl_app: 38000
   },
   postventaMilestones: [
     { id: 'D30', days: 30, label: 'Foto / feedback', tagClass: 'tag-d30',
@@ -70,7 +74,7 @@ const STATE = {
   token: null,        // token de admin (Gaspar) si está logueado
   activity: { rows: [], loading: false, error: null },
   cotizadorParams: null,  // se carga del Worker; si null usa CONFIG.cotizadorDefaults
-  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '' },
+  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', telefono: '' },
   cotizadorSaving: false
 };
 
@@ -101,6 +105,27 @@ async function saveCotizadorParams(updates) {
   STATE.cotizadorParams = Object.assign({}, STATE.cotizadorParams || {}, updates);
 }
 
+function copiarPresupuesto() {
+  const f = STATE.cotizadorForm;
+  if (!(+f.ancho > 0) || !(+f.alto > 0)) { alert('Completá al menos ancho y alto'); return; }
+  const r = calcCotizador(f);
+  const p = getCotizadorParams();
+  const nombre = f.cliente.trim() || 'Custom name';
+  const texto = `Te comparto la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+f.ancho)}x${Math.round(+f.alto)}\nBase transparente: ${fmtMoney(r.trans)}\nBase negra: ${fmtMoney(r.negro)}\n\nControladores opcionales\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña.\n\nTiempo de armado: 15/20 días.\n\nTodos los medios de pago!\n\nHacemos envíos GRATIS a todo el país!`;
+  navigator.clipboard.writeText(texto).then(() => {
+    toast('Presupuesto copiado al portapapeles ✓');
+  }).catch(() => {
+    // Fallback
+    const ta = document.createElement('textarea');
+    ta.value = texto;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    toast('Presupuesto copiado al portapapeles ✓');
+  });
+}
+
 async function saveCotizacion() {
   if (!CONFIG.appsScriptUrl) { alert('Falta configurar CONFIG.appsScriptUrl (Google Apps Script)'); return; }
   const f = STATE.cotizadorForm;
@@ -121,7 +146,8 @@ async function saveCotizacion() {
     descuento: r.descuento,
     recargo: r.recargo,
     reventa: r.reventa,
-    comision: r.comision
+    comision: r.comision,
+    telefono: (f.telefono || '').trim()
   };
   try {
     // Apps Script redirect CORS: usamos un iframe oculto + form POST
@@ -158,7 +184,7 @@ async function saveCotizacion() {
 
       form.submit();
     });
-    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '' };
+    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', telefono: '' };
     toast('Cotización guardada ✓');
     // Esperar un poco para que el sheet se actualice antes de recargar
     setTimeout(() => loadAll(), 2000);
@@ -1149,6 +1175,8 @@ function updateCotizadorForm() {
 function bindCotSaveBtn() {
   const btn = document.getElementById('cot-save-btn');
   if (btn) btn.onclick = () => saveCotizacion();
+  const copyBtn = document.getElementById('cot-copy-btn');
+  if (copyBtn) copyBtn.onclick = () => copiarPresupuesto();
 }
 let pptoShowCotizador = false;
 
@@ -1169,7 +1197,8 @@ function renderCotizadorResults() {
         <div class="cot-result ${r.recargo?'':'muted'}"><div class="lbl">Recargo</div><div class="val">${fmtMoney(r.recargo)}</div></div>
         <div class="cot-result"><div class="lbl">Comisión (${(p.comision_pct*100).toFixed(0)}%)</div><div class="val">${fmtMoney(r.comision)}</div></div>
       </div>
-      <div style="margin-top:var(--s-3);text-align:right">
+      <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end">
+        <button class="btn btn-ghost" id="cot-copy-btn">Copiar presupuesto</button>
         <button class="btn btn-cyan" id="cot-save-btn" ${STATE.cotizadorSaving ? 'disabled' : ''}>${STATE.cotizadorSaving ? 'Guardando…' : 'Guardar en Sheet'}</button>
       </div>
     </div>
@@ -1185,7 +1214,8 @@ function renderCotizadorForm() {
         <button class="btn btn-ghost" data-cot-close>×</button>
       </div>
       <div class="cot-grid">
-        <label>Cliente / diseño<input type="text" data-cot-field="cliente" value="${escapeHtml(f.cliente)}" placeholder="opcional"></label>
+        <label>Cliente / diseño<input type="text" data-cot-field="cliente" value="${escapeHtml(f.cliente)}" placeholder="nombre del cliente"></label>
+        <label>Teléfono<input type="tel" data-cot-field="telefono" value="${escapeHtml(f.telefono)}" placeholder="ej: 1155667788"></label>
         <label>Ancho (cm)<input type="number" min="0" step="0.1" data-cot-field="ancho" value="${escapeHtml(f.ancho)}"></label>
         <label>Alto (cm)<input type="number" min="0" step="0.1" data-cot-field="alto" value="${escapeHtml(f.alto)}"></label>
         <label>Neón (mt)<input type="number" min="0" step="0.1" data-cot-field="neon" value="${escapeHtml(f.neon)}"></label>
