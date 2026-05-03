@@ -4,3 +4,6 @@ node_modules/
 *.log
 .vscode/
 .idea/
+.wrangler/
+worker/.wrangler/
+node_modules/
