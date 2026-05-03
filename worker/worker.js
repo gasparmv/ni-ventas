@@ -116,6 +116,14 @@ export default {
       return reportHandler(env, url, false);
     }
 
+    // ----- Cotizador params (público lectura) -----
+    if (request.method === 'GET' && path === '/cotizador/params') {
+      const rs = await env.DB.prepare('SELECT key, value FROM cotizador_params').all();
+      const params = {};
+      for (const r of (rs.results || [])) params[r.key] = r.value;
+      return json({ params });
+    }
+
     // ----- Admin (requiere Bearer) -----
     if (path.startsWith('/admin/')) {
       const session = await getSession(env, request);
@@ -123,6 +131,23 @@ export default {
 
       if (request.method === 'GET' && path === '/admin/activity') {
         return reportHandler(env, url, true);
+      }
+
+      if (request.method === 'PUT' && path === '/admin/cotizador/params') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const params = body && body.params;
+        if (!params || typeof params !== 'object') return json({ error: 'missing params' }, 400);
+        const now = new Date().toISOString();
+        const stmts = [];
+        for (const [k, v] of Object.entries(params)) {
+          if (typeof v !== 'number' || isNaN(v)) continue;
+          stmts.push(env.DB.prepare(
+            'INSERT INTO cotizador_params (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at'
+          ).bind(k, v, now));
+        }
+        if (stmts.length) await env.DB.batch(stmts);
+        return noContent();
       }
 
       return json({ error: 'not found' }, 404);

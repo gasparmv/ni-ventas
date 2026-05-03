@@ -742,6 +742,86 @@ table.t td.cliente { font-weight: 600; }
   box-shadow: var(--glow-red-sm);
 }
 
+/* ============ COTIZADOR ============ */
+.cot-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr 1fr;
+  gap: var(--s-3);
+  margin-top: var(--s-2);
+}
+@media (max-width: 900px) { .cot-grid { grid-template-columns: 1fr 1fr; } }
+.cot-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: var(--tr-xwide);
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+.cot-grid input, .cot-grid select {
+  background: var(--ink-100);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+}
+.cot-grid input:focus, .cot-grid select:focus { border-color: var(--neon-cyan); }
+.cot-results { margin-top: var(--s-3); padding-top: var(--s-3); border-top: 1px solid var(--border); }
+.cot-meta { font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle); margin-bottom: var(--s-2); letter-spacing: var(--tr-wide); }
+.cot-meta b { color: var(--fg); }
+.cot-result-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--s-2); }
+.cot-result {
+  background: var(--ink-100);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+}
+.cot-result.muted { opacity: .5; }
+.cot-result .lbl { font-family: var(--font-mono); font-size: 9px; letter-spacing: var(--tr-xwide); text-transform: uppercase; color: var(--fg-subtle); }
+.cot-result .val { font-family: var(--font-display); font-size: 22px; color: var(--fg); margin-top: 4px; }
+
+.cot-params-group { margin-bottom: var(--s-3); }
+.cot-params-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: var(--tr-xwide);
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+  margin-bottom: 8px;
+}
+.cot-params-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--s-2);
+}
+.cot-param {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--ink-100);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+}
+.cot-param input {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  padding: 4px 0;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  outline: none;
+}
+.cot-param input:focus { border-bottom-color: var(--neon-cyan); }
+
 /* ============ HEATMAP ============ */
 .heatmap {
   display: grid;

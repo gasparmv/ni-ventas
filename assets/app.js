@@ -14,6 +14,32 @@ const CONFIG = {
   matchPriceTolerance: 0.20,   // ±20%
   presupuestoFollowupDays: 7,  // miércoles a miércoles
   presupuestoCutoff: '2026-04-27',   // presupuestos anteriores quedan dados por vencidos / fuera del seguimiento activo
+  cotizadorDefaults: {
+    // Mapping B2..B8 del sheet del cotizador
+    neon: 1800,
+    trans: 175000,
+    negro: 154000,
+    fuentes_1a: 3000,    // F entre 0 y 2 mt
+    fuentes_3a: 4080,    // F entre 2 y 6 mt
+    fuentes_5a: 7735,    // F entre 6 y 9 mt
+    fuentes_10a: 10500,  // F entre 9 y 30 mt
+    // Tier por m2 (B)
+    tier_25: 7500,       // m2 ≤ 25
+    tier_50: 15000,      // 25 < m2 ≤ 50
+    tier_99: 25000,      // m2 > 50
+    // Extra por exterior (G=EXT)
+    ext_25: 20000,
+    ext_50: 25000,
+    ext_99: 35000,
+    // Multiplicadores
+    reventa_mult: 0.8,        // reventa = trans × 0.8
+    comision_pct: 0.05,       // 5% Joaco sobre trans
+    descuento_mult: 0.88,     // si m2 > descuento_min_m2
+    descuento_min_m2: 100,
+    recargo_5: 2,             // m2 ≤ 5  → trans × 2
+    recargo_125: 1.5,         // m2 ≤ 12.5 → trans × 1.5
+    recargo_25: 1.15          // m2 < 25 → trans × 1.15
+  }
   postventaMilestones: [
     { id: 'D30', days: 30, label: 'Foto / feedback', tagClass: 'tag-d30',
       template: (n) => `Holaa ${n}, cómo va? cómo te quedó el cartel?\n\nsi tenés una foto cuando puedas pasame, nos re sirve mostrar como queda en el local 🤙` },
@@ -41,8 +67,85 @@ const STATE = {
   user: null,         // usuario activo (string)
   users: [],          // lista de usuarios (default + agregados)
   token: null,        // token de admin (Gaspar) si está logueado
-  activity: { rows: [], loading: false, error: null }
+  activity: { rows: [], loading: false, error: null },
+  cotizadorParams: null,  // se carga del Worker; si null usa CONFIG.cotizadorDefaults
+  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '' }
 };
+
+// ============ COTIZADOR ============
+function getCotizadorParams() {
+  return Object.assign({}, CONFIG.cotizadorDefaults, STATE.cotizadorParams || {});
+}
+
+async function loadCotizadorParams() {
+  if (!CONFIG.trackerUrl) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/cotizador/params');
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.params && Object.keys(j.params).length) STATE.cotizadorParams = j.params;
+  } catch (e) { /* offline ok */ }
+}
+
+async function saveCotizadorParams(updates) {
+  if (!isAdmin()) throw new Error('no autorizado');
+  const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/admin/cotizador/params', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ params: updates })
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  // Actualizar estado local con los nuevos valores
+  STATE.cotizadorParams = Object.assign({}, STATE.cotizadorParams || {}, updates);
+}
+
+function redondMult(v, mult) { return Math.round(v / mult) * mult; }
+
+function fuentesByNeon(f, p) {
+  if (f > 0 && f <= 2)  return p.fuentes_1a;
+  if (f > 2 && f <= 6)  return p.fuentes_3a;
+  if (f > 6 && f <= 9)  return p.fuentes_5a;
+  if (f > 9 && f <= 30) return p.fuentes_10a;
+  return 0;
+}
+function tierByM2(b, p) {
+  if (b <= 25) return p.tier_25;
+  if (b <= 50) return p.tier_50;
+  return p.tier_99;
+}
+function extByM2(b, p) {
+  if (b <= 25) return p.ext_25;
+  if (b <= 50) return p.ext_50;
+  return p.ext_99;
+}
+
+function calcCotizador(input) {
+  const p = getCotizadorParams();
+  const ancho = +input.ancho || 0;     // D (cm)
+  const alto  = +input.alto  || 0;     // E (cm)
+  const neon  = +input.neon  || 0;     // F (mt)
+  const tipo  = (input.tipo || 'INT').toUpperCase();  // G
+  const m2 = (ancho * alto) / 100;     // B (no es m² real, usa /100)
+
+  function precio(acrylicCost) {
+    const base = (acrylicCost * (ancho * 0.01) * (alto * 0.01) + p.neon * neon + fuentesByNeon(neon, p)) * 3;
+    const tier = tierByM2(m2, p);
+    const ext = tipo === 'EXT' ? extByM2(m2, p) : 0;
+    return redondMult(base + tier + ext, 500);
+  }
+  const trans = precio(p.trans);
+  const negro = precio(p.negro);
+
+  const descuento = m2 > p.descuento_min_m2 ? redondMult(trans * p.descuento_mult, 500) : 0;
+  let recargo = 0;
+  if (m2 <= 5)         recargo = redondMult(trans * p.recargo_5, 500);
+  else if (m2 <= 12.5) recargo = redondMult(trans * p.recargo_125, 500);
+  else if (m2 < 25)    recargo = redondMult(trans * p.recargo_25, 500);
+  const reventa  = redondMult(trans * p.reventa_mult, 500);
+  const comision = Math.round(trans * p.comision_pct);
+
+  return { m2, trans, negro, descuento, recargo, reventa, comision };
+}
 
 // ============ USUARIO ============
 function loadUser() {
@@ -948,7 +1051,68 @@ function bindPresupuestos() {
   document.querySelectorAll('[data-ppfilter]').forEach(el => {
     el.onclick = () => { pptoFilter = el.dataset.ppfilter; renderPresupuestos(); render(); };
   });
+  const openBtn = document.querySelector('[data-cot-open]');
+  if (openBtn) openBtn.onclick = () => { pptoShowCotizador = true; render(); };
+  const closeBtn = document.querySelector('[data-cot-close]');
+  if (closeBtn) closeBtn.onclick = () => { pptoShowCotizador = false; render(); };
+  document.querySelectorAll('[data-cot-field]').forEach(el => {
+    el.oninput = () => { STATE.cotizadorForm[el.dataset.cotField] = el.value; updateCotizadorForm(); };
+    el.onchange = () => { STATE.cotizadorForm[el.dataset.cotField] = el.value; updateCotizadorForm(); };
+  });
 }
+
+function updateCotizadorForm() {
+  const slot = document.getElementById('cot-results-slot');
+  if (slot) slot.innerHTML = renderCotizadorResults();
+}
+let pptoShowCotizador = false;
+
+function renderCotizadorResults() {
+  const f = STATE.cotizadorForm;
+  const valid = +f.ancho > 0 && +f.alto > 0;
+  if (!valid) return '<div class="muted" style="margin-top:var(--s-2);font-size:12px">Completá ancho y alto para ver los precios</div>';
+  const r = calcCotizador(f);
+  const p = getCotizadorParams();
+  return `
+    <div class="cot-results">
+      <div class="cot-meta">m² (sheet): <b>${r.m2.toFixed(2)}</b></div>
+      <div class="cot-result-grid">
+        <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${fmtMoney(r.trans)}</div></div>
+        <div class="cot-result"><div class="lbl">Negro</div><div class="val">${fmtMoney(r.negro)}</div></div>
+        <div class="cot-result"><div class="lbl">Reventa (×${p.reventa_mult})</div><div class="val">${fmtMoney(r.reventa)}</div></div>
+        <div class="cot-result ${r.descuento?'':'muted'}"><div class="lbl">Descuento ${r.descuento?'(m²>'+p.descuento_min_m2+')':'(no aplica)'}</div><div class="val">${fmtMoney(r.descuento)}</div></div>
+        <div class="cot-result ${r.recargo?'':'muted'}"><div class="lbl">Recargo</div><div class="val">${fmtMoney(r.recargo)}</div></div>
+        <div class="cot-result"><div class="lbl">Comisión (${(p.comision_pct*100).toFixed(0)}%)</div><div class="val">${fmtMoney(r.comision)}</div></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderCotizadorForm() {
+  const f = STATE.cotizadorForm;
+  return `
+    <div class="card cot-card" style="margin-bottom:var(--s-4)">
+      <div class="card-h">
+        <h3>Cotizador</h3>
+        <button class="btn btn-ghost" data-cot-close>×</button>
+      </div>
+      <div class="cot-grid">
+        <label>Cliente / diseño<input type="text" data-cot-field="cliente" value="${escapeHtml(f.cliente)}" placeholder="opcional"></label>
+        <label>Ancho (cm)<input type="number" min="0" step="0.1" data-cot-field="ancho" value="${escapeHtml(f.ancho)}"></label>
+        <label>Alto (cm)<input type="number" min="0" step="0.1" data-cot-field="alto" value="${escapeHtml(f.alto)}"></label>
+        <label>Neón (mt)<input type="number" min="0" step="0.1" data-cot-field="neon" value="${escapeHtml(f.neon)}"></label>
+        <label>Tipo
+          <select data-cot-field="tipo">
+            <option value="INT" ${f.tipo==='INT'?'selected':''}>INT (interior)</option>
+            <option value="EXT" ${f.tipo==='EXT'?'selected':''}>EXT (exterior)</option>
+          </select>
+        </label>
+      </div>
+      <div id="cot-results-slot">${renderCotizadorResults()}</div>
+    </div>
+  `;
+}
+
 function renderPresupuestos() {
   const list = STATE.presupuestos.map(p => ({...p, st: presupuestoStatus(p)}));
   const counts = {
@@ -965,8 +1129,12 @@ function renderPresupuestos() {
   return `
     <div class="page-head">
       <div><div class="eyebrow">${STATE.presupuestos.length}${STATE.presupuestos.length ? ' desde ' + fmtDate(STATE.presupuestos.reduce((min, p) => p.fecha < min ? p.fecha : min, STATE.presupuestos[0].fecha)) : ''}</div><h1>Presupuestos</h1></div>
-      <div class="actions"><button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
+      <div class="actions">
+        <button class="btn btn-cyan" data-cot-open>＋ Cotizador</button>
+        <button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button>
+      </div>
     </div>
+    ${pptoShowCotizador ? renderCotizadorForm() : ''}
     <div class="table-wrap">
       <div class="table-toolbar">
         <button class="btn btn-ghost ${pptoFilter==='all'?'btn-cyan':''}" data-ppfilter="all">Todos · ${counts.all}</button>
@@ -1733,6 +1901,34 @@ async function loadAdminActivity() {
 function bindAdmin() {
   document.querySelectorAll('[data-admin-range]').forEach(b => b.onclick = () => { adminData.range = b.dataset.adminRange; loadAdminActivity(); });
   if (!adminData.rows.length && !adminData.error && !adminData.loading && isAdmin()) loadAdminActivity();
+
+  const saveBtn = document.querySelector('[data-cot-save]');
+  if (saveBtn) saveBtn.onclick = async () => {
+    const updates = {};
+    document.querySelectorAll('[data-cot-param]').forEach(i => {
+      const v = parseFloat(i.value);
+      if (!isNaN(v)) updates[i.dataset.cotParam] = v;
+    });
+    const msg = document.getElementById('cot-save-msg');
+    msg.textContent = 'guardando…';
+    try {
+      await saveCotizadorParams(updates);
+      msg.textContent = '✓ guardado';
+      msg.style.color = 'var(--success)';
+      setTimeout(() => { msg.textContent = ''; }, 2000);
+    } catch (e) {
+      msg.textContent = '✗ error: ' + e.message;
+      msg.style.color = 'var(--neon-red)';
+    }
+  };
+  const resetBtn = document.querySelector('[data-cot-reset]');
+  if (resetBtn) resetBtn.onclick = () => {
+    if (!confirm('Resetear todos los parámetros a los valores originales?')) return;
+    const defs = CONFIG.cotizadorDefaults;
+    document.querySelectorAll('[data-cot-param]').forEach(i => {
+      i.value = defs[i.dataset.cotParam];
+    });
+  };
 }
 
 function renderAdmin() {
@@ -1800,6 +1996,8 @@ function renderAdmin() {
       ` : ''}
     </div>
 
+    ${renderAdminCotizador()}
+
     <div class="card admin-soon">
       <div class="card-h"><h3>Próximamente</h3></div>
       <div class="muted" style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s-3);font-size:13px">
@@ -1807,6 +2005,67 @@ function renderAdmin() {
         <div>💰 Comisiones acumuladas a pagar</div>
         <div>📝 Notas privadas por cliente</div>
         <div>📧 Reporte semanal automático</div>
+      </div>
+    </div>
+  `;
+}
+
+const COT_PARAM_GROUPS = [
+  { title: 'Mapping (sheet)', keys: [
+    ['neon', 'Precio neón (mt)'],
+    ['trans', 'Precio acrílico transparente (m²)'],
+    ['negro', 'Precio negro (m²)'],
+    ['fuentes_1a', 'Fuente · neón ≤ 2 mt'],
+    ['fuentes_3a', 'Fuente · 2-6 mt'],
+    ['fuentes_5a', 'Fuente · 6-9 mt'],
+    ['fuentes_10a', 'Fuente · 9-30 mt']
+  ]},
+  { title: 'Tier por m²', keys: [
+    ['tier_25', 'm² ≤ 25'],
+    ['tier_50', 'm² ≤ 50'],
+    ['tier_99', 'm² > 50']
+  ]},
+  { title: 'Extra por exterior (EXT)', keys: [
+    ['ext_25', 'm² ≤ 25'],
+    ['ext_50', 'm² ≤ 50'],
+    ['ext_99', 'm² > 50']
+  ]},
+  { title: 'Multiplicadores', keys: [
+    ['reventa_mult', 'Reventa × trans'],
+    ['comision_pct', 'Comisión (decimal: 0.05 = 5%)'],
+    ['descuento_mult', 'Descuento × trans'],
+    ['descuento_min_m2', 'Descuento aplica si m² >'],
+    ['recargo_5', 'Recargo (m² ≤ 5) ×'],
+    ['recargo_125', 'Recargo (m² ≤ 12.5) ×'],
+    ['recargo_25', 'Recargo (m² < 25) ×']
+  ]}
+];
+
+function renderAdminCotizador() {
+  const p = getCotizadorParams();
+  return `
+    <div class="card" style="margin-bottom:var(--s-4)">
+      <div class="card-h">
+        <h3>Parámetros del cotizador</h3>
+        <span class="muted" style="font-size:11px">${STATE.cotizadorParams ? 'sincronizado · D1' : 'usando valores por defecto'}</span>
+      </div>
+      ${COT_PARAM_GROUPS.map(g => `
+        <div class="cot-params-group">
+          <div class="cot-params-title">${g.title}</div>
+          <div class="cot-params-grid">
+            ${g.keys.map(([k, label]) => `
+              <label class="cot-param">
+                <span>${escapeHtml(label)}</span>
+                <input type="number" step="any" data-cot-param="${k}" value="${p[k]}">
+              </label>
+            `).join('')}
+          </div>
+        </div>
+      `).join('')}
+      <div class="seg-actions" style="margin-top:var(--s-3)">
+        <button class="btn btn-primary" data-cot-save>💾 Guardar</button>
+        <button class="btn btn-ghost" data-cot-reset>Resetear a defaults</button>
+        <span id="cot-save-msg" class="muted" style="font-size:12px"></span>
       </div>
     </div>
   `;
@@ -1856,6 +2115,7 @@ window.closeDrawer = closeDrawer;
 // ---------- INIT ----------
 loadDone();
 loadUser();
+loadCotizadorParams();
 const initView = location.hash.replace('#','') || 'dashboard';
 STATE.view = initView;
 loadAll();
