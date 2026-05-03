@@ -853,7 +853,33 @@ window.addEventListener('hashchange', () => {
 });
 
 // ============ RENDER ============
+function renderUserPicker() {
+  return `
+    <div class="user-picker-overlay">
+      <div class="user-picker-box">
+        <img class="brand-logo" src="assets/logo.svg" alt="Neon Infinito" style="width:80px;margin-bottom:var(--s-3)">
+        <h2 style="margin:0 0 var(--s-1)">NEON · Ventas</h2>
+        <p class="muted" style="margin:0 0 var(--s-4);font-size:13px">¿Quién sos?</p>
+        <div style="display:flex;gap:var(--s-3);justify-content:center">
+          ${CONFIG.defaultUsers.map(u => `
+            <button class="btn btn-cyan user-pick-big" data-pick-user="${escapeHtml(u)}" style="min-width:120px;padding:var(--s-3) var(--s-4);font-size:16px">${escapeHtml(u)}</button>
+          `).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+}
+function bindUserPicker() {
+  document.querySelectorAll('[data-pick-user]').forEach(el => {
+    el.onclick = () => setUser(el.dataset.pickUser);
+  });
+}
 function render() {
+  if (!STATE.user) {
+    document.getElementById('app').innerHTML = renderUserPicker();
+    bindUserPicker();
+    return;
+  }
   document.getElementById('app').innerHTML = renderShell();
   if (STATE.error)   document.getElementById('main').innerHTML = renderError();
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
