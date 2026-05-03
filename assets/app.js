@@ -31,8 +31,14 @@ const STATE = {
   error: null,
   view: 'dashboard',
   selected: null,
-  dashMonths: null   // null = mes actual; Set('YYYY-MM') = filtro activo; 'all' = todos
+  dashMonths: null,   // null = mes actual; Set('YYYY-MM') = filtro activo; 'all' = todos
+  dashChartIdx: 0     // 0 = ventas acumuladas, 1 = semanal stacked por canal
 };
+
+const DASH_CHARTS = [
+  { id: 'cumulative', title: (lbl) => `Ventas acumuladas · ${lbl}` },
+  { id: 'weekly',     title: (lbl) => `Semanas · stacked por canal · ${lbl}` }
+];
 
 const TODAY = new Date(); TODAY.setHours(0,0,0,0);
 
@@ -555,8 +561,15 @@ function renderDashboard() {
     </div>
 
     <div class="chart-grid">
-      <div class="card">
-        <div class="card-h"><h3>Ventas acumuladas · ${escapeHtml(dashMonthsLabel())}</h3></div>
+      <div class="card chart-card">
+        <div class="card-h">
+          <h3>${escapeHtml(DASH_CHARTS[STATE.dashChartIdx].title(dashMonthsLabel()))}</h3>
+          <div class="chart-nav">
+            <button class="chart-arrow" data-chart-nav="prev" aria-label="Anterior">‹</button>
+            <span class="chart-dots">${DASH_CHARTS.map((_,i)=>`<span class="dot ${i===STATE.dashChartIdx?'active':''}" data-chart-idx="${i}"></span>`).join('')}</span>
+            <button class="chart-arrow" data-chart-nav="next" aria-label="Siguiente">›</button>
+          </div>
+        </div>
         <div class="chart-canvas" id="chart-line"></div>
       </div>
       <div class="card">
@@ -1018,7 +1031,8 @@ function closeDrawer() {
 
 // ---------- CHARTS ----------
 function drawCharts() {
-  drawLine();
+  if (STATE.dashChartIdx === 0) drawLine();
+  else if (STATE.dashChartIdx === 1) drawWeeklyStacked();
   drawDonut('chart-estado', 'legend-estado', byField('estadoPedido'), ['var(--neon-cyan)', 'var(--warning)', 'var(--success)', 'var(--neon-red)', 'var(--ink-500)']);
   drawDonut('chart-canal',  'legend-canal',  byField('canalAd'),       ['var(--neon-red)', 'var(--neon-cyan)', 'var(--warning)', 'var(--success)', 'var(--ink-500)', 'var(--ink-600)']);
 }
@@ -1153,6 +1167,121 @@ function drawLine() {
     tooltip.style.display = 'none';
   });
 }
+function weekKey(d) {
+  // Lunes como inicio de semana. Devuelve 'YYYY-WNN' y la fecha del lunes.
+  const dt = new Date(d); dt.setHours(0,0,0,0);
+  const dow = (dt.getDay() + 6) % 7; // 0=lun
+  dt.setDate(dt.getDate() - dow);
+  const k = dt.toISOString().slice(0,10);
+  return { key: k, monday: dt };
+}
+
+function drawWeeklyStacked() {
+  const el = document.getElementById('chart-line'); if (!el) return;
+  const cur = pedidosDash();
+  if (cur.length === 0) { el.innerHTML = '<div class="loading muted">sin datos</div>'; return; }
+
+  // Agrupar por semana y por canal
+  const weeks = new Map(); // key -> { monday, byCat: {cat:val} }
+  const cats = new Map(); // cat -> total (para ordenar)
+  for (const p of cur) {
+    const wk = weekKey(p.fecha);
+    if (!weeks.has(wk.key)) weeks.set(wk.key, { monday: wk.monday, byCat: {} });
+    const cat = (p.canalAd || '—').trim() || '—';
+    const w = weeks.get(wk.key);
+    const v = p.precio + p.precioDimmer;
+    w.byCat[cat] = (w.byCat[cat] || 0) + v;
+    cats.set(cat, (cats.get(cat) || 0) + v);
+  }
+  // Asegurar todas las semanas del rango (incluyendo vacías)
+  const keys = Array.from(weeks.keys()).sort();
+  if (keys.length > 1) {
+    let cursor = new Date(keys[0]); const end = new Date(keys[keys.length-1]);
+    while (cursor <= end) {
+      const k = cursor.toISOString().slice(0,10);
+      if (!weeks.has(k)) weeks.set(k, { monday: new Date(cursor), byCat: {} });
+      cursor.setDate(cursor.getDate() + 7);
+    }
+  }
+  const sortedKeys = Array.from(weeks.keys()).sort();
+  const sortedCats = Array.from(cats.entries()).sort((a,b) => b[1]-a[1]).map(e => e[0]);
+  const palette = ['#FF1830', '#8FD4DE', '#FFB84D', '#4ADE80', '#A78BFA', '#F472B6', '#5B5B6E'];
+  const catColor = new Map(sortedCats.map((c,i) => [c, palette[i % palette.length]]));
+
+  const W = el.clientWidth, H = 240, PL = 60, PR = 20, PT = 16, PB = 56;
+  const innerW = W - PL - PR, innerH = H - PT - PB;
+  const totals = sortedKeys.map(k => Object.values(weeks.get(k).byCat).reduce((a,b)=>a+b, 0));
+  const max = Math.max(1, ...totals);
+  const barW = Math.max(8, Math.min(48, (innerW / sortedKeys.length) * 0.7));
+  const step = innerW / Math.max(1, sortedKeys.length);
+
+  // Y ticks
+  const yTicks = [0, max/2, max].map(v => ({ v, y: PT + innerH - (v / max) * innerH }));
+
+  let bars = '';
+  sortedKeys.forEach((k, i) => {
+    const w = weeks.get(k);
+    const cx = PL + step * i + step/2;
+    const x = cx - barW/2;
+    let acc = 0;
+    let segs = '';
+    sortedCats.forEach(cat => {
+      const v = w.byCat[cat] || 0;
+      if (v <= 0) return;
+      const h = (v / max) * innerH;
+      const yTop = PT + innerH - acc - h;
+      segs += `<rect class="wk-seg" x="${x.toFixed(2)}" y="${yTop.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}" fill="${catColor.get(cat)}" data-week="${k}" data-cat="${escapeHtml(cat)}" data-val="${v}"></rect>`;
+      acc += h;
+    });
+    bars += segs;
+  });
+
+  // Labels: primer/medio/último
+  const labelIdxs = sortedKeys.length <= 8
+    ? sortedKeys.map((_,i) => i)
+    : [0, Math.floor(sortedKeys.length/2), sortedKeys.length-1];
+  const xLabels = labelIdxs.map(i => {
+    const cx = PL + step * i + step/2;
+    const md = weeks.get(sortedKeys[i]).monday;
+    const lbl = `${String(md.getDate()).padStart(2,'0')}/${String(md.getMonth()+1).padStart(2,'0')}`;
+    return `<text class="label" x="${cx.toFixed(1)}" y="${(H - PB + 16).toFixed(1)}" text-anchor="middle">${lbl}</text>`;
+  }).join('');
+
+  const legend = sortedCats.slice(0, 7).map(c => `<span class="lg-i"><span class="lg-d" style="background:${catColor.get(c)}"></span>${escapeHtml(c)}</span>`).join('');
+
+  el.innerHTML = `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    ${yTicks.map(t => `<line class="grid" x1="${PL}" x2="${W-PR}" y1="${t.y.toFixed(1)}" y2="${t.y.toFixed(1)}"/>`).join('')}
+    ${yTicks.map(t => `<text class="label" x="${PL-8}" y="${(t.y+3).toFixed(1)}" text-anchor="end">${fmtMoney(t.v)}</text>`).join('')}
+    ${bars}
+    ${xLabels}
+  </svg>
+  <div class="chart-legend-row">${legend}</div>
+  <div class="chart-tooltip" style="display:none"></div>`;
+
+  const tooltip = el.querySelector('.chart-tooltip');
+  el.querySelectorAll('.wk-seg').forEach(seg => {
+    seg.addEventListener('mousemove', (e) => {
+      const rect = el.getBoundingClientRect();
+      const k = seg.dataset.week;
+      const w = weeks.get(k);
+      const total = Object.values(w.byCat).reduce((a,b)=>a+b,0);
+      const monday = w.monday;
+      const sunday = new Date(monday); sunday.setDate(sunday.getDate()+6);
+      const breakdown = sortedCats
+        .filter(c => (w.byCat[c]||0) > 0)
+        .map(c => `<div class="tt-row"><span class="tt-dot" style="background:${catColor.get(c)}"></span>${escapeHtml(c)} · ${fmtMoney(w.byCat[c])}</div>`)
+        .join('');
+      tooltip.style.display = 'block';
+      tooltip.innerHTML = `<div class="tt-d">${fmtDate(monday)} – ${fmtDate(sunday)}</div><div class="tt-v">${fmtMoney(total)}</div>${breakdown}`;
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      tooltip.style.left = `${Math.min(rect.width - 180, Math.max(0, x - 90))}px`;
+      tooltip.style.top  = `${Math.max(0, y - tooltip.offsetHeight - 12)}px`;
+    });
+    seg.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+  });
+}
+
 function drawDonut(canvasId, legendId, data, colors) {
   const el = document.getElementById(canvasId); if (!el) return;
   const total = data.reduce((a,b)=>a+b[1],0);
@@ -1187,6 +1316,15 @@ function bindCommon() {
     else setDashCurrent();
   });
   document.querySelectorAll('[data-period-m]').forEach(b => b.onclick = () => toggleDashMonth(b.dataset.periodM));
+  document.querySelectorAll('[data-chart-nav]').forEach(b => b.onclick = () => {
+    const dir = b.dataset.chartNav === 'next' ? 1 : -1;
+    STATE.dashChartIdx = (STATE.dashChartIdx + dir + DASH_CHARTS.length) % DASH_CHARTS.length;
+    render();
+  });
+  document.querySelectorAll('[data-chart-idx]').forEach(d => d.onclick = () => {
+    STATE.dashChartIdx = parseInt(d.dataset.chartIdx);
+    render();
+  });
 }
 
 function uniq(arr) { return Array.from(new Set(arr)); }

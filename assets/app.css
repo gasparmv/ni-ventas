@@ -477,6 +477,39 @@ table.t td.cliente { font-weight: 600; }
 .chart-svg .hover-line { stroke: var(--neon-red); stroke-width: 1; stroke-dasharray: 3 3; opacity: .6; }
 .chart-svg .hover-dot { fill: var(--neon-red); stroke: var(--bg-card); stroke-width: 2; filter: drop-shadow(0 0 6px rgba(255,24,48,.8)); }
 .chart-svg .hover-capture { cursor: crosshair; }
+.chart-svg .wk-seg { transition: opacity var(--dur-fast); cursor: pointer; }
+.chart-svg .wk-seg:hover { opacity: .85; filter: drop-shadow(0 0 6px currentColor); }
+.chart-tooltip .tt-row { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--fg-muted); margin-top: 2px; }
+.chart-tooltip .tt-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.chart-legend-row { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; padding: 0 4px; font-size: 11px; color: var(--fg-muted); }
+.chart-legend-row .lg-i { display: inline-flex; align-items: center; gap: 6px; }
+.chart-legend-row .lg-d { width: 10px; height: 10px; border-radius: 2px; }
+
+/* ============ CHART CAROUSEL ============ */
+.chart-card .card-h { gap: var(--s-3); }
+.chart-nav { display: flex; align-items: center; gap: 8px; }
+.chart-arrow {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  width: 28px; height: 28px;
+  border-radius: var(--r-sm);
+  font-size: 18px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--font-display);
+  padding: 0;
+  transition: all var(--dur-fast);
+}
+.chart-arrow:hover { border-color: var(--neon-cyan); color: var(--neon-cyan); box-shadow: var(--glow-cyan-sm); }
+.chart-dots { display: inline-flex; gap: 6px; }
+.chart-dots .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ink-400);
+  cursor: pointer;
+  transition: all var(--dur-fast);
+}
+.chart-dots .dot.active { background: var(--neon-red); box-shadow: var(--glow-red-sm); width: 18px; border-radius: 4px; }
+.chart-dots .dot:hover:not(.active) { background: var(--ink-600); }
 .chart-svg { width: 100%; height: 100%; overflow: visible; }
 .chart-svg .axis { stroke: var(--border); stroke-width: 1; }
 .chart-svg .grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; opacity: .5; }
