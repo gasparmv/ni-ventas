@@ -407,6 +407,12 @@ function parseDate(v) {
     const d = new Date(yr, parseInt(m[2]) - 1, parseInt(m[1]));
     return isNaN(d) ? null : d;
   }
+  // AR: d/m (sin año — asume año actual)
+  m = v.match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (m) {
+    const d = new Date(new Date().getFullYear(), parseInt(m[2]) - 1, parseInt(m[1]));
+    return isNaN(d) ? null : d;
+  }
   // AR: dd-mm-yyyy or dd-mm-yy
   m = v.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
   if (m) {
