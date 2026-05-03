@@ -13,23 +13,21 @@
 
 const SHEET_ID = '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ';
 
-const MESES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+const SHEET_NAME = '2026';
 
 function doPost(e) {
   try {
     const data = JSON.parse(e.postData.contents);
     const ss = SpreadsheetApp.openById(SHEET_ID);
 
-    // Determinar hoja del mes actual
-    const now = new Date();
-    const mesName = MESES[now.getMonth()];
-    let sheet = ss.getSheetByName(mesName);
+    let sheet = ss.getSheetByName(SHEET_NAME);
     if (!sheet) {
-      return ContentService.createTextOutput(JSON.stringify({ error: 'Hoja "' + mesName + '" no encontrada' }))
+      return ContentService.createTextOutput(JSON.stringify({ error: 'Hoja "' + SHEET_NAME + '" no encontrada' }))
         .setMimeType(ContentService.MimeType.JSON);
     }
 
     // Formato fecha: d/M
+    const now = new Date();
     const fecha = now.getDate() + '/' + (now.getMonth() + 1);
 
     // Columnas: A=Fecha, B=m2, C=diseño, D=alto, E=ancho, F=neon, G=tipo,
@@ -55,7 +53,7 @@ function doPost(e) {
 
     sheet.appendRow(row);
 
-    return ContentService.createTextOutput(JSON.stringify({ ok: true, sheet: mesName, row: sheet.getLastRow() }))
+    return ContentService.createTextOutput(JSON.stringify({ ok: true, sheet: SHEET_NAME, row: sheet.getLastRow() }))
       .setMimeType(ContentService.MimeType.JSON);
 
   } catch (err) {
