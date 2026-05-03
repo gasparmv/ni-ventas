@@ -444,7 +444,7 @@ function renderShell() {
   return `
     <aside class="sidebar">
       <div class="brand">
-        <img class="brand-logo" src="assets/logo.png" alt="Neon Infinito">
+        <img class="brand-logo" src="assets/logo.svg" alt="Neon Infinito">
         <span class="b-sub">· VENTAS</span>
       </div>
       <nav class="nav">
@@ -1012,21 +1012,18 @@ function drawLine() {
     const k = p.fecha.toISOString().slice(0,10);
     byDay.set(k, (byDay.get(k)||0) + p.precio + p.precioDimmer);
   }
-  // Build day axis: union of selected months (or current month if default), or full year if 'all'
+  // Build day axis. Modo 'Todos' = todos los días entre primer y último pedido.
   const months = getDashMonths();
-  const data = [];
+  const data = []; // { date: Date, label: string, val: number }
   if (!months) {
-    // 'all' = pedidos por mes
-    const byMonth = new Map();
-    for (const p of cur) {
-      const k = getMonth(p.fecha);
-      byMonth.set(k, (byMonth.get(k)||0) + p.precio + p.precioDimmer);
+    if (cur.length === 0) { el.innerHTML = '<div class="loading muted">sin datos</div>'; return; }
+    const dates = STATE.pedidos.map(p => p.fecha.getTime());
+    const minD = new Date(Math.min(...dates)); minD.setHours(0,0,0,0);
+    const maxD = new Date(Math.max(...dates)); maxD.setHours(0,0,0,0);
+    for (let dt = new Date(minD); dt <= maxD; dt = addDays(dt, 1)) {
+      const k = dt.toISOString().slice(0,10);
+      data.push({ date: new Date(dt), label: fmtDate(dt), val: byDay.get(k) || 0 });
     }
-    const sorted = Array.from(byMonth.keys()).sort();
-    sorted.forEach((k, i) => {
-      const [y,m] = k.split('-');
-      data.push({ d: new Date(parseInt(y), parseInt(m)-1, 1).toLocaleDateString('es-AR',{month:'short'}).replace('.',''), val: byMonth.get(k) });
-    });
   } else {
     const sortedMonths = months.slice().sort();
     for (const ym of sortedMonths) {
@@ -1036,29 +1033,95 @@ function drawLine() {
       for (let d = 1; d <= dim; d++) {
         const dt = new Date(yr, mo, d);
         const k = dt.toISOString().slice(0,10);
-        const label = sortedMonths.length > 1 ? `${d}/${mo+1}` : d;
-        data.push({ d: label, val: byDay.get(k) || 0 });
+        data.push({ date: dt, label: fmtDate(dt), val: byDay.get(k) || 0 });
       }
     }
   }
   if (data.length === 0) { el.innerHTML = '<div class="loading muted">sin datos</div>'; return; }
-  const daysInMonth = data.length;
   const max = Math.max(1, ...data.map(p=>p.val));
-  const W = el.clientWidth, H = 200, P = 30;
-  const x = (i) => P + (i / (data.length-1)) * (W - P*2);
-  const y = (v) => H - P - (v / max) * (H - P*2);
-  const pts = data.map((p,i) => `${x(i).toFixed(1)},${y(p.val).toFixed(1)}`).join(' ');
-  const area = `M ${x(0)},${y(0)} L ${pts.split(' ').join(' L ')} L ${x(data.length-1)},${y(0)} Z`;
+  const W = el.clientWidth, H = 220, PL = 50, PR = 20, PT = 16, PB = 28;
+  const xAt = (i) => PL + (i / Math.max(1, data.length-1)) * (W - PL - PR);
+  const yAt = (v) => (H - PB) - (v / max) * (H - PB - PT);
+
+  // Smooth path via Catmull-Rom → Bezier
+  function smoothPath(pts) {
+    if (pts.length < 2) return '';
+    let d = `M ${pts[0].x.toFixed(2)} ${pts[0].y.toFixed(2)}`;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i-1] || pts[i];
+      const p1 = pts[i];
+      const p2 = pts[i+1];
+      const p3 = pts[i+2] || p2;
+      const tension = 0.5;
+      const c1x = p1.x + (p2.x - p0.x) / 6 * tension;
+      const c1y = p1.y + (p2.y - p0.y) / 6 * tension;
+      const c2x = p2.x - (p3.x - p1.x) / 6 * tension;
+      const c2y = p2.y - (p3.y - p1.y) / 6 * tension;
+      d += ` C ${c1x.toFixed(2)} ${c1y.toFixed(2)} ${c2x.toFixed(2)} ${c2y.toFixed(2)} ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
+    }
+    return d;
+  }
+  const pts = data.map((p,i) => ({ x: xAt(i), y: yAt(p.val) }));
+  const linePath = smoothPath(pts);
+  const areaPath = linePath + ` L ${xAt(data.length-1).toFixed(2)} ${(H-PB).toFixed(2)} L ${xAt(0).toFixed(2)} ${(H-PB).toFixed(2)} Z`;
+
+  // Y axis ticks (3 levels)
+  const yTicks = [0, max/2, max].map(v => ({ v, y: yAt(v) }));
+
   el.innerHTML = `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-    <defs><linearGradient id="redGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#FF1830"/><stop offset="100%" stop-color="#FF1830" stop-opacity="0"/></linearGradient></defs>
-    ${[0,0.5,1].map(t => `<line class="grid" x1="${P}" x2="${W-P}" y1="${P + t*(H-P*2)}" y2="${P + t*(H-P*2)}"/>`).join('')}
-    <path class="area" d="${area}"/>
-    <polyline class="line" points="${pts}"/>
-    ${data.map((p,i) => p.val > 0 ? `<circle class="point" cx="${x(i).toFixed(1)}" cy="${y(p.val).toFixed(1)}" r="3"><title>${p.d}: ${fmtMoney(p.val)}</title></circle>` : '').join('')}
-    <text class="label" x="${P}" y="${H-8}">${data[0].d}</text>
-    <text class="label" x="${W-P}" y="${H-8}" text-anchor="end">${data[data.length-1].d}</text>
-    <text class="label" x="${P-5}" y="${P+4}" text-anchor="end">${fmtMoney(max)}</text>
-  </svg>`;
+    <defs>
+      <linearGradient id="redGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#FF1830" stop-opacity=".55"/>
+        <stop offset="100%" stop-color="#FF1830" stop-opacity="0"/>
+      </linearGradient>
+      <filter id="lineGlow" x="-20%" y="-20%" width="140%" height="140%">
+        <feGaussianBlur stdDeviation="2.5" result="b"/>
+        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+    ${yTicks.map(t => `<line class="grid" x1="${PL}" x2="${W-PR}" y1="${t.y.toFixed(1)}" y2="${t.y.toFixed(1)}"/>`).join('')}
+    ${yTicks.map(t => `<text class="label" x="${PL-8}" y="${(t.y+3).toFixed(1)}" text-anchor="end">${fmtMoney(t.v)}</text>`).join('')}
+    <path class="area" d="${areaPath}"/>
+    <path class="line" d="${linePath}" filter="url(#lineGlow)"/>
+    <text class="label" x="${PL}" y="${H-8}">${data[0].label}</text>
+    <text class="label" x="${W-PR}" y="${H-8}" text-anchor="end">${data[data.length-1].label}</text>
+    <g class="hover-layer" style="display:none">
+      <line class="hover-line" x1="0" x2="0" y1="${PT}" y2="${H-PB}"/>
+      <circle class="hover-dot" r="5"/>
+    </g>
+    <rect class="hover-capture" x="${PL}" y="${PT}" width="${W-PL-PR}" height="${H-PT-PB}" fill="transparent" pointer-events="all"/>
+  </svg>
+  <div class="chart-tooltip" style="display:none"></div>`;
+
+  // Hover interaction
+  const svg = el.querySelector('svg');
+  const tooltip = el.querySelector('.chart-tooltip');
+  const hoverLayer = svg.querySelector('.hover-layer');
+  const hoverLine = svg.querySelector('.hover-line');
+  const hoverDot = svg.querySelector('.hover-dot');
+  const capture = svg.querySelector('.hover-capture');
+  capture.addEventListener('mousemove', (e) => {
+    const rect = svg.getBoundingClientRect();
+    const sx = (e.clientX - rect.left) * (W / rect.width);
+    // find nearest data index
+    const ratio = (sx - PL) / (W - PL - PR);
+    const idx = Math.max(0, Math.min(data.length-1, Math.round(ratio * (data.length-1))));
+    const p = data[idx];
+    const px = xAt(idx), py = yAt(p.val);
+    hoverLayer.style.display = '';
+    hoverLine.setAttribute('x1', px); hoverLine.setAttribute('x2', px);
+    hoverDot.setAttribute('cx', px); hoverDot.setAttribute('cy', py);
+    tooltip.style.display = 'block';
+    tooltip.innerHTML = `<div class="tt-d">${p.label}</div><div class="tt-v">${fmtMoney(p.val)}</div>`;
+    // position tooltip in screen coords relative to chart container
+    const ttX = (px / W) * rect.width;
+    tooltip.style.left = `${Math.min(rect.width - 110, Math.max(0, ttX - 55))}px`;
+    tooltip.style.top  = `${Math.max(0, (py / H) * rect.height - 50)}px`;
+  });
+  capture.addEventListener('mouseleave', () => {
+    hoverLayer.style.display = 'none';
+    tooltip.style.display = 'none';
+  });
 }
 function drawDonut(canvasId, legendId, data, colors) {
   const el = document.getElementById(canvasId); if (!el) return;
