@@ -14,6 +14,7 @@ const CONFIG = {
   matchPriceTolerance: 0.20,   // ±20%
   presupuestoFollowupDays: 7,  // miércoles a miércoles
   presupuestoCutoff: '2026-04-27',   // presupuestos anteriores quedan dados por vencidos / fuera del seguimiento activo
+  appsScriptUrl: 'https://script.google.com/macros/s/AKfycbz9Jq2ew0dMcg5IEXn9OMsqhdVmlwqL_EVULlclWK-oIxh5avOlnZxRrGtis1sGalnd/exec',
   cotizadorDefaults: {
     // Mapping B2..B8 del sheet del cotizador
     neon: 1800,
@@ -69,7 +70,8 @@ const STATE = {
   token: null,        // token de admin (Gaspar) si está logueado
   activity: { rows: [], loading: false, error: null },
   cotizadorParams: null,  // se carga del Worker; si null usa CONFIG.cotizadorDefaults
-  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '' }
+  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '' },
+  cotizadorSaving: false
 };
 
 // ============ COTIZADOR ============
@@ -97,6 +99,46 @@ async function saveCotizadorParams(updates) {
   if (!r.ok) throw new Error('HTTP ' + r.status);
   // Actualizar estado local con los nuevos valores
   STATE.cotizadorParams = Object.assign({}, STATE.cotizadorParams || {}, updates);
+}
+
+async function saveCotizacion() {
+  if (!CONFIG.appsScriptUrl) { alert('Falta configurar CONFIG.appsScriptUrl (Google Apps Script)'); return; }
+  const f = STATE.cotizadorForm;
+  if (!(+f.ancho > 0) || !(+f.alto > 0)) { alert('Completá al menos ancho y alto'); return; }
+  if (!f.cliente.trim()) { alert('Completá el nombre del cliente/diseño'); return; }
+  const r = calcCotizador(f);
+  STATE.cotizadorSaving = true;
+  updateCotizadorForm();
+  try {
+    const resp = await fetch(CONFIG.appsScriptUrl, {
+      method: 'POST',
+      body: JSON.stringify({
+        cliente: f.cliente.trim(),
+        ancho: +f.ancho,
+        alto: +f.alto,
+        neon: +f.neon || 0,
+        tipo: f.tipo || 'INT',
+        m2: r.m2,
+        trans: r.trans,
+        negro: r.negro,
+        descuento: r.descuento,
+        recargo: r.recargo,
+        reventa: r.reventa,
+        comision: r.comision
+      })
+    });
+    const j = await resp.json();
+    if (j.error) throw new Error(j.error);
+    // Limpiar form y recargar datos
+    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '' };
+    toast('Cotización guardada en hoja ' + (j.sheet || ''));
+    loadAll(); // recargar sheets para ver la nueva fila
+  } catch (e) {
+    alert('Error al guardar: ' + e.message);
+  } finally {
+    STATE.cotizadorSaving = false;
+    updateCotizadorForm();
+  }
 }
 
 function redondMult(v, mult) { return Math.round(v / mult) * mult; }
@@ -1059,11 +1101,19 @@ function bindPresupuestos() {
     el.oninput = () => { STATE.cotizadorForm[el.dataset.cotField] = el.value; updateCotizadorForm(); };
     el.onchange = () => { STATE.cotizadorForm[el.dataset.cotField] = el.value; updateCotizadorForm(); };
   });
+  bindCotSaveBtn();
 }
 
 function updateCotizadorForm() {
   const slot = document.getElementById('cot-results-slot');
-  if (slot) slot.innerHTML = renderCotizadorResults();
+  if (slot) {
+    slot.innerHTML = renderCotizadorResults();
+    bindCotSaveBtn();
+  }
+}
+function bindCotSaveBtn() {
+  const btn = document.getElementById('cot-save-btn');
+  if (btn) btn.onclick = () => saveCotizacion();
 }
 let pptoShowCotizador = false;
 
@@ -1083,6 +1133,9 @@ function renderCotizadorResults() {
         <div class="cot-result ${r.descuento?'':'muted'}"><div class="lbl">Descuento ${r.descuento?'(m²>'+p.descuento_min_m2+')':'(no aplica)'}</div><div class="val">${fmtMoney(r.descuento)}</div></div>
         <div class="cot-result ${r.recargo?'':'muted'}"><div class="lbl">Recargo</div><div class="val">${fmtMoney(r.recargo)}</div></div>
         <div class="cot-result"><div class="lbl">Comisión (${(p.comision_pct*100).toFixed(0)}%)</div><div class="val">${fmtMoney(r.comision)}</div></div>
+      </div>
+      <div style="margin-top:var(--s-3);text-align:right">
+        <button class="btn btn-cyan" id="cot-save-btn" ${STATE.cotizadorSaving ? 'disabled' : ''}>${STATE.cotizadorSaving ? 'Guardando…' : 'Guardar en Sheet'}</button>
       </div>
     </div>
   `;
