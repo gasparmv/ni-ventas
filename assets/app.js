@@ -573,7 +573,8 @@ function renderDashboard() {
   const cur = pedidosDash();
   const totalMes = cur.reduce((a,p)=>a+p.precio+p.precioDimmer, 0);
   const aov = cur.length ? totalMes / cur.length : 0;
-  const cobrado = cur.reduce((a,p)=>a+p.pagado, 0);
+  // Cobrado = total - restante (si restante=0, el cartel está saldado)
+  const cobrado = cur.reduce((a,p)=>a + (p.precio + p.precioDimmer - p.restante), 0);
   const pctCobrado = totalMes ? Math.round(cobrado/totalMes*100) : 0;
   const sgts = getSeguimientosWeek();
   const pptosAbiertos = sgts.filter(s=>s.kind==='presupuesto');
