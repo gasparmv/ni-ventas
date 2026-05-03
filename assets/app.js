@@ -1263,19 +1263,22 @@ function drawWeeklyStacked() {
     seg.addEventListener('mousemove', (e) => {
       const rect = el.getBoundingClientRect();
       const k = seg.dataset.week;
+      const cat = seg.dataset.cat;
       const w = weeks.get(k);
+      const val = w.byCat[cat] || 0;
       const total = Object.values(w.byCat).reduce((a,b)=>a+b,0);
+      const pct = total ? Math.round(val / total * 100) : 0;
       const monday = w.monday;
       const sunday = new Date(monday); sunday.setDate(sunday.getDate()+6);
-      const breakdown = sortedCats
-        .filter(c => (w.byCat[c]||0) > 0)
-        .map(c => `<div class="tt-row"><span class="tt-dot" style="background:${catColor.get(c)}"></span>${escapeHtml(c)} · ${fmtMoney(w.byCat[c])}</div>`)
-        .join('');
       tooltip.style.display = 'block';
-      tooltip.innerHTML = `<div class="tt-d">${fmtDate(monday)} – ${fmtDate(sunday)}</div><div class="tt-v">${fmtMoney(total)}</div>${breakdown}`;
+      tooltip.innerHTML = `
+        <div class="tt-d">${fmtDate(monday)} – ${fmtDate(sunday)}</div>
+        <div class="tt-row" style="margin-top:4px"><span class="tt-dot" style="background:${catColor.get(cat)}"></span><span style="color:var(--fg)">${escapeHtml(cat)}</span></div>
+        <div class="tt-v">${fmtMoney(val)}</div>
+        <div class="tt-sub">${pct}% de la semana · total ${fmtMoney(total)}</div>`;
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
-      tooltip.style.left = `${Math.min(rect.width - 180, Math.max(0, x - 90))}px`;
+      tooltip.style.left = `${Math.min(rect.width - 220, Math.max(0, x - 110))}px`;
       tooltip.style.top  = `${Math.max(0, y - tooltip.offsetHeight - 12)}px`;
     });
     seg.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
