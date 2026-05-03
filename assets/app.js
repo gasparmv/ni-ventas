@@ -1302,41 +1302,46 @@ let panelJoacoFilter = 'pendientes'; // pendientes | todos | hechos
 
 function getPanelJoacoTasks() {
   const tasks = [];
-  // 1. Follow-ups de presupuestos (F1, F2, F3)
+  // 1. Follow-ups de presupuestos: solo el touchpoint actual (primer no-hecho)
   const cutoff = parseDate(CONFIG.presupuestoCutoff);
   for (const ppto of STATE.presupuestos) {
     if (cutoff && ppto.fecha < cutoff) continue;
     const st = presupuestoStatus(ppto);
     if (st.state === 'cerrado' || st.state === 'futuro') continue;
-    const tps = presupuestoTouchpoints(ppto.fecha);
-    for (const tp of tps) {
+    const tps = presupuestoTouchpoints(ppto.fecha).map(tp => {
       const doneId = `ppto:${ppto.idx}|${ppto.sheet}|${tp.id}`;
-      const done = isDone(doneId);
-      const doneAt = getDoneAt(doneId);
-      const state = touchpointState(tp.due);
-      const tel = ppto.telefono || '';
-      const nombre = ppto.nombre;
-      const firstName = nombre.split(' ')[0];
-      const msg = CONFIG.presupuestoTemplate(firstName);
-      tasks.push({
-        type: 'presupuesto',
-        id: doneId,
-        cliente: nombre,
-        label: `${tp.id} · Seguimiento presupuesto`,
-        detail: `${fmtMoney(ppto.precio)} · enviado ${fmtDate(ppto.fecha)} · ${st.days}d abierto`,
-        due: tp.due,
-        state,
-        done,
-        doneAt,
-        tel,
-        msg,
-        ppto
-      });
+      return { ...tp, doneId, done: isDone(doneId), doneAt: getDoneAt(doneId), state: touchpointState(tp.due) };
+    });
+    // Agregar los hechos recientes (último 24h) para que aparezcan en "Hechas"
+    for (const tp of tps) {
+      if (tp.done && tp.doneAt && daysBetween(tp.doneAt, TODAY) <= 1) {
+        tasks.push({
+          type: 'presupuesto', id: tp.doneId, cliente: ppto.nombre,
+          label: `${tp.id} · Seguimiento presupuesto`,
+          detail: `${fmtMoney(ppto.precio)} · enviado ${fmtDate(ppto.fecha)} · ${st.days}d abierto`,
+          due: tp.due, state: tp.state, done: true, doneAt: tp.doneAt,
+          tel: ppto.telefono || '', msg: CONFIG.presupuestoTemplate(ppto.nombre.split(' ')[0]), ppto
+        });
+      }
     }
+    // Solo el primer touchpoint no-hecho (el actual)
+    const current = tps.find(t => !t.done);
+    if (!current) continue;
+    const tel = ppto.telefono || '';
+    const firstName = ppto.nombre.split(' ')[0];
+    tasks.push({
+      type: 'presupuesto', id: current.doneId, cliente: ppto.nombre,
+      label: `${current.id} · Seguimiento presupuesto`,
+      detail: `${fmtMoney(ppto.precio)} · enviado ${fmtDate(ppto.fecha)} · ${st.days}d abierto`,
+      due: current.due, state: current.state, done: false, doneAt: null,
+      tel, msg: CONFIG.presupuestoTemplate(firstName), ppto
+    });
   }
-  // 2. Post-venta milestones (D30, D60, D90)
+  // 2. Post-venta: solo el milestone actual (primer no-hecho)
   for (const ped of STATE.pedidos) {
     const ms = postventaMilestones(ped);
+    const msDone = [];
+    let currentFound = false;
     for (const m of ms) {
       if (m.state === 'pending-delivery') continue;
       const doneId = `pv:${ped.idx}|${m.id}`;
@@ -1344,20 +1349,22 @@ function getPanelJoacoTasks() {
       const doneAt = getDoneAt(doneId);
       const tel = extractPhone(ped.envio);
       const firstName = ped.cartel.split(' ')[0];
-      tasks.push({
-        type: 'postventa',
-        id: doneId,
-        cliente: ped.cartel,
+      const stateNorm = m.state === 'overdue' ? 'overdue' : m.state === 'now' ? 'due' : 'future';
+      const item = {
+        type: 'postventa', id: doneId, cliente: ped.cartel,
         label: `${m.id} · ${m.label}`,
         detail: `${fmtMoney(ped.precio)} · entrega ${fmtDate(ped.fecha)}`,
-        due: m.due,
-        state: m.state === 'overdue' ? 'overdue' : m.state === 'now' ? 'due' : 'future',
-        done,
-        doneAt,
-        tel,
-        msg: m.template(firstName),
-        pedido: ped
-      });
+        due: m.due, state: stateNorm, done, doneAt, tel,
+        msg: m.template(firstName), pedido: ped
+      };
+      if (done) {
+        // Solo mostrar hechos recientes en "Hechas"
+        if (doneAt && daysBetween(doneAt, TODAY) <= 1) tasks.push(item);
+      } else if (!currentFound) {
+        // Solo el primer milestone no-hecho
+        tasks.push(item);
+        currentFound = true;
+      }
     }
   }
   return tasks;
