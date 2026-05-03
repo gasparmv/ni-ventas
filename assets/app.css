@@ -654,7 +654,7 @@ table.t td.cliente { font-weight: 600; }
   flex-wrap: wrap;
   flex: 1;
 }
-.period-selector .ps-chip {
+.ps-chip {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--fg-muted);
@@ -665,13 +665,14 @@ table.t td.cliente { font-weight: 600; }
   letter-spacing: var(--tr-wide);
   text-transform: uppercase;
   font-weight: 600;
+  cursor: pointer;
   transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast), box-shadow var(--dur-fast);
 }
-.period-selector .ps-chip:hover {
+.ps-chip:hover {
   border-color: var(--neon-cyan);
   color: var(--neon-cyan);
 }
-.period-selector .ps-chip.active {
+.ps-chip.active {
   background: rgba(143,212,222,.12);
   border-color: var(--neon-cyan);
   color: var(--neon-cyan);
