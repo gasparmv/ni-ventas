@@ -124,18 +124,44 @@ async function saveCotizacion() {
     comision: r.comision
   };
   try {
-    // Apps Script requiere redirect follow para CORS cross-origin
-    const resp = await fetch(CONFIG.appsScriptUrl, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'text/plain' },
-      body: JSON.stringify(payload)
+    // Apps Script redirect CORS: usamos un iframe oculto + form POST
+    await new Promise((resolve, reject) => {
+      const id = 'cot-iframe-' + Date.now();
+      const iframe = document.createElement('iframe');
+      iframe.name = id;
+      iframe.style.display = 'none';
+      document.body.appendChild(iframe);
+
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = CONFIG.appsScriptUrl;
+      form.target = id;
+      // Mandar payload como campo hidden "data"
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'data';
+      input.value = JSON.stringify(payload);
+      form.appendChild(input);
+      document.body.appendChild(form);
+
+      iframe.onload = () => {
+        // cleanup
+        setTimeout(() => { iframe.remove(); form.remove(); }, 500);
+        resolve();
+      };
+      iframe.onerror = () => {
+        iframe.remove(); form.remove();
+        reject(new Error('Error de red'));
+      };
+      // timeout por si no carga
+      setTimeout(() => { resolve(); iframe.remove(); form.remove(); }, 8000);
+
+      form.submit();
     });
-    // no-cors devuelve opaque response (no podemos leer el body),
-    // pero si no tiró error de red, asumimos éxito
     STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '' };
     toast('Cotización guardada ✓');
-    loadAll();
+    // Esperar un poco para que el sheet se actualice antes de recargar
+    setTimeout(() => loadAll(), 2000);
   } catch (e) {
     alert('Error al guardar: ' + e.message);
   } finally {

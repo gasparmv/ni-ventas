@@ -17,7 +17,9 @@ const SHEET_NAME = '2026';
 
 function doPost(e) {
   try {
-    const data = JSON.parse(e.postData.contents);
+    // Soporta tanto JSON body directo como form field "data"
+    const raw = (e.parameter && e.parameter.data) ? e.parameter.data : e.postData.contents;
+    const data = JSON.parse(raw);
     const ss = SpreadsheetApp.openById(SHEET_ID);
 
     let sheet = ss.getSheetByName(SHEET_NAME);
