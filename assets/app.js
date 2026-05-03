@@ -384,17 +384,25 @@ function nextWedAfter(d, minDays) {
   while (dt.getDay() !== 3) dt = addDays(dt, 1);
   return dt;
 }
+function nextFollowup(from) {
+  // Lun/Mar → miércoles de esa semana
+  // Mié → viernes de esa semana
+  // Jue/Vie/Sáb/Dom → lunes siguiente
+  const d = new Date(from); d.setHours(0,0,0,0);
+  const dow = d.getDay(); // 0=dom, 1=lun, 2=mar, 3=mie, 4=jue, 5=vie, 6=sab
+  if (dow === 1) return addDays(d, 2);      // lun → mié (+2)
+  if (dow === 2) return addDays(d, 1);      // mar → mié (+1)
+  if (dow === 3) return addDays(d, 2);      // mié → vie (+2)
+  if (dow === 4) return addDays(d, 4);      // jue → lun (+4)
+  if (dow === 5) return addDays(d, 3);      // vie → lun (+3)
+  if (dow === 6) return addDays(d, 2);      // sáb → lun (+2)
+  return addDays(d, 1);                     // dom → lun (+1)
+}
 function presupuestoTouchpoints(sent) {
   const s = new Date(sent); s.setHours(0,0,0,0);
-  const dow = s.getDay(); // 0=dom, 1=lun ... 6=sab
-  let f1;
-  if (dow >= 1 && dow <= 3) {
-    f1 = addDays(s, 5 - dow); // Mon→Fri (4d), Tue→Fri (3d), Wed→Fri (2d)
-  } else {
-    f1 = nextWedAfter(s, 4); // Thu/Fri/Sat/Sun → próximo miércoles ≥4d después
-  }
-  const f2 = nextWedAfter(f1, 5);
-  const f3 = addDays(f2, 7);
+  const f1 = nextFollowup(s);
+  const f2 = nextFollowup(f1);
+  const f3 = nextFollowup(f2);
   return [
     { id: 'F1', label: 'F1', due: f1 },
     { id: 'F2', label: 'F2', due: f2 },
