@@ -131,6 +131,7 @@ async function saveCotizacion() {
   const f = STATE.cotizadorForm;
   if (!(+f.ancho > 0) || !(+f.alto > 0)) { alert('Completá al menos ancho y alto'); return; }
   if (!f.cliente.trim()) { alert('Completá el nombre del cliente/diseño'); return; }
+  if (!f.telefono.trim()) { alert('Completá el teléfono del cliente'); return; }
   const r = calcCotizador(f);
   STATE.cotizadorSaving = true;
   updateCotizadorForm();
