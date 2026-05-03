@@ -75,10 +75,21 @@ function parseDate(v) {
 }
 
 function parseNum(v) {
+  // NI prices are always integer ARS — no real decimals.
+  // Google CSV may send: "149500", "149500.0", "149,500", "149,500.00", "$149.500", etc.
+  // Strategy: if there's a separator (. or ,) followed by 1-2 digits at end → strip decimals.
+  // Then strip all non-digits.
   if (v == null || v === '') return 0;
-  const s = String(v).replace(/[^\d.,-]/g, '').replace(/\./g, '').replace(',', '.');
-  const n = parseFloat(s);
-  return isNaN(n) ? 0 : n;
+  let s = String(v).trim();
+  if (!s) return 0;
+  // Remove trailing decimals (US format ".0" or AR format ",00")
+  s = s.replace(/[.,]\d{1,2}$/, '');
+  // Strip everything except digits and minus
+  const sign = s.startsWith('-') ? -1 : 1;
+  s = s.replace(/[^\d]/g, '');
+  if (!s) return 0;
+  const n = parseInt(s, 10);
+  return isNaN(n) ? 0 : sign * n;
 }
 
 function fmtMoney(n) { return '$' + Math.round(n||0).toLocaleString('es-AR'); }
