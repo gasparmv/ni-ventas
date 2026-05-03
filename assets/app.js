@@ -621,7 +621,8 @@ function parseCotizador(rows, sheetName) {
       precioTrans,
       precioNegro,
       precioReventa: reventa,
-      precio
+      precio,
+      telefono: (r[15] || '').trim()
     });
   }
   return out;
@@ -862,6 +863,7 @@ function render() {
     else if (v === 'pedidos')   document.getElementById('main').innerHTML = renderPedidos();
     else if (v === 'presupuestos') document.getElementById('main').innerHTML = renderPresupuestos();
     else if (v === 'seguimientos') document.getElementById('main').innerHTML = renderSeguimientos();
+    else if (v === 'panel-joaco')   document.getElementById('main').innerHTML = renderPanelJoaco();
     else if (v === 'actividad')    document.getElementById('main').innerHTML = renderActividad();
     else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
@@ -872,6 +874,7 @@ function render() {
   if (STATE.view === 'presupuestos') bindPresupuestos();
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') drawCharts();
+  if (STATE.view === 'panel-joaco') bindPanelJoaco();
   if (STATE.view === 'actividad') bindActividad();
   if (STATE.view === 'admin') bindAdmin();
 }
@@ -905,6 +908,9 @@ function renderShell() {
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
+        </button>
+        <button class="nav-item ${v==='panel-joaco'?'active':''}" data-view="panel-joaco"><span class="icon">⚡</span> Panel Joaco
+          ${STATE.loaded ? (() => { const c = getPanelJoacoCount(); return c ? '<span class="badge">' + c + '</span>' : ''; })() : ''}
         </button>
         <button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>
         ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
@@ -1291,6 +1297,152 @@ function renderPresupuestos() {
 }
 
 // ---------- SEGUIMIENTOS ----------
+// ---------- PANEL JOACO ----------
+let panelJoacoFilter = 'pendientes'; // pendientes | todos | hechos
+
+function getPanelJoacoTasks() {
+  const tasks = [];
+  // 1. Follow-ups de presupuestos (F1, F2, F3)
+  const cutoff = parseDate(CONFIG.presupuestoCutoff);
+  for (const ppto of STATE.presupuestos) {
+    if (cutoff && ppto.fecha < cutoff) continue;
+    const st = presupuestoStatus(ppto);
+    if (st.state === 'cerrado' || st.state === 'futuro') continue;
+    const tps = presupuestoTouchpoints(ppto.fecha);
+    for (const tp of tps) {
+      const doneId = `ppto:${ppto.idx}|${ppto.sheet}|${tp.id}`;
+      const done = isDone(doneId);
+      const doneAt = getDoneAt(doneId);
+      const state = touchpointState(tp.due);
+      const tel = ppto.telefono || '';
+      const nombre = ppto.nombre;
+      const firstName = nombre.split(' ')[0];
+      const msg = CONFIG.presupuestoTemplate(firstName);
+      tasks.push({
+        type: 'presupuesto',
+        id: doneId,
+        cliente: nombre,
+        label: `${tp.id} · Seguimiento presupuesto`,
+        detail: `${fmtMoney(ppto.precio)} · enviado ${fmtDate(ppto.fecha)} · ${st.days}d abierto`,
+        due: tp.due,
+        state,
+        done,
+        doneAt,
+        tel,
+        msg,
+        ppto
+      });
+    }
+  }
+  // 2. Post-venta milestones (D30, D60, D90)
+  for (const ped of STATE.pedidos) {
+    const ms = postventaMilestones(ped);
+    for (const m of ms) {
+      if (m.state === 'pending-delivery') continue;
+      const doneId = `pv:${ped.idx}|${m.id}`;
+      const done = isDone(doneId);
+      const doneAt = getDoneAt(doneId);
+      const tel = extractPhone(ped.envio);
+      const firstName = ped.cartel.split(' ')[0];
+      tasks.push({
+        type: 'postventa',
+        id: doneId,
+        cliente: ped.cartel,
+        label: `${m.id} · ${m.label}`,
+        detail: `${fmtMoney(ped.precio)} · entrega ${fmtDate(ped.fecha)}`,
+        due: m.due,
+        state: m.state === 'overdue' ? 'overdue' : m.state === 'now' ? 'due' : 'future',
+        done,
+        doneAt,
+        tel,
+        msg: m.template(firstName),
+        pedido: ped
+      });
+    }
+  }
+  return tasks;
+}
+
+function getPanelJoacoCount() {
+  if (!STATE.loaded) return 0;
+  const tasks = getPanelJoacoTasks();
+  return tasks.filter(t => !t.done && (t.state === 'due' || t.state === 'overdue')).length;
+}
+
+function renderPanelJoaco() {
+  const all = getPanelJoacoTasks();
+  const pendientes = all.filter(t => !t.done);
+  const hot = pendientes.filter(t => t.state === 'due' || t.state === 'overdue');
+  const future = pendientes.filter(t => t.state === 'future');
+  const hechos = all.filter(t => t.done);
+
+  let filtered;
+  if (panelJoacoFilter === 'pendientes') filtered = hot;
+  else if (panelJoacoFilter === 'todos') filtered = pendientes;
+  else filtered = hechos;
+
+  // Sort: overdue first, then due, then future. Within each: by date ascending
+  const order = { overdue: 0, due: 1, future: 2 };
+  filtered.sort((a, b) => {
+    if (a.done && b.done) return (b.doneAt || 0) - (a.doneAt || 0);
+    return (order[a.state] || 0) - (order[b.state] || 0) || a.due - b.due;
+  });
+
+  return `
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">${hot.length} tareas para hoy</div>
+        <h1>Panel Joaco</h1>
+      </div>
+      <div class="actions">
+        <button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button>
+      </div>
+    </div>
+    <div class="table-toolbar" style="margin-bottom:var(--s-3)">
+      <button class="btn btn-ghost ${panelJoacoFilter==='pendientes'?'btn-cyan':''}" data-jf="pendientes">Para hoy · ${hot.length}</button>
+      <button class="btn btn-ghost ${panelJoacoFilter==='todos'?'btn-cyan':''}" data-jf="todos">Todas pendientes · ${pendientes.length}</button>
+      <button class="btn btn-ghost ${panelJoacoFilter==='hechos'?'btn-cyan':''}" data-jf="hechos">Hechas · ${hechos.length}</button>
+    </div>
+    ${filtered.length === 0 ? '<div class="loading">Sin tareas en este filtro</div>' : `
+    <div class="seg-list">
+      ${filtered.map(t => {
+        const stClass = t.done ? 'tp-done' : t.state === 'overdue' ? 'tp-overdue' : t.state === 'due' ? 'tp-due' : 'tp-future';
+        const days = daysBetween(t.due, TODAY);
+        const whenLabel = t.done ? (t.doneAt ? 'hecho ' + fmtDoneAt(t.doneAt) : 'hecho') : days > 1 ? 'vencido ' + days + 'd' : days === 1 ? 'ayer' : days === 0 ? 'HOY' : days === -1 ? 'mañana' : 'en ' + (-days) + 'd';
+        const typeTag = t.type === 'presupuesto' ? '<span class="pill amber" style="font-size:10px">PPTO</span>' : '<span class="pill cyan" style="font-size:10px">PV</span>';
+        const waUrl = t.tel ? waLink(t.tel.startsWith('54') ? t.tel : '549' + t.tel.replace(/^0+/, ''), t.msg) : '';
+        return `
+          <div class="seg-card ${stClass}">
+            <div class="seg-row-top">
+              <div>
+                <div class="seg-cliente">${escapeHtml(t.cliente)} ${typeTag}</div>
+                <div class="seg-meta">${t.label} · ${t.detail}</div>
+              </div>
+              <div class="seg-current ${stClass}">
+                <div class="seg-current-when">${whenLabel}</div>
+              </div>
+            </div>
+            <div class="seg-actions">
+              ${waUrl ? `<a class="btn btn-primary" target="_blank" href="${escapeHtml(waUrl)}">WhatsApp</a>` : '<span class="muted" style="font-size:12px">Sin teléfono</span>'}
+              <button class="btn ${t.done ? 'btn-cyan' : 'btn-ghost'}" data-toggle-done="${t.id}">
+                ${t.done ? '✓ Hecho' : 'Marcar hecho'}
+              </button>
+            </div>
+          </div>`;
+      }).join('')}
+    </div>`}
+  `;
+}
+
+function bindPanelJoaco() {
+  document.querySelectorAll('[data-jf]').forEach(el => {
+    el.onclick = () => { panelJoacoFilter = el.dataset.jf; render(); };
+  });
+  document.querySelectorAll('[data-toggle-done]').forEach(el => {
+    el.onclick = (e) => { e.stopPropagation(); toggleDone(el.dataset.toggleDone); };
+  });
+}
+
 let segTab = 'presupuestos'; // presupuestos | postventa
 function bindSeguimientos() {
   document.querySelectorAll('[data-stab]').forEach(el => {
