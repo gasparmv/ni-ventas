@@ -39,7 +39,7 @@ const CONFIG = {
     recargo_5: 2,             // m2 ≤ 5  → trans × 2
     recargo_125: 1.5,         // m2 ≤ 12.5 → trans × 1.5
     recargo_25: 1.15          // m2 < 25 → trans × 1.15
-  }
+  },
   postventaMilestones: [
     { id: 'D30', days: 30, label: 'Foto / feedback', tagClass: 'tag-d30',
       template: (n) => `Holaa ${n}, cómo va? cómo te quedó el cartel?\n\nsi tenés una foto cuando puedas pasame, nos re sirve mostrar como queda en el local 🤙` },
