@@ -62,15 +62,39 @@ function parseCSV(text) {
 }
 
 function parseDate(v) {
+  // Argentina format priority: dd/mm/yyyy. NEVER fall through to new Date(v) for slash/dash formats
+  // because JS interprets "02/04/2026" as Feb 4 (US mm/dd), not Apr 2 (AR dd/mm).
   if (!v) return null;
   v = String(v).trim();
   if (!v) return null;
-  // Try ISO / common formats
-  let d = new Date(v);
-  if (!isNaN(d)) return d;
-  // try dd/mm/yyyy
-  const m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-  if (m) { const yr = m[3].length === 2 ? '20' + m[3] : m[3]; return new Date(`${yr}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`); }
+  // ISO yyyy-mm-dd (with optional time): unambiguous
+  let m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) {
+    const d = new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]));
+    return isNaN(d) ? null : d;
+  }
+  // AR: dd/mm/yyyy or dd/mm/yy
+  m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if (m) {
+    const yr = m[3].length === 2 ? 2000 + parseInt(m[3]) : parseInt(m[3]);
+    const d = new Date(yr, parseInt(m[2]) - 1, parseInt(m[1]));
+    return isNaN(d) ? null : d;
+  }
+  // AR: dd-mm-yyyy or dd-mm-yy
+  m = v.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
+  if (m) {
+    const yr = m[3].length === 2 ? 2000 + parseInt(m[3]) : parseInt(m[3]);
+    const d = new Date(yr, parseInt(m[2]) - 1, parseInt(m[1]));
+    return isNaN(d) ? null : d;
+  }
+  // Last resort: only for non-ambiguous strings (like "Date(...)" wrappers from gviz, or already parsed Date objects)
+  if (v instanceof Date) return v;
+  // Google's gviz CSV sometimes wraps as Date(2026,3,2) etc.
+  m = v.match(/^Date\((\d+),\s*(\d+),\s*(\d+)/);
+  if (m) {
+    const d = new Date(parseInt(m[1]), parseInt(m[2]), parseInt(m[3]));
+    return isNaN(d) ? null : d;
+  }
   return null;
 }
 
