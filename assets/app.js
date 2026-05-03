@@ -324,18 +324,15 @@ function matchPresupuestos() {
     let match = null;
     if (k && byName.has(k)) {
       const candidates = byName.get(k);
+      // Solo cerramos si hay match de nombre + precio dentro de tolerancia + fecha posterior.
+      // Sin match de precio, el presupuesto queda abierto (evita falsos cerrados por homónimos
+      // o múltiples pedidos del mismo cliente).
       for (const ped of candidates) {
-        if (ped.fecha < ppto.fecha) continue; // pedido anterior al presupuesto: skip
+        if (ped.fecha < ppto.fecha) continue;
         const ratio = ped.precio / (ppto.precio || 1);
         if (ratio >= 1 - CONFIG.matchPriceTolerance && ratio <= 1 + CONFIG.matchPriceTolerance) {
           match = ped;
           break;
-        }
-      }
-      // If no price match but exact name, accept first pedido posterior anyway
-      if (!match) {
-        for (const ped of candidates) {
-          if (ped.fecha >= ppto.fecha) { match = ped; break; }
         }
       }
     }
