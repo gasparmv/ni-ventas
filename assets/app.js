@@ -964,7 +964,7 @@ function renderPresupuestos() {
   filtered = filtered.sort((a,b) => b.fecha - a.fecha);
   return `
     <div class="page-head">
-      <div><div class="eyebrow">${STATE.presupuestos.length} desde 11/04/26</div><h1>Presupuestos</h1></div>
+      <div><div class="eyebrow">${STATE.presupuestos.length}${STATE.presupuestos.length ? ' desde ' + fmtDate(STATE.presupuestos.reduce((min, p) => p.fecha < min ? p.fecha : min, STATE.presupuestos[0].fecha)) : ''}</div><h1>Presupuestos</h1></div>
       <div class="actions"><button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
     </div>
     <div class="table-wrap">
@@ -985,7 +985,9 @@ function renderPresupuestos() {
               else if (p.st.state === 'fresco') pill = `<span class="pill cyan">${p.st.days}d</span>`;
               else if (p.st.state === 'abierto') pill = `<span class="pill ${p.st.days > 14 ? 'red' : 'amber'}">Abierto · ${p.st.days}d</span>`;
               else pill = `<span class="pill muted">Futuro</span>`;
-              return `<tr><td class="num">${fmtDate(p.fecha)}</td><td class="cliente">${escapeHtml(p.nombre)}</td><td class="num">${p.tamCm||'—'}×${p.ancho||'—'}</td><td class="num">${p.m2||'—'}</td><td class="num">${fmtMoney(p.precio)}</td><td>${pill}</td></tr>`;
+              const dDays = daysBetween(p.fecha, TODAY);
+              const dayPill = dDays === 0 ? '<span class="pill cyan" style="margin-left:6px;font-size:9px">HOY</span>' : dDays === 1 ? '<span class="pill amber" style="margin-left:6px;font-size:9px">AYER</span>' : '';
+              return `<tr><td class="num">${fmtDate(p.fecha)}${dayPill}</td><td class="cliente">${escapeHtml(p.nombre)}</td><td class="num">${p.tamCm||'—'}×${p.ancho||'—'}</td><td class="num">${p.m2||'—'}</td><td class="num">${fmtMoney(p.precio)}</td><td>${pill}</td></tr>`;
             }).join('')}
         </tbody>
       </table>
