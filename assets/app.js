@@ -302,14 +302,41 @@ function availableMonths() {
   return Array.from(set).sort().reverse();
 }
 function toggleDashMonth(m) {
+  // Mantener rango contiguo: al clickear un chip extendemos el rango,
+  // o lo achicamos si el chip está en el extremo. Click en el medio = no-op.
+  let current;
   if (STATE.dashMonths === 'all' || STATE.dashMonths === null) {
-    // start fresh from current selection visualized
-    const base = getDashMonths();
-    STATE.dashMonths = new Set(base || availableMonths());
+    current = new Set(getDashMonths() || []);
+  } else {
+    current = new Set(STATE.dashMonths);
   }
-  if (STATE.dashMonths.has(m)) STATE.dashMonths.delete(m);
-  else STATE.dashMonths.add(m);
-  if (STATE.dashMonths.size === 0) STATE.dashMonths = null; // back to default
+  const sorted = Array.from(current).sort();
+  if (current.size === 0) {
+    STATE.dashMonths = new Set([m]);
+  } else if (current.has(m)) {
+    // deselect solo si es extremo
+    if (m === sorted[0] || m === sorted[sorted.length-1]) {
+      current.delete(m);
+      if (current.size === 0) { STATE.dashMonths = null; render(); return; }
+      STATE.dashMonths = current;
+    } else {
+      // medio: nada
+      return;
+    }
+  } else {
+    // extender rango: incluir m y rellenar todo entre min y max
+    const all = [m, ...sorted].sort();
+    const minM = all[0], maxM = all[all.length-1];
+    const next = new Set();
+    // Iterar mes a mes desde minM hasta maxM
+    let [yi, mi] = minM.split('-').map(Number);
+    const [ye, me] = maxM.split('-').map(Number);
+    while (yi < ye || (yi === ye && mi <= me)) {
+      next.add(`${yi}-${String(mi).padStart(2,'0')}`);
+      mi++; if (mi > 12) { mi = 1; yi++; }
+    }
+    STATE.dashMonths = next;
+  }
   render();
 }
 function setDashAll() { STATE.dashMonths = 'all'; render(); }
@@ -529,7 +556,7 @@ function renderDashboard() {
 
     <div class="chart-grid">
       <div class="card">
-        <div class="card-h"><h3>Ventas por día · ${escapeHtml(dashMonthsLabel())}</h3></div>
+        <div class="card-h"><h3>Ventas acumuladas · ${escapeHtml(dashMonthsLabel())}</h3></div>
         <div class="chart-canvas" id="chart-line"></div>
       </div>
       <div class="card">
@@ -1038,6 +1065,9 @@ function drawLine() {
     }
   }
   if (data.length === 0) { el.innerHTML = '<div class="loading muted">sin datos</div>'; return; }
+  // Acumular: cada punto = total acumulado del período hasta ese día
+  let running = 0;
+  for (const p of data) { running += p.val; p.daily = p.val; p.val = running; }
   const max = Math.max(1, ...data.map(p=>p.val));
   const W = el.clientWidth, H = 220, PL = 50, PR = 20, PT = 16, PB = 28;
   const xAt = (i) => PL + (i / Math.max(1, data.length-1)) * (W - PL - PR);
@@ -1112,7 +1142,7 @@ function drawLine() {
     hoverLine.setAttribute('x1', px); hoverLine.setAttribute('x2', px);
     hoverDot.setAttribute('cx', px); hoverDot.setAttribute('cy', py);
     tooltip.style.display = 'block';
-    tooltip.innerHTML = `<div class="tt-d">${p.label}</div><div class="tt-v">${fmtMoney(p.val)}</div>`;
+    tooltip.innerHTML = `<div class="tt-d">${p.label}</div><div class="tt-v">${fmtMoney(p.val)}</div>${p.daily ? `<div class="tt-sub">+${fmtMoney(p.daily)} hoy</div>` : ''}`;
     // position tooltip in screen coords relative to chart container
     const ttX = (px / W) * rect.width;
     tooltip.style.left = `${Math.min(rect.width - 110, Math.max(0, ttX - 55))}px`;
