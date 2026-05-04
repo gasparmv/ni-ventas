@@ -1236,12 +1236,12 @@ function renderCotizadorResults() {
     <div class="cot-results">
       <div class="cot-meta">m² (sheet): <b>${r.m2.toFixed(2)}</b></div>
       <div class="cot-result-grid">
-        <div class="cot-result"><div class="lbl">Transparente${r.descuento?' <small>(dto)</small>':r.recargo?' <small>(rec)</small>':''}</div><div class="val">${fmtMoney(r.transFinal)}</div></div>
-        <div class="cot-result"><div class="lbl">Negro${r.descuentoNegro?' <small>(dto)</small>':r.recargoNegro?' <small>(rec)</small>':''}</div><div class="val">${fmtMoney(r.negroFinal)}</div></div>
+        <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${r.transFinal !== r.trans ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(r.trans)+'</s> ' : ''}${fmtMoney(r.transFinal)}</div></div>
+        <div class="cot-result"><div class="lbl">Negro</div><div class="val">${r.negroFinal !== r.negro ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(r.negro)+'</s> ' : ''}${fmtMoney(r.negroFinal)}</div></div>
         <div class="cot-result"><div class="lbl">Reventa (×${p.reventa_mult})</div><div class="val">${fmtMoney(r.reventa)}</div></div>
-        <div class="cot-result ${r.descuento?'':'muted'}"><div class="lbl">Dto trans / negro</div><div class="val">${r.descuento ? fmtMoney(r.descuento)+' / '+fmtMoney(r.descuentoNegro) : '—'}</div></div>
-        <div class="cot-result ${r.recargo?'':'muted'}"><div class="lbl">Rec trans / negro</div><div class="val">${r.recargo ? fmtMoney(r.recargo)+' / '+fmtMoney(r.recargoNegro) : '—'}</div></div>
         <div class="cot-result"><div class="lbl">Comisión (${(p.comision_pct*100).toFixed(0)}%)</div><div class="val">${fmtMoney(r.comision)}</div></div>
+        ${r.descuento ? '<div class="cot-result"><div class="lbl">Descuento (m²>'+p.descuento_min_m2+')</div><div class="val">×'+p.descuento_mult+'</div></div>' : ''}
+        ${r.recargo ? '<div class="cot-result"><div class="lbl">Recargo (m²≤'+(r.m2<=5?'5':r.m2<=12.5?'12.5':'25')+')</div><div class="val">×'+(r.m2<=5?p.recargo_5:r.m2<=12.5?p.recargo_125:p.recargo_25)+'</div></div>' : ''}
       </div>
       <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end">
         <button class="btn btn-ghost" id="cot-copy-btn">Copiar presupuesto</button>
