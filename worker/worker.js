@@ -12,8 +12,21 @@
 //
 // Endpoints privados (requieren Bearer token de admin):
 //   GET  /admin/activity?user=&from=&to=                                 → { rows } (igual a /report pero gated)
+//   POST /admin/wa/send      { to, body }                                → { id } (texto libre, ventana 24h)
+//   POST /admin/wa/template  { to, name, lang?, params?: [] }            → { id } (plantilla aprobada)
+//   POST /admin/wa/followups { items: [{to, name, milestone, pedidoId}] } → { sent, skipped, errors }
 //
-// Secret esperado: ADMIN_PASSWORD (setear con `wrangler secret put ADMIN_PASSWORD`)
+// Cron Trigger (diario 13:00 UTC / 10:00 AR):
+//   Apps Script publica los seguimientos pendientes; el worker los manda por WhatsApp.
+//
+// Secrets:
+//   ADMIN_PASSWORD                  setear con `wrangler secret put ADMIN_PASSWORD`
+//   WA_TOKEN                        token permanente de WhatsApp Cloud API (System User)
+//   APPS_SCRIPT_FOLLOWUPS_URL       endpoint de Apps Script que devuelve seguimientos pendientes
+//
+// Vars (en wrangler.toml):
+//   WA_PHONE_NUMBER_ID              919964037861500 (Neon Infinito +54 9 11 4436-6573)
+//   WA_API_VERSION                  v25.0
 
 const ALLOWED_ORIGINS = '*';
 const SESSION_DAYS = 30;
@@ -40,6 +53,67 @@ function randomToken() {
   const a = new Uint8Array(32);
   crypto.getRandomValues(a);
   return Array.from(a).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ===== WhatsApp Cloud API =====
+function normalizeArPhone(raw) {
+  // Acepta varios formatos y devuelve E.164 sin "+" para Argentina mobile (549...)
+  let n = String(raw || '').replace(/\D/g, '');
+  if (!n) return null;
+  if (n.startsWith('00')) n = n.slice(2);
+  if (n.startsWith('54')) {
+    // ya tiene country code; asegurarse del 9 mobile
+    if (!n.startsWith('549')) n = '549' + n.slice(2);
+    return n;
+  }
+  if (n.startsWith('15')) n = n.slice(2);   // 15-prefijo viejo
+  if (n.startsWith('0'))  n = n.slice(1);    // 0 inicial
+  return '549' + n;
+}
+
+async function waSend(env, payload) {
+  if (!env.WA_TOKEN || !env.WA_PHONE_NUMBER_ID) {
+    return { ok: false, status: 500, error: 'WhatsApp no configurado (faltan WA_TOKEN o WA_PHONE_NUMBER_ID)' };
+  }
+  const v = env.WA_API_VERSION || 'v25.0';
+  const url = `https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/messages`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.WA_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) return { ok: false, status: r.status, error: data?.error?.message || 'wa send failed', raw: data };
+  const id = data?.messages?.[0]?.id || null;
+  return { ok: true, id, raw: data };
+}
+
+async function waSendText(env, to, body) {
+  const num = normalizeArPhone(to);
+  if (!num) return { ok: false, status: 400, error: 'numero invalido' };
+  return waSend(env, { messaging_product: 'whatsapp', to: num, type: 'text', text: { body: String(body || '') } });
+}
+
+async function waSendTemplate(env, to, name, lang = 'es', params = []) {
+  const num = normalizeArPhone(to);
+  if (!num) return { ok: false, status: 400, error: 'numero invalido' };
+  const components = params && params.length
+    ? [{ type: 'body', parameters: params.map(p => ({ type: 'text', text: String(p) })) }]
+    : [];
+  return waSend(env, {
+    messaging_product: 'whatsapp',
+    to: num,
+    type: 'template',
+    template: { name, language: { code: lang }, components }
+  });
+}
+
+async function logWaEvent(env, { to, kind, ref, ok, messageId, error }) {
+  try {
+    await env.DB.prepare(
+      'INSERT INTO wa_log (ts, to_number, kind, ref, ok, message_id, error) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).bind(new Date().toISOString(), to || '', kind || '', ref || '', ok ? 1 : 0, messageId || '', error || '').run();
+  } catch (_) { /* tabla puede no existir aun en primera deploy */ }
 }
 
 async function getSession(env, request) {
@@ -133,6 +207,37 @@ export default {
         return reportHandler(env, url, true);
       }
 
+      if (request.method === 'POST' && path === '/admin/wa/send') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { to, body: text } = body || {};
+        if (!to || !text) return json({ error: 'missing fields (to, body)' }, 400);
+        const r = await waSendText(env, to, text);
+        await logWaEvent(env, { to, kind: 'text', ref: '', ok: r.ok, messageId: r.id, error: r.error });
+        if (!r.ok) return json({ error: r.error, raw: r.raw }, r.status || 500);
+        return json({ id: r.id });
+      }
+
+      if (request.method === 'POST' && path === '/admin/wa/template') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { to, name, lang, params } = body || {};
+        if (!to || !name) return json({ error: 'missing fields (to, name)' }, 400);
+        const r = await waSendTemplate(env, to, name, lang || 'es', Array.isArray(params) ? params : []);
+        await logWaEvent(env, { to, kind: 'template:' + name, ref: '', ok: r.ok, messageId: r.id, error: r.error });
+        if (!r.ok) return json({ error: r.error, raw: r.raw }, r.status || 500);
+        return json({ id: r.id });
+      }
+
+      if (request.method === 'POST' && path === '/admin/wa/followups') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const items = Array.isArray(body?.items) ? body.items : null;
+        if (!items) return json({ error: 'missing items[]' }, 400);
+        const result = await runFollowups(env, items);
+        return json(result);
+      }
+
       if (request.method === 'PUT' && path === '/admin/cotizador/params') {
         let body;
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
@@ -154,8 +259,87 @@ export default {
     }
 
     return json({ error: 'not found' }, 404);
+  },
+
+  // ===== Cron Trigger =====
+  // Se dispara segun wrangler.toml [triggers].crons. Ej: "0 13 * * *" = diario 13:00 UTC.
+  // Pide a Apps Script la lista de seguimientos pendientes de hoy y los manda por WhatsApp.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runScheduled(env));
   }
 };
+
+// ===== Followups =====
+// Recibe items: [{ to, name, milestone: 'D30'|'D60'|'D90'|'PPTO', pedidoId?, message? }]
+// Si milestone es D30/D60/D90 o PPTO y no hay message, usa la plantilla preconfigurada.
+const FOLLOWUP_TEMPLATES = {
+  // Reemplazar por nombres de plantillas UTILITY aprobadas en Meta cuando esten listas.
+  // Por ahora usa la plantilla aprobada generica para validar el flujo.
+  D30:  { name: 'prueba_de_plantilla', lang: 'es' },
+  D60:  { name: 'prueba_de_plantilla', lang: 'es' },
+  D90:  { name: 'prueba_de_plantilla', lang: 'es' },
+  PPTO: { name: 'prueba_de_plantilla', lang: 'es' }
+};
+
+async function runFollowups(env, items) {
+  const sent = [], skipped = [], errors = [];
+  for (const it of items) {
+    const to = it?.to;
+    const name = it?.name || 'cliente';
+    const milestone = it?.milestone || '';
+    const ref = it?.pedidoId ? `${milestone}:${it.pedidoId}` : milestone;
+    if (!to) { skipped.push({ ref, reason: 'sin telefono' }); continue; }
+    if (!normalizeArPhone(to)) { skipped.push({ ref, reason: 'telefono invalido' }); continue; }
+
+    // Idempotencia: si ya se envio hoy un followup con el mismo ref, saltar.
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      const existing = await env.DB.prepare(
+        "SELECT 1 FROM wa_log WHERE ref = ? AND ok = 1 AND substr(ts, 1, 10) = ? LIMIT 1"
+      ).bind(ref, today).first();
+      if (existing) { skipped.push({ ref, reason: 'ya enviado hoy' }); continue; }
+    } catch (_) {}
+
+    let r;
+    if (it.message) {
+      // texto libre (solo funciona dentro de ventana 24h)
+      r = await waSendText(env, to, it.message);
+    } else {
+      const tpl = FOLLOWUP_TEMPLATES[milestone] || FOLLOWUP_TEMPLATES.PPTO;
+      r = await waSendTemplate(env, to, tpl.name, tpl.lang, [name]);
+    }
+    await logWaEvent(env, { to, kind: 'followup:' + milestone, ref, ok: r.ok, messageId: r.id, error: r.error });
+    if (r.ok) sent.push({ ref, id: r.id });
+    else errors.push({ ref, error: r.error });
+  }
+  return { sent: sent.length, skipped: skipped.length, errors: errors.length, detail: { sent, skipped, errors } };
+}
+
+async function runScheduled(env) {
+  const url = env.APPS_SCRIPT_FOLLOWUPS_URL;
+  if (!url) {
+    await logWaEvent(env, { to: '', kind: 'cron', ref: '', ok: false, error: 'APPS_SCRIPT_FOLLOWUPS_URL no configurado' });
+    return;
+  }
+  let items;
+  try {
+    const r = await fetch(url, { method: 'GET' });
+    const j = await r.json();
+    items = Array.isArray(j?.items) ? j.items : [];
+  } catch (e) {
+    await logWaEvent(env, { to: '', kind: 'cron', ref: '', ok: false, error: 'fetch apps script: ' + e.message });
+    return;
+  }
+  if (!items.length) {
+    await logWaEvent(env, { to: '', kind: 'cron', ref: '', ok: true, error: '0 followups pendientes' });
+    return;
+  }
+  const result = await runFollowups(env, items);
+  await logWaEvent(env, {
+    to: '', kind: 'cron-summary', ref: '',
+    ok: true, error: `sent=${result.sent} skipped=${result.skipped} errors=${result.errors}`
+  });
+}
 
 async function reportHandler(env, url, _admin) {
   const userFilter = url.searchParams.get('user') || '';

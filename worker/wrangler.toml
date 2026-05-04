@@ -2,9 +2,18 @@ name = "ni-ventas-tracker"
 main = "worker.js"
 compatibility_date = "2026-05-01"
 
+# Variables de entorno (no secretos). Los secretos se setean con `wrangler secret put`.
+[vars]
+WA_PHONE_NUMBER_ID = "919964037861500"
+WA_API_VERSION = "v25.0"
+
 # La D1 binding se completa con el ID que devuelve `wrangler d1 create`.
-# Reemplazá <DB_ID> tras correr el comando del README.
 [[d1_databases]]
 binding = "DB"
 database_name = "ni-ventas"
 database_id = "bf9f0a63-0a68-45bd-b65b-d78ab61f0924"
+
+# Cron Trigger: corre todos los dias a las 13:00 UTC (10:00 AR).
+# Procesa los seguimientos automaticos de ventas de carteles.
+[triggers]
+crons = ["0 13 * * *"]
