@@ -343,23 +343,57 @@ async function trackEvent(action, itemId, itemKind, undo = false) {
 }
 
 // ============ TOUCHPOINTS / DONE ============
-function loadDone() {
+function loadDoneLocal() {
+  // Carga desde localStorage (fallback / cache offline)
   try {
     const raw = JSON.parse(localStorage.getItem('niventas.done') || '{}');
     if (Array.isArray(raw)) {
-      // formato viejo: array de ids sin timestamp
-      STATE.done = new Map(raw.map(id => [id, null]));
+      return new Map(raw.map(id => [id, null]));
     } else if (raw && typeof raw === 'object') {
-      STATE.done = new Map(Object.entries(raw));
-    } else {
-      STATE.done = new Map();
+      return new Map(Object.entries(raw));
     }
-  } catch(e) { STATE.done = new Map(); }
+  } catch(e) {}
+  return new Map();
 }
-function saveDone() {
+function saveDoneLocal() {
   const obj = {};
   for (const [k, v] of STATE.done) obj[k] = v;
   localStorage.setItem('niventas.done', JSON.stringify(obj));
+}
+async function loadDone() {
+  // Primero cargar localStorage como fallback inmediato
+  STATE.done = loadDoneLocal();
+  // Luego intentar cargar desde el Worker (fuente de verdad)
+  if (!CONFIG.trackerUrl || !STATE.user) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/done?user=' + encodeURIComponent(STATE.user));
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.marks && typeof j.marks === 'object') {
+      const remote = new Map(Object.entries(j.marks));
+      // Si el Worker tiene datos, usar esos
+      if (remote.size > 0) {
+        STATE.done = remote;
+        saveDoneLocal(); // sync al localStorage
+      } else if (STATE.done.size > 0) {
+        // Migración one-time: localStorage tiene datos pero Worker está vacío
+        await syncDoneToWorker();
+      }
+    }
+  } catch(e) { console.warn('done sync offline:', e.message); }
+}
+async function syncDoneToWorker() {
+  // Sube todos los done marks de localStorage al Worker
+  if (!CONFIG.trackerUrl || !STATE.user) return;
+  for (const [itemId, ts] of STATE.done) {
+    try {
+      await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/done', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user: STATE.user, itemId })
+      });
+    } catch(e) { break; } // si falla, parar
+  }
 }
 function isDone(id) { return STATE.done.has(id); }
 function getDoneAt(id) {
@@ -377,10 +411,20 @@ function fmtDoneAt(d) {
 }
 function toggleDone(id) {
   const wasDone = STATE.done.has(id);
+  const ts = new Date().toISOString();
   if (wasDone) STATE.done.delete(id);
-  else STATE.done.set(id, new Date().toISOString());
-  saveDone();
-  // Tracking remoto (no bloquea la UI)
+  else STATE.done.set(id, ts);
+  saveDoneLocal(); // cache local
+  // Persistir en Worker (no bloquea UI)
+  if (CONFIG.trackerUrl && STATE.user) {
+    const opts = {
+      method: wasDone ? 'DELETE' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: STATE.user, itemId: id })
+    };
+    fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/done', opts).catch(() => {});
+  }
+  // Tracking remoto
   const kind = id.startsWith('ppto:') ? 'presupuesto' : id.startsWith('pv:') ? 'postventa' : '';
   trackEvent('toggle_done', id, kind, wasDone);
   render();
@@ -2437,12 +2481,15 @@ window.loadAll = loadAll;
 window.closeDrawer = closeDrawer;
 
 // ---------- INIT ----------
-loadDone();
 loadUser();
+// Cargar done marks: localStorage inmediato + sync async desde Worker
+STATE.done = loadDoneLocal();
 loadCotizadorParams();
 const initView = location.hash.replace('#','') || 'dashboard';
 STATE.view = initView;
 loadAll();
+// Sync done marks desde Worker (en background, re-render cuando llegue)
+loadDone().then(() => { if (STATE.loaded) render(); });
 
 // Re-bind table when pedidos view rendered after data loads
 function rerenderTablePedidosIfNeeded() { if (STATE.view === 'pedidos') renderTablePedidos(); }

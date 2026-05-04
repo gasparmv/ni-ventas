@@ -27,6 +27,14 @@ CREATE TABLE IF NOT EXISTS cotizador_params (
   updated_at TEXT NOT NULL
 );
 
+-- Tareas marcadas como hechas (persistente, reemplaza localStorage)
+CREATE TABLE IF NOT EXISTS done_marks (
+  user    TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  ts      TEXT NOT NULL,
+  PRIMARY KEY (user, item_id)
+);
+
 -- Log de envíos de WhatsApp (Cloud API). Sirve para idempotencia diaria
 -- (no reenviar el mismo followup el mismo día) y auditoría.
 CREATE TABLE IF NOT EXISTS wa_log (

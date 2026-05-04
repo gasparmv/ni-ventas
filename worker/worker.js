@@ -34,7 +34,7 @@ const SESSION_DAYS = 30;
 function cors(headers = {}) {
   return {
     'Access-Control-Allow-Origin': ALLOWED_ORIGINS,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
     ...headers
@@ -148,6 +148,37 @@ export default {
       await env.DB.prepare(
         'INSERT INTO events (user, action, item_id, item_kind, undo, ts) VALUES (?, ?, ?, ?, ?, ?)'
       ).bind(user, action, itemId, itemKind || '', undo ? 1 : 0, ts).run();
+      return noContent();
+    }
+
+    // ----- Done marks (persistente, reemplaza localStorage) -----
+    if (request.method === 'GET' && path === '/done') {
+      const user = url.searchParams.get('user');
+      if (!user) return json({ error: 'missing user' }, 400);
+      const rs = await env.DB.prepare('SELECT item_id, ts FROM done_marks WHERE user = ?').bind(user).all();
+      const marks = {};
+      for (const r of (rs.results || [])) marks[r.item_id] = r.ts;
+      return json({ marks });
+    }
+
+    if (request.method === 'POST' && path === '/done') {
+      let body;
+      try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+      const { user, itemId } = body || {};
+      if (!user || !itemId) return json({ error: 'missing fields' }, 400);
+      const ts = new Date().toISOString();
+      await env.DB.prepare(
+        'INSERT OR REPLACE INTO done_marks (user, item_id, ts) VALUES (?, ?, ?)'
+      ).bind(user, itemId, ts).run();
+      return json({ ts });
+    }
+
+    if (request.method === 'DELETE' && path === '/done') {
+      let body;
+      try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+      const { user, itemId } = body || {};
+      if (!user || !itemId) return json({ error: 'missing fields' }, 400);
+      await env.DB.prepare('DELETE FROM done_marks WHERE user = ? AND item_id = ?').bind(user, itemId).run();
       return noContent();
     }
 
