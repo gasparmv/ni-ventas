@@ -5,6 +5,10 @@
 //   GET  /report?user=&from=&to=                                         → { rows }
 //   GET  /health
 //
+// Webhook WhatsApp:
+//   GET  /webhook             verificación de Meta (hub.verify_token)
+//   POST /webhook             recibe mensajes entrantes + status updates → guarda en wa_messages
+//
 // Auth:
 //   POST /auth/login         { user, password }                          → { token }
 //   POST /auth/logout                                                    → 204 (con Bearer)
@@ -12,6 +16,7 @@
 //
 // Endpoints privados (requieren Bearer token de admin):
 //   GET  /admin/activity?user=&from=&to=                                 → { rows } (igual a /report pero gated)
+//   GET  /admin/wa/messages?phone=&from=&to=&direction=&limit=           → { messages }
 //   POST /admin/wa/send      { to, body }                                → { id } (texto libre, ventana 24h)
 //   POST /admin/wa/template  { to, name, lang?, params?: [] }            → { id } (plantilla aprobada)
 //   POST /admin/wa/followups { items: [{to, name, milestone, pedidoId}] } → { sent, skipped, errors }
@@ -30,6 +35,7 @@
 
 const ALLOWED_ORIGINS = '*';
 const SESSION_DAYS = 30;
+const WA_VERIFY_TOKEN = 'neon-infinito-webhook-2026';
 
 function cors(headers = {}) {
   return {
@@ -130,13 +136,98 @@ async function getSession(env, request) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
     const url = new URL(request.url);
     const path = url.pathname;
 
     // ----- Health -----
     if (request.method === 'GET' && path === '/health') return json({ ok: true });
+
+    // ----- WhatsApp Webhook (verificación + recepción de mensajes) -----
+    if (request.method === 'GET' && path === '/webhook') {
+      // Verificación del webhook: Meta envía hub.mode, hub.verify_token, hub.challenge
+      const mode = url.searchParams.get('hub.mode');
+      const token = url.searchParams.get('hub.verify_token');
+      const challenge = url.searchParams.get('hub.challenge');
+      if (mode === 'subscribe' && token === WA_VERIFY_TOKEN) {
+        return new Response(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+      }
+      return new Response('Forbidden', { status: 403 });
+    }
+
+    if (request.method === 'POST' && path === '/webhook') {
+      // Meta envía notificaciones de mensajes entrantes y status updates
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: true }); }
+      // Siempre responder 200 rápido para que Meta no reintente
+      const processWebhook = async () => {
+        try {
+          const entries = body?.entry || [];
+          for (const entry of entries) {
+            const changes = entry?.changes || [];
+            for (const change of changes) {
+              if (change?.field !== 'messages') continue;
+              const value = change?.value || {};
+              const contacts = value?.contacts || [];
+              const contactMap = {};
+              for (const c of contacts) contactMap[c.wa_id] = c.profile?.name || '';
+
+              // Mensajes entrantes
+              for (const msg of (value?.messages || [])) {
+                const phone = msg.from || '';
+                const wamid = msg.id || '';
+                const senderName = contactMap[phone] || '';
+                const msgType = msg.type || 'unknown';
+                let msgBody = '';
+                let mediaUrl = '';
+                if (msg.text) msgBody = msg.text.body || '';
+                else if (msg.button) msgBody = msg.button.text || msg.button.payload || '';
+                else if (msg.interactive) msgBody = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
+                else if (msg.image) { msgBody = msg.image.caption || ''; mediaUrl = msg.image.id || ''; }
+                else if (msg.video) { msgBody = msg.video.caption || ''; mediaUrl = msg.video.id || ''; }
+                else if (msg.audio) { mediaUrl = msg.audio.id || ''; }
+                else if (msg.document) { msgBody = msg.document.filename || ''; mediaUrl = msg.document.id || ''; }
+                else if (msg.sticker) { mediaUrl = msg.sticker.id || ''; }
+                else if (msg.reaction) { msgBody = msg.reaction.emoji || ''; }
+                const contextId = msg.context?.id || '';
+                const ts = msg.timestamp ? new Date(parseInt(msg.timestamp) * 1000).toISOString() : new Date().toISOString();
+                try {
+                  await env.DB.prepare(
+                    'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                  ).bind(ts, wamid, 'inbound', phone, senderName, msgType, msgBody, mediaUrl, contextId, null).run();
+                } catch (_) {}
+              }
+
+              // Status updates (sent, delivered, read) para mensajes salientes
+              for (const st of (value?.statuses || [])) {
+                const wamid = st.id || '';
+                const status = st.status || ''; // sent | delivered | read | failed
+                const phone = st.recipient_id || '';
+                const ts = st.timestamp ? new Date(parseInt(st.timestamp) * 1000).toISOString() : new Date().toISOString();
+                if (!wamid) continue;
+                try {
+                  // Intentar actualizar status de un mensaje saliente existente
+                  const updated = await env.DB.prepare(
+                    'UPDATE wa_messages SET status = ? WHERE wamid = ?'
+                  ).bind(status, wamid).run();
+                  // Si no existe (mensaje enviado antes del webhook), insertar
+                  if (!updated?.meta?.changes) {
+                    await env.DB.prepare(
+                      'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                    ).bind(ts, wamid, 'outbound', phone, '', 'status', '', '', '', status).run();
+                  }
+                } catch (_) {}
+              }
+            }
+          }
+        } catch (e) { console.error('webhook processing error:', e); }
+      };
+      // Procesar en background, responder inmediato
+      if (typeof ctx !== 'undefined') ctx.waitUntil(processWebhook());
+      else await processWebhook();
+      return json({ ok: true });
+    }
 
     // ----- Tracking público -----
     if (request.method === 'POST' && path === '/event') {
@@ -267,6 +358,25 @@ export default {
         if (!items) return json({ error: 'missing items[]' }, 400);
         const result = await runFollowups(env, items);
         return json(result);
+      }
+
+      // Consultar mensajes de WhatsApp guardados (para análisis)
+      if (request.method === 'GET' && path === '/admin/wa/messages') {
+        const phone = url.searchParams.get('phone') || '';
+        const from = url.searchParams.get('from') || '';
+        const to = url.searchParams.get('to') || '';
+        const dir = url.searchParams.get('direction') || '';
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '500'), 5000);
+        let where = '1=1';
+        const params = [];
+        if (phone) { where += ' AND phone = ?'; params.push(phone); }
+        if (from) { where += ' AND ts >= ?'; params.push(from); }
+        if (to) { where += ' AND ts <= ?'; params.push(to); }
+        if (dir === 'inbound' || dir === 'outbound') { where += ' AND direction = ?'; params.push(dir); }
+        const rs = await env.DB.prepare(
+          `SELECT id, ts, wamid, direction, phone, sender_name, msg_type, body, context_id, status FROM wa_messages WHERE ${where} ORDER BY ts DESC LIMIT ?`
+        ).bind(...params, limit).all();
+        return json({ messages: rs.results || [] });
       }
 
       if (request.method === 'PUT' && path === '/admin/cotizador/params') {

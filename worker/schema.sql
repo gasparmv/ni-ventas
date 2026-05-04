@@ -49,3 +49,21 @@ CREATE TABLE IF NOT EXISTS wa_log (
 );
 CREATE INDEX IF NOT EXISTS idx_wa_log_ref_ts ON wa_log(ref, ts);
 CREATE INDEX IF NOT EXISTS idx_wa_log_ts     ON wa_log(ts);
+
+-- Mensajes de WhatsApp recibidos y enviados (para análisis e insights)
+CREATE TABLE IF NOT EXISTS wa_messages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts          TEXT NOT NULL,
+  wamid       TEXT UNIQUE,            -- ID de mensaje de Meta (dedup)
+  direction   TEXT NOT NULL,          -- inbound | outbound
+  phone       TEXT NOT NULL,          -- número del cliente (E.164 sin +)
+  sender_name TEXT,                   -- nombre del contacto (si Meta lo envía)
+  msg_type    TEXT,                   -- text | image | audio | video | document | sticker | reaction | button
+  body        TEXT,                   -- contenido del mensaje (texto, caption, o payload del botón)
+  media_url   TEXT,                   -- URL del media (si aplica)
+  context_id  TEXT,                   -- wamid del mensaje al que responde (si es reply)
+  status      TEXT                    -- sent | delivered | read (solo outbound, actualizado por webhook)
+);
+CREATE INDEX IF NOT EXISTS idx_wa_messages_phone ON wa_messages(phone);
+CREATE INDEX IF NOT EXISTS idx_wa_messages_ts    ON wa_messages(ts);
+CREATE INDEX IF NOT EXISTS idx_wa_messages_wamid ON wa_messages(wamid);
