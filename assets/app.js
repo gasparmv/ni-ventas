@@ -2304,10 +2304,13 @@ function renderAdmin() {
     return `<div class="page-head"><h1>Admin</h1></div><div class="error">No autorizado. Logueate como Gaspar.</div>`;
   }
   const { rows, loading, error, range } = adminData;
-  const total = rows.length;
-  const ppto = rows.filter(r => r.item_kind === 'presupuesto').length;
-  const pv   = rows.filter(r => r.item_kind === 'postventa').length;
   const days = range === 'all' ? 30 : (range === '7d' ? 7 : 30);
+  const periodStart = addDays(TODAY, -days);
+  // Presupuestos enviados (del sheet) en el período
+  const pptosEnviados = STATE.presupuestos.filter(p => p.fecha >= periodStart);
+  // Acciones de seguimiento (del tracker)
+  const accionesPpto = rows.filter(r => r.item_kind === 'presupuesto').length;
+  const accionesPv   = rows.filter(r => r.item_kind === 'postventa').length;
   const dayMap = new Map();
   for (const r of rows) {
     const k = r.ts.slice(0,10);
@@ -2338,9 +2341,9 @@ function renderAdmin() {
       ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
       ${!loading && !error ? `
         <div class="kpi-grid" style="margin-bottom:var(--s-3)">
-          <div class="kpi"><div class="kpi-label">Total acciones</div><div class="kpi-value">${total}</div></div>
-          <div class="kpi cyan"><div class="kpi-label">Presupuestos</div><div class="kpi-value">${ppto}</div></div>
-          <div class="kpi"><div class="kpi-label">Post-venta</div><div class="kpi-value">${pv}</div></div>
+          <div class="kpi cyan"><div class="kpi-label">Presupuestos enviados</div><div class="kpi-value">${pptosEnviados.length}</div></div>
+          <div class="kpi"><div class="kpi-label">Seguimientos hechos</div><div class="kpi-value">${accionesPpto}</div></div>
+          <div class="kpi"><div class="kpi-label">Post-venta hechos</div><div class="kpi-value">${accionesPv}</div></div>
         </div>
         <div class="heatmap">
           ${dayList.map(d => {
@@ -2349,7 +2352,27 @@ function renderAdmin() {
             return `<div class="hm-cell" style="background:rgba(143,212,222,${op})" title="${fmtDate(d.date)}: ${d.count}"></div>`;
           }).join('')}
         </div>
-        ${rows.length === 0 ? '<div class="loading muted" style="padding:24px">Sin actividad de Joaquín en este rango</div>' :
+        ${pptosEnviados.length > 0 ? `
+          <details style="margin-top:var(--s-3)" open>
+            <summary style="cursor:pointer;font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);letter-spacing:var(--tr-wide);text-transform:uppercase">Presupuestos enviados (${pptosEnviados.length})</summary>
+            <table class="t" style="margin-top:var(--s-2)">
+              <thead><tr><th>Fecha</th><th>Cliente</th><th>Tamaño</th><th>m²</th><th>Precio</th><th>Estado</th></tr></thead>
+              <tbody>${pptosEnviados.sort((a,b) => b.fecha - a.fecha).map(p => {
+                const st = presupuestoStatus(p);
+                const stLabel = st.state === 'cerrado' ? '<span class="pill green">CERRADO</span>' : st.state === 'fresco' ? '<span class="pill cyan">FRESCO</span>' : '<span class="pill amber">ABIERTO · '+st.days+'d</span>';
+                return `<tr>
+                  <td class="num">${fmtDate(p.fecha)}</td>
+                  <td>${escapeHtml(p.nombre)}</td>
+                  <td class="num">${p.tamCm||''}${p.ancho?'×'+p.ancho:''}</td>
+                  <td class="num">${p.m2}</td>
+                  <td class="num">${fmtMoney(p.precio)}</td>
+                  <td>${stLabel}</td>
+                </tr>`;
+              }).join('')}</tbody>
+            </table>
+          </details>
+        ` : ''}
+        ${rows.length === 0 ? '<div class="loading muted" style="padding:24px">Sin actividad de seguimientos en este rango</div>' :
           `<details style="margin-top:var(--s-3)"><summary style="cursor:pointer;font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);letter-spacing:var(--tr-wide);text-transform:uppercase">Ver eventos detallados (${rows.length})</summary>
             <table class="t" style="margin-top:var(--s-2)">
               <thead><tr><th>Cuándo</th><th>Tipo</th><th>Acción</th></tr></thead>
