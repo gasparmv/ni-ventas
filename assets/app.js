@@ -74,7 +74,7 @@ const STATE = {
   token: null,        // token de admin (Gaspar) si está logueado
   activity: { rows: [], loading: false, error: null },
   cotizadorParams: null,  // se carga del Worker; si null usa CONFIG.cotizadorDefaults
-  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', telefono: '' },
+  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '' },
   cotizadorSaving: false
 };
 
@@ -131,7 +131,7 @@ async function saveCotizacion() {
   const f = STATE.cotizadorForm;
   if (!(+f.ancho > 0) || !(+f.alto > 0)) { alert('Completá al menos ancho y alto'); return; }
   if (!f.cliente.trim()) { alert('Completá el nombre del cliente/diseño'); return; }
-  if (!f.telefono.trim()) { alert('Completá el teléfono del cliente'); return; }
+  if (f.canal === 'WPP' && !f.telefono.trim()) { alert('Completá el teléfono del cliente (obligatorio para WPP)'); return; }
   const r = calcCotizador(f);
   STATE.cotizadorSaving = true;
   updateCotizadorForm();
@@ -148,6 +148,7 @@ async function saveCotizacion() {
     recargo: r.recargo,
     reventa: r.reventa,
     comision: r.comision,
+    canal: f.canal || 'WPP',
     telefono: (f.telefono || '').trim()
   };
   try {
@@ -185,7 +186,7 @@ async function saveCotizacion() {
 
       form.submit();
     });
-    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', telefono: '' };
+    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '' };
     toast('Cotización guardada ✓');
     // Esperar un poco para que el sheet se actualice antes de recargar
     setTimeout(() => loadAll(), 2000);
@@ -1261,7 +1262,13 @@ function renderCotizadorForm() {
       </div>
       <div class="cot-grid">
         <label>Cliente / diseño<input type="text" data-cot-field="cliente" value="${escapeHtml(f.cliente)}" placeholder="nombre del cliente"></label>
-        <label>Teléfono<input type="tel" data-cot-field="telefono" value="${escapeHtml(f.telefono)}" placeholder="ej: 1155667788"></label>
+        <label>Canal
+          <select data-cot-field="canal">
+            <option value="WPP" ${f.canal==='WPP'?'selected':''}>WhatsApp</option>
+            <option value="IG" ${f.canal==='IG'?'selected':''}>Instagram</option>
+          </select>
+        </label>
+        <label>Teléfono${f.canal==='WPP'?' *':''}<input type="tel" data-cot-field="telefono" value="${escapeHtml(f.telefono)}" placeholder="${f.canal==='WPP'?'obligatorio':'opcional'}"></label>
         <label>Ancho (cm)<input type="number" min="0" step="0.1" data-cot-field="ancho" value="${escapeHtml(f.ancho)}"></label>
         <label>Alto (cm)<input type="number" min="0" step="0.1" data-cot-field="alto" value="${escapeHtml(f.alto)}"></label>
         <label>Neón (mt)<input type="number" min="0" step="0.1" data-cot-field="neon" value="${escapeHtml(f.neon)}"></label>
