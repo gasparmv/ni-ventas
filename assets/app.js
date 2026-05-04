@@ -111,7 +111,7 @@ function copiarPresupuesto() {
   const r = calcCotizador(f);
   const p = getCotizadorParams();
   const nombre = f.cliente.trim() || 'Custom name';
-  const texto = `Te comparto la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+f.ancho)}x${Math.round(+f.alto)}\nBase transparente: ${fmtMoney(r.trans)}\nBase negra: ${fmtMoney(r.negro)}\n\nControladores opcionales\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña.\n\nTiempo de armado: 15/20 días.\n\nTodos los medios de pago!\n\nHacemos envíos GRATIS a todo el país!`;
+  const texto = `Te comparto la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+f.ancho)}x${Math.round(+f.alto)}\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}\n\nControladores opcionales\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña.\n\nTiempo de armado: 15/20 días.\n\nTodos los medios de pago!\n\nHacemos envíos GRATIS a todo el país!`;
   navigator.clipboard.writeText(texto).then(() => {
     toast('Presupuesto copiado al portapapeles ✓');
   }).catch(() => {
@@ -235,14 +235,19 @@ function calcCotizador(input) {
   const negro = precio(p.negro);
 
   const descuento = m2 > p.descuento_min_m2 ? redondMult(trans * p.descuento_mult, 500) : 0;
-  let recargo = 0;
-  if (m2 <= 5)         recargo = redondMult(trans * p.recargo_5, 500);
-  else if (m2 <= 12.5) recargo = redondMult(trans * p.recargo_125, 500);
-  else if (m2 < 25)    recargo = redondMult(trans * p.recargo_25, 500);
+  const descuentoNegro = m2 > p.descuento_min_m2 ? redondMult(negro * p.descuento_mult, 500) : 0;
+  let recargo = 0, recargoNegro = 0;
+  if (m2 <= 5)         { recargo = redondMult(trans * p.recargo_5, 500); recargoNegro = redondMult(negro * p.recargo_5, 500); }
+  else if (m2 <= 12.5) { recargo = redondMult(trans * p.recargo_125, 500); recargoNegro = redondMult(negro * p.recargo_125, 500); }
+  else if (m2 < 25)    { recargo = redondMult(trans * p.recargo_25, 500); recargoNegro = redondMult(negro * p.recargo_25, 500); }
   const reventa  = redondMult(trans * p.reventa_mult, 500);
   const comision = Math.round(trans * p.comision_pct);
 
-  return { m2, trans, negro, descuento, recargo, reventa, comision };
+  // Precio final: si hay descuento se usa descuento, si hay recargo se usa recargo, sino base
+  const transFinal = descuento ? descuento : recargo ? recargo : trans;
+  const negroFinal = descuentoNegro ? descuentoNegro : recargoNegro ? recargoNegro : negro;
+
+  return { m2, trans, negro, descuento, descuentoNegro, recargo, recargoNegro, reventa, comision, transFinal, negroFinal };
 }
 
 // ============ USUARIO ============
@@ -1231,11 +1236,11 @@ function renderCotizadorResults() {
     <div class="cot-results">
       <div class="cot-meta">m² (sheet): <b>${r.m2.toFixed(2)}</b></div>
       <div class="cot-result-grid">
-        <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${fmtMoney(r.trans)}</div></div>
-        <div class="cot-result"><div class="lbl">Negro</div><div class="val">${fmtMoney(r.negro)}</div></div>
+        <div class="cot-result"><div class="lbl">Transparente${r.descuento?' <small>(dto)</small>':r.recargo?' <small>(rec)</small>':''}</div><div class="val">${fmtMoney(r.transFinal)}</div></div>
+        <div class="cot-result"><div class="lbl">Negro${r.descuentoNegro?' <small>(dto)</small>':r.recargoNegro?' <small>(rec)</small>':''}</div><div class="val">${fmtMoney(r.negroFinal)}</div></div>
         <div class="cot-result"><div class="lbl">Reventa (×${p.reventa_mult})</div><div class="val">${fmtMoney(r.reventa)}</div></div>
-        <div class="cot-result ${r.descuento?'':'muted'}"><div class="lbl">Descuento ${r.descuento?'(m²>'+p.descuento_min_m2+')':'(no aplica)'}</div><div class="val">${fmtMoney(r.descuento)}</div></div>
-        <div class="cot-result ${r.recargo?'':'muted'}"><div class="lbl">Recargo</div><div class="val">${fmtMoney(r.recargo)}</div></div>
+        <div class="cot-result ${r.descuento?'':'muted'}"><div class="lbl">Dto trans / negro</div><div class="val">${r.descuento ? fmtMoney(r.descuento)+' / '+fmtMoney(r.descuentoNegro) : '—'}</div></div>
+        <div class="cot-result ${r.recargo?'':'muted'}"><div class="lbl">Rec trans / negro</div><div class="val">${r.recargo ? fmtMoney(r.recargo)+' / '+fmtMoney(r.recargoNegro) : '—'}</div></div>
         <div class="cot-result"><div class="lbl">Comisión (${(p.comision_pct*100).toFixed(0)}%)</div><div class="val">${fmtMoney(r.comision)}</div></div>
       </div>
       <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end">
