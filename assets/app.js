@@ -3124,9 +3124,10 @@ function renderContactItem(c) {
       ${avatarHtml(c.phone, c.name, 49)}
       <div class="chat-contact-info">
         <div class="chat-contact-top">
-          <div class="chat-contact-name">${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
+          <div class="chat-contact-name">${escapeHtml(formatPhoneDisplay(c.phone))}</div>
           <div class="chat-contact-time${hasUnread ? ' unread' : ''}">${formatChatTime(c.lastTs)}</div>
         </div>
+        ${c.name ? `<div class="chat-contact-subname">${escapeHtml(c.name)}</div>` : ''}
         <div class="chat-contact-bottom">
           <div class="chat-contact-preview">${previewIcon}${escapeHtml(preview)}</div>
           <div style="display:flex;align-items:center;gap:4px">

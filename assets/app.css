@@ -1185,12 +1185,20 @@ table.t td.cliente { font-weight: 600; }
   gap: 6px;
 }
 .chat-contact-name {
-  font-size: 17px;
+  font-size: 16px;
   color: #e9edef;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
+}
+.chat-contact-subname {
+  font-size: 12px;
+  color: #8696a0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: -1px;
 }
 /* Unread: bold name + green timestamp */
 .chat-contact.has-unread .chat-contact-name { font-weight: 600; }
