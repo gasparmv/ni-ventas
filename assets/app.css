@@ -1161,17 +1161,21 @@ table.t td.cliente { font-weight: 600; }
   text-overflow: ellipsis;
   flex: 1;
 }
+/* Unread: bold name + green timestamp */
+.chat-contact.has-unread .chat-contact-name { font-weight: 600; }
 .chat-contact-time {
   font-size: 12px;
   color: #8696a0;
   flex-shrink: 0;
 }
+.chat-contact-time.unread { color: #00a884; }
 .chat-contact-bottom {
   display: flex;
   align-items: center;
   gap: 4px;
   margin-top: 1px;
 }
+.chat-contact.has-unread .chat-contact-preview { color: #d1d7db; }
 .chat-contact-preview {
   font-size: 14px;
   color: #8696a0;
@@ -1179,6 +1183,17 @@ table.t td.cliente { font-weight: 600; }
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
+}
+.chat-contact-unread {
+  background: #00a884;
+  color: #111b21;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 12px;
+  min-width: 20px;
+  text-align: center;
+  flex-shrink: 0;
 }
 
 /* -- Right panel (conversation) -- */
@@ -1218,6 +1233,25 @@ table.t td.cliente { font-weight: 600; }
   font-size: 13px;
   color: #8696a0;
   margin-top: 1px;
+}
+.chat-header-meta {
+  font-size: 12px;
+  color: #8696a0;
+  flex-shrink: 0;
+}
+.chat-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.chat-loading .spinner {
+  width: 30px; height: 30px;
+  border-width: 3px;
+  display: inline-block;
+  border-style: solid;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
 }
 
 /* Messages area */
@@ -1533,6 +1567,40 @@ table.t td.cliente { font-weight: 600; }
 .chat-input-bar .btn-send:hover { color: #e9edef; }
 .chat-input-bar .btn-send:disabled { opacity: .3; cursor: not-allowed; }
 .chat-input-bar .btn-send svg { width: 24px; height: 24px; }
+
+/* Scroll-to-bottom FAB */
+.chat-scroll-down {
+  position: absolute;
+  bottom: 75px;
+  right: 20px;
+  width: 42px; height: 42px;
+  border-radius: 50%;
+  background: #202c33;
+  border: none;
+  color: #8696a0;
+  box-shadow: 0 2px 5px rgba(0,0,0,.3);
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  transition: color .15s;
+  font-size: 18px;
+}
+.chat-scroll-down.visible { display: flex; }
+.chat-scroll-down:hover { color: #e9edef; }
+.chat-scroll-down .unread-count {
+  position: absolute;
+  top: -6px; right: -2px;
+  background: #00a884;
+  color: #111b21;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  min-width: 18px;
+  text-align: center;
+}
 
 /* No conversation selected */
 .chat-no-select {

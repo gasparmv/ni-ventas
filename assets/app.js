@@ -278,6 +278,10 @@ async function setUser(name) {
   STATE.user = name;
   saveUser();
   render();
+  // Pre-load chat contacts in background for unread badge
+  if (isAdmin() && !chatState.contacts.length) {
+    loadChatContacts().then(() => updateUnreadBadge());
+  }
 }
 async function loginPrompt() {
   if (!CONFIG.trackerUrl) {
@@ -991,7 +995,9 @@ function renderShell() {
           ${STATE.loaded ? (() => { const c = getPanelJoacoCount(); return c ? '<span class="badge">' + c + '</span>' : ''; })() : ''}
         </button>
         <button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>
-        ${isAdmin() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA</button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
+          <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread || ''}</span>
+        </button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
       </nav>
       <div class="sidebar-foot">
@@ -2485,16 +2491,19 @@ function toast(msg) {
 
 // ============ CHAT WHATSAPP ============
 const chatState = {
-  contacts: [],       // [{phone, name, lastMsg, lastTs, unread}]
+  contacts: [],       // [{phone, name, lastMsg, lastTs, unread, lastInboundTs}]
   messages: [],       // mensajes del contacto seleccionado
   selectedPhone: null,
   selectedName: '',
   loading: false,
+  loadingConv: false, // loading indicator for conversation panel
   sending: false,
   search: '',
   pollTimer: null,
   profilePics: {},    // phone → url (or 'none')
-  picLoading: new Set()
+  picLoading: new Set(),
+  readCursors: {},    // phone → last_read_ts (ISO)
+  totalUnread: 0,
 };
 
 // WhatsApp-style avatar colors (same 7 colors WA Web uses)
@@ -2551,10 +2560,60 @@ function loadProfilePic(phone) {
 const TICK_SINGLE = `<svg viewBox="0 0 16 11"><path d="M11.071.653a.457.457 0 0 0-.304-.102.493.493 0 0 0-.381.178l-6.19 7.636-2.011-2.585a.463.463 0 0 0-.36-.186.465.465 0 0 0-.344.153.52.52 0 0 0-.132.382.516.516 0 0 0 .159.375l2.323 2.995a.478.478 0 0 0 .353.168.467.467 0 0 0 .363-.169l6.571-8.102a.482.482 0 0 0-.047-.743z" fill="currentColor"/></svg>`;
 const TICK_DOUBLE = `<svg viewBox="0 0 16 11"><path d="M11.071.653a.457.457 0 0 0-.304-.102.493.493 0 0 0-.381.178l-6.19 7.636-2.011-2.585a.463.463 0 0 0-.36-.186.465.465 0 0 0-.344.153.52.52 0 0 0-.132.382.516.516 0 0 0 .159.375l2.323 2.995a.478.478 0 0 0 .353.168.467.467 0 0 0 .363-.169l6.571-8.102a.482.482 0 0 0-.047-.743z" fill="currentColor"/><path d="M15.071.653a.457.457 0 0 0-.304-.102.493.493 0 0 0-.381.178l-6.19 7.636-1.2-1.546-.361.446 1.244 1.605a.478.478 0 0 0 .353.168.467.467 0 0 0 .363-.169l6.571-8.102a.482.482 0 0 0-.047-.743z" fill="currentColor"/></svg>`;
 
+async function loadReadCursors() {
+  if (!isAdmin()) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/read-cursors', { headers: authHeaders() });
+    if (r.ok) {
+      const j = await r.json();
+      chatState.readCursors = j.cursors || {};
+    }
+  } catch (_) {}
+}
+
+async function markConversationRead(phone) {
+  if (!phone) return;
+  const now = new Date().toISOString();
+  chatState.readCursors[phone] = now;
+  // Update contact unread count locally
+  const c = chatState.contacts.find(ct => ct.phone === phone);
+  if (c) c.unread = 0;
+  updateUnreadBadge();
+  // Persist to server (fire and forget)
+  fetch(CONFIG.trackerUrl + '/admin/wa/mark-read', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ phone, ts: now })
+  }).catch(() => {});
+}
+
+function countUnread(phone, messages) {
+  const cursor = chatState.readCursors[phone];
+  if (!cursor) {
+    // Never opened: count all inbound
+    return messages.filter(m => m.direction === 'inbound').length;
+  }
+  return messages.filter(m => m.direction === 'inbound' && m.ts > cursor).length;
+}
+
+function updateUnreadBadge() {
+  chatState.totalUnread = chatState.contacts.reduce((sum, c) => sum + (c.unread || 0), 0);
+  // Update nav badge
+  const badge = document.querySelector('[data-chat-badge]');
+  if (badge) {
+    badge.textContent = chatState.totalUnread || '';
+    badge.style.display = chatState.totalUnread ? '' : 'none';
+  }
+}
+
 async function loadChatContacts() {
   if (!isAdmin()) return;
   chatState.loading = true;
   try {
+    // Load read cursors in parallel with messages on first load
+    if (!Object.keys(chatState.readCursors).length) {
+      await loadReadCursors();
+    }
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?limit=5000', {
       headers: authHeaders()
     });
@@ -2578,13 +2637,15 @@ async function loadChatContacts() {
       .map(c => {
         c.messages.sort((a, b) => a.ts.localeCompare(b.ts));
         const last = c.messages[c.messages.length - 1];
+        const unread = countUnread(c.phone, c.messages);
         return {
           phone: c.phone,
           name: c.name,
           lastMsg: last ? (last.body || `[${last.msg_type}]`).slice(0, 60) : '',
           lastTs: c.lastTs,
           lastDir: last ? last.direction : '',
-          lastType: last ? last.msg_type : ''
+          lastType: last ? last.msg_type : '',
+          unread
         };
       })
       .sort((a, b) => b.lastTs.localeCompare(a.lastTs));
@@ -2593,6 +2654,7 @@ async function loadChatContacts() {
       const c = byPhone.get(chatState.selectedPhone);
       chatState.messages = c ? c.messages : [];
     }
+    updateUnreadBadge();
   } catch (e) {
     console.error('chat load error:', e);
   } finally {
@@ -2741,7 +2803,7 @@ function renderContactItem(c) {
   if (c.lastDir === 'outbound') {
     previewIcon = `<span class="chat-msg-status" style="margin-right:2px;color:#8696a0">${TICK_DOUBLE}</span>`;
   }
-  // Clean preview: remove [audio] [imagen] prefixes for cleaner display
+  // Clean preview
   let preview = c.lastMsg || '';
   if (preview.startsWith('[audio]')) preview = '🎤 Audio';
   else if (preview.startsWith('[imagen]')) preview = '📷 Foto';
@@ -2749,16 +2811,20 @@ function renderContactItem(c) {
   else if (c.lastType === 'video') preview = '🎥 Video';
   else if (c.lastType === 'document') preview = '📄 ' + preview;
 
+  const hasUnread = (c.unread || 0) > 0;
+  const isActive = chatState.selectedPhone === c.phone;
+
   return `
-    <div class="chat-contact ${chatState.selectedPhone === c.phone ? 'active' : ''}" data-chat-phone="${escapeHtml(c.phone)}">
+    <div class="chat-contact ${isActive ? 'active' : ''}${hasUnread ? ' has-unread' : ''}" data-chat-phone="${escapeHtml(c.phone)}">
       ${avatarHtml(c.phone, c.name, 49)}
       <div class="chat-contact-info">
         <div class="chat-contact-top">
           <div class="chat-contact-name">${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
-          <div class="chat-contact-time">${formatChatTime(c.lastTs)}</div>
+          <div class="chat-contact-time${hasUnread ? ' unread' : ''}">${formatChatTime(c.lastTs)}</div>
         </div>
         <div class="chat-contact-bottom">
           <div class="chat-contact-preview">${previewIcon}${escapeHtml(preview)}</div>
+          ${hasUnread ? `<div class="chat-contact-unread">${c.unread}</div>` : ''}
         </div>
       </div>
     </div>
@@ -2779,17 +2845,27 @@ function renderChatConversation() {
   const phone = chatState.selectedPhone;
   const name = chatState.selectedName;
   loadProfilePic(phone);
+  const msgCount = chatState.messages.length;
+  const inboundCount = chatState.messages.filter(m => m.direction === 'inbound').length;
   return `
     <div class="chat-header">
       ${avatarHtml(phone, name, 40)}
-      <div>
+      <div style="flex:1;min-width:0">
         <div class="chat-header-name">${escapeHtml(name || formatPhoneDisplay(phone))}</div>
         <div class="chat-header-phone">${escapeHtml(formatPhoneDisplay(phone))}</div>
       </div>
+      <div class="chat-header-meta">
+        <span>${msgCount} msgs</span>
+      </div>
     </div>
     <div class="chat-messages" id="chat-messages">
-      ${renderChatBubbles()}
+      ${chatState.loadingConv
+        ? '<div class="chat-loading"><div class="spinner" style="border-color:#2a3942;border-top-color:#00a884"></div></div>'
+        : renderChatBubbles()}
     </div>
+    <button class="chat-scroll-down" id="chat-scroll-down" title="Ir al final">
+      <svg viewBox="0 0 19 20" width="18" height="18" fill="currentColor"><path d="M3.8 6.7l5.7 5.7 5.7-5.7 1.6 1.6-7.3 7.2-7.3-7.2 1.6-1.6z"/></svg>
+    </button>
     <div class="chat-input-bar">
       <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
       <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar">
@@ -3015,9 +3091,29 @@ async function selectChatContact(phone) {
   chatState.selectedPhone = phone;
   const contact = chatState.contacts.find(c => c.phone === phone);
   chatState.selectedName = contact?.name || '';
-  // Cargar mensajes frescos
+  chatState.loadingConv = true;
+
+  // Show loading state immediately
+  if (STATE.view === 'chat') {
+    const main = document.querySelector('.chat-main');
+    if (main) {
+      main.innerHTML = renderChatConversation();
+    }
+    // Update active in contact list
+    document.querySelectorAll('.chat-contact').forEach(el => {
+      el.classList.toggle('active', el.dataset.chatPhone === phone);
+      el.classList.remove('has-unread');
+    });
+  }
+
+  // Load messages
   await loadChatMessages(phone);
-  // Re-render solo la parte del chat
+  chatState.loadingConv = false;
+
+  // Mark as read
+  markConversationRead(phone);
+
+  // Re-render conversation with actual messages
   if (STATE.view === 'chat') {
     const main = document.querySelector('.chat-main');
     if (main) {
@@ -3028,23 +3124,26 @@ async function selectChatContact(phone) {
       const msgs = document.getElementById('chat-messages');
       if (msgs) msgs.scrollTop = msgs.scrollHeight;
     }
-    // Actualizar active en la lista
-    document.querySelectorAll('.chat-contact').forEach(el => {
-      el.classList.toggle('active', el.dataset.chatPhone === phone);
-    });
+    // Update unread badge on contact
+    const contactEl = document.querySelector(`[data-chat-phone="${phone}"]`);
+    if (contactEl) {
+      const badge = contactEl.querySelector('.chat-contact-unread');
+      if (badge) badge.remove();
+    }
   }
 }
 
 function bindChatConversation() {
   const ta = document.getElementById('chat-input');
   const btn = document.getElementById('chat-send-btn');
+  const msgEl = document.getElementById('chat-messages');
+  const scrollBtn = document.getElementById('chat-scroll-down');
+
   if (ta) {
-    // Auto-resize textarea
     ta.addEventListener('input', () => {
       ta.style.height = 'auto';
       ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
     });
-    // Enter para enviar (Shift+Enter para nueva línea)
     ta.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -3061,6 +3160,16 @@ function bindChatConversation() {
       if (ta && ta.value.trim() && !chatState.sending) {
         sendChatMessage(chatState.selectedPhone, ta.value);
       }
+    };
+  }
+  // Scroll-to-bottom FAB
+  if (msgEl && scrollBtn) {
+    msgEl.addEventListener('scroll', () => {
+      const distFromBottom = msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight;
+      scrollBtn.classList.toggle('visible', distFromBottom > 200);
+    });
+    scrollBtn.onclick = () => {
+      msgEl.scrollTo({ top: msgEl.scrollHeight, behavior: 'smooth' });
     };
   }
 }
@@ -3113,20 +3222,32 @@ function bindChat() {
   clearInterval(chatState.pollTimer);
   chatState.pollTimer = setInterval(async () => {
     if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
+    const prevMsgCount = chatState.messages.length;
     await loadChatContacts();
     if (STATE.view === 'chat') {
-      // Actualizar lista sin re-render completo
+      // Update contact list without losing search or scroll
       const list = document.getElementById('chat-contact-list');
-      if (list && !chatState.search) {
-        list.innerHTML = chatState.contacts.map(c => renderContactItem(c)).join('');
+      if (list) {
+        const search = chatState.search.toLowerCase();
+        const filtered = search
+          ? chatState.contacts.filter(c =>
+              (c.name || '').toLowerCase().includes(search) ||
+              c.phone.includes(search))
+          : chatState.contacts;
+        list.innerHTML = filtered.map(c => renderContactItem(c)).join('');
         bindChatContactClicks();
       }
-      // Si hay conversación abierta, actualizar mensajes
-      if (chatState.selectedPhone) {
+      // If conversation is open, only update if new messages arrived
+      if (chatState.selectedPhone && chatState.messages.length > prevMsgCount) {
+        const msgEl = document.getElementById('chat-messages');
+        const wasAtBottom = msgEl && (msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 80);
         renderChatMessages();
+        // Only auto-scroll if user was near the bottom
+        if (wasAtBottom && msgEl) msgEl.scrollTop = msgEl.scrollHeight;
       }
+      updateUnreadBadge();
     }
-  }, 15000);
+  }, 12000);
 }
 
 function bindChatContactClicks() {
@@ -3148,6 +3269,8 @@ STATE.view = initView;
 loadAll();
 // Sync done marks desde Worker (en background, re-render cuando llegue)
 loadDone().then(() => { if (STATE.loaded) render(); });
+// Pre-load chat unread counts for sidebar badge
+if (isAdmin()) loadChatContacts().then(() => updateUnreadBadge());
 
 // Re-bind table when pedidos view rendered after data loads
 function rerenderTablePedidosIfNeeded() { if (STATE.view === 'pedidos') renderTablePedidos(); }

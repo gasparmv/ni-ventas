@@ -515,6 +515,40 @@ export default {
         return json({ messages: rs.results || [] });
       }
 
+      // Read cursors: qué conversaciones fueron leídas y cuándo
+      if (request.method === 'GET' && path === '/admin/wa/read-cursors') {
+        try {
+          const rs = await env.DB.prepare('SELECT phone, last_read_ts FROM wa_read_cursor').all();
+          const cursors = {};
+          for (const r of (rs.results || [])) cursors[r.phone] = r.last_read_ts;
+          return json({ cursors });
+        } catch (_) {
+          return json({ cursors: {} });
+        }
+      }
+
+      // Marcar conversación como leída
+      if (request.method === 'POST' && path === '/admin/wa/mark-read') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone, ts } = body || {};
+        if (!phone || !ts) return json({ error: 'missing phone or ts' }, 400);
+        try {
+          await env.DB.prepare(
+            'INSERT INTO wa_read_cursor (phone, last_read_ts, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET last_read_ts = excluded.last_read_ts, updated_at = excluded.updated_at'
+          ).bind(phone, ts, new Date().toISOString()).run();
+        } catch (e) {
+          // Table might not exist yet — create it
+          try {
+            await env.DB.prepare('CREATE TABLE IF NOT EXISTS wa_read_cursor (phone TEXT PRIMARY KEY, last_read_ts TEXT NOT NULL, updated_at TEXT NOT NULL)').run();
+            await env.DB.prepare(
+              'INSERT OR REPLACE INTO wa_read_cursor (phone, last_read_ts, updated_at) VALUES (?, ?, ?)'
+            ).bind(phone, ts, new Date().toISOString()).run();
+          } catch (_) {}
+        }
+        return json({ ok: true });
+      }
+
       // Servir medios desde R2
       if (request.method === 'GET' && path.startsWith('/admin/media/')) {
         const key = decodeURIComponent(path.slice('/admin/media/'.length));

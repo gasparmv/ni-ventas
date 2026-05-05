@@ -67,3 +67,10 @@ CREATE TABLE IF NOT EXISTS wa_messages (
 CREATE INDEX IF NOT EXISTS idx_wa_messages_phone ON wa_messages(phone);
 CREATE INDEX IF NOT EXISTS idx_wa_messages_ts    ON wa_messages(ts);
 CREATE INDEX IF NOT EXISTS idx_wa_messages_wamid ON wa_messages(wamid);
+
+-- Tracking de última lectura por contacto (para badge "no leído" en dashboard chat)
+CREATE TABLE IF NOT EXISTS wa_read_cursor (
+  phone       TEXT PRIMARY KEY,
+  last_read_ts TEXT NOT NULL,        -- ISO timestamp del último mensaje visto
+  updated_at   TEXT NOT NULL
+);
