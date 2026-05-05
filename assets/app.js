@@ -270,20 +270,20 @@ function saveToken(t) {
   else localStorage.removeItem('niventas.token');
 }
 async function setUser(name) {
-  // Si elige Gaspar y no hay token válido, pedir password
-  if (name === 'Gaspar' && !STATE.token) {
-    const ok = await loginPrompt();
+  // Si elige un usuario con acceso privilegiado y no hay token, pedir password
+  if (['Gaspar', 'Joaquín'].includes(name) && !STATE.token) {
+    const ok = await loginPrompt(name);
     if (!ok) return;
   }
   STATE.user = name;
   saveUser();
   render();
   // Pre-load chat contacts in background for unread badge
-  if (isAdmin() && !chatState.contacts.length) {
+  if (canAccessChat() && !chatState.contacts.length) {
     loadChatContacts().then(() => updateUnreadBadge());
   }
 }
-async function loginPrompt() {
+async function loginPrompt(userName) {
   if (!CONFIG.trackerUrl) {
     alert('El backend de auth no está configurado. Ver CONFIG.trackerUrl.');
     return false;
@@ -294,7 +294,7 @@ async function loginPrompt() {
     const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user: 'Gaspar', password: pw })
+      body: JSON.stringify({ user: userName || 'Gaspar', password: pw })
     });
     if (r.status === 401) { alert('Contraseña incorrecta'); return false; }
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -316,13 +316,14 @@ async function logout() {
     } catch(e) {}
   }
   saveToken(null);
-  // Si estaba como Gaspar, lo dejo sin usuario para que tenga que re-loguearse
-  if (STATE.user === 'Gaspar') { STATE.user = null; saveUser(); }
+  // Si estaba con usuario privilegiado, lo dejo sin usuario para que tenga que re-loguearse
+  if (['Gaspar', 'Joaquín'].includes(STATE.user)) { STATE.user = null; saveUser(); }
   // Si estaba en vista admin, salir
   if (STATE.view === 'admin') setView('dashboard');
   else render();
 }
 function isAdmin() { return !!STATE.token && STATE.user === 'Gaspar'; }
+function canAccessChat() { return !!STATE.token && ['Gaspar', 'Joaquín'].includes(STATE.user); }
 function authHeaders() {
   return STATE.token ? { 'Authorization': 'Bearer ' + STATE.token } : {};
 }
@@ -980,14 +981,14 @@ function renderShell() {
         <span class="b-sub">· VENTAS</span>
       </div>
       <div class="user-pick">
-        <div class="user-pick-label">Usuario ${isAdmin() ? '<span class="admin-tag">admin</span>' : ''}</div>
+        <div class="user-pick-label">Usuario ${canAccessChat() ? '<span class="admin-tag">' + (isAdmin() ? 'admin' : 'chat') + '</span>' : ''}</div>
         <div class="user-pick-chips">
           ${STATE.users.map(u => {
-            const locked = u === 'Gaspar' && !STATE.token;
+            const locked = ['Gaspar', 'Joaquín'].includes(u) && !STATE.token;
             return `<button class="user-chip ${STATE.user===u?'active':''}" data-set-user="${escapeHtml(u)}">${locked?'🔒 ':''}${escapeHtml(u)}</button>`;
           }).join('')}
           <button class="user-chip add" data-add-user>+</button>
-          ${isAdmin() ? '<button class="user-chip add" data-logout title="Cerrar sesión">⎋</button>' : ''}
+          ${canAccessChat() ? '<button class="user-chip add" data-logout title="Cerrar sesión">⎋</button>' : ''}
         </div>
       </div>
       <nav class="nav">
@@ -1001,7 +1002,7 @@ function renderShell() {
           ${STATE.loaded ? (() => { const c = getPanelJoacoCount(); return c ? '<span class="badge">' + c + '</span>' : ''; })() : ''}
         </button>
         <button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>
-        ${isAdmin() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
+        ${canAccessChat() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
           <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread || ''}</span>
         </button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
@@ -2809,7 +2810,7 @@ const TICK_SINGLE = `<svg viewBox="0 0 16 11"><path d="M11.071.653a.457.457 0 0 
 const TICK_DOUBLE = `<svg viewBox="0 0 16 11"><path d="M11.071.653a.457.457 0 0 0-.304-.102.493.493 0 0 0-.381.178l-6.19 7.636-2.011-2.585a.463.463 0 0 0-.36-.186.465.465 0 0 0-.344.153.52.52 0 0 0-.132.382.516.516 0 0 0 .159.375l2.323 2.995a.478.478 0 0 0 .353.168.467.467 0 0 0 .363-.169l6.571-8.102a.482.482 0 0 0-.047-.743z" fill="currentColor"/><path d="M15.071.653a.457.457 0 0 0-.304-.102.493.493 0 0 0-.381.178l-6.19 7.636-1.2-1.546-.361.446 1.244 1.605a.478.478 0 0 0 .353.168.467.467 0 0 0 .363-.169l6.571-8.102a.482.482 0 0 0-.047-.743z" fill="currentColor"/></svg>`;
 
 async function loadReadCursors() {
-  if (!isAdmin()) return;
+  if (!canAccessChat()) return;
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/read-cursors', { headers: authHeaders() });
     if (r.ok) {
@@ -2855,7 +2856,7 @@ function updateUnreadBadge() {
 }
 
 async function loadChatContacts() {
-  if (!isAdmin()) return;
+  if (!canAccessChat()) return;
   chatState.loading = true;
   try {
     // Load read cursors in parallel with messages on first load
@@ -2911,7 +2912,7 @@ async function loadChatContacts() {
 }
 
 async function loadChatMessages(phone) {
-  if (!isAdmin() || !phone) return;
+  if (!canAccessChat() || !phone) return;
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?phone=' + encodeURIComponent(phone) + '&limit=500', {
       headers: authHeaders()
@@ -2925,7 +2926,7 @@ async function loadChatMessages(phone) {
 }
 
 async function sendChatMessage(phone, text) {
-  if (!isAdmin() || !phone || !text.trim()) return;
+  if (!canAccessChat() || !phone || !text.trim()) return;
   chatState.sending = true;
   updateChatInputState();
   try {
@@ -3048,8 +3049,8 @@ function renderBulkSection() {
 }
 
 function renderChat() {
-  if (!isAdmin()) {
-    return `<div class="page-head"><h1>Chat WhatsApp</h1></div><div class="error">No autorizado. Logueate como Gaspar.</div>`;
+  if (!canAccessChat()) {
+    return `<div class="page-head"><h1>Chat WhatsApp</h1></div><div class="error">No autorizado. Logueate con un usuario autorizado.</div>`;
   }
   const search = chatState.search.toLowerCase();
   let filtered = chatState.contacts;
@@ -3875,7 +3876,7 @@ loadAll();
 // Sync done marks desde Worker (en background, re-render cuando llegue)
 loadDone().then(() => { if (STATE.loaded) render(); });
 // Pre-load chat unread counts for sidebar badge
-if (isAdmin()) loadChatContacts().then(() => updateUnreadBadge());
+if (canAccessChat()) loadChatContacts().then(() => updateUnreadBadge());
 
 // Re-bind table when pedidos view rendered after data loads
 function rerenderTablePedidosIfNeeded() { if (STATE.view === 'pedidos') renderTablePedidos(); }
