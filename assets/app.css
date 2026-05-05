@@ -1878,6 +1878,35 @@ table.t td.cliente { font-weight: 600; }
 }
 .bulk-textarea::placeholder { color: #8696a0; }
 
+/* Location message */
+.chat-msg-location {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+  cursor: pointer;
+}
+.chat-msg-location:hover { opacity: .85; }
+
+/* Contact card message */
+.chat-msg-contact-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+}
+
+/* Unsupported message */
+.chat-msg-unsupported {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #8696a0;
+  font-size: 13px;
+  font-style: italic;
+  padding: 2px 0;
+}
+
 /* Attach & mic buttons */
 .btn-attach, .btn-mic { flex-shrink: 0; }
 

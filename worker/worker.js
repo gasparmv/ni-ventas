@@ -289,6 +289,21 @@ export default {
                 else if (msg.document) { msgBody = msg.document.filename || ''; mediaUrl = msg.document.id || ''; }
                 else if (msg.sticker) { mediaUrl = msg.sticker.id || ''; }
                 else if (msg.reaction) { msgBody = msg.reaction.emoji || ''; }
+                else if (msg.location) { msgBody = `[ubicacion] ${msg.location.latitude},${msg.location.longitude}${msg.location.name ? ' — ' + msg.location.name : ''}${msg.location.address ? ' (' + msg.location.address + ')' : ''}`; }
+                else if (msg.contacts && msg.contacts.length) {
+                  const cNames = msg.contacts.map(c => c.name?.formatted_name || c.name?.first_name || 'contacto').join(', ');
+                  const cPhones = msg.contacts.map(c => c.phones?.[0]?.phone || '').filter(Boolean).join(', ');
+                  msgBody = `[contacto] ${cNames}${cPhones ? ' — ' + cPhones : ''}`;
+                }
+                else if (msg.order) { msgBody = `[pedido] ${(msg.order.product_items || []).map(p => p.product_retailer_id).join(', ')}`; }
+                else if (msg.unsupported) {
+                  // Meta sends error details for unsupported messages
+                  const errTitle = msg.errors?.[0]?.title || '';
+                  const errDetails = msg.errors?.[0]?.error_data?.details || '';
+                  if (errTitle.includes('unavailable')) msgBody = '[mensaje no disponible]';
+                  else if (errTitle.includes('unknown')) msgBody = '[tipo de mensaje no soportado por la API]';
+                  else msgBody = `[no soportado: ${errTitle || 'desconocido'}]`;
+                }
                 const contextId = msg.context?.id || '';
                 const ts = msg.timestamp ? new Date(parseInt(msg.timestamp) * 1000).toISOString() : new Date().toISOString();
                 // Download media to R2 if present

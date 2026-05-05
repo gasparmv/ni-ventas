@@ -3112,6 +3112,13 @@ function renderContactItem(c) {
   let preview = c.lastMsg || '';
   if (preview.startsWith('[audio]')) preview = '🎤 Audio';
   else if (preview.startsWith('[imagen]')) preview = '📷 Foto';
+  else if (preview.startsWith('[ubicacion]')) preview = '📍 Ubicación';
+  else if (preview.startsWith('[contacto]')) preview = '👤 Contacto';
+  else if (preview.startsWith('[pedido]')) preview = '🛒 Pedido';
+  else if (preview.startsWith('[mensaje no disponible]')) preview = '⚠ Mensaje no disponible';
+  else if (preview.startsWith('[tipo de mensaje no soportado')) preview = '⚠ Mensaje no compatible';
+  else if (preview.startsWith('[no soportado')) preview = '⚠ No soportado';
+  else if (c.lastType === 'unsupported') preview = '⚠ No compatible';
   else if (c.lastType === 'sticker') preview = '🏷 Sticker';
   else if (c.lastType === 'video') preview = '🎥 Video';
   else if (c.lastType === 'document') preview = '📄 ' + preview;
@@ -3330,16 +3337,62 @@ function renderChatBubbles() {
       continue;
     }
 
-    // === TEXT (or any other type) ===
-    // Skip completely empty outbound bubbles (echo messages without content)
+    // Skip empty status echoes
     if (!bodyText.trim() && dir === 'outbound' && m.msg_type === 'status') continue;
-    // For empty bubbles without any content, show minimal
+
+    // === LOCATION ===
+    if (bodyText.startsWith('[ubicacion] ')) {
+      const locData = bodyText.slice(12);
+      const coordMatch = locData.match(/^(-?[\d.]+),(-?[\d.]+)/);
+      let locDisplay = locData.replace(/^-?[\d.]+,-?[\d.]+\s*—?\s*/, '').trim() || 'Ubicación compartida';
+      const mapLink = coordMatch ? `https://www.google.com/maps?q=${coordMatch[1]},${coordMatch[2]}` : '#';
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+        <a href="${mapLink}" target="_blank" style="text-decoration:none">
+          <div class="chat-msg-location">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="#ef5350"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
+            <div>
+              <div style="color:#e9edef;font-size:14px">${escapeHtml(locDisplay)}</div>
+              ${coordMatch ? `<div style="color:#8696a0;font-size:11px">${coordMatch[1]}, ${coordMatch[2]}</div>` : ''}
+            </div>
+          </div>
+        </a>
+        ${footer}
+      </div>`;
+      continue;
+    }
+
+    // === CONTACT CARD ===
+    if (bodyText.startsWith('[contacto] ')) {
+      const contactData = bodyText.slice(11);
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+        <div class="chat-msg-contact-card">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="#53bdeb"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+          <div style="color:#e9edef;font-size:14px">${escapeHtml(contactData)}</div>
+        </div>
+        ${footer}
+      </div>`;
+      continue;
+    }
+
+    // === UNSUPPORTED / UNAVAILABLE ===
+    if (m.msg_type === 'unsupported' || bodyText.startsWith('[mensaje no disponible]') || bodyText.startsWith('[tipo de mensaje no soportado') || bodyText.startsWith('[no soportado')) {
+      const isUnavailable = bodyText.includes('no disponible');
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+        <div class="chat-msg-unsupported">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="#8696a0"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+          <span>${isUnavailable ? 'Mensaje no disponible' : 'Mensaje no compatible con la API'}</span>
+        </div>
+        ${footer}
+      </div>`;
+      continue;
+    }
+
+    // === TEXT (or fallback) ===
     if (!bodyText.trim() && !m.media_url) {
-      // Could be an unsupported message type
       if (m.msg_type !== 'text' && m.msg_type !== 'status') {
         bodyText = `[${m.msg_type}]`;
-      } else if (!bodyText.trim()) {
-        continue; // Skip truly empty messages
+      } else {
+        continue;
       }
     }
 
