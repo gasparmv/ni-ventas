@@ -2537,12 +2537,33 @@ const chatState = {
   recordingSecs: 0,
 };
 
-// Avatar color palettes [base, accent] — 12 distinct hues for better differentiation
+// Avatar color palettes [base, accent] — 25 distinct hues for maximum differentiation
 const AVATAR_PALETTES = [
-  ['#00a884','#02c39a'], ['#53bdeb','#6ec6e6'], ['#cd7f32','#d4944a'],
-  ['#ef5350','#f06e6b'], ['#7986cb','#929ed4'], ['#e06090','#e87aa5'],
-  ['#009688','#1aafa0'], ['#7e57c2','#9574d0'], ['#ff7043','#ff8a65'],
-  ['#26a69a','#40b5aa'], ['#5c6bc0','#7580cc'], ['#8d6e63','#a08478'],
+  ['#00a884','#02c39a'], // teal
+  ['#53bdeb','#73cdf0'], // sky blue
+  ['#cd7f32','#d99545'], // bronze
+  ['#ef5350','#f47370'], // coral red
+  ['#7986cb','#949fd6'], // soft indigo
+  ['#e06090','#e87aa5'], // rose pink
+  ['#009688','#1aafa0'], // deep teal
+  ['#7e57c2','#9574d0'], // amethyst
+  ['#ff7043','#ff8f6a'], // terracotta
+  ['#26a69a','#40b5aa'], // mint
+  ['#5c6bc0','#7580cc'], // slate blue
+  ['#8d6e63','#a08478'], // mocha
+  ['#d4e157','#dce775'], // lime
+  ['#ff8a65','#ffab91'], // peach
+  ['#4db6ac','#6ec5bb'], // aquamarine
+  ['#ba68c8','#c882d4'], // orchid
+  ['#4dd0e1','#6ddae8'], // cyan
+  ['#f06292','#f48aac'], // hot pink
+  ['#aed581','#bee09a'], // sage
+  ['#ffb74d','#ffc877'], // amber
+  ['#9575cd','#ad91db'], // lavender
+  ['#4fc3f7','#75d0f9'], // light blue
+  ['#e57373','#ec9191'], // salmon
+  ['#81c784','#9dd49f'], // green
+  ['#dce775','#e4ee8d'], // yellow-green
 ];
 
 function getAvatarPalette(phone) {
