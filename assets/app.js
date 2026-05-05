@@ -949,6 +949,12 @@ function render() {
     else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
+  // Toggle main--chat class for full-height layout
+  const mainEl = document.getElementById('main');
+  if (mainEl) mainEl.classList.toggle('main--chat', STATE.view === 'chat');
+  // Lock entire app shell height when chat is active
+  const appEl = mainEl && mainEl.closest('.app');
+  if (appEl) appEl.classList.toggle('app--chat', STATE.view === 'chat');
   bindNav();
   bindCommon();
   if (STATE.view === 'pedidos') bindPedidos();

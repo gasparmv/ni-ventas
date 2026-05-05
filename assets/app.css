@@ -1,7 +1,7 @@
 /* NI Ventas · App layout & components — built on top of brand.css */
 
 *, *::before, *::after { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
+html, body { margin: 0; padding: 0; height: 100%; }
 body {
   background:
     radial-gradient(1200px 600px at 80% -10%, rgba(255,24,48,.06), transparent 60%),
@@ -1035,17 +1035,26 @@ table.t td.cliente { font-weight: 600; }
 }
 
 /* ============ CHAT (WhatsApp Web style) ============ */
-.chat-layout {
-  display: grid;
-  grid-template-columns: 30% 1fr;
-  gap: 0;
-  height: calc(100vh - 120px);
-  min-height: 500px;
-  border-radius: 0;
+/* When chat is active, lock the entire app shell to viewport height */
+.app.app--chat {
+  height: 100vh;
+  max-height: 100vh;
   overflow: hidden;
-  border: none;
 }
-@media (max-width: 900px) { .chat-layout { grid-template-columns: 1fr; height: auto; } }
+.main.main--chat {
+  padding: 0 !important;
+  max-width: none !important;
+  overflow: hidden;
+  height: 100%;
+}
+.chat-layout {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+.chat-layout > .chat-contacts { flex: 0 0 30%; max-width: 40%; }
+.chat-layout > .chat-main { flex: 1 1 auto; }
+@media (max-width: 900px) { .chat-layout { flex-direction: column; } .chat-layout > .chat-contacts { flex: none; max-width: none; } }
 
 /* -- Scrollbar WA-style for chat panels -- */
 .chat-contact-list::-webkit-scrollbar,
@@ -1061,6 +1070,9 @@ table.t td.cliente { font-weight: 600; }
   border-right: 1px solid #222d34;
   display: flex;
   flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 .chat-contacts-header {
   padding: 10px 16px;
@@ -1069,10 +1081,12 @@ table.t td.cliente { font-weight: 600; }
   align-items: center;
   justify-content: space-between;
   min-height: 59px;
+  flex-shrink: 0;
 }
 .chat-contacts-search {
   padding: 7px 10px;
   background: #111b21;
+  flex-shrink: 0;
 }
 .chat-contacts-search input {
   width: 100%;
@@ -1093,7 +1107,9 @@ table.t td.cliente { font-weight: 600; }
 .chat-contacts-search input::placeholder { color: #8696a0; }
 .chat-contact-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 .chat-contact {
   display: flex;
@@ -1202,6 +1218,9 @@ table.t td.cliente { font-weight: 600; }
   flex-direction: column;
   background: #0b141a;
   position: relative;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 /* WA doodle wallpaper */
 .chat-main::before {
@@ -1223,6 +1242,7 @@ table.t td.cliente { font-weight: 600; }
   align-items: center;
   gap: 12px;
   min-height: 59px;
+  flex-shrink: 0;
 }
 .chat-header-name {
   font-size: 16px;
@@ -1257,7 +1277,9 @@ table.t td.cliente { font-weight: 600; }
 /* Messages area */
 .chat-messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 12px 63px 4px;
   display: flex;
   flex-direction: column;
@@ -1532,6 +1554,7 @@ table.t td.cliente { font-weight: 600; }
   display: flex;
   gap: 6px;
   align-items: flex-end;
+  flex-shrink: 0;
 }
 .chat-input-bar textarea {
   flex: 1;
@@ -1609,6 +1632,7 @@ table.t td.cliente { font-weight: 600; }
   justify-content: center;
   flex-direction: column;
   flex: 1;
+  min-height: 0;
   gap: 12px;
   color: #8696a0;
   font-size: 14px;
