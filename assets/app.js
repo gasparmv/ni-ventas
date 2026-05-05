@@ -2668,8 +2668,11 @@ function formatChatTime(ts) {
   if (msgDate === today) return time;
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (msgDate === yesterday.toISOString().slice(0, 10)) return 'Ayer ' + time;
-  return d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }) + ' ' + time;
+  if (msgDate === yesterday.toISOString().slice(0, 10)) return 'Ayer';
+  // Same week: show day name
+  const diffDays = Math.floor((now - d) / 86400000);
+  if (diffDays < 7) return d.toLocaleDateString('es-AR', { weekday: 'short' });
+  return d.toLocaleDateString('es-AR', { day: 'numeric', month: 'numeric', year: '2-digit' });
 }
 
 function formatChatDate(ts) {
@@ -2872,7 +2875,7 @@ function renderChatBubbles() {
         <div class="chat-msg-media">
           <img src="${mediaUrl(m.media_url)}" alt="" loading="lazy"
                onclick="window.open(this.src,'_blank')"
-               onerror="this.outerHTML='<div class=\\'img-loading\\'>No se pudo cargar la imagen</div>'">
+               onerror="this.style.display='none'">
         </div>
         ${bodyText ? `<div class="chat-msg-body">${escapeHtml(bodyText).replace(/\n/g, '<br>')}</div>` : ''}
         ${footer}
