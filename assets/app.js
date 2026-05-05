@@ -2512,53 +2512,47 @@ const chatState = {
   totalUnread: 0,
 };
 
-// WhatsApp-style avatar colors (same 7 colors WA Web uses)
-const AVATAR_COLORS = [
-  '#00a884', // teal/green
-  '#53bdeb', // blue
-  '#ffa726', // orange
-  '#ef5350', // red
-  '#7986cb', // indigo
-  '#e91e63', // pink
-  '#009688', // dark teal
-  '#673ab7', // purple
-  '#ff7043', // deep orange
-  '#26a69a', // green-teal
+// Avatar color palettes [base, accent] — 12 distinct hues for better differentiation
+const AVATAR_PALETTES = [
+  ['#00a884','#02c39a'], ['#53bdeb','#6ec6e6'], ['#cd7f32','#d4944a'],
+  ['#ef5350','#f06e6b'], ['#7986cb','#929ed4'], ['#e06090','#e87aa5'],
+  ['#009688','#1aafa0'], ['#7e57c2','#9574d0'], ['#ff7043','#ff8a65'],
+  ['#26a69a','#40b5aa'], ['#5c6bc0','#7580cc'], ['#8d6e63','#a08478'],
 ];
 
-function getAvatarColor(phone) {
-  // Consistent color based on phone hash
+function getAvatarPalette(phone) {
   let hash = 0;
   for (let i = 0; i < phone.length; i++) hash = ((hash << 5) - hash) + phone.charCodeAt(i);
-  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+  return AVATAR_PALETTES[Math.abs(hash) % AVATAR_PALETTES.length];
 }
 
 function getInitials(name, phone) {
   if (name && name.trim()) {
-    const parts = name.trim().split(/\s+/);
+    const parts = name.trim().split(/\s+/).filter(p => p.length > 0);
     if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-    return parts[0].slice(0, 2).toUpperCase();
+    return parts[0].substring(0, 2).toUpperCase();
   }
-  // Use last 2 digits of phone
   return phone.slice(-2);
 }
 
+// WhatsApp Web default person silhouette
+const WA_PERSON_SVG = '<svg viewBox="0 0 212 212" width="60%" height="60%"><path fill="rgba(255,255,255,0.85)" d="M106.251 0C47.624 0 0 47.624 0 106.251s47.624 106.251 106.251 106.251 106.251-47.624 106.251-106.251S164.878 0 106.251 0zm0 28.07c23.399 0 42.364 18.966 42.364 42.364 0 23.399-18.966 42.364-42.364 42.364-23.399 0-42.364-18.966-42.364-42.364 0-23.399 18.965-42.364 42.364-42.364zm0 150.87c-26.466 0-49.921-13.513-63.612-34.025.328-21.078 42.408-32.64 63.612-32.64 21.204 0 63.284 11.562 63.612 32.64-13.691 20.512-37.146 34.025-63.612 34.025z"/></svg>';
+
 function avatarHtml(phone, name, size) {
   const s = size || 49;
-  const pic = chatState.profilePics[phone];
-  if (pic && pic !== 'none' && pic !== 'loading') {
-    return `<div class="chat-contact-avatar" data-avatar-phone="${escapeHtml(phone)}" style="width:${s}px;height:${s}px">` +
-      `<img src="${pic}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">` +
-      `<div class="avatar-initials" style="display:none;background:${getAvatarColor(phone)}">${getInitials(name, phone)}</div></div>`;
+  const pal = getAvatarPalette(phone);
+  const initials = getInitials(name, phone);
+  const fontSize = s <= 40 ? 15 : s <= 49 ? 19 : 24;
+  const hasName = name && name.trim().length > 0;
+  const bg = `background:linear-gradient(135deg,${pal[0]} 0%,${pal[1]} 100%)`;
+
+  if (hasName) {
+    return `<div class="chat-avatar" style="width:${s}px;height:${s}px;${bg}"><span class="chat-avatar-text" style="font-size:${fontSize}px">${initials}</span></div>`;
   }
-  return `<div class="chat-contact-avatar" data-avatar-phone="${escapeHtml(phone)}" style="width:${s}px;height:${s}px">` +
-    `<div class="avatar-initials" style="background:${getAvatarColor(phone)}">${getInitials(name, phone)}</div></div>`;
+  return `<div class="chat-avatar" style="width:${s}px;height:${s}px;${bg}"><div class="chat-avatar-icon">${WA_PERSON_SVG}</div></div>`;
 }
 
 function loadProfilePic(phone) {
-  // WA Cloud API doesn't expose contact profile pictures.
-  // We use colored initials avatars instead (same as WA Web for contacts without pics).
-  // This function is a no-op but kept for compatibility if we add pic support later.
   if (!chatState.profilePics[phone]) chatState.profilePics[phone] = 'none';
 }
 
