@@ -549,6 +549,189 @@ export default {
         return json({ ok: true });
       }
 
+      // ===== Enviar media (foto/audio) por WhatsApp =====
+      if (request.method === 'POST' && path === '/admin/wa/send-media') {
+        const ct = request.headers.get('Content-Type') || '';
+        if (!ct.includes('multipart/form-data')) return json({ error: 'expected multipart/form-data' }, 400);
+        const fd = await request.formData();
+        const to = fd.get('to');
+        const type = fd.get('type'); // image | audio
+        const caption = fd.get('caption') || '';
+        const file = fd.get('file');
+        if (!to || !type || !file) return json({ error: 'missing to, type, or file' }, 400);
+        const num = normalizeArPhone(to);
+        if (!num) return json({ error: 'numero invalido' }, 400);
+        // 1. Upload to R2
+        const ext = file.name ? '.' + file.name.split('.').pop() : (type === 'audio' ? '.ogg' : '.jpg');
+        const r2Key = `wa/out_${Date.now()}${ext}`;
+        const buf = await file.arrayBuffer();
+        const mime = file.type || (type === 'audio' ? 'audio/ogg; codecs=opus' : 'image/jpeg');
+        await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: mime } });
+        // 2. Upload media to Meta (get media ID)
+        const v = env.WA_API_VERSION || 'v25.0';
+        const uploadFd = new FormData();
+        uploadFd.append('messaging_product', 'whatsapp');
+        uploadFd.append('file', new Blob([buf], { type: mime }), 'file' + ext);
+        uploadFd.append('type', mime);
+        const uploadR = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/media`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` },
+          body: uploadFd
+        });
+        const uploadData = await uploadR.json().catch(() => ({}));
+        if (!uploadR.ok || !uploadData.id) {
+          return json({ error: 'media upload failed', detail: uploadData?.error?.message || '' }, 500);
+        }
+        const mediaId = uploadData.id;
+        // 3. Send via WA API
+        let payload;
+        if (type === 'image') {
+          payload = { messaging_product: 'whatsapp', to: num, type: 'image', image: { id: mediaId, caption: caption || undefined } };
+        } else {
+          payload = { messaging_product: 'whatsapp', to: num, type: 'audio', audio: { id: mediaId } };
+        }
+        const r = await waSend(env, payload);
+        await logWaEvent(env, { to: num, kind: type, ref: '', ok: r.ok, messageId: r.id, error: r.error });
+        if (!r.ok) return json({ error: r.error }, r.status || 500);
+        // 4. Save in wa_messages
+        let body = caption || '';
+        if (type === 'image') body = body || '[imagen]';
+        if (type === 'audio') {
+          // Transcribe outbound audio too
+          try {
+            const transcript = await transcribeAudio(env, r2Key);
+            if (transcript) body = '[audio] ' + transcript;
+            else body = '[audio]';
+          } catch (_) { body = '[audio]'; }
+        }
+        try {
+          await env.DB.prepare(
+            'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', type, body, r2Key, '', 'sent').run();
+        } catch (_) {}
+        return json({ id: r.id, r2Key });
+      }
+
+      // ===== Quick Replies CRUD =====
+      if (request.method === 'GET' && path === '/admin/quick-replies') {
+        try {
+          await env.DB.prepare('CREATE TABLE IF NOT EXISTS quick_replies (id INTEGER PRIMARY KEY AUTOINCREMENT, shortcut TEXT NOT NULL UNIQUE, body TEXT NOT NULL, created_at TEXT NOT NULL)').run();
+          const rs = await env.DB.prepare('SELECT id, shortcut, body FROM quick_replies ORDER BY shortcut').all();
+          return json({ replies: rs.results || [] });
+        } catch (e) { return json({ replies: [] }); }
+      }
+      if (request.method === 'POST' && path === '/admin/quick-replies') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { shortcut, body: text } = body || {};
+        if (!shortcut || !text) return json({ error: 'missing shortcut or body' }, 400);
+        await env.DB.prepare('CREATE TABLE IF NOT EXISTS quick_replies (id INTEGER PRIMARY KEY AUTOINCREMENT, shortcut TEXT NOT NULL UNIQUE, body TEXT NOT NULL, created_at TEXT NOT NULL)').run();
+        await env.DB.prepare('INSERT OR REPLACE INTO quick_replies (shortcut, body, created_at) VALUES (?, ?, ?)').bind(shortcut.toLowerCase().replace(/\s+/g, '_'), text, new Date().toISOString()).run();
+        return json({ ok: true });
+      }
+      if (request.method === 'DELETE' && path.startsWith('/admin/quick-replies/')) {
+        const id = path.split('/').pop();
+        await env.DB.prepare('DELETE FROM quick_replies WHERE id = ?').bind(id).run();
+        return json({ ok: true });
+      }
+
+      // ===== Labels CRUD =====
+      if (request.method === 'GET' && path === '/admin/labels') {
+        try {
+          await env.DB.prepare('CREATE TABLE IF NOT EXISTS labels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, color TEXT NOT NULL, created_at TEXT NOT NULL)').run();
+          await env.DB.prepare('CREATE TABLE IF NOT EXISTS contact_labels (phone TEXT NOT NULL, label_id INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (phone, label_id))').run();
+          const rs = await env.DB.prepare('SELECT id, name, color FROM labels ORDER BY name').all();
+          return json({ labels: rs.results || [] });
+        } catch (e) { return json({ labels: [] }); }
+      }
+      if (request.method === 'POST' && path === '/admin/labels') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { name, color } = body || {};
+        if (!name || !color) return json({ error: 'missing name or color' }, 400);
+        await env.DB.prepare('CREATE TABLE IF NOT EXISTS labels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, color TEXT NOT NULL, created_at TEXT NOT NULL)').run();
+        await env.DB.prepare('INSERT OR REPLACE INTO labels (name, color, created_at) VALUES (?, ?, ?)').bind(name, color, new Date().toISOString()).run();
+        const row = await env.DB.prepare('SELECT id FROM labels WHERE name = ?').bind(name).first();
+        return json({ ok: true, id: row?.id });
+      }
+      if (request.method === 'DELETE' && path.startsWith('/admin/labels/')) {
+        const id = path.split('/').pop();
+        await env.DB.prepare('DELETE FROM contact_labels WHERE label_id = ?').bind(id).run();
+        await env.DB.prepare('DELETE FROM labels WHERE id = ?').bind(id).run();
+        return json({ ok: true });
+      }
+
+      // ===== Contact Labels =====
+      if (request.method === 'GET' && path === '/admin/contact-labels') {
+        try {
+          await env.DB.prepare('CREATE TABLE IF NOT EXISTS contact_labels (phone TEXT NOT NULL, label_id INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (phone, label_id))').run();
+          const rs = await env.DB.prepare('SELECT phone, label_id FROM contact_labels').all();
+          // Group by phone
+          const map = {};
+          for (const r of (rs.results || [])) {
+            if (!map[r.phone]) map[r.phone] = [];
+            map[r.phone].push(r.label_id);
+          }
+          return json({ contactLabels: map });
+        } catch (e) { return json({ contactLabels: {} }); }
+      }
+      if (request.method === 'POST' && path === '/admin/contact-labels') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone, label_id } = body || {};
+        if (!phone || !label_id) return json({ error: 'missing phone or label_id' }, 400);
+        await env.DB.prepare('CREATE TABLE IF NOT EXISTS contact_labels (phone TEXT NOT NULL, label_id INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (phone, label_id))').run();
+        await env.DB.prepare('INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)').bind(phone, label_id, new Date().toISOString()).run();
+        return json({ ok: true });
+      }
+      if (request.method === 'DELETE' && path === '/admin/contact-labels') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone, label_id } = body || {};
+        if (!phone || !label_id) return json({ error: 'missing phone or label_id' }, 400);
+        await env.DB.prepare('DELETE FROM contact_labels WHERE phone = ? AND label_id = ?').bind(phone, label_id).run();
+        return json({ ok: true });
+      }
+
+      // ===== Bulk messaging =====
+      if (request.method === 'POST' && path === '/admin/wa/send-bulk') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { label_ids, message, template_name } = body || {};
+        if ((!label_ids || !label_ids.length) && !body.phones) return json({ error: 'missing label_ids or phones' }, 400);
+        if (!message && !template_name) return json({ error: 'missing message or template_name' }, 400);
+        // Get phones for the labels
+        let phones = body.phones || [];
+        if (label_ids && label_ids.length) {
+          const placeholders = label_ids.map(() => '?').join(',');
+          const rs = await env.DB.prepare(`SELECT DISTINCT phone FROM contact_labels WHERE label_id IN (${placeholders})`).bind(...label_ids).all();
+          phones = (rs.results || []).map(r => r.phone);
+        }
+        if (!phones.length) return json({ error: 'no contacts found for these labels' }, 400);
+        const results = { sent: 0, failed: 0, errors: [] };
+        for (const ph of phones) {
+          try {
+            let r;
+            if (template_name) {
+              r = await waSendTemplate(env, ph, template_name, 'es', []);
+            } else {
+              r = await waSendText(env, ph, message);
+            }
+            if (r.ok) {
+              results.sent++;
+              try {
+                await env.DB.prepare(
+                  'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                ).bind(new Date().toISOString(), r.id || '', 'outbound', ph, '', 'text', message || `[template:${template_name}]`, '', '', 'sent').run();
+              } catch (_) {}
+            } else {
+              results.failed++;
+              results.errors.push({ phone: ph, error: r.error });
+            }
+            await logWaEvent(env, { to: ph, kind: 'bulk', ref: '', ok: r.ok, messageId: r.id, error: r.error });
+          } catch (e) {
+            results.failed++;
+            results.errors.push({ phone: ph, error: e.message });
+          }
+        }
+        return json(results);
+      }
+
       // Servir medios desde R2
       if (request.method === 'GET' && path.startsWith('/admin/media/')) {
         const key = decodeURIComponent(path.slice('/admin/media/'.length));

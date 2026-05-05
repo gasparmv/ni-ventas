@@ -74,3 +74,27 @@ CREATE TABLE IF NOT EXISTS wa_read_cursor (
   last_read_ts TEXT NOT NULL,        -- ISO timestamp del último mensaje visto
   updated_at   TEXT NOT NULL
 );
+
+-- Respuestas rápidas (tipo / como WhatsApp)
+CREATE TABLE IF NOT EXISTS quick_replies (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  shortcut    TEXT NOT NULL UNIQUE,   -- ej: "saludo", "precio", "horarios"
+  body        TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
+-- Etiquetas para contactos
+CREATE TABLE IF NOT EXISTS labels (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL UNIQUE,
+  color       TEXT NOT NULL,          -- hex color ej: "#FF5722"
+  created_at  TEXT NOT NULL
+);
+
+-- Asignación de etiquetas a contactos (muchos a muchos)
+CREATE TABLE IF NOT EXISTS contact_labels (
+  phone       TEXT NOT NULL,
+  label_id    INTEGER NOT NULL,
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (phone, label_id)
+);

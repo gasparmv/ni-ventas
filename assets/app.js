@@ -1842,6 +1842,19 @@ function closeDrawer() {
   document.getElementById('drawer-bg').classList.remove('open');
 }
 
+function openDrawer(title, contentHtml) {
+  document.getElementById('drawer').innerHTML = `
+    <div class="drawer-h">
+      <h2>${title}</h2>
+      <button class="close" onclick="closeDrawer()">×</button>
+    </div>
+    <div class="drawer-body">${contentHtml}</div>
+  `;
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawer-bg').classList.add('open');
+  document.getElementById('drawer-bg').onclick = closeDrawer;
+}
+
 // ---------- CHARTS ----------
 function drawCharts() {
   if (STATE.dashChartIdx === 0) drawLine();
@@ -2502,14 +2515,26 @@ const chatState = {
   selectedPhone: null,
   selectedName: '',
   loading: false,
-  loadingConv: false, // loading indicator for conversation panel
+  loadingConv: false,
   sending: false,
   search: '',
   pollTimer: null,
-  profilePics: {},    // phone → url (or 'none')
+  profilePics: {},
   picLoading: new Set(),
-  readCursors: {},    // phone → last_read_ts (ISO)
+  readCursors: {},
   totalUnread: 0,
+  // New features
+  quickReplies: [],   // [{id, shortcut, body}]
+  qrLoaded: false,
+  labels: [],         // [{id, name, color}]
+  contactLabels: {},  // phone → [label_id, ...]
+  labelsLoaded: false,
+  filterLabels: [],   // active label filters (array of label_ids)
+  recording: false,
+  mediaRecorder: null,
+  audioChunks: [],
+  recordingTimer: null,
+  recordingSecs: 0,
 };
 
 // Avatar color palettes [base, accent] — 12 distinct hues for better differentiation
@@ -2554,6 +2579,208 @@ function avatarHtml(phone, name, size) {
 
 function loadProfilePic(phone) {
   if (!chatState.profilePics[phone]) chatState.profilePics[phone] = 'none';
+}
+
+// ===== Quick Replies =====
+async function loadQuickReplies() {
+  if (chatState.qrLoaded) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/quick-replies', { headers: authHeaders() });
+    if (r.ok) { const j = await r.json(); chatState.quickReplies = j.replies || []; chatState.qrLoaded = true; }
+  } catch (_) {}
+}
+async function saveQuickReply(shortcut, body) {
+  await fetch(CONFIG.trackerUrl + '/admin/quick-replies', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ shortcut, body })
+  });
+  chatState.qrLoaded = false;
+  await loadQuickReplies();
+}
+async function deleteQuickReply(id) {
+  await fetch(CONFIG.trackerUrl + '/admin/quick-replies/' + id, { method: 'DELETE', headers: authHeaders() });
+  chatState.quickReplies = chatState.quickReplies.filter(q => q.id !== id);
+}
+
+// ===== Labels =====
+async function loadLabels() {
+  if (chatState.labelsLoaded) return;
+  try {
+    const [lr, clr] = await Promise.all([
+      fetch(CONFIG.trackerUrl + '/admin/labels', { headers: authHeaders() }),
+      fetch(CONFIG.trackerUrl + '/admin/contact-labels', { headers: authHeaders() })
+    ]);
+    if (lr.ok) { const j = await lr.json(); chatState.labels = j.labels || []; }
+    if (clr.ok) { const j = await clr.json(); chatState.contactLabels = j.contactLabels || {}; }
+    chatState.labelsLoaded = true;
+  } catch (_) {}
+}
+async function saveLabel(name, color) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/labels', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ name, color })
+  });
+  const j = await r.json();
+  chatState.labelsLoaded = false;
+  await loadLabels();
+  return j.id;
+}
+async function deleteLabel(id) {
+  await fetch(CONFIG.trackerUrl + '/admin/labels/' + id, { method: 'DELETE', headers: authHeaders() });
+  chatState.labels = chatState.labels.filter(l => l.id !== id);
+  for (const ph of Object.keys(chatState.contactLabels)) {
+    chatState.contactLabels[ph] = chatState.contactLabels[ph].filter(lid => lid !== id);
+  }
+}
+async function toggleContactLabel(phone, labelId) {
+  const current = chatState.contactLabels[phone] || [];
+  if (current.includes(labelId)) {
+    await fetch(CONFIG.trackerUrl + '/admin/contact-labels', {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ phone, label_id: labelId })
+    });
+    chatState.contactLabels[phone] = current.filter(id => id !== labelId);
+  } else {
+    await fetch(CONFIG.trackerUrl + '/admin/contact-labels', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ phone, label_id: labelId })
+    });
+    if (!chatState.contactLabels[phone]) chatState.contactLabels[phone] = [];
+    chatState.contactLabels[phone].push(labelId);
+  }
+}
+
+// ===== Send media =====
+async function sendChatImage(phone, file, caption) {
+  if (!phone || !file) return;
+  chatState.sending = true;
+  updateChatInputState();
+  try {
+    const fd = new FormData();
+    fd.append('to', phone);
+    fd.append('type', 'image');
+    fd.append('caption', caption || '');
+    fd.append('file', file);
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-media', {
+      method: 'POST', headers: authHeaders(), body: fd
+    });
+    const j = await r.json();
+    if (!r.ok) { toast('Error: ' + (j.error || 'fallo envío imagen')); return; }
+    chatState.messages.push({
+      ts: new Date().toISOString(), wamid: j.id || '', direction: 'outbound',
+      phone, sender_name: '', msg_type: 'image', body: caption || '[imagen]',
+      media_url: j.r2Key || '', status: 'sent'
+    });
+    renderChatMessages();
+    toast('Imagen enviada');
+  } catch (e) { toast('Error de red'); }
+  finally { chatState.sending = false; updateChatInputState(); }
+}
+
+async function sendChatAudio(phone, blob) {
+  if (!phone || !blob) return;
+  chatState.sending = true;
+  updateChatInputState();
+  try {
+    const fd = new FormData();
+    fd.append('to', phone);
+    fd.append('type', 'audio');
+    fd.append('file', blob, 'audio.ogg');
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-media', {
+      method: 'POST', headers: authHeaders(), body: fd
+    });
+    const j = await r.json();
+    if (!r.ok) { toast('Error: ' + (j.error || 'fallo envío audio')); return; }
+    chatState.messages.push({
+      ts: new Date().toISOString(), wamid: j.id || '', direction: 'outbound',
+      phone, sender_name: '', msg_type: 'audio', body: '[audio]',
+      media_url: j.r2Key || '', status: 'sent'
+    });
+    renderChatMessages();
+    toast('Audio enviado');
+  } catch (e) { toast('Error de red'); }
+  finally { chatState.sending = false; updateChatInputState(); }
+}
+
+// ===== Audio recording =====
+function startRecording(phone) {
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    chatState.recording = true;
+    chatState.audioChunks = [];
+    chatState.recordingSecs = 0;
+    const mr = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+    chatState.mediaRecorder = mr;
+    mr.ondataavailable = e => { if (e.data.size > 0) chatState.audioChunks.push(e.data); };
+    mr.onstop = () => { stream.getTracks().forEach(t => t.stop()); };
+    mr.start();
+    chatState.recordingTimer = setInterval(() => {
+      chatState.recordingSecs++;
+      const el = document.getElementById('rec-timer');
+      if (el) el.textContent = Math.floor(chatState.recordingSecs / 60) + ':' + String(chatState.recordingSecs % 60).padStart(2, '0');
+    }, 1000);
+    renderRecordingUI();
+  }).catch(() => toast('No se pudo acceder al micrófono'));
+}
+
+function cancelRecording() {
+  if (chatState.mediaRecorder && chatState.mediaRecorder.state !== 'inactive') chatState.mediaRecorder.stop();
+  chatState.recording = false;
+  chatState.audioChunks = [];
+  clearInterval(chatState.recordingTimer);
+  renderNormalInputUI();
+}
+
+function stopAndSendRecording(phone) {
+  if (!chatState.mediaRecorder) return;
+  chatState.mediaRecorder.onstop = () => {
+    chatState.mediaRecorder.stream?.getTracks().forEach(t => t.stop());
+    const blob = new Blob(chatState.audioChunks, { type: 'audio/webm;codecs=opus' });
+    chatState.recording = false;
+    chatState.audioChunks = [];
+    clearInterval(chatState.recordingTimer);
+    renderNormalInputUI();
+    if (blob.size > 0) sendChatAudio(phone, blob);
+  };
+  chatState.mediaRecorder.stop();
+}
+
+function renderRecordingUI() {
+  const bar = document.querySelector('.chat-input-bar');
+  if (!bar) return;
+  bar.innerHTML = `
+    <button class="btn-send" id="rec-cancel" title="Cancelar" style="color:#ef5350"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></button>
+    <div class="rec-indicator"><span class="rec-dot"></span><span id="rec-timer">0:00</span></div>
+    <button class="btn-send" id="rec-send" title="Enviar audio" style="color:#00a884"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg></button>
+  `;
+  document.getElementById('rec-cancel').onclick = cancelRecording;
+  document.getElementById('rec-send').onclick = () => stopAndSendRecording(chatState.selectedPhone);
+}
+
+function renderNormalInputUI() {
+  const bar = document.querySelector('.chat-input-bar');
+  if (!bar) return;
+  bar.innerHTML = `
+    <button class="btn-send btn-attach" id="btn-attach" title="Adjuntar imagen"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647a5.58 5.58 0 003.972-1.645l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.501.501 1.134.79 1.737.79.558 0 1.031-.224 1.37-.564l5.582-5.58a.747.747 0 10-1.055-1.06l-5.58 5.58c-.172.172-.42.156-.614-.04-.508-.51-.427-1.122-.07-1.478l7.916-7.916c.866-.866 2.358-.764 3.46.34.556.557.876 1.203.918 1.818.036.526-.176 1.047-.595 1.466L10.11 18.526a4.09 4.09 0 01-2.913 1.205 4.09 4.09 0 01-2.913-1.205 4.09 4.09 0 01-1.205-2.913c0-1.1.428-2.134 1.205-2.911l8.647-8.646a.747.747 0 00-1.055-1.06l-8.647 8.646A5.58 5.58 0 001.816 15.556z"/></svg></button>
+    <input type="file" id="chat-file-input" accept="image/*" style="display:none">
+    <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
+    <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg></button>
+    <button class="btn-send btn-mic" id="btn-mic" title="Grabar audio"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M11.999 14.942c2.001 0 3.531-1.53 3.531-3.531V4.35c0-2.001-1.53-3.531-3.531-3.531S8.469 2.35 8.469 4.35v7.061c0 2.001 1.53 3.531 3.53 3.531zm6.238-3.53c0 3.531-2.942 6.002-6.238 6.002s-6.238-2.471-6.238-6.002H4.761c0 3.885 3.118 7.061 7.003 7.414v3.174h.471v-3.174c3.885-.353 7.003-3.529 7.003-7.414h-1z"/></svg></button>
+  `;
+  bindChatConversation();
+}
+
+// ===== Bulk messaging =====
+async function sendBulkMessage(labelIds, message) {
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ label_ids: labelIds, message })
+    });
+    const j = await r.json();
+    if (!r.ok) { toast('Error: ' + (j.error || 'fallo')); return j; }
+    toast(`Enviados: ${j.sent} | Fallidos: ${j.failed}`);
+    return j;
+  } catch (e) { toast('Error de red'); return null; }
 }
 
 // SVG tick icons (WA-style)
@@ -2761,33 +2988,90 @@ function formatPhoneDisplay(phone) {
   return '+' + s;
 }
 
+function renderContactLabelChips(phone) {
+  const ids = chatState.contactLabels[phone] || [];
+  if (!ids.length) return '';
+  return ids.map(id => {
+    const l = chatState.labels.find(lb => lb.id === id);
+    if (!l) return '';
+    return `<span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>`;
+  }).join('');
+}
+
+function renderLabelFilterBar() {
+  if (!chatState.labels.length) return '';
+  return `<div class="label-filter-bar" id="label-filter-bar">
+    ${chatState.labels.map(l => {
+      const active = chatState.filterLabels.includes(l.id);
+      return `<button class="label-filter-chip${active ? ' active' : ''}" data-label-id="${l.id}" style="--lc:${l.color}">${escapeHtml(l.name)}</button>`;
+    }).join('')}
+    ${chatState.filterLabels.length ? `<button class="label-filter-clear" id="clear-label-filter">Limpiar</button>` : ''}
+  </div>`;
+}
+
+function renderBulkSection() {
+  return `<div class="bulk-section" id="bulk-section" style="display:none">
+    <div class="bulk-header">
+      <h4>Mensaje masivo</h4>
+      <button class="btn-send" id="bulk-close" style="font-size:18px;width:28px;height:28px">&times;</button>
+    </div>
+    <div class="bulk-labels" id="bulk-labels">
+      <p style="color:#8696a0;font-size:13px;margin-bottom:6px">Enviar a contactos con etiqueta:</p>
+      ${chatState.labels.map(l => `<label class="bulk-label-check"><input type="checkbox" value="${l.id}" class="bulk-label-cb"><span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span></label>`).join('')}
+    </div>
+    <div id="bulk-count" style="color:#8696a0;font-size:12px;margin:6px 0"></div>
+    <textarea id="bulk-msg" placeholder="Escribí el mensaje..." rows="3" class="bulk-textarea"></textarea>
+    <button class="btn btn-primary" id="bulk-send-btn" style="margin-top:8px;width:100%">Enviar masivo</button>
+    <div id="bulk-result" style="margin-top:6px;font-size:13px"></div>
+  </div>`;
+}
+
 function renderChat() {
   if (!isAdmin()) {
     return `<div class="page-head"><h1>Chat WhatsApp</h1></div><div class="error">No autorizado. Logueate como Gaspar.</div>`;
   }
   const search = chatState.search.toLowerCase();
-  const filtered = search
-    ? chatState.contacts.filter(c =>
-        (c.name || '').toLowerCase().includes(search) ||
-        c.phone.includes(search) ||
-        (c.lastMsg || '').toLowerCase().includes(search))
-    : chatState.contacts;
+  let filtered = chatState.contacts;
+  if (search) {
+    filtered = filtered.filter(c =>
+      (c.name || '').toLowerCase().includes(search) ||
+      c.phone.includes(search) ||
+      (c.lastMsg || '').toLowerCase().includes(search));
+  }
+  // Filter by labels
+  if (chatState.filterLabels.length) {
+    filtered = filtered.filter(c => {
+      const cLabels = chatState.contactLabels[c.phone] || [];
+      return chatState.filterLabels.every(lid => cLabels.includes(lid));
+    });
+  }
 
   return `
     <div class="chat-layout">
       <div class="chat-contacts">
         <div class="chat-contacts-header">
           <div class="my-avatar"></div>
-          <button class="btn-send" id="chat-refresh" style="width:34px;height:34px;font-size:16px" title="Actualizar">↻</button>
+          <div style="display:flex;gap:4px">
+            <button class="btn-send" id="btn-bulk" style="width:34px;height:34px;font-size:14px" title="Mensaje masivo">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/><path d="M7 9h2v2H7zM11 9h2v2h-2zM15 9h2v2h-2z"/></svg>
+            </button>
+            <button class="btn-send" id="btn-manage-labels" style="width:34px;height:34px;font-size:14px" title="Gestionar etiquetas">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg>
+            </button>
+            <button class="btn-send" id="btn-manage-qr" style="width:34px;height:34px;font-size:14px" title="Respuestas rápidas">/ </button>
+            <button class="btn-send" id="chat-refresh" style="width:34px;height:34px;font-size:16px" title="Actualizar">↻</button>
+          </div>
         </div>
         <div class="chat-contacts-search">
           <input type="text" id="chat-search" placeholder="Buscar o empezar un chat nuevo" value="${escapeHtml(chatState.search)}">
         </div>
+        ${renderLabelFilterBar()}
         <div class="chat-contact-list" id="chat-contact-list">
           ${chatState.loading && !chatState.contacts.length ? '<div style="padding:30px;text-align:center"><div class="spinner" style="border-color:#2a3942;border-top-color:#00a884"></div></div>' : ''}
           ${filtered.map(c => renderContactItem(c)).join('')}
           ${!chatState.loading && !filtered.length ? '<div style="padding:30px;text-align:center;color:#8696a0;font-size:14px">Sin conversaciones</div>' : ''}
         </div>
+        ${renderBulkSection()}
       </div>
       <div class="chat-main">
         ${chatState.selectedPhone ? renderChatConversation() : renderChatNoSelect()}
@@ -2824,7 +3108,10 @@ function renderContactItem(c) {
         </div>
         <div class="chat-contact-bottom">
           <div class="chat-contact-preview">${previewIcon}${escapeHtml(preview)}</div>
-          ${hasUnread ? `<div class="chat-contact-unread">${c.unread}</div>` : ''}
+          <div style="display:flex;align-items:center;gap:4px">
+            ${renderContactLabelChips(c.phone)}
+            ${hasUnread ? `<div class="chat-contact-unread">${c.unread}</div>` : ''}
+          </div>
         </div>
       </div>
     </div>
@@ -2856,7 +3143,11 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         <span>${msgCount} msgs</span>
+        <button class="btn-label-toggle" id="btn-labels" title="Etiquetas">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg>
+        </button>
       </div>
+      <div class="chat-label-chips" id="chat-label-chips">${renderContactLabelChips(phone)}</div>
     </div>
     <div class="chat-messages" id="chat-messages">
       ${chatState.loadingConv
@@ -2867,10 +3158,14 @@ function renderChatConversation() {
       <svg viewBox="0 0 19 20" width="18" height="18" fill="currentColor"><path d="M3.8 6.7l5.7 5.7 5.7-5.7 1.6 1.6-7.3 7.2-7.3-7.2 1.6-1.6z"/></svg>
     </button>
     <div class="chat-input-bar">
-      <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
-      <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar">
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg>
-      </button>
+      <button class="btn-send btn-attach" id="btn-attach" title="Adjuntar imagen"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647a5.58 5.58 0 003.972-1.645l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.501.501 1.134.79 1.737.79.558 0 1.031-.224 1.37-.564l5.582-5.58a.747.747 0 10-1.055-1.06l-5.58 5.58c-.172.172-.42.156-.614-.04-.508-.51-.427-1.122-.07-1.478l7.916-7.916c.866-.866 2.358-.764 3.46.34.556.557.876 1.203.918 1.818.036.526-.176 1.047-.595 1.466L10.11 18.526a4.09 4.09 0 01-2.913 1.205 4.09 4.09 0 01-2.913-1.205 4.09 4.09 0 01-1.205-2.913c0-1.1.428-2.134 1.205-2.911l8.647-8.646a.747.747 0 00-1.055-1.06l-8.647 8.646A5.58 5.58 0 001.816 15.556z"/></svg></button>
+      <input type="file" id="chat-file-input" accept="image/*" style="display:none">
+      <div class="chat-input-wrap">
+        <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
+        <div class="qr-dropdown" id="qr-dropdown" style="display:none"></div>
+      </div>
+      <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg></button>
+      <button class="btn-send btn-mic" id="btn-mic" title="Grabar audio"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M11.999 14.942c2.001 0 3.531-1.53 3.531-3.531V4.35c0-2.001-1.53-3.531-3.531-3.531S8.469 2.35 8.469 4.35v7.061c0 2.001 1.53 3.531 3.53 3.531zm6.238-3.53c0 3.531-2.942 6.002-6.238 6.002s-6.238-2.471-6.238-6.002H4.761c0 3.885 3.118 7.061 7.003 7.414v3.174h.471v-3.174c3.885-.353 7.003-3.529 7.003-7.414h-1z"/></svg></button>
     </div>
   `;
 }
@@ -3138,13 +3433,31 @@ function bindChatConversation() {
   const btn = document.getElementById('chat-send-btn');
   const msgEl = document.getElementById('chat-messages');
   const scrollBtn = document.getElementById('chat-scroll-down');
+  const attachBtn = document.getElementById('btn-attach');
+  const fileInput = document.getElementById('chat-file-input');
+  const micBtn = document.getElementById('btn-mic');
+  const labelsBtn = document.getElementById('btn-labels');
 
   if (ta) {
     ta.addEventListener('input', () => {
       ta.style.height = 'auto';
       ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+      // Quick replies dropdown
+      handleQuickReplyInput(ta);
     });
     ta.addEventListener('keydown', (e) => {
+      // Handle QR dropdown navigation
+      const dd = document.getElementById('qr-dropdown');
+      if (dd && dd.style.display !== 'none') {
+        const items = dd.querySelectorAll('.qr-item');
+        const active = dd.querySelector('.qr-item.active');
+        let idx = Array.from(items).indexOf(active);
+        if (e.key === 'ArrowDown') { e.preventDefault(); idx = Math.min(idx + 1, items.length - 1); items.forEach((el, i) => el.classList.toggle('active', i === idx)); return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); idx = Math.max(idx - 1, 0); items.forEach((el, i) => el.classList.toggle('active', i === idx)); return; }
+        if (e.key === 'Enter' && active) { e.preventDefault(); ta.value = active.dataset.qrBody; dd.style.display = 'none'; ta.dispatchEvent(new Event('input')); return; }
+        if (e.key === 'Escape') { dd.style.display = 'none'; return; }
+        if (e.key === 'Tab' && active) { e.preventDefault(); ta.value = active.dataset.qrBody; dd.style.display = 'none'; ta.dispatchEvent(new Event('input')); return; }
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         if (ta.value.trim() && !chatState.sending) {
@@ -3162,6 +3475,28 @@ function bindChatConversation() {
       }
     };
   }
+  // Attach image
+  if (attachBtn && fileInput) {
+    attachBtn.onclick = () => fileInput.click();
+    fileInput.onchange = () => {
+      const file = fileInput.files[0];
+      if (file && chatState.selectedPhone) {
+        sendChatImage(chatState.selectedPhone, file, '');
+        fileInput.value = '';
+      }
+    };
+  }
+  // Mic button
+  if (micBtn) {
+    micBtn.onclick = () => {
+      if (!chatState.selectedPhone) return;
+      startRecording(chatState.selectedPhone);
+    };
+  }
+  // Label button on header
+  if (labelsBtn) {
+    labelsBtn.onclick = () => showLabelPicker(chatState.selectedPhone);
+  }
   // Scroll-to-bottom FAB
   if (msgEl && scrollBtn) {
     msgEl.addEventListener('scroll', () => {
@@ -3174,39 +3509,99 @@ function bindChatConversation() {
   }
 }
 
-function bindChat() {
-  // Cargar contactos si no están cargados
-  if (!chatState.contacts.length && !chatState.loading) {
-    loadChatContacts().then(() => {
-      if (STATE.view === 'chat') {
-        const list = document.getElementById('chat-contact-list');
-        if (list) {
-          // Re-render contacts
-          render();
-        }
+function handleQuickReplyInput(ta) {
+  const dd = document.getElementById('qr-dropdown');
+  if (!dd) return;
+  const val = ta.value;
+  if (val.startsWith('/') && val.length >= 1) {
+    const query = val.slice(1).toLowerCase();
+    const matches = chatState.quickReplies.filter(q => !query || q.shortcut.includes(query) || q.body.toLowerCase().includes(query));
+    if (matches.length && val !== '/') {
+      dd.innerHTML = matches.slice(0, 8).map((q, i) =>
+        `<div class="qr-item${i === 0 ? ' active' : ''}" data-qr-body="${escapeHtml(q.body)}">
+          <span class="qr-shortcut">/${escapeHtml(q.shortcut)}</span>
+          <span class="qr-preview">${escapeHtml(q.body.slice(0, 60))}</span>
+        </div>`
+      ).join('');
+      dd.style.display = 'block';
+      dd.querySelectorAll('.qr-item').forEach(el => {
+        el.onclick = () => { ta.value = el.dataset.qrBody; dd.style.display = 'none'; ta.focus(); ta.dispatchEvent(new Event('input')); };
+      });
+    } else if (val === '/') {
+      // Show all quick replies
+      dd.innerHTML = chatState.quickReplies.slice(0, 10).map((q, i) =>
+        `<div class="qr-item${i === 0 ? ' active' : ''}" data-qr-body="${escapeHtml(q.body)}">
+          <span class="qr-shortcut">/${escapeHtml(q.shortcut)}</span>
+          <span class="qr-preview">${escapeHtml(q.body.slice(0, 60))}</span>
+        </div>`
+      ).join('');
+      if (chatState.quickReplies.length) dd.style.display = 'block';
+      else dd.style.display = 'none';
+      dd.querySelectorAll('.qr-item').forEach(el => {
+        el.onclick = () => { ta.value = el.dataset.qrBody; dd.style.display = 'none'; ta.focus(); ta.dispatchEvent(new Event('input')); };
+      });
+    } else {
+      dd.style.display = 'none';
+    }
+  } else {
+    dd.style.display = 'none';
+  }
+}
+
+function showLabelPicker(phone) {
+  const existing = document.getElementById('label-picker-popup');
+  if (existing) { existing.remove(); return; }
+  const cLabels = chatState.contactLabels[phone] || [];
+  const popup = document.createElement('div');
+  popup.id = 'label-picker-popup';
+  popup.className = 'label-picker-popup';
+  popup.innerHTML = `
+    <div class="label-picker-title">Etiquetas</div>
+    ${chatState.labels.map(l => `
+      <label class="label-picker-row">
+        <input type="checkbox" ${cLabels.includes(l.id) ? 'checked' : ''} data-lbl-id="${l.id}">
+        <span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>
+      </label>
+    `).join('')}
+    ${!chatState.labels.length ? '<div style="color:#8696a0;font-size:13px;padding:8px">No hay etiquetas. Crealas desde el panel izquierdo.</div>' : ''}
+  `;
+  document.querySelector('.chat-header').appendChild(popup);
+  popup.querySelectorAll('input[data-lbl-id]').forEach(cb => {
+    cb.onchange = async () => {
+      await toggleContactLabel(phone, parseInt(cb.dataset.lblId));
+      // Update chips
+      const chips = document.getElementById('chat-label-chips');
+      if (chips) chips.innerHTML = renderContactLabelChips(phone);
+    };
+  });
+  // Close on outside click
+  setTimeout(() => {
+    document.addEventListener('click', function closer(e) {
+      if (!popup.contains(e.target) && e.target.id !== 'btn-labels') {
+        popup.remove(); document.removeEventListener('click', closer);
       }
     });
+  }, 10);
+}
+
+function bindChat() {
+  // Load data
+  if (!chatState.contacts.length && !chatState.loading) {
+    Promise.all([loadChatContacts(), loadQuickReplies(), loadLabels()]).then(() => {
+      if (STATE.view === 'chat') render();
+    });
+  } else {
+    loadQuickReplies();
+    loadLabels();
   }
-  // Buscar contactos
+  // Search
   const searchInput = document.getElementById('chat-search');
   if (searchInput) {
     searchInput.oninput = () => {
       chatState.search = searchInput.value;
-      const list = document.getElementById('chat-contact-list');
-      if (list) {
-        const search = chatState.search.toLowerCase();
-        const filtered = search
-          ? chatState.contacts.filter(c =>
-              (c.name || '').toLowerCase().includes(search) ||
-              c.phone.includes(search) ||
-              (c.lastMsg || '').toLowerCase().includes(search))
-          : chatState.contacts;
-        list.innerHTML = filtered.map(c => renderContactItem(c)).join('');
-        bindChatContactClicks();
-      }
+      refreshContactList();
     };
   }
-  // Click en contacto
   bindChatContactClicks();
   // Refresh
   const refreshBtn = document.getElementById('chat-refresh');
@@ -3216,38 +3611,173 @@ function bindChat() {
       if (STATE.view === 'chat') render();
     };
   }
-  // Bind conversation if one is selected
+  // Label filter chips
+  document.querySelectorAll('.label-filter-chip').forEach(btn => {
+    btn.onclick = () => {
+      const id = parseInt(btn.dataset.labelId);
+      if (chatState.filterLabels.includes(id)) {
+        chatState.filterLabels = chatState.filterLabels.filter(l => l !== id);
+      } else {
+        chatState.filterLabels.push(id);
+      }
+      render();
+    };
+  });
+  const clearFilter = document.getElementById('clear-label-filter');
+  if (clearFilter) clearFilter.onclick = () => { chatState.filterLabels = []; render(); };
+  // Manage labels button
+  const manageLabelsBtn = document.getElementById('btn-manage-labels');
+  if (manageLabelsBtn) manageLabelsBtn.onclick = () => showManageLabelsModal();
+  // Manage quick replies button
+  const manageQrBtn = document.getElementById('btn-manage-qr');
+  if (manageQrBtn) manageQrBtn.onclick = () => showManageQRModal();
+  // Bulk messaging button
+  const bulkBtn = document.getElementById('btn-bulk');
+  if (bulkBtn) bulkBtn.onclick = () => {
+    const sec = document.getElementById('bulk-section');
+    if (sec) sec.style.display = sec.style.display === 'none' ? 'block' : 'none';
+  };
+  bindBulkSection();
   if (chatState.selectedPhone) bindChatConversation();
-  // Auto-poll cada 15 segundos
+  // Poll
   clearInterval(chatState.pollTimer);
   chatState.pollTimer = setInterval(async () => {
     if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
     const prevMsgCount = chatState.messages.length;
     await loadChatContacts();
     if (STATE.view === 'chat') {
-      // Update contact list without losing search or scroll
-      const list = document.getElementById('chat-contact-list');
-      if (list) {
-        const search = chatState.search.toLowerCase();
-        const filtered = search
-          ? chatState.contacts.filter(c =>
-              (c.name || '').toLowerCase().includes(search) ||
-              c.phone.includes(search))
-          : chatState.contacts;
-        list.innerHTML = filtered.map(c => renderContactItem(c)).join('');
-        bindChatContactClicks();
-      }
-      // If conversation is open, only update if new messages arrived
+      refreshContactList();
       if (chatState.selectedPhone && chatState.messages.length > prevMsgCount) {
         const msgEl = document.getElementById('chat-messages');
         const wasAtBottom = msgEl && (msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 80);
         renderChatMessages();
-        // Only auto-scroll if user was near the bottom
         if (wasAtBottom && msgEl) msgEl.scrollTop = msgEl.scrollHeight;
       }
       updateUnreadBadge();
     }
   }, 12000);
+}
+
+function refreshContactList() {
+  const list = document.getElementById('chat-contact-list');
+  if (!list) return;
+  const search = chatState.search.toLowerCase();
+  let filtered = chatState.contacts;
+  if (search) filtered = filtered.filter(c => (c.name || '').toLowerCase().includes(search) || c.phone.includes(search) || (c.lastMsg || '').toLowerCase().includes(search));
+  if (chatState.filterLabels.length) filtered = filtered.filter(c => { const cl = chatState.contactLabels[c.phone] || []; return chatState.filterLabels.every(lid => cl.includes(lid)); });
+  list.innerHTML = filtered.map(c => renderContactItem(c)).join('');
+  bindChatContactClicks();
+}
+
+function bindBulkSection() {
+  const closeBtn = document.getElementById('bulk-close');
+  if (closeBtn) closeBtn.onclick = () => { document.getElementById('bulk-section').style.display = 'none'; };
+  // Count contacts when labels are checked
+  document.querySelectorAll('.bulk-label-cb').forEach(cb => {
+    cb.onchange = () => {
+      const checked = Array.from(document.querySelectorAll('.bulk-label-cb:checked')).map(c => parseInt(c.value));
+      if (!checked.length) { document.getElementById('bulk-count').textContent = ''; return; }
+      const phones = new Set();
+      for (const ph of Object.keys(chatState.contactLabels)) {
+        const cl = chatState.contactLabels[ph];
+        if (checked.some(lid => cl.includes(lid))) phones.add(ph);
+      }
+      document.getElementById('bulk-count').textContent = `${phones.size} contacto(s) seleccionados`;
+    };
+  });
+  const sendBtn = document.getElementById('bulk-send-btn');
+  if (sendBtn) sendBtn.onclick = async () => {
+    const checked = Array.from(document.querySelectorAll('.bulk-label-cb:checked')).map(c => parseInt(c.value));
+    const msg = document.getElementById('bulk-msg')?.value?.trim();
+    if (!checked.length) { toast('Seleccioná al menos una etiqueta'); return; }
+    if (!msg) { toast('Escribí un mensaje'); return; }
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Enviando...';
+    const result = await sendBulkMessage(checked, msg);
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Enviar masivo';
+    const resEl = document.getElementById('bulk-result');
+    if (resEl && result) resEl.innerHTML = `<span style="color:#00a884">Enviados: ${result.sent}</span>${result.failed ? ` | <span style="color:#ef5350">Fallidos: ${result.failed}</span>` : ''}`;
+  };
+}
+
+function showManageLabelsModal() {
+  const LABEL_COLORS = ['#ef5350','#ff7043','#ffa726','#ffca28','#66bb6a','#26a69a','#42a5f5','#5c6bc0','#ab47bc','#ec407a','#8d6e63','#78909c'];
+  const content = `
+    <h3 style="margin-bottom:12px">Gestionar etiquetas</h3>
+    <div style="margin-bottom:12px">
+      ${chatState.labels.map(l => `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>
+          <button class="btn-send" style="width:24px;height:24px;font-size:14px;color:#ef5350" data-del-label="${l.id}">&times;</button>
+        </div>
+      `).join('')}
+      ${!chatState.labels.length ? '<p style="color:#8696a0;font-size:13px">No hay etiquetas todavía</p>' : ''}
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+      ${LABEL_COLORS.map(c => `<button class="label-color-pick" data-color="${c}" style="width:24px;height:24px;border-radius:50%;border:2px solid transparent;background:${c};cursor:pointer"></button>`).join('')}
+    </div>
+    <div style="display:flex;gap:6px">
+      <input type="text" id="new-label-name" placeholder="Nombre..." style="flex:1;padding:6px 10px;background:#2a3942;border:none;color:#e9edef;border-radius:6px;font-size:14px">
+      <button class="btn btn-primary" id="add-label-btn" style="padding:6px 14px">Crear</button>
+    </div>
+  `;
+  openDrawer('Etiquetas', content);
+  let selectedColor = LABEL_COLORS[0];
+  document.querySelectorAll('.label-color-pick').forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll('.label-color-pick').forEach(b => b.style.borderColor = 'transparent');
+      btn.style.borderColor = '#fff';
+      selectedColor = btn.dataset.color;
+    };
+  });
+  document.querySelectorAll('[data-del-label]').forEach(btn => {
+    btn.onclick = async () => { await deleteLabel(parseInt(btn.dataset.delLabel)); showManageLabelsModal(); render(); };
+  });
+  const addBtn = document.getElementById('add-label-btn');
+  if (addBtn) addBtn.onclick = async () => {
+    const name = document.getElementById('new-label-name')?.value?.trim();
+    if (!name) return;
+    await saveLabel(name, selectedColor);
+    showManageLabelsModal();
+    render();
+  };
+}
+
+function showManageQRModal() {
+  const content = `
+    <h3 style="margin-bottom:12px">Respuestas rápidas</h3>
+    <p style="color:#8696a0;font-size:13px;margin-bottom:12px">Escribí <b>/</b> en el chat para ver tus respuestas guardadas</p>
+    <div style="margin-bottom:12px">
+      ${chatState.quickReplies.map(q => `
+        <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;padding:8px;background:#202c33;border-radius:8px">
+          <div style="flex:1;min-width:0">
+            <div style="color:#00a884;font-size:13px;font-weight:600">/${escapeHtml(q.shortcut)}</div>
+            <div style="color:#e9edef;font-size:14px;margin-top:2px;white-space:pre-wrap">${escapeHtml(q.body)}</div>
+          </div>
+          <button class="btn-send" style="width:24px;height:24px;font-size:14px;color:#ef5350;flex-shrink:0" data-del-qr="${q.id}">&times;</button>
+        </div>
+      `).join('')}
+      ${!chatState.quickReplies.length ? '<p style="color:#8696a0;font-size:13px">No hay respuestas guardadas</p>' : ''}
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <input type="text" id="new-qr-shortcut" placeholder="Atajo (ej: saludo)" style="padding:6px 10px;background:#2a3942;border:none;color:#e9edef;border-radius:6px;font-size:14px">
+      <textarea id="new-qr-body" placeholder="Texto del mensaje..." rows="3" style="padding:6px 10px;background:#2a3942;border:none;color:#e9edef;border-radius:6px;font-size:14px;resize:vertical;font-family:inherit"></textarea>
+      <button class="btn btn-primary" id="add-qr-btn" style="padding:6px 14px">Guardar respuesta</button>
+    </div>
+  `;
+  openDrawer('Respuestas rápidas', content);
+  document.querySelectorAll('[data-del-qr]').forEach(btn => {
+    btn.onclick = async () => { await deleteQuickReply(parseInt(btn.dataset.delQr)); showManageQRModal(); };
+  });
+  const addBtn = document.getElementById('add-qr-btn');
+  if (addBtn) addBtn.onclick = async () => {
+    const shortcut = document.getElementById('new-qr-shortcut')?.value?.trim();
+    const body = document.getElementById('new-qr-body')?.value?.trim();
+    if (!shortcut || !body) { toast('Completá atajo y mensaje'); return; }
+    await saveQuickReply(shortcut, body);
+    showManageQRModal();
+  };
 }
 
 function bindChatContactClicks() {
