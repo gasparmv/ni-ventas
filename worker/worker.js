@@ -151,6 +151,21 @@ async function downloadMedia(env, mediaId) {
   }
 }
 
+// ===== Audio transcription (Whisper via Workers AI) =====
+async function transcribeAudio(env, r2Key) {
+  if (!env.AI || !env.MEDIA || !r2Key) return null;
+  try {
+    const obj = await env.MEDIA.get(r2Key);
+    if (!obj) return null;
+    const bytes = await obj.arrayBuffer();
+    const result = await env.AI.run('@cf/openai/whisper', { audio: [...new Uint8Array(bytes)] });
+    return result?.text || null;
+  } catch (e) {
+    console.error('transcription error:', e);
+    return null;
+  }
+}
+
 async function logWaEvent(env, { to, kind, ref, ok, messageId, error }) {
   try {
     await env.DB.prepare(
@@ -243,6 +258,13 @@ export default {
                   try {
                     const dl = await downloadMedia(env, mediaUrl);
                     if (dl) r2Key = dl.key;
+                  } catch (_) {}
+                }
+                // Transcribe audio messages
+                if (msgType === 'audio' && r2Key && env.AI) {
+                  try {
+                    const transcript = await transcribeAudio(env, r2Key);
+                    if (transcript) msgBody = '[audio] ' + transcript;
                   } catch (_) {}
                 }
                 try {

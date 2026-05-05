@@ -13,6 +13,9 @@ binding = "DB"
 database_name = "ni-ventas"
 database_id = "bf9f0a63-0a68-45bd-b65b-d78ab61f0924"
 
+[ai]
+binding = "AI"
+
 [[r2_buckets]]
 binding = "MEDIA"
 bucket_name = "ni-ventas-media"
