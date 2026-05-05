@@ -445,7 +445,13 @@ export default {
 
     // ----- Admin (requiere Bearer) -----
     if (path.startsWith('/admin/')) {
-      const session = await getSession(env, request);
+      // Allow token via query param for resources loaded by <img>, <audio>, etc.
+      let session = await getSession(env, request);
+      if (!session && url.searchParams.get('token')) {
+        const qToken = url.searchParams.get('token');
+        const row = await env.DB.prepare('SELECT user, expires_at FROM sessions WHERE token = ?').bind(qToken).first();
+        if (row && new Date(row.expires_at) >= new Date()) session = { token: qToken, user: row.user };
+      }
       if (!session) return unauthorized();
 
       if (request.method === 'GET' && path === '/admin/activity') {
@@ -457,9 +463,16 @@ export default {
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const { to, body: text } = body || {};
         if (!to || !text) return json({ error: 'missing fields (to, body)' }, 400);
+        const num = normalizeArPhone(to);
         const r = await waSendText(env, to, text);
         await logWaEvent(env, { to, kind: 'text', ref: '', ok: r.ok, messageId: r.id, error: r.error });
         if (!r.ok) return json({ error: r.error, raw: r.raw }, r.status || 500);
+        // Guardar en wa_messages para que aparezca en el chat
+        try {
+          await env.DB.prepare(
+            'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, '', 'text', String(text), '', '', 'sent').run();
+        } catch (_) {}
         return json({ id: r.id });
       }
 
@@ -500,6 +513,71 @@ export default {
           `SELECT id, ts, wamid, direction, phone, sender_name, msg_type, body, context_id, status FROM wa_messages WHERE ${where} ORDER BY ts DESC LIMIT ?`
         ).bind(...params, limit).all();
         return json({ messages: rs.results || [] });
+      }
+
+      // Foto de perfil de WhatsApp (proxy cache)
+      if (request.method === 'GET' && path === '/admin/wa/profile-pic') {
+        const phone = url.searchParams.get('phone');
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        if (!env.WA_TOKEN || !env.WA_PHONE_NUMBER_ID) return json({ error: 'WA not configured' }, 500);
+        const v = env.WA_API_VERSION || 'v25.0';
+        // Check R2 cache first
+        const cacheKey = `wa/profile/${phone}.jpg`;
+        if (env.MEDIA) {
+          const cached = await env.MEDIA.get(cacheKey);
+          if (cached) {
+            return new Response(cached.body, {
+              headers: {
+                ...cors(),
+                'Content-Type': 'image/jpeg',
+                'Cache-Control': 'public, max-age=86400'
+              }
+            });
+          }
+        }
+        try {
+          // Get profile picture URL from WhatsApp Business API
+          const contactResp = await fetch(
+            `https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/contacts`,
+            {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${env.WA_TOKEN}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ blocking: 'wait', contacts: ['+' + phone], force_check: true })
+            }
+          );
+          const contactData = await contactResp.json();
+          const waId = contactData?.contacts?.[0]?.wa_id;
+          if (!waId) return json({ url: null });
+          // Get profile picture
+          const picResp = await fetch(
+            `https://graph.facebook.com/${v}/${waId}/profile_picture?redirect=false`,
+            { headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` } }
+          );
+          const picData = await picResp.json();
+          const picUrl = picData?.data?.url || picData?.url;
+          if (!picUrl) return json({ url: null });
+          // Download and cache in R2
+          const imgResp = await fetch(picUrl, {
+            headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
+          });
+          if (imgResp.ok && env.MEDIA) {
+            const imgBuf = await imgResp.arrayBuffer();
+            await env.MEDIA.put(cacheKey, imgBuf, {
+              httpMetadata: { contentType: 'image/jpeg' },
+              customMetadata: { phone, cached: new Date().toISOString() }
+            });
+            return new Response(imgBuf, {
+              headers: {
+                ...cors(),
+                'Content-Type': 'image/jpeg',
+                'Cache-Control': 'public, max-age=86400'
+              }
+            });
+          }
+          return json({ url: picUrl });
+        } catch (e) {
+          return json({ url: null, error: e.message });
+        }
       }
 
       // Servir medios desde R2

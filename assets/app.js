@@ -941,6 +941,7 @@ function render() {
     else if (v === 'seguimientos') document.getElementById('main').innerHTML = renderSeguimientos();
     else if (v === 'panel-joaco')   document.getElementById('main').innerHTML = renderPanelJoaco();
     else if (v === 'actividad')    document.getElementById('main').innerHTML = renderActividad();
+    else if (v === 'chat')         document.getElementById('main').innerHTML = renderChat();
     else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
@@ -952,6 +953,7 @@ function render() {
   if (STATE.view === 'dashboard') drawCharts();
   if (STATE.view === 'panel-joaco') bindPanelJoaco();
   if (STATE.view === 'actividad') bindActividad();
+  if (STATE.view === 'chat') bindChat();
   if (STATE.view === 'admin') bindAdmin();
 }
 
@@ -989,6 +991,7 @@ function renderShell() {
           ${STATE.loaded ? (() => { const c = getPanelJoacoCount(); return c ? '<span class="badge">' + c + '</span>' : ''; })() : ''}
         </button>
         <button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>
+        ${isAdmin() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
       </nav>
       <div class="sidebar-foot">
@@ -2478,6 +2481,490 @@ function toast(msg) {
   const t = document.getElementById('toast'); if (!t) return;
   t.textContent = msg; t.classList.add('show');
   clearTimeout(window.__tt); window.__tt = setTimeout(()=>t.classList.remove('show'), 1800);
+}
+
+// ============ CHAT WHATSAPP ============
+const chatState = {
+  contacts: [],       // [{phone, name, lastMsg, lastTs, unread}]
+  messages: [],       // mensajes del contacto seleccionado
+  selectedPhone: null,
+  selectedName: '',
+  loading: false,
+  sending: false,
+  search: '',
+  pollTimer: null,
+  profilePics: {},    // phone → url (or 'none')
+  picLoading: new Set()
+};
+
+// SVG icon for default avatar (WhatsApp-style person silhouette)
+const WA_DEFAULT_AVATAR_SVG = `<svg viewBox="0 0 212 212"><path fill="#cfd7dc" d="M106 0C47.5 0 0 47.5 0 106s47.5 106 106 106 106-47.5 106-106S164.5 0 106 0zm0 28c23.4 0 42.4 19 42.4 42.4S129.4 112.8 106 112.8s-42.4-19-42.4-42.4S82.6 28 106 28zm0 150.8c-26.5 0-50-13.5-63.7-34 .3-21.1 42.5-32.7 63.7-32.7s63.3 11.5 63.7 32.7c-13.7 20.5-37.2 34-63.7 34z"/></svg>`;
+
+function getAvatarHtml(phone, name, size) {
+  const s = size || 49;
+  const pic = chatState.profilePics[phone];
+  if (pic && pic !== 'none') {
+    return `<div class="chat-contact-avatar" style="width:${s}px;height:${s}px"><img src="${pic}" alt="" onerror="this.parentElement.innerHTML='<div class=\\'avatar-default\\'>${WA_DEFAULT_AVATAR_SVG}</div>'"></div>`;
+  }
+  return `<div class="chat-contact-avatar" style="width:${s}px;height:${s}px"><div class="avatar-default">${WA_DEFAULT_AVATAR_SVG}</div></div>`;
+}
+
+function loadProfilePic(phone) {
+  if (chatState.profilePics[phone] || chatState.picLoading.has(phone)) return;
+  chatState.picLoading.add(phone);
+  // Try to load from cached R2 first (via admin/media endpoint), then profile-pic endpoint
+  const picUrl = CONFIG.trackerUrl + '/admin/wa/profile-pic?phone=' + encodeURIComponent(phone);
+  fetch(picUrl, { headers: authHeaders() })
+    .then(r => {
+      if (r.ok && r.headers.get('content-type')?.includes('image')) {
+        return r.blob().then(blob => {
+          const url = URL.createObjectURL(blob);
+          chatState.profilePics[phone] = url;
+          // Update all avatars for this phone in the DOM
+          document.querySelectorAll(`[data-avatar-phone="${phone}"]`).forEach(el => {
+            el.innerHTML = `<img src="${url}" alt="">`;
+          });
+        });
+      }
+      return r.json().then(j => {
+        chatState.profilePics[phone] = j?.url || 'none';
+        if (j?.url) {
+          document.querySelectorAll(`[data-avatar-phone="${phone}"]`).forEach(el => {
+            el.innerHTML = `<img src="${j.url}" alt="">`;
+          });
+        }
+      });
+    })
+    .catch(() => { chatState.profilePics[phone] = 'none'; })
+    .finally(() => chatState.picLoading.delete(phone));
+}
+
+async function loadChatContacts() {
+  if (!isAdmin()) return;
+  chatState.loading = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?limit=5000', {
+      headers: authHeaders()
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const msgs = j.messages || [];
+    // Agrupar por teléfono
+    const byPhone = new Map();
+    for (const m of msgs) {
+      if (!m.phone || m.msg_type === 'status') continue;
+      if (!byPhone.has(m.phone)) {
+        byPhone.set(m.phone, { phone: m.phone, name: m.sender_name || '', messages: [], lastTs: m.ts });
+      }
+      const c = byPhone.get(m.phone);
+      c.messages.push(m);
+      if (m.sender_name && !c.name) c.name = m.sender_name;
+      if (m.ts > c.lastTs) c.lastTs = m.ts;
+    }
+    // Ordenar contactos por último mensaje
+    chatState.contacts = Array.from(byPhone.values())
+      .map(c => {
+        c.messages.sort((a, b) => a.ts.localeCompare(b.ts));
+        const last = c.messages[c.messages.length - 1];
+        return {
+          phone: c.phone,
+          name: c.name,
+          lastMsg: last ? (last.body || `[${last.msg_type}]`).slice(0, 60) : '',
+          lastTs: c.lastTs,
+          lastDir: last ? last.direction : ''
+        };
+      })
+      .sort((a, b) => b.lastTs.localeCompare(a.lastTs));
+    // Si hay contacto seleccionado, actualizar sus mensajes
+    if (chatState.selectedPhone) {
+      const c = byPhone.get(chatState.selectedPhone);
+      chatState.messages = c ? c.messages : [];
+    }
+  } catch (e) {
+    console.error('chat load error:', e);
+  } finally {
+    chatState.loading = false;
+  }
+}
+
+async function loadChatMessages(phone) {
+  if (!isAdmin() || !phone) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?phone=' + encodeURIComponent(phone) + '&limit=500', {
+      headers: authHeaders()
+    });
+    if (!r.ok) return;
+    const j = await r.json();
+    chatState.messages = (j.messages || []).filter(m => m.msg_type !== 'status').sort((a, b) => a.ts.localeCompare(b.ts));
+  } catch (e) {
+    console.error('chat messages error:', e);
+  }
+}
+
+async function sendChatMessage(phone, text) {
+  if (!isAdmin() || !phone || !text.trim()) return;
+  chatState.sending = true;
+  updateChatInputState();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ to: phone, body: text.trim() })
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      toast('Error: ' + (j.error || 'no se pudo enviar'));
+      return;
+    }
+    // Agregar mensaje local para feedback inmediato
+    chatState.messages.push({
+      ts: new Date().toISOString(),
+      wamid: j.id || '',
+      direction: 'outbound',
+      phone: phone,
+      sender_name: '',
+      msg_type: 'text',
+      body: text.trim(),
+      status: 'sent'
+    });
+    renderChatMessages();
+    // Limpiar input
+    const ta = document.getElementById('chat-input');
+    if (ta) { ta.value = ''; ta.style.height = 'auto'; }
+    toast('Mensaje enviado');
+  } catch (e) {
+    toast('Error de red al enviar');
+  } finally {
+    chatState.sending = false;
+    updateChatInputState();
+  }
+}
+
+function updateChatInputState() {
+  const btn = document.getElementById('chat-send-btn');
+  if (btn) btn.disabled = chatState.sending;
+}
+
+function formatChatTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const msgDate = ts.slice(0, 10);
+  const time = d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+  if (msgDate === today) return time;
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (msgDate === yesterday.toISOString().slice(0, 10)) return 'Ayer ' + time;
+  return d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }) + ' ' + time;
+}
+
+function formatChatDate(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const msgDate = ts.slice(0, 10);
+  if (msgDate === today) return 'Hoy';
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (msgDate === yesterday.toISOString().slice(0, 10)) return 'Ayer';
+  return d.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' });
+}
+
+function formatPhoneDisplay(phone) {
+  if (!phone) return '';
+  // 549XXXXXXXXXX → +54 9 XX XXXX-XXXX
+  const s = String(phone);
+  if (s.startsWith('549') && s.length >= 12) {
+    const area = s.slice(3, 5);
+    const rest = s.slice(5);
+    return `+54 9 ${area} ${rest.slice(0, 4)}-${rest.slice(4)}`;
+  }
+  return '+' + s;
+}
+
+function renderChat() {
+  if (!isAdmin()) {
+    return `<div class="page-head"><h1>Chat WhatsApp</h1></div><div class="error">No autorizado. Logueate como Gaspar.</div>`;
+  }
+  const search = chatState.search.toLowerCase();
+  const filtered = search
+    ? chatState.contacts.filter(c =>
+        (c.name || '').toLowerCase().includes(search) ||
+        c.phone.includes(search) ||
+        (c.lastMsg || '').toLowerCase().includes(search))
+    : chatState.contacts;
+
+  return `
+    <div class="chat-layout">
+      <div class="chat-contacts">
+        <div class="chat-contacts-header">
+          <div class="my-avatar"></div>
+          <button class="btn-send" id="chat-refresh" style="width:34px;height:34px;font-size:16px" title="Actualizar">↻</button>
+        </div>
+        <div class="chat-contacts-search">
+          <input type="text" id="chat-search" placeholder="Buscar o empezar un chat nuevo" value="${escapeHtml(chatState.search)}">
+        </div>
+        <div class="chat-contact-list" id="chat-contact-list">
+          ${chatState.loading && !chatState.contacts.length ? '<div style="padding:30px;text-align:center"><div class="spinner" style="border-color:#2a3942;border-top-color:#00a884"></div></div>' : ''}
+          ${filtered.map(c => renderContactItem(c)).join('')}
+          ${!chatState.loading && !filtered.length ? '<div style="padding:30px;text-align:center;color:#8696a0;font-size:14px">Sin conversaciones</div>' : ''}
+        </div>
+      </div>
+      <div class="chat-main">
+        ${chatState.selectedPhone ? renderChatConversation() : renderChatNoSelect()}
+      </div>
+    </div>
+  `;
+}
+
+function renderContactItem(c) {
+  // Trigger profile pic load
+  loadProfilePic(c.phone);
+  const checkPrefix = c.lastDir === 'outbound' ? '<span style="color:#8696a0;margin-right:2px">✓ </span>' : '';
+  return `
+    <div class="chat-contact ${chatState.selectedPhone === c.phone ? 'active' : ''}" data-chat-phone="${escapeHtml(c.phone)}">
+      <div class="chat-contact-avatar" data-avatar-phone="${escapeHtml(c.phone)}" style="width:49px;height:49px">
+        ${chatState.profilePics[c.phone] && chatState.profilePics[c.phone] !== 'none'
+          ? `<img src="${chatState.profilePics[c.phone]}" alt="">`
+          : `<div class="avatar-default">${WA_DEFAULT_AVATAR_SVG}</div>`}
+      </div>
+      <div class="chat-contact-info">
+        <div class="chat-contact-top">
+          <div class="chat-contact-name">${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
+          <div class="chat-contact-time">${formatChatTime(c.lastTs)}</div>
+        </div>
+        <div class="chat-contact-bottom">
+          <div class="chat-contact-preview">${checkPrefix}${escapeHtml(c.lastMsg)}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderChatNoSelect() {
+  return `
+    <div class="chat-no-select">
+      <svg class="wa-icon" viewBox="0 0 303 172" fill="none"><path d="M229.565 160.229c32.647-16.908 54.907-50.96 54.907-90.142C284.472 31.356 252.117 0 213.396 0c-23.618 0-44.489 11.732-57.203 29.653-12.715-17.921-33.586-29.653-57.204-29.653C60.268 0 27.913 31.356 27.913 70.087c0 39.182 22.26 73.234 54.907 90.142H0v12h303v-12h-73.435z" fill="rgba(0,168,132,.15)"/></svg>
+      <h3>Neon Infinito Chat</h3>
+      <div>Enviá y recibí mensajes de WhatsApp desde acá</div>
+    </div>
+  `;
+}
+
+function renderChatConversation() {
+  const phone = chatState.selectedPhone;
+  const name = chatState.selectedName;
+  loadProfilePic(phone);
+  return `
+    <div class="chat-header">
+      <div class="chat-contact-avatar" data-avatar-phone="${escapeHtml(phone)}" style="width:40px;height:40px">
+        ${chatState.profilePics[phone] && chatState.profilePics[phone] !== 'none'
+          ? `<img src="${chatState.profilePics[phone]}" alt="">`
+          : `<div class="avatar-default">${WA_DEFAULT_AVATAR_SVG}</div>`}
+      </div>
+      <div>
+        <div class="chat-header-name">${escapeHtml(name || formatPhoneDisplay(phone))}</div>
+        <div class="chat-header-phone">${escapeHtml(formatPhoneDisplay(phone))}</div>
+      </div>
+    </div>
+    <div class="chat-messages" id="chat-messages">
+      ${renderChatBubbles()}
+    </div>
+    <div class="chat-input-bar">
+      <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
+      <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg>
+      </button>
+    </div>
+  `;
+}
+
+function renderChatBubbles() {
+  const msgs = chatState.messages;
+  if (!msgs.length) return '<div class="chat-empty">Sin mensajes</div>';
+  let html = '';
+  let lastDate = '';
+  let lastDir = '';
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    const msgDate = m.ts.slice(0, 10);
+    if (msgDate !== lastDate) {
+      lastDate = msgDate;
+      html += `<div class="chat-date-sep"><span>${formatChatDate(m.ts)}</span></div>`;
+      lastDir = '';
+    }
+    const dir = m.direction || 'inbound';
+    const time = new Date(m.ts).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+    // Show tail when direction changes or first message of group
+    const hasTail = dir !== lastDir;
+    lastDir = dir;
+    // Status ticks for outbound
+    let statusIcon = '';
+    if (dir === 'outbound') {
+      if (m.status === 'read') statusIcon = '<span class="chat-msg-status read">✓✓</span>';
+      else if (m.status === 'delivered') statusIcon = '<span class="chat-msg-status delivered">✓✓</span>';
+      else statusIcon = '<span class="chat-msg-status sent">✓</span>';
+    }
+    // Media (append token for auth on <img>/<audio> tags)
+    const tkParam = STATE.token ? '?token=' + encodeURIComponent(STATE.token) : '';
+    let mediaHtml = '';
+    if (m.media_url && m.msg_type === 'image') {
+      const imgSrc = m.media_url.startsWith('wa/') ? CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(m.media_url) + tkParam : m.media_url;
+      mediaHtml = `<div class="chat-msg-media"><img src="${imgSrc}" alt="" loading="lazy" onclick="window.open(this.src,'_blank')"></div>`;
+    } else if (m.media_url && m.msg_type === 'audio') {
+      const audioSrc = m.media_url.startsWith('wa/') ? CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(m.media_url) + tkParam : m.media_url;
+      mediaHtml = `<div class="chat-msg-media"><audio controls preload="none" src="${audioSrc}" style="max-width:260px"></audio></div>`;
+    } else if (m.media_url && m.msg_type === 'video') {
+      const vidSrc = m.media_url.startsWith('wa/') ? CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(m.media_url) + tkParam : m.media_url;
+      mediaHtml = `<div class="chat-msg-media"><a href="${vidSrc}" target="_blank" style="display:inline-flex;align-items:center;gap:6px">▶ Video</a></div>`;
+    } else if (m.media_url && m.msg_type === 'document') {
+      const docSrc = m.media_url.startsWith('wa/') ? CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(m.media_url) + tkParam : m.media_url;
+      mediaHtml = `<div class="chat-msg-media"><a href="${docSrc}" target="_blank" style="display:inline-flex;align-items:center;gap:6px;background:#182229;padding:8px 12px;border-radius:6px">📄 ${escapeHtml(m.body || 'Documento')}</a></div>`;
+    } else if (m.media_url && m.msg_type === 'sticker') {
+      const stkSrc = m.media_url.startsWith('wa/') ? CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(m.media_url) + tkParam : m.media_url;
+      mediaHtml = `<div class="chat-msg-media"><img src="${stkSrc}" alt="" style="max-width:150px;max-height:150px" loading="lazy"></div>`;
+    }
+    const bodyText = m.msg_type === 'document' && mediaHtml ? '' : (m.body || '');
+    html += `
+      <div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+        ${mediaHtml}
+        ${bodyText ? `<span class="chat-msg-body">${escapeHtml(bodyText).replace(/\n/g, '<br>')}</span>` : ''}
+        <span class="chat-msg-footer"><span class="chat-msg-time">${time}</span>${statusIcon}</span>
+      </div>
+    `;
+  }
+  return html;
+}
+
+function renderChatMessages() {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  container.innerHTML = renderChatBubbles();
+  container.scrollTop = container.scrollHeight;
+}
+
+async function selectChatContact(phone) {
+  chatState.selectedPhone = phone;
+  const contact = chatState.contacts.find(c => c.phone === phone);
+  chatState.selectedName = contact?.name || '';
+  // Cargar mensajes frescos
+  await loadChatMessages(phone);
+  // Re-render solo la parte del chat
+  if (STATE.view === 'chat') {
+    const main = document.querySelector('.chat-main');
+    if (main) {
+      main.innerHTML = renderChatConversation();
+      bindChatConversation();
+      // Scroll to bottom
+      const msgs = document.getElementById('chat-messages');
+      if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    }
+    // Actualizar active en la lista
+    document.querySelectorAll('.chat-contact').forEach(el => {
+      el.classList.toggle('active', el.dataset.chatPhone === phone);
+    });
+  }
+}
+
+function bindChatConversation() {
+  const ta = document.getElementById('chat-input');
+  const btn = document.getElementById('chat-send-btn');
+  if (ta) {
+    // Auto-resize textarea
+    ta.addEventListener('input', () => {
+      ta.style.height = 'auto';
+      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+    });
+    // Enter para enviar (Shift+Enter para nueva línea)
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (ta.value.trim() && !chatState.sending) {
+          sendChatMessage(chatState.selectedPhone, ta.value);
+        }
+      }
+    });
+    ta.focus();
+  }
+  if (btn) {
+    btn.onclick = () => {
+      const ta = document.getElementById('chat-input');
+      if (ta && ta.value.trim() && !chatState.sending) {
+        sendChatMessage(chatState.selectedPhone, ta.value);
+      }
+    };
+  }
+}
+
+function bindChat() {
+  // Cargar contactos si no están cargados
+  if (!chatState.contacts.length && !chatState.loading) {
+    loadChatContacts().then(() => {
+      if (STATE.view === 'chat') {
+        const list = document.getElementById('chat-contact-list');
+        if (list) {
+          // Re-render contacts
+          render();
+        }
+      }
+    });
+  }
+  // Buscar contactos
+  const searchInput = document.getElementById('chat-search');
+  if (searchInput) {
+    searchInput.oninput = () => {
+      chatState.search = searchInput.value;
+      const list = document.getElementById('chat-contact-list');
+      if (list) {
+        const search = chatState.search.toLowerCase();
+        const filtered = search
+          ? chatState.contacts.filter(c =>
+              (c.name || '').toLowerCase().includes(search) ||
+              c.phone.includes(search) ||
+              (c.lastMsg || '').toLowerCase().includes(search))
+          : chatState.contacts;
+        list.innerHTML = filtered.map(c => renderContactItem(c)).join('');
+        bindChatContactClicks();
+      }
+    };
+  }
+  // Click en contacto
+  bindChatContactClicks();
+  // Refresh
+  const refreshBtn = document.getElementById('chat-refresh');
+  if (refreshBtn) {
+    refreshBtn.onclick = async () => {
+      await loadChatContacts();
+      if (STATE.view === 'chat') render();
+    };
+  }
+  // Bind conversation if one is selected
+  if (chatState.selectedPhone) bindChatConversation();
+  // Auto-poll cada 15 segundos
+  clearInterval(chatState.pollTimer);
+  chatState.pollTimer = setInterval(async () => {
+    if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
+    await loadChatContacts();
+    if (STATE.view === 'chat') {
+      // Actualizar lista sin re-render completo
+      const list = document.getElementById('chat-contact-list');
+      if (list && !chatState.search) {
+        list.innerHTML = chatState.contacts.map(c => renderContactItem(c)).join('');
+        bindChatContactClicks();
+      }
+      // Si hay conversación abierta, actualizar mensajes
+      if (chatState.selectedPhone) {
+        renderChatMessages();
+      }
+    }
+  }, 15000);
+}
+
+function bindChatContactClicks() {
+  document.querySelectorAll('.chat-contact').forEach(el => {
+    el.onclick = () => selectChatContact(el.dataset.chatPhone);
+  });
 }
 
 window.loadAll = loadAll;
