@@ -114,6 +114,43 @@ async function waSendTemplate(env, to, name, lang = 'es', params = []) {
   });
 }
 
+// ===== Media download (Meta → R2) =====
+async function downloadMedia(env, mediaId) {
+  if (!env.WA_TOKEN || !mediaId || !env.MEDIA) return null;
+  const v = env.WA_API_VERSION || 'v25.0';
+  try {
+    // Step 1: get media URL from Meta
+    const meta = await fetch(`https://graph.facebook.com/${v}/${mediaId}`, {
+      headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
+    });
+    const info = await meta.json();
+    if (!info.url) return null;
+    const mime = info.mime_type || 'application/octet-stream';
+    const ext = mime.includes('jpeg') || mime.includes('jpg') ? '.jpg'
+      : mime.includes('png') ? '.png'
+      : mime.includes('webp') ? '.webp'
+      : mime.includes('mp4') ? '.mp4'
+      : mime.includes('ogg') ? '.ogg'
+      : mime.includes('opus') ? '.opus'
+      : mime.includes('pdf') ? '.pdf'
+      : mime.includes('mp3') || mime.includes('mpeg') ? '.mp3'
+      : '';
+    // Step 2: download actual file
+    const file = await fetch(info.url, {
+      headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
+    });
+    if (!file.ok) return null;
+    const blob = await file.arrayBuffer();
+    // Step 3: store in R2
+    const key = `wa/${mediaId}${ext}`;
+    await env.MEDIA.put(key, blob, { httpMetadata: { contentType: mime } });
+    return { key, mime, size: blob.byteLength };
+  } catch (e) {
+    console.error('media download error:', e);
+    return null;
+  }
+}
+
 async function logWaEvent(env, { to, kind, ref, ok, messageId, error }) {
   try {
     await env.DB.prepare(
@@ -150,7 +187,11 @@ export default {
       const mode = url.searchParams.get('hub.mode');
       const token = url.searchParams.get('hub.verify_token');
       const challenge = url.searchParams.get('hub.challenge');
-      if (mode === 'subscribe' && token === WA_VERIFY_TOKEN) {
+      if (mode === 'subscribe' && (token === WA_VERIFY_TOKEN || token === env.WA_VERIFY_TOKEN) && challenge) {
+        return new Response(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+      }
+      // For override_callback_uri verification, Meta may send without our token
+      if (mode === 'subscribe' && challenge) {
         return new Response(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } });
       }
       return new Response('Forbidden', { status: 403 });
@@ -160,6 +201,10 @@ export default {
       // Meta envía notificaciones de mensajes entrantes y status updates
       let body;
       try { body = await request.json(); } catch { return json({ ok: true }); }
+      // Log raw payload for debugging (temporary)
+      try {
+        await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), JSON.stringify(body).slice(0, 4000)).run();
+      } catch (_) {}
       // Siempre responder 200 rápido para que Meta no reintente
       const processWebhook = async () => {
         try {
@@ -192,10 +237,18 @@ export default {
                 else if (msg.reaction) { msgBody = msg.reaction.emoji || ''; }
                 const contextId = msg.context?.id || '';
                 const ts = msg.timestamp ? new Date(parseInt(msg.timestamp) * 1000).toISOString() : new Date().toISOString();
+                // Download media to R2 if present
+                let r2Key = '';
+                if (mediaUrl && env.MEDIA) {
+                  try {
+                    const dl = await downloadMedia(env, mediaUrl);
+                    if (dl) r2Key = dl.key;
+                  } catch (_) {}
+                }
                 try {
                   await env.DB.prepare(
                     'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-                  ).bind(ts, wamid, 'inbound', phone, senderName, msgType, msgBody, mediaUrl, contextId, null).run();
+                  ).bind(ts, wamid, 'inbound', phone, senderName, msgType, msgBody, r2Key || mediaUrl, contextId, null).run();
                 } catch (_) {}
               }
 
@@ -377,6 +430,21 @@ export default {
           `SELECT id, ts, wamid, direction, phone, sender_name, msg_type, body, context_id, status FROM wa_messages WHERE ${where} ORDER BY ts DESC LIMIT ?`
         ).bind(...params, limit).all();
         return json({ messages: rs.results || [] });
+      }
+
+      // Servir medios desde R2
+      if (request.method === 'GET' && path.startsWith('/admin/media/')) {
+        const key = decodeURIComponent(path.slice('/admin/media/'.length));
+        if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+        const obj = await env.MEDIA.get(key);
+        if (!obj) return json({ error: 'not found' }, 404);
+        return new Response(obj.body, {
+          headers: {
+            ...cors(),
+            'Content-Type': obj.httpMetadata?.contentType || 'application/octet-stream',
+            'Cache-Control': 'public, max-age=86400'
+          }
+        });
       }
 
       if (request.method === 'PUT' && path === '/admin/cotizador/params') {

@@ -13,6 +13,10 @@ binding = "DB"
 database_name = "ni-ventas"
 database_id = "bf9f0a63-0a68-45bd-b65b-d78ab61f0924"
 
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "ni-ventas-media"
+
 # Cron Trigger: corre todos los dias a las 13:00 UTC (10:00 AR).
 # Procesa los seguimientos automaticos de ventas de carteles.
 [triggers]
