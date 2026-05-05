@@ -151,6 +151,45 @@ async function downloadMedia(env, mediaId) {
   }
 }
 
+// ===== Image analysis (Vision via Workers AI) =====
+async function analyzeImage(env, r2Key) {
+  if (!env.AI || !env.MEDIA || !r2Key) return null;
+  try {
+    const obj = await env.MEDIA.get(r2Key);
+    if (!obj) return null;
+    const buf = await obj.arrayBuffer();
+    const uint8 = new Uint8Array(buf);
+    // Try uform-gen2 (image-to-text, simpler API)
+    let result;
+    try {
+      result = await env.AI.run('@cf/unum/uform-gen2-qwen-500m', {
+        image: [...uint8],
+        prompt: 'Describí esta imagen en español en 1-2 oraciones cortas. Si tiene texto o palabras, transcibilas exactamente. Si es un diseño, logo o cartel, describí qué muestra.',
+        max_tokens: 200
+      });
+    } catch (e1) {
+      // Fallback: llama vision with array format
+      try {
+        result = await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
+          image: [...uint8],
+          prompt: 'Describe this image in Spanish in 1-2 short sentences.',
+          max_tokens: 200
+        });
+      } catch (e2) {
+        console.error('both vision models failed:', e1.message, e2.message);
+        return null;
+      }
+    }
+    // Extract text from whatever format the model returns
+    if (!result) return null;
+    if (typeof result === 'string') return result;
+    return result.description || result.response || result.text || result.output || JSON.stringify(result);
+  } catch (e) {
+    console.error('image analysis error:', e);
+    return null;
+  }
+}
+
 // ===== Audio transcription (Whisper via Workers AI) =====
 async function transcribeAudio(env, r2Key) {
   if (!env.AI || !env.MEDIA || !r2Key) return null;
@@ -266,6 +305,15 @@ export default {
                     const transcript = await transcribeAudio(env, r2Key);
                     if (transcript) msgBody = '[audio] ' + transcript;
                   } catch (_) {}
+                }
+                // Analyze image messages
+                if (msgType === 'image' && r2Key && env.AI) {
+                  try {
+                    const description = await analyzeImage(env, r2Key);
+                    if (description) msgBody = (msgBody ? msgBody + ' | ' : '') + '[imagen] ' + description;
+                  } catch (imgErr) {
+                    try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'IMG_ERR: ' + (imgErr?.message || String(imgErr))).run(); } catch(_){}
+                  }
                 }
                 try {
                   await env.DB.prepare(
