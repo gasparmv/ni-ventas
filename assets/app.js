@@ -270,9 +270,12 @@ function saveToken(t) {
   else localStorage.removeItem('niventas.token');
 }
 async function setUser(name) {
-  // Si elige un usuario con acceso privilegiado y no hay token, pedir password
-  if (['Gaspar', 'Joaquín'].includes(name) && !STATE.token) {
+  // Gaspar necesita password; Joaquín se auto-loguea sin password
+  if (name === 'Gaspar' && !STATE.token) {
     const ok = await loginPrompt(name);
+    if (!ok) return;
+  } else if (name === 'Joaquín' && !STATE.token) {
+    const ok = await autoLogin(name);
     if (!ok) return;
   }
   STATE.user = name;
@@ -305,6 +308,20 @@ async function loginPrompt(userName) {
     alert('Error de login: ' + e.message);
     return false;
   }
+}
+async function autoLogin(userName) {
+  if (!CONFIG.trackerUrl) return false;
+  try {
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: userName })
+    });
+    if (!r.ok) return false;
+    const j = await r.json();
+    saveToken(j.token);
+    return true;
+  } catch (e) { return false; }
 }
 async function logout() {
   if (CONFIG.trackerUrl && STATE.token) {
@@ -984,7 +1001,7 @@ function renderShell() {
         <div class="user-pick-label">Usuario ${canAccessChat() ? '<span class="admin-tag">' + (isAdmin() ? 'admin' : 'chat') + '</span>' : ''}</div>
         <div class="user-pick-chips">
           ${STATE.users.map(u => {
-            const locked = ['Gaspar', 'Joaquín'].includes(u) && !STATE.token;
+            const locked = u === 'Gaspar' && !STATE.token;
             return `<button class="user-chip ${STATE.user===u?'active':''}" data-set-user="${escapeHtml(u)}">${locked?'🔒 ':''}${escapeHtml(u)}</button>`;
           }).join('')}
           <button class="user-chip add" data-add-user>+</button>
