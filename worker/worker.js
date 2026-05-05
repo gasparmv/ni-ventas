@@ -510,74 +510,9 @@ export default {
         if (to) { where += ' AND ts <= ?'; params.push(to); }
         if (dir === 'inbound' || dir === 'outbound') { where += ' AND direction = ?'; params.push(dir); }
         const rs = await env.DB.prepare(
-          `SELECT id, ts, wamid, direction, phone, sender_name, msg_type, body, context_id, status FROM wa_messages WHERE ${where} ORDER BY ts DESC LIMIT ?`
+          `SELECT id, ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status FROM wa_messages WHERE ${where} ORDER BY ts DESC LIMIT ?`
         ).bind(...params, limit).all();
         return json({ messages: rs.results || [] });
-      }
-
-      // Foto de perfil de WhatsApp (proxy cache)
-      if (request.method === 'GET' && path === '/admin/wa/profile-pic') {
-        const phone = url.searchParams.get('phone');
-        if (!phone) return json({ error: 'missing phone' }, 400);
-        if (!env.WA_TOKEN || !env.WA_PHONE_NUMBER_ID) return json({ error: 'WA not configured' }, 500);
-        const v = env.WA_API_VERSION || 'v25.0';
-        // Check R2 cache first
-        const cacheKey = `wa/profile/${phone}.jpg`;
-        if (env.MEDIA) {
-          const cached = await env.MEDIA.get(cacheKey);
-          if (cached) {
-            return new Response(cached.body, {
-              headers: {
-                ...cors(),
-                'Content-Type': 'image/jpeg',
-                'Cache-Control': 'public, max-age=86400'
-              }
-            });
-          }
-        }
-        try {
-          // Get profile picture URL from WhatsApp Business API
-          const contactResp = await fetch(
-            `https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/contacts`,
-            {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${env.WA_TOKEN}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ blocking: 'wait', contacts: ['+' + phone], force_check: true })
-            }
-          );
-          const contactData = await contactResp.json();
-          const waId = contactData?.contacts?.[0]?.wa_id;
-          if (!waId) return json({ url: null });
-          // Get profile picture
-          const picResp = await fetch(
-            `https://graph.facebook.com/${v}/${waId}/profile_picture?redirect=false`,
-            { headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` } }
-          );
-          const picData = await picResp.json();
-          const picUrl = picData?.data?.url || picData?.url;
-          if (!picUrl) return json({ url: null });
-          // Download and cache in R2
-          const imgResp = await fetch(picUrl, {
-            headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
-          });
-          if (imgResp.ok && env.MEDIA) {
-            const imgBuf = await imgResp.arrayBuffer();
-            await env.MEDIA.put(cacheKey, imgBuf, {
-              httpMetadata: { contentType: 'image/jpeg' },
-              customMetadata: { phone, cached: new Date().toISOString() }
-            });
-            return new Response(imgBuf, {
-              headers: {
-                ...cors(),
-                'Content-Type': 'image/jpeg',
-                'Cache-Control': 'public, max-age=86400'
-              }
-            });
-          }
-          return json({ url: picUrl });
-        } catch (e) {
-          return json({ url: null, error: e.message });
-        }
       }
 
       // Servir medios desde R2

@@ -2497,47 +2497,59 @@ const chatState = {
   picLoading: new Set()
 };
 
-// SVG icon for default avatar (WhatsApp-style person silhouette)
-const WA_DEFAULT_AVATAR_SVG = `<svg viewBox="0 0 212 212"><path fill="#cfd7dc" d="M106 0C47.5 0 0 47.5 0 106s47.5 106 106 106 106-47.5 106-106S164.5 0 106 0zm0 28c23.4 0 42.4 19 42.4 42.4S129.4 112.8 106 112.8s-42.4-19-42.4-42.4S82.6 28 106 28zm0 150.8c-26.5 0-50-13.5-63.7-34 .3-21.1 42.5-32.7 63.7-32.7s63.3 11.5 63.7 32.7c-13.7 20.5-37.2 34-63.7 34z"/></svg>`;
+// WhatsApp-style avatar colors (same 7 colors WA Web uses)
+const AVATAR_COLORS = [
+  '#00a884', // teal/green
+  '#53bdeb', // blue
+  '#ffa726', // orange
+  '#ef5350', // red
+  '#7986cb', // indigo
+  '#e91e63', // pink
+  '#009688', // dark teal
+  '#673ab7', // purple
+  '#ff7043', // deep orange
+  '#26a69a', // green-teal
+];
 
-function getAvatarHtml(phone, name, size) {
+function getAvatarColor(phone) {
+  // Consistent color based on phone hash
+  let hash = 0;
+  for (let i = 0; i < phone.length; i++) hash = ((hash << 5) - hash) + phone.charCodeAt(i);
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+}
+
+function getInitials(name, phone) {
+  if (name && name.trim()) {
+    const parts = name.trim().split(/\s+/);
+    if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+  // Use last 2 digits of phone
+  return phone.slice(-2);
+}
+
+function avatarHtml(phone, name, size) {
   const s = size || 49;
   const pic = chatState.profilePics[phone];
-  if (pic && pic !== 'none') {
-    return `<div class="chat-contact-avatar" style="width:${s}px;height:${s}px"><img src="${pic}" alt="" onerror="this.parentElement.innerHTML='<div class=\\'avatar-default\\'>${WA_DEFAULT_AVATAR_SVG}</div>'"></div>`;
+  if (pic && pic !== 'none' && pic !== 'loading') {
+    return `<div class="chat-contact-avatar" data-avatar-phone="${escapeHtml(phone)}" style="width:${s}px;height:${s}px">` +
+      `<img src="${pic}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">` +
+      `<div class="avatar-initials" style="display:none;background:${getAvatarColor(phone)}">${getInitials(name, phone)}</div></div>`;
   }
-  return `<div class="chat-contact-avatar" style="width:${s}px;height:${s}px"><div class="avatar-default">${WA_DEFAULT_AVATAR_SVG}</div></div>`;
+  return `<div class="chat-contact-avatar" data-avatar-phone="${escapeHtml(phone)}" style="width:${s}px;height:${s}px">` +
+    `<div class="avatar-initials" style="background:${getAvatarColor(phone)}">${getInitials(name, phone)}</div></div>`;
 }
 
 function loadProfilePic(phone) {
-  if (chatState.profilePics[phone] || chatState.picLoading.has(phone)) return;
-  chatState.picLoading.add(phone);
-  // Try to load from cached R2 first (via admin/media endpoint), then profile-pic endpoint
-  const picUrl = CONFIG.trackerUrl + '/admin/wa/profile-pic?phone=' + encodeURIComponent(phone);
-  fetch(picUrl, { headers: authHeaders() })
-    .then(r => {
-      if (r.ok && r.headers.get('content-type')?.includes('image')) {
-        return r.blob().then(blob => {
-          const url = URL.createObjectURL(blob);
-          chatState.profilePics[phone] = url;
-          // Update all avatars for this phone in the DOM
-          document.querySelectorAll(`[data-avatar-phone="${phone}"]`).forEach(el => {
-            el.innerHTML = `<img src="${url}" alt="">`;
-          });
-        });
-      }
-      return r.json().then(j => {
-        chatState.profilePics[phone] = j?.url || 'none';
-        if (j?.url) {
-          document.querySelectorAll(`[data-avatar-phone="${phone}"]`).forEach(el => {
-            el.innerHTML = `<img src="${j.url}" alt="">`;
-          });
-        }
-      });
-    })
-    .catch(() => { chatState.profilePics[phone] = 'none'; })
-    .finally(() => chatState.picLoading.delete(phone));
+  // WA Cloud API doesn't expose contact profile pictures.
+  // We use colored initials avatars instead (same as WA Web for contacts without pics).
+  // This function is a no-op but kept for compatibility if we add pic support later.
+  if (!chatState.profilePics[phone]) chatState.profilePics[phone] = 'none';
 }
+
+// SVG tick icons (WA-style)
+const TICK_SINGLE = `<svg viewBox="0 0 16 11"><path d="M11.071.653a.457.457 0 0 0-.304-.102.493.493 0 0 0-.381.178l-6.19 7.636-2.011-2.585a.463.463 0 0 0-.36-.186.465.465 0 0 0-.344.153.52.52 0 0 0-.132.382.516.516 0 0 0 .159.375l2.323 2.995a.478.478 0 0 0 .353.168.467.467 0 0 0 .363-.169l6.571-8.102a.482.482 0 0 0-.047-.743z" fill="currentColor"/></svg>`;
+const TICK_DOUBLE = `<svg viewBox="0 0 16 11"><path d="M11.071.653a.457.457 0 0 0-.304-.102.493.493 0 0 0-.381.178l-6.19 7.636-2.011-2.585a.463.463 0 0 0-.36-.186.465.465 0 0 0-.344.153.52.52 0 0 0-.132.382.516.516 0 0 0 .159.375l2.323 2.995a.478.478 0 0 0 .353.168.467.467 0 0 0 .363-.169l6.571-8.102a.482.482 0 0 0-.047-.743z" fill="currentColor"/><path d="M15.071.653a.457.457 0 0 0-.304-.102.493.493 0 0 0-.381.178l-6.19 7.636-1.2-1.546-.361.446 1.244 1.605a.478.478 0 0 0 .353.168.467.467 0 0 0 .363-.169l6.571-8.102a.482.482 0 0 0-.047-.743z" fill="currentColor"/></svg>`;
 
 async function loadChatContacts() {
   if (!isAdmin()) return;
@@ -2571,7 +2583,8 @@ async function loadChatContacts() {
           name: c.name,
           lastMsg: last ? (last.body || `[${last.msg_type}]`).slice(0, 60) : '',
           lastTs: c.lastTs,
-          lastDir: last ? last.direction : ''
+          lastDir: last ? last.direction : '',
+          lastType: last ? last.msg_type : ''
         };
       })
       .sort((a, b) => b.lastTs.localeCompare(a.lastTs));
@@ -2719,23 +2732,30 @@ function renderChat() {
 }
 
 function renderContactItem(c) {
-  // Trigger profile pic load
   loadProfilePic(c.phone);
-  const checkPrefix = c.lastDir === 'outbound' ? '<span style="color:#8696a0;margin-right:2px">✓ </span>' : '';
+  // Preview icons
+  let previewIcon = '';
+  if (c.lastDir === 'outbound') {
+    previewIcon = `<span class="chat-msg-status" style="margin-right:2px;color:#8696a0">${TICK_DOUBLE}</span>`;
+  }
+  // Clean preview: remove [audio] [imagen] prefixes for cleaner display
+  let preview = c.lastMsg || '';
+  if (preview.startsWith('[audio]')) preview = '🎤 Audio';
+  else if (preview.startsWith('[imagen]')) preview = '📷 Foto';
+  else if (c.lastType === 'sticker') preview = '🏷 Sticker';
+  else if (c.lastType === 'video') preview = '🎥 Video';
+  else if (c.lastType === 'document') preview = '📄 ' + preview;
+
   return `
     <div class="chat-contact ${chatState.selectedPhone === c.phone ? 'active' : ''}" data-chat-phone="${escapeHtml(c.phone)}">
-      <div class="chat-contact-avatar" data-avatar-phone="${escapeHtml(c.phone)}" style="width:49px;height:49px">
-        ${chatState.profilePics[c.phone] && chatState.profilePics[c.phone] !== 'none'
-          ? `<img src="${chatState.profilePics[c.phone]}" alt="">`
-          : `<div class="avatar-default">${WA_DEFAULT_AVATAR_SVG}</div>`}
-      </div>
+      ${avatarHtml(c.phone, c.name, 49)}
       <div class="chat-contact-info">
         <div class="chat-contact-top">
           <div class="chat-contact-name">${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
           <div class="chat-contact-time">${formatChatTime(c.lastTs)}</div>
         </div>
         <div class="chat-contact-bottom">
-          <div class="chat-contact-preview">${checkPrefix}${escapeHtml(c.lastMsg)}</div>
+          <div class="chat-contact-preview">${previewIcon}${escapeHtml(preview)}</div>
         </div>
       </div>
     </div>
@@ -2745,9 +2765,9 @@ function renderContactItem(c) {
 function renderChatNoSelect() {
   return `
     <div class="chat-no-select">
-      <svg class="wa-icon" viewBox="0 0 303 172" fill="none"><path d="M229.565 160.229c32.647-16.908 54.907-50.96 54.907-90.142C284.472 31.356 252.117 0 213.396 0c-23.618 0-44.489 11.732-57.203 29.653-12.715-17.921-33.586-29.653-57.204-29.653C60.268 0 27.913 31.356 27.913 70.087c0 39.182 22.26 73.234 54.907 90.142H0v12h303v-12h-73.435z" fill="rgba(0,168,132,.15)"/></svg>
-      <h3>Neon Infinito Chat</h3>
-      <div>Enviá y recibí mensajes de WhatsApp desde acá</div>
+      <svg viewBox="0 0 303 172" width="250" fill="none" style="opacity:.08;margin-bottom:10px"><path d="M229.565 160.229c32.647-16.908 54.907-50.96 54.907-90.142C284.472 31.356 252.117 0 213.396 0c-23.618 0-44.489 11.732-57.203 29.653-12.715-17.921-33.586-29.653-57.204-29.653C60.268 0 27.913 31.356 27.913 70.087c0 39.182 22.26 73.234 54.907 90.142H0v12h303v-12h-73.435z" fill="#e9edef"/></svg>
+      <h3>Neon Infinito</h3>
+      <p>Enviá y recibí mensajes de WhatsApp.<br>Los mensajes que envíes desde acá se guardan automáticamente.</p>
     </div>
   `;
 }
@@ -2758,11 +2778,7 @@ function renderChatConversation() {
   loadProfilePic(phone);
   return `
     <div class="chat-header">
-      <div class="chat-contact-avatar" data-avatar-phone="${escapeHtml(phone)}" style="width:40px;height:40px">
-        ${chatState.profilePics[phone] && chatState.profilePics[phone] !== 'none'
-          ? `<img src="${chatState.profilePics[phone]}" alt="">`
-          : `<div class="avatar-default">${WA_DEFAULT_AVATAR_SVG}</div>`}
-      </div>
+      ${avatarHtml(phone, name, 40)}
       <div>
         <div class="chat-header-name">${escapeHtml(name || formatPhoneDisplay(phone))}</div>
         <div class="chat-header-phone">${escapeHtml(formatPhoneDisplay(phone))}</div>
@@ -2774,10 +2790,28 @@ function renderChatConversation() {
     <div class="chat-input-bar">
       <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
       <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar">
-        <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg>
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg>
       </button>
     </div>
   `;
+}
+
+function mediaUrl(r2Key) {
+  if (!r2Key) return '';
+  const tkParam = STATE.token ? '?token=' + encodeURIComponent(STATE.token) : '';
+  if (r2Key.startsWith('wa/')) return CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(r2Key) + tkParam;
+  return r2Key;
+}
+
+function generateAudioBars() {
+  // Generate random bar heights for visual waveform
+  const count = 28;
+  let bars = '';
+  for (let i = 0; i < count; i++) {
+    const h = 3 + Math.floor(Math.random() * 23);
+    bars += `<div class="audio-bar" style="height:${h}px"></div>`;
+  }
+  return bars;
 }
 
 function renderChatBubbles() {
@@ -2796,43 +2830,127 @@ function renderChatBubbles() {
     }
     const dir = m.direction || 'inbound';
     const time = new Date(m.ts).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-    // Show tail when direction changes or first message of group
     const hasTail = dir !== lastDir;
     lastDir = dir;
-    // Status ticks for outbound
-    let statusIcon = '';
+
+    // Status ticks (SVG like WA)
+    let statusHtml = '';
     if (dir === 'outbound') {
-      if (m.status === 'read') statusIcon = '<span class="chat-msg-status read">✓✓</span>';
-      else if (m.status === 'delivered') statusIcon = '<span class="chat-msg-status delivered">✓✓</span>';
-      else statusIcon = '<span class="chat-msg-status sent">✓</span>';
+      if (m.status === 'read') statusHtml = `<span class="chat-msg-status read">${TICK_DOUBLE}</span>`;
+      else if (m.status === 'delivered') statusHtml = `<span class="chat-msg-status delivered">${TICK_DOUBLE}</span>`;
+      else statusHtml = `<span class="chat-msg-status sent">${TICK_SINGLE}</span>`;
     }
-    // Media (append token for auth on <img>/<audio> tags)
-    const tkParam = STATE.token ? '?token=' + encodeURIComponent(STATE.token) : '';
-    let mediaHtml = '';
-    if (m.media_url && m.msg_type === 'image') {
-      const imgSrc = m.media_url.startsWith('wa/') ? CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(m.media_url) + tkParam : m.media_url;
-      mediaHtml = `<div class="chat-msg-media"><img src="${imgSrc}" alt="" loading="lazy" onclick="window.open(this.src,'_blank')"></div>`;
-    } else if (m.media_url && m.msg_type === 'audio') {
-      const audioSrc = m.media_url.startsWith('wa/') ? CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(m.media_url) + tkParam : m.media_url;
-      mediaHtml = `<div class="chat-msg-media"><audio controls preload="none" src="${audioSrc}" style="max-width:260px"></audio></div>`;
-    } else if (m.media_url && m.msg_type === 'video') {
-      const vidSrc = m.media_url.startsWith('wa/') ? CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(m.media_url) + tkParam : m.media_url;
-      mediaHtml = `<div class="chat-msg-media"><a href="${vidSrc}" target="_blank" style="display:inline-flex;align-items:center;gap:6px">▶ Video</a></div>`;
-    } else if (m.media_url && m.msg_type === 'document') {
-      const docSrc = m.media_url.startsWith('wa/') ? CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(m.media_url) + tkParam : m.media_url;
-      mediaHtml = `<div class="chat-msg-media"><a href="${docSrc}" target="_blank" style="display:inline-flex;align-items:center;gap:6px;background:#182229;padding:8px 12px;border-radius:6px">📄 ${escapeHtml(m.body || 'Documento')}</a></div>`;
-    } else if (m.media_url && m.msg_type === 'sticker') {
-      const stkSrc = m.media_url.startsWith('wa/') ? CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(m.media_url) + tkParam : m.media_url;
-      mediaHtml = `<div class="chat-msg-media"><img src="${stkSrc}" alt="" style="max-width:150px;max-height:150px" loading="lazy"></div>`;
+    const footer = `<span class="chat-msg-footer"><span class="chat-msg-time">${time}</span>${statusHtml}</span>`;
+
+    // Parse body: separate actual text from [audio]/[imagen] AI annotations
+    let bodyText = m.body || '';
+    let transcript = '';
+    let imgDescription = '';
+    if (m.msg_type === 'audio' && bodyText.startsWith('[audio] ')) {
+      transcript = bodyText.slice(8);
+      bodyText = '';
     }
-    const bodyText = m.msg_type === 'document' && mediaHtml ? '' : (m.body || '');
-    html += `
-      <div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
-        ${mediaHtml}
-        ${bodyText ? `<span class="chat-msg-body">${escapeHtml(bodyText).replace(/\n/g, '<br>')}</span>` : ''}
-        <span class="chat-msg-footer"><span class="chat-msg-time">${time}</span>${statusIcon}</span>
-      </div>
-    `;
+    if (m.msg_type === 'image') {
+      const imgIdx = bodyText.indexOf('[imagen] ');
+      if (imgIdx >= 0) {
+        imgDescription = bodyText.slice(imgIdx + 9);
+        bodyText = bodyText.slice(0, imgIdx).trim();
+      }
+    }
+
+    // === STICKER ===
+    if (m.msg_type === 'sticker' && m.media_url) {
+      html += `<div class="chat-msg ${dir} sticker-msg${hasTail ? ' has-tail' : ''}">
+        <img src="${mediaUrl(m.media_url)}" alt="" style="max-width:160px;max-height:160px" loading="lazy">
+      </div>`;
+      continue;
+    }
+
+    // === IMAGE ===
+    if (m.msg_type === 'image' && m.media_url) {
+      html += `<div class="chat-msg ${dir} has-media${hasTail ? ' has-tail' : ''}">
+        <div class="chat-msg-media">
+          <img src="${mediaUrl(m.media_url)}" alt="" loading="lazy"
+               onclick="window.open(this.src,'_blank')"
+               onerror="this.outerHTML='<div class=\\'img-loading\\'>No se pudo cargar la imagen</div>'">
+        </div>
+        ${bodyText ? `<div class="chat-msg-body">${escapeHtml(bodyText).replace(/\n/g, '<br>')}</div>` : ''}
+        ${footer}
+      </div>`;
+      continue;
+    }
+
+    // === AUDIO ===
+    if (m.msg_type === 'audio' && m.media_url) {
+      const contact = chatState.contacts.find(c => c.phone === chatState.selectedPhone);
+      const aName = dir === 'inbound' ? (contact?.name || '') : 'Neon';
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+        <div class="chat-msg-audio">
+          ${avatarHtml(dir === 'inbound' ? chatState.selectedPhone : '0000', aName, 46)}
+          <div class="audio-wave">
+            <div class="audio-bars" data-audio-src="${mediaUrl(m.media_url)}">
+              ${generateAudioBars()}
+            </div>
+            <div class="audio-dur">
+              <audio preload="metadata" src="${mediaUrl(m.media_url)}" data-audio-el></audio>
+              <span data-audio-time>0:00</span>
+            </div>
+          </div>
+        </div>
+        ${transcript ? `<div class="chat-msg-transcript">"${escapeHtml(transcript)}"</div>` : ''}
+        ${footer}
+      </div>`;
+      continue;
+    }
+
+    // === VIDEO ===
+    if (m.msg_type === 'video' && m.media_url) {
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+        <div class="chat-msg-video">
+          <div class="v-icon">▶</div>
+          <div>
+            <a href="${mediaUrl(m.media_url)}" target="_blank">Video</a>
+            ${bodyText ? `<div style="font-size:12px;color:#8696a0;margin-top:2px">${escapeHtml(bodyText)}</div>` : ''}
+          </div>
+        </div>
+        ${footer}
+      </div>`;
+      continue;
+    }
+
+    // === DOCUMENT ===
+    if (m.msg_type === 'document' && m.media_url) {
+      const docName = bodyText || 'Documento';
+      const ext = m.media_url.split('.').pop()?.toUpperCase() || 'DOC';
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+        <a href="${mediaUrl(m.media_url)}" target="_blank" style="text-decoration:none">
+          <div class="chat-msg-doc">
+            <div class="doc-icon">${ext.slice(0, 4)}</div>
+            <div class="doc-name">${escapeHtml(docName)}</div>
+          </div>
+        </a>
+        ${footer}
+      </div>`;
+      continue;
+    }
+
+    // === TEXT (or any other type) ===
+    // Skip completely empty outbound bubbles (echo messages without content)
+    if (!bodyText.trim() && dir === 'outbound' && m.msg_type === 'status') continue;
+    // For empty bubbles without any content, show minimal
+    if (!bodyText.trim() && !m.media_url) {
+      // Could be an unsupported message type
+      if (m.msg_type !== 'text' && m.msg_type !== 'status') {
+        bodyText = `[${m.msg_type}]`;
+      } else if (!bodyText.trim()) {
+        continue; // Skip truly empty messages
+      }
+    }
+
+    html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+      ${bodyText ? `<span class="chat-msg-body">${escapeHtml(bodyText).replace(/\n/g, '<br>')}</span>` : ''}
+      ${footer}
+    </div>`;
   }
   return html;
 }
@@ -2841,7 +2959,53 @@ function renderChatMessages() {
   const container = document.getElementById('chat-messages');
   if (!container) return;
   container.innerHTML = renderChatBubbles();
+  bindAudioPlayers();
   container.scrollTop = container.scrollHeight;
+}
+
+function bindAudioPlayers() {
+  // Bind click on audio bars to play/pause
+  document.querySelectorAll('.chat-msg-audio .audio-bars').forEach(bars => {
+    const audioEl = bars.closest('.chat-msg-audio').querySelector('audio[data-audio-el]');
+    const timeEl = bars.closest('.chat-msg-audio').querySelector('[data-audio-time]');
+    if (!audioEl) return;
+    // Show duration once loaded
+    audioEl.addEventListener('loadedmetadata', () => {
+      if (timeEl && audioEl.duration && isFinite(audioEl.duration)) {
+        const d = Math.round(audioEl.duration);
+        timeEl.textContent = Math.floor(d / 60) + ':' + String(d % 60).padStart(2, '0');
+      }
+    });
+    bars.style.cursor = 'pointer';
+    bars.onclick = () => {
+      if (audioEl.paused) {
+        // Pause all other audios first
+        document.querySelectorAll('audio[data-audio-el]').forEach(a => { if (a !== audioEl) a.pause(); });
+        audioEl.play();
+        bars.style.opacity = '1';
+      } else {
+        audioEl.pause();
+        bars.style.opacity = '.7';
+      }
+    };
+    audioEl.addEventListener('timeupdate', () => {
+      if (timeEl && audioEl.duration && isFinite(audioEl.duration)) {
+        const rem = Math.round(audioEl.duration - audioEl.currentTime);
+        timeEl.textContent = Math.floor(rem / 60) + ':' + String(rem % 60).padStart(2, '0');
+        // Animate bars progress
+        const pct = audioEl.currentTime / audioEl.duration;
+        const allBars = bars.querySelectorAll('.audio-bar');
+        allBars.forEach((bar, idx) => {
+          bar.style.background = (idx / allBars.length) <= pct ? '#00a884' : 'rgba(255,255,255,.4)';
+        });
+      }
+    });
+    audioEl.addEventListener('ended', () => {
+      bars.style.opacity = '.7';
+      const allBars = bars.querySelectorAll('.audio-bar');
+      allBars.forEach(bar => bar.style.background = 'rgba(255,255,255,.4)');
+    });
+  });
 }
 
 async function selectChatContact(phone) {
@@ -2856,6 +3020,7 @@ async function selectChatContact(phone) {
     if (main) {
       main.innerHTML = renderChatConversation();
       bindChatConversation();
+      bindAudioPlayers();
       // Scroll to bottom
       const msgs = document.getElementById('chat-messages');
       if (msgs) msgs.scrollTop = msgs.scrollHeight;
