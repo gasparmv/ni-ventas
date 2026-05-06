@@ -77,10 +77,11 @@ CREATE TABLE IF NOT EXISTS wa_read_cursor (
 
 -- Respuestas rápidas (tipo / como WhatsApp)
 CREATE TABLE IF NOT EXISTS quick_replies (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  shortcut    TEXT NOT NULL UNIQUE,   -- ej: "saludo", "precio", "horarios"
-  body        TEXT NOT NULL,
-  created_at  TEXT NOT NULL
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  shortcut      TEXT NOT NULL UNIQUE,   -- ej: "saludo", "precio", "horarios"
+  body          TEXT NOT NULL,
+  media_r2_key  TEXT,                   -- R2 key opcional: foto adjunta al QR
+  created_at    TEXT NOT NULL
 );
 
 -- Etiquetas para contactos

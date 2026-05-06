@@ -3109,13 +3109,33 @@ async function loadQuickReplies() {
     if (r.ok) { const j = await r.json(); chatState.quickReplies = j.replies || []; chatState.qrLoaded = true; }
   } catch (_) {}
 }
-async function saveQuickReply(shortcut, body) {
+async function saveQuickReply(shortcut, body, mediaR2Key) {
   await fetch(CONFIG.trackerUrl + '/admin/quick-replies', {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ shortcut, body })
+    body: JSON.stringify({ shortcut, body, media_r2_key: mediaR2Key || null })
   });
   chatState.qrLoaded = false;
   await loadQuickReplies();
+}
+async function uploadQuickReplyImage(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const r = await fetch(CONFIG.trackerUrl + '/admin/quick-replies/upload', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: fd
+  });
+  if (!r.ok) throw new Error('upload failed');
+  const j = await r.json();
+  return j.r2_key;
+}
+async function sendQuickReplyToChat(phone, qrId) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-quick-reply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ phone, qr_id: qrId })
+  });
+  return r.ok ? await r.json() : { ok: false };
 }
 async function deleteQuickReply(id) {
   await fetch(CONFIG.trackerUrl + '/admin/quick-replies/' + id, { method: 'DELETE', headers: authHeaders() });
@@ -4375,9 +4395,9 @@ function bindChatConversation() {
         let idx = Array.from(items).indexOf(active);
         if (e.key === 'ArrowDown') { e.preventDefault(); idx = Math.min(idx + 1, items.length - 1); items.forEach((el, i) => el.classList.toggle('active', i === idx)); return; }
         if (e.key === 'ArrowUp') { e.preventDefault(); idx = Math.max(idx - 1, 0); items.forEach((el, i) => el.classList.toggle('active', i === idx)); return; }
-        if (e.key === 'Enter' && active) { e.preventDefault(); ta.value = active.dataset.qrBody; dd.style.display = 'none'; ta.dispatchEvent(new Event('input')); return; }
+        if (e.key === 'Enter' && active) { e.preventDefault(); pickQuickReply(ta, active); return; }
         if (e.key === 'Escape') { dd.style.display = 'none'; return; }
-        if (e.key === 'Tab' && active) { e.preventDefault(); ta.value = active.dataset.qrBody; dd.style.display = 'none'; ta.dispatchEvent(new Event('input')); return; }
+        if (e.key === 'Tab' && active) { e.preventDefault(); pickQuickReply(ta, active); return; }
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -4457,42 +4477,59 @@ function bindChatConversation() {
   }
 }
 
+function _renderQRItem(q, i, active) {
+  const hasMedia = !!q.media_r2_key;
+  const icon = hasMedia ? `<img class="qr-thumb" src="${mediaUrl(q.media_r2_key)}" alt="">` : '';
+  return `<div class="qr-item${i === 0 || active ? ' active' : ''}" data-qr-id="${q.id}" data-qr-body="${escapeHtml(q.body)}" data-qr-has-media="${hasMedia ? '1' : '0'}">
+    ${icon}
+    <div class="qr-item-text">
+      <span class="qr-shortcut">/${escapeHtml(q.shortcut)}${hasMedia ? ' <span style="opacity:.6;font-size:10px">📷</span>' : ''}</span>
+      <span class="qr-preview">${escapeHtml((q.body || '(solo imagen)').slice(0, 60))}</span>
+    </div>
+  </div>`;
+}
+
 function handleQuickReplyInput(ta) {
   const dd = document.getElementById('qr-dropdown');
   if (!dd) return;
   const val = ta.value;
-  if (val.startsWith('/') && val.length >= 1) {
-    const query = val.slice(1).toLowerCase();
-    const matches = chatState.quickReplies.filter(q => !query || q.shortcut.includes(query) || q.body.toLowerCase().includes(query));
-    if (matches.length && val !== '/') {
-      dd.innerHTML = matches.slice(0, 8).map((q, i) =>
-        `<div class="qr-item${i === 0 ? ' active' : ''}" data-qr-body="${escapeHtml(q.body)}">
-          <span class="qr-shortcut">/${escapeHtml(q.shortcut)}</span>
-          <span class="qr-preview">${escapeHtml(q.body.slice(0, 60))}</span>
-        </div>`
-      ).join('');
-      dd.style.display = 'block';
-      dd.querySelectorAll('.qr-item').forEach(el => {
-        el.onclick = () => { ta.value = el.dataset.qrBody; dd.style.display = 'none'; ta.focus(); ta.dispatchEvent(new Event('input')); };
-      });
-    } else if (val === '/') {
-      // Show all quick replies
-      dd.innerHTML = chatState.quickReplies.slice(0, 10).map((q, i) =>
-        `<div class="qr-item${i === 0 ? ' active' : ''}" data-qr-body="${escapeHtml(q.body)}">
-          <span class="qr-shortcut">/${escapeHtml(q.shortcut)}</span>
-          <span class="qr-preview">${escapeHtml(q.body.slice(0, 60))}</span>
-        </div>`
-      ).join('');
-      if (chatState.quickReplies.length) dd.style.display = 'block';
-      else dd.style.display = 'none';
-      dd.querySelectorAll('.qr-item').forEach(el => {
-        el.onclick = () => { ta.value = el.dataset.qrBody; dd.style.display = 'none'; ta.focus(); ta.dispatchEvent(new Event('input')); };
-      });
+  if (!val.startsWith('/')) { dd.style.display = 'none'; return; }
+  const query = val.slice(1).toLowerCase();
+  let matches;
+  if (val === '/') matches = chatState.quickReplies.slice(0, 10);
+  else matches = chatState.quickReplies.filter(q => q.shortcut.includes(query) || (q.body || '').toLowerCase().includes(query)).slice(0, 8);
+  if (!matches.length) { dd.style.display = 'none'; return; }
+  dd.innerHTML = matches.map((q, i) => _renderQRItem(q, i, false)).join('');
+  dd.style.display = 'block';
+  dd.querySelectorAll('.qr-item').forEach(el => {
+    el.onclick = () => pickQuickReply(ta, el);
+  });
+}
+
+async function pickQuickReply(ta, el) {
+  const dd = document.getElementById('qr-dropdown');
+  const hasMedia = el.dataset.qrHasMedia === '1';
+  const qrId = parseInt(el.dataset.qrId);
+  const body = el.dataset.qrBody;
+  if (dd) dd.style.display = 'none';
+  if (hasMedia && chatState.selectedPhone) {
+    // Mandar directo (imagen + caption) sin pasar por el textarea.
+    ta.value = '';
+    ta.dispatchEvent(new Event('input'));
+    toast('Enviando respuesta…');
+    const j = await sendQuickReplyToChat(chatState.selectedPhone, qrId);
+    if (j.ok) {
+      // Refrescar mensajes inmediatamente
+      try { await loadChatMessages(chatState.selectedPhone); renderChatMessages(); } catch (_) {}
+      toast('✓ Enviado');
     } else {
-      dd.style.display = 'none';
+      toast('Error al enviar');
     }
   } else {
-    dd.style.display = 'none';
+    // Sin imagen → cargamos el body al textarea (el usuario puede editar antes de mandar).
+    ta.value = body;
+    ta.focus();
+    ta.dispatchEvent(new Event('input'));
   }
 }
 
@@ -4825,38 +4862,84 @@ function showManageLabelsModal() {
 
 function showManageQRModal() {
   const content = `
-    <h3 style="margin-bottom:12px">Respuestas rápidas</h3>
-    <p style="color:#8696a0;font-size:13px;margin-bottom:12px">Escribí <b>/</b> en el chat para ver tus respuestas guardadas</p>
-    <div style="margin-bottom:12px">
-      ${chatState.quickReplies.map(q => `
-        <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;padding:8px;background:#202c33;border-radius:8px">
-          <div style="flex:1;min-width:0">
-            <div style="color:#00a884;font-size:13px;font-weight:600">/${escapeHtml(q.shortcut)}</div>
-            <div style="color:#e9edef;font-size:14px;margin-top:2px;white-space:pre-wrap">${escapeHtml(q.body)}</div>
+    <div class="manage-qr">
+      <p class="manage-qr-hint">Escribí <b>/</b> en el chat para ver tus respuestas guardadas. Las que tienen foto la mandan junto con el texto como caption.</p>
+      <div class="manage-qr-section">
+        <div class="manage-qr-section-h">${chatState.quickReplies.length} respuesta${chatState.quickReplies.length === 1 ? '' : 's'}</div>
+        ${chatState.quickReplies.length ? `
+          <div class="manage-qr-list">
+            ${chatState.quickReplies.map(q => `
+              <div class="manage-qr-row">
+                ${q.media_r2_key ? `<img class="manage-qr-thumb" src="${mediaUrl(q.media_r2_key)}" alt="">` : '<div class="manage-qr-thumb-empty">📝</div>'}
+                <div class="manage-qr-text">
+                  <div class="manage-qr-shortcut">/${escapeHtml(q.shortcut)}</div>
+                  <div class="manage-qr-body">${escapeHtml(q.body || '(sin texto)')}</div>
+                </div>
+                <button class="manage-label-del" data-del-qr="${q.id}" title="Eliminar">&times;</button>
+              </div>
+            `).join('')}
           </div>
-          <button class="btn-send" style="width:24px;height:24px;font-size:14px;color:#ef5350;flex-shrink:0" data-del-qr="${q.id}">&times;</button>
+        ` : '<p class="manage-labels-empty">No hay respuestas guardadas</p>'}
+      </div>
+      <div class="manage-qr-section">
+        <div class="manage-qr-section-h">Nueva respuesta</div>
+        <input type="text" id="new-qr-shortcut" placeholder="Atajo (ej: saludo)" autocomplete="off">
+        <textarea id="new-qr-body" placeholder="Texto del mensaje (o caption si adjuntás foto)…" rows="3"></textarea>
+        <div class="manage-qr-image">
+          <input type="file" id="new-qr-image" accept="image/*" style="display:none">
+          <button class="btn btn-ghost" id="new-qr-image-btn" type="button">🖼 Adjuntar foto</button>
+          <span id="new-qr-image-name" class="manage-qr-image-name"></span>
         </div>
-      `).join('')}
-      ${!chatState.quickReplies.length ? '<p style="color:#8696a0;font-size:13px">No hay respuestas guardadas</p>' : ''}
-    </div>
-    <div style="display:flex;flex-direction:column;gap:6px">
-      <input type="text" id="new-qr-shortcut" placeholder="Atajo (ej: saludo)" style="padding:6px 10px;background:#2a3942;border:none;color:#e9edef;border-radius:6px;font-size:14px">
-      <textarea id="new-qr-body" placeholder="Texto del mensaje..." rows="3" style="padding:6px 10px;background:#2a3942;border:none;color:#e9edef;border-radius:6px;font-size:14px;resize:vertical;font-family:inherit"></textarea>
-      <button class="btn btn-primary" id="add-qr-btn" style="padding:6px 14px">Guardar respuesta</button>
+        <button class="btn btn-cyan" id="add-qr-btn">Guardar respuesta</button>
+      </div>
     </div>
   `;
   openDrawer('Respuestas rápidas', content);
   document.querySelectorAll('[data-del-qr]').forEach(btn => {
-    btn.onclick = async () => { await deleteQuickReply(parseInt(btn.dataset.delQr)); showManageQRModal(); };
+    btn.onclick = async () => {
+      const ok = await showConfirm('¿Eliminar esta respuesta rápida?', { title: 'Eliminar', variant: 'warn', confirmLabel: 'Eliminar' });
+      if (!ok) return;
+      await deleteQuickReply(parseInt(btn.dataset.delQr));
+      chatState.qrLoaded = false;
+      await loadQuickReplies();
+      showManageQRModal();
+    };
   });
-  const addBtn = document.getElementById('add-qr-btn');
-  if (addBtn) addBtn.onclick = async () => {
-    const shortcut = document.getElementById('new-qr-shortcut')?.value?.trim();
-    const body = document.getElementById('new-qr-body')?.value?.trim();
-    if (!shortcut || !body) { toast('Completá atajo y mensaje'); return; }
-    await saveQuickReply(shortcut, body);
-    showManageQRModal();
+  const imgInput = document.getElementById('new-qr-image');
+  const imgBtn = document.getElementById('new-qr-image-btn');
+  const imgName = document.getElementById('new-qr-image-name');
+  let pendingFile = null;
+  if (imgBtn) imgBtn.onclick = () => imgInput.click();
+  if (imgInput) imgInput.onchange = () => {
+    pendingFile = imgInput.files[0] || null;
+    if (imgName) imgName.textContent = pendingFile ? '✓ ' + pendingFile.name : '';
   };
+  const addBtn = document.getElementById('add-qr-btn');
+  const shortcutInput = document.getElementById('new-qr-shortcut');
+  const bodyInput = document.getElementById('new-qr-body');
+  if (addBtn) addBtn.onclick = async () => {
+    const shortcut = shortcutInput?.value?.trim();
+    const body = bodyInput?.value?.trim();
+    if (!shortcut) { toast('Falta el atajo'); return; }
+    if (!body && !pendingFile) { toast('Agregá texto o imagen'); return; }
+    addBtn.disabled = true;
+    addBtn.textContent = 'Guardando…';
+    try {
+      let r2Key = null;
+      if (pendingFile) {
+        addBtn.textContent = 'Subiendo imagen…';
+        r2Key = await uploadQuickReplyImage(pendingFile);
+      }
+      addBtn.textContent = 'Guardando…';
+      await saveQuickReply(shortcut, body, r2Key);
+      showManageQRModal();
+    } catch (e) {
+      toast('Error: ' + e.message);
+      addBtn.disabled = false;
+      addBtn.textContent = 'Guardar respuesta';
+    }
+  };
+  if (shortcutInput) setTimeout(() => shortcutInput.focus(), 50);
 }
 
 function bindChatContactClicks() {

@@ -1842,11 +1842,11 @@ table.t td.cliente { font-weight: 600; }
   padding: 4px 0;
 }
 .qr-item {
-  padding: 10px 16px;
+  padding: 8px 14px;
   cursor: pointer;
   display: flex;
-  gap: 12px;
-  align-items: baseline;
+  gap: 10px;
+  align-items: center;
   transition: background .1s;
 }
 .qr-item:hover, .qr-item.active { background: rgba(255,255,255,.06); }
@@ -2061,6 +2061,104 @@ table.t td.cliente { font-weight: 600; }
 }
 .manage-labels-add input::placeholder { color: var(--fg-subtle); }
 .manage-labels-add .btn { padding: 9px 16px; }
+
+/* ============ Modal Respuestas rápidas ============ */
+.manage-qr {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5);
+  padding-bottom: var(--s-3);
+}
+.manage-qr-hint {
+  font-size: 12px;
+  color: var(--fg-subtle);
+  line-height: 1.5;
+  margin: 0 0 var(--s-3);
+}
+.manage-qr-section { display: flex; flex-direction: column; gap: var(--s-3); }
+.manage-qr-section-h {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: var(--tr-wide);
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+.manage-qr-list { display: flex; flex-direction: column; gap: 6px; }
+.manage-qr-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  background: var(--ink-100);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.manage-qr-row:hover { border-color: var(--border-strong); }
+.manage-qr-thumb {
+  width: 44px; height: 44px;
+  object-fit: cover;
+  border-radius: var(--r-xs);
+  flex-shrink: 0;
+}
+.manage-qr-thumb-empty {
+  width: 44px; height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ink-200);
+  border-radius: var(--r-xs);
+  font-size: 18px;
+  flex-shrink: 0;
+  opacity: .5;
+}
+.manage-qr-text { flex: 1; min-width: 0; }
+.manage-qr-shortcut {
+  color: var(--neon-cyan);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+.manage-qr-body {
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.manage-qr-section input[type="text"], .manage-qr-section textarea {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--ink-100);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  resize: vertical;
+  transition: border-color .12s, box-shadow .12s;
+}
+.manage-qr-section input[type="text"]:focus, .manage-qr-section textarea:focus {
+  outline: none;
+  border-color: var(--neon-cyan);
+  box-shadow: var(--glow-cyan-sm);
+}
+.manage-qr-image {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.manage-qr-image-name { font-size: 12px; color: var(--fg-subtle); }
+
+/* QR dropdown items con thumbnail */
+.qr-item img.qr-thumb {
+  width: 32px; height: 32px;
+  object-fit: cover;
+  border-radius: var(--r-xs);
+  flex-shrink: 0;
+}
+.qr-item-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
 /* Button label toggle */
 .btn-label-toggle {

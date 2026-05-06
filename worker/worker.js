@@ -706,23 +706,93 @@ export default {
       // ===== Quick Replies CRUD =====
       if (request.method === 'GET' && path === '/admin/quick-replies') {
         try {
-          await env.DB.prepare('CREATE TABLE IF NOT EXISTS quick_replies (id INTEGER PRIMARY KEY AUTOINCREMENT, shortcut TEXT NOT NULL UNIQUE, body TEXT NOT NULL, created_at TEXT NOT NULL)').run();
-          const rs = await env.DB.prepare('SELECT id, shortcut, body FROM quick_replies ORDER BY shortcut').all();
+          const rs = await env.DB.prepare('SELECT id, shortcut, body, media_r2_key FROM quick_replies ORDER BY shortcut').all();
           return json({ replies: rs.results || [] });
         } catch (e) { return json({ replies: [] }); }
       }
       if (request.method === 'POST' && path === '/admin/quick-replies') {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        const { shortcut, body: text } = body || {};
-        if (!shortcut || !text) return json({ error: 'missing shortcut or body' }, 400);
-        await env.DB.prepare('CREATE TABLE IF NOT EXISTS quick_replies (id INTEGER PRIMARY KEY AUTOINCREMENT, shortcut TEXT NOT NULL UNIQUE, body TEXT NOT NULL, created_at TEXT NOT NULL)').run();
-        await env.DB.prepare('INSERT OR REPLACE INTO quick_replies (shortcut, body, created_at) VALUES (?, ?, ?)').bind(shortcut.toLowerCase().replace(/\s+/g, '_'), text, new Date().toISOString()).run();
+        const { shortcut, body: text, media_r2_key } = body || {};
+        if (!shortcut || (!text && !media_r2_key)) return json({ error: 'missing shortcut, body or media' }, 400);
+        const sc = shortcut.toLowerCase().replace(/\s+/g, '_');
+        await env.DB.prepare('INSERT OR REPLACE INTO quick_replies (shortcut, body, media_r2_key, created_at) VALUES (?, ?, ?, ?)')
+          .bind(sc, text || '', media_r2_key || null, new Date().toISOString()).run();
         return json({ ok: true });
       }
       if (request.method === 'DELETE' && path.startsWith('/admin/quick-replies/')) {
         const id = path.split('/').pop();
+        // Borrar también la imagen de R2 si tenía
+        try {
+          const row = await env.DB.prepare('SELECT media_r2_key FROM quick_replies WHERE id = ?').bind(id).first();
+          if (row?.media_r2_key) await env.MEDIA.delete(row.media_r2_key);
+        } catch (_) {}
         await env.DB.prepare('DELETE FROM quick_replies WHERE id = ?').bind(id).run();
         return json({ ok: true });
+      }
+      // Subir imagen para usar en quick replies. Devuelve la R2 key.
+      if (request.method === 'POST' && path === '/admin/quick-replies/upload') {
+        try {
+          const fd = await request.formData();
+          const file = fd.get('file');
+          if (!file || typeof file === 'string') return json({ error: 'missing file' }, 400);
+          const ext = file.name ? '.' + file.name.split('.').pop() : '.jpg';
+          const r2Key = `qr/${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+          const buf = await file.arrayBuffer();
+          const mime = file.type || 'image/jpeg';
+          await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: mime } });
+          return json({ ok: true, r2_key: r2Key });
+        } catch (e) { return json({ error: e.message }, 500); }
+      }
+      // Enviar quick reply: el server resuelve si tiene imagen, la sube a Meta
+      // (desde R2) y manda imagen+caption en una sola llamada. Sin imagen → texto.
+      if (request.method === 'POST' && path === '/admin/wa/send-quick-reply') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone, qr_id } = body || {};
+        if (!phone || !qr_id) return json({ error: 'missing phone or qr_id' }, 400);
+        const qr = await env.DB.prepare('SELECT shortcut, body, media_r2_key FROM quick_replies WHERE id = ?').bind(qr_id).first();
+        if (!qr) return json({ error: 'qr not found' }, 404);
+        const num = normalizeArPhone(phone);
+        if (!num) return json({ error: 'numero invalido' }, 400);
+        // Sin imagen: texto plano por waSendText.
+        if (!qr.media_r2_key) {
+          const r = await waSendText(env, phone, qr.body);
+          if (!r.ok) return json({ error: r.error || 'send failed' }, r.status || 500);
+          try {
+            await env.DB.prepare(
+              'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', 'text', qr.body, '', '', 'sent').run();
+          } catch (_) {}
+          return json({ ok: true, type: 'text', id: r.id });
+        }
+        // Con imagen: descargar de R2 → upload a Meta → send con caption.
+        const obj = await env.MEDIA.get(qr.media_r2_key);
+        if (!obj) return json({ error: 'media missing in R2' }, 500);
+        const buf = await obj.arrayBuffer();
+        const mime = obj.httpMetadata?.contentType || 'image/jpeg';
+        const ext = qr.media_r2_key.split('.').pop() || 'jpg';
+        const v = env.WA_API_VERSION || 'v25.0';
+        const fd = new FormData();
+        fd.append('messaging_product', 'whatsapp');
+        fd.append('file', new Blob([buf], { type: mime }), 'qr.' + ext);
+        fd.append('type', mime);
+        const upR = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/media`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` },
+          body: fd
+        });
+        const upJ = await upR.json().catch(() => ({}));
+        if (!upR.ok || !upJ.id) return json({ error: 'media upload failed', detail: upJ?.error?.message || '' }, 500);
+        const r = await waSend(env, {
+          messaging_product: 'whatsapp', to: num, type: 'image',
+          image: { id: upJ.id, caption: qr.body || undefined }
+        });
+        if (!r.ok) return json({ error: r.error }, r.status || 500);
+        try {
+          await env.DB.prepare(
+            'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', 'image', qr.body || '[imagen]', qr.media_r2_key, '', 'sent').run();
+        } catch (_) {}
+        return json({ ok: true, type: 'image', id: r.id });
       }
 
       // ===== Labels CRUD =====
