@@ -1174,6 +1174,7 @@ async function processPresupuestoFollowups(env) {
 
   const failures = [];
   let sent = 0;
+  let skippedInvalid = 0;
 
   for (const p of byPhone.values()) {
     // 3) Conversación posterior al presupuesto
@@ -1187,20 +1188,37 @@ async function processPresupuestoFollowups(env) {
 
     // ¿Respondió?
     if (conv.some(m => m.direction === 'inbound')) continue;
-    // ¿Ya tiene follow-up?
+    // ¿Ya tiene follow-up (sent o failed)?
     if (conv.some(m => m.direction === 'outbound' && (m.body || '').startsWith(FOLLOWUP_PRESUPUESTO_PREFIX_TEXT))) continue;
 
-    // 4) Enviar
-    const r = await waSendText(env, p.phone, FOLLOWUP_PRESUPUESTO_TEXT);
-    const ts = new Date().toISOString();
-    if (r.ok) {
-      sent++;
+    // Helper para insertar el marker (sent o failed) — ambos casos previenen
+    // que el próximo cron re-encuentre este presupuesto como pendiente.
+    const insertMarker = async (status, wamid) => {
       try {
         await env.DB.prepare(
           'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        ).bind(ts, r.id || '', 'outbound', p.phone, '', 'text', FOLLOWUP_PRESUPUESTO_TEXT, '', '', 'sent').run();
+        ).bind(new Date().toISOString(), wamid, 'outbound', p.phone, '', 'text', FOLLOWUP_PRESUPUESTO_TEXT, '', '', status).run();
       } catch (_) {}
+    };
+
+    // 4) Pre-validar: si el teléfono no normaliza, marcamos como fallido
+    // permanente y no gastamos call al API ni notificamos al admin.
+    if (!normalizeArPhone(p.phone)) {
+      await insertMarker('failed', 'fu-invalid:' + p.phone);
+      await logWaEvent(env, { to: p.phone, kind: 'pp-followup', ref: 'pp-fu:' + p.phone, ok: false, error: 'numero invalido (skip)' });
+      skippedInvalid++;
+      continue;
+    }
+
+    // 5) Enviar
+    const r = await waSendText(env, p.phone, FOLLOWUP_PRESUPUESTO_TEXT);
+    if (r.ok) {
+      sent++;
+      await insertMarker('sent', r.id || '');
     } else {
+      // Marker failed → el próximo cron NO lo va a re-procesar. Una sola
+      // notificación al admin por presupuesto, no spam cada 5 min.
+      await insertMarker('failed', 'fu-fail:' + p.phone + ':' + Date.now());
       failures.push({ phone: p.phone, name: p.sender_name || '', error: r.error || 'unknown' });
     }
     await logWaEvent(env, { to: p.phone, kind: 'pp-followup', ref: 'pp-fu:' + p.phone, ok: r.ok, messageId: r.id, error: r.error });
