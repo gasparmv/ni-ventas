@@ -1,0 +1,29 @@
+# Permitir todos los bots y scrapers (especialmente OG scrapers de WhatsApp,
+# Facebook, Twitter, LinkedIn, Discord, Slack para que las previews funcionen).
+User-agent: *
+Allow: /
+
+# Allowlist explícito por si algún CDN intermedio bloquea por defecto.
+User-agent: facebookexternalhit
+Allow: /
+
+User-agent: Facebot
+Allow: /
+
+User-agent: meta-externalagent
+Allow: /
+
+User-agent: Twitterbot
+Allow: /
+
+User-agent: WhatsApp
+Allow: /
+
+User-agent: LinkedInBot
+Allow: /
+
+User-agent: Slackbot
+Allow: /
+
+User-agent: Discordbot
+Allow: /
