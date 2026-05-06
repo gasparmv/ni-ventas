@@ -527,23 +527,29 @@ function parseDate(v) {
   if (!v) return null;
   v = String(v).trim();
   if (!v) return null;
+  // Hora opcional al final: " HH:mm" o " HH:mm:ss"
+  const timeMatch = v.match(/\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  const hh = timeMatch ? parseInt(timeMatch[1]) : 0;
+  const mi = timeMatch ? parseInt(timeMatch[2]) : 0;
+  const ss = timeMatch && timeMatch[3] ? parseInt(timeMatch[3]) : 0;
+  const datePart = timeMatch ? v.slice(0, timeMatch.index) : v;
   // ISO yyyy-mm-dd (with optional time): unambiguous
-  let m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  let m = datePart.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (m) {
-    const d = new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]));
+    const d = new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]), hh, mi, ss);
     return isNaN(d) ? null : d;
   }
   // AR: dd/mm/yyyy or dd/mm/yy
-  m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  m = datePart.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
   if (m) {
     const yr = m[3].length === 2 ? 2000 + parseInt(m[3]) : parseInt(m[3]);
-    const d = new Date(yr, parseInt(m[2]) - 1, parseInt(m[1]));
+    const d = new Date(yr, parseInt(m[2]) - 1, parseInt(m[1]), hh, mi, ss);
     return isNaN(d) ? null : d;
   }
   // AR: d/m (sin año — asume año actual)
-  m = v.match(/^(\d{1,2})\/(\d{1,2})$/);
+  m = datePart.match(/^(\d{1,2})\/(\d{1,2})$/);
   if (m) {
-    const d = new Date(new Date().getFullYear(), parseInt(m[2]) - 1, parseInt(m[1]));
+    const d = new Date(new Date().getFullYear(), parseInt(m[2]) - 1, parseInt(m[1]), hh, mi, ss);
     return isNaN(d) ? null : d;
   }
   // AR: dd-mm-yyyy or dd-mm-yy
@@ -584,6 +590,15 @@ function parseNum(v) {
 
 function fmtMoney(n) { return '$' + Math.round(n||0).toLocaleString('es-AR'); }
 function fmtDate(d) { if (!d) return '—'; return d.toLocaleDateString('es-AR', { day:'2-digit', month:'2-digit', year:'2-digit' }); }
+function fmtDateTime(d) {
+  if (!d) return '—';
+  const date = d.toLocaleDateString('es-AR', { day:'2-digit', month:'2-digit', year:'2-digit' });
+  // Solo mostrar hora si está presente (las filas viejas sin hora son 00:00:00)
+  if (d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0) return date;
+  const hh = String(d.getHours()).padStart(2,'0');
+  const mm = String(d.getMinutes()).padStart(2,'0');
+  return `${date} ${hh}:${mm}`;
+}
 function fmtDateLong(d) { if (!d) return '—'; return d.toLocaleDateString('es-AR', { day:'2-digit', month:'long', year:'numeric' }); }
 function daysBetween(a, b) { return Math.round((b - a) / 86400000); }
 function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
@@ -1126,7 +1141,7 @@ function renderDashboard() {
     <div class="alerts-grid">
       <div class="alert-card cyan">
         <div class="h">
-          <h3>Presupuestos a seguir</h3>
+          <h3>Para contactar esta semana</h3>
           <div class="count">${pptosAbiertos.length}</div>
         </div>
         <ul class="alert-list">
@@ -1218,9 +1233,11 @@ function renderTablePedidos() {
   });
   filtered.sort((a,b) => {
     const va = a[pedidoSort.col], vb = b[pedidoSort.col];
-    if (va instanceof Date) return (va - vb) * pedidoSort.dir;
-    if (typeof va === 'number') return (va - vb) * pedidoSort.dir;
-    return String(va).localeCompare(String(vb)) * pedidoSort.dir;
+    let cmp;
+    if (va instanceof Date) cmp = (va - vb) * pedidoSort.dir;
+    else if (typeof va === 'number') cmp = (va - vb) * pedidoSort.dir;
+    else cmp = String(va).localeCompare(String(vb)) * pedidoSort.dir;
+    return cmp || (b.idx - a.idx); // tiebreaker: orden del sheet (más nuevos primero)
   });
   document.getElementById('row-count').textContent = filtered.length;
   const headers = [
@@ -1368,15 +1385,17 @@ function renderPresupuestos() {
   const list = STATE.presupuestos.map(p => ({...p, st: presupuestoStatus(p)}));
   const counts = {
     all: list.length,
+    hoy: list.filter(p=>daysBetween(p.fecha, TODAY) === 0).length,
     abiertos: list.filter(p=>p.st.state==='abierto').length,
     cerrados: list.filter(p=>p.st.state==='cerrado').length,
     semana: list.filter(p=>p.st.state==='abierto' && p.st.days <= 14).length,
   };
   let filtered = list;
-  if (pptoFilter === 'abiertos') filtered = list.filter(p=>p.st.state==='abierto');
+  if (pptoFilter === 'hoy') filtered = list.filter(p=>daysBetween(p.fecha, TODAY) === 0);
+  else if (pptoFilter === 'abiertos') filtered = list.filter(p=>p.st.state==='abierto');
   else if (pptoFilter === 'cerrados') filtered = list.filter(p=>p.st.state==='cerrado');
   else if (pptoFilter === 'semana') filtered = list.filter(p=>p.st.state==='abierto' && p.st.days <= 14);
-  filtered = filtered.sort((a,b) => b.fecha - a.fecha);
+  filtered = filtered.sort((a,b) => (b.fecha - a.fecha) || (b.idx - a.idx));
   return `
     <div class="page-head">
       <div><div class="eyebrow">${STATE.presupuestos.length}${STATE.presupuestos.length ? ' desde ' + fmtDate(STATE.presupuestos.reduce((min, p) => p.fecha < min ? p.fecha : min, STATE.presupuestos[0].fecha)) : ''}</div><h1>Presupuestos</h1></div>
@@ -1388,6 +1407,7 @@ function renderPresupuestos() {
     ${pptoShowCotizador ? renderCotizadorForm() : ''}
     <div class="table-wrap">
       <div class="table-toolbar">
+        <button class="btn btn-ghost ${pptoFilter==='hoy'?'btn-cyan':''}" data-ppfilter="hoy">Hoy · ${counts.hoy}</button>
         <button class="btn btn-ghost ${pptoFilter==='all'?'btn-cyan':''}" data-ppfilter="all">Todos · ${counts.all}</button>
         <button class="btn btn-ghost ${pptoFilter==='abiertos'?'btn-cyan':''}" data-ppfilter="abiertos">Abiertos · ${counts.abiertos}</button>
         <button class="btn btn-ghost ${pptoFilter==='semana'?'btn-cyan':''}" data-ppfilter="semana">Para seguir · ${counts.semana}</button>
@@ -1400,13 +1420,19 @@ function renderPresupuestos() {
           ${filtered.length===0 ? '<tr class="empty-row"><td colspan="6">Sin presupuestos en este filtro</td></tr>' :
             filtered.map(p => {
               let pill = '';
-              if (p.st.state === 'cerrado') pill = `<span class="pill green">✓ Cerrado</span>`;
+              if (p.st.state === 'cerrado') {
+                const ratio = p.st.pedido ? (p.st.pedido.precio / (p.precio || 1)) : 1;
+                const exact = ratio >= 0.999 && ratio <= 1.001;
+                pill = exact
+                  ? `<span class="pill green">✓ Cerrado</span>`
+                  : `<span class="pill green" title="Cerrado automáticamente por match de nombre + precio dentro de tolerancia ±20%">✓ Cerrado <span style="opacity:.6;font-size:9px">auto</span></span>`;
+              }
               else if (p.st.state === 'fresco') pill = `<span class="pill cyan">${p.st.days}d</span>`;
               else if (p.st.state === 'abierto') pill = `<span class="pill ${p.st.days > 14 ? 'red' : 'amber'}">Abierto · ${p.st.days}d</span>`;
               else pill = `<span class="pill muted">Futuro</span>`;
               const dDays = daysBetween(p.fecha, TODAY);
               const dayPill = dDays === 0 ? '<span class="pill cyan" style="margin-left:6px;font-size:9px">HOY</span>' : dDays === 1 ? '<span class="pill amber" style="margin-left:6px;font-size:9px">AYER</span>' : '';
-              return `<tr><td class="num">${fmtDate(p.fecha)}${dayPill}</td><td class="cliente">${escapeHtml(p.nombre)}</td><td class="num">${p.tamCm||'—'}×${p.ancho||'—'}</td><td class="num">${p.m2||'—'}</td><td class="num">${fmtMoney(p.precio)}</td><td>${pill}</td></tr>`;
+              return `<tr><td class="num">${fmtDateTime(p.fecha)}${dayPill}</td><td class="cliente">${escapeHtml(p.nombre)}</td><td class="num">${p.tamCm||'—'}×${p.ancho||'—'}</td><td class="num">${p.m2||'—'}</td><td class="num">${fmtMoney(p.precio)}</td><td>${pill}</td></tr>`;
             }).join('')}
         </tbody>
       </table>
@@ -1754,8 +1780,8 @@ function renderSegPostventa(items) {
         ${filtered.map(it => {
           const m = it.milestone;
           const days = m.days;
-          const stateText = days > 0 ? `vencido ${days}d` : days === 0 ? 'HOY' : `en ${-days}d`;
-          const stClass = m.state === 'overdue' ? 'tp-overdue' : m.state === 'now' ? 'tp-due' : 'tp-future';
+          const stateText = it.done ? '✓ Hecho' : (days > 0 ? `vencido ${days}d` : days === 0 ? 'HOY' : `en ${-days}d`);
+          const stClass = it.done ? 'tp-done' : (m.state === 'overdue' ? 'tp-overdue' : m.state === 'now' ? 'tp-due' : 'tp-future');
           const tel = it.tel;
           const link = tel ? waLink(tel, m.template(it.pedido.cartel.split(' ')[0])) : '';
           return `
@@ -1840,13 +1866,19 @@ function openDrawerPedido(idx) {
             <div class="tl-desc">${fmtMoney(p.precio + p.precioDimmer)}</div>
           </div>
           ${ms.map(m => {
-            const cls = m.state === 'now' ? 'now' : (m.state === 'overdue' || m.state === 'future' ? 'future' : 'future');
+            const doneId = `pv:${p.idx}|${m.id}`;
+            const done = isDone(doneId);
+            const doneAt = getDoneAt(doneId);
+            const cls = done ? 'done' : (m.state === 'now' ? 'now' : 'future');
             const link = tel ? waLink(tel, m.template(p.cartel.split(' ')[0])) : '';
+            const desc = done
+              ? `✓ hecho${doneAt ? ' ' + fmtDoneAt(doneAt) : ''}`
+              : (m.entregado ? (m.days > 0 ? `vencido hace ${m.days}d` : m.days === 0 ? 'hoy' : `en ${-m.days}d`) : 'esperando entrega');
             return `<div class="tl-item ${cls}">
               <div class="tl-date">${fmtDate(m.due)} · <span class="pill ${m.tagClass}">${m.id}</span></div>
               <div class="tl-title">${m.label}</div>
-              <div class="tl-desc">${m.entregado ? (m.days > 0 ? `vencido hace ${m.days}d` : m.days === 0 ? 'hoy' : `en ${-m.days}d`) : 'esperando entrega'}</div>
-              ${link && (m.state === 'now' || m.state === 'overdue') ? `<a class="btn btn-primary" target="_blank" href="${escapeHtml(link)}" style="margin-top:8px;font-size:12px">📱 Mandar mensaje</a>` : ''}
+              <div class="tl-desc">${desc}</div>
+              ${!done && link && (m.state === 'now' || m.state === 'overdue') ? `<a class="btn btn-primary" target="_blank" href="${escapeHtml(link)}" style="margin-top:8px;font-size:12px">📱 Mandar mensaje</a>` : ''}
             </div>`;
           }).join('')}
         </div>
@@ -2203,17 +2235,17 @@ function renderActividad() {
     if (!u.last || r.ts > u.last) u.last = r.ts;
   }
 
-  // Heatmap por día (últimos N días)
+  // Heatmap por día (últimos N días) — usar fecha LOCAL Argentina, no UTC
   const days = actFilter.range === 'all' ? 30 : (actFilter.range === '7d' ? 7 : 30);
   const dayMap = new Map();
   for (const r of rows) {
-    const k = r.ts.slice(0,10);
+    const k = localDateKey(new Date(r.ts));
     dayMap.set(k, (dayMap.get(k) || 0) + 1);
   }
   const dayList = [];
   for (let i = days - 1; i >= 0; i--) {
     const dt = addDays(TODAY, -i);
-    const k = dt.toISOString().slice(0,10);
+    const k = localDateKey(dt);
     dayList.push({ date: dt, count: dayMap.get(k) || 0 });
   }
   const maxDay = Math.max(1, ...dayList.map(d => d.count));

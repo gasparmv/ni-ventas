@@ -28,9 +28,10 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
-    // Formato fecha: d/M
-    const now = new Date();
-    const fecha = now.getDate() + '/' + (now.getMonth() + 1);
+    // Formato fecha: d/M/yyyy HH:mm (hora local Argentina, AR-Buenos_Aires).
+    // Importante: incluir año + hora para poder ordenar dentro de un mismo día y no perder
+    // referencia al cambiar de año. parseDate() en app.js consume este formato.
+    const fecha = Utilities.formatDate(new Date(), 'America/Argentina/Buenos_Aires', 'd/M/yyyy HH:mm');
 
     // Columnas: A=Fecha, B=m2, C=diseño, D=alto, E=ancho, F=neon, G=tipo,
     //           H=transparente, I=negro, J=descuento, K=recargo, L=reventa,
