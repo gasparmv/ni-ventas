@@ -311,7 +311,7 @@ table.t {
 }
 table.t th, table.t td {
   text-align: left;
-  padding: 10px 14px;
+  padding: var(--s-3) var(--s-4);
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
@@ -1218,6 +1218,14 @@ table.t td.cliente { font-weight: 600; }
 }
 .chat-contacts-header .btn-send:hover { color: #e9edef; background: rgba(255,255,255,.06); }
 .chat-contacts-header .btn-send.active { color: var(--neon-cyan); background: rgba(143, 212, 222, .12); }
+.chat-empty-state {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--fg-subtle);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.chat-empty-emoji { font-size: 36px; margin-bottom: 8px; opacity: .5; }
 .archived-banner {
   background: rgba(143, 212, 222, .08);
   border-bottom: 1px solid rgba(143, 212, 222, .2);
@@ -2069,8 +2077,12 @@ table.t td.cliente { font-weight: 600; }
   transition: color .15s, background .15s;
 }
 .btn-label-toggle:hover { color: #e9edef; background: rgba(255,255,255,.06); }
-.btn-label-toggle.has-note { color: #fff8b0; }
-.btn-label-toggle.has-note:hover { color: #fff8b0; background: rgba(255, 248, 176, .12); }
+/* Tints sutiles para diferenciar los iconos del header del chat de un vistazo */
+#btn-note { color: rgba(255, 248, 176, .85); }
+#btn-note:hover { color: #fff8b0; background: rgba(255, 248, 176, .12); }
+#btn-note.has-note { color: #fff8b0; background: rgba(255, 248, 176, .15); }
+#btn-labels { color: rgba(143, 212, 222, .85); }
+#btn-labels:hover { color: var(--neon-cyan); background: rgba(143, 212, 222, .12); }
 
 /* ============ POST-IT de notas por contacto ============ */
 .chat-main > .chat-postit { z-index: 5; }
@@ -2081,9 +2093,11 @@ table.t td.cliente { font-weight: 600; }
   z-index: 5;
   background: #fff8b0;
   color: #2a2410;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   padding: 10px 12px;
   width: 240px;
+  max-height: 220px;
+  overflow-y: auto;
   font-family: var(--font-sans);
   font-size: 12.5px;
   line-height: 1.4;
@@ -2092,8 +2106,10 @@ table.t td.cliente { font-weight: 600; }
     -2px -2px 0 rgba(0, 0, 0, .04) inset;
   transform: rotate(-1.5deg);
   cursor: pointer;
+  user-select: none;
   transition: transform .12s var(--ease-out), box-shadow .12s var(--ease-out);
 }
+.chat-postit-body { user-select: text; }
 .chat-postit:hover { transform: rotate(0); box-shadow: 0 12px 24px rgba(0, 0, 0, .55); }
 .chat-postit::before {
   content: '';

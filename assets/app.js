@@ -3226,12 +3226,15 @@ async function deleteLabel(id) {
 }
 async function toggleContactLabel(phone, labelId) {
   const current = chatState.contactLabels[phone] || [];
+  const lbl = chatState.labels.find(l => l.id === labelId);
+  const lblName = lbl?.name || 'etiqueta';
   if (current.includes(labelId)) {
     await fetch(CONFIG.trackerUrl + '/admin/contact-labels', {
       method: 'DELETE', headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ phone, label_id: labelId })
     });
     chatState.contactLabels[phone] = current.filter(id => id !== labelId);
+    toast(`✗ ${lblName}`);
   } else {
     await fetch(CONFIG.trackerUrl + '/admin/contact-labels', {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -3239,6 +3242,7 @@ async function toggleContactLabel(phone, labelId) {
     });
     if (!chatState.contactLabels[phone]) chatState.contactLabels[phone] = [];
     chatState.contactLabels[phone].push(labelId);
+    toast(`✓ ${lblName}`);
   }
 }
 
@@ -3788,7 +3792,7 @@ function renderChat() {
         <div class="chat-contact-list" id="chat-contact-list">
           ${chatState.loading && !chatState.contacts.length ? '<div style="padding:30px;text-align:center"><div class="spinner" style="border-color:#2a3942;border-top-color:#00a884"></div></div>' : ''}
           ${filtered.map(c => renderContactItem(c)).join('')}
-          ${!chatState.loading && !filtered.length ? `<div style="padding:30px;text-align:center;color:#8696a0;font-size:14px">${chatState.showArchived ? 'No hay chats archivados' : 'Sin conversaciones'}</div>` : ''}
+          ${!chatState.loading && !filtered.length ? `<div class="chat-empty-state">${chatState.showArchived ? '<div class="chat-empty-emoji">📦</div>No hay chats archivados' : '<div class="chat-empty-emoji">👋</div>Sin conversaciones'}</div>` : ''}
         </div>
         ${renderBulkSection()}
       </div>
@@ -4302,9 +4306,16 @@ async function selectChatContact(phone) {
     });
   }
 
-  // Load messages
-  await loadChatMessages(phone);
+  // Load messages — protegido contra race: si el usuario clickea otro chat
+  // antes de que termine la carga, descartamos el resultado.
+  try {
+    await loadChatMessages(phone);
+  } catch (e) {
+    if (chatState.selectedPhone === phone) toast('Error al cargar la conversación');
+  }
   chatState.loadingConv = false;
+  // Si el usuario ya cambió de contacto durante el await, abortamos.
+  if (chatState.selectedPhone !== phone) return;
 
   // Mark as read
   markConversationRead(phone);
@@ -4645,17 +4656,23 @@ function bindBulkSection() {
   });
   const sendBtn = document.getElementById('bulk-send-btn');
   if (sendBtn) sendBtn.onclick = async () => {
+    if (sendBtn.disabled) return;
+    // Disable ANTES de leer/await — protege contra doble-click rápido.
+    sendBtn.disabled = true;
+    const prevText = sendBtn.textContent;
     const checked = getSelectedIds();
     const msg = document.getElementById('bulk-msg')?.value?.trim();
-    if (!checked.length) { toast('Seleccioná al menos una etiqueta'); return; }
-    if (!msg) { toast('Escribí un mensaje'); return; }
-    sendBtn.disabled = true;
+    if (!checked.length) { sendBtn.disabled = false; toast('Seleccioná al menos una etiqueta'); return; }
+    if (!msg) { sendBtn.disabled = false; toast('Escribí un mensaje'); return; }
     sendBtn.textContent = 'Enviando...';
-    const result = await sendBulkMessage(checked, msg);
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Enviar masivo';
-    const resEl = document.getElementById('bulk-result');
-    if (resEl && result) resEl.innerHTML = `<span style="color:#00a884">Enviados: ${result.sent}</span>${result.failed ? ` | <span style="color:#ef5350">Fallidos: ${result.failed}</span>` : ''}`;
+    try {
+      const result = await sendBulkMessage(checked, msg);
+      const resEl = document.getElementById('bulk-result');
+      if (resEl && result) resEl.innerHTML = `<span style="color:#00a884">Enviados: ${result.sent}</span>${result.failed ? ` | <span style="color:#ef5350">Fallidos: ${result.failed}</span>` : ''}`;
+    } finally {
+      sendBtn.disabled = false;
+      sendBtn.textContent = prevText;
+    }
   };
 }
 
