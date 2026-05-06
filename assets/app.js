@@ -3081,18 +3081,25 @@ async function loadPendingScheduled(phone, container) {
   } catch (_) {}
 }
 
+function localDateKey(d) {
+  // YYYY-MM-DD en hora local (no UTC), para comparar "mismo día calendario"
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function formatChatTime(ts) {
   if (!ts) return '';
   const d = new Date(ts);
   const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  const msgDate = ts.slice(0, 10);
+  const today = localDateKey(now);
+  const msgDate = localDateKey(d);
   const time = d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
   if (msgDate === today) return time;
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (msgDate === yesterday.toISOString().slice(0, 10)) return 'Ayer';
-  // Same week: show day name
+  if (msgDate === localDateKey(yesterday)) return 'Ayer';
   const diffDays = Math.floor((now - d) / 86400000);
   if (diffDays < 7) return d.toLocaleDateString('es-AR', { weekday: 'short' });
   return d.toLocaleDateString('es-AR', { day: 'numeric', month: 'numeric', year: '2-digit' });
@@ -3101,12 +3108,12 @@ function formatChatTime(ts) {
 function formatChatDate(ts) {
   const d = new Date(ts);
   const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  const msgDate = ts.slice(0, 10);
+  const today = localDateKey(now);
+  const msgDate = localDateKey(d);
   if (msgDate === today) return 'Hoy';
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (msgDate === yesterday.toISOString().slice(0, 10)) return 'Ayer';
+  if (msgDate === localDateKey(yesterday)) return 'Ayer';
   return d.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' });
 }
 
