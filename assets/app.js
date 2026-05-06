@@ -3727,11 +3727,11 @@ function renderBulkSection() {
     </div>
     <div class="bulk-labels" id="bulk-labels">
       <p style="color:#8696a0;font-size:13px;margin-bottom:6px">Enviar a contactos con etiqueta:</p>
-      ${chatState.labels.map(l => `<button type="button" class="bulk-label-pick" data-lbl-id="${l.id}" aria-pressed="false"><span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span><span class="bulk-label-tick">✓</span></button>`).join('')}
+      ${chatState.labels.map(l => `<button type="button" class="label-toggle-chip" data-lbl-id="${l.id}" style="--lc:${l.color}" aria-pressed="false">${escapeHtml(l.name)}</button>`).join('')}
     </div>
     <div id="bulk-count" style="color:#8696a0;font-size:12px;margin:6px 0"></div>
     <textarea id="bulk-msg" placeholder="Escribí el mensaje..." rows="3" class="bulk-textarea"></textarea>
-    <button class="btn btn-primary" id="bulk-send-btn" style="margin-top:8px;width:100%">Enviar masivo</button>
+    <button class="btn btn-cyan" id="bulk-send-btn" style="margin-top:8px;width:100%">Enviar masivo</button>
     <div id="bulk-result" style="margin-top:6px;font-size:13px"></div>
   </div>`;
 }
@@ -4483,16 +4483,11 @@ function showLabelPicker(phone) {
   popup.className = 'label-picker-popup';
   popup.innerHTML = `
     <div class="label-picker-title">Etiquetas</div>
-    ${chatState.labels.map(l => `
-      <label class="label-picker-row">
-        <input type="checkbox" ${cLabels.includes(l.id) ? 'checked' : ''} data-lbl-id="${l.id}">
-        <span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>
-      </label>
-    `).join('')}
+    <div class="label-picker-chips">
+      ${chatState.labels.map(l => `<button type="button" class="label-toggle-chip${cLabels.includes(l.id) ? ' active' : ''}" data-lbl-id="${l.id}" style="--lc:${l.color}" aria-pressed="${cLabels.includes(l.id)}">${escapeHtml(l.name)}</button>`).join('')}
+    </div>
     ${!chatState.labels.length ? '<div style="color:#8696a0;font-size:13px;padding:8px">No hay etiquetas. Crealas desde el panel izquierdo.</div>' : ''}
   `;
-  // Lo appendeamos al body con position fixed para evitar que el post-it u otros
-  // elementos del chat-main lo tapen. Posicionamos cerca del botón btn-labels.
   document.body.appendChild(popup);
   const btn = document.getElementById('btn-labels');
   if (btn) {
@@ -4502,12 +4497,21 @@ function showLabelPicker(phone) {
     popup.style.right = (window.innerWidth - r.right) + 'px';
     popup.style.left = 'auto';
   }
-  popup.querySelectorAll('input[data-lbl-id]').forEach(cb => {
-    cb.onchange = async () => {
-      await toggleContactLabel(phone, parseInt(cb.dataset.lblId));
+  popup.querySelectorAll('.label-toggle-chip').forEach(chip => {
+    chip.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (chip.dataset.busy === '1') return;
+      chip.dataset.busy = '1';
+      const labelId = parseInt(chip.dataset.lblId);
+      await toggleContactLabel(phone, labelId);
+      const nowOn = (chatState.contactLabels[phone] || []).includes(labelId);
+      chip.classList.toggle('active', nowOn);
+      chip.setAttribute('aria-pressed', nowOn ? 'true' : 'false');
       const chips = document.getElementById('chat-label-chips');
       if (chips) chips.innerHTML = renderContactLabelChips(phone);
-    };
+      refreshContactList();
+      chip.dataset.busy = '0';
+    });
   });
   setTimeout(() => {
     document.addEventListener('click', function closer(e) {
@@ -4636,7 +4640,8 @@ function refreshContactList() {
 function bindBulkSection() {
   const closeBtn = document.getElementById('bulk-close');
   if (closeBtn) closeBtn.onclick = () => { document.getElementById('bulk-section').style.display = 'none'; };
-  const getSelectedIds = () => Array.from(document.querySelectorAll('.bulk-label-pick.active')).map(b => parseInt(b.dataset.lblId));
+  const bulkSection = document.getElementById('bulk-section');
+  const getSelectedIds = () => Array.from(bulkSection.querySelectorAll('.label-toggle-chip.active')).map(b => parseInt(b.dataset.lblId));
   const updateCount = () => {
     const ids = getSelectedIds();
     if (!ids.length) { document.getElementById('bulk-count').textContent = ''; return; }
@@ -4647,7 +4652,7 @@ function bindBulkSection() {
     }
     document.getElementById('bulk-count').textContent = `${phones.size} contacto(s) seleccionados`;
   };
-  document.querySelectorAll('.bulk-label-pick').forEach(btn => {
+  bulkSection.querySelectorAll('.label-toggle-chip').forEach(btn => {
     btn.onclick = () => {
       btn.classList.toggle('active');
       btn.setAttribute('aria-pressed', btn.classList.contains('active') ? 'true' : 'false');

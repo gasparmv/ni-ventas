@@ -1942,25 +1942,23 @@ table.t td.cliente { font-weight: 600; }
   position: fixed;
   top: 60px;
   right: 16px;
-  background: #233138;
-  border-radius: 10px;
+  background: var(--ink-200);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
   padding: 14px;
-  box-shadow: 0 6px 20px rgba(0,0,0,.45);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .55), var(--inner-card);
   z-index: 320;
-  min-width: 200px;
+  min-width: 220px;
+  max-width: 280px;
 }
-.label-picker-title { color: #e9edef; font-weight: 600; font-size: 14px; margin-bottom: 10px; }
-.label-picker-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 4px;
-  cursor: pointer;
-  border-radius: 6px;
-  transition: background .12s;
+.label-picker-title {
+  color: var(--fg-subtle);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: var(--tr-xwide);
+  text-transform: uppercase;
+  margin-bottom: 10px;
 }
-.label-picker-row:hover { background: rgba(255,255,255,.05); }
-.label-picker-row input { accent-color: #00a884; width: 16px; height: 16px; }
 
 /* ============ Modal Gestionar etiquetas ============ */
 .manage-labels {
@@ -2330,33 +2328,43 @@ table.t td.cliente { font-weight: 600; }
 }
 .bulk-header h4 { color: #e9edef; font-size: 15px; font-weight: 500; margin: 0; }
 .bulk-labels { margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
-.bulk-label-pick {
+.label-picker-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* Chip toggleable: la etiqueta misma es el botón. Inactiva = opaca y desaturada,
+   activa = full color con glow + ✓. Sin pill envolvente, sin checkbox. */
+.label-toggle-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: transparent;
-  border: 1px solid var(--border);
+  background: var(--lc, var(--ink-300));
+  color: #fff;
+  border: 1px solid transparent;
   border-radius: var(--r-pill);
-  padding: 4px 10px 4px 4px;
-  cursor: pointer;
+  padding: 4px 12px;
   font-family: var(--font-sans);
-  transition: border-color .12s, background .12s, box-shadow .12s;
-}
-.bulk-label-pick:hover { border-color: var(--border-strong); background: rgba(255, 255, 255, .04); }
-.bulk-label-pick.active {
-  border-color: var(--neon-cyan);
-  background: rgba(143, 212, 222, .12);
-  box-shadow: var(--glow-cyan-sm);
-}
-.bulk-label-tick {
-  width: 14px;
-  text-align: center;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
-  color: var(--neon-cyan);
-  visibility: hidden;
+  letter-spacing: .2px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .25);
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: .42;
+  filter: saturate(.55);
+  transition: opacity .12s var(--ease-out), filter .12s var(--ease-out), box-shadow .12s var(--ease-out), transform .12s var(--ease-out);
 }
-.bulk-label-pick.active .bulk-label-tick { visibility: visible; }
+.label-toggle-chip:hover { opacity: .72; filter: saturate(.85); }
+.label-toggle-chip.active {
+  opacity: 1;
+  filter: saturate(1);
+  box-shadow: 0 0 0 2px var(--ink-100), 0 0 0 3px var(--lc, var(--neon-cyan));
+}
+.label-toggle-chip.active::after {
+  content: '✓';
+  font-size: 11px;
+  font-weight: 900;
+  margin-left: -2px;
+  opacity: .9;
+}
 .bulk-textarea {
   width: 100%;
   padding: 10px 12px;
