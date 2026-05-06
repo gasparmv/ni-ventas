@@ -2313,19 +2313,34 @@ table.t td.cliente { font-weight: 600; }
   margin-bottom: 10px;
 }
 .bulk-header h4 { color: #e9edef; font-size: 15px; font-weight: 500; margin: 0; }
-.bulk-labels { margin-bottom: 10px; }
-.bulk-label-check {
+.bulk-labels { margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+.bulk-label-pick {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin: 3px 6px 3px 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 4px 10px 4px 4px;
   cursor: pointer;
-  padding: 3px 6px;
-  border-radius: 6px;
-  transition: background .12s;
+  font-family: var(--font-sans);
+  transition: border-color .12s, background .12s, box-shadow .12s;
 }
-.bulk-label-check:hover { background: rgba(255,255,255,.05); }
-.bulk-label-check input { accent-color: #00a884; width: 15px; height: 15px; }
+.bulk-label-pick:hover { border-color: var(--border-strong); background: rgba(255, 255, 255, .04); }
+.bulk-label-pick.active {
+  border-color: var(--neon-cyan);
+  background: rgba(143, 212, 222, .12);
+  box-shadow: var(--glow-cyan-sm);
+}
+.bulk-label-tick {
+  width: 14px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--neon-cyan);
+  visibility: hidden;
+}
+.bulk-label-pick.active .bulk-label-tick { visibility: visible; }
 .bulk-textarea {
   width: 100%;
   padding: 10px 12px;

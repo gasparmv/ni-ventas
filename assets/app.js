@@ -3723,7 +3723,7 @@ function renderBulkSection() {
     </div>
     <div class="bulk-labels" id="bulk-labels">
       <p style="color:#8696a0;font-size:13px;margin-bottom:6px">Enviar a contactos con etiqueta:</p>
-      ${chatState.labels.map(l => `<label class="bulk-label-check"><input type="checkbox" value="${l.id}" class="bulk-label-cb"><span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span></label>`).join('')}
+      ${chatState.labels.map(l => `<button type="button" class="bulk-label-pick" data-lbl-id="${l.id}" aria-pressed="false"><span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span><span class="bulk-label-tick">✓</span></button>`).join('')}
     </div>
     <div id="bulk-count" style="color:#8696a0;font-size:12px;margin:6px 0"></div>
     <textarea id="bulk-msg" placeholder="Escribí el mensaje..." rows="3" class="bulk-textarea"></textarea>
@@ -4625,22 +4625,27 @@ function refreshContactList() {
 function bindBulkSection() {
   const closeBtn = document.getElementById('bulk-close');
   if (closeBtn) closeBtn.onclick = () => { document.getElementById('bulk-section').style.display = 'none'; };
-  // Count contacts when labels are checked
-  document.querySelectorAll('.bulk-label-cb').forEach(cb => {
-    cb.onchange = () => {
-      const checked = Array.from(document.querySelectorAll('.bulk-label-cb:checked')).map(c => parseInt(c.value));
-      if (!checked.length) { document.getElementById('bulk-count').textContent = ''; return; }
-      const phones = new Set();
-      for (const ph of Object.keys(chatState.contactLabels)) {
-        const cl = chatState.contactLabels[ph];
-        if (checked.some(lid => cl.includes(lid))) phones.add(ph);
-      }
-      document.getElementById('bulk-count').textContent = `${phones.size} contacto(s) seleccionados`;
+  const getSelectedIds = () => Array.from(document.querySelectorAll('.bulk-label-pick.active')).map(b => parseInt(b.dataset.lblId));
+  const updateCount = () => {
+    const ids = getSelectedIds();
+    if (!ids.length) { document.getElementById('bulk-count').textContent = ''; return; }
+    const phones = new Set();
+    for (const ph of Object.keys(chatState.contactLabels)) {
+      const cl = chatState.contactLabels[ph];
+      if (ids.some(lid => cl.includes(lid))) phones.add(ph);
+    }
+    document.getElementById('bulk-count').textContent = `${phones.size} contacto(s) seleccionados`;
+  };
+  document.querySelectorAll('.bulk-label-pick').forEach(btn => {
+    btn.onclick = () => {
+      btn.classList.toggle('active');
+      btn.setAttribute('aria-pressed', btn.classList.contains('active') ? 'true' : 'false');
+      updateCount();
     };
   });
   const sendBtn = document.getElementById('bulk-send-btn');
   if (sendBtn) sendBtn.onclick = async () => {
-    const checked = Array.from(document.querySelectorAll('.bulk-label-cb:checked')).map(c => parseInt(c.value));
+    const checked = getSelectedIds();
     const msg = document.getElementById('bulk-msg')?.value?.trim();
     if (!checked.length) { toast('Seleccioná al menos una etiqueta'); return; }
     if (!msg) { toast('Escribí un mensaje'); return; }
