@@ -641,7 +641,14 @@ function fmtDateTime(d) {
   return `${date} ${hh}:${mm}`;
 }
 function fmtDateLong(d) { if (!d) return '—'; return d.toLocaleDateString('es-AR', { day:'2-digit', month:'long', year:'numeric' }); }
-function daysBetween(a, b) { return Math.round((b - a) / 86400000); }
+function daysBetween(a, b) {
+  // Diferencia en días calendario (ignora hora/min/seg) — evita falsos negativos
+  // cuando una fecha tiene hora > 00:00 y la otra está fija a medianoche local.
+  if (!a || !b) return 0;
+  const da = new Date(a); da.setHours(0,0,0,0);
+  const db = new Date(b); db.setHours(0,0,0,0);
+  return Math.round((db - da) / 86400000);
+}
 function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
 function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function normName(s) { return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'').trim(); }
