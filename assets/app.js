@@ -892,10 +892,22 @@ function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c
 function normName(s) { return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'').trim(); }
 
 // ============ LOAD ============
+// Fetch con timeout: aborta si tarda más de N ms. Sin esto, una request
+// colgada de Apps Script o de gviz dejaba el spinner eterno.
+async function fetchWithTimeout(url, opts, timeoutMs) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function fetchSheet(id, sheet) {
   const url = csvUrl(id, sheet);
   try {
-    const r = await fetch(url);
+    const r = await fetchWithTimeout(url, {}, 12000);
     if (!r.ok) throw new Error(`${sheet}: ${r.status}`);
     const text = await r.text();
     return parseCSV(text);
@@ -905,45 +917,91 @@ async function fetchSheet(id, sheet) {
   }
 }
 
-// Fetch del cotizador via Apps Script Web App (devuelve display values raw, sin
-// coerción de tipo que hace gviz/csv y descartaba teléfonos con "+" o espacios).
+// Fetch del cotizador via Apps Script Web App (devuelve display values raw).
+// 8s timeout — Apps Script tiene cold-start hasta de varios segundos pero si
+// pasa de eso, fallback a gviz (más rápido aunque pierde teléfonos con +).
 async function fetchCotizadorViaAppsScript(sheetName) {
   if (!CONFIG.appsScriptUrl) return null;
   try {
     const url = CONFIG.appsScriptUrl.replace(/\/$/, '') + '?action=rows&sheet=' + encodeURIComponent(sheetName);
-    const r = await fetch(url, { redirect: 'follow' });
+    const r = await fetchWithTimeout(url, { redirect: 'follow' }, 8000);
     if (!r.ok) return null;
     const j = await r.json();
     if (!j || !Array.isArray(j.rows)) return null;
-    return j.rows; // ya es array de arrays
+    return j.rows;
   } catch (e) {
     console.warn('Apps Script fetch falló, fallback a gviz:', e.message);
     return null;
   }
 }
 
-async function loadAll() {
-  STATE.loaded = false;
-  STATE.error = null;
-  render();
+// Caché de pedidos + presupuestos en localStorage para mostrar data al instante
+// en el siguiente reload mientras se refresca en background (stale-while-revalidate).
+const CACHE_KEY = 'niventas.cache.v1';
+function loadCache() {
   try {
-    const ventasRows = await fetchSheet(CONFIG.ventasSheetId, CONFIG.ventasSheetName);
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const j = JSON.parse(raw);
+    if (!j || !j.ts) return null;
+    // Re-hidratar fechas: parseDate ya las maneja como objetos Date al guardar
+    // estaban serializadas como ISO strings. Las convertimos de vuelta.
+    const reviveDate = (d) => d ? new Date(d) : null;
+    j.pedidos.forEach(p => { p.fecha = reviveDate(p.fecha); });
+    j.presupuestos.forEach(p => { p.fecha = reviveDate(p.fecha); });
+    return j;
+  } catch (_) { return null; }
+}
+function saveCache() {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({
+      ts: Date.now(),
+      pedidos: STATE.pedidos,
+      presupuestos: STATE.presupuestos
+    }));
+  } catch (_) {}
+}
+
+async function loadAll(opts) {
+  const silent = !!(opts && opts.silent);
+  // Stale-while-revalidate: si tenemos caché y no se pidió refresh forzado,
+  // mostramos data al toque y refrescamos en background.
+  if (!STATE.loaded && !silent) {
+    const cached = loadCache();
+    if (cached && cached.pedidos && cached.presupuestos) {
+      STATE.pedidos = cached.pedidos;
+      STATE.presupuestos = cached.presupuestos;
+      matchPresupuestos();
+      STATE.loaded = true;
+      STATE.error = null;
+      render();
+      // Sigue al fetch fresco abajo, sin loading screen
+    } else {
+      STATE.loaded = false;
+      STATE.error = null;
+      render();
+    }
+  }
+  try {
+    // Cargar ventas y cotizador EN PARALELO (antes era serial → suma latencia).
+    const [ventasRows, ...cotizadorResults] = await Promise.all([
+      fetchSheet(CONFIG.ventasSheetId, CONFIG.ventasSheetName),
+      ...CONFIG.cotizadorSheets.map(async sheet => {
+        let rows = await fetchCotizadorViaAppsScript(sheet);
+        if (!rows) rows = await fetchSheet(CONFIG.cotizadorSheetId, sheet);
+        return { sheet, rows };
+      })
+    ]);
     if (!ventasRows) throw new Error('No se pudo cargar el Sheet "Ventas/2026". Verificá que esté público.');
     STATE.pedidos = parseVentas(ventasRows);
-
     const presupuestosAll = [];
-    for (const sheet of CONFIG.cotizadorSheets) {
-      // Preferimos el endpoint de Apps Script (devuelve valores raw sin coerción de tipo,
-      // crítico porque gviz CSV descarta los teléfonos con "+" y espacios cuando los
-      // numéricos puros le hacen inferir la columna como Number).
-      let rows = await fetchCotizadorViaAppsScript(sheet);
-      if (!rows) rows = await fetchSheet(CONFIG.cotizadorSheetId, sheet);
+    for (const { sheet, rows } of cotizadorResults) {
       if (rows) presupuestosAll.push(...parseCotizador(rows, sheet));
     }
     STATE.presupuestos = presupuestosAll;
-
     matchPresupuestos();
     STATE.loaded = true;
+    saveCache();
   } catch (e) {
     STATE.error = e.message;
   }
