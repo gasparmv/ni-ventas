@@ -1601,6 +1601,7 @@ table.t td.cliente { font-weight: 600; }
 .chat-msg-status.sent svg { fill: rgba(255,255,255,.4); }
 .chat-msg-status.delivered svg { fill: rgba(255,255,255,.5); }
 .chat-msg-status.read svg { fill: #53bdeb; }
+.chat-msg-status.failed { color: #ff4a5e; font-weight: 700; font-size: 11px; }
 
 /* Input bar */
 .chat-input-bar {

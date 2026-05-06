@@ -3597,6 +3597,7 @@ function renderChatBubbles() {
     if (dir === 'outbound') {
       if (m.status === 'read') statusHtml = `<span class="chat-msg-status read">${TICK_DOUBLE}</span>`;
       else if (m.status === 'delivered') statusHtml = `<span class="chat-msg-status delivered">${TICK_DOUBLE}</span>`;
+      else if (m.status === 'failed') statusHtml = `<span class="chat-msg-status failed" title="No se pudo entregar">✗ falló</span>`;
       else statusHtml = `<span class="chat-msg-status sent">${TICK_SINGLE}</span>`;
     }
     const footer = `<span class="chat-msg-footer"><span class="chat-msg-time">${time}</span>${statusHtml}</span>`;
