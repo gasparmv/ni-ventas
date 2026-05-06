@@ -564,6 +564,12 @@ async function setUser(name) {
   if (canAccessChat() && !chatState.contacts.length) {
     loadChatContacts().then(() => updateUnreadBadge());
   }
+  // Notificaciones funcionan aunque no estés en la vista del Chat — arrancamos
+  // el web worker apenas el user puede acceder.
+  if (canAccessChat()) {
+    ensureNotificationPermission();
+    initPollWorker();
+  }
 }
 async function loginPrompt(userName) {
   if (!CONFIG.trackerUrl) {
@@ -612,6 +618,7 @@ async function logout() {
     } catch(e) {}
   }
   saveToken(null);
+  teardownPollWorker();
   // Si estaba con usuario privilegiado, lo dejo sin usuario para que tenga que re-loguearse
   if (isGasparUser(STATE.user) || isJoaquinUser(STATE.user)) { STATE.user = null; saveUser(); }
   // Si estaba en vista admin, salir
@@ -4788,6 +4795,47 @@ function bindChat() {
   }
   // Pedir permiso de notificaciones del browser (idempotente).
   ensureNotificationPermission();
+  // Web Worker para notificaciones cuando la pestaña está minimizada/hidden.
+  // El main-thread setInterval sufre throttling a ~1/min en hidden tabs;
+  // el Web Worker corre en su propio thread y mantiene su frecuencia.
+  initPollWorker();
+}
+
+// ===== Web Worker para notificaciones en background =====
+let _pollWorker = null;
+function initPollWorker() {
+  if (_pollWorker) return; // ya inicializado
+  if (!STATE.token || !CONFIG.trackerUrl) return;
+  if (typeof Worker === 'undefined') return;
+  try {
+    _pollWorker = new Worker('assets/poll-worker.js');
+    _pollWorker.onmessage = (e) => {
+      const m = e.data || {};
+      if (m.type !== 'new-message') return;
+      // Si la pestaña está visible y este mensaje es del chat abierto, ya
+      // lo va a manejar el polling principal. Solo notificamos si NO está
+      // abierto este chat o si la pestaña está oculta.
+      if (document.visibilityState === 'visible' && chatState.selectedPhone === m.phone) return;
+      // Buscar el contacto si lo conocemos para usar su nombre/avatar
+      const contact = chatState.contacts.find(c => c.phone === m.phone) || {
+        phone: m.phone, name: m.name || '', lastMsg: m.body || ''
+      };
+      notifyNewMessage(contact);
+    };
+    _pollWorker.postMessage({
+      type: 'init',
+      token: STATE.token,
+      trackerUrl: CONFIG.trackerUrl
+    });
+  } catch (e) {
+    console.warn('Poll worker no disponible:', e);
+    _pollWorker = null;
+  }
+}
+function teardownPollWorker() {
+  if (!_pollWorker) return;
+  try { _pollWorker.postMessage({ type: 'stop' }); _pollWorker.terminate(); } catch (_) {}
+  _pollWorker = null;
 }
 
 // ===== Notificaciones del chat =====
@@ -5255,8 +5303,13 @@ STATE.view = initView;
 loadAll();
 // Sync done marks desde Worker (en background, re-render cuando llegue)
 loadDone().then(() => { if (STATE.loaded) render(); });
-// Pre-load chat unread counts for sidebar badge
-if (canAccessChat()) loadChatContacts().then(() => updateUnreadBadge());
+// Pre-load chat unread counts for sidebar badge + arrancar el web worker de
+// notificaciones aunque el usuario no entre a la vista del Chat.
+if (canAccessChat()) {
+  loadChatContacts().then(() => updateUnreadBadge());
+  ensureNotificationPermission();
+  initPollWorker();
+}
 
 // Re-bind table when pedidos view rendered after data loads
 function rerenderTablePedidosIfNeeded() { if (STATE.view === 'pedidos') renderTablePedidos(); }
