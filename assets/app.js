@@ -178,6 +178,100 @@ async function enviarPresupuestoWA() {
   if (waOk) await saveCotizacion();
 }
 
+const PRESUPUESTO_PREFIX = 'Te comparto la información detallada!';
+const FOLLOWUP_PRESUPUESTO_TEXT = 'Aca te dejamos el presupuesto! Decinos que te parece? si hay algun cambio o ajuste que quieras hacer, tambien si tenes foto de donde lo vas a poner te podemos hacer un montaje digital de como quedaría!';
+const FOLLOWUP_PRESUPUESTO_PREFIX = 'Aca te dejamos el presupuesto!';
+
+async function enviarFollowupsPresupuesto() {
+  if (!STATE.token) { alert('Tenés que estar logueado para enviar follow-ups'); return; }
+  if (!CONFIG.trackerUrl) { alert('Tracker no configurado'); return; }
+
+  toast('Buscando presupuestos sin respuesta…');
+
+  // 1) Outbound de las últimas 24h
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  let outbound = [];
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?direction=outbound&from=' + encodeURIComponent(since) + '&limit=2000', {
+      headers: authHeaders()
+    });
+    const j = await r.json();
+    outbound = j.messages || [];
+  } catch (e) { alert('Error de red al buscar mensajes'); return; }
+
+  // 2) Filtrar presupuestos del cotizador (texto que arranca con el prefijo conocido)
+  const presupuestos = outbound.filter(m => (m.body || '').startsWith(PRESUPUESTO_PREFIX));
+
+  // 3) Quedarse con el último presupuesto por teléfono
+  const byPhone = new Map();
+  for (const p of presupuestos) {
+    const ex = byPhone.get(p.phone);
+    if (!ex || new Date(p.ts) > new Date(ex.ts)) byPhone.set(p.phone, p);
+  }
+
+  // 4) Filtrar los enviados hace > 1h (sino es muy pronto para insistir)
+  const oneHourAgo = Date.now() - 60 * 60 * 1000;
+  const candidates = [...byPhone.values()].filter(p => new Date(p.ts).getTime() < oneHourAgo);
+
+  if (candidates.length === 0) {
+    alert('No hay presupuestos enviados hace más de 1 hora.');
+    return;
+  }
+
+  // 5) Para cada uno, chequear conversación: ¿respondió? ¿ya tiene follow-up?
+  const toSend = [];
+  let respondidos = 0;
+  let yaFollowedUp = 0;
+  for (const p of candidates) {
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?phone=' + encodeURIComponent(p.phone) + '&from=' + encodeURIComponent(p.ts) + '&limit=200', {
+        headers: authHeaders()
+      });
+      const j = await r.json();
+      const msgs = j.messages || [];
+      const respondio = msgs.some(m => m.direction === 'inbound' && new Date(m.ts) > new Date(p.ts));
+      if (respondio) { respondidos++; continue; }
+      const yaFu = msgs.some(m => m.direction === 'outbound' && new Date(m.ts) > new Date(p.ts) && (m.body || '').startsWith(FOLLOWUP_PRESUPUESTO_PREFIX));
+      if (yaFu) { yaFollowedUp++; continue; }
+      toSend.push(p);
+    } catch (_) { /* skip on error */ }
+  }
+
+  if (toSend.length === 0) {
+    alert(`Nada para enviar.\n${respondidos} ya respondieron, ${yaFollowedUp} ya tienen follow-up.`);
+    return;
+  }
+
+  const lista = toSend.map(p => `• ${p.sender_name || p.phone} (${p.phone})`).join('\n');
+  const ok = confirm(`Se van a enviar ${toSend.length} follow-up${toSend.length > 1 ? 's' : ''} a:\n\n${lista}\n\nDescartados: ${respondidos} respondieron, ${yaFollowedUp} ya tenían follow-up.\n\n¿Confirmar?`);
+  if (!ok) return;
+
+  // 6) Enviar uno por uno con pequeño delay
+  let sent = 0, failed = 0;
+  const errors = [];
+  for (const p of toSend) {
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ to: p.phone, body: FOLLOWUP_PRESUPUESTO_TEXT })
+      });
+      if (r.ok) { sent++; }
+      else {
+        failed++;
+        const j = await r.json().catch(() => ({}));
+        errors.push(`${p.sender_name || p.phone}: ${j.error || 'error'}`);
+      }
+    } catch (e) {
+      failed++;
+      errors.push(`${p.sender_name || p.phone}: red`);
+    }
+    await new Promise(r => setTimeout(r, 600));
+  }
+  const msg = `Enviados: ${sent}\nFallidos: ${failed}` + (errors.length ? `\n\nErrores:\n${errors.slice(0, 10).join('\n')}` : '');
+  alert(msg);
+}
+
 async function saveCotizacion() {
   if (!CONFIG.appsScriptUrl) { alert('Falta configurar CONFIG.appsScriptUrl (Google Apps Script)'); return; }
   const f = STATE.cotizadorForm;
@@ -1366,6 +1460,8 @@ function bindPresupuestos() {
     el.onchange = () => { STATE.cotizadorForm[el.dataset.cotField] = el.value; updateCotizadorForm(); };
   });
   bindCotSaveBtn();
+  const fuBtn = document.getElementById('btn-pp-followups');
+  if (fuBtn) fuBtn.onclick = () => enviarFollowupsPresupuesto();
 }
 
 function updateCotizadorForm() {
@@ -1491,6 +1587,7 @@ function renderPresupuestos() {
       <div><div class="eyebrow">${STATE.presupuestos.length}${STATE.presupuestos.length ? ' desde ' + fmtDate(STATE.presupuestos.reduce((min, p) => p.fecha < min ? p.fecha : min, STATE.presupuestos[0].fecha)) : ''}</div><h1>Presupuestos</h1></div>
       <div class="actions">
         <button class="btn btn-cyan" data-cot-open>＋ Cotizador</button>
+        <button class="btn btn-ghost" id="btn-pp-followups" title="Enviar follow-up a clientes que recibieron presupuesto hace +1hs y no respondieron">📱 Follow-ups</button>
         <button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button>
       </div>
     </div>
