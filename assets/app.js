@@ -540,12 +540,20 @@ function saveToken(t) {
   if (t) localStorage.setItem('niventas.token', t);
   else localStorage.removeItem('niventas.token');
 }
+// Normaliza nombre de usuario para comparaciones tolerantes a tilde.
+// Soporta variantes históricas en localStorage (Joaquin / Joaquín).
+function _userKey(s) {
+  return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
+function isJoaquinUser(s) { return _userKey(s) === 'joaquin'; }
+function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
+
 async function setUser(name) {
   // Gaspar necesita password; Joaquín se auto-loguea sin password
-  if (name === 'Gaspar' && !STATE.token) {
+  if (isGasparUser(name) && !STATE.token) {
     const ok = await loginPrompt(name);
     if (!ok) return;
-  } else if (name === 'Joaquín' && !STATE.token) {
+  } else if (isJoaquinUser(name) && !STATE.token) {
     const ok = await autoLogin(name);
     if (!ok) return;
   }
@@ -605,13 +613,13 @@ async function logout() {
   }
   saveToken(null);
   // Si estaba con usuario privilegiado, lo dejo sin usuario para que tenga que re-loguearse
-  if (['Gaspar', 'Joaquín'].includes(STATE.user)) { STATE.user = null; saveUser(); }
+  if (isGasparUser(STATE.user) || isJoaquinUser(STATE.user)) { STATE.user = null; saveUser(); }
   // Si estaba en vista admin, salir
   if (STATE.view === 'admin') setView('dashboard');
   else render();
 }
 function isAdmin() { return !!STATE.token && STATE.user === 'Gaspar'; }
-function canAccessChat() { return !!STATE.token && ['Gaspar', 'Joaquín'].includes(STATE.user); }
+function canAccessChat() { return !!STATE.token && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user)); }
 function authHeaders() {
   return STATE.token ? { 'Authorization': 'Bearer ' + STATE.token } : {};
 }
