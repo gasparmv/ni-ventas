@@ -122,7 +122,7 @@ function getPresupuestoTextoFinal() {
 
 function copiarPresupuesto() {
   const texto = getPresupuestoTextoFinal();
-  if (!texto) { alert('Completá al menos ancho y alto'); return; }
+  if (!texto) { showAlert('Completá al menos ancho y alto', { title: 'Faltan datos' }); return; }
   navigator.clipboard.writeText(texto).then(() => {
     toast('Presupuesto copiado al portapapeles ✓');
   }).catch(() => {
@@ -139,14 +139,14 @@ function copiarPresupuesto() {
 
 async function enviarPresupuestoWA() {
   const f = STATE.cotizadorForm;
-  if (!(+f.ancho > 0) || !(+f.alto > 0)) { alert('Completá al menos ancho y alto'); return; }
-  if (!f.cliente.trim()) { alert('Completá el nombre del cliente/diseño (se va a guardar también en el Sheet)'); return; }
+  if (!(+f.ancho > 0) || !(+f.alto > 0)) { await showAlert('Completá al menos ancho y alto', { title: 'Faltan datos' }); return; }
+  if (!f.cliente.trim()) { await showAlert('Completá el nombre del cliente/diseño (se va a guardar también en el Sheet)', { title: 'Falta el cliente' }); return; }
   const tel = (f.telefono || '').trim();
-  if (!tel) { alert('Completá el teléfono del cliente'); return; }
+  if (!tel) { await showAlert('Completá el teléfono del cliente', { title: 'Falta el teléfono' }); return; }
   const digits = tel.replace(/\D/g, '');
-  if (digits.length < 8) { alert('El teléfono parece inválido (' + digits.length + ' dígitos). Argentina necesita al menos 8 dígitos sin contar el código de país.'); return; }
-  if (!STATE.token) { alert('Tenés que estar logueado (Gaspar o Joaquín) para enviar por WhatsApp'); return; }
-  if (!CONFIG.trackerUrl) { alert('Tracker no configurado'); return; }
+  if (digits.length < 8) { await showAlert('El teléfono parece inválido (' + digits.length + ' dígitos). Argentina necesita al menos 8 dígitos sin contar el código de país.', { title: 'Teléfono inválido', variant: 'warn' }); return; }
+  if (!STATE.token) { await showAlert('Tenés que estar logueado (Gaspar o Joaquín) para enviar por WhatsApp', { title: 'Login requerido', variant: 'warn' }); return; }
+  if (!CONFIG.trackerUrl) { await showAlert('Tracker no configurado', { title: 'Error de configuración', variant: 'warn' }); return; }
   const texto = getPresupuestoTextoFinal();
   if (!texto) return;
   STATE.cotizadorSendingWA = true;
@@ -166,7 +166,7 @@ async function enviarPresupuestoWA() {
       const hint = /outside|24|window|template/i.test(String(detail))
         ? '\n\nWhatsApp Cloud API solo permite mensajes libres si el cliente escribió en las últimas 24hs. Si el cliente nunca habló al número, hay que mandar primero un template aprobado.'
         : '';
-      alert('Error al enviar: ' + detail + hint);
+      await showAlert(detail + hint, { title: 'No se pudo enviar', variant: 'warn' });
       return;
     }
     waOk = true;
@@ -175,7 +175,7 @@ async function enviarPresupuestoWA() {
     // El webhook puede marcarlo como 'failed' después.
     toast('Mandado a WhatsApp · verificando entrega…');
   } catch (e) {
-    alert('Error de red al enviar');
+    await showAlert('Error de red al enviar', { title: 'Error de conexión', variant: 'warn' });
   } finally {
     STATE.cotizadorSendingWA = false;
     updateCotizadorForm();
@@ -200,7 +200,10 @@ async function verificarEntregaWA(wamid, phone) {
       const msg = (j.messages || []).find(m => m.wamid === wamid);
       if (!msg) continue;
       if (msg.status === 'failed') {
-        alert('⚠ El mensaje a ' + phone + ' NO se entregó.\n\nLo más probable: el cliente está fuera de la ventana de 24h de WhatsApp (no te escribió en las últimas 24hs).\n\nEl presupuesto quedó guardado en el Sheet pero no llegó al cliente.');
+        await showAlert(
+          'El mensaje a ' + phone + ' NO se entregó.\n\nLo más probable: el cliente está fuera de la ventana de 24h de WhatsApp (no te escribió en las últimas 24hs).\n\nEl presupuesto quedó guardado en el Sheet pero no llegó al cliente.',
+          { title: 'Entrega fallida', variant: 'warn' }
+        );
         return;
       }
       if (msg.status === 'delivered' || msg.status === 'read') {
@@ -214,8 +217,8 @@ async function verificarEntregaWA(wamid, phone) {
 }
 
 async function verFallosWA() {
-  if (!STATE.token) { alert('Tenés que estar logueado'); return; }
-  if (!CONFIG.trackerUrl) { alert('Tracker no configurado'); return; }
+  if (!STATE.token) { await showAlert('Tenés que estar logueado', { title: 'Login requerido', variant: 'warn' }); return; }
+  if (!CONFIG.trackerUrl) { await showAlert('Tracker no configurado', { title: 'Error', variant: 'warn' }); return; }
   toast('Buscando presupuestos fallidos…');
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   let all = [];
@@ -225,13 +228,16 @@ async function verFallosWA() {
     });
     const j = await r.json();
     all = j.messages || [];
-  } catch (e) { alert('Error al consultar el worker'); return; }
+  } catch (e) { await showAlert('Error al consultar el worker', { title: 'Error de red', variant: 'warn' }); return; }
   const fallos = all.filter(m =>
     m.status === 'failed' &&
     (m.body || '').startsWith(PRESUPUESTO_PREFIX)
   );
   if (fallos.length === 0) {
-    alert('Sin fallos en las últimas 24h ✓\nTodos los presupuestos enviados por el cotizador llegaron al servidor de WhatsApp y fueron aceptados.');
+    await showAlert(
+      'Todos los presupuestos enviados por el cotizador en las últimas 24hs llegaron al servidor de WhatsApp y fueron aceptados.',
+      { title: 'Sin fallos ✓', variant: 'success' }
+    );
     return;
   }
   // Agrupar por teléfono (último intento por cliente)
@@ -246,7 +252,10 @@ async function verFallosWA() {
     const hora = new Date(m.ts).toLocaleString('es-AR', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
     return `• ${m.phone} — ${trabajo} (${hora})`;
   }).join('\n');
-  alert(`⚠ ${list.length} presupuesto${list.length > 1 ? 's' : ''} NO entregado${list.length > 1 ? 's' : ''} en las últimas 24h:\n\n${lines}\n\nLa causa más común: el cliente no escribió al número de WA Business en las últimas 24h, así que la API de WhatsApp no permite mandarle texto libre.`);
+  await showAlert(
+    `${lines}\n\nLa causa más común: el cliente no escribió al número de WA Business en las últimas 24h, así que la API de WhatsApp no permite mandarle texto libre.`,
+    { title: `${list.length} presupuesto${list.length > 1 ? 's' : ''} no entregado${list.length > 1 ? 's' : ''}`, variant: 'warn' }
+  );
 }
 
 const PRESUPUESTO_PREFIX = 'Te comparto la información detallada!';
@@ -255,8 +264,8 @@ const FOLLOWUP_PRESUPUESTO_PREFIX = 'Aca te dejamos el presupuesto!';
 
 async function enviarFollowupsPresupuesto(opts) {
   const force = !!(opts && opts.force);
-  if (!STATE.token) { alert('Tenés que estar logueado para enviar follow-ups'); return; }
-  if (!CONFIG.trackerUrl) { alert('Tracker no configurado'); return; }
+  if (!STATE.token) { await showAlert('Tenés que estar logueado para enviar follow-ups', { title: 'Login requerido', variant: 'warn' }); return; }
+  if (!CONFIG.trackerUrl) { await showAlert('Tracker no configurado', { title: 'Error', variant: 'warn' }); return; }
 
   toast(force ? 'Buscando presupuestos para forzar follow-up…' : 'Buscando presupuestos sin respuesta…');
 
@@ -269,7 +278,7 @@ async function enviarFollowupsPresupuesto(opts) {
     });
     const j = await r.json();
     outbound = j.messages || [];
-  } catch (e) { alert('Error de red al buscar mensajes'); return; }
+  } catch (e) { await showAlert('Error de red al buscar mensajes', { title: 'Error de red', variant: 'warn' }); return; }
 
   // 2) Filtrar presupuestos del cotizador (texto que arranca con el prefijo conocido)
   const presupuestos = outbound.filter(m => (m.body || '').startsWith(PRESUPUESTO_PREFIX));
@@ -289,9 +298,12 @@ async function enviarFollowupsPresupuesto(opts) {
     : [...byPhone.values()].filter(p => new Date(p.ts).getTime() < oneHourAgo);
 
   if (candidates.length === 0) {
-    alert(force
-      ? 'No hay presupuestos enviados en las últimas 24h.'
-      : 'No hay presupuestos enviados hace más de 1 hora.');
+    await showAlert(
+      force
+        ? 'No hay presupuestos enviados en las últimas 24h.'
+        : 'No hay presupuestos enviados hace más de 1 hora.',
+      { title: 'Nada para enviar' }
+    );
     return;
   }
 
@@ -315,12 +327,22 @@ async function enviarFollowupsPresupuesto(opts) {
   }
 
   if (toSend.length === 0) {
-    alert(`Nada para enviar.\n${respondidos} ya respondieron, ${yaFollowedUp} ya tienen follow-up.`);
+    await showAlert(
+      `${respondidos} ya respondieron, ${yaFollowedUp} ya tienen follow-up.`,
+      { title: 'Nada para enviar' }
+    );
     return;
   }
 
   const lista = toSend.map(p => `• ${p.sender_name || p.phone} (${p.phone})`).join('\n');
-  const ok = confirm(`Se van a enviar ${toSend.length} follow-up${toSend.length > 1 ? 's' : ''} a:\n\n${lista}\n\nDescartados: ${respondidos} respondieron, ${yaFollowedUp} ya tenían follow-up.\n\n¿Confirmar?`);
+  const ok = await showConfirm(
+    `${lista}\n\nDescartados: ${respondidos} respondieron, ${yaFollowedUp} ya tenían follow-up.`,
+    {
+      title: `Enviar ${toSend.length} follow-up${toSend.length > 1 ? 's' : ''}`,
+      confirmLabel: 'Enviar todos',
+      cancelLabel: 'Cancelar'
+    }
+  );
   if (!ok) return;
 
   // 6) Enviar uno por uno con pequeño delay
@@ -346,15 +368,18 @@ async function enviarFollowupsPresupuesto(opts) {
     await new Promise(r => setTimeout(r, 600));
   }
   const msg = `Enviados: ${sent}\nFallidos: ${failed}` + (errors.length ? `\n\nErrores:\n${errors.slice(0, 10).join('\n')}` : '');
-  alert(msg);
+  await showAlert(msg, {
+    title: 'Resultado del envío',
+    variant: failed > 0 ? 'warn' : 'success'
+  });
 }
 
 async function saveCotizacion() {
-  if (!CONFIG.appsScriptUrl) { alert('Falta configurar CONFIG.appsScriptUrl (Google Apps Script)'); return; }
+  if (!CONFIG.appsScriptUrl) { await showAlert('Falta configurar CONFIG.appsScriptUrl (Google Apps Script)', { title: 'Error de configuración', variant: 'warn' }); return; }
   const f = STATE.cotizadorForm;
-  if (!(+f.ancho > 0) || !(+f.alto > 0)) { alert('Completá al menos ancho y alto'); return; }
-  if (!f.cliente.trim()) { alert('Completá el nombre del cliente/diseño'); return; }
-  if (f.canal === 'WPP' && !f.telefono.trim()) { alert('Completá el teléfono del cliente (obligatorio para WPP)'); return; }
+  if (!(+f.ancho > 0) || !(+f.alto > 0)) { await showAlert('Completá al menos ancho y alto', { title: 'Faltan datos' }); return; }
+  if (!f.cliente.trim()) { await showAlert('Completá el nombre del cliente/diseño', { title: 'Falta el cliente' }); return; }
+  if (f.canal === 'WPP' && !f.telefono.trim()) { await showAlert('Completá el teléfono del cliente (obligatorio para WPP)', { title: 'Falta el teléfono' }); return; }
   const r = calcCotizador(f);
   STATE.cotizadorSaving = true;
   updateCotizadorForm();
@@ -414,7 +439,7 @@ async function saveCotizacion() {
     // Esperar un poco para que el sheet se actualice antes de recargar
     setTimeout(() => loadAll(), 2000);
   } catch (e) {
-    alert('Error al guardar: ' + e.message);
+    await showAlert(e.message, { title: 'Error al guardar', variant: 'warn' });
   } finally {
     STATE.cotizadorSaving = false;
     updateCotizadorForm();
@@ -511,7 +536,7 @@ async function setUser(name) {
 }
 async function loginPrompt(userName) {
   if (!CONFIG.trackerUrl) {
-    alert('El backend de auth no está configurado. Ver CONFIG.trackerUrl.');
+    await showAlert('El backend de auth no está configurado. Ver CONFIG.trackerUrl.', { title: 'Error de configuración', variant: 'warn' });
     return false;
   }
   const pw = prompt('Contraseña de admin:');
@@ -522,13 +547,13 @@ async function loginPrompt(userName) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user: userName || 'Gaspar', password: pw })
     });
-    if (r.status === 401) { alert('Contraseña incorrecta'); return false; }
+    if (r.status === 401) { await showAlert('Contraseña incorrecta', { title: 'Login fallido', variant: 'warn' }); return false; }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
     saveToken(j.token);
     return true;
   } catch (e) {
-    alert('Error de login: ' + e.message);
+    await showAlert(e.message, { title: 'Error de login', variant: 'warn' });
     return false;
   }
 }
@@ -1539,8 +1564,6 @@ function bindPresupuestos() {
   bindCotSaveBtn();
   const fuBtn = document.getElementById('btn-pp-followups');
   if (fuBtn) fuBtn.onclick = () => enviarFollowupsPresupuesto();
-  const fuForceBtn = document.getElementById('btn-pp-followups-force');
-  if (fuForceBtn) fuForceBtn.onclick = () => enviarFollowupsPresupuesto({ force: true });
   const failBtn = document.getElementById('btn-pp-failures');
   if (failBtn) failBtn.onclick = () => verFallosWA();
 }
@@ -1670,7 +1693,6 @@ function renderPresupuestos() {
         <button class="btn btn-cyan" data-cot-open>＋ Cotizador</button>
         <button class="btn btn-ghost" id="btn-pp-failures" title="Ver presupuestos del cotizador que fallaron en entregar por WhatsApp en las últimas 24hs">⚠ Fallos WA</button>
         <button class="btn btn-ghost" id="btn-pp-followups" title="Enviar follow-up a clientes que recibieron presupuesto hace +1hs y no respondieron">📱 Follow-ups</button>
-        <button class="btn btn-ghost" id="btn-pp-followups-force" title="TEST: forzar follow-up ignorando la regla de 1hs (incluye presupuestos enviados recién)">🧪 Test follow-up</button>
         <button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button>
       </div>
     </div>
@@ -2641,8 +2663,13 @@ function bindAdmin() {
     }
   };
   const resetBtn = document.querySelector('[data-cot-reset]');
-  if (resetBtn) resetBtn.onclick = () => {
-    if (!confirm('Resetear todos los parámetros a los valores originales?')) return;
+  if (resetBtn) resetBtn.onclick = async () => {
+    const ok = await showConfirm('¿Resetear todos los parámetros a los valores originales?', {
+      title: 'Resetear parámetros',
+      confirmLabel: 'Resetear',
+      variant: 'warn'
+    });
+    if (!ok) return;
     const defs = CONFIG.cotizadorDefaults;
     document.querySelectorAll('[data-cot-param]').forEach(i => {
       i.value = defs[i.dataset.cotParam];
@@ -2829,6 +2856,82 @@ function toast(msg) {
   const t = document.getElementById('toast'); if (!t) return;
   t.textContent = msg; t.classList.add('show');
   clearTimeout(window.__tt); window.__tt = setTimeout(()=>t.classList.remove('show'), 1800);
+}
+
+// ===== Modales NEON (reemplazan alert/confirm nativos) =====
+function _modalRender({ message, title, variant, confirmLabel, cancelLabel, withCancel }) {
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  const variantClass = variant ? ` modal--${variant}` : '';
+  const titleHtml = title ? `<div class="modal-h"><h3>${escapeHtml(title)}</h3></div>` : '';
+  const bodyHtml = escapeHtml(String(message || '')).replace(/\n/g, '<br>');
+  const cancelBtn = withCancel ? `<button class="btn btn-ghost modal-cancel">${escapeHtml(cancelLabel || 'Cancelar')}</button>` : '';
+  bg.innerHTML = `
+    <div class="modal${variantClass}">
+      ${titleHtml}
+      <div class="modal-body">${bodyHtml}</div>
+      <div class="modal-actions">
+        ${cancelBtn}
+        <button class="btn btn-cyan modal-confirm">${escapeHtml(confirmLabel || 'Aceptar')}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(bg);
+  // animar entrada en el siguiente tick
+  requestAnimationFrame(() => bg.classList.add('open'));
+  return bg;
+}
+
+function showAlert(message, opts) {
+  return new Promise(resolve => {
+    const variant = opts?.variant || (/⚠|fallaron|fall(ó|o)|inv(á|a)lido|error/i.test(String(message)) ? 'warn' : null);
+    const bg = _modalRender({
+      message,
+      title: opts?.title,
+      variant,
+      confirmLabel: opts?.confirmLabel,
+      withCancel: false
+    });
+    const close = () => {
+      bg.classList.remove('open');
+      setTimeout(() => bg.remove(), 150);
+      document.removeEventListener('keydown', onKey);
+      resolve();
+    };
+    function onKey(e) { if (e.key === 'Escape' || e.key === 'Enter') close(); }
+    bg.querySelector('.modal-confirm').onclick = close;
+    bg.addEventListener('click', e => { if (e.target === bg) close(); });
+    document.addEventListener('keydown', onKey);
+    setTimeout(() => bg.querySelector('.modal-confirm')?.focus(), 0);
+  });
+}
+
+function showConfirm(message, opts) {
+  return new Promise(resolve => {
+    const bg = _modalRender({
+      message,
+      title: opts?.title,
+      variant: opts?.variant,
+      confirmLabel: opts?.confirmLabel || 'Confirmar',
+      cancelLabel: opts?.cancelLabel || 'Cancelar',
+      withCancel: true
+    });
+    const finish = (val) => {
+      bg.classList.remove('open');
+      setTimeout(() => bg.remove(), 150);
+      document.removeEventListener('keydown', onKey);
+      resolve(val);
+    };
+    function onKey(e) {
+      if (e.key === 'Escape') finish(false);
+      else if (e.key === 'Enter') finish(true);
+    }
+    bg.querySelector('.modal-confirm').onclick = () => finish(true);
+    bg.querySelector('.modal-cancel').onclick = () => finish(false);
+    bg.addEventListener('click', e => { if (e.target === bg) finish(false); });
+    document.addEventListener('keydown', onKey);
+    setTimeout(() => bg.querySelector('.modal-confirm')?.focus(), 0);
+  });
 }
 
 // ============ CHAT WHATSAPP ============
