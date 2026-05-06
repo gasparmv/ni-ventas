@@ -3365,7 +3365,7 @@ function renderNormalInputUI() {
   if (!bar) return;
   bar.innerHTML = `
     <button class="btn-send btn-attach" id="btn-attach" title="Adjuntar imagen"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647a5.58 5.58 0 003.972-1.645l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.501.501 1.134.79 1.737.79.558 0 1.031-.224 1.37-.564l5.582-5.58a.747.747 0 10-1.055-1.06l-5.58 5.58c-.172.172-.42.156-.614-.04-.508-.51-.427-1.122-.07-1.478l7.916-7.916c.866-.866 2.358-.764 3.46.34.556.557.876 1.203.918 1.818.036.526-.176 1.047-.595 1.466L10.11 18.526a4.09 4.09 0 01-2.913 1.205 4.09 4.09 0 01-2.913-1.205 4.09 4.09 0 01-1.205-2.913c0-1.1.428-2.134 1.205-2.911l8.647-8.646a.747.747 0 00-1.055-1.06l-8.647 8.646A5.58 5.58 0 001.816 15.556z"/></svg></button>
-    <input type="file" id="chat-file-input" accept="image/*" style="display:none">
+    <input type="file" id="chat-file-input" accept="image/*" multiple style="display:none">
     <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
     <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg></button>
     <button class="btn-send btn-schedule" id="btn-schedule" title="Programar mensaje"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg></button>
@@ -4002,7 +4002,7 @@ function renderChatConversation() {
     </button>
     <div class="chat-input-bar">
       <button class="btn-send btn-attach" id="btn-attach" title="Adjuntar imagen"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647a5.58 5.58 0 003.972-1.645l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.501.501 1.134.79 1.737.79.558 0 1.031-.224 1.37-.564l5.582-5.58a.747.747 0 10-1.055-1.06l-5.58 5.58c-.172.172-.42.156-.614-.04-.508-.51-.427-1.122-.07-1.478l7.916-7.916c.866-.866 2.358-.764 3.46.34.556.557.876 1.203.918 1.818.036.526-.176 1.047-.595 1.466L10.11 18.526a4.09 4.09 0 01-2.913 1.205 4.09 4.09 0 01-2.913-1.205 4.09 4.09 0 01-1.205-2.913c0-1.1.428-2.134 1.205-2.911l8.647-8.646a.747.747 0 00-1.055-1.06l-8.647 8.646A5.58 5.58 0 001.816 15.556z"/></svg></button>
-      <input type="file" id="chat-file-input" accept="image/*" style="display:none">
+      <input type="file" id="chat-file-input" accept="image/*" multiple style="display:none">
       <div class="chat-input-wrap">
         <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
         <div class="qr-dropdown" id="qr-dropdown" style="display:none"></div>
@@ -4401,15 +4401,29 @@ function bindChatConversation() {
   if (schedBtn) {
     schedBtn.onclick = () => showScheduleModal(chatState.selectedPhone);
   }
-  // Attach image
+  // Attach image (soporta múltiples). Las mandamos en serie con un pequeño
+  // delay para no chocar con el rate limit del WA Cloud API.
   if (attachBtn && fileInput) {
     attachBtn.onclick = () => fileInput.click();
-    fileInput.onchange = () => {
-      const file = fileInput.files[0];
-      if (file && chatState.selectedPhone) {
-        sendChatImage(chatState.selectedPhone, file, '');
-        fileInput.value = '';
+    fileInput.onchange = async () => {
+      const files = Array.from(fileInput.files || []);
+      const phone = chatState.selectedPhone;
+      fileInput.value = '';
+      if (!phone || !files.length) return;
+      if (files.length === 1) {
+        sendChatImage(phone, files[0], '');
+        return;
       }
+      toast(`Enviando ${files.length} imágenes…`);
+      let sent = 0;
+      for (const f of files) {
+        try {
+          await sendChatImage(phone, f, '');
+          sent++;
+        } catch (_) {}
+        await new Promise(r => setTimeout(r, 400));
+      }
+      toast(`✓ ${sent}/${files.length} imágenes enviadas`);
     };
   }
   // Mic button
@@ -4609,23 +4623,33 @@ function bindChat() {
   };
   bindBulkSection();
   if (chatState.selectedPhone) bindChatConversation();
-  // Poll
+  // Poll: refresca contactos + mensajes del chat abierto.
+  // Antes era cada 12s y solo cargaba contactos (los mensajes del chat
+  // actual nunca se actualizaban en vivo). Ahora 4s y trae ambos en
+  // paralelo para que las respuestas aparezcan casi en tiempo real.
   clearInterval(chatState.pollTimer);
   chatState.pollTimer = setInterval(async () => {
     if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
+    const phone = chatState.selectedPhone;
     const prevMsgCount = chatState.messages.length;
-    await loadChatContacts();
-    if (STATE.view === 'chat') {
-      refreshContactList();
-      if (chatState.selectedPhone && chatState.messages.length > prevMsgCount) {
-        const msgEl = document.getElementById('chat-messages');
-        const wasAtBottom = msgEl && (msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 80);
-        renderChatMessages();
-        if (wasAtBottom && msgEl) msgEl.scrollTop = msgEl.scrollHeight;
-      }
-      updateUnreadBadge();
+    const prevLastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
+    await Promise.all([
+      loadChatContacts(),
+      phone ? loadChatMessages(phone) : Promise.resolve()
+    ]);
+    if (STATE.view !== 'chat' || chatState.selectedPhone !== phone) return;
+    refreshContactList();
+    // Re-render solo si hubo cambios reales (evita scroll jumpy)
+    const newLastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
+    const changed = chatState.messages.length !== prevMsgCount || newLastTs !== prevLastTs;
+    if (phone && changed) {
+      const msgEl = document.getElementById('chat-messages');
+      const wasAtBottom = msgEl && (msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 80);
+      renderChatMessages();
+      if (wasAtBottom && msgEl) msgEl.scrollTop = msgEl.scrollHeight;
     }
-  }, 12000);
+    updateUnreadBadge();
+  }, 4000);
 }
 
 function refreshContactList() {
