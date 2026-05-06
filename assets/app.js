@@ -2890,7 +2890,12 @@ async function loadChatContacts() {
     // Agrupar por teléfono
     const byPhone = new Map();
     for (const m of msgs) {
-      if (!m.phone || m.msg_type === 'status') continue;
+      if (!m.phone) continue;
+      // Status sin body = mensaje saliente desde WA Business app/web (placeholder).
+      // Lo incluimos para bumpear el chat y que se vea actividad, pero
+      // los status con body genuinamente vacíos los dejamos pasar como tal.
+      const isStatusPlaceholder = m.msg_type === 'status' && m.direction === 'outbound' && !m.body;
+      if (m.msg_type === 'status' && !isStatusPlaceholder) continue;
       if (!byPhone.has(m.phone)) {
         byPhone.set(m.phone, { phone: m.phone, name: '', messages: [], lastTs: m.ts });
       }
@@ -2909,7 +2914,11 @@ async function loadChatContacts() {
         return {
           phone: c.phone,
           name: c.name,
-          lastMsg: last ? (last.msg_type === 'revoke' ? 'Mensaje eliminado' : (last.body || `[${last.msg_type}]`)).slice(0, 60) : '',
+          lastMsg: last ? (
+            last.msg_type === 'revoke' ? 'Mensaje eliminado' :
+            (last.msg_type === 'status' && last.direction === 'outbound' && !last.body) ? '✓ Respondido desde WhatsApp' :
+            (last.body || `[${last.msg_type}]`)
+          ).slice(0, 60) : '',
           lastTs: c.lastTs,
           lastDir: last ? last.direction : '',
           lastType: last ? last.msg_type : '',
@@ -3457,8 +3466,18 @@ function renderChatBubbles() {
       continue;
     }
 
-    // Skip empty status echoes
-    if (!bodyText.trim() && dir === 'outbound' && m.msg_type === 'status') continue;
+    // Outbound enviado desde WA Business app/web: no tenemos contenido (Cloud API
+    // sin Coexistencia), pero mostramos placeholder para que el chat no se vea vacío.
+    if (!bodyText.trim() && dir === 'outbound' && m.msg_type === 'status') {
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+        <div class="chat-msg-unsupported" style="font-style:italic;opacity:.7">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="#8696a0"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
+          <span>Respondido desde WhatsApp</span>
+        </div>
+        ${footer}
+      </div>`;
+      continue;
+    }
 
     // === LOCATION ===
     if (bodyText.startsWith('[ubicacion] ')) {
