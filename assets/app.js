@@ -74,7 +74,7 @@ const STATE = {
   token: null,        // token de admin (Gaspar) si está logueado
   activity: { rows: [], loading: false, error: null },
   cotizadorParams: null,  // se carga del Worker; si null usa CONFIG.cotizadorDefaults
-  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '' },
+  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '' },
   cotizadorSaving: false
 };
 
@@ -114,8 +114,14 @@ function buildPresupuestoTexto() {
   return `Te comparto la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+f.ancho)}x${Math.round(+f.alto)}\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}\n\nControladores opcionales\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña.\n\nTiempo de armado: 15/20 días.\n\nTodos los medios de pago!\n\nHacemos envíos GRATIS a todo el país!`;
 }
 
+function getPresupuestoTextoFinal() {
+  // Si el usuario editó manualmente, usamos esa versión. Si no, la auto-generada.
+  const override = STATE.cotizadorForm.textoOverride;
+  return (override && override.trim()) ? override : buildPresupuestoTexto();
+}
+
 function copiarPresupuesto() {
-  const texto = buildPresupuestoTexto();
+  const texto = getPresupuestoTextoFinal();
   if (!texto) { alert('Completá al menos ancho y alto'); return; }
   navigator.clipboard.writeText(texto).then(() => {
     toast('Presupuesto copiado al portapapeles ✓');
@@ -138,7 +144,7 @@ async function enviarPresupuestoWA() {
   if (!tel) { alert('Completá el teléfono del cliente'); return; }
   if (!STATE.token) { alert('Tenés que estar logueado (Gaspar o Joaquín) para enviar por WhatsApp'); return; }
   if (!CONFIG.trackerUrl) { alert('Tracker no configurado'); return; }
-  const texto = buildPresupuestoTexto();
+  const texto = getPresupuestoTextoFinal();
   if (!texto) return;
   STATE.cotizadorSendingWA = true;
   updateCotizadorForm();
@@ -227,7 +233,7 @@ async function saveCotizacion() {
 
       form.submit();
     });
-    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '' };
+    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '' };
     toast('Cotización guardada ✓');
     // Esperar un poco para que el sheet se actualice antes de recargar
     setTimeout(() => loadAll(), 2000);
@@ -1371,6 +1377,18 @@ function bindCotSaveBtn() {
   if (copyBtn) copyBtn.onclick = () => copiarPresupuesto();
   const waBtn = document.getElementById('cot-send-wa-btn');
   if (waBtn) waBtn.onclick = () => enviarPresupuestoWA();
+  const editBtn = document.getElementById('cot-edit-btn');
+  if (editBtn) editBtn.onclick = () => { STATE.cotizadorEditing = !STATE.cotizadorEditing; updateCotizadorForm(); };
+  const closeBtn = document.getElementById('cot-text-close');
+  if (closeBtn) closeBtn.onclick = () => { STATE.cotizadorEditing = false; updateCotizadorForm(); };
+  const resetBtn = document.getElementById('cot-text-reset');
+  if (resetBtn) resetBtn.onclick = () => { STATE.cotizadorForm.textoOverride = ''; updateCotizadorForm(); };
+  const ta = document.getElementById('cot-text-editor');
+  if (ta) {
+    // Sin re-render mientras el usuario tipea (preserva cursor).
+    // Solo guarda el override; el badge "modificado" se actualiza al cerrar el editor.
+    ta.oninput = () => { STATE.cotizadorForm.textoOverride = ta.value; };
+  }
 }
 let pptoShowCotizador = false;
 
@@ -1391,11 +1409,27 @@ function renderCotizadorResults() {
         ${r.descuento ? '<div class="cot-result"><div class="lbl">Descuento (m²>'+p.descuento_min_m2+')</div><div class="val">×'+p.descuento_mult+'</div></div>' : ''}
         ${r.recargo ? '<div class="cot-result"><div class="lbl">Recargo (m²≤'+(r.m2<=5?'5':r.m2<=12.5?'12.5':'25')+')</div><div class="val">×'+(r.m2<=5?p.recargo_5:r.m2<=12.5?p.recargo_125:p.recargo_25)+'</div></div>' : ''}
       </div>
-      <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end;flex-wrap:wrap">
-        <button class="btn btn-ghost" id="cot-copy-btn">Copiar presupuesto</button>
+      <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end;flex-wrap:wrap;align-items:center">
+        ${STATE.cotizadorForm.textoOverride ? '<span class="pill amber" style="font-size:10px">texto modificado</span>' : ''}
+        <button class="btn btn-ghost btn-icon" id="cot-copy-btn" title="Copiar presupuesto" aria-label="Copiar presupuesto">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+        </button>
+        <button class="btn btn-ghost btn-icon" id="cot-edit-btn" title="Editar texto del presupuesto" aria-label="Editar texto">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+        </button>
         <button class="btn btn-ghost" id="cot-send-wa-btn" ${STATE.cotizadorSendingWA ? 'disabled' : ''}>${STATE.cotizadorSendingWA ? 'Enviando…' : '📱 Enviar por WhatsApp'}</button>
         <button class="btn btn-cyan" id="cot-save-btn" ${STATE.cotizadorSaving ? 'disabled' : ''}>${STATE.cotizadorSaving ? 'Guardando…' : 'Guardar en Sheet'}</button>
       </div>
+      ${STATE.cotizadorEditing ? `
+        <div style="margin-top:var(--s-3);display:flex;flex-direction:column;gap:var(--s-2)">
+          <label style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto (editable)</label>
+          <textarea id="cot-text-editor" rows="14" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;font-family:inherit;font-size:13px;color:var(--fg);resize:vertical">${escapeHtml(getPresupuestoTextoFinal() || '')}</textarea>
+          <div style="display:flex;gap:var(--s-2);justify-content:flex-end">
+            ${STATE.cotizadorForm.textoOverride ? '<button class="btn btn-ghost" id="cot-text-reset" title="Volver al texto auto-generado">↺ Restablecer</button>' : ''}
+            <button class="btn btn-ghost" id="cot-text-close">Cerrar editor</button>
+          </div>
+        </div>
+      ` : ''}
     </div>
   `;
 }

@@ -190,6 +190,8 @@ button { font-family: inherit; cursor: pointer; }
 .btn-ghost { background: transparent; }
 .btn-ghost.btn-cyan { background: var(--neon-cyan); color: var(--ink-050); border-color: var(--neon-cyan); }
 .btn .icon { font-size: 14px; }
+.btn-icon { padding: 9px 10px; }
+.btn-icon svg { display: block; }
 
 /* ============ CARDS ============ */
 .card {
