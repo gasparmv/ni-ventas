@@ -1954,6 +1954,154 @@ table.t td.cliente { font-weight: 600; }
 }
 .btn-label-toggle:hover { color: #e9edef; background: rgba(255,255,255,.06); }
 
+/* ============ POST-IT de notas por contacto ============ */
+.chat-main > .chat-postit { z-index: 5; }
+.chat-postit {
+  position: absolute;
+  top: 70px;
+  right: 14px;
+  z-index: 5;
+  background: #fff8b0;
+  color: #2a2410;
+  border-radius: 4px;
+  padding: 10px 12px;
+  width: 240px;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  line-height: 1.4;
+  box-shadow:
+    0 8px 18px rgba(0, 0, 0, .45),
+    -2px -2px 0 rgba(0, 0, 0, .04) inset;
+  transform: rotate(-1.5deg);
+  cursor: pointer;
+  transition: transform .12s var(--ease-out), box-shadow .12s var(--ease-out);
+}
+.chat-postit:hover { transform: rotate(0); box-shadow: 0 12px 24px rgba(0, 0, 0, .55); }
+.chat-postit::before {
+  content: '';
+  position: absolute;
+  top: -8px; left: 50%;
+  width: 36px; height: 14px;
+  background: rgba(255, 24, 48, .55);
+  transform: translateX(-50%) rotate(-3deg);
+  border-radius: 2px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .35);
+}
+.chat-postit-h {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: #6b5d2a;
+  margin-bottom: 6px;
+}
+.chat-postit-edit, .chat-postit-close {
+  background: transparent;
+  border: none;
+  color: #6b5d2a;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.chat-postit-close { font-size: 18px; font-weight: 700; }
+.chat-postit-edit:hover, .chat-postit-close:hover { color: #2a2410; }
+.chat-postit-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'Caveat', 'Patrick Hand', 'Comic Sans MS', cursive;
+  font-size: 16px;
+  line-height: 1.3;
+}
+.chat-postit--editing {
+  cursor: default;
+  transform: rotate(0);
+  width: 280px;
+}
+.chat-postit-textarea {
+  width: 100%;
+  min-height: 110px;
+  background: rgba(255, 255, 255, .55);
+  border: 1px dashed rgba(0, 0, 0, .2);
+  border-radius: 3px;
+  padding: 8px;
+  font-family: 'Caveat', 'Patrick Hand', cursive;
+  font-size: 16px;
+  color: #2a2410;
+  resize: vertical;
+}
+.chat-postit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+.chat-postit-btn {
+  background: rgba(0, 0, 0, .08);
+  border: 1px solid rgba(0, 0, 0, .15);
+  color: #2a2410;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chat-postit-btn:hover { background: rgba(0, 0, 0, .14); }
+.chat-postit-btn--primary { background: #2a2410; color: #fff8b0; border-color: #2a2410; }
+.chat-postit-btn--primary:hover { background: #000; }
+.chat-postit-btn--danger { color: var(--neon-red-deep); border-color: rgba(255, 24, 48, .35); }
+
+/* ============ Context menu (right-click sobre chat-contact) ============ */
+.chat-context-menu {
+  position: fixed;
+  background: var(--ink-200);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: 4px;
+  min-width: 190px;
+  z-index: 320;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .55), var(--inner-card);
+  opacity: 0;
+  transform: scale(.96);
+  transform-origin: top left;
+  transition: opacity .12s var(--ease-out), transform .12s var(--ease-out);
+}
+.chat-context-menu.open { opacity: 1; transform: scale(1); }
+.chat-context-menu .ccm-h {
+  padding: 6px 10px 8px;
+  font-size: 11px;
+  color: var(--fg-subtle);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-context-menu .ccm-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.chat-context-menu .ccm-item:hover { background: var(--ink-300); color: var(--neon-cyan); }
+.chat-context-menu .ccm-item svg { flex: 0 0 16px; opacity: .7; }
+.chat-context-menu .ccm-item:hover svg { opacity: 1; }
+
 /* Bulk messaging section */
 .bulk-section {
   background: #111b21;

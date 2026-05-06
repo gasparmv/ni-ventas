@@ -99,6 +99,13 @@ CREATE TABLE IF NOT EXISTS contact_labels (
   PRIMARY KEY (phone, label_id)
 );
 
+-- Notas libres por contacto (post-it que aparece al abrir el chat)
+CREATE TABLE IF NOT EXISTS contact_notes (
+  phone       TEXT PRIMARY KEY,
+  note        TEXT NOT NULL DEFAULT '',
+  updated_at  TEXT NOT NULL
+);
+
 -- Mensajes programados de WhatsApp
 CREATE TABLE IF NOT EXISTS scheduled_messages (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,

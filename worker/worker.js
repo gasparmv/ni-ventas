@@ -775,6 +775,48 @@ export default {
         return json({ ok: true });
       }
 
+      // ===== Notas por contacto =====
+      if (request.method === 'GET' && path === '/admin/contact-notes') {
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS contact_notes (phone TEXT PRIMARY KEY, note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)").run();
+          const phone = url.searchParams.get('phone') || '';
+          if (phone) {
+            const row = await env.DB.prepare('SELECT phone, note, updated_at FROM contact_notes WHERE phone = ?').bind(phone).first();
+            return json({ note: row || null });
+          }
+          // Sin filtro: devolver todas las que tienen contenido (para preload masivo)
+          const rs = await env.DB.prepare("SELECT phone, note, updated_at FROM contact_notes WHERE note != ''").all();
+          return json({ notes: rs.results || [] });
+        } catch (e) { return json({ error: e.message }, 500); }
+      }
+      if (request.method === 'PUT' && path === '/admin/contact-notes') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone, note } = body || {};
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS contact_notes (phone TEXT PRIMARY KEY, note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)").run();
+        const now = new Date().toISOString();
+        await env.DB.prepare(
+          'INSERT INTO contact_notes (phone, note, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at'
+        ).bind(phone, String(note || ''), now).run();
+        return json({ ok: true, updated_at: now });
+      }
+      if (request.method === 'DELETE' && path === '/admin/contact-notes') {
+        const phone = url.searchParams.get('phone') || '';
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        await env.DB.prepare('DELETE FROM contact_notes WHERE phone = ?').bind(phone).run();
+        return json({ ok: true });
+      }
+
+      // ===== Marcar conversación como NO leída =====
+      // (Borra el read_cursor para que la UI lo cuente como no leído otra vez)
+      if (request.method === 'POST' && path === '/admin/wa/mark-unread') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone } = body || {};
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        await env.DB.prepare('DELETE FROM wa_read_cursor WHERE phone = ?').bind(phone).run();
+        return json({ ok: true });
+      }
+
       // ===== Bulk messaging =====
       if (request.method === 'POST' && path === '/admin/wa/send-bulk') {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }

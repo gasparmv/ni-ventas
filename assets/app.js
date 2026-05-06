@@ -3083,6 +3083,46 @@ async function loadLabels() {
     chatState.labelsLoaded = true;
   } catch (_) {}
 }
+
+// ===== Notas por contacto =====
+async function loadAllNotes() {
+  if (chatState.notesLoaded) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/contact-notes', { headers: authHeaders() });
+    if (r.ok) {
+      const j = await r.json();
+      const map = {};
+      for (const n of (j.notes || [])) map[n.phone] = n.note;
+      chatState.notes = map;
+      chatState.notesLoaded = true;
+    }
+  } catch (_) {}
+}
+function getContactNote(phone) {
+  return (chatState.notes && chatState.notes[phone]) || '';
+}
+async function saveContactNote(phone, note) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/contact-notes', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ phone, note })
+  });
+  if (r.ok) {
+    if (!chatState.notes) chatState.notes = {};
+    if (note && note.trim()) chatState.notes[phone] = note;
+    else delete chatState.notes[phone];
+    return true;
+  }
+  return false;
+}
+async function markChatUnread(phone) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/wa/mark-unread', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ phone })
+  });
+  return r.ok;
+}
 async function saveLabel(name, color) {
   const r = await fetch(CONFIG.trackerUrl + '/admin/labels', {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -3717,6 +3757,107 @@ function renderChatNoSelect() {
   `;
 }
 
+function bindChatPostit() {
+  const phone = chatState.selectedPhone;
+  if (!phone) return;
+  const editBtn = document.getElementById('chat-postit-edit-btn');
+  if (editBtn) {
+    editBtn.onclick = (e) => {
+      e.stopPropagation();
+      chatState.editingNoteFor = phone;
+      refreshPostit();
+    };
+  }
+  // Click sobre el cuerpo del post-it (no editing) → entrar a edición
+  const postit = document.getElementById('chat-postit');
+  if (postit && !postit.classList.contains('chat-postit--editing')) {
+    postit.onclick = () => {
+      chatState.editingNoteFor = phone;
+      refreshPostit();
+    };
+  }
+  const cancel = document.getElementById('chat-postit-cancel');
+  if (cancel) cancel.onclick = () => {
+    chatState.editingNoteFor = null;
+    refreshPostit();
+  };
+  const save = document.getElementById('chat-postit-save');
+  if (save) save.onclick = async () => {
+    const txt = (document.getElementById('chat-postit-textarea')?.value || '').trim();
+    save.disabled = true; save.textContent = 'Guardando…';
+    const ok = await saveContactNote(phone, txt);
+    chatState.editingNoteFor = null;
+    refreshPostit();
+    if (ok) toast('Nota guardada ✓');
+    else toast('Error al guardar la nota');
+  };
+  const del = document.getElementById('chat-postit-delete');
+  if (del) del.onclick = async () => {
+    const confirmed = await showConfirm('¿Borrar la nota de este contacto?', { title: 'Borrar nota', variant: 'warn', confirmLabel: 'Borrar' });
+    if (!confirmed) return;
+    await saveContactNote(phone, '');
+    chatState.editingNoteFor = null;
+    refreshPostit();
+    toast('Nota borrada');
+  };
+}
+
+function refreshPostit() {
+  // Re-renderizar solo el post-it sin tocar mensajes (no perdés scroll ni input)
+  const phone = chatState.selectedPhone;
+  if (!phone) return;
+  const old = document.getElementById('chat-postit');
+  const html = renderChatNotePostit(phone);
+  if (old) {
+    if (!html) { old.remove(); return; }
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    old.replaceWith(tmp.firstElementChild);
+  } else if (html) {
+    // Insertar después del header
+    const header = document.querySelector('.chat-main .chat-header');
+    if (header) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      header.after(tmp.firstElementChild);
+    }
+  }
+  bindChatPostit();
+  // Foco al textarea si está editando
+  const textarea = document.getElementById('chat-postit-textarea');
+  if (textarea) { textarea.focus(); textarea.setSelectionRange(textarea.value.length, textarea.value.length); }
+}
+
+function renderChatNotePostit(phone) {
+  const note = getContactNote(phone);
+  const editing = chatState.editingNoteFor === phone;
+  if (!note && !editing) return ''; // sin nota y no editando → no renderizamos nada (el botón "agregar nota" vive en el context menu)
+  if (editing) {
+    return `
+      <div class="chat-postit chat-postit--editing" id="chat-postit">
+        <div class="chat-postit-h">
+          <span>📌 Nota del contacto</span>
+          <button class="chat-postit-close" id="chat-postit-cancel" title="Cancelar">×</button>
+        </div>
+        <textarea class="chat-postit-textarea" id="chat-postit-textarea" placeholder="Escribí algo sobre este cliente…">${escapeHtml(note)}</textarea>
+        <div class="chat-postit-actions">
+          ${note ? '<button class="chat-postit-btn chat-postit-btn--danger" id="chat-postit-delete">Borrar</button>' : ''}
+          <button class="chat-postit-btn chat-postit-btn--primary" id="chat-postit-save">Guardar</button>
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="chat-postit" id="chat-postit" title="Click para editar">
+      <div class="chat-postit-h">
+        <span>📌 Nota</span>
+        <button class="chat-postit-edit" id="chat-postit-edit-btn" title="Editar">✎</button>
+      </div>
+      <div class="chat-postit-body">${escapeHtml(note)}</div>
+    </div>
+  `;
+}
+
 function renderChatConversation() {
   const phone = chatState.selectedPhone;
   const name = chatState.selectedName;
@@ -3738,6 +3879,7 @@ function renderChatConversation() {
       </div>
       <div class="chat-label-chips" id="chat-label-chips">${renderContactLabelChips(phone)}</div>
     </div>
+    ${renderChatNotePostit(phone)}
     <div class="chat-messages" id="chat-messages">
       ${chatState.loadingConv
         ? '<div class="chat-loading"><div class="spinner" style="border-color:#2a3942;border-top-color:#00a884"></div></div>'
@@ -4096,6 +4238,7 @@ function bindChatConversation() {
   const fileInput = document.getElementById('chat-file-input');
   const micBtn = document.getElementById('btn-mic');
   const labelsBtn = document.getElementById('btn-labels');
+  bindChatPostit();
 
   if (ta) {
     ta.addEventListener('input', () => {
@@ -4251,12 +4394,13 @@ function showLabelPicker(phone) {
 function bindChat() {
   // Load data
   if (!chatState.contacts.length && !chatState.loading) {
-    Promise.all([loadChatContacts(), loadQuickReplies(), loadLabels()]).then(() => {
+    Promise.all([loadChatContacts(), loadQuickReplies(), loadLabels(), loadAllNotes()]).then(() => {
       if (STATE.view === 'chat') render();
     });
   } else {
     loadQuickReplies();
     loadLabels();
+    loadAllNotes();
   }
   // Search
   const searchInput = document.getElementById('chat-search');
@@ -4463,6 +4607,79 @@ function showManageQRModal() {
 function bindChatContactClicks() {
   document.querySelectorAll('.chat-contact').forEach(el => {
     el.onclick = () => selectChatContact(el.dataset.chatPhone);
+    el.oncontextmenu = (e) => {
+      e.preventDefault();
+      const phone = el.dataset.chatPhone;
+      const contact = chatState.contacts.find(c => c.phone === phone);
+      showChatContactContextMenu(e.clientX, e.clientY, phone, contact?.name || '');
+    };
+  });
+}
+
+function showChatContactContextMenu(x, y, phone, name) {
+  // Cerrar otro abierto
+  document.getElementById('chat-context-menu')?.remove();
+  const hasNote = !!getContactNote(phone);
+  const menu = document.createElement('div');
+  menu.id = 'chat-context-menu';
+  menu.className = 'chat-context-menu';
+  menu.innerHTML = `
+    <div class="ccm-h">${escapeHtml(name || formatPhoneDisplay(phone))}</div>
+    <button class="ccm-item" data-action="label">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg>
+      Etiquetar
+    </button>
+    <button class="ccm-item" data-action="note">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+      ${hasNote ? 'Editar nota' : 'Agregar nota'}
+    </button>
+    <button class="ccm-item" data-action="unread">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+      Marcar como no leído
+    </button>
+  `;
+  document.body.appendChild(menu);
+  // Posicionar (manteniéndolo dentro del viewport)
+  const rect = menu.getBoundingClientRect();
+  const maxX = window.innerWidth - rect.width - 8;
+  const maxY = window.innerHeight - rect.height - 8;
+  menu.style.left = Math.min(x, maxX) + 'px';
+  menu.style.top = Math.min(y, maxY) + 'px';
+  requestAnimationFrame(() => menu.classList.add('open'));
+
+  const close = () => { menu.remove(); document.removeEventListener('click', closer, true); document.removeEventListener('keydown', escer); };
+  function closer(e) { if (!menu.contains(e.target)) close(); }
+  function escer(e) { if (e.key === 'Escape') close(); }
+  setTimeout(() => {
+    document.addEventListener('click', closer, true);
+    document.addEventListener('keydown', escer);
+  }, 0);
+
+  menu.querySelectorAll('[data-action]').forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.action;
+      close();
+      if (action === 'label') {
+        await selectChatContact(phone);
+        // Esperar a que el header se renderice y abrir el label picker
+        setTimeout(() => showLabelPicker(phone), 50);
+      } else if (action === 'note') {
+        chatState.editingNoteFor = phone;
+        await selectChatContact(phone);
+      } else if (action === 'unread') {
+        const ok = await markChatUnread(phone);
+        if (ok) {
+          // Actualizar contador local + UI
+          const c = chatState.contacts.find(c => c.phone === phone);
+          if (c) c.unread = (c.unread || 0) + 1;
+          refreshContactList();
+          toast('Marcado como no leído');
+        } else {
+          toast('Error al marcar como no leído');
+        }
+      }
+    };
   });
 }
 
