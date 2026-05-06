@@ -152,6 +152,7 @@ async function enviarPresupuestoWA() {
   STATE.cotizadorSendingWA = true;
   updateCotizadorForm();
   let waOk = false;
+  let wamid = '';
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
       method: 'POST',
@@ -169,7 +170,10 @@ async function enviarPresupuestoWA() {
       return;
     }
     waOk = true;
-    toast('Enviado por WhatsApp ✓');
+    wamid = j.id || '';
+    // OJO: r.ok solo significa que Meta aceptó el request — no que entregó.
+    // El webhook puede marcarlo como 'failed' después.
+    toast('Mandado a WhatsApp · verificando entrega…');
   } catch (e) {
     alert('Error de red al enviar');
   } finally {
@@ -177,7 +181,72 @@ async function enviarPresupuestoWA() {
     updateCotizadorForm();
   }
   // Si el envío salió bien, guardar también en Sheet (un envío = un presupuesto registrado).
-  if (waOk) await saveCotizacion();
+  if (waOk) {
+    await saveCotizacion();
+    // Verificar entrega real en background (no bloquea la UI).
+    if (wamid) verificarEntregaWA(wamid, tel);
+  }
+}
+
+async function verificarEntregaWA(wamid, phone) {
+  // Polling: cada 3s hasta 18s, mira si el status cambió a delivered/read/failed.
+  for (let i = 0; i < 6; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?phone=' + encodeURIComponent(phone) + '&limit=30', {
+        headers: authHeaders()
+      });
+      const j = await r.json();
+      const msg = (j.messages || []).find(m => m.wamid === wamid);
+      if (!msg) continue;
+      if (msg.status === 'failed') {
+        alert('⚠ El mensaje a ' + phone + ' NO se entregó.\n\nLo más probable: el cliente está fuera de la ventana de 24h de WhatsApp (no te escribió en las últimas 24hs).\n\nEl presupuesto quedó guardado en el Sheet pero no llegó al cliente.');
+        return;
+      }
+      if (msg.status === 'delivered' || msg.status === 'read') {
+        toast('✓ Entregado a ' + phone);
+        return;
+      }
+    } catch (_) {}
+  }
+  // Timeout: el status sigue 'sent' después de 18s — queda en cola
+  toast('Mensaje en cola · chequeá el chat para confirmar entrega');
+}
+
+async function verFallosWA() {
+  if (!STATE.token) { alert('Tenés que estar logueado'); return; }
+  if (!CONFIG.trackerUrl) { alert('Tracker no configurado'); return; }
+  toast('Buscando presupuestos fallidos…');
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  let all = [];
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?direction=outbound&from=' + encodeURIComponent(since) + '&limit=2000', {
+      headers: authHeaders()
+    });
+    const j = await r.json();
+    all = j.messages || [];
+  } catch (e) { alert('Error al consultar el worker'); return; }
+  const fallos = all.filter(m =>
+    m.status === 'failed' &&
+    (m.body || '').startsWith(PRESUPUESTO_PREFIX)
+  );
+  if (fallos.length === 0) {
+    alert('Sin fallos en las últimas 24h ✓\nTodos los presupuestos enviados por el cotizador llegaron al servidor de WhatsApp y fueron aceptados.');
+    return;
+  }
+  // Agrupar por teléfono (último intento por cliente)
+  const byPhone = new Map();
+  for (const m of fallos) {
+    const ex = byPhone.get(m.phone);
+    if (!ex || new Date(m.ts) > new Date(ex.ts)) byPhone.set(m.phone, m);
+  }
+  const list = [...byPhone.values()].sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  const lines = list.map(m => {
+    const trabajo = (m.body.match(/Trabajo: ([^\n]+)/) || [])[1] || '(sin nombre)';
+    const hora = new Date(m.ts).toLocaleString('es-AR', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
+    return `• ${m.phone} — ${trabajo} (${hora})`;
+  }).join('\n');
+  alert(`⚠ ${list.length} presupuesto${list.length > 1 ? 's' : ''} NO entregado${list.length > 1 ? 's' : ''} en las últimas 24h:\n\n${lines}\n\nLa causa más común: el cliente no escribió al número de WA Business en las últimas 24h, así que la API de WhatsApp no permite mandarle texto libre.`);
 }
 
 const PRESUPUESTO_PREFIX = 'Te comparto la información detallada!';
@@ -1464,6 +1533,8 @@ function bindPresupuestos() {
   bindCotSaveBtn();
   const fuBtn = document.getElementById('btn-pp-followups');
   if (fuBtn) fuBtn.onclick = () => enviarFollowupsPresupuesto();
+  const failBtn = document.getElementById('btn-pp-failures');
+  if (failBtn) failBtn.onclick = () => verFallosWA();
 }
 
 function updateCotizadorForm() {
@@ -1589,6 +1660,7 @@ function renderPresupuestos() {
       <div><div class="eyebrow">${STATE.presupuestos.length}${STATE.presupuestos.length ? ' desde ' + fmtDate(STATE.presupuestos.reduce((min, p) => p.fecha < min ? p.fecha : min, STATE.presupuestos[0].fecha)) : ''}</div><h1>Presupuestos</h1></div>
       <div class="actions">
         <button class="btn btn-cyan" data-cot-open>＋ Cotizador</button>
+        <button class="btn btn-ghost" id="btn-pp-failures" title="Ver presupuestos del cotizador que fallaron en entregar por WhatsApp en las últimas 24hs">⚠ Fallos WA</button>
         <button class="btn btn-ghost" id="btn-pp-followups" title="Enviar follow-up a clientes que recibieron presupuesto hace +1hs y no respondieron">📱 Follow-ups</button>
         <button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button>
       </div>
