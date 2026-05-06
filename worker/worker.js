@@ -70,11 +70,16 @@ function normalizeArPhone(raw) {
   if (n.startsWith('54')) {
     // ya tiene country code; asegurarse del 9 mobile
     if (!n.startsWith('549')) n = '549' + n.slice(2);
-    return n;
+  } else {
+    if (n.startsWith('15')) n = n.slice(2);   // 15-prefijo viejo
+    if (n.startsWith('0'))  n = n.slice(1);    // 0 inicial
+    n = '549' + n;
   }
-  if (n.startsWith('15')) n = n.slice(2);   // 15-prefijo viejo
-  if (n.startsWith('0'))  n = n.slice(1);    // 0 inicial
-  return '549' + n;
+  // Validar largo: AR mobile = 549 + área (2-4) + número (6-8) → entre 11 y 14 dígitos.
+  // Sin esto, "333" pasaba a "549333" y Meta aceptaba el send retornando 200, dando
+  // falsa sensación de envío exitoso.
+  if (n.length < 11 || n.length > 14) return null;
+  return n;
 }
 
 async function waSend(env, payload) {
@@ -379,6 +384,14 @@ export default {
                 const ts = st.timestamp ? new Date(parseInt(st.timestamp) * 1000).toISOString() : new Date().toISOString();
                 if (!wamid) continue;
                 try {
+                  // Leer status previo antes de actualizar — para no notificar dos veces el mismo failed
+                  let prevStatus = null;
+                  let prevBody = '';
+                  try {
+                    const row = await env.DB.prepare('SELECT status, body FROM wa_messages WHERE wamid = ?').bind(wamid).first();
+                    prevStatus = row?.status || null;
+                    prevBody = row?.body || '';
+                  } catch (_) {}
                   // Intentar actualizar status de un mensaje saliente existente
                   const updated = await env.DB.prepare(
                     'UPDATE wa_messages SET status = ? WHERE wamid = ?'
@@ -397,6 +410,16 @@ export default {
                         'INSERT INTO wa_read_cursor (phone, last_read_ts, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET last_read_ts = excluded.last_read_ts, updated_at = excluded.updated_at'
                       ).bind(phone, ts, ts).run();
                     } catch (_) {}
+                  }
+                  // Notificar al admin si el envío FALLA (primera vez que llega como failed)
+                  if (status === 'failed' && prevStatus !== 'failed' && env.ADMIN_NOTIFY_PHONE) {
+                    const errs = Array.isArray(st.errors) ? st.errors : [];
+                    const errMsg = errs.length
+                      ? (errs[0].title || 'error') + (errs[0].message ? ': ' + errs[0].message : '')
+                      : 'sin detalle';
+                    const preview = prevBody ? prevBody.slice(0, 100) + (prevBody.length > 100 ? '…' : '') : '';
+                    const summary = `⚠ Falló envío WA a ${phone}\nError: ${errMsg}` + (preview ? `\nMensaje: "${preview}"` : '');
+                    try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
                   }
                 } catch (_) {}
               }

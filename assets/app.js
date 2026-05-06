@@ -143,6 +143,8 @@ async function enviarPresupuestoWA() {
   if (!f.cliente.trim()) { alert('Completá el nombre del cliente/diseño (se va a guardar también en el Sheet)'); return; }
   const tel = (f.telefono || '').trim();
   if (!tel) { alert('Completá el teléfono del cliente'); return; }
+  const digits = tel.replace(/\D/g, '');
+  if (digits.length < 8) { alert('El teléfono parece inválido (' + digits.length + ' dígitos). Argentina necesita al menos 8 dígitos sin contar el código de país.'); return; }
   if (!STATE.token) { alert('Tenés que estar logueado (Gaspar o Joaquín) para enviar por WhatsApp'); return; }
   if (!CONFIG.trackerUrl) { alert('Tracker no configurado'); return; }
   const texto = getPresupuestoTextoFinal();
