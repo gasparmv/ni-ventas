@@ -35,7 +35,7 @@ function doPost(e) {
 
     // Columnas: A=Fecha, B=m2, C=diseño, D=alto, E=ancho, F=neon, G=tipo,
     //           H=transparente, I=negro, J=descuento, K=recargo, L=reventa,
-    //           M=vacía, N=vacía, O=5% joaco, P=teléfono
+    //           M=vacía, N=vacía, O=5% joaco, P=teléfono/contacto, Q=canal (WPP|IG)
     const row = [
       fecha,
       data.m2 || 0,
@@ -52,7 +52,8 @@ function doPost(e) {
       '', // M vacía
       '', // N vacía
       data.comision || 0,  // O = 5% Joaco
-      data.telefono || ''  // P = Teléfono
+      data.telefono || '', // P = Teléfono o usuario IG (lo que corresponda según canal)
+      data.canal || ''     // Q = Canal: "WPP" o "IG"
     ];
 
     // Insertar después de la última fila con datos en columna C

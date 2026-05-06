@@ -950,6 +950,15 @@ function parseCotizador(rows, sheetName) {
     const reventa = parseNum(r[11]);
     // Use the highest as headline price (negro is usually lower, trans higher)
     const precio = Math.max(precioTrans, precioNegro, reventa);
+    const contacto = (r[15] || '').trim();
+    // Canal: si está en col Q lo usamos, sino lo inferimos del formato del contacto.
+    let canal = (r[16] || '').toUpperCase().trim();
+    if (canal !== 'WPP' && canal !== 'IG') {
+      // Heurística para datos viejos: solo dígitos / + / - / espacios → WPP. Tiene letras o @ → IG.
+      if (!contacto) canal = '';
+      else if (/^[\d\s+\-()]+$/.test(contacto)) canal = 'WPP';
+      else canal = 'IG';
+    }
     out.push({
       idx: i,
       sheet: sheetName,
@@ -964,7 +973,8 @@ function parseCotizador(rows, sheetName) {
       precioNegro,
       precioReventa: reventa,
       precio,
-      telefono: (r[15] || '').trim()
+      telefono: contacto,
+      canal
     });
   }
   return out;
@@ -1671,6 +1681,17 @@ function renderCotizadorForm() {
   `;
 }
 
+function renderContactoCell(p) {
+  const tel = (p.telefono || '').trim();
+  if (!tel) return '<span class="muted" style="font-size:12px">—</span>';
+  if (p.canal === 'IG') {
+    const handle = tel.startsWith('@') ? tel : '@' + tel;
+    return `<span class="contact-pill ig" title="Instagram"><span class="contact-icon">📷</span>${escapeHtml(handle)}</span>`;
+  }
+  // WPP por default si tenemos contacto pero no canal claro
+  return `<span class="contact-pill wpp" title="WhatsApp"><span class="contact-icon">💬</span>${escapeHtml(formatPhoneDisplay(tel))}</span>`;
+}
+
 function renderPresupuestos() {
   const list = STATE.presupuestos.map(p => ({...p, st: presupuestoStatus(p)}));
   const counts = {
@@ -1707,9 +1728,9 @@ function renderPresupuestos() {
         <div class="right">${filtered.length} filas</div>
       </div>
       <table class="t">
-        <thead><tr><th>Fecha</th><th>Cliente</th><th>Tamaño</th><th>m²</th><th>Precio</th><th>Estado</th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Cliente</th><th>Tamaño</th><th>m²</th><th>Precio</th><th>Contacto</th><th>Estado</th></tr></thead>
         <tbody>
-          ${filtered.length===0 ? '<tr class="empty-row"><td colspan="6">Sin presupuestos en este filtro</td></tr>' :
+          ${filtered.length===0 ? '<tr class="empty-row"><td colspan="7">Sin presupuestos en este filtro</td></tr>' :
             filtered.map(p => {
               let pill = '';
               if (p.st.state === 'cerrado') {
@@ -1724,7 +1745,7 @@ function renderPresupuestos() {
               else pill = `<span class="pill muted">Futuro</span>`;
               const dDays = daysBetween(p.fecha, TODAY);
               const dayPill = dDays === 0 ? '<span class="pill cyan" style="margin-left:6px;font-size:9px">HOY</span>' : dDays === 1 ? '<span class="pill amber" style="margin-left:6px;font-size:9px">AYER</span>' : '';
-              return `<tr><td class="num">${fmtDateTime(p.fecha)}${dayPill}</td><td class="cliente">${escapeHtml(p.nombre)}</td><td class="num">${p.tamCm||'—'}×${p.ancho||'—'}</td><td class="num">${p.m2||'—'}</td><td class="num">${fmtMoney(p.precio)}</td><td>${pill}</td></tr>`;
+              return `<tr><td class="num">${fmtDateTime(p.fecha)}${dayPill}</td><td class="cliente">${escapeHtml(p.nombre)}</td><td class="num">${p.tamCm||'—'}×${p.ancho||'—'}</td><td class="num">${p.m2||'—'}</td><td class="num">${fmtMoney(p.precio)}</td><td>${renderContactoCell(p)}</td><td>${pill}</td></tr>`;
             }).join('')}
         </tbody>
       </table>

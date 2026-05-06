@@ -699,6 +699,24 @@ table.t td.cliente { font-weight: 600; }
   background: var(--ink-100);
 }
 
+/* ============ Contact pill (Presupuestos: canal + tel/usuario) ============ */
+.contact-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  padding: 3px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--ink-100);
+  white-space: nowrap;
+}
+.contact-pill .contact-icon { font-size: 11px; line-height: 1; }
+.contact-pill.wpp { border-color: rgba(74, 222, 128, .35); color: #b8e7c5; }
+.contact-pill.ig  { border-color: rgba(255, 24, 48, .4); color: var(--neon-red-glow); }
+
 /* ============ PERIOD SELECTOR (dashboard) ============ */
 .period-selector {
   display: flex;
