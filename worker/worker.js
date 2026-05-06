@@ -197,7 +197,20 @@ async function transcribeAudio(env, r2Key) {
     const obj = await env.MEDIA.get(r2Key);
     if (!obj) return null;
     const bytes = await obj.arrayBuffer();
-    const result = await env.AI.run('@cf/openai/whisper', { audio: [...new Uint8Array(bytes)] });
+    // Usar whisper-large-v3-turbo (mejor calidad), fallback a whisper base
+    let result;
+    try {
+      result = await env.AI.run('@cf/openai/whisper-large-v3-turbo', {
+        audio: [...new Uint8Array(bytes)],
+        language: 'es'
+      });
+    } catch (e1) {
+      // Fallback al modelo base con idioma forzado
+      result = await env.AI.run('@cf/openai/whisper', {
+        audio: [...new Uint8Array(bytes)],
+        language: 'es'
+      });
+    }
     return result?.text || null;
   } catch (e) {
     console.error('transcription error:', e);
