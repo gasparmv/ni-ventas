@@ -78,6 +78,29 @@ function doPost(e) {
 }
 
 function doGet(e) {
-  return ContentService.createTextOutput(JSON.stringify({ status: 'ok', info: 'NI Cotizador Writer. Use POST to add rows.' }))
+  // GET ?action=rows&sheet=2026 → devuelve las filas crudas (sin coerción de tipo
+  // que hace gviz, que rompe los teléfonos con "+" o espacios).
+  const action = e && e.parameter && e.parameter.action;
+  if (action === 'rows') {
+    try {
+      const sheetName = (e.parameter.sheet || SHEET_NAME);
+      const ss = SpreadsheetApp.openById(SHEET_ID);
+      const sheet = ss.getSheetByName(sheetName);
+      if (!sheet) {
+        return ContentService.createTextOutput(JSON.stringify({ error: 'sheet not found: ' + sheetName }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+      // Leer hasta col Z y convertir a string para preservar formato exacto
+      const lastRow = sheet.getLastRow();
+      if (lastRow < 1) return ContentService.createTextOutput(JSON.stringify({ ok: true, rows: [] })).setMimeType(ContentService.MimeType.JSON);
+      const range = sheet.getRange(1, 1, lastRow, 26);
+      const display = range.getDisplayValues(); // valores tal como se ven en el sheet (preserva formato)
+      return ContentService.createTextOutput(JSON.stringify({ ok: true, rows: display, sheet: sheetName }))
+        .setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ error: err.message })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+  return ContentService.createTextOutput(JSON.stringify({ status: 'ok', info: 'NI Cotizador Writer. POST to add rows. GET ?action=rows&sheet=NAME to fetch.' }))
     .setMimeType(ContentService.MimeType.JSON);
 }

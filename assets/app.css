@@ -1917,14 +1917,14 @@ table.t td.cliente { font-weight: 600; }
 
 /* Label picker popup */
 .label-picker-popup {
-  position: absolute;
-  top: calc(100% + 4px);
+  position: fixed;
+  top: 60px;
   right: 16px;
   background: #233138;
   border-radius: 10px;
   padding: 14px;
   box-shadow: 0 6px 20px rgba(0,0,0,.45);
-  z-index: 30;
+  z-index: 320;
   min-width: 200px;
 }
 .label-picker-title { color: #e9edef; font-weight: 600; font-size: 14px; margin-bottom: 10px; }
@@ -2101,6 +2101,75 @@ table.t td.cliente { font-weight: 600; }
 .chat-context-menu .ccm-item:hover { background: var(--ink-300); color: var(--neon-cyan); }
 .chat-context-menu .ccm-item svg { flex: 0 0 16px; opacity: .7; }
 .chat-context-menu .ccm-item:hover svg { opacity: 1; }
+
+/* Submenú (cascade) */
+.chat-context-menu .ccm-item--has-sub { position: relative; }
+.chat-context-menu .ccm-chevron {
+  font-size: 10px;
+  opacity: .6;
+  margin-left: 6px;
+}
+.chat-context-menu .ccm-item--has-sub:hover .ccm-chevron { opacity: 1; }
+.chat-context-menu .ccm-submenu {
+  position: absolute;
+  top: -4px;
+  left: calc(100% + 4px);
+  min-width: 220px;
+  background: var(--ink-200);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: 4px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .55), var(--inner-card);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-6px);
+  transition: opacity .12s var(--ease-out), transform .12s var(--ease-out);
+  z-index: 1;
+}
+.chat-context-menu .ccm-submenu--left {
+  left: auto;
+  right: calc(100% + 4px);
+  transform: translateX(6px);
+}
+.chat-context-menu .ccm-item--has-sub:hover .ccm-submenu,
+.chat-context-menu .ccm-submenu:hover {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+.chat-context-menu .ccm-sub-h {
+  padding: 4px 8px 6px;
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.chat-context-menu .ccm-sub-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background .1s;
+}
+.chat-context-menu .ccm-sub-item:hover { background: var(--ink-300); }
+.chat-context-menu .ccm-sub-item input { accent-color: var(--neon-cyan); cursor: pointer; }
+.chat-context-menu .ccm-sub-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 700;
+  color: #2a2410;
+}
+.chat-context-menu .ccm-sub-empty {
+  font-size: 12px;
+  color: var(--fg-subtle);
+  padding: 8px;
+}
 
 /* Bulk messaging section */
 .bulk-section {

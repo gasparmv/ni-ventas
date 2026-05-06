@@ -105,6 +105,22 @@ async function saveCotizadorParams(updates) {
   STATE.cotizadorParams = Object.assign({}, STATE.cotizadorParams || {}, updates);
 }
 
+// Normaliza un teléfono AR a E.164 sin "+", así queda listo para WA Cloud API y bulk.
+// Mismo criterio que normalizeArPhone() del worker.
+function normalizeArPhoneFE(raw) {
+  let n = String(raw || '').replace(/\D/g, '');
+  if (!n) return '';
+  if (n.startsWith('00')) n = n.slice(2);
+  if (n.startsWith('54')) {
+    if (!n.startsWith('549')) n = '549' + n.slice(2);
+  } else {
+    if (n.startsWith('15')) n = n.slice(2);
+    if (n.startsWith('0'))  n = n.slice(1);
+    n = '549' + n;
+  }
+  return n;
+}
+
 function buildPresupuestoTexto() {
   const f = STATE.cotizadorForm;
   if (!(+f.ancho > 0) || !(+f.alto > 0)) return null;
@@ -383,6 +399,13 @@ async function saveCotizacion() {
   const r = calcCotizador(f);
   STATE.cotizadorSaving = true;
   updateCotizadorForm();
+  // Normalizamos el teléfono si el canal es WhatsApp para que quede en formato E.164
+  // (sin +, sin espacios, sin guiones). Así el sheet siempre tiene datos limpios y los
+  // bulk/follow-ups por WA Cloud API funcionan sin reformatear.
+  // Para Instagram no tocamos: el campo guarda el username/handle.
+  const telRaw = (f.telefono || '').trim();
+  const canal = f.canal || 'WPP';
+  const telFinal = canal === 'WPP' ? normalizeArPhoneFE(telRaw) : telRaw;
   const payload = {
     cliente: f.cliente.trim(),
     ancho: +f.ancho,
@@ -396,8 +419,8 @@ async function saveCotizacion() {
     recargo: r.recargo,
     reventa: r.reventa,
     comision: r.comision,
-    canal: f.canal || 'WPP',
-    telefono: (f.telefono || '').trim()
+    canal,
+    telefono: telFinal
   };
   try {
     // Apps Script redirect CORS: usamos un iframe oculto + form POST
@@ -874,6 +897,23 @@ async function fetchSheet(id, sheet) {
   }
 }
 
+// Fetch del cotizador via Apps Script Web App (devuelve display values raw, sin
+// coerción de tipo que hace gviz/csv y descartaba teléfonos con "+" o espacios).
+async function fetchCotizadorViaAppsScript(sheetName) {
+  if (!CONFIG.appsScriptUrl) return null;
+  try {
+    const url = CONFIG.appsScriptUrl.replace(/\/$/, '') + '?action=rows&sheet=' + encodeURIComponent(sheetName);
+    const r = await fetch(url, { redirect: 'follow' });
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!j || !Array.isArray(j.rows)) return null;
+    return j.rows; // ya es array de arrays
+  } catch (e) {
+    console.warn('Apps Script fetch falló, fallback a gviz:', e.message);
+    return null;
+  }
+}
+
 async function loadAll() {
   STATE.loaded = false;
   STATE.error = null;
@@ -885,7 +925,11 @@ async function loadAll() {
 
     const presupuestosAll = [];
     for (const sheet of CONFIG.cotizadorSheets) {
-      const rows = await fetchSheet(CONFIG.cotizadorSheetId, sheet);
+      // Preferimos el endpoint de Apps Script (devuelve valores raw sin coerción de tipo,
+      // crítico porque gviz CSV descarta los teléfonos con "+" y espacios cuando los
+      // numéricos puros le hacen inferir la columna como Number).
+      let rows = await fetchCotizadorViaAppsScript(sheet);
+      if (!rows) rows = await fetchSheet(CONFIG.cotizadorSheetId, sheet);
       if (rows) presupuestosAll.push(...parseCotizador(rows, sheet));
     }
     STATE.presupuestos = presupuestosAll;
@@ -4372,16 +4416,24 @@ function showLabelPicker(phone) {
     `).join('')}
     ${!chatState.labels.length ? '<div style="color:#8696a0;font-size:13px;padding:8px">No hay etiquetas. Crealas desde el panel izquierdo.</div>' : ''}
   `;
-  document.querySelector('.chat-header').appendChild(popup);
+  // Lo appendeamos al body con position fixed para evitar que el post-it u otros
+  // elementos del chat-main lo tapen. Posicionamos cerca del botón btn-labels.
+  document.body.appendChild(popup);
+  const btn = document.getElementById('btn-labels');
+  if (btn) {
+    const r = btn.getBoundingClientRect();
+    popup.style.position = 'fixed';
+    popup.style.top = (r.bottom + 6) + 'px';
+    popup.style.right = (window.innerWidth - r.right) + 'px';
+    popup.style.left = 'auto';
+  }
   popup.querySelectorAll('input[data-lbl-id]').forEach(cb => {
     cb.onchange = async () => {
       await toggleContactLabel(phone, parseInt(cb.dataset.lblId));
-      // Update chips
       const chips = document.getElementById('chat-label-chips');
       if (chips) chips.innerHTML = renderContactLabelChips(phone);
     };
   });
-  // Close on outside click
   setTimeout(() => {
     document.addEventListener('click', function closer(e) {
       if (!popup.contains(e.target) && e.target.id !== 'btn-labels') {
@@ -4620,15 +4672,28 @@ function showChatContactContextMenu(x, y, phone, name) {
   // Cerrar otro abierto
   document.getElementById('chat-context-menu')?.remove();
   const hasNote = !!getContactNote(phone);
+  const cLabels = chatState.contactLabels[phone] || [];
+  const labelItems = chatState.labels.map(l => `
+    <label class="ccm-sub-item" data-lbl-id="${l.id}">
+      <input type="checkbox" ${cLabels.includes(l.id) ? 'checked' : ''}>
+      <span class="ccm-sub-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>
+    </label>
+  `).join('') || '<div class="ccm-sub-empty">No hay etiquetas creadas todavía</div>';
+
   const menu = document.createElement('div');
   menu.id = 'chat-context-menu';
   menu.className = 'chat-context-menu';
   menu.innerHTML = `
     <div class="ccm-h">${escapeHtml(name || formatPhoneDisplay(phone))}</div>
-    <button class="ccm-item" data-action="label">
+    <div class="ccm-item ccm-item--has-sub" data-action="label" tabindex="0">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg>
-      Etiquetar
-    </button>
+      <span style="flex:1">Etiquetar</span>
+      <span class="ccm-chevron">▸</span>
+      <div class="ccm-submenu" data-submenu="label">
+        <div class="ccm-sub-h">Etiquetas</div>
+        ${labelItems}
+      </div>
+    </div>
     <button class="ccm-item" data-action="note">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
       ${hasNote ? 'Editar nota' : 'Agregar nota'}
@@ -4655,22 +4720,44 @@ function showChatContactContextMenu(x, y, phone, name) {
     document.addEventListener('keydown', escer);
   }, 0);
 
-  menu.querySelectorAll('[data-action]').forEach(btn => {
+  // Decidir si el submenú se abre a la derecha o a la izquierda del menú principal
+  const subEl = menu.querySelector('.ccm-submenu');
+  if (subEl) {
+    const space = window.innerWidth - (parseFloat(menu.style.left) + rect.width);
+    if (space < 240) subEl.classList.add('ccm-submenu--left');
+  }
+
+  // Click en checkbox de etiqueta → toggle (no cierra el menú)
+  menu.querySelectorAll('[data-lbl-id]').forEach(row => {
+    row.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const cb = row.querySelector('input[type="checkbox"]');
+      // Si clickeó directamente el label (no el cb) toggleamos manualmente
+      if (e.target !== cb) cb.checked = !cb.checked;
+      const labelId = parseInt(row.dataset.lblId);
+      await toggleContactLabel(phone, labelId);
+      // Actualizar chips si está abierto el chat de este contacto
+      if (chatState.selectedPhone === phone) {
+        const chips = document.getElementById('chat-label-chips');
+        if (chips) chips.innerHTML = renderContactLabelChips(phone);
+      }
+      // Refrescar lista de contactos para que muestre los chips actualizados
+      refreshContactList();
+    });
+  });
+
+  // Click en items de acción
+  menu.querySelectorAll('button[data-action]').forEach(btn => {
     btn.onclick = async (e) => {
       e.stopPropagation();
       const action = btn.dataset.action;
       close();
-      if (action === 'label') {
-        await selectChatContact(phone);
-        // Esperar a que el header se renderice y abrir el label picker
-        setTimeout(() => showLabelPicker(phone), 50);
-      } else if (action === 'note') {
+      if (action === 'note') {
         chatState.editingNoteFor = phone;
         await selectChatContact(phone);
       } else if (action === 'unread') {
         const ok = await markChatUnread(phone);
         if (ok) {
-          // Actualizar contador local + UI
           const c = chatState.contacts.find(c => c.phone === phone);
           if (c) c.unread = (c.unread || 0) + 1;
           refreshContactList();
