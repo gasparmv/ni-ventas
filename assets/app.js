@@ -3203,7 +3203,10 @@ function renderChat() {
     <div class="chat-layout">
       <div class="chat-contacts">
         <div class="chat-contacts-header">
-          <div class="my-avatar"></div>
+          <button id="chat-fullscreen" class="chat-fullscreen-btn" title="Ocultar barra lateral">
+            <svg class="ico-enter" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M5 5h5V3H3v7h2V5zm9-2v2h5v5h2V3h-7zm5 16h-5v2h7v-7h-2v5zM5 14H3v7h7v-2H5v-5z"/></svg>
+            <svg class="ico-exit" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" style="display:none"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
+          </button>
           <div style="display:flex;gap:4px">
             <button class="btn-send" id="btn-bulk" style="width:34px;height:34px;font-size:14px" title="Mensaje masivo">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/><path d="M7 9h2v2H7zM11 9h2v2h-2zM15 9h2v2h-2z"/></svg>
@@ -3213,10 +3216,6 @@ function renderChat() {
             </button>
             <button class="btn-send" id="btn-manage-qr" style="width:34px;height:34px;font-size:14px" title="Respuestas rápidas">/ </button>
             <button class="btn-send" id="chat-refresh" style="width:34px;height:34px;font-size:16px" title="Actualizar">↻</button>
-            <button class="btn-send" id="chat-fullscreen" style="width:34px;height:34px;font-size:14px" title="Pantalla completa">
-              <svg class="ico-enter" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M5 5h5V3H3v7h2V5zm9-2v2h5v5h2V3h-7zm5 16h-5v2h7v-7h-2v5zM5 14H3v7h7v-2H5v-5z"/></svg>
-              <svg class="ico-exit" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="display:none"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
-            </button>
           </div>
         </div>
         <div class="chat-contacts-search">
@@ -3857,7 +3856,7 @@ function bindChat() {
       const on = appEl.classList.contains('app--chat-full');
       fsBtn.querySelector('.ico-enter').style.display = on ? 'none' : '';
       fsBtn.querySelector('.ico-exit').style.display = on ? '' : 'none';
-      fsBtn.title = on ? 'Salir de pantalla completa' : 'Pantalla completa';
+      fsBtn.title = on ? 'Mostrar barra lateral' : 'Ocultar barra lateral';
     };
     syncIcons();
     fsBtn.onclick = () => {
