@@ -2907,7 +2907,7 @@ async function loadChatContacts() {
         return {
           phone: c.phone,
           name: c.name,
-          lastMsg: last ? (last.body || `[${last.msg_type}]`).slice(0, 60) : '',
+          lastMsg: last ? (last.msg_type === 'revoke' ? 'Mensaje eliminado' : (last.body || `[${last.msg_type}]`)).slice(0, 60) : '',
           lastTs: c.lastTs,
           lastDir: last ? last.direction : '',
           lastType: last ? last.msg_type : '',
@@ -3399,6 +3399,18 @@ function renderChatBubbles() {
         <div class="chat-msg-unsupported">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="#8696a0"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
           <span>${isUnavailable ? 'Mensaje no disponible' : 'Mensaje no compatible con la API'}</span>
+        </div>
+        ${footer}
+      </div>`;
+      continue;
+    }
+
+    // === REVOKED (mensaje eliminado) ===
+    if (m.msg_type === 'revoke') {
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+        <div class="chat-msg-unsupported" style="font-style:italic;opacity:.7">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="#8696a0"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8 0-1.85.63-3.55 1.69-4.9L16.9 18.31A7.902 7.902 0 0112 20zm6.31-3.1L7.1 5.69A7.902 7.902 0 0112 4c4.42 0 8 3.58 8 8 0 1.85-.63 3.55-1.69 4.9z"/></svg>
+          <span>Mensaje eliminado</span>
         </div>
         ${footer}
       </div>`;
