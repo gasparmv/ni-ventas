@@ -4775,12 +4775,15 @@ function showChatContactContextMenu(x, y, phone, name) {
   document.getElementById('chat-context-menu')?.remove();
   const hasNote = !!getContactNote(phone);
   const cLabels = chatState.contactLabels[phone] || [];
-  const labelItems = chatState.labels.map(l => `
-    <div class="ccm-sub-item" data-lbl-id="${l.id}" role="button">
-      <input type="checkbox" ${cLabels.includes(l.id) ? 'checked' : ''} tabindex="-1">
-      <span class="ccm-sub-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>
-    </div>
-  `).join('') || '<div class="ccm-sub-empty">No hay etiquetas creadas todavía</div>';
+  const labelItems = chatState.labels.map(l => {
+    const on = cLabels.includes(l.id);
+    return `
+      <div class="ccm-sub-item${on ? ' active' : ''}" data-lbl-id="${l.id}" role="button">
+        <span class="ccm-sub-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>
+        <span class="ccm-sub-tick">${on ? '✓' : ''}</span>
+      </div>
+    `;
+  }).join('') || '<div class="ccm-sub-empty">No hay etiquetas creadas todavía</div>';
 
   const menu = document.createElement('div');
   menu.id = 'chat-context-menu';
@@ -4833,17 +4836,20 @@ function showChatContactContextMenu(x, y, phone, name) {
     if (space < 240) subEl.classList.add('ccm-submenu--left');
   }
 
-  // Click en row → toggle (no cierra el menú). El checkbox es solo visual,
-  // tiene pointer-events:none, así que solo se dispara este handler una vez.
+  // Click en row → toggle (no cierra el menú). El estado se refleja con la
+  // clase .active y el tick (sin checkbox redundante).
   menu.querySelectorAll('[data-lbl-id]').forEach(row => {
     row.addEventListener('click', async (e) => {
       e.stopPropagation();
       if (row.dataset.busy === '1') return;
       row.dataset.busy = '1';
-      const cb = row.querySelector('input[type="checkbox"]');
-      cb.checked = !cb.checked;
       const labelId = parseInt(row.dataset.lblId);
       await toggleContactLabel(phone, labelId);
+      // Refrescar visual del row según nuevo estado
+      const nowOn = (chatState.contactLabels[phone] || []).includes(labelId);
+      row.classList.toggle('active', nowOn);
+      const tick = row.querySelector('.ccm-sub-tick');
+      if (tick) tick.textContent = nowOn ? '✓' : '';
       if (chatState.selectedPhone === phone) {
         const chips = document.getElementById('chat-label-chips');
         if (chips) chips.innerHTML = renderContactLabelChips(phone);

@@ -1411,6 +1411,9 @@ table.t td.cliente { font-weight: 600; }
   font-size: 12px;
   color: #8696a0;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .chat-loading {
   flex: 1;
@@ -2271,7 +2274,15 @@ table.t td.cliente { font-weight: 600; }
   transition: background .1s;
 }
 .chat-context-menu .ccm-sub-item:hover { background: var(--ink-300); }
-.chat-context-menu .ccm-sub-item input { accent-color: var(--neon-cyan); pointer-events: none; }
+.chat-context-menu .ccm-sub-item.active { background: rgba(143, 212, 222, .08); }
+.chat-context-menu .ccm-sub-tick {
+  margin-left: auto;
+  width: 16px;
+  text-align: center;
+  color: var(--neon-cyan);
+  font-weight: 700;
+  font-size: 13px;
+}
 .chat-context-menu .ccm-sub-chip {
   display: inline-block;
   padding: 2px 8px;
