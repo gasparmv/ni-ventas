@@ -368,6 +368,15 @@ export default {
                       'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
                     ).bind(ts, wamid, 'outbound', phone, '', 'status', '', '', '', status).run();
                   }
+                  // Auto-mark conversation as read when an outbound message is sent
+                  // (means someone replied from WA Web/phone)
+                  if (status === 'sent' && phone) {
+                    try {
+                      await env.DB.prepare(
+                        'INSERT INTO wa_read_cursor (phone, last_read_ts, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET last_read_ts = excluded.last_read_ts, updated_at = excluded.updated_at'
+                      ).bind(phone, ts, ts).run();
+                    } catch (_) {}
+                  }
                 } catch (_) {}
               }
             }

@@ -2892,11 +2892,12 @@ async function loadChatContacts() {
     for (const m of msgs) {
       if (!m.phone || m.msg_type === 'status') continue;
       if (!byPhone.has(m.phone)) {
-        byPhone.set(m.phone, { phone: m.phone, name: m.sender_name || '', messages: [], lastTs: m.ts });
+        byPhone.set(m.phone, { phone: m.phone, name: '', messages: [], lastTs: m.ts });
       }
       const c = byPhone.get(m.phone);
       c.messages.push(m);
-      if (m.sender_name && !c.name) c.name = m.sender_name;
+      // Always prefer the most recent non-empty sender_name
+      if (m.sender_name && m.direction === 'inbound') c.name = m.sender_name;
       if (m.ts > c.lastTs) c.lastTs = m.ts;
     }
     // Ordenar contactos por último mensaje
@@ -3246,7 +3247,6 @@ function renderContactItem(c) {
           <div class="chat-contact-name">${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
           <div class="chat-contact-time${hasUnread ? ' unread' : ''}">${formatChatTime(c.lastTs)}</div>
         </div>
-        ${c.name ? `<div class="chat-contact-subname">${escapeHtml(formatPhoneDisplay(c.phone))}</div>` : ''}
         <div class="chat-contact-bottom">
           <div class="chat-contact-preview">${previewIcon}${escapeHtml(preview)}</div>
           <div style="display:flex;align-items:center;gap:4px">
