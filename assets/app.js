@@ -253,11 +253,12 @@ const PRESUPUESTO_PREFIX = 'Te comparto la información detallada!';
 const FOLLOWUP_PRESUPUESTO_TEXT = 'Aca te dejamos el presupuesto! Decinos que te parece? si hay algun cambio o ajuste que quieras hacer, tambien si tenes foto de donde lo vas a poner te podemos hacer un montaje digital de como quedaría!';
 const FOLLOWUP_PRESUPUESTO_PREFIX = 'Aca te dejamos el presupuesto!';
 
-async function enviarFollowupsPresupuesto() {
+async function enviarFollowupsPresupuesto(opts) {
+  const force = !!(opts && opts.force);
   if (!STATE.token) { alert('Tenés que estar logueado para enviar follow-ups'); return; }
   if (!CONFIG.trackerUrl) { alert('Tracker no configurado'); return; }
 
-  toast('Buscando presupuestos sin respuesta…');
+  toast(force ? 'Buscando presupuestos para forzar follow-up…' : 'Buscando presupuestos sin respuesta…');
 
   // 1) Outbound de las últimas 24h
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -281,11 +282,16 @@ async function enviarFollowupsPresupuesto() {
   }
 
   // 4) Filtrar los enviados hace > 1h (sino es muy pronto para insistir)
+  // En modo force se saltea esta restricción — útil para test inmediato.
   const oneHourAgo = Date.now() - 60 * 60 * 1000;
-  const candidates = [...byPhone.values()].filter(p => new Date(p.ts).getTime() < oneHourAgo);
+  const candidates = force
+    ? [...byPhone.values()]
+    : [...byPhone.values()].filter(p => new Date(p.ts).getTime() < oneHourAgo);
 
   if (candidates.length === 0) {
-    alert('No hay presupuestos enviados hace más de 1 hora.');
+    alert(force
+      ? 'No hay presupuestos enviados en las últimas 24h.'
+      : 'No hay presupuestos enviados hace más de 1 hora.');
     return;
   }
 
@@ -1533,6 +1539,8 @@ function bindPresupuestos() {
   bindCotSaveBtn();
   const fuBtn = document.getElementById('btn-pp-followups');
   if (fuBtn) fuBtn.onclick = () => enviarFollowupsPresupuesto();
+  const fuForceBtn = document.getElementById('btn-pp-followups-force');
+  if (fuForceBtn) fuForceBtn.onclick = () => enviarFollowupsPresupuesto({ force: true });
   const failBtn = document.getElementById('btn-pp-failures');
   if (failBtn) failBtn.onclick = () => verFallosWA();
 }
@@ -1662,6 +1670,7 @@ function renderPresupuestos() {
         <button class="btn btn-cyan" data-cot-open>＋ Cotizador</button>
         <button class="btn btn-ghost" id="btn-pp-failures" title="Ver presupuestos del cotizador que fallaron en entregar por WhatsApp en las últimas 24hs">⚠ Fallos WA</button>
         <button class="btn btn-ghost" id="btn-pp-followups" title="Enviar follow-up a clientes que recibieron presupuesto hace +1hs y no respondieron">📱 Follow-ups</button>
+        <button class="btn btn-ghost" id="btn-pp-followups-force" title="TEST: forzar follow-up ignorando la regla de 1hs (incluye presupuestos enviados recién)">🧪 Test follow-up</button>
         <button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button>
       </div>
     </div>
