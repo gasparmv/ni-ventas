@@ -4583,44 +4583,69 @@ function bindBulkSection() {
 function showManageLabelsModal() {
   const LABEL_COLORS = ['#ef5350','#ff7043','#ffa726','#ffca28','#66bb6a','#26a69a','#42a5f5','#5c6bc0','#ab47bc','#ec407a','#8d6e63','#78909c'];
   const content = `
-    <h3 style="margin-bottom:12px">Gestionar etiquetas</h3>
-    <div style="margin-bottom:12px">
-      ${chatState.labels.map(l => `
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-          <span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>
-          <button class="btn-send" style="width:24px;height:24px;font-size:14px;color:#ef5350" data-del-label="${l.id}">&times;</button>
+    <div class="manage-labels">
+      <div class="manage-labels-section">
+        <div class="manage-labels-section-h">${chatState.labels.length} etiqueta${chatState.labels.length === 1 ? '' : 's'}</div>
+        ${chatState.labels.length ? `
+          <div class="manage-labels-list">
+            ${chatState.labels.map(l => `
+              <div class="manage-label-row">
+                <span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>
+                <button class="manage-label-del" data-del-label="${l.id}" title="Eliminar etiqueta">&times;</button>
+              </div>
+            `).join('')}
+          </div>
+        ` : '<p class="manage-labels-empty">No hay etiquetas todavía</p>'}
+      </div>
+      <div class="manage-labels-section">
+        <div class="manage-labels-section-h">Nueva etiqueta</div>
+        <div class="manage-labels-colors">
+          ${LABEL_COLORS.map((c, i) => `<button class="label-color-pick${i === 0 ? ' active' : ''}" data-color="${c}" style="background:${c}" aria-label="Color ${c}"></button>`).join('')}
         </div>
-      `).join('')}
-      ${!chatState.labels.length ? '<p style="color:#8696a0;font-size:13px">No hay etiquetas todavía</p>' : ''}
-    </div>
-    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-      ${LABEL_COLORS.map(c => `<button class="label-color-pick" data-color="${c}" style="width:24px;height:24px;border-radius:50%;border:2px solid transparent;background:${c};cursor:pointer"></button>`).join('')}
-    </div>
-    <div style="display:flex;gap:6px">
-      <input type="text" id="new-label-name" placeholder="Nombre..." style="flex:1;padding:6px 10px;background:#2a3942;border:none;color:#e9edef;border-radius:6px;font-size:14px">
-      <button class="btn btn-primary" id="add-label-btn" style="padding:6px 14px">Crear</button>
+        <div class="manage-labels-add">
+          <input type="text" id="new-label-name" placeholder="Nombre de la etiqueta…" autocomplete="off">
+          <button class="btn btn-cyan" id="add-label-btn">Crear</button>
+        </div>
+      </div>
     </div>
   `;
-  openDrawer('Etiquetas', content);
+  openDrawer('Gestionar etiquetas', content);
   let selectedColor = LABEL_COLORS[0];
   document.querySelectorAll('.label-color-pick').forEach(btn => {
     btn.onclick = () => {
-      document.querySelectorAll('.label-color-pick').forEach(b => b.style.borderColor = 'transparent');
-      btn.style.borderColor = '#fff';
+      document.querySelectorAll('.label-color-pick').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
       selectedColor = btn.dataset.color;
     };
   });
   document.querySelectorAll('[data-del-label]').forEach(btn => {
-    btn.onclick = async () => { await deleteLabel(parseInt(btn.dataset.delLabel)); showManageLabelsModal(); render(); };
+    btn.onclick = async () => {
+      const lid = parseInt(btn.dataset.delLabel);
+      const lbl = chatState.labels.find(l => l.id === lid);
+      const ok = await showConfirm(
+        `¿Eliminar la etiqueta "${lbl?.name || ''}"? Se va a quitar de todos los contactos que la tienen.`,
+        { title: 'Eliminar etiqueta', variant: 'warn', confirmLabel: 'Eliminar' }
+      );
+      if (!ok) return;
+      await deleteLabel(lid);
+      showManageLabelsModal();
+      render();
+    };
   });
   const addBtn = document.getElementById('add-label-btn');
-  if (addBtn) addBtn.onclick = async () => {
-    const name = document.getElementById('new-label-name')?.value?.trim();
+  const nameInput = document.getElementById('new-label-name');
+  const submit = async () => {
+    const name = nameInput?.value?.trim();
     if (!name) return;
     await saveLabel(name, selectedColor);
     showManageLabelsModal();
     render();
   };
+  if (addBtn) addBtn.onclick = submit;
+  if (nameInput) {
+    nameInput.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+    setTimeout(() => nameInput.focus(), 50);
+  }
 }
 
 function showManageQRModal() {

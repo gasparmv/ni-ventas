@@ -1857,13 +1857,13 @@ table.t td.cliente { font-weight: 600; }
   display: inline-block;
   padding: 2px 8px;
   border-radius: 3px;
-  font-size: 10px;
+  font-size: 11px;
   color: #fff;
-  font-weight: 600;
+  font-weight: 700;
   white-space: nowrap;
   line-height: 16px;
-  letter-spacing: .3px;
-  text-transform: uppercase;
+  letter-spacing: .15px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .25);
 }
 .chat-label-chips {
   display: flex;
@@ -1939,6 +1939,108 @@ table.t td.cliente { font-weight: 600; }
 }
 .label-picker-row:hover { background: rgba(255,255,255,.05); }
 .label-picker-row input { accent-color: #00a884; width: 16px; height: 16px; }
+
+/* ============ Modal Gestionar etiquetas ============ */
+.manage-labels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5);
+  padding-bottom: var(--s-3);
+}
+.manage-labels-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.manage-labels-section-h {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: var(--tr-wide);
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+.manage-labels-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.manage-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--ink-100);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  transition: border-color .12s, background .12s;
+}
+.manage-label-row:hover { border-color: var(--border-strong); }
+.manage-label-del {
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  color: var(--fg-subtle);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all .12s;
+  flex-shrink: 0;
+}
+.manage-label-del:hover {
+  background: rgba(255, 24, 48, .12);
+  border-color: var(--neon-red);
+  color: var(--neon-red);
+}
+.manage-labels-empty {
+  color: var(--fg-subtle);
+  font-size: 13px;
+  margin: 0;
+}
+.manage-labels-colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.label-color-pick {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: transform .12s, box-shadow .12s, border-color .12s;
+}
+.label-color-pick:hover { transform: scale(1.08); }
+.label-color-pick.active {
+  border-color: var(--fg);
+  box-shadow: 0 0 0 2px var(--ink-200), 0 0 0 4px var(--neon-cyan);
+  transform: scale(1.1);
+}
+.manage-labels-add {
+  display: flex;
+  gap: 8px;
+}
+.manage-labels-add input {
+  flex: 1;
+  padding: 9px 12px;
+  background: var(--ink-100);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  transition: border-color .12s, box-shadow .12s;
+}
+.manage-labels-add input:focus {
+  outline: none;
+  border-color: var(--neon-cyan);
+  box-shadow: var(--glow-cyan-sm);
+}
+.manage-labels-add input::placeholder { color: var(--fg-subtle); }
+.manage-labels-add .btn { padding: 9px 16px; }
 
 /* Button label toggle */
 .btn-label-toggle {
