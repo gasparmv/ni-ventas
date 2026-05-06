@@ -874,6 +874,8 @@ export default {
     // Followups de Apps Script solo a las 13:00 UTC (10:00 AR)
     const hour = new Date(event.scheduledTime).getUTCHours();
     if (hour === 13) ctx.waitUntil(runScheduled(env));
+    // Follow-up automático de presupuestos del cotizador: solo en horario AR (09-22 AR = 12-01 UTC)
+    if (hour >= 12 || hour <= 1) ctx.waitUntil(processPresupuestoFollowups(env));
   }
 };
 
@@ -958,6 +960,87 @@ async function runFollowups(env, items) {
     else errors.push({ ref, error: r.error });
   }
   return { sent: sent.length, skipped: skipped.length, errors: errors.length, detail: { sent, skipped, errors } };
+}
+
+// ===== Follow-up automático de presupuestos del cotizador =====
+// Detecta presupuestos enviados desde el cotizador (texto que arranca con un prefijo conocido),
+// que no fueron respondidos ni recibieron follow-up, y manda un mensaje de insistencia.
+// Si algun envio falla y hay ADMIN_NOTIFY_PHONE configurado, manda un WA al admin con el resumen.
+const PRESUPUESTO_PREFIX_TEXT = 'Te comparto la información detallada!';
+const FOLLOWUP_PRESUPUESTO_TEXT = 'Aca te dejamos el presupuesto! Decinos que te parece? si hay algun cambio o ajuste que quieras hacer, tambien si tenes foto de donde lo vas a poner te podemos hacer un montaje digital de como quedaría!';
+const FOLLOWUP_PRESUPUESTO_PREFIX_TEXT = 'Aca te dejamos el presupuesto!';
+
+async function processPresupuestoFollowups(env) {
+  const now = Date.now();
+  const oneHourAgo = new Date(now - 60 * 60 * 1000).toISOString();
+  const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+
+  // 1) Presupuestos del cotizador en las últimas 24h, enviados hace al menos 1h
+  let rows;
+  try {
+    const rs = await env.DB.prepare(
+      "SELECT phone, ts, body, sender_name FROM wa_messages WHERE direction = 'outbound' AND body LIKE ? AND ts >= ? AND ts <= ? ORDER BY ts DESC"
+    ).bind(PRESUPUESTO_PREFIX_TEXT + '%', oneDayAgo, oneHourAgo).all();
+    rows = rs.results || [];
+  } catch (e) {
+    await logWaEvent(env, { to: '', kind: 'cron-pp-followup', ref: '', ok: false, error: 'query: ' + e.message });
+    return;
+  }
+  if (!rows.length) return;
+
+  // 2) Latest presupuesto por teléfono
+  const byPhone = new Map();
+  for (const r of rows) {
+    const ex = byPhone.get(r.phone);
+    if (!ex || new Date(r.ts) > new Date(ex.ts)) byPhone.set(r.phone, r);
+  }
+
+  const failures = [];
+  let sent = 0;
+
+  for (const p of byPhone.values()) {
+    // 3) Conversación posterior al presupuesto
+    let conv;
+    try {
+      const rs = await env.DB.prepare(
+        'SELECT direction, body FROM wa_messages WHERE phone = ? AND ts > ? LIMIT 200'
+      ).bind(p.phone, p.ts).all();
+      conv = rs.results || [];
+    } catch (_) { continue; }
+
+    // ¿Respondió?
+    if (conv.some(m => m.direction === 'inbound')) continue;
+    // ¿Ya tiene follow-up?
+    if (conv.some(m => m.direction === 'outbound' && (m.body || '').startsWith(FOLLOWUP_PRESUPUESTO_PREFIX_TEXT))) continue;
+
+    // 4) Enviar
+    const r = await waSendText(env, p.phone, FOLLOWUP_PRESUPUESTO_TEXT);
+    const ts = new Date().toISOString();
+    if (r.ok) {
+      sent++;
+      try {
+        await env.DB.prepare(
+          'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ).bind(ts, r.id || '', 'outbound', p.phone, '', 'text', FOLLOWUP_PRESUPUESTO_TEXT, '', '', 'sent').run();
+      } catch (_) {}
+    } else {
+      failures.push({ phone: p.phone, name: p.sender_name || '', error: r.error || 'unknown' });
+    }
+    await logWaEvent(env, { to: p.phone, kind: 'pp-followup', ref: 'pp-fu:' + p.phone, ok: r.ok, messageId: r.id, error: r.error });
+    await new Promise(rs => setTimeout(rs, 600)); // delay anti rate-limit
+  }
+
+  // 5) Si fallaron envíos y hay número de admin configurado, mandar resumen
+  if (failures.length && env.ADMIN_NOTIFY_PHONE) {
+    const lines = failures.slice(0, 10).map(f => `• ${f.name || f.phone} (${f.phone}): ${f.error}`).join('\n');
+    const more = failures.length > 10 ? `\n…y ${failures.length - 10} más` : '';
+    const summary = `⚠ Follow-ups de presupuesto fallidos (${failures.length}):\n${lines}${more}\n\nProbablemente fuera de la ventana de 24h del cliente.`;
+    try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
+  }
+
+  if (sent > 0 || failures.length > 0) {
+    await logWaEvent(env, { to: '', kind: 'cron-pp-summary', ref: '', ok: true, error: `sent=${sent} failed=${failures.length}` });
+  }
 }
 
 async function runScheduled(env) {

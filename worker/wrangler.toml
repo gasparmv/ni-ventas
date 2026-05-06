@@ -20,6 +20,9 @@ binding = "AI"
 binding = "MEDIA"
 bucket_name = "ni-ventas-media"
 
-# Cron Trigger: cada 5 min para mensajes programados + followups a las 13:00 UTC.
+# Cron Trigger: cada 5 min.
+# - Mensajes programados (siempre)
+# - Follow-up de presupuestos del cotizador (solo en horario AR 09-22 = UTC 12-01)
+# - Followups de Apps Script (solo a las 13:00 UTC = 10:00 AR)
 [triggers]
 crons = ["*/5 * * * *"]
