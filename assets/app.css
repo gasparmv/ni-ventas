@@ -1907,8 +1907,35 @@ table.t td.cliente { font-weight: 600; }
   padding: 2px 0;
 }
 
-/* Attach & mic buttons */
-.btn-attach, .btn-mic { flex-shrink: 0; }
+/* Attach & mic & schedule buttons */
+.btn-attach, .btn-mic, .btn-schedule { flex-shrink: 0; }
+.btn-schedule { color: #8696a0; }
+.btn-schedule:hover { color: #00a884 !important; }
+
+/* Schedule modal */
+.schedule-modal-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,.6); z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+}
+.schedule-modal {
+  background: #1f2c34; border-radius: 12px; padding: 20px;
+  width: 380px; max-width: 90vw; color: #e9edef;
+  box-shadow: 0 8px 32px rgba(0,0,0,.5);
+}
+.schedule-preview {
+  background: #005c4b; border-radius: 8px; padding: 8px 12px;
+  font-size: 13px; color: #e9edef; max-height: 120px; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word;
+}
+.schedule-modal label { display: block; margin-bottom: 4px; }
+.schedule-modal input[type="date"],
+.schedule-modal input[type="time"] { font-family: inherit; font-size: 14px; }
+.schedule-modal .btn-action {
+  border: none; padding: 8px 18px; border-radius: 8px;
+  color: #fff; font-size: 14px; cursor: pointer;
+}
+.schedule-modal .btn-action:hover { filter: brightness(1.15); }
 
 /* ============ MISC ============ */
 .muted { color: var(--fg-subtle); }

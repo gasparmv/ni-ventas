@@ -775,6 +775,40 @@ export default {
         });
       }
 
+      // ===== Scheduled Messages CRUD =====
+      if (request.method === 'POST' && path === '/admin/wa/schedule') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const items = Array.isArray(body?.messages) ? body.messages : [body];
+        const created = [];
+        for (const it of items) {
+          const { phone, body: text, scheduled_at } = it || {};
+          if (!phone || !text || !scheduled_at) { created.push({ error: 'missing phone, body, or scheduled_at' }); continue; }
+          const num = normalizeArPhone(phone);
+          if (!num) { created.push({ error: 'numero invalido', phone }); continue; }
+          const now = new Date().toISOString();
+          const rs = await env.DB.prepare(
+            'INSERT INTO scheduled_messages (phone, body, scheduled_at, status, created_at) VALUES (?, ?, ?, ?, ?)'
+          ).bind(num, text, scheduled_at, 'pending', now).run();
+          created.push({ id: rs.meta?.last_row_id, phone: num, scheduled_at });
+        }
+        return json({ created });
+      }
+
+      if (request.method === 'GET' && path === '/admin/wa/schedule') {
+        const status = url.searchParams.get('status') || 'pending';
+        const rs = await env.DB.prepare(
+          'SELECT id, phone, body, scheduled_at, status, created_at, sent_at, error FROM scheduled_messages WHERE status = ? ORDER BY scheduled_at ASC LIMIT 200'
+        ).bind(status).all();
+        return json({ messages: rs.results || [] });
+      }
+
+      if (request.method === 'DELETE' && path.startsWith('/admin/wa/schedule/')) {
+        const id = path.split('/').pop();
+        await env.DB.prepare('UPDATE scheduled_messages SET status = ? WHERE id = ? AND status = ?').bind('cancelled', id, 'pending').run();
+        return json({ ok: true });
+      }
+
       if (request.method === 'PUT' && path === '/admin/cotizador/params') {
         let body;
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
@@ -799,12 +833,51 @@ export default {
   },
 
   // ===== Cron Trigger =====
-  // Se dispara segun wrangler.toml [triggers].crons. Ej: "0 13 * * *" = diario 13:00 UTC.
-  // Pide a Apps Script la lista de seguimientos pendientes de hoy y los manda por WhatsApp.
+  // Corre cada 5 min. Procesa: 1) mensajes programados, 2) followups (solo a las 13:00 UTC).
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runScheduled(env));
+    ctx.waitUntil(processScheduledMessages(env));
+    // Followups de Apps Script solo a las 13:00 UTC (10:00 AR)
+    const hour = new Date(event.scheduledTime).getUTCHours();
+    if (hour === 13) ctx.waitUntil(runScheduled(env));
   }
 };
+
+// ===== Scheduled Messages =====
+async function processScheduledMessages(env) {
+  const now = new Date().toISOString();
+  let rows;
+  try {
+    const rs = await env.DB.prepare(
+      "SELECT id, phone, body, scheduled_at FROM scheduled_messages WHERE status = 'pending' AND scheduled_at <= ? ORDER BY scheduled_at ASC LIMIT 50"
+    ).bind(now).all();
+    rows = rs.results || [];
+  } catch (e) {
+    // Table might not exist yet
+    console.error('scheduled_messages query error:', e);
+    return;
+  }
+  if (!rows.length) return;
+  for (const msg of rows) {
+    const r = await waSendText(env, msg.phone, msg.body);
+    const sentAt = new Date().toISOString();
+    if (r.ok) {
+      await env.DB.prepare(
+        "UPDATE scheduled_messages SET status = 'sent', sent_at = ?, wamid = ? WHERE id = ?"
+      ).bind(sentAt, r.id || '', msg.id).run();
+      // Save in wa_messages so it shows in chat
+      try {
+        await env.DB.prepare(
+          'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ).bind(sentAt, r.id || '', 'outbound', msg.phone, '', 'text', msg.body, '', '', 'sent').run();
+      } catch (_) {}
+    } else {
+      await env.DB.prepare(
+        "UPDATE scheduled_messages SET status = 'failed', error = ? WHERE id = ?"
+      ).bind(r.error || 'unknown error', msg.id).run();
+    }
+    await logWaEvent(env, { to: msg.phone, kind: 'scheduled', ref: `sched:${msg.id}`, ok: r.ok, messageId: r.id, error: r.error });
+  }
+}
 
 // ===== Followups =====
 // Recibe items: [{ to, name, milestone: 'D30'|'D60'|'D90'|'PPTO', pedidoId?, message? }]

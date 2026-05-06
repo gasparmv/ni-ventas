@@ -98,3 +98,17 @@ CREATE TABLE IF NOT EXISTS contact_labels (
   created_at  TEXT NOT NULL,
   PRIMARY KEY (phone, label_id)
 );
+
+-- Mensajes programados de WhatsApp
+CREATE TABLE IF NOT EXISTS scheduled_messages (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone        TEXT NOT NULL,             -- número destino E.164 sin +
+  body         TEXT NOT NULL,
+  scheduled_at TEXT NOT NULL,             -- ISO UTC timestamp de envío
+  status       TEXT NOT NULL DEFAULT 'pending',  -- pending | sent | failed | cancelled
+  created_at   TEXT NOT NULL,
+  sent_at      TEXT,                      -- cuando se envió realmente
+  wamid        TEXT,                      -- ID de Meta si se envió
+  error        TEXT                       -- error si falló
+);
+CREATE INDEX IF NOT EXISTS idx_sched_status_ts ON scheduled_messages(status, scheduled_at);

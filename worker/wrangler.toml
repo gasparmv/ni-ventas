@@ -20,7 +20,6 @@ binding = "AI"
 binding = "MEDIA"
 bucket_name = "ni-ventas-media"
 
-# Cron Trigger: corre todos los dias a las 13:00 UTC (10:00 AR).
-# Procesa los seguimientos automaticos de ventas de carteles.
+# Cron Trigger: cada 5 min para mensajes programados + followups a las 13:00 UTC.
 [triggers]
-crons = ["0 13 * * *"]
+crons = ["*/5 * * * *"]

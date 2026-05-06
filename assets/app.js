@@ -2803,6 +2803,7 @@ function renderNormalInputUI() {
     <input type="file" id="chat-file-input" accept="image/*" style="display:none">
     <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
     <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg></button>
+    <button class="btn-send btn-schedule" id="btn-schedule" title="Programar mensaje"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg></button>
     <button class="btn-send btn-mic" id="btn-mic" title="Grabar audio"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M11.999 14.942c2.001 0 3.531-1.53 3.531-3.531V4.35c0-2.001-1.53-3.531-3.531-3.531S8.469 2.35 8.469 4.35v7.061c0 2.001 1.53 3.531 3.53 3.531zm6.238-3.53c0 3.531-2.942 6.002-6.238 6.002s-6.238-2.471-6.238-6.002H4.761c0 3.885 3.118 7.061 7.003 7.414v3.174h.471v-3.174c3.885-.353 7.003-3.529 7.003-7.414h-1z"/></svg></button>
   `;
   bindChatConversation();
@@ -2984,6 +2985,99 @@ async function sendChatMessage(phone, text) {
 function updateChatInputState() {
   const btn = document.getElementById('chat-send-btn');
   if (btn) btn.disabled = chatState.sending;
+}
+
+// ===== Scheduled messages =====
+function showScheduleModal(phone) {
+  const ta = document.getElementById('chat-input');
+  const text = ta?.value?.trim();
+  if (!text) { toast('Escribí un mensaje primero'); return; }
+  // Default: tomorrow 8:00 AR
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const defaultDate = tomorrow.toISOString().slice(0, 10);
+  const modal = document.createElement('div');
+  modal.className = 'schedule-modal-overlay';
+  modal.innerHTML = `
+    <div class="schedule-modal">
+      <h3 style="margin:0 0 12px">Programar mensaje</h3>
+      <div class="schedule-preview">${escapeHtml(text).replace(/\n/g, '<br>')}</div>
+      <div style="display:flex;gap:8px;margin:12px 0">
+        <div style="flex:1">
+          <label style="font-size:12px;color:#8696a0">Fecha</label>
+          <input type="date" id="sched-date" value="${defaultDate}" style="width:100%;padding:8px;border-radius:6px;border:1px solid #3b4a54;background:#2a3942;color:#e9edef">
+        </div>
+        <div style="flex:1">
+          <label style="font-size:12px;color:#8696a0">Hora (Argentina)</label>
+          <input type="time" id="sched-time" value="08:00" style="width:100%;padding:8px;border-radius:6px;border:1px solid #3b4a54;background:#2a3942;color:#e9edef">
+        </div>
+      </div>
+      <div id="sched-pending-list" style="margin:8px 0"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+        <button id="sched-cancel" class="btn-action" style="background:#3b4a54">Cancelar</button>
+        <button id="sched-confirm" class="btn-action" style="background:#00a884">Programar</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector('#sched-cancel').onclick = () => modal.remove();
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  // Load pending scheduled messages for this phone
+  loadPendingScheduled(phone, modal.querySelector('#sched-pending-list'));
+  modal.querySelector('#sched-confirm').onclick = async () => {
+    const date = modal.querySelector('#sched-date').value;
+    const time = modal.querySelector('#sched-time').value;
+    if (!date || !time) { toast('Elegí fecha y hora'); return; }
+    // Convert AR time to UTC (AR = UTC-3)
+    const arDate = new Date(`${date}T${time}:00-03:00`);
+    const utc = arDate.toISOString();
+    if (arDate <= new Date()) { toast('La fecha debe ser futura'); return; }
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ phone, body: text, scheduled_at: utc })
+      });
+      const j = await r.json();
+      if (!r.ok) { toast('Error: ' + (j.error || 'fallo')); return; }
+      toast(`Programado para ${date} ${time} AR`);
+      if (ta) { ta.value = ''; ta.style.height = 'auto'; }
+      modal.remove();
+    } catch (e) {
+      toast('Error de red');
+    }
+  };
+}
+
+async function loadPendingScheduled(phone, container) {
+  if (!container) return;
+  try {
+    const num = phone.replace(/\D/g, '');
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/schedule?status=pending', {
+      headers: authHeaders()
+    });
+    const j = await r.json();
+    const msgs = (j.messages || []).filter(m => m.phone === num || m.phone === phone);
+    if (!msgs.length) return;
+    container.innerHTML = `<div style="font-size:12px;color:#8696a0;margin-bottom:4px">Programados pendientes:</div>` +
+      msgs.map(m => {
+        const arTime = new Date(m.scheduled_at).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' });
+        return `<div class="sched-pending-item" style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:13px">
+          <span style="flex:1;color:#d1d7db">${escapeHtml(m.body).slice(0, 50)}${m.body.length > 50 ? '...' : ''}</span>
+          <span style="color:#8696a0;white-space:nowrap">${arTime}</span>
+          <button data-id="${m.id}" class="sched-cancel-btn" style="background:none;border:none;color:#e44;cursor:pointer;font-size:16px" title="Cancelar">✕</button>
+        </div>`;
+      }).join('');
+    container.querySelectorAll('.sched-cancel-btn').forEach(btn => {
+      btn.onclick = async () => {
+        await fetch(CONFIG.trackerUrl + '/admin/wa/schedule/' + btn.dataset.id, {
+          method: 'DELETE', headers: authHeaders()
+        });
+        btn.closest('.sched-pending-item').remove();
+        toast('Mensaje cancelado');
+      };
+    });
+  } catch (_) {}
 }
 
 function formatChatTime(ts) {
@@ -3212,6 +3306,7 @@ function renderChatConversation() {
         <div class="qr-dropdown" id="qr-dropdown" style="display:none"></div>
       </div>
       <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg></button>
+      <button class="btn-send btn-schedule" id="btn-schedule" title="Programar mensaje"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg></button>
       <button class="btn-send btn-mic" id="btn-mic" title="Grabar audio"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M11.999 14.942c2.001 0 3.531-1.53 3.531-3.531V4.35c0-2.001-1.53-3.531-3.531-3.531S8.469 2.35 8.469 4.35v7.061c0 2.001 1.53 3.531 3.53 3.531zm6.238-3.53c0 3.531-2.942 6.002-6.238 6.002s-6.238-2.471-6.238-6.002H4.761c0 3.885 3.118 7.061 7.003 7.414v3.174h.471v-3.174c3.885-.353 7.003-3.529 7.003-7.414h-1z"/></svg></button>
     </div>
   `;
@@ -3579,6 +3674,11 @@ function bindChatConversation() {
         sendChatMessage(chatState.selectedPhone, ta.value);
       }
     };
+  }
+  // Schedule button
+  const schedBtn = document.getElementById('btn-schedule');
+  if (schedBtn) {
+    schedBtn.onclick = () => showScheduleModal(chatState.selectedPhone);
   }
   // Attach image
   if (attachBtn && fileInput) {
