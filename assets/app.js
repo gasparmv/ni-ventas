@@ -4737,17 +4737,18 @@ function bindChat() {
   };
   bindBulkSection();
   if (chatState.selectedPhone) bindChatConversation();
-  // Poll: refresca contactos + mensajes del chat abierto cada 4s.
-  // - Solo corre si la pestaña está visible (visibilitychange listener).
-  // - Al volver a la pestaña dispara un poll inmediato para actualizar.
-  // - Cuando se sale de la vista chat o se queda hidden, NO consume requests.
+  // Poll: refresca contactos + mensajes del chat abierto cada 4s. NO bloqueamos
+  // cuando la pestaña está oculta — los browsers ya tirotean setInterval a ~60s
+  // en background, y necesitamos que las notificaciones funcionen aunque Joaco
+  // tenga la pestaña minimizada.
   clearInterval(chatState.pollTimer);
   const tickPoll = async () => {
     if (STATE.view !== 'chat') return;
-    if (document.visibilityState !== 'visible') return; // tab oculto: skip
     const phone = chatState.selectedPhone;
     const prevMsgCount = chatState.messages.length;
     const prevLastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
+    const prevTotalUnread = chatState.totalUnread || 0;
+    const prevContactsByPhone = new Map(chatState.contacts.map(c => [c.phone, c]));
     await Promise.all([
       loadChatContacts(),
       phone ? loadChatMessages(phone) : Promise.resolve()
@@ -4763,6 +4764,16 @@ function bindChat() {
       if (wasAtBottom && msgEl) msgEl.scrollTop = msgEl.scrollHeight;
     }
     updateUnreadBadge();
+    // Notificación: si total unread subió, llegó al menos un inbound nuevo.
+    const newTotalUnread = chatState.totalUnread || 0;
+    if (newTotalUnread > prevTotalUnread) {
+      const trigger = chatState.contacts.find(c => {
+        const prev = prevContactsByPhone.get(c.phone);
+        return (c.unread || 0) > (prev?.unread || 0);
+      });
+      notifyNewMessage(trigger);
+    }
+    updateChatPageTitle();
   };
   chatState.pollTimer = setInterval(() => {
     if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
@@ -4775,6 +4786,73 @@ function bindChat() {
     };
     document.addEventListener('visibilitychange', chatState._visibilityHook);
   }
+  // Pedir permiso de notificaciones del browser (idempotente).
+  ensureNotificationPermission();
+}
+
+// ===== Notificaciones del chat =====
+function ensureNotificationPermission() {
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'default') {
+    try { Notification.requestPermission(); } catch (_) {}
+  }
+}
+
+let _audioCtx = null;
+function playChatNotificationSound() {
+  try {
+    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_audioCtx.state === 'suspended') _audioCtx.resume();
+    const ctx = _audioCtx;
+    const t0 = ctx.currentTime;
+    // Doble "ding" estilo WA: 880Hz → 1320Hz, decay exponencial corto.
+    const tones = [
+      { freq: 880,  start: 0,    dur: 0.10 },
+      { freq: 1320, start: 0.12, dur: 0.20 }
+    ];
+    for (const t of tones) {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = t.freq;
+      g.gain.setValueAtTime(0, t0 + t.start);
+      g.gain.linearRampToValueAtTime(0.16, t0 + t.start + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + t.start + t.dur);
+      osc.connect(g).connect(ctx.destination);
+      osc.start(t0 + t.start);
+      osc.stop(t0 + t.start + t.dur + 0.02);
+    }
+  } catch (_) {}
+}
+
+function notifyNewMessage(contact) {
+  playChatNotificationSound();
+  // Browser notification solo si la pestaña no está visible (sino el sonido
+  // y el badge en pantalla ya alcanzan).
+  if (document.visibilityState !== 'visible' && 'Notification' in window && Notification.permission === 'granted') {
+    try {
+      const name = contact?.name || formatPhoneDisplay(contact?.phone || '') || 'Nuevo mensaje';
+      const body = (contact?.lastMsg || '').slice(0, 120) || 'Nuevo mensaje de WhatsApp';
+      const n = new Notification(name, {
+        body,
+        icon: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22%3E%3Crect width=%2264%22 height=%2264%22 fill=%22%230A0A0F%22/%3E%3Ctext x=%2232%22 y=%2244%22 font-family=%22Archivo Black,sans-serif%22 font-size=%2240%22 font-weight=%22900%22 text-anchor=%22middle%22 fill=%22%23FF1830%22%3EN%3C/text%3E%3C/svg%3E',
+        tag: 'wa-' + (contact?.phone || 'new'),
+        renotify: true,
+        silent: true
+      });
+      n.onclick = () => {
+        try { window.focus(); } catch (_) {}
+        if (contact?.phone) selectChatContact(contact.phone);
+        n.close();
+      };
+    } catch (_) {}
+  }
+}
+
+function updateChatPageTitle() {
+  const total = chatState.totalUnread || 0;
+  const base = 'NEON · Ventas';
+  document.title = total > 0 ? `(${total}) ${base}` : base;
 }
 
 function refreshContactList() {
