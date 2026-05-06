@@ -1217,6 +1217,17 @@ table.t td.cliente { font-weight: 600; }
   font-size: 14px;
 }
 .chat-contacts-header .btn-send:hover { color: #e9edef; background: rgba(255,255,255,.06); }
+.chat-contacts-header .btn-send.active { color: var(--neon-cyan); background: rgba(143, 212, 222, .12); }
+.archived-banner {
+  background: rgba(143, 212, 222, .08);
+  border-bottom: 1px solid rgba(143, 212, 222, .2);
+  color: var(--neon-cyan);
+  font-size: 11px;
+  padding: 6px 12px;
+  text-align: center;
+  letter-spacing: .04em;
+  flex-shrink: 0;
+}
 .chat-contacts-header .btn-send svg { width: 18px; height: 18px; }
 .chat-contacts-search {
   padding: 7px 10px;
@@ -2055,6 +2066,8 @@ table.t td.cliente { font-weight: 600; }
   transition: color .15s, background .15s;
 }
 .btn-label-toggle:hover { color: #e9edef; background: rgba(255,255,255,.06); }
+.btn-label-toggle.has-note { color: #fff8b0; }
+.btn-label-toggle.has-note:hover { color: #fff8b0; background: rgba(255, 248, 176, .12); }
 
 /* ============ POST-IT de notas por contacto ============ */
 .chat-main > .chat-postit { z-index: 5; }
@@ -2258,7 +2271,7 @@ table.t td.cliente { font-weight: 600; }
   transition: background .1s;
 }
 .chat-context-menu .ccm-sub-item:hover { background: var(--ink-300); }
-.chat-context-menu .ccm-sub-item input { accent-color: var(--neon-cyan); cursor: pointer; }
+.chat-context-menu .ccm-sub-item input { accent-color: var(--neon-cyan); pointer-events: none; }
 .chat-context-menu .ccm-sub-chip {
   display: inline-block;
   padding: 2px 8px;

@@ -106,6 +106,12 @@ CREATE TABLE IF NOT EXISTS contact_notes (
   updated_at  TEXT NOT NULL
 );
 
+-- Chats archivados (no aparecen en la lista principal salvo que se filtre)
+CREATE TABLE IF NOT EXISTS archived_chats (
+  phone        TEXT PRIMARY KEY,
+  archived_at  TEXT NOT NULL
+);
+
 -- Mensajes programados de WhatsApp
 CREATE TABLE IF NOT EXISTS scheduled_messages (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,

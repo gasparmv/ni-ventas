@@ -817,6 +817,29 @@ export default {
         return json({ ok: true });
       }
 
+      // ===== Archivar / desarchivar chats =====
+      if (request.method === 'GET' && path === '/admin/wa/archived') {
+        try {
+          await env.DB.prepare('CREATE TABLE IF NOT EXISTS archived_chats (phone TEXT PRIMARY KEY, archived_at TEXT NOT NULL)').run();
+          const rs = await env.DB.prepare('SELECT phone, archived_at FROM archived_chats').all();
+          return json({ phones: (rs.results || []).map(r => r.phone) });
+        } catch (e) { return json({ error: e.message }, 500); }
+      }
+      if (request.method === 'POST' && path === '/admin/wa/archive') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone } = body || {};
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        await env.DB.prepare('CREATE TABLE IF NOT EXISTS archived_chats (phone TEXT PRIMARY KEY, archived_at TEXT NOT NULL)').run();
+        await env.DB.prepare('INSERT OR REPLACE INTO archived_chats (phone, archived_at) VALUES (?, ?)').bind(phone, new Date().toISOString()).run();
+        return json({ ok: true });
+      }
+      if (request.method === 'DELETE' && path === '/admin/wa/archive') {
+        const phone = url.searchParams.get('phone') || '';
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        await env.DB.prepare('DELETE FROM archived_chats WHERE phone = ?').bind(phone).run();
+        return json({ ok: true });
+      }
+
       // ===== Bulk messaging =====
       if (request.method === 'POST' && path === '/admin/wa/send-bulk') {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }

@@ -3167,6 +3167,46 @@ async function markChatUnread(phone) {
   });
   return r.ok;
 }
+
+// ===== Archivado de chats =====
+async function loadArchivedChats() {
+  if (chatState.archivedLoaded) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/archived', { headers: authHeaders() });
+    if (r.ok) {
+      const j = await r.json();
+      chatState.archived = new Set(j.phones || []);
+      chatState.archivedLoaded = true;
+    }
+  } catch (_) {}
+}
+async function archiveChat(phone) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/wa/archive', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ phone })
+  });
+  if (r.ok) {
+    if (!chatState.archived) chatState.archived = new Set();
+    chatState.archived.add(phone);
+    return true;
+  }
+  return false;
+}
+async function unarchiveChat(phone) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/wa/archive?phone=' + encodeURIComponent(phone), {
+    method: 'DELETE',
+    headers: authHeaders()
+  });
+  if (r.ok) {
+    chatState.archived?.delete(phone);
+    return true;
+  }
+  return false;
+}
+function isArchived(phone) {
+  return chatState.archived ? chatState.archived.has(phone) : false;
+}
 async function saveLabel(name, color) {
   const r = await fetch(CONFIG.trackerUrl + '/admin/labels', {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -3698,6 +3738,12 @@ function renderChat() {
   }
   const search = chatState.search.toLowerCase();
   let filtered = chatState.contacts;
+  // Archivados: por defecto fuera. Solo se muestran si chatState.showArchived = true.
+  if (chatState.showArchived) {
+    filtered = filtered.filter(c => isArchived(c.phone));
+  } else {
+    filtered = filtered.filter(c => !isArchived(c.phone));
+  }
   if (search) {
     filtered = filtered.filter(c =>
       (c.name || '').toLowerCase().includes(search) ||
@@ -3728,17 +3774,21 @@ function renderChat() {
               <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg>
             </button>
             <button class="btn-send" id="btn-manage-qr" style="width:34px;height:34px;font-size:14px" title="Respuestas rápidas">/ </button>
+            <button class="btn-send ${chatState.showArchived ? 'active' : ''}" id="btn-toggle-archived" style="width:34px;height:34px;font-size:14px" title="${chatState.showArchived ? 'Volver a chats activos' : 'Ver chats archivados'}">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM12 17.5L6.5 12H10v-2h4v2h3.5L12 17.5zM5.12 5l.81-1h12l.94 1H5.12z"/></svg>
+            </button>
             <button class="btn-send" id="chat-refresh" style="width:34px;height:34px;font-size:16px" title="Actualizar">↻</button>
           </div>
         </div>
         <div class="chat-contacts-search">
-          <input type="text" id="chat-search" placeholder="Buscar o empezar un chat nuevo" value="${escapeHtml(chatState.search)}">
+          <input type="text" id="chat-search" placeholder="${chatState.showArchived ? 'Buscar en archivados…' : 'Buscar o empezar un chat nuevo'}" value="${escapeHtml(chatState.search)}">
         </div>
+        ${chatState.showArchived ? '<div class="archived-banner">📦 Mostrando solo chats archivados</div>' : ''}
         ${renderLabelFilterBar()}
         <div class="chat-contact-list" id="chat-contact-list">
           ${chatState.loading && !chatState.contacts.length ? '<div style="padding:30px;text-align:center"><div class="spinner" style="border-color:#2a3942;border-top-color:#00a884"></div></div>' : ''}
           ${filtered.map(c => renderContactItem(c)).join('')}
-          ${!chatState.loading && !filtered.length ? '<div style="padding:30px;text-align:center;color:#8696a0;font-size:14px">Sin conversaciones</div>' : ''}
+          ${!chatState.loading && !filtered.length ? `<div style="padding:30px;text-align:center;color:#8696a0;font-size:14px">${chatState.showArchived ? 'No hay chats archivados' : 'Sin conversaciones'}</div>` : ''}
         </div>
         ${renderBulkSection()}
       </div>
@@ -3920,6 +3970,9 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         <span>${msgCount} msgs</span>
+        <button class="btn-label-toggle ${getContactNote(phone) ? 'has-note' : ''}" id="btn-note" title="${getContactNote(phone) ? 'Editar nota' : 'Agregar nota'}">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+        </button>
         <button class="btn-label-toggle" id="btn-labels" title="Etiquetas">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg>
         </button>
@@ -4351,6 +4404,14 @@ function bindChatConversation() {
   if (labelsBtn) {
     labelsBtn.onclick = () => showLabelPicker(chatState.selectedPhone);
   }
+  // Note button on header (al lado del de etiquetas)
+  const noteBtn = document.getElementById('btn-note');
+  if (noteBtn) noteBtn.onclick = () => {
+    const phone = chatState.selectedPhone;
+    if (!phone) return;
+    chatState.editingNoteFor = phone;
+    refreshPostit();
+  };
   // Scroll-to-bottom FAB
   if (msgEl && scrollBtn) {
     msgEl.addEventListener('scroll', () => {
@@ -4449,13 +4510,14 @@ function showLabelPicker(phone) {
 function bindChat() {
   // Load data
   if (!chatState.contacts.length && !chatState.loading) {
-    Promise.all([loadChatContacts(), loadQuickReplies(), loadLabels(), loadAllNotes()]).then(() => {
+    Promise.all([loadChatContacts(), loadQuickReplies(), loadLabels(), loadAllNotes(), loadArchivedChats()]).then(() => {
       if (STATE.view === 'chat') render();
     });
   } else {
     loadQuickReplies();
     loadLabels();
     loadAllNotes();
+    loadArchivedChats();
   }
   // Search
   const searchInput = document.getElementById('chat-search');
@@ -4507,6 +4569,12 @@ function bindChat() {
   // Manage labels button
   const manageLabelsBtn = document.getElementById('btn-manage-labels');
   if (manageLabelsBtn) manageLabelsBtn.onclick = () => showManageLabelsModal();
+  // Toggle ver archivados
+  const archivedBtn = document.getElementById('btn-toggle-archived');
+  if (archivedBtn) archivedBtn.onclick = () => {
+    chatState.showArchived = !chatState.showArchived;
+    render();
+  };
   // Manage quick replies button
   const manageQrBtn = document.getElementById('btn-manage-qr');
   if (manageQrBtn) manageQrBtn.onclick = () => showManageQRModal();
@@ -4542,6 +4610,12 @@ function refreshContactList() {
   if (!list) return;
   const search = chatState.search.toLowerCase();
   let filtered = chatState.contacts;
+  // Filtrar archivados (salvo que el filtro esté en "ver archivados")
+  if (chatState.showArchived) {
+    filtered = filtered.filter(c => isArchived(c.phone));
+  } else {
+    filtered = filtered.filter(c => !isArchived(c.phone));
+  }
   if (search) filtered = filtered.filter(c => (c.name || '').toLowerCase().includes(search) || c.phone.includes(search) || (c.lastMsg || '').toLowerCase().includes(search));
   if (chatState.filterLabels.length) filtered = filtered.filter(c => { const cl = chatState.contactLabels[c.phone] || []; return chatState.filterLabels.every(lid => cl.includes(lid)); });
   list.innerHTML = filtered.map(c => renderContactItem(c)).join('');
@@ -4702,10 +4776,10 @@ function showChatContactContextMenu(x, y, phone, name) {
   const hasNote = !!getContactNote(phone);
   const cLabels = chatState.contactLabels[phone] || [];
   const labelItems = chatState.labels.map(l => `
-    <label class="ccm-sub-item" data-lbl-id="${l.id}">
-      <input type="checkbox" ${cLabels.includes(l.id) ? 'checked' : ''}>
+    <div class="ccm-sub-item" data-lbl-id="${l.id}" role="button">
+      <input type="checkbox" ${cLabels.includes(l.id) ? 'checked' : ''} tabindex="-1">
       <span class="ccm-sub-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>
-    </label>
+    </div>
   `).join('') || '<div class="ccm-sub-empty">No hay etiquetas creadas todavía</div>';
 
   const menu = document.createElement('div');
@@ -4729,6 +4803,10 @@ function showChatContactContextMenu(x, y, phone, name) {
     <button class="ccm-item" data-action="unread">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
       Marcar como no leído
+    </button>
+    <button class="ccm-item" data-action="archive">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM12 17.5L6.5 12H10v-2h4v2h3.5L12 17.5zM5.12 5l.81-1h12l.94 1H5.12z"/></svg>
+      ${isArchived(phone) ? 'Desarchivar chat' : 'Archivar chat'}
     </button>
   `;
   document.body.appendChild(menu);
@@ -4755,22 +4833,23 @@ function showChatContactContextMenu(x, y, phone, name) {
     if (space < 240) subEl.classList.add('ccm-submenu--left');
   }
 
-  // Click en checkbox de etiqueta → toggle (no cierra el menú)
+  // Click en row → toggle (no cierra el menú). El checkbox es solo visual,
+  // tiene pointer-events:none, así que solo se dispara este handler una vez.
   menu.querySelectorAll('[data-lbl-id]').forEach(row => {
     row.addEventListener('click', async (e) => {
       e.stopPropagation();
+      if (row.dataset.busy === '1') return;
+      row.dataset.busy = '1';
       const cb = row.querySelector('input[type="checkbox"]');
-      // Si clickeó directamente el label (no el cb) toggleamos manualmente
-      if (e.target !== cb) cb.checked = !cb.checked;
+      cb.checked = !cb.checked;
       const labelId = parseInt(row.dataset.lblId);
       await toggleContactLabel(phone, labelId);
-      // Actualizar chips si está abierto el chat de este contacto
       if (chatState.selectedPhone === phone) {
         const chips = document.getElementById('chat-label-chips');
         if (chips) chips.innerHTML = renderContactLabelChips(phone);
       }
-      // Refrescar lista de contactos para que muestre los chips actualizados
       refreshContactList();
+      row.dataset.busy = '0';
     });
   });
 
@@ -4792,6 +4871,15 @@ function showChatContactContextMenu(x, y, phone, name) {
           toast('Marcado como no leído');
         } else {
           toast('Error al marcar como no leído');
+        }
+      } else if (action === 'archive') {
+        const wasArchived = isArchived(phone);
+        const ok = wasArchived ? await unarchiveChat(phone) : await archiveChat(phone);
+        if (ok) {
+          refreshContactList();
+          toast(wasArchived ? 'Chat desarchivado' : 'Chat archivado');
+        } else {
+          toast('Error');
         }
       }
     };
