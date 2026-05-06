@@ -4703,6 +4703,16 @@ function showManageLabelsModal() {
           <button class="btn btn-cyan" id="add-label-btn">Crear</button>
         </div>
       </div>
+      <div class="manage-labels-section">
+        <div class="manage-labels-section-h">Auto-etiquetado</div>
+        <p style="font-size:12px;color:var(--fg-subtle);line-height:1.5;margin:0">
+          Los mensajes nuevos de clientes se etiquetan automáticamente según palabras clave:
+          mensajes que contienen "curso", "comunidad", "alumno", etc. → <b style="color:var(--neon-cyan)">interesado curso</b>.
+          Si contienen "cartel", "neón", "presupuesto", etc. → <b style="color:var(--neon-red-glow)">interesado cartel</b>.
+        </p>
+        <button class="btn btn-ghost" id="run-autolabel-backfill" style="margin-top:8px">⚡ Procesar últimos 90 días</button>
+        <div id="autolabel-result" style="font-size:12px;color:var(--fg-subtle);margin-top:6px"></div>
+      </div>
     </div>
   `;
   openDrawer('Gestionar etiquetas', content);
@@ -4742,6 +4752,38 @@ function showManageLabelsModal() {
     nameInput.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
     setTimeout(() => nameInput.focus(), 50);
   }
+  // Auto-label backfill
+  const backfillBtn = document.getElementById('run-autolabel-backfill');
+  const backfillResult = document.getElementById('autolabel-result');
+  if (backfillBtn) backfillBtn.onclick = async () => {
+    if (backfillBtn.disabled) return;
+    backfillBtn.disabled = true;
+    const prev = backfillBtn.textContent;
+    backfillBtn.textContent = 'Procesando…';
+    if (backfillResult) backfillResult.textContent = '';
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/auto-label-backfill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ days: 90 })
+      });
+      const j = await r.json();
+      if (r.ok) {
+        if (backfillResult) backfillResult.textContent = `✓ ${j.processed || 0} mensajes analizados`;
+        // Recargar contact_labels para reflejar lo nuevo
+        chatState.labelsLoaded = false;
+        await loadLabels();
+        toast('Backfill completado');
+      } else {
+        if (backfillResult) backfillResult.textContent = `✗ ${j.error || 'error'}`;
+      }
+    } catch (e) {
+      if (backfillResult) backfillResult.textContent = '✗ Error de red';
+    } finally {
+      backfillBtn.disabled = false;
+      backfillBtn.textContent = prev;
+    }
+  };
 }
 
 function showManageQRModal() {

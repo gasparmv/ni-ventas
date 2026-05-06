@@ -374,6 +374,11 @@ export default {
                      WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
                   ).bind(ts, wamid, direction, phone, senderName, msgType, msgBody, r2Key || mediaUrl, contextId, null).run();
                 } catch (_) {}
+
+                // Auto-labeling: solo en inbound con texto. Idempotente (INSERT OR IGNORE).
+                if (direction === 'inbound' && msgBody && phone) {
+                  try { await applyAutoLabels(env, phone, msgBody); } catch (_) {}
+                }
               }
 
               // Status updates (sent, delivered, read) para mensajes salientes
@@ -817,6 +822,28 @@ export default {
         return json({ ok: true });
       }
 
+      // ===== Backfill de auto-labels =====
+      // Procesa todos los inbound del rango y aplica las reglas de auto-labeling.
+      // Útil cuando se modifican las keywords o para inicializar después de
+      // cargar las labels nuevas. Idempotente.
+      if (request.method === 'POST' && path === '/admin/wa/auto-label-backfill') {
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const days = Math.max(1, Math.min(365, parseInt(body?.days || '90')));
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+        try {
+          const rs = await env.DB.prepare(
+            "SELECT phone, body FROM wa_messages WHERE direction = 'inbound' AND body IS NOT NULL AND body != '' AND ts >= ? LIMIT 5000"
+          ).bind(since).all();
+          const rows = rs.results || [];
+          let processed = 0;
+          for (const r of rows) {
+            await applyAutoLabels(env, r.phone, r.body);
+            processed++;
+          }
+          return json({ ok: true, processed, since });
+        } catch (e) { return json({ error: e.message }, 500); }
+      }
+
       // ===== Archivar / desarchivar chats =====
       if (request.method === 'GET' && path === '/admin/wa/archived') {
         try {
@@ -1048,6 +1075,68 @@ async function runFollowups(env, items) {
     else errors.push({ ref, error: r.error });
   }
   return { sent: sent.length, skipped: skipped.length, errors: errors.length, detail: { sent, skipped, errors } };
+}
+
+// ===== Auto-labeling por keywords =====
+// Cuando llega un inbound con texto, analizamos el body buscando keywords
+// que matcheen reglas. Si matchea, le aplicamos la etiqueta correspondiente
+// al contacto (idempotente vía INSERT OR IGNORE).
+//
+// Reglas hardcodeadas v1. Si más adelante se quiere editar desde UI, mover
+// a una tabla `auto_label_rules (label_id, keywords TEXT, created_at)` y
+// loadearla acá. Por ahora, simple y directo.
+const AUTO_LABEL_RULES = [
+  {
+    label: 'interesado curso',
+    // Keywords case-insensitive. Match si el body contiene CUALQUIERA.
+    // Acentos opcionales: la comparación normaliza ambas puntas.
+    keywords: [
+      'curso', 'cursos', 'comunidad', 'capacitacion', 'capacitación',
+      'aprender', 'taller', 'clase', 'clases', 'alumno', 'alumna',
+      'inscribir', 'inscripcion', 'inscripción', 'formacion', 'formación',
+      'estudiar', 'aprendizaje', 'enseñan', 'ensenan'
+    ]
+  },
+  {
+    label: 'interesado cartel',
+    keywords: [
+      'cartel', 'carteles', 'neon', 'neón', 'letrero', 'letreros',
+      'luminoso', 'luminosa', 'rotulo', 'rótulo', 'logo', 'iluminar',
+      'cotizacion', 'cotización', 'cotizar', 'presupuesto', 'precio',
+      'medidas', 'diseño', 'render', 'fachada'
+    ]
+  }
+];
+
+function _normalizeForMatch(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, ''); // saca acentos
+}
+
+async function applyAutoLabels(env, phone, body) {
+  const haystack = _normalizeForMatch(body);
+  if (!haystack) return;
+  const matched = [];
+  for (const rule of AUTO_LABEL_RULES) {
+    for (const kw of rule.keywords) {
+      const needle = _normalizeForMatch(kw);
+      // Word boundary aproximado: separador o inicio/fin alrededor.
+      const re = new RegExp(`(^|[^a-z0-9])${needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`);
+      if (re.test(haystack)) { matched.push(rule.label); break; }
+    }
+  }
+  if (!matched.length) return;
+  // Resolver IDs de las labels que matchearon
+  for (const labelName of matched) {
+    try {
+      const row = await env.DB.prepare('SELECT id FROM labels WHERE name = ?').bind(labelName).first();
+      if (!row?.id) continue;
+      await env.DB.prepare(
+        'INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)'
+      ).bind(phone, row.id, new Date().toISOString()).run();
+    } catch (_) {}
+  }
 }
 
 // ===== Follow-up automático de presupuestos del cotizador =====
