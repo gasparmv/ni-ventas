@@ -3641,14 +3641,17 @@ function formatChatDate(ts) {
 
 function formatPhoneDisplay(phone) {
   if (!phone) return '';
-  // 549XXXXXXXXXX → +54 9 XX XXXX-XXXX
-  const s = String(phone);
-  if (s.startsWith('549') && s.length >= 12) {
-    const area = s.slice(3, 5);
-    const rest = s.slice(5);
+  // Sacar todo lo que no sea dígito y trabajar sobre la versión normalizada,
+  // así da igual si entra como "5491167...", "+54 9 11 67..." o "11-6766-9217".
+  const digits = String(phone).replace(/\D/g, '');
+  if (!digits) return '';
+  // Casos típicos AR: 549 + área (2-4) + número.
+  if (digits.startsWith('549') && digits.length >= 12) {
+    const area = digits.slice(3, 5);
+    const rest = digits.slice(5);
     return `+54 9 ${area} ${rest.slice(0, 4)}-${rest.slice(4)}`;
   }
-  return '+' + s;
+  return '+' + digits;
 }
 
 function renderContactLabelChips(phone) {
