@@ -140,6 +140,7 @@ function copiarPresupuesto() {
 async function enviarPresupuestoWA() {
   const f = STATE.cotizadorForm;
   if (!(+f.ancho > 0) || !(+f.alto > 0)) { alert('Completá al menos ancho y alto'); return; }
+  if (!f.cliente.trim()) { alert('Completá el nombre del cliente/diseño (se va a guardar también en el Sheet)'); return; }
   const tel = (f.telefono || '').trim();
   if (!tel) { alert('Completá el teléfono del cliente'); return; }
   if (!STATE.token) { alert('Tenés que estar logueado (Gaspar o Joaquín) para enviar por WhatsApp'); return; }
@@ -148,6 +149,7 @@ async function enviarPresupuestoWA() {
   if (!texto) return;
   STATE.cotizadorSendingWA = true;
   updateCotizadorForm();
+  let waOk = false;
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
       method: 'POST',
@@ -164,13 +166,16 @@ async function enviarPresupuestoWA() {
       alert('Error al enviar: ' + detail + hint);
       return;
     }
-    toast('Presupuesto enviado por WhatsApp ✓');
+    waOk = true;
+    toast('Enviado por WhatsApp ✓');
   } catch (e) {
     alert('Error de red al enviar');
   } finally {
     STATE.cotizadorSendingWA = false;
     updateCotizadorForm();
   }
+  // Si el envío salió bien, guardar también en Sheet (un envío = un presupuesto registrado).
+  if (waOk) await saveCotizacion();
 }
 
 async function saveCotizacion() {
