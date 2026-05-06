@@ -284,12 +284,21 @@ export default {
               const contacts = value?.contacts || [];
               const contactMap = {};
               for (const c of contacts) contactMap[c.wa_id] = c.profile?.name || '';
+              // Coexistencia / Echoes: si msg.from coincide con nuestro número
+              // de negocio, es un mensaje SALIENTE enviado desde la app/web de
+              // WhatsApp Business (no por la Cloud API). Lo guardamos con body.
+              const businessPhone = String(value?.metadata?.display_phone_number || '').replace(/\D/g, '');
 
-              // Mensajes entrantes
+              // Mensajes (entrantes y salientes vía echoes)
               for (const msg of (value?.messages || [])) {
-                const phone = msg.from || '';
+                const fromNorm = String(msg.from || '').replace(/\D/g, '');
+                const isOutboundEcho = businessPhone && fromNorm === businessPhone;
+                // En echoes el destinatario viene en msg.to o en contacts[0].wa_id
+                const recipient = String(msg.to || contacts[0]?.wa_id || '').replace(/\D/g, '');
+                const phone = isOutboundEcho ? recipient : (msg.from || '');
+                const direction = isOutboundEcho ? 'outbound' : 'inbound';
                 const wamid = msg.id || '';
-                const senderName = contactMap[phone] || '';
+                const senderName = isOutboundEcho ? '' : (contactMap[phone] || '');
                 const msgType = msg.type || 'unknown';
                 let msgBody = '';
                 let mediaUrl = '';
@@ -344,9 +353,21 @@ export default {
                   }
                 }
                 try {
+                  // Upsert: si ya existe (p.ej. placeholder de status webhook con body vacío),
+                  // completamos body/tipo/media. No pisamos status si ya viene 'sent/delivered/read'.
                   await env.DB.prepare(
-                    'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-                  ).bind(ts, wamid, 'inbound', phone, senderName, msgType, msgBody, r2Key || mediaUrl, contextId, null).run();
+                    `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT(wamid) DO UPDATE SET
+                       direction = excluded.direction,
+                       phone = excluded.phone,
+                       msg_type = excluded.msg_type,
+                       body = excluded.body,
+                       media_url = excluded.media_url,
+                       context_id = excluded.context_id,
+                       ts = excluded.ts
+                     WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+                  ).bind(ts, wamid, direction, phone, senderName, msgType, msgBody, r2Key || mediaUrl, contextId, null).run();
                 } catch (_) {}
               }
 
@@ -438,13 +459,18 @@ export default {
       let body;
       try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
       const { user, password } = body || {};
-      if (!user || !password) return json({ error: 'missing fields' }, 400);
-      if (!env.ADMIN_PASSWORD) return json({ error: 'server not configured' }, 500);
-      // Solo el admin (Gaspar) tiene contraseña; cualquier otro user devuelve 401
-      if (user !== 'Gaspar' || password !== env.ADMIN_PASSWORD) {
-        // pequeño delay para no facilitar timing attacks
-        await new Promise(r => setTimeout(r, 250));
-        return unauthorized('credenciales inválidas');
+      if (!user) return json({ error: 'missing fields' }, 400);
+      // Joaquín entra sin contraseña (solo chat); Gaspar necesita password
+      const NO_PASSWORD_USERS = ['Joaquín', 'Joaquin'];
+      if (NO_PASSWORD_USERS.includes(user)) {
+        // ok, sin password
+      } else {
+        if (!password) return json({ error: 'missing fields' }, 400);
+        if (!env.ADMIN_PASSWORD) return json({ error: 'server not configured' }, 500);
+        if (user !== 'Gaspar' || password !== env.ADMIN_PASSWORD) {
+          await new Promise(r => setTimeout(r, 250));
+          return unauthorized('credenciales inválidas');
+        }
       }
       const token = randomToken();
       const now = new Date();
