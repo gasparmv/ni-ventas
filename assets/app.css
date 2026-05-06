@@ -1041,6 +1041,9 @@ table.t td.cliente { font-weight: 600; }
   max-height: 100vh;
   overflow: hidden;
 }
+/* Fullscreen chat: hide sidebar, take full width */
+.app.app--chat-full { grid-template-columns: 1fr; }
+.app.app--chat-full > .sidebar { display: none; }
 .main.main--chat {
   padding: 0 !important;
   max-width: none !important;
