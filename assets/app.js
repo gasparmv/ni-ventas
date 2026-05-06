@@ -3532,7 +3532,26 @@ async function loadChatMessages(phone) {
     });
     if (!r.ok) return;
     const j = await r.json();
-    chatState.messages = (j.messages || []).filter(m => m.msg_type !== 'status').sort((a, b) => a.ts.localeCompare(b.ts));
+    const fresh = (j.messages || []).filter(m => m.msg_type !== 'status').sort((a, b) => a.ts.localeCompare(b.ts));
+    // Merge con dedupe por wamid: si tenemos un mensaje local sin wamid (recién
+    // enviado, todavía no confirmado) y aparece en el server con wamid, lo
+    // reemplazamos. Si el wamid ya existe en el array final, no duplicamos.
+    const seen = new Set();
+    const merged = [];
+    for (const m of fresh) {
+      const key = m.wamid || ('ts:' + m.ts + ':' + m.direction);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(m);
+    }
+    // Conservar mensajes locales recién enviados (sin wamid o con wamid no
+    // visto aún) que todavía no aparecen en el server.
+    for (const local of chatState.messages) {
+      if (!local.wamid) continue; // sin wamid = optimistic local, lo descartamos si el server no lo trae aún
+      if (!seen.has(local.wamid)) merged.push(local);
+    }
+    merged.sort((a, b) => a.ts.localeCompare(b.ts));
+    chatState.messages = merged;
   } catch (e) {
     console.error('chat messages error:', e);
   }
@@ -4660,13 +4679,14 @@ function bindChat() {
   };
   bindBulkSection();
   if (chatState.selectedPhone) bindChatConversation();
-  // Poll: refresca contactos + mensajes del chat abierto.
-  // Antes era cada 12s y solo cargaba contactos (los mensajes del chat
-  // actual nunca se actualizaban en vivo). Ahora 4s y trae ambos en
-  // paralelo para que las respuestas aparezcan casi en tiempo real.
+  // Poll: refresca contactos + mensajes del chat abierto cada 4s.
+  // - Solo corre si la pestaña está visible (visibilitychange listener).
+  // - Al volver a la pestaña dispara un poll inmediato para actualizar.
+  // - Cuando se sale de la vista chat o se queda hidden, NO consume requests.
   clearInterval(chatState.pollTimer);
-  chatState.pollTimer = setInterval(async () => {
-    if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
+  const tickPoll = async () => {
+    if (STATE.view !== 'chat') return;
+    if (document.visibilityState !== 'visible') return; // tab oculto: skip
     const phone = chatState.selectedPhone;
     const prevMsgCount = chatState.messages.length;
     const prevLastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
@@ -4676,7 +4696,6 @@ function bindChat() {
     ]);
     if (STATE.view !== 'chat' || chatState.selectedPhone !== phone) return;
     refreshContactList();
-    // Re-render solo si hubo cambios reales (evita scroll jumpy)
     const newLastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
     const changed = chatState.messages.length !== prevMsgCount || newLastTs !== prevLastTs;
     if (phone && changed) {
@@ -4686,7 +4705,18 @@ function bindChat() {
       if (wasAtBottom && msgEl) msgEl.scrollTop = msgEl.scrollHeight;
     }
     updateUnreadBadge();
+  };
+  chatState.pollTimer = setInterval(() => {
+    if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
+    tickPoll();
   }, 4000);
+  // Refresh inmediato al volver a la pestaña
+  if (!chatState._visibilityHook) {
+    chatState._visibilityHook = () => {
+      if (document.visibilityState === 'visible' && STATE.view === 'chat') tickPoll();
+    };
+    document.addEventListener('visibilitychange', chatState._visibilityHook);
+  }
 }
 
 function refreshContactList() {
