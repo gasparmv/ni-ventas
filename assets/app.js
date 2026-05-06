@@ -105,13 +105,18 @@ async function saveCotizadorParams(updates) {
   STATE.cotizadorParams = Object.assign({}, STATE.cotizadorParams || {}, updates);
 }
 
-function copiarPresupuesto() {
+function buildPresupuestoTexto() {
   const f = STATE.cotizadorForm;
-  if (!(+f.ancho > 0) || !(+f.alto > 0)) { alert('Completá al menos ancho y alto'); return; }
+  if (!(+f.ancho > 0) || !(+f.alto > 0)) return null;
   const r = calcCotizador(f);
   const p = getCotizadorParams();
   const nombre = f.cliente.trim() || 'Custom name';
-  const texto = `Te comparto la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+f.ancho)}x${Math.round(+f.alto)}\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}\n\nControladores opcionales\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña.\n\nTiempo de armado: 15/20 días.\n\nTodos los medios de pago!\n\nHacemos envíos GRATIS a todo el país!`;
+  return `Te comparto la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+f.ancho)}x${Math.round(+f.alto)}\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}\n\nControladores opcionales\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña.\n\nTiempo de armado: 15/20 días.\n\nTodos los medios de pago!\n\nHacemos envíos GRATIS a todo el país!`;
+}
+
+function copiarPresupuesto() {
+  const texto = buildPresupuestoTexto();
+  if (!texto) { alert('Completá al menos ancho y alto'); return; }
   navigator.clipboard.writeText(texto).then(() => {
     toast('Presupuesto copiado al portapapeles ✓');
   }).catch(() => {
@@ -124,6 +129,42 @@ function copiarPresupuesto() {
     ta.remove();
     toast('Presupuesto copiado al portapapeles ✓');
   });
+}
+
+async function enviarPresupuestoWA() {
+  const f = STATE.cotizadorForm;
+  if (!(+f.ancho > 0) || !(+f.alto > 0)) { alert('Completá al menos ancho y alto'); return; }
+  const tel = (f.telefono || '').trim();
+  if (!tel) { alert('Completá el teléfono del cliente'); return; }
+  if (!STATE.token) { alert('Tenés que estar logueado (Gaspar o Joaquín) para enviar por WhatsApp'); return; }
+  if (!CONFIG.trackerUrl) { alert('Tracker no configurado'); return; }
+  const texto = buildPresupuestoTexto();
+  if (!texto) return;
+  STATE.cotizadorSendingWA = true;
+  updateCotizadorForm();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ to: tel, body: texto })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const detail = j.error || 'no se pudo enviar';
+      // Caso típico fuera de ventana 24hs:
+      const hint = /outside|24|window|template/i.test(String(detail))
+        ? '\n\nWhatsApp Cloud API solo permite mensajes libres si el cliente escribió en las últimas 24hs. Si el cliente nunca habló al número, hay que mandar primero un template aprobado.'
+        : '';
+      alert('Error al enviar: ' + detail + hint);
+      return;
+    }
+    toast('Presupuesto enviado por WhatsApp ✓');
+  } catch (e) {
+    alert('Error de red al enviar');
+  } finally {
+    STATE.cotizadorSendingWA = false;
+    updateCotizadorForm();
+  }
 }
 
 async function saveCotizacion() {
@@ -1321,6 +1362,8 @@ function bindCotSaveBtn() {
   if (btn) btn.onclick = () => saveCotizacion();
   const copyBtn = document.getElementById('cot-copy-btn');
   if (copyBtn) copyBtn.onclick = () => copiarPresupuesto();
+  const waBtn = document.getElementById('cot-send-wa-btn');
+  if (waBtn) waBtn.onclick = () => enviarPresupuestoWA();
 }
 let pptoShowCotizador = false;
 
@@ -1341,8 +1384,9 @@ function renderCotizadorResults() {
         ${r.descuento ? '<div class="cot-result"><div class="lbl">Descuento (m²>'+p.descuento_min_m2+')</div><div class="val">×'+p.descuento_mult+'</div></div>' : ''}
         ${r.recargo ? '<div class="cot-result"><div class="lbl">Recargo (m²≤'+(r.m2<=5?'5':r.m2<=12.5?'12.5':'25')+')</div><div class="val">×'+(r.m2<=5?p.recargo_5:r.m2<=12.5?p.recargo_125:p.recargo_25)+'</div></div>' : ''}
       </div>
-      <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end">
+      <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end;flex-wrap:wrap">
         <button class="btn btn-ghost" id="cot-copy-btn">Copiar presupuesto</button>
+        <button class="btn btn-ghost" id="cot-send-wa-btn" ${STATE.cotizadorSendingWA ? 'disabled' : ''}>${STATE.cotizadorSendingWA ? 'Enviando…' : '📱 Enviar por WhatsApp'}</button>
         <button class="btn btn-cyan" id="cot-save-btn" ${STATE.cotizadorSaving ? 'disabled' : ''}>${STATE.cotizadorSaving ? 'Guardando…' : 'Guardar en Sheet'}</button>
       </div>
     </div>
