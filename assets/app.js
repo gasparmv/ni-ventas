@@ -3346,17 +3346,143 @@ async function sendChatImage(phone, file, caption) {
 
 // Wrapper para mandar múltiples files al chat seleccionado, en serie con
 // delay anti rate-limit. Se usa desde paste, drag-drop y file input.
+// Antes de enviar, muestra un modal de preview con caption + cancelar.
 async function sendChatFiles(files) {
   const phone = chatState.selectedPhone;
   if (!phone || !files.length) return;
-  if (files.length === 1) { await sendChatFile(phone, files[0], ''); return; }
-  toast(`Enviando ${files.length} archivos…`);
+  const result = await showMediaPreviewModal(files);
+  if (!result) return; // cancelado
+  const { files: finalFiles, caption } = result;
+  if (!finalFiles.length) return;
+  if (finalFiles.length === 1) { await sendChatFile(phone, finalFiles[0], caption); return; }
+  toast(`Enviando ${finalFiles.length} archivos…`);
   let sent = 0;
-  for (const f of files) {
-    try { await sendChatFile(phone, f, ''); sent++; } catch (_) {}
+  for (let i = 0; i < finalFiles.length; i++) {
+    const f = finalFiles[i];
+    // Caption va solo en el primero (igual que WA Web).
+    const cap = i === 0 ? caption : '';
+    try { await sendChatFile(phone, f, cap); sent++; } catch (_) {}
     await new Promise(r => setTimeout(r, 400));
   }
-  toast(`✓ ${sent}/${files.length} enviados`);
+  toast(`✓ ${sent}/${finalFiles.length} enviados`);
+}
+
+// Modal de preview de media antes de enviar (estilo WA Web).
+// Devuelve { files, caption } al confirmar, o null si se cancela.
+function showMediaPreviewModal(initialFiles) {
+  return new Promise((resolve) => {
+    document.getElementById('media-preview-modal')?.remove();
+    let files = [...initialFiles];
+    let activeIdx = 0;
+    const bg = document.createElement('div');
+    bg.id = 'media-preview-modal';
+    bg.className = 'modal-bg';
+    bg.innerHTML = `
+      <div class="modal media-preview-modal" style="max-width:680px;width:92vw">
+        <div class="modal-h" style="display:flex;align-items:center;gap:10px">
+          <h3 style="flex:1">Vista previa</h3>
+          <button class="btn btn-ghost mp-cancel" title="Cancelar (Esc)">✕</button>
+        </div>
+        <div class="modal-body" style="padding:0;display:flex;flex-direction:column;gap:0">
+          <div class="mp-stage" id="mp-stage"></div>
+          <div class="mp-thumbs" id="mp-thumbs"></div>
+          <div class="mp-caption-wrap">
+            <input type="text" id="mp-caption" placeholder="Agregar un mensaje (opcional)" autocomplete="off" maxlength="1024">
+          </div>
+        </div>
+        <div class="modal-actions">
+          <span id="mp-meta" style="margin-right:auto;color:var(--fg-subtle);font-size:12px"></span>
+          <button class="btn btn-ghost mp-cancel">Cancelar</button>
+          <button class="btn btn-cyan" id="mp-send">Enviar</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(bg);
+    requestAnimationFrame(() => bg.classList.add('open'));
+
+    const stage = bg.querySelector('#mp-stage');
+    const thumbs = bg.querySelector('#mp-thumbs');
+    const meta = bg.querySelector('#mp-meta');
+    const captionInput = bg.querySelector('#mp-caption');
+
+    const fmtBytes = (b) => b < 1024 ? b + ' B' : b < 1024 * 1024 ? (b / 1024).toFixed(1) + ' KB' : (b / 1024 / 1024).toFixed(2) + ' MB';
+
+    const renderStage = () => {
+      const f = files[activeIdx];
+      if (!f) { stage.innerHTML = '<div class="mp-empty">Sin archivos</div>'; meta.textContent = ''; return; }
+      const m = (f.type || '').toLowerCase();
+      let inner = '';
+      if (m.startsWith('image/')) {
+        inner = `<img src="${URL.createObjectURL(f)}" alt="${escapeHtml(f.name || '')}">`;
+      } else if (m.startsWith('video/')) {
+        inner = `<video controls src="${URL.createObjectURL(f)}"></video>`;
+      } else if (m.startsWith('audio/')) {
+        inner = `<div class="mp-doc"><div class="mp-doc-icon">♪</div><div><div class="mp-doc-name">${escapeHtml(f.name || 'audio')}</div><audio controls src="${URL.createObjectURL(f)}" style="width:100%;margin-top:8px"></audio></div></div>`;
+      } else {
+        const ext = (f.name || '').split('.').pop()?.toUpperCase() || 'FILE';
+        inner = `<div class="mp-doc"><div class="mp-doc-icon">${escapeHtml(ext.slice(0, 4))}</div><div><div class="mp-doc-name">${escapeHtml(f.name || 'documento')}</div><div class="mp-doc-sub">${fmtBytes(f.size || 0)}</div></div></div>`;
+      }
+      stage.innerHTML = inner;
+      meta.textContent = `${activeIdx + 1}/${files.length} · ${escapeHtml(f.name || '')} · ${fmtBytes(f.size || 0)}`;
+    };
+
+    const renderThumbs = () => {
+      if (files.length <= 1) { thumbs.style.display = 'none'; thumbs.innerHTML = ''; return; }
+      thumbs.style.display = 'flex';
+      thumbs.innerHTML = files.map((f, i) => {
+        const m = (f.type || '').toLowerCase();
+        let inner = '';
+        if (m.startsWith('image/')) inner = `<img src="${URL.createObjectURL(f)}">`;
+        else if (m.startsWith('video/')) inner = `<div class="mp-th-icon">▶</div>`;
+        else if (m.startsWith('audio/')) inner = `<div class="mp-th-icon">♪</div>`;
+        else inner = `<div class="mp-th-icon">📄</div>`;
+        return `<div class="mp-thumb${i === activeIdx ? ' active' : ''}" data-idx="${i}">
+          ${inner}
+          <button class="mp-th-rm" data-rm="${i}" title="Quitar">✕</button>
+        </div>`;
+      }).join('');
+      thumbs.querySelectorAll('.mp-thumb').forEach(el => {
+        el.onclick = (e) => {
+          if (e.target.closest('[data-rm]')) return;
+          activeIdx = parseInt(el.dataset.idx, 10) || 0;
+          renderStage();
+          renderThumbs();
+        };
+      });
+      thumbs.querySelectorAll('[data-rm]').forEach(btn => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const i = parseInt(btn.dataset.rm, 10);
+          files.splice(i, 1);
+          if (!files.length) { close(null); return; }
+          if (activeIdx >= files.length) activeIdx = files.length - 1;
+          renderStage();
+          renderThumbs();
+        };
+      });
+    };
+
+    renderStage();
+    renderThumbs();
+
+    const close = (val) => {
+      bg.classList.remove('open');
+      setTimeout(() => bg.remove(), 150);
+      document.removeEventListener('keydown', onKey);
+      resolve(val);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') close(null);
+      else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) confirm();
+    };
+    const confirm = () => close({ files, caption: captionInput.value || '' });
+
+    document.addEventListener('keydown', onKey);
+    bg.addEventListener('click', e => { if (e.target === bg) close(null); });
+    bg.querySelectorAll('.mp-cancel').forEach(b => b.onclick = () => close(null));
+    bg.querySelector('#mp-send').onclick = confirm;
+    setTimeout(() => captionInput.focus(), 50);
+  });
 }
 
 // Genérico: detecta tipo del file por mime y manda con el endpoint correcto.

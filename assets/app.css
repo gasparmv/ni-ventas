@@ -1811,6 +1811,131 @@ table.t td.cliente { font-weight: 600; }
 }
 .reaction-picker .rp-more { font-size: 18px; color: rgba(233,237,239,.7); }
 
+/* === Media preview modal (drag/paste/attach) === */
+.media-preview-modal .mp-stage {
+  background: #0b141a;
+  min-height: 320px;
+  max-height: 60vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+}
+.media-preview-modal .mp-stage img,
+.media-preview-modal .mp-stage video {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  display: block;
+}
+.media-preview-modal .mp-doc {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 28px 24px;
+  width: 100%;
+  max-width: 480px;
+  background: #182229;
+  border-radius: 8px;
+  margin: 16px;
+}
+.media-preview-modal .mp-doc-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  background: var(--neon-red);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.media-preview-modal .mp-doc-name {
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 500;
+  word-break: break-all;
+}
+.media-preview-modal .mp-doc-sub {
+  color: var(--fg-subtle);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.media-preview-modal .mp-empty {
+  color: var(--fg-subtle);
+  padding: 40px;
+}
+.media-preview-modal .mp-thumbs {
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px;
+  background: #111b21;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+.media-preview-modal .mp-thumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  border: 2px solid transparent;
+  flex-shrink: 0;
+  background: #182229;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.media-preview-modal .mp-thumb.active { border-color: var(--neon-cyan, #8FD4DE); }
+.media-preview-modal .mp-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.media-preview-modal .mp-th-icon {
+  font-size: 22px;
+  color: rgba(255,255,255,.7);
+}
+.media-preview-modal .mp-th-rm {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0,0,0,.65);
+  color: #fff;
+  border: 0;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  opacity: 0;
+  transition: opacity .1s;
+}
+.media-preview-modal .mp-thumb:hover .mp-th-rm { opacity: 1; }
+.media-preview-modal .mp-caption-wrap {
+  padding: 10px 14px;
+  background: #1f2c33;
+}
+.media-preview-modal #mp-caption {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--ink-100);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  color: var(--fg);
+  font-size: 14px;
+  outline: none;
+}
+.media-preview-modal #mp-caption:focus { border-color: var(--neon-cyan, #8FD4DE); }
+
 /* Reactions chip mostrado en el bubble */
 .chat-msg-reactions {
   position: absolute;
