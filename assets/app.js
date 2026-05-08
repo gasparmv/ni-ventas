@@ -4146,15 +4146,14 @@ function render24hBanner() {
   if (is24hWindowOpen()) return '';
   const last = lastInboundTs();
   const sub = last
-    ? `Última respuesta del cliente: ${formatRelativeTime(last)}. Para escribir tenés que mandar una plantilla aprobada.`
-    : 'Esta conversación nunca tuvo un mensaje del cliente. Para escribir primero tenés que mandar una plantilla aprobada.';
+    ? `Última respuesta del cliente ${formatRelativeTime(last)}. Solo se puede escribir con plantilla aprobada.`
+    : 'Sin mensajes previos del cliente. Solo se puede escribir con plantilla aprobada.';
   return `<div class="window24-banner">
-    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style="flex-shrink:0"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="flex-shrink:0"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
     <div class="w24-text">
-      <div class="w24-title">Ventana de 24h cerrada</div>
-      <div class="w24-sub">${escapeHtml(sub)}</div>
+      <span class="w24-title">Ventana de 24h cerrada</span>
+      <span class="w24-sub"> · ${escapeHtml(sub)}</span>
     </div>
-    <button class="btn btn-cyan w24-btn" id="btn-reopen-template">Reabrir con plantilla</button>
   </div>`;
 }
 
@@ -4166,89 +4165,6 @@ function formatRelativeTime(ts) {
   if (d < 30) return `hace ${d}d`;
   const mo = Math.floor(d / 30);
   return `hace ${mo} mes${mo === 1 ? '' : 'es'}`;
-}
-
-// Mostrar modal de confirmación + selector de plantilla, mandar la plantilla.
-async function showTemplateReopenModal() {
-  const phone = chatState.selectedPhone;
-  if (!phone) return;
-  const contact = chatState.contacts.find(c => c.phone === phone);
-  const fullName = contact?.name || '';
-  const firstName = fullName ? fullName.split(/\s+/)[0] : '';
-  document.getElementById('tpl-reopen-modal')?.remove();
-  const bg = document.createElement('div');
-  bg.id = 'tpl-reopen-modal';
-  bg.className = 'modal-bg';
-  bg.innerHTML = `
-    <div class="modal" style="max-width:520px">
-      <div class="modal-h"><h3>Reabrir conversación</h3></div>
-      <div class="modal-body">
-        <p style="color:var(--fg-subtle);font-size:13px;margin:0 0 14px">
-          La ventana de 24h está cerrada. Mandando una plantilla aprobada se reabre la conversación.
-        </p>
-        <div style="margin-bottom:14px">
-          <label style="display:block;font-size:12px;color:var(--fg-subtle);margin-bottom:4px">Plantilla</label>
-          <select id="tpl-select" style="width:100%;padding:8px 10px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-size:13px">
-            <option value="prueba_de_plantilla|es">prueba_de_plantilla — "Hola {{1}}, como estas? Me comunico por x cosa" + 2 botones</option>
-          </select>
-        </div>
-        <div style="margin-bottom:14px">
-          <label style="display:block;font-size:12px;color:var(--fg-subtle);margin-bottom:4px">Nombre (variable {{1}})</label>
-          <input type="text" id="tpl-param" value="${escapeHtml(firstName)}" placeholder="Nombre del cliente" style="width:100%;padding:8px 10px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-size:13px">
-        </div>
-        <div style="font-size:12px;color:var(--fg-subtle)">
-          Cuando el cliente toca cualquier botón ("mE INTERESA" / "No me interesa") se reabre la ventana de 24h y vas a poder mandarle texto libre.
-        </div>
-      </div>
-      <div class="modal-actions">
-        <button class="btn btn-ghost modal-cancel">Cancelar</button>
-        <button class="btn btn-cyan" id="tpl-send">Enviar plantilla</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(bg);
-  requestAnimationFrame(() => bg.classList.add('open'));
-  const close = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
-  bg.querySelector('.modal-cancel').onclick = close;
-  bg.addEventListener('click', e => { if (e.target === bg) close(); });
-  bg.querySelector('#tpl-send').onclick = async () => {
-    const sel = document.getElementById('tpl-select').value;
-    const [name, lang] = sel.split('|');
-    const param = document.getElementById('tpl-param').value.trim();
-    const sendBtn = bg.querySelector('#tpl-send');
-    sendBtn.disabled = true;
-    sendBtn.textContent = 'Enviando…';
-    try {
-      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/template', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ to: phone, name, lang, params: param ? [param] : [] })
-      });
-      const j = await r.json();
-      if (!r.ok) {
-        toast('Error: ' + (j.error || 'fallo envío'));
-        sendBtn.disabled = false;
-        sendBtn.textContent = 'Enviar plantilla';
-        return;
-      }
-      chatState.messages.push({
-        ts: new Date().toISOString(),
-        wamid: j.id || '',
-        direction: 'outbound',
-        phone, sender_name: '',
-        msg_type: 'template',
-        body: `[plantilla: ${name}]${param ? ' ' + param : ''}`,
-        status: 'sent'
-      });
-      renderChatMessages();
-      close();
-      toast('Plantilla enviada ✓');
-    } catch (_) {
-      toast('Error de red');
-      sendBtn.disabled = false;
-      sendBtn.textContent = 'Enviar plantilla';
-    }
-  };
 }
 
 function renderChatNoSelect() {
@@ -5430,9 +5346,6 @@ function bindChatConversation() {
     chatState.editingNoteFor = phone;
     refreshPostit();
   };
-  // Reabrir conversación con plantilla (banner de 24h)
-  const reopenBtn = document.getElementById('btn-reopen-template');
-  if (reopenBtn) reopenBtn.onclick = () => showTemplateReopenModal();
   // WhatsApp externo: abre wa.me con el contacto y copia el ultimo mensaje
   // entrante al portapapeles para que Joaco lo pueda ver de contexto en
   // su celular. Workaround mientras el numero esta deregistrado.
