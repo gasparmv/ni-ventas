@@ -1828,6 +1828,17 @@ table.t td.cliente { font-weight: 600; }
 }
 .reaction-picker .rp-more { font-size: 18px; color: rgba(233,237,239,.7); }
 
+/* Boton "Abrir en WhatsApp externo" del header — workaround mientras
+   el numero esta deregistrado del Cloud API. */
+.btn-wa-external {
+  background: rgba(37, 211, 102, .1) !important;
+  border-color: rgba(37, 211, 102, .35) !important;
+}
+.btn-wa-external:hover {
+  background: rgba(37, 211, 102, .2) !important;
+  border-color: #25D366 !important;
+}
+
 /* === Image lightbox === */
 .img-lightbox {
   position: fixed;
