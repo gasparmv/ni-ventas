@@ -565,17 +565,19 @@ export default {
       if (request.method === 'POST' && path === '/admin/wa/send') {
         let body;
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        const { to, body: text } = body || {};
+        const { to, body: text, reply_to } = body || {};
         if (!to || !text) return json({ error: 'missing fields (to, body)' }, 400);
         const num = normalizeArPhone(to);
-        const r = await waSendText(env, to, text);
-        await logWaEvent(env, { to, kind: 'text', ref: '', ok: r.ok, messageId: r.id, error: r.error });
+        // Si reply_to viene, incluimos context.message_id para que WA lo muestre como cita.
+        const payload = { messaging_product: 'whatsapp', to: num || to, type: 'text', text: { body: String(text) } };
+        if (reply_to) payload.context = { message_id: reply_to };
+        const r = await waSend(env, payload);
+        await logWaEvent(env, { to, kind: 'text', ref: reply_to || '', ok: r.ok, messageId: r.id, error: r.error });
         if (!r.ok) return json({ error: r.error, raw: r.raw }, r.status || 500);
-        // Guardar en wa_messages para que aparezca en el chat
         try {
           await env.DB.prepare(
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-          ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, '', 'text', String(text), '', '', 'sent').run();
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, '', 'text', String(text), '', reply_to || '', 'sent').run();
         } catch (_) {}
         return json({ id: r.id });
       }
@@ -661,6 +663,7 @@ export default {
         const to = fd.get('to');
         let type = fd.get('type'); // image | audio | document | video (default detectado del mime)
         const caption = fd.get('caption') || '';
+        const replyTo = fd.get('reply_to') || '';
         const file = fd.get('file');
         if (!to || !file) return json({ error: 'missing to or file' }, 400);
         const num = normalizeArPhone(to);
@@ -711,6 +714,7 @@ export default {
         } else { // document
           payload = { messaging_product: 'whatsapp', to: num, type: 'document', document: { id: mediaId, caption: caption || undefined, filename: fileName } };
         }
+        if (replyTo) payload.context = { message_id: replyTo };
         const r = await waSend(env, payload);
         await logWaEvent(env, { to: num, kind: type, ref: '', ok: r.ok, messageId: r.id, error: r.error });
         if (!r.ok) return json({ error: r.error }, r.status || 500);
@@ -729,7 +733,7 @@ export default {
         try {
           await env.DB.prepare(
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-          ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', type, body, r2Key, '', 'sent').run();
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', type, body, r2Key, replyTo || '', 'sent').run();
         } catch (_) {}
         return json({ id: r.id, r2Key, type });
       }

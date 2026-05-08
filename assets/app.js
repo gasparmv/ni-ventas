@@ -3499,12 +3499,14 @@ async function sendChatFile(phone, file, caption, type) {
     else if (m.startsWith('video/')) type = 'video';
     else type = 'document';
   }
+  const replyTo = chatState.replyingTo || '';
   try {
     const fd = new FormData();
     fd.append('to', phone);
     fd.append('type', type);
     fd.append('caption', caption || '');
     fd.append('file', file);
+    if (replyTo) fd.append('reply_to', replyTo);
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-media', {
       method: 'POST', headers: authHeaders(), body: fd
     });
@@ -3514,8 +3516,10 @@ async function sendChatFile(phone, file, caption, type) {
     chatState.messages.push({
       ts: new Date().toISOString(), wamid: j.id || '', direction: 'outbound',
       phone, sender_name: '', msg_type: type, body: caption || tag,
-      media_url: j.r2Key || '', status: 'sent'
+      media_url: j.r2Key || '', context_id: replyTo || '', status: 'sent'
     });
+    chatState.replyingTo = null;
+    renderReplyBanner();
     renderChatMessages();
     const labelOk = type === 'image' ? 'Imagen enviada' : type === 'video' ? 'Video enviado' : type === 'audio' ? 'Audio enviado' : 'Documento enviado';
     toast(labelOk);
@@ -3783,18 +3787,18 @@ async function sendChatMessage(phone, text) {
   if (!canAccessChat() || !phone || !text.trim()) return;
   chatState.sending = true;
   updateChatInputState();
+  const replyTo = chatState.replyingTo || '';
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ to: phone, body: text.trim() })
+      body: JSON.stringify({ to: phone, body: text.trim(), reply_to: replyTo || undefined })
     });
     const j = await r.json();
     if (!r.ok) {
       toast('Error: ' + (j.error || 'no se pudo enviar'));
       return;
     }
-    // Agregar mensaje local para feedback inmediato
     chatState.messages.push({
       ts: new Date().toISOString(),
       wamid: j.id || '',
@@ -3803,10 +3807,12 @@ async function sendChatMessage(phone, text) {
       sender_name: '',
       msg_type: 'text',
       body: text.trim(),
+      context_id: replyTo || '',
       status: 'sent'
     });
+    chatState.replyingTo = null;
+    renderReplyBanner();
     renderChatMessages();
-    // Limpiar input
     const ta = document.getElementById('chat-input');
     if (ta) { ta.value = ''; ta.style.height = 'auto'; }
     toast('Mensaje enviado');
@@ -4303,9 +4309,41 @@ function chatMsgActionsHtml() {
     <button class="cma-btn" data-cma="react" title="Reaccionar">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm3.5-9c.83 0 1.5-.67 1.5-1.5S16.33 8 15.5 8 14 8.67 14 9.5s.67 1.5 1.5 1.5zm-7 0c.83 0 1.5-.67 1.5-1.5S9.33 8 8.5 8 7 8.67 7 9.5 7.67 11 8.5 11zm3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z"/></svg>
     </button>
+    <button class="cma-btn" data-cma="reply" title="Responder">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>
+    </button>
     <button class="cma-btn" data-cma="forward" title="Reenviar">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 8V4l8 8-8 8v-4H4V8z"/></svg>
     </button>
+  </div>`;
+}
+
+// Devuelve un mensaje por wamid (busca en chatState.messages).
+function findMessageByWamid(wamid) {
+  if (!wamid) return null;
+  return chatState.messages.find(m => m.wamid === wamid) || null;
+}
+
+// HTML del bloque de cita (quoted reply) que va arriba del bubble cuando
+// el mensaje tiene context_id apuntando a otro mensaje.
+function quoteBlockHtml(m) {
+  if (!m.context_id) return '';
+  const parent = findMessageByWamid(m.context_id);
+  if (!parent) return ''; // padre no esta cargado, no mostramos nada
+  const parentDir = parent.direction || 'inbound';
+  const isMine = parentDir === 'outbound';
+  const author = isMine ? 'Vos' : (parent.sender_name || 'Cliente');
+  let preview = '';
+  if (parent.msg_type === 'image') preview = '📷 Imagen' + (parent.body ? ' · ' + parent.body : '');
+  else if (parent.msg_type === 'audio') preview = '🎤 Audio';
+  else if (parent.msg_type === 'video') preview = '🎬 Video';
+  else if (parent.msg_type === 'document') preview = '📄 ' + (parent.body || 'Documento');
+  else if (parent.msg_type === 'sticker') preview = 'Sticker';
+  else preview = parent.body || '';
+  preview = preview.slice(0, 120);
+  return `<div class="chat-msg-quote ${isMine ? 'mine' : 'theirs'}" data-jump-to="${escapeHtml(m.context_id)}">
+    <div class="cmq-author">${escapeHtml(author)}</div>
+    <div class="cmq-text">${escapeHtml(preview)}</div>
   </div>`;
 }
 
@@ -4566,9 +4604,27 @@ function renderChatMessages() {
   container.querySelectorAll('.chat-msg[data-wamid]').forEach(el => {
     const wamid = el.dataset.wamid;
     if (!wamid) return;
+    // Quote block (si este mensaje cita a otro)
+    const m = chatState.messages.find(x => x.wamid === wamid);
+    if (m && m.context_id) {
+      const qHtml = quoteBlockHtml(m);
+      if (qHtml) el.insertAdjacentHTML('afterbegin', qHtml);
+    }
     el.insertAdjacentHTML('beforeend', chatMsgActionsHtml());
     const chips = reactionsBadgeHtml(wamid, reactionsByParent);
     if (chips) el.insertAdjacentHTML('beforeend', chips);
+  });
+  // Click en una cita scrollea/destaca el mensaje original
+  container.querySelectorAll('[data-jump-to]').forEach(q => {
+    q.style.cursor = 'pointer';
+    q.onclick = (e) => {
+      e.stopPropagation();
+      const target = container.querySelector(`.chat-msg[data-wamid="${q.dataset.jumpTo}"]`);
+      if (!target) return;
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('chat-msg-flash');
+      setTimeout(() => target.classList.remove('chat-msg-flash'), 1500);
+    };
   });
   bindAudioPlayers();
   bindMessageContextMenus();
@@ -4718,7 +4774,57 @@ function bindMessageHoverActions() {
       e.preventDefault(); e.stopPropagation();
       showReactionPicker(reactBtn, wamid);
     };
+    const replyBtn = actions.querySelector('[data-cma="reply"]');
+    if (replyBtn) replyBtn.onclick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      startReplyTo(wamid);
+    };
   });
+}
+
+// Marca el mensaje como "respondiendo a", muestra el banner sobre el input
+// y enfoca el textarea. El send() existente lee chatState.replyingTo.
+function startReplyTo(wamid) {
+  const m = findMessageByWamid(wamid);
+  if (!m) return;
+  chatState.replyingTo = wamid;
+  renderReplyBanner();
+  const ta = document.getElementById('chat-input');
+  if (ta) ta.focus();
+}
+
+function cancelReply() {
+  chatState.replyingTo = null;
+  renderReplyBanner();
+}
+
+function renderReplyBanner() {
+  const wrap = document.querySelector('.chat-input-wrap');
+  if (!wrap) return;
+  document.getElementById('reply-banner')?.remove();
+  if (!chatState.replyingTo) return;
+  const m = findMessageByWamid(chatState.replyingTo);
+  if (!m) return;
+  const author = m.direction === 'outbound' ? 'Vos' : (m.sender_name || 'Cliente');
+  let preview = '';
+  if (m.msg_type === 'image') preview = '📷 Imagen' + (m.body ? ' · ' + m.body : '');
+  else if (m.msg_type === 'audio') preview = '🎤 Audio';
+  else if (m.msg_type === 'video') preview = '🎬 Video';
+  else if (m.msg_type === 'document') preview = '📄 ' + (m.body || 'Documento');
+  else preview = (m.body || '').slice(0, 140);
+  const banner = document.createElement('div');
+  banner.id = 'reply-banner';
+  banner.className = 'reply-banner';
+  banner.innerHTML = `
+    <div class="reply-banner-line"></div>
+    <div class="reply-banner-content">
+      <div class="rb-author">${escapeHtml(author)}</div>
+      <div class="rb-text">${escapeHtml(preview)}</div>
+    </div>
+    <button class="rb-close" title="Cancelar (Esc)">✕</button>
+  `;
+  wrap.before(banner);
+  banner.querySelector('.rb-close').onclick = cancelReply;
 }
 
 function showReactionPicker(anchor, wamid) {
@@ -4799,6 +4905,10 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
   menu.id = 'msg-action-menu';
   menu.className = 'chat-context-menu';
   menu.innerHTML = `
+    <button class="ccm-item" data-action="reply">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>
+      Responder
+    </button>
     <button class="ccm-item" data-action="react">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-3.5 6c.83 0 1.5.67 1.5 1.5S9.33 11 8.5 11 7 10.33 7 9.5 7.67 8 8.5 8zm7 0c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5-1.5-.67-1.5-1.5.67-1.5 1.5-1.5zM12 17.5c-2.33 0-4.31-1.46-5.11-3.5h10.22c-.8 2.04-2.78 3.5-5.11 3.5z"/></svg>
       Reaccionar
@@ -4831,6 +4941,11 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
     // Anclar el picker al punto de click — creamos un anchor virtual.
     const fakeAnchor = { getBoundingClientRect: () => ({ left: x, right: x, top: y, bottom: y, width: 0, height: 0 }) };
     showReactionPicker(fakeAnchor, wamid);
+  };
+  menu.querySelector('[data-action="reply"]').onclick = (ev) => {
+    ev.stopPropagation();
+    close();
+    startReplyTo(wamid);
   };
 }
 
@@ -5074,6 +5189,11 @@ function bindChatConversation() {
         if (e.key === 'Enter' && active) { e.preventDefault(); pickQuickReply(ta, active); return; }
         if (e.key === 'Escape') { dd.style.display = 'none'; return; }
         if (e.key === 'Tab' && active) { e.preventDefault(); pickQuickReply(ta, active); return; }
+      }
+      if (e.key === 'Escape' && chatState.replyingTo) {
+        e.preventDefault();
+        cancelReply();
+        return;
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();

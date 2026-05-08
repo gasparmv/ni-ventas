@@ -1828,6 +1828,87 @@ table.t td.cliente { font-weight: 600; }
 }
 .reaction-picker .rp-more { font-size: 18px; color: rgba(233,237,239,.7); }
 
+/* === Quote / cita arriba del bubble (estilo WA Web) === */
+.chat-msg-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  background: rgba(0,0,0,.18);
+  border-left: 4px solid var(--neon-cyan, #8FD4DE);
+  font-size: 12.5px;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+}
+.chat-msg-quote.mine { border-left-color: var(--neon-red, #FF1830); }
+.chat-msg-quote .cmq-author {
+  font-weight: 600;
+  color: var(--neon-cyan, #8FD4DE);
+  font-size: 12px;
+}
+.chat-msg-quote.mine .cmq-author { color: var(--neon-red, #FF1830); }
+.chat-msg-quote .cmq-text {
+  color: rgba(233,237,239,.75);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Flash al hacer click en una cita y saltar al original */
+.chat-msg.chat-msg-flash {
+  animation: msg-flash 1.5s ease;
+}
+@keyframes msg-flash {
+  0%, 100% { background-color: inherit; }
+  20% { background-color: rgba(143, 212, 222, .25); }
+}
+
+/* === Reply banner (sobre el input cuando estás respondiendo) === */
+.reply-banner {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  padding: 8px 14px;
+  margin: 0 8px;
+  background: #1f2c33;
+  border-radius: 8px 8px 0 0;
+  border-bottom: 1px solid var(--border);
+}
+.reply-banner-line {
+  width: 4px;
+  border-radius: 2px;
+  background: var(--neon-cyan, #8FD4DE);
+  flex-shrink: 0;
+}
+.reply-banner-content {
+  flex: 1;
+  min-width: 0;
+}
+.reply-banner .rb-author {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--neon-cyan, #8FD4DE);
+}
+.reply-banner .rb-text {
+  font-size: 13px;
+  color: rgba(233,237,239,.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reply-banner .rb-close {
+  background: transparent;
+  border: 0;
+  color: rgba(233,237,239,.6);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 6px;
+  align-self: center;
+}
+.reply-banner .rb-close:hover { color: #fff; }
+
 /* Boton "Abrir en WhatsApp externo" del header — workaround mientras
    el numero esta deregistrado del Cloud API. */
 .btn-wa-external {
