@@ -4393,11 +4393,10 @@ function renderChatBubbles() {
 
     // === IMAGE ===
     if (m.msg_type === 'image' && m.media_url) {
+      const imgSrc = mediaUrl(m.media_url);
       html += `<div class="chat-msg ${dir} has-media${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'image')}">
         <div class="chat-msg-media">
-          <img src="${mediaUrl(m.media_url)}" alt="" loading="lazy"
-               onclick="window.open(this.src,'_blank')"
-               onerror="this.style.display='none'">
+          <img src="${imgSrc}" alt="" loading="lazy" data-img-preview="${escapeHtml(imgSrc)}" onerror="this.style.display='none'">
         </div>
         ${bodyText ? `<div class="chat-msg-body">${escapeHtml(bodyText).replace(/\n/g, '<br>')}</div>` : ''}
         ${footer}
@@ -4449,14 +4448,14 @@ function renderChatBubbles() {
     // === DOCUMENT ===
     if (m.msg_type === 'document' && m.media_url) {
       const docName = bodyText || 'Documento';
-      const ext = m.media_url.split('.').pop()?.toUpperCase() || 'DOC';
+      const docSrc = mediaUrl(m.media_url);
+      const ext = (m.media_url.split('.').pop() || 'doc').toUpperCase();
+      const isPdf = ext === 'PDF' || /\.pdf($|\?)/i.test(m.media_url) || /\.pdf$/i.test(docName);
       html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
-        <a href="${mediaUrl(m.media_url)}" target="_blank" style="text-decoration:none">
-          <div class="chat-msg-doc">
-            <div class="doc-icon">${ext.slice(0, 4)}</div>
-            <div class="doc-name">${escapeHtml(docName)}</div>
-          </div>
-        </a>
+        <div class="chat-msg-doc" ${isPdf ? `data-pdf-preview="${escapeHtml(docSrc)}" data-doc-name="${escapeHtml(docName)}"` : `data-doc-open="${escapeHtml(docSrc)}"`} role="button">
+          <div class="doc-icon">${ext.slice(0, 4)}</div>
+          <div class="doc-name">${escapeHtml(docName)}</div>
+        </div>
         ${footer}
       </div>`;
       continue;
@@ -4570,7 +4569,117 @@ function renderChatMessages() {
   bindAudioPlayers();
   bindMessageContextMenus();
   bindMessageHoverActions();
+  bindMediaPreviewClicks();
   container.scrollTop = container.scrollHeight;
+}
+
+// Click en imagen/PDF → preview inline (no abre nueva pestaña).
+function bindMediaPreviewClicks() {
+  document.querySelectorAll('[data-img-preview]').forEach(img => {
+    img.style.cursor = 'zoom-in';
+    img.onclick = (e) => {
+      e.preventDefault();
+      // Galería: todas las imágenes del chat actual, en orden de aparición.
+      const all = Array.from(document.querySelectorAll('[data-img-preview]')).map(el => el.dataset.imgPreview);
+      const idx = all.indexOf(img.dataset.imgPreview);
+      showImageLightbox(all, idx >= 0 ? idx : 0);
+    };
+  });
+  document.querySelectorAll('[data-pdf-preview]').forEach(el => {
+    el.style.cursor = 'pointer';
+    el.onclick = (e) => {
+      e.preventDefault();
+      showPdfPreview(el.dataset.pdfPreview, el.dataset.docName || 'Documento');
+    };
+  });
+  document.querySelectorAll('[data-doc-open]').forEach(el => {
+    el.style.cursor = 'pointer';
+    el.onclick = (e) => {
+      e.preventDefault();
+      window.open(el.dataset.docOpen, '_blank');
+    };
+  });
+}
+
+// Lightbox de imagen con prev/next, zoom, descargar y cerrar.
+function showImageLightbox(images, startIdx) {
+  document.getElementById('img-lightbox')?.remove();
+  let idx = startIdx;
+  const lb = document.createElement('div');
+  lb.id = 'img-lightbox';
+  lb.className = 'img-lightbox';
+  lb.innerHTML = `
+    <button class="lb-close" title="Cerrar (Esc)">✕</button>
+    <a class="lb-download" download title="Descargar">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+    </a>
+    <button class="lb-nav lb-prev" title="Anterior">‹</button>
+    <button class="lb-nav lb-next" title="Siguiente">›</button>
+    <div class="lb-stage"><img id="lb-img" alt=""></div>
+    <div class="lb-counter"></div>
+  `;
+  document.body.appendChild(lb);
+  requestAnimationFrame(() => lb.classList.add('open'));
+  const imgEl = lb.querySelector('#lb-img');
+  const counter = lb.querySelector('.lb-counter');
+  const prevBtn = lb.querySelector('.lb-prev');
+  const nextBtn = lb.querySelector('.lb-next');
+  const dlLink = lb.querySelector('.lb-download');
+  const update = () => {
+    imgEl.src = images[idx];
+    dlLink.href = images[idx];
+    counter.textContent = images.length > 1 ? `${idx + 1} / ${images.length}` : '';
+    prevBtn.style.display = nextBtn.style.display = images.length > 1 ? '' : 'none';
+  };
+  update();
+  // Zoom on click
+  let zoomed = false;
+  imgEl.onclick = (e) => {
+    e.stopPropagation();
+    zoomed = !zoomed;
+    imgEl.classList.toggle('zoomed', zoomed);
+  };
+  prevBtn.onclick = (e) => { e.stopPropagation(); idx = (idx - 1 + images.length) % images.length; zoomed = false; imgEl.classList.remove('zoomed'); update(); };
+  nextBtn.onclick = (e) => { e.stopPropagation(); idx = (idx + 1) % images.length; zoomed = false; imgEl.classList.remove('zoomed'); update(); };
+  const close = () => { lb.classList.remove('open'); setTimeout(() => lb.remove(), 150); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => {
+    if (e.key === 'Escape') close();
+    else if (e.key === 'ArrowLeft' && images.length > 1) prevBtn.click();
+    else if (e.key === 'ArrowRight' && images.length > 1) nextBtn.click();
+  };
+  document.addEventListener('keydown', onKey);
+  lb.querySelector('.lb-close').onclick = close;
+  lb.addEventListener('click', (e) => { if (e.target === lb || e.target.classList.contains('lb-stage')) close(); });
+}
+
+// Preview de PDF en modal con iframe (renderiza nativo del browser).
+function showPdfPreview(src, name) {
+  document.getElementById('pdf-preview-modal')?.remove();
+  const bg = document.createElement('div');
+  bg.id = 'pdf-preview-modal';
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal pdf-preview-modal" style="max-width:1100px;width:96vw;height:92vh;display:flex;flex-direction:column">
+      <div class="modal-h" style="display:flex;align-items:center;gap:10px">
+        <h3 style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(name)}</h3>
+        <a class="btn btn-ghost" href="${escapeHtml(src)}" download="${escapeHtml(name)}" title="Descargar">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="vertical-align:middle"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+        </a>
+        <a class="btn btn-ghost" href="${escapeHtml(src)}" target="_blank" title="Abrir en pestaña nueva">↗</a>
+        <button class="btn btn-ghost pdf-close" title="Cerrar (Esc)">✕</button>
+      </div>
+      <div class="modal-body" style="flex:1;padding:0;background:#1a1a1a">
+        <iframe src="${escapeHtml(src)}#toolbar=1&navpanes=0" style="width:100%;height:100%;border:0;display:block"></iframe>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(bg);
+  requestAnimationFrame(() => bg.classList.add('open'));
+  const close = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  bg.querySelector('.pdf-close').onclick = close;
+  bg.addEventListener('click', e => { if (e.target === bg) close(); });
 }
 
 // Right-click sobre cualquier mensaje: muestra menú con "Reenviar".

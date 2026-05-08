@@ -1811,6 +1811,89 @@ table.t td.cliente { font-weight: 600; }
 }
 .reaction-picker .rp-more { font-size: 18px; color: rgba(233,237,239,.7); }
 
+/* === Image lightbox === */
+.img-lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.92);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity .15s ease;
+}
+.img-lightbox.open { opacity: 1; }
+.img-lightbox .lb-stage {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+  overflow: auto;
+}
+.img-lightbox #lb-img {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+  cursor: zoom-in;
+  transition: transform .15s ease;
+  user-select: none;
+}
+.img-lightbox #lb-img.zoomed {
+  max-width: none;
+  max-height: none;
+  cursor: zoom-out;
+  transform: scale(1.6);
+}
+.img-lightbox .lb-close,
+.img-lightbox .lb-download,
+.img-lightbox .lb-nav {
+  position: absolute;
+  background: rgba(255,255,255,.08);
+  border: 0;
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition: background .12s ease, transform .12s ease;
+  text-decoration: none;
+}
+.img-lightbox .lb-close { top: 18px; right: 18px; width: 40px; height: 40px; font-size: 22px; }
+.img-lightbox .lb-download { top: 18px; right: 68px; width: 40px; height: 40px; }
+.img-lightbox .lb-nav { top: 50%; transform: translateY(-50%); width: 48px; height: 48px; font-size: 30px; line-height: 1; }
+.img-lightbox .lb-prev { left: 22px; }
+.img-lightbox .lb-next { right: 22px; }
+.img-lightbox .lb-close:hover,
+.img-lightbox .lb-download:hover,
+.img-lightbox .lb-nav:hover { background: rgba(255,255,255,.18); }
+.img-lightbox .lb-counter {
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: rgba(255,255,255,.85);
+  background: rgba(0,0,0,.5);
+  padding: 6px 14px;
+  border-radius: 14px;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+/* === PDF preview modal === */
+.pdf-preview-modal .modal-h {
+  padding: 12px 14px !important;
+}
+.pdf-preview-modal .pdf-close,
+.pdf-preview-modal .btn-ghost {
+  padding: 6px 10px;
+  min-width: 36px;
+}
+.pdf-preview-modal iframe { background: #525659; }
+
 /* === Media preview modal (drag/paste/attach) === */
 .media-preview-modal .mp-stage {
   background: #0b141a;
