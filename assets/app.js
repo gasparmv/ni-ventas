@@ -4409,7 +4409,8 @@ function renderChatBubbles() {
       const contact = chatState.contacts.find(c => c.phone === chatState.selectedPhone);
       const aName = dir === 'inbound' ? (contact?.name || '') : 'Neon';
       const audioId = 'aud_' + (m.wamid || m.ts).replace(/[^a-z0-9]/gi, '');
-      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
+      const transcriptIconSvg = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M14 17H4v2h10v-2zm6-8H4v2h16V9zM4 15h16v-2H4v2zM4 5v2h16V5H4z"/></svg>';
+      html += `<div class="chat-msg ${dir} chat-msg-audio-bubble${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <div class="chat-msg-audio">
           ${avatarHtml(dir === 'inbound' ? chatState.selectedPhone : '0000', aName, 40)}
           <div class="audio-wave">
@@ -4420,12 +4421,12 @@ function renderChatBubbles() {
               <audio preload="metadata" src="${mediaUrl(m.media_url)}" data-audio-el></audio>
               <span class="audio-dur" data-audio-time>0:00</span>
               <button class="audio-speed" data-audio-speed="1" title="Velocidad de reproducción">1x</button>
-              ${transcript ? `<button class="audio-toggle-transcript" data-toggle-transcript="${audioId}" title="Mostrar transcripción">📝</button>` : ''}
+              ${transcript ? `<button class="audio-toggle-transcript" data-toggle-transcript="${audioId}" title="Mostrar transcripción">${transcriptIconSvg}</button>` : ''}
+              ${footer}
             </div>
           </div>
         </div>
         ${transcript ? `<div class="chat-msg-transcript" id="${audioId}" style="display:none">"${escapeHtml(transcript)}"</div>` : ''}
-        ${footer}
       </div>`;
       continue;
     }

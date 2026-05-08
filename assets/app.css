@@ -1647,6 +1647,23 @@ table.t td.cliente { font-weight: 600; }
   border-color: var(--neon-cyan);
 }
 .chat-msg-audio audio { display: none; }
+/* Timestamp inline dentro del audio-row, alineado a la derecha (estilo WA Web). */
+.chat-msg-audio-bubble .audio-row .chat-msg-footer {
+  margin: 0 0 0 auto;
+  float: none;
+  padding-top: 0;
+  flex-shrink: 0;
+}
+.chat-msg-audio .audio-toggle-transcript {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 5px;
+}
+/* Caption de imagen: padding correcto para que no se pegue al borde. */
+.chat-msg.has-media .chat-msg-body {
+  padding: 6px 6px 0;
+}
 .chat-msg-transcript {
   font-size: 12.5px;
   color: rgba(233,237,239,.65);
