@@ -1723,6 +1723,112 @@ table.t td.cliente { font-weight: 600; }
   max-height: 160px;
 }
 
+/* Hover actions: forward + react al lado del bubble (estilo WA Web) */
+.chat-msg-actions {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 4px;
+  padding: 2px;
+  background: #2a3942;
+  border-radius: 18px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s ease;
+  z-index: 4;
+}
+.chat-msg.inbound .chat-msg-actions { right: -76px; }
+.chat-msg.outbound .chat-msg-actions { left: -76px; }
+.chat-msg:hover .chat-msg-actions { opacity: 1; pointer-events: auto; }
+.chat-msg-actions .cma-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+  color: rgba(233,237,239,.85);
+  cursor: pointer;
+  padding: 0;
+}
+.chat-msg-actions .cma-btn:hover {
+  background: rgba(255,255,255,.08);
+  color: #e9edef;
+}
+.chat-msg-actions .cma-btn svg { display: block; }
+
+/* Reaction picker — popover de emojis */
+.reaction-picker {
+  position: fixed;
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px;
+  background: #233138;
+  border: 1px solid rgba(255,255,255,.06);
+  border-radius: 28px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.45);
+  z-index: 1000;
+  opacity: 0;
+  transform: translateY(4px) scale(.96);
+  transition: opacity .12s ease, transform .12s ease;
+}
+.reaction-picker.open { opacity: 1; transform: translateY(0) scale(1); }
+.reaction-picker .rp-emoji {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 0;
+  background: transparent;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform .1s ease, background .1s ease;
+  color: #e9edef;
+}
+.reaction-picker .rp-emoji:hover {
+  background: rgba(255,255,255,.08);
+  transform: scale(1.2);
+}
+.reaction-picker .rp-more { font-size: 18px; color: rgba(233,237,239,.7); }
+
+/* Reactions chip mostrado en el bubble */
+.chat-msg-reactions {
+  position: absolute;
+  bottom: -10px;
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px 6px;
+  background: #2a3942;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  font-size: 12px;
+  line-height: 1;
+  z-index: 3;
+  white-space: nowrap;
+}
+.chat-msg.inbound .chat-msg-reactions { left: 8px; }
+.chat-msg.outbound .chat-msg-reactions { right: 8px; }
+.reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 13px;
+}
+.reaction-chip .rc-num {
+  font-size: 11px;
+  color: rgba(233,237,239,.75);
+  margin-left: 2px;
+}
+/* Espacio extra abajo cuando el bubble tiene reacciones para que el chip no se solape con el siguiente. */
+.chat-msg:has(.chat-msg-reactions) { margin-bottom: 12px; }
+
 /* Timestamp + status */
 .chat-msg-footer {
   display: inline-flex;

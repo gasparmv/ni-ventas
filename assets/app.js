@@ -4167,14 +4167,59 @@ function generateAudioBars() {
   return bars;
 }
 
+// HTML para los iconos flotantes (forward + reaccionar) que aparecen al hover.
+// Se inyecta dentro del bubble; CSS lo posiciona afuera y lo muestra en hover.
+function chatMsgActionsHtml() {
+  return `<div class="chat-msg-actions">
+    <button class="cma-btn" data-cma="react" title="Reaccionar">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm3.5-9c.83 0 1.5-.67 1.5-1.5S16.33 8 15.5 8 14 8.67 14 9.5s.67 1.5 1.5 1.5zm-7 0c.83 0 1.5-.67 1.5-1.5S9.33 8 8.5 8 7 8.67 7 9.5 7.67 11 8.5 11zm3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z"/></svg>
+    </button>
+    <button class="cma-btn" data-cma="forward" title="Reenviar">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 8V4l8 8-8 8v-4H4V8z"/></svg>
+    </button>
+  </div>`;
+}
+
+// Construye los chips de reacciones (inbound + outbound) para un wamid dado.
+function reactionsBadgeHtml(wamid, reactionsByParent) {
+  const list = reactionsByParent.get(wamid);
+  if (!list || !list.length) return '';
+  // Última reacción por sender (phone+direction). Emoji vacío = quitada.
+  const latest = new Map();
+  for (const r of list) {
+    const key = (r.direction || 'inbound') + '|' + (r.phone || '');
+    latest.set(key, r);
+  }
+  const counts = new Map();
+  for (const r of latest.values()) {
+    const e = (r.body || '').trim();
+    if (!e) continue;
+    counts.set(e, (counts.get(e) || 0) + 1);
+  }
+  if (!counts.size) return '';
+  const chips = [...counts.entries()].map(([e, n]) =>
+    `<span class="reaction-chip">${escapeHtml(e)}${n > 1 ? '<span class="rc-num">' + n + '</span>' : ''}</span>`
+  ).join('');
+  return `<div class="chat-msg-reactions">${chips}</div>`;
+}
+
 function renderChatBubbles() {
   const msgs = chatState.messages;
   if (!msgs.length) return '<div class="chat-empty">Sin mensajes</div>';
+  // Pre-armar mapa de reacciones por wamid del padre.
+  const reactionsByParent = new Map();
+  for (const m of msgs) {
+    if (m.msg_type === 'reaction' && m.context_id) {
+      if (!reactionsByParent.has(m.context_id)) reactionsByParent.set(m.context_id, []);
+      reactionsByParent.get(m.context_id).push(m);
+    }
+  }
   let html = '';
   let lastDate = '';
   let lastDir = '';
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
+    if (m.msg_type === 'reaction') continue; // se renderizan como chips, no como bubble
     const msgDate = m.ts.slice(0, 10);
     if (msgDate !== lastDate) {
       lastDate = msgDate;
@@ -4372,11 +4417,14 @@ function renderChatBubbles() {
       }
     }
 
-    html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+    html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
       ${bodyText ? `<span class="chat-msg-body">${escapeHtml(bodyText).replace(/\n/g, '<br>')}</span>` : ''}
       ${footer}
     </div>`;
   }
+  // Post-proceso: inyectar acciones flotantes y chips de reacción en cada bubble con wamid.
+  // Lo hacemos via DOM después en renderChatMessages, pero también devolvemos el mapa de reacciones.
+  renderChatBubbles._reactionsByParent = reactionsByParent;
   return html;
 }
 
@@ -4384,8 +4432,18 @@ function renderChatMessages() {
   const container = document.getElementById('chat-messages');
   if (!container) return;
   container.innerHTML = renderChatBubbles();
+  // Inyectar acciones hover (forward + reaccionar) y chips de reacción en cada bubble con wamid.
+  const reactionsByParent = renderChatBubbles._reactionsByParent || new Map();
+  container.querySelectorAll('.chat-msg[data-wamid]').forEach(el => {
+    const wamid = el.dataset.wamid;
+    if (!wamid) return;
+    el.insertAdjacentHTML('beforeend', chatMsgActionsHtml());
+    const chips = reactionsBadgeHtml(wamid, reactionsByParent);
+    if (chips) el.insertAdjacentHTML('beforeend', chips);
+  });
   bindAudioPlayers();
   bindMessageContextMenus();
+  bindMessageHoverActions();
   container.scrollTop = container.scrollHeight;
 }
 
@@ -4403,12 +4461,109 @@ function bindMessageContextMenus() {
   });
 }
 
+// Hover actions (forward + react) inline al lado del bubble — estilo WA Web.
+function bindMessageHoverActions() {
+  document.querySelectorAll('.chat-msg[data-wamid] .chat-msg-actions').forEach(actions => {
+    const bubble = actions.closest('.chat-msg');
+    if (!bubble) return;
+    const wamid = bubble.dataset.wamid;
+    const msgType = bubble.dataset.msgType || 'text';
+    if (!wamid) return;
+    const fwdBtn = actions.querySelector('[data-cma="forward"]');
+    const reactBtn = actions.querySelector('[data-cma="react"]');
+    if (fwdBtn) fwdBtn.onclick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      showForwardModal(wamid, msgType);
+    };
+    if (reactBtn) reactBtn.onclick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      showReactionPicker(reactBtn, wamid);
+    };
+  });
+}
+
+function showReactionPicker(anchor, wamid) {
+  document.getElementById('reaction-picker')?.remove();
+  const emojis = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+  const pop = document.createElement('div');
+  pop.id = 'reaction-picker';
+  pop.className = 'reaction-picker';
+  pop.innerHTML = emojis.map(e => `<button class="rp-emoji" data-emoji="${e}">${e}</button>`).join('') +
+    `<button class="rp-emoji rp-more" data-more title="Otro">＋</button>`;
+  document.body.appendChild(pop);
+  const r = anchor.getBoundingClientRect();
+  const pr = pop.getBoundingClientRect();
+  let left = r.left + r.width / 2 - pr.width / 2;
+  let top = r.top - pr.height - 8;
+  if (top < 8) top = r.bottom + 8;
+  left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8));
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
+  requestAnimationFrame(() => pop.classList.add('open'));
+  const close = () => { pop.remove(); document.removeEventListener('click', closer, true); document.removeEventListener('keydown', escer); };
+  function closer(ev) { if (!pop.contains(ev.target) && ev.target !== anchor) close(); }
+  function escer(ev) { if (ev.key === 'Escape') close(); }
+  setTimeout(() => {
+    document.addEventListener('click', closer, true);
+    document.addEventListener('keydown', escer);
+  }, 0);
+  pop.querySelectorAll('[data-emoji]').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const emoji = btn.dataset.emoji;
+      close();
+      sendReaction(wamid, emoji);
+    };
+  });
+  pop.querySelector('[data-more]').onclick = (e) => {
+    e.stopPropagation();
+    const custom = prompt('Emoji para reaccionar:');
+    close();
+    if (custom && custom.trim()) sendReaction(wamid, custom.trim());
+  };
+}
+
+async function sendReaction(wamid, emoji) {
+  const phone = chatState.selectedPhone;
+  if (!phone || !wamid) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/react', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ phone, wamid, emoji })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      toast('Error al reaccionar: ' + (j.error || 'fallo'));
+      return;
+    }
+    // Reflejo optimista local: agregar reacción a chatState.messages.
+    chatState.messages.push({
+      ts: new Date().toISOString(),
+      wamid: j.id || ('local_react_' + Date.now()),
+      direction: 'outbound',
+      phone,
+      msg_type: 'reaction',
+      body: emoji,
+      context_id: wamid,
+      status: 'sent'
+    });
+    renderChatMessages();
+  } catch (_) {
+    toast('Error de red');
+  }
+}
+
 function showMessageActionsMenu(x, y, wamid, msgType) {
   document.getElementById('msg-action-menu')?.remove();
   const menu = document.createElement('div');
   menu.id = 'msg-action-menu';
   menu.className = 'chat-context-menu';
   menu.innerHTML = `
+    <button class="ccm-item" data-action="react">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-3.5 6c.83 0 1.5.67 1.5 1.5S9.33 11 8.5 11 7 10.33 7 9.5 7.67 8 8.5 8zm7 0c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5-1.5-.67-1.5-1.5.67-1.5 1.5-1.5zM12 17.5c-2.33 0-4.31-1.46-5.11-3.5h10.22c-.8 2.04-2.78 3.5-5.11 3.5z"/></svg>
+      Reaccionar
+    </button>
     <button class="ccm-item" data-action="forward">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 8V4l8 8-8 8v-4H4V8h8z"/></svg>
       Reenviar
@@ -4430,6 +4585,13 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
     ev.stopPropagation();
     close();
     showForwardModal(wamid, msgType);
+  };
+  menu.querySelector('[data-action="react"]').onclick = (ev) => {
+    ev.stopPropagation();
+    close();
+    // Anclar el picker al punto de click — creamos un anchor virtual.
+    const fakeAnchor = { getBoundingClientRect: () => ({ left: x, right: x, top: y, bottom: y, width: 0, height: 0 }) };
+    showReactionPicker(fakeAnchor, wamid);
   };
 }
 

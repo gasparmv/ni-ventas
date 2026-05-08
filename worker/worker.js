@@ -345,7 +345,7 @@ export default {
                   else if (errTitle.includes('unknown')) msgBody = '[tipo de mensaje no soportado por la API]';
                   else msgBody = `[no soportado: ${errTitle || 'desconocido'}]`;
                 }
-                const contextId = msg.context?.id || '';
+                const contextId = msg.context?.id || msg.reaction?.message_id || '';
                 const ts = msg.timestamp ? new Date(parseInt(msg.timestamp) * 1000).toISOString() : new Date().toISOString();
                 // Download media to R2 if present
                 let r2Key = '';
@@ -820,6 +820,32 @@ export default {
           }
         }
         return json(results);
+      }
+
+      // ===== Reaccionar a un mensaje (emoji) =====
+      // body: { phone, wamid, emoji }   — emoji vacío = quitar la reacción
+      if (request.method === 'POST' && path === '/admin/wa/react') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone, wamid, emoji } = body || {};
+        if (!phone || !wamid) return json({ error: 'missing phone or wamid' }, 400);
+        const num = normalizeArPhone(phone);
+        if (!num) return json({ error: 'numero invalido' }, 400);
+        const payload = {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: num,
+          type: 'reaction',
+          reaction: { message_id: wamid, emoji: emoji || '' }
+        };
+        const r = await waSend(env, payload);
+        await logWaEvent(env, { to: num, kind: 'reaction', ref: wamid, ok: r.ok, messageId: r.id, error: r.error });
+        if (!r.ok) return json({ error: r.error }, r.status || 500);
+        try {
+          await env.DB.prepare(
+            'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', 'reaction', emoji || '', '', wamid, 'sent').run();
+        } catch (_) {}
+        return json({ ok: true, id: r.id });
       }
 
       // ===== Quick Replies CRUD =====
