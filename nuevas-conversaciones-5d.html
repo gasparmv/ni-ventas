@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Nuevas conversaciones — últimos 5 días</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  body { font-family: system-ui, sans-serif; background:#0b0b0f; color:#eee; margin:0; padding:32px; }
+  h1 { font-weight:600; margin:0 0 4px; }
+  p  { color:#888; margin:0 0 24px; }
+  .card { background:#15151c; border-radius:12px; padding:24px; max-width:900px; }
+  canvas { max-height: 460px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Nuevas conversaciones — Neon Infinito</h1>
+  <p>Contactos que escribieron por primera vez al WhatsApp Business · 04–08 May 2026 (hora AR)</p>
+  <canvas id="c"></canvas>
+</div>
+<script>
+const data = [
+  { dia: '2026-05-04', nuevas: 13 },
+  { dia: '2026-05-05', nuevas: 59 },
+  { dia: '2026-05-06', nuevas: 34 },
+  { dia: '2026-05-07', nuevas: 58 },
+  { dia: '2026-05-08', nuevas: 27 },
+];
+new Chart(document.getElementById('c'), {
+  type: 'bar',
+  data: {
+    labels: data.map(d => d.dia.slice(5)),
+    datasets: [{
+      label: 'Nuevos contactos',
+      data: data.map(d => d.nuevas),
+      backgroundColor: '#7c5cff',
+      borderRadius: 6,
+    }],
+  },
+  options: {
+    plugins: {
+      legend: { labels: { color: '#ccc' } },
+      tooltip: { callbacks: { title: items => '2026-' + items[0].label } },
+    },
+    scales: {
+      x: { ticks: { color: '#aaa' }, grid: { color: '#222' } },
+      y: { ticks: { color: '#aaa' }, grid: { color: '#222' }, beginAtZero: true },
+    },
+  },
+});
+</script>
+</body>
+</html>

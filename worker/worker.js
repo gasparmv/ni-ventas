@@ -202,19 +202,33 @@ async function transcribeAudio(env, r2Key) {
     const obj = await env.MEDIA.get(r2Key);
     if (!obj) return null;
     const bytes = await obj.arrayBuffer();
-    // Usar whisper-large-v3-turbo (mejor calidad), fallback a whisper base
+    const audioArr = [...new Uint8Array(bytes)];
+    // Prompt contextual: ayuda al modelo a reconocer terminología específica
+    // (carteles de neón, jerga rioplatense, productos, medidas, etc.) que
+    // mejora notablemente la calidad de transcripción para Neon Infinito.
+    const initialPrompt = 'Conversación en español rioplatense argentino sobre carteles de neón LED, presupuestos, medidas en centímetros, m², colores, pedidos, envíos, pagos, controladores, fuentes, transparente, negro, base, neón, dimmer, instalación, cliente.';
     let result;
     try {
       result = await env.AI.run('@cf/openai/whisper-large-v3-turbo', {
-        audio: [...new Uint8Array(bytes)],
-        language: 'es'
+        audio: audioArr,
+        language: 'es',
+        task: 'transcribe',
+        vad_filter: true,
+        initial_prompt: initialPrompt
       });
     } catch (e1) {
-      // Fallback al modelo base con idioma forzado
-      result = await env.AI.run('@cf/openai/whisper', {
-        audio: [...new Uint8Array(bytes)],
-        language: 'es'
-      });
+      // Fallback al modelo base si el turbo falla
+      try {
+        result = await env.AI.run('@cf/openai/whisper-large-v3-turbo', {
+          audio: audioArr,
+          language: 'es'
+        });
+      } catch (e2) {
+        result = await env.AI.run('@cf/openai/whisper', {
+          audio: audioArr,
+          language: 'es'
+        });
+      }
     }
     return result?.text || null;
   } catch (e) {
@@ -375,10 +389,9 @@ export default {
                   ).bind(ts, wamid, direction, phone, senderName, msgType, msgBody, r2Key || mediaUrl, contextId, null).run();
                 } catch (_) {}
 
-                // Auto-labeling: solo en inbound con texto. Idempotente (INSERT OR IGNORE).
-                if (direction === 'inbound' && msgBody && phone) {
-                  try { await applyAutoLabels(env, phone, msgBody); } catch (_) {}
-                }
+                // Auto-labeling: deshabilitado por pedido del usuario (el matching
+                // por keywords genera demasiados falsos positivos). El código
+                // queda en applyAutoLabels() por si se quiere reactivar.
               }
 
               // Status updates (sent, delivered, read) para mensajes salientes
@@ -646,23 +659,36 @@ export default {
         if (!ct.includes('multipart/form-data')) return json({ error: 'expected multipart/form-data' }, 400);
         const fd = await request.formData();
         const to = fd.get('to');
-        const type = fd.get('type'); // image | audio
+        let type = fd.get('type'); // image | audio | document | video (default detectado del mime)
         const caption = fd.get('caption') || '';
         const file = fd.get('file');
-        if (!to || !type || !file) return json({ error: 'missing to, type, or file' }, 400);
+        if (!to || !file) return json({ error: 'missing to or file' }, 400);
         const num = normalizeArPhone(to);
         if (!num) return json({ error: 'numero invalido' }, 400);
+        const fileMime = file.type || '';
+        // Auto-detect type si no vino especificado o si vino "auto"
+        if (!type || type === 'auto') {
+          if (fileMime.startsWith('image/')) type = 'image';
+          else if (fileMime.startsWith('audio/')) type = 'audio';
+          else if (fileMime.startsWith('video/')) type = 'video';
+          else type = 'document';
+        }
         // 1. Upload to R2
-        const ext = file.name ? '.' + file.name.split('.').pop() : (type === 'audio' ? '.ogg' : '.jpg');
-        const r2Key = `wa/out_${Date.now()}${ext}`;
+        const fileName = file.name || ('file_' + Date.now());
+        const ext = fileName.includes('.') ? '.' + fileName.split('.').pop() : '';
+        const r2Key = `wa/out_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`;
         const buf = await file.arrayBuffer();
-        const mime = file.type || (type === 'audio' ? 'audio/ogg; codecs=opus' : 'image/jpeg');
+        const defaultMime = type === 'audio' ? 'audio/ogg; codecs=opus'
+                          : type === 'image' ? 'image/jpeg'
+                          : type === 'video' ? 'video/mp4'
+                          : 'application/octet-stream';
+        const mime = fileMime || defaultMime;
         await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: mime } });
         // 2. Upload media to Meta (get media ID)
         const v = env.WA_API_VERSION || 'v25.0';
         const uploadFd = new FormData();
         uploadFd.append('messaging_product', 'whatsapp');
-        uploadFd.append('file', new Blob([buf], { type: mime }), 'file' + ext);
+        uploadFd.append('file', new Blob([buf], { type: mime }), fileName);
         uploadFd.append('type', mime);
         const uploadR = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/media`, {
           method: 'POST',
@@ -678,8 +704,12 @@ export default {
         let payload;
         if (type === 'image') {
           payload = { messaging_product: 'whatsapp', to: num, type: 'image', image: { id: mediaId, caption: caption || undefined } };
-        } else {
+        } else if (type === 'audio') {
           payload = { messaging_product: 'whatsapp', to: num, type: 'audio', audio: { id: mediaId } };
+        } else if (type === 'video') {
+          payload = { messaging_product: 'whatsapp', to: num, type: 'video', video: { id: mediaId, caption: caption || undefined } };
+        } else { // document
+          payload = { messaging_product: 'whatsapp', to: num, type: 'document', document: { id: mediaId, caption: caption || undefined, filename: fileName } };
         }
         const r = await waSend(env, payload);
         await logWaEvent(env, { to: num, kind: type, ref: '', ok: r.ok, messageId: r.id, error: r.error });
@@ -687,8 +717,9 @@ export default {
         // 4. Save in wa_messages
         let body = caption || '';
         if (type === 'image') body = body || '[imagen]';
-        if (type === 'audio') {
-          // Transcribe outbound audio too
+        else if (type === 'video') body = body || '[video]';
+        else if (type === 'document') body = body || ('[documento] ' + fileName);
+        else if (type === 'audio') {
           try {
             const transcript = await transcribeAudio(env, r2Key);
             if (transcript) body = '[audio] ' + transcript;
@@ -700,7 +731,95 @@ export default {
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', type, body, r2Key, '', 'sent').run();
         } catch (_) {}
-        return json({ id: r.id, r2Key });
+        return json({ id: r.id, r2Key, type });
+      }
+
+      // ===== Forward (reenviar) un mensaje a uno o varios contactos =====
+      // body: { wamid: "...", to_phones: ["549...", "549..."] }
+      if (request.method === 'POST' && path === '/admin/wa/forward') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { wamid, to_phones } = body || {};
+        if (!wamid || !Array.isArray(to_phones) || !to_phones.length) return json({ error: 'missing wamid or to_phones' }, 400);
+        const original = await env.DB.prepare(
+          'SELECT msg_type, body, media_url FROM wa_messages WHERE wamid = ? LIMIT 1'
+        ).bind(wamid).first();
+        if (!original) return json({ error: 'mensaje original no encontrado' }, 404);
+        const results = { sent: 0, failed: 0, errors: [] };
+        // Helper: subir un blob existente en R2 a Meta y devolver media id
+        const uploadFromR2ToMeta = async (r2Key) => {
+          const obj = await env.MEDIA.get(r2Key);
+          if (!obj) return null;
+          const buf = await obj.arrayBuffer();
+          const mime = obj.httpMetadata?.contentType || 'application/octet-stream';
+          const fileName = r2Key.split('/').pop() || 'file';
+          const v = env.WA_API_VERSION || 'v25.0';
+          const fd = new FormData();
+          fd.append('messaging_product', 'whatsapp');
+          fd.append('file', new Blob([buf], { type: mime }), fileName);
+          fd.append('type', mime);
+          const upR = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/media`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` },
+            body: fd
+          });
+          const upJ = await upR.json().catch(() => ({}));
+          return upR.ok && upJ.id ? { id: upJ.id, mime, fileName } : null;
+        };
+        // Sub-helper para limpiar el body cuando es 'image' con descripción inyectada
+        const cleanBody = (bd, type) => {
+          if (!bd) return '';
+          if (type === 'audio' && bd.startsWith('[audio] ')) return ''; // la transcripción no se reenvía
+          if (type === 'image') {
+            const idx = bd.indexOf('[imagen]');
+            if (idx >= 0) return bd.slice(0, idx).trim();
+          }
+          if (type === 'video') {
+            const idx = bd.indexOf('[video]');
+            if (idx >= 0) return bd.slice(0, idx).trim();
+          }
+          if (type === 'document') {
+            const idx = bd.indexOf('[documento]');
+            if (idx >= 0) return bd.slice(0, idx).trim();
+          }
+          return bd;
+        };
+        for (const rawPhone of to_phones) {
+          const num = normalizeArPhone(rawPhone);
+          if (!num) { results.failed++; results.errors.push({ phone: rawPhone, error: 'numero invalido' }); continue; }
+          try {
+            let res;
+            if (original.msg_type === 'text' || !original.media_url) {
+              res = await waSendText(env, num, original.body || '');
+            } else {
+              const up = await uploadFromR2ToMeta(original.media_url);
+              if (!up) { results.failed++; results.errors.push({ phone: num, error: 'no se pudo subir media a Meta' }); continue; }
+              const v = env.WA_API_VERSION || 'v25.0';
+              const caption = cleanBody(original.body, original.msg_type);
+              let payload;
+              if (original.msg_type === 'image') payload = { messaging_product: 'whatsapp', to: num, type: 'image', image: { id: up.id, caption: caption || undefined } };
+              else if (original.msg_type === 'video') payload = { messaging_product: 'whatsapp', to: num, type: 'video', video: { id: up.id, caption: caption || undefined } };
+              else if (original.msg_type === 'audio') payload = { messaging_product: 'whatsapp', to: num, type: 'audio', audio: { id: up.id } };
+              else if (original.msg_type === 'sticker') payload = { messaging_product: 'whatsapp', to: num, type: 'sticker', sticker: { id: up.id } };
+              else payload = { messaging_product: 'whatsapp', to: num, type: 'document', document: { id: up.id, caption: caption || undefined, filename: up.fileName } };
+              res = await waSend(env, payload);
+            }
+            if (res.ok) {
+              results.sent++;
+              try {
+                await env.DB.prepare(
+                  'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                ).bind(new Date().toISOString(), res.id || '', 'outbound', num, '', original.msg_type, original.body || '', original.media_url || '', '', 'sent').run();
+              } catch (_) {}
+            } else {
+              results.failed++;
+              results.errors.push({ phone: num, error: res.error || 'send failed' });
+            }
+          } catch (e) {
+            results.failed++;
+            results.errors.push({ phone: rawPhone, error: e.message });
+          }
+        }
+        return json(results);
       }
 
       // ===== Quick Replies CRUD =====
@@ -1004,6 +1123,51 @@ export default {
         const data = await r.json().catch(() => ({}));
         if (!r.ok) return json({ error: data?.error?.message || 'create failed', raw: data }, r.status || 500);
         return json({ ok: true, id: data.id, status: data.status, category: data.category });
+      }
+      // Setear (o resetear) el PIN de two-step verification del número.
+      // POST a /{PHONE_NUMBER_ID} con {pin}. Necesario cuando la UI no expone
+      // la opción de 2FA o cuando se olvidó el PIN viejo.
+      if (request.method === 'POST' && path === '/admin/wa/set-pin') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { pin } = body || {};
+        if (!pin || !/^\d{6}$/.test(String(pin))) return json({ error: 'pin debe ser 6 dígitos numéricos' }, 400);
+        const v = env.WA_API_VERSION || 'v25.0';
+        const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: String(pin) })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: data?.error?.message || 'set-pin failed', code: data?.error?.code, raw: data }, r.status || 500);
+        return json({ ok: true, raw: data });
+      }
+      // Registrar número con Cloud API. Requiere PIN de two-step verification.
+      // Si el PIN no fue setado o se olvidó, ir a WA Manager → Number → Settings →
+      // Two-step verification → Set/Reset PIN.
+      if (request.method === 'POST' && path === '/admin/wa/register') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { pin } = body || {};
+        if (!pin) return json({ error: 'missing pin' }, 400);
+        const v = env.WA_API_VERSION || 'v25.0';
+        const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/register`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messaging_product: 'whatsapp', pin: String(pin) })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: data?.error?.message || 'register failed', code: data?.error?.code, raw: data }, r.status || 500);
+        return json({ ok: true, raw: data });
+      }
+      // Datos crudos del phone number (incluye platform_type, code_verification_status, etc.)
+      if (request.method === 'GET' && path === '/admin/wa/phone-info') {
+        if (!env.WA_PHONE_NUMBER_ID || !env.WA_TOKEN) return json({ error: 'WA not configured' }, 500);
+        const v = env.WA_API_VERSION || 'v25.0';
+        const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}?fields=verified_name,code_verification_status,display_phone_number,quality_rating,platform_type,certificate,messaging_limit_tier,health_status`, {
+          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: data?.error?.message || 'failed', raw: data }, r.status || 500);
+        return json(data);
       }
       // Status del número productivo (tier de mensajería + quality rating).
       if (request.method === 'GET' && path === '/admin/wa/phone-status') {

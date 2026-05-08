@@ -3341,27 +3341,58 @@ async function toggleContactLabel(phone, labelId) {
 
 // ===== Send media =====
 async function sendChatImage(phone, file, caption) {
+  return sendChatFile(phone, file, caption);
+}
+
+// Wrapper para mandar múltiples files al chat seleccionado, en serie con
+// delay anti rate-limit. Se usa desde paste, drag-drop y file input.
+async function sendChatFiles(files) {
+  const phone = chatState.selectedPhone;
+  if (!phone || !files.length) return;
+  if (files.length === 1) { await sendChatFile(phone, files[0], ''); return; }
+  toast(`Enviando ${files.length} archivos…`);
+  let sent = 0;
+  for (const f of files) {
+    try { await sendChatFile(phone, f, ''); sent++; } catch (_) {}
+    await new Promise(r => setTimeout(r, 400));
+  }
+  toast(`✓ ${sent}/${files.length} enviados`);
+}
+
+// Genérico: detecta tipo del file por mime y manda con el endpoint correcto.
+// type puede ser: image | audio | video | document | auto
+async function sendChatFile(phone, file, caption, type) {
   if (!phone || !file) return;
   chatState.sending = true;
   updateChatInputState();
+  // Detectar tipo si no fue pasado
+  if (!type) {
+    const m = (file.type || '').toLowerCase();
+    if (m.startsWith('image/')) type = 'image';
+    else if (m.startsWith('audio/')) type = 'audio';
+    else if (m.startsWith('video/')) type = 'video';
+    else type = 'document';
+  }
   try {
     const fd = new FormData();
     fd.append('to', phone);
-    fd.append('type', 'image');
+    fd.append('type', type);
     fd.append('caption', caption || '');
     fd.append('file', file);
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-media', {
       method: 'POST', headers: authHeaders(), body: fd
     });
     const j = await r.json();
-    if (!r.ok) { toast('Error: ' + (j.error || 'fallo envío imagen')); return; }
+    if (!r.ok) { toast('Error: ' + (j.error || 'fallo envío')); return; }
+    const tag = type === 'image' ? '[imagen]' : type === 'video' ? '[video]' : type === 'audio' ? '[audio]' : ('[documento] ' + (file.name || ''));
     chatState.messages.push({
       ts: new Date().toISOString(), wamid: j.id || '', direction: 'outbound',
-      phone, sender_name: '', msg_type: 'image', body: caption || '[imagen]',
+      phone, sender_name: '', msg_type: type, body: caption || tag,
       media_url: j.r2Key || '', status: 'sent'
     });
     renderChatMessages();
-    toast('Imagen enviada');
+    const labelOk = type === 'image' ? 'Imagen enviada' : type === 'video' ? 'Video enviado' : type === 'audio' ? 'Audio enviado' : 'Documento enviado';
+    toast(labelOk);
   } catch (e) { toast('Error de red'); }
   finally { chatState.sending = false; updateChatInputState(); }
 }
@@ -3450,7 +3481,7 @@ function renderNormalInputUI() {
   if (!bar) return;
   bar.innerHTML = `
     <button class="btn-send btn-attach" id="btn-attach" title="Adjuntar imagen"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647a5.58 5.58 0 003.972-1.645l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.501.501 1.134.79 1.737.79.558 0 1.031-.224 1.37-.564l5.582-5.58a.747.747 0 10-1.055-1.06l-5.58 5.58c-.172.172-.42.156-.614-.04-.508-.51-.427-1.122-.07-1.478l7.916-7.916c.866-.866 2.358-.764 3.46.34.556.557.876 1.203.918 1.818.036.526-.176 1.047-.595 1.466L10.11 18.526a4.09 4.09 0 01-2.913 1.205 4.09 4.09 0 01-2.913-1.205 4.09 4.09 0 01-1.205-2.913c0-1.1.428-2.134 1.205-2.911l8.647-8.646a.747.747 0 00-1.055-1.06l-8.647 8.646A5.58 5.58 0 001.816 15.556z"/></svg></button>
-    <input type="file" id="chat-file-input" accept="image/*" multiple style="display:none">
+    <input type="file" id="chat-file-input" accept="image/*,video/*,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,text/plain" multiple style="display:none">
     <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
     <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg></button>
     <button class="btn-send btn-schedule" id="btn-schedule" title="Programar mensaje"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg></button>
@@ -4106,7 +4137,7 @@ function renderChatConversation() {
     </button>
     <div class="chat-input-bar">
       <button class="btn-send btn-attach" id="btn-attach" title="Adjuntar imagen"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647a5.58 5.58 0 003.972-1.645l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.501.501 1.134.79 1.737.79.558 0 1.031-.224 1.37-.564l5.582-5.58a.747.747 0 10-1.055-1.06l-5.58 5.58c-.172.172-.42.156-.614-.04-.508-.51-.427-1.122-.07-1.478l7.916-7.916c.866-.866 2.358-.764 3.46.34.556.557.876 1.203.918 1.818.036.526-.176 1.047-.595 1.466L10.11 18.526a4.09 4.09 0 01-2.913 1.205 4.09 4.09 0 01-2.913-1.205 4.09 4.09 0 01-1.205-2.913c0-1.1.428-2.134 1.205-2.911l8.647-8.646a.747.747 0 00-1.055-1.06l-8.647 8.646A5.58 5.58 0 001.816 15.556z"/></svg></button>
-      <input type="file" id="chat-file-input" accept="image/*" multiple style="display:none">
+      <input type="file" id="chat-file-input" accept="image/*,video/*,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,text/plain" multiple style="display:none">
       <div class="chat-input-wrap">
         <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
         <div class="qr-dropdown" id="qr-dropdown" style="display:none"></div>
@@ -4155,13 +4186,13 @@ function renderChatBubbles() {
     const hasTail = dir !== lastDir;
     lastDir = dir;
 
-    // Status ticks (SVG like WA)
+    // Status ticks (SVG like WA). 'played' = audio escuchado, mismo símbolo que 'read'.
     let statusHtml = '';
     if (dir === 'outbound') {
-      if (m.status === 'read') statusHtml = `<span class="chat-msg-status read">${TICK_DOUBLE}</span>`;
-      else if (m.status === 'delivered') statusHtml = `<span class="chat-msg-status delivered">${TICK_DOUBLE}</span>`;
+      if (m.status === 'read' || m.status === 'played') statusHtml = `<span class="chat-msg-status read" title="Leído">${TICK_DOUBLE}</span>`;
+      else if (m.status === 'delivered') statusHtml = `<span class="chat-msg-status delivered" title="Entregado">${TICK_DOUBLE}</span>`;
       else if (m.status === 'failed') statusHtml = `<span class="chat-msg-status failed" title="No se pudo entregar">✗ falló</span>`;
-      else statusHtml = `<span class="chat-msg-status sent">${TICK_SINGLE}</span>`;
+      else statusHtml = `<span class="chat-msg-status sent" title="Enviado">${TICK_SINGLE}</span>`;
     }
     const footer = `<span class="chat-msg-footer"><span class="chat-msg-time">${time}</span>${statusHtml}</span>`;
 
@@ -4183,7 +4214,7 @@ function renderChatBubbles() {
 
     // === STICKER ===
     if (m.msg_type === 'sticker' && m.media_url) {
-      html += `<div class="chat-msg ${dir} sticker-msg${hasTail ? ' has-tail' : ''}">
+      html += `<div class="chat-msg ${dir} sticker-msg${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'sticker')}">
         <img src="${mediaUrl(m.media_url)}" alt="" style="max-width:160px;max-height:160px" loading="lazy">
       </div>`;
       continue;
@@ -4191,7 +4222,7 @@ function renderChatBubbles() {
 
     // === IMAGE ===
     if (m.msg_type === 'image' && m.media_url) {
-      html += `<div class="chat-msg ${dir} has-media${hasTail ? ' has-tail' : ''}">
+      html += `<div class="chat-msg ${dir} has-media${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'image')}">
         <div class="chat-msg-media">
           <img src="${mediaUrl(m.media_url)}" alt="" loading="lazy"
                onclick="window.open(this.src,'_blank')"
@@ -4207,20 +4238,23 @@ function renderChatBubbles() {
     if (m.msg_type === 'audio' && m.media_url) {
       const contact = chatState.contacts.find(c => c.phone === chatState.selectedPhone);
       const aName = dir === 'inbound' ? (contact?.name || '') : 'Neon';
-      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+      const audioId = 'aud_' + (m.wamid || m.ts).replace(/[^a-z0-9]/gi, '');
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <div class="chat-msg-audio">
-          ${avatarHtml(dir === 'inbound' ? chatState.selectedPhone : '0000', aName, 46)}
+          ${avatarHtml(dir === 'inbound' ? chatState.selectedPhone : '0000', aName, 40)}
           <div class="audio-wave">
             <div class="audio-bars" data-audio-src="${mediaUrl(m.media_url)}">
               ${generateAudioBars()}
             </div>
-            <div class="audio-dur">
+            <div class="audio-row">
               <audio preload="metadata" src="${mediaUrl(m.media_url)}" data-audio-el></audio>
-              <span data-audio-time>0:00</span>
+              <span class="audio-dur" data-audio-time>0:00</span>
+              <button class="audio-speed" data-audio-speed="1" title="Velocidad de reproducción">1x</button>
+              ${transcript ? `<button class="audio-toggle-transcript" data-toggle-transcript="${audioId}" title="Mostrar transcripción">📝</button>` : ''}
             </div>
           </div>
         </div>
-        ${transcript ? `<div class="chat-msg-transcript">"${escapeHtml(transcript)}"</div>` : ''}
+        ${transcript ? `<div class="chat-msg-transcript" id="${audioId}" style="display:none">"${escapeHtml(transcript)}"</div>` : ''}
         ${footer}
       </div>`;
       continue;
@@ -4228,7 +4262,7 @@ function renderChatBubbles() {
 
     // === VIDEO ===
     if (m.msg_type === 'video' && m.media_url) {
-      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <div class="chat-msg-video">
           <div class="v-icon">▶</div>
           <div>
@@ -4245,7 +4279,7 @@ function renderChatBubbles() {
     if (m.msg_type === 'document' && m.media_url) {
       const docName = bodyText || 'Documento';
       const ext = m.media_url.split('.').pop()?.toUpperCase() || 'DOC';
-      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <a href="${mediaUrl(m.media_url)}" target="_blank" style="text-decoration:none">
           <div class="chat-msg-doc">
             <div class="doc-icon">${ext.slice(0, 4)}</div>
@@ -4260,7 +4294,7 @@ function renderChatBubbles() {
     // Outbound enviado desde WA Business app/web: no tenemos contenido (Cloud API
     // sin Coexistencia), pero mostramos placeholder para que el chat no se vea vacío.
     if (!bodyText.trim() && dir === 'outbound' && m.msg_type === 'status') {
-      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <div class="chat-msg-unsupported" style="font-style:italic;opacity:.7">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="#8696a0"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
           <span>Respondido desde WhatsApp</span>
@@ -4276,7 +4310,7 @@ function renderChatBubbles() {
       const coordMatch = locData.match(/^(-?[\d.]+),(-?[\d.]+)/);
       let locDisplay = locData.replace(/^-?[\d.]+,-?[\d.]+\s*—?\s*/, '').trim() || 'Ubicación compartida';
       const mapLink = coordMatch ? `https://www.google.com/maps?q=${coordMatch[1]},${coordMatch[2]}` : '#';
-      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <a href="${mapLink}" target="_blank" style="text-decoration:none">
           <div class="chat-msg-location">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="#ef5350"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
@@ -4294,7 +4328,7 @@ function renderChatBubbles() {
     // === CONTACT CARD ===
     if (bodyText.startsWith('[contacto] ')) {
       const contactData = bodyText.slice(11);
-      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <div class="chat-msg-contact-card">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="#53bdeb"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
           <div style="color:#e9edef;font-size:14px">${escapeHtml(contactData)}</div>
@@ -4307,7 +4341,7 @@ function renderChatBubbles() {
     // === UNSUPPORTED / UNAVAILABLE ===
     if (m.msg_type === 'unsupported' || bodyText.startsWith('[mensaje no disponible]') || bodyText.startsWith('[tipo de mensaje no soportado') || bodyText.startsWith('[no soportado')) {
       const isUnavailable = bodyText.includes('no disponible');
-      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <div class="chat-msg-unsupported">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="#8696a0"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
           <span>${isUnavailable ? 'Mensaje no disponible' : 'Mensaje no compatible con la API'}</span>
@@ -4319,7 +4353,7 @@ function renderChatBubbles() {
 
     // === REVOKED (mensaje eliminado) ===
     if (m.msg_type === 'revoke') {
-      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}">
+      html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <div class="chat-msg-unsupported" style="font-style:italic;opacity:.7">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="#8696a0"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8 0-1.85.63-3.55 1.69-4.9L16.9 18.31A7.902 7.902 0 0112 20zm6.31-3.1L7.1 5.69A7.902 7.902 0 0112 4c4.42 0 8 3.58 8 8 0 1.85-.63 3.55-1.69 4.9z"/></svg>
           <span>Mensaje eliminado</span>
@@ -4351,10 +4385,166 @@ function renderChatMessages() {
   if (!container) return;
   container.innerHTML = renderChatBubbles();
   bindAudioPlayers();
+  bindMessageContextMenus();
   container.scrollTop = container.scrollHeight;
 }
 
+// Right-click sobre cualquier mensaje: muestra menú con "Reenviar".
+// Solo funciona si el mensaje tiene wamid (no para optimistic locales sin wamid).
+function bindMessageContextMenus() {
+  document.querySelectorAll('.chat-msg[data-wamid]').forEach(el => {
+    el.oncontextmenu = (e) => {
+      const wamid = el.dataset.wamid;
+      const msgType = el.dataset.msgType || 'text';
+      if (!wamid) return; // sin wamid no se puede reenviar
+      e.preventDefault();
+      showMessageActionsMenu(e.clientX, e.clientY, wamid, msgType);
+    };
+  });
+}
+
+function showMessageActionsMenu(x, y, wamid, msgType) {
+  document.getElementById('msg-action-menu')?.remove();
+  const menu = document.createElement('div');
+  menu.id = 'msg-action-menu';
+  menu.className = 'chat-context-menu';
+  menu.innerHTML = `
+    <button class="ccm-item" data-action="forward">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 8V4l8 8-8 8v-4H4V8h8z"/></svg>
+      Reenviar
+    </button>
+  `;
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.min(x, window.innerWidth - rect.width - 8) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - rect.height - 8) + 'px';
+  requestAnimationFrame(() => menu.classList.add('open'));
+  const close = () => { menu.remove(); document.removeEventListener('click', closer, true); document.removeEventListener('keydown', escer); };
+  function closer(ev) { if (!menu.contains(ev.target)) close(); }
+  function escer(ev) { if (ev.key === 'Escape') close(); }
+  setTimeout(() => {
+    document.addEventListener('click', closer, true);
+    document.addEventListener('keydown', escer);
+  }, 0);
+  menu.querySelector('[data-action="forward"]').onclick = (ev) => {
+    ev.stopPropagation();
+    close();
+    showForwardModal(wamid, msgType);
+  };
+}
+
+function showForwardModal(wamid, msgType) {
+  document.getElementById('forward-modal')?.remove();
+  const bg = document.createElement('div');
+  bg.id = 'forward-modal';
+  bg.className = 'modal-bg';
+  // contactos disponibles, ordenados por último mensaje
+  const contacts = [...chatState.contacts].filter(c => !isArchived(c.phone));
+  bg.innerHTML = `
+    <div class="modal" style="max-width:480px">
+      <div class="modal-h"><h3>Reenviar a…</h3></div>
+      <div class="modal-body" style="padding:0;display:flex;flex-direction:column">
+        <div style="padding:10px 14px;border-bottom:1px solid var(--border)">
+          <input type="text" id="fwd-search" placeholder="Buscar contacto…" autocomplete="off" style="width:100%;padding:8px 10px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-size:13px">
+        </div>
+        <div id="fwd-list" style="max-height:380px;overflow-y:auto;padding:6px 0">
+          ${contacts.map(c => `
+            <label class="fwd-item" data-phone="${escapeHtml(c.phone)}" data-name="${escapeHtml((c.name || '').toLowerCase())}">
+              <input type="checkbox" value="${escapeHtml(c.phone)}">
+              ${avatarHtml(c.phone, c.name, 36)}
+              <div class="fwd-item-text">
+                <div class="fwd-item-name">${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
+                <div class="fwd-item-sub">${escapeHtml(formatPhoneDisplay(c.phone))}</div>
+              </div>
+            </label>
+          `).join('')}
+        </div>
+      </div>
+      <div class="modal-actions">
+        <span id="fwd-count" style="margin-right:auto;color:var(--fg-subtle);font-size:12px">0 seleccionados</span>
+        <button class="btn btn-ghost modal-cancel">Cancelar</button>
+        <button class="btn btn-cyan" id="fwd-confirm" disabled>Reenviar</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(bg);
+  requestAnimationFrame(() => bg.classList.add('open'));
+  const close = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  bg.querySelector('.modal-cancel').onclick = close;
+  bg.addEventListener('click', e => { if (e.target === bg) close(); });
+  // search filter
+  const search = document.getElementById('fwd-search');
+  search.oninput = () => {
+    const q = search.value.toLowerCase();
+    document.querySelectorAll('.fwd-item').forEach(it => {
+      const name = it.dataset.name || '';
+      const phone = it.dataset.phone || '';
+      it.style.display = (name.includes(q) || phone.includes(q)) ? '' : 'none';
+    });
+  };
+  // selection counter
+  const updateCount = () => {
+    const checked = bg.querySelectorAll('input[type="checkbox"]:checked');
+    document.getElementById('fwd-count').textContent = `${checked.length} seleccionado${checked.length === 1 ? '' : 's'}`;
+    document.getElementById('fwd-confirm').disabled = checked.length === 0;
+  };
+  bg.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.onchange = updateCount);
+  // confirm
+  document.getElementById('fwd-confirm').onclick = async () => {
+    const phones = Array.from(bg.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+    if (!phones.length) return;
+    const btn = document.getElementById('fwd-confirm');
+    btn.disabled = true;
+    btn.textContent = 'Reenviando…';
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/forward', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ wamid, to_phones: phones })
+      });
+      const j = await r.json();
+      if (r.ok) {
+        toast(`✓ Reenviado a ${j.sent}/${phones.length}${j.failed ? ' (' + j.failed + ' fallidos)' : ''}`);
+        close();
+      } else {
+        toast('Error: ' + (j.error || 'fallo'));
+        btn.disabled = false;
+        btn.textContent = 'Reenviar';
+      }
+    } catch (e) {
+      toast('Error de red');
+      btn.disabled = false;
+      btn.textContent = 'Reenviar';
+    }
+  };
+  setTimeout(() => search.focus(), 50);
+}
+
 function bindAudioPlayers() {
+  // Speed buttons (1x → 1.5x → 2x → 1x)
+  document.querySelectorAll('.audio-speed').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const audioEl = btn.closest('.chat-msg-audio')?.querySelector('audio[data-audio-el]');
+      if (!audioEl) return;
+      const cur = parseFloat(btn.dataset.audioSpeed || '1');
+      const next = cur === 1 ? 1.5 : cur === 1.5 ? 2 : 1;
+      btn.dataset.audioSpeed = String(next);
+      btn.textContent = next + 'x';
+      audioEl.playbackRate = next;
+    };
+  });
+  // Toggle transcripción
+  document.querySelectorAll('[data-toggle-transcript]').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const target = document.getElementById(btn.dataset.toggleTranscript);
+      if (!target) return;
+      const visible = target.style.display !== 'none';
+      target.style.display = visible ? 'none' : 'block';
+      btn.classList.toggle('active', !visible);
+    };
+  });
   // Bind click on audio bars to play/pause
   document.querySelectorAll('.chat-msg-audio .audio-bars').forEach(bars => {
     const audioEl = bars.closest('.chat-msg-audio').querySelector('audio[data-audio-el]');
@@ -4439,6 +4629,7 @@ async function selectChatContact(phone) {
       main.innerHTML = renderChatConversation();
       bindChatConversation();
       bindAudioPlayers();
+      bindMessageContextMenus();
       // Scroll to bottom
       const msgs = document.getElementById('chat-messages');
       if (msgs) msgs.scrollTop = msgs.scrollHeight;
@@ -4505,30 +4696,70 @@ function bindChatConversation() {
   if (schedBtn) {
     schedBtn.onclick = () => showScheduleModal(chatState.selectedPhone);
   }
-  // Attach image (soporta múltiples). Las mandamos en serie con un pequeño
-  // delay para no chocar con el rate limit del WA Cloud API.
+  // Attach: soporta imágenes, videos, audios y documentos. Múltiples archivos.
+  // Mandamos en serie con delay para evitar rate limit del WA Cloud API.
   if (attachBtn && fileInput) {
     attachBtn.onclick = () => fileInput.click();
     fileInput.onchange = async () => {
       const files = Array.from(fileInput.files || []);
-      const phone = chatState.selectedPhone;
       fileInput.value = '';
-      if (!phone || !files.length) return;
-      if (files.length === 1) {
-        sendChatImage(phone, files[0], '');
-        return;
-      }
-      toast(`Enviando ${files.length} imágenes…`);
-      let sent = 0;
-      for (const f of files) {
-        try {
-          await sendChatImage(phone, f, '');
-          sent++;
-        } catch (_) {}
-        await new Promise(r => setTimeout(r, 400));
-      }
-      toast(`✓ ${sent}/${files.length} imágenes enviadas`);
+      await sendChatFiles(files);
     };
+  }
+  // Paste de imágenes desde clipboard (Ctrl+V con imagen copiada)
+  if (ta) {
+    ta.addEventListener('paste', async (e) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files = [];
+      for (const it of items) {
+        if (it.kind === 'file') {
+          const f = it.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (!files.length) return; // texto plano: dejá que el browser lo pegue normal
+      e.preventDefault();
+      await sendChatFiles(files);
+    });
+  }
+  // Drag and drop sobre el chat
+  const chatMain = document.querySelector('.chat-main');
+  if (chatMain && !chatMain.dataset.dropBound) {
+    chatMain.dataset.dropBound = '1';
+    let dragOverlay = null;
+    const showOverlay = () => {
+      if (dragOverlay) return;
+      dragOverlay = document.createElement('div');
+      dragOverlay.className = 'chat-drop-overlay';
+      dragOverlay.innerHTML = '<div class="chat-drop-inner">📎<br>Soltá para enviar</div>';
+      chatMain.appendChild(dragOverlay);
+    };
+    const hideOverlay = () => {
+      if (dragOverlay) { dragOverlay.remove(); dragOverlay = null; }
+    };
+    chatMain.addEventListener('dragenter', (e) => {
+      if (e.dataTransfer?.types?.includes('Files')) {
+        e.preventDefault();
+        showOverlay();
+      }
+    });
+    chatMain.addEventListener('dragover', (e) => {
+      if (e.dataTransfer?.types?.includes('Files')) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+      }
+    });
+    chatMain.addEventListener('dragleave', (e) => {
+      if (e.target === chatMain || e.target === dragOverlay) hideOverlay();
+    });
+    chatMain.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      hideOverlay();
+      const files = Array.from(e.dataTransfer?.files || []);
+      if (!files.length) return;
+      await sendChatFiles(files);
+    });
   }
   // Mic button
   if (micBtn) {
@@ -4873,7 +5104,21 @@ function playChatNotificationSound() {
   } catch (_) {}
 }
 
+// Dedupe global: el web worker y el main-thread polling pueden detectar el
+// mismo mensaje nuevo casi al mismo tiempo. Evitamos doble notif por phone+ts.
+const _recentNotifs = new Map(); // key: phone, value: lastNotifiedAt (ms)
+const _NOTIF_DEDUPE_MS = 6000; // 6s — más que el ciclo del polling
+
 function notifyNewMessage(contact) {
+  const phone = contact?.phone || '';
+  const now = Date.now();
+  const last = _recentNotifs.get(phone) || 0;
+  if (now - last < _NOTIF_DEDUPE_MS) return; // ya notificamos hace poco
+  _recentNotifs.set(phone, now);
+  // Limpieza vieja del Map
+  if (_recentNotifs.size > 100) {
+    for (const [k, v] of _recentNotifs) if (now - v > _NOTIF_DEDUPE_MS * 4) _recentNotifs.delete(k);
+  }
   playChatNotificationSound();
   // Browser notification solo si la pestaña no está visible (sino el sonido
   // y el badge en pantalla ya alcanzan).
