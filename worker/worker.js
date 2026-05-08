@@ -587,9 +587,17 @@ export default {
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const { to, name, lang, params } = body || {};
         if (!to || !name) return json({ error: 'missing fields (to, name)' }, 400);
+        const num = normalizeArPhone(to);
         const r = await waSendTemplate(env, to, name, lang || 'es', Array.isArray(params) ? params : []);
         await logWaEvent(env, { to, kind: 'template:' + name, ref: '', ok: r.ok, messageId: r.id, error: r.error });
         if (!r.ok) return json({ error: r.error, raw: r.raw }, r.status || 500);
+        // Guardar en wa_messages para que aparezca en el chat
+        try {
+          const previewBody = `[plantilla: ${name}]${Array.isArray(params) && params.length ? ' ' + params.join(', ') : ''}`;
+          await env.DB.prepare(
+            'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, '', 'template', previewBody, '', '', 'sent').run();
+        } catch (_) {}
         return json({ id: r.id });
       }
 

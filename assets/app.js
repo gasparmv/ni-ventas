@@ -4123,6 +4123,134 @@ function renderContactItem(c) {
   `;
 }
 
+// Devuelve el ts del último inbound del contacto seleccionado, o null.
+function lastInboundTs() {
+  const msgs = chatState.messages || [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.direction === 'inbound' && m.msg_type !== 'reaction') return m.ts;
+  }
+  return null;
+}
+
+// La "ventana de 24h" está abierta si hubo un inbound (que no sea reacción)
+// dentro de las últimas 24 horas. Si no, hay que mandar un template.
+function is24hWindowOpen() {
+  const last = lastInboundTs();
+  if (!last) return false;
+  const ageMs = Date.now() - new Date(last).getTime();
+  return ageMs < 24 * 60 * 60 * 1000;
+}
+
+function render24hBanner() {
+  if (is24hWindowOpen()) return '';
+  const last = lastInboundTs();
+  const sub = last
+    ? `Última respuesta del cliente: ${formatRelativeTime(last)}. Para escribir tenés que mandar una plantilla aprobada.`
+    : 'Esta conversación nunca tuvo un mensaje del cliente. Para escribir primero tenés que mandar una plantilla aprobada.';
+  return `<div class="window24-banner">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style="flex-shrink:0"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+    <div class="w24-text">
+      <div class="w24-title">Ventana de 24h cerrada</div>
+      <div class="w24-sub">${escapeHtml(sub)}</div>
+    </div>
+    <button class="btn btn-cyan w24-btn" id="btn-reopen-template">Reabrir con plantilla</button>
+  </div>`;
+}
+
+function formatRelativeTime(ts) {
+  const ms = Date.now() - new Date(ts).getTime();
+  const h = Math.floor(ms / (60 * 60 * 1000));
+  if (h < 24) return `hace ${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `hace ${d}d`;
+  const mo = Math.floor(d / 30);
+  return `hace ${mo} mes${mo === 1 ? '' : 'es'}`;
+}
+
+// Mostrar modal de confirmación + selector de plantilla, mandar la plantilla.
+async function showTemplateReopenModal() {
+  const phone = chatState.selectedPhone;
+  if (!phone) return;
+  const contact = chatState.contacts.find(c => c.phone === phone);
+  const fullName = contact?.name || '';
+  const firstName = fullName ? fullName.split(/\s+/)[0] : '';
+  document.getElementById('tpl-reopen-modal')?.remove();
+  const bg = document.createElement('div');
+  bg.id = 'tpl-reopen-modal';
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal" style="max-width:520px">
+      <div class="modal-h"><h3>Reabrir conversación</h3></div>
+      <div class="modal-body">
+        <p style="color:var(--fg-subtle);font-size:13px;margin:0 0 14px">
+          La ventana de 24h está cerrada. Mandando una plantilla aprobada se reabre la conversación.
+        </p>
+        <div style="margin-bottom:14px">
+          <label style="display:block;font-size:12px;color:var(--fg-subtle);margin-bottom:4px">Plantilla</label>
+          <select id="tpl-select" style="width:100%;padding:8px 10px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-size:13px">
+            <option value="prueba_de_plantilla|es">prueba_de_plantilla — "Hola {{1}}, como estas? Me comunico por x cosa" + 2 botones</option>
+          </select>
+        </div>
+        <div style="margin-bottom:14px">
+          <label style="display:block;font-size:12px;color:var(--fg-subtle);margin-bottom:4px">Nombre (variable {{1}})</label>
+          <input type="text" id="tpl-param" value="${escapeHtml(firstName)}" placeholder="Nombre del cliente" style="width:100%;padding:8px 10px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-size:13px">
+        </div>
+        <div style="font-size:12px;color:var(--fg-subtle)">
+          Cuando el cliente toca cualquier botón ("mE INTERESA" / "No me interesa") se reabre la ventana de 24h y vas a poder mandarle texto libre.
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost modal-cancel">Cancelar</button>
+        <button class="btn btn-cyan" id="tpl-send">Enviar plantilla</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(bg);
+  requestAnimationFrame(() => bg.classList.add('open'));
+  const close = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  bg.querySelector('.modal-cancel').onclick = close;
+  bg.addEventListener('click', e => { if (e.target === bg) close(); });
+  bg.querySelector('#tpl-send').onclick = async () => {
+    const sel = document.getElementById('tpl-select').value;
+    const [name, lang] = sel.split('|');
+    const param = document.getElementById('tpl-param').value.trim();
+    const sendBtn = bg.querySelector('#tpl-send');
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Enviando…';
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/template', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ to: phone, name, lang, params: param ? [param] : [] })
+      });
+      const j = await r.json();
+      if (!r.ok) {
+        toast('Error: ' + (j.error || 'fallo envío'));
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Enviar plantilla';
+        return;
+      }
+      chatState.messages.push({
+        ts: new Date().toISOString(),
+        wamid: j.id || '',
+        direction: 'outbound',
+        phone, sender_name: '',
+        msg_type: 'template',
+        body: `[plantilla: ${name}]${param ? ' ' + param : ''}`,
+        status: 'sent'
+      });
+      renderChatMessages();
+      close();
+      toast('Plantilla enviada ✓');
+    } catch (_) {
+      toast('Error de red');
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Enviar plantilla';
+    }
+  };
+}
+
 function renderChatNoSelect() {
   return `
     <div class="chat-no-select">
@@ -4270,6 +4398,7 @@ function renderChatConversation() {
     <button class="chat-scroll-down" id="chat-scroll-down" title="Ir al final">
       <svg viewBox="0 0 19 20" width="18" height="18" fill="currentColor"><path d="M3.8 6.7l5.7 5.7 5.7-5.7 1.6 1.6-7.3 7.2-7.3-7.2 1.6-1.6z"/></svg>
     </button>
+    ${render24hBanner()}
     <div class="chat-input-bar">
       <button class="btn-send btn-attach" id="btn-attach" title="Adjuntar imagen"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647a5.58 5.58 0 003.972-1.645l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.501.501 1.134.79 1.737.79.558 0 1.031-.224 1.37-.564l5.582-5.58a.747.747 0 10-1.055-1.06l-5.58 5.58c-.172.172-.42.156-.614-.04-.508-.51-.427-1.122-.07-1.478l7.916-7.916c.866-.866 2.358-.764 3.46.34.556.557.876 1.203.918 1.818.036.526-.176 1.047-.595 1.466L10.11 18.526a4.09 4.09 0 01-2.913 1.205 4.09 4.09 0 01-2.913-1.205 4.09 4.09 0 01-1.205-2.913c0-1.1.428-2.134 1.205-2.911l8.647-8.646a.747.747 0 00-1.055-1.06l-8.647 8.646A5.58 5.58 0 001.816 15.556z"/></svg></button>
       <input type="file" id="chat-file-input" accept="image/*,video/*,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,text/plain" multiple style="display:none">
@@ -5301,6 +5430,9 @@ function bindChatConversation() {
     chatState.editingNoteFor = phone;
     refreshPostit();
   };
+  // Reabrir conversación con plantilla (banner de 24h)
+  const reopenBtn = document.getElementById('btn-reopen-template');
+  if (reopenBtn) reopenBtn.onclick = () => showTemplateReopenModal();
   // WhatsApp externo: abre wa.me con el contacto y copia el ultimo mensaje
   // entrante al portapapeles para que Joaco lo pueda ver de contexto en
   // su celular. Workaround mientras el numero esta deregistrado.
