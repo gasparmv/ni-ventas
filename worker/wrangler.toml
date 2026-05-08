@@ -6,6 +6,7 @@ compatibility_date = "2026-05-01"
 [vars]
 WA_PHONE_NUMBER_ID = "919964037861500"
 WA_API_VERSION = "v25.0"
+WA_BUSINESS_ACCOUNT_ID = "800446462838166"
 
 # La D1 binding se completa con el ID que devuelve `wrangler d1 create`.
 [[d1_databases]]

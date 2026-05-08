@@ -940,23 +940,28 @@ export default {
       // ===== Bulk messaging =====
       if (request.method === 'POST' && path === '/admin/wa/send-bulk') {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        const { label_ids, message, template_name } = body || {};
+        const { label_ids, message, template_name, template_lang } = body || {};
         if ((!label_ids || !label_ids.length) && !body.phones) return json({ error: 'missing label_ids or phones' }, 400);
         if (!message && !template_name) return json({ error: 'missing message or template_name' }, 400);
-        // Get phones for the labels
-        let phones = body.phones || [];
+        // phones acepta dos formatos:
+        //   1) ["54911...", "54922..."]  (sin params, mismo mensaje a todos)
+        //   2) [{phone: "54911...", params: ["Juan"]}, ...]  (params por destinatario para template)
+        let recipients = [];
         if (label_ids && label_ids.length) {
           const placeholders = label_ids.map(() => '?').join(',');
           const rs = await env.DB.prepare(`SELECT DISTINCT phone FROM contact_labels WHERE label_id IN (${placeholders})`).bind(...label_ids).all();
-          phones = (rs.results || []).map(r => r.phone);
+          recipients = (rs.results || []).map(r => ({ phone: r.phone, params: [] }));
+        } else if (Array.isArray(body.phones)) {
+          recipients = body.phones.map(p => typeof p === 'string' ? { phone: p, params: [] } : { phone: p.phone, params: p.params || [] });
         }
-        if (!phones.length) return json({ error: 'no contacts found for these labels' }, 400);
+        if (!recipients.length) return json({ error: 'no contacts' }, 400);
         const results = { sent: 0, failed: 0, errors: [] };
-        for (const ph of phones) {
+        for (const it of recipients) {
+          const ph = it.phone;
           try {
             let r;
             if (template_name) {
-              r = await waSendTemplate(env, ph, template_name, 'es', []);
+              r = await waSendTemplate(env, ph, template_name, template_lang || 'es', it.params || []);
             } else {
               r = await waSendText(env, ph, message);
             }
@@ -978,6 +983,37 @@ export default {
           }
         }
         return json(results);
+      }
+
+      // ===== Templates: crear y listar =====
+      if (request.method === 'POST' && path === '/admin/wa/template-create') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { name, category, language, body_text, example_params } = body || {};
+        if (!name || !category || !language || !body_text) return json({ error: 'missing fields' }, 400);
+        if (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN) return json({ error: 'WA not configured' }, 500);
+        const v = env.WA_API_VERSION || 'v25.0';
+        const components = [{ type: 'BODY', text: body_text }];
+        if (Array.isArray(example_params) && example_params.length) {
+          components[0].example = { body_text: [example_params] };
+        }
+        const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_BUSINESS_ACCOUNT_ID}/message_templates`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, category, language, components })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: data?.error?.message || 'create failed', raw: data }, r.status || 500);
+        return json({ ok: true, id: data.id, status: data.status, category: data.category });
+      }
+      if (request.method === 'GET' && path === '/admin/wa/templates') {
+        if (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN) return json({ error: 'WA not configured' }, 500);
+        const v = env.WA_API_VERSION || 'v25.0';
+        const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_BUSINESS_ACCOUNT_ID}/message_templates?limit=100&fields=name,status,category,language,components`, {
+          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: data?.error?.message || 'list failed' }, r.status || 500);
+        return json({ templates: data.data || [] });
       }
 
       // Servir medios desde R2
