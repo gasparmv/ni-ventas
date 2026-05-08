@@ -1741,7 +1741,20 @@ table.t td.cliente { font-weight: 600; }
 }
 .chat-msg.inbound .chat-msg-actions { right: -76px; }
 .chat-msg.outbound .chat-msg-actions { left: -76px; }
-.chat-msg:hover .chat-msg-actions { opacity: 1; pointer-events: auto; }
+/* Puente invisible entre el bubble y los iconos. Sin esto el hover se pierde
+   al cruzar el gap y los iconos desaparecen antes de poder clickearlos. */
+.chat-msg-actions::after {
+  content: '';
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 16px;
+  pointer-events: auto;
+}
+.chat-msg.inbound .chat-msg-actions::after { left: -16px; }
+.chat-msg.outbound .chat-msg-actions::after { right: -16px; }
+.chat-msg:hover .chat-msg-actions,
+.chat-msg-actions:hover { opacity: 1; pointer-events: auto; }
 .chat-msg-actions .cma-btn {
   width: 30px;
   height: 30px;
