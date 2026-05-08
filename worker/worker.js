@@ -1005,6 +1005,18 @@ export default {
         if (!r.ok) return json({ error: data?.error?.message || 'create failed', raw: data }, r.status || 500);
         return json({ ok: true, id: data.id, status: data.status, category: data.category });
       }
+      // Status del número productivo (tier de mensajería + quality rating).
+      if (request.method === 'GET' && path === '/admin/wa/phone-status') {
+        if (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN) return json({ error: 'WA not configured' }, 500);
+        const v = env.WA_API_VERSION || 'v25.0';
+        const fields = 'id,display_phone_number,quality_rating,messaging_limit_tier,verified_name,status,name_status,throughput,health_status';
+        const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_BUSINESS_ACCOUNT_ID}/phone_numbers?fields=${fields}`, {
+          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: data?.error?.message || 'fetch failed', raw: data }, r.status || 500);
+        return json({ phones: data.data || [] });
+      }
       if (request.method === 'GET' && path === '/admin/wa/templates') {
         if (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN) return json({ error: 'WA not configured' }, 500);
         const v = env.WA_API_VERSION || 'v25.0';
@@ -1097,8 +1109,45 @@ export default {
     if (hour === 13) ctx.waitUntil(runScheduled(env));
     // Follow-up automático de presupuestos del cotizador: solo en horario AR (09-22 AR = 12-01 UTC)
     if (hour >= 12 || hour <= 1) ctx.waitUntil(processPresupuestoFollowups(env));
+    // Monitorear cambios de status de templates (PENDING → APPROVED/REJECTED)
+    ctx.waitUntil(monitorTemplateStatus(env));
   }
 };
+
+// ===== Monitor de templates: notifica al admin cuando cambia el status =====
+async function monitorTemplateStatus(env) {
+  if (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN || !env.ADMIN_NOTIFY_PHONE) return;
+  try {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS template_status_cache (name TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL)').run();
+    const v = env.WA_API_VERSION || 'v25.0';
+    const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_BUSINESS_ACCOUNT_ID}/message_templates?limit=100&fields=name,status,category`, {
+      headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
+    });
+    if (!r.ok) return;
+    const data = await r.json().catch(() => ({}));
+    const templates = data?.data || [];
+    for (const t of templates) {
+      const name = t.name;
+      const status = t.status;
+      if (!name || !status) continue;
+      const cached = await env.DB.prepare('SELECT status FROM template_status_cache WHERE name = ?').bind(name).first();
+      const prevStatus = cached?.status || null;
+      if (prevStatus === status) continue; // sin cambio
+      await env.DB.prepare(
+        'INSERT INTO template_status_cache (name, status, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at'
+      ).bind(name, status, new Date().toISOString()).run();
+      // Solo notifica si pasó de PENDING a algo decidido (no en la primera carga del cache).
+      const becameDecided = prevStatus === 'PENDING' && (status === 'APPROVED' || status === 'REJECTED');
+      if (becameDecided) {
+        const emoji = status === 'APPROVED' ? '✅' : '❌';
+        const msg = `${emoji} Template "${name}" ahora está ${status}.`;
+        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, msg); } catch (_) {}
+      }
+    }
+  } catch (e) {
+    await logWaEvent(env, { to: '', kind: 'template-monitor', ref: '', ok: false, error: e.message });
+  }
+}
 
 // ===== Scheduled Messages =====
 async function processScheduledMessages(env) {
