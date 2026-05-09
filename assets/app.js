@@ -1829,21 +1829,11 @@ function bpCompute() {
     }
   }
 
-  // Por caja / vendedor (solo del período)
-  const cajas = new Map();
-  const addCaja = (name, ventas, count, vertical) => {
-    if (!name) return;
-    if (!cajas.has(name)) cajas.set(name, { ventas: 0, count: 0, verticals: new Set() });
-    const c = cajas.get(name);
-    c.ventas += ventas; c.count += count; c.verticals.add(vertical);
-  };
-  for (const r of directo) addCaja(r.caja || 'Sin caja', r.venta, 1, 'directo');
-  for (const r of distris) addCaja(r.caja || 'Sin caja', r.venta, 1, 'distris');
-  for (const r of insumos) addCaja(r.caja || 'Sin caja', r.venta, 1, 'insumos');
-  for (const r of cursos)  addCaja(r.caja || 'Sin caja', r.vendido, 1, 'cursos');
-
-  // Top carteles del período (más caros)
-  const topCarteles = [...directo, ...distris]
+  // Top carteles del período (más caros) — clasificamos por canal (Directo/Distri)
+  const topCarteles = [
+    ...directo.map(r => ({ ...r, canal: 'Directo' })),
+    ...distris.map(r => ({ ...r, canal: 'Distri' }))
+  ]
     .sort((a, b) => b.venta - a.venta)
     .slice(0, 8);
 
@@ -1852,7 +1842,7 @@ function bpCompute() {
   const ventaCarteles = verticals.directo.ventas + verticals.distris.ventas;
   const aovCarteles = totalCarteles ? ventaCarteles / totalCarteles : 0;
 
-  return { period, range, verticals, total, cajas, topCarteles, totalCarteles, aovCarteles };
+  return { period, range, verticals, total, topCarteles, totalCarteles, aovCarteles };
 }
 
 // === Render ===
@@ -2035,39 +2025,21 @@ function renderBusinessPanel() {
       </div>`;
     })()}
 
-    <div class="bp-two-col">
-      <div class="card">
-        <div class="card-h"><h3>Top carteles del período</h3></div>
-        <table class="bp-table compact">
-          <thead><tr><th>Cliente</th><th>Fecha</th><th>Canal</th><th class="num">Venta</th></tr></thead>
-          <tbody>
-            ${c.topCarteles.length ? c.topCarteles.map(p => `
-              <tr>
-                <td>${escapeHtml(p.cliente || '—')}</td>
-                <td>${p.fecha}</td>
-                <td><span class="bp-pill ${p.caja ? '' : 'muted'}">${escapeHtml(p.caja || 'Directo')}</span></td>
-                <td class="num">${bpFmt(p.venta)}</td>
-              </tr>
-            `).join('') : '<tr><td colspan="4" class="muted" style="text-align:center;padding:14px">Sin ventas en el período</td></tr>'}
-          </tbody>
-        </table>
-      </div>
-      <div class="card">
-        <div class="card-h"><h3>Por caja / vendedor</h3></div>
-        <table class="bp-table compact">
-          <thead><tr><th>Caja</th><th class="num"># vts</th><th class="num">Total</th><th class="num">ø</th></tr></thead>
-          <tbody>
-            ${[...c.cajas.entries()].sort((a,b)=>b[1].ventas-a[1].ventas).map(([name, x]) => `
-              <tr>
-                <td><b>${escapeHtml(name)}</b></td>
-                <td class="num">${x.count}</td>
-                <td class="num">${bpFmt(x.ventas)}</td>
-                <td class="num">${bpFmt(x.count ? x.ventas/x.count : 0)}</td>
-              </tr>
-            `).join('') || '<tr><td colspan="4" class="muted" style="text-align:center;padding:14px">Sin datos</td></tr>'}
-          </tbody>
-        </table>
-      </div>
+    <div class="card" style="margin-top:18px">
+      <div class="card-h"><h3>Top carteles del período</h3><span class="muted" style="margin-left:auto;font-size:12px">${escapeHtml(periodLabel)} · ${c.totalCarteles} carteles</span></div>
+      <table class="bp-table compact">
+        <thead><tr><th>Cliente</th><th>Fecha</th><th>Canal</th><th class="num">Venta</th></tr></thead>
+        <tbody>
+          ${c.topCarteles.length ? c.topCarteles.map(p => `
+            <tr>
+              <td>${escapeHtml(p.cliente || '—')}</td>
+              <td>${p.fecha}</td>
+              <td><span class="bp-pill" style="background:${p.canal === 'Directo' ? 'rgba(255,24,48,.12)' : 'rgba(143,212,222,.12)'};color:${p.canal === 'Directo' ? 'var(--neon-red)' : 'var(--neon-cyan)'}">${p.canal}</span></td>
+              <td class="num">${bpFmt(p.venta)}</td>
+            </tr>
+          `).join('') : '<tr><td colspan="4" class="muted" style="text-align:center;padding:14px">Sin ventas en el período</td></tr>'}
+        </tbody>
+      </table>
     </div>
   `;
 }

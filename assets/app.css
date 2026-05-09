@@ -3134,16 +3134,6 @@ table.t td.cliente { font-weight: 600; }
 }
 .bp-pill.muted { opacity: .5; }
 
-.bp-two-col {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--s-4);
-  margin-top: var(--s-4);
-}
-@media (max-width: 1100px) {
-  .bp-two-col { grid-template-columns: 1fr; }
-}
-
 /* Funnel del panel */
 .bp-funnel {
   display: flex;
