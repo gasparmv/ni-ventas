@@ -1215,40 +1215,64 @@ function toggleDashMonth(m) {
 function setDashAll() { STATE.dashMonths = 'all'; render(); }
 function setDashCurrent() { STATE.dashMonths = null; render(); }
 
+// Primera fecha registrada en el cotizador. Antes de eso no hay tracking
+// de presupuestos, así que cualquier período que arranque antes da datos
+// parciales en el denominador.
+function getTrackingStartDate() {
+  const all = STATE.presupuestos || [];
+  if (!all.length) return null;
+  return all.reduce((min, p) => p.fecha < min ? p.fecha : min, all[0].fecha);
+}
+
 // Tasa de cierre Pedidos Directo (agregada del período):
 //   # ventas del período / # presupuestos enviados del período
 // Es la métrica contable simple que matchea con la mentalidad de negocio:
 // "de cada 100 cotizaciones que mando, ¿cuántas se transforman en venta?".
 //
-// Importante: hay desfase temporal (un presu de marzo puede cerrar en abril),
-// pero a nivel agregado mensual/anual los desfases se compensan. Para un mes
-// individual puede dar levemente sesgado.
-//
 // monthsFilter: null = mes actual, Set('YYYY-MM') = filtro, 'all' = todos.
 function getTasaCierreDirecto(monthsFilter) {
   let pptos = STATE.presupuestos || [];
   let pedidos = STATE.pedidos || [];
+  // Calcular el rango de fechas que cubre el filtro para detectar parcialidad
+  let rangeStart = null, rangeEnd = null;
   if (monthsFilter === 'all') {
-    // todos
+    // todos los meses con datos en pedidos+presupuestos
+    const allDates = [...pedidos.map(p=>p.fecha), ...pptos.map(p=>p.fecha)];
+    if (allDates.length) {
+      rangeStart = allDates.reduce((m,d)=>d<m?d:m, allDates[0]);
+      rangeEnd = allDates.reduce((m,d)=>d>m?d:m, allDates[0]);
+    }
   } else if (monthsFilter instanceof Set) {
     pptos = pptos.filter(p => monthsFilter.has(getMonth(p.fecha)));
     pedidos = pedidos.filter(p => monthsFilter.has(getMonth(p.fecha)));
+    const monthsArr = [...monthsFilter].sort();
+    if (monthsArr.length) {
+      const [y0,m0] = monthsArr[0].split('-');
+      const [y1,m1] = monthsArr[monthsArr.length-1].split('-');
+      rangeStart = new Date(+y0, +m0-1, 1);
+      rangeEnd = new Date(+y1, +m1, 0); // último día del mes
+    }
   } else {
     const cur = getCurrentMonth();
     pptos = pptos.filter(p => getMonth(p.fecha) === cur);
     pedidos = pedidos.filter(p => getMonth(p.fecha) === cur);
+    const [y,m] = cur.split('-');
+    rangeStart = new Date(+y, +m-1, 1);
+    rangeEnd = TODAY;
   }
   const enviados = pptos.length;
   const vendidos = pedidos.length;
   const tasa = enviados ? (vendidos / enviados) : 0;
-  // Match-based (info secundaria): cuántos presu del período tienen pedido
-  // asociado por nombre+precio. Subestima porque exige match exacto.
+  // Match-based: cuántos presu del período tienen pedido asociado por nombre+precio
   let cerradosMatch = 0;
   for (const ppto of pptos) {
     const st = presupuestoStatus(ppto);
     if (st.state === 'cerrado') cerradosMatch++;
   }
-  return { enviados, vendidos, cerradosMatch, tasa };
+  // Detectar parcialidad: si el rango empieza antes de que se empezó a trackear
+  const trackingStart = getTrackingStartDate();
+  const partial = (trackingStart && rangeStart && rangeStart < trackingStart);
+  return { enviados, vendidos, cerradosMatch, tasa, partial, trackingStart };
 }
 
 function presupuestoStatus(ppto) {
@@ -1552,7 +1576,7 @@ function renderDashboard() {
         <div class="kpi"><div class="kpi-label">Ventas mes</div><div class="kpi-value">${fmtMoney(totalMes)}</div><div class="kpi-delta">${cur.length} pedidos</div></div>
         <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${fmtMoney(aov)}</div><div class="kpi-delta">AOV mes</div></div>
         <div class="kpi"><div class="kpi-label">% Cobrado</div><div class="kpi-value">${pctCobrado}%</div><div class="kpi-delta">${fmtMoney(cobrado)} / ${fmtMoney(totalMes)}</div></div>
-        <div class="kpi cyan"><div class="kpi-label">Tasa de cierre</div><div class="kpi-value">${(tc.tasa*100).toFixed(1)}%</div><div class="kpi-delta">${tc.vendidos} ventas / ${tc.enviados} presu</div></div>
+        <div class="kpi cyan"${tc.partial ? ' title="Datos parciales: tracking empezó el ' + fmtDate(tc.trackingStart) + '"' : ''}><div class="kpi-label">Tasa de cierre${tc.partial ? ' <span class="partial-flag">parcial</span>' : ''}</div><div class="kpi-value">${(tc.tasa*100).toFixed(1)}%</div><div class="kpi-delta">${tc.vendidos} ventas / ${tc.enviados} presu${tc.partial ? ' · desde ' + fmtDate(tc.trackingStart) : ''}</div></div>
         <div class="kpi"><div class="kpi-label">Total año</div><div class="kpi-value">${fmtMoney(STATE.pedidos.reduce((a,p)=>a+p.precio+p.precioDimmer,0))}</div><div class="kpi-delta">${STATE.pedidos.length} pedidos · año</div></div>
       </div>`;
     })()}
@@ -1942,7 +1966,7 @@ function renderBusinessPanel() {
         <div class="kpi cyan"><div class="kpi-label">Costos totales</div><div class="kpi-value">${bpFmt(c.total.costos)}</div><div class="kpi-delta">${c.total.fijos ? 'Fijos: ' + bpFmt(c.total.fijos) : Math.round((c.total.costos/Math.max(1,c.total.ventas))*100) + '% s/ ventas'}</div></div>
         <div class="kpi"><div class="kpi-label">Margen operativo (CMA)</div><div class="kpi-value" style="color:${c.total.margen >= 0 ? 'var(--success, #25D366)' : 'var(--neon-red)'}">${bpFmt(c.total.margen)}</div><div class="kpi-delta">${Math.round(c.total.margenPct*100)}% del ingreso</div></div>
         <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${bpFmt(c.total.aov)}</div><div class="kpi-delta">AOV global</div></div>
-        <div class="kpi"><div class="kpi-label">Tasa de cierre Directo</div><div class="kpi-value">${(tc.tasa*100).toFixed(1)}%</div><div class="kpi-delta">${tc.vendidos} ventas / ${tc.enviados} presu</div></div>
+        <div class="kpi"${tc.partial ? ' title="Datos parciales: tracking empezó el ' + fmtDate(tc.trackingStart) + '"' : ''}><div class="kpi-label">Tasa de cierre Directo${tc.partial ? ' <span class="partial-flag">parcial</span>' : ''}</div><div class="kpi-value">${(tc.tasa*100).toFixed(1)}%</div><div class="kpi-delta">${tc.vendidos} ventas / ${tc.enviados} presu${tc.partial ? ' · desde ' + fmtDate(tc.trackingStart) : ''}</div></div>
         <div class="kpi cyan"><div class="kpi-label">Carteles totales</div><div class="kpi-value">${c.totalCarteles}</div><div class="kpi-delta">ø ${bpFmt(c.aovCarteles)} c/u</div></div>
       </div>`;
     })()}
@@ -2018,6 +2042,11 @@ function renderBusinessPanel() {
           <h3>Funnel Pedidos Directo · Presupuestos → Ventas</h3>
           <span class="muted" style="margin-left:auto;font-size:12px">${escapeHtml(periodLabel)}</span>
         </div>
+        ${tc.partial ? `<div class="bp-partial-banner">
+          ⚠ Datos parciales: el tracking de presupuestos empezó el <b>${fmtDate(tc.trackingStart)}</b>.
+          El denominador (# presupuestos) no incluye los anteriores a esa fecha,
+          así que la tasa real del período puede ser más baja.
+        </div>` : ''}
         <div style="padding:16px 20px">
           <div class="bp-funnel">
             <div class="bp-funnel-row">
