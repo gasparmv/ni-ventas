@@ -11,6 +11,13 @@ const CONFIG = {
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
   cotizadorSheets: ['2026'],
+  // Hojas históricas pre-tracking-por-fecha. Cada fila = 1 presupuesto del mes.
+  // Sin columna de fecha — asignamos día 15 del mes como referencia.
+  cotizadorHistoricalSheets: [
+    { name: 'ENERO',   month: '2026-01' },
+    { name: 'FEBRERO', month: '2026-02' },
+    { name: 'MARZO',   month: '2026-03' },
+  ],
   matchPriceTolerance: 0.20,   // ±20%
   presupuestoFollowupDays: 7,  // miércoles a miércoles
   presupuestoCutoff: '2026-04-27',   // presupuestos anteriores quedan dados por vencidos / fuera del seguimiento activo
@@ -1003,20 +1010,32 @@ async function loadAll(opts) {
     }
   }
   try {
-    // Cargar ventas y cotizador EN PARALELO (antes era serial → suma latencia).
-    const [ventasRows, ...cotizadorResults] = await Promise.all([
+    // Cargar ventas + cotizador moderno + hojas históricas EN PARALELO.
+    const cotizadorN = CONFIG.cotizadorSheets.length;
+    const histN = (CONFIG.cotizadorHistoricalSheets || []).length;
+    const all = await Promise.all([
       fetchSheet(CONFIG.ventasSheetId, CONFIG.ventasSheetName),
       ...CONFIG.cotizadorSheets.map(async sheet => {
         let rows = await fetchCotizadorViaAppsScript(sheet);
         if (!rows) rows = await fetchSheet(CONFIG.cotizadorSheetId, sheet);
         return { sheet, rows };
+      }),
+      ...(CONFIG.cotizadorHistoricalSheets || []).map(async ({ name, month }) => {
+        const rows = await fetchSheet(CONFIG.cotizadorSheetId, name);
+        return { historical: true, name, month, rows };
       })
     ]);
+    const ventasRows = all[0];
+    const cotizadorResults = all.slice(1, 1 + cotizadorN);
+    const historicalResults = all.slice(1 + cotizadorN, 1 + cotizadorN + histN);
     if (!ventasRows) throw new Error('No se pudo cargar el Sheet "Ventas/2026". Verificá que esté público.');
     STATE.pedidos = parseVentas(ventasRows);
     const presupuestosAll = [];
     for (const { sheet, rows } of cotizadorResults) {
       if (rows) presupuestosAll.push(...parseCotizador(rows, sheet));
+    }
+    for (const { name, month, rows } of historicalResults) {
+      if (rows) presupuestosAll.push(...parseCotizadorHistorical(rows, month));
     }
     STATE.presupuestos = presupuestosAll;
     matchPresupuestos();
@@ -1105,6 +1124,43 @@ function parseCotizador(rows, sheetName) {
       precio,
       telefono: contacto,
       canal
+    });
+  }
+  return out;
+}
+
+// Parser para hojas históricas (ENERO/FEBRERO/MARZO) — sin fecha por fila.
+// Headers: ch, m2, diseño, Tamaño (cm), '', Neon (mt), Transparente, Negro
+// Asigna fecha = día 15 del mes (referencia para filtros mensuales).
+function parseCotizadorHistorical(rows, monthYM) {
+  const out = [];
+  if (!rows || rows.length < 2) return out;
+  const [y, m] = monthYM.split('-').map(Number);
+  const fecha = new Date(y, m - 1, 15, 12, 0, 0); // mediodía día 15
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i] || [];
+    const nombre = String(r[2] || '').trim();
+    if (!nombre) continue;
+    const precioTrans = parseNum(r[6]);
+    const precioNegro = parseNum(r[7]);
+    const precio = Math.max(precioTrans, precioNegro);
+    out.push({
+      idx: i,
+      sheet: monthYM, // '2026-01' etc para que match con getMonth()
+      fecha,
+      m2: parseNum(r[1]),
+      nombre,
+      tamCm: parseNum(r[3]),
+      ancho: parseNum(r[4]),
+      neonMt: parseNum(r[5]),
+      tipo: '',
+      precioTrans,
+      precioNegro,
+      precioReventa: 0,
+      precio,
+      telefono: '',
+      canal: '',
+      historical: true
     });
   }
   return out;
@@ -1215,50 +1271,60 @@ function toggleDashMonth(m) {
 function setDashAll() { STATE.dashMonths = 'all'; render(); }
 function setDashCurrent() { STATE.dashMonths = null; render(); }
 
-// Primera fecha registrada en el cotizador. Antes de eso no hay tracking
-// de presupuestos, así que cualquier período que arranque antes da datos
-// parciales en el denominador.
-function getTrackingStartDate() {
-  const all = STATE.presupuestos || [];
-  if (!all.length) return null;
-  return all.reduce((min, p) => p.fecha < min ? p.fecha : min, all[0].fecha);
+// Detecta si los datos de presupuestos son parciales para un conjunto de meses.
+// Lógica: para cada mes del rango, mirar si está cubierto:
+//   1) Por una hoja histórica (ENERO/FEBRERO/MARZO) → COMPLETO
+//   2) Por cotizador moderno con fecha mínima ≈ día 1 → COMPLETO
+//   3) Por cotizador moderno con fecha mínima > día 5 → PARCIAL desde esa fecha
+// Devuelve { partial: boolean, since: Date|null } donde since es la fecha
+// más temprana del mes con tracking incompleto.
+function detectPartialPresupuestos(monthsArr) {
+  const histMonths = new Set((CONFIG.cotizadorHistoricalSheets || []).map(h => h.month));
+  let partial = false;
+  let since = null;
+  for (const ym of monthsArr) {
+    if (histMonths.has(ym)) continue; // tiene hoja histórica completa
+    // Mínima fecha de presupuestos no-historicos del mes
+    const inMonth = (STATE.presupuestos || []).filter(p =>
+      !p.historical && getMonth(p.fecha) === ym
+    );
+    if (!inMonth.length) {
+      // mes sin datos modernos y sin hoja histórica → completamente vacío
+      partial = true;
+      const [y,m] = ym.split('-').map(Number);
+      const monthStart = new Date(y, m-1, 1);
+      if (!since || monthStart < since) since = monthStart;
+      continue;
+    }
+    const minFecha = inMonth.reduce((min, p) => p.fecha < min ? p.fecha : min, inMonth[0].fecha);
+    if (minFecha.getDate() > 5) {
+      partial = true;
+      if (!since || minFecha < since) since = minFecha;
+    }
+  }
+  return { partial, since };
 }
 
 // Tasa de cierre Pedidos Directo (agregada del período):
 //   # ventas del período / # presupuestos enviados del período
-// Es la métrica contable simple que matchea con la mentalidad de negocio:
-// "de cada 100 cotizaciones que mando, ¿cuántas se transforman en venta?".
-//
 // monthsFilter: null = mes actual, Set('YYYY-MM') = filtro, 'all' = todos.
 function getTasaCierreDirecto(monthsFilter) {
   let pptos = STATE.presupuestos || [];
   let pedidos = STATE.pedidos || [];
-  // Calcular el rango de fechas que cubre el filtro para detectar parcialidad
-  let rangeStart = null, rangeEnd = null;
+  let monthsArr = [];
   if (monthsFilter === 'all') {
-    // todos los meses con datos en pedidos+presupuestos
-    const allDates = [...pedidos.map(p=>p.fecha), ...pptos.map(p=>p.fecha)];
-    if (allDates.length) {
-      rangeStart = allDates.reduce((m,d)=>d<m?d:m, allDates[0]);
-      rangeEnd = allDates.reduce((m,d)=>d>m?d:m, allDates[0]);
-    }
+    const allMonths = new Set();
+    for (const p of [...pptos, ...pedidos]) allMonths.add(getMonth(p.fecha));
+    monthsArr = [...allMonths];
   } else if (monthsFilter instanceof Set) {
     pptos = pptos.filter(p => monthsFilter.has(getMonth(p.fecha)));
     pedidos = pedidos.filter(p => monthsFilter.has(getMonth(p.fecha)));
-    const monthsArr = [...monthsFilter].sort();
-    if (monthsArr.length) {
-      const [y0,m0] = monthsArr[0].split('-');
-      const [y1,m1] = monthsArr[monthsArr.length-1].split('-');
-      rangeStart = new Date(+y0, +m0-1, 1);
-      rangeEnd = new Date(+y1, +m1, 0); // último día del mes
-    }
+    monthsArr = [...monthsFilter];
   } else {
     const cur = getCurrentMonth();
     pptos = pptos.filter(p => getMonth(p.fecha) === cur);
     pedidos = pedidos.filter(p => getMonth(p.fecha) === cur);
-    const [y,m] = cur.split('-');
-    rangeStart = new Date(+y, +m-1, 1);
-    rangeEnd = TODAY;
+    monthsArr = [cur];
   }
   const enviados = pptos.length;
   const vendidos = pedidos.length;
@@ -1266,13 +1332,12 @@ function getTasaCierreDirecto(monthsFilter) {
   // Match-based: cuántos presu del período tienen pedido asociado por nombre+precio
   let cerradosMatch = 0;
   for (const ppto of pptos) {
+    if (ppto.historical) continue; // las históricas no se matchean
     const st = presupuestoStatus(ppto);
     if (st.state === 'cerrado') cerradosMatch++;
   }
-  // Detectar parcialidad: si el rango empieza antes de que se empezó a trackear
-  const trackingStart = getTrackingStartDate();
-  const partial = (trackingStart && rangeStart && rangeStart < trackingStart);
-  return { enviados, vendidos, cerradosMatch, tasa, partial, trackingStart };
+  const { partial, since } = detectPartialPresupuestos(monthsArr);
+  return { enviados, vendidos, cerradosMatch, tasa, partial, trackingStart: since };
 }
 
 function presupuestoStatus(ppto) {
