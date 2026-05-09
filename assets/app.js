@@ -77,7 +77,7 @@ const STATE = {
   cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '' },
   cotizadorSaving: false,
   // Panel de negocio (solo Gaspar) — datos del Sheet "2025 V4"
-  businessPanel: { data: null, loading: false, error: null, lastFetch: 0, period: 'month' }
+  businessPanel: { data: null, loading: false, error: null, lastFetch: 0, period: 'current' }
 };
 
 // ============ COTIZADOR ============
@@ -1642,29 +1642,50 @@ function bpWeekRange() {
   const sat = new Date(mon); sat.setDate(mon.getDate() + 5); sat.setHours(23,59,59,999);
   return { start: mon, end: sat };
 }
-function bpMonthRange() {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), 1);
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-  return { start, end };
+function bpMonthRange(yyyymm) {
+  // yyyymm opcional: '2026-04'. Si no, mes actual.
+  let y, m;
+  if (yyyymm) { const p = yyyymm.split('-'); y = +p[0]; m = +p[1] - 1; }
+  else { const now = new Date(); y = now.getFullYear(); m = now.getMonth(); }
+  return {
+    start: new Date(y, m, 1),
+    end: new Date(y, m + 1, 0, 23, 59, 59, 999)
+  };
 }
-function bpYtdRange() {
-  const now = new Date();
-  return { start: new Date(now.getFullYear(), 0, 1), end: now };
+function bpAllRange() {
+  const bp = STATE.businessPanel.data;
+  const all = [...(bp?.directo||[]), ...(bp?.distris||[]), ...(bp?.insumos||[]), ...(bp?.cursos||[])];
+  if (!all.length) return { start: new Date(2026,0,1), end: new Date() };
+  const dates = all.map(r => new Date((r.fecha||'') + 'T12:00:00').getTime()).filter(Boolean);
+  return { start: new Date(Math.min(...dates)), end: new Date() };
 }
 function bpInRange(isoDate, range) {
   const d = new Date(isoDate + 'T12:00:00');
   return d >= range.start && d <= range.end;
+}
+// Devuelve meses únicos con datos: ['2026-05', '2026-04', ...] desc.
+function bpAvailableMonths() {
+  const bp = STATE.businessPanel.data; if (!bp) return [];
+  const set = new Set();
+  for (const arr of [bp.directo, bp.distris, bp.insumos, bp.cursos]) {
+    for (const r of (arr || [])) {
+      if (r.fecha) set.add(r.fecha.slice(0, 7));
+    }
+  }
+  return [...set].sort().reverse();
 }
 
 // Calcula KPIs y métricas según el período seleccionado.
 function bpCompute() {
   const bp = STATE.businessPanel;
   if (!bp.data) return null;
-  const period = bp.period || 'month';
-  const range = period === 'week' ? bpWeekRange()
-              : period === 'ytd'  ? bpYtdRange()
-              : bpMonthRange();
+  const period = bp.period || 'current';
+  let range;
+  if (period === 'week') range = bpWeekRange();
+  else if (period === 'all') range = bpAllRange();
+  else if (period === 'current') range = bpMonthRange(); // mes actual
+  else if (/^\d{4}-\d{2}$/.test(period)) range = bpMonthRange(period); // mes específico
+  else range = bpMonthRange();
 
   const directo = bp.data.directo.filter(r => bpInRange(r.fecha, range));
   const distris = bp.data.distris.filter(r => bpInRange(r.fecha, range));
@@ -1742,34 +1763,44 @@ function renderBusinessPanel() {
   const c = bpCompute();
   if (!c) return '<div class="loading"><div class="spinner"></div></div>';
 
-  const period = bp.period || 'month';
+  const period = bp.period || 'current';
   const ageS = Math.floor((Date.now() - bp.lastFetch) / 1000);
   const ageLabel = ageS < 60 ? 'recién' : ageS < 3600 ? `hace ${Math.floor(ageS/60)} min` : `hace ${Math.floor(ageS/3600)}h`;
+  const months = bpAvailableMonths();
+  const periodLabel = period === 'week' ? 'Esta semana'
+                    : period === 'all'  ? 'Todos los meses'
+                    : period === 'current' ? new Date().toLocaleDateString('es-AR', {month:'long', year:'numeric'})
+                    : (() => { const [y,m] = period.split('-'); return new Date(+y, +m-1, 1).toLocaleDateString('es-AR', {month:'long', year:'numeric'}); })();
 
   return `
+    <div class="period-selector">
+      <span class="ps-label">Período</span>
+      <div class="ps-chips">
+        <button class="ps-chip ${period==='current'?'active':''}" data-bp-period="current">Mes actual</button>
+        <button class="ps-chip ${period==='week'?'active':''}" data-bp-period="week">Esta semana</button>
+        <button class="ps-chip ${period==='all'?'active':''}" data-bp-period="all">Todos</button>
+        ${months.map(m => {
+          const [y, mm] = m.split('-');
+          const lbl = new Date(+y, +mm - 1, 1).toLocaleDateString('es-AR', {month:'short'}).replace('.','');
+          return `<button class="ps-chip ${period===m?'active':''}" data-bp-period="${m}">${lbl} ${y.slice(2)}</button>`;
+        }).join('')}
+      </div>
+      <span class="ps-meta">${periodLabel} · ${c.total.count} ventas · ${c.totalCarteles} carteles</span>
+    </div>
+
     <div class="page-head">
       <div>
         <div class="eyebrow" style="display:flex;align-items:center;gap:8px">
           <span style="background:rgba(255,24,48,.12);color:var(--neon-red);padding:2px 8px;border-radius:4px;font-weight:700;letter-spacing:.5px">🔒 SOLO GASPAR</span>
           ${new Date().toLocaleDateString('es-AR', {day:'2-digit', month:'long', year:'numeric'})}
         </div>
-        <h1>Panel de Negocio</h1>
+        <h1>Dashboard</h1>
       </div>
       <div class="actions">
         <span style="color:var(--fg-subtle);font-size:12px;margin-right:8px">Actualizado ${ageLabel}</span>
         <button class="btn btn-ghost" id="bp-refresh">↻ Refrescar</button>
         <a class="btn btn-cyan" href="https://docs.google.com/spreadsheets/d/1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE/edit" target="_blank">Abrir Sheet ↗</a>
       </div>
-    </div>
-
-    <div class="period-selector">
-      <span class="ps-label">Período</span>
-      <div class="ps-chips">
-        <button class="ps-chip ${period==='week'?'active':''}" data-bp-period="week">Esta semana (Lun-Sáb)</button>
-        <button class="ps-chip ${period==='month'?'active':''}" data-bp-period="month">Mes actual</button>
-        <button class="ps-chip ${period==='ytd'?'active':''}" data-bp-period="ytd">YTD ${new Date().getFullYear()}</button>
-      </div>
-      <span class="ps-meta">${c.total.count} ventas · ${c.totalCarteles} carteles</span>
     </div>
 
     <div class="kpi-grid">
@@ -1799,9 +1830,7 @@ function renderBusinessPanel() {
     </div>
 
     <div class="card" style="margin-top:18px">
-      <div class="card-h"><h3>Por vertical de negocio</h3><span class="muted" style="margin-left:auto;font-size:12px">${
-        period==='week' ? 'Esta semana (Lun-Sáb)' : period==='month' ? 'Mes actual' : 'YTD'
-      }</span></div>
+      <div class="card-h"><h3>Por vertical de negocio</h3><span class="muted" style="margin-left:auto;font-size:12px">${escapeHtml(periodLabel)}</span></div>
       <table class="bp-table">
         <thead>
           <tr>
