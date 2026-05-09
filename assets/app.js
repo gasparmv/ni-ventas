@@ -18,6 +18,14 @@ const CONFIG = {
     { name: 'FEBRERO', month: '2026-02' },
     { name: 'MARZO',   month: '2026-03' },
   ],
+  // Overrides manuales para meses con tracking incompleto.
+  // Se generan presupuestos "phantom" para llegar al total que vos dijiste,
+  // así la tasa de cierre refleja la realidad y no solo lo trackeado.
+  // Las phantom rows tienen historical:true y nombre genérico, no afectan
+  // el matching de pedidos.
+  cotizadorMonthOverrides: {
+    '2026-04': 512,  // Abril 2026: 376 trackeados + 136 phantom = 512 reales
+  },
   matchPriceTolerance: 0.20,   // ±20%
   presupuestoFollowupDays: 7,  // miércoles a miércoles
   presupuestoCutoff: '2026-04-27',   // presupuestos anteriores quedan dados por vencidos / fuera del seguimiento activo
@@ -1037,6 +1045,38 @@ async function loadAll(opts) {
     for (const { name, month, rows } of historicalResults) {
       if (rows) presupuestosAll.push(...parseCotizadorHistorical(rows, month));
     }
+    // Aplicar overrides: para cada mes con count manual, generar phantom
+    // entries hasta llegar al total. Si el override es menor al count actual,
+    // no hace nada (no quitamos data real).
+    const overrides = CONFIG.cotizadorMonthOverrides || {};
+    for (const [ym, target] of Object.entries(overrides)) {
+      const current = presupuestosAll.filter(p => getMonth(p.fecha) === ym).length;
+      const missing = target - current;
+      if (missing <= 0) continue;
+      const [y, m] = ym.split('-').map(Number);
+      // Distribuir las phantom uniformemente por días lun-sáb del mes anterior al primer trackeado
+      const realDates = presupuestosAll
+        .filter(p => getMonth(p.fecha) === ym && !p.historical)
+        .map(p => p.fecha.getTime());
+      const minRealDate = realDates.length ? new Date(Math.min(...realDates)) : new Date(y, m, 0);
+      // Asignamos las phantom al día 5 del mes (antes del tracking real)
+      const phantomDate = new Date(y, m - 1, 5, 12, 0, 0);
+      for (let i = 0; i < missing; i++) {
+        presupuestosAll.push({
+          idx: 'override_' + ym + '_' + i,
+          sheet: ym + '_override',
+          fecha: phantomDate,
+          m2: 0,
+          nombre: '',
+          tamCm: 0, ancho: 0, neonMt: 0,
+          tipo: '', precioTrans: 0, precioNegro: 0, precioReventa: 0, precio: 0,
+          telefono: '', canal: '',
+          historical: true,
+          phantom: true,
+          phantomMonth: ym
+        });
+      }
+    }
     STATE.presupuestos = presupuestosAll;
     matchPresupuestos();
     STATE.loaded = true;
@@ -1280,16 +1320,16 @@ function setDashCurrent() { STATE.dashMonths = null; render(); }
 // más temprana del mes con tracking incompleto.
 function detectPartialPresupuestos(monthsArr) {
   const histMonths = new Set((CONFIG.cotizadorHistoricalSheets || []).map(h => h.month));
+  const overrideMonths = new Set(Object.keys(CONFIG.cotizadorMonthOverrides || {}));
   let partial = false;
   let since = null;
   for (const ym of monthsArr) {
-    if (histMonths.has(ym)) continue; // tiene hoja histórica completa
-    // Mínima fecha de presupuestos no-historicos del mes
+    if (histMonths.has(ym)) continue;     // hoja histórica completa
+    if (overrideMonths.has(ym)) continue; // override manual completo
     const inMonth = (STATE.presupuestos || []).filter(p =>
       !p.historical && getMonth(p.fecha) === ym
     );
     if (!inMonth.length) {
-      // mes sin datos modernos y sin hoja histórica → completamente vacío
       partial = true;
       const [y,m] = ym.split('-').map(Number);
       const monthStart = new Date(y, m-1, 1);
