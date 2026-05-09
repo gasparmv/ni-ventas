@@ -1711,10 +1711,86 @@ function bpCompute() {
     count: Object.values(verticals).reduce((a,v)=>a+v.count,0),
     ventas: Object.values(verticals).reduce((a,v)=>a+v.ventas,0),
     costos: Object.values(verticals).reduce((a,v)=>a+v.costos,0),
+    fijos: 0,
   };
   total.aov = total.count ? total.ventas / total.count : 0;
   total.margen = total.ventas - total.costos;
   total.margenPct = total.ventas ? (total.margen / total.ventas) : 0;
+
+  // === OVERRIDE con PnL real (más preciso, incluye Fijos + ADS + contingencias) ===
+  // La PnL del Sheet tiene CMA precalculado a nivel mensual.
+  // Para esta semana o ranges no-mensuales, prorrateamos los fijos por días lun-sáb.
+  const pnl = bp.data.pnl || [];
+  const monthsInRange = (() => {
+    const out = [];
+    const start = new Date(range.start.getFullYear(), range.start.getMonth(), 1);
+    const end = new Date(range.end.getFullYear(), range.end.getMonth(), 1);
+    for (let d = new Date(start); d <= end; d.setMonth(d.getMonth() + 1)) {
+      out.push({ y: d.getFullYear(), m: d.getMonth() + 1 });
+    }
+    return out;
+  })();
+  // Sumar PnL de los meses incluidos
+  let pnlIngresos = 0, pnlCostos = 0, pnlFijos = 0, pnlMargen = 0;
+  const pnlByVertical = { directo: { ingresos: 0, costos: 0 }, distris: { ingresos: 0, costos: 0 }, insumos: { ingresos: 0, costos: 0 }, cursos: { ingresos: 0, costos: 0 } };
+  for (const { m } of monthsInRange) {
+    const row = pnl.find(p => p.month === m);
+    if (!row) continue;
+    pnlIngresos += row.ingresos.total;
+    pnlCostos   += Math.abs(row.costos.total);
+    pnlFijos    += Math.abs(row.costos.fijos);
+    pnlMargen   += row.margen;
+    for (const v of ['directo', 'distris', 'insumos', 'cursos']) {
+      pnlByVertical[v].ingresos += row.ingresos[v];
+      pnlByVertical[v].costos   += Math.abs(row.costos[v]);
+    }
+  }
+  // Si el rango cubre meses completos (current, mes específico, all) → usar PnL directo.
+  // Si es 'week' → prorrateamos fijos por # días lun-sáb del rango.
+  const useFullPnl = period === 'current' || period === 'all' || /^\d{4}-\d{2}$/.test(period);
+  if (useFullPnl && pnlIngresos > 0) {
+    // Override total con valores PnL (más confiables)
+    total.ventas = pnlIngresos;
+    total.costos = pnlCostos;
+    total.fijos = pnlFijos;
+    total.margen = pnlMargen;
+    total.margenPct = pnlIngresos ? (pnlMargen / pnlIngresos) : 0;
+    // Override verticals.X.costos con PnL (incluye ADS y contingencias)
+    for (const v of ['directo', 'distris', 'insumos', 'cursos']) {
+      const pv = pnlByVertical[v];
+      if (pv.costos > 0) {
+        verticals[v].costos = pv.costos;
+        verticals[v].margen = verticals[v].ventas - pv.costos;
+        verticals[v].margenPct = verticals[v].ventas ? (verticals[v].margen / verticals[v].ventas) : 0;
+      }
+    }
+  } else if (period === 'week') {
+    // Prorrateo de Fijos: tomamos los Fijos del mes en curso, los dividimos
+    // por # días lun-sáb del mes y multiplicamos por # días lun-sáb pasados de la semana.
+    const today = new Date();
+    const mRow = pnl.find(p => p.month === today.getMonth() + 1);
+    if (mRow) {
+      const fijosMes = Math.abs(mRow.costos.fijos);
+      // Días lun-sáb del mes
+      const y = today.getFullYear(), mo = today.getMonth();
+      const dim = new Date(y, mo + 1, 0).getDate();
+      let workDays = 0;
+      for (let d = 1; d <= dim; d++) {
+        const dow = new Date(y, mo, d).getDay();
+        if (dow !== 0) workDays++;
+      }
+      // Días lun-sáb pasados desde el lunes hasta hoy (o sábado si ya pasó)
+      let weekDays = 0;
+      for (let d = new Date(range.start); d <= range.end && d <= today; d = addDays(d, 1)) {
+        if (d.getDay() !== 0) weekDays++;
+      }
+      const fijosWeek = workDays > 0 ? fijosMes * (weekDays / workDays) : 0;
+      total.fijos = fijosWeek;
+      total.costos = total.costos + fijosWeek;
+      total.margen = total.ventas - total.costos;
+      total.margenPct = total.ventas ? (total.margen / total.ventas) : 0;
+    }
+  }
 
   // Por caja / vendedor (solo del período)
   const cajas = new Map();
@@ -1805,8 +1881,8 @@ function renderBusinessPanel() {
 
     <div class="kpi-grid">
       <div class="kpi"><div class="kpi-label">Ventas</div><div class="kpi-value">${bpFmt(c.total.ventas)}</div><div class="kpi-delta">${c.total.count} ventas</div></div>
-      <div class="kpi cyan"><div class="kpi-label">Costos</div><div class="kpi-value">${bpFmt(c.total.costos)}</div><div class="kpi-delta">${Math.round((c.total.costos/Math.max(1,c.total.ventas))*100)}% sobre ventas</div></div>
-      <div class="kpi"><div class="kpi-label">Margen</div><div class="kpi-value">${bpFmt(c.total.margen)}</div><div class="kpi-delta">${Math.round(c.total.margenPct*100)}% del ingreso</div></div>
+      <div class="kpi cyan"><div class="kpi-label">Costos totales</div><div class="kpi-value">${bpFmt(c.total.costos)}</div><div class="kpi-delta">${c.total.fijos ? 'Fijos: ' + bpFmt(c.total.fijos) : Math.round((c.total.costos/Math.max(1,c.total.ventas))*100) + '% s/ ventas'}</div></div>
+      <div class="kpi"><div class="kpi-label">Margen operativo (CMA)</div><div class="kpi-value" style="color:${c.total.margen >= 0 ? 'var(--success, #25D366)' : 'var(--neon-red)'}">${bpFmt(c.total.margen)}</div><div class="kpi-delta">${Math.round(c.total.margenPct*100)}% del ingreso</div></div>
       <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${bpFmt(c.total.aov)}</div><div class="kpi-delta">AOV global</div></div>
       <div class="kpi"><div class="kpi-label">Carteles</div><div class="kpi-value">${c.totalCarteles}</div><div class="kpi-delta">ø ${bpFmt(c.aovCarteles)} c/u</div></div>
     </div>
