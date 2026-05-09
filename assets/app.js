@@ -75,7 +75,9 @@ const STATE = {
   activity: { rows: [], loading: false, error: null },
   cotizadorParams: null,  // se carga del Worker; si null usa CONFIG.cotizadorDefaults
   cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '' },
-  cotizadorSaving: false
+  cotizadorSaving: false,
+  // Panel de negocio (solo Gaspar) — datos del Sheet "2025 V4"
+  businessPanel: { data: null, loading: false, error: null, lastFetch: 0, period: 'month' }
 };
 
 // ============ COTIZADOR ============
@@ -1354,7 +1356,7 @@ function render() {
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
   else {
     const v = STATE.view;
-    if (v === 'dashboard')      document.getElementById('main').innerHTML = renderDashboard();
+    if (v === 'dashboard')      document.getElementById('main').innerHTML = isAdmin() ? renderBusinessPanel() : renderDashboard();
     else if (v === 'pedidos')   document.getElementById('main').innerHTML = renderPedidos();
     else if (v === 'presupuestos') document.getElementById('main').innerHTML = renderPresupuestos();
     else if (v === 'seguimientos') document.getElementById('main').innerHTML = renderSeguimientos();
@@ -1378,7 +1380,10 @@ function render() {
   if (STATE.view === 'pedidos') bindPedidos();
   if (STATE.view === 'presupuestos') bindPresupuestos();
   if (STATE.view === 'seguimientos') bindSeguimientos();
-  if (STATE.view === 'dashboard') drawCharts();
+  if (STATE.view === 'dashboard') {
+    if (isAdmin()) bindBusinessPanel();
+    else drawCharts();
+  }
   if (STATE.view === 'panel-joaco') bindPanelJoaco();
   if (STATE.view === 'actividad') bindActividad();
   if (STATE.view === 'chat') bindChat();
@@ -1553,6 +1558,449 @@ function renderDashboard() {
       </div>
     </div>
   `;
+}
+
+// ============================================================================
+// ---------- BUSINESS PANEL (Gaspar only) ------------------------------------
+// ============================================================================
+// Lee del worker /admin/business-panel que parsea el Sheet "2025 V4".
+// Cachea 1h en D1; el frontend refetchea al entrar y cada 1h en background.
+
+const BP_VERTICALS = [
+  { key: 'directo', label: 'Carteles Directo', color: 'var(--neon-red)' },
+  { key: 'distris', label: 'Carteles Distris', color: 'var(--neon-cyan)' },
+  { key: 'insumos', label: 'Insumos',          color: '#FFA726' },
+  { key: 'cursos',  label: 'Cursos',           color: '#25D366' },
+];
+const BP_MONTHS = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+let _bpRefreshTimer = null;
+
+async function loadBusinessPanel(force) {
+  if (!CONFIG.trackerUrl || !STATE.token) return;
+  STATE.businessPanel.loading = true;
+  STATE.businessPanel.error = null;
+  if (STATE.view === 'dashboard' && isAdmin()) render();
+  try {
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/admin/business-panel' + (force ? '?force=1' : ''), {
+      headers: { 'Authorization': 'Bearer ' + STATE.token }
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    STATE.businessPanel.data = j;
+    STATE.businessPanel.lastFetch = Date.now();
+  } catch (e) {
+    STATE.businessPanel.error = e.message;
+  } finally {
+    STATE.businessPanel.loading = false;
+    if (STATE.view === 'dashboard' && isAdmin()) render();
+  }
+}
+
+function bindBusinessPanel() {
+  const bp = STATE.businessPanel;
+  if (!bp.data && !bp.loading && !bp.error) loadBusinessPanel(false);
+  // Period tabs
+  document.querySelectorAll('[data-bp-period]').forEach(b => {
+    b.onclick = () => {
+      STATE.businessPanel.period = b.dataset.bpPeriod;
+      render();
+    };
+  });
+  // Refresh
+  const refresh = document.getElementById('bp-refresh');
+  if (refresh) refresh.onclick = () => loadBusinessPanel(true);
+  // Auto-refresh cada 1h en background (idempotente)
+  if (_bpRefreshTimer) clearInterval(_bpRefreshTimer);
+  _bpRefreshTimer = setInterval(() => {
+    if (STATE.view === 'dashboard' && isAdmin()) loadBusinessPanel(false);
+  }, 60 * 60 * 1000);
+  // Dibujar charts si hay data
+  if (bp.data) requestAnimationFrame(() => drawBusinessCharts());
+}
+
+// === Helpers ===
+function bpFmt(n) {
+  if (!n) return '-';
+  const sign = n < 0 ? '-' : '';
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return sign + '$' + (abs / 1_000_000).toFixed(2) + 'M';
+  if (abs >= 1_000)     return sign + '$' + (abs / 1_000).toFixed(0) + 'k';
+  return sign + '$' + Math.round(abs);
+}
+function bpFmtNum(n) {
+  if (!n) return '0';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+  if (n >= 1_000)     return (n / 1_000).toFixed(0) + 'k';
+  return String(Math.round(n));
+}
+// Lunes-sábado de la semana actual (domingos no trabajan)
+function bpWeekRange() {
+  const today = new Date();
+  const dow = today.getDay(); // 0=Dom, 1=Lun ... 6=Sab
+  const monOffset = (dow === 0 ? -6 : 1 - dow); // si es domingo, ir al lunes anterior
+  const mon = new Date(today); mon.setDate(today.getDate() + monOffset); mon.setHours(0,0,0,0);
+  const sat = new Date(mon); sat.setDate(mon.getDate() + 5); sat.setHours(23,59,59,999);
+  return { start: mon, end: sat };
+}
+function bpMonthRange() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+  return { start, end };
+}
+function bpYtdRange() {
+  const now = new Date();
+  return { start: new Date(now.getFullYear(), 0, 1), end: now };
+}
+function bpInRange(isoDate, range) {
+  const d = new Date(isoDate + 'T12:00:00');
+  return d >= range.start && d <= range.end;
+}
+
+// Calcula KPIs y métricas según el período seleccionado.
+function bpCompute() {
+  const bp = STATE.businessPanel;
+  if (!bp.data) return null;
+  const period = bp.period || 'month';
+  const range = period === 'week' ? bpWeekRange()
+              : period === 'ytd'  ? bpYtdRange()
+              : bpMonthRange();
+
+  const directo = bp.data.directo.filter(r => bpInRange(r.fecha, range));
+  const distris = bp.data.distris.filter(r => bpInRange(r.fecha, range));
+  const insumos = bp.data.insumos.filter(r => bpInRange(r.fecha, range));
+  const cursos  = bp.data.cursos .filter(r => bpInRange(r.fecha, range));
+
+  const sumVenta = (arr) => arr.reduce((a, r) => a + (r.venta || r.vendido || 0), 0);
+  const sumCostosD = (arr) => arr.reduce((a, r) => a + Object.values(r.costos || {}).reduce((s, x) => s + (x || 0), 0), 0);
+
+  const verticals = {
+    directo: { count: directo.length, ventas: sumVenta(directo), costos: sumCostosD(directo) },
+    distris: { count: distris.length, ventas: sumVenta(distris), costos: sumCostosD(distris) },
+    insumos: { count: insumos.length, ventas: sumVenta(insumos), costos: insumos.reduce((a,r)=>a+(r.costo||0),0) },
+    cursos:  { count: cursos.length,  ventas: sumVenta(cursos),  costos: cursos.reduce((a,r)=>a+(r.comisionMp||0),0) },
+  };
+  for (const k of Object.keys(verticals)) {
+    const v = verticals[k];
+    v.aov = v.count ? v.ventas / v.count : 0;
+    v.margen = v.ventas - v.costos;
+    v.margenPct = v.ventas ? (v.margen / v.ventas) : 0;
+  }
+  const total = {
+    count: Object.values(verticals).reduce((a,v)=>a+v.count,0),
+    ventas: Object.values(verticals).reduce((a,v)=>a+v.ventas,0),
+    costos: Object.values(verticals).reduce((a,v)=>a+v.costos,0),
+  };
+  total.aov = total.count ? total.ventas / total.count : 0;
+  total.margen = total.ventas - total.costos;
+  total.margenPct = total.ventas ? (total.margen / total.ventas) : 0;
+
+  // Por caja / vendedor (solo del período)
+  const cajas = new Map();
+  const addCaja = (name, ventas, count, vertical) => {
+    if (!name) return;
+    if (!cajas.has(name)) cajas.set(name, { ventas: 0, count: 0, verticals: new Set() });
+    const c = cajas.get(name);
+    c.ventas += ventas; c.count += count; c.verticals.add(vertical);
+  };
+  for (const r of directo) addCaja(r.caja || 'Sin caja', r.venta, 1, 'directo');
+  for (const r of distris) addCaja(r.caja || 'Sin caja', r.venta, 1, 'distris');
+  for (const r of insumos) addCaja(r.caja || 'Sin caja', r.venta, 1, 'insumos');
+  for (const r of cursos)  addCaja(r.caja || 'Sin caja', r.vendido, 1, 'cursos');
+
+  // Top carteles del período (más caros)
+  const topCarteles = [...directo, ...distris]
+    .sort((a, b) => b.venta - a.venta)
+    .slice(0, 8);
+
+  // # carteles total (directo + distris)
+  const totalCarteles = directo.length + distris.length;
+  const ventaCarteles = verticals.directo.ventas + verticals.distris.ventas;
+  const aovCarteles = totalCarteles ? ventaCarteles / totalCarteles : 0;
+
+  return { period, range, verticals, total, cajas, topCarteles, totalCarteles, aovCarteles };
+}
+
+// === Render ===
+function renderBusinessPanel() {
+  const bp = STATE.businessPanel;
+  // Loading inicial
+  if (!bp.data && bp.loading) {
+    return `<div class="page-head"><h1>Panel de Negocio</h1></div>
+      <div class="loading"><div class="spinner"></div><p style="margin-top:14px">Leyendo Sheet "2025 V4"…</p></div>`;
+  }
+  if (bp.error && !bp.data) {
+    return `<div class="page-head"><h1>Panel de Negocio</h1></div>
+      <div class="error">Error: ${escapeHtml(bp.error)}<br><br>
+        <button class="btn" id="bp-refresh">Reintentar</button>
+      </div>`;
+  }
+  if (!bp.data) {
+    return `<div class="page-head"><h1>Panel de Negocio</h1></div>
+      <div class="loading"><div class="spinner"></div></div>`;
+  }
+  const c = bpCompute();
+  if (!c) return '<div class="loading"><div class="spinner"></div></div>';
+
+  const period = bp.period || 'month';
+  const ageS = Math.floor((Date.now() - bp.lastFetch) / 1000);
+  const ageLabel = ageS < 60 ? 'recién' : ageS < 3600 ? `hace ${Math.floor(ageS/60)} min` : `hace ${Math.floor(ageS/3600)}h`;
+
+  return `
+    <div class="page-head">
+      <div>
+        <div class="eyebrow" style="display:flex;align-items:center;gap:8px">
+          <span style="background:rgba(255,24,48,.12);color:var(--neon-red);padding:2px 8px;border-radius:4px;font-weight:700;letter-spacing:.5px">🔒 SOLO GASPAR</span>
+          ${new Date().toLocaleDateString('es-AR', {day:'2-digit', month:'long', year:'numeric'})}
+        </div>
+        <h1>Panel de Negocio</h1>
+      </div>
+      <div class="actions">
+        <span style="color:var(--fg-subtle);font-size:12px;margin-right:8px">Actualizado ${ageLabel}</span>
+        <button class="btn btn-ghost" id="bp-refresh">↻ Refrescar</button>
+        <a class="btn btn-cyan" href="https://docs.google.com/spreadsheets/d/1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE/edit" target="_blank">Abrir Sheet ↗</a>
+      </div>
+    </div>
+
+    <div class="period-selector">
+      <span class="ps-label">Período</span>
+      <div class="ps-chips">
+        <button class="ps-chip ${period==='week'?'active':''}" data-bp-period="week">Esta semana (Lun-Sáb)</button>
+        <button class="ps-chip ${period==='month'?'active':''}" data-bp-period="month">Mes actual</button>
+        <button class="ps-chip ${period==='ytd'?'active':''}" data-bp-period="ytd">YTD ${new Date().getFullYear()}</button>
+      </div>
+      <span class="ps-meta">${c.total.count} ventas · ${c.totalCarteles} carteles</span>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi"><div class="kpi-label">Ventas</div><div class="kpi-value">${bpFmt(c.total.ventas)}</div><div class="kpi-delta">${c.total.count} ventas</div></div>
+      <div class="kpi cyan"><div class="kpi-label">Costos</div><div class="kpi-value">${bpFmt(c.total.costos)}</div><div class="kpi-delta">${Math.round((c.total.costos/Math.max(1,c.total.ventas))*100)}% sobre ventas</div></div>
+      <div class="kpi"><div class="kpi-label">Margen</div><div class="kpi-value">${bpFmt(c.total.margen)}</div><div class="kpi-delta">${Math.round(c.total.margenPct*100)}% del ingreso</div></div>
+      <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${bpFmt(c.total.aov)}</div><div class="kpi-delta">AOV global</div></div>
+      <div class="kpi"><div class="kpi-label">Carteles</div><div class="kpi-value">${c.totalCarteles}</div><div class="kpi-delta">ø ${bpFmt(c.aovCarteles)} c/u</div></div>
+    </div>
+
+    <div class="bp-charts-row">
+      <div class="card chart-card bp-chart-wide">
+        <div class="card-h"><h3>Ingresos vs Costos por mes (FY ${new Date().getFullYear()})</h3></div>
+        <div class="chart-canvas" id="bp-chart-bars-line"></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>Mix por vertical</h3></div>
+        <div class="chart-canvas" id="bp-chart-donut"></div>
+        <div class="legend" id="bp-legend-donut"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h3>Run-Rate · Ingresos por vertical (stacked, mensual)</h3></div>
+      <div class="chart-canvas" id="bp-chart-stacked" style="height:280px"></div>
+      <div class="legend" id="bp-legend-stacked"></div>
+    </div>
+
+    <div class="card" style="margin-top:18px">
+      <div class="card-h"><h3>Por vertical de negocio</h3><span class="muted" style="margin-left:auto;font-size:12px">${
+        period==='week' ? 'Esta semana (Lun-Sáb)' : period==='month' ? 'Mes actual' : 'YTD'
+      }</span></div>
+      <table class="bp-table">
+        <thead>
+          <tr>
+            <th>Vertical</th><th># ventas</th><th>Ingresos</th><th>ø precio</th><th>Costos</th><th>Margen</th><th>%</th><th style="width:120px">Share</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${BP_VERTICALS.map(v => {
+            const x = c.verticals[v.key];
+            const share = c.total.ventas ? (x.ventas / c.total.ventas) : 0;
+            return `<tr>
+              <td><span class="bp-vname"><span class="bp-vdot" style="background:${v.color}"></span>${v.label}</span></td>
+              <td class="num">${x.count}</td>
+              <td class="num">${bpFmt(x.ventas)}</td>
+              <td class="num">${bpFmt(x.aov)}</td>
+              <td class="num">${bpFmt(x.costos)}</td>
+              <td class="num">${bpFmt(x.margen)}</td>
+              <td class="num">${Math.round(x.margenPct*100)}%</td>
+              <td><div class="bp-bar-bg"><div class="bp-bar-fg" style="width:${(share*100).toFixed(1)}%;background:${v.color}"></div></div></td>
+            </tr>`;
+          }).join('')}
+          <tr class="total">
+            <td>TOTAL</td>
+            <td class="num">${c.total.count}</td>
+            <td class="num">${bpFmt(c.total.ventas)}</td>
+            <td class="num">${bpFmt(c.total.aov)}</td>
+            <td class="num">${bpFmt(c.total.costos)}</td>
+            <td class="num">${bpFmt(c.total.margen)}</td>
+            <td class="num">${Math.round(c.total.margenPct*100)}%</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="bp-two-col">
+      <div class="card">
+        <div class="card-h"><h3>Top carteles del período</h3></div>
+        <table class="bp-table compact">
+          <thead><tr><th>Cliente</th><th>Fecha</th><th>Canal</th><th class="num">Venta</th></tr></thead>
+          <tbody>
+            ${c.topCarteles.length ? c.topCarteles.map(p => `
+              <tr>
+                <td>${escapeHtml(p.cliente || '—')}</td>
+                <td>${p.fecha}</td>
+                <td><span class="bp-pill ${p.caja ? '' : 'muted'}">${escapeHtml(p.caja || 'Directo')}</span></td>
+                <td class="num">${bpFmt(p.venta)}</td>
+              </tr>
+            `).join('') : '<tr><td colspan="4" class="muted" style="text-align:center;padding:14px">Sin ventas en el período</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>Por caja / vendedor</h3></div>
+        <table class="bp-table compact">
+          <thead><tr><th>Caja</th><th class="num"># vts</th><th class="num">Total</th><th class="num">ø</th></tr></thead>
+          <tbody>
+            ${[...c.cajas.entries()].sort((a,b)=>b[1].ventas-a[1].ventas).map(([name, x]) => `
+              <tr>
+                <td><b>${escapeHtml(name)}</b></td>
+                <td class="num">${x.count}</td>
+                <td class="num">${bpFmt(x.ventas)}</td>
+                <td class="num">${bpFmt(x.count ? x.ventas/x.count : 0)}</td>
+              </tr>
+            `).join('') || '<tr><td colspan="4" class="muted" style="text-align:center;padding:14px">Sin datos</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+// === Charts (SVG puro, mismo estilo que drawDonut existente) ===
+function drawBusinessCharts() {
+  drawBpBarsLine();
+  drawBpStacked();
+  drawBpDonut();
+}
+
+// 1. Bars (ingresos) + Line (costos) por mes — igual a la primera foto
+function drawBpBarsLine() {
+  const el = document.getElementById('bp-chart-bars-line'); if (!el) return;
+  const pnl = STATE.businessPanel.data?.pnl || [];
+  if (!pnl.length) { el.innerHTML = '<div class="loading muted">sin datos</div>'; return; }
+  const W = el.clientWidth || 700, H = 260, PL = 56, PR = 16, PT = 24, PB = 32;
+  const max = Math.max(...pnl.map(p => Math.max(p.ingresos.total, Math.abs(p.costos.total))), 1);
+  const xStep = (W - PL - PR) / 12;
+  const xAt = (m) => PL + (m - 0.5) * xStep;
+  const yAt = (v) => (H - PB) - (v / max) * (H - PB - PT);
+  const barW = xStep * 0.55;
+  const yTicks = [0, max/2, max].map(v => ({ v, y: yAt(v) }));
+  const bars = pnl.map((p, i) => {
+    const m = i + 1;
+    const x = xAt(m) - barW/2;
+    const y = yAt(p.ingresos.total);
+    const h = (H - PB) - y;
+    return p.ingresos.total > 0
+      ? `<g class="bp-bar-g">
+           <rect class="bp-bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0,h).toFixed(1)}" rx="3"/>
+           <text class="bp-bar-lbl" x="${(x+barW/2).toFixed(1)}" y="${(y-6).toFixed(1)}" text-anchor="middle">${bpFmtNum(p.ingresos.total)}</text>
+         </g>`
+      : '';
+  }).join('');
+  // Costos line (puntos) — costos totales por mes, valor absoluto
+  const costPts = pnl.map((p, i) => ({ x: xAt(i+1), y: yAt(Math.abs(p.costos.total)), v: Math.abs(p.costos.total) }))
+                    .filter(p => p.v > 0);
+  const costPath = costPts.length > 1 ? `M ${costPts.map(p => p.x.toFixed(1)+' '+p.y.toFixed(1)).join(' L ')}` : '';
+  const costDots = costPts.map(p => `<circle class="bp-cost-dot" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3"/>`).join('');
+  const costLbls = costPts.map(p => `<text class="bp-cost-lbl" x="${p.x.toFixed(1)}" y="${(p.y+18).toFixed(1)}" text-anchor="middle">${bpFmtNum(p.v)}</text>`).join('');
+
+  el.innerHTML = `<svg class="chart-svg bp-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    ${yTicks.map(t => `<line class="grid" x1="${PL}" x2="${W-PR}" y1="${t.y.toFixed(1)}" y2="${t.y.toFixed(1)}"/>`).join('')}
+    ${yTicks.map(t => `<text class="label" x="${PL-8}" y="${(t.y+3).toFixed(1)}" text-anchor="end">${bpFmtNum(t.v)}</text>`).join('')}
+    ${bars}
+    ${costPath ? `<path class="bp-cost-line" d="${costPath}"/>` : ''}
+    ${costDots}
+    ${costLbls}
+    ${BP_MONTHS.map((mn, i) => `<text class="label" x="${xAt(i+1).toFixed(1)}" y="${H-10}" text-anchor="middle">${mn}</text>`).join('')}
+    <g class="bp-legend-inline" transform="translate(${PL},6)">
+      <rect class="bp-bar" x="0" y="0" width="14" height="10" rx="2"/>
+      <text class="label" x="20" y="9">Ingresos</text>
+      <line class="bp-cost-line" x1="80" y1="5" x2="100" y2="5"/>
+      <circle class="bp-cost-dot" cx="90" cy="5" r="3"/>
+      <text class="label" x="106" y="9">Costos</text>
+    </g>
+  </svg>`;
+}
+
+// 2. Stacked bars: ingresos por vertical apilados por mes
+function drawBpStacked() {
+  const el = document.getElementById('bp-chart-stacked'); if (!el) return;
+  const pnl = STATE.businessPanel.data?.pnl || [];
+  if (!pnl.length) { el.innerHTML = '<div class="loading muted">sin datos</div>'; return; }
+  const W = el.clientWidth || 700, H = 280, PL = 56, PR = 16, PT = 18, PB = 32;
+  const max = Math.max(...pnl.map(p => p.ingresos.total), 1);
+  const xStep = (W - PL - PR) / 12;
+  const xAt = (m) => PL + (m - 0.5) * xStep;
+  const yAt = (v) => (H - PB) - (v / max) * (H - PB - PT);
+  const barW = xStep * 0.6;
+  const yTicks = [0, max/2, max].map(v => ({ v, y: yAt(v) }));
+
+  const bars = pnl.map((p, i) => {
+    const m = i + 1;
+    const x = xAt(m) - barW/2;
+    let stackY = H - PB;
+    const segments = [];
+    for (const v of BP_VERTICALS) {
+      const val = p.ingresos[v.key];
+      if (val <= 0) continue;
+      const h = (val / max) * (H - PB - PT);
+      stackY -= h;
+      segments.push(`<g class="bp-stack-seg">
+        <rect x="${x.toFixed(1)}" y="${stackY.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="${v.color}" opacity=".88"/>
+        ${h > 14 ? `<text class="bp-stack-lbl" x="${(x+barW/2).toFixed(1)}" y="${(stackY+h/2+3).toFixed(1)}" text-anchor="middle">${bpFmtNum(val)}</text>` : ''}
+      </g>`);
+    }
+    if (p.ingresos.total > 0) {
+      segments.push(`<text class="bp-bar-total" x="${(x+barW/2).toFixed(1)}" y="${(stackY-6).toFixed(1)}" text-anchor="middle">${bpFmtNum(p.ingresos.total)}</text>`);
+    }
+    return segments.join('');
+  }).join('');
+
+  el.innerHTML = `<svg class="chart-svg bp-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    ${yTicks.map(t => `<line class="grid" x1="${PL}" x2="${W-PR}" y1="${t.y.toFixed(1)}" y2="${t.y.toFixed(1)}"/>`).join('')}
+    ${yTicks.map(t => `<text class="label" x="${PL-8}" y="${(t.y+3).toFixed(1)}" text-anchor="end">${bpFmtNum(t.v)}</text>`).join('')}
+    ${bars}
+    ${BP_MONTHS.map((mn, i) => `<text class="label" x="${xAt(i+1).toFixed(1)}" y="${H-10}" text-anchor="middle">${mn}</text>`).join('')}
+  </svg>`;
+  document.getElementById('bp-legend-stacked').innerHTML = BP_VERTICALS.map(v =>
+    `<span class="lg-i"><span class="lg-d" style="background:${v.color}"></span>${v.label}</span>`
+  ).join('');
+}
+
+// 3. Donut: % de ingresos por vertical en el período actual
+function drawBpDonut() {
+  const el = document.getElementById('bp-chart-donut'); if (!el) return;
+  const c = bpCompute(); if (!c) return;
+  const data = BP_VERTICALS.map(v => ({ k: v.label, v: c.verticals[v.key].ventas, color: v.color }))
+                            .filter(d => d.v > 0);
+  const total = data.reduce((a, d) => a + d.v, 0);
+  if (!total) { el.innerHTML = '<div class="loading muted">sin datos</div>'; document.getElementById('bp-legend-donut').innerHTML=''; return; }
+  const W = el.clientWidth || 280, H = 220, R = 70, cx = W/2, cy = H/2;
+  let acc = 0;
+  const arcs = data.map(d => {
+    const len = (d.v / total) * 2 * Math.PI * R;
+    const dash = `${len} ${2 * Math.PI * R}`;
+    const offset = -acc;
+    acc += len;
+    return `<circle class="donut-cy" cx="${cx}" cy="${cy}" r="${R}" stroke="${d.color}" stroke-dasharray="${dash}" stroke-dashoffset="${offset}"></circle>`;
+  }).join('');
+  el.innerHTML = `<svg class="chart-svg" viewBox="0 0 ${W} ${H}">
+    ${arcs}
+    <text class="donut-center" x="${cx}" y="${cy-2}" style="font-size:18px">${bpFmt(total).replace('$','$')}</text>
+    <text x="${cx}" y="${cy+18}" class="label" text-anchor="middle">total ingresos</text>
+  </svg>`;
+  document.getElementById('bp-legend-donut').innerHTML = data.map(d => {
+    const pct = ((d.v / total) * 100).toFixed(1);
+    return `<span class="lg-i"><span class="lg-d" style="background:${d.color}"></span>${escapeHtml(d.k)} · <b>${pct}%</b></span>`;
+  }).join('');
 }
 
 // ---------- PEDIDOS ----------

@@ -3058,6 +3058,124 @@ table.t td.cliente { font-weight: 600; }
 }
 .schedule-modal .btn-action:hover { filter: brightness(1.15); }
 
+/* ============ BUSINESS PANEL (Gaspar) ============ */
+.bp-charts-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--s-4);
+  margin-top: var(--s-4);
+}
+@media (max-width: 1100px) {
+  .bp-charts-row { grid-template-columns: 1fr; }
+}
+.bp-chart-wide #bp-chart-bars-line { height: 260px; }
+
+.bp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.bp-table th, .bp-table td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.bp-table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--fg-subtle);
+  font-weight: 600;
+  background: rgba(255,255,255,.02);
+}
+.bp-table td.num, .bp-table th.num {
+  text-align: right;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.bp-table tbody tr:hover { background: rgba(255,255,255,.02); }
+.bp-table tr.total td {
+  border-top: 2px solid var(--neon-cyan);
+  font-weight: 700;
+  background: rgba(143,212,222,.05);
+}
+.bp-table.compact th, .bp-table.compact td { padding: 7px 12px; }
+
+.bp-vname {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.bp-vdot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.bp-bar-bg {
+  background: rgba(255,255,255,.05);
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.bp-bar-fg {
+  height: 100%;
+  border-radius: 3px;
+  transition: width .25s ease;
+}
+.bp-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  background: rgba(255,255,255,.06);
+  border-radius: 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  color: var(--fg-subtle);
+}
+.bp-pill.muted { opacity: .5; }
+
+.bp-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-4);
+  margin-top: var(--s-4);
+}
+@media (max-width: 1100px) {
+  .bp-two-col { grid-template-columns: 1fr; }
+}
+
+/* SVG charts del panel */
+.bp-svg .bp-bar { fill: var(--neon-cyan); opacity: .8; }
+.bp-svg .bp-bar-g:hover .bp-bar { opacity: 1; }
+.bp-svg .bp-bar-lbl,
+.bp-svg .bp-bar-total {
+  font-size: 10px;
+  font-weight: 600;
+  fill: rgba(143,212,222,.95);
+  font-family: ui-monospace, monospace;
+}
+.bp-svg .bp-cost-line {
+  fill: none;
+  stroke: var(--neon-red);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.bp-svg .bp-cost-dot { fill: var(--neon-red); stroke: var(--bg-0, #0A0A0F); stroke-width: 1.5; }
+.bp-svg .bp-cost-lbl {
+  font-size: 10px;
+  fill: rgba(255,180,180,.85);
+  font-weight: 600;
+  font-family: ui-monospace, monospace;
+}
+.bp-svg .bp-stack-lbl {
+  font-size: 9px;
+  font-weight: 700;
+  fill: rgba(0,0,0,.65);
+  font-family: ui-monospace, monospace;
+}
+.bp-svg .bp-legend-inline text { font-size: 11px; fill: var(--fg-subtle); }
+
 /* ============ MISC ============ */
 .muted { color: var(--fg-subtle); }
 .row { display: flex; gap: var(--s-3); align-items: center; flex-wrap: wrap; }

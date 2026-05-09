@@ -82,6 +82,213 @@ function normalizeArPhone(raw) {
   return n;
 }
 
+// === BUSINESS PANEL: parsing helpers ===
+function parseCsvLine(line) {
+  // Mini parser: respeta " " quotes y comas internas. Sheets gviz devuelve
+  // valores "quoteados" siempre, así que es seguro.
+  const out = [];
+  let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      if (inQ && line[i+1] === '"') { cur += '"'; i++; }
+      else inQ = !inQ;
+    } else if (c === ',' && !inQ) {
+      out.push(cur); cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+function parseCsv(csv) {
+  if (!csv) return [];
+  // Sheets gviz puede meter \n dentro de campos quoteados; reglas estrictas requieren parser estado.
+  const rows = [];
+  let cur = '', inQ = false, row = [];
+  for (let i = 0; i < csv.length; i++) {
+    const c = csv[i];
+    if (c === '"') {
+      if (inQ && csv[i+1] === '"') { cur += '"'; i++; }
+      else inQ = !inQ;
+    } else if (c === ',' && !inQ) {
+      row.push(cur); cur = '';
+    } else if ((c === '\n' || c === '\r') && !inQ) {
+      if (c === '\r' && csv[i+1] === '\n') i++;
+      row.push(cur); rows.push(row); row = []; cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+  return rows;
+}
+// Convierte "13.832k", "$175.000", "954.251", "(5.097k)", "63%", "-" → number.
+// Sheet usa . como separador de miles (formato AR) y k como sufijo de miles.
+function parseAmt(s) {
+  if (s == null) return 0;
+  const x = String(s).trim();
+  if (!x || x === '-' || x === '—') return 0;
+  let neg = false;
+  let v = x;
+  if (v.startsWith('(') && v.endsWith(')')) { neg = true; v = v.slice(1, -1); }
+  if (v.startsWith('-')) { neg = true; v = v.slice(1); }
+  v = v.replace(/[$\s]/g, '');
+  let mult = 1;
+  if (v.endsWith('k') || v.endsWith('K')) { mult = 1000; v = v.slice(0, -1); }
+  if (v.endsWith('M')) { mult = 1000000; v = v.slice(0, -1); }
+  if (v.endsWith('%')) { v = v.slice(0, -1); }
+  // formato AR: punto = miles, coma = decimal
+  if (v.includes(',')) {
+    v = v.replace(/\./g, '').replace(',', '.');
+  } else {
+    // Si tiene un solo punto y los dígitos después son ≤ 2 → decimal; sino es separador de miles
+    const m = v.match(/\.(\d+)$/);
+    if (!m || m[1].length === 3) v = v.replace(/\./g, '');
+  }
+  const n = parseFloat(v);
+  if (isNaN(n)) return 0;
+  return (neg ? -1 : 1) * n * mult;
+}
+// dd/MM/yyyy o d/M/yyyy → ISO 'yyyy-MM-dd'
+function parseDateAR(s) {
+  if (!s) return null;
+  const m = String(s).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (!m) return null;
+  const d = m[1].padStart(2, '0');
+  const mo = m[2].padStart(2, '0');
+  return `${m[3]}-${mo}-${d}`;
+}
+function parsePanelData({ pnlCsv, dirCsv, disCsv, insCsv, curCsv }) {
+  // ---- PnL: matriz mes × concepto (cols D-O = ene-dic, fila 3+ con conceptos en col C) ----
+  const pnlRows = parseCsv(pnlCsv);
+  // Filas relevantes: 3=TOTAL INGRESOS, 4=Carteles Directo, 5=Carteles Distris, 6=Insumos, 7=Cursos,
+  // 8=TOTAL COSTOS, 9=Carteles Directo costos, 10=Distris costos, 11=Insumos costos, 12=Cursos costos,
+  // 13=Fijos, 14=TOTAL CMA, 15=TOTAL CMA %
+  const monthCol = (m) => 3 + (m - 1); // mes 1 → col D (idx 3)
+  const pickRow = (idx) => pnlRows[idx] || [];
+  const pnl = [];
+  for (let m = 1; m <= 12; m++) {
+    const c = monthCol(m);
+    pnl.push({
+      month: m,
+      ingresos: {
+        total: parseAmt(pickRow(2)[c]),
+        directo: parseAmt(pickRow(3)[c]),
+        distris: parseAmt(pickRow(4)[c]),
+        insumos: parseAmt(pickRow(5)[c]),
+        cursos: parseAmt(pickRow(6)[c]),
+      },
+      costos: {
+        total: parseAmt(pickRow(7)[c]),
+        directo: parseAmt(pickRow(8)[c]),
+        distris: parseAmt(pickRow(9)[c]),
+        insumos: parseAmt(pickRow(10)[c]),
+        cursos: parseAmt(pickRow(11)[c]),
+        fijos: parseAmt(pickRow(12)[c]),
+      },
+      margen: parseAmt(pickRow(13)[c]),
+      margenPct: parseAmt(pickRow(14)[c]),
+    });
+  }
+  // ---- Pedidos_Directo: cada fila = una venta ----
+  // Cols: 0=ID, 1=Fecha, 2=Canal, 3=Nombre, 4=Cantidad, 14=VENTA PRECIO, 15=PRECIO DIMMER,
+  //       16=COSTOS ENVIO, 17=MATERIAL, 18=FUENTE, 19=DIMMER, 20=NEON, 21=MO, 22=JOAQUIN, 23=ANIBAL, 24=EMMA, 25=Caja
+  const dirRows = parseCsv(dirCsv).slice(1);
+  const directo = [];
+  for (const r of dirRows) {
+    const fecha = parseDateAR(r[1]);
+    const venta = parseAmt(r[14]) + parseAmt(r[15]);
+    if (!fecha || !venta) continue;
+    directo.push({
+      id: (r[0] || '').trim(),
+      fecha,
+      cliente: (r[3] || '').trim(),
+      cant: parseAmt(r[4]) || 1,
+      venta,
+      costos: {
+        envio: parseAmt(r[16]),
+        material: parseAmt(r[17]),
+        fuente: parseAmt(r[18]),
+        dimmer: parseAmt(r[19]),
+        neon: parseAmt(r[20]),
+        mo: parseAmt(r[21]),
+        joaquin: parseAmt(r[22]),
+        anibal: parseAmt(r[23]),
+        emma: parseAmt(r[24]),
+      },
+      caja: (r[25] || '').trim(),
+    });
+  }
+  // ---- Pedidos_Distris: igual pero sin PRODUCTOR ----
+  // Cols: 0=ID,1=Fecha,2=Canal,3=Nombre,4=Cantidad,13=VENTA PRECIO,14=PRECIO DIMMER,
+  //       15=COSTOS ENVIO,16=MATERIAL,17=FUENTE,18=DIMMER,19=NEON,20=MO,21=JOAQUIN,22=ANIBAL,23=EMMA,24=Caja
+  const disRows = parseCsv(disCsv).slice(1);
+  const distris = [];
+  for (const r of disRows) {
+    const fecha = parseDateAR(r[1]);
+    const venta = parseAmt(r[13]) + parseAmt(r[14]);
+    if (!fecha || !venta) continue;
+    distris.push({
+      id: (r[0] || '').trim(),
+      fecha,
+      cliente: (r[3] || '').trim(),
+      cant: parseAmt(r[4]) || 1,
+      venta,
+      costos: {
+        envio: parseAmt(r[15]),
+        material: parseAmt(r[16]),
+        fuente: parseAmt(r[17]),
+        dimmer: parseAmt(r[18]),
+        neon: parseAmt(r[19]),
+        mo: parseAmt(r[20]),
+      },
+      caja: (r[24] || '').trim(),
+    });
+  }
+  // ---- Venta_Insumos: 0=ID,1=FECHA,3=PRODUCTO,4=DISEÑO,5=ANCHO,6=ALTO,7=CANTIDAD,8=Pago,9=Precio,
+  //                    10=Emma,11=Anibal,12=Material,13=Margen,14=%,15=Mes,16=Año,17=Caja
+  const insRows = parseCsv(insCsv).slice(2);
+  const insumos = [];
+  for (const r of insRows) {
+    const fecha = parseDateAR(r[1]);
+    const venta = parseAmt(r[9]);
+    if (!fecha || !venta) continue;
+    insumos.push({
+      id: (r[0] || '').trim(),
+      fecha,
+      producto: (r[3] || '').trim(),
+      diseno: (r[4] || '').trim(),
+      cant: parseAmt(r[7]) || 1,
+      venta,
+      costo: parseAmt(r[10]) + parseAmt(r[11]) + parseAmt(r[12]),
+      margen: parseAmt(r[13]),
+      caja: (r[17] || '').trim(),
+    });
+  }
+  // ---- CURSOS: 0=Fecha,1=Nro orden,2=Alumno,3=Seña,4=Importe Restante,5=Vendido,
+  //              6=Medio de pago,7=Producto,10=Importe MP,11=ComisionMP,15=Caja
+  const curRows = parseCsv(curCsv).slice(1);
+  const cursos = [];
+  for (const r of curRows) {
+    const fecha = parseDateAR(r[0]);
+    const venta = parseAmt(r[5]);
+    if (!fecha || !venta) continue;
+    cursos.push({
+      fecha,
+      orden: (r[1] || '').trim(),
+      alumno: (r[2] || '').trim(),
+      vendido: venta,
+      medio: (r[6] || '').trim(),
+      producto: (r[7] || '').trim(),
+      comisionMp: parseAmt(r[11]),
+      caja: (r[15] || '').trim(),
+    });
+  }
+  return { pnl, directo, distris, insumos, cursos };
+}
+
 async function waSend(env, payload) {
   if (!env.WA_TOKEN || !env.WA_PHONE_NUMBER_ID) {
     return { ok: false, status: 500, error: 'WhatsApp no configurado (faltan WA_TOKEN o WA_PHONE_NUMBER_ID)' };
@@ -599,6 +806,47 @@ export default {
           ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, '', 'template', previewBody, '', '', 'sent').run();
         } catch (_) {}
         return json({ id: r.id });
+      }
+
+      // ===== BUSINESS PANEL (solo Gaspar) =====
+      // Lee el Sheet "2025 V4" (PnL + 6 hojas detalle), parsea y devuelve JSON.
+      // Cachea 1h en D1 para no tirar del Sheet en cada visita.
+      if (request.method === 'GET' && path === '/admin/business-panel') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const force = url.searchParams.get('force') === '1';
+        // Cache check
+        await env.DB.prepare('CREATE TABLE IF NOT EXISTS panel_cache (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TEXT NOT NULL)').run();
+        if (!force) {
+          const cached = await env.DB.prepare('SELECT v, updated_at FROM panel_cache WHERE k = ?').bind('business_panel_v1').first();
+          if (cached) {
+            const age = Date.now() - new Date(cached.updated_at).getTime();
+            if (age < 60 * 60 * 1000) {
+              return json({ ...JSON.parse(cached.v), _cached: true, _cache_age_s: Math.floor(age / 1000) });
+            }
+          }
+        }
+        // Fetch all 7 sheets in parallel via public gviz CSV.
+        const SID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE';
+        const fetchSheet = async (name, range) => {
+          const u = `https://docs.google.com/spreadsheets/d/${SID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(name)}${range ? '&range=' + range : ''}`;
+          const r = await fetch(u);
+          if (!r.ok) return '';
+          return await r.text();
+        };
+        const [pnlCsv, dirCsv, disCsv, insCsv, curCsv] = await Promise.all([
+          fetchSheet('PnL', 'A1:Q15'),
+          fetchSheet('Pedidos_Directo'),
+          fetchSheet('Pedidos_Distris'),
+          fetchSheet('Venta_Insumos'),
+          fetchSheet('CURSOS'),
+        ]);
+        const data = parsePanelData({ pnlCsv, dirCsv, disCsv, insCsv, curCsv });
+        const payload = JSON.stringify({ ts: new Date().toISOString(), ...data });
+        try {
+          await env.DB.prepare('INSERT OR REPLACE INTO panel_cache (k, v, updated_at) VALUES (?, ?, ?)')
+            .bind('business_panel_v1', payload, new Date().toISOString()).run();
+        } catch (_) {}
+        return new Response(payload, { headers: cors({ 'Content-Type': 'application/json' }) });
       }
 
       if (request.method === 'POST' && path === '/admin/wa/followups') {
