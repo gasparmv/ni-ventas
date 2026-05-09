@@ -717,6 +717,39 @@ table.t td.cliente { font-weight: 600; }
 .contact-pill.wpp { border-color: rgba(74, 222, 128, .35); color: #b8e7c5; }
 .contact-pill.ig  { border-color: rgba(255, 24, 48, .4); color: var(--neon-red-glow); }
 
+/* Cell con contacto + botón FUP al lado */
+.contact-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.fup-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  padding: 3px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid rgba(74, 222, 128, .45);
+  background: rgba(74, 222, 128, .08);
+  color: #4ade80;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all .12s ease;
+  user-select: none;
+}
+.fup-btn:hover {
+  background: #25D366;
+  color: #000;
+  border-color: #25D366;
+  box-shadow: 0 0 8px rgba(37, 211, 102, .4);
+  transform: translateY(-1px);
+}
+.fup-btn:active { transform: translateY(0); }
+
 /* ============ PERIOD SELECTOR (dashboard) ============ */
 .period-selector {
   display: flex;

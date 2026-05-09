@@ -2567,7 +2567,10 @@ function renderCotizadorForm() {
   `;
 }
 
-function renderContactoCell(p) {
+// Mensaje pre-armado para follow-up de presupuesto
+const FUP_MSG = 'Holaa, cómo estás? Pudiste chequear el presupuesto? Cualquier cosa podemos hablar por llamada de celular! Quedamos a disposición!';
+
+function renderContactoCell(p, withFup) {
   const tel = (p.telefono || '').trim();
   if (!tel) return '<span class="muted" style="font-size:12px">—</span>';
   if (p.canal === 'IG') {
@@ -2575,7 +2578,12 @@ function renderContactoCell(p) {
     return `<span class="contact-pill ig" title="Instagram"><span class="contact-icon">📷</span>${escapeHtml(handle)}</span>`;
   }
   // WPP por default si tenemos contacto pero no canal claro
-  return `<span class="contact-pill wpp" title="WhatsApp"><span class="contact-icon">💬</span>${escapeHtml(formatPhoneDisplay(tel))}</span>`;
+  const pill = `<span class="contact-pill wpp" title="WhatsApp"><span class="contact-icon">💬</span>${escapeHtml(formatPhoneDisplay(tel))}</span>`;
+  if (!withFup) return pill;
+  // Botón FUP: abre wa.me con mensaje prearmado de follow-up
+  const telNorm = tel.startsWith('54') ? tel : '549' + tel.replace(/^0+/, '').replace(/^15/, '');
+  const url = waLink(telNorm, FUP_MSG);
+  return `<span class="contact-cell">${pill}<a class="fup-btn" href="${escapeHtml(url)}" target="_blank" rel="noopener" title="Follow-up por WhatsApp" onclick="event.stopPropagation()">FUP</a></span>`;
 }
 
 function renderPresupuestos() {
@@ -2631,7 +2639,7 @@ function renderPresupuestos() {
               else pill = `<span class="pill muted">Futuro</span>`;
               const dDays = daysBetween(p.fecha, TODAY);
               const dayPill = dDays === 0 ? '<span class="pill cyan" style="margin-left:6px;font-size:9px">HOY</span>' : dDays === 1 ? '<span class="pill amber" style="margin-left:6px;font-size:9px">AYER</span>' : '';
-              return `<tr><td class="num">${fmtDateTime(p.fecha)}${dayPill}</td><td class="cliente">${escapeHtml(p.nombre)}</td><td class="num">${p.tamCm||'—'}×${p.ancho||'—'}</td><td class="num">${p.m2||'—'}</td><td class="num">${fmtMoney(p.precio)}</td><td>${renderContactoCell(p)}</td><td>${pill}</td></tr>`;
+              return `<tr><td class="num">${fmtDateTime(p.fecha)}${dayPill}</td><td class="cliente">${escapeHtml(p.nombre)}</td><td class="num">${p.tamCm||'—'}×${p.ancho||'—'}</td><td class="num">${p.m2||'—'}</td><td class="num">${fmtMoney(p.precio)}</td><td>${renderContactoCell(p, true)}</td><td>${pill}</td></tr>`;
             }).join('')}
         </tbody>
       </table>
