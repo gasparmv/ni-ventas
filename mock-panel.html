@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Panel de Negocio — Mockup</title>
+<style>
+:root {
+  --neon-red: #FF1830;
+  --neon-cyan: #8FD4DE;
+  --bg-0: #0A0A0F;
+  --bg-1: #111118;
+  --bg-2: #18181f;
+  --bg-3: #20202a;
+  --border: rgba(255,255,255,.06);
+  --fg: #e9edef;
+  --fg-sub: rgba(233,237,239,.55);
+  --fg-mute: rgba(233,237,239,.35);
+  --green: #25D366;
+  --amber: #FFA726;
+  --r-md: 10px;
+  --r-sm: 6px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg-0);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", system-ui, sans-serif;
+  font-size: 14px;
+  min-height: 100vh;
+  background-image:
+    radial-gradient(ellipse at top left, rgba(255,24,48,.04), transparent 50%),
+    radial-gradient(ellipse at bottom right, rgba(143,212,222,.03), transparent 50%);
+}
+
+.shell {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+/* ===== Header ===== */
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding-bottom: 18px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid var(--border);
+}
+.panel-header h1 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -.2px;
+  background: linear-gradient(135deg, var(--neon-red), var(--neon-cyan));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.panel-header .lock-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(255,24,48,.12);
+  color: var(--neon-red);
+  border: 1px solid rgba(255,24,48,.3);
+}
+.period-tabs { display: flex; gap: 4px; margin-left: auto; }
+.period-tab {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--fg-sub);
+  padding: 6px 14px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all .12s;
+}
+.period-tab:hover { color: var(--fg); border-color: var(--neon-cyan); }
+.period-tab.active {
+  background: var(--neon-cyan);
+  color: var(--bg-0);
+  border-color: var(--neon-cyan);
+  font-weight: 600;
+}
+.refresh-info {
+  font-size: 11px;
+  color: var(--fg-mute);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.refresh-info button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-sub);
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: 11px;
+}
+.refresh-info button:hover { color: var(--neon-cyan); border-color: var(--neon-cyan); }
+
+/* ===== KPI cards ===== */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 14px;
+  margin-bottom: 22px;
+}
+.kpi-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 16px 18px;
+  position: relative;
+  overflow: hidden;
+}
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--neon-red), var(--neon-cyan));
+  opacity: .6;
+}
+.kpi-card .kpi-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  color: var(--fg-mute);
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.kpi-card .kpi-value {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -.5px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  margin-bottom: 6px;
+}
+.kpi-card .kpi-delta {
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+}
+.kpi-delta.up { color: var(--green); }
+.kpi-delta.down { color: var(--neon-red); }
+.kpi-delta.flat { color: var(--fg-mute); }
+
+/* ===== Section ===== */
+.section {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  margin-bottom: 22px;
+  overflow: hidden;
+}
+.section-h {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.section-h h2 {
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  color: var(--fg-sub);
+}
+.section-h .badge {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+.section-body { padding: 18px 20px; }
+
+/* ===== Tabla por vertical ===== */
+.vertical-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.vertical-table th, .vertical-table td {
+  padding: 10px 14px;
+  text-align: right;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.vertical-table th {
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  font-size: 11px;
+  color: var(--fg-mute);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  font-family: inherit;
+}
+.vertical-table th:first-child, .vertical-table td:first-child {
+  text-align: left;
+  font-family: inherit;
+}
+.vertical-table td {
+  border-bottom: 1px solid rgba(255,255,255,.03);
+}
+.vertical-table tr.total td {
+  border-top: 2px solid var(--neon-cyan);
+  font-weight: 700;
+  background: rgba(143,212,222,.04);
+}
+.vertical-table .v-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.v-icon {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.v-icon.directo { background: var(--neon-red); }
+.v-icon.distris { background: var(--neon-cyan); }
+.v-icon.insumos { background: var(--amber); }
+.v-icon.cursos { background: var(--green); }
+
+.bar-cell { width: 120px; }
+.bar-bg {
+  background: rgba(255,255,255,.05);
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+.bar-fg {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--neon-red), var(--neon-cyan));
+}
+
+/* ===== Funnel ===== */
+.funnel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 600px;
+}
+.funnel-step {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.funnel-label {
+  width: 180px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--fg-sub);
+}
+.funnel-bar-wrap {
+  flex: 1;
+  background: rgba(255,255,255,.03);
+  border-radius: var(--r-sm);
+  height: 30px;
+  position: relative;
+  overflow: hidden;
+}
+.funnel-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--neon-red), var(--neon-cyan));
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  padding-left: 12px;
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  font-size: 13px;
+  color: #000;
+}
+.funnel-pct {
+  margin-left: auto;
+  padding-right: 12px;
+  font-size: 12px;
+  color: rgba(0,0,0,.7);
+  font-weight: 500;
+}
+.funnel-step:nth-child(1) .funnel-bar { width: 100%; }
+.funnel-step:nth-child(2) .funnel-bar { width: 56%; opacity: .85; }
+.funnel-step:nth-child(3) .funnel-bar { width: 32%; opacity: .7; }
+
+.funnel-note {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(143,212,222,.06);
+  border-left: 3px solid var(--neon-cyan);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  color: var(--fg-sub);
+}
+
+/* ===== PnL ===== */
+.pnl-table {
+  width: 100%;
+  font-size: 13px;
+}
+.pnl-table td {
+  padding: 7px 14px;
+  font-family: ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.pnl-table td:first-child {
+  font-family: inherit;
+  color: var(--fg-sub);
+}
+.pnl-table td:nth-child(2) { text-align: right; }
+.pnl-table tr.divider td { border-top: 1px solid var(--border); padding-top: 11px; }
+.pnl-table tr.subtotal td { font-weight: 700; color: var(--fg); }
+.pnl-table tr.subtotal td:first-child { color: var(--neon-cyan); }
+.pnl-table tr.cost td { color: rgba(255,180,180,.85); }
+.pnl-table tr.income td:nth-child(2) { color: var(--green); }
+.pnl-table tr.final td {
+  border-top: 2px solid var(--neon-red);
+  font-size: 15px;
+  font-weight: 700;
+  padding-top: 14px;
+}
+.pnl-table tr.final td:first-child { color: var(--neon-red); }
+
+/* ===== Spark ===== */
+.spark-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+}
+.spark-card {
+  padding: 14px 16px;
+  background: var(--bg-1);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+}
+.spark-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--fg-mute);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.spark-value {
+  font-size: 18px;
+  font-weight: 700;
+  font-family: ui-monospace, monospace;
+  margin-bottom: 8px;
+}
+.spark-bars {
+  display: flex;
+  align-items: end;
+  gap: 3px;
+  height: 36px;
+}
+.spark-bar {
+  flex: 1;
+  background: var(--neon-cyan);
+  border-radius: 1px;
+  opacity: .55;
+  transition: opacity .15s;
+}
+.spark-bar.last { background: var(--neon-red); opacity: 1; }
+.spark-card:hover .spark-bar { opacity: .8; }
+.spark-card:hover .spark-bar.last { opacity: 1; }
+
+/* ===== Comparativa por vendedor ===== */
+.seller-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+.seller-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 14px;
+}
+.seller-name {
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.seller-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--neon-red), var(--neon-cyan));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #000;
+}
+.seller-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 3px 0;
+}
+.seller-line span:first-child { color: var(--fg-mute); }
+.seller-line span:last-child { font-family: ui-monospace, monospace; font-weight: 500; }
+
+/* ===== Section helpers ===== */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 22px;
+}
+@media (max-width: 1100px) {
+  .kpi-row { grid-template-columns: repeat(2, 1fr); }
+  .spark-grid, .seller-grid { grid-template-columns: 1fr 1fr; }
+  .two-col { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<!-- HEADER -->
+<header class="panel-header">
+  <h1>📊 Panel de Negocio</h1>
+  <span class="lock-badge">🔒 SOLO GASPAR</span>
+  <div class="period-tabs">
+    <button class="period-tab" data-p="week">Esta semana</button>
+    <button class="period-tab active" data-p="month">Mes (Mayo)</button>
+    <button class="period-tab" data-p="ytd">YTD 2026</button>
+  </div>
+  <div class="refresh-info">
+    <span>🟢 Actualizado hace 12s</span>
+    <button>↻ Actualizar</button>
+  </div>
+</header>
+
+<!-- KPIs -->
+<div class="kpi-row">
+  <div class="kpi-card">
+    <div class="kpi-label">Ventas</div>
+    <div class="kpi-value" style="color:var(--green)">$33.564k</div>
+    <div class="kpi-delta up">↑ 14% vs abril</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Costos</div>
+    <div class="kpi-value">$17.709k</div>
+    <div class="kpi-delta up">↑ 13% vs abril</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Margen $</div>
+    <div class="kpi-value" style="color:var(--neon-cyan)">$15.854k</div>
+    <div class="kpi-delta up">↑ 15% vs abril</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Margen %</div>
+    <div class="kpi-value">47%</div>
+    <div class="kpi-delta flat">→ flat</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Ticket ø</div>
+    <div class="kpi-value">$262k</div>
+    <div class="kpi-delta up">↑ 8%</div>
+  </div>
+</div>
+
+<!-- POR VERTICAL -->
+<div class="section">
+  <div class="section-h">
+    <h2>🎯 Por vertical de negocio</h2>
+    <span class="badge">Mayo 2026 · datos hasta hoy</span>
+  </div>
+  <div class="section-body">
+    <table class="vertical-table">
+      <thead>
+        <tr>
+          <th>Vertical</th>
+          <th># ventas</th>
+          <th>Ingresos</th>
+          <th>ø precio</th>
+          <th>Costos</th>
+          <th>Margen</th>
+          <th>%</th>
+          <th>Share</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="v-name"><span class="v-icon directo"></span>Carteles Directo</span></td>
+          <td>38</td>
+          <td>$13.833k</td>
+          <td>$364k</td>
+          <td>$5.097k</td>
+          <td>$8.736k</td>
+          <td>63%</td>
+          <td><div class="bar-cell"><div class="bar-bg"><div class="bar-fg" style="width:41%"></div></div></div></td>
+        </tr>
+        <tr>
+          <td><span class="v-name"><span class="v-icon distris"></span>Carteles Distris</span></td>
+          <td>10</td>
+          <td>$2.922k</td>
+          <td>$292k</td>
+          <td>$954k</td>
+          <td>$1.968k</td>
+          <td>67%</td>
+          <td><div class="bar-cell"><div class="bar-bg"><div class="bar-fg" style="width:9%"></div></div></div></td>
+        </tr>
+        <tr>
+          <td><span class="v-name"><span class="v-icon insumos"></span>Insumos</span></td>
+          <td>67</td>
+          <td>$7.718k</td>
+          <td>$115k</td>
+          <td>$3.442k</td>
+          <td>$4.276k</td>
+          <td>55%</td>
+          <td><div class="bar-cell"><div class="bar-bg"><div class="bar-fg" style="width:23%"></div></div></div></td>
+        </tr>
+        <tr>
+          <td><span class="v-name"><span class="v-icon cursos"></span>Cursos</span></td>
+          <td>28</td>
+          <td>$10.121k</td>
+          <td>$361k</td>
+          <td>$5.180k</td>
+          <td>$4.941k</td>
+          <td>49%</td>
+          <td><div class="bar-cell"><div class="bar-bg"><div class="bar-fg" style="width:30%"></div></div></div></td>
+        </tr>
+        <tr class="total">
+          <td>TOTAL</td>
+          <td>143</td>
+          <td>$33.564k</td>
+          <td>$235k</td>
+          <td>$17.709k</td>
+          <td>$15.854k</td>
+          <td>47%</td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- TWO COL: Funnel + PnL -->
+<div class="two-col">
+  <!-- FUNNEL -->
+  <div class="section">
+    <div class="section-h">
+      <h2>📈 Funnel Joaco (Carteles Directo)</h2>
+      <span class="badge">Mayo 2026</span>
+    </div>
+    <div class="section-body">
+      <div class="funnel">
+        <div class="funnel-step">
+          <div class="funnel-label">Presupuestos enviados</div>
+          <div class="funnel-bar-wrap">
+            <div class="funnel-bar"><span>118</span><span class="funnel-pct">100%</span></div>
+          </div>
+        </div>
+        <div class="funnel-step">
+          <div class="funnel-label">Cierres (match nombre)</div>
+          <div class="funnel-bar-wrap">
+            <div class="funnel-bar"><span>38</span><span class="funnel-pct">32% del total</span></div>
+          </div>
+        </div>
+        <div class="funnel-step">
+          <div class="funnel-label">Cierres con match exacto</div>
+          <div class="funnel-bar-wrap">
+            <div class="funnel-bar"><span>22</span><span class="funnel-pct">19% del total</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="funnel-note">
+        💡 <b>Match exacto</b> = nombre del diseño en el cotizador igual al nombre en Pedidos_Directo. <b>Cierres totales</b> = todas las ventas del mes (algunas pueden no haber pasado por cotizador).
+      </div>
+    </div>
+  </div>
+
+  <!-- PnL -->
+  <div class="section">
+    <div class="section-h">
+      <h2>📊 PnL Mayo 2026</h2>
+      <span class="badge">Datos del Sheet PnL</span>
+    </div>
+    <div class="section-body">
+      <table class="pnl-table">
+        <tr class="subtotal income"><td>TOTAL INGRESOS</td><td>$33.564k</td></tr>
+        <tr><td>&nbsp;&nbsp;Carteles Directo</td><td>$13.833k</td></tr>
+        <tr><td>&nbsp;&nbsp;Carteles Distris</td><td>$1.891k</td></tr>
+        <tr><td>&nbsp;&nbsp;Insumos</td><td>$7.718k</td></tr>
+        <tr><td>&nbsp;&nbsp;Cursos</td><td>$10.121k</td></tr>
+        <tr class="divider subtotal cost"><td>TOTAL COSTOS</td><td>($17.709k)</td></tr>
+        <tr class="cost"><td>&nbsp;&nbsp;Carteles Directo</td><td>($6.465k)</td></tr>
+        <tr class="cost"><td>&nbsp;&nbsp;Carteles Distris</td><td>($561k)</td></tr>
+        <tr class="cost"><td>&nbsp;&nbsp;Insumos</td><td>($3.442k)</td></tr>
+        <tr class="cost"><td>&nbsp;&nbsp;Cursos</td><td>($5.180k)</td></tr>
+        <tr class="cost"><td>&nbsp;&nbsp;Estructura</td><td>($2.061k)</td></tr>
+        <tr class="final"><td>RESULTADO NETO (CMA)</td><td>$15.854k <span style="color:var(--fg-mute);font-size:12px">· 47%</span></td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- EVOLUCIÓN -->
+<div class="section">
+  <div class="section-h">
+    <h2>📅 Evolución últimos 5 meses</h2>
+    <span class="badge">2026</span>
+  </div>
+  <div class="section-body">
+    <div class="spark-grid">
+      <div class="spark-card">
+        <div class="spark-label">Ventas mensuales</div>
+        <div class="spark-value">$33.564k <span style="font-size:12px;color:var(--green);font-weight:500">↑ 14%</span></div>
+        <div class="spark-bars">
+          <div class="spark-bar" style="height:30%"></div>
+          <div class="spark-bar" style="height:50%"></div>
+          <div class="spark-bar" style="height:60%"></div>
+          <div class="spark-bar" style="height:70%"></div>
+          <div class="spark-bar last" style="height:80%"></div>
+        </div>
+        <div style="font-size:10px;color:var(--fg-mute);margin-top:4px">Ene · Feb · Mar · Abr · May</div>
+      </div>
+      <div class="spark-card">
+        <div class="spark-label">Margen %</div>
+        <div class="spark-value">47% <span style="font-size:12px;color:var(--fg-mute);font-weight:500">→ flat</span></div>
+        <div class="spark-bars">
+          <div class="spark-bar" style="height:42%"></div>
+          <div class="spark-bar" style="height:50%"></div>
+          <div class="spark-bar" style="height:47%"></div>
+          <div class="spark-bar" style="height:47%"></div>
+          <div class="spark-bar last" style="height:47%"></div>
+        </div>
+        <div style="font-size:10px;color:var(--fg-mute);margin-top:4px">42% · 50% · 47% · 47% · 47%</div>
+      </div>
+      <div class="spark-card">
+        <div class="spark-label">Ventas Directo</div>
+        <div class="spark-value">38 <span style="font-size:12px;color:var(--green);font-weight:500">↑ vs 38 abr</span></div>
+        <div class="spark-bars">
+          <div class="spark-bar" style="height:25%"></div>
+          <div class="spark-bar" style="height:55%"></div>
+          <div class="spark-bar" style="height:50%"></div>
+          <div class="spark-bar" style="height:75%"></div>
+          <div class="spark-bar last" style="height:75%"></div>
+        </div>
+        <div style="font-size:10px;color:var(--fg-mute);margin-top:4px">15 · 32 · 28 · 38 · 38</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- POR VENDEDOR / CAJA -->
+<div class="section">
+  <div class="section-h">
+    <h2>👥 Por caja / vendedor</h2>
+    <span class="badge">Mayo 2026 · quién facturó qué</span>
+  </div>
+  <div class="section-body">
+    <div class="seller-grid">
+      <div class="seller-card">
+        <div class="seller-name"><div class="seller-avatar">FA</div>Favio</div>
+        <div class="seller-line"><span>Ventas</span><span>$13.833k</span></div>
+        <div class="seller-line"><span># pedidos</span><span>38</span></div>
+        <div class="seller-line"><span>Comisión Joaco (5%)</span><span>$667k</span></div>
+        <div class="seller-line"><span>Vertical</span><span style="color:var(--neon-red)">Directo</span></div>
+      </div>
+      <div class="seller-card">
+        <div class="seller-name"><div class="seller-avatar">GA</div>Gaspar</div>
+        <div class="seller-line"><span>Ventas</span><span>$10.640k</span></div>
+        <div class="seller-line"><span># pedidos</span><span>77</span></div>
+        <div class="seller-line"><span>Comisión</span><span>—</span></div>
+        <div class="seller-line"><span>Vertical</span><span style="color:var(--neon-cyan)">Distris + Insumos</span></div>
+      </div>
+      <div class="seller-card">
+        <div class="seller-name"><div class="seller-avatar">BR</div>Bruno</div>
+        <div class="seller-line"><span>Ventas</span><span>$10.121k</span></div>
+        <div class="seller-line"><span># alumnos</span><span>28</span></div>
+        <div class="seller-line"><span>Comisión MP</span><span>$420k</span></div>
+        <div class="seller-line"><span>Vertical</span><span style="color:var(--green)">Cursos</span></div>
+      </div>
+      <div class="seller-card">
+        <div class="seller-name"><div class="seller-avatar">JO</div>Joaquín</div>
+        <div class="seller-line"><span>Comisión cobrada</span><span>$667k</span></div>
+        <div class="seller-line"><span># pedidos</span><span>38</span></div>
+        <div class="seller-line"><span>Comisión ø</span><span>$17.5k</span></div>
+        <div class="seller-line"><span>Rol</span><span style="color:var(--fg-mute)">Vendedor Directo</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="text-align:center;color:var(--fg-mute);font-size:11px;padding:20px 0">
+  Mockup con datos reales de tu Sheet · Pendiente: cablear endpoint /admin/business-panel · Cache 5 min en D1
+</div>
+
+</div>
+
+<script>
+// Toggle period tabs
+document.querySelectorAll('.period-tab').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('.period-tab').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+  };
+});
+</script>
+</body>
+</html>
