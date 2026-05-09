@@ -1215,37 +1215,40 @@ function toggleDashMonth(m) {
 function setDashAll() { STATE.dashMonths = 'all'; render(); }
 function setDashCurrent() { STATE.dashMonths = null; render(); }
 
-// Tasa de cierre Pedidos Directo: de los presupuestos enviados (cotizador Joaco)
-// que ya tienen ≥X días, cuántos terminaron en venta (match nombre+precio).
+// Tasa de cierre Pedidos Directo (agregada del período):
+//   # ventas del período / # presupuestos enviados del período
+// Es la métrica contable simple que matchea con la mentalidad de negocio:
+// "de cada 100 cotizaciones que mando, ¿cuántas se transforman en venta?".
+//
+// Importante: hay desfase temporal (un presu de marzo puede cerrar en abril),
+// pero a nivel agregado mensual/anual los desfases se compensan. Para un mes
+// individual puede dar levemente sesgado.
+//
 // monthsFilter: null = mes actual, Set('YYYY-MM') = filtro, 'all' = todos.
 function getTasaCierreDirecto(monthsFilter) {
   let pptos = STATE.presupuestos || [];
+  let pedidos = STATE.pedidos || [];
   if (monthsFilter === 'all') {
     // todos
   } else if (monthsFilter instanceof Set) {
     pptos = pptos.filter(p => monthsFilter.has(getMonth(p.fecha)));
+    pedidos = pedidos.filter(p => monthsFilter.has(getMonth(p.fecha)));
   } else {
     const cur = getCurrentMonth();
     pptos = pptos.filter(p => getMonth(p.fecha) === cur);
+    pedidos = pedidos.filter(p => getMonth(p.fecha) === cur);
   }
-  // "Maduros" = los que ya tuvieron tiempo de cerrar (≥ presupuestoFollowupDays).
-  // Si están más recientes, no tiene sentido contarlos como "no cerrados".
-  const maduros = pptos.filter(p => daysBetween(p.fecha, TODAY) >= 0);
-  let cerrados = 0, abiertos = 0, frescos = 0;
-  for (const ppto of maduros) {
+  const enviados = pptos.length;
+  const vendidos = pedidos.length;
+  const tasa = enviados ? (vendidos / enviados) : 0;
+  // Match-based (info secundaria): cuántos presu del período tienen pedido
+  // asociado por nombre+precio. Subestima porque exige match exacto.
+  let cerradosMatch = 0;
+  for (const ppto of pptos) {
     const st = presupuestoStatus(ppto);
-    if (st.state === 'cerrado') cerrados++;
-    else if (st.state === 'fresco') frescos++;
-    else if (st.state === 'abierto') abiertos++;
+    if (st.state === 'cerrado') cerradosMatch++;
   }
-  const enviados = maduros.length;
-  // Tasa "real": cerrados / (cerrados + abiertos) — los frescos están todavía
-  // dentro de la ventana de seguimiento, no se contaron.
-  const decididos = cerrados + abiertos;
-  const tasa = decididos ? (cerrados / decididos) : 0;
-  // Tasa "bruta": cerrados / total enviados (incluyendo frescos como no-cerrados)
-  const tasaBruta = enviados ? (cerrados / enviados) : 0;
-  return { enviados, cerrados, abiertos, frescos, tasa, tasaBruta };
+  return { enviados, vendidos, cerradosMatch, tasa };
 }
 
 function presupuestoStatus(ppto) {
@@ -1549,7 +1552,7 @@ function renderDashboard() {
         <div class="kpi"><div class="kpi-label">Ventas mes</div><div class="kpi-value">${fmtMoney(totalMes)}</div><div class="kpi-delta">${cur.length} pedidos</div></div>
         <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${fmtMoney(aov)}</div><div class="kpi-delta">AOV mes</div></div>
         <div class="kpi"><div class="kpi-label">% Cobrado</div><div class="kpi-value">${pctCobrado}%</div><div class="kpi-delta">${fmtMoney(cobrado)} / ${fmtMoney(totalMes)}</div></div>
-        <div class="kpi cyan"><div class="kpi-label">Tasa de cierre</div><div class="kpi-value">${Math.round(tc.tasa*100)}%</div><div class="kpi-delta">${tc.cerrados}/${tc.cerrados+tc.abiertos} cerrados${tc.frescos ? ' · ' + tc.frescos + ' frescos' : ''}</div></div>
+        <div class="kpi cyan"><div class="kpi-label">Tasa de cierre</div><div class="kpi-value">${(tc.tasa*100).toFixed(1)}%</div><div class="kpi-delta">${tc.vendidos} ventas / ${tc.enviados} presu</div></div>
         <div class="kpi"><div class="kpi-label">Total año</div><div class="kpi-value">${fmtMoney(STATE.pedidos.reduce((a,p)=>a+p.precio+p.precioDimmer,0))}</div><div class="kpi-delta">${STATE.pedidos.length} pedidos · año</div></div>
       </div>`;
     })()}
@@ -1939,7 +1942,7 @@ function renderBusinessPanel() {
         <div class="kpi cyan"><div class="kpi-label">Costos totales</div><div class="kpi-value">${bpFmt(c.total.costos)}</div><div class="kpi-delta">${c.total.fijos ? 'Fijos: ' + bpFmt(c.total.fijos) : Math.round((c.total.costos/Math.max(1,c.total.ventas))*100) + '% s/ ventas'}</div></div>
         <div class="kpi"><div class="kpi-label">Margen operativo (CMA)</div><div class="kpi-value" style="color:${c.total.margen >= 0 ? 'var(--success, #25D366)' : 'var(--neon-red)'}">${bpFmt(c.total.margen)}</div><div class="kpi-delta">${Math.round(c.total.margenPct*100)}% del ingreso</div></div>
         <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${bpFmt(c.total.aov)}</div><div class="kpi-delta">AOV global</div></div>
-        <div class="kpi"><div class="kpi-label">Tasa de cierre Directo</div><div class="kpi-value">${Math.round(tc.tasa*100)}%</div><div class="kpi-delta">${tc.cerrados}/${tc.cerrados+tc.abiertos} presu cerrados${tc.frescos ? ' · ' + tc.frescos + ' frescos' : ''}</div></div>
+        <div class="kpi"><div class="kpi-label">Tasa de cierre Directo</div><div class="kpi-value">${(tc.tasa*100).toFixed(1)}%</div><div class="kpi-delta">${tc.vendidos} ventas / ${tc.enviados} presu</div></div>
         <div class="kpi cyan"><div class="kpi-label">Carteles totales</div><div class="kpi-value">${c.totalCarteles}</div><div class="kpi-delta">ø ${bpFmt(c.aovCarteles)} c/u</div></div>
       </div>`;
     })()}
@@ -2007,13 +2010,12 @@ function renderBusinessPanel() {
       else monthsFilter = null;
       const tc = getTasaCierreDirecto(monthsFilter);
       const enviados = tc.enviados;
-      const cerrados = tc.cerrados;
-      const abiertos = tc.abiertos;
-      const frescos = tc.frescos;
+      const vendidos = tc.vendidos;
+      const noCerrados = Math.max(0, enviados - vendidos);
       const wPct = (n) => enviados ? Math.max(2, (n / enviados) * 100) : 0;
       return `<div class="card" style="margin-top:18px">
         <div class="card-h">
-          <h3>Funnel Pedidos Directo · Presupuestos → Cierres</h3>
+          <h3>Funnel Pedidos Directo · Presupuestos → Ventas</h3>
           <span class="muted" style="margin-left:auto;font-size:12px">${escapeHtml(periodLabel)}</span>
         </div>
         <div style="padding:16px 20px">
@@ -2023,22 +2025,18 @@ function renderBusinessPanel() {
               <div class="bp-funnel-bar-wrap"><div class="bp-funnel-bar" style="width:100%;background:rgba(143,212,222,.65)"><span class="bp-funnel-num">${enviados}</span><span class="bp-funnel-pct">100%</span></div></div>
             </div>
             <div class="bp-funnel-row">
-              <div class="bp-funnel-lbl">Frescos (en seguimiento)</div>
-              <div class="bp-funnel-bar-wrap"><div class="bp-funnel-bar" style="width:${wPct(frescos)}%;background:rgba(255,167,38,.7)"><span class="bp-funnel-num">${frescos}</span><span class="bp-funnel-pct">${enviados ? Math.round(frescos/enviados*100) : 0}%</span></div></div>
+              <div class="bp-funnel-lbl">No cerrados</div>
+              <div class="bp-funnel-bar-wrap"><div class="bp-funnel-bar" style="width:${wPct(noCerrados)}%;background:rgba(255,24,48,.55)"><span class="bp-funnel-num">${noCerrados}</span><span class="bp-funnel-pct">${enviados ? ((noCerrados/enviados)*100).toFixed(1) : 0}%</span></div></div>
             </div>
             <div class="bp-funnel-row">
-              <div class="bp-funnel-lbl">Abiertos sin venta</div>
-              <div class="bp-funnel-bar-wrap"><div class="bp-funnel-bar" style="width:${wPct(abiertos)}%;background:rgba(255,24,48,.55)"><span class="bp-funnel-num">${abiertos}</span><span class="bp-funnel-pct">${enviados ? Math.round(abiertos/enviados*100) : 0}%</span></div></div>
-            </div>
-            <div class="bp-funnel-row">
-              <div class="bp-funnel-lbl">Cerrados (venta)</div>
-              <div class="bp-funnel-bar-wrap"><div class="bp-funnel-bar" style="width:${wPct(cerrados)}%;background:rgba(37,211,102,.75)"><span class="bp-funnel-num">${cerrados}</span><span class="bp-funnel-pct">${enviados ? Math.round(cerrados/enviados*100) : 0}%</span></div></div>
+              <div class="bp-funnel-lbl">Vendidos</div>
+              <div class="bp-funnel-bar-wrap"><div class="bp-funnel-bar" style="width:${wPct(vendidos)}%;background:rgba(37,211,102,.75)"><span class="bp-funnel-num">${vendidos}</span><span class="bp-funnel-pct">${enviados ? ((vendidos/enviados)*100).toFixed(1) : 0}%</span></div></div>
             </div>
           </div>
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
-            <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Tasa de cierre real</div><div style="font-size:22px;font-weight:700;color:var(--neon-cyan);font-family:ui-monospace,monospace">${Math.round(tc.tasa*100)}%</div><div style="font-size:11px;color:var(--fg-subtle)">cerrados / decididos (excl. frescos)</div></div>
-            <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Tasa bruta</div><div style="font-size:22px;font-weight:700;font-family:ui-monospace,monospace">${Math.round(tc.tasaBruta*100)}%</div><div style="font-size:11px;color:var(--fg-subtle)">cerrados / total enviados</div></div>
-            <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Decididos</div><div style="font-size:22px;font-weight:700;font-family:ui-monospace,monospace">${cerrados + abiertos}<span style="font-size:13px;color:var(--fg-subtle);font-weight:400"> / ${enviados}</span></div><div style="font-size:11px;color:var(--fg-subtle)">${frescos} aún en seguimiento</div></div>
+            <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Tasa de cierre</div><div style="font-size:22px;font-weight:700;color:var(--neon-cyan);font-family:ui-monospace,monospace">${(tc.tasa*100).toFixed(1)}%</div><div style="font-size:11px;color:var(--fg-subtle)">${vendidos} ventas / ${enviados} presu</div></div>
+            <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Match nombre+precio</div><div style="font-size:22px;font-weight:700;font-family:ui-monospace,monospace">${tc.cerradosMatch}<span style="font-size:13px;color:var(--fg-subtle);font-weight:400"> de ${enviados}</span></div><div style="font-size:11px;color:var(--fg-subtle)">presu identificables como vendidos</div></div>
+            <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Diferencia</div><div style="font-size:22px;font-weight:700;font-family:ui-monospace,monospace">${vendidos - tc.cerradosMatch >= 0 ? '+' : ''}${vendidos - tc.cerradosMatch}</div><div style="font-size:11px;color:var(--fg-subtle)">ventas sin presu identificable</div></div>
           </div>
         </div>
       </div>`;
