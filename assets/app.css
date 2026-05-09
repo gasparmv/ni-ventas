@@ -3058,6 +3058,41 @@ table.t td.cliente { font-weight: 600; }
 }
 .schedule-modal .btn-action:hover { filter: brightness(1.15); }
 
+/* ============ PRIVACY TOGGLE (estilo billetera virtual) ============ */
+.privacy-toggle {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  width: auto !important;
+  padding: 4px 8px !important;
+  color: var(--fg-subtle);
+  transition: all .15s ease;
+}
+.privacy-toggle:hover {
+  color: var(--neon-cyan);
+  border-color: var(--neon-cyan);
+}
+.privacy-toggle.on {
+  color: var(--neon-cyan);
+  background: rgba(143,212,222,.12) !important;
+  border-color: var(--neon-cyan) !important;
+}
+.privacy-toggle.on::after {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: var(--neon-cyan);
+  border-radius: 50%;
+  margin-left: 5px;
+  box-shadow: 0 0 6px var(--neon-cyan);
+  animation: privacy-pulse 1.4s ease-in-out infinite;
+}
+@keyframes privacy-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
+}
+
 /* ============ BUSINESS PANEL (Gaspar) ============ */
 .bp-charts-row {
   display: grid;
