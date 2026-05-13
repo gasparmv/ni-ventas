@@ -141,39 +141,41 @@ function normalizeArPhoneFE(raw) {
 }
 
 // Devuelve la lista completa de carteles del cotizador (cartel 1 + extras).
-// Cada item conserva los campos del form (ancho, alto, neon, tipo).
+// Cada item conserva los campos del form (cliente, ancho, alto, neon, tipo).
+// El campo "cliente" en este contexto es el nombre del diseño (no del comprador).
 function getCarteles() {
   const f = STATE.cotizadorForm;
-  const c1 = { ancho: f.ancho, alto: f.alto, neon: f.neon, tipo: f.tipo || 'INT' };
+  const c1 = { cliente: f.cliente, ancho: f.ancho, alto: f.alto, neon: f.neon, tipo: f.tipo || 'INT' };
   const extras = Array.isArray(f.extraCarteles) ? f.extraCarteles : [];
   return [c1, ...extras].filter(c => +c.ancho > 0 && +c.alto > 0);
 }
 
 function buildPresupuestoTexto() {
-  const f = STATE.cotizadorForm;
   const carteles = getCarteles();
   if (carteles.length === 0) return null;
   const p = getCotizadorParams();
-  const nombre = f.cliente.trim() || 'Custom name';
 
   const closing = `\n\nControladores opcionales\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nPara iniciar el trabajo, se requiere el 50% del total en concepto de seña.\n\nTiempo de armado: 15/20 días.\n\nTodos los medios de pago!\n\nHacemos envíos GRATIS a todo el país!`;
 
   if (carteles.length === 1) {
     const c = carteles[0];
     const r = calcCotizador(c);
+    const nombre = (c.cliente || '').trim() || 'Custom name';
     return `Te comparto la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+c.ancho)}x${Math.round(+c.alto)}\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}${closing}`;
   }
 
-  // 2+ carteles
+  // 2+ carteles — cada uno con su propio nombre de diseño
   let totalTrans = 0, totalNegro = 0;
   const bloques = carteles.map((c, i) => {
     const r = calcCotizador(c);
     totalTrans += r.transFinal;
     totalNegro += r.negroFinal;
-    return `Cartel ${i+1} — ${Math.round(+c.ancho)}x${Math.round(+c.alto)} cm\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}`;
+    const disen = (c.cliente || '').trim() || `Cartel ${i+1}`;
+    return `${disen} — ${Math.round(+c.ancho)}x${Math.round(+c.alto)} cm\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}`;
   }).join('\n\n');
 
-  return `Te comparto la información detallada!\n\nTrabajo: ${nombre}\n\n${bloques}\n\nTotal transparente: ${fmtMoney(totalTrans)}\nTotal negro: ${fmtMoney(totalNegro)}${closing}`;
+  const trabajo = carteles.map(c => (c.cliente || '').trim()).filter(Boolean).join(' · ') || 'Custom name';
+  return `Te comparto la información detallada!\n\nTrabajo: ${trabajo}\n\n${bloques}\n\nTotal transparente: ${fmtMoney(totalTrans)}\nTotal negro: ${fmtMoney(totalNegro)}${closing}`;
 }
 
 function getPresupuestoTextoFinal() {
@@ -201,8 +203,13 @@ function copiarPresupuesto() {
 
 async function enviarPresupuestoWA() {
   const f = STATE.cotizadorForm;
-  if (!(+f.ancho > 0) || !(+f.alto > 0)) { await showAlert('Completá al menos ancho y alto', { title: 'Faltan datos' }); return; }
-  if (!f.cliente.trim()) { await showAlert('Completá el nombre del cliente/diseño (se va a guardar también en el Sheet)', { title: 'Falta el cliente' }); return; }
+  const carteles = getCarteles();
+  if (carteles.length === 0) { await showAlert('Completá al menos ancho y alto', { title: 'Faltan datos' }); return; }
+  const sinNombre = carteles.findIndex(c => !(c.cliente || '').trim());
+  if (sinNombre !== -1) {
+    await showAlert(`Falta el nombre de diseño del cartel ${sinNombre+1} (se guarda también en el Sheet)`, { title: 'Falta el diseño' });
+    return;
+  }
   const tel = (f.telefono || '').trim();
   if (!tel) { await showAlert('Completá el teléfono del cliente', { title: 'Falta el teléfono' }); return; }
   const digits = tel.replace(/\D/g, '');
@@ -474,22 +481,25 @@ async function saveCotizacion() {
   const f = STATE.cotizadorForm;
   const carteles = getCarteles();
   if (carteles.length === 0) { await showAlert('Completá al menos ancho y alto', { title: 'Faltan datos' }); return; }
-  if (!f.cliente.trim()) { await showAlert('Completá el nombre del cliente/diseño', { title: 'Falta el cliente' }); return; }
+  // Cada cartel necesita su propio nombre de diseño (campo "cliente").
+  const sinNombre = carteles.findIndex(c => !(c.cliente || '').trim());
+  if (sinNombre !== -1) {
+    await showAlert(`Falta el nombre de diseño del cartel ${sinNombre+1}`, { title: 'Falta el diseño' });
+    return;
+  }
   if (f.canal === 'WPP' && !f.telefono.trim()) { await showAlert('Completá el teléfono del cliente (obligatorio para WPP)', { title: 'Falta el teléfono' }); return; }
   STATE.cotizadorSaving = true;
   updateCotizadorForm();
   const telRaw = (f.telefono || '').trim();
   const canal = f.canal || 'WPP';
   const telFinal = canal === 'WPP' ? normalizeArPhoneFE(telRaw) : telRaw;
-  const cliente = f.cliente.trim();
   const multi = carteles.length > 1;
   try {
     for (let i = 0; i < carteles.length; i++) {
       const c = carteles[i];
       const r = calcCotizador(c);
       const payload = {
-        // Si hay más de un cartel, sufijamos el nombre para distinguir en la planilla.
-        cliente: multi ? `${cliente} (cartel ${i+1}/${carteles.length})` : cliente,
+        cliente: c.cliente.trim(),
         ancho: +c.ancho,
         alto: +c.alto,
         neon: +c.neon || 0,
@@ -2497,7 +2507,7 @@ function bindPresupuestos() {
     const field = el.dataset.extraField;
     const handler = () => {
       if (!Array.isArray(STATE.cotizadorForm.extraCarteles)) STATE.cotizadorForm.extraCarteles = [];
-      if (!STATE.cotizadorForm.extraCarteles[idx]) STATE.cotizadorForm.extraCarteles[idx] = { ancho:'', alto:'', neon:'', tipo:'INT' };
+      if (!STATE.cotizadorForm.extraCarteles[idx]) STATE.cotizadorForm.extraCarteles[idx] = { cliente:'', ancho:'', alto:'', neon:'', tipo:'INT' };
       STATE.cotizadorForm.extraCarteles[idx][field] = el.value;
       updateCotizadorForm();
     };
@@ -2508,7 +2518,7 @@ function bindPresupuestos() {
   const addBtn = document.getElementById('cot-add-cartel');
   if (addBtn) addBtn.onclick = () => {
     if (!Array.isArray(STATE.cotizadorForm.extraCarteles)) STATE.cotizadorForm.extraCarteles = [];
-    STATE.cotizadorForm.extraCarteles.push({ ancho:'', alto:'', neon:'', tipo:'INT' });
+    STATE.cotizadorForm.extraCarteles.push({ cliente:'', ancho:'', alto:'', neon:'', tipo:'INT' });
     render();
   };
   // × Eliminar cartel extra
@@ -2566,9 +2576,10 @@ function renderCotizadorResults() {
 
   const blocksHtml = multi ? carteles.map((c, i) => {
     const rr = calcCotizador(c);
+    const disen = (c.cliente || '').trim() || `Cartel ${i+1}`;
     return `
       <div class="cot-block" style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2)">
-        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Cartel ${i+1} · ${Math.round(+c.ancho)}×${Math.round(+c.alto)} cm · m² ${rr.m2.toFixed(2)}</div>
+        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${escapeHtml(disen)} · ${Math.round(+c.ancho)}×${Math.round(+c.alto)} cm · m² ${rr.m2.toFixed(2)}</div>
         <div class="cot-result-grid">
           <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${rr.transFinal !== rr.trans ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(rr.trans)+'</s> ' : ''}${fmtMoney(rr.transFinal)}</div></div>
           <div class="cot-result"><div class="lbl">Negro</div><div class="val">${rr.negroFinal !== rr.negro ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(rr.negro)+'</s> ' : ''}${fmtMoney(rr.negroFinal)}</div></div>
@@ -2624,7 +2635,6 @@ function renderCotizadorResults() {
 }
 
 function renderCotizadorCartelBlock(c, idx, removable) {
-  const prefix = `extra${idx}-`;
   return `
     <div class="cot-extra-block" data-extra-idx="${idx}" style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-top:var(--s-2);position:relative">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2)">
@@ -2632,6 +2642,7 @@ function renderCotizadorCartelBlock(c, idx, removable) {
         ${removable ? `<button class="btn btn-ghost btn-icon" data-extra-remove="${idx}" title="Eliminar este cartel" aria-label="Eliminar">×</button>` : ''}
       </div>
       <div class="cot-grid">
+        <label>Cliente / diseño<input type="text" data-extra-field="cliente" data-extra-idx="${idx}" value="${escapeHtml(c.cliente || '')}" placeholder="nombre del diseño"></label>
         <label>Ancho (cm)<input type="number" min="0" step="0.1" data-extra-field="ancho" data-extra-idx="${idx}" value="${escapeHtml(c.ancho)}"></label>
         <label>Alto (cm)<input type="number" min="0" step="0.1" data-extra-field="alto" data-extra-idx="${idx}" value="${escapeHtml(c.alto)}"></label>
         <label>Neón (mt)<input type="number" min="0" step="0.1" data-extra-field="neon" data-extra-idx="${idx}" value="${escapeHtml(c.neon)}"></label>
