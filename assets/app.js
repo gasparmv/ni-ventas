@@ -2445,10 +2445,15 @@ function pillEstadoPedido(s) {
 
 // ---------- PRESUPUESTOS ----------
 let pptoFilter = 'all'; // all | abiertos | cerrados | semana
+let pptoSearch = '';
 function bindPresupuestos() {
   document.querySelectorAll('[data-ppfilter]').forEach(el => {
     el.onclick = () => { pptoFilter = el.dataset.ppfilter; renderPresupuestos(); render(); };
   });
+  const searchInput = document.querySelector('[data-pp-search]');
+  if (searchInput) {
+    searchInput.addEventListener('input', () => { pptoSearch = searchInput.value; renderTablePresupuestos(); });
+  }
   const openBtn = document.querySelector('[data-cot-open]');
   if (openBtn) openBtn.onclick = () => { pptoShowCotizador = true; render(); };
   const closeBtn = document.querySelector('[data-cot-close]');
@@ -2595,12 +2600,6 @@ function renderPresupuestos() {
     cerrados: list.filter(p=>p.st.state==='cerrado').length,
     semana: list.filter(p=>p.st.state==='abierto' && p.st.days <= 14).length,
   };
-  let filtered = list;
-  if (pptoFilter === 'hoy') filtered = list.filter(p=>daysBetween(p.fecha, TODAY) === 0);
-  else if (pptoFilter === 'abiertos') filtered = list.filter(p=>p.st.state==='abierto');
-  else if (pptoFilter === 'cerrados') filtered = list.filter(p=>p.st.state==='cerrado');
-  else if (pptoFilter === 'semana') filtered = list.filter(p=>p.st.state==='abierto' && p.st.days <= 14);
-  filtered = filtered.sort((a,b) => (b.fecha - a.fecha) || (b.idx - a.idx));
   return `
     <div class="page-head">
       <div><div class="eyebrow">${STATE.presupuestos.length}${STATE.presupuestos.length ? ' desde ' + fmtDate(STATE.presupuestos.reduce((min, p) => p.fecha < min ? p.fecha : min, STATE.presupuestos[0].fecha)) : ''}</div><h1>Presupuestos</h1></div>
@@ -2614,36 +2613,58 @@ function renderPresupuestos() {
     ${pptoShowCotizador ? renderCotizadorForm() : ''}
     <div class="table-wrap">
       <div class="table-toolbar">
+        <input type="text" placeholder="Buscar por diseño / cliente…" data-pp-search value="${escapeHtml(pptoSearch)}">
         <button class="btn btn-ghost ${pptoFilter==='hoy'?'btn-cyan':''}" data-ppfilter="hoy">Hoy · ${counts.hoy}</button>
         <button class="btn btn-ghost ${pptoFilter==='all'?'btn-cyan':''}" data-ppfilter="all">Todos · ${counts.all}</button>
         <button class="btn btn-ghost ${pptoFilter==='abiertos'?'btn-cyan':''}" data-ppfilter="abiertos">Abiertos · ${counts.abiertos}</button>
         <button class="btn btn-ghost ${pptoFilter==='semana'?'btn-cyan':''}" data-ppfilter="semana">Para seguir · ${counts.semana}</button>
         <button class="btn btn-ghost ${pptoFilter==='cerrados'?'btn-cyan':''}" data-ppfilter="cerrados">Cerrados · ${counts.cerrados}</button>
-        <div class="right">${filtered.length} filas</div>
+        <div class="right"><span id="ppto-row-count">0</span> filas</div>
       </div>
-      <table class="t">
-        <thead><tr><th>Fecha</th><th>Cliente</th><th>Tamaño</th><th>m²</th><th>Precio</th><th>Contacto</th><th>Estado</th></tr></thead>
-        <tbody>
-          ${filtered.length===0 ? '<tr class="empty-row"><td colspan="7">Sin presupuestos en este filtro</td></tr>' :
-            filtered.map(p => {
-              let pill = '';
-              if (p.st.state === 'cerrado') {
-                const ratio = p.st.pedido ? (p.st.pedido.precio / (p.precio || 1)) : 1;
-                const exact = ratio >= 0.999 && ratio <= 1.001;
-                pill = exact
-                  ? `<span class="pill green">✓ Cerrado</span>`
-                  : `<span class="pill green" title="Cerrado automáticamente por match de nombre + precio dentro de tolerancia ±20%">✓ Cerrado <span style="opacity:.6;font-size:9px">auto</span></span>`;
-              }
-              else if (p.st.state === 'fresco') pill = `<span class="pill cyan">${p.st.days}d</span>`;
-              else if (p.st.state === 'abierto') pill = `<span class="pill ${p.st.days > 14 ? 'red' : 'amber'}">Abierto · ${p.st.days}d</span>`;
-              else pill = `<span class="pill muted">Futuro</span>`;
-              const dDays = daysBetween(p.fecha, TODAY);
-              const dayPill = dDays === 0 ? '<span class="pill cyan" style="margin-left:6px;font-size:9px">HOY</span>' : dDays === 1 ? '<span class="pill amber" style="margin-left:6px;font-size:9px">AYER</span>' : '';
-              return `<tr><td class="num">${fmtDateTime(p.fecha)}${dayPill}</td><td class="cliente">${escapeHtml(p.nombre)}</td><td class="num">${p.tamCm||'—'}×${p.ancho||'—'}</td><td class="num">${p.m2||'—'}</td><td class="num">${fmtMoney(p.precio)}</td><td>${renderContactoCell(p, true)}</td><td>${pill}</td></tr>`;
-            }).join('')}
-        </tbody>
-      </table>
+      <div id="table-presupuestos"></div>
     </div>
+  `;
+}
+
+function renderTablePresupuestos() {
+  const wrap = document.getElementById('table-presupuestos');
+  if (!wrap) return;
+  const list = STATE.presupuestos.map(p => ({...p, st: presupuestoStatus(p)}));
+  let filtered = list;
+  if (pptoFilter === 'hoy') filtered = filtered.filter(p=>daysBetween(p.fecha, TODAY) === 0);
+  else if (pptoFilter === 'abiertos') filtered = filtered.filter(p=>p.st.state==='abierto');
+  else if (pptoFilter === 'cerrados') filtered = filtered.filter(p=>p.st.state==='cerrado');
+  else if (pptoFilter === 'semana') filtered = filtered.filter(p=>p.st.state==='abierto' && p.st.days <= 14);
+  if (pptoSearch) {
+    const q = normName(pptoSearch);
+    filtered = filtered.filter(p => normName([p.nombre, p.telefono].join(' ')).includes(q));
+  }
+  filtered = filtered.sort((a,b) => (b.fecha - a.fecha) || (b.idx - a.idx));
+  const countEl = document.getElementById('ppto-row-count');
+  if (countEl) countEl.textContent = filtered.length;
+  wrap.innerHTML = `
+    <table class="t">
+      <thead><tr><th>Fecha</th><th>Cliente</th><th>Tamaño</th><th>m²</th><th>Precio</th><th>Contacto</th><th>Estado</th></tr></thead>
+      <tbody>
+        ${filtered.length===0 ? '<tr class="empty-row"><td colspan="7">Sin presupuestos en este filtro</td></tr>' :
+          filtered.map(p => {
+            let pill = '';
+            if (p.st.state === 'cerrado') {
+              const ratio = p.st.pedido ? (p.st.pedido.precio / (p.precio || 1)) : 1;
+              const exact = ratio >= 0.999 && ratio <= 1.001;
+              pill = exact
+                ? `<span class="pill green">✓ Cerrado</span>`
+                : `<span class="pill green" title="Cerrado automáticamente por match de nombre + precio dentro de tolerancia ±20%">✓ Cerrado <span style="opacity:.6;font-size:9px">auto</span></span>`;
+            }
+            else if (p.st.state === 'fresco') pill = `<span class="pill cyan">${p.st.days}d</span>`;
+            else if (p.st.state === 'abierto') pill = `<span class="pill ${p.st.days > 14 ? 'red' : 'amber'}">Abierto · ${p.st.days}d</span>`;
+            else pill = `<span class="pill muted">Futuro</span>`;
+            const dDays = daysBetween(p.fecha, TODAY);
+            const dayPill = dDays === 0 ? '<span class="pill cyan" style="margin-left:6px;font-size:9px">HOY</span>' : dDays === 1 ? '<span class="pill amber" style="margin-left:6px;font-size:9px">AYER</span>' : '';
+            return `<tr><td class="num">${fmtDateTime(p.fecha)}${dayPill}</td><td class="cliente">${escapeHtml(p.nombre)}</td><td class="num">${p.tamCm||'—'}×${p.ancho||'—'}</td><td class="num">${p.m2||'—'}</td><td class="num">${fmtMoney(p.precio)}</td><td>${renderContactoCell(p, true)}</td><td>${pill}</td></tr>`;
+          }).join('')}
+      </tbody>
+    </table>
   `;
 }
 
@@ -6901,4 +6922,10 @@ if (canAccessChat()) {
 // Re-bind table when pedidos view rendered after data loads
 function rerenderTablePedidosIfNeeded() { if (STATE.view === 'pedidos') renderTablePedidos(); }
 const _origRender = render;
-render = function() { _origRender.apply(this, arguments); if (STATE.view === 'pedidos' && STATE.loaded) renderTablePedidos(); };
+render = function() {
+  _origRender.apply(this, arguments);
+  if (STATE.loaded) {
+    if (STATE.view === 'pedidos') renderTablePedidos();
+    else if (STATE.view === 'presupuestos') renderTablePresupuestos();
+  }
+};
