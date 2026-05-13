@@ -28,7 +28,7 @@ const CONFIG = {
   },
   matchPriceTolerance: 0.20,   // ±20%
   presupuestoFollowupDays: 7,  // miércoles a miércoles
-  presupuestoCutoff: '2026-04-27',   // presupuestos anteriores quedan dados por vencidos / fuera del seguimiento activo
+  presupuestoCutoff: '2026-05-08',   // presupuestos anteriores quedan dados por vencidos / fuera del seguimiento activo
   appsScriptUrl: 'https://script.google.com/macros/s/AKfycbz9Jq2ew0dMcg5IEXn9OMsqhdVmlwqL_EVULlclWK-oIxh5avOlnZxRrGtis1sGalnd/exec',
   cotizadorDefaults: {
     // Mapping B2..B8 del sheet del cotizador
