@@ -89,7 +89,7 @@ const STATE = {
   token: null,        // token de admin (Gaspar) si está logueado
   activity: { rows: [], loading: false, error: null },
   cotizadorParams: null,  // se carga del Worker; si null usa CONFIG.cotizadorDefaults
-  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '' },
+  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '', extraCarteles: [] },
   cotizadorSaving: false,
   // Panel de negocio (solo Gaspar) — datos del Sheet "2025 V4"
   businessPanel: { data: null, loading: false, error: null, lastFetch: 0, period: 'current' },
@@ -140,13 +140,40 @@ function normalizeArPhoneFE(raw) {
   return n;
 }
 
+// Devuelve la lista completa de carteles del cotizador (cartel 1 + extras).
+// Cada item conserva los campos del form (ancho, alto, neon, tipo).
+function getCarteles() {
+  const f = STATE.cotizadorForm;
+  const c1 = { ancho: f.ancho, alto: f.alto, neon: f.neon, tipo: f.tipo || 'INT' };
+  const extras = Array.isArray(f.extraCarteles) ? f.extraCarteles : [];
+  return [c1, ...extras].filter(c => +c.ancho > 0 && +c.alto > 0);
+}
+
 function buildPresupuestoTexto() {
   const f = STATE.cotizadorForm;
-  if (!(+f.ancho > 0) || !(+f.alto > 0)) return null;
-  const r = calcCotizador(f);
+  const carteles = getCarteles();
+  if (carteles.length === 0) return null;
   const p = getCotizadorParams();
   const nombre = f.cliente.trim() || 'Custom name';
-  return `Te comparto la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+f.ancho)}x${Math.round(+f.alto)}\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}\n\nControladores opcionales\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña.\n\nTiempo de armado: 15/20 días.\n\nTodos los medios de pago!\n\nHacemos envíos GRATIS a todo el país!`;
+
+  const closing = `\n\nControladores opcionales\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nPara iniciar el trabajo, se requiere el 50% del total en concepto de seña.\n\nTiempo de armado: 15/20 días.\n\nTodos los medios de pago!\n\nHacemos envíos GRATIS a todo el país!`;
+
+  if (carteles.length === 1) {
+    const c = carteles[0];
+    const r = calcCotizador(c);
+    return `Te comparto la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+c.ancho)}x${Math.round(+c.alto)}\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}${closing}`;
+  }
+
+  // 2+ carteles
+  let totalTrans = 0, totalNegro = 0;
+  const bloques = carteles.map((c, i) => {
+    const r = calcCotizador(c);
+    totalTrans += r.transFinal;
+    totalNegro += r.negroFinal;
+    return `Cartel ${i+1} — ${Math.round(+c.ancho)}x${Math.round(+c.alto)} cm\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}`;
+  }).join('\n\n');
+
+  return `Te comparto la información detallada!\n\nTrabajo: ${nombre}\n\n${bloques}\n\nTotal transparente: ${fmtMoney(totalTrans)}\nTotal negro: ${fmtMoney(totalNegro)}${closing}`;
 }
 
 function getPresupuestoTextoFinal() {
@@ -409,76 +436,78 @@ async function enviarFollowupsPresupuesto(opts) {
   });
 }
 
+function postCartelToSheet(payload) {
+  return new Promise((resolve, reject) => {
+    const id = 'cot-iframe-' + Date.now() + '-' + Math.random().toString(36).slice(2,7);
+    const iframe = document.createElement('iframe');
+    iframe.name = id;
+    iframe.style.display = 'none';
+    document.body.appendChild(iframe);
+
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = CONFIG.appsScriptUrl;
+    form.target = id;
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'data';
+    input.value = JSON.stringify(payload);
+    form.appendChild(input);
+    document.body.appendChild(form);
+
+    iframe.onload = () => {
+      setTimeout(() => { iframe.remove(); form.remove(); }, 500);
+      resolve();
+    };
+    iframe.onerror = () => {
+      iframe.remove(); form.remove();
+      reject(new Error('Error de red'));
+    };
+    setTimeout(() => { resolve(); iframe.remove(); form.remove(); }, 8000);
+
+    form.submit();
+  });
+}
+
 async function saveCotizacion() {
   if (!CONFIG.appsScriptUrl) { await showAlert('Falta configurar CONFIG.appsScriptUrl (Google Apps Script)', { title: 'Error de configuración', variant: 'warn' }); return; }
   const f = STATE.cotizadorForm;
-  if (!(+f.ancho > 0) || !(+f.alto > 0)) { await showAlert('Completá al menos ancho y alto', { title: 'Faltan datos' }); return; }
+  const carteles = getCarteles();
+  if (carteles.length === 0) { await showAlert('Completá al menos ancho y alto', { title: 'Faltan datos' }); return; }
   if (!f.cliente.trim()) { await showAlert('Completá el nombre del cliente/diseño', { title: 'Falta el cliente' }); return; }
   if (f.canal === 'WPP' && !f.telefono.trim()) { await showAlert('Completá el teléfono del cliente (obligatorio para WPP)', { title: 'Falta el teléfono' }); return; }
-  const r = calcCotizador(f);
   STATE.cotizadorSaving = true;
   updateCotizadorForm();
-  // Normalizamos el teléfono si el canal es WhatsApp para que quede en formato E.164
-  // (sin +, sin espacios, sin guiones). Así el sheet siempre tiene datos limpios y los
-  // bulk/follow-ups por WA Cloud API funcionan sin reformatear.
-  // Para Instagram no tocamos: el campo guarda el username/handle.
   const telRaw = (f.telefono || '').trim();
   const canal = f.canal || 'WPP';
   const telFinal = canal === 'WPP' ? normalizeArPhoneFE(telRaw) : telRaw;
-  const payload = {
-    cliente: f.cliente.trim(),
-    ancho: +f.ancho,
-    alto: +f.alto,
-    neon: +f.neon || 0,
-    tipo: f.tipo || 'INT',
-    m2: r.m2,
-    trans: r.trans,
-    negro: r.negro,
-    descuento: r.descuento,
-    recargo: r.recargo,
-    reventa: r.reventa,
-    comision: r.comision,
-    canal,
-    telefono: telFinal
-  };
+  const cliente = f.cliente.trim();
+  const multi = carteles.length > 1;
   try {
-    // Apps Script redirect CORS: usamos un iframe oculto + form POST
-    await new Promise((resolve, reject) => {
-      const id = 'cot-iframe-' + Date.now();
-      const iframe = document.createElement('iframe');
-      iframe.name = id;
-      iframe.style.display = 'none';
-      document.body.appendChild(iframe);
-
-      const form = document.createElement('form');
-      form.method = 'POST';
-      form.action = CONFIG.appsScriptUrl;
-      form.target = id;
-      // Mandar payload como campo hidden "data"
-      const input = document.createElement('input');
-      input.type = 'hidden';
-      input.name = 'data';
-      input.value = JSON.stringify(payload);
-      form.appendChild(input);
-      document.body.appendChild(form);
-
-      iframe.onload = () => {
-        // cleanup
-        setTimeout(() => { iframe.remove(); form.remove(); }, 500);
-        resolve();
+    for (let i = 0; i < carteles.length; i++) {
+      const c = carteles[i];
+      const r = calcCotizador(c);
+      const payload = {
+        // Si hay más de un cartel, sufijamos el nombre para distinguir en la planilla.
+        cliente: multi ? `${cliente} (cartel ${i+1}/${carteles.length})` : cliente,
+        ancho: +c.ancho,
+        alto: +c.alto,
+        neon: +c.neon || 0,
+        tipo: c.tipo || 'INT',
+        m2: r.m2,
+        trans: r.trans,
+        negro: r.negro,
+        descuento: r.descuento,
+        recargo: r.recargo,
+        reventa: r.reventa,
+        comision: r.comision,
+        canal,
+        telefono: telFinal
       };
-      iframe.onerror = () => {
-        iframe.remove(); form.remove();
-        reject(new Error('Error de red'));
-      };
-      // timeout por si no carga
-      setTimeout(() => { resolve(); iframe.remove(); form.remove(); }, 8000);
-
-      form.submit();
-    });
-    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '' };
-    toast('Cotización guardada ✓');
-    // Esperar un poco para que el sheet se actualice antes de recargar
+      await postCartelToSheet(payload);
+    }
+    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '', extraCarteles: [] };
+    toast(multi ? `${carteles.length} carteles guardados ✓` : 'Cotización guardada ✓');
     setTimeout(() => loadAll(), 2000);
   } catch (e) {
     await showAlert(e.message, { title: 'Error al guardar', variant: 'warn' });
@@ -2462,6 +2491,34 @@ function bindPresupuestos() {
     el.oninput = () => { STATE.cotizadorForm[el.dataset.cotField] = el.value; updateCotizadorForm(); };
     el.onchange = () => { STATE.cotizadorForm[el.dataset.cotField] = el.value; updateCotizadorForm(); };
   });
+  // Inputs de carteles extra (data-extra-field + data-extra-idx)
+  document.querySelectorAll('[data-extra-field]').forEach(el => {
+    const idx = +el.dataset.extraIdx;
+    const field = el.dataset.extraField;
+    const handler = () => {
+      if (!Array.isArray(STATE.cotizadorForm.extraCarteles)) STATE.cotizadorForm.extraCarteles = [];
+      if (!STATE.cotizadorForm.extraCarteles[idx]) STATE.cotizadorForm.extraCarteles[idx] = { ancho:'', alto:'', neon:'', tipo:'INT' };
+      STATE.cotizadorForm.extraCarteles[idx][field] = el.value;
+      updateCotizadorForm();
+    };
+    el.oninput = handler;
+    el.onchange = handler;
+  });
+  // ＋ Agregar otro cartel
+  const addBtn = document.getElementById('cot-add-cartel');
+  if (addBtn) addBtn.onclick = () => {
+    if (!Array.isArray(STATE.cotizadorForm.extraCarteles)) STATE.cotizadorForm.extraCarteles = [];
+    STATE.cotizadorForm.extraCarteles.push({ ancho:'', alto:'', neon:'', tipo:'INT' });
+    render();
+  };
+  // × Eliminar cartel extra
+  document.querySelectorAll('[data-extra-remove]').forEach(el => {
+    el.onclick = () => {
+      const idx = +el.dataset.extraRemove;
+      if (Array.isArray(STATE.cotizadorForm.extraCarteles)) STATE.cotizadorForm.extraCarteles.splice(idx, 1);
+      render();
+    };
+  });
   bindCotSaveBtn();
   const fuBtn = document.getElementById('btn-pp-followups');
   if (fuBtn) fuBtn.onclick = () => enviarFollowupsPresupuesto();
@@ -2502,10 +2559,35 @@ function renderCotizadorResults() {
   const f = STATE.cotizadorForm;
   const valid = +f.ancho > 0 && +f.alto > 0;
   if (!valid) return '<div class="muted" style="margin-top:var(--s-2);font-size:12px">Completá ancho y alto para ver los precios</div>';
-  const r = calcCotizador(f);
+  const carteles = getCarteles();
   const p = getCotizadorParams();
+  const multi = carteles.length > 1;
+  const r = calcCotizador(carteles[0] || f);
+
+  const blocksHtml = multi ? carteles.map((c, i) => {
+    const rr = calcCotizador(c);
+    return `
+      <div class="cot-block" style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2)">
+        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Cartel ${i+1} · ${Math.round(+c.ancho)}×${Math.round(+c.alto)} cm · m² ${rr.m2.toFixed(2)}</div>
+        <div class="cot-result-grid">
+          <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${rr.transFinal !== rr.trans ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(rr.trans)+'</s> ' : ''}${fmtMoney(rr.transFinal)}</div></div>
+          <div class="cot-result"><div class="lbl">Negro</div><div class="val">${rr.negroFinal !== rr.negro ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(rr.negro)+'</s> ' : ''}${fmtMoney(rr.negroFinal)}</div></div>
+        </div>
+      </div>`;
+  }).join('') : '';
+
+  const totalTrans = carteles.reduce((s, c) => s + calcCotizador(c).transFinal, 0);
+  const totalNegro = carteles.reduce((s, c) => s + calcCotizador(c).negroFinal, 0);
+
   return `
     <div class="cot-results">
+      ${multi ? `
+        ${blocksHtml}
+        <div class="cot-result-grid" style="border-top:2px solid var(--accent-cyan);padding-top:var(--s-2);margin-top:var(--s-2)">
+          <div class="cot-result"><div class="lbl">Total transparente</div><div class="val"><b>${fmtMoney(totalTrans)}</b></div></div>
+          <div class="cot-result"><div class="lbl">Total negro</div><div class="val"><b>${fmtMoney(totalNegro)}</b></div></div>
+        </div>
+      ` : `
       <div class="cot-meta">m² (sheet): <b>${r.m2.toFixed(2)}</b></div>
       <div class="cot-result-grid">
         <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${r.transFinal !== r.trans ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(r.trans)+'</s> ' : ''}${fmtMoney(r.transFinal)}</div></div>
@@ -2515,6 +2597,7 @@ function renderCotizadorResults() {
         ${r.descuento ? '<div class="cot-result"><div class="lbl">Descuento (m²>'+p.descuento_min_m2+')</div><div class="val">×'+p.descuento_mult+'</div></div>' : ''}
         ${r.recargo ? '<div class="cot-result"><div class="lbl">Recargo (m²≤'+(r.m2<=5?'5':r.m2<=12.5?'12.5':'25')+')</div><div class="val">×'+(r.m2<=5?p.recargo_5:r.m2<=12.5?p.recargo_125:p.recargo_25)+'</div></div>' : ''}
       </div>
+      `}
       <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end;flex-wrap:wrap;align-items:center">
         ${STATE.cotizadorForm.textoOverride ? '<span class="pill amber" style="font-size:10px">texto modificado</span>' : ''}
         <button class="btn btn-ghost btn-icon" id="cot-copy-btn" title="Copiar presupuesto" aria-label="Copiar presupuesto">
@@ -2540,8 +2623,32 @@ function renderCotizadorResults() {
   `;
 }
 
+function renderCotizadorCartelBlock(c, idx, removable) {
+  const prefix = `extra${idx}-`;
+  return `
+    <div class="cot-extra-block" data-extra-idx="${idx}" style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-top:var(--s-2);position:relative">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2)">
+        <span style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em">Cartel ${idx+2}</span>
+        ${removable ? `<button class="btn btn-ghost btn-icon" data-extra-remove="${idx}" title="Eliminar este cartel" aria-label="Eliminar">×</button>` : ''}
+      </div>
+      <div class="cot-grid">
+        <label>Ancho (cm)<input type="number" min="0" step="0.1" data-extra-field="ancho" data-extra-idx="${idx}" value="${escapeHtml(c.ancho)}"></label>
+        <label>Alto (cm)<input type="number" min="0" step="0.1" data-extra-field="alto" data-extra-idx="${idx}" value="${escapeHtml(c.alto)}"></label>
+        <label>Neón (mt)<input type="number" min="0" step="0.1" data-extra-field="neon" data-extra-idx="${idx}" value="${escapeHtml(c.neon)}"></label>
+        <label>Tipo
+          <select data-extra-field="tipo" data-extra-idx="${idx}">
+            <option value="INT" ${c.tipo==='INT'?'selected':''}>INT (interior)</option>
+            <option value="EXT" ${c.tipo==='EXT'?'selected':''}>EXT (exterior)</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  `;
+}
+
 function renderCotizadorForm() {
   const f = STATE.cotizadorForm;
+  const extras = Array.isArray(f.extraCarteles) ? f.extraCarteles : [];
   return `
     <div class="card cot-card" style="margin-bottom:var(--s-4)">
       <div class="card-h">
@@ -2557,6 +2664,9 @@ function renderCotizadorForm() {
           </select>
         </label>
         <label>Teléfono${f.canal==='WPP'?' *':''}<input type="tel" data-cot-field="telefono" value="${escapeHtml(f.telefono)}" placeholder="${f.canal==='WPP'?'obligatorio':'opcional'}"></label>
+      </div>
+      ${extras.length ? `<div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-top:var(--s-3)">Cartel 1</div>` : ''}
+      <div class="cot-grid" style="${extras.length ? 'margin-top:var(--s-1)' : ''}">
         <label>Ancho (cm)<input type="number" min="0" step="0.1" data-cot-field="ancho" value="${escapeHtml(f.ancho)}"></label>
         <label>Alto (cm)<input type="number" min="0" step="0.1" data-cot-field="alto" value="${escapeHtml(f.alto)}"></label>
         <label>Neón (mt)<input type="number" min="0" step="0.1" data-cot-field="neon" value="${escapeHtml(f.neon)}"></label>
@@ -2566,6 +2676,10 @@ function renderCotizadorForm() {
             <option value="EXT" ${f.tipo==='EXT'?'selected':''}>EXT (exterior)</option>
           </select>
         </label>
+      </div>
+      ${extras.map((c, i) => renderCotizadorCartelBlock(c, i, true)).join('')}
+      <div style="margin-top:var(--s-2)">
+        <button class="btn btn-ghost" id="cot-add-cartel" title="Agregar otro cartel al presupuesto">＋ Agregar otro cartel</button>
       </div>
       <div id="cot-results-slot">${renderCotizadorResults()}</div>
     </div>
