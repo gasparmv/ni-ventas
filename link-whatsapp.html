@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vincular WhatsApp · Neon Infinito</title>
+<style>
+  body {
+    background: #0A0A0F;
+    color: #e9edef;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    min-height: 100vh;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .card {
+    background: #18181f;
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 14px;
+    padding: 30px;
+    max-width: 580px;
+    width: 100%;
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  }
+  h1 {
+    margin: 0 0 6px;
+    font-size: 22px;
+    background: linear-gradient(135deg, #FF1830, #8FD4DE);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .sub {
+    color: rgba(233,237,239,.6);
+    font-size: 13px;
+    margin-bottom: 24px;
+  }
+  .step {
+    background: rgba(143,212,222,.05);
+    border-left: 3px solid #8FD4DE;
+    padding: 12px 16px;
+    margin: 14px 0;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .step b { color: #8FD4DE; }
+  button {
+    background: #25D366;
+    color: #000;
+    border: 0;
+    padding: 14px 24px;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    width: 100%;
+    margin: 18px 0 10px;
+    transition: all .15s ease;
+  }
+  button:hover {
+    background: #1eb558;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 14px rgba(37,211,102,.3);
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+  pre {
+    background: #0a0a0f;
+    border: 1px solid rgba(255,255,255,.05);
+    border-radius: 6px;
+    padding: 14px;
+    font-size: 11px;
+    overflow: auto;
+    max-height: 280px;
+    color: #8FD4DE;
+    margin-top: 16px;
+    font-family: ui-monospace, monospace;
+    word-break: break-all;
+    white-space: pre-wrap;
+  }
+  .err { color: #FF1830; }
+  .ok { color: #25D366; }
+  .copy-btn {
+    background: rgba(143,212,222,.1);
+    color: #8FD4DE;
+    border: 1px solid rgba(143,212,222,.3);
+    padding: 6px 12px;
+    font-size: 11px;
+    border-radius: 4px;
+    width: auto;
+    margin: 8px 0;
+  }
+  .copy-btn:hover { background: rgba(143,212,222,.2); transform: none; box-shadow: none; }
+  hr {
+    border: 0;
+    border-top: 1px solid rgba(255,255,255,.06);
+    margin: 22px 0;
+  }
+  input[type=text] {
+    width: 100%;
+    padding: 10px 12px;
+    background: #0a0a0f;
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 6px;
+    color: #e9edef;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    margin: 8px 0;
+    box-sizing: border-box;
+  }
+  input[type=text]:focus { outline: none; border-color: #8FD4DE; }
+  .small { font-size: 12px; color: rgba(233,237,239,.55); }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🔗 Vincular WhatsApp 6573</h1>
+  <p class="sub">Embedded Signup · Conecta el +54 9 11 4436-6573 a Cloud API + Coexistence</p>
+
+  <div class="step">
+    <b>Cómo funciona:</b><br>
+    1. Apretás el botón verde abajo<br>
+    2. Te abre el diálogo de Facebook → loguéate con tu cuenta de Meta Business<br>
+    3. Te pregunta qué WABA y número conectar → elegís <b>Neon Infinito</b> y el <b>6573</b><br>
+    4. Aceptás permisos → Meta genera el QR / código y la app de Joaco se conecta sola<br>
+    5. Si te pide el QR/código manual, lo pasás a Joaco para que lo escanee/ingrese en la app
+  </div>
+
+  <button id="connect" onclick="launchSignup()">📱 Conectar WhatsApp con Embedded Signup</button>
+
+  <p class="small">Si el diálogo no aparece o pide config_id, copiá el JSON de abajo y pegámelo en el chat para diagnosticar.</p>
+
+  <hr>
+
+  <div class="small">⚙️ Configuración avanzada (opcional)</div>
+  <div class="small">Config ID (si tenés uno generado en Facebook Login for Business → Configurations):</div>
+  <input type="text" id="configId" placeholder="ej: 123456789012345" />
+
+  <hr>
+
+  <div class="small">📋 Respuesta de Meta:</div>
+  <pre id="output">Esperando que aprietes el botón...</pre>
+  <button class="copy-btn" onclick="copyOutput()">📋 Copiar respuesta</button>
+</div>
+
+<script>
+window.fbAsyncInit = function() {
+  FB.init({
+    appId: '866678322681866',
+    autoLogAppEvents: true,
+    xfbml: true,
+    version: 'v25.0'
+  });
+};
+
+(function(d, s, id){
+  var js, fjs = d.getElementsByTagName(s)[0];
+  if (d.getElementById(id)) return;
+  js = d.createElement(s); js.id = id;
+  js.src = "https://connect.facebook.net/en_US/sdk.js";
+  fjs.parentNode.insertBefore(js, fjs);
+}(document, 'script', 'facebook-jssdk'));
+
+const out = document.getElementById('output');
+
+window.addEventListener('message', (event) => {
+  if (!event.origin.endsWith('facebook.com')) return;
+  try {
+    const data = JSON.parse(event.data);
+    if (data.type === 'WA_EMBEDDED_SIGNUP') {
+      log('💬 Embedded Signup event:\n' + JSON.stringify(data, null, 2), 'ok');
+    }
+  } catch (e) {}
+});
+
+function log(msg, cls) {
+  out.textContent = msg;
+  out.className = cls || '';
+}
+
+function launchSignup() {
+  const configId = document.getElementById('configId').value.trim();
+  log('Abriendo diálogo de Facebook...');
+
+  const fbResp = (response) => {
+    log('Respuesta cruda:\n' + JSON.stringify(response, null, 2), response.authResponse ? 'ok' : 'err');
+    if (response.authResponse) {
+      const r = response.authResponse;
+      const summary = [
+        '✅ LOGIN OK',
+        '',
+        'code: ' + (r.code || '—'),
+        'accessToken: ' + (r.accessToken ? r.accessToken.slice(0,30) + '...' : '—'),
+        'expiresIn: ' + (r.expiresIn || '—'),
+        '',
+        'JSON completo abajo. Copialo y pegámelo en el chat.',
+        '',
+        JSON.stringify(response, null, 2)
+      ].join('\n');
+      log(summary, 'ok');
+    } else {
+      log('❌ Login cancelado o falló:\n' + JSON.stringify(response, null, 2), 'err');
+    }
+  };
+
+  const opts = {
+    scope: 'whatsapp_business_management,whatsapp_business_messaging,business_management',
+    return_scopes: true,
+    extras: {
+      feature: 'whatsapp_embedded_signup',
+      sessionInfoVersion: 3,
+      setup: {
+        solutionID: undefined
+      }
+    }
+  };
+  if (configId) {
+    opts.config_id = configId;
+    opts.response_type = 'code';
+    opts.override_default_response_type = true;
+  }
+  FB.login(fbResp, opts);
+}
+
+function copyOutput() {
+  navigator.clipboard.writeText(out.textContent);
+  const btn = event.target;
+  const orig = btn.textContent;
+  btn.textContent = '✓ Copiado';
+  setTimeout(() => btn.textContent = orig, 1500);
+}
+</script>
+</body>
+</html>
