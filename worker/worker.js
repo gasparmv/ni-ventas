@@ -160,6 +160,14 @@ function parseDateAR(s) {
   const mo = m[2].padStart(2, '0');
   return `${m[3]}-${mo}-${d}`;
 }
+// Filtro: cliente "neon" / "NEON" no cuenta como cliente real (es uso interno
+// del negocio, no facturación). Decidido en sección 15A del Cerebro NI.
+function isInternalNeon(name) {
+  if (!name) return false;
+  const n = String(name).trim().toLowerCase();
+  return n === 'neon' || n === 'neón' || n === 'neon infinito' || n === 'neoninfinito';
+}
+
 function parsePanelData({ pnlCsv, dirCsv, disCsv, insCsv, curCsv }) {
   // ---- PnL: matriz mes × concepto (cols D-O = ene-dic, fila 3+ con conceptos en col C) ----
   const pnlRows = parseCsv(pnlCsv);
@@ -201,6 +209,7 @@ function parsePanelData({ pnlCsv, dirCsv, disCsv, insCsv, curCsv }) {
     const fecha = parseDateAR(r[1]);
     const venta = parseAmt(r[14]) + parseAmt(r[15]);
     if (!fecha || !venta) continue;
+    if (isInternalNeon(r[3])) continue; // skip uso interno
     directo.push({
       id: (r[0] || '').trim(),
       fecha,
@@ -230,6 +239,7 @@ function parsePanelData({ pnlCsv, dirCsv, disCsv, insCsv, curCsv }) {
     const fecha = parseDateAR(r[1]);
     const venta = parseAmt(r[13]) + parseAmt(r[14]);
     if (!fecha || !venta) continue;
+    if (isInternalNeon(r[3])) continue; // skip uso interno
     distris.push({
       id: (r[0] || '').trim(),
       fecha,
@@ -255,9 +265,13 @@ function parsePanelData({ pnlCsv, dirCsv, disCsv, insCsv, curCsv }) {
     const fecha = parseDateAR(r[1]);
     const venta = parseAmt(r[9]);
     if (!fecha || !venta) continue;
+    // En Venta_Insumos el "cliente" está en col C (idx 2) — NO en col D.
+    // Filtramos uso interno (mencionado explícito en cerebro sección 15A).
+    if (isInternalNeon(r[2])) continue;
     insumos.push({
       id: (r[0] || '').trim(),
       fecha,
+      cliente: (r[2] || '').trim(),
       producto: (r[3] || '').trim(),
       diseno: (r[4] || '').trim(),
       cant: parseAmt(r[7]) || 1,
@@ -817,7 +831,7 @@ export default {
         // Cache check
         await env.DB.prepare('CREATE TABLE IF NOT EXISTS panel_cache (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TEXT NOT NULL)').run();
         if (!force) {
-          const cached = await env.DB.prepare('SELECT v, updated_at FROM panel_cache WHERE k = ?').bind('business_panel_v1').first();
+          const cached = await env.DB.prepare('SELECT v, updated_at FROM panel_cache WHERE k = ?').bind('business_panel_v2_noneon').first();
           if (cached) {
             const age = Date.now() - new Date(cached.updated_at).getTime();
             if (age < 60 * 60 * 1000) {
@@ -844,7 +858,7 @@ export default {
         const payload = JSON.stringify({ ts: new Date().toISOString(), ...data });
         try {
           await env.DB.prepare('INSERT OR REPLACE INTO panel_cache (k, v, updated_at) VALUES (?, ?, ?)')
-            .bind('business_panel_v1', payload, new Date().toISOString()).run();
+            .bind('business_panel_v2_noneon', payload, new Date().toISOString()).run();
         } catch (_) {}
         return new Response(payload, { headers: cors({ 'Content-Type': 'application/json' }) });
       }
