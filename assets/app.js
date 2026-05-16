@@ -92,7 +92,7 @@ const STATE = {
   cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '', extraCarteles: [] },
   cotizadorSaving: false,
   // Panel de negocio (solo Gaspar) — datos del Sheet "2025 V4"
-  businessPanel: { data: null, loading: false, error: null, lastFetch: 0, period: 'current' },
+  businessPanel: { data: null, loading: false, error: null, lastFetch: 0, period: 'current', selectedVertical: null },
   // Privacy mode: oculta números económicos (estilo billetera virtual)
   privacy: (() => { try { return localStorage.getItem('privacy_mode') === '1'; } catch(_) { return false; } })()
 };
@@ -1838,8 +1838,28 @@ function bindBusinessPanel() {
   _bpRefreshTimer = setInterval(() => {
     if (STATE.view === 'dashboard' && isAdmin()) loadBusinessPanel(false);
   }, 60 * 60 * 1000);
+  // Click en una fila de vertical → drill-down
+  document.querySelectorAll('[data-bp-vertical]').forEach(row => {
+    row.style.cursor = 'pointer';
+    row.onclick = () => {
+      STATE.businessPanel.selectedVertical = row.dataset.bpVertical;
+      render();
+    };
+  });
+  // Botón "Volver al panel general"
+  const back = document.getElementById('bp-back');
+  if (back) back.onclick = () => {
+    STATE.businessPanel.selectedVertical = null;
+    render();
+  };
   // Dibujar charts si hay data
-  if (bp.data) requestAnimationFrame(() => drawBusinessCharts());
+  if (bp.data) {
+    if (bp.selectedVertical) {
+      requestAnimationFrame(() => drawVerticalCharts(bp.selectedVertical));
+    } else {
+      requestAnimationFrame(() => drawBusinessCharts());
+    }
+  }
 }
 
 // === Helpers ===
@@ -2053,6 +2073,10 @@ function renderBusinessPanel() {
     return `<div class="page-head"><h1>Panel de Negocio</h1></div>
       <div class="loading"><div class="spinner"></div></div>`;
   }
+  // Si hay vertical seleccionada → mostrar drill-down detallado
+  if (bp.selectedVertical) {
+    return renderVerticalDetail(bp.selectedVertical);
+  }
   const c = bpCompute();
   if (!c) return '<div class="loading"><div class="spinner"></div></div>';
 
@@ -2145,8 +2169,8 @@ function renderBusinessPanel() {
           ${BP_VERTICALS.map(v => {
             const x = c.verticals[v.key];
             const share = c.total.ventas ? (x.ventas / c.total.ventas) : 0;
-            return `<tr>
-              <td><span class="bp-vname"><span class="bp-vdot" style="background:${v.color}"></span>${v.label}</span></td>
+            return `<tr class="bp-vertical-row" data-bp-vertical="${v.key}" title="Click para ver análisis detallado">
+              <td><span class="bp-vname"><span class="bp-vdot" style="background:${v.color}"></span>${v.label} <span class="bp-drill-hint">→</span></span></td>
               <td class="num">${x.count}</td>
               <td class="num">${bpFmt(x.ventas)}</td>
               <td class="num">${bpFmt(x.aov)}</td>
@@ -2361,6 +2385,440 @@ function drawBpDonut() {
     const pct = ((d.v / total) * 100).toFixed(1);
     return `<span class="lg-i"><span class="lg-d" style="background:${d.color}"></span>${escapeHtml(d.k)} · <b>${pct}%</b></span>`;
   }).join('');
+}
+
+// ============================================================================
+// ---------- VERTICAL DETAIL VIEW (drill-down por vertical) ------------------
+// ============================================================================
+// Cada vertical tiene su set propio de KPIs e insights, sacados del cerebro
+// (Cerebro_Principal_v9.html) y de los datos reales del Sheet 2025 V4.
+
+// Configuración de KPIs e insights por vertical
+const BP_VERTICAL_CONFIG = {
+  directo: {
+    label: 'Carteles Directo',
+    icon: '🎨',
+    color: 'var(--neon-red)',
+    desc: 'Ventas directas de carteles LED neón. Mezcla B2C (Instagram ads, retargeting) + algunos B2B/locales. Joaquín atiende todos los leads.',
+    rule: 'Regla 10:1 — cada 10 presupuestos enviados → 1 venta',
+    insights: [
+      '95% de clientes Directo compran 1 sola vez. Palanca dormida: flujo de post-venta sistemático.',
+      'Carteles 1000+ cm = 20% del volumen pero 38% de la facturación. AOV $604k vs $308k promedio.',
+      'AOV creció +42% en 4 meses por mix shift de canales, no por suba de precios.',
+      'Bs As Interior es el principal mercado fuera de CABA/GBA.',
+      'Miércoles es el día rey de la venta.'
+    ],
+    benchmark: { aov: 357000, marginPct: 60, monthlyVol: 39, regla10a1: 0.10 }
+  },
+  distris: {
+    label: 'Carteles Distris',
+    icon: '🏭',
+    color: 'var(--neon-cyan)',
+    desc: 'Carteles vendidos por Gaspar directo a clientes propios B2B (locales, marcas, gastronomía). Sin intervención de Joaquín. Sin ad spend.',
+    rule: 'Margen 65-84% (mejor que Directo) · ROAS efectivo infinito (sin ads)',
+    insights: [
+      'Sin ad spend asignado: revenue 100% del trabajo directo de Gaspar (red personal, B2B).',
+      'CAC efectivo $0. Es el canal con mejor unit economics absoluto, aunque chico en volumen.',
+      'Si se escala a 10 pedidos/mes sostenido, el revenue se duplica con casi cero costo.',
+      'AOV bajó -49% en 4 meses pero pedidos pasaron de 3 a 6 → canal se diversificó.',
+      'Volumen actual bajo: solo 21 pedidos en 4 meses (Q1+Abr).'
+    ],
+    benchmark: { aov: 386000, marginPct: 72, monthlyVol: 5 }
+  },
+  insumos: {
+    label: 'Insumos CNC',
+    icon: '🔌',
+    color: '#FFA726',
+    desc: 'Bases de acrílico cortadas por router CNC propio (Aníbal, domingos) + cables. Vendidas casi exclusivamente a alumnos del curso. Extensión natural del ecosistema.',
+    rule: 'Margen 58% · Ticket promedio $40.799 · Corte domingo → despacho lunes → entrega viernes',
+    insights: [
+      'TRANS (acrílico transparente) domina: 511 ventas, 73% del volumen.',
+      'Pack x6 es el SKU bandera: 49 unidades vendidas = $2.16M.',
+      'Base de alumnos recurrentes crece mes a mes (0 → 27 → 43 → 46) mientras la captación de nuevos baja (71 → 23 → 28 → 15).',
+      'Cross-sell cursos→insumos solo 2.5%: el 92.8% de los cursos ya incluye kit, casi nadie recompra después.',
+      'El embudo del Q1 ya está casi convertido — para escalar insumos hace falta nueva camada de alumnos.'
+    ],
+    benchmark: { aov: 40799, marginPct: 58, monthlyVol: 174 }
+  },
+  cursos: {
+    label: 'Cursos / Al Infinito',
+    icon: '🎓',
+    color: '#25D366',
+    desc: 'Programa de educación pago. SKUs: Evergreen Medium, Supernova (high ticket), Micro Launch, con upsells de Pack base x6 y Pack PREMIUM. Cara visible: Bruno.',
+    rule: 'AOV $227.500 · 92.8% incluye kit físico · Cadencia: Mastery mensual + Supernova trimestral',
+    insights: [
+      'Vertical de mayor aceleración: crecimiento x9 en 4 meses ($995k → $9.3M).',
+      'Lanzamiento mayo 2026: 40 cupos = récord histórico. Tasa de cierre 8% sobre asistentes a clase 2 (antes 5%).',
+      'Avatar que paga: 30-50 años (no pendejos). Hooks con pop culture argentina funcionan sin excepción.',
+      'MercadoPago domina la facturación (64.7%) — la fricción de cobro es mucho menor que transferencia.',
+      'Insight Lautaro: 80-90% de asistentes al lanzamiento no conocían a NI previamente. Interés compuesto.',
+      'Próximo lanzamiento Neon Mastery: 9-11 junio 2026.'
+    ],
+    benchmark: { aov: 227500, marginPct: 50, monthlyVol: 20, conversionRate: 0.08 }
+  }
+};
+
+// Compute específico para una vertical: filtra los datos y devuelve metrics relevantes
+function bpComputeVertical(key) {
+  const bp = STATE.businessPanel;
+  if (!bp.data) return null;
+  const period = bp.period || 'current';
+  let range;
+  if (period === 'week') range = bpWeekRange();
+  else if (period === 'all') range = bpAllRange();
+  else if (period === 'current') range = bpMonthRange();
+  else if (/^\d{4}-\d{2}$/.test(period)) range = bpMonthRange(period);
+  else range = bpMonthRange();
+
+  const arrName = key === 'cursos' ? 'cursos' : key;
+  const allArr = bp.data[arrName] || [];
+  const rows = allArr.filter(r => bpInRange(r.fecha, range));
+
+  // Métricas básicas
+  const count = rows.length;
+  const ventas = rows.reduce((a, r) => a + (r.venta || r.vendido || 0), 0);
+  const aov = count ? ventas / count : 0;
+
+  // Por mes (para tendencia)
+  const byMonth = new Map();
+  for (const r of allArr) {
+    const m = r.fecha.slice(0, 7);
+    if (!byMonth.has(m)) byMonth.set(m, { count: 0, ventas: 0 });
+    const x = byMonth.get(m);
+    x.count++; x.ventas += (r.venta || r.vendido || 0);
+  }
+
+  // Top clientes/items del período
+  const byCustomer = new Map();
+  for (const r of rows) {
+    const name = (r.cliente || r.alumno || r.diseno || '').trim() || 'Sin nombre';
+    if (!byCustomer.has(name)) byCustomer.set(name, { count: 0, total: 0 });
+    const c = byCustomer.get(name);
+    c.count++; c.total += (r.venta || r.vendido || 0);
+  }
+  const topCustomers = [...byCustomer.entries()]
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, 10)
+    .map(([name, x]) => ({ name, ...x }));
+
+  // PnL del mes corriente para esta vertical
+  const pnl = bp.data.pnl || [];
+  const currentMonth = period === 'current' ? new Date().getMonth() + 1
+                     : /^\d{4}-\d{2}$/.test(period) ? parseInt(period.split('-')[1])
+                     : null;
+  let pnlRow = currentMonth ? pnl.find(p => p.month === currentMonth) : null;
+  let pnlIngresos = pnlRow ? pnlRow.ingresos[key] : ventas;
+  let pnlCostos = pnlRow ? Math.abs(pnlRow.costos[key]) : 0;
+  let pnlMargen = pnlIngresos - pnlCostos;
+  let pnlMargenPct = pnlIngresos ? pnlMargen / pnlIngresos : 0;
+
+  // Si es 'all', sumar todos los meses del PnL
+  if (period === 'all' && pnl.length) {
+    pnlIngresos = pnl.reduce((a, p) => a + (p.ingresos[key] || 0), 0);
+    pnlCostos = pnl.reduce((a, p) => a + Math.abs(p.costos[key] || 0), 0);
+    pnlMargen = pnlIngresos - pnlCostos;
+    pnlMargenPct = pnlIngresos ? pnlMargen / pnlIngresos : 0;
+  }
+
+  return { range, count, ventas, aov, rows, byMonth, topCustomers, pnlIngresos, pnlCostos, pnlMargen, pnlMargenPct };
+}
+
+function renderVerticalDetail(key) {
+  const bp = STATE.businessPanel;
+  const cfg = BP_VERTICAL_CONFIG[key];
+  if (!cfg) return '<div class="error">Vertical no encontrada</div>';
+  const c = bpComputeVertical(key);
+  if (!c) return '<div class="loading"><div class="spinner"></div></div>';
+
+  const period = bp.period || 'current';
+  const months = bpAvailableMonths();
+  const periodLabel = period === 'week' ? 'Esta semana'
+                    : period === 'all'  ? 'Todos los meses'
+                    : period === 'current' ? new Date().toLocaleDateString('es-AR', {month:'long', year:'numeric'})
+                    : (() => { const [y,m] = period.split('-'); return new Date(+y, +m-1, 1).toLocaleDateString('es-AR', {month:'long', year:'numeric'}); })();
+
+  // Para Carteles Directo: integrar tasa de cierre
+  let tasaCierreHtml = '';
+  if (key === 'directo') {
+    let mf;
+    if (period === 'all') mf = 'all';
+    else if (period === 'current') mf = null;
+    else if (/^\d{4}-\d{2}$/.test(period)) mf = new Set([period]);
+    else mf = null;
+    const tc = getTasaCierreDirecto(mf);
+    tasaCierreHtml = `
+      <div class="card" style="margin-top:18px">
+        <div class="card-h">
+          <h3>📊 Funnel · Presupuestos → Ventas</h3>
+          <span class="muted" style="margin-left:auto;font-size:12px">${escapeHtml(periodLabel)}${tc.partial ? ' · ⚠ parcial' : ''}</span>
+        </div>
+        <div style="padding:16px 20px">
+          <div class="bp-funnel">
+            <div class="bp-funnel-row">
+              <div class="bp-funnel-lbl">Presupuestos enviados</div>
+              <div class="bp-funnel-bar-wrap"><div class="bp-funnel-bar" style="width:100%;background:rgba(143,212,222,.65)"><span class="bp-funnel-num">${tc.enviados}</span><span class="bp-funnel-pct">100%</span></div></div>
+            </div>
+            <div class="bp-funnel-row">
+              <div class="bp-funnel-lbl">No cerrados</div>
+              <div class="bp-funnel-bar-wrap"><div class="bp-funnel-bar" style="width:${tc.enviados ? Math.max(2, ((tc.enviados - tc.vendidos)/tc.enviados)*100) : 0}%;background:rgba(255,24,48,.55)"><span class="bp-funnel-num">${tc.enviados - tc.vendidos}</span><span class="bp-funnel-pct">${tc.enviados ? (((tc.enviados-tc.vendidos)/tc.enviados)*100).toFixed(1) : 0}%</span></div></div>
+            </div>
+            <div class="bp-funnel-row">
+              <div class="bp-funnel-lbl">Vendidos</div>
+              <div class="bp-funnel-bar-wrap"><div class="bp-funnel-bar" style="width:${tc.enviados ? Math.max(2, (tc.vendidos/tc.enviados)*100) : 0}%;background:rgba(37,211,102,.75)"><span class="bp-funnel-num">${tc.vendidos}</span><span class="bp-funnel-pct">${tc.enviados ? ((tc.vendidos/tc.enviados)*100).toFixed(1) : 0}%</span></div></div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:14px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+            <div style="font-size:13px;color:var(--fg-subtle)">Tasa de cierre real:</div>
+            <div style="font-size:24px;font-weight:700;color:var(--neon-cyan);font-family:ui-monospace,monospace">${(tc.tasa*100).toFixed(1)}%</div>
+            <div style="margin-left:auto;font-size:12px;color:var(--fg-subtle)">Regla 10:1 = ${(cfg.benchmark.regla10a1*100).toFixed(0)}% objetivo · ${tc.tasa >= cfg.benchmark.regla10a1 ? '✅ por encima' : '⚠ por debajo'}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Análisis específico por vertical
+  const specificAnalysis = renderVerticalSpecific(key, c);
+
+  return `
+    <div class="period-selector">
+      <span class="ps-label">Período</span>
+      <div class="ps-chips">
+        <button class="ps-chip ${period==='current'?'active':''}" data-bp-period="current">Mes actual</button>
+        <button class="ps-chip ${period==='week'?'active':''}" data-bp-period="week">Esta semana</button>
+        <button class="ps-chip ${period==='all'?'active':''}" data-bp-period="all">Todos</button>
+        ${months.map(m => {
+          const [y, mm] = m.split('-');
+          const lbl = new Date(+y, +mm - 1, 1).toLocaleDateString('es-AR', {month:'short'}).replace('.','');
+          return `<button class="ps-chip ${period===m?'active':''}" data-bp-period="${m}">${lbl} ${y.slice(2)}</button>`;
+        }).join('')}
+      </div>
+      <span class="ps-meta">${escapeHtml(periodLabel)} · ${c.count} ${key === 'cursos' ? 'cursos' : key === 'insumos' ? 'ventas' : 'pedidos'}</span>
+    </div>
+
+    <div class="page-head">
+      <div>
+        <div class="eyebrow" style="display:flex;align-items:center;gap:8px">
+          <button class="btn btn-ghost" id="bp-back" style="padding:4px 10px;font-size:12px">← Panel general</button>
+          <span style="background:rgba(255,24,48,.12);color:var(--neon-red);padding:2px 8px;border-radius:4px;font-weight:700;letter-spacing:.5px;font-size:10px">🔒 SOLO GASPAR</span>
+        </div>
+        <h1>${cfg.icon} ${cfg.label}</h1>
+        <div style="font-size:13px;color:var(--fg-subtle);max-width:760px;margin-top:6px">${escapeHtml(cfg.desc)}</div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-ghost" id="bp-refresh">↻ Refrescar</button>
+      </div>
+    </div>
+
+    <div style="padding:8px 14px;background:rgba(143,212,222,.06);border-left:3px solid var(--neon-cyan);border-radius:4px;font-size:12.5px;margin-bottom:18px">
+      📋 <b>Regla del vertical:</b> ${escapeHtml(cfg.rule)}
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi"><div class="kpi-label">Ventas (${periodLabel})</div><div class="kpi-value">${bpFmt(c.pnlIngresos || c.ventas)}</div><div class="kpi-delta">${c.count} ${key === 'cursos' ? 'cursos' : key === 'insumos' ? 'ventas' : 'pedidos'}</div></div>
+      <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${bpFmt(c.aov)}</div><div class="kpi-delta">Benchmark: ${bpFmt(cfg.benchmark.aov)}</div></div>
+      <div class="kpi"><div class="kpi-label">Costos</div><div class="kpi-value">${bpFmt(c.pnlCostos)}</div><div class="kpi-delta">${c.pnlIngresos ? Math.round((c.pnlCostos/c.pnlIngresos)*100) : 0}% s/ ventas</div></div>
+      <div class="kpi cyan"><div class="kpi-label">Margen</div><div class="kpi-value" style="color:${c.pnlMargen >= 0 ? 'var(--success, #25D366)' : 'var(--neon-red)'}">${bpFmt(c.pnlMargen)}</div><div class="kpi-delta">${Math.round(c.pnlMargenPct*100)}% · benchmark ${cfg.benchmark.marginPct}%</div></div>
+      <div class="kpi"><div class="kpi-label">Volumen vs benchmark</div><div class="kpi-value">${c.count >= cfg.benchmark.monthlyVol ? '↑' : '↓'} ${cfg.benchmark.monthlyVol}</div><div class="kpi-delta">${c.count} actuales vs ${cfg.benchmark.monthlyVol} esperados</div></div>
+    </div>
+
+    ${specificAnalysis}
+
+    ${tasaCierreHtml}
+
+    <div class="card" style="margin-top:18px">
+      <div class="card-h"><h3>📈 Evolución mensual</h3></div>
+      <div class="chart-canvas" id="bp-vert-chart" style="height:240px"></div>
+    </div>
+
+    ${c.topCustomers.length ? `
+    <div class="card" style="margin-top:18px">
+      <div class="card-h"><h3>🏆 Top ${key === 'cursos' ? 'alumnos' : key === 'insumos' ? 'diseños/clientes' : 'clientes'} del período</h3><span class="muted" style="margin-left:auto;font-size:12px">${escapeHtml(periodLabel)}</span></div>
+      <table class="bp-table compact">
+        <thead><tr><th>#</th><th>${key === 'cursos' ? 'Alumno' : key === 'insumos' ? 'Diseño' : 'Cliente'}</th><th class="num"># compras</th><th class="num">Total</th><th class="num">Promedio</th></tr></thead>
+        <tbody>
+          ${c.topCustomers.map((t, i) => `
+            <tr>
+              <td>${i+1}</td>
+              <td>${escapeHtml(t.name)}</td>
+              <td class="num">${t.count}</td>
+              <td class="num">${bpFmt(t.total)}</td>
+              <td class="num">${bpFmt(t.count ? t.total/t.count : 0)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>` : ''}
+
+    <div class="card" style="margin-top:18px">
+      <div class="card-h"><h3>💡 Insights estratégicos (Cerebro Neon Infinito)</h3></div>
+      <div style="padding:14px 20px">
+        <ul style="margin:0;padding-left:20px;line-height:1.7">
+          ${cfg.insights.map(i => `<li style="margin-bottom:6px;color:var(--fg-subtle)"><span style="color:var(--fg)">${escapeHtml(i)}</span></li>`).join('')}
+        </ul>
+      </div>
+    </div>
+  `;
+}
+
+// Render de análisis específico por vertical (depende de cuál es)
+function renderVerticalSpecific(key, c) {
+  const bp = STATE.businessPanel;
+  if (key === 'directo') {
+    // Análisis de tamaño de cartel, dimmer, base, color (de las filas)
+    const rows = c.rows;
+    // Por tamaño (cm) — calculado de cada row si tiene el dato (no lo tenemos en parsing actual, simplificamos por venta size buckets)
+    const buckets = { 'Mini (<150k)': 0, 'Chico (150-300k)': 0, 'Medio (300-500k)': 0, 'Grande (500-1M)': 0, 'XL (1M+)': 0 };
+    const bucketRev = { 'Mini (<150k)': 0, 'Chico (150-300k)': 0, 'Medio (300-500k)': 0, 'Grande (500-1M)': 0, 'XL (1M+)': 0 };
+    for (const r of rows) {
+      const v = r.venta;
+      let b;
+      if (v < 150000) b = 'Mini (<150k)';
+      else if (v < 300000) b = 'Chico (150-300k)';
+      else if (v < 500000) b = 'Medio (300-500k)';
+      else if (v < 1000000) b = 'Grande (500-1M)';
+      else b = 'XL (1M+)';
+      buckets[b]++;
+      bucketRev[b] += v;
+    }
+    const totalRev = Object.values(bucketRev).reduce((a, b) => a + b, 0);
+    return `
+      <div class="card" style="margin-top:18px">
+        <div class="card-h"><h3>📐 Distribución por ticket (carteles)</h3></div>
+        <table class="bp-table compact">
+          <thead><tr><th>Bucket</th><th class="num"># pedidos</th><th class="num">Facturación</th><th class="num">% revenue</th><th>Share</th></tr></thead>
+          <tbody>
+            ${Object.entries(buckets).map(([b, n]) => {
+              const rev = bucketRev[b];
+              const pct = totalRev ? (rev / totalRev) * 100 : 0;
+              return `<tr>
+                <td>${b}</td>
+                <td class="num">${n}</td>
+                <td class="num">${bpFmt(rev)}</td>
+                <td class="num">${pct.toFixed(1)}%</td>
+                <td><div class="bp-bar-bg"><div class="bp-bar-fg" style="width:${pct.toFixed(1)}%;background:var(--neon-red)"></div></div></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+        <div style="padding:10px 20px 16px;font-size:12px;color:var(--fg-subtle)">
+          💡 Histórico Q1+Abr 2026: <b>Carteles 1M+</b> son 20% del volumen pero <b>38% de la facturación</b>. Esos son los que ads B2C (Locales corto, El neón es una mierda) traen mayoritariamente.
+        </div>
+      </div>
+    `;
+  }
+  if (key === 'distris') {
+    return `
+      <div class="card" style="margin-top:18px">
+        <div class="card-h"><h3>🎯 Unit economics</h3></div>
+        <div style="padding:20px;display:grid;grid-template-columns:repeat(3,1fr);gap:18px">
+          <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">CAC</div><div style="font-size:24px;font-weight:700;color:var(--success, #25D366);font-family:ui-monospace,monospace">$0</div><div style="font-size:11px;color:var(--fg-subtle)">Sin ad spend asignado</div></div>
+          <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">ROAS efectivo</div><div style="font-size:24px;font-weight:700;color:var(--neon-cyan);font-family:ui-monospace,monospace">∞</div><div style="font-size:11px;color:var(--fg-subtle)">Sin costo de adquisición</div></div>
+          <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Mejor margen del negocio</div><div style="font-size:24px;font-weight:700;font-family:ui-monospace,monospace">65-84%</div><div style="font-size:11px;color:var(--fg-subtle)">vs 60% en Directo</div></div>
+        </div>
+      </div>
+    `;
+  }
+  if (key === 'insumos') {
+    // Productos vendidos
+    const byProd = new Map();
+    for (const r of c.rows) {
+      const p = (r.producto || 'Sin producto').trim();
+      if (!byProd.has(p)) byProd.set(p, { count: 0, ventas: 0 });
+      const x = byProd.get(p);
+      x.count++; x.ventas += r.venta;
+    }
+    const sorted = [...byProd.entries()].sort((a, b) => b[1].ventas - a[1].ventas).slice(0, 6);
+    return `
+      <div class="card" style="margin-top:18px">
+        <div class="card-h"><h3>📦 Productos vendidos</h3></div>
+        <table class="bp-table compact">
+          <thead><tr><th>Producto</th><th class="num"># ventas</th><th class="num">Facturación</th><th class="num">Ticket ø</th></tr></thead>
+          <tbody>
+            ${sorted.map(([p, x]) => `<tr>
+              <td><b>${escapeHtml(p)}</b></td>
+              <td class="num">${x.count}</td>
+              <td class="num">${bpFmt(x.ventas)}</td>
+              <td class="num">${bpFmt(x.count ? x.ventas/x.count : 0)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        <div style="padding:10px 20px 16px;font-size:12px;color:var(--fg-subtle)">
+          💡 TRANS (acrílico transparente) y NEGRO son los pilares. Pack x6 es el SKU bandera. Los cables son ventas residuales pero recurrentes.
+        </div>
+      </div>
+    `;
+  }
+  if (key === 'cursos') {
+    // SKUs vendidos
+    const bySku = new Map();
+    for (const r of c.rows) {
+      const p = (r.producto || 'Sin producto').trim();
+      if (!bySku.has(p)) bySku.set(p, { count: 0, ventas: 0 });
+      const x = bySku.get(p);
+      x.count++; x.ventas += r.vendido;
+    }
+    const sorted = [...bySku.entries()].sort((a, b) => b[1].ventas - a[1].ventas);
+    return `
+      <div class="card" style="margin-top:18px">
+        <div class="card-h"><h3>🎓 SKUs vendidos</h3></div>
+        <table class="bp-table compact">
+          <thead><tr><th>Producto</th><th class="num"># ventas</th><th class="num">Facturación</th><th class="num">AOV</th></tr></thead>
+          <tbody>
+            ${sorted.length ? sorted.map(([p, x]) => `<tr>
+              <td><b>${escapeHtml(p)}</b></td>
+              <td class="num">${x.count}</td>
+              <td class="num">${bpFmt(x.ventas)}</td>
+              <td class="num">${bpFmt(x.count ? x.ventas/x.count : 0)}</td>
+            </tr>`).join('') : '<tr><td colspan="4" class="muted" style="text-align:center;padding:14px">Sin cursos en el período</td></tr>'}
+          </tbody>
+        </table>
+        <div style="padding:10px 20px 16px;font-size:12px;color:var(--fg-subtle)">
+          💡 <b>Evergreen Medium</b> es la base del funnel ($172k AOV). <b>Supernova</b> es high-ticket ($506k AOV). El upsell de Pack PREMIUM lleva el AOV de $172k a $278k. Próximo lanzamiento Mastery: <b>9-11 junio 2026</b>.
+        </div>
+      </div>
+    `;
+  }
+  return '';
+}
+
+// Chart de evolución mensual de la vertical seleccionada
+function drawVerticalCharts(key) {
+  const el = document.getElementById('bp-vert-chart');
+  if (!el) return;
+  const c = bpComputeVertical(key);
+  if (!c) { el.innerHTML = '<div class="loading muted">sin datos</div>'; return; }
+  const cfg = BP_VERTICAL_CONFIG[key];
+  const months = [...c.byMonth.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  if (!months.length) { el.innerHTML = '<div class="loading muted">sin datos</div>'; return; }
+  const W = el.clientWidth || 700, H = 240, PL = 56, PR = 16, PT = 24, PB = 32;
+  const max = Math.max(...months.map(([, x]) => x.ventas), 1);
+  const xStep = (W - PL - PR) / Math.max(months.length, 1);
+  const xAt = (i) => PL + (i + 0.5) * xStep;
+  const yAt = (v) => (H - PB) - (v / max) * (H - PB - PT);
+  const barW = Math.min(xStep * 0.65, 60);
+  const yTicks = [0, max/2, max].map(v => ({ v, y: yAt(v) }));
+  const bars = months.map(([m, x], i) => {
+    const cx = xAt(i);
+    const y = yAt(x.ventas);
+    const h = (H - PB) - y;
+    return `<g>
+      <rect x="${(cx-barW/2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0,h).toFixed(1)}" rx="3" fill="${cfg.color}" opacity=".75"/>
+      <text class="bp-bar-lbl" x="${cx.toFixed(1)}" y="${(y-6).toFixed(1)}" text-anchor="middle" fill="${cfg.color}">${bpFmtNum(x.ventas)}</text>
+      <text class="bp-bar-lbl" x="${cx.toFixed(1)}" y="${(H-PB+18).toFixed(1)}" text-anchor="middle" style="opacity:.5;font-weight:400">${x.count}</text>
+    </g>`;
+  }).join('');
+  const labels = months.map(([m], i) => {
+    const [y, mm] = m.split('-');
+    const lbl = new Date(+y, +mm - 1, 1).toLocaleDateString('es-AR', {month:'short'}).replace('.','');
+    return `<text class="label" x="${xAt(i).toFixed(1)}" y="${H-2}" text-anchor="middle">${lbl} ${y.slice(2)}</text>`;
+  }).join('');
+  el.innerHTML = `<svg class="chart-svg bp-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    ${yTicks.map(t => `<line class="grid" x1="${PL}" x2="${W-PR}" y1="${t.y.toFixed(1)}" y2="${t.y.toFixed(1)}"/>`).join('')}
+    ${yTicks.map(t => `<text class="label" x="${PL-8}" y="${(t.y+3).toFixed(1)}" text-anchor="end">${bpFmtNum(t.v)}</text>`).join('')}
+    ${bars}
+    ${labels}
+  </svg>`;
 }
 
 // ---------- PEDIDOS ----------

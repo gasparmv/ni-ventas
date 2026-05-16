@@ -3202,6 +3202,25 @@ table.t td.cliente { font-weight: 600; }
 }
 .bp-pill.muted { opacity: .5; }
 
+/* Fila clickeable de vertical (drill-down al detalle) */
+.bp-vertical-row {
+  transition: background .12s ease;
+}
+.bp-vertical-row:hover {
+  background: rgba(143,212,222,.08) !important;
+}
+.bp-vertical-row .bp-drill-hint {
+  margin-left: 4px;
+  color: var(--fg-mute, rgba(255,255,255,.35));
+  font-weight: 700;
+  transition: transform .15s ease, color .15s ease;
+  display: inline-block;
+}
+.bp-vertical-row:hover .bp-drill-hint {
+  color: var(--neon-cyan);
+  transform: translateX(3px);
+}
+
 /* Flag "parcial" en KPIs cuando el tracking no cubre todo el período */
 .partial-flag {
   display: inline-block;
