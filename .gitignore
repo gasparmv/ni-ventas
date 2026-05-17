@@ -1,9 +1,11 @@
-.DS_Store
-Thumbs.db
-node_modules/
 *.log
-.vscode/
+.DS_Store
 .idea/
+.vscode/
 .wrangler/
-worker/.wrangler/
+Thumbs.db
+gen-icons.mjs
 node_modules/
+package-lock.json
+package.json
+worker/.wrangler/

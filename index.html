@@ -2,10 +2,32 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=1200, initial-scale=1">
+<!-- Viewport: en mobile portrait mostramos width=device-width para que la app
+     ocupe la pantalla; en desktop el min-width del CSS mantiene el layout. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=yes">
 <title>NEON · Ventas</title>
 <meta name="theme-color" content="#0A0A0F">
 <meta name="description" content="CRM y Dashboard de Neon Infinito — pedidos, presupuestos, follow-ups y chat WhatsApp.">
+
+<!-- === PWA — Web Manifest === -->
+<link rel="manifest" href="manifest.webmanifest">
+
+<!-- === iOS — Standalone (Add to Home Screen) === -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NEON">
+<meta name="format-detection" content="telephone=no">
+
+<!-- Apple touch icons (iOS los usa para la home screen) -->
+<link rel="apple-touch-icon" href="assets/icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/icon-180.png">
+<link rel="apple-touch-icon" sizes="192x192" href="assets/icon-192.png">
+<link rel="apple-touch-icon" sizes="512x512" href="assets/icon-512.png">
+
+<!-- iOS splash screens (opcional pero da experiencia más nativa) -->
+<link rel="apple-touch-startup-image" href="assets/splash-1170x2532.png" media="(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3)">
+
 <!-- Open Graph (preview en WhatsApp, Twitter, Discord, Slack, etc.) -->
 <meta property="og:type" content="website">
 <meta property="og:title" content="NEON Infinito · CRM Ventas">
@@ -16,10 +38,28 @@
 <meta property="og:image:type" content="image/png">
 <meta property="og:url" content="https://gasparmv.github.io/ni-ventas/">
 <meta name="twitter:card" content="summary_large_image">
+
 <link rel="stylesheet" href="assets/brand.css">
 <link rel="stylesheet" href="assets/app.css">
 <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
-<link rel="apple-touch-icon" href="assets/logo.svg">
+
+<script>
+// === Service Worker registration ===
+// Permite que la PWA cachee assets y siga abriendo sin internet.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/ni-ventas/sw.js', { scope: '/ni-ventas/' })
+      .then(reg => console.log('SW registered', reg.scope))
+      .catch(err => console.log('SW failed', err));
+  });
+}
+
+// === Detección de modo standalone (iOS PWA) ===
+// Sirve para ajustar UI (safe-areas, status bar) cuando está corriendo como app.
+if (window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches) {
+  document.documentElement.classList.add('pwa-standalone');
+}
+</script>
 </head>
 <body>
 <div id="app" class="app">

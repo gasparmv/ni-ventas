@@ -1,0 +1,59 @@
+{
+  "name": "NEON Infinito · CRM",
+  "short_name": "NEON",
+  "description": "CRM y dashboard de Neon Infinito — pedidos, presupuestos, follow-ups y chat WhatsApp.",
+  "start_url": "/ni-ventas/",
+  "scope": "/ni-ventas/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0A0A0F",
+  "theme_color": "#0A0A0F",
+  "lang": "es-AR",
+  "categories": ["business", "productivity"],
+  "icons": [
+    {
+      "src": "assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "assets/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Chat WhatsApp",
+      "short_name": "Chat",
+      "url": "/ni-ventas/#chat",
+      "description": "Abrir chat de WhatsApp del CRM"
+    },
+    {
+      "name": "Dashboard",
+      "short_name": "Dashboard",
+      "url": "/ni-ventas/#dashboard",
+      "description": "Ver dashboard de ventas"
+    },
+    {
+      "name": "Pedidos",
+      "short_name": "Pedidos",
+      "url": "/ni-ventas/#pedidos",
+      "description": "Listado de pedidos"
+    }
+  ]
+}
