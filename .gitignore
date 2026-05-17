@@ -7,5 +7,12 @@ Thumbs.db
 gen-icons.mjs
 node_modules/
 package-lock.json
-package.json
+/package.json
 worker/.wrangler/
+scripts/.crm-token
+scripts/.scrape-progress.json
+scripts/.wa-session/
+scripts/node_modules/
+scripts/package-lock.json
+# scripts/package.json SÍ se commitea (necesario para npm install)
+!scripts/package.json

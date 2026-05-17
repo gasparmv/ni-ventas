@@ -822,6 +822,40 @@ export default {
         return json({ id: r.id });
       }
 
+      // ===== BULK IMPORT de historial de WA (scrape via whatsapp-web.js) =====
+      // El script scrape-wa-history.js corre en la PC del usuario y manda
+      // batches de mensajes acá. Inserta con OR IGNORE para dedup por wamid.
+      if (request.method === 'POST' && path === '/admin/wa/import-bulk') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone, messages, contactName } = body || {};
+        if (!phone || !Array.isArray(messages)) return json({ error: 'missing phone or messages[]' }, 400);
+        const num = normalizeArPhone(phone) || phone;
+        let inserted = 0, duplicates = 0, skipped = 0, errors = 0;
+        for (const m of messages) {
+          try {
+            // Normalizar
+            const ts = m.ts || new Date().toISOString();
+            const wamid = m.wamid || ('scraped_' + num + '_' + new Date(ts).getTime() + '_' + Math.random().toString(36).slice(2, 8));
+            const direction = m.direction === 'outbound' ? 'outbound' : 'inbound';
+            const msgType = m.msg_type || m.type || 'text';
+            const bodyText = String(m.body || '');
+            const mediaUrl = m.media_url || '';
+            const contextId = m.context_id || '';
+            const senderName = direction === 'inbound' ? (contactName || m.sender_name || '') : '';
+            if (!bodyText && !mediaUrl) { skipped++; continue; }
+            const r = await env.DB.prepare(
+              'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            ).bind(ts, wamid, direction, num, senderName, msgType, bodyText, mediaUrl, contextId, 'imported').run();
+            if (r.meta && r.meta.changes > 0) inserted++;
+            else duplicates++;
+          } catch (e) {
+            errors++;
+          }
+        }
+        return json({ ok: true, inserted, duplicates, skipped, errors, total: messages.length });
+      }
+
       // ===== BUSINESS PANEL (solo Gaspar) =====
       // Lee el Sheet "2025 V4" (PnL + 6 hojas detalle), parsea y devuelve JSON.
       // Cachea 1h en D1 para no tirar del Sheet en cada visita.
