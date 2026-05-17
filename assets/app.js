@@ -1996,19 +1996,23 @@ function bpCompute() {
   // Si es 'week' → prorrateamos fijos por # días lun-sáb del rango.
   const useFullPnl = period === 'current' || period === 'all' || /^\d{4}-\d{2}$/.test(period);
   if (useFullPnl && pnlIngresos > 0) {
-    // Override total con valores PnL (más confiables)
+    // Override total con valores PnL (más confiables — fuente contable de Iñaki)
     total.ventas = pnlIngresos;
     total.costos = pnlCostos;
     total.fijos = pnlFijos;
     total.margen = pnlMargen;
     total.margenPct = pnlIngresos ? (pnlMargen / pnlIngresos) : 0;
-    // Override verticals.X.costos con PnL (incluye ADS y contingencias)
+    // Override verticals con PnL (ingresos + costos) para que donut/tabla
+    // sean consistentes con el KPI total. Los counts (# transacciones)
+    // siguen viniendo de raw rows porque el PnL no los tiene.
     for (const v of ['directo', 'distris', 'insumos', 'cursos']) {
       const pv = pnlByVertical[v];
-      if (pv.costos > 0) {
+      if (pv.ingresos > 0 || pv.costos > 0) {
+        verticals[v].ventas = pv.ingresos;
         verticals[v].costos = pv.costos;
-        verticals[v].margen = verticals[v].ventas - pv.costos;
-        verticals[v].margenPct = verticals[v].ventas ? (verticals[v].margen / verticals[v].ventas) : 0;
+        verticals[v].margen = pv.ingresos - pv.costos;
+        verticals[v].margenPct = pv.ingresos ? (verticals[v].margen / pv.ingresos) : 0;
+        verticals[v].aov = verticals[v].count ? pv.ingresos / verticals[v].count : 0;
       }
     }
   } else if (period === 'week') {
