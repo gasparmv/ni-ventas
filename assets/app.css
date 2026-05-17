@@ -3335,3 +3335,360 @@ table.t td.cliente { font-weight: 600; }
 ::-webkit-scrollbar-track { background: var(--ink-050); }
 ::-webkit-scrollbar-thumb { background: var(--ink-300); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--ink-400); }
+
+/* ============================================================================
+   MOBILE RESPONSIVE (iPhone-first, tablet también)
+   ============================================================================
+   Estrategia: bottom nav bar fija con scroll horizontal + top compact bar.
+   Tablas pasan a scroll-x. KPI grid a 2 cols. Modales full-screen.
+   Soporte de safe-area-inset para notch + home indicator de iPhone.
+*/
+@media (max-width: 768px) {
+  body {
+    /* Permitir text size adjustment al rotar */
+    -webkit-text-size-adjust: 100%;
+  }
+
+  /* === SHELL: app grid pasa a stack vertical === */
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+
+  /* === SIDEBAR → bottom nav bar fija === */
+  .sidebar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: auto;
+    height: auto;
+    flex-direction: row;
+    padding: 6px 4px;
+    padding-bottom: max(6px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    border-right: 0;
+    z-index: 50;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    background: rgba(17, 17, 24, .92);
+    gap: 0;
+    overflow: visible;
+  }
+
+  /* Ocultar elementos no esenciales del sidebar */
+  .sidebar .brand,
+  .sidebar .sidebar-foot { display: none; }
+
+  /* User-pick: compacto, va a la derecha del nav */
+  .sidebar .user-pick {
+    flex-shrink: 0;
+    padding: 0;
+    margin: 0 4px 0 0;
+    border: 0;
+  }
+  .sidebar .user-pick-label { display: none; }
+  .sidebar .user-pick-chips {
+    flex-direction: column;
+    gap: 2px;
+    padding: 0;
+  }
+  .sidebar .user-pick-chips .user-chip {
+    font-size: 9px;
+    padding: 3px 6px;
+    line-height: 1.2;
+  }
+  /* Solo mostrar el user activo + privacy toggle, los demás no caben */
+  .sidebar .user-chip:not(.active):not(.privacy-toggle):not([data-logout]) { display: none; }
+  .sidebar .user-chip.add[data-add-user] { display: none; }
+
+  /* Nav: en horizontal con scroll si no entran */
+  .sidebar .nav {
+    flex-direction: row;
+    flex: 1;
+    justify-content: flex-start;
+    align-items: stretch;
+    gap: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    scroll-snap-type: x mandatory;
+  }
+  .sidebar .nav::-webkit-scrollbar { display: none; }
+  .nav-item {
+    flex-direction: column;
+    gap: 2px;
+    font-size: 9px;
+    padding: 6px 8px;
+    min-width: 56px;
+    text-align: center;
+    white-space: nowrap;
+    border-radius: 8px;
+    border: 0;
+    position: relative;
+    scroll-snap-align: start;
+  }
+  .nav-item .icon {
+    font-size: 18px;
+    width: auto;
+    line-height: 1;
+    margin-bottom: 1px;
+  }
+  .nav-item .badge {
+    position: absolute;
+    top: 2px;
+    right: 4px;
+    margin-left: 0;
+    font-size: 8px;
+    padding: 0 5px;
+    min-width: 14px;
+    line-height: 1.4;
+  }
+  .nav-item.active {
+    background: rgba(255, 24, 48, .12);
+    color: var(--neon-red);
+    box-shadow: none;
+    border-color: transparent;
+  }
+
+  /* === MAIN: padding bottom para no taparse con bottom bar === */
+  .main {
+    padding: 12px 12px calc(80px + env(safe-area-inset-bottom)) 12px;
+    max-width: 100vw;
+  }
+  .main.main--chat {
+    padding: 0;
+    padding-bottom: calc(70px + env(safe-area-inset-bottom));
+  }
+
+  /* === PAGE HEAD: stack y achicar título === */
+  .page-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .page-head h1 { font-size: 26px; }
+  .page-head .eyebrow { font-size: 9px; }
+  .page-head .actions {
+    flex-wrap: wrap;
+    width: 100%;
+    gap: 6px;
+  }
+  .page-head .actions .btn { font-size: 12px; padding: 6px 10px; }
+
+  /* === KPI GRID: 2 cols en mobile === */
+  .kpi-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .kpi { padding: 12px 14px; }
+  .kpi-value { font-size: 18px; }
+  .kpi-label { font-size: 9px; }
+  .kpi-delta { font-size: 10px; }
+
+  /* === PERIOD SELECTOR: chips en scroll horizontal === */
+  .period-selector {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+  .period-selector .ps-label { font-size: 9px; }
+  .period-selector .ps-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 4px;
+    width: 100%;
+  }
+  .period-selector .ps-chips::-webkit-scrollbar { display: none; }
+  .ps-chip {
+    flex-shrink: 0;
+    font-size: 11px;
+    padding: 5px 12px;
+  }
+  .period-selector .ps-meta { font-size: 10px; }
+
+  /* === TABLAS GENÉRICAS: scroll horizontal === */
+  .table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .table-wrap table { min-width: 600px; }
+  .table-wrap th, .table-wrap td {
+    font-size: 11px;
+    padding: 6px 8px;
+    white-space: nowrap;
+  }
+  .table-toolbar {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px;
+  }
+  .table-toolbar input,
+  .table-toolbar select {
+    font-size: 12px;
+    padding: 6px 8px;
+    flex: 1 1 calc(50% - 6px);
+    min-width: 0;
+  }
+
+  /* === BUSINESS PANEL específico === */
+  .bp-charts-row { grid-template-columns: 1fr; gap: 12px; }
+  .bp-table {
+    font-size: 11px;
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .bp-table thead, .bp-table tbody { min-width: 540px; display: table; width: 100%; }
+  .bp-table th, .bp-table td {
+    padding: 8px 10px;
+    white-space: nowrap;
+  }
+  .bp-table .num { font-size: 11px; }
+  .bp-bar-bg { width: 60px !important; }
+  /* Chart canvas más bajo en mobile */
+  .chart-card .chart-canvas,
+  .bp-chart-wide #bp-chart-bars-line { height: 200px !important; }
+  #bp-chart-stacked { height: 220px !important; }
+  #bp-chart-donut { height: 180px !important; }
+  #bp-vert-chart { height: 200px !important; }
+
+  /* PnL table compacta */
+  .pnl-table { font-size: 12px; }
+  .pnl-table td { padding: 5px 10px; }
+
+  /* Funnel */
+  .bp-funnel-lbl { width: 120px; font-size: 11px; }
+  .bp-funnel-bar { padding: 0 10px; }
+  .bp-funnel-num { font-size: 12px; }
+  .bp-funnel-pct { font-size: 10px; }
+
+  /* Card headers */
+  .card-h { padding: 12px 14px; }
+  .card-h h3 { font-size: 13px; }
+  .card-h .muted, .card-h .badge { font-size: 10px; }
+
+  /* === MODALES: full-screen en mobile === */
+  .modal-bg .modal {
+    max-width: 100vw !important;
+    width: 100vw !important;
+    max-height: 100vh !important;
+    height: 100vh !important;
+    border-radius: 0 !important;
+    margin: 0;
+  }
+  .modal-bg .modal .modal-h { padding: 12px 14px; }
+  .modal-bg .modal .modal-h h3 { font-size: 15px; }
+  .modal-bg .modal .modal-body { padding: 12px 14px; }
+  .modal-bg .modal .modal-actions {
+    padding: 10px 14px;
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .modal-bg .modal .modal-actions .btn { flex: 1; min-width: 0; }
+
+  /* === ALERTS GRID: stack === */
+  .alerts-grid { grid-template-columns: 1fr; gap: 12px; }
+
+  /* === CHART GRID dashboard general === */
+  .chart-grid { grid-template-columns: 1fr; gap: 12px; }
+  .chart-grid .chart-canvas { height: 200px; }
+
+  /* === CHAT: ajustes mobile === */
+  .chat-msg { max-width: 88%; font-size: 14px; }
+  .chat-input-bar {
+    padding: 8px 8px max(8px, env(safe-area-inset-bottom)) 8px;
+    gap: 6px;
+  }
+  .chat-input-wrap textarea {
+    font-size: 16px; /* iOS no hace zoom si es ≥16px */
+  }
+  .chat-header {
+    padding: 8px 12px;
+  }
+  .chat-header-name { font-size: 14px; }
+  .chat-header-phone { font-size: 11px; }
+  .chat-header-meta { gap: 6px; flex-wrap: wrap; }
+  .chat-header-meta span { display: none; } /* "X msgs" se oculta */
+  .chat-list { width: 100%; }
+  .chat-messages { padding: 10px 12px 4px; }
+  /* Hover actions en mobile siempre visibles, más chicas */
+  .chat-msg-actions {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    background: rgba(42, 57, 66, .92) !important;
+  }
+  .chat-msg.inbound .chat-msg-actions { right: auto; left: 100%; margin-left: 6px; }
+  .chat-msg.outbound .chat-msg-actions { left: auto; right: 100%; margin-right: 6px; }
+  .chat-msg-actions::after { display: none; } /* el puente no hace falta touch */
+
+  /* === IMAGE LIGHTBOX === */
+  .img-lightbox .lb-nav { width: 40px; height: 40px; font-size: 26px; }
+  .img-lightbox .lb-prev { left: 8px; }
+  .img-lightbox .lb-next { right: 8px; }
+  .img-lightbox .lb-close { top: max(12px, env(safe-area-inset-top)); right: 12px; }
+  .img-lightbox .lb-download { top: max(12px, env(safe-area-inset-top)); right: 60px; }
+
+  /* === DRAWER (detalle de pedido) en mobile: full screen === */
+  .drawer {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    border-radius: 0;
+    padding-bottom: calc(80px + env(safe-area-inset-bottom));
+  }
+
+  /* === SVG charts ajustes === */
+  .chart-svg .label { font-size: 9px; }
+
+  /* === Notas (post-it) === */
+  .chat-postit { padding: 10px 14px; }
+
+  /* === SCROLL TO BOTTOM FAB === */
+  .chat-scroll-down { bottom: 80px; right: 12px; }
+
+  /* === LISTA DE CHATS: ajustar gaps === */
+  .chat-contact { padding: 10px 12px; gap: 10px; }
+  .chat-contact-name { font-size: 14px; }
+  .chat-contact-preview { font-size: 12px; }
+
+  /* === LABEL FILTER BAR === */
+  .label-filter-bar { padding: 8px 12px; gap: 6px; flex-wrap: wrap; }
+
+  /* === Sidebar foot info: si quedamos sin él, agregar info al header === */
+}
+
+@media (max-width: 480px) {
+  .nav-item { font-size: 8px; min-width: 50px; padding: 5px 6px; }
+  .nav-item .icon { font-size: 16px; }
+  .kpi-grid { gap: 6px; }
+  .kpi { padding: 10px 12px; }
+  .kpi-value { font-size: 16px; }
+  .kpi-label { font-size: 8px; }
+  .page-head h1 { font-size: 22px; }
+  .bp-table { font-size: 10px; }
+  .bp-table th, .bp-table td { padding: 6px 8px; }
+}
+
+/* === Standalone PWA (iOS app instalada) === */
+/* Agrega padding al top para evitar overlap con el status bar de iOS */
+.pwa-standalone .sidebar {
+  padding-top: max(8px, env(safe-area-inset-top));
+}
+.pwa-standalone .main {
+  padding-top: max(12px, env(safe-area-inset-top));
+}
+@media (max-width: 768px) {
+  .pwa-standalone .main {
+    padding-top: calc(max(12px, env(safe-area-inset-top)) + 4px);
+  }
+  /* Chat: sin top bar de pagina, hay que pegar el chat-header al safe-area */
+  .pwa-standalone .main.main--chat .chat-header {
+    padding-top: max(12px, env(safe-area-inset-top));
+  }
+}
