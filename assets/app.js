@@ -5142,33 +5142,54 @@ async function loadChatContacts() {
   }
 }
 
-async function loadChatMessages(phone) {
+async function loadChatMessages(phone, opts) {
   if (!canAccessChat() || !phone) return;
+  const isInitialLoad = !opts?.incremental && (!chatState.messages.length || chatState.messages[0]?.phone !== phone);
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?phone=' + encodeURIComponent(phone) + '&limit=500', {
-      headers: authHeaders()
-    });
+    // Initial load: limit alto (2000) para traer todo el historial visible.
+    // Incremental (polling): solo deltas desde el último ts conocido.
+    let url = CONFIG.trackerUrl + '/admin/wa/messages?phone=' + encodeURIComponent(phone);
+    if (isInitialLoad) {
+      url += '&limit=2000';
+    } else {
+      const lastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
+      // Pedir solo los mensajes desde el último ts conocido (incluso un poco antes
+      // para capturar status updates de mensajes recientes).
+      const sinceTs = lastTs ? new Date(new Date(lastTs).getTime() - 60000).toISOString() : '';
+      url += '&limit=500' + (sinceTs ? '&from=' + encodeURIComponent(sinceTs) : '');
+    }
+    const r = await fetch(url, { headers: authHeaders() });
     if (!r.ok) return;
     const j = await r.json();
-    const fresh = (j.messages || []).filter(m => m.msg_type !== 'status').sort((a, b) => a.ts.localeCompare(b.ts));
-    // Merge con dedupe por wamid: si tenemos un mensaje local sin wamid (recién
-    // enviado, todavía no confirmado) y aparece en el server con wamid, lo
-    // reemplazamos. Si el wamid ya existe en el array final, no duplicamos.
-    const seen = new Set();
-    const merged = [];
+    const fresh = (j.messages || []).filter(m => m.msg_type !== 'status');
+
+    // Merge: preservar TODOS los mensajes locales que tienen wamid (vienen del
+    // servidor en cargas anteriores), y agregar/actualizar los nuevos del fetch.
+    // Antes el comportamiento era reemplazar el array entero, lo que hacía que
+    // mensajes viejos "desaparecieran" en chats con >500 mensajes.
+    const byKey = new Map();
+    const keyOf = (m) => m.wamid || ('ts:' + m.ts + ':' + m.direction);
+    // Si es initial load: empezar desde cero con lo que vino del server.
+    // Si es incremental: empezar con los mensajes existentes y sumar/actualizar.
+    if (!isInitialLoad) {
+      for (const m of chatState.messages) {
+        byKey.set(keyOf(m), m);
+      }
+    }
+    // Agregar/actualizar con los frescos del server (server gana en caso de conflict)
     for (const m of fresh) {
-      const key = m.wamid || ('ts:' + m.ts + ':' + m.direction);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      merged.push(m);
+      byKey.set(keyOf(m), m);
     }
-    // Conservar mensajes locales recién enviados (sin wamid o con wamid no
-    // visto aún) que todavía no aparecen en el server.
-    for (const local of chatState.messages) {
-      if (!local.wamid) continue; // sin wamid = optimistic local, lo descartamos si el server no lo trae aún
-      if (!seen.has(local.wamid)) merged.push(local);
+    // Conservar mensajes optimistic locales (sin wamid, recién enviados)
+    if (!isInitialLoad) {
+      for (const local of chatState.messages) {
+        if (local.wamid) continue;
+        // Sin wamid = optimistic recién enviado, conservar si no apareció en server
+        const k = keyOf(local);
+        if (!byKey.has(k)) byKey.set(k, local);
+      }
     }
-    merged.sort((a, b) => a.ts.localeCompare(b.ts));
+    const merged = [...byKey.values()].sort((a, b) => a.ts.localeCompare(b.ts));
     chatState.messages = merged;
   } catch (e) {
     console.error('chat messages error:', e);
