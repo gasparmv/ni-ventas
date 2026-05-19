@@ -1048,6 +1048,60 @@ export default {
         return json(result);
       }
 
+      // ===== CHATS SUMMARY: una fila por phone con último mensaje + unread =====
+      // Reemplaza el patrón anterior de pedir limit=5000 mensajes para armar la
+      // lista de chats. Devuelve 1 fila por phone con: last_ts, last_body,
+      // last_direction, last_msg_type, contact_name (último sender_name inbound
+      // no vacío), unread (count inbound > last_read_ts).
+      // Mucho más liviano y escala con la cantidad de chats, no de mensajes.
+      if (request.method === 'GET' && path === '/admin/wa/chats-summary') {
+        try {
+          const rs = await env.DB.prepare(`
+            WITH last_per_phone AS (
+              SELECT phone, MAX(ts) AS max_ts
+              FROM wa_messages
+              WHERE phone IS NOT NULL AND phone != ''
+                AND NOT (msg_type = 'status' AND (body IS NULL OR body = '') AND direction != 'outbound')
+              GROUP BY phone
+            ),
+            last_msg AS (
+              SELECT m.phone, m.ts AS last_ts, m.body AS last_body,
+                     m.direction AS last_direction, m.msg_type AS last_msg_type
+              FROM wa_messages m
+              INNER JOIN last_per_phone lp ON m.phone = lp.phone AND m.ts = lp.max_ts
+            ),
+            inbound_name AS (
+              SELECT phone, sender_name
+              FROM (
+                SELECT phone, sender_name,
+                       ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts DESC) AS rn
+                FROM wa_messages
+                WHERE direction = 'inbound' AND sender_name IS NOT NULL AND sender_name != ''
+              ) t
+              WHERE rn = 1
+            ),
+            unread_counts AS (
+              SELECT m.phone, COUNT(*) AS unread
+              FROM wa_messages m
+              LEFT JOIN wa_read_cursor c ON c.phone = m.phone
+              WHERE m.direction = 'inbound'
+                AND m.ts > COALESCE(c.last_read_ts, '1970-01-01')
+              GROUP BY m.phone
+            )
+            SELECT lm.phone, lm.last_ts, lm.last_body, lm.last_direction, lm.last_msg_type,
+                   COALESCE(inm.sender_name, '') AS contact_name,
+                   COALESCE(uc.unread, 0) AS unread
+            FROM last_msg lm
+            LEFT JOIN inbound_name inm ON inm.phone = lm.phone
+            LEFT JOIN unread_counts uc ON uc.phone = lm.phone
+            ORDER BY lm.last_ts DESC
+          `).all();
+          return json({ chats: rs.results || [] });
+        } catch (e) {
+          return json({ chats: [], error: e.message }, 500);
+        }
+      }
+
       // Consultar mensajes de WhatsApp guardados (para análisis)
       if (request.method === 'GET' && path === '/admin/wa/messages') {
         const phone = url.searchParams.get('phone') || '';

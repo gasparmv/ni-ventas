@@ -5106,66 +5106,44 @@ async function loadChatContacts() {
   if (!canAccessChat()) return;
   chatState.loading = true;
   try {
-    // Load read cursors in parallel with messages on first load
+    // Cargar read cursors en paralelo en la primera carga
     if (!Object.keys(chatState.readCursors).length) {
       await loadReadCursors();
     }
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?limit=5000', {
+    // Usamos el endpoint /admin/wa/chats-summary que devuelve UNA fila por
+    // phone con: last_ts, last_body, last_direction, last_msg_type,
+    // contact_name (último sender_name inbound) y unread (computado server-
+    // side contra wa_read_cursor). Esto cubre TODOS los chats que tenemos
+    // en DB sin importar cuántos mensajes haya en total — escala con la
+    // cantidad de chats (~1k filas), no de mensajes (~16k+).
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/chats-summary', {
       headers: authHeaders()
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    const msgs = j.messages || [];
-    // Agrupar por teléfono
-    const byPhone = new Map();
-    for (const m of msgs) {
-      if (!m.phone) continue;
-      // Status sin body = mensaje saliente desde WA Business app/web (placeholder).
-      // Lo incluimos para bumpear el chat y que se vea actividad, pero
-      // los status con body genuinamente vacíos los dejamos pasar como tal.
-      const isStatusPlaceholder = m.msg_type === 'status' && m.direction === 'outbound' && !m.body;
-      if (m.msg_type === 'status' && !isStatusPlaceholder) continue;
-      if (!byPhone.has(m.phone)) {
-        byPhone.set(m.phone, { phone: m.phone, name: '', messages: [], lastTs: m.ts });
-      }
-      const c = byPhone.get(m.phone);
-      c.messages.push(m);
-      // Always prefer the most recent non-empty sender_name
-      if (m.sender_name && m.direction === 'inbound') c.name = m.sender_name;
-      if (m.ts > c.lastTs) c.lastTs = m.ts;
-    }
-    // Ordenar contactos por último mensaje
+    const chats = j.chats || [];
     const waNames = chatState.waContactNames || {};
-    chatState.contacts = Array.from(byPhone.values())
-      .map(c => {
-        c.messages.sort((a, b) => a.ts.localeCompare(b.ts));
-        const last = c.messages[c.messages.length - 1];
-        const unread = countUnread(c.phone, c.messages);
-        // Prioridad de nombre: wa_contacts (agenda real) > sender_name de inbound > vacío
-        const displayName = waNames[c.phone] || c.name || '';
-        return {
-          phone: c.phone,
-          name: displayName,
-          lastMsg: last ? (
-            last.msg_type === 'revoke' ? 'Mensaje eliminado' :
-            (last.msg_type === 'status' && last.direction === 'outbound' && !last.body) ? '✓ Respondido desde WhatsApp' :
-            (last.body || `[${last.msg_type}]`)
-          ).slice(0, 60) : '',
-          lastTs: c.lastTs,
-          lastDir: last ? last.direction : '',
-          lastType: last ? last.msg_type : '',
-          unread
-        };
-      })
-      .sort((a, b) => b.lastTs.localeCompare(a.lastTs));
-    // IMPORTANTE: NO tocar chatState.messages acá. Esta función trae los 5000
-    // mensajes globales más recientes (para armar el listado de contactos con
-    // lastMsg/lastTs), pero ese cutoff TRUNCA el historial del contacto
-    // seleccionado si tiene mensajes más viejos.
-    // Ej: Ariel Copeto con 42 msgs desde 1-mayo, el cutoff global solo cubre
-    // del 11-mayo en adelante → al reemplazar acá perdíamos los 16 del 1-mayo.
-    // loadChatMessages(phone) maneja el historial del chat abierto con su
-    // propio fetch dedicado (limit=2000 + merge incremental).
+    chatState.contacts = chats.map(c => {
+      // Prioridad de nombre: wa_contacts (agenda) > último sender_name > vacío
+      const displayName = waNames[c.phone] || c.contact_name || '';
+      const body = c.last_body || '';
+      const isStatusPlaceholder = c.last_msg_type === 'status' && c.last_direction === 'outbound' && !body;
+      return {
+        phone: c.phone,
+        name: displayName,
+        lastMsg: (
+          c.last_msg_type === 'revoke' ? 'Mensaje eliminado' :
+          isStatusPlaceholder ? '✓ Respondido desde WhatsApp' :
+          (body || `[${c.last_msg_type}]`)
+        ).slice(0, 60),
+        lastTs: c.last_ts,
+        lastDir: c.last_direction,
+        lastType: c.last_msg_type,
+        unread: c.unread || 0
+      };
+    }).sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
+    // NO tocar chatState.messages — loadChatMessages(phone) maneja el
+    // historial del chat abierto por su cuenta.
     updateUnreadBadge();
   } catch (e) {
     console.error('chat load error:', e);
