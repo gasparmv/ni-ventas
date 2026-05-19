@@ -873,7 +873,7 @@ export default {
         const { phone, messages, contactName } = body || {};
         if (!phone || !Array.isArray(messages)) return json({ error: 'missing phone or messages[]' }, 400);
         const num = normalizeArPhone(phone) || phone;
-        let inserted = 0, duplicates = 0, skipped = 0, errors = 0;
+        let inserted = 0, duplicates = 0, skipped = 0, errors = 0, mediaBackfilled = 0;
         for (const m of messages) {
           try {
             // Normalizar
@@ -889,13 +889,90 @@ export default {
             const r = await env.DB.prepare(
               'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             ).bind(ts, wamid, direction, num, senderName, msgType, bodyText, mediaUrl, contextId, 'imported').run();
-            if (r.meta && r.meta.changes > 0) inserted++;
-            else duplicates++;
+            if (r.meta && r.meta.changes > 0) {
+              inserted++;
+            } else {
+              duplicates++;
+              // Backfill media_url si el mensaje ya existía con media_url vacío
+              // y este import trae uno nuevo (ej: catch-up que ahora baja media).
+              if (mediaUrl) {
+                const u = await env.DB.prepare(
+                  "UPDATE wa_messages SET media_url = ? WHERE wamid = ? AND (media_url IS NULL OR media_url = '')"
+                ).bind(mediaUrl, wamid).run();
+                if (u.meta && u.meta.changes > 0) mediaBackfilled++;
+              }
+            }
           } catch (e) {
             errors++;
           }
         }
-        return json({ ok: true, inserted, duplicates, skipped, errors, total: messages.length });
+        return json({ ok: true, inserted, duplicates, skipped, errors, mediaBackfilled, total: messages.length });
+      }
+
+      // ===== MEDIA UPLOAD desde scraper (sube blob a R2, devuelve key) =====
+      // El scraper baja la media de WA Web (msg.downloadMedia → base64),
+      // la convierte a binario y la sube acá multipart. Devuelve el R2 key
+      // que el scraper guarda en media_url al hacer import-bulk.
+      // Key determinístico = wa/scrape_<wamid_sanitized> → si se intenta subir
+      // el mismo wamid 2 veces, sobrescribe (idempotente).
+      if (request.method === 'POST' && path === '/admin/wa/media/upload') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+        const ct = request.headers.get('Content-Type') || '';
+        if (!ct.includes('multipart/form-data')) return json({ error: 'expected multipart/form-data' }, 400);
+        const fd = await request.formData();
+        const file = fd.get('file');
+        const wamid = String(fd.get('wamid') || '').trim();
+        const msgType = String(fd.get('type') || 'document').trim();
+        if (!file) return json({ error: 'missing file' }, 400);
+        if (!wamid) return json({ error: 'missing wamid' }, 400);
+        const fileMime = file.type || '';
+        const fileName = file.name || '';
+        const ext = fileName.includes('.') ? '.' + fileName.split('.').pop().toLowerCase().slice(0, 5)
+                  : msgType === 'audio' ? '.ogg'
+                  : msgType === 'image' ? '.jpg'
+                  : msgType === 'video' ? '.mp4'
+                  : msgType === 'sticker' ? '.webp'
+                  : '';
+        // Key determinístico por wamid (sanitizado).
+        const sanitized = wamid.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
+        const r2Key = `wa/scrape_${sanitized}${ext}`;
+        const buf = await file.arrayBuffer();
+        const defaultMime = msgType === 'audio' ? 'audio/ogg; codecs=opus'
+                          : msgType === 'image' ? 'image/jpeg'
+                          : msgType === 'video' ? 'video/mp4'
+                          : msgType === 'sticker' ? 'image/webp'
+                          : 'application/octet-stream';
+        const mime = fileMime || defaultMime;
+        try {
+          await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: mime } });
+          return json({ ok: true, key: r2Key, bytes: buf.byteLength });
+        } catch (e) {
+          return json({ error: 'r2 put failed: ' + e.message }, 500);
+        }
+      }
+
+      // Lista de wamids que YA tienen media_url en DB.
+      if (request.method === 'GET' && path === '/admin/wa/media/wamids') {
+        try {
+          const rs = await env.DB.prepare(
+            "SELECT wamid FROM wa_messages WHERE media_url IS NOT NULL AND media_url != ''"
+          ).all();
+          const wamids = (rs.results || []).map(r => r.wamid).filter(Boolean);
+          return json({ wamids });
+        } catch (e) { return json({ wamids: [], error: e.message }, 500); }
+      }
+
+      // Lista de TODOS los wamids en DB (con o sin media). El scraper la baja
+      // al arrancar para saber qué mensajes ya están conocidos y skipear el
+      // download de media (costoso) cuando es un duplicado. Solo para mensajes
+      // NUEVOS se baja la media. ~16k strings ≈ 800 KB total.
+      if (request.method === 'GET' && path === '/admin/wa/wamids') {
+        try {
+          const rs = await env.DB.prepare('SELECT wamid FROM wa_messages WHERE wamid IS NOT NULL AND wamid != ""').all();
+          const wamids = (rs.results || []).map(r => r.wamid).filter(Boolean);
+          return json({ wamids, count: wamids.length });
+        } catch (e) { return json({ wamids: [], error: e.message }, 500); }
       }
 
       // ===== WA CONTACTS (nombres de contacto sincronizados desde WhatsApp) =====
