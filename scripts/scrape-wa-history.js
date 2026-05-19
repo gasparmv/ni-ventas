@@ -17,9 +17,54 @@
  */
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const qrcodeTerm = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
+
+// === Mini HTTP server local para mostrar el QR como imagen PNG ===
+// Joaco abre http://localhost:8765 y escanea el QR de ahí, mucho más fácil
+// que desde una consola ASCII.
+let currentQrDataUrl = '';
+let qrStatus = 'waiting'; // waiting | scanned | authenticated | ready
+const QR_PORT = 8765;
+function startQrServer() {
+  const server = http.createServer(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<!DOCTYPE html><html><head>
+      <meta charset="UTF-8">
+      <title>NEON · QR de WhatsApp</title>
+      <meta http-equiv="refresh" content="3">
+      <style>
+        body { background:#0A0A0F; color:#e9edef; font-family:-apple-system,system-ui,sans-serif; display:flex; flex-direction:column; align-items:center; padding:30px; }
+        h1 { background:linear-gradient(135deg,#FF1830,#8FD4DE); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+        .qr { background:white; padding:20px; border-radius:14px; margin:20px 0; }
+        .status { padding:10px 20px; border-radius:8px; background:#18181f; border:1px solid #2a2a35; font-family:ui-monospace,monospace; }
+        .status.waiting { color:#FFA726; }
+        .status.scanned { color:#8FD4DE; }
+        .status.authenticated, .status.ready { color:#25D366; }
+        .info { color:rgba(233,237,239,.6); font-size:13px; max-width:480px; text-align:center; line-height:1.5; }
+        .info b { color:#8FD4DE; }
+      </style>
+    </head><body>
+      <h1>🔗 Vincular WhatsApp Business</h1>
+      <div class="status ${qrStatus}">Estado: ${qrStatus === 'waiting' ? 'Esperando escaneo...' : qrStatus === 'scanned' ? 'QR Escaneado, autenticando...' : qrStatus === 'authenticated' ? '✓ Autenticado' : '✓ Listo, scrapeando...'}</div>
+      ${currentQrDataUrl && qrStatus === 'waiting' ? `<div class="qr"><img src="${currentQrDataUrl}" width="320" height="320"></div>` : '<div style="padding:60px">⏳ Generando QR...</div>'}
+      <div class="info">
+        <b>Joaco en el celular del 6573:</b><br>
+        WhatsApp Business → Ajustes → <b>Dispositivos vinculados</b> → Vincular un dispositivo → escaneá el QR de esta pantalla.<br><br>
+        Esta página se refresca sola cada 3 segundos.
+      </div>
+    </body></html>`);
+  });
+  server.listen(QR_PORT, '127.0.0.1', () => {
+    console.log(`🌐 QR disponible en http://localhost:${QR_PORT}`);
+    console.log(`   Abrilo en Chrome de tu PC y mostrá esa pantalla a Joaco.`);
+  });
+  return server;
+}
 
 // === CONFIG ===
 const WORKER_URL = 'https://ni-ventas-tracker.neoninfinito.workers.dev';
@@ -56,6 +101,34 @@ let progress = loadProgress();
 function normalizePhone(waId) {
   // waId formato '5491155604999@c.us' → '5491155604999'
   return String(waId || '').replace(/@.*$/, '').replace(/\D/g, '');
+}
+
+// Resuelve el número real de un chat. WhatsApp ahora usa LID (identificador
+// interno) para algunos contactos, en lugar del número directo. Probamos:
+//   1. Si el waId termina en @c.us → el user ES el número (formato viejo)
+//   2. Si termina en @lid → buscamos en chat.name si tiene formato +54... etc
+//   3. Si no, llamamos getContact() y vemos el number/id.user real
+async function resolvePhone(chat) {
+  const serial = chat.id?._serialized || '';
+  if (serial.endsWith('@c.us')) {
+    return chat.id.user; // formato clásico, es el número
+  }
+  // LID — buscar en el nombre del chat si tiene número embebido
+  const nm = (chat.name || chat.pushname || '').trim();
+  const matchPlus = nm.match(/\+?\s*(\d[\d\s\-()]+)/);
+  if (matchPlus) {
+    const digits = matchPlus[1].replace(/\D/g, '');
+    if (digits.length >= 10 && digits.length <= 15) return digits;
+  }
+  // Último recurso: getContact y leer el number
+  try {
+    const contact = await chat.getContact();
+    if (contact?.number) return String(contact.number).replace(/\D/g, '');
+    if (contact?.id?.user && /^\d+$/.test(contact.id.user) && contact.id.server === 'c.us') {
+      return contact.id.user;
+    }
+  } catch (_) {}
+  return null;
 }
 function tsToISO(ts) {
   // ts viene como Unix seconds
@@ -126,28 +199,55 @@ async function main() {
   console.log('   Progreso previo:', progress.processedChats.length, 'chats ya procesados');
   console.log('');
 
+  // Buscar Chrome instalado en el sistema (Windows / Mac / Linux)
+  const chromePaths = [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium-browser'
+  ];
+  let chromeExe = process.env.CHROME_PATH || '';
+  if (!chromeExe) {
+    for (const p of chromePaths) {
+      if (fs.existsSync(p)) { chromeExe = p; break; }
+    }
+  }
+  if (!chromeExe) {
+    console.error('❌ No se encontró Chrome instalado. Instalá Google Chrome o setea CHROME_PATH.');
+    process.exit(1);
+  }
+  console.log('   Chrome:', chromeExe);
+
   const client = new Client({
     authStrategy: new LocalAuth({ dataPath: path.join(__dirname, '.wa-session') }),
     puppeteer: {
       headless: true,
+      executablePath: chromeExe,
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
   });
 
-  client.on('qr', (qr) => {
-    console.log('📱 Escaneá el QR con WhatsApp Business del celular del 6573:');
-    console.log('   (Ajustes → Dispositivos vinculados → Vincular un dispositivo)');
-    console.log('');
-    qrcode.generate(qr, { small: true });
+  startQrServer();
+
+  client.on('qr', async (qr) => {
+    qrStatus = 'waiting';
+    try {
+      currentQrDataUrl = await QRCode.toDataURL(qr, { margin: 2, width: 480, errorCorrectionLevel: 'L' });
+    } catch (_) {}
+    console.log('📱 QR actualizado · http://localhost:' + QR_PORT);
   });
 
-  client.on('authenticated', () => console.log('✅ Autenticado'));
+  client.on('loading_screen', () => { qrStatus = 'scanned'; });
+  client.on('authenticated', () => { qrStatus = 'authenticated'; console.log('✅ Autenticado'); });
   client.on('auth_failure', (msg) => {
     console.error('❌ Falla de auth:', msg);
     process.exit(1);
   });
 
   client.on('ready', async () => {
+    qrStatus = 'ready';
     console.log('✅ WhatsApp Web listo. Listando chats...');
     try {
       const chats = await client.getChats();
@@ -162,9 +262,9 @@ async function main() {
       let chatIdx = 0;
       for (const chat of oneToOne) {
         chatIdx++;
-        const phone = normalizePhone(chat.id._serialized);
-        if (!phone || phone.length < 10) {
-          console.log(`  [${chatIdx}/${oneToOne.length}] SKIP: phone inválido (${chat.id._serialized})`);
+        const phone = await resolvePhone(chat);
+        if (!phone || phone.length < 10 || phone.length > 15) {
+          console.log(`  [${chatIdx}/${oneToOne.length}] SKIP: phone inválido (${chat.id._serialized} · name="${chat.name || chat.pushname || '?'}")`);
           continue;
         }
         if (progress.processedChats.includes(phone)) {

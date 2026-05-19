@@ -3091,6 +3091,69 @@ table.t td.cliente { font-weight: 600; }
 }
 .schedule-modal .btn-action:hover { filter: brightness(1.15); }
 
+/* ============ FULL-TEXT SEARCH RESULTS en chat list ============ */
+.search-section-header {
+  padding: 8px 14px 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: rgba(143, 212, 222, .8);
+  font-weight: 700;
+  border-top: 1px solid rgba(255,255,255,.05);
+  background: rgba(143,212,222,.04);
+  margin-top: 4px;
+}
+.search-msg-result {
+  padding: 9px 14px;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  transition: background .12s;
+}
+.search-msg-result:hover {
+  background: rgba(143,212,222,.08);
+}
+.search-msg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 3px;
+}
+.search-msg-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.search-msg-date {
+  font-size: 10.5px;
+  color: rgba(233,237,239,.45);
+  font-family: ui-monospace, monospace;
+}
+.search-msg-body {
+  font-size: 12.5px;
+  color: rgba(233,237,239,.7);
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-msg-dir {
+  color: rgba(143,212,222,.7);
+  font-weight: 700;
+  margin-right: 2px;
+}
+.search-msg-body mark,
+.search-msg-result mark {
+  background: rgba(255, 196, 0, .35);
+  color: #ffd966;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+.search-loading {
+  padding: 12px 14px;
+  font-size: 12px;
+  color: rgba(233,237,239,.5);
+  text-align: center;
+}
+
 /* ============ PRIVACY TOGGLE (estilo billetera virtual) ============ */
 .privacy-toggle {
   display: inline-flex !important;

@@ -822,6 +822,48 @@ export default {
         return json({ id: r.id });
       }
 
+      // ===== FULL-TEXT SEARCH del chat WA =====
+      // Busca en body de mensajes, sender_name y phone. Devuelve:
+      // - contacts: lista de phones que tienen mensajes que matchean
+      // - messages: mensajes individuales que matchean con preview
+      if (request.method === 'GET' && path === '/admin/wa/search') {
+        const q = (url.searchParams.get('q') || '').trim();
+        if (q.length < 2) return json({ contacts: [], messages: [] });
+        // SQLite LIKE es case-insensitive para ASCII por default con NOCASE,
+        // pero acá normalizamos a lowercase para consistencia.
+        const qLower = q.toLowerCase();
+        const like = '%' + qLower + '%';
+
+        // Contactos: phones únicos cuyos mensajes contienen el query.
+        // También matchea si el query es parte del phone (para buscar por número).
+        const contactsQ = await env.DB.prepare(
+          `SELECT phone, COUNT(*) AS hits, MAX(ts) AS last_match_ts,
+                  MAX(CASE WHEN LOWER(sender_name) != '' THEN sender_name END) AS contact_name
+           FROM wa_messages
+           WHERE LOWER(body) LIKE ?
+              OR LOWER(sender_name) LIKE ?
+              OR phone LIKE ?
+           GROUP BY phone
+           ORDER BY last_match_ts DESC
+           LIMIT 50`
+        ).bind(like, like, like).all();
+
+        // Mensajes individuales: top 50 mensajes recientes que matchean.
+        const messagesQ = await env.DB.prepare(
+          `SELECT ts, phone, sender_name, direction, msg_type, body, wamid
+           FROM wa_messages
+           WHERE LOWER(body) LIKE ?
+           ORDER BY ts DESC
+           LIMIT 50`
+        ).bind(like).all();
+
+        return json({
+          q,
+          contacts: contactsQ.results || [],
+          messages: messagesQ.results || []
+        });
+      }
+
       // ===== BULK IMPORT de historial de WA (scrape via whatsapp-web.js) =====
       // El script scrape-wa-history.js corre en la PC del usuario y manda
       // batches de mensajes acá. Inserta con OR IGNORE para dedup por wamid.

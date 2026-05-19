@@ -4486,6 +4486,11 @@ const chatState = {
   audioChunks: [],
   recordingTimer: null,
   recordingSecs: 0,
+  // Full-text search (busca en historial completo de mensajes, no solo el último)
+  searchResults: { contacts: [], messages: [], q: '' },
+  searchLoading: false,
+  _searchTimer: null,
+  highlightWamid: null, // wamid del mensaje a destacar al abrir un chat (de búsqueda)
 };
 
 // Avatar color palettes [base, accent] — 25 distinct hues for maximum differentiation
@@ -6059,7 +6064,23 @@ function renderChatMessages() {
   bindMessageContextMenus();
   bindMessageHoverActions();
   bindMediaPreviewClicks();
-  container.scrollTop = container.scrollHeight;
+  // Si venimos de un click en resultado de búsqueda, scrollear al mensaje y destacarlo
+  if (chatState.highlightWamid) {
+    const target = container.querySelector(`.chat-msg[data-wamid="${chatState.highlightWamid}"]`);
+    if (target) {
+      setTimeout(() => {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        target.classList.add('chat-msg-flash');
+        setTimeout(() => target.classList.remove('chat-msg-flash'), 2200);
+      }, 100);
+    } else {
+      // No está cargado (mensaje muy viejo no fue traído por la query de mensajes)
+      container.scrollTop = container.scrollHeight;
+    }
+    chatState.highlightWamid = null; // consumir el flag
+  } else {
+    container.scrollTop = container.scrollHeight;
+  }
 }
 
 // Click en imagen/PDF → preview inline (no abre nueva pestaña).
@@ -6858,12 +6879,22 @@ function bindChat() {
     loadAllNotes();
     loadArchivedChats();
   }
-  // Search
+  // Search — full-text en historial completo (no solo lastMsg)
   const searchInput = document.getElementById('chat-search');
   if (searchInput) {
     searchInput.oninput = () => {
       chatState.search = searchInput.value;
+      // Refresh inmediato con filtrado local (rápido, lo viejo)
       refreshContactList();
+      // Debounce: 300ms después llamar al backend para búsqueda en historial
+      if (chatState._searchTimer) clearTimeout(chatState._searchTimer);
+      const q = searchInput.value.trim();
+      if (q.length < 2) {
+        chatState.searchResults = { contacts: [], messages: [], q: '' };
+        refreshContactList();
+        return;
+      }
+      chatState._searchTimer = setTimeout(() => runBackendSearch(q), 300);
     };
   }
   bindChatContactClicks();
@@ -7098,10 +7129,35 @@ function updateChatPageTitle() {
   document.title = total > 0 ? `(${total}) ${base}` : base;
 }
 
+// Llama al backend para buscar en TODO el historial de wa_messages
+// (no solo lastMsg como hace el filtrado local).
+async function runBackendSearch(q) {
+  if (!CONFIG.trackerUrl || !STATE.token) return;
+  chatState.searchLoading = true;
+  refreshContactList();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/search?q=' + encodeURIComponent(q), {
+      headers: authHeaders()
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    chatState.searchResults = {
+      contacts: j.contacts || [],
+      messages: j.messages || [],
+      q: j.q || q
+    };
+  } catch (e) {
+    chatState.searchResults = { contacts: [], messages: [], q: '' };
+  } finally {
+    chatState.searchLoading = false;
+    refreshContactList();
+  }
+}
+
 function refreshContactList() {
   const list = document.getElementById('chat-contact-list');
   if (!list) return;
-  const search = chatState.search.toLowerCase();
+  const search = chatState.search.toLowerCase().trim();
   let filtered = chatState.contacts;
   // Filtrar archivados (salvo que el filtro esté en "ver archivados")
   if (chatState.showArchived) {
@@ -7109,10 +7165,85 @@ function refreshContactList() {
   } else {
     filtered = filtered.filter(c => !isArchived(c.phone));
   }
+  // Filtrado local rápido
   if (search) filtered = filtered.filter(c => (c.name || '').toLowerCase().includes(search) || c.phone.includes(search) || (c.lastMsg || '').toLowerCase().includes(search));
   if (chatState.filterLabels.length) filtered = filtered.filter(c => { const cl = chatState.contactLabels[c.phone] || []; return chatState.filterLabels.every(lid => cl.includes(lid)); });
-  list.innerHTML = filtered.map(c => renderContactItem(c)).join('');
+
+  // Si hay búsqueda activa, agregar contactos del backend que no están ya
+  // en la lista (matchean por historial profundo).
+  let extraHtml = '';
+  if (search && chatState.searchResults.q && chatState.searchResults.q.toLowerCase() === search) {
+    const localPhones = new Set(filtered.map(c => c.phone));
+    const extraContacts = chatState.searchResults.contacts.filter(c => !localPhones.has(c.phone));
+    if (extraContacts.length) {
+      const items = extraContacts.map(c => {
+        const contactObj = chatState.contacts.find(x => x.phone === c.phone) || {
+          phone: c.phone, name: c.contact_name || '', lastMsg: '', lastTs: c.last_match_ts, unread: 0
+        };
+        return renderContactItem(contactObj);
+      }).join('');
+      extraHtml = `<div class="search-section-header">📜 En historial (${extraContacts.length})</div>` + items;
+    }
+    // Mensajes individuales que matchean
+    if (chatState.searchResults.messages.length) {
+      const msgItems = chatState.searchResults.messages.slice(0, 20).map(m => {
+        const contact = chatState.contacts.find(c => c.phone === m.phone);
+        const name = contact?.name || m.sender_name || formatPhoneDisplay(m.phone);
+        const dirIcon = m.direction === 'outbound' ? '↗' : '↘';
+        const dateStr = new Date(m.ts).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: '2-digit' });
+        const preview = highlightMatch(m.body || '', search);
+        return `<div class="search-msg-result" data-search-jump="${escapeHtml(m.phone)}|${escapeHtml(m.wamid || '')}">
+          <div class="search-msg-head">
+            <span class="search-msg-name">${escapeHtml(name)}</span>
+            <span class="search-msg-date">${dateStr}</span>
+          </div>
+          <div class="search-msg-body"><span class="search-msg-dir">${dirIcon}</span> ${preview}</div>
+        </div>`;
+      }).join('');
+      extraHtml += `<div class="search-section-header">💬 Mensajes (${chatState.searchResults.messages.length})</div>` + msgItems;
+    }
+  }
+
+  // Indicador de loading
+  const loadingHtml = chatState.searchLoading
+    ? '<div class="search-loading">🔍 Buscando en historial...</div>'
+    : '';
+
+  list.innerHTML = filtered.map(c => renderContactItem(c)).join('') + loadingHtml + extraHtml;
   bindChatContactClicks();
+  bindSearchMessageJumps();
+}
+
+// Escapa HTML y resalta el match dentro de un texto con <mark>
+function highlightMatch(text, query) {
+  if (!text || !query) return escapeHtml(text || '');
+  const safe = escapeHtml(text);
+  const safeQ = escapeHtml(query);
+  // Case-insensitive replace preservando original
+  const re = new RegExp('(' + safeQ.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+  // Truncar el snippet a ~120 chars alrededor del primer match
+  const lower = safe.toLowerCase();
+  const qLower = safeQ.toLowerCase();
+  const idx = lower.indexOf(qLower);
+  let snippet = safe;
+  if (idx > 60 && safe.length > 140) {
+    snippet = '…' + safe.slice(idx - 40, idx + 80) + (idx + 80 < safe.length ? '…' : '');
+  } else if (safe.length > 140) {
+    snippet = safe.slice(0, 140) + '…';
+  }
+  return snippet.replace(re, '<mark>$1</mark>');
+}
+
+// Click en un resultado de mensaje → abrir el chat y scroll al mensaje
+function bindSearchMessageJumps() {
+  document.querySelectorAll('[data-search-jump]').forEach(el => {
+    el.style.cursor = 'pointer';
+    el.onclick = () => {
+      const [phone, wamid] = el.dataset.searchJump.split('|');
+      chatState.highlightWamid = wamid;
+      selectChatContact(phone);
+    };
+  });
 }
 
 function bindBulkSection() {
