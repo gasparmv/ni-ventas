@@ -5158,11 +5158,14 @@ async function loadChatContacts() {
         };
       })
       .sort((a, b) => b.lastTs.localeCompare(a.lastTs));
-    // Si hay contacto seleccionado, actualizar sus mensajes
-    if (chatState.selectedPhone) {
-      const c = byPhone.get(chatState.selectedPhone);
-      chatState.messages = c ? c.messages : [];
-    }
+    // IMPORTANTE: NO tocar chatState.messages acá. Esta función trae los 5000
+    // mensajes globales más recientes (para armar el listado de contactos con
+    // lastMsg/lastTs), pero ese cutoff TRUNCA el historial del contacto
+    // seleccionado si tiene mensajes más viejos.
+    // Ej: Ariel Copeto con 42 msgs desde 1-mayo, el cutoff global solo cubre
+    // del 11-mayo en adelante → al reemplazar acá perdíamos los 16 del 1-mayo.
+    // loadChatMessages(phone) maneja el historial del chat abierto con su
+    // propio fetch dedicado (limit=2000 + merge incremental).
     updateUnreadBadge();
   } catch (e) {
     console.error('chat load error:', e);
