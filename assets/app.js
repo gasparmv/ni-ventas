@@ -4491,6 +4491,10 @@ const chatState = {
   searchLoading: false,
   _searchTimer: null,
   highlightWamid: null, // wamid del mensaje a destacar al abrir un chat (de búsqueda)
+  // Nombres de contacto sincronizados desde WhatsApp (tabla wa_contacts en D1).
+  // Map phone → name. Tiene prioridad sobre sender_name al renderizar la lista.
+  waContactNames: {},
+  waContactNamesLoaded: false,
 };
 
 // Avatar color palettes [base, accent] — 25 distinct hues for maximum differentiation
@@ -4597,6 +4601,28 @@ async function sendQuickReplyToChat(phone, qrId) {
 async function deleteQuickReply(id) {
   await fetch(CONFIG.trackerUrl + '/admin/quick-replies/' + id, { method: 'DELETE', headers: authHeaders() });
   chatState.quickReplies = chatState.quickReplies.filter(q => q.id !== id);
+}
+
+// ===== WA Contact Names (sincronizados desde la agenda del 6573 vía scraper) =====
+async function loadWaContactNames() {
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/contacts', { headers: authHeaders() });
+    if (!r.ok) return;
+    const j = await r.json();
+    const map = {};
+    for (const c of (j.contacts || [])) {
+      if (c?.phone && c?.name) map[c.phone] = c.name;
+    }
+    chatState.waContactNames = map;
+    chatState.waContactNamesLoaded = true;
+    // Si ya hay contactos cargados, re-aplicar los nombres
+    if (chatState.contacts.length) {
+      for (const c of chatState.contacts) {
+        const wn = map[c.phone];
+        if (wn) c.name = wn;
+      }
+    }
+  } catch (_) {}
 }
 
 // ===== Labels =====
@@ -5109,14 +5135,17 @@ async function loadChatContacts() {
       if (m.ts > c.lastTs) c.lastTs = m.ts;
     }
     // Ordenar contactos por último mensaje
+    const waNames = chatState.waContactNames || {};
     chatState.contacts = Array.from(byPhone.values())
       .map(c => {
         c.messages.sort((a, b) => a.ts.localeCompare(b.ts));
         const last = c.messages[c.messages.length - 1];
         const unread = countUnread(c.phone, c.messages);
+        // Prioridad de nombre: wa_contacts (agenda real) > sender_name de inbound > vacío
+        const displayName = waNames[c.phone] || c.name || '';
         return {
           phone: c.phone,
-          name: c.name,
+          name: displayName,
           lastMsg: last ? (
             last.msg_type === 'revoke' ? 'Mensaje eliminado' :
             (last.msg_type === 'status' && last.direction === 'outbound' && !last.body) ? '✓ Respondido desde WhatsApp' :
@@ -6891,14 +6920,19 @@ function showLabelPicker(phone) {
 function bindChat() {
   // Load data
   if (!chatState.contacts.length && !chatState.loading) {
-    Promise.all([loadChatContacts(), loadQuickReplies(), loadLabels(), loadAllNotes(), loadArchivedChats()]).then(() => {
-      if (STATE.view === 'chat') render();
+    // Cargar nombres de WA primero (rápido, solo phone→name) y después contactos
+    // para que el primer render ya los muestre bien.
+    loadWaContactNames().finally(() => {
+      Promise.all([loadChatContacts(), loadQuickReplies(), loadLabels(), loadAllNotes(), loadArchivedChats()]).then(() => {
+        if (STATE.view === 'chat') render();
+      });
     });
   } else {
     loadQuickReplies();
     loadLabels();
     loadAllNotes();
     loadArchivedChats();
+    if (!chatState.waContactNamesLoaded) loadWaContactNames();
   }
   // Search — full-text en historial completo (no solo lastMsg)
   const searchInput = document.getElementById('chat-search');

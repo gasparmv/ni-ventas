@@ -898,6 +898,106 @@ export default {
         return json({ ok: true, inserted, duplicates, skipped, errors, total: messages.length });
       }
 
+      // ===== WA CONTACTS (nombres de contacto sincronizados desde WhatsApp) =====
+      // Tabla wa_contacts: phone → name. La fuente es el scraper que lee los
+      // nombres tal como Joaco los tiene guardados en la agenda del 6573.
+      // El frontend mergea esto contra los mensajes para mostrar el nombre real.
+      if (request.method === 'POST' && path === '/admin/wa/contacts/import-bulk') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { contacts } = body || {};
+        if (!Array.isArray(contacts)) return json({ error: 'missing contacts[]' }, 400);
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS wa_contacts (phone TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)").run();
+        const now = new Date().toISOString();
+        let upserted = 0, skipped = 0;
+        for (const c of (contacts || [])) {
+          const rawPhone = c?.phone || '';
+          const num = normalizeArPhone(rawPhone) || String(rawPhone).replace(/\D/g, '');
+          const name = String(c?.name || '').trim();
+          if (!num || !name) { skipped++; continue; }
+          try {
+            await env.DB.prepare(
+              'INSERT INTO wa_contacts (phone, name, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at'
+            ).bind(num, name, now).run();
+            upserted++;
+          } catch (_) { skipped++; }
+        }
+        return json({ ok: true, upserted, skipped, total: contacts.length });
+      }
+
+      if (request.method === 'GET' && path === '/admin/wa/contacts') {
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS wa_contacts (phone TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)").run();
+          const rs = await env.DB.prepare('SELECT phone, name FROM wa_contacts').all();
+          return json({ contacts: rs.results || [] });
+        } catch (e) { return json({ contacts: [] }); }
+      }
+
+      // ===== WA LABELS BULK IMPORT (desde el scraper) =====
+      // Body: { labels: [{name, color}], assignments: [{phone, labelName}], replaceAll?: bool }
+      // Si replaceAll=true → borra TODAS las assignments antes de insertar (sync limpio).
+      // Las labels se hacen upsert (mantiene id existente si ya está, actualiza color).
+      if (request.method === 'POST' && path === '/admin/wa/labels/import-bulk') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { labels, assignments, replaceAll } = body || {};
+        await env.DB.prepare('CREATE TABLE IF NOT EXISTS labels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, color TEXT NOT NULL, created_at TEXT NOT NULL)').run();
+        await env.DB.prepare('CREATE TABLE IF NOT EXISTS contact_labels (phone TEXT NOT NULL, label_id INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (phone, label_id))').run();
+        const now = new Date().toISOString();
+        const nameToId = new Map();
+        let labelsCreated = 0, labelsUpdated = 0, assignmentsCreated = 0, assignmentsSkipped = 0;
+
+        // 1) Upsert labels
+        if (Array.isArray(labels)) {
+          for (const l of labels) {
+            const name = String(l?.name || '').trim();
+            const color = String(l?.color || '#42a5f5').trim();
+            if (!name) continue;
+            try {
+              const existing = await env.DB.prepare('SELECT id FROM labels WHERE name = ?').bind(name).first();
+              if (existing) {
+                await env.DB.prepare('UPDATE labels SET color = ? WHERE id = ?').bind(color, existing.id).run();
+                nameToId.set(name, existing.id);
+                labelsUpdated++;
+              } else {
+                await env.DB.prepare('INSERT INTO labels (name, color, created_at) VALUES (?, ?, ?)').bind(name, color, now).run();
+                const row = await env.DB.prepare('SELECT id FROM labels WHERE name = ?').bind(name).first();
+                if (row) nameToId.set(name, row.id);
+                labelsCreated++;
+              }
+            } catch (_) {}
+          }
+        }
+
+        // 2) Si replaceAll → limpiar assignments existentes para sync limpio
+        if (replaceAll === true) {
+          await env.DB.prepare('DELETE FROM contact_labels').run();
+        }
+
+        // 3) Upsert assignments
+        if (Array.isArray(assignments)) {
+          for (const a of assignments) {
+            const rawPhone = a?.phone || '';
+            const phone = normalizeArPhone(rawPhone) || String(rawPhone).replace(/\D/g, '');
+            const labelName = String(a?.labelName || '').trim();
+            if (!phone || !labelName) { assignmentsSkipped++; continue; }
+            let lid = nameToId.get(labelName);
+            if (!lid) {
+              const row = await env.DB.prepare('SELECT id FROM labels WHERE name = ?').bind(labelName).first();
+              if (row) { lid = row.id; nameToId.set(labelName, lid); }
+            }
+            if (!lid) { assignmentsSkipped++; continue; }
+            try {
+              await env.DB.prepare(
+                'INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)'
+              ).bind(phone, lid, now).run();
+              assignmentsCreated++;
+            } catch (_) { assignmentsSkipped++; }
+          }
+        }
+        return json({ ok: true, labelsCreated, labelsUpdated, assignmentsCreated, assignmentsSkipped });
+      }
+
       // ===== BUSINESS PANEL (solo Gaspar) =====
       // Lee el Sheet "2025 V4" (PnL + 6 hojas detalle), parsea y devuelve JSON.
       // Cachea 1h en D1 para no tirar del Sheet en cada visita.
