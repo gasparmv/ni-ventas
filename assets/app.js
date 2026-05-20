@@ -155,13 +155,13 @@ function buildPresupuestoTexto() {
   if (carteles.length === 0) return null;
   const p = getCotizadorParams();
 
-  const closing = `\n\nControladores opcionales\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nPara iniciar el trabajo, se requiere el 50% del total en concepto de seña.\n\nTiempo de armado: 15/20 días.\n\nTodos los medios de pago!\n\nHacemos envíos GRATIS a todo el país!`;
+  const closing = `\n\nControladores opcionales:\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nTrabajamos con bases acrílicas transparentes de 3mm, la mejor calidad (NO mdf/fibrofácil/policarbonato/PETG/etc.)\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña. Aceptamos todos los medios de pago!\n\nTiempo de entrega: 15/20 días.\n\nHacemos envíos GRATIS a todo el país!`;
 
   if (carteles.length === 1) {
     const c = carteles[0];
     const r = calcCotizador(c);
     const nombre = (c.cliente || '').trim() || 'Custom name';
-    return `Te comparto la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+c.ancho)}x${Math.round(+c.alto)}\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}${closing}`;
+    return `Te comparto el presupuesto con la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+c.ancho)}x${Math.round(+c.alto)}\nBase acrílica transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}${closing}`;
   }
 
   // 2+ carteles — cada uno con su propio nombre de diseño
@@ -171,11 +171,11 @@ function buildPresupuestoTexto() {
     totalTrans += r.transFinal;
     totalNegro += r.negroFinal;
     const disen = (c.cliente || '').trim() || `Cartel ${i+1}`;
-    return `${disen} — ${Math.round(+c.ancho)}x${Math.round(+c.alto)} cm\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}`;
+    return `${disen} — ${Math.round(+c.ancho)}x${Math.round(+c.alto)} cm\nBase acrílica transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}`;
   }).join('\n\n');
 
   const trabajo = carteles.map(c => (c.cliente || '').trim()).filter(Boolean).join(' · ') || 'Custom name';
-  return `Te comparto la información detallada!\n\nTrabajo: ${trabajo}\n\n${bloques}\n\nTotal transparente: ${fmtMoney(totalTrans)}\nTotal negro: ${fmtMoney(totalNegro)}${closing}`;
+  return `Te comparto el presupuesto con la información detallada!\n\nTrabajo: ${trabajo}\n\n${bloques}\n\nTotal transparente: ${fmtMoney(totalTrans)}\nTotal negro: ${fmtMoney(totalNegro)}${closing}`;
 }
 
 function getPresupuestoTextoFinal() {
@@ -299,8 +299,7 @@ async function verFallosWA() {
     all = j.messages || [];
   } catch (e) { await showAlert('Error al consultar el worker', { title: 'Error de red', variant: 'warn' }); return; }
   const fallos = all.filter(m =>
-    m.status === 'failed' &&
-    (m.body || '').startsWith(PRESUPUESTO_PREFIX)
+    m.status === 'failed' && isPresupuestoMessage(m.body)
   );
   if (fallos.length === 0) {
     await showAlert(
@@ -327,7 +326,19 @@ async function verFallosWA() {
   );
 }
 
-const PRESUPUESTO_PREFIX = 'Te comparto la información detallada!';
+// Aceptamos AMBOS prefijos (viejo + nuevo) para no perder detección de
+// presupuestos históricos al cambiar la plantilla. La plantilla nueva
+// (mayo 2026) arranca con "Te comparto el presupuesto con..." y la vieja
+// con "Te comparto la información detallada!".
+const PRESUPUESTO_PREFIXES = [
+  'Te comparto el presupuesto con la información detallada!',
+  'Te comparto la información detallada!'
+];
+const PRESUPUESTO_PREFIX = PRESUPUESTO_PREFIXES[0]; // back-compat
+function isPresupuestoMessage(body) {
+  const b = String(body || '');
+  return PRESUPUESTO_PREFIXES.some(p => b.startsWith(p));
+}
 const FOLLOWUP_PRESUPUESTO_TEXT = 'Aca te dejamos el presupuesto! Decinos que te parece? si hay algun cambio o ajuste que quieras hacer, tambien si tenes foto de donde lo vas a poner te podemos hacer un montaje digital de como quedaría!';
 const FOLLOWUP_PRESUPUESTO_PREFIX = 'Aca te dejamos el presupuesto!';
 
@@ -349,8 +360,9 @@ async function enviarFollowupsPresupuesto(opts) {
     outbound = j.messages || [];
   } catch (e) { await showAlert('Error de red al buscar mensajes', { title: 'Error de red', variant: 'warn' }); return; }
 
-  // 2) Filtrar presupuestos del cotizador (texto que arranca con el prefijo conocido)
-  const presupuestos = outbound.filter(m => (m.body || '').startsWith(PRESUPUESTO_PREFIX));
+  // 2) Filtrar presupuestos del cotizador (texto que arranca con cualquiera
+  // de los prefijos conocidos — viejo o nuevo, para mantener históricos).
+  const presupuestos = outbound.filter(m => isPresupuestoMessage(m.body));
 
   // 3) Quedarse con el último presupuesto por teléfono
   const byPhone = new Map();

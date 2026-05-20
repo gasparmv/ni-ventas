@@ -2069,7 +2069,12 @@ async function applyAutoLabels(env, phone, body) {
 // Detecta presupuestos enviados desde el cotizador (texto que arranca con un prefijo conocido),
 // que no fueron respondidos ni recibieron follow-up, y manda un mensaje de insistencia.
 // Si algun envio falla y hay ADMIN_NOTIFY_PHONE configurado, manda un WA al admin con el resumen.
-const PRESUPUESTO_PREFIX_TEXT = 'Te comparto la información detallada!';
+// Acepta AMBOS prefijos (viejo + nuevo) para no perder presupuestos históricos.
+const PRESUPUESTO_PREFIXES_TEXT = [
+  'Te comparto el presupuesto con la información detallada!',
+  'Te comparto la información detallada!'
+];
+const PRESUPUESTO_PREFIX_TEXT = PRESUPUESTO_PREFIXES_TEXT[0]; // back-compat
 const FOLLOWUP_PRESUPUESTO_TEXT = 'Aca te dejamos el presupuesto! Decinos que te parece? si hay algun cambio o ajuste que quieras hacer, tambien si tenes foto de donde lo vas a poner te podemos hacer un montaje digital de como quedaría!';
 const FOLLOWUP_PRESUPUESTO_PREFIX_TEXT = 'Aca te dejamos el presupuesto!';
 
@@ -2082,8 +2087,8 @@ async function processPresupuestoFollowups(env) {
   let rows;
   try {
     const rs = await env.DB.prepare(
-      "SELECT phone, ts, body, sender_name FROM wa_messages WHERE direction = 'outbound' AND body LIKE ? AND ts >= ? AND ts <= ? ORDER BY ts DESC"
-    ).bind(PRESUPUESTO_PREFIX_TEXT + '%', oneDayAgo, oneHourAgo).all();
+      "SELECT phone, ts, body, sender_name FROM wa_messages WHERE direction = 'outbound' AND (body LIKE ? OR body LIKE ?) AND ts >= ? AND ts <= ? ORDER BY ts DESC"
+    ).bind(PRESUPUESTO_PREFIXES_TEXT[0] + '%', PRESUPUESTO_PREFIXES_TEXT[1] + '%', oneDayAgo, oneHourAgo).all();
     rows = rs.results || [];
   } catch (e) {
     await logWaEvent(env, { to: '', kind: 'cron-pp-followup', ref: '', ok: false, error: 'query: ' + e.message });
