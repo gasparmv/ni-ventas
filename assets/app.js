@@ -155,14 +155,7 @@ function buildPresupuestoTexto() {
   if (carteles.length === 0) return null;
   const p = getCotizadorParams();
 
-  // Promo Copa del Mundo: activa hasta el 31/07/2026 23:59 AR (cutoff = 01/08 00:00 AR = 03:00 UTC).
-  // El texto al cliente dice "solo por esta semana" a propósito (urgencia psicológica),
-  // aunque internamente la promo corre todo junio y julio. Se autodesactiva el 01/08.
-  const promoCopaActiva = Date.now() < Date.parse('2026-08-01T03:00:00Z');
-  const promoCopa = promoCopaActiva
-    ? `\n\n🎁 *Solo por esta semana*: con la compra del cartel te regalamos un neón de la Copa del Mundo! ⚽`
-    : '';
-  const closing = `${promoCopa}\n\nControladores opcionales:\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nTrabajamos con bases acrílicas transparentes de 3mm, la mejor calidad (NO mdf/fibrofácil/policarbonato/PETG/etc.)\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña. Aceptamos todos los medios de pago!\n\nTiempo de entrega: 15/20 días.\n\nHacemos envíos GRATIS a todo el país!`;
+  const closing = `\n\nControladores opcionales:\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nTrabajamos con bases acrílicas transparentes de 3mm, la mejor calidad (NO mdf/fibrofácil/policarbonato/PETG/etc.)\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña. Aceptamos todos los medios de pago!\n\nTiempo de entrega: 15/20 días.\n\nHacemos envíos GRATIS a todo el país!`;
 
   if (carteles.length === 1) {
     const c = carteles[0];
