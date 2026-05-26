@@ -7712,6 +7712,7 @@ const ORIGEN_LEAD_OPTS = [
 
 if (typeof STATE.briefs === 'undefined')          STATE.briefs = [];
 if (typeof STATE.briefsLoading === 'undefined')   STATE.briefsLoading = false;
+if (typeof STATE.briefsLoaded === 'undefined')    STATE.briefsLoaded = false;
 if (typeof STATE.briefsError === 'undefined')     STATE.briefsError = null;
 if (typeof STATE.briefSelected === 'undefined')   STATE.briefSelected = null;
 if (typeof STATE.briefDraft === 'undefined')      STATE.briefDraft = null;
@@ -7728,6 +7729,7 @@ async function fetchBriefs() {
     const data = await r.json();
     STATE.briefs = data.briefs || [];
     STATE.briefsError = null;
+    STATE.briefsLoaded = true;
   } catch (e) {
     STATE.briefsError = e.message || 'error';
   } finally {
@@ -8165,8 +8167,9 @@ function handleBriefAbrirCotizador() {
 function bindCotizacion() {
   if (!STATE.token) return;
 
-  // Carga inicial.
-  if (!STATE.briefs.length && !STATE.briefsLoading && !STATE.briefsError) {
+  // Carga inicial — solo si no se cargó NUNCA. Si la DB devuelve [] (sin briefs),
+  // briefsLoaded queda en true igual, así no entramos en loop infinito de fetch.
+  if (!STATE.briefsLoaded && !STATE.briefsLoading && !STATE.briefsError) {
     Promise.all([fetchBriefs(), fetchUsersPanel()]).then(() => render());
   } else if (!STATE.usersPanel) {
     fetchUsersPanel().then(() => render());
@@ -8176,7 +8179,10 @@ function bindCotizacion() {
   const newBtn = document.getElementById('brief-new');
   if (newBtn) newBtn.onclick = openBriefDraft;
   const refreshBtn = document.getElementById('briefs-refresh');
-  if (refreshBtn) refreshBtn.onclick = () => fetchBriefs().then(() => render());
+  if (refreshBtn) refreshBtn.onclick = () => {
+    STATE.briefsLoaded = false;  // forzar re-fetch
+    fetchBriefs().then(() => render());
+  };
 
   // Tarjetas → abrir drawer.
   document.querySelectorAll('.brief-card').forEach(el => {
