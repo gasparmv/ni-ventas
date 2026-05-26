@@ -126,3 +126,77 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
   error        TEXT                       -- error si falló
 );
 CREATE INDEX IF NOT EXISTS idx_sched_status_ts ON scheduled_messages(status, scheduled_at);
+
+-- ============================================================
+-- Panel de cotización conversacional (briefs)
+-- Cada brief es la unidad de trabajo entre comercial y diseñador:
+-- nace de una conversación de WhatsApp (vinculado por cliente_wa_id
+-- al phone de wa_messages), pasa por estados (nuevo → en_diseno →
+-- listo → enviado), y al "enviar" se materializa como fila del
+-- Sheet "Cotizador Joaco" + mensaje al cliente.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS briefs (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  cliente_wa_id     TEXT NOT NULL,             -- phone E.164 sin + (FK lógica a wa_messages.phone)
+  cliente_nombre    TEXT,
+  origen_lead       TEXT NOT NULL,             -- obligatorio (Locales Corto, El neón, Tu logo, IG orgánico, Plantilla msj, Recomendación, B2B form, otro)
+  estado            TEXT NOT NULL DEFAULT 'nuevo',  -- nuevo | en_diseno | listo | enviado | cerrado | colgado
+  tipo              TEXT,                      -- INT | EXT
+  diseno            TEXT,                      -- nombre/descripción del diseño
+  alto_cm           REAL,
+  ancho_cm          REAL,
+  m2                REAL,
+  neon_mt           REAL,
+  precio_trans      REAL,
+  precio_negro      REAL,
+  precio_final      REAL,                      -- el que efectivamente se envió
+  descuento         REAL DEFAULT 0,
+  recargo           REAL DEFAULT 0,
+  reventa           REAL DEFAULT 0,
+  comision_joaco    REAL DEFAULT 0,
+  comercial_id      TEXT NOT NULL,             -- FK lógica a users_panel.id
+  disenador_id      TEXT,                      -- null hasta que se asigne
+  intentos_followup INTEGER DEFAULT 0,         -- regla 12 puntos (sec. 8.1 cerebro)
+  notas             TEXT,
+  sheet_row         INTEGER,                   -- fila del Sheet "Cotizador Joaco" si se materializó
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL,
+  enviado_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_briefs_estado    ON briefs(estado);
+CREATE INDEX IF NOT EXISTS idx_briefs_wa        ON briefs(cliente_wa_id);
+CREATE INDEX IF NOT EXISTS idx_briefs_comercial ON briefs(comercial_id);
+CREATE INDEX IF NOT EXISTS idx_briefs_disenador ON briefs(disenador_id);
+CREATE INDEX IF NOT EXISTS idx_briefs_updated   ON briefs(updated_at);
+
+-- Hilo interno por brief (reemplaza grupo WhatsApp interno).
+-- Para fase 3, ya queda el esqueleto.
+CREATE TABLE IF NOT EXISTS brief_messages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  brief_id    INTEGER NOT NULL,
+  autor_id    TEXT NOT NULL,                  -- users_panel.id
+  tipo        TEXT NOT NULL,                  -- text | image | render | system
+  contenido   TEXT,                            -- texto o R2 key
+  is_final    INTEGER DEFAULT 0,               -- 1 = render final (el que se adjunta al envío)
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_brief_msg_brief ON brief_messages(brief_id, created_at);
+
+-- Usuarios del panel (comerciales, diseñadores, admin).
+-- Reemplaza el array hardcoded de NO_PASSWORD_USERS en worker.js.
+CREATE TABLE IF NOT EXISTS users_panel (
+  id            TEXT PRIMARY KEY,              -- slug: 'joaco', 'emma', 'gaspar'
+  nombre        TEXT NOT NULL,                 -- display name
+  rol           TEXT NOT NULL,                 -- comercial | disenador | admin
+  password_hash TEXT,                          -- null = entra sin password
+  activo        INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL
+);
+
+-- Seed inicial: equipo actual. Idempotente (INSERT OR IGNORE).
+-- Nuevos usuarios se agregan desde el panel de admin de Gaspar.
+INSERT OR IGNORE INTO users_panel (id, nombre, rol, password_hash, activo, created_at) VALUES
+  ('joaco',  'Joaquín Peiro',     'comercial', NULL, 1, datetime('now')),
+  ('emma',   'Emmanuel Canales',  'disenador', NULL, 1, datetime('now')),
+  ('gaspar', 'Gaspar Martínez',   'admin',     NULL, 1, datetime('now'));
+

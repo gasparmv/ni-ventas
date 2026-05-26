@@ -722,9 +722,18 @@ export default {
       try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
       const { user, password } = body || {};
       if (!user) return json({ error: 'missing fields' }, 400);
-      // Joaquín entra sin contraseña (solo chat); Gaspar necesita password
-      const NO_PASSWORD_USERS = ['Joaquín', 'Joaquin'];
-      if (NO_PASSWORD_USERS.includes(user)) {
+      // Usuarios sin password (lookup en users_panel donde password_hash IS NULL),
+      // más alias legacy ('Joaquín'/'Joaquin') por compatibilidad con sesiones viejas.
+      const NO_PASSWORD_LEGACY = ['Joaquín', 'Joaquin'];
+      const userSlug = String(user).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+      const panelUser = await env.DB.prepare(
+        'SELECT id, password_hash FROM users_panel WHERE id = ? AND activo = 1'
+      ).bind(userSlug).first();
+
+      const isLegacyNoPwd = NO_PASSWORD_LEGACY.includes(user);
+      const isPanelNoPwd  = panelUser && panelUser.password_hash === null;
+
+      if (isLegacyNoPwd || isPanelNoPwd) {
         // ok, sin password
       } else {
         if (!password) return json({ error: 'missing fields' }, 400);
@@ -1863,6 +1872,137 @@ export default {
         }
         if (stmts.length) await env.DB.batch(stmts);
         return noContent();
+      }
+
+      // ============================================================
+      // Briefs (panel de cotización conversacional)
+      // ============================================================
+
+      // GET /admin/briefs?estado=&comercial_id=&disenador_id=&limit=
+      if (request.method === 'GET' && path === '/admin/briefs') {
+        const estado = url.searchParams.get('estado');
+        const comercialId = url.searchParams.get('comercial_id');
+        const disenadorId = url.searchParams.get('disenador_id');
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '500'), 2000);
+        const where = [];
+        const args = [];
+        if (estado)      { where.push('estado = ?');       args.push(estado); }
+        if (comercialId) { where.push('comercial_id = ?'); args.push(comercialId); }
+        if (disenadorId) { where.push('disenador_id = ?'); args.push(disenadorId); }
+        const sql = `SELECT * FROM briefs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY updated_at DESC LIMIT ?`;
+        args.push(limit);
+        const rs = await env.DB.prepare(sql).bind(...args).all();
+        return json({ briefs: rs.results || [] });
+      }
+
+      // GET /admin/briefs/:id  →  detalle + hilo interno
+      if (request.method === 'GET' && /^\/admin\/briefs\/\d+$/.test(path)) {
+        const id = path.split('/').pop();
+        const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(id).first();
+        if (!brief) return json({ error: 'not found' }, 404);
+        const msgs = await env.DB.prepare(
+          'SELECT * FROM brief_messages WHERE brief_id = ? ORDER BY created_at ASC'
+        ).bind(id).all();
+        return json({ brief, messages: msgs.results || [] });
+      }
+
+      // POST /admin/briefs  →  crear
+      if (request.method === 'POST' && path === '/admin/briefs') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const required = ['cliente_wa_id', 'origen_lead', 'comercial_id'];
+        for (const k of required) {
+          if (!body[k]) return json({ error: `missing field: ${k}` }, 400);
+        }
+        const now = new Date().toISOString();
+        const cols = [
+          'cliente_wa_id', 'cliente_nombre', 'origen_lead', 'estado', 'tipo', 'diseno',
+          'alto_cm', 'ancho_cm', 'm2', 'neon_mt',
+          'precio_trans', 'precio_negro', 'precio_final',
+          'descuento', 'recargo', 'reventa', 'comision_joaco',
+          'comercial_id', 'disenador_id', 'notas',
+          'created_at', 'updated_at'
+        ];
+        const vals = [
+          body.cliente_wa_id, body.cliente_nombre || null, body.origen_lead,
+          body.estado || 'nuevo', body.tipo || null, body.diseno || null,
+          body.alto_cm ?? null, body.ancho_cm ?? null, body.m2 ?? null, body.neon_mt ?? null,
+          body.precio_trans ?? null, body.precio_negro ?? null, body.precio_final ?? null,
+          body.descuento ?? 0, body.recargo ?? 0, body.reventa ?? 0, body.comision_joaco ?? 0,
+          body.comercial_id, body.disenador_id || null, body.notas || null,
+          now, now
+        ];
+        const placeholders = cols.map(() => '?').join(',');
+        const result = await env.DB.prepare(
+          `INSERT INTO briefs (${cols.join(',')}) VALUES (${placeholders})`
+        ).bind(...vals).run();
+        const id = result.meta.last_row_id;
+        const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(id).first();
+        return json({ brief }, 201);
+      }
+
+      // PATCH /admin/briefs/:id  →  editar specs / cambiar estado / asignar
+      if (request.method === 'PATCH' && /^\/admin\/briefs\/\d+$/.test(path)) {
+        const id = path.split('/').pop();
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const editable = [
+          'cliente_nombre', 'origen_lead', 'estado', 'tipo', 'diseno',
+          'alto_cm', 'ancho_cm', 'm2', 'neon_mt',
+          'precio_trans', 'precio_negro', 'precio_final',
+          'descuento', 'recargo', 'reventa', 'comision_joaco',
+          'disenador_id', 'intentos_followup', 'notas', 'sheet_row'
+        ];
+        const sets = [];
+        const args = [];
+        for (const k of editable) {
+          if (k in body) { sets.push(`${k} = ?`); args.push(body[k]); }
+        }
+        if (!sets.length) return json({ error: 'nothing to update' }, 400);
+        sets.push('updated_at = ?');
+        args.push(new Date().toISOString());
+        args.push(id);
+        await env.DB.prepare(`UPDATE briefs SET ${sets.join(', ')} WHERE id = ?`).bind(...args).run();
+        const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(id).first();
+        return json({ brief });
+      }
+
+      // POST /admin/briefs/:id/messages  →  agregar mensaje al hilo interno (fase 3)
+      if (request.method === 'POST' && /^\/admin\/briefs\/\d+\/messages$/.test(path)) {
+        const id = path.split('/')[3];
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        if (!body.autor_id || !body.tipo) return json({ error: 'missing fields' }, 400);
+        const now = new Date().toISOString();
+        const result = await env.DB.prepare(
+          'INSERT INTO brief_messages (brief_id, autor_id, tipo, contenido, is_final, created_at) VALUES (?,?,?,?,?,?)'
+        ).bind(id, body.autor_id, body.tipo, body.contenido || null, body.is_final ? 1 : 0, now).run();
+        await env.DB.prepare('UPDATE briefs SET updated_at = ? WHERE id = ?').bind(now, id).run();
+        return json({ id: result.meta.last_row_id }, 201);
+      }
+
+      // POST /admin/briefs/:id/enviar  →  marca brief como enviado.
+      // El envío real al cliente (WhatsApp) y la escritura al Sheet ya las hace
+      // el frontend (cot-send-wa-btn / cot-save-btn en app.js). Este endpoint
+      // solo registra el avance de estado + el sheet_row para trazabilidad.
+      if (request.method === 'POST' && /^\/admin\/briefs\/\d+\/enviar$/.test(path)) {
+        const id = path.split('/')[3];
+        let body = {};
+        try { body = await request.json(); } catch {}
+        const now = new Date().toISOString();
+        await env.DB.prepare(
+          'UPDATE briefs SET estado = ?, enviado_at = ?, updated_at = ?, sheet_row = COALESCE(?, sheet_row), precio_final = COALESCE(?, precio_final) WHERE id = ?'
+        ).bind('enviado', now, now, body.sheet_row ?? null, body.precio_final ?? null, id).run();
+        const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(id).first();
+        return json({ brief });
+      }
+
+      // GET /admin/users-panel  →  lista de usuarios del panel (comerciales/diseñadores/admin)
+      if (request.method === 'GET' && path === '/admin/users-panel') {
+        const rs = await env.DB.prepare(
+          'SELECT id, nombre, rol, activo FROM users_panel WHERE activo = 1 ORDER BY rol, nombre'
+        ).all();
+        return json({ users: rs.results || [] });
       }
 
       return json({ error: 'not found' }, 404);

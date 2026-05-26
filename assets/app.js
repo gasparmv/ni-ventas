@@ -7688,30 +7688,562 @@ if (canAccessChat()) {
   initPollWorker();
 }
 
-// ============ COTIZACIÓN — panel conversacional (en construcción) ============
-// Stub mínimo para que el botón "Cotización" del sidebar no rompa.
-// La implementación real (kanban + briefs + hilo interno) se agrega
-// en próximas iteraciones. Schema D1 (briefs / brief_messages /
-// users_panel) y endpoints del worker (/admin/briefs/*) ya están listos.
-function renderCotizacion() {
+// ============ COTIZACIÓN — panel conversacional ============
+// Kanban de briefs. Cada brief es la unidad de trabajo entre comercial
+// (Joaco) y diseñador (Emma): nace de una conversación de WhatsApp,
+// pasa por estados (nuevo → en_diseno → listo → enviado), y al final
+// se materializa como fila del Sheet "Cotizador Joaco" usando el
+// cotizador existente de la vista Presupuestos.
+//
+// Backend: tabla `briefs` en D1 + endpoints /admin/briefs/* en worker.js.
+// El hilo interno (fase 3) reusa `brief_messages`, todavía no implementado.
+
+const BRIEF_ESTADOS = ['nuevo', 'en_diseno', 'listo', 'enviado', 'colgado', 'cerrado'];
+const BRIEF_COLUMNAS = [
+  { id: 'nuevo',     label: '📥 Nuevos',    color: 'var(--accent-cyan)' },
+  { id: 'en_diseno', label: '🎨 En diseño', color: 'var(--amber, #FFA726)' },
+  { id: 'listo',     label: '✅ Listos',    color: 'var(--green, #25D366)' },
+  { id: 'enviado',   label: '📤 Enviados',  color: 'var(--fg-subtle)' },
+];
+const ORIGEN_LEAD_OPTS = [
+  'Locales Corto', 'El neón', 'Tu logo', 'IG orgánico',
+  'Plantilla msj', 'Recomendación', 'B2B form', 'Otro'
+];
+
+if (typeof STATE.briefs === 'undefined')          STATE.briefs = [];
+if (typeof STATE.briefsLoading === 'undefined')   STATE.briefsLoading = false;
+if (typeof STATE.briefsError === 'undefined')     STATE.briefsError = null;
+if (typeof STATE.briefSelected === 'undefined')   STATE.briefSelected = null;
+if (typeof STATE.briefDraft === 'undefined')      STATE.briefDraft = null;
+if (typeof STATE.usersPanel === 'undefined')      STATE.usersPanel = null;
+
+async function fetchBriefs() {
+  if (!CONFIG.trackerUrl || !STATE.token) return;
+  STATE.briefsLoading = true;
+  try {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs?limit=500`, {
+      headers: { Authorization: `Bearer ${STATE.token}` }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    STATE.briefs = data.briefs || [];
+    STATE.briefsError = null;
+  } catch (e) {
+    STATE.briefsError = e.message || 'error';
+  } finally {
+    STATE.briefsLoading = false;
+  }
+}
+
+async function fetchUsersPanel() {
+  if (STATE.usersPanel) return STATE.usersPanel;
+  if (!CONFIG.trackerUrl || !STATE.token) {
+    STATE.usersPanel = [
+      { id: 'joaco',  nombre: 'Joaquín Peiro',    rol: 'comercial' },
+      { id: 'emma',   nombre: 'Emmanuel Canales', rol: 'disenador' },
+      { id: 'gaspar', nombre: 'Gaspar Martínez',  rol: 'admin' },
+    ];
+    return STATE.usersPanel;
+  }
+  try {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/users-panel`, {
+      headers: { Authorization: `Bearer ${STATE.token}` }
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    STATE.usersPanel = data.users || [];
+  } catch (e) {
+    STATE.usersPanel = [
+      { id: 'joaco',  nombre: 'Joaquín Peiro',    rol: 'comercial' },
+      { id: 'emma',   nombre: 'Emmanuel Canales', rol: 'disenador' },
+      { id: 'gaspar', nombre: 'Gaspar Martínez',  rol: 'admin' },
+    ];
+  }
+  return STATE.usersPanel;
+}
+
+async function saveBrief(data) {
+  const isCreate = !data.id;
+  const url = isCreate
+    ? `${CONFIG.trackerUrl}/admin/briefs`
+    : `${CONFIG.trackerUrl}/admin/briefs/${data.id}`;
+  const method = isCreate ? 'POST' : 'PATCH';
+  const body = { ...data };
+  delete body.id;
+  const r = await fetch(url, {
+    method,
+    headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error('save failed: HTTP ' + r.status);
+  const result = await r.json();
+  return result.brief;
+}
+
+async function marcarBriefEnviado(id, extra = {}) {
+  const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${id}/enviar`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(extra)
+  });
+  if (!r.ok) throw new Error('enviar failed: HTTP ' + r.status);
+  return (await r.json()).brief;
+}
+
+// Tiempo relativo "hace X" para el badge SLA en cada tarjeta.
+function relativeTime(iso) {
+  if (!iso) return '';
+  const diff = Date.now() - Date.parse(iso);
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'recién';
+  if (mins < 60) return `hace ${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `hace ${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `hace ${days}d`;
+}
+
+function isBriefStale(b) {
+  // Regla de cerebro 6.4: tiempo de respuesta importa. Estado activo sin
+  // mover +24h = badge rojo. Enviado sin respuesta +7d = colgado (auto).
+  if (b.estado === 'enviado' || b.estado === 'cerrado') return false;
+  const last = Date.parse(b.updated_at);
+  return (Date.now() - last) > 24 * 60 * 60 * 1000;
+}
+
+function renderBriefCard(b) {
+  const stale = isBriefStale(b);
+  const u = (STATE.usersPanel || []);
+  const dis = b.disenador_id ? (u.find(x => x.id === b.disenador_id)?.nombre || b.disenador_id) : null;
+  const com = b.comercial_id ? (u.find(x => x.id === b.comercial_id)?.nombre || b.comercial_id) : null;
+  const medidas = (b.alto_cm && b.ancho_cm) ? `${Math.round(b.ancho_cm)}×${Math.round(b.alto_cm)}` : '—';
+  const precio = b.precio_final ? fmtMoney(b.precio_final) : '—';
+  const intentos = b.intentos_followup || 0;
   return `
-    <div style="max-width:720px;margin:0 auto;padding:var(--s-6) var(--s-4)">
-      <div style="text-align:center;padding:var(--s-6);background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-md)">
-        <div style="font-size:48px;margin-bottom:var(--s-3)">🚧</div>
-        <h2 style="margin:0 0 var(--s-2)">Panel de cotización conversacional</h2>
-        <p class="muted" style="margin:0 0 var(--s-3);font-size:14px">En construcción.</p>
-        <p class="muted" style="margin:0;font-size:13px;line-height:1.5">
-          Próximamente vas a ver acá un kanban con los briefs en curso:<br>
-          📥 Nuevos · 🎨 En diseño · ✅ Listos · 🟡 Colgados
-        </p>
-        <p class="muted" style="margin-top:var(--s-4);font-size:12px;opacity:.7">
-          Mientras tanto, seguí cotizando desde la vista <b>Presupuestos</b>.
-        </p>
+    <div class="brief-card ${stale ? 'brief-card--stale' : ''}" data-brief-id="${b.id}"
+         style="background:var(--ink-100);border:1px solid ${stale ? 'rgba(255,24,48,.35)' : 'var(--border)'};border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:6px;margin-bottom:6px">
+        <div style="font-weight:600;font-size:13px;line-height:1.3;flex:1;min-width:0">
+          ${escapeHtml(b.cliente_nombre || 'Sin nombre')}
+        </div>
+        ${stale ? '<span class="pill" style="background:rgba(255,24,48,.15);color:#FF5566;font-size:9px;padding:1px 5px;border-radius:3px">SLA</span>' : ''}
+      </div>
+      <div style="font-size:11px;color:var(--fg-subtle);margin-bottom:6px">
+        ${b.diseno ? escapeHtml(b.diseno) + ' · ' : ''}${medidas} ${b.tipo ? '· ' + b.tipo : ''}
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--fg-mute, rgba(233,237,239,.4))">
+        <div style="display:flex;gap:6px;align-items:center">
+          ${dis ? `<span title="Diseñador">🎨 ${escapeHtml(dis.split(' ')[0])}</span>` : ''}
+          ${intentos > 0 ? `<span title="Intentos de seguimiento (regla 12 pts)">↻ ${intentos}/12</span>` : ''}
+        </div>
+        <div>${relativeTime(b.updated_at)}</div>
+      </div>
+      ${b.precio_final ? `<div style="margin-top:6px;font-family:ui-monospace,monospace;font-size:12px;color:var(--accent-cyan)">${precio}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderBriefColumn(col) {
+  const briefs = STATE.briefs.filter(b => b.estado === col.id);
+  return `
+    <div class="brief-col" data-col="${col.id}" style="flex:1;min-width:240px;background:var(--ink-050,#0f0f15);border:1px solid var(--border);border-radius:var(--r-md);padding:var(--s-2);display:flex;flex-direction:column">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2);padding:0 4px">
+        <span style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${col.color}">
+          ${col.label}
+        </span>
+        <span style="font-size:11px;color:var(--fg-mute);font-family:ui-monospace,monospace">${briefs.length}</span>
+      </div>
+      <div class="brief-col-list" style="flex:1;overflow-y:auto;max-height:calc(100vh - 220px)">
+        ${briefs.length ? briefs.map(renderBriefCard).join('') : '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-4)">—</div>'}
       </div>
     </div>
   `;
 }
-function bindCotizacion() { /* nada por ahora */ }
+
+function renderBriefDrawer() {
+  if (!STATE.briefSelected && !STATE.briefDraft) return '';
+  const isNew = !STATE.briefSelected;
+  const data = isNew ? STATE.briefDraft : (STATE.briefDraft || STATE.briefs.find(b => b.id === STATE.briefSelected) || {});
+  const users = STATE.usersPanel || [];
+  const comerciales = users.filter(u => u.rol === 'comercial' || u.rol === 'admin');
+  const disenadores = users.filter(u => u.rol === 'disenador');
+
+  // Cotización en vivo a partir de los inputs.
+  const cotInput = {
+    ancho: data.ancho_cm || 0,
+    alto:  data.alto_cm  || 0,
+    neon:  data.neon_mt  || 0,
+    tipo:  data.tipo     || 'INT',
+  };
+  let cot = null;
+  try { if (cotInput.ancho && cotInput.alto) cot = calcCotizador(cotInput); } catch(e) {}
+
+  return `
+    <div class="brief-drawer-backdrop" id="brief-drawer-backdrop"
+         style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:90"></div>
+    <aside class="brief-drawer" id="brief-drawer"
+           style="position:fixed;top:0;right:0;bottom:0;width:min(560px,100vw);background:var(--bg, #0A0A0F);border-left:1px solid var(--border);z-index:100;overflow-y:auto;padding:var(--s-4)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);position:sticky;top:0;background:var(--bg);padding-bottom:var(--s-2);border-bottom:1px solid var(--border);z-index:1">
+        <h2 style="margin:0;font-size:16px">${isNew ? '➕ Nuevo brief' : '📋 Brief #' + data.id}</h2>
+        <button class="btn btn-ghost btn-icon" id="brief-close" aria-label="Cerrar">✕</button>
+      </div>
+
+      <div style="display:grid;gap:var(--s-3)">
+
+        <!-- Cliente -->
+        <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
+          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Cliente</legend>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Nombre</label>
+          <input type="text" data-bf="cliente_nombre" value="${escapeHtml(data.cliente_nombre || '')}"
+                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);margin-bottom:var(--s-2)">
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">WhatsApp (E.164 sin +) <span style="color:#FF5566">*</span></label>
+          <input type="text" data-bf="cliente_wa_id" value="${escapeHtml(data.cliente_wa_id || '')}" placeholder="5491143366573"
+                 ${!isNew ? 'readonly' : ''}
+                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);margin-bottom:var(--s-2);${!isNew ? 'opacity:.6' : ''}">
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Origen del lead <span style="color:#FF5566">*</span></label>
+          <select data-bf="origen_lead" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+            <option value="">— Elegí origen —</option>
+            ${ORIGEN_LEAD_OPTS.map(o => `<option value="${o}" ${data.origen_lead === o ? 'selected' : ''}>${o}</option>`).join('')}
+          </select>
+        </fieldset>
+
+        <!-- Specs -->
+        <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
+          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Specs</legend>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Diseño</label>
+          <input type="text" data-bf="diseno" value="${escapeHtml(data.diseno || '')}" placeholder="ej. ALHAMBRA, logo VS, etc."
+                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);margin-bottom:var(--s-2)">
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
+            <div>
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho (cm)</label>
+              <input type="number" step="1" data-bf="ancho_cm" value="${data.ancho_cm || ''}"
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+            </div>
+            <div>
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Alto (cm)</label>
+              <input type="number" step="1" data-bf="alto_cm" value="${data.alto_cm || ''}"
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+            </div>
+            <div>
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Neón (mt)</label>
+              <input type="number" step="0.1" data-bf="neon_mt" value="${data.neon_mt || ''}"
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+            </div>
+          </div>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Tipo</label>
+          <div style="display:flex;gap:8px">
+            <label style="flex:1;cursor:pointer">
+              <input type="radio" name="brief-tipo" data-bf-radio="tipo" value="INT" ${(data.tipo || 'INT') === 'INT' ? 'checked' : ''} style="margin-right:4px">
+              Interior
+            </label>
+            <label style="flex:1;cursor:pointer">
+              <input type="radio" name="brief-tipo" data-bf-radio="tipo" value="EXT" ${data.tipo === 'EXT' ? 'checked' : ''} style="margin-right:4px">
+              Exterior
+            </label>
+          </div>
+        </fieldset>
+
+        <!-- Cotización en vivo -->
+        ${cot ? `
+        <fieldset style="border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:var(--s-3);background:rgba(143,212,222,.04)">
+          <legend style="font-size:11px;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Cotización (en vivo)</legend>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:13px">
+            <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${cot.m2.toFixed(2)}</b></div>
+            <div><span style="color:var(--fg-subtle);font-size:11px">Reventa</span><br><b>${fmtMoney(cot.reventa)}</b></div>
+            <div><span style="color:var(--fg-subtle);font-size:11px">Transparente</span><br><b style="color:var(--accent-cyan)">${fmtMoney(cot.transFinal)}</b></div>
+            <div><span style="color:var(--fg-subtle);font-size:11px">Negro</span><br><b style="color:var(--accent-cyan)">${fmtMoney(cot.negroFinal)}</b></div>
+          </div>
+          <div style="margin-top:8px;font-size:11px;color:var(--fg-mute)">
+            Comisión Joaco: ${fmtMoney(cot.comision)}
+          </div>
+        </fieldset>
+        ` : '<div class="muted" style="font-size:12px;text-align:center;padding:var(--s-2)">Completá ancho y alto para ver la cotización.</div>'}
+
+        <!-- Asignación y estado -->
+        <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
+          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Asignación</legend>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
+            <div>
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Comercial</label>
+              <select data-bf="comercial_id" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+                ${comerciales.map(u => `<option value="${u.id}" ${data.comercial_id === u.id ? 'selected' : ''}>${escapeHtml(u.nombre)}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Diseñador</label>
+              <select data-bf="disenador_id" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+                <option value="">— Sin asignar —</option>
+                ${disenadores.map(u => `<option value="${u.id}" ${data.disenador_id === u.id ? 'selected' : ''}>${escapeHtml(u.nombre)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Estado</label>
+          <select data-bf="estado" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+            ${BRIEF_ESTADOS.map(e => `<option value="${e}" ${(data.estado || 'nuevo') === e ? 'selected' : ''}>${e.replace('_',' ')}</option>`).join('')}
+          </select>
+        </fieldset>
+
+        <!-- Notas -->
+        <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
+          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Notas internas</legend>
+          <textarea data-bf="notas" rows="3" placeholder="referencia, cambios pedidos, etc."
+                    style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical">${escapeHtml(data.notas || '')}</textarea>
+        </fieldset>
+
+        <!-- Acciones -->
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;padding-bottom:var(--s-4)">
+          ${!isNew ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir en Cotizador</button>` : ''}
+          ${!isNew && data.estado !== 'enviado' ? `<button class="btn btn-ghost" id="brief-enviar">✓ Marcar como enviado</button>` : ''}
+          <button class="btn btn-cyan" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>
+        </div>
+      </div>
+    </aside>
+  `;
+}
+
+function renderCotizacion() {
+  // Disparar carga si no hay datos.
+  if (!STATE.token) {
+    return `
+      <div style="max-width:540px;margin:var(--s-6) auto;padding:var(--s-4);text-align:center">
+        <div style="font-size:32px;margin-bottom:var(--s-2)">🔒</div>
+        <p>Iniciá sesión para ver el panel de cotización.</p>
+      </div>
+    `;
+  }
+  const headerActions = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3)">
+      <div>
+        <h2 style="margin:0;font-size:18px">◆ Cotización</h2>
+        <p class="muted" style="margin:2px 0 0;font-size:12px">Briefs en curso · ${STATE.briefs.length} total</p>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" id="briefs-refresh" title="Refrescar">↻</button>
+        <button class="btn btn-cyan" id="brief-new">+ Nuevo brief</button>
+      </div>
+    </div>
+  `;
+
+  if (STATE.briefsLoading && !STATE.briefs.length) {
+    return `<div style="padding:var(--s-4)">${headerActions}<div class="muted" style="text-align:center;padding:var(--s-4)">Cargando briefs…</div></div>`;
+  }
+  if (STATE.briefsError) {
+    return `<div style="padding:var(--s-4)">${headerActions}<div style="padding:var(--s-3);background:rgba(255,24,48,.08);border:1px solid rgba(255,24,48,.3);border-radius:var(--r-sm);color:#FF5566">Error: ${escapeHtml(STATE.briefsError)}<br><span style="font-size:11px;opacity:.7">¿Falta aplicar la migración 001_briefs.sql al worker?</span></div></div>`;
+  }
+
+  return `
+    <div style="padding:var(--s-4);min-height:100%">
+      ${headerActions}
+      <div class="brief-kanban" style="display:flex;gap:var(--s-3);overflow-x:auto;padding-bottom:var(--s-2)">
+        ${BRIEF_COLUMNAS.map(renderBriefColumn).join('')}
+      </div>
+      ${renderBriefDrawer()}
+    </div>
+  `;
+}
+
+function openBriefDrawer(id) {
+  STATE.briefSelected = id;
+  STATE.briefDraft = null;
+  render();
+}
+
+function openBriefDraft() {
+  STATE.briefSelected = null;
+  STATE.briefDraft = {
+    cliente_nombre: '',
+    cliente_wa_id: '',
+    origen_lead: '',
+    estado: 'nuevo',
+    tipo: 'INT',
+    diseno: '',
+    ancho_cm: '',
+    alto_cm: '',
+    neon_mt: '',
+    comercial_id: 'joaco',
+    disenador_id: '',
+    notas: ''
+  };
+  render();
+}
+
+function closeBriefDrawer() {
+  STATE.briefSelected = null;
+  STATE.briefDraft = null;
+  render();
+}
+
+function readBriefDrawerForm() {
+  const out = {};
+  document.querySelectorAll('[data-bf]').forEach(el => {
+    const k = el.dataset.bf;
+    let v = el.value;
+    if (['alto_cm', 'ancho_cm', 'neon_mt'].includes(k)) v = v === '' ? null : Number(v);
+    out[k] = v === '' ? null : v;
+  });
+  const tipoEl = document.querySelector('[data-bf-radio="tipo"]:checked');
+  if (tipoEl) out.tipo = tipoEl.value;
+  return out;
+}
+
+async function handleBriefSave() {
+  const form = readBriefDrawerForm();
+  const isCreate = !STATE.briefSelected;
+  if (isCreate) {
+    if (!form.cliente_wa_id) { alert('Falta el WhatsApp del cliente.'); return; }
+    if (!form.origen_lead)   { alert('El origen del lead es obligatorio.'); return; }
+    if (!form.comercial_id)  { alert('Falta el comercial.'); return; }
+  } else {
+    form.id = STATE.briefSelected;
+  }
+
+  // Sumar cotización calculada al payload (precio final = trans, redondeable después).
+  try {
+    if (form.ancho_cm && form.alto_cm) {
+      const c = calcCotizador({ ancho: form.ancho_cm, alto: form.alto_cm, neon: form.neon_mt || 0, tipo: form.tipo || 'INT' });
+      form.m2 = c.m2;
+      form.precio_trans = c.transFinal;
+      form.precio_negro = c.negroFinal;
+      form.reventa = c.reventa;
+      form.comision_joaco = c.comision;
+      form.descuento = c.descuento || 0;
+      form.recargo = c.recargo || 0;
+      // precio_final lo deja en null hasta que se marque enviado o se elija manualmente.
+    }
+  } catch (e) {}
+
+  try {
+    const saved = await saveBrief(form);
+    if (isCreate) {
+      STATE.briefs.unshift(saved);
+    } else {
+      const i = STATE.briefs.findIndex(b => b.id === saved.id);
+      if (i >= 0) STATE.briefs[i] = saved;
+    }
+    closeBriefDrawer();
+  } catch (e) {
+    alert('Error al guardar: ' + e.message);
+  }
+}
+
+async function handleBriefEnviar() {
+  if (!STATE.briefSelected) return;
+  const brief = STATE.briefs.find(b => b.id === STATE.briefSelected);
+  if (!brief) return;
+  if (!confirm('Marcar este brief como enviado al cliente?')) return;
+  try {
+    const updated = await marcarBriefEnviado(brief.id, { precio_final: brief.precio_trans });
+    const i = STATE.briefs.findIndex(b => b.id === updated.id);
+    if (i >= 0) STATE.briefs[i] = updated;
+    closeBriefDrawer();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+function handleBriefAbrirCotizador() {
+  if (!STATE.briefSelected) return;
+  const b = STATE.briefs.find(x => x.id === STATE.briefSelected);
+  if (!b) return;
+  // Pre-cargar el cotizador de Presupuestos con los datos del brief.
+  STATE.cotizadorForm = {
+    ancho: b.ancho_cm || '',
+    alto:  b.alto_cm  || '',
+    neon:  b.neon_mt  || '',
+    tipo:  b.tipo     || 'INT',
+    cliente: b.cliente_nombre || b.diseno || '',
+    canal: 'WPP',
+    telefono: b.cliente_wa_id || '',
+    textoOverride: '',
+    extraCarteles: []
+  };
+  if (typeof pptoShowCotizador !== 'undefined') pptoShowCotizador = true;
+  closeBriefDrawer();
+  setView('presupuestos');
+}
+
+function bindCotizacion() {
+  if (!STATE.token) return;
+
+  // Carga inicial.
+  if (!STATE.briefs.length && !STATE.briefsLoading && !STATE.briefsError) {
+    Promise.all([fetchBriefs(), fetchUsersPanel()]).then(() => render());
+  } else if (!STATE.usersPanel) {
+    fetchUsersPanel().then(() => render());
+  }
+
+  // Header.
+  const newBtn = document.getElementById('brief-new');
+  if (newBtn) newBtn.onclick = openBriefDraft;
+  const refreshBtn = document.getElementById('briefs-refresh');
+  if (refreshBtn) refreshBtn.onclick = () => fetchBriefs().then(() => render());
+
+  // Tarjetas → abrir drawer.
+  document.querySelectorAll('.brief-card').forEach(el => {
+    el.onclick = () => openBriefDrawer(parseInt(el.dataset.briefId, 10));
+  });
+
+  // Drawer.
+  const closeBtn = document.getElementById('brief-close');
+  if (closeBtn) closeBtn.onclick = closeBriefDrawer;
+  const backdrop = document.getElementById('brief-drawer-backdrop');
+  if (backdrop) backdrop.onclick = closeBriefDrawer;
+  const saveBtn = document.getElementById('brief-save');
+  if (saveBtn) saveBtn.onclick = handleBriefSave;
+  const enviarBtn = document.getElementById('brief-enviar');
+  if (enviarBtn) enviarBtn.onclick = handleBriefEnviar;
+  const cotBtn = document.getElementById('brief-cotizar');
+  if (cotBtn) cotBtn.onclick = handleBriefAbrirCotizador;
+
+  // Re-render del bloque de cotización en vivo al tipear ancho/alto/neón/tipo.
+  document.querySelectorAll('[data-bf="ancho_cm"], [data-bf="alto_cm"], [data-bf="neon_mt"]').forEach(el => {
+    el.oninput = () => {
+      const form = readBriefDrawerForm();
+      // No re-renderizamos todo (perdería foco), solo recalculamos.
+      // Pequeño hack: actualizar el fieldset de cotización in-place.
+      const isNum = (k) => ['ancho_cm','alto_cm','neon_mt'].includes(k);
+      const draft = isNum ? null : null;
+      const cotInput = { ancho: form.ancho_cm || 0, alto: form.alto_cm || 0, neon: form.neon_mt || 0, tipo: form.tipo || 'INT' };
+      try {
+        if (cotInput.ancho && cotInput.alto) {
+          const c = calcCotizador(cotInput);
+          updateBriefCotPreview(c);
+        }
+      } catch(e) {}
+    };
+  });
+  document.querySelectorAll('[data-bf-radio="tipo"]').forEach(el => {
+    el.onchange = () => {
+      const form = readBriefDrawerForm();
+      const cotInput = { ancho: form.ancho_cm || 0, alto: form.alto_cm || 0, neon: form.neon_mt || 0, tipo: form.tipo || 'INT' };
+      try {
+        if (cotInput.ancho && cotInput.alto) updateBriefCotPreview(calcCotizador(cotInput));
+      } catch(e) {}
+    };
+  });
+}
+
+function updateBriefCotPreview(c) {
+  // Reemplaza el fieldset de cotización con los nuevos valores, sin re-renderizar
+  // el drawer entero (preserva foco de los inputs).
+  const drawer = document.getElementById('brief-drawer');
+  if (!drawer) return;
+  const fieldsets = drawer.querySelectorAll('fieldset');
+  // El de cotización es el 3ro (Cliente, Specs, Cotización).
+  // Si no hay cotización (m² 0), no hace falta tocar.
+  const cotFs = Array.from(fieldsets).find(f => f.querySelector('legend')?.textContent.includes('Cotización'));
+  if (!cotFs) return;
+  cotFs.innerHTML = `
+    <legend style="font-size:11px;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Cotización (en vivo)</legend>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:13px">
+      <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${c.m2.toFixed(2)}</b></div>
+      <div><span style="color:var(--fg-subtle);font-size:11px">Reventa</span><br><b>${fmtMoney(c.reventa)}</b></div>
+      <div><span style="color:var(--fg-subtle);font-size:11px">Transparente</span><br><b style="color:var(--accent-cyan)">${fmtMoney(c.transFinal)}</b></div>
+      <div><span style="color:var(--fg-subtle);font-size:11px">Negro</span><br><b style="color:var(--accent-cyan)">${fmtMoney(c.negroFinal)}</b></div>
+    </div>
+    <div style="margin-top:8px;font-size:11px;color:var(--fg-mute)">Comisión Joaco: ${fmtMoney(c.comision)}</div>
+  `;
+}
 
 // Re-bind table when pedidos view rendered after data loads
 function rerenderTablePedidosIfNeeded() { if (STATE.view === 'pedidos') renderTablePedidos(); }
