@@ -1895,7 +1895,7 @@ export default {
         return json({ briefs: rs.results || [] });
       }
 
-      // GET /admin/briefs/:id  →  detalle + hilo interno
+      // GET /admin/briefs/:id  →  detalle + hilo interno + imágenes
       if (request.method === 'GET' && /^\/admin\/briefs\/\d+$/.test(path)) {
         const id = path.split('/').pop();
         const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(id).first();
@@ -1903,33 +1903,35 @@ export default {
         const msgs = await env.DB.prepare(
           'SELECT * FROM brief_messages WHERE brief_id = ? ORDER BY created_at ASC'
         ).bind(id).all();
-        return json({ brief, messages: msgs.results || [] });
+        const imgs = await env.DB.prepare(
+          'SELECT * FROM brief_imagenes WHERE brief_id = ? ORDER BY orden ASC, id ASC'
+        ).bind(id).all();
+        return json({ brief, messages: msgs.results || [], imagenes: imgs.results || [] });
       }
 
-      // POST /admin/briefs  →  crear
+      // POST /admin/briefs  →  crear (form simplificado: solo titulo es virtualmente obligatorio)
       if (request.method === 'POST' && path === '/admin/briefs') {
         let body;
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        const required = ['cliente_wa_id', 'origen_lead', 'comercial_id'];
-        for (const k of required) {
-          if (!body[k]) return json({ error: `missing field: ${k}` }, 400);
-        }
+        // Comercial siempre joaco por default (equipo actual: solo Joaco + Emma).
+        const comercial_id = body.comercial_id || 'joaco';
         const now = new Date().toISOString();
         const cols = [
           'cliente_wa_id', 'cliente_nombre', 'origen_lead', 'estado', 'tipo', 'diseno',
-          'alto_cm', 'ancho_cm', 'm2', 'neon_mt',
+          'alto_cm', 'ancho_cm', 'm2', 'neon_mt', 'medidas_libre',
           'precio_trans', 'precio_negro', 'precio_final',
           'descuento', 'recargo', 'reventa', 'comision_joaco',
           'comercial_id', 'disenador_id', 'notas',
           'created_at', 'updated_at'
         ];
         const vals = [
-          body.cliente_wa_id, body.cliente_nombre || null, body.origen_lead,
+          body.cliente_wa_id || '', body.cliente_nombre || null, body.origen_lead || '',
           body.estado || 'nuevo', body.tipo || null, body.diseno || null,
           body.alto_cm ?? null, body.ancho_cm ?? null, body.m2 ?? null, body.neon_mt ?? null,
+          body.medidas_libre || null,
           body.precio_trans ?? null, body.precio_negro ?? null, body.precio_final ?? null,
           body.descuento ?? 0, body.recargo ?? 0, body.reventa ?? 0, body.comision_joaco ?? 0,
-          body.comercial_id, body.disenador_id || null, body.notas || null,
+          comercial_id, body.disenador_id || null, body.notas || null,
           now, now
         ];
         const placeholders = cols.map(() => '?').join(',');
@@ -1947,8 +1949,8 @@ export default {
         let body;
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const editable = [
-          'cliente_nombre', 'origen_lead', 'estado', 'tipo', 'diseno',
-          'alto_cm', 'ancho_cm', 'm2', 'neon_mt',
+          'cliente_nombre', 'cliente_wa_id', 'origen_lead', 'estado', 'tipo', 'diseno',
+          'alto_cm', 'ancho_cm', 'm2', 'neon_mt', 'medidas_libre',
           'precio_trans', 'precio_negro', 'precio_final',
           'descuento', 'recargo', 'reventa', 'comision_joaco',
           'disenador_id', 'intentos_followup', 'notas', 'sheet_row'
@@ -1995,6 +1997,67 @@ export default {
         ).bind('enviado', now, now, body.sheet_row ?? null, body.precio_final ?? null, id).run();
         const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(id).first();
         return json({ brief });
+      }
+
+      // PUT /admin/briefs/:id/imagen  →  sube imagen a R2 + inserta brief_imagenes.
+      // Body: bytes raw del archivo. Headers: Content-Type: image/png|jpeg|webp|etc.
+      // Devuelve { id, r2_key, content_type, size_bytes, orden, created_at }.
+      if (request.method === 'PUT' && /^\/admin\/briefs\/\d+\/imagen$/.test(path)) {
+        const briefId = path.split('/')[3];
+        if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+        const ct = request.headers.get('content-type') || 'application/octet-stream';
+        if (!ct.startsWith('image/')) return json({ error: 'only image/* content-type allowed' }, 400);
+
+        const buf = await request.arrayBuffer();
+        if (!buf || buf.byteLength === 0) return json({ error: 'empty body' }, 400);
+        if (buf.byteLength > 10 * 1024 * 1024) return json({ error: 'image too large (>10MB)' }, 413);
+
+        // Validar que el brief exista (FK lógica).
+        const brief = await env.DB.prepare('SELECT id FROM briefs WHERE id = ?').bind(briefId).first();
+        if (!brief) return json({ error: 'brief not found' }, 404);
+
+        const ext = (ct.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'bin';
+        const r2Key = `briefs/${briefId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        try {
+          await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: ct } });
+        } catch (e) {
+          return json({ error: 'r2 put failed: ' + e.message }, 500);
+        }
+
+        // Orden = max(orden) + 1 dentro del brief.
+        const ordRow = await env.DB.prepare(
+          'SELECT COALESCE(MAX(orden), -1) + 1 AS next_ord FROM brief_imagenes WHERE brief_id = ?'
+        ).bind(briefId).first();
+        const orden = ordRow?.next_ord ?? 0;
+        const now = new Date().toISOString();
+        const result = await env.DB.prepare(
+          'INSERT INTO brief_imagenes (brief_id, r2_key, content_type, size_bytes, orden, created_at) VALUES (?,?,?,?,?,?)'
+        ).bind(briefId, r2Key, ct, buf.byteLength, orden, now).run();
+        await env.DB.prepare('UPDATE briefs SET updated_at = ? WHERE id = ?').bind(now, briefId).run();
+        return json({
+          id: result.meta.last_row_id,
+          brief_id: parseInt(briefId, 10),
+          r2_key: r2Key,
+          content_type: ct,
+          size_bytes: buf.byteLength,
+          orden,
+          created_at: now
+        }, 201);
+      }
+
+      // DELETE /admin/briefs/:id/imagen/:imgId  →  borra de R2 + DB.
+      if (request.method === 'DELETE' && /^\/admin\/briefs\/\d+\/imagen\/\d+$/.test(path)) {
+        const parts = path.split('/');
+        const briefId = parts[3];
+        const imgId = parts[5];
+        const row = await env.DB.prepare(
+          'SELECT r2_key FROM brief_imagenes WHERE id = ? AND brief_id = ?'
+        ).bind(imgId, briefId).first();
+        if (!row) return json({ error: 'not found' }, 404);
+        try { if (env.MEDIA) await env.MEDIA.delete(row.r2_key); } catch (e) { /* ignorar fallos de R2 */ }
+        await env.DB.prepare('DELETE FROM brief_imagenes WHERE id = ?').bind(imgId).run();
+        await env.DB.prepare('UPDATE briefs SET updated_at = ? WHERE id = ?').bind(new Date().toISOString(), briefId).run();
+        return noContent();
       }
 
       // GET /admin/users-panel  →  lista de usuarios del panel (comerciales/diseñadores/admin)

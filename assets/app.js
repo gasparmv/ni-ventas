@@ -7698,16 +7698,12 @@ if (canAccessChat()) {
 // Backend: tabla `briefs` en D1 + endpoints /admin/briefs/* en worker.js.
 // El hilo interno (fase 3) reusa `brief_messages`, todavía no implementado.
 
-const BRIEF_ESTADOS = ['nuevo', 'en_diseno', 'listo', 'enviado', 'colgado', 'cerrado'];
+const BRIEF_ESTADOS = ['nuevo', 'listo', 'enviado', 'colgado'];
 const BRIEF_COLUMNAS = [
-  { id: 'nuevo',     label: '📥 Nuevos',    color: 'var(--accent-cyan)' },
-  { id: 'en_diseno', label: '🎨 En diseño', color: 'var(--amber, #FFA726)' },
-  { id: 'listo',     label: '✅ Listos',    color: 'var(--green, #25D366)' },
-  { id: 'enviado',   label: '📤 Enviados',  color: 'var(--fg-subtle)' },
-];
-const ORIGEN_LEAD_OPTS = [
-  'Locales Corto', 'El neón', 'Tu logo', 'IG orgánico',
-  'Plantilla msj', 'Recomendación', 'B2B form', 'Otro'
+  { id: 'nuevo',   label: '📥 Nuevos',   color: 'var(--accent-cyan)' },
+  { id: 'listo',   label: '✅ Listos',   color: 'var(--green, #25D366)' },
+  { id: 'enviado', label: '📤 Enviados', color: 'var(--fg-subtle)' },
+  { id: 'colgado', label: '🟡 Colgados', color: 'var(--amber, #FFA726)' },
 ];
 
 if (typeof STATE.briefs === 'undefined')          STATE.briefs = [];
@@ -7716,7 +7712,9 @@ if (typeof STATE.briefsLoaded === 'undefined')    STATE.briefsLoaded = false;
 if (typeof STATE.briefsError === 'undefined')     STATE.briefsError = null;
 if (typeof STATE.briefSelected === 'undefined')   STATE.briefSelected = null;
 if (typeof STATE.briefDraft === 'undefined')      STATE.briefDraft = null;
-if (typeof STATE.usersPanel === 'undefined')      STATE.usersPanel = null;
+if (typeof STATE.briefDraftImages === 'undefined') STATE.briefDraftImages = []; // blobs pre-creación
+if (typeof STATE.briefDetailImages === 'undefined') STATE.briefDetailImages = []; // imágenes ya en R2 del brief abierto
+if (typeof STATE.briefDetailLoading === 'undefined') STATE.briefDetailLoading = false;
 
 async function fetchBriefs() {
   if (!CONFIG.trackerUrl || !STATE.token) return;
@@ -7737,31 +7735,43 @@ async function fetchBriefs() {
   }
 }
 
-async function fetchUsersPanel() {
-  if (STATE.usersPanel) return STATE.usersPanel;
-  if (!CONFIG.trackerUrl || !STATE.token) {
-    STATE.usersPanel = [
-      { id: 'joaco',  nombre: 'Joaquín Peiro',    rol: 'comercial' },
-      { id: 'emma',   nombre: 'Emmanuel Canales', rol: 'disenador' },
-      { id: 'gaspar', nombre: 'Gaspar Martínez',  rol: 'admin' },
-    ];
-    return STATE.usersPanel;
-  }
+async function fetchBriefDetail(id) {
+  if (!CONFIG.trackerUrl || !STATE.token) return null;
+  STATE.briefDetailLoading = true;
   try {
-    const r = await fetch(`${CONFIG.trackerUrl}/admin/users-panel`, {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${id}`, {
       headers: { Authorization: `Bearer ${STATE.token}` }
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
-    STATE.usersPanel = data.users || [];
+    STATE.briefDetailImages = data.imagenes || [];
+    // Sync el brief en la lista por si tiene cambios.
+    const i = STATE.briefs.findIndex(b => b.id === data.brief.id);
+    if (i >= 0) STATE.briefs[i] = data.brief;
+    return data;
   } catch (e) {
-    STATE.usersPanel = [
-      { id: 'joaco',  nombre: 'Joaquín Peiro',    rol: 'comercial' },
-      { id: 'emma',   nombre: 'Emmanuel Canales', rol: 'disenador' },
-      { id: 'gaspar', nombre: 'Gaspar Martínez',  rol: 'admin' },
-    ];
+    return null;
+  } finally {
+    STATE.briefDetailLoading = false;
   }
-  return STATE.usersPanel;
+}
+
+async function uploadBriefImage(briefId, blob, contentType) {
+  const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/imagen`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': contentType },
+    body: blob
+  });
+  if (!r.ok) throw new Error('upload failed: HTTP ' + r.status);
+  return r.json();
+}
+
+async function deleteBriefImage(briefId, imgId) {
+  const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/imagen/${imgId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${STATE.token}` }
+  });
+  if (!r.ok) throw new Error('delete failed: HTTP ' + r.status);
 }
 
 async function saveBrief(data) {
@@ -7813,34 +7823,51 @@ function isBriefStale(b) {
   return (Date.now() - last) > 24 * 60 * 60 * 1000;
 }
 
+// Cruce con tabla de Presupuestos del Sheet: heurística por nombre normalizado.
+// Si el brief tiene un cliente_nombre que matchea con un presupuesto del sheet (mismo
+// nombre, fecha cercana), consideramos que fue cotizado.
+function findPresupuestoMatch(brief) {
+  if (!Array.isArray(STATE.presupuestos) || !brief.cliente_nombre) return null;
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const target = norm(brief.cliente_nombre);
+  if (!target) return null;
+  // Match exacto normalizado.
+  return STATE.presupuestos.find(p => norm(p.cliente || p.nombre || '') === target) || null;
+}
+
 function renderBriefCard(b) {
   const stale = isBriefStale(b);
-  const u = (STATE.usersPanel || []);
-  const dis = b.disenador_id ? (u.find(x => x.id === b.disenador_id)?.nombre || b.disenador_id) : null;
-  const com = b.comercial_id ? (u.find(x => x.id === b.comercial_id)?.nombre || b.comercial_id) : null;
-  const medidas = (b.alto_cm && b.ancho_cm) ? `${Math.round(b.ancho_cm)}×${Math.round(b.alto_cm)}` : '—';
-  const precio = b.precio_final ? fmtMoney(b.precio_final) : '—';
   const intentos = b.intentos_followup || 0;
+  const imgCount = b._imgCount || 0;       // se llena al cargar detalle, opcional acá
+  const thumb = b._firstImgKey || null;    // primer R2 key, si tenemos
+  const medidas = b.medidas_libre || ((b.alto_cm && b.ancho_cm) ? `${Math.round(b.ancho_cm)}×${Math.round(b.alto_cm)}` : '');
+  // Cruce con Sheet (solo importa para estado 'enviado').
+  const pMatch = b.estado === 'enviado' ? findPresupuestoMatch(b) : null;
+  const sinPresupuesto = b.estado === 'enviado' && !pMatch;
   return `
     <div class="brief-card ${stale ? 'brief-card--stale' : ''}" data-brief-id="${b.id}"
-         style="background:var(--ink-100);border:1px solid ${stale ? 'rgba(255,24,48,.35)' : 'var(--border)'};border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s">
-      <div style="display:flex;justify-content:space-between;align-items:start;gap:6px;margin-bottom:6px">
-        <div style="font-weight:600;font-size:13px;line-height:1.3;flex:1;min-width:0">
-          ${escapeHtml(b.cliente_nombre || 'Sin nombre')}
+         style="background:var(--ink-100);border:1px solid ${stale ? 'rgba(255,24,48,.35)' : sinPresupuesto ? 'rgba(255,167,38,.35)' : 'var(--border)'};border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s;display:flex;gap:8px">
+      ${thumb ? `<img src="${CONFIG.trackerUrl}/admin/media/${encodeURIComponent(thumb)}?token=${STATE.token}" alt="" style="width:44px;height:44px;object-fit:cover;border-radius:4px;flex-shrink:0;background:var(--ink-050)">` : ''}
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;justify-content:space-between;align-items:start;gap:6px;margin-bottom:4px">
+          <div style="font-weight:600;font-size:13px;line-height:1.3;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+            ${escapeHtml(b.cliente_nombre || 'Sin título')}
+          </div>
+          <div style="display:flex;gap:3px;flex-shrink:0">
+            ${stale ? '<span title="Sin movimiento +24h" style="background:rgba(255,24,48,.15);color:#FF5566;font-size:9px;padding:1px 5px;border-radius:3px">SLA</span>' : ''}
+            ${sinPresupuesto ? '<span title="Marcado como enviado pero no encontramos presupuesto en el Sheet — ¿olvidaste cotizar?" style="background:rgba(255,167,38,.15);color:#FFA726;font-size:9px;padding:1px 5px;border-radius:3px">⚠</span>' : ''}
+            ${pMatch ? '<span title="Tiene presupuesto en el Sheet" style="background:rgba(37,211,102,.15);color:#25D366;font-size:9px;padding:1px 5px;border-radius:3px">✓</span>' : ''}
+          </div>
         </div>
-        ${stale ? '<span class="pill" style="background:rgba(255,24,48,.15);color:#FF5566;font-size:9px;padding:1px 5px;border-radius:3px">SLA</span>' : ''}
-      </div>
-      <div style="font-size:11px;color:var(--fg-subtle);margin-bottom:6px">
-        ${b.diseno ? escapeHtml(b.diseno) + ' · ' : ''}${medidas} ${b.tipo ? '· ' + b.tipo : ''}
-      </div>
-      <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--fg-mute, rgba(233,237,239,.4))">
-        <div style="display:flex;gap:6px;align-items:center">
-          ${dis ? `<span title="Diseñador">🎨 ${escapeHtml(dis.split(' ')[0])}</span>` : ''}
-          ${intentos > 0 ? `<span title="Intentos de seguimiento (regla 12 pts)">↻ ${intentos}/12</span>` : ''}
+        ${medidas ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">${escapeHtml(medidas)}</div>` : ''}
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--fg-mute, rgba(233,237,239,.4))">
+          <div style="display:flex;gap:6px;align-items:center">
+            ${imgCount > 0 ? `<span title="${imgCount} captura(s)">📎 ${imgCount}</span>` : ''}
+            ${intentos > 0 ? `<span title="Intentos de seguimiento">↻ ${intentos}/12</span>` : ''}
+          </div>
+          <div>${relativeTime(b.updated_at)}</div>
         </div>
-        <div>${relativeTime(b.updated_at)}</div>
       </div>
-      ${b.precio_final ? `<div style="margin-top:6px;font-family:ui-monospace,monospace;font-size:12px;color:var(--accent-cyan)">${precio}</div>` : ''}
     </div>
   `;
 }
@@ -7866,19 +7893,7 @@ function renderBriefDrawer() {
   if (!STATE.briefSelected && !STATE.briefDraft) return '';
   const isNew = !STATE.briefSelected;
   const data = isNew ? STATE.briefDraft : (STATE.briefDraft || STATE.briefs.find(b => b.id === STATE.briefSelected) || {});
-  const users = STATE.usersPanel || [];
-  const comerciales = users.filter(u => u.rol === 'comercial' || u.rol === 'admin');
-  const disenadores = users.filter(u => u.rol === 'disenador');
-
-  // Cotización en vivo a partir de los inputs.
-  const cotInput = {
-    ancho: data.ancho_cm || 0,
-    alto:  data.alto_cm  || 0,
-    neon:  data.neon_mt  || 0,
-    tipo:  data.tipo     || 'INT',
-  };
-  let cot = null;
-  try { if (cotInput.ancho && cotInput.alto) cot = calcCotizador(cotInput); } catch(e) {}
+  const pMatch = (!isNew && data.estado === 'enviado') ? findPresupuestoMatch(data) : null;
 
   return `
     <div class="brief-drawer-backdrop" id="brief-drawer-backdrop"
@@ -7892,105 +7907,59 @@ function renderBriefDrawer() {
 
       <div style="display:grid;gap:var(--s-3)">
 
-        <!-- Cliente -->
-        <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
-          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Cliente</legend>
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Nombre</label>
-          <input type="text" data-bf="cliente_nombre" value="${escapeHtml(data.cliente_nombre || '')}"
-                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);margin-bottom:var(--s-2)">
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">WhatsApp (E.164 sin +) <span style="color:#FF5566">*</span></label>
-          <input type="text" data-bf="cliente_wa_id" value="${escapeHtml(data.cliente_wa_id || '')}" placeholder="5491143366573"
-                 ${!isNew ? 'readonly' : ''}
-                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);margin-bottom:var(--s-2);${!isNew ? 'opacity:.6' : ''}">
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Origen del lead <span style="color:#FF5566">*</span></label>
-          <select data-bf="origen_lead" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
-            <option value="">— Elegí origen —</option>
-            ${ORIGEN_LEAD_OPTS.map(o => `<option value="${o}" ${data.origen_lead === o ? 'selected' : ''}>${o}</option>`).join('')}
-          </select>
-        </fieldset>
+        <!-- Título + medidas -->
+        <div>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Título <span style="color:#FF5566">*</span></label>
+          <input type="text" data-bf="cliente_nombre" id="brief-titulo-input" value="${escapeHtml(data.cliente_nombre || '')}"
+                 placeholder="ej. Cartel Alhambra, Logo Vidrios Silvinas, etc."
+                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3)">
 
-        <!-- Specs -->
-        <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
-          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Specs</legend>
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Diseño</label>
-          <input type="text" data-bf="diseno" value="${escapeHtml(data.diseno || '')}" placeholder="ej. ALHAMBRA, logo VS, etc."
-                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);margin-bottom:var(--s-2)">
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
-            <div>
-              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho (cm)</label>
-              <input type="number" step="1" data-bf="ancho_cm" value="${data.ancho_cm || ''}"
-                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
-            </div>
-            <div>
-              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Alto (cm)</label>
-              <input type="number" step="1" data-bf="alto_cm" value="${data.alto_cm || ''}"
-                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
-            </div>
-            <div>
-              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Neón (mt)</label>
-              <input type="number" step="0.1" data-bf="neon_mt" value="${data.neon_mt || ''}"
-                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
-            </div>
-          </div>
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Tipo</label>
-          <div style="display:flex;gap:8px">
-            <label style="flex:1;cursor:pointer">
-              <input type="radio" name="brief-tipo" data-bf-radio="tipo" value="INT" ${(data.tipo || 'INT') === 'INT' ? 'checked' : ''} style="margin-right:4px">
-              Interior
-            </label>
-            <label style="flex:1;cursor:pointer">
-              <input type="radio" name="brief-tipo" data-bf-radio="tipo" value="EXT" ${data.tipo === 'EXT' ? 'checked' : ''} style="margin-right:4px">
-              Exterior
-            </label>
-          </div>
-        </fieldset>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Medidas (opcional)</label>
+          <input type="text" data-bf="medidas_libre" value="${escapeHtml(data.medidas_libre || '')}"
+                 placeholder="ej. 90x50, letras 80cm, INT, etc."
+                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px">
+        </div>
 
-        <!-- Cotización en vivo -->
-        ${cot ? `
-        <fieldset style="border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:var(--s-3);background:rgba(143,212,222,.04)">
-          <legend style="font-size:11px;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Cotización (en vivo)</legend>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:13px">
-            <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${cot.m2.toFixed(2)}</b></div>
-            <div><span style="color:var(--fg-subtle);font-size:11px">Reventa</span><br><b>${fmtMoney(cot.reventa)}</b></div>
-            <div><span style="color:var(--fg-subtle);font-size:11px">Transparente</span><br><b style="color:var(--accent-cyan)">${fmtMoney(cot.transFinal)}</b></div>
-            <div><span style="color:var(--fg-subtle);font-size:11px">Negro</span><br><b style="color:var(--accent-cyan)">${fmtMoney(cot.negroFinal)}</b></div>
+        <!-- Drop / paste zone para imágenes -->
+        <div>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Capturas del chat / referencias</label>
+          <div id="brief-dropzone"
+               style="border:2px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);text-align:center;color:var(--fg-mute);font-size:12px;cursor:pointer;transition:border-color .15s,background .15s">
+            📋 Pegá (Ctrl+V) o arrastrá imágenes acá<br>
+            <span style="font-size:10px;opacity:.6">o click para elegir archivo</span>
+            <input type="file" id="brief-file-input" accept="image/*" multiple style="display:none">
           </div>
-          <div style="margin-top:8px;font-size:11px;color:var(--fg-mute)">
-            Comisión Joaco: ${fmtMoney(cot.comision)}
+          <div id="brief-images-grid"
+               style="margin-top:var(--s-2);display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px">
+            ${renderBriefImagesGrid(isNew)}
           </div>
-        </fieldset>
-        ` : '<div class="muted" style="font-size:12px;text-align:center;padding:var(--s-2)">Completá ancho y alto para ver la cotización.</div>'}
+        </div>
 
-        <!-- Asignación y estado -->
-        <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
-          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Asignación</legend>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
-            <div>
-              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Comercial</label>
-              <select data-bf="comercial_id" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
-                ${comerciales.map(u => `<option value="${u.id}" ${data.comercial_id === u.id ? 'selected' : ''}>${escapeHtml(u.nombre)}</option>`).join('')}
-              </select>
-            </div>
-            <div>
-              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Diseñador</label>
-              <select data-bf="disenador_id" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
-                <option value="">— Sin asignar —</option>
-                ${disenadores.map(u => `<option value="${u.id}" ${data.disenador_id === u.id ? 'selected' : ''}>${escapeHtml(u.nombre)}</option>`).join('')}
-              </select>
-            </div>
-          </div>
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Estado</label>
+        <!-- Estado -->
+        <div>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Estado</label>
           <select data-bf="estado" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
-            ${BRIEF_ESTADOS.map(e => `<option value="${e}" ${(data.estado || 'nuevo') === e ? 'selected' : ''}>${e.replace('_',' ')}</option>`).join('')}
+            ${BRIEF_ESTADOS.map(e => `<option value="${e}" ${(data.estado || 'nuevo') === e ? 'selected' : ''}>${e}</option>`).join('')}
           </select>
-        </fieldset>
+        </div>
 
         <!-- Notas -->
-        <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
-          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Notas internas</legend>
-          <textarea data-bf="notas" rows="3" placeholder="referencia, cambios pedidos, etc."
+        <div>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Notas (opcional)</label>
+          <textarea data-bf="notas" rows="3" placeholder="cambios pedidos, info extra, etc."
                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical">${escapeHtml(data.notas || '')}</textarea>
-        </fieldset>
+        </div>
+
+        ${pMatch ? `
+        <div style="padding:var(--s-2);background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.3);border-radius:var(--r-sm);font-size:12px;color:#25D366">
+          ✓ Tiene presupuesto correspondiente en el Sheet (${escapeHtml(pMatch.cliente || pMatch.nombre || '')})
+        </div>
+        ` : ''}
+        ${(!isNew && data.estado === 'enviado' && !pMatch) ? `
+        <div style="padding:var(--s-2);background:rgba(255,167,38,.08);border:1px solid rgba(255,167,38,.3);border-radius:var(--r-sm);font-size:12px;color:#FFA726">
+          ⚠ Marcado como enviado pero no encontramos presupuesto en el Sheet. ¿Se cotizó?
+        </div>
+        ` : ''}
 
         <!-- Acciones -->
         <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;padding-bottom:var(--s-4)">
@@ -8001,6 +7970,32 @@ function renderBriefDrawer() {
       </div>
     </aside>
   `;
+}
+
+function renderBriefImagesGrid(isNew) {
+  // Para brief nuevo: imágenes locales pendientes de subir (STATE.briefDraftImages).
+  // Para brief existente: imágenes ya en R2 (STATE.briefDetailImages).
+  if (isNew) {
+    if (!STATE.briefDraftImages.length) return '<div style="grid-column:1/-1;font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">Sin imágenes todavía</div>';
+    return STATE.briefDraftImages.map((img, i) => `
+      <div style="position:relative;width:100%;aspect-ratio:1;border-radius:4px;overflow:hidden;background:var(--ink-050)">
+        <img src="${img.dataUrl}" style="width:100%;height:100%;object-fit:cover">
+        <button type="button" data-drop-img-remove="${i}" title="Quitar"
+                style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;border:0;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>
+      </div>
+    `).join('');
+  }
+  if (!STATE.briefDetailImages.length) return '<div style="grid-column:1/-1;font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">Sin imágenes todavía</div>';
+  return STATE.briefDetailImages.map(img => {
+    const url = `${CONFIG.trackerUrl}/admin/media/${encodeURIComponent(img.r2_key)}?token=${STATE.token}`;
+    return `
+      <div style="position:relative;width:100%;aspect-ratio:1;border-radius:4px;overflow:hidden;background:var(--ink-050)">
+        <img src="${url}" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" data-img-zoom="${escapeHtml(url)}">
+        <button type="button" data-img-remove="${img.id}" title="Eliminar"
+                style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;border:0;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>
+      </div>
+    `;
+  }).join('');
 }
 
 function renderCotizacion() {
@@ -8047,7 +8042,16 @@ function renderCotizacion() {
 function openBriefDrawer(id) {
   STATE.briefSelected = id;
   STATE.briefDraft = null;
+  STATE.briefDraftImages = [];
+  STATE.briefDetailImages = [];
   render();
+  // Cargar detalle (incluye imágenes) en background.
+  fetchBriefDetail(id).then(() => {
+    // Re-render solo del grid de imágenes, sin destruir el resto del drawer.
+    const grid = document.getElementById('brief-images-grid');
+    if (grid) grid.innerHTML = renderBriefImagesGrid(false);
+    bindBriefImageGridHandlers(false);
+  });
 }
 
 function openBriefDraft() {
@@ -8057,21 +8061,19 @@ function openBriefDraft() {
     cliente_wa_id: '',
     origen_lead: '',
     estado: 'nuevo',
-    tipo: 'INT',
-    diseno: '',
-    ancho_cm: '',
-    alto_cm: '',
-    neon_mt: '',
-    comercial_id: 'joaco',
-    disenador_id: '',
+    medidas_libre: '',
     notas: ''
   };
+  STATE.briefDraftImages = [];
+  STATE.briefDetailImages = [];
   render();
 }
 
 function closeBriefDrawer() {
   STATE.briefSelected = null;
   STATE.briefDraft = null;
+  STATE.briefDraftImages = [];
+  STATE.briefDetailImages = [];
   render();
 }
 
@@ -8080,42 +8082,100 @@ function readBriefDrawerForm() {
   document.querySelectorAll('[data-bf]').forEach(el => {
     const k = el.dataset.bf;
     let v = el.value;
-    if (['alto_cm', 'ancho_cm', 'neon_mt'].includes(k)) v = v === '' ? null : Number(v);
     out[k] = v === '' ? null : v;
   });
-  const tipoEl = document.querySelector('[data-bf-radio="tipo"]:checked');
-  if (tipoEl) out.tipo = tipoEl.value;
   return out;
+}
+
+// Convierte un File/Blob a { dataUrl, blob, contentType, size } para preview local
+// antes de subir al backend.
+function fileToDraftImage(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve({
+      dataUrl: fr.result,
+      blob: file,
+      contentType: file.type || 'image/png',
+      size: file.size
+    });
+    fr.onerror = reject;
+    fr.readAsDataURL(file);
+  });
+}
+
+async function addImageFromFile(file, isNewBrief) {
+  if (!file || !file.type || !file.type.startsWith('image/')) return;
+  if (isNewBrief) {
+    const img = await fileToDraftImage(file);
+    STATE.briefDraftImages.push(img);
+    const grid = document.getElementById('brief-images-grid');
+    if (grid) grid.innerHTML = renderBriefImagesGrid(true);
+    bindBriefImageGridHandlers(true);
+  } else {
+    try {
+      const result = await uploadBriefImage(STATE.briefSelected, file, file.type);
+      STATE.briefDetailImages.push(result);
+      const grid = document.getElementById('brief-images-grid');
+      if (grid) grid.innerHTML = renderBriefImagesGrid(false);
+      bindBriefImageGridHandlers(false);
+    } catch (e) {
+      alert('Error subiendo imagen: ' + e.message);
+    }
+  }
+}
+
+function bindBriefImageGridHandlers(isNew) {
+  if (isNew) {
+    document.querySelectorAll('[data-drop-img-remove]').forEach(btn => {
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        const i = parseInt(btn.dataset.dropImgRemove, 10);
+        STATE.briefDraftImages.splice(i, 1);
+        const grid = document.getElementById('brief-images-grid');
+        if (grid) grid.innerHTML = renderBriefImagesGrid(true);
+        bindBriefImageGridHandlers(true);
+      };
+    });
+  } else {
+    document.querySelectorAll('[data-img-remove]').forEach(btn => {
+      btn.onclick = async (ev) => {
+        ev.stopPropagation();
+        const imgId = parseInt(btn.dataset.imgRemove, 10);
+        if (!confirm('¿Eliminar esta imagen?')) return;
+        try {
+          await deleteBriefImage(STATE.briefSelected, imgId);
+          STATE.briefDetailImages = STATE.briefDetailImages.filter(x => x.id !== imgId);
+          const grid = document.getElementById('brief-images-grid');
+          if (grid) grid.innerHTML = renderBriefImagesGrid(false);
+          bindBriefImageGridHandlers(false);
+        } catch (e) {
+          alert('Error eliminando: ' + e.message);
+        }
+      };
+    });
+    document.querySelectorAll('[data-img-zoom]').forEach(el => {
+      el.onclick = () => window.open(el.dataset.imgZoom, '_blank');
+    });
+  }
 }
 
 async function handleBriefSave() {
   const form = readBriefDrawerForm();
   const isCreate = !STATE.briefSelected;
-  if (isCreate) {
-    if (!form.cliente_wa_id) { alert('Falta el WhatsApp del cliente.'); return; }
-    if (!form.origen_lead)   { alert('El origen del lead es obligatorio.'); return; }
-    if (!form.comercial_id)  { alert('Falta el comercial.'); return; }
-  } else {
-    form.id = STATE.briefSelected;
+  if (!form.cliente_nombre || !form.cliente_nombre.trim()) {
+    alert('Falta el título del brief.');
+    return;
   }
-
-  // Sumar cotización calculada al payload (precio final = trans, redondeable después).
-  try {
-    if (form.ancho_cm && form.alto_cm) {
-      const c = calcCotizador({ ancho: form.ancho_cm, alto: form.alto_cm, neon: form.neon_mt || 0, tipo: form.tipo || 'INT' });
-      form.m2 = c.m2;
-      form.precio_trans = c.transFinal;
-      form.precio_negro = c.negroFinal;
-      form.reventa = c.reventa;
-      form.comision_joaco = c.comision;
-      form.descuento = c.descuento || 0;
-      form.recargo = c.recargo || 0;
-      // precio_final lo deja en null hasta que se marque enviado o se elija manualmente.
-    }
-  } catch (e) {}
+  if (!isCreate) form.id = STATE.briefSelected;
 
   try {
     const saved = await saveBrief(form);
+    // Subir imágenes pendientes (solo en create).
+    if (isCreate && STATE.briefDraftImages.length) {
+      for (const img of STATE.briefDraftImages) {
+        try { await uploadBriefImage(saved.id, img.blob, img.contentType); } catch(e) { console.error('upload failed', e); }
+      }
+    }
     if (isCreate) {
       STATE.briefs.unshift(saved);
     } else {
@@ -8170,9 +8230,7 @@ function bindCotizacion() {
   // Carga inicial — solo si no se cargó NUNCA. Si la DB devuelve [] (sin briefs),
   // briefsLoaded queda en true igual, así no entramos en loop infinito de fetch.
   if (!STATE.briefsLoaded && !STATE.briefsLoading && !STATE.briefsError) {
-    Promise.all([fetchBriefs(), fetchUsersPanel()]).then(() => render());
-  } else if (!STATE.usersPanel) {
-    fetchUsersPanel().then(() => render());
+    fetchBriefs().then(() => render());
   }
 
   // Header.
@@ -8190,6 +8248,9 @@ function bindCotizacion() {
   });
 
   // Drawer.
+  const isNewDraft = !STATE.briefSelected && !!STATE.briefDraft;
+  const drawerOpen = !!STATE.briefSelected || isNewDraft;
+
   const closeBtn = document.getElementById('brief-close');
   if (closeBtn) closeBtn.onclick = closeBriefDrawer;
   const backdrop = document.getElementById('brief-drawer-backdrop');
@@ -8201,54 +8262,59 @@ function bindCotizacion() {
   const cotBtn = document.getElementById('brief-cotizar');
   if (cotBtn) cotBtn.onclick = handleBriefAbrirCotizador;
 
-  // Re-render del bloque de cotización en vivo al tipear ancho/alto/neón/tipo.
-  document.querySelectorAll('[data-bf="ancho_cm"], [data-bf="alto_cm"], [data-bf="neon_mt"]').forEach(el => {
-    el.oninput = () => {
-      const form = readBriefDrawerForm();
-      // No re-renderizamos todo (perdería foco), solo recalculamos.
-      // Pequeño hack: actualizar el fieldset de cotización in-place.
-      const isNum = (k) => ['ancho_cm','alto_cm','neon_mt'].includes(k);
-      const draft = isNum ? null : null;
-      const cotInput = { ancho: form.ancho_cm || 0, alto: form.alto_cm || 0, neon: form.neon_mt || 0, tipo: form.tipo || 'INT' };
-      try {
-        if (cotInput.ancho && cotInput.alto) {
-          const c = calcCotizador(cotInput);
-          updateBriefCotPreview(c);
-        }
-      } catch(e) {}
-    };
-  });
-  document.querySelectorAll('[data-bf-radio="tipo"]').forEach(el => {
-    el.onchange = () => {
-      const form = readBriefDrawerForm();
-      const cotInput = { ancho: form.ancho_cm || 0, alto: form.alto_cm || 0, neon: form.neon_mt || 0, tipo: form.tipo || 'INT' };
-      try {
-        if (cotInput.ancho && cotInput.alto) updateBriefCotPreview(calcCotizador(cotInput));
-      } catch(e) {}
-    };
-  });
-}
+  // ===== Imágenes: drop zone, paste, file input =====
+  if (drawerOpen) {
+    bindBriefImageGridHandlers(isNewDraft);
 
-function updateBriefCotPreview(c) {
-  // Reemplaza el fieldset de cotización con los nuevos valores, sin re-renderizar
-  // el drawer entero (preserva foco de los inputs).
-  const drawer = document.getElementById('brief-drawer');
-  if (!drawer) return;
-  const fieldsets = drawer.querySelectorAll('fieldset');
-  // El de cotización es el 3ro (Cliente, Specs, Cotización).
-  // Si no hay cotización (m² 0), no hace falta tocar.
-  const cotFs = Array.from(fieldsets).find(f => f.querySelector('legend')?.textContent.includes('Cotización'));
-  if (!cotFs) return;
-  cotFs.innerHTML = `
-    <legend style="font-size:11px;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Cotización (en vivo)</legend>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:13px">
-      <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${c.m2.toFixed(2)}</b></div>
-      <div><span style="color:var(--fg-subtle);font-size:11px">Reventa</span><br><b>${fmtMoney(c.reventa)}</b></div>
-      <div><span style="color:var(--fg-subtle);font-size:11px">Transparente</span><br><b style="color:var(--accent-cyan)">${fmtMoney(c.transFinal)}</b></div>
-      <div><span style="color:var(--fg-subtle);font-size:11px">Negro</span><br><b style="color:var(--accent-cyan)">${fmtMoney(c.negroFinal)}</b></div>
-    </div>
-    <div style="margin-top:8px;font-size:11px;color:var(--fg-mute)">Comisión Joaco: ${fmtMoney(c.comision)}</div>
-  `;
+    const dropzone = document.getElementById('brief-dropzone');
+    const fileInput = document.getElementById('brief-file-input');
+    if (dropzone && fileInput) {
+      dropzone.onclick = () => fileInput.click();
+      fileInput.onchange = async (ev) => {
+        const files = Array.from(ev.target.files || []);
+        for (const f of files) await addImageFromFile(f, isNewDraft);
+        fileInput.value = '';
+      };
+      dropzone.ondragover = (ev) => {
+        ev.preventDefault();
+        dropzone.style.borderColor = 'var(--accent-cyan)';
+        dropzone.style.background = 'rgba(143,212,222,.05)';
+      };
+      dropzone.ondragleave = () => {
+        dropzone.style.borderColor = 'var(--border)';
+        dropzone.style.background = '';
+      };
+      dropzone.ondrop = async (ev) => {
+        ev.preventDefault();
+        dropzone.style.borderColor = 'var(--border)';
+        dropzone.style.background = '';
+        const files = Array.from(ev.dataTransfer?.files || []);
+        for (const f of files) await addImageFromFile(f, isNewDraft);
+      };
+    }
+
+    // Paste global: si el drawer está abierto, escuchamos paste en el document.
+    // Capturamos imágenes del clipboard (screenshots con Win+Shift+S, Ctrl+C de foto, etc.)
+    const pasteHandler = async (ev) => {
+      if (!STATE.briefSelected && !STATE.briefDraft) return;
+      const items = ev.clipboardData?.items || [];
+      for (const item of items) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          ev.preventDefault();
+          const file = item.getAsFile();
+          if (file) await addImageFromFile(file, !STATE.briefSelected);
+        }
+      }
+    };
+    // Usar un attribute para idempotencia (no agregar listener N veces).
+    if (!document._briefPasteBound) {
+      document.addEventListener('paste', pasteHandler);
+      document._briefPasteBound = true;
+    }
+  } else {
+    // Drawer cerrado, limpiar paste handler si existe.
+    // (Por simplicidad lo dejamos siempre escuchando — chequea STATE adentro.)
+  }
 }
 
 // Re-bind table when pedidos view rendered after data loads
