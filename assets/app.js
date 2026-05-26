@@ -6,7 +6,7 @@
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Emma'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -155,7 +155,13 @@ function buildPresupuestoTexto() {
   if (carteles.length === 0) return null;
   const p = getCotizadorParams();
 
-  const closing = `\n\nControladores opcionales:\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nTrabajamos con bases acrílicas transparentes de 3mm, la mejor calidad (NO mdf/fibrofácil/policarbonato/PETG/etc.)\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña. Aceptamos todos los medios de pago!\n\nTiempo de entrega: 15/20 días.\n\nHacemos envíos GRATIS a todo el país!`;
+  // Promo Copa del Mundo: visible hasta el 31/07/2026 23:59 AR (cutoff = 01/08 00:00 AR = 03:00 UTC).
+  // Después de esa fecha el bloque desaparece solo, sin necesidad de redeploy.
+  const promoCopaActiva = Date.now() < Date.parse('2026-08-01T03:00:00Z');
+  const promoCopa = promoCopaActiva
+    ? `\n\n🎁 *Promo junio y julio*: con la compra del cartel te regalamos un neón de la Copa del Mundo! ⚽`
+    : '';
+  const closing = `${promoCopa}\n\nControladores opcionales:\n\nSlim: ${fmtMoney(p.ctrl_slim)}\n\nControl remoto: ${fmtMoney(p.ctrl_remoto)}\n\nApp: ${fmtMoney(p.ctrl_app)}\n\nTrabajamos con bases acrílicas transparentes de 3mm, la mejor calidad (NO mdf/fibrofácil/policarbonato/PETG/etc.)\nPara iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña. Aceptamos todos los medios de pago!\n\nTiempo de entrega: 15/20 días.\n\nHacemos envíos GRATIS a todo el país!`;
 
   if (carteles.length === 1) {
     const c = carteles[0];
@@ -1586,6 +1592,7 @@ function render() {
     if (v === 'dashboard')      document.getElementById('main').innerHTML = isAdmin() ? renderBusinessPanel() : renderDashboard();
     else if (v === 'pedidos')   document.getElementById('main').innerHTML = renderPedidos();
     else if (v === 'presupuestos') document.getElementById('main').innerHTML = renderPresupuestos();
+    else if (v === 'cotizacion')   document.getElementById('main').innerHTML = renderCotizacion();
     else if (v === 'seguimientos') document.getElementById('main').innerHTML = renderSeguimientos();
     else if (v === 'panel-joaco')   document.getElementById('main').innerHTML = renderPanelJoaco();
     else if (v === 'actividad')    document.getElementById('main').innerHTML = renderActividad();
@@ -1606,6 +1613,7 @@ function render() {
   bindCommon();
   if (STATE.view === 'pedidos') bindPedidos();
   if (STATE.view === 'presupuestos') bindPresupuestos();
+  if (STATE.view === 'cotizacion')   bindCotizacion();
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
     if (isAdmin()) bindBusinessPanel();
@@ -1649,6 +1657,7 @@ function renderShell() {
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
+        <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
         <button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>
@@ -7684,6 +7693,31 @@ if (canAccessChat()) {
   ensureNotificationPermission();
   initPollWorker();
 }
+
+// ============ COTIZACIÓN — panel conversacional (en construcción) ============
+// Stub mínimo para que el botón "Cotización" del sidebar no rompa.
+// La implementación real (kanban + briefs + hilo interno) se agrega
+// en próximas iteraciones. Schema D1 (briefs / brief_messages /
+// users_panel) y endpoints del worker (/admin/briefs/*) ya están listos.
+function renderCotizacion() {
+  return `
+    <div style="max-width:720px;margin:0 auto;padding:var(--s-6) var(--s-4)">
+      <div style="text-align:center;padding:var(--s-6);background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-md)">
+        <div style="font-size:48px;margin-bottom:var(--s-3)">🚧</div>
+        <h2 style="margin:0 0 var(--s-2)">Panel de cotización conversacional</h2>
+        <p class="muted" style="margin:0 0 var(--s-3);font-size:14px">En construcción.</p>
+        <p class="muted" style="margin:0;font-size:13px;line-height:1.5">
+          Próximamente vas a ver acá un kanban con los briefs en curso:<br>
+          📥 Nuevos · 🎨 En diseño · ✅ Listos · 🟡 Colgados
+        </p>
+        <p class="muted" style="margin-top:var(--s-4);font-size:12px;opacity:.7">
+          Mientras tanto, seguí cotizando desde la vista <b>Presupuestos</b>.
+        </p>
+      </div>
+    </div>
+  `;
+}
+function bindCotizacion() { /* nada por ahora */ }
 
 // Re-bind table when pedidos view rendered after data loads
 function rerenderTablePedidosIfNeeded() { if (STATE.view === 'pedidos') renderTablePedidos(); }
