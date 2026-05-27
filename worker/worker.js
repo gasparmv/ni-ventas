@@ -1996,6 +1996,26 @@ export default {
         return json({ id: result.meta.last_row_id }, 201);
       }
 
+      // DELETE /admin/briefs/:id  →  borra brief + sus imágenes (R2 + DB) + sus mensajes.
+      // Solo se debe llamar desde rol comercial/admin (el frontend gatea, acá confiamos).
+      if (request.method === 'DELETE' && /^\/admin\/briefs\/\d+$/.test(path)) {
+        const id = path.split('/').pop();
+        const brief = await env.DB.prepare('SELECT id FROM briefs WHERE id = ?').bind(id).first();
+        if (!brief) return json({ error: 'not found' }, 404);
+        // Borrar imágenes de R2 (mejor esfuerzo).
+        const imgs = await env.DB.prepare('SELECT r2_key FROM brief_imagenes WHERE brief_id = ?').bind(id).all();
+        if (env.MEDIA) {
+          for (const row of (imgs.results || [])) {
+            try { await env.MEDIA.delete(row.r2_key); } catch(e) { /* ignorar */ }
+          }
+        }
+        // Borrar filas dependientes en orden.
+        await env.DB.prepare('DELETE FROM brief_imagenes WHERE brief_id = ?').bind(id).run();
+        await env.DB.prepare('DELETE FROM brief_messages WHERE brief_id = ?').bind(id).run();
+        await env.DB.prepare('DELETE FROM briefs WHERE id = ?').bind(id).run();
+        return noContent();
+      }
+
       // POST /admin/briefs/:id/enviar  →  marca brief como enviado.
       // El envío real al cliente (WhatsApp) y la escritura al Sheet ya las hace
       // el frontend (cot-send-wa-btn / cot-save-btn en app.js). Este endpoint

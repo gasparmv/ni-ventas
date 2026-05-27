@@ -7804,6 +7804,32 @@ async function uploadBriefImage(briefId, blob, contentType, tipo = 'chat') {
   return r.json();
 }
 
+async function deleteBriefAPI(id) {
+  const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${STATE.token}` }
+  });
+  if (!r.ok) throw new Error('delete failed: HTTP ' + r.status);
+}
+
+async function handleBriefDelete(briefId, fromCard) {
+  if (!briefId) return;
+  // Solo comercial/admin pueden borrar.
+  const role = getUserRole();
+  if (role === 'disenador') { alert('Solo el comercial o admin puede borrar briefs.'); return; }
+  const b = STATE.briefs.find(x => x.id === briefId);
+  const titulo = b?.cliente_nombre || `Brief #${briefId}`;
+  if (!confirm(`¿Borrar "${titulo}"? Esta acción no se puede deshacer.`)) return;
+  try {
+    await deleteBriefAPI(briefId);
+    STATE.briefs = STATE.briefs.filter(x => x.id !== briefId);
+    if (STATE.briefSelected === briefId) closeBriefDrawer();
+    else render();
+  } catch (e) {
+    alert('Error al borrar: ' + e.message);
+  }
+}
+
 async function deleteBriefImage(briefId, imgId) {
   const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/imagen/${imgId}`, {
     method: 'DELETE',
@@ -7887,9 +7913,14 @@ function renderBriefCard(b) {
   const sinPresupuesto = b.estado === 'enviado' && !pMatch;
   const thumbUrl = thumb ? `${CONFIG.trackerUrl}/admin/media/${encodeURIComponent(thumb)}?token=${STATE.token}` : null;
   const borderColor = colgado ? 'rgba(255,167,38,.45)' : sinPresupuesto ? 'rgba(255,167,38,.35)' : 'var(--border)';
+  const canDelete = canCreateBriefs();  // mismo gate: comercial/admin
   return `
     <div class="brief-card" data-brief-id="${b.id}"
-         style="background:var(--ink-100);border:1px solid ${borderColor};border-radius:var(--r-sm);overflow:hidden;margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s">
+         style="background:var(--ink-100);border:1px solid ${borderColor};border-radius:var(--r-sm);overflow:hidden;margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s;position:relative">
+      ${canDelete ? `<button class="brief-card-delete" data-brief-delete="${b.id}" title="Eliminar brief" aria-label="Eliminar"
+              style="position:absolute;top:4px;right:4px;width:22px;height:22px;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;border:0;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;z-index:2;opacity:.6;transition:opacity .15s,background .15s"
+              onmouseover="this.style.opacity='1';this.style.background='rgba(255,24,48,.85)'"
+              onmouseout="this.style.opacity='.6';this.style.background='rgba(0,0,0,.55)'">✕</button>` : ''}
       ${thumbUrl ? `
         <div style="width:100%;height:120px;background:var(--ink-050) center/cover no-repeat;background-image:url('${thumbUrl}');position:relative">
           ${isRenderThumb ? '<div style="position:absolute;top:4px;left:4px;background:rgba(143,212,222,.85);color:#000;font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px">RENDER</div>' : ''}
@@ -8086,7 +8117,9 @@ function renderBriefDrawer() {
         ` : ''}
 
         <!-- Acciones por rol y estado -->
-        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;padding-bottom:var(--s-4)">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:var(--s-4)">
+          ${!isNew && canCreateBriefs() ? `<button class="btn btn-ghost" id="brief-delete" style="color:#FF5566;border-color:rgba(255,24,48,.25)" title="Eliminar este brief">🗑 Eliminar</button>` : ''}
+          <div style="flex:1"></div>
           ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Copiar presupuesto</button>` : ''}
           ${!isNew && estado === 'enviado' && isCom ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir Cotizador</button>` : ''}
           ${(isCom || isDis || isNew) ? `<button class="btn ${isNew ? 'btn-cyan' : 'btn-ghost'}" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>` : ''}
@@ -8560,6 +8593,14 @@ function bindCotizacion() {
     el.onclick = () => openBriefDrawer(parseInt(el.dataset.briefId, 10));
   });
 
+  // Cruz "✕" para borrar desde la card (intercepta el click del card).
+  document.querySelectorAll('[data-brief-delete]').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      handleBriefDelete(parseInt(btn.dataset.briefDelete, 10), true);
+    };
+  });
+
   // ===== Drop + paste sobre columna "A cotizar" (Joaco/admin) =====
   if (canCreateBriefs()) {
     const colNuevo = document.querySelector('.brief-col[data-col="nuevo"]');
@@ -8627,6 +8668,8 @@ function bindCotizacion() {
   if (cotBtn) cotBtn.onclick = handleBriefAbrirCotizador;
   const cotPopupBtn = document.getElementById('brief-cotizar-popup');
   if (cotPopupBtn) cotPopupBtn.onclick = openBriefCotizadorPopup;
+  const delBtn = document.getElementById('brief-delete');
+  if (delBtn) delBtn.onclick = () => handleBriefDelete(STATE.briefSelected, false);
 
   // ===== Drawer: dropzones internos (chat + render) =====
   if (drawerOpen) {
