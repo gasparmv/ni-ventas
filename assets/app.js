@@ -7698,13 +7698,24 @@ if (canAccessChat()) {
 // Backend: tabla `briefs` en D1 + endpoints /admin/briefs/* en worker.js.
 // El hilo interno (fase 3) reusa `brief_messages`, todavía no implementado.
 
-const BRIEF_ESTADOS = ['nuevo', 'listo', 'enviado', 'colgado'];
+const BRIEF_ESTADOS = ['nuevo', 'listo', 'enviado'];
 const BRIEF_COLUMNAS = [
-  { id: 'nuevo',   label: '📥 Nuevos',   color: 'var(--accent-cyan)' },
-  { id: 'listo',   label: '✅ Listos',   color: 'var(--green, #25D366)' },
-  { id: 'enviado', label: '📤 Enviados', color: 'var(--fg-subtle)' },
-  { id: 'colgado', label: '🟡 Colgados', color: 'var(--amber, #FFA726)' },
+  { id: 'nuevo',   label: '📥 A cotizar', color: 'var(--accent-cyan)' },
+  { id: 'listo',   label: '🎨 Listos',    color: 'var(--green, #25D366)' },
+  { id: 'enviado', label: '📤 Enviados',  color: 'var(--fg-subtle)' },
 ];
+
+// Rol del usuario logueado. Mapea el display name (STATE.user) a un rol funcional.
+// Joaco/Joaquín = comercial; Emma/Emmanuel = diseñador; Gaspar = admin (puede todo).
+function getUserRole() {
+  const u = (STATE.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (u === 'gaspar')                   return 'admin';
+  if (u === 'emma' || u === 'emmanuel') return 'disenador';
+  return 'comercial'; // joaco, joaquin, default
+}
+function canCreateBriefs() { const r = getUserRole(); return r === 'comercial' || r === 'admin'; }
+function canCotizar()      { const r = getUserRole(); return r === 'comercial' || r === 'admin'; }
+function canMarkListo()    { const r = getUserRole(); return r === 'disenador' || r === 'admin'; }
 
 if (typeof STATE.briefs === 'undefined')          STATE.briefs = [];
 if (typeof STATE.briefsLoading === 'undefined')   STATE.briefsLoading = false;
@@ -7715,6 +7726,7 @@ if (typeof STATE.briefDraft === 'undefined')      STATE.briefDraft = null;
 if (typeof STATE.briefDraftImages === 'undefined') STATE.briefDraftImages = []; // blobs pre-creación
 if (typeof STATE.briefDetailImages === 'undefined') STATE.briefDetailImages = []; // imágenes ya en R2 del brief abierto
 if (typeof STATE.briefDetailLoading === 'undefined') STATE.briefDetailLoading = false;
+if (typeof STATE.briefCotPopupOpen === 'undefined') STATE.briefCotPopupOpen = false;
 
 async function fetchBriefs() {
   if (!CONFIG.trackerUrl || !STATE.token) return;
@@ -7874,8 +7886,13 @@ function renderBriefCard(b) {
 
 function renderBriefColumn(col) {
   const briefs = STATE.briefs.filter(b => b.estado === col.id);
+  const isDropTarget = col.id === 'nuevo' && canCreateBriefs();
+  const dashedBorder = isDropTarget ? 'border:2px dashed rgba(143,212,222,.25)' : 'border:1px solid var(--border)';
+  const hint = isDropTarget && !briefs.length
+    ? '<div style="font-size:11px;color:var(--accent-cyan);text-align:center;padding:var(--s-4);line-height:1.5;opacity:.7">📋 Pegá Ctrl+V<br>o arrastrá una imagen<br>acá adentro</div>'
+    : (briefs.length ? '' : '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-4)">—</div>');
   return `
-    <div class="brief-col" data-col="${col.id}" style="flex:1;min-width:240px;background:var(--ink-050,#0f0f15);border:1px solid var(--border);border-radius:var(--r-md);padding:var(--s-2);display:flex;flex-direction:column">
+    <div class="brief-col" data-col="${col.id}" style="flex:1;min-width:240px;background:var(--ink-050,#0f0f15);${dashedBorder};border-radius:var(--r-md);padding:var(--s-2);display:flex;flex-direction:column;transition:border-color .15s,background .15s">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2);padding:0 4px">
         <span style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${col.color}">
           ${col.label}
@@ -7883,7 +7900,7 @@ function renderBriefColumn(col) {
         <span style="font-size:11px;color:var(--fg-mute);font-family:ui-monospace,monospace">${briefs.length}</span>
       </div>
       <div class="brief-col-list" style="flex:1;overflow-y:auto;max-height:calc(100vh - 220px)">
-        ${briefs.length ? briefs.map(renderBriefCard).join('') : '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-4)">—</div>'}
+        ${briefs.length ? briefs.map(renderBriefCard).join('') : hint}
       </div>
     </div>
   `;
@@ -7894,6 +7911,18 @@ function renderBriefDrawer() {
   const isNew = !STATE.briefSelected;
   const data = isNew ? STATE.briefDraft : (STATE.briefDraft || STATE.briefs.find(b => b.id === STATE.briefSelected) || {});
   const pMatch = (!isNew && data.estado === 'enviado') ? findPresupuestoMatch(data) : null;
+  const role = getUserRole();
+  const isCom = role === 'comercial' || role === 'admin';
+  const isDis = role === 'disenador' || role === 'admin';
+  const estado = data.estado || 'nuevo';
+
+  // Visibilidad de bloques según rol y estado:
+  // - Capturas del chat: visibles siempre (las subió Joaco).
+  // - Render + medidas técnicas: solo en estado 'listo' o cuando Emma está marcando como listo.
+  // - Notas: visible siempre.
+  // - Acción "Tomar y marcar listo" (Emma): solo en estado='nuevo' y rol disenador/admin.
+  // - Acción "Cotizar y enviar" (Joaco): solo en estado='listo' y rol comercial/admin.
+  const showRenderFields = estado === 'listo' || (estado === 'nuevo' && isDis && !isCom);
 
   return `
     <div class="brief-drawer-backdrop" id="brief-drawer-backdrop"
@@ -7901,58 +7930,95 @@ function renderBriefDrawer() {
     <aside class="brief-drawer" id="brief-drawer"
            style="position:fixed;top:0;right:0;bottom:0;width:min(560px,100vw);background:var(--bg, #0A0A0F);border-left:1px solid var(--border);z-index:100;overflow-y:auto;padding:var(--s-4)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);position:sticky;top:0;background:var(--bg);padding-bottom:var(--s-2);border-bottom:1px solid var(--border);z-index:1">
-        <h2 style="margin:0;font-size:16px">${isNew ? '➕ Nuevo brief' : '📋 Brief #' + data.id}</h2>
+        <h2 style="margin:0;font-size:16px">
+          ${isNew ? '➕ Nuevo brief' : '📋 Brief #' + data.id}
+          <span style="font-size:11px;color:var(--fg-subtle);font-weight:400;margin-left:6px">${estado}</span>
+        </h2>
         <button class="btn btn-ghost btn-icon" id="brief-close" aria-label="Cerrar">✕</button>
       </div>
 
       <div style="display:grid;gap:var(--s-3)">
 
-        <!-- Título + medidas -->
+        <!-- Título + medidas (libre) -->
         <div>
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Título <span style="color:#FF5566">*</span></label>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Título ${isCom ? '<span style="color:#FF5566">*</span>' : ''}</label>
           <input type="text" data-bf="cliente_nombre" id="brief-titulo-input" value="${escapeHtml(data.cliente_nombre || '')}"
-                 placeholder="ej. Cartel Alhambra, Logo Vidrios Silvinas, etc."
-                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3)">
+                 placeholder="ej. Cartel Alhambra"
+                 ${!isCom ? 'readonly' : ''}
+                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3);${!isCom ? 'opacity:.6' : ''}">
 
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Medidas (opcional)</label>
+          ${isCom ? `
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Medidas referenciales (opcional)</label>
           <input type="text" data-bf="medidas_libre" value="${escapeHtml(data.medidas_libre || '')}"
-                 placeholder="ej. 90x50, letras 80cm, INT, etc."
+                 placeholder="ej. 90x50 aprox, INT, etc."
                  style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px">
+          ` : (data.medidas_libre ? `<div style="font-size:12px;color:var(--fg-subtle)">Medidas referenciales: <b>${escapeHtml(data.medidas_libre)}</b></div>` : '')}
         </div>
 
-        <!-- Drop / paste zone para imágenes -->
+        <!-- Capturas del chat -->
         <div>
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Capturas del chat / referencias</label>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">${isCom ? 'Capturas del chat / referencias' : 'Capturas que mandó Joaco'}</label>
+          ${isCom ? `
           <div id="brief-dropzone"
                style="border:2px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);text-align:center;color:var(--fg-mute);font-size:12px;cursor:pointer;transition:border-color .15s,background .15s">
-            📋 Pegá (Ctrl+V) o arrastrá imágenes acá<br>
-            <span style="font-size:10px;opacity:.6">o click para elegir archivo</span>
+            📋 Pegá (Ctrl+V) o arrastrá imágenes acá
             <input type="file" id="brief-file-input" accept="image/*" multiple style="display:none">
           </div>
+          ` : ''}
           <div id="brief-images-grid"
                style="margin-top:var(--s-2);display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px">
             ${renderBriefImagesGrid(isNew)}
           </div>
         </div>
 
-        <!-- Estado -->
-        <div>
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Estado</label>
-          <select data-bf="estado" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
-            ${BRIEF_ESTADOS.map(e => `<option value="${e}" ${(data.estado || 'nuevo') === e ? 'selected' : ''}>${e}</option>`).join('')}
-          </select>
-        </div>
+        ${showRenderFields ? `
+        <!-- Render + medidas técnicas (cosa del diseñador) -->
+        <fieldset style="border:1px solid rgba(143,212,222,.25);border-radius:var(--r-sm);padding:var(--s-3);background:rgba(143,212,222,.03)">
+          <legend style="font-size:11px;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Diseño · datos para cotizar</legend>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
+            <div>
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho (cm)</label>
+              <input type="number" step="1" data-bf="ancho_cm" value="${data.ancho_cm || ''}"
+                     ${!isDis ? 'readonly' : ''}
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+            </div>
+            <div>
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Alto (cm)</label>
+              <input type="number" step="1" data-bf="alto_cm" value="${data.alto_cm || ''}"
+                     ${!isDis ? 'readonly' : ''}
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+            </div>
+            <div>
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Neón (mt)</label>
+              <input type="number" step="0.1" data-bf="neon_mt" value="${data.neon_mt || ''}"
+                     ${!isDis ? 'readonly' : ''}
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+            </div>
+          </div>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Tipo</label>
+          <div style="display:flex;gap:8px">
+            <label style="flex:1;cursor:${isDis ? 'pointer' : 'default'};opacity:${isDis ? '1' : '.7'}">
+              <input type="radio" name="brief-tipo" data-bf-radio="tipo" value="INT" ${(data.tipo || 'INT') === 'INT' ? 'checked' : ''} ${!isDis ? 'disabled' : ''} style="margin-right:4px">
+              Interior
+            </label>
+            <label style="flex:1;cursor:${isDis ? 'pointer' : 'default'};opacity:${isDis ? '1' : '.7'}">
+              <input type="radio" name="brief-tipo" data-bf-radio="tipo" value="EXT" ${data.tipo === 'EXT' ? 'checked' : ''} ${!isDis ? 'disabled' : ''} style="margin-right:4px">
+              Exterior
+            </label>
+          </div>
+        </fieldset>
+        ` : ''}
 
         <!-- Notas -->
         <div>
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Notas (opcional)</label>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Notas</label>
           <textarea data-bf="notas" rows="3" placeholder="cambios pedidos, info extra, etc."
                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical">${escapeHtml(data.notas || '')}</textarea>
         </div>
 
         ${pMatch ? `
         <div style="padding:var(--s-2);background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.3);border-radius:var(--r-sm);font-size:12px;color:#25D366">
-          ✓ Tiene presupuesto correspondiente en el Sheet (${escapeHtml(pMatch.cliente || pMatch.nombre || '')})
+          ✓ Hay presupuesto correspondiente en el Sheet: <b>${escapeHtml(pMatch.cliente || pMatch.nombre || '')}</b>
         </div>
         ` : ''}
         ${(!isNew && data.estado === 'enviado' && !pMatch) ? `
@@ -7961,11 +8027,13 @@ function renderBriefDrawer() {
         </div>
         ` : ''}
 
-        <!-- Acciones -->
+        <!-- Acciones según rol y estado -->
         <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;padding-bottom:var(--s-4)">
-          ${!isNew ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir en Cotizador</button>` : ''}
-          ${!isNew && data.estado !== 'enviado' ? `<button class="btn btn-ghost" id="brief-enviar">✓ Marcar como enviado</button>` : ''}
-          <button class="btn btn-cyan" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>
+          ${!isNew && estado === 'nuevo' && canMarkListo() ? `<button class="btn btn-cyan" id="brief-tomar">🎨 Tomar y marcar listo</button>` : ''}
+          ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Cotizar y enviar</button>` : ''}
+          ${!isNew && estado === 'listo' && canMarkListo() ? `<button class="btn btn-ghost" id="brief-back-nuevo">↩ Volver a "A cotizar"</button>` : ''}
+          ${!isNew && estado === 'enviado' && isCom ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir Cotizador</button>` : ''}
+          ${(isCom || isNew) ? `<button class="btn ${isNew ? 'btn-cyan' : 'btn-ghost'}" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>` : ''}
         </div>
       </div>
     </aside>
@@ -8012,11 +8080,11 @@ function renderCotizacion() {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3)">
       <div>
         <h2 style="margin:0;font-size:18px">◆ Cotización</h2>
-        <p class="muted" style="margin:2px 0 0;font-size:12px">Briefs en curso · ${STATE.briefs.length} total</p>
+        <p class="muted" style="margin:2px 0 0;font-size:12px">${canCreateBriefs() ? 'Pegá (Ctrl+V) o arrastrá imágenes sobre la columna "A cotizar" — se crea solo' : 'Tomá briefs de "A cotizar" para diseñarlos'} · ${STATE.briefs.length} total</p>
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" id="briefs-refresh" title="Refrescar">↻</button>
-        <button class="btn btn-cyan" id="brief-new">+ Nuevo brief</button>
+        ${canCreateBriefs() ? '<button class="btn btn-cyan" id="brief-new">+ Nuevo brief</button>' : ''}
       </div>
     </div>
   `;
@@ -8035,8 +8103,39 @@ function renderCotizacion() {
         ${BRIEF_COLUMNAS.map(renderBriefColumn).join('')}
       </div>
       ${renderBriefDrawer()}
+      ${renderBriefCotizadorPopup()}
     </div>
   `;
+}
+
+// Crea brief al instante con título auto-generado, opcionalmente sube una imagen,
+// y abre el drawer para que el usuario complete título/notas.
+// Usado por el paste/drop sobre la columna "A cotizar".
+async function quickCreateBriefFromImage(file) {
+  if (!canCreateBriefs()) return;
+  try {
+    const now = new Date();
+    const titulo = 'Sin título · ' + now.toLocaleString('es-AR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+    const saved = await saveBrief({
+      cliente_nombre: titulo,
+      estado: 'nuevo'
+    });
+    STATE.briefs.unshift(saved);
+    if (file) {
+      try { await uploadBriefImage(saved.id, file, file.type); } catch(e) { console.error('upload', e); }
+    }
+    // Abrir drawer para que el usuario complete título.
+    STATE.briefSelected = saved.id;
+    STATE.briefDraft = null;
+    STATE.briefDraftImages = [];
+    // Pre-cargar el detalle (incluye imagen recién subida).
+    fetchBriefDetail(saved.id).then(() => render());
+    render();
+    // Focus en el input de título para que pueda escribir directo.
+    setTimeout(() => { const el = document.getElementById('brief-titulo-input'); if (el) el.focus(); el?.select(); }, 50);
+  } catch (e) {
+    alert('Error creando brief: ' + e.message);
+  }
 }
 
 function openBriefDrawer(id) {
@@ -8082,9 +8181,115 @@ function readBriefDrawerForm() {
   document.querySelectorAll('[data-bf]').forEach(el => {
     const k = el.dataset.bf;
     let v = el.value;
+    if (['alto_cm', 'ancho_cm', 'neon_mt'].includes(k)) v = v === '' ? null : Number(v);
     out[k] = v === '' ? null : v;
   });
+  const tipoEl = document.querySelector('[data-bf-radio="tipo"]:checked');
+  if (tipoEl) out.tipo = tipoEl.value;
   return out;
+}
+
+// Acción del diseñador (Emma): toma un brief de "A cotizar" → pasa a "Listos".
+// El frontend ya tiene los campos de ancho/alto/neon visibles al re-renderizar el drawer,
+// para que Emma los complete después de tomar.
+async function handleBriefTomar() {
+  if (!STATE.briefSelected) return;
+  try {
+    const saved = await saveBrief({ id: STATE.briefSelected, estado: 'listo' });
+    const i = STATE.briefs.findIndex(b => b.id === saved.id);
+    if (i >= 0) STATE.briefs[i] = saved;
+    // Re-render con drawer abierto: ahora Emma ve los campos render+medidas técnicas.
+    render();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+// Acción del diseñador: si se equivocó al tomar, vuelve a "A cotizar".
+async function handleBriefBackNuevo() {
+  if (!STATE.briefSelected) return;
+  try {
+    const saved = await saveBrief({ id: STATE.briefSelected, estado: 'nuevo' });
+    const i = STATE.briefs.findIndex(b => b.id === saved.id);
+    if (i >= 0) STATE.briefs[i] = saved;
+    render();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+// Mini-popup cotizador: usa la lógica existente (calcCotizador + buildPresupuestoTexto)
+// pre-cargada con los datos que Emma dejó en el brief. Joaco copia el presupuesto
+// armado y lo manda al cliente; al cerrar el popup el brief queda marcado como enviado.
+function openBriefCotizadorPopup() {
+  if (!STATE.briefSelected) return;
+  const b = STATE.briefs.find(x => x.id === STATE.briefSelected);
+  if (!b) return;
+  if (!b.ancho_cm || !b.alto_cm) {
+    alert('Faltan medidas. Pedile a Emma que complete ancho y alto antes de cotizar.');
+    return;
+  }
+  // Setear STATE.cotizadorForm para que las funciones existentes (calcCotizador,
+  // buildPresupuestoTexto) operen con estos valores.
+  STATE.cotizadorForm = {
+    ancho: b.ancho_cm,
+    alto:  b.alto_cm,
+    neon:  b.neon_mt || 0,
+    tipo:  b.tipo || 'INT',
+    cliente: b.cliente_nombre || '',
+    canal: 'WPP',
+    telefono: b.cliente_wa_id || '',
+    textoOverride: '',
+    extraCarteles: []
+  };
+  STATE.briefCotPopupOpen = true;
+  render();
+}
+
+function closeBriefCotizadorPopup() {
+  STATE.briefCotPopupOpen = false;
+  render();
+}
+
+function renderBriefCotizadorPopup() {
+  if (!STATE.briefCotPopupOpen) return '';
+  let r = null;
+  try { r = calcCotizador(STATE.cotizadorForm); } catch(e) {}
+  const texto = (function(){ try { return buildPresupuestoTexto() || ''; } catch(e) { return ''; } })();
+  const f = STATE.cotizadorForm;
+  return `
+    <div id="brief-cot-popup-backdrop"
+         style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:flex;align-items:center;justify-content:center;padding:var(--s-4)">
+      <div style="background:var(--bg, #0A0A0F);border:1px solid var(--accent-cyan);border-radius:var(--r-md);max-width:560px;width:100%;max-height:90vh;overflow-y:auto;padding:var(--s-4)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);border-bottom:1px solid var(--border);padding-bottom:var(--s-2)">
+          <h2 style="margin:0;font-size:16px;color:var(--accent-cyan)">💰 Cotizar y enviar</h2>
+          <button class="btn btn-ghost btn-icon" id="brief-cot-popup-close" aria-label="Cerrar">✕</button>
+        </div>
+        <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:var(--s-3)">
+          <b>${escapeHtml(f.cliente || 'Sin título')}</b> · ${Math.round(+f.ancho)}×${Math.round(+f.alto)} cm · ${f.tipo} · neón ${f.neon} mt
+        </div>
+        ${r ? `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:14px;margin-bottom:var(--s-3);background:rgba(143,212,222,.04);padding:var(--s-3);border-radius:var(--r-sm)">
+          <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${r.m2.toFixed(2)}</b></div>
+          <div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>
+          <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.transFinal)}</b></div>
+          <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico negro</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.negroFinal)}</b></div>
+        </div>
+        ` : '<div class="muted" style="text-align:center;padding:var(--s-2)">No se pudo calcular precio (revisá medidas).</div>'}
+
+        <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto</label>
+        <textarea id="brief-cot-popup-text" rows="14"
+                  style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-3)">${escapeHtml(texto)}</textarea>
+
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+          <button class="btn btn-ghost" id="brief-cot-popup-copy">📋 Copiar texto</button>
+          <button class="btn btn-ghost" id="brief-cot-popup-sheet">💾 Guardar en Sheet</button>
+          <button class="btn btn-cyan" id="brief-cot-popup-enviar">✓ Marcar como enviado</button>
+        </div>
+        <div id="brief-cot-popup-status" style="font-size:11px;color:var(--green, #25D366);text-align:right;margin-top:6px;height:14px"></div>
+      </div>
+    </div>
+  `;
 }
 
 // Convierte un File/Blob a { dataUrl, blob, contentType, size } para preview local
@@ -8227,8 +8432,7 @@ function handleBriefAbrirCotizador() {
 function bindCotizacion() {
   if (!STATE.token) return;
 
-  // Carga inicial — solo si no se cargó NUNCA. Si la DB devuelve [] (sin briefs),
-  // briefsLoaded queda en true igual, así no entramos en loop infinito de fetch.
+  // Carga inicial — flag briefsLoaded evita loop infinito si la DB está vacía.
   if (!STATE.briefsLoaded && !STATE.briefsLoading && !STATE.briefsError) {
     fetchBriefs().then(() => render());
   }
@@ -8238,7 +8442,7 @@ function bindCotizacion() {
   if (newBtn) newBtn.onclick = openBriefDraft;
   const refreshBtn = document.getElementById('briefs-refresh');
   if (refreshBtn) refreshBtn.onclick = () => {
-    STATE.briefsLoaded = false;  // forzar re-fetch
+    STATE.briefsLoaded = false;
     fetchBriefs().then(() => render());
   };
 
@@ -8247,7 +8451,55 @@ function bindCotizacion() {
     el.onclick = () => openBriefDrawer(parseInt(el.dataset.briefId, 10));
   });
 
-  // Drawer.
+  // ===== Drop + paste sobre columna "A cotizar" (Joaco/admin) =====
+  if (canCreateBriefs()) {
+    const colNuevo = document.querySelector('.brief-col[data-col="nuevo"]');
+    if (colNuevo) {
+      colNuevo.ondragover = (ev) => {
+        ev.preventDefault();
+        colNuevo.style.borderColor = 'var(--accent-cyan)';
+        colNuevo.style.background = 'rgba(143,212,222,.06)';
+      };
+      colNuevo.ondragleave = () => {
+        colNuevo.style.borderColor = '';
+        colNuevo.style.background = '';
+      };
+      colNuevo.ondrop = async (ev) => {
+        ev.preventDefault();
+        colNuevo.style.borderColor = '';
+        colNuevo.style.background = '';
+        const files = Array.from(ev.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'));
+        for (const f of files) await quickCreateBriefFromImage(f);
+      };
+    }
+
+    // Paste global EN VISTA Cotización (no necesita drawer abierto).
+    // Idempotencia con flag en el document.
+    if (!document._cotPasteBound) {
+      document.addEventListener('paste', async (ev) => {
+        if (STATE.view !== 'cotizacion') return;
+        const items = ev.clipboardData?.items || [];
+        // Si el drawer está abierto, lo maneja el handler del drawer (más abajo).
+        // Si está cerrado y hay imágenes, creamos brief al toque.
+        const drawerOpen = !!STATE.briefSelected || !!STATE.briefDraft;
+        for (const item of items) {
+          if (item.kind === 'file' && item.type.startsWith('image/')) {
+            ev.preventDefault();
+            const file = item.getAsFile();
+            if (!file) continue;
+            if (drawerOpen) {
+              await addImageFromFile(file, !STATE.briefSelected);
+            } else if (canCreateBriefs()) {
+              await quickCreateBriefFromImage(file);
+            }
+          }
+        }
+      });
+      document._cotPasteBound = true;
+    }
+  }
+
+  // ===== Drawer =====
   const isNewDraft = !STATE.briefSelected && !!STATE.briefDraft;
   const drawerOpen = !!STATE.briefSelected || isNewDraft;
 
@@ -8261,8 +8513,14 @@ function bindCotizacion() {
   if (enviarBtn) enviarBtn.onclick = handleBriefEnviar;
   const cotBtn = document.getElementById('brief-cotizar');
   if (cotBtn) cotBtn.onclick = handleBriefAbrirCotizador;
+  const tomarBtn = document.getElementById('brief-tomar');
+  if (tomarBtn) tomarBtn.onclick = handleBriefTomar;
+  const backBtn = document.getElementById('brief-back-nuevo');
+  if (backBtn) backBtn.onclick = handleBriefBackNuevo;
+  const cotPopupBtn = document.getElementById('brief-cotizar-popup');
+  if (cotPopupBtn) cotPopupBtn.onclick = openBriefCotizadorPopup;
 
-  // ===== Imágenes: drop zone, paste, file input =====
+  // ===== Drawer: imágenes (drop zone interno + paste) =====
   if (drawerOpen) {
     bindBriefImageGridHandlers(isNewDraft);
 
@@ -8292,28 +8550,71 @@ function bindCotizacion() {
         for (const f of files) await addImageFromFile(f, isNewDraft);
       };
     }
+  }
 
-    // Paste global: si el drawer está abierto, escuchamos paste en el document.
-    // Capturamos imágenes del clipboard (screenshots con Win+Shift+S, Ctrl+C de foto, etc.)
-    const pasteHandler = async (ev) => {
-      if (!STATE.briefSelected && !STATE.briefDraft) return;
-      const items = ev.clipboardData?.items || [];
-      for (const item of items) {
-        if (item.kind === 'file' && item.type.startsWith('image/')) {
-          ev.preventDefault();
-          const file = item.getAsFile();
-          if (file) await addImageFromFile(file, !STATE.briefSelected);
-        }
+  // ===== Popup cotizador =====
+  if (STATE.briefCotPopupOpen) {
+    const popupBackdrop = document.getElementById('brief-cot-popup-backdrop');
+    if (popupBackdrop) popupBackdrop.onclick = (ev) => {
+      if (ev.target.id === 'brief-cot-popup-backdrop') closeBriefCotizadorPopup();
+    };
+    const popupClose = document.getElementById('brief-cot-popup-close');
+    if (popupClose) popupClose.onclick = closeBriefCotizadorPopup;
+    const copyBtn = document.getElementById('brief-cot-popup-copy');
+    if (copyBtn) copyBtn.onclick = async () => {
+      const ta = document.getElementById('brief-cot-popup-text');
+      if (!ta) return;
+      try {
+        await navigator.clipboard.writeText(ta.value);
+        const st = document.getElementById('brief-cot-popup-status');
+        if (st) { st.textContent = '✓ copiado'; setTimeout(() => { st.textContent = ''; }, 2000); }
+      } catch(e) {
+        ta.select(); document.execCommand('copy');
       }
     };
-    // Usar un attribute para idempotencia (no agregar listener N veces).
-    if (!document._briefPasteBound) {
-      document.addEventListener('paste', pasteHandler);
-      document._briefPasteBound = true;
-    }
-  } else {
-    // Drawer cerrado, limpiar paste handler si existe.
-    // (Por simplicidad lo dejamos siempre escuchando — chequea STATE adentro.)
+    const sheetBtn = document.getElementById('brief-cot-popup-sheet');
+    if (sheetBtn) sheetBtn.onclick = async () => {
+      // Llama al Apps Script para escribir al Sheet "Cotizador Joaco" (reusa lógica
+      // existente). Pasamos los datos del cotizadorForm.
+      try {
+        if (typeof saveCotizacionToSheet === 'function') {
+          await saveCotizacionToSheet();
+        } else {
+          // Fallback: POST directo al apps script.
+          const f = STATE.cotizadorForm;
+          const r = calcCotizador(f);
+          await fetch(CONFIG.appsScriptUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' },
+            body: JSON.stringify({
+              cliente: f.cliente, alto: f.alto, ancho: f.ancho, neon: f.neon,
+              tipo: f.tipo, m2: r.m2, trans: r.transFinal, negro: r.negroFinal,
+              reventa: r.reventa, comision: r.comision,
+              descuento: r.descuento || 0, recargo: r.recargo || 0,
+              telefono: f.telefono || '', canal: f.canal || 'WPP'
+            })
+          });
+        }
+        const st = document.getElementById('brief-cot-popup-status');
+        if (st) { st.textContent = '✓ guardado en Sheet'; setTimeout(() => { st.textContent = ''; }, 2500); }
+      } catch (e) {
+        alert('Error guardando en Sheet: ' + e.message);
+      }
+    };
+    const enviarPopupBtn = document.getElementById('brief-cot-popup-enviar');
+    if (enviarPopupBtn) enviarPopupBtn.onclick = async () => {
+      if (!STATE.briefSelected) return;
+      try {
+        const r = calcCotizador(STATE.cotizadorForm);
+        const updated = await marcarBriefEnviado(STATE.briefSelected, { precio_final: r.transFinal });
+        const i = STATE.briefs.findIndex(b => b.id === updated.id);
+        if (i >= 0) STATE.briefs[i] = updated;
+        closeBriefCotizadorPopup();
+        closeBriefDrawer();
+      } catch(e) {
+        alert('Error: ' + e.message);
+      }
+    };
   }
 }
 
