@@ -7699,11 +7699,36 @@ if (canAccessChat()) {
 // El hilo interno (fase 3) reusa `brief_messages`, todavía no implementado.
 
 const BRIEF_ESTADOS = ['nuevo', 'listo', 'enviado'];
+// Columna "colgados" es VIRTUAL: filtra briefs estado=nuevo|listo con +24h sin movimiento.
+// El estado real en DB sigue siendo 'nuevo' o 'listo'; cuando se mueva (edit/upload),
+// updated_at se actualiza y deja de estar colgado solo.
+const BRIEF_STALE_MS = 24 * 60 * 60 * 1000;
 const BRIEF_COLUMNAS = [
   { id: 'nuevo',   label: '📥 A cotizar', color: 'var(--accent-cyan)' },
   { id: 'listo',   label: '🎨 Listos',    color: 'var(--green, #25D366)' },
   { id: 'enviado', label: '📤 Enviados',  color: 'var(--fg-subtle)' },
+  { id: 'colgado', label: '🟡 Colgados',  color: 'var(--amber, #FFA726)', virtual: true },
 ];
+
+function isBriefColgado(b) {
+  if (b.estado !== 'nuevo' && b.estado !== 'listo') return false;
+  return (Date.now() - Date.parse(b.updated_at)) >= BRIEF_STALE_MS;
+}
+// Motivo del cuelgue para mostrar en el card.
+function getColgadoMotivo(b) {
+  if (b.estado === 'nuevo')  return 'Falta cotizar (Emma no diseñó)';
+  if (b.estado === 'listo')  return 'Falta enviar (Joaco no mandó al cliente)';
+  return '';
+}
+// Para filtrar columnas reales (vs virtuales):
+// - "nuevo"/"listo" en col real: NO colgado
+// - "colgado" virtual: cualquiera de los anteriores que SÍ colgó
+function briefBelongsToColumn(b, colId) {
+  if (colId === 'colgado') return isBriefColgado(b);
+  if (colId === 'enviado') return b.estado === 'enviado';
+  // 'nuevo' o 'listo'
+  return b.estado === colId && !isBriefColgado(b);
+}
 
 // Rol del usuario logueado. Mapea el display name (STATE.user) a un rol funcional.
 // Joaco/Joaquín = comercial; Emma/Emmanuel = diseñador; Gaspar = admin (puede todo).
@@ -7768,8 +7793,8 @@ async function fetchBriefDetail(id) {
   }
 }
 
-async function uploadBriefImage(briefId, blob, contentType) {
-  const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/imagen`, {
+async function uploadBriefImage(briefId, blob, contentType, tipo = 'chat') {
+  const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/imagen?tipo=${tipo}`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': contentType },
     body: blob
@@ -7848,20 +7873,26 @@ function findPresupuestoMatch(brief) {
 }
 
 function renderBriefCard(b) {
-  const stale = isBriefStale(b);
+  const colgado = isBriefColgado(b);
+  const motivo = colgado ? getColgadoMotivo(b) : '';
   const intentos = b.intentos_followup || 0;
-  const imgCount = b.img_count || 0;
-  const thumb = b.first_img_key || null;
-  const medidas = b.medidas_libre || ((b.alto_cm && b.ancho_cm) ? `${Math.round(b.ancho_cm)}×${Math.round(b.alto_cm)}` : '');
+  const chatCount = b.chat_count || 0;
+  const renderCount = b.render_count || 0;
+  // En el kanban mostramos el render si lo hay (refleja avance), si no la captura del chat.
+  const thumb = b.first_render_key || b.first_chat_key || null;
+  const isRenderThumb = !!b.first_render_key;
+  const medidas = b.medidas_libre || ((b.alto_cm && b.ancho_cm) ? `${Math.round(b.ancho_cm)}×${Math.round(b.alto_cm)} cm` : '');
   const pMatch = b.estado === 'enviado' ? findPresupuestoMatch(b) : null;
   const sinPresupuesto = b.estado === 'enviado' && !pMatch;
   const thumbUrl = thumb ? `${CONFIG.trackerUrl}/admin/media/${encodeURIComponent(thumb)}?token=${STATE.token}` : null;
+  const borderColor = colgado ? 'rgba(255,167,38,.45)' : sinPresupuesto ? 'rgba(255,167,38,.35)' : 'var(--border)';
   return `
-    <div class="brief-card ${stale ? 'brief-card--stale' : ''}" data-brief-id="${b.id}"
-         style="background:var(--ink-100);border:1px solid ${stale ? 'rgba(255,24,48,.35)' : sinPresupuesto ? 'rgba(255,167,38,.35)' : 'var(--border)'};border-radius:var(--r-sm);overflow:hidden;margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s">
+    <div class="brief-card" data-brief-id="${b.id}"
+         style="background:var(--ink-100);border:1px solid ${borderColor};border-radius:var(--r-sm);overflow:hidden;margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s">
       ${thumbUrl ? `
         <div style="width:100%;height:120px;background:var(--ink-050) center/cover no-repeat;background-image:url('${thumbUrl}');position:relative">
-          ${imgCount > 1 ? `<div style="position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.7);color:#fff;font-size:10px;padding:2px 6px;border-radius:10px">+${imgCount - 1}</div>` : ''}
+          ${isRenderThumb ? '<div style="position:absolute;top:4px;left:4px;background:rgba(143,212,222,.85);color:#000;font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px">RENDER</div>' : ''}
+          ${(chatCount + renderCount) > 1 ? `<div style="position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.7);color:#fff;font-size:10px;padding:2px 6px;border-radius:10px">+${(chatCount + renderCount) - 1}</div>` : ''}
         </div>
       ` : ''}
       <div style="padding:var(--s-2)">
@@ -7870,15 +7901,15 @@ function renderBriefCard(b) {
             ${escapeHtml(b.cliente_nombre || 'Sin título')}
           </div>
           <div style="display:flex;gap:3px;flex-shrink:0">
-            ${stale ? '<span title="Sin movimiento +24h" style="background:rgba(255,24,48,.15);color:#FF5566;font-size:9px;padding:1px 5px;border-radius:3px">SLA</span>' : ''}
-            ${sinPresupuesto ? '<span title="Marcado como enviado pero no encontramos presupuesto en el Sheet — ¿olvidaste cotizar?" style="background:rgba(255,167,38,.15);color:#FFA726;font-size:9px;padding:1px 5px;border-radius:3px">⚠</span>' : ''}
+            ${sinPresupuesto ? '<span title="Marcado como enviado pero no encontramos presupuesto en el Sheet" style="background:rgba(255,167,38,.15);color:#FFA726;font-size:9px;padding:1px 5px;border-radius:3px">⚠</span>' : ''}
             ${pMatch ? '<span title="Tiene presupuesto en el Sheet" style="background:rgba(37,211,102,.15);color:#25D366;font-size:9px;padding:1px 5px;border-radius:3px">✓</span>' : ''}
           </div>
         </div>
+        ${colgado ? `<div style="font-size:11px;color:#FFA726;margin-bottom:4px"><b>⚠ Colgado:</b> ${escapeHtml(motivo)}</div>` : ''}
         ${medidas ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">${escapeHtml(medidas)}</div>` : ''}
         <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--fg-mute, rgba(233,237,239,.4))">
           <div style="display:flex;gap:6px;align-items:center">
-            ${!thumbUrl && imgCount > 0 ? `<span title="${imgCount} captura(s)">📎 ${imgCount}</span>` : ''}
+            ${!thumbUrl && chatCount > 0 ? `<span title="${chatCount} captura(s)">📎 ${chatCount}</span>` : ''}
             ${intentos > 0 ? `<span title="Intentos de seguimiento">↻ ${intentos}/12</span>` : ''}
           </div>
           <div>${relativeTime(b.updated_at)}</div>
@@ -7889,7 +7920,7 @@ function renderBriefCard(b) {
 }
 
 function renderBriefColumn(col) {
-  const briefs = STATE.briefs.filter(b => b.estado === col.id);
+  const briefs = STATE.briefs.filter(b => briefBelongsToColumn(b, col.id));
   const isDropTarget = col.id === 'nuevo' && canCreateBriefs();
   const dashedBorder = isDropTarget ? 'border:2px dashed rgba(143,212,222,.25)' : 'border:1px solid var(--border)';
   const hint = isDropTarget && !briefs.length
@@ -7920,13 +7951,15 @@ function renderBriefDrawer() {
   const isDis = role === 'disenador' || role === 'admin';
   const estado = data.estado || 'nuevo';
 
-  // Visibilidad de bloques según rol y estado:
-  // - Capturas del chat: visibles siempre (las subió Joaco).
-  // - Render + medidas técnicas: solo en estado 'listo' o cuando Emma está marcando como listo.
-  // - Notas: visible siempre.
-  // - Acción "Tomar y marcar listo" (Emma): solo en estado='nuevo' y rol disenador/admin.
-  // - Acción "Cotizar y enviar" (Joaco): solo en estado='listo' y rol comercial/admin.
-  const showRenderFields = estado === 'listo' || (estado === 'nuevo' && isDis && !isCom);
+  // Imágenes separadas por tipo.
+  const chatImgs = STATE.briefDetailImages.filter(x => (x.tipo || 'chat') === 'chat');
+  const renderImgs = STATE.briefDetailImages.filter(x => x.tipo === 'render');
+
+  // El bloque "Respuesta del diseñador" se muestra siempre que el brief exista
+  // (no es draft), porque tanto Emma como Joaco necesitan verlo:
+  // - Emma para llenar / editar (en nuevo o listo).
+  // - Joaco para ver el resultado (en listo o enviado, read-only).
+  const showRenderBlock = !isNew;
 
   return `
     <div class="brief-drawer-backdrop" id="brief-drawer-backdrop"
@@ -7943,60 +7976,74 @@ function renderBriefDrawer() {
 
       <div style="display:grid;gap:var(--s-3)">
 
-        <!-- Título + medidas (libre) -->
-        <div>
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Título ${isCom ? '<span style="color:#FF5566">*</span>' : ''}</label>
+        <!-- ========= ZONA 1: Pedido de Joaco ========= -->
+        <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
+          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">📋 Pedido de Joaco</legend>
+
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Título ${isCom ? '<span style="color:#FF5566">*</span>' : ''}</label>
           <input type="text" data-bf="cliente_nombre" id="brief-titulo-input" value="${escapeHtml(data.cliente_nombre || '')}"
                  placeholder="ej. Cartel Alhambra"
                  ${!isCom ? 'readonly' : ''}
-                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3);${!isCom ? 'opacity:.6' : ''}">
+                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3);${!isCom ? 'opacity:.7' : ''}">
 
-          ${isCom ? `
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Medidas referenciales (opcional)</label>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Medidas referenciales (lo que pidió el cliente)</label>
           <input type="text" data-bf="medidas_libre" value="${escapeHtml(data.medidas_libre || '')}"
-                 placeholder="ej. 90x50 aprox, INT, etc."
-                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px">
-          ` : (data.medidas_libre ? `<div style="font-size:12px;color:var(--fg-subtle)">Medidas referenciales: <b>${escapeHtml(data.medidas_libre)}</b></div>` : '')}
-        </div>
+                 placeholder="ej. 90x50 aprox, letras 80cm, INT"
+                 ${!isCom ? 'readonly' : ''}
+                 style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3);${!isCom ? 'opacity:.7' : ''}">
 
-        <!-- Capturas del chat -->
-        <div>
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">${isCom ? 'Capturas del chat / referencias' : 'Capturas que mandó Joaco'}</label>
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Capturas del chat / referencias</label>
           ${isCom ? `
           <div id="brief-dropzone"
-               style="border:2px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);text-align:center;color:var(--fg-mute);font-size:12px;cursor:pointer;transition:border-color .15s,background .15s">
-            📋 Pegá (Ctrl+V) o arrastrá imágenes acá
+               style="border:2px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-2);text-align:center;color:var(--fg-mute);font-size:11px;cursor:pointer;transition:border-color .15s,background .15s">
+            📋 Pegá (Ctrl+V) o arrastrá capturas acá
             <input type="file" id="brief-file-input" accept="image/*" multiple style="display:none">
           </div>
-          ` : ''}
-          <div id="brief-images-grid"
+          ` : (chatImgs.length === 0 ? '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— Joaco aún no subió capturas —</div>' : '')}
+          <div id="brief-images-grid-chat"
                style="margin-top:var(--s-2);display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px">
-            ${renderBriefImagesGrid(isNew)}
+            ${renderBriefImagesGridFor('chat', isNew, isCom)}
           </div>
-        </div>
+        </fieldset>
 
-        ${showRenderFields ? `
-        <!-- Render + medidas técnicas (cosa del diseñador) -->
+        ${showRenderBlock ? `
+        <!-- ========= ZONA 2: Respuesta del diseñador ========= -->
         <fieldset style="border:1px solid rgba(143,212,222,.25);border-radius:var(--r-sm);padding:var(--s-3);background:rgba(143,212,222,.03)">
-          <legend style="font-size:11px;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">Diseño · datos para cotizar</legend>
+          <legend style="font-size:11px;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">🎨 Respuesta del diseñador</legend>
+
+          <!-- Render -->
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Render del diseño</label>
+          ${isDis ? `
+          <div id="brief-dropzone-render"
+               style="border:2px dashed rgba(143,212,222,.3);border-radius:var(--r-sm);padding:var(--s-2);text-align:center;color:var(--fg-mute);font-size:11px;cursor:pointer;transition:border-color .15s,background .15s">
+            🎨 Pegá (Ctrl+V) o arrastrá el render acá
+            <input type="file" id="brief-file-input-render" accept="image/*" multiple style="display:none">
+          </div>
+          ` : (renderImgs.length === 0 ? '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— Emma todavía no subió el render —</div>' : '')}
+          <div id="brief-images-grid-render"
+               style="margin-top:var(--s-2);display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px;margin-bottom:var(--s-3)">
+            ${renderBriefImagesGridFor('render', false, isDis)}
+          </div>
+
+          <!-- Medidas reales -->
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
             <div>
               <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho (cm)</label>
               <input type="number" step="1" data-bf="ancho_cm" value="${data.ancho_cm || ''}"
                      ${!isDis ? 'readonly' : ''}
-                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);${!isDis ? 'opacity:.7' : ''}">
             </div>
             <div>
               <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Alto (cm)</label>
               <input type="number" step="1" data-bf="alto_cm" value="${data.alto_cm || ''}"
                      ${!isDis ? 'readonly' : ''}
-                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);${!isDis ? 'opacity:.7' : ''}">
             </div>
             <div>
               <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Neón (mt)</label>
               <input type="number" step="0.1" data-bf="neon_mt" value="${data.neon_mt || ''}"
                      ${!isDis ? 'readonly' : ''}
-                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);${!isDis ? 'opacity:.7' : ''}">
             </div>
           </div>
           <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Tipo</label>
@@ -8010,13 +8057,19 @@ function renderBriefDrawer() {
               Exterior
             </label>
           </div>
+
+          ${estado === 'nuevo' && isDis ? `
+            <div style="margin-top:var(--s-2);padding:var(--s-2);background:rgba(143,212,222,.06);border-radius:4px;font-size:11px;color:var(--accent-cyan);text-align:center">
+              💡 Al guardar con render + ancho + alto + neón completos, pasa automáticamente a "Listos".
+            </div>
+          ` : ''}
         </fieldset>
         ` : ''}
 
-        <!-- Notas -->
+        <!-- Notas (cualquier rol puede escribir) -->
         <div>
           <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Notas</label>
-          <textarea data-bf="notas" rows="3" placeholder="cambios pedidos, info extra, etc."
+          <textarea data-bf="notas" rows="2" placeholder="cambios pedidos, info extra, etc."
                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical">${escapeHtml(data.notas || '')}</textarea>
         </div>
 
@@ -8027,28 +8080,27 @@ function renderBriefDrawer() {
         ` : ''}
         ${(!isNew && data.estado === 'enviado' && !pMatch) ? `
         <div style="padding:var(--s-2);background:rgba(255,167,38,.08);border:1px solid rgba(255,167,38,.3);border-radius:var(--r-sm);font-size:12px;color:#FFA726">
-          ⚠ Marcado como enviado pero no encontramos presupuesto en el Sheet. ¿Se cotizó?
+          ⚠ Marcado como enviado pero no encontramos presupuesto en el Sheet.
         </div>
         ` : ''}
 
-        <!-- Acciones según rol y estado -->
+        <!-- Acciones por rol y estado -->
         <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;padding-bottom:var(--s-4)">
-          ${!isNew && estado === 'nuevo' && canMarkListo() ? `<button class="btn btn-cyan" id="brief-tomar">🎨 Tomar y marcar listo</button>` : ''}
-          ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Cotizar y enviar</button>` : ''}
-          ${!isNew && estado === 'listo' && canMarkListo() ? `<button class="btn btn-ghost" id="brief-back-nuevo">↩ Volver a "A cotizar"</button>` : ''}
+          ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Copiar presupuesto</button>` : ''}
           ${!isNew && estado === 'enviado' && isCom ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir Cotizador</button>` : ''}
-          ${(isCom || isNew) ? `<button class="btn ${isNew ? 'btn-cyan' : 'btn-ghost'}" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>` : ''}
+          ${(isCom || isDis || isNew) ? `<button class="btn ${isNew ? 'btn-cyan' : 'btn-ghost'}" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>` : ''}
         </div>
       </div>
     </aside>
   `;
 }
 
-function renderBriefImagesGrid(isNew) {
-  // Para brief nuevo: imágenes locales pendientes de subir (STATE.briefDraftImages).
-  // Para brief existente: imágenes ya en R2 (STATE.briefDetailImages).
-  if (isNew) {
-    if (!STATE.briefDraftImages.length) return '<div style="grid-column:1/-1;font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">Sin imágenes todavía</div>';
+// Render grid de imágenes para un tipo específico (chat | render).
+// editable = si el rol actual puede borrar imágenes de este tipo.
+function renderBriefImagesGridFor(tipo, isDraft, editable) {
+  if (isDraft && tipo === 'chat') {
+    // En draft solo soportamos capturas del chat (todavía no hay id para subir render).
+    if (!STATE.briefDraftImages.length) return '';
     return STATE.briefDraftImages.map((img, i) => `
       <div style="position:relative;width:100%;aspect-ratio:1;border-radius:4px;overflow:hidden;background:var(--ink-050)">
         <img src="${img.dataUrl}" style="width:100%;height:100%;object-fit:cover">
@@ -8057,14 +8109,15 @@ function renderBriefImagesGrid(isNew) {
       </div>
     `).join('');
   }
-  if (!STATE.briefDetailImages.length) return '<div style="grid-column:1/-1;font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">Sin imágenes todavía</div>';
-  return STATE.briefDetailImages.map(img => {
+  const imgs = STATE.briefDetailImages.filter(x => (x.tipo || 'chat') === tipo);
+  if (!imgs.length) return '';
+  return imgs.map(img => {
     const url = `${CONFIG.trackerUrl}/admin/media/${encodeURIComponent(img.r2_key)}?token=${STATE.token}`;
     return `
       <div style="position:relative;width:100%;aspect-ratio:1;border-radius:4px;overflow:hidden;background:var(--ink-050)">
         <img src="${url}" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" data-img-zoom="${escapeHtml(url)}">
-        <button type="button" data-img-remove="${img.id}" title="Eliminar"
-                style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;border:0;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>
+        ${editable ? `<button type="button" data-img-remove="${img.id}" title="Eliminar"
+                style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;border:0;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ''}
       </div>
     `;
   }).join('');
@@ -8150,10 +8203,8 @@ function openBriefDrawer(id) {
   render();
   // Cargar detalle (incluye imágenes) en background.
   fetchBriefDetail(id).then(() => {
-    // Re-render solo del grid de imágenes, sin destruir el resto del drawer.
-    const grid = document.getElementById('brief-images-grid');
-    if (grid) grid.innerHTML = renderBriefImagesGrid(false);
-    bindBriefImageGridHandlers(false);
+    // Re-render solo los grids (chat + render) sin destruir el resto del drawer.
+    refreshImageGrids();
   });
 }
 
@@ -8191,35 +8242,6 @@ function readBriefDrawerForm() {
   const tipoEl = document.querySelector('[data-bf-radio="tipo"]:checked');
   if (tipoEl) out.tipo = tipoEl.value;
   return out;
-}
-
-// Acción del diseñador (Emma): toma un brief de "A cotizar" → pasa a "Listos".
-// El frontend ya tiene los campos de ancho/alto/neon visibles al re-renderizar el drawer,
-// para que Emma los complete después de tomar.
-async function handleBriefTomar() {
-  if (!STATE.briefSelected) return;
-  try {
-    const saved = await saveBrief({ id: STATE.briefSelected, estado: 'listo' });
-    const i = STATE.briefs.findIndex(b => b.id === saved.id);
-    if (i >= 0) STATE.briefs[i] = saved;
-    // Re-render con drawer abierto: ahora Emma ve los campos render+medidas técnicas.
-    render();
-  } catch (e) {
-    alert('Error: ' + e.message);
-  }
-}
-
-// Acción del diseñador: si se equivocó al tomar, vuelve a "A cotizar".
-async function handleBriefBackNuevo() {
-  if (!STATE.briefSelected) return;
-  try {
-    const saved = await saveBrief({ id: STATE.briefSelected, estado: 'nuevo' });
-    const i = STATE.briefs.findIndex(b => b.id === saved.id);
-    if (i >= 0) STATE.briefs[i] = saved;
-    render();
-  } catch (e) {
-    alert('Error: ' + e.message);
-  }
 }
 
 // Mini-popup cotizador: usa la lógica existente (calcCotizador + buildPresupuestoTexto)
@@ -8312,60 +8334,66 @@ function fileToDraftImage(file) {
   });
 }
 
-async function addImageFromFile(file, isNewBrief) {
+async function addImageFromFile(file, isNewBrief, tipo = 'chat') {
   if (!file || !file.type || !file.type.startsWith('image/')) return;
   if (isNewBrief) {
+    // Draft solo soporta capturas del chat (render requiere id de brief).
+    if (tipo !== 'chat') return;
     const img = await fileToDraftImage(file);
     STATE.briefDraftImages.push(img);
-    const grid = document.getElementById('brief-images-grid');
-    if (grid) grid.innerHTML = renderBriefImagesGrid(true);
-    bindBriefImageGridHandlers(true);
+    refreshImageGrids();
   } else {
     try {
-      const result = await uploadBriefImage(STATE.briefSelected, file, file.type);
+      const result = await uploadBriefImage(STATE.briefSelected, file, file.type, tipo);
       STATE.briefDetailImages.push(result);
-      const grid = document.getElementById('brief-images-grid');
-      if (grid) grid.innerHTML = renderBriefImagesGrid(false);
-      bindBriefImageGridHandlers(false);
+      refreshImageGrids();
     } catch (e) {
       alert('Error subiendo imagen: ' + e.message);
     }
   }
 }
 
+// Refresca AMBOS grids (chat + render) sin re-render del drawer.
+function refreshImageGrids() {
+  const isNew = !STATE.briefSelected && !!STATE.briefDraft;
+  const role = getUserRole();
+  const isCom = role === 'comercial' || role === 'admin';
+  const isDis = role === 'disenador' || role === 'admin';
+  const chatGrid = document.getElementById('brief-images-grid-chat');
+  if (chatGrid) chatGrid.innerHTML = renderBriefImagesGridFor('chat', isNew, isCom);
+  const renderGrid = document.getElementById('brief-images-grid-render');
+  if (renderGrid) renderGrid.innerHTML = renderBriefImagesGridFor('render', false, isDis);
+  bindBriefImageGridHandlers(isNew);
+}
+
 function bindBriefImageGridHandlers(isNew) {
-  if (isNew) {
-    document.querySelectorAll('[data-drop-img-remove]').forEach(btn => {
-      btn.onclick = (ev) => {
-        ev.stopPropagation();
-        const i = parseInt(btn.dataset.dropImgRemove, 10);
-        STATE.briefDraftImages.splice(i, 1);
-        const grid = document.getElementById('brief-images-grid');
-        if (grid) grid.innerHTML = renderBriefImagesGrid(true);
-        bindBriefImageGridHandlers(true);
-      };
-    });
-  } else {
-    document.querySelectorAll('[data-img-remove]').forEach(btn => {
-      btn.onclick = async (ev) => {
-        ev.stopPropagation();
-        const imgId = parseInt(btn.dataset.imgRemove, 10);
-        if (!confirm('¿Eliminar esta imagen?')) return;
-        try {
-          await deleteBriefImage(STATE.briefSelected, imgId);
-          STATE.briefDetailImages = STATE.briefDetailImages.filter(x => x.id !== imgId);
-          const grid = document.getElementById('brief-images-grid');
-          if (grid) grid.innerHTML = renderBriefImagesGrid(false);
-          bindBriefImageGridHandlers(false);
-        } catch (e) {
-          alert('Error eliminando: ' + e.message);
-        }
-      };
-    });
-    document.querySelectorAll('[data-img-zoom]').forEach(el => {
-      el.onclick = () => window.open(el.dataset.imgZoom, '_blank');
-    });
-  }
+  // Botones quitar de DRAFT (sin subir, solo borra del array).
+  document.querySelectorAll('[data-drop-img-remove]').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const i = parseInt(btn.dataset.dropImgRemove, 10);
+      STATE.briefDraftImages.splice(i, 1);
+      refreshImageGrids();
+    };
+  });
+  // Botones eliminar de imágenes ya subidas (brief existente).
+  document.querySelectorAll('[data-img-remove]').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const imgId = parseInt(btn.dataset.imgRemove, 10);
+      if (!confirm('¿Eliminar esta imagen?')) return;
+      try {
+        await deleteBriefImage(STATE.briefSelected, imgId);
+        STATE.briefDetailImages = STATE.briefDetailImages.filter(x => x.id !== imgId);
+        refreshImageGrids();
+      } catch (e) {
+        alert('Error eliminando: ' + e.message);
+      }
+    };
+  });
+  document.querySelectorAll('[data-img-zoom]').forEach(el => {
+    el.onclick = () => window.open(el.dataset.imgZoom, '_blank');
+  });
 }
 
 async function handleBriefSave() {
@@ -8377,12 +8405,28 @@ async function handleBriefSave() {
   }
   if (!isCreate) form.id = STATE.briefSelected;
 
+  // Auto-transición a "listo" cuando el diseñador completa render + medidas.
+  // Condiciones (todas):
+  //   - brief existente (no create)
+  //   - estado actual = "nuevo"
+  //   - ancho_cm, alto_cm, neon_mt todos completos
+  //   - al menos 1 imagen tipo='render' subida
+  if (!isCreate) {
+    const current = STATE.briefs.find(b => b.id === STATE.briefSelected);
+    const estadoActual = current?.estado || 'nuevo';
+    const tieneRender = STATE.briefDetailImages.some(x => x.tipo === 'render');
+    const tieneMedidas = form.ancho_cm > 0 && form.alto_cm > 0 && form.neon_mt > 0;
+    if (estadoActual === 'nuevo' && tieneRender && tieneMedidas) {
+      form.estado = 'listo';
+    }
+  }
+
   try {
     const saved = await saveBrief(form);
-    // Subir imágenes pendientes (solo en create).
+    // Subir imágenes pendientes del draft (solo capturas del chat).
     if (isCreate && STATE.briefDraftImages.length) {
       for (const img of STATE.briefDraftImages) {
-        try { await uploadBriefImage(saved.id, img.blob, img.contentType); } catch(e) { console.error('upload failed', e); }
+        try { await uploadBriefImage(saved.id, img.blob, img.contentType, 'chat'); } catch(e) { console.error('upload failed', e); }
       }
     }
     if (isCreate) {
@@ -8477,30 +8521,35 @@ function bindCotizacion() {
       };
     }
 
-    // Paste global EN VISTA Cotización (no necesita drawer abierto).
-    // Idempotencia con flag en el document.
-    if (!document._cotPasteBound) {
-      document.addEventListener('paste', async (ev) => {
-        if (STATE.view !== 'cotizacion') return;
-        const items = ev.clipboardData?.items || [];
-        // Si el drawer está abierto, lo maneja el handler del drawer (más abajo).
-        // Si está cerrado y hay imágenes, creamos brief al toque.
-        const drawerOpen = !!STATE.briefSelected || !!STATE.briefDraft;
-        for (const item of items) {
-          if (item.kind === 'file' && item.type.startsWith('image/')) {
-            ev.preventDefault();
-            const file = item.getAsFile();
-            if (!file) continue;
-            if (drawerOpen) {
-              await addImageFromFile(file, !STATE.briefSelected);
-            } else if (canCreateBriefs()) {
-              await quickCreateBriefFromImage(file);
-            }
+  }
+
+  // Paste global EN VISTA Cotización. Decide chat/render según rol y contexto.
+  if (!document._cotPasteBound) {
+    document.addEventListener('paste', async (ev) => {
+      if (STATE.view !== 'cotizacion') return;
+      const items = ev.clipboardData?.items || [];
+      const drawerOpen = !!STATE.briefSelected || !!STATE.briefDraft;
+      const role = getUserRole();
+      // Heurística:
+      // - Drawer abierto + diseñador → render
+      // - Drawer abierto + comercial → chat
+      // - Sin drawer + comercial → crear brief con captura
+      // - Sin drawer + diseñador → no hace nada (no puede crear)
+      const tipo = role === 'disenador' ? 'render' : 'chat';
+      for (const item of items) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          ev.preventDefault();
+          const file = item.getAsFile();
+          if (!file) continue;
+          if (drawerOpen) {
+            await addImageFromFile(file, !STATE.briefSelected, tipo);
+          } else if (canCreateBriefs()) {
+            await quickCreateBriefFromImage(file);
           }
         }
-      });
-      document._cotPasteBound = true;
-    }
+      }
+    });
+    document._cotPasteBound = true;
   }
 
   // ===== Drawer =====
@@ -8513,45 +8562,50 @@ function bindCotizacion() {
   if (backdrop) backdrop.onclick = closeBriefDrawer;
   const saveBtn = document.getElementById('brief-save');
   if (saveBtn) saveBtn.onclick = handleBriefSave;
-  const enviarBtn = document.getElementById('brief-enviar');
-  if (enviarBtn) enviarBtn.onclick = handleBriefEnviar;
   const cotBtn = document.getElementById('brief-cotizar');
   if (cotBtn) cotBtn.onclick = handleBriefAbrirCotizador;
-  const tomarBtn = document.getElementById('brief-tomar');
-  if (tomarBtn) tomarBtn.onclick = handleBriefTomar;
-  const backBtn = document.getElementById('brief-back-nuevo');
-  if (backBtn) backBtn.onclick = handleBriefBackNuevo;
   const cotPopupBtn = document.getElementById('brief-cotizar-popup');
   if (cotPopupBtn) cotPopupBtn.onclick = openBriefCotizadorPopup;
 
-  // ===== Drawer: imágenes (drop zone interno + paste) =====
+  // ===== Drawer: dropzones internos (chat + render) =====
   if (drawerOpen) {
     bindBriefImageGridHandlers(isNewDraft);
 
-    const dropzone = document.getElementById('brief-dropzone');
-    const fileInput = document.getElementById('brief-file-input');
-    if (dropzone && fileInput) {
-      dropzone.onclick = () => fileInput.click();
-      fileInput.onchange = async (ev) => {
+    // Dropzone CHAT (capturas del cliente — solo comercial/admin).
+    const dzChat = document.getElementById('brief-dropzone');
+    const fiChat = document.getElementById('brief-file-input');
+    if (dzChat && fiChat) {
+      dzChat.onclick = () => fiChat.click();
+      fiChat.onchange = async (ev) => {
         const files = Array.from(ev.target.files || []);
-        for (const f of files) await addImageFromFile(f, isNewDraft);
-        fileInput.value = '';
+        for (const f of files) await addImageFromFile(f, isNewDraft, 'chat');
+        fiChat.value = '';
       };
-      dropzone.ondragover = (ev) => {
-        ev.preventDefault();
-        dropzone.style.borderColor = 'var(--accent-cyan)';
-        dropzone.style.background = 'rgba(143,212,222,.05)';
-      };
-      dropzone.ondragleave = () => {
-        dropzone.style.borderColor = 'var(--border)';
-        dropzone.style.background = '';
-      };
-      dropzone.ondrop = async (ev) => {
-        ev.preventDefault();
-        dropzone.style.borderColor = 'var(--border)';
-        dropzone.style.background = '';
+      dzChat.ondragover = (ev) => { ev.preventDefault(); dzChat.style.borderColor = 'var(--accent-cyan)'; dzChat.style.background = 'rgba(143,212,222,.05)'; };
+      dzChat.ondragleave = () => { dzChat.style.borderColor = 'var(--border)'; dzChat.style.background = ''; };
+      dzChat.ondrop = async (ev) => {
+        ev.preventDefault(); dzChat.style.borderColor = 'var(--border)'; dzChat.style.background = '';
         const files = Array.from(ev.dataTransfer?.files || []);
-        for (const f of files) await addImageFromFile(f, isNewDraft);
+        for (const f of files) await addImageFromFile(f, isNewDraft, 'chat');
+      };
+    }
+
+    // Dropzone RENDER (solo diseñador/admin, brief existente).
+    const dzRender = document.getElementById('brief-dropzone-render');
+    const fiRender = document.getElementById('brief-file-input-render');
+    if (dzRender && fiRender) {
+      dzRender.onclick = () => fiRender.click();
+      fiRender.onchange = async (ev) => {
+        const files = Array.from(ev.target.files || []);
+        for (const f of files) await addImageFromFile(f, false, 'render');
+        fiRender.value = '';
+      };
+      dzRender.ondragover = (ev) => { ev.preventDefault(); dzRender.style.borderColor = 'var(--accent-cyan)'; dzRender.style.background = 'rgba(143,212,222,.1)'; };
+      dzRender.ondragleave = () => { dzRender.style.borderColor = 'rgba(143,212,222,.3)'; dzRender.style.background = ''; };
+      dzRender.ondrop = async (ev) => {
+        ev.preventDefault(); dzRender.style.borderColor = 'rgba(143,212,222,.3)'; dzRender.style.background = '';
+        const files = Array.from(ev.dataTransfer?.files || []);
+        for (const f of files) await addImageFromFile(f, false, 'render');
       };
     }
   }

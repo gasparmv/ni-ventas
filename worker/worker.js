@@ -1879,7 +1879,9 @@ export default {
       // ============================================================
 
       // GET /admin/briefs?estado=&comercial_id=&disenador_id=&limit=
-      // Incluye first_img_key + img_count para mostrar miniatura en el kanban.
+      // Incluye:
+      //   - first_chat_key + chat_count (capturas del chat — para thumb del kanban)
+      //   - first_render_key + render_count (renders del diseñador)
       if (request.method === 'GET' && path === '/admin/briefs') {
         const estado = url.searchParams.get('estado');
         const comercialId = url.searchParams.get('comercial_id');
@@ -1892,8 +1894,10 @@ export default {
         if (disenadorId) { where.push('b.disenador_id = ?'); args.push(disenadorId); }
         const sql = `
           SELECT b.*,
-                 (SELECT r2_key FROM brief_imagenes WHERE brief_id = b.id ORDER BY orden ASC, id ASC LIMIT 1) AS first_img_key,
-                 (SELECT COUNT(*) FROM brief_imagenes WHERE brief_id = b.id) AS img_count
+                 (SELECT r2_key FROM brief_imagenes WHERE brief_id = b.id AND tipo = 'chat'   ORDER BY orden, id LIMIT 1) AS first_chat_key,
+                 (SELECT COUNT(*)  FROM brief_imagenes WHERE brief_id = b.id AND tipo = 'chat')                            AS chat_count,
+                 (SELECT r2_key FROM brief_imagenes WHERE brief_id = b.id AND tipo = 'render' ORDER BY orden, id LIMIT 1) AS first_render_key,
+                 (SELECT COUNT(*)  FROM brief_imagenes WHERE brief_id = b.id AND tipo = 'render')                          AS render_count
           FROM briefs b
           ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
           ORDER BY b.updated_at DESC
@@ -2008,11 +2012,12 @@ export default {
         return json({ brief });
       }
 
-      // PUT /admin/briefs/:id/imagen  →  sube imagen a R2 + inserta brief_imagenes.
+      // PUT /admin/briefs/:id/imagen?tipo=chat|render  →  sube imagen a R2 + inserta.
       // Body: bytes raw del archivo. Headers: Content-Type: image/png|jpeg|webp|etc.
-      // Devuelve { id, r2_key, content_type, size_bytes, orden, created_at }.
+      // tipo: 'chat' (captura del cliente, sube Joaco) o 'render' (sube Emma). Default: 'chat'.
       if (request.method === 'PUT' && /^\/admin\/briefs\/\d+\/imagen$/.test(path)) {
         const briefId = path.split('/')[3];
+        const tipo = (url.searchParams.get('tipo') === 'render') ? 'render' : 'chat';
         if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
         const ct = request.headers.get('content-type') || 'application/octet-stream';
         if (!ct.startsWith('image/')) return json({ error: 'only image/* content-type allowed' }, 400);
@@ -2021,27 +2026,26 @@ export default {
         if (!buf || buf.byteLength === 0) return json({ error: 'empty body' }, 400);
         if (buf.byteLength > 10 * 1024 * 1024) return json({ error: 'image too large (>10MB)' }, 413);
 
-        // Validar que el brief exista (FK lógica).
         const brief = await env.DB.prepare('SELECT id FROM briefs WHERE id = ?').bind(briefId).first();
         if (!brief) return json({ error: 'brief not found' }, 404);
 
         const ext = (ct.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'bin';
-        const r2Key = `briefs/${briefId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const r2Key = `briefs/${briefId}/${tipo}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
         try {
           await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: ct } });
         } catch (e) {
           return json({ error: 'r2 put failed: ' + e.message }, 500);
         }
 
-        // Orden = max(orden) + 1 dentro del brief.
+        // Orden = max(orden) + 1 dentro del brief + tipo.
         const ordRow = await env.DB.prepare(
-          'SELECT COALESCE(MAX(orden), -1) + 1 AS next_ord FROM brief_imagenes WHERE brief_id = ?'
-        ).bind(briefId).first();
+          'SELECT COALESCE(MAX(orden), -1) + 1 AS next_ord FROM brief_imagenes WHERE brief_id = ? AND tipo = ?'
+        ).bind(briefId, tipo).first();
         const orden = ordRow?.next_ord ?? 0;
         const now = new Date().toISOString();
         const result = await env.DB.prepare(
-          'INSERT INTO brief_imagenes (brief_id, r2_key, content_type, size_bytes, orden, created_at) VALUES (?,?,?,?,?,?)'
-        ).bind(briefId, r2Key, ct, buf.byteLength, orden, now).run();
+          'INSERT INTO brief_imagenes (brief_id, r2_key, content_type, size_bytes, orden, created_at, tipo) VALUES (?,?,?,?,?,?,?)'
+        ).bind(briefId, r2Key, ct, buf.byteLength, orden, now, tipo).run();
         await env.DB.prepare('UPDATE briefs SET updated_at = ? WHERE id = ?').bind(now, briefId).run();
         return json({
           id: result.meta.last_row_id,
@@ -2050,6 +2054,7 @@ export default {
           content_type: ct,
           size_bytes: buf.byteLength,
           orden,
+          tipo,
           created_at: now
         }, 201);
       }
