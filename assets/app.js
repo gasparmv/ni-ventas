@@ -7850,17 +7850,21 @@ function findPresupuestoMatch(brief) {
 function renderBriefCard(b) {
   const stale = isBriefStale(b);
   const intentos = b.intentos_followup || 0;
-  const imgCount = b._imgCount || 0;       // se llena al cargar detalle, opcional acá
-  const thumb = b._firstImgKey || null;    // primer R2 key, si tenemos
+  const imgCount = b.img_count || 0;
+  const thumb = b.first_img_key || null;
   const medidas = b.medidas_libre || ((b.alto_cm && b.ancho_cm) ? `${Math.round(b.ancho_cm)}×${Math.round(b.alto_cm)}` : '');
-  // Cruce con Sheet (solo importa para estado 'enviado').
   const pMatch = b.estado === 'enviado' ? findPresupuestoMatch(b) : null;
   const sinPresupuesto = b.estado === 'enviado' && !pMatch;
+  const thumbUrl = thumb ? `${CONFIG.trackerUrl}/admin/media/${encodeURIComponent(thumb)}?token=${STATE.token}` : null;
   return `
     <div class="brief-card ${stale ? 'brief-card--stale' : ''}" data-brief-id="${b.id}"
-         style="background:var(--ink-100);border:1px solid ${stale ? 'rgba(255,24,48,.35)' : sinPresupuesto ? 'rgba(255,167,38,.35)' : 'var(--border)'};border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s;display:flex;gap:8px">
-      ${thumb ? `<img src="${CONFIG.trackerUrl}/admin/media/${encodeURIComponent(thumb)}?token=${STATE.token}" alt="" style="width:44px;height:44px;object-fit:cover;border-radius:4px;flex-shrink:0;background:var(--ink-050)">` : ''}
-      <div style="flex:1;min-width:0">
+         style="background:var(--ink-100);border:1px solid ${stale ? 'rgba(255,24,48,.35)' : sinPresupuesto ? 'rgba(255,167,38,.35)' : 'var(--border)'};border-radius:var(--r-sm);overflow:hidden;margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s">
+      ${thumbUrl ? `
+        <div style="width:100%;height:120px;background:var(--ink-050) center/cover no-repeat;background-image:url('${thumbUrl}');position:relative">
+          ${imgCount > 1 ? `<div style="position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.7);color:#fff;font-size:10px;padding:2px 6px;border-radius:10px">+${imgCount - 1}</div>` : ''}
+        </div>
+      ` : ''}
+      <div style="padding:var(--s-2)">
         <div style="display:flex;justify-content:space-between;align-items:start;gap:6px;margin-bottom:4px">
           <div style="font-weight:600;font-size:13px;line-height:1.3;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
             ${escapeHtml(b.cliente_nombre || 'Sin título')}
@@ -7874,7 +7878,7 @@ function renderBriefCard(b) {
         ${medidas ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">${escapeHtml(medidas)}</div>` : ''}
         <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--fg-mute, rgba(233,237,239,.4))">
           <div style="display:flex;gap:6px;align-items:center">
-            ${imgCount > 0 ? `<span title="${imgCount} captura(s)">📎 ${imgCount}</span>` : ''}
+            ${!thumbUrl && imgCount > 0 ? `<span title="${imgCount} captura(s)">📎 ${imgCount}</span>` : ''}
             ${intentos > 0 ? `<span title="Intentos de seguimiento">↻ ${intentos}/12</span>` : ''}
           </div>
           <div>${relativeTime(b.updated_at)}</div>

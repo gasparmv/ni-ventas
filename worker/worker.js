@@ -1879,6 +1879,7 @@ export default {
       // ============================================================
 
       // GET /admin/briefs?estado=&comercial_id=&disenador_id=&limit=
+      // Incluye first_img_key + img_count para mostrar miniatura en el kanban.
       if (request.method === 'GET' && path === '/admin/briefs') {
         const estado = url.searchParams.get('estado');
         const comercialId = url.searchParams.get('comercial_id');
@@ -1886,10 +1887,18 @@ export default {
         const limit = Math.min(parseInt(url.searchParams.get('limit') || '500'), 2000);
         const where = [];
         const args = [];
-        if (estado)      { where.push('estado = ?');       args.push(estado); }
-        if (comercialId) { where.push('comercial_id = ?'); args.push(comercialId); }
-        if (disenadorId) { where.push('disenador_id = ?'); args.push(disenadorId); }
-        const sql = `SELECT * FROM briefs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY updated_at DESC LIMIT ?`;
+        if (estado)      { where.push('b.estado = ?');       args.push(estado); }
+        if (comercialId) { where.push('b.comercial_id = ?'); args.push(comercialId); }
+        if (disenadorId) { where.push('b.disenador_id = ?'); args.push(disenadorId); }
+        const sql = `
+          SELECT b.*,
+                 (SELECT r2_key FROM brief_imagenes WHERE brief_id = b.id ORDER BY orden ASC, id ASC LIMIT 1) AS first_img_key,
+                 (SELECT COUNT(*) FROM brief_imagenes WHERE brief_id = b.id) AS img_count
+          FROM briefs b
+          ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+          ORDER BY b.updated_at DESC
+          LIMIT ?
+        `;
         args.push(limit);
         const rs = await env.DB.prepare(sql).bind(...args).all();
         return json({ briefs: rs.results || [] });
