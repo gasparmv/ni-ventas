@@ -6,7 +6,7 @@
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Emma'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Diseñador'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -7734,8 +7734,8 @@ function briefBelongsToColumn(b, colId) {
 // Joaco/Joaquín = comercial; Emma/Emmanuel = diseñador; Gaspar = admin (puede todo).
 function getUserRole() {
   const u = (STATE.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  if (u === 'gaspar')                   return 'admin';
-  if (u === 'emma' || u === 'emmanuel') return 'disenador';
+  if (u === 'gaspar')                                   return 'admin';
+  if (u === 'emma' || u === 'emmanuel' || u === 'disenador') return 'disenador';
   return 'comercial'; // joaco, joaquin, default
 }
 function canCreateBriefs() { const r = getUserRole(); return r === 'comercial' || r === 'admin'; }
