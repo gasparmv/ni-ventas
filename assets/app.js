@@ -7752,6 +7752,7 @@ if (typeof STATE.briefDraftImages === 'undefined') STATE.briefDraftImages = []; 
 if (typeof STATE.briefDetailImages === 'undefined') STATE.briefDetailImages = []; // imágenes ya en R2 del brief abierto
 if (typeof STATE.briefDetailLoading === 'undefined') STATE.briefDetailLoading = false;
 if (typeof STATE.briefCotPopupOpen === 'undefined') STATE.briefCotPopupOpen = false;
+if (typeof STATE.imgLightboxUrl === 'undefined')    STATE.imgLightboxUrl = null;
 
 async function fetchBriefs() {
   if (!CONFIG.trackerUrl || !STATE.token) return;
@@ -8161,6 +8162,7 @@ function renderCotizacion() {
       </div>
       ${renderBriefDrawer()}
       ${renderBriefCotizadorPopup()}
+      ${renderImgLightbox()}
     </div>
   `;
 }
@@ -8277,6 +8279,65 @@ function closeBriefCotizadorPopup() {
   render();
 }
 
+// Guarda la cotización actual al Sheet "Cotizador Joaco" vía Apps Script.
+// Si el brief abierto no tenía sheet_row, lo persistimos para idempotencia/traza.
+// Devuelve { ok, row } o { error }.
+async function saveCotToSheetFromPopup() {
+  const f = STATE.cotizadorForm;
+  if (!f) return { error: 'no form' };
+  const r = (function(){ try { return calcCotizador(f); } catch(e){ return null; } })();
+  if (!r) return { error: 'no calc' };
+  const payload = {
+    cliente: f.cliente, alto: f.alto, ancho: f.ancho, neon: f.neon,
+    tipo: f.tipo, m2: r.m2,
+    trans: r.transFinal, negro: r.negroFinal,
+    reventa: r.reventa, comision: r.comision,
+    descuento: r.descuento || 0, recargo: r.recargo || 0,
+    telefono: f.telefono || '', canal: f.canal || 'WPP'
+  };
+  try {
+    const resp = await fetch(CONFIG.appsScriptUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },  // text/plain evita preflight CORS
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if (data && data.ok && STATE.briefSelected && data.row) {
+      // Persistir sheet_row en el brief para trazabilidad.
+      try {
+        const saved = await saveBrief({ id: STATE.briefSelected, sheet_row: data.row });
+        const i = STATE.briefs.findIndex(b => b.id === saved.id);
+        if (i >= 0) STATE.briefs[i] = saved;
+      } catch(e) {}
+    }
+    return data;
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// ===== Lightbox (modal flotante para preview de imágenes) =====
+function openImgLightbox(url) {
+  STATE.imgLightboxUrl = url;
+  render();
+}
+function closeImgLightbox() {
+  STATE.imgLightboxUrl = null;
+  render();
+}
+function renderImgLightbox() {
+  if (!STATE.imgLightboxUrl) return '';
+  return `
+    <div id="img-lightbox" role="dialog" aria-modal="true"
+         style="position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:300;display:flex;align-items:center;justify-content:center;padding:24px;cursor:zoom-out">
+      <img src="${escapeHtml(STATE.imgLightboxUrl)}" alt="preview"
+           style="max-width:100%;max-height:100%;object-fit:contain;border-radius:6px;box-shadow:0 8px 40px rgba(0,0,0,.6);cursor:default">
+      <button id="img-lightbox-close" aria-label="Cerrar"
+              style="position:fixed;top:16px;right:20px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:0;cursor:pointer;font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)">✕</button>
+    </div>
+  `;
+}
+
 function renderBriefCotizadorPopup() {
   if (!STATE.briefCotPopupOpen) return '';
   let r = null;
@@ -8308,10 +8369,10 @@ function renderBriefCotizadorPopup() {
                   style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-3)">${escapeHtml(texto)}</textarea>
 
         <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
-          <button class="btn btn-ghost" id="brief-cot-popup-copy">📋 Copiar texto</button>
-          <button class="btn btn-ghost" id="brief-cot-popup-sheet">💾 Guardar en Sheet</button>
+          <button class="btn btn-ghost" id="brief-cot-popup-copy">📋 Copiar y guardar</button>
           <button class="btn btn-cyan" id="brief-cot-popup-enviar">✓ Marcar como enviado</button>
         </div>
+        <div style="font-size:10px;color:var(--fg-mute);text-align:right;margin-top:6px">Ambos botones guardan automáticamente en el Sheet de presupuestos.</div>
         <div id="brief-cot-popup-status" style="font-size:11px;color:var(--green, #25D366);text-align:right;margin-top:6px;height:14px"></div>
       </div>
     </div>
@@ -8392,7 +8453,7 @@ function bindBriefImageGridHandlers(isNew) {
     };
   });
   document.querySelectorAll('[data-img-zoom]').forEach(el => {
-    el.onclick = () => window.open(el.dataset.imgZoom, '_blank');
+    el.onclick = (ev) => { ev.stopPropagation(); openImgLightbox(el.dataset.imgZoom); };
   });
 }
 
@@ -8618,52 +8679,41 @@ function bindCotizacion() {
     };
     const popupClose = document.getElementById('brief-cot-popup-close');
     if (popupClose) popupClose.onclick = closeBriefCotizadorPopup;
+    const setStatus = (msg, color) => {
+      const st = document.getElementById('brief-cot-popup-status');
+      if (!st) return;
+      st.textContent = msg;
+      st.style.color = color || 'var(--green, #25D366)';
+      if (msg) setTimeout(() => { if (st.textContent === msg) st.textContent = ''; }, 3500);
+    };
+
+    // 📋 Copiar y guardar — copia al clipboard + escribe en el Sheet.
     const copyBtn = document.getElementById('brief-cot-popup-copy');
     if (copyBtn) copyBtn.onclick = async () => {
       const ta = document.getElementById('brief-cot-popup-text');
       if (!ta) return;
+      setStatus('Guardando…', 'var(--fg-subtle)');
       try {
         await navigator.clipboard.writeText(ta.value);
-        const st = document.getElementById('brief-cot-popup-status');
-        if (st) { st.textContent = '✓ copiado'; setTimeout(() => { st.textContent = ''; }, 2000); }
-      } catch(e) {
+      } catch (e) {
         ta.select(); document.execCommand('copy');
       }
+      const sheetResp = await saveCotToSheetFromPopup();
+      if (sheetResp.error) setStatus('⚠ copiado, pero falló Sheet: ' + sheetResp.error, '#FFA726');
+      else setStatus(`✓ copiado y guardado en Sheet (fila ${sheetResp.row || '?'})`);
     };
-    const sheetBtn = document.getElementById('brief-cot-popup-sheet');
-    if (sheetBtn) sheetBtn.onclick = async () => {
-      // Llama al Apps Script para escribir al Sheet "Cotizador Joaco" (reusa lógica
-      // existente). Pasamos los datos del cotizadorForm.
-      try {
-        if (typeof saveCotizacionToSheet === 'function') {
-          await saveCotizacionToSheet();
-        } else {
-          // Fallback: POST directo al apps script.
-          const f = STATE.cotizadorForm;
-          const r = calcCotizador(f);
-          await fetch(CONFIG.appsScriptUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain' },
-            body: JSON.stringify({
-              cliente: f.cliente, alto: f.alto, ancho: f.ancho, neon: f.neon,
-              tipo: f.tipo, m2: r.m2, trans: r.transFinal, negro: r.negroFinal,
-              reventa: r.reventa, comision: r.comision,
-              descuento: r.descuento || 0, recargo: r.recargo || 0,
-              telefono: f.telefono || '', canal: f.canal || 'WPP'
-            })
-          });
-        }
-        const st = document.getElementById('brief-cot-popup-status');
-        if (st) { st.textContent = '✓ guardado en Sheet'; setTimeout(() => { st.textContent = ''; }, 2500); }
-      } catch (e) {
-        alert('Error guardando en Sheet: ' + e.message);
-      }
-    };
+
+    // ✓ Marcar como enviado — escribe en el Sheet + marca brief enviado + cierra.
     const enviarPopupBtn = document.getElementById('brief-cot-popup-enviar');
     if (enviarPopupBtn) enviarPopupBtn.onclick = async () => {
       if (!STATE.briefSelected) return;
+      setStatus('Guardando en Sheet…', 'var(--fg-subtle)');
       try {
         const r = calcCotizador(STATE.cotizadorForm);
+        const sheetResp = await saveCotToSheetFromPopup();
+        if (sheetResp.error) {
+          if (!confirm('Falló el guardado en Sheet (' + sheetResp.error + '). ¿Marcar como enviado igual?')) return;
+        }
         const updated = await marcarBriefEnviado(STATE.briefSelected, { precio_final: r.transFinal });
         const i = STATE.briefs.findIndex(b => b.id === updated.id);
         if (i >= 0) STATE.briefs[i] = updated;
@@ -8673,6 +8723,24 @@ function bindCotizacion() {
         alert('Error: ' + e.message);
       }
     };
+  }
+
+  // ===== Lightbox: click backdrop o botón cierra =====
+  if (STATE.imgLightboxUrl) {
+    const lb = document.getElementById('img-lightbox');
+    if (lb) lb.onclick = (ev) => {
+      // Solo cerrar si clickearon el fondo (no la imagen).
+      if (ev.target.tagName !== 'IMG') closeImgLightbox();
+    };
+    const lbClose = document.getElementById('img-lightbox-close');
+    if (lbClose) lbClose.onclick = (ev) => { ev.stopPropagation(); closeImgLightbox(); };
+    // ESC también cierra.
+    if (!document._lightboxEscBound) {
+      document.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' && STATE.imgLightboxUrl) closeImgLightbox();
+      });
+      document._lightboxEscBound = true;
+    }
   }
 }
 
