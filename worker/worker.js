@@ -791,6 +791,16 @@ export default {
       }
       if (!session) return unauthorized();
 
+      // Defensa en profundidad: endpoints con datos sensibles (P&L, márgenes,
+      // actividad global) requieren que la sesión sea del admin (Gaspar), no
+      // cualquier token válido de bajo privilegio.
+      const sessionUserKey = String(session.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+      const isAdminSession = sessionUserKey === 'gaspar';
+      const ADMIN_ONLY_PATHS = ['/admin/business-panel', '/admin/activity'];
+      if (ADMIN_ONLY_PATHS.includes(path) && !isAdminSession) {
+        return json({ error: 'forbidden: admin only' }, 403);
+      }
+
       if (request.method === 'GET' && path === '/admin/activity') {
         return reportHandler(env, url, true);
       }

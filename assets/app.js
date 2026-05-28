@@ -606,33 +606,59 @@ function loadUser() {
   STATE.users = merged;
   STATE.user = localStorage.getItem('niventas.user') || null;
   STATE.token = localStorage.getItem('niventas.token') || null;
+  STATE.tokenUser = localStorage.getItem('niventas.tokenUser') || null;
+  // Si el token cargado no corresponde al usuario activo (estado viejo/manipulado),
+  // lo descartamos por seguridad: hay que re-autenticar.
+  if (STATE.token && STATE.user && _userKey(STATE.tokenUser) !== _userKey(STATE.user)) {
+    saveToken(null);
+  }
 }
 function saveUser() {
   localStorage.setItem('niventas.users', JSON.stringify(STATE.users));
   if (STATE.user) localStorage.setItem('niventas.user', STATE.user);
   else localStorage.removeItem('niventas.user');
 }
-function saveToken(t) {
+function saveToken(t, owner) {
   STATE.token = t;
-  if (t) localStorage.setItem('niventas.token', t);
-  else localStorage.removeItem('niventas.token');
+  STATE.tokenUser = t ? (owner || STATE.user || null) : null;
+  if (t) {
+    localStorage.setItem('niventas.token', t);
+    localStorage.setItem('niventas.tokenUser', STATE.tokenUser || '');
+  } else {
+    localStorage.removeItem('niventas.token');
+    localStorage.removeItem('niventas.tokenUser');
+  }
 }
 // Normaliza nombre de usuario para comparaciones tolerantes a tilde.
 // Soporta variantes históricas en localStorage (Joaquin / Joaquín).
 function _userKey(s) {
   return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
-function isJoaquinUser(s) { return _userKey(s) === 'joaquin'; }
+function isJoaquinUser(s) { return _userKey(s) === 'joaquin' || _userKey(s) === 'joaco'; }
 function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
+function isDisenadorUser(s) { const k = _userKey(s); return k === 'disenador' || k === 'emma' || k === 'emmanuel'; }
+// El token cargado pertenece a este usuario? (evita reutilizar token de bajo
+// privilegio para pasar como admin).
+function tokenBelongsTo(name) {
+  return !!STATE.token && _userKey(STATE.tokenUser) === _userKey(name);
+}
 
 async function setUser(name) {
-  // Gaspar necesita password; Joaquín se auto-loguea sin password
-  if (isGasparUser(name) && !STATE.token) {
-    const ok = await loginPrompt(name);
-    if (!ok) return;
-  } else if (isJoaquinUser(name) && !STATE.token) {
-    const ok = await autoLogin(name);
-    if (!ok) return;
+  // SEGURIDAD: el token está atado a un usuario. Si el token actual NO pertenece
+  // al usuario que se quiere activar, lo descartamos y re-autenticamos. Esto evita
+  // que un token de bajo privilegio (Joaquín/Diseñador) se reutilice para pasar
+  // como admin (Gaspar).
+  if (!tokenBelongsTo(name)) {
+    saveToken(null);
+    if (isGasparUser(name)) {
+      // Gaspar SIEMPRE requiere password, sin excepción.
+      const ok = await loginPrompt(name);
+      if (!ok) return;
+    } else {
+      // Joaquín, Diseñador y demás cuentas de bajo privilegio: auto-login sin password.
+      const ok = await autoLogin(name);
+      if (!ok) { await showAlert('No se pudo iniciar sesión como ' + name, { title: 'Login', variant: 'warn' }); return; }
+    }
   }
   STATE.user = name;
   saveUser();
@@ -664,7 +690,7 @@ async function loginPrompt(userName) {
     if (r.status === 401) { await showAlert('Contraseña incorrecta', { title: 'Login fallido', variant: 'warn' }); return false; }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    saveToken(j.token);
+    saveToken(j.token, userName || 'Gaspar');
     return true;
   } catch (e) {
     await showAlert(e.message, { title: 'Error de login', variant: 'warn' });
@@ -681,7 +707,7 @@ async function autoLogin(userName) {
     });
     if (!r.ok) return false;
     const j = await r.json();
-    saveToken(j.token);
+    saveToken(j.token, userName);
     return true;
   } catch (e) { return false; }
 }
@@ -702,8 +728,10 @@ async function logout() {
   if (STATE.view === 'admin') setView('dashboard');
   else render();
 }
-function isAdmin() { return !!STATE.token && STATE.user === 'Gaspar'; }
-function canAccessChat() { return !!STATE.token && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user)); }
+// isAdmin requiere que el TOKEN sea de Gaspar (no solo el nombre activo). Sin esto,
+// un token de bajo privilegio podría usarse para mostrar la UI admin.
+function isAdmin() { return !!STATE.token && isGasparUser(STATE.tokenUser) && isGasparUser(STATE.user); }
+function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user)); }
 function authHeaders() {
   return STATE.token ? { 'Authorization': 'Bearer ' + STATE.token } : {};
 }
