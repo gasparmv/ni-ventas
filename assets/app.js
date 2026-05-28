@@ -8365,15 +8365,10 @@ function renderBriefDrawer() {
           <div id="brief-render-ia-status" style="font-size:11px;text-align:center;margin-bottom:var(--s-2);min-height:14px;color:var(--fg-mute)"></div>
           ` : ''}
 
-          <!-- Render generado -->
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Render ${isDis ? '(generado por IA — podés regenerar o subir uno manual)' : 'del diseño'}</label>
-          ${isDis ? `
-          <div id="brief-dropzone-render"
-               style="border:2px dashed rgba(143,212,222,.2);border-radius:var(--r-sm);padding:var(--s-2);text-align:center;color:var(--fg-mute);font-size:11px;cursor:pointer">
-            🎨 o arrastrá un render manual acá
-            <input type="file" id="brief-file-input-render" accept="image/*" multiple style="display:none">
-          </div>
-          ` : (renderImgs.length === 0 ? '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— sin render todavía —</div>' : '')}
+          <!-- Render generado por IA — aparece automáticamente acá tras clickear el botón -->
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Render ${isDis ? '(se genera con el botón de arriba)' : 'del diseño'}</label>
+          ${isDis && renderImgs.length === 0 ? '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2);border:1px dashed rgba(143,212,222,.15);border-radius:var(--r-sm)">— el render aparecerá acá cuando lo generes con IA —</div>' : ''}
+          ${!isDis && renderImgs.length === 0 ? '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— sin render todavía —</div>' : ''}
           <div id="brief-images-grid-render"
                style="margin-top:var(--s-2);display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px;margin-bottom:var(--s-3)">
             ${renderBriefImagesGridFor('render', false, isDis)}
@@ -9111,15 +9106,9 @@ function bindCotizacion() {
     const genBtn = document.getElementById('brief-generar-render');
     if (genBtn) genBtn.onclick = generarRenderBrief;
 
-    // RENDER manual — sub-zona específica: cajita + grid capturan 'render' y
-    // hacen stopPropagation para no caer en el catch-all 'boceto' de la sección.
-    const fiRender = document.getElementById('brief-file-input-render');
-    const dzRender = document.getElementById('brief-dropzone-render');
-    if (dzRender && fiRender) {
-      dzRender.onclick = () => fiRender.click();
-      fiRender.onchange = async (ev) => { for (const f of Array.from(ev.target.files || [])) await addImageFromFile(f, false, 'render'); fiRender.value = ''; };
-    }
-    bindZone(dzRender, 'render', false);
+    // El render YA no tiene dropzone manual — solo se genera con IA.
+    // Igual mantenemos el grid como zona target por si se pega/dropea desde
+    // el modo "Pegar Ctrl+V" global (catch-all _briefPasteZone).
     bindZone(document.getElementById('brief-images-grid-render'), 'render', false);
   }
 
