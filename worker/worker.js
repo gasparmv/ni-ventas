@@ -54,6 +54,10 @@ function noContent() {
 }
 function unauthorized(msg = 'unauthorized') { return json({ error: msg }, 401); }
 
+async function sha256hex(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
 function randomToken() {
   // 32 bytes hex
   const a = new Uint8Array(32);
@@ -722,29 +726,41 @@ export default {
       try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
       const { user, password } = body || {};
       if (!user) return json({ error: 'missing fields' }, 400);
-      const NO_PASSWORD_LEGACY = ['Joaquín', 'Joaquin'];
       const userSlug = String(user).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+      // Alias: el frontend manda "Joaquín" (slug 'joaquin'); en users_panel puede
+      // estar como 'joaco' o 'joaquin'. Buscamos por cualquiera de los dos.
+      const lookupIds = userSlug === 'joaquin' ? ['joaquin', 'joaco']
+                      : userSlug === 'joaco'   ? ['joaco', 'joaquin']
+                      : [userSlug];
+      const placeholders = lookupIds.map(() => '?').join(',');
       const panelUser = await env.DB.prepare(
-        'SELECT id, rol, password_hash FROM users_panel WHERE id = ? AND activo = 1'
-      ).bind(userSlug).first();
+        `SELECT id, rol, password_hash FROM users_panel WHERE id IN (${placeholders}) AND activo = 1 LIMIT 1`
+      ).bind(...lookupIds).first();
 
-      // CRÍTICO: el admin (Gaspar) SIEMPRE requiere ADMIN_PASSWORD, sin importar que
-      // su password_hash en users_panel sea NULL. El "entra sin password" aplica solo
-      // a roles NO admin (comercial/diseñador) — son cuentas de bajo privilegio.
       const isAdminUser = userSlug === 'gaspar' || (panelUser && panelUser.rol === 'admin');
-      const isLegacyNoPwd = NO_PASSWORD_LEGACY.includes(user) && !isAdminUser;
-      const isPanelNoPwd  = panelUser && panelUser.password_hash === null && panelUser.rol !== 'admin';
 
-      if (!isAdminUser && (isLegacyNoPwd || isPanelNoPwd)) {
-        // ok, sin password (solo cuentas de bajo privilegio)
-      } else {
-        // Admin / cualquier usuario con password: validar contra ADMIN_PASSWORD.
+      if (isAdminUser) {
+        // Gaspar: contraseña en env.ADMIN_PASSWORD.
         if (!password) return json({ error: 'missing fields' }, 400);
         if (!env.ADMIN_PASSWORD) return json({ error: 'server not configured' }, 500);
-        if (!isAdminUser || password !== env.ADMIN_PASSWORD) {
+        if (password !== env.ADMIN_PASSWORD) {
           await new Promise(r => setTimeout(r, 250));
           return unauthorized('credenciales inválidas');
         }
+      } else if (panelUser && panelUser.password_hash) {
+        // Comercial / diseñador con password: validar hash SHA-256.
+        if (!password) return json({ error: 'missing fields' }, 400);
+        const inputHash = await sha256hex(password);
+        if (inputHash !== panelUser.password_hash) {
+          await new Promise(r => setTimeout(r, 250));
+          return unauthorized('credenciales inválidas');
+        }
+      } else if (panelUser) {
+        // Usuario existe pero sin password configurada → entra sin password (legacy).
+      } else {
+        // Usuario desconocido.
+        await new Promise(r => setTimeout(r, 250));
+        return unauthorized('usuario desconocido');
       }
       const token = randomToken();
       const now = new Date();

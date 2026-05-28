@@ -650,15 +650,9 @@ async function setUser(name) {
   // como admin (Gaspar).
   if (!tokenBelongsTo(name)) {
     saveToken(null);
-    if (isGasparUser(name)) {
-      // Gaspar SIEMPRE requiere password, sin excepción.
-      const ok = await loginPrompt(name);
-      if (!ok) return;
-    } else {
-      // Joaquín, Diseñador y demás cuentas de bajo privilegio: auto-login sin password.
-      const ok = await autoLogin(name);
-      if (!ok) { await showAlert('No se pudo iniciar sesión como ' + name, { title: 'Login', variant: 'warn' }); return; }
-    }
+    // Todos los usuarios requieren contraseña ahora (Gaspar, Joaquín, Diseñador).
+    const ok = await loginPrompt(name);
+    if (!ok) return;
   }
   STATE.user = name;
   saveUser();
@@ -679,7 +673,7 @@ async function loginPrompt(userName) {
     await showAlert('El backend de auth no está configurado. Ver CONFIG.trackerUrl.', { title: 'Error de configuración', variant: 'warn' });
     return false;
   }
-  const pw = prompt('Contraseña de admin:');
+  const pw = prompt('Contraseña de ' + (userName || 'usuario') + ':');
   if (!pw) return false;
   try {
     const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/auth/login', {
@@ -7785,6 +7779,7 @@ if (typeof STATE.briefDetailImages === 'undefined') STATE.briefDetailImages = []
 if (typeof STATE.briefDetailLoading === 'undefined') STATE.briefDetailLoading = false;
 if (typeof STATE.briefCotPopupOpen === 'undefined') STATE.briefCotPopupOpen = false;
 if (typeof STATE.imgLightboxUrl === 'undefined')    STATE.imgLightboxUrl = null;
+if (typeof STATE.briefDetailMessages === 'undefined') STATE.briefDetailMessages = []; // chat interno del brief abierto
 
 async function fetchBriefs() {
   if (!CONFIG.trackerUrl || !STATE.token) return;
@@ -7815,6 +7810,7 @@ async function fetchBriefDetail(id) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     STATE.briefDetailImages = data.imagenes || [];
+    STATE.briefDetailMessages = data.messages || [];
     // Sync el brief en la lista por si tiene cambios.
     const i = STATE.briefs.findIndex(b => b.id === data.brief.id);
     if (i >= 0) STATE.briefs[i] = data.brief;
@@ -7859,6 +7855,84 @@ async function handleBriefDelete(briefId, fromCard) {
     else render();
   } catch (e) {
     alert('Error al borrar: ' + e.message);
+  }
+}
+
+// ===== Chat interno del brief (brief_messages) =====
+function autorNombre(autorId) {
+  const k = _userKey(autorId);
+  if (k === 'gaspar') return 'Gaspar';
+  if (k === 'joaquin' || k === 'joaco') return 'Joaco';
+  if (k === 'disenador' || k === 'emma' || k === 'emmanuel') return 'Diseñador';
+  return autorId || '?';
+}
+async function sendBriefMessage(briefId, texto) {
+  const autor_id = _userKey(STATE.user) || 'joaco';
+  const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/messages`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ autor_id, tipo: 'text', contenido: texto })
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+function renderBriefChatBubbles() {
+  const msgs = (STATE.briefDetailMessages || []).filter(m => m.tipo === 'text');
+  const myKey = _userKey(STATE.user);
+  if (!msgs.length) return '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">Sin mensajes. Escribí para coordinar con el equipo.</div>';
+  return msgs.map(m => {
+    const mine = _userKey(m.autor_id) === myKey;
+    const hora = (function(){ try { return new Date(m.created_at).toLocaleString('es-AR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }); } catch(e){ return ''; } })();
+    return `
+      <div style="display:flex;justify-content:${mine ? 'flex-end' : 'flex-start'};margin-bottom:6px">
+        <div style="max-width:80%;background:${mine ? 'rgba(143,212,222,.14)' : 'var(--ink-100)'};border:1px solid ${mine ? 'rgba(143,212,222,.25)' : 'var(--border)'};border-radius:10px;padding:6px 10px">
+          <div style="font-size:10px;color:var(--fg-mute);margin-bottom:2px">${escapeHtml(autorNombre(m.autor_id))} · ${hora}</div>
+          <div style="font-size:13px;color:var(--fg);white-space:pre-wrap;word-break:break-word">${escapeHtml(m.contenido || '')}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderBriefChat() {
+  return `
+    <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
+      <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">💬 Chat interno</legend>
+      <div id="brief-chat-list" style="max-height:200px;overflow-y:auto;margin-bottom:var(--s-2);padding-right:4px">
+        ${renderBriefChatBubbles()}
+      </div>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="brief-chat-input" placeholder="Escribí un mensaje…" autocomplete="off"
+               style="flex:1;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-size:13px">
+        <button class="btn btn-cyan" id="brief-chat-send" style="padding:8px 14px">➤</button>
+      </div>
+    </fieldset>
+  `;
+}
+
+function refreshBriefChat() {
+  const list = document.getElementById('brief-chat-list');
+  if (list) { list.innerHTML = renderBriefChatBubbles(); list.scrollTop = list.scrollHeight; }
+}
+
+async function handleChatSend() {
+  const input = document.getElementById('brief-chat-input');
+  if (!input || !STATE.briefSelected) return;
+  const texto = input.value.trim();
+  if (!texto) return;
+  input.value = '';
+  input.focus();
+  try {
+    const res = await sendBriefMessage(STATE.briefSelected, texto);
+    // Optimista: agregar el mensaje localmente sin recargar todo.
+    STATE.briefDetailMessages.push({
+      id: res.id, brief_id: STATE.briefSelected, autor_id: _userKey(STATE.user),
+      tipo: 'text', contenido: texto, created_at: new Date().toISOString()
+    });
+    refreshBriefChat();
+  } catch (e) {
+    alert('Error enviando mensaje: ' + e.message);
+    input.value = texto;
   }
 }
 
@@ -8137,6 +8211,9 @@ function renderBriefDrawer() {
                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical">${escapeHtml(data.notas || '')}</textarea>
         </div>
 
+        <!-- Chat interno (solo briefs existentes) -->
+        ${!isNew ? renderBriefChat() : ''}
+
         ${pMatch ? `
         <div style="padding:var(--s-2);background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.3);border-radius:var(--r-sm);font-size:12px;color:#25D366">
           ✓ Hay presupuesto correspondiente en el Sheet: <b>${escapeHtml(pMatch.cliente || pMatch.nombre || '')}</b>
@@ -8267,11 +8344,12 @@ function openBriefDrawer(id) {
   STATE.briefDraft = null;
   STATE.briefDraftImages = [];
   STATE.briefDetailImages = [];
+  STATE.briefDetailMessages = [];
   render();
-  // Cargar detalle (incluye imágenes) en background.
+  // Cargar detalle (incluye imágenes + mensajes) en background.
   fetchBriefDetail(id).then(() => {
-    // Re-render solo los grids (chat + render) sin destruir el resto del drawer.
     refreshImageGrids();
+    refreshBriefChat();
   });
 }
 
@@ -8287,6 +8365,7 @@ function openBriefDraft() {
   };
   STATE.briefDraftImages = [];
   STATE.briefDetailImages = [];
+  STATE.briefDetailMessages = [];
   render();
 }
 
@@ -8295,6 +8374,7 @@ function closeBriefDrawer() {
   STATE.briefDraft = null;
   STATE.briefDraftImages = [];
   STATE.briefDetailImages = [];
+  STATE.briefDetailMessages = [];
   render();
 }
 
@@ -8729,6 +8809,11 @@ function bindCotizacion() {
   if (cotPopupBtn) cotPopupBtn.onclick = openBriefCotizadorPopup;
   const delBtn = document.getElementById('brief-delete');
   if (delBtn) delBtn.onclick = () => handleBriefDelete(STATE.briefSelected, false);
+  // Chat interno.
+  const chatSend = document.getElementById('brief-chat-send');
+  if (chatSend) chatSend.onclick = handleChatSend;
+  const chatInput = document.getElementById('brief-chat-input');
+  if (chatInput) chatInput.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); handleChatSend(); } };
 
   // ===== Drawer: dropzones internos (chat + render) =====
   if (drawerOpen) {
