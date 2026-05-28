@@ -7799,8 +7799,29 @@ if (typeof STATE.teamChatLastSeen === 'undefined') STATE.teamChatLastSeen = (() 
 let _teamChatPollTimer = null;
 let _teamChatLastMsgTs = '';
 // Zona de imágenes "activa" (bajo el mouse) para dirigir el paste al tipo correcto:
-// 'chat' | 'boceto' | 'render'. Se setea con mouseenter sobre cada zona.
+// 'chat' | 'boceto' | 'render'. Se setea con mouseenter sobre cada zona, pero
+// además trackeamos las coords del mouse para usar elementFromPoint en el paste —
+// mouseenter no dispara si el drawer se abre con el cursor ya sobre la zona.
 let _briefPasteZone = null;
+let _briefMouseX = 0, _briefMouseY = 0;
+if (typeof document !== 'undefined' && !document._briefMouseTracked) {
+  document.addEventListener('mousemove', (ev) => {
+    _briefMouseX = ev.clientX;
+    _briefMouseY = ev.clientY;
+  }, { passive: true });
+  document._briefMouseTracked = true;
+}
+// Resuelve la zona destino de un paste mirando qué hay debajo del cursor en
+// ese instante. Más confiable que el state _briefPasteZone (que depende de
+// que el mouse haya pasado por encima del fieldset).
+function resolvePasteZoneAtCursor() {
+  const el = document.elementFromPoint(_briefMouseX, _briefMouseY);
+  if (!el || !el.closest) return null;
+  if (el.closest('#brief-images-grid-render') || el.closest('#brief-dropzone-render')) return 'render';
+  if (el.closest('#brief-zone-disenador')) return 'boceto';
+  if (el.closest('#brief-zone-chat')) return 'chat';
+  return null;
+}
 
 async function fetchBriefs() {
   if (!CONFIG.trackerUrl || !STATE.token) return;
@@ -9023,9 +9044,14 @@ function bindCotizacion() {
       const items = ev.clipboardData?.items || [];
       const drawerOpen = !!STATE.briefSelected || !!STATE.briefDraft;
       const role = getUserRole();
-      // El paste va a la zona donde está el mouse (_briefPasteZone). Si no hay
-      // zona activa, default por rol: diseñador → boceto, comercial → chat.
-      const tipo = _briefPasteZone || (role === 'disenador' ? 'boceto' : 'chat');
+      // Prioridad para resolver la zona destino:
+      //   1) elementFromPoint(cursor) — la verdad de dónde está el mouse AHORA.
+      //   2) _briefPasteZone — state seteado por mouseenter (fallback).
+      //   3) default por rol — diseñador 'boceto', otros 'chat'.
+      // El elementFromPoint cubre el caso "drawer abierto con el cursor ya
+      // sobre la dropzone" donde mouseenter no llegó a dispararse.
+      const zoneAtCursor = resolvePasteZoneAtCursor();
+      const tipo = zoneAtCursor || _briefPasteZone || (role === 'disenador' ? 'boceto' : 'chat');
       // En brief nuevo (draft) solo se puede pegar chat (boceto/render necesitan id).
       const tipoFinal = (!STATE.briefSelected && tipo !== 'chat') ? 'chat' : tipo;
       for (const item of items) {
@@ -9092,6 +9118,9 @@ function bindCotizacion() {
     if (dzChat && fiChat) {
       dzChat.onclick = () => fiChat.click();
       fiChat.onchange = async (ev) => { for (const f of Array.from(ev.target.files || [])) await addImageFromFile(f, isNewDraft, 'chat'); fiChat.value = ''; };
+      // mouseenter directo en la cajita para que el paste sepa el target
+      // aunque el mouseenter del fieldset padre no haya disparado.
+      dzChat.addEventListener('mouseenter', () => { _briefPasteZone = 'chat'; });
     }
 
     // BOCETO — click en la cajita abre el file picker.
@@ -9100,6 +9129,26 @@ function bindCotizacion() {
     if (dzBoceto && fiBoceto) {
       dzBoceto.onclick = () => fiBoceto.click();
       fiBoceto.onchange = async (ev) => { for (const f of Array.from(ev.target.files || [])) await addImageFromFile(f, false, 'boceto'); fiBoceto.value = ''; };
+      dzBoceto.addEventListener('mouseenter', () => { _briefPasteZone = 'boceto'; });
+      // También binding de drop directo (con stopPropagation) para que el
+      // drop en la cajita NUNCA bubble al fieldset y caiga en chat por error.
+      dzBoceto.addEventListener('dragover', (ev) => { ev.preventDefault(); dzBoceto.style.borderColor = 'var(--accent-cyan)'; });
+      dzBoceto.addEventListener('dragleave', () => { dzBoceto.style.borderColor = ''; });
+      dzBoceto.addEventListener('drop', async (ev) => {
+        ev.preventDefault(); ev.stopPropagation(); dzBoceto.style.borderColor = '';
+        const files = Array.from(ev.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'));
+        for (const f of files) await addImageFromFile(f, false, 'boceto');
+      });
+    }
+    // También el grid de bocetos ya cargados acepta drop directo.
+    const bocetoGrid = document.getElementById('brief-images-grid-boceto');
+    if (bocetoGrid) {
+      bocetoGrid.addEventListener('mouseenter', () => { _briefPasteZone = 'boceto'; });
+      bocetoGrid.addEventListener('drop', async (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        const files = Array.from(ev.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'));
+        for (const f of files) await addImageFromFile(f, false, 'boceto');
+      });
     }
 
     // Botón generar render IA.
