@@ -8745,8 +8745,19 @@ function fileToDraftImage(file) {
   });
 }
 
+// El tipo final de la imagen se resuelve por ROL, no solo por la zona donde se
+// soltó. Un diseñador NUNCA sube capturas de chat (eso es de Joaco); un comercial
+// NUNCA sube boceto/render (eso es del diseñador). Admin (Gaspar) respeta la zona.
+function resolveImgTipoForRole(intentado) {
+  const role = getUserRole();
+  if (role === 'admin') return intentado;                                   // Gaspar: respeta la zona
+  if (role === 'disenador') return intentado === 'render' ? 'render' : 'boceto';
+  return 'chat';                                                            // comercial: siempre chat
+}
+
 async function addImageFromFile(file, isNewBrief, tipo = 'chat') {
   if (!file || !file.type || !file.type.startsWith('image/')) return;
+  tipo = resolveImgTipoForRole(tipo);
   if (isNewBrief) {
     // Draft solo soporta capturas del chat (render requiere id de brief).
     if (tipo !== 'chat') return;
