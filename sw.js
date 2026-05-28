@@ -5,7 +5,7 @@
 
 // IMPORTANTE: bumpear CACHE_NAME cada vez que cambia app.js o app.css —
 // el activate borra los caches viejos y fuerza re-descarga del bundle.
-const CACHE_NAME = 'neon-ni-v5';
+const CACHE_NAME = 'neon-ni-v6';
 const STATIC_ASSETS = [
   '/ni-ventas/',
   '/ni-ventas/index.html',
@@ -56,7 +56,10 @@ self.addEventListener('fetch', (event) => {
   // ve al primer refresh, no al segundo.
   if (url.origin === location.origin && NETWORK_FIRST_ASSETS.some(p => url.pathname === p || url.pathname.startsWith(p))) {
     event.respondWith(
-      fetch(req).then(res => {
+      // cache: 'reload' fuerza ir a la red ignorando el HTTP cache del navegador.
+      // Sin esto, GitHub Pages servía la versión vieja de app.js hasta ~10 min
+      // aunque el SW fuera "network-first" (el fetch usaba el HTTP cache).
+      fetch(req, { cache: 'reload' }).then(res => {
         if (res && res.status === 200) {
           const clone = res.clone();
           caches.open(CACHE_NAME).then(c => c.put(req, clone));
