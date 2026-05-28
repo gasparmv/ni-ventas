@@ -9091,24 +9091,35 @@ function bindCotizacion() {
   if (drawerOpen) {
     bindBriefImageGridHandlers(isNewDraft);
 
-    // Helper: hace que un elemento sea drop-target de un tipo dado, y al pasar el
-    // mouse marca esa zona como destino del paste (Ctrl+V). isDraftFor solo aplica
-    // a 'chat' en briefs nuevos (boceto/render requieren brief existente).
-    const bindZone = (el, tipo, isDraftFor) => {
+    // Helper: usa elementFromPoint para determinar la zona REAL al hacer drop.
+    // No confiamos en a qué fieldset bubbleó el evento — usamos las coords del
+    // mouse y vemos qué hay debajo. Esto evita que un drop en la zona del
+    // boceto termine en chat por orden de event listeners o bubbling raro.
+    const resolveDropZone = (ev) => {
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      if (!el?.closest) return null;
+      if (el.closest('#brief-images-grid-render') || el.closest('#brief-dropzone-render')) return 'render';
+      if (el.closest('#brief-zone-disenador')) return 'boceto';
+      if (el.closest('#brief-zone-chat')) return 'chat';
+      return null;
+    };
+    const bindZone = (el, fallbackTipo, isDraftFor) => {
       if (!el) return;
       el.addEventListener('dragover', (ev) => { ev.preventDefault(); el.style.outline = '2px dashed var(--accent-cyan)'; });
       el.addEventListener('dragleave', () => { el.style.outline = ''; });
       el.addEventListener('drop', async (ev) => {
         ev.preventDefault(); ev.stopPropagation(); el.style.outline = '';
+        // Resolución autoritativa: cursor → zona real. Si por algún motivo
+        // no se pudo resolver (ej. cursor fuera del drawer), usa el fallback.
+        const tipo = resolveDropZone(ev) || fallbackTipo;
         const files = Array.from(ev.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'));
         for (const f of files) await addImageFromFile(f, isDraftFor, tipo);
       });
-      el.addEventListener('mouseenter', () => { _briefPasteZone = tipo; });
+      el.addEventListener('mouseenter', () => { _briefPasteZone = fallbackTipo; });
     };
 
-    // CATCH-ALL por sección entera: soltar/pegar en cualquier parte de la
-    // sección "Pedido de Joaco" → chat; en "Respuesta del diseñador" → boceto.
-    // Las sub-zonas más específicas (render) hacen stopPropagation para ganar.
+    // CATCH-ALL por sección entera: soltar en cualquier parte de la sección
+    // funciona, pero la decisión final se basa en elementFromPoint del cursor.
     bindZone(document.getElementById('brief-zone-chat'), 'chat', isNewDraft);
     bindZone(document.getElementById('brief-zone-disenador'), 'boceto', false);
 
