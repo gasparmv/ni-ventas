@@ -1717,7 +1717,11 @@ function renderError() {
 function renderDashboard() {
   const cur = pedidosDash();
   const totalMes = cur.reduce((a,p)=>a+p.precio+p.precioDimmer, 0);
-  const aov = cur.length ? totalMes / cur.length : 0;
+  // AOV = ventas / total de UNIDADES (no pedidos). Un pedido puede tener
+  // múltiples carteles (ej. Bistau cantidad=10). Promediar por pedido sin
+  // contar unidades infla el ticket promedio.
+  const totalUnidades = cur.reduce((a,p) => a + (Number(p.cantidad) || 1), 0);
+  const aov = totalUnidades ? totalMes / totalUnidades : 0;
   // Cobrado = total - restante (si restante=0, el cartel está saldado)
   const cobrado = cur.reduce((a,p)=>a + (p.precio + p.precioDimmer - p.restante), 0);
   const pctCobrado = totalMes ? Math.round(cobrado/totalMes*100) : 0;
@@ -1758,8 +1762,8 @@ function renderDashboard() {
     ${(() => {
       const tc = getTasaCierreDirecto(STATE.dashMonths);
       return `<div class="kpi-grid">
-        <div class="kpi"><div class="kpi-label">Ventas mes</div><div class="kpi-value">${fmtMoney(totalMes)}</div><div class="kpi-delta">${cur.length} pedidos</div></div>
-        <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${fmtMoney(aov)}</div><div class="kpi-delta">AOV mes</div></div>
+        <div class="kpi"><div class="kpi-label">Ventas mes</div><div class="kpi-value">${fmtMoney(totalMes)}</div><div class="kpi-delta">${cur.length} pedidos · ${totalUnidades} unidades</div></div>
+        <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${fmtMoney(aov)}</div><div class="kpi-delta">ø por cartel</div></div>
         <div class="kpi"><div class="kpi-label">% Cobrado</div><div class="kpi-value">${pctCobrado}%</div><div class="kpi-delta">${fmtMoney(cobrado)} / ${fmtMoney(totalMes)}</div></div>
         <div class="kpi cyan"${tc.partial ? ' title="Datos parciales: tracking empezó el ' + fmtDate(tc.trackingStart) + '"' : ''}><div class="kpi-label">Tasa de cierre${tc.partial ? ' <span class="partial-flag">parcial</span>' : ''}</div><div class="kpi-value">${(tc.tasa*100).toFixed(1)}%</div><div class="kpi-delta">${tc.vendidos} ventas / ${tc.enviados} presu${tc.partial ? ' · desde ' + fmtDate(tc.trackingStart) : ''}</div></div>
         <div class="kpi"><div class="kpi-label">Total año</div><div class="kpi-value">${fmtMoney(STATE.pedidos.reduce((a,p)=>a+p.precio+p.precioDimmer,0))}</div><div class="kpi-delta">${STATE.pedidos.length} pedidos · año</div></div>
@@ -1983,25 +1987,31 @@ function bpCompute() {
   const sumVenta = (arr) => arr.reduce((a, r) => a + (r.venta || r.vendido || 0), 0);
   const sumCostosD = (arr) => arr.reduce((a, r) => a + Object.values(r.costos || {}).reduce((s, x) => s + (x || 0), 0), 0);
 
+  // sumUnidades: para directo y distris usamos r.cant (col Cantidad del Sheet).
+  // Para insumos y cursos no hay cantidad explícita, tratamos cada fila como 1.
+  const sumUnidades = (arr) => arr.reduce((a, r) => a + (Number(r.cant) || 1), 0);
   const verticals = {
-    directo: { count: directo.length, ventas: sumVenta(directo), costos: sumCostosD(directo) },
-    distris: { count: distris.length, ventas: sumVenta(distris), costos: sumCostosD(distris) },
-    insumos: { count: insumos.length, ventas: sumVenta(insumos), costos: insumos.reduce((a,r)=>a+(r.costo||0),0) },
-    cursos:  { count: cursos.length,  ventas: sumVenta(cursos),  costos: cursos.reduce((a,r)=>a+(r.comisionMp||0),0) },
+    directo: { count: directo.length, unidades: sumUnidades(directo), ventas: sumVenta(directo), costos: sumCostosD(directo) },
+    distris: { count: distris.length, unidades: sumUnidades(distris), ventas: sumVenta(distris), costos: sumCostosD(distris) },
+    insumos: { count: insumos.length, unidades: insumos.length,       ventas: sumVenta(insumos), costos: insumos.reduce((a,r)=>a+(r.costo||0),0) },
+    cursos:  { count: cursos.length,  unidades: cursos.length,        ventas: sumVenta(cursos),  costos: cursos.reduce((a,r)=>a+(r.comisionMp||0),0) },
   };
   for (const k of Object.keys(verticals)) {
     const v = verticals[k];
-    v.aov = v.count ? v.ventas / v.count : 0;
+    // AOV = ventas / UNIDADES, no por pedido. Pedidos con cantidad > 1
+    // (ej. Bistau con 10 carteles) inflaban el ticket promedio.
+    v.aov = v.unidades ? v.ventas / v.unidades : 0;
     v.margen = v.ventas - v.costos;
     v.margenPct = v.ventas ? (v.margen / v.ventas) : 0;
   }
   const total = {
     count: Object.values(verticals).reduce((a,v)=>a+v.count,0),
+    unidades: Object.values(verticals).reduce((a,v)=>a+v.unidades,0),
     ventas: Object.values(verticals).reduce((a,v)=>a+v.ventas,0),
     costos: Object.values(verticals).reduce((a,v)=>a+v.costos,0),
     fijos: 0,
   };
-  total.aov = total.count ? total.ventas / total.count : 0;
+  total.aov = total.unidades ? total.ventas / total.unidades : 0;
   total.margen = total.ventas - total.costos;
   total.margenPct = total.ventas ? (total.margen / total.ventas) : 0;
 
@@ -2053,7 +2063,7 @@ function bpCompute() {
         verticals[v].costos = pv.costos;
         verticals[v].margen = pv.ingresos - pv.costos;
         verticals[v].margenPct = pv.ingresos ? (verticals[v].margen / pv.ingresos) : 0;
-        verticals[v].aov = verticals[v].count ? pv.ingresos / verticals[v].count : 0;
+        verticals[v].aov = verticals[v].unidades ? pv.ingresos / verticals[v].unidades : 0;
       }
     }
   } else if (period === 'week') {
@@ -2092,8 +2102,9 @@ function bpCompute() {
     .sort((a, b) => b.venta - a.venta)
     .slice(0, 8);
 
-  // # carteles total (directo + distris)
-  const totalCarteles = directo.length + distris.length;
+  // # carteles total (directo + distris) — usamos UNIDADES (cant) no filas.
+  // Un pedido con cantidad=10 cuenta como 10 carteles, no 1.
+  const totalCarteles = verticals.directo.unidades + verticals.distris.unidades;
   const ventaCarteles = verticals.directo.ventas + verticals.distris.ventas;
   const aovCarteles = totalCarteles ? ventaCarteles / totalCarteles : 0;
 
@@ -2175,10 +2186,10 @@ function renderBusinessPanel() {
       else monthsFilter = null; // week → mes actual como aproximación
       const tc = getTasaCierreDirecto(monthsFilter);
       return `<div class="kpi-grid">
-        <div class="kpi"><div class="kpi-label">Ventas</div><div class="kpi-value">${bpFmt(c.total.ventas)}</div><div class="kpi-delta">${c.total.count} ventas</div></div>
+        <div class="kpi"><div class="kpi-label">Ventas</div><div class="kpi-value">${bpFmt(c.total.ventas)}</div><div class="kpi-delta">${c.total.count} pedidos · ${c.total.unidades} unidades</div></div>
         <div class="kpi cyan"><div class="kpi-label">Costos totales</div><div class="kpi-value">${bpFmt(c.total.costos)}</div><div class="kpi-delta">${c.total.fijos ? 'Fijos: ' + bpFmt(c.total.fijos) : Math.round((c.total.costos/Math.max(1,c.total.ventas))*100) + '% s/ ventas'}</div></div>
         <div class="kpi"><div class="kpi-label">Margen operativo (CMA)</div><div class="kpi-value" style="color:${c.total.margen >= 0 ? 'var(--success, #25D366)' : 'var(--neon-red)'}">${bpFmt(c.total.margen)}</div><div class="kpi-delta">${Math.round(c.total.margenPct*100)}% del ingreso</div></div>
-        <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${bpFmt(c.total.aov)}</div><div class="kpi-delta">AOV global</div></div>
+        <div class="kpi cyan"><div class="kpi-label">Ticket promedio</div><div class="kpi-value">${bpFmt(c.total.aov)}</div><div class="kpi-delta">ø por cartel</div></div>
         <div class="kpi"${tc.partial ? ' title="Datos parciales: tracking empezó el ' + fmtDate(tc.trackingStart) + '"' : ''}><div class="kpi-label">Tasa de cierre Directo${tc.partial ? ' <span class="partial-flag">parcial</span>' : ''}</div><div class="kpi-value">${(tc.tasa*100).toFixed(1)}%</div><div class="kpi-delta">${tc.vendidos} ventas / ${tc.enviados} presu${tc.partial ? ' · desde ' + fmtDate(tc.trackingStart) : ''}</div></div>
         <div class="kpi cyan"><div class="kpi-label">Carteles totales</div><div class="kpi-value">${c.totalCarteles}</div><div class="kpi-delta">ø ${bpFmt(c.aovCarteles)} c/u</div></div>
       </div>`;
