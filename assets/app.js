@@ -7785,6 +7785,7 @@ if (typeof STATE.teamChatMessages === 'undefined') STATE.teamChatMessages = [];
 if (typeof STATE.teamChatLoaded === 'undefined')  STATE.teamChatLoaded = false;
 if (typeof STATE.teamChatLastSeen === 'undefined') STATE.teamChatLastSeen = (() => { try { return localStorage.getItem('niventas.teamChatLastSeen') || ''; } catch(e) { return ''; } })();
 let _teamChatPollTimer = null;
+let _teamChatLastMsgTs = '';
 
 async function fetchBriefs() {
   if (!CONFIG.trackerUrl || !STATE.token) return;
@@ -8000,18 +8001,81 @@ function openTeamChat() {
   STATE.teamChatOpen = true;
   render();
   fetchTeamChat().then(() => { markTeamChatSeen(); refreshTeamChat(); });
-  startTeamChatPolling();
 }
 function closeTeamChat() {
   STATE.teamChatOpen = false;
-  stopTeamChatPolling();
   render();
 }
+
+// "Ruidito" de notificación con Web Audio (dos tonitos tipo pop). No requiere
+// archivo de audio. Puede fallar si el browser bloquea autoplay sin interacción,
+// pero como el usuario ya interactuó con el dashboard, normalmente suena.
+let _teamAudioCtx = null;
+function playChatSound() {
+  try {
+    _teamAudioCtx = _teamAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (_teamAudioCtx.state === 'suspended') _teamAudioCtx.resume();
+    const t = _teamAudioCtx.currentTime;
+    const o = _teamAudioCtx.createOscillator();
+    const g = _teamAudioCtx.createGain();
+    o.connect(g); g.connect(_teamAudioCtx.destination);
+    o.type = 'sine';
+    o.frequency.setValueAtTime(880, t);
+    o.frequency.setValueAtTime(1245, t + 0.09);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.18, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
+    o.start(t); o.stop(t + 0.34);
+  } catch (e) { /* sin audio */ }
+}
+
+function notifyChatBrowser(msg) {
+  try {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    // Solo notificar si la pestaña no está visible (si está mirando, ya lo ve).
+    if (!document.hidden) return;
+    const body = msg.tipo === 'image' ? '📷 Imagen' : (msg.contenido || '').slice(0, 90);
+    const n = new Notification('💬 ' + autorNombre(msg.autor_id), { body, icon: 'assets/logo.svg', tag: 'team-chat' });
+    n.onclick = () => { try { window.focus(); } catch(e){} if (STATE.view !== 'cotizacion') setView('cotizacion'); openTeamChat(); n.close(); };
+  } catch (e) {}
+}
+
+// Poll del team chat: detecta mensajes nuevos de OTROS y avisa con sonido +
+// notificación. Corre mientras se está en la vista Cotización (abierto o minimizado).
+async function pollTeamChat() {
+  if (!CONFIG.trackerUrl || !STATE.token) return;
+  let msgs = [];
+  try {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/team-chat?limit=100`, {
+      headers: { Authorization: `Bearer ${STATE.token}` }
+    });
+    if (!r.ok) return;
+    msgs = (await r.json()).messages || [];
+  } catch (e) { return; }
+
+  const prevTs = _teamChatLastMsgTs;
+  if (msgs.length) _teamChatLastMsgTs = msgs[msgs.length - 1].created_at;
+  const nuevosDeOtros = prevTs
+    ? msgs.filter(m => m.created_at > prevTs && _userKey(m.autor_id) !== _userKey(STATE.user))
+    : [];
+
+  STATE.teamChatMessages = msgs;
+  STATE.teamChatLoaded = true;
+
+  if (nuevosDeOtros.length) {
+    playChatSound();
+    notifyChatBrowser(nuevosDeOtros[nuevosDeOtros.length - 1]);
+  }
+
+  if (STATE.teamChatOpen) { markTeamChatSeen(); refreshTeamChat(false); }
+  else if (nuevosDeOtros.length) { render(); }  // refrescar badge de la burbuja
+}
+
 function startTeamChatPolling() {
-  stopTeamChatPolling();
+  if (_teamChatPollTimer) return;
   _teamChatPollTimer = setInterval(() => {
-    if (STATE.view !== 'cotizacion' || !STATE.teamChatOpen) { stopTeamChatPolling(); return; }
-    fetchTeamChat().then(() => { markTeamChatSeen(); refreshTeamChat(false); });
+    if (STATE.view !== 'cotizacion') { stopTeamChatPolling(); return; }
+    pollTeamChat();
   }, 8000);
 }
 function stopTeamChatPolling() {
@@ -9080,8 +9144,20 @@ function bindCotizacion() {
   }
   // Carga inicial del chat (para el badge de no leídos) aunque esté minimizado.
   if (!STATE.teamChatLoaded) {
-    fetchTeamChat().then(() => render());
+    fetchTeamChat().then(() => {
+      // Inicializar el cursor del poll para no notificar mensajes viejos al entrar.
+      if (STATE.teamChatMessages.length) _teamChatLastMsgTs = STATE.teamChatMessages[STATE.teamChatMessages.length - 1].created_at;
+      render();
+    });
   }
+  // Polling activo mientras estés en la vista Cotización (avisa con sonido + notif).
+  startTeamChatPolling();
+  // Pedir permiso de notificaciones del navegador (una vez).
+  try {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  } catch (e) {}
 }
 
 // Re-bind table when pedidos view rendered after data loads
