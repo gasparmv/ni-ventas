@@ -2125,12 +2125,17 @@ export default {
         return json({ brief });
       }
 
-      // PUT /admin/briefs/:id/imagen?tipo=chat|render  →  sube imagen a R2 + inserta.
+      // PUT /admin/briefs/:id/imagen?tipo=chat|boceto|render  →  sube imagen a R2 + inserta.
       // Body: bytes raw del archivo. Headers: Content-Type: image/png|jpeg|webp|etc.
-      // tipo: 'chat' (captura del cliente, sube Joaco) o 'render' (sube Emma). Default: 'chat'.
+      // tipo:
+      //   - 'chat'   → captura del cliente, sube Joaco
+      //   - 'boceto' → boceto vectorizado de cotización, sube Emma
+      //   - 'render' → render generado por IA (o subido manual), Emma
+      // Default: 'chat'.
       if (request.method === 'PUT' && /^\/admin\/briefs\/\d+\/imagen$/.test(path)) {
         const briefId = path.split('/')[3];
-        const tipo = (url.searchParams.get('tipo') === 'render') ? 'render' : 'chat';
+        const tipoRaw = url.searchParams.get('tipo') || 'chat';
+        const tipo = ['chat', 'boceto', 'render'].includes(tipoRaw) ? tipoRaw : 'chat';
         if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
         const ct = request.headers.get('content-type') || 'application/octet-stream';
         if (!ct.startsWith('image/')) return json({ error: 'only image/* content-type allowed' }, 400);

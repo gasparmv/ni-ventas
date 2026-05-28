@@ -9051,7 +9051,11 @@ function bindCotizacion() {
       // El elementFromPoint cubre el caso "drawer abierto con el cursor ya
       // sobre la dropzone" donde mouseenter no llegó a dispararse.
       const zoneAtCursor = resolvePasteZoneAtCursor();
-      const tipo = zoneAtCursor || _briefPasteZone || (role === 'disenador' ? 'boceto' : 'chat');
+      let tipo = zoneAtCursor || _briefPasteZone || (role === 'disenador' ? 'boceto' : 'chat');
+      // RESTRICCIÓN DURA: diseñador NUNCA puede pegar en chat. Si la zona
+      // resuelve a chat, lo forzamos a boceto. resolveImgTipoForRole adentro
+      // también haría esto, pero acá es explícito para evitar uploads basura.
+      if (role === 'disenador' && tipo === 'chat') tipo = 'boceto';
       // En brief nuevo (draft) solo se puede pegar chat (boceto/render necesitan id).
       const tipoFinal = (!STATE.briefSelected && tipo !== 'chat') ? 'chat' : tipo;
       for (const item of items) {
@@ -9120,7 +9124,12 @@ function bindCotizacion() {
 
     // CATCH-ALL por sección entera: soltar en cualquier parte de la sección
     // funciona, pero la decisión final se basa en elementFromPoint del cursor.
-    bindZone(document.getElementById('brief-zone-chat'), 'chat', isNewDraft);
+    // RESTRICCIÓN DURA: el rol diseñador NUNCA puede interactuar con la
+    // sección de Joaco. No bindeamos la zona de chat para él.
+    const role = getUserRole();
+    if (role !== 'disenador') {
+      bindZone(document.getElementById('brief-zone-chat'), 'chat', isNewDraft);
+    }
     bindZone(document.getElementById('brief-zone-disenador'), 'boceto', false);
 
     // CHAT — click en la cajita abre el file picker.
