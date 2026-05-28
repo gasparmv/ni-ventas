@@ -8298,7 +8298,7 @@ function renderBriefDrawer() {
       <div style="display:grid;gap:var(--s-3)">
 
         <!-- ========= ZONA 1: Pedido de Joaco ========= -->
-        <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
+        <fieldset id="brief-zone-chat" style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
           <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">📋 Pedido de Joaco</legend>
 
           <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Título ${isCom ? '<span style="color:#FF5566">*</span>' : ''}</label>
@@ -8329,7 +8329,7 @@ function renderBriefDrawer() {
 
         ${showRenderBlock ? `
         <!-- ========= ZONA 2: Respuesta del diseñador ========= -->
-        <fieldset style="border:1px solid rgba(143,212,222,.25);border-radius:var(--r-sm);padding:var(--s-3);background:rgba(143,212,222,.03)">
+        <fieldset id="brief-zone-disenador" style="border:1px solid rgba(143,212,222,.25);border-radius:var(--r-sm);padding:var(--s-3);background:rgba(143,212,222,.03)">
           <legend style="font-size:11px;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">🎨 Respuesta del diseñador</legend>
 
           <!-- Boceto vectorizado (lo sube Emma) -->
@@ -9063,31 +9063,34 @@ function bindCotizacion() {
       el.addEventListener('mouseenter', () => { _briefPasteZone = tipo; });
     };
 
-    // CHAT — cajita + grid completos como drop-target.
+    // CATCH-ALL por sección entera: soltar/pegar en cualquier parte de la
+    // sección "Pedido de Joaco" → chat; en "Respuesta del diseñador" → boceto.
+    // Las sub-zonas más específicas (render) hacen stopPropagation para ganar.
+    bindZone(document.getElementById('brief-zone-chat'), 'chat', isNewDraft);
+    bindZone(document.getElementById('brief-zone-disenador'), 'boceto', false);
+
+    // CHAT — click en la cajita abre el file picker.
     const fiChat = document.getElementById('brief-file-input');
     const dzChat = document.getElementById('brief-dropzone');
     if (dzChat && fiChat) {
       dzChat.onclick = () => fiChat.click();
       fiChat.onchange = async (ev) => { for (const f of Array.from(ev.target.files || [])) await addImageFromFile(f, isNewDraft, 'chat'); fiChat.value = ''; };
     }
-    bindZone(dzChat, 'chat', isNewDraft);
-    bindZone(document.getElementById('brief-images-grid-chat'), 'chat', isNewDraft);
 
-    // BOCETO — cajita + grid.
+    // BOCETO — click en la cajita abre el file picker.
     const fiBoceto = document.getElementById('brief-file-input-boceto');
     const dzBoceto = document.getElementById('brief-dropzone-boceto');
     if (dzBoceto && fiBoceto) {
       dzBoceto.onclick = () => fiBoceto.click();
       fiBoceto.onchange = async (ev) => { for (const f of Array.from(ev.target.files || [])) await addImageFromFile(f, false, 'boceto'); fiBoceto.value = ''; };
     }
-    bindZone(dzBoceto, 'boceto', false);
-    bindZone(document.getElementById('brief-images-grid-boceto'), 'boceto', false);
 
     // Botón generar render IA.
     const genBtn = document.getElementById('brief-generar-render');
     if (genBtn) genBtn.onclick = generarRenderBrief;
 
-    // RENDER manual — cajita + grid.
+    // RENDER manual — sub-zona específica: cajita + grid capturan 'render' y
+    // hacen stopPropagation para no caer en el catch-all 'boceto' de la sección.
     const fiRender = document.getElementById('brief-file-input-render');
     const dzRender = document.getElementById('brief-dropzone-render');
     if (dzRender && fiRender) {
