@@ -594,9 +594,16 @@ function calcCotizador(input) {
 
 // ============ USUARIO ============
 function loadUser() {
-  try {
-    STATE.users = JSON.parse(localStorage.getItem('niventas.users') || 'null') || CONFIG.defaultUsers.slice();
-  } catch(e) { STATE.users = CONFIG.defaultUsers.slice(); }
+  // Merge: los usuarios por defecto SIEMPRE están presentes (aunque el localStorage
+  // tenga una lista vieja cacheada), + cualquiera que el usuario haya agregado con "+".
+  let stored = [];
+  try { stored = JSON.parse(localStorage.getItem('niventas.users') || 'null') || []; }
+  catch(e) { stored = []; }
+  const merged = CONFIG.defaultUsers.slice();
+  for (const u of stored) {
+    if (!merged.some(x => x.toLowerCase() === String(u).toLowerCase())) merged.push(u);
+  }
+  STATE.users = merged;
   STATE.user = localStorage.getItem('niventas.user') || null;
   STATE.token = localStorage.getItem('niventas.token') || null;
 }
