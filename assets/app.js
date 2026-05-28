@@ -1690,9 +1690,6 @@ function renderShell() {
         <button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>
-        <button class="nav-item ${v==='panel-joaco'?'active':''}" data-view="panel-joaco"><span class="icon">⚡</span> Panel Joaco
-          ${STATE.loaded ? (() => { const c = getPanelJoacoCount(); return c ? '<span class="badge">' + c + '</span>' : ''; })() : ''}
-        </button>
         <button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>
         ${canAccessChat() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
           <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread || ''}</span>
