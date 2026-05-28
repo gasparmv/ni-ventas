@@ -389,7 +389,9 @@ const GEMINI_RENDER_PROMPT = 'Creame un render hiperrealista de un Cartel de Neo
 // Modelo de generación de imágenes de Gemini (Nano Banana). Configurable por env
 // por si cambia el nombre; default al actual.
 function geminiImageModel(env) {
-  return env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image';
+  // gemini-3-pro-image = mejor calidad (render que va al cliente).
+  // Alternativas más rápidas/baratas: gemini-3.1-flash-image, gemini-2.5-flash-image.
+  return env.GEMINI_IMAGE_MODEL || 'gemini-3-pro-image';
 }
 
 // ArrayBuffer → base64 en chunks (evita stack overflow con imágenes grandes).
