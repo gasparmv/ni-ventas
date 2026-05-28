@@ -7779,6 +7779,7 @@ if (typeof STATE.briefDetailImages === 'undefined') STATE.briefDetailImages = []
 if (typeof STATE.briefDetailLoading === 'undefined') STATE.briefDetailLoading = false;
 if (typeof STATE.briefCotPopupOpen === 'undefined') STATE.briefCotPopupOpen = false;
 if (typeof STATE.imgLightboxUrl === 'undefined')    STATE.imgLightboxUrl = null;
+if (typeof STATE.briefGenerandoRender === 'undefined') STATE.briefGenerandoRender = false;
 if (typeof STATE.briefDetailMessages === 'undefined') STATE.briefDetailMessages = []; // (legacy, sin uso)
 if (typeof STATE.teamChatOpen === 'undefined')    STATE.teamChatOpen = false;
 if (typeof STATE.teamChatMessages === 'undefined') STATE.teamChatMessages = [];
@@ -8328,15 +8329,37 @@ function renderBriefDrawer() {
         <fieldset style="border:1px solid rgba(143,212,222,.25);border-radius:var(--r-sm);padding:var(--s-3);background:rgba(143,212,222,.03)">
           <legend style="font-size:11px;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">🎨 Respuesta del diseñador</legend>
 
-          <!-- Render -->
-          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Render del diseño</label>
+          <!-- Boceto vectorizado (lo sube Emma) -->
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Boceto vectorizado de cotización</label>
+          ${isDis ? `
+          <div id="brief-dropzone-boceto"
+               style="border:2px dashed rgba(143,212,222,.3);border-radius:var(--r-sm);padding:var(--s-2);text-align:center;color:var(--fg-mute);font-size:11px;cursor:pointer;transition:border-color .15s,background .15s">
+            ✏️ Pegá (Ctrl+V) o arrastrá el boceto acá
+            <input type="file" id="brief-file-input-boceto" accept="image/*" multiple style="display:none">
+          </div>
+          ` : (STATE.briefDetailImages.filter(x=>x.tipo==='boceto').length === 0 ? '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— sin boceto —</div>' : '')}
+          <div id="brief-images-grid-boceto"
+               style="margin-top:var(--s-2);display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px;margin-bottom:var(--s-2)">
+            ${renderBriefImagesGridFor('boceto', false, isDis)}
+          </div>
+
+          <!-- Botón: generar render con IA (Gemini) -->
+          ${isDis ? `
+          <button class="btn btn-cyan" id="brief-generar-render" style="width:100%;margin-bottom:var(--s-3)" ${STATE.briefGenerandoRender ? 'disabled' : ''}>
+            ${STATE.briefGenerandoRender ? '✨ Generando render… (puede tardar ~15s)' : '✨ Generar render IA con el boceto'}
+          </button>
+          <div id="brief-render-ia-status" style="font-size:11px;text-align:center;margin-bottom:var(--s-2);min-height:14px;color:var(--fg-mute)"></div>
+          ` : ''}
+
+          <!-- Render generado -->
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Render ${isDis ? '(generado por IA — podés regenerar o subir uno manual)' : 'del diseño'}</label>
           ${isDis ? `
           <div id="brief-dropzone-render"
-               style="border:2px dashed rgba(143,212,222,.3);border-radius:var(--r-sm);padding:var(--s-2);text-align:center;color:var(--fg-mute);font-size:11px;cursor:pointer;transition:border-color .15s,background .15s">
-            🎨 Pegá (Ctrl+V) o arrastrá el render acá
+               style="border:2px dashed rgba(143,212,222,.2);border-radius:var(--r-sm);padding:var(--s-2);text-align:center;color:var(--fg-mute);font-size:11px;cursor:pointer">
+            🎨 o arrastrá un render manual acá
             <input type="file" id="brief-file-input-render" accept="image/*" multiple style="display:none">
           </div>
-          ` : (renderImgs.length === 0 ? '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— Emma todavía no subió el render —</div>' : '')}
+          ` : (renderImgs.length === 0 ? '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— sin render todavía —</div>' : '')}
           <div id="brief-images-grid-render"
                style="margin-top:var(--s-2);display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px;margin-bottom:var(--s-3)">
             ${renderBriefImagesGridFor('render', false, isDis)}
@@ -8737,7 +8760,7 @@ async function addImageFromFile(file, isNewBrief, tipo = 'chat') {
   }
 }
 
-// Refresca AMBOS grids (chat + render) sin re-render del drawer.
+// Refresca los grids (chat + boceto + render) sin re-render del drawer.
 function refreshImageGrids() {
   const isNew = !STATE.briefSelected && !!STATE.briefDraft;
   const role = getUserRole();
@@ -8745,9 +8768,39 @@ function refreshImageGrids() {
   const isDis = role === 'disenador' || role === 'admin';
   const chatGrid = document.getElementById('brief-images-grid-chat');
   if (chatGrid) chatGrid.innerHTML = renderBriefImagesGridFor('chat', isNew, isCom);
+  const bocetoGrid = document.getElementById('brief-images-grid-boceto');
+  if (bocetoGrid) bocetoGrid.innerHTML = renderBriefImagesGridFor('boceto', false, isDis);
   const renderGrid = document.getElementById('brief-images-grid-render');
   if (renderGrid) renderGrid.innerHTML = renderBriefImagesGridFor('render', false, isDis);
   bindBriefImageGridHandlers(isNew);
+}
+
+// Llama al worker para generar el render con Gemini a partir del boceto.
+async function generarRenderBrief() {
+  if (!STATE.briefSelected) return;
+  const hasBoceto = STATE.briefDetailImages.some(x => x.tipo === 'boceto');
+  if (!hasBoceto) { alert('Primero subí el boceto vectorizado.'); return; }
+  STATE.briefGenerandoRender = true;
+  const statusEl = document.getElementById('brief-render-ia-status');
+  const btn = document.getElementById('brief-generar-render');
+  if (btn) { btn.disabled = true; btn.textContent = '✨ Generando render… (puede tardar ~15s)'; }
+  if (statusEl) { statusEl.textContent = 'Procesando boceto con Gemini…'; statusEl.style.color = 'var(--accent-cyan)'; }
+  try {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${STATE.briefSelected}/generar-render`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${STATE.token}` }
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+    STATE.briefDetailImages.push(data);
+    if (statusEl) { statusEl.textContent = '✓ Render generado'; statusEl.style.color = 'var(--green, #25D366)'; }
+    refreshImageGrids();
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '⚠ ' + e.message; statusEl.style.color = '#FF5566'; }
+  } finally {
+    STATE.briefGenerandoRender = false;
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Generar render IA con el boceto'; }
+  }
 }
 
 function bindBriefImageGridHandlers(isNew) {
@@ -9011,7 +9064,30 @@ function bindCotizacion() {
       };
     }
 
-    // Dropzone RENDER (solo diseñador/admin, brief existente).
+    // Dropzone BOCETO (diseñador/admin) — lo que Emma carga para que la IA genere el render.
+    const dzBoceto = document.getElementById('brief-dropzone-boceto');
+    const fiBoceto = document.getElementById('brief-file-input-boceto');
+    if (dzBoceto && fiBoceto) {
+      dzBoceto.onclick = () => fiBoceto.click();
+      fiBoceto.onchange = async (ev) => {
+        const files = Array.from(ev.target.files || []);
+        for (const f of files) await addImageFromFile(f, false, 'boceto');
+        fiBoceto.value = '';
+      };
+      dzBoceto.ondragover = (ev) => { ev.preventDefault(); dzBoceto.style.borderColor = 'var(--accent-cyan)'; dzBoceto.style.background = 'rgba(143,212,222,.1)'; };
+      dzBoceto.ondragleave = () => { dzBoceto.style.borderColor = 'rgba(143,212,222,.3)'; dzBoceto.style.background = ''; };
+      dzBoceto.ondrop = async (ev) => {
+        ev.preventDefault(); dzBoceto.style.borderColor = 'rgba(143,212,222,.3)'; dzBoceto.style.background = '';
+        const files = Array.from(ev.dataTransfer?.files || []);
+        for (const f of files) await addImageFromFile(f, false, 'boceto');
+      };
+    }
+
+    // Botón generar render IA.
+    const genBtn = document.getElementById('brief-generar-render');
+    if (genBtn) genBtn.onclick = generarRenderBrief;
+
+    // Dropzone RENDER manual (diseñador/admin, brief existente).
     const dzRender = document.getElementById('brief-dropzone-render');
     const fiRender = document.getElementById('brief-file-input-render');
     if (dzRender && fiRender) {
@@ -9022,9 +9098,9 @@ function bindCotizacion() {
         fiRender.value = '';
       };
       dzRender.ondragover = (ev) => { ev.preventDefault(); dzRender.style.borderColor = 'var(--accent-cyan)'; dzRender.style.background = 'rgba(143,212,222,.1)'; };
-      dzRender.ondragleave = () => { dzRender.style.borderColor = 'rgba(143,212,222,.3)'; dzRender.style.background = ''; };
+      dzRender.ondragleave = () => { dzRender.style.borderColor = 'rgba(143,212,222,.2)'; dzRender.style.background = ''; };
       dzRender.ondrop = async (ev) => {
-        ev.preventDefault(); dzRender.style.borderColor = 'rgba(143,212,222,.3)'; dzRender.style.background = '';
+        ev.preventDefault(); dzRender.style.borderColor = 'rgba(143,212,222,.2)'; dzRender.style.background = '';
         const files = Array.from(ev.dataTransfer?.files || []);
         for (const f of files) await addImageFromFile(f, false, 'render');
       };
