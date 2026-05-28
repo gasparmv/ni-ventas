@@ -7779,7 +7779,12 @@ if (typeof STATE.briefDetailImages === 'undefined') STATE.briefDetailImages = []
 if (typeof STATE.briefDetailLoading === 'undefined') STATE.briefDetailLoading = false;
 if (typeof STATE.briefCotPopupOpen === 'undefined') STATE.briefCotPopupOpen = false;
 if (typeof STATE.imgLightboxUrl === 'undefined')    STATE.imgLightboxUrl = null;
-if (typeof STATE.briefDetailMessages === 'undefined') STATE.briefDetailMessages = []; // chat interno del brief abierto
+if (typeof STATE.briefDetailMessages === 'undefined') STATE.briefDetailMessages = []; // (legacy, sin uso)
+if (typeof STATE.teamChatOpen === 'undefined')    STATE.teamChatOpen = false;
+if (typeof STATE.teamChatMessages === 'undefined') STATE.teamChatMessages = [];
+if (typeof STATE.teamChatLoaded === 'undefined')  STATE.teamChatLoaded = false;
+if (typeof STATE.teamChatLastSeen === 'undefined') STATE.teamChatLastSeen = (() => { try { return localStorage.getItem('niventas.teamChatLastSeen') || ''; } catch(e) { return ''; } })();
+let _teamChatPollTimer = null;
 
 async function fetchBriefs() {
   if (!CONFIG.trackerUrl || !STATE.token) return;
@@ -7858,7 +7863,7 @@ async function handleBriefDelete(briefId, fromCard) {
   }
 }
 
-// ===== Chat interno del brief (brief_messages) =====
+// ============ TEAM CHAT (widget flotante global del equipo) ============
 function autorNombre(autorId) {
   const k = _userKey(autorId);
   if (k === 'gaspar') return 'Gaspar';
@@ -7866,9 +7871,23 @@ function autorNombre(autorId) {
   if (k === 'disenador' || k === 'emma' || k === 'emmanuel') return 'Diseñador';
   return autorId || '?';
 }
-async function sendBriefMessage(briefId, texto) {
+
+async function fetchTeamChat() {
+  if (!CONFIG.trackerUrl || !STATE.token) return;
+  STATE.teamChatLoaded = true; // marcar antes para no entrar en loop de re-fetch
+  try {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/team-chat?limit=100`, {
+      headers: { Authorization: `Bearer ${STATE.token}` }
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    STATE.teamChatMessages = data.messages || [];
+  } catch (e) { /* silencioso */ }
+}
+
+async function sendTeamMessage(texto) {
   const autor_id = _userKey(STATE.user) || 'joaco';
-  const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/messages`, {
+  const r = await fetch(`${CONFIG.trackerUrl}/admin/team-chat`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ autor_id, tipo: 'text', contenido: texto })
@@ -7877,62 +7896,158 @@ async function sendBriefMessage(briefId, texto) {
   return r.json();
 }
 
-function renderBriefChatBubbles() {
-  const msgs = (STATE.briefDetailMessages || []).filter(m => m.tipo === 'text');
+async function uploadTeamImage(blob, contentType) {
+  const autor = _userKey(STATE.user) || 'joaco';
+  const r = await fetch(`${CONFIG.trackerUrl}/admin/team-chat/imagen?autor=${autor}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': contentType },
+    body: blob
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+// Cantidad de mensajes nuevos (no vistos) para el badge de la burbuja.
+function teamChatUnread() {
+  if (!STATE.teamChatLastSeen) return STATE.teamChatMessages.length ? 0 : 0;
+  return STATE.teamChatMessages.filter(m =>
+    m.created_at > STATE.teamChatLastSeen && _userKey(m.autor_id) !== _userKey(STATE.user)
+  ).length;
+}
+
+function markTeamChatSeen() {
+  const last = STATE.teamChatMessages.length ? STATE.teamChatMessages[STATE.teamChatMessages.length - 1].created_at : new Date().toISOString();
+  STATE.teamChatLastSeen = last;
+  try { localStorage.setItem('niventas.teamChatLastSeen', last); } catch(e) {}
+}
+
+function renderTeamChatBubbles() {
+  const msgs = STATE.teamChatMessages || [];
   const myKey = _userKey(STATE.user);
-  if (!msgs.length) return '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">Sin mensajes. Escribí para coordinar con el equipo.</div>';
+  if (!msgs.length) return '<div style="font-size:12px;color:var(--fg-mute);text-align:center;padding:var(--s-4)">Sin mensajes todavía.<br>Escribile al equipo 👋</div>';
   return msgs.map(m => {
     const mine = _userKey(m.autor_id) === myKey;
     const hora = (function(){ try { return new Date(m.created_at).toLocaleString('es-AR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }); } catch(e){ return ''; } })();
+    let inner;
+    if (m.tipo === 'image') {
+      const url = `${CONFIG.trackerUrl}/admin/media/${encodeURIComponent(m.contenido)}?token=${STATE.token}`;
+      inner = `<img src="${url}" data-img-zoom="${escapeHtml(url)}" style="max-width:180px;max-height:180px;border-radius:6px;cursor:zoom-in;display:block">`;
+    } else {
+      inner = `<div style="font-size:13px;color:var(--fg);white-space:pre-wrap;word-break:break-word">${escapeHtml(m.contenido || '')}</div>`;
+    }
     return `
-      <div style="display:flex;justify-content:${mine ? 'flex-end' : 'flex-start'};margin-bottom:6px">
-        <div style="max-width:80%;background:${mine ? 'rgba(143,212,222,.14)' : 'var(--ink-100)'};border:1px solid ${mine ? 'rgba(143,212,222,.25)' : 'var(--border)'};border-radius:10px;padding:6px 10px">
-          <div style="font-size:10px;color:var(--fg-mute);margin-bottom:2px">${escapeHtml(autorNombre(m.autor_id))} · ${hora}</div>
-          <div style="font-size:13px;color:var(--fg);white-space:pre-wrap;word-break:break-word">${escapeHtml(m.contenido || '')}</div>
+      <div style="display:flex;justify-content:${mine ? 'flex-end' : 'flex-start'};margin-bottom:8px">
+        <div style="max-width:82%">
+          <div style="font-size:10px;color:var(--fg-mute);margin-bottom:2px;${mine ? 'text-align:right' : ''}">${escapeHtml(autorNombre(m.autor_id))} · ${hora}</div>
+          <div style="background:${mine ? 'rgba(143,212,222,.14)' : 'var(--ink-100)'};border:1px solid ${mine ? 'rgba(143,212,222,.25)' : 'var(--border)'};border-radius:10px;padding:${m.tipo === 'image' ? '4px' : '7px 11px'}">${inner}</div>
         </div>
       </div>`;
   }).join('');
 }
 
-function renderBriefChat() {
+function renderTeamChatWidget() {
+  const unread = teamChatUnread();
+  if (!STATE.teamChatOpen) {
+    // Burbuja minimizada (FAB).
+    return `
+      <button id="team-chat-fab" title="Chat del equipo" aria-label="Abrir chat"
+        style="position:fixed;bottom:24px;right:24px;z-index:120;width:56px;height:56px;border-radius:50%;border:0;cursor:pointer;background:linear-gradient(135deg,var(--neon-red,#FF1830),var(--accent-cyan,#8FD4DE));box-shadow:0 4px 20px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;font-size:24px">
+        💬
+        ${unread > 0 ? `<span style="position:absolute;top:-2px;right:-2px;background:var(--neon-red,#FF1830);color:#fff;font-size:11px;font-weight:700;min-width:20px;height:20px;border-radius:10px;display:flex;align-items:center;justify-content:center;padding:0 5px;border:2px solid var(--bg,#0A0A0F)">${unread}</span>` : ''}
+      </button>
+    `;
+  }
+  // Ventana abierta.
   return `
-    <fieldset style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
-      <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">💬 Chat interno</legend>
-      <div id="brief-chat-list" style="max-height:200px;overflow-y:auto;margin-bottom:var(--s-2);padding-right:4px">
-        ${renderBriefChatBubbles()}
+    <div id="team-chat-window"
+      style="position:fixed;bottom:24px;right:24px;z-index:120;width:min(380px,calc(100vw - 32px));height:min(520px,calc(100vh - 80px));background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,.5);display:flex;flex-direction:column;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:linear-gradient(135deg,rgba(255,24,48,.12),rgba(143,212,222,.12));border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px">💬 Chat del equipo</div>
+        <button id="team-chat-min" title="Minimizar" aria-label="Minimizar"
+          style="width:28px;height:28px;border-radius:6px;background:rgba(255,255,255,.08);color:var(--fg);border:0;cursor:pointer;font-size:16px;line-height:1">─</button>
       </div>
-      <div style="display:flex;gap:6px">
-        <input type="text" id="brief-chat-input" placeholder="Escribí un mensaje…" autocomplete="off"
-               style="flex:1;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-size:13px">
-        <button class="btn btn-cyan" id="brief-chat-send" style="padding:8px 14px">➤</button>
+      <div id="team-chat-list" style="flex:1;overflow-y:auto;padding:12px 14px">
+        ${renderTeamChatBubbles()}
       </div>
-    </fieldset>
+      <div style="display:flex;gap:6px;align-items:center;padding:10px 12px;border-top:1px solid var(--border)">
+        <button id="team-chat-attach" title="Adjuntar imagen" aria-label="Adjuntar"
+          style="width:34px;height:34px;border-radius:8px;background:var(--ink-100);border:1px solid var(--border);color:var(--fg-subtle);cursor:pointer;font-size:16px;flex-shrink:0">📎</button>
+        <input type="file" id="team-chat-file" accept="image/*" multiple style="display:none">
+        <input type="text" id="team-chat-input" placeholder="Mensaje…" autocomplete="off"
+          style="flex:1;background:var(--ink-100);border:1px solid var(--border);border-radius:8px;padding:9px;color:var(--fg);font-size:13px">
+        <button id="team-chat-send" class="btn btn-cyan" style="padding:9px 14px;flex-shrink:0">➤</button>
+      </div>
+    </div>
   `;
 }
 
-function refreshBriefChat() {
-  const list = document.getElementById('brief-chat-list');
-  if (list) { list.innerHTML = renderBriefChatBubbles(); list.scrollTop = list.scrollHeight; }
+function refreshTeamChat(scroll = true) {
+  const list = document.getElementById('team-chat-list');
+  if (list) {
+    list.innerHTML = renderTeamChatBubbles();
+    if (scroll) list.scrollTop = list.scrollHeight;
+    // Re-bind zoom de imágenes del chat.
+    list.querySelectorAll('[data-img-zoom]').forEach(el => {
+      el.onclick = (ev) => { ev.stopPropagation(); openImgLightbox(el.dataset.imgZoom); };
+    });
+  }
+  // Si está minimizado, actualizar el badge.
+  const fab = document.getElementById('team-chat-fab');
+  if (fab && !STATE.teamChatOpen) render();
 }
 
-async function handleChatSend() {
-  const input = document.getElementById('brief-chat-input');
-  if (!input || !STATE.briefSelected) return;
+function openTeamChat() {
+  STATE.teamChatOpen = true;
+  render();
+  fetchTeamChat().then(() => { markTeamChatSeen(); refreshTeamChat(); });
+  startTeamChatPolling();
+}
+function closeTeamChat() {
+  STATE.teamChatOpen = false;
+  stopTeamChatPolling();
+  render();
+}
+function startTeamChatPolling() {
+  stopTeamChatPolling();
+  _teamChatPollTimer = setInterval(() => {
+    if (STATE.view !== 'cotizacion' || !STATE.teamChatOpen) { stopTeamChatPolling(); return; }
+    fetchTeamChat().then(() => { markTeamChatSeen(); refreshTeamChat(false); });
+  }, 8000);
+}
+function stopTeamChatPolling() {
+  if (_teamChatPollTimer) { clearInterval(_teamChatPollTimer); _teamChatPollTimer = null; }
+}
+
+async function handleTeamChatSend() {
+  const input = document.getElementById('team-chat-input');
+  if (!input) return;
   const texto = input.value.trim();
   if (!texto) return;
   input.value = '';
   input.focus();
+  // Optimista.
+  const optimistic = { id: 'tmp' + Date.now(), autor_id: _userKey(STATE.user), tipo: 'text', contenido: texto, created_at: new Date().toISOString() };
+  STATE.teamChatMessages.push(optimistic);
+  refreshTeamChat();
   try {
-    const res = await sendBriefMessage(STATE.briefSelected, texto);
-    // Optimista: agregar el mensaje localmente sin recargar todo.
-    STATE.briefDetailMessages.push({
-      id: res.id, brief_id: STATE.briefSelected, autor_id: _userKey(STATE.user),
-      tipo: 'text', contenido: texto, created_at: new Date().toISOString()
-    });
-    refreshBriefChat();
+    const res = await sendTeamMessage(texto);
+    optimistic.id = res.id;
+    markTeamChatSeen();
   } catch (e) {
-    alert('Error enviando mensaje: ' + e.message);
-    input.value = texto;
+    optimistic.contenido = '⚠ no se envió: ' + texto;
+    refreshTeamChat();
+  }
+}
+
+async function handleTeamChatImage(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  try {
+    const res = await uploadTeamImage(file, file.type);
+    STATE.teamChatMessages.push(res);
+    markTeamChatSeen();
+    refreshTeamChat();
+  } catch (e) {
+    alert('Error subiendo imagen: ' + e.message);
   }
 }
 
@@ -8211,8 +8326,6 @@ function renderBriefDrawer() {
                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical">${escapeHtml(data.notas || '')}</textarea>
         </div>
 
-        <!-- Chat interno (solo briefs existentes) -->
-        ${!isNew ? renderBriefChat() : ''}
 
         ${pMatch ? `
         <div style="padding:var(--s-2);background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.3);border-radius:var(--r-sm);font-size:12px;color:#25D366">
@@ -8305,6 +8418,7 @@ function renderCotizacion() {
       ${renderBriefDrawer()}
       ${renderBriefCotizadorPopup()}
       ${renderImgLightbox()}
+      ${renderTeamChatWidget()}
     </div>
   `;
 }
@@ -8809,11 +8923,6 @@ function bindCotizacion() {
   if (cotPopupBtn) cotPopupBtn.onclick = openBriefCotizadorPopup;
   const delBtn = document.getElementById('brief-delete');
   if (delBtn) delBtn.onclick = () => handleBriefDelete(STATE.briefSelected, false);
-  // Chat interno.
-  const chatSend = document.getElementById('brief-chat-send');
-  if (chatSend) chatSend.onclick = handleChatSend;
-  const chatInput = document.getElementById('brief-chat-input');
-  if (chatInput) chatInput.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); handleChatSend(); } };
 
   // ===== Drawer: dropzones internos (chat + render) =====
   if (drawerOpen) {
@@ -8928,6 +9037,50 @@ function bindCotizacion() {
       });
       document._lightboxEscBound = true;
     }
+  }
+
+  // ===== Team chat widget (flotante) =====
+  const fab = document.getElementById('team-chat-fab');
+  if (fab) fab.onclick = openTeamChat;
+  const minBtn = document.getElementById('team-chat-min');
+  if (minBtn) minBtn.onclick = closeTeamChat;
+  const tcSend = document.getElementById('team-chat-send');
+  if (tcSend) tcSend.onclick = handleTeamChatSend;
+  const tcInput = document.getElementById('team-chat-input');
+  if (tcInput) tcInput.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); handleTeamChatSend(); } };
+  const tcAttach = document.getElementById('team-chat-attach');
+  const tcFile = document.getElementById('team-chat-file');
+  if (tcAttach && tcFile) {
+    tcAttach.onclick = () => tcFile.click();
+    tcFile.onchange = async (ev) => {
+      const files = Array.from(ev.target.files || []);
+      for (const f of files) await handleTeamChatImage(f);
+      tcFile.value = '';
+    };
+  }
+  // Paste de imagen dentro de la ventana de chat.
+  if (STATE.teamChatOpen && tcInput && !tcInput._pasteBound) {
+    tcInput.addEventListener('paste', async (ev) => {
+      const items = ev.clipboardData?.items || [];
+      for (const item of items) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          ev.preventDefault();
+          const file = item.getAsFile();
+          if (file) await handleTeamChatImage(file);
+        }
+      }
+    });
+    tcInput._pasteBound = true;
+  }
+  // Bind zoom de imágenes ya presentes en el chat.
+  if (STATE.teamChatOpen) {
+    document.querySelectorAll('#team-chat-list [data-img-zoom]').forEach(el => {
+      el.onclick = (ev) => { ev.stopPropagation(); openImgLightbox(el.dataset.imgZoom); };
+    });
+  }
+  // Carga inicial del chat (para el badge de no leídos) aunque esté minimizado.
+  if (!STATE.teamChatLoaded) {
+    fetchTeamChat().then(() => render());
   }
 }
 

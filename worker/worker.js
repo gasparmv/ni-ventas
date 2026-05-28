@@ -2123,6 +2123,45 @@ export default {
         return noContent();
       }
 
+      // ===== Team chat (chat global del equipo, flotante) =====
+      // Reusa brief_messages con brief_id = 0 (hilo general, no atado a un brief).
+      if (request.method === 'GET' && path === '/admin/team-chat') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '100'), 500);
+        const rs = await env.DB.prepare(
+          'SELECT * FROM brief_messages WHERE brief_id = 0 ORDER BY created_at DESC LIMIT ?'
+        ).bind(limit).all();
+        return json({ messages: (rs.results || []).reverse() });
+      }
+      if (request.method === 'POST' && path === '/admin/team-chat') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        if (!body.autor_id || !body.contenido) return json({ error: 'missing fields' }, 400);
+        const now = new Date().toISOString();
+        const result = await env.DB.prepare(
+          'INSERT INTO brief_messages (brief_id, autor_id, tipo, contenido, created_at) VALUES (0,?,?,?,?)'
+        ).bind(body.autor_id, body.tipo || 'text', body.contenido, now).run();
+        return json({ id: result.meta.last_row_id, created_at: now }, 201);
+      }
+      // PUT /admin/team-chat/imagen?autor=joaco  →  sube imagen a R2 + mensaje tipo='image'.
+      if (request.method === 'PUT' && path === '/admin/team-chat/imagen') {
+        if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+        const ct = request.headers.get('content-type') || '';
+        if (!ct.startsWith('image/')) return json({ error: 'only image/* allowed' }, 400);
+        const autor = url.searchParams.get('autor') || 'joaco';
+        const buf = await request.arrayBuffer();
+        if (!buf || buf.byteLength === 0) return json({ error: 'empty body' }, 400);
+        if (buf.byteLength > 10 * 1024 * 1024) return json({ error: 'too large (>10MB)' }, 413);
+        const ext = (ct.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'bin';
+        const r2Key = `teamchat/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        try { await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: ct } }); }
+        catch (e) { return json({ error: 'r2 put failed: ' + e.message }, 500); }
+        const now = new Date().toISOString();
+        const result = await env.DB.prepare(
+          'INSERT INTO brief_messages (brief_id, autor_id, tipo, contenido, created_at) VALUES (0,?,?,?,?)'
+        ).bind(autor, 'image', r2Key, now).run();
+        return json({ id: result.meta.last_row_id, r2_key: r2Key, tipo: 'image', autor_id: autor, contenido: r2Key, created_at: now }, 201);
+      }
+
       // GET /admin/users-panel  →  lista de usuarios del panel (comerciales/diseñadores/admin)
       if (request.method === 'GET' && path === '/admin/users-panel') {
         const rs = await env.DB.prepare(
