@@ -7787,6 +7787,9 @@ if (typeof STATE.teamChatLoaded === 'undefined')  STATE.teamChatLoaded = false;
 if (typeof STATE.teamChatLastSeen === 'undefined') STATE.teamChatLastSeen = (() => { try { return localStorage.getItem('niventas.teamChatLastSeen') || ''; } catch(e) { return ''; } })();
 let _teamChatPollTimer = null;
 let _teamChatLastMsgTs = '';
+// Zona de imágenes "activa" (bajo el mouse) para dirigir el paste al tipo correcto:
+// 'chat' | 'boceto' | 'render'. Se setea con mouseenter sobre cada zona.
+let _briefPasteZone = null;
 
 async function fetchBriefs() {
   if (!CONFIG.trackerUrl || !STATE.token) return;
@@ -8576,6 +8579,7 @@ function closeBriefDrawer() {
   STATE.briefDraftImages = [];
   STATE.briefDetailImages = [];
   STATE.briefDetailMessages = [];
+  _briefPasteZone = null;
   render();
 }
 
@@ -9002,19 +9006,18 @@ function bindCotizacion() {
       const items = ev.clipboardData?.items || [];
       const drawerOpen = !!STATE.briefSelected || !!STATE.briefDraft;
       const role = getUserRole();
-      // Heurística:
-      // - Drawer abierto + diseñador → render
-      // - Drawer abierto + comercial → chat
-      // - Sin drawer + comercial → crear brief con captura
-      // - Sin drawer + diseñador → no hace nada (no puede crear)
-      const tipo = role === 'disenador' ? 'render' : 'chat';
+      // El paste va a la zona donde está el mouse (_briefPasteZone). Si no hay
+      // zona activa, default por rol: diseñador → boceto, comercial → chat.
+      const tipo = _briefPasteZone || (role === 'disenador' ? 'boceto' : 'chat');
+      // En brief nuevo (draft) solo se puede pegar chat (boceto/render necesitan id).
+      const tipoFinal = (!STATE.briefSelected && tipo !== 'chat') ? 'chat' : tipo;
       for (const item of items) {
         if (item.kind === 'file' && item.type.startsWith('image/')) {
           ev.preventDefault();
           const file = item.getAsFile();
           if (!file) continue;
           if (drawerOpen) {
-            await addImageFromFile(file, !STATE.briefSelected, tipo);
+            await addImageFromFile(file, !STATE.briefSelected, tipoFinal);
           } else if (canCreateBriefs()) {
             await quickCreateBriefFromImage(file);
           }
@@ -9041,70 +9044,58 @@ function bindCotizacion() {
   const delBtn = document.getElementById('brief-delete');
   if (delBtn) delBtn.onclick = () => handleBriefDelete(STATE.briefSelected, false);
 
-  // ===== Drawer: dropzones internos (chat + render) =====
+  // ===== Drawer: dropzones internos (chat + boceto + render) =====
   if (drawerOpen) {
     bindBriefImageGridHandlers(isNewDraft);
 
-    // Dropzone CHAT (capturas del cliente — solo comercial/admin).
-    const dzChat = document.getElementById('brief-dropzone');
+    // Helper: hace que un elemento sea drop-target de un tipo dado, y al pasar el
+    // mouse marca esa zona como destino del paste (Ctrl+V). isDraftFor solo aplica
+    // a 'chat' en briefs nuevos (boceto/render requieren brief existente).
+    const bindZone = (el, tipo, isDraftFor) => {
+      if (!el) return;
+      el.addEventListener('dragover', (ev) => { ev.preventDefault(); el.style.outline = '2px dashed var(--accent-cyan)'; });
+      el.addEventListener('dragleave', () => { el.style.outline = ''; });
+      el.addEventListener('drop', async (ev) => {
+        ev.preventDefault(); ev.stopPropagation(); el.style.outline = '';
+        const files = Array.from(ev.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'));
+        for (const f of files) await addImageFromFile(f, isDraftFor, tipo);
+      });
+      el.addEventListener('mouseenter', () => { _briefPasteZone = tipo; });
+    };
+
+    // CHAT — cajita + grid completos como drop-target.
     const fiChat = document.getElementById('brief-file-input');
+    const dzChat = document.getElementById('brief-dropzone');
     if (dzChat && fiChat) {
       dzChat.onclick = () => fiChat.click();
-      fiChat.onchange = async (ev) => {
-        const files = Array.from(ev.target.files || []);
-        for (const f of files) await addImageFromFile(f, isNewDraft, 'chat');
-        fiChat.value = '';
-      };
-      dzChat.ondragover = (ev) => { ev.preventDefault(); dzChat.style.borderColor = 'var(--accent-cyan)'; dzChat.style.background = 'rgba(143,212,222,.05)'; };
-      dzChat.ondragleave = () => { dzChat.style.borderColor = 'var(--border)'; dzChat.style.background = ''; };
-      dzChat.ondrop = async (ev) => {
-        ev.preventDefault(); dzChat.style.borderColor = 'var(--border)'; dzChat.style.background = '';
-        const files = Array.from(ev.dataTransfer?.files || []);
-        for (const f of files) await addImageFromFile(f, isNewDraft, 'chat');
-      };
+      fiChat.onchange = async (ev) => { for (const f of Array.from(ev.target.files || [])) await addImageFromFile(f, isNewDraft, 'chat'); fiChat.value = ''; };
     }
+    bindZone(dzChat, 'chat', isNewDraft);
+    bindZone(document.getElementById('brief-images-grid-chat'), 'chat', isNewDraft);
 
-    // Dropzone BOCETO (diseñador/admin) — lo que Emma carga para que la IA genere el render.
-    const dzBoceto = document.getElementById('brief-dropzone-boceto');
+    // BOCETO — cajita + grid.
     const fiBoceto = document.getElementById('brief-file-input-boceto');
+    const dzBoceto = document.getElementById('brief-dropzone-boceto');
     if (dzBoceto && fiBoceto) {
       dzBoceto.onclick = () => fiBoceto.click();
-      fiBoceto.onchange = async (ev) => {
-        const files = Array.from(ev.target.files || []);
-        for (const f of files) await addImageFromFile(f, false, 'boceto');
-        fiBoceto.value = '';
-      };
-      dzBoceto.ondragover = (ev) => { ev.preventDefault(); dzBoceto.style.borderColor = 'var(--accent-cyan)'; dzBoceto.style.background = 'rgba(143,212,222,.1)'; };
-      dzBoceto.ondragleave = () => { dzBoceto.style.borderColor = 'rgba(143,212,222,.3)'; dzBoceto.style.background = ''; };
-      dzBoceto.ondrop = async (ev) => {
-        ev.preventDefault(); dzBoceto.style.borderColor = 'rgba(143,212,222,.3)'; dzBoceto.style.background = '';
-        const files = Array.from(ev.dataTransfer?.files || []);
-        for (const f of files) await addImageFromFile(f, false, 'boceto');
-      };
+      fiBoceto.onchange = async (ev) => { for (const f of Array.from(ev.target.files || [])) await addImageFromFile(f, false, 'boceto'); fiBoceto.value = ''; };
     }
+    bindZone(dzBoceto, 'boceto', false);
+    bindZone(document.getElementById('brief-images-grid-boceto'), 'boceto', false);
 
     // Botón generar render IA.
     const genBtn = document.getElementById('brief-generar-render');
     if (genBtn) genBtn.onclick = generarRenderBrief;
 
-    // Dropzone RENDER manual (diseñador/admin, brief existente).
-    const dzRender = document.getElementById('brief-dropzone-render');
+    // RENDER manual — cajita + grid.
     const fiRender = document.getElementById('brief-file-input-render');
+    const dzRender = document.getElementById('brief-dropzone-render');
     if (dzRender && fiRender) {
       dzRender.onclick = () => fiRender.click();
-      fiRender.onchange = async (ev) => {
-        const files = Array.from(ev.target.files || []);
-        for (const f of files) await addImageFromFile(f, false, 'render');
-        fiRender.value = '';
-      };
-      dzRender.ondragover = (ev) => { ev.preventDefault(); dzRender.style.borderColor = 'var(--accent-cyan)'; dzRender.style.background = 'rgba(143,212,222,.1)'; };
-      dzRender.ondragleave = () => { dzRender.style.borderColor = 'rgba(143,212,222,.2)'; dzRender.style.background = ''; };
-      dzRender.ondrop = async (ev) => {
-        ev.preventDefault(); dzRender.style.borderColor = 'rgba(143,212,222,.2)'; dzRender.style.background = '';
-        const files = Array.from(ev.dataTransfer?.files || []);
-        for (const f of files) await addImageFromFile(f, false, 'render');
-      };
+      fiRender.onchange = async (ev) => { for (const f of Array.from(ev.target.files || [])) await addImageFromFile(f, false, 'render'); fiRender.value = ''; };
     }
+    bindZone(dzRender, 'render', false);
+    bindZone(document.getElementById('brief-images-grid-render'), 'render', false);
   }
 
   // ===== Popup cotizador =====
