@@ -8571,8 +8571,35 @@ function handleBriefAbrirCotizador() {
   setView('presupuestos');
 }
 
+// Firma de la lista de briefs para detectar cambios entre polls.
+function briefsSignature() {
+  return (STATE.briefs || [])
+    .map(b => `${b.id}:${b.estado}:${b.updated_at}:${b.chat_count || 0}:${b.render_count || 0}`)
+    .join('|');
+}
+
+// Polling: refresca los briefs cada 10s mientras se está en la vista Cotización.
+// Re-renderiza solo si (a) la lista cambió y (b) el usuario no está en medio de
+// algo (drawer/popup/lightbox abierto), para no pisarle la interacción.
+function startBriefsPolling() {
+  if (STATE.briefsPollTimer) return;
+  STATE.briefsPollTimer = setInterval(async () => {
+    if (STATE.view !== 'cotizacion' || !STATE.token) return;
+    if (document.hidden) return;  // no pollear si la pestaña está oculta
+    const before = briefsSignature();
+    await fetchBriefs();
+    const after = briefsSignature();
+    if (after !== before) {
+      const busy = STATE.briefSelected || STATE.briefDraft || STATE.briefCotPopupOpen || STATE.imgLightboxUrl;
+      if (!busy) render();
+    }
+  }, 10000);
+}
+
 function bindCotizacion() {
   if (!STATE.token) return;
+
+  startBriefsPolling();
 
   // Carga inicial — flag briefsLoaded evita loop infinito si la DB está vacía.
   if (!STATE.briefsLoaded && !STATE.briefsLoading && !STATE.briefsError) {

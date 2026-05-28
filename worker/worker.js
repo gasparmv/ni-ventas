@@ -722,23 +722,26 @@ export default {
       try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
       const { user, password } = body || {};
       if (!user) return json({ error: 'missing fields' }, 400);
-      // Usuarios sin password (lookup en users_panel donde password_hash IS NULL),
-      // más alias legacy ('Joaquín'/'Joaquin') por compatibilidad con sesiones viejas.
       const NO_PASSWORD_LEGACY = ['Joaquín', 'Joaquin'];
       const userSlug = String(user).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
       const panelUser = await env.DB.prepare(
-        'SELECT id, password_hash FROM users_panel WHERE id = ? AND activo = 1'
+        'SELECT id, rol, password_hash FROM users_panel WHERE id = ? AND activo = 1'
       ).bind(userSlug).first();
 
-      const isLegacyNoPwd = NO_PASSWORD_LEGACY.includes(user);
-      const isPanelNoPwd  = panelUser && panelUser.password_hash === null;
+      // CRÍTICO: el admin (Gaspar) SIEMPRE requiere ADMIN_PASSWORD, sin importar que
+      // su password_hash en users_panel sea NULL. El "entra sin password" aplica solo
+      // a roles NO admin (comercial/diseñador) — son cuentas de bajo privilegio.
+      const isAdminUser = userSlug === 'gaspar' || (panelUser && panelUser.rol === 'admin');
+      const isLegacyNoPwd = NO_PASSWORD_LEGACY.includes(user) && !isAdminUser;
+      const isPanelNoPwd  = panelUser && panelUser.password_hash === null && panelUser.rol !== 'admin';
 
-      if (isLegacyNoPwd || isPanelNoPwd) {
-        // ok, sin password
+      if (!isAdminUser && (isLegacyNoPwd || isPanelNoPwd)) {
+        // ok, sin password (solo cuentas de bajo privilegio)
       } else {
+        // Admin / cualquier usuario con password: validar contra ADMIN_PASSWORD.
         if (!password) return json({ error: 'missing fields' }, 400);
         if (!env.ADMIN_PASSWORD) return json({ error: 'server not configured' }, 500);
-        if (user !== 'Gaspar' || password !== env.ADMIN_PASSWORD) {
+        if (!isAdminUser || password !== env.ADMIN_PASSWORD) {
           await new Promise(r => setTimeout(r, 250));
           return unauthorized('credenciales inválidas');
         }
