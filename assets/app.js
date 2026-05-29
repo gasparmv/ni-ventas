@@ -8570,14 +8570,27 @@ function renderCotizacion() {
   `;
 }
 
-// Crea brief al instante con título auto-generado, opcionalmente sube una imagen,
-// y abre el drawer para que el usuario complete título/notas.
+// Crea brief al instante PIDIENDO TÍTULO ANTES — Joaco tiene que tipear sí o sí
+// el nombre del cliente o cartel antes de que se cree el brief. Esto evita
+// que queden briefs "Sin título" colgados en el board.
 // Usado por el paste/drop sobre la columna "A cotizar".
 async function quickCreateBriefFromImage(file) {
   if (!canCreateBriefs()) return;
+  // 1) Pedir título primero. Loop hasta que ingrese uno válido o cancele.
+  let titulo = '';
+  while (true) {
+    titulo = (prompt('¿Cómo se llama este pedido? (nombre del cliente o cartel)') || '').trim();
+    if (titulo === '') {
+      // null o vacío → si fue cancel (null), salir sin crear. Si fue OK con vacío, re-prompt.
+      // prompt() devuelve null cuando se cancela, string vacío cuando se acepta sin escribir.
+      // Acá unificamos: si está vacío, no creamos.
+      return;
+    }
+    if (titulo.length >= 2) break;
+    alert('El título tiene que tener al menos 2 caracteres.');
+  }
+  // 2) Crear con el título dado y subir la imagen.
   try {
-    const now = new Date();
-    const titulo = 'Sin título · ' + now.toLocaleString('es-AR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
     const saved = await saveBrief({
       cliente_nombre: titulo,
       estado: 'nuevo'
@@ -8586,15 +8599,12 @@ async function quickCreateBriefFromImage(file) {
     if (file) {
       try { await uploadBriefImage(saved.id, file, file.type); } catch(e) { console.error('upload', e); }
     }
-    // Abrir drawer para que el usuario complete título.
+    // Abrir drawer ya con el título cargado.
     STATE.briefSelected = saved.id;
     STATE.briefDraft = null;
     STATE.briefDraftImages = [];
-    // Pre-cargar el detalle (incluye imagen recién subida).
     fetchBriefDetail(saved.id).then(() => render());
     render();
-    // Focus en el input de título para que pueda escribir directo.
-    setTimeout(() => { const el = document.getElementById('brief-titulo-input'); if (el) el.focus(); el?.select(); }, 50);
   } catch (e) {
     alert('Error creando brief: ' + e.message);
   }
