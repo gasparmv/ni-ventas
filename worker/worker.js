@@ -395,11 +395,15 @@ const GEMINI_RENDER_PROMPT = [
   '- El neón sigue el contorno del diseño con precisión.',
   '- Respetá exactamente los colores y formas de la imagen.',
   '',
+  'REGLA DE CONVERSIÓN DE COLORES:',
+  '- Si en el diseño de referencia hay partes en color NEGRO, esas partes deben renderizarse en neón BLANCO FRÍO (no existe neón LED negro físicamente — el negro siempre se convierte a blanco frío en el producto final).',
+  '- Para el resto de los colores: respetá fielmente lo que tenga la referencia.',
+  '',
   'CASO ESPECIAL:',
   '- Si la imagen es un boceto vectorizado limpio: mantené el diseño fiel.',
   '- Si es una foto, captura de chat o referencia rough: interpretá el diseño deseado y generá un render limpio del cartel terminado.',
   '',
-  'PRIORIDAD ALTA: Si en el contexto vienen NOTAS / INSTRUCCIONES ESPECÍFICAS, aplicalas al render por encima de la interpretación default (ej: "letras en cursiva", "color azul", "agregar marco dorado", "estilo retro", etc.).'
+  'PRIORIDAD ALTA: Si en el contexto vienen NOTAS / INSTRUCCIONES ESPECÍFICAS, aplicalas al render por encima de la interpretación default (ej: "letras en cursiva", "color azul", "agregar marco dorado", "estilo retro", etc.). EXCEPCIÓN: la regla de "negro → blanco frío" no se sobreescribe nunca, salvo que las notas digan explícitamente otro color para esas partes.'
 ].join('\n');
 
 // Prompt para que la IA estime medidas + mts de neón a partir de la imagen y
