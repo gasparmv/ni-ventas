@@ -382,9 +382,46 @@ async function downloadMedia(env, mediaId) {
 }
 
 // ===== Render hiperrealista con Gemini (image-to-image) =====
-// Prompt fijo del negocio para generar el render del cartel de neón a partir
-// del boceto vectorizado de cotización.
-const GEMINI_RENDER_PROMPT = 'Creame un render hiperrealista de un Cartel de Neon LED hecho con una manguera de silicona de 6 mm de espesor (con base plana y frente en forma de media caña), a partir de este boceto de cotización vectorizado. El diseño debe respetar exactamente los colores de la imagen proporcionada. El neón debe seguir el contorno del diseño con presición. Debe incluir el contorno de base de acrilico';
+// Prompt para generar el render. Soporta tanto un boceto vectorizado como
+// una captura/foto que mandó Joaco — adapta el comportamiento según el caso.
+const GEMINI_RENDER_PROMPT = [
+  'Sos especialista en carteles de neón LED. Generá un render hiperrealista del producto terminado a partir de la imagen de referencia adjunta.',
+  '',
+  'ESPECIFICACIONES TÉCNICAS DEL PRODUCTO:',
+  '- Manguera de silicona de 6 mm (base plana, frente en forma de media caña).',
+  '- Base de acrílico transparente de 3 mm que sigue el contorno del diseño.',
+  '- El neón sigue el contorno del diseño con precisión.',
+  '- Respetá exactamente los colores y formas de la imagen.',
+  '',
+  'CASO ESPECIAL:',
+  '- Si la imagen es un boceto vectorizado limpio: mantené el diseño fiel.',
+  '- Si es una foto, captura de chat o referencia rough: interpretá el diseño deseado y generá un render limpio del cartel terminado.'
+].join('\n');
+
+// Prompt para que la IA estime medidas + mts de neón a partir de la imagen y
+// del texto que escribió el cliente. Usa gemini-2.5-flash (mucho más barato
+// que el modelo de imagen) y devuelve JSON estructurado.
+const GEMINI_PARAMS_PROMPT = (contextoCliente) => [
+  'Sos un experto en cotización de carteles de neón LED en Argentina.',
+  '',
+  'Mirá la imagen de referencia y estimá las medidas para cotizar.',
+  '',
+  'CONTEXTO DEL CLIENTE (lo que escribió en el chat):',
+  contextoCliente || '(sin info adicional)',
+  '',
+  'REGLAS:',
+  '- Si el cliente especificó medidas en su mensaje (ej: "90x50", "1m de ancho", "letras de 80cm"), USALAS como base. Parseá del texto.',
+  '- Si no especificó, asumí un tamaño típico para el tipo de diseño (entre 60 y 150 cm de ancho).',
+  '- alto_cm: derivá de la proporción del diseño en la imagen.',
+  '- neon_mt: longitud aproximada del contorno del diseño = total de manguera de neón necesaria.',
+  '  · Palabra cursiva: ~0.4-0.6 mt por letra.',
+  '  · Letras block/sans-serif: ~0.2-0.3 mt por letra.',
+  '  · Logos: estimá el perímetro total de las líneas del diseño escaladas al tamaño elegido.',
+  '- dif_vs_cliente: poné true si lo que estimaste difiere >20% de lo que dijo el cliente en el texto. Si el cliente no dijo medidas, poné false.',
+  '',
+  'Respondé únicamente con un JSON válido, sin explicación previa, sin markdown:',
+  '{"ancho_cm": <entero>, "alto_cm": <entero>, "neon_mt": <decimal 1 lugar>, "razonamiento": "<una frase breve>", "dif_vs_cliente": <true|false>}'
+].join('\n');
 
 // Modelo de generación de imágenes de Gemini (Nano Banana). Configurable por env
 // por si cambia el nombre; default al actual.
@@ -443,6 +480,55 @@ async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto) {
     return { error: 'Gemini no devolvió imagen: ' + txt.slice(0, 200) };
   }
   return { ok: true, base64: inline.data, mime: inline.mimeType || inline.mime_type || 'image/png' };
+}
+
+// Analiza la imagen + el texto del cliente y devuelve un JSON con ancho_cm,
+// alto_cm, neon_mt, razonamiento y dif_vs_cliente. Usa gemini-2.5-flash con
+// responseMimeType=application/json (modo estructurado) → mucho más confiable
+// que parsear texto libre. Costo ~$0.001 por call (muy barato vs render).
+async function estimarParametrosConGemini(env, imageBuf, imageMime, contextoCliente) {
+  if (!env.GEMINI_API_KEY) return { error: 'GEMINI_API_KEY no configurada' };
+  // Usamos un modelo de texto+vision económico (no el de imagen, que es caro).
+  const model = env.GEMINI_PARAMS_MODEL || 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+  const body = {
+    contents: [{
+      parts: [
+        { text: GEMINI_PARAMS_PROMPT(contextoCliente) },
+        { inline_data: { mime_type: imageMime || 'image/png', data: abToBase64(imageBuf) } }
+      ]
+    }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0.2
+    }
+  };
+  let resp;
+  try {
+    resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  } catch (e) {
+    return { error: 'fetch a Gemini Flash falló: ' + e.message };
+  }
+  if (!resp.ok) {
+    let detail = '';
+    try { detail = (await resp.json())?.error?.message || ''; } catch(e) {}
+    return { error: `Gemini params HTTP ${resp.status}${detail ? ': ' + detail : ''}` };
+  }
+  let data;
+  try { data = await resp.json(); } catch (e) { return { error: 'respuesta de params no es JSON wrapper' }; }
+  const txt = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  if (!txt) return { error: 'Gemini no devolvió texto con params' };
+  let parsed;
+  try { parsed = JSON.parse(txt); }
+  catch (e) { return { error: 'JSON de params inválido: ' + txt.slice(0, 100) }; }
+  return {
+    ok: true,
+    ancho_cm: Math.round(Number(parsed.ancho_cm) || 0),
+    alto_cm: Math.round(Number(parsed.alto_cm) || 0),
+    neon_mt: Math.round((Number(parsed.neon_mt) || 0) * 10) / 10,
+    razonamiento: String(parsed.razonamiento || '').slice(0, 250),
+    dif_vs_cliente: !!parsed.dif_vs_cliente
+  };
 }
 
 // ===== Image analysis (Vision via Workers AI) =====
@@ -2177,9 +2263,14 @@ export default {
         }, 201);
       }
 
-      // POST /admin/briefs/:id/generar-render  →  toma el boceto (tipo='boceto')
-      // más reciente del brief, lo manda a Gemini con el prompt del negocio, y
-      // guarda el resultado como una imagen tipo='render'. Devuelve el render nuevo.
+      // POST /admin/briefs/:id/generar-render  →  pipeline IA completo en paralelo:
+      //   1. Toma como input el boceto si existe; si no, la captura de chat más reciente.
+      //   2. Llama gemini-3-pro-image para generar el render (~$0.04).
+      //   3. Llama gemini-2.5-flash para estimar ancho_cm, alto_cm, neon_mt (~$0.001).
+      //   4. Guarda el render en R2 + actualiza el brief con las medidas estimadas.
+      //   5. Devuelve la imagen del render + los params + flag dif_vs_cliente.
+      // Idea: con esto Joaco solo tiene que mandar capturas del chat y el AI
+      // saca todo lo necesario para cotizar, salteando al diseñador.
       if (request.method === 'POST' && /^\/admin\/briefs\/\d+\/generar-render$/.test(path)) {
         const briefId = path.split('/')[3];
         if (!env.GEMINI_API_KEY) return json({ error: 'Falta configurar GEMINI_API_KEY en el worker' }, 503);
@@ -2188,33 +2279,49 @@ export default {
         const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(briefId).first();
         if (!brief) return json({ error: 'brief not found' }, 404);
 
-        // Buscar el boceto más reciente.
-        const bocetoRow = await env.DB.prepare(
-          "SELECT r2_key, content_type FROM brief_imagenes WHERE brief_id = ? AND tipo = 'boceto' ORDER BY orden DESC, id DESC LIMIT 1"
+        // Prioridad de imagen input: boceto > captura de chat más reciente.
+        let inputRow = await env.DB.prepare(
+          "SELECT r2_key, content_type, tipo FROM brief_imagenes WHERE brief_id = ? AND tipo = 'boceto' ORDER BY orden DESC, id DESC LIMIT 1"
         ).bind(briefId).first();
-        if (!bocetoRow) return json({ error: 'No hay boceto cargado para generar el render' }, 400);
+        let inputOrigen = 'boceto';
+        if (!inputRow) {
+          inputRow = await env.DB.prepare(
+            "SELECT r2_key, content_type, tipo FROM brief_imagenes WHERE brief_id = ? AND tipo = 'chat' ORDER BY orden DESC, id DESC LIMIT 1"
+          ).bind(briefId).first();
+          inputOrigen = 'chat';
+        }
+        if (!inputRow) return json({ error: 'No hay imagen para generar (subí un boceto o una captura del cliente)' }, 400);
 
-        const obj = await env.MEDIA.get(bocetoRow.r2_key);
-        if (!obj) return json({ error: 'boceto no encontrado en R2' }, 404);
-        const bocetoBuf = await obj.arrayBuffer();
+        const obj = await env.MEDIA.get(inputRow.r2_key);
+        if (!obj) return json({ error: 'imagen no encontrada en R2' }, 404);
+        const inputBuf = await obj.arrayBuffer();
 
-        // Contexto de medidas para el prompt.
-        const medidas = [];
-        if (brief.ancho_cm) medidas.push(`ancho ${brief.ancho_cm} cm`);
-        if (brief.alto_cm)  medidas.push(`alto ${brief.alto_cm} cm`);
-        if (brief.neon_mt)  medidas.push(`${brief.neon_mt} m de neón`);
-        const extraTexto = medidas.length ? `Medidas del cartel: ${medidas.join(', ')}.` : '';
+        // Contexto para AMBOS prompts: lo que Joaco escribió y lo que ya está en el brief.
+        const contextoLines = [];
+        if (brief.cliente_nombre) contextoLines.push(`Cliente / título: ${brief.cliente_nombre}`);
+        if (brief.medidas_libre) contextoLines.push(`Medidas que pidió el cliente: ${brief.medidas_libre}`);
+        if (brief.ancho_cm) contextoLines.push(`Ancho ya definido: ${brief.ancho_cm} cm`);
+        if (brief.alto_cm) contextoLines.push(`Alto ya definido: ${brief.alto_cm} cm`);
+        if (brief.neon_mt) contextoLines.push(`Neón ya definido: ${brief.neon_mt} m`);
+        const contexto = contextoLines.join('\n');
 
-        const gen = await generarRenderConGemini(env, bocetoBuf, bocetoRow.content_type, extraTexto);
-        if (gen.error) return json({ error: gen.error }, 502);
+        // En PARALELO: render (caro, lento) + params (barato, rápido).
+        // Si una falla y la otra OK, devolvemos lo que hay y reportamos el error parcial.
+        const [renderResult, paramsResult] = await Promise.all([
+          generarRenderConGemini(env, inputBuf, inputRow.content_type, contexto),
+          estimarParametrosConGemini(env, inputBuf, inputRow.content_type, contexto)
+        ]);
 
-        // Guardar el render generado en R2.
+        // Render es lo crítico: si falla, error duro (sin render no hay nada que devolver).
+        if (renderResult.error) return json({ error: 'render: ' + renderResult.error, params_error: paramsResult.error }, 502);
+
+        // Guardar el render en R2.
         let renderBuf;
-        try { renderBuf = Uint8Array.from(atob(gen.base64), c => c.charCodeAt(0)).buffer; }
+        try { renderBuf = Uint8Array.from(atob(renderResult.base64), c => c.charCodeAt(0)).buffer; }
         catch (e) { return json({ error: 'no se pudo decodificar la imagen de Gemini' }, 500); }
-        const ext = (gen.mime.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'png';
+        const ext = (renderResult.mime.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'png';
         const r2Key = `briefs/${briefId}/render-ia-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-        await env.MEDIA.put(r2Key, renderBuf, { httpMetadata: { contentType: gen.mime } });
+        await env.MEDIA.put(r2Key, renderBuf, { httpMetadata: { contentType: renderResult.mime } });
 
         const ordRow = await env.DB.prepare(
           "SELECT COALESCE(MAX(orden), -1) + 1 AS next_ord FROM brief_imagenes WHERE brief_id = ? AND tipo = 'render'"
@@ -2222,11 +2329,32 @@ export default {
         const now = new Date().toISOString();
         const result = await env.DB.prepare(
           "INSERT INTO brief_imagenes (brief_id, r2_key, content_type, size_bytes, orden, created_at, tipo) VALUES (?,?,?,?,?,?, 'render')"
-        ).bind(briefId, r2Key, gen.mime, renderBuf.byteLength, ordRow?.next_ord ?? 0, now).run();
-        await env.DB.prepare('UPDATE briefs SET updated_at = ? WHERE id = ?').bind(now, briefId).run();
+        ).bind(briefId, r2Key, renderResult.mime, renderBuf.byteLength, ordRow?.next_ord ?? 0, now).run();
+
+        // Actualizar brief con los params estimados (decisión del usuario: AI siempre
+        // sobreescribe; el flag dif_vs_cliente sirve solo para mostrar warning UI).
+        let paramsOut = null;
+        if (paramsResult.ok) {
+          await env.DB.prepare(
+            'UPDATE briefs SET ancho_cm = ?, alto_cm = ?, neon_mt = ?, updated_at = ? WHERE id = ?'
+          ).bind(paramsResult.ancho_cm, paramsResult.alto_cm, paramsResult.neon_mt, now, briefId).run();
+          paramsOut = {
+            ancho_cm: paramsResult.ancho_cm,
+            alto_cm: paramsResult.alto_cm,
+            neon_mt: paramsResult.neon_mt,
+            razonamiento: paramsResult.razonamiento,
+            dif_vs_cliente: paramsResult.dif_vs_cliente
+          };
+        } else {
+          await env.DB.prepare('UPDATE briefs SET updated_at = ? WHERE id = ?').bind(now, briefId).run();
+        }
+
         return json({
           id: result.meta.last_row_id, brief_id: parseInt(briefId, 10),
-          r2_key: r2Key, content_type: gen.mime, tipo: 'render', created_at: now
+          r2_key: r2Key, content_type: renderResult.mime, tipo: 'render', created_at: now,
+          input_origen: inputOrigen,
+          params: paramsOut,
+          params_error: paramsResult.error || null
         }, 201);
       }
 

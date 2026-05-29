@@ -7791,6 +7791,7 @@ if (typeof STATE.briefDetailLoading === 'undefined') STATE.briefDetailLoading = 
 if (typeof STATE.briefCotPopupOpen === 'undefined') STATE.briefCotPopupOpen = false;
 if (typeof STATE.imgLightboxUrl === 'undefined')    STATE.imgLightboxUrl = null;
 if (typeof STATE.briefGenerandoRender === 'undefined') STATE.briefGenerandoRender = false;
+if (typeof STATE.briefLastAiParams === 'undefined') STATE.briefLastAiParams = null; // último resultado de estimación IA (banner)
 if (typeof STATE.briefDetailMessages === 'undefined') STATE.briefDetailMessages = []; // (legacy, sin uso)
 if (typeof STATE.teamChatOpen === 'undefined')    STATE.teamChatOpen = false;
 if (typeof STATE.teamChatMessages === 'undefined') STATE.teamChatMessages = [];
@@ -8378,13 +8379,26 @@ function renderBriefDrawer() {
             ${renderBriefImagesGridFor('boceto', false, isDis)}
           </div>
 
-          <!-- Botón: generar render con IA (Gemini) -->
-          ${isDis ? `
-          <button class="btn btn-cyan" id="brief-generar-render" style="width:100%;margin-bottom:var(--s-3)" ${STATE.briefGenerandoRender ? 'disabled' : ''}>
-            ${STATE.briefGenerandoRender ? '✨ Generando render… (puede tardar ~15s)' : '✨ Generar render IA con el boceto'}
-          </button>
-          <div id="brief-render-ia-status" style="font-size:11px;text-align:center;margin-bottom:var(--s-2);min-height:14px;color:var(--fg-mute)"></div>
-          ` : ''}
+          <!-- Botón: generar render + estimar medidas con IA -->
+          ${(() => {
+            // Disponible para diseñador Y comercial/admin: el AI saca todo
+            // (render + ancho + alto + mts neón) de cualquier imagen disponible
+            // (boceto si existe, si no las capturas que mandó Joaco).
+            const tieneBoceto = STATE.briefDetailImages.some(x => x.tipo === 'boceto');
+            const tieneChat = chatImgs.length > 0;
+            const hayInput = tieneBoceto || tieneChat;
+            const fuente = tieneBoceto ? 'el boceto' : 'las capturas de Joaco';
+            const disabled = STATE.briefGenerandoRender || !hayInput;
+            const label = STATE.briefGenerandoRender
+              ? '✨ Generando render + estimando medidas… (~15s)'
+              : !hayInput
+                ? '⚠ Subí al menos una imagen para generar'
+                : `✨ Generar render IA + medidas (con ${fuente})`;
+            return `
+              <button class="btn btn-cyan" id="brief-generar-render" style="width:100%;margin-bottom:var(--s-3)" ${disabled ? 'disabled' : ''}>${label}</button>
+              <div id="brief-render-ia-status" style="font-size:11px;text-align:center;margin-bottom:var(--s-2);min-height:14px;color:var(--fg-mute)"></div>
+            `;
+          })()}
 
           <!-- Render generado por IA — aparece automáticamente acá tras clickear el botón -->
           <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Render ${isDis ? '(se genera con el botón de arriba)' : 'del diseño'}</label>
@@ -8395,7 +8409,23 @@ function renderBriefDrawer() {
             ${renderBriefImagesGridFor('render', false, isDis)}
           </div>
 
-          <!-- Medidas reales -->
+          ${(() => {
+            // Banner del último razonamiento IA si es este brief y hay info.
+            const ai = STATE.briefLastAiParams;
+            if (!ai || ai.briefId !== STATE.briefSelected) return '';
+            const warn = ai.dif_vs_cliente;
+            const bg = warn ? 'rgba(255,167,38,.1)' : 'rgba(143,212,222,.08)';
+            const border = warn ? '#FFA726' : 'var(--accent-cyan)';
+            const icon = warn ? '⚠' : '✨';
+            const prefix = warn
+              ? '<b>AI difiere de lo que dijo el cliente.</b> '
+              : '<b>AI sugiere estas medidas:</b> ';
+            return `<div style="padding:8px 12px;margin-bottom:var(--s-2);background:${bg};border-left:3px solid ${border};border-radius:var(--r-sm);font-size:12px;color:var(--fg-subtle)">
+              ${icon} ${prefix}${escapeHtml(ai.razonamiento || '')}
+            </div>`;
+          })()}
+
+          <!-- Medidas (auto-rellenadas por AI o editables a mano) -->
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
             <div>
               <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho (cm)</label>
@@ -8606,6 +8636,7 @@ function closeBriefDrawer() {
   STATE.briefDraftImages = [];
   STATE.briefDetailImages = [];
   STATE.briefDetailMessages = [];
+  STATE.briefLastAiParams = null;
   _briefPasteZone = null;
   render();
 }
@@ -8834,32 +8865,64 @@ async function generarRenderBrief() {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
-    STATE.briefDetailImages.push(data);
-    if (statusEl) { statusEl.textContent = '✓ Render generado'; statusEl.style.color = 'var(--green, #25D366)'; }
+    // El response trae { ...render, params: { ancho_cm, alto_cm, neon_mt, razonamiento, dif_vs_cliente }, input_origen }
+    // Separamos la imagen del payload de params para no contaminar briefDetailImages.
+    const { params, params_error, input_origen, ...renderImg } = data;
+    STATE.briefDetailImages.push(renderImg);
+
+    // Mensaje de status: cuenta render + si hubo extracción de params.
+    let statusMsg = '✓ Render generado';
+    if (input_origen === 'chat') statusMsg += ' (desde capturas de Joaco)';
+    if (params) {
+      statusMsg += ` · medidas estimadas: ${params.ancho_cm}×${params.alto_cm} cm · ${params.neon_mt} m de neón`;
+      if (params.dif_vs_cliente) statusMsg += ' ⚠ difiere del cliente';
+    } else if (params_error) {
+      statusMsg += ' · (params: ' + params_error.slice(0, 60) + ')';
+    }
+    if (statusEl) { statusEl.textContent = statusMsg; statusEl.style.color = 'var(--green, #25D366)'; }
+
+    // Actualizar el brief local con las medidas que el AI escribió en DB.
+    if (params) {
+      const idx = STATE.briefs.findIndex(b => b.id === STATE.briefSelected);
+      if (idx >= 0) {
+        STATE.briefs[idx] = {
+          ...STATE.briefs[idx],
+          ancho_cm: params.ancho_cm,
+          alto_cm: params.alto_cm,
+          neon_mt: params.neon_mt
+        };
+      }
+      // Guardar metadata del último razonamiento + flag de warning para mostrar en UI.
+      STATE.briefLastAiParams = {
+        briefId: STATE.briefSelected,
+        razonamiento: params.razonamiento,
+        dif_vs_cliente: params.dif_vs_cliente
+      };
+    }
     refreshImageGrids();
+
     // Auto-transición a "listo" apenas se genera el render. Si el brief está
-    // en estado "nuevo", lo pasamos a "listo" automáticamente — Emma no tiene
-    // que tocar nada más para que el comercial lo vea como listo para cotizar.
+    // en estado "nuevo", lo pasamos a "listo" automáticamente.
     try {
       const current = STATE.briefs.find(b => b.id === STATE.briefSelected);
       if (current && current.estado === 'nuevo') {
         const saved = await saveBrief({ id: STATE.briefSelected, estado: 'listo' });
-        // Actualizar el cache local del brief con el estado nuevo
         const idx = STATE.briefs.findIndex(b => b.id === saved.id);
         if (idx >= 0) STATE.briefs[idx] = saved; else STATE.briefs.unshift(saved);
-        if (statusEl) { statusEl.textContent = '✓ Render generado · brief pasó a "Listos"'; }
-        // Re-render para reflejar el badge nuevo en el header del drawer + en el board
-        render();
+        if (statusEl && !statusEl.textContent.includes('Listos')) {
+          statusEl.textContent = statusMsg + ' · brief → Listos';
+        }
       }
     } catch (eState) {
-      // No es fatal: el render se generó OK, solo no se pudo cambiar el estado.
       console.error('auto-transición a listo falló:', eState);
     }
+    // Re-render completo para que los inputs de ancho/alto/neón muestren los
+    // valores nuevos + el badge de estado + el banner de warning si dif.
+    render();
   } catch (e) {
     if (statusEl) { statusEl.textContent = '⚠ ' + e.message; statusEl.style.color = '#FF5566'; }
   } finally {
     STATE.briefGenerandoRender = false;
-    if (btn) { btn.disabled = false; btn.textContent = '✨ Generar render IA con el boceto'; }
   }
 }
 
