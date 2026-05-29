@@ -673,8 +673,11 @@ async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto) {
 // que parsear texto libre. Costo ~$0.001 por call (muy barato vs render).
 async function estimarParametrosConGemini(env, imageBuf, imageMime, contextoCliente) {
   if (!env.GEMINI_API_KEY) return { error: 'GEMINI_API_KEY no configurada' };
-  // Usamos un modelo de texto+vision económico (no el de imagen, que es caro).
-  const model = env.GEMINI_PARAMS_MODEL || 'gemini-2.5-flash';
+  // Modelo de texto+vision. Antes era gemini-2.5-flash (más barato pero
+  // poco preciso midiendo proporciones en imágenes: error típico ±15%).
+  // Pro tiene visión mucho más fina, error esperable ±5%. Costo extra
+  // ~$0.005 por brief (vs $0.001 con Flash), despreciable vs render.
+  const model = env.GEMINI_PARAMS_MODEL || 'gemini-2.5-pro';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
   const body = {
     contents: [{
