@@ -8837,6 +8837,24 @@ async function generarRenderBrief() {
     STATE.briefDetailImages.push(data);
     if (statusEl) { statusEl.textContent = '✓ Render generado'; statusEl.style.color = 'var(--green, #25D366)'; }
     refreshImageGrids();
+    // Auto-transición a "listo" apenas se genera el render. Si el brief está
+    // en estado "nuevo", lo pasamos a "listo" automáticamente — Emma no tiene
+    // que tocar nada más para que el comercial lo vea como listo para cotizar.
+    try {
+      const current = STATE.briefs.find(b => b.id === STATE.briefSelected);
+      if (current && current.estado === 'nuevo') {
+        const saved = await saveBrief({ id: STATE.briefSelected, estado: 'listo' });
+        // Actualizar el cache local del brief con el estado nuevo
+        const idx = STATE.briefs.findIndex(b => b.id === saved.id);
+        if (idx >= 0) STATE.briefs[idx] = saved; else STATE.briefs.unshift(saved);
+        if (statusEl) { statusEl.textContent = '✓ Render generado · brief pasó a "Listos"'; }
+        // Re-render para reflejar el badge nuevo en el header del drawer + en el board
+        render();
+      }
+    } catch (eState) {
+      // No es fatal: el render se generó OK, solo no se pudo cambiar el estado.
+      console.error('auto-transición a listo falló:', eState);
+    }
   } catch (e) {
     if (statusEl) { statusEl.textContent = '⚠ ' + e.message; statusEl.style.color = '#FF5566'; }
   } finally {
