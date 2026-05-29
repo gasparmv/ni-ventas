@@ -8851,13 +8851,31 @@ function refreshImageGrids() {
 // Llama al worker para generar el render con Gemini a partir del boceto.
 async function generarRenderBrief() {
   if (!STATE.briefSelected) return;
-  const hasBoceto = STATE.briefDetailImages.some(x => x.tipo === 'boceto');
-  if (!hasBoceto) { alert('Primero subí el boceto vectorizado.'); return; }
+  // Aceptamos cualquier imagen (boceto O captura del chat) — el worker
+  // hace el fallback. Solo bloqueamos si NO hay ninguna.
+  const tieneImagen = STATE.briefDetailImages.length > 0;
+  if (!tieneImagen) { alert('Subí al menos una captura o boceto antes de generar.'); return; }
   STATE.briefGenerandoRender = true;
   const statusEl = document.getElementById('brief-render-ia-status');
   const btn = document.getElementById('brief-generar-render');
-  if (btn) { btn.disabled = true; btn.textContent = '✨ Generando render… (puede tardar ~15s)'; }
-  if (statusEl) { statusEl.textContent = 'Procesando boceto con Gemini…'; statusEl.style.color = 'var(--accent-cyan)'; }
+  if (btn) { btn.disabled = true; btn.textContent = '✨ Generando render + medidas… (~15s)'; }
+  if (statusEl) { statusEl.textContent = 'Guardando notas + analizando con Gemini…'; statusEl.style.color = 'var(--accent-cyan)'; }
+
+  // 1) AUTO-SAVE: si el usuario escribió notas / cambió título / medidas
+  // referenciales y aprieta "Generar" sin guardar, esos campos no estarían
+  // en DB cuando el worker los lea. Guardamos primero para que la IA vea
+  // todo lo último que se tipeó.
+  try {
+    const form = readBriefDrawerForm();
+    form.id = STATE.briefSelected;
+    const saved = await saveBrief(form);
+    const idx = STATE.briefs.findIndex(b => b.id === saved.id);
+    if (idx >= 0) STATE.briefs[idx] = saved;
+  } catch (eSave) {
+    // No es fatal: si el save falla, la IA leerá la última versión de DB
+    // (que puede no tener los cambios recientes). Avisamos por consola.
+    console.warn('auto-save antes de generar falló:', eSave);
+  }
   try {
     const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${STATE.briefSelected}/generar-render`, {
       method: 'POST',

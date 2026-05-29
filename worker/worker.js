@@ -384,6 +384,8 @@ async function downloadMedia(env, mediaId) {
 // ===== Render hiperrealista con Gemini (image-to-image) =====
 // Prompt para generar el render. Soporta tanto un boceto vectorizado como
 // una captura/foto que mandó Joaco — adapta el comportamiento según el caso.
+// Si el contexto (que se appendea al final del prompt) trae NOTAS específicas,
+// el modelo debe respetarlas con prioridad alta (cursiva, color, agregados, etc.).
 const GEMINI_RENDER_PROMPT = [
   'Sos especialista en carteles de neón LED. Generá un render hiperrealista del producto terminado a partir de la imagen de referencia adjunta.',
   '',
@@ -395,7 +397,9 @@ const GEMINI_RENDER_PROMPT = [
   '',
   'CASO ESPECIAL:',
   '- Si la imagen es un boceto vectorizado limpio: mantené el diseño fiel.',
-  '- Si es una foto, captura de chat o referencia rough: interpretá el diseño deseado y generá un render limpio del cartel terminado.'
+  '- Si es una foto, captura de chat o referencia rough: interpretá el diseño deseado y generá un render limpio del cartel terminado.',
+  '',
+  'PRIORIDAD ALTA: Si en el contexto vienen NOTAS / INSTRUCCIONES ESPECÍFICAS, aplicalas al render por encima de la interpretación default (ej: "letras en cursiva", "color azul", "agregar marco dorado", "estilo retro", etc.).'
 ].join('\n');
 
 // Prompt para que la IA estime medidas + mts de neón a partir de la imagen y
@@ -411,6 +415,7 @@ const GEMINI_PARAMS_PROMPT = (contextoCliente) => [
   '',
   'REGLAS:',
   '- Si el cliente especificó medidas en su mensaje (ej: "90x50", "1m de ancho", "letras de 80cm"), USALAS como base. Parseá del texto.',
+  '- Si en las NOTAS / INSTRUCCIONES ESPECÍFICAS del contexto hay medidas, esas mandan sobre todo lo demás (son lo último que pidió el usuario).',
   '- Si no especificó, asumí un tamaño típico para el tipo de diseño (entre 60 y 150 cm de ancho).',
   '- alto_cm: derivá de la proporción del diseño en la imagen.',
   '- neon_mt: longitud aproximada del contorno del diseño = total de manguera de neón necesaria.',
@@ -2296,13 +2301,18 @@ export default {
         if (!obj) return json({ error: 'imagen no encontrada en R2' }, 404);
         const inputBuf = await obj.arrayBuffer();
 
-        // Contexto para AMBOS prompts: lo que Joaco escribió y lo que ya está en el brief.
+        // Contexto para AMBOS prompts: lo que Joaco escribió, lo que ya está en
+        // el brief Y las notas del usuario (instrucciones específicas para esta
+        // generación, ej: "letras en cursiva", "color verde", "agregar marco", etc.).
         const contextoLines = [];
         if (brief.cliente_nombre) contextoLines.push(`Cliente / título: ${brief.cliente_nombre}`);
         if (brief.medidas_libre) contextoLines.push(`Medidas que pidió el cliente: ${brief.medidas_libre}`);
         if (brief.ancho_cm) contextoLines.push(`Ancho ya definido: ${brief.ancho_cm} cm`);
         if (brief.alto_cm) contextoLines.push(`Alto ya definido: ${brief.alto_cm} cm`);
         if (brief.neon_mt) contextoLines.push(`Neón ya definido: ${brief.neon_mt} m`);
+        if (brief.notas && String(brief.notas).trim()) {
+          contextoLines.push(`\nNOTAS / INSTRUCCIONES ESPECÍFICAS PARA ESTE DISEÑO (tomalas en cuenta):\n${String(brief.notas).trim()}`);
+        }
         const contexto = contextoLines.join('\n');
 
         // En PARALELO: render (caro, lento) + params (barato, rápido).
