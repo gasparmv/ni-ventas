@@ -4547,6 +4547,9 @@ const chatState = {
   // Map phone → name. Tiene prioridad sobre sender_name al renderizar la lista.
   waContactNames: {},
   waContactNamesLoaded: false,
+  // Ad attribution por contacto (Meta Click-to-WhatsApp). Map phone → attribution row.
+  // Se carga lazy cuando seleccionás un chat. Si no hay attribution → null.
+  adAttributions: {},
 };
 
 // Avatar color palettes [base, accent] — 25 distinct hues for maximum differentiation
@@ -5723,6 +5726,48 @@ function refreshPostit() {
   if (textarea) { textarea.focus(); textarea.setSelectionRange(textarea.value.length, textarea.value.length); }
 }
 
+// ===== Ad Attribution banner =====
+// Muestra contexto del ad de Meta del que vino el cliente (Click-to-WhatsApp).
+// Similar al banner verde que muestra WhatsApp Business arriba del chat.
+function renderAdAttributionBanner(phone) {
+  const attr = chatState.adAttributions[phone];
+  if (!attr) return ''; // null = sin attribution, undefined = no cargado todavía
+  const isInstagram = (attr.source_url || '').includes('instagram') || (attr.media_type || '').toLowerCase().includes('instagram');
+  const platform = isInstagram ? 'Instagram' : 'Facebook';
+  const icon = isInstagram
+    ? '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2.16c3.2 0 3.58.01 4.85.07 1.17.05 1.8.25 2.23.41.56.22.96.48 1.38.9.42.42.68.82.9 1.38.16.42.36 1.06.41 2.23.06 1.27.07 1.65.07 4.85s-.01 3.58-.07 4.85c-.05 1.17-.25 1.8-.41 2.23-.22.56-.48.96-.9 1.38-.42.42-.82.68-1.38.9-.42.16-1.06.36-2.23.41-1.27.06-1.65.07-4.85.07s-3.58-.01-4.85-.07c-1.17-.05-1.8-.25-2.23-.41-.56-.22-.96-.48-1.38-.9-.42-.42-.68-.82-.9-1.38-.16-.42-.36-1.06-.41-2.23C2.17 15.58 2.16 15.2 2.16 12s.01-3.58.07-4.85c.05-1.17.25-1.8.41-2.23.22-.56.48-.96.9-1.38.42-.42.82-.68 1.38-.9.42-.16 1.06-.36 2.23-.41C8.42 2.17 8.8 2.16 12 2.16zm0 5.84a4 4 0 100 8 4 4 0 000-8zm0 6.6a2.6 2.6 0 110-5.2 2.6 2.6 0 010 5.2zm5.1-7.7a.94.94 0 100-1.88.94.94 0 000 1.88z"/></svg>'
+    : '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M22 12c0-5.52-4.48-10-10-10S2 6.48 2 12c0 4.84 3.44 8.87 8 9.8V15H8v-3h2V9.5C10 7.57 11.57 6 13.5 6H16v3h-2c-.55 0-1 .45-1 1v2h3v3h-3v6.95c5.05-.5 9-4.76 9-9.95z"/></svg>';
+  const adIdShort = attr.source_id ? (attr.source_id.length > 12 ? attr.source_id.slice(0, 6) + '…' + attr.source_id.slice(-4) : attr.source_id) : '';
+  const sourceUrl = attr.source_url || (attr.source_id ? `https://www.facebook.com/ads/library/?id=${attr.source_id}` : '');
+  return `
+    <div class="ad-attribution-banner" style="background:rgba(37,211,102,.08);border-left:3px solid #25D366;padding:10px 14px;margin:0;font-size:13px;display:flex;gap:10px;align-items:center">
+      <div style="color:#25D366;flex-shrink:0">${icon}</div>
+      <div style="flex:1;min-width:0">
+        <div style="color:#25D366;font-weight:600;font-size:12px">Anuncio de ${platform}</div>
+        ${attr.headline ? `<div style="color:var(--fg);font-size:13px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(attr.headline)}</div>` : ''}
+        ${attr.body && !attr.headline ? `<div style="color:var(--fg-subtle);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(attr.body.slice(0, 80))}</div>` : ''}
+        <div style="color:var(--fg-mute);font-size:11px;margin-top:2px;font-family:ui-monospace,monospace">ad:${adIdShort}</div>
+      </div>
+      ${sourceUrl ? `<a href="${sourceUrl}" target="_blank" style="color:#25D366;text-decoration:none;font-size:12px;flex-shrink:0">Ver ↗</a>` : ''}
+    </div>
+  `;
+}
+
+async function loadAdAttribution(phone) {
+  if (!canAccessChat() || !phone) return;
+  if (phone in chatState.adAttributions) return; // ya está cargado (puede ser null o objeto)
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/ad-attribution?phone=' + encodeURIComponent(phone), {
+      headers: authHeaders()
+    });
+    if (!r.ok) { chatState.adAttributions[phone] = null; return; }
+    const j = await r.json();
+    chatState.adAttributions[phone] = j.attribution || null;
+  } catch (_) {
+    chatState.adAttributions[phone] = null;
+  }
+}
+
 function renderChatNotePostit(phone) {
   const note = getContactNote(phone);
   const editing = chatState.editingNoteFor === phone;
@@ -5778,6 +5823,7 @@ function renderChatConversation() {
       <div class="chat-label-chips" id="chat-label-chips">${renderContactLabelChips(phone)}</div>
     </div>
     ${renderChatNotePostit(phone)}
+    ${renderAdAttributionBanner(phone)}
     <div class="chat-messages" id="chat-messages">
       ${chatState.loadingConv
         ? '<div class="chat-loading"><div class="spinner" style="border-color:#2a3942;border-top-color:#00a884"></div></div>'
@@ -6656,6 +6702,25 @@ async function selectChatContact(phone) {
       el.classList.remove('has-unread');
     });
   }
+
+  // Lazy load ad attribution (no bloquea, se actualiza el banner cuando vuelve)
+  loadAdAttribution(phone).then(() => {
+    if (chatState.selectedPhone === phone && STATE.view === 'chat') {
+      const main = document.querySelector('.chat-main');
+      if (main) {
+        // Re-renderizamos solo el banner sin tocar los mensajes (preserva scroll)
+        const banner = main.querySelector('.ad-attribution-banner');
+        const newBannerHtml = renderAdAttributionBanner(phone);
+        if (newBannerHtml && !banner) {
+          // No había banner antes — insertarlo después del postit (o después del header)
+          const insertAfter = main.querySelector('.chat-postit') || main.querySelector('.chat-header');
+          if (insertAfter) insertAfter.insertAdjacentHTML('afterend', newBannerHtml);
+        } else if (newBannerHtml && banner) {
+          banner.outerHTML = newBannerHtml;
+        }
+      }
+    }
+  });
 
   // Load messages — protegido contra race: si el usuario clickea otro chat
   // antes de que termine la carga, descartamos el resultado.

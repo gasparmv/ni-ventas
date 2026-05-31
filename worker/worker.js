@@ -1003,6 +1003,60 @@ export default {
                   ).bind(ts, wamid, direction, phone, senderName, msgType, msgBody, r2Key || mediaUrl, contextId, null).run();
                 } catch (_) {}
 
+                // ===== Ad Attribution (referral) =====
+                // Cuando un cliente clickea un ad de Meta (Click-to-WhatsApp) y manda
+                // mensaje, Meta inyecta un objeto `referral` con info del ad de origen.
+                // Lo guardamos en wa_ad_attributions para trazabilidad y dashboard.
+                const ref = msg.referral;
+                if (ref && ref.source_id) {
+                  try {
+                    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS wa_ad_attributions (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      phone TEXT NOT NULL,
+                      wamid TEXT,
+                      ts TEXT NOT NULL,
+                      source_id TEXT,
+                      source_type TEXT,
+                      source_url TEXT,
+                      headline TEXT,
+                      body TEXT,
+                      media_type TEXT,
+                      image_url TEXT,
+                      video_url TEXT,
+                      thumbnail_url TEXT,
+                      ctwa_clid TEXT,
+                      ad_name TEXT,
+                      ad_set_name TEXT,
+                      campaign_name TEXT,
+                      created_at TEXT NOT NULL
+                    )`).run();
+                    await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_wa_ad_attr_phone ON wa_ad_attributions(phone)`).run();
+                    await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_wa_ad_attr_source ON wa_ad_attributions(source_id)`).run();
+                    const nowIso = new Date().toISOString();
+                    await env.DB.prepare(`INSERT INTO wa_ad_attributions
+                      (phone, wamid, ts, source_id, source_type, source_url, headline, body, media_type, image_url, video_url, thumbnail_url, ctwa_clid, created_at)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `).bind(
+                      phone,
+                      wamid,
+                      ts,
+                      String(ref.source_id || ''),
+                      String(ref.source_type || ''),
+                      String(ref.source_url || ''),
+                      String(ref.headline || ''),
+                      String(ref.body || ''),
+                      String(ref.media_type || ''),
+                      String(ref.image_url || ''),
+                      String(ref.video_url || ''),
+                      String(ref.thumbnail_url || ''),
+                      String(ref.ctwa_clid || ''),
+                      nowIso
+                    ).run();
+                  } catch (e) {
+                    try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'AD_ATTR_ERR: ' + (e?.message || String(e))).run(); } catch(_) {}
+                  }
+                }
+
                 // Auto-labeling: deshabilitado por pedido del usuario (el matching
                 // por keywords genera demasiados falsos positivos). El código
                 // queda en applyAutoLabels() por si se quiere reactivar.
@@ -1566,6 +1620,40 @@ export default {
       }
 
       // ===== CHATS SUMMARY: una fila por phone con último mensaje + unread =====
+      // ===== Ad Attribution: contexto del ad que originó el primer contacto =====
+      // GET /admin/wa/ad-attribution?phone=549XXXXXXXXXX → último ad referral
+      // POST /admin/wa/ad-attributions/list → lista resumida agregada por source_id
+      if (request.method === 'GET' && path === '/admin/wa/ad-attribution') {
+        const phone = url.searchParams.get('phone') || '';
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        try {
+          const row = await env.DB.prepare(
+            'SELECT * FROM wa_ad_attributions WHERE phone = ? ORDER BY ts DESC LIMIT 1'
+          ).bind(phone).first();
+          return json({ attribution: row || null });
+        } catch (e) {
+          return json({ attribution: null, error: e.message });
+        }
+      }
+      if (request.method === 'GET' && path === '/admin/wa/ad-attributions/summary') {
+        // Para dashboard futuro: agregado por source_id con counts.
+        try {
+          const rs = await env.DB.prepare(`
+            SELECT source_id, source_type, headline,
+                   COUNT(*) AS leads,
+                   COUNT(DISTINCT phone) AS unique_contacts,
+                   MIN(ts) AS first_lead_ts,
+                   MAX(ts) AS last_lead_ts
+            FROM wa_ad_attributions
+            GROUP BY source_id
+            ORDER BY last_lead_ts DESC
+          `).all();
+          return json({ ads: rs.results || [] });
+        } catch (e) {
+          return json({ ads: [], error: e.message });
+        }
+      }
+
       // Reemplaza el patrón anterior de pedir limit=5000 mensajes para armar la
       // lista de chats. Devuelve 1 fila por phone con: last_ts, last_body,
       // last_direction, last_msg_type, contact_name (último sender_name inbound
