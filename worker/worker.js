@@ -26,12 +26,15 @@
 //
 // Secrets:
 //   ADMIN_PASSWORD                  setear con `wrangler secret put ADMIN_PASSWORD`
-//   WA_TOKEN                        token permanente de WhatsApp Cloud API (System User)
+//   WA_TOKEN                        token permanente de WhatsApp Cloud API (System User)  ← Meta direct (legacy)
+//   D360_API_KEY                    API key de 360dialog (channel access)                  ← 360dialog (actual)
 //   APPS_SCRIPT_FOLLOWUPS_URL       endpoint de Apps Script que devuelve seguimientos pendientes
 //
 // Vars (en wrangler.toml):
 //   WA_PHONE_NUMBER_ID              919964037861500 (Neon Infinito +54 9 11 4436-6573)
 //   WA_API_VERSION                  v25.0
+//   WA_PROVIDER                     'meta' | '360dialog' (default 'meta'). Setear a '360dialog'
+//                                   con `wrangler secret put WA_PROVIDER` cuando termine la migración.
 
 const ALLOWED_ORIGINS = '*';
 const SESSION_DAYS = 30;
@@ -307,21 +310,69 @@ function parsePanelData({ pnlCsv, dirCsv, disCsv, insCsv, curCsv }) {
   return { pnl, directo, distris, insumos, cursos };
 }
 
-async function waSend(env, payload) {
-  if (!env.WA_TOKEN || !env.WA_PHONE_NUMBER_ID) {
-    return { ok: false, status: 500, error: 'WhatsApp no configurado (faltan WA_TOKEN o WA_PHONE_NUMBER_ID)' };
+// ============================================================
+// WhatsApp Provider Abstraction
+// ============================================================
+// Abstrae las llamadas a la API de WhatsApp para soportar dos providers:
+//   - 'meta'      : Meta Cloud API directa (graph.facebook.com)
+//   - '360dialog' : 360dialog como BSP (waba-v2.360dialog.io)
+//
+// Ambos providers usan estructuras de payload compatibles (360dialog es un thin
+// proxy sobre Meta), solo cambia la URL base y el header de autenticación.
+function getWaClient(env) {
+  const provider = (env.WA_PROVIDER || 'meta').toLowerCase();
+  if (provider === '360dialog') {
+    if (!env.D360_API_KEY) {
+      throw new Error('WA_PROVIDER=360dialog pero D360_API_KEY no configurada');
+    }
+    const base = env.D360_API_BASE || 'https://waba-v2.360dialog.io';
+    return {
+      provider: '360dialog',
+      base,
+      headers: { 'D360-API-KEY': env.D360_API_KEY },
+      // En 360dialog NO se incluye phone_id ni waba_id en la URL — son implícitos por la API key
+      messagesUrl: () => `${base}/messages`,
+      mediaUrl:    (mediaId) => `${base}/${mediaId}`,
+      mediaUploadUrl: () => `${base}/media`,
+      // Templates en 360dialog usan otro endpoint (Partner API), por ahora dejamos el Meta como fallback
+      templatesUrl: () => `${base}/configs/templates`,
+      // GET phone info: 360dialog no expone exactamente este endpoint; el dashboard ya muestra todo
+      phoneInfoUrl: (fields) => `${base}/configs/whatsapp_business_account`,
+    };
   }
+  // Default: Meta direct
   const v = env.WA_API_VERSION || 'v25.0';
-  const url = `https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/messages`;
-  const r = await fetch(url, {
+  const base = `https://graph.facebook.com/${v}`;
+  return {
+    provider: 'meta',
+    base,
+    headers: env.WA_TOKEN ? { 'Authorization': `Bearer ${env.WA_TOKEN}` } : {},
+    messagesUrl: () => `${base}/${env.WA_PHONE_NUMBER_ID}/messages`,
+    mediaUrl:    (mediaId) => `${base}/${mediaId}`,
+    mediaUploadUrl: () => `${base}/${env.WA_PHONE_NUMBER_ID}/media`,
+    templatesUrl: () => `${base}/${env.WA_BUSINESS_ACCOUNT_ID}/message_templates`,
+    phoneInfoUrl: (fields) => `${base}/${env.WA_PHONE_NUMBER_ID}${fields ? '?fields=' + fields : ''}`,
+  };
+}
+
+async function waSend(env, payload) {
+  if (!env.WA_PHONE_NUMBER_ID) {
+    return { ok: false, status: 500, error: 'WA_PHONE_NUMBER_ID no configurado' };
+  }
+  let wa;
+  try { wa = getWaClient(env); } catch (e) { return { ok: false, status: 500, error: e.message }; }
+  if (wa.provider === 'meta' && !env.WA_TOKEN) {
+    return { ok: false, status: 500, error: 'WA_TOKEN no configurado (provider meta)' };
+  }
+  const r = await fetch(wa.messagesUrl(), {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${env.WA_TOKEN}`, 'Content-Type': 'application/json' },
+    headers: { ...wa.headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) return { ok: false, status: r.status, error: data?.error?.message || 'wa send failed', raw: data };
+  if (!r.ok) return { ok: false, status: r.status, error: data?.error?.message || 'wa send failed', raw: data, provider: wa.provider };
   const id = data?.messages?.[0]?.id || null;
-  return { ok: true, id, raw: data };
+  return { ok: true, id, raw: data, provider: wa.provider };
 }
 
 async function waSendText(env, to, body) {
@@ -344,15 +395,15 @@ async function waSendTemplate(env, to, name, lang = 'es', params = []) {
   });
 }
 
-// ===== Media download (Meta → R2) =====
+// ===== Media download (WhatsApp → R2, vía Meta o 360dialog) =====
 async function downloadMedia(env, mediaId) {
-  if (!env.WA_TOKEN || !mediaId || !env.MEDIA) return null;
-  const v = env.WA_API_VERSION || 'v25.0';
+  if (!mediaId || !env.MEDIA) return null;
+  let wa;
+  try { wa = getWaClient(env); } catch (_) { return null; }
+  if (wa.provider === 'meta' && !env.WA_TOKEN) return null;
   try {
-    // Step 1: get media URL from Meta
-    const meta = await fetch(`https://graph.facebook.com/${v}/${mediaId}`, {
-      headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
-    });
+    // Step 1: get media URL from WA API (Meta o 360dialog)
+    const meta = await fetch(wa.mediaUrl(mediaId), { headers: wa.headers });
     const info = await meta.json();
     if (!info.url) return null;
     const mime = info.mime_type || 'application/octet-stream';
@@ -365,10 +416,10 @@ async function downloadMedia(env, mediaId) {
       : mime.includes('pdf') ? '.pdf'
       : mime.includes('mp3') || mime.includes('mpeg') ? '.mp3'
       : '';
-    // Step 2: download actual file
-    const file = await fetch(info.url, {
-      headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
-    });
+    // Step 2: download actual file. Meta requiere el header de auth en este request
+    // también; 360dialog en algunos casos devuelve URLs presigneadas que no piden auth.
+    // Por seguridad mandamos el header igual — si la URL ya está firmada, se ignora.
+    const file = await fetch(info.url, { headers: wa.headers });
     if (!file.ok) return null;
     const blob = await file.arrayBuffer();
     // Step 3: store in R2
@@ -1240,6 +1291,19 @@ export default {
         });
       }
 
+      // ===== TEMPORARY: GET phone info (sirve para verificar estado durante migración 360dialog) =====
+      // Lo dejo solo este (read-only, low risk). Los de modificación (deregister,
+      // delete-phone) los saqué — fallaron para nuestro caso ON_PREMISE.
+      if (request.method === 'GET' && path === '/admin/wa/phone-info') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const v = env.WA_API_VERSION || 'v25.0';
+        const fields = 'id,display_phone_number,verified_name,quality_rating,platform_type,name_status,code_verification_status,messaging_limit_tier,account_mode,is_pin_enabled,status,certificate,is_official_business_account,throughput,health_status';
+        const url = `https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}?fields=${fields}`;
+        const r = await fetch(url, { headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` } });
+        const j = await r.json().catch(() => ({}));
+        return json({ ok: r.ok, status: r.status, response: j });
+      }
+
       // ===== BULK IMPORT de historial de WA (scrape via whatsapp-web.js) =====
       // El script scrape-wa-history.js corre en la PC del usuario y manda
       // batches de mensajes acá. Inserta con OR IGNORE para dedup por wamid.
@@ -1640,15 +1704,15 @@ export default {
                           : 'application/octet-stream';
         const mime = fileMime || defaultMime;
         await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: mime } });
-        // 2. Upload media to Meta (get media ID)
-        const v = env.WA_API_VERSION || 'v25.0';
+        // 2. Upload media to WA (Meta o 360dialog) para obtener media id
+        const _wa1 = getWaClient(env);
         const uploadFd = new FormData();
         uploadFd.append('messaging_product', 'whatsapp');
         uploadFd.append('file', new Blob([buf], { type: mime }), fileName);
         uploadFd.append('type', mime);
-        const uploadR = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/media`, {
+        const uploadR = await fetch(_wa1.mediaUploadUrl(), {
           method: 'POST',
-          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` },
+          headers: _wa1.headers,
           body: uploadFd
         });
         const uploadData = await uploadR.json().catch(() => ({}));
@@ -1709,14 +1773,14 @@ export default {
           const buf = await obj.arrayBuffer();
           const mime = obj.httpMetadata?.contentType || 'application/octet-stream';
           const fileName = r2Key.split('/').pop() || 'file';
-          const v = env.WA_API_VERSION || 'v25.0';
+          const _waRe = getWaClient(env);
           const fd = new FormData();
           fd.append('messaging_product', 'whatsapp');
           fd.append('file', new Blob([buf], { type: mime }), fileName);
           fd.append('type', mime);
-          const upR = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/media`, {
+          const upR = await fetch(_waRe.mediaUploadUrl(), {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` },
+            headers: _waRe.headers,
             body: fd
           });
           const upJ = await upR.json().catch(() => ({}));
@@ -1872,14 +1936,14 @@ export default {
         const buf = await obj.arrayBuffer();
         const mime = obj.httpMetadata?.contentType || 'image/jpeg';
         const ext = qr.media_r2_key.split('.').pop() || 'jpg';
-        const v = env.WA_API_VERSION || 'v25.0';
+        const _waQr = getWaClient(env);
         const fd = new FormData();
         fd.append('messaging_product', 'whatsapp');
         fd.append('file', new Blob([buf], { type: mime }), 'qr.' + ext);
         fd.append('type', mime);
-        const upR = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}/media`, {
+        const upR = await fetch(_waQr.mediaUploadUrl(), {
           method: 'POST',
-          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` },
+          headers: _waQr.headers,
           body: fd
         });
         const upJ = await upR.json().catch(() => ({}));
@@ -2092,20 +2156,20 @@ export default {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const { name, category, language, body_text, example_params } = body || {};
         if (!name || !category || !language || !body_text) return json({ error: 'missing fields' }, 400);
-        if (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN) return json({ error: 'WA not configured' }, 500);
-        const v = env.WA_API_VERSION || 'v25.0';
+        const _waT = getWaClient(env);
+        if (_waT.provider === 'meta' && (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN)) return json({ error: 'WA not configured (meta)' }, 500);
         const components = [{ type: 'BODY', text: body_text }];
         if (Array.isArray(example_params) && example_params.length) {
           components[0].example = { body_text: [example_params] };
         }
-        const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_BUSINESS_ACCOUNT_ID}/message_templates`, {
+        const r = await fetch(_waT.templatesUrl(), {
           method: 'POST',
-          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}`, 'Content-Type': 'application/json' },
+          headers: { ..._waT.headers, 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, category, language, components })
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) return json({ error: data?.error?.message || 'create failed', raw: data }, r.status || 500);
-        return json({ ok: true, id: data.id, status: data.status, category: data.category });
+        return json({ ok: true, id: data.id, status: data.status, category: data.category, provider: _waT.provider });
       }
       // Setear (o resetear) el PIN de two-step verification del número.
       // POST a /{PHONE_NUMBER_ID} con {pin}. Necesario cuando la UI no expone
@@ -2165,14 +2229,15 @@ export default {
         return json({ phones: data.data || [] });
       }
       if (request.method === 'GET' && path === '/admin/wa/templates') {
-        if (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN) return json({ error: 'WA not configured' }, 500);
-        const v = env.WA_API_VERSION || 'v25.0';
-        const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_BUSINESS_ACCOUNT_ID}/message_templates?limit=100&fields=name,status,category,language,components`, {
-          headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
+        const _waL = getWaClient(env);
+        if (_waL.provider === 'meta' && (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN)) return json({ error: 'WA not configured (meta)' }, 500);
+        const sep = _waL.templatesUrl().includes('?') ? '&' : '?';
+        const r = await fetch(`${_waL.templatesUrl()}${sep}limit=100&fields=name,status,category,language,components`, {
+          headers: _waL.headers
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) return json({ error: data?.error?.message || 'list failed' }, r.status || 500);
-        return json({ templates: data.data || [] });
+        return json({ templates: data.data || data.waba_templates || [], provider: _waL.provider });
       }
 
       // Servir medios desde R2
@@ -2635,16 +2700,19 @@ export default {
 
 // ===== Monitor de templates: notifica al admin cuando cambia el status =====
 async function monitorTemplateStatus(env) {
-  if (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN || !env.ADMIN_NOTIFY_PHONE) return;
+  if (!env.ADMIN_NOTIFY_PHONE) return;
+  let _waM;
+  try { _waM = getWaClient(env); } catch (_) { return; }
+  if (_waM.provider === 'meta' && (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN)) return;
   try {
     await env.DB.prepare('CREATE TABLE IF NOT EXISTS template_status_cache (name TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL)').run();
-    const v = env.WA_API_VERSION || 'v25.0';
-    const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_BUSINESS_ACCOUNT_ID}/message_templates?limit=100&fields=name,status,category`, {
-      headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
+    const sep = _waM.templatesUrl().includes('?') ? '&' : '?';
+    const r = await fetch(`${_waM.templatesUrl()}${sep}limit=100&fields=name,status,category`, {
+      headers: _waM.headers
     });
     if (!r.ok) return;
     const data = await r.json().catch(() => ({}));
-    const templates = data?.data || [];
+    const templates = data?.data || data?.waba_templates || [];
     for (const t of templates) {
       const name = t.name;
       const status = t.status;
