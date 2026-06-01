@@ -770,6 +770,47 @@ async function estimarParametrosConGemini(env, imageBuf, imageMime, contextoClie
   };
 }
 
+// ===== Coexistence history import (event: 'history' de 360dialog) =====
+// Procesa el formato no-Meta { event: 'history', data: { messages: [...] } }.
+// Inserta cada mensaje histórico con INSERT OR IGNORE — wamid UNIQUE evita
+// duplicados con mensajes ya guardados via webhook normal.
+async function processCoexistenceHistory(env, data) {
+  const businessPhone = String(env.WA_BUSINESS_PHONE || '5491144366573').replace(/\D/g, '');
+  const msgs = Array.isArray(data?.messages) ? data.messages : [];
+  const contacts = Array.isArray(data?.contacts) ? data.contacts : [];
+  const nameByPhone = {};
+  for (const c of contacts) {
+    const waId = String(c.wa_id || '').replace('+', '');
+    const nm = c.profile?.name || '';
+    if (waId && nm) nameByPhone[waId] = nm;
+  }
+  for (const m of msgs) {
+    const wamid = m.id || '';
+    if (!wamid) continue;
+    const fromNorm = String(m.from || '').replace(/\D/g, '');
+    const direction = fromNorm === businessPhone ? 'outbound' : 'inbound';
+    const phone = fromNorm;
+    const senderName = direction === 'inbound' ? (nameByPhone[phone] || '') : '';
+    const msgType = m.type || 'unknown';
+    let body = ''; let mediaUrl = '';
+    if (m.text)        body = m.text.body || '';
+    else if (m.image)  { body = m.image.caption || '';  mediaUrl = m.image.id || ''; }
+    else if (m.video)  { body = m.video.caption || '';  mediaUrl = m.video.id || ''; }
+    else if (m.audio)  { mediaUrl = m.audio.id || ''; }
+    else if (m.document) { body = m.document.filename || ''; mediaUrl = m.document.id || ''; }
+    else if (m.sticker)  { mediaUrl = m.sticker.id || ''; }
+    else if (m.reaction) body = m.reaction.emoji || '';
+    else if (m.location) body = `[ubicacion] ${m.location.latitude},${m.location.longitude}`;
+    const contextId = m.context?.id || m.reaction?.message_id || '';
+    const ts = m.timestamp ? new Date(parseInt(m.timestamp) * 1000).toISOString() : new Date().toISOString();
+    try {
+      await env.DB.prepare(
+        'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?,?,?,?,?,?,?,?,?,?)'
+      ).bind(ts, wamid, direction, phone, senderName, msgType, body, mediaUrl, contextId, null).run();
+    } catch (_) {}
+  }
+}
+
 // ===== Image analysis (Vision via Workers AI) =====
 async function analyzeImage(env, r2Key) {
   if (!env.AI || !env.MEDIA || !r2Key) return null;
@@ -908,11 +949,26 @@ export default {
       // Siempre responder 200 rápido para que Meta no reintente
       const processWebhook = async () => {
         try {
+          // Coexistence — formato no-Meta: { id, event, data } directo en la raíz.
+          // 360dialog envía 'event: history' (mensajes históricos del onboarding)
+          // y 'event: smb_app_state_sync' (contactos sincronizados) en este formato
+          // a la partner-configured webhook URL.
+          if (body?.event === 'history' && body?.data) {
+            await processCoexistenceHistory(env, body.data);
+            return;
+          }
+          if (body?.event === 'smb_app_state_sync' && body?.data) {
+            // Por ahora solo log — no usamos contactos sync en el CRM todavía.
+            return;
+          }
+
           const entries = body?.entry || [];
           for (const entry of entries) {
             const changes = entry?.changes || [];
             for (const change of changes) {
-              if (change?.field !== 'messages') continue;
+              // Aceptamos: 'messages' (Meta estándar) Y 'smb_message_echoes'
+              // (coexistence — mensajes que Joaco escribió desde la app móvil).
+              if (change?.field !== 'messages' && change?.field !== 'smb_message_echoes') continue;
               const value = change?.value || {};
               const contacts = value?.contacts || [];
               const contactMap = {};
