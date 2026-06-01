@@ -9199,10 +9199,14 @@ async function generarRenderInBackground(briefId) {
     };
   }
 
-  // Auto-transición de 'nuevo' → 'listo'.
+  // Auto-transición de 'nuevo' → 'listo' SOLO si ya están las 3 medidas.
+  // Si Emma aún no cargó ancho/alto/neón, el brief se queda en 'nuevo' hasta
+  // que las complete y guarde — en ese momento handleBriefSave detecta render
+  // + medidas y lo pasa a 'listo'.
   try {
     const current = STATE.briefs.find(b => b.id === briefId);
-    if (current && current.estado === 'nuevo') {
+    const tieneMedidas = current && current.ancho_cm > 0 && current.alto_cm > 0 && current.neon_mt > 0;
+    if (current && current.estado === 'nuevo' && tieneMedidas) {
       const saved = await saveBrief({ id: briefId, estado: 'listo' });
       const ix = STATE.briefs.findIndex(b => b.id === saved.id);
       if (ix >= 0) STATE.briefs[ix] = saved;
