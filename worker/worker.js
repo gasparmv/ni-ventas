@@ -416,13 +416,17 @@ async function downloadMedia(env, mediaId) {
       : mime.includes('pdf') ? '.pdf'
       : mime.includes('mp3') || mime.includes('mpeg') ? '.mp3'
       : '';
-    // Step 2: download actual file. Las URLs de lookaside.fbsbx.com (devueltas
-    // por 360dialog y Meta) son PRE-FIRMADAS — agregar headers de auth puede
-    // hacerlas fallar. Para Meta directo, el download requiere el Bearer token.
-    // Detección: si la URL ya es lookaside (presigned), bajamos sin headers;
-    // si es otra (graph.facebook.com directo), incluimos auth.
-    const isPresigned = /lookaside\.fbsbx\.com/.test(info.url);
-    const file = await fetch(info.url, isPresigned ? {} : { headers: wa.headers });
+    // Step 2: download.
+    // - Meta directo: bajar de graph.facebook.com con Bearer token.
+    // - 360dialog: la URL del paso 1 apunta a lookaside.fbsbx.com pero NO se
+    //   puede descargar desde ahí (Meta rechaza 401). 360dialog tiene un PROXY:
+    //   reemplazar el host lookaside.fbsbx.com → waba-v2.360dialog.io conservando
+    //   path y query, y mandar D360-API-KEY. Documentado en su API reference.
+    let downloadUrl = info.url;
+    if (wa.provider === '360dialog' && /lookaside\.fbsbx\.com/.test(downloadUrl)) {
+      downloadUrl = downloadUrl.replace('https://lookaside.fbsbx.com', wa.base);
+    }
+    const file = await fetch(downloadUrl, { headers: wa.headers });
     if (!file.ok) return null;
     const blob = await file.arrayBuffer();
     // Step 3: store in R2
@@ -1378,6 +1382,44 @@ export default {
     // ----- Reportes (público para tracking básico) -----
     if (request.method === 'GET' && path === '/report') {
       return reportHandler(env, url, false);
+    }
+
+    // DEBUG público temporal — reprocesar imágenes pendientes (media_url con id raw).
+    if (request.method === 'POST' && path === '/debug/media-reprocess') {
+      // Trae media images con media_url numérico (no wa/...) y las baja a R2.
+      const rs = await env.DB.prepare(
+        "SELECT id, media_url FROM wa_messages WHERE msg_type IN ('image','video','audio','document','sticker') AND media_url GLOB '[0-9]*' AND length(media_url) > 8 ORDER BY id DESC LIMIT 200"
+      ).all();
+      const pending = rs.results || [];
+      let ok = 0, fail = 0;
+      const errors = [];
+      for (const row of pending) {
+        try {
+          const result = await downloadMedia(env, row.media_url);
+          if (result) {
+            await env.DB.prepare('UPDATE wa_messages SET media_url = ? WHERE id = ?').bind(result.key, row.id).run();
+            ok++;
+          } else {
+            fail++;
+            errors.push({ id: row.id, media: row.media_url, reason: 'null' });
+          }
+        } catch (e) { fail++; errors.push({ id: row.id, err: e.message }); }
+      }
+      return json({ ok, fail, total: pending.length, errors: errors.slice(0, 10) });
+    }
+
+    // DEBUG temporal — reprocesar UN media específico (id puntual).
+    if (request.method === 'GET' && /^\/debug\/media\/\d+$/.test(path)) {
+      const mediaId = path.split('/').pop();
+      try {
+        const result = await downloadMedia(env, mediaId);
+        if (!result) return json({ ok: false, mediaId });
+        // Actualizar wa_messages si hay rows con ese mediaId raw.
+        await env.DB.prepare('UPDATE wa_messages SET media_url = ? WHERE media_url = ?').bind(result.key, mediaId).run();
+        return json({ ok: true, mediaId, ...result });
+      } catch (e) {
+        return json({ ok: false, error: e.message, mediaId });
+      }
     }
 
     // ----- Cotizador params (público lectura) -----
