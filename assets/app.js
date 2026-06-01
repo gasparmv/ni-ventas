@@ -8727,14 +8727,13 @@ async function confirmQuickCreate() {
     for (const img of STATE.quickModalImages) {
       try { await uploadBriefImage(saved.id, img.blob, img.contentType, 'chat'); } catch(e) { console.error('upload', e); }
     }
-    // Cerrar modal y abrir el drawer del brief recién creado.
+    // Cerrar modal y volver al kanban. NO abrimos el drawer porque el form
+    // que se completó en el modal ya tiene todos los datos del brief — abrirlo
+    // sería pedir los mismos campos otra vez. El brief queda visible como
+    // tarjeta nueva en la columna "A cotizar".
     STATE.quickModalOpen = false;
     STATE.quickModalImages = [];
     STATE.quickModalSaving = false;
-    STATE.briefSelected = saved.id;
-    STATE.briefDraft = null;
-    STATE.briefDraftImages = [];
-    fetchBriefDetail(saved.id).then(() => refreshImageGrids());
     render();
   } catch (e) {
     STATE.quickModalSaving = false;
