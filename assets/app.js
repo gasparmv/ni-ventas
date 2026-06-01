@@ -8828,8 +8828,12 @@ function openBriefDrawer(id) {
   STATE.briefDetailImages = [];
   STATE.briefDetailMessages = [];
   render();
-  // Cargar detalle (incluye imágenes + mensajes) en background.
+  // Cargar detalle en background. Cuando llega, re-renderizamos el DRAWER ENTERO
+  // para que la IIFE del botón "Generar render IA" se vuelva a evaluar con las
+  // imágenes ya cargadas (refreshImageGrids parchea grid y botón pero la IIFE
+  // del label del botón ya quedó congelada en el primer render).
   fetchBriefDetail(id).then(() => {
+    render();
     refreshImageGrids();
     refreshBriefChat();
   });
@@ -9047,6 +9051,9 @@ async function addImageFromFile(file, isNewBrief, tipo = 'chat') {
     try {
       const result = await uploadBriefImage(STATE.briefSelected, file, file.type, tipo);
       STATE.briefDetailImages.push(result);
+      // Re-render del drawer para que el botón "Generar render IA" se re-evalúe
+      // con la imagen recién subida en el state.
+      render();
       refreshImageGrids();
     } catch (e) {
       alert('Error subiendo imagen: ' + e.message);
