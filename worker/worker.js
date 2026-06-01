@@ -416,10 +416,13 @@ async function downloadMedia(env, mediaId) {
       : mime.includes('pdf') ? '.pdf'
       : mime.includes('mp3') || mime.includes('mpeg') ? '.mp3'
       : '';
-    // Step 2: download actual file. Meta requiere el header de auth en este request
-    // también; 360dialog en algunos casos devuelve URLs presigneadas que no piden auth.
-    // Por seguridad mandamos el header igual — si la URL ya está firmada, se ignora.
-    const file = await fetch(info.url, { headers: wa.headers });
+    // Step 2: download actual file. Las URLs de lookaside.fbsbx.com (devueltas
+    // por 360dialog y Meta) son PRE-FIRMADAS — agregar headers de auth puede
+    // hacerlas fallar. Para Meta directo, el download requiere el Bearer token.
+    // Detección: si la URL ya es lookaside (presigned), bajamos sin headers;
+    // si es otra (graph.facebook.com directo), incluimos auth.
+    const isPresigned = /lookaside\.fbsbx\.com/.test(info.url);
+    const file = await fetch(info.url, isPresigned ? {} : { headers: wa.headers });
     if (!file.ok) return null;
     const blob = await file.arrayBuffer();
     // Step 3: store in R2
@@ -1038,12 +1041,19 @@ export default {
                 }
                 else if (msg.order) { msgBody = `[pedido] ${(msg.order.product_items || []).map(p => p.product_retailer_id).join(', ')}`; }
                 else if (msg.unsupported) {
-                  // Meta sends error details for unsupported messages
+                  // Meta sends error details for unsupported messages.
+                  // El código 131051 ("Message type unknown") corresponde casi siempre
+                  // a un mensaje EDITADO por el cliente — Meta no expone la edición
+                  // por Cloud API, solo te notifica que algo cambió.
                   const errTitle = msg.errors?.[0]?.title || '';
-                  const errDetails = msg.errors?.[0]?.error_data?.details || '';
-                  if (errTitle.includes('unavailable')) msgBody = '[mensaje no disponible]';
-                  else if (errTitle.includes('unknown')) msgBody = '[tipo de mensaje no soportado por la API]';
-                  else msgBody = `[no soportado: ${errTitle || 'desconocido'}]`;
+                  const errCode  = msg.errors?.[0]?.code;
+                  if (errCode === 131051 || errTitle === 'Message type unknown') {
+                    msgBody = '✏️ El cliente editó un mensaje (Meta no comparte el contenido editado)';
+                  } else if (errTitle.includes('unavailable')) {
+                    msgBody = '[mensaje no disponible]';
+                  } else {
+                    msgBody = `[no soportado: ${errTitle || 'desconocido'}]`;
+                  }
                 }
                 const contextId = msg.context?.id || msg.reaction?.message_id || '';
                 const ts = msg.timestamp ? new Date(parseInt(msg.timestamp) * 1000).toISOString() : new Date().toISOString();
@@ -2858,6 +2868,18 @@ export default {
         await env.DB.prepare('DELETE FROM brief_imagenes WHERE id = ?').bind(imgId).run();
         await env.DB.prepare('UPDATE briefs SET updated_at = ? WHERE id = ?').bind(new Date().toISOString(), briefId).run();
         return noContent();
+      }
+
+      // ===== DEBUG: test download de media desde el worker =====
+      if (request.method === 'GET' && /^\/admin\/360\/media-test\/\d+$/.test(path)) {
+        const mediaId = path.split('/').pop();
+        try {
+          const result = await downloadMedia(env, mediaId);
+          if (!result) return json({ error: 'downloadMedia returned null', mediaId });
+          return json({ ok: true, mediaId, ...result });
+        } catch (e) {
+          return json({ error: e.message, mediaId });
+        }
       }
 
       // ===== 360dialog webhook config (echoes de WA Business) =====

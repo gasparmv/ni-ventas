@@ -2454,30 +2454,40 @@ table.t td.cliente { font-weight: 600; }
 /* Label filter bar */
 .label-filter-bar {
   display: flex;
-  gap: 5px;
-  padding: 6px 10px;
+  gap: 8px;
+  padding: 10px 12px;
   flex-wrap: wrap;
   flex-shrink: 0;
   background: #111b21;
   border-bottom: 1px solid #222d34;
+  max-height: 140px;
+  overflow-y: auto;
 }
 .label-filter-chip {
-  padding: 4px 12px;
-  border-radius: 16px;
+  padding: 6px 14px;
+  border-radius: 18px;
   font-size: 12px;
-  border: 1px solid color-mix(in srgb, var(--lc) 60%, transparent);
+  font-weight: 600;
+  letter-spacing: .02em;
+  border: 1px solid color-mix(in srgb, var(--lc) 45%, transparent);
   color: var(--lc);
-  background: transparent;
+  background: color-mix(in srgb, var(--lc) 10%, transparent);
   cursor: pointer;
-  font-weight: 500;
   transition: all .15s;
   font-family: 'Segoe UI', system-ui, sans-serif;
+  white-space: nowrap;
+  line-height: 1;
 }
-.label-filter-chip:hover { background: color-mix(in srgb, var(--lc) 15%, transparent); }
+.label-filter-chip:hover {
+  background: color-mix(in srgb, var(--lc) 22%, transparent);
+  border-color: var(--lc);
+  transform: translateY(-1px);
+}
 .label-filter-chip.active {
   background: var(--lc);
   color: #fff;
   border-color: var(--lc);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--lc) 35%, transparent);
 }
 .label-filter-clear {
   padding: 4px 12px;
