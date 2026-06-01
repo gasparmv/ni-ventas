@@ -7871,6 +7871,9 @@ if (typeof STATE.briefDetailImages === 'undefined') STATE.briefDetailImages = []
 if (typeof STATE.briefDetailLoading === 'undefined') STATE.briefDetailLoading = false;
 if (typeof STATE.briefCotPopupOpen === 'undefined') STATE.briefCotPopupOpen = false;
 if (typeof STATE.imgLightboxUrl === 'undefined')    STATE.imgLightboxUrl = null;
+if (typeof STATE.quickModalOpen === 'undefined')    STATE.quickModalOpen = false;
+if (typeof STATE.quickModalImages === 'undefined')  STATE.quickModalImages = []; // [{dataUrl, blob, contentType}]
+if (typeof STATE.quickModalSaving === 'undefined')  STATE.quickModalSaving = false;
 if (typeof STATE.briefGenerandoRender === 'undefined') STATE.briefGenerandoRender = false;
 if (typeof STATE.briefLastAiParams === 'undefined') STATE.briefLastAiParams = null; // último resultado de estimación IA (banner)
 if (typeof STATE.briefDetailMessages === 'undefined') STATE.briefDetailMessages = []; // (legacy, sin uso)
@@ -8646,6 +8649,7 @@ function renderCotizacion() {
       ${renderBriefDrawer()}
       ${renderBriefCotizadorPopup()}
       ${renderImgLightbox()}
+      ${renderQuickCreateModal()}
       ${renderTeamChatWidget()}
     </div>
   `;
@@ -8655,40 +8659,166 @@ function renderCotizacion() {
 // el nombre del cliente o cartel antes de que se cree el brief. Esto evita
 // que queden briefs "Sin título" colgados en el board.
 // Usado por el paste/drop sobre la columna "A cotizar".
+// Cuando el comercial pega/dropea una imagen sobre la columna "A cotizar":
+// en vez de crear el brief directo (con prompt feo), abrimos un MODAL popup
+// centrado con animación, con el form de "Nuevo brief" pre-cargado con la
+// imagen. Recién al confirmar se crea el brief en la DB.
 async function quickCreateBriefFromImage(file) {
   if (!canCreateBriefs()) return;
-  // 1) Pedir título primero. Loop hasta que ingrese uno válido o cancele.
-  let titulo = '';
-  while (true) {
-    titulo = (prompt('¿Cómo se llama este pedido? (nombre del cliente o cartel)') || '').trim();
-    if (titulo === '') {
-      // null o vacío → si fue cancel (null), salir sin crear. Si fue OK con vacío, re-prompt.
-      // prompt() devuelve null cuando se cancela, string vacío cuando se acepta sin escribir.
-      // Acá unificamos: si está vacío, no creamos.
-      return;
-    }
-    if (titulo.length >= 2) break;
-    alert('El título tiene que tener al menos 2 caracteres.');
+  if (!file) return;
+  // Convertir el archivo a {dataUrl, blob, contentType} para preview local.
+  let img;
+  try { img = await fileToDraftImage(file); } catch(e) { return; }
+  if (STATE.quickModalOpen) {
+    // Modal ya abierto: agregar la imagen al draft (permite múltiples paste/drop seguidos).
+    STATE.quickModalImages.push(img);
+    refreshQuickModalImages();
+  } else {
+    // Abrir modal por primera vez.
+    STATE.quickModalImages = [img];
+    STATE.quickModalOpen = true;
+    STATE.quickModalSaving = false;
+    render();
+    // Auto-focus en el input de título.
+    setTimeout(() => {
+      const el = document.getElementById('quick-modal-titulo');
+      if (el) { el.focus(); el.select(); }
+    }, 50);
   }
-  // 2) Crear con el título dado y subir la imagen.
+}
+
+// Cancela el modal sin crear nada.
+function cancelQuickCreate() {
+  STATE.quickModalOpen = false;
+  STATE.quickModalImages = [];
+  STATE.quickModalSaving = false;
+  render();
+}
+
+// Lee el form, valida, crea el brief en la DB y sube todas las imágenes.
+async function confirmQuickCreate() {
+  if (STATE.quickModalSaving) return;
+  const tEl = document.getElementById('quick-modal-titulo');
+  const mEl = document.getElementById('quick-modal-medidas');
+  const nEl = document.getElementById('quick-modal-notas');
+  const titulo = (tEl?.value || '').trim();
+  const medidas = (mEl?.value || '').trim();
+  const notas   = (nEl?.value || '').trim();
+  if (titulo.length < 2) {
+    if (tEl) { tEl.focus(); tEl.style.borderColor = '#FF5566'; setTimeout(() => { tEl.style.borderColor = 'var(--border)'; }, 1200); }
+    return;
+  }
+  if (!STATE.quickModalImages.length) {
+    alert('Sumá al menos una imagen antes de crear el brief.');
+    return;
+  }
+  STATE.quickModalSaving = true;
+  const saveBtn = document.getElementById('quick-modal-confirm');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Creando…'; }
   try {
     const saved = await saveBrief({
       cliente_nombre: titulo,
+      medidas_libre: medidas || null,
+      notas: notas || null,
       estado: 'nuevo'
     });
     STATE.briefs.unshift(saved);
-    if (file) {
-      try { await uploadBriefImage(saved.id, file, file.type); } catch(e) { console.error('upload', e); }
+    // Subir todas las imágenes pegadas.
+    for (const img of STATE.quickModalImages) {
+      try { await uploadBriefImage(saved.id, img.blob, img.contentType, 'chat'); } catch(e) { console.error('upload', e); }
     }
-    // Abrir drawer ya con el título cargado.
+    // Cerrar modal y abrir el drawer del brief recién creado.
+    STATE.quickModalOpen = false;
+    STATE.quickModalImages = [];
+    STATE.quickModalSaving = false;
     STATE.briefSelected = saved.id;
     STATE.briefDraft = null;
     STATE.briefDraftImages = [];
-    fetchBriefDetail(saved.id).then(() => render());
+    fetchBriefDetail(saved.id).then(() => refreshImageGrids());
     render();
   } catch (e) {
+    STATE.quickModalSaving = false;
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '✓ Crear brief'; }
     alert('Error creando brief: ' + e.message);
   }
+}
+
+// ============ Modal "Quick Create" — popup centrado con animación ============
+function renderQuickCreateModal() {
+  if (!STATE.quickModalOpen) return '';
+  return `
+    <style>
+      @keyframes nv-qmodal-fade { from { opacity: 0 } to { opacity: 1 } }
+      @keyframes nv-qmodal-pop {
+        from { opacity: 0; transform: scale(.88) translateY(8px); }
+        to   { opacity: 1; transform: scale(1) translateY(0); }
+      }
+      .nv-qmodal-backdrop { animation: nv-qmodal-fade .18s ease-out; }
+      .nv-qmodal-card { animation: nv-qmodal-pop .22s cubic-bezier(.16,1.0,.3,1) both; }
+    </style>
+    <div id="quick-modal-backdrop" class="nv-qmodal-backdrop" role="dialog" aria-modal="true"
+      style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:280;display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(4px)">
+      <div id="quick-modal-card" class="nv-qmodal-card"
+        style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:520px;width:100%;max-height:90vh;overflow-y:auto;padding:var(--s-4)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
+          <h2 style="margin:0;font-size:16px">✨ Nuevo brief desde imagen</h2>
+          <button id="quick-modal-close" aria-label="Cerrar" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
+        </div>
+
+        <!-- Preview de las imágenes pegadas -->
+        <div id="quick-modal-images" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(70px,1fr));gap:6px;margin-bottom:var(--s-3)">
+          ${renderQuickModalImages()}
+        </div>
+        <div style="font-size:10px;color:var(--fg-mute);margin-bottom:var(--s-3);text-align:center;opacity:.7">
+          Podés pegar (Ctrl+V) más imágenes y se suman al brief.
+        </div>
+
+        <!-- Form -->
+        <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Título <span style="color:#FF5566">*</span></label>
+        <input type="text" id="quick-modal-titulo" placeholder="Cliente o cartel — ej. Alhambra"
+          style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3)">
+
+        <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Medidas referenciales (opcional)</label>
+        <input type="text" id="quick-modal-medidas" placeholder="Lo que pidió el cliente: 90x50, letras 80, INT…"
+          style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3)">
+
+        <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Notas (opcional)</label>
+        <textarea id="quick-modal-notas" rows="2" placeholder="referencia, info extra…"
+          style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-4)"></textarea>
+
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button id="quick-modal-cancel" class="btn btn-ghost">Cancelar</button>
+          <button id="quick-modal-confirm" class="btn btn-cyan">✓ Crear brief</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderQuickModalImages() {
+  if (!STATE.quickModalImages.length) return '<div style="grid-column:1/-1;font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— sin imágenes —</div>';
+  return STATE.quickModalImages.map((img, i) => `
+    <div style="position:relative;width:100%;aspect-ratio:1;border-radius:6px;overflow:hidden;background:var(--ink-050)">
+      <img src="${img.dataUrl}" style="width:100%;height:100%;object-fit:cover">
+      <button type="button" data-quick-img-remove="${i}" title="Quitar"
+        style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;border:0;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>
+    </div>
+  `).join('');
+}
+
+function refreshQuickModalImages() {
+  const grid = document.getElementById('quick-modal-images');
+  if (!grid) return;
+  grid.innerHTML = renderQuickModalImages();
+  // Re-bind botones quitar.
+  grid.querySelectorAll('[data-quick-img-remove]').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const i = parseInt(btn.dataset.quickImgRemove, 10);
+      STATE.quickModalImages.splice(i, 1);
+      refreshQuickModalImages();
+    };
+  });
 }
 
 function openBriefDrawer(id) {
@@ -9460,6 +9590,37 @@ function bindCotizacion() {
         if (ev.key === 'Escape' && STATE.imgLightboxUrl) closeImgLightbox();
       });
       document._lightboxEscBound = true;
+    }
+  }
+
+  // ===== Quick-create modal (paste/drop sobre A cotizar) =====
+  if (STATE.quickModalOpen) {
+    const qBackdrop = document.getElementById('quick-modal-backdrop');
+    if (qBackdrop) qBackdrop.onclick = (ev) => { if (ev.target.id === 'quick-modal-backdrop') cancelQuickCreate(); };
+    const qClose = document.getElementById('quick-modal-close');
+    if (qClose) qClose.onclick = cancelQuickCreate;
+    const qCancel = document.getElementById('quick-modal-cancel');
+    if (qCancel) qCancel.onclick = cancelQuickCreate;
+    const qConfirm = document.getElementById('quick-modal-confirm');
+    if (qConfirm) qConfirm.onclick = confirmQuickCreate;
+    // Botones quitar imagen.
+    document.querySelectorAll('[data-quick-img-remove]').forEach(btn => {
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        const i = parseInt(btn.dataset.quickImgRemove, 10);
+        STATE.quickModalImages.splice(i, 1);
+        refreshQuickModalImages();
+      };
+    });
+    // Enter en el título → confirmar.
+    const tituloInput = document.getElementById('quick-modal-titulo');
+    if (tituloInput) tituloInput.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); confirmQuickCreate(); } };
+    // ESC cierra (usa el mismo binding global del lightbox no, hago uno propio).
+    if (!document._quickModalEscBound) {
+      document.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' && STATE.quickModalOpen) cancelQuickCreate();
+      });
+      document._quickModalEscBound = true;
     }
   }
 
