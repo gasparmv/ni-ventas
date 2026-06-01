@@ -966,9 +966,12 @@ export default {
           for (const entry of entries) {
             const changes = entry?.changes || [];
             for (const change of changes) {
-              // Aceptamos: 'messages' (Meta estándar) Y 'smb_message_echoes'
-              // (coexistence — mensajes que Joaco escribió desde la app móvil).
-              if (change?.field !== 'messages' && change?.field !== 'smb_message_echoes') continue;
+              // Aceptamos: 'messages' (Meta estándar), 'smb_message_echoes'
+              // (coexistence echoes), y 'history' (algunos history events vienen
+              // en formato Meta-style con value.message_echoes adentro, además del
+              // formato plano {event,data} que se maneja arriba).
+              const allowedFields = new Set(['messages', 'smb_message_echoes', 'history']);
+              if (!allowedFields.has(change?.field)) continue;
               const value = change?.value || {};
               const contacts = value?.contacts || [];
               const contactMap = {};
