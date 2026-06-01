@@ -5223,19 +5223,60 @@ async function loadChatContacts() {
   }
 }
 
+// PAGE_SIZE_INITIAL: cuántos mensajes traer al abrir un chat por primera vez.
+// PAGE_SIZE_OLDER: cuántos cargar al scrollear arriba ("ver anteriores").
+// Bajar 2000 → 200 elimina el lag de 2-4s en chats con +1700 mensajes.
+const CHAT_PAGE_SIZE_INITIAL = 200;
+const CHAT_PAGE_SIZE_OLDER = 200;
+
+// Handler del botón "↑ Cargar mensajes anteriores". Mantiene el scroll position
+// del usuario: si tenía un mensaje X visible antes de cargar, sigue viendo X
+// después (no scrollea al top).
+async function handleLoadOlderMessages() {
+  if (chatState.loadingOlder || !chatState.selectedPhone) return;
+  chatState.loadingOlder = true;
+  // Re-render del botón para mostrar "Cargando…"
+  renderChatMessages();
+  // Capturar scroll position relativa al primer mensaje visible (anchor).
+  const container = document.getElementById('chat-messages');
+  const prevScrollHeight = container?.scrollHeight || 0;
+  const prevScrollTop = container?.scrollTop || 0;
+  try {
+    await loadChatMessages(chatState.selectedPhone, { loadOlder: true });
+  } finally {
+    chatState.loadingOlder = false;
+    renderChatMessages();
+    // Restaurar scroll position: el container crece hacia arriba con los
+    // mensajes nuevos. scrollTop += diferencia de altura para que el usuario
+    // siga viendo el mismo mensaje que tenía a la vista.
+    const newContainer = document.getElementById('chat-messages');
+    if (newContainer) {
+      const newScrollHeight = newContainer.scrollHeight;
+      newContainer.scrollTop = prevScrollTop + (newScrollHeight - prevScrollHeight);
+    }
+  }
+}
+
 async function loadChatMessages(phone, opts) {
   if (!canAccessChat() || !phone) return;
-  const isInitialLoad = !opts?.incremental && (!chatState.messages.length || chatState.messages[0]?.phone !== phone);
+  const isInitialLoad = !opts?.incremental && !opts?.loadOlder
+    && (!chatState.messages.length || chatState.messages[0]?.phone !== phone);
+  const isLoadOlder = !!opts?.loadOlder;
   try {
-    // Initial load: limit alto (2000) para traer todo el historial visible.
-    // Incremental (polling): solo deltas desde el último ts conocido.
     let url = CONFIG.trackerUrl + '/admin/wa/messages?phone=' + encodeURIComponent(phone);
     if (isInitialLoad) {
-      url += '&limit=2000';
+      // Carga inicial: los 200 mensajes más recientes (server hace ORDER BY ts DESC).
+      url += '&limit=' + CHAT_PAGE_SIZE_INITIAL;
+    } else if (isLoadOlder) {
+      // Cargar 200 anteriores al primer mensaje actualmente cacheado.
+      const firstTs = chatState.messages.length ? chatState.messages[0].ts : '';
+      if (!firstTs) return;
+      // to=firstTs (exclusivo): -1ms para no traer el mismo.
+      const beforeTs = new Date(new Date(firstTs).getTime() - 1).toISOString();
+      url += '&limit=' + CHAT_PAGE_SIZE_OLDER + '&to=' + encodeURIComponent(beforeTs);
     } else {
+      // Incremental (polling): deltas desde el último ts conocido.
       const lastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
-      // Pedir solo los mensajes desde el último ts conocido (incluso un poco antes
-      // para capturar status updates de mensajes recientes).
       const sinceTs = lastTs ? new Date(new Date(lastTs).getTime() - 60000).toISOString() : '';
       url += '&limit=500' + (sinceTs ? '&from=' + encodeURIComponent(sinceTs) : '');
     }
@@ -5244,34 +5285,29 @@ async function loadChatMessages(phone, opts) {
     const j = await r.json();
     const fresh = (j.messages || []).filter(m => m.msg_type !== 'status');
 
-    // Merge: preservar TODOS los mensajes locales que tienen wamid (vienen del
-    // servidor en cargas anteriores), y agregar/actualizar los nuevos del fetch.
-    // Antes el comportamiento era reemplazar el array entero, lo que hacía que
-    // mensajes viejos "desaparecieran" en chats con >500 mensajes.
+    // Si fue initial o loadOlder, calcular si hay más anteriores: si el server
+    // devolvió un batch lleno, asumimos que sí. Si vino con menos rows, no hay más.
+    if (isInitialLoad || isLoadOlder) {
+      chatState.hasMoreOlder = fresh.length >= (isInitialLoad ? CHAT_PAGE_SIZE_INITIAL : CHAT_PAGE_SIZE_OLDER);
+    }
+
+    // Merge: preservar TODOS los mensajes locales con wamid (de cargas previas),
+    // sumar los frescos. Funciona tanto para incremental (timestamps nuevos) como
+    // para loadOlder (timestamps viejos): el sort final ordena bien todo.
     const byKey = new Map();
     const keyOf = (m) => m.wamid || ('ts:' + m.ts + ':' + m.direction);
-    // Si es initial load: empezar desde cero con lo que vino del server.
-    // Si es incremental: empezar con los mensajes existentes y sumar/actualizar.
     if (!isInitialLoad) {
-      for (const m of chatState.messages) {
-        byKey.set(keyOf(m), m);
-      }
+      for (const m of chatState.messages) byKey.set(keyOf(m), m);
     }
-    // Agregar/actualizar con los frescos del server (server gana en caso de conflict)
-    for (const m of fresh) {
-      byKey.set(keyOf(m), m);
-    }
-    // Conservar mensajes optimistic locales (sin wamid, recién enviados)
+    for (const m of fresh) byKey.set(keyOf(m), m);
     if (!isInitialLoad) {
       for (const local of chatState.messages) {
         if (local.wamid) continue;
-        // Sin wamid = optimistic recién enviado, conservar si no apareció en server
         const k = keyOf(local);
         if (!byKey.has(k)) byKey.set(k, local);
       }
     }
-    const merged = [...byKey.values()].sort((a, b) => a.ts.localeCompare(b.ts));
-    chatState.messages = merged;
+    chatState.messages = [...byKey.values()].sort((a, b) => a.ts.localeCompare(b.ts));
   } catch (e) {
     console.error('chat messages error:', e);
   }
@@ -5952,6 +5988,14 @@ function reactionsBadgeHtml(wamid, reactionsByParent) {
 function renderChatBubbles() {
   const msgs = chatState.messages;
   if (!msgs.length) return '<div class="chat-empty">Sin mensajes</div>';
+  // Botón "cargar anteriores" arriba si hay más mensajes históricos por traer.
+  const olderBtn = chatState.hasMoreOlder ? `
+    <div class="chat-load-older-wrap">
+      <button class="chat-load-older-btn" id="chat-load-older-btn" ${chatState.loadingOlder ? 'disabled' : ''}>
+        ${chatState.loadingOlder ? '⏳ Cargando…' : '↑ Cargar mensajes anteriores'}
+      </button>
+    </div>
+  ` : '';
   // Pre-armar mapa de reacciones por wamid del padre.
   const reactionsByParent = new Map();
   for (const m of msgs) {
@@ -5960,7 +6004,7 @@ function renderChatBubbles() {
       reactionsByParent.get(m.context_id).push(m);
     }
   }
-  let html = '';
+  let html = olderBtn;
   let lastDate = '';
   let lastDir = '';
   for (let i = 0; i < msgs.length; i++) {
@@ -6178,6 +6222,9 @@ function renderChatMessages() {
   const container = document.getElementById('chat-messages');
   if (!container) return;
   container.innerHTML = renderChatBubbles();
+  // Bind del botón "↑ Cargar mensajes anteriores" si está presente.
+  const olderBtn = container.querySelector('#chat-load-older-btn');
+  if (olderBtn) olderBtn.onclick = handleLoadOlderMessages;
   // Inyectar acciones hover (forward + reaccionar) y chips de reacción en cada bubble con wamid.
   const reactionsByParent = renderChatBubbles._reactionsByParent || new Map();
   container.querySelectorAll('.chat-msg[data-wamid]').forEach(el => {

@@ -1491,6 +1491,29 @@ table.t td.cliente { font-weight: 600; }
   color: #8696a0;
   font-size: 14px;
 }
+.chat-load-older-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 14px 0 8px;
+}
+.chat-load-older-btn {
+  background: rgba(143,212,222,.08);
+  border: 1px solid rgba(143,212,222,.25);
+  color: var(--accent-cyan, #8FD4DE);
+  padding: 8px 18px;
+  border-radius: 18px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .15s;
+  font-family: inherit;
+}
+.chat-load-older-btn:hover:not(:disabled) {
+  background: rgba(143,212,222,.18);
+  border-color: var(--accent-cyan, #8FD4DE);
+  transform: translateY(-1px);
+}
+.chat-load-older-btn:disabled { opacity: .6; cursor: wait; }
 
 /* Date separator pill */
 .chat-date-sep {
