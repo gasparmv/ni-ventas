@@ -8937,6 +8937,26 @@ function refreshImageGrids() {
   const renderGrid = document.getElementById('brief-images-grid-render');
   if (renderGrid) renderGrid.innerHTML = renderBriefImagesGridFor('render', false, isDis);
   bindBriefImageGridHandlers(isNew);
+  refreshGenerarRenderButton();
+}
+
+// Recalcula el estado del botón "Generar render IA" según las imágenes que hay
+// realmente en STATE.briefDetailImages. Se invoca al cargar el detalle y al
+// subir/borrar imágenes — sin esto, el botón queda con el estado del primer
+// render del drawer (cuando aún no había llegado el detalle del backend).
+function refreshGenerarRenderButton() {
+  const btn = document.getElementById('brief-generar-render');
+  if (!btn) return;
+  const tieneBoceto = STATE.briefDetailImages.some(x => x.tipo === 'boceto');
+  const tieneChat = STATE.briefDetailImages.some(x => (x.tipo || 'chat') === 'chat');
+  const hayInput = tieneBoceto || tieneChat;
+  const fuente = tieneBoceto ? 'el boceto' : 'las capturas de Joaco';
+  btn.disabled = !!STATE.briefGenerandoRender || !hayInput;
+  btn.textContent = STATE.briefGenerandoRender
+    ? '✨ Generando render + medidas… (~15s)'
+    : !hayInput
+      ? '⚠ Subí al menos una imagen para generar'
+      : `✨ Generar render IA + medidas (con ${fuente})`;
 }
 
 // Llama al worker para generar el render con Gemini a partir del boceto.
