@@ -334,8 +334,9 @@ function getWaClient(env) {
       messagesUrl: () => `${base}/messages`,
       mediaUrl:    (mediaId) => `${base}/${mediaId}`,
       mediaUploadUrl: () => `${base}/media`,
-      // Templates en 360dialog usan otro endpoint (Partner API), por ahora dejamos el Meta como fallback
-      templatesUrl: () => `${base}/configs/templates`,
+      // Templates en 360dialog usa la Channel API: GET/POST /v1/configs/templates
+      // Devuelve { waba_templates: [...] } (no { data: [...] } como Meta).
+      templatesUrl: () => `${base}/v1/configs/templates`,
       // GET phone info: 360dialog no expone exactamente este endpoint; el dashboard ya muestra todo
       phoneInfoUrl: (fields) => `${base}/configs/whatsapp_business_account`,
     };
@@ -778,43 +779,169 @@ async function estimarParametrosConGemini(env, imageBuf, imageMime, contextoClie
 }
 
 // ===== Coexistence history import (event: 'history' de 360dialog) =====
-// Procesa el formato no-Meta { event: 'history', data: { messages: [...] } }.
-// Inserta cada mensaje histórico con INSERT OR IGNORE — wamid UNIQUE evita
-// duplicados con mensajes ya guardados via webhook normal.
+// Procesa el formato 360dialog flat con TRES sub-payloads mutuamente exclusivos:
+//   - data.messages[]: mensajes entrantes del cliente (live, ya recibimos via Meta-style también)
+//   - data.message_echoes[]: mensajes que Joaco escribió desde el celular (outbound)
+//   - data.history[].threads[].messages[]: backfill on-boarding (hasta 6 meses de historial)
+//
+// Todos los inserts son INSERT OR IGNORE — wamid UNIQUE evita duplicados.
+// Para cada media (image/video/audio/document/sticker) hace downloadMedia → R2.
 async function processCoexistenceHistory(env, data) {
   const businessPhone = String(env.WA_BUSINESS_PHONE || '5491144366573').replace(/\D/g, '');
-  const msgs = Array.isArray(data?.messages) ? data.messages : [];
-  const contacts = Array.isArray(data?.contacts) ? data.contacts : [];
+
+  // Cache de nombres si hay state_sync o contacts.
   const nameByPhone = {};
-  for (const c of contacts) {
+  for (const c of (data?.contacts || [])) {
     const waId = String(c.wa_id || '').replace('+', '');
-    const nm = c.profile?.name || '';
+    const nm = c.profile?.name || c.profile?.full_name || '';
     if (waId && nm) nameByPhone[waId] = nm;
   }
-  for (const m of msgs) {
-    const wamid = m.id || '';
-    if (!wamid) continue;
+
+  // Helper: extrae body + mediaUrl + flags según el tipo del mensaje.
+  // Devuelve { msgType, body, mediaUrl, contextId, forwarded, isVoice }.
+  const parseMsg = (m) => {
+    let msgType = m.type || 'unknown';
+    let body = '';
+    let mediaUrl = '';
+    let forwarded = 0;
+    let isVoice = 0;
+
+    if (m.text)         body = m.text.body || '';
+    else if (m.image)   { body = m.image.caption || '';  mediaUrl = m.image.id || ''; }
+    else if (m.video)   { body = m.video.caption || '';  mediaUrl = m.video.id || ''; }
+    else if (m.audio)   { mediaUrl = m.audio.id || ''; isVoice = m.audio.voice ? 1 : 0; }
+    else if (m.document){ body = m.document.filename || ''; mediaUrl = m.document.id || ''; }
+    else if (m.sticker) { mediaUrl = m.sticker.id || ''; }
+    else if (m.reaction) body = m.reaction.emoji || '';
+    else if (m.location) body = `[ubicacion] ${m.location.latitude},${m.location.longitude}${m.location.name ? ' — ' + m.location.name : ''}`;
+    else if (m.button)   body = m.button.text || m.button.payload || '';
+    else if (m.interactive) body = m.interactive?.button_reply?.title || m.interactive?.list_reply?.title || '';
+    else if (m.contacts && m.contacts.length) {
+      const names = m.contacts.map(c => c.name?.formatted_name || c.name?.first_name || 'contacto').join(', ');
+      const phones = m.contacts.map(c => c.phones?.[0]?.phone || c.phones?.[0]?.wa_id || '').filter(Boolean).join(', ');
+      body = `[contacto] ${names}${phones ? ' — ' + phones : ''}`;
+    }
+    else if (m.order)   body = `[pedido] ${(m.order.product_items || []).map(p => p.product_retailer_id).join(', ')}`;
+    // Coexistence history-specific:
+    else if (m.type === 'media_placeholder') {
+      // History trae 9417 de estos — placeholders de media que Meta no migró al onboarding.
+      body = '[media histórica no disponible]';
+    }
+    else if (m.type === 'edit' && m.edit) {
+      // History trae 373 edits — mantenemos el texto editado.
+      msgType = 'edit';
+      body = m.edit.message?.text?.body || '[mensaje editado]';
+    }
+    else if ((m.type === 'errors' || m.unsupported) && Array.isArray(m.errors) && m.errors.length) {
+      const code = m.errors[0].code;
+      const title = m.errors[0].title || '';
+      if (code === 131051 || title === 'Message type unknown') {
+        body = '✏️ El cliente editó un mensaje (Meta no comparte el contenido editado)';
+      } else if (title.includes('unavailable')) {
+        body = '[mensaje no disponible]';
+      } else {
+        body = `[no soportado: ${title || code || 'desconocido'}]`;
+      }
+    }
+
+    // Flags adicionales
+    let contextId = '';
+    if (m.context?.id) contextId = m.context.id;
+    else if (m.reaction?.message_id) contextId = m.reaction.message_id;
+    if (m.context?.forwarded) forwarded = 1;
+    if (m.edit?.original_message_id) contextId = m.edit.original_message_id;
+
+    return { msgType, body, mediaUrl, contextId, forwarded, isVoice };
+  };
+
+  // Helper: inserta un mensaje en wa_messages, baja media a R2, atribuye ads.
+  const insertMsg = async ({ wamid, ts, direction, phone, senderName, m }) => {
+    const { msgType, body, mediaUrl, contextId } = parseMsg(m);
+
+    // Bajar media a R2 (best-effort).
+    let r2Key = '';
+    if (mediaUrl && env.MEDIA) {
+      try { const dl = await downloadMedia(env, mediaUrl); if (dl) r2Key = dl.key; } catch (_) {}
+    }
+    if (msgType === 'audio' && r2Key && env.AI) {
+      try { const t = await transcribeAudio(env, r2Key); if (t) { /* body se guarda como '[audio] X' */ } } catch (_) {}
+    }
+
+    try {
+      await env.DB.prepare(
+        `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(wamid) DO UPDATE SET
+           direction = excluded.direction,
+           phone = excluded.phone,
+           msg_type = excluded.msg_type,
+           body = excluded.body,
+           media_url = excluded.media_url,
+           context_id = excluded.context_id,
+           ts = excluded.ts
+         WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type IN ('status','media_placeholder')`
+      ).bind(ts, wamid, direction, phone, senderName, msgType, body, r2Key || mediaUrl, contextId, null).run();
+    } catch (_) {}
+
+    // Ad attribution (CTWA — referral) — mismo bloque que rama Meta-style.
+    if (m.referral && direction === 'inbound') {
+      try {
+        const ref = m.referral;
+        const exists = await env.DB.prepare('SELECT 1 FROM wa_ad_attributions WHERE wamid = ?').bind(wamid).first();
+        if (!exists) {
+          await env.DB.prepare(`INSERT INTO wa_ad_attributions
+            (phone, wamid, ts, source_id, source_type, source_url, headline, body, media_type, image_url, video_url, thumbnail_url, ctwa_clid, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+            phone, wamid, ts,
+            String(ref.source_id || ''), String(ref.source_type || ''), String(ref.source_url || ''),
+            String(ref.headline || ''), String(ref.body || ''), String(ref.media_type || ''),
+            String(ref.image_url || ''), String(ref.video_url || ''), String(ref.thumbnail_url || ''),
+            String(ref.ctwa_clid || ''), new Date().toISOString()
+          ).run();
+        }
+      } catch (_) {}
+    }
+  };
+
+  // === Branch 1: data.messages[] (live inbound del cliente) ===
+  for (const m of (data?.messages || [])) {
+    const wamid = m.id || ''; if (!wamid) continue;
     const fromNorm = String(m.from || '').replace(/\D/g, '');
     const direction = fromNorm === businessPhone ? 'outbound' : 'inbound';
     const phone = fromNorm;
     const senderName = direction === 'inbound' ? (nameByPhone[phone] || '') : '';
-    const msgType = m.type || 'unknown';
-    let body = ''; let mediaUrl = '';
-    if (m.text)        body = m.text.body || '';
-    else if (m.image)  { body = m.image.caption || '';  mediaUrl = m.image.id || ''; }
-    else if (m.video)  { body = m.video.caption || '';  mediaUrl = m.video.id || ''; }
-    else if (m.audio)  { mediaUrl = m.audio.id || ''; }
-    else if (m.document) { body = m.document.filename || ''; mediaUrl = m.document.id || ''; }
-    else if (m.sticker)  { mediaUrl = m.sticker.id || ''; }
-    else if (m.reaction) body = m.reaction.emoji || '';
-    else if (m.location) body = `[ubicacion] ${m.location.latitude},${m.location.longitude}`;
-    const contextId = m.context?.id || m.reaction?.message_id || '';
     const ts = m.timestamp ? new Date(parseInt(m.timestamp) * 1000).toISOString() : new Date().toISOString();
-    try {
-      await env.DB.prepare(
-        'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?,?,?,?,?,?,?,?,?,?)'
-      ).bind(ts, wamid, direction, phone, senderName, msgType, body, mediaUrl, contextId, null).run();
-    } catch (_) {}
+    await insertMsg({ wamid, ts, direction, phone, senderName, m });
+  }
+
+  // === Branch 2: data.message_echoes[] (Joaco escribió desde el celular) ===
+  // ANTES SE IGNORABAN — 6.475 mensajes perdidos en 6 meses según auditoría.
+  for (const echo of (data?.message_echoes || [])) {
+    const wamid = echo.id || ''; if (!wamid) continue;
+    const phone = String(echo.to || '').replace(/\D/g, ''); // destinatario = cliente
+    const ts = echo.timestamp ? new Date(parseInt(echo.timestamp) * 1000).toISOString() : new Date().toISOString();
+    await insertMsg({ wamid, ts, direction: 'outbound', phone, senderName: '', m: echo });
+  }
+
+  // === Branch 3: data.history[] (backfill on-boarding) ===
+  // Cada history tiene threads, cada thread tiene messages. ANTES SE IGNORABA — 64.596 mensajes.
+  for (const histEntry of (data?.history || [])) {
+    for (const thread of (histEntry?.threads || [])) {
+      const threadCtx = thread?.context || {};
+      // Para identificar al cliente del thread (cuando from_me=true)
+      const clientPhone = String(threadCtx.wa_id || '').replace('+', '');
+      for (const m of (thread?.messages || [])) {
+        const wamid = m.id || ''; if (!wamid) continue;
+        // Direction barato y confiable: history_context.from_me
+        const fromMe = m.history_context?.from_me === true;
+        const direction = fromMe ? 'outbound' : 'inbound';
+        const fromNorm = String(m.from || '').replace(/\D/g, '');
+        const phone = fromMe ? clientPhone : (fromNorm || clientPhone);
+        const senderName = direction === 'inbound' ? (nameByPhone[phone] || '') : '';
+        const ts = m.timestamp ? new Date(parseInt(m.timestamp) * 1000).toISOString() : new Date().toISOString();
+        await insertMsg({ wamid, ts, direction, phone, senderName, m });
+      }
+    }
   }
 }
 
