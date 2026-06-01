@@ -7874,7 +7874,10 @@ if (typeof STATE.imgLightboxUrl === 'undefined')    STATE.imgLightboxUrl = null;
 if (typeof STATE.quickModalOpen === 'undefined')    STATE.quickModalOpen = false;
 if (typeof STATE.quickModalImages === 'undefined')  STATE.quickModalImages = []; // [{dataUrl, blob, contentType}]
 if (typeof STATE.quickModalSaving === 'undefined')  STATE.quickModalSaving = false;
-if (typeof STATE.briefGenerandoRender === 'undefined') STATE.briefGenerandoRender = false;
+// Mapa { briefId: true } de briefs cuya generación de render IA está corriendo
+// EN SEGUNDO PLANO. Emma puede cerrar el drawer y abrir otro brief mientras la
+// IA termina; cuando termina, refrescamos la card y opcionalmente notificamos.
+if (typeof STATE.briefsGenerando === 'undefined') STATE.briefsGenerando = {};
 if (typeof STATE.briefLastAiParams === 'undefined') STATE.briefLastAiParams = null; // último resultado de estimación IA (banner)
 if (typeof STATE.briefDetailMessages === 'undefined') STATE.briefDetailMessages = []; // (legacy, sin uso)
 if (typeof STATE.teamChatOpen === 'undefined')    STATE.teamChatOpen = false;
@@ -8311,6 +8314,7 @@ function renderBriefCard(b) {
   const intentos = b.intentos_followup || 0;
   const chatCount = b.chat_count || 0;
   const renderCount = b.render_count || 0;
+  const generando = !!STATE.briefsGenerando[b.id];
   // En el kanban mostramos el render si lo hay (refleja avance), si no la captura del chat.
   const thumb = b.first_render_key || b.first_chat_key || null;
   const isRenderThumb = !!b.first_render_key;
@@ -8321,8 +8325,10 @@ function renderBriefCard(b) {
   const borderColor = colgado ? 'rgba(255,167,38,.45)' : sinPresupuesto ? 'rgba(255,167,38,.35)' : 'var(--border)';
   const canDelete = canCreateBriefs();  // mismo gate: comercial/admin
   return `
+    <style>@keyframes nv-pulse { 0%,100% { opacity:.55 } 50% { opacity:1 } }</style>
     <div class="brief-card" data-brief-id="${b.id}"
-         style="background:var(--ink-100);border:1px solid ${borderColor};border-radius:var(--r-sm);overflow:hidden;margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s;position:relative">
+         style="background:var(--ink-100);border:1px solid ${generando ? 'var(--accent-cyan,#8FD4DE)' : borderColor};border-radius:var(--r-sm);overflow:hidden;margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s;position:relative">
+      ${generando ? `<div style="position:absolute;top:6px;left:6px;background:rgba(143,212,222,.92);color:#000;font-size:9px;font-weight:700;padding:3px 7px;border-radius:10px;z-index:3;animation:nv-pulse 1.4s ease-in-out infinite">✨ Generando IA…</div>` : ''}
       ${canDelete ? `<button class="brief-card-delete" data-brief-delete="${b.id}" title="Eliminar brief" aria-label="Eliminar"
               style="position:absolute;top:4px;right:4px;width:22px;height:22px;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;border:0;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;z-index:2;opacity:.6;transition:opacity .15s,background .15s"
               onmouseover="this.style.opacity='1';this.style.background='rgba(255,24,48,.85)'"
@@ -8472,9 +8478,10 @@ function renderBriefDrawer() {
             const tieneChat = chatImgs.length > 0;
             const hayInput = tieneBoceto || tieneChat;
             const fuente = tieneBoceto ? 'el boceto' : 'las capturas de Joaco';
-            const disabled = STATE.briefGenerandoRender || !hayInput;
-            const label = STATE.briefGenerandoRender
-              ? '✨ Generando render… (~15s)'
+            const generando = !!STATE.briefsGenerando[STATE.briefSelected];
+            const disabled = generando || !hayInput;
+            const label = generando
+              ? '✨ Generando… podés seguir con otro brief'
               : !hayInput
                 ? '⚠ Subí al menos una imagen para generar'
                 : `✨ Generar render IA (con ${fuente})`;
@@ -9087,103 +9094,149 @@ function refreshGenerarRenderButton() {
   const tieneChat = STATE.briefDetailImages.some(x => (x.tipo || 'chat') === 'chat');
   const hayInput = tieneBoceto || tieneChat;
   const fuente = tieneBoceto ? 'el boceto' : 'las capturas de Joaco';
-  btn.disabled = !!STATE.briefGenerandoRender || !hayInput;
-  btn.textContent = STATE.briefGenerandoRender
-    ? '✨ Generando render… (~15s)'
+  const generando = !!STATE.briefsGenerando[STATE.briefSelected];
+  btn.disabled = generando || !hayInput;
+  btn.textContent = generando
+    ? '✨ Generando… podés seguir con otro brief'
     : !hayInput
       ? '⚠ Subí al menos una imagen para generar'
       : `✨ Generar render IA (con ${fuente})`;
 }
 
 // Llama al worker para generar el render con Gemini a partir del boceto.
+// Lanza la generación de render IA EN SEGUNDO PLANO. Emma puede cerrar el
+// drawer, abrir otro brief, generar otro render — todo en paralelo. Al
+// terminar, refresca la card del kanban y suena una notificación si el brief
+// ya no está abierto.
 async function generarRenderBrief() {
   if (!STATE.briefSelected) return;
-  // Aceptamos cualquier imagen (boceto O captura del chat) — el worker
-  // hace el fallback. Solo bloqueamos si NO hay ninguna.
   const tieneImagen = STATE.briefDetailImages.length > 0;
   if (!tieneImagen) { alert('Subí al menos una captura o boceto antes de generar.'); return; }
-  STATE.briefGenerandoRender = true;
-  const statusEl = document.getElementById('brief-render-ia-status');
-  const btn = document.getElementById('brief-generar-render');
-  if (btn) { btn.disabled = true; btn.textContent = '✨ Generando render… (~15s)'; }
-  if (statusEl) { statusEl.textContent = 'Guardando notas + analizando con Gemini…'; statusEl.style.color = 'var(--accent-cyan)'; }
 
-  // 1) AUTO-SAVE: si el usuario escribió notas / cambió título / medidas
-  // referenciales y aprieta "Generar" sin guardar, esos campos no estarían
-  // en DB cuando el worker los lea. Guardamos primero para que la IA vea
-  // todo lo último que se tipeó.
+  // Snapshot del briefId: si Emma cambia de brief, las callbacks usan ESTE id.
+  const briefId = STATE.briefSelected;
+
+  // Auto-save sincrónico de los campos del drawer antes de mandar a la IA, para
+  // que el worker lea las notas / título / medidas referenciales actualizadas.
   try {
     const form = readBriefDrawerForm();
-    form.id = STATE.briefSelected;
+    form.id = briefId;
     const saved = await saveBrief(form);
     const idx = STATE.briefs.findIndex(b => b.id === saved.id);
     if (idx >= 0) STATE.briefs[idx] = saved;
-  } catch (eSave) {
-    // No es fatal: si el save falla, la IA leerá la última versión de DB
-    // (que puede no tener los cambios recientes). Avisamos por consola.
-    console.warn('auto-save antes de generar falló:', eSave);
+  } catch (eSave) { console.warn('auto-save pre-IA falló:', eSave); }
+
+  // Marcar como generando + refrescar UI (botón disabled + card con spinner).
+  STATE.briefsGenerando[briefId] = true;
+  if (STATE.briefSelected === briefId) {
+    const statusEl = document.getElementById('brief-render-ia-status');
+    if (statusEl) { statusEl.textContent = 'Corriendo en segundo plano… podés cerrar y seguir con otro brief.'; statusEl.style.color = 'var(--accent-cyan)'; }
   }
+  refreshGenerarRenderButton();
+  // Refresh card del kanban para mostrar el badge "generando" si Emma lo cierra.
+  // No re-renderizamos el drawer entero para no interrumpir si está escribiendo.
+
+  // Lanzar el trabajo de fondo (no await acá — Emma sigue interactuando).
+  generarRenderInBackground(briefId);
+}
+
+async function generarRenderInBackground(briefId) {
+  let renderResult = null;
+  let renderError = null;
   try {
-    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${STATE.briefSelected}/generar-render`, {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/generar-render`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${STATE.token}` }
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
-    // El response trae { ...render, params: { ancho_cm, alto_cm, neon_mt, razonamiento, dif_vs_cliente }, input_origen }
-    // Separamos la imagen del payload de params para no contaminar briefDetailImages.
-    const { params, params_error, input_origen, ...renderImg } = data;
-    STATE.briefDetailImages.push(renderImg);
+    renderResult = data;
+  } catch (e) {
+    renderError = e;
+  }
 
-    // Mensaje de status: cuenta render + si hubo extracción de params.
-    let statusMsg = '✓ Render generado';
-    if (input_origen === 'chat') statusMsg += ' (desde capturas de Joaco)';
-    if (params) {
-      statusMsg += ` · medidas estimadas: ${params.ancho_cm}×${params.alto_cm} cm · ${params.neon_mt} m de neón`;
-      if (params.dif_vs_cliente) statusMsg += ' ⚠ difiere del cliente';
-    } else if (params_error) {
-      statusMsg += ' · (params: ' + params_error.slice(0, 60) + ')';
+  // Cleanup del flag siempre.
+  delete STATE.briefsGenerando[briefId];
+
+  if (renderError) {
+    console.error(`Render falló para brief #${briefId}:`, renderError);
+    // Si Emma sigue en ese brief, mostrarle el error.
+    if (STATE.briefSelected === briefId) {
+      const statusEl = document.getElementById('brief-render-ia-status');
+      if (statusEl) { statusEl.textContent = '⚠ ' + renderError.message; statusEl.style.color = '#FF5566'; }
+      refreshGenerarRenderButton();
+    } else {
+      // Si está en otro brief, notificarle el fallo en segundo plano.
+      notifyRenderResult(briefId, false, renderError.message);
     }
-    if (statusEl) { statusEl.textContent = statusMsg; statusEl.style.color = 'var(--green, #25D366)'; }
+    return;
+  }
 
-    // La IA SOLO SUGIERE — no autocompletamos los inputs del diseñador. La
-    // sugerencia (con razonamiento) se muestra como referencia en el cartel
-    // de status para que la diseñadora la lea y cargue las medidas reales.
-    if (params) {
-      STATE.briefLastAiParams = {
-        briefId: STATE.briefSelected,
-        ancho_cm: params.ancho_cm,
-        alto_cm: params.alto_cm,
-        neon_mt: params.neon_mt,
-        razonamiento: params.razonamiento,
-        dif_vs_cliente: params.dif_vs_cliente
+  // Éxito: separar la imagen render de los params.
+  const { params, params_error, input_origen, ...renderImg } = renderResult;
+
+  // Actualizar contador render_count + thumb en la card del kanban.
+  const idx = STATE.briefs.findIndex(b => b.id === briefId);
+  if (idx >= 0) {
+    STATE.briefs[idx].render_count = (STATE.briefs[idx].render_count || 0) + 1;
+    if (!STATE.briefs[idx].first_render_key) STATE.briefs[idx].first_render_key = renderImg.r2_key;
+  }
+
+  // Si el brief sigue abierto, agregar a briefDetailImages para el grid local.
+  if (STATE.briefSelected === briefId) {
+    STATE.briefDetailImages.push(renderImg);
+  }
+
+  // Guardar params sugeridos por IA como referencia (no escribimos los inputs).
+  if (params) {
+    STATE.briefLastAiParams = {
+      briefId,
+      ancho_cm: params.ancho_cm,
+      alto_cm: params.alto_cm,
+      neon_mt: params.neon_mt,
+      razonamiento: params.razonamiento,
+      dif_vs_cliente: params.dif_vs_cliente
+    };
+  }
+
+  // Auto-transición de 'nuevo' → 'listo'.
+  try {
+    const current = STATE.briefs.find(b => b.id === briefId);
+    if (current && current.estado === 'nuevo') {
+      const saved = await saveBrief({ id: briefId, estado: 'listo' });
+      const ix = STATE.briefs.findIndex(b => b.id === saved.id);
+      if (ix >= 0) STATE.briefs[ix] = saved;
+    }
+  } catch (eState) { console.error('auto-transición listo falló:', eState); }
+
+  // Refresh UI según contexto:
+  if (STATE.briefSelected === briefId) {
+    // Emma sigue en el brief original — re-render para que aparezca el render generado.
+    render();
+  } else {
+    // Emma se cambió a otro brief — refrescar SOLO el kanban (no destruir lo abierto)
+    // y notificar con sonido.
+    render();
+    notifyRenderResult(briefId, true);
+  }
+}
+
+function notifyRenderResult(briefId, success, errMsg) {
+  const b = STATE.briefs.find(x => x.id === briefId);
+  const titulo = b?.cliente_nombre || `Brief #${briefId}`;
+  try { playChatSound(); } catch(e) {}
+  try {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      const body = success ? titulo : `${titulo} · ⚠ ${(errMsg || '').slice(0, 80)}`;
+      const n = new Notification(success ? '✨ Render listo' : '⚠ Render falló', { body, icon: 'assets/logo.svg', tag: 'render-ia-' + briefId });
+      n.onclick = () => {
+        try { window.focus(); } catch(e) {}
+        if (STATE.view !== 'cotizacion') setView('cotizacion');
+        openBriefDrawer(briefId);
+        n.close();
       };
     }
-    refreshImageGrids();
-
-    // Auto-transición a "listo" apenas se genera el render. Si el brief está
-    // en estado "nuevo", lo pasamos a "listo" automáticamente.
-    try {
-      const current = STATE.briefs.find(b => b.id === STATE.briefSelected);
-      if (current && current.estado === 'nuevo') {
-        const saved = await saveBrief({ id: STATE.briefSelected, estado: 'listo' });
-        const idx = STATE.briefs.findIndex(b => b.id === saved.id);
-        if (idx >= 0) STATE.briefs[idx] = saved; else STATE.briefs.unshift(saved);
-        if (statusEl && !statusEl.textContent.includes('Listos')) {
-          statusEl.textContent = statusMsg + ' · brief → Listos';
-        }
-      }
-    } catch (eState) {
-      console.error('auto-transición a listo falló:', eState);
-    }
-    // Re-render completo para que los inputs de ancho/alto/neón muestren los
-    // valores nuevos + el badge de estado + el banner de warning si dif.
-    render();
-  } catch (e) {
-    if (statusEl) { statusEl.textContent = '⚠ ' + e.message; statusEl.style.color = '#FF5566'; }
-  } finally {
-    STATE.briefGenerandoRender = false;
-  }
+  } catch (e) {}
 }
 
 function bindBriefImageGridHandlers(isNew) {
