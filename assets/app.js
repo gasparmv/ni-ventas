@@ -9147,20 +9147,15 @@ async function generarRenderBrief() {
     }
     if (statusEl) { statusEl.textContent = statusMsg; statusEl.style.color = 'var(--green, #25D366)'; }
 
-    // Actualizar el brief local con las medidas que el AI escribió en DB.
+    // La IA SOLO SUGIERE — no autocompletamos los inputs del diseñador. La
+    // sugerencia (con razonamiento) se muestra como referencia en el cartel
+    // de status para que la diseñadora la lea y cargue las medidas reales.
     if (params) {
-      const idx = STATE.briefs.findIndex(b => b.id === STATE.briefSelected);
-      if (idx >= 0) {
-        STATE.briefs[idx] = {
-          ...STATE.briefs[idx],
-          ancho_cm: params.ancho_cm,
-          alto_cm: params.alto_cm,
-          neon_mt: params.neon_mt
-        };
-      }
-      // Guardar metadata del último razonamiento + flag de warning para mostrar en UI.
       STATE.briefLastAiParams = {
         briefId: STATE.briefSelected,
+        ancho_cm: params.ancho_cm,
+        alto_cm: params.alto_cm,
+        neon_mt: params.neon_mt,
         razonamiento: params.razonamiento,
         dif_vs_cliente: params.dif_vs_cliente
       };

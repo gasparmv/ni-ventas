@@ -2680,13 +2680,13 @@ export default {
           "INSERT INTO brief_imagenes (brief_id, r2_key, content_type, size_bytes, orden, created_at, tipo) VALUES (?,?,?,?,?,?, 'render')"
         ).bind(briefId, r2Key, renderResult.mime, renderBuf.byteLength, ordRow?.next_ord ?? 0, now).run();
 
-        // Actualizar brief con los params estimados (decisión del usuario: AI siempre
-        // sobreescribe; el flag dif_vs_cliente sirve solo para mostrar warning UI).
+        // La IA SOLO SUGIERE medidas — NO sobreescribe los campos del brief.
+        // El diseñador (Emma) las completa a mano: la IA puede errar y la diseñadora
+        // sabe las medidas reales. La response devuelve los valores estimados como
+        // referencia (se muestran en un cartel de sugerencia en el frontend), pero
+        // ancho_cm / alto_cm / neon_mt del brief quedan tal cual estaban.
         let paramsOut = null;
         if (paramsResult.ok) {
-          await env.DB.prepare(
-            'UPDATE briefs SET ancho_cm = ?, alto_cm = ?, neon_mt = ?, updated_at = ? WHERE id = ?'
-          ).bind(paramsResult.ancho_cm, paramsResult.alto_cm, paramsResult.neon_mt, now, briefId).run();
           paramsOut = {
             ancho_cm: paramsResult.ancho_cm,
             alto_cm: paramsResult.alto_cm,
@@ -2694,9 +2694,8 @@ export default {
             razonamiento: paramsResult.razonamiento,
             dif_vs_cliente: paramsResult.dif_vs_cliente
           };
-        } else {
-          await env.DB.prepare('UPDATE briefs SET updated_at = ? WHERE id = ?').bind(now, briefId).run();
         }
+        await env.DB.prepare('UPDATE briefs SET updated_at = ? WHERE id = ?').bind(now, briefId).run();
 
         return json({
           id: result.meta.last_row_id, brief_id: parseInt(briefId, 10),
