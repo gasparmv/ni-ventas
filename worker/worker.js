@@ -1662,18 +1662,21 @@ export default {
       if (request.method === 'GET' && path === '/admin/wa/chats-summary') {
         try {
           const rs = await env.DB.prepare(`
-            WITH last_per_phone AS (
-              SELECT phone, MAX(ts) AS max_ts
-              FROM wa_messages
-              WHERE phone IS NOT NULL AND phone != ''
-                AND NOT (msg_type = 'status' AND (body IS NULL OR body = '') AND direction != 'outbound')
-              GROUP BY phone
-            ),
-            last_msg AS (
-              SELECT m.phone, m.ts AS last_ts, m.body AS last_body,
-                     m.direction AS last_direction, m.msg_type AS last_msg_type
-              FROM wa_messages m
-              INNER JOIN last_per_phone lp ON m.phone = lp.phone AND m.ts = lp.max_ts
+            WITH last_msg AS (
+              -- Garantiza EXACTAMENTE un row por phone, aunque haya múltiples filas
+              -- con el mismo ts (caso común con 360dialog: status sent/delivered/read
+              -- del mismo mensaje llegan en el mismo segundo, y el INNER JOIN previo
+              -- por (phone, ts) devolvía duplicados — el bug de "contacto repetido 7 veces").
+              SELECT phone, ts AS last_ts, body AS last_body,
+                     direction AS last_direction, msg_type AS last_msg_type
+              FROM (
+                SELECT phone, ts, body, direction, msg_type,
+                       ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts DESC, id DESC) AS rn
+                FROM wa_messages
+                WHERE phone IS NOT NULL AND phone != ''
+                  AND NOT (msg_type = 'status' AND (body IS NULL OR body = '') AND direction != 'outbound')
+              ) t
+              WHERE rn = 1
             ),
             inbound_name AS (
               SELECT phone, sender_name
