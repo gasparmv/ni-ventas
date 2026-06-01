@@ -1089,6 +1089,59 @@ export default {
                 // queda en applyAutoLabels() por si se quiere reactivar.
               }
 
+              // Coexistence: smb_message_echoes — mensajes que Joaco escribió
+              // desde la app de WhatsApp Business del celular. 360dialog los manda
+              // en `value.message_echoes[]` (NO en value.messages), con field:
+              // 'smb_message_echoes'. Por eso antes los ignorábamos silenciosamente.
+              // Estructura del echo:
+              //   { from: businessNumber, to: clientNumber, id, timestamp, type, text|image|...}
+              for (const echo of (value?.message_echoes || [])) {
+                const wamid = echo.id || '';
+                if (!wamid) continue;
+                const phone = String(echo.to || '').replace(/\D/g, ''); // destinatario = cliente
+                const ts = echo.timestamp ? new Date(parseInt(echo.timestamp) * 1000).toISOString() : new Date().toISOString();
+                const msgType = echo.type || 'unknown';
+                let msgBody = '';
+                let mediaUrl = '';
+                if (echo.text) msgBody = echo.text.body || '';
+                else if (echo.image) { msgBody = echo.image.caption || ''; mediaUrl = echo.image.id || ''; }
+                else if (echo.video) { msgBody = echo.video.caption || ''; mediaUrl = echo.video.id || ''; }
+                else if (echo.audio) { mediaUrl = echo.audio.id || ''; }
+                else if (echo.document) { msgBody = echo.document.filename || ''; mediaUrl = echo.document.id || ''; }
+                else if (echo.sticker) { mediaUrl = echo.sticker.id || ''; }
+                else if (echo.reaction) { msgBody = echo.reaction.emoji || ''; }
+                else if (echo.location) { msgBody = `[ubicacion] ${echo.location.latitude},${echo.location.longitude}${echo.location.name ? ' — ' + echo.location.name : ''}`; }
+                const contextId = echo.context?.id || echo.reaction?.message_id || '';
+                // Bajar media a R2 si tiene id (algunos echoes traen el media id).
+                let r2Key = '';
+                if (mediaUrl && env.MEDIA) {
+                  try { const dl = await downloadMedia(env, mediaUrl); if (dl) r2Key = dl.key; } catch (_) {}
+                }
+                if (msgType === 'audio' && r2Key && env.AI) {
+                  try { const t = await transcribeAudio(env, r2Key); if (t) msgBody = '[audio] ' + t; } catch (_) {}
+                }
+                if (msgType === 'image' && r2Key && env.AI) {
+                  try { const desc = await analyzeImage(env, r2Key); if (desc) msgBody = (msgBody ? msgBody + ' | ' : '') + '[imagen] ' + desc; } catch (_) {}
+                }
+                try {
+                  // Upsert. Si el wamid ya existe como placeholder de status (body
+                  // vacío, msg_type='status'), lo completamos con el body real del echo.
+                  await env.DB.prepare(
+                    `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT(wamid) DO UPDATE SET
+                       direction = excluded.direction,
+                       phone = excluded.phone,
+                       msg_type = excluded.msg_type,
+                       body = excluded.body,
+                       media_url = excluded.media_url,
+                       context_id = excluded.context_id,
+                       ts = excluded.ts
+                     WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+                  ).bind(ts, wamid, 'outbound', phone, '', msgType, msgBody, r2Key || mediaUrl, contextId, null).run();
+                } catch (_) {}
+              }
+
               // Status updates (sent, delivered, read) para mensajes salientes
               for (const st of (value?.statuses || [])) {
                 const wamid = st.id || '';
@@ -2746,6 +2799,39 @@ export default {
         await env.DB.prepare('DELETE FROM brief_imagenes WHERE id = ?').bind(imgId).run();
         await env.DB.prepare('UPDATE briefs SET updated_at = ? WHERE id = ?').bind(new Date().toISOString(), briefId).run();
         return noContent();
+      }
+
+      // ===== 360dialog webhook config (echoes de WA Business) =====
+      // GET ver config actual, PUT actualizar fields suscritos.
+      if (request.method === 'GET' && path === '/admin/360/webhook') {
+        if (!env.D360_API_KEY) return json({ error: 'D360_API_KEY not configured' }, 500);
+        try {
+          const r = await fetch('https://waba-v2.360dialog.io/v1/configs/webhook', {
+            headers: { 'D360-API-KEY': env.D360_API_KEY, 'Accept': 'application/json' }
+          });
+          const text = await r.text();
+          let body; try { body = JSON.parse(text); } catch { body = text; }
+          return json({ status: r.status, body });
+        } catch (e) {
+          return json({ error: e.message }, 500);
+        }
+      }
+      if (request.method === 'POST' && path === '/admin/360/webhook') {
+        if (!env.D360_API_KEY) return json({ error: 'D360_API_KEY not configured' }, 500);
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        try {
+          const r = await fetch('https://waba-v2.360dialog.io/v1/configs/webhook', {
+            method: 'POST',
+            headers: { 'D360-API-KEY': env.D360_API_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          const text = await r.text();
+          let resp; try { resp = JSON.parse(text); } catch { resp = text; }
+          return json({ status: r.status, body: resp });
+        } catch (e) {
+          return json({ error: e.message }, 500);
+        }
       }
 
       // ===== Team chat (chat global del equipo, flotante) =====
