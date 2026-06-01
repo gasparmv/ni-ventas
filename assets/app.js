@@ -1568,14 +1568,21 @@ function waLink(tel, msg) {
 }
 
 // ============ ROUTING ============
+// Diseñador puro (no admin): solo puede ver la tab Cotización.
+function isDisenadorOnly() {
+  return getUserRole() === 'disenador';
+}
 function setView(v) {
+  // Diseñador queda confinado a Cotización, sin importar a dónde quiera ir.
+  if (isDisenadorOnly()) v = 'cotizacion';
   STATE.view = v;
   STATE.selected = null;
   location.hash = v;
   render();
 }
 window.addEventListener('hashchange', () => {
-  const h = location.hash.replace('#','') || 'dashboard';
+  let h = location.hash.replace('#','') || 'dashboard';
+  if (isDisenadorOnly()) h = 'cotizacion';
   if (h !== STATE.view) { STATE.view = h; render(); }
 });
 
@@ -1606,6 +1613,11 @@ function render() {
     document.getElementById('app').innerHTML = renderUserPicker();
     bindUserPicker();
     return;
+  }
+  // Diseñador queda confinado a Cotización aunque la URL o el state digan otra cosa.
+  if (isDisenadorOnly() && STATE.view !== 'cotizacion') {
+    STATE.view = 'cotizacion';
+    if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
   document.getElementById('app').innerHTML = renderShell();
   if (STATE.error)   document.getElementById('main').innerHTML = renderError();
@@ -1677,6 +1689,9 @@ function renderShell() {
         </div>
       </div>
       <nav class="nav">
+        ${isDisenadorOnly() ? `
+          <button class="nav-item active" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
+        ` : `
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
@@ -1688,6 +1703,7 @@ function renderShell() {
         ${canAccessChat() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
           <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread || ''}</span>
         </button>` : ''}
+        `}
         ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
       </nav>
       <div class="sidebar-foot">
