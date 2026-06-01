@@ -917,17 +917,44 @@ export default {
               const contacts = value?.contacts || [];
               const contactMap = {};
               for (const c of contacts) contactMap[c.wa_id] = c.profile?.name || '';
-              // Coexistencia / Echoes: si msg.from coincide con nuestro número
-              // de negocio, es un mensaje SALIENTE enviado desde la app/web de
-              // WhatsApp Business (no por la Cloud API). Lo guardamos con body.
-              const businessPhone = String(value?.metadata?.display_phone_number || '').replace(/\D/g, '');
+              // Coexistencia / Echoes: detectar mensajes SALIENTES (Joaco escribió
+              // desde la app de WhatsApp Business) con MÚLTIPLES heurísticas porque
+              // 360dialog puede no traer value.metadata.display_phone_number igual
+              // que Meta direct.
+              // 1) display_phone_number del metadata (Meta direct, ideal)
+              // 2) env.WA_BUSINESS_PHONE (fallback hardcoded por wrangler secret)
+              // 3) presencia de msg.to (Y from distinto del cliente) — heurística:
+              //    los mensajes inbound del cliente NO traen msg.to, los echoes sí.
+              const businessPhoneFromMeta = String(value?.metadata?.display_phone_number || '').replace(/\D/g, '');
+              const businessPhoneFromEnv  = String(env.WA_BUSINESS_PHONE || '').replace(/\D/g, '');
+              const businessPhones = new Set([businessPhoneFromMeta, businessPhoneFromEnv].filter(Boolean));
+
+              // Log de diagnóstico: guardamos el primer message del primer batch
+              // para inspeccionar el formato real de 360dialog. Truncado a 4KB.
+              try {
+                if (Array.isArray(value?.messages) && value.messages.length) {
+                  const dbg = {
+                    metadata: value.metadata,
+                    sample_message_keys: Object.keys(value.messages[0]),
+                    sample_message: value.messages[0],
+                    business_phones_known: Array.from(businessPhones)
+                  };
+                  const dbgStr = JSON.stringify(dbg).slice(0, 4000);
+                  await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'WEBHOOK_DEBUG: ' + dbgStr).run();
+                }
+              } catch(_) {}
 
               // Mensajes (entrantes y salientes vía echoes)
               for (const msg of (value?.messages || [])) {
                 const fromNorm = String(msg.from || '').replace(/\D/g, '');
-                const isOutboundEcho = businessPhone && fromNorm === businessPhone;
-                // En echoes el destinatario viene en msg.to o en contacts[0].wa_id
-                const recipient = String(msg.to || contacts[0]?.wa_id || '').replace(/\D/g, '');
+                const toNorm   = String(msg.to   || '').replace(/\D/g, '');
+                // Echo si: from coincide con un número de business conocido, O si
+                // tiene msg.to definido (los mensajes entrantes del cliente NO lo traen).
+                const isOutboundEcho =
+                  (businessPhones.size > 0 && businessPhones.has(fromNorm)) ||
+                  (!!toNorm && fromNorm !== toNorm);
+                // En echoes el destinatario viene en msg.to o en contacts[0]?.wa_id
+                const recipient = toNorm || String(contacts[0]?.wa_id || '').replace(/\D/g, '');
                 const phone = isOutboundEcho ? recipient : (msg.from || '');
                 const direction = isOutboundEcho ? 'outbound' : 'inbound';
                 const wamid = msg.id || '';

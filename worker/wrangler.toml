@@ -7,6 +7,10 @@ compatibility_date = "2026-05-01"
 WA_PHONE_NUMBER_ID = "919964037861500"
 WA_API_VERSION = "v25.0"
 WA_BUSINESS_ACCOUNT_ID = "800446462838166"
+# Número del business en formato E.164 sin "+" (solo dígitos). Usado para detectar
+# mensajes echoes (los que Joaco manda desde la app de WA Business) cuando el
+# webhook de 360dialog no incluye metadata.display_phone_number.
+WA_BUSINESS_PHONE = "5491144366573"
 
 # La D1 binding se completa con el ID que devuelve `wrangler d1 create`.
 [[d1_databases]]
