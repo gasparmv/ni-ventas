@@ -945,6 +945,64 @@ async function processCoexistenceHistory(env, data) {
   }
 }
 
+// ===== Template status update (webhook field message_template_status_update) =====
+// Meta dispara este evento cuando un template cambia de status (PENDING → APPROVED|
+// REJECTED|PAUSED|DISABLED). Reemplaza al polling cada 5 min de monitorTemplateStatus
+// si el field está suscrito en el hub de 360dialog.
+async function processTemplateStatusUpdate(env, value) {
+  const name = value?.message_template_name || '';
+  const lang = value?.message_template_language || '';
+  const event = value?.event || ''; // APPROVED, REJECTED, PAUSED, etc.
+  const reason = value?.reason || '';
+  if (!env.ADMIN_NOTIFY_PHONE || !name || !event) return;
+  let icon = '📋';
+  if (event === 'APPROVED') icon = '✅';
+  else if (event === 'REJECTED' || event === 'DISABLED') icon = '❌';
+  else if (event === 'PAUSED' || event === 'FLAGGED') icon = '⚠️';
+  const text = `${icon} Plantilla "${name}" (${lang}): ${event}${reason ? `\nMotivo: ${reason}` : ''}`;
+  try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, text); } catch (_) {}
+}
+
+// ===== Coexistence state sync (event: 'smb_app_state_sync' de 360dialog) =====
+// 360dialog manda este evento al onboardear y cada vez que Joaco agrega/modifica/
+// elimina un contacto en la app de WhatsApp Business del celular. Es la fuente de
+// la verdad para nombres reales y permite poblar sender_name de mensajes inbound.
+async function processCoexistenceStateSync(env, data) {
+  const items = Array.isArray(data?.state_sync) ? data.state_sync : [];
+  const now = new Date().toISOString();
+  for (const item of items) {
+    if (item.type !== 'contact') continue;
+    const c = item.contact || {};
+    const userId = String(c.user_id || '').trim();
+    const phone = String(c.phone_number || '').replace(/\D/g, '');
+    const fullName = String(c.full_name || '').trim();
+    const firstName = String(c.first_name || '').trim();
+    if (!userId || !phone) continue;
+    const action = item.action || 'add';
+    const version = parseInt(item.metadata?.version) || 1;
+    try {
+      await env.DB.prepare(
+        `INSERT INTO wa_address_book (user_id, phone, full_name, first_name, action, version, first_seen_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)
+         ON CONFLICT(user_id) DO UPDATE SET
+           phone = excluded.phone,
+           full_name = CASE WHEN excluded.full_name != '' THEN excluded.full_name ELSE wa_address_book.full_name END,
+           first_name = CASE WHEN excluded.first_name != '' THEN excluded.first_name ELSE wa_address_book.first_name END,
+           action = excluded.action,
+           version = excluded.version,
+           updated_at = excluded.updated_at`
+      ).bind(userId, phone, fullName, firstName, action, version, now, now).run();
+
+      // Bonus: backfill sender_name de mensajes inbound previos sin nombre.
+      if (fullName) {
+        await env.DB.prepare(
+          "UPDATE wa_messages SET sender_name = ? WHERE phone = ? AND direction = 'inbound' AND (sender_name IS NULL OR sender_name = '')"
+        ).bind(fullName, phone).run();
+      }
+    } catch (_) {}
+  }
+}
+
 // ===== Image analysis (Vision via Workers AI) =====
 async function analyzeImage(env, r2Key) {
   if (!env.AI || !env.MEDIA || !r2Key) return null;
@@ -1092,7 +1150,7 @@ export default {
             return;
           }
           if (body?.event === 'smb_app_state_sync' && body?.data) {
-            // Por ahora solo log — no usamos contactos sync en el CRM todavía.
+            await processCoexistenceStateSync(env, body.data);
             return;
           }
 
@@ -1100,6 +1158,13 @@ export default {
           for (const entry of entries) {
             const changes = entry?.changes || [];
             for (const change of changes) {
+              // Field 'message_template_status_update' = cambio de status de una
+              // plantilla (APPROVED/REJECTED/PAUSED/DISABLED). Notificamos al admin
+              // y dejamos de pollear monitorTemplateStatus.
+              if (change?.field === 'message_template_status_update') {
+                await processTemplateStatusUpdate(env, change.value || {});
+                continue;
+              }
               // Aceptamos: 'messages' (Meta estándar), 'smb_message_echoes'
               // (coexistence echoes), y 'history' (algunos history events vienen
               // en formato Meta-style con value.message_echoes adentro, además del
@@ -1663,18 +1728,8 @@ export default {
         });
       }
 
-      // ===== TEMPORARY: GET phone info (sirve para verificar estado durante migración 360dialog) =====
-      // Lo dejo solo este (read-only, low risk). Los de modificación (deregister,
-      // delete-phone) los saqué — fallaron para nuestro caso ON_PREMISE.
-      if (request.method === 'GET' && path === '/admin/wa/phone-info') {
-        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
-        const v = env.WA_API_VERSION || 'v25.0';
-        const fields = 'id,display_phone_number,verified_name,quality_rating,platform_type,name_status,code_verification_status,messaging_limit_tier,account_mode,is_pin_enabled,status,certificate,is_official_business_account,throughput,health_status';
-        const url = `https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}?fields=${fields}`;
-        const r = await fetch(url, { headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` } });
-        const j = await r.json().catch(() => ({}));
-        return json({ ok: r.ok, status: r.status, response: j });
-      }
+      // (Endpoint /admin/wa/phone-info v1 removido — la versión que ramifica por
+      //  provider y unifica con phone-status vive más abajo en este mismo archivo.)
 
       // ===== BULK IMPORT de historial de WA (scrape via whatsapp-web.js) =====
       // El script scrape-wa-history.js corre en la PC del usuario y manda
@@ -2070,7 +2125,6 @@ export default {
             'INSERT INTO wa_read_cursor (phone, last_read_ts, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET last_read_ts = excluded.last_read_ts, updated_at = excluded.updated_at'
           ).bind(phone, ts, new Date().toISOString()).run();
         } catch (e) {
-          // Table might not exist yet — create it
           try {
             await env.DB.prepare('CREATE TABLE IF NOT EXISTS wa_read_cursor (phone TEXT PRIMARY KEY, last_read_ts TEXT NOT NULL, updated_at TEXT NOT NULL)').run();
             await env.DB.prepare(
@@ -2078,6 +2132,25 @@ export default {
             ).bind(phone, ts, new Date().toISOString()).run();
           } catch (_) {}
         }
+
+        // Marcar el último inbound como leído en WhatsApp (doble tilde azul al cliente).
+        // Solo lo hacemos para el ÚLTIMO mensaje inbound del contacto — Meta automáticamente
+        // marca todos los anteriores como leídos también.
+        try {
+          const lastInbound = await env.DB.prepare(
+            "SELECT wamid FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND wamid != '' AND ts <= ? ORDER BY ts DESC LIMIT 1"
+          ).bind(phone, ts).first();
+          if (lastInbound?.wamid && lastInbound.wamid.startsWith('wamid.')) {
+            await waSend(env, {
+              messaging_product: 'whatsapp',
+              status: 'read',
+              message_id: lastInbound.wamid,
+              // Bonus: typing indicator para mostrar que estamos por contestar.
+              typing_indicator: { type: 'text' }
+            });
+          }
+        } catch (e) { /* mark-read en WA es best-effort, no rompe el flow del cursor */ }
+
         return json({ ok: true });
       }
 
@@ -2580,10 +2653,14 @@ export default {
         if (!r.ok) return json({ error: data?.error?.message || 'create failed', raw: data }, r.status || 500);
         return json({ ok: true, id: data.id, status: data.status, category: data.category, provider: _waT.provider });
       }
-      // Setear (o resetear) el PIN de two-step verification del número.
-      // POST a /{PHONE_NUMBER_ID} con {pin}. Necesario cuando la UI no expone
-      // la opción de 2FA o cuando se olvidó el PIN viejo.
+      // set-pin y register son operaciones del flujo ON_PREMISE de Meta direct,
+      // ya no aplican con 360dialog Cloud API hosted (lo gestiona el provider).
+      // Si alguien las llama post-migración, devolvemos 501 con guía.
       if (request.method === 'POST' && path === '/admin/wa/set-pin') {
+        if ((env.WA_PROVIDER || 'meta') !== 'meta') {
+          return json({ error: '2FA PIN se gestiona desde el dashboard de 360dialog Hub', provider: env.WA_PROVIDER }, 501);
+        }
+        if (!session || session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const { pin } = body || {};
         if (!pin || !/^\d{6}$/.test(String(pin))) return json({ error: 'pin debe ser 6 dígitos numéricos' }, 400);
@@ -2597,10 +2674,11 @@ export default {
         if (!r.ok) return json({ error: data?.error?.message || 'set-pin failed', code: data?.error?.code, raw: data }, r.status || 500);
         return json({ ok: true, raw: data });
       }
-      // Registrar número con Cloud API. Requiere PIN de two-step verification.
-      // Si el PIN no fue setado o se olvidó, ir a WA Manager → Number → Settings →
-      // Two-step verification → Set/Reset PIN.
       if (request.method === 'POST' && path === '/admin/wa/register') {
+        if ((env.WA_PROVIDER || 'meta') !== 'meta') {
+          return json({ error: 'register no aplica con 360dialog (Cloud API hosted)', provider: env.WA_PROVIDER }, 501);
+        }
+        if (!session || session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const { pin } = body || {};
         if (!pin) return json({ error: 'missing pin' }, 400);
@@ -2614,20 +2692,38 @@ export default {
         if (!r.ok) return json({ error: data?.error?.message || 'register failed', code: data?.error?.code, raw: data }, r.status || 500);
         return json({ ok: true, raw: data });
       }
-      // Datos crudos del phone number (incluye platform_type, code_verification_status, etc.)
+      // Datos crudos del phone number — ramifica por provider.
+      // Meta: GET /{phone_id}?fields=...
+      // 360dialog: GET /v1/configs/whatsapp_business_account (devuelve TODO).
       if (request.method === 'GET' && path === '/admin/wa/phone-info') {
-        if (!env.WA_PHONE_NUMBER_ID || !env.WA_TOKEN) return json({ error: 'WA not configured' }, 500);
+        if (!session || session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const _waP = getWaClient(env);
+        if (_waP.provider === '360dialog') {
+          const r = await fetch(`${_waP.base}/v1/configs/whatsapp_business_account`, { headers: _waP.headers });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) return json({ error: data?.error || 'failed', raw: data }, r.status || 500);
+          return json({ provider: '360dialog', ...data });
+        }
+        if (!env.WA_PHONE_NUMBER_ID || !env.WA_TOKEN) return json({ error: 'WA not configured (meta)' }, 500);
         const v = env.WA_API_VERSION || 'v25.0';
         const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_PHONE_NUMBER_ID}?fields=verified_name,code_verification_status,display_phone_number,quality_rating,platform_type,certificate,messaging_limit_tier,health_status`, {
           headers: { 'Authorization': `Bearer ${env.WA_TOKEN}` }
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) return json({ error: data?.error?.message || 'failed', raw: data }, r.status || 500);
-        return json(data);
+        return json({ provider: 'meta', ...data });
       }
-      // Status del número productivo (tier de mensajería + quality rating).
+      // Health status del número (quality + tier + can_send_message).
       if (request.method === 'GET' && path === '/admin/wa/phone-status') {
-        if (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN) return json({ error: 'WA not configured' }, 500);
+        if (!session || session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const _waS = getWaClient(env);
+        if (_waS.provider === '360dialog') {
+          const r = await fetch(`${_waS.base}/v1/health_status`, { headers: _waS.headers });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) return json({ error: data?.error || 'health fetch failed', raw: data }, r.status || 500);
+          return json({ provider: '360dialog', ...data });
+        }
+        if (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN) return json({ error: 'WA not configured (meta)' }, 500);
         const v = env.WA_API_VERSION || 'v25.0';
         const fields = 'id,display_phone_number,quality_rating,messaging_limit_tier,verified_name,status,name_status,throughput,health_status';
         const r = await fetch(`https://graph.facebook.com/${v}/${env.WA_BUSINESS_ACCOUNT_ID}/phone_numbers?fields=${fields}`, {
@@ -2635,7 +2731,7 @@ export default {
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) return json({ error: data?.error?.message || 'fetch failed', raw: data }, r.status || 500);
-        return json({ phones: data.data || [] });
+        return json({ provider: 'meta', phones: data.data || [] });
       }
       if (request.method === 'GET' && path === '/admin/wa/templates') {
         const _waL = getWaClient(env);
@@ -3146,8 +3242,11 @@ export default {
     if (hour === 13) ctx.waitUntil(runScheduled(env));
     // Follow-up automático de presupuestos del cotizador: solo en horario AR (09-22 AR = 12-01 UTC)
     if (hour >= 12 || hour <= 1) ctx.waitUntil(processPresupuestoFollowups(env));
-    // Monitorear cambios de status de templates (PENDING → APPROVED/REJECTED)
-    ctx.waitUntil(monitorTemplateStatus(env));
+    // Monitor de status de templates: 1 vez por hora, no cada 5 min. El polling
+    // es fallback; lo ideal es suscribir al webhook field 'message_template_status_update'
+    // en el hub de 360dialog (lo manejamos abajo en notifyTemplateStatusChange).
+    const minute = new Date(event.scheduledTime).getUTCMinutes();
+    if (minute < 5) ctx.waitUntil(monitorTemplateStatus(env));
   }
 };
 
