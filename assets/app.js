@@ -8474,10 +8474,10 @@ function renderBriefDrawer() {
             const fuente = tieneBoceto ? 'el boceto' : 'las capturas de Joaco';
             const disabled = STATE.briefGenerandoRender || !hayInput;
             const label = STATE.briefGenerandoRender
-              ? '✨ Generando render + estimando medidas… (~15s)'
+              ? '✨ Generando render… (~15s)'
               : !hayInput
                 ? '⚠ Subí al menos una imagen para generar'
-                : `✨ Generar render IA + medidas (con ${fuente})`;
+                : `✨ Generar render IA (con ${fuente})`;
             return `
               <button class="btn btn-cyan" id="brief-generar-render" style="width:100%;margin-bottom:var(--s-3)" ${disabled ? 'disabled' : ''}>${label}</button>
               <div id="brief-render-ia-status" style="font-size:11px;text-align:center;margin-bottom:var(--s-2);min-height:14px;color:var(--fg-mute)"></div>
@@ -9090,10 +9090,10 @@ function refreshGenerarRenderButton() {
   const fuente = tieneBoceto ? 'el boceto' : 'las capturas de Joaco';
   btn.disabled = !!STATE.briefGenerandoRender || !hayInput;
   btn.textContent = STATE.briefGenerandoRender
-    ? '✨ Generando render + medidas… (~15s)'
+    ? '✨ Generando render… (~15s)'
     : !hayInput
       ? '⚠ Subí al menos una imagen para generar'
-      : `✨ Generar render IA + medidas (con ${fuente})`;
+      : `✨ Generar render IA (con ${fuente})`;
 }
 
 // Llama al worker para generar el render con Gemini a partir del boceto.
@@ -9106,7 +9106,7 @@ async function generarRenderBrief() {
   STATE.briefGenerandoRender = true;
   const statusEl = document.getElementById('brief-render-ia-status');
   const btn = document.getElementById('brief-generar-render');
-  if (btn) { btn.disabled = true; btn.textContent = '✨ Generando render + medidas… (~15s)'; }
+  if (btn) { btn.disabled = true; btn.textContent = '✨ Generando render… (~15s)'; }
   if (statusEl) { statusEl.textContent = 'Guardando notas + analizando con Gemini…'; statusEl.style.color = 'var(--accent-cyan)'; }
 
   // 1) AUTO-SAVE: si el usuario escribió notas / cambió título / medidas
