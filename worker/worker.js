@@ -500,6 +500,12 @@ async function analyzeChatWithClaude(env, phone, modelOverride = 'sonnet') {
   if (!env.ANTHROPIC_API_KEY) {
     return { ok: false, error: 'ANTHROPIC_API_KEY no configurada' };
   }
+  // Bloqueo phones internos del equipo: no son clientes, son miembros del
+  // equipo (Joaco/Gaspar/Bruno) que se comunican con el número del negocio.
+  try {
+    const internal = await env.DB.prepare('SELECT phone FROM wa_internal_phones WHERE phone = ?').bind(phone).first();
+    if (internal) return { ok: false, error: 'phone interno del equipo, no es cliente — skipeado' };
+  } catch (_) {}
   const ctx = await buildChatContext(env, phone);
   if (!ctx) return { ok: false, error: 'sin mensajes para este phone' };
 
@@ -2738,7 +2744,10 @@ export default {
       // Batch análisis para cron diario. Toma N chats que tengan actividad
       // posterior al last_analyzed_at (o que nunca se analizaron) y los corre.
       // Limit default 10 por llamada (~30 seg). Se puede llamar varias veces
-      // para procesar más.
+      // para procesar más. Excluye phones internos del equipo (Joaco, Gaspar, Bruno)
+      // listados en wa_internal_phones para no analizar chats internos como si
+      // fueran clientes (los msgs de Joaco en su número del negocio NO son
+      // conversaciones de venta).
       if (request.method === 'POST' && path === '/admin/wa/analyze-pending') {
         const limit = Math.min(parseInt(url.searchParams.get('limit') || '10'), 50);
         const minMsgs = parseInt(url.searchParams.get('min_msgs') || '3'); // chats con menos de 3 msgs los skipeamos por default
@@ -2747,10 +2756,12 @@ export default {
           // Estrategia: phones que tienen msgs nuevos desde el último análisis.
           // Subquery saca last_msg_ts por phone, y comparamos contra last_analyzed_at
           // de wa_conversations. Si nunca se analizó o si hay msgs nuevos, entra.
+          // EXCLUDE: phones en wa_internal_phones (equipo, no clientes).
           const rs = await env.DB.prepare(
             `WITH chat_stats AS (
                SELECT phone, MAX(ts) AS last_ts, COUNT(*) AS n_msgs
                FROM wa_messages WHERE msg_type != 'reaction'
+                 AND phone NOT IN (SELECT phone FROM wa_internal_phones)
                GROUP BY phone
                HAVING n_msgs >= ?
              )
