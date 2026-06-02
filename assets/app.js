@@ -7144,19 +7144,12 @@ function bindChatConversation() {
       // Marker para que el polling sepa que estás tipeando activamente
       // y evite refreshes pesados del sidebar mientras escribís.
       chatState._lastTypeMs = performance.now();
-      // === FIX CRÍTICO: defer auto-resize a RAF ===
-      // Setear style.height='auto' + leer scrollHeight fuerza un layout
-      // SÍNCRONO de toda la página. Con mucho DOM (sidebar de 1000+ chats),
-      // ese reflow tarda 200ms por keystroke → typing inutilizable.
-      // En RAF el browser ya pasó el frame y el reflow no bloquea la tecla.
-      if (ta._resizeRaf) cancelAnimationFrame(ta._resizeRaf);
-      ta._resizeRaf = requestAnimationFrame(() => {
-        ta._resizeRaf = null;
-        ta.style.height = 'auto';
-        ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
-      });
-      // Quick replies dropdown — early-returns si el value no empieza con '/',
-      // así que cuesta ~0ms en typing normal.
+      // === ELIMINADO: el JS auto-resize (ta.style.height='auto' + scrollHeight) ===
+      // Aún con RAF, leer scrollHeight forzaba un reflow de toda la página que
+      // con mucho DOM (1000+ chats + bubbles + filtros) tardaba 200-3000ms.
+      // El CSS `field-sizing: content` (Chrome ≥123, Safari 17) resuelve esto
+      // nativamente sin reflow forzado. Para browsers sin soporte, el textarea
+      // mantiene rows=1 + max-height + scroll interno (degradación aceptable).
       handleQuickReplyInput(ta);
       if (_LAG_DEBUG) {
         const dt = performance.now() - _t0;

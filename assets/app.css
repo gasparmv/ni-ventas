@@ -2402,6 +2402,12 @@ table.t td.cliente { font-weight: 600; }
   min-height: 40px;
   max-height: 120px;
   line-height: 1.35;
+  /* Auto-resize NATIVO sin JS: el browser ajusta la altura al contenido sin
+     forzar reflow. Reemplaza el patrón viejo de `style.height='auto'; el.scrollHeight`
+     en cada keystroke, que con DOM grande tardaba 200-3000ms POR TECLA y bloqueaba
+     el typing entero. Chrome ≥123 y Safari 17 lo soportan; browsers viejos caen
+     a textarea fijo con scroll interno (degradación aceptable). */
+  field-sizing: content;
 }
 .chat-input-wrap textarea::placeholder { color: #8696a0; }
 
