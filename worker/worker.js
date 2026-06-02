@@ -444,6 +444,17 @@ function extractLeadFields(fieldData) {
   return { phone, firstName, fullName, email, allFields: out };
 }
 
+// Helper para loguear errores del flow de leads a wa_webhook_log con prefijo
+// LEADS_DEBUG, así podemos diagnosticar sin wrangler tail.
+async function _logLeadDebug(env, label, data) {
+  try {
+    const payload = 'LEADS_DEBUG[' + label + ']: ' + (typeof data === 'string' ? data : JSON.stringify(data)).slice(0, 3500);
+    await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(
+      new Date().toISOString(), payload
+    ).run();
+  } catch (_) { /* swallow — best effort logging */ }
+}
+
 // Procesa un payload webhook de leadgen. Por cada change.field='leadgen':
 //   1) dedup por leadgen_id en wa_leads (evita doble proceso si Meta reintenta).
 //   2) fetch detalle del lead via Graph API.
@@ -452,22 +463,28 @@ function extractLeadFields(fieldData) {
 //   5) si hay teléfono válido, manda el template lead_b2b_followup.
 //   6) guarda el msg saliente en wa_messages para que aparezca en el CRM.
 async function processLeadgenWebhook(env, body) {
+  try {
   const entries = body?.entry || [];
+  await _logLeadDebug(env, 'START', { entries_count: entries.length, has_token: !!env.META_PAGE_ACCESS_TOKEN });
   for (const entry of entries) {
     const changes = entry?.changes || [];
     for (const change of changes) {
       if (change?.field !== 'leadgen') continue;
       const value = change?.value || {};
       const leadgenId = value.leadgen_id;
+      await _logLeadDebug(env, 'CHANGE', { field: change.field, leadgen_id: leadgenId, page_id: value.page_id });
       if (!leadgenId) continue;
 
       // Dedup: si ya está procesado, skip silenciosamente.
       try {
         const existing = await env.DB.prepare('SELECT id FROM wa_leads WHERE leadgen_id = ?').bind(leadgenId).first();
-        if (existing) continue;
-      } catch (_) {}
+        if (existing) { await _logLeadDebug(env, 'DEDUP_SKIP', { leadgen_id: leadgenId }); continue; }
+      } catch (e) {
+        await _logLeadDebug(env, 'DEDUP_ERR', { msg: e.message });
+      }
 
       const detail = await fetchLeadDetails(env, leadgenId);
+      await _logLeadDebug(env, 'FETCH_DETAIL', { has_detail: !!detail, leadgen_id: leadgenId });
       const tsIso = value.created_time
         ? new Date(parseInt(value.created_time) * 1000).toISOString()
         : (detail?.created_time || new Date().toISOString());
@@ -485,7 +502,10 @@ async function processLeadgenWebhook(env, body) {
             value.adset_id || '', value.campaign_id || '',
             'failed to fetch lead detail from Graph API (token/permiso?)'
           ).run();
-        } catch (_) {}
+          await _logLeadDebug(env, 'INSERT_PLACEHOLDER_OK', { leadgen_id: leadgenId });
+        } catch (e) {
+          await _logLeadDebug(env, 'INSERT_PLACEHOLDER_ERR', { msg: e.message });
+        }
         continue;
       }
 
@@ -566,6 +586,10 @@ async function processLeadgenWebhook(env, body) {
         } catch (_) {}
       }
     }
+  }
+  await _logLeadDebug(env, 'END', { ok: true });
+  } catch (err) {
+    await _logLeadDebug(env, 'FATAL', { message: err?.message, stack: (err?.stack || '').slice(0, 1500) });
   }
 }
 
