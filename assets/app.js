@@ -6057,12 +6057,17 @@ function renderChatBubbles(msgs, opts) {
   let html = olderBtn;
   // Arranco el lastDate/lastDir desde el "ancla" si fue provisto (caso
   // incremental: el último bubble en DOM define la continuidad de fecha).
-  let lastDate = opts.previousMsg ? opts.previousMsg.ts.slice(0, 10) : '';
+  // IMPORTANTE: comparamos fechas en hora LOCAL (Argentina), no UTC.
+  // Antes hacíamos m.ts.slice(0,10) que sacaba la fecha UTC del ISO string,
+  // y eso agrupaba mensajes de 21-23:59hs AR con los del día siguiente UTC
+  // (porque UTC = AR + 3h). Bug visible: si tipeabas a las 22hs y respondías
+  // al día siguiente 15hs, no aparecía separador "Hoy" entre ambos.
+  let lastDate = opts.previousMsg ? localDateKey(new Date(opts.previousMsg.ts)) : '';
   let lastDir = opts.previousMsg ? (opts.previousMsg.direction || 'inbound') : '';
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
     if (m.msg_type === 'reaction') continue; // se renderizan como chips, no como bubble
-    const msgDate = m.ts.slice(0, 10);
+    const msgDate = localDateKey(new Date(m.ts));
     if (msgDate !== lastDate) {
       lastDate = msgDate;
       html += `<div class="chat-date-sep"><span>${formatChatDate(m.ts)}</span></div>`;
