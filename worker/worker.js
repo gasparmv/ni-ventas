@@ -653,6 +653,21 @@ async function analyzeChatWithClaude(env, phone, modelOverride = 'sonnet') {
       parsed.confidence || '', new Date().toISOString()
     ).run();
 
+    // Auto-etiquetar el chat según outcome detectado por Claude. Por ahora
+    // solo etiquetamos 'Abandonado IA' para que el equipo pueda hacer
+    // seguimiento masivo con campañas de re-engagement. En el futuro se
+    // pueden sumar 'Vendido IA', 'En Proceso IA', etc.
+    try {
+      if (parsed.outcome === 'abandoned_by_client') {
+        const lbl = await env.DB.prepare("SELECT id FROM labels WHERE name = 'Abandonado IA'").first();
+        if (lbl?.id) {
+          await env.DB.prepare(
+            "INSERT INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, datetime('now')) ON CONFLICT(phone, label_id) DO NOTHING"
+          ).bind(phone, lbl.id).run();
+        }
+      }
+    } catch (_) {}
+
     return { ok: true, parsed, cost_usd: cost, tokens_in: ti, tokens_out: to, model };
   } catch (e) {
     return { ok: false, error: e.message };
