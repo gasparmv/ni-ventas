@@ -4055,3 +4055,16 @@ table.t td.cliente { font-weight: 600; }
 }
 
 
+
+/* ===== Insights IA dashboard ===== */
+.ins-table { width:100%; border-collapse:collapse; font-size:13px }
+.ins-table thead th { text-align:left; padding:6px 8px; border-bottom:1px solid #2a3942; opacity:.7; font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.04em }
+.ins-table tbody td { padding:8px 8px; border-bottom:1px solid #1a2530; vertical-align:middle }
+.ins-table tbody tr:hover { background:#1a2530 }
+.ins-rank { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:8px }
+.ins-rank li { display:flex; flex-direction:column; gap:4px }
+.ins-rank-label { font-size:13px }
+.ins-rank-bar { position:relative; height:18px; background:#1a2530; border-radius:4px; overflow:hidden; display:flex; align-items:center }
+.ins-rank-fill { position:absolute; left:0; top:0; bottom:0; background:linear-gradient(90deg, #06b6d4, #22c55e); opacity:.5 }
+.ins-rank-bar span { position:relative; padding-left:8px; font-size:12px; font-weight:600 }
+

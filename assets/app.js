@@ -1632,6 +1632,7 @@ function render() {
     else if (v === 'panel-joaco')   document.getElementById('main').innerHTML = renderPanelJoaco();
     else if (v === 'actividad')    document.getElementById('main').innerHTML = renderActividad();
     else if (v === 'chat')         document.getElementById('main').innerHTML = renderChat();
+    else if (v === 'insights')     document.getElementById('main').innerHTML = renderInsights();
     else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
@@ -1657,6 +1658,7 @@ function render() {
   if (STATE.view === 'panel-joaco') bindPanelJoaco();
   if (STATE.view === 'actividad') bindActividad();
   if (STATE.view === 'chat') bindChat();
+  if (STATE.view === 'insights') bindInsights();
   if (STATE.view === 'admin') bindAdmin();
   // Sincronizar classes mobile del chat (chat-mobile-list / chat-mobile-conv)
   // en el .app raíz. Solo el CSS bajo el media query mobile las usa.
@@ -1706,6 +1708,7 @@ function renderShell() {
         ${canAccessChat() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
           <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread || ''}</span>
         </button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${v==='insights'?'active':''}" data-view="insights"><span class="icon">⚡</span> Insights IA</button>` : ''}
         `}
         ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
       </nav>
@@ -5568,6 +5571,186 @@ function renderBulkSection() {
     <button class="btn btn-cyan" id="bulk-send-btn" style="margin-top:8px;width:100%">Enviar masivo</button>
     <div id="bulk-result" style="margin-top:6px;font-size:13px"></div>
   </div>`;
+}
+
+// ============================================================
+// INSIGHTS IA — dashboard con datos agregados del análisis de
+// conversaciones con Claude. Los datos los provee el endpoint
+// /admin/wa/insights del worker.
+// ============================================================
+const insightsState = { data: null, loading: false, error: null };
+
+function renderInsights() {
+  if (!isAdmin()) return `<div class="page-head"><h1>Insights IA</h1></div><div class="error">Solo admin.</div>`;
+  const d = insightsState.data;
+  if (insightsState.loading && !d) {
+    return `<div class="page-head"><h1>Insights IA</h1></div><div class="loading"><div class="spinner"></div><p style="margin-top:10px">Cargando análisis…</p></div>`;
+  }
+  if (!d) {
+    return `<div class="page-head"><h1>Insights IA</h1><button class="btn" id="insights-refresh">↻ Cargar</button></div>${insightsState.error ? `<div class="error">${escapeHtml(insightsState.error)}</div>` : '<p style="opacity:.7">Cargando…</p>'}`;
+  }
+  const s = d.summary || {};
+  const total = s.total || 0;
+  const sold = s.sold || 0, lost = s.lost || 0, abandoned = s.abandoned || 0, inProgress = s.in_progress || 0, spam = s.spam || 0;
+  const decided = sold + lost + abandoned;
+  const conversionRate = decided > 0 ? Math.round((sold / decided) * 100) : 0;
+  const explicitDecided = sold + lost;
+  const explicitRate = explicitDecided > 0 ? Math.round((sold / explicitDecided) * 100) : 0;
+
+  return `
+    <div class="page-head">
+      <h1>Insights IA</h1>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="opacity:.6;font-size:13px">Total analizado: ${total} · Gastado: $${(d.total_cost_usd||0).toFixed(2)} USD</span>
+        <button class="btn" id="insights-refresh">↻ Refrescar</button>
+      </div>
+    </div>
+
+    <div class="kpi-grid" style="margin-bottom:24px">
+      <div class="kpi"><div class="kpi-label">VENTAS</div><div class="kpi-value" style="color:#22c55e">${sold}</div><div class="kpi-sub">${total ? Math.round(sold/total*100) : 0}% del total</div></div>
+      <div class="kpi"><div class="kpi-label">PERDIDOS</div><div class="kpi-value" style="color:#ef4444">${lost}</div><div class="kpi-sub">decisión NO comprar</div></div>
+      <div class="kpi"><div class="kpi-label">ABANDONADOS</div><div class="kpi-value" style="color:#f59e0b">${abandoned}</div><div class="kpi-sub">${total ? Math.round(abandoned/total*100) : 0}% — dejaron de responder</div></div>
+      <div class="kpi"><div class="kpi-label">EN PROCESO</div><div class="kpi-value">${inProgress}</div><div class="kpi-sub">conversación activa</div></div>
+      <div class="kpi"><div class="kpi-label">CONVERSIÓN</div><div class="kpi-value" style="color:#06b6d4">${conversionRate}%</div><div class="kpi-sub">de los decididos (incl. abandono)</div></div>
+      <div class="kpi"><div class="kpi-label">CONV. EXPLÍCITA</div><div class="kpi-value" style="color:#06b6d4">${explicitRate}%</div><div class="kpi-sub">solo sold vs lost</div></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px">
+      <div class="card">
+        <h3 style="margin:0 0 12px">Conversiones por anuncio</h3>
+        ${renderInsightsAdTable(d.by_ad || [])}
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 12px">Por vertical de cliente</h3>
+        ${renderInsightsTable(d.by_vertical || [], 'vertical')}
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px">
+      <div class="card">
+        <h3 style="margin:0 0 12px">Top objeciones que frenan ventas</h3>
+        ${renderInsightsRankList(d.top_objections || [], 'objection', 'count')}
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 12px">Top intent signals</h3>
+        ${renderInsightsRankList(d.top_intents || [], 'intent', 'count')}
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px">
+      <div class="card">
+        <h3 style="margin:0 0 12px">Por tipo de producto</h3>
+        ${renderInsightsProductTable(d.by_product || [])}
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 12px">Sentiment final del cliente</h3>
+        ${renderInsightsSentimentTable(d.by_sentiment || [])}
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 12px">Costo por modelo</h3>
+      ${renderInsightsTable((d.by_model || []).map(m => ({ ...m, total: m.calls })), 'model_used', true)}
+    </div>
+  `;
+}
+
+function renderInsightsAdTable(rows) {
+  if (!rows.length) return '<p style="opacity:.6">Sin datos todavía</p>';
+  return `<table class="ins-table"><thead><tr>
+    <th>Ad</th><th>Campaña</th><th>Total</th><th style="color:#22c55e">✓</th><th style="color:#ef4444">✗</th><th style="color:#f59e0b">👻</th><th>Conv%</th>
+  </tr></thead><tbody>
+  ${rows.map(r => {
+    const decided = (r.sold||0) + (r.lost||0) + (r.abandoned||0);
+    const rate = decided > 0 ? Math.round((r.sold||0)/decided*100) : 0;
+    return `<tr><td title="${escapeHtml(r.ad_name)}">${escapeHtml((r.ad_name||'').slice(0,40))}</td>
+      <td style="opacity:.6">${escapeHtml((r.campaign_name||'').slice(0,30))}</td>
+      <td>${r.total}</td>
+      <td style="color:#22c55e">${r.sold||0}</td>
+      <td style="color:#ef4444">${r.lost||0}</td>
+      <td style="color:#f59e0b">${r.abandoned||0}</td>
+      <td>${rate}%</td>
+    </tr>`;
+  }).join('')}
+  </tbody></table>`;
+}
+
+function renderInsightsTable(rows, keyField, simpleCount) {
+  if (!rows.length) return '<p style="opacity:.6">Sin datos todavía</p>';
+  if (simpleCount) {
+    return `<table class="ins-table"><thead><tr><th>${keyField}</th><th>Calls</th><th>Costo USD</th></tr></thead><tbody>
+      ${rows.map(r => `<tr><td>${escapeHtml(r[keyField] || '-')}</td><td>${r.calls||r.total||0}</td><td>$${(r.cost||0).toFixed(2)}</td></tr>`).join('')}
+    </tbody></table>`;
+  }
+  return `<table class="ins-table"><thead><tr>
+    <th>${keyField}</th><th>Total</th><th style="color:#22c55e">✓</th><th style="color:#ef4444">✗</th><th style="color:#f59e0b">👻</th><th>Conv%</th>
+  </tr></thead><tbody>
+  ${rows.map(r => {
+    const decided = (r.sold||0) + (r.lost||0) + (r.abandoned||0);
+    const rate = decided > 0 ? Math.round((r.sold||0)/decided*100) : 0;
+    return `<tr><td>${escapeHtml(r[keyField] || '-')}</td>
+      <td>${r.total}</td>
+      <td style="color:#22c55e">${r.sold||0}</td>
+      <td style="color:#ef4444">${r.lost||0}</td>
+      <td style="color:#f59e0b">${r.abandoned||0}</td>
+      <td>${rate}%</td>
+    </tr>`;
+  }).join('')}
+  </tbody></table>`;
+}
+
+function renderInsightsProductTable(rows) {
+  if (!rows.length) return '<p style="opacity:.6">Sin datos todavía</p>';
+  return `<table class="ins-table"><thead><tr><th>Producto</th><th>Total</th><th style="color:#22c55e">Ventas</th><th>%</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td>${escapeHtml(r.product_type)}</td><td>${r.total}</td><td style="color:#22c55e">${r.sold}</td><td>${r.total ? Math.round(r.sold/r.total*100):0}%</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
+function renderInsightsSentimentTable(rows) {
+  if (!rows.length) return '<p style="opacity:.6">Sin datos todavía</p>';
+  const colors = { positive: '#22c55e', neutral: '#9ca3af', negative: '#ef4444' };
+  return `<table class="ins-table"><thead><tr><th>Sentiment</th><th>Cantidad</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td style="color:${colors[r.sentiment_final] || '#9ca3af'}">${escapeHtml(r.sentiment_final)}</td><td>${r.n}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
+function renderInsightsRankList(rows, labelField, countField) {
+  if (!rows.length) return '<p style="opacity:.6">Sin datos todavía</p>';
+  const max = Math.max(...rows.map(r => r[countField] || 0));
+  return `<ol class="ins-rank">
+    ${rows.map(r => {
+      const pct = max > 0 ? (r[countField] / max) * 100 : 0;
+      return `<li>
+        <div class="ins-rank-label">${escapeHtml(r[labelField] || '-')}</div>
+        <div class="ins-rank-bar"><div class="ins-rank-fill" style="width:${pct}%"></div><span>${r[countField]}</span></div>
+      </li>`;
+    }).join('')}
+  </ol>`;
+}
+
+async function loadInsights() {
+  if (!CONFIG.trackerUrl || !STATE.token) return;
+  insightsState.loading = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/insights', { headers: authHeaders() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    insightsState.data = await r.json();
+    insightsState.error = null;
+  } catch (e) {
+    insightsState.error = e.message;
+  } finally {
+    insightsState.loading = false;
+    render();
+  }
+}
+
+function bindInsights() {
+  // Carga inicial si no hay data
+  if (!insightsState.data && !insightsState.loading) {
+    loadInsights();
+  }
+  const btn = document.getElementById('insights-refresh');
+  if (btn) btn.onclick = () => loadInsights();
 }
 
 function renderChat() {

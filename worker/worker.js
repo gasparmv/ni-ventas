@@ -2802,6 +2802,115 @@ export default {
         }
       }
 
+      // Agregados pre-calculados para el dashboard de insights IA.
+      // Devuelve resumen, distribución por ad, por vertical, top objeciones,
+      // top "qué funcionó" y costo total acumulado del análisis.
+      if (request.method === 'GET' && path === '/admin/wa/insights') {
+        try {
+          const results = {};
+          // Resumen general — outcomes y costo
+          const summary = await env.DB.prepare(
+            `SELECT
+              COUNT(*) AS total,
+              SUM(CASE WHEN outcome = 'sold' THEN 1 ELSE 0 END) AS sold,
+              SUM(CASE WHEN outcome = 'lost' THEN 1 ELSE 0 END) AS lost,
+              SUM(CASE WHEN outcome = 'abandoned_by_client' THEN 1 ELSE 0 END) AS abandoned,
+              SUM(CASE WHEN outcome = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
+              SUM(CASE WHEN outcome = 'spam' THEN 1 ELSE 0 END) AS spam
+            FROM wa_conversations WHERE outcome != ''`
+          ).first();
+          results.summary = summary || {};
+          const costRow = await env.DB.prepare(
+            `SELECT ROUND(SUM(cost_usd_estimated), 2) AS total_cost FROM wa_chat_analyses WHERE error = ''`
+          ).first();
+          results.total_cost_usd = costRow?.total_cost || 0;
+          // Por ad — solo ads que tengan al menos 1 análisis
+          results.by_ad = (await env.DB.prepare(
+            `SELECT ad_name, campaign_name,
+              COUNT(*) AS total,
+              SUM(CASE WHEN outcome = 'sold' THEN 1 ELSE 0 END) AS sold,
+              SUM(CASE WHEN outcome = 'lost' THEN 1 ELSE 0 END) AS lost,
+              SUM(CASE WHEN outcome = 'abandoned_by_client' THEN 1 ELSE 0 END) AS abandoned,
+              SUM(CASE WHEN outcome = 'in_progress' THEN 1 ELSE 0 END) AS in_progress
+            FROM wa_conversations
+            WHERE ad_name != ''
+            GROUP BY ad_name, campaign_name
+            ORDER BY total DESC LIMIT 30`
+          ).all()).results || [];
+          // Por vertical
+          results.by_vertical = (await env.DB.prepare(
+            `SELECT vertical,
+              COUNT(*) AS total,
+              SUM(CASE WHEN outcome = 'sold' THEN 1 ELSE 0 END) AS sold,
+              SUM(CASE WHEN outcome = 'lost' THEN 1 ELSE 0 END) AS lost,
+              SUM(CASE WHEN outcome = 'abandoned_by_client' THEN 1 ELSE 0 END) AS abandoned,
+              SUM(CASE WHEN outcome = 'in_progress' THEN 1 ELSE 0 END) AS in_progress
+            FROM wa_conversations
+            WHERE vertical != ''
+            GROUP BY vertical
+            ORDER BY total DESC`
+          ).all()).results || [];
+          // Por product type
+          results.by_product = (await env.DB.prepare(
+            `SELECT product_type,
+              COUNT(*) AS total,
+              SUM(CASE WHEN outcome = 'sold' THEN 1 ELSE 0 END) AS sold
+            FROM wa_conversations
+            WHERE product_type != ''
+            GROUP BY product_type
+            ORDER BY total DESC`
+          ).all()).results || [];
+          // Sentiment
+          results.by_sentiment = (await env.DB.prepare(
+            `SELECT sentiment_final, COUNT(*) AS n FROM wa_conversations
+             WHERE sentiment_final != '' GROUP BY sentiment_final ORDER BY n DESC`
+          ).all()).results || [];
+          // Top objeciones (parseamos los JSON arrays a flat list)
+          const objRows = (await env.DB.prepare(
+            `SELECT objections FROM wa_conversations WHERE objections != '' AND objections != '[]'`
+          ).all()).results || [];
+          const objCounts = {};
+          for (const r of objRows) {
+            try {
+              const arr = JSON.parse(r.objections);
+              if (Array.isArray(arr)) for (const o of arr) {
+                const key = String(o).trim().toLowerCase();
+                if (key) objCounts[key] = (objCounts[key] || 0) + 1;
+              }
+            } catch (_) {}
+          }
+          results.top_objections = Object.entries(objCounts)
+            .sort((a, b) => b[1] - a[1]).slice(0, 20)
+            .map(([k, v]) => ({ objection: k, count: v }));
+          // Top intent signals
+          const intRows = (await env.DB.prepare(
+            `SELECT intent_signals FROM wa_conversations WHERE intent_signals != '' AND intent_signals != '[]'`
+          ).all()).results || [];
+          const intCounts = {};
+          for (const r of intRows) {
+            try {
+              const arr = JSON.parse(r.intent_signals);
+              if (Array.isArray(arr)) for (const o of arr) {
+                const key = String(o).trim().toLowerCase();
+                if (key) intCounts[key] = (intCounts[key] || 0) + 1;
+              }
+            } catch (_) {}
+          }
+          results.top_intents = Object.entries(intCounts)
+            .sort((a, b) => b[1] - a[1]).slice(0, 20)
+            .map(([k, v]) => ({ intent: k, count: v }));
+          // Costos por modelo
+          results.by_model = (await env.DB.prepare(
+            `SELECT model_used, COUNT(*) AS calls, ROUND(SUM(cost_usd_estimated), 2) AS cost
+             FROM wa_chat_analyses WHERE error = ''
+             GROUP BY model_used ORDER BY cost DESC`
+          ).all()).results || [];
+          return json(results);
+        } catch (e) {
+          return json({ error: e.message }, 500);
+        }
+      }
+
       // Listado/resumen de conversaciones ya analizadas. Filtros básicos para
       // explorar insights desde el dashboard sin tener que hacer SQL.
       if (request.method === 'GET' && path === '/admin/wa/conversations') {
