@@ -7466,6 +7466,16 @@ function bindChat() {
       render();
     };
   }
+  // Posicionamiento del menu fijo (position:fixed escapa del overflow:hidden
+  // del sidebar). Calculamos top/left desde el rect del botón.
+  if (chatState.labelDropdownOpen) {
+    const menu = document.getElementById('label-filter-dd-menu');
+    if (menu && ddBtn) {
+      const r = ddBtn.getBoundingClientRect();
+      menu.style.top = (r.bottom + 6) + 'px';
+      menu.style.left = r.left + 'px';
+    }
+  }
   // Items del dropdown (toggle de cada etiqueta) — quedan adentro del menu.
   document.querySelectorAll('#label-filter-dd-menu .label-filter-chip').forEach(btn => {
     btn.onclick = (e) => {

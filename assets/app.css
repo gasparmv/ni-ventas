@@ -2556,15 +2556,16 @@ table.t td.cliente { font-weight: 600; }
   margin-left: 2px;
 }
 .label-filter-dd-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 50;
+  /* position: fixed para escapar del overflow:hidden de .chat-contacts.
+     El top/left se calculan en JS via getBoundingClientRect del botón.
+     z-index alto para quedar arriba de la lista de chats. */
+  position: fixed;
+  z-index: 9999;
   background: #233138;
   border: 1px solid #2a3942;
   border-radius: 8px;
   padding: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .65);
   display: flex;
   flex-direction: column;
   gap: 6px;
