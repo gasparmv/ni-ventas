@@ -396,6 +396,249 @@ async function waSendTemplate(env, to, name, lang = 'es', params = []) {
   });
 }
 
+// ===== Análisis de conversaciones con Claude (Anthropic API) =====
+// El system prompt vive como constante para versionarlo. Cuando se cambia,
+// bumpear ANALYSIS_PROMPT_VERSION para que el cron sepa que tiene que
+// re-analizar conversaciones aunque ya tengan análisis previo.
+const ANALYSIS_PROMPT_VERSION = 1;
+const ANALYSIS_SYSTEM_PROMPT = `Sos un analista experto en ventas de carteles de neón LED. Trabajás para Neon Infinito, una empresa argentina que vende carteles personalizados, hace cursos de fabricación, y ofrece franquicias/tercerización de producción.
+
+Tu tarea: analizar una conversación de WhatsApp entre un cliente y el equipo de Neon Infinito (mayormente Joaco, el vendedor) y extraer información estructurada para entender el ciclo de venta, identificar patrones de cliente, y eventualmente entrenar un agente automático que pueda responder mejor.
+
+Devolvé SOLO un JSON válido (sin markdown, sin code blocks, sin texto extra), con este schema EXACTO:
+
+{
+  "outcome": "sold" | "lost" | "abandoned_by_client" | "in_progress" | "spam",
+  "outcome_reason": "string corto explicando por qué",
+  "product_type": "cartel_personalizado" | "curso" | "franquicia" | "tercerizacion" | "otro",
+  "product_details": "string descriptivo del producto solicitado (medidas, colores, texto del cartel, etc)",
+  "vertical": "particular" | "local" | "franquicia" | "evento" | "tercerizacion" | "otro",
+  "customer_profile": "string corto: edad/perfil/intención",
+  "intent_signals": ["array de signals tipo 'pidio_precio_temprano', 'pregunto_envios', 'mostro_foto_referencia', 'pidio_seña', 'pago_completo', 'dudo_dias_antes_decidir', 'pregunto_curso', 'pidio_franquicia'"],
+  "objections": ["array de objeciones: 'precio_alto', 'tiempo_entrega', 'tamaño', 'envio_lejos', 'desconfianza', etc"],
+  "key_questions": ["array de preguntas LITERAL del cliente (3-5 más importantes)"],
+  "ad_source_inferred": "si el primer mensaje del cliente sugiere de qué publicidad vino, descripción corta. Si no se puede inferir: ''",
+  "joaco_approach": "string descriptivo de cómo respondió Joaco/el equipo (tiempos, info dada, upsells, tono)",
+  "what_worked": "string: qué cosas concretas hicieron avanzar la conversación hacia venta",
+  "what_didnt": "string: qué cosas frenaron o casi pierden al cliente",
+  "sentiment_final": "positive" | "neutral" | "negative",
+  "next_action": "string: qué se debería hacer ahora (follow-up, postventa, archivar, etc)",
+  "confidence": "low" | "medium" | "high"
+}
+
+Reglas:
+- Si la conversación tiene muy pocos mensajes (< 3) y no hay info clara, devolvé confidence: "low" y outcome: "in_progress" o "spam" según corresponda.
+- outcome=sold: confirmá que hubo seña, pago, o confirmación explícita de compra.
+- outcome=lost: el cliente decidió NO comprar explícitamente.
+- outcome=abandoned_by_client: dejó de responder sin decisión clara.
+- outcome=in_progress: la conversación está activa y aún se está negociando.
+- outcome=spam: bot, mensaje sin contexto, número equivocado.
+- En product_details poné info concreta del producto (no genérico). Si no hay info, "".
+- ad_source_inferred: SOLO si el cliente literalmente menciona el ad o cita un copy. No inventes.
+
+Respondé SOLO con el JSON, sin texto adicional.`;
+
+// Junta el contexto completo de un chat (text+transcripciones+adjuntos) para
+// pasar a Claude. Limita a últimos N msgs para no explotar el context window.
+async function buildChatContext(env, phone, maxMsgs = 100) {
+  const rs = await env.DB.prepare(
+    `SELECT ts, direction, msg_type, body, media_url FROM wa_messages
+     WHERE phone = ? AND msg_type != 'reaction'
+     ORDER BY ts ASC LIMIT ?`
+  ).bind(phone, maxMsgs).all();
+  const msgs = rs.results || [];
+  if (!msgs.length) return null;
+
+  // Buscar también ad attribution si existe — es lo que más le ayuda a Claude
+  // para entender de dónde viene el cliente.
+  const attrib = await env.DB.prepare(
+    `SELECT ad_name, campaign_name, headline, body as ad_body, source_id
+     FROM wa_ad_attributions WHERE phone = ? ORDER BY ts ASC LIMIT 1`
+  ).bind(phone).first();
+
+  // Contact name (de wa_address_book o de los msgs)
+  const contact = await env.DB.prepare(
+    `SELECT full_name FROM wa_address_book WHERE phone = ? LIMIT 1`
+  ).bind(phone).first();
+
+  // Construir string del chat
+  const lines = msgs.map(m => {
+    const who = m.direction === 'inbound' ? 'CLIENTE' : 'JOACO';
+    let content = m.body || '';
+    if (m.msg_type === 'image' && !content.startsWith('[imagen')) content = '[imagen] ' + content;
+    if (m.msg_type === 'audio' && !content.startsWith('[audio')) content = '[audio] (sin transcripción)';
+    if (m.msg_type === 'document') content = `[documento] ${content}`;
+    if (m.msg_type === 'location') content = `[ubicación] ${content}`;
+    return `${m.ts} ${who}: ${content}`;
+  }).join('\n');
+
+  let header = `## CONVERSACIÓN`;
+  if (contact?.full_name) header += `\nCliente: ${contact.full_name} (${phone})`;
+  else header += `\nCliente: ${phone}`;
+  if (attrib) {
+    header += `\nORIGEN: Ad "${attrib.ad_name || attrib.source_id}" (campaña "${attrib.campaign_name || 'N/A'}")`;
+    if (attrib.headline) header += `\nAd headline: ${attrib.headline}`;
+    if (attrib.ad_body) header += `\nAd copy: ${String(attrib.ad_body).slice(0, 300)}`;
+  } else {
+    header += `\nORIGEN: sin atribución registrada (capaz viene de orgánico o pre-mayo 2026)`;
+  }
+  header += `\nTotal msgs: ${msgs.length}\n\n`;
+
+  return {
+    fullText: header + lines,
+    msgsCount: msgs.length,
+    lastMsgTs: msgs[msgs.length - 1].ts,
+    attribSourceId: attrib?.source_id || '',
+    attribAdName: attrib?.ad_name || '',
+    attribCampaignName: attrib?.campaign_name || ''
+  };
+}
+
+// Llama Anthropic API con el chat de un phone y guarda el análisis.
+// modelOverride: 'sonnet' (default) | 'opus' — para casos VIP usar opus.
+async function analyzeChatWithClaude(env, phone, modelOverride = 'sonnet') {
+  if (!env.ANTHROPIC_API_KEY) {
+    return { ok: false, error: 'ANTHROPIC_API_KEY no configurada' };
+  }
+  const ctx = await buildChatContext(env, phone);
+  if (!ctx) return { ok: false, error: 'sin mensajes para este phone' };
+
+  const model = modelOverride === 'opus'
+    ? 'claude-opus-4-5'
+    : 'claude-sonnet-4-5';
+
+  try {
+    const t0 = Date.now();
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 1500,
+        system: ANALYSIS_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: ctx.fullText }]
+      })
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      // Guardar el error en histórico para debug
+      await env.DB.prepare(
+        `INSERT INTO wa_chat_analyses (phone, analyzed_at, model_used, prompt_version, msgs_analyzed, msgs_until_ts, raw_response, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(phone, new Date().toISOString(), model, ANALYSIS_PROMPT_VERSION,
+             ctx.msgsCount, ctx.lastMsgTs, JSON.stringify(j).slice(0, 4000),
+             j.error?.message || 'HTTP ' + r.status).run();
+      return { ok: false, error: j.error?.message || 'HTTP ' + r.status, raw: j };
+    }
+    const text = j.content?.[0]?.text || '';
+    let parsed;
+    try {
+      // Limpiar posibles wrappers de markdown
+      const clean = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+      parsed = JSON.parse(clean);
+    } catch (e) {
+      await env.DB.prepare(
+        `INSERT INTO wa_chat_analyses (phone, analyzed_at, model_used, prompt_version, msgs_analyzed, msgs_until_ts, raw_response, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(phone, new Date().toISOString(), model, ANALYSIS_PROMPT_VERSION,
+             ctx.msgsCount, ctx.lastMsgTs, text.slice(0, 4000),
+             'JSON parse error: ' + e.message).run();
+      return { ok: false, error: 'JSON parse error', raw: text };
+    }
+
+    // Estimación de costo (precios junio 2026, USD)
+    const ti = j.usage?.input_tokens || 0;
+    const to = j.usage?.output_tokens || 0;
+    const cost = model.includes('opus')
+      ? (ti * 15 + to * 75) / 1000000
+      : (ti * 3 + to * 15) / 1000000;
+
+    // Guardar histórico
+    await env.DB.prepare(
+      `INSERT INTO wa_chat_analyses (phone, analyzed_at, model_used, prompt_version, msgs_analyzed, msgs_until_ts, raw_response, tokens_in, tokens_out, cost_usd_estimated)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(phone, new Date().toISOString(), model, ANALYSIS_PROMPT_VERSION,
+           ctx.msgsCount, ctx.lastMsgTs, JSON.stringify(parsed).slice(0, 4000),
+           ti, to, cost).run();
+
+    // Upsert en wa_conversations (snapshot vigente)
+    const adSrcConfidence = ctx.attribSourceId ? 'high' : (parsed.ad_source_inferred ? 'inferred' : '');
+    const adSrcId = ctx.attribSourceId || '';
+    const adName = ctx.attribAdName || parsed.ad_source_inferred || '';
+    const campaignName = ctx.attribCampaignName || '';
+
+    // Calcular contadores básicos
+    const counts = await env.DB.prepare(
+      `SELECT COUNT(*) AS total, SUM(CASE WHEN direction='inbound' THEN 1 ELSE 0 END) AS inbound,
+              SUM(CASE WHEN direction='outbound' THEN 1 ELSE 0 END) AS outbound,
+              MIN(ts) AS first_ts, MAX(ts) AS last_ts
+       FROM wa_messages WHERE phone = ? AND msg_type != 'reaction'`
+    ).bind(phone).first();
+
+    await env.DB.prepare(
+      `INSERT INTO wa_conversations (
+        phone, first_msg_ts, last_msg_ts, total_msgs, inbound_count, outbound_count,
+        ad_source_id, ad_name, campaign_name, ad_source_confidence,
+        outcome, outcome_reason, product_type, product_details, vertical, customer_profile,
+        intent_signals, objections, key_questions, joaco_approach, what_worked, what_didnt,
+        sentiment_final, next_action, last_analyzed_at, analysis_version, last_model_used,
+        confidence, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(phone) DO UPDATE SET
+        first_msg_ts = excluded.first_msg_ts,
+        last_msg_ts = excluded.last_msg_ts,
+        total_msgs = excluded.total_msgs,
+        inbound_count = excluded.inbound_count,
+        outbound_count = excluded.outbound_count,
+        ad_source_id = excluded.ad_source_id,
+        ad_name = excluded.ad_name,
+        campaign_name = excluded.campaign_name,
+        ad_source_confidence = excluded.ad_source_confidence,
+        outcome = excluded.outcome,
+        outcome_reason = excluded.outcome_reason,
+        product_type = excluded.product_type,
+        product_details = excluded.product_details,
+        vertical = excluded.vertical,
+        customer_profile = excluded.customer_profile,
+        intent_signals = excluded.intent_signals,
+        objections = excluded.objections,
+        key_questions = excluded.key_questions,
+        joaco_approach = excluded.joaco_approach,
+        what_worked = excluded.what_worked,
+        what_didnt = excluded.what_didnt,
+        sentiment_final = excluded.sentiment_final,
+        next_action = excluded.next_action,
+        last_analyzed_at = excluded.last_analyzed_at,
+        analysis_version = excluded.analysis_version,
+        last_model_used = excluded.last_model_used,
+        confidence = excluded.confidence,
+        updated_at = excluded.updated_at`
+    ).bind(
+      phone, counts?.first_ts || '', counts?.last_ts || '', counts?.total || 0,
+      counts?.inbound || 0, counts?.outbound || 0,
+      adSrcId, adName, campaignName, adSrcConfidence,
+      parsed.outcome || '', parsed.outcome_reason || '',
+      parsed.product_type || '', parsed.product_details || '',
+      parsed.vertical || '', parsed.customer_profile || '',
+      JSON.stringify(parsed.intent_signals || []),
+      JSON.stringify(parsed.objections || []),
+      JSON.stringify(parsed.key_questions || []),
+      parsed.joaco_approach || '', parsed.what_worked || '', parsed.what_didnt || '',
+      parsed.sentiment_final || '', parsed.next_action || '',
+      new Date().toISOString(), ANALYSIS_PROMPT_VERSION, model,
+      parsed.confidence || '', new Date().toISOString()
+    ).run();
+
+    return { ok: true, parsed, cost_usd: cost, tokens_in: ti, tokens_out: to, model };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // ===== Meta Lead Ads — webhook helpers =====
 // Fetch del detalle del lead via Graph API. Requiere META_PAGE_ACCESS_TOKEN
 // con permiso leads_retrieval sobre la Page que recibe los leads.
@@ -2477,6 +2720,133 @@ export default {
           return response;
         } catch (e) {
           return json({ chats: [], error: e.message }, 500);
+        }
+      }
+
+      // Análisis individual de un chat con Claude. model=sonnet|opus.
+      // GET para que sea fácil disparar desde browser/curl, idempotente por phone
+      // (cada llamada UPDATE el snapshot vigente + INSERT histórico).
+      if (request.method === 'POST' && path === '/admin/wa/analyze-chat') {
+        let payload;
+        try { payload = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone, model } = payload || {};
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        const res = await analyzeChatWithClaude(env, phone, model === 'opus' ? 'opus' : 'sonnet');
+        return json(res, res.ok ? 200 : 500);
+      }
+
+      // Batch análisis para cron diario. Toma N chats que tengan actividad
+      // posterior al last_analyzed_at (o que nunca se analizaron) y los corre.
+      // Limit default 10 por llamada (~30 seg). Se puede llamar varias veces
+      // para procesar más.
+      if (request.method === 'POST' && path === '/admin/wa/analyze-pending') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '10'), 50);
+        const minMsgs = parseInt(url.searchParams.get('min_msgs') || '3'); // chats con menos de 3 msgs los skipeamos por default
+        const stats = { processed: 0, succeeded: 0, failed: 0, total_cost_usd: 0, results: [] };
+        try {
+          // Estrategia: phones que tienen msgs nuevos desde el último análisis.
+          // Subquery saca last_msg_ts por phone, y comparamos contra last_analyzed_at
+          // de wa_conversations. Si nunca se analizó o si hay msgs nuevos, entra.
+          const rs = await env.DB.prepare(
+            `WITH chat_stats AS (
+               SELECT phone, MAX(ts) AS last_ts, COUNT(*) AS n_msgs
+               FROM wa_messages WHERE msg_type != 'reaction'
+               GROUP BY phone
+               HAVING n_msgs >= ?
+             )
+             SELECT cs.phone FROM chat_stats cs
+             LEFT JOIN wa_conversations c ON c.phone = cs.phone
+             WHERE c.last_analyzed_at IS NULL OR c.last_analyzed_at < cs.last_ts
+                OR c.analysis_version < ?
+             ORDER BY cs.last_ts DESC
+             LIMIT ?`
+          ).bind(minMsgs, ANALYSIS_PROMPT_VERSION, limit).all();
+          const phones = (rs.results || []).map(r => r.phone);
+          for (const phone of phones) {
+            stats.processed++;
+            const r = await analyzeChatWithClaude(env, phone, 'sonnet');
+            if (r.ok) {
+              stats.succeeded++;
+              stats.total_cost_usd += r.cost_usd || 0;
+            } else {
+              stats.failed++;
+            }
+            stats.results.push({ phone, ok: r.ok, error: r.error });
+          }
+          return json({ ok: true, stats });
+        } catch (e) {
+          return json({ error: e.message, stats }, 500);
+        }
+      }
+
+      // Listado/resumen de conversaciones ya analizadas. Filtros básicos para
+      // explorar insights desde el dashboard sin tener que hacer SQL.
+      if (request.method === 'GET' && path === '/admin/wa/conversations') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 500);
+        const outcome = url.searchParams.get('outcome') || '';
+        const productType = url.searchParams.get('product_type') || '';
+        const adName = url.searchParams.get('ad_name') || '';
+        let sql = `SELECT phone, first_msg_ts, last_msg_ts, total_msgs, ad_name, campaign_name,
+                          outcome, outcome_reason, product_type, product_details, vertical,
+                          sentiment_final, confidence, last_analyzed_at, last_model_used
+                   FROM wa_conversations WHERE 1=1`;
+        const params = [];
+        if (outcome) { sql += ' AND outcome = ?'; params.push(outcome); }
+        if (productType) { sql += ' AND product_type = ?'; params.push(productType); }
+        if (adName) { sql += ' AND ad_name = ?'; params.push(adName); }
+        sql += ' ORDER BY last_msg_ts DESC LIMIT ?';
+        params.push(limit);
+        try {
+          const rs = await env.DB.prepare(sql).bind(...params).all();
+          return json({ conversations: rs.results || [] });
+        } catch (e) {
+          return json({ conversations: [], error: e.message }, 500);
+        }
+      }
+
+      // Backfill de transcripción de audios históricos. Toma N audios con media
+      // en R2 pero sin transcripción (body vacío o solo placeholder '[audio]')
+      // y los procesa via Workers AI whisper-large-v3-turbo. Workers tiene
+      // límite de ~30s por request, por eso default limit=15 (cada audio tarda
+      // 1-3 seg). Idempotente: si se vuelve a llamar, sigue donde dejó.
+      if (request.method === 'POST' && path === '/admin/wa/transcribe-backfill') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '15'), 50);
+        const stats = { processed: 0, transcribed: 0, failed: 0, no_media: 0 };
+        try {
+          const rs = await env.DB.prepare(
+            `SELECT id, media_url FROM wa_messages
+             WHERE msg_type='audio'
+               AND media_url LIKE 'wa/%'
+               AND (body = '' OR body = '[audio]' OR body IS NULL OR length(body) < 10)
+             ORDER BY ts DESC
+             LIMIT ?`
+          ).bind(limit).all();
+          const rows = rs.results || [];
+          for (const r of rows) {
+            stats.processed++;
+            try {
+              const transcript = await transcribeAudio(env, r.media_url);
+              if (transcript && transcript.trim().length > 0) {
+                await env.DB.prepare('UPDATE wa_messages SET body = ? WHERE id = ?').bind(
+                  '[audio] ' + transcript, r.id
+                ).run();
+                stats.transcribed++;
+              } else {
+                stats.no_media++;
+              }
+            } catch (e) {
+              stats.failed++;
+            }
+          }
+          // Cuántos quedan pendientes para que el caller decida si seguir.
+          const remaining = await env.DB.prepare(
+            `SELECT COUNT(*) AS n FROM wa_messages
+             WHERE msg_type='audio' AND media_url LIKE 'wa/%'
+             AND (body = '' OR body = '[audio]' OR body IS NULL OR length(body) < 10)`
+          ).first();
+          return json({ ok: true, stats, remaining: remaining?.n || 0 });
+        } catch (e) {
+          return json({ error: e.message, stats }, 500);
         }
       }
 
