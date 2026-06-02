@@ -2574,32 +2574,46 @@ table.t td.cliente { font-weight: 600; }
   overflow-y: auto;
 }
 
-/* Chip de etiqueta dentro del dropdown — usa --lc del color de la label. */
-.label-filter-chip {
-  padding: 6px 12px;
-  border-radius: 14px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: .02em;
-  border: 1px solid color-mix(in srgb, var(--lc) 45%, transparent);
-  color: var(--lc);
-  background: color-mix(in srgb, var(--lc) 10%, transparent);
+/* Item de etiqueta dentro del dropdown — fila vertical estilo WhatsApp Web:
+   cuadradito de color + nombre + check si está activa. */
+.label-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: transparent;
+  border: 0;
+  color: #e9edef;
+  font-size: 14px;
+  font-weight: 400;
   cursor: pointer;
-  transition: all .15s;
-  font-family: 'Segoe UI', system-ui, sans-serif;
-  white-space: nowrap;
-  line-height: 1;
+  border-radius: 6px;
+  width: 100%;
   text-align: left;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  transition: background .12s;
+  line-height: 1.2;
 }
-.label-filter-chip:hover {
-  background: color-mix(in srgb, var(--lc) 22%, transparent);
-  border-color: var(--lc);
+.label-filter-item:hover { background: rgba(255, 255, 255, .04); }
+.label-filter-item.active { background: rgba(0, 168, 132, .12); }
+.label-filter-item-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  display: inline-block;
 }
-.label-filter-chip.active {
-  background: var(--lc);
-  color: #fff;
-  border-color: var(--lc);
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--lc) 35%, transparent);
+.label-filter-item-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.label-filter-item-check {
+  color: #00a884;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-left: 6px;
 }
 
 .label-filter-clear {
@@ -3875,7 +3889,6 @@ table.t td.cliente { font-weight: 600; }
     scrollbar-width: none;
   }
   .label-filter-bar::-webkit-scrollbar { display: none; }
-  .label-filter-chip { flex-shrink: 0; padding: 6px 12px; font-size: 13px; }
 }
 
 @media (max-width: 480px) {

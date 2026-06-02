@@ -5540,7 +5540,11 @@ function renderLabelFilterBar() {
         <div class="label-filter-dd-menu" id="label-filter-dd-menu" style="display:${chatState.labelDropdownOpen ? 'block' : 'none'}">
           ${chatState.labels.map(l => {
             const active = chatState.filterLabels.includes(l.id);
-            return `<button class="label-filter-chip${active ? ' active' : ''}" data-label-id="${l.id}" style="--lc:${l.color}">${escapeHtml(l.name)}</button>`;
+            return `<button class="label-filter-item${active ? ' active' : ''}" data-label-id="${l.id}">
+              <span class="label-filter-item-dot" style="background:${l.color}"></span>
+              <span class="label-filter-item-name">${escapeHtml(l.name)}</span>
+              ${active ? '<span class="label-filter-item-check">✓</span>' : ''}
+            </button>`;
           }).join('')}
           ${labelsCount ? `<button class="label-filter-clear" id="clear-label-filter">Limpiar etiquetas</button>` : ''}
         </div>
@@ -7477,7 +7481,7 @@ function bindChat() {
     }
   }
   // Items del dropdown (toggle de cada etiqueta) — quedan adentro del menu.
-  document.querySelectorAll('#label-filter-dd-menu .label-filter-chip').forEach(btn => {
+  document.querySelectorAll('#label-filter-dd-menu .label-filter-item').forEach(btn => {
     btn.onclick = (e) => {
       e.stopPropagation(); // no cerrar el dropdown al tildar
       const id = parseInt(btn.dataset.labelId);
