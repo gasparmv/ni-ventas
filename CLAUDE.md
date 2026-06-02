@@ -61,3 +61,7 @@ Si vas a editar un archivo que también modificó un commit reciente del remoto,
 - Fechas en hora local Argentina, no UTC. Helper `localDateKey()` en `app.js`.
 - `wa_messages` tabla central (D1). Direction inbound/outbound, dedup por `wamid`.
 - `msg_type='status'` con body vacío = mensaje saliente desde WA Business app (placeholder).
+
+## Scraper de WA Web (archivado)
+
+Antes del 31-may existía `scripts/` con scrapers basados en `whatsapp-web.js` para sincronizar historiales cuando la API no estaba activa (`scrape-wa-delta.js`, `scrape-wa-history.js`, `scrape-wa-deep.js`, `scrape-wa-labels.js`, `scrape-wa-live.js`). Se archivaron en el commit `a2c53b9` y se borraron del working tree. Si la API de 360dialog cae o Joaco se olvida de abrir la app cada 13 días y se rompe la coexistencia, se recupera con `git show a2c53b9` o `git restore --source=a2c53b9 -- scripts/`. Los endpoints del worker que consumían (`/admin/wa/import-bulk`, `/admin/wa/media-upload`, `/admin/wa/wamids-list`, `/admin/wa/contacts-bulk`, `/admin/wa/labels-bulk`) siguen activos.

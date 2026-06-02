@@ -4674,7 +4674,7 @@ async function deleteQuickReply(id) {
   chatState.quickReplies = chatState.quickReplies.filter(q => q.id !== id);
 }
 
-// ===== WA Contact Names (sincronizados desde la agenda del 6573 vía scraper) =====
+// ===== WA Contact Names (snapshot histórico, sincronizado en su momento desde la agenda del 6573) =====
 async function loadWaContactNames() {
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/contacts', { headers: authHeaders() });
