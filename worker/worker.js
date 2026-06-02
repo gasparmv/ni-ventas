@@ -396,6 +396,178 @@ async function waSendTemplate(env, to, name, lang = 'es', params = []) {
   });
 }
 
+// ===== Meta Lead Ads — webhook helpers =====
+// Fetch del detalle del lead via Graph API. Requiere META_PAGE_ACCESS_TOKEN
+// con permiso leads_retrieval sobre la Page que recibe los leads.
+async function fetchLeadDetails(env, leadgenId) {
+  if (!env.META_PAGE_ACCESS_TOKEN || !leadgenId) return null;
+  try {
+    const fields = 'field_data,created_time,form_id,ad_id,adset_id,campaign_id';
+    const r = await fetch(
+      `https://graph.facebook.com/v21.0/${encodeURIComponent(leadgenId)}?fields=${fields}&access_token=${encodeURIComponent(env.META_PAGE_ACCESS_TOKEN)}`
+    );
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (_) { return null; }
+}
+
+// Mapea form_name + ad_name a una "vertical" para usar como {{2}} en el template.
+// Los nombres de los forms B2B son del estilo "b2b - carteles-copy" o "b2b - Reventa";
+// los ads agregan más contexto ("Franquicias - resolver - B2B - ..."). Tomamos lo
+// que aporte más info.
+function inferLeadVertical(formName, adName) {
+  const text = ((formName || '') + ' ' + (adName || '')).toLowerCase();
+  if (text.includes('franquicia')) return 'franquicias';
+  if (text.includes('reventa')) return 'reventa';
+  if (text.includes('terceriza')) return 'producir tu marca';
+  if (text.includes('evento')) return 'eventos';
+  if (text.includes('arquitecto')) return 'arquitectos';
+  if (text.includes('pop'))       return 'POP';
+  if (text.includes('cartel'))    return 'tu cartel';
+  return 'tu negocio';
+}
+
+// Extrae los valores típicos del field_data del lead. Meta usa slugs estándar
+// (full_name, email, phone_number) pero los custom forms pueden agregar campos
+// con otros nombres en español.
+function extractLeadFields(fieldData) {
+  const out = {};
+  for (const fd of (fieldData || [])) {
+    const k = (fd.name || '').toLowerCase().trim();
+    const v = (fd.values || [])[0] || '';
+    out[k] = v;
+  }
+  const phone = out['phone_number'] || out['telefono'] || out['teléfono'] || out['phone'] || out['celular'] || '';
+  const fullName = out['full_name'] || out['nombre_completo'] || out['nombre completo'] || out['name'] || out['nombre'] || '';
+  const firstName = (out['first_name'] || fullName).split(/\s+/)[0] || '';
+  const email = out['email'] || out['correo'] || '';
+  return { phone, firstName, fullName, email, allFields: out };
+}
+
+// Procesa un payload webhook de leadgen. Por cada change.field='leadgen':
+//   1) dedup por leadgen_id en wa_leads (evita doble proceso si Meta reintenta).
+//   2) fetch detalle del lead via Graph API.
+//   3) extrae teléfono/nombre/email.
+//   4) inserta en wa_leads.
+//   5) si hay teléfono válido, manda el template lead_b2b_followup.
+//   6) guarda el msg saliente en wa_messages para que aparezca en el CRM.
+async function processLeadgenWebhook(env, body) {
+  const entries = body?.entry || [];
+  for (const entry of entries) {
+    const changes = entry?.changes || [];
+    for (const change of changes) {
+      if (change?.field !== 'leadgen') continue;
+      const value = change?.value || {};
+      const leadgenId = value.leadgen_id;
+      if (!leadgenId) continue;
+
+      // Dedup: si ya está procesado, skip silenciosamente.
+      try {
+        const existing = await env.DB.prepare('SELECT id FROM wa_leads WHERE leadgen_id = ?').bind(leadgenId).first();
+        if (existing) continue;
+      } catch (_) {}
+
+      const detail = await fetchLeadDetails(env, leadgenId);
+      const tsIso = value.created_time
+        ? new Date(parseInt(value.created_time) * 1000).toISOString()
+        : (detail?.created_time || new Date().toISOString());
+
+      if (!detail) {
+        // Guardamos placeholder para que el lead no se pierda. Se puede reintentar
+        // luego con un SELECT WHERE process_error IS NOT EMPTY.
+        try {
+          await env.DB.prepare(
+            `INSERT INTO wa_leads (leadgen_id, ts, received_at, page_id, form_id, ad_id, adset_id, campaign_id, process_error)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            leadgenId, tsIso, new Date().toISOString(),
+            value.page_id || '', value.form_id || '', value.ad_id || '',
+            value.adset_id || '', value.campaign_id || '',
+            'failed to fetch lead detail from Graph API (token/permiso?)'
+          ).run();
+        } catch (_) {}
+        continue;
+      }
+
+      const { phone: phoneRaw, firstName, fullName, email, allFields } = extractLeadFields(detail.field_data);
+      const phoneNorm = normalizeArPhone(phoneRaw) || '';
+      const formId = detail.form_id || value.form_id || '';
+      const adId = detail.ad_id || value.ad_id || '';
+      const adsetId = detail.adset_id || value.adset_id || '';
+      const campaignId = detail.campaign_id || value.campaign_id || '';
+      const vertical = inferLeadVertical('', '');  // se mejora abajo
+
+      // Estrategia para "vertical": si tenemos form_name lo usamos. Si no, ad name
+      // requeriría otro Graph API call. Por ahora usamos heurística simple por
+      // form_id si lo tenemos. En una siguiente versión podemos cachear form_name
+      // por form_id en una tabla aparte.
+      const verticalUsed = inferLeadVertical(allFields['__form_name__'] || '', adId ? `ad_${adId}` : '');
+
+      try {
+        await env.DB.prepare(
+          `INSERT INTO wa_leads
+           (leadgen_id, ts, received_at, page_id, form_id, form_name, ad_id, adset_id, campaign_id,
+            phone, phone_raw, first_name, full_name, email, vertical, raw_lead_data, template_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          leadgenId, tsIso, new Date().toISOString(),
+          value.page_id || '', formId, '',
+          adId, adsetId, campaignId,
+          phoneNorm, phoneRaw, firstName, fullName, email,
+          verticalUsed,
+          JSON.stringify(detail.field_data || []).slice(0, 4000),
+          phoneNorm ? 'pending' : 'skipped'
+        ).run();
+      } catch (e) {
+        // INSERT podría fallar por race condition (otro tick procesando mismo lead).
+        // Si UNIQUE constraint falla, dejamos pasar.
+        continue;
+      }
+
+      // Sin teléfono válido → no podemos mandar template, marcamos skipped.
+      if (!phoneNorm) {
+        try {
+          await env.DB.prepare('UPDATE wa_leads SET template_error = ? WHERE leadgen_id = ?').bind(
+            'telefono invalido o vacio: ' + phoneRaw, leadgenId
+          ).run();
+        } catch (_) {}
+        continue;
+      }
+
+      // Mandar template lead_b2b_followup con (firstName, vertical).
+      const tplResult = await waSendTemplate(env, phoneNorm, 'lead_b2b_followup', 'es', [
+        firstName || 'amigo/a',
+        verticalUsed || 'tu negocio'
+      ]);
+
+      if (tplResult?.ok) {
+        const wamid = tplResult.data?.messages?.[0]?.id || '';
+        try {
+          await env.DB.prepare(
+            'UPDATE wa_leads SET template_status = ?, template_sent_at = ?, wamid = ? WHERE leadgen_id = ?'
+          ).bind('sent', new Date().toISOString(), wamid, leadgenId).run();
+        } catch (_) {}
+
+        // Guardar el outbound en wa_messages para que aparezca en el CRM como
+        // primer mensaje de la conversación. El body es un preview legible.
+        try {
+          const previewBody = `Hola ${firstName || 'amigo/a'} 👋\n\nSoy Joaco de Neon Infinito. Vi que dejaste tus datos en nuestra publicidad — gracias por interesarte.\n\nHacemos carteles de neón LED para ${verticalUsed} con calidad premium y entrega en todo el país.\n\n¿Querés que te cuente cómo trabajamos y armemos algo juntos?`;
+          await env.DB.prepare(
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')`
+          ).bind(new Date().toISOString(), wamid, phoneNorm, previewBody).run();
+        } catch (_) {}
+      } else {
+        try {
+          await env.DB.prepare(
+            'UPDATE wa_leads SET template_status = ?, template_error = ? WHERE leadgen_id = ?'
+          ).bind('failed', JSON.stringify(tplResult || {}).slice(0, 500), leadgenId).run();
+        } catch (_) {}
+      }
+    }
+  }
+}
+
 // ===== Media download (WhatsApp → R2, vía Meta o 360dialog) =====
 async function downloadMedia(env, mediaId) {
   if (!mediaId || !env.MEDIA) return null;
@@ -1113,6 +1285,36 @@ export default {
 
     // ----- Health -----
     if (request.method === 'GET' && path === '/health') return json({ ok: true });
+
+    // ===== Meta Lead Ads Webhook (separado del de WhatsApp) =====
+    // Se suscribe en la Meta App "agente neon nuevo" (866678322681866) al campo
+    // `leadgen` de la Page que recibe los leads (100517509701851).
+    // Secretos requeridos:
+    //   LEADGEN_VERIFY_TOKEN     — string random; Meta lo verifica al suscribir
+    //   META_PAGE_ACCESS_TOKEN   — token de la Page con permiso leads_retrieval
+    if (request.method === 'GET' && path === '/webhook/leads') {
+      const mode = url.searchParams.get('hub.mode');
+      const token = url.searchParams.get('hub.verify_token');
+      const challenge = url.searchParams.get('hub.challenge');
+      if (mode === 'subscribe' && token === env.LEADGEN_VERIFY_TOKEN && challenge) {
+        return new Response(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+      }
+      return new Response('Forbidden', { status: 403 });
+    }
+    if (request.method === 'POST' && path === '/webhook/leads') {
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: true }); }
+      // Log raw payload para debug temporal (luego se puede sacar).
+      try {
+        await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(
+          new Date().toISOString(), 'LEADS: ' + JSON.stringify(body).slice(0, 4000)
+        ).run();
+      } catch (_) {}
+      // Responder 200 inmediato a Meta. El procesamiento (fetch detalle + enviar
+      // template) va en waitUntil para no bloquear la respuesta del webhook.
+      ctx.waitUntil(processLeadgenWebhook(env, body));
+      return json({ ok: true });
+    }
 
     // ----- WhatsApp Webhook (verificación + recepción de mensajes) -----
     if (request.method === 'GET' && path === '/webhook') {
@@ -2122,6 +2324,53 @@ export default {
           return response;
         } catch (e) {
           return json({ chats: [], error: e.message }, 500);
+        }
+      }
+
+      // Listado de leads procesados desde Meta Lead Ads + status del template.
+      // Útil para monitorear el flujo en tiempo real y debug.
+      if (request.method === 'GET' && path === '/admin/wa/leads') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 500);
+        const status = url.searchParams.get('status') || ''; // pending|sent|failed|skipped
+        let sql = 'SELECT id, leadgen_id, ts, received_at, page_id, form_id, ad_id, phone, first_name, full_name, email, vertical, template_status, template_sent_at, template_error, wamid, process_error FROM wa_leads';
+        const params = [];
+        if (status) { sql += ' WHERE template_status = ?'; params.push(status); }
+        sql += ' ORDER BY ts DESC LIMIT ?';
+        params.push(limit);
+        try {
+          const rs = await env.DB.prepare(sql).bind(...params).all();
+          return json({ leads: rs.results || [] });
+        } catch (e) {
+          return json({ leads: [], error: e.message }, 500);
+        }
+      }
+
+      // Reintentar enviar template para un lead que falló. Útil cuando el template
+      // estaba pendiente de aprobación al momento del lead, o falló la API.
+      if (request.method === 'POST' && path.startsWith('/admin/wa/leads/') && path.endsWith('/retry')) {
+        const leadgenId = path.slice('/admin/wa/leads/'.length, -('/retry'.length));
+        try {
+          const row = await env.DB.prepare('SELECT * FROM wa_leads WHERE leadgen_id = ?').bind(leadgenId).first();
+          if (!row) return json({ error: 'lead not found' }, 404);
+          if (!row.phone) return json({ error: 'lead has no valid phone' }, 400);
+          const tplResult = await waSendTemplate(env, row.phone, 'lead_b2b_followup', 'es', [
+            row.first_name || 'amigo/a',
+            row.vertical || 'tu negocio'
+          ]);
+          if (tplResult?.ok) {
+            const wamid = tplResult.data?.messages?.[0]?.id || '';
+            await env.DB.prepare(
+              'UPDATE wa_leads SET template_status = ?, template_sent_at = ?, wamid = ?, template_error = ? WHERE leadgen_id = ?'
+            ).bind('sent', new Date().toISOString(), wamid, '', leadgenId).run();
+            return json({ ok: true, wamid });
+          } else {
+            await env.DB.prepare(
+              'UPDATE wa_leads SET template_status = ?, template_error = ? WHERE leadgen_id = ?'
+            ).bind('failed', JSON.stringify(tplResult).slice(0, 500), leadgenId).run();
+            return json({ ok: false, error: tplResult }, 500);
+          }
+        } catch (e) {
+          return json({ error: e.message }, 500);
         }
       }
 
