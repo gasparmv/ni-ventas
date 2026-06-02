@@ -4,6 +4,57 @@
  * Routing: hash-based (#dashboard, #pedidos, etc.)
  */
 
+// ===== DEBUG LAG INSTRUMENTATION (opt-in: localStorage.debugLag='1') =====
+// Pegado para diagnosticar el lag al tipear en el chat. Se activa con:
+//   localStorage.setItem('debugLag','1'); location.reload();
+// Y se desactiva con:
+//   localStorage.removeItem('debugLag'); location.reload();
+// Loguea:
+//   - Long tasks (>50ms que bloquean main thread) con info de si tipeás.
+//   - Lag entre keydown y siguiente paint (>30ms es feo).
+// REMOVER después de diagnosticar.
+const _LAG_DEBUG = (() => {
+  try { return localStorage.getItem('debugLag') === '1'; } catch (_) { return false; }
+})();
+if (_LAG_DEBUG) {
+  console.warn('[LAG] Debug activado. Tipeá en un chat y mirá los warnings acá.');
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        const active = document.activeElement;
+        const isInput = active && (active.id === 'chat-input' || active.tagName === 'TEXTAREA' || active.tagName === 'INPUT');
+        const ctx = isInput ? ' (mientras tipeás en ' + (active.id || active.tagName) + ')' : '';
+        // entry.attribution[0] suele decir qué container/script causó la tarea
+        const attr = (e.attribution && e.attribution[0]) || null;
+        const src = attr ? ` [${attr.containerType || ''}${attr.containerName ? ':' + attr.containerName : ''}]` : '';
+        console.warn(`[LAG] LONG TASK: ${e.duration.toFixed(0)}ms${ctx}${src}`);
+      }
+    }).observe({ entryTypes: ['longtask'] });
+  } catch (e) {
+    console.warn('[LAG] PerformanceObserver longtask no soportado:', e.message);
+  }
+  // Mide el delay entre la tecla y el siguiente paint del browser.
+  // Si esto es alto, hay algo en el main thread bloqueando el repaint.
+  document.addEventListener('keydown', (ev) => {
+    if (!ev.target || (ev.target.id !== 'chat-input' && ev.target.tagName !== 'TEXTAREA')) return;
+    const t = performance.now();
+    requestAnimationFrame(() => {
+      const lag = performance.now() - t;
+      if (lag > 30) console.warn(`[LAG] KEY → PAINT: ${lag.toFixed(0)}ms · key="${ev.key}" · target=${ev.target.id || ev.target.tagName}`);
+    });
+  }, true);
+}
+// Helper para medir bloques específicos. Si _LAG_DEBUG está off, no hace nada.
+function _lagMeasure(name, fn) {
+  if (!_LAG_DEBUG) return fn();
+  const t0 = performance.now();
+  try { return fn(); }
+  finally {
+    const dt = performance.now() - t0;
+    if (dt > 8) console.warn(`[LAG] ${name}: ${dt.toFixed(1)}ms`);
+  }
+}
+
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
   defaultUsers: ['Gaspar', 'Joaquín', 'Diseñador'],
@@ -7089,10 +7140,15 @@ function bindChatConversation() {
 
   if (ta) {
     ta.addEventListener('input', () => {
+      const _t0 = _LAG_DEBUG ? performance.now() : 0;
       ta.style.height = 'auto';
       ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
       // Quick replies dropdown
       handleQuickReplyInput(ta);
+      if (_LAG_DEBUG) {
+        const dt = performance.now() - _t0;
+        if (dt > 4) console.warn(`[LAG] textarea input handler: ${dt.toFixed(1)}ms`);
+      }
     });
     ta.addEventListener('keydown', (e) => {
       // Handle QR dropdown navigation
@@ -7440,18 +7496,23 @@ function bindChat() {
     const prevLastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
     const prevTotalUnread = chatState.totalUnread || 0;
     const prevContactsByPhone = new Map(chatState.contacts.map(c => [c.phone, c]));
+    const _fetchT0 = _LAG_DEBUG ? performance.now() : 0;
     await Promise.all([
       loadChatContacts(),
       phone ? loadChatMessages(phone) : Promise.resolve()
     ]);
+    if (_LAG_DEBUG) {
+      const dt = performance.now() - _fetchT0;
+      if (dt > 50) console.warn(`[LAG] tickPoll fetches: ${dt.toFixed(0)}ms (red, no main-thread block)`);
+    }
     if (STATE.view !== 'chat' || chatState.selectedPhone !== phone) return;
-    refreshContactList();
+    _lagMeasure('refreshContactList', () => refreshContactList());
     const newLastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
     const changed = chatState.messages.length !== prevMsgCount || newLastTs !== prevLastTs;
     if (phone && changed) {
       const msgEl = document.getElementById('chat-messages');
       const wasAtBottom = msgEl && (msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 80);
-      renderChatMessages();
+      _lagMeasure('renderChatMessages (poll)', () => renderChatMessages());
       if (wasAtBottom && msgEl) msgEl.scrollTop = msgEl.scrollHeight;
     }
     updateUnreadBadge();
