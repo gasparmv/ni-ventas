@@ -4552,6 +4552,8 @@ const chatState = {
   contactLabels: {},  // phone → [label_id, ...]
   labelsLoaded: false,
   filterLabels: [],   // active label filters (array of label_ids)
+  filterUnreadOnly: false, // chip "No leídos" del top — muestra solo chats con unread > 0
+  labelDropdownOpen: false, // dropdown de etiquetas (estilo WA Web)
   recording: false,
   mediaRecorder: null,
   audioChunks: [],
@@ -5521,13 +5523,29 @@ function renderContactLabelChips(phone) {
 }
 
 function renderLabelFilterBar() {
-  if (!chatState.labels.length) return '';
+  // Diseño tipo WhatsApp Web: chips fijos Todos / No leídos + dropdown
+  // "Etiquetas ▾" que abre el listado de etiquetas custom. Mucho más compacto
+  // que la lista vertical anterior, especialmente en desktop.
+  const noFilters = !chatState.filterLabels.length && !chatState.filterUnreadOnly;
+  const labelsCount = chatState.filterLabels.length;
   return `<div class="label-filter-bar" id="label-filter-bar">
-    ${chatState.labels.map(l => {
-      const active = chatState.filterLabels.includes(l.id);
-      return `<button class="label-filter-chip${active ? ' active' : ''}" data-label-id="${l.id}" style="--lc:${l.color}">${escapeHtml(l.name)}</button>`;
-    }).join('')}
-    ${chatState.filterLabels.length ? `<button class="label-filter-clear" id="clear-label-filter">Limpiar</button>` : ''}
+    <button class="label-filter-pill${noFilters ? ' active' : ''}" data-filter-fixed="all">Todos</button>
+    <button class="label-filter-pill${chatState.filterUnreadOnly ? ' active' : ''}" data-filter-fixed="unread">No leídos</button>
+    ${chatState.labels.length ? `
+      <div class="label-filter-dd-wrap">
+        <button class="label-filter-pill label-filter-dd-btn${labelsCount ? ' active' : ''}" id="label-filter-dd-btn" aria-expanded="${chatState.labelDropdownOpen ? 'true' : 'false'}">
+          Etiquetas${labelsCount ? ` (${labelsCount})` : ''}
+          <span class="label-filter-dd-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="label-filter-dd-menu" id="label-filter-dd-menu" style="display:${chatState.labelDropdownOpen ? 'block' : 'none'}">
+          ${chatState.labels.map(l => {
+            const active = chatState.filterLabels.includes(l.id);
+            return `<button class="label-filter-chip${active ? ' active' : ''}" data-label-id="${l.id}" style="--lc:${l.color}">${escapeHtml(l.name)}</button>`;
+          }).join('')}
+          ${labelsCount ? `<button class="label-filter-clear" id="clear-label-filter">Limpiar etiquetas</button>` : ''}
+        </div>
+      </div>
+    ` : ''}
   </div>`;
 }
 
@@ -5565,6 +5583,10 @@ function renderChat() {
       (c.name || '').toLowerCase().includes(search) ||
       c.phone.includes(search) ||
       (c.lastMsg || '').toLowerCase().includes(search));
+  }
+  // Filter por "No leídos" (chip fijo del top de la barra).
+  if (chatState.filterUnreadOnly) {
+    filtered = filtered.filter(c => (c.unread || 0) > 0);
   }
   // Filter by labels
   if (chatState.filterLabels.length) {
@@ -7420,9 +7442,34 @@ function bindChat() {
       syncIcons();
     };
   }
-  // Label filter chips
-  document.querySelectorAll('.label-filter-chip').forEach(btn => {
+  // Chips fijos (Todos, No leídos) — estilo WhatsApp Web.
+  document.querySelectorAll('[data-filter-fixed]').forEach(btn => {
     btn.onclick = () => {
+      const kind = btn.dataset.filterFixed;
+      if (kind === 'all') {
+        // Limpia TODO: unread + labels + cierra dropdown.
+        chatState.filterUnreadOnly = false;
+        chatState.filterLabels = [];
+        chatState.labelDropdownOpen = false;
+      } else if (kind === 'unread') {
+        chatState.filterUnreadOnly = !chatState.filterUnreadOnly;
+      }
+      render();
+    };
+  });
+  // Dropdown "Etiquetas ▾".
+  const ddBtn = document.getElementById('label-filter-dd-btn');
+  if (ddBtn) {
+    ddBtn.onclick = (e) => {
+      e.stopPropagation();
+      chatState.labelDropdownOpen = !chatState.labelDropdownOpen;
+      render();
+    };
+  }
+  // Items del dropdown (toggle de cada etiqueta) — quedan adentro del menu.
+  document.querySelectorAll('#label-filter-dd-menu .label-filter-chip').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation(); // no cerrar el dropdown al tildar
       const id = parseInt(btn.dataset.labelId);
       if (chatState.filterLabels.includes(id)) {
         chatState.filterLabels = chatState.filterLabels.filter(l => l !== id);
@@ -7432,8 +7479,27 @@ function bindChat() {
       render();
     };
   });
+  // Click afuera del dropdown lo cierra.
+  if (chatState.labelDropdownOpen && !chatState._ddOutsideBound) {
+    chatState._ddOutsideBound = true;
+    setTimeout(() => {
+      const handler = (ev) => {
+        if (!ev.target.closest('.label-filter-dd-wrap')) {
+          chatState.labelDropdownOpen = false;
+          chatState._ddOutsideBound = false;
+          document.removeEventListener('click', handler);
+          render();
+        }
+      };
+      document.addEventListener('click', handler);
+    }, 0);
+  }
   const clearFilter = document.getElementById('clear-label-filter');
-  if (clearFilter) clearFilter.onclick = () => { chatState.filterLabels = []; render(); };
+  if (clearFilter) clearFilter.onclick = (e) => {
+    e.stopPropagation();
+    chatState.filterLabels = [];
+    render();
+  };
   // Manage labels button
   const manageLabelsBtn = document.getElementById('btn-manage-labels');
   if (manageLabelsBtn) manageLabelsBtn.onclick = () => showManageLabelsModal();
@@ -7700,6 +7766,7 @@ function refreshContactList() {
   }
   // Filtrado local rápido
   if (search) filtered = filtered.filter(c => (c.name || '').toLowerCase().includes(search) || c.phone.includes(search) || (c.lastMsg || '').toLowerCase().includes(search));
+  if (chatState.filterUnreadOnly) filtered = filtered.filter(c => (c.unread || 0) > 0);
   if (chatState.filterLabels.length) filtered = filtered.filter(c => { const cl = chatState.contactLabels[c.phone] || []; return chatState.filterLabels.every(lid => cl.includes(lid)); });
 
   // Si hay búsqueda activa, agregar contactos del backend que no están ya

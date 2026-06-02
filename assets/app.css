@@ -2497,21 +2497,86 @@ table.t td.cliente { font-weight: 600; }
 .chat-header .chat-label-chips { padding: 0; margin-top: 2px; }
 .chat-contact-bottom .label-chip { padding: 1px 6px; font-size: 9px; line-height: 14px; }
 
-/* Label filter bar */
+/* ============================================================
+   Label filter bar — diseño tipo WhatsApp Web
+   ============================================================
+   Una sola fila compacta con chips fijos (Todos, No leídos) +
+   un dropdown "Etiquetas ▾" que abre el listado de etiquetas
+   custom. Reemplaza al diseño anterior que renderizaba TODAS
+   las etiquetas como pills inline, lo cual ocupaba 2-4 filas
+   verticales en desktop. */
 .label-filter-bar {
   display: flex;
   gap: 8px;
-  padding: 10px 12px;
-  flex-wrap: wrap;
+  padding: 8px 12px;
+  align-items: center;
   flex-shrink: 0;
   background: #111b21;
   border-bottom: 1px solid #222d34;
-  max-height: 140px;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: visible; /* el dropdown sale hacia abajo */
+  scrollbar-width: none;
+}
+.label-filter-bar::-webkit-scrollbar { display: none; }
+
+/* Chip fijo gris (Todos / No leídos) — color uniforme estilo WA Web. */
+.label-filter-pill {
+  padding: 6px 14px;
+  border-radius: 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 0;
+  color: #aebac1;
+  background: rgba(134, 150, 160, .12);
+  cursor: pointer;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  white-space: nowrap;
+  line-height: 1;
+  transition: background .12s, color .12s;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.label-filter-pill:hover { background: rgba(134, 150, 160, .2); color: #e9edef; }
+.label-filter-pill.active {
+  background: rgba(0, 168, 132, .18);
+  color: #00d9a3;
+}
+
+/* Dropdown "Etiquetas ▾" — pill con caret. */
+.label-filter-dd-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.label-filter-dd-caret {
+  font-size: 10px;
+  opacity: .7;
+  margin-left: 2px;
+}
+.label-filter-dd-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  background: #233138;
+  border: 1px solid #2a3942;
+  border-radius: 8px;
+  padding: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+  max-height: 360px;
   overflow-y: auto;
 }
+
+/* Chip de etiqueta dentro del dropdown — usa --lc del color de la label. */
 .label-filter-chip {
-  padding: 6px 14px;
-  border-radius: 18px;
+  padding: 6px 12px;
+  border-radius: 14px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: .02em;
@@ -2523,11 +2588,11 @@ table.t td.cliente { font-weight: 600; }
   font-family: 'Segoe UI', system-ui, sans-serif;
   white-space: nowrap;
   line-height: 1;
+  text-align: left;
 }
 .label-filter-chip:hover {
   background: color-mix(in srgb, var(--lc) 22%, transparent);
   border-color: var(--lc);
-  transform: translateY(-1px);
 }
 .label-filter-chip.active {
   background: var(--lc);
@@ -2535,15 +2600,18 @@ table.t td.cliente { font-weight: 600; }
   border-color: var(--lc);
   box-shadow: 0 2px 8px color-mix(in srgb, var(--lc) 35%, transparent);
 }
+
 .label-filter-clear {
   padding: 4px 12px;
-  border-radius: 16px;
-  font-size: 12px;
+  border-radius: 12px;
+  font-size: 11px;
   border: 1px solid #3b4a54;
   color: #8696a0;
   background: transparent;
   cursor: pointer;
   font-family: 'Segoe UI', system-ui, sans-serif;
+  margin-top: 4px;
+  text-align: center;
 }
 .label-filter-clear:hover { background: #2a3942; color: #e9edef; }
 
