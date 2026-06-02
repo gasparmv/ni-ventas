@@ -3748,15 +3748,42 @@ table.t td.cliente { font-weight: 600; }
   /* === SCROLL TO BOTTOM FAB === */
   .chat-scroll-down { bottom: 80px; right: 12px; }
 
-  /* === LISTA DE CHATS: ajustar gaps === */
-  .chat-contact { padding: 10px 12px; gap: 10px; }
-  .chat-contact-name { font-size: 14px; }
-  .chat-contact-preview { font-size: 12px; }
+  /* === LISTA DE CHATS estilo WhatsApp: items más grandes, tipografía más clara === */
+  .chat-contact { padding: 0 14px; gap: 12px; height: 78px; }
+  .chat-contact-info { padding: 14px 0; }
+  .chat-contact-name { font-size: 16px; }
+  .chat-contact.has-unread .chat-contact-name { font-weight: 700; }
+  .chat-contact-preview { font-size: 14px; }
+  .chat-contact-time { font-size: 12px; }
+  .chat-contact-unread {
+    min-width: 22px;
+    height: 22px;
+    border-radius: 11px;
+    font-size: 12px;
+    padding: 0 7px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+  /* Avatar ligeramente más grande en mobile (visual jerarquía WA) — el width
+     inline del HTML manda, pero forzamos el .chat-avatar a expandir. */
+  .chat-contact .chat-avatar { width: 52px !important; height: 52px !important; }
+  .chat-contact .chat-avatar-text { font-size: 19px !important; }
 
-  /* === LABEL FILTER BAR === */
-  .label-filter-bar { padding: 8px 12px; gap: 6px; flex-wrap: wrap; }
-
-  /* === Sidebar foot info: si quedamos sin él, agregar info al header === */
+  /* === LABEL FILTER BAR: una sola fila scroll horizontal estilo WA chips === */
+  .label-filter-bar {
+    padding: 8px 12px;
+    gap: 8px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    max-height: none;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .label-filter-bar::-webkit-scrollbar { display: none; }
+  .label-filter-chip { flex-shrink: 0; padding: 6px 12px; font-size: 13px; }
 }
 
 @media (max-width: 480px) {
@@ -3801,8 +3828,12 @@ table.t td.cliente { font-weight: 600; }
    raíz desde JS (ver _applyMobileChatClass). El back arrow del header
    (.chat-back-btn) está en el HTML siempre pero solo se ve en mobile.
    =========================================================================== */
-/* Default: back arrow oculto. El media query mobile lo activa. */
+/* Defaults — el media query mobile abajo overridea estos a display visible.
+   Los dejamos acá (antes del @media) para que la specificity y orden de
+   declaración no nos jueguen en contra. */
 .chat-back-btn { display: none; }
+.chat-mobile-title { display: none; }
+.chat-archived-row { display: none; }
 
 @media (max-width: 768px) {
   /* Override del flex-direction: column que pone .chat-layout en max-width: 900px.
@@ -3854,5 +3885,68 @@ table.t td.cliente { font-weight: 600; }
      (en lista no tiene sentido — ya estás en la "raíz" del chat). */
   .app.chat-mobile-list .chat-back-btn,
   .app:not(.chat-mobile-conv) .chat-back-btn { display: none; }
+
+  /* ----- Título "Chats" estilo WhatsApp ----- */
+  .chat-mobile-title {
+    display: block;
+    font-size: 28px;
+    font-weight: 700;
+    color: #e9edef;
+    margin: 0;
+    padding: 14px 16px 6px;
+    letter-spacing: -0.4px;
+    background: #111b21;
+    flex-shrink: 0;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  }
+
+  /* ----- Header del sidebar más compacto en mobile (botones a la derecha) ----- */
+  .chat-contacts-header {
+    padding: 4px 8px 8px;
+    background: #111b21;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+  /* El botón fullscreen no tiene sentido en mobile (ya está full). */
+  .chat-contacts-header #chat-fullscreen { display: none; }
+  .chat-contacts-header .btn-send {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+  }
+
+  /* ----- Search más estilo WhatsApp (más redondeado, padding cómodo) ----- */
+  .chat-contacts-search { padding: 4px 12px 10px; }
+  .chat-contacts-search input {
+    border-radius: 22px;
+    padding: 10px 14px 10px 38px;
+    font-size: 14px;
+    background-color: #202c33;
+    background-position: 14px center;
+    background-size: 16px;
+  }
+
+  /* ----- Fila "Archivados · N" estilo WA ----- */
+  .chat-archived-row {
+    display: flex;
+    align-items: center;
+    gap: 28px;
+    padding: 12px 20px;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid #222d34;
+    color: #e9edef;
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+    font-size: 15px;
+    font-family: inherit;
+    transition: background .15s;
+  }
+  .chat-archived-row:hover,
+  .chat-archived-row:active { background: #1f2c33; }
+  .chat-archived-label { flex: 1; color: #e9edef; }
+  .chat-archived-count { color: #8696a0; font-size: 13px; }
 }
+
 

@@ -5577,6 +5577,7 @@ function renderChat() {
   return `
     <div class="chat-layout">
       <div class="chat-contacts">
+        <h1 class="chat-mobile-title">Chats</h1>
         <div class="chat-contacts-header">
           <button id="chat-fullscreen" class="chat-fullscreen-btn" title="Ocultar barra lateral">
             <svg class="ico-enter" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M5 5h5V3H3v7h2V5zm9-2v2h5v5h2V3h-7zm5 16h-5v2h7v-7h-2v5zM5 14H3v7h7v-2H5v-5z"/></svg>
@@ -5600,6 +5601,18 @@ function renderChat() {
           <input type="text" id="chat-search" placeholder="${chatState.showArchived ? 'Buscar en archivados…' : 'Buscar o empezar un chat nuevo'}" value="${escapeHtml(chatState.search)}">
         </div>
         ${chatState.showArchived ? '<div class="archived-banner">📦 Mostrando solo chats archivados</div>' : ''}
+        ${(() => {
+          // Fila estilo WA "Archivados · N" — solo si NO estamos viendo archivados
+          // y hay alguno. CSS la oculta en desktop (botón del header sigue ahí).
+          if (chatState.showArchived) return '';
+          const archCount = chatState.contacts.filter(c => isArchived(c.phone)).length;
+          if (!archCount) return '';
+          return `<button class="chat-archived-row" id="chat-archived-row" type="button">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" style="flex-shrink:0;color:#8696a0"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM12 17.5L6.5 12H10v-2h4v2h3.5L12 17.5zM5.12 5l.81-1h12l.94 1H5.12z"/></svg>
+            <span class="chat-archived-label">Archivados</span>
+            <span class="chat-archived-count">${archCount}</span>
+          </button>`;
+        })()}
         ${renderLabelFilterBar()}
         <div class="chat-contact-list" id="chat-contact-list">
           ${chatState.loading && !chatState.contacts.length ? '<div style="padding:30px;text-align:center"><div class="spinner" style="border-color:#2a3942;border-top-color:#00a884"></div></div>' : ''}
@@ -7398,12 +7411,12 @@ function bindChat() {
   // Manage labels button
   const manageLabelsBtn = document.getElementById('btn-manage-labels');
   if (manageLabelsBtn) manageLabelsBtn.onclick = () => showManageLabelsModal();
-  // Toggle ver archivados
+  // Toggle ver archivados (botón del header desktop + fila mobile)
+  const toggleArchived = () => { chatState.showArchived = !chatState.showArchived; render(); };
   const archivedBtn = document.getElementById('btn-toggle-archived');
-  if (archivedBtn) archivedBtn.onclick = () => {
-    chatState.showArchived = !chatState.showArchived;
-    render();
-  };
+  if (archivedBtn) archivedBtn.onclick = toggleArchived;
+  const archivedRow = document.getElementById('chat-archived-row');
+  if (archivedRow) archivedRow.onclick = toggleArchived;
   // Manage quick replies button
   const manageQrBtn = document.getElementById('btn-manage-qr');
   if (manageQrBtn) manageQrBtn.onclick = () => showManageQRModal();
