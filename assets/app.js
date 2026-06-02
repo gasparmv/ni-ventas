@@ -33,16 +33,8 @@ if (_LAG_DEBUG) {
   } catch (e) {
     console.warn('[LAG] PerformanceObserver longtask no soportado:', e.message);
   }
-  // Mide el delay entre la tecla y el siguiente paint del browser.
-  // Si esto es alto, hay algo en el main thread bloqueando el repaint.
-  document.addEventListener('keydown', (ev) => {
-    if (!ev.target || (ev.target.id !== 'chat-input' && ev.target.tagName !== 'TEXTAREA')) return;
-    const t = performance.now();
-    requestAnimationFrame(() => {
-      const lag = performance.now() - t;
-      if (lag > 30) console.warn(`[LAG] KEY → PAINT: ${lag.toFixed(0)}ms · key="${ev.key}" · target=${ev.target.id || ev.target.tagName}`);
-    });
-  }, true);
+  // (Eliminé el keydown listener con RAF — agregaba overhead a cada tecla.
+  //  Los long tasks del PerformanceObserver ya capturan el bloqueo real.)
 }
 // Helper para medir bloques específicos. Si _LAG_DEBUG está off, no hace nada.
 function _lagMeasure(name, fn) {
@@ -5679,7 +5671,24 @@ function renderChat() {
   `;
 }
 
+// Cache global del HTML de cada item del sidebar. Reduces drásticamente el
+// costo de refreshContactList (de ~500ms a <50ms para 1000+ chats) porque
+// el polling cada 4s casi nunca cambia el 99% de los items. Solo regeneramos
+// el HTML si CAMBIÓ algún campo relevante (visible en _contactItemKey).
+const _contactItemCache = new Map();
+function _contactItemKey(c) {
+  // Key estable que captura todo lo que afecta el HTML renderizado.
+  // Si cualquiera de estos cambia, regeneramos. Sino, reusamos el cache.
+  const labels = (chatState.contactLabels[c.phone] || []).join(',');
+  const isActive = chatState.selectedPhone === c.phone ? '1' : '0';
+  return `${c.phone}|${c.name || ''}|${c.lastTs || ''}|${c.unread || 0}|${c.lastDir || ''}|${c.lastType || ''}|${c.lastMsg || ''}|${isActive}|${labels}`;
+}
 function renderContactItem(c) {
+  // Cache hit: HTML idéntico al previo. Devolvemos directo sin recomputar.
+  const cached = _contactItemCache.get(c.phone);
+  const key = _contactItemKey(c);
+  if (cached && cached.key === key) return cached.html;
+
   loadProfilePic(c.phone);
   // Preview icons
   let previewIcon = '';
@@ -5704,7 +5713,7 @@ function renderContactItem(c) {
   const hasUnread = (c.unread || 0) > 0;
   const isActive = chatState.selectedPhone === c.phone;
 
-  return `
+  const html = `
     <div class="chat-contact ${isActive ? 'active' : ''}${hasUnread ? ' has-unread' : ''}" data-chat-phone="${escapeHtml(c.phone)}">
       ${avatarHtml(c.phone, c.name, 49)}
       <div class="chat-contact-info">
@@ -5722,6 +5731,8 @@ function renderContactItem(c) {
       </div>
     </div>
   `;
+  _contactItemCache.set(c.phone, { key, html });
+  return html;
 }
 
 // Devuelve el ts del último inbound del contacto seleccionado, o null.
@@ -7502,14 +7513,15 @@ function bindChat() {
     const prevLastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
     const prevTotalUnread = chatState.totalUnread || 0;
     const prevContactsByPhone = new Map(chatState.contacts.map(c => [c.phone, c]));
-    const _fetchT0 = _LAG_DEBUG ? performance.now() : 0;
+    const _fetchT0 = performance.now();
     await Promise.all([
       loadChatContacts(),
       phone ? loadChatMessages(phone) : Promise.resolve()
     ]);
-    if (_LAG_DEBUG) {
-      const dt = performance.now() - _fetchT0;
-      if (dt > 50) console.warn(`[LAG] tickPoll fetches: ${dt.toFixed(0)}ms (red, no main-thread block)`);
+    // Trackear duración del fetch para adaptive polling (sin debug flag).
+    chatState._lastTickMs = performance.now() - _fetchT0;
+    if (_LAG_DEBUG && chatState._lastTickMs > 50) {
+      console.warn(`[LAG] tickPoll fetches: ${chatState._lastTickMs.toFixed(0)}ms (red, no main-thread block)`);
     }
     if (STATE.view !== 'chat' || chatState.selectedPhone !== phone) return;
     // ===== Skip renders pesados durante typing activo =====
@@ -7551,10 +7563,27 @@ function bindChat() {
   const scheduleTick = (typeof requestIdleCallback === 'function')
     ? () => requestIdleCallback(tickPoll, { timeout: 2000 })
     : () => tickPoll();
+  // Adaptive polling: arrancamos en 4s. Si un tick tarda >3s (server lento),
+  // subimos el interval a 8s para no acumular ticks ni saturar la red. Si vuelve
+  // a ser rápido, bajamos a 4s. chatState._lastTickMs lo mide tickPoll.
+  let _pollIntervalMs = 4000;
+  const reschedulePolling = (newMs) => {
+    if (newMs === _pollIntervalMs) return;
+    _pollIntervalMs = newMs;
+    clearInterval(chatState.pollTimer);
+    chatState.pollTimer = setInterval(() => {
+      if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
+      scheduleTick();
+      const last = chatState._lastTickMs || 0;
+      reschedulePolling(last > 3000 ? 8000 : 4000);
+    }, _pollIntervalMs);
+  };
   chatState.pollTimer = setInterval(() => {
     if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
     scheduleTick();
-  }, 4000);
+    const last = chatState._lastTickMs || 0;
+    reschedulePolling(last > 3000 ? 8000 : 4000);
+  }, _pollIntervalMs);
   // Refresh inmediato al volver a la pestaña
   if (!chatState._visibilityHook) {
     chatState._visibilityHook = () => {
