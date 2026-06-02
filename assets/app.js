@@ -7141,9 +7141,22 @@ function bindChatConversation() {
   if (ta) {
     ta.addEventListener('input', () => {
       const _t0 = _LAG_DEBUG ? performance.now() : 0;
-      ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
-      // Quick replies dropdown
+      // Marker para que el polling sepa que estás tipeando activamente
+      // y evite refreshes pesados del sidebar mientras escribís.
+      chatState._lastTypeMs = performance.now();
+      // === FIX CRÍTICO: defer auto-resize a RAF ===
+      // Setear style.height='auto' + leer scrollHeight fuerza un layout
+      // SÍNCRONO de toda la página. Con mucho DOM (sidebar de 1000+ chats),
+      // ese reflow tarda 200ms por keystroke → typing inutilizable.
+      // En RAF el browser ya pasó el frame y el reflow no bloquea la tecla.
+      if (ta._resizeRaf) cancelAnimationFrame(ta._resizeRaf);
+      ta._resizeRaf = requestAnimationFrame(() => {
+        ta._resizeRaf = null;
+        ta.style.height = 'auto';
+        ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+      });
+      // Quick replies dropdown — early-returns si el value no empieza con '/',
+      // así que cuesta ~0ms en typing normal.
       handleQuickReplyInput(ta);
       if (_LAG_DEBUG) {
         const dt = performance.now() - _t0;
@@ -7506,9 +7519,19 @@ function bindChat() {
       if (dt > 50) console.warn(`[LAG] tickPoll fetches: ${dt.toFixed(0)}ms (red, no main-thread block)`);
     }
     if (STATE.view !== 'chat' || chatState.selectedPhone !== phone) return;
-    _lagMeasure('refreshContactList', () => refreshContactList());
+    // ===== Skip renders pesados durante typing activo =====
+    // refreshContactList tarda 500-1000ms (construye HTML de 1000+ contactos).
+    // Si el user tipeó en los últimos 1500ms, postergamos. El fetch ya trajo
+    // los datos nuevos al estado — el próximo poll cuando pare de tipear va
+    // a renderearlos.
+    const isTyping = chatState._lastTypeMs && (performance.now() - chatState._lastTypeMs < 1500);
+    if (!isTyping) {
+      _lagMeasure('refreshContactList', () => refreshContactList());
+    }
     const newLastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
     const changed = chatState.messages.length !== prevMsgCount || newLastTs !== prevLastTs;
+    // renderChatMessages SÍ corre incluso durante typing — el render incremental
+    // es liviano (<8ms) y queremos que el user vea msgs entrantes del chat actual.
     if (phone && changed) {
       const msgEl = document.getElementById('chat-messages');
       const wasAtBottom = msgEl && (msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 80);
