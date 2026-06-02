@@ -7379,9 +7379,17 @@ function bindChat() {
     }
     updateChatPageTitle();
   };
+  // requestIdleCallback difiere el polling a cuando el main thread está libre
+  // — si el usuario está tipeando rápido, el render del polling queda en cola
+  // hasta el primer gap entre keystrokes. Con timeout de 2s nos aseguramos
+  // que se ejecute en algún momento incluso bajo presión sostenida.
+  // Fallback a tickPoll directo si el browser no soporta (Safari < 17).
+  const scheduleTick = (typeof requestIdleCallback === 'function')
+    ? () => requestIdleCallback(tickPoll, { timeout: 2000 })
+    : () => tickPoll();
   chatState.pollTimer = setInterval(() => {
     if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
-    tickPoll();
+    scheduleTick();
   }, 4000);
   // Refresh inmediato al volver a la pestaña
   if (!chatState._visibilityHook) {
@@ -7594,9 +7602,17 @@ function refreshContactList() {
     ? '<div class="search-loading">🔍 Buscando en historial...</div>'
     : '';
 
-  list.innerHTML = filtered.map(c => renderContactItem(c)).join('') + loadingHtml + extraHtml;
-  bindChatContactClicks();
-  bindSearchMessageJumps();
+  // Dirty check: comparamos el HTML resultante contra el último seteado. Si es
+  // idéntico, NO tocamos el DOM. Es el caso del polling cada 4s cuando no
+  // hubo cambios reales: antes se reconstruía toda la lista igual y bloqueaba
+  // el main thread mientras el usuario tipeaba.
+  const newHtml = filtered.map(c => renderContactItem(c)).join('') + loadingHtml + extraHtml;
+  if (newHtml !== list._lastHtml) {
+    list.innerHTML = newHtml;
+    list._lastHtml = newHtml;
+    bindChatContactClicks();
+    bindSearchMessageJumps();
+  }
 }
 
 // Escapa HTML y resalta el match dentro de un texto con <mark>
