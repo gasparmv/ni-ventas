@@ -2773,16 +2773,28 @@ export default {
              LIMIT ?`
           ).bind(minMsgs, ANALYSIS_PROMPT_VERSION, limit).all();
           const phones = (rs.results || []).map(r => r.phone);
-          for (const phone of phones) {
+          // Ejecutamos los N análisis EN PARALELO con Promise.all. Cada análisis
+          // es ~3 seg I/O bound (espera respuesta de Anthropic), así que con
+          // limit=15 el wall time queda ~5-8 seg en vez de 45-60 seg en serie.
+          // Workers tiene CPU time limit (30s free/5min paid) pero el await fetch
+          // no consume CPU, así que esto es safe.
+          const results = await Promise.all(phones.map(async (phone) => {
+            try {
+              const r = await analyzeChatWithClaude(env, phone, 'sonnet');
+              return { phone, ok: r.ok, cost: r.cost_usd || 0, error: r.error };
+            } catch (e) {
+              return { phone, ok: false, error: e.message };
+            }
+          }));
+          for (const r of results) {
             stats.processed++;
-            const r = await analyzeChatWithClaude(env, phone, 'sonnet');
             if (r.ok) {
               stats.succeeded++;
-              stats.total_cost_usd += r.cost_usd || 0;
+              stats.total_cost_usd += r.cost || 0;
             } else {
               stats.failed++;
             }
-            stats.results.push({ phone, ok: r.ok, error: r.error });
+            stats.results.push({ phone: r.phone, ok: r.ok, error: r.error });
           }
           return json({ ok: true, stats });
         } catch (e) {
@@ -4095,8 +4107,45 @@ export default {
     // en el hub de 360dialog (lo manejamos abajo en notifyTemplateStatusChange).
     const minute = new Date(event.scheduledTime).getUTCMinutes();
     if (minute < 5) ctx.waitUntil(monitorTemplateStatus(env));
+    // Análisis de chats nuevos: 1 vez por hora (procesa hasta 15 chats que
+    // tengan actividad nueva desde su último análisis o que nunca se analizaron).
+    // Ignora phones internos. Idempotente: si no hay nada que analizar, no hace nada.
+    if (minute < 5) ctx.waitUntil(processAnalysisPending(env));
   }
 };
+
+// Cron handler: procesa chats con actividad nueva. Limit conservador (5/hora)
+// para respetar rate limits del tier 1 de Anthropic API (8k output tokens/min,
+// 50 req/min). Si subimos de tier (agregando créditos) podemos aumentar.
+// Tras el backfill inicial, los chats con actividad nueva por día son ~30-50,
+// se procesan en ~10-12 horas con este ritmo.
+async function processAnalysisPending(env) {
+  if (!env.ANTHROPIC_API_KEY) return;
+  try {
+    const rs = await env.DB.prepare(
+      `WITH chat_stats AS (
+         SELECT phone, MAX(ts) AS last_ts, COUNT(*) AS n_msgs
+         FROM wa_messages WHERE msg_type != 'reaction'
+           AND phone NOT IN (SELECT phone FROM wa_internal_phones)
+         GROUP BY phone
+         HAVING n_msgs >= 3
+       )
+       SELECT cs.phone FROM chat_stats cs
+       LEFT JOIN wa_conversations c ON c.phone = cs.phone
+       WHERE c.last_analyzed_at IS NULL OR c.last_analyzed_at < cs.last_ts
+          OR c.analysis_version < ?
+       ORDER BY cs.last_ts DESC
+       LIMIT 5`
+    ).bind(ANALYSIS_PROMPT_VERSION).all();
+    const phones = (rs.results || []).map(r => r.phone);
+    if (!phones.length) return;
+    // Procesamos secuencial (no Promise.all) para no superar el rate limit
+    // de requests/minuto del API. Con 5 chats × ~3s c/u = 15s wall time.
+    for (const p of phones) {
+      try { await analyzeChatWithClaude(env, p, 'sonnet'); } catch (_) {}
+    }
+  } catch (_) {}
+}
 
 // ===== Monitor de templates: notifica al admin cuando cambia el status =====
 async function monitorTemplateStatus(env) {
