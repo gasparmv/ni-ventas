@@ -5578,7 +5578,7 @@ function renderBulkSection() {
 // conversaciones con Claude. Los datos los provee el endpoint
 // /admin/wa/insights del worker.
 // ============================================================
-const insightsState = { data: null, loading: false, error: null, productFilter: '' };
+const insightsState = { data: null, loading: false, error: null, productFilter: '', zoomOutcome: '', zoomList: null, zoomLoading: false };
 
 function renderInsights() {
   if (!isAdmin()) return `<div class="page-head"><h1>Insights IA</h1></div><div class="error">Solo admin.</div>`;
@@ -5618,13 +5618,15 @@ function renderInsights() {
     </div>
 
     <div class="kpi-grid" style="margin-bottom:24px">
-      <div class="kpi"><div class="kpi-label">VENTAS</div><div class="kpi-value" style="color:#22c55e">${sold}</div><div class="kpi-sub">${total ? Math.round(sold/total*100) : 0}% del total</div></div>
-      <div class="kpi"><div class="kpi-label">PERDIDOS</div><div class="kpi-value" style="color:#ef4444">${lost}</div><div class="kpi-sub">decisión NO comprar</div></div>
-      <div class="kpi"><div class="kpi-label">ABANDONADOS</div><div class="kpi-value" style="color:#f59e0b">${abandoned}</div><div class="kpi-sub">${total ? Math.round(abandoned/total*100) : 0}% — dejaron de responder</div></div>
-      <div class="kpi"><div class="kpi-label">EN PROCESO</div><div class="kpi-value">${inProgress}</div><div class="kpi-sub">conversación activa</div></div>
+      <button class="kpi kpi-clickable${insightsState.zoomOutcome==='sold'?' kpi-active':''}" data-outcome="sold"><div class="kpi-label">VENTAS</div><div class="kpi-value" style="color:#22c55e">${sold}</div><div class="kpi-sub">${total ? Math.round(sold/total*100) : 0}% del total</div></button>
+      <button class="kpi kpi-clickable${insightsState.zoomOutcome==='lost'?' kpi-active':''}" data-outcome="lost"><div class="kpi-label">PERDIDOS</div><div class="kpi-value" style="color:#ef4444">${lost}</div><div class="kpi-sub">decisión NO comprar</div></button>
+      <button class="kpi kpi-clickable${insightsState.zoomOutcome==='abandoned_by_client'?' kpi-active':''}" data-outcome="abandoned_by_client"><div class="kpi-label">ABANDONADOS</div><div class="kpi-value" style="color:#f59e0b">${abandoned}</div><div class="kpi-sub">${total ? Math.round(abandoned/total*100) : 0}% — dejaron de responder</div></button>
+      <button class="kpi kpi-clickable${insightsState.zoomOutcome==='in_progress'?' kpi-active':''}" data-outcome="in_progress"><div class="kpi-label">EN PROCESO</div><div class="kpi-value">${inProgress}</div><div class="kpi-sub">conversación activa</div></button>
       <div class="kpi"><div class="kpi-label">CONVERSIÓN</div><div class="kpi-value" style="color:#06b6d4">${conversionRate}%</div><div class="kpi-sub">de los decididos (incl. abandono)</div></div>
       <div class="kpi"><div class="kpi-label">CONV. EXPLÍCITA</div><div class="kpi-value" style="color:#06b6d4">${explicitRate}%</div><div class="kpi-sub">solo sold vs lost</div></div>
     </div>
+
+    ${insightsState.zoomOutcome ? renderInsightsZoom() : ''}
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px">
       <div class="card">
@@ -5739,6 +5741,72 @@ function renderInsightsRankList(rows, labelField, countField) {
   </ol>`;
 }
 
+// Renderiza la sección "drill-down" con la lista de chats del outcome elegido.
+// Se monta debajo de las KPIs cuando insightsState.zoomOutcome no es vacío.
+function renderInsightsZoom() {
+  const o = insightsState.zoomOutcome;
+  const titles = {
+    sold: '🟢 Ventas confirmadas',
+    lost: '🔴 Perdidos (decisión NO comprar)',
+    abandoned_by_client: '🟠 Abandonados (clientes que dejaron de responder)',
+    in_progress: '⚪ En proceso (conversaciones activas)'
+  };
+  const items = insightsState.zoomList || [];
+  return `<div class="card" style="margin-bottom:24px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="margin:0">${titles[o] || o} <span style="opacity:.5;font-weight:400">(${items.length})</span></h3>
+      <button class="btn btn-ghost" id="zoom-close">✕ Cerrar</button>
+    </div>
+    ${insightsState.zoomLoading
+      ? '<div class="loading"><div class="spinner"></div></div>'
+      : items.length === 0
+        ? '<p style="opacity:.6">Sin chats en esta categoría todavía.</p>'
+        : `<table class="ins-table">
+            <thead><tr>
+              <th>Cliente</th><th>Producto</th><th>Vertical</th><th>Ad</th>
+              <th>Razón</th><th>Sentiment</th><th>Última msg</th><th></th>
+            </tr></thead>
+            <tbody>
+              ${items.map(c => {
+                const fmtTs = c.last_msg_ts ? new Date(c.last_msg_ts).toLocaleDateString('es-AR', { day:'2-digit', month:'2-digit', year:'2-digit' }) : '-';
+                const sentColors = { positive:'#22c55e', neutral:'#9ca3af', negative:'#ef4444' };
+                return `<tr>
+                  <td style="font-family:monospace;font-size:12px">${escapeHtml(c.phone)}</td>
+                  <td>${escapeHtml((c.product_details||c.product_type||'').slice(0,50))}</td>
+                  <td>${escapeHtml(c.vertical||'-')}</td>
+                  <td style="opacity:.7">${escapeHtml((c.ad_name||'').slice(0,30))}</td>
+                  <td style="font-size:12px;opacity:.85">${escapeHtml((c.outcome_reason||'').slice(0,80))}</td>
+                  <td style="color:${sentColors[c.sentiment_final]||'#9ca3af'}">${escapeHtml(c.sentiment_final||'-')}</td>
+                  <td style="font-size:12px;opacity:.7">${fmtTs}</td>
+                  <td><button class="btn btn-sm" data-open-chat="${escapeHtml(c.phone)}">Ver chat →</button></td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`}
+  </div>`;
+}
+
+async function loadInsightsZoom(outcome) {
+  if (!CONFIG.trackerUrl || !STATE.token) return;
+  insightsState.zoomLoading = true;
+  insightsState.zoomList = null;
+  render();
+  const pf = insightsState.productFilter;
+  const params = new URLSearchParams({ outcome, limit: '500' });
+  if (pf) params.set('product_type', pf);
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/conversations?' + params.toString(), { headers: authHeaders() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    insightsState.zoomList = j.conversations || [];
+  } catch (e) {
+    insightsState.zoomList = [];
+  } finally {
+    insightsState.zoomLoading = false;
+    render();
+  }
+}
+
 async function loadInsights() {
   if (!CONFIG.trackerUrl || !STATE.token) return;
   insightsState.loading = true;
@@ -5771,7 +5839,44 @@ function bindInsights() {
       if (pf === insightsState.productFilter) return;
       insightsState.productFilter = pf;
       insightsState.data = null; // force re-fetch
+      insightsState.zoomOutcome = ''; // cierro el zoom al cambiar tab
+      insightsState.zoomList = null;
       loadInsights();
+    };
+  });
+  // KPIs clickeables — drill-down a lista de chats
+  document.querySelectorAll('.kpi-clickable').forEach(k => {
+    k.onclick = () => {
+      const oc = k.dataset.outcome;
+      if (insightsState.zoomOutcome === oc) {
+        // Click en el mismo KPI cierra el zoom
+        insightsState.zoomOutcome = '';
+        insightsState.zoomList = null;
+        render();
+        return;
+      }
+      insightsState.zoomOutcome = oc;
+      loadInsightsZoom(oc);
+    };
+  });
+  // Cerrar el zoom
+  const closeBtn = document.getElementById('zoom-close');
+  if (closeBtn) closeBtn.onclick = () => {
+    insightsState.zoomOutcome = '';
+    insightsState.zoomList = null;
+    render();
+  };
+  // Abrir el chat completo desde un row
+  document.querySelectorAll('[data-open-chat]').forEach(b => {
+    b.onclick = () => {
+      const phone = b.dataset.openChat;
+      STATE.view = 'chat';
+      chatState.selectedPhone = phone;
+      // Si el chat está en modo mobile WA-style, mostrar la conversación
+      if (typeof enterMobileChatConversation === 'function') enterMobileChatConversation();
+      try { selectChatContact(phone); } catch (_) {}
+      location.hash = 'chat';
+      render();
     };
   });
 }

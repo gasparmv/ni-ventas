@@ -4074,3 +4074,13 @@ table.t td.cliente { font-weight: 600; }
 .ins-tab:hover { background:#1a2530; color:#e9edef }
 .ins-tab.active { background:#06b6d4; color:#fff; font-weight:600 }
 
+
+/* KPIs clickeables — drill-down zoom */
+.kpi-clickable { cursor:pointer; text-align:left; font-family:inherit; transition: all .15s }
+.kpi-clickable:hover { background:#1a2530; transform:translateY(-2px) }
+.kpi-clickable.kpi-active { background:#0e7490; box-shadow: 0 4px 12px rgba(6,182,212,.3) }
+.kpi-clickable.kpi-active .kpi-value { color:#fff !important }
+.btn-sm { padding:4px 10px; font-size:12px }
+.btn-ghost { background:transparent; border:1px solid #3b4a54; color:#9ca3af }
+.btn-ghost:hover { background:#1a2530 }
+
