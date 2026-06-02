@@ -4,49 +4,6 @@
  * Routing: hash-based (#dashboard, #pedidos, etc.)
  */
 
-// ===== DEBUG LAG INSTRUMENTATION (opt-in: localStorage.debugLag='1') =====
-// Pegado para diagnosticar el lag al tipear en el chat. Se activa con:
-//   localStorage.setItem('debugLag','1'); location.reload();
-// Y se desactiva con:
-//   localStorage.removeItem('debugLag'); location.reload();
-// Loguea:
-//   - Long tasks (>50ms que bloquean main thread) con info de si tipeás.
-//   - Lag entre keydown y siguiente paint (>30ms es feo).
-// REMOVER después de diagnosticar.
-const _LAG_DEBUG = (() => {
-  try { return localStorage.getItem('debugLag') === '1'; } catch (_) { return false; }
-})();
-if (_LAG_DEBUG) {
-  console.warn('[LAG] Debug activado. Tipeá en un chat y mirá los warnings acá.');
-  try {
-    new PerformanceObserver((list) => {
-      for (const e of list.getEntries()) {
-        const active = document.activeElement;
-        const isInput = active && (active.id === 'chat-input' || active.tagName === 'TEXTAREA' || active.tagName === 'INPUT');
-        const ctx = isInput ? ' (mientras tipeás en ' + (active.id || active.tagName) + ')' : '';
-        // entry.attribution[0] suele decir qué container/script causó la tarea
-        const attr = (e.attribution && e.attribution[0]) || null;
-        const src = attr ? ` [${attr.containerType || ''}${attr.containerName ? ':' + attr.containerName : ''}]` : '';
-        console.warn(`[LAG] LONG TASK: ${e.duration.toFixed(0)}ms${ctx}${src}`);
-      }
-    }).observe({ entryTypes: ['longtask'] });
-  } catch (e) {
-    console.warn('[LAG] PerformanceObserver longtask no soportado:', e.message);
-  }
-  // (Eliminé el keydown listener con RAF — agregaba overhead a cada tecla.
-  //  Los long tasks del PerformanceObserver ya capturan el bloqueo real.)
-}
-// Helper para medir bloques específicos. Si _LAG_DEBUG está off, no hace nada.
-function _lagMeasure(name, fn) {
-  if (!_LAG_DEBUG) return fn();
-  const t0 = performance.now();
-  try { return fn(); }
-  finally {
-    const dt = performance.now() - t0;
-    if (dt > 8) console.warn(`[LAG] ${name}: ${dt.toFixed(1)}ms`);
-  }
-}
-
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
   defaultUsers: ['Gaspar', 'Joaquín', 'Diseñador'],
@@ -7151,21 +7108,12 @@ function bindChatConversation() {
 
   if (ta) {
     ta.addEventListener('input', () => {
-      const _t0 = _LAG_DEBUG ? performance.now() : 0;
       // Marker para que el polling sepa que estás tipeando activamente
       // y evite refreshes pesados del sidebar mientras escribís.
       chatState._lastTypeMs = performance.now();
-      // === ELIMINADO: el JS auto-resize (ta.style.height='auto' + scrollHeight) ===
-      // Aún con RAF, leer scrollHeight forzaba un reflow de toda la página que
-      // con mucho DOM (1000+ chats + bubbles + filtros) tardaba 200-3000ms.
-      // El CSS `field-sizing: content` (Chrome ≥123, Safari 17) resuelve esto
-      // nativamente sin reflow forzado. Para browsers sin soporte, el textarea
-      // mantiene rows=1 + max-height + scroll interno (degradación aceptable).
+      // El auto-resize del textarea lo maneja el CSS via `field-sizing: content`
+      // (Chrome ≥123, Safari 17). No usamos JS para evitar reflows forzados.
       handleQuickReplyInput(ta);
-      if (_LAG_DEBUG) {
-        const dt = performance.now() - _t0;
-        if (dt > 4) console.warn(`[LAG] textarea input handler: ${dt.toFixed(1)}ms`);
-      }
     });
     ta.addEventListener('keydown', (e) => {
       // Handle QR dropdown navigation
@@ -7518,29 +7466,23 @@ function bindChat() {
       loadChatContacts(),
       phone ? loadChatMessages(phone) : Promise.resolve()
     ]);
-    // Trackear duración del fetch para adaptive polling (sin debug flag).
+    // Trackear duración del fetch para el adaptive polling (si fue >3s,
+    // el setInterval externo espacia el próximo tick a 8s).
     chatState._lastTickMs = performance.now() - _fetchT0;
-    if (_LAG_DEBUG && chatState._lastTickMs > 50) {
-      console.warn(`[LAG] tickPoll fetches: ${chatState._lastTickMs.toFixed(0)}ms (red, no main-thread block)`);
-    }
     if (STATE.view !== 'chat' || chatState.selectedPhone !== phone) return;
-    // ===== Skip renders pesados durante typing activo =====
-    // refreshContactList tarda 500-1000ms (construye HTML de 1000+ contactos).
-    // Si el user tipeó en los últimos 1500ms, postergamos. El fetch ya trajo
-    // los datos nuevos al estado — el próximo poll cuando pare de tipear va
-    // a renderearlos.
+    // Skip refresh del sidebar durante typing activo (últimos 1500ms). El
+    // fetch ya trajo los datos al estado — el próximo poll cuando pare de
+    // tipear va a renderearlos.
     const isTyping = chatState._lastTypeMs && (performance.now() - chatState._lastTypeMs < 1500);
-    if (!isTyping) {
-      _lagMeasure('refreshContactList', () => refreshContactList());
-    }
+    if (!isTyping) refreshContactList();
     const newLastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
     const changed = chatState.messages.length !== prevMsgCount || newLastTs !== prevLastTs;
-    // renderChatMessages SÍ corre incluso durante typing — el render incremental
-    // es liviano (<8ms) y queremos que el user vea msgs entrantes del chat actual.
+    // renderChatMessages corre incluso durante typing — el render incremental
+    // es liviano (<8ms) y el usuario quiere ver msgs entrantes del chat actual.
     if (phone && changed) {
       const msgEl = document.getElementById('chat-messages');
       const wasAtBottom = msgEl && (msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < 80);
-      _lagMeasure('renderChatMessages (poll)', () => renderChatMessages());
+      renderChatMessages();
       if (wasAtBottom && msgEl) msgEl.scrollTop = msgEl.scrollHeight;
     }
     updateUnreadBadge();
