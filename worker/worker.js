@@ -1243,13 +1243,39 @@ export default {
                   // por Cloud API, solo te notifica que algo cambió.
                   const errTitle = msg.errors?.[0]?.title || '';
                   const errCode  = msg.errors?.[0]?.code;
+                  const errDetails = msg.errors?.[0]?.details || msg.errors?.[0]?.message || '';
+                  let classified;
                   if (errCode === 131051 || errTitle === 'Message type unknown') {
                     msgBody = '✏️ El cliente editó un mensaje (Meta no comparte el contenido editado)';
+                    classified = 'edited';
                   } else if (errTitle.includes('unavailable')) {
                     msgBody = '[mensaje no disponible]';
+                    classified = 'unavailable';
                   } else {
                     msgBody = `[no soportado: ${errTitle || 'desconocido'}]`;
+                    classified = 'other';
                   }
+                  // Guardamos el payload crudo del mensaje para diagnosticar por qué
+                  // Meta no comparte el contenido. La tabla tiene índice por ts/phone.
+                  // No bloqueamos el flujo principal si esto falla.
+                  try {
+                    const rawPayload = JSON.stringify(msg).slice(0, 8000);
+                    await env.DB.prepare(
+                      'INSERT INTO wa_webhook_debug (ts, inserted_at, wamid, phone, sender_name, error_code, error_title, error_details, msg_type, classified_as, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                    ).bind(
+                      msg.timestamp ? new Date(parseInt(msg.timestamp) * 1000).toISOString() : new Date().toISOString(),
+                      new Date().toISOString(),
+                      msg.id || '',
+                      phone || '',
+                      senderName || '',
+                      errCode || null,
+                      errTitle,
+                      typeof errDetails === 'string' ? errDetails : JSON.stringify(errDetails),
+                      msg.type || 'unsupported',
+                      classified,
+                      rawPayload
+                    ).run();
+                  } catch (_) { /* ignore */ }
                 }
                 const contextId = msg.context?.id || msg.reaction?.message_id || '';
                 const ts = msg.timestamp ? new Date(parseInt(msg.timestamp) * 1000).toISOString() : new Date().toISOString();
@@ -2096,6 +2122,21 @@ export default {
           return response;
         } catch (e) {
           return json({ chats: [], error: e.message }, 500);
+        }
+      }
+
+      // Diagnóstico: log de mensajes inbound que Meta marca como unsupported.
+      // Captura el JSON crudo + error.title/code/details para entender por qué
+      // tantos mensajes llegan sin contenido (sospecha: msgs eliminados rápido).
+      if (request.method === 'GET' && path === '/admin/wa/debug-unavailable') {
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 200);
+        try {
+          const rs = await env.DB.prepare(
+            'SELECT id, ts, inserted_at, wamid, phone, sender_name, error_code, error_title, error_details, msg_type, classified_as, raw_payload FROM wa_webhook_debug ORDER BY ts DESC LIMIT ?'
+          ).bind(limit).all();
+          return json({ rows: rs.results || [] });
+        } catch (e) {
+          return json({ rows: [], error: e.message }, 500);
         }
       }
 
