@@ -536,7 +536,7 @@ async function processLeadgenWebhook(env, body) {
 
       // Mandar template lead_b2b_followup con (firstName,). Sin {{2}}: el copy
       // del template es genérico para carteles, no segmentado por vertical.
-      const tplResult = await waSendTemplate(env, phoneNorm, 'lead_b2b_followup', 'es', [
+      const tplResult = await waSendTemplate(env, phoneNorm, 'lead_b2b_followup', 'es_AR', [
         firstName || 'amigo/a'
       ]);
 
@@ -2354,7 +2354,7 @@ export default {
           const row = await env.DB.prepare('SELECT * FROM wa_leads WHERE leadgen_id = ?').bind(leadgenId).first();
           if (!row) return json({ error: 'lead not found' }, 404);
           if (!row.phone) return json({ error: 'lead has no valid phone' }, 400);
-          const tplResult = await waSendTemplate(env, row.phone, 'lead_b2b_followup', 'es', [
+          const tplResult = await waSendTemplate(env, row.phone, 'lead_b2b_followup', 'es_AR', [
             row.first_name || 'amigo/a'
           ]);
           if (tplResult?.ok) {
