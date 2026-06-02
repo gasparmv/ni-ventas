@@ -593,6 +593,114 @@ async function processLeadgenWebhook(env, body) {
   }
 }
 
+// Procesa un lead que llegó desde la Google Sheet (via Apps Script onChange).
+// Workaround mientras App Review aprueba leads_retrieval: Meta sincroniza leads
+// a la Sheet nativamente (sin requerir review), y el Apps Script nos manda
+// cada fila nueva como webhook a /webhook/sheet-lead.
+// El payload trae row_data como objeto {columna: valor} con TODAS las columnas
+// de la sheet. Mapeo a los campos canónicos de wa_leads.
+async function processSheetLead(env, body) {
+  try {
+    const row = body?.row_data || {};
+    await _logLeadDebug(env, 'SHEET_START', { keys: Object.keys(row), sheet_id: body?.sheet_id, row_index: body?.row_index });
+
+    // Mapeo de campos de la sheet a los nuestros. Meta usa nombres estándar
+    // (id, full_name, phone_number, email) y a veces agrega campos custom del form.
+    const lcRow = {};
+    for (const k of Object.keys(row)) lcRow[String(k).toLowerCase().trim()] = row[k];
+
+    const leadgenId = String(lcRow['id'] || lcRow['lead_id'] || lcRow['leadgen_id'] || '').trim();
+    if (!leadgenId) {
+      await _logLeadDebug(env, 'SHEET_NO_ID', { row });
+      return;
+    }
+
+    // Dedup con la misma tabla wa_leads (key única = leadgen_id).
+    try {
+      const existing = await env.DB.prepare('SELECT id FROM wa_leads WHERE leadgen_id = ?').bind(leadgenId).first();
+      if (existing) { await _logLeadDebug(env, 'SHEET_DEDUP_SKIP', { leadgen_id: leadgenId }); return; }
+    } catch (_) {}
+
+    const phoneRaw = String(lcRow['phone_number'] || lcRow['telefono'] || lcRow['teléfono'] || lcRow['phone'] || lcRow['celular'] || '').trim();
+    const fullName = String(lcRow['full_name'] || lcRow['nombre_completo'] || lcRow['nombre completo'] || lcRow['name'] || lcRow['nombre'] || '').trim();
+    const firstName = String(lcRow['first_name'] || fullName).split(/\s+/)[0] || '';
+    const email = String(lcRow['email'] || lcRow['correo'] || '').trim();
+    const adId = String(lcRow['ad_id'] || '').trim();
+    const formId = String(lcRow['form_id'] || '').trim();
+    const formName = String(lcRow['form_name'] || '').trim();
+    const adName = String(lcRow['ad_name'] || '').trim();
+    const adsetId = String(lcRow['adset_id'] || '').trim();
+    const campaignId = String(lcRow['campaign_id'] || '').trim();
+
+    const phoneNorm = normalizeArPhone(phoneRaw) || '';
+    const vertical = inferLeadVertical(formName, adName);
+    const createdTime = lcRow['created_time'] || lcRow['createdtime'] || '';
+    const tsIso = createdTime ? (typeof createdTime === 'string' && createdTime.includes('T') ? createdTime : new Date(createdTime).toISOString()) : new Date().toISOString();
+
+    try {
+      await env.DB.prepare(
+        `INSERT INTO wa_leads
+         (leadgen_id, ts, received_at, page_id, form_id, form_name, ad_id, ad_name, adset_id, campaign_id,
+          phone, phone_raw, first_name, full_name, email, vertical, raw_lead_data, template_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        leadgenId, tsIso, new Date().toISOString(),
+        '100517509701851', // page id conocido — Neon Infinito
+        formId, formName, adId, adName, adsetId, campaignId,
+        phoneNorm, phoneRaw, firstName, fullName, email,
+        vertical,
+        JSON.stringify(row).slice(0, 4000),
+        phoneNorm ? 'pending' : 'skipped'
+      ).run();
+    } catch (e) {
+      await _logLeadDebug(env, 'SHEET_INSERT_ERR', { msg: e.message });
+      return;
+    }
+
+    if (!phoneNorm) {
+      try {
+        await env.DB.prepare('UPDATE wa_leads SET template_error = ? WHERE leadgen_id = ?').bind(
+          'telefono invalido o vacio: ' + phoneRaw, leadgenId
+        ).run();
+      } catch (_) {}
+      await _logLeadDebug(env, 'SHEET_NO_PHONE', { leadgen_id: leadgenId });
+      return;
+    }
+
+    // Mandar template lead_b2b_followup (mismo flow que webhook real).
+    const tplResult = await waSendTemplate(env, phoneNorm, 'lead_b2b_followup', 'es_AR', [
+      firstName || 'amigo/a'
+    ]);
+
+    if (tplResult?.ok) {
+      const wamid = tplResult.data?.messages?.[0]?.id || '';
+      try {
+        await env.DB.prepare(
+          'UPDATE wa_leads SET template_status = ?, template_sent_at = ?, wamid = ? WHERE leadgen_id = ?'
+        ).bind('sent', new Date().toISOString(), wamid, leadgenId).run();
+      } catch (_) {}
+
+      try {
+        const previewBody = `Holaa ${firstName || 'amigo/a'}, por aca Joaco de Neon Infinito! Nos llego tu formulario para presupuestar carteles! Tenes un diseño/imagen de referencia para pasarnos asi te lo cotizamos?`;
+        await env.DB.prepare(
+          `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+           VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')`
+        ).bind(new Date().toISOString(), wamid, phoneNorm, previewBody).run();
+      } catch (_) {}
+      await _logLeadDebug(env, 'SHEET_TEMPLATE_SENT', { leadgen_id: leadgenId, phone: phoneNorm, wamid });
+    } else {
+      try {
+        await env.DB.prepare(
+          'UPDATE wa_leads SET template_status = ?, template_error = ? WHERE leadgen_id = ?'
+        ).bind('failed', JSON.stringify(tplResult || {}).slice(0, 500), leadgenId).run();
+      } catch (_) {}
+      await _logLeadDebug(env, 'SHEET_TEMPLATE_FAILED', { leadgen_id: leadgenId, err: tplResult });
+    }
+  } catch (err) {
+    await _logLeadDebug(env, 'SHEET_FATAL', { message: err?.message, stack: (err?.stack || '').slice(0, 1500) });
+  }
+}
+
 // ===== Media download (WhatsApp → R2, vía Meta o 360dialog) =====
 async function downloadMedia(env, mediaId) {
   if (!mediaId || !env.MEDIA) return null;
@@ -1338,6 +1446,26 @@ export default {
       // Responder 200 inmediato a Meta. El procesamiento (fetch detalle + enviar
       // template) va en waitUntil para no bloquear la respuesta del webhook.
       ctx.waitUntil(processLeadgenWebhook(env, body));
+      return json({ ok: true });
+    }
+
+    // ===== Bridge desde Google Sheets (Apps Script onChange) =====
+    // Workaround mientras App Review aprueba leads_retrieval. Meta sincroniza
+    // leads a la sheet nativamente, y un Apps Script en la sheet nos manda
+    // cada fila nueva acá. Auth via header X-Sheet-Secret.
+    if (request.method === 'POST' && path === '/webhook/sheet-lead') {
+      const incoming = request.headers.get('x-sheet-secret') || '';
+      if (!env.SHEET_BRIDGE_SECRET || incoming !== env.SHEET_BRIDGE_SECRET) {
+        return json({ error: 'forbidden' }, 403);
+      }
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: true }); }
+      try {
+        await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(
+          new Date().toISOString(), 'SHEET_LEAD: ' + JSON.stringify(body).slice(0, 4000)
+        ).run();
+      } catch (_) {}
+      ctx.waitUntil(processSheetLead(env, body));
       return json({ ok: true });
     }
 
