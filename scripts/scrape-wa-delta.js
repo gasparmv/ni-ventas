@@ -24,17 +24,23 @@
  */
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
+const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+
+// QR state — si la sesión está vencida, el web UI muestra el QR aquí.
+let currentQrDataUrl = '';
 
 // === CONFIG ===
 const WORKER_URL = 'https://ni-ventas-tracker.neoninfinito.workers.dev';
 const TOKEN_FILE = path.join(__dirname, '.crm-token');
 const STATE_FILE = path.join(__dirname, '.delta-state.json');
 const STATS_PORT = 8765;
-const CATCHUP_INTERVAL_MIN = 30;   // cada 30 min hace catch-up por las dudas
-const CATCHUP_LOOKBACK_DAYS = 14;  // solo chats con actividad en últimos 14 días
+const CATCHUP_INTERVAL_MIN = 15;   // catch-up cada 15 min — agresivo porque WA Web está
+                                    // sincronizando historial post-relink (los primeros días)
+const CATCHUP_LOOKBACK_DAYS = 21;  // amplío a 21 días por las dudas — cuando WA sincroniza
+                                    // mensajes viejos, el chat.timestamp puede ser antiguo
 const FETCH_LIMIT_PER_CHAT = 80;   // últimos 80 mensajes por chat (dedup en backend)
 const BATCH_SIZE = 50;
 const SLEEP_BETWEEN_CHATS_MS = 300;
@@ -112,6 +118,12 @@ function startStatsServer() {
       </style></head><body>
       <h1>🔁 WA Delta Scraper</h1>
       <div class="sub">Catch-up periódico + Live listener — pensado para correr 24/7</div>
+      ${state.status === 'waiting_qr' && currentQrDataUrl ? `
+        <div style="background:#fff;padding:18px;border-radius:14px;text-align:center;margin-bottom:20px">
+          <img src="${currentQrDataUrl}" width="320" height="320" alt="QR de WhatsApp" style="display:block;margin:0 auto">
+          <div style="color:#0A0A0F;font-size:13px;margin-top:10px"><b>Escanealo desde el celular del 6573:</b><br>WhatsApp Business → Ajustes → Dispositivos vinculados → Vincular un dispositivo</div>
+        </div>
+      ` : ''}
       <div class="status">
         <div class="pill" style="background:rgba(143,212,222,.12);color:${sColor}">● ${state.status.toUpperCase().replace(/_/g,' ')}</div>
         <div style="margin-top:10px;font-size:13px;color:rgba(233,237,239,.65)">
@@ -189,7 +201,12 @@ async function downloadAndUploadMedia(msg, wamid, msgType) {
     const downloadP = msg.downloadMedia();
     const timer = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), MEDIA_DOWNLOAD_TIMEOUT_MS));
     const media = await Promise.race([downloadP, timer]);
-    if (!media || !media.data) { state.mediaFailed++; return null; }
+    if (!media || !media.data) {
+      state.mediaFailed++;
+      // Causa más común: media vieja con keys expiradas en WhatsApp.
+      if ((state.mediaFailed % 10) === 1) console.log(`     ⚠ media ${msgType} sin data (probable: expirada en WA): ${wamid.slice(-12)}`);
+      return null;
+    }
     const buf = Buffer.from(media.data, 'base64');
     if (buf.length > MEDIA_MAX_BYTES) {
       console.log(`     ⚠ media ${msgType} skipeada (${(buf.length/1048576).toFixed(1)}MB > 25MB)`);
@@ -211,13 +228,26 @@ async function downloadAndUploadMedia(msg, wamid, msgType) {
       headers: { 'Authorization': 'Bearer ' + TOKEN },
       body: fd
     });
-    if (!r.ok) { state.mediaFailed++; return null; }
+    if (!r.ok) {
+      state.mediaFailed++;
+      const txt = await r.text().catch(() => '');
+      console.log(`     ⚠ upload R2 falló HTTP ${r.status} ${txt.slice(0,100)}`);
+      return null;
+    }
     const j = await r.json();
-    if (!j.key) { state.mediaFailed++; return null; }
+    if (!j.key) {
+      state.mediaFailed++;
+      console.log(`     ⚠ upload R2 OK pero sin key: ${JSON.stringify(j).slice(0,100)}`);
+      return null;
+    }
     state.mediaDownloaded++;
+    if ((state.mediaDownloaded % 25) === 1) {
+      console.log(`     ✓ media R2: ${state.mediaDownloaded} OK / ${state.mediaFailed} fail (${msgType} → ${j.key})`);
+    }
     return j.key;
   } catch (e) {
     state.mediaFailed++;
+    if ((state.mediaFailed % 10) === 1) console.log(`     ⚠ media exception: ${e.message?.slice(0,80)}`);
     return null;
   }
 }
@@ -395,13 +425,18 @@ async function main() {
     }
   });
 
-  client.on('qr', () => {
-    console.error('❌ Sesión expirada. Corré scrape-wa-history.js primero para autenticar.');
-    process.exit(1);
+  client.on('qr', async (qr) => {
+    state.status = 'waiting_qr';
+    saveState();
+    try {
+      currentQrDataUrl = await QRCode.toDataURL(qr, { margin: 2, width: 480, errorCorrectionLevel: 'L' });
+    } catch (_) {}
+    console.log('📱 QR actualizado · escanealo desde http://localhost:' + STATS_PORT);
   });
   client.on('authenticated', () => {
     console.log('✅ Autenticado');
     state.status = 'authenticating';
+    currentQrDataUrl = ''; // limpiar QR
     saveState();
   });
   client.on('ready', async () => {
