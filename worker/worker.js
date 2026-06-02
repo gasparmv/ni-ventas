@@ -400,43 +400,57 @@ async function waSendTemplate(env, to, name, lang = 'es', params = []) {
 // El system prompt vive como constante para versionarlo. Cuando se cambia,
 // bumpear ANALYSIS_PROMPT_VERSION para que el cron sepa que tiene que
 // re-analizar conversaciones aunque ya tengan análisis previo.
-const ANALYSIS_PROMPT_VERSION = 1;
-const ANALYSIS_SYSTEM_PROMPT = `Sos un analista experto en ventas de carteles de neón LED. Trabajás para Neon Infinito, una empresa argentina que vende carteles personalizados, hace cursos de fabricación, y ofrece franquicias/tercerización de producción.
+const ANALYSIS_PROMPT_VERSION = 2;
+const ANALYSIS_SYSTEM_PROMPT = `Sos un analista experto en ventas de Neon Infinito, empresa argentina con DOS verticales completamente distintos:
 
-Tu tarea: analizar una conversación de WhatsApp entre un cliente y el equipo de Neon Infinito (mayormente Joaco, el vendedor) y extraer información estructurada para entender el ciclo de venta, identificar patrones de cliente, y eventualmente entrenar un agente automático que pueda responder mejor.
+1) **CARTELES**: venta de carteles personalizados de neón LED a particulares, locales comerciales, eventos, etc. Ciclo: cliente pide presupuesto → recibe cotización → seña 50% → producción → envío. Objeción principal típica: precio.
+2) **CURSOS**: curso de fabricación de carteles de neón (online o presencial, con kit incluido). Ciclo: cliente pide info → recibe modalidad/precio → paga → recibe acceso/material. Objeciones típicas: dudas de modalidad, financiación.
+
+Estos dos verticales tienen ciclos, objeciones, intent signals y customer profiles COMPLETAMENTE distintos. Identificá primero cuál es y aplicá el marco correspondiente.
 
 Devolvé SOLO un JSON válido (sin markdown, sin code blocks, sin texto extra), con este schema EXACTO:
 
 {
   "outcome": "sold" | "lost" | "abandoned_by_client" | "in_progress" | "spam",
-  "outcome_reason": "string corto explicando por qué",
+  "outcome_reason": "string corto",
   "product_type": "cartel_personalizado" | "curso" | "franquicia" | "tercerizacion" | "otro",
-  "product_details": "string descriptivo del producto solicitado (medidas, colores, texto del cartel, etc)",
-  "vertical": "particular" | "local" | "franquicia" | "evento" | "tercerizacion" | "otro",
-  "customer_profile": "string corto: edad/perfil/intención",
-  "intent_signals": ["array de signals tipo 'pidio_precio_temprano', 'pregunto_envios', 'mostro_foto_referencia', 'pidio_seña', 'pago_completo', 'dudo_dias_antes_decidir', 'pregunto_curso', 'pidio_franquicia'"],
-  "objections": ["array de objeciones: 'precio_alto', 'tiempo_entrega', 'tamaño', 'envio_lejos', 'desconfianza', etc"],
-  "key_questions": ["array de preguntas LITERAL del cliente (3-5 más importantes)"],
-  "ad_source_inferred": "si el primer mensaje del cliente sugiere de qué publicidad vino, descripción corta. Si no se puede inferir: ''",
-  "joaco_approach": "string descriptivo de cómo respondió Joaco/el equipo (tiempos, info dada, upsells, tono)",
-  "what_worked": "string: qué cosas concretas hicieron avanzar la conversación hacia venta",
-  "what_didnt": "string: qué cosas frenaron o casi pierden al cliente",
+  "product_details": "string descriptivo del producto/curso solicitado",
+  "vertical": "particular" | "local" | "franquicia" | "evento" | "tercerizacion" | "alumno_curso" | "otro",
+  "customer_profile": "string corto: perfil del cliente",
+  "intent_signals": ["array — VER LISTAS NORMALIZADAS ABAJO"],
+  "objections": ["array — VER LISTAS NORMALIZADAS ABAJO"],
+  "key_questions": ["array de 3-5 preguntas literales más importantes del cliente"],
+  "ad_source_inferred": "string solo si cliente cita ad/copy; sino ''",
+  "joaco_approach": "string: cómo respondió Joaco/equipo (tiempos, tono, upsells)",
+  "what_worked": "string: qué cerró/avanzó la venta",
+  "what_didnt": "string: qué frenó",
   "sentiment_final": "positive" | "neutral" | "negative",
-  "next_action": "string: qué se debería hacer ahora (follow-up, postventa, archivar, etc)",
+  "next_action": "string: qué hacer ahora",
   "confidence": "low" | "medium" | "high"
 }
 
-Reglas:
-- Si la conversación tiene muy pocos mensajes (< 3) y no hay info clara, devolvé confidence: "low" y outcome: "in_progress" o "spam" según corresponda.
-- outcome=sold: confirmá que hubo seña, pago, o confirmación explícita de compra.
-- outcome=lost: el cliente decidió NO comprar explícitamente.
-- outcome=abandoned_by_client: dejó de responder sin decisión clara.
-- outcome=in_progress: la conversación está activa y aún se está negociando.
-- outcome=spam: bot, mensaje sin contexto, número equivocado.
-- En product_details poné info concreta del producto (no genérico). Si no hay info, "".
-- ad_source_inferred: SOLO si el cliente literalmente menciona el ad o cita un copy. No inventes.
+CRÍTICO — USAR SOLO ESTAS ETIQUETAS NORMALIZADAS según el vertical detectado. NO inventes variantes. Si una situación no encaja, usá la más cercana o omitila.
 
-Respondé SOLO con el JSON, sin texto adicional.`;
+**Para CARTELES (product_type = "cartel_personalizado" / "tercerizacion" / "franquicia"):**
+- objections: precio_alto, tiempo_entrega_largo, no_le_gusto_diseno, dudo_calidad, problema_envio_distancia, presupuesto_limitado, silencio_post_presupuesto, prefiere_otro_proveedor, cambio_de_idea, descuento_no_satisfizo, tamano_no_acordado, no_quiere_pagar_envio
+- intent_signals: pidio_presupuesto, mando_foto_referencia, pidio_medidas, especifico_colores, eligio_dimmer, eligio_base_acrilica, pidio_envio, pago_sena, pago_completo, pidio_descuento, urgencia_fecha_evento, pidio_logo_marca, eligio_fondo_transparente, eligio_fondo_negro, pidio_postventa
+
+**Para CURSOS (product_type = "curso"):**
+- objections: precio_alto_curso, no_tiene_tarjeta_credito, esperando_proximo_pago, prefiere_aprender_youtube_gratis, dudo_certificacion, distancia_lejos_si_presencial, falta_tiempo_para_curso, prefiere_otra_modalidad, no_esta_seguro_si_le_gustara, problemas_de_pago
+- intent_signals: pidio_info_curso, pregunto_modalidad, vio_videos_demo, pregunto_kit_incluido, pregunto_fechas, hizo_pago_parcial, completo_pago, pregunto_descuento_grupo, quiere_segunda_actividad_economica, pregunto_certificacion, pregunto_si_para_hijo, pregunto_acceso_videos_grabados
+
+Reglas de outcome:
+- sold: hubo seña/pago/entrega/confirmación EXPLÍCITA de compra.
+- lost: cliente decidió NO comprar EXPLÍCITAMENTE.
+- abandoned_by_client: dejó de responder sin decisión clara.
+- in_progress: negociación activa.
+- spam: bot/mensaje sin contexto/número equivocado.
+
+product_details: concreto (medidas/colores/dimensiones para carteles; modalidad/fecha/incluye-kit para cursos). Si no hay info, "".
+
+confidence: 'low' si <3 msgs útiles o información ambigua; 'high' si flow claro.
+
+Respondé SOLO el JSON, sin texto adicional.`;
 
 // Junta el contexto completo de un chat (text+transcripciones+adjuntos) para
 // pasar a Claude. Limita a últimos N msgs para no explotar el context window.
@@ -2805,9 +2819,18 @@ export default {
       // Agregados pre-calculados para el dashboard de insights IA.
       // Devuelve resumen, distribución por ad, por vertical, top objeciones,
       // top "qué funcionó" y costo total acumulado del análisis.
+      // Filtro opcional ?product_type=cartel_personalizado|curso|... para
+      // segmentar por vertical (los ciclos de venta son completamente distintos).
       if (request.method === 'GET' && path === '/admin/wa/insights') {
         try {
-          const results = {};
+          const productFilter = url.searchParams.get('product_type') || '';
+          const where = productFilter
+            ? `WHERE outcome != '' AND product_type = '${productFilter.replace(/'/g, "''")}'`
+            : `WHERE outcome != ''`;
+          const whereLabels = productFilter
+            ? `WHERE product_type = '${productFilter.replace(/'/g, "''")}'`
+            : ``;
+          const results = { filter: productFilter };
           // Resumen general — outcomes y costo
           const summary = await env.DB.prepare(
             `SELECT
@@ -2817,14 +2840,17 @@ export default {
               SUM(CASE WHEN outcome = 'abandoned_by_client' THEN 1 ELSE 0 END) AS abandoned,
               SUM(CASE WHEN outcome = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
               SUM(CASE WHEN outcome = 'spam' THEN 1 ELSE 0 END) AS spam
-            FROM wa_conversations WHERE outcome != ''`
+            FROM wa_conversations ${where}`
           ).first();
           results.summary = summary || {};
           const costRow = await env.DB.prepare(
             `SELECT ROUND(SUM(cost_usd_estimated), 2) AS total_cost FROM wa_chat_analyses WHERE error = ''`
           ).first();
           results.total_cost_usd = costRow?.total_cost || 0;
-          // Por ad — solo ads que tengan al menos 1 análisis
+          // Por ad — solo ads que tengan al menos 1 análisis. Aplica filtro de producto si está activo.
+          const adWhere = productFilter
+            ? `WHERE ad_name != '' AND product_type = '${productFilter.replace(/'/g, "''")}'`
+            : `WHERE ad_name != ''`;
           results.by_ad = (await env.DB.prepare(
             `SELECT ad_name, campaign_name,
               COUNT(*) AS total,
@@ -2833,11 +2859,14 @@ export default {
               SUM(CASE WHEN outcome = 'abandoned_by_client' THEN 1 ELSE 0 END) AS abandoned,
               SUM(CASE WHEN outcome = 'in_progress' THEN 1 ELSE 0 END) AS in_progress
             FROM wa_conversations
-            WHERE ad_name != ''
+            ${adWhere}
             GROUP BY ad_name, campaign_name
             ORDER BY total DESC LIMIT 30`
           ).all()).results || [];
-          // Por vertical
+          // Por vertical (vertical del CLIENTE: particular/local/franquicia/etc — distinto a product_type)
+          const vertWhere = productFilter
+            ? `WHERE vertical != '' AND product_type = '${productFilter.replace(/'/g, "''")}'`
+            : `WHERE vertical != ''`;
           results.by_vertical = (await env.DB.prepare(
             `SELECT vertical,
               COUNT(*) AS total,
@@ -2846,7 +2875,7 @@ export default {
               SUM(CASE WHEN outcome = 'abandoned_by_client' THEN 1 ELSE 0 END) AS abandoned,
               SUM(CASE WHEN outcome = 'in_progress' THEN 1 ELSE 0 END) AS in_progress
             FROM wa_conversations
-            WHERE vertical != ''
+            ${vertWhere}
             GROUP BY vertical
             ORDER BY total DESC`
           ).all()).results || [];
@@ -2866,8 +2895,11 @@ export default {
              WHERE sentiment_final != '' GROUP BY sentiment_final ORDER BY n DESC`
           ).all()).results || [];
           // Top objeciones (parseamos los JSON arrays a flat list)
+          const objWhere = productFilter
+            ? `WHERE objections != '' AND objections != '[]' AND product_type = '${productFilter.replace(/'/g, "''")}'`
+            : `WHERE objections != '' AND objections != '[]'`;
           const objRows = (await env.DB.prepare(
-            `SELECT objections FROM wa_conversations WHERE objections != '' AND objections != '[]'`
+            `SELECT objections FROM wa_conversations ${objWhere}`
           ).all()).results || [];
           const objCounts = {};
           for (const r of objRows) {
@@ -2882,9 +2914,12 @@ export default {
           results.top_objections = Object.entries(objCounts)
             .sort((a, b) => b[1] - a[1]).slice(0, 20)
             .map(([k, v]) => ({ objection: k, count: v }));
-          // Top intent signals
+          // Top intent signals (mismo filtro de producto)
+          const intWhere = productFilter
+            ? `WHERE intent_signals != '' AND intent_signals != '[]' AND product_type = '${productFilter.replace(/'/g, "''")}'`
+            : `WHERE intent_signals != '' AND intent_signals != '[]'`;
           const intRows = (await env.DB.prepare(
-            `SELECT intent_signals FROM wa_conversations WHERE intent_signals != '' AND intent_signals != '[]'`
+            `SELECT intent_signals FROM wa_conversations ${intWhere}`
           ).all()).results || [];
           const intCounts = {};
           for (const r of intRows) {

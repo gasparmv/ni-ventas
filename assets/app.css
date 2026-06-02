@@ -4068,3 +4068,9 @@ table.t td.cliente { font-weight: 600; }
 .ins-rank-fill { position:absolute; left:0; top:0; bottom:0; background:linear-gradient(90deg, #06b6d4, #22c55e); opacity:.5 }
 .ins-rank-bar span { position:relative; padding-left:8px; font-size:12px; font-weight:600 }
 
+
+.ins-tabs { display:flex; gap:4px; margin-bottom:24px; padding-bottom:12px; border-bottom:1px solid #2a3942 }
+.ins-tab { padding:8px 16px; background:transparent; border:0; color:#9ca3af; cursor:pointer; font-size:14px; border-radius:6px 6px 0 0; transition:all .15s; font-family:inherit }
+.ins-tab:hover { background:#1a2530; color:#e9edef }
+.ins-tab.active { background:#06b6d4; color:#fff; font-weight:600 }
+

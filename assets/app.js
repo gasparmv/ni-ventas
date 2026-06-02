@@ -5578,7 +5578,7 @@ function renderBulkSection() {
 // conversaciones con Claude. Los datos los provee el endpoint
 // /admin/wa/insights del worker.
 // ============================================================
-const insightsState = { data: null, loading: false, error: null };
+const insightsState = { data: null, loading: false, error: null, productFilter: '' };
 
 function renderInsights() {
   if (!isAdmin()) return `<div class="page-head"><h1>Insights IA</h1></div><div class="error">Solo admin.</div>`;
@@ -5597,6 +5597,14 @@ function renderInsights() {
   const explicitDecided = sold + lost;
   const explicitRate = explicitDecided > 0 ? Math.round((sold / explicitDecided) * 100) : 0;
 
+  const pf = insightsState.productFilter;
+  const tabs = [
+    { v: '', label: 'TODO', count: '' },
+    { v: 'cartel_personalizado', label: '🎨 Carteles', count: '' },
+    { v: 'curso', label: '🎓 Cursos', count: '' },
+    { v: 'tercerizacion', label: '🏭 Tercerización', count: '' },
+    { v: 'franquicia', label: '⚙ Franquicia', count: '' }
+  ];
   return `
     <div class="page-head">
       <h1>Insights IA</h1>
@@ -5604,6 +5612,9 @@ function renderInsights() {
         <span style="opacity:.6;font-size:13px">Total analizado: ${total} · Gastado: $${(d.total_cost_usd||0).toFixed(2)} USD</span>
         <button class="btn" id="insights-refresh">↻ Refrescar</button>
       </div>
+    </div>
+    <div class="ins-tabs">
+      ${tabs.map(t => `<button class="ins-tab${pf === t.v ? ' active' : ''}" data-pf="${t.v}">${t.label}</button>`).join('')}
     </div>
 
     <div class="kpi-grid" style="margin-bottom:24px">
@@ -5731,8 +5742,10 @@ function renderInsightsRankList(rows, labelField, countField) {
 async function loadInsights() {
   if (!CONFIG.trackerUrl || !STATE.token) return;
   insightsState.loading = true;
+  const pf = insightsState.productFilter;
+  const q = pf ? '?product_type=' + encodeURIComponent(pf) : '';
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/insights', { headers: authHeaders() });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/insights' + q, { headers: authHeaders() });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     insightsState.data = await r.json();
     insightsState.error = null;
@@ -5751,6 +5764,16 @@ function bindInsights() {
   }
   const btn = document.getElementById('insights-refresh');
   if (btn) btn.onclick = () => loadInsights();
+  // Tabs de filtro por product_type
+  document.querySelectorAll('.ins-tab').forEach(t => {
+    t.onclick = () => {
+      const pf = t.dataset.pf || '';
+      if (pf === insightsState.productFilter) return;
+      insightsState.productFilter = pf;
+      insightsState.data = null; // force re-fetch
+      loadInsights();
+    };
+  });
 }
 
 function renderChat() {
