@@ -1658,6 +1658,9 @@ function render() {
   if (STATE.view === 'actividad') bindActividad();
   if (STATE.view === 'chat') bindChat();
   if (STATE.view === 'admin') bindAdmin();
+  // Sincronizar classes mobile del chat (chat-mobile-list / chat-mobile-conv)
+  // en el .app raíz. Solo el CSS bajo el media query mobile las usa.
+  if (typeof _applyMobileChatClass === 'function') _applyMobileChatClass();
 }
 
 function renderShell() {
@@ -4566,6 +4569,10 @@ const chatState = {
   // Ad attribution por contacto (Meta Click-to-WhatsApp). Map phone → attribution row.
   // Se carga lazy cuando seleccionás un chat. Si no hay attribution → null.
   adAttributions: {},
+  // Mobile UX (≤768px): 'list' muestra solo el sidebar de contactos full-screen
+  // (estilo WA), 'conversation' muestra solo la conversación con back arrow.
+  // En desktop se ignora y siempre se muestra el split-view completo.
+  mobileView: 'list',
 };
 
 // Avatar color palettes [base, accent] — 25 distinct hues for maximum differentiation
@@ -5858,6 +5865,9 @@ function renderChatConversation() {
   const inboundCount = chatState.messages.filter(m => m.direction === 'inbound').length;
   return `
     <div class="chat-header">
+      <button class="chat-back-btn" id="chat-back-btn" title="Volver a la lista" aria-label="Volver">
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+      </button>
       ${avatarHtml(phone, name, 40)}
       <div style="flex:1;min-width:0">
         <div class="chat-header-name">${escapeHtml(name || formatPhoneDisplay(phone))}</div>
@@ -6916,10 +6926,68 @@ function bindAudioPlayers() {
   });
 }
 
+// ===== Mobile chat navigation (estilo WhatsApp app) =====
+// En pantallas ≤768px el chat funciona como WA mobile: lista de chats full-screen,
+// tap → conversación full-screen con back arrow. Mantenemos history.pushState así
+// el botón "atrás" del browser/Android funciona como esperás.
+function _isMobileViewport() {
+  return window.matchMedia('(max-width: 768px)').matches;
+}
+function _applyMobileChatClass() {
+  const appEl = document.querySelector('.app');
+  if (!appEl) return;
+  appEl.classList.remove('chat-mobile-list', 'chat-mobile-conv');
+  if (STATE.view !== 'chat') return;
+  // Aplicamos las classes SIEMPRE (no solo en mobile) — el CSS las activa solo
+  // bajo el media query, así no rompemos el split-view de desktop.
+  appEl.classList.add(chatState.mobileView === 'conversation' ? 'chat-mobile-conv' : 'chat-mobile-list');
+}
+function enterMobileChatConversation() {
+  chatState.mobileView = 'conversation';
+  _applyMobileChatClass();
+  // Marker en history para que el botón "atrás" del browser nos devuelva a la lista
+  // en vez de salir del chat view. Solo si todavía no estamos en un state nuestro.
+  if (_isMobileViewport()) {
+    try {
+      if (!history.state || history.state.mobileChat !== 'conversation') {
+        history.pushState({ mobileChat: 'conversation' }, '');
+      }
+    } catch (_) {}
+  }
+}
+function exitMobileChatConversation() {
+  chatState.mobileView = 'list';
+  _applyMobileChatClass();
+  // Volvemos al state anterior (la lista) sin pushear uno nuevo, así "atrás"
+  // sigue navegando entre las views de la app.
+  try {
+    if (history.state && history.state.mobileChat === 'conversation') {
+      history.back();
+      return; // popstate handler abajo ya limpia
+    }
+  } catch (_) {}
+}
+// popstate (atrás del browser) en mobile + en chat conversation → volver a la lista.
+if (typeof window !== 'undefined' && !window._chatPopstateBound) {
+  window.addEventListener('popstate', (e) => {
+    if (STATE.view !== 'chat') return;
+    if (!_isMobileViewport()) return;
+    if (chatState.mobileView === 'conversation') {
+      chatState.mobileView = 'list';
+      _applyMobileChatClass();
+      // No prevenir default — dejamos que la navegación siga si hay más history.
+    }
+  });
+  window._chatPopstateBound = true;
+}
+
 async function selectChatContact(phone) {
   chatState.selectedPhone = phone;
   const contact = chatState.contacts.find(c => c.phone === phone);
   chatState.selectedName = contact?.name || '';
+  // En mobile, al tocar un chat pasamos a la vista "conversación full-screen"
+  // (oculta lista + sidebar nav). En desktop esto no cambia nada visual.
+  enterMobileChatConversation();
   chatState.loadingConv = true;
 
   // Show loading state immediately
@@ -6998,7 +7066,13 @@ function bindChatConversation() {
   const fileInput = document.getElementById('chat-file-input');
   const micBtn = document.getElementById('btn-mic');
   const labelsBtn = document.getElementById('btn-labels');
+  const backBtn = document.getElementById('chat-back-btn');
   bindChatPostit();
+  // Back arrow del header (solo se ve en mobile via CSS, pero igual lo bindeamos
+  // siempre para no tener que distinguir).
+  if (backBtn) {
+    backBtn.onclick = (e) => { e.preventDefault(); exitMobileChatConversation(); };
+  }
 
   if (ta) {
     ta.addEventListener('input', () => {

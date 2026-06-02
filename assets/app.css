@@ -3788,3 +3788,71 @@ table.t td.cliente { font-weight: 600; }
     padding-top: max(12px, env(safe-area-inset-top));
   }
 }
+
+/* ===========================================================================
+   CHAT MOBILE — estilo WhatsApp app (lista full-screen ↔ conversación full-screen)
+   ===========================================================================
+   En desktop el chat es split-view: lista a la izquierda + conversación a la
+   derecha. En mobile (≤768px) eso es inusable: las dos columnas se apilan
+   verticalmente y el input queda lejos.
+
+   Solución estilo WhatsApp: en mobile, solo una de las dos vistas está visible
+   a la vez. Las classes `chat-mobile-list` y `chat-mobile-conv` van en el `.app`
+   raíz desde JS (ver _applyMobileChatClass). El back arrow del header
+   (.chat-back-btn) está en el HTML siempre pero solo se ve en mobile.
+   =========================================================================== */
+/* Default: back arrow oculto. El media query mobile lo activa. */
+.chat-back-btn { display: none; }
+
+@media (max-width: 768px) {
+  /* Override del flex-direction: column que pone .chat-layout en max-width: 900px.
+     En mobile queremos UNO de los dos paneles ocupando todo, no apilados. */
+  .chat-layout {
+    flex-direction: row;
+    height: 100%;
+  }
+  .chat-layout > .chat-contacts,
+  .chat-layout > .chat-main {
+    flex: 1 1 100%;
+    max-width: 100%;
+    width: 100%;
+  }
+  /* Por default (chat-mobile-list o sin class), ocultamos la conversación */
+  .app.chat-mobile-list .chat-layout > .chat-main,
+  .app:not(.chat-mobile-conv):not(.chat-mobile-list) .chat-layout > .chat-main {
+    display: none;
+  }
+  /* En "conversation", ocultamos la lista y el sidebar nav (full-screen focus) */
+  .app.chat-mobile-conv .chat-layout > .chat-contacts {
+    display: none;
+  }
+  .app.chat-mobile-conv .sidebar {
+    display: none;
+  }
+  /* Sin sidebar bottom-bar, el main no necesita el padding bottom para no taparse */
+  .app.chat-mobile-conv .main,
+  .app.chat-mobile-conv .main.main--chat {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* El back arrow visible solo cuando estás en mobile chat conversation */
+  .chat-back-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 0;
+    color: #e9edef;
+    cursor: pointer;
+    padding: 6px;
+    margin-right: 4px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .chat-back-btn:hover,
+  .chat-back-btn:active { background: rgba(255,255,255,.08); }
+  /* El back arrow queda visible SOLO durante la vista conversación
+     (en lista no tiene sentido — ya estás en la "raíz" del chat). */
+  .app.chat-mobile-list .chat-back-btn,
+  .app:not(.chat-mobile-conv) .chat-back-btn { display: none; }
+}
+
