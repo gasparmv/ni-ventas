@@ -1306,6 +1306,16 @@ table.t td.cliente { font-weight: 600; }
   height: 72px;
   cursor: pointer;
   transition: background .15s;
+  /* === PERF: content-visibility skipea layout/paint de items off-screen ===
+     El sidebar tiene 1000+ contactos pero solo ~10 son visibles. Sin esto,
+     CUALQUIER reflow forzado (tipear en el textarea, polling refresh, etc)
+     re-mide los 1000 items → typing lag de cientos de ms.
+     Con content-visibility:auto el browser saltea layout/paint de los
+     contactos fuera del viewport. contain-intrinsic-size le dice al browser
+     qué espacio reservar (alto fijo 72px), así el scrollbar queda correcto.
+     Da hasta 7x mejora de rendering según web.dev. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 .chat-contact:hover { background: #202c33; }
 .chat-contact.active { background: #2a3942; }
@@ -1543,6 +1553,13 @@ table.t td.cliente { font-weight: 600; }
   box-shadow: 0 1px 0.5px rgba(11,20,26,.13);
   margin-bottom: 1px;
   clear: both;
+  /* === PERF: idem .chat-contact — skipear layout de bubbles off-screen ===
+     200+ bubbles en el listado, ~10 visibles. contain-intrinsic-size estima
+     altura promedio (text: 50px) — el browser ajusta si el bubble entra al
+     viewport. Bubbles más altos (imagen/audio/video) tienen su propia altura
+     y el layout se corrige al hacer scroll. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 50px;
 }
 .chat-msg.inbound {
   align-self: flex-start;
