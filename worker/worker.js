@@ -534,10 +534,10 @@ async function processLeadgenWebhook(env, body) {
         continue;
       }
 
-      // Mandar template lead_b2b_followup con (firstName, vertical).
+      // Mandar template lead_b2b_followup con (firstName,). Sin {{2}}: el copy
+      // del template es genérico para carteles, no segmentado por vertical.
       const tplResult = await waSendTemplate(env, phoneNorm, 'lead_b2b_followup', 'es', [
-        firstName || 'amigo/a',
-        verticalUsed || 'tu negocio'
+        firstName || 'amigo/a'
       ]);
 
       if (tplResult?.ok) {
@@ -549,9 +549,10 @@ async function processLeadgenWebhook(env, body) {
         } catch (_) {}
 
         // Guardar el outbound en wa_messages para que aparezca en el CRM como
-        // primer mensaje de la conversación. El body es un preview legible.
+        // primer mensaje de la conversación. El body es el copy real (lo que
+        // recibió el lead), con {{1}} reemplazado por el firstName.
         try {
-          const previewBody = `Hola ${firstName || 'amigo/a'} 👋\n\nSoy Joaco de Neon Infinito. Vi que dejaste tus datos en nuestra publicidad — gracias por interesarte.\n\nHacemos carteles de neón LED para ${verticalUsed} con calidad premium y entrega en todo el país.\n\n¿Querés que te cuente cómo trabajamos y armemos algo juntos?`;
+          const previewBody = `Holaa ${firstName || 'amigo/a'}, por aca Joaco de Neon Infinito! Nos llego tu formulario para presupuestar carteles! Tenes un diseño/imagen de referencia para pasarnos asi te lo cotizamos?`;
           await env.DB.prepare(
             `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
              VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')`
@@ -2354,8 +2355,7 @@ export default {
           if (!row) return json({ error: 'lead not found' }, 404);
           if (!row.phone) return json({ error: 'lead has no valid phone' }, 400);
           const tplResult = await waSendTemplate(env, row.phone, 'lead_b2b_followup', 'es', [
-            row.first_name || 'amigo/a',
-            row.vertical || 'tu negocio'
+            row.first_name || 'amigo/a'
           ]);
           if (tplResult?.ok) {
             const wamid = tplResult.data?.messages?.[0]?.id || '';
