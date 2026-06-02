@@ -5985,28 +5985,38 @@ function reactionsBadgeHtml(wamid, reactionsByParent) {
   return `<div class="chat-msg-reactions">${chips}</div>`;
 }
 
-function renderChatBubbles() {
-  const msgs = chatState.messages;
+function renderChatBubbles(msgs, opts) {
+  // Permite render incremental: pasás un subset de msgs + opts.previousMsg
+  // para arrancar el lastDate/lastDir desde un "ancla" sin renderearla. Y
+  // opts.skipOlderBtn evita duplicar el botón de "cargar anteriores" cuando
+  // estás appendeando bubbles nuevos al DOM existente.
+  msgs = msgs || chatState.messages;
+  opts = opts || {};
   if (!msgs.length) return '<div class="chat-empty">Sin mensajes</div>';
   // Botón "cargar anteriores" arriba si hay más mensajes históricos por traer.
-  const olderBtn = chatState.hasMoreOlder ? `
+  const olderBtn = (!opts.skipOlderBtn && chatState.hasMoreOlder) ? `
     <div class="chat-load-older-wrap">
       <button class="chat-load-older-btn" id="chat-load-older-btn" ${chatState.loadingOlder ? 'disabled' : ''}>
         ${chatState.loadingOlder ? '⏳ Cargando…' : '↑ Cargar mensajes anteriores'}
       </button>
     </div>
   ` : '';
-  // Pre-armar mapa de reacciones por wamid del padre.
+  // Pre-armar mapa de reacciones por wamid del padre. Para el caso incremental
+  // usamos chatState.messages completo (no solo el subset) — las reacciones
+  // pueden venir en cualquier orden y aplicarse a bubbles existentes en DOM.
+  const reactionsSource = opts.allMsgsForReactions || msgs;
   const reactionsByParent = new Map();
-  for (const m of msgs) {
+  for (const m of reactionsSource) {
     if (m.msg_type === 'reaction' && m.context_id) {
       if (!reactionsByParent.has(m.context_id)) reactionsByParent.set(m.context_id, []);
       reactionsByParent.get(m.context_id).push(m);
     }
   }
   let html = olderBtn;
-  let lastDate = '';
-  let lastDir = '';
+  // Arranco el lastDate/lastDir desde el "ancla" si fue provisto (caso
+  // incremental: el último bubble en DOM define la continuidad de fecha).
+  let lastDate = opts.previousMsg ? opts.previousMsg.ts.slice(0, 10) : '';
+  let lastDir = opts.previousMsg ? (opts.previousMsg.direction || 'inbound') : '';
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
     if (m.msg_type === 'reaction') continue; // se renderizan como chips, no como bubble
@@ -6218,19 +6228,16 @@ function renderChatBubbles() {
   return html;
 }
 
-function renderChatMessages() {
-  const container = document.getElementById('chat-messages');
-  if (!container) return;
-  container.innerHTML = renderChatBubbles();
-  // Bind del botón "↑ Cargar mensajes anteriores" si está presente.
-  const olderBtn = container.querySelector('#chat-load-older-btn');
-  if (olderBtn) olderBtn.onclick = handleLoadOlderMessages;
-  // Inyectar acciones hover (forward + reaccionar) y chips de reacción en cada bubble con wamid.
-  const reactionsByParent = renderChatBubbles._reactionsByParent || new Map();
-  container.querySelectorAll('.chat-msg[data-wamid]').forEach(el => {
+// Post-procesa los bubbles recién insertados al DOM (quote blocks, action
+// buttons, chips de reacción, event handlers). Si se le pasa `scope`, solo
+// trabaja sobre los elementos dentro de ese scope (caso render incremental).
+function _postProcessBubbles(container, reactionsByParent, scope) {
+  const root = scope || container;
+  root.querySelectorAll('.chat-msg[data-wamid]').forEach(el => {
     const wamid = el.dataset.wamid;
     if (!wamid) return;
-    // Quote block (si este mensaje cita a otro)
+    // Skip si ya tiene las acciones inyectadas (defensa contra doble bind)
+    if (el.querySelector('.chat-msg-actions')) return;
     const m = chatState.messages.find(x => x.wamid === wamid);
     if (m && m.context_id) {
       const qHtml = quoteBlockHtml(m);
@@ -6240,8 +6247,8 @@ function renderChatMessages() {
     const chips = reactionsBadgeHtml(wamid, reactionsByParent);
     if (chips) el.insertAdjacentHTML('beforeend', chips);
   });
-  // Click en una cita scrollea/destaca el mensaje original
-  container.querySelectorAll('[data-jump-to]').forEach(q => {
+  root.querySelectorAll('[data-jump-to]').forEach(q => {
+    if (q.dataset._bound) return; q.dataset._bound = '1';
     q.style.cursor = 'pointer';
     q.onclick = (e) => {
       e.stopPropagation();
@@ -6252,11 +6259,113 @@ function renderChatMessages() {
       setTimeout(() => target.classList.remove('chat-msg-flash'), 1500);
     };
   });
+}
+
+function renderChatMessages() {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+
+  // ===== Render incremental cuando es seguro =====
+  // En vez de hacer innerHTML = ... y reconstruir todos los bubbles cada vez
+  // que el polling detecta cambios, intentamos un append incremental de los
+  // mensajes nuevos al final. Eso evita el reflow completo del DOM (que es
+  // lo que generaba lag al escribir en chats pesados de 200+ mensajes).
+  //
+  // Condiciones para incremental:
+  //   1. Ya hay bubbles renderizados en el DOM (no es la primera vez).
+  //   2. Los mensajes nuevos en chatState son TODOS más nuevos (ts >=) que
+  //      el último bubble en DOM. Si hay mensajes "insertados al medio"
+  //      (status update que cambió el ts, load older), caemos al full render.
+  //   3. No hay highlightWamid pendiente (caso de búsqueda → necesita scrollIntoView
+  //      sobre TODO el listado, mejor un full render para asegurarnos).
+  //   4. El número de bubbles actuales corresponde al de chatState (no se
+  //      borraron mensajes).
+  const existingBubbles = container.querySelectorAll('.chat-msg[data-wamid]');
+  const allMsgs = chatState.messages || [];
+  const renderableMsgs = allMsgs.filter(m => m.msg_type !== 'reaction');
+  // Buildeamos el lookup por wamid una sola vez, lo usamos tanto para
+  // determinar el ts del último bubble como para encontrar el "anchor".
+  const msgByWamid = new Map();
+  for (const m of allMsgs) if (m.wamid) msgByWamid.set(m.wamid, m);
+
+  const canTryIncremental =
+    existingBubbles.length > 0 &&
+    !chatState.highlightWamid &&
+    renderableMsgs.length > 0;
+
+  if (canTryIncremental) {
+    const existingWamids = new Set();
+    for (const el of existingBubbles) existingWamids.add(el.dataset.wamid);
+    const newMsgs = renderableMsgs.filter(m => m.wamid && !existingWamids.has(m.wamid));
+    // Detectar reacciones nuevas a bubbles ya en DOM (no son "newMsgs" porque
+    // las reactions están filtradas, pero impactan los chips).
+    const newReactionsToExisting = allMsgs.some(m =>
+      m.msg_type === 'reaction' && m.context_id && existingWamids.has(m.context_id) && !existingWamids.has(m.wamid)
+    );
+
+    if (newMsgs.length === 0) {
+      // Nada nuevo que renderizar — pero quizás cambiaron status de mensajes
+      // existentes (sent→delivered→read) o llegó una reacción nueva. Actualizamos
+      // los ticks y chips in-place sin reflow completo.
+      _updateExistingBubbleStatuses(container, msgByWamid);
+      if (newReactionsToExisting) {
+        const reactionsByParent = _buildReactionsMap(allMsgs);
+        _refreshReactionChips(container, reactionsByParent);
+      }
+      return;
+    }
+
+    // ¿Todos los nuevos van al final? Comparamos contra el ts del ÚLTIMO bubble
+    // en DOM (no leemos dataset.ts porque no se emite; lookup por wamid).
+    const lastBubble = existingBubbles[existingBubbles.length - 1];
+    const lastExistingWamid = lastBubble.dataset.wamid;
+    const lastExistingMsg = msgByWamid.get(lastExistingWamid);
+    const lastTs = (lastExistingMsg && lastExistingMsg.ts) || '';
+    const allAtEnd = !lastTs || newMsgs.every(m => (m.ts || '') >= lastTs);
+
+    if (allAtEnd) {
+      // ✅ Render incremental: append solo los nuevos
+      const newHtml = renderChatBubbles(newMsgs, {
+        skipOlderBtn: true,
+        previousMsg: lastExistingMsg || null,
+        allMsgsForReactions: allMsgs
+      });
+      // Buildeamos en un fragment temporal para post-procesar antes de mover al DOM real.
+      const tmp = document.createElement('div');
+      tmp.innerHTML = newHtml;
+      const reactionsByParent = renderChatBubbles._reactionsByParent || new Map();
+      _postProcessBubbles(container, reactionsByParent, tmp);
+      // Detectamos si el usuario estaba al fondo ANTES de insertar (para
+      // decidir auto-scroll). Threshold de 80px para tolerar leves scrolls hacia arriba.
+      const wasAtBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < 80;
+      while (tmp.firstChild) container.appendChild(tmp.firstChild);
+      // Refrescar chips de reacciones de bubbles existentes (las nuevas msgs
+      // pueden incluir reacciones a bubbles viejos).
+      _refreshReactionChips(container, reactionsByParent);
+      // Bind handlers solo al markup nuevo (audio/imágenes/menús contextuales).
+      // bindXxx() son idempotentes (chequean dataset._bound o similar), pero
+      // igual operan sobre TODO el container — ok porque ya skipean los ya bindeados.
+      bindAudioPlayers();
+      bindMessageContextMenus();
+      bindMessageHoverActions();
+      bindMediaPreviewClicks();
+      if (wasAtBottom) container.scrollTop = container.scrollHeight;
+      _updateExistingBubbleStatuses(container, msgByWamid);
+      return;
+    }
+    // Si llegamos acá, hay msgs insertados al medio o reordenados → full render
+  }
+
+  // ===== Full render (fallback / primera vez / casos complejos) =====
+  container.innerHTML = renderChatBubbles();
+  const olderBtn = container.querySelector('#chat-load-older-btn');
+  if (olderBtn) olderBtn.onclick = handleLoadOlderMessages;
+  const reactionsByParent = renderChatBubbles._reactionsByParent || new Map();
+  _postProcessBubbles(container, reactionsByParent);
   bindAudioPlayers();
   bindMessageContextMenus();
   bindMessageHoverActions();
   bindMediaPreviewClicks();
-  // Si venimos de un click en resultado de búsqueda, scrollear al mensaje y destacarlo
   if (chatState.highlightWamid) {
     const target = container.querySelector(`.chat-msg[data-wamid="${chatState.highlightWamid}"]`);
     if (target) {
@@ -6266,12 +6375,72 @@ function renderChatMessages() {
         setTimeout(() => target.classList.remove('chat-msg-flash'), 2200);
       }, 100);
     } else {
-      // No está cargado (mensaje muy viejo no fue traído por la query de mensajes)
       container.scrollTop = container.scrollHeight;
     }
-    chatState.highlightWamid = null; // consumir el flag
+    chatState.highlightWamid = null;
   } else {
     container.scrollTop = container.scrollHeight;
+  }
+}
+
+// Actualiza in-place los ticks de status (sent/delivered/read) sin tocar el
+// resto del bubble. Mucho más liviano que re-renderizar la lista entera.
+// El caller puede pasar un msgByWamid precomputado para evitar rebuildearlo.
+function _updateExistingBubbleStatuses(container, msgByWamid) {
+  if (!msgByWamid) {
+    msgByWamid = new Map();
+    for (const m of (chatState.messages || [])) if (m.wamid) msgByWamid.set(m.wamid, m);
+  }
+  container.querySelectorAll('.chat-msg.outbound[data-wamid]').forEach(el => {
+    const m = msgByWamid.get(el.dataset.wamid);
+    if (!m || !m.status) return;
+    const statusEl = el.querySelector('.chat-msg-status');
+    if (!statusEl) return;
+    const cur = statusEl.className.includes('read') ? 'read'
+              : statusEl.className.includes('delivered') ? 'delivered'
+              : statusEl.className.includes('failed') ? 'failed'
+              : 'sent';
+    const desired = (m.status === 'played' || m.status === 'read') ? 'read'
+                  : m.status === 'delivered' ? 'delivered'
+                  : m.status === 'failed' ? 'failed'
+                  : 'sent';
+    if (cur !== desired) {
+      statusEl.classList.remove('read', 'delivered', 'failed', 'sent');
+      statusEl.classList.add(desired);
+      statusEl.title = desired === 'read' ? 'Leído'
+                     : desired === 'delivered' ? 'Entregado'
+                     : desired === 'failed' ? 'No se pudo entregar'
+                     : 'Enviado';
+      statusEl.innerHTML = desired === 'failed' ? '✗ falló'
+                         : (desired === 'read' || desired === 'delivered') ? TICK_DOUBLE
+                         : TICK_SINGLE;
+    }
+  });
+}
+
+// Construye el mapa context_id → [reactions] desde un array de mensajes.
+// Mismo formato que renderChatBubbles produce internamente.
+function _buildReactionsMap(msgs) {
+  const map = new Map();
+  for (const m of (msgs || [])) {
+    if (m.msg_type === 'reaction' && m.context_id) {
+      if (!map.has(m.context_id)) map.set(m.context_id, []);
+      map.get(m.context_id).push(m);
+    }
+  }
+  return map;
+}
+
+// Cuando llegan reacciones nuevas, actualiza los chips de los bubbles ya
+// renderizados en DOM sin reconstruir el bubble. Reemplaza chips existentes.
+function _refreshReactionChips(container, reactionsByParent) {
+  for (const [parentWamid, _] of reactionsByParent) {
+    const parentEl = container.querySelector(`.chat-msg[data-wamid="${parentWamid}"]`);
+    if (!parentEl) continue;
+    const existingChips = parentEl.querySelector('.chat-msg-reactions');
+    if (existingChips) existingChips.remove();
+    const chipsHtml = reactionsBadgeHtml(parentWamid, reactionsByParent);
+    if (chipsHtml) parentEl.insertAdjacentHTML('beforeend', chipsHtml);
   }
 }
 

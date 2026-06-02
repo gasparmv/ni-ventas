@@ -2,6 +2,23 @@
 
 CRM/dashboard de ventas para Neon Infinito. Frontend en GitHub Pages, backend en Cloudflare Worker.
 
+## ⚠ REGLA CRÍTICA — Verificar sync ANTES de editar
+
+Hay múltiples sesiones de Claude editando este repo desde distintas PCs y celulares (Remote Control). Antes de leer o editar CUALQUIER archivo, **siempre arrancar con esto**:
+
+```bash
+git fetch origin
+git status              # ver si hay cambios uncommitted locales
+git log HEAD..origin/main --oneline   # ver si origin tiene commits que no tenés
+```
+
+- Si `origin/main` tiene commits nuevos → `git pull origin main` ANTES de editar
+- Si hay cambios locales uncommitted → preguntar al usuario qué hacer con ellos antes de pullear (pueden ser de otra sesión Claude que no llegó a commitear)
+- **NUNCA editar sin verificar sync primero.** El tool `Read` lee del filesystem local, no de GitHub. Editar sobre código viejo genera conflictos al pushear o pisa trabajo de otras sesiones.
+
+Si vas a editar un archivo que también modificó un commit reciente del remoto, primero hacer el pull y revisar cómo quedó el archivo actualizado — el problema que vas a resolver puede que ya esté resuelto, o la estructura del código puede haber cambiado.
+
+
 ## Arquitectura
 
 - **Frontend** (`index.html`, `assets/`): SPA estática servida por GitHub Pages en `https://gasparmv.github.io/ni-ventas/`. Push a `main` → deploy automático.
