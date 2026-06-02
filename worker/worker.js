@@ -2033,6 +2033,18 @@ export default {
       // no vacío), unread (count inbound > last_read_ts).
       // Mucho más liviano y escala con la cantidad de chats, no de mensajes.
       if (request.method === 'GET' && path === '/admin/wa/chats-summary') {
+        // === Cache de 4s en Workers Cache API ===
+        // La query SQL pesa 1-2s (3 CTEs + ROW_NUMBER OVER sobre 56k+ msgs).
+        // El client polea cada 4-8s; cacheando 4s reducimos los hits reales a
+        // 1 query cada 4s sin afectar la frescura percibida. El handler de
+        // /admin/wa/mark-read invalida la cache para que el badge unread se
+        // actualice instantáneamente cuando el usuario marca un chat como leído.
+        const cache = caches.default;
+        const cacheUrl = new URL(request.url);
+        cacheUrl.search = ''; // ignorar cache-busters como ?t=123
+        const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
+        const cached = await cache.match(cacheKey);
+        if (cached) return cached;
         try {
           const rs = await env.DB.prepare(`
             WITH last_msg AS (
@@ -2077,7 +2089,11 @@ export default {
             LEFT JOIN unread_counts uc ON uc.phone = lm.phone
             ORDER BY lm.last_ts DESC
           `).all();
-          return json({ chats: rs.results || [] });
+          const response = json({ chats: rs.results || [] });
+          response.headers.set('Cache-Control', 'public, max-age=4');
+          // ctx.waitUntil para no bloquear la response esperando el cache.put.
+          ctx.waitUntil(cache.put(cacheKey, response.clone()));
+          return response;
         } catch (e) {
           return json({ chats: [], error: e.message }, 500);
         }
@@ -2120,6 +2136,15 @@ export default {
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const { phone, ts } = body || {};
         if (!phone || !ts) return json({ error: 'missing phone or ts' }, 400);
+        // Invalidar cache del chats-summary: el unread count del chat marcado
+        // cambia a 0 y el badge tiene que refrescar al instante (no esperar 4s).
+        try {
+          const cacheUrl = new URL(request.url);
+          cacheUrl.pathname = '/admin/wa/chats-summary';
+          cacheUrl.search = '';
+          const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
+          ctx.waitUntil(caches.default.delete(cacheKey));
+        } catch (_) {}
         try {
           await env.DB.prepare(
             'INSERT INTO wa_read_cursor (phone, last_read_ts, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET last_read_ts = excluded.last_read_ts, updated_at = excluded.updated_at'
