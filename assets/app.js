@@ -9395,21 +9395,7 @@ function renderBriefDrawer() {
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:var(--s-4)">
           ${!isNew && canCreateBriefs() ? `<button class="btn btn-ghost" id="brief-delete" style="color:#FF5566;border-color:rgba(255,24,48,.25)" title="Eliminar este brief">🗑 Eliminar</button>` : ''}
           <div style="flex:1"></div>
-          ${(() => {
-            // Botón "Enviar por WhatsApp" — solo cuando el brief está listo,
-            // la consulta vino por WA, y tenemos teléfono guardado.
-            // Back-compat: brief viejo sin origen_lead pero con cliente_wa_id se trata como WA.
-            if (isNew || estado !== 'listo' || !canCotizar()) return '';
-            const origen = (data.origen_lead || '').toLowerCase();
-            const telDigits = String(data.cliente_wa_id || '').replace(/\D/g, '');
-            const isWa = origen === 'wpp' || origen === 'whatsapp' || (origen === '' && telDigits.length >= 8);
-            if (!isWa || telDigits.length < 8) return '';
-            const sending = STATE.briefsEnviando && STATE.briefsEnviando[data.id];
-            return `<button class="btn btn-cyan" id="brief-enviar-wa" ${sending ? 'disabled' : ''} title="Enviar presupuesto por WhatsApp a ${escapeHtml(telDigits)}">
-              ${sending ? '⏳ Enviando…' : '📤 Enviar por WhatsApp'}
-            </button>`;
-          })()}
-          ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-ghost" id="brief-cotizar-popup">💰 Copiar presupuesto</button>` : ''}
+          ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Ver presupuesto</button>` : ''}
           ${!isNew && estado === 'enviado' && isCom ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir Cotizador</button>` : ''}
           ${(isCom || isDis || isNew) ? `<button class="btn ${isNew ? 'btn-cyan' : 'btn-ghost'}" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>` : ''}
         </div>
@@ -9818,108 +9804,6 @@ function closeBriefCotizadorPopup() {
   render();
 }
 
-// ============ ENVIAR PRESUPUESTO POR WHATSAPP API (botón del drawer brief) ============
-// Toma el brief en estado 'listo', arma el texto del presupuesto reutilizando
-// la lógica del cotizador (buildPresupuestoTexto + calcCotizador), y lo manda
-// via POST /admin/wa/send. Si el envío sale OK:
-//   - marca el brief como 'enviado' en D1 (PATCH /admin/briefs/:id)
-//   - actualiza el state local
-//   - guarda también en el Sheet para mantener la traza histórica
-//   - inicia polling de verificación de entrega (delivered/read/failed)
-async function handleBriefEnviarWA() {
-  if (!STATE.briefSelected) return;
-  const briefId = STATE.briefSelected;
-  // No re-mandar si ya está en curso.
-  if (STATE.briefsEnviando[briefId]) return;
-  const brief = STATE.briefs.find(b => b.id === briefId);
-  if (!brief) return;
-
-  // Validaciones — el botón solo se renderiza con datos OK, pero defensivo.
-  if (brief.estado !== 'listo') { alert('El brief no está en estado "Listo".'); return; }
-  if (!brief.ancho_cm || !brief.alto_cm) { alert('Faltan medidas (ancho/alto).'); return; }
-  const telDigits = String(brief.cliente_wa_id || '').replace(/\D/g, '');
-  if (telDigits.length < 8) {
-    await showAlert('Falta el teléfono del cliente o es inválido. Editá el brief y completá el campo "Teléfono".', { title: 'Falta teléfono', variant: 'warn' });
-    return;
-  }
-  if (!STATE.token) {
-    await showAlert('Tenés que estar logueado para enviar por WhatsApp.', { title: 'Login requerido', variant: 'warn' });
-    return;
-  }
-  if (!CONFIG.trackerUrl) { await showAlert('Tracker no configurado', { title: 'Error', variant: 'warn' }); return; }
-
-  // Setear STATE.cotizadorForm para reutilizar buildPresupuestoTexto / calcCotizador
-  // (misma lógica que openBriefCotizadorPopup — pero acá vamos directo al envío).
-  STATE.cotizadorForm = {
-    ancho: brief.ancho_cm,
-    alto:  brief.alto_cm,
-    neon:  brief.neon_mt || 0,
-    tipo:  brief.tipo || 'INT',
-    cliente: brief.cliente_nombre || '',
-    canal: 'WPP',
-    telefono: telDigits,
-    textoOverride: '',
-    extraCarteles: []
-  };
-  const texto = (function(){ try { return buildPresupuestoTexto() || ''; } catch(e) { return ''; } })();
-  if (!texto) {
-    await showAlert('No pude generar el texto del presupuesto. Verificá medidas + título.', { title: 'Error', variant: 'warn' });
-    return;
-  }
-
-  // Confirmación previa — operación irreversible (manda WA al cliente).
-  const ok = await showConfirm(
-    `Voy a mandar el presupuesto del brief "${brief.cliente_nombre || '#' + brief.id}" al WhatsApp +${telDigits}.\n\n¿Confirmás?`,
-    { title: 'Enviar presupuesto', confirmLabel: '📤 Mandar', cancelLabel: 'Cancelar' }
-  ).catch(() => false);
-  if (!ok) return;
-
-  STATE.briefsEnviando[briefId] = true;
-  render();
-  let waOk = false, wamid = '';
-  try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ to: telDigits, body: texto })
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      const detail = j.error || 'no se pudo enviar';
-      const hint = /outside|24|window|template/i.test(String(detail))
-        ? '\n\nWhatsApp Cloud API solo permite mensajes libres si el cliente escribió en las últimas 24hs. Si el cliente no respondió en ese plazo, hay que mandarle primero un template aprobado.'
-        : '';
-      await showAlert(detail + hint, { title: 'No se pudo enviar', variant: 'warn' });
-      return;
-    }
-    waOk = true;
-    wamid = j.id || '';
-    toast('Presupuesto mandado · verificando entrega…');
-  } catch (e) {
-    await showAlert('Error de red al enviar: ' + (e.message || e), { title: 'Error de conexión', variant: 'warn' });
-  } finally {
-    STATE.briefsEnviando[briefId] = false;
-    render();
-  }
-
-  if (!waOk) return;
-
-  // Marcar el brief como 'enviado' en D1.
-  try {
-    const saved = await saveBrief({ id: briefId, estado: 'enviado' });
-    const idx = STATE.briefs.findIndex(b => b.id === saved.id);
-    if (idx >= 0) STATE.briefs[idx] = saved;
-    render();
-  } catch (e) {
-    console.warn('No pude marcar brief como enviado:', e);
-  }
-
-  // Persistir también en Sheet (igual que cuando se manda desde el cotizador).
-  try { await saveCotToSheetFromPopup(); } catch(e) { console.warn('Sheet save falló:', e); }
-
-  // Verificación de entrega en background.
-  if (wamid) verificarEntregaWA(wamid, telDigits);
-}
 
 // Guarda la cotización actual al Sheet "Cotizador Joaco" vía Apps Script.
 // Si el brief abierto no tenía sheet_row, lo persistimos para idempotencia/traza.
@@ -10010,11 +9894,32 @@ function renderBriefCotizadorPopup() {
         <textarea id="brief-cot-popup-text" rows="14"
                   style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-3)">${escapeHtml(texto)}</textarea>
 
-        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
-          <button class="btn btn-ghost" id="brief-cot-popup-copy">📋 Copiar y guardar</button>
-          <button class="btn btn-cyan" id="brief-cot-popup-enviar">✓ Marcar como enviado</button>
-        </div>
-        <div style="font-size:10px;color:var(--fg-mute);text-align:right;margin-top:6px">Ambos botones guardan automáticamente en el Sheet de presupuestos.</div>
+        ${(() => {
+          // Botones del modal:
+          // - "📋 Copiar presupuesto" siempre (clipboard + Sheet). NO marca el
+          //   brief como enviado — útil para clientes de IG que se envían por DM.
+          // - "📤 Enviar por WhatsApp" solo si el brief tiene origen=wpp + tel
+          //   válido. Hace: WA send + Sheet + brief → 'enviado' + cierra modales.
+          // Recuperamos el brief en curso para decidir.
+          const b = STATE.briefs.find(x => x.id === STATE.briefSelected) || {};
+          const o = String(b.origen_lead || '').toLowerCase();
+          const tel = String(b.cliente_wa_id || '').replace(/\D/g, '');
+          const isWa = (o === 'wpp' || o === 'whatsapp' || (o === '' && tel.length >= 8)) && tel.length >= 8;
+          const sending = STATE.briefsEnviando && STATE.briefsEnviando[b.id];
+          const igHint = (o === 'ig' || o === 'instagram')
+            ? '<div style="font-size:10px;color:var(--fg-mute);text-align:left;margin-top:6px">📷 Consulta vino por Instagram — copialo y pegalo en el DM. Cuando lo mandes, marcá el brief como enviado a mano.</div>'
+            : '';
+          return `
+            <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+              <button class="btn btn-ghost" id="brief-cot-popup-copy">📋 Copiar presupuesto</button>
+              ${isWa ? `<button class="btn btn-cyan" id="brief-cot-popup-send-wa" ${sending ? 'disabled' : ''}>
+                ${sending ? '⏳ Enviando…' : '📤 Enviar por WhatsApp'}
+              </button>` : ''}
+            </div>
+            ${igHint}
+            <div style="font-size:10px;color:var(--fg-mute);text-align:right;margin-top:6px">"Copiar" guarda en Sheet · "Enviar" además manda al cliente y marca el brief como enviado.</div>
+          `;
+        })()}
         <div id="brief-cot-popup-status" style="font-size:11px;color:var(--green, #25D366);text-align:right;margin-top:6px;height:14px"></div>
       </div>
     </div>
@@ -10489,8 +10394,6 @@ function bindCotizacion() {
   if (cotBtn) cotBtn.onclick = handleBriefAbrirCotizador;
   const cotPopupBtn = document.getElementById('brief-cotizar-popup');
   if (cotPopupBtn) cotPopupBtn.onclick = openBriefCotizadorPopup;
-  const enviarWaBtn = document.getElementById('brief-enviar-wa');
-  if (enviarWaBtn) enviarWaBtn.onclick = () => handleBriefEnviarWA();
   const delBtn = document.getElementById('brief-delete');
   if (delBtn) delBtn.onclick = () => handleBriefDelete(STATE.briefSelected, false);
 
@@ -10600,7 +10503,9 @@ function bindCotizacion() {
       if (msg) setTimeout(() => { if (st.textContent === msg) st.textContent = ''; }, 3500);
     };
 
-    // 📋 Copiar y guardar — copia al clipboard + escribe en el Sheet.
+    // 📋 Copiar presupuesto — copia al clipboard + guarda en el Sheet.
+    // NO marca el brief como enviado — esto sirve para IG donde Joaco pega
+    // manualmente en el DM, o para chequear el texto antes de mandar por WA.
     const copyBtn = document.getElementById('brief-cot-popup-copy');
     if (copyBtn) copyBtn.onclick = async () => {
       const ta = document.getElementById('brief-cot-popup-text');
@@ -10616,25 +10521,89 @@ function bindCotizacion() {
       else setStatus(`✓ copiado y guardado en Sheet (fila ${sheetResp.row || '?'})`);
     };
 
-    // ✓ Marcar como enviado — escribe en el Sheet + marca brief enviado + cierra.
-    const enviarPopupBtn = document.getElementById('brief-cot-popup-enviar');
-    if (enviarPopupBtn) enviarPopupBtn.onclick = async () => {
+    // 📤 Enviar por WhatsApp — manda el texto al cliente via API, guarda en
+    // Sheet, marca el brief como enviado y cierra los modales. Solo aparece
+    // cuando origen=wpp + tel válido.
+    const sendWaBtn = document.getElementById('brief-cot-popup-send-wa');
+    if (sendWaBtn) sendWaBtn.onclick = async () => {
       if (!STATE.briefSelected) return;
-      setStatus('Guardando en Sheet…', 'var(--fg-subtle)');
+      const briefId = STATE.briefSelected;
+      if (STATE.briefsEnviando[briefId]) return;
+      const brief = STATE.briefs.find(b => b.id === briefId);
+      if (!brief) return;
+      const telDigits = String(brief.cliente_wa_id || '').replace(/\D/g, '');
+      if (telDigits.length < 8) {
+        await showAlert('Falta el teléfono del cliente o es inválido.', { title: 'Falta teléfono', variant: 'warn' });
+        return;
+      }
+      if (!STATE.token) {
+        await showAlert('Tenés que estar logueado para enviar por WhatsApp.', { title: 'Login requerido', variant: 'warn' });
+        return;
+      }
+      if (!CONFIG.trackerUrl) { await showAlert('Tracker no configurado', { title: 'Error', variant: 'warn' }); return; }
+      const ta = document.getElementById('brief-cot-popup-text');
+      const texto = (ta?.value || '').trim();
+      if (!texto) { await showAlert('El texto del presupuesto está vacío.', { title: 'Sin texto', variant: 'warn' }); return; }
+
+      const ok = await showConfirm(
+        `Voy a mandar el presupuesto al WhatsApp +${telDigits} y marcar el brief como enviado.\n\n¿Confirmás?`,
+        { title: 'Enviar presupuesto', confirmLabel: '📤 Mandar', cancelLabel: 'Cancelar' }
+      ).catch(() => false);
+      if (!ok) return;
+
+      STATE.briefsEnviando[briefId] = true;
+      setStatus('Enviando por WhatsApp…', 'var(--fg-subtle)');
+      // Re-render del modal para que el botón muestre "⏳ Enviando…".
+      render();
+
+      let waOk = false, wamid = '';
       try {
-        const r = calcCotizador(STATE.cotizadorForm);
-        const sheetResp = await saveCotToSheetFromPopup();
-        if (sheetResp.error) {
-          if (!confirm('Falló el guardado en Sheet (' + sheetResp.error + '). ¿Marcar como enviado igual?')) return;
+        const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ to: telDigits, body: texto })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          const detail = j.error || 'no se pudo enviar';
+          const hint = /outside|24|window|template/i.test(String(detail))
+            ? '\n\nWhatsApp Cloud API solo permite mensajes libres si el cliente escribió en las últimas 24hs. Si no respondió en ese plazo, hay que mandar primero un template aprobado.'
+            : '';
+          await showAlert(detail + hint, { title: 'No se pudo enviar', variant: 'warn' });
+          return;
         }
-        const updated = await marcarBriefEnviado(STATE.briefSelected, { precio_final: r.transFinal });
+        waOk = true;
+        wamid = j.id || '';
+      } catch (e) {
+        await showAlert('Error de red al enviar: ' + (e.message || e), { title: 'Error de conexión', variant: 'warn' });
+      } finally {
+        STATE.briefsEnviando[briefId] = false;
+      }
+
+      if (!waOk) { render(); return; }
+
+      // Persistir en Sheet (igual que el botón "Copiar presupuesto").
+      try {
+        const sheetResp = await saveCotToSheetFromPopup();
+        if (sheetResp.error) console.warn('Sheet falló:', sheetResp.error);
+      } catch(e) { console.warn('Sheet exception:', e); }
+
+      // Marcar brief como enviado (con precio para que matchee el Sheet).
+      try {
+        const calc = (function(){ try { return calcCotizador(STATE.cotizadorForm); } catch(e){ return null; } })();
+        const updated = await marcarBriefEnviado(briefId, calc ? { precio_final: calc.transFinal } : {});
         const i = STATE.briefs.findIndex(b => b.id === updated.id);
         if (i >= 0) STATE.briefs[i] = updated;
-        closeBriefCotizadorPopup();
-        closeBriefDrawer();
-      } catch(e) {
-        alert('Error: ' + e.message);
+      } catch (e) {
+        console.warn('No pude marcar brief como enviado:', e);
       }
+
+      toast('✓ Presupuesto enviado · brief pasó a "Enviados"');
+      // Polling de delivery en background — no bloquea el cierre.
+      if (wamid) verificarEntregaWA(wamid, telDigits);
+
+      closeBriefCotizadorPopup();
+      closeBriefDrawer();
     };
   }
 
