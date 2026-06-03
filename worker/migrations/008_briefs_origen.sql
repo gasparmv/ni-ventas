@@ -1,0 +1,22 @@
+-- Migración 008: agregar origen (wpp|ig) + teléfono al brief.
+--
+-- La tabla briefs ya tenía cliente_wa_id (NOT NULL) y origen_lead (NOT NULL TEXT)
+-- desde la 001, pero NUNCA se expusieron en la UI — quedaban como '' silenciosos.
+--
+-- Ahora Joaco aclara en el modal si la consulta vino por WhatsApp o Instagram.
+-- Si es WhatsApp, el teléfono es OBLIGATORIO desde la UI (front lo valida) para
+-- poder mandarle el presupuesto directo via API cuando esté listo.
+--
+-- Como SQLite no soporta ALTER COLUMN ... DROP NOT NULL, NO podemos relajar el
+-- constraint de cliente_wa_id sin reconstruir la tabla. Solución: la columna
+-- queda NOT NULL pero acepta '' (string vacío) — para Instagram, el front manda
+-- ''. origen_lead pasa a usar valores normalizados: 'wpp' | 'ig' (back-compat:
+-- briefs viejos con origen_lead='' siguen funcionando, se tratan como 'wpp'
+-- desde la UI si tienen cliente_wa_id, o 'ig' si no).
+--
+-- Sí agregamos índice por origen_lead — útil para el futuro filtro del kanban.
+--
+-- Aplicar con:
+--   wrangler d1 execute ni-ventas --file=worker/migrations/008_briefs_origen.sql --remote
+
+CREATE INDEX IF NOT EXISTS idx_briefs_origen ON briefs(origen_lead);

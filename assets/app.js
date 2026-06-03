@@ -8642,6 +8642,10 @@ if (typeof STATE.quickModalSaving === 'undefined')  STATE.quickModalSaving = fal
 // EN SEGUNDO PLANO. Emma puede cerrar el drawer y abrir otro brief mientras la
 // IA termina; cuando termina, refrescamos la card y opcionalmente notificamos.
 if (typeof STATE.briefsGenerando === 'undefined') STATE.briefsGenerando = {};
+// Brief en proceso de envío del presupuesto vía WhatsApp API. Mientras el flag
+// está en true, el botón "Enviar por WhatsApp" muestra "⏳ Enviando…" y queda
+// deshabilitado, evitando que un doble-click mande dos mensajes al cliente.
+if (typeof STATE.briefsEnviando === 'undefined') STATE.briefsEnviando = {};
 if (typeof STATE.briefLastAiParams === 'undefined') STATE.briefLastAiParams = null; // último resultado de estimación IA (banner)
 if (typeof STATE.briefDetailMessages === 'undefined') STATE.briefDetailMessages = []; // (legacy, sin uso)
 if (typeof STATE.teamChatOpen === 'undefined')    STATE.teamChatOpen = false;
@@ -9109,6 +9113,18 @@ function renderBriefCard(b) {
             ${escapeHtml(b.cliente_nombre || 'Sin título')}
           </div>
           <div style="display:flex;gap:3px;flex-shrink:0">
+            ${(() => {
+              // Chip de origen: 📱 (WA, con tel) o 📷 (IG). Ayuda a Joaco a
+              // identificar de un vistazo si el brief puede enviarse por API.
+              const o = String(b.origen_lead || '').toLowerCase();
+              if (o === 'ig' || o === 'instagram') {
+                return '<span title="Consulta vino por Instagram — copiar y pegar en DM" style="background:rgba(225,48,108,.15);color:#E1306C;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600">IG</span>';
+              }
+              if (o === 'wpp' || o === 'whatsapp' || (b.cliente_wa_id && String(b.cliente_wa_id).length >= 8)) {
+                return '<span title="Consulta vino por WhatsApp — se puede enviar presu por API" style="background:rgba(37,211,102,.15);color:#25D366;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600">WA</span>';
+              }
+              return '';
+            })()}
             ${sinPresupuesto ? '<span title="Marcado como enviado pero no encontramos presupuesto en el Sheet" style="background:rgba(255,167,38,.15);color:#FFA726;font-size:9px;padding:1px 5px;border-radius:3px">⚠</span>' : ''}
             ${pMatch ? '<span title="Tiene presupuesto en el Sheet" style="background:rgba(37,211,102,.15);color:#25D366;font-size:9px;padding:1px 5px;border-radius:3px">✓</span>' : ''}
           </div>
@@ -9193,6 +9209,41 @@ function renderBriefDrawer() {
                  placeholder="ej. Cartel Alhambra"
                  ${!isCom ? 'readonly' : ''}
                  style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3);${!isCom ? 'opacity:.7' : ''}">
+
+          ${(() => {
+            // Bloque origen + teléfono. Editable por comercial/admin. Para roles
+            // diseñador es read-only. Cuando origen=wpp, el teléfono es
+            // obligatorio para poder mandar el presu via API al finalizar.
+            // Back-compat: briefs viejos con origen_lead='' los tratamos como
+            // 'wpp' si tienen cliente_wa_id (heredado del flujo anterior).
+            const origenRaw = (data.origen_lead || '').toLowerCase();
+            const origen = (origenRaw === 'ig' || origenRaw === 'instagram') ? 'ig'
+                         : (origenRaw === 'wpp' || origenRaw === 'whatsapp' || data.cliente_wa_id) ? 'wpp'
+                         : 'wpp';
+            const tel = data.cliente_wa_id || '';
+            return `
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Por dónde llegó la consulta?</label>
+              <div style="display:flex;gap:8px;margin-bottom:var(--s-3)">
+                <label style="flex:1;cursor:${isCom ? 'pointer' : 'default'};padding:8px;border:1px solid ${origen === 'wpp' ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:var(--r-sm);text-align:center;font-size:13px;${origen === 'wpp' ? 'background:rgba(143,212,222,.08);color:var(--accent-cyan)' : 'color:var(--fg-subtle)'};opacity:${isCom ? '1' : '.7'}">
+                  <input type="radio" name="brief-origen" data-bf-radio="origen_lead" value="wpp" ${origen === 'wpp' ? 'checked' : ''} ${!isCom ? 'disabled' : ''} style="display:none">
+                  📱 WhatsApp
+                </label>
+                <label style="flex:1;cursor:${isCom ? 'pointer' : 'default'};padding:8px;border:1px solid ${origen === 'ig' ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:var(--r-sm);text-align:center;font-size:13px;${origen === 'ig' ? 'background:rgba(143,212,222,.08);color:var(--accent-cyan)' : 'color:var(--fg-subtle)'};opacity:${isCom ? '1' : '.7'}">
+                  <input type="radio" name="brief-origen" data-bf-radio="origen_lead" value="ig" ${origen === 'ig' ? 'checked' : ''} ${!isCom ? 'disabled' : ''} style="display:none">
+                  📷 Instagram
+                </label>
+              </div>
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">
+                Teléfono del cliente
+                <span id="brief-tel-required" style="color:#FF5566;${origen === 'wpp' ? '' : 'display:none'}">*</span>
+                <span id="brief-tel-hint" style="color:var(--fg-mute);font-size:10px;margin-left:4px;${origen === 'wpp' ? '' : 'display:none'}">obligatorio para mandar presu por WhatsApp</span>
+              </label>
+              <input type="tel" data-bf="cliente_wa_id" id="brief-tel-input" value="${escapeHtml(tel)}"
+                     placeholder="ej. 5491155604999 (sin +, solo dígitos)"
+                     ${!isCom ? 'readonly' : ''}
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3);${!isCom ? 'opacity:.7' : ''}">
+            `;
+          })()}
 
           <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Medidas referenciales (lo que pidió el cliente)</label>
           <input type="text" data-bf="medidas_libre" value="${escapeHtml(data.medidas_libre || '')}"
@@ -9344,7 +9395,21 @@ function renderBriefDrawer() {
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:var(--s-4)">
           ${!isNew && canCreateBriefs() ? `<button class="btn btn-ghost" id="brief-delete" style="color:#FF5566;border-color:rgba(255,24,48,.25)" title="Eliminar este brief">🗑 Eliminar</button>` : ''}
           <div style="flex:1"></div>
-          ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Copiar presupuesto</button>` : ''}
+          ${(() => {
+            // Botón "Enviar por WhatsApp" — solo cuando el brief está listo,
+            // la consulta vino por WA, y tenemos teléfono guardado.
+            // Back-compat: brief viejo sin origen_lead pero con cliente_wa_id se trata como WA.
+            if (isNew || estado !== 'listo' || !canCotizar()) return '';
+            const origen = (data.origen_lead || '').toLowerCase();
+            const telDigits = String(data.cliente_wa_id || '').replace(/\D/g, '');
+            const isWa = origen === 'wpp' || origen === 'whatsapp' || (origen === '' && telDigits.length >= 8);
+            if (!isWa || telDigits.length < 8) return '';
+            const sending = STATE.briefsEnviando && STATE.briefsEnviando[data.id];
+            return `<button class="btn btn-cyan" id="brief-enviar-wa" ${sending ? 'disabled' : ''} title="Enviar presupuesto por WhatsApp a ${escapeHtml(telDigits)}">
+              ${sending ? '⏳ Enviando…' : '📤 Enviar por WhatsApp'}
+            </button>`;
+          })()}
+          ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-ghost" id="brief-cotizar-popup">💰 Copiar presupuesto</button>` : ''}
           ${!isNew && estado === 'enviado' && isCom ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir Cotizador</button>` : ''}
           ${(isCom || isDis || isNew) ? `<button class="btn ${isNew ? 'btn-cyan' : 'btn-ghost'}" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>` : ''}
         </div>
@@ -9449,6 +9514,7 @@ async function quickCreateBriefFromImage(file) {
     STATE.quickModalImages = [img];
     STATE.quickModalOpen = true;
     STATE.quickModalSaving = false;
+    STATE.quickModalOrigen = 'wpp';  // default: la mayoría llega por WhatsApp
     render();
     // Auto-focus en el input de título.
     setTimeout(() => {
@@ -9463,7 +9529,31 @@ function cancelQuickCreate() {
   STATE.quickModalOpen = false;
   STATE.quickModalImages = [];
   STATE.quickModalSaving = false;
+  STATE.quickModalOrigen = 'wpp';
   render();
+}
+
+// Setea el origen del modal Quick Create y actualiza la visibilidad del input
+// teléfono sin re-renderear todo (evita perder lo que el usuario ya tipeó).
+function setQuickModalOrigen(origen) {
+  STATE.quickModalOrigen = origen;
+  // Update visual del toggle.
+  ['wpp', 'ig'].forEach(o => {
+    const btn = document.getElementById('quick-modal-origen-' + o);
+    if (!btn) return;
+    if (o === origen) {
+      btn.style.background = 'var(--accent-cyan,#8FD4DE)';
+      btn.style.color = '#000';
+      btn.style.borderColor = 'var(--accent-cyan,#8FD4DE)';
+    } else {
+      btn.style.background = 'transparent';
+      btn.style.color = 'var(--fg-subtle)';
+      btn.style.borderColor = 'var(--border)';
+    }
+  });
+  // Mostrar/ocultar input teléfono.
+  const wrap = document.getElementById('quick-modal-telefono-wrap');
+  if (wrap) wrap.style.display = origen === 'wpp' ? '' : 'none';
 }
 
 // Lee el form, valida, crea el brief en la DB y sube todas las imágenes.
@@ -9472,11 +9562,23 @@ async function confirmQuickCreate() {
   const tEl = document.getElementById('quick-modal-titulo');
   const mEl = document.getElementById('quick-modal-medidas');
   const nEl = document.getElementById('quick-modal-notas');
+  const fEl = document.getElementById('quick-modal-telefono');
   const titulo = (tEl?.value || '').trim();
   const medidas = (mEl?.value || '').trim();
   const notas   = (nEl?.value || '').trim();
+  const origen  = (STATE.quickModalOrigen || 'wpp');
+  const telRaw  = (fEl?.value || '').trim();
+  const telDigits = telRaw.replace(/\D/g, '');
   if (titulo.length < 2) {
     if (tEl) { tEl.focus(); tEl.style.borderColor = '#FF5566'; setTimeout(() => { tEl.style.borderColor = 'var(--border)'; }, 1200); }
+    return;
+  }
+  // Si la consulta vino por WhatsApp, el teléfono es obligatorio: lo necesitamos
+  // para poder mandarle el presupuesto directo via API cuando el brief esté listo.
+  // Para Instagram lo dejamos pasar vacío (Joaco le responde por DM manual).
+  if (origen === 'wpp' && telDigits.length < 8) {
+    if (fEl) { fEl.focus(); fEl.style.borderColor = '#FF5566'; setTimeout(() => { fEl.style.borderColor = 'var(--border)'; }, 1500); }
+    alert('Si la consulta vino por WhatsApp, el teléfono es obligatorio (al menos 8 dígitos sin contar el código de país).');
     return;
   }
   if (!STATE.quickModalImages.length) {
@@ -9489,6 +9591,8 @@ async function confirmQuickCreate() {
   try {
     const saved = await saveBrief({
       cliente_nombre: titulo,
+      cliente_wa_id: origen === 'wpp' ? telDigits : '',
+      origen_lead: origen,
       medidas_libre: medidas || null,
       notas: notas || null,
       estado: 'nuevo'
@@ -9516,6 +9620,11 @@ async function confirmQuickCreate() {
 // ============ Modal "Quick Create" — popup centrado con animación ============
 function renderQuickCreateModal() {
   if (!STATE.quickModalOpen) return '';
+  const origen = STATE.quickModalOrigen || 'wpp';
+  // Helper para estilo del botón origen (activo/inactivo).
+  const oBtn = (val, active) => active
+    ? 'background:var(--accent-cyan,#8FD4DE);color:#000;border-color:var(--accent-cyan,#8FD4DE);'
+    : 'background:transparent;color:var(--fg-subtle);border-color:var(--border);';
   return `
     <style>
       @keyframes nv-qmodal-fade { from { opacity: 0 } to { opacity: 1 } }
@@ -9547,6 +9656,26 @@ function renderQuickCreateModal() {
         <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Título <span style="color:#FF5566">*</span></label>
         <input type="text" id="quick-modal-titulo" placeholder="Cliente o cartel — ej. Alhambra"
           style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3)">
+
+        <!-- Origen de la consulta: WhatsApp o Instagram -->
+        <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">¿Por dónde llegó la consulta? <span style="color:#FF5566">*</span></label>
+        <div style="display:flex;gap:8px;margin-bottom:var(--s-3)">
+          <button type="button" id="quick-modal-origen-wpp" data-qm-origen="wpp"
+            style="flex:1;padding:10px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;transition:all .15s;${oBtn('wpp', origen === 'wpp')}">
+            📱 WhatsApp
+          </button>
+          <button type="button" id="quick-modal-origen-ig" data-qm-origen="ig"
+            style="flex:1;padding:10px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;transition:all .15s;${oBtn('ig', origen === 'ig')}">
+            📷 Instagram
+          </button>
+        </div>
+
+        <!-- Teléfono (visible solo si WPP, obligatorio en ese caso) -->
+        <div id="quick-modal-telefono-wrap" style="${origen === 'wpp' ? '' : 'display:none'}">
+          <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Teléfono del cliente <span style="color:#FF5566">*</span></label>
+          <input type="tel" id="quick-modal-telefono" placeholder="ej. 5491155604999 (sin +, solo dígitos)"
+            style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3)">
+        </div>
 
         <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Medidas referenciales (opcional)</label>
         <input type="text" id="quick-modal-medidas" placeholder="Lo que pidió el cliente: 90x50, letras 80, INT…"
@@ -9638,14 +9767,21 @@ function closeBriefDrawer() {
 
 function readBriefDrawerForm() {
   const out = {};
+  // cliente_wa_id y origen_lead son NOT NULL en D1 — mandar '' en vez de null
+  // para no romper el PATCH cuando el campo queda vacío (ej. brief Instagram).
+  const KEEP_EMPTY = new Set(['cliente_wa_id', 'origen_lead']);
   document.querySelectorAll('[data-bf]').forEach(el => {
     const k = el.dataset.bf;
     let v = el.value;
     if (['alto_cm', 'ancho_cm', 'neon_mt'].includes(k)) v = v === '' ? null : Number(v);
-    out[k] = v === '' ? null : v;
+    // Para teléfono: normalizar a solo dígitos.
+    if (k === 'cliente_wa_id' && typeof v === 'string') v = v.replace(/\D/g, '');
+    out[k] = (v === '' && !KEEP_EMPTY.has(k)) ? null : v;
   });
   const tipoEl = document.querySelector('[data-bf-radio="tipo"]:checked');
   if (tipoEl) out.tipo = tipoEl.value;
+  const origenEl = document.querySelector('[data-bf-radio="origen_lead"]:checked');
+  if (origenEl) out.origen_lead = origenEl.value;
   return out;
 }
 
@@ -9680,6 +9816,109 @@ function openBriefCotizadorPopup() {
 function closeBriefCotizadorPopup() {
   STATE.briefCotPopupOpen = false;
   render();
+}
+
+// ============ ENVIAR PRESUPUESTO POR WHATSAPP API (botón del drawer brief) ============
+// Toma el brief en estado 'listo', arma el texto del presupuesto reutilizando
+// la lógica del cotizador (buildPresupuestoTexto + calcCotizador), y lo manda
+// via POST /admin/wa/send. Si el envío sale OK:
+//   - marca el brief como 'enviado' en D1 (PATCH /admin/briefs/:id)
+//   - actualiza el state local
+//   - guarda también en el Sheet para mantener la traza histórica
+//   - inicia polling de verificación de entrega (delivered/read/failed)
+async function handleBriefEnviarWA() {
+  if (!STATE.briefSelected) return;
+  const briefId = STATE.briefSelected;
+  // No re-mandar si ya está en curso.
+  if (STATE.briefsEnviando[briefId]) return;
+  const brief = STATE.briefs.find(b => b.id === briefId);
+  if (!brief) return;
+
+  // Validaciones — el botón solo se renderiza con datos OK, pero defensivo.
+  if (brief.estado !== 'listo') { alert('El brief no está en estado "Listo".'); return; }
+  if (!brief.ancho_cm || !brief.alto_cm) { alert('Faltan medidas (ancho/alto).'); return; }
+  const telDigits = String(brief.cliente_wa_id || '').replace(/\D/g, '');
+  if (telDigits.length < 8) {
+    await showAlert('Falta el teléfono del cliente o es inválido. Editá el brief y completá el campo "Teléfono".', { title: 'Falta teléfono', variant: 'warn' });
+    return;
+  }
+  if (!STATE.token) {
+    await showAlert('Tenés que estar logueado para enviar por WhatsApp.', { title: 'Login requerido', variant: 'warn' });
+    return;
+  }
+  if (!CONFIG.trackerUrl) { await showAlert('Tracker no configurado', { title: 'Error', variant: 'warn' }); return; }
+
+  // Setear STATE.cotizadorForm para reutilizar buildPresupuestoTexto / calcCotizador
+  // (misma lógica que openBriefCotizadorPopup — pero acá vamos directo al envío).
+  STATE.cotizadorForm = {
+    ancho: brief.ancho_cm,
+    alto:  brief.alto_cm,
+    neon:  brief.neon_mt || 0,
+    tipo:  brief.tipo || 'INT',
+    cliente: brief.cliente_nombre || '',
+    canal: 'WPP',
+    telefono: telDigits,
+    textoOverride: '',
+    extraCarteles: []
+  };
+  const texto = (function(){ try { return buildPresupuestoTexto() || ''; } catch(e) { return ''; } })();
+  if (!texto) {
+    await showAlert('No pude generar el texto del presupuesto. Verificá medidas + título.', { title: 'Error', variant: 'warn' });
+    return;
+  }
+
+  // Confirmación previa — operación irreversible (manda WA al cliente).
+  const ok = await showConfirm(
+    `Voy a mandar el presupuesto del brief "${brief.cliente_nombre || '#' + brief.id}" al WhatsApp +${telDigits}.\n\n¿Confirmás?`,
+    { title: 'Enviar presupuesto', confirmLabel: '📤 Mandar', cancelLabel: 'Cancelar' }
+  ).catch(() => false);
+  if (!ok) return;
+
+  STATE.briefsEnviando[briefId] = true;
+  render();
+  let waOk = false, wamid = '';
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ to: telDigits, body: texto })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const detail = j.error || 'no se pudo enviar';
+      const hint = /outside|24|window|template/i.test(String(detail))
+        ? '\n\nWhatsApp Cloud API solo permite mensajes libres si el cliente escribió en las últimas 24hs. Si el cliente no respondió en ese plazo, hay que mandarle primero un template aprobado.'
+        : '';
+      await showAlert(detail + hint, { title: 'No se pudo enviar', variant: 'warn' });
+      return;
+    }
+    waOk = true;
+    wamid = j.id || '';
+    toast('Presupuesto mandado · verificando entrega…');
+  } catch (e) {
+    await showAlert('Error de red al enviar: ' + (e.message || e), { title: 'Error de conexión', variant: 'warn' });
+  } finally {
+    STATE.briefsEnviando[briefId] = false;
+    render();
+  }
+
+  if (!waOk) return;
+
+  // Marcar el brief como 'enviado' en D1.
+  try {
+    const saved = await saveBrief({ id: briefId, estado: 'enviado' });
+    const idx = STATE.briefs.findIndex(b => b.id === saved.id);
+    if (idx >= 0) STATE.briefs[idx] = saved;
+    render();
+  } catch (e) {
+    console.warn('No pude marcar brief como enviado:', e);
+  }
+
+  // Persistir también en Sheet (igual que cuando se manda desde el cotizador).
+  try { await saveCotToSheetFromPopup(); } catch(e) { console.warn('Sheet save falló:', e); }
+
+  // Verificación de entrega en background.
+  if (wamid) verificarEntregaWA(wamid, telDigits);
 }
 
 // Guarda la cotización actual al Sheet "Cotizador Joaco" vía Apps Script.
@@ -10250,6 +10489,8 @@ function bindCotizacion() {
   if (cotBtn) cotBtn.onclick = handleBriefAbrirCotizador;
   const cotPopupBtn = document.getElementById('brief-cotizar-popup');
   if (cotPopupBtn) cotPopupBtn.onclick = openBriefCotizadorPopup;
+  const enviarWaBtn = document.getElementById('brief-enviar-wa');
+  if (enviarWaBtn) enviarWaBtn.onclick = () => handleBriefEnviarWA();
   const delBtn = document.getElementById('brief-delete');
   if (delBtn) delBtn.onclick = () => handleBriefDelete(STATE.briefSelected, false);
 
@@ -10425,6 +10666,10 @@ function bindCotizacion() {
     if (qCancel) qCancel.onclick = cancelQuickCreate;
     const qConfirm = document.getElementById('quick-modal-confirm');
     if (qConfirm) qConfirm.onclick = confirmQuickCreate;
+    // Toggle origen WhatsApp / Instagram.
+    document.querySelectorAll('[data-qm-origen]').forEach(btn => {
+      btn.onclick = () => setQuickModalOrigen(btn.dataset.qmOrigen);
+    });
     // Botones quitar imagen.
     document.querySelectorAll('[data-quick-img-remove]').forEach(btn => {
       btn.onclick = (ev) => {
