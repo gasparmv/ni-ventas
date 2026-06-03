@@ -653,13 +653,22 @@ async function analyzeChatWithClaude(env, phone, modelOverride = 'sonnet') {
       parsed.confidence || '', new Date().toISOString()
     ).run();
 
-    // Auto-etiquetar el chat según outcome detectado por Claude. Por ahora
-    // solo etiquetamos 'Abandonado IA' para que el equipo pueda hacer
-    // seguimiento masivo con campañas de re-engagement. En el futuro se
-    // pueden sumar 'Vendido IA', 'En Proceso IA', etc.
+    // Auto-etiquetar el chat según outcome + product_type. El equipo arma
+    // campañas de re-engagement con templates DISTINTOS para carteles vs
+    // cursos (los ciclos de venta y copy son completamente distintos), por
+    // eso separamos en dos labels específicas. Los outcomes 'otro'/sin
+    // product_type claro caen a la genérica.
     try {
       if (parsed.outcome === 'abandoned_by_client') {
-        const lbl = await env.DB.prepare("SELECT id FROM labels WHERE name = 'Abandonado IA'").first();
+        let labelName = 'Abandonado IA';
+        if (parsed.product_type === 'curso') {
+          labelName = 'Abandonado IA · Curso';
+        } else if (parsed.product_type === 'cartel_personalizado' ||
+                   parsed.product_type === 'tercerizacion' ||
+                   parsed.product_type === 'franquicia') {
+          labelName = 'Abandonado IA · Cartel';
+        }
+        const lbl = await env.DB.prepare("SELECT id FROM labels WHERE name = ?").bind(labelName).first();
         if (lbl?.id) {
           await env.DB.prepare(
             "INSERT INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, datetime('now')) ON CONFLICT(phone, label_id) DO NOTHING"
