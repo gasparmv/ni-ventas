@@ -420,6 +420,12 @@ function parseCSV(text) {
   return rows;
 }
 
+// Capitaliza la primera letra (para el {{1}} del template): "alan" → "Alan".
+function capitalizeName(s) {
+  s = String(s || '').trim();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+}
+
 // Lee el Sheet de cursos y devuelve los leads parseados + normalizados.
 // { total, leads: [{ nombre, telRaw, tel, valido }] } (dedup por tel dentro del sheet).
 async function fetchCursosLeads(env) {
@@ -3474,6 +3480,72 @@ export default {
           muestra: data.leads.slice(0, 8),
           invalidos_muestra: invalidos.slice(0, 5)
         });
+      }
+
+      // Envío masivo de la plantilla de cursos a los leads del Sheet (solo admin).
+      // Body: { limit?: number (default 10, máx 200), dryRun?: bool }.
+      // Manda la plantilla cursos_clases_vivo_mayo con {{1}}=primer nombre, guarda
+      // el outbound en el CRM y deriva cada chat a la bandeja de Abril. Dedup
+      // atómico por wa_autoreply_log kind='cursos_broadcast' (no manda 2 veces).
+      if (request.method === 'POST' && path === '/admin/wa/cursos-broadcast') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const limit = Math.min(Math.max(parseInt(body?.limit || '10', 10) || 10, 1), 200);
+        const dryRun = !!body?.dryRun;
+        let data;
+        try { data = await fetchCursosLeads(env); } catch (e) { return json({ error: 'no pude leer el sheet: ' + e.message }, 502); }
+        const validos = data.leads.filter(l => l.valido);
+        // Excluir los que ya recibieron (status sent o en curso).
+        const yaSet = new Set();
+        try {
+          const rs = await env.DB.prepare("SELECT phone FROM wa_autoreply_log WHERE kind = 'cursos_broadcast'").all();
+          for (const r of (rs.results || [])) yaSet.add(r.phone);
+        } catch (_) {}
+        const pendientes = validos.filter(l => !yaSet.has(l.tel)).slice(0, limit);
+        if (dryRun) {
+          return json({ dryRun: true, a_enviar: pendientes.length, muestra: pendientes.map(l => ({ nombre: l.nombre, tel: l.tel })) });
+        }
+        const result = { enviados: 0, fallidos: 0, errores: [] };
+        for (const lead of pendientes) {
+          // Reserva atómica (evita doble envío).
+          let reserva;
+          try {
+            reserva = await env.DB.prepare(
+              "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'cursos_broadcast', '', 'sending', ?, ?)"
+            ).bind(lead.tel, new Date().toISOString(), lead.nombre || '').run();
+          } catch (_) { continue; }
+          if (!reserva?.meta?.changes) continue; // ya reservado
+          const primerNombre = capitalizeName((lead.nombre || '').split(/\s+/)[0]) || 'amigo/a';
+          const tpl = await waSendTemplate(env, lead.tel, 'cursos_clases_vivo_mayo', 'es_AR', [primerNombre]);
+          if (tpl?.ok) {
+            result.enviados++;
+            const wamid = tpl.id || '';
+            const ts = new Date().toISOString();
+            try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'cursos_broadcast'").bind(ts, lead.tel).run(); } catch (_) {}
+            const previewBody = `holaa ${primerNombre}! Cómo andás?\nSoy Abril, de Neon Infinito. Me dijeron los chicos que participaste de las clases en vivo que hicieron el 6 y 7 de mayo, puede ser?`;
+            if (wamid) {
+              try {
+                await env.DB.prepare(
+                  `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+                   VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
+                   ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+                     WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+                ).bind(ts, wamid, lead.tel, previewBody).run();
+              } catch (_) {}
+            }
+            // Derivar a la bandeja de Abril.
+            try {
+              await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos'").bind(lead.tel, ts).run();
+            } catch (_) {}
+          } else {
+            result.fallidos++;
+            if (result.errores.length < 8) result.errores.push({ tel: lead.tel, err: String(tpl?.error || JSON.stringify(tpl || {})).slice(0, 140) });
+            // Liberar reserva para permitir reintento.
+            try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'cursos_broadcast'").bind(lead.tel).run(); } catch (_) {}
+          }
+        }
+        return json(result);
       }
 
       // Derivar un chat a una bandeja (solo admin). inbox: 'cursos' | 'general'.
