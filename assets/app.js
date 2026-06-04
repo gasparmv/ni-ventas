@@ -5390,11 +5390,41 @@ function audioExtForMime(m) {
   if (m.includes('webm')) return '.webm';
   return '.bin';
 }
+const OPUS_ENCODER_URL = 'https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/encoderWorker.min.js';
+
+function _startRecTimer() {
+  chatState.recordingSecs = 0;
+  chatState.recordingTimer = setInterval(() => {
+    chatState.recordingSecs++;
+    const el = document.getElementById('rec-timer');
+    if (el) el.textContent = Math.floor(chatState.recordingSecs / 60) + ':' + String(chatState.recordingSecs % 60).padStart(2, '0');
+  }, 1000);
+}
+
 function startRecording(phone) {
+  // Preferimos opus-recorder: graba ogg/opus que WhatsApp acepta en TODOS los
+  // navegadores (Chrome con MediaRecorder solo graba webm, que WhatsApp rechaza).
+  if (typeof Recorder !== 'undefined') {
+    try {
+      const rec = new Recorder({ encoderPath: OPUS_ENCODER_URL, numberOfChannels: 1, encoderSampleRate: 48000, streamPages: false, recordingGain: 1 });
+      chatState.opusRec = rec;
+      rec.ondataavailable = () => {}; // se setea el real en stop
+      rec.start().then(() => {
+        chatState.recording = true;
+        _startRecTimer();
+        renderRecordingUI();
+      }).catch(() => { chatState.opusRec = null; _startRecordingMR(phone); });
+      return;
+    } catch (e) { chatState.opusRec = null; }
+  }
+  _startRecordingMR(phone);
+}
+
+// Fallback con MediaRecorder (Firefox graba ogg, Safari mp4; Chrome webm = falla).
+function _startRecordingMR(phone) {
   navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
     chatState.recording = true;
     chatState.audioChunks = [];
-    chatState.recordingSecs = 0;
     const wantMime = pickAudioMime();
     const mr = wantMime ? new MediaRecorder(stream, { mimeType: wantMime }) : new MediaRecorder(stream);
     chatState.audioMime = mr.mimeType || wantMime || 'audio/webm';
@@ -5402,17 +5432,16 @@ function startRecording(phone) {
     mr.ondataavailable = e => { if (e.data.size > 0) chatState.audioChunks.push(e.data); };
     mr.onstop = () => { stream.getTracks().forEach(t => t.stop()); };
     mr.start();
-    chatState.recordingTimer = setInterval(() => {
-      chatState.recordingSecs++;
-      const el = document.getElementById('rec-timer');
-      if (el) el.textContent = Math.floor(chatState.recordingSecs / 60) + ':' + String(chatState.recordingSecs % 60).padStart(2, '0');
-    }, 1000);
+    _startRecTimer();
     renderRecordingUI();
   }).catch(() => toast('No se pudo acceder al micrófono'));
 }
 
 function cancelRecording() {
-  if (chatState.mediaRecorder && chatState.mediaRecorder.state !== 'inactive') chatState.mediaRecorder.stop();
+  try {
+    if (chatState.opusRec) { chatState.opusRec.ondataavailable = () => {}; chatState.opusRec.stop(); chatState.opusRec = null; }
+    else if (chatState.mediaRecorder && chatState.mediaRecorder.state !== 'inactive') chatState.mediaRecorder.stop();
+  } catch (_) {}
   chatState.recording = false;
   chatState.audioChunks = [];
   clearInterval(chatState.recordingTimer);
@@ -5420,15 +5449,25 @@ function cancelRecording() {
 }
 
 function stopAndSendRecording(phone) {
-  if (!chatState.mediaRecorder) return;
-  chatState.mediaRecorder.onstop = () => {
-    chatState.mediaRecorder.stream?.getTracks().forEach(t => t.stop());
-    const blob = new Blob(chatState.audioChunks, { type: chatState.audioMime || 'audio/webm' });
+  const finish = (blob) => {
     chatState.recording = false;
     chatState.audioChunks = [];
     clearInterval(chatState.recordingTimer);
     renderNormalInputUI();
-    if (blob.size > 0) sendChatAudio(phone, blob);
+    if (blob && blob.size > 0) sendChatAudio(phone, blob);
+  };
+  // opus-recorder: el archivo ogg llega por ondataavailable al hacer stop().
+  if (chatState.opusRec) {
+    const rec = chatState.opusRec;
+    chatState.opusRec = null;
+    rec.ondataavailable = (typedArray) => { finish(new Blob([typedArray], { type: 'audio/ogg' })); };
+    try { rec.stop(); } catch (_) { finish(null); }
+    return;
+  }
+  if (!chatState.mediaRecorder) return;
+  chatState.mediaRecorder.onstop = () => {
+    chatState.mediaRecorder.stream?.getTracks().forEach(t => t.stop());
+    finish(new Blob(chatState.audioChunks, { type: chatState.audioMime || 'audio/webm' }));
   };
   chatState.mediaRecorder.stop();
 }
