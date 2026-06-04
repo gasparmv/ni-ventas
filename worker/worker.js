@@ -1610,12 +1610,6 @@ async function processCoexistenceHistory(env, data) {
     const senderName = direction === 'inbound' ? (nameByPhone[phone] || '') : '';
     const ts = m.timestamp ? new Date(parseInt(m.timestamp) * 1000).toISOString() : new Date().toISOString();
     await insertMsg({ wamid, ts, direction, phone, senderName, m });
-    // Auto-respuesta del minicurso: solo para inbound nuevo (últimos 10 min) que
-    // pida la guía + cotizador. Mensaje libre (dentro de la ventana de 24h).
-    if (direction === 'inbound' && matchMinicursoTrigger(m.text?.body || '')) {
-      const reciente = (Date.now() - new Date(ts).getTime()) < 10 * 60 * 1000;
-      if (reciente) await maybeAutoReplyMinicurso(env, phone, senderName);
-    }
   }
 
   // === Branch 2: data.message_echoes[] (Joaco escribió desde el celular) ===
@@ -2130,6 +2124,17 @@ export default {
                      WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
                   ).bind(ts, wamid, direction, phone, senderName, msgType, msgBody, r2Key || mediaUrl, contextId, null).run();
                 } catch (_) {}
+
+                // ===== Auto-respuesta del minicurso (regalos) =====
+                // Solo inbound de texto reciente (últimos 10 min) que pida la
+                // guía + cotizador. Mensaje libre (ventana 24h). Una vez por
+                // contacto y deriva el chat a la bandeja de cursos (Abril).
+                if (direction === 'inbound' && matchMinicursoTrigger(msgBody)) {
+                  const reciente = (Date.now() - new Date(ts).getTime()) < 10 * 60 * 1000;
+                  if (reciente) {
+                    try { await maybeAutoReplyMinicurso(env, phone, senderName); } catch (_) {}
+                  }
+                }
 
                 // ===== Ad Attribution (referral) =====
                 // Cuando un cliente clickea un ad de Meta (Click-to-WhatsApp) y manda
