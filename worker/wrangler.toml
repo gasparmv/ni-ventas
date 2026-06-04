@@ -29,9 +29,11 @@ binding = "AI"
 binding = "MEDIA"
 bucket_name = "ni-ventas-media"
 
-# Cron Trigger: cada 5 min.
-# - Mensajes programados (siempre)
-# - Follow-up de presupuestos del cotizador (solo en horario AR 09-22 = UTC 12-01)
-# - Followups de Apps Script (solo a las 13:00 UTC = 10:00 AR)
+# Cron Triggers:
+# - "*/5 * * * *" (cada 5 min): tareas normales — mensajes programados,
+#   follow-ups de presupuestos (horario AR), followups Apps Script (13:00 UTC),
+#   monitor de templates + análisis IA (1x/hora con minute<5).
+# - "* * * * *" (cada 1 min): SOLO la cola de auto-respuestas del minicurso,
+#   para que la demora configurada (~1 min) salga en ~1-2 min y no hasta 6.
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "* * * * *"]

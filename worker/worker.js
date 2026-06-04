@@ -453,49 +453,62 @@ async function maybeAutoReplyMinicurso(env, phone, senderName) {
     // Dedup ATÓMICO: reservamos el envío en wa_autoreply_log (PK phone+kind).
     // Si el webhook del mismo mensaje llega 2 veces casi simultáneo, solo una
     // ejecución obtiene changes=1; las demás (changes=0) NO duplican.
-    const now = new Date().toISOString();
+    // ENCOLAR con demora (~1-2 min) en vez de responder al instante, para que no
+    // quede robótico. Reserva ATÓMICA por PK (phone, kind): si el webhook del
+    // mismo mensaje llega 2 veces, solo una obtiene changes=1; las demás NO
+    // duplican. El cron (processAutoReplyQueue) lo manda cuando vence due_at.
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const dueAt = new Date(nowMs + 60 * 1000).toISOString(); // +60s → con el cron */1 sale en ~1-2 min
     let reserva;
     try {
       reserva = await env.DB.prepare(
-        "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at) VALUES (?, 'minicurso', ?)"
-      ).bind(phone, now).run();
-    } catch (e) {
-      try {
-        await env.DB.prepare("CREATE TABLE IF NOT EXISTS wa_autoreply_log (phone TEXT NOT NULL, kind TEXT NOT NULL, sent_at TEXT NOT NULL, PRIMARY KEY (phone, kind))").run();
-        reserva = await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at) VALUES (?, 'minicurso', ?)").bind(phone, now).run();
-      } catch (_) { return; }
-    }
-    if (!reserva?.meta?.changes) return; // ya reservado / ya enviado → no duplicar
-    const nombre = (senderName || '').trim().split(/\s+/)[0] || '';
-    const saludo = nombre ? `Buenas ${nombre}!` : 'Buenas!';
-    const body = `${saludo} Acá están los regalos por haber visto hasta el final! 🎁 ${MINICURSO_REGALO_LINK}\nContanos, qué te pareció el nuevo Curso? Viste la 2da clase hasta el final?`;
-    const res = await waSendText(env, phone, body);
-    if (!res?.ok) {
-      // Envío falló → liberar la reserva para permitir reintento.
-      try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'minicurso'").bind(phone).run(); } catch (_) {}
-      return;
-    }
-    const wamid = res.id || '';
-    const ts = new Date().toISOString();
-    // Guardar el outbound para que aparezca en el CRM.
-    try {
-      if (wamid) {
-        await env.DB.prepare(
-          `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-           VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '')
-           ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text'
-             WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
-        ).bind(ts, wamid, phone, body).run();
-      }
-    } catch (_) {}
-    // Derivar el chat a la bandeja de cursos (lo gestiona Abril).
+        "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'minicurso', '', 'queued', ?, ?)"
+      ).bind(phone, dueAt, senderName || '').run();
+    } catch (_) { return; }
+    if (!reserva?.meta?.changes) return; // ya en cola o ya enviado → no duplicar
+    // Derivar el chat a la bandeja de cursos al instante (la respuesta sale con
+    // demora, pero el chat ya aparece en la bandeja de Abril).
     try {
       await env.DB.prepare(
-        `INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?)
-         ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos'`
-      ).bind(phone, ts).run();
+        "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos'"
+      ).bind(phone, nowIso).run();
     } catch (_) {}
   } catch (e) { /* best-effort, no rompe el webhook */ }
+}
+
+// Procesa la cola de auto-respuestas vencidas (lo llama el cron cada minuto).
+// Manda el mensaje libre con los regalos, lo guarda en el CRM y marca 'sent'.
+// Ventana de reintento de 30 min: si el envío falla (p.ej. fuera de ventana
+// 24h) reintenta en los próximos ticks hasta 30 min; después se abandona.
+async function processAutoReplyQueue(env) {
+  try {
+    const nowIso = new Date().toISOString();
+    const floorIso = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT phone, sender_name FROM wa_autoreply_log WHERE kind = 'minicurso' AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 25"
+    ).bind(nowIso, floorIso).all();
+    for (const row of (rs.results || [])) {
+      const phone = row.phone;
+      const nombre = (row.sender_name || '').trim().split(/\s+/)[0] || '';
+      const saludo = nombre ? `Buenas ${nombre}!` : 'Buenas!';
+      const body = `${saludo} Acá están los regalos por haber visto hasta el final! 🎁 ${MINICURSO_REGALO_LINK}\nContanos, qué te pareció el nuevo Curso? Viste la 2da clase hasta el final?`;
+      const res = await waSendText(env, phone, body);
+      if (!res?.ok) continue; // queda 'queued' → reintenta el próximo tick (dentro de la ventana)
+      await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'minicurso'").bind(new Date().toISOString(), phone).run();
+      const wamid = res.id || '';
+      if (wamid) {
+        try {
+          await env.DB.prepare(
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+             VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '')
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text'
+               WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+          ).bind(new Date().toISOString(), wamid, phone, body).run();
+        } catch (_) {}
+      }
+    }
+  } catch (e) { /* best-effort */ }
 }
 
 // ===== Análisis de conversaciones con Claude (Anthropic API) =====
@@ -4640,6 +4653,11 @@ export default {
   // ===== Cron Trigger =====
   // Corre cada 5 min. Procesa: 1) mensajes programados, 2) followups (solo a las 13:00 UTC).
   async scheduled(event, env, ctx) {
+    // Cola de auto-respuestas (minicurso): corre en CADA tick, incluido el cron
+    // dedicado de cada minuto, para que la demora sea ~1-2 min y no más.
+    ctx.waitUntil(processAutoReplyQueue(env));
+    // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
+    if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
     // Followups de Apps Script solo a las 13:00 UTC (10:00 AR)
     const hour = new Date(event.scheduledTime).getUTCHours();
