@@ -450,15 +450,31 @@ const MINICURSO_REGALO_LINK = 'https://drive.google.com/drive/folders/14q3QvLPY6
 async function maybeAutoReplyMinicurso(env, phone, senderName) {
   if (!phone) return;
   try {
-    const prev = await env.DB.prepare(
-      "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND body LIKE '%14q3QvLPY6vO9d0qSLN%' LIMIT 1"
-    ).bind(phone).first();
-    if (prev) return; // ya le mandamos los regalos antes
+    // Dedup ATÓMICO: reservamos el envío en wa_autoreply_log (PK phone+kind).
+    // Si el webhook del mismo mensaje llega 2 veces casi simultáneo, solo una
+    // ejecución obtiene changes=1; las demás (changes=0) NO duplican.
+    const now = new Date().toISOString();
+    let reserva;
+    try {
+      reserva = await env.DB.prepare(
+        "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at) VALUES (?, 'minicurso', ?)"
+      ).bind(phone, now).run();
+    } catch (e) {
+      try {
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS wa_autoreply_log (phone TEXT NOT NULL, kind TEXT NOT NULL, sent_at TEXT NOT NULL, PRIMARY KEY (phone, kind))").run();
+        reserva = await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at) VALUES (?, 'minicurso', ?)").bind(phone, now).run();
+      } catch (_) { return; }
+    }
+    if (!reserva?.meta?.changes) return; // ya reservado / ya enviado → no duplicar
     const nombre = (senderName || '').trim().split(/\s+/)[0] || '';
     const saludo = nombre ? `Buenas ${nombre}!` : 'Buenas!';
     const body = `${saludo} Acá están los regalos por haber visto hasta el final! 🎁 ${MINICURSO_REGALO_LINK}\nContanos, qué te pareció el nuevo Curso? Viste la 2da clase hasta el final?`;
     const res = await waSendText(env, phone, body);
-    if (!res?.ok) return;
+    if (!res?.ok) {
+      // Envío falló → liberar la reserva para permitir reintento.
+      try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'minicurso'").bind(phone).run(); } catch (_) {}
+      return;
+    }
     const wamid = res.id || '';
     const ts = new Date().toISOString();
     // Guardar el outbound para que aparezca en el CRM.
