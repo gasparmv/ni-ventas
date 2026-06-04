@@ -908,6 +908,10 @@ async function processLeadgenWebhook(env, body) {
             ).bind(new Date().toISOString(), wamid, phoneNorm, previewBody).run();
           }
         } catch (_) {}
+        // Etiquetar el chat como FORM (lead de formulario B2B), id de label = 12.
+        try {
+          await env.DB.prepare('INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, 12, ?)').bind(phoneNorm, new Date().toISOString()).run();
+        } catch (_) {}
       } else {
         try {
           await env.DB.prepare(
@@ -1022,6 +1026,10 @@ async function processSheetLead(env, body) {
                WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
           ).bind(new Date().toISOString(), wamid, phoneNorm, previewBody).run();
         }
+      } catch (_) {}
+      // Etiquetar el chat como FORM (lead de formulario B2B), id de label = 12.
+      try {
+        await env.DB.prepare('INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, 12, ?)').bind(phoneNorm, new Date().toISOString()).run();
       } catch (_) {}
       await _logLeadDebug(env, 'SHEET_TEMPLATE_SENT', { leadgen_id: leadgenId, phone: phoneNorm, wamid });
     } else {
