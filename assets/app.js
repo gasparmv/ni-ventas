@@ -9915,6 +9915,31 @@ function cancelQuickCreate() {
   render();
 }
 
+// Abre el modal "Nuevo brief" VACÍO (sin imagen previa). Lo usa el botón
+// "+ Nuevo brief" del kanban. Las capturas son opcionales y se suman dentro
+// del modal (dropzone / paste / drag). Reemplaza al viejo drawer lateral.
+function openNuevoBriefModal() {
+  if (!canCreateBriefs()) return;
+  STATE.quickModalImages = [];
+  STATE.quickModalOpen = true;
+  STATE.quickModalSaving = false;
+  STATE.quickModalOrigen = 'wpp';
+  render();
+  setTimeout(() => {
+    const el = document.getElementById('quick-modal-titulo');
+    if (el) el.focus();
+  }, 60);
+}
+
+// Suma archivos de imagen al modal Quick Create (desde input file o drop).
+async function addFilesToQuickModal(fileList) {
+  const files = Array.from(fileList || []).filter(f => f.type && f.type.startsWith('image/'));
+  for (const f of files) {
+    try { const img = await fileToDraftImage(f); STATE.quickModalImages.push(img); } catch (e) { /* skip */ }
+  }
+  refreshQuickModalImages();
+}
+
 // Setea el origen del modal Quick Create y actualiza la visibilidad del input
 // teléfono sin re-renderear todo (evita perder lo que el usuario ya tipeó).
 function setQuickModalOrigen(origen) {
@@ -9963,10 +9988,8 @@ async function confirmQuickCreate() {
     alert('Si la consulta vino por WhatsApp, el teléfono es obligatorio (al menos 8 dígitos sin contar el código de país).');
     return;
   }
-  if (!STATE.quickModalImages.length) {
-    alert('Sumá al menos una imagen antes de crear el brief.');
-    return;
-  }
+  // La imagen es OPCIONAL: el brief se puede crear sin capturas y agregarlas
+  // después desde el drawer (o el diseñador sube el render directo).
   STATE.quickModalSaving = true;
   const saveBtn = document.getElementById('quick-modal-confirm');
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Creando…'; }
@@ -10022,16 +10045,18 @@ function renderQuickCreateModal() {
       <div id="quick-modal-card" class="nv-qmodal-card"
         style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:520px;width:100%;max-height:90vh;overflow-y:auto;padding:var(--s-4)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
-          <h2 style="margin:0;font-size:16px">✨ Nuevo brief desde imagen</h2>
+          <h2 style="margin:0;font-size:16px">✨ Nuevo brief</h2>
           <button id="quick-modal-close" aria-label="Cerrar" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
         </div>
 
-        <!-- Preview de las imágenes pegadas -->
-        <div id="quick-modal-images" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(70px,1fr));gap:6px;margin-bottom:var(--s-3)">
+        <!-- Preview de las imágenes (capturas del chat / referencias) -->
+        <div id="quick-modal-images" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(70px,1fr));gap:6px;margin-bottom:var(--s-2)">
           ${renderQuickModalImages()}
         </div>
-        <div style="font-size:10px;color:var(--fg-mute);margin-bottom:var(--s-3);text-align:center;opacity:.7">
-          Podés pegar (Ctrl+V) más imágenes y se suman al brief.
+        <div id="quick-modal-dropzone"
+          style="border:2px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-2);text-align:center;color:var(--fg-mute);font-size:11px;cursor:pointer;transition:border-color .15s,background .15s;margin-bottom:var(--s-3)">
+          📋 Pegá (Ctrl+V), arrastrá o tocá acá para sumar capturas <span style="opacity:.6">(opcional)</span>
+          <input type="file" id="quick-modal-file-input" accept="image/*" multiple style="display:none">
         </div>
 
         <!-- Form -->
@@ -10077,7 +10102,7 @@ function renderQuickCreateModal() {
 }
 
 function renderQuickModalImages() {
-  if (!STATE.quickModalImages.length) return '<div style="grid-column:1/-1;font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— sin imágenes —</div>';
+  if (!STATE.quickModalImages.length) return '';  // sin imágenes: el dropzone de abajo invita a sumar
   return STATE.quickModalImages.map((img, i) => `
     <div style="position:relative;width:100%;aspect-ratio:1;border-radius:6px;overflow:hidden;background:var(--ink-050)">
       <img src="${img.dataUrl}" style="width:100%;height:100%;object-fit:cover">
@@ -10759,7 +10784,7 @@ function bindCotizacion() {
 
   // Header.
   const newBtn = document.getElementById('brief-new');
-  if (newBtn) newBtn.onclick = openBriefDraft;
+  if (newBtn) newBtn.onclick = openNuevoBriefModal;
   const refreshBtn = document.getElementById('briefs-refresh');
   if (refreshBtn) refreshBtn.onclick = () => {
     STATE.briefsLoaded = false;
@@ -11148,6 +11173,16 @@ function bindCotizacion() {
     document.querySelectorAll('[data-qm-origen]').forEach(btn => {
       btn.onclick = () => setQuickModalOrigen(btn.dataset.qmOrigen);
     });
+    // Dropzone: click abre el selector, drop/file-input suman imágenes.
+    const qDrop = document.getElementById('quick-modal-dropzone');
+    const qFileInput = document.getElementById('quick-modal-file-input');
+    if (qDrop && qFileInput) {
+      qDrop.onclick = () => qFileInput.click();
+      qDrop.ondragover = (ev) => { ev.preventDefault(); qDrop.style.borderColor = 'var(--accent-cyan)'; qDrop.style.background = 'rgba(143,212,222,.06)'; };
+      qDrop.ondragleave = () => { qDrop.style.borderColor = ''; qDrop.style.background = ''; };
+      qDrop.ondrop = (ev) => { ev.preventDefault(); qDrop.style.borderColor = ''; qDrop.style.background = ''; addFilesToQuickModal(ev.dataTransfer?.files); };
+      qFileInput.onchange = () => { addFilesToQuickModal(qFileInput.files); qFileInput.value = ''; };
+    }
     // Botones quitar imagen.
     document.querySelectorAll('[data-quick-img-remove]').forEach(btn => {
       btn.onclick = (ev) => {
