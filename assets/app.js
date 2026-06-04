@@ -8313,12 +8313,18 @@ function bindChat() {
 
 // ===== Web Worker para notificaciones en background =====
 let _pollWorker = null;
+let _pollWorkerToken = null; // token con el que arrancó el poll-worker (para detectar cambio de usuario)
 function initPollWorker() {
-  if (_pollWorker) return; // ya inicializado
   if (!STATE.token || !CONFIG.trackerUrl) return;
   if (typeof Worker === 'undefined') return;
+  // Si ya está corriendo con ESTE token, no hacemos nada. Si el token cambió
+  // (cambio de usuario sin recargar: Joaco → Abril, etc.), reiniciamos para que
+  // el polling de notificaciones use el token/rol correcto (filtra por bandeja).
+  if (_pollWorker && _pollWorkerToken === STATE.token) return;
+  if (_pollWorker) { try { _pollWorker.postMessage({ type: 'stop' }); _pollWorker.terminate(); } catch (_) {} _pollWorker = null; }
   try {
     _pollWorker = new Worker('assets/poll-worker.js');
+    _pollWorkerToken = STATE.token;
     _pollWorker.onmessage = (e) => {
       const m = e.data || {};
       if (m.type !== 'new-message') return;
@@ -8340,12 +8346,14 @@ function initPollWorker() {
   } catch (e) {
     console.warn('Poll worker no disponible:', e);
     _pollWorker = null;
+    _pollWorkerToken = null;
   }
 }
 function teardownPollWorker() {
   if (!_pollWorker) return;
   try { _pollWorker.postMessage({ type: 'stop' }); _pollWorker.terminate(); } catch (_) {}
   _pollWorker = null;
+  _pollWorkerToken = null;
 }
 
 // ===== Notificaciones del chat =====
