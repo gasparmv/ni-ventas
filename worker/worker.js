@@ -2749,12 +2749,15 @@ export default {
       // no vacío), unread (count inbound > last_read_ts).
       // Mucho más liviano y escala con la cantidad de chats, no de mensajes.
       if (request.method === 'GET' && path === '/admin/wa/chats-summary') {
-        // === Cache de 4s en Workers Cache API ===
-        // La query SQL pesa 1-2s (3 CTEs + ROW_NUMBER OVER sobre 56k+ msgs).
-        // El client polea cada 4-8s; cacheando 4s reducimos los hits reales a
-        // 1 query cada 4s sin afectar la frescura percibida. El handler de
-        // /admin/wa/mark-read invalida la cache para que el badge unread se
-        // actualice instantáneamente cuando el usuario marca un chat como leído.
+        // === Cache de 15s en Workers Cache API ===
+        // La query SQL es cara (3 CTEs + ROW_NUMBER OVER sobre 64k+ msgs: ~440k
+        // filas escaneadas, ~310ms). El client polea cada 4-8s; cacheando 15s
+        // reducimos las ejecuciones reales de la query a ~1 cada 15s. Trade-off:
+        // un chat nuevo puede tardar hasta 15s en aparecer EN LA LISTA (el chat
+        // abierto se actualiza por su propio polling, más rápido). El handler de
+        // /admin/wa/mark-read invalida la cache para que el badge unread baje a 0
+        // al instante. (La solución de fondo es la tabla resumen incremental —
+        // ver wa_chats_summary; esto es el alivio inmediato.)
         const cache = caches.default;
         const cacheUrl = new URL(request.url);
         cacheUrl.search = ''; // ignorar cache-busters como ?t=123
@@ -2806,7 +2809,7 @@ export default {
             ORDER BY lm.last_ts DESC
           `).all();
           const response = json({ chats: rs.results || [] });
-          response.headers.set('Cache-Control', 'public, max-age=4');
+          response.headers.set('Cache-Control', 'public, max-age=15');
           // ctx.waitUntil para no bloquear la response esperando el cache.put.
           ctx.waitUntil(cache.put(cacheKey, response.clone()));
           return response;
