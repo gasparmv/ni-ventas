@@ -499,6 +499,98 @@ function matchMinicursoTrigger(text) {
   return t.includes('cotizador') && t.includes('guia') && t.includes('curso');
 }
 
+// ===== Campaña de cursos (broadcast lanzamiento mayo) =====
+const CURSOS_EVENTO_MSG = 'aah buenísimo! Te escribía para invitarte a un nuevo evento en vivo este próximo martes 9 y jueves 11 de junio, los chicos van a hacer algo muuy copado ahora que arranca el mundial';
+
+// Clasifica con IA la respuesta del cliente al template de cursos: positiva o no.
+async function analyzeResponseSentiment(env, texto) {
+  const t = String(texto || '').trim();
+  if (!t || !env.ANTHROPIC_API_KEY) return 'no_positiva';
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 8,
+        system: 'A un contacto se le preguntó si participó de unas clases en vivo y si quiere recibir info/regalo de un curso de carteles de neón. Clasificá su RESPUESTA. Respondé SOLO una palabra: POSITIVA (acepta, le interesa, dice que sí, pide la info, responde con entusiasmo) o NEGATIVA (rechaza, no le interesa, pide que no le escriban, desconfía, o es ambiguo/irrelevante).',
+        messages: [{ role: 'user', content: t.slice(0, 500) }]
+      })
+    });
+    const j = await r.json();
+    if (!r.ok) return 'no_positiva';
+    return (j.content?.[0]?.text || '').toUpperCase().includes('POSITIVA') ? 'positiva' : 'no_positiva';
+  } catch (e) { return 'no_positiva'; }
+}
+
+// Procesa la respuesta de un lead de la campaña: si el chat está oculto, analiza
+// el sentiment, manda el mensaje del evento SOLO si es positiva, y revela el
+// chat a la bandeja de Abril (responda lo que responda).
+async function revealCursosCampaign(env, phone, msgBody) {
+  if (!phone) return;
+  let camp;
+  try { camp = await env.DB.prepare("SELECT phone, revealed_at FROM wa_cursos_campaign WHERE phone = ?").bind(phone).first(); } catch (_) { return; }
+  if (!camp || camp.revealed_at) return; // no es de la campaña, o ya revelado
+  const sentiment = await analyzeResponseSentiment(env, msgBody);
+  const ts = new Date().toISOString();
+  if (sentiment === 'positiva') {
+    const res = await waSendText(env, phone, CURSOS_EVENTO_MSG);
+    if (res?.ok && res.id) {
+      try {
+        await env.DB.prepare(
+          `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+           VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '')
+           ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text'
+             WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+        ).bind(new Date().toISOString(), res.id, phone, CURSOS_EVENTO_MSG).run();
+      } catch (_) {}
+    }
+  }
+  // Revelar: bandeja de Abril + marcar en la campaña.
+  try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos' WHERE phone = ?").bind(phone).run(); } catch (_) {}
+  try { await env.DB.prepare("UPDATE wa_cursos_campaign SET responded_at = ?, sentiment = ?, revealed_at = ?, updated_at = ? WHERE phone = ?").bind(ts, sentiment, ts, ts, phone).run(); } catch (_) {}
+}
+
+// Cron: follow-up (template 2) a los que NO respondieron al template 1 hace ≥12h.
+// Una sola vez por contacto. El chat sigue oculto hasta que respondan.
+async function processCursosFollowup(env) {
+  try {
+    const cutoff = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT phone, nombre FROM wa_cursos_campaign WHERE responded_at IS NULL AND followup_at IS NULL AND sent_1_at IS NOT NULL AND sent_1_at <= ? ORDER BY sent_1_at ASC LIMIT 30"
+    ).bind(cutoff).all();
+    for (const row of (rs.results || [])) {
+      const phone = row.phone;
+      const primerNombre = capitalizeName((row.nombre || '').split(/\s+/)[0]) || 'amigo/a';
+      const now = new Date().toISOString();
+      // Reservar el follow-up ANTES de mandar (evita doble envío entre crons).
+      // Si el cliente respondió justo, responded_at != NULL → no se actualiza.
+      const upd = await env.DB.prepare(
+        "UPDATE wa_cursos_campaign SET followup_at = ?, updated_at = ? WHERE phone = ? AND followup_at IS NULL AND responded_at IS NULL"
+      ).bind(now, now, phone).run();
+      if (!upd?.meta?.changes) continue;
+      const tpl = await waSendTemplate(env, phone, 'cursos_followup_clases_mayo', 'es_AR', [primerNombre]);
+      if (tpl?.ok) {
+        const wamid = tpl.id || '';
+        const previewBody = `Holaa ${primerNombre}! Quedó algo pendiente de las clases del 6 y 7 de mayo 🎁. Queres que te mande la info?`;
+        if (wamid) {
+          try {
+            await env.DB.prepare(
+              `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+               VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
+               ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+                 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+            ).bind(new Date().toISOString(), wamid, phone, previewBody).run();
+          } catch (_) {}
+        }
+      } else {
+        // Falló el envío → liberar el follow-up para reintentar en otro ciclo.
+        try { await env.DB.prepare("UPDATE wa_cursos_campaign SET followup_at = NULL WHERE phone = ?").bind(phone).run(); } catch (_) {}
+      }
+    }
+  } catch (e) { /* best-effort */ }
+}
+
 const MINICURSO_REGALO_LINK = 'https://drive.google.com/drive/folders/14q3QvLPY6vO9d0qSLN-O7X0KxPmmIkW0';
 
 // Responde una sola vez por contacto (dedup por el link en outbound previo),
@@ -1915,9 +2007,11 @@ async function getSessionRole(env, userName) {
 //   cursos    → solo bandeja 'cursos'
 //   los demás → todo MENOS 'cursos' (Joaco no ve los de cursos)
 function inboxClauseForRole(role) {
-  if (role === 'admin') return '';
+  // 'oculto' = chats de broadcast aún sin respuesta: no se ven en NINGUNA
+  // bandeja (ni admin) hasta que el cliente responde y se revelan.
+  if (role === 'admin') return "AND inbox != 'oculto'";
   if (role === 'cursos') return "AND inbox = 'cursos'";
-  return "AND inbox != 'cursos'";
+  return "AND inbox NOT IN ('cursos','oculto')";
 }
 
 // Control de acceso por chat para el rol 'cursos': solo puede leer/escribir
@@ -2219,6 +2313,12 @@ export default {
                   if (reciente) {
                     try { await maybeAutoReplyMinicurso(env, phone, senderName); } catch (_) {}
                   }
+                }
+                // ===== Campaña de cursos: si este inbound responde a un broadcast
+                // oculto, IA evalúa, manda el evento si es positiva, y revela el
+                // chat a Abril. (No hace nada si el chat no es de la campaña.) =====
+                if (direction === 'inbound') {
+                  try { await revealCursosCampaign(env, phone, msgBody); } catch (_) {}
                 }
 
                 // ===== Ad Attribution (referral) =====
@@ -3422,8 +3522,10 @@ export default {
           //   comercial→ todo MENOS cursos
           if (_role === 'cursos') {
             where += " AND phone IN (SELECT phone FROM wa_chats_summary WHERE inbox = 'cursos')";
-          } else if (_role !== 'admin') {
-            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox = 'cursos')";
+          } else if (_role === 'admin') {
+            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox = 'oculto')";
+          } else {
+            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox IN ('cursos','oculto'))";
           }
         }
         if (from) { where += ' AND ts >= ?'; params.push(from); }
@@ -3507,6 +3609,9 @@ export default {
           return json({ dryRun: true, a_enviar: pendientes.length, muestra: pendientes.map(l => ({ nombre: l.nombre, tel: l.tel })) });
         }
         const result = { enviados: 0, fallidos: 0, errores: [] };
+        // id de la etiqueta 'form 6 y 7 de mayo' (para distinguir la campaña).
+        let formLabelId = 24;
+        try { const lr = await env.DB.prepare("SELECT id FROM labels WHERE name = 'form 6 y 7 de mayo'").first(); if (lr?.id) formLabelId = lr.id; } catch (_) {}
         for (const lead of pendientes) {
           // Reserva atómica (evita doble envío).
           let reserva;
@@ -3534,10 +3639,16 @@ export default {
                 ).bind(ts, wamid, lead.tel, previewBody).run();
               } catch (_) {}
             }
-            // Derivar a la bandeja de Abril.
+            // OCULTAR del front (inbox='oculto') hasta que el cliente responda.
             try {
-              await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos'").bind(lead.tel, ts).run();
+              await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto'").bind(lead.tel, ts).run();
             } catch (_) {}
+            // Registrar en la campaña (estado: enviado template 1, esperando respuesta).
+            try {
+              await env.DB.prepare("INSERT INTO wa_cursos_campaign (phone, nombre, sent_1_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET sent_1_at = excluded.sent_1_at, updated_at = excluded.updated_at").bind(lead.tel, lead.nombre || '', ts, ts).run();
+            } catch (_) {}
+            // Etiquetar con 'form 6 y 7 de mayo'.
+            try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(lead.tel, formLabelId, ts).run(); } catch (_) {}
           } else {
             result.fallidos++;
             if (result.errores.length < 8) result.errores.push({ tel: lead.tel, err: String(tpl?.error || JSON.stringify(tpl || {})).slice(0, 140) });
@@ -4821,6 +4932,9 @@ export default {
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
+    // Follow-up de la campaña de cursos: solo en horario hábil AR (8-20).
+    const hAR = (new Date(event.scheduledTime).getUTCHours() - 3 + 24) % 24;
+    if (hAR >= 8 && hAR < 20) ctx.waitUntil(processCursosFollowup(env));
     // Followups de Apps Script solo a las 13:00 UTC (10:00 AR)
     const hour = new Date(event.scheduledTime).getUTCHours();
     if (hour === 13) ctx.waitUntil(runScheduled(env));
