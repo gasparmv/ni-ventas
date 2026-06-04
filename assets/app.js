@@ -9606,27 +9606,30 @@ function renderBriefDrawer() {
                          : (origenRaw === 'wpp' || origenRaw === 'whatsapp' || data.cliente_wa_id) ? 'wpp'
                          : 'wpp';
             const tel = data.cliente_wa_id || '';
+            const actStyle = 'border:1px solid var(--accent-cyan,#8FD4DE);background:rgba(143,212,222,.08);color:var(--accent-cyan)';
+            const inactStyle = 'border:1px solid var(--border);background:transparent;color:var(--fg-subtle)';
             return `
-              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Por dónde llegó la consulta?</label>
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Por dónde llegó la consulta? ${isCom ? '<span style="color:#FF5566">*</span>' : ''}</label>
               <div style="display:flex;gap:8px;margin-bottom:var(--s-3)">
-                <label style="flex:1;cursor:${isCom ? 'pointer' : 'default'};padding:8px;border:1px solid ${origen === 'wpp' ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:var(--r-sm);text-align:center;font-size:13px;${origen === 'wpp' ? 'background:rgba(143,212,222,.08);color:var(--accent-cyan)' : 'color:var(--fg-subtle)'};opacity:${isCom ? '1' : '.7'}">
+                <label id="brief-origen-lbl-wpp" data-brief-origen="wpp" style="flex:1;cursor:${isCom ? 'pointer' : 'default'};padding:8px;border-radius:var(--r-sm);text-align:center;font-size:13px;${origen === 'wpp' ? actStyle : inactStyle};opacity:${isCom ? '1' : '.7'}">
                   <input type="radio" name="brief-origen" data-bf-radio="origen_lead" value="wpp" ${origen === 'wpp' ? 'checked' : ''} ${!isCom ? 'disabled' : ''} style="display:none">
                   📱 WhatsApp
                 </label>
-                <label style="flex:1;cursor:${isCom ? 'pointer' : 'default'};padding:8px;border:1px solid ${origen === 'ig' ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:var(--r-sm);text-align:center;font-size:13px;${origen === 'ig' ? 'background:rgba(143,212,222,.08);color:var(--accent-cyan)' : 'color:var(--fg-subtle)'};opacity:${isCom ? '1' : '.7'}">
+                <label id="brief-origen-lbl-ig" data-brief-origen="ig" style="flex:1;cursor:${isCom ? 'pointer' : 'default'};padding:8px;border-radius:var(--r-sm);text-align:center;font-size:13px;${origen === 'ig' ? actStyle : inactStyle};opacity:${isCom ? '1' : '.7'}">
                   <input type="radio" name="brief-origen" data-bf-radio="origen_lead" value="ig" ${origen === 'ig' ? 'checked' : ''} ${!isCom ? 'disabled' : ''} style="display:none">
                   📷 Instagram
                 </label>
               </div>
-              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">
-                Teléfono del cliente
-                <span id="brief-tel-required" style="color:#FF5566;${origen === 'wpp' ? '' : 'display:none'}">*</span>
-                <span id="brief-tel-hint" style="color:var(--fg-mute);font-size:10px;margin-left:4px;${origen === 'wpp' ? '' : 'display:none'}">obligatorio para mandar presu por WhatsApp</span>
-              </label>
-              <input type="tel" data-bf="cliente_wa_id" id="brief-tel-input" value="${escapeHtml(tel)}"
-                     placeholder="ej. 5491155604999 (sin +, solo dígitos)"
-                     ${!isCom ? 'readonly' : ''}
-                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3);${!isCom ? 'opacity:.7' : ''}">
+              <div id="brief-tel-wrap" style="${origen === 'wpp' ? '' : 'display:none'}">
+                <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">
+                  Teléfono del cliente <span style="color:#FF5566">*</span>
+                  <span style="color:var(--fg-mute);font-size:10px;margin-left:4px">obligatorio para mandar presu por WhatsApp</span>
+                </label>
+                <input type="tel" data-bf="cliente_wa_id" id="brief-tel-input" value="${escapeHtml(tel)}"
+                       placeholder="ej. 5491155604999 (sin +, solo dígitos)"
+                       ${!isCom ? 'readonly' : ''}
+                       style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3);${!isCom ? 'opacity:.7' : ''}">
+              </div>
             `;
           })()}
 
@@ -10162,6 +10165,27 @@ function readBriefDrawerForm() {
   const origenEl = document.querySelector('[data-bf-radio="origen_lead"]:checked');
   if (origenEl) out.origen_lead = origenEl.value;
   return out;
+}
+
+// Toggle de origen (WhatsApp / Instagram) en el DRAWER del brief. Actualiza el
+// feedback visual de ambos botones, marca el radio oculto y muestra/oculta el
+// campo teléfono (obligatorio solo para WhatsApp). Equivalente a
+// setQuickModalOrigen pero para el drawer.
+function setBriefDrawerOrigen(origen) {
+  const actStyle = { border: '1px solid var(--accent-cyan,#8FD4DE)', background: 'rgba(143,212,222,.08)', color: 'var(--accent-cyan)' };
+  const inactStyle = { border: '1px solid var(--border)', background: 'transparent', color: 'var(--fg-subtle)' };
+  ['wpp', 'ig'].forEach(o => {
+    const lbl = document.getElementById('brief-origen-lbl-' + o);
+    if (!lbl) return;
+    const st = o === origen ? actStyle : inactStyle;
+    lbl.style.border = st.border;
+    lbl.style.background = st.background;
+    lbl.style.color = st.color;
+    const radio = lbl.querySelector('input[type=radio]');
+    if (radio) radio.checked = (o === origen);
+  });
+  const telWrap = document.getElementById('brief-tel-wrap');
+  if (telWrap) telWrap.style.display = origen === 'wpp' ? '' : 'none';
 }
 
 // Mini-popup cotizador: usa la lógica existente (calcCotizador + buildPresupuestoTexto)
@@ -10832,6 +10856,14 @@ function bindCotizacion() {
   if (cotBtn) cotBtn.onclick = handleBriefAbrirCotizador;
   const cotPopupBtn = document.getElementById('brief-cotizar-popup');
   if (cotPopupBtn) cotPopupBtn.onclick = openBriefCotizadorPopup;
+  // Toggle origen WhatsApp / Instagram en el drawer (feedback visual + tel).
+  document.querySelectorAll('[data-brief-origen]').forEach(lbl => {
+    lbl.onclick = () => {
+      const radio = lbl.querySelector('input[type=radio]');
+      if (!radio || radio.disabled) return;  // solo comercial/admin
+      setBriefDrawerOrigen(lbl.dataset.briefOrigen);
+    };
+  });
   const delBtn = document.getElementById('brief-delete');
   if (delBtn) delBtn.onclick = () => handleBriefDelete(STATE.briefSelected, false);
 
