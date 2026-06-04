@@ -5349,15 +5349,16 @@ async function sendChatAudio(phone, blob) {
   chatState.sending = true;
   updateChatInputState();
   try {
+    const mime = blob.type || 'audio/ogg';
     const fd = new FormData();
     fd.append('to', phone);
     fd.append('type', 'audio');
-    fd.append('file', blob, 'audio.ogg');
+    fd.append('file', blob, 'audio' + audioExtForMime(mime));
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-media', {
       method: 'POST', headers: authHeaders(), body: fd
     });
     const j = await r.json();
-    if (!r.ok) { toast('Error: ' + (j.error || 'fallo envío audio')); return; }
+    if (!r.ok) { toast('Error audio: ' + (j.error || 'fallo') + (j.detail ? ' · ' + j.detail : '')); console.warn('audio fail', j); return; }
     chatState.messages.push({
       ts: new Date().toISOString(), wamid: j.id || '', direction: 'outbound',
       phone, sender_name: '', msg_type: 'audio', body: '[audio]',
@@ -5370,12 +5371,33 @@ async function sendChatAudio(phone, blob) {
 }
 
 // ===== Audio recording =====
+// WhatsApp solo acepta audio en ogg/opus, mp4(m4a), mpeg(mp3), aac o amr — NO
+// acepta webm. Elegimos el mejor formato compatible que soporte el navegador.
+// (Firefox graba ogg; Safari mp4; Chrome solo webm → ese caso lo cubrimos en el
+//  worker/segundo paso si hace falta.)
+function pickAudioMime() {
+  const prefs = ['audio/ogg;codecs=opus', 'audio/ogg', 'audio/mp4', 'audio/mpeg', 'audio/webm;codecs=opus', 'audio/webm'];
+  if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported) {
+    for (const m of prefs) { try { if (MediaRecorder.isTypeSupported(m)) return m; } catch (_) {} }
+  }
+  return '';
+}
+function audioExtForMime(m) {
+  m = (m || '').toLowerCase();
+  if (m.includes('ogg')) return '.ogg';
+  if (m.includes('mp4')) return '.m4a';
+  if (m.includes('mpeg') || m.includes('mp3')) return '.mp3';
+  if (m.includes('webm')) return '.webm';
+  return '.bin';
+}
 function startRecording(phone) {
   navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
     chatState.recording = true;
     chatState.audioChunks = [];
     chatState.recordingSecs = 0;
-    const mr = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+    const wantMime = pickAudioMime();
+    const mr = wantMime ? new MediaRecorder(stream, { mimeType: wantMime }) : new MediaRecorder(stream);
+    chatState.audioMime = mr.mimeType || wantMime || 'audio/webm';
     chatState.mediaRecorder = mr;
     mr.ondataavailable = e => { if (e.data.size > 0) chatState.audioChunks.push(e.data); };
     mr.onstop = () => { stream.getTracks().forEach(t => t.stop()); };
@@ -5401,7 +5423,7 @@ function stopAndSendRecording(phone) {
   if (!chatState.mediaRecorder) return;
   chatState.mediaRecorder.onstop = () => {
     chatState.mediaRecorder.stream?.getTracks().forEach(t => t.stop());
-    const blob = new Blob(chatState.audioChunks, { type: 'audio/webm;codecs=opus' });
+    const blob = new Blob(chatState.audioChunks, { type: chatState.audioMime || 'audio/webm' });
     chatState.recording = false;
     chatState.audioChunks = [];
     clearInterval(chatState.recordingTimer);
