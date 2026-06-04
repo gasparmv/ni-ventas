@@ -356,6 +356,42 @@ function getWaClient(env) {
   };
 }
 
+// Query "vieja" de la lista de chats — se usa SOLO como red de seguridad del
+// endpoint /admin/wa/chats-summary si la libreta wa_chats_summary está vacía o
+// falla. Escanea toda wa_messages (cara) pero garantiza que la lista nunca se
+// rompa aunque la libreta tenga un problema.
+const CHATS_SUMMARY_FALLBACK_SQL = `
+  WITH last_msg AS (
+    SELECT phone, ts AS last_ts, body AS last_body, direction AS last_direction, msg_type AS last_msg_type
+    FROM (
+      SELECT phone, ts, body, direction, msg_type,
+             ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts DESC, id DESC) AS rn
+      FROM wa_messages
+      WHERE phone IS NOT NULL AND phone != ''
+        AND NOT (msg_type = 'status' AND (body IS NULL OR body = '') AND direction != 'outbound')
+    ) t WHERE rn = 1
+  ),
+  inbound_name AS (
+    SELECT phone, sender_name FROM (
+      SELECT phone, sender_name, ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts DESC) AS rn
+      FROM wa_messages WHERE direction = 'inbound' AND sender_name IS NOT NULL AND sender_name != ''
+    ) t WHERE rn = 1
+  ),
+  unread_counts AS (
+    SELECT m.phone, COUNT(*) AS unread FROM wa_messages m
+    LEFT JOIN wa_read_cursor c ON c.phone = m.phone
+    WHERE m.direction = 'inbound' AND m.ts > COALESCE(c.last_read_ts, '1970-01-01')
+    GROUP BY m.phone
+  )
+  SELECT lm.phone, lm.last_ts, lm.last_body, lm.last_direction, lm.last_msg_type,
+         COALESCE(inm.sender_name, '') AS contact_name,
+         COALESCE(uc.unread, 0) AS unread
+  FROM last_msg lm
+  LEFT JOIN inbound_name inm ON inm.phone = lm.phone
+  LEFT JOIN unread_counts uc ON uc.phone = lm.phone
+  ORDER BY lm.last_ts DESC
+`;
+
 async function waSend(env, payload) {
   if (!env.WA_PHONE_NUMBER_ID) {
     return { ok: false, status: 500, error: 'WA_PHONE_NUMBER_ID no configurado' };
@@ -2749,73 +2785,44 @@ export default {
       // no vacío), unread (count inbound > last_read_ts).
       // Mucho más liviano y escala con la cantidad de chats, no de mensajes.
       if (request.method === 'GET' && path === '/admin/wa/chats-summary') {
-        // === Cache de 15s en Workers Cache API ===
-        // La query SQL es cara (3 CTEs + ROW_NUMBER OVER sobre 64k+ msgs: ~440k
-        // filas escaneadas, ~310ms). El client polea cada 4-8s; cacheando 15s
-        // reducimos las ejecuciones reales de la query a ~1 cada 15s. Trade-off:
-        // un chat nuevo puede tardar hasta 15s en aparecer EN LA LISTA (el chat
-        // abierto se actualiza por su propio polling, más rápido). El handler de
-        // /admin/wa/mark-read invalida la cache para que el badge unread baje a 0
-        // al instante. (La solución de fondo es la tabla resumen incremental —
-        // ver wa_chats_summary; esto es el alivio inmediato.)
+        // === Lista de chats: lee de la libreta resumen wa_chats_summary ===
+        // La libreta tiene 1 fila por chat (último msg + no leídos + nombre),
+        // mantenida al día por el trigger trg_wa_chats_summary_ins. Leerla es
+        // ~unas cientos de filas (vs ~440k de la query vieja con ROW_NUMBER).
+        // RED DE SEGURIDAD: si la libreta está vacía (no migrada) o falla, se
+        // usa la query vieja (CHATS_SUMMARY_FALLBACK_SQL) — así nunca se rompe.
+        // Cache corto (5s) en Workers Cache API; mark-read invalida la cache.
         const cache = caches.default;
         const cacheUrl = new URL(request.url);
         cacheUrl.search = ''; // ignorar cache-busters como ?t=123
         const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
         const cached = await cache.match(cacheKey);
         if (cached) return cached;
+        let chats = null;
         try {
-          const rs = await env.DB.prepare(`
-            WITH last_msg AS (
-              -- Garantiza EXACTAMENTE un row por phone, aunque haya múltiples filas
-              -- con el mismo ts (caso común con 360dialog: status sent/delivered/read
-              -- del mismo mensaje llegan en el mismo segundo, y el INNER JOIN previo
-              -- por (phone, ts) devolvía duplicados — el bug de "contacto repetido 7 veces").
-              SELECT phone, ts AS last_ts, body AS last_body,
-                     direction AS last_direction, msg_type AS last_msg_type
-              FROM (
-                SELECT phone, ts, body, direction, msg_type,
-                       ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts DESC, id DESC) AS rn
-                FROM wa_messages
-                WHERE phone IS NOT NULL AND phone != ''
-                  AND NOT (msg_type = 'status' AND (body IS NULL OR body = '') AND direction != 'outbound')
-              ) t
-              WHERE rn = 1
-            ),
-            inbound_name AS (
-              SELECT phone, sender_name
-              FROM (
-                SELECT phone, sender_name,
-                       ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts DESC) AS rn
-                FROM wa_messages
-                WHERE direction = 'inbound' AND sender_name IS NOT NULL AND sender_name != ''
-              ) t
-              WHERE rn = 1
-            ),
-            unread_counts AS (
-              SELECT m.phone, COUNT(*) AS unread
-              FROM wa_messages m
-              LEFT JOIN wa_read_cursor c ON c.phone = m.phone
-              WHERE m.direction = 'inbound'
-                AND m.ts > COALESCE(c.last_read_ts, '1970-01-01')
-              GROUP BY m.phone
-            )
-            SELECT lm.phone, lm.last_ts, lm.last_body, lm.last_direction, lm.last_msg_type,
-                   COALESCE(inm.sender_name, '') AS contact_name,
-                   COALESCE(uc.unread, 0) AS unread
-            FROM last_msg lm
-            LEFT JOIN inbound_name inm ON inm.phone = lm.phone
-            LEFT JOIN unread_counts uc ON uc.phone = lm.phone
-            ORDER BY lm.last_ts DESC
-          `).all();
-          const response = json({ chats: rs.results || [] });
-          response.headers.set('Cache-Control', 'public, max-age=15');
-          // ctx.waitUntil para no bloquear la response esperando el cache.put.
-          ctx.waitUntil(cache.put(cacheKey, response.clone()));
-          return response;
-        } catch (e) {
-          return json({ chats: [], error: e.message }, 500);
+          const rs = await env.DB.prepare(
+            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread
+             FROM wa_chats_summary
+             WHERE last_ts != ''
+             ORDER BY last_ts DESC`
+          ).all();
+          chats = rs.results || [];
+          // Si la libreta está vacía (ej. base sin migrar), caer al fallback.
+          if (!chats.length) chats = null;
+        } catch (e) { chats = null; }
+        // Fallback a la query vieja (red de seguridad).
+        if (chats === null) {
+          try {
+            const fb = await env.DB.prepare(CHATS_SUMMARY_FALLBACK_SQL).all();
+            chats = fb.results || [];
+          } catch (e) {
+            return json({ chats: [], error: e.message }, 500);
+          }
         }
+        const response = json({ chats });
+        response.headers.set('Cache-Control', 'public, max-age=5');
+        ctx.waitUntil(cache.put(cacheKey, response.clone()));
+        return response;
       }
 
       // Análisis individual de un chat con Claude. model=sonnet|opus.
@@ -3203,6 +3210,9 @@ export default {
           await env.DB.prepare(
             'INSERT INTO wa_read_cursor (phone, last_read_ts, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET last_read_ts = excluded.last_read_ts, updated_at = excluded.updated_at'
           ).bind(phone, ts, new Date().toISOString()).run();
+          // Resetear el contador de no leídos en la libreta resumen (el trigger
+          // solo suma; el reset a 0 lo hacemos acá al marcar el chat como leído).
+          try { await env.DB.prepare('UPDATE wa_chats_summary SET unread = 0 WHERE phone = ?').bind(phone).run(); } catch (_) {}
         } catch (e) {
           try {
             await env.DB.prepare('CREATE TABLE IF NOT EXISTS wa_read_cursor (phone TEXT PRIMARY KEY, last_read_ts TEXT NOT NULL, updated_at TEXT NOT NULL)').run();
