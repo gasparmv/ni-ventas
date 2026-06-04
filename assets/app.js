@@ -10983,8 +10983,9 @@ function bindCotizacion() {
       const texto = (ta?.value || '').trim();
       if (!texto) { await showAlert('El texto del presupuesto está vacío.', { title: 'Sin texto', variant: 'warn' }); return; }
 
+      const tieneRender = (STATE.briefDetailImages || []).some(x => x.tipo === 'render');
       const ok = await showConfirm(
-        `Voy a mandar el presupuesto al WhatsApp +${telDigits} y marcar el brief como enviado.\n\n¿Confirmás?`,
+        `Voy a mandarle al WhatsApp +${telDigits} ${tieneRender ? 'el render con el presupuesto de pie de foto' : 'el presupuesto'} y marcar el brief como enviado.\n\n¿Confirmás?`,
         { title: 'Enviar presupuesto', confirmLabel: '📤 Mandar', cancelLabel: 'Cancelar' }
       ).catch(() => false);
       if (!ok) return;
@@ -10996,10 +10997,13 @@ function bindCotizacion() {
 
       let waOk = false, wamid = '';
       try {
-        const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
+        // Mandamos el RENDER del brief como foto con el presupuesto de caption
+        // (un solo mensaje). El worker resuelve la imagen desde R2; si el brief
+        // no tiene render, manda solo el texto.
+        const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-brief-presupuesto', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ to: telDigits, body: texto })
+          body: JSON.stringify({ brief_id: briefId, to: telDigits, caption: texto })
         });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) {

@@ -3313,6 +3313,86 @@ export default {
         return json({ id: r.id, r2Key, type });
       }
 
+      // ===== Enviar presupuesto de un brief: render (foto) + presupuesto de caption =====
+      // body: { brief_id, to, caption }
+      // Manda el render del brief como IMAGEN con el texto del presupuesto de
+      // pie de foto, en un solo mensaje (como pidió Gaspar). Si el brief no
+      // tiene render, manda solo el texto. Si el caption supera el límite de
+      // WhatsApp (1024 chars), manda la imagen sin caption + el texto aparte.
+      if (request.method === 'POST' && path === '/admin/wa/send-brief-presupuesto') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { brief_id, to, caption } = body || {};
+        if (!to || !caption) return json({ error: 'missing to or caption' }, 400);
+        const num = normalizeArPhone(to);
+        if (!num) return json({ error: 'numero invalido' }, 400);
+
+        // Buscar el render más reciente del brief.
+        let renderKey = null;
+        if (brief_id) {
+          try {
+            const row = await env.DB.prepare(
+              "SELECT r2_key FROM brief_imagenes WHERE brief_id = ? AND tipo = 'render' ORDER BY created_at DESC, id DESC LIMIT 1"
+            ).bind(brief_id).first();
+            if (row && row.r2_key) renderKey = row.r2_key;
+          } catch (_) {}
+        }
+
+        const CAPTION_MAX = 1024;
+        const nowIso = () => new Date().toISOString();
+        const saveMsg = async (wamid, type, bodyTxt, mediaKey) => {
+          try {
+            await env.DB.prepare(
+              'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            ).bind(nowIso(), wamid || '', 'outbound', num, '', type, bodyTxt, mediaKey || '', '', 'sent').run();
+          } catch (_) {}
+        };
+
+        let usedImage = false, splitText = false, mainId = '';
+
+        if (renderKey) {
+          const obj = await env.MEDIA.get(renderKey);
+          if (obj) {
+            const buf = await obj.arrayBuffer();
+            const mime = obj.httpMetadata?.contentType || 'image/jpeg';
+            const fileName = renderKey.split('/').pop() || 'render.jpg';
+            const _wa = getWaClient(env);
+            const fd = new FormData();
+            fd.append('messaging_product', 'whatsapp');
+            fd.append('file', new Blob([buf], { type: mime }), fileName);
+            fd.append('type', mime);
+            const upR = await fetch(_wa.mediaUploadUrl(), { method: 'POST', headers: _wa.headers, body: fd });
+            const upJ = await upR.json().catch(() => ({}));
+            if (upR.ok && upJ.id) {
+              usedImage = true;
+              const fits = String(caption).length <= CAPTION_MAX;
+              const imgCaption = fits ? caption : '';
+              const r = await waSend(env, { messaging_product: 'whatsapp', to: num, type: 'image', image: { id: upJ.id, caption: imgCaption || undefined } });
+              await logWaEvent(env, { to: num, kind: 'image', ref: 'brief:' + (brief_id || ''), ok: r.ok, messageId: r.id, error: r.error });
+              if (!r.ok) return json({ error: r.error || 'image send failed' }, r.status || 500);
+              mainId = r.id || '';
+              await saveMsg(r.id, 'image', imgCaption || '[imagen]', renderKey);
+              // Caption no entraba → mandar el texto como segundo mensaje.
+              if (!fits) {
+                splitText = true;
+                const rt = await waSendText(env, num, caption);
+                await saveMsg(rt.id, 'text', caption, '');
+              }
+            }
+          }
+        }
+
+        // Sin render (o el upload falló): mandar solo texto.
+        if (!usedImage) {
+          const rt = await waSendText(env, num, caption);
+          await logWaEvent(env, { to: num, kind: 'text', ref: 'brief:' + (brief_id || ''), ok: rt.ok, messageId: rt.id, error: rt.error });
+          if (!rt.ok) return json({ error: rt.error || 'text send failed' }, rt.status || 500);
+          mainId = rt.id || '';
+          await saveMsg(rt.id, 'text', caption, '');
+        }
+
+        return json({ id: mainId, hasImage: usedImage, splitText });
+      }
+
       // ===== Forward (reenviar) un mensaje a uno o varios contactos =====
       // body: { wamid: "...", to_phones: ["549...", "549..."] }
       if (request.method === 'POST' && path === '/admin/wa/forward') {
