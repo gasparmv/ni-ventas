@@ -1734,14 +1734,21 @@ async function getSession(env, request) {
   return { token, user: row.user };
 }
 
+// Mapea el slug del usuario (del nombre que manda el front) a los posibles ids
+// en users_panel. Cubre alias históricos: Joaquín↔joaco y Abril↔cursos (el
+// botón del selector dice "Abril" pero el usuario en la base es 'cursos').
+function userLookupIds(slug) {
+  if (slug === 'joaquin' || slug === 'joaco') return ['joaquin', 'joaco'];
+  if (slug === 'abril' || slug === 'cursos') return ['abril', 'cursos'];
+  return [slug];
+}
+
 // Rol funcional del usuario de la sesión: admin | comercial | disenador | cursos.
 // gaspar siempre admin; el resto se resuelve por su slug contra users_panel.
 async function getSessionRole(env, userName) {
   const slug = String(userName || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   if (slug === 'gaspar') return 'admin';
-  const ids = slug === 'joaquin' ? ['joaquin', 'joaco']
-            : slug === 'joaco'   ? ['joaco', 'joaquin']
-            : [slug];
+  const ids = userLookupIds(slug);
   const ph = ids.map(() => '?').join(',');
   try {
     const u = await env.DB.prepare(`SELECT rol FROM users_panel WHERE id IN (${ph}) AND activo = 1 LIMIT 1`).bind(...ids).first();
@@ -2269,11 +2276,8 @@ export default {
       const { user, password } = body || {};
       if (!user) return json({ error: 'missing fields' }, 400);
       const userSlug = String(user).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-      // Alias: el frontend manda "Joaquín" (slug 'joaquin'); en users_panel puede
-      // estar como 'joaco' o 'joaquin'. Buscamos por cualquiera de los dos.
-      const lookupIds = userSlug === 'joaquin' ? ['joaquin', 'joaco']
-                      : userSlug === 'joaco'   ? ['joaco', 'joaquin']
-                      : [userSlug];
+      // Alias del slug → ids posibles en users_panel (Joaquín↔joaco, Abril↔cursos).
+      const lookupIds = userLookupIds(userSlug);
       const placeholders = lookupIds.map(() => '?').join(',');
       const panelUser = await env.DB.prepare(
         `SELECT id, rol, password_hash FROM users_panel WHERE id IN (${placeholders}) AND activo = 1 LIMIT 1`
