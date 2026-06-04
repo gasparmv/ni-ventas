@@ -528,27 +528,33 @@ async function analyzeResponseSentiment(env, texto) {
 // chat a la bandeja de Abril (responda lo que responda).
 async function revealCursosCampaign(env, phone, msgBody) {
   if (!phone) return;
-  let camp;
-  try { camp = await env.DB.prepare("SELECT phone, revealed_at FROM wa_cursos_campaign WHERE phone = ?").bind(phone).first(); } catch (_) { return; }
-  if (!camp || camp.revealed_at) return; // no es de la campaña, o ya revelado
+  const now = new Date().toISOString();
+  // Dedup ATÓMICO: reclamamos la respuesta marcando responded_at solo si aún no
+  // estaba respondida/revelada. Si el webhook del mismo inbound llega 2 veces,
+  // solo una obtiene changes=1; la otra aborta → no duplica el mensaje del evento.
+  let claim;
+  try {
+    claim = await env.DB.prepare(
+      "UPDATE wa_cursos_campaign SET responded_at = ?, updated_at = ? WHERE phone = ? AND responded_at IS NULL AND revealed_at IS NULL"
+    ).bind(now, now, phone).run();
+  } catch (_) { return; }
+  if (!claim?.meta?.changes) return; // no es de la campaña, o ya procesado
   const sentiment = await analyzeResponseSentiment(env, msgBody);
-  const ts = new Date().toISOString();
+  try { await env.DB.prepare("UPDATE wa_cursos_campaign SET sentiment = ? WHERE phone = ?").bind(sentiment, phone).run(); } catch (_) {}
   if (sentiment === 'positiva') {
-    const res = await waSendText(env, phone, CURSOS_EVENTO_MSG);
-    if (res?.ok && res.id) {
-      try {
-        await env.DB.prepare(
-          `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-           VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '')
-           ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text'
-             WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
-        ).bind(new Date().toISOString(), res.id, phone, CURSOS_EVENTO_MSG).run();
-      } catch (_) {}
-    }
+    // Encolar el mensaje del evento con demora (~1-2 min, más humano). El cron
+    // (processAutoReplyQueue) lo manda y RECIÉN AHÍ revela el chat a Abril.
+    const dueAt = new Date(Date.now() + 60 * 1000).toISOString();
+    try {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'cursos_evento', '', 'queued', ?, '')"
+      ).bind(phone, dueAt).run();
+    } catch (_) {}
+  } else {
+    // No positiva → revelar al instante a Abril, sin mensaje.
+    try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos' WHERE phone = ?").bind(phone).run(); } catch (_) {}
+    try { await env.DB.prepare("UPDATE wa_cursos_campaign SET revealed_at = ?, updated_at = ? WHERE phone = ?").bind(now, now, phone).run(); } catch (_) {}
   }
-  // Revelar: bandeja de Abril + marcar en la campaña.
-  try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos' WHERE phone = ?").bind(phone).run(); } catch (_) {}
-  try { await env.DB.prepare("UPDATE wa_cursos_campaign SET responded_at = ?, sentiment = ?, revealed_at = ?, updated_at = ? WHERE phone = ?").bind(ts, sentiment, ts, ts, phone).run(); } catch (_) {}
 }
 
 // Cron: follow-up (template 2) a los que NO respondieron al template 1 hace ≥12h.
@@ -633,17 +639,24 @@ async function processAutoReplyQueue(env) {
   try {
     const nowIso = new Date().toISOString();
     const floorIso = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    // Procesa minicurso (regalos) y cursos_evento (invitación al evento). Ambos
+    // son mensaje libre con demora; el evento además REVELA el chat a Abril.
     const rs = await env.DB.prepare(
-      "SELECT phone, sender_name FROM wa_autoreply_log WHERE kind = 'minicurso' AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 25"
+      "SELECT phone, kind, sender_name FROM wa_autoreply_log WHERE kind IN ('minicurso','cursos_evento') AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 25"
     ).bind(nowIso, floorIso).all();
     for (const row of (rs.results || [])) {
       const phone = row.phone;
-      const nombre = (row.sender_name || '').trim().split(/\s+/)[0] || '';
-      const saludo = nombre ? `Buenas ${nombre}!` : 'Buenas!';
-      const body = `${saludo} Acá están los regalos por haber visto hasta el final! 🎁 ${MINICURSO_REGALO_LINK}\nContanos, qué te pareció el nuevo Curso? Viste la 2da clase hasta el final?`;
+      let body;
+      if (row.kind === 'minicurso') {
+        const nombre = (row.sender_name || '').trim().split(/\s+/)[0] || '';
+        const saludo = nombre ? `Buenas ${nombre}!` : 'Buenas!';
+        body = `${saludo} Acá están los regalos por haber visto hasta el final! 🎁 ${MINICURSO_REGALO_LINK}\nContanos, qué te pareció el nuevo Curso? Viste la 2da clase hasta el final?`;
+      } else {
+        body = CURSOS_EVENTO_MSG;
+      }
       const res = await waSendText(env, phone, body);
       if (!res?.ok) continue; // queda 'queued' → reintenta el próximo tick (dentro de la ventana)
-      await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'minicurso'").bind(new Date().toISOString(), phone).run();
+      await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = ?").bind(new Date().toISOString(), phone, row.kind).run();
       const wamid = res.id || '';
       if (wamid) {
         try {
@@ -654,6 +667,12 @@ async function processAutoReplyQueue(env) {
                WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
           ).bind(new Date().toISOString(), wamid, phone, body).run();
         } catch (_) {}
+      }
+      // El evento de cursos: recién acá (tras mandarlo) se revela el chat a Abril.
+      if (row.kind === 'cursos_evento') {
+        const ts2 = new Date().toISOString();
+        try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos' WHERE phone = ?").bind(phone).run(); } catch (_) {}
+        try { await env.DB.prepare("UPDATE wa_cursos_campaign SET revealed_at = ?, updated_at = ? WHERE phone = ?").bind(ts2, ts2, phone).run(); } catch (_) {}
       }
     }
   } catch (e) { /* best-effort */ }
