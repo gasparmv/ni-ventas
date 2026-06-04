@@ -3396,14 +3396,19 @@ export default {
       // o lo devuelve a la bandeja general.
       if (request.method === 'POST' && path === '/admin/wa/chat-inbox') {
         const role = await getSessionRole(env, session.user);
-        // Admin y comercial (Joaco) pueden derivar chats a Cursos / sacarlos.
-        // Abril (cursos) no mueve chats (solo gestiona los suyos).
-        if (role !== 'admin' && role !== 'comercial') return json({ error: 'forbidden' }, 403);
+        // Admin y comercial (Joaco): mueven chats en cualquier dirección.
+        // Cursos (Abril): SOLO puede SACAR de su bandeja (cursos → general) un
+        // chat mal derivado; no puede meter chats (no ve los de general).
+        if (role !== 'admin' && role !== 'comercial' && role !== 'cursos') return json({ error: 'forbidden' }, 403);
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const phone = String(body?.phone || '').replace(/\D/g, '');
         const inbox = body?.inbox;
         if (!phone || !['cursos', 'general'].includes(inbox)) {
           return json({ error: 'phone (dígitos) e inbox (cursos|general) requeridos' }, 400);
+        }
+        if (role === 'cursos') {
+          if (inbox !== 'general') return json({ error: 'forbidden: solo podés sacar chats de Cursos' }, 403);
+          if (!(await inboxAccessOk(env, 'cursos', phone))) return json({ error: 'forbidden: ese chat no está en tu bandeja' }, 403);
         }
         // Upsert: el chat ya suele existir en la libreta (tiene mensajes). Si no,
         // lo creamos con la bandeja seteada (aparecerá cuando tenga mensajes).

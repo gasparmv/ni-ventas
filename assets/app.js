@@ -6572,9 +6572,10 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         <span>${msgCount} msgs</span>
-        ${(getUserRole() === 'admin' || getUserRole() === 'comercial') ? (() => {
+        ${['admin', 'comercial', 'cursos'].includes(getUserRole()) ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
           const _enCursos = _c && _c.inbox === 'cursos';
+          // Abril (cursos) solo ve chats de su bandeja → siempre "Sacar de Cursos".
           return `<button class="btn-label-toggle${_enCursos ? ' has-note' : ''}" id="btn-cursos-toggle" data-en-cursos="${_enCursos ? '1' : '0'}" title="${_enCursos ? 'Sacar de la bandeja Cursos' : 'Derivar a la bandeja Cursos (Abril)'}" style="font-size:17px;line-height:1">🎓</button>`;
         })() : ''}
         <button class="btn-label-toggle ${getContactNote(phone) ? 'has-note' : ''}" id="btn-note" title="${getContactNote(phone) ? 'Editar nota' : 'Agregar nota'}">
@@ -7933,7 +7934,7 @@ function bindChatConversation() {
 async function handleToggleCursos() {
   const phone = chatState.selectedPhone;
   const role = getUserRole();
-  if (!phone || (role !== 'admin' && role !== 'comercial')) return;
+  if (!phone || !['admin', 'comercial', 'cursos'].includes(role)) return;
   const c = (chatState.contacts || []).find(x => x.phone === phone);
   const enCursos = c && c.inbox === 'cursos';
   const nuevo = enCursos ? 'general' : 'cursos';
@@ -7954,7 +7955,11 @@ async function handleToggleCursos() {
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
     if (c) c.inbox = nuevo;  // refleja al instante en el botón
     toast(nuevo === 'cursos' ? '🎓 Derivado a Cursos — lo ve Abril' : 'Devuelto a la bandeja general');
-    // Refrescar la lista: si soy Joaco y lo mandé a cursos, debe salir de mi bandeja.
+    // Si el chat dejó de pertenecer a la bandeja del usuario, lo deseleccionamos
+    // (Abril lo sacó a general, o Joaco lo derivó a cursos) — ya no lo puede ver.
+    const yaNoVisible = (role === 'cursos' && nuevo === 'general') || (role === 'comercial' && nuevo === 'cursos');
+    if (yaNoVisible) chatState.selectedPhone = null;
+    // Refrescar la lista para que el chat salga (o entre) en la bandeja correcta.
     chatState.contactsLoaded = false;
     loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
   } catch (e) {
