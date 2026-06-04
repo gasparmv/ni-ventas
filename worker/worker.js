@@ -885,7 +885,7 @@ async function processLeadgenWebhook(env, body) {
       ]);
 
       if (tplResult?.ok) {
-        const wamid = tplResult.data?.messages?.[0]?.id || '';
+        const wamid = tplResult.id || '';
         try {
           await env.DB.prepare(
             'UPDATE wa_leads SET template_status = ?, template_sent_at = ?, wamid = ? WHERE leadgen_id = ?'
@@ -897,10 +897,16 @@ async function processLeadgenWebhook(env, body) {
         // recibió el lead), con {{1}} reemplazado por el firstName.
         try {
           const previewBody = `Holaa ${firstName || 'amigo/a'}, por aca Joaco de Neon Infinito! Nos llego tu formulario para presupuestar carteles! Tenes un diseño/imagen de referencia para pasarnos asi te lo cotizamos?`;
-          await env.DB.prepare(
-            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')`
-          ).bind(new Date().toISOString(), wamid, phoneNorm, previewBody).run();
+          // UPSERT por wamid: si el status (sent/delivered) ya creó la fila vacía,
+          // completamos el body + msg_type en vez de fallar por el UNIQUE de wamid.
+          if (wamid) {
+            await env.DB.prepare(
+              `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+               VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
+               ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+                 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+            ).bind(new Date().toISOString(), wamid, phoneNorm, previewBody).run();
+          }
         } catch (_) {}
       } else {
         try {
@@ -1006,10 +1012,16 @@ async function processSheetLead(env, body) {
 
       try {
         const previewBody = `Holaa ${firstName || 'amigo/a'}, por aca Joaco de Neon Infinito! Nos llego tu formulario para presupuestar carteles! Tenes un diseño/imagen de referencia para pasarnos asi te lo cotizamos?`;
-        await env.DB.prepare(
-          `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-           VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')`
-        ).bind(new Date().toISOString(), wamid, phoneNorm, previewBody).run();
+        // UPSERT por wamid: si el status (sent/delivered) ya creó la fila vacía,
+        // completamos el body + msg_type en vez de fallar por el UNIQUE de wamid.
+        if (wamid) {
+          await env.DB.prepare(
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+               WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+          ).bind(new Date().toISOString(), wamid, phoneNorm, previewBody).run();
+        }
       } catch (_) {}
       await _logLeadDebug(env, 'SHEET_TEMPLATE_SENT', { leadgen_id: leadgenId, phone: phoneNorm, wamid });
     } else {
@@ -3201,7 +3213,7 @@ export default {
             row.first_name || 'amigo/a'
           ]);
           if (tplResult?.ok) {
-            const wamid = tplResult.data?.messages?.[0]?.id || '';
+            const wamid = tplResult.id || '';
             await env.DB.prepare(
               'UPDATE wa_leads SET template_status = ?, template_sent_at = ?, wamid = ?, template_error = ? WHERE leadgen_id = ?'
             ).bind('sent', new Date().toISOString(), wamid, '', leadgenId).run();
@@ -3287,7 +3299,9 @@ export default {
       // o lo devuelve a la bandeja general.
       if (request.method === 'POST' && path === '/admin/wa/chat-inbox') {
         const role = await getSessionRole(env, session.user);
-        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        // Admin y comercial (Joaco) pueden derivar chats a Cursos / sacarlos.
+        // Abril (cursos) no mueve chats (solo gestiona los suyos).
+        if (role !== 'admin' && role !== 'comercial') return json({ error: 'forbidden' }, 403);
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const phone = String(body?.phone || '').replace(/\D/g, '');
         const inbox = body?.inbox;

@@ -5538,7 +5538,8 @@ async function loadChatContacts() {
         lastTs: c.last_ts,
         lastDir: c.last_direction,
         lastType: c.last_msg_type,
-        unread: c.unread || 0
+        unread: c.unread || 0,
+        inbox: c.inbox || 'general'   // bandeja: general | cursos (para el botón 🎓)
       };
     }).sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
     // NO tocar chatState.messages — loadChatMessages(phone) maneja el
@@ -5831,11 +5832,22 @@ function formatPhoneDisplay(phone) {
   return '+' + digits;
 }
 
+// Etiquetas visibles según el rol. El rol 'cursos' (Abril) solo ve las
+// relevantes a cursos; los demás roles ven todas. IDs estables:
+//   23 Abandonado IA · Curso · 19 Cliente potencial · 17 Importante
+//   13 Pago completo curso · 5 interesado curso
+const CURSOS_LABEL_IDS = [23, 19, 17, 13, 5];
+function visibleLabels() {
+  const all = chatState.labels || [];
+  return isCursosOnly() ? all.filter(l => CURSOS_LABEL_IDS.includes(l.id)) : all;
+}
+
 function renderContactLabelChips(phone) {
   const ids = chatState.contactLabels[phone] || [];
   if (!ids.length) return '';
+  const vis = visibleLabels();
   return ids.map(id => {
-    const l = chatState.labels.find(lb => lb.id === id);
+    const l = vis.find(lb => lb.id === id);
     if (!l) return '';
     return `<span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>`;
   }).join('');
@@ -5850,14 +5862,14 @@ function renderLabelFilterBar() {
   return `<div class="label-filter-bar" id="label-filter-bar">
     <button class="label-filter-pill${noFilters ? ' active' : ''}" data-filter-fixed="all">Todos</button>
     <button class="label-filter-pill${chatState.filterUnreadOnly ? ' active' : ''}" data-filter-fixed="unread">No leídos</button>
-    ${chatState.labels.length ? `
+    ${visibleLabels().length ? `
       <div class="label-filter-dd-wrap">
         <button class="label-filter-pill label-filter-dd-btn${labelsCount ? ' active' : ''}" id="label-filter-dd-btn" aria-expanded="${chatState.labelDropdownOpen ? 'true' : 'false'}">
           Etiquetas${labelsCount ? ` (${labelsCount})` : ''}
           <span class="label-filter-dd-caret" aria-hidden="true">▾</span>
         </button>
         <div class="label-filter-dd-menu" id="label-filter-dd-menu" style="display:${chatState.labelDropdownOpen ? 'block' : 'none'}">
-          ${chatState.labels.map(l => {
+          ${visibleLabels().map(l => {
             const active = chatState.filterLabels.includes(l.id);
             return `<button class="label-filter-item${active ? ' active' : ''}" data-label-id="${l.id}">
               <span class="label-filter-item-dot" style="background:${l.color}"></span>
@@ -6560,7 +6572,7 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         <span>${msgCount} msgs</span>
-        ${isAdmin() ? (() => {
+        ${(getUserRole() === 'admin' || getUserRole() === 'comercial') ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
           const _enCursos = _c && _c.inbox === 'cursos';
           return `<button class="btn-label-toggle${_enCursos ? ' has-note' : ''}" id="btn-cursos-toggle" data-en-cursos="${_enCursos ? '1' : '0'}" title="${_enCursos ? 'Sacar de la bandeja Cursos' : 'Derivar a la bandeja Cursos (Abril)'}" style="font-size:17px;line-height:1">🎓</button>`;
@@ -7917,10 +7929,11 @@ function bindChatConversation() {
   }
 }
 
-// Deriva (o saca) el chat activo a la bandeja de Cursos. Solo admin.
+// Deriva (o saca) el chat activo a la bandeja de Cursos. Admin y comercial (Joaco).
 async function handleToggleCursos() {
   const phone = chatState.selectedPhone;
-  if (!phone || !isAdmin()) return;
+  const role = getUserRole();
+  if (!phone || (role !== 'admin' && role !== 'comercial')) return;
   const c = (chatState.contacts || []).find(x => x.phone === phone);
   const enCursos = c && c.inbox === 'cursos';
   const nuevo = enCursos ? 'general' : 'cursos';
@@ -7928,7 +7941,7 @@ async function handleToggleCursos() {
   const ok = await showConfirm(
     enCursos
       ? `Sacar a "${nombre}" de la bandeja de Cursos.\n\nVuelve a la bandeja general (la ve Joaco).`
-      : `Derivar a "${nombre}" a la bandeja de Cursos.\n\nLo va a ver Abril y se oculta de la bandeja de Joaco.`,
+      : `Derivar a "${nombre}" a la bandeja de Cursos.\n\nLo va a ver Abril y sale de la bandeja de Joaco.`,
     { title: enCursos ? 'Sacar de Cursos' : 'Derivar a Cursos', confirmLabel: enCursos ? 'Sacar' : '🎓 Derivar', cancelLabel: 'Cancelar' }
   ).catch(() => false);
   if (!ok) return;
@@ -7941,7 +7954,9 @@ async function handleToggleCursos() {
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
     if (c) c.inbox = nuevo;  // refleja al instante en el botón
     toast(nuevo === 'cursos' ? '🎓 Derivado a Cursos — lo ve Abril' : 'Devuelto a la bandeja general');
-    render();
+    // Refrescar la lista: si soy Joaco y lo mandé a cursos, debe salir de mi bandeja.
+    chatState.contactsLoaded = false;
+    loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
   } catch (e) {
     await showAlert('No se pudo cambiar la bandeja: ' + (e.message || e), { title: 'Error', variant: 'warn' });
   }
@@ -8013,9 +8028,9 @@ function showLabelPicker(phone) {
   popup.innerHTML = `
     <div class="label-picker-title">Etiquetas</div>
     <div class="label-picker-chips">
-      ${chatState.labels.map(l => `<button type="button" class="label-toggle-chip${cLabels.includes(l.id) ? ' active' : ''}" data-lbl-id="${l.id}" style="--lc:${l.color}" aria-pressed="${cLabels.includes(l.id)}">${escapeHtml(l.name)}</button>`).join('')}
+      ${visibleLabels().map(l => `<button type="button" class="label-toggle-chip${cLabels.includes(l.id) ? ' active' : ''}" data-lbl-id="${l.id}" style="--lc:${l.color}" aria-pressed="${cLabels.includes(l.id)}">${escapeHtml(l.name)}</button>`).join('')}
     </div>
-    ${!chatState.labels.length ? '<div style="color:#8696a0;font-size:13px;padding:8px">No hay etiquetas. Crealas desde el panel izquierdo.</div>' : ''}
+    ${!visibleLabels().length ? '<div style="color:#8696a0;font-size:13px;padding:8px">No hay etiquetas.</div>' : ''}
   `;
   document.body.appendChild(popup);
   const btn = document.getElementById('btn-labels');
