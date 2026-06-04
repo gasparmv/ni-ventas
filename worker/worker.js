@@ -393,6 +393,56 @@ const CHATS_SUMMARY_FALLBACK_SQL = `
   ORDER BY lm.last_ts DESC
 `;
 
+// Sheet público de interesados en cursos (form del minicurso). Lo leemos por
+// CSV export (sin auth, está compartido). Col B (idx 1) = Nombre Completo,
+// col G (idx 6, última) = teléfono.
+const CURSOS_SHEET_CSV = 'https://docs.google.com/spreadsheets/d/1yJM2uj7SMMreJXHvxPPT8XNe0d1d4sgAt02jTUISXJA/export?format=csv';
+const CURSOS_COL_NOMBRE = 1;
+const CURSOS_COL_TELEFONO = 6;
+
+// Parser CSV mínimo que respeta comillas dobles (campos con comas/saltos).
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else if (c !== '\r') field += c;
+    }
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+// Lee el Sheet de cursos y devuelve los leads parseados + normalizados.
+// { total, leads: [{ nombre, telRaw, tel, valido }] } (dedup por tel dentro del sheet).
+async function fetchCursosLeads(env) {
+  const r = await fetch(CURSOS_SHEET_CSV, { redirect: 'follow' });
+  if (!r.ok) throw new Error('sheet HTTP ' + r.status);
+  const rows = parseCSV(await r.text());
+  const seen = new Set();
+  const leads = [];
+  for (let i = 1; i < rows.length; i++) {
+    const nombre = String(rows[i][CURSOS_COL_NOMBRE] || '').trim();
+    const telRaw = String(rows[i][CURSOS_COL_TELEFONO] || '').trim();
+    if (!nombre && !telRaw) continue;
+    const tel = normalizeArPhone(telRaw) || '';
+    const valido = !!tel && tel.length >= 10;
+    if (valido) {
+      if (seen.has(tel)) continue; // dedup dentro del sheet
+      seen.add(tel);
+    }
+    leads.push({ nombre, telRaw, tel, valido });
+  }
+  return { total: Math.max(0, rows.length - 1), leads };
+}
+
 async function waSend(env, payload) {
   if (!env.WA_PHONE_NUMBER_ID) {
     return { ok: false, status: 500, error: 'WA_PHONE_NUMBER_ID no configurado' };
@@ -3389,6 +3439,41 @@ export default {
         } catch (_) {
           return json({ cursors: {} });
         }
+      }
+
+      // Preview de los leads del Sheet de cursos (solo admin). No manda nada;
+      // devuelve conteos + muestra para revisar antes del envío masivo.
+      if (request.method === 'GET' && path === '/admin/wa/cursos-leads') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        let data;
+        try { data = await fetchCursosLeads(env); }
+        catch (e) { return json({ error: 'no pude leer el sheet: ' + e.message }, 502); }
+        const validos = data.leads.filter(l => l.valido);
+        const invalidos = data.leads.filter(l => !l.valido);
+        // Cuántos ya recibieron el broadcast (dedup).
+        let yaEnviados = 0;
+        try {
+          const phones = validos.map(l => l.tel);
+          if (phones.length) {
+            // chunk para no pasar 999 binds
+            for (let i = 0; i < phones.length; i += 400) {
+              const chunk = phones.slice(i, i + 400);
+              const ph = chunk.map(() => '?').join(',');
+              const r2 = await env.DB.prepare(`SELECT COUNT(*) AS n FROM wa_autoreply_log WHERE kind='cursos_broadcast' AND status='sent' AND phone IN (${ph})`).bind(...chunk).first();
+              yaEnviados += (r2?.n || 0);
+            }
+          }
+        } catch (_) {}
+        return json({
+          total_filas: data.total,
+          validos: validos.length,
+          invalidos: invalidos.length,
+          ya_enviados: yaEnviados,
+          pendientes: validos.length - yaEnviados,
+          muestra: data.leads.slice(0, 8),
+          invalidos_muestra: invalidos.slice(0, 5)
+        });
       }
 
       // Derivar un chat a una bandeja (solo admin). inbox: 'cursos' | 'general'.
