@@ -3231,21 +3231,32 @@ export default {
       // Consultar mensajes de WhatsApp guardados (para análisis)
       if (request.method === 'GET' && path === '/admin/wa/messages') {
         const phone = url.searchParams.get('phone') || '';
-        // Rol 'cursos' (Abril): solo puede abrir chats de su bandeja. Si pide un
-        // phone que no es 'cursos' (o pide la lista global sin phone), 403.
-        {
-          const _role = await getSessionRole(env, session.user);
-          if (_role === 'cursos' && !(await inboxAccessOk(env, _role, phone.replace(/\D/g, '')))) {
-            return json({ error: 'forbidden: chat fuera de tu bandeja', messages: [] }, 403);
-          }
-        }
+        const _role = await getSessionRole(env, session.user);
         const from = url.searchParams.get('from') || '';
         const to = url.searchParams.get('to') || '';
         const dir = url.searchParams.get('direction') || '';
         const limit = Math.min(parseInt(url.searchParams.get('limit') || '500'), 5000);
         let where = '1=1';
         const params = [];
-        if (phone) { where += ' AND phone = ?'; params.push(phone); }
+        if (phone) {
+          // Consulta de un chat puntual. Rol 'cursos' solo accede a su bandeja.
+          if (_role === 'cursos' && !(await inboxAccessOk(env, _role, phone.replace(/\D/g, '')))) {
+            return json({ error: 'forbidden: chat fuera de tu bandeja', messages: [] }, 403);
+          }
+          where += ' AND phone = ?'; params.push(phone);
+        } else {
+          // Consulta global (polling de inbound, follow-ups, etc.): filtramos por
+          // bandeja según rol para que Joaco NUNCA reciba ni procese nada de
+          // cursos (ni notificaciones en segundo plano), y Abril solo lo suyo.
+          //   admin    → sin filtro
+          //   cursos   → solo chats de la bandeja cursos
+          //   comercial→ todo MENOS cursos
+          if (_role === 'cursos') {
+            where += " AND phone IN (SELECT phone FROM wa_chats_summary WHERE inbox = 'cursos')";
+          } else if (_role !== 'admin') {
+            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox = 'cursos')";
+          }
+        }
         if (from) { where += ' AND ts >= ?'; params.push(from); }
         if (to) { where += ' AND ts <= ?'; params.push(to); }
         if (dir === 'inbound' || dir === 'outbound') { where += ' AND direction = ?'; params.push(dir); }
