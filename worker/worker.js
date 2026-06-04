@@ -385,7 +385,8 @@ const CHATS_SUMMARY_FALLBACK_SQL = `
   )
   SELECT lm.phone, lm.last_ts, lm.last_body, lm.last_direction, lm.last_msg_type,
          COALESCE(inm.sender_name, '') AS contact_name,
-         COALESCE(uc.unread, 0) AS unread
+         COALESCE(uc.unread, 0) AS unread,
+         'general' AS inbox
   FROM last_msg lm
   LEFT JOIN inbound_name inm ON inm.phone = lm.phone
   LEFT JOIN unread_counts uc ON uc.phone = lm.phone
@@ -1733,6 +1734,55 @@ async function getSession(env, request) {
   return { token, user: row.user };
 }
 
+// Rol funcional del usuario de la sesión: admin | comercial | disenador | cursos.
+// gaspar siempre admin; el resto se resuelve por su slug contra users_panel.
+async function getSessionRole(env, userName) {
+  const slug = String(userName || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (slug === 'gaspar') return 'admin';
+  const ids = slug === 'joaquin' ? ['joaquin', 'joaco']
+            : slug === 'joaco'   ? ['joaco', 'joaquin']
+            : [slug];
+  const ph = ids.map(() => '?').join(',');
+  try {
+    const u = await env.DB.prepare(`SELECT rol FROM users_panel WHERE id IN (${ph}) AND activo = 1 LIMIT 1`).bind(...ids).first();
+    return (u && u.rol) ? u.rol : 'comercial';
+  } catch (e) { return 'comercial'; }
+}
+
+// Cláusula SQL de filtrado de bandeja según rol (para la lista de chats).
+//   admin     → sin filtro (ve todo)
+//   cursos    → solo bandeja 'cursos'
+//   los demás → todo MENOS 'cursos' (Joaco no ve los de cursos)
+function inboxClauseForRole(role) {
+  if (role === 'admin') return '';
+  if (role === 'cursos') return "AND inbox = 'cursos'";
+  return "AND inbox != 'cursos'";
+}
+
+// Control de acceso por chat para el rol 'cursos': solo puede leer/escribir
+// chats que estén en la bandeja 'cursos'. Otros roles no se restringen acá.
+async function inboxAccessOk(env, role, phone) {
+  if (role !== 'cursos') return true;
+  if (!phone) return false;
+  try {
+    const r = await env.DB.prepare('SELECT inbox FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
+    return !!r && r.inbox === 'cursos';
+  } catch (e) { return false; }
+}
+
+// Invalida las variantes (por rol) del cache de chats-summary.
+async function invalidateChatsSummaryCache(request) {
+  try {
+    const cache = caches.default;
+    const base = new URL(request.url);
+    base.pathname = '/admin/wa/chats-summary';
+    for (const role of ['admin', 'comercial', 'disenador', 'cursos']) {
+      base.search = '?role=' + role;
+      await cache.delete(new Request(base.toString(), { method: 'GET' }));
+    }
+  } catch (_) {}
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
@@ -2405,6 +2455,13 @@ export default {
         const { to, body: text, reply_to } = body || {};
         if (!to || !text) return json({ error: 'missing fields (to, body)' }, 400);
         const num = normalizeArPhone(to);
+        // Rol 'cursos' (Abril) solo puede escribir a chats de su bandeja.
+        {
+          const _role = await getSessionRole(env, session.user);
+          if (!(await inboxAccessOk(env, _role, num || String(to).replace(/\D/g, '')))) {
+            return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
+          }
+        }
         // Si reply_to viene, incluimos context.message_id para que WA lo muestre como cita.
         const payload = { messaging_product: 'whatsapp', to: num || to, type: 'text', text: { body: String(text) } };
         if (reply_to) payload.context = { message_id: reply_to };
@@ -2792,31 +2849,42 @@ export default {
         // RED DE SEGURIDAD: si la libreta está vacía (no migrada) o falla, se
         // usa la query vieja (CHATS_SUMMARY_FALLBACK_SQL) — así nunca se rompe.
         // Cache corto (5s) en Workers Cache API; mark-read invalida la cache.
+        // Rol del usuario → qué bandeja ve. Cache POR ROL (cada rol ve una
+        // lista distinta: Abril solo 'cursos', Joaco todo menos 'cursos',
+        // Gaspar todo). Sin esto, el cache mezclaría las listas entre usuarios.
+        const role = await getSessionRole(env, session.user);
         const cache = caches.default;
         const cacheUrl = new URL(request.url);
-        cacheUrl.search = ''; // ignorar cache-busters como ?t=123
+        cacheUrl.search = '?role=' + encodeURIComponent(role); // separa el cache por rol
         const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
         const cached = await cache.match(cacheKey);
         if (cached) return cached;
+        const inboxClause = inboxClauseForRole(role);
         let chats = null;
         try {
           const rs = await env.DB.prepare(
-            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread
+            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread, inbox
              FROM wa_chats_summary
-             WHERE last_ts != ''
+             WHERE last_ts != '' ${inboxClause}
              ORDER BY last_ts DESC`
           ).all();
           chats = rs.results || [];
           // Si la libreta está vacía (ej. base sin migrar), caer al fallback.
           if (!chats.length) chats = null;
         } catch (e) { chats = null; }
-        // Fallback a la query vieja (red de seguridad).
+        // Fallback a la query vieja (red de seguridad). No tiene info de bandeja:
+        // para 'cursos' devolvemos vacío (no puede saber cuáles son suyos sin la
+        // libreta); admin/comercial reciben la lista completa como degradación.
         if (chats === null) {
-          try {
-            const fb = await env.DB.prepare(CHATS_SUMMARY_FALLBACK_SQL).all();
-            chats = fb.results || [];
-          } catch (e) {
-            return json({ chats: [], error: e.message }, 500);
+          if (role === 'cursos') {
+            chats = [];
+          } else {
+            try {
+              const fb = await env.DB.prepare(CHATS_SUMMARY_FALLBACK_SQL).all();
+              chats = fb.results || [];
+            } catch (e) {
+              return json({ chats: [], error: e.message }, 500);
+            }
           }
         }
         const response = json({ chats });
@@ -3163,6 +3231,14 @@ export default {
       // Consultar mensajes de WhatsApp guardados (para análisis)
       if (request.method === 'GET' && path === '/admin/wa/messages') {
         const phone = url.searchParams.get('phone') || '';
+        // Rol 'cursos' (Abril): solo puede abrir chats de su bandeja. Si pide un
+        // phone que no es 'cursos' (o pide la lista global sin phone), 403.
+        {
+          const _role = await getSessionRole(env, session.user);
+          if (_role === 'cursos' && !(await inboxAccessOk(env, _role, phone.replace(/\D/g, '')))) {
+            return json({ error: 'forbidden: chat fuera de tu bandeja', messages: [] }, 403);
+          }
+        }
         const from = url.searchParams.get('from') || '';
         const to = url.searchParams.get('to') || '';
         const dir = url.searchParams.get('direction') || '';
@@ -3191,6 +3267,51 @@ export default {
         }
       }
 
+      // Derivar un chat a una bandeja (solo admin). inbox: 'cursos' | 'general'.
+      // Marca el chat como de la bandeja Cursos (lo ve Abril, se oculta de Joaco)
+      // o lo devuelve a la bandeja general.
+      if (request.method === 'POST' && path === '/admin/wa/chat-inbox') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const phone = String(body?.phone || '').replace(/\D/g, '');
+        const inbox = body?.inbox;
+        if (!phone || !['cursos', 'general'].includes(inbox)) {
+          return json({ error: 'phone (dígitos) e inbox (cursos|general) requeridos' }, 400);
+        }
+        // Upsert: el chat ya suele existir en la libreta (tiene mensajes). Si no,
+        // lo creamos con la bandeja seteada (aparecerá cuando tenga mensajes).
+        await env.DB.prepare(
+          `INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox`
+        ).bind(phone, inbox, new Date().toISOString()).run();
+        ctx.waitUntil(invalidateChatsSummaryCache(request));
+        return json({ ok: true, phone, inbox });
+      }
+
+      // Bulk: derivar varios chats a una bandeja de una (solo admin).
+      if (request.method === 'POST' && path === '/admin/wa/chat-inbox-bulk') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const inbox = body?.inbox;
+        const phones = Array.isArray(body?.phones) ? body.phones : [];
+        if (!['cursos', 'general'].includes(inbox) || !phones.length) {
+          return json({ error: 'inbox (cursos|general) y phones[] requeridos' }, 400);
+        }
+        const now = new Date().toISOString();
+        const stmts = phones
+          .map(p => String(p || '').replace(/\D/g, ''))
+          .filter(p => p.length >= 8)
+          .map(p => env.DB.prepare(
+            `INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox`
+          ).bind(p, inbox, now));
+        if (stmts.length) await env.DB.batch(stmts);
+        ctx.waitUntil(invalidateChatsSummaryCache(request));
+        return json({ ok: true, updated: stmts.length, inbox });
+      }
+
       // Marcar conversación como leída
       if (request.method === 'POST' && path === '/admin/wa/mark-read') {
         let body;
@@ -3199,13 +3320,7 @@ export default {
         if (!phone || !ts) return json({ error: 'missing phone or ts' }, 400);
         // Invalidar cache del chats-summary: el unread count del chat marcado
         // cambia a 0 y el badge tiene que refrescar al instante (no esperar 4s).
-        try {
-          const cacheUrl = new URL(request.url);
-          cacheUrl.pathname = '/admin/wa/chats-summary';
-          cacheUrl.search = '';
-          const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
-          ctx.waitUntil(caches.default.delete(cacheKey));
-        } catch (_) {}
+        ctx.waitUntil(invalidateChatsSummaryCache(request));
         try {
           await env.DB.prepare(
             'INSERT INTO wa_read_cursor (phone, last_read_ts, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET last_read_ts = excluded.last_read_ts, updated_at = excluded.updated_at'
@@ -3249,6 +3364,13 @@ export default {
         if (!ct.includes('multipart/form-data')) return json({ error: 'expected multipart/form-data' }, 400);
         const fd = await request.formData();
         const to = fd.get('to');
+        // Rol 'cursos' (Abril) solo puede mandar media a chats de su bandeja.
+        {
+          const _role = await getSessionRole(env, session.user);
+          if (!(await inboxAccessOk(env, _role, String(to || '').replace(/\D/g, '')))) {
+            return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
+          }
+        }
         let type = fd.get('type'); // image | audio | document | video (default detectado del mime)
         const caption = fd.get('caption') || '';
         const replyTo = fd.get('reply_to') || '';

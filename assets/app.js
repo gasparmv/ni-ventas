@@ -6,7 +6,7 @@
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Diseñador'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Diseñador', 'Abril'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -809,6 +809,9 @@ function _userKey(s) {
 function isJoaquinUser(s) { return _userKey(s) === 'joaquin' || _userKey(s) === 'joaco'; }
 function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
 function isDisenadorUser(s) { const k = _userKey(s); return k === 'disenador' || k === 'emma' || k === 'emmanuel'; }
+// Abril: usuario de la bandeja de Cursos. Solo ve el Chat WA, y dentro solo los
+// chats derivados a 'cursos'.
+function isCursosUser(s) { const k = _userKey(s); return k === 'abril' || k === 'cursos'; }
 // El token cargado pertenece a este usuario? (evita reutilizar token de bajo
 // privilegio para pasar como admin).
 function tokenBelongsTo(name) {
@@ -897,7 +900,9 @@ async function logout() {
 // isAdmin requiere que el TOKEN sea de Gaspar (no solo el nombre activo). Sin esto,
 // un token de bajo privilegio podría usarse para mostrar la UI admin.
 function isAdmin() { return !!STATE.token && isGasparUser(STATE.tokenUser) && isGasparUser(STATE.user); }
-function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user)); }
+function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isCursosUser(STATE.user)); }
+// Abril (rol cursos): SOLO ve la sección Chat WA, nada más.
+function isCursosOnly() { return isCursosUser(STATE.user); }
 function authHeaders() {
   return STATE.token ? { 'Authorization': 'Bearer ' + STATE.token } : {};
 }
@@ -1745,8 +1750,9 @@ function isDisenadorOnly() {
   return getUserRole() === 'disenador';
 }
 function setView(v) {
-  // Diseñador queda confinado a Cotización, sin importar a dónde quiera ir.
-  if (isDisenadorOnly()) v = 'cotizacion';
+  // Diseñador queda confinado a Cotización; Abril (cursos) al Chat WA.
+  if (isCursosOnly()) v = 'chat';
+  else if (isDisenadorOnly()) v = 'cotizacion';
   STATE.view = v;
   STATE.selected = null;
   location.hash = v;
@@ -1754,7 +1760,8 @@ function setView(v) {
 }
 window.addEventListener('hashchange', () => {
   let h = location.hash.replace('#','') || 'dashboard';
-  if (isDisenadorOnly()) h = 'cotizacion';
+  if (isCursosOnly()) h = 'chat';
+  else if (isDisenadorOnly()) h = 'cotizacion';
   if (h !== STATE.view) { STATE.view = h; render(); }
 });
 
@@ -1786,8 +1793,12 @@ function render() {
     bindUserPicker();
     return;
   }
-  // Diseñador queda confinado a Cotización aunque la URL o el state digan otra cosa.
-  if (isDisenadorOnly() && STATE.view !== 'cotizacion') {
+  // Diseñador queda confinado a Cotización; Abril (cursos) al Chat WA, aunque
+  // la URL o el state digan otra cosa.
+  if (isCursosOnly() && STATE.view !== 'chat') {
+    STATE.view = 'chat';
+    if (location.hash !== '#chat') location.hash = 'chat';
+  } else if (isDisenadorOnly() && STATE.view !== 'cotizacion') {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
@@ -1866,7 +1877,11 @@ function renderShell() {
         </div>
       </div>
       <nav class="nav">
-        ${isDisenadorOnly() ? `
+        ${isCursosOnly() ? `
+          <button class="nav-item active" data-view="chat"><span class="icon">✉</span> Chat WA
+            <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread || ''}</span>
+          </button>
+        ` : isDisenadorOnly() ? `
           <button class="nav-item active" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
         ` : `
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
@@ -6545,6 +6560,11 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         <span>${msgCount} msgs</span>
+        ${isAdmin() ? (() => {
+          const _c = (chatState.contacts || []).find(x => x.phone === phone);
+          const _enCursos = _c && _c.inbox === 'cursos';
+          return `<button class="btn-label-toggle${_enCursos ? ' has-note' : ''}" id="btn-cursos-toggle" data-en-cursos="${_enCursos ? '1' : '0'}" title="${_enCursos ? 'Sacar de la bandeja Cursos' : 'Derivar a la bandeja Cursos (Abril)'}" style="font-size:17px;line-height:1">🎓</button>`;
+        })() : ''}
         <button class="btn-label-toggle ${getContactNote(phone) ? 'has-note' : ''}" id="btn-note" title="${getContactNote(phone) ? 'Editar nota' : 'Agregar nota'}">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
         </button>
@@ -7882,6 +7902,9 @@ function bindChatConversation() {
     chatState.editingNoteFor = phone;
     refreshPostit();
   };
+  // 🎓 Derivar / sacar de la bandeja Cursos (solo admin).
+  const cursosBtn = document.getElementById('btn-cursos-toggle');
+  if (cursosBtn) cursosBtn.onclick = () => handleToggleCursos();
   // Scroll-to-bottom FAB
   if (msgEl && scrollBtn) {
     msgEl.addEventListener('scroll', () => {
@@ -7891,6 +7914,36 @@ function bindChatConversation() {
     scrollBtn.onclick = () => {
       msgEl.scrollTo({ top: msgEl.scrollHeight, behavior: 'smooth' });
     };
+  }
+}
+
+// Deriva (o saca) el chat activo a la bandeja de Cursos. Solo admin.
+async function handleToggleCursos() {
+  const phone = chatState.selectedPhone;
+  if (!phone || !isAdmin()) return;
+  const c = (chatState.contacts || []).find(x => x.phone === phone);
+  const enCursos = c && c.inbox === 'cursos';
+  const nuevo = enCursos ? 'general' : 'cursos';
+  const nombre = (c && c.contact_name) || formatPhoneDisplay(phone);
+  const ok = await showConfirm(
+    enCursos
+      ? `Sacar a "${nombre}" de la bandeja de Cursos.\n\nVuelve a la bandeja general (la ve Joaco).`
+      : `Derivar a "${nombre}" a la bandeja de Cursos.\n\nLo va a ver Abril y se oculta de la bandeja de Joaco.`,
+    { title: enCursos ? 'Sacar de Cursos' : 'Derivar a Cursos', confirmLabel: enCursos ? 'Sacar' : '🎓 Derivar', cancelLabel: 'Cancelar' }
+  ).catch(() => false);
+  if (!ok) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/chat-inbox', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ phone, inbox: nuevo })
+    });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
+    if (c) c.inbox = nuevo;  // refleja al instante en el botón
+    toast(nuevo === 'cursos' ? '🎓 Derivado a Cursos — lo ve Abril' : 'Devuelto a la bandeja general');
+    render();
+  } catch (e) {
+    await showAlert('No se pudo cambiar la bandeja: ' + (e.message || e), { title: 'Error', variant: 'warn' });
   }
 }
 
