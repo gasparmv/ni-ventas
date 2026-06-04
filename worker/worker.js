@@ -433,6 +433,55 @@ async function waSendTemplate(env, to, name, lang = 'es', params = []) {
   });
 }
 
+// ===== Auto-respuesta del minicurso (regalos) =====
+// Cuando un contacto ESCRIBE pidiendo la guía + cotizador del minicurso, le
+// respondemos automáticamente con el link de regalos. Es respuesta dentro de la
+// ventana de 24h (mensaje libre, no template — el link va sin restricción).
+// Detección por palabras clave (normalizado, sin acentos).
+function matchMinicursoTrigger(text) {
+  const t = String(text || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  return t.includes('cotizador') && t.includes('guia') && t.includes('curso');
+}
+
+const MINICURSO_REGALO_LINK = 'https://drive.google.com/drive/folders/14q3QvLPY6vO9d0qSLN-O7X0KxPmmIkW0';
+
+// Responde una sola vez por contacto (dedup por el link en outbound previo),
+// guarda el outbound en el CRM y deriva el chat a la bandeja de cursos (Abril).
+async function maybeAutoReplyMinicurso(env, phone, senderName) {
+  if (!phone) return;
+  try {
+    const prev = await env.DB.prepare(
+      "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND body LIKE '%14q3QvLPY6vO9d0qSLN%' LIMIT 1"
+    ).bind(phone).first();
+    if (prev) return; // ya le mandamos los regalos antes
+    const nombre = (senderName || '').trim().split(/\s+/)[0] || '';
+    const saludo = nombre ? `Buenas ${nombre}!` : 'Buenas!';
+    const body = `${saludo} Acá están los regalos por haber visto hasta el final! 🎁 ${MINICURSO_REGALO_LINK}\nContanos, qué te pareció el nuevo Curso? Viste la 2da clase hasta el final?`;
+    const res = await waSendText(env, phone, body);
+    if (!res?.ok) return;
+    const wamid = res.id || '';
+    const ts = new Date().toISOString();
+    // Guardar el outbound para que aparezca en el CRM.
+    try {
+      if (wamid) {
+        await env.DB.prepare(
+          `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+           VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '')
+           ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text'
+             WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+        ).bind(ts, wamid, phone, body).run();
+      }
+    } catch (_) {}
+    // Derivar el chat a la bandeja de cursos (lo gestiona Abril).
+    try {
+      await env.DB.prepare(
+        `INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?)
+         ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos'`
+      ).bind(phone, ts).run();
+    } catch (_) {}
+  } catch (e) { /* best-effort, no rompe el webhook */ }
+}
+
 // ===== Análisis de conversaciones con Claude (Anthropic API) =====
 // El system prompt vive como constante para versionarlo. Cuando se cambia,
 // bumpear ANALYSIS_PROMPT_VERSION para que el cron sepa que tiene que
@@ -1561,6 +1610,12 @@ async function processCoexistenceHistory(env, data) {
     const senderName = direction === 'inbound' ? (nameByPhone[phone] || '') : '';
     const ts = m.timestamp ? new Date(parseInt(m.timestamp) * 1000).toISOString() : new Date().toISOString();
     await insertMsg({ wamid, ts, direction, phone, senderName, m });
+    // Auto-respuesta del minicurso: solo para inbound nuevo (últimos 10 min) que
+    // pida la guía + cotizador. Mensaje libre (dentro de la ventana de 24h).
+    if (direction === 'inbound' && matchMinicursoTrigger(m.text?.body || '')) {
+      const reciente = (Date.now() - new Date(ts).getTime()) < 10 * 60 * 1000;
+      if (reciente) await maybeAutoReplyMinicurso(env, phone, senderName);
+    }
   }
 
   // === Branch 2: data.message_echoes[] (Joaco escribió desde el celular) ===
