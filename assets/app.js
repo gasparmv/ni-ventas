@@ -58,7 +58,38 @@ const CONFIG = {
     // Controladores opcionales
     ctrl_slim: 18700,
     ctrl_remoto: 25000,
-    ctrl_app: 38000
+    ctrl_app: 38000,
+
+    // ============ Lógica NUEVA (paralelo durante transición) ============
+    // Modelo COGS + margen variable. Spec en spec-cotizador-nuevo.md.
+    // Mientras "transicionUseNueva" sea false, el cotizador muestra ambos
+    // precios pero usa la fórmula vieja para el presupuesto enviado al cliente.
+    // Para activar la nueva en producción, setear true (configurable desde el
+    // worker via /admin/cotizador/params).
+    transicionUseNueva: true,        // si true, presupuesto cliente usa fórmula nueva
+    // Costos por m²
+    nv_costo_m2: 75000,              // = $40k acrílico + (15% Anibal + 5% Emma) × $175k m² imaginario
+    nv_costo_neon_mt: 2631,          // $/mt de neón
+    // Fuente por cm de neón (3 escalones)
+    nv_fuente_corto: 4000,           // cm ≤ 500
+    nv_fuente_medio: 4500,           // 500 < cm < 1200
+    nv_fuente_largo: 9000,           // cm ≥ 1200
+    // Divisor base = 1 − MO (13.5%) − comisión Joaco (5%)
+    nv_divisor_base: 0.815,
+    // Margen por tamaño (interpolación log entre dos CF de referencia)
+    nv_margen_chico: 0.68,           // CF ≤ ref_chico → 68%
+    nv_margen_grande: 0.51,          // CF ≥ ref_grande → 51%
+    nv_cf_ref_chico: 20500,
+    nv_cf_ref_grande: 109000,
+    // Complejidad por densidad (tramos / metros)
+    nv_complejidad_coef: 0.018,
+    nv_complejidad_pivote: 1.4,
+    nv_complejidad_tope: 0.04,
+    // Clamp final del margen
+    nv_margen_min: 0.48,
+    nv_margen_max: 0.72,
+    // Acrílico negro: precio = transparente × ratio (siempre 7% más barato)
+    nv_negro_ratio: 0.93
   },
   postventaMilestones: [
     { id: 'D30', days: 30, label: 'Foto / feedback', tagClass: 'tag-d30',
@@ -89,7 +120,7 @@ const STATE = {
   token: null,        // token de admin (Gaspar) si está logueado
   activity: { rows: [], loading: false, error: null },
   cotizadorParams: null,  // se carga del Worker; si null usa CONFIG.cotizadorDefaults
-  cotizadorForm: { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '', extraCarteles: [] },
+  cotizadorForm: { ancho: '', alto: '', neon: '', tramos: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '', extraCarteles: [] },
   cotizadorSaving: false,
   // Panel de negocio (solo Gaspar) — datos del Sheet "2025 V4"
   businessPanel: { data: null, loading: false, error: null, lastFetch: 0, period: 'current', selectedVertical: null },
@@ -145,7 +176,7 @@ function normalizeArPhoneFE(raw) {
 // El campo "cliente" en este contexto es el nombre del diseño (no del comprador).
 function getCarteles() {
   const f = STATE.cotizadorForm;
-  const c1 = { cliente: f.cliente, ancho: f.ancho, alto: f.alto, neon: f.neon, tipo: f.tipo || 'INT' };
+  const c1 = { cliente: f.cliente, ancho: f.ancho, alto: f.alto, neon: f.neon, tramos: f.tramos, tipo: f.tipo || 'INT' };
   const extras = Array.isArray(f.extraCarteles) ? f.extraCarteles : [];
   return [c1, ...extras].filter(c => +c.ancho > 0 && +c.alto > 0);
 }
@@ -159,7 +190,7 @@ function buildPresupuestoTexto() {
 
   if (carteles.length === 1) {
     const c = carteles[0];
-    const r = calcCotizador(c);
+    const r = calcCotizadorActivo(c);
     const nombre = (c.cliente || '').trim() || 'Custom name';
     return `Te comparto el presupuesto con la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+c.ancho)}x${Math.round(+c.alto)}\nBase acrílica transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}${closing}`;
   }
@@ -167,7 +198,7 @@ function buildPresupuestoTexto() {
   // 2+ carteles — cada uno con su propio nombre de diseño
   let totalTrans = 0, totalNegro = 0;
   const bloques = carteles.map((c, i) => {
-    const r = calcCotizador(c);
+    const r = calcCotizadorActivo(c);
     totalTrans += r.transFinal;
     totalNegro += r.negroFinal;
     const disen = (c.cliente || '').trim() || `Cartel ${i+1}`;
@@ -509,12 +540,18 @@ async function saveCotizacion() {
   try {
     for (let i = 0; i < carteles.length; i++) {
       const c = carteles[i];
-      const r = calcCotizador(c);
+      // Calculamos AMBAS fórmulas y mandamos todo al Sheet. La de "activo"
+      // (transicionUseNueva) es la que el cliente recibe; la otra queda
+      // como referencia histórica para validar la transición con datos reales.
+      const r       = calcCotizadorActivo(c);
+      const rNueva  = calcCotizadorNuevo(c);
+      const rViejo  = calcCotizador(c);
       const payload = {
         cliente: c.cliente.trim(),
         ancho: +c.ancho,
         alto: +c.alto,
         neon: +c.neon || 0,
+        tramos: +c.tramos || 0,
         tipo: c.tipo || 'INT',
         m2: r.m2,
         trans: r.trans,
@@ -524,11 +561,17 @@ async function saveCotizacion() {
         reventa: r.reventa,
         comision: r.comision,
         canal,
-        telefono: telFinal
+        telefono: telFinal,
+        // Campos nuevos (para apps-script que los grabe al final del row):
+        cf: rNueva.cf,
+        margen: rNueva.margen,
+        densidad: rNueva.densidad,
+        precio_nuevo: rNueva.transFinal,
+        precio_viejo: rViejo.transFinal
       };
       await postCartelToSheet(payload);
     }
-    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '', extraCarteles: [] };
+    STATE.cotizadorForm = { ancho: '', alto: '', neon: '', tramos: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '', extraCarteles: [] };
     toast(multi ? `${carteles.length} carteles guardados ✓` : 'Cotización guardada ✓');
     setTimeout(() => loadAll(), 2000);
   } catch (e) {
@@ -590,6 +633,88 @@ function calcCotizador(input) {
   const negroFinal = descuentoNegro ? descuentoNegro : recargoNegro ? recargoNegro : negro;
 
   return { m2, trans, negro, descuento, descuentoNegro, recargo, recargoNegro, reventa, comision, transFinal, negroFinal };
+}
+
+// ============ COTIZADOR NUEVO (spec-cotizador-nuevo.md) ============
+// Modelo: costo real (COGS) + margen objetivo variable.
+// Input: { ancho, alto, neon (mt), tramos (cantidad), tipo (INT|EXT) }
+// Devuelve mismo shape que calcCotizador para que los consumers no rompan,
+// PLUS: cf, margen, densidad (para diagnóstico/UI comparativa).
+//
+// Diferencias vs la vieja:
+//  - Margen variable por tamaño y complejidad (no markup ×3 fijo).
+//  - m² real (÷10.000) en vez del m² "del Sheet" (÷100).
+//  - Negro = transparente × nv_negro_ratio (no fórmula propia).
+//  - Sin recargos/descuentos automáticos (la spec dice "precio sale justo").
+//  - EXT mantiene tiers actuales (ext_25/ext_50/ext_99) — se suma al precio.
+function calcCotizadorNuevo(input) {
+  const p = getCotizadorParams();
+  const ancho   = +input.ancho  || 0;
+  const alto    = +input.alto   || 0;
+  const metros  = +input.neon   || 0;
+  const tramos  = +input.tramos || 0;
+  const tipo    = (input.tipo || 'INT').toUpperCase();
+
+  const m2 = (ancho * alto) / 10000;  // m² real
+  const cm = metros * 100;
+  // Para mantener back-compat con el "m²" que graba el Sheet (división /100),
+  // lo seguimos exponiendo igual:
+  const m2Sheet = (ancho * alto) / 100;
+
+  // Fuente por cm
+  const fuente = cm <= 500 ? p.nv_fuente_corto
+               : cm <  1200 ? p.nv_fuente_medio
+               : p.nv_fuente_largo;
+
+  // Costo fijo
+  const cf = m2 * p.nv_costo_m2 + fuente + p.nv_costo_neon_mt * metros;
+
+  // Margen por tamaño (interpolación log sobre el CF)
+  const lo = Math.log(p.nv_cf_ref_chico);
+  const hi = Math.log(p.nv_cf_ref_grande);
+  const x  = Math.max(0, Math.min(1, (Math.log(Math.max(cf, 1)) - lo) / (hi - lo)));
+  const margenTam = p.nv_margen_chico - (p.nv_margen_chico - p.nv_margen_grande) * x;
+
+  // Complejidad por densidad
+  const densidad = metros > 0 ? tramos / metros : 0;
+  const ajuste = Math.max(-p.nv_complejidad_tope,
+                  Math.min(p.nv_complejidad_tope,
+                    p.nv_complejidad_coef * (densidad - p.nv_complejidad_pivote)));
+
+  const margen = Math.max(p.nv_margen_min, Math.min(p.nv_margen_max, margenTam + ajuste));
+
+  // Precio: CF / (0.815 − margen). Suma EXT si corresponde, después redondea a $500.
+  let precio = cf / (p.nv_divisor_base - margen);
+  if (tipo === 'EXT') {
+    precio += m2Sheet <= 25 ? p.ext_25 : m2Sheet <= 50 ? p.ext_50 : p.ext_99;
+  }
+  const transFinal = redondMult(precio, 500);
+  const negroFinal = redondMult(transFinal * p.nv_negro_ratio, 500);
+
+  // Comisión Joaco 5% del precio (info — ya está incluida en el divisor 0.815).
+  const comision = Math.round(transFinal * p.comision_pct);
+  // Reventa (info, igual que antes).
+  const reventa = redondMult(transFinal * p.reventa_mult, 500);
+
+  // Devuelve shape compatible + extras para UI comparativa.
+  return {
+    // Diagnóstico nuevo
+    cf, margen, densidad, fuente,
+    // Shape compatible con calcCotizador (sin recargos/descuentos)
+    m2: m2Sheet, m2real: m2,
+    trans: transFinal, negro: negroFinal,
+    descuento: 0, descuentoNegro: 0, recargo: 0, recargoNegro: 0,
+    reventa, comision,
+    transFinal, negroFinal
+  };
+}
+
+// Helper: devuelve la función de cálculo activa según el toggle de transición.
+// Default = nueva (transicionUseNueva true en cotizadorDefaults). El presupuesto
+// que se envía al cliente sale de acá.
+function calcCotizadorActivo(input) {
+  const p = getCotizadorParams();
+  return p.transicionUseNueva ? calcCotizadorNuevo(input) : calcCotizador(input);
 }
 
 // ============ USUARIO ============
@@ -3043,7 +3168,7 @@ function bindPresupuestos() {
     const field = el.dataset.extraField;
     const handler = () => {
       if (!Array.isArray(STATE.cotizadorForm.extraCarteles)) STATE.cotizadorForm.extraCarteles = [];
-      if (!STATE.cotizadorForm.extraCarteles[idx]) STATE.cotizadorForm.extraCarteles[idx] = { cliente:'', ancho:'', alto:'', neon:'', tipo:'INT' };
+      if (!STATE.cotizadorForm.extraCarteles[idx]) STATE.cotizadorForm.extraCarteles[idx] = { cliente:'', ancho:'', alto:'', neon:'', tramos:'', tipo:'INT' };
       STATE.cotizadorForm.extraCarteles[idx][field] = el.value;
       updateCotizadorForm();
     };
@@ -3054,7 +3179,7 @@ function bindPresupuestos() {
   const addBtn = document.getElementById('cot-add-cartel');
   if (addBtn) addBtn.onclick = () => {
     if (!Array.isArray(STATE.cotizadorForm.extraCarteles)) STATE.cotizadorForm.extraCarteles = [];
-    STATE.cotizadorForm.extraCarteles.push({ cliente:'', ancho:'', alto:'', neon:'', tipo:'INT' });
+    STATE.cotizadorForm.extraCarteles.push({ cliente:'', ancho:'', alto:'', neon:'', tramos:'', tipo:'INT' });
     render();
   };
   // × Eliminar cartel extra
@@ -3108,23 +3233,33 @@ function renderCotizadorResults() {
   const carteles = getCarteles();
   const p = getCotizadorParams();
   const multi = carteles.length > 1;
-  const r = calcCotizador(carteles[0] || f);
+  // Comparativa: calculamos con AMBAS fórmulas. La activa (transicionUseNueva)
+  // es la que se manda al cliente; la otra se muestra como referencia chica.
+  const useNueva = !!p.transicionUseNueva;
+  const r       = useNueva ? calcCotizadorNuevo(carteles[0] || f) : calcCotizador(carteles[0] || f);
+  const rOtra   = useNueva ? calcCotizador(carteles[0] || f)       : calcCotizadorNuevo(carteles[0] || f);
+  const labelActivo = useNueva ? 'NUEVO' : 'VIEJO';
+  const labelOtra   = useNueva ? 'fórmula vieja' : 'fórmula nueva';
 
   const blocksHtml = multi ? carteles.map((c, i) => {
-    const rr = calcCotizador(c);
+    const rr = useNueva ? calcCotizadorNuevo(c) : calcCotizador(c);
+    const rrOtra = useNueva ? calcCotizador(c) : calcCotizadorNuevo(c);
     const disen = (c.cliente || '').trim() || `Cartel ${i+1}`;
     return `
       <div class="cot-block" style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2)">
-        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${escapeHtml(disen)} · ${Math.round(+c.ancho)}×${Math.round(+c.alto)} cm · m² ${rr.m2.toFixed(2)}</div>
+        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${escapeHtml(disen)} · ${Math.round(+c.ancho)}×${Math.round(+c.alto)} cm${useNueva && rr.cf ? ' · CF '+fmtMoney(rr.cf)+' · margen '+Math.round(rr.margen*100)+'%' : ' · m² '+rr.m2.toFixed(2)}</div>
         <div class="cot-result-grid">
-          <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${rr.transFinal !== rr.trans ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(rr.trans)+'</s> ' : ''}${fmtMoney(rr.transFinal)}</div></div>
-          <div class="cot-result"><div class="lbl">Negro</div><div class="val">${rr.negroFinal !== rr.negro ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(rr.negro)+'</s> ' : ''}${fmtMoney(rr.negroFinal)}</div></div>
+          <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${fmtMoney(rr.transFinal)}</div></div>
+          <div class="cot-result"><div class="lbl">Negro</div><div class="val">${fmtMoney(rr.negroFinal)}</div></div>
         </div>
+        <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">↔ ${labelOtra}: trans ${fmtMoney(rrOtra.transFinal)} · negro ${fmtMoney(rrOtra.negroFinal)}</div>
       </div>`;
   }).join('') : '';
 
-  const totalTrans = carteles.reduce((s, c) => s + calcCotizador(c).transFinal, 0);
-  const totalNegro = carteles.reduce((s, c) => s + calcCotizador(c).negroFinal, 0);
+  const totalTrans = carteles.reduce((s, c) => s + (useNueva ? calcCotizadorNuevo(c) : calcCotizador(c)).transFinal, 0);
+  const totalNegro = carteles.reduce((s, c) => s + (useNueva ? calcCotizadorNuevo(c) : calcCotizador(c)).negroFinal, 0);
+  const totalTransOtra = carteles.reduce((s, c) => s + (useNueva ? calcCotizador(c) : calcCotizadorNuevo(c)).transFinal, 0);
+  const totalNegroOtra = carteles.reduce((s, c) => s + (useNueva ? calcCotizador(c) : calcCotizadorNuevo(c)).negroFinal, 0);
 
   return `
     <div class="cot-results">
@@ -3134,15 +3269,21 @@ function renderCotizadorResults() {
           <div class="cot-result"><div class="lbl">Total transparente</div><div class="val"><b>${fmtMoney(totalTrans)}</b></div></div>
           <div class="cot-result"><div class="lbl">Total negro</div><div class="val"><b>${fmtMoney(totalNegro)}</b></div></div>
         </div>
+        <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">↔ ${labelOtra}: total trans ${fmtMoney(totalTransOtra)} · total negro ${fmtMoney(totalNegroOtra)}</div>
       ` : `
-      <div class="cot-meta">m² (sheet): <b>${r.m2.toFixed(2)}</b></div>
+      <div class="cot-meta">
+        ${useNueva && r.cf ? `CF: <b>${fmtMoney(r.cf)}</b> · margen: <b>${Math.round(r.margen*100)}%</b>${r.densidad ? ' · densidad '+r.densidad.toFixed(2)+'<small style="color:var(--fg-mute);font-size:10px">tramos/m</small>' : ''}` : `m² (sheet): <b>${r.m2.toFixed(2)}</b>`}
+      </div>
       <div class="cot-result-grid">
-        <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${r.transFinal !== r.trans ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(r.trans)+'</s> ' : ''}${fmtMoney(r.transFinal)}</div></div>
-        <div class="cot-result"><div class="lbl">Negro</div><div class="val">${r.negroFinal !== r.negro ? '<s style="opacity:.4;font-size:12px">'+fmtMoney(r.negro)+'</s> ' : ''}${fmtMoney(r.negroFinal)}</div></div>
+        <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${fmtMoney(r.transFinal)}</div></div>
+        <div class="cot-result"><div class="lbl">Negro</div><div class="val">${fmtMoney(r.negroFinal)}</div></div>
         <div class="cot-result"><div class="lbl">Reventa (×${p.reventa_mult})</div><div class="val">${fmtMoney(r.reventa)}</div></div>
         <div class="cot-result"><div class="lbl">Comisión (${(p.comision_pct*100).toFixed(0)}%)</div><div class="val">${fmtMoney(r.comision)}</div></div>
-        ${r.descuento ? '<div class="cot-result"><div class="lbl">Descuento (m²>'+p.descuento_min_m2+')</div><div class="val">×'+p.descuento_mult+'</div></div>' : ''}
-        ${r.recargo ? '<div class="cot-result"><div class="lbl">Recargo (m²≤'+(r.m2<=5?'5':r.m2<=12.5?'12.5':'25')+')</div><div class="val">×'+(r.m2<=5?p.recargo_5:r.m2<=12.5?p.recargo_125:p.recargo_25)+'</div></div>' : ''}
+      </div>
+      <div style="font-size:11px;color:var(--fg-mute);margin-top:8px;padding:8px;background:rgba(255,255,255,.02);border-radius:var(--r-sm);border:1px dashed var(--border)">
+        <b style="color:var(--fg-subtle)">↔ ${labelOtra}:</b>
+        trans <s>${fmtMoney(rOtra.transFinal)}</s> · negro <s>${fmtMoney(rOtra.negroFinal)}</s>
+        <span style="margin-left:6px;font-size:10px;opacity:.7">${useNueva ? '(la spec dice "abaratar grandes / cobrar chicos complejos")' : '(toggle transicionUseNueva en cotizador_params para activar)'}</span>
       </div>
       `}
       <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end;flex-wrap:wrap;align-items:center">
@@ -3182,6 +3323,9 @@ function renderCotizadorCartelBlock(c, idx, removable) {
         <label>Ancho (cm)<input type="number" min="0" step="0.1" data-extra-field="ancho" data-extra-idx="${idx}" value="${escapeHtml(c.ancho)}"></label>
         <label>Alto (cm)<input type="number" min="0" step="0.1" data-extra-field="alto" data-extra-idx="${idx}" value="${escapeHtml(c.alto)}"></label>
         <label>Neón (mt)<input type="number" min="0" step="0.1" data-extra-field="neon" data-extra-idx="${idx}" value="${escapeHtml(c.neon)}"></label>
+        <label title="Cantidad de tramos/cortes del vector. Afecta margen por complejidad.">
+          Tramos<input type="number" min="0" step="1" data-extra-field="tramos" data-extra-idx="${idx}" value="${escapeHtml(c.tramos || '')}" placeholder="ej. 15">
+        </label>
         <label>Tipo
           <select data-extra-field="tipo" data-extra-idx="${idx}">
             <option value="INT" ${c.tipo==='INT'?'selected':''}>INT (interior)</option>
@@ -3217,6 +3361,9 @@ function renderCotizadorForm() {
         <label>Ancho (cm)<input type="number" min="0" step="0.1" data-cot-field="ancho" value="${escapeHtml(f.ancho)}"></label>
         <label>Alto (cm)<input type="number" min="0" step="0.1" data-cot-field="alto" value="${escapeHtml(f.alto)}"></label>
         <label>Neón (mt)<input type="number" min="0" step="0.1" data-cot-field="neon" value="${escapeHtml(f.neon)}"></label>
+        <label title="Cantidad de cortes/tramos independientes de neón (subtrazos abiertos del vector). Se cuenta en Illustrator. Afecta el margen por complejidad.">
+          Tramos<input type="number" min="0" step="1" data-cot-field="tramos" value="${escapeHtml(f.tramos)}" placeholder="ej. 15">
+        </label>
         <label>Tipo
           <select data-cot-field="tipo">
             <option value="INT" ${f.tipo==='INT'?'selected':''}>INT (interior)</option>
@@ -9332,7 +9479,7 @@ function renderBriefDrawer() {
           })()}
 
           <!-- Medidas (auto-rellenadas por AI o editables a mano) -->
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
             <div>
               <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho (cm)</label>
               <input type="number" step="1" data-bf="ancho_cm" value="${data.ancho_cm || ''}"
@@ -9349,6 +9496,13 @@ function renderBriefDrawer() {
               <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Neón (mt)</label>
               <input type="number" step="0.1" data-bf="neon_mt" value="${data.neon_mt || ''}"
                      ${!isDis ? 'readonly' : ''}
+                     style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);${!isDis ? 'opacity:.7' : ''}">
+            </div>
+            <div title="Cantidad de tramos/cortes independientes del neón LED. Se cuenta en Illustrator. Afecta el margen por complejidad en la fórmula nueva.">
+              <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Tramos</label>
+              <input type="number" step="1" min="0" data-bf="tramos" value="${data.tramos || ''}"
+                     ${!isDis ? 'readonly' : ''}
+                     placeholder="ej. 15"
                      style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);${!isDis ? 'opacity:.7' : ''}">
             </div>
           </div>
@@ -9759,7 +9913,7 @@ function readBriefDrawerForm() {
   document.querySelectorAll('[data-bf]').forEach(el => {
     const k = el.dataset.bf;
     let v = el.value;
-    if (['alto_cm', 'ancho_cm', 'neon_mt'].includes(k)) v = v === '' ? null : Number(v);
+    if (['alto_cm', 'ancho_cm', 'neon_mt', 'tramos'].includes(k)) v = v === '' ? null : Number(v);
     // Para teléfono: normalizar a solo dígitos.
     if (k === 'cliente_wa_id' && typeof v === 'string') v = v.replace(/\D/g, '');
     out[k] = (v === '' && !KEEP_EMPTY.has(k)) ? null : v;
@@ -9788,6 +9942,7 @@ function openBriefCotizadorPopup() {
     ancho: b.ancho_cm,
     alto:  b.alto_cm,
     neon:  b.neon_mt || 0,
+    tramos: b.tramos || 0,
     tipo:  b.tipo || 'INT',
     cliente: b.cliente_nombre || '',
     canal: 'WPP',
@@ -9811,15 +9966,24 @@ function closeBriefCotizadorPopup() {
 async function saveCotToSheetFromPopup() {
   const f = STATE.cotizadorForm;
   if (!f) return { error: 'no form' };
-  const r = (function(){ try { return calcCotizador(f); } catch(e){ return null; } })();
+  const r       = (function(){ try { return calcCotizadorActivo(f); } catch(e){ return null; } })();
+  const rNueva  = (function(){ try { return calcCotizadorNuevo(f); }  catch(e){ return null; } })();
+  const rViejo  = (function(){ try { return calcCotizador(f); }       catch(e){ return null; } })();
   if (!r) return { error: 'no calc' };
   const payload = {
     cliente: f.cliente, alto: f.alto, ancho: f.ancho, neon: f.neon,
+    tramos: +f.tramos || 0,
     tipo: f.tipo, m2: r.m2,
     trans: r.transFinal, negro: r.negroFinal,
     reventa: r.reventa, comision: r.comision,
     descuento: r.descuento || 0, recargo: r.recargo || 0,
-    telefono: f.telefono || '', canal: f.canal || 'WPP'
+    telefono: f.telefono || '', canal: f.canal || 'WPP',
+    // Campos de transición — grabados al final del row para validar:
+    cf: rNueva ? rNueva.cf : 0,
+    margen: rNueva ? rNueva.margen : 0,
+    densidad: rNueva ? rNueva.densidad : 0,
+    precio_nuevo: rNueva ? rNueva.transFinal : 0,
+    precio_viejo: rViejo ? rViejo.transFinal : 0
   };
   try {
     const resp = await fetch(CONFIG.appsScriptUrl, {
@@ -9866,8 +10030,12 @@ function renderImgLightbox() {
 
 function renderBriefCotizadorPopup() {
   if (!STATE.briefCotPopupOpen) return '';
-  let r = null;
-  try { r = calcCotizador(STATE.cotizadorForm); } catch(e) {}
+  const p = getCotizadorParams();
+  const useNueva = !!p.transicionUseNueva;
+  let r = null, rOtra = null;
+  try { r     = useNueva ? calcCotizadorNuevo(STATE.cotizadorForm) : calcCotizador(STATE.cotizadorForm); } catch(e) {}
+  try { rOtra = useNueva ? calcCotizador(STATE.cotizadorForm)       : calcCotizadorNuevo(STATE.cotizadorForm); } catch(e) {}
+  const labelOtra = useNueva ? 'fórmula vieja' : 'fórmula nueva';
   const texto = (function(){ try { return buildPresupuestoTexto() || ''; } catch(e) { return ''; } })();
   const f = STATE.cotizadorForm;
   return `
@@ -9879,15 +10047,26 @@ function renderBriefCotizadorPopup() {
           <button class="btn btn-ghost btn-icon" id="brief-cot-popup-close" aria-label="Cerrar">✕</button>
         </div>
         <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:var(--s-3)">
-          <b>${escapeHtml(f.cliente || 'Sin título')}</b> · ${Math.round(+f.ancho)}×${Math.round(+f.alto)} cm · ${f.tipo} · neón ${f.neon} mt
+          <b>${escapeHtml(f.cliente || 'Sin título')}</b> · ${Math.round(+f.ancho)}×${Math.round(+f.alto)} cm · ${f.tipo} · neón ${f.neon} mt${(+f.tramos > 0) ? ' · '+(+f.tramos)+' tramos' : ''}
         </div>
         ${r ? `
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:14px;margin-bottom:var(--s-3);background:rgba(143,212,222,.04);padding:var(--s-3);border-radius:var(--r-sm)">
-          <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${r.m2.toFixed(2)}</b></div>
-          <div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:14px;margin-bottom:var(--s-2);background:rgba(143,212,222,.04);padding:var(--s-3);border-radius:var(--r-sm)">
+          ${useNueva && r.cf ? `
+            <div><span style="color:var(--fg-subtle);font-size:11px">CF (costo fijo)</span><br><b>${fmtMoney(r.cf)}</b></div>
+            <div><span style="color:var(--fg-subtle);font-size:11px">Margen objetivo</span><br><b>${Math.round(r.margen*100)}%</b></div>
+          ` : `
+            <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${r.m2.toFixed(2)}</b></div>
+            <div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>
+          `}
           <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.transFinal)}</b></div>
           <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico negro</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.negroFinal)}</b></div>
         </div>
+        ${rOtra ? `
+        <div style="font-size:11px;color:var(--fg-mute);margin-bottom:var(--s-3);padding:8px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm)">
+          <b style="color:var(--fg-subtle)">↔ ${labelOtra}:</b>
+          trans <s>${fmtMoney(rOtra.transFinal)}</s> · negro <s>${fmtMoney(rOtra.negroFinal)}</s>
+        </div>
+        ` : ''}
         ` : '<div class="muted" style="text-align:center;padding:var(--s-2)">No se pudo calcular precio (revisá medidas).</div>'}
 
         <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto</label>

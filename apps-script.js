@@ -35,7 +35,13 @@ function doPost(e) {
 
     // Columnas: A=Fecha, B=m2, C=diseño, D=alto, E=ancho, F=neon, G=tipo,
     //           H=transparente, I=negro, J=descuento, K=recargo, L=reventa,
-    //           M=vacía, N=vacía, O=5% joaco, P=teléfono/contacto, Q=canal (WPP|IG)
+    //           M=vacía, N=vacía, O=5% joaco, P=teléfono/contacto, Q=canal,
+    //           R=tramos (NUEVO), S=CF (NUEVO), T=margen (NUEVO),
+    //           U=precio_nuevo (NUEVO), V=precio_viejo (NUEVO), W=densidad (NUEVO)
+    // R..W son las columnas de TRANSICIÓN: durante el cambio al cotizador nuevo
+    // (spec COGS + margen variable) grabamos AMBOS precios para validar la
+    // fórmula nueva contra los presupuestos históricos. Una vez confirmado que
+    // la fórmula nueva está bien calibrada, se pueden ignorar/limpiar.
     const row = [
       fecha,
       data.m2 || 0,
@@ -53,7 +59,13 @@ function doPost(e) {
       '', // N vacía
       data.comision || 0,  // O = 5% Joaco
       data.telefono || '', // P = Teléfono o usuario IG (lo que corresponda según canal)
-      data.canal || ''     // Q = Canal: "WPP" o "IG"
+      data.canal || '',    // Q = Canal: "WPP" o "IG"
+      data.tramos || 0,    // R = Tramos (cortes/subtrazos del vector)
+      Math.round(data.cf || 0),                    // S = Costo Fijo (fórmula nueva)
+      data.margen ? +(data.margen).toFixed(4) : 0, // T = Margen objetivo (0..1)
+      data.precio_nuevo || 0,                      // U = Precio según fórmula nueva
+      data.precio_viejo || 0,                      // V = Precio según fórmula vieja
+      data.densidad ? +(data.densidad).toFixed(3) : 0 // W = Densidad (tramos/mt)
     ];
 
     // Insertar después de la última fila con datos en columna C

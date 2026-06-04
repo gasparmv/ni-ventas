@@ -3896,7 +3896,7 @@ export default {
         const now = new Date().toISOString();
         const cols = [
           'cliente_wa_id', 'cliente_nombre', 'origen_lead', 'estado', 'tipo', 'diseno',
-          'alto_cm', 'ancho_cm', 'm2', 'neon_mt', 'medidas_libre',
+          'alto_cm', 'ancho_cm', 'm2', 'neon_mt', 'tramos', 'medidas_libre',
           'precio_trans', 'precio_negro', 'precio_final',
           'descuento', 'recargo', 'reventa', 'comision_joaco',
           'comercial_id', 'disenador_id', 'notas',
@@ -3905,7 +3905,7 @@ export default {
         const vals = [
           body.cliente_wa_id || '', body.cliente_nombre || null, body.origen_lead || '',
           body.estado || 'nuevo', body.tipo || null, body.diseno || null,
-          body.alto_cm ?? null, body.ancho_cm ?? null, body.m2 ?? null, body.neon_mt ?? null,
+          body.alto_cm ?? null, body.ancho_cm ?? null, body.m2 ?? null, body.neon_mt ?? null, body.tramos ?? 0,
           body.medidas_libre || null,
           body.precio_trans ?? null, body.precio_negro ?? null, body.precio_final ?? null,
           body.descuento ?? 0, body.recargo ?? 0, body.reventa ?? 0, body.comision_joaco ?? 0,
@@ -3928,7 +3928,7 @@ export default {
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const editable = [
           'cliente_nombre', 'cliente_wa_id', 'origen_lead', 'estado', 'tipo', 'diseno',
-          'alto_cm', 'ancho_cm', 'm2', 'neon_mt', 'medidas_libre',
+          'alto_cm', 'ancho_cm', 'm2', 'neon_mt', 'tramos', 'medidas_libre',
           'precio_trans', 'precio_negro', 'precio_final',
           'descuento', 'recargo', 'reventa', 'comision_joaco',
           'disenador_id', 'intentos_followup', 'notas', 'sheet_row'
