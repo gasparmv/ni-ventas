@@ -2290,6 +2290,54 @@ export default {
       return json({ params });
     }
 
+    // ----- COGS del Excel 2026v4 (proxy al Apps Script) -----
+    // El front no puede leer el Apps Script directo (CORS lo bloquea), así que
+    // el worker hace de proxy server-to-server. Devuelve los costos reales del
+    // mes actual leídos de la hoja COGS, para que el cotizador nuevo cotice con
+    // datos vivos. Cache D1 (TTL 20 min) salvo ?fresh=1 que fuerza relectura.
+    if (request.method === 'GET' && path === '/cotizador/cogs') {
+      const scriptUrl = env.APPS_SCRIPT_URL;
+      if (!scriptUrl) return json({ error: 'APPS_SCRIPT_URL no configurada en el worker' }, 500);
+      const fresh = url.searchParams.get('fresh') === '1';
+      const TTL_MS = 20 * 60 * 1000;
+      // 1) Cache en kv_cache (key 'cogs_excel').
+      if (!fresh) {
+        try {
+          const cached = await env.DB.prepare(
+            "SELECT v, updated_at FROM kv_cache WHERE k = 'cogs_excel'"
+          ).first();
+          if (cached && cached.v && cached.updated_at) {
+            const age = Date.now() - Date.parse(cached.updated_at);
+            if (age >= 0 && age < TTL_MS) {
+              return json({ ...JSON.parse(cached.v), cached: true, age_ms: age });
+            }
+          }
+        } catch (_) { /* cache miss o JSON inválido → seguimos al fetch */ }
+      }
+      // 2) Fetch al Apps Script (server-to-server, sin CORS).
+      let data;
+      try {
+        const r = await fetch(scriptUrl + '?action=cogs', { redirect: 'follow' });
+        data = await r.json();
+      } catch (e) {
+        // Si falla la red, devolvemos el cache aunque esté vencido.
+        try {
+          const stale = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'cogs_excel'").first();
+          if (stale && stale.v) return json({ ...JSON.parse(stale.v), cached: true, stale: true });
+        } catch (_) {}
+        return json({ error: 'no pude leer COGS del Apps Script: ' + (e.message || e) }, 502);
+      }
+      // 3) Guardar en cache solo si vino bien.
+      if (data && data.ok) {
+        try {
+          await env.DB.prepare(
+            "INSERT INTO kv_cache (k, v, updated_at) VALUES ('cogs_excel', ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at"
+          ).bind(JSON.stringify(data), new Date().toISOString()).run();
+        } catch (_) { /* si falla el cache no es fatal */ }
+      }
+      return json(data);
+    }
+
     // ----- Admin (requiere Bearer) -----
     if (path.startsWith('/admin/')) {
       // Allow token via query param for resources loaded by <img>, <audio>, etc.

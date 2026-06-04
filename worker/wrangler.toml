@@ -11,6 +11,10 @@ WA_BUSINESS_ACCOUNT_ID = "800446462838166"
 # mensajes echoes (los que Joaco manda desde la app de WA Business) cuando el
 # webhook de 360dialog no incluye metadata.display_phone_number.
 WA_BUSINESS_PHONE = "5491144366573"
+# URL del Apps Script "Cotizador Writer" — la usa el worker para leer la hoja
+# COGS del Excel 2026v4 (proxy server-to-server, evita CORS en el front).
+# Misma URL que CONFIG.appsScriptUrl en app.js. No es secreta.
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz9Jq2ew0dMcg5IEXn9OMsqhdVmlwqL_EVULlclWK-oIxh5avOlnZxRrGtis1sGalnd/exec"
 
 # La D1 binding se completa con el ID que devuelve `wrangler d1 create`.
 [[d1_databases]]

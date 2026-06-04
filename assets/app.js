@@ -120,6 +120,8 @@ const STATE = {
   token: null,        // token de admin (Gaspar) si está logueado
   activity: { rows: [], loading: false, error: null },
   cotizadorParams: null,  // se carga del Worker; si null usa CONFIG.cotizadorDefaults
+  cotizadorCogs: null,    // COGS del Excel 2026v4 { derived, raw, mes, fetchedAt } — pisa params para la fórmula nueva
+  cotizadorCogsError: null,
   cotizadorForm: { ancho: '', alto: '', neon: '', tramos: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '', extraCarteles: [] },
   cotizadorSaving: false,
   // Panel de negocio (solo Gaspar) — datos del Sheet "2025 V4"
@@ -129,18 +131,63 @@ const STATE = {
 };
 
 // ============ COTIZADOR ============
+// Precedencia de params: defaults del código < params de D1 (panel admin) <
+// COGS derivados del Excel 2026v4 (los costos reales pisan a todo, son la fuente
+// de verdad de la fórmula nueva). Los COGS solo aportan 3 claves: nv_costo_m2,
+// nv_costo_neon_mt, nv_divisor_base. El resto (calibración) viene de D1/defaults.
 function getCotizadorParams() {
-  return Object.assign({}, CONFIG.cotizadorDefaults, STATE.cotizadorParams || {});
+  const cogs = (STATE.cotizadorCogs && STATE.cotizadorCogs.derived) || {};
+  return Object.assign({}, CONFIG.cotizadorDefaults, STATE.cotizadorParams || {}, cogs);
 }
 
 async function loadCotizadorParams() {
   if (!CONFIG.trackerUrl) return;
+  // Cache optimista de COGS desde localStorage (instantáneo mientras llega el fresco).
+  try {
+    const cached = JSON.parse(localStorage.getItem('niventas.cogs') || 'null');
+    if (cached && cached.derived) STATE.cotizadorCogs = cached;
+  } catch (_) {}
   try {
     const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/cotizador/params');
-    if (!r.ok) return;
-    const j = await r.json();
-    if (j.params && Object.keys(j.params).length) STATE.cotizadorParams = j.params;
+    if (r.ok) {
+      const j = await r.json();
+      if (j.params && Object.keys(j.params).length) STATE.cotizadorParams = j.params;
+    }
   } catch (e) { /* offline ok */ }
+  // COGS del Excel en background (no bloquea el resto del arranque).
+  loadCogsFromExcel();
+}
+
+// Lee los COGS reales del Excel 2026v4 (vía worker proxy → Apps Script) y los
+// transforma en los 3 params nv_* de la fórmula nueva. Cachea en localStorage.
+// opts.fresh = true bypassa el cache del worker (botón "Refrescar COGS").
+async function loadCogsFromExcel(opts) {
+  if (!CONFIG.trackerUrl) return null;
+  const fresh = !!(opts && opts.fresh);
+  try {
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/cotizador/cogs' + (fresh ? '?fresh=1' : ''));
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!j || !j.ok || !j.cogs) { STATE.cotizadorCogsError = (j && j.error) || 'sin datos'; return null; }
+    const c = j.cogs;
+    // Derivar los params de la fórmula nueva a partir de los costos crudos:
+    //   nv_costo_m2 = costo acrílico transparente + (Anibal% + Emma%) × m² imaginario
+    //   nv_divisor_base = 1 − Mano de Obra − comisión Joaquín
+    const derived = {
+      nv_costo_m2: Math.round((+c.costo_acrilico_trans || 0) + ((+c.anibal || 0) + (+c.emma || 0)) * (+c.venta_trans_imaginario || 0)),
+      nv_costo_neon_mt: Math.round(+c.costo_neon_mt || 0),
+      nv_divisor_base: +(1 - (+c.mano_obra || 0) - (+c.joaquin || 0)).toFixed(4)
+    };
+    STATE.cotizadorCogs = { derived, raw: c, mes: j.mes, fetchedAt: Date.now(), cached: !!j.cached };
+    STATE.cotizadorCogsError = null;
+    try { localStorage.setItem('niventas.cogs', JSON.stringify(STATE.cotizadorCogs)); } catch (_) {}
+    // Re-render si estamos en una vista que muestra precios/params.
+    if (['admin', 'cotizacion', 'presupuestos'].includes(STATE.view)) { try { render(); } catch(_){} }
+    return STATE.cotizadorCogs;
+  } catch (e) {
+    STATE.cotizadorCogsError = e.message || String(e);
+    return null;
+  }
 }
 
 async function saveCotizadorParams(updates) {
@@ -4419,6 +4466,19 @@ function bindAdmin() {
       i.value = defs[i.dataset.cotParam];
     });
   };
+  // 🔄 Refrescar COGS del Excel al instante (bypassa cache del worker).
+  const cogsBtn = document.getElementById('cogs-refresh');
+  if (cogsBtn) cogsBtn.onclick = async () => {
+    cogsBtn.disabled = true;
+    const orig = cogsBtn.textContent;
+    cogsBtn.textContent = '⏳ Leyendo…';
+    const res = await loadCogsFromExcel({ fresh: true });
+    cogsBtn.disabled = false;
+    cogsBtn.textContent = orig;
+    if (res) toast('✓ COGS actualizados del Excel');
+    else toast('⚠ No se pudo leer el Excel — revisá el Apps Script');
+    render();
+  };
 }
 
 function renderAdmin() {
@@ -4503,7 +4563,40 @@ function renderAdmin() {
   `;
 }
 
+// Parámetros de CALIBRACIÓN de la fórmula nueva (editables, viven en D1).
+// Los COGS (costo m², neón, divisor) NO están acá — salen del Excel y se
+// muestran aparte (read-only). Los params viejos van en COT_PARAM_GROUPS_LEGACY.
 const COT_PARAM_GROUPS = [
+  { title: 'Fuente (por cm de neón)', keys: [
+    ['nv_fuente_corto', 'cm ≤ 500'],
+    ['nv_fuente_medio', '500 – 1200'],
+    ['nv_fuente_largo', 'cm ≥ 1200']
+  ]},
+  { title: 'Margen por tamaño', keys: [
+    ['nv_margen_chico', 'Margen cartel chico (0.68 = 68%)'],
+    ['nv_margen_grande', 'Margen cartel grande (0.51 = 51%)'],
+    ['nv_cf_ref_chico', 'CF referencia chico ($)'],
+    ['nv_cf_ref_grande', 'CF referencia grande ($)']
+  ]},
+  { title: 'Complejidad (densidad tramos/m)', keys: [
+    ['nv_complejidad_coef', 'Coeficiente (0.018)'],
+    ['nv_complejidad_pivote', 'Pivote densidad (1.4)'],
+    ['nv_complejidad_tope', 'Tope ± (0.04)']
+  ]},
+  { title: 'Topes y negro', keys: [
+    ['nv_margen_min', 'Margen mínimo (0.48 = 48%)'],
+    ['nv_margen_max', 'Margen máximo (0.72 = 72%)'],
+    ['nv_negro_ratio', 'Negro × transparente (0.93)']
+  ]},
+  { title: 'Extra por exterior (EXT)', keys: [
+    ['ext_25', 'm² ≤ 25'],
+    ['ext_50', 'm² ≤ 50'],
+    ['ext_99', 'm² > 50']
+  ]}
+];
+
+// Params de la fórmula VIEJA — quedan accesibles colapsados por si se reactiva.
+const COT_PARAM_GROUPS_LEGACY = [
   { title: 'Mapping (sheet)', keys: [
     ['neon', 'Precio neón (mt)'],
     ['trans', 'Precio acrílico transparente (m²)'],
@@ -4518,12 +4611,7 @@ const COT_PARAM_GROUPS = [
     ['tier_50', 'm² ≤ 50'],
     ['tier_99', 'm² > 50']
   ]},
-  { title: 'Extra por exterior (EXT)', keys: [
-    ['ext_25', 'm² ≤ 25'],
-    ['ext_50', 'm² ≤ 50'],
-    ['ext_99', 'm² > 50']
-  ]},
-  { title: 'Multiplicadores', keys: [
+  { title: 'Multiplicadores (viejos)', keys: [
     ['reventa_mult', 'Reventa × trans'],
     ['comision_pct', 'Comisión (decimal: 0.05 = 5%)'],
     ['descuento_mult', 'Descuento × trans'],
@@ -4534,14 +4622,61 @@ const COT_PARAM_GROUPS = [
   ]}
 ];
 
+const MESES_ES = ['', 'enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+
+// Bloque read-only con los COGS leídos del Excel 2026v4 + el desglose de cómo
+// se arman los params de la fórmula nueva. Botón para refrescar al instante.
+function renderCogsBlock() {
+  const cogs = STATE.cotizadorCogs;
+  const err = STATE.cotizadorCogsError;
+  const p = getCotizadorParams();
+  const fmtPct = v => (v != null ? (Number(v) * 100).toFixed(1).replace('.0', '') + '%' : '—');
+  const raw = cogs && cogs.raw;
+  const mesTxt = cogs && cogs.mes ? (MESES_ES[cogs.mes] || ('mes ' + cogs.mes)) : '—';
+  const ageTxt = cogs && cogs.fetchedAt
+    ? 'leído ' + relativeTime(new Date(cogs.fetchedAt).toISOString()) + (cogs.cached ? ' · cache' : '')
+    : '';
+  return `
+    <div class="cot-params-group" style="border:1px solid rgba(143,212,222,.25);border-radius:var(--r-sm);padding:var(--s-3);background:rgba(143,212,222,.03)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2)">
+        <div class="cot-params-title" style="margin:0;color:var(--accent-cyan)">💎 COGS reales — del Excel 2026v4 · hoja COGS</div>
+        <button class="btn btn-ghost" id="cogs-refresh" style="font-size:12px;padding:4px 10px">🔄 Refrescar</button>
+      </div>
+      ${err ? `<div style="font-size:11px;color:#FFA726;margin-bottom:var(--s-2)">⚠ No se pudo leer el Excel (${escapeHtml(String(err))}). Usando valores por defecto del código.</div>` : ''}
+      ${raw ? `
+        <div style="font-size:11px;color:var(--fg-mute);margin-bottom:var(--s-2)">Mes: <b style="color:var(--fg-subtle)">${mesTxt}</b> · ${ageTxt}</div>
+        <div class="cot-params-grid">
+          <label class="cot-param"><span>Costo acrílico transparente (m²)</span><input type="text" value="${fmtMoney(raw.costo_acrilico_trans||0)}" readonly style="opacity:.75"></label>
+          <label class="cot-param"><span>m² imaginario (venta trans)</span><input type="text" value="${fmtMoney(raw.venta_trans_imaginario||0)}" readonly style="opacity:.75"></label>
+          <label class="cot-param"><span>Anibal</span><input type="text" value="${fmtPct(raw.anibal)}" readonly style="opacity:.75"></label>
+          <label class="cot-param"><span>Emma</span><input type="text" value="${fmtPct(raw.emma)}" readonly style="opacity:.75"></label>
+          <label class="cot-param"><span>Costo neón (mt)</span><input type="text" value="${fmtMoney(raw.costo_neon_mt||0)}" readonly style="opacity:.75"></label>
+          <label class="cot-param"><span>Mano de obra</span><input type="text" value="${fmtPct(raw.mano_obra)}" readonly style="opacity:.75"></label>
+          <label class="cot-param"><span>Comisión Joaquín</span><input type="text" value="${fmtPct(raw.joaquin)}" readonly style="opacity:.75"></label>
+        </div>
+        <div style="margin-top:var(--s-2);padding:8px 12px;background:rgba(143,212,222,.06);border-radius:var(--r-sm);font-size:12px;color:var(--fg-subtle);font-family:ui-monospace,monospace">
+          → Costo por m² combinado: <b style="color:var(--accent-cyan)">${fmtMoney(p.nv_costo_m2)}</b>
+          &nbsp;·&nbsp; Costo neón: <b style="color:var(--accent-cyan)">${fmtMoney(p.nv_costo_neon_mt)}/mt</b>
+          &nbsp;·&nbsp; Divisor: <b style="color:var(--accent-cyan)">${(+p.nv_divisor_base).toFixed(3)}</b>
+        </div>
+      ` : `<div style="font-size:12px;color:var(--fg-mute);padding:var(--s-2)">Cargando COGS del Excel… (si no aparece, revisá que el Apps Script tenga <code>action=cogs</code>)</div>`}
+    </div>
+  `;
+}
+
 function renderAdminCotizador() {
   const p = getCotizadorParams();
+  const usandoNueva = !!p.transicionUseNueva;
   return `
     <div class="card" style="margin-bottom:var(--s-4)">
       <div class="card-h">
         <h3>Parámetros del cotizador</h3>
-        <span class="muted" style="font-size:11px">${STATE.cotizadorParams ? 'sincronizado · D1' : 'usando valores por defecto'}</span>
+        <span class="muted" style="font-size:11px">${usandoNueva ? '⚡ fórmula nueva activa' : 'fórmula vieja activa'} · ${STATE.cotizadorParams ? 'D1' : 'defaults'}</span>
       </div>
+
+      ${renderCogsBlock()}
+
+      <div style="font-size:11px;color:var(--fg-mute);margin:var(--s-3) 0 var(--s-1)">CALIBRACIÓN — fórmula nueva (editable)</div>
       ${COT_PARAM_GROUPS.map(g => `
         <div class="cot-params-group">
           <div class="cot-params-title">${g.title}</div>
@@ -4556,10 +4691,29 @@ function renderAdminCotizador() {
         </div>
       `).join('')}
       <div class="seg-actions" style="margin-top:var(--s-3)">
-        <button class="btn btn-primary" data-cot-save>💾 Guardar</button>
+        <button class="btn btn-primary" data-cot-save>💾 Guardar calibración</button>
         <button class="btn btn-ghost" data-cot-reset>Resetear a defaults</button>
         <span id="cot-save-msg" class="muted" style="font-size:12px"></span>
       </div>
+
+      <details style="margin-top:var(--s-4)">
+        <summary style="cursor:pointer;font-size:11px;color:var(--fg-mute);user-select:none">⚙ Parámetros de la fórmula VIEJA (legacy — no afectan el precio mientras la nueva esté activa)</summary>
+        <div style="margin-top:var(--s-2)">
+          ${COT_PARAM_GROUPS_LEGACY.map(g => `
+            <div class="cot-params-group">
+              <div class="cot-params-title">${g.title}</div>
+              <div class="cot-params-grid">
+                ${g.keys.map(([k, label]) => `
+                  <label class="cot-param">
+                    <span>${escapeHtml(label)}</span>
+                    <input type="number" step="any" data-cot-param="${k}" value="${p[k]}">
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </details>
     </div>
   `;
 }
