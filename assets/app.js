@@ -8947,6 +8947,8 @@ if (typeof STATE.briefsGenerando === 'undefined') STATE.briefsGenerando = {};
 // está en true, el botón "Enviar por WhatsApp" muestra "⏳ Enviando…" y queda
 // deshabilitado, evitando que un doble-click mande dos mensajes al cliente.
 if (typeof STATE.briefsEnviando === 'undefined') STATE.briefsEnviando = {};
+// True mientras corre la verificación masiva de "enviados" (botón del kanban).
+if (typeof STATE.verificandoEnviados === 'undefined') STATE.verificandoEnviados = false;
 if (typeof STATE.briefLastAiParams === 'undefined') STATE.briefLastAiParams = null; // último resultado de estimación IA (banner)
 if (typeof STATE.briefDetailMessages === 'undefined') STATE.briefDetailMessages = []; // (legacy, sin uso)
 if (typeof STATE.teamChatOpen === 'undefined')    STATE.teamChatOpen = false;
@@ -9342,6 +9344,88 @@ async function marcarBriefEnviado(id, extra = {}) {
   });
   if (!r.ok) throw new Error('enviar failed: HTTP ' + r.status);
   return (await r.json()).brief;
+}
+
+// Verifica vía API si a un teléfono ya se le mandó un presupuesto por WhatsApp.
+// Busca en el historial outbound un mensaje que matchee isPresupuestoMessage
+// (o el follow-up de presupuesto) en los últimos `dias` días. NO reenvía nada.
+// Devuelve { enviado: bool, ts, wamid } — enviado=true si encontró el presu.
+async function verificarPresupuestoEnHistorial(phone, dias = 30) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length < 8) return { enviado: false };
+  const tel = normalizeArPhoneFE(digits);
+  const since = new Date(Date.now() - dias * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/messages?phone=' + encodeURIComponent(tel) + '&direction=outbound&from=' + encodeURIComponent(since) + '&limit=500', {
+      headers: authHeaders()
+    });
+    if (!r.ok) return { enviado: false };
+    const j = await r.json();
+    const msgs = j.messages || [];
+    // Un presupuesto cuenta si: matchea el prefijo del cotizador, o es el
+    // follow-up de presupuesto, y NO está fallido.
+    const hit = msgs
+      .filter(m => m.status !== 'failed')
+      .filter(m => isPresupuestoMessage(m.body) || String(m.body || '').startsWith(FOLLOWUP_PRESUPUESTO_PREFIX))
+      .sort((a, b) => new Date(b.ts) - new Date(a.ts))[0];
+    if (hit) return { enviado: true, ts: hit.ts, wamid: hit.wamid || '' };
+    return { enviado: false };
+  } catch (e) {
+    return { enviado: false, error: e.message };
+  }
+}
+
+// Botón "🔍 Verificar enviados": recorre los briefs en 'listo' tipo WhatsApp con
+// teléfono, consulta el historial WA de cada uno, y marca como enviado los que
+// ya tienen el presupuesto mandado. No reenvía. Resuelve el atraso de golpe.
+async function handleVerificarEnviados() {
+  if (STATE.verificandoEnviados) return;
+  if (!STATE.token) { await showAlert('Tenés que estar logueado.', { title: 'Login requerido', variant: 'warn' }); return; }
+
+  // Candidatos: listos, no colgados, origen WA (o con teléfono cargado), con tel válido.
+  const candidatos = STATE.briefs.filter(b => {
+    if (b.estado !== 'listo') return false;
+    if (isBriefColgado(b)) return false;
+    const o = String(b.origen_lead || '').toLowerCase();
+    const tel = String(b.cliente_wa_id || '').replace(/\D/g, '');
+    const esWa = o === 'wpp' || o === 'whatsapp' || (o === '' && tel.length >= 8);
+    return esWa && tel.length >= 8;
+  });
+
+  if (!candidatos.length) {
+    await showAlert('No hay briefs en "Listos" de WhatsApp con teléfono para verificar.', { title: 'Nada para verificar' });
+    return;
+  }
+
+  STATE.verificandoEnviados = true;
+  render();
+  let marcados = 0, sinRastro = 0;
+  try {
+    // Secuencial para no saturar el worker / la API de WhatsApp.
+    for (const b of candidatos) {
+      const res = await verificarPresupuestoEnHistorial(b.cliente_wa_id);
+      if (res.enviado) {
+        try {
+          const updated = await marcarBriefEnviado(b.id);
+          const i = STATE.briefs.findIndex(x => x.id === updated.id);
+          if (i >= 0) STATE.briefs[i] = updated;
+          marcados++;
+        } catch (e) { /* sigue con el resto */ }
+      } else {
+        sinRastro++;
+      }
+    }
+  } finally {
+    STATE.verificandoEnviados = false;
+    render();
+  }
+
+  await showAlert(
+    `Revisé ${candidatos.length} brief${candidatos.length > 1 ? 's' : ''} de WhatsApp en "Listos".\n\n` +
+    `✓ ${marcados} pasaron a "Enviados" (encontré el presupuesto en el historial).\n` +
+    `• ${sinRastro} quedaron en "Listos" (no encontré presupuesto mandado — capaz se mandó editado o todavía no se envió).`,
+    { title: 'Verificación terminada', variant: marcados > 0 ? 'success' : undefined }
+  );
 }
 
 // Tiempo relativo "hace X" para el badge SLA en cada tarjeta.
@@ -9758,6 +9842,7 @@ function renderCotizacion() {
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" id="briefs-refresh" title="Refrescar">↻</button>
+        ${canCotizar() ? `<button class="btn btn-ghost" id="briefs-verificar-enviados" title="Revisar los 'Listos' tipo WhatsApp contra el historial y pasar a Enviados los que ya tienen presupuesto mandado">${STATE.verificandoEnviados ? '⏳ Verificando…' : '🔍 Verificar enviados'}</button>` : ''}
         ${canCreateBriefs() ? '<button class="btn btn-cyan" id="brief-new">+ Nuevo brief</button>' : ''}
       </div>
     </div>
@@ -10228,29 +10313,35 @@ function renderBriefCotizadorPopup() {
                   style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-3)">${escapeHtml(texto)}</textarea>
 
         ${(() => {
-          // Botones del modal:
-          // - "📋 Copiar presupuesto" siempre (clipboard + Sheet). NO marca el
-          //   brief como enviado — útil para clientes de IG que se envían por DM.
-          // - "📤 Enviar por WhatsApp" solo si el brief tiene origen=wpp + tel
-          //   válido. Hace: WA send + Sheet + brief → 'enviado' + cierra modales.
-          // Recuperamos el brief en curso para decidir.
+          // Botones del modal, según el origen del brief:
+          // - WhatsApp: "📋 Copiar presupuesto" (copia + Sheet, no marca) +
+          //   "📤 Enviar por WhatsApp" (manda + verifica 3 cosas + marca enviado).
+          // - Instagram: un solo botón "📋 Copiar y marcar como enviado" (copia +
+          //   Sheet + marca enviado, sin teléfono ni verificación API).
           const b = STATE.briefs.find(x => x.id === STATE.briefSelected) || {};
           const o = String(b.origen_lead || '').toLowerCase();
           const tel = String(b.cliente_wa_id || '').replace(/\D/g, '');
-          const isWa = (o === 'wpp' || o === 'whatsapp' || (o === '' && tel.length >= 8)) && tel.length >= 8;
+          const esIg = (o === 'ig' || o === 'instagram');
+          const isWa = !esIg && (o === 'wpp' || o === 'whatsapp' || (o === '' && tel.length >= 8)) && tel.length >= 8;
           const sending = STATE.briefsEnviando && STATE.briefsEnviando[b.id];
-          const igHint = (o === 'ig' || o === 'instagram')
-            ? '<div style="font-size:10px;color:var(--fg-mute);text-align:left;margin-top:6px">📷 Consulta vino por Instagram — copialo y pegalo en el DM. Cuando lo mandes, marcá el brief como enviado a mano.</div>'
-            : '';
+          if (esIg) {
+            return `
+              <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+                <button class="btn btn-cyan" id="brief-cot-popup-copy-ig" ${sending ? 'disabled' : ''}>${sending ? '⏳…' : '📋 Copiar y marcar como enviado'}</button>
+              </div>
+              <div style="font-size:10px;color:var(--fg-mute);text-align:right;margin-top:6px">📷 Instagram: copia el texto, lo guarda en el Sheet y marca el brief como enviado. Pegalo en el DM.</div>
+            `;
+          }
+          // WhatsApp (o brief viejo con teléfono).
+          const noTel = !isWa;
           return `
             <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
               <button class="btn btn-ghost" id="brief-cot-popup-copy">📋 Copiar presupuesto</button>
-              ${isWa ? `<button class="btn btn-cyan" id="brief-cot-popup-send-wa" ${sending ? 'disabled' : ''}>
+              <button class="btn btn-cyan" id="brief-cot-popup-send-wa" ${(sending || noTel) ? 'disabled' : ''} ${noTel ? 'title="Falta el teléfono del cliente (obligatorio para WhatsApp)"' : ''}>
                 ${sending ? '⏳ Enviando…' : '📤 Enviar por WhatsApp'}
-              </button>` : ''}
+              </button>
             </div>
-            ${igHint}
-            <div style="font-size:10px;color:var(--fg-mute);text-align:right;margin-top:6px">"Copiar" guarda en Sheet · "Enviar" además manda al cliente y marca el brief como enviado.</div>
+            ${noTel ? '<div style="font-size:10px;color:#FFA726;text-align:right;margin-top:6px">⚠ Falta el teléfono del cliente. Editá el brief para poder enviar por WhatsApp.</div>' : '<div style="font-size:10px;color:var(--fg-mute);text-align:right;margin-top:6px">"Copiar" solo guarda en Sheet · "Enviar" manda al cliente, verifica y marca enviado.</div>'}
           `;
         })()}
         <div id="brief-cot-popup-status" style="font-size:11px;color:var(--green, #25D366);text-align:right;margin-top:6px;height:14px"></div>
@@ -10521,6 +10612,18 @@ async function handleBriefSave() {
     alert('Falta el título del brief.');
     return;
   }
+  // Si la consulta vino por WhatsApp, el teléfono es obligatorio (lo necesitamos
+  // para mandar el presupuesto por API). Para Instagram no se pide.
+  const origen = String(form.origen_lead || '').toLowerCase();
+  if (origen === 'wpp' || origen === 'whatsapp') {
+    const telDigits = String(form.cliente_wa_id || '').replace(/\D/g, '');
+    if (telDigits.length < 8) {
+      const telEl = document.getElementById('brief-tel-input');
+      if (telEl) { telEl.focus(); telEl.style.borderColor = '#FF5566'; setTimeout(() => { telEl.style.borderColor = 'var(--border)'; }, 1500); }
+      alert('La consulta es por WhatsApp: el teléfono es obligatorio (al menos 8 dígitos). Si es de Instagram, cambiá el origen a 📷 Instagram.');
+      return;
+    }
+  }
   if (!isCreate) form.id = STATE.briefSelected;
 
   // Auto-transición a "listo" cuando el diseñador completa render + medidas.
@@ -10638,6 +10741,8 @@ function bindCotizacion() {
     STATE.briefsLoaded = false;
     fetchBriefs().then(() => render());
   };
+  const verifBtn = document.getElementById('briefs-verificar-enviados');
+  if (verifBtn) verifBtn.onclick = handleVerificarEnviados;
 
   // Tarjetas → abrir drawer.
   document.querySelectorAll('.brief-card').forEach(el => {
@@ -10915,15 +11020,18 @@ function bindCotizacion() {
 
       if (!waOk) { render(); return; }
 
-      // Persistir en Sheet (igual que el botón "Copiar presupuesto").
+      // CHECK 2 — guardar en el Sheet del cotizador Joaco.
+      let sheetOk = false;
       try {
         const sheetResp = await saveCotToSheetFromPopup();
+        sheetOk = !sheetResp.error;
         if (sheetResp.error) console.warn('Sheet falló:', sheetResp.error);
       } catch(e) { console.warn('Sheet exception:', e); }
 
-      // Marcar brief como enviado (con precio para que matchee el Sheet).
+      // CHECK 3 cumplido (API ok = waOk) + tel (gate) + sheet → marcar enviado.
+      // El precio guardado usa la fórmula ACTIVA (la nueva) para que matchee el Sheet.
       try {
-        const calc = (function(){ try { return calcCotizador(STATE.cotizadorForm); } catch(e){ return null; } })();
+        const calc = (function(){ try { return calcCotizadorActivo(STATE.cotizadorForm); } catch(e){ return null; } })();
         const updated = await marcarBriefEnviado(briefId, calc ? { precio_final: calc.transFinal } : {});
         const i = STATE.briefs.findIndex(b => b.id === updated.id);
         if (i >= 0) STATE.briefs[i] = updated;
@@ -10931,10 +11039,42 @@ function bindCotizacion() {
         console.warn('No pude marcar brief como enviado:', e);
       }
 
-      toast('✓ Presupuesto enviado · brief pasó a "Enviados"');
+      toast(sheetOk ? '✓ Presupuesto enviado · brief pasó a "Enviados"' : '✓ Enviado y marcado · ⚠ no se guardó en el Sheet');
       // Polling de delivery en background — no bloquea el cierre.
       if (wamid) verificarEntregaWA(wamid, telDigits);
 
+      closeBriefCotizadorPopup();
+      closeBriefDrawer();
+    };
+
+    // 📋 (IG) Copiar y marcar como enviado — copia al clipboard, guarda en el
+    // Sheet y marca el brief como enviado, SIN teléfono ni verificación API.
+    // Joaco lo usa para consultas de Instagram (lo pega en el DM a mano).
+    const copyIgBtn = document.getElementById('brief-cot-popup-copy-ig');
+    if (copyIgBtn) copyIgBtn.onclick = async () => {
+      if (!STATE.briefSelected) return;
+      const briefId = STATE.briefSelected;
+      if (STATE.briefsEnviando[briefId]) return;
+      const ta = document.getElementById('brief-cot-popup-text');
+      const texto = (ta?.value || '').trim();
+      if (!texto) { await showAlert('El texto del presupuesto está vacío.', { title: 'Sin texto', variant: 'warn' }); return; }
+      STATE.briefsEnviando[briefId] = true;
+      setStatus('Copiando y guardando…', 'var(--fg-subtle)');
+      render();
+      // 1) Clipboard.
+      try { await navigator.clipboard.writeText(texto); } catch (e) { ta.select(); document.execCommand('copy'); }
+      // 2) Sheet.
+      let sheetOk = false;
+      try { const sr = await saveCotToSheetFromPopup(); sheetOk = !sr.error; } catch (e) { console.warn('Sheet:', e); }
+      // 3) Marcar enviado (sin API — IG no se verifica).
+      try {
+        const calc = (function(){ try { return calcCotizadorActivo(STATE.cotizadorForm); } catch(e){ return null; } })();
+        const updated = await marcarBriefEnviado(briefId, calc ? { precio_final: calc.transFinal } : {});
+        const i = STATE.briefs.findIndex(b => b.id === updated.id);
+        if (i >= 0) STATE.briefs[i] = updated;
+      } catch (e) { console.warn('marcar enviado:', e); }
+      STATE.briefsEnviando[briefId] = false;
+      toast(sheetOk ? '✓ Copiado · brief pasó a "Enviados". Pegalo en el DM de IG.' : '✓ Marcado enviado · ⚠ no guardó en Sheet. Pegalo en el DM.');
       closeBriefCotizadorPopup();
       closeBriefDrawer();
     };
