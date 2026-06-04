@@ -15,6 +15,10 @@ const SHEET_ID = '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ';
 
 const SHEET_NAME = '2026';
 
+// Spreadsheet 2026 v4 — de ahí leemos la hoja COGS para el cotizador nuevo.
+// (Es OTRO spreadsheet, distinto del SHEET_ID de presupuestos de arriba.)
+const COGS_SHEET_ID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE';
+
 function doPost(e) {
   try {
     // Soporta tanto JSON body directo como form field "data"
@@ -89,10 +93,93 @@ function doPost(e) {
   }
 }
 
+// Lee la hoja COGS del 2026 v4 y devuelve los costos del MES ACTUAL.
+// - La columna del mes se detecta leyendo la fila 1: busca la celda cuyo número
+//   == mes actual (zona AR). Así no importa en qué letra esté.
+// - Los valores se buscan por NOMBRE de fila (col A "id" o col B "Nombre"),
+//   no por número de fila → si insertás filas en el Excel no se rompe.
+// - Override para testear: ?action=cogs&mes=6  ·  diagnóstico: ?action=cogs&debug=1
+function getCogs(e) {
+  try {
+    const ss = SpreadsheetApp.openById(COGS_SHEET_ID);
+    // Buscar la hoja cuyo nombre contenga "cogs" (la pestaña puede ser "1 COGS").
+    var sheet = null;
+    var allSheets = ss.getSheets();
+    for (var s = 0; s < allSheets.length; s++) {
+      if (allSheets[s].getName().toLowerCase().indexOf('cogs') !== -1) { sheet = allSheets[s]; break; }
+    }
+    if (!sheet) return jsonOut({ error: 'no encontré una hoja con "COGS" en el nombre' });
+
+    var lastRow = sheet.getLastRow();
+    var lastCol = sheet.getLastColumn();
+    var values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+
+    // Mes actual (AR), o override por querystring.
+    var mes = parseInt((e && e.parameter && e.parameter.mes) || '', 10);
+    if (!mes || mes < 1 || mes > 12) {
+      mes = parseInt(Utilities.formatDate(new Date(), 'America/Argentina/Buenos_Aires', 'M'), 10);
+    }
+
+    // Columna del mes: en la fila 1, la celda cuyo número == mes.
+    var header = values[0] || [];
+    var monthCol = -1;
+    for (var c = 0; c < header.length; c++) {
+      var hv = header[c];
+      var n = (typeof hv === 'number') ? Math.round(hv) : parseInt(String(hv).trim(), 10);
+      if (n === mes) { monthCol = c; break; }
+    }
+    if (monthCol === -1) return jsonOut({ error: 'no encontré la columna del mes ' + mes, header: header });
+
+    // Buscar el valor de una fila por su id (col A) o nombre (col B).
+    function findVal(labels) {
+      for (var r = 1; r < values.length; r++) {
+        var idA = String(values[r][0] || '').trim().toLowerCase();
+        var idB = String(values[r][1] || '').trim().toLowerCase();
+        for (var i = 0; i < labels.length; i++) {
+          var L = labels[i].toLowerCase();
+          if (idA === L || idB === L) return values[r][monthCol];
+        }
+      }
+      return null;
+    }
+    // Normaliza porcentajes: si viene 15 en vez de 0.15, lo divide.
+    function pct(v) { v = Number(v) || 0; return v > 1 ? v / 100 : v; }
+
+    if (e && e.parameter && e.parameter.debug) {
+      // Modo diagnóstico: devuelve las primeras 3 columnas de cada fila + header.
+      var preview = [];
+      for (var r2 = 0; r2 < Math.min(values.length, 30); r2++) {
+        preview.push([values[r2][0], values[r2][1], values[r2][monthCol]]);
+      }
+      return jsonOut({ ok: true, mes: mes, monthColIndex: monthCol, header: header, preview: preview });
+    }
+
+    var cogs = {
+      costo_acrilico_trans:   Number(findVal(['Trans', 'Coste Acrilico Trans'])) || 0,
+      costo_acrilico_negro:   Number(findVal(['Negro', 'Coste Acrilico Negro'])) || 0,
+      venta_trans_imaginario: Number(findVal(['TRANS_V', 'Venta Acrilico Trans'])) || 0,
+      anibal:    pct(findVal(['ANIBAL', 'Anibal'])),
+      emma:      pct(findVal(['EMMA', 'Emma'])),
+      costo_neon_mt: Number(findVal(['Neon', 'Metro de neon'])) || 0,
+      mano_obra: pct(findVal(['MO', 'Mano de Obra'])),
+      joaquin:   pct(findVal(['JOAQUIN', 'Joaquin']))
+    };
+    return jsonOut({ ok: true, mes: mes, cogs: cogs });
+  } catch (err) {
+    return jsonOut({ error: err.message });
+  }
+}
+
+function jsonOut(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
 function doGet(e) {
+  const action = e && e.parameter && e.parameter.action;
+  // GET ?action=cogs → costos del mes actual para el cotizador nuevo.
+  if (action === 'cogs') return getCogs(e);
   // GET ?action=rows&sheet=2026 → devuelve las filas crudas (sin coerción de tipo
   // que hace gviz, que rompe los teléfonos con "+" o espacios).
-  const action = e && e.parameter && e.parameter.action;
   if (action === 'rows') {
     try {
       const sheetName = (e.parameter.sheet || SHEET_NAME);
