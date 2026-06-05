@@ -523,6 +523,29 @@ async function analyzeResponseSentiment(env, texto) {
   } catch (e) { return 'no_positiva'; }
 }
 
+// Sentiment del feedback del minicurso. Como el regalo ya está prometido/ganado,
+// somos GENEROSOS: en duda → positiva. Solo 'no_positiva' si es claramente
+// hostil/spam/rechazo, o si la IA no está disponible (ahí lo maneja Abril).
+async function analyzeMinicursoFeedback(env, texto) {
+  const t = String(texto || '').trim();
+  if (!t || !env.ANTHROPIC_API_KEY) return 'no_positiva';
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 8,
+        system: 'A un contacto que vio un minicurso de carteles de neón se le prometió un regalo (cotizador + guía) y se le preguntó qué le pareció el curso. Hay que decidir si le mandamos el regalo automáticamente. Como el regalo ya está prometido, sé GENEROSO. Respondé SOLO una palabra: NEGATIVA únicamente si la respuesta es claramente hostil, un insulto, spam, número equivocado, o pide que no le escriban. En cualquier otro caso (feedback, agradecimiento, una pregunta, algo neutral o ambiguo) respondé POSITIVA.',
+        messages: [{ role: 'user', content: t.slice(0, 500) }]
+      })
+    });
+    const j = await r.json();
+    if (!r.ok) return 'no_positiva';
+    return (j.content?.[0]?.text || '').toUpperCase().includes('NEGATIVA') ? 'no_positiva' : 'positiva';
+  } catch (e) { return 'no_positiva'; }
+}
+
 // Procesa la respuesta de un lead de la campaña: si el chat está oculto, analiza
 // el sentiment, manda el mensaje del evento SOLO si es positiva, y revela el
 // chat a la bandeja de Abril (responda lo que responda).
@@ -631,6 +654,41 @@ async function maybeAutoReplyMinicurso(env, phone, senderName) {
   } catch (e) { /* best-effort, no rompe el webhook */ }
 }
 
+// Cuando un lead responde al gate de feedback del minicurso: si la IA evalúa la
+// respuesta como positiva, encola el link de regalos (con demora ~1 min). Si no,
+// lo deja para Abril. Una sola vez por contacto (dedup atómico 'minicurso_gift').
+async function maybeSendMinicursoGift(env, phone, msgBody, inboundTs) {
+  if (!phone || !msgBody) return;
+  try {
+    // ¿Hay un autoreply de minicurso ya enviado, ANTERIOR a este inbound? Si no,
+    // este inbound es el trigger inicial, no la respuesta al gate de feedback.
+    const ar = await env.DB.prepare(
+      "SELECT sent_at FROM wa_autoreply_log WHERE phone = ? AND kind = 'minicurso' AND status = 'sent' AND sent_at != '' LIMIT 1"
+    ).bind(phone).first();
+    if (!ar || !ar.sent_at) return;
+    if (!(String(inboundTs) > String(ar.sent_at))) return; // inbound previo/igual → no es la respuesta
+    // Reserva ATÓMICA del regalo (una sola vez por contacto).
+    let reserva;
+    try {
+      reserva = await env.DB.prepare(
+        "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'minicurso_gift', '', 'pending', '', '')"
+      ).bind(phone).run();
+    } catch (_) { return; }
+    if (!reserva?.meta?.changes) return; // ya evaluado/enviado
+    const sentiment = await analyzeMinicursoFeedback(env, msgBody);
+    if (sentiment !== 'positiva') {
+      // No positiva → lo maneja Abril (no auto-enviamos el link).
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'minicurso_gift'").bind(phone).run(); } catch (_) {}
+      return;
+    }
+    // Positiva → encolar el link con demora (~1 min); lo manda processAutoReplyQueue.
+    const dueAt = new Date(Date.now() + 60 * 1000).toISOString();
+    try {
+      await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued', due_at = ? WHERE phone = ? AND kind = 'minicurso_gift'").bind(dueAt, phone).run();
+    } catch (_) {}
+  } catch (e) { /* best-effort */ }
+}
+
 // Procesa la cola de auto-respuestas vencidas (lo llama el cron cada minuto).
 // Manda el mensaje libre con los regalos, lo guarda en el CRM y marca 'sent'.
 // Ventana de reintento de 30 min: si el envío falla (p.ej. fuera de ventana
@@ -639,10 +697,11 @@ async function processAutoReplyQueue(env) {
   try {
     const nowIso = new Date().toISOString();
     const floorIso = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-    // Procesa minicurso (regalos) y cursos_evento (invitación al evento). Ambos
-    // son mensaje libre con demora; el evento además REVELA el chat a Abril.
+    // Procesa minicurso (gate de feedback), minicurso_gift (link de regalos tras
+    // respuesta positiva) y cursos_evento. Todos mensaje libre con demora; el
+    // evento además REVELA el chat a Abril.
     const rs = await env.DB.prepare(
-      "SELECT phone, kind, sender_name FROM wa_autoreply_log WHERE kind IN ('minicurso','cursos_evento') AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 25"
+      "SELECT phone, kind, sender_name FROM wa_autoreply_log WHERE kind IN ('minicurso','minicurso_gift','cursos_evento') AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 25"
     ).bind(nowIso, floorIso).all();
     for (const row of (rs.results || [])) {
       const phone = row.phone;
@@ -651,9 +710,11 @@ async function processAutoReplyQueue(env) {
         const nombre = (row.sender_name || '').trim().split(/\s+/)[0] || '';
         const saludo = nombre ? `Buenas ${nombre}!` : 'Buenas!';
         // Nuevo flujo: NO mandamos el link de una. Prometemos los regalos pero
-        // pedimos feedback del curso PRIMERO (los regalos los manda Abril cuando
-        // responde). El link MINICURSO_REGALO_LINK queda para ese envío manual.
+        // pedimos feedback del curso PRIMERO. El link se manda en 'minicurso_gift'
+        // cuando el lead responde y la IA lo evalúa como positiva.
         body = `${saludo} Ahora te paso los regalos (Cotizador + Guía de Producción). Pero antes, contanos qué te pareció el nuevo Curso! Viste la 2da clase hasta el final?`;
+      } else if (row.kind === 'minicurso_gift') {
+        body = `Buenísimo, gracias por el feedback! 🙌 Acá van los regalos 🎁\n\nCotizador + Guía de Producción:\n${MINICURSO_REGALO_LINK}`;
       } else {
         body = CURSOS_EVENTO_MSG;
       }
@@ -2404,6 +2465,11 @@ export default {
                 // chat a Abril. (No hace nada si el chat no es de la campaña.) =====
                 if (direction === 'inbound') {
                   try { await revealCursosCampaign(env, phone, msgBody); } catch (_) {}
+                }
+                // ===== Minicurso: si este inbound responde al gate de feedback,
+                // la IA evalúa y le manda el link de regalos si es positiva. =====
+                if (direction === 'inbound') {
+                  try { await maybeSendMinicursoGift(env, phone, msgBody, ts); } catch (_) {}
                 }
 
                 // ===== Ad Attribution (referral) =====
