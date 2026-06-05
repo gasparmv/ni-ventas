@@ -5205,7 +5205,19 @@ export default {
         const sets = [];
         const args = [];
         for (const k of editable) {
-          if (k in body) { sets.push(`${k} = ?`); args.push(body[k]); }
+          if (!(k in body)) continue;
+          // Guard defensivo: nunca pisar un teléfono ya cargado con vacío. Si
+          // un caller manda cliente_wa_id='' (ej. una auto-grabación sin el
+          // campo en el DOM), lo ignoramos para no borrar el número del cliente.
+          // Para borrarlo a propósito hay que mandar origen_lead='ig' (que sí
+          // se permite cambiar) — el teléfono queda guardado pero no se usa.
+          if (k === 'cliente_wa_id') {
+            const nv = String(body[k] ?? '').replace(/\D/g, '');
+            if (!nv) continue; // vacío → no tocar
+            sets.push(`${k} = ?`); args.push(nv);
+            continue;
+          }
+          sets.push(`${k} = ?`); args.push(body[k]);
         }
         if (!sets.length) return json({ error: 'nothing to update' }, 400);
         sets.push('updated_at = ?');

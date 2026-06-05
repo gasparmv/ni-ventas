@@ -10418,6 +10418,13 @@ function readBriefDrawerForm() {
   // para no romper el PATCH cuando el campo queda vacío (ej. brief Instagram).
   const KEEP_EMPTY = new Set(['cliente_wa_id', 'origen_lead']);
   document.querySelectorAll('[data-bf]').forEach(el => {
+    // CRÍTICO: NO reenviar campos que el usuario actual NO puede editar
+    // (readonly/disabled). Para el rol diseñador, título/origen/teléfono son
+    // read-only — si los reenviáramos, una auto-grabación (ej. al generar el
+    // render, generarRenderBrief) pisaría el origen_lead/cliente_wa_id que
+    // cargó el comercial. BUG real: briefs creados como WPP + número aparecían
+    // como IG sin número después de pasar por la etapa de diseño.
+    if (el.disabled || el.readOnly) return;
     const k = el.dataset.bf;
     let v = el.value;
     if (['alto_cm', 'ancho_cm', 'neon_mt', 'tramos'].includes(k)) v = v === '' ? null : Number(v);
@@ -10425,10 +10432,12 @@ function readBriefDrawerForm() {
     if (k === 'cliente_wa_id' && typeof v === 'string') v = v.replace(/\D/g, '');
     out[k] = (v === '' && !KEEP_EMPTY.has(k)) ? null : v;
   });
+  // tipo (INT/EXT) lo edita el diseñador; origen lo edita el comercial. En ambos
+  // casos: solo lo incluimos si el radio NO está disabled (= el rol puede editarlo).
   const tipoEl = document.querySelector('[data-bf-radio="tipo"]:checked');
-  if (tipoEl) out.tipo = tipoEl.value;
+  if (tipoEl && !tipoEl.disabled) out.tipo = tipoEl.value;
   const origenEl = document.querySelector('[data-bf-radio="origen_lead"]:checked');
-  if (origenEl) out.origen_lead = origenEl.value;
+  if (origenEl && !origenEl.disabled) out.origen_lead = origenEl.value;
   return out;
 }
 
