@@ -629,7 +629,9 @@ async function processCursosFollowup(env) {
     ).bind(cutoff).all();
     for (const row of (rs.results || [])) {
       const phone = row.phone;
-      const primerNombre = capitalizeName((row.nombre || '').split(/\s+/)[0]) || 'amigo/a';
+      // primerNombre puede ser '' (sin nombre conocido) — NO usar fallback "amigo/a",
+      // queda impersonal. Si no hay nombre, usamos el template _anon (sin variable).
+      const primerNombre = capitalizeName((row.nombre || '').split(/\s+/)[0]);
       const now = new Date().toISOString();
       // Reservar el follow-up ANTES de mandar (evita doble envío entre crons).
       // Si el cliente respondió justo, responded_at != NULL → no se actualiza.
@@ -637,10 +639,18 @@ async function processCursosFollowup(env) {
         "UPDATE wa_cursos_campaign SET followup_at = ?, updated_at = ? WHERE phone = ? AND followup_at IS NULL AND responded_at IS NULL"
       ).bind(now, now, phone).run();
       if (!upd?.meta?.changes) continue;
-      const tpl = await waSendTemplate(env, phone, 'cursos_followup_clases_mayo', 'es_AR', [primerNombre]);
+      // Dos templates: con nombre y sin nombre. Si todavía no aprobaron el _anon,
+      // el send fallará → liberamos followup_at y reintentamos en el próximo ciclo.
+      let tpl, previewBody;
+      if (primerNombre) {
+        tpl = await waSendTemplate(env, phone, 'cursos_followup_clases_mayo', 'es_AR', [primerNombre]);
+        previewBody = `Holaa ${primerNombre}! Quedó algo pendiente de las clases del 6 y 7 de mayo 🎁. Queres que te mande la info?`;
+      } else {
+        tpl = await waSendTemplate(env, phone, 'cursos_followup_clases_mayo_anon', 'es_AR', []);
+        previewBody = `Buenass! Quedó algo pendiente de las clases del 6 y 7 de mayo 🎁. Queres que te mande la info?`;
+      }
       if (tpl?.ok) {
         const wamid = tpl.id || '';
-        const previewBody = `Holaa ${primerNombre}! Quedó algo pendiente de las clases del 6 y 7 de mayo 🎁. Queres que te mande la info?`;
         if (wamid) {
           try {
             await env.DB.prepare(
