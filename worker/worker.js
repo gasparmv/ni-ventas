@@ -572,7 +572,7 @@ function matchMinicursoTrigger(text) {
 }
 
 // ===== Campaña de cursos (broadcast lanzamiento mayo) =====
-const CURSOS_EVENTO_MSG = 'aah buenísimo! Te escribía para invitarte a un nuevo evento en vivo este próximo martes 9 y jueves 11 de junio, los chicos van a hacer algo muuy copado ahora que arranca el mundial';
+const CURSOS_EVENTO_MSG = 'aah buenísimo! Te escribía para invitarte a un nuevo evento en vivo este próximo martes 9 y jueves 11 de junio, los chicos van a hacer algo muuy copado ahora que arranca el mundial\n\nTe gustaría participar?';
 
 // Clasifica con IA la respuesta del cliente al template de cursos: positiva o no.
 async function analyzeResponseSentiment(env, texto) {
