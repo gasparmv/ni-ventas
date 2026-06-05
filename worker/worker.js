@@ -549,35 +549,74 @@ async function analyzeMinicursoFeedback(env, texto) {
 // Procesa la respuesta de un lead de la campaña: si el chat está oculto, analiza
 // el sentiment, manda el mensaje del evento SOLO si es positiva, y revela el
 // chat a la bandeja de Abril (responda lo que responda).
+// Cliente responde al template 1 de la campaña de cursos: en vez de analizar
+// el primer mensaje con IA al toque (que ignoraba mensajes siguientes y podía
+// clasificar mal por "hola"), RESERVAMOS la respuesta con analyze_due_at de
+// 2 min. Cuando vence el plazo, processCursosCampaignPending junta TODOS los
+// mensajes inbound del cliente desde sent_1_at, los manda a la IA, y decide
+// si encolar el mensaje del evento o solo revelar el chat a Abril.
 async function revealCursosCampaign(env, phone, msgBody) {
   if (!phone) return;
   const now = new Date().toISOString();
-  // Dedup ATÓMICO: reclamamos la respuesta marcando responded_at solo si aún no
-  // estaba respondida/revelada. Si el webhook del mismo inbound llega 2 veces,
-  // solo una obtiene changes=1; la otra aborta → no duplica el mensaje del evento.
-  let claim;
+  const analyzeDueAt = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+  // Claim ATÓMICO: marcamos responded_at + analyze_due_at solo si aún no
+  // estaba respondida. Mensajes siguientes del cliente NO modifican esta
+  // fila (responded_at NOT NULL = no entra al WHERE). Quedan en wa_messages
+  // y los lee el cron cuando junta el texto agregado.
   try {
-    claim = await env.DB.prepare(
-      "UPDATE wa_cursos_campaign SET responded_at = ?, updated_at = ? WHERE phone = ? AND responded_at IS NULL AND revealed_at IS NULL"
-    ).bind(now, now, phone).run();
-  } catch (_) { return; }
-  if (!claim?.meta?.changes) return; // no es de la campaña, o ya procesado
-  const sentiment = await analyzeResponseSentiment(env, msgBody);
-  try { await env.DB.prepare("UPDATE wa_cursos_campaign SET sentiment = ? WHERE phone = ?").bind(sentiment, phone).run(); } catch (_) {}
-  if (sentiment === 'positiva') {
-    // Encolar el mensaje del evento con demora (~1-2 min, más humano). El cron
-    // (processAutoReplyQueue) lo manda y RECIÉN AHÍ revela el chat a Abril.
-    const dueAt = new Date(Date.now() + 60 * 1000).toISOString();
-    try {
-      await env.DB.prepare(
-        "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'cursos_evento', '', 'queued', ?, '')"
-      ).bind(phone, dueAt).run();
-    } catch (_) {}
-  } else {
-    // No positiva → revelar al instante a Abril, sin mensaje.
-    try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos' WHERE phone = ?").bind(phone).run(); } catch (_) {}
-    try { await env.DB.prepare("UPDATE wa_cursos_campaign SET revealed_at = ?, updated_at = ? WHERE phone = ?").bind(now, now, phone).run(); } catch (_) {}
-  }
+    await env.DB.prepare(
+      "UPDATE wa_cursos_campaign SET responded_at = ?, analyze_due_at = ?, updated_at = ? WHERE phone = ? AND responded_at IS NULL AND revealed_at IS NULL"
+    ).bind(now, analyzeDueAt, now, phone).run();
+  } catch (_) { /* best-effort */ }
+}
+
+// Cron: procesa las respuestas pendientes de la campaña de cursos cuando vence
+// la ventana de 2 min. Junta TODOS los mensajes inbound del cliente desde
+// sent_1_at, los manda a la IA, decide: positiva → encola cursos_evento;
+// no positiva → revela el chat a Abril sin mensaje.
+async function processCursosCampaignPending(env) {
+  try {
+    const nowIso = new Date().toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT phone, sent_1_at FROM wa_cursos_campaign WHERE analyze_due_at IS NOT NULL AND analyze_due_at <= ? AND sentiment IS NULL LIMIT 25"
+    ).bind(nowIso).all();
+    for (const row of (rs.results || [])) {
+      const phone = row.phone;
+      // Claim atómico para evitar análisis duplicado entre ticks: pasamos
+      // sentiment a 'analyzing' (temporal). Solo una invocación lo logra.
+      let claim;
+      try {
+        claim = await env.DB.prepare(
+          "UPDATE wa_cursos_campaign SET sentiment = 'analyzing' WHERE phone = ? AND sentiment IS NULL"
+        ).bind(phone).run();
+      } catch (_) { continue; }
+      if (!claim?.meta?.changes) continue;
+      // Juntar todos los msgs inbound del cliente desde sent_1_at.
+      const anchor = row.sent_1_at || '';
+      const msgs = await env.DB.prepare(
+        "SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'reaction' AND ts > ? AND body != '' ORDER BY ts ASC LIMIT 20"
+      ).bind(phone, anchor).all();
+      const combinedText = (msgs.results || []).map(m => String(m.body || '').trim()).filter(Boolean).join(' · ');
+      let sentiment = 'no_positiva';
+      if (combinedText) sentiment = await analyzeResponseSentiment(env, combinedText);
+      try { await env.DB.prepare("UPDATE wa_cursos_campaign SET sentiment = ? WHERE phone = ?").bind(sentiment, phone).run(); } catch (_) {}
+      const now = new Date().toISOString();
+      if (sentiment === 'positiva') {
+        // Encolar el mensaje del evento con demora (~30s). processAutoReplyQueue
+        // lo manda y RECIÉN AHÍ revela el chat a Abril.
+        const dueAt = new Date(Date.now() + 30 * 1000).toISOString();
+        try {
+          await env.DB.prepare(
+            "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'cursos_evento', '', 'queued', ?, '')"
+          ).bind(phone, dueAt).run();
+        } catch (_) {}
+      } else {
+        // No positiva → revelar al toque a Abril, sin mensaje.
+        try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos' WHERE phone = ?").bind(phone).run(); } catch (_) {}
+        try { await env.DB.prepare("UPDATE wa_cursos_campaign SET revealed_at = ?, updated_at = ? WHERE phone = ?").bind(now, now, phone).run(); } catch (_) {}
+      }
+    }
+  } catch (e) { /* best-effort */ }
 }
 
 // Cron: follow-up (template 2) a los que NO respondieron al template 1 hace ≥12h.
@@ -5153,6 +5192,9 @@ export default {
     // Procesar respuestas pendientes del gate de feedback del minicurso:
     // espera 2 min al cliente, junta todos los mensajes, manda a la IA y decide.
     ctx.waitUntil(processMinicursoGiftPending(env));
+    // Idem para la campaña de cursos (respuesta al template 1): espera 2 min,
+    // junta todos los mensajes, IA decide entre encolar cursos_evento o revelar.
+    ctx.waitUntil(processCursosCampaignPending(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
