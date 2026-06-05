@@ -6742,7 +6742,11 @@ function renderChatConversation() {
 function mediaUrl(r2Key) {
   if (!r2Key) return '';
   const tkParam = STATE.token ? '?token=' + encodeURIComponent(STATE.token) : '';
-  if (r2Key.startsWith('wa/')) return CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(r2Key) + tkParam;
+  // wa/  → media bajado del webhook (imagen del cliente, audio, etc.)
+  // promo/ → assets promocionales (foto de copa para follow-up de presupuesto)
+  if (r2Key.startsWith('wa/') || r2Key.startsWith('promo/')) {
+    return CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(r2Key) + tkParam;
+  }
   return r2Key;
 }
 
@@ -6912,12 +6916,12 @@ function renderChatBubbles(msgs, opts) {
 
     // === IMAGE ===
     if (m.msg_type === 'image') {
-      // media_url válido solo si fue descargado a R2 (key con prefix wa/...).
-      // Si quedó como media_id raw (ej "1669741024296229") es porque
+      // media_url válido si fue descargado a R2 (wa/) o es un asset
+      // promocional (promo/). Si quedó como media_id raw es porque
       // downloadMedia falló en el webhook y el media ya no se puede recuperar
       // (Meta expira las URLs en ~30 días). Mostramos placeholder en vez de
       // burbuja vacía con un <img> roto.
-      const hasValidMedia = m.media_url && String(m.media_url).startsWith('wa/');
+      const hasValidMedia = m.media_url && (String(m.media_url).startsWith('wa/') || String(m.media_url).startsWith('promo/'));
       if (hasValidMedia) {
         const imgSrc = mediaUrl(m.media_url);
         html += `<div class="chat-msg ${dir} has-media${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'image')}">

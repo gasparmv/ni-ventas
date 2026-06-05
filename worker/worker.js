@@ -5998,11 +5998,14 @@ async function processPresupuestoFollowups(env) {
     // Helper para insertar el marker (sent o failed) — ambos casos previenen
     // que el próximo cron re-encuentre este presupuesto como pendiente.
     // Guarda el cuerpo de la variante real que se mandó (para dedup futuro).
+    // Si es copa, también persistimos la R2 key del promo asset en media_url
+    // para que el chat del CRM renderice la imagen (no "Imagen no disponible").
     const insertMarker = async (status, wamid, bodyToStore) => {
       try {
+        const mediaUrl = variantKind === 'copa' ? PROMO_COPA_R2_KEY : '';
         await env.DB.prepare(
           'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        ).bind(new Date().toISOString(), wamid, 'outbound', p.phone, '', variantKind === 'copa' ? 'image' : 'text', bodyToStore || variantBody, '', '', status).run();
+        ).bind(new Date().toISOString(), wamid, 'outbound', p.phone, '', variantKind === 'copa' ? 'image' : 'text', bodyToStore || variantBody, mediaUrl, '', status).run();
       } catch (_) {}
     };
 
