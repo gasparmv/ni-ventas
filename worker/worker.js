@@ -1004,7 +1004,7 @@ async function processAutoReplyQueue(env) {
         // cuando el lead responde y la IA lo evalúa como positiva.
         body = `${saludo} Ahora te paso los regalos (Cotizador + Guía de Producción). Pero antes, contanos qué te pareció el nuevo Curso! Viste la 2da clase hasta el final?`;
       } else if (row.kind === 'minicurso_gift') {
-        body = `Buenísimo, gracias por el feedback! 🙌 Acá van los regalos 🎁\n\nCotizador + Guía de Producción:\n${MINICURSO_REGALO_LINK}`;
+        body = `genial entoncees, acá te mando los regalos (cotizador automático + guía de producción) por ver hasta el final! 👇🏼\n${MINICURSO_REGALO_LINK}`;
       } else {
         body = CURSOS_EVENTO_MSG;
       }
@@ -5806,14 +5806,18 @@ const PRESUPUESTO_PREFIX_TEXT = PRESUPUESTO_PREFIXES_TEXT[0]; // back-compat
 const FOLLOWUP_PRESUPUESTO_TEXT = 'Aca te dejamos el presupuesto! Decinos que te parece? si hay algun cambio o ajuste que quieras hacer, tambien si tenes foto de donde lo vas a poner te podemos hacer un montaje digital de como quedaría!';
 const FOLLOWUP_PRESUPUESTO_PREFIX_TEXT = 'Aca te dejamos el presupuesto!';
 
-// ===== Variantes de follow-up de presupuesto (jun 2026 en adelante) =====
-// - PROMO COPA (solo junio 2026): mensaje + foto de copa del mundo neón.
-// - DESPUES (jul 2026 →): según monto del presupuesto (≷ $300.000).
+// ===== Variantes de follow-up de presupuesto =====
+// Lógica de selección por fecha (AR):
+//   - 24-jun a 30-jun (última semana junio): PROMO COPA + foto.
+//   - Resto del tiempo: texto según monto del presupuesto (≷ $300.000).
+//     - 'low'  → texto suave ("Holaa, cómo estás?")
+//     - 'high' → texto pro ("Buenas! Avisanos qué te pareció")
 //
-// Detección del monto: regex que toma el MAYOR $XXX del body — eso captura
-// el precio principal del cartel ignorando los accesorios chiquitos (Slim,
-// Control, App). Si no parsea, default a 'low' (mensaje más liviano).
-const PROMO_COPA_END_UTC = '2026-07-01T03:00:00Z'; // 1-jul 00:00 AR (UTC-3)
+// Detección del monto: regex que toma el MAYOR $XXX del body — captura el
+// precio principal del cartel ignorando los accesorios chiquitos (Slim,
+// Control, App). Si no parsea, default a 'low'.
+const PROMO_COPA_START_UTC = '2026-06-24T03:00:00Z'; // 24-jun 00:00 AR (UTC-3)
+const PROMO_COPA_END_UTC   = '2026-07-01T03:00:00Z'; // 1-jul 00:00 AR (UTC-3)
 const PROMO_COPA_R2_KEY = 'promo/copa-mundial-junio.jpg';
 const PROMO_COPA_CAPTION = 'Te quería avisar que estamos regalando copas del mundo a todos los que compren esta semana!\n\nAvísame si querías avanzar con el pedido, o si queres que te llamemos y te asesoremos!';
 const FOLLOWUP_PRESUPUESTO_LOW_TEXT = 'Holaa, cómo estás? Pudiste chequear el presupuesto? Cualquier cosa podemos llamarte para asesorarte! Quedamos a disposición!';
@@ -5978,10 +5982,10 @@ async function processPresupuestoFollowups(env) {
     if (conv.some(m => m.direction === 'outbound' && ALL_FOLLOWUP_PREFIXES_TEXT.some(pref => (m.body || '').startsWith(pref)))) continue;
 
     // 4) Decidir qué variante mandar según fecha y monto.
-    // - PROMO COPA hasta jun-30 inclusive: imagen + caption.
-    // - DESDE jul-1: texto según monto (≷ $300k).
+    // - Entre 24-jun y 30-jun: PROMO COPA (imagen + caption) a TODOS.
+    // - Resto del tiempo: texto según monto (≷ $300k).
     const ahoraIso = new Date().toISOString();
-    const inCopaPromo = ahoraIso < PROMO_COPA_END_UTC;
+    const inCopaPromo = ahoraIso >= PROMO_COPA_START_UTC && ahoraIso < PROMO_COPA_END_UTC;
     const monto = extractPresupuestoAmount(p.body);
     let variantBody, variantKind;
     if (inCopaPromo) {
