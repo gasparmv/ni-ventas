@@ -4613,6 +4613,23 @@ export default {
         if (!r.ok) return json({ error: data?.error?.message || 'create failed', raw: data }, r.status || 500);
         return json({ ok: true, id: data.id, status: data.status, category: data.category, provider: _waT.provider });
       }
+      // DELETE template — útil para recrear cuando se carga mal (encoding, typos).
+      // Meta y 360dialog NO permiten editar un template aprobado, hay que borrar y recrear.
+      // En Meta: DELETE /{waba_id}/message_templates?name=...
+      // En 360dialog: DELETE /v1/configs/templates/{templatename}
+      if (request.method === 'DELETE' && path === '/admin/wa/template-delete') {
+        const name = url.searchParams.get('name');
+        if (!name) return json({ error: 'missing name' }, 400);
+        const _waD = getWaClient(env);
+        if (_waD.provider === 'meta' && (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN)) return json({ error: 'WA not configured (meta)' }, 500);
+        const delUrl = _waD.provider === '360dialog'
+          ? `${_waD.templatesUrl()}/${encodeURIComponent(name)}`
+          : `${_waD.templatesUrl()}?name=${encodeURIComponent(name)}`;
+        const r = await fetch(delUrl, { method: 'DELETE', headers: _waD.headers });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: data?.error?.message || 'delete failed', raw: data }, r.status || 500);
+        return json({ ok: true, deleted: name, provider: _waD.provider });
+      }
       // set-pin y register son operaciones del flujo ON_PREMISE de Meta direct,
       // ya no aplican con 360dialog Cloud API hosted (lo gestiona el provider).
       // Si alguien las llama post-migración, devolvemos 501 con guía.
