@@ -570,6 +570,38 @@ async function revealCursosCampaign(env, phone, msgBody) {
   } catch (_) { /* best-effort */ }
 }
 
+// Cron (*/1): recupera media (imagenes/videos/audios/docs/stickers) cuyo
+// downloadMedia falló en el handler del webhook. Causa típica: race con Meta —
+// el webhook del msg llega antes de que el media esté disponible en su API, así
+// que el primer fetch da 404 o info.url=null, y queda guardado el media_id raw
+// en wa_messages.media_url en vez de la R2 key "wa/...".
+//
+// Filtro de tiempo: solo reintentamos los últimos 2 hs. Más viejo que eso, el
+// media ya caducó en Meta (URLs temporales) — reintentarlos solo gasta cuota.
+// Idempotente: si downloadMedia funciona, actualizamos media_url a la R2 key
+// y la próxima corrida no lo trae más.
+async function processPendingMedia(env) {
+  if (!env.MEDIA) return;
+  try {
+    const cutoff = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT id, media_url FROM wa_messages " +
+      "WHERE msg_type IN ('image','video','audio','document','sticker') " +
+      "  AND media_url GLOB '[0-9]*' AND length(media_url) > 8 " +
+      "  AND ts >= ? " +
+      "ORDER BY id DESC LIMIT 20"
+    ).bind(cutoff).all();
+    for (const row of (rs.results || [])) {
+      try {
+        const result = await downloadMedia(env, row.media_url);
+        if (result) {
+          await env.DB.prepare('UPDATE wa_messages SET media_url = ? WHERE id = ?').bind(result.key, row.id).run();
+        }
+      } catch (_) { /* siguiente */ }
+    }
+  } catch (_) { /* best-effort */ }
+}
+
 // Cron: procesa las respuestas pendientes de la campaña de cursos cuando vence
 // la ventana de 2 min. Junta TODOS los mensajes inbound del cliente desde
 // sent_1_at, los manda a la IA, decide: positiva → encola cursos_evento;
@@ -5222,6 +5254,10 @@ export default {
     // Idem para la campaña de cursos (respuesta al template 1): espera 2 min,
     // junta todos los mensajes, IA decide entre encolar cursos_evento o revelar.
     ctx.waitUntil(processCursosCampaignPending(env));
+    // Recuperar media (imagenes/videos/audios) que fallaron en el webhook por
+    // race condition con Meta. Reintenta los media_id raw recientes (<2 hs);
+    // los viejos ya caducaron en Meta y no tiene sentido reintentarlos.
+    ctx.waitUntil(processPendingMedia(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
