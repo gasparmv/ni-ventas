@@ -9693,11 +9693,28 @@ function isBriefStale(b) {
 // Si el brief tiene un cliente_nombre que matchea con un presupuesto del sheet (mismo
 // nombre, fecha cercana), consideramos que fue cotizado.
 function findPresupuestoMatch(brief) {
+  if (!brief) return null;
+  // 1) Señal AUTORITATIVA: si el brief tiene sheet_row, el presupuesto YA se
+  //    escribió en el Sheet al enviarlo (saveCotToSheetFromPopup guardó el número
+  //    de fila que devolvió el Apps Script). No dependemos del match por nombre
+  //    contra STATE.presupuestos, que puede estar desactualizado si el presupuesto
+  //    se mandó DESPUÉS de que cargó el dashboard → falso ⚠ "no está en el Sheet".
+  if (brief.sheet_row) {
+    // Intentar traer la fila real (para mostrar datos en el drawer); si no la
+    // encontramos en la data cargada, devolvemos un match sintético igual.
+    const byName = Array.isArray(STATE.presupuestos) && brief.cliente_nombre
+      ? STATE.presupuestos.find(p => {
+          const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          return norm(p.cliente || p.nombre || '') === norm(brief.cliente_nombre);
+        })
+      : null;
+    return byName || { nombre: brief.cliente_nombre || '', sheet_row: brief.sheet_row, _bySheetRow: true };
+  }
+  // 2) Fallback (briefs viejos sin sheet_row): match exacto por nombre normalizado.
   if (!Array.isArray(STATE.presupuestos) || !brief.cliente_nombre) return null;
   const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const target = norm(brief.cliente_nombre);
   if (!target) return null;
-  // Match exacto normalizado.
   return STATE.presupuestos.find(p => norm(p.cliente || p.nombre || '') === target) || null;
 }
 
