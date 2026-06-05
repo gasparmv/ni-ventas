@@ -646,7 +646,7 @@ async function processCursosFollowup(env) {
         tpl = await waSendTemplate(env, phone, 'cursos_followup_clases_mayo', 'es_AR', [primerNombre]);
         previewBody = `Holaa ${primerNombre}! Quedó algo pendiente de las clases del 6 y 7 de mayo 🎁. Queres que te mande la info?`;
       } else {
-        tpl = await waSendTemplate(env, phone, 'cursos_followup_clases_mayo_anon', 'es_AR', []);
+        tpl = await waSendTemplate(env, phone, 'cursos_followup_clases_mayo_anon_v2', 'es_AR', []);
         previewBody = `Buenass! Quedó algo pendiente de las clases del 6 y 7 de mayo 🎁. Queres que te mande la info?`;
       }
       if (tpl?.ok) {
