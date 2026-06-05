@@ -5919,12 +5919,29 @@ async function processPresupuestoFollowups(env) {
   const oneHourAgo = new Date(now - 60 * 60 * 1000).toISOString();
   const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();
 
-  // 1) Presupuestos del cotizador en las últimas 24h, enviados hace al menos 1h
+  // 1) Presupuestos del cotizador en las últimas 24h, enviados hace al menos 1h.
+  //
+  // Antes: WHERE body LIKE 'prefix1%' OR body LIKE 'prefix2%'
+  // Problema: D1 tira "LIKE or GLOB pattern too complex" cuando wa_messages
+  // crece mucho (vimos esto en producción con ~1.5M rows). El planner no
+  // puede aplicar el LIKE eficientemente y aborta.
+  //
+  // Fix: usar substr(body, 1, N) = 'prefix' — comparación exacta de prefijo
+  // sin pattern matching. Más rápido y sin el límite de complejidad.
+  // Tomamos 26 chars iniciales, suficiente para distinguir ambos formatos:
+  //   'Te comparto el presupuesto' (formato nuevo)
+  //   'Te comparto la información' (formato viejo)
+  const pfx1 = PRESUPUESTO_PREFIXES_TEXT[0].substring(0, 26);
+  const pfx2 = PRESUPUESTO_PREFIXES_TEXT[1].substring(0, 26);
   let rows;
   try {
     const rs = await env.DB.prepare(
-      "SELECT phone, ts, body, sender_name FROM wa_messages WHERE direction = 'outbound' AND (body LIKE ? OR body LIKE ?) AND ts >= ? AND ts <= ? ORDER BY ts DESC"
-    ).bind(PRESUPUESTO_PREFIXES_TEXT[0] + '%', PRESUPUESTO_PREFIXES_TEXT[1] + '%', oneDayAgo, oneHourAgo).all();
+      "SELECT phone, ts, body, sender_name FROM wa_messages " +
+      "WHERE direction = 'outbound' " +
+      "  AND ts >= ? AND ts <= ? " +
+      "  AND (substr(body, 1, 26) = ? OR substr(body, 1, 26) = ?) " +
+      "ORDER BY ts DESC"
+    ).bind(oneDayAgo, oneHourAgo, pfx1, pfx2).all();
     rows = rs.results || [];
   } catch (e) {
     await logWaEvent(env, { to: '', kind: 'cron-pp-followup', ref: '', ok: false, error: 'query: ' + e.message });
