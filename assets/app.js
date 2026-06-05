@@ -6911,15 +6911,29 @@ function renderChatBubbles(msgs, opts) {
     }
 
     // === IMAGE ===
-    if (m.msg_type === 'image' && m.media_url) {
-      const imgSrc = mediaUrl(m.media_url);
-      html += `<div class="chat-msg ${dir} has-media${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'image')}">
-        <div class="chat-msg-media">
-          <img src="${imgSrc}" alt="" loading="lazy" data-img-preview="${escapeHtml(imgSrc)}" onerror="this.style.display='none'">
-        </div>
-        ${bodyText ? `<div class="chat-msg-body">${escapeHtml(bodyText).replace(/\n/g, '<br>')}</div>` : ''}
-        ${footer}
-      </div>`;
+    if (m.msg_type === 'image') {
+      // media_url válido solo si fue descargado a R2 (key con prefix wa/...).
+      // Si quedó como media_id raw (ej "1669741024296229") es porque
+      // downloadMedia falló en el webhook y el media ya no se puede recuperar
+      // (Meta expira las URLs en ~30 días). Mostramos placeholder en vez de
+      // burbuja vacía con un <img> roto.
+      const hasValidMedia = m.media_url && String(m.media_url).startsWith('wa/');
+      if (hasValidMedia) {
+        const imgSrc = mediaUrl(m.media_url);
+        html += `<div class="chat-msg ${dir} has-media${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'image')}">
+          <div class="chat-msg-media">
+            <img src="${imgSrc}" alt="" loading="lazy" data-img-preview="${escapeHtml(imgSrc)}" onerror="this.style.display='none'">
+          </div>
+          ${bodyText ? `<div class="chat-msg-body">${escapeHtml(bodyText).replace(/\n/g, '<br>')}</div>` : ''}
+          ${footer}
+        </div>`;
+      } else {
+        // Placeholder para imagen no recuperable.
+        html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'image')}">
+          <div class="chat-msg-body" style="opacity:.7;font-style:italic">📷 Imagen (no disponible)${bodyText ? '<br>' + escapeHtml(bodyText).replace(/\n/g, '<br>') : ''}</div>
+          ${footer}
+        </div>`;
+      }
       continue;
     }
 
@@ -8390,7 +8404,9 @@ function bindChat() {
         const prev = prevContactsByPhone.get(c.phone);
         return (c.unread || 0) > (prev?.unread || 0);
       });
-      notifyNewMessage(trigger);
+      // El ts del último msg del contact actúa como id único para el dedupe
+      // — evita que el WW notifique el mismo wamid cuando él lo poll después.
+      notifyNewMessage(trigger, trigger?.lastInboundTs || trigger?.lastTs);
     }
     updateChatPageTitle();
   };
@@ -8463,7 +8479,9 @@ function initPollWorker() {
       const contact = chatState.contacts.find(c => c.phone === m.phone) || {
         phone: m.phone, name: m.name || '', lastMsg: m.body || ''
       };
-      notifyNewMessage(contact);
+      // m.ts (timestamp del msg detectado por el WW) es la clave de dedupe
+      // que va a coincidir con la del main polling si ambos lo capturan.
+      notifyNewMessage(contact, m.ts);
     };
     _pollWorker.postMessage({
       type: 'init',
@@ -8518,20 +8536,30 @@ function playChatNotificationSound() {
   } catch (_) {}
 }
 
-// Dedupe global: el web worker y el main-thread polling pueden detectar el
-// mismo mensaje nuevo casi al mismo tiempo. Evitamos doble notif por phone+ts.
-const _recentNotifs = new Map(); // key: phone, value: lastNotifiedAt (ms)
-const _NOTIF_DEDUPE_MS = 6000; // 6s — más que el ciclo del polling
+// Dedupe global: el web worker (poll-worker.js cada 5s) y el main-thread
+// polling (cada 4-8s) pueden detectar el MISMO mensaje y disparar notifs
+// duplicadas. Dedupe ESTRICTO por (phone, ts) — si ya notificamos ese
+// mensaje exacto, nunca volvemos a notificarlo aunque pase tiempo.
+const _notifiedKeys = new Set();
+const _NOTIF_KEYS_CAP = 500; // LRU manual: cuando supera, dropeamos los más viejos
 
-function notifyNewMessage(contact) {
+function notifyNewMessage(contact, ts) {
   const phone = contact?.phone || '';
-  const now = Date.now();
-  const last = _recentNotifs.get(phone) || 0;
-  if (now - last < _NOTIF_DEDUPE_MS) return; // ya notificamos hace poco
-  _recentNotifs.set(phone, now);
-  // Limpieza vieja del Map
-  if (_recentNotifs.size > 100) {
-    for (const [k, v] of _recentNotifs) if (now - v > _NOTIF_DEDUPE_MS * 4) _recentNotifs.delete(k);
+  // Si no nos pasaron ts, usamos el del contact (lastInboundTs / lastTs).
+  const tsKey = ts || contact?.lastInboundTs || contact?.lastTs || '';
+  const key = phone + '|' + tsKey;
+  if (!phone || !tsKey) return; // sin key confiable, mejor no notificar (evita spam)
+  if (_notifiedKeys.has(key)) return;
+  _notifiedKeys.add(key);
+  // Cap simple: si pasa el límite, vaciamos la mitad más vieja. Set en JS
+  // mantiene orden de inserción, así que iteramos y borramos los primeros.
+  if (_notifiedKeys.size > _NOTIF_KEYS_CAP) {
+    const drop = Math.floor(_NOTIF_KEYS_CAP / 2);
+    let i = 0;
+    for (const k of _notifiedKeys) {
+      if (i++ >= drop) break;
+      _notifiedKeys.delete(k);
+    }
   }
   playChatNotificationSound();
   // Browser notification solo si la pestaña no está visible (sino el sonido
