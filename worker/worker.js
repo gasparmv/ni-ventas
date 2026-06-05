@@ -5561,8 +5561,10 @@ export default {
     // Followups de Apps Script solo a las 13:00 UTC (10:00 AR)
     const hour = new Date(event.scheduledTime).getUTCHours();
     if (hour === 13) ctx.waitUntil(runScheduled(env));
-    // Follow-up automático de presupuestos del cotizador: solo en horario AR (09-22 AR = 12-01 UTC)
-    if (hour >= 12 || hour <= 1) ctx.waitUntil(processPresupuestoFollowups(env));
+    // Follow-up automático de presupuestos del cotizador: solo horario hábil AR (8-20).
+    // Usa hAR (calculado más arriba en este mismo handler) para consistencia
+    // con processCursosFollowup/processMinicursoFollowup.
+    if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processPresupuestoFollowups(env));
     // Monitor de status de templates: 1 vez por hora, no cada 5 min. El polling
     // es fallback; lo ideal es suscribir al webhook field 'message_template_status_update'
     // en el hub de 360dialog (lo manejamos abajo en notifyTemplateStatusChange).
