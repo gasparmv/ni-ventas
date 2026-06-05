@@ -642,6 +642,79 @@ async function revealCursosCampaign(env, phone, msgBody) {
   } catch (_) { /* best-effort */ }
 }
 
+// Cron (*/1): procesa el goteo del broadcast de cursos. La cola se carga vía
+// POST /admin/wa/cursos-broadcast-schedule, que inserta filas en
+// wa_autoreply_log con kind='cursos_broadcast', status='queued' y due_at
+// distribuido en una ventana. Este cron busca los que vencen, manda el
+// template (cursos_clases_vivo_mayo con primerNombre) y replica todas las
+// acciones que hace el endpoint sincrónico de broadcast: insert en
+// wa_messages, INSERT en wa_cursos_campaign, etiqueta 'form 6 y 7 de mayo',
+// y oculta el chat (inbox='oculto') hasta que el cliente responda.
+async function processCursosBroadcastQueue(env) {
+  try {
+    const nowIso = new Date().toISOString();
+    // Floor de 6 hs (no procesamos colas muy viejas — si el worker estuvo down).
+    const floorIso = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT phone, sender_name FROM wa_autoreply_log " +
+      "WHERE kind = 'cursos_broadcast' AND status = 'queued' " +
+      "  AND due_at <= ? AND due_at >= ? " +
+      "ORDER BY due_at ASC LIMIT 3"
+    ).bind(nowIso, floorIso).all();
+    if (!rs.results?.length) return;
+    // Etiqueta de la campaña (creada al primer broadcast).
+    let formLabelId = 24;
+    try { const lr = await env.DB.prepare("SELECT id FROM labels WHERE name = 'form 6 y 7 de mayo'").first(); if (lr?.id) formLabelId = lr.id; } catch (_) {}
+    for (const row of rs.results) {
+      const phone = row.phone;
+      const nombre = row.sender_name || '';
+      // Claim atómico: 'queued' → 'sending'. Si otro tick ya lo agarró, skip.
+      let claim;
+      try {
+        claim = await env.DB.prepare(
+          "UPDATE wa_autoreply_log SET status = 'sending' WHERE phone = ? AND kind = 'cursos_broadcast' AND status = 'queued'"
+        ).bind(phone).run();
+      } catch (_) { continue; }
+      if (!claim?.meta?.changes) continue;
+      // Skip si el phone está marcado como unreachable (puede haberse marcado
+      // después de encolar). Marca como 'skipped' y sigue.
+      if (await isUnreachable(env, phone)) {
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped', sent_at = ? WHERE phone = ? AND kind = 'cursos_broadcast'").bind(new Date().toISOString(), phone).run(); } catch (_) {}
+        continue;
+      }
+      const primerNombre = capitalizeName((nombre || '').split(/\s+/)[0]) || 'amigo/a';
+      const tpl = await waSendTemplate(env, phone, 'cursos_clases_vivo_mayo', 'es_AR', [primerNombre]);
+      if (!tpl?.ok) {
+        // Si falla, revertir a queued para reintento. waSend ya marcó
+        // unreachable si el error code lo amerita (al próximo tick, isUnreachable
+        // arriba lo va a skipear).
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued' WHERE phone = ? AND kind = 'cursos_broadcast'").bind(phone).run(); } catch (_) {}
+        continue;
+      }
+      const ts = new Date().toISOString();
+      const wamid = tpl.id || '';
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'cursos_broadcast'").bind(ts, phone).run(); } catch (_) {}
+      const previewBody = `holaa ${primerNombre}! Cómo andás?\nSoy Abril, de Neon Infinito. Me dijeron los chicos que participaste de las clases en vivo que hicieron el 6 y 7 de mayo, puede ser?`;
+      if (wamid) {
+        try {
+          await env.DB.prepare(
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+               WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+          ).bind(ts, wamid, phone, previewBody).run();
+        } catch (_) {}
+      }
+      // Ocultar el chat hasta que el cliente responda.
+      try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto'").bind(phone, ts).run(); } catch (_) {}
+      // Registrar en la campaña.
+      try { await env.DB.prepare("INSERT INTO wa_cursos_campaign (phone, nombre, sent_1_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET sent_1_at = excluded.sent_1_at, updated_at = excluded.updated_at").bind(phone, nombre, ts, ts).run(); } catch (_) {}
+      // Etiquetar.
+      try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, formLabelId, ts).run(); } catch (_) {}
+    }
+  } catch (_) { /* best-effort */ }
+}
+
 // Cron (*/1): recupera media (imagenes/videos/audios/docs/stickers) cuyo
 // downloadMedia falló en el handler del webhook. Causa típica: race con Meta —
 // el webhook del msg llega antes de que el media esté disponible en su API, así
@@ -3964,6 +4037,78 @@ export default {
         });
       }
 
+      // Programar goteo del broadcast — encola N leads en la cola con due_at
+      // distribuido entre startTs y endTs. El cron processCursosBroadcastQueue
+      // los procesa cuando vencen. NO manda nada al toque.
+      // Body: { count, startTs (ISO), endTs (ISO), dryRun? }
+      // Excluye automáticamente: ya enviados (cursos_broadcast 'sent'),
+      // unreachable phones, y leads sin tel válido.
+      if (request.method === 'POST' && path === '/admin/wa/cursos-broadcast-schedule') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const count = Math.min(Math.max(parseInt(body?.count || '0', 10) || 0, 1), 500);
+        const startTs = body?.startTs ? new Date(body.startTs) : new Date();
+        const endTs = body?.endTs ? new Date(body.endTs) : new Date(Date.now() + 4 * 60 * 60 * 1000);
+        const dryRun = !!body?.dryRun;
+        if (isNaN(startTs.getTime()) || isNaN(endTs.getTime()) || endTs <= startTs) {
+          return json({ error: 'startTs/endTs inválidos' }, 400);
+        }
+        let data;
+        try { data = await fetchCursosLeads(env); } catch (e) { return json({ error: 'no pude leer el sheet: ' + e.message }, 502); }
+        const validos = data.leads.filter(l => l.valido);
+        // Excluir ya enviados, en cola y unreachable.
+        const yaSet = new Set();
+        try {
+          const rs = await env.DB.prepare("SELECT phone FROM wa_autoreply_log WHERE kind = 'cursos_broadcast'").all();
+          for (const r of (rs.results || [])) yaSet.add(r.phone);
+        } catch (_) {}
+        const unreachSet = new Set();
+        try {
+          const rs = await env.DB.prepare("SELECT phone FROM wa_unreachable_phones").all();
+          for (const r of (rs.results || [])) unreachSet.add(r.phone);
+        } catch (_) {}
+        const pendientes = validos.filter(l => !yaSet.has(l.tel) && !unreachSet.has(l.tel)).slice(0, count);
+        if (!pendientes.length) return json({ scheduled: 0, available: validos.length - yaSet.size, reason: 'no quedan leads pendientes' });
+        // Distribuir due_at uniformemente entre startTs y endTs.
+        const totalMs = endTs.getTime() - startTs.getTime();
+        const step = pendientes.length > 1 ? totalMs / (pendientes.length - 1) : 0;
+        const planned = pendientes.map((l, i) => ({
+          tel: l.tel,
+          nombre: l.nombre || '',
+          due_at: new Date(startTs.getTime() + Math.round(i * step)).toISOString()
+        }));
+        if (dryRun) {
+          return json({
+            dryRun: true,
+            scheduled: planned.length,
+            window: { startTs: startTs.toISOString(), endTs: endTs.toISOString(), step_seconds: Math.round(step / 1000) },
+            primeros: planned.slice(0, 5),
+            ultimos: planned.slice(-5)
+          });
+        }
+        // Insertar en wa_autoreply_log con kind='cursos_broadcast' y status='queued'.
+        let scheduled = 0;
+        const nowIso = new Date().toISOString();
+        for (const p of planned) {
+          try {
+            const r = await env.DB.prepare(
+              "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'cursos_broadcast', '', 'queued', ?, ?)"
+            ).bind(p.tel, p.due_at, p.nombre).run();
+            if (r?.meta?.changes) scheduled++;
+          } catch (_) {}
+        }
+        return json({
+          ok: true,
+          scheduled,
+          requested: planned.length,
+          window: { startTs: startTs.toISOString(), endTs: endTs.toISOString(), step_seconds: Math.round(step / 1000) },
+          primeros: planned.slice(0, 3),
+          ultimos: planned.slice(-3),
+          nota: 'El cron procesa cada minuto. El primer envío sale aprox a las ' + startTs.toISOString() + '.'
+        });
+      }
+
       // Envío masivo de la plantilla de cursos a los leads del Sheet (solo admin).
       // Body: { limit?: number (default 10, máx 200), dryRun?: bool }.
       // Manda la plantilla cursos_clases_vivo_mayo con {{1}}=primer nombre, guarda
@@ -5367,6 +5512,9 @@ export default {
     // race condition con Meta. Reintenta los media_id raw recientes (<2 hs);
     // los viejos ya caducaron en Meta y no tiene sentido reintentarlos.
     ctx.waitUntil(processPendingMedia(env));
+    // Cola de goteo del broadcast de cursos: procesa los queued con due_at
+    // vencido. Encolados vía POST /admin/wa/cursos-broadcast-schedule.
+    ctx.waitUntil(processCursosBroadcastQueue(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
