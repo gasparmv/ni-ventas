@@ -464,9 +464,81 @@ async function waSend(env, payload) {
     body: JSON.stringify(payload)
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) return { ok: false, status: r.status, error: data?.error?.message || 'wa send failed', raw: data, provider: wa.provider };
+  if (!r.ok) {
+    // Auto-detección de phones no alcanzables. Si Meta nos rechaza con un
+    // código que indica que el destinatario está "muerto" (sin WA, bloqueado,
+    // mala reputación, etc.), marcamos al phone en wa_unreachable_phones para
+    // skipear en los flows automáticos futuros.
+    try {
+      const to = payload?.to || '';
+      const errCode = data?.error?.code;
+      const errSubcode = data?.error?.error_subcode;
+      const errMsg = data?.error?.message || '';
+      const templateName = payload?.template?.name || '';
+      const reason = classifyUnreachableReason(errCode, errSubcode, errMsg);
+      if (to && reason) {
+        await markUnreachable(env, to, reason, errMsg, templateName).catch(() => {});
+      }
+    } catch (_) { /* no romper el flow del error original */ }
+    return { ok: false, status: r.status, error: data?.error?.message || 'wa send failed', raw: data, provider: wa.provider };
+  }
   const id = data?.messages?.[0]?.id || null;
   return { ok: true, id, raw: data, provider: wa.provider };
+}
+
+// ===== Sistema de phones no alcanzables =====
+// Marca/consulta/desmarca contactos que están "muertos" para outreach
+// automático. Los flows de follow-up consultan isUnreachable antes de mandar.
+// El webhook inbound desmarca automáticamente cuando el cliente responde.
+
+function classifyUnreachableReason(code, subcode, message) {
+  // Códigos de Meta — ver migration 017 para detalle.
+  if (code === 131026) return 'undeliverable';
+  if (code === 131049) return 'ecosystem';
+  if (code === 131047) return 'window_closed';
+  if (code === 131048) return 'rate_limit';
+  // Heurística por mensaje si no hay code (algunos errores vienen sin code numérico).
+  const m = String(message || '').toLowerCase();
+  if (m.includes('undeliverable')) return 'undeliverable';
+  if (m.includes('healthy ecosystem')) return 'ecosystem';
+  return null; // null = no marcar (error transitorio o no relacionado al destinatario)
+}
+
+async function markUnreachable(env, phone, reason, errorMsg, templateName) {
+  if (!phone || !reason || !env.DB) return;
+  const num = normalizeArPhone(phone);
+  if (!num) return;
+  const now = new Date().toISOString();
+  const errTrunc = String(errorMsg || '').slice(0, 500);
+  try {
+    await env.DB.prepare(
+      `INSERT INTO wa_unreachable_phones (phone, marked_at, reason, last_error, last_template, fail_count, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?)
+       ON CONFLICT(phone) DO UPDATE SET
+         reason = excluded.reason,
+         last_error = excluded.last_error,
+         last_template = excluded.last_template,
+         fail_count = fail_count + 1,
+         updated_at = excluded.updated_at`
+    ).bind(num, now, reason, errTrunc, String(templateName || ''), now).run();
+  } catch (_) { /* best-effort */ }
+}
+
+async function isUnreachable(env, phone) {
+  if (!phone || !env.DB) return false;
+  const num = normalizeArPhone(phone);
+  if (!num) return false;
+  try {
+    const row = await env.DB.prepare('SELECT 1 FROM wa_unreachable_phones WHERE phone = ?').bind(num).first();
+    return !!row;
+  } catch (_) { return false; }
+}
+
+async function removeUnreachable(env, phone) {
+  if (!phone || !env.DB) return;
+  const num = normalizeArPhone(phone);
+  if (!num) return;
+  try { await env.DB.prepare('DELETE FROM wa_unreachable_phones WHERE phone = ?').bind(num).run(); } catch (_) {}
 }
 
 async function waSendText(env, to, body) {
@@ -657,7 +729,10 @@ async function processCursosFollowup(env) {
   try {
     const cutoff = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
     const rs = await env.DB.prepare(
-      "SELECT phone, nombre FROM wa_cursos_campaign WHERE responded_at IS NULL AND followup_at IS NULL AND sent_1_at IS NOT NULL AND sent_1_at <= ? ORDER BY sent_1_at ASC LIMIT 30"
+      "SELECT phone, nombre FROM wa_cursos_campaign " +
+      "WHERE responded_at IS NULL AND followup_at IS NULL AND sent_1_at IS NOT NULL AND sent_1_at <= ? " +
+      "  AND phone NOT IN (SELECT phone FROM wa_unreachable_phones) " +
+      "ORDER BY sent_1_at ASC LIMIT 30"
     ).bind(cutoff).all();
     for (const row of (rs.results || [])) {
       const phone = row.phone;
@@ -902,6 +977,7 @@ async function processMinicursoFollowup(env) {
        WHERE a.kind = 'minicurso' AND a.status = 'sent' AND a.sent_at != ''
          AND a.sent_at <= ? AND a.sent_at >= ?
          AND NOT EXISTS (SELECT 1 FROM wa_autoreply_log f WHERE f.phone = a.phone AND f.kind = 'minicurso_followup')
+         AND a.phone NOT IN (SELECT phone FROM wa_unreachable_phones)
        ORDER BY a.sent_at ASC LIMIT 30`
     ).bind(cutoffHigh, cutoffLow).all();
     for (const row of (rs.results || [])) {
@@ -2596,6 +2672,13 @@ export default {
                   ).bind(ts, wamid, direction, phone, senderName, msgType, msgBody, r2Key || mediaUrl, contextId, null).run();
                 } catch (_) {}
 
+                // ===== Auto-recovery de unreachable =====
+                // Si este contacto estaba marcado como unreachable y ahora nos
+                // escribe, significa que NO está muerto. Lo desmarcamos para que
+                // los flows automáticos vuelvan a considerarlo.
+                if (direction === 'inbound' && phone) {
+                  try { await removeUnreachable(env, phone); } catch (_) {}
+                }
                 // ===== Auto-respuesta del minicurso (regalos) =====
                 // Solo inbound de texto reciente (últimos 10 min) que pida la
                 // guía + cotizador. Mensaje libre (ventana 24h). Una vez por
@@ -4645,6 +4728,32 @@ export default {
         if (!r.ok) return json({ error: data?.error?.message || 'create failed', raw: data }, r.status || 500);
         return json({ ok: true, id: data.id, status: data.status, category: data.category, provider: _waT.provider });
       }
+      // ===== Unreachable phones — listar / agregar / borrar =====
+      // GET  /admin/wa/unreachable          → { phones: [...] }
+      // POST /admin/wa/unreachable          { phone, reason? } → marcar manual
+      // DELETE /admin/wa/unreachable?phone= → desmarcar manual
+      if (request.method === 'GET' && path === '/admin/wa/unreachable') {
+        try {
+          const limit = Math.min(parseInt(url.searchParams.get('limit') || '500', 10) || 500, 2000);
+          const rs = await env.DB.prepare(
+            'SELECT phone, marked_at, reason, last_error, last_template, fail_count, updated_at FROM wa_unreachable_phones ORDER BY updated_at DESC LIMIT ?'
+          ).bind(limit).all();
+          return json({ phones: rs.results || [] });
+        } catch (e) { return json({ error: e.message }, 500); }
+      }
+      if (request.method === 'POST' && path === '/admin/wa/unreachable') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { phone, reason } = body || {};
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        await markUnreachable(env, phone, reason || 'manual', '(marcado manual)', '');
+        return json({ ok: true, phone: normalizeArPhone(phone) });
+      }
+      if (request.method === 'DELETE' && path === '/admin/wa/unreachable') {
+        const phone = url.searchParams.get('phone');
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        await removeUnreachable(env, phone);
+        return json({ ok: true, phone: normalizeArPhone(phone) });
+      }
       // DELETE template — útil para recrear cuando se carga mal (encoding, typos).
       // Meta y 360dialog NO permiten editar un template aprobado, hay que borrar y recrear.
       // En Meta: DELETE /{waba_id}/message_templates?name=...
@@ -5573,6 +5682,13 @@ async function processPresupuestoFollowups(env) {
       await insertMarker('failed', 'fu-invalid:' + p.phone);
       await logWaEvent(env, { to: p.phone, kind: 'pp-followup', ref: 'pp-fu:' + p.phone, ok: false, error: 'numero invalido (skip)' });
       skippedInvalid++;
+      continue;
+    }
+
+    // Skip si el phone está marcado como unreachable. Insertamos marker
+    // 'skipped' para no re-evaluarlo en cada cron (idempotencia).
+    if (await isUnreachable(env, p.phone)) {
+      await insertMarker('skipped', 'fu-unreachable:' + p.phone);
       continue;
     }
 
