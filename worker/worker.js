@@ -4873,6 +4873,40 @@ export default {
         if (!r.ok) return json({ error: data?.error?.message || 'create failed', raw: data }, r.status || 500);
         return json({ ok: true, id: data.id, status: data.status, category: data.category, provider: _waT.provider });
       }
+      // ===== Promo assets (imágenes para campañas como follow-up de copa) =====
+      // POST /admin/wa/promo-asset/upload?key=copa-mundial-junio
+      //   Body: imagen binaria (image/jpeg, image/png, image/webp).
+      //   Header opcional: Content-Type (default image/jpeg).
+      // Guarda en R2 con key 'promo/<key>.<ext>'. Invalida el cache de media_id
+      // (próxima vez que el cron lo necesite, re-uploadea a Meta).
+      //
+      // GET /admin/wa/promo-asset?key=...  → devuelve metadata + URL del worker
+      //   para previsualizar (admin-only via /admin/media path).
+      if (request.method === 'POST' && path === '/admin/wa/promo-asset/upload') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        const key = (url.searchParams.get('key') || '').trim();
+        if (!key || !/^[a-z0-9-]+$/i.test(key)) return json({ error: 'key inválido (solo a-z 0-9 -)' }, 400);
+        if (!env.MEDIA) return json({ error: 'R2 no configurado' }, 500);
+        const ct = request.headers.get('content-type') || 'image/jpeg';
+        const cleanMime = String(ct).split(';')[0].trim();
+        const ext = cleanMime.includes('png') ? '.png'
+                  : cleanMime.includes('webp') ? '.webp'
+                  : '.jpg';
+        const r2Key = `promo/${key}${ext}`;
+        let buf;
+        try { buf = await request.arrayBuffer(); } catch (e) { return json({ error: 'no pude leer el body: ' + e.message }, 400); }
+        if (!buf || buf.byteLength < 100) return json({ error: 'imagen vacía o demasiado chica' }, 400);
+        if (buf.byteLength > 5 * 1024 * 1024) return json({ error: 'imagen >5MB (Meta no acepta)' }, 400);
+        try {
+          await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: cleanMime } });
+        } catch (e) { return json({ error: 'r2 put failed: ' + e.message }, 500); }
+        // Invalidar cache del media_id para esta key (próxima invocación
+        // re-uploadea a Meta con la imagen nueva).
+        try { await env.DB.prepare('DELETE FROM kv_cache WHERE k = ?').bind('promo_media:' + r2Key).run(); } catch (_) {}
+        return json({ ok: true, key, r2_key: r2Key, size: buf.byteLength, mime: cleanMime });
+      }
+
       // ===== Unreachable phones — listar / agregar / borrar =====
       // GET  /admin/wa/unreachable          → { phones: [...] }
       // POST /admin/wa/unreachable          { phone, reason? } → marcar manual
@@ -5770,6 +5804,114 @@ const PRESUPUESTO_PREFIX_TEXT = PRESUPUESTO_PREFIXES_TEXT[0]; // back-compat
 const FOLLOWUP_PRESUPUESTO_TEXT = 'Aca te dejamos el presupuesto! Decinos que te parece? si hay algun cambio o ajuste que quieras hacer, tambien si tenes foto de donde lo vas a poner te podemos hacer un montaje digital de como quedaría!';
 const FOLLOWUP_PRESUPUESTO_PREFIX_TEXT = 'Aca te dejamos el presupuesto!';
 
+// ===== Variantes de follow-up de presupuesto (jun 2026 en adelante) =====
+// - PROMO COPA (solo junio 2026): mensaje + foto de copa del mundo neón.
+// - DESPUES (jul 2026 →): según monto del presupuesto (≷ $300.000).
+//
+// Detección del monto: regex que toma el MAYOR $XXX del body — eso captura
+// el precio principal del cartel ignorando los accesorios chiquitos (Slim,
+// Control, App). Si no parsea, default a 'low' (mensaje más liviano).
+const PROMO_COPA_END_UTC = '2026-07-01T03:00:00Z'; // 1-jul 00:00 AR (UTC-3)
+const PROMO_COPA_R2_KEY = 'promo/copa-mundial-junio.jpg';
+const PROMO_COPA_CAPTION = 'Te quería avisar que estamos regalando copas del mundo a todos los que compren esta semana!\n\nAvísame si querías avanzar con el pedido, o si queres que te llamemos y te asesoremos!';
+const FOLLOWUP_PRESUPUESTO_LOW_TEXT = 'Holaa, cómo estás? Pudiste chequear el presupuesto? Cualquier cosa podemos llamarte para asesorarte! Quedamos a disposición!';
+const FOLLOWUP_PRESUPUESTO_HIGH_TEXT = 'Buenas! Avisanos qué te pareció el presupuesto! Si te cierra el precio, o si querés que veamos de mejorar los números.\nTe podemos llamar para asesorarte, o coordinamos una visita si estas por Capital federal o GBA.';
+const FOLLOWUP_AMOUNT_THRESHOLD = 300000;
+
+// Prefijos de TODOS los possibles follow-ups (legacy + nuevos) para dedup.
+// Si conv contiene un outbound que comience con CUALQUIERA de estos, ya tuvo
+// follow-up y no se le manda otro.
+const ALL_FOLLOWUP_PREFIXES_TEXT = [
+  FOLLOWUP_PRESUPUESTO_PREFIX_TEXT,            // 'Aca te dejamos el presupuesto!' (legacy)
+  'Te quería avisar que estamos regalando',    // copa
+  'Holaa, cómo estás? Pudiste chequear',       // < 300k
+  'Buenas! Avisanos qué te pareció'            // ≥ 300k
+];
+
+function extractPresupuestoAmount(body) {
+  if (!body) return 0;
+  // Toma el MAYOR número con $ del body. En el cotizador, el precio principal
+  // del cartel siempre es mayor que los accesorios (Slim $18.7k, Control $25k,
+  // App $38k). Si querés ser más estricto, cambia a "primer match después de
+  // 'Base acrílica transparente'", pero el max es más robusto a cambios de
+  // formato del cotizador.
+  let max = 0;
+  const re = /\$\s*([\d.]+)/g;
+  let m;
+  while ((m = re.exec(String(body))) !== null) {
+    const raw = m[1].replace(/\./g, '');
+    const n = parseInt(raw, 10);
+    if (!isNaN(n) && n > max) max = n;
+  }
+  return max;
+}
+
+// Sube un buffer a Meta vía /media, devuelve el media_id (o null si falla).
+// El media_id sirve para mandar mensajes type='image'|'video'|'document' SIN
+// re-uploadear cada vez (válido por ~30 días).
+async function uploadMediaToMeta(env, buf, mime, fileName) {
+  try {
+    const wa = getWaClient(env);
+    if (wa.provider === 'meta' && !env.WA_TOKEN) return null;
+    const fd = new FormData();
+    fd.append('messaging_product', 'whatsapp');
+    fd.append('file', new Blob([buf], { type: mime }), fileName);
+    fd.append('type', mime);
+    const r = await fetch(wa.mediaUploadUrl(), {
+      method: 'POST',
+      headers: wa.headers,
+      body: fd
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return null;
+    return data.id || null;
+  } catch (_) { return null; }
+}
+
+// Devuelve el media_id de Meta para una imagen en R2, cacheando el resultado
+// en kv_cache. TTL 7 días — Meta caduca media_ids a ~30 días pero re-upload
+// más frecuente es trivial. Si la imagen no está en R2, devuelve null y el
+// caller debe fallback a texto.
+async function getPromoMediaId(env, r2Key) {
+  if (!env.MEDIA || !env.DB) return null;
+  const cacheKey = 'promo_media:' + r2Key;
+  // 1) Try cache válido.
+  try {
+    const row = await env.DB.prepare("SELECT v, updated_at FROM kv_cache WHERE k = ?").bind(cacheKey).first();
+    if (row?.v && row.updated_at) {
+      const ageMs = Date.now() - new Date(row.updated_at).getTime();
+      if (ageMs < 7 * 24 * 60 * 60 * 1000) return row.v;
+    }
+  } catch (_) {}
+  // 2) Re-upload desde R2.
+  try {
+    const obj = await env.MEDIA.get(r2Key);
+    if (!obj) return null;
+    const buf = await obj.arrayBuffer();
+    const mime = obj.httpMetadata?.contentType || 'image/jpeg';
+    const fileName = r2Key.split('/').pop() || 'image.jpg';
+    const mediaId = await uploadMediaToMeta(env, buf, mime, fileName);
+    if (!mediaId) return null;
+    try {
+      await env.DB.prepare(
+        "INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at"
+      ).bind(cacheKey, mediaId, new Date().toISOString()).run();
+    } catch (_) {}
+    return mediaId;
+  } catch (_) { return null; }
+}
+
+async function waSendImage(env, to, mediaId, caption) {
+  const num = normalizeArPhone(to);
+  if (!num) return { ok: false, status: 400, error: 'numero invalido' };
+  return waSend(env, {
+    messaging_product: 'whatsapp',
+    to: num,
+    type: 'image',
+    image: { id: mediaId, caption: caption || undefined }
+  });
+}
+
 async function processPresupuestoFollowups(env) {
   const now = Date.now();
   const oneHourAgo = new Date(now - 60 * 60 * 1000).toISOString();
@@ -5811,23 +5953,44 @@ async function processPresupuestoFollowups(env) {
 
     // ¿Respondió?
     if (conv.some(m => m.direction === 'inbound')) continue;
-    // ¿Ya tiene follow-up (sent o failed)?
-    if (conv.some(m => m.direction === 'outbound' && (m.body || '').startsWith(FOLLOWUP_PRESUPUESTO_PREFIX_TEXT))) continue;
+    // ¿Ya tiene follow-up (cualquier variante: legacy, copa, low, high)?
+    // Si el outbound posterior arranca con ALGUNO de los prefijos conocidos,
+    // ya recibió follow-up.
+    if (conv.some(m => m.direction === 'outbound' && ALL_FOLLOWUP_PREFIXES_TEXT.some(pref => (m.body || '').startsWith(pref)))) continue;
+
+    // 4) Decidir qué variante mandar según fecha y monto.
+    // - PROMO COPA hasta jun-30 inclusive: imagen + caption.
+    // - DESDE jul-1: texto según monto (≷ $300k).
+    const ahoraIso = new Date().toISOString();
+    const inCopaPromo = ahoraIso < PROMO_COPA_END_UTC;
+    const monto = extractPresupuestoAmount(p.body);
+    let variantBody, variantKind;
+    if (inCopaPromo) {
+      variantBody = PROMO_COPA_CAPTION;
+      variantKind = 'copa';
+    } else if (monto >= FOLLOWUP_AMOUNT_THRESHOLD) {
+      variantBody = FOLLOWUP_PRESUPUESTO_HIGH_TEXT;
+      variantKind = 'high';
+    } else {
+      variantBody = FOLLOWUP_PRESUPUESTO_LOW_TEXT;
+      variantKind = 'low';
+    }
 
     // Helper para insertar el marker (sent o failed) — ambos casos previenen
     // que el próximo cron re-encuentre este presupuesto como pendiente.
-    const insertMarker = async (status, wamid) => {
+    // Guarda el cuerpo de la variante real que se mandó (para dedup futuro).
+    const insertMarker = async (status, wamid, bodyToStore) => {
       try {
         await env.DB.prepare(
           'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        ).bind(new Date().toISOString(), wamid, 'outbound', p.phone, '', 'text', FOLLOWUP_PRESUPUESTO_TEXT, '', '', status).run();
+        ).bind(new Date().toISOString(), wamid, 'outbound', p.phone, '', variantKind === 'copa' ? 'image' : 'text', bodyToStore || variantBody, '', '', status).run();
       } catch (_) {}
     };
 
-    // 4) Pre-validar: si el teléfono no normaliza, marcamos como fallido
+    // 5) Pre-validar: si el teléfono no normaliza, marcamos como fallido
     // permanente y no gastamos call al API ni notificamos al admin.
     if (!normalizeArPhone(p.phone)) {
-      await insertMarker('failed', 'fu-invalid:' + p.phone);
+      await insertMarker('failed', 'fu-invalid:' + p.phone, null);
       await logWaEvent(env, { to: p.phone, kind: 'pp-followup', ref: 'pp-fu:' + p.phone, ok: false, error: 'numero invalido (skip)' });
       skippedInvalid++;
       continue;
@@ -5836,22 +5999,34 @@ async function processPresupuestoFollowups(env) {
     // Skip si el phone está marcado como unreachable. Insertamos marker
     // 'skipped' para no re-evaluarlo en cada cron (idempotencia).
     if (await isUnreachable(env, p.phone)) {
-      await insertMarker('skipped', 'fu-unreachable:' + p.phone);
+      await insertMarker('skipped', 'fu-unreachable:' + p.phone, null);
       continue;
     }
 
-    // 5) Enviar
-    const r = await waSendText(env, p.phone, FOLLOWUP_PRESUPUESTO_TEXT);
+    // 6) Enviar. Si es copa, intentamos imagen+caption; si no hay media
+    // disponible (R2 vacío, upload a Meta falla), caemos a texto solo.
+    let r;
+    if (variantKind === 'copa') {
+      const mediaId = await getPromoMediaId(env, PROMO_COPA_R2_KEY);
+      if (mediaId) {
+        r = await waSendImage(env, p.phone, mediaId, PROMO_COPA_CAPTION);
+      } else {
+        // Fallback: sin imagen, solo el caption como texto.
+        r = await waSendText(env, p.phone, PROMO_COPA_CAPTION);
+      }
+    } else {
+      r = await waSendText(env, p.phone, variantBody);
+    }
     if (r.ok) {
       sent++;
-      await insertMarker('sent', r.id || '');
+      await insertMarker('sent', r.id || '', null);
     } else {
       // Marker failed → el próximo cron NO lo va a re-procesar. Una sola
       // notificación al admin por presupuesto, no spam cada 5 min.
-      await insertMarker('failed', 'fu-fail:' + p.phone + ':' + Date.now());
+      await insertMarker('failed', 'fu-fail:' + p.phone + ':' + Date.now(), null);
       failures.push({ phone: p.phone, name: p.sender_name || '', error: r.error || 'unknown' });
     }
-    await logWaEvent(env, { to: p.phone, kind: 'pp-followup', ref: 'pp-fu:' + p.phone, ok: r.ok, messageId: r.id, error: r.error });
+    await logWaEvent(env, { to: p.phone, kind: 'pp-followup-' + variantKind, ref: 'pp-fu:' + p.phone, ok: r.ok, messageId: r.id, error: r.error });
     await new Promise(rs => setTimeout(rs, 600)); // delay anti rate-limit
   }
 
