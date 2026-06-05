@@ -3814,13 +3814,16 @@ export default {
                           : type === 'video' ? 'video/mp4'
                           : 'application/octet-stream';
         const mime = fileMime || defaultMime;
-        await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: mime } });
+        // WhatsApp/360dialog espera el MIME SIN parámetros (rechaza
+        // "audio/ogg; codecs=opus" o "audio/webm;codecs=opus"). Lo limpiamos.
+        const cleanMime = mime.split(';')[0].trim();
+        await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: cleanMime } });
         // 2. Upload media to WA (Meta o 360dialog) para obtener media id
         const _wa1 = getWaClient(env);
         const uploadFd = new FormData();
         uploadFd.append('messaging_product', 'whatsapp');
-        uploadFd.append('file', new Blob([buf], { type: mime }), fileName);
-        uploadFd.append('type', mime);
+        uploadFd.append('file', new Blob([buf], { type: cleanMime }), fileName);
+        uploadFd.append('type', cleanMime);
         const uploadR = await fetch(_wa1.mediaUploadUrl(), {
           method: 'POST',
           headers: _wa1.headers,
@@ -3828,7 +3831,9 @@ export default {
         });
         const uploadData = await uploadR.json().catch(() => ({}));
         if (!uploadR.ok || !uploadData.id) {
-          return json({ error: 'media upload failed', detail: uploadData?.error?.message || '' }, 500);
+          // Log de diagnóstico: mime recibido + respuesta cruda del provider.
+          try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), `AUDIO_FAIL type=${type} mimeRecibido=${mime} clean=${cleanMime} status=${uploadR.status} resp=${JSON.stringify(uploadData).slice(0, 600)}`).run(); } catch (_) {}
+          return json({ error: 'media upload failed', detail: (uploadData?.error?.message || uploadData?.error || JSON.stringify(uploadData) || '').toString().slice(0, 200) }, 500);
         }
         const mediaId = uploadData.id;
         // 3. Send via WA API

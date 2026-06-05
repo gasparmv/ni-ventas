@@ -9,3 +9,8 @@ node_modules/
 package-lock.json
 /package.json
 worker/.wrangler/
+
+# Local-only — el repo es PÚBLICO. No subir docs internos ni el Apps Script
+# (tiene el ID del Excel financiero 2026v4). Se editan/pegan a mano en Google.
+HANDOFF.md
+worker/apps-script-cotizador.gs

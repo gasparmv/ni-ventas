@@ -89,8 +89,15 @@ const CONFIG = {
     nv_margen_min: 0.48,
     nv_margen_max: 0.72,
     // Acrílico negro: precio = transparente × ratio (siempre 7% más barato)
-    nv_negro_ratio: 0.93
+    nv_negro_ratio: 0.93,
+    // Fallback del sueldo fijo de Joaco si un mes no está en joacoFijoByMonth.
+    nv_joaquin_fijo: 250000
   },
+  // Sueldo fijo mensual de Joaco — espejo de la hoja COGS fila 50 ("Sueldos
+  // Joaquin"), indexado por número de mes (fila 47 = 1..12). El dashboard suma
+  // el fijo REAL de cada mes del período elegido (varía mes a mes). Si cambia
+  // en el Excel, actualizá acá (o conectamos el Apps Script para sincronizar).
+  joacoFijoByMonth: { 1: 492500, 2: 267000, 3: 250000, 4: 326000, 5: 290000, 6: 250000, 7: 250000, 8: 250000, 9: 250000, 10: 250000, 11: 250000, 12: 250000 },
   postventaMilestones: [
     { id: 'D30', days: 30, label: 'Foto / feedback', tagClass: 'tag-d30',
       template: (n) => `Holaa ${n}, cómo va? cómo te quedó el cartel?\n\nsi tenés una foto cuando puedas pasame, nos re sirve mostrar como queda en el local 🤙` },
@@ -140,6 +147,17 @@ function getCotizadorParams() {
   return Object.assign({}, CONFIG.cotizadorDefaults, STATE.cotizadorParams || {}, cogs);
 }
 
+// Sueldo fijo de Joaco para un mes 'YYYY-MM' (panel "Tu sueldo").
+// Prioridad: mapa por mes que venga de COGS → CONFIG.joacoFijoByMonth → default.
+function joacoFijoMes(yyyymm) {
+  const m = parseInt(String(yyyymm || '').split('-')[1], 10);
+  const cogsMap = (STATE.cotizadorCogs && STATE.cotizadorCogs.fijoByMonth) || null;
+  if (cogsMap && +cogsMap[m]) return +cogsMap[m];
+  const cfgMap = CONFIG.joacoFijoByMonth || {};
+  if (+cfgMap[m]) return +cfgMap[m];
+  return (+getCotizadorParams().nv_joaquin_fijo) || 250000;
+}
+
 async function loadCotizadorParams() {
   if (!CONFIG.trackerUrl) return;
   // Cache optimista de COGS desde localStorage (instantáneo mientras llega el fresco).
@@ -178,7 +196,12 @@ async function loadCogsFromExcel(opts) {
       nv_costo_neon_mt: Math.round(+c.costo_neon_mt || 0),
       nv_divisor_base: +(1 - (+c.mano_obra || 0) - (+c.joaquin || 0)).toFixed(4)
     };
-    STATE.cotizadorCogs = { derived, raw: c, mes: j.mes, fetchedAt: Date.now(), cached: !!j.cached };
+    // Sueldo fijo de Joaco (panel "Tu sueldo"): si el Apps Script expone el mapa
+    // por mes (joaquin_fijo_by_month = COGS fila 50) lo usamos; un valor único
+    // (joaquin_fijo) sirve de fallback; si no, queda el mapa de CONFIG.
+    if (+c.joaquin_fijo) derived.nv_joaquin_fijo = Math.round(+c.joaquin_fijo);
+    const fijoByMonth = (c.joaquin_fijo_by_month && typeof c.joaquin_fijo_by_month === 'object') ? c.joaquin_fijo_by_month : null;
+    STATE.cotizadorCogs = { derived, raw: c, mes: j.mes, fijoByMonth, fetchedAt: Date.now(), cached: !!j.cached };
     STATE.cotizadorCogsError = null;
     try { localStorage.setItem('niventas.cogs', JSON.stringify(STATE.cotizadorCogs)); } catch (_) {}
     // Re-render si estamos en una vista que muestra precios/params.
@@ -1978,6 +2001,49 @@ function renderDashboard() {
         <div class="kpi"><div class="kpi-label">Total año</div><div class="kpi-value">${fmtMoney(STATE.pedidos.reduce((a,p)=>a+p.precio+p.precioDimmer,0))}</div><div class="kpi-delta">${STATE.pedidos.length} pedidos · año</div></div>
       </div>`;
     })()}
+
+    ${isJoaquinUser(STATE.user) ? (() => {
+      // Panel "Tu sueldo" — solo Joaco. Sueldo = fijo del mes (COGS fila 50
+      // "Sueldos Joaquin") + comisión 5% de carteles directo. Solo se cuenta
+      // desde mayo 2026 en adelante: lo anterior no se muestra (pagos sin confirmar).
+      const DESDE = '2026-05';
+      const params = getCotizadorParams();
+      const rate = (STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.joaquin) || params.comision_pct || 0.05;
+      const ratePct = +(rate * 100).toFixed(1);
+      const sel = getDashMonths();                                  // null = todos, array = meses
+      const periodMonths = (sel || availableMonths()).filter(m => m >= DESDE);
+      let inner, periodLbl;
+      if (!periodMonths.length) {
+        periodLbl = 'desde mayo 2026';
+        inner = `<div style="color:var(--fg-subtle);font-size:13px">El sueldo se muestra <b>desde mayo 2026</b> en adelante. Elegí mayo, junio o "Todos" en el período para verlo.</div>`;
+      } else {
+        const nMonths = periodMonths.length;
+        // Fijo = suma del sueldo REAL de cada mes (COGS fila 50, varía mes a mes).
+        const fijo = periodMonths.reduce((a, m) => a + joacoFijoMes(m), 0);
+        // Comisión = 5% de carteles directo (ventas del dashboard) de esos meses.
+        const ventas = STATE.pedidos
+          .filter(p => periodMonths.indexOf(getMonth(p.fecha)) !== -1)
+          .reduce((a, p) => a + (p.precio || 0) + (p.precioDimmer || 0), 0);
+        const comision = Math.round(ventas * rate);
+        const sueldo = fijo + comision;
+        const por100k = Math.round(100000 * rate);
+        periodLbl = nMonths === 1
+          ? new Date(+periodMonths[0].split('-')[0], +periodMonths[0].split('-')[1] - 1, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
+          : nMonths + ' meses (desde may)';
+        inner = `
+        <div class="kpi-grid" style="margin:0">
+          <div class="kpi"><div class="kpi-label">Sueldo fijo</div><div class="kpi-value">${fmtMoney(fijo)}</div><div class="kpi-delta">${nMonths === 1 ? 'fijo del mes' : 'suma real · ' + nMonths + ' meses'}</div></div>
+          <div class="kpi cyan"><div class="kpi-label">Comisión ${ratePct}%</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">sobre ${fmtMoney(ventas)} en carteles directo</div></div>
+          <div class="kpi"><div class="kpi-label">Te estás llevando</div><div class="kpi-value">${fmtMoney(sueldo)}</div><div class="kpi-delta">fijo + comisión</div></div>
+        </div>
+        <div style="margin-top:var(--s-3);color:var(--fg-subtle);font-size:12px">Por cada ${fmtMoney(100000)} en carteles directo sumás ${fmtMoney(por100k)} de comisión 🚀</div>`;
+      }
+      return `
+      <div style="background:linear-gradient(135deg,rgba(37,211,102,.07),transparent 55%),var(--bg-card);border:1px solid rgba(37,211,102,.35);border-radius:var(--r-md);padding:var(--s-4);margin-bottom:var(--s-5)">
+        <h3 style="margin:0 0 var(--s-3);font-size:15px;letter-spacing:var(--tr-tight)">💰 Tu sueldo · ${escapeHtml(periodLbl)}</h3>
+        ${inner}
+      </div>`;
+    })() : ''}
 
     <div class="chart-grid">
       <div class="card chart-card">
