@@ -650,7 +650,10 @@ async function processAutoReplyQueue(env) {
       if (row.kind === 'minicurso') {
         const nombre = (row.sender_name || '').trim().split(/\s+/)[0] || '';
         const saludo = nombre ? `Buenas ${nombre}!` : 'Buenas!';
-        body = `${saludo} Acá están los regalos por haber visto hasta el final! 🎁 ${MINICURSO_REGALO_LINK}\nContanos, qué te pareció el nuevo Curso? Viste la 2da clase hasta el final?`;
+        // Nuevo flujo: NO mandamos el link de una. Prometemos los regalos pero
+        // pedimos feedback del curso PRIMERO (los regalos los manda Abril cuando
+        // responde). El link MINICURSO_REGALO_LINK queda para ese envío manual.
+        body = `${saludo} Ahora te paso los regalos (Cotizador + Guía de Producción). Pero antes, contanos qué te pareció el nuevo Curso! Viste la 2da clase hasta el final?`;
       } else {
         body = CURSOS_EVENTO_MSG;
       }
@@ -673,6 +676,69 @@ async function processAutoReplyQueue(env) {
         const ts2 = new Date().toISOString();
         try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos' WHERE phone = ?").bind(phone).run(); } catch (_) {}
         try { await env.DB.prepare("UPDATE wa_cursos_campaign SET revealed_at = ?, updated_at = ? WHERE phone = ?").bind(ts2, ts2, phone).run(); } catch (_) {}
+      }
+    }
+  } catch (e) { /* best-effort */ }
+}
+
+// Cron: follow-up del minicurso. Si pasaron ≥4h desde que mandamos el mensaje de
+// los regalos y el lead NO respondió, le mandamos un recordatorio (una sola vez).
+// Solo se llama en horario hábil AR (8-20), así nunca sale de madrugada.
+// Ventana 4–24h: el límite de 24h evita (a) mandar a contactos históricos que el
+// backfill cargó en wa_autoreply_log y (b) caer fuera de la ventana libre de 24h.
+async function processMinicursoFollowup(env) {
+  try {
+    const cutoffHigh = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();  // ≥4h
+    const cutoffLow  = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // ≤24h
+    const rs = await env.DB.prepare(
+      `SELECT a.phone, a.sent_at FROM wa_autoreply_log a
+       WHERE a.kind = 'minicurso' AND a.status = 'sent' AND a.sent_at != ''
+         AND a.sent_at <= ? AND a.sent_at >= ?
+         AND NOT EXISTS (SELECT 1 FROM wa_autoreply_log f WHERE f.phone = a.phone AND f.kind = 'minicurso_followup')
+       ORDER BY a.sent_at ASC LIMIT 30`
+    ).bind(cutoffHigh, cutoffLow).all();
+    for (const row of (rs.results || [])) {
+      const phone = row.phone;
+      const now = new Date().toISOString();
+      // ¿Respondió DESPUÉS de que le mandamos los regalos? Si sí, no molestamos.
+      const resp = await env.DB.prepare(
+        "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1"
+      ).bind(phone, row.sent_at).first();
+      if (resp) {
+        // Marca 'skipped' para no volver a evaluar este contacto.
+        try {
+          await env.DB.prepare(
+            "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'minicurso_followup', ?, 'skipped', '', '')"
+          ).bind(phone, now).run();
+        } catch (_) {}
+        continue;
+      }
+      // Reserva ATÓMICA antes de mandar (evita doble envío entre ticks del cron).
+      let reserva;
+      try {
+        reserva = await env.DB.prepare(
+          "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'minicurso_followup', '', 'queued', '', '')"
+        ).bind(phone).run();
+      } catch (_) { continue; }
+      if (!reserva?.meta?.changes) continue; // otro tick lo reservó
+      const body = 'buenas buenas! Acá Abril de Neon infinito. Pudiste ver el mensaje?';
+      const res = await waSendText(env, phone, body);
+      if (!res?.ok) {
+        // Falló (transitorio, o fuera de ventana 24h) → liberar para reintentar.
+        try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'minicurso_followup' AND status = 'queued'").bind(phone).run(); } catch (_) {}
+        continue;
+      }
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'minicurso_followup'").bind(now, phone).run(); } catch (_) {}
+      const wamid = res.id || '';
+      if (wamid) {
+        try {
+          await env.DB.prepare(
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+             VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '')
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text'
+               WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+          ).bind(now, wamid, phone, body).run();
+        } catch (_) {}
       }
     }
   } catch (e) { /* best-effort */ }
@@ -4956,9 +5022,12 @@ export default {
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
-    // Follow-up de la campaña de cursos: solo en horario hábil AR (8-20).
+    // Follow-ups en horario hábil AR (8-20): campaña de cursos + minicurso (4h sin responder).
     const hAR = (new Date(event.scheduledTime).getUTCHours() - 3 + 24) % 24;
-    if (hAR >= 8 && hAR < 20) ctx.waitUntil(processCursosFollowup(env));
+    if (hAR >= 8 && hAR < 20) {
+      ctx.waitUntil(processCursosFollowup(env));
+      ctx.waitUntil(processMinicursoFollowup(env));
+    }
     // Followups de Apps Script solo a las 13:00 UTC (10:00 AR)
     const hour = new Date(event.scheduledTime).getUTCHours();
     if (hour === 13) ctx.waitUntil(runScheduled(env));
