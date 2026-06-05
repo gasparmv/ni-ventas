@@ -654,38 +654,87 @@ async function maybeAutoReplyMinicurso(env, phone, senderName) {
   } catch (e) { /* best-effort, no rompe el webhook */ }
 }
 
-// Cuando un lead responde al gate de feedback del minicurso: si la IA evalúa la
-// respuesta como positiva, encola el link de regalos (con demora ~1 min). Si no,
-// lo deja para Abril. Una sola vez por contacto (dedup atómico 'minicurso_gift').
+// Cuando llega el PRIMER mensaje del cliente como respuesta al gate de feedback
+// del minicurso, en vez de analizar al toque (que ignoraba mensajes siguientes
+// del cliente porque la reserva atómica bloqueaba el reanálisis), RESERVAMOS
+// con un wait_until de ~2 min para darle tiempo al cliente a tipear todo lo
+// que quiera. Cuando ese wait_until vence, processMinicursoGiftPending agrupa
+// TODOS los mensajes del cliente posteriores al template, los manda a la IA y
+// decide. Una sola vez por contacto (dedup atómico 'minicurso_gift').
 async function maybeSendMinicursoGift(env, phone, msgBody, inboundTs) {
   if (!phone || !msgBody) return;
   try {
-    // ¿Hay un autoreply de minicurso ya enviado, ANTERIOR a este inbound? Si no,
-    // este inbound es el trigger inicial, no la respuesta al gate de feedback.
     const ar = await env.DB.prepare(
       "SELECT sent_at FROM wa_autoreply_log WHERE phone = ? AND kind = 'minicurso' AND status = 'sent' AND sent_at != '' LIMIT 1"
     ).bind(phone).first();
     if (!ar || !ar.sent_at) return;
-    if (!(String(inboundTs) > String(ar.sent_at))) return; // inbound previo/igual → no es la respuesta
-    // Reserva ATÓMICA del regalo (una sola vez por contacto).
-    let reserva;
+    if (!(String(inboundTs) > String(ar.sent_at))) return;
+    // Reserva ATÓMICA con due_at = ahora + 2 min. NO analizamos todavía.
+    // Si el cliente manda 5 mensajes seguidos, los 5 inbound siguientes
+    // intentan el INSERT pero solo el primero gana → el resto NO modifica
+    // la fila. La IA leerá los 5 mensajes cuando el cron procese al vencer.
+    const dueAt = new Date(Date.now() + 2 * 60 * 1000).toISOString();
     try {
-      reserva = await env.DB.prepare(
-        "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'minicurso_gift', '', 'pending', '', '')"
-      ).bind(phone).run();
-    } catch (_) { return; }
-    if (!reserva?.meta?.changes) return; // ya evaluado/enviado
-    const sentiment = await analyzeMinicursoFeedback(env, msgBody);
-    if (sentiment !== 'positiva') {
-      // No positiva → lo maneja Abril (no auto-enviamos el link).
-      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'minicurso_gift'").bind(phone).run(); } catch (_) {}
-      return;
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'minicurso_gift', '', 'waiting_msgs', ?, '')"
+      ).bind(phone, dueAt).run();
+    } catch (_) { /* ignore */ }
+  } catch (e) { /* best-effort */ }
+}
+
+// Cron que procesa las reservas 'waiting_msgs' del minicurso_gift cuya ventana
+// de 2 min venció. Agrupa TODOS los mensajes inbound del cliente desde el
+// sent_at del template del minicurso (es decir, todo lo que tipeó en esos
+// 2 min) y manda el texto concatenado a la IA. Si POSITIVA → encola el regalo
+// para envío. Si no → skip (lo maneja Abril manualmente).
+async function processMinicursoGiftPending(env) {
+  try {
+    const nowIso = new Date().toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT phone FROM wa_autoreply_log WHERE kind = 'minicurso_gift' AND status = 'waiting_msgs' AND due_at <= ? LIMIT 25"
+    ).bind(nowIso).all();
+    for (const row of (rs.results || [])) {
+      const phone = row.phone;
+      // Claim atómico: pasamos a 'analyzing' para que dos invocaciones del cron
+      // no analicen el mismo chat dos veces (doble llamada a Claude = doble gasto).
+      let claim;
+      try {
+        claim = await env.DB.prepare(
+          "UPDATE wa_autoreply_log SET status = 'analyzing' WHERE phone = ? AND kind = 'minicurso_gift' AND status = 'waiting_msgs'"
+        ).bind(phone).run();
+      } catch (_) { continue; }
+      if (!claim?.meta?.changes) continue;
+      // Buscar el sent_at del template del minicurso (anchor).
+      const anchor = await env.DB.prepare(
+        "SELECT sent_at FROM wa_autoreply_log WHERE phone = ? AND kind = 'minicurso' AND status = 'sent' LIMIT 1"
+      ).bind(phone).first();
+      if (!anchor?.sent_at) {
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'minicurso_gift'").bind(phone).run(); } catch (_) {}
+        continue;
+      }
+      // Juntar todos los mensajes inbound del cliente posteriores al template.
+      // Solo texto utilizable: descartamos reactions y placeholders vacíos.
+      const msgs = await env.DB.prepare(
+        "SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'reaction' AND ts > ? AND body != '' ORDER BY ts ASC LIMIT 20"
+      ).bind(phone, anchor.sent_at).all();
+      const combinedText = (msgs.results || []).map(m => String(m.body || '').trim()).filter(Boolean).join(' · ');
+      if (!combinedText) {
+        // Solo emojis/audios sin transcripción/etc — lo maneja Abril.
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'minicurso_gift'").bind(phone).run(); } catch (_) {}
+        continue;
+      }
+      const sentiment = await analyzeMinicursoFeedback(env, combinedText);
+      if (sentiment !== 'positiva') {
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'minicurso_gift'").bind(phone).run(); } catch (_) {}
+        continue;
+      }
+      // Positiva → encolar regalo con demora chica (~30s) para que el cliente
+      // alcance a leer si llegó algo nuevo justo antes.
+      const dueAt = new Date(Date.now() + 30 * 1000).toISOString();
+      try {
+        await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued', due_at = ? WHERE phone = ? AND kind = 'minicurso_gift'").bind(dueAt, phone).run();
+      } catch (_) {}
     }
-    // Positiva → encolar el link con demora (~1 min); lo manda processAutoReplyQueue.
-    const dueAt = new Date(Date.now() + 60 * 1000).toISOString();
-    try {
-      await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued', due_at = ? WHERE phone = ? AND kind = 'minicurso_gift'").bind(dueAt, phone).run();
-    } catch (_) {}
   } catch (e) { /* best-effort */ }
 }
 
@@ -705,6 +754,18 @@ async function processAutoReplyQueue(env) {
     ).bind(nowIso, floorIso).all();
     for (const row of (rs.results || [])) {
       const phone = row.phone;
+      // CLAIM ATÓMICO: pasamos la fila a 'sending' antes de enviar. Si dos
+      // invocaciones del cron se solapan (1 cron por minuto, send puede tardar),
+      // solo una obtiene changes=1 y procesa; la otra se saltea y evita el doble
+      // envío que vimos en algunos chats. Si waSendText falla, revertimos a
+      // 'queued' para que el próximo tick reintente dentro de la ventana.
+      let claim;
+      try {
+        claim = await env.DB.prepare(
+          "UPDATE wa_autoreply_log SET status = 'sending' WHERE phone = ? AND kind = ? AND status = 'queued'"
+        ).bind(phone, row.kind).run();
+      } catch (_) { continue; }
+      if (!claim?.meta?.changes) continue; // ya lo tomó otro tick
       let body;
       if (row.kind === 'minicurso') {
         const nombre = (row.sender_name || '').trim().split(/\s+/)[0] || '';
@@ -719,7 +780,11 @@ async function processAutoReplyQueue(env) {
         body = CURSOS_EVENTO_MSG;
       }
       const res = await waSendText(env, phone, body);
-      if (!res?.ok) continue; // queda 'queued' → reintenta el próximo tick (dentro de la ventana)
+      if (!res?.ok) {
+        // Revertir a 'queued' para reintento en el siguiente tick
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued' WHERE phone = ? AND kind = ?").bind(phone, row.kind).run(); } catch (_) {}
+        continue;
+      }
       await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = ?").bind(new Date().toISOString(), phone, row.kind).run();
       const wamid = res.id || '';
       if (wamid) {
@@ -5085,6 +5150,9 @@ export default {
     // Cola de auto-respuestas (minicurso): corre en CADA tick, incluido el cron
     // dedicado de cada minuto, para que la demora sea ~1-2 min y no más.
     ctx.waitUntil(processAutoReplyQueue(env));
+    // Procesar respuestas pendientes del gate de feedback del minicurso:
+    // espera 2 min al cliente, junta todos los mensajes, manda a la IA y decide.
+    ctx.waitUntil(processMinicursoGiftPending(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
