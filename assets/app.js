@@ -5456,7 +5456,11 @@ function audioExtForMime(m) {
   if (m.includes('webm')) return '.webm';
   return '.bin';
 }
-const OPUS_ENCODER_URL = 'https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/encoderWorker.min.js';
+// Self-hosted (mismo origen) — ANTES era el CDN de jsdelivr, pero iOS Safari
+// bloquea cargar un Worker cross-origin → opus-recorder fallaba en iPhone y
+// caía a MediaRecorder (m4a) → WhatsApp mostraba el audio como ARCHIVO en vez
+// de nota de voz. Sirviéndolo del mismo origen, iOS lo carga y graba ogg/opus.
+const OPUS_ENCODER_URL = 'assets/opus-encoderWorker.min.js';
 
 function _startRecTimer() {
   chatState.recordingSecs = 0;

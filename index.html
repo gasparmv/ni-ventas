@@ -66,8 +66,12 @@ if (window.navigator.standalone || window.matchMedia('(display-mode: standalone)
   <div class="loading"><div class="spinner"></div></div>
 </div>
 <!-- opus-recorder: graba notas de voz en ogg/opus (compatible WhatsApp en todos
-     los navegadores, incluido Chrome que solo grabaría webm con MediaRecorder). -->
-<script src="https://cdn.jsdelivr.net/npm/opus-recorder@8.0.5/dist/recorder.min.js"></script>
+     los navegadores, incluido Chrome que solo grabaría webm con MediaRecorder).
+     SELF-HOSTED (no CDN): iOS Safari bloquea cargar el encoderWorker como Worker
+     cross-origin → caía al grabador nativo (m4a) y WhatsApp lo mostraba como
+     ARCHIVO en vez de nota de voz. Sirviéndolo del mismo origen, iOS lo carga
+     bien y siempre graba ogg/opus → nota de voz nativa. -->
+<script src="assets/opus-recorder.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>
