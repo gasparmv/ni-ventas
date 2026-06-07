@@ -6954,7 +6954,13 @@ function renderChatBubbles(msgs, opts) {
       const transcriptIconSvg = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M14 17H4v2h10v-2zm6-8H4v2h16V9zM4 15h16v-2H4v2zM4 5v2h16V5H4z"/></svg>';
       html += `<div class="chat-msg ${dir} chat-msg-audio-bubble${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <div class="chat-msg-audio">
-          ${avatarHtml(dir === 'inbound' ? chatState.selectedPhone : '0000', aName, 40)}
+          <div class="audio-avatar-wrap" style="position:relative;flex-shrink:0">
+            ${avatarHtml(dir === 'inbound' ? chatState.selectedPhone : '0000', aName, 40)}
+            <button class="audio-play-btn" data-audio-play title="Reproducir / pausar" aria-label="Reproducir o pausar audio">
+              <svg class="ico-play" viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              <svg class="ico-pause" viewBox="0 0 24 24" width="13" height="13" fill="currentColor" style="display:none"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+            </button>
+          </div>
           <div class="audio-wave">
             <div class="audio-bars" data-audio-src="${mediaUrl(m.media_url)}">
               ${generateAudioBars()}
@@ -7602,6 +7608,11 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 8V4l8 8-8 8v-4H4V8h8z"/></svg>
       Reenviar
     </button>
+    ${msgType === 'image' ? `
+    <button class="ccm-item" data-action="copy-image">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+      Copiar imagen
+    </button>` : ''}
   `;
   document.body.appendChild(menu);
   const rect = menu.getBoundingClientRect();
@@ -7632,6 +7643,47 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
     close();
     startReplyTo(wamid);
   };
+  const copyImgBtn = menu.querySelector('[data-action="copy-image"]');
+  if (copyImgBtn) copyImgBtn.onclick = (ev) => {
+    ev.stopPropagation();
+    close();
+    copyImageOfMessage(wamid);
+  };
+}
+
+// Copia la imagen de un mensaje al portapapeles (click derecho / long-press →
+// "Copiar imagen"). El portapapeles en Chrome solo acepta image/png, así que si
+// la imagen es jpeg/webp la convertimos vía canvas antes de copiar.
+async function copyImageOfMessage(wamid) {
+  if (!navigator.clipboard || !window.ClipboardItem) {
+    toast('Tu navegador no permite copiar imágenes');
+    return;
+  }
+  const el = document.querySelector(`.chat-msg[data-wamid="${(window.CSS && CSS.escape) ? CSS.escape(wamid) : wamid}"] img`);
+  const src = el?.getAttribute('src') || el?.dataset?.imgPreview;
+  if (!src) { toast('No encontré la imagen'); return; }
+  try {
+    const resp = await fetch(src);
+    const blob = await resp.blob();
+    let outBlob = blob;
+    if (blob.type !== 'image/png') {
+      outBlob = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          const cv = document.createElement('canvas');
+          cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+          cv.getContext('2d').drawImage(img, 0, 0);
+          cv.toBlob(b => b ? resolve(b) : reject(new Error('canvas')), 'image/png');
+        };
+        img.onerror = reject;
+        img.src = URL.createObjectURL(blob);
+      });
+    }
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': outBlob })]);
+    toast('Imagen copiada ✓');
+  } catch (e) {
+    toast('No pude copiar la imagen');
+  }
 }
 
 function showForwardModal(wamid, msgType) {
@@ -7787,6 +7839,35 @@ function bindAudioPlayers() {
       const allBars = bars.querySelectorAll('.audio-bar');
       allBars.forEach(bar => bar.style.background = 'rgba(255,255,255,.4)');
     });
+  });
+
+  // Botón play/pausa explícito (símbolo ▶/⏸) — además del click en la onda.
+  // Sincroniza el ícono con el estado REAL del audio (play/pause/ended), así
+  // refleja también cuando se pausa solo al reproducir otro audio.
+  document.querySelectorAll('.chat-msg-audio').forEach(box => {
+    const audioEl = box.querySelector('audio[data-audio-el]');
+    const playBtn = box.querySelector('[data-audio-play]');
+    if (!audioEl || !playBtn) return;
+    const icoPlay = playBtn.querySelector('.ico-play');
+    const icoPause = playBtn.querySelector('.ico-pause');
+    const syncIcon = () => {
+      const playing = !audioEl.paused && !audioEl.ended;
+      if (icoPlay) icoPlay.style.display = playing ? 'none' : '';
+      if (icoPause) icoPause.style.display = playing ? '' : 'none';
+    };
+    playBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (audioEl.paused) {
+        document.querySelectorAll('audio[data-audio-el]').forEach(a => { if (a !== audioEl) a.pause(); });
+        audioEl.play();
+      } else {
+        audioEl.pause();
+      }
+    };
+    audioEl.addEventListener('play', syncIcon);
+    audioEl.addEventListener('pause', syncIcon);
+    audioEl.addEventListener('ended', syncIcon);
+    syncIcon();
   });
 }
 
