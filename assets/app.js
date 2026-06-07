@@ -5805,6 +5805,7 @@ async function sendChatMessage(phone, text) {
     renderChatMessages();
     const ta = document.getElementById('chat-input');
     if (ta) { ta.value = ''; ta.style.height = 'auto'; }
+    setDraft(phone, ''); // limpiar borrador guardado de este chat
     toast('Mensaje enviado');
   } catch (e) {
     toast('Error de red al enviar');
@@ -6475,7 +6476,7 @@ function renderContactItem(c) {
           <div class="chat-contact-time${hasUnread ? ' unread' : ''}">${formatChatTime(c.lastTs)}</div>
         </div>
         <div class="chat-contact-bottom">
-          <div class="chat-contact-preview">${previewIcon}${escapeHtml(preview)}</div>
+          <div class="chat-contact-preview" title="${escapeHtml(preview)}">${previewIcon}${escapeHtml(preview)}</div>
           <div style="display:flex;align-items:center;gap:4px">
             ${renderContactLabelChips(c.phone)}
             ${hasUnread ? `<div class="chat-contact-unread">${c.unread}</div>` : ''}
@@ -7920,6 +7921,20 @@ async function selectChatContact(phone) {
   }
 }
 
+// === Borradores por chat (persisten al cambiar de conversación y al recargar) ===
+// Guarda lo que estás tipeando, indexado por teléfono, en localStorage. Al volver
+// al chat (o recargar el CRM) el texto sigue ahí listo para mandar. Se borra al
+// enviar el mensaje.
+const DRAFTS_LS_KEY = 'ni_chat_drafts';
+let _chatDrafts = (() => { try { return JSON.parse(localStorage.getItem(DRAFTS_LS_KEY) || '{}'); } catch (_) { return {}; } })();
+function getDraft(phone) { return (phone && _chatDrafts[phone]) || ''; }
+function setDraft(phone, text) {
+  if (!phone) return;
+  if (text && text.trim()) _chatDrafts[phone] = text;
+  else delete _chatDrafts[phone];
+  try { localStorage.setItem(DRAFTS_LS_KEY, JSON.stringify(_chatDrafts)); } catch (_) {}
+}
+
 function bindChatConversation() {
   const ta = document.getElementById('chat-input');
   const btn = document.getElementById('chat-send-btn');
@@ -7938,10 +7953,15 @@ function bindChatConversation() {
   }
 
   if (ta) {
+    // Restaurar borrador guardado para este chat (si quedó algo sin enviar).
+    const _draft = getDraft(chatState.selectedPhone);
+    if (_draft && !ta.value) ta.value = _draft;
     ta.addEventListener('input', () => {
       // Marker para que el polling sepa que estás tipeando activamente
       // y evite refreshes pesados del sidebar mientras escribís.
       chatState._lastTypeMs = performance.now();
+      // Persistir el borrador por chat (sobrevive al cambiar de conversación y recargar).
+      setDraft(chatState.selectedPhone, ta.value);
       // El auto-resize del textarea lo maneja el CSS via `field-sizing: content`
       // (Chrome ≥123, Safari 17). No usamos JS para evitar reflows forzados.
       handleQuickReplyInput(ta);

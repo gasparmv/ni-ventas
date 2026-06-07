@@ -2643,6 +2643,10 @@ table.t td.cliente { font-weight: 600; }
   z-index: 320;
   min-width: 220px;
   max-width: 280px;
+  /* Con muchas etiquetas (20+) la lista crecía más que la pantalla y las de
+     abajo quedaban fuera de vista sin scroll. Cap + scroll para verlas todas. */
+  max-height: calc(100vh - 90px);
+  overflow-y: auto;
 }
 .label-picker-title {
   color: var(--fg-subtle);
