@@ -1553,6 +1553,10 @@ table.t td.cliente { font-weight: 600; }
   box-shadow: 0 1px 0.5px rgba(11,20,26,.13);
   margin-bottom: 1px;
   clear: both;
+  /* pan-y: el scroll vertical sigue funcionando, pero el gesto HORIZONTAL queda
+     para nuestro handler (swipe-derecha para citar) en vez de que el navegador
+     lo trate como scroll/atrás. Clave para que el swipe ande en mobile. */
+  touch-action: pan-y;
   /* === PERF: idem .chat-contact — skipear layout de bubbles off-screen ===
      200+ bubbles en el listado, ~10 visibles. contain-intrinsic-size estima
      altura promedio (text: 50px) — el browser ajusta si el bubble entra al
@@ -3570,15 +3574,16 @@ table.t td.cliente { font-weight: 600; }
     top: auto;
     height: auto;
     flex-direction: row;
-    padding: 6px 4px;
-    padding-bottom: max(6px, env(safe-area-inset-bottom));
+    align-items: center;
+    padding: 4px 6px;
+    padding-bottom: max(4px, env(safe-area-inset-bottom));
     border-top: 1px solid var(--border);
     border-right: 0;
     z-index: 50;
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     background: rgba(17, 17, 24, .92);
-    gap: 0;
+    gap: 6px;
     overflow: visible;
   }
 
@@ -3595,8 +3600,11 @@ table.t td.cliente { font-weight: 600; }
   }
   .sidebar .user-pick-label { display: none; }
   .sidebar .user-pick-chips {
-    flex-direction: column;
-    gap: 2px;
+    /* En fila (no columna) para que la barra inferior sea fina (~52px) y no un
+       bloque alto. Antes apilaba Abril/ojo/logout verticalmente = barra gorda. */
+    flex-direction: row;
+    align-items: center;
+    gap: 3px;
     padding: 0;
   }
   .sidebar .user-pick-chips .user-chip {
