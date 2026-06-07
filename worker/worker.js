@@ -4344,22 +4344,33 @@ export default {
                           : type === 'video' ? 'video/mp4'
                           : 'application/octet-stream';
         const mime = fileMime || defaultMime;
-        // WhatsApp/360dialog espera el MIME SIN parámetros (rechaza
-        // "audio/ogg; codecs=opus" o "audio/webm;codecs=opus"). Lo limpiamos.
         const cleanMime = mime.split(';')[0].trim();
         await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: cleanMime } });
-        // 2. Upload media to WA (Meta o 360dialog) para obtener media id
+        // 2. Upload media a WhatsApp (Meta o 360dialog) para obtener el media id.
+        // CLAVE para NOTAS DE VOZ: WhatsApp renderiza el audio como nota de voz
+        // (PTT, con ondita) SOLO si el mime del upload es "audio/ogg; codecs=opus"
+        // CON el parámetro de codec. Con "audio/ogg" pelado lo trata como ARCHIVO.
+        // (Verificado: el archivo que mandamos ya es ogg/opus válido — OggS +
+        // OpusHead —; lo único que faltaba era declarar el codec al subir.)
+        // Para el resto de tipos (imagen/video/doc) va el mime limpio.
         const _wa1 = getWaClient(env);
-        const uploadFd = new FormData();
-        uploadFd.append('messaging_product', 'whatsapp');
-        uploadFd.append('file', new Blob([buf], { type: cleanMime }), fileName);
-        uploadFd.append('type', cleanMime);
-        const uploadR = await fetch(_wa1.mediaUploadUrl(), {
-          method: 'POST',
-          headers: _wa1.headers,
-          body: uploadFd
-        });
-        const uploadData = await uploadR.json().catch(() => ({}));
+        const uploadAudioAsVoice = (type === 'audio' && /ogg/i.test(cleanMime));
+        const doMediaUpload = async (uploadMime) => {
+          const fd = new FormData();
+          fd.append('messaging_product', 'whatsapp');
+          fd.append('file', new Blob([buf], { type: uploadMime }), fileName);
+          fd.append('type', uploadMime);
+          const r = await fetch(_wa1.mediaUploadUrl(), { method: 'POST', headers: _wa1.headers, body: fd });
+          const d = await r.json().catch(() => ({}));
+          return { r, d };
+        };
+        let { r: uploadR, d: uploadData } = await doMediaUpload(uploadAudioAsVoice ? 'audio/ogg; codecs=opus' : cleanMime);
+        // Fallback: si el provider rechaza el mime con el codec param, reintentamos
+        // con el mime pelado (queda como archivo, pero se envía igual, no falla).
+        if ((!uploadR.ok || !uploadData.id) && uploadAudioAsVoice) {
+          const _retry = await doMediaUpload(cleanMime);
+          uploadR = _retry.r; uploadData = _retry.d;
+        }
         if (!uploadR.ok || !uploadData.id) {
           // Log de diagnóstico: mime recibido + respuesta cruda del provider.
           try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), `AUDIO_FAIL type=${type} mimeRecibido=${mime} clean=${cleanMime} status=${uploadR.status} resp=${JSON.stringify(uploadData).slice(0, 600)}`).run(); } catch (_) {}
