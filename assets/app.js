@@ -1902,7 +1902,7 @@ function renderShell() {
       <nav class="nav">
         ${isCursosOnly() ? `
           <button class="nav-item active" data-view="chat"><span class="icon">✉</span> Chat WA
-            <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread || ''}</span>
+            <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '')}</span>
           </button>
         ` : isDisenadorOnly() ? `
           <button class="nav-item active" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
@@ -1916,7 +1916,7 @@ function renderShell() {
         </button>
         <button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>
         ${canAccessChat() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
-          <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread || ''}</span>
+          <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '')}</span>
         </button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='insights'?'active':''}" data-view="insights"><span class="icon">⚡</span> Insights IA</button>` : ''}
         `}
@@ -5627,7 +5627,7 @@ function updateUnreadBadge() {
   // Update nav badge
   const badge = document.querySelector('[data-chat-badge]');
   if (badge) {
-    badge.textContent = chatState.totalUnread || '';
+    badge.textContent = chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '');
     badge.style.display = chatState.totalUnread ? '' : 'none';
   }
 }
@@ -6479,7 +6479,7 @@ function renderContactItem(c) {
           <div class="chat-contact-preview" title="${escapeHtml(preview)}">${previewIcon}${escapeHtml(preview)}</div>
           <div style="display:flex;align-items:center;gap:4px">
             ${renderContactLabelChips(c.phone)}
-            ${hasUnread ? `<div class="chat-contact-unread">${c.unread}</div>` : ''}
+            ${hasUnread ? `<div class="chat-contact-unread">${c.unread > 99 ? '99+' : c.unread}</div>` : ''}
           </div>
         </div>
       </div>
