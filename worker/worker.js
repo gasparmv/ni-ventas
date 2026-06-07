@@ -4394,8 +4394,23 @@ export default {
           } catch (_) { body = '[audio]'; }
         }
         try {
+          // UPSERT (NO "INSERT OR IGNORE"): el webhook de status ('sent') puede
+          // crear un placeholder msg_type='status' con este wamid ANTES de que
+          // termine el upload del audio/imagen (es lento: R2 + Cloud API). Con
+          // INSERT OR IGNORE el placeholder ganaba y la data real (media_url,
+          // tipo, body) se perdía → el media no se veía en otras PCs y quien lo
+          // mandó lo re-enviaba (de ahí el "se manda dos veces"). Con ON CONFLICT
+          // pisamos el placeholder con la data real, sin tocar el status ya
+          // avanzado (delivered/read).
           await env.DB.prepare(
-            'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(wamid) DO UPDATE SET
+               msg_type = excluded.msg_type,
+               body = excluded.body,
+               media_url = excluded.media_url,
+               context_id = excluded.context_id
+             WHERE wa_messages.msg_type = 'status' OR wa_messages.media_url IS NULL OR wa_messages.media_url = ''`
           ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', type, body, r2Key, replyTo || '', 'sent').run();
         } catch (_) {}
         return json({ id: r.id, r2Key, type });
