@@ -7477,8 +7477,14 @@ function cancelReply() {
 }
 
 function renderReplyBanner() {
-  const wrap = document.querySelector('.chat-input-wrap');
-  if (!wrap) return;
+  // El banner va ARRIBA de toda la barra de input (full-width, estilo WhatsApp),
+  // NO adentro de .chat-input-bar. Si se insertaba antes de .chat-input-wrap,
+  // quedaba como hijo en fila del flex horizontal y le robaba ancho al textarea
+  // → el textarea colapsaba a ~1 carácter y el texto se veía VERTICAL. Anclando
+  // en .chat-input-bar (cuyo contenedor apila en columna, igual que el banner de
+  // 24h) el banner queda arriba y el input mantiene su ancho.
+  const bar = document.querySelector('.chat-input-bar');
+  if (!bar) return;
   document.getElementById('reply-banner')?.remove();
   if (!chatState.replyingTo) return;
   const m = findMessageByWamid(chatState.replyingTo);
