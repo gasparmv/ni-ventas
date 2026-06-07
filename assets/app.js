@@ -7431,13 +7431,38 @@ function showPdfPreview(src, name) {
 // Solo funciona si el mensaje tiene wamid (no para optimistic locales sin wamid).
 function bindMessageContextMenus() {
   document.querySelectorAll('.chat-msg[data-wamid]').forEach(el => {
+    const wamid = el.dataset.wamid;
+    const msgType = el.dataset.msgType || 'text';
+    if (!wamid) return; // sin wamid no se puede citar/reenviar
     el.oncontextmenu = (e) => {
-      const wamid = el.dataset.wamid;
-      const msgType = el.dataset.msgType || 'text';
-      if (!wamid) return; // sin wamid no se puede reenviar
       e.preventDefault();
       showMessageActionsMenu(e.clientX, e.clientY, wamid, msgType);
     };
+    // DESKTOP: doble-click cita el mensaje para responder (estilo WhatsApp).
+    el.ondblclick = (e) => { e.preventDefault(); startReplyTo(wamid); };
+    // MOBILE: swipe del mensaje hacia la DERECHA → lo cita para responder.
+    // Solo cuenta el gesto si es horizontal (si es vertical, dejamos scrollear).
+    let _sx = 0, _sy = 0, _swiping = false;
+    el.addEventListener('touchstart', (ev) => {
+      if (ev.touches.length !== 1) { _swiping = false; return; }
+      _sx = ev.touches[0].clientX; _sy = ev.touches[0].clientY; _swiping = true;
+      el.style.transition = '';
+    }, { passive: true });
+    el.addEventListener('touchmove', (ev) => {
+      if (!_swiping) return;
+      const dx = ev.touches[0].clientX - _sx;
+      const dy = ev.touches[0].clientY - _sy;
+      if (Math.abs(dy) > Math.abs(dx)) { _swiping = false; el.style.transform = ''; return; }
+      if (dx > 0) el.style.transform = `translateX(${Math.min(dx, 80)}px)`;
+    }, { passive: true });
+    el.addEventListener('touchend', (ev) => {
+      if (!_swiping) return;
+      _swiping = false;
+      const dx = (ev.changedTouches[0] ? ev.changedTouches[0].clientX : _sx) - _sx;
+      el.style.transition = 'transform .15s ease';
+      el.style.transform = '';
+      if (dx > 55) startReplyTo(wamid); // pasó el umbral → citar
+    }, { passive: true });
   });
 }
 
