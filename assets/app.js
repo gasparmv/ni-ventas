@@ -7459,10 +7459,18 @@ function bindMessageContextMenus() {
       if (!_swiping) return;
       _swiping = false;
       const dx = (ev.changedTouches[0] ? ev.changedTouches[0].clientX : _sx) - _sx;
+      if (dx > 45) {
+        // preventDefault marca el gesto como acción deliberada → iOS permite que
+        // el focus() del input abra el TECLADO (como WhatsApp). Citamos (banner)
+        // y enfocamos DENTRO del gesto, antes del reset visual.
+        ev.preventDefault();
+        startReplyTo(wamid);
+        const ta = document.getElementById('chat-input');
+        if (ta) { ta.focus(); try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (_) {} }
+      }
       el.style.transition = 'transform .15s ease';
       el.style.transform = '';
-      if (dx > 55) startReplyTo(wamid); // pasó el umbral → citar
-    }, { passive: true });
+    }, { passive: false });
   });
 }
 
