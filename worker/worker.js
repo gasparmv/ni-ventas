@@ -1677,7 +1677,13 @@ async function processSheetLead(env, body) {
     ]);
 
     if (tplResult?.ok) {
-      const wamid = tplResult.data?.messages?.[0]?.id || '';
+      // BUG FIX: waSend devuelve el wamid en tplResult.id (y el raw en .raw),
+      // NO en .data. Antes leía tplResult.data?.messages[0].id → siempre ''.
+      // Por eso el template del form B2B se mandaba (el lead lo recibía) pero
+      // NO aparecía en el CRM: con wamid='' se saltaba el INSERT en wa_messages
+      // y solo quedaba el placeholder vacío de status. El webhook real (línea
+      // ~1558) ya usaba .id bien; el bridge de Sheets tenía el typo.
+      const wamid = tplResult.id || '';
       try {
         await env.DB.prepare(
           'UPDATE wa_leads SET template_status = ?, template_sent_at = ?, wamid = ? WHERE leadgen_id = ?'
