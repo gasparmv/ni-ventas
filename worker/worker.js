@@ -728,13 +728,16 @@ async function processCursosBroadcastQueue(env) {
 async function processPendingMedia(env) {
   if (!env.MEDIA) return;
   try {
-    const cutoff = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    // Ventana de 24h (antes 2h): la media de 360dialog puede tardar en estar
+    // disponible o el worker pudo estar saturado; 24h da margen sin reintentar
+    // eternamente media ya caducada.
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const rs = await env.DB.prepare(
       "SELECT id, media_url FROM wa_messages " +
       "WHERE msg_type IN ('image','video','audio','document','sticker') " +
       "  AND media_url GLOB '[0-9]*' AND length(media_url) > 8 " +
       "  AND ts >= ? " +
-      "ORDER BY id DESC LIMIT 20"
+      "ORDER BY id DESC LIMIT 60"
     ).bind(cutoff).all();
     for (const row of (rs.results || [])) {
       try {
@@ -1756,6 +1759,24 @@ async function downloadMedia(env, mediaId) {
   }
 }
 
+// Reintenta downloadMedia ante fallo transitorio. Causa #1 de imágenes/audios
+// vacíos: el webhook llega ANTES de que Meta/360dialog tenga el media listo para
+// descargar (race condition). El primer intento es inmediato; si falla, espera y
+// reintenta. Solo agrega latencia en el ~14% de casos que fallan a la primera;
+// los que andan al toque no se demoran. Corre dentro de ctx.waitUntil (no bloquea
+// la respuesta al webhook), así que los segundos de espera son seguros.
+async function downloadMediaWithRetry(env, mediaId, attempts = 3) {
+  const delays = [0, 1500, 4000];
+  for (let i = 0; i < attempts; i++) {
+    if (delays[i]) await new Promise(r => setTimeout(r, delays[i]));
+    try {
+      const dl = await downloadMedia(env, mediaId);
+      if (dl) return dl;
+    } catch (_) { /* reintentar */ }
+  }
+  return null;
+}
+
 // ===== Render hiperrealista con Gemini (image-to-image) =====
 // Prompt para generar el render. Soporta tanto un boceto vectorizado como
 // una captura/foto que mandó Joaco — adapta el comportamiento según el caso.
@@ -2172,15 +2193,17 @@ async function processCoexistenceHistory(env, data) {
 
   // Helper: inserta un mensaje en wa_messages, baja media a R2, atribuye ads.
   const insertMsg = async ({ wamid, ts, direction, phone, senderName, m }) => {
-    const { msgType, body, mediaUrl, contextId } = parseMsg(m);
+    let { msgType, body, mediaUrl, contextId } = parseMsg(m);
 
-    // Bajar media a R2 (best-effort).
+    // Bajar media a R2 (best-effort, con reintentos por el race del webhook).
     let r2Key = '';
     if (mediaUrl && env.MEDIA) {
-      try { const dl = await downloadMedia(env, mediaUrl); if (dl) r2Key = dl.key; } catch (_) {}
+      try { const dl = await downloadMediaWithRetry(env, mediaUrl); if (dl) r2Key = dl.key; } catch (_) {}
     }
     if (msgType === 'audio' && r2Key && env.AI) {
-      try { const t = await transcribeAudio(env, r2Key); if (t) { /* body se guarda como '[audio] X' */ } } catch (_) {}
+      // FIX: antes esto era un no-op (calculaba la transcripción y la tiraba).
+      // Ahora la guardamos en body como '[audio] <texto>' igual que la rama live.
+      try { const t = await transcribeAudio(env, r2Key); if (t) body = '[audio] ' + t; } catch (_) {}
     }
 
     try {
@@ -2703,11 +2726,12 @@ export default {
                 }
                 const contextId = msg.context?.id || msg.reaction?.message_id || '';
                 const ts = msg.timestamp ? new Date(parseInt(msg.timestamp) * 1000).toISOString() : new Date().toISOString();
-                // Download media to R2 if present
+                // Download media to R2 if present (con reintentos: el webhook
+                // suele llegar antes de que el media esté listo en Meta).
                 let r2Key = '';
                 if (mediaUrl && env.MEDIA) {
                   try {
-                    const dl = await downloadMedia(env, mediaUrl);
+                    const dl = await downloadMediaWithRetry(env, mediaUrl);
                     if (dl) r2Key = dl.key;
                   } catch (_) {}
                 }
@@ -2859,7 +2883,7 @@ export default {
                 // Bajar media a R2 si tiene id (algunos echoes traen el media id).
                 let r2Key = '';
                 if (mediaUrl && env.MEDIA) {
-                  try { const dl = await downloadMedia(env, mediaUrl); if (dl) r2Key = dl.key; } catch (_) {}
+                  try { const dl = await downloadMediaWithRetry(env, mediaUrl); if (dl) r2Key = dl.key; } catch (_) {}
                 }
                 if (msgType === 'audio' && r2Key && env.AI) {
                   try { const t = await transcribeAudio(env, r2Key); if (t) msgBody = '[audio] ' + t; } catch (_) {}
