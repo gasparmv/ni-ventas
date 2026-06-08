@@ -4514,6 +4514,8 @@ async function loadAdminActivity() {
 function bindAdmin() {
   document.querySelectorAll('[data-admin-range]').forEach(b => b.onclick = () => { adminData.range = b.dataset.adminRange; loadAdminActivity(); });
   if (!adminData.rows.length && !adminData.error && !adminData.loading && isAdmin()) loadAdminActivity();
+  // Stats del copiloto IA (generadas / enviadas / editadas / descartadas).
+  maybeRefreshCopilotCost();
 
   const saveBtn = document.querySelector('[data-cot-save]');
   if (saveBtn) saveBtn.onclick = async () => {
@@ -4631,6 +4633,17 @@ function renderAdmin() {
     </div>
 
     ${renderAdminCotizador()}
+
+    <div class="card" style="margin-bottom:var(--s-4)">
+      <div class="card-h">
+        <h3>Copiloto IA · sugerencias</h3>
+        <span class="muted" style="font-size:12px">se cobra solo al tocar ✨</span>
+      </div>
+      <div id="copilot-admin-stats"><div class="loading"><div class="spinner"></div></div></div>
+      <div class="muted" style="font-size:12px;margin-top:var(--s-3);line-height:1.5;border-top:1px solid var(--border);padding-top:var(--s-3)">
+        <b>Mejoras al playbook:</b> cada vez que editás o descartás una sugerencia, el sistema lo registra (qué cambiaste y por qué no servía). Esa data se va juntando y la síntesis de mejoras al guión va a aparecer acá mismo para que la apruebes — es la próxima fase (2C), todavía no está activa pero ya estamos guardando todo.
+      </div>
+    </div>
 
     <div class="card admin-soon">
       <div class="card-h"><h3>Próximamente</h3></div>
@@ -6450,14 +6463,48 @@ function logSuggestionFeedback(s, finalText, action) {
 
 async function maybeRefreshCopilotCost() {
   if (typeof getUserRole === 'function' && getUserRole() !== 'admin') return;
+  // Solo pega al endpoint si hay algo en pantalla que llenar (contador del
+  // toolbar o tarjeta del panel admin). Evita fetches innecesarios.
+  const costEl = document.getElementById('copilot-cost');
+  const statsEl = document.getElementById('copilot-admin-stats');
+  if (!costEl && !statsEl) return;
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/copilot/usage', { headers: { ...authHeaders() } });
     const j = await r.json();
     if (j && j.ok) {
-      const el = document.getElementById('copilot-cost');
-      if (el) el.textContent = `🤖 $${(j.month.cost_usd || 0).toFixed(2)}`;
+      if (costEl) costEl.textContent = `🤖 $${(j.month.cost_usd || 0).toFixed(2)}`;
+      if (statsEl) statsEl.innerHTML = renderCopilotStatsHTML(j);
     }
-  } catch (_) {}
+  } catch (_) {
+    if (statsEl) statsEl.innerHTML = '<div class="muted" style="padding:16px">No se pudo cargar el uso del copiloto</div>';
+  }
+}
+
+// Pinta el detalle de uso del copiloto en el panel admin. j = respuesta de
+// GET /admin/copilot/usage. Muestra el mes en curso (generadas / enviadas tal
+// cual / editadas / descartadas / costo) + histórico con tasa "tal cual".
+function renderCopilotStatsHTML(j) {
+  const m = j.month || {}, t = j.total || {};
+  const gen = m.generated || 0, sent = m.sent || 0, edited = m.edited || 0, ignored = m.ignored || 0;
+  // Tasa "tal cual" = de las que se mandaron (tal cual + editadas), cuántas
+  // salieron sin tocar. Señal de qué tan buena viene la sugerencia.
+  const usadas = (t.sent || 0) + (t.edited || 0);
+  const tasaTalCual = usadas > 0 ? Math.round((t.sent || 0) / usadas * 100) : null;
+  return `
+    <div class="kpi-grid" style="margin-bottom:var(--s-3)">
+      <div class="kpi cyan"><div class="kpi-label">Generadas (mes)</div><div class="kpi-value">${gen}</div></div>
+      <div class="kpi"><div class="kpi-label">Enviadas tal cual</div><div class="kpi-value">${sent}</div></div>
+      <div class="kpi"><div class="kpi-label">Editadas</div><div class="kpi-value">${edited}</div></div>
+      <div class="kpi"><div class="kpi-label">Descartadas</div><div class="kpi-value">${ignored}</div></div>
+    </div>
+    <div class="kpi-grid">
+      <div class="kpi"><div class="kpi-label">Costo del mes</div><div class="kpi-value">$${(m.cost_usd || 0).toFixed(2)}</div></div>
+      <div class="kpi"><div class="kpi-label">Tasa "tal cual"</div><div class="kpi-value">${tasaTalCual == null ? '—' : tasaTalCual + '%'}</div></div>
+      <div class="kpi"><div class="kpi-label">Edición prom.</div><div class="kpi-value">${t.avg_edit_distance || 0}</div></div>
+      <div class="kpi"><div class="kpi-label">Generadas (total)</div><div class="kpi-value">${t.generated || 0}</div></div>
+    </div>
+    <div class="muted" style="font-size:12px;margin-top:var(--s-2)">Histórico: ${t.sent || 0} enviadas tal cual · ${t.edited || 0} editadas · ${t.ignored || 0} descartadas · $${(t.cost_usd || 0).toFixed(2)} gastado en total</div>
+  `;
 }
 
 function renderChat() {
@@ -6511,6 +6558,7 @@ function renderChat() {
               <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM12 17.5L6.5 12H10v-2h4v2h3.5L12 17.5zM5.12 5l.81-1h12l.94 1H5.12z"/></svg>
             </button>
             <button class="btn-send" id="chat-refresh" style="width:34px;height:34px;font-size:16px" title="Actualizar">↻</button>
+            ${getUserRole() === 'admin' ? '<span id="copilot-cost" class="copilot-cost" title="Gasto IA del mes en sugerencias"></span>' : ''}
           </div>
         </div>
         <div class="chat-contacts-search">
@@ -6835,7 +6883,6 @@ function renderChatConversation() {
         <button class="btn-label-toggle" id="btn-labels" title="Etiquetas">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg>
         </button>
-        ${getUserRole() === 'admin' ? '<span id="copilot-cost" class="copilot-cost" title="Gasto IA del mes en sugerencias"></span>' : ''}
       </div>
       <div class="chat-label-chips" id="chat-label-chips">${renderContactLabelChips(phone)}</div>
     </div>

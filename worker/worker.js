@@ -3515,19 +3515,30 @@ export default {
       // ----- Copiloto: contador de gasto IA (solo Gaspar) -----
       if (request.method === 'GET' && path === '/admin/copilot/usage') {
         if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
-        const ms = new Date(); ms.setUTCDate(1); ms.setUTCHours(0, 0, 0, 0);
-        const ds = new Date(); ds.setUTCHours(0, 0, 0, 0);
-        const q = async (since) => await env.DB.prepare(
-          `SELECT COUNT(*) AS n, ROUND(SUM(cost_usd), 4) AS cost FROM copilot_usage WHERE created_at >= ?`
-        ).bind(since).first();
-        const month = await q(ms.toISOString());
-        const today = await q(ds.toISOString());
-        const total = await env.DB.prepare(`SELECT COUNT(*) AS n, ROUND(SUM(cost_usd), 4) AS cost FROM copilot_usage`).first();
+        const ms = new Date(); ms.setUTCDate(1); ms.setUTCHours(0, 0, 0, 0); const m = ms.toISOString();
+        const ds = new Date(); ds.setUTCHours(0, 0, 0, 0); const d = ds.toISOString();
+        const usage = async (cond, ...b) => await env.DB.prepare(
+          `SELECT COUNT(*) AS n, ROUND(SUM(cost_usd), 4) AS cost FROM copilot_usage WHERE kind = 'suggest'${cond}`
+        ).bind(...b).first();
+        const fb = async (cond, ...b) => {
+          const rows = (await env.DB.prepare(
+            `SELECT action, COUNT(*) AS n FROM suggestion_feedback${cond} GROUP BY action`
+          ).bind(...b).all()).results || [];
+          const o = { sent: 0, edited: 0, ignored: 0 };
+          rows.forEach(r => { if (o[r.action] != null) o[r.action] = r.n; });
+          return o;
+        };
+        const uD = await usage(' AND created_at >= ?', d);
+        const uM = await usage(' AND created_at >= ?', m);
+        const uT = await usage('');
+        const fM = await fb(' WHERE created_at >= ?', m);
+        const fT = await fb('');
+        const edT = await env.DB.prepare(`SELECT ROUND(AVG(edit_distance), 1) AS a FROM suggestion_feedback WHERE action = 'edited' AND edit_distance IS NOT NULL`).first();
         return json({
           ok: true,
-          month: { count: month?.n || 0, cost_usd: month?.cost || 0 },
-          today: { count: today?.n || 0, cost_usd: today?.cost || 0 },
-          total: { count: total?.n || 0, cost_usd: total?.cost || 0 }
+          today: { count: uD?.n || 0, cost_usd: uD?.cost || 0 },
+          month: { count: uM?.n || 0, cost_usd: uM?.cost || 0, generated: uM?.n || 0, sent: fM.sent, edited: fM.edited, ignored: fM.ignored },
+          total: { count: uT?.n || 0, cost_usd: uT?.cost || 0, generated: uT?.n || 0, sent: fT.sent, edited: fT.edited, ignored: fT.ignored, avg_edit_distance: edT?.a || 0 }
         });
       }
 
