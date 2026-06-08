@@ -657,6 +657,7 @@ async function revealCursosCampaign(env, phone, msgBody) {
 // wa_messages, INSERT en wa_cursos_campaign, etiqueta 'form 6 y 7 de mayo',
 // y oculta el chat (inbox='oculto') hasta que el cliente responda.
 async function processCursosBroadcastQueue(env) {
+  if (await isWaBillingBlocked(env)) return; // pausado por bloqueo de pago de WhatsApp
   try {
     const nowIso = new Date().toISOString();
     // Floor de 6 hs (no procesamos colas muy viejas — si el worker estuvo down).
@@ -808,6 +809,7 @@ async function processCursosCampaignPending(env) {
 // Cron: follow-up (template 2) a los que NO respondieron al template 1 hace ≥12h.
 // Una sola vez por contacto. El chat sigue oculto hasta que respondan.
 async function processCursosFollowup(env) {
+  if (await isWaBillingBlocked(env)) return; // pausado por bloqueo de pago de WhatsApp
   try {
     const cutoff = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
     const rs = await env.DB.prepare(
@@ -1051,6 +1053,7 @@ async function processAutoReplyQueue(env) {
 // Ventana 4–24h: el límite de 24h evita (a) mandar a contactos históricos que el
 // backfill cargó en wa_autoreply_log y (b) caer fuera de la ventana libre de 24h.
 async function processMinicursoFollowup(env) {
+  if (await isWaBillingBlocked(env)) return; // pausado por bloqueo de pago de WhatsApp
   try {
     const cutoffHigh = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();  // ≥4h
     const cutoffLow  = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); // ≤24h
@@ -3062,6 +3065,56 @@ async function getUsdArsRate(env) {
   } catch (_) { return null; }
 }
 
+// ===== Circuit breaker: bloqueo de pago de WhatsApp (error Meta 131042) =====
+// Cuando Meta rechaza la ENTREGA con "Business eligibility payment issue", el
+// problema es de cuenta (saldo/credit line de 360dialog), no del destinatario.
+// Pausamos los envíos automáticos para no quemar contactos ni spamear a Gaspar,
+// y reanudamos solos cuando un envío vuelve a salir OK (o tras un cooldown).
+const WA_BILLING_BLOCK_KEY = 'wa_billing_block';
+const WA_BILLING_COOLDOWN_MS = 3 * 60 * 60 * 1000;   // tras el último bloqueo, reintenta a las 3h
+const WA_BILLING_NOTIFY_MS = 12 * 60 * 60 * 1000;    // avisa como mucho 1 vez cada 12h
+
+function isBillingBlockError(code, msg) {
+  if (code === 131042 || code === '131042') return true;
+  const m = String(msg || '').toLowerCase();
+  return m.includes('eligibility') || (m.includes('payment') && m.includes('issue'));
+}
+
+async function setWaBillingBlock(env, errMsg) {
+  const now = Date.now();
+  let prev = null;
+  try { const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k=?').bind(WA_BILLING_BLOCK_KEY).first(); if (row) prev = JSON.parse(row.v); } catch (_) {}
+  const lastNotify = (prev && prev.last_notify_at) || 0;
+  const shouldNotify = (now - lastNotify) > WA_BILLING_NOTIFY_MS;
+  const obj = {
+    since: (prev && prev.since) || now,
+    updated_at: now,
+    count: ((prev && prev.count) || 0) + 1,
+    last_error: String(errMsg || '').slice(0, 300),
+    last_notify_at: shouldNotify ? now : lastNotify
+  };
+  try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at').bind(WA_BILLING_BLOCK_KEY, JSON.stringify(obj), new Date().toISOString()).run(); } catch (_) {}
+  return { shouldNotify, count: obj.count };
+}
+
+async function clearWaBillingBlock(env) {
+  try {
+    const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k=?').bind(WA_BILLING_BLOCK_KEY).first();
+    if (!row) return false; // no estaba bloqueado
+    await env.DB.prepare('DELETE FROM kv_cache WHERE k=?').bind(WA_BILLING_BLOCK_KEY).run();
+    return true; // estaba bloqueado y se resolvió
+  } catch (_) { return false; }
+}
+
+async function isWaBillingBlocked(env) {
+  try {
+    const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k=?').bind(WA_BILLING_BLOCK_KEY).first();
+    if (!row) return false;
+    const obj = JSON.parse(row.v);
+    return (Date.now() - ((obj && obj.updated_at) || 0)) < WA_BILLING_COOLDOWN_MS;
+  } catch (_) { return false; }
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
@@ -3505,15 +3558,31 @@ export default {
                       ).bind(phone, ts, ts).run();
                     } catch (_) {}
                   }
+                  // Si un envío vuelve a salir OK y había bloqueo de pago activo,
+                  // levantarlo (se reanudan los flujos automáticos) y avisar.
+                  if (status === 'sent' || status === 'delivered') {
+                    try { if (await clearWaBillingBlock(env) && env.ADMIN_NOTIFY_PHONE) await waSendText(env, env.ADMIN_NOTIFY_PHONE, 'WhatsApp volvió a andar — reanudo los envíos automáticos'); } catch (_) {}
+                  }
                   // Notificar al admin si el envío FALLA (primera vez que llega como failed)
-                  if (status === 'failed' && prevStatus !== 'failed' && env.ADMIN_NOTIFY_PHONE) {
+                  if (status === 'failed' && prevStatus !== 'failed') {
                     const errs = Array.isArray(st.errors) ? st.errors : [];
+                    const errCode = errs.length ? errs[0].code : null;
+                    // Evitar el duplicado feo "X: X" cuando title === message.
                     const errMsg = errs.length
-                      ? (errs[0].title || 'error') + (errs[0].message ? ': ' + errs[0].message : '')
+                      ? (errs[0].title || 'error') + (errs[0].message && errs[0].message !== errs[0].title ? ': ' + errs[0].message : '')
                       : 'sin detalle';
-                    const preview = prevBody ? prevBody.slice(0, 100) + (prevBody.length > 100 ? '…' : '') : '';
-                    const summary = `⚠ Falló envío WA a ${phone}\nError: ${errMsg}` + (preview ? `\nMensaje: "${preview}"` : '');
-                    try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
+                    if (isBillingBlockError(errCode, errMsg)) {
+                      // Bloqueo de cuenta por pago: pausar envíos automáticos + avisar 1 vez por episodio.
+                      const { shouldNotify } = await setWaBillingBlock(env, errMsg);
+                      if (shouldNotify && env.ADMIN_NOTIFY_PHONE) {
+                        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp BLOQUEADO por pago (error de elegibilidad/saldo de Meta)\nCargá saldo en hub.360dialog.com (Billing). Pausé los envíos automáticos para no quemar contactos — se reanudan solos cuando vuelva a andar'); } catch (_) {}
+                      }
+                    } else if (env.ADMIN_NOTIFY_PHONE) {
+                      // Fallo puntual (destinatario, etc.) → aviso por mensaje, como antes.
+                      const preview = prevBody ? prevBody.slice(0, 100) + (prevBody.length > 100 ? '…' : '') : '';
+                      const summary = `⚠ Falló envío WA a ${phone}\nError: ${errMsg}` + (preview ? `\nMensaje: "${preview}"` : '');
+                      try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
+                    }
                   }
                 } catch (_) {}
               }
@@ -3973,7 +4042,8 @@ export default {
             wa_provider: env.WA_PROVIDER || 'meta',
             has_d360_key: !!env.D360_API_KEY,
             has_wa_token: !!env.WA_TOKEN,
-            has_anthropic_key: !!env.ANTHROPIC_API_KEY
+            has_anthropic_key: !!env.ANTHROPIC_API_KEY,
+            wa_billing_blocked: await isWaBillingBlocked(env)
           }
         });
       }
@@ -3984,6 +4054,11 @@ export default {
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const action = body?.action || 'upsert';
         const now = new Date().toISOString();
+        if (action === 'resume_wa') {
+          // Reanudar manualmente los envíos (tras cargar saldo en 360dialog).
+          const was = await clearWaBillingBlock(env);
+          return json({ ok: true, was_blocked: was });
+        }
         if (action === 'set_rate') {
           const rt = parseFloat(body?.usd_ars);
           if (!isFinite(rt) || rt <= 0) return json({ error: 'tipo de cambio inválido' }, 400);
@@ -6545,6 +6620,7 @@ async function monitorTemplateStatus(env) {
 
 // ===== Scheduled Messages =====
 async function processScheduledMessages(env) {
+  if (await isWaBillingBlocked(env)) return; // pausado por bloqueo de pago de WhatsApp
   const now = new Date().toISOString();
   let rows;
   try {
@@ -6814,6 +6890,7 @@ async function waSendImage(env, to, mediaId, caption) {
 }
 
 async function processPresupuestoFollowups(env) {
+  if (await isWaBillingBlocked(env)) return; // pausado por bloqueo de pago de WhatsApp
   const now = Date.now();
   const oneHourAgo = new Date(now - 60 * 60 * 1000).toISOString();
   const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();

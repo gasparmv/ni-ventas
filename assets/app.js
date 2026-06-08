@@ -6716,8 +6716,11 @@ function renderCostsHTML(j) {
       </div>
     </div>` : `<button class="btn btn-ghost" onclick="startAddCost()" style="margin-top:var(--s-2)">+ Agregar servicio</button>`;
 
-  const provLine = `<div class="muted" style="font-size:11px;margin-top:var(--s-3);border-top:1px solid var(--border);padding-top:var(--s-2)">
-    WhatsApp activo: <b>${escapeHtml(pv.wa_provider || '?')}</b> · credenciales configuradas: 360dialog ${pv.has_d360_key ? '✓' : '✗'} · Anthropic ${pv.has_anthropic_key ? '✓' : '✗'} · Meta token ${pv.has_wa_token ? '✓' : '✗'}
+  const blockBanner = pv.wa_billing_blocked
+    ? `<div class="cost-block-banner">🔴 WhatsApp BLOQUEADO por pago — cargá saldo en <a href="https://hub.360dialog.com" target="_blank" rel="noopener">hub.360dialog.com</a>. Envíos automáticos pausados; se reanudan solos al destrabarse. <button class="cost-btn" onclick="resumeWa()" style="margin-left:6px">reanudar ahora</button></div>`
+    : '';
+  const provLine = blockBanner + `<div class="muted" style="font-size:11px;margin-top:var(--s-3);border-top:1px solid var(--border);padding-top:var(--s-2)">
+    WhatsApp activo: <b>${escapeHtml(pv.wa_provider || '?')}</b>${pv.wa_billing_blocked ? ' <span style="color:#ff6b6b">(bloqueado)</span>' : ''} · credenciales configuradas: 360dialog ${pv.has_d360_key ? '✓' : '✗'} · Anthropic ${pv.has_anthropic_key ? '✓' : '✗'} · Meta token ${pv.has_wa_token ? '✓' : '✗'}
     ${j.usage ? `<br>uso del mes: ${j.usage.wa_outbound_msgs} mensajes salientes a ${j.usage.wa_conversations} contactos` : ''}
   </div>`;
 
@@ -6781,7 +6784,15 @@ async function saveRate() {
   else alert('No se pudo guardar el tipo de cambio');
 }
 
+async function resumeWa() {
+  if (!confirm('Reanudar los envíos automáticos de WhatsApp? Hacelo solo si ya cargaste saldo en 360dialog.')) return;
+  const j = await postCosts({ action: 'resume_wa' });
+  if (j && j.ok) await loadCosts();
+  else alert('No se pudo reanudar');
+}
+
 window.startEditCost = startEditCost;
+window.resumeWa = resumeWa;
 window.cancelEditCost = cancelEditCost;
 window.startAddCost = startAddCost;
 window.cancelAddCost = cancelAddCost;

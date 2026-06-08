@@ -4153,4 +4153,6 @@ table.t td.cliente { font-weight: 600; }
 .cost-edit-grid label, .cost-full { display:flex; flex-direction:column; gap:3px; font-size:11px; color:#8696a0 }
 .cost-full { margin-top:8px }
 .cost-full input { width:100% }
+.cost-block-banner { background:rgba(255,68,68,.15); border:1px solid rgba(255,68,68,.4); color:#ffb4b4; border-radius:8px; padding:9px 11px; font-size:12px; line-height:1.4; margin-top:var(--s-3) }
+.cost-block-banner a { color:#fff; text-decoration:underline }
 
