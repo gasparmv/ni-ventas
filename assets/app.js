@@ -5074,7 +5074,7 @@ async function loadChatTemplates() {
     if (r.ok) {
       const j = await r.json();
       const list = Array.isArray(j.templates) ? j.templates : [];
-      chatState.templates = list.filter(t => String(t.status || '').toLowerCase() === 'approved' && t.name !== 'prueba_de_plantilla');
+      chatState.templates = list.filter(t => String(t.status || '').toLowerCase() === 'approved' && t.name !== 'prueba_de_plantilla' && !String(t.name || '').startsWith('adhoc_'));
       chatState.tplLoaded = true;
     }
   } catch (_) {}

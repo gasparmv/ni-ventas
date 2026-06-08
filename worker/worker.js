@@ -5913,7 +5913,7 @@ export default {
         const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
         try {
           const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_pending_template_send WHERE created_by = ? AND created_at >= ?").bind(session.user, dayStart.toISOString()).first();
-          if (c && c.n >= 5) return json({ error: 'Llegaste al máximo de 5 plantillas nuevas por día.' }, 429);
+          if (c && c.n >= 100) return json({ error: 'Llegaste al máximo de 100 plantillas nuevas por día.' }, 429);
         } catch (_) {}
         const tplName = 'adhoc_' + Date.now();
         const _waT = getWaClient(env);
