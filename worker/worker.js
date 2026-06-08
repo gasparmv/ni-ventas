@@ -49,8 +49,14 @@ function cors(headers = {}) {
     ...headers
   };
 }
+// Semilla del framework de venta. framework-venta.js se autogenera desde
+// framework-venta.md (string JSON, módulo JS normal — no requiere reglas de wrangler).
+import { FRAMEWORK_SEED_B64 } from './knowledge/framework-venta.js';
+// Decodificar base64 UTF-8 -> string (evita problemas de escaping/interop al bundlear).
+const FRAMEWORK_SEED = new TextDecoder().decode(Uint8Array.from(atob(FRAMEWORK_SEED_B64), c => c.charCodeAt(0)));
+
 function json(data, status = 200) {
-  return new Response(JSON.stringify(data), { status, headers: cors({ 'Content-Type': 'application/json' }) });
+  return new Response(JSON.stringify(data), { status, headers: cors({ 'Content-Type': 'application/json; charset=utf-8' }) });
 }
 function noContent() {
   return new Response(null, { status: 204, headers: cors() });
@@ -2508,6 +2514,95 @@ async function invalidateChatsSummaryCache(request) {
   } catch (_) {}
 }
 
+// ===== Framework de venta (hogar operativo del agente IA) =====
+// Vive en D1 (tabla sales_framework, versionada). Se auto-siembra desde
+// FRAMEWORK_SEED (worker/knowledge/framework-venta.md) si la tabla está vacía.
+// El agente lee la versión activa en runtime; el bucle de retroalimentación
+// inserta versiones nuevas con aprobación humana. Source: seed|manual|synthesis.
+async function ensureFrameworkSeeded(env) {
+  try {
+    const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM sales_framework').first();
+    if (row && row.n > 0) return;
+    await env.DB.prepare(
+      `INSERT INTO sales_framework (version, content, format, is_active, source, notes, created_by, created_at)
+       VALUES (1, ?, 'md', 1, 'seed', 'Semilla inicial desde el repo', 'system', ?)`
+    ).bind(FRAMEWORK_SEED, new Date().toISOString()).run();
+    await deriveFrameworkSections(env, 1, FRAMEWORK_SEED);
+  } catch (e) { try { console.error('sales_framework seed:', (e && e.message) || e); } catch (_) {} }
+}
+
+async function getActiveFramework(env) {
+  await ensureFrameworkSeeded(env);
+  return await env.DB.prepare(
+    `SELECT version, content, format, source, notes, created_by, created_at
+     FROM sales_framework WHERE is_active = 1 ORDER BY version DESC LIMIT 1`
+  ).first();
+}
+
+// Parte el markdown del playbook en secciones (por encabezados # .. ######).
+// Cada sección = { order_idx, level, heading, body }. Sirve para retrieval
+// dirigido y feedback por sección (en vez de mandar el blob entero al modelo).
+function parseMarkdownSections(md) {
+  const lines = String(md || '').split(/\r?\n/);
+  const sections = [];
+  let cur = null;
+  let order = 0;
+  for (const line of lines) {
+    const m = line.match(/^(#{1,6})\s+(.*)$/);
+    if (m) {
+      if (cur) sections.push(cur);
+      cur = { order_idx: order++, level: m[1].length, heading: m[2].trim(), body: '' };
+    } else if (cur) {
+      cur.body += (cur.body ? '\n' : '') + line;
+    }
+  }
+  if (cur) sections.push(cur);
+  return sections.map(s => ({ order_idx: s.order_idx, level: s.level, heading: s.heading, body: s.body.trim() }));
+}
+
+// Deriva (regenera) las secciones de una versión del playbook en framework_sections.
+async function deriveFrameworkSections(env, version, content) {
+  try {
+    const secs = parseMarkdownSections(content);
+    await env.DB.prepare('DELETE FROM framework_sections WHERE version = ?').bind(version).run();
+    const now = new Date().toISOString();
+    for (const s of secs) {
+      await env.DB.prepare(
+        `INSERT INTO framework_sections (version, order_idx, level, heading, body, tags, created_at)
+         VALUES (?, ?, ?, ?, ?, '', ?)`
+      ).bind(version, s.order_idx, s.level, s.heading, s.body, now).run();
+    }
+  } catch (e) { try { console.error('deriveFrameworkSections:', (e && e.message) || e); } catch (_) {} }
+}
+
+// Asegura que existan las secciones de una versión (deriva on-demand si faltan).
+async function ensureSectionsForVersion(env, version, content) {
+  try {
+    const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM framework_sections WHERE version = ?').bind(version).first();
+    if (row && row.n > 0) return;
+    await deriveFrameworkSections(env, version, content);
+  } catch (_) {}
+}
+
+// Distancia de Levenshtein (para edit_distance entre sugerencia y mensaje enviado).
+function levenshtein(a, b) {
+  a = String(a || ''); b = String(b || '');
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let v0 = new Array(b.length + 1), v1 = new Array(b.length + 1);
+  for (let i = 0; i <= b.length; i++) v0[i] = i;
+  for (let i = 0; i < a.length; i++) {
+    v1[0] = i + 1;
+    for (let j = 0; j < b.length; j++) {
+      const cost = a[i] === b[j] ? 0 : 1;
+      v1[j + 1] = Math.min(v1[j] + 1, v0[j + 1] + 1, v0[j] + cost);
+    }
+    const tmp = v0; v0 = v1; v1 = tmp;
+  }
+  return v0[b.length];
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
@@ -3199,6 +3294,86 @@ export default {
 
       if (request.method === 'GET' && path === '/admin/activity') {
         return reportHandler(env, url, true);
+      }
+
+      // ----- Framework de venta (sales_framework) -----
+      // Lectura: cualquier sesión válida (ver el playbook). Escritura: solo admin.
+      if (request.method === 'GET' && path === '/admin/framework') {
+        const fw = await getActiveFramework(env);
+        if (fw && url.searchParams.get('sections')) {
+          await ensureSectionsForVersion(env, fw.version, fw.content);
+          const rs = await env.DB.prepare(
+            'SELECT order_idx, level, heading, body, tags FROM framework_sections WHERE version = ? ORDER BY order_idx'
+          ).bind(fw.version).all();
+          return json({ ok: true, framework: fw, sections: (rs.results || []) });
+        }
+        return json({ ok: true, framework: fw || null });
+      }
+      if (request.method === 'GET' && path === '/admin/framework/versions') {
+        await ensureFrameworkSeeded(env);
+        const rs = await env.DB.prepare(
+          `SELECT id, version, is_active, source, notes, created_by, created_at
+           FROM sales_framework ORDER BY version DESC`
+        ).all();
+        return json({ ok: true, versions: (rs.results || []) });
+      }
+      if (request.method === 'POST' && path === '/admin/framework') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const content = String(body?.content || '').trim();
+        if (!content) return json({ error: 'missing content' }, 400);
+        const notes = String(body?.notes || '');
+        const source = ['manual', 'synthesis'].includes(body?.source) ? body.source : 'manual';
+        await ensureFrameworkSeeded(env);
+        const maxRow = await env.DB.prepare('SELECT MAX(version) AS v FROM sales_framework').first();
+        const nextV = (maxRow?.v || 0) + 1;
+        await env.DB.prepare('UPDATE sales_framework SET is_active = 0 WHERE is_active = 1').run();
+        await env.DB.prepare(
+          `INSERT INTO sales_framework (version, content, format, is_active, source, notes, created_by, created_at)
+           VALUES (?, ?, 'md', 1, ?, ?, ?, ?)`
+        ).bind(nextV, content, source, notes, session.user, new Date().toISOString()).run();
+        await deriveFrameworkSections(env, nextV, content);
+        return json({ ok: true, version: nextV });
+      }
+      if (request.method === 'POST' && path === '/admin/framework/activate') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const v = parseInt(body?.version, 10);
+        if (!v) return json({ error: 'missing version' }, 400);
+        const exists = await env.DB.prepare('SELECT 1 FROM sales_framework WHERE version = ?').bind(v).first();
+        if (!exists) return json({ error: 'version not found' }, 404);
+        await env.DB.prepare('UPDATE sales_framework SET is_active = 0 WHERE is_active = 1').run();
+        await env.DB.prepare('UPDATE sales_framework SET is_active = 1 WHERE version = ?').bind(v).run();
+        return json({ ok: true, active: v });
+      }
+
+      // ----- Feedback de respuestas sugeridas (substrato del bucle de auto-mejora) -----
+      // Loguea enviada/editada/ignorada + edit_distance (Levenshtein) + versión del
+      // playbook + datos del hilo. El outcome se completa después al cerrar el hilo.
+      if (request.method === 'POST' && path === '/admin/suggestion-feedback') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const phone = String(body?.phone || '').replace(/\D/g, '');
+        if (!phone) return json({ error: 'missing phone' }, 400);
+        const suggested = String(body?.suggested_text || '');
+        const finalTxt = String(body?.final_text || '');
+        const action = ['sent', 'edited', 'ignored'].includes(body?.action) ? body.action : '';
+        const ed = (suggested && finalTxt) ? levenshtein(suggested, finalTxt)
+                 : (body?.edit_distance != null ? parseInt(body.edit_distance, 10) : null);
+        await env.DB.prepare(
+          `INSERT INTO suggestion_feedback
+             (phone, suggested_text, final_text, action, edit_distance, confidence, framework_version, vertical, objection, outcome, model_used, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)`
+        ).bind(
+          phone, suggested, finalTxt, action, ed,
+          (body?.confidence != null ? +body.confidence : null),
+          (body?.framework_version != null ? parseInt(body.framework_version, 10) : null),
+          String(body?.vertical || ''), String(body?.objection || ''),
+          String(body?.model_used || ''), session.user, new Date().toISOString()
+        ).run();
+        return json({ ok: true, edit_distance: ed });
       }
 
       if (request.method === 'POST' && path === '/admin/wa/send') {
