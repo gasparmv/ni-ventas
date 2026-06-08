@@ -4518,6 +4518,8 @@ function bindAdmin() {
   maybeRefreshCopilotCost();
   // Fase 2C: propuestas de mejora al playbook pendientes de aprobar.
   loadImprovements();
+  // Panel de costos del sitio (gasto mensual IA/infra/servicios).
+  loadCosts();
 
   const saveBtn = document.querySelector('[data-cot-save]');
   if (saveBtn) saveBtn.onclick = async () => {
@@ -4649,6 +4651,14 @@ function renderAdmin() {
         </div>
         <div id="copilot-improvements"><div class="muted" style="font-size:12px">cargando…</div></div>
       </div>
+    </div>
+
+    <div class="card" style="margin-bottom:var(--s-4)">
+      <div class="card-h">
+        <h3>Costos del sitio</h3>
+        <span class="muted" style="font-size:12px">gasto mensual · la IA se mide sola</span>
+      </div>
+      <div id="costs-panel"><div class="loading"><div class="spinner"></div></div></div>
     </div>
 
     <div class="card admin-soon">
@@ -6601,6 +6611,184 @@ async function rejectImprovement(id, btn) {
 window.generateImprovements = generateImprovements;
 window.approveImprovement = approveImprovement;
 window.rejectImprovement = rejectImprovement;
+
+// ===== Panel de costos del sitio (admin) =====
+let costsState = { data: null, editingId: null, adding: false };
+
+async function loadCosts() {
+  if (typeof getUserRole === 'function' && getUserRole() !== 'admin') return;
+  const el = document.getElementById('costs-panel');
+  if (!el) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/costs', { headers: { ...authHeaders() } });
+    const j = await r.json();
+    if (j && j.ok) { costsState.data = j; renderCostsPanel(); }
+    else el.innerHTML = '<div class="muted" style="font-size:12px">no se pudo cargar</div>';
+  } catch (_) { el.innerHTML = '<div class="muted" style="font-size:12px">no se pudo cargar</div>'; }
+}
+
+function renderCostsPanel() {
+  const el = document.getElementById('costs-panel');
+  if (el) el.innerHTML = renderCostsHTML(costsState.data);
+}
+
+const COST_CAT_LABEL = { ia: 'IA', infra: 'Infra', mensajeria: 'Mensajería', almacenamiento: 'Almacenam.', ads: 'Ads', otro: 'Otro' };
+
+function costAmtDisplay(s) {
+  if (s.cost_type === 'auto') return `auto · $${(s.monthly_usd || 0).toFixed(2)}`;
+  if (s.cost_type === 'free') return 'gratis';
+  if (s.monthly_usd == null) return '⚠ definí el tipo de cambio';
+  const native = s.cost_currency !== 'USD' ? ` (${s.cost_amount} ${s.cost_currency})` : '';
+  const est = s.cost_type === 'usage' ? ' est.' : '';
+  return `$${(s.monthly_usd || 0).toFixed(2)}${est}${native}`;
+}
+
+function renderCostsHTML(j) {
+  if (!j) return '<div class="loading"><div class="spinner"></div></div>';
+  const services = j.services || [];
+  const t = j.totals || {};
+  const pv = j.provider || {};
+  const anth = j.anthropic || {};
+  const infra = services.filter(s => s.category !== 'ads');
+  const ads = services.filter(s => s.category === 'ads');
+
+  const totalsHead = `
+    <div class="kpi-grid" style="margin-bottom:var(--s-3)">
+      <div class="kpi cyan"><div class="kpi-label">Infra del sitio / mes</div><div class="kpi-value">$${(t.infra_usd || 0).toFixed(2)}${t.infra_incomplete ? ' <span class="muted" style="font-size:11px">+faltan</span>' : ''}</div></div>
+      <div class="kpi"><div class="kpi-label">IA este mes (auto)</div><div class="kpi-value">$${(anth.total || 0).toFixed(2)}</div></div>
+      <div class="kpi"><div class="kpi-label">Ads / mes (aparte)</div><div class="kpi-value">$${(t.ads_usd || 0).toFixed(2)}${t.ads_incomplete ? ' <span class="muted" style="font-size:11px">+faltan</span>' : ''}</div></div>
+    </div>
+    <div class="muted" style="font-size:12px;margin-bottom:var(--s-2)">IA desglose: copiloto $${(anth.suggest || 0).toFixed(2)} · análisis de chats $${(anth.analysis || 0).toFixed(2)} · síntesis $${(anth.synthesis || 0).toFixed(2)}</div>`;
+
+  const itemHtml = (s) => {
+    if (costsState.editingId === s.id) return editFormHtml(s);
+    const billing = s.billing_url ? `<a href="${escapeHtml(s.billing_url)}" target="_blank" rel="noopener" class="cost-link">facturación ↗</a>` : '';
+    const acts = s.cost_type === 'auto'
+      ? '<span class="muted" style="font-size:11px">calculado solo</span>'
+      : `<button class="cost-btn" onclick="startEditCost(${s.id})">editar</button><button class="cost-btn cost-btn-del" onclick="deleteCost(${s.id})">quitar</button>`;
+    return `<div class="cost-item">
+      <div class="cost-row1">
+        <span class="cost-cat cost-cat-${escapeHtml(s.category)}">${COST_CAT_LABEL[s.category] || s.category}</span>
+        <span class="cost-name">${escapeHtml(s.name)}</span>
+        <span class="cost-amt">${costAmtDisplay(s)}</span>
+      </div>
+      ${s.usage ? `<div class="cost-usage">${escapeHtml(s.usage)}</div>` : ''}
+      ${s.credential_location ? `<div class="cost-cred">🔑 ${escapeHtml(s.credential_location)}</div>` : ''}
+      ${s.notes ? `<div class="cost-notes">${escapeHtml(s.notes)}</div>` : ''}
+      <div class="cost-actions">${billing}${acts}</div>
+    </div>`;
+  };
+
+  const editFormHtml = (s) => {
+    const cur = c => s.cost_currency === c ? 'selected' : '';
+    const typ = tp => s.cost_type === tp ? 'selected' : '';
+    return `<div class="cost-item cost-editing">
+      <div class="cost-name">${escapeHtml(s.name)}</div>
+      <div class="cost-edit-grid">
+        <label>Costo mensual<input type="number" step="0.01" id="cost-amount-${s.id}" value="${s.cost_amount}"></label>
+        <label>Moneda<select id="cost-cur-${s.id}"><option ${cur('USD')}>USD</option><option ${cur('ARS')}>ARS</option><option ${cur('EUR')}>EUR</option></select></label>
+        <label>Tipo<select id="cost-type-${s.id}"><option value="fixed" ${typ('fixed')}>fijo</option><option value="usage" ${typ('usage')}>variable</option><option value="free" ${typ('free')}>gratis</option></select></label>
+      </div>
+      <label class="cost-full">Notas<input type="text" id="cost-notes-${s.id}" value="${escapeHtml(s.notes || '')}"></label>
+      <div class="cost-actions">
+        <button class="suggest-use" onclick="saveCost(${s.id})">Guardar</button>
+        <button class="suggest-dismiss" onclick="cancelEditCost()">Cancelar</button>
+      </div>
+    </div>`;
+  };
+
+  const rateLine = `<div class="cost-rate">Tipo de cambio USD→ARS: <input type="number" id="cost-rate-input" value="${j.fx_usd_ars || ''}" placeholder="ej 1200" style="width:90px"> <button class="cost-btn" onclick="saveRate()">guardar</button> ${j.fx_usd_ars ? '' : '<span class="muted" style="font-size:11px">⚠ sin definir — los montos en ARS no se suman al total</span>'}</div>`;
+
+  const addBlock = costsState.adding ? `
+    <div class="cost-item cost-editing">
+      <div class="cost-name">Nuevo servicio</div>
+      <label class="cost-full">Nombre<input type="text" id="newcost-name" placeholder="ej OpenAI, dominio, etc"></label>
+      <div class="cost-edit-grid">
+        <label>Categoría<select id="newcost-cat"><option value="ia">IA</option><option value="infra">Infra</option><option value="mensajeria">Mensajería</option><option value="almacenamiento">Almacenam.</option><option value="ads">Ads</option><option value="otro">Otro</option></select></label>
+        <label>Costo mensual<input type="number" step="0.01" id="newcost-amount" value="0"></label>
+        <label>Moneda<select id="newcost-cur"><option>USD</option><option>ARS</option><option>EUR</option></select></label>
+      </div>
+      <label class="cost-full">Qué hace<input type="text" id="newcost-usage"></label>
+      <label class="cost-full">Dónde está la credencial<input type="text" id="newcost-cred"></label>
+      <div class="cost-actions">
+        <button class="suggest-use" onclick="addCostService()">Agregar</button>
+        <button class="suggest-dismiss" onclick="cancelAddCost()">Cancelar</button>
+      </div>
+    </div>` : `<button class="btn btn-ghost" onclick="startAddCost()" style="margin-top:var(--s-2)">+ Agregar servicio</button>`;
+
+  const provLine = `<div class="muted" style="font-size:11px;margin-top:var(--s-3);border-top:1px solid var(--border);padding-top:var(--s-2)">
+    WhatsApp activo: <b>${escapeHtml(pv.wa_provider || '?')}</b> · credenciales configuradas: 360dialog ${pv.has_d360_key ? '✓' : '✗'} · Anthropic ${pv.has_anthropic_key ? '✓' : '✗'} · Meta token ${pv.has_wa_token ? '✓' : '✗'}
+    ${j.usage ? `<br>uso del mes: ${j.usage.wa_outbound_msgs} mensajes salientes a ${j.usage.wa_conversations} contactos` : ''}
+  </div>`;
+
+  return totalsHead +
+    infra.map(itemHtml).join('') +
+    (ads.length ? `<div class="cost-sep">Marketing (aparte del total de infra)</div>` + ads.map(itemHtml).join('') : '') +
+    addBlock + rateLine + provLine;
+}
+
+function startEditCost(id) { costsState.editingId = id; costsState.adding = false; renderCostsPanel(); }
+function cancelEditCost() { costsState.editingId = null; renderCostsPanel(); }
+function startAddCost() { costsState.adding = true; costsState.editingId = null; renderCostsPanel(); }
+function cancelAddCost() { costsState.adding = false; renderCostsPanel(); }
+
+async function postCosts(payload) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/costs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(payload)
+  });
+  return await r.json();
+}
+
+async function saveCost(id) {
+  const amount = parseFloat((document.getElementById('cost-amount-' + id) || {}).value);
+  const cur = (document.getElementById('cost-cur-' + id) || {}).value;
+  const type = (document.getElementById('cost-type-' + id) || {}).value;
+  const notes = (document.getElementById('cost-notes-' + id) || {}).value;
+  const orig = (costsState.data.services || []).find(s => s.id === id) || {};
+  const j = await postCosts({ action: 'upsert', service: { id, name: orig.name, category: orig.category, provider: orig.provider, usage: orig.usage, credential_location: orig.credential_location, billing_url: orig.billing_url, sort_order: orig.sort_order, cost_amount: isFinite(amount) ? amount : 0, cost_currency: cur, cost_type: type, notes } });
+  if (j && j.ok) { costsState.editingId = null; await loadCosts(); }
+  else alert('No se pudo guardar: ' + ((j && j.error) || 'error'));
+}
+
+async function addCostService() {
+  const name = (document.getElementById('newcost-name') || {}).value;
+  if (!name || !name.trim()) { alert('Poné un nombre'); return; }
+  const j = await postCosts({ action: 'upsert', service: {
+    name: name.trim(),
+    category: (document.getElementById('newcost-cat') || {}).value,
+    cost_amount: parseFloat((document.getElementById('newcost-amount') || {}).value) || 0,
+    cost_currency: (document.getElementById('newcost-cur') || {}).value,
+    usage: (document.getElementById('newcost-usage') || {}).value,
+    credential_location: (document.getElementById('newcost-cred') || {}).value,
+    cost_type: 'fixed', sort_order: 90
+  } });
+  if (j && j.ok) { costsState.adding = false; await loadCosts(); }
+  else alert('No se pudo agregar: ' + ((j && j.error) || 'error'));
+}
+
+async function deleteCost(id) {
+  if (!confirm('Quitar este servicio del panel de costos?')) return;
+  const j = await postCosts({ action: 'delete', id });
+  if (j && j.ok) await loadCosts();
+  else alert('No se pudo quitar');
+}
+
+async function saveRate() {
+  const r = parseFloat((document.getElementById('cost-rate-input') || {}).value);
+  if (!isFinite(r) || r <= 0) { alert('Poné un tipo de cambio válido'); return; }
+  const j = await postCosts({ action: 'set_rate', usd_ars: r });
+  if (j && j.ok) await loadCosts();
+  else alert('No se pudo guardar el tipo de cambio');
+}
+
+window.startEditCost = startEditCost;
+window.cancelEditCost = cancelEditCost;
+window.startAddCost = startAddCost;
+window.cancelAddCost = cancelAddCost;
+window.saveCost = saveCost;
+window.addCostService = addCostService;
+window.deleteCost = deleteCost;
+window.saveRate = saveRate;
 
 function renderChat() {
   if (!canAccessChat()) {

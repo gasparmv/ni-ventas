@@ -2981,6 +2981,87 @@ async function applyImprovementToFramework(env, imp, user, overrideContent) {
   return { ok: true, version: nextV };
 }
 
+// ===== Panel de costos del sitio =====
+// Inventario de servicios (IAs, infra, mensajería, almacenamiento, ads) + costo
+// mensual. Anthropic se calcula solo y exacto; el resto lo carga Gaspar.
+
+async function ensureCostsSchema(env) {
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS site_services (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sort_order INTEGER NOT NULL DEFAULT 100,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'otro',
+        provider TEXT NOT NULL DEFAULT '',
+        usage TEXT NOT NULL DEFAULT '',
+        credential_location TEXT NOT NULL DEFAULT '',
+        cost_type TEXT NOT NULL DEFAULT 'fixed',
+        cost_amount REAL NOT NULL DEFAULT 0,
+        cost_currency TEXT NOT NULL DEFAULT 'USD',
+        auto_key TEXT NOT NULL DEFAULT '',
+        billing_url TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`
+    ).run();
+    const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM site_services').first();
+    if (!row || row.n === 0) await seedDefaultServices(env);
+  } catch (e) { try { console.error('ensureCostsSchema:', (e && e.message) || e); } catch (_) {} }
+}
+
+async function seedDefaultServices(env) {
+  const now = new Date().toISOString();
+  // [sort, name, category, provider, usage, credential_location, cost_type, amount, currency, auto_key, billing_url, notes]
+  const seed = [
+    [10, 'Anthropic (Claude API)', 'ia', 'Anthropic', 'Copiloto de respuestas sugeridas, análisis de chats con IA y síntesis de mejoras al playbook (Fase 2C)', 'Cloudflare secret ANTHROPIC_API_KEY', 'auto', 0, 'USD', 'anthropic', 'https://console.anthropic.com/settings/billing', 'Se calcula solo y exacto desde el uso real. Modelos: Sonnet (copiloto/análisis) y Opus (síntesis).'],
+    [20, 'Cloudflare (Workers + D1 + R2 + AI)', 'infra', 'Cloudflare', 'Backend del CRM (Worker), base de datos (D1), almacenamiento de media (R2) e IA de embeddings (Workers AI)', 'Cuenta Cloudflare (login) + wrangler', 'fixed', 0, 'USD', '', 'https://dash.cloudflare.com/?to=/:account/billing', 'Cargá tu costo: plan Workers Paid (~USD 5/mes) o gratis si estás en free tier. D1 actual ~92MB (dentro del free).'],
+    [30, '360dialog (WhatsApp BSP)', 'mensajeria', '360dialog', 'Envío y recepción de WhatsApp (Cloud API) + plantillas. Es el proveedor activo desde el 31-may', 'Cloudflare secret D360_API_KEY + login hub.360dialog.com', 'fixed', 0, 'USD', '', 'https://hub.360dialog.com', 'IMPORTANTE: acá se carga el SALDO de WhatsApp (prepago), NO en la tarjeta de Meta. Incluye fee mensual de BSP + saldo de conversaciones.'],
+    [40, 'Meta WhatsApp (conversaciones)', 'mensajeria', 'Meta', 'Costo por conversación de WhatsApp que cobra Meta (lo paga 360dialog desde tu saldo prepago)', 'WABA 800446462838166 (Meta Business)', 'usage', 0, 'USD', '', 'https://business.facebook.com/wa/manage/', 'Se descuenta del saldo de 360dialog, no de una tarjeta en Meta. Estimá según conversaciones del mes.'],
+    [50, 'Google (Apps Script + Drive)', 'almacenamiento', 'Google', 'Apps Script (lee la Sheet de ventas + COGS del cotizador), Google Drive (Cerebro / base de conocimiento)', 'Cuenta Google neoninfinitok@gmail.com', 'free', 0, 'USD', '', 'https://one.google.com', 'Apps Script y Sheets son gratis. Solo cuesta si tenés Google One por almacenamiento extra de Drive.'],
+    [60, 'GitHub Pages (frontend)', 'infra', 'GitHub', 'Hosting del frontend del CRM (sitio estático), deploy automático al pushear', 'Cuenta GitHub gasparmv', 'free', 0, 'USD', '', 'https://github.com/settings/billing', 'Gratis para GitHub Pages en repos públicos.'],
+    [70, 'Meta Ads (publicidad)', 'ads', 'Meta', 'Anuncios B2B de captación de leads (campaña activa ~419 leads/mes)', 'Meta Ads Manager — cuenta "Lau - Neon" 882517310728279', 'usage', 0, 'ARS', '', 'https://adsmanager.facebook.com', 'Marketing, no es infraestructura del sitio. Se muestra aparte del total de infra.']
+  ];
+  for (const s of seed) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO site_services (sort_order, name, category, provider, usage, credential_location, cost_type, cost_amount, cost_currency, auto_key, billing_url, notes, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+      ).bind(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11], now, now).run();
+    } catch (_) {}
+  }
+}
+
+// Costo real de Anthropic del mes en curso (copilot_usage + wa_chat_analyses).
+async function computeAnthropicMonthCost(env) {
+  const ms = new Date(); ms.setUTCDate(1); ms.setUTCHours(0, 0, 0, 0); const m = ms.toISOString();
+  const out = { total: 0, suggest: 0, synthesis: 0, analysis: 0 };
+  try {
+    const cu = (await env.DB.prepare(
+      `SELECT kind, ROUND(SUM(cost_usd), 4) AS c FROM copilot_usage WHERE created_at >= ? GROUP BY kind`
+    ).bind(m).all()).results || [];
+    cu.forEach(r => { if (r.kind === 'suggest') out.suggest = r.c || 0; else if (r.kind === 'synthesis') out.synthesis = r.c || 0; });
+  } catch (_) {}
+  try {
+    const an = await env.DB.prepare(
+      `SELECT ROUND(SUM(cost_usd_estimated), 4) AS c FROM wa_chat_analyses WHERE analyzed_at >= ?`
+    ).bind(m).first();
+    out.analysis = an?.c || 0;
+  } catch (_) {}
+  out.total = +((out.suggest + out.synthesis + out.analysis).toFixed(4));
+  return out;
+}
+
+async function getUsdArsRate(env) {
+  try {
+    const row = await env.DB.prepare(`SELECT v FROM kv_cache WHERE k = 'usd_ars_rate'`).first();
+    const n = row ? parseFloat(row.v) : NaN;
+    return (isFinite(n) && n > 0) ? n : null;
+  } catch (_) { return null; }
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
@@ -3850,6 +3931,102 @@ export default {
           month: { count: uM?.n || 0, cost_usd: uM?.cost || 0, generated: uM?.n || 0, sent: fM.sent, edited: fM.edited, ignored: fM.ignored },
           total: { count: uT?.n || 0, cost_usd: uT?.cost || 0, generated: uT?.n || 0, sent: fT.sent, edited: fT.edited, ignored: fT.ignored, avg_edit_distance: edT?.a || 0 }
         });
+      }
+
+      // ----- Panel de costos del sitio -----
+      if (request.method === 'GET' && path === '/admin/costs') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        await ensureCostsSchema(env);
+        const services = (await env.DB.prepare('SELECT * FROM site_services WHERE active = 1 ORDER BY sort_order, id').all()).results || [];
+        const anth = await computeAnthropicMonthCost(env);
+        const rate = await getUsdArsRate(env);
+        const ms = new Date(); ms.setUTCDate(1); ms.setUTCHours(0, 0, 0, 0); const m = ms.toISOString();
+        let waOut = 0, waConv = 0;
+        try { waOut = (await env.DB.prepare(`SELECT COUNT(*) AS n FROM wa_messages WHERE direction='outbound' AND ts >= ?`).bind(m).first())?.n || 0; } catch (_) {}
+        try { waConv = (await env.DB.prepare(`SELECT COUNT(DISTINCT phone) AS n FROM wa_messages WHERE direction='outbound' AND ts >= ?`).bind(m).first())?.n || 0; } catch (_) {}
+        const toUsd = (amt, cur) => {
+          if (!amt) return 0;
+          if (cur === 'ARS') return rate ? +(amt / rate).toFixed(2) : null; // null = falta el tipo de cambio
+          if (cur === 'EUR') return +(amt * 1.08).toFixed(2);
+          return amt; // USD
+        };
+        let infraUsd = 0, adsUsd = 0, infraIncomplete = false, adsIncomplete = false;
+        const enriched = services.map(s => {
+          let usd;
+          if (s.cost_type === 'auto' && s.auto_key === 'anthropic') usd = anth.total;
+          else if (s.cost_type === 'free') usd = 0;
+          else usd = toUsd(s.cost_amount, s.cost_currency);
+          const row = { ...s, monthly_usd: usd };
+          if (s.cost_type === 'auto' && s.auto_key === 'anthropic') row.anthropic = anth;
+          if (s.category === 'ads') { if (usd == null) adsIncomplete = true; else adsUsd += usd; }
+          else { if (usd == null) infraIncomplete = true; else infraUsd += usd; }
+          return row;
+        });
+        return json({
+          ok: true,
+          services: enriched,
+          anthropic: anth,
+          fx_usd_ars: rate,
+          totals: { infra_usd: +infraUsd.toFixed(2), ads_usd: +adsUsd.toFixed(2), infra_incomplete: infraIncomplete, ads_incomplete: adsIncomplete },
+          usage: { wa_outbound_msgs: waOut, wa_conversations: waConv },
+          provider: {
+            wa_provider: env.WA_PROVIDER || 'meta',
+            has_d360_key: !!env.D360_API_KEY,
+            has_wa_token: !!env.WA_TOKEN,
+            has_anthropic_key: !!env.ANTHROPIC_API_KEY
+          }
+        });
+      }
+      if (request.method === 'POST' && path === '/admin/costs') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        await ensureCostsSchema(env);
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const action = body?.action || 'upsert';
+        const now = new Date().toISOString();
+        if (action === 'set_rate') {
+          const rt = parseFloat(body?.usd_ars);
+          if (!isFinite(rt) || rt <= 0) return json({ error: 'tipo de cambio inválido' }, 400);
+          await env.DB.prepare(`INSERT INTO kv_cache (k, v, updated_at) VALUES ('usd_ars_rate', ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at`).bind(String(rt), now).run();
+          return json({ ok: true, usd_ars: rt });
+        }
+        if (action === 'delete') {
+          const id = parseInt(body?.id, 10);
+          if (!id) return json({ error: 'missing id' }, 400);
+          await env.DB.prepare('UPDATE site_services SET active=0, updated_at=? WHERE id=?').bind(now, id).run();
+          return json({ ok: true });
+        }
+        const sv = body?.service || {};
+        const f = {
+          name: String(sv.name || '').slice(0, 200),
+          category: ['ia', 'infra', 'mensajeria', 'almacenamiento', 'ads', 'otro'].includes(sv.category) ? sv.category : 'otro',
+          provider: String(sv.provider || '').slice(0, 100),
+          usage: String(sv.usage || '').slice(0, 1000),
+          credential_location: String(sv.credential_location || '').slice(0, 500),
+          cost_type: ['fixed', 'usage', 'free'].includes(sv.cost_type) ? sv.cost_type : 'fixed', // 'auto' no se setea a mano
+          cost_amount: (isFinite(parseFloat(sv.cost_amount)) ? parseFloat(sv.cost_amount) : 0),
+          cost_currency: ['USD', 'ARS', 'EUR'].includes(sv.cost_currency) ? sv.cost_currency : 'USD',
+          billing_url: String(sv.billing_url || '').slice(0, 500),
+          notes: String(sv.notes || '').slice(0, 1000),
+          sort_order: (isFinite(parseInt(sv.sort_order, 10)) ? parseInt(sv.sort_order, 10) : 100)
+        };
+        const id = parseInt(sv.id, 10);
+        if (id) {
+          // Editar: no tocar auto_key (un servicio 'auto' sigue siendo auto). Solo
+          // actualiza cost_type si el original NO era auto.
+          const orig = await env.DB.prepare('SELECT cost_type, auto_key FROM site_services WHERE id=?').bind(id).first();
+          const keepAuto = orig && orig.cost_type === 'auto';
+          await env.DB.prepare(
+            `UPDATE site_services SET name=?, category=?, provider=?, usage=?, credential_location=?, cost_type=?, cost_amount=?, cost_currency=?, billing_url=?, notes=?, sort_order=?, updated_at=? WHERE id=?`
+          ).bind(f.name, f.category, f.provider, f.usage, f.credential_location, keepAuto ? 'auto' : f.cost_type, f.cost_amount, f.cost_currency, f.billing_url, f.notes, f.sort_order, now, id).run();
+          return json({ ok: true, id });
+        }
+        if (!f.name) return json({ error: 'falta el nombre del servicio' }, 400);
+        const res = await env.DB.prepare(
+          `INSERT INTO site_services (sort_order, name, category, provider, usage, credential_location, cost_type, cost_amount, cost_currency, auto_key, billing_url, notes, active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, 1, ?, ?)`
+        ).bind(f.sort_order, f.name, f.category, f.provider, f.usage, f.credential_location, f.cost_type, f.cost_amount, f.cost_currency, f.billing_url, f.notes, now, now).run();
+        return json({ ok: true, id: res.meta?.last_row_id });
       }
 
       if (request.method === 'POST' && path === '/admin/wa/send') {
