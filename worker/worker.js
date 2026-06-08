@@ -3066,8 +3066,9 @@ async function getUsdArsRate(env) {
 }
 
 // ===== Circuit breaker: bloqueo de pago de WhatsApp (error Meta 131042) =====
-// Cuando Meta rechaza la ENTREGA con "Business eligibility payment issue", el
-// problema es de cuenta (saldo/credit line de 360dialog), no del destinatario.
+// Cuando Meta rechaza la ENTREGA con "Business eligibility payment issue" (131042),
+// es un problema de PAGO en la cuenta de WhatsApp Business de META (su Billing Hub),
+// NO del saldo de 360dialog ni del destinatario.
 // Pausamos los envíos automáticos para no quemar contactos ni spamear a Gaspar,
 // y reanudamos solos cuando un envío vuelve a salir OK (o tras un cooldown).
 const WA_BILLING_BLOCK_KEY = 'wa_billing_block';
@@ -3575,7 +3576,7 @@ export default {
                       // Bloqueo de cuenta por pago: pausar envíos automáticos + avisar 1 vez por episodio.
                       const { shouldNotify } = await setWaBillingBlock(env, errMsg);
                       if (shouldNotify && env.ADMIN_NOTIFY_PHONE) {
-                        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp BLOQUEADO por pago (error de elegibilidad/saldo de Meta)\nCargá saldo en hub.360dialog.com (Billing). Pausé los envíos automáticos para no quemar contactos — se reanudan solos cuando vuelva a andar'); } catch (_) {}
+                        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp BLOQUEADO por pago — Meta error 131042 (pagos pendientes en la cuenta de WhatsApp Business).\nRegularizá en el Billing Hub de META: business.facebook.com/billing_hub (OJO: es de Meta, NO el saldo de 360dialog).\nPausé los envíos automáticos para no quemar contactos — se reanudan solos cuando vuelva a andar.'); } catch (_) {}
                       }
                     } else if (env.ADMIN_NOTIFY_PHONE) {
                       // Fallo puntual (destinatario, etc.) → aviso por mensaje, como antes.
