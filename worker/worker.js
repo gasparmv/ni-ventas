@@ -2610,8 +2610,12 @@ const SUGGEST_SYSTEM_RULES = `Sos parte del equipo de ventas de Neon Infinito (c
 REGLAS DURAS (no negociables):
 1. PRIMERO clasificá la vertical del lead: "carteles" (quiere un cartel para su local/un regalo), "cursos" (quiere aprender / Neon Mastery), "supernova" (ya fabrica y quiere escalar ventas), o "ambiguo". Aplicá el criterio de esa vertical (ver playbook: 8A.0 router + PARTE A carteles + PARTE B cursos). NUNCA cruces criterios: no mandes render/medidas/seña a un lead de curso, ni testimonios de "facturá millones" a un dueño de local que solo quiere un cartel.
 2. NUNCA inventes precios, plazos de entrega, garantías, datos de pago ni condiciones. Si el dato NO está explícito en el playbook o el contexto, NO lo pongas en el mensaje: agregalo a "missing_info" y bajá la confianza. Para cotizar un cartel hace falta foto + medidas (alto y ancho) + interior/exterior — nunca tires un precio a ojo.
-3. Tono Neon Infinito: rioplatense, voseo, cercano, frases cortas, humano. Emojis funcionales (🙌 👇 🤙 🫶). Nada robótico ni corporativo. Si no sabés el nombre del cliente, arrancá con "Buenas!".
-4. Espejá el canal y el registro del cliente: si escribe corto, respondé corto; si manda audio, sugerí responder con audio.
+3. TONO — imitá EXACTAMENTE cómo escribe el equipo (mirá los mensajes de JOACO en el historial). Es WhatsApp argentino informal, NO formal:
+   - SIN signos de apertura: NUNCA uses ¿ ni ¡. Escribí "como va?" o "que bueno!", nunca "¿cómo va?" ni "¡qué bueno!".
+   - SIN punto final: no cierres las oraciones con ".".
+   - Emojis al MÍNIMO: 0 o como mucho 1 en todo el mensaje, nunca varios.
+   - Voseo, frases cortas, cercano, humano. Nada robótico ni corporativo. Si no sabés el nombre, arrancá con "Buenas".
+4. Espejá el registro de ESA conversación (nivel de formalidad, largo de los mensajes, cómo saluda Joaco). Tu sugerencia tiene que sentirse escrita por la misma persona que venía respondiendo, no por un bot.
 5. Si conviene un humano (B2B de varios locales, dudas fuertes de precio/financiación, una queja, o te falta info clave para responder bien), poné should_escalate=true con el motivo y hacé un draft prudente (sin comprometer nada).
 
 Devolvé SOLO un objeto JSON (sin markdown, sin texto extra) con EXACTAMENTE este shape:
@@ -2686,7 +2690,18 @@ async function suggestReply(env, phone, opts = {}) {
     const sensitive = missing.some(m => /precio|plazo|garant|pago|cuota|tiempo|entrega|financ/i.test(String(m)));
     const conf = typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
     const lowConfidence = conf < 0.7 || sensitive || parsed.should_escalate === true;
-    const ti = j.usage?.input_tokens || 0, to = j.usage?.output_tokens || 0;
+    const ti = j.usage?.input_tokens || 0;
+    const tcw = j.usage?.cache_creation_input_tokens || 0;
+    const tcr = j.usage?.cache_read_input_tokens || 0;
+    const to = j.usage?.output_tokens || 0;
+    // Costo real (precios Sonnet jun 2026): input $3, cache write $3.75, cache read $0.30, output $15 /MTok.
+    const cost = +(((ti * 3 + tcw * 3.75 + tcr * 0.30 + to * 15) / 1000000).toFixed(5));
+    try {
+      await env.DB.prepare(
+        `INSERT INTO copilot_usage (phone, kind, model, tokens_in, tokens_out, cache_read, cache_creation, cost_usd, created_by, created_at)
+         VALUES (?, 'suggest', 'claude-sonnet-4-5', ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(phone, ti, to, tcr, tcw, cost, opts.createdBy || '', new Date().toISOString()).run();
+    } catch (_) {}
     return {
       ok: true,
       suggestion: {
@@ -2702,9 +2717,8 @@ async function suggestReply(env, phone, opts = {}) {
       },
       framework_version: frameworkVersion,
       model: 'claude-sonnet-4-5',
-      tokens_in: ti, tokens_out: to,
-      cache_read: j.usage?.cache_read_input_tokens || 0,
-      cost_usd: +(((ti * 3 + to * 15) / 1000000).toFixed(5))
+      tokens_in: ti, tokens_out: to, cache_read: tcr, cache_creation: tcw,
+      cost_usd: cost
     };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
@@ -3493,9 +3507,28 @@ export default {
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const num = String(body?.phone || '').replace(/\D/g, '');
         if (!num) return json({ error: 'missing phone' }, 400);
-        const res = await suggestReply(env, num, { dry: !!body?.dry });
+        const res = await suggestReply(env, num, { dry: !!body?.dry, createdBy: session.user });
         if (!res.ok) return json({ error: res.error || 'failed', raw: res.raw }, res.error === 'ANTHROPIC_API_KEY no configurada' ? 503 : 500);
         return json(res);
+      }
+
+      // ----- Copiloto: contador de gasto IA (solo Gaspar) -----
+      if (request.method === 'GET' && path === '/admin/copilot/usage') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        const ms = new Date(); ms.setUTCDate(1); ms.setUTCHours(0, 0, 0, 0);
+        const ds = new Date(); ds.setUTCHours(0, 0, 0, 0);
+        const q = async (since) => await env.DB.prepare(
+          `SELECT COUNT(*) AS n, ROUND(SUM(cost_usd), 4) AS cost FROM copilot_usage WHERE created_at >= ?`
+        ).bind(since).first();
+        const month = await q(ms.toISOString());
+        const today = await q(ds.toISOString());
+        const total = await env.DB.prepare(`SELECT COUNT(*) AS n, ROUND(SUM(cost_usd), 4) AS cost FROM copilot_usage`).first();
+        return json({
+          ok: true,
+          month: { count: month?.n || 0, cost_usd: month?.cost || 0 },
+          today: { count: today?.n || 0, cost_usd: today?.cost || 0 },
+          total: { count: total?.n || 0, cost_usd: total?.cost || 0 }
+        });
       }
 
       if (request.method === 'POST' && path === '/admin/wa/send') {

@@ -5806,6 +5806,14 @@ async function sendChatMessage(phone, text) {
     const ta = document.getElementById('chat-input');
     if (ta) { ta.value = ''; ta.style.height = 'auto'; }
     setDraft(phone, ''); // limpiar borrador guardado de este chat
+    // Copiloto: si esta respuesta salió de una sugerencia usada, logueamos el feedback.
+    try {
+      const sg = chatState.lastSuggestion;
+      if (sg && sg.phone === phone && sg._used) {
+        logSuggestionFeedback(sg, text.trim(), text.trim() === String(sg.draft || '').trim() ? 'sent' : 'edited');
+        chatState.lastSuggestion = null;
+      }
+    } catch (_) {}
     toast('Mensaje enviado');
   } catch (e) {
     toast('Error de red al enviar');
@@ -6341,6 +6349,117 @@ function bindInsights() {
   });
 }
 
+// ===== Copiloto: sugerencia de respuesta (Fase 2B) — sugiere, NO envía =====
+// Pide una sugerencia al worker (POST /admin/wa/suggest-reply). Gasta solo al
+// clickear. NUNCA envía: solo muestra el draft para revisar/editar/usar.
+async function requestSuggestion(phone) {
+  if (!phone) return;
+  const btn = document.getElementById('btn-suggest');
+  const panel = document.getElementById('suggest-panel');
+  if (!panel) return;
+  if (btn) btn.disabled = true;
+  panel.style.display = 'block';
+  panel.innerHTML = '<div class="suggest-loading">✨ Pensando una respuesta…</div>';
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/suggest-reply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ phone })
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      panel.innerHTML = '<div class="suggest-row"><span class="suggest-err">No se pudo generar' + (j && j.error ? ': ' + escapeHtml(String(j.error)) : '') + '</span><button class="suggest-x" data-suggest-close>✕</button></div>';
+    } else {
+      chatState.lastSuggestion = { phone, draft: j.suggestion.draft || '', framework_version: j.framework_version || null, vertical: j.suggestion.vertical || '', _used: false };
+      renderSuggestPanel(j);
+      maybeRefreshCopilotCost();
+    }
+  } catch (e) {
+    panel.innerHTML = '<div class="suggest-row"><span class="suggest-err">Error de red</span><button class="suggest-x" data-suggest-close>✕</button></div>';
+  } finally {
+    if (btn) btn.disabled = false;
+    bindSuggestPanelActions();
+  }
+}
+
+function renderSuggestPanel(j) {
+  const panel = document.getElementById('suggest-panel');
+  if (!panel) return;
+  const s = j.suggestion || {};
+  const warn = !!(s.low_confidence || s.should_escalate);
+  const conf = Math.round((s.confidence || 0) * 100);
+  const missing = Array.isArray(s.missing_info) ? s.missing_info : [];
+  const sources = Array.isArray(s.sources_used) ? s.sources_used : [];
+  panel.innerHTML = `
+    <div class="suggest-head">
+      <span class="suggest-title">✨ Sugerencia${s.vertical ? ' · ' + escapeHtml(s.vertical) : ''}</span>
+      <span class="suggest-conf ${warn ? 'warn' : 'ok'}">${conf}%</span>
+      <button class="suggest-x" data-suggest-close title="Descartar">✕</button>
+    </div>
+    ${warn ? `<div class="suggest-warn">⚠ Revisá antes de mandar${s.escalation_reason ? ': ' + escapeHtml(String(s.escalation_reason)) : ''}${missing.length ? '<br><b>Falta:</b> ' + escapeHtml(missing.join(', ')) : ''}</div>` : ''}
+    <div class="suggest-draft">${escapeHtml(s.draft || '')}</div>
+    ${sources.length ? `<div class="suggest-src">basado en: ${escapeHtml(sources.join(' · '))}</div>` : ''}
+    <div class="suggest-actions">
+      <button class="suggest-use" data-suggest-use>Usar ✍️</button>
+      <button class="suggest-dismiss" data-suggest-close>Descartar</button>
+    </div>`;
+  bindSuggestPanelActions();
+}
+
+function bindSuggestPanelActions() {
+  const panel = document.getElementById('suggest-panel');
+  if (!panel) return;
+  const useBtn = panel.querySelector('[data-suggest-use]');
+  if (useBtn) useBtn.onclick = useSuggestion;
+  panel.querySelectorAll('[data-suggest-close]').forEach(el => { el.onclick = dismissSuggestion; });
+}
+
+function useSuggestion() {
+  const ta = document.getElementById('chat-input');
+  const s = chatState.lastSuggestion;
+  if (ta && s) {
+    ta.value = s.draft;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+    ta.focus();
+    s._used = true;
+  }
+  const panel = document.getElementById('suggest-panel');
+  if (panel) panel.style.display = 'none';
+}
+
+function dismissSuggestion(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  const s = chatState.lastSuggestion;
+  if (s && !s._used) logSuggestionFeedback(s, '', 'ignored');
+  chatState.lastSuggestion = null;
+  const panel = document.getElementById('suggest-panel');
+  if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
+}
+
+function logSuggestionFeedback(s, finalText, action) {
+  if (!s) return;
+  try {
+    fetch(CONFIG.trackerUrl + '/admin/suggestion-feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ phone: s.phone, suggested_text: s.draft, final_text: finalText, action, framework_version: s.framework_version, vertical: s.vertical })
+    });
+  } catch (_) {}
+}
+
+async function maybeRefreshCopilotCost() {
+  if (typeof getUserRole === 'function' && getUserRole() !== 'admin') return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/copilot/usage', { headers: { ...authHeaders() } });
+    const j = await r.json();
+    if (j && j.ok) {
+      const el = document.getElementById('copilot-cost');
+      if (el) el.textContent = `🤖 $${(j.month.cost_usd || 0).toFixed(2)}`;
+    }
+  } catch (_) {}
+}
+
 function renderChat() {
   if (!canAccessChat()) {
     return `<div class="page-head"><h1>Chat WhatsApp</h1></div><div class="error">No autorizado. Logueate con un usuario autorizado.</div>`;
@@ -6716,6 +6835,7 @@ function renderChatConversation() {
         <button class="btn-label-toggle" id="btn-labels" title="Etiquetas">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg>
         </button>
+        ${getUserRole() === 'admin' ? '<span id="copilot-cost" class="copilot-cost" title="Gasto IA del mes en sugerencias"></span>' : ''}
       </div>
       <div class="chat-label-chips" id="chat-label-chips">${renderContactLabelChips(phone)}</div>
     </div>
@@ -6730,7 +6850,9 @@ function renderChatConversation() {
       <svg viewBox="0 0 19 20" width="18" height="18" fill="currentColor"><path d="M3.8 6.7l5.7 5.7 5.7-5.7 1.6 1.6-7.3 7.2-7.3-7.2 1.6-1.6z"/></svg>
     </button>
     ${render24hBanner()}
+    <div id="suggest-panel" class="suggest-panel" style="display:none"></div>
     <div class="chat-input-bar">
+      ${['admin', 'comercial', 'cursos'].includes(getUserRole()) ? '<button class="btn-send btn-suggest" id="btn-suggest" title="Sugerir respuesta con IA">✨</button>' : ''}
       <button class="btn-send btn-attach" id="btn-attach" title="Adjuntar imagen"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647a5.58 5.58 0 003.972-1.645l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.501.501 1.134.79 1.737.79.558 0 1.031-.224 1.37-.564l5.582-5.58a.747.747 0 10-1.055-1.06l-5.58 5.58c-.172.172-.42.156-.614-.04-.508-.51-.427-1.122-.07-1.478l7.916-7.916c.866-.866 2.358-.764 3.46.34.556.557.876 1.203.918 1.818.036.526-.176 1.047-.595 1.466L10.11 18.526a4.09 4.09 0 01-2.913 1.205 4.09 4.09 0 01-2.913-1.205 4.09 4.09 0 01-1.205-2.913c0-1.1.428-2.134 1.205-2.911l8.647-8.646a.747.747 0 00-1.055-1.06l-8.647 8.646A5.58 5.58 0 001.816 15.556z"/></svg></button>
       <input type="file" id="chat-file-input" accept="image/*,video/*,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,text/plain" multiple style="display:none">
       <div class="chat-input-wrap">
@@ -8120,6 +8242,10 @@ function bindChatConversation() {
   if (schedBtn) {
     schedBtn.onclick = () => showScheduleModal(chatState.selectedPhone);
   }
+  // Copiloto: botón "Sugerir" + contador de gasto (admin)
+  const suggestBtn = document.getElementById('btn-suggest');
+  if (suggestBtn) suggestBtn.onclick = () => requestSuggestion(chatState.selectedPhone);
+  maybeRefreshCopilotCost();
   // Attach: soporta imágenes, videos, audios y documentos. Múltiples archivos.
   // Mandamos en serie con delay para evitar rate limit del WA Cloud API.
   if (attachBtn && fileInput) {
