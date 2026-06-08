@@ -4960,8 +4960,10 @@ const chatState = {
   readCursors: {},
   totalUnread: 0,
   // New features
-  quickReplies: [],   // [{id, shortcut, body}]
+  quickReplies: [],   // [{id, shortcut, body, vertical}]
   qrLoaded: false,
+  templates: [],      // plantillas aprobadas (para el menú /)
+  tplLoaded: false,
   labels: [],         // [{id, name, color}]
   contactLabels: {},  // phone → [label_id, ...]
   labelsLoaded: false,
@@ -5064,10 +5066,52 @@ async function loadQuickReplies() {
     if (r.ok) { const j = await r.json(); chatState.quickReplies = j.replies || []; chatState.qrLoaded = true; }
   } catch (_) {}
 }
-async function saveQuickReply(shortcut, body, mediaR2Key) {
+// Carga las plantillas aprobadas para mostrarlas en el menú "/" junto a las respuestas.
+async function loadChatTemplates() {
+  if (chatState.tplLoaded) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/templates', { headers: authHeaders() });
+    if (r.ok) {
+      const j = await r.json();
+      const list = Array.isArray(j.templates) ? j.templates : [];
+      chatState.templates = list.filter(t => String(t.status || '').toLowerCase() === 'approved' && t.name !== 'prueba_de_plantilla');
+      chatState.tplLoaded = true;
+    }
+  } catch (_) {}
+}
+// Texto del body de una plantilla (de sus components) y cantidad de variables {{n}}.
+function tplBodyText(t) {
+  const comps = t && Array.isArray(t.components) ? t.components : [];
+  const b = comps.find(c => String(c.type || '').toUpperCase() === 'BODY');
+  return (b && b.text) || '';
+}
+function tplParamCount(t) {
+  const m = tplBodyText(t).match(/\{\{\s*\d+\s*\}\}/g);
+  return m ? m.length : 0;
+}
+// Vertical de una plantilla según su nombre (cursos_* / sorteo / clase → cursos).
+function templateVertical(name) {
+  const n = String(name || '').toLowerCase();
+  return (n.startsWith('cursos') || n.includes('sorteo') || n.includes('clase')) ? 'cursos' : 'carteles';
+}
+// Verticales visibles para el usuario actual (null = todas). Joaco→carteles, Abril→cursos, Gaspar→todas.
+function qrVerticalsForUser() {
+  if (isCursosUser(STATE.user)) return ['cursos'];
+  if (isGasparUser(STATE.user)) return null;
+  return ['carteles'];
+}
+// Manda una plantilla aprobada al chat actual (reabre conversaciones de +24h).
+async function sendTemplateToChat(phone, name, lang, params) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/wa/template', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ to: phone, name, lang: lang || 'es_AR', params: params || [] })
+  });
+  return r.ok ? await r.json() : { ok: false };
+}
+async function saveQuickReply(shortcut, body, mediaR2Key, vertical) {
   await fetch(CONFIG.trackerUrl + '/admin/quick-replies', {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ shortcut, body, media_r2_key: mediaR2Key || null })
+    body: JSON.stringify({ shortcut, body, media_r2_key: mediaR2Key || null, vertical: vertical || 'carteles' })
   });
   chatState.qrLoaded = false;
   await loadQuickReplies();
@@ -8735,25 +8779,79 @@ function _renderQRItem(q, i, active) {
   </div>`;
 }
 
+// Item de PLANTILLA en el menú "/" (distinto de una respuesta guardada: badge
+// + al elegirla se manda como template, sirve para reabrir charlas de +24h).
+function _renderTplItem(t) {
+  const preview = tplBodyText(t).replace(/\{\{\s*1\s*\}\}/g, '[nombre]');
+  return `<div class="qr-item" data-tpl-name="${escapeHtml(t.name)}" data-tpl-lang="${escapeHtml(t.language || 'es_AR')}" data-tpl-params="${tplParamCount(t)}">
+    <div class="qr-item-text">
+      <span class="qr-shortcut">${escapeHtml(t.name)} <span style="opacity:.75;font-size:9px;border:1px solid currentColor;border-radius:4px;padding:0 4px;color:var(--neon-cyan,#8FD4DE)">PLANTILLA</span></span>
+      <span class="qr-preview">${escapeHtml((preview || '').slice(0, 60))}</span>
+    </div>
+  </div>`;
+}
+
 function handleQuickReplyInput(ta) {
   const dd = document.getElementById('qr-dropdown');
   if (!dd) return;
   const val = ta.value;
   if (!val.startsWith('/')) { dd.style.display = 'none'; return; }
+  loadChatTemplates(); // idempotente (por si no cargaron al abrir el chat)
   const query = val.slice(1).toLowerCase();
-  let matches;
-  if (val === '/') matches = chatState.quickReplies.slice(0, 10);
-  else matches = chatState.quickReplies.filter(q => q.shortcut.includes(query) || (q.body || '').toLowerCase().includes(query)).slice(0, 8);
-  if (!matches.length) { dd.style.display = 'none'; return; }
-  dd.innerHTML = matches.map((q, i) => _renderQRItem(q, i, false)).join('');
+  const verts = qrVerticalsForUser(); // null = todas (admin)
+  const qrs = (chatState.quickReplies || []).filter(q => !verts || verts.includes(q.vertical || 'carteles'));
+  const tpls = (chatState.templates || []).filter(t => !verts || verts.includes(templateVertical(t.name)));
+  let qrMatches, tplMatches;
+  if (val === '/') {
+    qrMatches = qrs.slice(0, 8);
+    tplMatches = tpls.slice(0, 6);
+  } else {
+    qrMatches = qrs.filter(q => q.shortcut.toLowerCase().includes(query) || (q.body || '').toLowerCase().includes(query)).slice(0, 6);
+    tplMatches = tpls.filter(t => (t.name || '').toLowerCase().includes(query) || tplBodyText(t).toLowerCase().includes(query)).slice(0, 4);
+  }
+  let html = qrMatches.map((q, i) => _renderQRItem(q, i, false)).join('');
+  html += tplMatches.map(t => _renderTplItem(t)).join('');
+  // Pie: crear una respuesta guardada nueva.
+  html += `<div class="qr-item" data-qr-add="1"><div class="qr-item-text"><span class="qr-shortcut" style="color:var(--neon-cyan,#8FD4DE)">＋ Nueva respuesta guardada</span></div></div>`;
+  dd.innerHTML = html;
   dd.style.display = 'block';
-  dd.querySelectorAll('.qr-item').forEach(el => {
-    el.onclick = () => pickQuickReply(ta, el);
-  });
+  dd.querySelectorAll('.qr-item').forEach(el => { el.onclick = () => pickQuickReply(ta, el); });
 }
 
 async function pickQuickReply(ta, el) {
   const dd = document.getElementById('qr-dropdown');
+  // "+" → abrir el panel para crear una respuesta guardada nueva.
+  if (el.dataset.qrAdd === '1') {
+    if (dd) dd.style.display = 'none';
+    ta.value = ''; ta.dispatchEvent(new Event('input'));
+    showManageQRModal();
+    return;
+  }
+  // Plantilla → mandarla como template (reabre charlas de +24h). Pide confirmación.
+  if (el.dataset.tplName) {
+    if (dd) dd.style.display = 'none';
+    const name = el.dataset.tplName;
+    const lang = el.dataset.tplLang || 'es_AR';
+    const nParams = parseInt(el.dataset.tplParams || '0', 10) || 0;
+    const ok = await showConfirm(`¿Mandar la plantilla "${name}"?\n\nSe envía como mensaje aprobado por Meta — sirve para reabrir conversaciones de más de 24h.`, { title: 'Enviar plantilla', confirmLabel: 'Enviar' });
+    if (!ok) return;
+    let params = [];
+    if (nParams >= 1) {
+      const c = (chatState.contacts || []).find(x => x.phone === chatState.selectedPhone);
+      const first = ((c && c.name) || '').trim().split(/\s+/)[0] || 'amigo/a';
+      params = [first];
+    }
+    ta.value = ''; ta.dispatchEvent(new Event('input'));
+    toast('Enviando plantilla…');
+    const j = await sendTemplateToChat(chatState.selectedPhone, name, lang, params);
+    if (j && j.id) {
+      try { await loadChatMessages(chatState.selectedPhone); renderChatMessages(); } catch (_) {}
+      toast('✓ Plantilla enviada');
+    } else {
+      toast('Error al enviar la plantilla');
+    }
+    return;
+  }
   const hasMedia = el.dataset.qrHasMedia === '1';
   const qrId = parseInt(el.dataset.qrId);
   const body = el.dataset.qrBody;
@@ -8833,7 +8931,7 @@ function bindChat() {
     // Cargar nombres de WA primero (rápido, solo phone→name) y después contactos
     // para que el primer render ya los muestre bien.
     loadWaContactNames().finally(() => {
-      Promise.all([loadChatContacts(), loadQuickReplies(), loadLabels(), loadAllNotes(), loadArchivedChats()]).then(() => {
+      Promise.all([loadChatContacts(), loadQuickReplies(), loadChatTemplates(), loadLabels(), loadAllNotes(), loadArchivedChats()]).then(() => {
         if (STATE.view === 'chat') render();
       });
     });
@@ -9486,14 +9584,20 @@ function showManageLabelsModal() {
 }
 
 function showManageQRModal() {
+  const verts = qrVerticalsForUser();
+  const visQR = (chatState.quickReplies || []).filter(q => !verts || verts.includes(q.vertical || 'carteles'));
+  const defVert = (verts && verts[0]) || 'carteles';
+  const vertOptions = (verts === null)
+    ? `<option value="carteles">Carteles</option><option value="cursos">Cursos</option>`
+    : `<option value="${defVert}">${defVert === 'cursos' ? 'Cursos' : 'Carteles'}</option>`;
   const content = `
     <div class="manage-qr">
-      <p class="manage-qr-hint">Escribí <b>/</b> en el chat para ver tus respuestas guardadas. Las que tienen foto la mandan junto con el texto como caption.</p>
+      <p class="manage-qr-hint">Escribí <b>/</b> en el chat para ver tus respuestas guardadas y plantillas. Las que tienen foto la mandan junto con el texto como caption.</p>
       <div class="manage-qr-section">
-        <div class="manage-qr-section-h">${chatState.quickReplies.length} respuesta${chatState.quickReplies.length === 1 ? '' : 's'}</div>
-        ${chatState.quickReplies.length ? `
+        <div class="manage-qr-section-h">${visQR.length} respuesta${visQR.length === 1 ? '' : 's'}</div>
+        ${visQR.length ? `
           <div class="manage-qr-list">
-            ${chatState.quickReplies.map(q => `
+            ${visQR.map(q => `
               <div class="manage-qr-row">
                 ${q.media_r2_key ? `<img class="manage-qr-thumb" src="${mediaUrl(q.media_r2_key)}" alt="">` : '<div class="manage-qr-thumb-empty">📝</div>'}
                 <div class="manage-qr-text">
@@ -9515,6 +9619,9 @@ function showManageQRModal() {
           <button class="btn btn-ghost" id="new-qr-image-btn" type="button">🖼 Adjuntar foto</button>
           <span id="new-qr-image-name" class="manage-qr-image-name"></span>
         </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--fg-subtle,#8696a0);margin:4px 0 8px">Sección:
+          <select id="new-qr-vertical" style="flex:1;padding:6px;border-radius:6px;background:rgba(255,255,255,.05);color:inherit;border:1px solid var(--border,#334155)">${vertOptions}</select>
+        </label>
         <button class="btn btn-cyan" id="add-qr-btn">Guardar respuesta</button>
       </div>
     </div>
@@ -9556,7 +9663,8 @@ function showManageQRModal() {
         r2Key = await uploadQuickReplyImage(pendingFile);
       }
       addBtn.textContent = 'Guardando…';
-      await saveQuickReply(shortcut, body, r2Key);
+      const vertical = document.getElementById('new-qr-vertical')?.value || defVert;
+      await saveQuickReply(shortcut, body, r2Key, vertical);
       showManageQRModal();
     } catch (e) {
       toast('Error: ' + e.message);

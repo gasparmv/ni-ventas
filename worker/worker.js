@@ -5524,17 +5524,18 @@ export default {
       // ===== Quick Replies CRUD =====
       if (request.method === 'GET' && path === '/admin/quick-replies') {
         try {
-          const rs = await env.DB.prepare('SELECT id, shortcut, body, media_r2_key FROM quick_replies ORDER BY shortcut').all();
+          const rs = await env.DB.prepare('SELECT id, shortcut, body, media_r2_key, vertical FROM quick_replies ORDER BY shortcut').all();
           return json({ replies: rs.results || [] });
         } catch (e) { return json({ replies: [] }); }
       }
       if (request.method === 'POST' && path === '/admin/quick-replies') {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        const { shortcut, body: text, media_r2_key } = body || {};
+        const { shortcut, body: text, media_r2_key, vertical } = body || {};
         if (!shortcut || (!text && !media_r2_key)) return json({ error: 'missing shortcut, body or media' }, 400);
         const sc = shortcut.toLowerCase().replace(/\s+/g, '_');
-        await env.DB.prepare('INSERT OR REPLACE INTO quick_replies (shortcut, body, media_r2_key, created_at) VALUES (?, ?, ?, ?)')
-          .bind(sc, text || '', media_r2_key || null, new Date().toISOString()).run();
+        const vert = (vertical === 'cursos') ? 'cursos' : 'carteles';
+        await env.DB.prepare('INSERT OR REPLACE INTO quick_replies (shortcut, body, media_r2_key, vertical, created_at) VALUES (?, ?, ?, ?, ?)')
+          .bind(sc, text || '', media_r2_key || null, vert, new Date().toISOString()).run();
         return json({ ok: true });
       }
       if (request.method === 'DELETE' && path.startsWith('/admin/quick-replies/')) {
