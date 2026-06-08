@@ -5089,6 +5089,19 @@ function tplParamCount(t) {
   const m = tplBodyText(t).match(/\{\{\s*\d+\s*\}\}/g);
   return m ? m.length : 0;
 }
+// Si el body es el marcador "[plantilla: NOMBRE]", devuelve el TEXTO REAL de esa
+// plantilla (con {{1}} → primer nombre del contacto). Si no la encuentra, un
+// rótulo limpio. Si no es un marcador, devuelve el body tal cual.
+function tplMarkerToText(body, phone) {
+  const s = String(body || '');
+  const mk = s.match(/^\[plantilla:\s*([a-z0-9_]+)\]/i);
+  if (!mk) return s;
+  const tpl = (chatState.templates || []).find(t => t.name === mk[1]);
+  if (!tpl) return '📋 Plantilla enviada';
+  const c = (chatState.contacts || []).find(x => x.phone === phone);
+  const fn = ((c && c.name) || '').trim().split(/\s+/)[0] || 'amigo/a';
+  return tplBodyText(tpl).replace(/\{\{\s*\d+\s*\}\}/g, fn);
+}
 // Vertical de una plantilla según su nombre (cursos_* / sorteo / clase → cursos).
 function templateVertical(name) {
   const n = String(name || '').toLowerCase();
@@ -7402,8 +7415,9 @@ function renderChatBubbles(msgs, opts) {
     }
     const footer = `<span class="chat-msg-footer"><span class="chat-msg-time">${time}</span>${statusHtml}</span>`;
 
-    // Parse body: separate actual text from [audio]/[imagen] AI annotations
-    let bodyText = m.body || '';
+    // Parse body: separate actual text from [audio]/[imagen] AI annotations.
+    // Si es el marcador de una plantilla ("[plantilla: NOMBRE]"), mostramos el texto real.
+    let bodyText = tplMarkerToText(m.body || '', m.phone || chatState.selectedPhone);
     let transcript = '';
     let imgDescription = '';
     if (m.msg_type === 'audio' && bodyText.startsWith('[audio] ')) {
@@ -8042,7 +8056,7 @@ function renderReplyBanner() {
   else if (m.msg_type === 'audio') preview = '🎤 Audio';
   else if (m.msg_type === 'video') preview = '🎬 Video';
   else if (m.msg_type === 'document') preview = '📄 ' + (m.body || 'Documento');
-  else preview = (m.body || '').slice(0, 140);
+  else preview = tplMarkerToText(m.body || '', m.phone || chatState.selectedPhone).slice(0, 140);
   const banner = document.createElement('div');
   banner.id = 'reply-banner';
   banner.className = 'reply-banner';
