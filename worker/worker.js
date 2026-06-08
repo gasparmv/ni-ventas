@@ -2603,6 +2603,117 @@ function levenshtein(a, b) {
   return v0[b.length];
 }
 
+// ===== Copiloto: motor de respuestas sugeridas (Fase 2) =====
+// Reglas duras del agente (separadas del playbook, que va cacheado aparte).
+const SUGGEST_SYSTEM_RULES = `Sos parte del equipo de ventas de Neon Infinito (carteles de neón LED y cursos para aprender a fabricarlos, Argentina). Te paso una conversación real de WhatsApp con un cliente y el PLAYBOOK de ventas del negocio. Tu tarea: sugerir el PRÓXIMO mensaje para mandarle al cliente, listo para enviar.
+
+REGLAS DURAS (no negociables):
+1. PRIMERO clasificá la vertical del lead: "carteles" (quiere un cartel para su local/un regalo), "cursos" (quiere aprender / Neon Mastery), "supernova" (ya fabrica y quiere escalar ventas), o "ambiguo". Aplicá el criterio de esa vertical (ver playbook: 8A.0 router + PARTE A carteles + PARTE B cursos). NUNCA cruces criterios: no mandes render/medidas/seña a un lead de curso, ni testimonios de "facturá millones" a un dueño de local que solo quiere un cartel.
+2. NUNCA inventes precios, plazos de entrega, garantías, datos de pago ni condiciones. Si el dato NO está explícito en el playbook o el contexto, NO lo pongas en el mensaje: agregalo a "missing_info" y bajá la confianza. Para cotizar un cartel hace falta foto + medidas (alto y ancho) + interior/exterior — nunca tires un precio a ojo.
+3. Tono Neon Infinito: rioplatense, voseo, cercano, frases cortas, humano. Emojis funcionales (🙌 👇 🤙 🫶). Nada robótico ni corporativo. Si no sabés el nombre del cliente, arrancá con "Buenas!".
+4. Espejá el canal y el registro del cliente: si escribe corto, respondé corto; si manda audio, sugerí responder con audio.
+5. Si conviene un humano (B2B de varios locales, dudas fuertes de precio/financiación, una queja, o te falta info clave para responder bien), poné should_escalate=true con el motivo y hacé un draft prudente (sin comprometer nada).
+
+Devolvé SOLO un objeto JSON (sin markdown, sin texto extra) con EXACTAMENTE este shape:
+{"vertical":"carteles|cursos|supernova|ambiguo","intent":"string corto","draft":"el mensaje sugerido, en tono NI","confidence":0.0,"sources_used":["secciones del playbook usadas"],"missing_info":["datos que faltan y NO inventaste, ej: precio, plazo, garantía"],"should_escalate":false,"escalation_reason":""}`;
+
+// Genera una respuesta sugerida para el último mensaje de un chat. NO la envía.
+// opts.dry=true devuelve el contexto armado sin llamar a Claude (para test/inspección).
+async function suggestReply(env, phone, opts = {}) {
+ try {
+  const ctx = await buildChatContext(env, phone, 40);
+  if (!ctx) return { ok: false, error: 'sin mensajes para este phone' };
+
+  const conv = await env.DB.prepare(
+    `SELECT vertical, product_type, customer_profile, objections, what_worked, next_action
+     FROM wa_conversations WHERE phone = ?`
+  ).bind(phone).first();
+
+  // Ejemplos ganadores: qué cerró en ventas concretadas del mismo producto.
+  let examples = [];
+  try {
+    const exr = conv?.product_type
+      ? await env.DB.prepare(`SELECT what_worked FROM wa_conversations WHERE outcome='sold' AND what_worked != '' AND product_type = ? ORDER BY last_analyzed_at DESC LIMIT 3`).bind(conv.product_type).all()
+      : await env.DB.prepare(`SELECT what_worked FROM wa_conversations WHERE outcome='sold' AND what_worked != '' ORDER BY last_analyzed_at DESC LIMIT 3`).all();
+    examples = (exr.results || []).map(e => e.what_worked).filter(Boolean);
+  } catch (_) {}
+
+  const fw = await getActiveFramework(env);
+  const frameworkText = fw?.content || '';
+  const frameworkVersion = fw?.version || null;
+
+  let userContent = ctx.fullText + '\n\n';
+  if (conv) {
+    userContent += `## ANÁLISIS PREVIO DEL CLIENTE\n`;
+    if (conv.vertical) userContent += `Vertical: ${conv.vertical}\n`;
+    if (conv.customer_profile) userContent += `Perfil: ${conv.customer_profile}\n`;
+    if (conv.objections) userContent += `Objeciones detectadas: ${conv.objections}\n`;
+    if (conv.next_action) userContent += `Próxima acción (del análisis): ${conv.next_action}\n`;
+    userContent += '\n';
+  }
+  if (examples.length) {
+    userContent += `## QUÉ FUNCIONÓ EN VENTAS CERRADAS PARECIDAS (referencia, no copiar literal)\n`;
+    examples.forEach((e, i) => { userContent += `${i + 1}. ${e}\n`; });
+    userContent += '\n';
+  }
+  userContent += `Sugerí el PRÓXIMO mensaje para mandarle al cliente ahora. Devolvé SOLO el JSON.`;
+
+  if (opts.dry) {
+    return { ok: true, dry: true, framework_version: frameworkVersion, framework_chars: frameworkText.length,
+             examples: examples.length, has_analysis: !!conv, user_chars: userContent.length,
+             user_preview: userContent.slice(0, 1400) };
+  }
+  if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'ANTHROPIC_API_KEY no configurada' };
+
+  const system = [
+    { type: 'text', text: SUGGEST_SYSTEM_RULES },
+    { type: 'text', text: '## PLAYBOOK DE VENTAS\n\n' + frameworkText, cache_control: { type: 'ephemeral' } }
+  ];
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1000, system, messages: [{ role: 'user', content: userContent }] })
+    });
+    const j = await r.json();
+    if (!r.ok) return { ok: false, error: j.error?.message || ('HTTP ' + r.status), raw: j };
+    const text = j.content?.[0]?.text || '';
+    let parsed;
+    try { parsed = JSON.parse(text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()); }
+    catch (e) { return { ok: false, error: 'JSON parse error', raw: text.slice(0, 1500) }; }
+
+    const missing = Array.isArray(parsed.missing_info) ? parsed.missing_info : [];
+    const sensitive = missing.some(m => /precio|plazo|garant|pago|cuota|tiempo|entrega|financ/i.test(String(m)));
+    const conf = typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
+    const lowConfidence = conf < 0.7 || sensitive || parsed.should_escalate === true;
+    const ti = j.usage?.input_tokens || 0, to = j.usage?.output_tokens || 0;
+    return {
+      ok: true,
+      suggestion: {
+        vertical: parsed.vertical || (conv?.vertical || ''),
+        intent: parsed.intent || '',
+        draft: String(parsed.draft || ''),
+        confidence: conf,
+        low_confidence: lowConfidence,
+        sources_used: Array.isArray(parsed.sources_used) ? parsed.sources_used : [],
+        missing_info: missing,
+        should_escalate: parsed.should_escalate === true || sensitive,
+        escalation_reason: parsed.escalation_reason || (sensitive ? 'falta info sensible (precio/plazo/garantía) — confirmá con humano' : '')
+      },
+      framework_version: frameworkVersion,
+      model: 'claude-sonnet-4-5',
+      tokens_in: ti, tokens_out: to,
+      cache_read: j.usage?.cache_read_input_tokens || 0,
+      cost_usd: +(((ti * 3 + to * 15) / 1000000).toFixed(5))
+    };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+ } catch (outer) {
+   return { ok: false, error: 'suggest: ' + String((outer && outer.message) || outer) };
+ }
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
@@ -3374,6 +3485,17 @@ export default {
           String(body?.model_used || ''), session.user, new Date().toISOString()
         ).run();
         return json({ ok: true, edit_distance: ed });
+      }
+
+      // ----- Copiloto: respuesta sugerida (NO la envía; la muestra para revisar) -----
+      if (request.method === 'POST' && path === '/admin/wa/suggest-reply') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const num = String(body?.phone || '').replace(/\D/g, '');
+        if (!num) return json({ error: 'missing phone' }, 400);
+        const res = await suggestReply(env, num, { dry: !!body?.dry });
+        if (!res.ok) return json({ error: res.error || 'failed', raw: res.raw }, res.error === 'ANTHROPIC_API_KEY no configurada' ? 503 : 500);
+        return json(res);
       }
 
       if (request.method === 'POST' && path === '/admin/wa/send') {
