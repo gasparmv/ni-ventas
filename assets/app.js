@@ -4516,6 +4516,8 @@ function bindAdmin() {
   if (!adminData.rows.length && !adminData.error && !adminData.loading && isAdmin()) loadAdminActivity();
   // Stats del copiloto IA (generadas / enviadas / editadas / descartadas).
   maybeRefreshCopilotCost();
+  // Fase 2C: propuestas de mejora al playbook pendientes de aprobar.
+  loadImprovements();
 
   const saveBtn = document.querySelector('[data-cot-save]');
   if (saveBtn) saveBtn.onclick = async () => {
@@ -4640,8 +4642,12 @@ function renderAdmin() {
         <span class="muted" style="font-size:12px">se cobra solo al tocar ✨</span>
       </div>
       <div id="copilot-admin-stats"><div class="loading"><div class="spinner"></div></div></div>
-      <div class="muted" style="font-size:12px;margin-top:var(--s-3);line-height:1.5;border-top:1px solid var(--border);padding-top:var(--s-3)">
-        <b>Mejoras al playbook:</b> cada vez que editás o descartás una sugerencia, el sistema lo registra (qué cambiaste y por qué no servía). Esa data se va juntando y la síntesis de mejoras al guión va a aparecer acá mismo para que la apruebes — es la próxima fase (2C), todavía no está activa pero ya estamos guardando todo.
+      <div style="border-top:1px solid var(--border);margin-top:var(--s-3);padding-top:var(--s-3)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:var(--s-2)">
+          <div><b>Mejoras al playbook</b> <span class="muted" style="font-size:12px">la IA las propone, las aprobás vos</span></div>
+          <button class="btn btn-ghost" id="btn-gen-improvements" onclick="generateImprovements(this)">✨ Generar ahora</button>
+        </div>
+        <div id="copilot-improvements"><div class="muted" style="font-size:12px">cargando…</div></div>
       </div>
     </div>
 
@@ -6506,6 +6512,95 @@ function renderCopilotStatsHTML(j) {
     <div class="muted" style="font-size:12px;margin-top:var(--s-2)">Histórico: ${t.sent || 0} enviadas tal cual · ${t.edited || 0} editadas · ${t.ignored || 0} descartadas · $${(t.cost_usd || 0).toFixed(2)} gastado en total</div>
   `;
 }
+
+// ===== Fase 2C: mejoras al playbook (panel admin) =====
+async function loadImprovements() {
+  if (typeof getUserRole === 'function' && getUserRole() !== 'admin') return;
+  const el = document.getElementById('copilot-improvements');
+  if (!el) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/framework/improvements?status=pending', { headers: { ...authHeaders() } });
+    const j = await r.json();
+    el.innerHTML = (j && j.ok) ? renderImprovementsHTML(j) : '<div class="muted" style="font-size:12px">no se pudo cargar</div>';
+  } catch (_) { el.innerHTML = '<div class="muted" style="font-size:12px">no se pudo cargar</div>'; }
+}
+
+function renderImprovementsHTML(j) {
+  const items = (j && j.improvements) || [];
+  const lr = j && j.last_run;
+  const lastLine = lr ? `<div class="muted" style="font-size:11px;margin-top:8px">última síntesis: ${new Date(lr.created_at).toLocaleString('es-AR')}${lr.cost_usd != null ? ' · $' + (+lr.cost_usd).toFixed(2) : ''}${lr.created_by ? ' · ' + escapeHtml(lr.created_by) : ''}</div>` : '';
+  if (!items.length) {
+    return `<div class="muted" style="font-size:13px;line-height:1.5">No hay propuestas pendientes. El sistema aprende de cada sugerencia que editás o descartás. Cuando junta señal suficiente (o tocás "Generar ahora") te propone acá mejoras concretas al guión para que las apruebes vos. Nada se cambia sin tu OK.</div>${lastLine}`;
+  }
+  return items.map(it => {
+    const conf = it.confidence != null ? Math.round(it.confidence * 100) + '%' : '';
+    return `<div class="improve-item">
+      <div class="improve-head">
+        <span class="improve-vert improve-vert-${escapeHtml(it.vertical || 'general')}">${escapeHtml(it.vertical || 'general')}</span>
+        <span class="improve-title">${escapeHtml(it.title || '')}</span>
+        ${conf ? `<span class="muted" style="font-size:11px">conf ${conf}</span>` : ''}
+      </div>
+      ${it.rationale ? `<div class="improve-txt">${escapeHtml(it.rationale)}</div>` : ''}
+      ${it.evidence ? `<div class="improve-txt muted"><b>Evidencia:</b> ${escapeHtml(it.evidence)}</div>` : ''}
+      <div class="muted" style="font-size:11px;margin-top:4px">→ ${escapeHtml(it.operation || 'append')} · sección "${escapeHtml(it.target_heading || '(nueva)')}"</div>
+      <details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px;color:var(--neon-cyan)">Ver texto propuesto</summary><pre class="improve-content">${escapeHtml(it.proposed_content || '')}</pre></details>
+      <div class="improve-actions">
+        <button class="suggest-use" onclick="approveImprovement(${it.id}, this)">Aprobar y aplicar</button>
+        <button class="suggest-dismiss" onclick="rejectImprovement(${it.id}, this)">Rechazar</button>
+      </div>
+    </div>`;
+  }).join('') + lastLine;
+}
+
+async function generateImprovements(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Analizando...'; }
+  const el = document.getElementById('copilot-improvements');
+  if (el) el.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/framework/improvements/generate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ force: true })
+    });
+    const j = await r.json();
+    if (j && j.ok) {
+      if (j.generated === 0) {
+        if (el) el.innerHTML = `<div class="muted" style="font-size:13px;line-height:1.5">${escapeHtml(j.reason || 'no encontró mejoras sólidas para proponer esta vez')}</div>`;
+      } else { await loadImprovements(); }
+    } else if (el) {
+      el.innerHTML = `<div class="suggest-err" style="font-size:12px">${escapeHtml(j.error || 'falló la síntesis')}</div>`;
+    }
+  } catch (_) { if (el) el.innerHTML = '<div class="suggest-err" style="font-size:12px">error de red</div>'; }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '✨ Generar ahora'; } }
+}
+
+async function approveImprovement(id, btn) {
+  if (!confirm('Aprobar esta mejora? Se crea una versión nueva del playbook con el cambio aplicado y queda activa al toque.')) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/framework/improvements/approve', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ id })
+    });
+    const j = await r.json();
+    if (j && j.ok) { await loadImprovements(); }
+    else { alert('No se pudo aplicar: ' + (j.error || 'error')); if (btn) btn.disabled = false; }
+  } catch (_) { alert('Error de red'); if (btn) btn.disabled = false; }
+}
+
+async function rejectImprovement(id, btn) {
+  const note = prompt('Por qué la rechazás? (opcional — ayuda a la próxima síntesis)');
+  if (note === null) return; // canceló el prompt
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/framework/improvements/reject', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ id, note })
+    });
+    const j = await r.json();
+    if (j && j.ok) { await loadImprovements(); }
+    else { alert('No se pudo: ' + (j.error || 'error')); if (btn) btn.disabled = false; }
+  } catch (_) { alert('Error de red'); if (btn) btn.disabled = false; }
+}
+window.generateImprovements = generateImprovements;
+window.approveImprovement = approveImprovement;
+window.rejectImprovement = rejectImprovement;
 
 function renderChat() {
   if (!canAccessChat()) {

@@ -2728,6 +2728,259 @@ async function suggestReply(env, phone, opts = {}) {
  }
 }
 
+// ===== Fase 2C: bucle de auto-mejora del playbook =====
+// Lee el feedback acumulado (ediciones/descartes de sugerencias) + lo que cerró
+// ventas y las objeciones que perdieron, y propone mejoras CONCRETAS al playbook.
+// Cada propuesta queda 'pending' hasta que Gaspar la aprueba. Al aprobar, se crea
+// una versión nueva del framework con el cambio aplicado y se activa. NUNCA toca
+// el playbook sin aprobación humana.
+
+// Crea la tabla on-demand (belt-and-suspenders: aunque la migración no se haya
+// corrido todavía en este entorno, los endpoints no 500ean).
+async function ensureImprovementsSchema(env) {
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS framework_improvements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        vertical TEXT NOT NULL DEFAULT 'general',
+        title TEXT NOT NULL DEFAULT '',
+        rationale TEXT NOT NULL DEFAULT '',
+        evidence TEXT NOT NULL DEFAULT '',
+        target_heading TEXT NOT NULL DEFAULT '',
+        operation TEXT NOT NULL DEFAULT 'append',
+        proposed_content TEXT NOT NULL DEFAULT '',
+        confidence REAL,
+        based_on_version INTEGER,
+        source_model TEXT NOT NULL DEFAULT '',
+        batch_id TEXT NOT NULL DEFAULT '',
+        applied_version INTEGER,
+        reviewed_by TEXT NOT NULL DEFAULT '',
+        reviewed_at TEXT,
+        review_note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+      )`
+    ).run();
+    await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_framework_improvements_status ON framework_improvements(status)').run();
+  } catch (e) { try { console.error('ensureImprovementsSchema:', (e && e.message) || e); } catch (_) {} }
+}
+
+// Cirugía sobre el markdown crudo del playbook (preserva el resto del doc tal
+// cual; no reserializa desde secciones parseadas, que perdería formato). Busca el
+// encabezado destino por texto normalizado y aplica append/replace, o suma una
+// sección nueva al final. Si no encuentra el destino, NUNCA pierde el cambio:
+// lo agrega como sección nueva al final.
+function applyEditToMarkdown(md, edit) {
+  const content = String(edit?.proposed_content || '').trim();
+  if (!content) return String(md || '');
+  const text = String(md || '');
+  const op = ['append', 'replace', 'new_section'].includes(edit?.operation) ? edit.operation : 'append';
+  const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+  const appendAtEnd = () => text.replace(/\s+$/, '') + '\n\n' + content + '\n';
+  if (op === 'new_section' || !edit?.target_heading) return appendAtEnd();
+
+  const lines = text.split(/\r?\n/);
+  const target = norm(edit.target_heading);
+  let hi = -1, hlevel = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(#{1,6})\s+(.*)$/);
+    if (m && norm(m[2]) === target) { hi = i; hlevel = m[1].length; break; }
+  }
+  if (hi === -1) return appendAtEnd(); // no se encontró la sección → no perder el cambio
+
+  // Fin de la sección: próximo encabezado de nivel <= al del target (o EOF).
+  let end = lines.length;
+  for (let i = hi + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^(#{1,6})\s+/);
+    if (m && m[1].length <= hlevel) { end = i; break; }
+  }
+  if (op === 'replace') {
+    const out = lines.slice(0, hi).concat([lines[hi], '', content], lines.slice(end));
+    return out.join('\n');
+  }
+  // append: insertar al final del cuerpo de la sección (antes del próximo heading),
+  // salteando líneas en blanco finales.
+  let insertAt = end;
+  while (insertAt > hi + 1 && lines[insertAt - 1].trim() === '') insertAt--;
+  const out = lines.slice(0, insertAt).concat(['', content], lines.slice(insertAt));
+  return out.join('\n');
+}
+
+// Junta la evidencia real para la síntesis. Devuelve texto armado + contadores.
+async function gatherSynthesisEvidence(env) {
+  const safe = async (q, ...b) => { try { return (await env.DB.prepare(q).bind(...b).all()).results || []; } catch (_) { return []; } };
+  // (a) Ediciones con cambio significativo: el draft estuvo flojo y el humano lo
+  //     corrigió. El "final" es el patrón correcto.
+  const edits = await safe(
+    `SELECT suggested_text, final_text, vertical, objection, edit_distance
+       FROM suggestion_feedback WHERE action='edited' AND edit_distance >= 3
+       ORDER BY created_at DESC LIMIT 40`);
+  // (b) Descartes: lo que NO había que sugerir.
+  const discards = await safe(
+    `SELECT suggested_text, vertical, objection
+       FROM suggestion_feedback WHERE action='ignored'
+       ORDER BY created_at DESC LIMIT 25`);
+  // (c) Ventas cerradas: qué funcionó (por vertical/producto).
+  const wins = await safe(
+    `SELECT product_type, vertical, what_worked, objections
+       FROM wa_conversations WHERE outcome='sold' AND what_worked != ''
+       ORDER BY last_analyzed_at DESC LIMIT 25`);
+  // (d) Ventas perdidas: objeciones/qué falló.
+  const losses = await safe(
+    `SELECT product_type, vertical, objections, what_didnt, outcome_reason
+       FROM wa_conversations WHERE outcome='lost' AND (objections != '' OR what_didnt != '')
+       ORDER BY last_analyzed_at DESC LIMIT 20`);
+
+  const counts = { edits: edits.length, discards: discards.length, wins: wins.length, losses: losses.length };
+  let txt = '';
+  if (edits.length) {
+    txt += `## CORRECCIONES DEL HUMANO A LAS SUGERENCIAS (el copiloto sugirió X, el humano lo cambió a Y antes de mandar)\n`;
+    edits.forEach((e, i) => {
+      txt += `${i + 1}. [${e.vertical || 's/d'}]${e.objection ? ' obj: ' + e.objection : ''}\n   SUGERIDO: ${String(e.suggested_text || '').slice(0, 400)}\n   ENVIADO:  ${String(e.final_text || '').slice(0, 400)}\n`;
+    });
+    txt += '\n';
+  }
+  if (discards.length) {
+    txt += `## SUGERENCIAS DESCARTADAS (el humano NO las mandó — qué evitar)\n`;
+    discards.forEach((e, i) => { txt += `${i + 1}. [${e.vertical || 's/d'}] ${String(e.suggested_text || '').slice(0, 300)}\n`; });
+    txt += '\n';
+  }
+  if (wins.length) {
+    txt += `## VENTAS CERRADAS — QUÉ FUNCIONÓ\n`;
+    wins.forEach((e, i) => { txt += `${i + 1}. [${e.vertical || e.product_type || 's/d'}] ${String(e.what_worked || '').slice(0, 350)}\n`; });
+    txt += '\n';
+  }
+  if (losses.length) {
+    txt += `## VENTAS PERDIDAS — OBJECIONES / QUÉ FALLÓ\n`;
+    losses.forEach((e, i) => { txt += `${i + 1}. [${e.vertical || e.product_type || 's/d'}] obj: ${String(e.objections || '').slice(0, 200)}${e.what_didnt ? ' | falló: ' + String(e.what_didnt).slice(0, 200) : ''}\n`; });
+    txt += '\n';
+  }
+  return { text: txt, counts, total: edits.length + discards.length + wins.length + losses.length };
+}
+
+const SYNTHESIS_SYSTEM_RULES = `Sos el analista de mejora continua del equipo de ventas de Neon Infinito (carteles de neón LED y cursos para aprender a fabricarlos, Argentina). Tu trabajo: leer (a) el PLAYBOOK de ventas actual y (b) EVIDENCIA real de las últimas semanas — correcciones que el humano le hizo a las sugerencias del copiloto, sugerencias que descartó, qué cerró ventas y qué objeciones perdieron ventas — y proponer MEJORAS CONCRETAS al playbook.
+
+PRINCIPIOS (no negociables):
+1. SOLO proponé cambios respaldados por la EVIDENCIA que te paso. Cada propuesta cita el dato que la motiva (ej. "en 4 de 6 ediciones de carteles el humano sacó el precio y preguntó medidas primero"). NADA de consejos genéricos de ventas sin respaldo en los datos.
+2. SEPARÁ carteles de cursos SIEMPRE. Una mejora para carteles no se mezcla con cursos. Si la evidencia es de una sola vertical, la propuesta es para esa vertical.
+3. CONCRETO Y DIRIGIDO. Cada propuesta apunta a UNA sección existente del playbook (target_heading copiado EXACTO del playbook) con operation=append (sumar al final de esa sección) o replace (reescribir esa sección). Usá new_section solo si es un tema realmente nuevo. proposed_content es el markdown EXACTO a incorporar, en el mismo estilo y tono del playbook.
+4. NO toques datos operativos (precios, alias, plazos, garantía, logística): esos los maneja el humano. Enfocate en: cómo redactar y secuenciar los mensajes, manejo de objeciones, criterio de calificación, qué preguntar y cuándo, errores a evitar.
+5. CONSERVADOR. Máximo 5 propuestas, solo las de mayor impacto. Si la evidencia es delgada o no hay patrón claro, devolvé MENOS (o ninguna). Calidad sobre cantidad: una propuesta floja erosiona la confianza en el sistema.
+6. El playbook es la "biblia" del negocio: afinalo con lo que pasa en la cancha, sin romper lo que ya funciona.
+
+Devolvé SOLO un objeto JSON (sin markdown, sin texto extra) con EXACTAMENTE este shape:
+{"improvements":[{"vertical":"carteles|cursos|supernova|general","title":"título corto","rationale":"el insight, por qué mejora la venta","evidence":"el dato concreto que lo respalda (con números si los hay)","target_heading":"encabezado EXACTO de la sección del playbook a tocar","operation":"append|replace|new_section","proposed_content":"el markdown exacto a incorporar","confidence":0.0}]}
+Si no hay nada sólido que proponer, devolvé {"improvements":[]}.`;
+
+// Corre la síntesis: junta evidencia, le pide a Opus propuestas, las guarda como
+// 'pending'. opts.force salta el gate de "suficiente feedback nuevo".
+async function synthesizeFrameworkImprovements(env, opts = {}) {
+  try {
+    if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'ANTHROPIC_API_KEY no configurada' };
+    await ensureImprovementsSchema(env);
+
+    // Gate: ¿hay suficiente feedback nuevo desde la última corrida?
+    let newSinceLast = null;
+    try {
+      const last = await env.DB.prepare('SELECT MAX(created_at) AS t FROM framework_improvements').first();
+      const fbq = last?.t
+        ? await env.DB.prepare(`SELECT COUNT(*) AS n FROM suggestion_feedback WHERE action IN ('edited','ignored') AND created_at > ?`).bind(last.t).first()
+        : await env.DB.prepare(`SELECT COUNT(*) AS n FROM suggestion_feedback WHERE action IN ('edited','ignored')`).first();
+      newSinceLast = fbq?.n || 0;
+    } catch (_) {}
+    if (!opts.force && newSinceLast != null && newSinceLast < 12) {
+      return { ok: true, generated: 0, skipped: true, reason: `poco feedback nuevo (${newSinceLast}/12) — no corro la síntesis para no gastar al pedo`, new_feedback: newSinceLast };
+    }
+
+    const ev = await gatherSynthesisEvidence(env);
+    if (ev.total === 0) return { ok: true, generated: 0, skipped: true, reason: 'sin evidencia todavía (no hay ediciones, descartes ni ventas analizadas)', evidence_counts: ev.counts };
+
+    const fw = await getActiveFramework(env);
+    const frameworkText = fw?.content || '';
+    const basedOnVersion = fw?.version || null;
+
+    const userContent = `# EVIDENCIA REAL (últimas semanas)\n\n${ev.text}\n---\nAnalizá la evidencia contra el playbook y proponé mejoras concretas. Devolvé SOLO el JSON.`;
+    const system = [
+      { type: 'text', text: SYNTHESIS_SYSTEM_RULES },
+      { type: 'text', text: '## PLAYBOOK DE VENTAS ACTUAL (v' + basedOnVersion + ')\n\n' + frameworkText }
+    ];
+    const model = 'claude-opus-4-5';
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model, max_tokens: 4000, system, messages: [{ role: 'user', content: userContent }] })
+    });
+    const j = await r.json();
+    if (!r.ok) return { ok: false, error: j.error?.message || ('HTTP ' + r.status), raw: j };
+    const text = j.content?.[0]?.text || '';
+    let parsed;
+    try { parsed = JSON.parse(text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()); }
+    catch (e) { return { ok: false, error: 'JSON parse error', raw: text.slice(0, 1500) }; }
+    const improvements = Array.isArray(parsed.improvements) ? parsed.improvements.slice(0, 5) : [];
+
+    // Costo (Opus: input $15, output $75 /MTok).
+    const ti = j.usage?.input_tokens || 0;
+    const to = j.usage?.output_tokens || 0;
+    const tcr = j.usage?.cache_read_input_tokens || 0;
+    const tcw = j.usage?.cache_creation_input_tokens || 0;
+    const cost = +(((ti * 15 + tcw * 18.75 + tcr * 1.5 + to * 75) / 1000000).toFixed(5));
+    try {
+      await env.DB.prepare(
+        `INSERT INTO copilot_usage (phone, kind, model, tokens_in, tokens_out, cache_read, cache_creation, cost_usd, created_by, created_at)
+         VALUES (NULL, 'synthesis', ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(model, ti, to, tcr, tcw, cost, opts.createdBy || 'cron', new Date().toISOString()).run();
+    } catch (_) {}
+
+    const batchId = 'syn_' + Date.now();
+    const now = new Date().toISOString();
+    let saved = 0;
+    for (const imp of improvements) {
+      const op = ['append', 'replace', 'new_section'].includes(imp?.operation) ? imp.operation : 'append';
+      const vertical = ['carteles', 'cursos', 'supernova', 'general'].includes(imp?.vertical) ? imp.vertical : 'general';
+      const content = String(imp?.proposed_content || '').trim();
+      const title = String(imp?.title || '').trim();
+      if (!content || !title) continue;
+      try {
+        await env.DB.prepare(
+          `INSERT INTO framework_improvements
+             (status, vertical, title, rationale, evidence, target_heading, operation, proposed_content, confidence, based_on_version, source_model, batch_id, created_at)
+           VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          vertical, title.slice(0, 200), String(imp?.rationale || '').slice(0, 2000),
+          String(imp?.evidence || '').slice(0, 2000), String(imp?.target_heading || '').slice(0, 300),
+          op, content.slice(0, 8000),
+          (typeof imp?.confidence === 'number' ? imp.confidence : null),
+          basedOnVersion, model, batchId, now
+        ).run();
+        saved++;
+      } catch (_) {}
+    }
+    return { ok: true, generated: saved, batch_id: batchId, cost_usd: cost, based_on_version: basedOnVersion, evidence_counts: ev.counts, new_feedback: newSinceLast };
+  } catch (e) {
+    return { ok: false, error: 'synthesis: ' + String((e && e.message) || e) };
+  }
+}
+
+// Aplica una propuesta aprobada: crea una versión nueva del framework con el
+// cambio incorporado y la activa. overrideContent permite que Gaspar edite el
+// texto antes de aplicar.
+async function applyImprovementToFramework(env, imp, user, overrideContent) {
+  const fw = await getActiveFramework(env);
+  if (!fw) return { ok: false, error: 'no hay framework activo' };
+  const effective = (overrideContent != null && String(overrideContent).trim()) ? String(overrideContent) : imp.proposed_content;
+  const newMd = applyEditToMarkdown(fw.content, { operation: imp.operation, target_heading: imp.target_heading, proposed_content: effective });
+  if (newMd === fw.content) return { ok: false, error: 'el cambio no modificó el playbook (revisá la sección destino)' };
+  const maxRow = await env.DB.prepare('SELECT MAX(version) AS v FROM sales_framework').first();
+  const nextV = (maxRow?.v || 0) + 1;
+  await env.DB.prepare('UPDATE sales_framework SET is_active = 0 WHERE is_active = 1').run();
+  await env.DB.prepare(
+    `INSERT INTO sales_framework (version, content, format, is_active, source, notes, created_by, created_at)
+     VALUES (?, ?, 'md', 1, 'synthesis', ?, ?, ?)`
+  ).bind(nextV, newMd, ('2C #' + imp.id + ': ' + String(imp.title || '').slice(0, 120)), user, new Date().toISOString()).run();
+  await deriveFrameworkSections(env, nextV, newMd);
+  return { ok: true, version: nextV };
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
@@ -3472,6 +3725,63 @@ export default {
         await env.DB.prepare('UPDATE sales_framework SET is_active = 0 WHERE is_active = 1').run();
         await env.DB.prepare('UPDATE sales_framework SET is_active = 1 WHERE version = ?').bind(v).run();
         return json({ ok: true, active: v });
+      }
+
+      // ===== Fase 2C: mejoras al playbook (síntesis + aprobación humana) =====
+      // Listar propuestas (por defecto las pendientes de revisar).
+      if (request.method === 'GET' && path === '/admin/framework/improvements') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        await ensureImprovementsSchema(env);
+        const status = url.searchParams.get('status') || 'pending';
+        const rs = status === 'all'
+          ? await env.DB.prepare(`SELECT * FROM framework_improvements ORDER BY (status='pending') DESC, created_at DESC LIMIT 50`).all()
+          : await env.DB.prepare(`SELECT * FROM framework_improvements WHERE status = ? ORDER BY created_at DESC LIMIT 50`).bind(status).all();
+        const pend = await env.DB.prepare(`SELECT COUNT(*) AS n FROM framework_improvements WHERE status='pending'`).first();
+        // Última corrida de síntesis (para mostrar "cuándo / cuánto costó").
+        let lastRun = null;
+        try { lastRun = await env.DB.prepare(`SELECT created_at, cost_usd, created_by FROM copilot_usage WHERE kind='synthesis' ORDER BY created_at DESC LIMIT 1`).first(); } catch (_) {}
+        return json({ ok: true, improvements: (rs.results || []), pending_count: pend?.n || 0, last_run: lastRun });
+      }
+      // Disparar la síntesis a mano (botón "Generar mejoras ahora"). force salta el gate.
+      if (request.method === 'POST' && path === '/admin/framework/improvements/generate') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        let body = {};
+        try { body = await request.json(); } catch (_) {}
+        const res = await synthesizeFrameworkImprovements(env, { force: body?.force !== false, createdBy: session.user });
+        if (!res.ok) return json({ error: res.error || 'failed', raw: res.raw }, res.error === 'ANTHROPIC_API_KEY no configurada' ? 503 : 500);
+        return json(res);
+      }
+      // Aprobar una propuesta: aplica el cambio (versión nueva del playbook) y la marca approved.
+      if (request.method === 'POST' && path === '/admin/framework/improvements/approve') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        await ensureImprovementsSchema(env);
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const id = parseInt(body?.id, 10);
+        if (!id) return json({ error: 'missing id' }, 400);
+        const imp = await env.DB.prepare(`SELECT * FROM framework_improvements WHERE id = ?`).bind(id).first();
+        if (!imp) return json({ error: 'propuesta no encontrada' }, 404);
+        if (imp.status !== 'pending') return json({ error: 'ya fue revisada (' + imp.status + ')' }, 409);
+        const applied = await applyImprovementToFramework(env, imp, session.user, body?.edited_content);
+        if (!applied.ok) return json({ error: applied.error }, 400);
+        await env.DB.prepare(
+          `UPDATE framework_improvements SET status='approved', applied_version=?, reviewed_by=?, reviewed_at=? WHERE id = ?`
+        ).bind(applied.version, session.user, new Date().toISOString(), id).run();
+        return json({ ok: true, applied_version: applied.version });
+      }
+      // Rechazar una propuesta (con motivo opcional, que es señal para la próxima síntesis).
+      if (request.method === 'POST' && path === '/admin/framework/improvements/reject') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        await ensureImprovementsSchema(env);
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const id = parseInt(body?.id, 10);
+        if (!id) return json({ error: 'missing id' }, 400);
+        const upd = await env.DB.prepare(
+          `UPDATE framework_improvements SET status='rejected', reviewed_by=?, reviewed_at=?, review_note=? WHERE id = ? AND status='pending'`
+        ).bind(session.user, new Date().toISOString(), String(body?.note || '').slice(0, 1000), id).run();
+        if (!upd.meta?.changes) return json({ error: 'propuesta no encontrada o ya revisada' }, 404);
+        return json({ ok: true });
       }
 
       // ----- Feedback de respuestas sugeridas (substrato del bucle de auto-mejora) -----
@@ -5974,6 +6284,14 @@ export default {
     // tengan actividad nueva desde su último análisis o que nunca se analizaron).
     // Ignora phones internos. Idempotente: si no hay nada que analizar, no hace nada.
     if (minute < 5) ctx.waitUntil(processAnalysisPending(env));
+    // Fase 2C: síntesis de mejoras al playbook, 1 vez por semana (lunes 13:00 UTC
+    // = 10:00 AR). La función tiene su propio gate: si no hay suficiente feedback
+    // nuevo desde la última corrida, no gasta. Las propuestas quedan 'pending'
+    // para que Gaspar las apruebe — el cron NUNCA toca el playbook solo.
+    const dow = new Date(event.scheduledTime).getUTCDay(); // 0=dom, 1=lun
+    if (dow === 1 && hour === 13 && minute < 5) {
+      ctx.waitUntil(synthesizeFrameworkImprovements(env, { createdBy: 'cron' }));
+    }
   }
 };
 
