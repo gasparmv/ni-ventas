@@ -6804,7 +6804,8 @@ const ALL_FOLLOWUP_PREFIXES_TEXT = [
   FOLLOWUP_PRESUPUESTO_PREFIX_TEXT,            // 'Aca te dejamos el presupuesto!' (legacy)
   'Te quería avisar que estamos regalando',    // copa
   'Holaa, cómo estás? Pudiste chequear',       // < 300k
-  'Buenas! Avisanos qué te pareció'            // ≥ 300k
+  'Buenas! Avisanos qué te pareció',           // ≥ 300k
+  '[plantilla: seguimiento_presupuesto]'       // contingencia ventana cerrada (template)
 ];
 
 function extractPresupuestoAmount(body) {
@@ -7003,8 +7004,39 @@ async function processPresupuestoFollowups(env) {
       continue;
     }
 
-    // 6) Enviar. Si es copa, intentamos imagen+caption; si no hay media
-    // disponible (R2 vacío, upload a Meta falla), caemos a texto solo.
+    // 6.0) CONTINGENCIA ventana cerrada: el texto libre solo puede salir si el
+    // cliente escribió hace <24h. Como el follow-up sale días después del
+    // presupuesto, casi siempre la ventana está cerrada → Meta rechaza el texto.
+    // Si la ventana está cerrada, mandamos la plantilla aprobada (sí sale fuera
+    // de las 24h). La ventana se mide por el último inbound del cliente.
+    let windowOpen = false;
+    try {
+      const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound'").bind(p.phone).first();
+      windowOpen = !!(li && li.t && (now - new Date(li.t).getTime()) < 24 * 60 * 60 * 1000);
+    } catch (_) {}
+    if (!windowOpen) {
+      const firstName = capitalizeName((p.sender_name || '').split(/\s+/)[0]) || 'amigo/a';
+      const rt = await waSendTemplate(env, p.phone, 'seguimiento_presupuesto', 'es_AR', [firstName]);
+      if (rt.ok) {
+        // Marker 'sent' → dedup (body reconocido por ALL_FOLLOWUP_PREFIXES_TEXT).
+        sent++;
+        try {
+          await env.DB.prepare(
+            'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(new Date().toISOString(), rt.id || ('fu-tpl:' + p.phone), 'outbound', p.phone, '', 'template', '[plantilla: seguimiento_presupuesto]', '', '', 'sent').run();
+        } catch (_) {}
+      } else {
+        // NO marcamos marker → reintenta el próximo cron (p.ej. si la plantilla
+        // todavía está 'pending' de aprobación). Solo log, sin notificar al admin
+        // (evita ruido en el hueco de aprobación). Acotado por el query de 24h.
+        await logWaEvent(env, { to: p.phone, kind: 'pp-followup-tpl', ref: 'pp-fu:' + p.phone, ok: false, error: rt.error });
+      }
+      await new Promise(rs => setTimeout(rs, 600));
+      continue;
+    }
+
+    // 6) Enviar (ventana ABIERTA). Si es copa, intentamos imagen+caption; si no
+    // hay media disponible (R2 vacío, upload a Meta falla), caemos a texto solo.
     let r;
     if (variantKind === 'copa') {
       const mediaId = await getPromoMediaId(env, PROMO_COPA_R2_KEY);
