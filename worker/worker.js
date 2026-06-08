@@ -3116,6 +3116,74 @@ async function isWaBillingBlocked(env) {
   } catch (_) { return false; }
 }
 
+// ===== Plantillas "al toque" (creadas por vendedores) =====
+// Guardrails: el vendedor no conoce las reglas de Meta, así que validamos el
+// contenido ANTES de mandarlo a Meta. Si no cumple, ni se intenta crear.
+// Devuelve un mensaje de error (string) si NO cumple, o null si está OK.
+function validateAdhocTemplate(text) {
+  const t = String(text || '').trim();
+  if (t.length < 10) return 'El texto es muy corto (mínimo 10 caracteres).';
+  if (t.length > 600) return 'El texto es muy largo (máximo 600 caracteres).';
+  if (/https?:\/\/|www\.|wa\.me|t\.me|\b\S+\.(com|net|ar|org|io)\b/i.test(t)) return 'No se permiten links en la plantilla.';
+  if (/[A-ZÁÉÍÓÚÑ]{5,}/.test(t)) return 'Evitá palabras en MAYÚSCULAS (Meta las rechaza).';
+  if (/\d{7,}/.test(t)) return 'No incluyas números largos (teléfonos o códigos).';
+  if (/(.)\1{6,}/.test(t)) return 'Hay caracteres repetidos de más.';
+  return null;
+}
+
+// Cron: manda las plantillas "al toque" apenas Meta las aprueba (el vendedor no
+// espera en el chat). Reintenta si el envío falla; marca rejected/expired.
+// Se llama SOLO en horario hábil AR para no escribir de madrugada.
+async function processPendingTemplateSends(env) {
+  if (await isWaBillingBlocked(env)) return;
+  let pend;
+  try {
+    const rs = await env.DB.prepare(
+      "SELECT template_name, phone, body_preview, created_at FROM wa_pending_template_send WHERE status = 'pending' ORDER BY created_at ASC LIMIT 20"
+    ).all();
+    pend = rs.results || [];
+  } catch (_) { return; }
+  if (!pend.length) return;
+  // Estado actual de las plantillas (un solo fetch).
+  const statusByName = {};
+  try {
+    const _wa = getWaClient(env);
+    const sep = _wa.templatesUrl().includes('?') ? '&' : '?';
+    const r = await fetch(`${_wa.templatesUrl()}${sep}limit=200&fields=name,status`, { headers: _wa.headers });
+    const data = await r.json().catch(() => ({}));
+    for (const t of (data.data || data.waba_templates || [])) statusByName[t.name] = String(t.status || '').toLowerCase();
+  } catch (_) { return; }
+  const now = Date.now();
+  for (const row of pend) {
+    const st = statusByName[row.template_name];
+    if (st === 'approved') {
+      const rt = await waSendTemplate(env, row.phone, row.template_name, 'es_AR', []);
+      if (rt.ok) {
+        try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='sent', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
+        const wamid = rt.id || '';
+        if (wamid) {
+          try {
+            await env.DB.prepare(
+              `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+               VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
+               ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+                 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+            ).bind(new Date().toISOString(), wamid, row.phone, row.body_preview).run();
+          } catch (_) {}
+        }
+        if (env.ADMIN_NOTIFY_PHONE) { try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, `✅ Plantilla aprobada y enviada a ${row.phone}:\n"${(row.body_preview || '').slice(0, 120)}"`); } catch (_) {} }
+        await new Promise(rs => setTimeout(rs, 400));
+      }
+      // si el envío falla, queda 'pending' y reintenta el próximo tick
+    } else if (st === 'rejected') {
+      try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='rejected', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
+      if (env.ADMIN_NOTIFY_PHONE) { try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, `❌ Meta rechazó una plantilla nueva para ${row.phone}. Probá de nuevo con un texto más simple (sin links ni MAYÚSCULAS).`); } catch (_) {} }
+    } else if ((now - new Date(row.created_at).getTime()) > 24 * 60 * 60 * 1000) {
+      try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='expired', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
+    }
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
@@ -5825,6 +5893,43 @@ export default {
         if (!r.ok) return json({ error: data?.error?.message || 'create failed', raw: data }, r.status || 500);
         return json({ ok: true, id: data.id, status: data.status, category: data.category, provider: _waT.provider });
       }
+
+      // ===== Crear plantilla "al toque" + mandarla sola cuando Meta la apruebe =====
+      // Para vendedores (Joaco/Abril): crean una plantilla a medida para ESTE chat
+      // sin esperar la aprobación en pantalla. Guardrails de contenido + tope diario
+      // + nombre auto (categoría siempre MARKETING). El cron processPendingTemplateSends
+      // la manda apenas Meta la aprueba.
+      if (request.method === 'POST' && path === '/admin/wa/template-create-send') {
+        const role = await getSessionRole(env, session.user);
+        if (!['admin', 'comercial', 'cursos'].includes(role)) return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const num = normalizeArPhone(String(body?.to || ''));
+        if (!num) return json({ error: 'teléfono inválido' }, 400);
+        if (!(await inboxAccessOk(env, role, num))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
+        const text = String(body?.body_text || '').trim();
+        const vErr = validateAdhocTemplate(text);
+        if (vErr) return json({ error: vErr }, 400);
+        // Tope diario: 5 plantillas nuevas por usuario.
+        const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+        try {
+          const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_pending_template_send WHERE created_by = ? AND created_at >= ?").bind(session.user, dayStart.toISOString()).first();
+          if (c && c.n >= 5) return json({ error: 'Llegaste al máximo de 5 plantillas nuevas por día.' }, 429);
+        } catch (_) {}
+        const tplName = 'adhoc_' + Date.now();
+        const _waT = getWaClient(env);
+        const r = await fetch(_waT.templatesUrl(), {
+          method: 'POST', headers: { ..._waT.headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: tplName, category: 'MARKETING', language: 'es_AR', components: [{ type: 'BODY', text }] })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: data?.error?.message || 'Meta rechazó la creación de la plantilla', raw: data }, r.status || 500);
+        try {
+          await env.DB.prepare(
+            "INSERT OR REPLACE INTO wa_pending_template_send (template_name, phone, body_preview, created_by, created_at, status, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)"
+          ).bind(tplName, num, text.slice(0, 300), session.user, new Date().toISOString(), new Date().toISOString()).run();
+        } catch (_) {}
+        return json({ ok: true, template_name: tplName, status: data.status || 'pending' });
+      }
       // ===== Promo assets (imágenes para campañas como follow-up de copa) =====
       // POST /admin/wa/promo-asset/upload?key=copa-mundial-junio
       //   Body: imagen binaria (image/jpeg, image/png, image/webp).
@@ -6529,6 +6634,8 @@ export default {
     // Usa hAR (calculado más arriba en este mismo handler) para consistencia
     // con processCursosFollowup/processMinicursoFollowup.
     if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processPresupuestoFollowups(env));
+    // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
+    if (hAR >= 8 && hAR < 21) ctx.waitUntil(processPendingTemplateSends(env));
     // Monitor de status de templates: 1 vez por hora, no cada 5 min. El polling
     // es fallback; lo ideal es suscribir al webhook field 'message_template_status_update'
     // en el hub de 360dialog (lo manejamos abajo en notifyTemplateStatusChange).

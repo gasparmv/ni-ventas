@@ -8811,8 +8811,9 @@ function handleQuickReplyInput(ta) {
   }
   let html = qrMatches.map((q, i) => _renderQRItem(q, i, false)).join('');
   html += tplMatches.map(t => _renderTplItem(t)).join('');
-  // Pie: crear una respuesta guardada nueva.
+  // Pie: crear una respuesta guardada nueva + crear plantilla al toque.
   html += `<div class="qr-item" data-qr-add="1"><div class="qr-item-text"><span class="qr-shortcut" style="color:var(--neon-cyan,#8FD4DE)">＋ Nueva respuesta guardada</span></div></div>`;
+  html += `<div class="qr-item" data-tpl-create="1"><div class="qr-item-text"><span class="qr-shortcut" style="color:var(--neon-cyan,#8FD4DE)">📋 Crear plantilla nueva (Meta)</span></div></div>`;
   dd.innerHTML = html;
   dd.style.display = 'block';
   dd.querySelectorAll('.qr-item').forEach(el => { el.onclick = () => pickQuickReply(ta, el); });
@@ -8825,6 +8826,13 @@ async function pickQuickReply(ta, el) {
     if (dd) dd.style.display = 'none';
     ta.value = ''; ta.dispatchEvent(new Event('input'));
     showManageQRModal();
+    return;
+  }
+  // "Crear plantilla nueva (Meta)" → abre el cuadro de creación al toque.
+  if (el.dataset.tplCreate === '1') {
+    if (dd) dd.style.display = 'none';
+    ta.value = ''; ta.dispatchEvent(new Event('input'));
+    showCreateTemplateModal();
     return;
   }
   // Plantilla → mandarla como template (reabre charlas de +24h). Pide confirmación.
@@ -9579,6 +9587,70 @@ function showManageLabelsModal() {
     } finally {
       backfillBtn.disabled = false;
       backfillBtn.textContent = prev;
+    }
+  };
+}
+
+// Validación cliente (espejo del worker) para plantillas "al toque".
+function validateAdhocTemplateClient(text) {
+  const t = (text || '').trim();
+  if (!t) return '';
+  if (t.length < 10) return 'Muy corto (mínimo 10 caracteres).';
+  if (t.length > 600) return 'Muy largo (máximo 600).';
+  if (/https?:\/\/|www\.|wa\.me|t\.me|\b\S+\.(com|net|ar|org|io)\b/i.test(t)) return 'No se permiten links.';
+  if (/[A-ZÁÉÍÓÚÑ]{5,}/.test(t)) return 'Evitá palabras en MAYÚSCULAS.';
+  if (/\d{7,}/.test(t)) return 'No incluyas números largos (teléfonos).';
+  return null;
+}
+
+// Cuadro para crear una plantilla a medida para el chat actual. Cuando Meta la
+// aprueba, el cron la manda sola (el vendedor no espera en pantalla).
+function showCreateTemplateModal() {
+  if (!chatState.selectedPhone) { toast('Abrí un chat primero'); return; }
+  const content = `
+    <div class="manage-qr">
+      <p class="manage-qr-hint">Creá una plantilla a medida para este cliente. Cuando Meta la apruebe (unos minutos), <b>se manda sola</b> — no tenés que esperar acá.</p>
+      <textarea id="new-tpl-body" placeholder="Escribí el mensaje… ej: Hola! Quería saber si seguís interesado, cualquier cosa quedamos a disposición 🙂" rows="4"></textarea>
+      <div id="new-tpl-warn" style="color:#ff6b6b;font-size:12px;min-height:16px;margin:4px 0"></div>
+      <div style="font-size:12px;color:var(--fg-subtle,#8696a0);line-height:1.7;margin:6px 0">
+        <b>Para que Meta la apruebe:</b><br>
+        ✅ Mensaje claro y amable (tipo "retomemos la charla").<br>
+        🚫 Sin links · 🚫 Sin teléfonos · 🚫 Sin palabras en MAYÚSCULAS.
+      </div>
+      <button class="btn btn-cyan" id="create-tpl-btn" disabled>Crear y mandar al aprobarse</button>
+    </div>
+  `;
+  openDrawer('Crear plantilla nueva', content);
+  const ta = document.getElementById('new-tpl-body');
+  const warn = document.getElementById('new-tpl-warn');
+  const btn = document.getElementById('create-tpl-btn');
+  const check = () => {
+    const err = validateAdhocTemplateClient(ta.value);
+    warn.textContent = err || '';
+    btn.disabled = !!err || !ta.value.trim();
+  };
+  if (ta) { ta.oninput = check; setTimeout(() => ta.focus(), 50); }
+  if (btn) btn.onclick = async () => {
+    const text = (ta.value || '').trim();
+    const err = validateAdhocTemplateClient(text);
+    if (err) { warn.textContent = err; return; }
+    btn.disabled = true; btn.textContent = 'Creando…';
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/template-create-send', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ to: chatState.selectedPhone, body_text: text })
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.ok) {
+        closeDrawer();
+        toast('✓ Plantilla creada. Se manda sola cuando Meta la apruebe (unos min).');
+      } else {
+        warn.textContent = j.error || 'No se pudo crear';
+        btn.disabled = false; btn.textContent = 'Crear y mandar al aprobarse';
+      }
+    } catch (e) {
+      warn.textContent = 'Error: ' + (e.message || e);
+      btn.disabled = false; btn.textContent = 'Crear y mandar al aprobarse';
     }
   };
 }
