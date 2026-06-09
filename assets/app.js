@@ -10498,10 +10498,12 @@ async function handleVerificarEnviados() {
   if (STATE.verificandoEnviados) return;
   if (!STATE.token) { await showAlert('Tenés que estar logueado.', { title: 'Login requerido', variant: 'warn' }); return; }
 
-  // Candidatos: listos, no colgados, origen WA (o con teléfono cargado), con tel válido.
+  // Candidatos: 'listos' + 'colgados' (briefs 'nuevo'/'listo' parados +24h), origen
+  // WA (o con teléfono cargado), con tel válido. Incluir los colgados capta los que
+  // Joaco mandó por la app de WA sin actualizar el CRM: se detectan en el historial
+  // y pasan a "Enviados" de una, limpiando el atraso.
   const candidatos = STATE.briefs.filter(b => {
-    if (b.estado !== 'listo') return false;
-    if (isBriefColgado(b)) return false;
+    if (!(b.estado === 'listo' || isBriefColgado(b))) return false;
     const o = String(b.origen_lead || '').toLowerCase();
     const tel = String(b.cliente_wa_id || '').replace(/\D/g, '');
     const esWa = o === 'wpp' || o === 'whatsapp' || (o === '' && tel.length >= 8);
@@ -10509,7 +10511,7 @@ async function handleVerificarEnviados() {
   });
 
   if (!candidatos.length) {
-    await showAlert('No hay briefs en "Listos" de WhatsApp con teléfono para verificar.', { title: 'Nada para verificar' });
+    await showAlert('No hay briefs en "Listos" ni "Colgados" de WhatsApp con teléfono para verificar.', { title: 'Nada para verificar' });
     return;
   }
 
@@ -10537,9 +10539,9 @@ async function handleVerificarEnviados() {
   }
 
   await showAlert(
-    `Revisé ${candidatos.length} brief${candidatos.length > 1 ? 's' : ''} de WhatsApp en "Listos".\n\n` +
+    `Revisé ${candidatos.length} brief${candidatos.length > 1 ? 's' : ''} de WhatsApp ("Listos" + "Colgados").\n\n` +
     `✓ ${marcados} pasaron a "Enviados" (encontré el presupuesto en el historial).\n` +
-    `• ${sinRastro} quedaron en "Listos" (no encontré presupuesto mandado — capaz se mandó editado o todavía no se envió).`,
+    `• ${sinRastro} quedaron sin cambios (no encontré presupuesto mandado — capaz se mandó editado o todavía no se envió).`,
     { title: 'Verificación terminada', variant: marcados > 0 ? 'success' : undefined }
   );
 }
@@ -10978,7 +10980,7 @@ function renderCotizacion() {
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" id="briefs-refresh" title="Refrescar">↻</button>
-        ${canCotizar() ? `<button class="btn btn-ghost" id="briefs-verificar-enviados" title="Revisar los 'Listos' tipo WhatsApp contra el historial y pasar a Enviados los que ya tienen presupuesto mandado">${STATE.verificandoEnviados ? '⏳ Verificando…' : '🔍 Verificar enviados'}</button>` : ''}
+        ${canCotizar() ? `<button class="btn btn-ghost" id="briefs-verificar-enviados" title="Revisar los 'Listos' y 'Colgados' tipo WhatsApp contra el historial y pasar a Enviados los que ya tienen presupuesto mandado">${STATE.verificandoEnviados ? '⏳ Verificando…' : '🔍 Verificar enviados'}</button>` : ''}
         ${canCreateBriefs() ? '<button class="btn btn-cyan" id="brief-new">+ Nuevo brief</button>' : ''}
       </div>
     </div>
