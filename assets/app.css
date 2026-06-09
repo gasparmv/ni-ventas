@@ -1820,8 +1820,6 @@ table.t td.cliente { font-weight: 600; }
 /* Hover actions: forward + react al lado del bubble (estilo WA Web) */
 .chat-msg-actions {
   position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
   display: flex;
   gap: 4px;
   padding: 2px;
@@ -1831,22 +1829,14 @@ table.t td.cliente { font-weight: 600; }
   opacity: 0;
   pointer-events: none;
   transition: opacity .12s ease;
-  z-index: 4;
+  z-index: 6;
 }
-.chat-msg.inbound .chat-msg-actions { right: -76px; }
-.chat-msg.outbound .chat-msg-actions { left: -76px; }
-/* Puente invisible entre el bubble y los iconos. Sin esto el hover se pierde
-   al cruzar el gap y los iconos desaparecen antes de poder clickearlos. */
-.chat-msg-actions::after {
-  content: '';
-  position: absolute;
-  top: -4px;
-  bottom: -4px;
-  width: 16px;
-  pointer-events: auto;
-}
-.chat-msg.inbound .chat-msg-actions::after { left: -16px; }
-.chat-msg.outbound .chat-msg-actions::after { right: -16px; }
+/* Toolbar SOBRE el bubble, en la esquina superior derecha. Antes iba a -76px al
+   costado y en mensajes anchos el borde del contenedor la cortaba (solo se veía
+   el primer botón). Ahora flota encima del mensaje y se ven los 3. */
+.chat-msg.inbound .chat-msg-actions,
+.chat-msg.outbound .chat-msg-actions { top: 4px; right: 6px; left: auto; transform: none; }
+.chat-msg-actions::after { display: none; } /* el puente lateral ya no hace falta */
 .chat-msg:hover .chat-msg-actions,
 .chat-msg-actions:hover { opacity: 1; pointer-events: auto; }
 .chat-msg-actions .cma-btn {
@@ -1882,7 +1872,7 @@ table.t td.cliente { font-weight: 600; }
   color: #d1d7db;
   opacity: 0;
   cursor: pointer;
-  display: flex;
+  display: none; /* oculto: la toolbar de acciones ya muestra los botones al hover */
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -3862,6 +3852,8 @@ table.t td.cliente { font-weight: 600; }
     opacity: 1 !important;
     pointer-events: auto !important;
     background: rgba(42, 57, 66, .92) !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
   }
   .chat-msg.inbound .chat-msg-actions { right: auto; left: 100%; margin-left: 6px; }
   .chat-msg.outbound .chat-msg-actions { left: auto; right: 100%; margin-right: 6px; }
