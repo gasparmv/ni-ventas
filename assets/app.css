@@ -1867,6 +1867,31 @@ table.t td.cliente { font-weight: 600; }
   color: #e9edef;
 }
 .chat-msg-actions .cma-btn svg { display: block; }
+/* Chevron (caret) que aparece al hover sobre el bubble y abre el menú de acciones
+   (el mismo del click derecho) — estilo WhatsApp Web. Va DENTRO del bubble (no a
+   -76px afuera como .chat-msg-actions), así no lo recorta el contenedor del chat. */
+.chat-msg-caret {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  width: 26px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(32, 44, 51, .55);
+  color: #d1d7db;
+  opacity: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: opacity .12s, background .12s;
+  z-index: 4;
+}
+.chat-msg:hover .chat-msg-caret { opacity: .92; }
+.chat-msg-caret:hover { opacity: 1; color: #fff; background: rgba(32, 44, 51, .8); }
+.chat-msg-caret svg { display: block; }
 
 /* Reaction picker — popover de emojis */
 .reaction-picker {
@@ -3841,6 +3866,16 @@ table.t td.cliente { font-weight: 600; }
   .chat-msg.inbound .chat-msg-actions { right: auto; left: 100%; margin-left: 6px; }
   .chat-msg.outbound .chat-msg-actions { left: auto; right: 100%; margin-right: 6px; }
   .chat-msg-actions::after { display: none; } /* el puente no hace falta touch */
+  /* En mobile el menú se abre con LONG-PRESS (mantener apretado), no con hover.
+     Ocultamos el chevron (no hay hover) y matamos la selección/callout nativa de
+     iOS para que mantener apretado abra el menú en vez de seleccionar texto.
+     "Copiar texto" queda en el menú para no perder el copiar. */
+  .chat-msg-caret { display: none; }
+  .chat-msg {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
 
   /* === IMAGE LIGHTBOX === */
   .img-lightbox .lb-nav { width: 40px; height: 40px; font-size: 26px; }

@@ -7639,6 +7639,9 @@ function _postProcessBubbles(container, reactionsByParent, scope) {
       if (qHtml) el.insertAdjacentHTML('afterbegin', qHtml);
     }
     el.insertAdjacentHTML('beforeend', chatMsgActionsHtml());
+    // Chevron estilo WhatsApp Web: aparece al hover (desktop) y abre el menú de
+    // acciones (el mismo del click derecho). En mobile se usa long-press (ver bind).
+    el.insertAdjacentHTML('beforeend', '<button class="chat-msg-caret" data-caret aria-label="Más opciones"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg></button>');
     const chips = reactionsBadgeHtml(wamid, reactionsByParent);
     if (chips) el.insertAdjacentHTML('beforeend', chips);
   });
@@ -7959,24 +7962,45 @@ function bindMessageContextMenus() {
       e.preventDefault();
       showMessageActionsMenu(e.clientX, e.clientY, wamid, msgType);
     };
+    // DESKTOP: el chevron (aparece al hover) abre el mismo menú de acciones.
+    const caret = el.querySelector('.chat-msg-caret');
+    if (caret && !caret.dataset._bound) {
+      caret.dataset._bound = '1';
+      caret.onclick = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const r = caret.getBoundingClientRect();
+        showMessageActionsMenu(r.right, r.bottom, wamid, msgType);
+      };
+    }
     // DESKTOP: doble-click cita el mensaje para responder (estilo WhatsApp).
     el.ondblclick = (e) => { e.preventDefault(); startReplyTo(wamid); };
-    // MOBILE: swipe del mensaje hacia la DERECHA → lo cita para responder.
-    // Solo cuenta el gesto si es horizontal (si es vertical, dejamos scrollear).
-    let _sx = 0, _sy = 0, _swiping = false;
+    // MOBILE: swipe a la DERECHA → citar; mantener apretado (long-press) → menú.
+    // Ambos gestos conviven: si el dedo se mueve, se cancela el long-press; si se
+    // queda quieto ~480ms, abre el menú (como WhatsApp en el celular).
+    let _sx = 0, _sy = 0, _swiping = false, _lpTimer = null, _lpFired = false;
+    const _clearLp = () => { if (_lpTimer) { clearTimeout(_lpTimer); _lpTimer = null; } };
     el.addEventListener('touchstart', (ev) => {
-      if (ev.touches.length !== 1) { _swiping = false; return; }
-      _sx = ev.touches[0].clientX; _sy = ev.touches[0].clientY; _swiping = true;
+      if (ev.touches.length !== 1) { _swiping = false; _clearLp(); return; }
+      _sx = ev.touches[0].clientX; _sy = ev.touches[0].clientY; _swiping = true; _lpFired = false;
       el.style.transition = '';
+      _clearLp();
+      _lpTimer = setTimeout(() => {
+        _lpFired = true; _swiping = false; el.style.transform = '';
+        try { if (navigator.vibrate) navigator.vibrate(15); } catch (_) {}
+        showMessageActionsMenu(_sx, _sy, wamid, msgType);
+      }, 480);
     }, { passive: true });
     el.addEventListener('touchmove', (ev) => {
-      if (!_swiping) return;
       const dx = ev.touches[0].clientX - _sx;
       const dy = ev.touches[0].clientY - _sy;
+      if (Math.abs(dx) > 10 || Math.abs(dy) > 10) _clearLp(); // se movió → no es long-press
+      if (!_swiping) return;
       if (Math.abs(dy) > Math.abs(dx)) { _swiping = false; el.style.transform = ''; return; }
       if (dx > 0) el.style.transform = `translateX(${Math.min(dx, 80)}px)`;
     }, { passive: true });
     el.addEventListener('touchend', (ev) => {
+      _clearLp();
+      if (_lpFired) { _lpFired = false; _swiping = false; el.style.transition = 'transform .15s ease'; el.style.transform = ''; return; }
       if (!_swiping) return;
       _swiping = false;
       const dx = (ev.changedTouches[0] ? ev.changedTouches[0].clientX : _sx) - _sx;
@@ -8146,6 +8170,8 @@ async function sendReaction(wamid, emoji) {
 
 function showMessageActionsMenu(x, y, wamid, msgType) {
   document.getElementById('msg-action-menu')?.remove();
+  const _m = findMessageByWamid(wamid);
+  const _hasText = !!(_m && _m.body && String(_m.body).trim() && _m.msg_type !== 'reaction');
   const menu = document.createElement('div');
   menu.id = 'msg-action-menu';
   menu.className = 'chat-context-menu';
@@ -8166,6 +8192,11 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
     <button class="ccm-item" data-action="copy-image">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
       Copiar imagen
+    </button>` : ''}
+    ${_hasText ? `
+    <button class="ccm-item" data-action="copy-text">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+      Copiar texto
     </button>` : ''}
   `;
   document.body.appendChild(menu);
@@ -8203,6 +8234,32 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
     close();
     copyImageOfMessage(wamid);
   };
+  const copyTxtBtn = menu.querySelector('[data-action="copy-text"]');
+  if (copyTxtBtn) copyTxtBtn.onclick = (ev) => { ev.stopPropagation(); close(); copyTextOfMessage(wamid); };
+}
+
+// Copia el TEXTO de un mensaje (click derecho / long-press → "Copiar texto").
+// Necesario en mobile porque desactivamos la selección nativa para el long-press.
+async function copyTextOfMessage(wamid) {
+  const m = findMessageByWamid(wamid);
+  if (!m) return;
+  const txt = (typeof tplMarkerToText === 'function')
+    ? tplMarkerToText(m.body || '', m.phone || chatState.selectedPhone)
+    : (m.body || '');
+  if (!txt || !txt.trim()) { toast('No hay texto para copiar'); return; }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(txt);
+      toast('Texto copiado');
+    } else {
+      // Fallback para navegadores viejos / contextos sin clipboard API.
+      const ta = document.createElement('textarea');
+      ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); toast('Texto copiado'); } catch (_) { toast('No se pudo copiar'); }
+      ta.remove();
+    }
+  } catch (_) { toast('No se pudo copiar'); }
 }
 
 // Copia la imagen de un mensaje al portapapeles (click derecho / long-press →
