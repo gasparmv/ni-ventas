@@ -10502,6 +10502,28 @@ async function marcarBriefEnviado(id, extra = {}) {
   return (await r.json()).brief;
 }
 
+// Manda un brief 'listo' de vuelta a 'A cotizar' (nuevo) para que Emma lo
+// modifique (el cliente pidió un cambio): lo marca urgente + modificar y lo deja
+// arriba de la cola. Gate de rol en el botón (canCotizar = Joaco/Gaspar).
+async function mandarBriefAModificar(id) {
+  if (!id) return;
+  const ok = await showConfirm(
+    'Mandar este pedido de vuelta a "A cotizar" para que Emma lo modifique?\n\nVa a aparecer arriba de todo (urgente) con el sticker "modificar".',
+    { title: 'Mandar a modificar', confirmLabel: '🔧 Mandar a modificar', cancelLabel: 'Cancelar' }
+  );
+  if (!ok) return;
+  try {
+    await saveBrief({ id, estado: 'nuevo', urgente: 1, modificar: 1 });
+    const i = STATE.briefs.findIndex(x => x.id === id);
+    if (i >= 0) STATE.briefs[i] = { ...STATE.briefs[i], estado: 'nuevo', urgente: 1, modificar: 1 };
+    closeBriefDrawer();
+    render();
+    toast('Mandado a modificar — quedó arriba en "A cotizar" 🔧');
+  } catch (e) {
+    toast('No se pudo mandar a modificar');
+  }
+}
+
 // Verifica vía API si a un teléfono ya se le mandó un presupuesto por WhatsApp.
 // Busca en el historial outbound un mensaje que matchee isPresupuestoMessage
 // (o el follow-up de presupuesto) en los últimos `dias` días. NO reenvía nada.
@@ -10661,6 +10683,8 @@ function renderBriefCard(b) {
               style="position:absolute;top:4px;right:4px;width:22px;height:22px;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;border:0;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;z-index:2;opacity:.6;transition:opacity .15s,background .15s"
               onmouseover="this.style.opacity='1';this.style.background='rgba(255,24,48,.85)'"
               onmouseout="this.style.opacity='.6';this.style.background='rgba(0,0,0,.55)'">✕</button>` : ''}
+      ${canCreateBriefs() && b.estado === 'nuevo' && !generando ? `<button class="brief-card-urgente" data-brief-urgente="${b.id}" title="${b.urgente ? 'Quitar urgente' : 'Marcar urgente (prioridad para Emma)'}"
+              style="position:absolute;top:4px;left:4px;width:22px;height:22px;border-radius:50%;background:${b.urgente ? 'rgba(255,24,48,.92)' : 'rgba(0,0,0,.55)'};border:0;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center;z-index:3;opacity:${b.urgente ? '1' : '.55'};transition:opacity .15s,background .15s">🔥</button>` : ''}
       ${thumbUrl ? `
         <div style="width:100%;height:120px;background:var(--ink-050) center/cover no-repeat;background-image:url('${thumbUrl}');position:relative">
           ${isRenderThumb ? '<div style="position:absolute;top:4px;left:4px;background:rgba(143,212,222,.85);color:#000;font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px">RENDER</div>' : ''}
@@ -10689,6 +10713,10 @@ function renderBriefCard(b) {
             ${pMatch ? '<span title="Tiene presupuesto en el Sheet" style="background:rgba(37,211,102,.15);color:#25D366;font-size:9px;padding:1px 5px;border-radius:3px">✓</span>' : ''}
           </div>
         </div>
+        ${(b.urgente && b.estado === 'nuevo') || b.modificar ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px">
+          ${b.urgente && b.estado === 'nuevo' ? '<span style="background:rgba(255,24,48,.16);color:#ff5468;font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px">🔥 URGENTE</span>' : ''}
+          ${b.modificar && (b.estado === 'nuevo' || b.estado === 'listo') ? '<span style="background:rgba(255,167,38,.16);color:#FFA726;font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px">🔧 MODIFICAR</span>' : ''}
+        </div>` : ''}
         ${colgado ? `<div style="font-size:11px;color:#FFA726;margin-bottom:4px"><b>⚠ Colgado:</b> ${escapeHtml(motivo)}</div>` : ''}
         ${medidas ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">${escapeHtml(medidas)}</div>` : ''}
         <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--fg-mute, rgba(233,237,239,.4))">
@@ -10704,7 +10732,9 @@ function renderBriefCard(b) {
 }
 
 function renderBriefColumn(col) {
-  const briefs = STATE.briefs.filter(b => briefBelongsToColumn(b, col.id));
+  let briefs = STATE.briefs.filter(b => briefBelongsToColumn(b, col.id));
+  // En "A cotizar" (nuevo) los urgentes van arriba de todo para que Emma priorice.
+  if (col.id === 'nuevo') briefs = briefs.slice().sort((a, b) => (b.urgente ? 1 : 0) - (a.urgente ? 1 : 0));
   const isDropTarget = col.id === 'nuevo' && canCreateBriefs();
   const dashedBorder = isDropTarget ? 'border:2px dashed rgba(143,212,222,.25)' : 'border:1px solid var(--border)';
   const hint = isDropTarget && !briefs.length
@@ -10966,6 +10996,7 @@ function renderBriefDrawer() {
           ${!isNew && canCreateBriefs() ? `<button class="btn btn-ghost" id="brief-delete" style="color:#FF5566;border-color:rgba(255,24,48,.25)" title="Eliminar este brief">🗑 Eliminar</button>` : ''}
           <div style="flex:1"></div>
           ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Ver presupuesto</button>` : ''}
+          ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-ghost" id="brief-modificar" title="Volver a 'A cotizar' para que Emma lo modifique (queda urgente y arriba de todo)" style="color:#FFA726;border-color:rgba(255,167,38,.4)">🔧 Mandar a modificar</button>` : ''}
           ${!isNew && estado === 'enviado' && isCom ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir Cotizador</button>` : ''}
           ${(isCom || isDis || isNew) ? `<button class="btn ${isNew ? 'btn-cyan' : 'btn-ghost'}" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>` : ''}
         </div>
@@ -11990,6 +12021,21 @@ function bindCotizacion() {
     };
   });
 
+  // 🔥 Toggle urgente desde la card (Joaco/Gaspar). Optimista; revierte si falla.
+  document.querySelectorAll('[data-brief-urgente]').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const id = parseInt(btn.dataset.briefUrgente, 10);
+      const b = STATE.briefs.find(x => x.id === id);
+      if (!b) return;
+      const prev = b.urgente ? 1 : 0;
+      b.urgente = prev ? 0 : 1;
+      render();
+      try { await saveBrief({ id, urgente: b.urgente }); }
+      catch (e) { b.urgente = prev; render(); toast('No se pudo marcar urgente'); }
+    };
+  });
+
   // ===== Drop + paste sobre columna "A cotizar" (Joaco/admin) =====
   if (canCreateBriefs()) {
     const colNuevo = document.querySelector('.brief-col[data-col="nuevo"]');
@@ -12063,6 +12109,8 @@ function bindCotizacion() {
   if (saveBtn) saveBtn.onclick = handleBriefSave;
   const cotBtn = document.getElementById('brief-cotizar');
   if (cotBtn) cotBtn.onclick = handleBriefAbrirCotizador;
+  const modBtn = document.getElementById('brief-modificar');
+  if (modBtn) modBtn.onclick = () => mandarBriefAModificar(STATE.briefSelected);
   const cotPopupBtn = document.getElementById('brief-cotizar-popup');
   if (cotPopupBtn) cotPopupBtn.onclick = openBriefCotizadorPopup;
   // Toggle origen WhatsApp / Instagram en el drawer (feedback visual + tel).

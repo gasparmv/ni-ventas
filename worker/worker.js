@@ -6257,7 +6257,8 @@ export default {
           'alto_cm', 'ancho_cm', 'm2', 'neon_mt', 'tramos', 'medidas_libre',
           'precio_trans', 'precio_negro', 'precio_final',
           'descuento', 'recargo', 'reventa', 'comision_joaco',
-          'disenador_id', 'intentos_followup', 'notas', 'sheet_row'
+          'disenador_id', 'intentos_followup', 'notas', 'sheet_row',
+          'urgente', 'modificar'
         ];
         const sets = [];
         const args = [];
