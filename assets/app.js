@@ -7958,6 +7958,10 @@ function bindMessageContextMenus() {
     const wamid = el.dataset.wamid;
     const msgType = el.dataset.msgType || 'text';
     if (!wamid) return; // sin wamid no se puede citar/reenviar
+    // Idempotente: si ya lo bindeamos, no volver a agregar listeners (los
+    // addEventListener de touch NO son idempotentes y se duplicarían).
+    if (el.dataset._ctxBound) return;
+    el.dataset._ctxBound = '1';
     el.oncontextmenu = (e) => {
       e.preventDefault();
       showMessageActionsMenu(e.clientX, e.clientY, wamid, msgType);
@@ -8638,6 +8642,16 @@ function bindChatConversation() {
   const labelsBtn = document.getElementById('btn-labels');
   const backBtn = document.getElementById('chat-back-btn');
   bindChatPostit();
+  // Hidratar los bubbles recién renderizados: inyectar acciones (chevron + iconos
+  // de hover + chips de reacción) y bindear menús (click derecho / long-press /
+  // hover). renderChatConversation() arma los bubbles INLINE pero NO los
+  // post-procesa — sin esto no aparecían ni el chevron ni los iconos de hover al
+  // ABRIR un chat (solo se veían tras un update incremental). Todo idempotente.
+  if (msgEl) {
+    _postProcessBubbles(msgEl, renderChatBubbles._reactionsByParent || new Map());
+    bindMessageContextMenus();
+    bindMessageHoverActions();
+  }
   // Back arrow del header (solo se ve en mobile via CSS, pero igual lo bindeamos
   // siempre para no tener que distinguir).
   if (backBtn) {
