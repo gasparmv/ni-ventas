@@ -5632,6 +5632,19 @@ export default {
         const num = normalizeArPhone(to);
         if (!num) return json({ error: 'numero invalido' }, 400);
 
+        // ¿Ventana de 24h abierta? (el cliente escribió en las últimas 24h). Si NO,
+        // no intentamos el envío libre (imagen/texto): Meta lo acepta y después lo
+        // rechaza async con 131047 ("Re-engagement message"), dejando el brief mal
+        // marcado como enviado. Avisamos al front (window_closed) para que mande la
+        // plantilla aprobada presupuesto_detallado, que SÍ se puede fuera de ventana.
+        try {
+          const since24 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const inb = await env.DB.prepare(
+            "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1"
+          ).bind(num, since24).first();
+          if (!inb) return json({ error: 'Re-engagement message', window_closed: true }, 409);
+        } catch (_) {}
+
         // Buscar el render más reciente del brief.
         let renderKey = null;
         if (brief_id) {

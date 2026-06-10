@@ -12493,16 +12493,24 @@ function bindCotizacion() {
           body: JSON.stringify({ brief_id: briefId, to: telDigits, caption: texto })
         });
         const j = await r.json().catch(() => ({}));
-        if (!r.ok) {
+        if (r.ok) {
+          waOk = true;
+          wamid = j.id || '';
+        } else {
           const detail = j.error || 'no se pudo enviar';
-          const hint = /outside|24|window|template/i.test(String(detail))
-            ? '\n\nWhatsApp Cloud API solo permite mensajes libres si el cliente escribió en las últimas 24hs. Si no respondió en ese plazo, hay que mandar primero un template aprobado.'
-            : '';
-          await showAlert(detail + hint, { title: 'No se pudo enviar', variant: 'warn' });
-          return;
+          // Ventana de 24h cerrada (el worker no intentó el envío libre porque Meta
+          // lo rechaza): mandamos el presupuesto como PLANTILLA aprobada (1 diseño).
+          const windowClosed = j.window_closed || /outside|24|window|template|131047|re-?engag/i.test(String(detail));
+          if (windowClosed) {
+            const sent = await enviarPresupuestoComoPlantilla(telDigits, getCarteles());
+            if (sent.cancelled) { render(); return; }
+            if (!sent.ok) { await showAlert(sent.error || 'No se pudo mandar la plantilla.', { title: 'No se pudo enviar', variant: 'warn' }); return; }
+            waOk = true; wamid = sent.wamid || '';
+          } else {
+            await showAlert(detail, { title: 'No se pudo enviar', variant: 'warn' });
+            return;
+          }
         }
-        waOk = true;
-        wamid = j.id || '';
       } catch (e) {
         await showAlert('Error de red al enviar: ' + (e.message || e), { title: 'Error de conexión', variant: 'warn' });
       } finally {
