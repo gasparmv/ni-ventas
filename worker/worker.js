@@ -143,15 +143,19 @@ function parseCsv(csv) {
 async function ensurePedidosSchema(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, fecha TEXT, cartel TEXT, colores TEXT, alto REAL, ancho REAL, cm_neon REAL, base TEXT, cantidad REAL, precio REAL, dimer TEXT, precio_dimmer REAL, envio TEXT, aclaracion TEXT, productor TEXT, plataforma TEXT, estado_pago TEXT, pagado REAL, restante REAL, estado_pedido TEXT, ad TEXT, sheet_row INTEGER, origen TEXT NOT NULL DEFAULT 'backfill', created_at TEXT, updated_at TEXT)`).run();
 }
-// Número formato AR ("$262.000", "1.130.000", "120", "-") → number|null.
-// El "." es separador de miles; la "," es decimal.
+// Número de precio → entero. Los precios de NI son SIEMPRE enteros en pesos (sin
+// centavos). Google CSV puede mandar "149500", "149.500", "149,500", "$149.500",
+// "1,110,000", "149500.00", etc. Misma lógica que parseNum() del front: saca el
+// decimal final (.0 / ,00) y después TODO lo no-dígito. null si queda vacío.
 function pedidoNum(s) {
-  if (s == null) return null;
-  const str = String(s).trim();
+  if (s == null || s === '') return null;
+  let str = String(s).trim();
   if (!str || str === '-') return null;
-  const cleaned = str.replace(/[^\d,.-]/g, '').replace(/\./g, '').replace(',', '.');
-  const n = parseFloat(cleaned);
-  return isNaN(n) ? null : n;
+  const sign = str.startsWith('-') ? -1 : 1;
+  str = str.replace(/[.,]\d{1,2}$/, '').replace(/[^\d]/g, '');
+  if (!str) return null;
+  const n = parseInt(str, 10);
+  return isNaN(n) ? null : sign * n;
 }
 // Fecha "DD/M/YYYY" (o "DD/M/YY") → ISO "YYYY-MM-DD"; null si no parsea.
 function pedidoFecha(s) {
