@@ -7331,7 +7331,7 @@ async function processPresupuestoFollowups(env) {
       try {
         const mediaUrl = variantKind === 'copa' ? PROMO_COPA_R2_KEY : '';
         await env.DB.prepare(
-          'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, automated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)'
         ).bind(new Date().toISOString(), wamid, 'outbound', p.phone, '', variantKind === 'copa' ? 'image' : 'text', bodyToStore || variantBody, mediaUrl, '', status).run();
       } catch (_) {}
     };
@@ -7370,7 +7370,7 @@ async function processPresupuestoFollowups(env) {
         sent++;
         try {
           await env.DB.prepare(
-            'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, automated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)'
           ).bind(new Date().toISOString(), rt.id || ('fu-tpl:' + p.phone), 'outbound', p.phone, '', 'template', '[plantilla: seguimiento_presupuesto]', '', '', 'sent').run();
         } catch (_) {}
       } else {
