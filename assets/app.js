@@ -7629,7 +7629,13 @@ function renderChatBubbles(msgs, opts) {
       else if (m.status === 'failed') statusHtml = `<span class="chat-msg-status failed" title="No se pudo entregar">✗ falló</span>`;
       else statusHtml = `<span class="chat-msg-status sent" title="Enviado">${TICK_SINGLE}</span>`;
     }
-    const footer = `<span class="chat-msg-footer"><span class="chat-msg-time">${time}</span>${statusHtml}</span>`;
+    // Badge de mensaje automático: solo en salientes marcados automated=1 por el
+    // worker (broadcasts, follow-ups, auto-replies). Lo que manda una persona
+    // (Gaspar/Joaco/Abril desde el CRM o el cel) queda sin badge.
+    const autoBadge = (dir === 'outbound' && m.automated)
+      ? `<span class="chat-msg-auto" title="Mensaje automático del sistema — no lo mandó una persona del equipo" style="font-size:9px;font-weight:700;color:#9fb0bb;background:rgba(134,150,160,.18);padding:1px 5px;border-radius:7px;margin-right:5px;vertical-align:middle;letter-spacing:.02em">🤖 automático</span>`
+      : '';
+    const footer = `<span class="chat-msg-footer">${autoBadge}<span class="chat-msg-time">${time}</span>${statusHtml}</span>`;
 
     // Parse body: separate actual text from [audio]/[imagen] AI annotations.
     // Si es el marcador de una plantilla ("[plantilla: NOMBRE]"), mostramos el texto real.

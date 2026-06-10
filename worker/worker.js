@@ -797,9 +797,9 @@ async function processCursosBroadcastQueue(env) {
       if (wamid) {
         try {
           await env.DB.prepare(
-            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
-             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1
                WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
           ).bind(ts, wamid, phone, previewBody).run();
         } catch (_) {}
@@ -855,9 +855,9 @@ async function processJunioBroadcastQueue(env) {
       if (wamid) {
         try {
           await env.DB.prepare(
-            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
-             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1
                WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
           ).bind(ts, wamid, phone, previewBody).run();
         } catch (_) {}
@@ -997,9 +997,9 @@ async function processCursosFollowup(env) {
         if (wamid) {
           try {
             await env.DB.prepare(
-              `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-               VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
-               ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+              `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+               VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)
+               ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1
                  WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
             ).bind(new Date().toISOString(), wamid, phone, previewBody).run();
           } catch (_) {}
@@ -1191,9 +1191,9 @@ async function processAutoReplyQueue(env) {
       if (wamid) {
         try {
           await env.DB.prepare(
-            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-             VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '')
-             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text'
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+             VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text', automated = 1
                WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
           ).bind(new Date().toISOString(), wamid, phone, body).run();
         } catch (_) {}
@@ -1271,9 +1271,9 @@ async function processMinicursoFollowup(env) {
       if (wamid) {
         try {
           await env.DB.prepare(
-            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-             VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '')
-             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text'
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+             VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text', automated = 1
                WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
           ).bind(now, wamid, phone, body).run();
         } catch (_) {}
@@ -1750,9 +1750,9 @@ async function processLeadgenWebhook(env, body) {
           // completamos el body + msg_type en vez de fallar por el UNIQUE de wamid.
           if (wamid) {
             await env.DB.prepare(
-              `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-               VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
-               ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+              `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+               VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)
+               ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1
                  WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
             ).bind(new Date().toISOString(), wamid, phoneNorm, previewBody).run();
           }
@@ -1875,9 +1875,9 @@ async function processSheetLead(env, body) {
         // completamos el body + msg_type en vez de fallar por el UNIQUE de wamid.
         if (wamid) {
           await env.DB.prepare(
-            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
-             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1
                WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
           ).bind(new Date().toISOString(), wamid, phoneNorm, previewBody).run();
         }
@@ -3334,9 +3334,9 @@ async function processPendingTemplateSends(env) {
         if (wamid) {
           try {
             await env.DB.prepare(
-              `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-               VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
-               ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+              `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+               VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)
+               ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1
                  WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
             ).bind(new Date().toISOString(), wamid, row.phone, row.body_preview).run();
           } catch (_) {}
@@ -5157,7 +5157,7 @@ export default {
         if (to) { where += ' AND ts <= ?'; params.push(to); }
         if (dir === 'inbound' || dir === 'outbound') { where += ' AND direction = ?'; params.push(dir); }
         const rs = await env.DB.prepare(
-          `SELECT id, ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status FROM wa_messages WHERE ${where} ORDER BY ts DESC LIMIT ?`
+          `SELECT id, ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, automated FROM wa_messages WHERE ${where} ORDER BY ts DESC LIMIT ?`
         ).bind(...params, limit).all();
         return json({ messages: rs.results || [] });
       }
@@ -5382,9 +5382,9 @@ export default {
             if (wamid) {
               try {
                 await env.DB.prepare(
-                  `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
-                   VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
-                   ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+                  `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+                   VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)
+                   ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1
                      WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
                 ).bind(ts, wamid, lead.tel, previewBody).run();
               } catch (_) {}
