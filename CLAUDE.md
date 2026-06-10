@@ -27,14 +27,14 @@ Si vas a editar un archivo que también modificó un commit reciente del remoto,
 
 ## WhatsApp Business — info clave
 
-- **Número productivo**: +54 9 11 4436-6573, Phone Number ID `919964037861500`, WABA ID `800446462838166`.
+- **Número productivo**: +54 9 11 4436-6573, Phone Number ID `919964037861500`, WABA ID `800446462838166` (legacy Meta-directo). **WABA de facturación activa: `1748207462464731`** — es la que Meta factura (Billing Hub) por las conversaciones/mensajes. La `800446…` quedó como referencia vieja (solo la usa el fallback del provider `meta`).
 - **Provider activo (desde 2026-05-31)**: **360dialog** como BSP en modo Coexistencia.
   - API base: `https://waba-v2.360dialog.io`
   - API key en secret `D360_API_KEY` (Cloudflare worker)
   - Channel ID (interno 360dialog): `vrx5QVCH`
   - Hosting: Cloud API hosted by Meta (migrado de ON_PREMISE)
   - Webhook recibe en `/webhook` del worker (mismo endpoint que Meta direct)
-  - Funds prepagados en 360dialog hub
+  - **Facturación (OJO):** Meta cobra las conversaciones/mensajes (mayormente plantillas MARKETING — los broadcasts) **DIRECTO a la tarjeta Visa** vía el Billing Hub (business.facebook.com/billing_hub), sobre la WABA `1748207462464731`. **NO sale del saldo prepago de 360dialog** (eso era un supuesto viejo y equivocado). El hub de 360dialog tiene su propio saldo/fee de BSP aparte. Si la tarjeta rebota (estado "Error" en el hub) → Meta bloquea los envíos (error 131042).
 - **Modo Coexistencia activo**: Joaco mantiene la app WA Business del celular Y el CRM funciona con Cloud API. Regla: Joaco debe abrir la app al menos 1 vez cada 13 días o se desactiva. PIN 2FA configurado: `230204` (uso si se necesita re-migrar).
 - **App de Meta (legacy)**: "agente neon nuevo", App ID `866678322681866`. Antes del 31-may era el provider productivo via Meta directo con `WA_TOKEN`. Ya no se usa para sends, pero el secret WA_TOKEN se mantiene como fallback (si se setea WA_PROVIDER='meta' en el worker, vuelve al provider Meta direct).
 - **Pre-migración (histórico)**: el número estaba en ON_PREMISE con flag 2494160 que bloqueaba templates. PIP (`Fintech Solutions Wsp`, App ID `518523686767316`) era un BSP previo, removido del Business Portfolio durante la migración. Manychat también está en "Eliminadas" del portfolio.
