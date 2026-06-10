@@ -406,6 +406,12 @@ const CURSOS_SHEET_CSV = 'https://docs.google.com/spreadsheets/d/1yJM2uj7SMMreJX
 const CURSOS_COL_NOMBRE = 1;
 const CURSOS_COL_TELEFONO = 6;
 
+// Sheet del lanzamiento de JUNIO 2026 (form acumulativo desde 2025). Para el
+// broadcast SOLO tomamos los anotados el 9 y 10 de junio 2026 (los del lanzamiento).
+// Col 0 = Marca temporal (D/M/YYYY ...), col 1 = Nombre, col 2 = teléfono.
+const JUNIO_SHEET_CSV = 'https://docs.google.com/spreadsheets/d/11Hg9nmiCPPBACas_14uOnV1k4npE_zN7uX6xilHb4RE/export?format=csv';
+const JUNIO_COL_TS = 0, JUNIO_COL_NOMBRE = 1, JUNIO_COL_TELEFONO = 2;
+
 // Parser CSV mínimo que respeta comillas dobles (campos con comas/saltos).
 function parseCSV(text) {
   const rows = [];
@@ -453,6 +459,32 @@ async function fetchCursosLeads(env) {
     leads.push({ nombre, telRaw, tel, valido });
   }
   return { total: Math.max(0, rows.length - 1), leads };
+}
+
+// Lee el sheet del lanzamiento de junio y devuelve SOLO los anotados el 9 y 10
+// de junio 2026 (los del lanzamiento), parseados + normalizados. El form es
+// acumulativo desde 2025, por eso el filtro de fecha por la Marca temporal.
+async function fetchJunioLeads(env) {
+  const r = await fetch(JUNIO_SHEET_CSV, { redirect: 'follow' });
+  if (!r.ok) throw new Error('sheet HTTP ' + r.status);
+  const rows = parseCSV(await r.text());
+  const seen = new Set();
+  const leads = [];
+  for (let i = 1; i < rows.length; i++) {
+    const ts = String(rows[i][JUNIO_COL_TS] || '').trim();
+    const p = (ts.split(/\s+/)[0] || '').split('/'); // D/M/YYYY
+    if (p.length !== 3) continue;
+    const day = parseInt(p[0], 10), mon = parseInt(p[1], 10), yr = parseInt(p[2], 10);
+    if (!((day === 9 || day === 10) && mon === 6 && yr === 2026)) continue; // solo 9 y 10 jun 2026
+    const nombre = String(rows[i][JUNIO_COL_NOMBRE] || '').trim();
+    const telRaw = String(rows[i][JUNIO_COL_TELEFONO] || '').trim();
+    if (!nombre && !telRaw) continue;
+    const tel = normalizeArPhone(telRaw) || '';
+    const valido = !!tel && tel.length >= 10;
+    if (valido) { if (seen.has(tel)) continue; seen.add(tel); }
+    leads.push({ nombre, telRaw, tel, valido });
+  }
+  return { total: leads.length, leads };
 }
 
 async function waSend(env, payload) {
@@ -627,6 +659,10 @@ function matchMinicursoTrigger(text) {
 // ===== Campaña de cursos (broadcast lanzamiento mayo) =====
 const CURSOS_EVENTO_MSG = 'aah buenísimo! Te escribía para invitarte a un nuevo evento en vivo este próximo martes 9 y jueves 11 de junio, los chicos van a hacer algo muuy copado ahora que arranca el mundial\n\nTe gustaría participar?';
 
+// Mensaje que se manda a los que responden POSITIVO a la plantilla del
+// lanzamiento de junio 2026 (mismo criterio IA que mayo).
+const JUNIO_VIVO_MSG = 'Perfectoo, acá vamos a transmitir en vivo mañana 19 hs. TODO sobre el modelo de negocio de los neones LED… y también abrimos inscripciones para la Comunidad Al Infinito 🙌🏼\nhttps://youtube.com/live/UbMdCzZhwxY?feature=share';
+
 // Clasifica con IA la respuesta del cliente al template de cursos: positiva o no.
 async function analyzeResponseSentiment(env, texto) {
   const t = String(texto || '').trim();
@@ -769,6 +805,63 @@ async function processCursosBroadcastQueue(env) {
   } catch (_) { /* best-effort */ }
 }
 
+// Cron (*/1): goteo del broadcast de JUNIO 2026 (lanzamiento). Misma lógica que el
+// de mayo pero con la plantilla lanzamiento_junio_2026, campaign='junio' y la cola
+// kind='junio_broadcast'. Manda hasta 6 por tick para terminar los ~720 a tiempo.
+async function processJunioBroadcastQueue(env) {
+  if (await isWaBillingBlocked(env)) return; // pausado por bloqueo de pago de WhatsApp
+  try {
+    const nowIso = new Date().toISOString();
+    const floorIso = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT phone, sender_name FROM wa_autoreply_log " +
+      "WHERE kind = 'junio_broadcast' AND status = 'queued' AND due_at <= ? AND due_at >= ? " +
+      "ORDER BY due_at ASC LIMIT 6"
+    ).bind(nowIso, floorIso).all();
+    if (!rs.results?.length) return;
+    let labelId = null;
+    try { const lr = await env.DB.prepare("SELECT id FROM labels WHERE name = 'lanzamiento junio 2026'").first(); if (lr?.id) labelId = lr.id; } catch (_) {}
+    for (const row of rs.results) {
+      const phone = row.phone;
+      const nombre = row.sender_name || '';
+      let claim;
+      try {
+        claim = await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sending' WHERE phone = ? AND kind = 'junio_broadcast' AND status = 'queued'").bind(phone).run();
+      } catch (_) { continue; }
+      if (!claim?.meta?.changes) continue;
+      if (await isUnreachable(env, phone)) {
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped', sent_at = ? WHERE phone = ? AND kind = 'junio_broadcast'").bind(new Date().toISOString(), phone).run(); } catch (_) {}
+        continue;
+      }
+      const primerNombre = capitalizeName((nombre || '').split(/\s+/)[0]) || 'amigo/a';
+      const tpl = await waSendTemplate(env, phone, 'lanzamiento_junio_2026', 'es_AR', [primerNombre]);
+      if (!tpl?.ok) {
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued' WHERE phone = ? AND kind = 'junio_broadcast'").bind(phone).run(); } catch (_) {}
+        continue;
+      }
+      const ts = new Date().toISOString();
+      const wamid = tpl.id || '';
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'junio_broadcast'").bind(ts, phone).run(); } catch (_) {}
+      const previewBody = `holaa ${primerNombre}! Soy Abril, de Neon Infinito\nveo que completaste el formulario que pasamos al final del vivo de ayer, y te escribo porque mañana tenemos la 2da clase!! Arrancamos sorteando los 3 kits iniciales…\nTe paso el link para ver la clase de mañana?`;
+      if (wamid) {
+        try {
+          await env.DB.prepare(
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id)
+             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '')
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template'
+               WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+          ).bind(ts, wamid, phone, previewBody).run();
+        } catch (_) {}
+      }
+      // Ocultar el chat hasta que responda.
+      try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto'").bind(phone, ts).run(); } catch (_) {}
+      // Registrar en la campaña con campaign='junio'.
+      try { await env.DB.prepare("INSERT INTO wa_cursos_campaign (phone, nombre, sent_1_at, campaign, updated_at) VALUES (?, ?, ?, 'junio', ?) ON CONFLICT(phone) DO UPDATE SET sent_1_at = excluded.sent_1_at, campaign = 'junio', updated_at = excluded.updated_at").bind(phone, nombre, ts, ts).run(); } catch (_) {}
+      if (labelId) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, labelId, ts).run(); } catch (_) {} }
+    }
+  } catch (_) { /* best-effort */ }
+}
+
 // Cron (*/1): recupera media (imagenes/videos/audios/docs/stickers) cuyo
 // downloadMedia falló en el handler del webhook. Causa típica: race con Meta —
 // el webhook del msg llega antes de que el media esté disponible en su API, así
@@ -812,7 +905,7 @@ async function processCursosCampaignPending(env) {
   try {
     const nowIso = new Date().toISOString();
     const rs = await env.DB.prepare(
-      "SELECT phone, sent_1_at FROM wa_cursos_campaign WHERE analyze_due_at IS NOT NULL AND analyze_due_at <= ? AND sentiment IS NULL LIMIT 25"
+      "SELECT phone, sent_1_at, campaign FROM wa_cursos_campaign WHERE analyze_due_at IS NOT NULL AND analyze_due_at <= ? AND sentiment IS NULL LIMIT 25"
     ).bind(nowIso).all();
     for (const row of (rs.results || [])) {
       const phone = row.phone;
@@ -837,12 +930,14 @@ async function processCursosCampaignPending(env) {
       const now = new Date().toISOString();
       if (sentiment === 'positiva') {
         // Encolar el mensaje del evento con demora (~30s). processAutoReplyQueue
-        // lo manda y RECIÉN AHÍ revela el chat a Abril.
+        // lo manda y RECIÉN AHÍ revela el chat a Abril. El mensaje depende de la
+        // campaña: junio → JUNIO_VIVO_MSG; mayo → CURSOS_EVENTO_MSG.
         const dueAt = new Date(Date.now() + 30 * 1000).toISOString();
+        const evKind = (row.campaign === 'junio') ? 'junio_evento' : 'cursos_evento';
         try {
           await env.DB.prepare(
-            "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'cursos_evento', '', 'queued', ?, '')"
-          ).bind(phone, dueAt).run();
+            "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, ?, '', 'queued', ?, '')"
+          ).bind(phone, evKind, dueAt).run();
         } catch (_) {}
       } else {
         // No positiva → revelar al toque a Abril, sin mensaje.
@@ -1071,6 +1166,8 @@ async function processAutoReplyQueue(env) {
         body = `${saludo} Ahora te paso los regalos (Cotizador + Guía de Producción). Pero antes, contanos qué te pareció el nuevo Curso! Viste la 2da clase hasta el final?`;
       } else if (row.kind === 'minicurso_gift') {
         body = `genial entoncees, acá te mando los regalos (cotizador automático + guía de producción) por ver hasta el final! 👇🏼\n${MINICURSO_REGALO_LINK}`;
+      } else if (row.kind === 'junio_evento') {
+        body = JUNIO_VIVO_MSG;
       } else {
         body = CURSOS_EVENTO_MSG;
       }
@@ -1092,8 +1189,8 @@ async function processAutoReplyQueue(env) {
           ).bind(new Date().toISOString(), wamid, phone, body).run();
         } catch (_) {}
       }
-      // El evento de cursos: recién acá (tras mandarlo) se revela el chat a Abril.
-      if (row.kind === 'cursos_evento') {
+      // El evento de cursos/junio: recién acá (tras mandarlo) se revela el chat a Abril.
+      if (row.kind === 'cursos_evento' || row.kind === 'junio_evento') {
         const ts2 = new Date().toISOString();
         try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos' WHERE phone = ?").bind(phone).run(); } catch (_) {}
         try { await env.DB.prepare("UPDATE wa_cursos_campaign SET revealed_at = ?, updated_at = ? WHERE phone = ?").bind(ts2, ts2, phone).run(); } catch (_) {}
@@ -5175,6 +5272,59 @@ export default {
         });
       }
 
+      // Schedule del broadcast de JUNIO 2026 (lanzamiento). Igual que el de cursos
+      // pero lee fetchJunioLeads (filtrado 9 y 10 jun 2026) y encola kind='junio_broadcast'.
+      if (request.method === 'POST' && path === '/admin/wa/junio-broadcast-schedule') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const count = Math.min(Math.max(parseInt(body?.count || '0', 10) || 0, 1), 1000);
+        const startTs = body?.startTs ? new Date(body.startTs) : new Date();
+        const endTs = body?.endTs ? new Date(body.endTs) : new Date(Date.now() + 4 * 60 * 60 * 1000);
+        const dryRun = !!body?.dryRun;
+        if (isNaN(startTs.getTime()) || isNaN(endTs.getTime()) || endTs <= startTs) {
+          return json({ error: 'startTs/endTs inválidos' }, 400);
+        }
+        let data;
+        try { data = await fetchJunioLeads(env); } catch (e) { return json({ error: 'no pude leer el sheet: ' + e.message }, 502); }
+        const validos = data.leads.filter(l => l.valido);
+        const yaSet = new Set();
+        try {
+          const rs = await env.DB.prepare("SELECT phone FROM wa_autoreply_log WHERE kind = 'junio_broadcast'").all();
+          for (const r of (rs.results || [])) yaSet.add(r.phone);
+        } catch (_) {}
+        const unreachSet = new Set();
+        try {
+          const rs = await env.DB.prepare("SELECT phone FROM wa_unreachable_phones").all();
+          for (const r of (rs.results || [])) unreachSet.add(r.phone);
+        } catch (_) {}
+        const pendientes = validos.filter(l => !yaSet.has(l.tel) && !unreachSet.has(l.tel)).slice(0, count);
+        if (!pendientes.length) return json({ scheduled: 0, available: validos.length - yaSet.size, reason: 'no quedan leads pendientes' });
+        const totalMs = endTs.getTime() - startTs.getTime();
+        const step = pendientes.length > 1 ? totalMs / (pendientes.length - 1) : 0;
+        const planned = pendientes.map((l, i) => ({
+          tel: l.tel, nombre: l.nombre || '',
+          due_at: new Date(startTs.getTime() + Math.round(i * step)).toISOString()
+        }));
+        if (dryRun) {
+          return json({ dryRun: true, scheduled: planned.length, total_validos: validos.length, ya_encolados: yaSet.size,
+            window: { startTs: startTs.toISOString(), endTs: endTs.toISOString(), step_seconds: Math.round(step / 1000) },
+            primeros: planned.slice(0, 5), ultimos: planned.slice(-5) });
+        }
+        let scheduled = 0;
+        for (const p of planned) {
+          try {
+            const r = await env.DB.prepare(
+              "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'junio_broadcast', '', 'queued', ?, ?)"
+            ).bind(p.tel, p.due_at, p.nombre).run();
+            if (r?.meta?.changes) scheduled++;
+          } catch (_) {}
+        }
+        return json({ ok: true, scheduled, requested: planned.length,
+          window: { startTs: startTs.toISOString(), endTs: endTs.toISOString(), step_seconds: Math.round(step / 1000) },
+          primeros: planned.slice(0, 3), ultimos: planned.slice(-3) });
+      }
+
       // Envío masivo de la plantilla de cursos a los leads del Sheet (solo admin).
       // Body: { limit?: number (default 10, máx 200), dryRun?: bool }.
       // Manda la plantilla cursos_clases_vivo_mayo con {{1}}=primer nombre, guarda
@@ -6683,6 +6833,8 @@ export default {
     // Cola de goteo del broadcast de cursos: procesa los queued con due_at
     // vencido. Encolados vía POST /admin/wa/cursos-broadcast-schedule.
     ctx.waitUntil(processCursosBroadcastQueue(env));
+    // Goteo del broadcast de JUNIO 2026. Encolado vía /admin/wa/junio-broadcast-schedule.
+    ctx.waitUntil(processJunioBroadcastQueue(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
