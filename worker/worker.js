@@ -6496,8 +6496,16 @@ export default {
         if (!carteles.length) return json({ error: 'falta al menos un cartel con nombre' }, 400);
         const now = new Date().toISOString();
         const fecha = (body.fecha && /^\d{4}-\d{2}-\d{2}$/.test(body.fecha)) ? body.fecha : now.slice(0, 10);
-        const mx = await env.DB.prepare('SELECT MAX(numero) AS m FROM pedidos').first();
-        const numero = (mx && mx.m ? Math.floor(Number(mx.m)) : 0) + 1;
+        // El número viene del front (auto-sugerido pero editable por Joaco, porque
+        // el numbering del Excel es inconsistente). Si no viene, fallback a max+1.
+        const bodyNum = Math.floor(Number(body.numero));
+        let numero;
+        if (Number.isFinite(bodyNum) && bodyNum > 0) {
+          numero = bodyNum;
+        } else {
+          const mx = await env.DB.prepare('SELECT MAX(numero) AS m FROM pedidos').first();
+          numero = (mx && mx.m ? Math.floor(Number(mx.m)) : 0) + 1;
+        }
         const num = (v) => (v == null || v === '') ? null : (isNaN(Number(v)) ? null : Number(v));
         const total = carteles.reduce((s, c) => s + (num(c.precio) || 0) + (num(c.precio_dimmer) || 0), 0);
         const pagado = num(body.pagado);
