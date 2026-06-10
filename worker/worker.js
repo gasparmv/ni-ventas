@@ -6449,6 +6449,7 @@ export default {
           'precio_trans', 'precio_negro', 'precio_final',
           'descuento', 'recargo', 'reventa', 'comision_joaco',
           'comercial_id', 'disenador_id', 'notas',
+          'urgente', 'modificar',
           'created_at', 'updated_at'
         ];
         const vals = [
@@ -6459,6 +6460,7 @@ export default {
           body.precio_trans ?? null, body.precio_negro ?? null, body.precio_final ?? null,
           body.descuento ?? 0, body.recargo ?? 0, body.reventa ?? 0, body.comision_joaco ?? 0,
           comercial_id, body.disenador_id || null, body.notas || null,
+          body.urgente ?? 0, body.modificar ?? 0,
           now, now
         ];
         const placeholders = cols.map(() => '?').join(',');

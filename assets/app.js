@@ -11381,14 +11381,9 @@ async function confirmQuickCreate() {
       origen_lead: origen,
       medidas_libre: medidas || null,
       notas: notas || null,
-      estado: 'nuevo'
+      estado: 'nuevo',
+      urgente
     });
-    // El POST de creación no persiste 'urgente' (no está en sus columnas del INSERT),
-    // así que si se marcó urgente lo seteamos con un PATCH inmediato. Best-effort:
-    // si falla, el brief queda creado igual y se puede marcar desde la card/drawer.
-    if (urgente) {
-      try { await saveBrief({ id: saved.id, urgente: 1 }); saved.urgente = 1; } catch (_) {}
-    }
     STATE.briefs.unshift(saved);
     // Subir todas las imágenes pegadas.
     for (const img of STATE.quickModalImages) {
