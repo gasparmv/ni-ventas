@@ -4183,3 +4183,23 @@ table.t td.cliente { font-weight: 600; }
 .cost-block-banner { background:rgba(255,68,68,.15); border:1px solid rgba(255,68,68,.4); color:#ffb4b4; border-radius:8px; padding:9px 11px; font-size:12px; line-height:1.4; margin-top:var(--s-3) }
 .cost-block-banner a { color:#fff; text-decoration:underline }
 
+/* ===== Nuevo chat: botón "+" del header + sugerencia de la barra de búsqueda ===== */
+.new-chat-suggest { padding:6px 10px 2px }
+.new-chat-suggest-btn { display:flex; align-items:center; gap:10px; width:100%; text-align:left; background:rgba(0,168,132,.10); border:1px solid rgba(0,168,132,.35); color:#e9edef; border-radius:10px; padding:10px 12px; cursor:pointer; font-size:14px; transition:background .12s }
+.new-chat-suggest-btn:hover { background:rgba(0,168,132,.18) }
+.new-chat-suggest-btn svg { color:#00a884; flex-shrink:0 }
+.new-chat-suggest-btn strong { color:#00d9a6 }
+.nc-exists { color:#8696a0; font-size:12px }
+.new-chat-modal .modal-body { gap:14px }
+.nc-note { font-size:12.5px; line-height:1.45; color:#aebac1; background:rgba(255,255,255,.04); border:1px solid #2a3942; border-radius:8px; padding:9px 11px }
+.nc-note strong { color:#e9edef }
+.nc-field { display:flex; flex-direction:column; gap:5px }
+.nc-label { font-size:12px; color:#8696a0 }
+.nc-input { background:#2a3942; border:1px solid #3b4a54; color:#e9edef; border-radius:8px; padding:9px 11px; font-size:14px; width:100%; box-sizing:border-box }
+.nc-input:focus { outline:none; border-color:#00a884 }
+select.nc-input { cursor:pointer }
+.nc-hint { font-size:12px; color:#8696a0; min-height:14px }
+.nc-hint.ok { color:#8fd4de }
+.nc-hint.err { color:#ff8a8a }
+.nc-preview { white-space:pre-wrap; font-size:13px; line-height:1.45; color:#d7dde0; background:#0b141a; border:1px solid #2a3942; border-left:3px solid #00a884; border-radius:8px; padding:10px 12px; max-height:200px; overflow:auto }
+

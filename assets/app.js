@@ -5161,6 +5161,150 @@ async function sendTemplateToChat(phone, name, lang, params) {
   });
   return r.ok ? await r.json() : { ok: false };
 }
+
+// ===== Nuevo chat a un número que no está en contactos =====
+// Como el número es nuevo (fuera de la ventana de 24h de WhatsApp), el primer
+// mensaje OBLIGATORIAMENTE tiene que ser una plantilla aprobada. Dos entradas:
+// el botón "+" del header y la barra de búsqueda (al pegar un teléfono).
+
+// ¿El texto parece un número de teléfono? (solo dígitos/símbolos y >= 8 dígitos).
+function looksLikePhone(s) {
+  const raw = String(s || '').trim();
+  if (!raw) return false;
+  if (!/^[\d\s()+.\-]+$/.test(raw)) return false; // si tiene letras, es búsqueda por nombre
+  return raw.replace(/\D/g, '').length >= 8;
+}
+
+// Muestra/oculta el botón "Chatear con +54…" debajo de la barra de búsqueda.
+function updateNewChatSuggest(value) {
+  const box = document.getElementById('new-chat-suggest');
+  if (!box) return;
+  if (!looksLikePhone(value)) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const norm = normalizeArPhoneFE(value);
+  const exists = (chatState.contacts || []).some(c => c.phone === norm);
+  box.style.display = 'block';
+  box.innerHTML = `<button type="button" class="new-chat-suggest-btn" id="new-chat-suggest-btn">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-1 9h-3v3h-2v-3h-3V9h3V6h2v3h3v2z"/></svg>
+      <span><strong>Chatear</strong> con ${escapeHtml(formatPhoneDisplay(norm))}${exists ? ' <span class="nc-exists">· ya tenés un chat</span>' : ''}</span>
+    </button>`;
+  const btn = document.getElementById('new-chat-suggest-btn');
+  if (btn) btn.onclick = () => {
+    if (exists) {
+      // Ya existe → abrir el chat directamente (no hace falta plantilla).
+      const si = document.getElementById('chat-search'); if (si) si.value = '';
+      chatState.search = ''; updateNewChatSuggest('');
+      selectChatContact(norm);
+    } else {
+      showNewChatModal(norm);
+    }
+  };
+}
+
+// Modal para arrancar un chat nuevo con una plantilla aprobada.
+function showNewChatModal(prefillPhone) {
+  document.getElementById('new-chat-modal')?.remove();
+  loadChatTemplates(); // idempotente
+  const verts = qrVerticalsForUser(); // null = admin ve todas
+  const tplOptions = (chatState.templates || [])
+    .filter(t => !verts || verts.includes(templateVertical(t.name)))
+    .map(t => `<option value="${escapeHtml(t.name)}" data-lang="${escapeHtml(t.language || 'es_AR')}" data-params="${tplParamCount(t)}">${escapeHtml(t.name)}</option>`)
+    .join('');
+  const bg = document.createElement('div');
+  bg.id = 'new-chat-modal';
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal new-chat-modal" style="max-width:460px;width:92vw">
+      <div class="modal-h"><h3>Nuevo chat</h3></div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+        <div class="nc-note">Es un número nuevo, fuera de la ventana de 24 h: el primer mensaje tiene que ser una <strong>plantilla aprobada</strong>.</div>
+        <label class="nc-field">
+          <span class="nc-label">Número de teléfono</span>
+          <input type="tel" id="nc-phone" class="nc-input" placeholder="11 2345-6789" value="${escapeHtml(prefillPhone || '')}" autocomplete="off">
+          <span class="nc-hint" id="nc-hint"></span>
+        </label>
+        <label class="nc-field">
+          <span class="nc-label">Plantilla de inicio</span>
+          <select id="nc-tpl" class="nc-input">
+            <option value="">Elegí una plantilla…</option>
+            ${tplOptions}
+          </select>
+        </label>
+        <label class="nc-field" id="nc-name-field" style="display:none">
+          <span class="nc-label">Nombre (reemplaza {{1}} en la plantilla)</span>
+          <input type="text" id="nc-name" class="nc-input" placeholder="amigo/a" autocomplete="off">
+        </label>
+        <div class="nc-preview" id="nc-preview" style="display:none"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost modal-cancel" type="button">Cancelar</button>
+        <button class="btn btn-cyan" id="nc-send" type="button" disabled>Chatear</button>
+      </div>
+    </div>`;
+  document.body.appendChild(bg);
+  requestAnimationFrame(() => bg.classList.add('open'));
+
+  const phoneEl = bg.querySelector('#nc-phone');
+  const tplEl = bg.querySelector('#nc-tpl');
+  const nameField = bg.querySelector('#nc-name-field');
+  const nameEl = bg.querySelector('#nc-name');
+  const previewEl = bg.querySelector('#nc-preview');
+  const hintEl = bg.querySelector('#nc-hint');
+  const sendBtn = bg.querySelector('#nc-send');
+
+  const close = () => bg.remove();
+  bg.addEventListener('click', (e) => { if (e.target === bg) close(); });
+  bg.querySelector('.modal-cancel').onclick = close;
+
+  const selectedTpl = () => (chatState.templates || []).find(t => t.name === tplEl.value);
+  const nParams = () => { const o = tplEl.options[tplEl.selectedIndex]; return o ? (parseInt(o.dataset.params || '0', 10) || 0) : 0; };
+
+  function refresh() {
+    const norm = normalizeArPhoneFE(phoneEl.value);
+    const phoneOk = norm.length >= 12; // 549 + área + número
+    if (!phoneEl.value.trim()) { hintEl.textContent = ''; hintEl.className = 'nc-hint'; }
+    else if (phoneOk) {
+      const exists = (chatState.contacts || []).some(c => c.phone === norm);
+      hintEl.innerHTML = `Se enviará a <strong>${escapeHtml(formatPhoneDisplay(norm))}</strong>${exists ? ' · <span class="nc-exists">ya tenés un chat con este número</span>' : ''}`;
+      hintEl.className = 'nc-hint ok';
+    } else { hintEl.textContent = 'Número inválido — revisá el código de área.'; hintEl.className = 'nc-hint err'; }
+    const tpl = selectedTpl();
+    nameField.style.display = (tpl && nParams() >= 1) ? '' : 'none';
+    if (tpl) {
+      const fn = (nameEl.value || '').trim() || 'amigo/a';
+      const txt = tplBodyText(tpl).replace(/\{\{\s*\d+\s*\}\}/g, fn);
+      previewEl.textContent = txt;
+      previewEl.style.display = txt ? 'block' : 'none';
+    } else { previewEl.style.display = 'none'; }
+    sendBtn.disabled = !(phoneOk && tpl);
+  }
+
+  phoneEl.addEventListener('input', refresh);
+  tplEl.addEventListener('change', refresh);
+  nameEl.addEventListener('input', refresh);
+  refresh();
+  setTimeout(() => phoneEl.focus(), 30);
+
+  sendBtn.onclick = async () => {
+    const norm = normalizeArPhoneFE(phoneEl.value);
+    const tpl = selectedTpl();
+    if (!norm || norm.length < 12 || !tpl) return;
+    const lang = (tplEl.options[tplEl.selectedIndex] && tplEl.options[tplEl.selectedIndex].dataset.lang) || tpl.language || 'es_AR';
+    const params = nParams() >= 1 ? [((nameEl.value || '').trim() || 'amigo/a')] : [];
+    sendBtn.disabled = true; sendBtn.textContent = 'Enviando…';
+    const j = await sendTemplateToChat(norm, tpl.name, lang, params);
+    if (j && j.id) {
+      toast('✓ Plantilla enviada');
+      close();
+      const si = document.getElementById('chat-search'); if (si) si.value = '';
+      chatState.search = ''; updateNewChatSuggest('');
+      await selectChatContact(norm); // abre la conversación con el mensaje de la plantilla
+      loadChatContacts().then(() => { if (STATE.view === 'chat') refreshContactList(); }); // que aparezca en la lista
+    } else {
+      toast('Error al enviar la plantilla');
+      sendBtn.disabled = false; sendBtn.textContent = 'Chatear';
+    }
+  };
+}
 async function saveQuickReply(shortcut, body, mediaR2Key, vertical) {
   await fetch(CONFIG.trackerUrl + '/admin/quick-replies', {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -6941,6 +7085,9 @@ function renderChat() {
             <svg class="ico-exit" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" style="display:none"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
           </button>
           <div style="display:flex;gap:4px">
+            <button class="btn-send" id="btn-new-chat" style="width:34px;height:34px;font-size:14px" title="Nuevo chat (a un número nuevo)">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-1 9h-3v3h-2v-3h-3V9h3V6h2v3h3v2z"/></svg>
+            </button>
             <button class="btn-send" id="btn-bulk" style="width:34px;height:34px;font-size:14px" title="Mensaje masivo">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/><path d="M7 9h2v2H7zM11 9h2v2h-2zM15 9h2v2h-2z"/></svg>
             </button>
@@ -6958,6 +7105,7 @@ function renderChat() {
         <div class="chat-contacts-search">
           <input type="text" id="chat-search" placeholder="${chatState.showArchived ? 'Buscar en archivados…' : 'Buscar o empezar un chat nuevo'}" value="${escapeHtml(chatState.search)}">
         </div>
+        <div id="new-chat-suggest" class="new-chat-suggest" style="display:none"></div>
         ${chatState.showArchived ? '<div class="archived-banner">📦 Mostrando solo chats archivados</div>' : ''}
         ${(() => {
           // Fila estilo WA "Archivados · N" — solo si NO estamos viendo archivados
@@ -9084,6 +9232,8 @@ function bindChat() {
   if (searchInput) {
     searchInput.oninput = () => {
       chatState.search = searchInput.value;
+      // Si pegaron un teléfono, mostrar el botón "Chatear con +54…".
+      updateNewChatSuggest(searchInput.value);
       // Refresh inmediato con filtrado local (rápido, lo viejo)
       refreshContactList();
       // Debounce: 300ms después llamar al backend para búsqueda en historial
@@ -9097,6 +9247,8 @@ function bindChat() {
       chatState._searchTimer = setTimeout(() => runBackendSearch(q), 300);
     };
   }
+  // Repoblar la sugerencia de "Chatear con…" tras un re-render (si quedó un tel en la búsqueda).
+  updateNewChatSuggest(chatState.search);
   bindChatContactClicks();
   // Refresh
   const refreshBtn = document.getElementById('chat-refresh');
@@ -9190,6 +9342,9 @@ function bindChat() {
     chatState.filterLabels = [];
     render();
   };
+  // Nuevo chat a un número nuevo (botón "+")
+  const newChatBtn = document.getElementById('btn-new-chat');
+  if (newChatBtn) newChatBtn.onclick = () => showNewChatModal('');
   // Manage labels button
   const manageLabelsBtn = document.getElementById('btn-manage-labels');
   if (manageLabelsBtn) manageLabelsBtn.onclick = () => showManageLabelsModal();
