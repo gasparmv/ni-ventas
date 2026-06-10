@@ -5231,6 +5231,10 @@ function showNewChatModal(prefillPhone) {
           <span class="nc-label">Nombre (reemplaza {{1}} en la plantilla)</span>
           <input type="text" id="nc-name" class="nc-input" placeholder="amigo/a" autocomplete="off">
         </label>
+        <div class="nc-field" id="nc-preview-field" style="display:none">
+          <span class="nc-label">Vista previa — así se manda</span>
+          <div class="nc-preview" id="nc-preview"></div>
+        </div>
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost modal-cancel" type="button">Cancelar</button>
@@ -5246,6 +5250,8 @@ function showNewChatModal(prefillPhone) {
   const nameEl = bg.querySelector('#nc-name');
   const hintEl = bg.querySelector('#nc-hint');
   const sendBtn = bg.querySelector('#nc-send');
+  const previewField = bg.querySelector('#nc-preview-field');
+  const previewEl = bg.querySelector('#nc-preview');
 
   // Plantilla elegida (se setea al clickear un row del listado estilo "/").
   let selectedName = null, selectedLang = 'es_AR', selectedParams = 0;
@@ -5264,6 +5270,13 @@ function showNewChatModal(prefillPhone) {
       hintEl.className = 'nc-hint ok';
     } else { hintEl.textContent = 'Número inválido — revisá el código de área.'; hintEl.className = 'nc-hint err'; }
     nameField.style.display = (selectedName && selectedParams >= 1) ? '' : 'none';
+    // Vista previa: el body completo de la plantilla con {{1}} ya reemplazado.
+    const tpl = selectedName ? (chatState.templates || []).find(t => t.name === selectedName) : null;
+    if (tpl) {
+      const fn = (nameEl.value || '').trim() || 'amigo/a';
+      previewEl.textContent = tplBodyText(tpl).replace(/\{\{\s*\d+\s*\}\}/g, fn);
+      previewField.style.display = '';
+    } else { previewField.style.display = 'none'; }
     sendBtn.disabled = !(phoneOk && selectedName);
   }
 
