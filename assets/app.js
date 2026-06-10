@@ -7197,6 +7197,7 @@ function renderChat() {
         ${chatState.selectedPhone ? renderChatConversation() : renderChatNoSelect()}
       </div>
     </div>
+    ${renderQuickCreateModal()}
   `;
 }
 
@@ -7478,6 +7479,7 @@ function renderChatConversation() {
         <div class="chat-header-phone">${escapeHtml(formatPhoneDisplay(phone))}</div>
       </div>
       <div class="chat-header-meta">
+        ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
         <span>${msgCount} msgs</span>
         ${['admin', 'comercial', 'cursos'].includes(getUserRole()) ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
@@ -8903,6 +8905,12 @@ function bindChatConversation() {
   const fileInput = document.getElementById('chat-file-input');
   const micBtn = document.getElementById('btn-mic');
   const labelsBtn = document.getElementById('btn-labels');
+  // Botón "Crear brief" del header → abre el mismo modal del panel de Cotización
+  // (con teléfono + WhatsApp pre-cargados) por encima de la conversación. Y bindea
+  // ese modal por si quedó abierto tras este render.
+  const chatBriefBtn = document.getElementById('btn-chat-brief');
+  if (chatBriefBtn) chatBriefBtn.onclick = openBriefFromChat;
+  bindQuickCreateModal();
   const backBtn = document.getElementById('chat-back-btn');
   bindChatPostit();
   // Hidratar los bubbles recién renderizados: inyectar acciones (chevron + iconos
@@ -11406,11 +11414,93 @@ function openNuevoBriefModal() {
   STATE.quickModalSaving = false;
   STATE.quickModalOrigen = 'wpp';
   STATE.quickModalUrgente = false;
+  STATE.quickModalPrefillPhone = '';
   render();
   setTimeout(() => {
     const el = document.getElementById('quick-modal-titulo');
     if (el) el.focus();
   }, 60);
+}
+
+// Abre el modal "Nuevo brief" DESDE UN CHAT, con el teléfono y la plataforma
+// (WhatsApp) ya cargados — el resto (título, medidas, notas, imágenes) lo completa
+// Joaco. El brief se crea como estado 'nuevo' → le llega a Emma en "A cotizar".
+// Es el MISMO modal del panel de Cotización, renderizado por encima de la conversación.
+function openBriefFromChat() {
+  if (!canCreateBriefs()) { toast('No tenés permiso para crear briefs'); return; }
+  const phone = chatState.selectedPhone;
+  if (!phone) return;
+  STATE.quickModalImages = [];
+  STATE.quickModalOpen = true;
+  STATE.quickModalSaving = false;
+  STATE.quickModalOrigen = 'wpp';
+  STATE.quickModalUrgente = false;
+  STATE.quickModalPrefillPhone = String(phone).replace(/\D/g, '');
+  render();
+  setTimeout(() => {
+    const el = document.getElementById('quick-modal-titulo');
+    if (el) el.focus();
+  }, 60);
+}
+
+// Bindea los handlers del modal "Nuevo brief" (quick-create). Extraído de
+// bindCotizacion para poder reusarlo también desde el chat (botón "Crear brief"
+// del header de la conversación). Idempotente; corre solo si el modal está abierto.
+function bindQuickCreateModal() {
+  if (!STATE.quickModalOpen) return;
+  const qBackdrop = document.getElementById('quick-modal-backdrop');
+  if (qBackdrop) qBackdrop.onclick = (ev) => { if (ev.target.id === 'quick-modal-backdrop') cancelQuickCreate(); };
+  const qClose = document.getElementById('quick-modal-close');
+  if (qClose) qClose.onclick = cancelQuickCreate;
+  const qCancel = document.getElementById('quick-modal-cancel');
+  if (qCancel) qCancel.onclick = cancelQuickCreate;
+  const qConfirm = document.getElementById('quick-modal-confirm');
+  if (qConfirm) qConfirm.onclick = confirmQuickCreate;
+  // Checkbox urgente: persiste en STATE (sobrevive re-renders) + feedback visual.
+  const qUrg = document.getElementById('quick-modal-urgente');
+  if (qUrg) qUrg.onchange = () => {
+    STATE.quickModalUrgente = qUrg.checked;
+    const lbl = document.getElementById('quick-modal-urgente-lbl');
+    if (lbl) {
+      lbl.style.borderColor = qUrg.checked ? 'rgba(255,24,48,.5)' : 'var(--border)';
+      lbl.style.background = qUrg.checked ? 'rgba(255,24,48,.08)' : 'transparent';
+      const sp = lbl.querySelector('span');
+      if (sp) sp.style.color = qUrg.checked ? '#ff5468' : 'var(--fg)';
+    }
+  };
+  // Toggle origen WhatsApp / Instagram.
+  document.querySelectorAll('[data-qm-origen]').forEach(btn => {
+    btn.onclick = () => setQuickModalOrigen(btn.dataset.qmOrigen);
+  });
+  // Dropzone: click abre el selector, drop/file-input suman imágenes.
+  const qDrop = document.getElementById('quick-modal-dropzone');
+  const qFileInput = document.getElementById('quick-modal-file-input');
+  if (qDrop && qFileInput) {
+    qDrop.onclick = () => qFileInput.click();
+    qDrop.ondragover = (ev) => { ev.preventDefault(); qDrop.style.borderColor = 'var(--accent-cyan)'; qDrop.style.background = 'rgba(143,212,222,.06)'; };
+    qDrop.ondragleave = () => { qDrop.style.borderColor = ''; qDrop.style.background = ''; };
+    qDrop.ondrop = (ev) => { ev.preventDefault(); qDrop.style.borderColor = ''; qDrop.style.background = ''; addFilesToQuickModal(ev.dataTransfer?.files); };
+    qFileInput.onchange = () => { addFilesToQuickModal(qFileInput.files); qFileInput.value = ''; };
+  }
+  // Botones quitar imagen.
+  document.querySelectorAll('[data-quick-img-remove]').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const i = parseInt(btn.dataset.quickImgRemove, 10);
+      STATE.quickModalImages.splice(i, 1);
+      refreshQuickModalImages();
+    };
+  });
+  // Enter en el título → confirmar.
+  const tituloInput = document.getElementById('quick-modal-titulo');
+  if (tituloInput) tituloInput.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); confirmQuickCreate(); } };
+  // ESC cierra (binding global propio, una sola vez).
+  if (!document._quickModalEscBound) {
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && STATE.quickModalOpen) cancelQuickCreate();
+    });
+    document._quickModalEscBound = true;
+  }
 }
 
 // Suma archivos de imagen al modal Quick Create (desde input file o drop).
@@ -11564,7 +11654,7 @@ function renderQuickCreateModal() {
         <!-- Teléfono (visible solo si WPP, obligatorio en ese caso) -->
         <div id="quick-modal-telefono-wrap" style="${origen === 'wpp' ? '' : 'display:none'}">
           <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Teléfono del cliente <span style="color:#FF5566">*</span></label>
-          <input type="tel" id="quick-modal-telefono" placeholder="ej. 5491155604999 (sin +, solo dígitos)"
+          <input type="tel" id="quick-modal-telefono" placeholder="ej. 5491155604999 (sin +, solo dígitos)" value="${escapeHtml(STATE.quickModalPrefillPhone || '')}"
             style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3)">
         </div>
 
@@ -12700,61 +12790,7 @@ function bindCotizacion() {
   }
 
   // ===== Quick-create modal (paste/drop sobre A cotizar) =====
-  if (STATE.quickModalOpen) {
-    const qBackdrop = document.getElementById('quick-modal-backdrop');
-    if (qBackdrop) qBackdrop.onclick = (ev) => { if (ev.target.id === 'quick-modal-backdrop') cancelQuickCreate(); };
-    const qClose = document.getElementById('quick-modal-close');
-    if (qClose) qClose.onclick = cancelQuickCreate;
-    const qCancel = document.getElementById('quick-modal-cancel');
-    if (qCancel) qCancel.onclick = cancelQuickCreate;
-    const qConfirm = document.getElementById('quick-modal-confirm');
-    if (qConfirm) qConfirm.onclick = confirmQuickCreate;
-    // Checkbox urgente: persiste en STATE (sobrevive re-renders) + feedback visual.
-    const qUrg = document.getElementById('quick-modal-urgente');
-    if (qUrg) qUrg.onchange = () => {
-      STATE.quickModalUrgente = qUrg.checked;
-      const lbl = document.getElementById('quick-modal-urgente-lbl');
-      if (lbl) {
-        lbl.style.borderColor = qUrg.checked ? 'rgba(255,24,48,.5)' : 'var(--border)';
-        lbl.style.background = qUrg.checked ? 'rgba(255,24,48,.08)' : 'transparent';
-        const sp = lbl.querySelector('span');
-        if (sp) sp.style.color = qUrg.checked ? '#ff5468' : 'var(--fg)';
-      }
-    };
-    // Toggle origen WhatsApp / Instagram.
-    document.querySelectorAll('[data-qm-origen]').forEach(btn => {
-      btn.onclick = () => setQuickModalOrigen(btn.dataset.qmOrigen);
-    });
-    // Dropzone: click abre el selector, drop/file-input suman imágenes.
-    const qDrop = document.getElementById('quick-modal-dropzone');
-    const qFileInput = document.getElementById('quick-modal-file-input');
-    if (qDrop && qFileInput) {
-      qDrop.onclick = () => qFileInput.click();
-      qDrop.ondragover = (ev) => { ev.preventDefault(); qDrop.style.borderColor = 'var(--accent-cyan)'; qDrop.style.background = 'rgba(143,212,222,.06)'; };
-      qDrop.ondragleave = () => { qDrop.style.borderColor = ''; qDrop.style.background = ''; };
-      qDrop.ondrop = (ev) => { ev.preventDefault(); qDrop.style.borderColor = ''; qDrop.style.background = ''; addFilesToQuickModal(ev.dataTransfer?.files); };
-      qFileInput.onchange = () => { addFilesToQuickModal(qFileInput.files); qFileInput.value = ''; };
-    }
-    // Botones quitar imagen.
-    document.querySelectorAll('[data-quick-img-remove]').forEach(btn => {
-      btn.onclick = (ev) => {
-        ev.stopPropagation();
-        const i = parseInt(btn.dataset.quickImgRemove, 10);
-        STATE.quickModalImages.splice(i, 1);
-        refreshQuickModalImages();
-      };
-    });
-    // Enter en el título → confirmar.
-    const tituloInput = document.getElementById('quick-modal-titulo');
-    if (tituloInput) tituloInput.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); confirmQuickCreate(); } };
-    // ESC cierra (usa el mismo binding global del lightbox no, hago uno propio).
-    if (!document._quickModalEscBound) {
-      document.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Escape' && STATE.quickModalOpen) cancelQuickCreate();
-      });
-      document._quickModalEscBound = true;
-    }
-  }
+  bindQuickCreateModal();
 
   // ===== Team chat widget (flotante) =====
   const fab = document.getElementById('team-chat-fab');
