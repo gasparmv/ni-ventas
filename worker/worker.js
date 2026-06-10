@@ -141,7 +141,7 @@ function parseCsv(csv) {
 // ===== Pedidos: migración del Excel de Ventas (hoja 2026) a D1 =====
 // D1 pasa a ser la fuente de verdad; el Excel queda como espejo (fase posterior).
 async function ensurePedidosSchema(env) {
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, fecha TEXT, cartel TEXT, colores TEXT, alto REAL, ancho REAL, cm_neon REAL, base TEXT, cantidad REAL, precio REAL, dimer TEXT, precio_dimmer REAL, envio TEXT, aclaracion TEXT, productor TEXT, plataforma TEXT, estado_pago TEXT, pagado REAL, restante REAL, estado_pedido TEXT, ad TEXT, sheet_row INTEGER, origen TEXT NOT NULL DEFAULT 'backfill', created_at TEXT, updated_at TEXT)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, fecha TEXT, cartel TEXT, colores TEXT, alto REAL, ancho REAL, cm_neon REAL, base TEXT, cantidad REAL, precio REAL, dimer TEXT, precio_dimmer REAL, envio TEXT, aclaracion TEXT, productor TEXT, plataforma TEXT, estado_pago TEXT, pagado REAL, restante REAL, estado_pedido TEXT, ad TEXT, telefono TEXT, sheet_row INTEGER, origen TEXT NOT NULL DEFAULT 'backfill', created_at TEXT, updated_at TEXT)`).run();
 }
 // Número de precio → entero. Los precios de NI son SIEMPRE enteros en pesos (sin
 // centavos). Google CSV puede mandar "149500", "149.500", "149,500", "$149.500",
@@ -6482,6 +6482,43 @@ export default {
           await env.DB.batch(stmts.slice(j, j + CHUNK));
         }
         return json({ ok: true, inserted, skipped, total_rows: rows.length });
+      }
+
+      // POST /admin/pedidos → crea un pedido (1+ carteles que comparten número).
+      // numero = max+1 (server-side); fecha = hoy si no viene; estado_pedido fijo
+      // 'En produccion'; pagado/restante a nivel pedido (restante = total − pagado)
+      // replicados en cada fila. origen='crm' (lo distingue del backfill del Excel).
+      if (request.method === 'POST' && path === '/admin/pedidos') {
+        await ensurePedidosSchema(env);
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const carteles = Array.isArray(body.carteles) ? body.carteles.filter(c => c && String(c.cartel || '').trim()) : [];
+        if (!carteles.length) return json({ error: 'falta al menos un cartel con nombre' }, 400);
+        const now = new Date().toISOString();
+        const fecha = (body.fecha && /^\d{4}-\d{2}-\d{2}$/.test(body.fecha)) ? body.fecha : now.slice(0, 10);
+        const mx = await env.DB.prepare('SELECT MAX(numero) AS m FROM pedidos').first();
+        const numero = (mx && mx.m ? Math.floor(Number(mx.m)) : 0) + 1;
+        const num = (v) => (v == null || v === '') ? null : (isNaN(Number(v)) ? null : Number(v));
+        const total = carteles.reduce((s, c) => s + (num(c.precio) || 0) + (num(c.precio_dimmer) || 0), 0);
+        const pagado = num(body.pagado);
+        const restante = pagado != null ? Math.max(0, total - pagado) : total;
+        const plataforma = body.plataforma === 'IG' ? 'IG' : 'WPP';
+        const estadoPago = String(body.estado_pago || '1er pago');
+        const ad = String(body.ad || '');
+        const telefono = String(body.telefono || '').replace(/\D/g, '');
+        const stmts = carteles.map(c => env.DB.prepare(
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, sheet_row, origen, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, NULL, 'crm', ?, ?)`
+        ).bind(
+          numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
+          num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
+          num(c.cantidad) || 1, num(c.precio), String(c.dimer || 'NO').trim(), num(c.precio_dimmer),
+          String(c.envio || '').trim(), String(c.aclaracion || '').trim(),
+          plataforma, estadoPago, pagado, restante, ad, telefono, now, now
+        ));
+        await env.DB.batch(stmts);
+        const rs = await env.DB.prepare('SELECT * FROM pedidos WHERE numero = ? AND origen = ? ORDER BY id').bind(numero, 'crm').all();
+        return json({ ok: true, numero, pedidos: rs.results || [] });
       }
 
       // ============================================================
