@@ -6102,7 +6102,10 @@ function formatPhoneDisplay(phone) {
 // relevantes a cursos; los demás roles ven todas. IDs estables:
 //   23 Abandonado IA · Curso · 19 Cliente potencial · 17 Importante
 //   13 Pago completo curso · 5 interesado curso
-const CURSOS_LABEL_IDS = [23, 19, 17, 13, 5];
+// Etiquetas que ve Abril (usuario Cursos) al etiquetar/filtrar. El resto las ve solo el admin.
+// 5=interesado curso, 13=Pago completo curso, 26=Alumno, 23=Abandonado IA·Curso,
+// 25=Registro evento junio, 27=form 9 de junio, 17=Importante, 18=Seguimiento.
+const CURSOS_LABEL_IDS = [5, 13, 26, 23, 25, 27, 17, 18];
 function visibleLabels() {
   const all = chatState.labels || [];
   return isCursosOnly() ? all.filter(l => CURSOS_LABEL_IDS.includes(l.id)) : all;
@@ -8691,6 +8694,7 @@ function bindChatConversation() {
     _postProcessBubbles(msgEl, renderChatBubbles._reactionsByParent || new Map());
     bindMessageContextMenus();
     bindMessageHoverActions();
+    bindMediaPreviewClicks(); // sin esto, las imágenes no abrían el lightbox al ABRIR un chat (solo tras un update incremental)
   }
   // Back arrow del header (solo se ve en mobile via CSS, pero igual lo bindeamos
   // siempre para no tener que distinguir).
