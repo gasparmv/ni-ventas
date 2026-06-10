@@ -137,6 +137,30 @@ function parseCsv(csv) {
   if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
   return rows;
 }
+
+// ===== Pedidos: migración del Excel de Ventas (hoja 2026) a D1 =====
+// D1 pasa a ser la fuente de verdad; el Excel queda como espejo (fase posterior).
+async function ensurePedidosSchema(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, fecha TEXT, cartel TEXT, colores TEXT, alto REAL, ancho REAL, cm_neon REAL, base TEXT, cantidad REAL, precio REAL, dimer TEXT, precio_dimmer REAL, envio TEXT, aclaracion TEXT, productor TEXT, plataforma TEXT, estado_pago TEXT, pagado REAL, restante REAL, estado_pedido TEXT, ad TEXT, sheet_row INTEGER, origen TEXT NOT NULL DEFAULT 'backfill', created_at TEXT, updated_at TEXT)`).run();
+}
+// Número formato AR ("$262.000", "1.130.000", "120", "-") → number|null.
+// El "." es separador de miles; la "," es decimal.
+function pedidoNum(s) {
+  if (s == null) return null;
+  const str = String(s).trim();
+  if (!str || str === '-') return null;
+  const cleaned = str.replace(/[^\d,.-]/g, '').replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(cleaned);
+  return isNaN(n) ? null : n;
+}
+// Fecha "DD/M/YYYY" (o "DD/M/YY") → ISO "YYYY-MM-DD"; null si no parsea.
+function pedidoFecha(s) {
+  if (!s) return null;
+  const m = String(s).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (!m) return null;
+  let y = m[3]; if (y.length === 2) y = '20' + y;
+  return `${y}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
+}
 // Convierte "13.832k", "$175.000", "954.251", "(5.097k)", "63%", "-" → number.
 // Sheet usa . como separador de miles (formato AR) y k como sufijo de miles.
 function parseAmt(s) {
@@ -6404,6 +6428,56 @@ export default {
         }
         if (stmts.length) await env.DB.batch(stmts);
         return noContent();
+      }
+
+      // ============================================================
+      // Pedidos (migración del Excel de Ventas a D1 — fuente de verdad)
+      // ============================================================
+
+      // GET /admin/pedidos → todas las filas de la tabla pedidos.
+      if (request.method === 'GET' && path === '/admin/pedidos') {
+        await ensurePedidosSchema(env);
+        const rs = await env.DB.prepare('SELECT * FROM pedidos ORDER BY fecha DESC, numero DESC, id DESC').all();
+        return json({ pedidos: rs.results || [] });
+      }
+
+      // POST /admin/pedidos/backfill → importa (idempotente) los pedidos del Excel
+      // de Ventas hoja "2026" a D1. Borra solo lo previamente importado (origen=
+      // 'backfill') y reinserta; preserva los creados en el CRM (origen='crm').
+      if (request.method === 'POST' && path === '/admin/pedidos/backfill') {
+        await ensurePedidosSchema(env);
+        const VENTAS_SID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
+        const u = `https://docs.google.com/spreadsheets/d/${VENTAS_SID}/gviz/tq?tqx=out:csv&sheet=2026`;
+        const r = await fetch(u);
+        if (!r.ok) return json({ error: 'no se pudo leer el Excel de Ventas: HTTP ' + r.status }, 502);
+        const rows = parseCsv(await r.text());
+        if (rows.length < 2) return json({ error: 'el Excel de Ventas vino vacío' }, 502);
+        const now = new Date().toISOString();
+        let skipped = 0;
+        const stmts = [env.DB.prepare("DELETE FROM pedidos WHERE origen = 'backfill'")];
+        for (let i = 1; i < rows.length; i++) {
+          const c = rows[i];
+          if (!c || !String(c[2] || '').trim()) { skipped++; continue; }  // necesita cartel
+          const fecha = pedidoFecha(c[0]);
+          if (!fecha) { skipped++; continue; }                            // necesita fecha válida
+          stmts.push(env.DB.prepare(
+            `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, sheet_row, origen, created_at, updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'backfill', ?, ?)`
+          ).bind(
+            pedidoNum(c[1]), fecha, String(c[2] || '').trim(), String(c[3] || '').trim(),
+            pedidoNum(c[4]), pedidoNum(c[5]), pedidoNum(c[6]), String(c[7] || '').trim(),
+            pedidoNum(c[8]) || 1, pedidoNum(c[9]), String(c[10] || '').trim(), pedidoNum(c[11]),
+            String(c[12] || '').trim(), String(c[13] || '').trim(), String(c[14] || '').trim(), String(c[15] || '').trim(),
+            String(c[16] || '').trim(), pedidoNum(c[17]), pedidoNum(c[18]), String(c[19] || '').trim(),
+            String(c[20] || '').trim(), i + 1, now, now
+          ));
+        }
+        const inserted = stmts.length - 1;
+        const CHUNK = 50;
+        for (let j = 0; j < stmts.length; j += CHUNK) {
+          await env.DB.batch(stmts.slice(j, j + CHUNK));
+        }
+        return json({ ok: true, inserted, skipped, total_rows: rows.length });
       }
 
       // ============================================================
