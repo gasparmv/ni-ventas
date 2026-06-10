@@ -9517,7 +9517,7 @@ function initPollWorker() {
       };
       // m.ts (timestamp del msg detectado por el WW) es la clave de dedupe
       // que va a coincidir con la del main polling si ambos lo capturan.
-      notifyNewMessage(contact, m.ts);
+      notifyNewMessage(contact, m.ts, m.body);
     };
     _pollWorker.postMessage({
       type: 'init',
@@ -9579,7 +9579,7 @@ function playChatNotificationSound() {
 const _notifiedKeys = new Set();
 const _NOTIF_KEYS_CAP = 500; // LRU manual: cuando supera, dropeamos los más viejos
 
-function notifyNewMessage(contact, ts) {
+function notifyNewMessage(contact, ts, bodyOverride) {
   const phone = contact?.phone || '';
   // Si no nos pasaron ts, usamos el del contact (lastInboundTs / lastTs).
   const tsKey = ts || contact?.lastInboundTs || contact?.lastTs || '';
@@ -9603,7 +9603,10 @@ function notifyNewMessage(contact, ts) {
   if (document.visibilityState !== 'visible' && 'Notification' in window && Notification.permission === 'granted') {
     try {
       const name = contact?.name || formatPhoneDisplay(contact?.phone || '') || 'Nuevo mensaje';
-      const body = (contact?.lastMsg || '').slice(0, 120) || 'Nuevo mensaje de WhatsApp';
+      // bodyOverride = texto del mensaje ENTRANTE que disparó la notif (lo trae el
+      // poll-worker). Sin esto usábamos contact.lastMsg, que suele ser TU último
+      // saliente (el cliente responde → notif mostraba tu propio texto, no el suyo).
+      const body = ((bodyOverride || contact?.lastMsg || '').slice(0, 120)) || 'Nuevo mensaje de WhatsApp';
       const n = new Notification(name, {
         body,
         icon: 'assets/logo.svg',
