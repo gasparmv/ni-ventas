@@ -3416,7 +3416,9 @@ async function pmTraceAd() {
     const j = await r.json();
     const a = j.attribution;
     if (!a) return;
-    const txt = a.ad_title || a.campaign_name || a.headline || a.source_title || a.body || 'vino de un ad';
+    const plat = ((a.source_url||'').includes('instagram') || (a.media_type||'').toLowerCase().includes('instagram')) ? 'IG ad' : 'FB ad';
+    const det = a.headline || (a.body ? a.body.slice(0,60) : '') || a.source_id || '';
+    const txt = det ? `${plat}: ${det}` : plat;
     adEl.value = txt; m.ad = txt;
     adEl.style.borderColor = '#25D366';
     setTimeout(() => { adEl.style.borderColor = 'var(--border)'; }, 1600);
