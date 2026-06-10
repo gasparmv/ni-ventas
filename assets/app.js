@@ -5129,18 +5129,30 @@ function tplParamCount(t) {
   const m = tplBodyText(t).match(/\{\{\s*\d+\s*\}\}/g);
   return m ? m.length : 0;
 }
-// Si el body es el marcador "[plantilla: NOMBRE]", devuelve el TEXTO REAL de esa
-// plantilla (con {{1}} → primer nombre del contacto). Si no la encuentra, un
-// rótulo limpio. Si no es un marcador, devuelve el body tal cual.
+// Si el body es el marcador "[plantilla: NOMBRE] p1, p2, …", devuelve el TEXTO
+// REAL de esa plantilla con cada {{n}} reemplazada por el parámetro n-ésimo que
+// se guardó al enviarla (el worker los une con ", "). Si NO se guardaron params
+// (plantillas de 1 variable = nombre), cae al primer nombre del contacto. Si no
+// encuentra la plantilla, un rótulo limpio. Si no es un marcador, el body tal cual.
 function tplMarkerToText(body, phone) {
   const s = String(body || '');
-  const mk = s.match(/^\[plantilla:\s*([a-z0-9_]+)\]/i);
+  const mk = s.match(/^\[plantilla:\s*([a-z0-9_]+)\]\s*([\s\S]*)$/i);
   if (!mk) return s;
   const tpl = (chatState.templates || []).find(t => t.name === mk[1]);
   if (!tpl) return '📋 Plantilla enviada';
+  const text = tplBodyText(tpl);
+  const stored = (mk[2] || '').trim() ? mk[2].trim().split(', ') : [];
+  if (stored.length) {
+    // Reemplazo posicional: {{1}}→stored[0], {{2}}→stored[1], … (los valores reales enviados).
+    return text.replace(/\{\{\s*(\d+)\s*\}\}/g, (m, n) => {
+      const v = stored[parseInt(n, 10) - 1];
+      return (v === undefined) ? m : v;
+    });
+  }
+  // Sin params guardados (plantilla de 1 var = nombre): usar el primer nombre del contacto.
   const c = (chatState.contacts || []).find(x => x.phone === phone);
   const fn = ((c && c.name) || '').trim().split(/\s+/)[0] || 'amigo/a';
-  return tplBodyText(tpl).replace(/\{\{\s*\d+\s*\}\}/g, fn);
+  return text.replace(/\{\{\s*\d+\s*\}\}/g, fn);
 }
 // Vertical de una plantilla según su nombre (cursos_* / sorteo / clase → cursos).
 function templateVertical(name) {
