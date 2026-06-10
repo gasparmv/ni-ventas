@@ -1317,6 +1317,44 @@ function saveCache() {
   } catch (_) {}
 }
 
+// Carga los pedidos desde D1 (la nueva fuente de verdad, ex-Excel de Ventas) y
+// los mapea a la MISMA forma que devolvía parseVentas, así el resto del front
+// (tabla, dashboard, matching de presupuestos) no cambia.
+async function fetchPedidosFromD1() {
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos', { headers: authHeaders() });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j.pedidos || []).map(mapPedidoFromD1);
+  } catch (e) { return null; }
+}
+function mapPedidoFromD1(row) {
+  return {
+    idx: row.id,
+    fecha: parseDate(row.fecha),
+    numero: row.numero || '',
+    cartel: row.cartel || '',
+    colores: row.colores || '',
+    alto: row.alto || 0,
+    ancho: row.ancho || 0,
+    cmNeon: row.cm_neon || 0,
+    base: row.base || '',
+    cantidad: row.cantidad || 1,
+    precio: row.precio || 0,
+    dimmer: row.dimer || 'NO',
+    precioDimmer: row.precio_dimmer || 0,
+    envio: row.envio || '',
+    aclaracion: row.aclaracion || '',
+    productor: row.productor || '',
+    plataforma: row.plataforma || '',
+    estadoPago: row.estado_pago || '',
+    pagado: row.pagado || 0,
+    restante: row.restante || 0,
+    estadoPedido: row.estado_pedido || '',
+    canalAd: row.ad || ''
+  };
+}
+
 async function loadAll(opts) {
   const silent = !!(opts && opts.silent);
   // Stale-while-revalidate: si tenemos caché y no se pidió refresh forzado,
@@ -1342,7 +1380,7 @@ async function loadAll(opts) {
     const cotizadorN = CONFIG.cotizadorSheets.length;
     const histN = (CONFIG.cotizadorHistoricalSheets || []).length;
     const all = await Promise.all([
-      fetchSheet(CONFIG.ventasSheetId, CONFIG.ventasSheetName),
+      fetchPedidosFromD1(),
       ...CONFIG.cotizadorSheets.map(async sheet => {
         let rows = await fetchCotizadorViaAppsScript(sheet);
         if (!rows) rows = await fetchSheet(CONFIG.cotizadorSheetId, sheet);
@@ -1353,11 +1391,11 @@ async function loadAll(opts) {
         return { historical: true, name, month, rows };
       })
     ]);
-    const ventasRows = all[0];
+    const pedidosD1 = all[0];
     const cotizadorResults = all.slice(1, 1 + cotizadorN);
     const historicalResults = all.slice(1 + cotizadorN, 1 + cotizadorN + histN);
-    if (!ventasRows) throw new Error('No se pudo cargar el Sheet "Ventas/2026". Verificá que esté público.');
-    STATE.pedidos = parseVentas(ventasRows);
+    if (!pedidosD1) throw new Error('No se pudieron cargar los pedidos del CRM (worker /admin/pedidos).');
+    STATE.pedidos = pedidosD1;
     const presupuestosAll = [];
     for (const { sheet, rows } of cotizadorResults) {
       if (rows) presupuestosAll.push(...parseCotizador(rows, sheet));
