@@ -486,7 +486,7 @@ async function waSend(env, payload) {
         await markUnreachable(env, to, reason, errMsg, templateName).catch(() => {});
       }
     } catch (_) { /* no romper el flow del error original */ }
-    return { ok: false, status: r.status, error: data?.error?.message || 'wa send failed', raw: data, provider: wa.provider };
+    return { ok: false, status: r.status, code: data?.error?.code ?? null, error: data?.error?.message || 'wa send failed', raw: data, provider: wa.provider };
   }
   const id = data?.messages?.[0]?.id || null;
   return { ok: true, id, raw: data, provider: wa.provider };
@@ -508,6 +508,53 @@ function classifyUnreachableReason(code, subcode, message) {
   if (m.includes('undeliverable')) return 'undeliverable';
   if (m.includes('healthy ecosystem')) return 'ecosystem';
   return null; // null = no marcar (error transitorio o no relacionado al destinatario)
+}
+
+// ===== Clasificación de fallos de envío + reintento con tope (follow-ups) =====
+// Usado por TODOS los crons de follow-up para tratar igual los errores: los
+// transitorios (glitch de Meta, rate-limit) se reintentan hasta SEND_FAIL_CAP
+// veces; los permanentes (ventana cerrada, número muerto, cuenta bloqueada) se
+// dan por perdidos enseguida. El contador vive en kv_cache (sin schema nuevo).
+const SEND_FAIL_CAP = 3;
+
+// ¿El error conviene reintentarlo? Permanentes → false. Resto (incluido el
+// genérico "wa send failed" y el #131000 "Something went wrong") → true.
+function isTransientSendError(res) {
+  const code = res && res.code;
+  const msg = String((res && res.error) || '').toLowerCase();
+  if (code === 131047 || code === 131051) return false; // fuera de ventana 24h
+  if (code === 131026 || code === 131049) return false; // destinatario no alcanzable
+  if (code === 131042) return false;                     // cuenta bloqueada por pago
+  if (/re-?engag|outside|more than 24|undeliverable|ecosystem|eligibilit|payment/.test(msg)) return false;
+  return true;
+}
+
+// Motivo legible del fallo, para el aviso al admin (en vez del genérico fijo).
+function describeSendFailure(res) {
+  const code = res && res.code;
+  const msg = String((res && res.error) || '');
+  if (code === 131047 || code === 131051 || /re-?engag|outside|more than 24|window/i.test(msg)) return 'ventana de 24h cerrada (el cliente no escribió hace +24h)';
+  if (code === 131042 || /eligibilit|payment/i.test(msg)) return 'cuenta bloqueada por pago — revisá saldo en 360dialog';
+  if (code === 131026 || code === 131049 || /undeliverable|ecosystem/i.test(msg)) return 'número no alcanzable (sin WhatsApp / bloqueado)';
+  if (code === 131000 || /something went wrong/i.test(msg)) return 'error transitorio de Meta (#131000)';
+  if (code === 131048 || code === 131056 || /rate/i.test(msg)) return 'límite de envío momentáneo de Meta';
+  return (msg || 'error desconocido') + (code ? ' (#' + code + ')' : '');
+}
+
+// Contador de fallos consecutivos por (kind:phone) en kv_cache. bump devuelve el
+// nuevo total; clear lo borra (llamar al enviar OK). Tope = SEND_FAIL_CAP.
+async function bumpSendFail(env, key) {
+  let n = 0;
+  try {
+    const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k = ?').bind('sfail:' + key).first();
+    n = row ? (parseInt(row.v, 10) || 0) : 0;
+  } catch (_) {}
+  n += 1;
+  try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at').bind('sfail:' + key, String(n), new Date().toISOString()).run(); } catch (_) {}
+  return n;
+}
+async function clearSendFail(env, key) {
+  try { await env.DB.prepare('DELETE FROM kv_cache WHERE k = ?').bind('sfail:' + key).run(); } catch (_) {}
 }
 
 async function markUnreachable(env, phone, reason, errorMsg, templateName) {
@@ -841,6 +888,7 @@ async function processCursosFollowup(env) {
         previewBody = `Buenass! Quedó algo pendiente de las clases del 6 y 7 de mayo 🎁. Queres que te mande la info?`;
       }
       if (tpl?.ok) {
+        await clearSendFail(env, 'cursosfu:' + phone);
         const wamid = tpl.id || '';
         if (wamid) {
           try {
@@ -853,8 +901,15 @@ async function processCursosFollowup(env) {
           } catch (_) {}
         }
       } else {
-        // Falló el envío → liberar el follow-up para reintentar en otro ciclo.
-        try { await env.DB.prepare("UPDATE wa_cursos_campaign SET followup_at = NULL WHERE phone = ?").bind(phone).run(); } catch (_) {}
+        // Falló. Transitorio y bajo el tope → liberar para reintentar; permanente
+        // o tope alcanzado → dejar marcado (no reintenta más) + registrar el motivo.
+        const n = await bumpSendFail(env, 'cursosfu:' + phone);
+        if (isTransientSendError(tpl) && n < SEND_FAIL_CAP) {
+          try { await env.DB.prepare("UPDATE wa_cursos_campaign SET followup_at = NULL WHERE phone = ?").bind(phone).run(); } catch (_) {}
+        } else {
+          await clearSendFail(env, 'cursosfu:' + phone);
+          await logWaEvent(env, { to: phone, kind: 'cursos-followup-giveup', ref: 'cursosfu:' + phone, ok: false, error: describeSendFailure(tpl) });
+        }
       }
     }
   } catch (e) { /* best-effort */ }
@@ -1092,10 +1147,19 @@ async function processMinicursoFollowup(env) {
       const body = 'buenas buenas! Acá Abril de Neon infinito. Pudiste ver el mensaje?';
       const res = await waSendText(env, phone, body);
       if (!res?.ok) {
-        // Falló (transitorio, o fuera de ventana 24h) → liberar para reintentar.
-        try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'minicurso_followup' AND status = 'queued'").bind(phone).run(); } catch (_) {}
+        // Transitorio y bajo el tope → liberar para reintentar; permanente
+        // (ventana cerrada, etc.) o tope alcanzado → marcar 'failed' (no reintenta más).
+        const n = await bumpSendFail(env, 'minifu:' + phone);
+        if (isTransientSendError(res) && n < SEND_FAIL_CAP) {
+          try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'minicurso_followup' AND status = 'queued'").bind(phone).run(); } catch (_) {}
+        } else {
+          await clearSendFail(env, 'minifu:' + phone);
+          try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'failed', sent_at = ? WHERE phone = ? AND kind = 'minicurso_followup'").bind(now, phone).run(); } catch (_) {}
+          await logWaEvent(env, { to: phone, kind: 'minicurso-followup-giveup', ref: 'minifu:' + phone, ok: false, error: describeSendFailure(res) });
+        }
         continue;
       }
+      await clearSendFail(env, 'minifu:' + phone);
       try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'minicurso_followup'").bind(now, phone).run(); } catch (_) {}
       const wamid = res.id || '';
       if (wamid) {
@@ -7160,11 +7224,19 @@ async function processPresupuestoFollowups(env) {
     if (r.ok) {
       sent++;
       await insertMarker('sent', r.id || '', null);
+      await clearSendFail(env, 'ppfu:' + p.phone);
     } else {
-      // Marker failed → el próximo cron NO lo va a re-procesar. Una sola
-      // notificación al admin por presupuesto, no spam cada 5 min.
-      await insertMarker('failed', 'fu-fail:' + p.phone + ':' + Date.now(), null);
-      failures.push({ phone: p.phone, name: p.sender_name || '', error: r.error || 'unknown' });
+      // Transitorio y bajo el tope → NO marcamos (reintenta el próximo cron, sin
+      // avisar para no spamear). Permanente o tope alcanzado → marcar failed +
+      // avisar con el motivo REAL (no el genérico "fuera de ventana").
+      const n = await bumpSendFail(env, 'ppfu:' + p.phone);
+      if (isTransientSendError(r) && n < SEND_FAIL_CAP) {
+        // dejar pendiente para que el próximo cron lo reintente
+      } else {
+        await insertMarker('failed', 'fu-fail:' + p.phone + ':' + Date.now(), null);
+        await clearSendFail(env, 'ppfu:' + p.phone);
+        failures.push({ phone: p.phone, name: p.sender_name || '', error: describeSendFailure(r) });
+      }
     }
     await logWaEvent(env, { to: p.phone, kind: 'pp-followup-' + variantKind, ref: 'pp-fu:' + p.phone, ok: r.ok, messageId: r.id, error: r.error });
     await new Promise(rs => setTimeout(rs, 600)); // delay anti rate-limit
@@ -7174,7 +7246,7 @@ async function processPresupuestoFollowups(env) {
   if (failures.length && env.ADMIN_NOTIFY_PHONE) {
     const lines = failures.slice(0, 10).map(f => `• ${f.name || f.phone} (${f.phone}): ${f.error}`).join('\n');
     const more = failures.length > 10 ? `\n…y ${failures.length - 10} más` : '';
-    const summary = `⚠ Follow-ups de presupuesto fallidos (${failures.length}):\n${lines}${more}\n\nProbablemente fuera de la ventana de 24h del cliente.`;
+    const summary = `⚠ Follow-ups de presupuesto que no salieron (${failures.length}):\n${lines}${more}\n\n(El motivo real va al lado de cada uno. Los transitorios se reintentan solos; estos ya agotaron los reintentos o son permanentes.)`;
     try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
   }
 
