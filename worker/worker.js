@@ -663,7 +663,15 @@ const CURSOS_EVENTO_MSG = 'aah buenísimo! Te escribía para invitarte a un nuev
 // lanzamiento de junio 2026 (mismo criterio IA que mayo).
 const JUNIO_VIVO_MSG = 'Perfectoo, acá vamos a transmitir en vivo mañana 19 hs. TODO sobre el modelo de negocio de los neones LED… y también abrimos inscripciones para la Comunidad Al Infinito 🙌🏼\nhttps://youtube.com/live/UbMdCzZhwxY?feature=share';
 
-// Clasifica con IA la respuesta del cliente al template de cursos: positiva o no.
+// Clasifica con IA la respuesta del cliente al broadcast de cursos/lanzamiento.
+// El contacto YA mostró interés (se anotó al form / participó del vivo), así que
+// somos GENEROSOS: el costo de NO mandarle el link a alguien interesado es alto y
+// el de mandárselo a alguien tibio es bajo (es solo un link de YouTube). Ante la
+// duda → positiva. Solo 'no_positiva' si es rechazo claro, hostil, spam, número
+// equivocado o auto-respuesta de otro negocio. Antes esto era ESTRICTO (todo lo
+// ambiguo caía en no_positiva) y se comía respuestas cortas afirmativas tipo
+// "Si por favor" → no recibían el link. Si la IA no está → no_positiva (Abril lo
+// maneja a mano viendo el chat revelado).
 async function analyzeResponseSentiment(env, texto) {
   const t = String(texto || '').trim();
   if (!t || !env.ANTHROPIC_API_KEY) return 'no_positiva';
@@ -674,13 +682,14 @@ async function analyzeResponseSentiment(env, texto) {
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
         max_tokens: 8,
-        system: 'A un contacto se le preguntó si participó de unas clases en vivo y si quiere recibir info/regalo de un curso de carteles de neón. Clasificá su RESPUESTA. Respondé SOLO una palabra: POSITIVA (acepta, le interesa, dice que sí, pide la info, responde con entusiasmo) o NEGATIVA (rechaza, no le interesa, pide que no le escriban, desconfía, o es ambiguo/irrelevante).',
+        system: 'A un contacto que se anotó a unas clases en vivo de carteles de neón LED se le ofreció el link para ver la próxima clase/vivo ("¿te paso el link?"). Decidí si le mandamos el link automáticamente. El contacto YA mostró interés, así que ANTE LA DUDA mandá (POSITIVA). Respondé SOLO una palabra. POSITIVA: si dice que sí de cualquier forma ("si", "dale", "si por favor", "obvio", "bueno", "ok"), pide el link, agradece con interés, hace una pregunta, o responde algo neutral o ambiguo. NEGATIVA: SOLO si rechaza claramente (dice que no, "no hace falta", "ya lo tengo", "ya lo vi", "no me interesa", "no me escriban"), insulta, es spam, número equivocado, o es una auto-respuesta automática de otro negocio.',
         messages: [{ role: 'user', content: t.slice(0, 500) }]
       })
     });
     const j = await r.json();
     if (!r.ok) return 'no_positiva';
-    return (j.content?.[0]?.text || '').toUpperCase().includes('POSITIVA') ? 'positiva' : 'no_positiva';
+    // Generoso: positiva por defecto, no_positiva SOLO si la IA dice NEGATIVA.
+    return (j.content?.[0]?.text || '').toUpperCase().includes('NEGATIVA') ? 'no_positiva' : 'positiva';
   } catch (e) { return 'no_positiva'; }
 }
 
@@ -1140,7 +1149,7 @@ async function processAutoReplyQueue(env) {
     // respuesta positiva) y cursos_evento. Todos mensaje libre con demora; el
     // evento además REVELA el chat a Abril.
     const rs = await env.DB.prepare(
-      "SELECT phone, kind, sender_name FROM wa_autoreply_log WHERE kind IN ('minicurso','minicurso_gift','cursos_evento') AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 25"
+      "SELECT phone, kind, sender_name FROM wa_autoreply_log WHERE kind IN ('minicurso','minicurso_gift','cursos_evento','junio_evento') AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 25"
     ).bind(nowIso, floorIso).all();
     for (const row of (rs.results || [])) {
       const phone = row.phone;
