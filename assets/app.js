@@ -5205,10 +5205,8 @@ function showNewChatModal(prefillPhone) {
   document.getElementById('new-chat-modal')?.remove();
   loadChatTemplates(); // idempotente
   const verts = qrVerticalsForUser(); // null = admin ve todas
-  const tplOptions = (chatState.templates || [])
-    .filter(t => !verts || verts.includes(templateVertical(t.name)))
-    .map(t => `<option value="${escapeHtml(t.name)}" data-lang="${escapeHtml(t.language || 'es_AR')}" data-params="${tplParamCount(t)}">${escapeHtml(t.name)}</option>`)
-    .join('');
+  const tpls = (chatState.templates || []).filter(t => !verts || verts.includes(templateVertical(t.name)));
+  const tplRows = tpls.map(t => _renderTplItem(t)).join('') || '<div class="nc-empty">No hay plantillas aprobadas para tu vertical.</div>';
   const bg = document.createElement('div');
   bg.id = 'new-chat-modal';
   bg.className = 'modal-bg';
@@ -5222,18 +5220,17 @@ function showNewChatModal(prefillPhone) {
           <input type="tel" id="nc-phone" class="nc-input" placeholder="11 2345-6789" value="${escapeHtml(prefillPhone || '')}" autocomplete="off">
           <span class="nc-hint" id="nc-hint"></span>
         </label>
-        <label class="nc-field">
+        <div class="nc-field">
           <span class="nc-label">Plantilla de inicio</span>
-          <select id="nc-tpl" class="nc-input">
-            <option value="">Elegí una plantilla…</option>
-            ${tplOptions}
-          </select>
-        </label>
+          <div class="nc-tpl-list" id="nc-tpl-list">
+            ${tplRows}
+            <div class="qr-item" data-tpl-create="1"><div class="qr-item-text"><span class="qr-shortcut" style="color:var(--neon-cyan,#8FD4DE)">📋 Crear plantilla nueva (Meta)</span></div></div>
+          </div>
+        </div>
         <label class="nc-field" id="nc-name-field" style="display:none">
           <span class="nc-label">Nombre (reemplaza {{1}} en la plantilla)</span>
           <input type="text" id="nc-name" class="nc-input" placeholder="amigo/a" autocomplete="off">
         </label>
-        <div class="nc-preview" id="nc-preview" style="display:none"></div>
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost modal-cancel" type="button">Cancelar</button>
@@ -5244,19 +5241,18 @@ function showNewChatModal(prefillPhone) {
   requestAnimationFrame(() => bg.classList.add('open'));
 
   const phoneEl = bg.querySelector('#nc-phone');
-  const tplEl = bg.querySelector('#nc-tpl');
+  const listEl = bg.querySelector('#nc-tpl-list');
   const nameField = bg.querySelector('#nc-name-field');
   const nameEl = bg.querySelector('#nc-name');
-  const previewEl = bg.querySelector('#nc-preview');
   const hintEl = bg.querySelector('#nc-hint');
   const sendBtn = bg.querySelector('#nc-send');
+
+  // Plantilla elegida (se setea al clickear un row del listado estilo "/").
+  let selectedName = null, selectedLang = 'es_AR', selectedParams = 0;
 
   const close = () => bg.remove();
   bg.addEventListener('click', (e) => { if (e.target === bg) close(); });
   bg.querySelector('.modal-cancel').onclick = close;
-
-  const selectedTpl = () => (chatState.templates || []).find(t => t.name === tplEl.value);
-  const nParams = () => { const o = tplEl.options[tplEl.selectedIndex]; return o ? (parseInt(o.dataset.params || '0', 10) || 0) : 0; };
 
   function refresh() {
     const norm = normalizeArPhoneFE(phoneEl.value);
@@ -5267,31 +5263,35 @@ function showNewChatModal(prefillPhone) {
       hintEl.innerHTML = `Se enviará a <strong>${escapeHtml(formatPhoneDisplay(norm))}</strong>${exists ? ' · <span class="nc-exists">ya tenés un chat con este número</span>' : ''}`;
       hintEl.className = 'nc-hint ok';
     } else { hintEl.textContent = 'Número inválido — revisá el código de área.'; hintEl.className = 'nc-hint err'; }
-    const tpl = selectedTpl();
-    nameField.style.display = (tpl && nParams() >= 1) ? '' : 'none';
-    if (tpl) {
-      const fn = (nameEl.value || '').trim() || 'amigo/a';
-      const txt = tplBodyText(tpl).replace(/\{\{\s*\d+\s*\}\}/g, fn);
-      previewEl.textContent = txt;
-      previewEl.style.display = txt ? 'block' : 'none';
-    } else { previewEl.style.display = 'none'; }
-    sendBtn.disabled = !(phoneOk && tpl);
+    nameField.style.display = (selectedName && selectedParams >= 1) ? '' : 'none';
+    sendBtn.disabled = !(phoneOk && selectedName);
   }
 
+  // Rows del listado: elegir una plantilla (resalta) o crear una nueva en Meta.
+  listEl.querySelectorAll('.qr-item').forEach(row => {
+    row.onclick = () => {
+      if (row.dataset.tplCreate === '1') { close(); showCreateTemplateModal(); return; }
+      if (!row.dataset.tplName) return;
+      selectedName = row.dataset.tplName;
+      selectedLang = row.dataset.tplLang || 'es_AR';
+      selectedParams = parseInt(row.dataset.tplParams || '0', 10) || 0;
+      listEl.querySelectorAll('.qr-item').forEach(r => r.classList.remove('nc-selected'));
+      row.classList.add('nc-selected');
+      refresh();
+    };
+  });
+
   phoneEl.addEventListener('input', refresh);
-  tplEl.addEventListener('change', refresh);
   nameEl.addEventListener('input', refresh);
   refresh();
   setTimeout(() => phoneEl.focus(), 30);
 
   sendBtn.onclick = async () => {
     const norm = normalizeArPhoneFE(phoneEl.value);
-    const tpl = selectedTpl();
-    if (!norm || norm.length < 12 || !tpl) return;
-    const lang = (tplEl.options[tplEl.selectedIndex] && tplEl.options[tplEl.selectedIndex].dataset.lang) || tpl.language || 'es_AR';
-    const params = nParams() >= 1 ? [((nameEl.value || '').trim() || 'amigo/a')] : [];
+    if (!norm || norm.length < 12 || !selectedName) return;
+    const params = selectedParams >= 1 ? [((nameEl.value || '').trim() || 'amigo/a')] : [];
     sendBtn.disabled = true; sendBtn.textContent = 'Enviando…';
-    const j = await sendTemplateToChat(norm, tpl.name, lang, params);
+    const j = await sendTemplateToChat(norm, selectedName, selectedLang, params);
     if (j && j.id) {
       toast('✓ Plantilla enviada');
       close();
