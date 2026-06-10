@@ -4881,6 +4881,24 @@ function bindNav() {
   if (privacyBtn) privacyBtn.onclick = () => togglePrivacy();
 }
 function bindCommon() {
+  // Paste de imágenes en el modal "Nuevo brief" cuando está abierto FUERA de la
+  // vista Cotización (ej. sobre el chat). En Cotización lo maneja el paste propio
+  // de ese view. Global + guardado por flag: se bindea una sola vez para toda la app.
+  if (!document._quickModalPasteBound) {
+    document.addEventListener('paste', async (ev) => {
+      if (!STATE.quickModalOpen || STATE.view === 'cotizacion') return;
+      const items = ev.clipboardData?.items || [];
+      const files = [];
+      for (const item of items) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length) { ev.preventDefault(); await addFilesToQuickModal(files); }
+    });
+    document._quickModalPasteBound = true;
+  }
   document.querySelectorAll('[data-action="seg-cliente"]').forEach(b => b.onclick = () => {
     pedidoFilter.search = b.dataset.cliente;
     setView('pedidos');
@@ -11560,8 +11578,18 @@ async function confirmQuickCreate() {
     alert('Si la consulta vino por WhatsApp, el teléfono es obligatorio (al menos 8 dígitos sin contar el código de país).');
     return;
   }
-  // La imagen es OPCIONAL: el brief se puede crear sin capturas y agregarlas
-  // después desde el drawer (o el diseñador sube el render directo).
+  // La FOTO ES OBLIGATORIA: un brief sin imagen de referencia no sirve para que
+  // Emma cotice. Si no hay ninguna, frenamos y marcamos en rojo el dropzone.
+  if (!STATE.quickModalImages.length) {
+    const dz = document.getElementById('quick-modal-dropzone');
+    if (dz) {
+      dz.style.borderColor = '#FF5566';
+      dz.style.color = '#FF5566';
+      setTimeout(() => { dz.style.borderColor = 'var(--border)'; dz.style.color = 'var(--fg-mute)'; }, 1800);
+    }
+    toast('Agregá al menos una foto de referencia (Ctrl+V, arrastrá o tocá la zona de arriba)');
+    return;
+  }
   STATE.quickModalSaving = true;
   const saveBtn = document.getElementById('quick-modal-confirm');
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Creando…'; }
@@ -11629,7 +11657,7 @@ function renderQuickCreateModal() {
         </div>
         <div id="quick-modal-dropzone"
           style="border:2px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-2);text-align:center;color:var(--fg-mute);font-size:11px;cursor:pointer;transition:border-color .15s,background .15s;margin-bottom:var(--s-3)">
-          📋 Pegá (Ctrl+V), arrastrá o tocá acá para sumar capturas <span style="opacity:.6">(opcional)</span>
+          📋 Pegá (Ctrl+V), arrastrá o tocá acá para sumar la foto de referencia <span style="color:#FF5566">* obligatoria</span>
           <input type="file" id="quick-modal-file-input" accept="image/*" multiple style="display:none">
         </div>
 
