@@ -6341,11 +6341,16 @@ export default {
         if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
         const obj = await env.MEDIA.get(key);
         if (!obj) return json({ error: 'not found' }, 404);
+        // wa/ y briefs/ son content-addressed (la key nunca cambia de contenido) →
+        // cache inmutable de 1 año, así no se re-bajan las fotos en cada primera
+        // apertura del día (antes era 24h y se vencía cada noche). promo/ puede
+        // re-subirse con la misma key → cache corto de 24h.
+        const immutableMedia = key.startsWith('wa/') || key.startsWith('briefs/');
         return new Response(obj.body, {
           headers: {
             ...cors(),
             'Content-Type': obj.httpMetadata?.contentType || 'application/octet-stream',
-            'Cache-Control': 'public, max-age=86400'
+            'Cache-Control': immutableMedia ? 'public, max-age=31536000, immutable' : 'public, max-age=86400'
           }
         });
       }
