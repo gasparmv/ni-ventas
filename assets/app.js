@@ -911,7 +911,7 @@ async function loginPrompt(userName) {
     await showAlert('El backend de auth no está configurado. Ver CONFIG.trackerUrl.', { title: 'Error de configuración', variant: 'warn' });
     return false;
   }
-  const pw = prompt('Contraseña de ' + (userName || 'usuario') + ':');
+  const pw = await showPasswordPrompt(userName);
   if (!pw) return false;
   try {
     const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/auth/login', {
@@ -4981,6 +4981,47 @@ function showConfirm(message, opts) {
     bg.addEventListener('click', e => { if (e.target === bg) finish(false); });
     document.addEventListener('keydown', onKey);
     setTimeout(() => bg.querySelector('.modal-confirm')?.focus(), 0);
+  });
+}
+
+// Prompt de contraseña con la estética NEON (reemplaza el prompt() nativo del
+// login). Resuelve con el texto ingresado, o null si se cancela.
+function showPasswordPrompt(userName) {
+  return new Promise(resolve => {
+    const bg = document.createElement('div');
+    bg.className = 'modal-bg';
+    bg.innerHTML = `
+      <div class="modal modal--login">
+        <div class="modal-h"><h3>Iniciar sesión</h3></div>
+        <div class="modal-body">
+          <label class="nc-field">
+            <span class="nc-label">Contraseña de ${escapeHtml(userName || 'usuario')}</span>
+            <input type="password" class="nc-input" autocomplete="current-password" placeholder="••••••••">
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost modal-cancel">Cancelar</button>
+          <button class="btn btn-cyan modal-confirm">Entrar</button>
+        </div>
+      </div>`;
+    document.body.appendChild(bg);
+    requestAnimationFrame(() => bg.classList.add('open'));
+    const input = bg.querySelector('input');
+    const finish = (val) => {
+      bg.classList.remove('open');
+      setTimeout(() => bg.remove(), 150);
+      document.removeEventListener('keydown', onKey);
+      resolve(val);
+    };
+    function onKey(e) {
+      if (e.key === 'Escape') finish(null);
+      else if (e.key === 'Enter') { e.preventDefault(); finish(input.value || null); }
+    }
+    bg.querySelector('.modal-confirm').onclick = () => finish(input.value || null);
+    bg.querySelector('.modal-cancel').onclick = () => finish(null);
+    bg.addEventListener('click', e => { if (e.target === bg) finish(null); });
+    document.addEventListener('keydown', onKey);
+    setTimeout(() => { if (input) input.focus(); }, 50);
   });
 }
 

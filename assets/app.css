@@ -663,7 +663,7 @@ table.t td.cliente { font-weight: 600; }
 }
 .modal-bg.open .modal { transform: translateY(0) scale(1); }
 .modal--warn { border-color: var(--neon-red); box-shadow: 0 20px 60px rgba(0,0,0,.55), var(--glow-red-sm); }
-.modal--success { border-color: var(--neon-cyan); box-shadow: 0 20px 60px rgba(0,0,0,.55), var(--glow-cyan-sm); }
+.modal--success, .modal--login { border-color: var(--neon-cyan); box-shadow: 0 20px 60px rgba(0,0,0,.55), var(--glow-cyan-sm); }
 .modal-h {
   padding: 16px 20px;
   border-bottom: 1px solid var(--border);
@@ -678,7 +678,7 @@ table.t td.cliente { font-weight: 600; }
   color: var(--fg);
 }
 .modal--warn .modal-h h3 { color: var(--neon-red); }
-.modal--success .modal-h h3 { color: var(--neon-cyan); }
+.modal--success .modal-h h3, .modal--login .modal-h h3 { color: var(--neon-cyan); }
 .modal-body {
   padding: 18px 20px;
   font-size: 13px;
