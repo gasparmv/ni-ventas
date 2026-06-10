@@ -3249,6 +3249,9 @@ function bindPedidos() {
   document.querySelectorAll('tr[data-pid]').forEach(el => {
     el.onclick = () => openDrawerPedido(parseInt(el.dataset.pid));
   });
+  const nuevoBtn = document.getElementById('pedido-nuevo');
+  if (nuevoBtn) nuevoBtn.onclick = openCargarPedidoModal;
+  bindPedidoModal();
 }
 function renderPedidos() {
   const estadosPago = uniq(STATE.pedidos.map(p=>p.estadoPago).filter(Boolean));
@@ -3258,7 +3261,7 @@ function renderPedidos() {
   return `
     <div class="page-head">
       <div><div class="eyebrow">${STATE.pedidos.length} totales</div><h1>Pedidos</h1></div>
-      <div class="actions"><button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
+      <div class="actions">${canCotizar() ? '<button class="btn btn-cyan" id="pedido-nuevo">＋ Cargar pedido</button>' : ''}<button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
     </div>
     <div class="table-wrap">
       <div class="table-toolbar">
@@ -3271,6 +3274,7 @@ function renderPedidos() {
       </div>
       <div id="table-pedidos"></div>
     </div>
+    ${renderPedidoModal()}
   `;
 }
 function renderTablePedidos() {
@@ -3347,6 +3351,209 @@ function pillEstadoPedido(s) {
   if (x.includes('produc')) return `<span class="pill amber">${escapeHtml(s)}</span>`;
   if (x.includes('list')) return `<span class="pill green">${escapeHtml(s)}</span>`;
   return `<span class="pill muted">${escapeHtml(s||'—')}</span>`;
+}
+
+// ===================== Modal "Cargar pedido" (fase 2) =====================
+// Carga un pedido (1+ carteles) directo a D1 via POST /admin/pedidos. Mismo
+// estilo/UX que "Crear brief". Numero sugerido+editable, fecha/estado automaticos,
+// precio de dimmer auto por tipo (editable), restante calculado, y trazabilidad
+// del ad por telefono (WPP).
+const DIMMER_PRECIOS = { NO: '', SLIM: 18700, CONTROL: 25000, APP: 38000 };
+function nuevoCartelPedido() {
+  return { cartel:'', colores:'', alto:'', ancho:'', cmNeon:'', base:'TRANS', cantidad:1, precio:'', dimer:'NO', precioDimmer:'', envio:'', aclaracion:'' };
+}
+function suggestProximoNumero() {
+  const ps = (STATE.pedidos || []).filter(p => p.numero);
+  if (!ps.length) return '';
+  const sorted = ps.slice().sort((a,b) => (b.fecha - a.fecha) || (b.idx - a.idx));
+  const n = parseInt(sorted[0].numero, 10);
+  return isNaN(n) ? '' : n + 1;
+}
+function pedidoModalTotal() {
+  return ((STATE.pedidoModal && STATE.pedidoModal.carteles) || []).reduce((s,c) => s + (Number(c.precio)||0) + (Number(c.precioDimmer)||0), 0);
+}
+function openCargarPedidoModal() {
+  if (!canCotizar()) return;
+  STATE.pedidoModal = { numero: suggestProximoNumero(), plataforma:'WPP', telefono:'', estadoPago:'1er pago', pagado:'', ad:'', carteles:[nuevoCartelPedido()] };
+  STATE.pedidoModalOpen = true;
+  STATE.pedidoModalSaving = false;
+  render();
+  setTimeout(() => { const el = document.getElementById('pm-cartel-0'); if (el) el.focus(); }, 60);
+}
+function cancelCargarPedido() { STATE.pedidoModalOpen = false; render(); }
+// Vuelca el DOM a STATE para que los valores sobrevivan a un re-render (agregar/quitar cartel, cambiar plataforma).
+function readPedidoModalDOM() {
+  const m = STATE.pedidoModal; if (!m) return;
+  const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
+  ['numero','telefono','pagado','ad'].forEach(f => { const x = v('pm-'+f); if (x !== undefined) m[f] = x; });
+  const ep = v('pm-estadopago'); if (ep !== undefined) m.estadoPago = ep;
+  (m.carteles||[]).forEach((c,i) => {
+    ['cartel','colores','alto','ancho','cmNeon','cantidad','precio','precioDimmer','envio','aclaracion','base','dimer'].forEach(f => {
+      const x = v(`pm-${f}-${i}`); if (x !== undefined) c[f] = x;
+    });
+  });
+}
+function pmAddCartel() { readPedidoModalDOM(); STATE.pedidoModal.carteles.push(nuevoCartelPedido()); render(); }
+function pmRemoveCartel(i) { readPedidoModalDOM(); STATE.pedidoModal.carteles.splice(i,1); if (!STATE.pedidoModal.carteles.length) STATE.pedidoModal.carteles.push(nuevoCartelPedido()); render(); }
+// Recalcula total + restante inline (sin re-render → no pierde foco).
+function pmRecalc() {
+  readPedidoModalDOM();
+  const total = pedidoModalTotal();
+  const pagado = Number(STATE.pedidoModal.pagado) || 0;
+  const tEl = document.getElementById('pm-total'); if (tEl) tEl.textContent = fmtMoney(total);
+  const rEl = document.getElementById('pm-restante'); if (rEl) rEl.textContent = fmtMoney(Math.max(0, total - pagado));
+}
+// Trae el ad por telefono (WPP) y lo pone en "de que ad viene" (override manual ok).
+async function pmTraceAd() {
+  const m = STATE.pedidoModal; if (!m || m.plataforma !== 'WPP') return;
+  const tel = (document.getElementById('pm-telefono')?.value || '').replace(/\D/g,'');
+  if (tel.length < 8) return;
+  const adEl = document.getElementById('pm-ad');
+  if (!adEl || adEl.value.trim()) return; // no pisar si ya hay algo cargado a mano
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/ad-attribution?phone=' + encodeURIComponent(tel), { headers: authHeaders() });
+    if (!r.ok) return;
+    const j = await r.json();
+    const a = j.attribution;
+    if (!a) return;
+    const txt = a.ad_title || a.campaign_name || a.headline || a.source_title || a.body || 'vino de un ad';
+    adEl.value = txt; m.ad = txt;
+    adEl.style.borderColor = '#25D366';
+    setTimeout(() => { adEl.style.borderColor = 'var(--border)'; }, 1600);
+  } catch (e) {}
+}
+function renderPedidoCartelBlock(c, i, n) {
+  const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px';
+  const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
+  const baseOpts = ['TRANS','NEGRO'].map(o=>`<option ${c.base===o?'selected':''}>${o}</option>`).join('');
+  const dimerOpts = ['NO','SLIM','CONTROL','APP'].map(o=>`<option ${c.dimer===o?'selected':''}>${o}</option>`).join('');
+  return `
+    <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:11px;color:var(--accent-cyan);font-weight:700">Cartel ${i+1}</span>
+        ${n>1 ? `<button class="btn btn-ghost" data-pm-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
+      </div>
+      <div style="margin-bottom:6px"><label style="${lbl}">Cartel / diseño *</label><input id="pm-cartel-${i}" value="${escapeHtml(c.cartel||'')}" placeholder="ej. Magnolia café-bar" style="${inp}"></div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:2"><label style="${lbl}">Colores</label><input id="pm-colores-${i}" value="${escapeHtml(c.colores||'')}" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Cant.</label><input id="pm-cantidad-${i}" type="number" value="${escapeHtml(String(c.cantidad??1))}" style="${inp}"></div>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><label style="${lbl}">Alto cm</label><input id="pm-alto-${i}" type="number" value="${escapeHtml(String(c.alto||''))}" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Ancho cm</label><input id="pm-ancho-${i}" type="number" value="${escapeHtml(String(c.ancho||''))}" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">CM neón</label><input id="pm-cmNeon-${i}" type="number" value="${escapeHtml(String(c.cmNeon||''))}" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Base</label><select id="pm-base-${i}" style="${inp}">${baseOpts}</select></div>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1.3"><label style="${lbl}">Precio cartel *</label><input id="pm-precio-${i}" type="number" value="${escapeHtml(String(c.precio||''))}" placeholder="$" style="${inp}" data-pm-calc></div>
+        <div style="flex:1"><label style="${lbl}">Dimmer</label><select id="pm-dimer-${i}" data-pm-dimer="${i}" style="${inp}">${dimerOpts}</select></div>
+        <div style="flex:1"><label style="${lbl}">Precio dimmer</label><input id="pm-precioDimmer-${i}" type="number" value="${escapeHtml(String(c.precioDimmer||''))}" placeholder="auto" style="${inp}" data-pm-calc></div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <div style="flex:1"><label style="${lbl}">Envío</label><input id="pm-envio-${i}" value="${escapeHtml(c.envio||'')}" placeholder="ej. CABA / exterior" style="${inp}"></div>
+        <div style="flex:1.6"><label style="${lbl}">Aclaración</label><input id="pm-aclaracion-${i}" value="${escapeHtml(c.aclaracion||'')}" style="${inp}"></div>
+      </div>
+    </div>`;
+}
+function renderPedidoModal() {
+  if (!STATE.pedidoModalOpen || !STATE.pedidoModal) return '';
+  const m = STATE.pedidoModal;
+  const total = pedidoModalTotal();
+  const restante = Math.max(0, total - (Number(m.pagado)||0));
+  const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;color:var(--fg);font-size:13px';
+  const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
+  const oBtn = (active) => active ? 'background:var(--accent-cyan,#8FD4DE);color:#000;border-color:var(--accent-cyan,#8FD4DE);' : 'background:transparent;color:var(--fg-subtle);border-color:var(--border);';
+  return `
+    <div id="pm-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:280;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
+      <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:660px;width:100%;margin:auto;padding:var(--s-4)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
+          <h2 style="margin:0;font-size:16px">📦 Cargar pedido</h2>
+          <button id="pm-close" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
+        </div>
+        <div style="display:flex;gap:10px;margin-bottom:var(--s-3)">
+          <div style="width:120px"><label style="${lbl}">N° pedido</label><input id="pm-numero" type="number" value="${escapeHtml(String(m.numero||''))}" style="${inp}"></div>
+          <div style="flex:1"><label style="${lbl}">Fecha (auto)</label><input type="text" value="${fmtDate(new Date())}" disabled style="${inp};opacity:.5"></div>
+          <div style="flex:1"><label style="${lbl}">Estado pedido</label><input type="text" value="En produccion" disabled style="${inp};opacity:.5"></div>
+        </div>
+        <label style="${lbl}">Plataforma · ¿por dónde llegó?</label>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <button type="button" data-pm-plat="WPP" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(m.plataforma==='WPP')}">📱 WhatsApp</button>
+          <button type="button" data-pm-plat="IG" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(m.plataforma==='IG')}">📷 Instagram</button>
+        </div>
+        <div id="pm-tel-wrap" style="margin-bottom:var(--s-3);${m.plataforma==='WPP'?'':'display:none'}">
+          <label style="${lbl}">Teléfono del cliente <span style="opacity:.6">(para trazar el ad)</span></label>
+          <input id="pm-telefono" type="tel" value="${escapeHtml(m.telefono||'')}" placeholder="5491155604999" style="${inp}">
+        </div>
+        <label style="${lbl}">Carteles del pedido</label>
+        <div id="pm-carteles">${m.carteles.map((c,i)=>renderPedidoCartelBlock(c,i,m.carteles.length)).join('')}</div>
+        <button id="pm-add-cartel" class="btn btn-ghost" style="width:100%;margin-bottom:var(--s-3);font-size:12px">＋ Agregar otro cartel a este pedido</button>
+        <div style="display:flex;gap:10px;margin-bottom:var(--s-3)">
+          <div style="flex:1"><label style="${lbl}">Estado del pago</label><select id="pm-estadopago" style="${inp}">${['1er pago','2do pago'].map(o=>`<option ${m.estadoPago===o?'selected':''}>${o}</option>`).join('')}</select></div>
+          <div style="flex:1"><label style="${lbl}">Pagado (seña)</label><input id="pm-pagado" type="number" value="${escapeHtml(String(m.pagado||''))}" placeholder="$" style="${inp}" data-pm-calc></div>
+          <div style="flex:1"><label style="${lbl}">Restante (auto)</label><div style="${inp};opacity:.7;display:flex;align-items:center;min-height:36px"><span id="pm-restante">${fmtMoney(restante)}</span></div></div>
+        </div>
+        <div style="margin-bottom:var(--s-3)"><label style="${lbl}">De qué ad viene <span style="opacity:.6">(auto por teléfono en WPP · editable)</span></label><input id="pm-ad" value="${escapeHtml(m.ad||'')}" placeholder="se completa solo si vino de un ad" style="${inp}"></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding-top:var(--s-2);border-top:1px solid var(--border)">
+          <div style="font-size:13px;color:var(--fg-subtle)">Total: <b style="color:var(--fg)" id="pm-total">${fmtMoney(total)}</b></div>
+          <div style="display:flex;gap:8px">
+            <button id="pm-cancel" class="btn btn-ghost">Cancelar</button>
+            <button id="pm-confirm" class="btn btn-cyan">${STATE.pedidoModalSaving ? 'Cargando…' : '✓ Crear pedido'}</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+function bindPedidoModal() {
+  if (!STATE.pedidoModalOpen) return;
+  const close = () => cancelCargarPedido();
+  const cl = document.getElementById('pm-close'); if (cl) cl.onclick = close;
+  const cc = document.getElementById('pm-cancel'); if (cc) cc.onclick = close;
+  const bk = document.getElementById('pm-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'pm-backdrop') close(); };
+  document.querySelectorAll('[data-pm-plat]').forEach(b => b.onclick = () => { readPedidoModalDOM(); STATE.pedidoModal.plataforma = b.dataset.pmPlat; render(); });
+  const add = document.getElementById('pm-add-cartel'); if (add) add.onclick = pmAddCartel;
+  document.querySelectorAll('[data-pm-remove]').forEach(b => b.onclick = () => pmRemoveCartel(parseInt(b.dataset.pmRemove,10)));
+  document.querySelectorAll('[data-pm-dimer]').forEach(sel => sel.onchange = () => {
+    const i = parseInt(sel.dataset.pmDimer,10);
+    const pd = document.getElementById('pm-precioDimmer-'+i);
+    if (pd) { const sug = DIMMER_PRECIOS[sel.value]; pd.value = (sug==null?'':sug); }
+    pmRecalc();
+  });
+  document.querySelectorAll('[data-pm-calc]').forEach(el => el.addEventListener('input', pmRecalc));
+  const tel = document.getElementById('pm-telefono'); if (tel) tel.addEventListener('blur', pmTraceAd);
+  const cf = document.getElementById('pm-confirm'); if (cf) cf.onclick = confirmCargarPedido;
+}
+async function confirmCargarPedido() {
+  if (STATE.pedidoModalSaving) return;
+  readPedidoModalDOM();
+  const m = STATE.pedidoModal;
+  const carteles = (m.carteles||[]).filter(c => String(c.cartel||'').trim());
+  if (!carteles.length) { toast('Poné al menos un cartel con nombre'); return; }
+  const sinPrecio = carteles.findIndex(c => !(Number(c.precio) > 0));
+  if (sinPrecio >= 0) { toast(`Falta el precio del cartel ${sinPrecio+1}`); return; }
+  STATE.pedidoModalSaving = true; render();
+  try {
+    const payload = {
+      numero: m.numero ? Number(m.numero) : undefined,
+      plataforma: m.plataforma, telefono: m.telefono, estado_pago: m.estadoPago, pagado: m.pagado, ad: m.ad,
+      carteles: carteles.map(c => ({
+        cartel: c.cartel, colores: c.colores, alto: c.alto, ancho: c.ancho, cm_neon: c.cmNeon,
+        base: c.base, cantidad: c.cantidad, precio: c.precio, dimer: c.dimer, precio_dimmer: c.precioDimmer,
+        envio: c.envio, aclaracion: c.aclaracion
+      }))
+    };
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos', { method:'POST', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
+    const nuevos = (j.pedidos||[]).map(mapPedidoFromD1);
+    STATE.pedidos = [...nuevos, ...STATE.pedidos];
+    STATE.pedidoModalOpen = false;
+    STATE.pedidoModalSaving = false;
+    render();
+    toast(`Pedido #${j.numero} cargado ✓ (${nuevos.length} cartel${nuevos.length>1?'es':''})`);
+  } catch (e) {
+    STATE.pedidoModalSaving = false; render();
+    toast('Error al cargar el pedido: ' + e.message);
+  }
 }
 
 // ---------- PRESUPUESTOS ----------
