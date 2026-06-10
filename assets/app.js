@@ -10506,9 +10506,10 @@ async function marcarBriefEnviado(id, extra = {}) {
   return (await r.json()).brief;
 }
 
-// Manda un brief 'listo' de vuelta a 'A cotizar' (nuevo) para que Emma lo
-// modifique (el cliente pidió un cambio): lo marca urgente + modificar y lo deja
-// arriba de la cola. Gate de rol en el botón (canCotizar = Joaco/Gaspar).
+// Manda un brief de vuelta a 'A cotizar' (nuevo) para que Emma lo modifique
+// (el cliente vio el presupuesto y pidió un cambio): lo marca urgente + modificar
+// y lo deja arriba de la cola. Sirve para 'listo' Y 'enviado' — siempre resetea a
+// nuevo + urgente + modificar. Gate de rol en el botón (canCotizar = Joaco/Gaspar).
 async function mandarBriefAModificar(id) {
   if (!id) return;
   const ok = await showConfirm(
@@ -10526,6 +10527,18 @@ async function mandarBriefAModificar(id) {
   } catch (e) {
     toast('No se pudo mandar a modificar');
   }
+}
+
+// Toggle del flag urgente desde el DRAWER del brief (mismo efecto que el 🔥 de la
+// card). Optimista: actualiza el state + re-render y revierte si el save falla.
+async function toggleBriefUrgente(id) {
+  const b = STATE.briefs.find(x => x.id === id);
+  if (!b) return;
+  const prev = b.urgente ? 1 : 0;
+  b.urgente = prev ? 0 : 1;
+  render();
+  try { await saveBrief({ id, urgente: b.urgente }); }
+  catch (e) { b.urgente = prev; render(); toast('No se pudo marcar urgente'); }
 }
 
 // Verifica vía API si a un teléfono ya se le mandó un presupuesto por WhatsApp.
@@ -10998,9 +11011,10 @@ function renderBriefDrawer() {
         <!-- Acciones por rol y estado -->
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-bottom:var(--s-4)">
           ${!isNew && canCreateBriefs() ? `<button class="btn btn-ghost" id="brief-delete" style="color:#FF5566;border-color:rgba(255,24,48,.25)" title="Eliminar este brief">🗑 Eliminar</button>` : ''}
+          ${!isNew && estado === 'nuevo' && canCreateBriefs() ? `<button class="btn btn-ghost" id="brief-urgente-toggle" title="${data.urgente ? 'Quitar urgente' : 'Marcar urgente (prioridad para Emma)'}" style="color:${data.urgente ? '#ff5468' : 'var(--fg-subtle)'};border-color:${data.urgente ? 'rgba(255,24,48,.5)' : 'var(--border)'}">🔥 ${data.urgente ? 'Urgente ✓' : 'Marcar urgente'}</button>` : ''}
           <div style="flex:1"></div>
           ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Ver presupuesto</button>` : ''}
-          ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-ghost" id="brief-modificar" title="Volver a 'A cotizar' para que Emma lo modifique (queda urgente y arriba de todo)" style="color:#FFA726;border-color:rgba(255,167,38,.4)">🔧 Mandar a modificar</button>` : ''}
+          ${!isNew && (estado === 'listo' || estado === 'enviado') && canCotizar() ? `<button class="btn btn-ghost" id="brief-modificar" title="Volver a 'A cotizar' para que Emma lo modifique (queda urgente y arriba de todo)" style="color:#FFA726;border-color:rgba(255,167,38,.4)">🔧 Mandar a modificar</button>` : ''}
           ${!isNew && estado === 'enviado' && isCom ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir Cotizador</button>` : ''}
           ${(isCom || isDis || isNew) ? `<button class="btn ${isNew ? 'btn-cyan' : 'btn-ghost'}" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>` : ''}
         </div>
@@ -11134,6 +11148,7 @@ function openNuevoBriefModal() {
   STATE.quickModalOpen = true;
   STATE.quickModalSaving = false;
   STATE.quickModalOrigen = 'wpp';
+  STATE.quickModalUrgente = false;
   render();
   setTimeout(() => {
     const el = document.getElementById('quick-modal-titulo');
@@ -11204,6 +11219,7 @@ async function confirmQuickCreate() {
   const saveBtn = document.getElementById('quick-modal-confirm');
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Creando…'; }
   try {
+    const urgente = document.getElementById('quick-modal-urgente')?.checked ? 1 : 0;
     const saved = await saveBrief({
       cliente_nombre: titulo,
       cliente_wa_id: origen === 'wpp' ? telDigits : '',
@@ -11212,6 +11228,12 @@ async function confirmQuickCreate() {
       notas: notas || null,
       estado: 'nuevo'
     });
+    // El POST de creación no persiste 'urgente' (no está en sus columnas del INSERT),
+    // así que si se marcó urgente lo seteamos con un PATCH inmediato. Best-effort:
+    // si falla, el brief queda creado igual y se puede marcar desde la card/drawer.
+    if (urgente) {
+      try { await saveBrief({ id: saved.id, urgente: 1 }); saved.urgente = 1; } catch (_) {}
+    }
     STATE.briefs.unshift(saved);
     // Subir todas las imágenes pegadas.
     for (const img of STATE.quickModalImages) {
@@ -11300,7 +11322,14 @@ function renderQuickCreateModal() {
 
         <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Notas (opcional)</label>
         <textarea id="quick-modal-notas" rows="2" placeholder="referencia, info extra…"
-          style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-4)"></textarea>
+          style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-3)"></textarea>
+
+        <!-- Urgente: prioridad para Emma (queda arriba de todo en "A cotizar") -->
+        <label id="quick-modal-urgente-lbl" style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:9px 11px;border:1px solid ${STATE.quickModalUrgente ? 'rgba(255,24,48,.5)' : 'var(--border)'};border-radius:var(--r-sm);margin-bottom:var(--s-4);background:${STATE.quickModalUrgente ? 'rgba(255,24,48,.08)' : 'transparent'};transition:border-color .15s,background .15s">
+          <input type="checkbox" id="quick-modal-urgente" ${STATE.quickModalUrgente ? 'checked' : ''} style="width:16px;height:16px;accent-color:#ff3030;cursor:pointer;margin:0">
+          <span style="font-size:13px;font-weight:600;color:${STATE.quickModalUrgente ? '#ff5468' : 'var(--fg)'}">🔥 Marcar como urgente</span>
+          <span style="font-size:11px;color:var(--fg-subtle)">prioridad para Emma</span>
+        </label>
 
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button id="quick-modal-cancel" class="btn btn-ghost">Cancelar</button>
@@ -12115,6 +12144,8 @@ function bindCotizacion() {
   if (cotBtn) cotBtn.onclick = handleBriefAbrirCotizador;
   const modBtn = document.getElementById('brief-modificar');
   if (modBtn) modBtn.onclick = () => mandarBriefAModificar(STATE.briefSelected);
+  const urgToggleBtn = document.getElementById('brief-urgente-toggle');
+  if (urgToggleBtn) urgToggleBtn.onclick = () => toggleBriefUrgente(STATE.briefSelected);
   const cotPopupBtn = document.getElementById('brief-cotizar-popup');
   if (cotPopupBtn) cotPopupBtn.onclick = openBriefCotizadorPopup;
   // Toggle origen WhatsApp / Instagram en el drawer (feedback visual + tel).
@@ -12405,6 +12436,18 @@ function bindCotizacion() {
     if (qCancel) qCancel.onclick = cancelQuickCreate;
     const qConfirm = document.getElementById('quick-modal-confirm');
     if (qConfirm) qConfirm.onclick = confirmQuickCreate;
+    // Checkbox urgente: persiste en STATE (sobrevive re-renders) + feedback visual.
+    const qUrg = document.getElementById('quick-modal-urgente');
+    if (qUrg) qUrg.onchange = () => {
+      STATE.quickModalUrgente = qUrg.checked;
+      const lbl = document.getElementById('quick-modal-urgente-lbl');
+      if (lbl) {
+        lbl.style.borderColor = qUrg.checked ? 'rgba(255,24,48,.5)' : 'var(--border)';
+        lbl.style.background = qUrg.checked ? 'rgba(255,24,48,.08)' : 'transparent';
+        const sp = lbl.querySelector('span');
+        if (sp) sp.style.color = qUrg.checked ? '#ff5468' : 'var(--fg)';
+      }
+    };
     // Toggle origen WhatsApp / Instagram.
     document.querySelectorAll('[data-qm-origen]').forEach(btn => {
       btn.onclick = () => setQuickModalOrigen(btn.dataset.qmOrigen);
