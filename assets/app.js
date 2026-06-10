@@ -10949,13 +10949,33 @@ function renderBriefColumn(col) {
         <span style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${col.color}">
           ${col.label}
         </span>
-        <span style="font-size:11px;color:var(--fg-mute);font-family:ui-monospace,monospace">${briefs.length}</span>
+        <span style="font-size:11px;color:var(--fg-mute);font-family:ui-monospace,monospace" data-col-count data-total="${briefs.length}">${briefs.length}</span>
       </div>
       <div class="brief-col-list" style="flex:1;overflow-y:auto;max-height:calc(100vh - 220px)">
         ${briefs.length ? briefs.map(renderBriefCard).join('') : hint}
       </div>
     </div>
   `;
+}
+
+// Filtra las cards del board de cotización según briefSearch SIN re-renderizar
+// (preserva el foco del input y los handlers de las cards). Oculta las que no
+// matchean por cliente/diseño/teléfono y actualiza el contador de cada columna.
+// Se re-aplica desde bindCotizacion tras cada render (ej. polling actualizó el board).
+function filterBriefBoard() {
+  const q = briefSearch ? normName(briefSearch) : '';
+  document.querySelectorAll('.brief-col').forEach(colEl => {
+    let visible = 0;
+    colEl.querySelectorAll('.brief-card').forEach(card => {
+      const b = STATE.briefs.find(x => x.id === parseInt(card.dataset.briefId, 10));
+      const hay = b ? normName([b.cliente_nombre, b.diseno, b.cliente_wa_id].filter(Boolean).join(' ')) : '';
+      const show = !q || (hay && hay.includes(q));
+      card.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    const countEl = colEl.querySelector('[data-col-count]');
+    if (countEl) countEl.textContent = q ? visible : (countEl.dataset.total || visible);
+  });
 }
 
 function renderBriefDrawer() {
@@ -11237,6 +11257,7 @@ function renderBriefImagesGridFor(tipo, isDraft, editable) {
   }).join('');
 }
 
+let briefSearch = ''; // búsqueda del board de cotización — filtra las cards en vivo (las columnas son los estados)
 function renderCotizacion() {
   // Disparar carga si no hay datos.
   if (!STATE.token) {
@@ -11271,6 +11292,12 @@ function renderCotizacion() {
   return `
     <div style="padding:var(--s-4);min-height:100%">
       ${headerActions}
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:var(--s-3);flex-wrap:wrap">
+        <input type="text" id="brief-search" placeholder="🔍 Buscar presupuesto por cliente / diseño / teléfono…" value="${escapeHtml(briefSearch)}" autocomplete="off"
+          style="flex:1;min-width:220px;max-width:440px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:9px 12px;color:var(--fg);font-size:13px">
+        <button class="btn btn-ghost" id="brief-search-clear" title="Limpiar búsqueda" style="padding:7px 11px;font-size:13px">✕</button>
+        <span class="muted" style="font-size:11px">Cada coincidencia queda en la columna de su estado</span>
+      </div>
       <div class="brief-kanban" style="display:flex;gap:var(--s-3);overflow-x:auto;padding-bottom:var(--s-2)">
         ${BRIEF_COLUMNAS.map(renderBriefColumn).join('')}
       </div>
@@ -12221,6 +12248,19 @@ function bindCotizacion() {
   };
   const verifBtn = document.getElementById('briefs-verificar-enviados');
   if (verifBtn) verifBtn.onclick = handleVerificarEnviados;
+
+  // Buscador del board: filtra las cards en vivo (sin re-render, mantiene foco).
+  const briefSearchInput = document.getElementById('brief-search');
+  if (briefSearchInput) briefSearchInput.oninput = () => { briefSearch = briefSearchInput.value; filterBriefBoard(); };
+  const briefSearchClear = document.getElementById('brief-search-clear');
+  if (briefSearchClear) briefSearchClear.onclick = () => {
+    briefSearch = '';
+    const el = document.getElementById('brief-search');
+    if (el) { el.value = ''; el.focus(); }
+    filterBriefBoard();
+  };
+  // Re-aplicar el filtro tras este render (el polling de briefs re-renderiza el board).
+  if (briefSearch) filterBriefBoard();
 
   // Tarjetas → abrir drawer.
   document.querySelectorAll('.brief-card').forEach(el => {
