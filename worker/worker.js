@@ -988,6 +988,13 @@ async function processCursosCampaignPending(env) {
 // Cron: follow-up (template 2) a los que NO respondieron al template 1 hace ≥12h.
 // Una sola vez por contacto. El chat sigue oculto hasta que respondan.
 async function processCursosFollowup(env) {
+  // ⛔ DESACTIVADO 2026-06-11 (pedido urgente de Gaspar). Este follow-up de mayo
+  // seleccionaba TODO wa_cursos_campaign sin filtrar `campaign`, así que le mandó
+  // el seguimiento de "las clases del 6 y 7 de mayo" al cohort de JUNIO (~90 envíos
+  // a gente equivocada, muchos bloqueados por calidad de Meta - "healthy ecosystem
+  // engagement"). Queda apagado. Para re-activar SOLO el cohort real de mayo:
+  // agregar  AND campaign = 'mayo'  al SELECT de abajo y borrar este return.
+  return;
   if (await isWaBillingBlocked(env)) return; // pausado por bloqueo de pago de WhatsApp
   try {
     const cutoff = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
