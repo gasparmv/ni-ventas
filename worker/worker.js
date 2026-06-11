@@ -2605,6 +2605,8 @@ async function analyzeImage(env, r2Key) {
 // Ventana 11/06 00:00 → 16/06 00:00 (AR, incluye todo el 15/06). AR = UTC-3.
 const PAGO_LANZAMIENTO_START_UTC = '2026-06-11T03:00:00.000Z';
 const PAGO_LANZAMIENTO_END_UTC   = '2026-06-16T03:00:00.000Z';
+const PAGO_SENA_MIN = 30000;   // banda de la seña del acceso (~40.000 ARS)
+const PAGO_SENA_MAX = 50000;
 function isPagoLanzamientoWindow(tsIso) {
   const t = String(tsIso || '');
   return t >= PAGO_LANZAMIENTO_START_UTC && t < PAGO_LANZAMIENTO_END_UTC;
@@ -2667,6 +2669,13 @@ async function isSimilarToLaunchAmount(env, monto) {
   return false;
 }
 
+// Crea la etiqueta si no existe (con el nombre EXACTO en UTF-8 del worker — evita
+// el problema de encoding de la ñ vía wrangler) y devuelve su id.
+async function ensureLabelId(env, name, color) {
+  try { await env.DB.prepare("INSERT OR IGNORE INTO labels (name, color, created_at) VALUES (?, ?, datetime('now'))").bind(name, color || '#888').run(); } catch (_) {}
+  try { const r = await env.DB.prepare("SELECT id FROM labels WHERE name = ?").bind(name).first(); return r?.id || null; } catch (_) { return null; }
+}
+
 // Procesa un comprobante entrante: dedup por wamid, OCR, respalda en D1 y etiqueta.
 // NO responde nada (eso lo hacen a mano). Corre en ctx.waitUntil (no bloquea el webhook).
 async function processPaymentProof(env, m) {
@@ -2682,7 +2691,9 @@ async function processPaymentProof(env, m) {
   const monto = (a && +a.monto) || 0;
   let clasificacion = '', labelName = null;
   if (esPago) {
-    if (await hasLaunchKeyPhrase(env, m.phone, m.caption)) { clasificacion = 'lanzamiento'; labelName = 'pago lanzamiento junio'; }
+    const esSena = monto >= PAGO_SENA_MIN && monto <= PAGO_SENA_MAX;  // ~40k → seña
+    if (esSena) { clasificacion = 'sena'; labelName = 'seña lanzamiento junio'; }
+    else if (await hasLaunchKeyPhrase(env, m.phone, m.caption)) { clasificacion = 'lanzamiento'; labelName = 'pago lanzamiento junio'; }
     else if (await isSimilarToLaunchAmount(env, monto)) { clasificacion = 'a_definir'; labelName = 'a definir - lanzamiento'; }
     else { clasificacion = 'otro'; }
   }
@@ -2692,10 +2703,9 @@ async function processPaymentProof(env, m) {
     ).bind(esPago ? 1 : 0, clasificacion, monto, (a && a.moneda) || 'ARS', (a && a.cuenta) || '', (a && a.titular_destino) || '', (a && a.banco) || '', (a && +a.confianza) || 0, JSON.stringify(a || {}).slice(0, 1500), m.wamid).run();
   } catch (_) {}
   if (labelName) {
-    try {
-      const lr = await env.DB.prepare("SELECT id FROM labels WHERE name = ?").bind(labelName).first();
-      if (lr?.id) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(m.phone, lr.id, new Date().toISOString()).run();
-    } catch (_) {}
+    const color = labelName.indexOf('seña') === 0 ? '#06b6d4' : labelName.indexOf('pago') === 0 ? '#22c55e' : '#f59e0b';
+    const lid = await ensureLabelId(env, labelName, color);
+    if (lid) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(m.phone, lid, new Date().toISOString()).run(); } catch (_) {} }
   }
 }
 
