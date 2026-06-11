@@ -2601,6 +2601,104 @@ async function analyzeImage(env, r2Key) {
   }
 }
 
+// ===== Comprobantes de pago — lanzamiento junio 2026 =====
+// Ventana 11/06 00:00 → 16/06 00:00 (AR, incluye todo el 15/06). AR = UTC-3.
+const PAGO_LANZAMIENTO_START_UTC = '2026-06-11T03:00:00.000Z';
+const PAGO_LANZAMIENTO_END_UTC   = '2026-06-16T03:00:00.000Z';
+function isPagoLanzamientoWindow(tsIso) {
+  const t = String(tsIso || '');
+  return t >= PAGO_LANZAMIENTO_START_UTC && t < PAGO_LANZAMIENTO_END_UTC;
+}
+function _normTxt(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+
+// OCR potente del comprobante con Claude visión (imagen o PDF). Devuelve el JSON parseado o null.
+async function analyzePaymentProof(env, r2Key, mimeHint) {
+  if (!env.ANTHROPIC_API_KEY || !env.MEDIA || !r2Key) return null;
+  let obj; try { obj = await env.MEDIA.get(r2Key); } catch (_) { return null; }
+  if (!obj) return null;
+  let buf; try { buf = await obj.arrayBuffer(); } catch (_) { return null; }
+  if (!buf || buf.byteLength < 64) return null;
+  const mime = (String(obj.httpMetadata?.contentType || mimeHint || '').split(';')[0].trim().toLowerCase()) || 'image/jpeg';
+  const isPdf = mime.includes('pdf');
+  const b64 = abToBase64(buf);
+  const block = isPdf
+    ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }
+    : { type: 'image', source: { type: 'base64', media_type: /(png|jpeg|webp|gif)/.test(mime) ? mime : 'image/jpeg', data: b64 } };
+  const system = 'Sos un analista que lee comprobantes de pago/transferencia de Argentina (capturas o PDFs). Devolvé SOLO un JSON válido (sin markdown ni texto extra) con este formato exacto:\n' +
+    '{"es_comprobante":true,"monto":0,"moneda":"ARS","cuenta":"mp_gaspar","titular_destino":"","banco":"","fecha":"","confianza":0.0}\n' +
+    'Reglas:\n' +
+    '- monto: numero sin simbolos ni puntos de miles (ej: 45000). 0 si no se ve.\n' +
+    '- cuenta: a que cuenta ENTRO el dinero. Mercado Pago -> "mp_gaspar". Banco de la Nacion Argentina (BNA / Banco Nacion) -> "bna_bruno". Otra entidad -> "otra". No se distingue -> "desconocida".\n' +
+    '- titular_destino: nombre del que RECIBE, tal cual figura. banco: la entidad destino.\n' +
+    '- Si NO es un comprobante de pago, es_comprobante=false y el resto en 0/"".';
+  let r;
+  try {
+    r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 400, system, messages: [{ role: 'user', content: [block, { type: 'text', text: 'Analiza este comprobante y devolve el JSON.' }] }] })
+    });
+  } catch (_) { return null; }
+  let j; try { j = await r.json(); } catch (_) { return null; }
+  if (!r.ok) return null;
+  let txt = String(j.content?.[0]?.text || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  try { return JSON.parse(txt); } catch (_) { return { es_comprobante: false }; }
+}
+
+// ¿La conversación tiene la frase clave del lanzamiento? (caption del comprobante
+// o algún inbound de texto de los últimos 30 min con "comunidad al infinito").
+async function hasLaunchKeyPhrase(env, phone, caption) {
+  if (_normTxt(caption).includes('comunidad al infinito')) return true;
+  try {
+    const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts >= ? ORDER BY ts DESC LIMIT 12").bind(phone, since).all();
+    for (const r of (rs.results || [])) if (_normTxt(r.body).includes('comunidad al infinito')) return true;
+  } catch (_) {}
+  return false;
+}
+
+// ¿El monto es similar (±10%) a algún pago confirmado del lanzamiento?
+async function isSimilarToLaunchAmount(env, monto) {
+  if (!(monto > 0)) return false;
+  try {
+    const rs = await env.DB.prepare("SELECT DISTINCT monto FROM wa_pago_proof WHERE clasificacion = 'lanzamiento' AND monto > 0").all();
+    for (const r of (rs.results || [])) { const a = +r.monto; if (a > 0 && Math.abs(monto - a) <= 0.10 * a) return true; }
+  } catch (_) {}
+  return false;
+}
+
+// Procesa un comprobante entrante: dedup por wamid, OCR, respalda en D1 y etiqueta.
+// NO responde nada (eso lo hacen a mano). Corre en ctx.waitUntil (no bloquea el webhook).
+async function processPaymentProof(env, m) {
+  if (!m || !m.wamid || !m.phone) return;
+  try {
+    const res = await env.DB.prepare(
+      "INSERT OR IGNORE INTO wa_pago_proof (wamid, phone, nombre, media_key, caption, ts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(m.wamid, m.phone, m.senderName || '', m.r2Key || '', String(m.caption || '').slice(0, 500), m.ts || new Date().toISOString(), new Date().toISOString()).run();
+    if (!res?.meta?.changes) return; // ya procesado
+  } catch (_) { return; }
+  const a = await analyzePaymentProof(env, m.r2Key, m.msgType === 'document' ? 'application/pdf' : '');
+  const esPago = !!(a && a.es_comprobante);
+  const monto = (a && +a.monto) || 0;
+  let clasificacion = '', labelName = null;
+  if (esPago) {
+    if (await hasLaunchKeyPhrase(env, m.phone, m.caption)) { clasificacion = 'lanzamiento'; labelName = 'pago lanzamiento junio'; }
+    else if (await isSimilarToLaunchAmount(env, monto)) { clasificacion = 'a_definir'; labelName = 'a definir - lanzamiento'; }
+    else { clasificacion = 'otro'; }
+  }
+  try {
+    await env.DB.prepare(
+      "UPDATE wa_pago_proof SET is_payment=?, clasificacion=?, monto=?, moneda=?, cuenta=?, titular=?, banco=?, confianza=?, raw=? WHERE wamid=?"
+    ).bind(esPago ? 1 : 0, clasificacion, monto, (a && a.moneda) || 'ARS', (a && a.cuenta) || '', (a && a.titular_destino) || '', (a && a.banco) || '', (a && +a.confianza) || 0, JSON.stringify(a || {}).slice(0, 1500), m.wamid).run();
+  } catch (_) {}
+  if (labelName) {
+    try {
+      const lr = await env.DB.prepare("SELECT id FROM labels WHERE name = ?").bind(labelName).first();
+      if (lr?.id) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(m.phone, lr.id, new Date().toISOString()).run();
+    } catch (_) {}
+  }
+}
+
 // ===== Audio transcription (Whisper via Workers AI) =====
 async function transcribeAudio(env, r2Key) {
   if (!env.AI || !env.MEDIA || !r2Key) return null;
@@ -3683,6 +3781,13 @@ export default {
                 // la IA evalúa y le manda el link de regalos si es positiva. =====
                 if (direction === 'inbound') {
                   try { await maybeSendMinicursoGift(env, phone, msgBody, ts); } catch (_) {}
+                }
+                // ===== Lanzamiento junio: capturar comprobantes de pago =====
+                // En la ventana (11-15/06), todo inbound con imagen/PDF se OCRea,
+                // se clasifica, se etiqueta y se respalda en D1 (NO se responde nada).
+                if (direction === 'inbound' && (msgType === 'image' || msgType === 'document') && r2Key && isPagoLanzamientoWindow(ts)) {
+                  const _pp = processPaymentProof(env, { wamid, phone, senderName, r2Key, msgType, caption: msgBody, ts }).catch(() => {});
+                  if (typeof ctx !== 'undefined' && ctx && ctx.waitUntil) ctx.waitUntil(_pp); else await _pp;
                 }
 
                 // ===== Ad Attribution (referral) =====
