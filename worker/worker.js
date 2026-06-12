@@ -2613,6 +2613,88 @@ function isPagoLanzamientoWindow(tsIso) {
 }
 function _normTxt(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
 
+// ===== Reenvío automático de comprobantes al WhatsApp personal de Gaspar =====
+// Pedido para el lanzamiento: que cada imagen/PDF que entre se le reenvíe a
+// Gaspar a su personal, SOLO hoy (11/06) y mañana (12/06) AR. Idempotente vía la
+// MISMA marca de kv_cache ('resent:<num>:<wamid>') que usó el reenvío manual, así
+// no duplica con la "foto" inicial. Si el send falla (p.ej. ventana 24h cerrada)
+// NO marca → un barrido posterior con /admin/wa/resend-media lo recupera.
+const RESEND_GASPAR_PHONE   = '5491155604999';
+const RESEND_GASPAR_END_UTC = '2026-06-13T03:00:00.000Z'; // fin del 12/06 AR (cubre todo el 12)
+function isResendGasparWindow(tsIso) {
+  // Sin límite inferior: alcanza con que sea anterior al cierre (todo lo que
+  // entre de acá a fin de mañana). El hook ya está acotado a inbound media.
+  return String(tsIso || '') < RESEND_GASPAR_END_UTC;
+}
+async function forwardProofToGaspar(env, m) {
+  try {
+    const target = RESEND_GASPAR_PHONE;
+    const phone = String(m.phone || '');
+    if (!phone || phone === target) return;        // no reenviarse a sí mismo
+    const r2Key = m.r2Key;
+    if (!r2Key) return;
+    const ckey = 'resent:' + target + ':' + m.wamid;
+    // idempotencia: si ya se reenvió, salir
+    try { const seen = await env.DB.prepare("SELECT 1 AS x FROM kv_cache WHERE k = ?").bind(ckey).first(); if (seen) return; } catch (_) {}
+    // datos del OCR (processPaymentProof ya escribió la fila, si pudo)
+    let monto = 0, cuenta = '';
+    try { const p = await env.DB.prepare("SELECT monto, cuenta FROM wa_pago_proof WHERE wamid = ?").bind(m.wamid).first(); if (p) { monto = p.monto || 0; cuenta = p.cuenta || ''; } } catch (_) {}
+    let obj; try { obj = await env.MEDIA.get(r2Key); } catch (_) { return; }
+    if (!obj) return;
+    const buf = await obj.arrayBuffer();
+    const mime = obj.httpMetadata?.contentType || (m.msgType === 'image' ? 'image/jpeg' : 'application/pdf');
+    const baseName = (r2Key.split('/').pop() || '');
+    const dotExt = baseName.includes('.') ? ('.' + baseName.split('.').pop()) : '';
+    const ext = dotExt || (m.msgType === 'image' ? '.jpg' : (mime.includes('pdf') ? '.pdf' : ''));
+    const fileName = m.msgType === 'document' ? ('comprobante_' + phone + ext) : (baseName || ('img' + ext));
+    const mediaId = await uploadMediaToMeta(env, buf, mime, fileName);
+    if (!mediaId) return;
+    const fmtMonto = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    const cuentaLabel = (c) => c === 'mp_gaspar' ? 'MP Gaspar' : c === 'bna_bruno' ? 'BNA Bruno' : (c === 'otra' ? 'otra cuenta' : (c || ''));
+    const d = new Date(m.ts || Date.now());
+    const art = new Date(d.getTime() - 3 * 3600 * 1000);
+    const hhmm = String(art.getUTCHours()).padStart(2, '0') + ':' + String(art.getUTCMinutes()).padStart(2, '0');
+    const quien = (m.senderName && String(m.senderName).trim()) ? String(m.senderName).trim() : phone;
+    let cap = quien + ' · ' + phone + ' · ' + hhmm;
+    if (monto && monto > 0) cap += '\n$' + fmtMonto(monto) + (cuenta ? (' · ' + cuentaLabel(cuenta)) : '');
+    let res;
+    if (m.msgType === 'image') res = await waSendImage(env, target, mediaId, cap);
+    else res = await waSendDocument(env, target, mediaId, fileName, cap);
+    if (res && res.ok) {
+      try { await env.DB.prepare("INSERT OR REPLACE INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?)").bind(ckey, '1', new Date().toISOString()).run(); } catch (_) {}
+    }
+  } catch (_) {}
+}
+// Red de seguridad del reenvío a Gaspar: corre en el cron y reintenta los inbound
+// media (hoy+mañana) que aún no tienen la marca 'resent:' (los que el reenvío en
+// vivo no logró mandar). LIMIT chico por tick — como corre cada minuto, drena
+// cualquier backlog rápido sin recargar. Se apaga sola pasada la ventana + 3h.
+async function processGasparResendBackfill(env) {
+  try {
+    const endMs = new Date(RESEND_GASPAR_END_UTC).getTime() + 3 * 3600 * 1000;
+    if (Date.now() > endMs) return;                 // ventana terminada → nada que hacer
+    const target = RESEND_GASPAR_PHONE;
+    const floor = '2026-06-11T23:00:00.000Z';       // desde las 20h AR del 11/06
+    let rows;
+    try {
+      const rs = await env.DB.prepare(
+        "SELECT m.wamid, m.phone, m.sender_name AS senderName, m.msg_type AS msgType, m.media_url AS r2Key, m.ts " +
+        "FROM wa_messages m " +
+        "LEFT JOIN kv_cache kc ON kc.k = ('resent:' || ? || ':' || m.wamid) " +
+        "WHERE m.direction='inbound' AND m.msg_type IN ('image','document') " +
+        "  AND m.ts >= ? AND m.ts < ? AND m.media_url IS NOT NULL AND m.media_url != '' " +
+        "  AND kc.k IS NULL " +
+        "ORDER BY m.id ASC LIMIT 5"
+      ).bind(target, floor, RESEND_GASPAR_END_UTC).all();
+      rows = rs.results || [];
+    } catch (_) { return; }
+    for (const r of rows) {
+      await forwardProofToGaspar(env, { wamid: r.wamid, phone: r.phone, senderName: r.senderName, r2Key: r.r2Key, msgType: r.msgType, ts: r.ts });
+      await new Promise(rr => setTimeout(rr, 300));
+    }
+  } catch (_) {}
+}
+
 // OCR potente del comprobante con Claude visión (imagen o PDF). Devuelve el JSON parseado o null.
 async function analyzePaymentProof(env, r2Key, mimeHint) {
   if (!env.ANTHROPIC_API_KEY || !env.MEDIA || !r2Key) return null;
@@ -3807,7 +3889,14 @@ export default {
                 // En la ventana (11-15/06), todo inbound con imagen/PDF se OCRea,
                 // se clasifica, se etiqueta y se respalda en D1 (NO se responde nada).
                 if (direction === 'inbound' && (msgType === 'image' || msgType === 'document') && r2Key && isPagoLanzamientoWindow(ts)) {
-                  const _pp = processPaymentProof(env, { wamid, phone, senderName, r2Key, msgType, caption: msgBody, ts }).catch(() => {});
+                  // 1) OCR + clasificación + backup en D1. 2) reenvío a Gaspar
+                  // (solo hoy/mañana). El reenvío corre SIEMPRE tras el intento de
+                  // OCR (aunque el OCR falle) para no perder ningún comprobante; el
+                  // caption incluye monto/cuenta si el OCR alcanzó a leerlos.
+                  const _pp = (async () => {
+                    try { await processPaymentProof(env, { wamid, phone, senderName, r2Key, msgType, caption: msgBody, ts }); } catch (_) {}
+                    if (isResendGasparWindow(ts)) { try { await forwardProofToGaspar(env, { wamid, phone, senderName, r2Key, msgType, ts }); } catch (_) {} }
+                  })();
                   if (typeof ctx !== 'undefined' && ctx && ctx.waitUntil) ctx.waitUntil(_pp); else await _pp;
                 }
 
@@ -6407,6 +6496,87 @@ export default {
       // set-pin y register son operaciones del flujo ON_PREMISE de Meta direct,
       // ya no aplican con 360dialog Cloud API hosted (lo gestiona el provider).
       // Si alguien las llama post-migración, devolvemos 501 con guía.
+      // One-off: reenvía a un número TODAS las imágenes/PDF inbound desde un
+      // timestamp. Usado en el lanzamiento junio para que Gaspar reciba en su
+      // WhatsApp personal todos los comprobantes que entraron. Gaspar-only.
+      // Robusto: timeout por item (un upload colgado NO cuelga toda la request),
+      // budget total (corta y devuelve last_id para continuar) e idempotencia
+      // (marca cada envío en kv_cache para que reintentos no dupliquen).
+      // Paginado por id estable. Body: { since, to, limit?, after_id?, delay_ms? }.
+      if (request.method === 'POST' && path === '/admin/wa/resend-media') {
+        if (!session || session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const since = String(body?.since || '').trim();
+        const to = String(body?.to || '').trim();
+        const afterId = parseInt(body?.after_id || '0', 10) || 0;
+        const limit = Math.min(Math.max(parseInt(body?.limit || '8', 10) || 8, 1), 50);
+        const delayMs = Math.min(Math.max(parseInt(body?.delay_ms || '250', 10) || 250, 0), 3000);
+        const itemTimeoutMs = Math.min(Math.max(parseInt(body?.item_timeout_ms || '15000', 10) || 15000, 3000), 45000);
+        const maxReqMs = Math.min(Math.max(parseInt(body?.max_req_ms || '45000', 10) || 45000, 5000), 110000);
+        if (!since || !to) return json({ error: 'missing since or to' }, 400);
+        const num = normalizeArPhone(to);
+        if (!num) return json({ error: 'numero destino invalido' }, 400);
+        let rows;
+        try {
+          const rs = await env.DB.prepare(
+            "SELECT m.id, m.wamid, m.phone, m.sender_name, m.msg_type, m.media_url, m.ts, " +
+            "       p.monto AS p_monto, p.cuenta AS p_cuenta, p.clasificacion AS p_clase " +
+            "FROM wa_messages m " +
+            "LEFT JOIN wa_pago_proof p ON p.wamid = m.wamid " +
+            "WHERE m.direction='inbound' AND m.msg_type IN ('image','document') " +
+            "  AND m.ts >= ? AND m.id > ? AND m.media_url IS NOT NULL AND m.media_url != '' " +
+            "ORDER BY m.id ASC LIMIT ?"
+          ).bind(since, afterId, limit).all();
+          rows = rs.results || [];
+        } catch (e) { return json({ error: 'query failed: ' + e.message }, 500); }
+
+        const fmtMonto = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+        const cuentaLabel = (c) => c === 'mp_gaspar' ? 'MP Gaspar' : c === 'bna_bruno' ? 'BNA Bruno' : (c === 'otra' ? 'otra cuenta' : (c || 'cuenta?'));
+        const withTimeout = (p, ms, label) => Promise.race([
+          Promise.resolve(p),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout ' + label)), ms))
+        ]);
+        const startMs = Date.now();
+        let sent = 0, failed = 0, skipped = 0, lastId = afterId, truncated = false; const errors = [];
+        for (const r of rows) {
+          if (Date.now() - startMs > maxReqMs) { truncated = true; break; }
+          lastId = r.id;
+          const ckey = 'resent:' + num + ':' + r.wamid;
+          // idempotencia: si ya lo reenviamos a este número, saltar
+          try {
+            const seen = await env.DB.prepare("SELECT 1 AS x FROM kv_cache WHERE k = ?").bind(ckey).first();
+            if (seen) { skipped++; continue; }
+          } catch (_) {}
+          try {
+            const obj = await withTimeout(env.MEDIA.get(r.media_url), itemTimeoutMs, 'r2');
+            if (!obj) { failed++; errors.push({ id: r.id, phone: r.phone, error: 'no en R2' }); continue; }
+            const buf = await withTimeout(obj.arrayBuffer(), itemTimeoutMs, 'r2-read');
+            const mime = obj.httpMetadata?.contentType || (r.msg_type === 'image' ? 'image/jpeg' : 'application/pdf');
+            const baseName = (r.media_url.split('/').pop() || '');
+            const dotExt = baseName.includes('.') ? ('.' + baseName.split('.').pop()) : '';
+            const ext = dotExt || (r.msg_type === 'image' ? '.jpg' : (mime.includes('pdf') ? '.pdf' : ''));
+            const fileName = r.msg_type === 'document' ? ('comprobante_' + r.phone + ext) : (baseName || ('img' + ext));
+            const mediaId = await withTimeout(uploadMediaToMeta(env, buf, mime, fileName), itemTimeoutMs, 'upload');
+            if (!mediaId) { failed++; errors.push({ id: r.id, phone: r.phone, error: 'upload a Meta fallo' }); continue; }
+            // ART hh:mm (UTC-3)
+            const d = new Date(r.ts);
+            const art = new Date(d.getTime() - 3 * 3600 * 1000);
+            const hhmm = String(art.getUTCHours()).padStart(2, '0') + ':' + String(art.getUTCMinutes()).padStart(2, '0');
+            const quien = (r.sender_name && r.sender_name.trim()) ? r.sender_name.trim() : r.phone;
+            let cap = quien + ' · ' + r.phone + ' · ' + hhmm;
+            if (r.p_monto && r.p_monto > 0) cap += '\n$' + fmtMonto(r.p_monto) + ' · ' + cuentaLabel(r.p_cuenta);
+            let res;
+            if (r.msg_type === 'image') res = await withTimeout(waSendImage(env, num, mediaId, cap), itemTimeoutMs, 'send');
+            else res = await withTimeout(waSendDocument(env, num, mediaId, fileName, cap), itemTimeoutMs, 'send');
+            if (res && res.ok) {
+              sent++;
+              try { await env.DB.prepare("INSERT OR REPLACE INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?)").bind(ckey, '1', new Date().toISOString()).run(); } catch (_) {}
+            } else { failed++; errors.push({ id: r.id, phone: r.phone, error: (res && res.error) || 'send fallo', code: res && res.code }); }
+          } catch (e) { failed++; errors.push({ id: r.id, phone: r.phone, error: String(e && e.message || e) }); }
+          if (delayMs) await new Promise(rr => setTimeout(rr, delayMs));
+        }
+        return json({ ok: true, batch: rows.length, sent, failed, skipped, last_id: lastId, truncated, done: !truncated && rows.length < limit, errors: errors.slice(0, 30) });
+      }
       if (request.method === 'POST' && path === '/admin/wa/set-pin') {
         if ((env.WA_PROVIDER || 'meta') !== 'meta') {
           return json({ error: '2FA PIN se gestiona desde el dashboard de 360dialog Hub', provider: env.WA_PROVIDER }, 501);
@@ -7120,6 +7290,11 @@ export default {
     ctx.waitUntil(processCursosBroadcastQueue(env));
     // Goteo del broadcast de JUNIO 2026. Encolado vía /admin/wa/junio-broadcast-schedule.
     ctx.waitUntil(processJunioBroadcastQueue(env));
+    // Backfill del reenvío de comprobantes a Gaspar (lanzamiento, hoy+mañana):
+    // reintenta los inbound media que el reenvío en vivo no logró mandar (glitch
+    // de Meta o ventana 24h momentáneamente cerrada). Idempotente vía kv_cache,
+    // se auto-apaga pasada la ventana, y si no hay pendientes no hace nada.
+    ctx.waitUntil(processGasparResendBackfill(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
@@ -7498,6 +7673,17 @@ async function waSendImage(env, to, mediaId, caption) {
     to: num,
     type: 'image',
     image: { id: mediaId, caption: caption || undefined }
+  });
+}
+
+async function waSendDocument(env, to, mediaId, filename, caption) {
+  const num = normalizeArPhone(to);
+  if (!num) return { ok: false, status: 400, error: 'numero invalido' };
+  return waSend(env, {
+    messaging_product: 'whatsapp',
+    to: num,
+    type: 'document',
+    document: { id: mediaId, filename: filename || undefined, caption: caption || undefined }
   });
 }
 
