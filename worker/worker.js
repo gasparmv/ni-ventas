@@ -2602,12 +2602,18 @@ async function analyzeImage(env, r2Key) {
 }
 
 // ===== Comprobantes de pago — lanzamiento junio 2026 =====
+// DESACTIVADO el 12/06 a pedido de Gaspar: el OCR de comprobantes y el reenvío
+// a su WhatsApp personal eran solo para la noche del 11/06. Este interruptor
+// apaga las tres piezas (OCR, reenvío en vivo y backfill). Para reactivar todo,
+// poner PAGO_CAPTURA_ACTIVA = true.
+const PAGO_CAPTURA_ACTIVA = false;
 // Ventana 11/06 00:00 → 16/06 00:00 (AR, incluye todo el 15/06). AR = UTC-3.
 const PAGO_LANZAMIENTO_START_UTC = '2026-06-11T03:00:00.000Z';
 const PAGO_LANZAMIENTO_END_UTC   = '2026-06-16T03:00:00.000Z';
 const PAGO_SENA_MIN = 30000;   // banda de la seña del acceso (~40.000 ARS)
 const PAGO_SENA_MAX = 50000;
 function isPagoLanzamientoWindow(tsIso) {
+  if (!PAGO_CAPTURA_ACTIVA) return false;   // captura desactivada → no se OCR-ea ni reenvía nada
   const t = String(tsIso || '');
   return t >= PAGO_LANZAMIENTO_START_UTC && t < PAGO_LANZAMIENTO_END_UTC;
 }
@@ -2671,6 +2677,7 @@ async function forwardProofToGaspar(env, m) {
 // cualquier backlog rápido sin recargar. Se apaga sola pasada la ventana + 3h.
 async function processGasparResendBackfill(env) {
   try {
+    if (!PAGO_CAPTURA_ACTIVA) return;               // reenvío de comprobantes desactivado (12/06)
     const endMs = new Date(RESEND_GASPAR_END_UTC).getTime() + 3 * 3600 * 1000;
     if (Date.now() > endMs) return;                 // ventana terminada → nada que hacer
     const target = RESEND_GASPAR_PHONE;
