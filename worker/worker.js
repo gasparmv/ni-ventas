@@ -2676,6 +2676,17 @@ async function ensureLabelId(env, name, color) {
   try { const r = await env.DB.prepare("SELECT id FROM labels WHERE name = ?").bind(name).first(); return r?.id || null; } catch (_) { return null; }
 }
 
+// Resuelve la cuenta destino por la INSTITUCIÓN (más confiable que el campo
+// "cuenta" del OCR, que falla si el titular figura "Neon infinito" en vez de Gaspar).
+function resolveCuenta(a) {
+  const banco = _normTxt(a && a.banco);
+  if (banco.includes('mercado pago') || banco.includes('mercadopago')) return 'mp_gaspar';
+  if (banco.includes('nacion') || banco.includes('bna')) return 'bna_bruno';
+  const c = (a && a.cuenta) || '';
+  if (c === 'mp_gaspar' || c === 'bna_bruno') return c;
+  return c || 'desconocida';
+}
+
 // Procesa un comprobante entrante: dedup por wamid, OCR, respalda en D1 y etiqueta.
 // NO responde nada (eso lo hacen a mano). Corre en ctx.waitUntil (no bloquea el webhook).
 async function processPaymentProof(env, m) {
@@ -2689,18 +2700,18 @@ async function processPaymentProof(env, m) {
   const a = await analyzePaymentProof(env, m.r2Key, m.msgType === 'document' ? 'application/pdf' : '');
   const esPago = !!(a && a.es_comprobante);
   const monto = (a && +a.monto) || 0;
+  const cuenta = resolveCuenta(a);
   let clasificacion = '', labelName = null;
   if (esPago) {
     const esSena = monto >= PAGO_SENA_MIN && monto <= PAGO_SENA_MAX;  // ~40k → seña
     if (esSena) { clasificacion = 'sena'; labelName = 'seña lanzamiento junio'; }
     else if (await hasLaunchKeyPhrase(env, m.phone, m.caption)) { clasificacion = 'lanzamiento'; labelName = 'pago lanzamiento junio'; }
-    else if (await isSimilarToLaunchAmount(env, monto)) { clasificacion = 'a_definir'; labelName = 'a definir - lanzamiento'; }
-    else { clasificacion = 'otro'; }
+    else { clasificacion = 'a_definir'; labelName = 'a definir - lanzamiento'; }  // catch-all en la ventana: ningún pago queda sin etiquetar
   }
   try {
     await env.DB.prepare(
       "UPDATE wa_pago_proof SET is_payment=?, clasificacion=?, monto=?, moneda=?, cuenta=?, titular=?, banco=?, confianza=?, raw=? WHERE wamid=?"
-    ).bind(esPago ? 1 : 0, clasificacion, monto, (a && a.moneda) || 'ARS', (a && a.cuenta) || '', (a && a.titular_destino) || '', (a && a.banco) || '', (a && +a.confianza) || 0, JSON.stringify(a || {}).slice(0, 1500), m.wamid).run();
+    ).bind(esPago ? 1 : 0, clasificacion, monto, (a && a.moneda) || 'ARS', cuenta, (a && a.titular_destino) || '', (a && a.banco) || '', (a && +a.confianza) || 0, JSON.stringify(a || {}).slice(0, 1500), m.wamid).run();
   } catch (_) {}
   if (labelName) {
     const color = labelName.indexOf('seña') === 0 ? '#06b6d4' : labelName.indexOf('pago') === 0 ? '#22c55e' : '#f59e0b';
