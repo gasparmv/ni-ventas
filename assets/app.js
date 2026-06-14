@@ -4371,6 +4371,13 @@ function openDrawerPedido(idx) {
   if (!p) return;
   const tel = extractPhone(p.envio);
   const ms = postventaMilestones(p);
+  // Carteles del mismo pedido (numero+fecha): los cambios de estado/pago/productor aplican a todos.
+  const hermanos = STATE.pedidos.filter(x => x.numero === p.numero && +x.fecha === +p.fecha);
+  const totalPedido = hermanos.reduce((s,x) => s + (Number(x.precio)||0) + (Number(x.precioDimmer)||0), 0);
+  const inpD = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:7px 9px;color:var(--fg);font-size:13px';
+  const lblD = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
+  const pedOpts = uniq([p.estadoPedido,'En produccion','para enviar','Entregado'].filter(Boolean)).map(o=>`<option ${p.estadoPedido===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
+  const pagoOpts = uniq([p.estadoPago,'1er pago','2do pago','pagado'].filter(Boolean)).map(o=>`<option ${p.estadoPago===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
   document.getElementById('drawer').innerHTML = `
     <div class="drawer-h">
       <h2>${escapeHtml(p.cartel)}</h2>
@@ -4390,21 +4397,23 @@ function openDrawerPedido(idx) {
         </dl>
       </div>
       <div class="drawer-section">
-        <h4>Pago</h4>
-        <dl class="kv">
-          <dt>Precio</dt><dd>${fmtMoney(p.precio + p.precioDimmer)}</dd>
-          <dt>Pagado</dt><dd>${fmtMoney(p.pagado)}</dd>
-          <dt>Restante</dt><dd>${fmtMoney(p.restante)}</dd>
-          <dt>Estado pago</dt><dd>${pillEstadoPago(p.estadoPago)}</dd>
-          <dt>Estado pedido</dt><dd>${pillEstadoPedido(p.estadoPedido)}</dd>
-        </dl>
+        <h4>Estado, pago y productor ${hermanos.length>1?`<span style="font-size:11px;color:var(--fg-subtle);font-weight:400">· aplica a los ${hermanos.length} carteles</span>`:''}</h4>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div><label style="${lblD}">Estado del pedido</label><select id="ped-edit-estadopedido" style="${inpD}">${pedOpts}</select></div>
+          <div style="display:flex;gap:8px">
+            <div style="flex:1"><label style="${lblD}">Estado del pago</label><select id="ped-edit-estadopago" style="${inpD}">${pagoOpts}</select></div>
+            <div style="flex:1"><label style="${lblD}">Pagado</label><input id="ped-edit-pagado" type="number" value="${p.pagado||''}" style="${inpD}"></div>
+          </div>
+          <div><label style="${lblD}">Productor</label><input id="ped-edit-productor" value="${escapeHtml(p.productor||'')}" placeholder="quién lo produce (lo cargás vos)" style="${inpD}"></div>
+          <div style="font-size:12px;color:var(--fg-subtle)">Total del pedido: <b style="color:var(--fg)">${fmtMoney(totalPedido)}</b> · Restante actual: <b style="color:var(--fg)">${fmtMoney(p.restante)}</b></div>
+          <button class="btn btn-cyan" id="ped-edit-save" onclick="savePedidoEdit(${idx})">Guardar cambios</button>
+        </div>
       </div>
       <div class="drawer-section">
         <h4>Origen</h4>
         <dl class="kv">
           <dt>Plataforma</dt><dd>${escapeHtml(p.plataforma||'—')}</dd>
           <dt>Canal AD</dt><dd>${escapeHtml(p.canalAd||'—')}</dd>
-          <dt>Productor</dt><dd>${escapeHtml(p.productor||'—')}</dd>
         </dl>
       </div>
       <div class="drawer-section">
@@ -4443,6 +4452,35 @@ function openDrawerPedido(idx) {
   document.getElementById('drawer').classList.add('open');
   document.getElementById('drawer-bg').classList.add('open');
   document.getElementById('drawer-bg').onclick = closeDrawer;
+}
+
+// Guarda los cambios de estado/pago/productor de un pedido (a nivel pedido: el
+// worker los aplica a todos los carteles del numero+fecha). Refresca tabla + drawer.
+async function savePedidoEdit(idx) {
+  const p = STATE.pedidos.find(x => x.idx === idx);
+  if (!p) return;
+  const body = {
+    estado_pedido: document.getElementById('ped-edit-estadopedido')?.value,
+    estado_pago:   document.getElementById('ped-edit-estadopago')?.value,
+    pagado:        document.getElementById('ped-edit-pagado')?.value,
+    productor:     document.getElementById('ped-edit-productor')?.value
+  };
+  const btn = document.getElementById('ped-edit-save');
+  if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx, { method: 'PATCH', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    const updated = (j.pedidos || []).map(mapPedidoFromD1);
+    const ids = new Set(updated.map(x => x.idx));
+    STATE.pedidos = STATE.pedidos.filter(x => !ids.has(x.idx)).concat(updated);
+    if (STATE.view === 'pedidos') renderTablePedidos();
+    openDrawerPedido(idx); // refrescar el drawer con lo guardado
+    toast('Pedido actualizado ✓');
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Guardar cambios'; }
+    toast('Error al guardar: ' + e.message);
+  }
 }
 
 function closeDrawer() {

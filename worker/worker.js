@@ -6888,6 +6888,35 @@ export default {
         return json({ ok: true, numero, pedidos: rs.results || [] });
       }
 
+      // PATCH /admin/pedidos/:id → edita un pedido. estado_pedido, estado_pago,
+      // productor y pagado son a NIVEL PEDIDO: se aplican a todas las filas con el
+      // mismo numero+fecha (los carteles del pedido). 'pagado' recalcula el restante
+      // = (Σ precio + Σ precio_dimmer del pedido) − pagado.
+      if (request.method === 'PATCH' && /^\/admin\/pedidos\/\d+$/.test(path)) {
+        await ensurePedidosSchema(env);
+        const id = parseInt(path.split('/').pop(), 10);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const ref = await env.DB.prepare('SELECT numero, fecha FROM pedidos WHERE id = ?').bind(id).first();
+        if (!ref) return json({ error: 'pedido no encontrado' }, 404);
+        const sets = [], args = [];
+        if ('estado_pedido' in body) { sets.push('estado_pedido = ?'); args.push(String(body.estado_pedido || '')); }
+        if ('estado_pago' in body)   { sets.push('estado_pago = ?');   args.push(String(body.estado_pago || '')); }
+        if ('productor' in body)     { sets.push('productor = ?');     args.push(String(body.productor || '')); }
+        if ('pagado' in body) {
+          const pagado = (body.pagado === '' || body.pagado == null) ? null : Number(body.pagado);
+          const tot = await env.DB.prepare('SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t FROM pedidos WHERE numero = ? AND fecha = ?').bind(ref.numero, ref.fecha).first();
+          const total = tot ? Number(tot.t) : 0;
+          const restante = pagado != null ? Math.max(0, total - pagado) : total;
+          sets.push('pagado = ?', 'restante = ?'); args.push(pagado, restante);
+        }
+        if (!sets.length) return json({ error: 'nada para actualizar' }, 400);
+        sets.push('updated_at = ?'); args.push(new Date().toISOString());
+        args.push(ref.numero, ref.fecha);
+        await env.DB.prepare(`UPDATE pedidos SET ${sets.join(', ')} WHERE numero = ? AND fecha = ?`).bind(...args).run();
+        const rs2 = await env.DB.prepare('SELECT * FROM pedidos WHERE numero = ? AND fecha = ? ORDER BY id').bind(ref.numero, ref.fecha).all();
+        return json({ ok: true, numero: ref.numero, pedidos: rs2.results || [] });
+      }
+
       // ============================================================
       // Briefs (panel de cotización conversacional)
       // ============================================================
