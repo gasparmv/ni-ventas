@@ -11666,13 +11666,13 @@ function renderBriefDrawer() {
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Frente material</label><select data-corp-bf="frente_material" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="impreso" ${(corpCj.frente_material||'impreso')!=='acrilico'?'selected':''}>Impreso</option><option value="acrilico" ${corpCj.frente_material==='acrilico'?'selected':''}>Acrílico</option></select></div>
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Frente acabado</label>${corpAc('frente_acabado', corpCj.frente_acabado||'translucido','Translúcido','Opaco')}</div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Frente color</label><input type="color" data-corp-bf="frente_color" value="${corpCj.frente_color||'#ffd400'}" style="width:100%;height:36px;padding:2px"></div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Frente color</label><input type="color" data-corp-bf="frente_color" value="${corpCj.frente_color||'#ffd400'}" style="width:100%;height:30px;padding:3px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--ink-100);cursor:pointer"></div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Lat. acabado</label>${corpAc('lat_acabado', corpCj.lat_acabado||'translucido','Transl.','Opaco')}</div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Lat. color</label><input type="color" data-corp-bf="lat_color" value="${corpCj.lat_color||'#ffffff'}" style="width:100%;height:36px;padding:2px"></div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Lat. color</label><input type="color" data-corp-bf="lat_color" value="${corpCj.lat_color||'#ffffff'}" style="width:100%;height:30px;padding:3px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--ink-100);cursor:pointer"></div>
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Esp. acabado</label>${corpAc('esp_acabado', corpCj.esp_acabado||'translucida','Transl.','Opaca')}</div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Esp. color</label><input type="color" data-corp-bf="esp_color" value="${corpCj.esp_color||'#ffffff'}" style="width:100%;height:36px;padding:2px"></div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Esp. color</label><input type="color" data-corp-bf="esp_color" value="${corpCj.esp_color||'#ffffff'}" style="width:100%;height:30px;padding:3px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--ink-100);cursor:pointer"></div>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)">
             <div><div style="font-size:11px;color:var(--fg-subtle)">Precio final</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(corpPr.precio)}</div></div>
@@ -11693,7 +11693,7 @@ function renderBriefDrawer() {
           </div>
           `}
 
-          ${estado === 'nuevo' && isDis ? `
+          ${estado === 'nuevo' && isDis && !esCorpBrief ? `
             <div style="margin-top:var(--s-2);padding:var(--s-2);background:rgba(143,212,222,.06);border-radius:4px;font-size:11px;color:var(--accent-cyan);text-align:center">
               💡 Al guardar con render + ancho + alto + neón completos, pasa automáticamente a "Listos".
             </div>
