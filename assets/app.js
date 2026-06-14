@@ -12264,7 +12264,7 @@ async function confirmQuickCreate() {
       medidas_libre: medidas || null,
       notas: notas || null,
       estado: 'nuevo',
-      tipo: STATE.quickModalTipo || null,
+      tipo: (STATE.view === 'corporeas' ? 'corporea' : null),
       urgente
     });
     STATE.briefs.unshift(saved);
