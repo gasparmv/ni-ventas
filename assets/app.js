@@ -11911,7 +11911,7 @@ document.addEventListener('click', (ev) => {
   if (t.closest && t.closest('#corp-ver-presupuesto') && STATE.briefSelected) { openCorpPopup(STATE.briefSelected); return; }
   if (t.closest && t.closest('[data-corp-popup-close]')) { closeCorpPopup(); return; }
   if (t.matches && t.matches('[data-corp-popup-bg]')) { closeCorpPopup(); return; }
-  if (t.closest && t.closest('[data-corp-popup-copy]')) { const ta = document.getElementById('corp-popup-text'); if (ta) { copyToClipboard(ta.value); toast('Copiado'); } return; }
+  if (t.closest && t.closest('[data-corp-popup-copy]')) { const ta = document.getElementById('corp-popup-text'); if (ta) { try { navigator.clipboard.writeText(ta.value); } catch(e){ ta.select(); document.execCommand('copy'); } toast('Copiado'); } return; }
   if (t.closest && t.closest('[data-corp-popup-send]')) { const ta = document.getElementById('corp-popup-text'); if (ta && STATE.corpPopupBrief) enviarCorporeaPresupuesto(STATE.corpPopupBrief, ta.value); return; }
 });
 function renderCorporeaPrice() {
