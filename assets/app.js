@@ -11461,6 +11461,11 @@ function renderBriefDrawer() {
   const role = getUserRole();
   const isCom = role === 'comercial' || role === 'admin';
   const isDis = role === 'disenador' || role === 'admin';
+  const esCorpBrief = data.tipo === 'corporea';
+  let corpCj = {}; if (esCorpBrief) { try { corpCj = JSON.parse(data.corporea_json || '{}') || {}; } catch(e){} }
+  const corpSinLuz = esCorpBrief && corpCj.con_luz === false;
+  const corpPr = esCorpBrief ? calcCorporea({ ancho: data.ancho_cm, alto: data.alto_cm, con_luz: corpSinLuz ? '0' : '1', frente_material: corpCj.frente_material || 'impreso' }) : null;
+  const corpAc = (field, val, l0, l1) => corpSinLuz ? '<span class="pill" style="font-size:11px">opaco</span>' : `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="translucido" ${String(val||'').startsWith('transl')?'selected':''}>${l0}</option><option value="opaco" ${!String(val||'').startsWith('transl')?'selected':''}>${l1}</option></select>`;
   const estado = data.estado || 'nuevo';
 
   // Imágenes separadas por tipo.
@@ -11622,7 +11627,9 @@ function renderBriefDrawer() {
             </div>`;
           })()}
 
-          <!-- Medidas (auto-rellenadas por AI o editables a mano) -->
+          <!-- Medidas (auto-rellenadas por AI o editables a mano). Solo carteles:
+               las corpóreas tienen su propia grilla (medidas + specs) más abajo. -->
+          ${!esCorpBrief ? `
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
             <div>
               <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho (cm)</label>
@@ -11649,7 +11656,30 @@ function renderBriefDrawer() {
                      placeholder="ej. 15"
                      style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);${!isDis ? 'opacity:.7' : ''}">
             </div>
+          </div>` : ''}
+          ${esCorpBrief ? `
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho (cm)</label><input type="number" step="1" data-bf="ancho_cm" value="${data.ancho_cm || ''}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"></div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Alto (cm)</label><input type="number" step="1" data-bf="alto_cm" value="${data.alto_cm || ''}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"></div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Iluminación</label><select data-corp-bf="con_luz" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="1" ${!corpSinLuz?'selected':''}>Con luz</option><option value="0" ${corpSinLuz?'selected':''}>Sin luz</option></select></div>
           </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Frente material</label><select data-corp-bf="frente_material" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="impreso" ${(corpCj.frente_material||'impreso')!=='acrilico'?'selected':''}>Impreso</option><option value="acrilico" ${corpCj.frente_material==='acrilico'?'selected':''}>Acrílico</option></select></div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Frente acabado</label>${corpAc('frente_acabado', corpCj.frente_acabado||'translucido','Translúcido','Opaco')}</div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Frente color</label><input type="color" data-corp-bf="frente_color" value="${corpCj.frente_color||'#ffd400'}" style="width:100%;height:36px;padding:2px"></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Lat. acabado</label>${corpAc('lat_acabado', corpCj.lat_acabado||'translucido','Transl.','Opaco')}</div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Lat. color</label><input type="color" data-corp-bf="lat_color" value="${corpCj.lat_color||'#ffffff'}" style="width:100%;height:36px;padding:2px"></div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Esp. acabado</label>${corpAc('esp_acabado', corpCj.esp_acabado||'translucida','Transl.','Opaca')}</div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Esp. color</label><input type="color" data-corp-bf="esp_color" value="${corpCj.esp_color||'#ffffff'}" style="width:100%;height:36px;padding:2px"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)">
+            <div><div style="font-size:11px;color:var(--fg-subtle)">Precio final</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(corpPr.precio)}</div></div>
+            <div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${corpPr.m2.toLocaleString('es-AR',{maximumFractionDigits:2})} m²${isAdmin()?` · costo ${fmtMoney(corpPr.costo)} · ×${corpPr.margen}`:''}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(corpPr.precio*0.03))}</div>
+          </div>
+          <div style="font-size:11px;color:var(--fg-mute);margin-top:6px">💡 Guardá para recalcular el precio y dejar la config lista para el render.</div>
+          ` : `
           <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Tipo</label>
           <div style="display:flex;gap:8px">
             <label style="flex:1;cursor:${isDis ? 'pointer' : 'default'};opacity:${isDis ? '1' : '.7'}">
@@ -11661,6 +11691,7 @@ function renderBriefDrawer() {
               Exterior
             </label>
           </div>
+          `}
 
           ${estado === 'nuevo' && isDis ? `
             <div style="margin-top:var(--s-2);padding:var(--s-2);background:rgba(143,212,222,.06);border-radius:4px;font-size:11px;color:var(--accent-cyan);text-align:center">
@@ -12439,6 +12470,29 @@ function readBriefDrawerForm() {
   if (tipoEl && !tipoEl.disabled) out.tipo = tipoEl.value;
   const origenEl = document.querySelector('[data-bf-radio="origen_lead"]:checked');
   if (origenEl && !origenEl.disabled) out.origen_lead = origenEl.value;
+  // Corpóreas: si el drawer tiene specs (data-corp-bf), armamos corporea_json +
+  // precio_final + comisión Joaco (3%) desde esos campos. No toca tipo (queda 'corporea').
+  const corpEls = document.querySelectorAll('[data-corp-bf]');
+  if (corpEls.length) {
+    const cf = {};
+    corpEls.forEach(el => { if (!el.disabled) cf[el.dataset.corpBf] = el.value; });
+    const ancho = +out.ancho_cm || +cf.ancho_cm || 0;
+    const alto  = +out.alto_cm  || +cf.alto_cm  || 0;
+    const sinLuz = String(cf.con_luz) === '0';
+    const r = calcCorporea({ ancho, alto, con_luz: cf.con_luz, frente_material: cf.frente_material });
+    out.corporea_json = JSON.stringify({
+      frente_material: cf.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
+      con_luz: !sinLuz,
+      frente_acabado: sinLuz ? 'opaco' : cf.frente_acabado, frente_color: cf.frente_color,
+      lat_acabado: sinLuz ? 'opaco' : cf.lat_acabado, lat_color: cf.lat_color,
+      esp_acabado: sinLuz ? 'opaca' : cf.esp_acabado, esp_color: cf.esp_color,
+      ancho_cm: ancho, alto_cm: alto, m2: r.m2,
+      costo_m2: r.costoM2, margen: r.margen, costo: r.costo, precio: r.precio,
+      comision_joaco: Math.round(r.precio * 0.03)
+    });
+    out.precio_final = r.precio;
+    out.m2 = r.m2;
+  }
   return out;
 }
 
