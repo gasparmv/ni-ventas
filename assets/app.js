@@ -1351,7 +1351,9 @@ function mapPedidoFromD1(row) {
     pagado: row.pagado || 0,
     restante: row.restante || 0,
     estadoPedido: row.estado_pedido || '',
-    canalAd: row.ad || ''
+    canalAd: row.ad || '',
+    tramos: row.tramos || '',
+    tipo: row.tipo || ''
   };
 }
 
@@ -3360,7 +3362,7 @@ function pillEstadoPedido(s) {
 // del ad por telefono (WPP).
 const DIMMER_PRECIOS = { NO: '', SLIM: 18700, CONTROL: 25000, APP: 38000 };
 function nuevoCartelPedido() {
-  return { cartel:'', colores:'', alto:'', ancho:'', cmNeon:'', base:'TRANS', cantidad:1, precio:'', dimer:'NO', precioDimmer:'', envio:'', aclaracion:'' };
+  return { cartel:'', colores:'', tipo:'INT', alto:'', ancho:'', cmNeon:'', tramos:'', base:'TRANS', cantidad:1, precio:'', dimer:'NO', precioDimmer:'', envio:'', aclaracion:'' };
 }
 function suggestProximoNumero() {
   const ps = (STATE.pedidos || []).filter(p => p.numero);
@@ -3388,7 +3390,7 @@ function readPedidoModalDOM() {
   ['numero','telefono','pagado','ad'].forEach(f => { const x = v('pm-'+f); if (x !== undefined) m[f] = x; });
   const ep = v('pm-estadopago'); if (ep !== undefined) m.estadoPago = ep;
   (m.carteles||[]).forEach((c,i) => {
-    ['cartel','colores','alto','ancho','cmNeon','cantidad','precio','precioDimmer','envio','aclaracion','base','dimer'].forEach(f => {
+    ['cartel','alto','ancho','cmNeon','tramos','cantidad','precio','precioDimmer','envio','aclaracion','base','dimer','tipo'].forEach(f => {
       const x = v(`pm-${f}-${i}`); if (x !== undefined) c[f] = x;
     });
   });
@@ -3424,35 +3426,103 @@ async function pmTraceAd() {
     setTimeout(() => { adEl.style.borderColor = 'var(--border)'; }, 1600);
   } catch (e) {}
 }
+// Paleta del muestrario (dropdown multi-color → chips).
+const PEDIDO_COLORES = ['Amarillo','Azul','Blanco cálido','Blanco frío','Celeste','Naranja','Rojo','Rosa','Verde','Violeta'];
+const PEDIDO_COLOR_HEX = { 'Amarillo':'#f5d020','Azul':'#2a5cff','Blanco cálido':'#ffe3a8','Blanco frío':'#eaf2ff','Celeste':'#5ad1e6','Naranja':'#ff8a1e','Rojo':'#ff2d2d','Rosa':'#ff4fa3','Verde':'#39e639','Violeta':'#9b5cff' };
+function pmColorList(c) { return String(c.colores||'').split(/,\s*/).map(s=>s.trim()).filter(Boolean); }
+function pmAddColor(i, color) {
+  if (!color) return;
+  readPedidoModalDOM();
+  const c = STATE.pedidoModal.carteles[i];
+  const list = pmColorList(c);
+  if (!list.includes(color)) list.push(color);
+  c.colores = list.join(', ');
+  render();
+}
+function pmRemoveColor(i, color) {
+  readPedidoModalDOM();
+  const c = STATE.pedidoModal.carteles[i];
+  c.colores = pmColorList(c).filter(x => x !== color).join(', ');
+  render();
+}
+// Autocomplete del diseño contra las cotizaciones (STATE.presupuestos). Si el
+// pedido siguió el flujo de cotización aparece acá y prellena medidas/tipo/tel.
+function pmCartelAutocomplete(i) {
+  const input = document.getElementById('pm-cartel-' + i);
+  const box = document.getElementById('pm-ac-' + i);
+  if (!input || !box) return;
+  const q = normName(input.value);
+  if (q.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const matches = (STATE.presupuestos || []).filter(p => p.nombre && normName(p.nombre).includes(q)).slice(0, 8);
+  if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  STATE._pmAcMatches = matches;
+  box.innerHTML = matches.map((p, k) => `<div data-pm-ac-pick="${i}|${k}" style="padding:7px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border)"><b>${escapeHtml(p.nombre)}</b><span style="color:var(--fg-mute)"> · ${escapeHtml(p.tipo||'')}${p.ancho?(' · '+p.ancho+'×'+(p.tamCm||'?')+'cm'):''}${p.neonMt?(' · '+p.neonMt+'m neón'):''}</span></div>`).join('');
+  box.style.display = 'block';
+  box.querySelectorAll('[data-pm-ac-pick]').forEach(el => el.onmousedown = (ev) => {
+    ev.preventDefault(); // antes del blur del input
+    const parts = el.dataset.pmAcPick.split('|');
+    pmPickCotizacion(parseInt(parts[0],10), parseInt(parts[1],10));
+  });
+}
+function pmPickCotizacion(i, k) {
+  const p = (STATE._pmAcMatches || [])[k];
+  if (!p) return;
+  readPedidoModalDOM();
+  const c = STATE.pedidoModal.carteles[i];
+  c.cartel = p.nombre;
+  if (p.tamCm) c.alto = p.tamCm;        // "Tamaño (cm)" del cotizador ≈ alto
+  if (p.ancho) c.ancho = p.ancho;
+  if (p.neonMt) c.cmNeon = Math.round(p.neonMt * 100); // cotizador en metros → cm
+  if (p.tipo === 'INT' || p.tipo === 'EXT') c.tipo = p.tipo;
+  const m = STATE.pedidoModal;
+  if (!m.telefono && p.telefono) m.telefono = String(p.telefono).replace(/\D/g, '');
+  if (p.canal === 'WPP' || p.canal === 'IG') m.plataforma = p.canal;
+  render();
+  toast('Prellenado desde la cotización "' + p.nombre + '" — revisá medidas y poné el precio');
+}
 function renderPedidoCartelBlock(c, i, n) {
   const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px';
   const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
   const baseOpts = ['TRANS','NEGRO'].map(o=>`<option ${c.base===o?'selected':''}>${o}</option>`).join('');
   const dimerOpts = ['NO','SLIM','CONTROL','APP'].map(o=>`<option ${c.dimer===o?'selected':''}>${o}</option>`).join('');
+  const tipoOpts = [['INT','Interior'],['EXT','Exterior']].map(([v,l])=>`<option value="${v}" ${c.tipo===v?'selected':''}>${l}</option>`).join('');
+  const cols = pmColorList(c);
+  const chips = cols.map(col => `<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(143,212,222,.10);border:1px solid var(--border);border-radius:11px;padding:2px 5px 2px 8px;font-size:11px;margin:0 4px 4px 0"><span style="width:9px;height:9px;border-radius:50%;background:${PEDIDO_COLOR_HEX[col]||'#888'};display:inline-block;border:1px solid rgba(255,255,255,.3)"></span>${escapeHtml(col)}<button data-pm-color-rm="${i}|${escapeHtml(col)}" title="Quitar" style="background:none;border:0;color:var(--fg-subtle);cursor:pointer;font-size:12px;line-height:1;padding:0 1px">✕</button></span>`).join('');
+  const colorOpts = '<option value="">＋ agregar color…</option>' + PEDIDO_COLORES.filter(col=>!cols.includes(col)).map(col=>`<option>${col}</option>`).join('');
   return `
     <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
         <span style="font-size:11px;color:var(--accent-cyan);font-weight:700">Cartel ${i+1}</span>
         ${n>1 ? `<button class="btn btn-ghost" data-pm-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
       </div>
-      <div style="margin-bottom:6px"><label style="${lbl}">Cartel / diseño *</label><input id="pm-cartel-${i}" value="${escapeHtml(c.cartel||'')}" placeholder="ej. Magnolia café-bar" style="${inp}"></div>
-      <div style="display:flex;gap:6px;margin-bottom:6px">
-        <div style="flex:2"><label style="${lbl}">Colores</label><input id="pm-colores-${i}" value="${escapeHtml(c.colores||'')}" style="${inp}"></div>
-        <div style="flex:1"><label style="${lbl}">Cant.</label><input id="pm-cantidad-${i}" type="number" value="${escapeHtml(String(c.cantidad??1))}" style="${inp}"></div>
+      <div style="margin-bottom:6px;position:relative">
+        <label style="${lbl}">Cartel / diseño * <span style="opacity:.5;text-transform:none;letter-spacing:0">— si fue cotizado, elegilo y se prellena</span></label>
+        <input id="pm-cartel-${i}" data-pm-ac="${i}" autocomplete="off" value="${escapeHtml(c.cartel||'')}" placeholder="ej. Magnolia café-bar" style="${inp}">
+        <div id="pm-ac-${i}" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:6;background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);max-height:190px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5)"></div>
       </div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
-        <div style="flex:1"><label style="${lbl}">Alto cm</label><input id="pm-alto-${i}" type="number" value="${escapeHtml(String(c.alto||''))}" style="${inp}"></div>
-        <div style="flex:1"><label style="${lbl}">Ancho cm</label><input id="pm-ancho-${i}" type="number" value="${escapeHtml(String(c.ancho||''))}" style="${inp}"></div>
-        <div style="flex:1"><label style="${lbl}">CM neón</label><input id="pm-cmNeon-${i}" type="number" value="${escapeHtml(String(c.cmNeon||''))}" style="${inp}"></div>
-        <div style="flex:1"><label style="${lbl}">Base</label><select id="pm-base-${i}" style="${inp}">${baseOpts}</select></div>
+        <div style="flex:2">
+          <label style="${lbl}">Colores *</label>
+          <div style="margin-bottom:3px">${chips || '<span style="font-size:11px;color:var(--fg-mute)">elegí del muestrario →</span>'}</div>
+          <select data-pm-coloradd="${i}" style="${inp}">${colorOpts}</select>
+        </div>
+        <div style="flex:1"><label style="${lbl}">Tipo *</label><select id="pm-tipo-${i}" style="${inp}">${tipoOpts}</select></div>
+        <div style="flex:0.8"><label style="${lbl}">Cant. *</label><input id="pm-cantidad-${i}" type="number" value="${escapeHtml(String(c.cantidad??1))}" style="${inp}"></div>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><label style="${lbl}">Alto cm *</label><input id="pm-alto-${i}" type="number" value="${escapeHtml(String(c.alto||''))}" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Ancho cm *</label><input id="pm-ancho-${i}" type="number" value="${escapeHtml(String(c.ancho||''))}" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">CM neón *</label><input id="pm-cmNeon-${i}" type="number" value="${escapeHtml(String(c.cmNeon||''))}" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Tramos</label><input id="pm-tramos-${i}" type="number" value="${escapeHtml(String(c.tramos||''))}" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Base *</label><select id="pm-base-${i}" style="${inp}">${baseOpts}</select></div>
       </div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
         <div style="flex:1.3"><label style="${lbl}">Precio cartel *</label><input id="pm-precio-${i}" type="number" value="${escapeHtml(String(c.precio||''))}" placeholder="$" style="${inp}" data-pm-calc></div>
-        <div style="flex:1"><label style="${lbl}">Dimmer</label><select id="pm-dimer-${i}" data-pm-dimer="${i}" style="${inp}">${dimerOpts}</select></div>
+        <div style="flex:1"><label style="${lbl}">Dimmer *</label><select id="pm-dimer-${i}" data-pm-dimer="${i}" style="${inp}">${dimerOpts}</select></div>
         <div style="flex:1"><label style="${lbl}">Precio dimmer</label><input id="pm-precioDimmer-${i}" type="number" value="${escapeHtml(String(c.precioDimmer||''))}" placeholder="auto" style="${inp}" data-pm-calc></div>
       </div>
       <div style="display:flex;gap:6px">
-        <div style="flex:1"><label style="${lbl}">Envío</label><input id="pm-envio-${i}" value="${escapeHtml(c.envio||'')}" placeholder="ej. CABA / exterior" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Envío *</label><input id="pm-envio-${i}" value="${escapeHtml(c.envio||'')}" placeholder="ej. CABA / exterior" style="${inp}"></div>
         <div style="flex:1.6"><label style="${lbl}">Aclaración</label><input id="pm-aclaracion-${i}" value="${escapeHtml(c.aclaracion||'')}" style="${inp}"></div>
       </div>
     </div>`;
@@ -3521,6 +3591,15 @@ function bindPedidoModal() {
     pmRecalc();
   });
   document.querySelectorAll('[data-pm-calc]').forEach(el => el.addEventListener('input', pmRecalc));
+  // Autocomplete del diseño (cotizaciones).
+  document.querySelectorAll('[data-pm-ac]').forEach(el => {
+    const i = parseInt(el.dataset.pmAc, 10);
+    el.oninput = () => pmCartelAutocomplete(i);
+    el.onblur = () => setTimeout(() => { const box = document.getElementById('pm-ac-' + i); if (box) box.style.display = 'none'; }, 150);
+  });
+  // Colores: dropdown agrega chip / ✕ quita.
+  document.querySelectorAll('[data-pm-coloradd]').forEach(sel => sel.onchange = () => pmAddColor(parseInt(sel.dataset.pmColoradd, 10), sel.value));
+  document.querySelectorAll('[data-pm-color-rm]').forEach(b => b.onclick = () => { const p = b.dataset.pmColorRm.split('|'); pmRemoveColor(parseInt(p[0], 10), p[1]); });
   const tel = document.getElementById('pm-telefono'); if (tel) tel.addEventListener('blur', pmTraceAd);
   const cf = document.getElementById('pm-confirm'); if (cf) cf.onclick = confirmCargarPedido;
 }
@@ -3530,16 +3609,28 @@ async function confirmCargarPedido() {
   const m = STATE.pedidoModal;
   const carteles = (m.carteles||[]).filter(c => String(c.cartel||'').trim());
   if (!carteles.length) { toast('Poné al menos un cartel con nombre'); return; }
-  const sinPrecio = carteles.findIndex(c => !(Number(c.precio) > 0));
-  if (sinPrecio >= 0) { toast(`Falta el precio del cartel ${sinPrecio+1}`); return; }
+  if (m.plataforma === 'WPP' && String(m.telefono||'').replace(/\D/g,'').length < 8) { toast('El teléfono es obligatorio para WhatsApp'); return; }
+  for (let k = 0; k < carteles.length; k++) {
+    const c = carteles[k], nro = k + 1;
+    if (!String(c.colores||'').trim())   { toast(`Cartel ${nro}: elegí al menos un color`); return; }
+    if (!(Number(c.cantidad) > 0))       { toast(`Cartel ${nro}: falta la cantidad`); return; }
+    if (!(Number(c.alto) > 0))           { toast(`Cartel ${nro}: falta el alto`); return; }
+    if (!(Number(c.ancho) > 0))          { toast(`Cartel ${nro}: falta el ancho`); return; }
+    if (!(Number(c.cmNeon) > 0))         { toast(`Cartel ${nro}: faltan los cm de neón`); return; }
+    if (!String(c.base||'').trim())      { toast(`Cartel ${nro}: falta la base`); return; }
+    if (!(Number(c.precio) > 0))         { toast(`Cartel ${nro}: falta el precio`); return; }
+    if (c.dimer && c.dimer !== 'NO' && !(Number(c.precioDimmer) > 0)) { toast(`Cartel ${nro}: falta el precio del dimmer`); return; }
+    if (!String(c.envio||'').trim())     { toast(`Cartel ${nro}: falta el envío`); return; }
+  }
+  if (!(Number(m.pagado) > 0)) { toast('Falta el monto de la seña (pagado)'); return; }
   STATE.pedidoModalSaving = true; render();
   try {
     const payload = {
       numero: m.numero ? Number(m.numero) : undefined,
       plataforma: m.plataforma, telefono: m.telefono, estado_pago: m.estadoPago, pagado: m.pagado, ad: m.ad,
       carteles: carteles.map(c => ({
-        cartel: c.cartel, colores: c.colores, alto: c.alto, ancho: c.ancho, cm_neon: c.cmNeon,
-        base: c.base, cantidad: c.cantidad, precio: c.precio, dimer: c.dimer, precio_dimmer: c.precioDimmer,
+        cartel: c.cartel, colores: c.colores, tipo: c.tipo, alto: c.alto, ancho: c.ancho, cm_neon: c.cmNeon,
+        tramos: c.tramos, base: c.base, cantidad: c.cantidad, precio: c.precio, dimer: c.dimer, precio_dimmer: c.precioDimmer,
         envio: c.envio, aclaracion: c.aclaracion
       }))
     };

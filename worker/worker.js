@@ -141,7 +141,7 @@ function parseCsv(csv) {
 // ===== Pedidos: migración del Excel de Ventas (hoja 2026) a D1 =====
 // D1 pasa a ser la fuente de verdad; el Excel queda como espejo (fase posterior).
 async function ensurePedidosSchema(env) {
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, fecha TEXT, cartel TEXT, colores TEXT, alto REAL, ancho REAL, cm_neon REAL, base TEXT, cantidad REAL, precio REAL, dimer TEXT, precio_dimmer REAL, envio TEXT, aclaracion TEXT, productor TEXT, plataforma TEXT, estado_pago TEXT, pagado REAL, restante REAL, estado_pedido TEXT, ad TEXT, telefono TEXT, sheet_row INTEGER, origen TEXT NOT NULL DEFAULT 'backfill', created_at TEXT, updated_at TEXT)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, fecha TEXT, cartel TEXT, colores TEXT, alto REAL, ancho REAL, cm_neon REAL, base TEXT, cantidad REAL, precio REAL, dimer TEXT, precio_dimmer REAL, envio TEXT, aclaracion TEXT, productor TEXT, plataforma TEXT, estado_pago TEXT, pagado REAL, restante REAL, estado_pedido TEXT, ad TEXT, telefono TEXT, tramos REAL, tipo TEXT, sheet_row INTEGER, origen TEXT NOT NULL DEFAULT 'backfill', created_at TEXT, updated_at TEXT)`).run();
 }
 // Número de precio → entero. Los precios de NI son SIEMPRE enteros en pesos (sin
 // centavos). Google CSV puede mandar "149500", "149.500", "149,500", "$149.500",
@@ -6825,13 +6825,13 @@ export default {
         const ad = String(body.ad || '');
         const telefono = String(body.telefono || '').replace(/\D/g, '');
         const stmts = carteles.map(c => env.DB.prepare(
-          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, sheet_row, origen, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, NULL, 'crm', ?, ?)`
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, sheet_row, origen, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, NULL, 'crm', ?, ?)`
         ).bind(
           numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
           num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
           num(c.cantidad) || 1, num(c.precio), String(c.dimer || 'NO').trim(), num(c.precio_dimmer),
-          String(c.envio || '').trim(), String(c.aclaracion || '').trim(),
+          String(c.envio || '').trim(), String(c.aclaracion || '').trim(), num(c.tramos), String(c.tipo || '').trim(),
           plataforma, estadoPago, pagado, restante, ad, telefono, now, now
         ));
         await env.DB.batch(stmts);
