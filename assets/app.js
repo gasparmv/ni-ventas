@@ -11738,7 +11738,7 @@ function renderBriefDrawer() {
           ${!isNew && canCreateBriefs() ? `<button class="btn btn-ghost" id="brief-delete" style="color:#FF5566;border-color:rgba(255,24,48,.25)" title="Eliminar este brief">🗑 Eliminar</button>` : ''}
           ${!isNew && estado === 'nuevo' && canCreateBriefs() ? `<button class="btn btn-ghost" id="brief-urgente-toggle" title="${data.urgente ? 'Quitar urgente' : 'Marcar urgente (prioridad para Emma)'}" style="color:${data.urgente ? '#ff5468' : 'var(--fg-subtle)'};border-color:${data.urgente ? 'rgba(255,24,48,.5)' : 'var(--border)'}">🔥 ${data.urgente ? 'Urgente ✓' : 'Marcar urgente'}</button>` : ''}
           <div style="flex:1"></div>
-          ${!isNew && estado === 'listo' && canCotizar() ? (esCorpBrief ? `<button class="btn btn-cyan" id="corp-enviar-presupuesto" ${STATE.briefsEnviando[STATE.briefSelected]?'disabled':''}>${STATE.briefsEnviando[STATE.briefSelected]?'Enviando…':'📤 Enviar presupuesto'}</button>` : `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Ver presupuesto</button>`) : ''}
+          ${!isNew && estado === 'listo' && canCotizar() ? (esCorpBrief ? `<button class="btn btn-cyan" id="corp-ver-presupuesto">💰 Ver presupuesto</button>` : `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Ver presupuesto</button>`) : ''}
           ${!isNew && (estado === 'listo' || estado === 'enviado') && canCotizar() ? `<button class="btn btn-ghost" id="brief-modificar" title="Volver a 'A cotizar' para que Emma lo modifique (queda urgente y arriba de todo)" style="color:#FFA726;border-color:rgba(255,167,38,.4)">🔧 Mandar a modificar</button>` : ''}
           ${!isNew && estado === 'enviado' && isCom ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir Cotizador</button>` : ''}
           ${(isCom || isDis || isNew) ? `<button class="btn ${isNew ? 'btn-cyan' : 'btn-ghost'}" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>` : ''}
@@ -11862,20 +11862,31 @@ document.addEventListener('click', (ev) => {
   }
   document.querySelectorAll('[id^="corp-colorpanel-"]').forEach(p => p.style.display = 'none');
 });
-// ===== Enviar presupuesto de corpórea (Stage C) — WhatsApp directo, SIN tocar el Sheet de neones =====
+// ===== Presupuesto de corpórea (Stage C) — popup con texto editable + copiar + enviar por WhatsApp.
+// Mismo flujo que "Ver presupuesto" de neones, pero con precio/texto corpóreo y SIN tocar el Sheet.
 function corpPresupuestoTexto(brief, cj) {
   const nombre = brief.cliente_nombre ? ` "${brief.cliente_nombre}"` : '';
   const med = (cj.ancho_cm && cj.alto_cm) ? ` (${cj.ancho_cm}×${cj.alto_cm} cm)` : (brief.medidas_libre ? ` (${brief.medidas_libre})` : '');
   return `Hola! Te paso el presupuesto del cartel corpóreo${nombre}${med}:\n\n💰 Precio: ${fmtMoney(brief.precio_final || 0)}\n\nCualquier duda quedo a disposición. Saludos!`;
 }
-async function enviarCorporeaPresupuesto(briefId) {
+function openCorpPopup(id) { STATE.corpPopupBrief = id; STATE.corpPopupText = null; render(); }
+function closeCorpPopup() { STATE.corpPopupBrief = null; STATE.corpPopupText = null; render(); }
+function renderCorpPopup() {
+  const id = STATE.corpPopupBrief; if (!id) return '';
+  const brief = STATE.briefs.find(b => b.id === id); if (!brief) return '';
+  let cj = {}; try { cj = JSON.parse(brief.corporea_json || '{}') || {}; } catch (e) {}
+  const texto = STATE.corpPopupText != null ? STATE.corpPopupText : corpPresupuestoTexto(brief, cj);
+  const noTel = !String(brief.cliente_wa_id || '').replace(/\D/g, '');
+  const sending = !!STATE.briefsEnviando[id];
+  return `<div style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:flex;align-items:center;justify-content:center" data-corp-popup-bg><div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-md,10px);padding:var(--s-4);width:min(520px,92vw);max-height:90vh;overflow:auto"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2)"><h3 style="margin:0;font-size:16px">Presupuesto · ${escapeHtml(brief.cliente_nombre || 'corpórea')}</h3><button class="btn btn-ghost" data-corp-popup-close>✕</button></div><div style="font-size:13px;color:var(--fg-subtle);margin-bottom:var(--s-2)">Precio final: <b style="color:var(--accent-cyan);font-size:15px">${fmtMoney(brief.precio_final || 0)}</b>${isAdmin() ? ` · comisión Joaco 3%: ${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}` : ''}</div><textarea id="corp-popup-text" rows="9" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:13px;font-family:inherit;resize:vertical">${escapeHtml(texto)}</textarea><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:var(--s-3)"><button class="btn btn-ghost" data-corp-popup-copy>📋 Copiar</button><button class="btn btn-cyan" data-corp-popup-send ${(sending || noTel) ? 'disabled' : ''} ${noTel ? 'title="Falta el teléfono del cliente"' : ''}>${sending ? 'Enviando…' : '📤 Enviar por WhatsApp'}</button></div></div></div>`;
+}
+async function enviarCorporeaPresupuesto(briefId, textOverride) {
   const brief = STATE.briefs.find(b => b.id === briefId);
   if (!brief || STATE.briefsEnviando[briefId]) return;
   const tel = String(brief.cliente_wa_id || '').replace(/\D/g, '');
   if (!tel) { toast('Falta el teléfono del cliente para enviar por WhatsApp'); return; }
   let cj = {}; try { cj = JSON.parse(brief.corporea_json || '{}') || {}; } catch (e) {}
-  const texto = corpPresupuestoTexto(brief, cj);
-  if (!confirm('Enviar este presupuesto por WhatsApp al cliente?\n\n' + texto)) return;
+  const texto = textOverride != null ? textOverride : corpPresupuestoTexto(brief, cj);
   STATE.briefsEnviando[briefId] = true; render();
   try {
     const res = await fetch(`${CONFIG.trackerUrl}/admin/wa/send`, {
@@ -11887,6 +11898,7 @@ async function enviarCorporeaPresupuesto(briefId) {
     const updated = await marcarBriefEnviado(briefId, { precio_final: brief.precio_final });
     const i = STATE.briefs.findIndex(b => b.id === updated.id);
     if (i >= 0) STATE.briefs[i] = updated;
+    STATE.corpPopupBrief = null;
     toast('✓ Presupuesto enviado');
   } catch (e) {
     toast('No se pudo enviar: ' + (e.message || e));
@@ -11895,8 +11907,12 @@ async function enviarCorporeaPresupuesto(briefId) {
   }
 }
 document.addEventListener('click', (ev) => {
-  const b = ev.target.closest && ev.target.closest('#corp-enviar-presupuesto');
-  if (b && !b.disabled && STATE.briefSelected) enviarCorporeaPresupuesto(STATE.briefSelected);
+  const t = ev.target;
+  if (t.closest && t.closest('#corp-ver-presupuesto') && STATE.briefSelected) { openCorpPopup(STATE.briefSelected); return; }
+  if (t.closest && t.closest('[data-corp-popup-close]')) { closeCorpPopup(); return; }
+  if (t.matches && t.matches('[data-corp-popup-bg]')) { closeCorpPopup(); return; }
+  if (t.closest && t.closest('[data-corp-popup-copy]')) { const ta = document.getElementById('corp-popup-text'); if (ta) { copyToClipboard(ta.value); toast('Copiado'); } return; }
+  if (t.closest && t.closest('[data-corp-popup-send]')) { const ta = document.getElementById('corp-popup-text'); if (ta && STATE.corpPopupBrief) enviarCorporeaPresupuesto(STATE.corpPopupBrief, ta.value); return; }
 });
 function renderCorporeaPrice() {
   const f = STATE.corporeaForm;
@@ -12132,6 +12148,7 @@ function renderCotizacion(producto = 'neon') {
       </div>
       ${renderBriefDrawer()}
       ${renderBriefCotizadorPopup()}
+      ${renderCorpPopup()}
       ${renderImgLightbox()}
       ${renderQuickCreateModal()}
       ${renderTeamChatWidget()}
