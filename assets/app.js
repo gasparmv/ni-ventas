@@ -3475,9 +3475,10 @@ function pmPickCotizacion(i, k) {
   if (p.neonMt) c.cmNeon = Math.round(p.neonMt * 100); // cotizador en metros → cm
   if (p.tipo === 'INT' || p.tipo === 'EXT') c.tipo = p.tipo;
   const m = STATE.pedidoModal;
-  if (!m.telefono && p.telefono) m.telefono = String(p.telefono).replace(/\D/g, '');
+  if (p.telefono) m.telefono = String(p.telefono).replace(/\D/g, '');
   if (p.canal === 'WPP' || p.canal === 'IG') m.plataforma = p.canal;
   render();
+  pmTraceAd(); // trazar el ad con el teléfono recién prellenado (WPP)
   toast('Prellenado desde la cotización "' + p.nombre + '" — revisá medidas y poné el precio');
 }
 function renderPedidoCartelBlock(c, i, n) {
@@ -3488,7 +3489,10 @@ function renderPedidoCartelBlock(c, i, n) {
   const tipoOpts = [['INT','Interior'],['EXT','Exterior']].map(([v,l])=>`<option value="${v}" ${c.tipo===v?'selected':''}>${l}</option>`).join('');
   const cols = pmColorList(c);
   const chips = cols.map(col => `<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(143,212,222,.10);border:1px solid var(--border);border-radius:11px;padding:2px 5px 2px 8px;font-size:11px;margin:0 4px 4px 0"><span style="width:9px;height:9px;border-radius:50%;background:${PEDIDO_COLOR_HEX[col]||'#888'};display:inline-block;border:1px solid rgba(255,255,255,.3)"></span>${escapeHtml(col)}<button data-pm-color-rm="${i}|${escapeHtml(col)}" title="Quitar" style="background:none;border:0;color:var(--fg-subtle);cursor:pointer;font-size:12px;line-height:1;padding:0 1px">✕</button></span>`).join('');
-  const colorOpts = '<option value="">＋ agregar color…</option>' + PEDIDO_COLORES.filter(col=>!cols.includes(col)).map(col=>`<option>${col}</option>`).join('');
+  const availCols = PEDIDO_COLORES.filter(col => !cols.includes(col));
+  const colorMenu = availCols.length
+    ? availCols.map(col => `<div data-pm-coloradd="${i}|${escapeHtml(col)}" style="display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:pointer;font-size:13px"><span style="width:12px;height:12px;border-radius:50%;background:${PEDIDO_COLOR_HEX[col]||'#888'};border:1px solid rgba(255,255,255,.3);flex-shrink:0"></span>${escapeHtml(col)}</div>`).join('')
+    : '<div style="padding:8px 10px;font-size:12px;color:var(--fg-mute)">ya están todos</div>';
   return `
     <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
@@ -3501,12 +3505,19 @@ function renderPedidoCartelBlock(c, i, n) {
         <div id="pm-ac-${i}" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:6;background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);max-height:190px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5)"></div>
       </div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
-        <div style="flex:2">
+        <div style="flex:2;position:relative">
           <label style="${lbl}">Colores *</label>
           <div style="margin-bottom:3px">${chips || '<span style="font-size:11px;color:var(--fg-mute)">elegí del muestrario →</span>'}</div>
-          <select data-pm-coloradd="${i}" style="${inp}">${colorOpts}</select>
+          <button type="button" data-pm-color-trigger="${i}" style="${inp};cursor:pointer;text-align:left;display:flex;align-items:center;justify-content:space-between">＋ agregar color… <span style="opacity:.5">▾</span></button>
+          <div id="pm-colorpanel-${i}" style="display:none;position:absolute;left:0;right:0;z-index:7;background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);max-height:220px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);margin-top:2px">${colorMenu}</div>
         </div>
-        <div style="flex:1"><label style="${lbl}">Tipo *</label><select id="pm-tipo-${i}" style="${inp}">${tipoOpts}</select></div>
+        <div style="flex:1.1">
+          <label style="${lbl}">Tipo *</label>
+          <div style="display:flex;border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden">
+            <button type="button" data-pm-tipo="${i}|INT" style="flex:1;padding:7px 4px;border:0;cursor:pointer;font-size:12px;${c.tipo==='INT'?'background:var(--accent-cyan,#8FD4DE);color:#000;font-weight:700':'background:transparent;color:var(--fg-subtle)'}">Interior</button>
+            <button type="button" data-pm-tipo="${i}|EXT" style="flex:1;padding:7px 4px;border:0;cursor:pointer;font-size:12px;${c.tipo==='EXT'?'background:var(--accent-cyan,#8FD4DE);color:#000;font-weight:700':'background:transparent;color:var(--fg-subtle)'}">Exterior</button>
+          </div>
+        </div>
         <div style="flex:0.8"><label style="${lbl}">Cant. *</label><input id="pm-cantidad-${i}" type="number" value="${escapeHtml(String(c.cantidad??1))}" style="${inp}"></div>
       </div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
@@ -3598,8 +3609,10 @@ function bindPedidoModal() {
     el.onblur = () => setTimeout(() => { const box = document.getElementById('pm-ac-' + i); if (box) box.style.display = 'none'; }, 150);
   });
   // Colores: dropdown agrega chip / ✕ quita.
-  document.querySelectorAll('[data-pm-coloradd]').forEach(sel => sel.onchange = () => pmAddColor(parseInt(sel.dataset.pmColoradd, 10), sel.value));
+  document.querySelectorAll('[data-pm-color-trigger]').forEach(b => b.onclick = (e) => { e.stopPropagation(); const panel = document.getElementById('pm-colorpanel-' + b.dataset.pmColorTrigger); if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none'; });
+  document.querySelectorAll('[data-pm-coloradd]').forEach(el => el.onclick = () => { const p = el.dataset.pmColoradd.split('|'); pmAddColor(parseInt(p[0], 10), p[1]); });
   document.querySelectorAll('[data-pm-color-rm]').forEach(b => b.onclick = () => { const p = b.dataset.pmColorRm.split('|'); pmRemoveColor(parseInt(p[0], 10), p[1]); });
+  document.querySelectorAll('[data-pm-tipo]').forEach(b => b.onclick = () => { const p = b.dataset.pmTipo.split('|'); readPedidoModalDOM(); STATE.pedidoModal.carteles[parseInt(p[0], 10)].tipo = p[1]; render(); });
   const tel = document.getElementById('pm-telefono'); if (tel) tel.addEventListener('blur', pmTraceAd);
   const cf = document.getElementById('pm-confirm'); if (cf) cf.onclick = confirmCargarPedido;
 }
