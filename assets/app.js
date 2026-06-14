@@ -11738,7 +11738,7 @@ function renderBriefDrawer() {
           ${!isNew && canCreateBriefs() ? `<button class="btn btn-ghost" id="brief-delete" style="color:#FF5566;border-color:rgba(255,24,48,.25)" title="Eliminar este brief">🗑 Eliminar</button>` : ''}
           ${!isNew && estado === 'nuevo' && canCreateBriefs() ? `<button class="btn btn-ghost" id="brief-urgente-toggle" title="${data.urgente ? 'Quitar urgente' : 'Marcar urgente (prioridad para Emma)'}" style="color:${data.urgente ? '#ff5468' : 'var(--fg-subtle)'};border-color:${data.urgente ? 'rgba(255,24,48,.5)' : 'var(--border)'}">🔥 ${data.urgente ? 'Urgente ✓' : 'Marcar urgente'}</button>` : ''}
           <div style="flex:1"></div>
-          ${!isNew && estado === 'listo' && canCotizar() ? `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Ver presupuesto</button>` : ''}
+          ${!isNew && estado === 'listo' && canCotizar() ? (esCorpBrief ? `<button class="btn btn-cyan" id="corp-enviar-presupuesto" ${STATE.briefsEnviando[STATE.briefSelected]?'disabled':''}>${STATE.briefsEnviando[STATE.briefSelected]?'Enviando…':'📤 Enviar presupuesto'}</button>` : `<button class="btn btn-cyan" id="brief-cotizar-popup">💰 Ver presupuesto</button>`) : ''}
           ${!isNew && (estado === 'listo' || estado === 'enviado') && canCotizar() ? `<button class="btn btn-ghost" id="brief-modificar" title="Volver a 'A cotizar' para que Emma lo modifique (queda urgente y arriba de todo)" style="color:#FFA726;border-color:rgba(255,167,38,.4)">🔧 Mandar a modificar</button>` : ''}
           ${!isNew && estado === 'enviado' && isCom ? `<button class="btn btn-ghost" id="brief-cotizar">📐 Abrir Cotizador</button>` : ''}
           ${(isCom || isDis || isNew) ? `<button class="btn ${isNew ? 'btn-cyan' : 'btn-ghost'}" id="brief-save">${isNew ? 'Crear brief' : 'Guardar'}</button>` : ''}
@@ -11861,6 +11861,42 @@ document.addEventListener('click', (ev) => {
     return;
   }
   document.querySelectorAll('[id^="corp-colorpanel-"]').forEach(p => p.style.display = 'none');
+});
+// ===== Enviar presupuesto de corpórea (Stage C) — WhatsApp directo, SIN tocar el Sheet de neones =====
+function corpPresupuestoTexto(brief, cj) {
+  const nombre = brief.cliente_nombre ? ` "${brief.cliente_nombre}"` : '';
+  const med = (cj.ancho_cm && cj.alto_cm) ? ` (${cj.ancho_cm}×${cj.alto_cm} cm)` : (brief.medidas_libre ? ` (${brief.medidas_libre})` : '');
+  return `Hola! Te paso el presupuesto del cartel corpóreo${nombre}${med}:\n\n💰 Precio: ${fmtMoney(brief.precio_final || 0)}\n\nCualquier duda quedo a disposición. Saludos!`;
+}
+async function enviarCorporeaPresupuesto(briefId) {
+  const brief = STATE.briefs.find(b => b.id === briefId);
+  if (!brief || STATE.briefsEnviando[briefId]) return;
+  const tel = String(brief.cliente_wa_id || '').replace(/\D/g, '');
+  if (!tel) { toast('Falta el teléfono del cliente para enviar por WhatsApp'); return; }
+  let cj = {}; try { cj = JSON.parse(brief.corporea_json || '{}') || {}; } catch (e) {}
+  const texto = corpPresupuestoTexto(brief, cj);
+  if (!confirm('Enviar este presupuesto por WhatsApp al cliente?\n\n' + texto)) return;
+  STATE.briefsEnviando[briefId] = true; render();
+  try {
+    const res = await fetch(`${CONFIG.trackerUrl}/admin/wa/send`, {
+      method: 'POST', headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: tel, body: texto })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    const updated = await marcarBriefEnviado(briefId, { precio_final: brief.precio_final });
+    const i = STATE.briefs.findIndex(b => b.id === updated.id);
+    if (i >= 0) STATE.briefs[i] = updated;
+    toast('✓ Presupuesto enviado');
+  } catch (e) {
+    toast('No se pudo enviar: ' + (e.message || e));
+  } finally {
+    STATE.briefsEnviando[briefId] = false; render();
+  }
+}
+document.addEventListener('click', (ev) => {
+  const b = ev.target.closest && ev.target.closest('#corp-enviar-presupuesto');
+  if (b && !b.disabled && STATE.briefSelected) enviarCorporeaPresupuesto(STATE.briefSelected);
 });
 function renderCorporeaPrice() {
   const f = STATE.corporeaForm;
