@@ -11865,9 +11865,11 @@ document.addEventListener('click', (ev) => {
 // ===== Presupuesto de corpórea (Stage C) — popup con texto editable + copiar + enviar por WhatsApp.
 // Mismo flujo que "Ver presupuesto" de neones, pero con precio/texto corpóreo y SIN tocar el Sheet.
 function corpPresupuestoTexto(brief, cj) {
-  const nombre = brief.cliente_nombre ? ` "${brief.cliente_nombre}"` : '';
-  const med = (cj.ancho_cm && cj.alto_cm) ? ` (${cj.ancho_cm}×${cj.alto_cm} cm)` : (brief.medidas_libre ? ` (${brief.medidas_libre})` : '');
-  return `Hola! Te paso el presupuesto del cartel corpóreo${nombre}${med}:\n\n💰 Precio: ${fmtMoney(brief.precio_final || 0)}\n\nCualquier duda quedo a disposición. Saludos!`;
+  const med = (cj.ancho_cm && cj.alto_cm) ? `${cj.ancho_cm}x${cj.alto_cm}cm` : (brief.medidas_libre || '');
+  const L = ['Te comparto el presupuesto:', '', `Trabajo: ${brief.cliente_nombre || ''} (cartel corpóreo 3D)`];
+  if (med) L.push(`Medidas: ${med}`);
+  L.push(`Precio: ${fmtMoney(brief.precio_final || 0)}`, '', 'Incluye fabricación. Cualquier duda quedo a disposición. Saludos!');
+  return L.join('\n');
 }
 function openCorpPopup(id) { STATE.corpPopupBrief = id; STATE.corpPopupText = null; render(); }
 function closeCorpPopup() { STATE.corpPopupBrief = null; STATE.corpPopupText = null; render(); }
@@ -11878,7 +11880,33 @@ function renderCorpPopup() {
   const texto = STATE.corpPopupText != null ? STATE.corpPopupText : corpPresupuestoTexto(brief, cj);
   const noTel = !String(brief.cliente_wa_id || '').replace(/\D/g, '');
   const sending = !!STATE.briefsEnviando[id];
-  return `<div style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:flex;align-items:center;justify-content:center" data-corp-popup-bg><div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-md,10px);padding:var(--s-4);width:min(520px,92vw);max-height:90vh;overflow:auto"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2)"><h3 style="margin:0;font-size:16px">Presupuesto · ${escapeHtml(brief.cliente_nombre || 'corpórea')}</h3><button class="btn btn-ghost" data-corp-popup-close>✕</button></div><div style="font-size:13px;color:var(--fg-subtle);margin-bottom:var(--s-2)">Precio final: <b style="color:var(--accent-cyan);font-size:15px">${fmtMoney(brief.precio_final || 0)}</b>${isAdmin() ? ` · comisión Joaco 3%: ${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}` : ''}</div><textarea id="corp-popup-text" rows="9" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:13px;font-family:inherit;resize:vertical">${escapeHtml(texto)}</textarea><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:var(--s-3)"><button class="btn btn-ghost" data-corp-popup-copy>📋 Copiar</button><button class="btn btn-cyan" data-corp-popup-send ${(sending || noTel) ? 'disabled' : ''} ${noTel ? 'title="Falta el teléfono del cliente"' : ''}>${sending ? 'Enviando…' : '📤 Enviar por WhatsApp'}</button></div></div></div>`;
+  const caso = corporeaCaso({ con_luz: cj.con_luz === false ? '0' : '1', frente_acabado: cj.frente_acabado, lat_acabado: cj.lat_acabado, esp_acabado: cj.esp_acabado });
+  const luz = cj.con_luz === false ? 'sin luz' : 'con luz';
+  const mat = cj.frente_material === 'acrilico' ? 'acrílico' : 'impreso';
+  const m2 = (typeof cj.m2 === 'number') ? cj.m2.toFixed(2) : '';
+  return `
+    <div data-corp-popup-bg style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:flex;align-items:center;justify-content:center;padding:var(--s-4)">
+      <div style="background:var(--bg, #0A0A0F);border:1px solid var(--accent-cyan);border-radius:var(--r-md);max-width:560px;width:100%;max-height:90vh;overflow-y:auto;padding:var(--s-4)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);border-bottom:1px solid var(--border);padding-bottom:var(--s-2)">
+          <h2 style="margin:0;font-size:16px;color:var(--accent-cyan)">💰 Cotizar y enviar</h2>
+          <button class="btn btn-ghost btn-icon" data-corp-popup-close aria-label="Cerrar">✕</button>
+        </div>
+        <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:var(--s-3)">
+          <b>${escapeHtml(brief.cliente_nombre || 'Sin título')}</b> · ${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm${m2 ? ' · ' + m2 + ' m²' : ''} · corpórea · caso ${caso} · ${luz} · frente ${mat}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:14px;margin-bottom:var(--s-3);background:rgba(143,212,222,.04);padding:var(--s-3);border-radius:var(--r-sm)">
+          <div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco 3%</span><br><b>${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</b></div>
+          ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Costo · margen</span><br><b>${fmtMoney(cj.costo || 0)} · ×${cj.margen || ''}</b></div>` : '<div></div>'}
+          <div style="grid-column:1 / -1"><span style="color:var(--fg-subtle);font-size:11px">Precio final</span><br><b style="color:var(--accent-cyan);font-size:18px">${fmtMoney(brief.precio_final || 0)}</b></div>
+        </div>
+        <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto</label>
+        <textarea id="corp-popup-text" rows="12" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-3)">${escapeHtml(texto)}</textarea>
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+          <button class="btn btn-ghost" data-corp-popup-copy>📋 Copiar</button>
+          <button class="btn btn-cyan" data-corp-popup-send ${(sending || noTel) ? 'disabled' : ''} ${noTel ? 'title="Falta el teléfono del cliente (obligatorio para WhatsApp)"' : ''}>${sending ? '⏳ Enviando…' : '📤 Enviar por WhatsApp'}</button>
+        </div>
+      </div>
+    </div>`;
 }
 async function enviarCorporeaPresupuesto(briefId, textOverride) {
   const brief = STATE.briefs.find(b => b.id === briefId);
