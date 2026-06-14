@@ -165,6 +165,33 @@ function pedidoFecha(s) {
   let y = m[3]; if (y.length === 2) y = '20' + y;
   return `${y}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
 }
+// Sincroniza SOLO el campo `productor` desde el Excel de Ventas hacia D1 (Gaspar
+// lo completa en el Excel, no en el CRM). Matchea por sheet_row (posición en el
+// Excel) y solo toca filas origen='backfill' → NO pisa ediciones del CRM ni los
+// pedidos nuevos (origen='crm', sheet_row NULL). Devuelve cuántas filas cambiaron.
+async function syncProductoresFromVentas(env) {
+  try {
+    const VENTAS_SID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
+    const u = `https://docs.google.com/spreadsheets/d/${VENTAS_SID}/gviz/tq?tqx=out:csv&sheet=2026`;
+    const r = await fetch(u);
+    if (!r.ok) return 0;
+    const rows = parseCsv(await r.text());
+    const now = new Date().toISOString();
+    const stmts = [];
+    for (let i = 1; i < rows.length; i++) {
+      const prod = String((rows[i] && rows[i][14]) || '').trim();
+      if (!prod) continue; // no borramos un productor existente con vacíos del Excel
+      stmts.push(env.DB.prepare("UPDATE pedidos SET productor = ?, updated_at = ? WHERE sheet_row = ? AND origen = 'backfill' AND IFNULL(productor,'') != ?").bind(prod, now, i + 1, prod));
+    }
+    let changed = 0;
+    const CHUNK = 50;
+    for (let j = 0; j < stmts.length; j += CHUNK) {
+      const res = await env.DB.batch(stmts.slice(j, j + CHUNK));
+      for (const rr of res) changed += (rr.meta && rr.meta.changes) || 0;
+    }
+    return changed;
+  } catch (e) { return 0; }
+}
 // Convierte "13.832k", "$175.000", "954.251", "(5.097k)", "63%", "-" → number.
 // Sheet usa . como separador de miles (formato AR) y k como sufijo de miles.
 function parseAmt(s) {
@@ -7002,6 +7029,14 @@ export default {
         return json({ ok: true, numero: ref.numero, pedidos: rs2.results || [] });
       }
 
+      // POST /admin/pedidos/sync-productores → trae el productor del Excel a D1
+      // (solo ese campo, por sheet_row). On-demand; también corre solo en el cron.
+      if (request.method === 'POST' && path === '/admin/pedidos/sync-productores') {
+        await ensurePedidosSchema(env);
+        const changed = await syncProductoresFromVentas(env);
+        return json({ ok: true, changed });
+      }
+
       // ============================================================
       // Briefs (panel de cotización conversacional)
       // ============================================================
@@ -7479,6 +7514,8 @@ export default {
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
+    // Cada ~30 min: traer del Excel de Ventas el campo `productor` (Gaspar lo carga ahí).
+    if (new Date().getUTCMinutes() % 30 < 5) ctx.waitUntil(syncProductoresFromVentas(env));
     // Follow-ups en horario hábil AR (8-20): campaña de cursos + minicurso (4h sin responder).
     const hAR = (new Date(event.scheduledTime).getUTCHours() - 3 + 24) % 24;
     if (hAR >= 8 && hAR < 20) {
