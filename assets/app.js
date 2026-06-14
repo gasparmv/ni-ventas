@@ -11403,8 +11403,14 @@ function renderBriefCard(b) {
   `;
 }
 
+// Producto del tablero activo: 'neon' (Cotización) | 'corporea' (Corpóreas). Lo setea
+// renderCotizacion(producto). Separa los dos kanbans sobre la misma tabla de briefs.
+let briefProducto = 'neon';
+function briefMatchesProducto(b) {
+  return briefProducto === 'corporea' ? b.tipo === 'corporea' : b.tipo !== 'corporea';
+}
 function renderBriefColumn(col) {
-  let briefs = STATE.briefs.filter(b => briefBelongsToColumn(b, col.id));
+  let briefs = STATE.briefs.filter(b => briefBelongsToColumn(b, col.id) && briefMatchesProducto(b));
   // En "A cotizar" (nuevo) los urgentes van arriba de todo para que Emma priorice.
   if (col.id === 'nuevo') briefs = briefs.slice().sort((a, b) => (b.urgente ? 1 : 0) - (a.urgente ? 1 : 0));
   const isDropTarget = col.id === 'nuevo' && canCreateBriefs();
@@ -11801,6 +11807,10 @@ function renderCorpBriefCard(b) {
   `;
 }
 function renderCorporeas() {
+  // Corpóreas = MISMO kanban que Cotización, scopeado a tipo='corporea'.
+  return renderCotizacion('corporea');
+}
+function _corporeasFormV1_dead() {
   if (!STATE.token) {
     return `<div style="max-width:540px;margin:var(--s-6) auto;padding:var(--s-4);text-align:center"><div style="font-size:32px;margin-bottom:var(--s-2)">🔒</div><p>Iniciá sesión para ver el panel de corpóreas.</p></div>`;
   }
@@ -11872,6 +11882,11 @@ function bindCorpCreateBtn() {
   if (b) b.onclick = createCorporeaBrief;
 }
 function bindCorporeas() {
+  // Reusa el binding del kanban (mismos IDs). briefProducto ya quedó en 'corporea'
+  // porque renderCorporeas llamó a renderCotizacion('corporea').
+  bindCotizacion();
+}
+function _bindCorporeasV1_dead() {
   if (!STATE.token) return;
   if (!STATE.briefsLoaded && !STATE.briefsLoading && !STATE.briefsError) {
     fetchBriefs().then(() => render());
@@ -11941,21 +11956,23 @@ async function createCorporeaBrief() {
   }
 }
 
-function renderCotizacion() {
+function renderCotizacion(producto = 'neon') {
+  briefProducto = producto;
+  const esCorp = producto === 'corporea';
   // Disparar carga si no hay datos.
   if (!STATE.token) {
     return `
       <div style="max-width:540px;margin:var(--s-6) auto;padding:var(--s-4);text-align:center">
         <div style="font-size:32px;margin-bottom:var(--s-2)">🔒</div>
-        <p>Iniciá sesión para ver el panel de cotización.</p>
+        <p>Iniciá sesión para ver el panel de ${esCorp ? 'corpóreas' : 'cotización'}.</p>
       </div>
     `;
   }
   const headerActions = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3)">
       <div>
-        <h2 style="margin:0;font-size:18px">◆ Cotización</h2>
-        <p class="muted" style="margin:2px 0 0;font-size:12px">${canCreateBriefs() ? 'Pegá (Ctrl+V) o arrastrá imágenes sobre la columna "A cotizar" — se crea solo' : 'Tomá briefs de "A cotizar" para diseñarlos'} · ${STATE.briefs.length} total</p>
+        <h2 style="margin:0;font-size:18px">${esCorp ? '▣ Corpóreas' : '◆ Cotización'}</h2>
+        <p class="muted" style="margin:2px 0 0;font-size:12px">${canCreateBriefs() ? 'Pegá (Ctrl+V) o arrastrá imágenes sobre la columna "A cotizar" — se crea solo' : 'Tomá briefs de "A cotizar" para diseñarlos'} · ${STATE.briefs.filter(briefMatchesProducto).length} ${esCorp ? 'corpóreas' : 'total'}</p>
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" id="briefs-refresh" title="Refrescar">↻</button>
@@ -12046,6 +12063,7 @@ function openNuevoBriefModal() {
   STATE.quickModalOrigen = 'wpp';
   STATE.quickModalUrgente = false;
   STATE.quickModalPrefillPhone = '';
+  STATE.quickModalTipo = (briefProducto === 'corporea' ? 'corporea' : null);
   render();
   setTimeout(() => {
     const el = document.getElementById('quick-modal-titulo');
@@ -12215,6 +12233,7 @@ async function confirmQuickCreate() {
       medidas_libre: medidas || null,
       notas: notas || null,
       estado: 'nuevo',
+      tipo: STATE.quickModalTipo || null,
       urgente
     });
     STATE.briefs.unshift(saved);
@@ -12991,7 +13010,7 @@ function briefsSignature() {
 function startBriefsPolling() {
   if (STATE.briefsPollTimer) return;
   STATE.briefsPollTimer = setInterval(async () => {
-    if (STATE.view !== 'cotizacion' || !STATE.token) return;
+    if ((STATE.view !== 'cotizacion' && STATE.view !== 'corporeas') || !STATE.token) return;
     if (document.hidden) return;  // no pollear si la pestaña está oculta
     const before = briefsSignature();
     await fetchBriefs();
@@ -13092,7 +13111,7 @@ function bindCotizacion() {
   // Paste global EN VISTA Cotización. Decide chat/render según rol y contexto.
   if (!document._cotPasteBound) {
     document.addEventListener('paste', async (ev) => {
-      if (STATE.view !== 'cotizacion') return;
+      if (STATE.view !== 'cotizacion' && STATE.view !== 'corporeas') return;
       const items = ev.clipboardData?.items || [];
       const drawerOpen = !!STATE.briefSelected || !!STATE.briefDraft;
       const role = getUserRole();
