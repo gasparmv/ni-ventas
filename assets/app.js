@@ -11686,10 +11686,7 @@ function renderBriefDrawer() {
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Acabado</label>${corpAc('esp_acabado', corpCj.esp_acabado||'translucida','Translúcida','Opaca')}</div>
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Color</label>${corpColorSel('esp_color', corpCj.esp_color)}</div>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)">
-            <div><div style="font-size:11px;color:var(--fg-subtle)">Precio final</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(corpPr.precio)}</div></div>
-            <div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${corpPr.m2.toLocaleString('es-AR',{maximumFractionDigits:2})} m²${isAdmin()?` · costo ${fmtMoney(corpPr.costo)} · ×${corpPr.margen}`:''}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(corpPr.precio*0.03))}</div>
-          </div>
+          <div id="corp-price-box">${corpPriceBoxHtml(corpPr)}</div>
           <div style="font-size:11px;color:var(--fg-mute);margin-top:6px">💡 Guardá para recalcular el precio y dejar la config lista para el render.</div>
           ` : `
           <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Tipo</label>
@@ -11812,6 +11809,28 @@ function corporeaCaso(f) {
   if (!fT && !lT && eT) return 'D';
   return 'E';
 }
+// Contenido de la cajita de precio del drawer corpóreo (reusable para el live-update).
+function corpPriceBoxHtml(r) {
+  return `<div style="display:flex;justify-content:space-between;align-items:center;padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(r.precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${r.m2.toLocaleString('es-AR',{maximumFractionDigits:2})} m²${isAdmin()?` · costo ${fmtMoney(r.costo)} · ×${r.margen}`:''}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(r.precio*0.03))}</div></div>`;
+}
+// Recalcula el precio del drawer corpóreo en vivo (sin re-render, mantiene foco).
+function updateCorpDrawerPrice() {
+  const box = document.getElementById('corp-price-box');
+  if (!box) return;
+  const val = (s, d) => { const el = document.querySelector(s); return el ? el.value : d; };
+  box.innerHTML = corpPriceBoxHtml(calcCorporea({
+    ancho: val('[data-bf="ancho_cm"]', 0), alto: val('[data-bf="alto_cm"]', 0),
+    con_luz: val('[data-corp-bf="con_luz"]', '1'), frente_material: val('[data-corp-bf="frente_material"]', 'impreso')
+  }));
+}
+document.addEventListener('input', (ev) => {
+  const t = ev.target;
+  if (t && t.matches && t.matches('[data-bf="ancho_cm"],[data-bf="alto_cm"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+});
+document.addEventListener('change', (ev) => {
+  const t = ev.target;
+  if (t && t.matches && t.matches('[data-corp-bf="con_luz"],[data-corp-bf="frente_material"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+});
 function renderCorporeaPrice() {
   const f = STATE.corporeaForm;
   const valid = +f.ancho > 0 && +f.alto > 0;
