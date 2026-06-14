@@ -11466,8 +11466,13 @@ function renderBriefDrawer() {
   const corpSinLuz = esCorpBrief && corpCj.con_luz === false;
   const corpPr = esCorpBrief ? calcCorporea({ ancho: data.ancho_cm, alto: data.alto_cm, con_luz: corpSinLuz ? '0' : '1', frente_material: corpCj.frente_material || 'impreso' }) : null;
   const corpAc = (field, val, l0, l1) => corpSinLuz ? '<span class="pill" style="font-size:11px">opaco</span>' : `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="translucido" ${String(val||'').startsWith('transl')?'selected':''}>${l0}</option><option value="opaco" ${!String(val||'').startsWith('transl')?'selected':''}>${l1}</option></select>`;
-  const CORP_COLORS = ['Blanco','Negro','Gris','Rojo','Naranja','Amarillo','Verde lima','Verde','Celeste','Azul','Azul marino','Violeta','Rosa','Fucsia','Bordó','Marrón','Dorado','Plateado'];
-  const corpColorSel = (field, val) => `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">${CORP_COLORS.map(c => `<option ${String(val||'').toLowerCase()===c.toLowerCase()?'selected':''}>${c}</option>`).join('')}</select>`;
+  const CORP_COLOR_MAP = {'Blanco':'#ffffff','Blanco cálido':'#fff1d6','Blanco frío':'#e9f1ff','Crema':'#f7efd6','Beige':'#e3d3a8','Marfil':'#fbf8ef','Negro':'#141414','Gris oscuro':'#454545','Gris':'#8a8a8a','Gris claro':'#c9c9c9','Plateado':'#c6cace','Rojo':'#e10600','Rojo oscuro':'#8b0000','Bordó':'#5c0a1e','Coral':'#ff6f5e','Rosa':'#ff5fa2','Rosa pastel':'#ffc2d4','Fucsia':'#ff2d8e','Magenta':'#cc0a78','Naranja':'#ff7a00','Naranja oscuro':'#cc5200','Ámbar':'#ffbf00','Amarillo':'#ffd400','Amarillo oro':'#f0c000','Dorado':'#d4af37','Verde lima':'#7ce000','Verde':'#1db954','Verde oscuro':'#0b6b35','Verde agua':'#22c9a9','Menta':'#9ff0c8','Celeste':'#5ec8ff','Cyan':'#00cfd4','Turquesa':'#1fc7c7','Azul':'#1565ff','Azul marino':'#0a2a66','Violeta':'#7c3aed','Lila':'#b794f6','Púrpura':'#6b21a8','Marrón':'#7b4a21','Chocolate':'#4a2c11'};
+  const corpColorSel = (field, val) => {
+    const keys = Object.keys(CORP_COLOR_MAP);
+    const curKey = keys.find(k => k.toLowerCase() === String(val||'').toLowerCase()) || keys[0];
+    const opts = keys.map(k => `<option data-hex="${CORP_COLOR_MAP[k]}" ${k===curKey?'selected':''}>${k}</option>`).join('');
+    return `<div style="display:flex;align-items:center;gap:6px"><select data-corp-bf="${field}" onchange="this.parentElement.querySelector('.corp-sw').style.background=this.options[this.selectedIndex].dataset.hex" style="flex:1;min-width:0;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">${opts}</select><span class="corp-sw" style="width:26px;height:26px;flex:none;border-radius:6px;border:1px solid var(--border);background:${CORP_COLOR_MAP[curKey]}"></span></div>`;
+  };
   const estado = data.estado || 'nuevo';
 
   // Imágenes separadas por tipo.
