@@ -1,0 +1,28 @@
+-- Migración 030: soporte de cotización de CORPÓREAS (letras 3D macizas).
+--
+-- El panel de corpóreas reusa la tabla `briefs` (mismo flujo que carteles), pero
+-- necesita guardar la configuración propia de la corpórea: material del frente
+-- (impreso/acrílico), acabado de cada cara (translúcido/opaco), color de las
+-- caras opacas, iluminación (con/sin luz) y el caso visual A-E que alimenta el
+-- render IA. Todo eso va en una sola columna JSON (flexible, no rompe nada).
+--
+-- Un brief de corpórea se distingue por `tipo = 'corporea'`. Las medidas y el
+-- precio siguen usando las columnas existentes (ancho_cm, alto_cm, m2,
+-- precio_final). corporea_json es NULL para todos los briefs de cartel (no rompe
+-- back-compat).
+--
+-- Forma del JSON (lo escribe el frontend):
+--   {
+--     "frente_material": "impreso" | "acrilico",
+--     "con_luz": true | false,
+--     "frente_acabado": "translucido" | "opaco",  "frente_color": "<texto>",
+--     "lat_acabado": "translucido" | "opaco",      "lat_color": "<texto>",
+--     "esp_acabado": "translucida" | "opaca",      "esp_color": "<texto>",
+--     "ancho_cm": <int>, "alto_cm": <int>, "m2": <num>,
+--     "costo_m2": <int>, "margen": <num>, "costo": <num>, "precio": <int>
+--   }
+--
+-- Aplicar con:
+--   wrangler d1 execute ni-ventas --remote --file=worker/migrations/030_briefs_corporea.sql
+
+ALTER TABLE briefs ADD COLUMN corporea_json TEXT;

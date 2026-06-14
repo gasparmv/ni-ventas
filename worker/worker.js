@@ -2273,6 +2273,89 @@ const GEMINI_PARAMS_PROMPT = (contextoCliente) => [
   '{"ancho_cm": <entero>, "alto_cm": <entero>, "neon_mt": <decimal 1 lugar>, "razonamiento": "<frase corta: ratio de imagen, cómo llegaste a las medidas, y desglose del cálculo de neón (ej: 11 letras × ~80cm c/u + figura del vaso ~120cm)>", "dif_vs_cliente": <true|false>}'
 ].join('\n');
 
+// ===== Render de CORPÓREAS (letras 3D macizas) =====
+// Mismo esquema que GEMINI_RENDER_PROMPT pero para letras corpóreas (no neón).
+// La diferencia clave es de DÓNDE SALE LA LUZ según qué caras son translúcidas u
+// opacas → colapsa en 5 casos visuales (A-E). El worker arma el bloque de contexto
+// con el caso puntual (corporeaContexto) y lo appendea al final, igual que carteles.
+const GEMINI_CORPOREA_RENDER_PROMPT = [
+  'Sos especialista en carteles CORPÓREOS (letras 3D macizas). Generá un render hiperrealista del producto terminado a partir de la imagen de referencia adjunta.',
+  '',
+  '═══ REGLA #1 — FIDELIDAD ABSOLUTA AL DISEÑO ═══',
+  'Sos fabricante, NO ilustrador. Copiá EXACTO de la referencia: composición, tipografía, formas, proporciones, poses. NO rediseñes ni reinterpretes.',
+  '',
+  '═══ QUÉ ES EL PRODUCTO: LETRA CORPÓREA 3D ═══',
+  'Letras/logo MACIZOS en 3 dimensiones. NO es neón (no son tubos/contornos): son letras SÓLIDAS con cuerpo y profundidad. Cada letra es una "caja" con:',
+  '- FRENTE: la cara de adelante (superficie llena, no hueca).',
+  '- LATERALES: el canto/profundidad que le da volumen (~5-10 cm de fondo).',
+  '- ESPALDA: el fondo, contra la pared. Lleva LED interno.',
+  '',
+  '═══ DE DÓNDE SALE LA LUZ (regla central) ═══',
+  'Con luz, el LED escapa SOLO por las caras translúcidas; las opacas son color sólido.',
+  '- Frente translúcido → la cara frontal BRILLA pareja (transiluminada).',
+  '- Frente opaco → cara frontal color sólido, sin brillo.',
+  '- Laterales translúcidos → los cantos BRILLAN.  |  Laterales opacos → cantos color sólido.',
+  '- Espalda translúcida + frente opaco → la luz sale por atrás = HALO retroiluminado en la pared alrededor de la letra (efecto backlight).  |  Espalda opaca → sin halo.',
+  'SIN LUZ → ninguna cara brilla, todo opaco, letra 3D de color sólido (tipo PVC/acrílico pintado).',
+  '',
+  '═══ LOS 5 CASOS (el contexto indica cuál) ═══',
+  'A) frente translúcido + laterales translúcidos → toda la letra brilla como volumen de luz.',
+  'B) frente translúcido + laterales opacos → cara frontal brilla, cantos color sólido.',
+  'C) frente opaco + laterales translúcidos → frente color sólido, cantos brillan.',
+  'D) frente opaco + laterales opacos + espalda translúcida → letra color sólido con HALO retroiluminado en la pared detrás.',
+  'E) sin luz → letra 3D color sólido, sin ningún brillo ni halo.',
+  '',
+  '═══ COLOR ═══',
+  'Caras translúcidas encendidas: blanco cálido por defecto (o el color del contexto).',
+  'Caras opacas: el color del contexto (cualquiera).',
+  '',
+  '═══ VISTA ═══',
+  'Leve 3/4 (perspectiva suave) para que se vea la PROFUNDIDAD y el volumen 3D, sobre pared neutra lisa, bien iluminada, sin objetos alrededor.',
+  '',
+  '═══ PRIORIDAD DE NOTAS ═══',
+  'Aplicá las notas del contexto (color, agregados). NUNCA sobreescriben: fidelidad al diseño, que sea corpórea maciza 3D, y la regla de por dónde sale la luz.'
+].join('\n');
+
+// Dado un brief de corpórea (tipo='corporea' con corporea_json), determina el caso
+// visual A-E (según qué caras son translúcidas/opacas + iluminación) y arma el bloque
+// de contexto puntual que se appendea al GEMINI_CORPOREA_RENDER_PROMPT.
+function corporeaContexto(brief) {
+  let p = {};
+  try { p = JSON.parse(brief.corporea_json || '{}') || {}; } catch { p = {}; }
+  const conLuz = p.con_luz !== false; // default: con luz
+  const fTrans = String(p.frente_acabado || 'translucido').toLowerCase().startsWith('transl');
+  const lTrans = String(p.lat_acabado || 'translucido').toLowerCase().startsWith('transl');
+  const eTrans = String(p.esp_acabado || 'opaca').toLowerCase().startsWith('transl');
+  const mat = (p.frente_material === 'acrilico') ? 'acrílico' : 'impreso';
+  let caso, efecto;
+  if (!conLuz) {
+    caso = 'E'; efecto = 'apagada: letra 3D de color sólido, sin ningún brillo ni halo (todas las caras opacas).';
+  } else if (fTrans && lTrans) {
+    caso = 'A'; efecto = 'toda la letra brilla como un volumen de luz (frente y cantos transiluminados).';
+  } else if (fTrans && !lTrans) {
+    caso = 'B'; efecto = 'la cara frontal brilla pareja, los cantos/laterales son color sólido.';
+  } else if (!fTrans && lTrans) {
+    caso = 'C'; efecto = 'el frente es color sólido, los cantos/laterales brillan.';
+  } else if (!fTrans && !lTrans && eTrans) {
+    caso = 'D'; efecto = 'letra de color sólido con HALO retroiluminado en la pared detrás (efecto backlight).';
+  } else {
+    caso = 'E'; efecto = 'todas las caras opacas con luz = no escapa luz, se ve como una letra 3D de color sólido sin brillo.';
+  }
+  const colF = p.frente_color ? `, color ${p.frente_color}` : '';
+  const colL = p.lat_color ? `, color ${p.lat_color}` : '';
+  const colE = p.esp_color ? `, color ${p.esp_color}` : '';
+  const med = (p.ancho_cm && p.alto_cm) ? `${p.ancho_cm} × ${p.alto_cm} cm` : (brief.medidas_libre || 's/d');
+  return [
+    'CONTEXTO DE ESTA CORPÓREA (aplicá EXACTAMENTE este caso):',
+    `- CASO ${caso}: ${efecto}`,
+    `- Frente: ${mat}, ${fTrans ? 'translúcido (transilumina)' : 'opaco'}${colF}.`,
+    `- Laterales: ${lTrans ? 'translúcidos (brillan)' : 'opacos'}${colL}.`,
+    `- Espalda: ${eTrans ? 'translúcida (deja salir luz = halo)' : 'opaca'}${colE}.`,
+    `- Iluminación: ${conLuz ? 'CON luz (LED encendido)' : 'SIN luz (apagada)'}.`,
+    `- Medidas: ${med}.`
+  ].join('\n');
+}
+
 // Modelo de generación de imágenes de Gemini (Nano Banana). Configurable por env
 // por si cambia el nombre; default al actual.
 function geminiImageModel(env) {
@@ -2294,11 +2377,13 @@ function abToBase64(buf) {
 
 // Toma el boceto (bytes + mime) + medidas, llama a Gemini, devuelve { ok, base64, mime }
 // con la imagen generada, o { error }.
-async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto) {
+async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto, opts = {}) {
   if (!env.GEMINI_API_KEY) return { error: 'GEMINI_API_KEY no configurada' };
   const model = geminiImageModel(env);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
-  const promptText = GEMINI_RENDER_PROMPT + (extraTexto ? `\n\n${extraTexto}` : '');
+  // basePrompt permite usar otro prompt (ej. corpóreas) sin tocar el de carteles.
+  const basePrompt = opts.basePrompt || GEMINI_RENDER_PROMPT;
+  const promptText = basePrompt + (extraTexto ? `\n\n${extraTexto}` : '');
   const body = {
     contents: [{
       parts: [
@@ -6973,7 +7058,7 @@ export default {
         const comercial_id = body.comercial_id || 'joaco';
         const now = new Date().toISOString();
         const cols = [
-          'cliente_wa_id', 'cliente_nombre', 'origen_lead', 'estado', 'tipo', 'diseno',
+          'cliente_wa_id', 'cliente_nombre', 'origen_lead', 'estado', 'tipo', 'diseno', 'corporea_json',
           'alto_cm', 'ancho_cm', 'm2', 'neon_mt', 'tramos', 'medidas_libre',
           'precio_trans', 'precio_negro', 'precio_final',
           'descuento', 'recargo', 'reventa', 'comision_joaco',
@@ -6983,7 +7068,7 @@ export default {
         ];
         const vals = [
           body.cliente_wa_id || '', body.cliente_nombre || null, body.origen_lead || '',
-          body.estado || 'nuevo', body.tipo || null, body.diseno || null,
+          body.estado || 'nuevo', body.tipo || null, body.diseno || null, body.corporea_json ?? null,
           body.alto_cm ?? null, body.ancho_cm ?? null, body.m2 ?? null, body.neon_mt ?? null, body.tramos ?? 0,
           body.medidas_libre || null,
           body.precio_trans ?? null, body.precio_negro ?? null, body.precio_final ?? null,
@@ -7007,7 +7092,7 @@ export default {
         let body;
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const editable = [
-          'cliente_nombre', 'cliente_wa_id', 'origen_lead', 'estado', 'tipo', 'diseno',
+          'cliente_nombre', 'cliente_wa_id', 'origen_lead', 'estado', 'tipo', 'diseno', 'corporea_json',
           'alto_cm', 'ancho_cm', 'm2', 'neon_mt', 'tramos', 'medidas_libre',
           'precio_trans', 'precio_negro', 'precio_final',
           'descuento', 'recargo', 'reventa', 'comision_joaco',
@@ -7187,13 +7272,22 @@ export default {
         if (brief.notas && String(brief.notas).trim()) {
           contextoLines.push(`\nNOTAS / INSTRUCCIONES ESPECÍFICAS PARA ESTE DISEÑO (tomalas en cuenta):\n${String(brief.notas).trim()}`);
         }
-        const contexto = contextoLines.join('\n');
+        let contexto = contextoLines.join('\n');
+
+        // Corpóreas (tipo='corporea'): prompt distinto (letra 3D maciza, no neón) +
+        // contexto del caso visual A-E (según qué caras son translúcidas/opacas) que
+        // se antepone. NO se estima neón/ancho/alto como en carteles — las medidas las
+        // carga el usuario en el form, así que params queda null.
+        const esCorporea = brief.tipo === 'corporea';
+        if (esCorporea) {
+          contexto = corporeaContexto(brief) + (contexto ? `\n\n${contexto}` : '');
+        }
 
         // En PARALELO: render (caro, lento) + params (barato, rápido).
         // Si una falla y la otra OK, devolvemos lo que hay y reportamos el error parcial.
         const [renderResult, paramsResult] = await Promise.all([
-          generarRenderConGemini(env, inputBuf, inputRow.content_type, contexto),
-          estimarParametrosConGemini(env, inputBuf, inputRow.content_type, contexto)
+          generarRenderConGemini(env, inputBuf, inputRow.content_type, contexto, esCorporea ? { basePrompt: GEMINI_CORPOREA_RENDER_PROMPT } : {}),
+          esCorporea ? Promise.resolve({ ok: false, error: null }) : estimarParametrosConGemini(env, inputBuf, inputRow.content_type, contexto)
         ]);
 
         // Render es lo crítico: si falla, error duro (sin render no hay nada que devolver).
