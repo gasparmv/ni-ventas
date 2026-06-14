@@ -11466,12 +11466,16 @@ function renderBriefDrawer() {
   const corpSinLuz = esCorpBrief && corpCj.con_luz === false;
   const corpPr = esCorpBrief ? calcCorporea({ ancho: data.ancho_cm, alto: data.alto_cm, con_luz: corpSinLuz ? '0' : '1', frente_material: corpCj.frente_material || 'impreso' }) : null;
   const corpAc = (field, val, l0, l1) => corpSinLuz ? '<span class="pill" style="font-size:11px">opaco</span>' : `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="translucido" ${String(val||'').startsWith('transl')?'selected':''}>${l0}</option><option value="opaco" ${!String(val||'').startsWith('transl')?'selected':''}>${l1}</option></select>`;
-  const CORP_COLOR_MAP = {'Blanco':'#ffffff','Blanco cálido':'#fff1d6','Blanco frío':'#e9f1ff','Crema':'#f7efd6','Beige':'#e3d3a8','Marfil':'#fbf8ef','Negro':'#141414','Gris oscuro':'#454545','Gris':'#8a8a8a','Gris claro':'#c9c9c9','Plateado':'#c6cace','Rojo':'#e10600','Rojo oscuro':'#8b0000','Bordó':'#5c0a1e','Coral':'#ff6f5e','Rosa':'#ff5fa2','Rosa pastel':'#ffc2d4','Fucsia':'#ff2d8e','Magenta':'#cc0a78','Naranja':'#ff7a00','Naranja oscuro':'#cc5200','Ámbar':'#ffbf00','Amarillo':'#ffd400','Amarillo oro':'#f0c000','Dorado':'#d4af37','Verde lima':'#7ce000','Verde':'#1db954','Verde oscuro':'#0b6b35','Verde agua':'#22c9a9','Menta':'#9ff0c8','Celeste':'#5ec8ff','Cyan':'#00cfd4','Turquesa':'#1fc7c7','Azul':'#1565ff','Azul marino':'#0a2a66','Violeta':'#7c3aed','Lila':'#b794f6','Púrpura':'#6b21a8','Marrón':'#7b4a21','Chocolate':'#4a2c11'};
   const corpColorSel = (field, val) => {
     const keys = Object.keys(CORP_COLOR_MAP);
-    const curKey = keys.find(k => k.toLowerCase() === String(val||'').toLowerCase()) || keys[0];
-    const opts = keys.map(k => `<option data-hex="${CORP_COLOR_MAP[k]}" ${k===curKey?'selected':''}>${k}</option>`).join('');
-    return `<div style="display:flex;align-items:center;gap:6px"><select data-corp-bf="${field}" onchange="this.parentElement.querySelector('.corp-sw').style.background=this.options[this.selectedIndex].dataset.hex" style="flex:1;min-width:0;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">${opts}</select><span class="corp-sw" style="width:26px;height:26px;flex:none;border-radius:6px;border:1px solid var(--border);background:${CORP_COLOR_MAP[curKey]}"></span></div>`;
+    const cur = keys.find(k => k.toLowerCase() === String(val||'').toLowerCase()) || keys[0];
+    const dot = (hex) => `<span class="corp-cdot" style="width:13px;height:13px;border-radius:50%;background:${hex};border:1px solid rgba(255,255,255,.35);flex-shrink:0;display:inline-block"></span>`;
+    const opts = keys.map(k => `<div data-corp-color="${field}|${k}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:13px${k===cur?';background:rgba(143,212,222,.12)':''}">${dot(CORP_COLOR_MAP[k])}${k}</div>`).join('');
+    return `<div style="position:relative">
+      <input type="hidden" data-corp-bf="${field}" value="${cur}">
+      <button type="button" data-corp-color-trigger="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px;cursor:pointer;text-align:left;display:flex;align-items:center;gap:8px;justify-content:space-between"><span style="display:flex;align-items:center;gap:8px">${dot(CORP_COLOR_MAP[cur])}<span class="corp-cname">${cur}</span></span><span style="opacity:.5">▾</span></button>
+      <div id="corp-colorpanel-${field}" style="display:none;position:absolute;left:0;right:0;z-index:30;background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);max-height:240px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);margin-top:2px">${opts}</div>
+    </div>`;
   };
   const estado = data.estado || 'nuevo';
 
@@ -11830,6 +11834,33 @@ document.addEventListener('input', (ev) => {
 document.addEventListener('change', (ev) => {
   const t = ev.target;
   if (t && t.matches && t.matches('[data-corp-bf="con_luz"],[data-corp-bf="frente_material"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+});
+// Paleta de colores corpóreos (nombre → hex) — usada por el dropdown custom del drawer.
+const CORP_COLOR_MAP = {'Blanco':'#ffffff','Blanco cálido':'#fff1d6','Blanco frío':'#e9f1ff','Crema':'#f7efd6','Beige':'#e3d3a8','Marfil':'#fbf8ef','Negro':'#141414','Gris oscuro':'#454545','Gris':'#8a8a8a','Gris claro':'#c9c9c9','Plateado':'#c6cace','Rojo':'#e10600','Rojo oscuro':'#8b0000','Bordó':'#5c0a1e','Coral':'#ff6f5e','Rosa':'#ff5fa2','Rosa pastel':'#ffc2d4','Fucsia':'#ff2d8e','Magenta':'#cc0a78','Naranja':'#ff7a00','Naranja oscuro':'#cc5200','Ámbar':'#ffbf00','Amarillo':'#ffd400','Amarillo oro':'#f0c000','Dorado':'#d4af37','Verde lima':'#7ce000','Verde':'#1db954','Verde oscuro':'#0b6b35','Verde agua':'#22c9a9','Menta':'#9ff0c8','Celeste':'#5ec8ff','Cyan':'#00cfd4','Turquesa':'#1fc7c7','Azul':'#1565ff','Azul marino':'#0a2a66','Violeta':'#7c3aed','Lila':'#b794f6','Púrpura':'#6b21a8','Marrón':'#7b4a21','Chocolate':'#4a2c11'};
+// Dropdown de color custom (swatch en cada opción). Delegado: trigger toggle / opción selecciona / click afuera cierra.
+document.addEventListener('click', (ev) => {
+  const opt = ev.target.closest && ev.target.closest('[data-corp-color]');
+  if (opt) {
+    const sp = opt.dataset.corpColor.split('|'); const field = sp[0], name = sp[1];
+    const panel = document.getElementById('corp-colorpanel-' + field);
+    const wrap = panel && panel.parentElement;
+    if (wrap) {
+      const hid = wrap.querySelector('[data-corp-bf]'); if (hid) hid.value = name;
+      const trig = wrap.querySelector('[data-corp-color-trigger]');
+      if (trig) { const d = trig.querySelector('.corp-cdot'); if (d) d.style.background = CORP_COLOR_MAP[name] || '#888'; const nm = trig.querySelector('.corp-cname'); if (nm) nm.textContent = name; }
+    }
+    document.querySelectorAll('[id^="corp-colorpanel-"]').forEach(p => p.style.display = 'none');
+    return;
+  }
+  const trig = ev.target.closest && ev.target.closest('[data-corp-color-trigger]');
+  if (trig) {
+    const panel = document.getElementById('corp-colorpanel-' + trig.dataset.corpColorTrigger);
+    const wasOpen = panel && panel.style.display === 'block';
+    document.querySelectorAll('[id^="corp-colorpanel-"]').forEach(p => p.style.display = 'none');
+    if (panel && !wasOpen) panel.style.display = 'block';
+    return;
+  }
+  document.querySelectorAll('[id^="corp-colorpanel-"]').forEach(p => p.style.display = 'none');
 });
 function renderCorporeaPrice() {
   const f = STATE.corporeaForm;
