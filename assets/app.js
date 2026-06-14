@@ -130,6 +130,8 @@ const STATE = {
   cotizadorCogs: null,    // COGS del Excel 2026v4 { derived, raw, mes, fetchedAt } — pisa params para la fórmula nueva
   cotizadorCogsError: null,
   cotizadorForm: { ancho: '', alto: '', neon: '', tramos: '', tipo: 'INT', cliente: '', canal: 'WPP', telefono: '', textoOverride: '', extraCarteles: [] },
+  corporeaForm: defaultCorpForm(),
+  corpCreating: false,
   cotizadorSaving: false,
   // Panel de negocio (solo Gaspar) — datos del Sheet "2025 V4"
   businessPanel: { data: null, loading: false, error: null, lastFetch: 0, period: 'current', selectedVertical: null },
@@ -1905,6 +1907,11 @@ function render() {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
+  // Corpóreas: solo Joaquín + Gaspar. Si alguien más cae acá (hash directo), al dashboard.
+  if (STATE.view === 'corporeas' && !(isJoaquinUser(STATE.user) || isGasparUser(STATE.user))) {
+    STATE.view = 'dashboard';
+    if (location.hash !== '#dashboard') location.hash = 'dashboard';
+  }
   document.getElementById('app').innerHTML = renderShell();
   if (STATE.error)   document.getElementById('main').innerHTML = renderError();
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
@@ -1914,6 +1921,7 @@ function render() {
     else if (v === 'pedidos')   document.getElementById('main').innerHTML = renderPedidos();
     else if (v === 'presupuestos') document.getElementById('main').innerHTML = renderPresupuestos();
     else if (v === 'cotizacion')   document.getElementById('main').innerHTML = renderCotizacion();
+    else if (v === 'corporeas')    document.getElementById('main').innerHTML = renderCorporeas();
     else if (v === 'seguimientos') document.getElementById('main').innerHTML = renderSeguimientos();
     else if (v === 'panel-joaco')   document.getElementById('main').innerHTML = renderPanelJoaco();
     else if (v === 'actividad')    document.getElementById('main').innerHTML = renderActividad();
@@ -1936,6 +1944,7 @@ function render() {
   if (STATE.view === 'pedidos') bindPedidos();
   if (STATE.view === 'presupuestos') bindPresupuestos();
   if (STATE.view === 'cotizacion')   bindCotizacion();
+  if (STATE.view === 'corporeas')    bindCorporeas();
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
     if (isAdmin()) bindBusinessPanel();
@@ -1991,6 +2000,7 @@ function renderShell() {
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
+        ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
         <button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>
@@ -11717,6 +11727,220 @@ function renderBriefImagesGridFor(tipo, isDraft, editable) {
 }
 
 let briefSearch = ''; // búsqueda del board de cotización — filtra las cards en vivo (las columnas son los estados)
+// ============ CORPÓREAS (cotización de letras 3D) ============
+// Panel paralelo al de carteles, acceso solo Joaquín + Gaspar. Modelo de precio
+// por MULTIPLICADOR (distinto al divisor de carteles): precio = m² × costo/m² × margen.
+// Crea un brief tipo='corporea' con corporea_json; el render + seguimiento reusan
+// el drawer de briefs existente (es agnóstico al tipo).
+function defaultCorpForm() {
+  return { cliente:'', telefono:'', ancho:'', alto:'', con_luz:'1',
+    frente_material:'impreso', frente_acabado:'translucido', frente_color:'#ffd400',
+    lat_acabado:'translucido', lat_color:'#ffffff',
+    esp_acabado:'translucida', esp_color:'#ffffff' };
+}
+const CORP_PRECIOS = { conluz: { impreso: 320000, acrilico: 400000 }, sinluz: { impreso: 200000, acrilico: 300000 } };
+function calcCorporea(f) {
+  const ancho = +f.ancho || 0, alto = +f.alto || 0;
+  const m2 = (ancho * alto) / 10000;
+  const conLuz = String(f.con_luz) !== '0';
+  const mat = f.frente_material === 'acrilico' ? 'acrilico' : 'impreso';
+  const costoM2 = CORP_PRECIOS[conLuz ? 'conluz' : 'sinluz'][mat];
+  const costo = m2 * costoM2;
+  const margen = m2 <= 2 ? 2 : (m2 <= 5 ? 1.75 : 1.5);
+  const precio = Math.round(costo * margen / 1000) * 1000;
+  return { m2, conLuz, costoM2, costo, margen, precio };
+}
+// Deriva el caso visual A-E (igual que el worker) para mostrarlo de referencia.
+function corporeaCaso(f) {
+  const conLuz = String(f.con_luz) !== '0';
+  const fT = String(f.frente_acabado || '').startsWith('transl');
+  const lT = String(f.lat_acabado || '').startsWith('transl');
+  const eT = String(f.esp_acabado || '').startsWith('transl');
+  if (!conLuz) return 'E';
+  if (fT && lT) return 'A';
+  if (fT && !lT) return 'B';
+  if (!fT && lT) return 'C';
+  if (!fT && !lT && eT) return 'D';
+  return 'E';
+}
+function renderCorporeaPrice() {
+  const f = STATE.corporeaForm;
+  const valid = +f.ancho > 0 && +f.alto > 0;
+  if (!valid) return '<div class="muted" style="margin-top:var(--s-3);font-size:12px">Completá ancho y alto para ver el precio</div>';
+  const r = calcCorporea(f);
+  const caso = corporeaCaso(f);
+  const adminInfo = isAdmin() ? `<div class="muted" style="font-size:11px;margin-top:6px">Costo/m² ${fmtMoney(r.costoM2)} · Costo ${fmtMoney(r.costo)} · Margen ×${r.margen}</div>` : '';
+  return `
+    <div class="cot-results" style="margin-top:var(--s-3)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap">
+        <div>
+          <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">Precio final</div>
+          <div style="font-size:26px;font-weight:600;color:var(--cyan,#3ad)">${fmtMoney(r.precio)}</div>
+        </div>
+        <div style="text-align:right" class="muted">
+          <div style="font-size:12px">${r.m2.toLocaleString('es-AR',{maximumFractionDigits:2})} m² · caso ${caso}</div>
+        </div>
+      </div>
+      ${adminInfo}
+      <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end">
+        <button class="btn btn-cyan" id="corp-create-btn" ${STATE.corpCreating?'disabled':''}>${STATE.corpCreating?'Creando…':'Crear brief + render'}</button>
+      </div>
+    </div>
+  `;
+}
+function renderCorpBriefCard(b) {
+  let cj = {}; try { cj = JSON.parse(b.corporea_json || '{}') || {}; } catch (e) {}
+  const caso = b.corporea_json ? corporeaCaso({ con_luz: cj.con_luz === false ? '0' : '1', frente_acabado: cj.frente_acabado, lat_acabado: cj.lat_acabado, esp_acabado: cj.esp_acabado }) : '?';
+  return `
+    <div class="card" data-corp-brief="${b.id}" style="cursor:pointer;padding:var(--s-3)">
+      <div style="font-weight:600;font-size:13px;margin-bottom:4px">${escapeHtml(b.cliente_nombre || '—')}</div>
+      <div class="muted" style="font-size:11px">${b.ancho_cm||'?'}×${b.alto_cm||'?'}cm · caso ${caso} · ${escapeHtml(b.estado || '')}</div>
+      <div style="font-size:15px;font-weight:600;margin-top:4px;color:var(--cyan,#3ad)">${fmtMoney(b.precio_final || 0)}</div>
+      ${b.render_count ? '<div class="pill" style="font-size:10px;margin-top:4px;display:inline-block">✓ render</div>' : ''}
+    </div>
+  `;
+}
+function renderCorporeas() {
+  if (!STATE.token) {
+    return `<div style="max-width:540px;margin:var(--s-6) auto;padding:var(--s-4);text-align:center"><div style="font-size:32px;margin-bottom:var(--s-2)">🔒</div><p>Iniciá sesión para ver el panel de corpóreas.</p></div>`;
+  }
+  const f = STATE.corporeaForm;
+  const sinLuz = String(f.con_luz) === '0';
+  const corpBriefs = (STATE.briefs || []).filter(b => b.tipo === 'corporea');
+  const acabado = (field, val, labels) => sinLuz
+    ? ` <span class="pill" style="font-size:11px;display:inline-block;margin-top:4px">opaco</span>`
+    : `<select data-corp-field="${field}">
+         <option value="translucido" ${String(val).startsWith('transl')?'selected':''}>${labels[0]}</option>
+         <option value="opaco" ${!String(val).startsWith('transl')?'selected':''}>${labels[1]}</option>
+       </select>`;
+  return `
+    <div style="padding:var(--s-4);min-height:100%">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3)">
+        <div>
+          <h2 style="margin:0;font-size:18px">▣ Corpóreas</h2>
+          <p class="muted" style="margin:2px 0 0;font-size:12px">Cotización de letras 3D · ${corpBriefs.length} ${corpBriefs.length===1?'brief':'briefs'}</p>
+        </div>
+      </div>
+      <div class="card cot-card" style="margin-bottom:var(--s-4)">
+        <div class="card-h"><h3>Nueva corpórea</h3></div>
+        <div class="cot-grid">
+          <label>Cliente / diseño<input type="text" data-corp-field="cliente" value="${escapeHtml(f.cliente)}" placeholder="nombre del cliente"></label>
+          <label>Teléfono<input type="tel" data-corp-field="telefono" value="${escapeHtml(f.telefono)}" placeholder="para el presupuesto"></label>
+          <label>Ancho (cm)<input type="number" min="0" step="1" data-corp-field="ancho" value="${escapeHtml(f.ancho)}"></label>
+          <label>Alto (cm)<input type="number" min="0" step="1" data-corp-field="alto" value="${escapeHtml(f.alto)}"></label>
+          <label>Iluminación
+            <select data-corp-field="con_luz" data-corp-render="1">
+              <option value="1" ${!sinLuz?'selected':''}>Con luz</option>
+              <option value="0" ${sinLuz?'selected':''}>Sin luz</option>
+            </select>
+          </label>
+        </div>
+        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-top:var(--s-3)">Frente</div>
+        <div class="cot-grid" style="margin-top:var(--s-1)">
+          <label>Material
+            <select data-corp-field="frente_material">
+              <option value="impreso" ${f.frente_material!=='acrilico'?'selected':''}>Impreso</option>
+              <option value="acrilico" ${f.frente_material==='acrilico'?'selected':''}>Acrílico</option>
+            </select>
+          </label>
+          <label>Acabado${acabado('frente_acabado', f.frente_acabado, ['Translúcido','Opaco'])}</label>
+          <label>Color<input type="color" data-corp-field="frente_color" value="${escapeHtml(f.frente_color||'#ffffff')}" style="height:34px;padding:2px"></label>
+        </div>
+        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-top:var(--s-3)">Laterales</div>
+        <div class="cot-grid" style="margin-top:var(--s-1)">
+          <label>Acabado${acabado('lat_acabado', f.lat_acabado, ['Translúcido','Opaco'])}</label>
+          <label>Color<input type="color" data-corp-field="lat_color" value="${escapeHtml(f.lat_color||'#ffffff')}" style="height:34px;padding:2px"></label>
+        </div>
+        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-top:var(--s-3)">Espalda</div>
+        <div class="cot-grid" style="margin-top:var(--s-1)">
+          <label>Acabado${acabado('esp_acabado', f.esp_acabado, ['Translúcida','Opaca'])}</label>
+          <label>Color<input type="color" data-corp-field="esp_color" value="${escapeHtml(f.esp_color||'#ffffff')}" style="height:34px;padding:2px"></label>
+        </div>
+        <div id="corp-price-slot">${renderCorporeaPrice()}</div>
+      </div>
+      <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:var(--s-2)">Briefs de corpóreas</div>
+      ${corpBriefs.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:var(--s-2)">${corpBriefs.map(renderCorpBriefCard).join('')}</div>` : '<div class="muted" style="font-size:12px">Todavía no hay corpóreas cotizadas. Completá el form de arriba y dale a "Crear brief".</div>'}
+    </div>
+  `;
+}
+function updateCorpPrice() {
+  const slot = document.getElementById('corp-price-slot');
+  if (slot) { slot.innerHTML = renderCorporeaPrice(); bindCorpCreateBtn(); }
+}
+function bindCorpCreateBtn() {
+  const b = document.getElementById('corp-create-btn');
+  if (b) b.onclick = createCorporeaBrief;
+}
+function bindCorporeas() {
+  if (!STATE.token) return;
+  if (!STATE.briefsLoaded && !STATE.briefsLoading && !STATE.briefsError) {
+    fetchBriefs().then(() => render());
+  }
+  document.querySelectorAll('[data-corp-field]').forEach(el => {
+    const field = el.dataset.corpField;
+    const isRender = el.dataset.corpRender === '1';
+    const handler = () => {
+      STATE.corporeaForm[field] = el.value;
+      if (isRender) render(); else updateCorpPrice();
+    };
+    el.oninput = handler;
+    el.onchange = handler;
+  });
+  bindCorpCreateBtn();
+  document.querySelectorAll('[data-corp-brief]').forEach(el => {
+    el.onclick = () => openCorporeaInDrawer(parseInt(el.dataset.corpBrief, 10));
+  });
+}
+function openCorporeaInDrawer(id) {
+  // El drawer de briefs vive y se bindea en la vista Cotización — abrimos ahí
+  // (es agnóstico al tipo: muestra imágenes + botón de render, que el worker
+  // resuelve con el prompt de corpóreas según corporea_json).
+  setView('cotizacion');
+  openBriefDrawer(id);
+}
+async function createCorporeaBrief() {
+  const f = STATE.corporeaForm;
+  if (!(+f.ancho > 0 && +f.alto > 0)) { toast('Completá ancho y alto'); return; }
+  const r = calcCorporea(f);
+  const sinLuz = String(f.con_luz) === '0';
+  const cj = {
+    frente_material: f.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
+    con_luz: !sinLuz,
+    frente_acabado: sinLuz ? 'opaco' : f.frente_acabado,
+    frente_color: f.frente_color,
+    lat_acabado: sinLuz ? 'opaco' : f.lat_acabado,
+    lat_color: f.lat_color,
+    esp_acabado: sinLuz ? 'opaca' : f.esp_acabado,
+    esp_color: f.esp_color,
+    ancho_cm: +f.ancho, alto_cm: +f.alto, m2: r.m2,
+    costo_m2: r.costoM2, margen: r.margen, costo: r.costo, precio: r.precio
+  };
+  STATE.corpCreating = true; updateCorpPrice();
+  try {
+    const body = {
+      tipo: 'corporea', cliente_nombre: f.cliente || 'Corpórea', origen_lead: 'wpp',
+      cliente_wa_id: (f.telefono || '').replace(/\D/g, ''),
+      estado: 'nuevo', ancho_cm: +f.ancho, alto_cm: +f.alto, m2: r.m2,
+      precio_final: r.precio, corporea_json: JSON.stringify(cj), comercial_id: 'joaco'
+    };
+    const res = await fetch(`${CONFIG.trackerUrl}/admin/briefs`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!res.ok || !data.brief) throw new Error(data.error || ('HTTP ' + res.status));
+    STATE.briefs.unshift(data.brief);
+    STATE.corporeaForm = defaultCorpForm();
+    STATE.corpCreating = false;
+    openCorporeaInDrawer(data.brief.id);
+    toast('Corpórea creada — subí el diseño y generá el render');
+  } catch (e) {
+    STATE.corpCreating = false; updateCorpPrice();
+    toast('No se pudo crear: ' + (e.message || e));
+  }
+}
+
 function renderCotizacion() {
   // Disparar carga si no hay datos.
   if (!STATE.token) {
