@@ -12921,7 +12921,7 @@ async function generarRenderInBackground(briefId) {
   // + medidas y lo pasa a 'listo'.
   try {
     const current = STATE.briefs.find(b => b.id === briefId);
-    const tieneMedidas = current && current.ancho_cm > 0 && current.alto_cm > 0 && current.neon_mt > 0;
+    const tieneMedidas = current && current.ancho_cm > 0 && current.alto_cm > 0 && (current.tipo === 'corporea' || current.neon_mt > 0);
     if (current && current.estado === 'nuevo' && tieneMedidas) {
       const saved = await saveBrief({ id: briefId, estado: 'listo' });
       const ix = STATE.briefs.findIndex(b => b.id === saved.id);
@@ -13020,7 +13020,7 @@ async function handleBriefSave() {
     const current = STATE.briefs.find(b => b.id === STATE.briefSelected);
     const estadoActual = current?.estado || 'nuevo';
     const tieneRender = STATE.briefDetailImages.some(x => x.tipo === 'render');
-    const tieneMedidas = form.ancho_cm > 0 && form.alto_cm > 0 && form.neon_mt > 0;
+    const tieneMedidas = form.ancho_cm > 0 && form.alto_cm > 0 && (current?.tipo === 'corporea' || form.neon_mt > 0);
     if (estadoActual === 'nuevo' && tieneRender && tieneMedidas) {
       form.estado = 'listo';
     }
