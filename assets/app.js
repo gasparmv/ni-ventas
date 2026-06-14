@@ -11466,6 +11466,8 @@ function renderBriefDrawer() {
   const corpSinLuz = esCorpBrief && corpCj.con_luz === false;
   const corpPr = esCorpBrief ? calcCorporea({ ancho: data.ancho_cm, alto: data.alto_cm, con_luz: corpSinLuz ? '0' : '1', frente_material: corpCj.frente_material || 'impreso' }) : null;
   const corpAc = (field, val, l0, l1) => corpSinLuz ? '<span class="pill" style="font-size:11px">opaco</span>' : `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="translucido" ${String(val||'').startsWith('transl')?'selected':''}>${l0}</option><option value="opaco" ${!String(val||'').startsWith('transl')?'selected':''}>${l1}</option></select>`;
+  const CORP_COLORS = ['Blanco','Negro','Gris','Rojo','Naranja','Amarillo','Verde lima','Verde','Celeste','Azul','Azul marino','Violeta','Rosa','Fucsia','Bordó','Marrón','Dorado','Plateado'];
+  const corpColorSel = (field, val) => `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">${CORP_COLORS.map(c => `<option ${String(val||'').toLowerCase()===c.toLowerCase()?'selected':''}>${c}</option>`).join('')}</select>`;
   const estado = data.estado || 'nuevo';
 
   // Imágenes separadas por tipo.
@@ -11663,16 +11665,21 @@ function renderBriefDrawer() {
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Alto (cm)</label><input type="number" step="1" data-bf="alto_cm" value="${data.alto_cm || ''}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"></div>
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Iluminación</label><select data-corp-bf="con_luz" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="1" ${!corpSinLuz?'selected':''}>Con luz</option><option value="0" ${corpSinLuz?'selected':''}>Sin luz</option></select></div>
           </div>
+          <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-3) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Frente</div>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Frente material</label><select data-corp-bf="frente_material" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="impreso" ${(corpCj.frente_material||'impreso')!=='acrilico'?'selected':''}>Impreso</option><option value="acrilico" ${corpCj.frente_material==='acrilico'?'selected':''}>Acrílico</option></select></div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Frente acabado</label>${corpAc('frente_acabado', corpCj.frente_acabado||'translucido','Translúcido','Opaco')}</div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Frente color</label><input type="color" data-corp-bf="frente_color" value="${corpCj.frente_color||'#ffd400'}" style="width:100%;height:30px;padding:3px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--ink-100);cursor:pointer"></div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Material</label><select data-corp-bf="frente_material" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="impreso" ${(corpCj.frente_material||'impreso')!=='acrilico'?'selected':''}>Impreso</option><option value="acrilico" ${corpCj.frente_material==='acrilico'?'selected':''}>Acrílico</option></select></div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Acabado</label>${corpAc('frente_acabado', corpCj.frente_acabado||'translucido','Translúcido','Opaco')}</div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Color</label>${corpColorSel('frente_color', corpCj.frente_color)}</div>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Lat. acabado</label>${corpAc('lat_acabado', corpCj.lat_acabado||'translucido','Transl.','Opaco')}</div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Lat. color</label><input type="color" data-corp-bf="lat_color" value="${corpCj.lat_color||'#ffffff'}" style="width:100%;height:30px;padding:3px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--ink-100);cursor:pointer"></div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Esp. acabado</label>${corpAc('esp_acabado', corpCj.esp_acabado||'translucida','Transl.','Opaca')}</div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Esp. color</label><input type="color" data-corp-bf="esp_color" value="${corpCj.esp_color||'#ffffff'}" style="width:100%;height:30px;padding:3px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--ink-100);cursor:pointer"></div>
+          <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-3) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Laterales</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Acabado</label>${corpAc('lat_acabado', corpCj.lat_acabado||'translucido','Translúcido','Opaco')}</div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Color</label>${corpColorSel('lat_color', corpCj.lat_color)}</div>
+          </div>
+          <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-3) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Espalda</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Acabado</label>${corpAc('esp_acabado', corpCj.esp_acabado||'translucida','Translúcida','Opaca')}</div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Color</label>${corpColorSel('esp_color', corpCj.esp_color)}</div>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)">
             <div><div style="font-size:11px;color:var(--fg-subtle)">Precio final</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(corpPr.precio)}</div></div>
