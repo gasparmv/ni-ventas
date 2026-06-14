@@ -899,6 +899,55 @@ async function processJunioBroadcastQueue(env) {
   } catch (_) { /* best-effort */ }
 }
 
+// Cron (*/1): goteo del broadcast "1 cupo · Comunidad Al Infinito" (plantilla
+// cupo_comunidad_junio) a los leads del form de junio que NO pagaron. Encolado en
+// wa_autoreply_log (kind='cupo_broadcast', due_at desde el 14/06 14:00 ART). Manda
+// la plantilla cuando Meta la aprueba (revert-on-fail: si aún no está aprobada,
+// vuelve a 'queued' y reintenta el próximo tick → arranca apenas se apruebe).
+async function processCupoBroadcastQueue(env) {
+  if (await isWaBillingBlocked(env)) return;
+  try {
+    const nowIso = new Date().toISOString();
+    const floorIso = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT phone, sender_name FROM wa_autoreply_log WHERE kind = 'cupo_broadcast' AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 6"
+    ).bind(nowIso, floorIso).all();
+    if (!rs.results?.length) return;
+    for (const row of rs.results) {
+      const phone = row.phone;
+      const nombre = row.sender_name || '';
+      let claim;
+      try { claim = await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sending' WHERE phone = ? AND kind = 'cupo_broadcast' AND status = 'queued'").bind(phone).run(); } catch (_) { continue; }
+      if (!claim?.meta?.changes) continue;
+      if (await isUnreachable(env, phone)) {
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped', sent_at = ? WHERE phone = ? AND kind = 'cupo_broadcast'").bind(new Date().toISOString(), phone).run(); } catch (_) {}
+        continue;
+      }
+      const primerNombre = capitalizeName((nombre || '').split(/\s+/)[0]) || 'amigo/a';
+      const tpl = await waSendTemplate(env, phone, 'cupo_comunidad_junio', 'es_AR', [primerNombre]);
+      if (!tpl?.ok) {
+        // Falla típica: la plantilla todavía no está aprobada por Meta → volver a 'queued' y reintentar.
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued' WHERE phone = ? AND kind = 'cupo_broadcast'").bind(phone).run(); } catch (_) {}
+        continue;
+      }
+      const ts = new Date().toISOString();
+      const wamid = tpl.id || '';
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'cupo_broadcast'").bind(ts, phone).run(); } catch (_) {}
+      const previewBody = `buenass ${primerNombre}! Abril de Neon Infinito te escribe ✨\n🚨 Te comento que queda UN solo cupo para acceder a la Comunidad Al Infinito!! confirmame porfa si viste el jueves la clase 2 del evento, y estás al tanto de la propuesta (sorteo incluido!)`;
+      if (wamid) {
+        try {
+          await env.DB.prepare(
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1
+               WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+          ).bind(ts, wamid, phone, previewBody).run();
+        } catch (_) {}
+      }
+    }
+  } catch (_) { /* best-effort */ }
+}
+
 // Cron (*/1): recupera media (imagenes/videos/audios/docs/stickers) cuyo
 // downloadMedia falló en el handler del webhook. Causa típica: race con Meta —
 // el webhook del msg llega antes de que el media esté disponible en su API, así
@@ -7297,6 +7346,8 @@ export default {
     ctx.waitUntil(processCursosBroadcastQueue(env));
     // Goteo del broadcast de JUNIO 2026. Encolado vía /admin/wa/junio-broadcast-schedule.
     ctx.waitUntil(processJunioBroadcastQueue(env));
+    // Goteo del broadcast "1 cupo · Comunidad Al Infinito" a no-pagadores del form de junio.
+    ctx.waitUntil(processCupoBroadcastQueue(env));
     // Backfill del reenvío de comprobantes a Gaspar (lanzamiento, hoy+mañana):
     // reintenta los inbound media que el reenvío en vivo no logró mandar (glitch
     // de Meta o ventana 24h momentáneamente cerrada). Idempotente vía kv_cache,
