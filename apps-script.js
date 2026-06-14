@@ -219,6 +219,9 @@ function doGet(e) {
   const action = e && e.parameter && e.parameter.action;
   // GET ?action=cogs → costos del mes actual para el cotizador nuevo.
   if (action === 'cogs') return getCogs(e);
+  // GET ?action=pedido_ping → verificar (sin escribir) que esta versión nueva
+  // del Apps Script (con el espejo de pedidos) está deployada.
+  if (action === 'pedido_ping') return jsonOut({ ok: true, pong: true });
   // GET ?action=rows&sheet=2026 → devuelve las filas crudas (sin coerción de tipo
   // que hace gviz, que rompe los teléfonos con "+" o espacios).
   if (action === 'rows') {
