@@ -24,6 +24,16 @@ function doPost(e) {
     // Soporta tanto JSON body directo como form field "data"
     const raw = (e.parameter && e.parameter.data) ? e.parameter.data : e.postData.contents;
     const data = JSON.parse(raw);
+
+    // ===== Acciones de PEDIDOS (espejo del CRM → Excel de Ventas) =====
+    // Si no hay `action`, sigue el flujo histórico del cotizador (más abajo).
+    if (data.action === 'pedido_ping') {
+      return jsonOut({ ok: true, pong: true });
+    }
+    if (data.action === 'pedido_upsert') {
+      return pedidoUpsert(data);
+    }
+
     const ss = SpreadsheetApp.openById(SHEET_ID);
 
     let sheet = ss.getSheetByName(SHEET_NAME);
@@ -90,6 +100,37 @@ function doPost(e) {
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({ error: err.message }))
       .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// Upsert de un pedido en el Excel de VENTAS (hoja 2026). El CRM (D1) es la fuente
+// de verdad; esto es el espejo. data.row = array de 21 valores (cols A..U). Con
+// data.sheet_row actualiza esa fila SIN tocar O (15 = Productor, que cargás vos en
+// el Excel); sin sheet_row, agrega una fila nueva y devuelve su número.
+function pedidoUpsert(data) {
+  try {
+    var VENTAS_ID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
+    var ss = SpreadsheetApp.openById(VENTAS_ID);
+    var sheet = ss.getSheetByName('2026');
+    if (!sheet) return jsonOut({ error: 'hoja 2026 de Ventas no encontrada' });
+    var row = data.row || [];
+    while (row.length < 21) row.push('');
+    var sheetRow = parseInt(data.sheet_row, 10) || 0;
+    if (sheetRow && sheetRow > 1) {
+      // UPDATE: escribir A..N (1..14) y P..U (16..21), SALTANDO O (15 = Productor).
+      sheet.getRange(sheetRow, 1, 1, 14).setValues([row.slice(0, 14)]);
+      sheet.getRange(sheetRow, 16, 1, 6).setValues([row.slice(15, 21)]);
+      return jsonOut({ ok: true, row: sheetRow });
+    }
+    // APPEND: después de la última fila con datos en la col C (cartel).
+    var colC = sheet.getRange('C:C').getValues();
+    var last = 0;
+    for (var i = colC.length - 1; i >= 0; i--) { if (colC[i][0] !== '' && colC[i][0] !== null) { last = i + 1; break; } }
+    var insertRow = last + 1;
+    sheet.getRange(insertRow, 1, 1, 21).setValues([row.slice(0, 21)]);
+    return jsonOut({ ok: true, row: insertRow });
+  } catch (err) {
+    return jsonOut({ error: err.message });
   }
 }
 

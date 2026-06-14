@@ -141,7 +141,7 @@ function parseCsv(csv) {
 // ===== Pedidos: migración del Excel de Ventas (hoja 2026) a D1 =====
 // D1 pasa a ser la fuente de verdad; el Excel queda como espejo (fase posterior).
 async function ensurePedidosSchema(env) {
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, fecha TEXT, cartel TEXT, colores TEXT, alto REAL, ancho REAL, cm_neon REAL, base TEXT, cantidad REAL, precio REAL, dimer TEXT, precio_dimmer REAL, envio TEXT, aclaracion TEXT, productor TEXT, plataforma TEXT, estado_pago TEXT, pagado REAL, restante REAL, estado_pedido TEXT, ad TEXT, telefono TEXT, tramos REAL, tipo TEXT, sheet_row INTEGER, origen TEXT NOT NULL DEFAULT 'backfill', created_at TEXT, updated_at TEXT)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, fecha TEXT, cartel TEXT, colores TEXT, alto REAL, ancho REAL, cm_neon REAL, base TEXT, cantidad REAL, precio REAL, dimer TEXT, precio_dimmer REAL, envio TEXT, aclaracion TEXT, productor TEXT, plataforma TEXT, estado_pago TEXT, pagado REAL, restante REAL, estado_pedido TEXT, ad TEXT, telefono TEXT, tramos REAL, tipo TEXT, sheet_row INTEGER, origen TEXT NOT NULL DEFAULT 'backfill', mirror_dirty INTEGER NOT NULL DEFAULT 0, created_at TEXT, updated_at TEXT)`).run();
 }
 // Número de precio → entero. Los precios de NI son SIEMPRE enteros en pesos (sin
 // centavos). Google CSV puede mandar "149500", "149.500", "149,500", "$149.500",
@@ -191,6 +191,54 @@ async function syncProductoresFromVentas(env) {
     }
     return changed;
   } catch (e) { return 0; }
+}
+// ISO "YYYY-MM-DD" → "D/M/YYYY" (formato del Excel de Ventas).
+function pedidoFechaToExcel(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return iso || '';
+  return `${parseInt(m[3], 10)}/${parseInt(m[2], 10)}/${m[1]}`;
+}
+// Empuja UNA fila de pedido al Excel de Ventas vía el Apps Script (action=
+// pedido_upsert). Con sheet_row → actualiza; sin él → agrega y devuelve el nuevo
+// nro de fila. La columna Productor (O) NO se toca (la maneja Gaspar en el Excel).
+async function pushPedidoToVentas(env, row) {
+  if (!env.APPS_SCRIPT_URL) return null;
+  const arr = [
+    pedidoFechaToExcel(row.fecha), row.numero ?? '', row.cartel || '', row.colores || '',
+    row.alto ?? '', row.ancho ?? '', row.cm_neon ?? '', row.base || '',
+    row.cantidad ?? '', row.precio ?? '', row.dimer || '', row.precio_dimmer ?? '',
+    row.envio || '', row.aclaracion || '', '', // O = Productor (placeholder, se respeta)
+    row.plataforma || '', row.estado_pago || '', row.pagado ?? '', row.restante ?? '',
+    row.estado_pedido || '', row.ad || ''
+  ];
+  try {
+    const r = await fetch(env.APPS_SCRIPT_URL, {
+      method: 'POST', redirect: 'follow',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'pedido_upsert', sheet_row: row.sheet_row || 0, row: arr })
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j && j.ok && j.row) ? Number(j.row) : null;
+  } catch (e) { return null; }
+}
+// Cron: replica al Excel los pedidos marcados mirror_dirty=1 (creados/editados en
+// el CRM). GATEADO por el flag kv 'pedidos_mirror_on' (se prende DESPUÉS de
+// deployar el Apps Script, para no pushear contra el viejo). El clear es condicional
+// por updated_at para no perder ediciones concurrentes.
+async function processPedidosMirror(env) {
+  if (!env.APPS_SCRIPT_URL) return;
+  try {
+    const flag = await env.DB.prepare("SELECT value FROM kv_cache WHERE key = 'pedidos_mirror_on'").first();
+    if (!flag || flag.value !== '1') return;
+    const rs = await env.DB.prepare('SELECT * FROM pedidos WHERE mirror_dirty = 1 ORDER BY id LIMIT 8').all();
+    for (const row of (rs.results || [])) {
+      const newRow = await pushPedidoToVentas(env, row);
+      if (newRow) {
+        await env.DB.prepare('UPDATE pedidos SET mirror_dirty = 0, sheet_row = ? WHERE id = ? AND updated_at = ?').bind(newRow, row.id, row.updated_at).run();
+      }
+    }
+  } catch (e) {}
 }
 // Convierte "13.832k", "$175.000", "954.251", "(5.097k)", "63%", "-" → number.
 // Sheet usa . como separador de miles (formato AR) y k como sufijo de miles.
@@ -6986,8 +7034,8 @@ export default {
         const ad = String(body.ad || '');
         const telefono = String(body.telefono || '').replace(/\D/g, '');
         const stmts = carteles.map(c => env.DB.prepare(
-          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, sheet_row, origen, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, NULL, 'crm', ?, ?)`
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, sheet_row, origen, mirror_dirty, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, NULL, 'crm', 1, ?, ?)`
         ).bind(
           numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
           num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
@@ -7022,6 +7070,7 @@ export default {
           sets.push('pagado = ?', 'restante = ?'); args.push(pagado, restante);
         }
         if (!sets.length) return json({ error: 'nada para actualizar' }, 400);
+        sets.push('mirror_dirty = 1'); // marcar para que el cron lo replique al Excel
         sets.push('updated_at = ?'); args.push(new Date().toISOString());
         args.push(ref.numero, ref.fecha);
         await env.DB.prepare(`UPDATE pedidos SET ${sets.join(', ')} WHERE numero = ? AND fecha = ?`).bind(...args).run();
@@ -7035,6 +7084,15 @@ export default {
         await ensurePedidosSchema(env);
         const changed = await syncProductoresFromVentas(env);
         return json({ ok: true, changed });
+      }
+
+      // POST /admin/pedidos/mirror-resync → marca los pedidos creados en el CRM
+      // (origen='crm') como mirror_dirty para que el cron los empuje al Excel.
+      // Sirve para el primer push tras activar el espejo, o para forzar re-sync.
+      if (request.method === 'POST' && path === '/admin/pedidos/mirror-resync') {
+        await ensurePedidosSchema(env);
+        const res = await env.DB.prepare("UPDATE pedidos SET mirror_dirty = 1 WHERE origen = 'crm'").run();
+        return json({ ok: true, marcados: (res.meta && res.meta.changes) || 0 });
       }
 
       // ============================================================
@@ -7489,6 +7547,9 @@ export default {
     // Cola de auto-respuestas (minicurso): corre en CADA tick, incluido el cron
     // dedicado de cada minuto, para que la demora sea ~1-2 min y no más.
     ctx.waitUntil(processAutoReplyQueue(env));
+    // Espejo de pedidos al Excel de Ventas (gateado por flag kv 'pedidos_mirror_on';
+    // no hace nada hasta que se active tras deployar el Apps Script).
+    ctx.waitUntil(processPedidosMirror(env));
     // Procesar respuestas pendientes del gate de feedback del minicurso:
     // espera 2 min al cliente, junta todos los mensajes, manda a la IA y decide.
     ctx.waitUntil(processMinicursoGiftPending(env));
