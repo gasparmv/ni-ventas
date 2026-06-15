@@ -7329,6 +7329,31 @@ export default {
       //   5. Devuelve la imagen del render + los params + flag dif_vs_cliente.
       // Idea: con esto Joaco solo tiene que mandar capturas del chat y el AI
       // saca todo lo necesario para cotizar, salteando al diseñador.
+      // POST /admin/render-adhoc — render IA "suelto" (SIN brief): lo usa el
+      // cotizador rápido de #presupuestos para hacer un mockup al toque sin pasar
+      // por el flujo del panel. Recibe una foto (multipart) + notas opcionales,
+      // genera el render con Gemini y lo devuelve en base64. El front lo muestra y,
+      // al enviar el presupuesto, lo manda como foto + caption (igual que el panel).
+      if (request.method === 'POST' && path === '/admin/render-adhoc') {
+        if (!env.GEMINI_API_KEY) return json({ error: 'Falta configurar GEMINI_API_KEY en el worker' }, 503);
+        const ctType = request.headers.get('Content-Type') || '';
+        if (!ctType.includes('multipart/form-data')) return json({ error: 'expected multipart/form-data' }, 400);
+        let fd; try { fd = await request.formData(); } catch { return json({ error: 'invalid form-data' }, 400); }
+        const file = fd.get('file');
+        if (!file || typeof file.arrayBuffer !== 'function') return json({ error: 'missing file' }, 400);
+        const buf = await file.arrayBuffer();
+        if (!buf || buf.byteLength < 64) return json({ error: 'imagen inválida o vacía' }, 400);
+        const mime = (file.type || 'image/jpeg').split(';')[0].trim();
+        const notas = String(fd.get('notas') || '').trim();
+        const contexto = notas ? `NOTAS / INSTRUCCIONES ESPECÍFICAS PARA ESTE DISEÑO (tomalas en cuenta):\n${notas}` : '';
+        const renderResult = await generarRenderConGemini(env, buf, mime, contexto);
+        if (!renderResult || renderResult.error) {
+          return json({ error: 'render: ' + ((renderResult && renderResult.error) || 'sin respuesta de la IA') }, 502);
+        }
+        return json({ ok: true, mime: renderResult.mime, base64: renderResult.base64 });
+      }
+
+      // POST /admin/briefs/:id/generar-render  →  pipeline IA completo en paralelo:
       if (request.method === 'POST' && /^\/admin\/briefs\/\d+\/generar-render$/.test(path)) {
         const briefId = path.split('/')[3];
         if (!env.GEMINI_API_KEY) return json({ error: 'Falta configurar GEMINI_API_KEY en el worker' }, 503);

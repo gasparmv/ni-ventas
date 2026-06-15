@@ -360,11 +360,25 @@ async function enviarPresupuestoWA() {
   let waOk = false;
   let wamid = '';
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ to: tel, body: texto })
-    });
+    // Si hay render IA generado, se manda como FOTO con el texto del presupuesto
+    // en el caption (misma lógica que el panel de cotización). Si no, texto solo.
+    const tieneRender = !!(f.renderResult && f.renderResult.base64);
+    let r;
+    if (tieneRender) {
+      const blob = b64ToBlob(f.renderResult.base64, f.renderResult.mime);
+      const fd = new FormData();
+      fd.append('to', tel);
+      fd.append('type', 'image');
+      fd.append('caption', texto);
+      fd.append('file', blob, 'render.png');
+      r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-media', { method: 'POST', headers: authHeaders(), body: fd });
+    } else {
+      r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ to: tel, body: texto })
+      });
+    }
     const j = await r.json().catch(() => ({}));
     if (!r.ok) {
       const detail = j.error || 'no se pudo enviar';
@@ -395,6 +409,10 @@ async function enviarPresupuestoWA() {
   // Si el envío salió bien, guardar también en Sheet (un envío = un presupuesto registrado).
   if (waOk) {
     await saveCotizacion();
+    // Limpiar el render para que no quede pegado al próximo presupuesto.
+    STATE.cotizadorForm.renderInput = null;
+    STATE.cotizadorForm.renderResult = null;
+    STATE.cotizadorRenderGenerating = false;
     // Verificar entrega real en background (no bloquea la UI).
     if (wamid) verificarEntregaWA(wamid, tel);
   }
@@ -3720,6 +3738,7 @@ function bindPresupuestos() {
     };
   });
   bindCotSaveBtn();
+  bindCotRender();
   const fuBtn = document.getElementById('btn-pp-followups');
   if (fuBtn) fuBtn.onclick = () => enviarFollowupsPresupuesto();
   const failBtn = document.getElementById('btn-pp-failures');
@@ -3753,6 +3772,79 @@ function bindCotSaveBtn() {
     ta.oninput = () => { STATE.cotizadorForm.textoOverride = ta.value; };
   }
 }
+
+// ===== Render IA del cotizador rápido (#presupuestos) =====
+function bindCotRender() {
+  const dz = document.getElementById('cot-render-dropzone');
+  const fileInput = document.getElementById('cot-render-file');
+  if (dz && fileInput) {
+    dz.onclick = () => fileInput.click();
+    dz.ondragover = (ev) => { ev.preventDefault(); dz.style.borderColor = 'var(--accent-cyan)'; dz.style.background = 'rgba(143,212,222,.06)'; };
+    dz.ondragleave = () => { dz.style.borderColor = ''; dz.style.background = ''; };
+    dz.ondrop = (ev) => { ev.preventDefault(); dz.style.borderColor = ''; dz.style.background = ''; cotRenderSetFile(ev.dataTransfer?.files?.[0]); };
+    fileInput.onchange = () => { cotRenderSetFile(fileInput.files?.[0]); fileInput.value = ''; };
+  }
+  const genBtn = document.getElementById('cot-render-generate');
+  if (genBtn) genBtn.onclick = () => cotGenerarRender();
+  const regenBtn = document.getElementById('cot-render-regen');
+  if (regenBtn) regenBtn.onclick = () => cotGenerarRender();
+  const clearBtn = document.getElementById('cot-render-clear');
+  if (clearBtn) clearBtn.onclick = () => cotRenderClear();
+}
+
+async function cotRenderSetFile(file) {
+  if (!file || !(file.type || '').startsWith('image/')) return;
+  try {
+    const img = await fileToDraftImage(file);   // { dataUrl, blob, contentType }
+    STATE.cotizadorForm.renderInput = img;
+    STATE.cotizadorForm.renderResult = null;
+    render();
+  } catch (e) { toast('No se pudo leer la imagen'); }
+}
+
+function cotRenderClear() {
+  STATE.cotizadorForm.renderInput = null;
+  STATE.cotizadorForm.renderResult = null;
+  STATE.cotizadorRenderGenerating = false;
+  render();
+}
+
+async function cotGenerarRender() {
+  const inp = STATE.cotizadorForm.renderInput;
+  if (!inp || !inp.blob) { toast('Subí una foto primero'); return; }
+  if (STATE.cotizadorRenderGenerating) return;
+  if (!CONFIG.trackerUrl || !STATE.token) { toast('Tenés que estar logueado para generar el render'); return; }
+  STATE.cotizadorRenderGenerating = true;
+  render();
+  try {
+    const fd = new FormData();
+    fd.append('file', inp.blob, 'boceto' + (inp.contentType === 'image/png' ? '.png' : '.jpg'));
+    const nombre = (STATE.cotizadorForm.cliente || '').trim();
+    if (nombre) fd.append('notas', 'Cartel de neón LED para: ' + nombre);
+    const r = await fetch(CONFIG.trackerUrl + '/admin/render-adhoc', { method: 'POST', headers: authHeaders(), body: fd });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.base64) {
+      toast('Error generando render: ' + (j.error || 'fallo'));
+      STATE.cotizadorRenderGenerating = false; render(); return;
+    }
+    STATE.cotizadorForm.renderResult = { mime: j.mime || 'image/png', base64: j.base64 };
+    STATE.cotizadorRenderGenerating = false;
+    render();
+    toast('Render generado ✨');
+  } catch (e) {
+    STATE.cotizadorRenderGenerating = false; render();
+    toast('Error de red generando el render');
+  }
+}
+
+// base64 → Blob (para mandar el render por /admin/wa/send-media con caption).
+function b64ToBlob(b64, mime) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime || 'image/png' });
+}
+
 let pptoShowCotizador = false;
 
 function renderCotizadorResults() {
@@ -3904,7 +3996,48 @@ function renderCotizadorForm() {
       <div style="margin-top:var(--s-2)">
         <button class="btn btn-ghost" id="cot-add-cartel" title="Agregar otro cartel al presupuesto">＋ Agregar otro cartel</button>
       </div>
+      ${renderCotizadorRenderBlock()}
       <div id="cot-results-slot">${renderCotizadorResults()}</div>
+    </div>
+  `;
+}
+
+// Bloque de Render IA del cotizador rápido (#presupuestos). Misma lógica que el
+// panel de cotización: subís una foto/boceto, se genera el render con IA y se
+// manda como foto + caption (el texto del presupuesto) al enviar por WhatsApp.
+function renderCotizadorRenderBlock() {
+  const f = STATE.cotizadorForm;
+  const input = f.renderInput;     // { dataUrl, blob, contentType }
+  const result = f.renderResult;   // { mime, base64 }
+  const gen = !!STATE.cotizadorRenderGenerating;
+  return `
+    <div style="margin-top:var(--s-3);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-2)">
+      <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">✨ Render IA <span style="text-transform:none;color:var(--fg-mute)">(opcional · se envía como foto con el presupuesto)</span></div>
+      ${!input && !result ? `
+        <div id="cot-render-dropzone" style="border:2px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-2);text-align:center;color:var(--fg-mute);font-size:11px;cursor:pointer;transition:border-color .15s,background .15s">
+          📋 Pegá, arrastrá o tocá para subir la foto / boceto del cartel
+          <input type="file" id="cot-render-file" accept="image/*" style="display:none">
+        </div>
+      ` : ''}
+      ${input && !result ? `
+        <div style="display:flex;gap:var(--s-2);align-items:center">
+          <img src="${input.dataUrl}" alt="boceto" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--border);flex:0 0 auto">
+          <button class="btn btn-cyan" id="cot-render-generate" ${gen ? 'disabled' : ''} style="flex:1">${gen ? '✨ Generando render…' : '✨ Generar render IA'}</button>
+          <button class="btn btn-ghost btn-icon" id="cot-render-clear" title="Quitar" ${gen ? 'disabled' : ''}>×</button>
+        </div>
+      ` : ''}
+      ${result ? `
+        <div style="display:flex;gap:var(--s-2);align-items:flex-start">
+          <img src="data:${result.mime};base64,${result.base64}" alt="render" style="width:120px;border-radius:8px;border:1px solid var(--accent-cyan);flex:0 0 auto">
+          <div style="flex:1;font-size:11px;color:var(--fg-mute)">
+            ✅ Render listo — se va a enviar como foto junto con el presupuesto.
+            <div style="margin-top:8px;display:flex;gap:6px">
+              <button class="btn btn-ghost" id="cot-render-regen" title="Generar otro render con la misma foto" ${gen ? 'disabled' : ''}>${gen ? '…' : '↻ Otro'}</button>
+              <button class="btn btn-ghost" id="cot-render-clear" title="Quitar el render">× Quitar</button>
+            </div>
+          </div>
+        </div>
+      ` : ''}
     </div>
   `;
 }
@@ -12208,6 +12341,7 @@ async function quickCreateBriefFromImage(file) {
     STATE.quickModalOpen = true;
     STATE.quickModalSaving = false;
     STATE.quickModalOrigen = 'wpp';  // default: la mayoría llega por WhatsApp
+    STATE.quickModalIntExt = null;   // sin default: Joaco DEBE elegir Interior/Exterior
     render();
     // Auto-focus en el input de título.
     setTimeout(() => {
@@ -12238,6 +12372,7 @@ function openNuevoBriefModal() {
   STATE.quickModalUrgente = false;
   STATE.quickModalPrefillPhone = '';
   STATE.quickModalTipo = (briefProducto === 'corporea' ? 'corporea' : null);
+  STATE.quickModalIntExt = null;
   render();
   setTimeout(() => {
     const el = document.getElementById('quick-modal-titulo');
@@ -12259,6 +12394,7 @@ function openBriefFromChat() {
   STATE.quickModalOrigen = 'wpp';
   STATE.quickModalUrgente = false;
   STATE.quickModalPrefillPhone = String(phone).replace(/\D/g, '');
+  STATE.quickModalIntExt = null;
   render();
   setTimeout(() => {
     const el = document.getElementById('quick-modal-titulo');
@@ -12294,6 +12430,10 @@ function bindQuickCreateModal() {
   // Toggle origen WhatsApp / Instagram.
   document.querySelectorAll('[data-qm-origen]').forEach(btn => {
     btn.onclick = () => setQuickModalOrigen(btn.dataset.qmOrigen);
+  });
+  // Toggle Interior / Exterior (obligatorio, sin default).
+  document.querySelectorAll('[data-qm-intext]').forEach(btn => {
+    btn.onclick = () => setQuickModalIntExt(btn.dataset.qmIntext);
   });
   // Dropzone: click abre el selector, drop/file-input suman imágenes.
   const qDrop = document.getElementById('quick-modal-dropzone');
@@ -12358,6 +12498,20 @@ function setQuickModalOrigen(origen) {
   if (wrap) wrap.style.display = origen === 'wpp' ? '' : 'none';
 }
 
+// Setea Interior/Exterior del modal Quick Create y actualiza el toggle (sin
+// re-render, para no perder lo tipeado). Arranca null: Joaco DEBE elegir.
+function setQuickModalIntExt(val) {
+  STATE.quickModalIntExt = val;
+  ['INT', 'EXT'].forEach(o => {
+    const btn = document.getElementById('quick-modal-intext-' + o);
+    if (!btn) return;
+    const active = (o === val);
+    btn.style.background = active ? 'var(--accent-cyan,#8FD4DE)' : 'transparent';
+    btn.style.color = active ? '#000' : 'var(--fg-subtle)';
+    btn.style.borderColor = active ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)';
+  });
+}
+
 // Lee el form, valida, crea el brief en la DB y sube todas las imágenes.
 async function confirmQuickCreate() {
   if (STATE.quickModalSaving) return;
@@ -12395,6 +12549,17 @@ async function confirmQuickCreate() {
     toast('Agregá al menos una foto de referencia (Ctrl+V, arrastrá o tocá la zona de arriba)');
     return;
   }
+  // Interior / Exterior OBLIGATORIO para neones (define el precio). Sin default:
+  // si Joaco no eligió, frenamos y resaltamos los botones en rojo.
+  const esCorpBrief = (STATE.view === 'corporeas');
+  if (!esCorpBrief && !STATE.quickModalIntExt) {
+    ['INT', 'EXT'].forEach(o => {
+      const b = document.getElementById('quick-modal-intext-' + o);
+      if (b) { b.style.borderColor = '#FF5566'; setTimeout(() => { if (STATE.quickModalIntExt !== o) b.style.borderColor = 'var(--border)'; }, 1600); }
+    });
+    toast('Elegí si el cartel es Interior o Exterior (define el precio)');
+    return;
+  }
   STATE.quickModalSaving = true;
   const saveBtn = document.getElementById('quick-modal-confirm');
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Creando…'; }
@@ -12407,7 +12572,7 @@ async function confirmQuickCreate() {
       medidas_libre: medidas || null,
       notas: notas || null,
       estado: 'nuevo',
-      tipo: (STATE.view === 'corporeas' ? 'corporea' : null),
+      tipo: (esCorpBrief ? 'corporea' : STATE.quickModalIntExt),
       urgente
     });
     STATE.briefs.unshift(saved);
@@ -12492,8 +12657,24 @@ function renderQuickCreateModal() {
             style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3)">
         </div>
 
+        ${STATE.view !== 'corporeas' ? `
+        <!-- Interior / Exterior: OBLIGATORIO y SIN default — define el precio (EXT cobra extra).
+             Si no se exige, Joaco se olvida y queda todo "interior" cobrado de menos. -->
+        <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">¿Interior o exterior? <span style="color:#FF5566">*</span></label>
+        <div id="quick-modal-intext-wrap" style="display:flex;gap:8px;margin-bottom:var(--s-3)">
+          <button type="button" id="quick-modal-intext-INT" data-qm-intext="INT"
+            style="flex:1;padding:10px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;transition:all .15s;${oBtn('x', STATE.quickModalIntExt === 'INT')}">
+            🏠 Interior
+          </button>
+          <button type="button" id="quick-modal-intext-EXT" data-qm-intext="EXT"
+            style="flex:1;padding:10px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;transition:all .15s;${oBtn('x', STATE.quickModalIntExt === 'EXT')}">
+            🌤️ Exterior
+          </button>
+        </div>
+        ` : ''}
+
         <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Medidas referenciales (opcional)</label>
-        <input type="text" id="quick-modal-medidas" placeholder="Lo que pidió el cliente: 90x50, letras 80, INT…"
+        <input type="text" id="quick-modal-medidas" placeholder="Lo que pidió el cliente: 90x50, letras 80…"
           style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3)">
 
         <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Notas (opcional)</label>
