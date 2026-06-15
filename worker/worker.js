@@ -2417,14 +2417,20 @@ function corporeaContexto(brief) {
   } else {
     caso = 'E'; efecto = 'todas las caras opacas con luz = no escapa luz, se ve como una letra 3D de color sólido sin brillo.';
   }
-  const colF = p.frente_color ? `, color ${p.frente_color}` : '';
+  // "Replicar diseño": el frente NO es un color sólido sino GRÁFICA IMPRESA full
+  // color que reproduce el diseño de la imagen de referencia (logos multicolor
+  // como Google/marcas — no se representan con un color único).
+  const fReplicar = /replic|dise[ñn]o/i.test(String(p.frente_color || ''));
+  const colF = fReplicar
+    ? ' — GRÁFICA IMPRESA FULL COLOR: el frente reproduce EXACTAMENTE el diseño/logo de la imagen de referencia (todos sus colores, formas y tipografía tal cual), NO es un color sólido'
+    : (p.frente_color ? `, color ${p.frente_color}` : '');
   const colL = p.lat_color ? `, color ${p.lat_color}` : '';
   const colE = p.esp_color ? `, color ${p.esp_color}` : '';
   const med = (p.ancho_cm && p.alto_cm) ? `${p.ancho_cm} × ${p.alto_cm} cm` : (brief.medidas_libre || 's/d');
   return [
     'CONTEXTO DE ESTA CORPÓREA (aplicá EXACTAMENTE este caso):',
     `- CASO ${caso}: ${efecto}`,
-    `- Frente: ${mat}, ${fTrans ? 'translúcido (transilumina)' : 'opaco'}${colF}.`,
+    `- Frente: ${fReplicar ? 'gráfica impresa' : mat}, ${fTrans ? 'translúcido (transilumina)' : 'opaco'}${colF}.`,
     `- Laterales: ${lTrans ? 'translúcidos (brillan)' : 'opacos'}${colL}.`,
     `- Espalda: ${eTrans ? 'translúcida (deja salir luz = halo)' : 'opaca'}${colE}.`,
     `- Iluminación: ${conLuz ? 'CON luz (LED encendido)' : 'SIN luz (apagada)'}.`,

@@ -11600,13 +11600,15 @@ function renderBriefDrawer() {
   const corpPr = esCorpBrief ? calcCorporea({ ancho: data.ancho_cm, alto: data.alto_cm, con_luz: corpSinLuz ? '0' : '1', frente_material: corpCj.frente_material || 'impreso' }) : null;
   const corpAc = (field, val, l0, l1) => corpSinLuz ? '<span class="pill" style="font-size:11px">opaco</span>' : `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="translucido" ${String(val||'').startsWith('transl')?'selected':''}>${l0}</option><option value="opaco" ${!String(val||'').startsWith('transl')?'selected':''}>${l1}</option></select>`;
   const corpColorSel = (field, val) => {
-    const keys = Object.keys(CORP_COLOR_MAP);
-    const cur = keys.find(k => k.toLowerCase() === String(val||'').toLowerCase()) || keys[0];
-    const dot = (hex) => `<span class="corp-cdot" style="width:13px;height:13px;border-radius:50%;background:${hex};border:1px solid rgba(255,255,255,.35);flex-shrink:0;display:inline-block"></span>`;
-    const opts = keys.map(k => `<div data-corp-color="${field}|${k}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:13px${k===cur?';background:rgba(143,212,222,.12)':''}">${dot(CORP_COLOR_MAP[k])}${k}</div>`).join('');
+    const baseKeys = Object.keys(CORP_COLOR_MAP);
+    // Solo el FRENTE ofrece "Replicar diseño" (gráfica impresa full color).
+    const keys = (field === 'frente_color') ? [CORP_REPLICAR, ...baseKeys] : baseKeys;
+    const cur = keys.find(k => k.toLowerCase() === String(val||'').toLowerCase()) || baseKeys[0];
+    const dot = (k) => `<span class="corp-cdot" style="width:13px;height:13px;border-radius:50%;background:${k===CORP_REPLICAR?CORP_REPLICAR_GRAD:(CORP_COLOR_MAP[k]||'#888')};border:1px solid rgba(255,255,255,.35);flex-shrink:0;display:inline-block"></span>`;
+    const opts = keys.map(k => `<div data-corp-color="${field}|${k}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:13px${k===cur?';background:rgba(143,212,222,.12)':''}${k===CORP_REPLICAR?';border-bottom:1px solid var(--border);font-weight:600':''}">${dot(k)}${k}</div>`).join('');
     return `<div style="position:relative">
       <input type="hidden" data-corp-bf="${field}" value="${cur}">
-      <button type="button" data-corp-color-trigger="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px;cursor:pointer;text-align:left;display:flex;align-items:center;gap:8px;justify-content:space-between"><span style="display:flex;align-items:center;gap:8px">${dot(CORP_COLOR_MAP[cur])}<span class="corp-cname">${cur}</span></span><span style="opacity:.5">▾</span></button>
+      <button type="button" data-corp-color-trigger="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px;cursor:pointer;text-align:left;display:flex;align-items:center;gap:8px;justify-content:space-between"><span style="display:flex;align-items:center;gap:8px">${dot(cur)}<span class="corp-cname">${cur}</span></span><span style="opacity:.5">▾</span></button>
       <div id="corp-colorpanel-${field}" style="display:none;position:absolute;left:0;right:0;z-index:30;background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);max-height:240px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5);margin-top:2px">${opts}</div>
     </div>`;
   };
@@ -11970,6 +11972,11 @@ document.addEventListener('change', (ev) => {
 });
 // Paleta de colores corpóreos (nombre → hex) — usada por el dropdown custom del drawer.
 const CORP_COLOR_MAP = {'Blanco':'#ffffff','Blanco cálido':'#fff1d6','Blanco frío':'#e9f1ff','Crema':'#f7efd6','Beige':'#e3d3a8','Marfil':'#fbf8ef','Negro':'#141414','Gris oscuro':'#454545','Gris':'#8a8a8a','Gris claro':'#c9c9c9','Plateado':'#c6cace','Rojo':'#e10600','Rojo oscuro':'#8b0000','Bordó':'#5c0a1e','Coral':'#ff6f5e','Rosa':'#ff5fa2','Rosa pastel':'#ffc2d4','Fucsia':'#ff2d8e','Magenta':'#cc0a78','Naranja':'#ff7a00','Naranja oscuro':'#cc5200','Ámbar':'#ffbf00','Amarillo':'#ffd400','Amarillo oro':'#f0c000','Dorado':'#d4af37','Verde lima':'#7ce000','Verde':'#1db954','Verde oscuro':'#0b6b35','Verde agua':'#22c9a9','Menta':'#9ff0c8','Celeste':'#5ec8ff','Cyan':'#00cfd4','Turquesa':'#1fc7c7','Azul':'#1565ff','Azul marino':'#0a2a66','Violeta':'#7c3aed','Lila':'#b794f6','Púrpura':'#6b21a8','Marrón':'#7b4a21','Chocolate':'#4a2c11'};
+// "Replicar diseño": opción especial SOLO del frente — en vez de un color sólido,
+// el frente va en GRÁFICA IMPRESA full color reproduciendo el logo/diseño que mandó
+// el cliente (para logos multicolor que no se representan con un color). Swatch = arcoíris.
+const CORP_REPLICAR = 'Replicar diseño';
+const CORP_REPLICAR_GRAD = 'conic-gradient(from 0deg,#ff3b30,#ff9500,#ffd400,#34c759,#00c7be,#1565ff,#7c3aed,#ff2d8e,#ff3b30)';
 // Dropdown de color custom (swatch en cada opción). Delegado: trigger toggle / opción selecciona / click afuera cierra.
 document.addEventListener('click', (ev) => {
   const opt = ev.target.closest && ev.target.closest('[data-corp-color]');
@@ -11980,7 +11987,7 @@ document.addEventListener('click', (ev) => {
     if (wrap) {
       const hid = wrap.querySelector('[data-corp-bf]'); if (hid) hid.value = name;
       const trig = wrap.querySelector('[data-corp-color-trigger]');
-      if (trig) { const d = trig.querySelector('.corp-cdot'); if (d) d.style.background = CORP_COLOR_MAP[name] || '#888'; const nm = trig.querySelector('.corp-cname'); if (nm) nm.textContent = name; }
+      if (trig) { const d = trig.querySelector('.corp-cdot'); if (d) d.style.background = (name === CORP_REPLICAR) ? CORP_REPLICAR_GRAD : (CORP_COLOR_MAP[name] || '#888'); const nm = trig.querySelector('.corp-cname'); if (nm) nm.textContent = name; }
     }
     document.querySelectorAll('[id^="corp-colorpanel-"]').forEach(p => p.style.display = 'none');
     return;
