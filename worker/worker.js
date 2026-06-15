@@ -4103,6 +4103,18 @@ export default {
                 if (direction === 'inbound') {
                   try { await revealCursosCampaign(env, phone, msgBody); } catch (_) {}
                 }
+                // ===== wa.me "Neón Mastery": ruteo directo a bandeja de cursos =====
+                // Gente que entra por el link de wa.me del grupo de precalentamiento
+                // del prelanzamiento manda el texto prearmado "Hola quiero acceder a
+                // Neón Mastery". Los pasamos SOLO a la bandeja de Abril (cursos), sin
+                // responder nada (pedido explícito): el equipo los atiende a mano.
+                if (direction === 'inbound' && _normTxt(msgBody).includes('acceder a neon mastery')) {
+                  try {
+                    await env.DB.prepare(
+                      "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos'"
+                    ).bind(phone, ts).run();
+                  } catch (_) {}
+                }
                 // ===== Minicurso: si este inbound responde al gate de feedback,
                 // la IA evalúa y le manda el link de regalos si es positiva. =====
                 if (direction === 'inbound') {
