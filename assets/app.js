@@ -12004,11 +12004,46 @@ document.addEventListener('click', (ev) => {
 });
 // ===== Presupuesto de corpórea (Stage C) — popup con texto editable + copiar + enviar por WhatsApp.
 // Mismo flujo que "Ver presupuesto" de neones, pero con precio/texto corpóreo y SIN tocar el Sheet.
+// Arma el texto del presupuesto de una CORPÓREA con las variables que se eligieron
+// (material del frente, color o "replica tu diseño", acabado, color de laterales,
+// iluminación y halo). Mismo estilo que el de neón pero adaptado a letras 3D.
 function corpPresupuestoTexto(brief, cj) {
-  const med = (cj.ancho_cm && cj.alto_cm) ? `${cj.ancho_cm}x${cj.alto_cm}cm` : (brief.medidas_libre || '');
-  const L = ['Te comparto el presupuesto:', '', `Trabajo: ${brief.cliente_nombre || ''} (cartel corpóreo 3D)`];
+  cj = cj || {};
+  // Color como texto legible: nombres (ej. "Rojo") sí; hex (#xxxxxx) se omite.
+  const fmtCol = (c) => { c = String(c || '').trim(); return (!c || c[0] === '#') ? '' : c.toLowerCase(); };
+  const esReplica = /replic|dise[ñn]o/i.test(String(cj.frente_color || ''));
+  const conLuz = !(cj.con_luz === false || cj.con_luz === '0' || cj.con_luz === 0 || cj.con_luz === 'no');
+  const fTrans = String(cj.frente_acabado || 'translucido').toLowerCase().startsWith('transl');
+  const eTrans = String(cj.esp_acabado || '').toLowerCase().startsWith('transl');
+  const mat = String(cj.frente_material) === 'acrilico' ? 'acrílico' : 'impreso';
+  const med = (cj.ancho_cm && cj.alto_cm) ? `${cj.ancho_cm}x${cj.alto_cm} cm` : (brief.medidas_libre || '');
+  const precio = brief.precio_final || cj.precio || 0;
+
+  // Frente: material + color/diseño + acabado.
+  let frente;
+  if (esReplica) {
+    frente = 'gráfica impresa full color, reproduciendo tu diseño';
+  } else {
+    const col = fmtCol(cj.frente_color);
+    frente = mat + (col ? ` color ${col}` : '');
+  }
+  frente += fTrans ? ', translúcido (la cara ilumina)' : ', opaco (color sólido)';
+
+  const latCol = fmtCol(cj.lat_color);
+  const conHalo = conLuz && eTrans && !fTrans;   // espalda translúcida + frente opaco = halo retroiluminado
+
+  const L = [
+    'Te comparto el presupuesto con la información detallada!',
+    '',
+    `Trabajo: ${brief.cliente_nombre || ''} (letras corpóreas 3D macizas)`,
+  ];
   if (med) L.push(`Medidas: ${med}`);
-  L.push(`Precio: ${fmtMoney(brief.precio_final || 0)}`, '', 'Incluye fabricación. Cualquier duda quedo a disposición. Saludos!');
+  L.push(`Frente: ${frente}`);
+  if (latCol) L.push(`Laterales: ${latCol}`);
+  L.push(`Iluminación: ${conLuz ? 'con LED interno' + (conHalo ? ' + halo retroiluminado en la pared' : '') : 'sin luz (color sólido)'}`);
+  L.push('', `Precio: ${fmtMoney(precio)}`, '',
+    `Fabricación en letras 3D macizas${conLuz ? ' con LED interno' : ''}. Para arrancar pedimos el 50% de seña — aceptamos todos los medios de pago. Hacemos envíos a todo el país!`,
+    'Cualquier duda quedo a disposición 🙌');
   return L.join('\n');
 }
 function openCorpPopup(id) { STATE.corpPopupBrief = id; STATE.corpPopupText = null; render(); }
