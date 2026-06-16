@@ -12011,10 +12011,10 @@ function corpPresupuestoTexto(brief, cj) {
   cj = cj || {};
   // Color como texto legible: nombres (ej. "Rojo") sí; hex (#xxxxxx) se omite.
   const fmtCol = (c) => { c = String(c || '').trim(); return (!c || c[0] === '#') ? '' : c.toLowerCase(); };
+  const acab = (v, def) => String(v || def).toLowerCase().startsWith('transl') ? 'translúcido' : 'opaco';
   const esReplica = /replic|dise[ñn]o/i.test(String(cj.frente_color || ''));
   const conLuz = !(cj.con_luz === false || cj.con_luz === '0' || cj.con_luz === 0 || cj.con_luz === 'no');
   const fTrans = String(cj.frente_acabado || 'translucido').toLowerCase().startsWith('transl');
-  const eTrans = String(cj.esp_acabado || '').toLowerCase().startsWith('transl');
   const mat = String(cj.frente_material) === 'acrilico' ? 'acrílico' : 'impreso';
   const med = (cj.ancho_cm && cj.alto_cm) ? `${cj.ancho_cm}x${cj.alto_cm} cm` : (brief.medidas_libre || '');
   const precio = brief.precio_final || cj.precio || 0;
@@ -12027,23 +12027,27 @@ function corpPresupuestoTexto(brief, cj) {
     const col = fmtCol(cj.frente_color);
     frente = mat + (col ? ` color ${col}` : '');
   }
-  frente += fTrans ? ', translúcido (la cara ilumina)' : ', opaco (color sólido)';
+  frente += fTrans ? ', translúcido (el frente ilumina)' : ', opaco';
 
-  const latCol = fmtCol(cj.lat_color);
-  const conHalo = conLuz && eTrans && !fTrans;   // espalda translúcida + frente opaco = halo retroiluminado
+  // Laterales y fondo (espalda): color + acabado (opaco/translúcido).
+  const latCol = fmtCol(cj.lat_color), espCol = fmtCol(cj.esp_color);
+  const latTxt = latCol ? `${latCol} (${acab(cj.lat_acabado, 'translucido')})` : acab(cj.lat_acabado, 'translucido');
+  const espTxt = espCol ? `${espCol} (${acab(cj.esp_acabado, 'opaca')})` : acab(cj.esp_acabado, 'opaca');
 
   const L = [
     'Te comparto el presupuesto con la información detallada!',
     '',
-    `Trabajo: ${brief.cliente_nombre || ''} (letras corpóreas 3D macizas)`,
+    `Trabajo: ${brief.cliente_nombre || ''}`,
   ];
   if (med) L.push(`Medidas: ${med}`);
   L.push(`Frente: ${frente}`);
-  if (latCol) L.push(`Laterales: ${latCol}`);
-  L.push(`Iluminación: ${conLuz ? 'con LED interno' + (conHalo ? ' + halo retroiluminado en la pared' : '') : 'sin luz (color sólido)'}`);
+  L.push(`Laterales: ${latTxt}`);
+  L.push(`Fondo: ${espTxt}`);
+  L.push(`Iluminación: ${conLuz ? 'con LED interno' : 'sin luz'}`);
   L.push('', `Precio: ${fmtMoney(precio)}`, '',
-    `Fabricación en letras 3D macizas${conLuz ? ' con LED interno' : ''}. Para arrancar pedimos el 50% de seña — aceptamos todos los medios de pago. Hacemos envíos a todo el país!`,
-    'Cualquier duda quedo a disposición 🙌');
+    `Fabricación en letras 3D${conLuz ? ' con LED interno' : ''}. Para arrancar pedimos el 50% de seña — aceptamos todos los medios de pago. Hacemos envíos a todo el país!`,
+    'Cualquier duda quedo a disposición 🙌',
+    '', 'Tiempo de producción: 15/20 días');
   return L.join('\n');
 }
 function openCorpPopup(id) { STATE.corpPopupBrief = id; STATE.corpPopupText = null; render(); }
