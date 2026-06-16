@@ -8001,11 +8001,12 @@ async function waSendDocument(env, to, mediaId, filename, caption) {
 async function processPresupuestoFollowups(env) {
   if (await isWaBillingBlocked(env)) return; // pausado por bloqueo de pago de WhatsApp
   const now = Date.now();
-  // Follow-up a las 24h del envío del presupuesto (antes era 1h — muy cargoso
-  // mandar tan encima). Ventana de selección 24h–48h: el presupuesto recién entra
-  // al cumplir 24h, y hay 24h de margen para que el cron lo agarre (corre solo en
-  // horario hábil 8-20, así uno que cumple 24h de madrugada sale a la mañana).
-  const minAgeAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();   // edad mínima: 24h
+  // Follow-up a las 23h del envío del presupuesto: lo más tarde posible DENTRO de
+  // la ventana de 24h de WhatsApp para que salga como TEXTO LIBRE GRATIS (no
+  // plantilla paga). Si el cron lo agarra con la ventana del cliente todavía
+  // abierta → gratis; si ya cerró → plantilla paga (ver bloque windowOpen abajo).
+  // Ventana de selección 23h–48h; corre solo en horario hábil 8-20.
+  const minAgeAgo = new Date(now - 23 * 60 * 60 * 1000).toISOString();   // edad mínima: 23h
   const maxAgeAgo = new Date(now - 48 * 60 * 60 * 1000).toISOString();   // edad máxima: 48h
 
   // 1) Presupuestos del cotizador enviados hace entre 24h y 48h.
