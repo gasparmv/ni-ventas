@@ -13177,19 +13177,29 @@ function renderBriefCotizadorPopup() {
         ` : ''}
         ` : '<div class="muted" style="text-align:center;padding:var(--s-2)">No se pudo calcular precio (revisá medidas).</div>'}
 
-        ${isAdmin() && r ? `
-        <div style="font-size:12px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);margin-bottom:var(--s-3)">
-          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent-cyan);margin-bottom:6px">🔒 Desglose de costos · solo admin</div>
-          <table style="width:100%;font-family:ui-monospace,monospace;font-size:12px;color:var(--fg-subtle)">
-            ${r.cf ? `<tr><td>Costo fijo (materiales + neón + fuente)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(r.cf)}</td></tr>
-            <tr><td>Margen objetivo</td><td style="text-align:right;color:var(--fg)">${Math.round(r.margen*100)}%</td></tr>` : `<tr><td>m²</td><td style="text-align:right;color:var(--fg)">${(r.m2||0).toFixed(2)}</td></tr>`}
-            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio transparente</td><td style="text-align:right;padding-top:5px;color:var(--accent-cyan)">${fmtMoney(r.transFinal)}</td></tr>
-            <tr><td>Precio negro</td><td style="text-align:right;color:var(--accent-cyan)">${fmtMoney(r.negroFinal)}</td></tr>
-            <tr><td>Comisión Joaco (es costo)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(r.comision)}</td></tr>
-            ${r.cf ? `<tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Ganancia neta transp.</b> (precio − costo − comisión)</td><td style="text-align:right;padding-top:5px;color:#4ade80"><b>${fmtMoney(r.transFinal - r.cf - r.comision)}</b></td></tr>` : ''}
-          </table>
-        </div>
-        ` : ''}
+        ${isAdmin() && r ? (function(){
+          const raw = (STATE.cotizadorCogs && STATE.cotizadorCogs.raw) || null;
+          const m2r = r.m2real || ((+f.ancho * +f.alto) / 10000) || 0;
+          const metros = +f.neon || 0;
+          const row = (lbl, val, col) => `<tr><td>${lbl}</td><td style="text-align:right;color:${col || 'var(--fg)'}">${fmtMoney(val)}</td></tr>`;
+          let rows = '', costoTotal = r.cf || 0;
+          if (raw) {
+            const base = m2r * (+raw.costo_acrilico_trans || 0);
+            const neon = metros * (+raw.costo_neon_mt || 0);
+            const fuente = r.fuente || 0;
+            const anibal = m2r * (+raw.anibal || 0) * (+raw.venta_trans_imaginario || 0);
+            const emma = m2r * (+raw.emma || 0) * (+raw.venta_trans_imaginario || 0);
+            const manoObra = (+raw.mano_obra || 0) * (r.transFinal || 0);
+            const joaquin = (+raw.joaquin || 0) * (r.transFinal || 0);
+            costoTotal = base + neon + fuente + anibal + emma + manoObra + joaquin;
+            rows = row('Base (acrílico)', base) + row('Neón', neon) + row('Fuente', fuente) + row('Aníbal (corte base CNC)', anibal) + row('Emma (diseño)', emma) + row('Mano de obra', manoObra) + row('Joaquín (comisión)', joaquin);
+          } else {
+            rows = row('Costo fijo (base+neón+fuente)', r.cf || 0) + row('Comisión Joaco', r.comision || 0) + `<tr><td colspan="2" style="color:var(--fg-mute);font-size:10px">Abrí el cotizador (tab Cotización) para cargar el desglose detallado de COGS</td></tr>`;
+            costoTotal = (r.cf || 0) + (r.comision || 0);
+          }
+          const ganancia = (r.transFinal || 0) - costoTotal;
+          return `<div style="font-size:12px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);margin-bottom:var(--s-3)"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent-cyan);margin-bottom:6px">🔒 Desglose de COGS · solo admin</div><table style="width:100%;font-family:ui-monospace,monospace;font-size:12px;color:var(--fg-subtle)">${rows}<tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Costo total</b></td><td style="text-align:right;padding-top:5px;color:var(--fg)"><b>${fmtMoney(costoTotal)}</b></td></tr><tr><td>Precio transparente</td><td style="text-align:right;color:var(--accent-cyan)">${fmtMoney(r.transFinal || 0)}</td></tr><tr><td><b>Ganancia neta</b> (precio − costo total)</td><td style="text-align:right;color:#4ade80"><b>${fmtMoney(ganancia)}</b></td></tr></table><div style="font-size:10px;color:var(--fg-mute);margin-top:6px">El dimmer se cotiza aparte (en el pedido).</div></div>`;
+        })() : ''}
         <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto</label>
         <textarea id="brief-cot-popup-text" rows="14"
                   style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-3)">${escapeHtml(texto)}</textarea>
