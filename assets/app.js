@@ -12193,11 +12193,39 @@ async function enviarCorporeaPresupuesto(briefId, textOverride) {
       }
       throw new Error(data.error || ('HTTP ' + res.status));
     }
+    // Guardar la corpórea en el Sheet de presupuestos (hoja del año) como una fila
+    // más, con tipo='CORP' (marca de producto que la distingue del INT/EXT de neón).
+    // Así entra a facturación + seguimientos; el sheet_row que devuelve se persiste
+    // en el brief → el aviso "no encontramos presupuesto en el Sheet" desaparece.
+    let sheetRow = null;
+    if (CONFIG.appsScriptUrl) {
+      try {
+        const sresp = await fetch(CONFIG.appsScriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },  // text/plain evita el preflight CORS
+          body: JSON.stringify({
+            cliente: brief.cliente_nombre || '',
+            alto: cj.alto_cm || 0, ancho: cj.ancho_cm || 0,
+            neon: 0, tramos: 0, tipo: 'CORP', m2: cj.m2 || 0,
+            trans: brief.precio_final || 0, negro: 0, reventa: 0,
+            descuento: 0, recargo: 0,
+            telefono: tel, canal: 'WPP',
+            comision: Math.round((brief.precio_final || 0) * 0.03),
+            cf: cj.costo || 0, margen: cj.margen || 0, densidad: 0,
+            precio_nuevo: brief.precio_final || 0, precio_viejo: brief.precio_final || 0
+          })
+        });
+        const sd = await sresp.json().catch(() => ({}));
+        if (sd && sd.ok && sd.row) sheetRow = sd.row;
+      } catch (e) { console.warn('No se pudo guardar la corpórea en el Sheet:', e); }
+    }
+    if (sheetRow) { try { await saveBrief({ id: briefId, sheet_row: sheetRow }); } catch (e) {} }
+
     const updated = await marcarBriefEnviado(briefId, { precio_final: brief.precio_final });
     const i = STATE.briefs.findIndex(b => b.id === updated.id);
     if (i >= 0) STATE.briefs[i] = updated;
     STATE.corpPopupBrief = null;
-    toast('✓ Presupuesto enviado');
+    toast(sheetRow ? '✓ Presupuesto enviado' : '✓ Enviado · ⚠ no se pudo guardar en el Sheet');
   } catch (e) {
     toast('No se pudo enviar: ' + (e.message || e));
   } finally {
