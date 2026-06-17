@@ -1040,6 +1040,73 @@ async function processCupoBroadcastQueue(env) {
   } catch (_) { /* best-effort */ }
 }
 
+// ===== Broadcast custom (Fase 2): CSV + plantilla elegida, con goteo =====
+// Tabla de metadata (una fila por broadcast); los targets van a wa_autoreply_log
+// con kind = 'bc_<id>' (mismo motor de goteo que los broadcasts hardcodeados).
+async function ensureBroadcastsSchema(env) {
+  try {
+    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS wa_broadcasts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      template TEXT NOT NULL,
+      lang TEXT DEFAULT 'es',
+      param_mode TEXT DEFAULT 'nombre',
+      body_preview TEXT,
+      status TEXT DEFAULT 'running',
+      total INTEGER DEFAULT 0,
+      created_at TEXT,
+      created_by TEXT
+    )`).run();
+  } catch (_) {}
+}
+
+// Procesa los broadcasts custom: manda la plantilla guardada de cada broadcast
+// 'running' a sus targets encolados que ya vencieron. 6 por tick (goteo via
+// due_at). Revert-on-fail (vuelve a 'queued') y respeta unreachable + billing.
+async function processCustomBroadcasts(env) {
+  if (await isWaBillingBlocked(env)) return;
+  try {
+    const nowIso = new Date().toISOString();
+    const floorIso = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT a.phone AS phone, a.sender_name AS sender_name, a.kind AS kind, b.template AS template, b.lang AS lang, b.param_mode AS param_mode, b.body_preview AS body_preview FROM wa_autoreply_log a JOIN wa_broadcasts b ON ('bc_' || b.id) = a.kind WHERE a.status = 'queued' AND a.due_at <= ? AND a.due_at >= ? AND b.status = 'running' ORDER BY a.due_at ASC LIMIT 6"
+    ).bind(nowIso, floorIso).all();
+    if (!rs.results?.length) return;
+    for (const row of rs.results) {
+      const phone = row.phone, kind = row.kind;
+      let claim;
+      try { claim = await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sending' WHERE phone = ? AND kind = ? AND status = 'queued'").bind(phone, kind).run(); } catch (_) { continue; }
+      if (!claim?.meta?.changes) continue;
+      if (await isUnreachable(env, phone)) {
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped', sent_at = ? WHERE phone = ? AND kind = ?").bind(new Date().toISOString(), phone, kind).run(); } catch (_) {}
+        continue;
+      }
+      const primerNombre = capitalizeName((row.sender_name || '').split(/\s+/)[0]) || 'amigo/a';
+      const params = (row.param_mode === 'none') ? [] : [primerNombre];
+      const tpl = await waSendTemplate(env, phone, row.template, row.lang || 'es', params);
+      if (!tpl?.ok) {
+        // Falla tipica: plantilla no aprobada aun o ventana → volver a 'queued'.
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued' WHERE phone = ? AND kind = ?").bind(phone, kind).run(); } catch (_) {}
+        continue;
+      }
+      const ts = new Date().toISOString();
+      const wamid = tpl.id || '';
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = ?").bind(ts, phone, kind).run(); } catch (_) {}
+      const previewBody = (row.body_preview || '').replace(/\{\{\s*1\s*\}\}/g, primerNombre);
+      if (wamid && previewBody) {
+        try {
+          await env.DB.prepare(
+            `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+             VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)
+             ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1
+               WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+          ).bind(ts, wamid, phone, previewBody).run();
+        } catch (_) {}
+      }
+    }
+  } catch (_) { /* best-effort */ }
+}
+
 // Cron (*/1): recupera media (imagenes/videos/audios/docs/stickers) cuyo
 // downloadMedia falló en el handler del webhook. Causa típica: race con Meta —
 // el webhook del msg llega antes de que el media esté disponible en su API, así
@@ -4822,7 +4889,63 @@ export default {
           { id:'pago_ocr', group:'Otras', name:'OCR de comprobantes de pago', desc:'En ventana de lanzamiento, OCRea imagenes/PDF, clasifica y respalda. No responde al cliente.', trigger:'Inbound con imagen/PDF', state: PAGO_CAPTURA_ACTIVA ? 'active' : 'disabled', stats:{} },
           { id:'copilot', group:'Otras', name:'Analisis IA de chats (Copilot)', desc:'Analiza chats nuevos con Claude (hasta 5/h): sentimiento, objeciones, proxima accion.', trigger:'Cron horario', state: env.ANTHROPIC_API_KEY ? 'active' : 'inactivo', stats:{} },
         ];
+        // Broadcasts custom creados desde el panel (Fase 2): se suman arriba.
+        try {
+          const bcs = (await env.DB.prepare("SELECT id, name, template, status FROM wa_broadcasts ORDER BY id DESC").all()).results || [];
+          for (const b of bcs) {
+            const st = byKind['bc_' + b.id] || {};
+            const state = b.status === 'paused' ? 'pausado' : (st.queued ? 'en_curso' : (st.sent ? 'completado' : 'inactivo'));
+            automations.unshift({ id: 'bc_' + b.id, group: 'Broadcasts', name: b.name || ('Broadcast #' + b.id), desc: 'Plantilla ' + b.template + ' - creado desde el panel (CSV).', trigger: 'CSV / manual', state, stats: st });
+          }
+        } catch (_) {}
         return json({ ok:true, billing_blocked: billingBlocked, cursos_inbox: cursosInbox, automations });
+      }
+      // Crear un broadcast custom desde el panel (Fase 2): CSV de contactos +
+      // plantilla elegida + goteo. dryRun=true valida sin encolar (preview seguro).
+      if (request.method === 'POST' && path === '/admin/broadcasts') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        await ensureBroadcastsSchema(env);
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const template = (body?.template || '').trim();
+        if (!template) return json({ error: 'falta la plantilla' }, 400);
+        const lang = (body?.lang || 'es').trim();
+        const paramMode = body?.param_mode === 'none' ? 'none' : 'nombre';
+        const bodyPreview = (body?.body_preview || '').slice(0, 2000);
+        const name = (body?.name || '').slice(0, 120);
+        const intervalSec = Math.max(5, Math.min(3600, parseInt(body?.intervalSec, 10) || 32));
+        const rawContacts = Array.isArray(body?.contacts) ? body.contacts : [];
+        // Normalizar telefonos + dedupe; descartar invalidos.
+        const seen = new Set();
+        const valid = [];
+        let invalid = 0;
+        for (const c of rawContacts) {
+          const ph = normalizeArPhone(c && (c.phone != null ? c.phone : c.tel));
+          if (!ph) { invalid++; continue; }
+          if (seen.has(ph)) continue;
+          seen.add(ph);
+          valid.push({ phone: ph, nombre: String((c && c.nombre) || '').slice(0, 80) });
+        }
+        if (!valid.length) return json({ error: 'no hay contactos validos en el CSV', invalid }, 400);
+        let startMs = Date.parse(body?.startTs || '');
+        if (!startMs || isNaN(startMs)) startMs = Date.now();
+        const durationMin = Math.round((valid.length * intervalSec) / 60);
+        if (body?.dryRun) {
+          return json({ ok: true, dryRun: true, valid: valid.length, invalid, interval_sec: intervalSec, start: new Date(startMs).toISOString(), duration_min: durationMin, sample: valid.slice(0, 5) });
+        }
+        const ins = await env.DB.prepare(
+          "INSERT INTO wa_broadcasts (name, template, lang, param_mode, body_preview, status, total, created_at, created_by) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, 'admin')"
+        ).bind(name, template, lang, paramMode, bodyPreview, valid.length, new Date().toISOString()).run();
+        const id = ins?.meta?.last_row_id;
+        if (!id) return json({ error: 'no se pudo crear el broadcast' }, 500);
+        const kind = 'bc_' + id;
+        const stmts = [];
+        for (let i = 0; i < valid.length; i++) {
+          const dueAt = new Date(startMs + i * intervalSec * 1000).toISOString();
+          stmts.push(env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, ?, '', 'queued', ?, ?)").bind(valid[i].phone, kind, dueAt, valid[i].nombre));
+        }
+        for (let j = 0; j < stmts.length; j += 100) { try { await env.DB.batch(stmts.slice(j, j + 100)); } catch (_) {} }
+        return json({ ok: true, id, kind, enqueued: valid.length, invalid, interval_sec: intervalSec, start: new Date(startMs).toISOString(), duration_min: durationMin });
       }
       if (request.method === 'POST' && path === '/admin/costs') {
         if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
@@ -7684,6 +7807,7 @@ export default {
     ctx.waitUntil(processJunioBroadcastQueue(env));
     // Goteo del broadcast "1 cupo · Comunidad Al Infinito" a no-pagadores del form de junio.
     ctx.waitUntil(processCupoBroadcastQueue(env));
+    ctx.waitUntil(processCustomBroadcasts(env));
     // Backfill del reenvío de comprobantes a Gaspar (lanzamiento, hoy+mañana):
     // reintenta los inbound media que el reenvío en vivo no logró mandar (glitch
     // de Meta o ventana 24h momentáneamente cerrada). Idempotente vía kv_cache,

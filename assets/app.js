@@ -2097,6 +2097,7 @@ function renderAutomatizaciones() {
         <h1>Automatizaciones</h1>
       </div>
       <div class="actions">
+        <button class="btn btn-cyan" onclick="openBroadcastModal()">+ Crear broadcast</button>
         <button class="btn btn-ghost" onclick="bindAutomatizaciones()">↻ Refrescar</button>
       </div>
     </div>
@@ -2156,8 +2157,202 @@ function renderAutomatizacionesData(data) {
       </div>
     </div>
   `).join('');
-  const foot = `<div class="auto-foot">Bandeja de cursos (Abril): ${(data && data.cursos_inbox) || 0} chats · Fase 1 (solo lectura). Crear automatizaciones y los switches de prender/apagar llegan en las próximas fases.</div>`;
+  const foot = `<div class="auto-foot">Bandeja de cursos (Abril): ${(data && data.cursos_inbox) || 0} chats · Podés crear broadcasts por CSV con el botón de arriba. Las reglas "escriben X → mandá Y" y los switches on/off llegan en las próximas fases.</div>`;
   return banner + sections + foot;
+}
+
+// Parser de CSV para broadcasts: detecta delimitador, header opcional, y saca
+// telefono + nombre de cada fila. El worker re-normaliza/dedupea, así que acá
+// solo extraemos candidatos.
+function _parseBroadcastCsv(text) {
+  const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return { contacts: [], invalid: 0 };
+  const delim = lines[0].includes('\t') ? '\t' : (lines[0].includes(';') ? ';' : ',');
+  const rows = lines.map(l => l.split(delim).map(c => c.trim().replace(/^"|"$/g, '')));
+  const looksPhone = (s) => String(s || '').replace(/\D/g, '').length >= 8;
+  let header = null, dataRows = rows;
+  if (!rows[0].some(looksPhone)) { header = rows[0].map(h => h.toLowerCase()); dataRows = rows.slice(1); }
+  let phoneIdx = -1, nameIdx = -1;
+  if (header) {
+    phoneIdx = header.findIndex(h => /tel|phone|cel|whats|num/.test(h));
+    nameIdx = header.findIndex(h => /nombre|name|contacto|cliente/.test(h));
+  }
+  const contacts = []; let invalid = 0;
+  for (const r of dataRows) {
+    let phone, nombre;
+    if (phoneIdx >= 0) {
+      phone = r[phoneIdx];
+      nombre = nameIdx >= 0 ? r[nameIdx] : (r.find((c, i) => i !== phoneIdx && c && !looksPhone(c)) || '');
+    } else {
+      const pi = r.findIndex(looksPhone);
+      phone = pi >= 0 ? r[pi] : r[0];
+      nombre = r.find((c, i) => i !== pi && c && !looksPhone(c)) || '';
+    }
+    if (!phone || !looksPhone(phone)) { invalid++; continue; }
+    contacts.push({ phone: String(phone), nombre: String(nombre || '') });
+  }
+  return { contacts, invalid };
+}
+
+// Modal para crear un broadcast (Fase 2): CSV + plantilla + goteo, con preview
+// de seguridad (dry-run) antes de encolar de verdad.
+function openBroadcastModal() {
+  document.getElementById('bc-modal')?.remove();
+  loadChatTemplates();
+  const verts = qrVerticalsForUser();
+  const tpls = (chatState.templates || []).filter(t => !verts || verts.includes(templateVertical(t.name)));
+  const tplRows = tpls.map(t => _renderTplItem(t)).join('') || '<div class="nc-empty">No hay plantillas aprobadas.</div>';
+  const bg = document.createElement('div');
+  bg.id = 'bc-modal';
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal" style="max-width:520px;width:94vw">
+      <div class="modal-h"><h3>Crear broadcast</h3></div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;max-height:72vh;overflow:auto">
+        <div class="nc-note">Mandá una plantilla aprobada a una lista de contactos (CSV), con goteo para no quemar la cuenta. Revisá el <strong>preview</strong> antes de encolar.</div>
+        <label class="nc-field">
+          <span class="nc-label">Nombre del broadcast (interno)</span>
+          <input type="text" id="bc-name" class="nc-input" placeholder="Ej: Reactivación junio" autocomplete="off">
+        </label>
+        <div class="nc-field">
+          <span class="nc-label">Contactos (CSV: teléfono, nombre)</span>
+          <input type="file" id="bc-file" accept=".csv,.txt" style="margin-bottom:6px;font-size:12px">
+          <textarea id="bc-csv" class="nc-input" rows="4" placeholder="O pegá acá, uno por línea:&#10;5491122334455, Sofia&#10;1133445566, Mateo" style="resize:vertical;font-family:monospace;font-size:12px"></textarea>
+          <span class="nc-hint" id="bc-csv-hint"></span>
+        </div>
+        <div class="nc-field">
+          <span class="nc-label">Plantilla a enviar</span>
+          <div class="nc-tpl-list" id="bc-tpl-list">${tplRows}</div>
+        </div>
+        <div class="nc-field" id="bc-preview-field" style="display:none">
+          <span class="nc-label">Vista previa del mensaje</span>
+          <div class="nc-preview" id="bc-preview"></div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <label class="nc-field" style="flex:1;min-width:150px">
+            <span class="nc-label">Arranca</span>
+            <input type="datetime-local" id="bc-start" class="nc-input">
+            <span class="nc-hint">vacío = ahora</span>
+          </label>
+          <label class="nc-field" style="flex:1;min-width:110px">
+            <span class="nc-label">Cada (seg)</span>
+            <input type="number" id="bc-interval" class="nc-input" value="32" min="5" max="3600">
+            <span class="nc-hint">goteo entre envíos</span>
+          </label>
+        </div>
+        <div id="bc-summary" style="display:none"><div class="auto-banner warn" id="bc-summary-box" style="margin:0"></div></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost modal-cancel" type="button">Cancelar</button>
+        <button class="btn btn-cyan" id="bc-create" type="button" disabled>Crear y encolar</button>
+      </div>
+    </div>`;
+  document.body.appendChild(bg);
+  void bg.offsetWidth; bg.classList.add('open'); requestAnimationFrame(() => bg.classList.add('open'));
+
+  const fileEl = bg.querySelector('#bc-file');
+  const csvEl = bg.querySelector('#bc-csv');
+  const csvHint = bg.querySelector('#bc-csv-hint');
+  const listEl = bg.querySelector('#bc-tpl-list');
+  const previewField = bg.querySelector('#bc-preview-field');
+  const previewEl = bg.querySelector('#bc-preview');
+  const startEl = bg.querySelector('#bc-start');
+  const intervalEl = bg.querySelector('#bc-interval');
+  const createBtn = bg.querySelector('#bc-create');
+  const summaryWrap = bg.querySelector('#bc-summary');
+  const summaryBox = bg.querySelector('#bc-summary-box');
+  const nameEl = bg.querySelector('#bc-name');
+
+  let selectedName = null, selectedLang = 'es_AR', selectedParams = 0;
+  let parsed = { contacts: [], invalid: 0 };
+  let confirmed = false;
+
+  const close = () => bg.remove();
+  bg.addEventListener('click', (e) => { if (e.target === bg) close(); });
+  bg.querySelector('.modal-cancel').onclick = close;
+
+  function refresh() {
+    parsed = _parseBroadcastCsv(csvEl.value);
+    if (csvEl.value.trim()) {
+      csvHint.innerHTML = `<strong>${parsed.contacts.length}</strong> contactos detectados${parsed.invalid ? ` · ${parsed.invalid} sin teléfono (se descartan)` : ''}`;
+      csvHint.className = 'nc-hint ok';
+    } else { csvHint.textContent = ''; csvHint.className = 'nc-hint'; }
+    const tpl = selectedName ? (chatState.templates || []).find(t => t.name === selectedName) : null;
+    if (tpl) {
+      previewEl.textContent = tplBodyText(tpl).replace(/\{\{\s*\d+\s*\}\}/g, '{nombre}');
+      previewField.style.display = '';
+    } else previewField.style.display = 'none';
+    // Cualquier cambio invalida un preview previo: hay que re-confirmar.
+    if (confirmed) { confirmed = false; createBtn.textContent = 'Crear y encolar'; summaryWrap.style.display = 'none'; }
+    createBtn.disabled = !(parsed.contacts.length && selectedName);
+  }
+
+  listEl.querySelectorAll('.qr-item').forEach(row => {
+    row.onclick = () => {
+      if (!row.dataset.tplName) return;
+      selectedName = row.dataset.tplName;
+      selectedLang = row.dataset.tplLang || 'es_AR';
+      selectedParams = parseInt(row.dataset.tplParams || '0', 10) || 0;
+      listEl.querySelectorAll('.qr-item').forEach(r => r.classList.remove('nc-selected'));
+      row.classList.add('nc-selected');
+      refresh();
+    };
+  });
+
+  fileEl.onchange = () => {
+    const f = fileEl.files && fileEl.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => { csvEl.value = String(reader.result || ''); refresh(); };
+    reader.readAsText(f);
+  };
+  csvEl.addEventListener('input', refresh);
+  intervalEl.addEventListener('input', () => { if (confirmed) refresh(); });
+  startEl.addEventListener('input', () => { if (confirmed) refresh(); });
+  refresh();
+
+  async function callApi(dryRun) {
+    const tpl = (chatState.templates || []).find(t => t.name === selectedName);
+    const payload = {
+      name: nameEl.value.trim(),
+      template: selectedName,
+      lang: selectedLang,
+      param_mode: selectedParams >= 1 ? 'nombre' : 'none',
+      body_preview: tpl ? tplBodyText(tpl) : '',
+      contacts: parsed.contacts,
+      startTs: startEl.value ? new Date(startEl.value).toISOString() : '',
+      intervalSec: parseInt(intervalEl.value, 10) || 32,
+      dryRun
+    };
+    const r = await fetch(CONFIG.trackerUrl + '/admin/broadcasts', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(payload) });
+    return r.json();
+  }
+
+  createBtn.onclick = async () => {
+    if (!parsed.contacts.length || !selectedName) return;
+    if (!confirmed) {
+      createBtn.disabled = true; createBtn.textContent = 'Calculando…';
+      const j = await callApi(true);
+      createBtn.disabled = false;
+      if (!j || !j.ok) { toast(j && j.error ? j.error : 'Error en el preview'); createBtn.textContent = 'Crear y encolar'; return; }
+      const startTxt = j.start ? new Date(j.start).toLocaleString('es-AR') : 'ahora';
+      summaryBox.innerHTML = `Vas a mandar <strong>${escapeHtml(selectedName)}</strong> a <strong>${j.valid}</strong> contactos${j.invalid ? ` (${j.invalid} descartados)` : ''}.<br>Arranca <strong>${escapeHtml(startTxt)}</strong>, uno cada ${j.interval_sec}s (~${j.duration_min} min total).<br><strong>Tocá de nuevo para confirmar y encolar.</strong>`;
+      summaryWrap.style.display = '';
+      createBtn.textContent = 'Confirmar y encolar';
+      confirmed = true;
+      return;
+    }
+    createBtn.disabled = true; createBtn.textContent = 'Encolando…';
+    const j = await callApi(false);
+    if (j && j.ok) {
+      toast(`✓ Broadcast encolado: ${j.enqueued} contactos`);
+      close();
+      if (STATE.view === 'automatizaciones') bindAutomatizaciones();
+    } else {
+      toast(j && j.error ? j.error : 'Error al crear el broadcast');
+      createBtn.disabled = false; createBtn.textContent = 'Confirmar y encolar';
+    }
+  };
 }
 
 // ---------- DASHBOARD ----------
