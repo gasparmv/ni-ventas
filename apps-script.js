@@ -140,10 +140,18 @@ function pedidoUpsert(data) {
 // - Los valores se buscan por NOMBRE de fila (col A "id" o col B "Nombre"),
 //   no por número de fila → si insertás filas en el Excel no se rompe.
 // - Override para testear: ?action=cogs&mes=6  ·  diagnóstico: ?action=cogs&debug=1
+// Helpers para getCogs (lectura de sueldos fijos de la hoja COGS).
+function _norm(s) { return String(s == null ? '' : s).trim().toLowerCase(); }
+function _toNum(v) {
+  if (typeof v === 'number') return Math.round(v);
+  var s = String(v == null ? '' : v).replace(/[^0-9\-]/g, '');
+  var n = parseInt(s, 10);
+  return isNaN(n) ? 0 : n;
+}
+
 function getCogs(e) {
   try {
     const ss = SpreadsheetApp.openById(COGS_SHEET_ID);
-    // Buscar la hoja cuyo nombre contenga "cogs" (la pestaña puede ser "1 COGS").
     var sheet = null;
     var allSheets = ss.getSheets();
     for (var s = 0; s < allSheets.length; s++) {
@@ -155,13 +163,11 @@ function getCogs(e) {
     var lastCol = sheet.getLastColumn();
     var values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
 
-    // Mes actual (AR), o override por querystring.
     var mes = parseInt((e && e.parameter && e.parameter.mes) || '', 10);
     if (!mes || mes < 1 || mes > 12) {
       mes = parseInt(Utilities.formatDate(new Date(), 'America/Argentina/Buenos_Aires', 'M'), 10);
     }
 
-    // Columna del mes: en la fila 1, la celda cuyo número == mes.
     var header = values[0] || [];
     var monthCol = -1;
     for (var c = 0; c < header.length; c++) {
@@ -171,7 +177,6 @@ function getCogs(e) {
     }
     if (monthCol === -1) return jsonOut({ error: 'no encontré la columna del mes ' + mes, header: header });
 
-    // Buscar el valor de una fila por su id (col A) o nombre (col B).
     function findVal(labels) {
       for (var r = 1; r < values.length; r++) {
         var idA = String(values[r][0] || '').trim().toLowerCase();
@@ -183,16 +188,64 @@ function getCogs(e) {
       }
       return null;
     }
-    // Normaliza porcentajes: si viene 15 en vez de 0.15, lo divide.
     function pct(v) { v = Number(v) || 0; return v > 1 ? v / 100 : v; }
 
-    if (e && e.parameter && e.parameter.debug) {
-      // Modo diagnóstico: devuelve las primeras 3 columnas de cada fila + header.
-      var preview = [];
-      for (var r2 = 0; r2 < Math.min(values.length, 30); r2++) {
-        preview.push([values[r2][0], values[r2][1], values[r2][monthCol]]);
+    // Sueldo fijo de Joaquín por mes: busca la fila "sueldos joaqu..." y lee la
+    // celda del mes detectando el header de meses más cercano hacia arriba.
+    function findRowByLabel(needle) {
+      needle = _norm(needle);
+      for (var r = 0; r < values.length; r++) {
+        var maxc = Math.min(values[r].length, 6);
+        for (var c = 0; c < maxc; c++) {
+          if (_norm(values[r][c]).indexOf(needle) !== -1 && _norm(values[r][c]).length) return r;
+        }
       }
-      return jsonOut({ ok: true, mes: mes, monthColIndex: monthCol, header: header, preview: preview });
+      return -1;
+    }
+    function monthColsNear(dataRow) {
+      for (var r = dataRow - 1; r >= 0; r--) {
+        var map = {}, count = 0;
+        for (var c = 0; c < values[r].length; c++) {
+          var vv = values[r][c];
+          var nn = (typeof vv === 'number') ? Math.round(vv) : parseInt(String(vv).trim(), 10);
+          if (nn >= 1 && nn <= 12 && map[nn] === undefined) { map[nn] = c; count++; }
+        }
+        if (count >= 6) return map;
+      }
+      return null;
+    }
+
+    var joaquinFijoByMonth = null, joaquinFijoRow = -1;
+    var jrow = findRowByLabel('sueldos joaqu');
+    if (jrow >= 0) {
+      joaquinFijoRow = jrow + 1;
+      var mcols = monthColsNear(jrow);
+      if (!mcols) {
+        mcols = {};
+        for (var c2 = 0; c2 < header.length; c2++) {
+          var hh = header[c2];
+          var hn = (typeof hh === 'number') ? Math.round(hh) : parseInt(String(hh).trim(), 10);
+          if (hn >= 1 && hn <= 12 && mcols[hn] === undefined) mcols[hn] = c2;
+        }
+      }
+      joaquinFijoByMonth = {};
+      for (var m = 1; m <= 12; m++) {
+        if (mcols[m] !== undefined) {
+          var val = _toNum(values[jrow][mcols[m]]);
+          if (val) joaquinFijoByMonth[m] = val;
+        }
+      }
+    }
+
+    if (e && e.parameter && e.parameter.debug) {
+      var preview = [];
+      for (var r3 = 0; r3 < Math.min(values.length, 55); r3++) {
+        preview.push([values[r3][0], values[r3][1], values[r3][2], values[r3][monthCol]]);
+      }
+      return jsonOut({
+        ok: true, mes: mes, monthColIndex: monthCol, header: header,
+        joaquinFijoRow: joaquinFijoRow, joaquin_fijo_by_month: joaquinFijoByMonth, preview: preview
+      });
     }
 
     var cogs = {
@@ -203,7 +256,9 @@ function getCogs(e) {
       emma:      pct(findVal(['EMMA', 'Emma'])),
       costo_neon_mt: Number(findVal(['Neon', 'Metro de neon'])) || 0,
       mano_obra: pct(findVal(['MO', 'Mano de Obra'])),
-      joaquin:   pct(findVal(['JOAQUIN', 'Joaquin']))
+      joaquin:   pct(findVal(['JOAQUIN', 'Joaquin'])),
+      joaquin_fijo_by_month: joaquinFijoByMonth,
+      joaquin_fijo: (joaquinFijoByMonth && joaquinFijoByMonth[mes]) || 0
     };
     return jsonOut({ ok: true, mes: mes, cogs: cogs });
   } catch (err) {
