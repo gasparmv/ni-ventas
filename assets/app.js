@@ -1413,7 +1413,7 @@ async function loadAll(opts) {
     // Cargar ventas + cotizador moderno + hojas históricas EN PARALELO.
     const cotizadorN = CONFIG.cotizadorSheets.length;
     const histN = (CONFIG.cotizadorHistoricalSheets || []).length;
-    const all = await Promise.all([
+    const all = await Promise.race([Promise.all([
       fetchPedidosFromD1(),
       ...CONFIG.cotizadorSheets.map(async sheet => {
         let rows = await fetchCotizadorViaAppsScript(sheet);
@@ -1426,7 +1426,7 @@ async function loadAll(opts) {
         if (!rows) { rows = await fetchSheet(CONFIG.cotizadorSheetId, name); setHistSheetCache(name, rows); }
         return { historical: true, name, month, rows };
       })
-    ]);
+    ]), new Promise((_, rej) => setTimeout(() => rej(new Error('La carga tardó demasiado (timeout). Revisá tu conexión y reintentá.')), 30000))]);
     const pedidosD1 = all[0];
     const cotizadorResults = all.slice(1, 1 + cotizadorN);
     const historicalResults = all.slice(1 + cotizadorN, 1 + cotizadorN + histN);
@@ -1476,7 +1476,10 @@ async function loadAll(opts) {
     STATE.loaded = true;
     saveCache();
   } catch (e) {
-    STATE.error = e.message;
+    // Solo mostramos pantalla de error si NO hay nada cacheado para mostrar. Si
+    // ya teníamos data (cache stale-while-revalidate), un refresh fallido/timeout
+    // NO debe tapar la vista con el error — mantenemos la data y seguimos.
+    if (!STATE.loaded) STATE.error = e.message;
   }
   render();
 }
@@ -1953,7 +1956,12 @@ function render() {
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
   document.getElementById('app').innerHTML = renderShell();
-  if (STATE.error)   document.getElementById('main').innerHTML = renderError();
+  // El Chat WA carga su data del worker (no de Sheets), así que se renderiza
+  // SIEMPRE — aunque Sheets siga cargando o haya fallado. Antes el gate de abajo
+  // (!STATE.loaded) tapaba el chat con "Conectando con Google Sheets…" y, si el
+  // fetch de Sheets se colgaba en un arranque sin caché, la app quedaba trabada.
+  if (STATE.view === 'chat') document.getElementById('main').innerHTML = renderChat();
+  else if (STATE.error)   document.getElementById('main').innerHTML = renderError();
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
   else {
     const v = STATE.view;
@@ -10882,7 +10890,11 @@ loadUser();
 // Cargar done marks: localStorage inmediato + sync async desde Worker
 STATE.done = loadDoneLocal();
 loadCotizadorParams();
-const initView = location.hash.replace('#','') || 'dashboard';
+// Al abrir la PWA instalada (standalone) sin hash explícito, arrancamos en el
+// Chat WA (lo más usado en el celu) para usuarios con acceso al chat. En el
+// navegador (tab) se mantiene el dashboard por defecto.
+const _isStandalone = !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true;
+const initView = location.hash.replace('#','') || ((_isStandalone && canAccessChat()) ? 'chat' : 'dashboard');
 STATE.view = initView;
 loadAll();
 // Sync done marks desde Worker (en background, re-render cuando llegue)
