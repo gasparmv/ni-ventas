@@ -1145,7 +1145,14 @@ table.t td.cliente { font-weight: 600; }
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 9999;
+  /* DEBE quedar por DEBAJO del modal de login (.modal-bg z-index:300) y de los
+     toasts (.toast z-index:200). Cuando no hay sesión, este overlay es lo único
+     que render() pinta en #app, así que no necesita z-index alto. Antes estaba
+     en 9999 y tapaba por completo el prompt de contraseña: el modal se creaba
+     y se abría, pero quedaba DETRÁS del overlay opaco → "toco el usuario y no
+     aparece para poner la contraseña". Bug latente que solo aparecía al loguear
+     sin token (después de limpiar cookies). */
+  z-index: 100;
 }
 .user-picker-box {
   text-align: center;
