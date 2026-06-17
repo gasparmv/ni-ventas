@@ -229,8 +229,8 @@ async function pushPedidoToVentas(env, row) {
 async function processPedidosMirror(env) {
   if (!env.APPS_SCRIPT_URL) return;
   try {
-    const flag = await env.DB.prepare("SELECT value FROM kv_cache WHERE key = 'pedidos_mirror_on'").first();
-    if (!flag || flag.value !== '1') return;
+    const flag = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'pedidos_mirror_on'").first();
+    if (!flag || flag.v !== '1') return;
     const rs = await env.DB.prepare('SELECT * FROM pedidos WHERE mirror_dirty = 1 ORDER BY id LIMIT 8').all();
     for (const row of (rs.results || [])) {
       const newRow = await pushPedidoToVentas(env, row);
