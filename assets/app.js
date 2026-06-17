@@ -1975,6 +1975,7 @@ function render() {
     else if (v === 'actividad')    document.getElementById('main').innerHTML = renderActividad();
     else if (v === 'chat')         document.getElementById('main').innerHTML = renderChat();
     else if (v === 'insights')     document.getElementById('main').innerHTML = renderInsights();
+    else if (v === 'automatizaciones') document.getElementById('main').innerHTML = renderAutomatizaciones();
     else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
@@ -2002,6 +2003,7 @@ function render() {
   if (STATE.view === 'actividad') bindActividad();
   if (STATE.view === 'chat') bindChat();
   if (STATE.view === 'insights') bindInsights();
+  if (STATE.view === 'automatizaciones') bindAutomatizaciones();
   if (STATE.view === 'admin') bindAdmin();
   // Sincronizar classes mobile del chat (chat-mobile-list / chat-mobile-conv)
   // en el .app raíz. Solo el CSS bajo el media query mobile las usa.
@@ -2057,6 +2059,7 @@ function renderShell() {
           <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '')}</span>
         </button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='insights'?'active':''}" data-view="insights"><span class="icon">⚡</span> Insights IA</button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${v==='automatizaciones'?'active':''}" data-view="automatizaciones"><span class="icon">⚙</span> Automatiz.</button>` : ''}
         `}
         ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
       </nav>
@@ -2081,6 +2084,80 @@ function renderError() {
     <div class="error">${escapeHtml(STATE.error)}<br><br>
       <button class="btn" onclick="loadAll()">Reintentar</button>
     </div>`;
+}
+
+// ---------- AUTOMATIZACIONES (Fase 1: panel read-only, solo admin) ----------
+// Lista todas las automatizaciones de WhatsApp con su estado y stats en vivo.
+// Data del endpoint GET /admin/automations del worker.
+function renderAutomatizaciones() {
+  return `
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">WhatsApp</div>
+        <h1>Automatizaciones</h1>
+      </div>
+      <div class="actions">
+        <button class="btn btn-ghost" onclick="bindAutomatizaciones()">↻ Refrescar</button>
+      </div>
+    </div>
+    <div id="autos-body"><div class="loading"><div class="spinner"></div><p style="margin-top:14px">Cargando automatizaciones…</p></div></div>
+  `;
+}
+
+async function bindAutomatizaciones() {
+  const body = document.getElementById('autos-body');
+  if (!body) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/automations', { headers: authHeaders() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    body.innerHTML = renderAutomatizacionesData(await r.json());
+  } catch (e) {
+    body.innerHTML = `<div class="error">No se pudieron cargar las automatizaciones.<br>${escapeHtml(e.message)}<br><br><button class="btn" onclick="bindAutomatizaciones()">Reintentar</button></div>`;
+  }
+}
+
+function renderAutomatizacionesData(data) {
+  const autos = (data && data.automations) || [];
+  const stateMeta = {
+    active:     { label: 'Activa',     cls: 'on'   },
+    en_curso:   { label: 'En curso',   cls: 'live' },
+    completado: { label: 'Completada', cls: 'done' },
+    pausado:    { label: 'Pausada',    cls: 'warn' },
+    disabled:   { label: 'Apagada',    cls: 'off'  },
+    inactivo:   { label: 'Inactiva',   cls: 'idle' },
+  };
+  const statLabels = { queued: 'en cola', sent: 'enviados', skipped: 'omitidos', en_cola: 'en cola', enviados: 'enviados', respondieron: 'respondieron', positivas: 'positivas' };
+  const renderStats = (s) => {
+    const entries = Object.entries(s || {}).filter(([, v]) => v != null);
+    if (!entries.length) return '';
+    return `<div class="auto-stats">${entries.map(([k, v]) => `<span class="auto-stat"><b>${v}</b> ${statLabels[k] || k}</span>`).join('')}</div>`;
+  };
+  const groups = {};
+  for (const a of autos) (groups[a.group] = groups[a.group] || []).push(a);
+  const banner = data && data.billing_blocked
+    ? `<div class="auto-banner warn">⚠ Envíos PAUSADOS por Meta (problema de facturación). Todas las automatizaciones de envío están frenadas hasta resolver la tarjeta.</div>`
+    : '';
+  const sections = Object.entries(groups).map(([g, items]) => `
+    <div class="auto-group">
+      <h2 class="auto-group-h">${escapeHtml(g)}</h2>
+      <div class="auto-cards">
+        ${items.map(a => {
+          const sm = stateMeta[a.state] || { label: a.state, cls: 'idle' };
+          return `<div class="card auto-card">
+            <div class="auto-card-top">
+              <span class="auto-name">${escapeHtml(a.name)}</span>
+              <span class="auto-badge ${sm.cls}">${escapeHtml(sm.label)}</span>
+            </div>
+            <div class="auto-desc">${escapeHtml(a.desc)}</div>
+            <div class="auto-trigger">⚡ ${escapeHtml(a.trigger)}</div>
+            ${renderStats(a.stats)}
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+  `).join('');
+  const foot = `<div class="auto-foot">Bandeja de cursos (Abril): ${(data && data.cursos_inbox) || 0} chats · Fase 1 (solo lectura). Crear automatizaciones y los switches de prender/apagar llegan en las próximas fases.</div>`;
+  return banner + sections + foot;
 }
 
 // ---------- DASHBOARD ----------

@@ -4771,6 +4771,42 @@ export default {
           }
         });
       }
+      // Inventario de automatizaciones de WhatsApp (Fase 1: read-only). Lista
+      // TODAS las automatizaciones (broadcasts, disparadores por mensaje, crons)
+      // con su estado real y stats en vivo derivadas de la base. Solo admin.
+      if (request.method === 'GET' && path === '/admin/automations') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        // Stats de colas/broadcasts en una sola query (kind x status).
+        const qRows = (await env.DB.prepare("SELECT kind, status, COUNT(*) AS n FROM wa_autoreply_log GROUP BY kind, status").all()).results || [];
+        const byKind = {};
+        for (const r of qRows) { (byKind[r.kind] = byKind[r.kind] || {})[r.status] = r.n; }
+        // Stats de campañas (respondieron / positivas) por campaña.
+        const camp = {};
+        try {
+          const cr = (await env.DB.prepare("SELECT campaign, COUNT(*) AS total, SUM(CASE WHEN responded_at IS NOT NULL THEN 1 ELSE 0 END) AS responded, SUM(CASE WHEN sentiment='positiva' THEN 1 ELSE 0 END) AS positiva FROM wa_cursos_campaign GROUP BY campaign").all()).results || [];
+          for (const r of cr) camp[r.campaign] = r;
+        } catch (_) {}
+        let cursosInbox = 0;
+        try { cursosInbox = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE inbox='cursos'").first())?.n || 0; } catch (_) {}
+        const billingBlocked = await isWaBillingBlocked(env);
+        // Estado de un broadcast segun su cola: en curso si quedan encolados,
+        // completado si ya mando algo, inactivo si nunca tuvo data.
+        const bcState = (k) => (byKind[k]?.queued ? 'en_curso' : (byKind[k]?.sent ? 'completado' : 'inactivo'));
+        const automations = [
+          { id:'cupo_broadcast', group:'Broadcasts', name:'Cupo Comunidad (1 cupo)', desc:'Plantilla cupo_comunidad_junio a leads del form de junio, con goteo.', trigger:'Manual / encolado', state: bcState('cupo_broadcast'), stats: byKind.cupo_broadcast || {} },
+          { id:'junio_broadcast', group:'Broadcasts', name:'Lanzamiento Junio', desc:'Plantilla lanzamiento_junio_2026 a leads del 9-10 jun, con goteo.', trigger:'Manual / encolado', state: bcState('junio_broadcast'), stats: byKind.junio_broadcast || {} },
+          { id:'cursos_broadcast', group:'Broadcasts', name:'Cursos Mayo', desc:'Plantilla cursos_clases_vivo_mayo, con goteo.', trigger:'Manual / encolado', state: bcState('cursos_broadcast'), stats: byKind.cursos_broadcast || {} },
+          { id:'neon_mastery', group:'Disparadores por mensaje', name:'Ruteo "Neon Mastery"', desc:'Quien escribe "acceder a Neon Mastery" pasa a la bandeja de Abril (cursos). No responde nada.', trigger:'Texto contiene "acceder a neon mastery"', state:'active', stats:{} },
+          { id:'minicurso', group:'Disparadores por mensaje', name:'Auto-reply Minicurso', desc:'Quien pide cotizador + guia + curso recibe el link del minicurso (1 vez por contacto).', trigger:'Texto: cotizador + guia + curso', state: billingBlocked ? 'pausado' : 'active', stats:{ enviados: byKind.minicurso?.sent || 0, en_cola: byKind.minicurso?.queued || 0 } },
+          { id:'cursos_reveal', group:'Disparadores por mensaje', name:'Respuesta a campana de cursos', desc:'Si un lead de campana responde, la IA evalua, manda el evento si es positiva y revela el chat a Abril.', trigger:'Inbound de lead de campana', state:'active', stats:{ respondieron: (camp.junio?.responded||0)+(camp.mayo?.responded||0), positivas: (camp.junio?.positiva||0)+(camp.mayo?.positiva||0) } },
+          { id:'presupuesto_fu', group:'Seguimientos automaticos', name:'Follow-up de presupuesto', desc:'23h despues de cotizar sin respuesta, manda un seguimiento (gratis, dentro de la ventana de 24h).', trigger:'Cron horario 8-20 AR', state: billingBlocked ? 'pausado' : 'active', stats:{} },
+          { id:'minicurso_fu', group:'Seguimientos automaticos', name:'Follow-up de minicurso', desc:'4-24h sin respuesta tras el minicurso, manda un recordatorio.', trigger:'Cron horario 8-20 AR', state: billingBlocked ? 'pausado' : 'active', stats:{} },
+          { id:'cursos_fu', group:'Seguimientos automaticos', name:'Follow-up de cursos (Mayo)', desc:'2do mensaje a no-respondedores. DESACTIVADO (mandaba al cohorte equivocado).', trigger:'Cron horario', state:'disabled', stats:{} },
+          { id:'pago_ocr', group:'Otras', name:'OCR de comprobantes de pago', desc:'En ventana de lanzamiento, OCRea imagenes/PDF, clasifica y respalda. No responde al cliente.', trigger:'Inbound con imagen/PDF', state: PAGO_CAPTURA_ACTIVA ? 'active' : 'disabled', stats:{} },
+          { id:'copilot', group:'Otras', name:'Analisis IA de chats (Copilot)', desc:'Analiza chats nuevos con Claude (hasta 5/h): sentimiento, objeciones, proxima accion.', trigger:'Cron horario', state: env.ANTHROPIC_API_KEY ? 'active' : 'inactivo', stats:{} },
+        ];
+        return json({ ok:true, billing_blocked: billingBlocked, cursos_inbox: cursosInbox, automations });
+      }
       if (request.method === 'POST' && path === '/admin/costs') {
         if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
         await ensureCostsSchema(env);
