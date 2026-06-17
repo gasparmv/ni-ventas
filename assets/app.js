@@ -1377,6 +1377,18 @@ function mapPedidoFromD1(row) {
   };
 }
 
+// Cache PERMANENTE de las hojas históricas (ENE/FEB/MAR): son datos del pasado,
+// inmutables, pero antes se re-bajaban de Google gviz en CADA arranque (3 fetches
+// lentos + dependencia de Google). Las cacheamos para siempre: se bajan una sola
+// vez en la vida y después salen de localStorage al instante. (Si alguna vez hay
+// que invalidar, subir el sufijo de versión _v1.)
+function getHistSheetCache(name) {
+  try { const v = localStorage.getItem('ni_hist_v1_' + name); return v ? JSON.parse(v) : null; } catch { return null; }
+}
+function setHistSheetCache(name, rows) {
+  try { if (rows && rows.length) localStorage.setItem('ni_hist_v1_' + name, JSON.stringify(rows)); } catch {}
+}
+
 async function loadAll(opts) {
   const silent = !!(opts && opts.silent);
   // Stale-while-revalidate: si tenemos caché y no se pidió refresh forzado,
@@ -1409,7 +1421,9 @@ async function loadAll(opts) {
         return { sheet, rows };
       }),
       ...(CONFIG.cotizadorHistoricalSheets || []).map(async ({ name, month }) => {
-        const rows = await fetchSheet(CONFIG.cotizadorSheetId, name);
+        // Inmutables → cache permanente. Solo se bajan la primera vez.
+        let rows = getHistSheetCache(name);
+        if (!rows) { rows = await fetchSheet(CONFIG.cotizadorSheetId, name); setHistSheetCache(name, rows); }
         return { historical: true, name, month, rows };
       })
     ]);
@@ -1587,6 +1601,7 @@ function parseCotizadorHistorical(rows, monthYM) {
 }
 
 function matchPresupuestos() {
+  STATE._segStamp = (STATE._segStamp || 0) + 1;  // invalida el memo de getSeguimientosWeek (cambiaron datos)
   STATE.matched = new Map();
   // Build pedidos index by normalized name
   const byName = new Map();
@@ -1826,7 +1841,14 @@ function postventasActivos() {
   return out;
 }
 
+let _segWeekCache = null, _segWeekKey = '';
 function getSeguimientosWeek() {
+  // Memo: esta función corre en CADA renderShell() (todas las vistas) y recorre
+  // presupuestos + pedidos con cálculo de milestones — caro para pintar 2 badges.
+  // Cacheamos y recalculamos solo cuando cambian los datos (lengths o el stamp
+  // que sube matchPresupuestos al re-cruzar datos).
+  const key = STATE.presupuestos.length + '|' + STATE.pedidos.length + '|' + (STATE._segStamp || 0);
+  if (_segWeekKey === key && _segWeekCache) return _segWeekCache;
   // Items "calientes" para badge sidebar y alertas dashboard
   const list = [];
   for (const it of presupuestosActivos()) {
@@ -2669,7 +2691,7 @@ function renderBusinessPanel() {
               <div class="bp-funnel-bar-wrap"><div class="bp-funnel-bar" style="width:${wPct(vendidos)}%;background:rgba(37,211,102,.75)"><span class="bp-funnel-num">${vendidos}</span><span class="bp-funnel-pct">${enviados ? ((vendidos/enviados)*100).toFixed(1) : 0}%</span></div></div>
             </div>
           </div>
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+          <div class="bp-stat-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
             <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Tasa de cierre</div><div style="font-size:22px;font-weight:700;color:var(--neon-cyan);font-family:ui-monospace,monospace">${(tc.tasa*100).toFixed(1)}%</div><div style="font-size:11px;color:var(--fg-subtle)">${vendidos} ventas / ${enviados} presu</div></div>
             <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Match nombre+precio</div><div style="font-size:22px;font-weight:700;font-family:ui-monospace,monospace">${tc.cerradosMatch}<span style="font-size:13px;color:var(--fg-subtle);font-weight:400"> de ${enviados}</span></div><div style="font-size:11px;color:var(--fg-subtle)">presu identificables como vendidos</div></div>
             <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Diferencia</div><div style="font-size:22px;font-weight:700;font-family:ui-monospace,monospace">${vendidos - tc.cerradosMatch >= 0 ? '+' : ''}${vendidos - tc.cerradosMatch}</div><div style="font-size:11px;color:var(--fg-subtle)">ventas sin presu identificable</div></div>
@@ -3150,7 +3172,7 @@ function renderVerticalSpecific(key, c) {
     return `
       <div class="card" style="margin-top:18px">
         <div class="card-h"><h3>🎯 Unit economics</h3></div>
-        <div style="padding:20px;display:grid;grid-template-columns:repeat(3,1fr);gap:18px">
+        <div class="bp-stat-grid" style="padding:20px;display:grid;grid-template-columns:repeat(3,1fr);gap:18px">
           <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">CAC</div><div style="font-size:24px;font-weight:700;color:var(--success, #25D366);font-family:ui-monospace,monospace">$0</div><div style="font-size:11px;color:var(--fg-subtle)">Sin ad spend asignado</div></div>
           <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">ROAS efectivo</div><div style="font-size:24px;font-weight:700;color:var(--neon-cyan);font-family:ui-monospace,monospace">∞</div><div style="font-size:11px;color:var(--fg-subtle)">Sin costo de adquisición</div></div>
           <div><div style="font-size:11px;text-transform:uppercase;color:var(--fg-subtle);letter-spacing:.5px">Mejor margen del negocio</div><div style="font-size:24px;font-weight:700;font-family:ui-monospace,monospace">65-84%</div><div style="font-size:11px;color:var(--fg-subtle)">vs 60% en Directo</div></div>
@@ -3264,9 +3286,21 @@ function drawVerticalCharts(key) {
 let pedidoFilter = { search: '', estadoPago: '', estadoPedido: '', canal: '', mes: '' };
 let pedidoSort = { col: 'fecha', dir: -1 };
 function bindPedidos() {
+  let _pedidoSearchTimer = null;
   document.querySelectorAll('[data-pf]').forEach(el => {
-    el.addEventListener('input', () => { pedidoFilter[el.dataset.pf] = el.value; renderTablePedidos(); });
-    el.addEventListener('change', () => { pedidoFilter[el.dataset.pf] = el.value; renderTablePedidos(); });
+    if (el.dataset.pf === 'search') {
+      // Búsqueda de texto: debounce 180ms. renderTablePedidos() filtra y repinta
+      // las 200+ filas; hacerlo en cada tecla traba el tipeo. El input vive en el
+      // toolbar (fuera de #table-pedidos), así que no pierde el foco al repintar.
+      el.addEventListener('input', () => {
+        pedidoFilter.search = el.value;
+        clearTimeout(_pedidoSearchTimer);
+        _pedidoSearchTimer = setTimeout(renderTablePedidos, 180);
+      });
+    } else {
+      el.addEventListener('input', () => { pedidoFilter[el.dataset.pf] = el.value; renderTablePedidos(); });
+      el.addEventListener('change', () => { pedidoFilter[el.dataset.pf] = el.value; renderTablePedidos(); });
+    }
   });
   document.querySelectorAll('[data-sort]').forEach(el => {
     el.onclick = () => {
@@ -3695,11 +3729,19 @@ let pptoFilter = 'all'; // all | abiertos | cerrados | semana
 let pptoSearch = '';
 function bindPresupuestos() {
   document.querySelectorAll('[data-ppfilter]').forEach(el => {
-    el.onclick = () => { pptoFilter = el.dataset.ppfilter; renderPresupuestos(); render(); };
+    el.onclick = () => { pptoFilter = el.dataset.ppfilter; render(); };
   });
   const searchInput = document.querySelector('[data-pp-search]');
   if (searchInput) {
-    searchInput.addEventListener('input', () => { pptoSearch = searchInput.value; renderTablePresupuestos(); });
+    // Debounce 180ms: repintar la tabla de presupuestos en cada tecla traba el
+    // tipeo. El input está en el toolbar (fuera de #table-presupuestos) → no
+    // pierde el foco al repintar.
+    let _pptoSearchTimer = null;
+    searchInput.addEventListener('input', () => {
+      pptoSearch = searchInput.value;
+      clearTimeout(_pptoSearchTimer);
+      _pptoSearchTimer = setTimeout(renderTablePresupuestos, 180);
+    });
   }
   const openBtn = document.querySelector('[data-cot-open]');
   if (openBtn) openBtn.onclick = () => { pptoShowCotizador = true; render(); };
@@ -8017,7 +8059,6 @@ function renderChatConversation() {
   const name = chatState.selectedName;
   loadProfilePic(phone);
   const msgCount = chatState.messages.length;
-  const inboundCount = chatState.messages.filter(m => m.direction === 'inbound').length;
   return `
     <div class="chat-header">
       <button class="chat-back-btn" id="chat-back-btn" title="Volver a la lista" aria-label="Volver">
@@ -8551,17 +8592,20 @@ function renderChatMessages() {
       // Detectamos si el usuario estaba al fondo ANTES de insertar (para
       // decidir auto-scroll). Threshold de 80px para tolerar leves scrolls hacia arriba.
       const wasAtBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < 80;
+      // Bind handlers SOLO al markup nuevo, mientras vive en el fragment detached.
+      // Antes estos 4 binds recorrían TODO el container en cada poll (O(n) en la
+      // conversación, aunque skipearan los ya bindeados); acotándolos al fragment
+      // el costo es O(burbujas nuevas). Los onclick se preservan al mover los nodos;
+      // los handlers que necesitan ver toda la conversación (galería de imágenes,
+      // pausar otros audios) usan document en tiempo de click, no de bind.
+      bindAudioPlayers(tmp);
+      bindMessageContextMenus(tmp);
+      bindMessageHoverActions(tmp);
+      bindMediaPreviewClicks(tmp);
       while (tmp.firstChild) container.appendChild(tmp.firstChild);
       // Refrescar chips de reacciones de bubbles existentes (las nuevas msgs
       // pueden incluir reacciones a bubbles viejos).
       _refreshReactionChips(container, reactionsByParent);
-      // Bind handlers solo al markup nuevo (audio/imágenes/menús contextuales).
-      // bindXxx() son idempotentes (chequean dataset._bound o similar), pero
-      // igual operan sobre TODO el container — ok porque ya skipean los ya bindeados.
-      bindAudioPlayers();
-      bindMessageContextMenus();
-      bindMessageHoverActions();
-      bindMediaPreviewClicks();
       if (wasAtBottom) container.scrollTop = container.scrollHeight;
       _updateExistingBubbleStatuses(container, msgByWamid);
       return;
@@ -8658,8 +8702,9 @@ function _refreshReactionChips(container, reactionsByParent) {
 }
 
 // Click en imagen/PDF → preview inline (no abre nueva pestaña).
-function bindMediaPreviewClicks() {
-  document.querySelectorAll('[data-img-preview]').forEach(img => {
+function bindMediaPreviewClicks(root) {
+  const scope = root || document;
+  scope.querySelectorAll('[data-img-preview]').forEach(img => {
     img.style.cursor = 'zoom-in';
     img.onclick = (e) => {
       e.preventDefault();
@@ -8669,14 +8714,14 @@ function bindMediaPreviewClicks() {
       showImageLightbox(all, idx >= 0 ? idx : 0);
     };
   });
-  document.querySelectorAll('[data-pdf-preview]').forEach(el => {
+  scope.querySelectorAll('[data-pdf-preview]').forEach(el => {
     el.style.cursor = 'pointer';
     el.onclick = (e) => {
       e.preventDefault();
       showPdfPreview(el.dataset.pdfPreview, el.dataset.docName || 'Documento');
     };
   });
-  document.querySelectorAll('[data-doc-open]').forEach(el => {
+  scope.querySelectorAll('[data-doc-open]').forEach(el => {
     el.style.cursor = 'pointer';
     el.onclick = (e) => {
       e.preventDefault();
@@ -8768,8 +8813,9 @@ function showPdfPreview(src, name) {
 
 // Right-click sobre cualquier mensaje: muestra menú con "Reenviar".
 // Solo funciona si el mensaje tiene wamid (no para optimistic locales sin wamid).
-function bindMessageContextMenus() {
-  document.querySelectorAll('.chat-msg[data-wamid]').forEach(el => {
+function bindMessageContextMenus(root) {
+  const scope = root || document;
+  scope.querySelectorAll('.chat-msg[data-wamid]').forEach(el => {
     const wamid = el.dataset.wamid;
     const msgType = el.dataset.msgType || 'text';
     if (!wamid) return; // sin wamid no se puede citar/reenviar
@@ -8839,8 +8885,9 @@ function bindMessageContextMenus() {
 }
 
 // Hover actions (forward + react) inline al lado del bubble — estilo WA Web.
-function bindMessageHoverActions() {
-  document.querySelectorAll('.chat-msg[data-wamid] .chat-msg-actions').forEach(actions => {
+function bindMessageHoverActions(root) {
+  const scope = root || document;
+  scope.querySelectorAll('.chat-msg[data-wamid] .chat-msg-actions').forEach(actions => {
     const bubble = actions.closest('.chat-msg');
     if (!bubble) return;
     const wamid = bubble.dataset.wamid;
@@ -9203,9 +9250,10 @@ function showForwardModal(wamid, msgType) {
   setTimeout(() => search.focus(), 50);
 }
 
-function bindAudioPlayers() {
+function bindAudioPlayers(root) {
+  const scope = root || document;
   // Speed buttons (1x → 1.5x → 2x → 1x)
-  document.querySelectorAll('.audio-speed').forEach(btn => {
+  scope.querySelectorAll('.audio-speed').forEach(btn => {
     btn.onclick = (e) => {
       e.stopPropagation();
       const audioEl = btn.closest('.chat-msg-audio')?.querySelector('audio[data-audio-el]');
@@ -9218,7 +9266,7 @@ function bindAudioPlayers() {
     };
   });
   // Toggle transcripción
-  document.querySelectorAll('[data-toggle-transcript]').forEach(btn => {
+  scope.querySelectorAll('[data-toggle-transcript]').forEach(btn => {
     btn.onclick = (e) => {
       e.stopPropagation();
       const target = document.getElementById(btn.dataset.toggleTranscript);
@@ -9229,7 +9277,7 @@ function bindAudioPlayers() {
     };
   });
   // Bind click on audio bars to play/pause
-  document.querySelectorAll('.chat-msg-audio .audio-bars').forEach(bars => {
+  scope.querySelectorAll('.chat-msg-audio .audio-bars').forEach(bars => {
     const audioEl = bars.closest('.chat-msg-audio').querySelector('audio[data-audio-el]');
     const timeEl = bars.closest('.chat-msg-audio').querySelector('[data-audio-time]');
     if (!audioEl) return;
@@ -9274,7 +9322,7 @@ function bindAudioPlayers() {
   // Botón play/pausa explícito (símbolo ▶/⏸) — además del click en la onda.
   // Sincroniza el ícono con el estado REAL del audio (play/pause/ended), así
   // refleja también cuando se pausa solo al reproducir otro audio.
-  document.querySelectorAll('.chat-msg-audio').forEach(box => {
+  scope.querySelectorAll('.chat-msg-audio').forEach(box => {
     const audioEl = box.querySelector('audio[data-audio-el]');
     const playBtn = box.querySelector('[data-audio-play]');
     if (!audioEl || !playBtn) return;
@@ -9519,7 +9567,11 @@ function bindChatConversation() {
         }
       }
     });
-    ta.focus();
+    // Foco automático SOLO en desktop. En móvil, hacer focus al seleccionar un
+    // chat dispara el teclado de inmediato y tapa media pantalla (el usuario
+    // todavía está leyendo, no escribiendo) — el teclado debe salir recién
+    // cuando toca el input.
+    if (!_isMobileViewport()) ta.focus();
   }
   if (btn) {
     btn.onclick = () => {
@@ -9840,7 +9892,31 @@ function showLabelPicker(phone) {
   }, 10);
 }
 
+// === Altura del chat vs teclado virtual (móvil) ===
+// El teclado virtual NO achica 100vh → el input quedaría tapado detrás de él.
+// VisualViewport sí refleja el área realmente visible: seteamos --vvh (que usa
+// .app--chat en el CSS) al alto visible. Solo en chat + móvil; en desktop o sin
+// soporte de VisualViewport el CSS cae al fallback 100vh (sin regresión).
+let _vvBound = false;
+function syncChatViewportHeight() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const apply = () => {
+    if (STATE.view === 'chat' && window.matchMedia('(max-width: 768px)').matches) {
+      document.documentElement.style.setProperty('--vvh', Math.round(vv.height) + 'px');
+    } else {
+      document.documentElement.style.removeProperty('--vvh');
+    }
+  };
+  if (!_vvBound) {
+    _vvBound = true;
+    vv.addEventListener('resize', apply);
+  }
+  apply();
+}
+
 function bindChat() {
+  syncChatViewportHeight();
   // Load data
   if (!chatState.contacts.length && !chatState.loading) {
     // Cargar nombres de WA primero (rápido, solo phone→name) y después contactos
@@ -11179,7 +11255,7 @@ function notifyChatBrowser(msg) {
     if (!document.hidden) return;
     const body = msg.tipo === 'image' ? '📷 Imagen' : (msg.contenido || '').slice(0, 90);
     const n = new Notification('💬 ' + autorNombre(msg.autor_id), { body, icon: 'assets/logo.svg', tag: 'team-chat' });
-    n.onclick = () => { try { window.focus(); } catch(e){} if (STATE.view !== 'cotizacion') setView('cotizacion'); openTeamChat(); n.close(); };
+    n.onclick = () => { try { window.focus(); } catch(e){} if (STATE.view !== 'cotizacion' && STATE.view !== 'corporeas') setView('cotizacion'); openTeamChat(); n.close(); };
   } catch (e) {}
 }
 
@@ -11217,7 +11293,11 @@ async function pollTeamChat() {
 function startTeamChatPolling() {
   if (_teamChatPollTimer) return;
   _teamChatPollTimer = setInterval(() => {
-    if (STATE.view !== 'cotizacion') { stopTeamChatPolling(); return; }
+    // Corpóreas reusa el board de Cotización (renderCorporeas = renderCotizacion),
+    // así que el FAB del team-chat también vive ahí: el polling debe seguir activo
+    // en AMBAS vistas, no solo en cotizacion (si no, en corpóreas el chat de equipo
+    // no recibía mensajes nuevos: badge sin actualizar, sin sonido).
+    if (STATE.view !== 'cotizacion' && STATE.view !== 'corporeas') { stopTeamChatPolling(); return; }
     pollTeamChat();
   }, 8000);
 }
@@ -11480,7 +11560,6 @@ function renderBriefCard(b) {
   const borderColor = colgado ? 'rgba(255,167,38,.45)' : sinPresupuesto ? 'rgba(255,167,38,.35)' : 'var(--border)';
   const canDelete = canCreateBriefs();  // mismo gate: comercial/admin
   return `
-    <style>@keyframes nv-pulse { 0%,100% { opacity:.55 } 50% { opacity:1 } }</style>
     <div class="brief-card" data-brief-id="${b.id}"
          style="background:var(--ink-100);border:1px solid ${generando ? 'var(--accent-cyan,#8FD4DE)' : borderColor};border-radius:var(--r-sm);overflow:hidden;margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s;position:relative">
       ${generando ? `<div style="position:absolute;top:6px;left:6px;background:rgba(143,212,222,.92);color:#000;font-size:9px;font-weight:700;padding:3px 7px;border-radius:10px;z-index:3;animation:nv-pulse 1.4s ease-in-out infinite">✨ Generando IA…</div>` : ''}
@@ -11491,9 +11570,10 @@ function renderBriefCard(b) {
       ${canCreateBriefs() && b.estado === 'nuevo' && !generando ? `<button class="brief-card-urgente" data-brief-urgente="${b.id}" title="${b.urgente ? 'Quitar urgente' : 'Marcar urgente (prioridad para Emma)'}"
               style="position:absolute;top:4px;left:4px;width:22px;height:22px;border-radius:50%;background:${b.urgente ? 'rgba(255,24,48,.92)' : 'rgba(0,0,0,.55)'};border:0;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center;z-index:3;opacity:${b.urgente ? '1' : '.55'};transition:opacity .15s,background .15s">🔥</button>` : ''}
       ${thumbUrl ? `
-        <div style="width:100%;height:120px;background:var(--ink-050) center/cover no-repeat;background-image:url('${thumbUrl}');position:relative">
-          ${isRenderThumb ? '<div style="position:absolute;top:4px;left:4px;background:rgba(143,212,222,.85);color:#000;font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px">RENDER</div>' : ''}
-          ${(chatCount + renderCount) > 1 ? `<div style="position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.7);color:#fff;font-size:10px;padding:2px 6px;border-radius:10px">+${(chatCount + renderCount) - 1}</div>` : ''}
+        <div style="width:100%;height:120px;background:var(--ink-050);position:relative;overflow:hidden">
+          <img src="${thumbUrl}" loading="lazy" decoding="async" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">
+          ${isRenderThumb ? '<div style="position:absolute;top:4px;left:4px;background:rgba(143,212,222,.85);color:#000;font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;z-index:1">RENDER</div>' : ''}
+          ${(chatCount + renderCount) > 1 ? `<div style="position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.7);color:#fff;font-size:10px;padding:2px 6px;border-radius:10px;z-index:1">+${(chatCount + renderCount) - 1}</div>` : ''}
         </div>
       ` : ''}
       <div style="padding:var(--s-2)">
@@ -13112,9 +13192,11 @@ async function addImageFromFile(file, isNewBrief, tipo = 'chat') {
     try {
       const result = await uploadBriefImage(STATE.briefSelected, file, file.type, tipo);
       STATE.briefDetailImages.push(result);
-      // Re-render del drawer para que el botón "Generar render IA" se re-evalúe
-      // con la imagen recién subida en el state.
-      render();
+      // Refresco PARCIAL: refreshImageGrids() regenera los grids de imágenes y
+      // re-evalúa el botón "Generar render IA" (vía refreshGenerarRenderButton).
+      // Antes había además un render() global que repintaba TODA la app (board
+      // detrás del drawer incluido) solo para actualizar ese botón — innecesario
+      // y causaba parpadeo. El refresco parcial cubre todo lo visible del drawer.
       refreshImageGrids();
     } catch (e) {
       alert('Error subiendo imagen: ' + e.message);
@@ -13290,7 +13372,7 @@ function notifyRenderResult(briefId, success, errMsg) {
       const n = new Notification(success ? '✨ Render listo' : '⚠ Render falló', { body, icon: 'assets/logo.svg', tag: 'render-ia-' + briefId });
       n.onclick = () => {
         try { window.focus(); } catch(e) {}
-        if (STATE.view !== 'cotizacion') setView('cotizacion');
+        if (STATE.view !== 'cotizacion' && STATE.view !== 'corporeas') setView('cotizacion');
         openBriefDrawer(briefId);
         n.close();
       };

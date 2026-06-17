@@ -25,8 +25,7 @@
 <link rel="apple-touch-icon" sizes="192x192" href="assets/icon-192.png">
 <link rel="apple-touch-icon" sizes="512x512" href="assets/icon-512.png">
 
-<!-- iOS splash screens (opcional pero da experiencia más nativa) -->
-<link rel="apple-touch-startup-image" href="assets/splash-1170x2532.png" media="(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3)">
+<!-- (splash screen iOS removido: el PNG referenciado no existía → daba 404 en cada carga) -->
 
 <!-- Open Graph (preview en WhatsApp, Twitter, Discord, Slack, etc.) -->
 <meta property="og:type" content="website">
@@ -39,6 +38,14 @@
 <meta property="og:url" content="https://gasparmv.github.io/ni-ventas/">
 <meta name="twitter:card" content="summary_large_image">
 
+<!-- Preconnect a orígenes críticos (acelera la 1ª conexión: DNS+TLS por adelantado). -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://ni-ventas-tracker.neoninfinito.workers.dev" crossorigin>
+<!-- Fuentes async (antes venían por @import dentro de brand.css = cascada bloqueante).
+     media="print" + onload las baja sin bloquear el primer dibujado; display=swap da fallback. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Archivo+Black&family=JetBrains+Mono:wght@400;500;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Archivo+Black&family=JetBrains+Mono:wght@400;500;700&display=swap"></noscript>
 <link rel="stylesheet" href="assets/brand.css">
 <link rel="stylesheet" href="assets/app.css">
 <link rel="icon" type="image/svg+xml" href="assets/logo.svg">

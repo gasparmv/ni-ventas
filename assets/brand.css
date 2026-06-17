@@ -8,8 +8,10 @@
 /* ---------- FONTS -------------------------------------------------------- */
 /* Bold display headlines lean on a geometric sans with tight letterforms
    (close to the logo's stroke); body copy stays neutral grotesque.
-   Mono is used for tags / labels / numbers. */
-@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Archivo+Black&family=JetBrains+Mono:wght@400;500;700&display=swap');
+   Mono is used for tags / labels / numbers.
+   NOTA: las fuentes se cargan desde index.html (preconnect + <link> async). Antes
+   venían por @import acá adentro, que las encadenaba en serie DESPUÉS de bajar este
+   CSS (cascada render-blocking → frenaba el primer dibujado). */
 
 :root {
   /* ====================================================================
@@ -60,6 +62,14 @@
   --warning: #FFB84D;
   --danger:  var(--neon-red);
   --info:    var(--neon-cyan);
+
+  /* Alias que el código (app.js / app.css) usa pero que NO estaban declarados.
+     Sin esto, en ~64 lugares sin fallback el texto heredaba el color del padre
+     (blanco) en vez de salir tenue → jerarquía visual rota. */
+  --accent-cyan: var(--neon-cyan);
+  --accent-red:  var(--neon-red);
+  --fg-mute:     var(--fg-subtle);
+  --bg-0:        var(--ink-050);
 
   /* ====================================================================
      TYPE — families
