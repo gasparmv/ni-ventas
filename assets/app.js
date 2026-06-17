@@ -5520,7 +5520,7 @@ function _modalRender({ message, title, variant, confirmLabel, cancelLabel, with
   `;
   document.body.appendChild(bg);
   // animar entrada en el siguiente tick
-  requestAnimationFrame(() => bg.classList.add('open'));
+  void bg.offsetWidth; bg.classList.add('open'); requestAnimationFrame(() => bg.classList.add('open'));
   return bg;
 }
 
@@ -5597,7 +5597,7 @@ function showPasswordPrompt(userName) {
         </div>
       </div>`;
     document.body.appendChild(bg);
-    requestAnimationFrame(() => bg.classList.add('open'));
+    void bg.offsetWidth; bg.classList.add('open'); requestAnimationFrame(() => bg.classList.add('open'));
     const input = bg.querySelector('input');
     const finish = (val) => {
       bg.classList.remove('open');
@@ -5887,7 +5887,7 @@ function showNewChatModal(prefillPhone) {
       </div>
     </div>`;
   document.body.appendChild(bg);
-  requestAnimationFrame(() => bg.classList.add('open'));
+  void bg.offsetWidth; bg.classList.add('open'); requestAnimationFrame(() => bg.classList.add('open'));
 
   const phoneEl = bg.querySelector('#nc-phone');
   const listEl = bg.querySelector('#nc-tpl-list');
@@ -6209,7 +6209,7 @@ function showMediaPreviewModal(initialFiles) {
       </div>
     `;
     document.body.appendChild(bg);
-    requestAnimationFrame(() => bg.classList.add('open'));
+    void bg.offsetWidth; bg.classList.add('open'); requestAnimationFrame(() => bg.classList.add('open'));
 
     const stage = bg.querySelector('#mp-stage');
     const thumbs = bg.querySelector('#mp-thumbs');
@@ -8748,7 +8748,7 @@ function showImageLightbox(images, startIdx) {
     <div class="lb-counter"></div>
   `;
   document.body.appendChild(lb);
-  requestAnimationFrame(() => lb.classList.add('open'));
+  void lb.offsetWidth; lb.classList.add('open'); requestAnimationFrame(() => lb.classList.add('open'));
   const imgEl = lb.querySelector('#lb-img');
   const counter = lb.querySelector('.lb-counter');
   const prevBtn = lb.querySelector('.lb-prev');
@@ -8803,7 +8803,7 @@ function showPdfPreview(src, name) {
     </div>
   `;
   document.body.appendChild(bg);
-  requestAnimationFrame(() => bg.classList.add('open'));
+  void bg.offsetWidth; bg.classList.add('open'); requestAnimationFrame(() => bg.classList.add('open'));
   const close = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); document.removeEventListener('keydown', onKey); };
   const onKey = (e) => { if (e.key === 'Escape') close(); };
   document.addEventListener('keydown', onKey);
@@ -8979,7 +8979,7 @@ function showReactionPicker(anchor, wamid) {
   left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8));
   pop.style.left = left + 'px';
   pop.style.top = top + 'px';
-  requestAnimationFrame(() => pop.classList.add('open'));
+  void pop.offsetWidth; pop.classList.add('open'); requestAnimationFrame(() => pop.classList.add('open'));
   const close = () => { pop.remove(); document.removeEventListener('click', closer, true); document.removeEventListener('keydown', escer); };
   function closer(ev) { if (!pop.contains(ev.target) && ev.target !== anchor) close(); }
   function escer(ev) { if (ev.key === 'Escape') close(); }
@@ -9069,7 +9069,7 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
   const rect = menu.getBoundingClientRect();
   menu.style.left = Math.min(x, window.innerWidth - rect.width - 8) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - rect.height - 8) + 'px';
-  requestAnimationFrame(() => menu.classList.add('open'));
+  void menu.offsetWidth; menu.classList.add('open'); requestAnimationFrame(() => menu.classList.add('open'));
   const close = () => { menu.remove(); document.removeEventListener('click', closer, true); document.removeEventListener('keydown', escer); };
   function closer(ev) { if (!menu.contains(ev.target)) close(); }
   function escer(ev) { if (ev.key === 'Escape') close(); }
@@ -9198,7 +9198,7 @@ function showForwardModal(wamid, msgType) {
     </div>
   `;
   document.body.appendChild(bg);
-  requestAnimationFrame(() => bg.classList.add('open'));
+  void bg.offsetWidth; bg.classList.add('open'); requestAnimationFrame(() => bg.classList.add('open'));
   const close = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
   bg.querySelector('.modal-cancel').onclick = close;
   bg.addEventListener('click', e => { if (e.target === bg) close(); });
@@ -10801,7 +10801,7 @@ function showChatContactContextMenu(x, y, phone, name) {
   const maxY = window.innerHeight - rect.height - 8;
   menu.style.left = Math.min(x, maxX) + 'px';
   menu.style.top = Math.min(y, maxY) + 'px';
-  requestAnimationFrame(() => menu.classList.add('open'));
+  void menu.offsetWidth; menu.classList.add('open'); requestAnimationFrame(() => menu.classList.add('open'));
 
   const close = () => { menu.remove(); document.removeEventListener('click', closer, true); document.removeEventListener('keydown', escer); };
   function closer(e) { if (!menu.contains(e.target)) close(); }
