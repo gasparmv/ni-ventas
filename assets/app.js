@@ -12176,12 +12176,23 @@ async function enviarCorporeaPresupuesto(briefId, textOverride) {
   const texto = textOverride != null ? textOverride : corpPresupuestoTexto(brief, cj);
   STATE.briefsEnviando[briefId] = true; render();
   try {
-    const res = await fetch(`${CONFIG.trackerUrl}/admin/wa/send`, {
+    // send-brief-presupuesto manda el RENDER del brief (si existe en R2) como foto
+    // con el presupuesto de pie de foto; si no hay render, manda solo el texto.
+    // Antes esto usaba /admin/wa/send con solo {body} → NUNCA adjuntaba la imagen.
+    const res = await fetch(`${CONFIG.trackerUrl}/admin/wa/send-brief-presupuesto`, {
       method: 'POST', headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to: tel, body: texto })
+      body: JSON.stringify({ brief_id: briefId, to: tel, caption: texto })
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    if (!res.ok) {
+      // Ventana de 24 h cerrada: no se puede mandar foto/texto libre, el cliente
+      // tiene que escribir primero. (La plantilla de neón no aplica a corpóreas.)
+      if (res.status === 409 || data.window_closed) {
+        toast('Ventana de 24 h cerrada: el cliente tiene que escribirte primero para poder mandarle el presupuesto.');
+        return;
+      }
+      throw new Error(data.error || ('HTTP ' + res.status));
+    }
     const updated = await marcarBriefEnviado(briefId, { precio_final: brief.precio_final });
     const i = STATE.briefs.findIndex(b => b.id === updated.id);
     if (i >= 0) STATE.briefs[i] = updated;
