@@ -12158,6 +12158,21 @@ function renderCorpPopup() {
           ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Costo · margen</span><br><b>${fmtMoney(cj.costo || 0)} · ×${cj.margen || ''}</b></div>` : '<div></div>'}
           <div style="grid-column:1 / -1"><span style="color:var(--fg-subtle);font-size:11px">Precio final</span><br><b style="color:var(--accent-cyan);font-size:18px">${fmtMoney(brief.precio_final || 0)}</b></div>
         </div>
+        ${isAdmin() ? `
+        <div style="font-size:12px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);margin-bottom:var(--s-3)">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent-cyan);margin-bottom:6px">🔒 Desglose de costos · solo admin</div>
+          <table style="width:100%;font-family:ui-monospace,monospace;font-size:12px;color:var(--fg-subtle)">
+            <tr><td>Superficie</td><td style="text-align:right;color:var(--fg)">${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm = <b>${m2 || '?'} m²</b></td></tr>
+            <tr><td>Costo/m² (${mat}, ${luz})</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo_m2 || 0)}</td></tr>
+            <tr><td>Costo base (m² × costo/m²)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo || 0)}</td></tr>
+            <tr><td>Margen por superficie</td><td style="text-align:right;color:var(--fg)">×${cj.margen || '?'}</td></tr>
+            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio final (costo × margen)</td><td style="text-align:right;padding-top:5px"><b style="color:var(--accent-cyan)">${fmtMoney(brief.precio_final || 0)}</b></td></tr>
+            <tr><td>Ganancia (precio − costo)</td><td style="text-align:right;color:#4ade80">${fmtMoney((brief.precio_final || 0) - (cj.costo || 0))}</td></tr>
+            <tr><td>Comisión Joaco (3%)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</td></tr>
+          </table>
+          <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Margen: ≤2 m² ×2 · 2–5 m² ×1.75 · +5 m² ×1.5 · costo/m²: impreso 320k / acrílico 400k (con luz), 200k / 300k (sin luz)</div>
+        </div>
+        ` : ''}
         <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto</label>
         <textarea id="corp-popup-text" rows="12" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-3)">${escapeHtml(texto)}</textarea>
         <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
