@@ -12167,8 +12167,8 @@ function renderCorpPopup() {
             <tr><td>Costo base (m² × costo/m²)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo || 0)}</td></tr>
             <tr><td>Margen por superficie</td><td style="text-align:right;color:var(--fg)">×${cj.margen || '?'}</td></tr>
             <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio final (costo × margen)</td><td style="text-align:right;padding-top:5px"><b style="color:var(--accent-cyan)">${fmtMoney(brief.precio_final || 0)}</b></td></tr>
-            <tr><td>Ganancia (precio − costo)</td><td style="text-align:right;color:#4ade80">${fmtMoney((brief.precio_final || 0) - (cj.costo || 0))}</td></tr>
-            <tr><td>Comisión Joaco (3%)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</td></tr>
+            <tr><td>Comisión Joaco (3% — es costo)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</td></tr>
+            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Ganancia neta</b> (precio − costo − comisión)</td><td style="text-align:right;padding-top:5px;color:#4ade80"><b>${fmtMoney((brief.precio_final || 0) - (cj.costo || 0) - Math.round((brief.precio_final || 0) * 0.03))}</b></td></tr>
           </table>
           <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Margen: ≤2 m² ×2 · 2–5 m² ×1.75 · +5 m² ×1.5 · costo/m²: impreso 320k / acrílico 400k (con luz), 200k / 300k (sin luz)</div>
         </div>
@@ -13165,6 +13165,19 @@ function renderBriefCotizadorPopup() {
         ` : ''}
         ` : '<div class="muted" style="text-align:center;padding:var(--s-2)">No se pudo calcular precio (revisá medidas).</div>'}
 
+        ${isAdmin() && r ? `
+        <div style="font-size:12px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);margin-bottom:var(--s-3)">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent-cyan);margin-bottom:6px">🔒 Desglose de costos · solo admin</div>
+          <table style="width:100%;font-family:ui-monospace,monospace;font-size:12px;color:var(--fg-subtle)">
+            ${r.cf ? `<tr><td>Costo fijo (materiales + neón + fuente)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(r.cf)}</td></tr>
+            <tr><td>Margen objetivo</td><td style="text-align:right;color:var(--fg)">${Math.round(r.margen*100)}%</td></tr>` : `<tr><td>m²</td><td style="text-align:right;color:var(--fg)">${(r.m2||0).toFixed(2)}</td></tr>`}
+            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio transparente</td><td style="text-align:right;padding-top:5px;color:var(--accent-cyan)">${fmtMoney(r.transFinal)}</td></tr>
+            <tr><td>Precio negro</td><td style="text-align:right;color:var(--accent-cyan)">${fmtMoney(r.negroFinal)}</td></tr>
+            <tr><td>Comisión Joaco (es costo)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(r.comision)}</td></tr>
+            ${r.cf ? `<tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Ganancia neta transp.</b> (precio − costo − comisión)</td><td style="text-align:right;padding-top:5px;color:#4ade80"><b>${fmtMoney(r.transFinal - r.cf - r.comision)}</b></td></tr>` : ''}
+          </table>
+        </div>
+        ` : ''}
         <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto</label>
         <textarea id="brief-cot-popup-text" rows="14"
                   style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-family:inherit;font-size:13px;resize:vertical;margin-bottom:var(--s-3)">${escapeHtml(texto)}</textarea>
