@@ -198,6 +198,25 @@ function pedidoFechaToExcel(iso) {
   if (!m) return iso || '';
   return `${parseInt(m[3], 10)}/${parseInt(m[2], 10)}/${m[1]}`;
 }
+// POST robusto al Apps Script. El Web App responde un 302 a una URL googleusercontent
+// que entrega el resultado del doPost por GET. Cloudflare, al seguir el redirect sobre
+// un POST con redirect:'follow', puede perder el body → el doPost no corre. Por eso lo
+// seguimos a mano: POST con redirect:'manual' y, si hay 3xx, GET al Location. Devuelve
+// el JSON parseado, o null si falla.
+async function appsScriptPost(env, payload) {
+  if (!env.APPS_SCRIPT_URL) return null;
+  let r = await fetch(env.APPS_SCRIPT_URL, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (r.status >= 300 && r.status < 400) {
+    const loc = r.headers.get('location');
+    if (loc) r = await fetch(loc, { method: 'GET', redirect: 'follow' });
+  }
+  if (!r.ok) return null;
+  try { return await r.json(); } catch (_) { return null; }
+}
 // Empuja UNA fila de pedido al Excel de Ventas vía el Apps Script (action=
 // pedido_upsert). Con sheet_row → actualiza; sin él → agrega y devuelve el nuevo
 // nro de fila. La columna Productor (O) NO se toca (la maneja Gaspar en el Excel).
@@ -212,13 +231,7 @@ async function pushPedidoToVentas(env, row) {
     row.estado_pedido || '', row.ad || ''
   ];
   try {
-    const r = await fetch(env.APPS_SCRIPT_URL, {
-      method: 'POST', redirect: 'follow',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'pedido_upsert', sheet_row: row.sheet_row || 0, row: arr })
-    });
-    if (!r.ok) return null;
-    const j = await r.json();
+    const j = await appsScriptPost(env, { action: 'pedido_upsert', sheet_row: row.sheet_row || 0, row: arr });
     return (j && j.ok && j.row) ? Number(j.row) : null;
   } catch (e) { return null; }
 }
@@ -227,18 +240,22 @@ async function pushPedidoToVentas(env, row) {
 // deployar el Apps Script, para no pushear contra el viejo). El clear es condicional
 // por updated_at para no perder ediciones concurrentes.
 async function processPedidosMirror(env) {
-  if (!env.APPS_SCRIPT_URL) return;
+  if (!env.APPS_SCRIPT_URL) return { skipped: 'no_url' };
   try {
     const flag = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'pedidos_mirror_on'").first();
-    if (!flag || flag.v !== '1') return;
+    if (!flag || flag.v !== '1') return { skipped: 'flag_off' };
     const rs = await env.DB.prepare('SELECT * FROM pedidos WHERE mirror_dirty = 1 ORDER BY id LIMIT 8').all();
-    for (const row of (rs.results || [])) {
+    const rows = rs.results || [];
+    let pushed = 0;
+    for (const row of rows) {
       const newRow = await pushPedidoToVentas(env, row);
       if (newRow) {
         await env.DB.prepare('UPDATE pedidos SET mirror_dirty = 0, sheet_row = ? WHERE id = ? AND updated_at = ?').bind(newRow, row.id, row.updated_at).run();
+        pushed++;
       }
     }
-  } catch (e) {}
+    return { checked: rows.length, pushed };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 // Convierte "13.832k", "$175.000", "954.251", "(5.097k)", "63%", "-" → number.
 // Sheet usa . como separador de miles (formato AR) y k como sufijo de miles.
@@ -7148,6 +7165,26 @@ export default {
         await ensurePedidosSchema(env);
         const res = await env.DB.prepare("UPDATE pedidos SET mirror_dirty = 1 WHERE origen = 'crm'").run();
         return json({ ok: true, marcados: (res.meta && res.meta.changes) || 0 });
+      }
+
+      // POST /admin/pedidos/mirror-run → fuerza una corrida del espejo ahora mismo
+      // (sin esperar el cron) y devuelve el diagnóstico { checked, pushed } o { error }.
+      if (request.method === 'POST' && path === '/admin/pedidos/mirror-run') {
+        await ensurePedidosSchema(env);
+        const result = await processPedidosMirror(env);
+        return json({ ok: true, result });
+      }
+
+      // GET /admin/pedidos/mirror-debug → testea el path POST worker→Apps Script con un
+      // pedido_ping (NO escribe nada) y reporta si llegó al doPost. Diagnóstico.
+      if (request.method === 'GET' && path === '/admin/pedidos/mirror-debug') {
+        if (!env.APPS_SCRIPT_URL) return json({ error: 'no APPS_SCRIPT_URL' });
+        try {
+          const j = await appsScriptPost(env, { action: 'pedido_ping' });
+          return json({ ok: true, reached: !!(j && j.pong), response: j });
+        } catch (e) {
+          return json({ error: String((e && e.message) || e) });
+        }
       }
 
       // ============================================================
