@@ -9694,8 +9694,19 @@ function showForwardModal(wamid, msgType) {
   const bg = document.createElement('div');
   bg.id = 'forward-modal';
   bg.className = 'modal-bg';
-  // contactos disponibles, ordenados por último mensaje
-  const contacts = [...chatState.contacts].filter(c => !isArchived(c.phone));
+  // Contactos disponibles, ordenados por recencia (chatState.contacts ya viene
+  // ordenado por último mensaje, ver ~línea 7113). Hay 7000+: NO los pintamos
+  // todos de una o el main thread se clava 1-2s (mismo problema que el sidebar,
+  // ver windowing en renderChat). Renderizamos de a FWD_PAGE; el scroll suma y
+  // la búsqueda re-filtra sobre la lista completa en memoria.
+  const allContacts = [...chatState.contacts].filter(c => !isArchived(c.phone));
+  const FWD_PAGE = 50;
+  let fwdLimit = FWD_PAGE;
+  let lastFilteredCount = 0;
+  // Selección persistida fuera del DOM: como re-renderizamos al buscar/scrollear
+  // los checkboxes se recrean, así que el Set es la fuente de verdad de a quién
+  // reenviar (podés elegir a uno, buscar otro lejano y mantener ambos marcados).
+  const selected = new Set();
   bg.innerHTML = `
     <div class="modal" style="max-width:480px">
       <div class="modal-h"><h3>Reenviar a…</h3></div>
@@ -9703,18 +9714,7 @@ function showForwardModal(wamid, msgType) {
         <div style="padding:10px 14px;border-bottom:1px solid var(--border)">
           <input type="text" id="fwd-search" placeholder="Buscar contacto…" autocomplete="off" style="width:100%;padding:8px 10px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-size:13px">
         </div>
-        <div id="fwd-list" style="max-height:380px;overflow-y:auto;padding:6px 0">
-          ${contacts.map(c => `
-            <label class="fwd-item" data-phone="${escapeHtml(c.phone)}" data-name="${escapeHtml((c.name || '').toLowerCase())}">
-              <input type="checkbox" value="${escapeHtml(c.phone)}">
-              ${avatarHtml(c.phone, c.name, 36)}
-              <div class="fwd-item-text">
-                <div class="fwd-item-name">${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
-                <div class="fwd-item-sub">${escapeHtml(formatPhoneDisplay(c.phone))}</div>
-              </div>
-            </label>
-          `).join('')}
-        </div>
+        <div id="fwd-list" style="max-height:380px;overflow-y:auto;padding:6px 0"></div>
       </div>
       <div class="modal-actions">
         <span id="fwd-count" style="margin-right:auto;color:var(--fg-subtle);font-size:12px">0 seleccionados</span>
@@ -9728,30 +9728,77 @@ function showForwardModal(wamid, msgType) {
   const close = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
   bg.querySelector('.modal-cancel').onclick = close;
   bg.addEventListener('click', e => { if (e.target === bg) close(); });
-  // search filter
-  const search = document.getElementById('fwd-search');
-  search.oninput = () => {
-    const q = search.value.toLowerCase();
-    document.querySelectorAll('.fwd-item').forEach(it => {
-      const name = it.dataset.name || '';
-      const phone = it.dataset.phone || '';
-      it.style.display = (name.includes(q) || phone.includes(q)) ? '' : 'none';
+
+  const search = bg.querySelector('#fwd-search');
+  const listEl = bg.querySelector('#fwd-list');
+  const countEl = bg.querySelector('#fwd-count');
+  const confirmBtn = bg.querySelector('#fwd-confirm');
+
+  const itemHtml = c => `
+    <label class="fwd-item">
+      <input type="checkbox" value="${escapeHtml(c.phone)}"${selected.has(c.phone) ? ' checked' : ''}>
+      ${avatarHtml(c.phone, c.name, 36)}
+      <div class="fwd-item-text">
+        <div class="fwd-item-name">${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
+        <div class="fwd-item-sub">${escapeHtml(formatPhoneDisplay(c.phone))}</div>
+      </div>
+    </label>
+  `;
+
+  // El contador y el botón se rigen por el Set, no por los checkboxes del DOM
+  // (que son solo la ventana visible).
+  const updateCount = () => {
+    const n = selected.size;
+    countEl.textContent = `${n} seleccionado${n === 1 ? '' : 's'}`;
+    confirmBtn.disabled = n === 0;
+  };
+
+  // Filtra sobre los 7000+ en memoria y re-renderiza SOLO la ventana visible.
+  // preserveScroll=true al sumar página (scroll infinito) para no saltar;
+  // false al buscar/abrir (mostramos desde arriba).
+  const renderList = ({ preserveScroll = false } = {}) => {
+    const q = search.value.toLowerCase().trim();
+    let filtered = allContacts;
+    if (q) filtered = allContacts.filter(c =>
+      (c.name || '').toLowerCase().includes(q) ||
+      c.phone.includes(q) ||
+      (formatPhoneDisplay(c.phone) || '').toLowerCase().includes(q));
+    lastFilteredCount = filtered.length;
+    const visible = filtered.slice(0, fwdLimit);
+    const st = listEl.scrollTop;
+    listEl.innerHTML = visible.length
+      ? visible.map(itemHtml).join('')
+      : '<div style="padding:18px 14px;text-align:center;color:var(--fg-subtle);font-size:13px">Sin resultados</div>';
+    listEl.scrollTop = preserveScroll ? st : 0;
+    listEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.onchange = () => {
+        if (cb.checked) selected.add(cb.value); else selected.delete(cb.value);
+        updateCount();
+      };
     });
   };
-  // selection counter
-  const updateCount = () => {
-    const checked = bg.querySelectorAll('input[type="checkbox"]:checked');
-    document.getElementById('fwd-count').textContent = `${checked.length} seleccionado${checked.length === 1 ? '' : 's'}`;
-    document.getElementById('fwd-confirm').disabled = checked.length === 0;
-  };
-  bg.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.onchange = updateCount);
-  // confirm
-  document.getElementById('fwd-confirm').onclick = async () => {
-    const phones = Array.from(bg.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+
+  // Scroll infinito: cerca del fondo suma una página si quedan más por mostrar.
+  listEl.addEventListener('scroll', () => {
+    if (listEl.scrollTop + listEl.clientHeight >= listEl.scrollHeight - 200
+        && fwdLimit < lastFilteredCount) {
+      fwdLimit += FWD_PAGE;
+      renderList({ preserveScroll: true });
+    }
+  });
+
+  // Búsqueda: filtra la lista COMPLETA y re-renderiza los matches desde arriba.
+  // (Antes solo toggleaba display sobre los visibles → no encontraba a los de
+  // más abajo de los primeros 50.) Reseteamos la ventana a la primera página.
+  search.oninput = () => { fwdLimit = FWD_PAGE; renderList(); };
+
+  renderList();
+
+  confirmBtn.onclick = async () => {
+    const phones = Array.from(selected);
     if (!phones.length) return;
-    const btn = document.getElementById('fwd-confirm');
-    btn.disabled = true;
-    btn.textContent = 'Reenviando…';
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Reenviando…';
     try {
       const r = await fetch(CONFIG.trackerUrl + '/admin/wa/forward', {
         method: 'POST',
@@ -9764,13 +9811,13 @@ function showForwardModal(wamid, msgType) {
         close();
       } else {
         toast('Error: ' + (j.error || 'fallo'));
-        btn.disabled = false;
-        btn.textContent = 'Reenviar';
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Reenviar';
       }
     } catch (e) {
       toast('Error de red');
-      btn.disabled = false;
-      btn.textContent = 'Reenviar';
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Reenviar';
     }
   };
   setTimeout(() => search.focus(), 50);
