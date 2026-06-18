@@ -8096,6 +8096,9 @@ export default {
     // Usa hAR (calculado más arriba en este mismo handler) para consistencia
     // con processCursosFollowup/processMinicursoFollowup.
     if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processPresupuestoFollowups(env));
+    // Anti-colgados: etiqueta "⏳ Te toca" los leads tibios que nos quedaron debiendo
+    // respuesta + resumen 2x/día a Joaco y Gaspar (ver playbook §A4.1).
+    if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processColgados(env));
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
     if (hAR >= 8 && hAR < 21) ctx.waitUntil(processPendingTemplateSends(env));
     // Monitor de status de templates: 1 vez por hora, no cada 5 min. El polling
@@ -8665,6 +8668,109 @@ async function processPresupuestoFollowups(env) {
 
   if (sent > 0 || failures.length > 0) {
     await logWaEvent(env, { to: '', kind: 'cron-pp-summary', ref: '', ok: true, error: `sent=${sent} failed=${failures.length}` });
+  }
+}
+
+// ===== Anti-colgados: leads tibios esperando respuesta (pelota de NUESTRO lado) =====
+// Marca con la etiqueta "⏳ Te toca" toda conversación donde mandamos presupuesto, el
+// cliente RESPONDIÓ, y la última palabra es de él hace ≥90 min. La etiqueta se SACA
+// sola cuando contestamos. 2x/día (10 y 17 AR) manda un resumen a los internos
+// (Joaco + Gaspar). Objetivo: que ningún lead tibio se cuelgue por olvido. El FUP
+// automático solo cubre a los que quedaron MUDOS; esto cubre el hueco de los que
+// respondieron y se dejan enfriar. Ver playbook §A4.1.
+const COLGADO_LABEL_NAME = '⏳ Te toca';
+const COLGADO_LABEL_COLOR = '#f59e0b';
+const COLGADO_MIN_MS = 90 * 60 * 1000;                                // 1h30 esperando
+const COLGADO_INTERNAL_PHONES = ['5491137593269', '5491155604999'];   // Joaco, Gaspar
+
+async function processColgados(env) {
+  const now = Date.now();
+  const labelId = await ensureLabelId(env, COLGADO_LABEL_NAME, COLGADO_LABEL_COLOR);
+  if (!labelId) return;
+
+  // 1) Presupuestos enviados en los últimos 12 días (prefijo exacto, sin LIKE → sin
+  //    el límite de complejidad de D1; mismos prefijos que usa el FUP).
+  const since = new Date(now - 12 * 24 * 60 * 60 * 1000).toISOString();
+  const pfx1 = PRESUPUESTO_PREFIXES_TEXT[0].substring(0, 26);
+  const pfx2 = PRESUPUESTO_PREFIXES_TEXT[1].substring(0, 26);
+  let presRows;
+  try {
+    const rs = await env.DB.prepare(
+      "SELECT phone, MAX(ts) AS pres_ts FROM wa_messages " +
+      "WHERE direction='outbound' AND ts >= ? AND (substr(body,1,26)=? OR substr(body,1,26)=?) " +
+      "GROUP BY phone"
+    ).bind(since, pfx1, pfx2).all();
+    presRows = rs.results || [];
+  } catch (e) {
+    await logWaEvent(env, { to: '', kind: 'cron-colgados', ref: '', ok: false, error: 'query: ' + e.message });
+    return;
+  }
+
+  // 2) Determinar quiénes están colgados (respondieron + última palabra de ellos + ≥90 min).
+  const colgados = [];
+  for (const p of presRows) {
+    if (COLGADO_INTERNAL_PHONES.includes(p.phone)) continue;
+    let conv;
+    try {
+      const rs = await env.DB.prepare(
+        "SELECT direction, ts, sender_name FROM wa_messages WHERE phone=? AND ts>? ORDER BY ts LIMIT 200"
+      ).bind(p.phone, p.pres_ts).all();
+      conv = rs.results || [];
+    } catch (_) { continue; }
+    if (!conv.length) continue;
+    if (!conv.some(m => m.direction === 'inbound')) continue;          // mudo → lo cubre el FUP
+    const last = conv[conv.length - 1];
+    if (last.direction !== 'inbound') continue;                         // ya contestamos → no es colgado
+    const waitedMs = now - new Date(last.ts).getTime();
+    if (waitedMs < COLGADO_MIN_MS) continue;                            // todavía no llegó al umbral
+    try { if (await env.DB.prepare("SELECT 1 FROM archived_chats WHERE phone=?").bind(p.phone).first()) continue; } catch (_) {}
+    let name = '';
+    try { const c = await env.DB.prepare("SELECT name FROM wa_contacts WHERE phone=?").bind(p.phone).first(); name = (c && c.name) || ''; } catch (_) {}
+    if (!name) { const inb = [...conv].reverse().find(m => m.direction === 'inbound' && m.sender_name); name = (inb && inb.sender_name) || ''; }
+    colgados.push({ phone: p.phone, waitingMin: Math.round(waitedMs / 60000), name });
+  }
+  const colgadoSet = new Set(colgados.map(c => c.phone));
+
+  // 3) Aplicar la etiqueta a los colgados.
+  for (const c of colgados) {
+    try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(c.phone, labelId, new Date().toISOString()).run(); } catch (_) {}
+  }
+  // 4) Sacar la etiqueta de los que YA NO están colgados (contestamos / avanzaron / se archivaron).
+  try {
+    const tagged = (await env.DB.prepare("SELECT phone FROM contact_labels WHERE label_id=?").bind(labelId).all()).results || [];
+    for (const t of tagged) {
+      if (!colgadoSet.has(t.phone)) {
+        try { await env.DB.prepare("DELETE FROM contact_labels WHERE phone=? AND label_id=?").bind(t.phone, labelId).run(); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+
+  // 5) Resumen a los internos 2x/día (10:00 y 17:00 AR), dedup por kv_cache.
+  const hAR = (new Date().getUTCHours() - 3 + 24) % 24;
+  const minute = new Date().getUTCMinutes();
+  if ((hAR === 10 || hAR === 17) && minute < 5 && colgados.length > 0) {
+    const dateKeyAR = new Date(now - 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const slotKey = `colgados-summary:${dateKeyAR}:${hAR}`;
+    let already = false;
+    try { already = !!(await env.DB.prepare("SELECT v FROM kv_cache WHERE k=?").bind(slotKey).first()); } catch (_) {}
+    if (!already && !(await isWaBillingBlocked(env))) {
+      const top = colgados.sort((a, b) => b.waitingMin - a.waitingMin).slice(0, 12);
+      const lines = top.map(c => {
+        const hrs = c.waitingMin >= 60 ? `${Math.floor(c.waitingMin / 60)}h${String(c.waitingMin % 60).padStart(2, '0')}` : `${c.waitingMin}min`;
+        return `• ${c.name || ('+' + c.phone)} — hace ${hrs}`;
+      }).join('\n');
+      const more = colgados.length > 12 ? `\n…y ${colgados.length - 12} más` : '';
+      const msg = `⏳ *Leads esperándote* (${colgados.length})\nRespondieron el presupuesto y tienen la pelota de nuestro lado 👇\n\n${lines}${more}\n\nEntrá al CRM → Chat → filtro "${COLGADO_LABEL_NAME}" y respondeles. No los dejes enfriar! 🔥`;
+      for (const ph of COLGADO_INTERNAL_PHONES) {
+        try { await waSendText(env, ph, msg); } catch (_) {}
+        await new Promise(r => setTimeout(r, 400));
+      }
+      try { await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(slotKey, String(colgados.length), new Date().toISOString()).run(); } catch (_) {}
+    }
+  }
+
+  if (colgados.length > 0) {
+    await logWaEvent(env, { to: '', kind: 'cron-colgados', ref: '', ok: true, error: `colgados=${colgados.length}` });
   }
 }
 

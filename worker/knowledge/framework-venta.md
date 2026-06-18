@@ -124,6 +124,21 @@ Se dispara sobre un **presupuesto sin respuesta**. Solo **8:00–20:00 AR**. Se 
 - **Variante por monto:** &lt;$300k vs ≥$300k usan textos distintos (ya configurado en el CRM).
 - **Escalar a humano (en vez de FUP automático)** si: B2B de varios locales, el cliente mostró dudas fuertes de precio/financiación, está caliente y conviene una **llamada**, o hay una queja. El agente avisa con una nota específica (ej. *"preguntó por financiación y dudó del precio — conviene llamarlo"*).
 
+## A4.1 — 🔴 REGLA DE ORO: ningún lead tibio sin respuesta (anti-colgados)
+**El presupuesto que el cliente respondió y quedó esperándonos es la PRIORIDAD #1.** Es plata caliente que se enfría en horas. El FUP automático NO cubre esto (solo dispara cuando el cliente quedó MUDO); **apenas el cliente contesta, la pelota es nuestra y hay que jugarla.** Es la fuga de ventas #1: leads que respondieron interesados y se dejaron colgar.
+
+**La regla:**
+- Si el cliente respondió un presupuesto y la última palabra es de él → **se le responde el mismo día** (8–20 AR). **Nunca** dejarlo +24 h.
+- Una respuesta tibia ("lo veo con mi socia", "gracias, lo muestro y aviso", "me encanta 😍") **NO es un cierre: es la señal para EMPUJAR**, no para decir "estamos a disposición" y soltarlo.
+- **Empujar siempre con:** lead time → *"si lo encargás esta semana lo sumo a la tanda y lo tenés antes"* + recordar la **seña 50%** + ofrecer **llamada** + (si es del interior) reforzar **envío gratis**.
+- Cotizar **TODOS** los carteles que pidió (si pidió 2, no mandar 1 solo).
+- Si pasaron +24 h y se cerró la ventana de WhatsApp → reabrir con plantilla (`retomar_carteles_v2` / `seguimiento_presupuesto`) y seguir con el empujón.
+
+**Soporte del sistema (para NO depender de la memoria de nadie):**
+- Las conversaciones con la pelota de nuestro lado se **auto-etiquetan "⏳ Te toca"** y se muestran arriba / filtrables en el chat.
+- El CRM le manda a Joaco un **resumen** de los que están esperando hace +X h (recordatorio activo).
+- La etiqueta se saca **sola** cuando se responde. Objetivo: que la lista de "⏳ Te toca" quede en cero al cierre del día.
+
 ## A5. FAQ — adelantarse a TODAS las consultas (carteles)
 
 | Consulta del cliente | Respuesta sugerida |
