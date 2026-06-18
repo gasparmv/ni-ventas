@@ -3807,23 +3807,29 @@ function renderTablePedidos() {
     return cmp || (b.idx - a.idx); // tiebreaker: orden del sheet (más nuevos primero)
   });
   document.getElementById('row-count').textContent = filtered.length;
+  // Columnas pedidas: C cartel, H base, J precio, K dimer, M envio, N aclaracion,
+  // Q estado_pago, T estado_pedido, U ad. Fecha queda como primera (ordena).
   const headers = [
-    ['fecha','Fecha'],['cartel','Cartel'],['precio','Precio'],['estadoPago','Pago'],['estadoPedido','Estado'],['canalAd','Canal'],['plataforma','Plat.']
+    ['fecha','Fecha'],['cartel','Cartel'],['base','Base'],['precio','Precio'],['dimmer','Dimer'],['envio','Envío'],['aclaracion','Aclar.'],['estadoPago','Pago'],['estadoPedido','Estado'],['canalAd','Ad']
   ];
+  const trunc = (s, n) => { s = String(s||'').replace(/\s+/g,' ').trim(); return s ? (escapeHtml(s.slice(0,n)) + (s.length>n?'…':'')) : '—'; };
   wrap.innerHTML = `
     <table class="t">
       <thead><tr>${headers.map(([c,l]) => `<th data-sort="${c}" class="${pedidoSort.col===c?'sorted':''}">${l} <span class="sort">${pedidoSort.col===c?(pedidoSort.dir>0?'▲':'▼'):''}</span></th>`).join('')}</tr></thead>
       <tbody>
-        ${filtered.length === 0 ? '<tr class="empty-row"><td colspan="7">No hay pedidos con esos filtros</td></tr>' :
+        ${filtered.length === 0 ? '<tr class="empty-row"><td colspan="10">No hay pedidos con esos filtros</td></tr>' :
           filtered.map(p => `
             <tr data-pid="${p.idx}">
               <td class="num">${fmtDate(p.fecha)}</td>
               <td class="cliente">${escapeHtml(p.cartel)}</td>
-              <td class="num">${fmtMoney(p.precio + p.precioDimmer)}</td>
+              <td><span class="muted" style="font-size:12px">${escapeHtml(p.base||'—')}</span></td>
+              <td class="num">${fmtMoney(p.precio)}</td>
+              <td><span style="font-size:12px">${escapeHtml(p.dimmer||'—')}</span></td>
+              <td title="${escapeHtml(p.envio||'')}"><span class="muted" style="font-size:12px">${trunc(p.envio,16)}</span></td>
+              <td title="${escapeHtml(p.aclaracion||'')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion,16)}</span></td>
               <td>${pillEstadoPago(p.estadoPago)}</td>
               <td>${pillEstadoPedido(p.estadoPedido)}</td>
               <td><span class="muted" style="font-size:12px">${escapeHtml(p.canalAd||'—')}</span></td>
-              <td><span class="muted" style="font-size:12px">${escapeHtml(p.plataforma||'—')}</span></td>
             </tr>
           `).join('')}
       </tbody>
@@ -5005,6 +5011,9 @@ function openDrawerPedido(idx) {
   const lblD = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
   const pedOpts = uniq([p.estadoPedido,'En produccion','para enviar','Entregado'].filter(Boolean)).map(o=>`<option ${p.estadoPedido===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
   const pagoOpts = uniq([p.estadoPago,'1er pago','2do pago'].filter(Boolean)).map(o=>`<option ${p.estadoPago===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
+  // Dropdowns alineados a la validación del Excel (base col H, dimer col K).
+  const baseOptsD = ['NEGRO','TRANS','ESPEJO','TRANS Y VINILO'].map(o=>`<option ${p.base===o?'selected':''}>${o}</option>`).join('');
+  const dimerOptsD = ['NO','SLIM','CONTROL','APP'].map(o=>`<option ${p.dimmer===o?'selected':''}>${o}</option>`).join('');
   document.getElementById('drawer').innerHTML = `
     <div class="drawer-h">
       <h2>${escapeHtml(p.cartel)}</h2>
@@ -5012,15 +5021,22 @@ function openDrawerPedido(idx) {
     </div>
     <div class="drawer-body">
       <div class="drawer-section">
-        <h4>Datos del pedido</h4>
-        <dl class="kv">
+        <h4>Datos del cartel</h4>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div><label style="${lblD}">Diseño / cartel</label><input id="ped-edit-cartel" value="${escapeHtml(p.cartel||'')}" style="${inpD}"></div>
+          <div style="display:flex;gap:8px">
+            <div style="flex:1"><label style="${lblD}">Base</label><select id="ped-edit-base" style="${inpD}">${baseOptsD}</select></div>
+            <div style="flex:1"><label style="${lblD}">Dimmer</label><select id="ped-edit-dimer" style="${inpD}">${dimerOptsD}</select></div>
+          </div>
+          <div><label style="${lblD}">Precio del cartel</label><input id="ped-edit-precio" type="number" value="${p.precio||''}" style="${inpD}"></div>
+        </div>
+        <dl class="kv" style="margin-top:10px">
           <dt>Fecha</dt><dd>${fmtDateLong(p.fecha)}</dd>
           <dt>Número</dt><dd>${p.numero || '—'}</dd>
           <dt>Medidas</dt><dd>${p.alto}×${p.ancho} cm · ${p.cmNeon} cm neón</dd>
           <dt>Colores</dt><dd>${escapeHtml(p.colores)}</dd>
-          <dt>Base</dt><dd>${escapeHtml(p.base)}</dd>
-          <dt>Dimmer</dt><dd>${escapeHtml(p.dimmer)} ${p.precioDimmer ? '· '+fmtMoney(p.precioDimmer) : ''}</dd>
           <dt>Cantidad</dt><dd>${p.cantidad}</dd>
+          ${p.precioDimmer ? `<dt>Precio dimmer</dt><dd>${fmtMoney(p.precioDimmer)}</dd>` : ''}
         </dl>
       </div>
       <div class="drawer-section">
@@ -5032,21 +5048,20 @@ function openDrawerPedido(idx) {
             <div style="flex:1"><label style="${lblD}">Pagado</label><input id="ped-edit-pagado" type="number" value="${p.pagado||''}" style="${inpD}"></div>
           </div>
           <div><label style="${lblD}">Productor</label><input id="ped-edit-productor" value="${escapeHtml(p.productor||'')}" placeholder="quién lo produce (lo cargás vos)" style="${inpD}"></div>
-          <div style="font-size:12px;color:var(--fg-subtle)">Total del pedido: <b style="color:var(--fg)">${fmtMoney(totalPedido)}</b> · Restante actual: <b style="color:var(--fg)">${fmtMoney(p.restante)}</b></div>
-          <button class="btn btn-cyan" id="ped-edit-save" onclick="savePedidoEdit(${idx})">Guardar cambios</button>
         </div>
       </div>
       <div class="drawer-section">
-        <h4>Origen</h4>
-        <dl class="kv">
-          <dt>Plataforma</dt><dd>${escapeHtml(p.plataforma||'—')}</dd>
-          <dt>Canal AD</dt><dd>${escapeHtml(p.canalAd||'—')}</dd>
-        </dl>
+        <h4>Trazabilidad y envío</h4>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div><label style="${lblD}">Trazabilidad (Ad)</label><input id="ped-edit-ad" value="${escapeHtml(p.canalAd||'')}" placeholder="de qué ad vino / cómo llegó" style="${inpD}"></div>
+          <div><label style="${lblD}">Envío</label><textarea id="ped-edit-envio" rows="4" style="${inpD};resize:vertical">${escapeHtml(p.envio||'')}</textarea></div>
+          <div><label style="${lblD}">Aclaración</label><input id="ped-edit-aclaracion" value="${escapeHtml(p.aclaracion||'')}" style="${inpD}"></div>
+          <div style="font-size:11px;color:var(--fg-subtle)">Plataforma: ${escapeHtml(p.plataforma||'—')}</div>
+        </div>
       </div>
       <div class="drawer-section">
-        <h4>Envío</h4>
-        <div class="t-small" style="white-space:pre-wrap;background:var(--ink-200);padding:12px;border-radius:8px;color:var(--fg)">${escapeHtml(p.envio||'(sin datos)')}</div>
-        ${p.aclaracion ? `<div class="t-small" style="margin-top:8px;color:var(--fg-subtle)"><b>Aclaración:</b> ${escapeHtml(p.aclaracion)}</div>` : ''}
+        <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:10px">Total del pedido: <b style="color:var(--fg)">${fmtMoney(totalPedido)}</b> · Restante actual: <b style="color:var(--fg)">${fmtMoney(p.restante)}</b></div>
+        <button class="btn btn-cyan" id="ped-edit-save" onclick="savePedidoEdit(${idx})" style="width:100%">Guardar cambios</button>
       </div>
       <div class="drawer-section">
         <h4>Timeline post-venta</h4>
@@ -5087,6 +5102,15 @@ async function savePedidoEdit(idx) {
   const p = STATE.pedidos.find(x => x.idx === idx);
   if (!p) return;
   const body = {
+    // Campos del cartel (esta fila): el worker los actualiza por id.
+    cartel:        document.getElementById('ped-edit-cartel')?.value,
+    base:          document.getElementById('ped-edit-base')?.value,
+    dimer:         document.getElementById('ped-edit-dimer')?.value,
+    precio:        document.getElementById('ped-edit-precio')?.value,
+    ad:            document.getElementById('ped-edit-ad')?.value,
+    envio:         document.getElementById('ped-edit-envio')?.value,
+    aclaracion:    document.getElementById('ped-edit-aclaracion')?.value,
+    // Campos del pedido (aplican a todos los carteles del nro+fecha).
     estado_pedido: document.getElementById('ped-edit-estadopedido')?.value,
     estado_pago:   document.getElementById('ped-edit-estadopago')?.value,
     pagado:        document.getElementById('ped-edit-pagado')?.value,
