@@ -198,6 +198,51 @@ async function syncProductoresFromVentas(env) {
     return changed;
   } catch (e) { return 0; }
 }
+// Sync Excel → CRM: importa a D1 los pedidos NUEVOS cargados a mano en el Excel
+// (filas con cartel + fecha válida cuyo sheet_row todavía no está en D1). Es la
+// contraparte del espejo (CRM → Excel). Los inserta con origen='excel' y
+// mirror_dirty=0 (NO se re-empujan al Excel). Matchea por sheet_row → asume que el
+// Excel crece agregando filas al final (que es como se carga). Devuelve cuántos importó.
+async function importNewPedidosFromVentas(env) {
+  try {
+    const VENTAS_SID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
+    const u = `https://docs.google.com/spreadsheets/d/${VENTAS_SID}/gviz/tq?tqx=out:csv&sheet=2026`;
+    const r = await fetch(u);
+    if (!r.ok) return 0;
+    const rows = parseCsv(await r.text());
+    if (rows.length < 2) return 0;
+    const have = new Set();
+    const rs = await env.DB.prepare('SELECT sheet_row FROM pedidos WHERE sheet_row IS NOT NULL').all();
+    for (const x of (rs.results || [])) have.add(Number(x.sheet_row));
+    const now = new Date().toISOString();
+    const stmts = [];
+    for (let i = 1; i < rows.length; i++) {
+      const sheetRow = i + 1;
+      if (have.has(sheetRow)) continue;                 // ya está en D1
+      const c = rows[i];
+      if (!c || !String(c[2] || '').trim()) continue;   // necesita cartel
+      const fecha = pedidoFecha(c[0]);
+      if (!fecha) continue;                             // necesita fecha válida
+      stmts.push(env.DB.prepare(
+        `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, sheet_row, origen, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'excel', ?, ?)`
+      ).bind(
+        pedidoNum(c[1]), fecha, String(c[2] || '').trim(), String(c[3] || '').trim(),
+        pedidoNum(c[4]), pedidoNum(c[5]), pedidoNum(c[6]), String(c[7] || '').trim(),
+        pedidoNum(c[8]) || 1, pedidoNum(c[9]), String(c[10] || '').trim(), pedidoNum(c[11]),
+        String(c[12] || '').trim(), String(c[13] || '').trim(), String(c[14] || '').trim(), String(c[15] || '').trim(),
+        String(c[16] || '').trim(), pedidoNum(c[17]), pedidoNum(c[18]), String(c[19] || '').trim(),
+        String(c[20] || '').trim(), sheetRow, now, now
+      ));
+    }
+    if (!stmts.length) return 0;
+    const CHUNK = 50;
+    for (let j = 0; j < stmts.length; j += CHUNK) {
+      await env.DB.batch(stmts.slice(j, j + CHUNK));
+    }
+    return stmts.length;
+  } catch (e) { return 0; }
+}
 // ISO "YYYY-MM-DD" → "D/M/YYYY" (formato del Excel de Ventas).
 function pedidoFechaToExcel(iso) {
   const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -7481,6 +7526,14 @@ export default {
         return json({ ok: true, changed });
       }
 
+      // POST /admin/pedidos/import-excel → importa al CRM los pedidos nuevos cargados a
+      // mano en el Excel (sync Excel → CRM, on-demand; también corre solo en el cron).
+      if (request.method === 'POST' && path === '/admin/pedidos/import-excel') {
+        await ensurePedidosSchema(env);
+        const imported = await importNewPedidosFromVentas(env);
+        return json({ ok: true, imported });
+      }
+
       // POST /admin/pedidos/mirror-resync → marca los pedidos creados en el CRM
       // (origen='crm') como mirror_dirty para que el cron los empuje al Excel.
       // Sirve para el primer push tras activar el espejo, o para forzar re-sync.
@@ -8028,6 +8081,8 @@ export default {
     ctx.waitUntil(processScheduledMessages(env));
     // Cada ~30 min: traer del Excel de Ventas el campo `productor` (Gaspar lo carga ahí).
     if (new Date().getUTCMinutes() % 30 < 5) ctx.waitUntil(syncProductoresFromVentas(env));
+    // Cada ~15 min: importar al CRM los pedidos nuevos cargados a mano en el Excel.
+    if (new Date().getUTCMinutes() % 15 < 5) ctx.waitUntil(importNewPedidosFromVentas(env));
     // Follow-ups en horario hábil AR (8-20): campaña de cursos + minicurso (4h sin responder).
     const hAR = (new Date(event.scheduledTime).getUTCHours() - 3 + 24) % 24;
     if (hAR >= 8 && hAR < 20) {
