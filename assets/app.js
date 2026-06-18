@@ -2449,10 +2449,12 @@ function validateBroadcastTemplate(text) {
 // Crear una plantilla nueva para usar en broadcasts (sin cliente asociado). Va a
 // Meta via /admin/wa/template-create con guardrails para que la aprueben. Queda
 // PENDING hasta que Meta la apruebe (unos min); ahi aparece en la lista.
-function showCreateTemplateBroadcast() {
+function showCreateTemplateBroadcast(opts) {
+  opts = opts || {};
   const content = `
     <div class="manage-qr">
       <p class="manage-qr-hint">Creá una plantilla nueva. La mandamos a Meta para aprobación — cuando la aprueben (unos minutos) aparece en la lista de plantillas, lista para usar.</p>
+      ${opts.scheduleInfo ? `<div style="background:#102a1e;border:1px solid #1f6f47;border-radius:8px;padding:8px 10px;font-size:12px;color:#9fe0b8;margin-bottom:8px">📅 Al crearla, queda <b>programado el seguimiento para ${escapeHtml(opts.scheduleInfo)}</b> con esta plantilla. Se manda cuando Meta la apruebe (unos min) y <b>solo si el cliente no te volvió a escribir antes</b>.</div>` : ''}
       <textarea id="bct-body" placeholder="Escribí el mensaje… Usá [nombre] donde quieras que vaya el nombre del contacto.&#10;Ej: Hola [nombre]! Te escribo de Neon Infinito para contarte una novedad 🙂" rows="5"></textarea>
       <div id="bct-warn" style="color:#ff6b6b;font-size:12px;min-height:16px;margin:4px 0"></div>
       <div id="bct-preview-wrap" style="display:none;margin:6px 0">
@@ -2499,8 +2501,9 @@ function showCreateTemplateBroadcast() {
       const j = await r.json().catch(() => ({}));
       if (r.ok && j.ok) {
         closeDrawer();
-        toast('✓ Plantilla enviada a Meta. Cuando la aprueben (unos min) aparece en la lista.');
         loadChatTemplates();
+        if (opts.onCreated) { await opts.onCreated(name, hasVar); }
+        else toast('✓ Plantilla enviada a Meta. Cuando la aprueben (unos min) aparece en la lista.');
       } else {
         warn.textContent = j.error || 'No se pudo crear';
         btn.disabled = false; btn.textContent = 'Crear plantilla';
@@ -7353,7 +7356,31 @@ function showScheduleModal(phone) {
   // Crear una plantilla nueva al toque (se manda a Meta; cuando la aprueban aparece
   // en este dropdown). Cierra este modal y abre el creador de plantillas.
   const newTplBtn = modal.querySelector('#sched-new-tpl');
-  if (newTplBtn) newTplBtn.onclick = () => { modal.remove(); showCreateTemplateBroadcast(); };
+  if (newTplBtn) newTplBtn.onclick = () => {
+    // Crear + PROGRAMAR en un solo flujo: capturamos la fecha/hora de acá, abrimos el
+    // creador de plantilla, y al crearla programamos el seguimiento para ese horario
+    // con la plantilla nueva (se manda cuando Meta la apruebe, si el cliente no responde).
+    const date = modal.querySelector('#sched-date').value;
+    const time = modal.querySelector('#sched-time').value;
+    const arDate = (date && time) ? new Date(`${date}T${time}:00-03:00`) : null;
+    if (!arDate || isNaN(arDate.getTime()) || arDate <= new Date()) { toast('Primero elegí acá la fecha y hora (futura), después creá la plantilla'); return; }
+    modal.remove();
+    showCreateTemplateBroadcast({
+      scheduleInfo: `${date} ${time} AR`,
+      onCreated: async (name, hasVar) => {
+        const params = (hasVar && firstName) ? [firstName] : [];
+        try {
+          const r = await fetch(CONFIG.trackerUrl + '/admin/wa/schedule', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ phone, body: '', template: name, params, lang: 'es_AR', scheduled_at: arDate.toISOString() })
+          });
+          const j = await r.json().catch(() => ({}));
+          if (r.ok) toast(`✓ Plantilla creada y seguimiento programado para ${date} ${time} AR. Se manda cuando Meta la apruebe, si el cliente no responde antes 🙌`);
+          else toast('Plantilla creada, pero no se pudo programar: ' + (j.error || 'error'));
+        } catch (e) { toast('Plantilla creada, pero falló programar: ' + (e.message || e)); }
+      }
+    });
+  };
   modal.querySelector('#sched-cancel').onclick = () => modal.remove();
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   loadPendingScheduled(phone, modal.querySelector('#sched-pending-list'));
