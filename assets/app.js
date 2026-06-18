@@ -14109,7 +14109,10 @@ function startBriefsPolling() {
     await fetchBriefs();
     const after = briefsSignature();
     if (after !== before) {
-      const busy = STATE.briefSelected || STATE.briefDraft || STATE.briefCotPopupOpen || STATE.imgLightboxUrl;
+      // No pisar un form en progreso: drawer, cotizador, lightbox o el MODAL de
+      // crear brief abierto (quickModalOpen). Sin esto, cuando Emma manda algo a
+      // "Listos" el poll re-renderizaba y le borraba a Joaco lo que estaba cargando.
+      const busy = STATE.briefSelected || STATE.briefDraft || STATE.briefCotPopupOpen || STATE.imgLightboxUrl || STATE.quickModalOpen;
       if (!busy) render();
     }
   }, 10000);
