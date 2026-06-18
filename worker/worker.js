@@ -7410,33 +7410,65 @@ export default {
         return json({ ok: true, numero, pedidos: rs.results || [] });
       }
 
-      // PATCH /admin/pedidos/:id → edita un pedido. estado_pedido, estado_pago,
-      // productor y pagado son a NIVEL PEDIDO: se aplican a todas las filas con el
-      // mismo numero+fecha (los carteles del pedido). 'pagado' recalcula el restante
-      // = (Σ precio + Σ precio_dimmer del pedido) − pagado.
+      // PATCH /admin/pedidos/:id → edita un pedido. Dos alcances:
+      //  - Campos del CARTEL (solo esta fila, por id): cartel, base, dimer, precio, ad,
+      //    envio, aclaracion.
+      //  - Campos del PEDIDO (todas las filas del numero+fecha): estado_pedido,
+      //    estado_pago, productor, pagado.
+      // Si cambia el precio (cartel) o el pagado (pedido), recalcula el restante del
+      // pedido = (Σ precio + Σ precio_dimmer) − pagado. Todo marca mirror_dirty.
       if (request.method === 'PATCH' && /^\/admin\/pedidos\/\d+$/.test(path)) {
         await ensurePedidosSchema(env);
         const id = parseInt(path.split('/').pop(), 10);
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const ref = await env.DB.prepare('SELECT numero, fecha FROM pedidos WHERE id = ?').bind(id).first();
         if (!ref) return json({ error: 'pedido no encontrado' }, 404);
-        const sets = [], args = [];
-        if ('estado_pedido' in body) { sets.push('estado_pedido = ?'); args.push(String(body.estado_pedido || '')); }
-        if ('estado_pago' in body)   { sets.push('estado_pago = ?');   args.push(String(body.estado_pago || '')); }
-        if ('productor' in body)     { sets.push('productor = ?');     args.push(String(body.productor || '')); }
-        if ('pagado' in body) {
-          const pagado = (body.pagado === '' || body.pagado == null) ? null : Number(body.pagado);
+        const now = new Date().toISOString();
+        let touched = false, precioChanged = false;
+
+        // 1) Campos del CARTEL → UPDATE solo esta fila (por id).
+        const cSets = [], cArgs = [];
+        if ('cartel' in body)     { cSets.push('cartel = ?');     cArgs.push(String(body.cartel || '').trim()); }
+        if ('base' in body)       { cSets.push('base = ?');       cArgs.push(String(body.base || '').trim()); }
+        if ('dimer' in body)      { cSets.push('dimer = ?');      cArgs.push(String(body.dimer || '').trim()); }
+        if ('ad' in body)         { cSets.push('ad = ?');         cArgs.push(String(body.ad || '').trim()); }
+        if ('envio' in body)      { cSets.push('envio = ?');      cArgs.push(String(body.envio || '').trim()); }
+        if ('aclaracion' in body) { cSets.push('aclaracion = ?'); cArgs.push(String(body.aclaracion || '').trim()); }
+        if ('precio' in body) {
+          const pv = (body.precio === '' || body.precio == null) ? null : (isNaN(Number(body.precio)) ? null : Number(body.precio));
+          cSets.push('precio = ?'); cArgs.push(pv); precioChanged = true;
+        }
+        if (cSets.length) {
+          cSets.push('mirror_dirty = 1', 'mirror_attempts = 0', 'mirror_error = NULL', 'updated_at = ?');
+          cArgs.push(now, id);
+          await env.DB.prepare(`UPDATE pedidos SET ${cSets.join(', ')} WHERE id = ?`).bind(...cArgs).run();
+          touched = true;
+        }
+
+        // 2) Campos del PEDIDO → UPDATE todas las filas del numero+fecha. Recalcula el
+        //    restante si cambió el precio (ya aplicado arriba) o el pagado.
+        const oSets = [], oArgs = [];
+        if ('estado_pedido' in body) { oSets.push('estado_pedido = ?'); oArgs.push(String(body.estado_pedido || '')); }
+        if ('estado_pago' in body)   { oSets.push('estado_pago = ?');   oArgs.push(String(body.estado_pago || '')); }
+        if ('productor' in body)     { oSets.push('productor = ?');     oArgs.push(String(body.productor || '')); }
+        const pagadoInBody = ('pagado' in body);
+        if (pagadoInBody || precioChanged) {
+          let pagado;
+          if (pagadoInBody) { pagado = (body.pagado === '' || body.pagado == null) ? null : Number(body.pagado); }
+          else { const cur = await env.DB.prepare('SELECT pagado FROM pedidos WHERE numero = ? AND fecha = ? LIMIT 1').bind(ref.numero, ref.fecha).first(); pagado = (cur && cur.pagado != null) ? Number(cur.pagado) : null; }
           const tot = await env.DB.prepare('SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t FROM pedidos WHERE numero = ? AND fecha = ?').bind(ref.numero, ref.fecha).first();
           const total = tot ? Number(tot.t) : 0;
           const restante = pagado != null ? Math.max(0, total - pagado) : total;
-          sets.push('pagado = ?', 'restante = ?'); args.push(pagado, restante);
+          oSets.push('pagado = ?', 'restante = ?'); oArgs.push(pagado, restante);
         }
-        if (!sets.length) return json({ error: 'nada para actualizar' }, 400);
-        // marcar para replicar al Excel + resetear la red de seguridad (reintenta limpio).
-        sets.push('mirror_dirty = 1', 'mirror_attempts = 0', 'mirror_error = NULL');
-        sets.push('updated_at = ?'); args.push(new Date().toISOString());
-        args.push(ref.numero, ref.fecha);
-        await env.DB.prepare(`UPDATE pedidos SET ${sets.join(', ')} WHERE numero = ? AND fecha = ?`).bind(...args).run();
+        if (oSets.length) {
+          oSets.push('mirror_dirty = 1', 'mirror_attempts = 0', 'mirror_error = NULL', 'updated_at = ?');
+          oArgs.push(now, ref.numero, ref.fecha);
+          await env.DB.prepare(`UPDATE pedidos SET ${oSets.join(', ')} WHERE numero = ? AND fecha = ?`).bind(...oArgs).run();
+          touched = true;
+        }
+
+        if (!touched) return json({ error: 'nada para actualizar' }, 400);
         const rs2 = await env.DB.prepare('SELECT * FROM pedidos WHERE numero = ? AND fecha = ? ORDER BY id').bind(ref.numero, ref.fecha).all();
         return json({ ok: true, numero: ref.numero, pedidos: rs2.results || [] });
       }
