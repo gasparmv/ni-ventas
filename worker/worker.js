@@ -5023,6 +5023,12 @@ export default {
         let cursosInbox = 0;
         try { cursosInbox = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE inbox='cursos'").first())?.n || 0; } catch (_) {}
         const billingBlocked = await isWaBillingBlocked(env);
+        // Stats del flujo Lead Ads B2B -> auto-WhatsApp (tabla wa_leads).
+        let leadsTotal = 0, leadsSent = 0;
+        try {
+          const lr = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN template_status='sent' THEN 1 ELSE 0 END) AS sent FROM wa_leads").first();
+          leadsTotal = lr?.total || 0; leadsSent = lr?.sent || 0;
+        } catch (_) {}
         // Estado de un broadcast segun su cola: en curso si quedan encolados,
         // completado si ya mando algo, inactivo si nunca tuvo data.
         const bcState = (k) => (byKind[k]?.queued ? 'en_curso' : (byKind[k]?.sent ? 'completado' : 'inactivo'));
@@ -5038,6 +5044,7 @@ export default {
           { id:'cursos_fu', group:'Seguimientos automaticos', name:'Follow-up de cursos (Mayo)', desc:'2do mensaje a no-respondedores. DESACTIVADO (mandaba al cohorte equivocado).', trigger:'Cron horario', state:'disabled', stats:{} },
           { id:'pago_ocr', group:'Otras', name:'OCR de comprobantes de pago', desc:'En ventana de lanzamiento, OCRea imagenes/PDF, clasifica y respalda. No responde al cliente.', trigger:'Inbound con imagen/PDF', state: PAGO_CAPTURA_ACTIVA ? 'active' : 'disabled', stats:{} },
           { id:'copilot', group:'Otras', name:'Analisis IA de chats (Copilot)', desc:'Analiza chats nuevos con Claude (hasta 5/h): sentimiento, objeciones, proxima accion.', trigger:'Cron horario', state: env.ANTHROPIC_API_KEY ? 'active' : 'inactivo', stats:{} },
+          { id:'lead_b2b', group:'Leads / Ads', name:'Lead Ads B2B -> auto-WhatsApp', desc:'Cuando entra un lead del form B2B de Meta Ads, le manda la plantilla lead_b2b_followup en menos de 30s.', trigger:'Webhook de Meta (leadgen)', state: env.META_PAGE_ACCESS_TOKEN ? 'active' : 'disabled', stats:{ leads: leadsTotal, enviados: leadsSent, fallidos: Math.max(0, leadsTotal - leadsSent) } },
         ];
         // Broadcasts custom creados desde el panel (Fase 2): se suman arriba.
         try {
