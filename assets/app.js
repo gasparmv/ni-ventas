@@ -4293,6 +4293,27 @@ function bindCotRender() {
   if (regenBtn) regenBtn.onclick = () => cotGenerarRender();
   const clearBtn = document.getElementById('cot-render-clear');
   if (clearBtn) clearBtn.onclick = () => cotRenderClear();
+
+  // Paste de imagen (Ctrl/Cmd+V) sobre el Render IA. Un <div> no recibe el
+  // evento 'paste' (solo inputs/contenteditable/document), por eso el "📋 Pegá"
+  // del dropzone no hacía nada. Escuchamos en document (bind único) y dirigimos
+  // la imagen al cotizador cuando su dropzone está visible (cotizador abierto y
+  // sin imagen aún) y no hay un modal encima con su propio paste.
+  if (!document._cotRenderPasteBound) {
+    document.addEventListener('paste', async (ev) => {
+      if (STATE.quickModalOpen) return;
+      if (!document.getElementById('cot-render-dropzone')) return;
+      const items = ev.clipboardData?.items || [];
+      let file = null;
+      for (const it of items) {
+        if (it.kind === 'file' && (it.type || '').startsWith('image/')) { file = it.getAsFile(); break; }
+      }
+      if (!file) return;            // texto u otro contenido → no interceptamos
+      ev.preventDefault();
+      await cotRenderSetFile(file);
+    });
+    document._cotRenderPasteBound = true;
+  }
 }
 
 async function cotRenderSetFile(file) {
