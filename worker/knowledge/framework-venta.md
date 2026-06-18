@@ -112,7 +112,7 @@ Seña del 50%:
 - **D90 (segundo cartel):** Holaa {n}, cómo va? ya pasaron 3 meses del cartel 🤯 capaz se te ocurrió otro espacio del local o algo más — si querés te armo un render gratis con una idea, sin compromiso
 
 ## A4. Automatización de seguimientos — FUP1 / FUP2 / FUP3
-Se dispara sobre un **presupuesto sin respuesta**. Solo **8:00–20:00 AR**. Se **corta** si el cliente responde, ya compró, o el número está muerto (`wa_unreachable_phones`).
+Se dispara ~23 h después del presupuesto (lo más tarde DENTRO de la ventana de 24h, para que salga gratis; si ya cerró, va con plantilla). Solo **8:00–20:00 AR**. **Se manda IGUAL aunque el cliente haya respondido con un no-compromiso** ("dale, lo pienso", "hablo con mi socio", "gracias, me comunico") — esos demostraron interés y valen MÁS que los mudos. Se **corta** solo si: el cliente **ya compró / avanzó al cierre**, dejó una **pregunta puntual sin responder** (la contesta una persona → queda en `⏳ Te toca`), o el número está muerto (`wa_unreachable_phones`).
 
 | Instancia | Cuándo | Objetivo | Mensaje sugerido |
 |---|---|---|---|

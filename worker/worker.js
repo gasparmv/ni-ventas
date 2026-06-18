@@ -8368,6 +8368,10 @@ const PROMO_COPA_CAPTION = 'Te quería avisar que estamos regalando copas del mu
 const FOLLOWUP_PRESUPUESTO_LOW_TEXT = 'Holaa, cómo estás? Pudiste chequear el presupuesto? Cualquier cosa podemos llamarte para asesorarte! Quedamos a disposición!';
 const FOLLOWUP_PRESUPUESTO_HIGH_TEXT = 'Buenas! Avisanos qué te pareció el presupuesto! Si te cierra el precio, o si querés que veamos de mejorar los números.\nTe podemos llamar para asesorarte, o coordinamos una visita si estas por Capital federal o GBA.';
 const FOLLOWUP_AMOUNT_THRESHOLD = 300000;
+// Señales de que el cliente YA avanzó al cierre/compra → NO le mandamos follow-up
+// automático (no se spamea a quien está comprando). Solo aparecen en el cierre
+// (datos de pago / orden de compra), nunca en el presupuesto.
+const FUP_CIERRE_MARKERS = ['neoninfinito.ok', 'orden de compra', 'datos de pago', '3840200500000051390011'];
 
 // Prefijos de TODOS los possibles follow-ups (legacy + nuevos) para dedup.
 // Si conv contiene un outbound que comience con CUALQUIERA de estos, ya tuvo
@@ -8532,13 +8536,23 @@ async function processPresupuestoFollowups(env) {
     let conv;
     try {
       const rs = await env.DB.prepare(
-        'SELECT direction, body FROM wa_messages WHERE phone = ? AND ts > ? LIMIT 200'
+        'SELECT direction, body, ts FROM wa_messages WHERE phone = ? AND ts > ? ORDER BY ts LIMIT 200'
       ).bind(p.phone, p.ts).all();
       conv = rs.results || [];
     } catch (_) { continue; }
 
-    // ¿Respondió?
-    if (conv.some(m => m.direction === 'inbound')) continue;
+    // ¿Respondió el cliente? ANTES: si respondía CUALQUIER cosa, se salteaba el
+    // follow-up. AHORA (pedido de Gaspar, 18/06): el FUP de las 23h TAMBIÉN va a los
+    // que respondieron con un NO-COMPROMISO ("dale, lo pienso", "hablo con mi socio",
+    // "gracias, me comunico") — esos demostraron interés y valen MÁS que los mudos.
+    // Solo NO mandamos el FUP automático en dos casos:
+    //   (a) Ya avanzó al CIERRE / compró → no spamear a quien está comprando.
+    //   (b) Dejó una PREGUNTA puntual sin responder (última inbound con "?" o pidiendo
+    //       factura) → lo contesta una persona (queda en "⏳ Te toca"); mandar
+    //       "¿pudiste verlo?" encima de una pregunta sin responder sería tonto.
+    if (conv.some(m => m.direction === 'outbound' && FUP_CIERRE_MARKERS.some(k => (m.body || '').toLowerCase().includes(k)))) continue;
+    const ultimoMsg = conv[conv.length - 1];
+    if (ultimoMsg && ultimoMsg.direction === 'inbound' && /\?|factura/i.test(ultimoMsg.body || '')) continue;
     // ¿Ya tiene follow-up (cualquier variante: legacy, copa, low, high)?
     // Si el outbound posterior arranca con ALGUNO de los prefijos conocidos,
     // ya recibió follow-up.
