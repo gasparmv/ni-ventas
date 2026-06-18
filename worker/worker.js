@@ -142,6 +142,12 @@ function parseCsv(csv) {
 // D1 pasa a ser la fuente de verdad; el Excel queda como espejo (fase posterior).
 async function ensurePedidosSchema(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, fecha TEXT, cartel TEXT, colores TEXT, alto REAL, ancho REAL, cm_neon REAL, base TEXT, cantidad REAL, precio REAL, dimer TEXT, precio_dimmer REAL, envio TEXT, aclaracion TEXT, productor TEXT, plataforma TEXT, estado_pago TEXT, pagado REAL, restante REAL, estado_pedido TEXT, ad TEXT, telefono TEXT, tramos REAL, tipo TEXT, sheet_row INTEGER, origen TEXT NOT NULL DEFAULT 'backfill', mirror_dirty INTEGER NOT NULL DEFAULT 0, created_at TEXT, updated_at TEXT)`).run();
+  // Columnas agregadas después de crear la tabla en prod: red de seguridad del espejo.
+  // mirror_attempts = intentos fallidos; mirror_error = motivo del último fallo (ej.
+  // valor que infringe la validación de datos del Excel). El ALTER tira si ya existen.
+  for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT']) {
+    try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
+  }
 }
 // Número de precio → entero. Los precios de NI son SIEMPRE enteros en pesos (sin
 // centavos). Google CSV puede mandar "149500", "149.500", "149,500", "$149.500",
@@ -204,7 +210,7 @@ function pedidoFechaToExcel(iso) {
 // seguimos a mano: POST con redirect:'manual' y, si hay 3xx, GET al Location. Devuelve
 // el JSON parseado, o null si falla.
 async function appsScriptPost(env, payload) {
-  if (!env.APPS_SCRIPT_URL) return null;
+  if (!env.APPS_SCRIPT_URL) return { error: 'no APPS_SCRIPT_URL' };
   let r = await fetch(env.APPS_SCRIPT_URL, {
     method: 'POST', redirect: 'manual',
     headers: { 'Content-Type': 'application/json' },
@@ -214,14 +220,20 @@ async function appsScriptPost(env, payload) {
     const loc = r.headers.get('location');
     if (loc) r = await fetch(loc, { method: 'GET', redirect: 'follow' });
   }
-  if (!r.ok) return null;
-  try { return await r.json(); } catch (_) { return null; }
+  const text = await r.text();
+  try { return JSON.parse(text); }
+  catch (_) {
+    // Apps Script devuelve HTML cuando el doPost tira un error no atrapado (típico:
+    // una celda que infringe la validación de datos del Excel). Sacamos el mensaje.
+    const m = text.match(/monospace[^>]*>([^<]+)</) || text.match(/errorMessage[^>]*>([^<]+)</);
+    return { error: (m ? m[1] : 'respuesta no-JSON del Apps Script').trim().slice(0, 280) };
+  }
 }
 // Empuja UNA fila de pedido al Excel de Ventas vía el Apps Script (action=
 // pedido_upsert). Con sheet_row → actualiza; sin él → agrega y devuelve el nuevo
 // nro de fila. La columna Productor (O) NO se toca (la maneja Gaspar en el Excel).
 async function pushPedidoToVentas(env, row) {
-  if (!env.APPS_SCRIPT_URL) return null;
+  if (!env.APPS_SCRIPT_URL) return { error: 'no APPS_SCRIPT_URL' };
   const arr = [
     pedidoFechaToExcel(row.fecha), row.numero ?? '', row.cartel || '', row.colores || '',
     row.alto ?? '', row.ancho ?? '', row.cm_neon ?? '', row.base || '',
@@ -232,8 +244,9 @@ async function pushPedidoToVentas(env, row) {
   ];
   try {
     const j = await appsScriptPost(env, { action: 'pedido_upsert', sheet_row: row.sheet_row || 0, row: arr });
-    return (j && j.ok && j.row) ? Number(j.row) : null;
-  } catch (e) { return null; }
+    if (j && j.ok && j.row) return { row: Number(j.row) };
+    return { error: (j && j.error) ? String(j.error) : 'el Apps Script no devolvió row' };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 // Cron: replica al Excel los pedidos marcados mirror_dirty=1 (creados/editados en
 // el CRM). GATEADO por el flag kv 'pedidos_mirror_on' (se prende DESPUÉS de
@@ -246,15 +259,22 @@ async function processPedidosMirror(env) {
     if (!flag || flag.v !== '1') return { skipped: 'flag_off' };
     const rs = await env.DB.prepare('SELECT * FROM pedidos WHERE mirror_dirty = 1 ORDER BY id LIMIT 8').all();
     const rows = rs.results || [];
-    let pushed = 0;
+    let pushed = 0, failed = 0;
     for (const row of rows) {
-      const newRow = await pushPedidoToVentas(env, row);
-      if (newRow) {
-        await env.DB.prepare('UPDATE pedidos SET mirror_dirty = 0, sheet_row = ? WHERE id = ? AND updated_at = ?').bind(newRow, row.id, row.updated_at).run();
+      const res = await pushPedidoToVentas(env, row);
+      if (res && res.row) {
+        await env.DB.prepare('UPDATE pedidos SET mirror_dirty = 0, mirror_attempts = 0, mirror_error = NULL, sheet_row = ? WHERE id = ? AND updated_at = ?').bind(res.row, row.id, row.updated_at).run();
         pushed++;
+      } else {
+        // Red de seguridad: tras 5 intentos deja de reintentar (dirty=0) y guarda el
+        // error para que se vea en el CRM. Evita el loop infinito ante un valor rechazado.
+        const att = (Number(row.mirror_attempts) || 0) + 1;
+        const err = (res && res.error) ? String(res.error) : 'fallo desconocido';
+        await env.DB.prepare('UPDATE pedidos SET mirror_attempts = ?, mirror_error = ?, mirror_dirty = ? WHERE id = ? AND updated_at = ?').bind(att, err, att >= 5 ? 0 : 1, row.id, row.updated_at).run();
+        failed++;
       }
     }
-    return { checked: rows.length, pushed };
+    return { checked: rows.length, pushed, failed };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 // Convierte "13.832k", "$175.000", "954.251", "(5.097k)", "63%", "-" → number.
@@ -7265,7 +7285,8 @@ export default {
           sets.push('pagado = ?', 'restante = ?'); args.push(pagado, restante);
         }
         if (!sets.length) return json({ error: 'nada para actualizar' }, 400);
-        sets.push('mirror_dirty = 1'); // marcar para que el cron lo replique al Excel
+        // marcar para replicar al Excel + resetear la red de seguridad (reintenta limpio).
+        sets.push('mirror_dirty = 1', 'mirror_attempts = 0', 'mirror_error = NULL');
         sets.push('updated_at = ?'); args.push(new Date().toISOString());
         args.push(ref.numero, ref.fecha);
         await env.DB.prepare(`UPDATE pedidos SET ${sets.join(', ')} WHERE numero = ? AND fecha = ?`).bind(...args).run();
@@ -7286,7 +7307,7 @@ export default {
       // Sirve para el primer push tras activar el espejo, o para forzar re-sync.
       if (request.method === 'POST' && path === '/admin/pedidos/mirror-resync') {
         await ensurePedidosSchema(env);
-        const res = await env.DB.prepare("UPDATE pedidos SET mirror_dirty = 1 WHERE origen = 'crm'").run();
+        const res = await env.DB.prepare("UPDATE pedidos SET mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL WHERE origen = 'crm'").run();
         return json({ ok: true, marcados: (res.meta && res.meta.changes) || 0 });
       }
 
@@ -7308,6 +7329,14 @@ export default {
         } catch (e) {
           return json({ error: String((e && e.message) || e) });
         }
+      }
+
+      // GET /admin/pedidos/mirror-failures → lista los pedidos que la red de seguridad
+      // marcó con error de espejo (mirror_error no nulo). Para revisarlos y corregirlos.
+      if (request.method === 'GET' && path === '/admin/pedidos/mirror-failures') {
+        await ensurePedidosSchema(env);
+        const rs = await env.DB.prepare("SELECT id, numero, fecha, cartel, estado_pedido, estado_pago, mirror_attempts, mirror_error FROM pedidos WHERE mirror_error IS NOT NULL ORDER BY id").all();
+        return json({ ok: true, fallos: rs.results || [] });
       }
 
       // ============================================================
