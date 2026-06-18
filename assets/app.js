@@ -1373,7 +1373,8 @@ function mapPedidoFromD1(row) {
     estadoPedido: row.estado_pedido || '',
     canalAd: row.ad || '',
     tramos: row.tramos || '',
-    tipo: row.tipo || ''
+    tipo: row.tipo || '',
+    mirrorError: row.mirror_error || ''
   };
 }
 
@@ -3607,6 +3608,11 @@ function renderPedidos() {
       <div><div class="eyebrow">${STATE.pedidos.length} totales</div><h1>Pedidos</h1></div>
       <div class="actions">${canCotizar() ? '<button class="btn btn-cyan" id="pedido-nuevo">＋ Cargar pedido</button>' : ''}<button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
     </div>
+    ${(() => {
+      const fallos = STATE.pedidos.filter(p => p.mirrorError);
+      if (!fallos.length) return '';
+      return `<div style="margin:0 0 12px;padding:10px 14px;background:rgba(255,90,90,.12);border:1px solid var(--neon-red,#ff5a5a);border-radius:8px;color:var(--fg);font-size:13px">⚠ <strong>${fallos.length} pedido${fallos.length>1?'s':''}</strong> no se sincronizó al Excel (un valor fue rechazado por la validación de la planilla). Revisá: ${fallos.slice(0,6).map(p=>'#'+p.numero+' '+escapeHtml(p.cartel)).join(', ')}${fallos.length>6?'…':''}</div>`;
+    })()}
     <div class="table-wrap">
       <div class="table-toolbar">
         <input type="text" placeholder="Buscar (cliente, tel, número, canal, productor…)" data-pf="search" value="${escapeHtml(pedidoFilter.search)}">
@@ -3826,7 +3832,7 @@ function pmPickCotizacion(i, k) {
 function renderPedidoCartelBlock(c, i, n) {
   const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px';
   const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
-  const baseOpts = ['TRANS','NEGRO'].map(o=>`<option ${c.base===o?'selected':''}>${o}</option>`).join('');
+  const baseOpts = ['TRANS','NEGRO','ESPEJO','TRANS Y VINILO'].map(o=>`<option ${c.base===o?'selected':''}>${o}</option>`).join('');
   const dimerOpts = ['NO','SLIM','CONTROL','APP'].map(o=>`<option ${c.dimer===o?'selected':''}>${o}</option>`).join('');
   const tipoOpts = [['INT','Interior'],['EXT','Exterior']].map(([v,l])=>`<option value="${v}" ${c.tipo===v?'selected':''}>${l}</option>`).join('');
   const cols = pmColorList(c);
@@ -4842,7 +4848,7 @@ function openDrawerPedido(idx) {
   const inpD = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:7px 9px;color:var(--fg);font-size:13px';
   const lblD = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
   const pedOpts = uniq([p.estadoPedido,'En produccion','para enviar','Entregado'].filter(Boolean)).map(o=>`<option ${p.estadoPedido===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
-  const pagoOpts = uniq([p.estadoPago,'1er pago','2do pago','pagado'].filter(Boolean)).map(o=>`<option ${p.estadoPago===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
+  const pagoOpts = uniq([p.estadoPago,'1er pago','2do pago'].filter(Boolean)).map(o=>`<option ${p.estadoPago===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
   document.getElementById('drawer').innerHTML = `
     <div class="drawer-h">
       <h2>${escapeHtml(p.cartel)}</h2>
