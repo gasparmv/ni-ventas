@@ -2202,7 +2202,8 @@ function openBroadcastModal() {
   loadChatTemplates();
   const verts = qrVerticalsForUser();
   const tpls = (chatState.templates || []).filter(t => !verts || verts.includes(templateVertical(t.name)));
-  const tplRows = tpls.map(t => _renderTplItem(t)).join('') || '<div class="nc-empty">No hay plantillas aprobadas.</div>';
+  const tplRows = (tpls.map(t => _renderTplItem(t)).join('') || '<div class="nc-empty">No hay plantillas aprobadas.</div>')
+    + '<div class="qr-item" data-tpl-create="1"><div class="qr-item-text"><span class="qr-shortcut" style="color:var(--neon-cyan,#8FD4DE)">📋 Crear plantilla nueva (Meta)</span></div></div>';
   const bg = document.createElement('div');
   bg.id = 'bc-modal';
   bg.className = 'modal-bg';
@@ -2331,6 +2332,7 @@ function openBroadcastModal() {
 
   listEl.querySelectorAll('.qr-item').forEach(row => {
     row.onclick = () => {
+      if (row.dataset.tplCreate === '1') { close(); showCreateTemplateBroadcast(); return; }
       if (!row.dataset.tplName) return;
       selectedName = row.dataset.tplName;
       selectedLang = row.dataset.tplLang || 'es_AR';
@@ -2342,6 +2344,7 @@ function openBroadcastModal() {
   });
   fuListEl.querySelectorAll('.qr-item').forEach(row => {
     row.onclick = () => {
+      if (row.dataset.tplCreate === '1') { close(); showCreateTemplateBroadcast(); return; }
       if (!row.dataset.tplName) return;
       fuName = row.dataset.tplName;
       fuLang = row.dataset.tplLang || 'es_AR';
@@ -2420,6 +2423,91 @@ function openBroadcastModal() {
     } else {
       toast(j && j.error ? j.error : 'Error al crear el broadcast');
       createBtn.disabled = false; createBtn.textContent = 'Confirmar y encolar';
+    }
+  };
+}
+
+// Validacion de plantilla para broadcast (guardrails de Meta: sin links/tel/
+// MAYUS, largo, y reglas de la variable [nombre]). Devuelve null si esta OK.
+function validateBroadcastTemplate(text) {
+  const t = (text || '').trim();
+  if (!t) return '';
+  if (t.length < 10) return 'Muy corto (mínimo 10 caracteres).';
+  if (t.length > 600) return 'Muy largo (máximo 600).';
+  if (/https?:\/\/|www\.|wa\.me|t\.me|\b\S+\.(com|net|ar|org|io)\b/i.test(t)) return 'Sin links (Meta los rechaza).';
+  if (/[A-ZÁÉÍÓÚÑ]{5,}/.test(t)) return 'Evitá palabras en MAYÚSCULAS.';
+  if (/\d{7,}/.test(t)) return 'No incluyas números largos (teléfonos).';
+  const varCount = (t.match(/\[nombre\]/gi) || []).length;
+  if (varCount > 1) return 'Usá [nombre] una sola vez.';
+  if (varCount === 1) {
+    if (/^\s*\[nombre\]/i.test(t)) return 'No puede empezar con [nombre] (regla de Meta).';
+    if (/\[nombre\]\s*$/i.test(t)) return 'No puede terminar con [nombre] (regla de Meta).';
+  }
+  return null;
+}
+
+// Crear una plantilla nueva para usar en broadcasts (sin cliente asociado). Va a
+// Meta via /admin/wa/template-create con guardrails para que la aprueben. Queda
+// PENDING hasta que Meta la apruebe (unos min); ahi aparece en la lista.
+function showCreateTemplateBroadcast() {
+  const content = `
+    <div class="manage-qr">
+      <p class="manage-qr-hint">Creá una plantilla nueva para tus broadcasts. La mandamos a Meta para aprobación — cuando la aprueben (unos minutos) aparece en la lista de plantillas.</p>
+      <textarea id="bct-body" placeholder="Escribí el mensaje… Usá [nombre] donde quieras que vaya el nombre del contacto.&#10;Ej: Hola [nombre]! Te escribo de Neon Infinito para contarte una novedad 🙂" rows="5"></textarea>
+      <div id="bct-warn" style="color:#ff6b6b;font-size:12px;min-height:16px;margin:4px 0"></div>
+      <div id="bct-preview-wrap" style="display:none;margin:6px 0">
+        <div style="font-size:11px;color:var(--muted,#8a93a3);margin-bottom:4px">Vista previa</div>
+        <div class="nc-preview" id="bct-preview"></div>
+      </div>
+      <div style="font-size:12px;color:var(--fg-subtle,#8696a0);line-height:1.7;margin:6px 0">
+        <b>Para que Meta la apruebe (categoría Marketing):</b><br>
+        ✅ Mensaje claro y humano, como le escribirías a un cliente.<br>
+        ✅ Podés usar <b>[nombre]</b> (una vez, ni al principio ni al final).<br>
+        🚫 Sin links · 🚫 sin teléfonos · 🚫 sin MAYÚSCULAS · 🚫 nada engañoso.
+      </div>
+      <button class="btn btn-cyan" id="bct-btn" disabled>Crear plantilla</button>
+    </div>
+  `;
+  openDrawer('Crear plantilla nueva', content);
+  const ta = document.getElementById('bct-body');
+  const warn = document.getElementById('bct-warn');
+  const btn = document.getElementById('bct-btn');
+  const pvWrap = document.getElementById('bct-preview-wrap');
+  const pv = document.getElementById('bct-preview');
+  const check = () => {
+    const err = validateBroadcastTemplate(ta.value);
+    warn.textContent = err || '';
+    const has = !!ta.value.trim();
+    btn.disabled = !!err || !has;
+    if (has && !err) { pv.textContent = ta.value.replace(/\[nombre\]/gi, 'Sofia'); pvWrap.style.display = ''; }
+    else pvWrap.style.display = 'none';
+  };
+  if (ta) { ta.oninput = check; setTimeout(() => ta.focus(), 50); }
+  if (btn) btn.onclick = async () => {
+    const text = (ta.value || '').trim();
+    const err = validateBroadcastTemplate(text);
+    if (err) { warn.textContent = err; return; }
+    btn.disabled = true; btn.textContent = 'Creando…';
+    const hasVar = /\[nombre\]/i.test(text);
+    const bodyText = text.replace(/\[nombre\]/gi, '{{1}}');
+    const name = 'bcast_' + Date.now().toString(36);
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/template-create', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ name, category: 'MARKETING', language: 'es_AR', body_text: bodyText, example_params: hasVar ? ['Sofia'] : [] })
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.ok) {
+        closeDrawer();
+        toast('✓ Plantilla enviada a Meta. Cuando la aprueben (unos min) aparece en la lista.');
+        loadChatTemplates();
+      } else {
+        warn.textContent = j.error || 'No se pudo crear';
+        btn.disabled = false; btn.textContent = 'Crear plantilla';
+      }
+    } catch (e) {
+      warn.textContent = 'Error: ' + (e.message || e);
+      btn.disabled = false; btn.textContent = 'Crear plantilla';
     }
   };
 }
