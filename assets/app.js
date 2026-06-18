@@ -3827,8 +3827,8 @@ function renderTablePedidos() {
               <td><span style="font-size:12px">${escapeHtml(p.dimmer||'—')}</span></td>
               <td title="${escapeHtml(p.envio||'')}"><span class="muted" style="font-size:12px">${trunc(p.envio,16)}</span></td>
               <td title="${escapeHtml(p.aclaracion||'')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion,16)}</span></td>
-              <td>${pillEstadoPago(p.estadoPago)}</td>
-              <td>${pillEstadoPedido(p.estadoPedido)}</td>
+              <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pago',p.estadoPago,PAGO_OPTS_TABLE)}</td>
+              <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pedido',p.estadoPedido,PED_OPTS_TABLE)}</td>
               <td><span class="muted" style="font-size:12px">${escapeHtml(p.canalAd||'—')}</span></td>
             </tr>
           `).join('')}
@@ -3863,6 +3863,14 @@ function pillEstadoPedido(s) {
   if (x.includes('produc')) return `<span class="pill amber">${escapeHtml(s)}</span>`;
   if (x.includes('list')) return `<span class="pill green">${escapeHtml(s)}</span>`;
   return `<span class="pill muted">${escapeHtml(s||'—')}</span>`;
+}
+// Dropdowns inline para editar estado_pago / estado_pedido directo en la tabla
+// (a nivel pedido: el worker lo aplica a todos los carteles del nro+fecha).
+const PAGO_OPTS_TABLE = ['1er pago','2do pago'];
+const PED_OPTS_TABLE = ['En produccion','para enviar','Entregado'];
+function inlinePedidoSelect(idx, field, current, opts) {
+  const options = uniq([current, ...opts].filter(Boolean)).map(o => `<option ${current===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
+  return `<select onchange="savePedidoField(${idx},'${field}',this.value)" style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:3px 6px;color:var(--fg);font-size:11px;cursor:pointer;max-width:140px">${options}</select>`;
 }
 
 // ===================== Modal "Cargar pedido" (fase 2) =====================
@@ -5096,8 +5104,21 @@ function openDrawerPedido(idx) {
   document.getElementById('drawer-bg').onclick = closeDrawer;
 }
 
-// Guarda los cambios de estado/pago/productor de un pedido (a nivel pedido: el
-// worker los aplica a todos los carteles del numero+fecha). Refresca tabla + drawer.
+// Cambio rápido de un solo campo (estado_pago / estado_pedido) desde el dropdown
+// inline de la tabla. PATCH a nivel pedido; refresca STATE + repinta la tabla.
+async function savePedidoField(idx, field, value) {
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx, { method: 'PATCH', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ [field]: value }) });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    const updated = (j.pedidos || []).map(mapPedidoFromD1);
+    const ids = new Set(updated.map(x => x.idx));
+    STATE.pedidos = STATE.pedidos.filter(x => !ids.has(x.idx)).concat(updated);
+    renderTablePedidos();
+    toast('Actualizado ✓');
+  } catch (e) { toast('Error: ' + e.message); renderTablePedidos(); }
+}
+// Guarda los cambios del cartel + del pedido desde el drawer. Refresca tabla + drawer.
 async function savePedidoEdit(idx) {
   const p = STATE.pedidos.find(x => x.idx === idx);
   if (!p) return;
