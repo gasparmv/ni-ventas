@@ -2452,7 +2452,7 @@ function validateBroadcastTemplate(text) {
 function showCreateTemplateBroadcast() {
   const content = `
     <div class="manage-qr">
-      <p class="manage-qr-hint">Creá una plantilla nueva para tus broadcasts. La mandamos a Meta para aprobación — cuando la aprueben (unos minutos) aparece en la lista de plantillas.</p>
+      <p class="manage-qr-hint">Creá una plantilla nueva. La mandamos a Meta para aprobación — cuando la aprueben (unos minutos) aparece en la lista de plantillas, lista para usar.</p>
       <textarea id="bct-body" placeholder="Escribí el mensaje… Usá [nombre] donde quieras que vaya el nombre del contacto.&#10;Ej: Hola [nombre]! Te escribo de Neon Infinito para contarte una novedad 🙂" rows="5"></textarea>
       <div id="bct-warn" style="color:#ff6b6b;font-size:12px;min-height:16px;margin:4px 0"></div>
       <div id="bct-preview-wrap" style="display:none;margin:6px 0">
@@ -7323,7 +7323,8 @@ function showScheduleModal(phone) {
       <select id="sched-template" style="width:100%;padding:8px;border-radius:6px;border:1px solid #3b4a54;background:#2a3942;color:#e9edef;margin-bottom:6px">
         ${ordered.length ? ordered.map(t => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`).join('') : '<option value="">(no hay plantillas aprobadas)</option>'}
       </select>
-      <div id="sched-tpl-preview" style="font-size:12px;color:#aebac1;background:#202c33;border-radius:6px;padding:8px;margin-bottom:10px;white-space:pre-wrap"></div>
+      <div id="sched-tpl-preview" style="font-size:12px;color:#aebac1;background:#202c33;border-radius:6px;padding:8px;margin-bottom:6px;white-space:pre-wrap"></div>
+      <button type="button" id="sched-new-tpl" style="background:none;border:none;color:#53bdeb;cursor:pointer;font-size:12px;padding:0;margin:0 0 10px;text-align:left">➕ Crear plantilla nueva (la aprueba Meta en unos minutos)</button>
       <div style="display:flex;gap:8px;margin:6px 0">
         <div style="flex:1">
           <label style="font-size:12px;color:#8696a0">Fecha</label>
@@ -7349,6 +7350,10 @@ function showScheduleModal(phone) {
     if (prev) prev.textContent = t ? fillTpl(t) : '';
   };
   if (sel) { sel.onchange = syncPrev; syncPrev(); }
+  // Crear una plantilla nueva al toque (se manda a Meta; cuando la aprueban aparece
+  // en este dropdown). Cierra este modal y abre el creador de plantillas.
+  const newTplBtn = modal.querySelector('#sched-new-tpl');
+  if (newTplBtn) newTplBtn.onclick = () => { modal.remove(); showCreateTemplateBroadcast(); };
   modal.querySelector('#sched-cancel').onclick = () => modal.remove();
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   loadPendingScheduled(phone, modal.querySelector('#sched-pending-list'));
