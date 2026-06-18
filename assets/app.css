@@ -382,6 +382,8 @@ table.t td.cliente { font-weight: 600; }
 .pill.red   { background: rgba(255,24,48,.12); color: #ff5a6e; border-color: rgba(255,24,48,.35); }
 .pill.cyan  { background: rgba(143,212,222,.12); color: var(--neon-cyan); border-color: rgba(143,212,222,.3); }
 .pill.muted { background: var(--ink-200); color: var(--fg-subtle); }
+.pill.blue   { background: rgba(80,140,255,.14); color: #8ab4ff; border-color: rgba(80,140,255,.32); }
+.pill.violet { background: rgba(155,92,255,.14); color: #c4a0ff; border-color: rgba(155,92,255,.32); }
 
 .tag-d30 { background: rgba(74,222,128,.15); color: #6ef0a0; }
 .tag-d60 { background: rgba(255,184,77,.15); color: #ffc97a; }

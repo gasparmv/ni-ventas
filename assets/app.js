@@ -3822,9 +3822,9 @@ function renderTablePedidos() {
             <tr data-pid="${p.idx}">
               <td class="num">${fmtDate(p.fecha)}</td>
               <td class="cliente">${escapeHtml(p.cartel)}</td>
-              <td><span class="muted" style="font-size:12px">${escapeHtml(p.base||'—')}</span></td>
+              <td>${baseSwatch(p.base)}</td>
               <td class="num">${fmtMoney(p.precio)}</td>
-              <td><span style="font-size:12px">${escapeHtml(p.dimmer||'—')}</span></td>
+              <td>${dimerPillHtml(p.dimmer)}</td>
               <td title="${escapeHtml(p.envio||'')}"><span class="muted" style="font-size:12px">${trunc(p.envio,16)}</span></td>
               <td title="${escapeHtml(p.aclaracion||'')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion,16)}</span></td>
               <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pago',p.estadoPago,PAGO_OPTS_TABLE)}</td>
@@ -3845,32 +3845,37 @@ function renderTablePedidos() {
     };
   });
 }
-function pillEstadoPago(s) {
-  const x = (s||'').toLowerCase();
-  // "primer pago" / "1er pago" → rojo (falta cobrar resto)
-  if (x.includes('primer') || x.includes('1er') || x.includes('1°') || /\b1\b/.test(x)) return `<span class="pill red">${escapeHtml(s)}</span>`;
-  // Cobro completo → verde
-  if (x.includes('cobrad') || x.includes('total') || x === 'pagado' || x.includes('100')) return `<span class="pill green">${escapeHtml(s)}</span>`;
-  // Seña / parcial → amber
-  if (x.includes('seña') || x.includes('sena') || x.includes('parc')) return `<span class="pill amber">${escapeHtml(s)}</span>`;
-  // 2do / restante / pendiente → amber
-  if (x.includes('2do') || x.includes('rest') || x.includes('pend')) return `<span class="pill amber">${escapeHtml(s)}</span>`;
-  return `<span class="pill muted">${escapeHtml(s||'—')}</span>`;
-}
-function pillEstadoPedido(s) {
-  const x = (s||'').toLowerCase();
-  if (x.includes('entreg') || x.includes('envia')) return `<span class="pill cyan">${escapeHtml(s)}</span>`;
-  if (x.includes('produc')) return `<span class="pill amber">${escapeHtml(s)}</span>`;
-  if (x.includes('list')) return `<span class="pill green">${escapeHtml(s)}</span>`;
-  return `<span class="pill muted">${escapeHtml(s||'—')}</span>`;
-}
-// Dropdowns inline para editar estado_pago / estado_pedido directo en la tabla
-// (a nivel pedido: el worker lo aplica a todos los carteles del nro+fecha).
+// Paleta de pills (mismo look que el timeline post-venta). Mapea cada valor a un color.
+const PILL_HEX = {
+  red:    { bg:'rgba(255,24,48,.12)',   fg:'#ff5a6e',          bd:'rgba(255,24,48,.35)' },
+  green:  { bg:'rgba(74,222,128,.12)',  fg:'#6ef0a0',          bd:'rgba(74,222,128,.3)' },
+  amber:  { bg:'rgba(255,184,77,.12)',  fg:'#ffc97a',          bd:'rgba(255,184,77,.3)' },
+  cyan:   { bg:'rgba(143,212,222,.12)', fg:'var(--neon-cyan)', bd:'rgba(143,212,222,.3)' },
+  blue:   { bg:'rgba(80,140,255,.14)',  fg:'#8ab4ff',          bd:'rgba(80,140,255,.32)' },
+  violet: { bg:'rgba(155,92,255,.14)',  fg:'#c4a0ff',          bd:'rgba(155,92,255,.32)' },
+  muted:  { bg:'var(--ink-200)',        fg:'var(--fg-subtle)', bd:'var(--border)' }
+};
+// 1er pago → rojo · 2do pago → verde.
+function pagoColor(s){ const x=(s||'').toLowerCase(); if (x.includes('1er')||x.includes('primer')||/\b1\b/.test(x)) return 'red'; if (x.includes('2do')||x.includes('pagad')||x.includes('cobrad')||x.includes('total')) return 'green'; return 'muted'; }
+// En produccion → rojo · para enviar → amarillo · entregado → verde.
+function pedidoEstadoColor(s){ const x=(s||'').toLowerCase(); if (x.includes('produc')) return 'red'; if (x.includes('envia')||x.includes('enviar')) return 'amber'; if (x.includes('entreg')||x.includes('list')) return 'green'; return 'muted'; }
+// Dimmer: NO gris · SLIM cyan · CONTROL azul · APP violeta.
+function dimerColor(s){ const x=(s||'').toLowerCase(); if (x.includes('slim')) return 'cyan'; if (x.includes('control')) return 'blue'; if (x.includes('app')) return 'violet'; return 'muted'; }
+// Color del acrílico para el puntito de la base.
+function baseHex(s){ const x=(s||'').toLowerCase(); if (x==='negro') return '#0c0c0c'; if (x==='trans') return '#ffffff'; if (x.includes('espejo')) return 'linear-gradient(135deg,#e2e8f0,#9aa6b4)'; if (x.includes('vinilo')) return '#dfe8ff'; return 'var(--ink-300)'; }
+function pillEstadoPago(s){ return `<span class="pill ${pagoColor(s)}">${escapeHtml(s||'—')}</span>`; }
+function pillEstadoPedido(s){ return `<span class="pill ${pedidoEstadoColor(s)}">${escapeHtml(s||'—')}</span>`; }
+function dimerPillHtml(s){ if (!s) return '<span style="color:var(--fg-subtle)">—</span>'; return `<span class="pill ${dimerColor(s)}">${escapeHtml(s)}</span>`; }
+// Base con un puntito del color del acrílico (NEGRO negro, TRANS blanco, etc.).
+function baseSwatch(s){ if (!s) return '<span style="color:var(--fg-subtle)">—</span>'; return `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:11px;height:11px;border-radius:50%;background:${baseHex(s)};border:1px solid var(--border);flex:none"></span><span style="font-size:12px">${escapeHtml(s)}</span></span>`; }
+// Dropdown inline (tabla) coloreado según el valor actual, para editar el estado sin
+// abrir el drawer (a nivel pedido: el worker lo aplica a todos los carteles del nro+fecha).
 const PAGO_OPTS_TABLE = ['1er pago','2do pago'];
 const PED_OPTS_TABLE = ['En produccion','para enviar','Entregado'];
 function inlinePedidoSelect(idx, field, current, opts) {
-  const options = uniq([current, ...opts].filter(Boolean)).map(o => `<option ${current===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
-  return `<select onchange="savePedidoField(${idx},'${field}',this.value)" style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:3px 6px;color:var(--fg);font-size:11px;cursor:pointer;max-width:140px">${options}</select>`;
+  const col = PILL_HEX[(field === 'estado_pago' ? pagoColor(current) : pedidoEstadoColor(current))] || PILL_HEX.muted;
+  const options = uniq([current, ...opts].filter(Boolean)).map(o => `<option style="background:var(--ink-100);color:var(--fg)" ${current===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
+  return `<select onchange="savePedidoField(${idx},'${field}',this.value)" style="background:${col.bg};color:${col.fg};border:1px solid ${col.bd};border-radius:var(--r-pill);padding:3px 8px;font-size:11px;font-weight:600;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.04em;cursor:pointer;max-width:150px">${options}</select>`;
 }
 
 // ===================== Modal "Cargar pedido" (fase 2) =====================
@@ -5062,6 +5067,7 @@ function openDrawerPedido(idx) {
         <h4>Trazabilidad y envío</h4>
         <div style="display:flex;flex-direction:column;gap:10px">
           <div><label style="${lblD}">Trazabilidad (Ad)</label><input id="ped-edit-ad" value="${escapeHtml(p.canalAd||'')}" placeholder="de qué ad vino / cómo llegó" style="${inpD}"></div>
+          <button class="btn btn-ghost" onclick="verAnuncioPedido(${idx})" style="font-size:12px;align-self:flex-start;padding:5px 10px">🔗 Ver anuncio</button>
           <div><label style="${lblD}">Envío</label><textarea id="ped-edit-envio" rows="4" style="${inpD};resize:vertical">${escapeHtml(p.envio||'')}</textarea></div>
           <div><label style="${lblD}">Aclaración</label><input id="ped-edit-aclaracion" value="${escapeHtml(p.aclaracion||'')}" style="${inpD}"></div>
           <div style="font-size:11px;color:var(--fg-subtle)">Plataforma: ${escapeHtml(p.plataforma||'—')}</div>
@@ -5104,6 +5110,23 @@ function openDrawerPedido(idx) {
   document.getElementById('drawer-bg').onclick = closeDrawer;
 }
 
+// Abre el anuncio del que vino el cliente: busca en vivo la atribución de ad por el
+// teléfono del pedido y abre el link de Meta (source_url o Ads Library por id).
+async function verAnuncioPedido(idx) {
+  const p = STATE.pedidos.find(x => x.idx === idx);
+  if (!p) return;
+  const tel = String(p.telefono || extractPhone(p.envio) || '').replace(/\D/g, '');
+  if (!tel) { toast('Este pedido no tiene teléfono para trazar el anuncio'); return; }
+  toast('Buscando el anuncio…');
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/ad-attribution?phone=' + encodeURIComponent(tel), { headers: authHeaders() });
+    const j = await r.json();
+    const a = j && j.attribution;
+    const url = a && (a.source_url || (a.source_id ? 'https://www.facebook.com/ads/library/?id=' + a.source_id : ''));
+    if (url) window.open(url, '_blank');
+    else toast('No se encontró el anuncio para este contacto');
+  } catch (e) { toast('Error al buscar el anuncio'); }
+}
 // Cambio rápido de un solo campo (estado_pago / estado_pedido) desde el dropdown
 // inline de la tabla. PATCH a nivel pedido; refresca STATE + repinta la tabla.
 async function savePedidoField(idx, field, value) {
