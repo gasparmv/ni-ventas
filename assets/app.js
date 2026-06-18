@@ -6174,7 +6174,15 @@ const chatState = {
   // (estilo WA), 'conversation' muestra solo la conversación con back arrow.
   // En desktop se ignora y siempre se muestra el split-view completo.
   mobileView: 'list',
+  // Windowing del sidebar: cuántos contactos pintamos en el DOM (hay 7000+).
+  // Pintarlos a TODOS clava el main thread ~1-2s y deja el scroll/tipeo trabado
+  // (cada contacto son ~14 nodos → 7000 = ~100k nodos). El scroll va sumando
+  // de a CHAT_CONTACT_PAGE al acercarse al fondo. Los viejos se alcanzan buscando.
+  contactRenderLimit: 50,
+  _lastFilteredCount: 0,
 };
+// Tamaño de página del windowing del sidebar de chats.
+const CHAT_CONTACT_PAGE = 50;
 
 // Avatar color palettes [base, accent] — 25 distinct hues for maximum differentiation
 const AVATAR_PALETTES = [
@@ -8217,6 +8225,9 @@ function renderChat() {
   if (!canAccessChat()) {
     return `<div class="page-head"><h1>Chat WhatsApp</h1></div><div class="error">No autorizado. Logueate con un usuario autorizado.</div>`;
   }
+  // Al (re)armar la página de chat arrancamos mostrando los más recientes; el
+  // scroll va sumando. Sin esto pintaríamos los 7000+ contactos de una sola vez.
+  chatState.contactRenderLimit = CHAT_CONTACT_PAGE;
   const search = chatState.search.toLowerCase();
   let filtered = chatState.contacts;
   // Archivados: por defecto fuera. Solo se muestran si chatState.showArchived = true.
@@ -8242,6 +8253,11 @@ function renderChat() {
       return chatState.filterLabels.every(lid => cLabels.includes(lid));
     });
   }
+
+  // Windowing: solo pintamos los primeros N (orden por recencia, ver línea 7113).
+  // El resto se alcanza scrolleando (suma páginas) o buscando.
+  chatState._lastFilteredCount = filtered.length;
+  const visibleContacts = filtered.slice(0, chatState.contactRenderLimit);
 
   return `
     <div class="chat-layout">
@@ -8290,7 +8306,7 @@ function renderChat() {
         ${renderLabelFilterBar()}
         <div class="chat-contact-list" id="chat-contact-list">
           ${chatState.loading && !chatState.contacts.length ? '<div style="padding:30px;text-align:center"><div class="spinner" style="border-color:#2a3942;border-top-color:#00a884"></div></div>' : ''}
-          ${filtered.map(c => renderContactItem(c)).join('')}
+          ${visibleContacts.map(c => renderContactItem(c)).join('')}
           ${!chatState.loading && !filtered.length ? `<div class="chat-empty-state">${chatState.showArchived ? '<div class="chat-empty-emoji">📦</div>No hay chats archivados' : '<div class="chat-empty-emoji">👋</div>Sin conversaciones'}</div>` : ''}
         </div>
         ${renderBulkSection()}
@@ -10448,6 +10464,7 @@ function bindChat() {
   if (searchInput) {
     searchInput.oninput = () => {
       chatState.search = searchInput.value;
+      chatState.contactRenderLimit = CHAT_CONTACT_PAGE; // mostrar resultados desde arriba
       // Si pegaron un teléfono, mostrar el botón "Chatear con +54…".
       updateNewChatSuggest(searchInput.value);
       // Refresh inmediato con filtrado local (rápido, lo viejo)
@@ -10466,6 +10483,7 @@ function bindChat() {
   // Repoblar la sugerencia de "Chatear con…" tras un re-render (si quedó un tel en la búsqueda).
   updateNewChatSuggest(chatState.search);
   bindChatContactClicks();
+  bindContactListInfiniteScroll();
   // Refresh
   const refreshBtn = document.getElementById('chat-refresh');
   if (refreshBtn) {
@@ -10839,6 +10857,20 @@ async function runBackendSearch(q) {
   }
 }
 
+// "Infinite scroll" del sidebar: cerca del fondo sube el límite de contactos
+// renderizados y re-renderiza. Idempotente (guard _moreScrollBound por elemento).
+function bindContactListInfiniteScroll() {
+  const list = document.getElementById('chat-contact-list');
+  if (!list || list._moreScrollBound) return;
+  list._moreScrollBound = true;
+  list.addEventListener('scroll', () => {
+    if (list.scrollTop + list.clientHeight >= list.scrollHeight - 500
+        && chatState.contactRenderLimit < (chatState._lastFilteredCount || 0)) {
+      chatState.contactRenderLimit += CHAT_CONTACT_PAGE;
+      refreshContactList();
+    }
+  });
+}
 function refreshContactList() {
   const list = document.getElementById('chat-contact-list');
   if (!list) return;
@@ -10899,13 +10931,18 @@ function refreshContactList() {
   // idéntico, NO tocamos el DOM. Es el caso del polling cada 4s cuando no
   // hubo cambios reales: antes se reconstruía toda la lista igual y bloqueaba
   // el main thread mientras el usuario tipeaba.
-  const newHtml = filtered.map(c => renderContactItem(c)).join('') + loadingHtml + extraHtml;
+  chatState._lastFilteredCount = filtered.length;
+  const visibleContacts = filtered.slice(0, chatState.contactRenderLimit);
+  const newHtml = visibleContacts.map(c => renderContactItem(c)).join('') + loadingHtml + extraHtml;
   if (newHtml !== list._lastHtml) {
+    const st = list.scrollTop; // preservar scroll: evita el salto al re-render del poll y al sumar página
     list.innerHTML = newHtml;
     list._lastHtml = newHtml;
+    list.scrollTop = st;
     bindChatContactClicks();
     bindSearchMessageJumps();
   }
+  bindContactListInfiniteScroll();
 }
 
 // Escapa HTML y resalta el match dentro de un texto con <mark>
