@@ -7298,9 +7298,17 @@ function updateChatInputState() {
 // ===== Scheduled messages =====
 function showScheduleModal(phone) {
   const ta = document.getElementById('chat-input');
-  const text = ta?.value?.trim();
-  if (!text) { toast('Escribí un mensaje primero'); return; }
-  // Default: tomorrow 8:00 AR
+  const text = (ta?.value || '').trim();   // texto libre OPCIONAL (solo si la ventana sigue abierta)
+  loadChatTemplates();                       // idempotente (por si no cargaron)
+  const contact = (chatState.contacts || []).find(c => c.phone === phone);
+  const cname = (contact && contact.name) || chatState.selectedName || '';
+  const firstName = (cname.trim().split(/\s+/)[0] || '').replace(/^./, c => c.toUpperCase());
+  const tplBody = (t) => { const b = (t.components || []).find(c => (c.type || '').toUpperCase() === 'BODY'); return (b && b.text) || ''; };
+  const tplVars = (t) => (tplBody(t).match(/\{\{\d+\}\}/g) || []).length;
+  const fillTpl = (t) => tplBody(t).replace(/\{\{1\}\}/g, firstName || 'tu nombre').replace(/\{\{\d+\}\}/g, '…');
+  // Plantillas de re-enganche de carteles primero (las más útiles para seguimiento).
+  const prefer = ['seguimiento_presupuesto', 'retomar_carteles_v2', 'retomar_carteles'];
+  const ordered = [...(chatState.templates || [])].sort((a, b) => ((prefer.indexOf(a.name) + 1) || 99) - ((prefer.indexOf(b.name) + 1) || 99));
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   const defaultDate = tomorrow.toISOString().slice(0, 10);
@@ -7308,47 +7316,61 @@ function showScheduleModal(phone) {
   modal.className = 'schedule-modal-overlay';
   modal.innerHTML = `
     <div class="schedule-modal">
-      <h3 style="margin:0 0 12px">Programar mensaje</h3>
-      <div class="schedule-preview">${escapeHtml(text).replace(/\n/g, '<br>')}</div>
-      <div style="display:flex;gap:8px;margin:12px 0">
+      <h3 style="margin:0 0 6px">Programar seguimiento</h3>
+      <p style="font-size:12px;color:#8696a0;margin:0 0 10px">Se manda <b>solo si el cliente NO te vuelve a escribir</b> antes. Si la ventana de 24h ya cerró (lo normal al día siguiente), se manda con una <b>plantilla aprobada</b> 👇</p>
+      ${text ? `<div class="schedule-preview">${escapeHtml(text).replace(/\n/g, '<br>')}</div><div style="font-size:11px;color:#8696a0;margin:4px 0 8px">↑ este texto libre solo se manda si la ventana sigue abierta</div>` : ''}
+      <label style="font-size:12px;color:#8696a0">Plantilla (si la ventana está cerrada)</label>
+      <select id="sched-template" style="width:100%;padding:8px;border-radius:6px;border:1px solid #3b4a54;background:#2a3942;color:#e9edef;margin-bottom:6px">
+        ${ordered.length ? ordered.map(t => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`).join('') : '<option value="">(no hay plantillas aprobadas)</option>'}
+      </select>
+      <div id="sched-tpl-preview" style="font-size:12px;color:#aebac1;background:#202c33;border-radius:6px;padding:8px;margin-bottom:10px;white-space:pre-wrap"></div>
+      <div style="display:flex;gap:8px;margin:6px 0">
         <div style="flex:1">
           <label style="font-size:12px;color:#8696a0">Fecha</label>
           <input type="date" id="sched-date" value="${defaultDate}" style="width:100%;padding:8px;border-radius:6px;border:1px solid #3b4a54;background:#2a3942;color:#e9edef">
         </div>
         <div style="flex:1">
           <label style="font-size:12px;color:#8696a0">Hora (Argentina)</label>
-          <input type="time" id="sched-time" value="08:00" style="width:100%;padding:8px;border-radius:6px;border:1px solid #3b4a54;background:#2a3942;color:#e9edef">
+          <input type="time" id="sched-time" value="10:00" style="width:100%;padding:8px;border-radius:6px;border:1px solid #3b4a54;background:#2a3942;color:#e9edef">
         </div>
       </div>
       <div id="sched-pending-list" style="margin:8px 0"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
-        <button id="sched-cancel" class="btn-action" style="background:#3b4a54">Cancelar</button>
+        <button id="sched-cancel" class="btn-action" style="background:#3b4a54">Cerrar</button>
         <button id="sched-confirm" class="btn-action" style="background:#00a884">Programar</button>
       </div>
     </div>
   `;
   document.body.appendChild(modal);
+  const sel = modal.querySelector('#sched-template');
+  const prev = modal.querySelector('#sched-tpl-preview');
+  const syncPrev = () => {
+    const t = ordered.find(x => x.name === (sel && sel.value));
+    if (prev) prev.textContent = t ? fillTpl(t) : '';
+  };
+  if (sel) { sel.onchange = syncPrev; syncPrev(); }
   modal.querySelector('#sched-cancel').onclick = () => modal.remove();
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
-  // Load pending scheduled messages for this phone
   loadPendingScheduled(phone, modal.querySelector('#sched-pending-list'));
   modal.querySelector('#sched-confirm').onclick = async () => {
     const date = modal.querySelector('#sched-date').value;
     const time = modal.querySelector('#sched-time').value;
+    const template = sel ? sel.value : '';
     if (!date || !time) { toast('Elegí fecha y hora'); return; }
-    // Convert AR time to UTC (AR = UTC-3)
+    if (!template && !text) { toast('Elegí una plantilla (o escribí un texto)'); return; }
     const arDate = new Date(`${date}T${time}:00-03:00`);
-    const utc = arDate.toISOString();
-    if (arDate <= new Date()) { toast('La fecha debe ser futura'); return; }
+    if (isNaN(arDate.getTime()) || arDate <= new Date()) { toast('La fecha debe ser futura'); return; }
+    const tplObj = ordered.find(x => x.name === template);
+    const params = (tplObj && tplVars(tplObj) >= 1 && firstName) ? [firstName] : [];
     try {
       const r = await fetch(CONFIG.trackerUrl + '/admin/wa/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ phone, body: text, scheduled_at: utc })
+        body: JSON.stringify({ phone, body: text || '', template, params, lang: 'es_AR', scheduled_at: arDate.toISOString() })
       });
       const j = await r.json();
       if (!r.ok) { toast('Error: ' + (j.error || 'fallo')); return; }
-      toast(`Programado para ${date} ${time} AR`);
+      toast(`⏰ Seguimiento programado para ${date} ${time} AR — se cancela si responde antes`);
       if (ta) { ta.value = ''; ta.style.height = 'auto'; }
       modal.remove();
     } catch (e) {
@@ -8618,7 +8640,6 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
-        ${canCreateBriefs() ? `<button class="btn ${armedFupPhones.has(phone) ? 'btn-cyan' : 'btn-ghost'}" id="btn-chat-fup" title="Programar el seguimiento (FUP) de este presupuesto para mañana. No se duplica con el automático: lo manda el mismo cron de follow-ups." style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">${armedFupPhones.has(phone) ? '✓ FUP mañana' : '⏰ FUP mañana'}</button>` : ''}
         <span>${msgCount} msgs</span>
         ${['admin', 'comercial', 'cursos'].includes(getUserRole()) ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
@@ -10103,8 +10124,6 @@ function bindChatConversation() {
   // ese modal por si quedó abierto tras este render.
   const chatBriefBtn = document.getElementById('btn-chat-brief');
   if (chatBriefBtn) chatBriefBtn.onclick = openBriefFromChat;
-  const chatFupBtn = document.getElementById('btn-chat-fup');
-  if (chatFupBtn) chatFupBtn.onclick = () => armChatFup(chatState.selectedPhone);
   bindQuickCreateModal();
   const backBtn = document.getElementById('chat-back-btn');
   bindChatPostit();
@@ -10512,49 +10531,8 @@ function syncChatViewportHeight() {
   apply();
 }
 
-// Set de teléfonos con FUP armado a mano (botón "⏰ FUP mañana"). La verdad vive en
-// el backend (kv_cache 'fup-armed:<phone>'); esto solo refleja el estado del botón.
-const armedFupPhones = new Set();
-async function armChatFup(phone) {
-  if (!phone) return;
-  const btn = document.getElementById('btn-chat-fup');
-  const yaArmado = armedFupPhones.has(phone);
-  if (btn) btn.disabled = true;
-  try {
-    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/admin/wa/arm-fup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ phone, off: yaArmado })
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
-    if (j.armed) { armedFupPhones.add(phone); toast('⏰ Listo — le mando el seguimiento mañana (no se duplica con el automático)'); }
-    else { armedFupPhones.delete(phone); toast('FUP desactivado'); }
-  } catch (e) {
-    toast('No se pudo: ' + (e.message || e));
-  } finally {
-    if (btn) btn.disabled = false;
-    _syncFupBtn(phone);
-  }
-}
-function _syncFupBtn(phone) {
-  const btn = document.getElementById('btn-chat-fup');
-  if (!btn || chatState.selectedPhone !== phone) return;
-  const on = armedFupPhones.has(phone);
-  btn.textContent = on ? '✓ FUP mañana' : '⏰ FUP mañana';
-  btn.classList.toggle('btn-cyan', on);
-  btn.classList.toggle('btn-ghost', !on);
-}
 function bindChat() {
   syncChatViewportHeight();
-  // Reflejar en el botón "⏰ FUP mañana" qué contactos ya están armados.
-  fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/admin/wa/arm-fup', { headers: authHeaders() })
-    .then(r => r.json()).then(j => {
-      if (j && Array.isArray(j.phones)) {
-        armedFupPhones.clear(); j.phones.forEach(p => armedFupPhones.add(p));
-        if (chatState.selectedPhone) _syncFupBtn(chatState.selectedPhone);
-      }
-    }).catch(() => {});
   // Load data
   if (!chatState.contacts.length && !chatState.loading) {
     // Cargar nombres de WA primero (rápido, solo phone→name) y después contactos
