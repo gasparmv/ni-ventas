@@ -2241,6 +2241,30 @@ function openBroadcastModal() {
             <span class="nc-hint">goteo entre envíos</span>
           </label>
         </div>
+        <div class="nc-field" style="border-top:1px solid var(--border,#2a2a36);padding-top:12px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
+            <input type="checkbox" id="bc-reply-on"> <span class="nc-label" style="margin:0">Responder automático según la respuesta (IA)</span>
+          </label>
+          <div id="bc-reply-cfg" style="display:none;flex-direction:column;gap:8px;margin-top:8px">
+            <span class="nc-hint">Cuando conteste, la IA decide. Sale como texto libre (gratis, ventana abierta).</span>
+            <textarea id="bc-reply-pos" class="nc-input" rows="2" placeholder="Si contesta algo POSITIVO, mandar..." style="resize:vertical"></textarea>
+            <textarea id="bc-reply-neg" class="nc-input" rows="2" placeholder="Si contesta algo NEGATIVO, mandar (opcional)..." style="resize:vertical"></textarea>
+          </div>
+        </div>
+        <div class="nc-field" style="border-top:1px solid var(--border,#2a2a36);padding-top:12px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
+            <input type="checkbox" id="bc-fu-on"> <span class="nc-label" style="margin:0">Seguimiento si NO contesta</span>
+          </label>
+          <div id="bc-fu-cfg" style="display:none;flex-direction:column;gap:8px;margin-top:8px">
+            <label class="nc-field" style="max-width:170px;margin:0">
+              <span class="nc-label">A las (horas)</span>
+              <input type="number" id="bc-fu-hours" class="nc-input" value="24" min="1" max="168">
+            </label>
+            <span class="nc-hint">No contestó = ventana cerrada → tiene que ser plantilla aprobada:</span>
+            <div class="nc-tpl-list" id="bc-fu-tpl-list">${tplRows}</div>
+            <div id="bc-fu-preview-field" style="display:none"><span class="nc-label">Vista previa del seguimiento</span><div class="nc-preview" id="bc-fu-preview"></div></div>
+          </div>
+        </div>
         <div id="bc-summary" style="display:none"><div class="auto-banner warn" id="bc-summary-box" style="margin:0"></div></div>
       </div>
       <div class="modal-actions">
@@ -2263,8 +2287,19 @@ function openBroadcastModal() {
   const summaryWrap = bg.querySelector('#bc-summary');
   const summaryBox = bg.querySelector('#bc-summary-box');
   const nameEl = bg.querySelector('#bc-name');
+  const replyOnEl = bg.querySelector('#bc-reply-on');
+  const replyCfg = bg.querySelector('#bc-reply-cfg');
+  const replyPosEl = bg.querySelector('#bc-reply-pos');
+  const replyNegEl = bg.querySelector('#bc-reply-neg');
+  const fuOnEl = bg.querySelector('#bc-fu-on');
+  const fuCfg = bg.querySelector('#bc-fu-cfg');
+  const fuHoursEl = bg.querySelector('#bc-fu-hours');
+  const fuListEl = bg.querySelector('#bc-fu-tpl-list');
+  const fuPreviewField = bg.querySelector('#bc-fu-preview-field');
+  const fuPreviewEl = bg.querySelector('#bc-fu-preview');
 
   let selectedName = null, selectedLang = 'es_AR', selectedParams = 0;
+  let fuName = null, fuLang = 'es_AR', fuParams = 0;
   let parsed = { contacts: [], invalid: 0 };
   let confirmed = false;
 
@@ -2283,9 +2318,15 @@ function openBroadcastModal() {
       previewEl.textContent = tplBodyText(tpl).replace(/\{\{\s*\d+\s*\}\}/g, '{nombre}');
       previewField.style.display = '';
     } else previewField.style.display = 'none';
+    // Preview del seguimiento (Z).
+    const fuTpl = fuName ? (chatState.templates || []).find(t => t.name === fuName) : null;
+    if (fuTpl) { fuPreviewEl.textContent = tplBodyText(fuTpl).replace(/\{\{\s*\d+\s*\}\}/g, '{nombre}'); fuPreviewField.style.display = ''; }
+    else fuPreviewField.style.display = 'none';
     // Cualquier cambio invalida un preview previo: hay que re-confirmar.
     if (confirmed) { confirmed = false; createBtn.textContent = 'Crear y encolar'; summaryWrap.style.display = 'none'; }
-    createBtn.disabled = !(parsed.contacts.length && selectedName);
+    const replyOk = !replyOnEl.checked || !!(replyPosEl.value || '').trim();
+    const fuOk = !fuOnEl.checked || (!!fuName && parseFloat(fuHoursEl.value) > 0);
+    createBtn.disabled = !(parsed.contacts.length && selectedName && replyOk && fuOk);
   }
 
   listEl.querySelectorAll('.qr-item').forEach(row => {
@@ -2299,6 +2340,20 @@ function openBroadcastModal() {
       refresh();
     };
   });
+  fuListEl.querySelectorAll('.qr-item').forEach(row => {
+    row.onclick = () => {
+      if (!row.dataset.tplName) return;
+      fuName = row.dataset.tplName;
+      fuLang = row.dataset.tplLang || 'es_AR';
+      fuParams = parseInt(row.dataset.tplParams || '0', 10) || 0;
+      fuListEl.querySelectorAll('.qr-item').forEach(r => r.classList.remove('nc-selected'));
+      row.classList.add('nc-selected');
+      refresh();
+    };
+  });
+  replyOnEl.onchange = () => { replyCfg.style.display = replyOnEl.checked ? 'flex' : 'none'; refresh(); };
+  fuOnEl.onchange = () => { fuCfg.style.display = fuOnEl.checked ? 'flex' : 'none'; refresh(); };
+  [replyPosEl, replyNegEl, fuHoursEl].forEach(el => el.addEventListener('input', refresh));
 
   fileEl.onchange = () => {
     const f = fileEl.files && fileEl.files[0];
@@ -2314,6 +2369,7 @@ function openBroadcastModal() {
 
   async function callApi(dryRun) {
     const tpl = (chatState.templates || []).find(t => t.name === selectedName);
+    const fuTpl = fuName ? (chatState.templates || []).find(t => t.name === fuName) : null;
     const payload = {
       name: nameEl.value.trim(),
       template: selectedName,
@@ -2323,6 +2379,14 @@ function openBroadcastModal() {
       contacts: parsed.contacts,
       startTs: startEl.value ? new Date(startEl.value).toISOString() : '',
       intervalSec: parseInt(intervalEl.value, 10) || 32,
+      reply_ai: replyOnEl.checked ? 1 : 0,
+      reply_pos_msg: replyOnEl.checked ? replyPosEl.value.trim() : '',
+      reply_neg_msg: replyOnEl.checked ? replyNegEl.value.trim() : '',
+      followup_hours: fuOnEl.checked ? (parseFloat(fuHoursEl.value) || 24) : null,
+      followup_template: fuOnEl.checked ? (fuName || '') : '',
+      followup_lang: fuLang,
+      followup_param_mode: fuParams >= 1 ? 'nombre' : 'none',
+      followup_preview: (fuOnEl.checked && fuTpl) ? tplBodyText(fuTpl) : '',
       dryRun
     };
     const r = await fetch(CONFIG.trackerUrl + '/admin/broadcasts', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(payload) });
@@ -2337,7 +2401,11 @@ function openBroadcastModal() {
       createBtn.disabled = false;
       if (!j || !j.ok) { toast(j && j.error ? j.error : 'Error en el preview'); createBtn.textContent = 'Crear y encolar'; return; }
       const startTxt = j.start ? new Date(j.start).toLocaleString('es-AR') : 'ahora';
-      summaryBox.innerHTML = `Vas a mandar <strong>${escapeHtml(selectedName)}</strong> a <strong>${j.valid}</strong> contactos${j.invalid ? ` (${j.invalid} descartados)` : ''}.<br>Arranca <strong>${escapeHtml(startTxt)}</strong>, uno cada ${j.interval_sec}s (~${j.duration_min} min total).<br><strong>Tocá de nuevo para confirmar y encolar.</strong>`;
+      const extras = [];
+      if (replyOnEl.checked) extras.push('responde con IA según la contestación');
+      if (fuOnEl.checked) extras.push(`seguimiento a las ${parseFloat(fuHoursEl.value) || 24}h si no contesta`);
+      const extraTxt = extras.length ? `<br>+ ${extras.join(' · ')}.` : '';
+      summaryBox.innerHTML = `Vas a mandar <strong>${escapeHtml(selectedName)}</strong> a <strong>${j.valid}</strong> contactos${j.invalid ? ` (${j.invalid} descartados)` : ''}.<br>Arranca <strong>${escapeHtml(startTxt)}</strong>, uno cada ${j.interval_sec}s (~${j.duration_min} min total).${extraTxt}<br><strong>Tocá de nuevo para confirmar y encolar.</strong>`;
       summaryWrap.style.display = '';
       createBtn.textContent = 'Confirmar y encolar';
       confirmed = true;

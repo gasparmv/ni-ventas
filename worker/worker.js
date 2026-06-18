@@ -1078,6 +1078,30 @@ async function ensureBroadcastsSchema(env) {
       created_by TEXT
     )`).run();
   } catch (_) {}
+  // Columnas opcionales del flujo fusionado (Fase 2.5): respuesta con IA + follow-up.
+  for (const c of [
+    "reply_ai INTEGER DEFAULT 0",
+    "reply_pos_msg TEXT",
+    "reply_neg_msg TEXT",
+    "followup_hours REAL",
+    "followup_template TEXT",
+    "followup_lang TEXT",
+    "followup_param_mode TEXT",
+    "followup_preview TEXT"
+  ]) { try { await env.DB.prepare("ALTER TABLE wa_broadcasts ADD COLUMN " + c).run(); } catch (_) {} }
+  // Estado por contacto del flujo: respondio / sentimiento / branch / followup.
+  try {
+    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS wa_broadcast_events (
+      broadcast_id INTEGER,
+      phone TEXT,
+      replied_at TEXT,
+      analyze_due_at TEXT,
+      sentiment TEXT,
+      branch_sent_at TEXT,
+      followup_sent_at TEXT,
+      PRIMARY KEY (broadcast_id, phone)
+    )`).run();
+  } catch (_) {}
 }
 
 // Procesa los broadcasts custom: manda la plantilla guardada de cada broadcast
@@ -1122,6 +1146,108 @@ async function processCustomBroadcasts(env) {
                WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
           ).bind(ts, wamid, phone, previewBody).run();
         } catch (_) {}
+      }
+    }
+  } catch (_) { /* best-effort */ }
+}
+
+// Sentiment GENERICO para broadcasts custom: clasifica la respuesta del contacto
+// como 'positiva' o 'no_positiva'. Generoso: ante la duda, positiva.
+async function analyzeBroadcastReply(env, texto) {
+  const t = String(texto || '').trim();
+  if (!t || !env.ANTHROPIC_API_KEY) return 'positiva';
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 8,
+        system: 'Un contacto respondio a un mensaje que le mandamos. Clasifica su respuesta en UNA palabra. POSITIVA: muestra interes, dice que si de cualquier forma, pregunta, agradece, o es neutral/ambigua. NEGATIVA: SOLO si rechaza claramente (dice que no, no le interesa, pide que no le escriban), insulta, es spam, numero equivocado, o es una auto-respuesta de otro negocio. Ante la duda, POSITIVA. Responde SOLO: POSITIVA o NEGATIVA.',
+        messages: [{ role: 'user', content: t.slice(0, 500) }]
+      })
+    });
+    const j = await r.json();
+    if (!r.ok) return 'positiva';
+    return (j.content?.[0]?.text || '').toUpperCase().includes('NEGATIVA') ? 'no_positiva' : 'positiva';
+  } catch (e) { return 'positiva'; }
+}
+
+// Webhook: si un inbound viene de un contacto que recibio un broadcast con
+// respuesta-IA activada y todavia no fue procesado, lo marca para analisis (a
+// los ~2 min, para juntar todos sus mensajes). processBroadcastReplies lo levanta.
+async function maybeBranchBroadcastReply(env, phone) {
+  if (!phone) return;
+  try {
+    const row = await env.DB.prepare(
+      "SELECT b.id AS bid FROM wa_autoreply_log a JOIN wa_broadcasts b ON ('bc_' || b.id) = a.kind WHERE a.phone = ? AND a.status = 'sent' AND b.reply_ai = 1 AND b.status = 'running' ORDER BY a.sent_at DESC LIMIT 1"
+    ).bind(phone).first();
+    if (!row?.bid) return;
+    const exists = await env.DB.prepare("SELECT 1 FROM wa_broadcast_events WHERE broadcast_id = ? AND phone = ?").bind(row.bid, phone).first();
+    if (exists) return;
+    const now = new Date().toISOString();
+    const due = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+    await env.DB.prepare("INSERT OR IGNORE INTO wa_broadcast_events (broadcast_id, phone, replied_at, analyze_due_at) VALUES (?, ?, ?, ?)").bind(row.bid, phone, now, due).run();
+  } catch (_) {}
+}
+
+// Cron (*/1): analiza respuestas pendientes a broadcasts con IA y manda el
+// mensaje X (positiva) o Y (no_positiva) como TEXTO LIBRE (la ventana esta
+// abierta porque el contacto acaba de escribir).
+async function processBroadcastReplies(env) {
+  if (await isWaBillingBlocked(env)) return;
+  try {
+    const nowIso = new Date().toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT e.broadcast_id AS bid, e.phone AS phone, e.replied_at AS replied_at, b.reply_pos_msg AS pos, b.reply_neg_msg AS neg FROM wa_broadcast_events e JOIN wa_broadcasts b ON b.id = e.broadcast_id WHERE e.sentiment IS NULL AND e.analyze_due_at IS NOT NULL AND e.analyze_due_at <= ? ORDER BY e.analyze_due_at ASC LIMIT 4"
+    ).bind(nowIso).all();
+    if (!rs.results?.length) return;
+    for (const row of rs.results) {
+      let claim;
+      try { claim = await env.DB.prepare("UPDATE wa_broadcast_events SET sentiment = 'analizando' WHERE broadcast_id = ? AND phone = ? AND sentiment IS NULL").bind(row.bid, row.phone).run(); } catch (_) { continue; }
+      if (!claim?.meta?.changes) continue;
+      let texto = '';
+      try {
+        const m = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'reaction' AND ts >= ? AND body != '' ORDER BY ts ASC LIMIT 20").bind(row.phone, row.replied_at).all();
+        texto = (m.results || []).map(x => x.body).join('\n');
+      } catch (_) {}
+      const sentiment = await analyzeBroadcastReply(env, texto);
+      const msg = (sentiment === 'positiva') ? row.pos : row.neg;
+      if (msg && String(msg).trim()) { try { await waSendText(env, row.phone, String(msg)); } catch (_) {} }
+      try { await env.DB.prepare("UPDATE wa_broadcast_events SET sentiment = ?, branch_sent_at = ? WHERE broadcast_id = ? AND phone = ?").bind(sentiment, new Date().toISOString(), row.bid, row.phone).run(); } catch (_) {}
+    }
+  } catch (_) { /* best-effort */ }
+}
+
+// Cron (*/1, solo 9-21 AR): a los contactos de un broadcast que NO respondieron
+// despues de followup_hours, les manda la plantilla de seguimiento (Z). Como no
+// respondieron la ventana esta cerrada => va como plantilla.
+async function processBroadcastFollowups(env) {
+  if (await isWaBillingBlocked(env)) return;
+  const hAR = (new Date().getUTCHours() + 24 - 3) % 24;
+  if (hAR < 9 || hAR >= 21) return;
+  try {
+    const now = Date.now();
+    const bcs = (await env.DB.prepare("SELECT id, followup_hours, followup_template, followup_lang, followup_param_mode, followup_preview FROM wa_broadcasts WHERE status = 'running' AND followup_hours IS NOT NULL AND followup_template IS NOT NULL AND followup_template != ''").all()).results || [];
+    for (const b of bcs) {
+      const cutoff = new Date(now - b.followup_hours * 3600 * 1000).toISOString();
+      const targets = (await env.DB.prepare(
+        "SELECT a.phone AS phone, a.sender_name AS nombre FROM wa_autoreply_log a WHERE a.kind = ? AND a.status = 'sent' AND a.sent_at <= ? AND NOT EXISTS (SELECT 1 FROM wa_broadcast_events e WHERE e.broadcast_id = ? AND e.phone = a.phone) AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = a.phone AND m.direction = 'inbound' AND m.ts > a.sent_at) ORDER BY a.sent_at ASC LIMIT 4"
+      ).bind('bc_' + b.id, cutoff, b.id).all()).results || [];
+      for (const t of targets) {
+        // Claim atomico: marca el evento ANTES de mandar (evita doble-envio).
+        let claim;
+        try { claim = await env.DB.prepare("INSERT OR IGNORE INTO wa_broadcast_events (broadcast_id, phone, followup_sent_at) VALUES (?, ?, ?)").bind(b.id, t.phone, new Date().toISOString()).run(); } catch (_) { continue; }
+        if (!claim?.meta?.changes) continue;
+        if (await isUnreachable(env, t.phone)) continue;
+        const primerNombre = capitalizeName((t.nombre || '').split(/\s+/)[0]) || 'amigo/a';
+        const params = (b.followup_param_mode === 'none') ? [] : [primerNombre];
+        const tpl = await waSendTemplate(env, t.phone, b.followup_template, b.followup_lang || 'es', params);
+        if (tpl?.ok && tpl.id) {
+          const ts = new Date().toISOString();
+          const previewBody = (b.followup_preview || '').replace(/\{\{\s*1\s*\}\}/g, primerNombre);
+          if (previewBody) { try { await env.DB.prepare(`INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1) ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`).bind(ts, tpl.id, t.phone, previewBody).run(); } catch (_) {} }
+        }
       }
     }
   } catch (_) { /* best-effort */ }
@@ -4207,6 +4333,10 @@ export default {
                 if (direction === 'inbound') {
                   try { await revealCursosCampaign(env, phone, msgBody); } catch (_) {}
                 }
+                // Broadcast custom con respuesta-IA activada: marcar para branch X/Y (Fase 2.5).
+                if (direction === 'inbound') {
+                  try { await maybeBranchBroadcastReply(env, phone); } catch (_) {}
+                }
                 // ===== wa.me "Neón Mastery": ruteo directo a bandeja de cursos =====
                 // Gente que entra por el link de wa.me del grupo de precalentamiento
                 // del prelanzamiento manda el texto prearmado "Hola quiero acceder a
@@ -4935,6 +5065,16 @@ export default {
         const name = (body?.name || '').slice(0, 120);
         const intervalSec = Math.max(5, Math.min(3600, parseInt(body?.intervalSec, 10) || 32));
         const rawContacts = Array.isArray(body?.contacts) ? body.contacts : [];
+        // Flujo fusionado (Fase 2.5): respuesta IA (X/Y texto libre) + follow-up (Z plantilla). Opcional.
+        const replyAi = body?.reply_ai ? 1 : 0;
+        const replyPos = (body?.reply_pos_msg || '').slice(0, 2000);
+        const replyNeg = (body?.reply_neg_msg || '').slice(0, 2000);
+        let followupHours = parseFloat(body?.followup_hours);
+        if (!followupHours || isNaN(followupHours) || followupHours <= 0) followupHours = null;
+        const followupTemplate = (body?.followup_template || '').trim();
+        const followupLang = (body?.followup_lang || 'es').trim();
+        const followupParamMode = body?.followup_param_mode === 'none' ? 'none' : 'nombre';
+        const followupPreview = (body?.followup_preview || '').slice(0, 2000);
         // Normalizar telefonos + dedupe; descartar invalidos.
         const seen = new Set();
         const valid = [];
@@ -4954,8 +5094,8 @@ export default {
           return json({ ok: true, dryRun: true, valid: valid.length, invalid, interval_sec: intervalSec, start: new Date(startMs).toISOString(), duration_min: durationMin, sample: valid.slice(0, 5) });
         }
         const ins = await env.DB.prepare(
-          "INSERT INTO wa_broadcasts (name, template, lang, param_mode, body_preview, status, total, created_at, created_by) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, 'admin')"
-        ).bind(name, template, lang, paramMode, bodyPreview, valid.length, new Date().toISOString()).run();
+          "INSERT INTO wa_broadcasts (name, template, lang, param_mode, body_preview, status, total, created_at, created_by, reply_ai, reply_pos_msg, reply_neg_msg, followup_hours, followup_template, followup_lang, followup_param_mode, followup_preview) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, 'admin', ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).bind(name, template, lang, paramMode, bodyPreview, valid.length, new Date().toISOString(), replyAi, replyPos, replyNeg, followupHours, (followupHours ? followupTemplate : null), followupLang, followupParamMode, followupPreview).run();
         const id = ins?.meta?.last_row_id;
         if (!id) return json({ error: 'no se pudo crear el broadcast' }, 500);
         const kind = 'bc_' + id;
@@ -7837,6 +7977,8 @@ export default {
     // Goteo del broadcast "1 cupo · Comunidad Al Infinito" a no-pagadores del form de junio.
     ctx.waitUntil(processCupoBroadcastQueue(env));
     ctx.waitUntil(processCustomBroadcasts(env));
+    ctx.waitUntil(processBroadcastReplies(env));
+    ctx.waitUntil(processBroadcastFollowups(env));
     // Backfill del reenvío de comprobantes a Gaspar (lanzamiento, hoy+mañana):
     // reintenta los inbound media que el reenvío en vivo no logró mandar (glitch
     // de Meta o ventana 24h momentáneamente cerrada). Idempotente vía kv_cache,
