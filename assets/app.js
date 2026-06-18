@@ -8618,6 +8618,7 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
+        ${canCreateBriefs() ? `<button class="btn ${armedFupPhones.has(phone) ? 'btn-cyan' : 'btn-ghost'}" id="btn-chat-fup" title="Programar el seguimiento (FUP) de este presupuesto para mañana. No se duplica con el automático: lo manda el mismo cron de follow-ups." style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">${armedFupPhones.has(phone) ? '✓ FUP mañana' : '⏰ FUP mañana'}</button>` : ''}
         <span>${msgCount} msgs</span>
         ${['admin', 'comercial', 'cursos'].includes(getUserRole()) ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
@@ -10102,6 +10103,8 @@ function bindChatConversation() {
   // ese modal por si quedó abierto tras este render.
   const chatBriefBtn = document.getElementById('btn-chat-brief');
   if (chatBriefBtn) chatBriefBtn.onclick = openBriefFromChat;
+  const chatFupBtn = document.getElementById('btn-chat-fup');
+  if (chatFupBtn) chatFupBtn.onclick = () => armChatFup(chatState.selectedPhone);
   bindQuickCreateModal();
   const backBtn = document.getElementById('chat-back-btn');
   bindChatPostit();
@@ -10509,8 +10512,49 @@ function syncChatViewportHeight() {
   apply();
 }
 
+// Set de teléfonos con FUP armado a mano (botón "⏰ FUP mañana"). La verdad vive en
+// el backend (kv_cache 'fup-armed:<phone>'); esto solo refleja el estado del botón.
+const armedFupPhones = new Set();
+async function armChatFup(phone) {
+  if (!phone) return;
+  const btn = document.getElementById('btn-chat-fup');
+  const yaArmado = armedFupPhones.has(phone);
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/admin/wa/arm-fup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ phone, off: yaArmado })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    if (j.armed) { armedFupPhones.add(phone); toast('⏰ Listo — le mando el seguimiento mañana (no se duplica con el automático)'); }
+    else { armedFupPhones.delete(phone); toast('FUP desactivado'); }
+  } catch (e) {
+    toast('No se pudo: ' + (e.message || e));
+  } finally {
+    if (btn) btn.disabled = false;
+    _syncFupBtn(phone);
+  }
+}
+function _syncFupBtn(phone) {
+  const btn = document.getElementById('btn-chat-fup');
+  if (!btn || chatState.selectedPhone !== phone) return;
+  const on = armedFupPhones.has(phone);
+  btn.textContent = on ? '✓ FUP mañana' : '⏰ FUP mañana';
+  btn.classList.toggle('btn-cyan', on);
+  btn.classList.toggle('btn-ghost', !on);
+}
 function bindChat() {
   syncChatViewportHeight();
+  // Reflejar en el botón "⏰ FUP mañana" qué contactos ya están armados.
+  fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/admin/wa/arm-fup', { headers: authHeaders() })
+    .then(r => r.json()).then(j => {
+      if (j && Array.isArray(j.phones)) {
+        armedFupPhones.clear(); j.phones.forEach(p => armedFupPhones.add(p));
+        if (chatState.selectedPhone) _syncFupBtn(chatState.selectedPhone);
+      }
+    }).catch(() => {});
   // Load data
   if (!chatState.contacts.length && !chatState.loading) {
     // Cargar nombres de WA primero (rápido, solo phone→name) y después contactos

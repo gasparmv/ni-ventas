@@ -7337,6 +7337,31 @@ export default {
         return json({ messages: rs.results || [] });
       }
 
+      // ===== FUP manual ("⏰ FUP mañana" del chat) =====
+      // Marca un contacto como "armado": el MISMO cron de follow-ups
+      // (processPresupuestoFollowups) lo procesa con su dedup, así NUNCA se duplica
+      // con el FUP automático. Por defecto se manda mañana ~10 AR.
+      if (request.method === 'POST' && path === '/admin/wa/arm-fup') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const num = normalizeArPhone(body?.phone || '');
+        if (!num) return json({ error: 'numero invalido' }, 400);
+        const key = 'fup-armed:' + num;
+        if (body?.off) {
+          try { await env.DB.prepare('DELETE FROM kv_cache WHERE k = ?').bind(key).run(); } catch (_) {}
+          return json({ ok: true, armed: false });
+        }
+        // Due = mañana 10:00 AR (13:00 UTC). El cron lo levanta cuando due <= ahora.
+        const d = new Date(); d.setUTCDate(d.getUTCDate() + 1); d.setUTCHours(13, 0, 0, 0);
+        const due = d.toISOString();
+        try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at').bind(key, due, new Date().toISOString()).run(); } catch (_) {}
+        return json({ ok: true, armed: true, due });
+      }
+      if (request.method === 'GET' && path === '/admin/wa/arm-fup') {
+        const rs = await env.DB.prepare("SELECT k FROM kv_cache WHERE k LIKE 'fup-armed:%'").all();
+        const phones = (rs.results || []).map(r => r.k.slice('fup-armed:'.length));
+        return json({ ok: true, phones });
+      }
+
       if (request.method === 'DELETE' && path.startsWith('/admin/wa/schedule/')) {
         const id = path.split('/').pop();
         await env.DB.prepare('UPDATE scheduled_messages SET status = ? WHERE id = ? AND status = ?').bind('cancelled', id, 'pending').run();
@@ -8518,14 +8543,36 @@ async function processPresupuestoFollowups(env) {
     await logWaEvent(env, { to: '', kind: 'cron-pp-followup', ref: '', ok: false, error: 'query: ' + e.message });
     return;
   }
-  if (!rows.length) return;
-
-  // 2) Latest presupuesto por teléfono
+  // 2) Latest presupuesto por teléfono (ventana 23-48h = candidatos automáticos)
   const byPhone = new Map();
   for (const r of rows) {
     const ex = byPhone.get(r.phone);
     if (!ex || new Date(r.ts) > new Date(ex.ts)) byPhone.set(r.phone, r);
   }
+
+  // 2b) Contactos ARMADOS a mano (botón "⏰ FUP mañana" del chat) cuyo turno ya llegó
+  // (due <= ahora). Se agregan al MISMO loop de abajo → comparten el dedup, así NUNCA
+  // se duplican con el FUP automático. `forced` saltea los filtros de elegibilidad
+  // (pregunta pendiente) pero NUNCA el dedup ni el "ya compró".
+  const armedPhones = new Set();
+  try {
+    const ar = await env.DB.prepare("SELECT k, v FROM kv_cache WHERE k LIKE 'fup-armed:%'").all();
+    const nowIso = new Date().toISOString();
+    for (const row of (ar.results || [])) {
+      if (!row.v || row.v > nowIso) continue;            // todavía no es su turno (p.ej. mañana)
+      const ph = row.k.slice('fup-armed:'.length);
+      let pr = null;
+      try {
+        pr = await env.DB.prepare(
+          "SELECT phone, ts, body, sender_name FROM wa_messages WHERE phone=? AND direction='outbound' AND (substr(body,1,26)=? OR substr(body,1,26)=?) ORDER BY ts DESC LIMIT 1"
+        ).bind(ph, pfx1, pfx2).first();
+      } catch (_) {}
+      if (pr) { byPhone.set(ph, pr); armedPhones.add(ph); }
+      else { try { await env.DB.prepare("DELETE FROM kv_cache WHERE k=?").bind(row.k).run(); } catch (_) {} } // sin presupuesto → desarmar
+    }
+  } catch (_) {}
+
+  if (!byPhone.size) return;
 
   const failures = [];
   let sent = 0;
@@ -8550,9 +8597,13 @@ async function processPresupuestoFollowups(env) {
     //   (b) Dejó una PREGUNTA puntual sin responder (última inbound con "?" o pidiendo
     //       factura) → lo contesta una persona (queda en "⏳ Te toca"); mandar
     //       "¿pudiste verlo?" encima de una pregunta sin responder sería tonto.
+    const forced = armedPhones.has(p.phone);  // armado a mano desde el chat
+    // No molestar a quien YA compró / está cerrando (aplica también a los armados).
     if (conv.some(m => m.direction === 'outbound' && FUP_CIERRE_MARKERS.some(k => (m.body || '').toLowerCase().includes(k)))) continue;
+    // Pregunta puntual sin responder → la contesta una persona (queda en "⏳ Te toca").
+    // Los armados a mano SÍ pasan (Gaspar decidió mandarles el FUP igual).
     const ultimoMsg = conv[conv.length - 1];
-    if (ultimoMsg && ultimoMsg.direction === 'inbound' && /\?|factura/i.test(ultimoMsg.body || '')) continue;
+    if (!forced && ultimoMsg && ultimoMsg.direction === 'inbound' && /\?|factura/i.test(ultimoMsg.body || '')) continue;
     // ¿Ya tiene follow-up (cualquier variante: legacy, copa, low, high)?
     // Si el outbound posterior arranca con ALGUNO de los prefijos conocidos,
     // ya recibió follow-up.
@@ -8671,6 +8722,11 @@ async function processPresupuestoFollowups(env) {
     await logWaEvent(env, { to: p.phone, kind: 'pp-followup-' + variantKind, ref: 'pp-fu:' + p.phone, ok: r.ok, messageId: r.id, error: r.error });
     await new Promise(rs => setTimeout(rs, 600)); // delay anti rate-limit
   }
+
+  // Limpiar las marcas de los contactos armados que ya se procesaron (mandado o
+  // deduplicado). Los que todavía no llegaron a su turno (due futuro) no entraron
+  // en armedPhones, así que su marca queda intacta para mañana.
+  for (const ph of armedPhones) { try { await env.DB.prepare("DELETE FROM kv_cache WHERE k=?").bind('fup-armed:' + ph).run(); } catch (_) {} }
 
   // 5) Si fallaron envíos y hay número de admin configurado, mandar resumen
   if (failures.length && env.ADMIN_NOTIFY_PHONE) {
