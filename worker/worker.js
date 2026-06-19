@@ -1813,6 +1813,8 @@ async function buildChatContext(env, phone, maxMsgs = 100) {
     header += `\nORIGEN: Ad "${attrib.ad_name || attrib.source_id}" (campaña "${attrib.campaign_name || 'N/A'}")`;
     if (attrib.headline) header += `\nAd headline: ${attrib.headline}`;
     if (attrib.ad_body) header += `\nAd copy: ${String(attrib.ad_body).slice(0, 300)}`;
+    const _adVert = classifyAdVertical(attrib.campaign_name, attrib.ad_name, attrib.headline, attrib.ad_body);
+    header += `\nVERTICAL DEFINIDA POR EL AD: ${_adVert.toUpperCase()} — el cliente entro desde un anuncio de ${_adVert}, asi que NO hay ambiguedad carteles/cursos. Asumi ${_adVert} y anda directo a ese flujo (NO preguntes si busca un cartel o si quiere aprender/cursos).`;
   } else {
     header += `\nORIGEN: sin atribución registrada (capaz viene de orgánico o pre-mayo 2026)`;
   }
@@ -2032,6 +2034,17 @@ function inferLeadVertical(formName, adName) {
   if (text.includes('pop'))       return 'POP';
   if (text.includes('cartel'))    return 'tu cartel';
   return 'tu negocio';
+}
+
+// Clasifica un lead que vino de un AD de Meta en su vertical de NEGOCIO:
+// 'cursos' (quiere aprender / comunidad / Neon Mastery / Supernova) o 'carteles'
+// (quiere o vende carteles). Mira el texto disponible del ad (campaña / nombre /
+// headline / copy). Conservador: cursos SOLO con senales fuertes; el resto cae
+// en carteles (la mayoria de los click-to-WhatsApp, y el comercial puede re-derivar).
+function classifyAdVertical(...parts) {
+  const t = parts.filter(Boolean).join(' ').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (/\bcurso|mastery|comunidad|supernova|al infinito|aprend(e|er|iz)|emprend/.test(t)) return 'cursos';
+  return 'carteles';
 }
 
 // Extrae los valores típicos del field_data del lead. Meta usa slugs estándar
@@ -4466,6 +4479,12 @@ export default {
                   } catch (e) {
                     try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'AD_ATTR_ERR: ' + (e?.message || String(e))).run(); } catch(_) {}
                   }
+                  // Trazabilidad del ad -> bandeja: carteles a Joaquin (general), cursos a Abril.
+                  // Solo si el chat no tiene bandeja asignada o esta 'oculto' (no pisa asignaciones manuales).
+                  try {
+                    const _vert = classifyAdVertical(String(ref.headline || ''), String(ref.body || ''));
+                    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox = 'oculto'").bind(phone, _vert === 'cursos' ? 'cursos' : 'general', ts).run();
+                  } catch (_) {}
                 }
 
                 // Auto-labeling: deshabilitado por pedido del usuario (el matching
