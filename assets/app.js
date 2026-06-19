@@ -10155,7 +10155,7 @@ function bindChatConversation() {
   // (con teléfono + WhatsApp pre-cargados) por encima de la conversación. Y bindea
   // ese modal por si quedó abierto tras este render.
   const chatBriefBtn = document.getElementById('btn-chat-brief');
-  if (chatBriefBtn) chatBriefBtn.onclick = openBriefFromChat;
+  if (chatBriefBtn) chatBriefBtn.onclick = chooseBriefTypeFromChat;
   bindQuickCreateModal();
   const backBtn = document.getElementById('chat-back-btn');
   bindChatPostit();
@@ -11618,7 +11618,7 @@ function getUserRole() {
   if (u === 'emma' || u === 'emmanuel' || u === 'disenador') return 'disenador';
   return 'comercial'; // joaco, joaquin, default
 }
-function canCreateBriefs() { const r = getUserRole(); return r === 'comercial' || r === 'admin'; }
+function canCreateBriefs() { if (isCursosUser(STATE.user)) return false; const r = getUserRole(); return r === 'comercial' || r === 'admin'; }
 function canCotizar()      { const r = getUserRole(); return r === 'comercial' || r === 'admin'; }
 function canMarkListo()    { const r = getUserRole(); return r === 'disenador' || r === 'admin'; }
 
@@ -13195,6 +13195,7 @@ async function quickCreateBriefFromImage(file) {
     STATE.quickModalSaving = false;
     STATE.quickModalOrigen = 'wpp';  // default: la mayoría llega por WhatsApp
     STATE.quickModalIntExt = null;   // sin default: Joaco DEBE elegir Interior/Exterior
+    STATE.quickModalTipo = (briefProducto === 'corporea' ? 'corporea' : null);
     render();
     // Auto-focus en el input de título.
     setTimeout(() => {
@@ -13237,7 +13238,31 @@ function openNuevoBriefModal() {
 // (WhatsApp) ya cargados — el resto (título, medidas, notas, imágenes) lo completa
 // Joaco. El brief se crea como estado 'nuevo' → le llega a Emma en "A cotizar".
 // Es el MISMO modal del panel de Cotización, renderizado por encima de la conversación.
-function openBriefFromChat() {
+// Chooser: al tocar "Crear brief" en el chat, preguntamos si es para NEÓN o CORPÓREA
+// (cada uno arma el brief con el tipo correcto). Antes siempre creaba neón.
+function chooseBriefTypeFromChat() {
+  if (!canCreateBriefs()) { toast('No tenés permiso para crear briefs'); return; }
+  if (!chatState.selectedPhone) return;
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal" style="max-width:400px">
+      <div class="modal-h"><h3>¿Qué tipo de brief?</h3></div>
+      <div class="modal-body" style="display:flex;gap:12px;padding:18px">
+        <button class="btn btn-cyan" id="bt-neon" style="flex:1;padding:18px 10px;font-size:14px;font-weight:700;line-height:1.5">🔤<br>Cartel de neón</button>
+        <button class="btn btn-cyan" id="bt-corp" style="flex:1;padding:18px 10px;font-size:14px;font-weight:700;line-height:1.5">▣<br>Corpórea</button>
+      </div>
+      <div class="modal-actions"><button class="btn btn-ghost modal-cancel">Cancelar</button></div>
+    </div>`;
+  document.body.appendChild(bg);
+  void bg.offsetWidth; bg.classList.add('open'); requestAnimationFrame(() => bg.classList.add('open'));
+  const close = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  bg.querySelector('.modal-cancel').onclick = close;
+  bg.addEventListener('click', e => { if (e.target === bg) close(); });
+  bg.querySelector('#bt-neon').onclick = () => { close(); openBriefFromChat(false); };
+  bg.querySelector('#bt-corp').onclick = () => { close(); openBriefFromChat(true); };
+}
+function openBriefFromChat(corporea) {
   if (!canCreateBriefs()) { toast('No tenés permiso para crear briefs'); return; }
   const phone = chatState.selectedPhone;
   if (!phone) return;
@@ -13248,6 +13273,7 @@ function openBriefFromChat() {
   STATE.quickModalUrgente = false;
   STATE.quickModalPrefillPhone = String(phone).replace(/\D/g, '');
   STATE.quickModalIntExt = null;
+  STATE.quickModalTipo = corporea ? 'corporea' : null;
   render();
   setTimeout(() => {
     const el = document.getElementById('quick-modal-titulo');
@@ -13404,7 +13430,7 @@ async function confirmQuickCreate() {
   }
   // Interior / Exterior OBLIGATORIO para neones (define el precio). Sin default:
   // si Joaco no eligió, frenamos y resaltamos los botones en rojo.
-  const esCorpBrief = (STATE.view === 'corporeas');
+  const esCorpBrief = (STATE.view === 'corporeas') || STATE.quickModalTipo === 'corporea';
   if (!esCorpBrief && !STATE.quickModalIntExt) {
     ['INT', 'EXT'].forEach(o => {
       const b = document.getElementById('quick-modal-intext-' + o);
@@ -13471,7 +13497,7 @@ function renderQuickCreateModal() {
       <div id="quick-modal-card" class="nv-qmodal-card"
         style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:520px;width:100%;max-height:90vh;overflow-y:auto;padding:var(--s-4)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
-          <h2 style="margin:0;font-size:16px">✨ Nuevo brief</h2>
+          <h2 style="margin:0;font-size:16px">✨ Nuevo brief ${(STATE.view === 'corporeas' || STATE.quickModalTipo === 'corporea') ? '<span style="color:#c4a0ff;font-size:13px">· Corpórea ▣</span>' : '<span style="color:#8FD4DE;font-size:13px">· Neón</span>'}</h2>
           <button id="quick-modal-close" aria-label="Cerrar" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
         </div>
 
@@ -13510,7 +13536,7 @@ function renderQuickCreateModal() {
             style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;color:var(--fg);font-size:14px;margin-bottom:var(--s-3)">
         </div>
 
-        ${STATE.view !== 'corporeas' ? `
+        ${(STATE.view !== 'corporeas' && STATE.quickModalTipo !== 'corporea') ? `
         <!-- Interior / Exterior: OBLIGATORIO y SIN default — define el precio (EXT cobra extra).
              Si no se exige, Joaco se olvida y queda todo "interior" cobrado de menos. -->
         <label style="display:block;font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">¿Interior o exterior? <span style="color:#FF5566">*</span></label>
