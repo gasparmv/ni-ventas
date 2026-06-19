@@ -7245,18 +7245,34 @@ async function loadChatMessages(phone, opts) {
 
 async function sendChatMessage(phone, text) {
   if (!canAccessChat() || !phone || !text.trim()) return;
+  const body = text.trim();
+  const replyTo = chatState.replyingTo || '';
+  // OPTIMISTA: limpiamos el input YA (antes del envío) para que puedas escribir el
+  // siguiente mensaje sin esperar 1-2s a que termine. Si el envío falla, restauramos
+  // el texto para no perderlo.
+  const ta = document.getElementById('chat-input');
+  if (ta) { ta.value = ''; ta.style.height = 'auto'; }
+  chatState.replyingTo = null;
+  renderReplyBanner();
+  setDraft(phone, '');
+  const restoreOnFail = () => {
+    const t = document.getElementById('chat-input');
+    if (t && !t.value.trim()) { t.value = body; setDraft(phone, body); }
+    chatState.replyingTo = replyTo || null;
+    renderReplyBanner();
+  };
   chatState.sending = true;
   updateChatInputState();
-  const replyTo = chatState.replyingTo || '';
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ to: phone, body: text.trim(), reply_to: replyTo || undefined })
+      body: JSON.stringify({ to: phone, body, reply_to: replyTo || undefined })
     });
     const j = await r.json();
     if (!r.ok) {
       toast('Error: ' + (j.error || 'no se pudo enviar'));
+      restoreOnFail();
       return;
     }
     chatState.messages.push({
@@ -7266,27 +7282,22 @@ async function sendChatMessage(phone, text) {
       phone: phone,
       sender_name: '',
       msg_type: 'text',
-      body: text.trim(),
+      body,
       context_id: replyTo || '',
       status: 'sent'
     });
-    chatState.replyingTo = null;
-    renderReplyBanner();
     renderChatMessages();
-    const ta = document.getElementById('chat-input');
-    if (ta) { ta.value = ''; ta.style.height = 'auto'; }
-    setDraft(phone, ''); // limpiar borrador guardado de este chat
     // Copiloto: si esta respuesta salió de una sugerencia usada, logueamos el feedback.
     try {
       const sg = chatState.lastSuggestion;
       if (sg && sg.phone === phone && sg._used) {
-        logSuggestionFeedback(sg, text.trim(), text.trim() === String(sg.draft || '').trim() ? 'sent' : 'edited');
+        logSuggestionFeedback(sg, body, body === String(sg.draft || '').trim() ? 'sent' : 'edited');
         chatState.lastSuggestion = null;
       }
     } catch (_) {}
-    toast('Mensaje enviado');
   } catch (e) {
     toast('Error de red al enviar');
+    restoreOnFail();
   } finally {
     chatState.sending = false;
     updateChatInputState();
@@ -9233,11 +9244,11 @@ function renderChatMessages() {
         setTimeout(() => target.classList.remove('chat-msg-flash'), 2200);
       }, 100);
     } else {
-      container.scrollTop = container.scrollHeight;
+      scrollChatToBottom();
     }
     chatState.highlightWamid = null;
   } else {
-    container.scrollTop = container.scrollHeight;
+    scrollChatToBottom();
   }
 }
 
@@ -10115,9 +10126,8 @@ async function selectChatContact(phone) {
       bindChatConversation();
       bindAudioPlayers();
       bindMessageContextMenus();
-      // Scroll to bottom
-      const msgs = document.getElementById('chat-messages');
-      if (msgs) msgs.scrollTop = msgs.scrollHeight;
+      // Scroll al fondo (último mensaje), robusto a las imágenes que cargan después.
+      scrollChatToBottom();
     }
     // Update unread badge on contact
     const contactEl = document.querySelector(`[data-chat-phone="${phone}"]`);
@@ -10142,6 +10152,26 @@ function setDraft(phone, text) {
   try { localStorage.setItem(DRAFTS_LS_KEY, JSON.stringify(_chatDrafts)); } catch (_) {}
 }
 
+// Scroll robusto al fondo del chat. Un solo scrollTop=scrollHeight queda CORTO al
+// abrir, porque las imágenes todavía no cargaron (alto 0) → scrollHeight es chico y
+// te deja en el medio. Re-scrolleamos en rAF + timeouts, y cuando carga cada imagen
+// (solo si seguís cerca del fondo, para no tironearte si scrolleaste a leer historial).
+function scrollChatToBottom() {
+  const m = document.getElementById('chat-messages');
+  if (!m) return;
+  const toBottom = () => { const el = document.getElementById('chat-messages'); if (el) el.scrollTop = el.scrollHeight; };
+  toBottom();
+  requestAnimationFrame(toBottom);
+  setTimeout(toBottom, 150);
+  setTimeout(toBottom, 500);
+  m.querySelectorAll('img').forEach(img => {
+    if (img.complete) return;
+    img.addEventListener('load', () => {
+      const c = document.getElementById('chat-messages');
+      if (c && (c.scrollHeight - c.scrollTop - c.clientHeight) < 800) c.scrollTop = c.scrollHeight;
+    }, { once: true });
+  });
+}
 function bindChatConversation() {
   const ta = document.getElementById('chat-input');
   const btn = document.getElementById('chat-send-btn');
@@ -10210,7 +10240,7 @@ function bindChatConversation() {
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        if (ta.value.trim() && !chatState.sending) {
+        if (ta.value.trim()) {
           sendChatMessage(chatState.selectedPhone, ta.value);
         }
       }
@@ -10224,7 +10254,7 @@ function bindChatConversation() {
   if (btn) {
     btn.onclick = () => {
       const ta = document.getElementById('chat-input');
-      if (ta && ta.value.trim() && !chatState.sending) {
+      if (ta && ta.value.trim()) {
         sendChatMessage(chatState.selectedPhone, ta.value);
       }
     };
