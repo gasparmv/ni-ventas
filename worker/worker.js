@@ -8603,6 +8603,11 @@ async function processPresupuestoFollowups(env) {
     //   (b) Dejó una PREGUNTA puntual sin responder (última inbound con "?" o pidiendo
     //       factura) → lo contesta una persona (queda en "⏳ Te toca"); mandar
     //       "¿pudiste verlo?" encima de una pregunta sin responder sería tonto.
+    // NO duplicar: si ya le escribimos hace poco (≤12h), no mandamos el FUP
+    // automático. Cubre el caso de Joaco mandando un seguimiento MANUAL y el cron
+    // disparando otro encima minutos después. El presupuesto en sí tiene ≥23h, así
+    // que nunca cuenta acá — solo cuentan los mensajes posteriores (manuales).
+    if (conv.some(m => m.direction === 'outbound' && (now - new Date(m.ts).getTime()) < 12 * 60 * 60 * 1000)) continue;
     // No molestar a quien YA compró / está cerrando.
     if (conv.some(m => m.direction === 'outbound' && FUP_CIERRE_MARKERS.some(k => (m.body || '').toLowerCase().includes(k)))) continue;
     // Pregunta puntual sin responder → la contesta una persona (queda en "⏳ Te toca");
