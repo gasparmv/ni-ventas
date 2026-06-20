@@ -4374,6 +4374,51 @@ function b64ToBlob(b64, mime) {
 
 let pptoShowCotizador = false;
 
+// Modo revendedor: dado un precio (sugerido/retail), el revendedor lo compra a -5%
+// y lo revende marcando 25-35% SOBRE SU COSTO. Devuelve costo + rango de reventa + ganancia.
+function revendedorCalc(precio) {
+  const costo = Math.round(precio * 0.95);
+  return {
+    costo,
+    reventaMin: Math.round(costo * 1.25),
+    reventaMax: Math.round(costo * 1.35),
+    gananciaMin: Math.round(costo * 0.25),
+    gananciaMax: Math.round(costo * 0.35),
+  };
+}
+function toggleCotizadorRevendedor() { STATE.cotizadorRevendedor = !STATE.cotizadorRevendedor; render(); }
+// Bloque "Precios revendedor" para el cotizador: toggle + tabla (trans/negro) con
+// costo (-5%), reventa sugerida (+25-35% sobre el costo) y ganancia del revendedor.
+function renderRevendedorBlock(baseTrans, baseNegro) {
+  const on = !!STATE.cotizadorRevendedor;
+  const toggle = `<button class="btn btn-ghost" onclick="toggleCotizadorRevendedor()" style="font-size:11px;margin-top:var(--s-3)">🤝 ${on ? 'Ocultar' : 'Ver'} precios revendedor</button>`;
+  if (!on) return toggle;
+  const fila = (label, base) => {
+    const r = revendedorCalc(base);
+    return `<tr>
+      <td style="padding:5px 8px;color:var(--fg-subtle)">${label}</td>
+      <td style="padding:5px 8px;text-align:right">${fmtMoney(r.costo)}</td>
+      <td style="padding:5px 8px;text-align:right;color:var(--accent-cyan)">${fmtMoney(r.reventaMin)} – ${fmtMoney(r.reventaMax)}</td>
+      <td style="padding:5px 8px;text-align:right;color:#4ade80">${fmtMoney(r.gananciaMin)} – ${fmtMoney(r.gananciaMax)}</td>
+    </tr>`;
+  };
+  return `${toggle}
+    <div style="margin-top:var(--s-2);padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border:1px solid var(--border);border-radius:var(--r-sm)">
+      <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">🤝 Precios revendedor <span style="text-transform:none;color:var(--fg-mute)">· costo −5% · reventa +25 a 35% sobre el costo</span></div>
+      <table style="width:100%;font-size:12px;border-collapse:collapse">
+        <thead><tr style="color:var(--fg-mute);font-size:10px;text-transform:uppercase;letter-spacing:.04em">
+          <th style="text-align:left;padding:2px 8px">Base</th>
+          <th style="text-align:right;padding:2px 8px">Tu costo (−5%)</th>
+          <th style="text-align:right;padding:2px 8px">Reventa sugerida</th>
+          <th style="text-align:right;padding:2px 8px">Tu ganancia</th>
+        </tr></thead>
+        <tbody>
+          ${fila('Transparente', baseTrans)}
+          ${fila('Negro', baseNegro)}
+        </tbody>
+      </table>
+    </div>`;
+}
 function renderCotizadorResults() {
   const f = STATE.cotizadorForm;
   const valid = +f.ancho > 0 && +f.alto > 0;
@@ -4434,6 +4479,7 @@ function renderCotizadorResults() {
         <span style="margin-left:6px;font-size:10px;opacity:.7">${useNueva ? '(la spec dice "abaratar grandes / cobrar chicos complejos")' : '(toggle transicionUseNueva en cotizador_params para activar)'}</span>
       </div>
       `}
+      ${renderRevendedorBlock(multi ? totalTrans : r.transFinal, multi ? totalNegro : r.negroFinal)}
       <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);justify-content:flex-end;flex-wrap:wrap;align-items:center">
         ${STATE.cotizadorForm.textoOverride ? '<span class="pill amber" style="font-size:10px">texto modificado</span>' : ''}
         <button class="btn btn-ghost btn-icon" id="cot-copy-btn" title="Copiar presupuesto" aria-label="Copiar presupuesto">
