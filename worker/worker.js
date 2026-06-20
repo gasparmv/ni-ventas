@@ -1298,6 +1298,164 @@ async function processBroadcastFollowups(env) {
   } catch (_) { /* best-effort */ }
 }
 
+// ===== Flujo de cursos por ads (Fase 3) =====
+// Se dispara cuando un lead de un ad de CURSOS nos escribe: opener automatico
+// (msgs 1-3), branch por IA (manda link si responde positivo), y nutrir (msg 6
+// a +23h, msg 7 si responde). Queda OCULTO para Abril durante el opener; se
+// revela al responder o al nudge de 3hs. Apagado por flag kv 'cursos_flow_on'.
+async function cursosFlowOn(env) {
+  try { const f = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'cursos_flow_on'").first(); return !!f && f.v === '1'; } catch (_) { return false; }
+}
+
+// ¿El contacto ya esta mas adelante en el embudo del minicurso? (recibio el link
+// del minicurso o el regalo cotizador+guia). Si si, no arrancamos / no va el msg 6.
+async function gotMinicurso(env, phone) {
+  try {
+    const r = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind IN ('minicurso','minicurso_gift') AND status = 'sent' LIMIT 1").bind(phone).first();
+    return !!r;
+  } catch (_) { return false; }
+}
+
+// Texto de cada mensaje del flujo (texto libre; la ventana de 24h esta abierta
+// porque el lead nos escribio).
+function cursosFlowBody(kind) {
+  switch (kind) {
+    case 'cf_1': return 'Holaa como va?? Por acá Abril de Neon Infinito, sii, estamos con una formación online y GRATUITA de 2 clases, donde te contamos todo sobre el negocio de carteles de Neon LED: cómo venderlos (con o sin inversión en anuncios), cómo fabricarlos desde cero, y cómo empezar sin tener idea.';
+    case 'cf_2': return 'Al final, te contamos cómo acceder al programa completo, con seguimiento en nuestra comunidad, contenido grabado, y un regalo sorpresa para cada nuevo alumno.';
+    case 'cf_3': return 'Te paso el enlace para verla?';
+    case 'cf_4': return 'Acá te mando la página para que te registres en nuestra nueva formación GRATUITA de 2 clases.\nAprovechá a verla ahora en este link 👇🏼\nneoninfinito.com';
+    case 'cf_5': return 'Después nos contás qué te pareció (quedate hasta el final que hay sorpresa) ✨';
+    case 'cf_nudge': return 'buenas buenas! Pudiste ver el mensaje?';
+    case 'cf_6': return 'holaa, cómo va?? Contanos qué te pareció el Minicurso, si es que pudiste verlo completo ✨';
+    case 'cf_7': return 'Viste la 2da y última clase de la Formación gratuita hasta el final? Para saber si estás al tanto del programa Al Infinito, y todo lo que incluye (kit inicial de regalo, grupo de alumnos por Wpp, etc.)';
+    default: return '';
+  }
+}
+
+// Webhook (inbound): arranca el flujo para un lead nuevo de ad de cursos, o
+// transiciona el estado si ya esta en el flujo (respuesta al msg 3 o al msg 6).
+async function cursosFlowOnInbound(env, phone, msgBody, ts) {
+  if (!phone || !(await cursosFlowOn(env))) return;
+  try {
+    const row = await env.DB.prepare("SELECT stage FROM wa_cursos_flow WHERE phone = ?").bind(phone).first();
+    const now = new Date().toISOString();
+    if (!row) {
+      const attr = await env.DB.prepare("SELECT source_id, headline, body FROM wa_ad_attributions WHERE phone = ? ORDER BY ts DESC LIMIT 1").bind(phone).first();
+      if (!attr || !attr.source_id) return;
+      const vert = await adVerticalForSource(env, attr.source_id, attr.headline, attr.body);
+      if (vert !== 'cursos') return;
+      if (await gotMinicurso(env, phone)) return;
+      await env.DB.prepare("INSERT OR IGNORE INTO wa_cursos_flow (phone, stage, started_at, nudged, updated_at) VALUES (?, 'opener', ?, 0, ?)").bind(phone, now, now).run();
+      try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at").bind(phone, now).run(); } catch (_) {}
+      const base = Date.now() + 5 * 60 * 1000;
+      const enq = (k, off) => env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, ?, '', 'queued', ?, '')").bind(phone, k, new Date(base + off).toISOString());
+      try { await env.DB.batch([enq('cf_1', 0), enq('cf_2', 10000), enq('cf_3', 20000)]); } catch (_) {}
+      return;
+    }
+    const due2 = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+    if (row.stage === 'await1') {
+      await env.DB.prepare("UPDATE wa_cursos_flow SET stage = 'analyze1', reply_due = ?, updated_at = ? WHERE phone = ? AND stage = 'await1'").bind(due2, now, phone).run();
+      try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos', updated_at = ? WHERE phone = ?").bind(now, phone).run(); } catch (_) {}
+    } else if (row.stage === 'await6') {
+      await env.DB.prepare("UPDATE wa_cursos_flow SET stage = 'analyze6', m6_reply_due = ?, updated_at = ? WHERE phone = ? AND stage = 'await6'").bind(due2, now, phone).run();
+    }
+  } catch (_) {}
+}
+
+// Cron (*/1): motor del flujo. (a) manda cf_* vencidos + transiciona; (b) analiza
+// respuestas (cf_3/cf_6) con IA y ramifica; (c) nudge a las 3hs sin respuesta.
+async function processCursosFlow(env) {
+  if (!(await cursosFlowOn(env)) || await isWaBillingBlocked(env)) return;
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  // (a) Mandar mensajes cf_* vencidos (texto libre; cf_6 plantilla si cerro la ventana).
+  try {
+    const floorIso = new Date(nowMs - 72 * 60 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare("SELECT phone, kind FROM wa_autoreply_log WHERE kind LIKE 'cf/_%' ESCAPE '/' AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 6").bind(nowIso, floorIso).all();
+    for (const r of (rs.results || [])) {
+      const phone = r.phone, kind = r.kind;
+      let claim;
+      try { claim = await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sending' WHERE phone = ? AND kind = ? AND status = 'queued'").bind(phone, kind).run(); } catch (_) { continue; }
+      if (!claim?.meta?.changes) continue;
+      const body = cursosFlowBody(kind);
+      let res, asTemplate = false;
+      if (kind === 'cf_6') {
+        let lastIn = null;
+        try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound'").bind(phone).first(); lastIn = li && li.t; } catch (_) {}
+        const within24 = lastIn && (nowMs - new Date(lastIn).getTime()) < 24 * 60 * 60 * 1000;
+        if (within24) { res = await waSendText(env, phone, body); }
+        else { asTemplate = true; res = await waSendTemplate(env, phone, 'minicurso_feedback', 'es_AR', []); }
+      } else {
+        res = await waSendText(env, phone, body);
+      }
+      if (!res || !res.ok) { try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued' WHERE phone = ? AND kind = ?").bind(phone, kind).run(); } catch (_) {} continue; }
+      const sentTs = new Date().toISOString();
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = ?").bind(sentTs, phone, kind).run(); } catch (_) {}
+      if (res.id && body) { try { await env.DB.prepare(`INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', ?, ?, 'sent', '', 1) ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, automated = 1 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`).bind(sentTs, res.id, phone, asTemplate ? 'template' : 'text', body).run(); } catch (_) {} }
+      if (kind === 'cf_3') {
+        try { await env.DB.prepare("UPDATE wa_cursos_flow SET stage = 'await1', opener3_at = ?, updated_at = ? WHERE phone = ?").bind(sentTs, sentTs, phone).run(); } catch (_) {}
+      } else if (kind === 'cf_4') {
+        try { await env.DB.prepare("UPDATE wa_cursos_flow SET stage = 'link', link_sent_at = ?, updated_at = ? WHERE phone = ?").bind(sentTs, sentTs, phone).run(); } catch (_) {}
+        if (!(await gotMinicurso(env, phone))) {
+          try { await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'cf_6', '', 'queued', ?, '')").bind(phone, new Date(nowMs + 23 * 60 * 60 * 1000).toISOString()).run(); } catch (_) {}
+        }
+      } else if (kind === 'cf_6') {
+        try { await env.DB.prepare("UPDATE wa_cursos_flow SET stage = 'await6', updated_at = ? WHERE phone = ?").bind(sentTs, phone).run(); } catch (_) {}
+      } else if (kind === 'cf_7') {
+        try { await env.DB.prepare("UPDATE wa_cursos_flow SET stage = 'done', updated_at = ? WHERE phone = ?").bind(sentTs, phone).run(); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  // (b) Analizar respuestas pendientes con IA y ramificar.
+  try {
+    const an = await env.DB.prepare("SELECT phone, stage, started_at, link_sent_at FROM wa_cursos_flow WHERE (stage = 'analyze1' AND reply_due <= ?) OR (stage = 'analyze6' AND m6_reply_due <= ?) LIMIT 4").bind(nowIso, nowIso).all();
+    for (const r of (an.results || [])) {
+      const phone = r.phone;
+      const sinceTs = r.stage === 'analyze6' ? (r.link_sent_at || r.started_at) : r.started_at;
+      const claimStage = r.stage === 'analyze1' ? 'analyzing1' : 'analyzing6';
+      let cl; try { cl = await env.DB.prepare("UPDATE wa_cursos_flow SET stage = ? WHERE phone = ? AND stage = ?").bind(claimStage, phone, r.stage).run(); } catch (_) { continue; }
+      if (!cl?.meta?.changes) continue;
+      let texto = '';
+      try { const m = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'reaction' AND ts >= ? AND body != '' ORDER BY ts ASC LIMIT 20").bind(phone, sinceTs).all(); texto = (m.results || []).map(x => x.body).join('\n'); } catch (_) {}
+      const sentiment = await analyzeBroadcastReply(env, texto);
+      if (r.stage === 'analyze1') {
+        if (sentiment === 'positiva') {
+          const b = Date.now() + 2 * 60 * 1000;
+          try { await env.DB.batch([
+            env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'cf_4', '', 'queued', ?, '')").bind(phone, new Date(b).toISOString()),
+            env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'cf_5', '', 'queued', ?, '')").bind(phone, new Date(b + 10000).toISOString())
+          ]); } catch (_) {}
+          try { await env.DB.prepare("UPDATE wa_cursos_flow SET stage = 'await_link', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+        } else {
+          try { await env.DB.prepare("UPDATE wa_cursos_flow SET stage = 'done', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+        }
+      } else {
+        if (sentiment === 'positiva') {
+          try { await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'cf_7', '', 'queued', ?, '')").bind(phone, new Date(Date.now() + 2 * 60 * 1000).toISOString()).run(); } catch (_) {}
+        }
+        try { await env.DB.prepare("UPDATE wa_cursos_flow SET stage = 'done', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  // (c) Nudge a las 3hs si quedo en await1 sin responder (y se revela a Abril).
+  try {
+    const cutoff = new Date(nowMs - 3 * 60 * 60 * 1000).toISOString();
+    const nd = await env.DB.prepare("SELECT phone FROM wa_cursos_flow WHERE stage = 'await1' AND nudged = 0 AND opener3_at IS NOT NULL AND opener3_at <= ? LIMIT 4").bind(cutoff).all();
+    for (const r of (nd.results || [])) {
+      const phone = r.phone;
+      let cl; try { cl = await env.DB.prepare("UPDATE wa_cursos_flow SET nudged = 1, updated_at = ? WHERE phone = ? AND stage = 'await1' AND nudged = 0").bind(nowIso, phone).run(); } catch (_) { continue; }
+      if (!cl?.meta?.changes) continue;
+      const res = await waSendText(env, phone, cursosFlowBody('cf_nudge'));
+      if (res && res.ok) {
+        try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+        if (res.id) { try { await env.DB.prepare(`INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1) ON CONFLICT(wamid) DO NOTHING`).bind(new Date().toISOString(), res.id, phone, cursosFlowBody('cf_nudge')).run(); } catch (_) {} }
+      } else {
+        try { await env.DB.prepare("UPDATE wa_cursos_flow SET nudged = 0 WHERE phone = ?").bind(phone).run(); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+}
+
 // Cron (*/1): recupera media (imagenes/videos/audios/docs/stickers) cuyo
 // downloadMedia falló en el handler del webhook. Causa típica: race con Meta —
 // el webhook del msg llega antes de que el media esté disponible en su API, así
@@ -4496,13 +4654,21 @@ export default {
                   // Solo si el chat no tiene bandeja asignada o esta 'oculto' (no pisa asignaciones manuales).
                   try {
                     const _vert = await adVerticalForSource(env, ref.source_id, String(ref.headline || ''), String(ref.body || ''));
-                    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox = 'oculto'").bind(phone, _vert === 'cursos' ? 'cursos' : 'general', ts).run();
+                    // Si es lead de cursos y el flujo automatico esta activo, el flujo
+                    // maneja la bandeja (oculto durante el opener). No ruteamos aca.
+                    if (!(_vert === 'cursos' && await cursosFlowOn(env))) {
+                      await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox = 'oculto'").bind(phone, _vert === 'cursos' ? 'cursos' : 'general', ts).run();
+                    }
                   } catch (_) {}
                 }
 
                 // Auto-labeling: deshabilitado por pedido del usuario (el matching
                 // por keywords genera demasiados falsos positivos). El código
                 // queda en applyAutoLabels() por si se quiere reactivar.
+                // ===== Flujo de cursos por ads (Fase 3): arranque / transiciones =====
+                if (direction === 'inbound') {
+                  try { await cursosFlowOnInbound(env, phone, msgBody, ts); } catch (_) {}
+                }
               }
 
               // Coexistence: smb_message_echoes — mensajes que Joaco escribió
@@ -8106,6 +8272,7 @@ export default {
     ctx.waitUntil(processCustomBroadcasts(env));
     ctx.waitUntil(processBroadcastReplies(env));
     ctx.waitUntil(processBroadcastFollowups(env));
+    ctx.waitUntil(processCursosFlow(env));
     // Backfill del reenvío de comprobantes a Gaspar (lanzamiento, hoy+mañana):
     // reintenta los inbound media que el reenvío en vivo no logró mandar (glitch
     // de Meta o ventana 24h momentáneamente cerrada). Idempotente vía kv_cache,
