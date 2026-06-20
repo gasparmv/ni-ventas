@@ -1652,7 +1652,8 @@ async function cursosFlowOnInbound(env, phone, msgBody, ts) {
       if (vert !== 'cursos') return;
       if (await gotMinicurso(env, phone)) return;
       await env.DB.prepare("INSERT OR IGNORE INTO wa_cursos_flow (phone, stage, started_at, nudged, updated_at) VALUES (?, 'opener', ?, 0, ?)").bind(phone, now, now).run();
-      try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at").bind(phone, now).run(); } catch (_) {}
+      // Abril los ve DESDE EL INICIO: arrancan en su bandeja (cursos), no ocultos.
+      try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('general','oculto')").bind(phone, now).run(); } catch (_) {}
       const base = Date.now() + 5 * 60 * 1000;
       const enq = (k, off) => env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, ?, '', 'queued', ?, '')").bind(phone, k, new Date(base + off).toISOString());
       try { await env.DB.batch([enq('cf_1', 0), enq('cf_2', 10000), enq('cf_3', 20000)]); } catch (_) {}
@@ -5689,7 +5690,7 @@ export default {
           { id:'pago_ocr', group:'Otras', name:'OCR de comprobantes de pago', desc:'En ventana de lanzamiento, OCRea imagenes/PDF, clasifica y respalda. No responde al cliente.', trigger:'Inbound con imagen/PDF', state: PAGO_CAPTURA_ACTIVA ? 'active' : 'disabled', stats:{} },
           { id:'copilot', group:'Otras', name:'Analisis IA de chats (Copilot)', desc:'Analiza chats nuevos con Claude (hasta 5/h): sentimiento, objeciones, proxima accion.', trigger:'Cron horario', state: env.ANTHROPIC_API_KEY ? 'active' : 'inactivo', stats:{} },
           { id:'lead_b2b', group:'Leads / Ads', name:'Lead Ads B2B -> auto-WhatsApp', desc:'Cuando entra un lead del form B2B de Meta Ads, le manda la plantilla lead_b2b_followup en menos de 30s.', trigger:'Webhook de Meta (leadgen)', state: env.META_PAGE_ACCESS_TOKEN ? 'active' : 'disabled', stats:{ leads: leadsTotal, enviados: leadsSent, fallidos: Math.max(0, leadsTotal - leadsSent) } },
-          { id:'cursos_flow', group:'Disparadores por mensaje', name:'Flujo de cursos (ads)', desc:'Lead de ad de cursos -> opener automatico (oculto a Abril) -> branch por IA (manda el minicurso si responde + revela a Abril) -> nutrir (msg +23h) + nudge a las 3hs.', trigger:'Inbound de lead de ad de cursos', state: cfOn ? 'active' : 'disabled', stats:{ en_curso: cfActivos, total: cfTotal } },
+          { id:'cursos_flow', group:'Disparadores por mensaje', name:'Flujo de cursos (ads)', desc:'Lead de ad de cursos -> opener automatico (visible para Abril desde el inicio) -> branch por IA (manda el minicurso si responde) -> nutrir (msg +23h) + nudge a las 3hs.', trigger:'Inbound de lead de ad de cursos', state: cfOn ? 'active' : 'disabled', stats:{ en_curso: cfActivos, total: cfTotal } },
         ];
         // Broadcasts custom creados desde el panel (Fase 2): se suman arriba.
         try {
