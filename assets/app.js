@@ -14293,6 +14293,7 @@ function handleBriefAbrirCotizador() {
     ancho: b.ancho_cm || '',
     alto:  b.alto_cm  || '',
     neon:  b.neon_mt  || '',
+    tramos: b.tramos  || '',
     tipo:  b.tipo     || 'INT',
     cliente: b.cliente_nombre || b.diseno || '',
     canal: 'WPP',
