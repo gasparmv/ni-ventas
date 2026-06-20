@@ -202,7 +202,8 @@ async function getRevSession(env, request) {
 async function ensureRevSchema(env) {
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS revendedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT, email TEXT UNIQUE, whatsapp TEXT, pass_hash TEXT, pass_salt TEXT, created_at TEXT)").run();
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS revendedor_sesiones (token TEXT PRIMARY KEY, revendedor_id INTEGER, expires_at TEXT, created_at TEXT)").run();
-  await env.DB.prepare("CREATE TABLE IF NOT EXISTS revendedor_cotizaciones (id INTEGER PRIMARY KEY AUTOINCREMENT, revendedor_id INTEGER, ancho REAL, alto REAL, neon REAL, tramos REAL, tipo TEXT, sugerido INTEGER, costo INTEGER, reventa_min INTEGER, reventa_max INTEGER, created_at TEXT)").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS revendedor_cotizaciones (id INTEGER PRIMARY KEY AUTOINCREMENT, revendedor_id INTEGER, nombre TEXT, ancho REAL, alto REAL, neon REAL, tramos REAL, tipo TEXT, sugerido INTEGER, costo INTEGER, reventa_min INTEGER, reventa_max INTEGER, created_at TEXT)").run();
+  try { await env.DB.prepare("ALTER TABLE revendedor_cotizaciones ADD COLUMN nombre TEXT").run(); } catch (_) {}
 }
 
 const REVENDEDOR_HTML = `<!doctype html>
@@ -330,6 +331,7 @@ input:focus,select:focus{border-color:var(--cy);box-shadow:0 0 0 3px rgba(34,211
     var nm=(me&&me.nombre)?me.nombre:'';
     var h='<div class="top"><div class="hi">Hola <b>'+esc(nm)+'</b></div><button class="linkb" id="b_out">Salir</button></div>';
     h+='<div class="card"><h1>Cotizador</h1><div class="sub">Carga las medidas y te muestra tu costo y a cuanto revenderlo.</div>';
+    h+='<label>Nombre del dise&ntilde;o <span style="opacity:.6">(opcional)</span></label><input id="i_nombre" maxlength="60" placeholder="Ej: Logo del local">';
     h+='<div class="r"><div><label>Ancho (cm)</label><input id="i_ancho" type="number" inputmode="numeric" placeholder="50"></div><div><label>Alto (cm)</label><input id="i_alto" type="number" inputmode="numeric" placeholder="30"></div></div>';
     h+='<div class="r"><div><label>Metros de neon</label><input id="i_neon" type="number" inputmode="decimal" placeholder="3"></div><div><label>Tramos <span style="opacity:.6">(si no sabes, 1)</span></label><input id="i_tramos" type="number" inputmode="numeric" value="1"></div></div>';
     h+='<label>Tipo</label><select id="i_tipo"><option value="INT">Interior</option><option value="EXT">Exterior (resistente)</option></select>';
@@ -343,21 +345,22 @@ input:focus,select:focus{border-color:var(--cy);box-shadow:0 0 0 3px rgba(34,211
   }
   function baseCard(title,sw,o){
     var h='<div class="base"><h3><span class="sw" style="background:'+sw+'"></span>'+title+'</h3>';
-    h+='<div class="line"><span class="k">Precio sugerido (PVP)</span><span class="pvp">'+money(o.sugerido)+'</span></div>';
     h+='<div class="line big"><span class="k">Tu costo (-5%)</span><span class="v">'+money(o.costo)+'</span></div>';
     h+='<div class="line"><span class="k">Reventa sugerida</span><span class="v">'+money(o.reventaMin)+' a '+money(o.reventaMax)+'</span></div>';
     h+='<div class="line win"><span class="k">Tu ganancia</span><span class="v">'+money(o.gananciaMin)+' a '+money(o.gananciaMax)+'</span></div>';
     return h+'</div>';
   }
   function doCalc(){
+    var nombre=$('i_nombre')?$('i_nombre').value.trim():'';
     var ancho=+$('i_ancho').value, alto=+$('i_alto').value, neon=+$('i_neon').value, tramos=+$('i_tramos').value||1, tipo=$('i_tipo').value;
     if(!ancho||!alto||!neon)return showErr('Carga ancho, alto y metros de neon.');
     var b=$('b_calc');b.disabled=true;b.textContent='Calculando...';
-    api('/revendedor/cotizar',{method:'POST',body:{ancho:ancho,alto:alto,neon:neon,tramos:tramos,tipo:tipo}}).then(function(r){
+    api('/revendedor/cotizar',{method:'POST',body:{nombre:nombre,ancho:ancho,alto:alto,neon:neon,tramos:tramos,tipo:tipo}}).then(function(r){
       b.disabled=false;b.textContent='Calcular precio';
       if(!r.ok){ if(r.data&&r.data.error==='unauthorized')return logout(); return showErr((r.data&&r.data.error)||'No se pudo calcular.'); }
       if(!r.data||!r.data.trans)return showErr('No se pudo calcular.');
-      $('res').innerHTML=baseCard('Transparente','#cbd5e1',r.data.trans)+baseCard('Negro','#1f2937',r.data.negro);
+      var head=nombre?'<div class="card" style="padding:12px 16px;margin-bottom:10px"><b style="font-size:15px">'+esc(nombre)+'</b></div>':'';
+      $('res').innerHTML=head+baseCard('Transparente','#cbd5e1',r.data.trans)+baseCard('Negro','#1f2937',r.data.negro);
       loadHist();
     });
   }
@@ -368,7 +371,9 @@ input:focus,select:focus{border-color:var(--cy);box-shadow:0 0 0 3px rgba(34,211
       for(var i=0;i<its.length;i++){var it=its[i];
         var dt=new Date(it.created_at);var ds=isNaN(dt.getTime())?'':dt.toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit'});
         var sp=Math.round(it.ancho)+'x'+Math.round(it.alto)+' cm - '+it.neon+'m'+(it.tipo==='EXT'?' - ext':'');
-        h+='<div class="it"><div><div class="sp">'+esc(sp)+'</div><div class="d">'+ds+'</div></div><div class="pr"><div class="c">'+money(it.costo)+'</div><div class="d">rev '+money(it.reventa_min)+' a '+money(it.reventa_max)+'</div></div></div>';
+        var nm=(it.nombre&&String(it.nombre).trim())?String(it.nombre):'';
+        var title=nm||sp; var sub=nm?(sp+' - '+ds):ds;
+        h+='<div class="it"><div><div class="sp">'+esc(title)+'</div><div class="d">'+esc(sub)+'</div></div><div class="pr"><div class="c">'+money(it.costo)+'</div><div class="d">rev '+money(it.reventa_min)+' a '+money(it.reventa_max)+'</div></div></div>';
       }
       $('hist').innerHTML=h;
     });
@@ -5373,6 +5378,7 @@ export default {
         const ancho = +body.ancho || 0, alto = +body.alto || 0, neon = +body.neon || 0;
         const tramos = +body.tramos || 1;
         const tipo = String(body.tipo || 'INT').toUpperCase() === 'EXT' ? 'EXT' : 'INT';
+        const nombre = String(body.nombre || '').slice(0, 80).trim();
         if (ancho <= 0 || alto <= 0 || neon <= 0) return json({ error: 'Carga ancho, alto y metros de neon.' }, 400);
         if (ancho > 2000 || alto > 2000 || neon > 200) return json({ error: 'Medidas fuera de rango.' }, 400);
         const p = await revPriceParams(env);
@@ -5381,14 +5387,14 @@ export default {
         const now = new Date().toISOString();
         try {
           await env.DB.prepare(
-            'INSERT INTO revendedor_cotizaciones (revendedor_id, ancho, alto, neon, tramos, tipo, sugerido, costo, reventa_min, reventa_max, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
-          ).bind(sess.id, ancho, alto, neon, tramos, tipo, trans.sugerido, trans.costo, trans.reventaMin, trans.reventaMax, now).run();
+            'INSERT INTO revendedor_cotizaciones (revendedor_id, nombre, ancho, alto, neon, tramos, tipo, sugerido, costo, reventa_min, reventa_max, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
+          ).bind(sess.id, nombre, ancho, alto, neon, tramos, tipo, trans.sugerido, trans.costo, trans.reventaMin, trans.reventaMax, now).run();
         } catch (_) {}
         return json({ ok: true, trans, negro });
       }
       if (request.method === 'GET' && path === '/revendedor/historial') {
         const rs = await env.DB.prepare(
-          'SELECT id, ancho, alto, neon, tramos, tipo, sugerido, costo, reventa_min, reventa_max, created_at FROM revendedor_cotizaciones WHERE revendedor_id = ? ORDER BY id DESC LIMIT 40'
+          'SELECT id, nombre, ancho, alto, neon, tramos, tipo, sugerido, costo, reventa_min, reventa_max, created_at FROM revendedor_cotizaciones WHERE revendedor_id = ? ORDER BY id DESC LIMIT 40'
         ).bind(sess.id).all();
         return json({ ok: true, items: rs.results || [] });
       }
