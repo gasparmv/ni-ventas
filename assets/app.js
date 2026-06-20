@@ -4390,6 +4390,7 @@ function toggleCotizadorRevendedor() { STATE.cotizadorRevendedor = !STATE.cotiza
 // Bloque "Precios revendedor" para el cotizador: toggle + tabla (trans/negro) con
 // costo (-5%), reventa sugerida (+25-35% sobre el costo) y ganancia del revendedor.
 function renderRevendedorBlock(baseTrans, baseNegro) {
+  if (!isAdmin()) return '';  // precios de revendedor: solo Gaspar, no Joaco
   const on = !!STATE.cotizadorRevendedor;
   const toggle = `<button class="btn btn-ghost" onclick="toggleCotizadorRevendedor()" style="font-size:11px;margin-top:var(--s-3)">🤝 ${on ? 'Ocultar' : 'Ver'} precios revendedor</button>`;
   if (!on) return toggle;
