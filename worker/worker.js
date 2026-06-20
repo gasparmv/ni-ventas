@@ -74,6 +74,312 @@ function randomToken() {
   return Array.from(a).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// ============================================================================
+// ===== Portal Revendedores (cotizador publico con cuentas propias) ==========
+// Pagina + endpoints servidos por el worker, en dominio aparte del CRM.
+// El precio se calcula SERVER-SIDE: los costos/margenes internos nunca viajan
+// al navegador del revendedor. Auth separada de la del CRM.
+// ============================================================================
+
+// Defaults de la formula nueva (espejo de CONFIG.cotizadorDefaults en app.js).
+const REV_COTIZADOR_DEFAULTS = {
+  nv_fuente_corto: 4000, nv_fuente_medio: 4500, nv_fuente_largo: 9000,
+  nv_costo_m2: 75000, nv_costo_neon_mt: 2631,
+  nv_cf_ref_chico: 20500, nv_cf_ref_grande: 109000,
+  nv_margen_chico: 0.68, nv_margen_grande: 0.51,
+  nv_complejidad_coef: 0.018, nv_complejidad_pivote: 1.4, nv_complejidad_tope: 0.04,
+  nv_margen_min: 0.48, nv_margen_max: 0.72,
+  nv_divisor_base: 0.815,
+  ext_25: 20000, ext_50: 25000, ext_99: 35000,
+  nv_negro_ratio: 0.93
+};
+
+// Lee los COGS crudos (mismo cache 'cogs_excel' que usa el CRM). Si no hay cache,
+// los trae del Apps Script y los cachea. Devuelve el objeto data ({ok, cogs,...}).
+async function getCogsForPricing(env) {
+  try {
+    const row = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'cogs_excel'").first();
+    if (row && row.v) return JSON.parse(row.v);
+  } catch (_) {}
+  try {
+    if (!env.APPS_SCRIPT_URL) return null;
+    const r = await fetch(env.APPS_SCRIPT_URL + '?action=cogs', { redirect: 'follow' });
+    const data = await r.json();
+    if (data && data.ok) {
+      try {
+        await env.DB.prepare(
+          "INSERT INTO kv_cache (k, v, updated_at) VALUES ('cogs_excel', ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at"
+        ).bind(JSON.stringify(data), new Date().toISOString()).run();
+      } catch (_) {}
+    }
+    return data;
+  } catch (_) { return null; }
+}
+
+// Arma los params: defaults + overrides (cotizador_params) + COGS derivados
+// (misma derivacion que loadCogsFromExcel en app.js). Asi el precio sugerido
+// queda identico al que muestra el CRM.
+async function revPriceParams(env) {
+  const p = Object.assign({}, REV_COTIZADOR_DEFAULTS);
+  try {
+    const rs = await env.DB.prepare('SELECT key, value FROM cotizador_params').all();
+    for (const r of (rs.results || [])) { const n = Number(r.value); p[r.key] = isNaN(n) ? r.value : n; }
+  } catch (_) {}
+  try {
+    const data = await getCogsForPricing(env);
+    const c = data && data.cogs;
+    if (c) {
+      const costoM2 = Math.round((+c.costo_acrilico_trans || 0) + ((+c.anibal || 0) + (+c.emma || 0)) * (+c.venta_trans_imaginario || 0));
+      const neonMt = Math.round(+c.costo_neon_mt || 0);
+      const divisor = +(1 - (+c.mano_obra || 0) - (+c.joaquin || 0)).toFixed(4);
+      if (costoM2 > 0) p.nv_costo_m2 = costoM2;
+      if (neonMt > 0) p.nv_costo_neon_mt = neonMt;
+      if (isFinite(divisor) && divisor > 0 && divisor < 1) p.nv_divisor_base = divisor;
+    }
+  } catch (_) {}
+  return p;
+}
+
+// Port de calcCotizadorNuevo (app.js). Devuelve precio transparente y negro.
+function revCalcPrecio(input, p) {
+  const ancho = +input.ancho || 0, alto = +input.alto || 0;
+  const metros = +input.neon || 0, tramos = +input.tramos || 0;
+  const tipo = String(input.tipo || 'INT').toUpperCase();
+  const m2 = (ancho * alto) / 10000;
+  const cm = metros * 100;
+  const m2Sheet = (ancho * alto) / 100;
+  const fuente = cm <= 500 ? p.nv_fuente_corto : cm < 1200 ? p.nv_fuente_medio : p.nv_fuente_largo;
+  const cf = m2 * p.nv_costo_m2 + fuente + p.nv_costo_neon_mt * metros;
+  const lo = Math.log(p.nv_cf_ref_chico), hi = Math.log(p.nv_cf_ref_grande);
+  const x = Math.max(0, Math.min(1, (Math.log(Math.max(cf, 1)) - lo) / (hi - lo)));
+  const margenTam = p.nv_margen_chico - (p.nv_margen_chico - p.nv_margen_grande) * x;
+  const densidad = metros > 0 ? tramos / metros : 0;
+  const ajuste = Math.max(-p.nv_complejidad_tope, Math.min(p.nv_complejidad_tope, p.nv_complejidad_coef * (densidad - p.nv_complejidad_pivote)));
+  const margen = Math.max(p.nv_margen_min, Math.min(p.nv_margen_max, margenTam + ajuste));
+  let precio = cf / (p.nv_divisor_base - margen);
+  if (tipo === 'EXT') precio += m2Sheet <= 25 ? p.ext_25 : m2Sheet <= 50 ? p.ext_50 : p.ext_99;
+  const transFinal = Math.round(precio / 500) * 500;
+  const negroFinal = Math.round((transFinal * p.nv_negro_ratio) / 500) * 500;
+  return { transFinal, negroFinal };
+}
+
+// Numeros de revendedor: costo = sugerido -5%; reventa = costo +25% a +35%.
+function revNumbers(sugerido) {
+  const costo = Math.round(sugerido * 0.95);
+  return {
+    sugerido,
+    costo,
+    reventaMin: Math.round(costo * 1.25),
+    reventaMax: Math.round(costo * 1.35),
+    gananciaMin: Math.round(costo * 0.25),
+    gananciaMax: Math.round(costo * 0.35)
+  };
+}
+
+// --- Auth de revendedores (separada de la del CRM) ---
+function revHex(buf) { return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join(''); }
+function revBytes(hex) { const a = new Uint8Array(hex.length / 2); for (let i = 0; i < a.length; i++) a[i] = parseInt(hex.substr(i * 2, 2), 16); return a; }
+async function revHashPassword(password, saltHex) {
+  const salt = saltHex ? revBytes(saltHex) : crypto.getRandomValues(new Uint8Array(16));
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(password)), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 120000, hash: 'SHA-256' }, key, 256);
+  return { hash: revHex(bits), salt: saltHex || revHex(salt) };
+}
+async function getRevSession(env, request) {
+  const auth = request.headers.get('Authorization') || '';
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (!m) return null;
+  const token = m[1].trim();
+  try {
+    const row = await env.DB.prepare(
+      'SELECT s.revendedor_id AS id, s.expires_at AS exp, r.nombre AS nombre, r.email AS email FROM revendedor_sesiones s JOIN revendedores r ON r.id = s.revendedor_id WHERE s.token = ?'
+    ).bind(token).first();
+    if (!row) return null;
+    if (new Date(row.exp) < new Date()) return null;
+    return { id: row.id, nombre: row.nombre, email: row.email, token };
+  } catch (_) { return null; }
+}
+async function ensureRevSchema(env) {
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS revendedores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT, email TEXT UNIQUE, whatsapp TEXT, pass_hash TEXT, pass_salt TEXT, created_at TEXT)").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS revendedor_sesiones (token TEXT PRIMARY KEY, revendedor_id INTEGER, expires_at TEXT, created_at TEXT)").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS revendedor_cotizaciones (id INTEGER PRIMARY KEY AUTOINCREMENT, revendedor_id INTEGER, ancho REAL, alto REAL, neon REAL, tramos REAL, tipo TEXT, sugerido INTEGER, costo INTEGER, reventa_min INTEGER, reventa_max INTEGER, created_at TEXT)").run();
+}
+
+const REVENDEDOR_HTML = `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Neon Infinito - Revendedores</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0b0c14;--card:rgba(255,255,255,.04);--bd:rgba(255,255,255,.09);--tx:#e9ecf5;--mut:#8a90a6;--cy:#22d3ee;--vi:#a78bfa;--gr:#34d399}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:radial-gradient(1200px 600px at 50% -10%,rgba(167,139,250,.15),transparent),radial-gradient(900px 500px at 90% 8%,rgba(34,211,238,.10),transparent),var(--bg);color:var(--tx);min-height:100vh;line-height:1.45;-webkit-font-smoothing:antialiased}
+.wrap{max-width:520px;margin:0 auto;padding:22px 16px 60px}
+.brand{display:flex;align-items:center;gap:10px;justify-content:center;margin:14px 0 22px}
+.brand .dot{width:11px;height:11px;border-radius:50%;background:var(--cy);box-shadow:0 0 14px var(--cy),0 0 30px var(--cy)}
+.brand b{font-weight:800;letter-spacing:.5px;font-size:18px}
+.brand .t{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:2px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:18px;margin-bottom:14px}
+h1{font-size:20px;margin-bottom:4px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:8px}
+label{display:block;font-size:12px;color:var(--mut);margin:12px 0 5px;font-weight:600}
+input,select{width:100%;background:#0e1019;border:1px solid var(--bd);border-radius:10px;padding:12px 13px;color:var(--tx);font-size:15px;outline:none;transition:border .15s,box-shadow .15s}
+input:focus,select:focus{border-color:var(--cy);box-shadow:0 0 0 3px rgba(34,211,238,.15)}
+.r{display:flex;gap:10px}.r>div{flex:1}
+.btn{width:100%;border:0;border-radius:11px;padding:13px;font-size:15px;font-weight:700;color:#06121a;background:linear-gradient(135deg,var(--cy),var(--vi));cursor:pointer;margin-top:16px}
+.btn:active{transform:scale(.99)}.btn:disabled{opacity:.5}
+.tabs{display:flex;gap:6px;background:#0e1019;border:1px solid var(--bd);border-radius:11px;padding:4px}
+.tabs button{flex:1;border:0;background:transparent;color:var(--mut);padding:9px;border-radius:8px;font-weight:600;cursor:pointer;font-size:14px}
+.tabs button.on{background:linear-gradient(135deg,rgba(34,211,238,.2),rgba(167,139,250,.2));color:var(--tx)}
+.err{background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.3);color:#fca5a5;padding:10px 12px;border-radius:9px;font-size:13px;margin-top:12px;display:none}
+.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.top .hi{font-size:14px}.top .hi b{color:var(--cy)}
+.linkb{background:none;border:0;color:var(--mut);font-size:13px;cursor:pointer;text-decoration:underline}
+.base{border:1px solid var(--bd);border-radius:13px;padding:14px;margin-bottom:10px;background:#0e1019}
+.base h3{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--mut);margin-bottom:10px;display:flex;align-items:center;gap:7px}
+.base h3 .sw{width:13px;height:13px;border-radius:4px;border:1px solid rgba(255,255,255,.2)}
+.line{display:flex;justify-content:space-between;align-items:baseline;padding:5px 0}
+.line .k{font-size:13px;color:var(--mut)}
+.line .v{font-weight:700;font-size:15px}
+.line.big .v{font-size:21px;color:var(--cy)}
+.line.win .v{color:var(--gr)}
+.line .pvp{font-size:13px;color:var(--mut);font-weight:600}
+.hist .it{border-top:1px solid var(--bd);padding:10px 0;display:flex;justify-content:space-between;gap:8px}
+.hist .it:first-child{border-top:0}
+.hist .d{color:var(--mut);font-size:11px}
+.hist .sp{font-weight:600;font-size:13px}
+.hist .pr{text-align:right;white-space:nowrap}
+.hist .pr .c{color:var(--cy);font-weight:700;font-size:13px}
+.note{color:var(--mut);font-size:11px;margin-top:10px;text-align:center;line-height:1.5}
+.hide{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><span class="dot"></span><b>NEON INFINITO</b><span class="t">revendedores</span></div>
+  <div id="auth"></div>
+  <div id="app" class="hide"></div>
+</div>
+<script>
+(function(){
+  var TKEY='rev_token';
+  var token=localStorage.getItem(TKEY)||'';
+  var me=null;
+  function $(id){return document.getElementById(id);}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function money(n){return '$'+Number(Math.round(n||0)).toLocaleString('es-AR');}
+  function api(path,opts){
+    opts=opts||{}; opts.headers=opts.headers||{};
+    if(opts.body){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(opts.body);}
+    if(token)opts.headers['Authorization']='Bearer '+token;
+    return fetch(path,opts).then(function(r){return r.json().then(function(j){return {ok:r.ok,data:j};}).catch(function(){return {ok:r.ok,data:{}};});});
+  }
+  function showErr(m){var e=$('err');if(e){e.textContent=m;e.style.display='block';}}
+  var authTab='login';
+  function renderAuth(){
+    $('app').className='hide'; $('auth').className='';
+    var h='<div class="card">';
+    h+='<div class="tabs"><button id="tlogin" class="'+(authTab==='login'?'on':'')+'">Entrar</button><button id="tsignup" class="'+(authTab==='signup'?'on':'')+'">Crear cuenta</button></div>';
+    if(authTab==='signup'){
+      h+='<h1 style="margin-top:14px">Crear cuenta</h1><div class="sub">Para revender carteles de Neon Infinito.</div>';
+      h+='<label>Nombre / Negocio</label><input id="f_nombre" placeholder="Tu nombre o local">';
+      h+='<label>Email</label><input id="f_email" type="email" placeholder="vos@email.com" autocapitalize="off" autocomplete="email">';
+      h+='<label>WhatsApp</label><input id="f_wpp" type="tel" placeholder="11 2345 6789">';
+      h+='<label>Contrase&ntilde;a</label><input id="f_pass" type="password" placeholder="minimo 6 caracteres" autocomplete="new-password">';
+      h+='<button class="btn" id="b_signup">Crear cuenta</button>';
+    } else {
+      h+='<h1 style="margin-top:14px">Entrar</h1><div class="sub">Ingresa con tu email y contrase&ntilde;a.</div>';
+      h+='<label>Email</label><input id="f_email" type="email" placeholder="vos@email.com" autocapitalize="off" autocomplete="email">';
+      h+='<label>Contrase&ntilde;a</label><input id="f_pass" type="password" placeholder="tu contrase&ntilde;a" autocomplete="current-password">';
+      h+='<button class="btn" id="b_login">Entrar</button>';
+    }
+    h+='<div class="err" id="err"></div></div>';
+    h+='<div class="note">Precios de referencia para revendedores. La cotizacion final la confirma Neon Infinito.</div>';
+    $('auth').innerHTML=h;
+    $('tlogin').onclick=function(){authTab='login';renderAuth();};
+    $('tsignup').onclick=function(){authTab='signup';renderAuth();};
+    if($('b_signup'))$('b_signup').onclick=doSignup;
+    if($('b_login'))$('b_login').onclick=doLogin;
+  }
+  function doSignup(){
+    var nombre=$('f_nombre').value.trim(), email=$('f_email').value.trim(), wpp=$('f_wpp').value.trim(), pass=$('f_pass').value;
+    if(!nombre||!email||!wpp||!pass)return showErr('Completa todos los campos.');
+    if(pass.length<6)return showErr('La contrasena necesita al menos 6 caracteres.');
+    var b=$('b_signup');b.disabled=true;b.textContent='Creando...';
+    api('/revendedor/signup',{method:'POST',body:{nombre:nombre,email:email,whatsapp:wpp,password:pass}}).then(function(r){
+      b.disabled=false;b.textContent='Crear cuenta';
+      if(!r.ok||!r.data.token)return showErr(r.data.error||'No se pudo crear la cuenta.');
+      token=r.data.token;localStorage.setItem(TKEY,token);me=r.data.revendedor||{nombre:nombre};enterApp();
+    });
+  }
+  function doLogin(){
+    var email=$('f_email').value.trim(), pass=$('f_pass').value;
+    if(!email||!pass)return showErr('Completa email y contrasena.');
+    var b=$('b_login');b.disabled=true;b.textContent='Entrando...';
+    api('/revendedor/login',{method:'POST',body:{email:email,password:pass}}).then(function(r){
+      b.disabled=false;b.textContent='Entrar';
+      if(!r.ok||!r.data.token)return showErr(r.data.error||'Email o contrasena incorrectos.');
+      token=r.data.token;localStorage.setItem(TKEY,token);me=r.data.revendedor||{};enterApp();
+    });
+  }
+  function logout(){token='';localStorage.removeItem(TKEY);me=null;renderAuth();}
+  function enterApp(){ $('auth').className='hide'; $('app').className=''; renderApp(); loadHist(); }
+  function renderApp(){
+    var nm=(me&&me.nombre)?me.nombre:'';
+    var h='<div class="top"><div class="hi">Hola <b>'+esc(nm)+'</b></div><button class="linkb" id="b_out">Salir</button></div>';
+    h+='<div class="card"><h1>Cotizador</h1><div class="sub">Carga las medidas y te muestra tu costo y a cuanto revenderlo.</div>';
+    h+='<div class="r"><div><label>Ancho (cm)</label><input id="i_ancho" type="number" inputmode="numeric" placeholder="50"></div><div><label>Alto (cm)</label><input id="i_alto" type="number" inputmode="numeric" placeholder="30"></div></div>';
+    h+='<div class="r"><div><label>Metros de neon</label><input id="i_neon" type="number" inputmode="decimal" placeholder="3"></div><div><label>Tramos <span style="opacity:.6">(si no sabes, 1)</span></label><input id="i_tramos" type="number" inputmode="numeric" value="1"></div></div>';
+    h+='<label>Tipo</label><select id="i_tipo"><option value="INT">Interior</option><option value="EXT">Exterior (resistente)</option></select>';
+    h+='<button class="btn" id="b_calc">Calcular precio</button><div class="err" id="err"></div></div>';
+    h+='<div id="res"></div>';
+    h+='<div class="card"><h1 style="font-size:16px">Tus cotizaciones</h1><div id="hist" class="hist"><div class="note" style="margin:8px 0 0">Todavia no hiciste ninguna.</div></div></div>';
+    h+='<div class="note">Tu costo = 5% menos del precio sugerido. Reventa sugerida = 25% a 35% sobre tu costo.<br>Precios de referencia; la cotizacion final la confirma Neon Infinito.</div>';
+    $('app').innerHTML=h;
+    $('b_out').onclick=logout;
+    $('b_calc').onclick=doCalc;
+  }
+  function baseCard(title,sw,o){
+    var h='<div class="base"><h3><span class="sw" style="background:'+sw+'"></span>'+title+'</h3>';
+    h+='<div class="line"><span class="k">Precio sugerido (PVP)</span><span class="pvp">'+money(o.sugerido)+'</span></div>';
+    h+='<div class="line big"><span class="k">Tu costo (-5%)</span><span class="v">'+money(o.costo)+'</span></div>';
+    h+='<div class="line"><span class="k">Reventa sugerida</span><span class="v">'+money(o.reventaMin)+' a '+money(o.reventaMax)+'</span></div>';
+    h+='<div class="line win"><span class="k">Tu ganancia</span><span class="v">'+money(o.gananciaMin)+' a '+money(o.gananciaMax)+'</span></div>';
+    return h+'</div>';
+  }
+  function doCalc(){
+    var ancho=+$('i_ancho').value, alto=+$('i_alto').value, neon=+$('i_neon').value, tramos=+$('i_tramos').value||1, tipo=$('i_tipo').value;
+    if(!ancho||!alto||!neon)return showErr('Carga ancho, alto y metros de neon.');
+    var b=$('b_calc');b.disabled=true;b.textContent='Calculando...';
+    api('/revendedor/cotizar',{method:'POST',body:{ancho:ancho,alto:alto,neon:neon,tramos:tramos,tipo:tipo}}).then(function(r){
+      b.disabled=false;b.textContent='Calcular precio';
+      if(!r.ok){ if(r.data&&r.data.error==='unauthorized')return logout(); return showErr((r.data&&r.data.error)||'No se pudo calcular.'); }
+      if(!r.data||!r.data.trans)return showErr('No se pudo calcular.');
+      $('res').innerHTML=baseCard('Transparente','#cbd5e1',r.data.trans)+baseCard('Negro','#1f2937',r.data.negro);
+      loadHist();
+    });
+  }
+  function loadHist(){
+    api('/revendedor/historial').then(function(r){
+      if(!r.ok||!r.data||!r.data.items||!r.data.items.length)return;
+      var its=r.data.items,h='';
+      for(var i=0;i<its.length;i++){var it=its[i];
+        var dt=new Date(it.created_at);var ds=isNaN(dt.getTime())?'':dt.toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit'});
+        var sp=Math.round(it.ancho)+'x'+Math.round(it.alto)+' cm - '+it.neon+'m'+(it.tipo==='EXT'?' - ext':'');
+        h+='<div class="it"><div><div class="sp">'+esc(sp)+'</div><div class="d">'+ds+'</div></div><div class="pr"><div class="c">'+money(it.costo)+'</div><div class="d">rev '+money(it.reventa_min)+' a '+money(it.reventa_max)+'</div></div></div>';
+      }
+      $('hist').innerHTML=h;
+    });
+  }
+  if(token){ api('/revendedor/me').then(function(r){ if(r.ok&&r.data&&r.data.id){me=r.data;enterApp();} else {token='';localStorage.removeItem(TKEY);renderAuth();} }); }
+  else renderAuth();
+})();
+</script>
+</body>
+</html>`;
+
 // ===== WhatsApp Cloud API =====
 function normalizeArPhone(raw) {
   // Acepta varios formatos y devuelve E.164 sin "+" para Argentina mobile (549...)
@@ -4998,6 +5304,93 @@ export default {
         } catch (_) { /* si falla el cache no es fatal */ }
       }
       return json(data);
+    }
+
+    // ----- Portal Revendedores (publico, cuentas propias, aislado del CRM) -----
+    if (path === '/revendedores' || path === '/revendedores/') {
+      return new Response(REVENDEDOR_HTML, {
+        headers: { 'content-type': 'text/html; charset=utf-8', 'x-robots-tag': 'noindex, nofollow', 'cache-control': 'no-store' }
+      });
+    }
+    if (path.startsWith('/revendedor/')) {
+      await ensureRevSchema(env);
+
+      if (request.method === 'POST' && path === '/revendedor/signup') {
+        let body; try { body = await request.json(); } catch (_) { return json({ error: 'JSON invalido' }, 400); }
+        const nombre = String(body.nombre || '').trim();
+        const email = String(body.email || '').trim().toLowerCase();
+        const whatsapp = normalizeArPhone(body.whatsapp) || String(body.whatsapp || '').trim();
+        const password = String(body.password || '');
+        if (!nombre || !email || !whatsapp || !password) return json({ error: 'Faltan datos.' }, 400);
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json({ error: 'Email invalido.' }, 400);
+        if (password.length < 6) return json({ error: 'La contrasena necesita al menos 6 caracteres.' }, 400);
+        const dup = await env.DB.prepare('SELECT id FROM revendedores WHERE email = ?').bind(email).first();
+        if (dup) return json({ error: 'Ya existe una cuenta con ese email. Proba entrar.' }, 409);
+        const { hash, salt } = await revHashPassword(password);
+        const now = new Date().toISOString();
+        const ins = await env.DB.prepare(
+          'INSERT INTO revendedores (nombre, email, whatsapp, pass_hash, pass_salt, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+        ).bind(nombre, email, whatsapp, hash, salt, now).run();
+        let id = ins.meta && ins.meta.last_row_id;
+        if (!id) { const row = await env.DB.prepare('SELECT id FROM revendedores WHERE email = ?').bind(email).first(); id = row && row.id; }
+        const tk = randomToken();
+        const exp = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString();
+        await env.DB.prepare('INSERT INTO revendedor_sesiones (token, revendedor_id, expires_at, created_at) VALUES (?, ?, ?, ?)').bind(tk, id, exp, now).run();
+        return json({ ok: true, token: tk, revendedor: { id, nombre, email } });
+      }
+
+      if (request.method === 'POST' && path === '/revendedor/login') {
+        let body; try { body = await request.json(); } catch (_) { return json({ error: 'JSON invalido' }, 400); }
+        const email = String(body.email || '').trim().toLowerCase();
+        const password = String(body.password || '');
+        if (!email || !password) return json({ error: 'Faltan datos.' }, 400);
+        const u = await env.DB.prepare('SELECT id, nombre, email, pass_hash, pass_salt FROM revendedores WHERE email = ?').bind(email).first();
+        if (!u) return json({ error: 'Email o contrasena incorrectos.' }, 401);
+        const { hash } = await revHashPassword(password, u.pass_salt);
+        if (hash !== u.pass_hash) return json({ error: 'Email o contrasena incorrectos.' }, 401);
+        const tk = randomToken();
+        const now = new Date().toISOString();
+        const exp = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString();
+        await env.DB.prepare('INSERT INTO revendedor_sesiones (token, revendedor_id, expires_at, created_at) VALUES (?, ?, ?, ?)').bind(tk, u.id, exp, now).run();
+        return json({ ok: true, token: tk, revendedor: { id: u.id, nombre: u.nombre, email: u.email } });
+      }
+
+      // De aca en adelante requiere sesion de revendedor.
+      const sess = await getRevSession(env, request);
+      if (!sess) return unauthorized();
+
+      if (request.method === 'GET' && path === '/revendedor/me') {
+        return json({ id: sess.id, nombre: sess.nombre, email: sess.email });
+      }
+      if (request.method === 'POST' && path === '/revendedor/logout') {
+        await env.DB.prepare('DELETE FROM revendedor_sesiones WHERE token = ?').bind(sess.token).run();
+        return json({ ok: true });
+      }
+      if (request.method === 'POST' && path === '/revendedor/cotizar') {
+        let body; try { body = await request.json(); } catch (_) { return json({ error: 'JSON invalido' }, 400); }
+        const ancho = +body.ancho || 0, alto = +body.alto || 0, neon = +body.neon || 0;
+        const tramos = +body.tramos || 1;
+        const tipo = String(body.tipo || 'INT').toUpperCase() === 'EXT' ? 'EXT' : 'INT';
+        if (ancho <= 0 || alto <= 0 || neon <= 0) return json({ error: 'Carga ancho, alto y metros de neon.' }, 400);
+        if (ancho > 2000 || alto > 2000 || neon > 200) return json({ error: 'Medidas fuera de rango.' }, 400);
+        const p = await revPriceParams(env);
+        const { transFinal, negroFinal } = revCalcPrecio({ ancho, alto, neon, tramos, tipo }, p);
+        const trans = revNumbers(transFinal), negro = revNumbers(negroFinal);
+        const now = new Date().toISOString();
+        try {
+          await env.DB.prepare(
+            'INSERT INTO revendedor_cotizaciones (revendedor_id, ancho, alto, neon, tramos, tipo, sugerido, costo, reventa_min, reventa_max, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
+          ).bind(sess.id, ancho, alto, neon, tramos, tipo, trans.sugerido, trans.costo, trans.reventaMin, trans.reventaMax, now).run();
+        } catch (_) {}
+        return json({ ok: true, trans, negro });
+      }
+      if (request.method === 'GET' && path === '/revendedor/historial') {
+        const rs = await env.DB.prepare(
+          'SELECT id, ancho, alto, neon, tramos, tipo, sugerido, costo, reventa_min, reventa_max, created_at FROM revendedor_cotizaciones WHERE revendedor_id = ? ORDER BY id DESC LIMIT 40'
+        ).bind(sess.id).all();
+        return json({ ok: true, items: rs.results || [] });
+      }
+      return json({ error: 'not found' }, 404);
     }
 
     // ----- Admin (requiere Bearer) -----
