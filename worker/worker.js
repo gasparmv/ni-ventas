@@ -5272,6 +5272,9 @@ export default {
           const lr = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN template_status='sent' THEN 1 ELSE 0 END) AS sent FROM wa_leads").first();
           leadsTotal = lr?.total || 0; leadsSent = lr?.sent || 0;
         } catch (_) {}
+        let cfOn = false, cfTotal = 0, cfActivos = 0;
+        try { cfOn = (await env.DB.prepare("SELECT v FROM kv_cache WHERE k='cursos_flow_on'").first())?.v === '1'; } catch (_) {}
+        try { const cr = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN stage NOT IN ('done','stopped') THEN 1 ELSE 0 END) AS activos FROM wa_cursos_flow").first(); cfTotal = cr?.total || 0; cfActivos = cr?.activos || 0; } catch (_) {}
         // Estado de un broadcast segun su cola: en curso si quedan encolados,
         // completado si ya mando algo, inactivo si nunca tuvo data.
         const bcState = (k) => (byKind[k]?.queued ? 'en_curso' : (byKind[k]?.sent ? 'completado' : 'inactivo'));
@@ -5288,6 +5291,7 @@ export default {
           { id:'pago_ocr', group:'Otras', name:'OCR de comprobantes de pago', desc:'En ventana de lanzamiento, OCRea imagenes/PDF, clasifica y respalda. No responde al cliente.', trigger:'Inbound con imagen/PDF', state: PAGO_CAPTURA_ACTIVA ? 'active' : 'disabled', stats:{} },
           { id:'copilot', group:'Otras', name:'Analisis IA de chats (Copilot)', desc:'Analiza chats nuevos con Claude (hasta 5/h): sentimiento, objeciones, proxima accion.', trigger:'Cron horario', state: env.ANTHROPIC_API_KEY ? 'active' : 'inactivo', stats:{} },
           { id:'lead_b2b', group:'Leads / Ads', name:'Lead Ads B2B -> auto-WhatsApp', desc:'Cuando entra un lead del form B2B de Meta Ads, le manda la plantilla lead_b2b_followup en menos de 30s.', trigger:'Webhook de Meta (leadgen)', state: env.META_PAGE_ACCESS_TOKEN ? 'active' : 'disabled', stats:{ leads: leadsTotal, enviados: leadsSent, fallidos: Math.max(0, leadsTotal - leadsSent) } },
+          { id:'cursos_flow', group:'Disparadores por mensaje', name:'Flujo de cursos (ads)', desc:'Lead de ad de cursos -> opener automatico (oculto a Abril) -> branch por IA (manda el minicurso si responde + revela a Abril) -> nutrir (msg +23h) + nudge a las 3hs.', trigger:'Inbound de lead de ad de cursos', state: cfOn ? 'active' : 'disabled', stats:{ en_curso: cfActivos, total: cfTotal } },
         ];
         // Broadcasts custom creados desde el panel (Fase 2): se suman arriba.
         try {
