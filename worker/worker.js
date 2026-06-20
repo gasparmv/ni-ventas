@@ -213,53 +213,67 @@ const REVENDEDOR_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>Neon Infinito - Revendedores</title>
+<meta name="theme-color" content="#0A0A0F">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Archivo+Black&family=JetBrains+Mono:wght@400;500;700&display=swap">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#0b0c14;--card:rgba(255,255,255,.04);--bd:rgba(255,255,255,.09);--tx:#e9ecf5;--mut:#8a90a6;--cy:#22d3ee;--vi:#a78bfa;--gr:#34d399}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:radial-gradient(1200px 600px at 50% -10%,rgba(167,139,250,.15),transparent),radial-gradient(900px 500px at 90% 8%,rgba(34,211,238,.10),transparent),var(--bg);color:var(--tx);min-height:100vh;line-height:1.45;-webkit-font-smoothing:antialiased}
-.wrap{max-width:520px;margin:0 auto;padding:22px 16px 60px}
-.brand{display:flex;align-items:center;gap:10px;justify-content:center;margin:14px 0 22px}
-.brand .dot{width:11px;height:11px;border-radius:50%;background:var(--cy);box-shadow:0 0 14px var(--cy),0 0 30px var(--cy)}
-.brand b{font-weight:800;letter-spacing:.5px;font-size:18px}
-.brand .t{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:2px}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:18px;margin-bottom:14px}
-h1{font-size:20px;margin-bottom:4px}
-.sub{color:var(--mut);font-size:13px;margin-bottom:8px}
-label{display:block;font-size:12px;color:var(--mut);margin:12px 0 5px;font-weight:600}
-input,select{width:100%;background:#0e1019;border:1px solid var(--bd);border-radius:10px;padding:12px 13px;color:var(--tx);font-size:15px;outline:none;transition:border .15s,box-shadow .15s}
-input:focus,select:focus{border-color:var(--cy);box-shadow:0 0 0 3px rgba(34,211,238,.15)}
+:root{
+--red:#FF1830;--red-glow:#FF4A5E;--cyan:#8FD4DE;
+--bg:#0A0A0F;--raised:#101018;--card:#1A1A24;--bd:#262633;--bd2:#3A3A4A;
+--fg:#FFFFFF;--mut:#BFBFCF;--sub:#8A8A9E;--faint:#5B5B6E;--gr:#4ADE80;
+--fdisp:'Archivo Black','Archivo',system-ui,sans-serif;
+--fsans:'Archivo',ui-sans-serif,system-ui,-apple-system,sans-serif;
+--fmono:'JetBrains Mono',ui-monospace,Menlo,monospace;
+--glow-red:0 0 14px rgba(255,24,48,.6),0 0 32px rgba(255,24,48,.34);
+--glow-cyan:0 0 12px rgba(143,212,222,.7),0 0 30px rgba(143,212,222,.4);
+}
+body{font-family:var(--fsans);background:radial-gradient(1100px 600px at 50% -15%,rgba(255,24,48,.10),transparent),radial-gradient(900px 520px at 88% 4%,rgba(143,212,222,.07),transparent),var(--bg);color:var(--fg);min-height:100vh;line-height:1.45;-webkit-font-smoothing:antialiased}
+.wrap{max-width:520px;margin:0 auto;padding:28px 16px 60px}
+.brand{display:flex;flex-direction:column;align-items:center;gap:9px;margin:6px 0 26px}
+.brand .logo{height:46px;width:auto;filter:drop-shadow(0 0 9px rgba(255,21,21,.55)) drop-shadow(0 0 12px rgba(42,216,255,.4))}
+.brand .tag{font-family:var(--fmono);font-size:11px;text-transform:uppercase;letter-spacing:.3em;color:var(--sub)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:18px;padding:20px;margin-bottom:14px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.03)}
+h1{font-family:var(--fdisp);font-size:23px;text-transform:uppercase;letter-spacing:-.01em;margin-bottom:5px;line-height:1.05}
+.sub{color:var(--sub);font-size:13px;margin-bottom:8px}
+label{display:block;font-family:var(--fmono);font-size:10.5px;text-transform:uppercase;letter-spacing:.12em;color:var(--sub);margin:14px 0 6px;font-weight:500}
+input,select{width:100%;background:var(--raised);border:1px solid var(--bd);border-radius:10px;padding:12px 13px;color:var(--fg);font-size:15px;font-family:var(--fsans);outline:none;transition:border .15s,box-shadow .15s}
+input::placeholder{color:var(--faint)}
+input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,212,222,.16)}
 .r{display:flex;gap:10px}.r>div{flex:1}
-.btn{width:100%;border:0;border-radius:11px;padding:13px;font-size:15px;font-weight:700;color:#06121a;background:linear-gradient(135deg,var(--cy),var(--vi));cursor:pointer;margin-top:16px}
-.btn:active{transform:scale(.99)}.btn:disabled{opacity:.5}
-.tabs{display:flex;gap:6px;background:#0e1019;border:1px solid var(--bd);border-radius:11px;padding:4px}
-.tabs button{flex:1;border:0;background:transparent;color:var(--mut);padding:9px;border-radius:8px;font-weight:600;cursor:pointer;font-size:14px}
-.tabs button.on{background:linear-gradient(135deg,rgba(34,211,238,.2),rgba(167,139,250,.2));color:var(--tx)}
-.err{background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.3);color:#fca5a5;padding:10px 12px;border-radius:9px;font-size:13px;margin-top:12px;display:none}
-.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-.top .hi{font-size:14px}.top .hi b{color:var(--cy)}
-.linkb{background:none;border:0;color:var(--mut);font-size:13px;cursor:pointer;text-decoration:underline}
-.base{border:1px solid var(--bd);border-radius:13px;padding:14px;margin-bottom:10px;background:#0e1019}
-.base h3{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--mut);margin-bottom:10px;display:flex;align-items:center;gap:7px}
+.btn{width:100%;border:0;border-radius:11px;padding:14px;font-family:var(--fsans);font-size:14px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:#fff;background:var(--red);cursor:pointer;margin-top:18px;box-shadow:var(--glow-red);transition:transform .1s,box-shadow .2s,filter .2s}
+.btn:hover{filter:brightness(1.08);box-shadow:0 0 18px rgba(255,24,48,.85),0 0 46px rgba(255,24,48,.45)}
+.btn:active{transform:scale(.99)}.btn:disabled{opacity:.45;box-shadow:none;filter:none}
+.tabs{display:flex;gap:6px;background:var(--raised);border:1px solid var(--bd);border-radius:11px;padding:4px}
+.tabs button{flex:1;border:0;background:transparent;color:var(--sub);padding:10px;border-radius:8px;font-family:var(--fsans);font-weight:700;cursor:pointer;font-size:13px;text-transform:uppercase;letter-spacing:.04em}
+.tabs button.on{background:var(--card);color:var(--fg);box-shadow:inset 0 0 0 1px var(--bd2)}
+.err{background:rgba(255,24,48,.12);border:1px solid rgba(255,24,48,.34);color:var(--red-glow);padding:10px 12px;border-radius:9px;font-size:13px;margin-top:12px;display:none}
+.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.top .hi{font-size:14px;color:var(--mut)}.top .hi b{color:var(--cyan);font-weight:700}
+.linkb{background:none;border:0;color:var(--sub);font-size:11px;cursor:pointer;font-family:var(--fmono);text-transform:uppercase;letter-spacing:.08em}
+.base{border:1px solid var(--bd);border-radius:14px;padding:16px;margin-bottom:10px;background:var(--raised)}
+.base h3{font-family:var(--fmono);font-size:11px;text-transform:uppercase;letter-spacing:.16em;color:var(--sub);margin-bottom:12px;display:flex;align-items:center;gap:8px}
 .base h3 .sw{width:13px;height:13px;border-radius:4px;border:1px solid rgba(255,255,255,.2)}
-.line{display:flex;justify-content:space-between;align-items:baseline;padding:5px 0}
-.line .k{font-size:13px;color:var(--mut)}
-.line .v{font-weight:700;font-size:15px}
-.line.big .v{font-size:21px;color:var(--cy)}
+.line{display:flex;justify-content:space-between;align-items:baseline;padding:6px 0}
+.line .k{font-size:13px;color:var(--sub)}
+.line .v{font-weight:700;font-size:15px;font-family:var(--fmono)}
+.line.big{padding-top:8px}
+.line.big .v{font-size:23px;color:var(--cyan);text-shadow:var(--glow-cyan)}
 .line.win .v{color:var(--gr)}
-.line .pvp{font-size:13px;color:var(--mut);font-weight:600}
-.hist .it{border-top:1px solid var(--bd);padding:10px 0;display:flex;justify-content:space-between;gap:8px}
+.hist .it{border-top:1px solid var(--bd);padding:11px 0;display:flex;justify-content:space-between;gap:8px}
 .hist .it:first-child{border-top:0}
-.hist .d{color:var(--mut);font-size:11px}
-.hist .sp{font-weight:600;font-size:13px}
+.hist .d{color:var(--faint);font-size:11px;font-family:var(--fmono)}
+.hist .sp{font-weight:700;font-size:13px}
 .hist .pr{text-align:right;white-space:nowrap}
-.hist .pr .c{color:var(--cy);font-weight:700;font-size:13px}
-.note{color:var(--mut);font-size:11px;margin-top:10px;text-align:center;line-height:1.5}
+.hist .pr .c{color:var(--cyan);font-weight:700;font-size:13px;font-family:var(--fmono)}
+.note{color:var(--faint);font-size:11px;margin-top:10px;text-align:center;line-height:1.6}
 .hide{display:none}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="brand"><span class="dot"></span><b>NEON INFINITO</b><span class="t">revendedores</span></div>
+  <div class="brand"><svg class="logo" viewBox="1500 600 1300 800" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="NEON INFINITO"><path fill="#FF1515" d="M1830.98,943.35c-3.12,0-6.17-1.29-8.36-3.67l-236.8-257.99v250.24c0,6.26-5.08,11.34-11.34,11.34 s-11.34-5.08-11.34-11.34V652.57c0-4.67,2.87-8.87,7.22-10.57c4.36-1.7,9.31-0.54,12.47,2.9l236.8,257.99V652.57 c0-6.26,5.08-11.34,11.34-11.34s11.34,5.08,11.34,11.34v279.44c0,4.67-2.87,8.87-7.22,10.57 C1833.75,943.1,1832.36,943.35,1830.98,943.35z"/><path fill="#FF1515" d="M2081.45,940.36h-178.79c-6.26,0-11.34-5.08-11.34-11.34V647.9c0-6.26,5.08-11.34,11.34-11.34h178.79 c6.26,0,11.34,5.08,11.34,11.34s-5.08,11.34-11.34,11.34H1914v258.45h167.45c6.26,0,11.34,5.08,11.34,11.34 S2087.71,940.36,2081.45,940.36z"/><path fill="#FF1515" d="M2246.82,944.74c-86.17,0-156.28-70.11-156.28-156.28c0-86.17,70.11-156.28,156.28-156.28 s156.28,70.11,156.28,156.28C2403.1,874.63,2332.99,944.74,2246.82,944.74z M2246.82,654.86c-73.67,0-133.6,59.93-133.6,133.6 s59.93,133.6,133.6,133.6s133.6-59.93,133.6-133.6S2320.49,654.86,2246.82,654.86z"/><path fill="#FF1515" d="M2708.34,943.35c-3.12,0-6.17-1.29-8.36-3.67l-236.8-257.99v250.32c0,6.26-5.08,11.34-11.34,11.34 s-11.34-5.08-11.34-11.34V652.57c0-4.67,2.87-8.87,7.22-10.57c4.36-1.7,9.31-0.54,12.47,2.9L2697,902.89V652.57 c0-6.26,5.08-11.34,11.34-11.34s11.34,5.08,11.34,11.34v279.44c0,4.67-2.87,8.87-7.22,10.57 C2711.12,943.1,2709.72,943.35,2708.34,943.35z"/><path fill="#FF1515" d="M1995.54,796.87h-57.82c-6.26,0-11.34-5.08-11.34-11.34s5.08-11.34,11.34-11.34h57.82 c6.26,0,11.34,5.08,11.34,11.34S2001.8,796.87,1995.54,796.87z"/><path fill="#2AD8FF" d="M2420.21,1351.48c-20.88,0-41.89-3.86-62.74-11.54c-26.3-9.69-50.25-24.92-71.18-45.27l-106.05-103.06 l-106.14,102.08c-42.21,40.6-99.11,60.48-156.12,54.55c-37.24-3.87-71.06-18.04-97.81-40.97c-62.45-53.54-60.97-133.61-60.88-137 c1.65-59.37,34.98-115.4,86.98-146.21c43.23-25.61,97.1-31.28,147.81-15.54c29.11,9.03,56.52,25.5,79.29,47.62l106.95,103.93 l109.47-105.28c14.69-14.13,31.05-25.69,48.62-34.37c28.64-14.15,73.59-28.37,125.08-15.8c37.07,9.05,71.41,30.39,96.7,60.09 c27.05,31.77,41.44,69.79,41.61,109.93c0.18,43.03-16.83,84.77-47.87,117.52c-28.52,30.09-67.58,50.95-107.16,57.23 C2437.96,1350.78,2429.09,1351.48,2420.21,1351.48z M2196.59,1175.88l105.5,102.52c18.65,18.12,39.92,31.67,63.22,40.26 c26.03,9.6,52.24,12.4,77.9,8.33c67.07-10.64,136.24-70.5,135.91-152.26c-0.32-77.9-61.11-133.46-121.01-148.08 c-44.87-10.95-84.4,1.62-109.66,14.1c-15.48,7.65-29.93,17.87-42.94,30.38L2196.59,1175.88z M1936.82,1022.44 c-28.07,0-55.38,7.14-78.98,21.13c-45.37,26.88-74.44,75.67-75.88,127.33c-0.08,2.94-1.36,72.57,52.97,119.15 c23.24,19.92,52.76,32.24,85.4,35.64c50.35,5.23,100.67-12.39,138.06-48.34l105.58-101.55l-106.4-103.4 c-20.21-19.64-44.49-34.24-70.2-42.22C1970.68,1024.99,1953.61,1022.44,1936.82,1022.44z"/></svg><span class="tag">Revendedores</span></div>
   <div id="auth"></div>
   <div id="app" class="hide"></div>
 </div>
