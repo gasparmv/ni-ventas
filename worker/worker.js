@@ -182,7 +182,7 @@ function revBytes(hex) { const a = new Uint8Array(hex.length / 2); for (let i = 
 async function revHashPassword(password, saltHex) {
   const salt = saltHex ? revBytes(saltHex) : crypto.getRandomValues(new Uint8Array(16));
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(password)), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 120000, hash: 'SHA-256' }, key, 256);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' }, key, 256);
   return { hash: revHex(bits), salt: saltHex || revHex(salt) };
 }
 async function getRevSession(env, request) {
@@ -5313,6 +5313,7 @@ export default {
       });
     }
     if (path.startsWith('/revendedor/')) {
+      try {
       await ensureRevSchema(env);
 
       if (request.method === 'POST' && path === '/revendedor/signup') {
@@ -5391,6 +5392,10 @@ export default {
         return json({ ok: true, items: rs.results || [] });
       }
       return json({ error: 'not found' }, 404);
+      } catch (e) {
+        console.error('rev_error', (e && (e.stack || e.message)) || e);
+        return json({ error: 'Hubo un error, proba de nuevo.' }, 500);
+      }
     }
 
     // ----- Admin (requiere Bearer) -----
