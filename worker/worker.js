@@ -2737,14 +2737,23 @@ async function processIgWebhook(env, body) {
         }
         // Hora REAL del mensaje (epoch ms del webhook), no la de ahora -> así el replay de logs
         // viejos respeta el orden cronológico de la conversación.
+        // Hora REAL del mensaje (epoch ms del webhook), no la de ahora -> así el replay de logs
+        // viejos respeta el orden cronológico de la conversación.
         const ts = m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString();
-        const senderName = isEcho ? '' : await igResolveName(env, custId);  // en echo el remitente somos nosotros
         // Media a R2 (la URL de IG vence en horas). No aplica a ad refs.
         let storedMedia = rawMediaUrl;
         if (rawMediaUrl && env.MEDIA) {
           const k = await downloadIgMedia(env, rawMediaUrl, mid, attType);
           if (k) storedMedia = k;
         }
+        // Echo de story/reacción/share SIN texto ni media -> nada que mostrar. No lo guardamos
+        // (si no, aparece una fila vacía que se ve como "[text]" en la lista).
+        if (!isAdRef && !String(body).trim() && !storedMedia) continue;
+        // Nombre del cliente: en inbound es el sender; en echo igual lo resolvemos (populando
+        // wa_contacts) para que los contactos a los que SOLO les escribimos no salgan como el ID.
+        // El sender_name del mensaje va '' en echo (el remitente somos nosotros).
+        const senderName = isEcho ? '' : await igResolveName(env, custId);
+        if (isEcho) { try { await igResolveName(env, custId); } catch (_) {} }
         // 1) Guardar el mensaje (channel='ig'). El trigger arma resumen + nombre.
         try {
           await env.DB.prepare(
@@ -6312,8 +6321,9 @@ export default {
         if (!(await igGetToken(env))) return json({ error: 'no IG token' }, 400);
         let contactos = 0, media = 0;
         try {
-          // 1) Contactos de IG a los que les falta @usuario o foto -> re-resolver.
-          const rs = await env.DB.prepare("SELECT phone FROM wa_contacts WHERE phone IN (SELECT phone FROM wa_chats_summary WHERE channel='ig') AND (pic_url IS NULL OR pic_url='' OR username IS NULL OR username='')").all();
+          // 1) Contactos de IG sin nombre/@usuario/foto -> re-resolver. Incluye los "echo-only"
+          //    (a los que solo les escribimos y no están en wa_contacts) vía LEFT JOIN.
+          const rs = await env.DB.prepare("SELECT s.phone AS phone FROM wa_chats_summary s LEFT JOIN wa_contacts c ON c.phone=s.phone WHERE s.channel='ig' AND (c.name IS NULL OR c.name='' OR c.username IS NULL OR c.username='' OR c.pic_url IS NULL OR c.pic_url='')").all();
           for (const row of (rs.results || [])) { contactos++; await igResolveName(env, row.phone); }
           // 2) Mensajes de IG con media todavía en URL cruda (lookaside) -> bajar a R2.
           const ms = await env.DB.prepare("SELECT id, wamid, media_url, msg_type FROM wa_messages WHERE channel='ig' AND media_url LIKE 'http%' LIMIT 100").all();

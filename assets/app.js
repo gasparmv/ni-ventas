@@ -7199,7 +7199,7 @@ async function loadChatContacts() {
         lastMsg: (
           c.last_msg_type === 'revoke' ? 'Mensaje eliminado' :
           isStatusPlaceholder ? '✓ Respondido desde WhatsApp' :
-          (body || `[${c.last_msg_type}]`)
+          (body || ({ image: '📷 Foto', video: '🎥 Video', audio: '🎤 Audio', document: '📎 Archivo', sticker: 'Sticker', text: '' }[c.last_msg_type] ?? `[${c.last_msg_type}]`))
         ).slice(0, 60),
         lastTs: c.last_ts,
         lastDir: c.last_direction,
