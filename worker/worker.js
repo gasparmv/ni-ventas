@@ -2675,12 +2675,14 @@ async function igResolveName(env, igId) {
 async function downloadIgMedia(env, url, mid, attType) {
   if (!url || !env.MEDIA) return '';
   try {
-    const res = await fetch(url);
-    if (!res.ok) return '';
+    // UA de navegador: lookaside.fbsbx.com le sirve HTML/403 a clientes sin UA (como el fetch
+    // por defecto de Workers). Con UA de navegador devuelve el binario real.
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 'Accept': 'image/avif,image/webp,image/apng,image/*,video/*,*/*' } });
+    if (!res.ok) { try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(new Date().toISOString(), 'IG_MEDIA_FAIL http ' + res.status).run(); } catch (_) {} return ''; }
     const mime = res.headers.get('content-type') || 'application/octet-stream';
     // Si la URL de IG ya venció, devuelve una página de error HTML con 200. NO la guardamos
     // como si fuera media (si no, el chat muestra un "archivo" roto). Solo media real.
-    if (!/^(image|video|audio|application\/pdf|application\/octet-stream)/i.test(mime)) return '';
+    if (!/^(image|video|audio|application\/pdf|application\/octet-stream)/i.test(mime)) { try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(new Date().toISOString(), 'IG_MEDIA_SKIP mime=' + mime).run(); } catch (_) {} return ''; }
     const ext = mime.includes('jpeg') || mime.includes('jpg') ? '.jpg'
       : mime.includes('png') ? '.png'
       : mime.includes('webp') ? '.webp'
