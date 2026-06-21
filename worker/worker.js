@@ -2587,6 +2587,23 @@ async function _logLeadDebug(env, label, data) {
 async function igInboxOn(env) {
   try { const r = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'ig_inbox_on'").first(); return !!r && String(r.v) === '1'; } catch (_) { return false; }
 }
+// Resuelve nombre + @usuario de un IG user id (el que escribe) vía Graph API.
+// Cachea en wa_contacts para no re-pegarle a la API en cada mensaje. Si no hay token
+// o falla, devuelve '' (el chat muestra el id hasta que se resuelva).
+async function igResolveName(env, igId) {
+  if (!env.IG_ACCESS_TOKEN || !igId) return '';
+  try { const c = await env.DB.prepare("SELECT name FROM wa_contacts WHERE phone = ?").bind(igId).first(); if (c && c.name) return c.name; } catch (_) {}
+  try {
+    const r = await fetch(`https://graph.instagram.com/${encodeURIComponent(igId)}?fields=name,username&access_token=${encodeURIComponent(env.IG_ACCESS_TOKEN)}`);
+    const j = await r.json();
+    if (j && !j.error) {
+      const name = j.name || (j.username ? '@' + j.username : '');
+      if (name) { try { await env.DB.prepare("INSERT INTO wa_contacts (phone, name, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at").bind(igId, name, new Date().toISOString()).run(); } catch (_) {} }
+      return name;
+    }
+  } catch (_) {}
+  return '';
+}
 async function processIgWebhook(env, body) {
   if (body?.object !== 'instagram') return;
   for (const entry of (body?.entry || [])) {
@@ -2603,11 +2620,12 @@ async function processIgWebhook(env, body) {
           : (att.type === 'image' ? 'image' : att.type === 'video' ? 'video' : att.type === 'audio' ? 'audio' : 'document');
         const mediaUrl = att?.payload?.url || '';
         const ts = new Date().toISOString();
-        // 1) Guardar el mensaje entrante (channel='ig'). El trigger arma el resumen.
+        const senderName = await igResolveName(env, senderId);  // @usuario / nombre real
+        // 1) Guardar el mensaje entrante (channel='ig'). El trigger arma resumen + nombre.
         try {
           await env.DB.prepare(
-            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'inbound', ?, '', ?, ?, ?, '', '', 'ig')"
-          ).bind(ts, mid, senderId, msgType, text, mediaUrl).run();
+            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'inbound', ?, ?, ?, ?, ?, '', '', 'ig')"
+          ).bind(ts, mid, senderId, senderName, msgType, text, mediaUrl).run();
         } catch (_) {}
         // 2) Clasificar la vertical: ad (referral) primero; si no, por contenido.
         const ref = msg.referral || m.referral || null;
