@@ -2704,48 +2704,74 @@ async function processIgWebhook(env, body) {
     for (const m of (entry?.messaging || [])) {
       try {
         const msg = m?.message;
-        if (!msg || msg.is_echo) continue;                 // ignorar echoes (lo que mandamos nosotros)
-        const senderId = m?.sender?.id;
-        if (!senderId) continue;
-        const mid = msg.mid || ('ig-' + senderId + '-' + (m.timestamp || ''));
-        const text = msg.text || '';
+        if (!msg) continue;
+        // ECHO = lo que mandamos NOSOTROS (desde el CRM, la app de IG, ManyChat o GHL). Antes
+        // los descartábamos y por eso no se veían los mensajes enviados. Ahora los guardamos
+        // como 'outbound'. Dedup: el mid del echo == el id que devuelve nuestro envío, así que
+        // INSERT OR IGNORE no duplica los que ya guardó /admin/ig/send.
+        const isEcho = !!msg.is_echo;
+        // La "phone" (clave del chat) SIEMPRE es el cliente: en inbound es el sender; en echo,
+        // el sender somos nosotros y el cliente es el recipient.
+        const custId = isEcho ? m?.recipient?.id : m?.sender?.id;
+        if (!custId) continue;
+        const direction = isEcho ? 'outbound' : 'inbound';
+        const mid = msg.mid || ('ig-' + custId + '-' + (m.timestamp || ''));
         const att = Array.isArray(msg.attachments) ? msg.attachments[0] : null;
-        const msgType = !att ? 'text'
-          : (att.type === 'image' ? 'image' : att.type === 'video' ? 'video' : att.type === 'audio' ? 'audio' : 'document');
-        const rawMediaUrl = att?.payload?.url || '';
-        const ts = new Date().toISOString();
-        const senderName = await igResolveName(env, senderId);  // @usuario / nombre real
-        // Si hay media, la bajamos a R2 (la URL de IG vence en horas). Si falla, guardamos la
-        // URL cruda como fallback (carga un rato). processIgWebhook ya corre en waitUntil.
+        const attType = att?.type || '';
+        // ig_post / share / story_mention / ig_reel = referencia al ANUNCIO o publicación a la
+        // que respondió el cliente (NO una imagen que mandó). Lo mostramos como aviso con el
+        // título del aviso, no como "imagen no disponible".
+        const isAdRef = ['ig_post', 'share', 'story_mention', 'ig_reel'].includes(attType);
+        let msgType, body, rawMediaUrl = '';
+        if (isAdRef) {
+          msgType = 'text';
+          const adTitle = String(att?.payload?.title || '').replace(/\s+/g, ' ').trim();
+          body = '📢 Respondió a un anuncio' + (adTitle ? ': "' + adTitle.slice(0, 140) + (adTitle.length > 140 ? '…' : '') + '"' : '');
+        } else if (att) {
+          msgType = attType === 'image' ? 'image' : attType === 'video' ? 'video' : attType === 'audio' ? 'audio' : 'document';
+          rawMediaUrl = att?.payload?.url || '';
+          body = msg.text || '';
+        } else {
+          msgType = 'text';
+          body = msg.text || '';
+        }
+        // Hora REAL del mensaje (epoch ms del webhook), no la de ahora -> así el replay de logs
+        // viejos respeta el orden cronológico de la conversación.
+        const ts = m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString();
+        const senderName = isEcho ? '' : await igResolveName(env, custId);  // en echo el remitente somos nosotros
+        // Media a R2 (la URL de IG vence en horas). No aplica a ad refs.
         let storedMedia = rawMediaUrl;
         if (rawMediaUrl && env.MEDIA) {
-          const k = await downloadIgMedia(env, rawMediaUrl, mid, att?.type);
+          const k = await downloadIgMedia(env, rawMediaUrl, mid, attType);
           if (k) storedMedia = k;
         }
-        // 1) Guardar el mensaje entrante (channel='ig'). El trigger arma resumen + nombre.
+        // 1) Guardar el mensaje (channel='ig'). El trigger arma resumen + nombre.
         try {
           await env.DB.prepare(
-            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'inbound', ?, ?, ?, ?, ?, '', '', 'ig')"
-          ).bind(ts, mid, senderId, senderName, msgType, text, storedMedia).run();
+            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', 'ig')"
+          ).bind(ts, mid, direction, custId, senderName, msgType, body, storedMedia).run();
         } catch (_) {}
-        // 2) Clasificar la vertical: ad (referral) primero; si no, por contenido.
-        const ref = msg.referral || m.referral || null;
-        const adId = ref && ref.ad_id ? String(ref.ad_id) : '';
-        let vert;
-        if (adId) vert = await adVerticalForSource(env, adId, text, String(ref?.ref || ''), String(ref?.ad_title || ''));
-        else vert = classifyAdVertical(text);
-        const esCursos = vert === 'cursos';
-        // 3) Canal IG SIEMPRE; bandeja 'cursos' SOLO si es seguro (sin pisar asignación
-        //    manual previa), default 'general'. Mismo criterio que WhatsApp.
-        try { await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone = ?").bind(senderId).run(); } catch (_) {}
-        try {
-          if (esCursos) {
-            await env.DB.prepare("UPDATE wa_chats_summary SET inbox='cursos' WHERE phone = ? AND (inbox IS NULL OR inbox IN ('general','oculto',''))").bind(senderId).run();
-          } else {
-            await env.DB.prepare("UPDATE wa_chats_summary SET inbox='general' WHERE phone = ? AND (inbox IS NULL OR inbox = '')").bind(senderId).run();
-          }
-        } catch (_) {}
-        await logWaEvent(env, { to: senderId, kind: 'ig-inbound', ref: 'ig:' + senderId, ok: true, error: vert || '' });
+        // Canal IG siempre (también si la conversación arranca con un echo de automatización).
+        try { await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone = ?").bind(custId).run(); } catch (_) {}
+        // 2) Clasificación de vertical + bandeja: SOLO para mensajes ENTRANTES del cliente.
+        if (!isEcho) {
+          const ref = msg.referral || m.referral || null;
+          const adId = ref && ref.ad_id ? String(ref.ad_id) : '';
+          let vert;
+          if (adId) vert = await adVerticalForSource(env, adId, body, String(ref?.ref || ''), String(ref?.ad_title || ''));
+          else vert = classifyAdVertical(body);
+          const esCursos = vert === 'cursos';
+          // Canal IG; bandeja 'cursos' SOLO si es seguro (sin pisar asignación manual previa),
+          // default 'general'. Mismo criterio que WhatsApp.
+          try {
+            if (esCursos) {
+              await env.DB.prepare("UPDATE wa_chats_summary SET inbox='cursos' WHERE phone = ? AND (inbox IS NULL OR inbox IN ('general','oculto',''))").bind(custId).run();
+            } else {
+              await env.DB.prepare("UPDATE wa_chats_summary SET inbox='general' WHERE phone = ? AND (inbox IS NULL OR inbox = '')").bind(custId).run();
+            }
+          } catch (_) {}
+          await logWaEvent(env, { to: custId, kind: 'ig-inbound', ref: 'ig:' + custId, ok: true, error: vert || '' });
+        }
       } catch (e) {
         try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(new Date().toISOString(), 'IG_ERR: ' + (e?.message || String(e))).run(); } catch (_) {}
       }
@@ -6297,6 +6323,29 @@ export default {
           }
           return json({ ok: true, contactos, media });
         } catch (e) { return json({ error: String(e), contactos, media }, 500); }
+      }
+
+      // Re-procesa los webhooks de IG ya logueados a través de processIgWebhook (idempotente:
+      // INSERT OR IGNORE por mid). Sirve para recuperar HISTÓRICO: los mensajes ENVIADOS (echoes)
+      // que antes descartábamos, y re-etiquetar los anuncios (ig_post) que quedaron como
+      // "imagen no disponible". Esos placeholders se borran primero para que el replay los recree bien.
+      if (request.method === 'POST' && path === '/admin/ig/replay-logs') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let replayed = 0, deleted = 0;
+        try {
+          const del = await env.DB.prepare("DELETE FROM wa_messages WHERE channel='ig' AND body='🖼️ imagen no disponible'").run();
+          deleted = del.meta?.changes || 0;
+          const rs = await env.DB.prepare("SELECT payload FROM wa_webhook_log WHERE payload LIKE 'IG: {%' ORDER BY ts DESC LIMIT 600").all();
+          for (const row of (rs.results || [])) {
+            try {
+              const raw = String(row.payload || '');
+              const obj = JSON.parse(raw.slice(raw.indexOf('{')));
+              await processIgWebhook(env, obj);
+              replayed++;
+            } catch (_) {}
+          }
+          return json({ ok: true, deleted, replayed });
+        } catch (e) { return json({ error: String(e), deleted, replayed }, 500); }
       }
 
       // Enviar un DM de IG (texto). Lo dispara el chat cuando el contacto es de Instagram.
