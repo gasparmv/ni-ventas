@@ -6245,6 +6245,9 @@ const chatState = {
   // (estilo WA), 'conversation' muestra solo la conversación con back arrow.
   // En desktop se ignora y siempre se muestra el split-view completo.
   mobileView: 'list',
+  // Canal activo del chat: 'wa' (WhatsApp) | 'ig' (Instagram). Default WhatsApp.
+  // Separa las dos bandejas — WhatsApp queda priorizado, IG aparte.
+  channel: 'wa',
   // Windowing del sidebar: cuántos contactos pintamos en el DOM (hay 7000+).
   // Pintarlos a TODOS clava el main thread ~1-2s y deja el scroll/tipeo trabado
   // (cada contacto son ~14 nodos → 7000 = ~100k nodos). El scroll va sumando
@@ -7187,7 +7190,8 @@ async function loadChatContacts() {
         lastDir: c.last_direction,
         lastType: c.last_msg_type,
         unread: c.unread || 0,
-        inbox: c.inbox || 'general'   // bandeja: general | cursos (para el botón 🎓)
+        inbox: c.inbox || 'general',  // bandeja: general | cursos (para el botón 🎓)
+        channel: c.channel || 'wa'    // canal: wa | ig (pestaña WhatsApp / Instagram)
       };
     }).sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
     // NO tocar chatState.messages — loadChatMessages(phone) maneja el
@@ -7581,7 +7585,12 @@ function renderLabelFilterBar() {
   // que la lista vertical anterior, especialmente en desktop.
   const noFilters = !chatState.filterLabels.length && !chatState.filterUnreadOnly;
   const labelsCount = chatState.filterLabels.length;
-  return `<div class="label-filter-bar" id="label-filter-bar">
+  const ch = chatState.channel || 'wa';
+  const chanTabs = `<div class="chat-channel-tabs" style="display:flex;border-bottom:1px solid var(--border);margin-bottom:4px">
+    <button class="chat-channel-tab" data-channel="wa" style="flex:1;padding:8px 4px;background:none;border:none;border-bottom:2px solid ${ch==='wa'?'var(--accent-cyan,#8FD4DE)':'transparent'};color:${ch==='wa'?'var(--fg)':'var(--fg-subtle)'};font-weight:700;font-size:13px;cursor:pointer">💬 WhatsApp</button>
+    <button class="chat-channel-tab" data-channel="ig" style="flex:1;padding:8px 4px;background:none;border:none;border-bottom:2px solid ${ch==='ig'?'#E1306C':'transparent'};color:${ch==='ig'?'var(--fg)':'var(--fg-subtle)'};font-weight:700;font-size:13px;cursor:pointer">📷 Instagram</button>
+  </div>`;
+  return chanTabs + `<div class="label-filter-bar" id="label-filter-bar">
     <button class="label-filter-pill${noFilters ? ' active' : ''}" data-filter-fixed="all">Todos</button>
     <button class="label-filter-pill${chatState.filterUnreadOnly ? ' active' : ''}" data-filter-fixed="unread">No leídos</button>
     ${visibleLabels().length ? `
@@ -8362,7 +8371,7 @@ function renderChat() {
   // scroll va sumando. Sin esto pintaríamos los 7000+ contactos de una sola vez.
   chatState.contactRenderLimit = CHAT_CONTACT_PAGE;
   const search = chatState.search.toLowerCase();
-  let filtered = chatState.contacts;
+  let filtered = chatState.contacts.filter(c => (c.channel || 'wa') === (chatState.channel || 'wa'));
   // Archivados: por defecto fuera. Solo se muestran si chatState.showArchived = true.
   if (chatState.showArchived) {
     filtered = filtered.filter(c => isArchived(c.phone));
@@ -10228,6 +10237,15 @@ function bindChatConversation() {
   const fileInput = document.getElementById('chat-file-input');
   const micBtn = document.getElementById('btn-mic');
   const labelsBtn = document.getElementById('btn-labels');
+  // Fase 2a: en Instagram todavía NO se responde (Fase 2b). Bloqueamos el envío y
+  // avisamos — read-only, para no intentar mandar por el caño de WhatsApp.
+  const _selContact = (chatState.contacts || []).find(c => c.phone === chatState.selectedPhone);
+  if (_selContact && _selContact.channel === 'ig') {
+    if (ta) { ta.disabled = true; ta.placeholder = '📷 Responder por Instagram: próximamente (por ahora solo lectura)'; }
+    if (btn) btn.disabled = true;
+    if (attachBtn) attachBtn.disabled = true;
+    if (micBtn) micBtn.style.display = 'none';
+  }
   // Botón "Crear brief" del header → abre el mismo modal del panel de Cotización
   // (con teléfono + WhatsApp pre-cargados) por encima de la conversación. Y bindea
   // ese modal por si quedó abierto tras este render.
@@ -10707,6 +10725,17 @@ function bindChat() {
       syncIcons();
     };
   }
+  // Pestañas de canal (WhatsApp / Instagram). Cambia la bandeja visible.
+  document.querySelectorAll('[data-channel]').forEach(btn => {
+    btn.onclick = () => {
+      const ch = btn.dataset.channel;
+      if (ch && ch !== chatState.channel) {
+        chatState.channel = ch;
+        chatState.contactRenderLimit = CHAT_CONTACT_PAGE; // reset del windowing
+        render();
+      }
+    };
+  });
   // Chips fijos (Todos, No leídos) — estilo WhatsApp Web.
   document.querySelectorAll('[data-filter-fixed]').forEach(btn => {
     btn.onclick = () => {
@@ -11074,7 +11103,7 @@ function refreshContactList() {
   const list = document.getElementById('chat-contact-list');
   if (!list) return;
   const search = chatState.search.toLowerCase().trim();
-  let filtered = chatState.contacts;
+  let filtered = chatState.contacts.filter(c => (c.channel || 'wa') === (chatState.channel || 'wa'));
   // Filtrar archivados (salvo que el filtro esté en "ver archivados")
   if (chatState.showArchived) {
     filtered = filtered.filter(c => isArchived(c.phone));

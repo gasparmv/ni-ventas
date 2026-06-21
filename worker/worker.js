@@ -6336,7 +6336,7 @@ export default {
         let chats = null;
         try {
           const rs = await env.DB.prepare(
-            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread, inbox
+            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread, inbox, channel
              FROM wa_chats_summary
              WHERE last_ts != '' ${inboxClause}
              ORDER BY last_ts DESC`
