@@ -4637,6 +4637,33 @@ export default {
       return json({ ok: true });
     }
 
+    // ===== Instagram DM Webhook (inbox de IG → CRM) — FASE 1: SOLO RECIBIR =====
+    // App de Meta "agente neon nuevo" (866678322681866), producto Instagram con
+    // Instagram Business Login, suscripto al campo `messages`. SEPARADO del de
+    // WhatsApp (/webhook) y del de leadgen (/webhook/leads) para NO tocar lo que ya
+    // anda. Por ahora SOLO loguea el payload (confirmar que los DM llegan). No guarda
+    // en el chat ni responde NADA — eso se suma después, gateado. No puede romper nada.
+    // Secreto requerido: IG_VERIFY_TOKEN (string random; Meta lo verifica al suscribir).
+    if (request.method === 'GET' && path === '/webhook/ig') {
+      const mode = url.searchParams.get('hub.mode');
+      const token = url.searchParams.get('hub.verify_token');
+      const challenge = url.searchParams.get('hub.challenge');
+      if (mode === 'subscribe' && env.IG_VERIFY_TOKEN && token === env.IG_VERIFY_TOKEN && challenge) {
+        return new Response(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+      }
+      return new Response('Forbidden', { status: 403 });
+    }
+    if (request.method === 'POST' && path === '/webhook/ig') {
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: true }); }
+      try {
+        await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(
+          new Date().toISOString(), 'IG: ' + JSON.stringify(body).slice(0, 4000)
+        ).run();
+      } catch (_) {}
+      return json({ ok: true }); // 200 rápido; no se procesa ni se envía nada (Fase 1)
+    }
+
     // ===== Bridge desde Google Sheets (Apps Script onChange) =====
     // Workaround mientras App Review aprueba leads_retrieval. Meta sincroniza
     // leads a la sheet nativamente, y un Apps Script en la sheet nos manda
