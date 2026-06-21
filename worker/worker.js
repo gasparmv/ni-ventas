@@ -6189,6 +6189,21 @@ export default {
         } catch (e) { return json({ contacts: [] }); }
       }
 
+      // Rellena la foto de perfil de los contactos de IG que todavía no la tienen
+      // (los resueltos antes de agregar la foto). One-shot, idempotente: igResolveName
+      // ya saltea los que tienen foto fresca. Útil además para refrescar antes de que venzan.
+      if (request.method === 'POST' && path === '/admin/ig/backfill-pics') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        if (!env.IG_ACCESS_TOKEN) return json({ error: 'no IG token' }, 400);
+        let processed = 0;
+        try {
+          const rs = await env.DB.prepare("SELECT phone FROM wa_contacts WHERE phone IN (SELECT phone FROM wa_chats_summary WHERE channel='ig') AND (pic_url IS NULL OR pic_url='')").all();
+          for (const row of (rs.results || [])) { processed++; await igResolveName(env, row.phone); }
+          const after = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_contacts WHERE phone IN (SELECT phone FROM wa_chats_summary WHERE channel='ig') AND pic_url IS NOT NULL AND pic_url!=''").first();
+          return json({ ok: true, processed, conFoto: after?.n || 0 });
+        } catch (e) { return json({ error: String(e), processed }, 500); }
+      }
+
       // ===== WA LABELS BULK IMPORT (desde el scraper) =====
       // Body: { labels: [{name, color}], assignments: [{phone, labelName}], replaceAll?: bool }
       // Si replaceAll=true → borra TODAS las assignments antes de insertar (sync limpio).
