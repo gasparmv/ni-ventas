@@ -2645,14 +2645,14 @@ async function igResolveName(env, igId) {
   if (!token || !igId) return '';
   let cachedName = '';
   try {
-    const c = await env.DB.prepare("SELECT name, pic_url, updated_at FROM wa_contacts WHERE phone = ?").bind(igId).first();
+    const c = await env.DB.prepare("SELECT name, username, pic_url, updated_at FROM wa_contacts WHERE phone = ?").bind(igId).first();
     if (c && c.name) {
       cachedName = c.name;
-      // Cacheado COMPLETO (nombre + foto) y FRESCO (<20 días, antes de que venza la URL de
-      // IG, que caduca en semanas) -> no le pegamos a la API. Si falta la foto o está vieja,
-      // re-resolvemos: así los contactos viejos sin foto se auto-reparan en su próximo DM.
+      // Cacheado COMPLETO (nombre + @usuario + foto) y FRESCO (<20 días, antes de que venza
+      // la URL de IG, que caduca en semanas) -> no le pegamos a la API. Si falta algo o está
+      // vieja, re-resolvemos: así los contactos viejos se auto-reparan en su próximo DM.
       const fresh = c.updated_at && (Date.now() - new Date(c.updated_at).getTime()) < 20 * 86400000;
-      if (c.pic_url && fresh) return c.name;
+      if (c.pic_url && c.username && fresh) return c.name;
     }
   } catch (_) {}
   try {
@@ -2660,12 +2660,43 @@ async function igResolveName(env, igId) {
     const j = await r.json();
     if (j && !j.error) {
       const name = j.name || (j.username ? '@' + j.username : '') || cachedName;
+      const username = j.username || '';
       const pic = j.profile_pic || '';
-      if (name || pic) { try { await env.DB.prepare("INSERT INTO wa_contacts (phone, name, pic_url, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET name=excluded.name, pic_url=excluded.pic_url, updated_at=excluded.updated_at").bind(igId, name, pic, new Date().toISOString()).run(); } catch (_) {} }
+      if (name || pic || username) { try { await env.DB.prepare("INSERT INTO wa_contacts (phone, name, username, pic_url, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET name=excluded.name, username=excluded.username, pic_url=excluded.pic_url, updated_at=excluded.updated_at").bind(igId, name, username, pic, new Date().toISOString()).run(); } catch (_) {} }
       return name;
     }
   } catch (_) {}
   return cachedName;
+}
+
+// Baja una media de IG (imagen/video/audio/doc que mandó el cliente) y la guarda en R2,
+// igual que con WhatsApp. Las URLs de IG (lookaside.fbsbx.com) vencen en horas, por eso
+// hay que cachear el binario. Devuelve la R2 key (ej 'ig/<mid>.jpg') o '' si falla.
+async function downloadIgMedia(env, url, mid, attType) {
+  if (!url || !env.MEDIA) return '';
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return '';
+    const mime = res.headers.get('content-type') || 'application/octet-stream';
+    // Si la URL de IG ya venció, devuelve una página de error HTML con 200. NO la guardamos
+    // como si fuera media (si no, el chat muestra un "archivo" roto). Solo media real.
+    if (!/^(image|video|audio|application\/pdf|application\/octet-stream)/i.test(mime)) return '';
+    const ext = mime.includes('jpeg') || mime.includes('jpg') ? '.jpg'
+      : mime.includes('png') ? '.png'
+      : mime.includes('webp') ? '.webp'
+      : mime.includes('gif') ? '.gif'
+      : mime.includes('mp4') ? '.mp4'
+      : mime.includes('quicktime') ? '.mov'
+      : mime.includes('ogg') || mime.includes('opus') ? '.ogg'
+      : mime.includes('mpeg') || mime.includes('mp3') ? '.mp3'
+      : mime.includes('aac') || mime.includes('m4a') ? '.m4a'
+      : mime.includes('pdf') ? '.pdf' : '';
+    const safe = String(mid || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80) || ('m' + (attType || 'media'));
+    const blob = await res.arrayBuffer();
+    const key = `ig/${safe}${ext}`;
+    await env.MEDIA.put(key, blob, { httpMetadata: { contentType: mime } });
+    return key;
+  } catch (_) { return ''; }
 }
 async function processIgWebhook(env, body) {
   if (body?.object !== 'instagram') return;
@@ -2681,14 +2712,21 @@ async function processIgWebhook(env, body) {
         const att = Array.isArray(msg.attachments) ? msg.attachments[0] : null;
         const msgType = !att ? 'text'
           : (att.type === 'image' ? 'image' : att.type === 'video' ? 'video' : att.type === 'audio' ? 'audio' : 'document');
-        const mediaUrl = att?.payload?.url || '';
+        const rawMediaUrl = att?.payload?.url || '';
         const ts = new Date().toISOString();
         const senderName = await igResolveName(env, senderId);  // @usuario / nombre real
+        // Si hay media, la bajamos a R2 (la URL de IG vence en horas). Si falla, guardamos la
+        // URL cruda como fallback (carga un rato). processIgWebhook ya corre en waitUntil.
+        let storedMedia = rawMediaUrl;
+        if (rawMediaUrl && env.MEDIA) {
+          const k = await downloadIgMedia(env, rawMediaUrl, mid, att?.type);
+          if (k) storedMedia = k;
+        }
         // 1) Guardar el mensaje entrante (channel='ig'). El trigger arma resumen + nombre.
         try {
           await env.DB.prepare(
             "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'inbound', ?, ?, ?, ?, ?, '', '', 'ig')"
-          ).bind(ts, mid, senderId, senderName, msgType, text, mediaUrl).run();
+          ).bind(ts, mid, senderId, senderName, msgType, text, storedMedia).run();
         } catch (_) {}
         // 2) Clasificar la vertical: ad (referral) primero; si no, por contenido.
         const ref = msg.referral || m.referral || null;
@@ -6235,7 +6273,7 @@ export default {
       if (request.method === 'GET' && path === '/admin/wa/contacts') {
         try {
           await env.DB.prepare("CREATE TABLE IF NOT EXISTS wa_contacts (phone TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)").run();
-          const rs = await env.DB.prepare('SELECT phone, name, pic_url FROM wa_contacts').all();
+          const rs = await env.DB.prepare('SELECT phone, name, username, pic_url FROM wa_contacts').all();
           return json({ contacts: rs.results || [] });
         } catch (e) { return json({ contacts: [] }); }
       }
@@ -6246,13 +6284,19 @@ export default {
       if (request.method === 'POST' && path === '/admin/ig/backfill-pics') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         if (!(await igGetToken(env))) return json({ error: 'no IG token' }, 400);
-        let processed = 0;
+        let contactos = 0, media = 0;
         try {
-          const rs = await env.DB.prepare("SELECT phone FROM wa_contacts WHERE phone IN (SELECT phone FROM wa_chats_summary WHERE channel='ig') AND (pic_url IS NULL OR pic_url='')").all();
-          for (const row of (rs.results || [])) { processed++; await igResolveName(env, row.phone); }
-          const after = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_contacts WHERE phone IN (SELECT phone FROM wa_chats_summary WHERE channel='ig') AND pic_url IS NOT NULL AND pic_url!=''").first();
-          return json({ ok: true, processed, conFoto: after?.n || 0 });
-        } catch (e) { return json({ error: String(e), processed }, 500); }
+          // 1) Contactos de IG a los que les falta @usuario o foto -> re-resolver.
+          const rs = await env.DB.prepare("SELECT phone FROM wa_contacts WHERE phone IN (SELECT phone FROM wa_chats_summary WHERE channel='ig') AND (pic_url IS NULL OR pic_url='' OR username IS NULL OR username='')").all();
+          for (const row of (rs.results || [])) { contactos++; await igResolveName(env, row.phone); }
+          // 2) Mensajes de IG con media todavía en URL cruda (lookaside) -> bajar a R2.
+          const ms = await env.DB.prepare("SELECT id, wamid, media_url, msg_type FROM wa_messages WHERE channel='ig' AND media_url LIKE 'http%' LIMIT 100").all();
+          for (const row of (ms.results || [])) {
+            const k = await downloadIgMedia(env, row.media_url, row.wamid, row.msg_type);
+            if (k) { await env.DB.prepare('UPDATE wa_messages SET media_url=? WHERE id=?').bind(k, row.id).run(); media++; }
+          }
+          return json({ ok: true, contactos, media });
+        } catch (e) { return json({ error: String(e), contactos, media }, 500); }
       }
 
       // Enviar un DM de IG (texto). Lo dispara el chat cuando el contacto es de Instagram.
@@ -8140,7 +8184,7 @@ export default {
         // cache inmutable de 1 año, así no se re-bajan las fotos en cada primera
         // apertura del día (antes era 24h y se vencía cada noche). promo/ puede
         // re-subirse con la misma key → cache corto de 24h.
-        const immutableMedia = key.startsWith('wa/') || key.startsWith('briefs/');
+        const immutableMedia = key.startsWith('wa/') || key.startsWith('briefs/') || key.startsWith('ig/');
         return new Response(obj.body, {
           headers: {
             ...cors(),

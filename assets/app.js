@@ -6238,6 +6238,7 @@ const chatState = {
   // Map phone → name. Tiene prioridad sobre sender_name al renderizar la lista.
   waContactNames: {},
   waContactPics: {},
+  waContactUsernames: {},
   waContactNamesLoaded: false,
   // Ad attribution por contacto (Meta Click-to-WhatsApp). Map phone → attribution row.
   // Se carga lazy cuando seleccionás un chat. Si no hay attribution → null.
@@ -6604,12 +6605,15 @@ async function loadWaContactNames() {
     const j = await r.json();
     const map = {};
     const pics = {};
+    const usernames = {};
     for (const c of (j.contacts || [])) {
       if (c?.phone && c?.name) map[c.phone] = c.name;
       if (c?.phone && c?.pic_url) pics[c.phone] = c.pic_url;
+      if (c?.phone && c?.username) usernames[c.phone] = c.username;
     }
     chatState.waContactNames = map;
     chatState.waContactPics = pics;
+    chatState.waContactUsernames = usernames;
     chatState.waContactNamesLoaded = true;
     // Si ya hay contactos cargados, re-aplicar los nombres
     if (chatState.contacts.length) {
@@ -8749,7 +8753,7 @@ function renderChatConversation() {
       ${avatarHtml(phone, name, 40)}
       <div style="flex:1;min-width:0">
         <div class="chat-header-name">${escapeHtml(name || formatPhoneDisplay(phone))}</div>
-        <div class="chat-header-phone">${escapeHtml(formatPhoneDisplay(phone))}</div>
+        <div class="chat-header-phone">${escapeHtml(formatPhoneDisplay(phone))}${(chatState.waContactUsernames && chatState.waContactUsernames[phone]) ? ' · @' + escapeHtml(chatState.waContactUsernames[phone]) : ''}</div>
       </div>
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
@@ -8801,7 +8805,7 @@ function mediaUrl(r2Key) {
   const tkParam = STATE.token ? '?token=' + encodeURIComponent(STATE.token) : '';
   // wa/  → media bajado del webhook (imagen del cliente, audio, etc.)
   // promo/ → assets promocionales (foto de copa para follow-up de presupuesto)
-  if (r2Key.startsWith('wa/') || r2Key.startsWith('promo/') || r2Key.startsWith('briefs/')) {
+  if (r2Key.startsWith('wa/') || r2Key.startsWith('promo/') || r2Key.startsWith('briefs/') || r2Key.startsWith('ig/')) {
     return CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(r2Key) + tkParam;
   }
   return r2Key;
@@ -8985,7 +8989,7 @@ function renderChatBubbles(msgs, opts) {
       // downloadMedia falló en el webhook y el media ya no se puede recuperar
       // (Meta expira las URLs en ~30 días). Mostramos placeholder en vez de
       // burbuja vacía con un <img> roto.
-      const hasValidMedia = m.media_url && (String(m.media_url).startsWith('wa/') || String(m.media_url).startsWith('promo/') || String(m.media_url).startsWith('briefs/'));
+      const hasValidMedia = m.media_url && (String(m.media_url).startsWith('wa/') || String(m.media_url).startsWith('promo/') || String(m.media_url).startsWith('briefs/') || String(m.media_url).startsWith('ig/'));
       if (hasValidMedia) {
         const imgSrc = mediaUrl(m.media_url);
         html += `<div class="chat-msg ${dir} has-media${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'image')}">
