@@ -6237,6 +6237,7 @@ const chatState = {
   // Nombres de contacto sincronizados desde WhatsApp (tabla wa_contacts en D1).
   // Map phone → name. Tiene prioridad sobre sender_name al renderizar la lista.
   waContactNames: {},
+  waContactPics: {},
   waContactNamesLoaded: false,
   // Ad attribution por contacto (Meta Click-to-WhatsApp). Map phone → attribution row.
   // Se carga lazy cuando seleccionás un chat. Si no hay attribution → null.
@@ -6312,11 +6313,18 @@ function avatarHtml(phone, name, size) {
   const fontSize = s <= 40 ? 15 : s <= 49 ? 19 : 24;
   const hasName = name && name.trim().length > 0;
   const bg = `background:linear-gradient(135deg,${pal[0]} 0%,${pal[1]} 100%)`;
+  const pic = (chatState.waContactPics && chatState.waContactPics[phone]) || '';
 
-  if (hasName) {
-    return `<div class="chat-avatar" style="width:${s}px;height:${s}px;${bg}"><span class="chat-avatar-text" style="font-size:${fontSize}px">${initials}</span></div>`;
-  }
-  return `<div class="chat-avatar" style="width:${s}px;height:${s}px;${bg}"><div class="chat-avatar-icon">${WA_PERSON_SVG}</div></div>`;
+  // Base que queda SIEMPRE por debajo: iniciales (si hay nombre) o silueta.
+  const base = hasName
+    ? `<span class="chat-avatar-text" style="font-size:${fontSize}px">${initials}</span>`
+    : `<div class="chat-avatar-icon">${WA_PERSON_SVG}</div>`;
+  // Foto de perfil (hoy solo IG): se superpone. Si la URL venció (las de IG
+  // caducan), onerror la quita y quedan las iniciales/silueta de abajo.
+  const img = pic
+    ? `<img src="${pic.replace(/"/g, '&quot;')}" loading="lazy" referrerpolicy="no-referrer" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" onerror="this.remove()">`
+    : '';
+  return `<div class="chat-avatar" style="width:${s}px;height:${s}px;${bg};position:relative;overflow:hidden">${base}${img}</div>`;
 }
 
 function loadProfilePic(phone) {
@@ -6595,10 +6603,13 @@ async function loadWaContactNames() {
     if (!r.ok) return;
     const j = await r.json();
     const map = {};
+    const pics = {};
     for (const c of (j.contacts || [])) {
       if (c?.phone && c?.name) map[c.phone] = c.name;
+      if (c?.phone && c?.pic_url) pics[c.phone] = c.pic_url;
     }
     chatState.waContactNames = map;
+    chatState.waContactPics = pics;
     chatState.waContactNamesLoaded = true;
     // Si ya hay contactos cargados, re-aplicar los nombres
     if (chatState.contacts.length) {

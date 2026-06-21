@@ -2592,17 +2592,29 @@ async function igInboxOn(env) {
 // o falla, devuelve '' (el chat muestra el id hasta que se resuelva).
 async function igResolveName(env, igId) {
   if (!env.IG_ACCESS_TOKEN || !igId) return '';
-  try { const c = await env.DB.prepare("SELECT name FROM wa_contacts WHERE phone = ?").bind(igId).first(); if (c && c.name) return c.name; } catch (_) {}
+  let cachedName = '';
   try {
-    const r = await fetch(`https://graph.instagram.com/${encodeURIComponent(igId)}?fields=name,username&access_token=${encodeURIComponent(env.IG_ACCESS_TOKEN)}`);
+    const c = await env.DB.prepare("SELECT name, pic_url, updated_at FROM wa_contacts WHERE phone = ?").bind(igId).first();
+    if (c && c.name) {
+      cachedName = c.name;
+      // Cacheado COMPLETO (nombre + foto) y FRESCO (<20 días, antes de que venza la URL de
+      // IG, que caduca en semanas) -> no le pegamos a la API. Si falta la foto o está vieja,
+      // re-resolvemos: así los contactos viejos sin foto se auto-reparan en su próximo DM.
+      const fresh = c.updated_at && (Date.now() - new Date(c.updated_at).getTime()) < 20 * 86400000;
+      if (c.pic_url && fresh) return c.name;
+    }
+  } catch (_) {}
+  try {
+    const r = await fetch(`https://graph.instagram.com/${encodeURIComponent(igId)}?fields=name,username,profile_pic&access_token=${encodeURIComponent(env.IG_ACCESS_TOKEN)}`);
     const j = await r.json();
     if (j && !j.error) {
-      const name = j.name || (j.username ? '@' + j.username : '');
-      if (name) { try { await env.DB.prepare("INSERT INTO wa_contacts (phone, name, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at").bind(igId, name, new Date().toISOString()).run(); } catch (_) {} }
+      const name = j.name || (j.username ? '@' + j.username : '') || cachedName;
+      const pic = j.profile_pic || '';
+      if (name || pic) { try { await env.DB.prepare("INSERT INTO wa_contacts (phone, name, pic_url, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET name=excluded.name, pic_url=excluded.pic_url, updated_at=excluded.updated_at").bind(igId, name, pic, new Date().toISOString()).run(); } catch (_) {} }
       return name;
     }
   } catch (_) {}
-  return '';
+  return cachedName;
 }
 async function processIgWebhook(env, body) {
   if (body?.object !== 'instagram') return;
@@ -6172,7 +6184,7 @@ export default {
       if (request.method === 'GET' && path === '/admin/wa/contacts') {
         try {
           await env.DB.prepare("CREATE TABLE IF NOT EXISTS wa_contacts (phone TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)").run();
-          const rs = await env.DB.prepare('SELECT phone, name FROM wa_contacts').all();
+          const rs = await env.DB.prepare('SELECT phone, name, pic_url FROM wa_contacts').all();
           return json({ contacts: rs.results || [] });
         } catch (e) { return json({ contacts: [] }); }
       }
