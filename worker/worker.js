@@ -2579,6 +2579,61 @@ async function _logLeadDebug(env, label, data) {
 //   4) inserta en wa_leads.
 //   5) si hay teléfono válido, manda el template lead_b2b_followup.
 //   6) guarda el msg saliente en wa_messages para que aparezca en el CRM.
+// ===== Instagram DM — flag + procesador (Fase 2a: SOLO recibir + clasificar) =====
+// Gateado por kv_cache 'ig_inbox_on' (default OFF). Cuando está ON, guarda el DM en
+// wa_messages (channel='ig') y rutea el chat: a 'cursos' SOLO si la trazabilidad del
+// ad (wa_ad_verticals vía adVerticalForSource) o el contenido lo confirman; si no,
+// 'general'. NO responde nada. WhatsApp queda intacto (channel='wa').
+async function igInboxOn(env) {
+  try { const r = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'ig_inbox_on'").first(); return !!r && String(r.v) === '1'; } catch (_) { return false; }
+}
+async function processIgWebhook(env, body) {
+  if (body?.object !== 'instagram') return;
+  for (const entry of (body?.entry || [])) {
+    for (const m of (entry?.messaging || [])) {
+      try {
+        const msg = m?.message;
+        if (!msg || msg.is_echo) continue;                 // ignorar echoes (lo que mandamos nosotros)
+        const senderId = m?.sender?.id;
+        if (!senderId) continue;
+        const mid = msg.mid || ('ig-' + senderId + '-' + (m.timestamp || ''));
+        const text = msg.text || '';
+        const att = Array.isArray(msg.attachments) ? msg.attachments[0] : null;
+        const msgType = !att ? 'text'
+          : (att.type === 'image' ? 'image' : att.type === 'video' ? 'video' : att.type === 'audio' ? 'audio' : 'document');
+        const mediaUrl = att?.payload?.url || '';
+        const ts = new Date().toISOString();
+        // 1) Guardar el mensaje entrante (channel='ig'). El trigger arma el resumen.
+        try {
+          await env.DB.prepare(
+            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'inbound', ?, '', ?, ?, ?, '', '', 'ig')"
+          ).bind(ts, mid, senderId, msgType, text, mediaUrl).run();
+        } catch (_) {}
+        // 2) Clasificar la vertical: ad (referral) primero; si no, por contenido.
+        const ref = msg.referral || m.referral || null;
+        const adId = ref && ref.ad_id ? String(ref.ad_id) : '';
+        let vert;
+        if (adId) vert = await adVerticalForSource(env, adId, text, String(ref?.ref || ''), String(ref?.ad_title || ''));
+        else vert = classifyAdVertical(text);
+        const esCursos = vert === 'cursos';
+        // 3) Canal IG SIEMPRE; bandeja 'cursos' SOLO si es seguro (sin pisar asignación
+        //    manual previa), default 'general'. Mismo criterio que WhatsApp.
+        try { await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone = ?").bind(senderId).run(); } catch (_) {}
+        try {
+          if (esCursos) {
+            await env.DB.prepare("UPDATE wa_chats_summary SET inbox='cursos' WHERE phone = ? AND (inbox IS NULL OR inbox IN ('general','oculto',''))").bind(senderId).run();
+          } else {
+            await env.DB.prepare("UPDATE wa_chats_summary SET inbox='general' WHERE phone = ? AND (inbox IS NULL OR inbox = '')").bind(senderId).run();
+          }
+        } catch (_) {}
+        await logWaEvent(env, { to: senderId, kind: 'ig-inbound', ref: 'ig:' + senderId, ok: true, error: vert || '' });
+      } catch (e) {
+        try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(new Date().toISOString(), 'IG_ERR: ' + (e?.message || String(e))).run(); } catch (_) {}
+      }
+    }
+  }
+}
+
 async function processLeadgenWebhook(env, body) {
   try {
   const entries = body?.entry || [];
@@ -4661,7 +4716,10 @@ export default {
           new Date().toISOString(), 'IG: ' + JSON.stringify(body).slice(0, 4000)
         ).run();
       } catch (_) {}
-      return json({ ok: true }); // 200 rápido; no se procesa ni se envía nada (Fase 1)
+      // Fase 2a: si el flag 'ig_inbox_on' está prendido, parsear + clasificar + guardar
+      // (read-only, sin responder nada). Si está apagado, solo queda el log de arriba.
+      if (await igInboxOn(env)) ctx.waitUntil(processIgWebhook(env, body));
+      return json({ ok: true });
     }
 
     // ===== Bridge desde Google Sheets (Apps Script onChange) =====
