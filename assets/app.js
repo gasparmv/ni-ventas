@@ -7325,11 +7325,14 @@ async function sendChatMessage(phone, text) {
   };
   chatState.sending = true;
   updateChatInputState();
+  // Instagram va por su propio caño (Graph API), no por el de WhatsApp (360dialog).
+  const _contact = (chatState.contacts || []).find(c => c.phone === phone);
+  const _isIg = _contact && _contact.channel === 'ig';
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
+    const r = await fetch(CONFIG.trackerUrl + (_isIg ? '/admin/ig/send' : '/admin/wa/send'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ to: phone, body, reply_to: replyTo || undefined })
+      body: JSON.stringify(_isIg ? { to: phone, text: body } : { to: phone, body, reply_to: replyTo || undefined })
     });
     const j = await r.json();
     if (!r.ok) {
@@ -10248,14 +10251,24 @@ function bindChatConversation() {
   const fileInput = document.getElementById('chat-file-input');
   const micBtn = document.getElementById('btn-mic');
   const labelsBtn = document.getElementById('btn-labels');
-  // Fase 2a: en Instagram todavía NO se responde (Fase 2b). Bloqueamos el envío y
-  // avisamos — read-only, para no intentar mandar por el caño de WhatsApp.
+  // Instagram: se RESPONDE (Fase 2b), pero por ahora solo TEXTO (sin adjuntos/audio)
+  // y solo dentro de la ventana de 24 h. IG no permite texto libre fuera de la ventana
+  // y no tiene plantillas para reabrir como WhatsApp → si está cerrada, avisamos y
+  // bloqueamos hasta que el cliente vuelva a escribir.
   const _selContact = (chatState.contacts || []).find(c => c.phone === chatState.selectedPhone);
   if (_selContact && _selContact.channel === 'ig') {
-    if (ta) { ta.disabled = true; ta.placeholder = '📷 Responder por Instagram: próximamente (por ahora solo lectura)'; }
-    if (btn) btn.disabled = true;
     if (attachBtn) attachBtn.disabled = true;
     if (micBtn) micBtn.style.display = 'none';
+    let _lastInTs = 0;
+    for (const m of (chatState.messages || [])) {
+      if (m.direction === 'inbound') { const t = new Date(m.ts).getTime(); if (t > _lastInTs) _lastInTs = t; }
+    }
+    const _igOpen = _lastInTs && (Date.now() - _lastInTs) < 24 * 3600 * 1000;
+    if (ta) {
+      ta.disabled = !_igOpen;
+      ta.placeholder = _igOpen ? 'Responder por Instagram…' : '🔒 Ventana de 24 h cerrada — esperá a que el cliente escriba para poder responder';
+    }
+    if (btn) btn.disabled = !_igOpen;
   }
   // Botón "Crear brief" del header → abre el mismo modal del panel de Cotización
   // (con teléfono + WhatsApp pre-cargados) por encima de la conversación. Y bindea

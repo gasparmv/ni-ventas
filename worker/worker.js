@@ -2588,10 +2588,61 @@ async function igInboxOn(env) {
   try { const r = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'ig_inbox_on'").first(); return !!r && String(r.v) === '1'; } catch (_) { return false; }
 }
 // Resuelve nombre + @usuario de un IG user id (el que escribe) vía Graph API.
+// Token de IG: priorizamos el de kv_cache (que el cron va refrescando antes de que venza)
+// y caemos al secret IG_ACCESS_TOKEN como semilla inicial. Así el token se auto-renueva
+// sin que Gaspar tenga que re-pegarlo cada 60 días.
+async function igGetToken(env) {
+  try { const r = await env.DB.prepare("SELECT v FROM kv_cache WHERE k='ig_access_token'").first(); if (r && r.v) return r.v; } catch (_) {}
+  return env.IG_ACCESS_TOKEN || '';
+}
+
+// Envía un DM de IG por la Graph API (Instagram con Instagram Login). El que envía es
+// 'me' (la cuenta del token). Devuelve { ok, id, error }. NO valida la ventana de 24h:
+// eso lo hace el endpoint antes de llamar acá.
+async function igSend(env, recipientId, text) {
+  const token = await igGetToken(env);
+  if (!token) return { ok: false, error: 'no IG token' };
+  try {
+    const r = await fetch('https://graph.instagram.com/v21.0/me/messages?access_token=' + encodeURIComponent(token), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipient: { id: String(recipientId) }, message: { text: String(text) } })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) return { ok: false, error: (j.error && (j.error.error_user_msg || j.error.message)) || ('http ' + r.status), raw: j };
+    return { ok: true, id: j.message_id || j.id || '' };
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
+
+// Refresca el token largo de IG (válido 60 días) por otro de 60 días. Solo corre si pasaron
+// >24h del último refresco (gate en kv_cache). Si el token no es renovable o falla, no rompe
+// nada: igGetToken sigue usando el último válido. Se llama desde el cron.
+async function igMaybeRefreshToken(env) {
+  try {
+    const last = await env.DB.prepare("SELECT v FROM kv_cache WHERE k='ig_token_refreshed_at'").first();
+    const lastTs = last && last.v ? new Date(last.v).getTime() : 0;
+    if (lastTs && (Date.now() - lastTs) < 24 * 3600 * 1000) return; // ya refrescado hoy
+    const token = await igGetToken(env);
+    if (!token) return;
+    const r = await fetch('https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=' + encodeURIComponent(token));
+    const j = await r.json().catch(() => ({}));
+    const now = new Date().toISOString();
+    if (r.ok && j.access_token) {
+      await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('ig_access_token', ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(j.access_token, now).run();
+      await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('ig_token_refreshed_at', ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(now, now).run();
+      try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(now, 'IG: token refrescado, +' + (j.expires_in || '?') + 's').run(); } catch (_) {}
+    } else {
+      // No marcamos refreshed_at: reintenta en el próximo cron. Logueamos para visibilidad.
+      try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(now, 'IG: refresh token FALLÓ: ' + JSON.stringify(j).slice(0, 200)).run(); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
 // Cachea en wa_contacts para no re-pegarle a la API en cada mensaje. Si no hay token
 // o falla, devuelve '' (el chat muestra el id hasta que se resuelva).
 async function igResolveName(env, igId) {
-  if (!env.IG_ACCESS_TOKEN || !igId) return '';
+  const token = await igGetToken(env);
+  if (!token || !igId) return '';
   let cachedName = '';
   try {
     const c = await env.DB.prepare("SELECT name, pic_url, updated_at FROM wa_contacts WHERE phone = ?").bind(igId).first();
@@ -2605,7 +2656,7 @@ async function igResolveName(env, igId) {
     }
   } catch (_) {}
   try {
-    const r = await fetch(`https://graph.instagram.com/${encodeURIComponent(igId)}?fields=name,username,profile_pic&access_token=${encodeURIComponent(env.IG_ACCESS_TOKEN)}`);
+    const r = await fetch(`https://graph.instagram.com/${encodeURIComponent(igId)}?fields=name,username,profile_pic&access_token=${encodeURIComponent(token)}`);
     const j = await r.json();
     if (j && !j.error) {
       const name = j.name || (j.username ? '@' + j.username : '') || cachedName;
@@ -6194,7 +6245,7 @@ export default {
       // ya saltea los que tienen foto fresca. Útil además para refrescar antes de que venzan.
       if (request.method === 'POST' && path === '/admin/ig/backfill-pics') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
-        if (!env.IG_ACCESS_TOKEN) return json({ error: 'no IG token' }, 400);
+        if (!(await igGetToken(env))) return json({ error: 'no IG token' }, 400);
         let processed = 0;
         try {
           const rs = await env.DB.prepare("SELECT phone FROM wa_contacts WHERE phone IN (SELECT phone FROM wa_chats_summary WHERE channel='ig') AND (pic_url IS NULL OR pic_url='')").all();
@@ -6202,6 +6253,45 @@ export default {
           const after = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_contacts WHERE phone IN (SELECT phone FROM wa_chats_summary WHERE channel='ig') AND pic_url IS NOT NULL AND pic_url!=''").first();
           return json({ ok: true, processed, conFoto: after?.n || 0 });
         } catch (e) { return json({ error: String(e), processed }, 500); }
+      }
+
+      // Enviar un DM de IG (texto). Lo dispara el chat cuando el contacto es de Instagram.
+      // Valida la ventana de 24h ANTES de mandar (IG no permite texto libre fuera de ella;
+      // a diferencia de WhatsApp, IG no tiene plantillas para reabrir). El que envía es una
+      // persona desde el chat: nada automático.
+      if (request.method === 'POST' && path === '/admin/ig/send') {
+        let body;
+        try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { to, text } = body || {};
+        if (!to || !text) return json({ error: 'missing fields (to, text)' }, 400);
+        const igId = String(to);
+        // Rol 'cursos' (Abril) solo puede escribir a chats de su bandeja.
+        {
+          const _role = await getSessionRole(env, session.user);
+          if (!(await inboxAccessOk(env, _role, igId))) {
+            return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
+          }
+        }
+        // Ventana de 24h: tomamos el último mensaje ENTRANTE de IG de este contacto.
+        let lastTs = 0;
+        try {
+          const lastIn = await env.DB.prepare("SELECT MAX(ts) AS ts FROM wa_messages WHERE phone=? AND direction='inbound' AND channel='ig'").bind(igId).first();
+          lastTs = lastIn && lastIn.ts ? new Date(lastIn.ts).getTime() : 0;
+        } catch (_) {}
+        if (!(lastTs && (Date.now() - lastTs) < 24 * 3600 * 1000)) {
+          return json({ error: 'Ventana de 24 h cerrada: el cliente no escribió en las últimas 24 h. Instagram no permite mandar fuera de la ventana.', window_closed: true }, 409);
+        }
+        const r = await igSend(env, igId, text);
+        await logWaEvent(env, { to: igId, kind: 'ig-text', ref: '', ok: r.ok, messageId: r.id, error: r.error });
+        if (!r.ok) return json({ error: r.error, raw: r.raw }, 500);
+        try {
+          await env.DB.prepare(
+            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, '', 'text', ?, '', '', 'sent', 'ig')"
+          ).bind(new Date().toISOString(), r.id || '', igId, String(text)).run();
+          // Aseguramos que el resumen quede marcado como IG (el trigger no toca channel).
+          await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone=?").bind(igId).run();
+        } catch (_) {}
+        return json({ id: r.id });
       }
 
       // ===== WA LABELS BULK IMPORT (desde el scraper) =====
@@ -8834,6 +8924,8 @@ export default {
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
+    // Refresca el token largo de IG antes de que venza (se autogatea a 1 vez/día).
+    ctx.waitUntil(igMaybeRefreshToken(env));
     // Cada ~30 min: traer del Excel de Ventas el campo `productor` (Gaspar lo carga ahí).
     if (new Date().getUTCMinutes() % 30 < 5) ctx.waitUntil(syncProductoresFromVentas(env));
     // Cada ~15 min: importar al CRM los pedidos nuevos cargados a mano en el Excel.
