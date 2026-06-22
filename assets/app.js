@@ -1977,7 +1977,6 @@ function render() {
     else if (v === 'chat')         document.getElementById('main').innerHTML = renderChat();
     else if (v === 'insights')     document.getElementById('main').innerHTML = renderInsights();
     else if (v === 'automatizaciones') document.getElementById('main').innerHTML = renderAutomatizaciones();
-    else if (v === 'precotiz')     document.getElementById('main').innerHTML = renderPrecotiz();
     else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
@@ -2006,7 +2005,6 @@ function render() {
   if (STATE.view === 'chat') bindChat();
   if (STATE.view === 'insights') bindInsights();
   if (STATE.view === 'automatizaciones') bindAutomatizaciones();
-  if (STATE.view === 'precotiz') bindPrecotiz();
   if (STATE.view === 'admin') bindAdmin();
   // Sincronizar classes mobile del chat (chat-mobile-list / chat-mobile-conv)
   // en el .app raíz. Solo el CSS bajo el media query mobile las usa.
@@ -2063,9 +2061,6 @@ function renderShell() {
         </button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='insights'?'active':''}" data-view="insights"><span class="icon">⚡</span> Insights IA</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='automatizaciones'?'active':''}" data-view="automatizaciones"><span class="icon">⚙</span> Automatiz.</button>` : ''}
-        ${isAdmin() ? `<button class="nav-item ${v==='precotiz'?'active':''}" data-view="precotiz"><span class="icon">◐</span> Pre cotización
-          ${(STATE.precotiz && STATE.precotiz.draftCount) ? `<span class="badge">${STATE.precotiz.draftCount}</span>` : ''}
-        </button>` : ''}
         `}
         ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
       </nav>
@@ -2205,6 +2200,83 @@ function bindPrecotiz() {
 
 async function precotizControl(body) {
   try { await fetch(CONFIG.trackerUrl + '/admin/precotiz/control', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); } catch (_) {}
+}
+
+// Banner del piloto DENTRO de la conversación (solo Gaspar): si el chat abierto
+// es un lead del piloto, muestra estado + datos juntados + (si hay) el borrador
+// del bot para aprobar/editar/descartar. '' si no aplica.
+function renderPrecotizChatBanner(phone) {
+  if (!isAdmin() || !STATE.precotiz || !Array.isArray(STATE.precotiz.leads)) return '';
+  const lead = STATE.precotiz.leads.find(l => l.phone === phone);
+  if (!lead) return '';
+  let draft = [];
+  if (lead.pending_draft) { try { draft = JSON.parse(lead.pending_draft); } catch (_) {} }
+  const estado = lead.estado === 'completo' ? 'pre cotización completa' : lead.estado === 'escalado' ? ('freno de mano — ' + (lead.escalado_motivo || 'revisar')) : 'en pre cotización · el bot releva';
+  const dato = (ok, l) => `<span style="color:${ok ? '#25D366' : 'var(--fg-subtle)'}">${ok ? '✓' : '○'} ${l}</span>`;
+  return `
+    <div style="background:rgba(143,212,222,.08);border-bottom:1px solid var(--border);padding:8px 14px;font-size:12px;position:relative;z-index:1">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="color:var(--accent-cyan,#8FD4DE);font-weight:600">◐ ${escapeHtml(estado)}</span>
+        <span style="display:flex;gap:10px;font-size:11px">${dato(lead.tiene_foto, 'foto')} ${dato(lead.tiene_medidas, 'medidas')} ${dato(lead.tiene_intext, 'int/ext')}</span>
+      </div>
+      ${draft.length ? `
+        <div style="margin-top:8px;background:var(--ink-100);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);padding:8px">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:5px">Borrador del bot — esperando tu OK</div>
+          <textarea id="precotiz-chat-draft" rows="${Math.min(12, draft.join('\n\n').split('\n').length + 1)}" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-size:13px;font-family:inherit;resize:vertical">${escapeHtml(draft.join('\n\n'))}</textarea>
+          <div style="font-size:10px;color:var(--fg-subtle);margin:3px 0 7px">cada bloque separado por una línea en blanco = un mensajito</div>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-cyan" id="precotiz-chat-approve" style="font-size:12px;padding:5px 12px">Aprobar y enviar</button>
+            <button class="btn btn-ghost" id="precotiz-chat-discard" style="font-size:12px;padding:5px 12px">Descartar</button>
+          </div>
+        </div>` : ''}
+    </div>`;
+}
+
+function bindPrecotizChatBanner(phone) {
+  const ap = document.getElementById('precotiz-chat-approve');
+  if (ap) ap.onclick = async () => {
+    const ta = document.getElementById('precotiz-chat-draft');
+    const mensajes = (ta ? ta.value : '').split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
+    if (!mensajes.length) { toast('No hay mensajes para enviar'); return; }
+    if (!await showConfirm(`Mandar ${mensajes.length} mensaje(s) a este cliente?`, { title: 'Enviar', confirmLabel: 'Mandar' }).catch(() => false)) return;
+    ap.disabled = true; ap.textContent = 'Enviando…';
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/precotiz/approve', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, mensajes }) });
+      toast(r.ok ? '✓ Enviado' : 'Error al enviar');
+    } catch (_) { toast('Error de red'); }
+    await fetchPrecotiz();
+    if (chatState.selectedPhone === phone) { try { await loadChatMessages(phone); } catch (_) {} }
+    render();
+  };
+  const di = document.getElementById('precotiz-chat-discard');
+  if (di) di.onclick = async () => {
+    if (!await showConfirm('Descartar este borrador sin enviar?', { title: 'Descartar', confirmLabel: 'Descartar' }).catch(() => false)) return;
+    try { await fetch(CONFIG.trackerUrl + '/admin/precotiz/discard', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }) }); } catch (_) {}
+    await fetchPrecotiz(); render();
+  };
+}
+
+// Control compacto del piloto (on/off + modo), arriba de la lista de chats. Solo Gaspar.
+function renderPrecotizControl() {
+  if (!isAdmin()) return '';
+  const P = STATE.precotiz || {};
+  return `
+    <div style="padding:6px 10px;background:var(--ink-100);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;font-size:11px;flex-wrap:wrap">
+      <span style="color:var(--accent-cyan,#8FD4DE);font-weight:600">◐ Pre cotización</span>
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="precotiz-ctl-on" ${P.on ? 'checked' : ''}> ${P.on ? 'ON' : 'off'}</label>
+      <select id="precotiz-ctl-modo" style="font-size:11px;padding:2px 4px">
+        <option value="draft" ${P.modo !== 'auto' ? 'selected' : ''}>borrador</option>
+        <option value="auto" ${P.modo === 'auto' ? 'selected' : ''}>auto</option>
+      </select>
+      <span class="muted">${P.count || 0}/${P.cap || 10}${P.draftCount ? ' · ' + P.draftCount + ' x aprobar' : ''}</span>
+    </div>`;
+}
+
+function bindPrecotizControl() {
+  const on = document.getElementById('precotiz-ctl-on');
+  if (on) on.onchange = async () => { await precotizControl({ on: on.checked }); await fetchPrecotiz(); render(); };
+  const modo = document.getElementById('precotiz-ctl-modo');
+  if (modo) modo.onchange = async () => { await precotizControl({ modo: modo.value }); toast('Modo: ' + modo.value); };
 }
 
 function renderAutomatizaciones() {
@@ -8539,6 +8611,7 @@ function renderChat() {
   return `
     <div class="chat-layout">
       <div class="chat-contacts">
+        ${renderPrecotizControl()}
         <h1 class="chat-mobile-title">Chats</h1>
         <div class="chat-contacts-header">
           <button id="chat-fullscreen" class="chat-fullscreen-btn" title="Ocultar barra lateral">
@@ -8895,6 +8968,7 @@ function renderChatConversation() {
     </div>
     ${renderChatNotePostit(phone)}
     ${renderAdAttributionBanner(phone)}
+    ${renderPrecotizChatBanner(phone)}
     <div class="chat-messages" id="chat-messages">
       ${chatState.loadingConv
         ? '<div class="chat-loading"><div class="spinner" style="border-color:#2a3942;border-top-color:#00a884"></div></div>'
@@ -10312,6 +10386,9 @@ async function selectChatContact(phone) {
   // Mark as read
   markConversationRead(phone);
 
+  // Refrescar el estado del piloto al abrir un chat, así el banner de pre
+  // cotización (si aplica) muestra el borrador/datos al día. Solo Gaspar.
+  if (isAdmin()) { try { await fetchPrecotiz(); } catch (_) {} }
   // Re-render conversation with actual messages
   if (STATE.view === 'chat') {
     const main = document.querySelector('.chat-main');
@@ -10367,6 +10444,7 @@ function scrollChatToBottom() {
   });
 }
 function bindChatConversation() {
+  if (isAdmin()) bindPrecotizChatBanner(chatState.selectedPhone);
   const ta = document.getElementById('chat-input');
   const btn = document.getElementById('chat-send-btn');
   const msgEl = document.getElementById('chat-messages');
@@ -10808,6 +10886,11 @@ function syncChatViewportHeight() {
 
 function bindChat() {
   syncChatViewportHeight();
+  if (isAdmin()) {
+    bindPrecotizControl();
+    // Carga inicial del estado del piloto (una vez al entrar a la sección chat).
+    if (!STATE._precotizInit) { STATE._precotizInit = true; fetchPrecotiz().then(() => { if (STATE.view === 'chat') render(); }); }
+  }
   // Load data
   if (!chatState.contacts.length && !chatState.loading) {
     // Cargar nombres de WA primero (rápido, solo phone→name) y después contactos
