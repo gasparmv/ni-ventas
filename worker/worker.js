@@ -1216,9 +1216,11 @@ async function precotizSetInbox(env, phone, inbox) {
 // Una sola llamada IA por lead: clasifica si es carteles, detecta cuáles de los
 // 3 datos ya están, decide si frenar, y si falta algo redacta los mensajitos.
 const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (carteles de neón LED, Argentina). Manejás SOLO la PRE COTIZACIÓN de un lead: la etapa de relevamiento donde hay que juntar 3 datos para poder cotizar un cartel:
-1) una FOTO o imagen de referencia del diseño (en el chat aparece como "[imagen]"),
+1) una FOTO o imagen de referencia del diseño,
 2) las MEDIDAS aproximadas (alto y ancho),
 3) si es para INTERIOR o EXTERIOR.
+
+Si te paso imágenes, MIRALAS bien. Una imagen cuenta como la foto del diseño (tiene_foto=true) SOLO si es un boceto, logo, foto o referencia del cartel/diseño que el cliente quiere. Si la imagen es un meme, una captura de otra app, un tweet, una promo, spam, o cualquier cosa que no tenga que ver con un cartel → tiene_foto=false (y si es spam o estafa, frenar=true y es_carteles=false).
 
 Te paso la conversación de WhatsApp (CLIENTE = el lead, JOACO = nosotros/el bot). Mirá qué de los 3 datos ya dio el cliente y, si corresponde, escribí el/los próximos mensajes para pedir SOLO lo que falta.
 
@@ -1253,6 +1255,32 @@ Si ya están los 3 datos, mensajes=[] (el humano sigue desde acá). Nunca promet
 Devolvé SOLO un JSON, sin nada alrededor:
 {"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"mensajes":["..."]}`;
 
+// Arma bloques de imagen (base64) de las últimas imágenes inbound del lead, para
+// que el clasificador las VEA (Claude visión) — así distingue una foto de diseño
+// real de un spam/captura random. Reusa el formato de analyzePaymentProof.
+async function precotizImageBlocks(env, phone, max = 2) {
+  if (!env.MEDIA) return [];
+  let rows = [];
+  try {
+    const rs = await env.DB.prepare("SELECT media_url FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type = 'image' AND media_url != '' ORDER BY ts DESC LIMIT ?").bind(phone, max).all();
+    rows = rs.results || [];
+  } catch (_) { return []; }
+  const blocks = [];
+  for (const r of rows) {
+    try {
+      const obj = await env.MEDIA.get(r.media_url);
+      if (!obj) continue;
+      const buf = await obj.arrayBuffer();
+      if (!buf || buf.byteLength < 64 || buf.byteLength > 4 * 1024 * 1024) continue; // vacía o >4MB
+      let mime = String(obj.httpMetadata?.contentType || 'image/jpeg').split(';')[0].trim().toLowerCase();
+      if (mime === 'image/jpg') mime = 'image/jpeg';
+      if (!/^image\/(png|jpeg|webp|gif)$/.test(mime)) continue;
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: mime, data: abToBase64(buf) } });
+    } catch (_) {}
+  }
+  return blocks;
+}
+
 // Extrae el PRIMER objeto JSON balanceado de un texto (el modelo a veces agrega
 // un análisis en markdown después del JSON, lo que rompía JSON.parse del todo).
 function extractFirstJson(text) {
@@ -1275,8 +1303,11 @@ function extractFirstJson(text) {
 
 // Devuelve { ok, data, error, status, raw }. Reintenta 1 vez ante saturación
 // (429/529) o error de red. data = el JSON parseado del modelo.
-async function precotizLlm(env, fullText, fwText) {
+async function precotizLlm(env, fullText, fwText, imageBlocks) {
   if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'sin ANTHROPIC_API_KEY' };
+  const userContent = (Array.isArray(imageBlocks) && imageBlocks.length)
+    ? [...imageBlocks, { type: 'text', text: fullText }]
+    : fullText;
   const payload = {
     model: 'claude-sonnet-4-5',
     max_tokens: 1024,
@@ -1284,7 +1315,7 @@ async function precotizLlm(env, fullText, fwText) {
       { type: 'text', text: PRECOTIZ_LLM_SYSTEM },
       { type: 'text', text: '## PLAYBOOK (referencia de tono y criterio)\n\n' + (fwText || ''), cache_control: { type: 'ephemeral' } }
     ],
-    messages: [{ role: 'user', content: fullText }]
+    messages: [{ role: 'user', content: userContent }]
   };
   for (let intento = 0; intento < 2; intento++) {
     try {
@@ -1346,11 +1377,12 @@ async function processPrecotizPilot(env) {
     const ctx = await buildChatContext(env, lead.phone, 40);
     if (!ctx) continue;
     const fw = await getActiveFramework(env);
-    const out = await precotizLlm(env, ctx.fullText, fw?.content || '');
+    const imgs = await precotizImageBlocks(env, lead.phone);
+    const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs);
     if (!out.ok) continue;
     const res = out.data;
 
-    const tF = (/\[imagen/i.test(ctx.fullText) || res.tiene_foto) ? 1 : 0; // foto: confiar también en el msg_type
+    const tF = res.tiene_foto ? 1 : 0; // la IA VE la imagen y decide si es la foto del diseño
     const tM = res.tiene_medidas ? 1 : 0, tI = res.tiene_intext ? 1 : 0;
 
     if (res.frenar || res.es_carteles === false) {
@@ -1405,12 +1437,13 @@ async function processPrecotizPilot(env) {
     const ctx = await buildChatContext(env, phone, 40);
     if (!ctx) continue;
     const fw = await getActiveFramework(env);
-    const out = await precotizLlm(env, ctx.fullText, fw?.content || '');
+    const imgs = await precotizImageBlocks(env, phone);
+    const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs);
     if (!out.ok) continue;
     const res = out.data;
     if (!res || res.es_carteles === false || res.frenar) continue;          // no entra al piloto
 
-    const tF = (/\[imagen/i.test(ctx.fullText) || res.tiene_foto) ? 1 : 0;
+    const tF = res.tiene_foto ? 1 : 0;
     const tM = res.tiene_medidas ? 1 : 0, tI = res.tiene_intext ? 1 : 0;
     try {
       await env.DB.prepare("INSERT OR IGNORE INTO precotiz_pilot (phone, estado, tiene_foto, tiene_medidas, tiene_intext, nombre, last_inbound_ts, last_processed_ts, created_at, updated_at) VALUES (?, 'activo', ?, ?, ?, '', ?, ?, ?, ?)").bind(phone, tF, tM, tI, c.last_ts, c.last_ts, nowIso, nowIso).run();
@@ -6226,7 +6259,8 @@ export default {
           const ctx = await buildChatContext(env, num, 40);
           if (!ctx) return json({ error: 'sin mensajes para ese phone' }, 404);
           const fw = await getActiveFramework(env);
-          const out = await precotizLlm(env, ctx.fullText, fw?.content || '');
+          const imgs = await precotizImageBlocks(env, num);
+          const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs);
           return json({ ok: out.ok, phone: num, result: out.data || null, error: out.error || null, status: out.status || null, raw: out.raw || null });
         }
 
