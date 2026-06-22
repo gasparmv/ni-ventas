@@ -1136,6 +1136,251 @@ async function removeUnreachable(env, phone) {
   try { await env.DB.prepare('DELETE FROM wa_unreachable_phones WHERE phone = ?').bind(num).run(); } catch (_) {}
 }
 
+// ============================================================
+// PILOTO DE PRE COTIZACIÓN automática (carteles) — ver migración 031.
+// Automatiza SOLO la pre cotización (apertura + relevamiento hasta juntar los 3
+// datos: foto + medidas + interior/exterior) para ~20% de los leads nuevos, con
+// tope de 10. Bot con freno de mano; los chats van a inbox='precotiz' (solo
+// Gaspar los ve) hasta completar. ON/OFF y modo (draft/auto) viven en kv_cache.
+// ============================================================
+const PRECOTIZ_CAP = 10;                       // tope de leads en el piloto
+const PRECOTIZ_GASPAR_PHONE = '5491155604999'; // a quién avisar al completar
+
+// kv_cache como settings store (genérico, idempotente).
+async function kvGet(env, k, def = null) {
+  try { const r = await env.DB.prepare('SELECT v FROM kv_cache WHERE k = ?').bind(k).first(); return r ? r.v : def; }
+  catch (_) { return def; }
+}
+async function kvSet(env, k, v) {
+  try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at').bind(k, String(v), new Date().toISOString()).run(); }
+  catch (_) {}
+}
+
+// ¿Piloto prendido? Default OFF (kill-switch): arranca apagado hasta estar
+// deployado y probado. Gaspar lo prende con kv 'precotiz_on'='1'.
+async function precotizOn(env) { return (await kvGet(env, 'precotiz_on', '0')) === '1'; }
+// Modo: 'auto' (auto-envío) | 'draft' (Gaspar aprueba los mensajitos). Default draft.
+async function precotizModo(env) { return (await kvGet(env, 'precotiz_modo', 'draft')) === 'auto' ? 'auto' : 'draft'; }
+
+// Selección determinística ~20% por número: un mismo cliente cae siempre del
+// mismo lado (no random por mensaje). Hash simple sobre los dígitos del teléfono.
+function precotizPicks(phone) {
+  const d = String(phone || '').replace(/\D/g, '');
+  if (d.length < 8) return false;
+  let h = 0;
+  for (let i = 0; i < d.length; i++) h = (h * 31 + d.charCodeAt(i)) >>> 0;
+  return h % 5 === 0; // 1 de cada 5 ≈ 20%
+}
+
+// Horario hábil del piloto: 8:00–22:00 AR (UTC-3) — los clientes escriben tarde.
+function precotizEnHorario(d = new Date()) {
+  const ar = new Date(d.getTime() - 3 * 60 * 60 * 1000);
+  const h = ar.getUTCHours();
+  return h >= 8 && h < 22;
+}
+
+async function precotizGet(env, phone) {
+  try { return await env.DB.prepare('SELECT * FROM precotiz_pilot WHERE phone = ?').bind(phone).first(); }
+  catch (_) { return null; }
+}
+async function precotizCount(env) {
+  try { const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM precotiz_pilot').first(); return r ? (r.n || 0) : 0; }
+  catch (_) { return 0; }
+}
+
+// Envía un mensaje del bot Y lo persiste en wa_messages (waSend no guarda solo).
+// automated=1 para distinguir lo que mandó el piloto. Aparece en el chat del CRM.
+async function precotizSend(env, phone, body) {
+  const r = await waSendText(env, phone, body);
+  if (r && r.ok) {
+    try {
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+         VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)`
+      ).bind(new Date().toISOString(), r.id || ('precotiz:' + phone + ':' + Date.now()), phone, String(body || '')).run();
+    } catch (_) {}
+  }
+  return r;
+}
+
+async function precotizNotifyGaspar(env, msg) {
+  try { await waSendText(env, PRECOTIZ_GASPAR_PHONE, msg); } catch (_) {}
+}
+
+// Mueve el chat de bandeja (reusa wa_chats_summary.inbox, mig. 012):
+// 'precotiz' = solo Gaspar lo ve; 'general' = vuelve a la bandeja de Joaco.
+async function precotizSetInbox(env, phone, inbox) {
+  try { await env.DB.prepare('UPDATE wa_chats_summary SET inbox = ? WHERE phone = ?').bind(inbox, phone).run(); } catch (_) {}
+}
+
+// Una sola llamada IA por lead: clasifica si es carteles, detecta cuáles de los
+// 3 datos ya están, decide si frenar, y si falta algo redacta los mensajitos.
+const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (carteles de neón LED, Argentina). Manejás SOLO la PRE COTIZACIÓN de un lead: la etapa de relevamiento donde hay que juntar 3 datos para poder cotizar un cartel:
+1) una FOTO o imagen de referencia del diseño (en el chat aparece como "[imagen]"),
+2) las MEDIDAS aproximadas (alto y ancho),
+3) si es para INTERIOR o EXTERIOR.
+
+Te paso la conversación de WhatsApp (CLIENTE = el lead, JOACO = nosotros/el bot). Mirá qué de los 3 datos ya dio el cliente y, si corresponde, escribí el/los próximos mensajes para pedir SOLO lo que falta.
+
+ESTILO DE LOS MENSAJES (clave, para parecer humano y no un bot):
+- Súper natural, tono argentino informal de WhatsApp.
+- SIN emojis.
+- SIN signos de apertura (nunca ¿ ni ¡). El cierre de pregunta ? va siempre; el de exclamación ! solo a veces.
+- Varios mensajes CORTOS y separados (2-3 como máximo), nunca un párrafo largo.
+- Si es el primer mensaje nuestro, presentate ("buenas, te habla Joaco de neon infinito").
+
+FRENO DE MANO — poné frenar=true y mensajes=[] si:
+- es B2B / varios locales / franquicia,
+- hay objeción fuerte de precio o pedido de financiación,
+- es una queja o cliente enojado,
+- pide algo fuera del relevamiento simple (factura, garantía, instalación compleja),
+- o no parece un lead de carteles (curso, o ambiguo) → además es_carteles=false.
+
+Si ya están los 3 datos, mensajes=[] (el humano sigue desde acá). Nunca prometas el render/precio: eso lo hace una persona después.
+
+Devolvé SOLO un JSON, sin nada alrededor:
+{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"mensajes":["..."]}`;
+
+async function precotizLlm(env, fullText, fwText) {
+  if (!env.ANTHROPIC_API_KEY) return null;
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 700,
+        system: [
+          { type: 'text', text: PRECOTIZ_LLM_SYSTEM },
+          { type: 'text', text: '## PLAYBOOK (referencia de tono y criterio)\n\n' + (fwText || ''), cache_control: { type: 'ephemeral' } }
+        ],
+        messages: [{ role: 'user', content: fullText }]
+      })
+    });
+    const j = await r.json();
+    if (!r.ok) return null;
+    const text = j.content?.[0]?.text || '';
+    const clean = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    return JSON.parse(clean);
+  } catch (_) { return null; }
+}
+
+// Manda (auto) o deja en borrador (draft) los mensajitos que generó la IA.
+async function precotizEmitir(env, phone, nombre, msgs, modo, nowIso) {
+  if (modo === 'auto') {
+    for (const m of msgs) { await precotizSend(env, phone, m); await new Promise(r => setTimeout(r, 1200)); }
+    return { sent: true };
+  }
+  // draft: guardar para que Gaspar apruebe desde el CRM; NO enviar.
+  try { await env.DB.prepare('UPDATE precotiz_pilot SET pending_draft = ?, draft_ts = ?, updated_at = ? WHERE phone = ?').bind(JSON.stringify(msgs), nowIso, nowIso, phone).run(); } catch (_) {}
+  await precotizNotifyGaspar(env, `hay un borrador para aprobar en la pre cotizacion de ${nombre || phone}\nentra al crm a revisarlo`);
+  return { sent: false };
+}
+
+// Motor del piloto. Corre en el cron de 1 min. Gateado por kill-switch (OFF por
+// defecto) + horario 8-22 AR + bloqueo de billing de WA.
+async function processPrecotizPilot(env) {
+  if (!(await precotizOn(env))) return;
+  if (!precotizEnHorario()) return;
+  if (await isWaBillingBlocked(env)) return;
+
+  const modo = await precotizModo(env);
+  const nowIso = new Date().toISOString();
+
+  // ---- B) Procesar leads ACTIVOS con un inbound nuevo sin responder ----
+  let activos = [];
+  try { const rs = await env.DB.prepare("SELECT * FROM precotiz_pilot WHERE estado = 'activo'").all(); activos = rs.results || []; } catch (_) {}
+  for (const lead of activos) {
+    if (lead.pending_draft) continue; // esperando OK de Gaspar (modo draft)
+    let lastIn;
+    try { lastIn = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'status'").bind(lead.phone).first(); } catch (_) { continue; }
+    const lastInTs = lastIn?.t || '';
+    if (!lastInTs || (lead.last_processed_ts && lastInTs <= lead.last_processed_ts)) continue; // nada nuevo
+
+    const ctx = await buildChatContext(env, lead.phone, 40);
+    if (!ctx) continue;
+    const fw = await getActiveFramework(env);
+    const res = await precotizLlm(env, ctx.fullText, fw?.content || '');
+    if (!res) continue;
+
+    const tF = (/\[imagen/i.test(ctx.fullText) || res.tiene_foto) ? 1 : 0; // foto: confiar también en el msg_type
+    const tM = res.tiene_medidas ? 1 : 0, tI = res.tiene_intext ? 1 : 0;
+
+    if (res.frenar || res.es_carteles === false) {
+      try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo=?, tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(String(res.motivo_freno || (res.es_carteles === false ? 'no es carteles' : 'fuera de guion')).slice(0, 200), tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
+      await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${lead.nombre || lead.phone}\nmotivo: ${res.motivo_freno || 'revisar'}\nentra a verlo vos`);
+      continue;
+    }
+    if (tF && tM && tI) { // completó los 3 → handoff a Joaco
+      try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', tiene_foto=1, tiene_medidas=1, tiene_intext=1, last_processed_ts=?, completed_at=?, updated_at=? WHERE phone=?").bind(lastInTs, nowIso, nowIso, lead.phone).run(); } catch (_) {}
+      await precotizSetInbox(env, lead.phone, 'general');
+      await precotizNotifyGaspar(env, `termino la pre cotizacion de ${lead.nombre || lead.phone}\nya tiene foto, medidas e interior/exterior\npaso a la bandeja para que lo cotice Joaco`);
+      continue;
+    }
+    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 3) : [];
+    try { await env.DB.prepare("UPDATE precotiz_pilot SET tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
+    if (!msgs.length) continue;
+    if (modo === 'auto') {
+      await precotizEmitir(env, lead.phone, lead.nombre, msgs, 'auto', nowIso);
+      try { await env.DB.prepare('UPDATE precotiz_pilot SET msgs_bot = msgs_bot + 1, updated_at = ? WHERE phone = ?').bind(nowIso, lead.phone).run(); } catch (_) {}
+    } else {
+      await precotizEmitir(env, lead.phone, lead.nombre, msgs, 'draft', nowIso);
+    }
+  }
+
+  // ---- A) Captar leads NUEVOS de carteles (si hay cupo) ----
+  if ((await precotizCount(env)) >= PRECOTIZ_CAP) return;
+  let cands = [];
+  try {
+    const since = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare("SELECT phone, MAX(ts) AS last_ts FROM wa_messages WHERE direction='inbound' AND msg_type!='status' AND ts > ? GROUP BY phone ORDER BY last_ts DESC LIMIT 15").bind(since).all();
+    cands = rs.results || [];
+  } catch (_) { return; }
+
+  for (const c of cands) {
+    if ((await precotizCount(env)) >= PRECOTIZ_CAP) break;
+    const phone = c.phone;
+    if (!precotizPicks(phone)) continue;                                   // fuera del 20%
+    if (await precotizGet(env, phone)) continue;                           // ya en el piloto
+    if ((await kvGet(env, 'precotiz_seen:' + phone)) === '1') continue;     // ya evaluado
+    await kvSet(env, 'precotiz_seen:' + phone, '1');                        // marcar visto pase lo que pase
+    try { const intn = await env.DB.prepare('SELECT 1 AS x FROM wa_internal_phones WHERE phone = ?').bind(phone).first(); if (intn) continue; } catch (_) {}
+    try { const ped = await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1').bind(phone).first(); if (ped) continue; } catch (_) {} // cliente existente, no lead nuevo
+    let first;
+    try { first = await env.DB.prepare("SELECT MIN(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(phone).first(); } catch (_) { continue; }
+    const firstTs = first?.t || '';
+    if (!firstTs || firstTs < new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()) continue; // primer contacto debe ser reciente (<3h)
+
+    const ctx = await buildChatContext(env, phone, 40);
+    if (!ctx) continue;
+    const fw = await getActiveFramework(env);
+    const res = await precotizLlm(env, ctx.fullText, fw?.content || '');
+    if (!res || res.es_carteles === false || res.frenar) continue;          // no entra al piloto
+
+    const tF = (/\[imagen/i.test(ctx.fullText) || res.tiene_foto) ? 1 : 0;
+    const tM = res.tiene_medidas ? 1 : 0, tI = res.tiene_intext ? 1 : 0;
+    try {
+      await env.DB.prepare("INSERT OR IGNORE INTO precotiz_pilot (phone, estado, tiene_foto, tiene_medidas, tiene_intext, nombre, last_inbound_ts, last_processed_ts, created_at, updated_at) VALUES (?, 'activo', ?, ?, ?, '', ?, ?, ?, ?)").bind(phone, tF, tM, tI, c.last_ts, c.last_ts, nowIso, nowIso).run();
+    } catch (_) { continue; }
+    await precotizSetInbox(env, phone, 'precotiz'); // ocultar de Joaco
+
+    if (tF && tM && tI) { // raro en el primer contacto, pero por las dudas
+      try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', completed_at=?, updated_at=? WHERE phone=?").bind(nowIso, nowIso, phone).run(); } catch (_) {}
+      await precotizSetInbox(env, phone, 'general');
+      await precotizNotifyGaspar(env, `termino la pre cotizacion de ${phone} (vino con todo)\npaso a la bandeja para Joaco`);
+      continue;
+    }
+    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 3) : [];
+    if (!msgs.length) continue;
+    if (modo === 'auto') {
+      await precotizEmitir(env, phone, '', msgs, 'auto', nowIso);
+      try { await env.DB.prepare('UPDATE precotiz_pilot SET msgs_bot = 1, updated_at = ? WHERE phone = ?').bind(nowIso, phone).run(); } catch (_) {}
+    } else {
+      await precotizEmitir(env, phone, '', msgs, 'draft', nowIso);
+    }
+  }
+}
+
 async function waSendText(env, to, body) {
   const num = normalizeArPhone(to);
   if (!num) return { ok: false, status: 400, error: 'numero invalido' };
@@ -2700,6 +2945,37 @@ async function downloadIgMedia(env, url, mid, attType) {
     return key;
   } catch (_) { return ''; }
 }
+// Sincroniza el mapa media_id -> {ad_id, ad_name, campaign} de la cuenta de Meta Ads, para
+// darle a los leads de IG (que responden a un post promocionado) la MISMA trazabilidad que
+// WhatsApp: el webhook de IG solo trae el título del aviso, no el ad_id; acá lo resolvemos.
+// Necesita un token con permiso ads_read. Devuelve {ok, count, error} para diagnóstico.
+async function syncIgAdMap(env) {
+  const token = env.META_ADS_TOKEN || env.META_PAGE_ACCESS_TOKEN || env.IG_ACCESS_TOKEN || '';
+  if (!token) return { ok: false, error: 'no token' };
+  const acct = String(env.META_AD_ACCOUNT_ID || '882517310728279').replace(/^act_/, '');
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS ig_ad_map (media_id TEXT PRIMARY KEY, ad_id TEXT, ad_name TEXT, campaign_name TEXT, updated_at TEXT)").run(); } catch (_) {}
+  let url = `https://graph.facebook.com/v21.0/act_${acct}/ads?fields=id,name,campaign{name},creative{effective_instagram_media_id}&limit=200&access_token=${encodeURIComponent(token)}`;
+  let count = 0, pages = 0, error = '';
+  try {
+    while (url && pages < 25) {
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.error) { error = '(#' + (j.error.code || '?') + ') ' + (j.error.message || ''); break; }
+      for (const ad of (j.data || [])) {
+        const mid = ad.creative && ad.creative.effective_instagram_media_id;
+        if (!mid) continue;
+        try {
+          await env.DB.prepare("INSERT INTO ig_ad_map (media_id, ad_id, ad_name, campaign_name, updated_at) VALUES (?,?,?,?,?) ON CONFLICT(media_id) DO UPDATE SET ad_id=excluded.ad_id, ad_name=excluded.ad_name, campaign_name=excluded.campaign_name, updated_at=excluded.updated_at")
+            .bind(String(mid), String(ad.id || ''), String(ad.name || ''), String(ad.campaign && ad.campaign.name || ''), new Date().toISOString()).run();
+          count++;
+        } catch (_) {}
+      }
+      url = (j.paging && j.paging.next) || '';
+      pages++;
+    }
+  } catch (e) { error = String(e); }
+  return { ok: !error, count, pages, error };
+}
 async function processIgWebhook(env, body) {
   if (body?.object !== 'instagram') return;
   for (const entry of (body?.entry || [])) {
@@ -2791,13 +3067,25 @@ async function processIgWebhook(env, body) {
               adAttr = { sid: String(ref.ad_id || ''), stype: String(ref.type || ref.source || 'ad'), head: String(ctx.ad_title || ''), img: String(ctx.photo_url || ''), vid: String(ctx.video_url || '') };
             } else if (isAdRef && att) {
               const p = att.payload || {};
-              adAttr = { sid: String(p.ig_post_media_id || p.id || ''), stype: attType, head: String(p.title || '').replace(/\s+/g, ' ').trim().slice(0, 200), img: String(p.url || ''), vid: '' };
+              const mediaId = String(p.ig_post_media_id || p.id || '');
+              // Si el mapa de Meta Ads tiene este post promocionado, usamos el ad_id REAL + campaña
+              // (paridad total con WhatsApp: el frontend arma el link "Ver" a la biblioteca de Meta).
+              let mapped = null;
+              try { mapped = await env.DB.prepare("SELECT ad_id, ad_name, campaign_name FROM ig_ad_map WHERE media_id = ?").bind(mediaId).first(); } catch (_) {}
+              const tituloAviso = String(p.title || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+              adAttr = {
+                sid: (mapped && mapped.ad_id) ? mapped.ad_id : mediaId,
+                stype: (mapped && mapped.ad_id) ? 'ad' : attType,   // 'ad' habilita el link "Ver" en el banner
+                head: tituloAviso || (mapped && mapped.ad_name) || '',
+                body: (mapped && mapped.campaign_name) ? ('Campaña: ' + mapped.campaign_name) : '',
+                img: String(p.url || ''), vid: ''
+              };
             }
             if (adAttr) {
               const exists = await env.DB.prepare('SELECT 1 FROM wa_ad_attributions WHERE wamid = ?').bind(mid).first();
               if (!exists) {
                 await env.DB.prepare(`INSERT INTO wa_ad_attributions (phone, wamid, ts, source_id, source_type, source_url, headline, body, media_type, image_url, video_url, thumbnail_url, ctwa_clid, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
-                  custId, mid, ts, adAttr.sid, adAttr.stype, '', adAttr.head, '', 'instagram', adAttr.img, adAttr.vid, '', '', new Date().toISOString()
+                  custId, mid, ts, adAttr.sid, adAttr.stype, '', adAttr.head, adAttr.body || '', 'instagram', adAttr.img, adAttr.vid, '', '', new Date().toISOString()
                 ).run();
               }
             }
@@ -4136,7 +4424,9 @@ function inboxClauseForRole(role) {
   // bandeja (ni admin) hasta que el cliente responde y se revelan.
   if (role === 'admin') return "AND inbox != 'oculto'";
   if (role === 'cursos') return "AND inbox = 'cursos'";
-  return "AND inbox NOT IN ('cursos','oculto')";
+  // 'precotiz' = lead en pre cotización automática (piloto): solo Gaspar (admin)
+  // lo ve mientras está en relevamiento; vuelve a 'general' al completar los 3 datos.
+  return "AND inbox NOT IN ('cursos','oculto','precotiz')";
 }
 
 // Control de acceso por chat para el rol 'cursos': solo puede leer/escribir
@@ -5854,6 +6144,74 @@ export default {
         return json(res);
       }
 
+      // ----- Piloto de pre cotización (solo Gaspar): estado, control, dry-run, aprobar -----
+      if (path.startsWith('/admin/precotiz')) {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+
+        // GET /admin/precotiz → on/off + modo + leads del piloto
+        if (request.method === 'GET' && path === '/admin/precotiz') {
+          const on = (await kvGet(env, 'precotiz_on', '0')) === '1';
+          const modo = await kvGet(env, 'precotiz_modo', 'draft');
+          let leads = [];
+          try { const rs = await env.DB.prepare('SELECT * FROM precotiz_pilot ORDER BY updated_at DESC').all(); leads = rs.results || []; } catch (_) {}
+          return json({ ok: true, on, modo, cap: PRECOTIZ_CAP, count: leads.length, leads });
+        }
+
+        // POST /admin/precotiz/control → { on?, modo? } prender/apagar + draft|auto
+        if (request.method === 'POST' && path === '/admin/precotiz/control') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          if (typeof body?.on === 'boolean') await kvSet(env, 'precotiz_on', body.on ? '1' : '0');
+          if (body?.modo === 'auto' || body?.modo === 'draft') await kvSet(env, 'precotiz_modo', body.modo);
+          return json({ ok: true, on: (await kvGet(env, 'precotiz_on', '0')) === '1', modo: await kvGet(env, 'precotiz_modo', 'draft') });
+        }
+
+        // POST /admin/precotiz/dry-run → { phone } qué decidiría el motor, SIN enviar
+        if (request.method === 'POST' && path === '/admin/precotiz/dry-run') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          const num = String(body?.phone || '').replace(/\D/g, '');
+          if (!num) return json({ error: 'missing phone' }, 400);
+          const ctx = await buildChatContext(env, num, 40);
+          if (!ctx) return json({ error: 'sin mensajes para ese phone' }, 404);
+          const fw = await getActiveFramework(env);
+          const res = await precotizLlm(env, ctx.fullText, fw?.content || '');
+          if (!res) return json({ error: 'la IA no devolvió resultado' }, 502);
+          return json({ ok: true, phone: num, result: res });
+        }
+
+        // POST /admin/precotiz/approve → { phone, mensajes? } envía los mensajitos (editados o del borrador)
+        if (request.method === 'POST' && path === '/admin/precotiz/approve') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          const num = String(body?.phone || '').replace(/\D/g, '');
+          if (!num) return json({ error: 'missing phone' }, 400);
+          const lead = await precotizGet(env, num);
+          if (!lead) return json({ error: 'lead no encontrado' }, 404);
+          let msgs = Array.isArray(body?.mensajes) ? body.mensajes : null;
+          if (!msgs && lead.pending_draft) { try { msgs = JSON.parse(lead.pending_draft); } catch (_) { msgs = null; } }
+          msgs = (msgs || []).filter(m => typeof m === 'string' && m.trim()).slice(0, 5);
+          if (!msgs.length) return json({ error: 'no hay mensajes para enviar' }, 400);
+          for (const m of msgs) { await precotizSend(env, num, m); await new Promise(r => setTimeout(r, 900)); }
+          const nowIso = new Date().toISOString();
+          let lastInTs = '';
+          try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'status'").bind(num).first(); lastInTs = li?.t || ''; } catch (_) {}
+          try { await env.DB.prepare("UPDATE precotiz_pilot SET pending_draft = '', draft_ts = '', msgs_bot = msgs_bot + 1, last_processed_ts = ?, updated_at = ? WHERE phone = ?").bind(lastInTs || nowIso, nowIso, num).run(); } catch (_) {}
+          return json({ ok: true, sent: msgs.length });
+        }
+
+        // POST /admin/precotiz/discard → { phone } descarta el borrador sin enviar
+        if (request.method === 'POST' && path === '/admin/precotiz/discard') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          const num = String(body?.phone || '').replace(/\D/g, '');
+          if (!num) return json({ error: 'missing phone' }, 400);
+          const nowIso = new Date().toISOString();
+          let lastInTs = '';
+          try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'status'").bind(num).first(); lastInTs = li?.t || ''; } catch (_) {}
+          try { await env.DB.prepare("UPDATE precotiz_pilot SET pending_draft = '', draft_ts = '', last_processed_ts = ?, updated_at = ? WHERE phone = ?").bind(lastInTs || nowIso, nowIso, num).run(); } catch (_) {}
+          return json({ ok: true });
+        }
+
+        return json({ error: 'not found' }, 404);
+      }
+
       // ----- Copiloto: contador de gasto IA (solo Gaspar) -----
       if (request.method === 'GET' && path === '/admin/copilot/usage') {
         if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
@@ -6379,6 +6737,14 @@ export default {
           }
           return json({ ok: true, deleted, replayed });
         } catch (e) { return json({ error: String(e), deleted, replayed }, 500); }
+      }
+
+      // Sincroniza el mapa de anuncios de IG (media_id -> ad_id/campaña) desde Meta Ads.
+      // Devuelve el diagnóstico (sirve para ver si el token tiene permiso ads_read).
+      if (request.method === 'POST' && path === '/admin/ig/sync-ad-map') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const res = await syncIgAdMap(env);
+        return json(res, res.ok ? 200 : 502);
       }
 
       // Enviar un DM de IG (texto). Lo dispara el chat cuando el contacto es de Instagram.
@@ -9047,6 +9413,10 @@ export default {
     // de Meta o ventana 24h momentáneamente cerrada). Idempotente vía kv_cache,
     // se auto-apaga pasada la ventana, y si no hay pendientes no hace nada.
     ctx.waitUntil(processGasparResendBackfill(env));
+    // Piloto de pre cotización automática (carteles): capta leads del 20% y los
+    // releva con freno de mano. Gateado internamente (kill-switch OFF por defecto
+    // + horario 8-22 AR). Corre en cada tick para responder en ~1-2 min.
+    ctx.waitUntil(processPrecotizPilot(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
@@ -9065,6 +9435,9 @@ export default {
     // Followups de Apps Script solo a las 13:00 UTC (10:00 AR)
     const hour = new Date(event.scheduledTime).getUTCHours();
     if (hour === 13) ctx.waitUntil(runScheduled(env));
+    // Sync diario del mapa de anuncios de IG (post promocionado -> ad_id + campaña), para darle
+    // a los leads de IG la misma trazabilidad que WhatsApp. No-op hasta que exista META_ADS_TOKEN.
+    if (hour === 13) ctx.waitUntil(syncIgAdMap(env));
     // Follow-up automático de presupuestos del cotizador: solo horario hábil AR (8-20).
     // Usa hAR (calculado más arriba en este mismo handler) para consistencia
     // con processCursosFollowup/processMinicursoFollowup.
