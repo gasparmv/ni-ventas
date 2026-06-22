@@ -3024,7 +3024,12 @@ async function downloadIgMedia(env, url, mid, attType) {
       : mime.includes('mpeg') || mime.includes('mp3') ? '.mp3'
       : mime.includes('aac') || mime.includes('m4a') ? '.m4a'
       : mime.includes('pdf') ? '.pdf' : '';
-    const safe = String(mid || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80) || ('m' + (attType || 'media'));
+    // CLAVE: NO truncar corto. Los mid de Instagram comparten un prefijo largo
+    // (formato + IDs de página/thread) y la parte ÚNICA (message id) viene al
+    // final (~char 110+). Truncar a 80 hacía colisionar imágenes de DISTINTOS
+    // chats en la misma key de R2 → se pisaban (un cliente veía la foto de otro).
+    // 300 captura el mid completo (los de IG rondan los 150 chars) y queda único.
+    const safe = String(mid || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 300) || ('m' + (attType || 'media'));
     const blob = await res.arrayBuffer();
     const key = `ig/${safe}${ext}`;
     await env.MEDIA.put(key, blob, { httpMetadata: { contentType: mime } });
