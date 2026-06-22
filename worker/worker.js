@@ -3128,6 +3128,13 @@ async function processIgWebhook(env, body) {
           await env.DB.prepare(
             "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', 'ig')"
           ).bind(ts, mid, direction, custId, senderName, msgType, body, storedMedia).run();
+          // Si el mensaje YA existía con una media_url vieja (key truncada que se
+          // pisaba entre chats), la corregimos a la key nueva re-descargada. Esto
+          // hace que /admin/ig/replay-logs RECUPERE las imágenes cuya URL de IG
+          // siga viva (las vencidas no se pueden re-bajar).
+          if (storedMedia && String(storedMedia).startsWith('ig/')) {
+            await env.DB.prepare("UPDATE wa_messages SET media_url = ? WHERE wamid = ? AND media_url LIKE 'ig/%' AND media_url != ?").bind(storedMedia, mid, storedMedia).run();
+          }
         } catch (_) {}
         // Canal IG siempre (también si la conversación arranca con un echo de automatización).
         try { await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone = ?").bind(custId).run(); } catch (_) {}
