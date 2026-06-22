@@ -1245,6 +1245,7 @@ FRENO DE MANO — poné frenar=true y mensajes=[] si:
 - hay objeción fuerte de precio o pedido de financiación,
 - es una queja o cliente enojado,
 - pide algo fuera del relevamiento simple (factura, garantía, instalación compleja),
+- es SPAM, una cadena, una promo de cripto / casino / inversión, un link sospechoso, o cualquier cosa que claramente NO tiene que ver con pedir un cartel → frenar=true y es_carteles=false (NO le respondas),
 - o no parece un lead de carteles (curso, o ambiguo) → además es_carteles=false.
 
 Si ya están los 3 datos, mensajes=[] (el humano sigue desde acá). Nunca prometas el render/precio: eso lo hace una persona después.
@@ -1386,6 +1387,10 @@ async function processPrecotizPilot(env) {
   for (const c of cands) {
     if ((await precotizCount(env)) >= PRECOTIZ_CAP) break;
     const phone = c.phone;
+    // Solo WhatsApp Argentina (54 + 10/11 dígitos). Excluye IDs de Instagram
+    // (números largos de 15-17 dígitos) y números no-AR: no son leads de
+    // carteles que el bot pueda atender por este canal.
+    if (!/^54\d{10,11}$/.test(phone)) continue;
     if (!precotizPicks(phone)) continue;                                   // fuera del 20%
     if (await precotizGet(env, phone)) continue;                           // ya en el piloto
     if ((await kvGet(env, 'precotiz_seen:' + phone)) === '1') continue;     // ya evaluado
