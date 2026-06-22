@@ -1226,7 +1226,7 @@ ESTILO DE LOS MENSAJES (clave, para parecer humano y no un bot):
 - Súper natural, tono argentino informal de WhatsApp.
 - SIN emojis.
 - SIN signos de apertura (nunca ¿ ni ¡). El cierre de pregunta ? va siempre; el de exclamación ! solo a veces.
-- Varios mensajes CORTOS y separados (2-3 como máximo), nunca un párrafo largo.
+- Varios mensajes CORTOS y separados, MÁXIMO 4 mensajes (idealmente 2-3). Si tenés que pedir varios datos, AGRUPALOS en uno o dos mensajes (ej: "necesito un par de cositas, una foto o referencia del diseño, las medidas aprox alto y ancho, y si es para interior o exterior"). NUNCA mandes un mensaje por cada dato.
 - Si es el primer mensaje nuestro, presentate ("buenas, te habla Joaco de neon infinito").
 
 FRENO DE MANO — poné frenar=true y mensajes=[] si:
@@ -1241,28 +1241,62 @@ Si ya están los 3 datos, mensajes=[] (el humano sigue desde acá). Nunca promet
 Devolvé SOLO un JSON, sin nada alrededor:
 {"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"mensajes":["..."]}`;
 
+// Extrae el PRIMER objeto JSON balanceado de un texto (el modelo a veces agrega
+// un análisis en markdown después del JSON, lo que rompía JSON.parse del todo).
+function extractFirstJson(text) {
+  let t = String(text || '').replace(/^```(?:json)?\s*/i, '');
+  const start = t.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < t.length; i++) {
+    const c = t[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) return t.slice(start, i + 1); }
+  }
+  return null;
+}
+
+// Devuelve { ok, data, error, status, raw }. Reintenta 1 vez ante saturación
+// (429/529) o error de red. data = el JSON parseado del modelo.
 async function precotizLlm(env, fullText, fwText) {
-  if (!env.ANTHROPIC_API_KEY) return null;
-  try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-5',
-        max_tokens: 700,
-        system: [
-          { type: 'text', text: PRECOTIZ_LLM_SYSTEM },
-          { type: 'text', text: '## PLAYBOOK (referencia de tono y criterio)\n\n' + (fwText || ''), cache_control: { type: 'ephemeral' } }
-        ],
-        messages: [{ role: 'user', content: fullText }]
-      })
-    });
-    const j = await r.json();
-    if (!r.ok) return null;
-    const text = j.content?.[0]?.text || '';
-    const clean = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    return JSON.parse(clean);
-  } catch (_) { return null; }
+  if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'sin ANTHROPIC_API_KEY' };
+  const payload = {
+    model: 'claude-sonnet-4-5',
+    max_tokens: 1024,
+    system: [
+      { type: 'text', text: PRECOTIZ_LLM_SYSTEM },
+      { type: 'text', text: '## PLAYBOOK (referencia de tono y criterio)\n\n' + (fwText || ''), cache_control: { type: 'ephemeral' } }
+    ],
+    messages: [{ role: 'user', content: fullText }]
+  };
+  for (let intento = 0; intento < 2; intento++) {
+    try {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if ((r.status === 429 || r.status === 529) && intento === 0) { await new Promise(s => setTimeout(s, 1500)); continue; }
+        return { ok: false, error: (j && j.error && j.error.message) || ('HTTP ' + r.status), status: r.status };
+      }
+      const text = j.content?.[0]?.text || '';
+      const jsonStr = extractFirstJson(text);
+      if (!jsonStr) return { ok: false, error: 'sin JSON en la respuesta', raw: text.slice(0, 600) };
+      try { return { ok: true, data: JSON.parse(jsonStr) }; }
+      catch (e) { return { ok: false, error: 'JSON parse', raw: text.slice(0, 600) }; }
+    } catch (e) {
+      if (intento === 0) { await new Promise(s => setTimeout(s, 1500)); continue; }
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+  return { ok: false, error: 'sin respuesta' };
 }
 
 // Manda (auto) o deja en borrador (draft) los mensajitos que generó la IA.
@@ -1300,8 +1334,9 @@ async function processPrecotizPilot(env) {
     const ctx = await buildChatContext(env, lead.phone, 40);
     if (!ctx) continue;
     const fw = await getActiveFramework(env);
-    const res = await precotizLlm(env, ctx.fullText, fw?.content || '');
-    if (!res) continue;
+    const out = await precotizLlm(env, ctx.fullText, fw?.content || '');
+    if (!out.ok) continue;
+    const res = out.data;
 
     const tF = (/\[imagen/i.test(ctx.fullText) || res.tiene_foto) ? 1 : 0; // foto: confiar también en el msg_type
     const tM = res.tiene_medidas ? 1 : 0, tI = res.tiene_intext ? 1 : 0;
@@ -1317,7 +1352,7 @@ async function processPrecotizPilot(env) {
       await precotizNotifyGaspar(env, `termino la pre cotizacion de ${lead.nombre || lead.phone}\nya tiene foto, medidas e interior/exterior\npaso a la bandeja para que lo cotice Joaco`);
       continue;
     }
-    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 3) : [];
+    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
     try { await env.DB.prepare("UPDATE precotiz_pilot SET tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
     if (!msgs.length) continue;
     if (modo === 'auto') {
@@ -1354,7 +1389,9 @@ async function processPrecotizPilot(env) {
     const ctx = await buildChatContext(env, phone, 40);
     if (!ctx) continue;
     const fw = await getActiveFramework(env);
-    const res = await precotizLlm(env, ctx.fullText, fw?.content || '');
+    const out = await precotizLlm(env, ctx.fullText, fw?.content || '');
+    if (!out.ok) continue;
+    const res = out.data;
     if (!res || res.es_carteles === false || res.frenar) continue;          // no entra al piloto
 
     const tF = (/\[imagen/i.test(ctx.fullText) || res.tiene_foto) ? 1 : 0;
@@ -1370,7 +1407,7 @@ async function processPrecotizPilot(env) {
       await precotizNotifyGaspar(env, `termino la pre cotizacion de ${phone} (vino con todo)\npaso a la bandeja para Joaco`);
       continue;
     }
-    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 3) : [];
+    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
     if (!msgs.length) continue;
     if (modo === 'auto') {
       await precotizEmitir(env, phone, '', msgs, 'auto', nowIso);
@@ -6173,9 +6210,8 @@ export default {
           const ctx = await buildChatContext(env, num, 40);
           if (!ctx) return json({ error: 'sin mensajes para ese phone' }, 404);
           const fw = await getActiveFramework(env);
-          const res = await precotizLlm(env, ctx.fullText, fw?.content || '');
-          if (!res) return json({ error: 'la IA no devolvió resultado' }, 502);
-          return json({ ok: true, phone: num, result: res });
+          const out = await precotizLlm(env, ctx.fullText, fw?.content || '');
+          return json({ ok: out.ok, phone: num, result: out.data || null, error: out.error || null, status: out.status || null, raw: out.raw || null });
         }
 
         // POST /admin/precotiz/approve → { phone, mensajes? } envía los mensajitos (editados o del borrador)
