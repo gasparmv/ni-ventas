@@ -2781,6 +2781,27 @@ async function processIgWebhook(env, body) {
               await env.DB.prepare("UPDATE wa_chats_summary SET inbox='general' WHERE phone = ? AND (inbox IS NULL OR inbox = '')").bind(custId).run();
             }
           } catch (_) {}
+          // Atribución de anuncio (igual que CTWA en WhatsApp): si el cliente vino de un anuncio
+          // (referral con ad_id) o respondió al post de un aviso (ig_post), lo guardamos en
+          // wa_ad_attributions -> el banner del chat aparece solo (mismo endpoint que WhatsApp).
+          try {
+            let adAttr = null;
+            if (ref && (ref.ad_id || ref.ref)) {
+              const ctx = ref.ads_context_data || {};
+              adAttr = { sid: String(ref.ad_id || ''), stype: String(ref.type || ref.source || 'ad'), head: String(ctx.ad_title || ''), img: String(ctx.photo_url || ''), vid: String(ctx.video_url || '') };
+            } else if (isAdRef && att) {
+              const p = att.payload || {};
+              adAttr = { sid: String(p.ig_post_media_id || p.id || ''), stype: attType, head: String(p.title || '').replace(/\s+/g, ' ').trim().slice(0, 200), img: String(p.url || ''), vid: '' };
+            }
+            if (adAttr) {
+              const exists = await env.DB.prepare('SELECT 1 FROM wa_ad_attributions WHERE wamid = ?').bind(mid).first();
+              if (!exists) {
+                await env.DB.prepare(`INSERT INTO wa_ad_attributions (phone, wamid, ts, source_id, source_type, source_url, headline, body, media_type, image_url, video_url, thumbnail_url, ctwa_clid, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+                  custId, mid, ts, adAttr.sid, adAttr.stype, '', adAttr.head, '', 'instagram', adAttr.img, adAttr.vid, '', '', new Date().toISOString()
+                ).run();
+              }
+            }
+          } catch (_) {}
           await logWaEvent(env, { to: custId, kind: 'ig-inbound', ref: 'ig:' + custId, ok: true, error: vert || '' });
         }
       } catch (e) {

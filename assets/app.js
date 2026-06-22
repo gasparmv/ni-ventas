@@ -8680,7 +8680,10 @@ function renderAdAttributionBanner(phone) {
     ? '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2.16c3.2 0 3.58.01 4.85.07 1.17.05 1.8.25 2.23.41.56.22.96.48 1.38.9.42.42.68.82.9 1.38.16.42.36 1.06.41 2.23.06 1.27.07 1.65.07 4.85s-.01 3.58-.07 4.85c-.05 1.17-.25 1.8-.41 2.23-.22.56-.48.96-.9 1.38-.42.42-.82.68-1.38.9-.42.16-1.06.36-2.23.41-1.27.06-1.65.07-4.85.07s-3.58-.01-4.85-.07c-1.17-.05-1.8-.25-2.23-.41-.56-.22-.96-.48-1.38-.9-.42-.42-.68-.82-.9-1.38-.16-.42-.36-1.06-.41-2.23C2.17 15.58 2.16 15.2 2.16 12s.01-3.58.07-4.85c.05-1.17.25-1.8.41-2.23.22-.56.48-.96.9-1.38.42-.42.82-.68 1.38-.9.42-.16 1.06-.36 2.23-.41C8.42 2.17 8.8 2.16 12 2.16zm0 5.84a4 4 0 100 8 4 4 0 000-8zm0 6.6a2.6 2.6 0 110-5.2 2.6 2.6 0 010 5.2zm5.1-7.7a.94.94 0 100-1.88.94.94 0 000 1.88z"/></svg>'
     : '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M22 12c0-5.52-4.48-10-10-10S2 6.48 2 12c0 4.84 3.44 8.87 8 9.8V15H8v-3h2V9.5C10 7.57 11.57 6 13.5 6H16v3h-2c-.55 0-1 .45-1 1v2h3v3h-3v6.95c5.05-.5 9-4.76 9-9.95z"/></svg>';
   const adIdShort = attr.source_id ? (attr.source_id.length > 12 ? attr.source_id.slice(0, 6) + '…' + attr.source_id.slice(-4) : attr.source_id) : '';
-  const sourceUrl = attr.source_url || (attr.source_id ? `https://www.facebook.com/ads/library/?id=${attr.source_id}` : '');
+  // El link "Ver" va a la biblioteca de anuncios de Meta SOLO si es un ad_id real. Para los
+  // ig_post de IG el source_id es el id del post (no un ad_id), así que no armamos link roto.
+  const igPostTypes = ['ig_post', 'share', 'story_mention', 'ig_reel'];
+  const sourceUrl = attr.source_url || (attr.source_id && !igPostTypes.includes(attr.source_type) ? `https://www.facebook.com/ads/library/?id=${attr.source_id}` : '');
   return `
     <div class="ad-attribution-banner" style="background:rgba(37,211,102,.08);border-left:3px solid #25D366;padding:10px 14px;margin:0;font-size:13px;display:flex;gap:10px;align-items:center">
       <div style="color:#25D366;flex-shrink:0">${icon}</div>
