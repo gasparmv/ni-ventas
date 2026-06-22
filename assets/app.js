@@ -1977,6 +1977,7 @@ function render() {
     else if (v === 'chat')         document.getElementById('main').innerHTML = renderChat();
     else if (v === 'insights')     document.getElementById('main').innerHTML = renderInsights();
     else if (v === 'automatizaciones') document.getElementById('main').innerHTML = renderAutomatizaciones();
+    else if (v === 'precotiz')     document.getElementById('main').innerHTML = renderPrecotiz();
     else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
@@ -2005,6 +2006,7 @@ function render() {
   if (STATE.view === 'chat') bindChat();
   if (STATE.view === 'insights') bindInsights();
   if (STATE.view === 'automatizaciones') bindAutomatizaciones();
+  if (STATE.view === 'precotiz') bindPrecotiz();
   if (STATE.view === 'admin') bindAdmin();
   // Sincronizar classes mobile del chat (chat-mobile-list / chat-mobile-conv)
   // en el .app raíz. Solo el CSS bajo el media query mobile las usa.
@@ -2061,6 +2063,9 @@ function renderShell() {
         </button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='insights'?'active':''}" data-view="insights"><span class="icon">⚡</span> Insights IA</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='automatizaciones'?'active':''}" data-view="automatizaciones"><span class="icon">⚙</span> Automatiz.</button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${v==='precotiz'?'active':''}" data-view="precotiz"><span class="icon">◐</span> Pre cotización
+          ${(STATE.precotiz && STATE.precotiz.draftCount) ? `<span class="badge">${STATE.precotiz.draftCount}</span>` : ''}
+        </button>` : ''}
         `}
         ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
       </nav>
@@ -2090,6 +2095,118 @@ function renderError() {
 // ---------- AUTOMATIZACIONES (Fase 1: panel read-only, solo admin) ----------
 // Lista todas las automatizaciones de WhatsApp con su estado y stats en vivo.
 // Data del endpoint GET /admin/automations del worker.
+// ===== Piloto de pre cotización (vista admin / solo Gaspar) =====
+async function fetchPrecotiz() {
+  if (!STATE.token) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/precotiz', { headers: authHeaders() });
+    if (!r.ok) { STATE.precotiz = { error: 'HTTP ' + r.status }; return; }
+    const j = await r.json();
+    const leads = j.leads || [];
+    STATE.precotiz = {
+      on: !!j.on, modo: j.modo || 'draft', cap: j.cap || 10, count: j.count != null ? j.count : leads.length,
+      leads, draftCount: leads.filter(l => l.pending_draft && l.pending_draft !== '').length
+    };
+  } catch (e) { STATE.precotiz = { error: String((e && e.message) || e) }; }
+}
+
+function renderPrecotiz() {
+  if (!isAdmin()) return '<div class="page-head"><h1>Pre cotización</h1></div><div class="error">Solo Gaspar.</div>';
+  const P = STATE.precotiz;
+  if (!P) { fetchPrecotiz().then(render); return '<div class="page-head"><h1>Pre cotización</h1></div>' + renderLoading(); }
+  if (P.error) return `<div class="page-head"><h1>Pre cotización</h1></div><div class="error">Error: ${escapeHtml(P.error)} <button class="btn" data-precotiz-reload>Reintentar</button></div>`;
+
+  const estadoChip = (l) => l.estado === 'completo'
+    ? '<span class="pill" style="background:rgba(37,211,102,.16);color:#25D366">completo</span>'
+    : l.estado === 'escalado'
+      ? '<span class="pill" style="background:rgba(255,167,38,.16);color:#FFA726">freno de mano</span>'
+      : '<span class="pill" style="background:rgba(143,212,222,.14);color:var(--accent-cyan,#8FD4DE)">en relevamiento</span>';
+  const datoChip = (ok, label) => `<span class="pill" style="font-size:10px;${ok ? 'background:rgba(37,211,102,.16);color:#25D366' : 'background:rgba(255,255,255,.06);color:var(--fg-subtle)'}">${ok ? '✓' : '○'} ${label}</span>`;
+
+  const leadsHtml = (P.leads || []).map(l => {
+    let draft = [];
+    if (l.pending_draft) { try { draft = JSON.parse(l.pending_draft); } catch (_) {} }
+    return `
+      <div class="card" style="margin-bottom:var(--s-3);padding:var(--s-3)">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+          <div style="font-weight:600;font-size:13px">${escapeHtml(l.nombre || ('+' + l.phone))} <span class="muted" style="font-weight:400">+${escapeHtml(l.phone)}</span></div>
+          ${estadoChip(l)}
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">
+          ${datoChip(l.tiene_foto, 'foto')} ${datoChip(l.tiene_medidas, 'medidas')} ${datoChip(l.tiene_intext, 'int/ext')}
+        </div>
+        ${l.escalado_motivo ? `<div class="muted" style="font-size:11px;margin-bottom:6px">motivo: ${escapeHtml(l.escalado_motivo)}</div>` : ''}
+        ${draft.length ? `
+          <div style="background:var(--ink-100);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);padding:10px;margin-top:6px">
+            <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:6px">Borrador del bot — esperando tu OK</div>
+            <textarea data-precotiz-draft="${escapeHtml(l.phone)}" rows="${Math.min(8, draft.length + 2)}" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-size:13px;font-family:inherit;resize:vertical">${escapeHtml(draft.join('\n'))}</textarea>
+            <div style="font-size:10px;color:var(--fg-subtle);margin:4px 0 8px">cada renglón = un mensajito separado · podés editar antes de mandar</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-cyan" data-precotiz-approve="${escapeHtml(l.phone)}">Aprobar y enviar</button>
+              <button class="btn btn-ghost" data-precotiz-discard="${escapeHtml(l.phone)}">Descartar</button>
+            </div>
+          </div>` : ''}
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="page-head">
+      <h1>Pre cotización <span class="muted" style="font-size:14px">· piloto</span></h1>
+      <div class="actions"><button class="btn btn-ghost" data-precotiz-reload>↻ Actualizar</button></div>
+    </div>
+    <div class="card" style="padding:var(--s-4);margin-bottom:var(--s-4)">
+      <div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" data-precotiz-on ${P.on ? 'checked' : ''}>
+          <b>${P.on ? 'Piloto PRENDIDO' : 'Piloto apagado'}</b>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px">Modo:
+          <select data-precotiz-modo>
+            <option value="draft" ${P.modo !== 'auto' ? 'selected' : ''}>Borrador (apruebo yo)</option>
+            <option value="auto" ${P.modo === 'auto' ? 'selected' : ''}>Auto-envío</option>
+          </select>
+        </label>
+        <span class="muted" style="font-size:12px">${P.count}/${P.cap} leads</span>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:8px">Con el piloto prendido y en modo borrador, el bot arma los mensajitos y te avisa acá para que los apruebes. Solo vos ves estos chats hasta que junten los 3 datos.</div>
+    </div>
+    ${(P.leads && P.leads.length) ? leadsHtml : '<div class="muted" style="font-size:13px">Todavía no entró ningún lead al piloto.</div>'}
+  `;
+}
+
+function bindPrecotiz() {
+  const reload = () => fetchPrecotiz().then(render);
+  document.querySelectorAll('[data-precotiz-reload]').forEach(el => el.onclick = reload);
+  const onChk = document.querySelector('[data-precotiz-on]');
+  if (onChk) onChk.onchange = async () => { await precotizControl({ on: onChk.checked }); reload(); };
+  const modoSel = document.querySelector('[data-precotiz-modo]');
+  if (modoSel) modoSel.onchange = async () => { await precotizControl({ modo: modoSel.value }); toast('Modo: ' + modoSel.value); };
+  document.querySelectorAll('[data-precotiz-approve]').forEach(el => el.onclick = async () => {
+    const phone = el.dataset.precotizApprove;
+    const ta = document.querySelector(`[data-precotiz-draft="${phone}"]`);
+    const mensajes = (ta ? ta.value : '').split('\n').map(s => s.trim()).filter(Boolean);
+    if (!mensajes.length) { toast('No hay mensajes para enviar'); return; }
+    if (!await showConfirm(`Mandar ${mensajes.length} mensaje(s) a +${phone}?`, { title: 'Enviar', confirmLabel: 'Mandar' }).catch(() => false)) return;
+    el.disabled = true; el.textContent = 'Enviando…';
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/precotiz/approve', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, mensajes }) });
+      const j = await r.json().catch(() => ({}));
+      toast(r.ok ? '✓ Enviado' : ('Error: ' + (j.error || r.status)));
+    } catch (e) { toast('Error de red'); }
+    reload();
+  });
+  document.querySelectorAll('[data-precotiz-discard]').forEach(el => el.onclick = async () => {
+    const phone = el.dataset.precotizDiscard;
+    if (!await showConfirm('Descartar este borrador sin enviar?', { title: 'Descartar', confirmLabel: 'Descartar' }).catch(() => false)) return;
+    try { await fetch(CONFIG.trackerUrl + '/admin/precotiz/discard', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }) }); } catch (_) {}
+    reload();
+  });
+}
+
+async function precotizControl(body) {
+  try { await fetch(CONFIG.trackerUrl + '/admin/precotiz/control', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); } catch (_) {}
+}
+
 function renderAutomatizaciones() {
   return `
     <div class="page-head">
