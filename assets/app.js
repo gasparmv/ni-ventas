@@ -7107,6 +7107,9 @@ async function sendChatFile(phone, file, caption, type) {
     else type = 'document';
   }
   const replyTo = chatState.replyingTo || '';
+  // IG: la foto va por el endpoint de Instagram (el de WhatsApp rechaza el ID de IG).
+  const _cMedia = (chatState.contacts || []).find(c => c.phone === phone);
+  const _mediaEndpoint = (_cMedia && _cMedia.channel === 'ig') ? '/admin/ig/send-media' : '/admin/wa/send-media';
   try {
     const fd = new FormData();
     fd.append('to', phone);
@@ -7114,7 +7117,7 @@ async function sendChatFile(phone, file, caption, type) {
     fd.append('caption', caption || '');
     fd.append('file', file);
     if (replyTo) fd.append('reply_to', replyTo);
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-media', {
+    const r = await fetch(CONFIG.trackerUrl + _mediaEndpoint, {
       method: 'POST', headers: authHeaders(), body: fd
     });
     const j = await r.json();
