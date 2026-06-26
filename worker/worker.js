@@ -347,7 +347,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     h+='<div class="card"><h1>Cotizador</h1><div class="sub">Carga las medidas y te muestra tu costo y a cuanto revenderlo.</div>';
     h+='<label>Nombre del dise&ntilde;o <span style="opacity:.6">(opcional)</span></label><input id="i_nombre" maxlength="60" placeholder="Ej: Logo del local">';
     h+='<div class="r"><div><label>Ancho (cm)</label><input id="i_ancho" type="number" inputmode="numeric" placeholder="50"></div><div><label>Alto (cm)</label><input id="i_alto" type="number" inputmode="numeric" placeholder="30"></div></div>';
-    h+='<div class="r"><div><label>Metros de neon</label><input id="i_neon" type="number" inputmode="decimal" placeholder="3"></div><div><label>Tramos <span style="opacity:.6">(si no sabes, 1)</span></label><input id="i_tramos" type="number" inputmode="numeric" value="1"></div></div>';
+    h+='<div class="r"><div><label>Metros de neon</label><input id="i_neon" type="number" inputmode="decimal" placeholder="3"></div><div><label>Tramos</label><input id="i_tramos" type="number" inputmode="numeric" placeholder="3"></div></div>';
     h+='<label>Tipo</label><select id="i_tipo"><option value="INT">Interior</option><option value="EXT">Exterior (resistente)</option></select>';
     h+='<button class="btn" id="b_calc">Calcular precio</button><div class="err" id="err"></div></div>';
     h+='<div id="res"></div>';
@@ -359,15 +359,15 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   }
   function baseCard(title,sw,o){
     var h='<div class="base"><h3><span class="sw" style="background:'+sw+'"></span>'+title+'</h3>';
-    h+='<div class="line big"><span class="k">Tu costo (-5%)</span><span class="v">'+money(o.costo)+'</span></div>';
+    h+='<div class="line big"><span class="k">Tu costo</span><span class="v">'+money(o.costo)+'</span></div>';
     h+='<div class="line"><span class="k">Reventa sugerida</span><span class="v">'+money(o.reventaMin)+' a '+money(o.reventaMax)+'</span></div>';
     h+='<div class="line win"><span class="k">Tu ganancia</span><span class="v">'+money(o.gananciaMin)+' a '+money(o.gananciaMax)+'</span></div>';
     return h+'</div>';
   }
   function doCalc(){
     var nombre=$('i_nombre')?$('i_nombre').value.trim():'';
-    var ancho=+$('i_ancho').value, alto=+$('i_alto').value, neon=+$('i_neon').value, tramos=+$('i_tramos').value||1, tipo=$('i_tipo').value;
-    if(!ancho||!alto||!neon)return showErr('Carga ancho, alto y metros de neon.');
+    var ancho=+$('i_ancho').value, alto=+$('i_alto').value, neon=+$('i_neon').value, tramos=+$('i_tramos').value, tipo=$('i_tipo').value;
+    if(!ancho||!alto||!neon||!tramos)return showErr('Carga ancho, alto, metros de neon y tramos.');
     var b=$('b_calc');b.disabled=true;b.textContent='Calculando...';
     api('/revendedor/cotizar',{method:'POST',body:{nombre:nombre,ancho:ancho,alto:alto,neon:neon,tramos:tramos,tipo:tipo}}).then(function(r){
       b.disabled=false;b.textContent='Calcular precio';
