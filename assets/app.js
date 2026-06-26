@@ -13100,7 +13100,10 @@ document.addEventListener('click', (ev) => {
 // Arma el texto del presupuesto de una CORPÓREA con las variables que se eligieron
 // (material del frente, color o "replica tu diseño", acabado, color de laterales,
 // iluminación y halo). Mismo estilo que el de neón pero adaptado a letras 3D.
-function corpPresupuestoTexto(brief, cj) {
+// Campos variables del presupuesto de corpórea, compuestos en UN solo lugar.
+// Lo reusan el texto libre (corpPresupuestoTexto) y la plantilla de fallback
+// presupuesto_corporea (enviarPresupuestoCorporeaComoPlantilla) — así no divergen.
+function corpPresupuestoFields(brief, cj) {
   cj = cj || {};
   // Color como texto legible: nombres (ej. "Rojo") sí; hex (#xxxxxx) se omite.
   const fmtCol = (c) => { c = String(c || '').trim(); return (!c || c[0] === '#') ? '' : c.toLowerCase(); };
@@ -13124,21 +13127,34 @@ function corpPresupuestoTexto(brief, cj) {
 
   // Laterales y fondo (espalda): color + acabado (opaco/translúcido).
   const latCol = fmtCol(cj.lat_color), espCol = fmtCol(cj.esp_color);
-  const latTxt = latCol ? `${latCol} (${acab(cj.lat_acabado, 'translucido')})` : acab(cj.lat_acabado, 'translucido');
-  const espTxt = espCol ? `${espCol} (${acab(cj.esp_acabado, 'opaca')})` : acab(cj.esp_acabado, 'opaca');
+  const laterales = latCol ? `${latCol} (${acab(cj.lat_acabado, 'translucido')})` : acab(cj.lat_acabado, 'translucido');
+  const fondo = espCol ? `${espCol} (${acab(cj.esp_acabado, 'opaca')})` : acab(cj.esp_acabado, 'opaca');
 
+  return {
+    nombre: brief.cliente_nombre || '',
+    medidas: med,
+    frente,
+    laterales,
+    fondo,
+    conLuz,
+    iluminacion: conLuz ? 'con LED interno' : 'sin luz',
+    precio,
+  };
+}
+function corpPresupuestoTexto(brief, cj) {
+  const f = corpPresupuestoFields(brief, cj);
   const L = [
     'Te comparto el presupuesto con la información detallada!',
     '',
-    `Trabajo: ${brief.cliente_nombre || ''}`,
+    `Trabajo: ${f.nombre}`,
   ];
-  if (med) L.push(`Medidas: ${med}`);
-  L.push(`Frente: ${frente}`);
-  L.push(`Laterales: ${latTxt}`);
-  L.push(`Fondo: ${espTxt}`);
-  L.push(`Iluminación: ${conLuz ? 'con LED interno' : 'sin luz'}`);
-  L.push('', `Precio: ${fmtMoney(precio)}`, '',
-    `Fabricación en letras 3D${conLuz ? ' con LED interno' : ''}. Para arrancar pedimos el 50% de seña — aceptamos todos los medios de pago. Hacemos envíos a todo el país!`,
+  if (f.medidas) L.push(`Medidas: ${f.medidas}`);
+  L.push(`Frente: ${f.frente}`);
+  L.push(`Laterales: ${f.laterales}`);
+  L.push(`Fondo: ${f.fondo}`);
+  L.push(`Iluminación: ${f.iluminacion}`);
+  L.push('', `Precio: ${fmtMoney(f.precio)}`, '',
+    `Fabricación en letras 3D${f.conLuz ? ' con LED interno' : ''}. Para arrancar pedimos el 50% de seña — aceptamos todos los medios de pago. Hacemos envíos a todo el país!`,
     'Cualquier duda quedo a disposición 🙌',
     '', 'Tiempo de producción: 15/20 días');
   return L.join('\n');
@@ -13195,6 +13211,34 @@ function renderCorpPopup() {
       </div>
     </div>`;
 }
+// Fallback fuera de la ventana de 24 h: igual que en neón (enviarPresupuestoComoPlantilla),
+// manda el presupuesto como PLANTILLA aprobada (presupuesto_corporea, 7 variables).
+// El render NO va acá — se manda cuando el cliente responde y se reabre la ventana.
+async function enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj) {
+  const f = corpPresupuestoFields(brief, cj);
+  // Meta no acepta variables vacías: default para los campos que puedan venir sin dato.
+  const nombre = (f.nombre || '').trim() || 'tu trabajo';
+  const medidas = (f.medidas || '').trim() || 'a confirmar';
+  const precio = fmtMoney(f.precio);
+  const params = [nombre, medidas, f.frente, f.laterales, f.fondo, f.iluminacion, precio];
+  const ok = await showConfirm(
+    `La ventana de 24 h está cerrada, así que el presupuesto va como PLANTILLA aprobada (texto, sin el render — eso se manda cuando el cliente responda y se reabra la ventana).\n\n` +
+    `Trabajo: ${nombre}\nMedidas: ${medidas}\nPrecio: ${precio}\n\n¿Lo mando?`,
+    { title: 'Enviar como plantilla', confirmLabel: '📤 Mandar plantilla', cancelLabel: 'Cancelar' }
+  );
+  if (!ok) return { ok: false, cancelled: true };
+  try {
+    const tr = await fetch(CONFIG.trackerUrl + '/admin/wa/template', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ to: tel, name: 'presupuesto_corporea', lang: 'es', params })
+    });
+    const tj = await tr.json().catch(() => ({}));
+    if (!tr.ok) return { ok: false, error: 'No se pudo mandar la plantilla: ' + (tj.error || ('HTTP ' + tr.status)) };
+    return { ok: true, wamid: tj.id || '' };
+  } catch (e) {
+    return { ok: false, error: 'Error de red al mandar la plantilla' };
+  }
+}
 async function enviarCorporeaPresupuesto(briefId, textOverride) {
   const brief = STATE.briefs.find(b => b.id === briefId);
   if (!brief || STATE.briefsEnviando[briefId]) return;
@@ -13212,14 +13256,22 @@ async function enviarCorporeaPresupuesto(briefId, textOverride) {
       body: JSON.stringify({ brief_id: briefId, to: tel, caption: texto })
     });
     const data = await res.json().catch(() => ({}));
+    let viaPlantilla = false;
     if (!res.ok) {
-      // Ventana de 24 h cerrada: no se puede mandar foto/texto libre, el cliente
-      // tiene que escribir primero. (La plantilla de neón no aplica a corpóreas.)
+      // Ventana de 24 h cerrada: Meta rechaza foto/texto libre. Igual que en neón,
+      // mandamos el presupuesto como PLANTILLA aprobada (presupuesto_corporea) y
+      // seguimos al guardado en Sheet + marcado de enviado. El render se manda cuando
+      // el cliente responda y se reabra la ventana.
       if (res.status === 409 || data.window_closed) {
-        toast('Ventana de 24 h cerrada: el cliente tiene que escribirte primero para poder mandarle el presupuesto.');
-        return;
+        const sent = await enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj);
+        if (!sent.ok) {
+          if (!sent.cancelled) toast(sent.error || 'No se pudo mandar la plantilla');
+          return;
+        }
+        viaPlantilla = true;
+      } else {
+        throw new Error(data.error || ('HTTP ' + res.status));
       }
-      throw new Error(data.error || ('HTTP ' + res.status));
     }
     // Guardar la corpórea en el Sheet de presupuestos (hoja del año) como una fila
     // más, con tipo='CORP' (marca de producto que la distingue del INT/EXT de neón).
@@ -13253,7 +13305,10 @@ async function enviarCorporeaPresupuesto(briefId, textOverride) {
     const i = STATE.briefs.findIndex(b => b.id === updated.id);
     if (i >= 0) STATE.briefs[i] = updated;
     STATE.corpPopupBrief = null;
-    toast(sheetRow ? '✓ Presupuesto enviado' : '✓ Enviado · ⚠ no se pudo guardar en el Sheet');
+    const okMsg = viaPlantilla
+      ? (sheetRow ? 'Presupuesto enviado como plantilla ✓' : 'Plantilla enviada ✓ · ⚠ no se guardó en el Sheet')
+      : (sheetRow ? '✓ Presupuesto enviado' : '✓ Enviado · ⚠ no se pudo guardar en el Sheet');
+    toast(okMsg);
   } catch (e) {
     toast('No se pudo enviar: ' + (e.message || e));
   } finally {
