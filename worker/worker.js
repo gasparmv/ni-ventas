@@ -10045,7 +10045,9 @@ async function processPresupuestoFollowups(env) {
     // - Entre 24-jun y 30-jun: PROMO COPA (imagen + caption) a TODOS.
     // - Resto del tiempo: texto según monto (≷ $300k).
     const ahoraIso = new Date().toISOString();
-    const inCopaPromo = ahoraIso >= PROMO_COPA_START_UTC && ahoraIso < PROMO_COPA_END_UTC;
+    // Copa DESACTIVADA por pedido de Gaspar — se manda el follow-up NORMAL (high/low por monto).
+    // Para reactivar: const inCopaPromo = ahoraIso >= PROMO_COPA_START_UTC && ahoraIso < PROMO_COPA_END_UTC;
+    const inCopaPromo = false;
     const monto = extractPresupuestoAmount(p.body);
     let variantBody, variantKind;
     if (inCopaPromo) {
