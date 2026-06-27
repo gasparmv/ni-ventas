@@ -1144,6 +1144,7 @@ async function removeUnreachable(env, phone) {
 // Gaspar los ve) hasta completar. ON/OFF y modo (draft/auto) viven en kv_cache.
 // ============================================================
 const PRECOTIZ_CAP = 10;                       // tope de leads en el piloto
+const PRECOTIZ_DEBOUNCE_MS = 60 * 1000;        // esperar a que el cliente pare de escribir (manda foto + medidas en mensajes seguidos) antes de armar la respuesta
 const PRECOTIZ_GASPAR_PHONE = '5491155604999'; // a quién avisar al completar
 
 // kv_cache como settings store (genérico, idempotente).
@@ -1368,11 +1369,22 @@ async function processPrecotizPilot(env) {
   let activos = [];
   try { const rs = await env.DB.prepare("SELECT * FROM precotiz_pilot WHERE estado = 'activo'").all(); activos = rs.results || []; } catch (_) {}
   for (const lead of activos) {
-    if (lead.pending_draft) continue; // esperando OK de Gaspar (modo draft)
     let lastIn;
     try { lastIn = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'status'").bind(lead.phone).first(); } catch (_) { continue; }
     const lastInTs = lastIn?.t || '';
-    if (!lastInTs || (lead.last_processed_ts && lastInTs <= lead.last_processed_ts)) continue; // nada nuevo
+    if (!lastInTs) continue;
+    // Debounce: el cliente manda foto + medidas en varios mensajes seguidos. No
+    // respondemos apresurado — esperamos a que el último inbound tenga > DEBOUNCE
+    // de antigüedad (que haya parado de escribir).
+    if (Date.now() - new Date(lastInTs).getTime() < PRECOTIZ_DEBOUNCE_MS) continue;
+    if (lead.pending_draft) {
+      // Hay un borrador esperando tu OK. Si el cliente NO mandó nada nuevo desde
+      // que se generó, lo dejamos quieto. Si mandó algo después (ej. las medidas),
+      // el borrador quedó viejo → seguimos y lo RE-GENERAMOS con la info al día.
+      if (lead.draft_ts && lastInTs <= lead.draft_ts) continue;
+    } else if (lead.last_processed_ts && lastInTs <= lead.last_processed_ts) {
+      continue; // sin draft y sin nada nuevo
+    }
 
     const ctx = await buildChatContext(env, lead.phone, 40);
     if (!ctx) continue;
@@ -1426,6 +1438,10 @@ async function processPrecotizPilot(env) {
     if (!precotizPicks(phone)) continue;                                   // fuera del 20%
     if (await precotizGet(env, phone)) continue;                           // ya en el piloto
     if ((await kvGet(env, 'precotiz_seen:' + phone)) === '1') continue;     // ya evaluado
+    // Debounce: esperar a que el lead nuevo pare de escribir (manda hola + foto +
+    // medidas en ráfaga) antes de captarlo. NO marcamos seen todavía → se re-evalúa
+    // en los próximos ticks hasta que pase el silencio.
+    if (Date.now() - new Date(c.last_ts).getTime() < PRECOTIZ_DEBOUNCE_MS) continue;
     await kvSet(env, 'precotiz_seen:' + phone, '1');                        // marcar visto pase lo que pase
     try { const intn = await env.DB.prepare('SELECT 1 AS x FROM wa_internal_phones WHERE phone = ?').bind(phone).first(); if (intn) continue; } catch (_) {}
     try { const ped = await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1').bind(phone).first(); if (ped) continue; } catch (_) {} // cliente existente, no lead nuevo
