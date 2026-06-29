@@ -15,6 +15,9 @@ WA_BUSINESS_PHONE = "5491144366573"
 # COGS del Excel 2026v4 (proxy server-to-server, evita CORS en el front).
 # Misma URL que CONFIG.appsScriptUrl en app.js. No es secreta.
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz9Jq2ew0dMcg5IEXn9OMsqhdVmlwqL_EVULlclWK-oIxh5avOlnZxRrGtis1sGalnd/exec"
+# Modelo de imagen de Gemini para el render del cotizador. Flash = más barato (el
+# render va al cliente). Para volver a máxima calidad: "gemini-3-pro-image".
+GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
 
 # La D1 binding se completa con el ID que devuelve `wrangler d1 create`.
 [[d1_databases]]
