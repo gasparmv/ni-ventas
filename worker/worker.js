@@ -3894,6 +3894,34 @@ function abToBase64(buf) {
   return btoa(binary);
 }
 
+// Precios de Gemini por 1M tokens (USD). En los modelos *-image, 'out' incluye los
+// tokens de la imagen generada (el grueso del costo). Ajustables si Google cambia
+// precios — la fuente de verdad sigue siendo la factura de Google.
+const GEMINI_PRICES = {
+  'gemini-3.1-flash-image': { in: 0.30, out: 30 },
+  'gemini-2.5-flash-image': { in: 0.30, out: 30 },
+  'gemini-3-pro-image':     { in: 2.00, out: 120 },
+  'gemini-2.5-pro':         { in: 1.25, out: 5 },
+  'gemini-2.5-flash':       { in: 0.30, out: 2.50 },
+};
+function geminiCost(model, usage) {
+  if (!usage) return 0;
+  const p = GEMINI_PRICES[model] || GEMINI_PRICES['gemini-2.5-flash-image'];
+  const ti = usage.promptTokenCount || 0;
+  const to = usage.candidatesTokenCount || Math.max(0, (usage.totalTokenCount || 0) - ti);
+  return (ti * p.in + to * p.out) / 1e6;
+}
+// Registra un uso de Gemini (render | params) con su costo estimado en gemini_usage.
+async function geminiTrackUsage(env, model, kind, usage, ref) {
+  try {
+    const ti = (usage && usage.promptTokenCount) || 0;
+    const to = (usage && usage.candidatesTokenCount) || 0;
+    await env.DB.prepare(
+      "INSERT INTO gemini_usage (ts, model, kind, tokens_in, tokens_out, cost_usd, ref) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(new Date().toISOString(), model || '', kind || 'render', ti, to, geminiCost(model, usage), String(ref || '')).run();
+  } catch (_) {}
+}
+
 // Toma el boceto (bytes + mime) + medidas, llama a Gemini, devuelve { ok, base64, mime }
 // con la imagen generada, o { error }.
 async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto, opts = {}) {
@@ -3933,7 +3961,9 @@ async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto, op
     const txt = parts.find(p => p.text)?.text || 'sin imagen en la respuesta';
     return { error: 'Gemini no devolvió imagen: ' + txt.slice(0, 200) };
   }
-  return { ok: true, base64: inline.data, mime: inline.mimeType || inline.mime_type || 'image/png' };
+  // Registrar el costo de este render (tokens reales que devuelve Gemini).
+  try { await geminiTrackUsage(env, model, 'render', data?.usageMetadata, opts.ref || ''); } catch (_) {}
+  return { ok: true, base64: inline.data, mime: inline.mimeType || inline.mime_type || 'image/png', usage: data?.usageMetadata || null, model };
 }
 
 // Analiza la imagen + el texto del cliente y devuelve un JSON con ancho_cm,
@@ -3978,6 +4008,7 @@ async function estimarParametrosConGemini(env, imageBuf, imageMime, contextoClie
   let parsed;
   try { parsed = JSON.parse(txt); }
   catch (e) { return { error: 'JSON de params inválido: ' + txt.slice(0, 100) }; }
+  try { await geminiTrackUsage(env, model, 'params', data?.usageMetadata, ''); } catch (_) {}
   return {
     ok: true,
     ancho_cm: Math.round(Number(parsed.ancho_cm) || 0),
@@ -6342,6 +6373,31 @@ export default {
         }
 
         return json({ error: 'not found' }, 404);
+      }
+
+      // ----- Copiloto: contador de gasto IA (solo Gaspar) -----
+      // ----- Gasto de Gemini: renders + estimación de medidas (solo Gaspar) -----
+      if (request.method === 'GET' && path === '/admin/gemini/usage') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        const ms = new Date(); ms.setUTCDate(1); ms.setUTCHours(0, 0, 0, 0); const m = ms.toISOString();
+        const ds = new Date(); ds.setUTCHours(0, 0, 0, 0); const d = ds.toISOString();
+        const agg = async (where, ...b) => {
+          const r = await env.DB.prepare(`SELECT COUNT(*) AS n, ROUND(SUM(cost_usd), 4) AS cost FROM gemini_usage WHERE 1=1 ${where}`).bind(...b).first();
+          return { n: r?.n || 0, cost: r?.cost || 0 };
+        };
+        const today = await agg(' AND ts >= ?', d);
+        const month = await agg(' AND ts >= ?', m);
+        const monthRender = await agg(" AND kind='render' AND ts >= ?", m);
+        const total = await agg('');
+        const byModel = (await env.DB.prepare("SELECT model, kind, COUNT(*) AS n, ROUND(SUM(cost_usd), 4) AS cost FROM gemini_usage WHERE ts >= ? GROUP BY model, kind ORDER BY cost DESC").bind(m).all()).results || [];
+        const avgRender = monthRender.n ? +(monthRender.cost / monthRender.n).toFixed(4) : 0;
+        return json({
+          ok: true,
+          today: { count: today.n, cost_usd: today.cost },
+          month: { count: month.n, cost_usd: month.cost, renders: monthRender.n, avg_render_usd: avgRender },
+          total: { count: total.n, cost_usd: total.cost },
+          by_model: byModel
+        });
       }
 
       // ----- Copiloto: contador de gasto IA (solo Gaspar) -----
