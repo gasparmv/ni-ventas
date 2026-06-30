@@ -3172,6 +3172,16 @@ async function processIgWebhook(env, body) {
         } catch (_) {}
         // Canal IG siempre (también si la conversación arranca con un echo de automatización).
         try { await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone = ?").bind(custId).run(); } catch (_) {}
+        // Bandeja por CONTENIDO de cursos (mensaje entrante o echo saliente): el opener de cursos
+        // en IG lo manda una herramienta externa (ManyChat/GHL) o se manda a mano, así que el
+        // worker lo ve solo como mensaje. Si el texto tiene marcadores fuertes de cursos, mandamos
+        // el chat a la bandeja de Abril (sin pisar asignación manual). Sin esto, el lead de cursos
+        // que entra por IG cae en 'general' porque se clasifica por el texto de su respuesta.
+        try {
+          if (/neoninfinito\.com|mastery|minicurso|curso\s+gratuito|comunidad\s+al\s+infinito|supernova/i.test(String(body || ''))) {
+            await env.DB.prepare("UPDATE wa_chats_summary SET inbox='cursos', updated_at = ? WHERE phone = ? AND (inbox IS NULL OR inbox IN ('general','oculto',''))").bind(ts, custId).run();
+          }
+        } catch (_) {}
         // 2) Clasificación de vertical + bandeja: SOLO para mensajes ENTRANTES del cliente.
         if (!isEcho) {
           const ref = msg.referral || m.referral || null;
@@ -6927,6 +6937,20 @@ export default {
         } catch (e) { return json({ error: String(e), deleted, replayed }, 500); }
       }
 
+      // Backfill: manda a la bandeja de Abril (cursos) los chats de IG que recibieron el
+      // opener/contenido de cursos pero quedaron en 'general' (leads de cursos que entran por
+      // IG, históricamente mal ruteados por clasificarse por el texto de su respuesta).
+      // Idempotente y seguro: solo promueve general/oculto -> cursos (no pisa asignación manual).
+      if (request.method === 'POST' && path === '/admin/ig/reclasify-cursos') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        try {
+          const r = await env.DB.prepare(
+            "UPDATE wa_chats_summary SET inbox='cursos', updated_at = ? WHERE channel='ig' AND inbox IN ('general','oculto') AND phone IN (SELECT DISTINCT phone FROM wa_messages WHERE channel='ig' AND (body LIKE '%neoninfinito.com%' OR body LIKE '%mastery%' OR body LIKE '%minicurso%' OR body LIKE '%curso gratuito%' OR body LIKE '%comunidad al infinito%' OR body LIKE '%supernova%'))"
+          ).bind(new Date().toISOString()).run();
+          return json({ ok: true, updated: r.meta && r.meta.changes });
+        } catch (e) { return json({ error: String(e && e.message || e) }, 500); }
+      }
+
       // Sincroniza el mapa de anuncios de IG (media_id -> ad_id/campaña) desde Meta Ads.
       // Devuelve el diagnóstico (sirve para ver si el token tiene permiso ads_read).
       if (request.method === 'POST' && path === '/admin/ig/sync-ad-map') {
@@ -9666,7 +9690,11 @@ export default {
     // Follow-up automático de presupuestos del cotizador: solo horario hábil AR (8-20).
     // Usa hAR (calculado más arriba en este mismo handler) para consistencia
     // con processCursosFollowup/processMinicursoFollowup.
-    if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processPresupuestoFollowups(env));
+    // Seguimientos de presupuesto: NO los domingos (hora AR). Los que caen domingo
+    // salen el lunes a primera hora (8 AR); el lunes ampliamos la ventana a 72h para
+    // levantar el backlog del finde sin perder ninguno (el dedup evita repetir).
+    const dowAR = new Date(new Date(event.scheduledTime).getTime() - 3 * 3600 * 1000).getUTCDay(); // 0=domingo
+    if (hAR >= 8 && hAR <= 20 && dowAR !== 0) ctx.waitUntil(processPresupuestoFollowups(env, { maxAgeHours: dowAR === 1 ? 72 : 48 }));
     // Anti-colgados: etiqueta "⏳ Te toca" los leads tibios que nos quedaron debiendo
     // respuesta + resumen 2x/día a Joaco y Gaspar (ver playbook §A4.1).
     if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processColgados(env));
