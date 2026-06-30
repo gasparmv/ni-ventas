@@ -10109,7 +10109,7 @@ async function waSendDocument(env, to, mediaId, filename, caption) {
   });
 }
 
-async function processPresupuestoFollowups(env) {
+async function processPresupuestoFollowups(env, opts = {}) {
   if (await isWaBillingBlocked(env)) return; // pausado por bloqueo de pago de WhatsApp
   const now = Date.now();
   // Follow-up a las 23h del envío del presupuesto: lo más tarde posible DENTRO de
@@ -10118,7 +10118,7 @@ async function processPresupuestoFollowups(env) {
   // abierta → gratis; si ya cerró → plantilla paga (ver bloque windowOpen abajo).
   // Ventana de selección 23h–48h; corre solo en horario hábil 8-20.
   const minAgeAgo = new Date(now - 23 * 60 * 60 * 1000).toISOString();   // edad mínima: 23h
-  const maxAgeAgo = new Date(now - 48 * 60 * 60 * 1000).toISOString();   // edad máxima: 48h
+  const maxAgeAgo = new Date(now - (opts.maxAgeHours || 48) * 60 * 60 * 1000).toISOString();   // edad máxima: 48h normal, 72h los lunes (backlog del domingo)
 
   // 1) Presupuestos del cotizador enviados hace entre 24h y 48h.
   //
