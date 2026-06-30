@@ -3915,6 +3915,7 @@ function drawVerticalCharts(key) {
 let pedidoFilter = { search: '', estadoPago: '', estadoPedido: '', canal: '', mes: '' };
 let pedidoSort = { col: 'fecha', dir: -1 };
 function bindPedidos() {
+  startPedidosPolling();
   let _pedidoSearchTimer = null;
   document.querySelectorAll('[data-pf]').forEach(el => {
     if (el.dataset.pf === 'search') {
@@ -3953,7 +3954,7 @@ function renderPedidos() {
   const meses = uniq(STATE.pedidos.map(p=>getMonth(p.fecha))).sort().reverse();
   return `
     <div class="page-head">
-      <div><div class="eyebrow">${STATE.pedidos.length} totales</div><h1>Pedidos</h1></div>
+      <div><div class="eyebrow" id="pedidos-total-count">${STATE.pedidos.length} totales</div><h1>Pedidos</h1></div>
       <div class="actions">${canCotizar() ? '<button class="btn btn-cyan" id="pedido-nuevo">＋ Cargar pedido</button>' : ''}<button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
     </div>
     ${(() => {
@@ -14697,6 +14698,36 @@ function startBriefsPolling() {
       if (!busy) render();
     }
   }, 10000);
+}
+
+// Auto-refresco del panel de Pedidos (igual que el de Cotización). Sin esto, un
+// pedido nuevo (que entra a D1 vía el cron Excel→base) no aparecía hasta tocar
+// "Refrescar" o recargar la página. Polleamos /admin/pedidos cada 15s, solo en la
+// vista Pedidos y solo si el usuario no está editando nada.
+function pedidosSignature() {
+  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}`).join('|');
+}
+function startPedidosPolling() {
+  if (STATE.pedidosPollTimer) return;
+  STATE.pedidosPollTimer = setInterval(async () => {
+    if (STATE.view !== 'pedidos' || !STATE.token) return;
+    if (document.hidden) return;  // no pollear si la pestaña está oculta
+    // No pisar al usuario mientras edita: modal "Cargar pedido", drawer abierto,
+    // un input/select con foco (búsqueda o dropdown inline), o el lightbox.
+    const ae = document.activeElement;
+    const editing = ae && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName);
+    const drawerOpen = document.getElementById('drawer')?.classList.contains('open');
+    if (STATE.pedidoModalOpen || drawerOpen || STATE.imgLightboxUrl || editing) return;
+    const before = pedidosSignature();
+    const fresh = await fetchPedidosFromD1();
+    if (!fresh || !fresh.length) return;  // fetch falló o vino vacío → no pisar la tabla
+    STATE.pedidos = fresh;
+    if (pedidosSignature() !== before) {
+      renderTablePedidos();
+      const tc = document.getElementById('pedidos-total-count');
+      if (tc) tc.textContent = `${STATE.pedidos.length} totales`;
+    }
+  }, 15000);
 }
 
 function bindCotizacion() {
