@@ -5,7 +5,7 @@
 
 // IMPORTANTE: bumpear CACHE_NAME cada vez que cambia app.js o app.css —
 // el activate borra los caches viejos y fuerza re-descarga del bundle.
-const CACHE_NAME = 'neon-ni-v131';
+const CACHE_NAME = 'neon-ni-v132';
 const STATIC_ASSETS = [
   '/ni-ventas/',
   '/ni-ventas/index.html',

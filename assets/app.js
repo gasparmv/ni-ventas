@@ -7773,7 +7773,10 @@ function formatPhoneDisplay(phone) {
 // Etiquetas que ve Abril (usuario Cursos) al etiquetar/filtrar. El resto las ve solo el admin.
 // 5=interesado curso, 13=Pago completo curso, 26=Alumno, 23=Abandonado IA·Curso,
 // 25=Registro evento junio, 27=form 9 de junio, 17=Importante, 18=Seguimiento.
-const CURSOS_LABEL_IDS = [5, 13, 26, 23, 25, 27, 17, 18];
+// "Venta Abril": Abril la marca (botón dedicado en el chat) cada vez que vende un
+// curso; a fin de mes Gaspar filtra por esta etiqueta para revisar comisiones.
+const VENTA_ABRIL_LABEL_ID = 2154;
+const CURSOS_LABEL_IDS = [5, 13, 26, 23, 25, 27, 17, 18, VENTA_ABRIL_LABEL_ID];
 function visibleLabels() {
   const all = chatState.labels || [];
   return isCursosOnly() ? all.filter(l => CURSOS_LABEL_IDS.includes(l.id)) : all;
@@ -8954,6 +8957,10 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
+        ${(isCursosOnly() || getUserRole() === 'admin') ? (() => {
+          const _venta = (chatState.contactLabels[phone] || []).includes(VENTA_ABRIL_LABEL_ID);
+          return `<button class="btn ${_venta ? 'btn-cyan' : 'btn-ghost'}" id="btn-venta-abril" title="Marcar/desmarcar esta conversación como Venta de curso de Abril" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">${_venta ? '✅ Venta Abril' : '💰 Venta Abril'}</button>`;
+        })() : ''}
         <span>${msgCount} msgs</span>
         ${['admin', 'comercial', 'cursos'].includes(getUserRole()) ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
@@ -10639,6 +10646,22 @@ function bindChatConversation() {
   if (labelsBtn) {
     labelsBtn.onclick = () => showLabelPicker(chatState.selectedPhone);
   }
+  // 💰 Venta Abril — botón dedicado de 1 toque: togglea la etiqueta "Venta Abril"
+  // en la conversación. Abril lo marca al vender un curso; Gaspar filtra a fin de mes.
+  const ventaAbrilBtn = document.getElementById('btn-venta-abril');
+  if (ventaAbrilBtn) ventaAbrilBtn.onclick = async () => {
+    const phone = chatState.selectedPhone;
+    if (!phone) return;
+    ventaAbrilBtn.disabled = true;
+    await toggleContactLabel(phone, VENTA_ABRIL_LABEL_ID);
+    const has = (chatState.contactLabels[phone] || []).includes(VENTA_ABRIL_LABEL_ID);
+    ventaAbrilBtn.classList.toggle('btn-cyan', has);
+    ventaAbrilBtn.classList.toggle('btn-ghost', !has);
+    ventaAbrilBtn.innerHTML = has ? '✅ Venta Abril' : '💰 Venta Abril';
+    const chips = document.getElementById('chat-label-chips');
+    if (chips) chips.innerHTML = renderContactLabelChips(phone);
+    ventaAbrilBtn.disabled = false;
+  };
   // Note button on header (al lado del de etiquetas)
   const noteBtn = document.getElementById('btn-note');
   if (noteBtn) noteBtn.onclick = () => {
