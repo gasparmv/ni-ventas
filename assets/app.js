@@ -6929,22 +6929,62 @@ async function toggleContactLabel(phone, labelId) {
   const current = chatState.contactLabels[phone] || [];
   const lbl = chatState.labels.find(l => l.id === labelId);
   const lblName = lbl?.name || 'etiqueta';
-  if (current.includes(labelId)) {
-    await fetch(CONFIG.trackerUrl + '/admin/contact-labels', {
-      method: 'DELETE', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ phone, label_id: labelId })
-    });
-    chatState.contactLabels[phone] = current.filter(id => id !== labelId);
-    toast(`✗ ${lblName}`);
-  } else {
-    await fetch(CONFIG.trackerUrl + '/admin/contact-labels', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ phone, label_id: labelId })
-    });
-    if (!chatState.contactLabels[phone]) chatState.contactLabels[phone] = [];
-    chatState.contactLabels[phone].push(labelId);
-    toast(`✓ ${lblName}`);
+  const removing = current.includes(labelId);
+  // OPTIMISTA: actualizamos estado + UI YA; la persistencia va en segundo plano.
+  // Aunque el back tarde, el toggle vuela. Si el back falla, revertimos y avisamos.
+  chatState.contactLabels[phone] = removing ? current.filter(id => id !== labelId) : [...current, labelId];
+  toast(removing ? `✗ ${lblName}` : `✓ ${lblName}`);
+  fetch(CONFIG.trackerUrl + '/admin/contact-labels', {
+    method: removing ? 'DELETE' : 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ phone, label_id: labelId })
+  }).then(r => { if (!r.ok) throw new Error('http ' + r.status); }).catch(() => {
+    // rollback: el back no guardó
+    const cur = chatState.contactLabels[phone] || [];
+    chatState.contactLabels[phone] = removing ? [...cur, labelId] : cur.filter(id => id !== labelId);
+    toast('⚠ No se pudo guardar la etiqueta, reintentá');
+    if (chatState.selectedPhone === phone) {
+      const chips = document.getElementById('chat-label-chips');
+      if (chips) chips.innerHTML = renderContactLabelChips(phone);
+      const vb = document.getElementById('btn-venta-abril');
+      if (vb && labelId === VENTA_ABRIL_LABEL_ID) {
+        const has = (chatState.contactLabels[phone] || []).includes(VENTA_ABRIL_LABEL_ID);
+        vb.classList.toggle('btn-cyan', has); vb.classList.toggle('btn-ghost', !has);
+        vb.innerHTML = has ? '✅ Venta Abril' : '💰 Venta Abril';
+      }
+    }
+  });
+}
+
+// Animación tipo casino (monedas + confeti + frase random) cuando Abril marca una
+// venta. Todo CSS (GPU), sin loop de JS, y se autolimpia a los ~3s → no ralentiza.
+function ventaAbrilCelebration() {
+  if (document.getElementById('va-celebration')) return; // no solapar
+  if (!document.getElementById('va-anim-css')) {
+    const st = document.createElement('style');
+    st.id = 'va-anim-css';
+    st.textContent = '@keyframes vaFall{0%{transform:translateY(-15vh) rotate(0)}100%{transform:translateY(115vh) rotate(720deg)}}@keyframes vaPop{0%{transform:translate(-50%,-50%) scale(.3);opacity:0}12%{transform:translate(-50%,-50%) scale(1.18);opacity:1}72%{transform:translate(-50%,-50%) scale(1);opacity:1}100%{transform:translate(-50%,-50%) scale(1.06);opacity:0}}#va-celebration{position:fixed;inset:0;z-index:99999;pointer-events:none;overflow:hidden}#va-celebration .va-p{position:absolute;top:0;will-change:transform;animation:vaFall linear forwards}#va-celebration .va-msg{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);text-align:center;font-weight:900;font-size:clamp(26px,7vw,64px);line-height:1.1;color:#fff;text-shadow:0 0 12px var(--neon-cyan,#8fd4de),0 0 26px var(--neon-cyan,#8fd4de),0 0 40px #22c55e;animation:vaPop 2.6s cubic-bezier(.2,.8,.2,1) forwards;max-width:92vw}';
+    document.head.appendChild(st);
   }
+  const FRASES = ['¡GENIA TOTAL, ABRI! 💸','¡Otra que cae, sos una máquina! 🔥','¡Vendiste, reina! 👑','¡Se prende otro neón! ✨','¡Comisión asegurada, capa! 💰','¡Imparable, Abri! 🚀','¡Otra venta al infinito! ♾️','¡La rompiste toda! 💪','¡Máquina de vender, grosa! 🤑','¡Bien ahí, crack! 🙌','¡Que siga la joda! 🎉','¡A cobrar, campeona! 💵'];
+  const EMO = ['🪙','💰','🎉','✨','💵','🤑','⭐','💚','🎊'];
+  const COLORS = ['#22c55e','#8fd4de','#ffd23f','#ff5a6e','#c4a0ff','#ffa94d'];
+  const wrap = document.createElement('div');
+  wrap.id = 'va-celebration';
+  let html = `<div class="va-msg">${FRASES[Math.floor(Math.random()*FRASES.length)]}</div>`;
+  for (let i = 0; i < 42; i++) {
+    const left = Math.random()*100, dur = 1.8+Math.random()*1.6, delay = Math.random()*0.7;
+    if (Math.random() < 0.62) {
+      const size = 18+Math.random()*26;
+      html += `<span class="va-p" style="left:${left}vw;font-size:${size}px;animation-duration:${dur}s;animation-delay:${delay}s">${EMO[Math.floor(Math.random()*EMO.length)]}</span>`;
+    } else {
+      const c = COLORS[Math.floor(Math.random()*COLORS.length)], w = 8+Math.random()*8;
+      html += `<span class="va-p" style="left:${left}vw;width:${w}px;height:${(w*1.6).toFixed(1)}px;background:${c};border-radius:2px;box-shadow:0 0 8px ${c};animation-duration:${dur}s;animation-delay:${delay}s"></span>`;
+    }
+  }
+  wrap.innerHTML = html;
+  document.body.appendChild(wrap);
+  setTimeout(() => wrap.remove(), 3100);
 }
 
 // ===== Send media =====
@@ -10649,18 +10689,18 @@ function bindChatConversation() {
   // 💰 Venta Abril — botón dedicado de 1 toque: togglea la etiqueta "Venta Abril"
   // en la conversación. Abril lo marca al vender un curso; Gaspar filtra a fin de mes.
   const ventaAbrilBtn = document.getElementById('btn-venta-abril');
-  if (ventaAbrilBtn) ventaAbrilBtn.onclick = async () => {
+  if (ventaAbrilBtn) ventaAbrilBtn.onclick = () => {
     const phone = chatState.selectedPhone;
     if (!phone) return;
-    ventaAbrilBtn.disabled = true;
-    await toggleContactLabel(phone, VENTA_ABRIL_LABEL_ID);
+    // Optimista: el toggle actualiza el estado al toque (el back persiste solo).
+    toggleContactLabel(phone, VENTA_ABRIL_LABEL_ID);
     const has = (chatState.contactLabels[phone] || []).includes(VENTA_ABRIL_LABEL_ID);
     ventaAbrilBtn.classList.toggle('btn-cyan', has);
     ventaAbrilBtn.classList.toggle('btn-ghost', !has);
     ventaAbrilBtn.innerHTML = has ? '✅ Venta Abril' : '💰 Venta Abril';
     const chips = document.getElementById('chat-label-chips');
     if (chips) chips.innerHTML = renderContactLabelChips(phone);
-    ventaAbrilBtn.disabled = false;
+    if (has) ventaAbrilCelebration();  // 🎰 fiesta solo al MARCAR
   };
   // Note button on header (al lado del de etiquetas)
   const noteBtn = document.getElementById('btn-note');
