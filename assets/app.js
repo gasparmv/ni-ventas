@@ -7544,19 +7544,23 @@ async function loadChatMessages(phone, opts) {
 
 async function sendChatMessage(phone, text) {
   if (!canAccessChat() || !phone || !text.trim()) return;
-  const body = text.trim();
+  const full = text.trim();
+  // El playbook pide "varios mensajes cortos" para parecer humano, y el Copiloto ahora arma la
+  // sugerencia así. Partimos por DOBLE salto de línea (una línea en blanco): cada bloque se manda
+  // como un mensaje aparte. Un salto simple (\n) NO parte (queda dentro del mismo mensaje). Si no
+  // hay dobles saltos, es un solo mensaje (igual que antes) -> backward-compatible.
+  const parts = full.split(/\n[ \t]*\n+/).map(t => t.trim()).filter(Boolean);
   const replyTo = chatState.replyingTo || '';
-  // OPTIMISTA: limpiamos el input YA (antes del envío) para que puedas escribir el
-  // siguiente mensaje sin esperar 1-2s a que termine. Si el envío falla, restauramos
-  // el texto para no perderlo.
+  // OPTIMISTA: limpiamos el input YA (antes del envío) para que puedas seguir. Si algo falla,
+  // restauramos SOLO lo que no se llegó a mandar (no re-mandamos lo que ya salió).
   const ta = document.getElementById('chat-input');
   if (ta) { ta.value = ''; ta.style.height = 'auto'; }
   chatState.replyingTo = null;
   renderReplyBanner();
   setDraft(phone, '');
-  const restoreOnFail = () => {
+  const restoreOnFail = (remaining) => {
     const t = document.getElementById('chat-input');
-    if (t && !t.value.trim()) { t.value = body; setDraft(phone, body); }
+    if (t && !t.value.trim()) { t.value = remaining; setDraft(phone, remaining); }
     chatState.replyingTo = replyTo || null;
     renderReplyBanner();
   };
@@ -7565,41 +7569,49 @@ async function sendChatMessage(phone, text) {
   // Instagram va por su propio caño (Graph API), no por el de WhatsApp (360dialog).
   const _contact = (chatState.contacts || []).find(c => c.phone === phone);
   const _isIg = _contact && _contact.channel === 'ig';
+  let sent = 0;
   try {
-    const r = await fetch(CONFIG.trackerUrl + (_isIg ? '/admin/ig/send' : '/admin/wa/send'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(_isIg ? { to: phone, text: body } : { to: phone, body, reply_to: replyTo || undefined })
-    });
-    const j = await r.json();
-    if (!r.ok) {
-      toast('Error: ' + (j.error || 'no se pudo enviar'));
-      restoreOnFail();
-      return;
+    for (let i = 0; i < parts.length; i++) {
+      const partBody = parts[i];
+      const partReply = i === 0 ? replyTo : ''; // la cita (reply) va solo en el primero
+      const r = await fetch(CONFIG.trackerUrl + (_isIg ? '/admin/ig/send' : '/admin/wa/send'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(_isIg ? { to: phone, text: partBody } : { to: phone, body: partBody, reply_to: partReply || undefined })
+      });
+      const j = await r.json();
+      if (!r.ok) {
+        toast('Error: ' + (j.error || 'no se pudo enviar'));
+        restoreOnFail(parts.slice(sent).join('\n\n'));
+        return;
+      }
+      chatState.messages.push({
+        ts: new Date().toISOString(),
+        wamid: j.id || '',
+        direction: 'outbound',
+        phone: phone,
+        sender_name: '',
+        msg_type: 'text',
+        body: partBody,
+        context_id: partReply || '',
+        status: 'sent'
+      });
+      sent++;
+      renderChatMessages();
+      // Pausa humana entre mensajes (no en el último): se sienten escritos, no un bloque bulk.
+      if (i < parts.length - 1) await new Promise(res => setTimeout(res, 650));
     }
-    chatState.messages.push({
-      ts: new Date().toISOString(),
-      wamid: j.id || '',
-      direction: 'outbound',
-      phone: phone,
-      sender_name: '',
-      msg_type: 'text',
-      body,
-      context_id: replyTo || '',
-      status: 'sent'
-    });
-    renderChatMessages();
-    // Copiloto: si esta respuesta salió de una sugerencia usada, logueamos el feedback.
+    // Copiloto: si esta respuesta salió de una sugerencia usada, logueamos el feedback (texto completo).
     try {
       const sg = chatState.lastSuggestion;
       if (sg && sg.phone === phone && sg._used) {
-        logSuggestionFeedback(sg, body, body === String(sg.draft || '').trim() ? 'sent' : 'edited');
+        logSuggestionFeedback(sg, full, full === String(sg.draft || '').trim() ? 'sent' : 'edited');
         chatState.lastSuggestion = null;
       }
     } catch (_) {}
   } catch (e) {
     toast('Error de red al enviar');
-    restoreOnFail();
+    restoreOnFail(parts.slice(sent).join('\n\n'));
   } finally {
     chatState.sending = false;
     updateChatInputState();
@@ -8242,7 +8254,15 @@ function renderSuggestPanel(j) {
       <button class="suggest-x" data-suggest-close title="Descartar">✕</button>
     </div>
     ${warn ? `<div class="suggest-warn">⚠ Revisá antes de mandar${s.escalation_reason ? ': ' + escapeHtml(String(s.escalation_reason)) : ''}${missing.length ? '<br><b>Falta:</b> ' + escapeHtml(missing.join(', ')) : ''}</div>` : ''}
-    <div class="suggest-draft">${escapeHtml(s.draft || '')}</div>
+    ${(() => {
+      // Mostramos la sugerencia PARTIDA en los mensajes que se van a mandar (uno por globo),
+      // para que se vea que van separados (estilo humano del playbook).
+      const msgs = String(s.draft || '').split(/\n[ \t]*\n+/).map(t => t.trim()).filter(Boolean);
+      if (msgs.length <= 1) return `<div class="suggest-draft">${escapeHtml(s.draft || '')}</div>`;
+      return `<div class="suggest-draft suggest-draft-multi" title="Se manda en ${msgs.length} mensajes separados">` +
+        msgs.map(m => `<div class="suggest-msg" style="padding:5px 9px;background:rgba(255,255,255,.06);border-radius:9px;margin-bottom:4px">${escapeHtml(m)}</div>`).join('') +
+        `<div class="suggest-msg-hint" style="font-size:11px;opacity:.6;margin-top:2px">↑ ${msgs.length} mensajes separados</div></div>`;
+    })()}
     ${sources.length ? `<div class="suggest-src">basado en: ${escapeHtml(sources.join(' · '))}</div>` : ''}
     <div class="suggest-actions">
       <button class="suggest-use" data-suggest-use>Usar ✍️</button>
