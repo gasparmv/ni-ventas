@@ -3742,6 +3742,91 @@ async function processMinicursoLead(env, body) {
   }
 }
 
+// ============================================================================
+// Leads B2B de REVENTA (revendedores). Un App Script en el Sheet de reventa
+// reenvía cada fila nueva a POST /webhook/reventa-lead. Filtramos los
+// CUALIFICADOS (tiene experiencia en venta Y clientes) y a esos les mandamos la
+// plantilla lead_reventa_apertura (firmada por Gaspar), los etiquetamos
+// "revendedor", los dejamos en la bandeja general (los ven Joaco y Gaspar, Abril
+// no) y le avisamos a Gaspar por WhatsApp. Los NO cualificados no se tocan: van
+// al minicurso por la página E2 del formulario. Kill-switch OFF por defecto.
+// ============================================================================
+async function reventaOn(env) { return (await kvGet(env, 'reventa_on', '0')) === '1'; }
+// ¿La respuesta descalifica? (P1/P2 en "No"). Normaliza mayúsculas y acentos.
+function reventaEsNo(s) {
+  const t = String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  return t === 'no' || t.startsWith('no ') || t.startsWith('no,') || t.startsWith('no.');
+}
+
+async function processReventaLead(env, body) {
+  try {
+    const row = body?.row_data || body || {};
+    // Claves del Sheet normalizadas (sin mayúsculas ni acentos) para matchear seguro.
+    const lc = {};
+    for (const k of Object.keys(row)) { const nk = String(k).toLowerCase().trim().normalize('NFD').replace(/[̀-ͯ]/g, ''); lc[nk] = row[k]; }
+    const pick = (...keys) => { for (const key of keys) { for (const rk of Object.keys(lc)) { if (rk.includes(key)) return String(lc[rk] || '').trim(); } } return ''; };
+
+    const leadId = String(lc['id'] || lc['lead_id'] || lc['leadgen_id'] || '').trim();
+    if (!leadId) { try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'REVENTA_NO_ID: ' + JSON.stringify(body).slice(0, 400)).run(); } catch (_) {} return; }
+    // Dedup por lead_id.
+    try { const ex = await env.DB.prepare('SELECT 1 AS x FROM reventa_leads WHERE lead_id = ?').bind(leadId).first(); if (ex) return; } catch (_) {}
+
+    const phoneRaw = String(lc['phone'] || lc['phone_number'] || lc['telefono'] || lc['celular'] || '').trim();
+    const nombreRaw = String(lc['full_name'] || lc['nombre_completo'] || lc['name'] || lc['nombre'] || '').trim();
+    const p1 = pick('experiencia');                 // ¿tenés experiencia en venta de productos?
+    const p2 = pick('clientes');                    // ¿tenes clientes para venderles?
+    const p3 = pick('rubro', 'dedica');             // ¿te dedicás a alguno de estos rubros?
+    const phone = normalizeArPhone(phoneRaw) || '';
+    const nombre = (nombreRaw.split(/\s+/)[0] || '').replace(/[^\p{L}\p{M}'\-]/gu, '');
+    // Cualifica si tiene experiencia (P1 ≠ No) Y clientes (P2 ≠ No).
+    const cualif = !!p1 && !!p2 && !reventaEsNo(p1) && !reventaEsNo(p2);
+    const now = new Date().toISOString();
+
+    // Registrar siempre (dedup + métricas), cualifique o no.
+    try {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO reventa_leads (lead_id, ts, phone, nombre, p1_experiencia, p2_clientes, p3_rubro, cualificado, template_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      ).bind(leadId, now, phone, nombre, p1, p2, p3, cualif ? 1 : 0, cualif ? 'pending' : 'skipped', now).run();
+    } catch (e) { try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'REVENTA_INSERT_ERR: ' + (e?.message || String(e))).run(); } catch (_) {} return; }
+
+    // No cualificado o sin teléfono: no lo tocamos (va al minicurso por la página E2).
+    if (!cualif || !phone) return;
+    // Kill-switch: si está OFF, quedó registrado pero no mandamos nada.
+    if (!(await reventaOn(env))) return;
+
+    // 1) Plantilla de apertura (fuera de ventana: el lead nunca nos escribió).
+    const nombreTpl = capitalizeName(nombre) || 'buenas';
+    const res = await waSendTemplate(env, phone, 'lead_reventa_apertura', 'es_AR', [nombreTpl]);
+    const sentTs = new Date().toISOString();
+    if (res?.ok) {
+      const wamid = res.id || '';
+      try { await env.DB.prepare("UPDATE reventa_leads SET template_status = 'sent', template_sent_at = ?, wamid = ? WHERE lead_id = ?").bind(sentTs, wamid, leadId).run(); } catch (_) {}
+      const preview = `Holaa ${nombreTpl}! Soy Gaspar de Neon Infinito. Vimos que te interesa sumarte como revendedor de nuestros neones LED. Contame, hoy tenés un local o vendés más por redes?`;
+      if (wamid) { try { await env.DB.prepare("INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1) ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'").bind(sentTs, wamid, phone, preview).run(); } catch (_) {} }
+    } else {
+      try { await env.DB.prepare("UPDATE reventa_leads SET template_status = 'failed' WHERE lead_id = ?").bind(leadId).run(); } catch (_) {}
+    }
+
+    // 2) Bandeja general + etiqueta "revendedor" (los ven Joaco y Gaspar, Abril no).
+    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'general', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'general', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('oculto','')").bind(phone, sentTs).run(); } catch (_) {}
+    try {
+      const lab = await env.DB.prepare("SELECT id FROM labels WHERE name = 'revendedor'").first();
+      if (lab?.id) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, lab.id, sentTs).run();
+    } catch (_) {}
+
+    // 3) Avisar a Gaspar por WhatsApp (una sola vez por lead).
+    try {
+      const st = await env.DB.prepare("SELECT notif_sent FROM reventa_leads WHERE lead_id = ?").bind(leadId).first();
+      if (!st?.notif_sent) {
+        await precotizNotifyGaspar(env, `nuevo revendedor cualificado\n${nombreRaw || nombre || 's/nombre'} - ${phone}\nya le mandé la apertura, quedó en la bandeja general con etiqueta revendedor`);
+        await env.DB.prepare("UPDATE reventa_leads SET notif_sent = 1 WHERE lead_id = ?").bind(leadId).run();
+      }
+    } catch (_) {}
+  } catch (err) {
+    try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'REVENTA_ERR: ' + (err?.message || String(err))).run(); } catch (_) {}
+  }
+}
+
 // ===== Media download (WhatsApp → R2, vía Meta o 360dialog) =====
 async function downloadMedia(env, mediaId) {
   if (!mediaId || !env.MEDIA) return null;
@@ -5659,6 +5744,20 @@ export default {
       return json({ ok: true });
     }
 
+    // ===== Registro de leads del formulario B2B de REVENTA =====
+    // Un App Script en el Sheet de reventa reenvía cada fila nueva acá (mismo
+    // header de auth que el minicurso). El worker filtra cualificados y actúa.
+    if (request.method === 'POST' && path === '/webhook/reventa-lead') {
+      const incoming = request.headers.get('x-sheet-secret') || '';
+      const okSecret = (env.SHEET_BRIDGE_SECRET && incoming === env.SHEET_BRIDGE_SECRET) || (env.MINICURSO_WEBHOOK_SECRET && incoming === env.MINICURSO_WEBHOOK_SECRET);
+      if (!okSecret) return json({ error: 'forbidden' }, 403);
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: true }); }
+      try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'REVENTA_LEAD: ' + JSON.stringify(body).slice(0, 2000)).run(); } catch (_) {}
+      ctx.waitUntil(processReventaLead(env, body));
+      return json({ ok: true });
+    }
+
     // ----- WhatsApp Webhook (verificación + recepción de mensajes) -----
     if (request.method === 'GET' && path === '/webhook') {
       // Verificación del webhook: Meta envía hub.mode, hub.verify_token, hub.challenge
@@ -6647,6 +6746,29 @@ export default {
             ).bind(num, nombre, now, due, now, now).run();
           } catch (e) { return json({ error: String(e?.message || e) }, 500); }
           return json({ ok: true, phone: num, nombre, opener_due_at: due });
+        }
+
+        // GET /admin/reventa → estado + leads del flujo de reventa B2B
+        if (request.method === 'GET' && path === '/admin/reventa') {
+          const on = (await kvGet(env, 'reventa_on', '0')) === '1';
+          let leads = [];
+          try { const rs = await env.DB.prepare('SELECT * FROM reventa_leads ORDER BY created_at DESC LIMIT 300').all(); leads = rs.results || []; } catch (_) {}
+          const cual = leads.filter(l => l.cualificado).length;
+          return json({ ok: true, on, count: leads.length, cualificados: cual, no_cualificados: leads.length - cual, leads });
+        }
+        // POST /admin/reventa/control → { on? } (kill-switch)
+        if (request.method === 'POST' && path === '/admin/reventa/control') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          if (typeof body?.on === 'boolean') await kvSet(env, 'reventa_on', body.on ? '1' : '0');
+          return json({ ok: true, on: (await kvGet(env, 'reventa_on', '0')) === '1' });
+        }
+        // POST /admin/reventa/test → simula un lead { phone, nombre, p1, p2, p3, id? }
+        if (request.method === 'POST' && path === '/admin/reventa/test') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          const row = { id: body.id || ('test-' + String(body.phone || '').replace(/\D/g, '')), phone: body.phone || '', full_name: body.nombre || '', 'tenes experiencia en venta de productos': body.p1 || '', 'tenes clientes para venderles': body.p2 || '', 'te dedicas a alguno de estos rubros': body.p3 || '' };
+          await processReventaLead(env, { row_data: row });
+          const lead = await env.DB.prepare('SELECT lead_id, phone, nombre, cualificado, template_status FROM reventa_leads WHERE lead_id = ?').bind(row.id).first();
+          return json({ ok: true, lead });
         }
 
         // POST /admin/precotiz/dry-run → { phone } qué decidiría el motor, SIN enviar
