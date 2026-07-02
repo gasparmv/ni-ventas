@@ -3728,7 +3728,8 @@ async function processMinicursoLead(env, body) {
       try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'MINICURSO_LEAD_NO_PHONE: ' + JSON.stringify(body).slice(0, 500)).run(); } catch (_) {}
       return;
     }
-    const nombre = (nombreRaw.split(/\s+/)[0] || ''); // primer nombre para el opener
+    // Primer nombre, sin puntuación/números (evita openers tipo "holaa Andrés,,").
+    const nombre = (nombreRaw.split(/\s+/)[0] || '').replace(/[^\p{L}\p{M}'\-]/gu, '');
     // Dedup: si ya está registrado (en cualquier estado), no re-encolamos.
     try { const ex = await env.DB.prepare('SELECT 1 AS x FROM minicurso_landing WHERE phone = ?').bind(phone).first(); if (ex) return; } catch (_) {}
     const now = new Date().toISOString();
