@@ -5308,6 +5308,30 @@ async function synthesizeFrameworkImprovements(env, opts = {}) {
   }
 }
 
+// Wrapper del cron para la síntesis (Fase 2C): se chequea 1 vez/día pero corre solo si pasaron
+// ~7 días desde la última síntesis que EFECTIVAMENTE gastó (copilot_usage). Mantiene la cadencia
+// semanal pero SE AUTO-RECUPERA: si el lunes falla (hipo de API, cron salteado, deploy en ese
+// minuto), reintenta el martes, etc. — ya no se pierde la semana entera. Loguea éxito/fallo en
+// wa_webhook_log para visibilidad; los skip por poco feedback no se loguean (esperados y gratis).
+async function maybeWeeklySynthesis(env) {
+  try {
+    const last = await env.DB.prepare("SELECT MAX(created_at) AS t FROM copilot_usage WHERE kind='synthesis'").first();
+    if (last && last.t) {
+      const days = (Date.now() - new Date(last.t).getTime()) / 86400000;
+      if (days < 6.5) return; // ya corrió esta semana
+    }
+    const res = await synthesizeFrameworkImprovements(env, { createdBy: 'cron' });
+    if (res && !res.skipped) {
+      const msg = res.ok
+        ? ('SYNTH ok: ' + (res.generated != null ? res.generated : '?') + ' propuestas ($' + (res.cost_usd || 0) + ')')
+        : ('SYNTH FALLO: ' + (res.error || 'desconocido'));
+      try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(new Date().toISOString(), msg).run(); } catch (_) {}
+    }
+  } catch (e) {
+    try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(new Date().toISOString(), 'SYNTH ERR: ' + ((e && e.message) || String(e))).run(); } catch (_) {}
+  }
+}
+
 // Aplica una propuesta aprobada: crea una versión nueva del framework con el
 // cambio incorporado y la activa. overrideContent permite que Gaspar edite el
 // texto antes de aplicar.
@@ -9998,13 +10022,13 @@ export default {
     // tengan actividad nueva desde su último análisis o que nunca se analizaron).
     // Ignora phones internos. Idempotente: si no hay nada que analizar, no hace nada.
     if (minute < 5) ctx.waitUntil(processAnalysisPending(env));
-    // Fase 2C: síntesis de mejoras al playbook, 1 vez por semana (lunes 13:00 UTC
-    // = 10:00 AR). La función tiene su propio gate: si no hay suficiente feedback
-    // nuevo desde la última corrida, no gasta. Las propuestas quedan 'pending'
-    // para que Gaspar las apruebe — el cron NUNCA toca el playbook solo.
-    const dow = new Date(event.scheduledTime).getUTCDay(); // 0=dom, 1=lun
-    if (dow === 1 && hour === 13 && minute < 5) {
-      ctx.waitUntil(synthesizeFrameworkImprovements(env, { createdBy: 'cron' }));
+    // Fase 2C: síntesis de mejoras al playbook. Antes corría SOLO lunes 13:00 (una ventana de 5
+    // min por semana); si ese tick fallaba se perdía la semana entera y sin rastro. Ahora se
+    // chequea 1 vez/día (13:00 UTC = 10 AR) y corre si pasaron ~7 días desde la última síntesis
+    // -> self-healing (un día perdido lo agarra el siguiente). Igual tiene su gate de feedback y
+    // NUNCA toca el playbook solo (deja propuestas 'pending' para que Gaspar apruebe).
+    if (hour === 13 && minute < 5) {
+      ctx.waitUntil(maybeWeeklySynthesis(env));
     }
   }
 };
