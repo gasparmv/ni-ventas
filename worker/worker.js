@@ -2004,6 +2004,213 @@ function cursosFlowBody(kind) {
   }
 }
 
+// ============================================================================
+// Landing del minicurso gratuito (leads que se REGISTRAN en la web).
+// La landing manda cada registro (nombre + teléfono) a /webhook/minicurso-lead
+// (2da acción de webhook, en paralelo a la que ya escribe en el Google Sheet).
+// A los ~45 min Abril manda un opener (PLANTILLA aprobada: el lead nunca nos
+// escribió, la ventana de 24h está cerrada), el chat entra a su bandeja, y según
+// la respuesta la IA ramifica. Follow-up a las 23h si no vio la clase 2.
+// Estructura calcada de wa_cursos_flow; la diferencia es el disparo (registro,
+// no inbound de ad) y que el opener va por plantilla. GUARDIA anti-choque con el
+// flujo de ads en ambas direcciones (ver también cursosFlowOnInbound).
+// ============================================================================
+const MINICURSO_LANDING_DELAY_MS = 45 * 60 * 1000;          // opener a los 45 min del registro
+const MINICURSO_LANDING_FOLLOWUP_MS = 23 * 60 * 60 * 1000;  // follow-up a las 23h del último mensaje
+const MINICURSO_LANDING_DEBOUNCE_MS = 90 * 1000;            // esperar a que el cliente termine de escribir
+const MINICURSO_LANDING_OPENER_TPL = 'minicurso_landing_opener';     // plantilla Meta (opener, fuera de ventana)
+const MINICURSO_LANDING_FOLLOWUP_TPL = 'minicurso_landing_followup'; // plantilla Meta (follow-up, fuera de ventana)
+// Mensajes de texto libre (dentro de la ventana de 24h: el lead ya respondió).
+const MINICURSO_LANDING_CLASE2_MSG = 'buenísimo entonces ✨ avisame cuando hayas visto la clase 2 completa y seguimos charlando! Que al final hay una propuesta que te va a interesar seguro';
+const MINICURSO_LANDING_FU_1 = 'buenass, cómo va? Abril de nuevoo jej';
+const MINICURSO_LANDING_FU_2 = 'che, avisame cuando hayas podido ver la clase 2 hasta el final! Me ayudaría mucho saber qué te pareció ✨';
+
+async function minicursoLandingOn(env) { return (await kvGet(env, 'minicurso_landing_on', '0')) === '1'; }
+// Horario de envío (opener + follow-up): 8-22 AR, para no mandar plantillas de madrugada.
+function minicursoLandingEnHorario() {
+  const hAR = (new Date().getUTCHours() - 3 + 24) % 24;
+  return hAR >= 8 && hAR < 22;
+}
+// Preview del opener que se guarda en el chat (la plantilla real la aprueba Meta).
+function minicursoLandingOpenerPreview(nombre) {
+  const n = String(nombre || '').trim();
+  return `holaa ${n}, vimos que te registraste hace un ratito a la formación gratuita! Soy Abril, de Neon Infinito. calculo que ya viste la clase 1, no?`.replace(' , ', ', ');
+}
+function minicursoLandingFollowupPreview() {
+  return MINICURSO_LANDING_FU_1 + '\n' + MINICURSO_LANDING_FU_2;
+}
+// ¿El lead ya está en el flujo de la landing en un estado ACTIVO (no terminal)?
+// Lo usa el guardia del flujo de ads para no arrancar un opener duplicado.
+async function minicursoLandingActivo(env, phone) {
+  try {
+    const r = await env.DB.prepare("SELECT 1 AS x FROM minicurso_landing WHERE phone = ? AND stage NOT IN ('guarded','abril_manual','done') LIMIT 1").bind(phone).first();
+    return !!r;
+  } catch (_) { return false; }
+}
+
+// ¿El cliente indicó que YA vio/terminó la clase 2? Gate del follow-up (que SOLO
+// sale si NO vio la clase 2). Conservadores para el "sí vio": solo true ante señal
+// clara; ante duda -> false (mandamos el recordatorio, es suave y barato).
+async function analyzeVioClase2(env, texto) {
+  const t = String(texto || '').trim();
+  if (!t || !env.ANTHROPIC_API_KEY) return false;
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 8,
+        system: 'Seguís a personas anotadas a una formación gratuita de 2 clases sobre carteles de neón LED. Te paso la conversación (Cliente / Abril). Decidí si el CLIENTE ya vio, terminó o está viendo la CLASE 2 (la segunda y última clase). Respondé SOLO una palabra: SI si el cliente da a entender claramente que ya vio/terminó/está viendo la clase 2, la segunda clase, o las dos clases (ej. "ya la vi", "terminé las dos", "me encantó la segunda"). NO en cualquier otro caso: si no menciona la clase 2, si solo habló de la clase 1, si dijo que todavía no pudo, si es ambiguo o no hay señal. Ante la duda, NO.',
+        messages: [{ role: 'user', content: t.slice(0, 1500) }]
+      })
+    });
+    const j = await r.json();
+    if (!r.ok) return false;
+    return (j.content?.[0]?.text || '').trim().toUpperCase().startsWith('S');
+  } catch (e) { return false; }
+}
+
+// Webhook (inbound): el lead de la landing respondió. Marca para análisis (con
+// debounce para juntar mensajes) o reprograma el follow-up si ya avanzó.
+async function minicursoLandingOnInbound(env, phone, ts) {
+  if (!phone || !(await minicursoLandingOn(env))) return;
+  try {
+    const row = await env.DB.prepare("SELECT stage FROM minicurso_landing WHERE phone = ?").bind(phone).first();
+    if (!row) return;
+    const now = new Date().toISOString();
+    const due = new Date(Date.now() + MINICURSO_LANDING_DEBOUNCE_MS).toISOString();
+    const fu = new Date(Date.now() + MINICURSO_LANDING_FOLLOWUP_MS).toISOString();
+    if (row.stage === 'await1' || row.stage === 'analyze1' || row.stage === 'analyzing1') {
+      // Primera respuesta al opener (o sigue escribiendo): analizar con debounce y correr el follow-up.
+      await env.DB.prepare("UPDATE minicurso_landing SET stage = 'analyze1', reply_due = ?, followup_due_at = ?, updated_at = ? WHERE phone = ?").bind(due, fu, now, phone).run();
+    } else if (row.stage === 'done_pos') {
+      // Ya le mandamos la clase 2: cada mensaje nuevo corre el follow-up 23h.
+      await env.DB.prepare("UPDATE minicurso_landing SET followup_due_at = ?, updated_at = ? WHERE phone = ? AND followup_sent_at IS NULL").bind(fu, now, phone).run();
+    }
+  } catch (_) {}
+}
+
+// Cron (*/1): motor del flujo de la landing. (a) manda el opener a los 45 min
+// (plantilla) con guardia + horario; (b) analiza la respuesta con IA y ramifica;
+// (c) follow-up a las 23h si no vio la clase 2 y no pidió los regalos.
+async function processMinicursoLanding(env) {
+  if (!(await minicursoLandingOn(env)) || await isWaBillingBlocked(env)) return;
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const enHorario = minicursoLandingEnHorario();
+
+  // (a) OPENER: registros cuyo +45min venció. Solo en horario (no plantillas de
+  //     madrugada). Guardia anti-choque con el flujo de ads / minicurso ya recibido.
+  if (enHorario) {
+    try {
+      const rs = await env.DB.prepare("SELECT phone, nombre FROM minicurso_landing WHERE stage = 'registered' AND opener_due_at <= ? ORDER BY opener_due_at ASC LIMIT 10").bind(nowIso).all();
+      for (const r of (rs.results || [])) {
+        const phone = r.phone;
+        // GUARDIA: si ya está en el flujo de ads (sin terminar) o ya recibió el
+        // minicurso/regalo, no duplicamos el opener. Lo marcamos guarded y dejamos
+        // el chat en la bandeja de Abril igual.
+        let guard = '';
+        try { const inFlow = await env.DB.prepare("SELECT stage FROM wa_cursos_flow WHERE phone = ?").bind(phone).first(); if (inFlow && inFlow.stage && inFlow.stage !== 'done') guard = 'en_flujo_ads:' + inFlow.stage; } catch (_) {}
+        if (!guard && await gotMinicurso(env, phone)) guard = 'ya_recibio_minicurso';
+        if (guard) {
+          try { await env.DB.prepare("UPDATE minicurso_landing SET stage = 'guarded', guard_reason = ?, updated_at = ? WHERE phone = ? AND stage = 'registered'").bind(guard, nowIso, phone).run(); } catch (_) {}
+          try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos', updated_at = ? WHERE phone = ? AND (inbox IS NULL OR inbox IN ('general','oculto',''))").bind(nowIso, phone).run(); } catch (_) {}
+          continue;
+        }
+        // Claim atómico (evita doble envío entre ticks del cron).
+        let cl; try { cl = await env.DB.prepare("UPDATE minicurso_landing SET stage = 'sending_opener', updated_at = ? WHERE phone = ? AND stage = 'registered'").bind(nowIso, phone).run(); } catch (_) { continue; }
+        if (!cl?.meta?.changes) continue;
+        const nombre = (r.nombre || '').trim() || 'buenas';
+        const res = await waSendTemplate(env, phone, MINICURSO_LANDING_OPENER_TPL, 'es_AR', [nombre]);
+        if (!res || !res.ok) {
+          // Liberar para reintentar en el próximo tick en horario.
+          try { await env.DB.prepare("UPDATE minicurso_landing SET stage = 'registered', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+          continue;
+        }
+        const sentTs = new Date().toISOString();
+        // Abril lo ve DESDE EL INICIO. Follow-up programado a +23h del opener.
+        try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('general','oculto','')").bind(phone, sentTs).run(); } catch (_) {}
+        try { await env.DB.prepare("UPDATE minicurso_landing SET stage = 'await1', opener_sent_at = ?, followup_due_at = ?, updated_at = ? WHERE phone = ?").bind(sentTs, new Date(nowMs + MINICURSO_LANDING_FOLLOWUP_MS).toISOString(), sentTs, phone).run(); } catch (_) {}
+        if (res.id) { try { await env.DB.prepare(`INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1) ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`).bind(sentTs, res.id, phone, minicursoLandingOpenerPreview(nombre)).run(); } catch (_) {} }
+      }
+    } catch (_) {}
+  }
+
+  // (b) BRANCH: respuestas con el debounce vencido. Junta los mensajes del cliente,
+  //     IA evalúa (generoso): positiva -> mensaje clase 2 (texto libre, ventana
+  //     abierta); no positiva -> Abril lo sigue a mano (sin mensaje automático).
+  try {
+    const an = await env.DB.prepare("SELECT phone, opener_sent_at FROM minicurso_landing WHERE stage = 'analyze1' AND reply_due <= ? LIMIT 6").bind(nowIso).all();
+    for (const r of (an.results || [])) {
+      const phone = r.phone;
+      let cl; try { cl = await env.DB.prepare("UPDATE minicurso_landing SET stage = 'analyzing1' WHERE phone = ? AND stage = 'analyze1'").bind(phone).run(); } catch (_) { continue; }
+      if (!cl?.meta?.changes) continue;
+      let texto = '';
+      try { const m = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'reaction' AND ts >= ? AND body != '' ORDER BY ts ASC LIMIT 20").bind(phone, r.opener_sent_at || '').all(); texto = (m.results || []).map(x => x.body).join('\n'); } catch (_) {}
+      const sentiment = await analyzeMinicursoFeedback(env, texto); // generoso: duda -> positiva
+      if (sentiment === 'positiva') {
+        const res = await waSendText(env, phone, MINICURSO_LANDING_CLASE2_MSG);
+        const sentTs = new Date().toISOString();
+        if (res && res.ok) {
+          if (res.id) { try { await env.DB.prepare(`INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1) ON CONFLICT(wamid) DO NOTHING`).bind(sentTs, res.id, phone, MINICURSO_LANDING_CLASE2_MSG).run(); } catch (_) {} }
+          try { await env.DB.prepare("UPDATE minicurso_landing SET stage = 'done_pos', followup_due_at = ?, updated_at = ? WHERE phone = ?").bind(new Date(Date.now() + MINICURSO_LANDING_FOLLOWUP_MS).toISOString(), sentTs, phone).run(); } catch (_) {}
+        } else {
+          // No se pudo mandar: volver a await1 (reintenta con el próximo inbound/tick).
+          try { await env.DB.prepare("UPDATE minicurso_landing SET stage = 'await1', updated_at = ? WHERE phone = ?").bind(sentTs, phone).run(); } catch (_) {}
+        }
+      } else {
+        // No positiva: lo sigue Abril. El chat ya está en su bandeja. Sin follow-up.
+        try { await env.DB.prepare("UPDATE minicurso_landing SET stage = 'abril_manual', followup_due_at = NULL, updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+
+  // (c) FOLLOW-UP a las 23h del último mensaje. Aplica a await1 (no respondió el
+  //     opener) o done_pos (dijo que vio la 1, le pedimos la 2). Gates: no pidió
+  //     los regalos y la IA interpreta que NO vio la clase 2. Texto libre si la
+  //     ventana sigue abierta (2 mensajitos), plantilla si ya cerró.
+  if (enHorario) {
+    try {
+      const fsq = await env.DB.prepare("SELECT phone, opener_sent_at FROM minicurso_landing WHERE stage IN ('await1','done_pos') AND followup_due_at IS NOT NULL AND followup_due_at <= ? AND followup_sent_at IS NULL LIMIT 10").bind(nowIso).all();
+      for (const r of (fsq.results || [])) {
+        const phone = r.phone;
+        // Claim atómico.
+        let cl; try { cl = await env.DB.prepare("UPDATE minicurso_landing SET followup_sent_at = 'sending', updated_at = ? WHERE phone = ? AND followup_sent_at IS NULL").bind(nowIso, phone).run(); } catch (_) { continue; }
+        if (!cl?.meta?.changes) continue;
+        // Gate 1: ya pidió los regalos (cotizador+guía) -> no lo molestamos.
+        if (await gotMinicurso(env, phone)) { try { await env.DB.prepare("UPDATE minicurso_landing SET followup_sent_at = 'skipped', guard_reason = 'pidio_regalos', stage = 'done', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {} continue; }
+        // Gate 2: ¿ya vio la clase 2 (según la conversación)? Si sí -> no mandamos.
+        let texto = '';
+        try { const m = await env.DB.prepare("SELECT direction, body FROM wa_messages WHERE phone = ? AND ts >= ? AND body != '' AND msg_type != 'reaction' ORDER BY ts ASC LIMIT 30").bind(phone, r.opener_sent_at || '').all(); texto = (m.results || []).map(x => (x.direction === 'inbound' ? 'Cliente: ' : 'Abril: ') + x.body).join('\n'); } catch (_) {}
+        if (await analyzeVioClase2(env, texto)) { try { await env.DB.prepare("UPDATE minicurso_landing SET vio_clase2 = 1, followup_sent_at = 'skipped', guard_reason = 'vio_clase2', stage = 'done', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {} continue; }
+        // Mandar. ¿Ventana abierta? (último inbound < 24h).
+        let lastIn = null;
+        try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound'").bind(phone).first(); lastIn = li && li.t; } catch (_) {}
+        const within24 = lastIn && (nowMs - new Date(lastIn).getTime()) < 24 * 60 * 60 * 1000;
+        let ok = false;
+        if (within24) {
+          const r1 = await waSendText(env, phone, MINICURSO_LANDING_FU_1);
+          if (r1 && r1.ok) {
+            if (r1.id) { try { await env.DB.prepare("INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1) ON CONFLICT(wamid) DO NOTHING").bind(new Date().toISOString(), r1.id, phone, MINICURSO_LANDING_FU_1).run(); } catch (_) {} }
+            const r2 = await waSendText(env, phone, MINICURSO_LANDING_FU_2);
+            if (r2 && r2.ok && r2.id) { try { await env.DB.prepare("INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1) ON CONFLICT(wamid) DO NOTHING").bind(new Date().toISOString(), r2.id, phone, MINICURSO_LANDING_FU_2).run(); } catch (_) {} }
+            ok = true;
+          }
+        } else {
+          const rt = await waSendTemplate(env, phone, MINICURSO_LANDING_FOLLOWUP_TPL, 'es_AR', []);
+          if (rt && rt.ok) {
+            if (rt.id) { try { await env.DB.prepare("INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1) ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'").bind(new Date().toISOString(), rt.id, phone, minicursoLandingFollowupPreview()).run(); } catch (_) {} }
+            ok = true;
+          }
+        }
+        if (ok) { try { await env.DB.prepare("UPDATE minicurso_landing SET followup_sent_at = ?, stage = 'done', updated_at = ? WHERE phone = ?").bind(new Date().toISOString(), nowIso, phone).run(); } catch (_) {} }
+        else { try { await env.DB.prepare("UPDATE minicurso_landing SET followup_sent_at = NULL, updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {} }
+      }
+    } catch (_) {}
+  }
+}
+
 // Webhook (inbound): arranca el flujo para un lead nuevo de ad de cursos, o
 // transiciona el estado si ya esta en el flujo (respuesta al msg 3 o al msg 6).
 async function cursosFlowOnInbound(env, phone, msgBody, ts) {
@@ -2017,6 +2224,9 @@ async function cursosFlowOnInbound(env, phone, msgBody, ts) {
       const vert = await adVerticalForSource(env, attr.source_id, attr.headline, attr.body);
       if (vert !== 'cursos') return;
       if (await gotMinicurso(env, phone)) return;
+      // GUARDIA anti-choque: si el lead ya está siendo atendido por la landing del
+      // minicurso (mismo público), no arrancamos el opener de ads (sería doble).
+      if (await minicursoLandingActivo(env, phone)) return;
       await env.DB.prepare("INSERT OR IGNORE INTO wa_cursos_flow (phone, stage, started_at, nudged, updated_at) VALUES (?, 'opener', ?, 0, ?)").bind(phone, now, now).run();
       // Abril los ve DESDE EL INICIO: arrancan en su bandeja (cursos), no ocultos.
       try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('general','oculto')").bind(phone, now).run(); } catch (_) {}
@@ -3503,6 +3713,31 @@ async function processSheetLead(env, body) {
     }
   } catch (err) {
     await _logLeadDebug(env, 'SHEET_FATAL', { message: err?.message, stack: (err?.stack || '').slice(0, 1500) });
+  }
+}
+
+// Registra un lead de la LANDING del minicurso: normaliza el teléfono, dedup, e
+// inserta en minicurso_landing con el opener programado a +45min. NO manda nada
+// acá — el opener lo dispara el cron processMinicursoLanding (con guardia + horario).
+async function processMinicursoLead(env, body) {
+  try {
+    const phoneRaw = String(body?.phone || body?.telefono || body?.['teléfono'] || body?.phone_number || body?.celular || '').trim();
+    const nombreRaw = String(body?.firstName || body?.first_name || body?.nombre || body?.name || '').trim();
+    const phone = normalizeArPhone(phoneRaw) || '';
+    if (!phone) {
+      try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'MINICURSO_LEAD_NO_PHONE: ' + JSON.stringify(body).slice(0, 500)).run(); } catch (_) {}
+      return;
+    }
+    const nombre = (nombreRaw.split(/\s+/)[0] || ''); // primer nombre para el opener
+    // Dedup: si ya está registrado (en cualquier estado), no re-encolamos.
+    try { const ex = await env.DB.prepare('SELECT 1 AS x FROM minicurso_landing WHERE phone = ?').bind(phone).first(); if (ex) return; } catch (_) {}
+    const now = new Date().toISOString();
+    const due = new Date(Date.now() + MINICURSO_LANDING_DELAY_MS).toISOString();
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO minicurso_landing (phone, nombre, stage, registered_at, opener_due_at, source, updated_at, created_at) VALUES (?, ?, 'registered', ?, ?, 'landing', ?, ?)"
+    ).bind(phone, nombre, now, due, now, now).run();
+  } catch (err) {
+    try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'MINICURSO_LEAD_ERR: ' + (err?.message || String(err))).run(); } catch (_) {}
   }
 }
 
@@ -5382,6 +5617,22 @@ export default {
       return json({ ok: true });
     }
 
+    // ===== Registro de la landing del minicurso gratuito =====
+    // La landing manda cada registro (nombre + teléfono) acá, en paralelo a la
+    // acción que ya escribe en el Google Sheet. Auth via header X-Sheet-Secret
+    // (acepta el secret del bridge de leads o uno dedicado). El opener lo dispara
+    // el cron a los 45 min (con guardia + horario), no acá.
+    if (request.method === 'POST' && path === '/webhook/minicurso-lead') {
+      const incoming = request.headers.get('x-sheet-secret') || '';
+      const okSecret = (env.SHEET_BRIDGE_SECRET && incoming === env.SHEET_BRIDGE_SECRET) || (env.MINICURSO_WEBHOOK_SECRET && incoming === env.MINICURSO_WEBHOOK_SECRET);
+      if (!okSecret) return json({ error: 'forbidden' }, 403);
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: true }); }
+      try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'MINICURSO_LEAD: ' + JSON.stringify(body).slice(0, 2000)).run(); } catch (_) {}
+      ctx.waitUntil(processMinicursoLead(env, body));
+      return json({ ok: true });
+    }
+
     // ----- WhatsApp Webhook (verificación + recepción de mensajes) -----
     if (request.method === 'GET' && path === '/webhook') {
       // Verificación del webhook: Meta envía hub.mode, hub.verify_token, hub.challenge
@@ -5719,6 +5970,8 @@ export default {
                 // ===== Flujo de cursos por ads (Fase 3): arranque / transiciones =====
                 if (direction === 'inbound') {
                   try { await cursosFlowOnInbound(env, phone, msgBody, ts); } catch (_) {}
+                  // Landing del minicurso: respuesta al opener -> branch por IA / follow-up.
+                  try { await minicursoLandingOnInbound(env, phone, ts); } catch (_) {}
                 }
               }
 
@@ -6336,6 +6589,38 @@ export default {
           if (typeof body?.on === 'boolean') await kvSet(env, 'precotiz_on', body.on ? '1' : '0');
           if (body?.modo === 'auto' || body?.modo === 'draft') await kvSet(env, 'precotiz_modo', body.modo);
           return json({ ok: true, on: (await kvGet(env, 'precotiz_on', '0')) === '1', modo: await kvGet(env, 'precotiz_modo', 'draft') });
+        }
+
+        // GET /admin/minicurso-landing → estado + leads del flujo de la landing del minicurso
+        if (request.method === 'GET' && path === '/admin/minicurso-landing') {
+          const on = (await kvGet(env, 'minicurso_landing_on', '0')) === '1';
+          let leads = [];
+          try { const rs = await env.DB.prepare('SELECT * FROM minicurso_landing ORDER BY updated_at DESC LIMIT 300').all(); leads = rs.results || []; } catch (_) {}
+          const by_stage = {};
+          for (const l of leads) by_stage[l.stage] = (by_stage[l.stage] || 0) + 1;
+          return json({ ok: true, on, count: leads.length, by_stage, leads });
+        }
+        // POST /admin/minicurso-landing/control → { on? } prender/apagar (kill-switch)
+        if (request.method === 'POST' && path === '/admin/minicurso-landing/control') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          if (typeof body?.on === 'boolean') await kvSet(env, 'minicurso_landing_on', body.on ? '1' : '0');
+          return json({ ok: true, on: (await kvGet(env, 'minicurso_landing_on', '0')) === '1' });
+        }
+        // POST /admin/minicurso-landing/test → { phone, nombre, now? } registra un lead
+        // de prueba. Con now:true el opener sale en el próximo tick (probar sin esperar 45min).
+        if (request.method === 'POST' && path === '/admin/minicurso-landing/test') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          const num = normalizeArPhone(String(body?.phone || '')) || '';
+          if (!num) return json({ error: 'missing/invalid phone' }, 400);
+          const nombre = (String(body?.nombre || body?.firstName || '').trim().split(/\s+/)[0]) || '';
+          const now = new Date().toISOString();
+          const due = body?.now ? now : new Date(Date.now() + MINICURSO_LANDING_DELAY_MS).toISOString();
+          try {
+            await env.DB.prepare(
+              "INSERT INTO minicurso_landing (phone, nombre, stage, registered_at, opener_due_at, source, updated_at, created_at) VALUES (?, ?, 'registered', ?, ?, 'test', ?, ?) ON CONFLICT(phone) DO UPDATE SET stage='registered', nombre=excluded.nombre, opener_due_at=excluded.opener_due_at, opener_sent_at=NULL, reply_due=NULL, followup_sent_at=NULL, followup_due_at=NULL, guard_reason='', vio_clase2=0, updated_at=excluded.updated_at"
+            ).bind(num, nombre, now, due, now, now).run();
+          } catch (e) { return json({ error: String(e?.message || e) }, 500); }
+          return json({ ok: true, phone: num, nombre, opener_due_at: due });
         }
 
         // POST /admin/precotiz/dry-run → { phone } qué decidiría el motor, SIN enviar
@@ -9666,6 +9951,10 @@ export default {
     // releva con freno de mano. Gateado internamente (kill-switch OFF por defecto
     // + horario 8-22 AR). Corre en cada tick para responder en ~1-2 min.
     ctx.waitUntil(processPrecotizPilot(env));
+    // Landing del minicurso gratuito: opener a los 45 min (plantilla) + branch por
+    // IA + follow-up 23h. Gateado (kill-switch OFF por defecto + horario 8-22 AR).
+    // Corre en cada tick para responder rápido; guardia anti-choque con el flujo de ads.
+    ctx.waitUntil(processMinicursoLanding(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
