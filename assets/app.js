@@ -8927,7 +8927,7 @@ function renderAdAttributionBanner(phone) {
       <div style="flex:1;min-width:0">
         <div style="color:#25D366;font-weight:600;font-size:12px">Anuncio de ${platform}</div>
         ${attr.headline ? `<div style="color:var(--fg);font-size:13px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(attr.headline)}</div>` : ''}
-        ${attr.body && !attr.headline ? `<div style="color:var(--fg-subtle);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(attr.body.slice(0, 80))}</div>` : ''}
+        ${attr.body ? `<div style="color:var(--fg-subtle);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(attr.body.slice(0, 80))}</div>` : ''}
         <div style="color:var(--fg-mute);font-size:11px;margin-top:2px;font-family:ui-monospace,monospace">ad:${adIdShort}</div>
       </div>
       ${sourceUrl ? `<a href="${sourceUrl}" target="_blank" style="color:#25D366;text-decoration:none;font-size:12px;flex-shrink:0">Ver ↗</a>` : ''}
