@@ -2022,8 +2022,8 @@ const MINICURSO_LANDING_OPENER_TPL = 'minicurso_landing_opener';     // plantill
 const MINICURSO_LANDING_FOLLOWUP_TPL = 'minicurso_landing_followup'; // plantilla Meta (follow-up, fuera de ventana)
 // Mensajes de texto libre (dentro de la ventana de 24h: el lead ya respondió).
 const MINICURSO_LANDING_CLASE2_MSG = 'buenísimo entonces ✨ avisame cuando hayas visto la clase 2 completa y seguimos charlando! Que al final hay una propuesta que te va a interesar seguro';
-const MINICURSO_LANDING_FU_1 = 'buenass, cómo va? Abril de nuevoo jej';
-const MINICURSO_LANDING_FU_2 = 'che, avisame cuando hayas podido ver la clase 2 hasta el final! Me ayudaría mucho saber qué te pareció ✨';
+const MINICURSO_LANDING_FU_1 = 'buenass, cómo va? Abril de nuevoo';
+const MINICURSO_LANDING_FU_2 = 'avisame cuando hayas podido ver la clase 2 hasta el final! Me ayudaría mucho saber qué te pareció ✨';
 
 async function minicursoLandingOn(env) { return (await kvGet(env, 'minicurso_landing_on', '0')) === '1'; }
 // Horario de envío (opener + follow-up): 8-22 AR, para no mandar plantillas de madrugada.
