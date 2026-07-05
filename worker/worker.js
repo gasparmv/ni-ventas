@@ -2079,6 +2079,10 @@ async function minicursoLandingOnInbound(env, phone, ts) {
     const row = await env.DB.prepare("SELECT stage FROM minicurso_landing WHERE phone = ?").bind(phone).first();
     if (!row) return;
     const now = new Date().toISOString();
+    // El lead respondió ALGO (cualquier mensaje, cualquier stage) → recién ahora lo
+    // mostramos en la bandeja de Abril. Antes queda 'oculto' para no ensuciarla con
+    // leads que no contestan nada. No pisa si Abril ya lo movió a otra bandeja.
+    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('oculto','general','')").bind(phone, now).run(); } catch (_) {}
     const due = new Date(Date.now() + MINICURSO_LANDING_DEBOUNCE_MS).toISOString();
     const fu = new Date(Date.now() + MINICURSO_LANDING_FOLLOWUP_MS).toISOString();
     if (row.stage === 'await1' || row.stage === 'analyze1' || row.stage === 'analyzing1') {
@@ -2108,14 +2112,14 @@ async function processMinicursoLanding(env) {
       for (const r of (rs.results || [])) {
         const phone = r.phone;
         // GUARDIA: si ya está en el flujo de ads (sin terminar) o ya recibió el
-        // minicurso/regalo, no duplicamos el opener. Lo marcamos guarded y dejamos
-        // el chat en la bandeja de Abril igual.
+        // minicurso/regalo, no duplicamos el opener. Lo marcamos guarded y lo dejamos
+        // OCULTO hasta que responda (el reveal-on-inbound lo cubre, sigue en la tabla).
         let guard = '';
         try { const inFlow = await env.DB.prepare("SELECT stage FROM wa_cursos_flow WHERE phone = ?").bind(phone).first(); if (inFlow && inFlow.stage && inFlow.stage !== 'done') guard = 'en_flujo_ads:' + inFlow.stage; } catch (_) {}
         if (!guard && await gotMinicurso(env, phone)) guard = 'ya_recibio_minicurso';
         if (guard) {
           try { await env.DB.prepare("UPDATE minicurso_landing SET stage = 'guarded', guard_reason = ?, updated_at = ? WHERE phone = ? AND stage = 'registered'").bind(guard, nowIso, phone).run(); } catch (_) {}
-          try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos', updated_at = ? WHERE phone = ? AND (inbox IS NULL OR inbox IN ('general','oculto',''))").bind(nowIso, phone).run(); } catch (_) {}
+          try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'oculto', updated_at = ? WHERE phone = ? AND (inbox IS NULL OR inbox IN ('general',''))").bind(nowIso, phone).run(); } catch (_) {}
           continue;
         }
         // Claim atómico (evita doble envío entre ticks del cron).
@@ -2129,8 +2133,9 @@ async function processMinicursoLanding(env) {
           continue;
         }
         const sentTs = new Date().toISOString();
-        // Abril lo ve DESDE EL INICIO. Follow-up programado a +23h del opener.
-        try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('general','oculto','')").bind(phone, sentTs).run(); } catch (_) {}
+        // Queda OCULTO hasta que responda algo (Abril solo ve leads que contestaron).
+        // El reveal a 'cursos' lo hace minicursoLandingOnInbound al primer entrante.
+        try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('general','oculto','')").bind(phone, sentTs).run(); } catch (_) {}
         try { await env.DB.prepare("UPDATE minicurso_landing SET stage = 'await1', opener_sent_at = ?, followup_due_at = ?, updated_at = ? WHERE phone = ?").bind(sentTs, new Date(nowMs + MINICURSO_LANDING_FOLLOWUP_MS).toISOString(), sentTs, phone).run(); } catch (_) {}
         if (res.id) { try { await env.DB.prepare(`INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1) ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`).bind(sentTs, res.id, phone, minicursoLandingOpenerPreview(nombre)).run(); } catch (_) {} }
       }
