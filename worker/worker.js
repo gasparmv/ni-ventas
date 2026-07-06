@@ -1549,6 +1549,21 @@ async function maybeCapiQualifiedLead(env, phone) {
   } catch (_) {}
 }
 
+// Avisa a Gaspar por WhatsApp UNA sola vez cuando el dataset ya juntó suficientes
+// eventos QualifiedLead como para que valga cambiar la campaña a Conversion Leads.
+const CAPI_READY_THRESHOLD = 15;
+async function maybeCapiReadyNotice(env) {
+  try {
+    if (!env.META_CAPI_TOKEN) return;
+    if ((await kvGet(env, 'capi_ready_notified', '0')) === '1') return;
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_leads WHERE capi_qualified_at IS NOT NULL").first();
+    const n = (r && r.n) || 0;
+    if (n < CAPI_READY_THRESHOLD) return;
+    await precotizNotifyGaspar(env, `che, ya se juntaron ${n} leads B2B que respondieron (evento QualifiedLead en el dataset de Meta). Es buen momento para cambiar la campaña de carteles a "Clientes potenciales de conversion" optimizando por QualifiedLead. Avisame y te guio con el cambio.`);
+    await kvSet(env, 'capi_ready_notified', '1');
+  } catch (_) {}
+}
+
 // ===== Auto-respuesta del minicurso (regalos) =====
 // Cuando un contacto ESCRIBE pidiendo la guía + cotizador del minicurso, le
 // respondemos automáticamente con el link de regalos. Es respuesta dentro de la
@@ -10199,6 +10214,8 @@ export default {
     // Anti-colgados: etiqueta "⏳ Te toca" los leads tibios que nos quedaron debiendo
     // respuesta + resumen 2x/día a Joaco y Gaspar (ver playbook §A4.1).
     if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processColgados(env));
+    // Aviso a Gaspar cuando el dataset ya tiene suficientes QualifiedLead (CAPI) para cambiar la campaña.
+    if (hAR >= 9 && hAR <= 20) ctx.waitUntil(maybeCapiReadyNotice(env));
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
     if (hAR >= 8 && hAR < 21) ctx.waitUntil(processPendingTemplateSends(env));
     // Monitor de status de templates: 1 vez por hora, no cada 5 min. El polling
