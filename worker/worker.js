@@ -1503,6 +1503,37 @@ async function waSendTemplate(env, to, name, lang = 'es', params = []) {
   });
 }
 
+// ===== API de Conversiones de Meta (CAPI) =====
+// Manda eventos de leads al dataset de Meta para que el algoritmo optimice hacia
+// leads de CALIDAD (no solo cantidad de formularios). Sirve para carteles y
+// reventa (mismo dataset). El lead_id (leadgen_id de Meta) matchea el evento con
+// el lead del anuncio, sin exponer datos personales. Sin token, es no-op.
+const META_CAPI_DATASET = '1268253154997275';
+async function metaCapiHash(s) {
+  try {
+    const data = new TextEncoder().encode(String(s || '').trim().toLowerCase());
+    const buf = await crypto.subtle.digest('SHA-256', data);
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch (_) { return ''; }
+}
+// eventName: 'Lead' (entró) | 'QualifiedLead' (bueno) | etc. leadId = leadgen_id de Meta.
+async function sendCapiEvent(env, { leadId, phone, email, eventName, eventTime, ref } = {}) {
+  if (!env.META_CAPI_TOKEN) return { ok: false, error: 'no_token' };
+  try {
+    const user_data = {};
+    if (leadId) user_data.lead_id = String(leadId);
+    if (phone) { const h = await metaCapiHash(String(phone).replace(/\D/g, '')); if (h) user_data.ph = [h]; }
+    if (email) { const h = await metaCapiHash(email); if (h) user_data.em = [h]; }
+    if (!user_data.lead_id && !user_data.ph && !user_data.em) return { ok: false, error: 'no_identifier' };
+    const payload = { data: [{ event_name: eventName || 'Lead', event_time: eventTime || Math.floor(Date.now() / 1000), action_source: 'system_generated', user_data }] };
+    const url = `https://graph.facebook.com/v21.0/${META_CAPI_DATASET}/events?access_token=${env.META_CAPI_TOKEN}`;
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) { try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'CAPI_ERR ' + (ref || '') + ': ' + JSON.stringify(j).slice(0, 400)).run(); } catch (_) {} return { ok: false, error: j.error || j }; }
+    return { ok: true, received: j.events_received, fbtrace: j.fbtrace_id };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
 // ===== Auto-respuesta del minicurso (regalos) =====
 // Cuando un contacto ESCRIBE pidiendo la guía + cotizador del minicurso, le
 // respondemos automáticamente con el link de regalos. Es respuesta dentro de la
@@ -3660,6 +3691,10 @@ async function processSheetLead(env, body) {
       await _logLeadDebug(env, 'SHEET_INSERT_ERR', { msg: e.message });
       return;
     }
+
+    // CAPI: avisar a Meta que entró un lead B2B (para optimización de la pauta).
+    // El lead_id matchea el evento con el lead del anuncio. No-op si no hay token.
+    try { await sendCapiEvent(env, { leadId: leadgenId, phone: phoneNorm, email, eventName: 'Lead', ref: 'sheet:' + leadgenId }); } catch (_) {}
 
     if (!phoneNorm) {
       try {
@@ -6774,6 +6809,13 @@ export default {
           await processReventaLead(env, { row_data: row });
           const lead = await env.DB.prepare('SELECT lead_id, phone, nombre, cualificado, template_status FROM reventa_leads WHERE lead_id = ?').bind(row.id).first();
           return json({ ok: true, lead });
+        }
+
+        // POST /admin/capi/test → { phone?, leadId?, event? } manda un evento de prueba a la CAPI de Meta
+        if (request.method === 'POST' && path === '/admin/capi/test') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          const out = await sendCapiEvent(env, { leadId: body.leadId || '', phone: body.phone || '', email: body.email || '', eventName: body.event || 'Lead', ref: 'admin-test' });
+          return json(out);
         }
 
         // POST /admin/precotiz/dry-run → { phone } qué decidiría el motor, SIN enviar
