@@ -8683,12 +8683,12 @@ export default {
       // body: { wamid: "...", to_phones: ["549...", "549..."] }
       if (request.method === 'POST' && path === '/admin/wa/forward') {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        const { wamid, to_phones } = body || {};
-        if (!wamid || !Array.isArray(to_phones) || !to_phones.length) return json({ error: 'missing wamid or to_phones' }, 400);
-        const original = await env.DB.prepare(
-          'SELECT msg_type, body, media_url FROM wa_messages WHERE wamid = ? LIMIT 1'
-        ).bind(wamid).first();
-        if (!original) return json({ error: 'mensaje original no encontrado' }, 404);
+        // Acepta wamids[] (varios mensajes, estilo WhatsApp) o wamid (uno solo, compat).
+        const wamids = Array.isArray(body?.wamids) ? body.wamids : (body?.wamid ? [body.wamid] : []);
+        const to_phones = Array.isArray(body?.to_phones) ? body.to_phones : [];
+        if (!wamids.length || !to_phones.length) return json({ error: 'missing wamids or to_phones' }, 400);
+        // Tope anti-spam: a Gaspar le bloquearon el número una vez por mandar de más.
+        if (to_phones.length > 30) return json({ error: 'demasiados destinatarios (máx 30 por seguridad de WhatsApp)' }, 400);
         const results = { sent: 0, failed: 0, errors: [] };
         // Helper: subir un blob existente en R2 a Meta y devolver media id
         const uploadFromR2ToMeta = async (r2Key) => {
@@ -8728,40 +8728,57 @@ export default {
           }
           return bd;
         };
+        // Pre-fetch de los mensajes + subir su media UNA sola vez (se reusa el media_id para
+        // todos los destinatarios → más rápido y menos carga en la API). Orden = el de wamids.
+        const items = [];
+        for (const w of wamids) {
+          const original = await env.DB.prepare('SELECT msg_type, body, media_url FROM wa_messages WHERE wamid = ? LIMIT 1').bind(w).first();
+          if (!original) continue;
+          let up = null;
+          if (original.msg_type !== 'text' && original.media_url && !/^https?:/i.test(original.media_url)) {
+            up = await uploadFromR2ToMeta(original.media_url);
+          }
+          items.push({ original, up });
+        }
+        if (!items.length) return json({ error: 'ningún mensaje original encontrado' }, 404);
+        results.recipients = to_phones.length;
+        results.messages = items.length;
         for (const rawPhone of to_phones) {
           const num = normalizeArPhone(rawPhone);
           if (!num) { results.failed++; results.errors.push({ phone: rawPhone, error: 'numero invalido' }); continue; }
-          try {
-            let res;
-            if (original.msg_type === 'text' || !original.media_url) {
-              res = await waSendText(env, num, original.body || '');
-            } else {
-              const up = await uploadFromR2ToMeta(original.media_url);
-              if (!up) { results.failed++; results.errors.push({ phone: num, error: 'no se pudo subir media a Meta' }); continue; }
-              const v = env.WA_API_VERSION || 'v25.0';
-              const caption = cleanBody(original.body, original.msg_type);
-              let payload;
-              if (original.msg_type === 'image') payload = { messaging_product: 'whatsapp', to: num, type: 'image', image: { id: up.id, caption: caption || undefined } };
-              else if (original.msg_type === 'video') payload = { messaging_product: 'whatsapp', to: num, type: 'video', video: { id: up.id, caption: caption || undefined } };
-              else if (original.msg_type === 'audio') payload = { messaging_product: 'whatsapp', to: num, type: 'audio', audio: { id: up.id, voice: true } };
-              else if (original.msg_type === 'sticker') payload = { messaging_product: 'whatsapp', to: num, type: 'sticker', sticker: { id: up.id } };
-              else payload = { messaging_product: 'whatsapp', to: num, type: 'document', document: { id: up.id, caption: caption || undefined, filename: up.fileName } };
-              res = await waSend(env, payload);
-            }
-            if (res.ok) {
-              results.sent++;
-              try {
-                await env.DB.prepare(
-                  'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-                ).bind(new Date().toISOString(), res.id || '', 'outbound', num, '', original.msg_type, original.body || '', original.media_url || '', '', 'sent').run();
-              } catch (_) {}
-            } else {
+          for (const it of items) {
+            const original = it.original;
+            try {
+              let res;
+              if (original.msg_type === 'text' || !original.media_url) {
+                res = await waSendText(env, num, original.body || '');
+              } else if (!it.up) {
+                results.failed++; results.errors.push({ phone: num, error: 'no se pudo subir media a Meta' }); continue;
+              } else {
+                const caption = cleanBody(original.body, original.msg_type);
+                let payload;
+                if (original.msg_type === 'image') payload = { messaging_product: 'whatsapp', to: num, type: 'image', image: { id: it.up.id, caption: caption || undefined } };
+                else if (original.msg_type === 'video') payload = { messaging_product: 'whatsapp', to: num, type: 'video', video: { id: it.up.id, caption: caption || undefined } };
+                else if (original.msg_type === 'audio') payload = { messaging_product: 'whatsapp', to: num, type: 'audio', audio: { id: it.up.id, voice: true } };
+                else if (original.msg_type === 'sticker') payload = { messaging_product: 'whatsapp', to: num, type: 'sticker', sticker: { id: it.up.id } };
+                else payload = { messaging_product: 'whatsapp', to: num, type: 'document', document: { id: it.up.id, caption: caption || undefined, filename: it.up.fileName } };
+                res = await waSend(env, payload);
+              }
+              if (res.ok) {
+                results.sent++;
+                try {
+                  await env.DB.prepare(
+                    'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                  ).bind(new Date().toISOString(), res.id || '', 'outbound', num, '', original.msg_type, original.body || '', original.media_url || '', '', 'sent').run();
+                } catch (_) {}
+              } else {
+                results.failed++;
+                results.errors.push({ phone: num, error: res.error || 'send failed' });
+              }
+            } catch (e) {
               results.failed++;
-              results.errors.push({ phone: num, error: res.error || 'send failed' });
+              results.errors.push({ phone: rawPhone, error: e.message });
             }
-          } catch (e) {
-            results.failed++;
-            results.errors.push({ phone: rawPhone, error: e.message });
           }
         }
         return json(results);

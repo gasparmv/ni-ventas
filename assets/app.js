@@ -10031,7 +10031,7 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
   menu.querySelector('[data-action="forward"]').onclick = (ev) => {
     ev.stopPropagation();
     close();
-    showForwardModal(wamid, msgType);
+    startForwardSelection(wamid);
   };
   menu.querySelector('[data-action="react"]').onclick = (ev) => {
     ev.stopPropagation();
@@ -10114,7 +10114,69 @@ async function copyImageOfMessage(wamid) {
   }
 }
 
-function showForwardModal(wamid, msgType) {
+// ===== Modo selección para reenviar VARIOS mensajes (estilo WhatsApp) =====
+// "Reenviar" en el menú de un mensaje entra en este modo: se marca ese mensaje y podés
+// tocar otros para sumarlos; la barra de abajo abre el selector de destinatarios con TODOS.
+function ensureFwdStyles() {
+  if (document.getElementById('fwd-styles')) return;
+  const s = document.createElement('style'); s.id = 'fwd-styles';
+  s.textContent = `
+    .chat-messages.fwd-selecting .chat-msg{cursor:pointer}
+    .chat-msg.fwd-checked{background:rgba(143,212,222,.16);outline:2px solid var(--accent-cyan,#8FD4DE);border-radius:10px}
+    #fwd-bar{position:sticky;bottom:0;z-index:40;display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--ink-200,#1b2836);border-top:1px solid var(--border)}
+    #fwd-bar .fwd-lbl{color:var(--fg);font-weight:600;font-size:13px}
+    #fwd-bar .fwd-go{margin-left:auto;background:var(--accent-cyan,#8FD4DE);color:#04222a;border:none;border-radius:20px;padding:8px 18px;font-weight:700;cursor:pointer;font-size:13px}
+    #fwd-bar .fwd-go:disabled{opacity:.45;cursor:default}
+    #fwd-bar .fwd-x{background:none;border:none;color:var(--fg-subtle);font-size:20px;line-height:1;cursor:pointer}
+  `;
+  document.head.appendChild(s);
+}
+function startForwardSelection(wamid) {
+  ensureFwdStyles();
+  chatState.fwdMode = true;
+  chatState.fwdSel = new Set(wamid ? [wamid] : []);
+  document.querySelector('.chat-messages')?.classList.add('fwd-selecting');
+  applyFwdSelectionUI();
+}
+function applyFwdSelectionUI() {
+  const sel = chatState.fwdSel || new Set();
+  document.querySelectorAll('.chat-msg[data-wamid]').forEach(el => {
+    el.classList.toggle('fwd-checked', sel.has(el.dataset.wamid));
+    if (!el.dataset._fwdBound) { el.dataset._fwdBound = '1'; el.addEventListener('click', fwdBubbleClick, true); }
+  });
+  renderFwdBar();
+}
+function fwdBubbleClick(e) {
+  if (!chatState.fwdMode) return;
+  const el = e.currentTarget; const w = el.dataset.wamid; if (!w) return;
+  e.preventDefault(); e.stopPropagation();
+  const sel = chatState.fwdSel;
+  if (sel.has(w)) sel.delete(w); else sel.add(w);
+  el.classList.toggle('fwd-checked', sel.has(w));
+  renderFwdBar();
+}
+function renderFwdBar() {
+  let bar = document.getElementById('fwd-bar');
+  if (!chatState.fwdMode) { bar?.remove(); return; }
+  const main = document.querySelector('.chat-main'); if (!main) return;
+  if (!bar) { bar = document.createElement('div'); bar.id = 'fwd-bar'; main.appendChild(bar); }
+  const n = chatState.fwdSel.size;
+  bar.innerHTML = `<button class="fwd-x" title="Cancelar">✕</button><span class="fwd-lbl">${n} mensaje${n === 1 ? '' : 's'} seleccionado${n === 1 ? '' : 's'}</span><button class="fwd-go"${n ? '' : ' disabled'}>Reenviar →</button>`;
+  bar.querySelector('.fwd-x').onclick = exitForwardSelection;
+  bar.querySelector('.fwd-go').onclick = () => { const ids = Array.from(chatState.fwdSel); if (!ids.length) return; exitForwardSelection(); showForwardModal(ids); };
+}
+function exitForwardSelection() {
+  chatState.fwdMode = false;
+  document.querySelector('.chat-messages')?.classList.remove('fwd-selecting');
+  document.querySelectorAll('.chat-msg.fwd-checked').forEach(el => el.classList.remove('fwd-checked'));
+  document.getElementById('fwd-bar')?.remove();
+  chatState.fwdSel = new Set();
+}
+
+function showForwardModal(wamidOrIds, msgType) {
+  // Acepta un wamid solo (compat) o un array (reenvío de varios mensajes a la vez).
+  const wamids = (Array.isArray(wamidOrIds) ? wamidOrIds : [wamidOrIds]).filter(Boolean);
+  if (!wamids.length) return;
   document.getElementById('forward-modal')?.remove();
   const bg = document.createElement('div');
   bg.id = 'forward-modal';
@@ -10134,7 +10196,7 @@ function showForwardModal(wamid, msgType) {
   const selected = new Set();
   bg.innerHTML = `
     <div class="modal" style="max-width:480px">
-      <div class="modal-h"><h3>Reenviar a…</h3></div>
+      <div class="modal-h"><h3>Reenviar${wamids.length > 1 ? ' ' + wamids.length + ' mensajes' : ''} a…</h3></div>
       <div class="modal-body" style="padding:0;display:flex;flex-direction:column">
         <div style="padding:10px 14px;border-bottom:1px solid var(--border)">
           <input type="text" id="fwd-search" placeholder="Buscar contacto…" autocomplete="off" style="width:100%;padding:8px 10px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-size:13px">
@@ -10228,11 +10290,11 @@ function showForwardModal(wamid, msgType) {
       const r = await fetch(CONFIG.trackerUrl + '/admin/wa/forward', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ wamid, to_phones: phones })
+        body: JSON.stringify({ wamids, to_phones: phones })
       });
       const j = await r.json();
       if (r.ok) {
-        toast(`✓ Reenviado a ${j.sent}/${phones.length}${j.failed ? ' (' + j.failed + ' fallidos)' : ''}`);
+        toast(`✓ Reenviado a ${phones.length} ${phones.length === 1 ? 'persona' : 'personas'}${j.failed ? ' (' + j.failed + ' fallaron)' : ''}`);
         close();
       } else {
         toast('Error: ' + (j.error || 'fallo'));
