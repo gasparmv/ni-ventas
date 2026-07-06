@@ -1534,6 +1534,21 @@ async function sendCapiEvent(env, { leadId, phone, email, eventName, eventTime, 
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
+// CAPI: cuando un lead B2B (del form de carteles) RESPONDE por WhatsApp, es señal
+// de CALIDAD (lead real, no basura ni número equivocado). Manda "QualifiedLead" a
+// Meta una sola vez, para que la campaña optimice hacia leads que responden.
+async function maybeCapiQualifiedLead(env, phone) {
+  if (!phone || !env.META_CAPI_TOKEN) return;
+  try {
+    const lead = await env.DB.prepare("SELECT leadgen_id FROM wa_leads WHERE phone = ? AND capi_qualified_at IS NULL AND leadgen_id IS NOT NULL ORDER BY received_at DESC LIMIT 1").bind(phone).first();
+    if (!lead || !lead.leadgen_id) return;
+    // Marca atómica ANTES de mandar (evita doble envío entre inbounds seguidos).
+    const claim = await env.DB.prepare("UPDATE wa_leads SET capi_qualified_at = ? WHERE leadgen_id = ? AND capi_qualified_at IS NULL").bind(new Date().toISOString(), lead.leadgen_id).run();
+    if (!claim?.meta?.changes) return;
+    await sendCapiEvent(env, { leadId: lead.leadgen_id, phone, eventName: 'QualifiedLead', ref: 'qual:' + lead.leadgen_id });
+  } catch (_) {}
+}
+
 // ===== Auto-respuesta del minicurso (regalos) =====
 // Cuando un contacto ESCRIBE pidiendo la guía + cotizador del minicurso, le
 // respondemos automáticamente con el link de regalos. Es respuesta dentro de la
@@ -6137,6 +6152,8 @@ export default {
                   try { await cursosFlowOnInbound(env, phone, msgBody, ts); } catch (_) {}
                   // Landing del minicurso: respuesta al opener -> branch por IA / follow-up.
                   try { await minicursoLandingOnInbound(env, phone, ts); } catch (_) {}
+                  // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
+                  try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
                 }
               }
 
