@@ -1006,12 +1006,24 @@ async function waSend(env, payload) {
   if (wa.provider === 'meta' && !env.WA_TOKEN) {
     return { ok: false, status: 500, error: 'WA_TOKEN no configurado (provider meta)' };
   }
-  const r = await fetch(wa.messagesUrl(), {
-    method: 'POST',
-    headers: { ...wa.headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  const data = await r.json().catch(() => ({}));
+  const _body = JSON.stringify(payload);
+  const _doSend = async () => {
+    const rr = await fetch(wa.messagesUrl(), {
+      method: 'POST',
+      headers: { ...wa.headers, 'Content-Type': 'application/json' },
+      body: _body
+    });
+    const dd = await rr.json().catch(() => ({}));
+    return { r: rr, data: dd };
+  };
+  let { r, data } = await _doSend();
+  // Reintento del error transitorio #131000 de Meta ("Something went wrong"): el mensaje NO
+  // salió (falló), Meta mismo recomienda reintentar, así que NO se duplica. Sin esto, a la gente
+  // (ej. Abril) le aparecía "Error: (#131000)" en la cara por un glitch pasajero de Meta.
+  if (!r.ok && (data?.error?.code === 131000 || data?.error?.code === 131016)) {
+    await new Promise(res => setTimeout(res, 800));
+    ({ r, data } = await _doSend());
+  }
   if (!r.ok) {
     // Auto-detección de phones no alcanzables. Si Meta nos rechaza con un
     // código que indica que el destinatario está "muerto" (sin WA, bloqueado,
