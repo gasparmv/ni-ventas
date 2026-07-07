@@ -7545,11 +7545,14 @@ async function loadChatMessages(phone, opts) {
 async function sendChatMessage(phone, text) {
   if (!canAccessChat() || !phone || !text.trim()) return;
   const full = text.trim();
-  // El playbook pide "varios mensajes cortos" para parecer humano, y el Copiloto ahora arma la
-  // sugerencia así. Partimos por DOBLE salto de línea (una línea en blanco): cada bloque se manda
-  // como un mensaje aparte. Un salto simple (\n) NO parte (queda dentro del mismo mensaje). Si no
-  // hay dobles saltos, es un solo mensaje (igual que antes) -> backward-compatible.
-  const parts = full.split(/\n[ \t]*\n+/).map(t => t.trim()).filter(Boolean);
+  // El split en "varios mensajes cortos" (parecer humano del playbook) es SOLO para las
+  // sugerencias del Copiloto IA (cuando tocaste "Usar ✍️"). Lo que escribís VOS a mano se
+  // manda tal cual, en un solo mensaje, aunque tenga saltos de línea dobles. Detectamos la
+  // sugerencia por chatState.lastSuggestion._used del chat actual.
+  const fromSuggestion = !!(chatState.lastSuggestion && chatState.lastSuggestion.phone === phone && chatState.lastSuggestion._used);
+  const parts = fromSuggestion
+    ? full.split(/\n[ \t]*\n+/).map(t => t.trim()).filter(Boolean)
+    : [full];
   const replyTo = chatState.replyingTo || '';
   // OPTIMISTA: limpiamos el input YA (antes del envío) para que puedas seguir. Si algo falla,
   // restauramos SOLO lo que no se llegó a mandar (no re-mandamos lo que ya salió).
@@ -9848,7 +9851,7 @@ function bindMessageHoverActions(root) {
     const reactBtn = actions.querySelector('[data-cma="react"]');
     if (fwdBtn) fwdBtn.onclick = (e) => {
       e.preventDefault(); e.stopPropagation();
-      showForwardModal(wamid, msgType);
+      startForwardSelection(wamid);
     };
     if (reactBtn) reactBtn.onclick = (e) => {
       e.preventDefault(); e.stopPropagation();
