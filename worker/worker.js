@@ -1537,8 +1537,10 @@ async function sendCapiEvent(env, { leadId, phone, email, eventName, eventTime, 
     if (phone) { const h = await metaCapiHash(String(phone).replace(/\D/g, '')); if (h) user_data.ph = [h]; }
     if (email) { const h = await metaCapiHash(email); if (h) user_data.em = [h]; }
     if (!user_data.lead_id && !user_data.ph && !user_data.em) return { ok: false, error: 'no_identifier' };
-    const payload = { data: [{ event_name: eventName || 'Lead', event_time: eventTime || Math.floor(Date.now() / 1000), action_source: 'system_generated', user_data }] };
-    const url = `https://graph.facebook.com/v21.0/${META_CAPI_DATASET}/events?access_token=${env.META_CAPI_TOKEN}`;
+    // custom_data con event_source='crm' + lead_event_source: Meta lo exige para que
+    // el evento cuente como "CRM lead" en la optimización de Conversion Leads.
+    const payload = { data: [{ event_name: eventName || 'Lead', event_time: eventTime || Math.floor(Date.now() / 1000), action_source: 'system_generated', custom_data: { event_source: 'crm', lead_event_source: 'Neon Infinito CRM' }, user_data }] };
+    const url = `https://graph.facebook.com/v25.0/${META_CAPI_DATASET}/events?access_token=${env.META_CAPI_TOKEN}`;
     const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j.error) { try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'CAPI_ERR ' + (ref || '') + ': ' + JSON.stringify(j).slice(0, 400)).run(); } catch (_) {} return { ok: false, error: j.error || j }; }
