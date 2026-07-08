@@ -7442,6 +7442,19 @@ async function loadChatContacts() {
         channel: c.channel || 'wa'    // canal: wa | ig (pestaña WhatsApp / Instagram)
       };
     }).sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
+    // Refrescar etiquetas de contactos (throttle ~12s). Antes solo se cargaban
+    // UNA vez (loadLabels tiene guard labelsLoaded), así que las etiquetas nuevas
+    // —p.ej. "revendedor" aplicada por la automatización— no aparecían hasta
+    // recargar la página. Ahora el poll las re-consulta y refreshContactList (que
+    // corre justo después en tickPoll) las muestra sin recargar.
+    try {
+      const _now = Date.now();
+      if (!chatState._clRefreshAt || (_now - chatState._clRefreshAt) >= 12000) {
+        chatState._clRefreshAt = _now;
+        const _clr = await fetch(CONFIG.trackerUrl + '/admin/contact-labels', { headers: authHeaders() });
+        if (_clr.ok) { const _cj = await _clr.json(); chatState.contactLabels = _cj.contactLabels || {}; }
+      }
+    } catch (_) {}
     // NO tocar chatState.messages — loadChatMessages(phone) maneja el
     // historial del chat abierto por su cuenta.
     updateUnreadBadge();
