@@ -4244,6 +4244,28 @@ const GEMINI_CORPOREA_RENDER_PROMPT = [
   'Aplicá las notas del contexto (color, agregados). NUNCA sobreescriben: fidelidad al diseño, que sea corpórea maciza 3D, y la regla de por dónde sale la luz.'
 ].join('\n');
 
+// Prompt de rectificación de perspectiva: endereza una foto de un cartel a vista
+// FRONTAL (herramienta del diseñador Emma). Es una corrección geométrica pura —
+// preserva texto/tipografía/colores/proporciones. Usa la misma cañería de Gemini
+// image que los renders (generarRenderConGemini con basePrompt).
+const GEMINI_RECTIFY_PROMPT = [
+  'Corregí la perspectiva de esta fotografía de un cartel. Transformá la imagen para mostrar el cartel en una vista FRONTAL perfecta (de frente, head-on), como si la cámara estuviera exactamente perpendicular y centrada al cartel.',
+  '',
+  'Corregí SOLO la geometría:',
+  '- Eliminá toda la distorsión de perspectiva y el efecto keystone/trapezoidal.',
+  '- Las líneas verticales quedan 100% verticales y las horizontales 100% horizontales; las esquinas del cartel forman ángulos rectos de 90 grados.',
+  '- El cartel queda plano y de frente, sin inclinación, rotación ni punto de fuga.',
+  '',
+  'Mantené IDÉNTICO, sin alterar absolutamente nada:',
+  '- El texto y la tipografía exactos (misma caligrafía, mismos trazos). NO reescribas ni cambies ninguna letra, número ni símbolo.',
+  '- Los colores, el brillo y el color de luz del neón/LED, los reflejos y la iluminación.',
+  '- Las proporciones reales, el grosor de los trazos, el logo y todos los detalles del diseño.',
+  '',
+  'Es una corrección geométrica, NO un rediseño: no agregues, quites, inventes ni reestilices nada. Mantené la calidad fotográfica original.',
+  '',
+  'Encuadrá el cartel centrado y recortado prolijo. Si al enderezar quedan bordes vacíos, completá el fondo de forma neutra y coherente. Devolvé únicamente la imagen final rectificada, sin texto ni marcas de agua.'
+].join('\n');
+
 // Dado un brief de corpórea (tipo='corporea' con corporea_json), determina el caso
 // visual A-E (según qué caras son translúcidas/opacas + iluminación) y arma el bloque
 // de contexto puntual que se appendea al GEMINI_CORPOREA_RENDER_PROMPT.
@@ -9954,6 +9976,22 @@ export default {
           return json({ error: 'render: ' + ((renderResult && renderResult.error) || 'sin respuesta de la IA') }, 502);
         }
         return json({ ok: true, mime: renderResult.mime, base64: renderResult.base64 });
+      }
+
+      // POST /admin/rectify-perspective  →  endereza la perspectiva de una foto a vista
+      // frontal (herramienta del diseñador). Body: imagen cruda (Content-Type image/*).
+      // Reusa la cañería de Gemini image con GEMINI_RECTIFY_PROMPT. Devuelve { ok, base64, mime }.
+      if (request.method === 'POST' && path === '/admin/rectify-perspective') {
+        if (!env.GEMINI_API_KEY) return json({ error: 'Falta configurar GEMINI_API_KEY en el worker' }, 503);
+        const ct = (request.headers.get('content-type') || '').split(';')[0].trim();
+        if (!ct.startsWith('image/')) return json({ error: 'Mandá la imagen cruda con Content-Type image/*' }, 400);
+        let buf;
+        try { buf = await request.arrayBuffer(); } catch (e) { return json({ error: 'No pude leer la imagen: ' + e.message }, 400); }
+        if (!buf || buf.byteLength < 100) return json({ error: 'Imagen vacía o demasiado chica' }, 400);
+        if (buf.byteLength > 12 * 1024 * 1024) return json({ error: 'Imagen muy grande (máx 12 MB)' }, 400);
+        const r = await generarRenderConGemini(env, buf, ct, '', { basePrompt: GEMINI_RECTIFY_PROMPT, ref: 'rectify' });
+        if (!r.ok) return json({ error: r.error || 'No se pudo rectificar la imagen' }, 502);
+        return json({ ok: true, base64: r.base64, mime: r.mime });
       }
 
       // POST /admin/briefs/:id/generar-render  →  pipeline IA completo en paralelo:
