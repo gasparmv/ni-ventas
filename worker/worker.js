@@ -10041,7 +10041,9 @@ export default {
         try { buf = await request.arrayBuffer(); } catch (e) { return json({ error: 'No pude leer la imagen: ' + e.message }, 400); }
         if (!buf || buf.byteLength < 100) return json({ error: 'Imagen vacía o demasiado chica' }, 400);
         if (buf.byteLength > 12 * 1024 * 1024) return json({ error: 'Imagen muy grande (máx 12 MB)' }, 400);
-        const r = await generarRenderConGemini(env, buf, ct, '', { basePrompt, ref: 'imgtool:' + mode });
+        const notes = (url.searchParams.get('notes') || '').trim();
+        const extraTexto = notes ? ('Aclaración adicional del diseñador (respetala): ' + notes) : '';
+        const r = await generarRenderConGemini(env, buf, ct, extraTexto, { basePrompt, ref: 'imgtool:' + mode });
         if (!r.ok) return json({ error: r.error || 'No se pudo procesar la imagen' }, 502);
         return json({ ok: true, base64: r.base64, mime: r.mime });
       }
@@ -10056,7 +10058,9 @@ export default {
         const renderB64 = String((body && body.render) || '');
         if (!canvasB64 || !renderB64) return json({ error: 'Faltan las dos imágenes (local marcado + render del cartel)' }, 400);
         if (canvasB64.length > 24 * 1024 * 1024 || renderB64.length > 24 * 1024 * 1024) return json({ error: 'Imagen muy grande' }, 400);
-        const r = await generarRenderConGemini(env, null, (body && body.canvasMime) || 'image/png', '', {
+        const notes = String((body && body.notes) || '').trim();
+        const extraTexto = notes ? ('Aclaración adicional del diseñador (respetala): ' + notes) : '';
+        const r = await generarRenderConGemini(env, null, (body && body.canvasMime) || 'image/png', extraTexto, {
           basePrompt: GEMINI_MOCKUP_PROMPT,
           mainBase64: canvasB64,
           extraImages: [{ base64: renderB64, mime: (body && body.renderMime) || 'image/png' }],

@@ -13352,6 +13352,7 @@ function _ensureRectifyListeners() {
   // El input file dispara 'change'; los botones 'click' (delegado, el modal se re-renderiza).
   document.addEventListener('change', (e) => {
     if (e.target && e.target.id === 'rectify-file') _rectifyPickFile(e.target.files && e.target.files[0]);
+    if (e.target && e.target.id === 'rectify-notes' && STATE.rectify) STATE.rectify.notes = e.target.value;
   });
   // Pegar con Ctrl+V mientras el modal está abierto: agarra la imagen del portapapeles.
   document.addEventListener('paste', (e) => {
@@ -13399,7 +13400,8 @@ async function doRectify() {
   if (!st || !st.origFile || st.loading) return;
   st.loading = true; st.error = ''; render();
   try {
-    const resp = await fetch(CONFIG.trackerUrl + _imgToolCfg().endpoint, {
+    const _notes = ((document.getElementById('rectify-notes') || {}).value || st.notes || '').trim();
+    const resp = await fetch(CONFIG.trackerUrl + _imgToolCfg().endpoint + (_notes ? ('&notes=' + encodeURIComponent(_notes.slice(0, 600))) : ''), {
       method: 'POST',
       headers: { 'Content-Type': st.origFile.type || 'image/png', ...authHeaders() },
       body: st.origFile
@@ -13455,6 +13457,10 @@ function renderRectifyModal() {
                 : `<div style="width:100%;aspect-ratio:1/1;border-radius:var(--r-sm);border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;color:var(--fg-mute);font-size:12px;text-align:center;padding:12px">${st.loading ? cfg.loadingMsg : 'Apretá el botón para generarla'}</div>`}
             </div>
           </div>
+          <div style="margin-top:var(--s-3)">
+            <label style="font-size:11px;color:var(--fg-subtle);display:block;margin-bottom:4px">Aclaración extra para la IA (opcional)</label>
+            <textarea id="rectify-notes" rows="2" placeholder="Ej: mantené el corazón tal cual, no cambies los colores…" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-family:inherit;font-size:12px;resize:vertical">${escapeHtml(st.notes || '')}</textarea>
+          </div>
           ${st.error ? `<div style="margin-top:10px;color:#FF6B7A;font-size:12px">⚠ ${escapeHtml(st.error)}</div>` : ''}
           <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:var(--s-3)">
             <button class="btn btn-ghost" data-rectify-reset ${st.loading ? 'disabled' : ''}>${cfg.resetLabel}</button>
@@ -13477,6 +13483,7 @@ function _ensureMockupListeners() {
     if (!e.target) return;
     if (e.target.id === 'mockup-canvas-file') _mockupPickCanvas(e.target.files && e.target.files[0]);
     if (e.target.id === 'mockup-render-file') _mockupPickRender(e.target.files && e.target.files[0]);
+    if (e.target.id === 'mockup-notes' && STATE.mockup) STATE.mockup.notes = e.target.value;
   });
   // Ctrl+V: llena el primer campo vacío (local, luego render).
   document.addEventListener('paste', (e) => {
@@ -13591,12 +13598,13 @@ async function doMockup() {
   ctx.strokeRect(_mockupRect.nx, _mockupRect.ny, _mockupRect.nw, _mockupRect.nh);
   const canvasB64 = off.toDataURL('image/png').split(',')[1];
   const renderB64 = await _fileToB64(m.renderFile);
+  const _notes = ((document.getElementById('mockup-notes') || {}).value || m.notes || '').trim();
   m.loading = true; m.error = ''; render();
   try {
     const resp = await fetch(CONFIG.trackerUrl + '/admin/img-mockup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ canvas: canvasB64, canvasMime: 'image/png', render: renderB64, renderMime: (m.renderFile.type || 'image/png') })
+      body: JSON.stringify({ canvas: canvasB64, canvasMime: 'image/png', render: renderB64, renderMime: (m.renderFile.type || 'image/png'), notes: _notes.slice(0, 600) })
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || !data.ok) m.error = data.error || ('HTTP ' + resp.status);
@@ -13647,6 +13655,10 @@ function renderMockupModal() {
               ? `<img src="${m.renderUrl}" style="max-width:100%;display:block;border-radius:var(--r-sm);border:1px solid var(--border)">`
               : dz('mockup-render-file', 'Render del cartel', 'subí o pegá con Ctrl+V')}
           </div>
+        </div>
+        <div style="margin-top:var(--s-3)">
+          <label style="font-size:11px;color:var(--fg-subtle);display:block;margin-bottom:4px">Aclaración extra para la IA (opcional)</label>
+          <textarea id="mockup-notes" rows="2" placeholder="Ej: ponelo un poco más arriba, luz más cálida, sin reflejos en el vidrio…" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-family:inherit;font-size:12px;resize:vertical">${escapeHtml(m.notes || '')}</textarea>
         </div>
         ${m.error ? `<div style="margin-top:10px;color:#FF6B7A;font-size:12px">⚠ ${escapeHtml(m.error)}</div>` : ''}
         <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:var(--s-3)">
@@ -14035,7 +14047,7 @@ function renderCotizacion(producto = 'neon') {
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" id="briefs-refresh" title="Refrescar">↻</button>
-        ${(getUserRole() === 'disenador' || getUserRole() === 'admin') ? `<button class="btn btn-ghost" id="btn-rectify-foto" title="Enderezar la perspectiva de una foto (llevarla a vista frontal) con IA — para usarla de base de diseño">🔧 Rectificar foto</button>
+        ${(getUserRole() === 'disenador' || getUserRole() === 'admin' || getUserRole() === 'comercial') ? `<button class="btn btn-ghost" id="btn-rectify-foto" title="Enderezar la perspectiva de una foto (llevarla a vista frontal) con IA — para usarla de base de diseño">🔧 Rectificar foto</button>
         <button class="btn btn-ghost" id="btn-vectorize" title="Convertir un logo/diseño a silueta B&N maciza de alto contraste, lista para vectorizar con el Calco de Imagen de Illustrator">⬛ Vectorizar</button>
         <button class="btn btn-ghost" id="btn-mockup" title="Montar el render de un cartel sobre la foto del local del cliente para ver cómo queda puesto (montaje hiperrealista con IA)">🏠 Montaje</button>` : ''}
         ${canCotizar() ? `<button class="btn btn-ghost" id="briefs-verificar-enviados" title="Revisar los 'Listos' y 'Colgados' tipo WhatsApp contra el historial y pasar a Enviados los que ya tienen presupuesto mandado">${STATE.verificandoEnviados ? '⏳ Verificando…' : '🔍 Verificar enviados'}</button>` : ''}
