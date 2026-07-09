@@ -15107,6 +15107,8 @@ function bindCotizacion() {
   if (!document._cotPasteBound) {
     document.addEventListener('paste', async (ev) => {
       if (STATE.view !== 'cotizacion' && STATE.view !== 'corporeas') return;
+      // Si el modal de rectificar foto está abierto, el Ctrl+V es para ÉL: no abrir brief.
+      if (STATE.rectify && STATE.rectify.open) return;
       const items = ev.clipboardData?.items || [];
       const drawerOpen = !!STATE.briefSelected || !!STATE.briefDraft;
       const role = getUserRole();
