@@ -13323,10 +13323,29 @@ function corpPresupuestoTexto(brief, cj) {
 }
 function openCorpPopup(id) { STATE.corpPopupBrief = id; STATE.corpPopupText = null; render(); }
 function closeCorpPopup() { STATE.corpPopupBrief = null; STATE.corpPopupText = null; render(); }
-// ============ Rectificar foto (perspectiva -> vista frontal, IA) ============
-// Herramienta del diseñador (Emma) + admin: sube una foto de un cartel en
-// perspectiva y con un click la endereza a vista frontal via Gemini (mismo modelo
-// que los renders del cotizador), para usarla de base de diseño. No toca briefs.
+// ============ Herramientas de imagen IA (rectificar perspectiva / vectorizar B&N) ============
+// Herramientas del diseñador (Emma) + admin: subís una imagen y con un click la
+// procesás con Gemini (mismo modelo que los renders del cotizador), para usarla de
+// base de diseño. Un solo modal parametrizado por "modo". No toca briefs.
+const IMG_TOOL_CFG = {
+  rectify: {
+    icon: '🔧', title: 'Rectificar foto', sub: 'perspectiva → vista frontal',
+    zoneIcon: '📐', zoneHint: 'Tocá para subir una foto, o pegá con Ctrl+V',
+    zoneSub: 'cartel en perspectiva · JPG o PNG · máx 12 MB',
+    resultLabel: 'Rectificada', loadingMsg: '⏳ Enderezando con IA…<br>(10-20s)',
+    go: '✨ Rectificar perspectiva', going: '⏳ Rectificando…', again: '↻ Rectificar de nuevo',
+    resetLabel: '↺ Otra foto', endpoint: '/admin/img-tool?mode=rectify', file: 'rectificada.png',
+  },
+  vectorize: {
+    icon: '⬛', title: 'Vectorizar (B&N)', sub: 'silueta maciza para Illustrator',
+    zoneIcon: '⬛', zoneHint: 'Tocá para subir el logo/diseño, o pegá con Ctrl+V',
+    zoneSub: 'para el Calco de Imagen · JPG o PNG · máx 12 MB',
+    resultLabel: 'Silueta B&N', loadingMsg: '⏳ Convirtiendo a B&N con IA…<br>(10-20s)',
+    go: '✨ Generar silueta B&N', going: '⏳ Procesando…', again: '↻ Generar de nuevo',
+    resetLabel: '↺ Otra imagen', endpoint: '/admin/img-tool?mode=vectorize', file: 'silueta-bn.png',
+  },
+};
+function _imgToolCfg() { return IMG_TOOL_CFG[(STATE.rectify && STATE.rectify.mode) || 'rectify'] || IMG_TOOL_CFG.rectify; }
 function _ensureRectifyListeners() {
   if (window._rectifyBound) return;
   window._rectifyBound = true;
@@ -13356,9 +13375,9 @@ function _ensureRectifyListeners() {
     if (t.closest('[data-rectify-go]')) return doRectify();
   });
 }
-function openRectifyModal() {
+function openImgTool(mode) {
   _ensureRectifyListeners();
-  STATE.rectify = { open: true, origUrl: '', origFile: null, result: null, loading: false, error: '' };
+  STATE.rectify = { open: true, mode: (mode === 'vectorize' ? 'vectorize' : 'rectify'), origUrl: '', origFile: null, result: null, loading: false, error: '' };
   render();
 }
 function closeRectifyModal() {
@@ -13380,7 +13399,7 @@ async function doRectify() {
   if (!st || !st.origFile || st.loading) return;
   st.loading = true; st.error = ''; render();
   try {
-    const resp = await fetch(CONFIG.trackerUrl + '/admin/rectify-perspective', {
+    const resp = await fetch(CONFIG.trackerUrl + _imgToolCfg().endpoint, {
       method: 'POST',
       headers: { 'Content-Type': st.origFile.type || 'image/png', ...authHeaders() },
       body: st.origFile
@@ -13400,26 +13419,27 @@ function downloadRectify() {
   const blob = b64ToBlob(st.result.base64, st.result.mime);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = 'rectificada.png'; a.click();
+  a.href = url; a.download = _imgToolCfg().file; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 function renderRectifyModal() {
   const st = STATE.rectify;
   if (!st || !st.open) return '';
+  const cfg = _imgToolCfg();
   const hasOrig = !!st.origUrl;
   const hasResult = !!(st.result && st.result.base64);
   return `
     <div data-rectify-bg style="position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:6000;display:flex;align-items:center;justify-content:center;padding:16px">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);width:min(760px,96vw);max-height:92vh;overflow:auto;padding:var(--s-4)">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--s-3)">
-          <h2 style="margin:0;font-size:16px">🔧 Rectificar foto <span style="color:var(--fg-mute);font-size:12px;font-weight:400">· perspectiva → vista frontal</span></h2>
+          <h2 style="margin:0;font-size:16px">${cfg.icon} ${cfg.title} <span style="color:var(--fg-mute);font-size:12px;font-weight:400">· ${cfg.sub}</span></h2>
           <button class="btn btn-ghost" data-rectify-close style="padding:4px 10px">✕</button>
         </div>
         ${!hasOrig ? `
           <label style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;border:2px dashed var(--border);border-radius:var(--r-sm);padding:38px 16px;cursor:pointer;color:var(--fg-mute);text-align:center">
-            <div style="font-size:30px">📐</div>
-            <div style="font-size:13px">Tocá para subir una foto, o pegá con Ctrl+V</div>
-            <div style="font-size:11px;opacity:.7">cartel en perspectiva · JPG o PNG · máx 12 MB</div>
+            <div style="font-size:30px">${cfg.zoneIcon}</div>
+            <div style="font-size:13px">${cfg.zoneHint}</div>
+            <div style="font-size:11px;opacity:.7">${cfg.zoneSub}</div>
             <input type="file" id="rectify-file" accept="image/*" style="display:none">
           </label>
         ` : `
@@ -13429,17 +13449,17 @@ function renderRectifyModal() {
               <img src="${st.origUrl}" style="width:100%;border-radius:var(--r-sm);border:1px solid var(--border);display:block">
             </div>
             <div>
-              <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px">Rectificada</div>
+              <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px">${cfg.resultLabel}</div>
               ${hasResult
                 ? `<img src="data:${st.result.mime};base64,${st.result.base64}" style="width:100%;border-radius:var(--r-sm);border:1px solid var(--accent-cyan);display:block">`
-                : `<div style="width:100%;aspect-ratio:1/1;border-radius:var(--r-sm);border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;color:var(--fg-mute);font-size:12px;text-align:center;padding:12px">${st.loading ? '⏳ Enderezando con IA…<br>(10-20s)' : 'Apretá "Rectificar" para generarla'}</div>`}
+                : `<div style="width:100%;aspect-ratio:1/1;border-radius:var(--r-sm);border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;color:var(--fg-mute);font-size:12px;text-align:center;padding:12px">${st.loading ? cfg.loadingMsg : 'Apretá el botón para generarla'}</div>`}
             </div>
           </div>
           ${st.error ? `<div style="margin-top:10px;color:#FF6B7A;font-size:12px">⚠ ${escapeHtml(st.error)}</div>` : ''}
           <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:var(--s-3)">
-            <button class="btn btn-ghost" data-rectify-reset ${st.loading ? 'disabled' : ''}>↺ Otra foto</button>
+            <button class="btn btn-ghost" data-rectify-reset ${st.loading ? 'disabled' : ''}>${cfg.resetLabel}</button>
             ${hasResult ? `<button class="btn btn-ghost" data-rectify-download>⬇ Descargar</button>` : ''}
-            <button class="btn btn-cyan" data-rectify-go ${st.loading ? 'disabled' : ''}>${st.loading ? '⏳ Rectificando…' : (hasResult ? '↻ Rectificar de nuevo' : '✨ Rectificar perspectiva')}</button>
+            <button class="btn btn-cyan" data-rectify-go ${st.loading ? 'disabled' : ''}>${st.loading ? cfg.going : (hasResult ? cfg.again : cfg.go)}</button>
           </div>
         `}
       </div>
@@ -13814,7 +13834,8 @@ function renderCotizacion(producto = 'neon') {
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" id="briefs-refresh" title="Refrescar">↻</button>
-        ${(getUserRole() === 'disenador' || getUserRole() === 'admin') ? `<button class="btn btn-ghost" id="btn-rectify-foto" title="Enderezar la perspectiva de una foto (llevarla a vista frontal) con IA — para usarla de base de diseño">🔧 Rectificar foto</button>` : ''}
+        ${(getUserRole() === 'disenador' || getUserRole() === 'admin') ? `<button class="btn btn-ghost" id="btn-rectify-foto" title="Enderezar la perspectiva de una foto (llevarla a vista frontal) con IA — para usarla de base de diseño">🔧 Rectificar foto</button>
+        <button class="btn btn-ghost" id="btn-vectorize" title="Convertir un logo/diseño a silueta B&N maciza de alto contraste, lista para vectorizar con el Calco de Imagen de Illustrator">⬛ Vectorizar</button>` : ''}
         ${canCotizar() ? `<button class="btn btn-ghost" id="briefs-verificar-enviados" title="Revisar los 'Listos' y 'Colgados' tipo WhatsApp contra el historial y pasar a Enviados los que ya tienen presupuesto mandado">${STATE.verificandoEnviados ? '⏳ Verificando…' : '🔍 Verificar enviados'}</button>` : ''}
         ${canCreateBriefs() ? '<button class="btn btn-cyan" id="brief-new">+ Nuevo brief</button>' : ''}
       </div>
@@ -15036,7 +15057,9 @@ function bindCotizacion() {
   const verifBtn = document.getElementById('briefs-verificar-enviados');
   if (verifBtn) verifBtn.onclick = handleVerificarEnviados;
   const rectBtn = document.getElementById('btn-rectify-foto');
-  if (rectBtn) rectBtn.onclick = openRectifyModal;
+  if (rectBtn) rectBtn.onclick = () => openImgTool('rectify');
+  const vecBtn = document.getElementById('btn-vectorize');
+  if (vecBtn) vecBtn.onclick = () => openImgTool('vectorize');
 
   // Buscador del board: filtra las cards en vivo (sin re-render, mantiene foco).
   const briefSearchInput = document.getElementById('brief-search');

@@ -4266,6 +4266,29 @@ const GEMINI_RECTIFY_PROMPT = [
   'Encuadrá el cartel centrado y recortado prolijo. Si al enderezar quedan bordes vacíos, completá el fondo de forma neutra y coherente. Devolvé únicamente la imagen final rectificada, sin texto ni marcas de agua.'
 ].join('\n');
 
+// Prompt de vectorización: convierte una imagen (logo/texto) en una SILUETA MACIZA
+// blanco y negro puro, lista para el Calco de Imagen de Illustrator (rellena huecos/
+// contornos, alto contraste, sin grises). Herramienta del diseñador. Misma cañería.
+const GEMINI_VECTORIZE_PROMPT = [
+  'Convertí esta imagen en una SILUETA MACIZA en blanco y negro puro, lista para vectorizar con el Calco de Imagen (Image Trace) de Illustrator.',
+  '',
+  'Aislá el elemento gráfico principal (el logo o el texto) sobre un fondo BLANCO PURO (#FFFFFF), sin nada más alrededor.',
+  '',
+  'Convertí TODO a blanco y negro binario de máximo contraste:',
+  '- Solo dos colores: negro pleno (#000000) para la figura, blanco puro (#FFFFFF) para el fondo. Nada intermedio.',
+  '- Eliminá por completo cualquier gris, escala de grises, degradado, sombra, brillo, textura, reflejo o transparencia.',
+  '',
+  'Rellená las formas para que queden MACIZAS:',
+  '- Si las letras o formas son huecas, contorneadas o tienen trazo doble/interno, rellenalas por completo de negro pleno.',
+  '- Eliminá absolutamente cualquier trazo, línea o hueco BLANCO dentro de la figura. El interior de cada letra/forma queda negro sólido.',
+  '',
+  'Bordes limpios y DUROS (nítidos, sin desenfoque ni suavizado), formas simplificadas.',
+  '',
+  'REGLA CLAVE — fidelidad: NO rediseñes, NO cambies la tipografía, NO reinterpretes. Respetá EXACTO la forma, las proporciones, la composición y el texto del original (misma cantidad de letras, mismos trazos). Es una conversión a silueta, no un rediseño.',
+  '',
+  'Devolvé únicamente la imagen procesada (silueta negra sobre blanco), sin texto, marcas de agua ni bordes.'
+].join('\n');
+
 // Dado un brief de corpórea (tipo='corporea' con corporea_json), determina el caso
 // visual A-E (según qué caras son translúcidas/opacas + iluminación) y arma el bloque
 // de contexto puntual que se appendea al GEMINI_CORPOREA_RENDER_PROMPT.
@@ -9981,16 +10004,20 @@ export default {
       // POST /admin/rectify-perspective  →  endereza la perspectiva de una foto a vista
       // frontal (herramienta del diseñador). Body: imagen cruda (Content-Type image/*).
       // Reusa la cañería de Gemini image con GEMINI_RECTIFY_PROMPT. Devuelve { ok, base64, mime }.
-      if (request.method === 'POST' && path === '/admin/rectify-perspective') {
+      if (request.method === 'POST' && (path === '/admin/img-tool' || path === '/admin/rectify-perspective')) {
         if (!env.GEMINI_API_KEY) return json({ error: 'Falta configurar GEMINI_API_KEY en el worker' }, 503);
+        // modo: rectify (perspectiva -> frontal) | vectorize (silueta B&N para Illustrator).
+        // La ruta vieja /admin/rectify-perspective queda como rectify por retrocompat.
+        const mode = path === '/admin/rectify-perspective' ? 'rectify' : (url.searchParams.get('mode') || 'rectify');
+        const basePrompt = mode === 'vectorize' ? GEMINI_VECTORIZE_PROMPT : GEMINI_RECTIFY_PROMPT;
         const ct = (request.headers.get('content-type') || '').split(';')[0].trim();
         if (!ct.startsWith('image/')) return json({ error: 'Mandá la imagen cruda con Content-Type image/*' }, 400);
         let buf;
         try { buf = await request.arrayBuffer(); } catch (e) { return json({ error: 'No pude leer la imagen: ' + e.message }, 400); }
         if (!buf || buf.byteLength < 100) return json({ error: 'Imagen vacía o demasiado chica' }, 400);
         if (buf.byteLength > 12 * 1024 * 1024) return json({ error: 'Imagen muy grande (máx 12 MB)' }, 400);
-        const r = await generarRenderConGemini(env, buf, ct, '', { basePrompt: GEMINI_RECTIFY_PROMPT, ref: 'rectify' });
-        if (!r.ok) return json({ error: r.error || 'No se pudo rectificar la imagen' }, 502);
+        const r = await generarRenderConGemini(env, buf, ct, '', { basePrompt, ref: 'imgtool:' + mode });
+        if (!r.ok) return json({ error: r.error || 'No se pudo procesar la imagen' }, 502);
         return json({ ok: true, base64: r.base64, mime: r.mime });
       }
 
