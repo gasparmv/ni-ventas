@@ -4289,6 +4289,91 @@ const GEMINI_VECTORIZE_PROMPT = [
   'Devolvé únicamente la imagen procesada (silueta negra sobre blanco), sin texto, marcas de agua ni bordes.'
 ].join('\n');
 
+// ===== Analytics: funnel pre-cotización (carteles) =====
+// Mide por mes (cohorte por PRIMER inbound del año, hora AR): leads nuevos, cuántos
+// mandaron foto, cuántos medidas, cuántos recibieron presupuesto — y la cohorte
+// "revivible" (últimos 60 días sin presupuesto, desglosada por qué dato falta).
+// UN solo scan de wa_messages por query (agregación condicional, sin LIKE por el
+// límite de D1) — para uso on-demand/cron, nunca en polls. Detección de presupuesto
+// = la misma de producción (processPresupuestoFollowups) + los markers de plantilla.
+async function analyticsPrecotizFunnel(env, url) {
+  const desde = (url.searchParams.get('desde') || '2026-01-01') + 'T03:00:00Z'; // 00:00 AR
+  const hoyMs = Date.now();
+  const revDesde = new Date(hoyMs - 60 * 86400000).toISOString();
+  const revHasta = new Date(hoyMs - 3 * 86400000).toISOString(); // 3 días de gracia (en curso)
+  // per_phone: flags por teléfono en un solo scan. GLOB de medidas = aproximación
+  // (el regex real vive en JS); excluye imágenes porque la descripción IA appendeada
+  // ('[imagen] ...') mete números. Nota: acotar por ts hace que un cliente viejo que
+  // vuelve cuente como nuevo — error aceptado, mismo criterio del análisis de mayo.
+  const perPhone = (extraWhere) => `
+    WITH per_phone AS (
+      SELECT phone,
+        CASE WHEN MAX(CASE WHEN channel='ig' THEN 1 ELSE 0 END)=1 THEN 'ig' ELSE 'wa' END AS canal,
+        MIN(CASE WHEN direction='inbound'  AND msg_type!='status' THEN ts END) AS first_in_ts,
+        MIN(CASE WHEN direction='outbound' AND msg_type!='status' THEN ts END) AS first_out_ts,
+        MAX(CASE WHEN direction='inbound'  AND msg_type!='status' THEN ts END) AS last_in_ts,
+        MAX(CASE WHEN direction='outbound' AND msg_type!='status' THEN ts END) AS last_out_ts,
+        MAX(CASE WHEN direction='inbound' AND msg_type='image' THEN 1 ELSE 0 END) AS has_img,
+        MAX(CASE WHEN direction='inbound' AND msg_type IN ('text','audio') AND (
+              lower(body) GLOB '*[0-9]x[0-9]*'  OR lower(body) GLOB '*[0-9] x [0-9]*'
+           OR lower(body) GLOB '*[0-9]x [0-9]*' OR lower(body) GLOB '*[0-9] x[0-9]*'
+           OR lower(body) GLOB '*[0-9] por [0-9]*'
+           OR lower(body) GLOB '*[0-9]cm*'      OR lower(body) GLOB '*[0-9] cm*'
+           OR lower(body) GLOB '*[0-9] mts*'    OR lower(body) GLOB '*[0-9] metro*'
+        ) THEN 1 ELSE 0 END) AS has_med,
+        MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND (
+              substr(body,1,26)='Te comparto el presupuesto'
+           OR substr(body,1,26)='Te comparto la información'
+           OR substr(body,1,34)='[plantilla: presupuesto_detallado]'
+           OR substr(body,1,33)='[plantilla: presupuesto_corporea]'
+        ) THEN 1 ELSE 0 END) AS has_quote
+      FROM wa_messages
+      WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
+        AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573')
+      GROUP BY phone
+    ),
+    leads AS (
+      SELECT p.*, strftime('%Y-%m', datetime(first_in_ts,'-3 hours')) AS mes
+      FROM per_phone p
+      WHERE first_in_ts IS NOT NULL
+        AND (first_out_ts IS NULL OR first_in_ts <= first_out_ts)  -- inbound-first (excluye broadcasts nuestros)
+        AND p.phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox='cursos')  -- solo carteles
+        ${extraWhere || ''}
+    )`;
+  const qMensual = perPhone('') + `
+    SELECT mes, COUNT(*) AS nuevos,
+      SUM(canal='wa') AS wa, SUM(canal='ig') AS ig,
+      SUM(has_img) AS con_foto, SUM(has_med) AS con_medidas,
+      SUM(has_img*has_med) AS con_ambas,
+      SUM(has_quote) AS cotizados,
+      SUM(CASE WHEN has_quote=0 AND has_img=1 AND has_med=1 THEN 1 ELSE 0 END) AS listos_sin_cotizar,
+      SUM(CASE WHEN has_quote=0 AND has_img=0 AND has_med=0 THEN 1 ELSE 0 END) AS sin_datos_sin_cotizar
+    FROM leads GROUP BY mes ORDER BY mes`;
+  const qRevival = perPhone(`AND p.first_in_ts >= '${revDesde}' AND p.first_in_ts <= '${revHasta}'
+        AND p.phone NOT IN (SELECT phone FROM wa_unreachable_phones)`) + `
+    SELECT canal, COUNT(*) AS total,
+      SUM(CASE WHEN has_img=0 AND has_med=0 THEN 1 ELSE 0 END) AS sin_datos,
+      SUM(CASE WHEN has_img=1 AND has_med=0 THEN 1 ELSE 0 END) AS solo_foto,
+      SUM(CASE WHEN has_img=0 AND has_med=1 THEN 1 ELSE 0 END) AS solo_medidas,
+      SUM(CASE WHEN has_img=1 AND has_med=1 THEN 1 ELSE 0 END) AS datos_completos,
+      SUM(CASE WHEN last_out_ts IS NULL OR last_in_ts > last_out_ts THEN 1 ELSE 0 END) AS ultima_palabra_del_cliente
+    FROM leads WHERE has_quote=0 GROUP BY canal`;
+  const qBriefs = `
+    SELECT strftime('%Y-%m', datetime(created_at,'-3 hours')) AS mes,
+      COUNT(*) AS creados,
+      SUM(CASE WHEN estado='enviado' THEN 1 ELSE 0 END) AS enviados,
+      SUM(CASE WHEN lower(origen_lead)='ig' THEN 1 ELSE 0 END) AS ig
+    FROM briefs WHERE created_at >= ?1 GROUP BY mes ORDER BY mes`;
+  const out = { desde: desde, revival_ventana: { desde: revDesde, hasta: revHasta } };
+  try { out.mensual = (await env.DB.prepare(qMensual).bind(desde).all()).results || []; }
+  catch (e) { out.mensual_error = String(e && e.message || e); }
+  try { out.revival = (await env.DB.prepare(qRevival).bind(desde).all()).results || []; }
+  catch (e) { out.revival_error = String(e && e.message || e); }
+  try { out.briefs = (await env.DB.prepare(qBriefs).bind(desde).all()).results || []; }
+  catch (e) { out.briefs_error = String(e && e.message || e); }
+  return json(out);
+}
+
 // Prompt de montaje/mockup: monta el render de un cartel sobre la foto del local del
 // cliente, en la zona que el diseñador marcó con un recuadro. Hiperrealista, con glow
 // del neón, SIN el cable de 220v. Herramienta del diseñador (2 imágenes de entrada).
@@ -10068,6 +10153,15 @@ export default {
         });
         if (!r.ok) return json({ error: r.error || 'No se pudo generar el montaje' }, 502);
         return json({ ok: true, base64: r.base64, mime: r.mime });
+      }
+
+      // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
+      // + cohorte revivible (últimos 60 días sin presupuesto). Solo admin; query pesada
+      // (scan de wa_messages) — no llamar en polls.
+      if (request.method === 'GET' && path === '/admin/analytics/precotiz-funnel') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        return analyticsPrecotizFunnel(env, url);
       }
 
       // POST /admin/briefs/:id/generar-render  →  pipeline IA completo en paralelo:
