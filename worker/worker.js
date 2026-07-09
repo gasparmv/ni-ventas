@@ -4289,6 +4289,25 @@ const GEMINI_VECTORIZE_PROMPT = [
   'Devolvé únicamente la imagen procesada (silueta negra sobre blanco), sin texto, marcas de agua ni bordes.'
 ].join('\n');
 
+// Prompt de montaje/mockup: monta el render de un cartel sobre la foto del local del
+// cliente, en la zona que el diseñador marcó con un recuadro. Hiperrealista, con glow
+// del neón, SIN el cable de 220v. Herramienta del diseñador (2 imágenes de entrada).
+const GEMINI_MOCKUP_PROMPT = [
+  'Sos especialista en fotomontajes hiperrealistas de carteles de neón LED. Recibís DOS imágenes:',
+  '1) La PRIMERA es la foto del frente/lugar del cliente. Tiene un recuadro marcado (un rectángulo dibujado encima) que indica EXACTAMENTE dónde y de qué tamaño va el cartel.',
+  '2) La SEGUNDA es el cartel de neón solo (el render).',
+  '',
+  'Montá el cartel de la segunda imagen sobre la primera, EXACTAMENTE en la zona del recuadro y con ese tamaño. Reglas:',
+  '- Integración HIPERREALISTA: ajustá la perspectiva, el ángulo y la escala del cartel para que calce natural con la pared/superficie del recuadro.',
+  '- El neón ILUMINA de verdad: agregá el glow/resplandor del neón sobre la pared y el entorno cercano, con reflejos, luz y sombras coherentes con la escena (hora del día, materiales).',
+  '- ELIMINÁ por completo el recuadro/marca: no debe quedar ningún rastro del rectángulo dibujado.',
+  '- NO dibujes el cable de alimentación a 220v, ni transformadores, ni cables visibles: queda feo. El cartel va limpio, sin cables.',
+  '- El resto de la foto (el local, la pared, el entorno) queda IDÉNTICO a la original, sin cambios.',
+  '- No agregues texto, marcas de agua ni elementos que no estén en las imágenes.',
+  '',
+  'Devolvé únicamente la foto final con el cartel montado, fotorrealista.'
+].join('\n');
+
 // Dado un brief de corpórea (tipo='corporea' con corporea_json), determina el caso
 // visual A-E (según qué caras son translúcidas/opacas + iluminación) y arma el bloque
 // de contexto puntual que se appendea al GEMINI_CORPOREA_RENDER_PROMPT.
@@ -4391,13 +4410,19 @@ async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto, op
   // basePrompt permite usar otro prompt (ej. corpóreas) sin tocar el de carteles.
   const basePrompt = opts.basePrompt || GEMINI_RENDER_PROMPT;
   const promptText = basePrompt + (extraTexto ? `\n\n${extraTexto}` : '');
+  const reqParts = [
+    { text: promptText },
+    { inline_data: { mime_type: bocetoMime || 'image/png', data: opts.mainBase64 || abToBase64(bocetoBuf) } }
+  ];
+  // Imágenes extra (ej: montaje = foto del local marcada + render del cartel). Van
+  // después de la principal, en el orden que las referencia el prompt.
+  if (Array.isArray(opts.extraImages)) {
+    for (const im of opts.extraImages) {
+      if (im && im.base64) reqParts.push({ inline_data: { mime_type: im.mime || 'image/png', data: im.base64 } });
+    }
+  }
   const body = {
-    contents: [{
-      parts: [
-        { text: promptText },
-        { inline_data: { mime_type: bocetoMime || 'image/png', data: abToBase64(bocetoBuf) } }
-      ]
-    }],
+    contents: [{ parts: reqParts }],
     generationConfig: { responseModalities: ['IMAGE', 'TEXT'] }
   };
   let resp;
@@ -10018,6 +10043,26 @@ export default {
         if (buf.byteLength > 12 * 1024 * 1024) return json({ error: 'Imagen muy grande (máx 12 MB)' }, 400);
         const r = await generarRenderConGemini(env, buf, ct, '', { basePrompt, ref: 'imgtool:' + mode });
         if (!r.ok) return json({ error: r.error || 'No se pudo procesar la imagen' }, 502);
+        return json({ ok: true, base64: r.base64, mime: r.mime });
+      }
+
+      // POST /admin/img-mockup  →  monta el render de un cartel sobre la foto del local
+      // (montaje hiperrealista). Body JSON: { canvas, render, canvasMime, renderMime } en
+      // base64 crudo. 'canvas' = la foto del local CON el recuadro marcado (dónde va el cartel).
+      if (request.method === 'POST' && path === '/admin/img-mockup') {
+        if (!env.GEMINI_API_KEY) return json({ error: 'Falta configurar GEMINI_API_KEY en el worker' }, 503);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const canvasB64 = String((body && body.canvas) || '');
+        const renderB64 = String((body && body.render) || '');
+        if (!canvasB64 || !renderB64) return json({ error: 'Faltan las dos imágenes (local marcado + render del cartel)' }, 400);
+        if (canvasB64.length > 24 * 1024 * 1024 || renderB64.length > 24 * 1024 * 1024) return json({ error: 'Imagen muy grande' }, 400);
+        const r = await generarRenderConGemini(env, null, (body && body.canvasMime) || 'image/png', '', {
+          basePrompt: GEMINI_MOCKUP_PROMPT,
+          mainBase64: canvasB64,
+          extraImages: [{ base64: renderB64, mime: (body && body.renderMime) || 'image/png' }],
+          ref: 'mockup'
+        });
+        if (!r.ok) return json({ error: r.error || 'No se pudo generar el montaje' }, 502);
         return json({ ok: true, base64: r.base64, mime: r.mime });
       }
 

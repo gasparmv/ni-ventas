@@ -4494,7 +4494,7 @@ function bindCotRender() {
   // sin imagen aún) y no hay un modal encima con su propio paste.
   if (!document._cotRenderPasteBound) {
     document.addEventListener('paste', async (ev) => {
-      if (STATE.quickModalOpen || (STATE.rectify && STATE.rectify.open)) return;
+      if (STATE.quickModalOpen || (STATE.rectify && STATE.rectify.open) || (STATE.mockup && STATE.mockup.open)) return;
       if (!document.getElementById('cot-render-dropzone')) return;
       const items = ev.clipboardData?.items || [];
       let file = null;
@@ -13465,6 +13465,206 @@ function renderRectifyModal() {
       </div>
     </div>`;
 }
+// ============ Montaje / Mockup: cartel montado sobre la foto del local ============
+// Herramienta del diseñador + admin: 2 imágenes (foto del local marcada con un
+// recuadro + render del cartel) -> Gemini compone un montaje hiperrealista (sin el
+// cable 220v). El recuadro (posición + tamaño) lo dibuja el usuario sobre la foto.
+let _mockupRect = null;  // marca en coords NATURALES de la foto del local {nx,ny,nw,nh}
+function _ensureMockupListeners() {
+  if (window._mockupBound) return;
+  window._mockupBound = true;
+  document.addEventListener('change', (e) => {
+    if (!e.target) return;
+    if (e.target.id === 'mockup-canvas-file') _mockupPickCanvas(e.target.files && e.target.files[0]);
+    if (e.target.id === 'mockup-render-file') _mockupPickRender(e.target.files && e.target.files[0]);
+  });
+  // Ctrl+V: llena el primer campo vacío (local, luego render).
+  document.addEventListener('paste', (e) => {
+    const m = STATE.mockup;
+    if (!m || !m.open) return;
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    let file = null;
+    for (const it of items) { if (it.kind === 'file' && (it.type || '').startsWith('image/')) { file = it.getAsFile(); break; } }
+    if (!file) return;
+    e.preventDefault();
+    if (!m.canvasUrl) _mockupPickCanvas(file);
+    else if (!m.renderUrl) _mockupPickRender(file);
+    else _mockupPickCanvas(file);
+  });
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t || !t.closest) return;
+    if (t.matches && t.matches('[data-mockup-bg]')) return closeMockupModal();
+    if (t.closest('[data-mockup-close]')) return closeMockupModal();
+    if (t.closest('[data-mockup-clearmark]')) { _mockupRect = null; const cv = document.getElementById('mockup-draw'); if (cv) cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); return; }
+    if (t.closest('[data-mockup-go]')) return doMockup();
+    if (t.closest('[data-mockup-download]')) return downloadMockup();
+    if (t.closest('[data-mockup-reset]')) { if (STATE.mockup) { STATE.mockup.result = null; STATE.mockup.error = ''; } return render(); }
+  });
+}
+function openMockupModal() {
+  _ensureMockupListeners();
+  STATE.mockup = { open: true, canvasUrl: '', canvasFile: null, renderUrl: '', renderFile: null, result: null, loading: false, error: '' };
+  _mockupRect = null;
+  render();
+}
+function closeMockupModal() { if (STATE.mockup) STATE.mockup.open = false; render(); }
+function _mockupPickCanvas(file) {
+  if (!file || !/^image\//.test(file.type || '')) { toast('Elegí una imagen'); return; }
+  if (file.size > 12 * 1024 * 1024) { toast('La imagen es muy grande (máx 12 MB)'); return; }
+  const fr = new FileReader();
+  fr.onload = () => { STATE.mockup = { ...(STATE.mockup || {}), open: true, canvasUrl: fr.result, canvasFile: file, result: null, error: '' }; _mockupRect = null; render(); };
+  fr.readAsDataURL(file);
+}
+function _mockupPickRender(file) {
+  if (!file || !/^image\//.test(file.type || '')) { toast('Elegí una imagen'); return; }
+  if (file.size > 12 * 1024 * 1024) { toast('La imagen es muy grande (máx 12 MB)'); return; }
+  const fr = new FileReader();
+  fr.onload = () => { STATE.mockup = { ...(STATE.mockup || {}), open: true, renderUrl: fr.result, renderFile: file, result: null, error: '' }; render(); };
+  fr.readAsDataURL(file);
+}
+function _mockupDrawRect(cv, x, y, w, h) {
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.lineWidth = Math.max(2, Math.round(cv.width / 220));
+  ctx.strokeStyle = '#FF3DAE';
+  ctx.strokeRect(x, y, w, h);
+  ctx.fillStyle = 'rgba(255,61,174,0.12)';
+  ctx.fillRect(x, y, w, h);
+}
+// Se llama tras cada render: dimensiona el canvas de dibujo al tamaño mostrado de la
+// foto, redibuja la marca guardada y (re)bindea los eventos de dibujo del recuadro.
+function bindMockupCanvas() {
+  const m = STATE.mockup;
+  if (!m || !m.open || !m.canvasUrl) return;
+  const img = document.getElementById('mockup-canvas-img');
+  const cv = document.getElementById('mockup-draw');
+  if (!img || !cv) return;
+  const fit = () => {
+    const w = img.clientWidth, h = img.clientHeight;
+    if (!w || !h) return;
+    cv.width = w; cv.height = h; cv.style.width = w + 'px'; cv.style.height = h + 'px';
+    if (_mockupRect && img.naturalWidth) {
+      const s = w / img.naturalWidth;
+      _mockupDrawRect(cv, _mockupRect.nx * s, _mockupRect.ny * s, _mockupRect.nw * s, _mockupRect.nh * s);
+    }
+  };
+  if (img.complete && img.naturalWidth) fit(); else img.onload = fit;
+  let drawing = false, sx = 0, sy = 0;
+  const P = (e) => {
+    const r = cv.getBoundingClientRect();
+    const cx = (e.touches && e.touches[0] ? e.touches[0].clientX : e.clientX) - r.left;
+    const cy = (e.touches && e.touches[0] ? e.touches[0].clientY : e.clientY) - r.top;
+    return { x: Math.max(0, Math.min(cv.width, cx)), y: Math.max(0, Math.min(cv.height, cy)) };
+  };
+  cv.onpointerdown = (e) => { e.preventDefault(); drawing = true; const p = P(e); sx = p.x; sy = p.y; try { cv.setPointerCapture(e.pointerId); } catch (_) {} };
+  cv.onpointermove = (e) => { if (!drawing) return; const p = P(e); _mockupDrawRect(cv, Math.min(sx, p.x), Math.min(sy, p.y), Math.abs(p.x - sx), Math.abs(p.y - sy)); };
+  cv.onpointerup = (e) => {
+    if (!drawing) return; drawing = false;
+    const p = P(e);
+    const x = Math.min(sx, p.x), y = Math.min(sy, p.y), w = Math.abs(p.x - sx), h = Math.abs(p.y - sy);
+    if (w < 8 || h < 8) { _mockupRect = null; cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); return; }
+    const s = img.naturalWidth / cv.width;
+    _mockupRect = { nx: x * s, ny: y * s, nw: w * s, nh: h * s };
+    _mockupDrawRect(cv, x, y, w, h);
+  };
+}
+function _fileToB64(file) {
+  return new Promise((resolve) => { const fr = new FileReader(); fr.onload = () => resolve(String(fr.result).split(',')[1] || ''); fr.readAsDataURL(file); });
+}
+async function doMockup() {
+  const m = STATE.mockup;
+  if (!m || m.loading) return;
+  if (!m.canvasFile) { toast('Subí la foto del local (paso 1)'); return; }
+  if (!_mockupRect) { toast('Marcá con el recuadro dónde va el cartel'); return; }
+  if (!m.renderFile) { toast('Subí el render del cartel (paso 2)'); return; }
+  const img = document.getElementById('mockup-canvas-img');
+  if (!img || !img.naturalWidth) { toast('Esperá a que cargue la foto del local'); return; }
+  // Componer la foto del local + el recuadro (a resolución natural) -> base64.
+  const off = document.createElement('canvas');
+  off.width = img.naturalWidth; off.height = img.naturalHeight;
+  const ctx = off.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  ctx.lineWidth = Math.max(3, Math.round(off.width / 150));
+  ctx.strokeStyle = '#FF3DAE';
+  ctx.strokeRect(_mockupRect.nx, _mockupRect.ny, _mockupRect.nw, _mockupRect.nh);
+  const canvasB64 = off.toDataURL('image/png').split(',')[1];
+  const renderB64 = await _fileToB64(m.renderFile);
+  m.loading = true; m.error = ''; render();
+  try {
+    const resp = await fetch(CONFIG.trackerUrl + '/admin/img-mockup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ canvas: canvasB64, canvasMime: 'image/png', render: renderB64, renderMime: (m.renderFile.type || 'image/png') })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) m.error = data.error || ('HTTP ' + resp.status);
+    else m.result = { base64: data.base64, mime: data.mime || 'image/png' };
+  } catch (e) {
+    m.error = 'Error de red: ' + (e.message || e);
+  } finally {
+    m.loading = false; render();
+  }
+}
+function downloadMockup() {
+  const m = STATE.mockup;
+  if (!m || !m.result) return;
+  const blob = b64ToBlob(m.result.base64, m.result.mime);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'montaje.png'; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+function renderMockupModal() {
+  const m = STATE.mockup;
+  if (!m || !m.open) return '';
+  const dz = (id, label, sub) => `<label style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;border:2px dashed var(--border);border-radius:var(--r-sm);padding:26px 12px;cursor:pointer;color:var(--fg-mute);text-align:center;min-height:150px">
+        <div style="font-size:24px">📷</div><div style="font-size:12px">${label}</div><div style="font-size:10px;opacity:.7">${sub}</div>
+        <input type="file" id="${id}" accept="image/*" style="display:none"></label>`;
+  const hasResult = !!(m.result && m.result.base64);
+  return `
+    <div data-mockup-bg style="position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:6000;display:flex;align-items:center;justify-content:center;padding:16px">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);width:min(920px,96vw);max-height:92vh;overflow:auto;padding:var(--s-4)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--s-3)">
+          <h2 style="margin:0;font-size:16px">🏠 Montaje en el local <span style="color:var(--fg-mute);font-size:12px;font-weight:400">· mirá cómo queda el cartel puesto</span></h2>
+          <button class="btn btn-ghost" data-mockup-close style="padding:4px 10px">✕</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
+          <div>
+            <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px">1 · Lugar (marcá dónde va)</div>
+            ${m.canvasUrl ? `
+              <div style="position:relative;display:inline-block;max-width:100%;line-height:0">
+                <img id="mockup-canvas-img" src="${m.canvasUrl}" style="max-width:100%;display:block;border-radius:var(--r-sm);border:1px solid var(--border)">
+                <canvas id="mockup-draw" style="position:absolute;left:0;top:0;cursor:crosshair;touch-action:none"></canvas>
+              </div>
+              <div style="font-size:11px;color:var(--fg-mute);margin-top:5px">✏️ Arrastrá para marcar el recuadro donde va el cartel</div>
+            ` : dz('mockup-canvas-file', 'Foto del frente / local', 'subí o pegá con Ctrl+V')}
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px">2 · Render del cartel (solo)</div>
+            ${m.renderUrl
+              ? `<img src="${m.renderUrl}" style="max-width:100%;display:block;border-radius:var(--r-sm);border:1px solid var(--border)">`
+              : dz('mockup-render-file', 'Render del cartel', 'subí o pegá con Ctrl+V')}
+          </div>
+        </div>
+        ${m.error ? `<div style="margin-top:10px;color:#FF6B7A;font-size:12px">⚠ ${escapeHtml(m.error)}</div>` : ''}
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:var(--s-3)">
+          ${m.canvasUrl ? `<button class="btn btn-ghost" data-mockup-clearmark ${m.loading ? 'disabled' : ''}>Borrar marca</button>` : ''}
+          <button class="btn btn-cyan" data-mockup-go ${m.loading ? 'disabled' : ''}>${m.loading ? '⏳ Montando… (15-30s)' : '✨ Generar montaje'}</button>
+        </div>
+        ${hasResult ? `
+          <div style="margin-top:var(--s-4);border-top:1px solid var(--border);padding-top:var(--s-3)">
+            <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px">3 · Montaje hiperrealista</div>
+            <img src="data:${m.result.mime};base64,${m.result.base64}" style="max-width:100%;display:block;border-radius:var(--r-sm);border:1px solid var(--accent-cyan)">
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+              <button class="btn btn-ghost" data-mockup-reset>↺ Otro</button>
+              <button class="btn btn-ghost" data-mockup-download>⬇ Descargar</button>
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    </div>`;
+}
 function renderCorpPopup() {
   const id = STATE.corpPopupBrief; if (!id) return '';
   const brief = STATE.briefs.find(b => b.id === id); if (!brief) return '';
@@ -13835,7 +14035,8 @@ function renderCotizacion(producto = 'neon') {
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" id="briefs-refresh" title="Refrescar">↻</button>
         ${(getUserRole() === 'disenador' || getUserRole() === 'admin') ? `<button class="btn btn-ghost" id="btn-rectify-foto" title="Enderezar la perspectiva de una foto (llevarla a vista frontal) con IA — para usarla de base de diseño">🔧 Rectificar foto</button>
-        <button class="btn btn-ghost" id="btn-vectorize" title="Convertir un logo/diseño a silueta B&N maciza de alto contraste, lista para vectorizar con el Calco de Imagen de Illustrator">⬛ Vectorizar</button>` : ''}
+        <button class="btn btn-ghost" id="btn-vectorize" title="Convertir un logo/diseño a silueta B&N maciza de alto contraste, lista para vectorizar con el Calco de Imagen de Illustrator">⬛ Vectorizar</button>
+        <button class="btn btn-ghost" id="btn-mockup" title="Montar el render de un cartel sobre la foto del local del cliente para ver cómo queda puesto (montaje hiperrealista con IA)">🏠 Montaje</button>` : ''}
         ${canCotizar() ? `<button class="btn btn-ghost" id="briefs-verificar-enviados" title="Revisar los 'Listos' y 'Colgados' tipo WhatsApp contra el historial y pasar a Enviados los que ya tienen presupuesto mandado">${STATE.verificandoEnviados ? '⏳ Verificando…' : '🔍 Verificar enviados'}</button>` : ''}
         ${canCreateBriefs() ? '<button class="btn btn-cyan" id="brief-new">+ Nuevo brief</button>' : ''}
       </div>
@@ -13865,6 +14066,7 @@ function renderCotizacion(producto = 'neon') {
       ${renderBriefCotizadorPopup()}
       ${renderCorpPopup()}
       ${renderRectifyModal()}
+      ${renderMockupModal()}
       ${renderImgLightbox()}
       ${renderQuickCreateModal()}
       ${renderTeamChatWidget()}
@@ -15060,6 +15262,9 @@ function bindCotizacion() {
   if (rectBtn) rectBtn.onclick = () => openImgTool('rectify');
   const vecBtn = document.getElementById('btn-vectorize');
   if (vecBtn) vecBtn.onclick = () => openImgTool('vectorize');
+  const mockBtn = document.getElementById('btn-mockup');
+  if (mockBtn) mockBtn.onclick = openMockupModal;
+  bindMockupCanvas();
 
   // Buscador del board: filtra las cards en vivo (sin re-render, mantiene foco).
   const briefSearchInput = document.getElementById('brief-search');
@@ -15130,8 +15335,9 @@ function bindCotizacion() {
   if (!document._cotPasteBound) {
     document.addEventListener('paste', async (ev) => {
       if (STATE.view !== 'cotizacion' && STATE.view !== 'corporeas') return;
-      // Si el modal de rectificar foto está abierto, el Ctrl+V es para ÉL: no abrir brief.
-      if (STATE.rectify && STATE.rectify.open) return;
+      // Si un modal de herramienta de imagen está abierto (rectificar/vectorizar o
+      // montaje), el Ctrl+V es para ÉL: no abrir brief.
+      if ((STATE.rectify && STATE.rectify.open) || (STATE.mockup && STATE.mockup.open)) return;
       const items = ev.clipboardData?.items || [];
       const drawerOpen = !!STATE.briefSelected || !!STATE.briefDraft;
       const role = getUserRole();
