@@ -13550,6 +13550,7 @@ function bindMockupCanvas() {
     }
   };
   if (img.complete && img.naturalWidth) fit(); else img.onload = fit;
+  setTimeout(fit, 40);  // red de seguridad: redibuja la marca cuando el layout ya midió el ancho
   let drawing = false, sx = 0, sy = 0;
   const P = (e) => {
     const r = cv.getBoundingClientRect();
