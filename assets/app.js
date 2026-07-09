@@ -4494,7 +4494,7 @@ function bindCotRender() {
   // sin imagen aún) y no hay un modal encima con su propio paste.
   if (!document._cotRenderPasteBound) {
     document.addEventListener('paste', async (ev) => {
-      if (STATE.quickModalOpen) return;
+      if (STATE.quickModalOpen || (STATE.rectify && STATE.rectify.open)) return;
       if (!document.getElementById('cot-render-dropzone')) return;
       const items = ev.clipboardData?.items || [];
       let file = null;
@@ -13334,6 +13334,18 @@ function _ensureRectifyListeners() {
   document.addEventListener('change', (e) => {
     if (e.target && e.target.id === 'rectify-file') _rectifyPickFile(e.target.files && e.target.files[0]);
   });
+  // Pegar con Ctrl+V mientras el modal está abierto: agarra la imagen del portapapeles.
+  document.addEventListener('paste', (e) => {
+    if (!STATE.rectify || !STATE.rectify.open) return;
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    let file = null;
+    for (const it of items) {
+      if (it.kind === 'file' && (it.type || '').startsWith('image/')) { file = it.getAsFile(); break; }
+    }
+    if (!file) return;
+    e.preventDefault();
+    _rectifyPickFile(file);
+  });
   document.addEventListener('click', (e) => {
     const t = e.target;
     if (!t || !t.closest) return;
@@ -13406,8 +13418,8 @@ function renderRectifyModal() {
         ${!hasOrig ? `
           <label style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;border:2px dashed var(--border);border-radius:var(--r-sm);padding:38px 16px;cursor:pointer;color:var(--fg-mute);text-align:center">
             <div style="font-size:30px">📐</div>
-            <div style="font-size:13px">Tocá para subir una foto del cartel en perspectiva</div>
-            <div style="font-size:11px;opacity:.7">JPG o PNG · máx 12 MB</div>
+            <div style="font-size:13px">Tocá para subir una foto, o pegá con Ctrl+V</div>
+            <div style="font-size:11px;opacity:.7">cartel en perspectiva · JPG o PNG · máx 12 MB</div>
             <input type="file" id="rectify-file" accept="image/*" style="display:none">
           </label>
         ` : `
