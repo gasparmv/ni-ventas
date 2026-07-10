@@ -4393,6 +4393,67 @@ async function analyticsPrecotizFunnel(env, url) {
   return json(out);
 }
 
+// Etiqueta "💰 Sin cotizar" a los leads que mandaron foto Y medidas pero nunca
+// recibieron presupuesto (últimos 60 días, alcanzables). Es la lista de "plata en
+// la mesa" para que Joaco filtre en el chat y cotice. Idempotente (INSERT OR IGNORE);
+// re-ejecutable cuando se quiera refrescar. Misma detección que el funnel.
+const SIN_COTIZAR_LABEL_NAME = '💰 Sin cotizar';
+const SIN_COTIZAR_LABEL_COLOR = '#22c55e';
+async function etiquetarListosSinCotizar(env) {
+  const scanDesde = '2026-03-01T03:00:00Z';
+  const hoyMs = Date.now();
+  const winDesde = new Date(hoyMs - 60 * 86400000).toISOString();
+  const winHasta = new Date(hoyMs - 3 * 86400000).toISOString();
+  const sql = `
+    WITH per_phone AS (
+      SELECT phone,
+        CASE WHEN MAX(CASE WHEN channel='ig' THEN 1 ELSE 0 END)=1 THEN 'ig' ELSE 'wa' END AS canal,
+        MIN(CASE WHEN direction='inbound'  AND msg_type!='status' THEN ts END) AS first_in_ts,
+        MIN(CASE WHEN direction='outbound' AND msg_type!='status' THEN ts END) AS first_out_ts,
+        MAX(CASE WHEN direction='inbound'  AND msg_type!='status' THEN ts END) AS last_in_ts,
+        MAX(CASE WHEN direction='inbound' AND msg_type='image' THEN 1 ELSE 0 END) AS has_img,
+        MAX(CASE WHEN direction='inbound' AND msg_type IN ('text','audio') AND (
+              lower(body) GLOB '*[0-9]x[0-9]*'  OR lower(body) GLOB '*[0-9] x [0-9]*'
+           OR lower(body) GLOB '*[0-9]x [0-9]*' OR lower(body) GLOB '*[0-9] x[0-9]*'
+           OR lower(body) GLOB '*[0-9] por [0-9]*'
+           OR lower(body) GLOB '*[0-9]cm*'      OR lower(body) GLOB '*[0-9] cm*'
+           OR lower(body) GLOB '*[0-9] mts*'    OR lower(body) GLOB '*[0-9] metro*'
+        ) THEN 1 ELSE 0 END) AS has_med,
+        MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND (
+              substr(body,1,26)='Te comparto el presupuesto'
+           OR substr(body,1,26)='Te comparto la información'
+           OR substr(body,1,34)='[plantilla: presupuesto_detallado]'
+           OR substr(body,1,33)='[plantilla: presupuesto_corporea]'
+        ) THEN 1 ELSE 0 END) AS has_quote
+      FROM wa_messages
+      WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
+        AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573')
+      GROUP BY phone
+    )
+    SELECT p.phone, p.canal, p.first_in_ts, p.last_in_ts, s.contact_name
+    FROM per_phone p LEFT JOIN wa_chats_summary s ON s.phone = p.phone
+    WHERE p.first_in_ts IS NOT NULL
+      AND p.first_in_ts >= ?2 AND p.first_in_ts <= ?3
+      AND (p.first_out_ts IS NULL OR p.first_in_ts <= p.first_out_ts)
+      AND IFNULL(s.inbox,'general') != 'cursos'
+      AND p.has_quote = 0 AND p.has_img = 1 AND p.has_med = 1
+      AND p.phone NOT IN (SELECT phone FROM wa_unreachable_phones)
+    ORDER BY p.last_in_ts DESC`;
+  const rows = (await env.DB.prepare(sql).bind(scanDesde, winDesde, winHasta).all()).results || [];
+  const labelId = await ensureLabelId(env, SIN_COTIZAR_LABEL_NAME, SIN_COTIZAR_LABEL_COLOR);
+  let etiquetados = 0;
+  if (labelId) {
+    const nowIso = new Date().toISOString();
+    for (const r of rows) {
+      try {
+        const res = await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(r.phone, labelId, nowIso).run();
+        if (res.meta && res.meta.changes) etiquetados++;
+      } catch (_) {}
+    }
+  }
+  return { total: rows.length, etiquetados_nuevos: etiquetados, label: SIN_COTIZAR_LABEL_NAME, label_id: labelId, rows };
+}
+
 // Prompt de montaje/mockup: monta el render de un cartel sobre la foto del local del
 // cliente, en la zona que el diseñador marcó con un recuadro. Hiperrealista, con glow
 // del neón, SIN el cable de 220v. Herramienta del diseñador (2 imágenes de entrada).
@@ -10231,6 +10292,16 @@ export default {
         });
         if (!r.ok) return json({ error: r.error || 'No se pudo generar el montaje' }, 502);
         return json({ ok: true, base64: r.base64, mime: r.mime });
+      }
+
+      // POST /admin/wa/etiquetar-sin-cotizar  →  aplica la etiqueta "💰 Sin cotizar" a los
+      // leads con foto+medidas sin presupuesto (últimos 60 días). Devuelve la lista.
+      // Re-ejecutable para refrescar (idempotente). Solo admin; query pesada, no poll.
+      if (request.method === 'POST' && path === '/admin/wa/etiquetar-sin-cotizar') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        try { return json({ ok: true, ...(await etiquetarListosSinCotizar(env)) }); }
+        catch (e) { return json({ error: String(e && e.message || e) }, 500); }
       }
 
       // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
