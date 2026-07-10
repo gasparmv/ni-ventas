@@ -4268,8 +4268,10 @@ const GEMINI_CORPOREA_RENDER_PROMPT = [
 const GEMINI_RECTIFY_PROMPT = [
   'Corregí la perspectiva de esta fotografía de un cartel. Transformá la imagen para mostrar el cartel en una vista FRONTAL perfecta (de frente, head-on), como si la cámara estuviera exactamente perpendicular y centrada al cartel.',
   '',
+  'CRÍTICO: la foto puede venir MUY torcida, rotada o en ángulo fuerte. Enderezala SIEMPRE, con toda la fuerza que haga falta — rotá, deformá y estirá las esquinas lo que sea necesario. El resultado DEBE verse claramente DISTINTO al original: derecho y de frente. NUNCA devuelvas una imagen casi igual a la de entrada (si lo hacés, fallaste). Es preferible una corrección fuerte y notoria a una tímida.',
+  '',
   'Corregí SOLO la geometría:',
-  '- Eliminá toda la distorsión de perspectiva y el efecto keystone/trapezoidal.',
+  '- Eliminá TODA la distorsión de perspectiva y el efecto keystone/trapezoidal, por más marcado que sea el ángulo.',
   '- Las líneas verticales quedan 100% verticales y las horizontales 100% horizontales; las esquinas del cartel forman ángulos rectos de 90 grados.',
   '- El cartel queda plano y de frente, sin inclinación, rotación ni punto de fuga.',
   '',
@@ -4507,7 +4509,7 @@ async function geminiTrackUsage(env, model, kind, usage, ref) {
 // con la imagen generada, o { error }.
 async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto, opts = {}) {
   if (!env.GEMINI_API_KEY) return { error: 'GEMINI_API_KEY no configurada' };
-  const model = geminiImageModel(env);
+  const model = opts.model || geminiImageModel(env);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
   // basePrompt permite usar otro prompt (ej. corpóreas) sin tocar el de carteles.
   const basePrompt = opts.basePrompt || GEMINI_RENDER_PROMPT;
@@ -10201,7 +10203,10 @@ export default {
         if (buf.byteLength > 12 * 1024 * 1024) return json({ error: 'Imagen muy grande (máx 12 MB)' }, 400);
         const notes = (url.searchParams.get('notes') || '').trim();
         const extraTexto = notes ? ('Aclaración adicional del diseñador (respetala): ' + notes) : '';
-        const r = await generarRenderConGemini(env, buf, ct, extraTexto, { basePrompt, ref: 'imgtool:' + mode });
+        // Herramientas del disenador (rectificar/vectorizar): modelo PRO (mejor
+        // correccion geometrica y detalle). Es low-volume, no afecta el costo de
+        // los renders (que van en flash). Override por env si hace falta.
+        const r = await generarRenderConGemini(env, buf, ct, extraTexto, { basePrompt, model: env.GEMINI_IMGTOOL_MODEL || 'gemini-3-pro-image', ref: 'imgtool:' + mode });
         if (!r.ok) return json({ error: r.error || 'No se pudo procesar la imagen' }, 502);
         return json({ ok: true, base64: r.base64, mime: r.mime });
       }
