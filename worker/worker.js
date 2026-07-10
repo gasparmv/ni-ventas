@@ -6781,6 +6781,18 @@ export default {
     }
 
     // ----- Admin (requiere Bearer) -----
+    // Media SALIENTE de IG (ig/out_): PÚBLICA sin auth. Instagram descarga la URL (sin token)
+    // para reenviarla al cliente; con el gate de auth recibía 401 y fallaba ("Upload failed").
+    // Son archivos que NOSOTROS mandamos (imágenes/audios salientes, no sensibles) y con nombre
+    // aleatorio inadivinable. El resto de /admin/media/ sigue protegido por el gate de abajo.
+    if (request.method === 'GET' && path.startsWith('/admin/media/')) {
+      const _k = decodeURIComponent(path.slice('/admin/media/'.length));
+      if (_k.startsWith('ig/out_') && env.MEDIA) {
+        const _obj = await env.MEDIA.get(_k);
+        if (_obj) return new Response(_obj.body, { headers: { ...cors(), 'Content-Type': _obj.httpMetadata?.contentType || 'application/octet-stream', 'Cache-Control': 'public, max-age=31536000, immutable' } });
+      }
+    }
+
     if (path.startsWith('/admin/')) {
       // Allow token via query param for resources loaded by <img>, <audio>, etc.
       let session = await getSession(env, request);
