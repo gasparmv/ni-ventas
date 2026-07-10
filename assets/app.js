@@ -7398,9 +7398,58 @@ function renderNormalInputUI() {
     <textarea id="chat-input" placeholder="Escribí un mensaje" rows="1"></textarea>
     <button class="btn-send" id="chat-send-btn" ${chatState.sending ? 'disabled' : ''} title="Enviar"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.101 21.757L23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z"/></svg></button>
     <button class="btn-send btn-schedule" id="btn-schedule" title="Programar mensaje"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg></button>
+    <button class="btn-send btn-sticker" id="btn-sticker" title="Stickers"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M18.36 3H5.64C4.19 3 3 4.19 3 5.64v12.72C3 19.81 4.19 21 5.64 21H14l7-7V5.64C21 4.19 19.81 3 18.36 3zM8 8.5a1.5 1.5 0 110 3 1.5 1.5 0 010-3zm4 8c-2.33 0-4.31-1.46-5.11-3.5h10.22c-.8 2.04-2.78 3.5-5.11 3.5zM16 11.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zM14 19v-3.5c0-.83.67-1.5 1.5-1.5H19L14 19z"/></svg></button>
     <button class="btn-send btn-mic" id="btn-mic" title="Grabar audio"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M11.999 14.942c2.001 0 3.531-1.53 3.531-3.531V4.35c0-2.001-1.53-3.531-3.531-3.531S8.469 2.35 8.469 4.35v7.061c0 2.001 1.53 3.531 3.53 3.531zm6.238-3.53c0 3.531-2.942 6.002-6.238 6.002s-6.238-2.471-6.238-6.002H4.761c0 3.885 3.118 7.061 7.003 7.414v3.174h.471v-3.174c3.885-.353 7.003-3.529 7.003-7.414h-1z"/></svg></button>
   `;
   bindChatConversation();
+}
+
+// ===== Stickers favoritos =====
+// Gaspar se manda sus stickers al numero desde su WhatsApp personal -> entran como inbound
+// (WebP en R2). Toca ⭐ para guardarlos y los reusa desde el picker de la barra.
+async function loadStickerFavs() {
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/sticker-favs', { headers: authHeaders() });
+    if (r.ok) { const j = await r.json(); chatState.stickerFavs = (j.stickers || []).map(s => s.r2_key); }
+  } catch (_) {}
+}
+async function toggleStickerFav(r2Key, remove) {
+  try {
+    await fetch(CONFIG.trackerUrl + '/admin/wa/sticker-fav', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ r2_key: r2Key, remove: !!remove }) });
+    if (remove) chatState.stickerFavs = (chatState.stickerFavs || []).filter(k => k !== r2Key);
+    else if (!(chatState.stickerFavs || []).includes(r2Key)) chatState.stickerFavs = [r2Key, ...(chatState.stickerFavs || [])];
+    toast(remove ? 'Sticker quitado de favoritos' : '⭐ Sticker guardado');
+  } catch (_) { toast('No se pudo guardar'); }
+}
+async function sendStickerToChat(phone, r2Key) {
+  if (!phone || !r2Key) return;
+  chatState.sending = true; updateChatInputState();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-sticker', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ to: phone, r2_key: r2Key }) });
+    const j = await r.json();
+    if (!r.ok) { toast('Error sticker: ' + (j.error || 'fallo')); return; }
+    chatState.messages.push({ ts: new Date().toISOString(), wamid: j.id || '', direction: 'outbound', phone, sender_name: '', msg_type: 'sticker', body: '', media_url: r2Key, status: 'sent' });
+    renderChatMessages();
+    const p = document.getElementById('sticker-picker'); if (p) p.remove();
+  } catch (e) { toast('Error de red'); }
+  finally { chatState.sending = false; updateChatInputState(); }
+}
+function toggleStickerPicker() {
+  const existing = document.getElementById('sticker-picker');
+  if (existing) { existing.remove(); return; }
+  const bar = document.querySelector('.chat-input-bar');
+  if (!bar || !bar.parentElement) return;
+  const favs = chatState.stickerFavs || [];
+  const panel = document.createElement('div');
+  panel.id = 'sticker-picker';
+  panel.style.cssText = 'position:absolute;bottom:64px;left:8px;right:8px;max-height:240px;overflow-y:auto;background:var(--bg-elev,#1f2c34);border:1px solid var(--border,#2a3942);border-radius:12px;padding:10px;display:flex;flex-wrap:wrap;gap:8px;z-index:60;box-shadow:0 -4px 20px rgba(0,0,0,.45)';
+  panel.innerHTML = favs.length
+    ? favs.map(k => `<img src="${mediaUrl(k)}" data-send-sticker="${k}" style="width:82px;height:82px;object-fit:contain;cursor:pointer;border-radius:8px" title="Mandar sticker">`).join('')
+    : '<div style="padding:14px;opacity:.75;font-size:13px;line-height:1.4">No tenés stickers guardados todavía.<br>Mandate tus stickers favoritos desde tu WhatsApp a este número y tocá <b>⭐</b> en cada uno para guardarlos acá.</div>';
+  const host = bar.parentElement;
+  if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+  host.appendChild(panel);
+  panel.querySelectorAll('[data-send-sticker]').forEach(el => { el.onclick = () => sendStickerToChat(chatState.selectedPhone, el.getAttribute('data-send-sticker')); });
 }
 
 // ===== Bulk messaging =====
@@ -9324,8 +9373,11 @@ function renderChatBubbles(msgs, opts) {
 
     // === STICKER ===
     if (m.msg_type === 'sticker' && m.media_url) {
-      html += `<div class="chat-msg ${dir} sticker-msg${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'sticker')}">
+      const _isFav = (chatState.stickerFavs || []).includes(m.media_url);
+      const _canFav = String(m.media_url).startsWith('wa/');
+      html += `<div class="chat-msg ${dir} sticker-msg${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'sticker')}" style="position:relative">
         <img src="${mediaUrl(m.media_url)}" alt="" style="max-width:160px;max-height:160px" loading="lazy">
+        ${_canFav ? `<button class="sticker-fav-btn" data-sticker-fav="${m.media_url}" data-fav="${_isFav ? '1' : '0'}" title="${_isFav ? 'Quitar de mis stickers' : 'Guardar sticker'}" style="position:absolute;top:0;right:0;background:rgba(0,0,0,.55);border:none;border-radius:50%;width:26px;height:26px;cursor:pointer;font-size:14px;line-height:1;padding:0;color:#fff">${_isFav ? '⭐' : '☆'}</button>` : ''}
       </div>`;
       continue;
     }
@@ -10785,6 +10837,30 @@ function bindChatConversation() {
       fileInput.value = '';
       await sendChatFiles(files);
     };
+  }
+  // Stickers: botón del picker + guardar con ⭐ (delegado en el contenedor de mensajes).
+  // Solo WhatsApp: en IG los stickers no van por API, así que lo ocultamos en chats de IG.
+  const stickerBtn = document.getElementById('btn-sticker');
+  if (stickerBtn) {
+    const _scIg = (chatState.contacts || []).find(c => c.phone === chatState.selectedPhone);
+    if (_scIg && _scIg.channel === 'ig') stickerBtn.style.display = 'none';
+    else stickerBtn.onclick = toggleStickerPicker;
+  }
+  if (!chatState.stickerFavsLoaded) { chatState.stickerFavsLoaded = true; loadStickerFavs(); }
+  const _msgsEl = document.getElementById('chat-messages');
+  if (_msgsEl && !_msgsEl._stickerFavBound) {
+    _msgsEl._stickerFavBound = true;
+    _msgsEl.addEventListener('click', (e) => {
+      const b = e.target.closest && e.target.closest('[data-sticker-fav]');
+      if (!b) return;
+      e.stopPropagation();
+      const k = b.getAttribute('data-sticker-fav');
+      const isFav = b.getAttribute('data-fav') === '1';
+      toggleStickerFav(k, isFav);
+      b.setAttribute('data-fav', isFav ? '0' : '1');
+      b.textContent = isFav ? '☆' : '⭐';
+      b.title = isFav ? 'Guardar sticker' : 'Quitar de mis stickers';
+    });
   }
   // Paste de imágenes desde clipboard (Ctrl+V con imagen copiada)
   if (ta) {

@@ -8676,6 +8676,47 @@ export default {
       }
 
       // ===== Enviar media (foto/audio) por WhatsApp =====
+      // ===== Stickers favoritos =====
+      // Gaspar se manda sus stickers al numero desde su WhatsApp personal -> entran como
+      // inbound (WebP cacheado en R2). Los marca como favoritos y los reusa desde un picker.
+      if (request.method === 'GET' && path === '/admin/wa/sticker-favs') {
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS sticker_favs (r2_key TEXT PRIMARY KEY, added_at TEXT NOT NULL)").run();
+          const rs = await env.DB.prepare("SELECT r2_key, added_at FROM sticker_favs ORDER BY added_at DESC").all();
+          return json({ stickers: rs.results || [] });
+        } catch (e) { return json({ stickers: [] }); }
+      }
+      if (request.method === 'POST' && path === '/admin/wa/sticker-fav') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { r2_key, remove } = body || {};
+        if (!r2_key || !String(r2_key).startsWith('wa/')) return json({ error: 'r2_key invalido' }, 400);
+        try {
+          await env.DB.prepare("CREATE TABLE IF NOT EXISTS sticker_favs (r2_key TEXT PRIMARY KEY, added_at TEXT NOT NULL)").run();
+          if (remove) await env.DB.prepare("DELETE FROM sticker_favs WHERE r2_key = ?").bind(r2_key).run();
+          else await env.DB.prepare("INSERT OR IGNORE INTO sticker_favs (r2_key, added_at) VALUES (?, ?)").bind(r2_key, new Date().toISOString()).run();
+          return json({ ok: true });
+        } catch (e) { return json({ error: String(e) }, 500); }
+      }
+      // Mandar un sticker favorito: lo saca de R2, lo sube a WhatsApp y lo manda como type=sticker.
+      if (request.method === 'POST' && path === '/admin/wa/send-sticker') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { to, r2_key } = body || {};
+        if (!to || !r2_key) return json({ error: 'missing to or r2_key' }, 400);
+        const num = normalizeArPhone(to);
+        if (!num) return json({ error: 'numero invalido' }, 400);
+        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, num))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
+        if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+        const obj = await env.MEDIA.get(r2_key);
+        if (!obj) return json({ error: 'sticker no encontrado' }, 404);
+        const mediaId = await uploadMediaToMeta(env, await obj.arrayBuffer(), 'image/webp', 'sticker.webp');
+        if (!mediaId) return json({ error: 'no se pudo subir el sticker a WhatsApp' }, 502);
+        const r = await waSend(env, { messaging_product: 'whatsapp', to: num, type: 'sticker', sticker: { id: mediaId } });
+        await logWaEvent(env, { to: num, kind: 'sticker', ref: r2_key, ok: r.ok, messageId: r.id, error: r.error });
+        if (!r.ok) return json({ error: r.error, raw: r.raw }, r.status || 500);
+        try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, 'outbound', ?, '', 'sticker', '', ?, '', 'sent')").bind(new Date().toISOString(), r.id || '', num, r2_key).run(); } catch (_) {}
+        return json({ id: r.id });
+      }
+
       if (request.method === 'POST' && path === '/admin/wa/send-media') {
         const ct = request.headers.get('Content-Type') || '';
         if (!ct.includes('multipart/form-data')) return json({ error: 'expected multipart/form-data' }, 400);
