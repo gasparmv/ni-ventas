@@ -7222,6 +7222,7 @@ function pickAudioMime() {
 function audioExtForMime(m) {
   m = (m || '').toLowerCase();
   if (m.includes('ogg')) return '.ogg';
+  if (m.includes('wav')) return '.wav';
   if (m.includes('mp4')) return '.m4a';
   if (m.includes('mpeg') || m.includes('mp3')) return '.mp3';
   if (m.includes('webm')) return '.webm';
@@ -7242,9 +7243,59 @@ function _startRecTimer() {
   }, 1000);
 }
 
+// ===== Grabador WAV (para Instagram) =====
+// IG acepta aac/m4a/wav/mp4 pero NO ogg/opus (lo que grabamos para WhatsApp). Chrome y Firefox
+// no graban mp4/aac nativo, así que capturamos PCM crudo con Web Audio API y lo encodeamos como
+// WAV (que IG sí acepta). Anda en TODOS los navegadores y sin librerías de transcodeo.
+function _startRecordingWav(phone) {
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC();
+    const source = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const chunks = [];
+    proc.onaudioprocess = (e) => {
+      chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); // copiar: el buffer se reusa
+      e.outputBuffer.getChannelData(0).fill(0); // silencio en la salida -> no se escucha el mic por los parlantes
+    };
+    source.connect(proc);
+    proc.connect(ctx.destination);
+    chatState.wavRec = { stream, ctx, source, proc, chunks, sampleRate: ctx.sampleRate };
+    chatState.recording = true;
+    _startRecTimer();
+    renderRecordingUI();
+  }).catch(() => toast('No se pudo acceder al micrófono'));
+}
+// Une los chunks PCM, baja a 16kHz mono y arma un WAV (PCM 16-bit) — liviano y suficiente para voz.
+function _encodeWav(chunks, inRate) {
+  let len = 0; for (const c of chunks) len += c.length;
+  const pcm = new Float32Array(len);
+  let off = 0; for (const c of chunks) { pcm.set(c, off); off += c.length; }
+  const outRate = 16000;
+  const ratio = (inRate || 48000) / outRate;
+  const outLen = Math.max(1, Math.floor(pcm.length / ratio));
+  const ds = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const s = Math.max(-1, Math.min(1, pcm[Math.floor(i * ratio)] || 0));
+    ds[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  const buf = new ArrayBuffer(44 + ds.length * 2);
+  const dv = new DataView(buf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, 'RIFF'); dv.setUint32(4, 36 + ds.length * 2, true); ws(8, 'WAVE');
+  ws(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, outRate, true); dv.setUint32(28, outRate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  ws(36, 'data'); dv.setUint32(40, ds.length * 2, true);
+  let p = 44; for (let i = 0; i < ds.length; i++) { dv.setInt16(p, ds[i], true); p += 2; }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
 function startRecording(phone) {
-  // Preferimos opus-recorder: graba ogg/opus que WhatsApp acepta en TODOS los
-  // navegadores (Chrome con MediaRecorder solo graba webm, que WhatsApp rechaza).
+  // Instagram NO acepta ogg/opus -> grabamos WAV con Web Audio API (anda en todo navegador).
+  const _c = (chatState.contacts || []).find(x => x.phone === phone);
+  if (_c && _c.channel === 'ig') { _startRecordingWav(phone); return; }
+  // WhatsApp: preferimos opus-recorder (ogg/opus, que WhatsApp acepta en TODOS los navegadores;
+  // Chrome con MediaRecorder solo graba webm, que WhatsApp rechaza).
   if (typeof Recorder !== 'undefined') {
     try {
       const rec = new Recorder({ encoderPath: OPUS_ENCODER_URL, numberOfChannels: 1, encoderSampleRate: 48000, streamPages: false, recordingGain: 1 });
@@ -7280,7 +7331,8 @@ function _startRecordingMR(phone) {
 
 function cancelRecording() {
   try {
-    if (chatState.opusRec) { chatState.opusRec.ondataavailable = () => {}; chatState.opusRec.stop(); chatState.opusRec = null; }
+    if (chatState.wavRec) { const w = chatState.wavRec; chatState.wavRec = null; try { w.proc.disconnect(); w.source.disconnect(); w.stream.getTracks().forEach(t => t.stop()); w.ctx.close(); } catch (_) {} }
+    else if (chatState.opusRec) { chatState.opusRec.ondataavailable = () => {}; chatState.opusRec.stop(); chatState.opusRec = null; }
     else if (chatState.mediaRecorder && chatState.mediaRecorder.state !== 'inactive') chatState.mediaRecorder.stop();
   } catch (_) {}
   chatState.recording = false;
@@ -7297,6 +7349,18 @@ function stopAndSendRecording(phone) {
     renderNormalInputUI();
     if (blob && blob.size > 0) sendChatAudio(phone, blob);
   };
+  // WAV (Instagram): armamos el WAV desde los chunks PCM capturados.
+  if (chatState.wavRec) {
+    const w = chatState.wavRec; chatState.wavRec = null;
+    try {
+      w.proc.disconnect(); w.source.disconnect();
+      w.stream.getTracks().forEach(t => t.stop());
+      const blob = _encodeWav(w.chunks, w.sampleRate);
+      try { w.ctx.close(); } catch (_) {}
+      finish(blob);
+    } catch (_) { finish(null); }
+    return;
+  }
   // opus-recorder: el archivo ogg llega por ondataavailable al hacer stop().
   if (chatState.opusRec) {
     const rec = chatState.opusRec;
