@@ -3269,6 +3269,23 @@ async function igSendImage(env, recipientId, imageUrl) {
   } catch (e) { return { ok: false, error: String(e) }; }
 }
 
+// Manda un audio por IG (attachment type=audio con URL pública que IG descarga). Igual que
+// igSendImage pero type=audio. El audio se sirve desde R2 vía /admin/media/ (sin token).
+async function igSendAudio(env, recipientId, audioUrl) {
+  const token = await igGetToken(env);
+  if (!token) return { ok: false, error: 'no IG token' };
+  try {
+    const r = await fetch('https://graph.instagram.com/v21.0/me/messages?access_token=' + encodeURIComponent(token), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipient: { id: String(recipientId) }, message: { attachment: { type: 'audio', payload: { url: String(audioUrl), is_reusable: false } } } })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) return { ok: false, error: (j.error && (j.error.error_user_msg || j.error.message)) || ('http ' + r.status), raw: j };
+    return { ok: true, id: j.message_id || j.id || '' };
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
+
 // Refresca el token largo de IG (válido 60 días) por otro de 60 días. Solo corre si pasaron
 // >24h del último refresco (gate en kv_cache). Si el token no es renovable o falla, no rompe
 // nada: igGetToken sigue usando el último válido. Se llama desde el cron.
@@ -7691,22 +7708,25 @@ export default {
         const file = fd.get('file');
         if (!igId || !file) return json({ error: 'missing to or file' }, 400);
         { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, igId))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
-        const fileMime = (file.type || 'image/jpeg').split(';')[0].trim();
-        if (!fileMime.startsWith('image/')) return json({ error: 'Por IG por ahora solo se pueden mandar imagenes' }, 400);
+        const fileMime = (file.type || '').split(';')[0].trim();
+        const isImg = fileMime.startsWith('image/');
+        const isAud = fileMime.startsWith('audio/');
+        if (!isImg && !isAud) return json({ error: 'Por IG solo se pueden mandar imagenes o audios por ahora' }, 400);
         let lastTs = 0;
         try { const lastIn = await env.DB.prepare("SELECT MAX(ts) AS ts FROM wa_messages WHERE phone=? AND direction='inbound' AND channel='ig'").bind(igId).first(); lastTs = lastIn && lastIn.ts ? new Date(lastIn.ts).getTime() : 0; } catch (_) {}
         if (!(lastTs && (Date.now() - lastTs) < 24 * 3600 * 1000)) return json({ error: 'Ventana de 24 h cerrada: el cliente no escribio en las ultimas 24 h. Instagram no permite mandar fuera de la ventana.', window_closed: true }, 409);
-        const fileName = file.name || ('img_' + Date.now());
-        const ext = fileName.includes('.') ? '.' + fileName.split('.').pop() : '.jpg';
+        const fileName = file.name || ((isAud ? 'aud_' : 'img_') + Date.now());
+        const ext = fileName.includes('.') ? '.' + fileName.split('.').pop() : (isAud ? '.m4a' : '.jpg');
         const r2Key = `ig/out_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`;
         await env.MEDIA.put(r2Key, await file.arrayBuffer(), { httpMetadata: { contentType: fileMime } });
-        const imageUrl = new URL(request.url).origin + '/admin/media/' + r2Key;
-        const r = await igSendImage(env, igId, imageUrl);
-        await logWaEvent(env, { to: igId, kind: 'ig-image', ref: r2Key, ok: r.ok, messageId: r.id, error: r.error });
+        const mediaUrl = new URL(request.url).origin + '/admin/media/' + r2Key;
+        const r = isAud ? await igSendAudio(env, igId, mediaUrl) : await igSendImage(env, igId, mediaUrl);
+        await logWaEvent(env, { to: igId, kind: isAud ? 'ig-audio' : 'ig-image', ref: r2Key, ok: r.ok, messageId: r.id, error: r.error });
         if (!r.ok) return json({ error: r.error, raw: r.raw }, 500);
         const ts = new Date().toISOString();
+        const mtype = isAud ? 'audio' : 'image';
         try {
-          await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, '', 'image', '', ?, '', 'sent', 'ig')").bind(ts, r.id || ('ig-img-' + Date.now()), igId, r2Key).run();
+          await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, '', ?, '', ?, '', 'sent', 'ig')").bind(ts, r.id || ('ig-med-' + Date.now()), igId, mtype, r2Key).run();
           await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone=?").bind(igId).run();
         } catch (_) {}
         if (caption && String(caption).trim()) {

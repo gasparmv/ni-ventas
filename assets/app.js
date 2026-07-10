@@ -7184,11 +7184,14 @@ async function sendChatAudio(phone, blob) {
   updateChatInputState();
   try {
     const mime = blob.type || 'audio/ogg';
+    // Instagram va por su propio caño (/admin/ig/send-media, Graph API); WhatsApp por 360dialog.
+    const _c = (chatState.contacts || []).find(c => c.phone === phone);
+    const _isIg = _c && _c.channel === 'ig';
     const fd = new FormData();
     fd.append('to', phone);
     fd.append('type', 'audio');
     fd.append('file', blob, 'audio' + audioExtForMime(mime));
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-media', {
+    const r = await fetch(CONFIG.trackerUrl + (_isIg ? '/admin/ig/send-media' : '/admin/wa/send-media'), {
       method: 'POST', headers: authHeaders(), body: fd
     });
     const j = await r.json();
@@ -10602,19 +10605,20 @@ function bindChatConversation() {
   const fileInput = document.getElementById('chat-file-input');
   const micBtn = document.getElementById('btn-mic');
   const labelsBtn = document.getElementById('btn-labels');
-  // Instagram: se RESPONDE (Fase 2b), pero por ahora solo TEXTO (sin adjuntos/audio)
-  // y solo dentro de la ventana de 24 h. IG no permite texto libre fuera de la ventana
-  // y no tiene plantillas para reabrir como WhatsApp → si está cerrada, avisamos y
-  // bloqueamos hasta que el cliente vuelva a escribir.
+  // Instagram: se RESPONDE (texto, imagen y audio) SOLO dentro de la ventana de 24 h. IG no
+  // permite mandar fuera de la ventana y no tiene plantillas para reabrir como WhatsApp → si
+  // está cerrada, avisamos y bloqueamos todo hasta que el cliente vuelva a escribir.
   const _selContact = (chatState.contacts || []).find(c => c.phone === chatState.selectedPhone);
   if (_selContact && _selContact.channel === 'ig') {
-    if (attachBtn) attachBtn.disabled = true;
-    if (micBtn) micBtn.style.display = 'none';
     let _lastInTs = 0;
     for (const m of (chatState.messages || [])) {
       if (m.direction === 'inbound') { const t = new Date(m.ts).getTime(); if (t > _lastInTs) _lastInTs = t; }
     }
     const _igOpen = _lastInTs && (Date.now() - _lastInTs) < 24 * 3600 * 1000;
+    // Imagen y audio van por /admin/ig/send-media (mismo caño que WhatsApp). Dentro de la
+    // ventana: habilitados. Fuera: bloqueados.
+    if (attachBtn) attachBtn.disabled = !_igOpen;
+    if (micBtn && !_igOpen) micBtn.style.display = 'none';
     if (ta) {
       ta.disabled = !_igOpen;
       ta.placeholder = _igOpen ? 'Responder por Instagram…' : '🔒 Ventana de 24 h cerrada — esperá a que el cliente escriba para poder responder';
