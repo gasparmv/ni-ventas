@@ -4597,6 +4597,62 @@ async function computeRefloteSegment(env) {
   };
 }
 
+// Broadcast fijo del reflote (reply_ai=1) — reusa el motor de goteo + rama IA de Fase 2.5.
+const REFLOTE_POS_MSG = 'Dale! Pasanos una foto del diseño que quieras y las medidas y te armamos el presupuesto.';
+const REFLOTE_BODY_PREVIEW = 'Holaa {{1}}! Te escribíamos de Neon Infinito por tu consulta del cartel. Seguís interesado? Pasanos una foto de referencia y las medidas y te armamos el presupuesto';
+async function ensureRefloteBroadcast(env) {
+  await ensureBroadcastsSchema(env);
+  try {
+    const row = await env.DB.prepare("SELECT id FROM wa_broadcasts WHERE template = 'reflote_presupuesto' ORDER BY id ASC LIMIT 1").first();
+    if (row && row.id) {
+      try { await env.DB.prepare("UPDATE wa_broadcasts SET status='running', reply_ai=1, reply_pos_msg=?, reply_neg_msg='', lang='es_AR', param_mode='nombre', body_preview=? WHERE id=?").bind(REFLOTE_POS_MSG, REFLOTE_BODY_PREVIEW, row.id).run(); } catch (_) {}
+      return row.id;
+    }
+    const res = await env.DB.prepare(
+      "INSERT INTO wa_broadcasts (name, template, lang, param_mode, body_preview, status, reply_ai, reply_pos_msg, reply_neg_msg, created_at, created_by) VALUES ('Reflote presupuesto (auto)', 'reflote_presupuesto', 'es_AR', 'nombre', ?, 'running', 1, ?, '', ?, 'sistema')"
+    ).bind(REFLOTE_BODY_PREVIEW, REFLOTE_POS_MSG, new Date().toISOString()).run();
+    return res.meta && res.meta.last_row_id;
+  } catch (_) { return null; }
+}
+// Barrido del reflote: 1 vez/semana (lunes 9 AM AR desde el cron). Encola el segmento
+// CUALIFICADO de WhatsApp en la cola de broadcast (kind bc_<id>) con due_at goteado a lo
+// largo del día (~1 cada 2,5 min) y los etiqueta "🔁 Reflote" (no re-manda). El sender +
+// la rama IA existentes hacen el resto SIN ocultar el chat (queda en la bandeja de Joaco).
+// Gated por kv reflote_on='1'. Lock diario atómico contra doble corrida.
+async function processRefloteSweep(env) {
+  try {
+    if (await isWaBillingBlocked(env)) return { skipped: 'billing' };
+    const f = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'reflote_on'").first();
+    if (!f || f.v !== '1') return { skipped: 'off' };
+    const nowIso = new Date().toISOString();
+    const lock = await env.DB.prepare("INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES (?, '1', datetime('now'))").bind('reflote_sweep:' + nowIso.slice(0, 10)).run();
+    if (!(lock.meta && lock.meta.changes)) return { skipped: 'ya corrio hoy' };
+    const bid = await ensureRefloteBroadcast(env);
+    if (!bid) return { error: 'sin broadcast id' };
+    const seg = await computeRefloteSegment(env);
+    const labelId = seg.label_id;
+    const wa = (seg.rows || []).filter(r => r.canal === 'wa').slice(0, 500);  // solo WA (IG no recibe plantillas)
+    const kind = 'bc_' + bid;
+    const startMs = Date.now();
+    const stepSec = 150;
+    let enq = 0;
+    for (let i = 0; i < wa.length; i++) {
+      const r = wa[i];
+      const due = new Date(startMs + i * stepSec * 1000).toISOString();
+      try {
+        const res = await env.DB.prepare(
+          "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, ?, '', 'queued', ?, ?)"
+        ).bind(r.phone, kind, due, r.contact_name || '').run();
+        if (res.meta && res.meta.changes) {
+          if (labelId) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(r.phone, labelId, nowIso).run(); } catch (_) {} }
+          enq++;
+        }
+      } catch (_) {}
+    }
+    return { enqueued: enq, total_wa: wa.length, broadcast_id: bid };
+  } catch (e) { return { error: String(e && e.message || e) }; }
+}
+
 // Prompt de montaje/mockup: monta el render de un cartel sobre la foto del local del
 // cliente, en la zona que el diseñador marcó con un recuadro. Hiperrealista, con glow
 // del neón, SIN el cable de 220v. Herramienta del diseñador (2 imágenes de entrada).
@@ -10789,6 +10845,10 @@ export default {
     // Escalación + limpieza de los "sin cotizar" con +10 días: 1 vez/día (10 AM AR),
     // avisa a Gaspar y los saca de la lista activa de Joaco. Lock diario adentro.
     if (hAR === 10 && minute === 0) ctx.waitUntil(escalarSinCotizarViejos(env));
+    // Reflote de presupuesto: barrido SEMANAL (lunes 9 AM AR). Encola el segmento
+    // cualificado de WA en el goteo de broadcast (rama IA prendida, sin ocultar).
+    // Gated por kv reflote_on='1' + lock diario adentro.
+    if (dowAR === 1 && hAR === 9 && minute === 0) ctx.waitUntil(processRefloteSweep(env));
     // Análisis de chats nuevos: 1 vez por hora (procesa hasta 15 chats que
     // tengan actividad nueva desde su último análisis o que nunca se analizaron).
     // Ignora phones internos. Idempotente: si no hay nada que analizar, no hace nada.
