@@ -1269,6 +1269,8 @@ FORMATO PARA PEDIR LOS DATOS QUE FALTAN: un mensaje con la lista (cada dato en s
 [3] tenes esa info para pasarme?
 La lista [2] es UN SOLO mensaje aunque tenga varios renglones (los renglones van separados por saltos de linea simples dentro del mismo mensaje). Si el cliente YA dio algún dato, sacalo de la lista y pedí solo lo que falta; si falta uno solo, pedilo en una frase corta sin lista. Igual, cerrá siempre con una pregunta.
 
+CONSULTAS DE PRODUCTO — si el cliente pregunta algo del producto (precio, si sirve para exterior, envíos, tiempos, cambios, logos, etc.), respondé con lo que dice el PLAYBOOK que te paso (tiene un FAQ con las respuestas REALES). NUNCA inventes datos, tecnicismos ni ratings que no estén en el playbook (por ejemplo NUNCA digas "IP65" ni specs que no te dieron). Si algo no lo sabés con certeza, decí que el equipo lo confirma. Después de responder la duda, seguí pidiendo el dato que te falta.
+
 FRENO DE MANO — poné frenar=true y mensajes=[] si:
 - es B2B / varios locales / franquicia,
 - hay objeción fuerte de precio o pedido de financiación,
@@ -1335,13 +1337,18 @@ async function precotizLlm(env, fullText, fwText, imageBlocks) {
   const userContent = (Array.isArray(imageBlocks) && imageBlocks.length)
     ? [...imageBlocks, { type: 'text', text: fullText }]
     : fullText;
-  // Solo el system de relevamiento (ya trae tono + criterio + freno de mano). El playbook
-  // completo de ventas (~7.5k tokens) era redundante para esta tarea acotada y se sacó para
-  // bajar el costo ~9x. (fwText queda ignorado, se conserva el param por retrocompat.)
+  // System de relevamiento + el PLAYBOOK COMPLETO y VIVO. fwText viene de getActiveFramework(),
+  // que devuelve SIEMPRE la versión activa/más actualizada → cuando se actualiza el playbook
+  // (a mano o via framework_improvements), el bot lo refleja solo. Así responde consultas de
+  // producto con datos REALES (FAQ: exterior, envíos, tiempos...) en vez de inventar.
+  // cache_control abarata las llamadas seguidas dentro de una misma conversación.
   const payload = {
     model: 'claude-sonnet-4-5',
     max_tokens: 1024,
-    system: PRECOTIZ_LLM_SYSTEM,
+    system: [
+      { type: 'text', text: PRECOTIZ_LLM_SYSTEM },
+      { type: 'text', text: '## PLAYBOOK (tono, criterio y FAQ de productos — usá el FAQ para responder consultas)\n\n' + (fwText || ''), cache_control: { type: 'ephemeral' } }
+    ],
     messages: [{ role: 'user', content: userContent }]
   };
   for (let intento = 0; intento < 2; intento++) {
