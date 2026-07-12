@@ -1175,14 +1175,15 @@ async function precotizOn(env) { return (await kvGet(env, 'precotiz_on', '0')) =
 // Modo: 'auto' (auto-envío) | 'draft' (Gaspar aprueba los mensajitos). Default draft.
 async function precotizModo(env) { return (await kvGet(env, 'precotiz_modo', 'draft')) === 'auto' ? 'auto' : 'draft'; }
 
-// Selección determinística ~20% por número: un mismo cliente cae siempre del
-// mismo lado (no random por mensaje). Hash simple sobre los dígitos del teléfono.
-function precotizPicks(phone) {
+// Selección determinística por número, muestra CONFIGURABLE (kv precotiz_sample %):
+// un mismo cliente cae siempre del mismo lado (no random por mensaje). Hash sobre los
+// dígitos → 0..99; entra si < pct. pct=50 → mitad; pct=100 → todos.
+function precotizPicks(phone, pct = 100) {
   const d = String(phone || '').replace(/\D/g, '');
   if (d.length < 8) return false;
   let h = 0;
   for (let i = 0; i < d.length; i++) h = (h * 31 + d.charCodeAt(i)) >>> 0;
-  return h % 5 === 0; // 1 de cada 5 ≈ 20%
+  return (h % 100) < pct;
 }
 
 // Horario hábil del piloto: 8:00–22:00 AR (UTC-3) — los clientes escriben tarde.
@@ -1224,6 +1225,19 @@ async function precotizNotifyGaspar(env, msg) {
 // 'precotiz' = solo Gaspar lo ve; 'general' = vuelve a la bandeja de Joaco.
 async function precotizSetInbox(env, phone, inbox) {
   try { await env.DB.prepare('UPDATE wa_chats_summary SET inbox = ? WHERE phone = ?').bind(inbox, phone).run(); } catch (_) {}
+}
+
+// Etiqueta "🤖 Precotización": marca los leads que está trabajando el bot para que Joaco +
+// Gaspar los VEAN en la bandeja (NO se ocultan) y puedan monitorear. Se saca al completar/escalar.
+const PRECOTIZ_LABEL_NAME = '🤖 Precotización';
+const PRECOTIZ_LABEL_COLOR = '#8b5cf6';
+async function precotizTag(env, phone, on) {
+  try {
+    const id = await ensureLabelId(env, PRECOTIZ_LABEL_NAME, PRECOTIZ_LABEL_COLOR);
+    if (!id) return;
+    if (on) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, id, new Date().toISOString()).run();
+    else await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
+  } catch (_) {}
 }
 
 // Una sola llamada IA por lead: clasifica si es carteles, detecta cuáles de los
@@ -1321,13 +1335,13 @@ async function precotizLlm(env, fullText, fwText, imageBlocks) {
   const userContent = (Array.isArray(imageBlocks) && imageBlocks.length)
     ? [...imageBlocks, { type: 'text', text: fullText }]
     : fullText;
+  // Solo el system de relevamiento (ya trae tono + criterio + freno de mano). El playbook
+  // completo de ventas (~7.5k tokens) era redundante para esta tarea acotada y se sacó para
+  // bajar el costo ~9x. (fwText queda ignorado, se conserva el param por retrocompat.)
   const payload = {
     model: 'claude-sonnet-4-5',
     max_tokens: 1024,
-    system: [
-      { type: 'text', text: PRECOTIZ_LLM_SYSTEM },
-      { type: 'text', text: '## PLAYBOOK (referencia de tono y criterio)\n\n' + (fwText || ''), cache_control: { type: 'ephemeral' } }
-    ],
+    system: PRECOTIZ_LLM_SYSTEM,
     messages: [{ role: 'user', content: userContent }]
   };
   for (let intento = 0; intento < 2; intento++) {
@@ -1411,12 +1425,13 @@ async function processPrecotizPilot(env) {
 
     if (res.frenar || res.es_carteles === false) {
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo=?, tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(String(res.motivo_freno || (res.es_carteles === false ? 'no es carteles' : 'fuera de guion')).slice(0, 200), tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
+      await precotizTag(env, lead.phone, false);
       await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${lead.nombre || lead.phone}\nmotivo: ${res.motivo_freno || 'revisar'}\nentra a verlo vos`);
       continue;
     }
     if (tF && tM && tI) { // completó los 3 → handoff a Joaco
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', tiene_foto=1, tiene_medidas=1, tiene_intext=1, last_processed_ts=?, completed_at=?, updated_at=? WHERE phone=?").bind(lastInTs, nowIso, nowIso, lead.phone).run(); } catch (_) {}
-      await precotizSetInbox(env, lead.phone, 'general');
+      await precotizTag(env, lead.phone, false);
       await precotizNotifyGaspar(env, `termino la pre cotizacion de ${lead.nombre || lead.phone}\nya tiene foto, medidas e interior/exterior\npaso a la bandeja para que lo cotice Joaco`);
       continue;
     }
@@ -1432,7 +1447,10 @@ async function processPrecotizPilot(env) {
   }
 
   // ---- A) Captar leads NUEVOS de carteles (si hay cupo) ----
-  if ((await precotizCount(env)) >= PRECOTIZ_CAP) return;
+  // Muestra (precotiz_sample %) y tope (precotiz_cap) configurables via kv para el rollout gradual.
+  const cap = parseInt(await kvGet(env, 'precotiz_cap', String(PRECOTIZ_CAP)), 10) || PRECOTIZ_CAP;
+  const samplePct = parseInt(await kvGet(env, 'precotiz_sample', '20'), 10) || 20;
+  if ((await precotizCount(env)) >= cap) return;
   let cands = [];
   try {
     const since = new Date(Date.now() - 20 * 60 * 1000).toISOString();
@@ -1441,13 +1459,13 @@ async function processPrecotizPilot(env) {
   } catch (_) { return; }
 
   for (const c of cands) {
-    if ((await precotizCount(env)) >= PRECOTIZ_CAP) break;
+    if ((await precotizCount(env)) >= cap) break;
     const phone = c.phone;
     // Solo WhatsApp Argentina (54 + 10/11 dígitos). Excluye IDs de Instagram
     // (números largos de 15-17 dígitos) y números no-AR: no son leads de
     // carteles que el bot pueda atender por este canal.
     if (!/^54\d{10,11}$/.test(phone)) continue;
-    if (!precotizPicks(phone)) continue;                                   // fuera del 20%
+    if (!precotizPicks(phone, samplePct)) continue;                        // fuera de la muestra
     if (await precotizGet(env, phone)) continue;                           // ya en el piloto
     if ((await kvGet(env, 'precotiz_seen:' + phone)) === '1') continue;     // ya evaluado
     // Debounce: esperar a que el lead nuevo pare de escribir (manda hola + foto +
@@ -1476,11 +1494,11 @@ async function processPrecotizPilot(env) {
     try {
       await env.DB.prepare("INSERT OR IGNORE INTO precotiz_pilot (phone, estado, tiene_foto, tiene_medidas, tiene_intext, nombre, last_inbound_ts, last_processed_ts, created_at, updated_at) VALUES (?, 'activo', ?, ?, ?, '', ?, ?, ?, ?)").bind(phone, tF, tM, tI, c.last_ts, c.last_ts, nowIso, nowIso).run();
     } catch (_) { continue; }
-    await precotizSetInbox(env, phone, 'precotiz'); // ocultar de Joaco
+    await precotizTag(env, phone, true); // etiqueta VISIBLE (no oculta) — Joaco+Gaspar monitorean
 
     if (tF && tM && tI) { // raro en el primer contacto, pero por las dudas
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', completed_at=?, updated_at=? WHERE phone=?").bind(nowIso, nowIso, phone).run(); } catch (_) {}
-      await precotizSetInbox(env, phone, 'general');
+      await precotizTag(env, phone, false);
       await precotizNotifyGaspar(env, `termino la pre cotizacion de ${phone} (vino con todo)\npaso a la bandeja para Joaco`);
       continue;
     }
@@ -1492,6 +1510,52 @@ async function processPrecotizPilot(env) {
     } else {
       await precotizEmitir(env, phone, '', msgs, 'draft', nowIso);
     }
+  }
+}
+
+// Mensaje de nudge (SIN IA — barato): pide SOLO los datos que faltan, en el tono del bot.
+function precotizNudgeMsg(lead) {
+  const faltan = [];
+  if (!lead.tiene_foto) faltan.push('una foto o referencia del diseño');
+  if (!lead.tiene_medidas) faltan.push('las medidas aprox (alto y ancho)');
+  if (!lead.tiene_intext) faltan.push('si es para interior o exterior');
+  if (!faltan.length) return '';
+  if (faltan.length === 1) return `hola! seguimos con tu presupuesto, me quedo faltando ${faltan[0]} para poder cotizarte. me lo pasas cuando puedas?`;
+  return `hola! seguimos con tu presupuesto del cartel. para cotizarte todavia me falta:\n${faltan.map(f => '- ' + f).join('\n')}\nme lo pasas cuando puedas?`;
+}
+
+// Nudge del piloto: persigue a los leads que quedaron a mitad (les falta algún dato) y se
+// callaron. Sin IA (mensaje fijo). Solo en modo AUTO + horario 9-21 AR (perseguir de
+// madrugada es spam). Máx 2 nudges por lead (1er a las 4h de silencio, 2do a las 24h); no
+// toca completados/escalados ni fríos (>7 días → esos los agarra el reflote).
+async function processPrecotizNudges(env) {
+  if (!(await precotizOn(env))) return;
+  if ((await precotizModo(env)) !== 'auto') return;
+  if (await isWaBillingBlocked(env)) return;
+  const hAR = (new Date().getUTCHours() - 3 + 24) % 24;
+  if (hAR < 9 || hAR >= 21) return;
+  try { await env.DB.prepare('ALTER TABLE precotiz_pilot ADD COLUMN nudge_count INTEGER DEFAULT 0').run(); } catch (_) {}
+  try { await env.DB.prepare('ALTER TABLE precotiz_pilot ADD COLUMN last_nudge_at TEXT').run(); } catch (_) {}
+  const nowMs = Date.now();
+  let leads = [];
+  try {
+    leads = (await env.DB.prepare(
+      "SELECT * FROM precotiz_pilot WHERE estado='activo' AND NOT (tiene_foto=1 AND tiene_medidas=1 AND tiene_intext=1) AND IFNULL(nudge_count,0) < 2 AND IFNULL(msgs_bot,0) > 0 AND pending_draft IS NULL"
+    ).all()).results || [];
+  } catch (_) {}
+  for (const lead of leads) {
+    let lastIn;
+    try { lastIn = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(lead.phone).first(); } catch (_) { continue; }
+    const lastInTs = lastIn && lastIn.t; if (!lastInTs) continue;
+    const silenceH = (nowMs - new Date(lastInTs).getTime()) / 3600000;
+    const umbral = (lead.nudge_count || 0) === 0 ? 4 : 24;
+    if (silenceH < umbral || silenceH > 7 * 24) continue;
+    if (lead.last_nudge_at && (nowMs - new Date(lead.last_nudge_at).getTime()) / 3600000 < 16) continue;
+    const msg = precotizNudgeMsg(lead);
+    if (!msg) continue;
+    try { await precotizSend(env, lead.phone, msg); } catch (_) { continue; }
+    const now = new Date().toISOString();
+    try { await env.DB.prepare('UPDATE precotiz_pilot SET nudge_count = IFNULL(nudge_count,0) + 1, last_nudge_at = ?, updated_at = ? WHERE phone = ?').bind(now, now, lead.phone).run(); } catch (_) {}
   }
 }
 
@@ -10793,6 +10857,8 @@ export default {
     // releva con freno de mano. Gateado internamente (kill-switch OFF por defecto
     // + horario 8-22 AR). Corre en cada tick para responder en ~1-2 min.
     ctx.waitUntil(processPrecotizPilot(env));
+    // Nudge del piloto: persigue leads a medias que se callaron (cada 15 min; gate 9-21 AR adentro).
+    if (minute % 15 === 0) ctx.waitUntil(processPrecotizNudges(env));
     // Landing del minicurso gratuito: opener a los 45 min (plantilla) + branch por
     // IA + follow-up 23h. Gateado (kill-switch OFF por defecto + horario 8-22 AR).
     // Corre en cada tick para responder rápido; guardia anti-choque con el flujo de ads.
