@@ -2329,7 +2329,7 @@ function renderPrecotizControl() {
         <option value="draft" ${P.modo !== 'auto' ? 'selected' : ''}>borrador</option>
         <option value="auto" ${P.modo === 'auto' ? 'selected' : ''}>auto</option>
       </select>
-      <span class="muted">${P.count || 0}/${P.cap || 10}${P.draftCount ? ' · ' + P.draftCount + ' x aprobar' : ''}</span>
+      <span class="muted">${P.count || 0}/${P.cap || 10}${P.sample ? ' · ' + P.sample + '%' : ''}${P.draftCount ? ' · ' + P.draftCount + ' x aprobar' : ''}</span>
     </div>`;
 }
 

@@ -7299,9 +7299,11 @@ export default {
         if (request.method === 'GET' && path === '/admin/precotiz') {
           const on = (await kvGet(env, 'precotiz_on', '0')) === '1';
           const modo = await kvGet(env, 'precotiz_modo', 'draft');
+          const cap = parseInt(await kvGet(env, 'precotiz_cap', String(PRECOTIZ_CAP)), 10) || PRECOTIZ_CAP;
+          const sample = parseInt(await kvGet(env, 'precotiz_sample', '20'), 10) || 20;
           let leads = [];
           try { const rs = await env.DB.prepare('SELECT * FROM precotiz_pilot ORDER BY updated_at DESC').all(); leads = rs.results || []; } catch (_) {}
-          return json({ ok: true, on, modo, cap: PRECOTIZ_CAP, count: leads.length, leads });
+          return json({ ok: true, on, modo, cap, sample, count: leads.length, leads });
         }
 
         // POST /admin/precotiz/control → { on?, modo? } prender/apagar + draft|auto
