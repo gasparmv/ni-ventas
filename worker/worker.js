@@ -4402,7 +4402,8 @@ const SIN_COTIZAR_LABEL_NAME = '💰 Sin cotizar';
 const SIN_COTIZAR_LABEL_COLOR = '#22c55e';
 const _SC_QUOTE_SQL = "(substr(body,1,26)='Te comparto el presupuesto' OR substr(body,1,26)='Te comparto la información' OR substr(body,1,34)='[plantilla: presupuesto_detallado]' OR substr(body,1,33)='[plantilla: presupuesto_corporea]')";
 async function syncSinCotizar(env, opts = {}) {
-  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS sin_cotizar (phone TEXT PRIMARY KEY, name TEXT, canal TEXT, quotable_since TEXT, created_at TEXT, quoted_at TEXT)").run(); } catch (_) {}
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS sin_cotizar (phone TEXT PRIMARY KEY, name TEXT, canal TEXT, quotable_since TEXT, created_at TEXT, quoted_at TEXT, escalated_at TEXT)").run(); } catch (_) {}
+  try { await env.DB.prepare("ALTER TABLE sin_cotizar ADD COLUMN escalated_at TEXT").run(); } catch (_) {}
   const labelId = await ensureLabelId(env, SIN_COTIZAR_LABEL_NAME, SIN_COTIZAR_LABEL_COLOR);
   const nowIso = new Date().toISOString();
   let added = 0, removed = 0;
@@ -4502,6 +4503,42 @@ async function syncSinCotizar(env, opts = {}) {
     nombres: lista.slice(0, 6).map(r => (r.name && r.name.trim()) ? r.name.trim() : ('+' + r.phone)),
     rows: lista
   };
+}
+
+// Escalación + auto-limpieza: leads "sin cotizar" con +10 días etiquetados sin que Joaco
+// haya cotizado. Los saca de la lista activa (ya están fríos) y le avisa a Gaspar en UN
+// solo mensaje. Corre 1 vez/día desde el cron; lock diario atómico (kv_cache) evita doble.
+async function escalarSinCotizarViejos(env) {
+  const labelId = await ensureLabelId(env, SIN_COTIZAR_LABEL_NAME, SIN_COTIZAR_LABEL_COLOR);
+  if (!labelId) return { escalados: 0 };
+  const nowIso = new Date().toISOString();
+  const hoy = nowIso.slice(0, 10);
+  try {
+    const lock = await env.DB.prepare("INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES (?, '1', datetime('now'))").bind('sin_cotizar_escal:' + hoy).run();
+    if (!(lock.meta && lock.meta.changes)) return { escalados: 0, skipped: true };
+  } catch (_) {}
+  try { await env.DB.prepare("ALTER TABLE sin_cotizar ADD COLUMN escalated_at TEXT").run(); } catch (_) {}
+  const umbral10d = new Date(Date.now() - 10 * 86400000).toISOString();
+  let viejos = [];
+  try {
+    viejos = (await env.DB.prepare(
+      "SELECT sc.phone, sc.name, sc.canal FROM sin_cotizar sc " +
+      "JOIN contact_labels cl ON cl.phone = sc.phone AND cl.label_id = ? " +
+      "WHERE sc.quoted_at IS NULL AND sc.escalated_at IS NULL AND sc.created_at <= ? ORDER BY sc.created_at ASC"
+    ).bind(labelId, umbral10d).all()).results || [];
+  } catch (_) {}
+  if (!viejos.length) return { escalados: 0 };
+  for (const v of viejos) {
+    try {
+      await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(v.phone, labelId).run();
+      await env.DB.prepare("UPDATE sin_cotizar SET escalated_at = ? WHERE phone = ?").bind(nowIso, v.phone).run();
+    } catch (_) {}
+  }
+  const lines = viejos.slice(0, 25).map(v => `- ${(v.name && v.name.trim()) ? v.name.trim() : ('+' + v.phone)}${v.canal === 'ig' ? ' (IG)' : ''}`);
+  const extra = viejos.length > 25 ? `\n...y ${viejos.length - 25} mas` : '';
+  const msg = `⚠️ ${viejos.length} pedido${viejos.length > 1 ? 's' : ''} sin cotizar hace +10 dias\nJoaco no les paso presupuesto, los saque de la lista activa (ya estan frios):\n${lines.join('\n')}${extra}`;
+  try { await precotizNotifyGaspar(env, msg); } catch (_) {}
+  return { escalados: viejos.length };
 }
 
 // Prompt de montaje/mockup: monta el render de un cartel sobre la foto del local del
@@ -10668,9 +10705,10 @@ export default {
     // levantar el backlog del finde sin perder ninguno (el dedup evita repetir).
     const dowAR = new Date(new Date(event.scheduledTime).getTime() - 3 * 3600 * 1000).getUTCDay(); // 0=domingo
     if (hAR >= 8 && hAR <= 20 && dowAR !== 0) ctx.waitUntil(processPresupuestoFollowups(env, { maxAgeHours: dowAR === 1 ? 72 : 48 }));
-    // Anti-colgados: etiqueta "⏳ Te toca" los leads tibios que nos quedaron debiendo
-    // respuesta + resumen 2x/día a Joaco y Gaspar (ver playbook §A4.1).
-    if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processColgados(env));
+    // Anti-colgados "⏳ Te toca": PAUSADO 2026-07-12 a pedido de Gaspar ("no lo usamos
+    // tanto, hay que verlo bien después"). El código de processColgados queda intacto;
+    // para reactivar, descomentar la línea de abajo.
+    // if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processColgados(env));
     // Aviso a Gaspar cuando el dataset ya tiene suficientes QualifiedLead (CAPI) para cambiar la campaña.
     if (hAR >= 9 && hAR <= 20) ctx.waitUntil(maybeCapiReadyNotice(env));
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
@@ -10683,6 +10721,9 @@ export default {
     // Alarma "sin cotizar": cada 5 min DESTILDA a los que Joaco ya cotizó (dinámico,
     // barato); a :00 y :30 (8-22 AR) además ESCANEA y etiqueta los nuevos con +20hs.
     if (minute % 5 === 0) ctx.waitUntil(syncSinCotizar(env, { addPass: (minute % 30 === 0 && hAR >= 8 && hAR <= 22) }));
+    // Escalación + limpieza de los "sin cotizar" con +10 días: 1 vez/día (10 AM AR),
+    // avisa a Gaspar y los saca de la lista activa de Joaco. Lock diario adentro.
+    if (hAR === 10 && minute === 0) ctx.waitUntil(escalarSinCotizarViejos(env));
     // Análisis de chats nuevos: 1 vez por hora (procesa hasta 15 chats que
     // tengan actividad nueva desde su último análisis o que nunca se analizaron).
     // Ignora phones internos. Idempotente: si no hay nada que analizar, no hace nada.
