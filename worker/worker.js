@@ -4393,65 +4393,115 @@ async function analyticsPrecotizFunnel(env, url) {
   return json(out);
 }
 
-// Etiqueta "💰 Sin cotizar" a los leads que mandaron foto Y medidas pero nunca
-// recibieron presupuesto (últimos 60 días, alcanzables). Es la lista de "plata en
-// la mesa" para que Joaco filtre en el chat y cotice. Idempotente (INSERT OR IGNORE);
-// re-ejecutable cuando se quiera refrescar. Misma detección que el funnel.
+// Alarma "💰 Sin cotizar": leads que mandaron foto Y medidas pero NO recibieron
+// presupuesto tras +20hs. DINÁMICA — cada corrida (1) reconcilia etiquetas viejas,
+// (2) DESTILDA a los que Joaco ya cotizó (actuó → sale de la lista), y (3) con addPass
+// escanea y etiqueta los nuevos que cruzaron las 20hs. Tag-once via tabla sin_cotizar:
+// un lead destildado a mano NO se re-etiqueta (evita falsas oportunidades repetidas).
 const SIN_COTIZAR_LABEL_NAME = '💰 Sin cotizar';
 const SIN_COTIZAR_LABEL_COLOR = '#22c55e';
-async function etiquetarListosSinCotizar(env) {
-  const scanDesde = '2026-03-01T03:00:00Z';
-  const hoyMs = Date.now();
-  const winDesde = new Date(hoyMs - 60 * 86400000).toISOString();
-  const winHasta = new Date(hoyMs - 3 * 86400000).toISOString();
-  const sql = `
-    WITH per_phone AS (
-      SELECT phone,
-        CASE WHEN MAX(CASE WHEN channel='ig' THEN 1 ELSE 0 END)=1 THEN 'ig' ELSE 'wa' END AS canal,
-        MIN(CASE WHEN direction='inbound'  AND msg_type!='status' THEN ts END) AS first_in_ts,
-        MIN(CASE WHEN direction='outbound' AND msg_type!='status' THEN ts END) AS first_out_ts,
-        MAX(CASE WHEN direction='inbound'  AND msg_type!='status' THEN ts END) AS last_in_ts,
-        MAX(CASE WHEN direction='inbound' AND msg_type='image' THEN 1 ELSE 0 END) AS has_img,
-        MAX(CASE WHEN direction='inbound' AND msg_type IN ('text','audio') AND (
-              lower(body) GLOB '*[0-9]x[0-9]*'  OR lower(body) GLOB '*[0-9] x [0-9]*'
-           OR lower(body) GLOB '*[0-9]x [0-9]*' OR lower(body) GLOB '*[0-9] x[0-9]*'
-           OR lower(body) GLOB '*[0-9] por [0-9]*'
-           OR lower(body) GLOB '*[0-9]cm*'      OR lower(body) GLOB '*[0-9] cm*'
-           OR lower(body) GLOB '*[0-9] mts*'    OR lower(body) GLOB '*[0-9] metro*'
-        ) THEN 1 ELSE 0 END) AS has_med,
-        MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND (
-              substr(body,1,26)='Te comparto el presupuesto'
-           OR substr(body,1,26)='Te comparto la información'
-           OR substr(body,1,34)='[plantilla: presupuesto_detallado]'
-           OR substr(body,1,33)='[plantilla: presupuesto_corporea]'
-        ) THEN 1 ELSE 0 END) AS has_quote
-      FROM wa_messages
-      WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
-        AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573')
-      GROUP BY phone
-    )
-    SELECT p.phone, p.canal, p.first_in_ts, p.last_in_ts, s.contact_name
-    FROM per_phone p LEFT JOIN wa_chats_summary s ON s.phone = p.phone
-    WHERE p.first_in_ts IS NOT NULL
-      AND p.first_in_ts >= ?2 AND p.first_in_ts <= ?3
-      AND (p.first_out_ts IS NULL OR p.first_in_ts <= p.first_out_ts)
-      AND IFNULL(s.inbox,'general') != 'cursos'
-      AND p.has_quote = 0 AND p.has_img = 1 AND p.has_med = 1
-      AND p.phone NOT IN (SELECT phone FROM wa_unreachable_phones)
-    ORDER BY p.last_in_ts DESC`;
-  const rows = (await env.DB.prepare(sql).bind(scanDesde, winDesde, winHasta).all()).results || [];
+const _SC_QUOTE_SQL = "(substr(body,1,26)='Te comparto el presupuesto' OR substr(body,1,26)='Te comparto la información' OR substr(body,1,34)='[plantilla: presupuesto_detallado]' OR substr(body,1,33)='[plantilla: presupuesto_corporea]')";
+async function syncSinCotizar(env, opts = {}) {
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS sin_cotizar (phone TEXT PRIMARY KEY, name TEXT, canal TEXT, quotable_since TEXT, created_at TEXT, quoted_at TEXT)").run(); } catch (_) {}
   const labelId = await ensureLabelId(env, SIN_COTIZAR_LABEL_NAME, SIN_COTIZAR_LABEL_COLOR);
-  let etiquetados = 0;
+  const nowIso = new Date().toISOString();
+  let added = 0, removed = 0;
+
+  // (1) RECONCILIAR: importá a sin_cotizar cualquier teléfono ya etiquetado que no esté
+  // registrado (ej. el one-shot inicial), para que el destildado dinámico lo alcance.
   if (labelId) {
-    const nowIso = new Date().toISOString();
+    try {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO sin_cotizar (phone, name, canal, quotable_since, created_at) " +
+        "SELECT cl.phone, IFNULL(s.contact_name,''), 'wa', cl.created_at, cl.created_at " +
+        "FROM contact_labels cl LEFT JOIN wa_chats_summary s ON s.phone = cl.phone WHERE cl.label_id = ?"
+      ).bind(labelId).run();
+    } catch (_) {}
+  }
+
+  // (2) DESTILDAR a los que YA tienen presupuesto (barato: solo mira los etiquetados).
+  try {
+    const tagged = (await env.DB.prepare("SELECT phone FROM sin_cotizar WHERE quoted_at IS NULL").all()).results || [];
+    const phones = tagged.map(r => String(r.phone).replace(/[^0-9]/g, '')).filter(Boolean);
+    if (phones.length) {
+      const inList = phones.map(p => `'${p}'`).join(',');
+      const quoted = (await env.DB.prepare(
+        `SELECT DISTINCT phone FROM wa_messages WHERE phone IN (${inList}) AND direction='outbound' AND IFNULL(status,'')!='failed' AND ${_SC_QUOTE_SQL}`
+      ).all()).results || [];
+      for (const q of quoted) {
+        try {
+          if (labelId) await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(q.phone, labelId).run();
+          await env.DB.prepare("UPDATE sin_cotizar SET quoted_at = ? WHERE phone = ?").bind(nowIso, q.phone).run();
+          removed++;
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+
+  // (3) ETIQUETAR NUEVOS (solo con addPass — es el scan pesado de wa_messages).
+  // foto+medidas, sin presupuesto, +20hs desde que juntó AMBOS datos, alcanzable,
+  // no cursos, no interno, inbound-first, primer contacto <60d. Tag-once (OR IGNORE).
+  if (opts.addPass) {
+    const desde60d = new Date(Date.now() - 60 * 86400000).toISOString();
+    const umbral20h = new Date(Date.now() - 20 * 3600000).toISOString();
+    const sql = `
+      WITH per_phone AS (
+        SELECT phone,
+          CASE WHEN MAX(CASE WHEN channel='ig' THEN 1 ELSE 0 END)=1 THEN 'ig' ELSE 'wa' END AS canal,
+          MIN(CASE WHEN direction='inbound'  AND msg_type!='status' THEN ts END) AS first_in_ts,
+          MIN(CASE WHEN direction='outbound' AND msg_type!='status' THEN ts END) AS first_out_ts,
+          MAX(CASE WHEN direction='inbound'  AND msg_type!='status' THEN ts END) AS last_in_ts,
+          MIN(CASE WHEN direction='inbound' AND msg_type='image' THEN ts END) AS first_img_ts,
+          MIN(CASE WHEN direction='inbound' AND msg_type IN ('text','audio') AND (
+                lower(body) GLOB '*[0-9]x[0-9]*'  OR lower(body) GLOB '*[0-9] x [0-9]*'
+             OR lower(body) GLOB '*[0-9]x [0-9]*' OR lower(body) GLOB '*[0-9] x[0-9]*'
+             OR lower(body) GLOB '*[0-9] por [0-9]*'
+             OR lower(body) GLOB '*[0-9]cm*'      OR lower(body) GLOB '*[0-9] cm*'
+             OR lower(body) GLOB '*[0-9] mts*'    OR lower(body) GLOB '*[0-9] metro*'
+          ) THEN ts END) AS first_med_ts,
+          MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND ${_SC_QUOTE_SQL} THEN 1 ELSE 0 END) AS has_quote
+        FROM wa_messages
+        WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
+          AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573')
+        GROUP BY phone
+      )
+      SELECT p.phone, p.canal, p.last_in_ts, max(p.first_img_ts, p.first_med_ts) AS quotable_since, s.contact_name
+      FROM per_phone p LEFT JOIN wa_chats_summary s ON s.phone = p.phone
+      WHERE p.first_in_ts IS NOT NULL AND p.first_in_ts >= ?1
+        AND (p.first_out_ts IS NULL OR p.first_in_ts <= p.first_out_ts)
+        AND IFNULL(s.inbox,'general') != 'cursos'
+        AND p.has_quote = 0 AND p.first_img_ts IS NOT NULL AND p.first_med_ts IS NOT NULL
+        AND max(p.first_img_ts, p.first_med_ts) <= ?2
+        AND p.phone NOT IN (SELECT phone FROM wa_unreachable_phones)
+      ORDER BY p.last_in_ts DESC`;
+    let rows = [];
+    try { rows = (await env.DB.prepare(sql).bind(desde60d, umbral20h).all()).results || []; } catch (_) {}
     for (const r of rows) {
       try {
-        const res = await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(r.phone, labelId, nowIso).run();
-        if (res.meta && res.meta.changes) etiquetados++;
+        const res = await env.DB.prepare("INSERT OR IGNORE INTO sin_cotizar (phone, name, canal, quotable_since, created_at) VALUES (?, ?, ?, ?, ?)")
+          .bind(r.phone, r.contact_name || '', r.canal || 'wa', r.quotable_since || nowIso, nowIso).run();
+        if (res.meta && res.meta.changes) {
+          if (labelId) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(r.phone, labelId, nowIso).run();
+          added++;
+        }
       } catch (_) {}
     }
   }
-  return { total: rows.length, etiquetados_nuevos: etiquetados, label: SIN_COTIZAR_LABEL_NAME, label_id: labelId, rows };
+
+  // (4) ESTADO actual — fuente de verdad = contact_labels con esta etiqueta.
+  let lista = [];
+  try {
+    lista = (await env.DB.prepare(
+      "SELECT cl.phone, cl.created_at, s.contact_name AS name FROM contact_labels cl LEFT JOIN wa_chats_summary s ON s.phone = cl.phone WHERE cl.label_id = ? ORDER BY cl.created_at DESC"
+    ).bind(labelId).all()).results || [];
+  } catch (_) {}
+  return {
+    label: SIN_COTIZAR_LABEL_NAME, label_id: labelId,
+    count: lista.length, etiquetados_nuevos: added, destildados: removed,
+    max_created_at: lista[0] ? lista[0].created_at : null,
+    nombres: lista.slice(0, 6).map(r => (r.name && r.name.trim()) ? r.name.trim() : ('+' + r.phone)),
+    rows: lista
+  };
 }
 
 // Prompt de montaje/mockup: monta el render de un cartel sobre la foto del local del
@@ -10294,14 +10344,33 @@ export default {
         return json({ ok: true, base64: r.base64, mime: r.mime });
       }
 
-      // POST /admin/wa/etiquetar-sin-cotizar  →  aplica la etiqueta "💰 Sin cotizar" a los
-      // leads con foto+medidas sin presupuesto (últimos 60 días). Devuelve la lista.
-      // Re-ejecutable para refrescar (idempotente). Solo admin; query pesada, no poll.
+      // POST /admin/wa/etiquetar-sin-cotizar  →  corre el sync completo (destilda los ya
+      // cotizados + etiqueta los nuevos con +20hs) y devuelve la lista. Solo admin; scan
+      // pesado, no poll. El cron lo corre solo; esto es para refrescar a mano.
       if (request.method === 'POST' && path === '/admin/wa/etiquetar-sin-cotizar') {
         const role = await getSessionRole(env, session.user);
         if (role !== 'admin') return json({ error: 'forbidden' }, 403);
-        try { return json({ ok: true, ...(await etiquetarListosSinCotizar(env)) }); }
+        try { return json({ ok: true, ...(await syncSinCotizar(env, { addPass: true })) }); }
         catch (e) { return json({ error: String(e && e.message || e) }, 500); }
+      }
+
+      // GET /admin/wa/sin-cotizar-status  →  estado liviano de la alarma para el poll del
+      // front (count + max_created_at + nombres). Solo lee contact_labels (barato).
+      // Admin + comercial (Joaco). NO escanea wa_messages.
+      if (request.method === 'GET' && path === '/admin/wa/sin-cotizar-status') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin' && role !== 'comercial') return json({ error: 'forbidden' }, 403);
+        try {
+          const labelId = await ensureLabelId(env, SIN_COTIZAR_LABEL_NAME, SIN_COTIZAR_LABEL_COLOR);
+          const lista = (await env.DB.prepare(
+            "SELECT cl.phone, cl.created_at, s.contact_name AS name FROM contact_labels cl LEFT JOIN wa_chats_summary s ON s.phone = cl.phone WHERE cl.label_id = ? ORDER BY cl.created_at DESC"
+          ).bind(labelId).all()).results || [];
+          return json({
+            ok: true, label_id: labelId, count: lista.length,
+            max_created_at: lista[0] ? lista[0].created_at : null,
+            nombres: lista.slice(0, 6).map(r => (r.name && r.name.trim()) ? r.name.trim() : ('+' + r.phone))
+          });
+        } catch (e) { return json({ error: String(e && e.message || e) }, 500); }
       }
 
       // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
@@ -10611,6 +10680,9 @@ export default {
     // en el hub de 360dialog (lo manejamos abajo en notifyTemplateStatusChange).
     const minute = new Date(event.scheduledTime).getUTCMinutes();
     if (minute < 5) ctx.waitUntil(monitorTemplateStatus(env));
+    // Alarma "sin cotizar": cada 5 min DESTILDA a los que Joaco ya cotizó (dinámico,
+    // barato); a :00 y :30 (8-22 AR) además ESCANEA y etiqueta los nuevos con +20hs.
+    if (minute % 5 === 0) ctx.waitUntil(syncSinCotizar(env, { addPass: (minute % 30 === 0 && hAR >= 8 && hAR <= 22) }));
     // Análisis de chats nuevos: 1 vez por hora (procesa hasta 15 chats que
     // tengan actividad nueva desde su último análisis o que nunca se analizaron).
     // Ignora phones internos. Idempotente: si no hay nada que analizar, no hace nada.

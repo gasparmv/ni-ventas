@@ -1957,6 +1957,7 @@ function render() {
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
   document.getElementById('app').innerHTML = renderShell();
+  try { startSinCotizarWatch(); } catch (_) {}
   // El Chat WA carga su data del worker (no de Sheets), así que se renderiza
   // SIEMPRE — aunque Sheets siga cargando o haya fallado. Antes el gate de abajo
   // (!STATE.loaded) tapaba el chat con "Conectando con Google Sheets…" y, si el
@@ -2011,6 +2012,65 @@ function render() {
   if (typeof _applyMobileChatClass === 'function') _applyMobileChatClass();
 }
 
+// ===== Alarma "💰 Sin cotizar" — pedidos con foto+medidas sin presupuesto hace +20hs =====
+// Modal global para Joaco (comercial) + admin: aparece cuando queda un lead colgado.
+// La lista la mantiene DINÁMICA el worker (destilda a los que Joaco ya cotizó). El
+// botón "Ver" filtra el chat por la etiqueta. Poll liviano cada 75s (solo lee, no scanea).
+function _canSeeSinCotizar() { const r = getUserRole(); return r === 'admin' || r === 'comercial'; }
+function _sinCotizarShouldShow() {
+  const sc = STATE.sinCotizar;
+  if (!sc || !_canSeeSinCotizar() || !sc.count) return false;
+  const ack = localStorage.getItem('sinCotizarAck') || '';
+  return !!sc.maxCreatedAt && sc.maxCreatedAt > ack;
+}
+async function fetchSinCotizarStatus() {
+  if (!STATE.token || !CONFIG.trackerUrl || !_canSeeSinCotizar()) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/sin-cotizar-status', { headers: authHeaders() });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!j.ok) return;
+    const prev = STATE.sinCotizar;
+    STATE.sinCotizar = { count: j.count || 0, labelId: j.label_id, maxCreatedAt: j.max_created_at || '', nombres: j.nombres || [] };
+    if (!prev || prev.count !== STATE.sinCotizar.count || prev.maxCreatedAt !== STATE.sinCotizar.maxCreatedAt) render();
+  } catch (_) {}
+}
+function _sinCotizarAck() { if (STATE.sinCotizar) localStorage.setItem('sinCotizarAck', STATE.sinCotizar.maxCreatedAt || ''); }
+function startSinCotizarWatch() {
+  if (window._sinCotizarWatch || !_canSeeSinCotizar()) return;
+  window._sinCotizarWatch = true;
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t || !t.closest) return;
+    if (t.closest('[data-sc-ver]')) {
+      _sinCotizarAck();
+      if (STATE.sinCotizar && STATE.sinCotizar.labelId) { chatState.filterLabels = [STATE.sinCotizar.labelId]; chatState.labelDropdownOpen = false; }
+      setView('chat');
+      return;
+    }
+    if (t.closest('[data-sc-dismiss]') || (t.matches && t.matches('[data-sc-bg]'))) { _sinCotizarAck(); render(); return; }
+  });
+  fetchSinCotizarStatus();
+  setInterval(fetchSinCotizarStatus, 75000);
+}
+function renderSinCotizarModal() {
+  if (!_sinCotizarShouldShow()) return '';
+  const sc = STATE.sinCotizar;
+  const nombres = (sc.nombres || []).slice(0, 4);
+  return `
+    <div data-sc-bg style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:7000;display:flex;align-items:center;justify-content:center;padding:16px">
+      <div style="background:var(--bg);border:1px solid var(--accent-cyan);border-radius:var(--r-md);width:min(420px,94vw);padding:var(--s-4);box-shadow:0 10px 40px rgba(0,0,0,.45)">
+        <div style="font-size:34px;text-align:center;margin-bottom:4px">💰</div>
+        <h2 style="margin:0 0 6px;font-size:17px;text-align:center">${sc.count === 1 ? 'Hay un pedido sin cotizar' : 'Hay ' + sc.count + ' pedidos sin cotizar'}</h2>
+        <p style="margin:0 0 12px;font-size:13px;color:var(--fg-mute);text-align:center;line-height:1.5">Mandaron foto y medidas y todavía no les pasaste presupuesto (hace más de 20 h).</p>
+        ${nombres.length ? `<div style="font-size:12px;color:var(--fg-subtle);text-align:center;margin-bottom:14px">${nombres.map(n => escapeHtml(n)).join(' · ')}${sc.count > nombres.length ? ' · +' + (sc.count - nombres.length) : ''}</div>` : ''}
+        <div style="display:flex;gap:8px;justify-content:center">
+          <button class="btn btn-ghost" data-sc-dismiss style="padding:8px 16px">Después</button>
+          <button class="btn btn-cyan" data-sc-ver style="padding:8px 20px">Ver los pedidos →</button>
+        </div>
+      </div>
+    </div>`;
+}
 function renderShell() {
   // Counts for badges
   const sgts = STATE.loaded ? getSeguimientosWeek() : [];
@@ -2073,6 +2133,7 @@ function renderShell() {
     <div id="drawer-bg" class="drawer-bg"></div>
     <div id="drawer" class="drawer"></div>
     <div id="toast" class="toast"></div>
+    ${renderSinCotizarModal()}
   `;
 }
 
