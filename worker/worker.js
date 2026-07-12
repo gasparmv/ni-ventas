@@ -4541,6 +4541,62 @@ async function escalarSinCotizarViejos(env) {
   return { escalados: viejos.length };
 }
 
+// Segmento "Reflote 15 días": leads CUALIFICADOS de carteles (últimos 15 días) que
+// engancharon (pidieron precio/presupuesto O mandaron foto O medidas) pero NO recibieron
+// presupuesto y NO tienen los datos completos (no son de "sin cotizar"). Alcanzables,
+// inbound-first, no cursos, no internos, y NO ya reflotados. Base del broadcast de rescate.
+const REFLOTE_LABEL_NAME = '🔁 Reflote';
+const REFLOTE_LABEL_COLOR = '#3b82f6';
+async function computeRefloteSegment(env) {
+  const labelId = await ensureLabelId(env, REFLOTE_LABEL_NAME, REFLOTE_LABEL_COLOR);
+  const desde15d = new Date(Date.now() - 15 * 86400000).toISOString();
+  const sql = `
+    WITH per_phone AS (
+      SELECT phone,
+        CASE WHEN MAX(CASE WHEN channel='ig' THEN 1 ELSE 0 END)=1 THEN 'ig' ELSE 'wa' END AS canal,
+        MIN(CASE WHEN direction='inbound' AND msg_type!='status' THEN ts END) AS first_in_ts,
+        MIN(CASE WHEN direction='outbound' AND msg_type!='status' THEN ts END) AS first_out_ts,
+        MAX(CASE WHEN direction='inbound' AND msg_type!='status' THEN ts END) AS last_in_ts,
+        MAX(CASE WHEN direction='inbound' AND msg_type='image' THEN 1 ELSE 0 END) AS has_img,
+        MAX(CASE WHEN direction='inbound' AND msg_type IN ('text','audio') AND (
+              lower(body) GLOB '*[0-9]x[0-9]*' OR lower(body) GLOB '*[0-9] x [0-9]*'
+           OR lower(body) GLOB '*[0-9]x [0-9]*' OR lower(body) GLOB '*[0-9] x[0-9]*'
+           OR lower(body) GLOB '*[0-9] por [0-9]*'
+           OR lower(body) GLOB '*[0-9]cm*' OR lower(body) GLOB '*[0-9] cm*'
+           OR lower(body) GLOB '*[0-9] mts*' OR lower(body) GLOB '*[0-9] metro*'
+        ) THEN 1 ELSE 0 END) AS has_med,
+        MAX(CASE WHEN direction='inbound' AND msg_type IN ('text','audio') AND (
+              lower(body) GLOB '*presupuesto*' OR lower(body) GLOB '*cotiz*'
+           OR lower(body) GLOB '*precio*' OR lower(body) GLOB '*cuanto*'
+           OR lower(body) GLOB '*cuánto*' OR lower(body) GLOB '*cuesta*' OR lower(body) GLOB '*presupuest*'
+        ) THEN 1 ELSE 0 END) AS has_intent,
+        MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND ${_SC_QUOTE_SQL} THEN 1 ELSE 0 END) AS has_quote
+      FROM wa_messages
+      WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
+        AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573')
+      GROUP BY phone
+    )
+    SELECT p.phone, p.canal, p.first_in_ts, p.last_in_ts, s.contact_name
+    FROM per_phone p LEFT JOIN wa_chats_summary s ON s.phone = p.phone
+    WHERE p.first_in_ts IS NOT NULL AND p.first_in_ts >= ?1
+      AND (p.first_out_ts IS NULL OR p.first_in_ts <= p.first_out_ts)
+      AND IFNULL(s.inbox,'general') != 'cursos'
+      AND p.has_quote = 0
+      AND (p.has_intent = 1 OR p.has_img = 1 OR p.has_med = 1)
+      AND NOT (p.has_img = 1 AND p.has_med = 1)
+      AND p.phone NOT IN (SELECT phone FROM wa_unreachable_phones)
+      AND p.phone NOT IN (SELECT phone FROM contact_labels WHERE label_id = ${labelId || 0})
+    ORDER BY p.last_in_ts DESC`;
+  let rows = [];
+  try { rows = (await env.DB.prepare(sql).bind(desde15d).all()).results || []; } catch (e) { return { error: String(e && e.message || e), count: 0, rows: [] }; }
+  const wa = rows.filter(r => r.canal === 'wa').length;
+  return {
+    count: rows.length, wa, ig: rows.length - wa, label_id: labelId,
+    sample: rows.slice(0, 8).map(r => (r.contact_name && r.contact_name.trim()) ? r.contact_name.trim() : ('+' + r.phone)),
+    rows
+  };
+}
+
 // Prompt de montaje/mockup: monta el render de un cartel sobre la foto del local del
 // cliente, en la zona que el diseñador marcó con un recuadro. Hiperrealista, con glow
 // del neón, SIN el cable de 220v. Herramienta del diseñador (2 imágenes de entrada).
@@ -10388,6 +10444,15 @@ export default {
         const role = await getSessionRole(env, session.user);
         if (role !== 'admin') return json({ error: 'forbidden' }, 403);
         try { return json({ ok: true, ...(await syncSinCotizar(env, { addPass: true })) }); }
+        catch (e) { return json({ error: String(e && e.message || e) }, 500); }
+      }
+
+      // GET /admin/wa/reflote-segment  →  cuenta el segmento cualificado del reflote (dry-run,
+      // no manda nada). Solo admin; scan de wa_messages (15 días), no poll.
+      if (request.method === 'GET' && path === '/admin/wa/reflote-segment') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        try { const seg = await computeRefloteSegment(env); delete seg.rows; return json({ ok: true, ...seg }); }
         catch (e) { return json({ error: String(e && e.message || e) }, 500); }
       }
 
