@@ -1240,6 +1240,27 @@ async function precotizTag(env, phone, on) {
   } catch (_) {}
 }
 
+// Etiqueta "📋 Para cotizar": cuando el bot TERMINA la pre cotización (juntó foto +
+// medidas + int/ext), el lead pasa a esta bandeja para que Joaco lo cotice. Se pone al
+// completar (+ se marca el chat NO leído) y se SACA sola cuando el presupuesto se envía
+// (el brief pasa a 'enviado'). Distinta de "🤖 Precotización" (esa marca mientras el bot
+// todavía está juntando los datos).
+const PARA_COTIZAR_LABEL_NAME = '📋 Para cotizar';
+const PARA_COTIZAR_LABEL_COLOR = '#f59e0b';
+async function paraCotizarTag(env, phone, on) {
+  try {
+    const id = await ensureLabelId(env, PARA_COTIZAR_LABEL_NAME, PARA_COTIZAR_LABEL_COLOR);
+    if (!id) return;
+    if (on) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, id, new Date().toISOString()).run();
+    else await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
+  } catch (_) {}
+}
+// Marca el chat como NO leído (borra el read_cursor, igual que POST /admin/wa/mark-unread)
+// para que aparezca pendiente arriba en la bandeja de Joaco.
+async function precotizMarcarNoLeido(env, phone) {
+  try { await env.DB.prepare('DELETE FROM wa_read_cursor WHERE phone = ?').bind(phone).run(); } catch (_) {}
+}
+
 // Una sola llamada IA por lead: clasifica si es carteles, detecta cuáles de los
 // 3 datos ya están, decide si frenar, y si falta algo redacta los mensajitos.
 const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (carteles de neón LED, Argentina). Manejás SOLO la PRE COTIZACIÓN de un lead: la etapa de relevamiento donde hay que juntar 3 datos para poder cotizar un cartel:
@@ -1392,6 +1413,27 @@ async function precotizEmitir(env, phone, nombre, msgs, modo, nowIso) {
 // defecto) + horario 8-22 AR + bloqueo de billing de WA.
 async function processPrecotizPilot(env) {
   if (!(await precotizOn(env))) return;
+
+  // Reconciliar la bandeja "Para cotizar" (idempotente). Corre SIEMPRE que el piloto esté
+  // ON, aunque sea fuera de horario, porque Joaco puede cotizar a cualquier hora. Está
+  // desacoplado del flujo de briefs (no toca el código que usa Joaco):
+  //  - lead 'completo' con el presupuesto YA enviado (algún brief 'enviado') -> sale de la
+  //    bandeja (pasa a 'cotizado' y se le saca la etiqueta).
+  //  - lead 'completo' todavía pendiente -> se asegura la etiqueta (backfill + auto-reparación).
+  try {
+    const _comp = await env.DB.prepare(
+      "SELECT p.phone, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados FROM precotiz_pilot p WHERE p.estado = 'completo'"
+    ).all();
+    for (const r of (_comp.results || [])) {
+      if (r.enviados > 0) {
+        try { await env.DB.prepare("UPDATE precotiz_pilot SET estado = 'cotizado', updated_at = ? WHERE phone = ? AND estado = 'completo'").bind(new Date().toISOString(), r.phone).run(); } catch (_) {}
+        await paraCotizarTag(env, r.phone, false);
+      } else {
+        await paraCotizarTag(env, r.phone, true);
+      }
+    }
+  } catch (_) {}
+
   if (!precotizEnHorario()) return;
   if (await isWaBillingBlocked(env)) return;
 
@@ -1458,6 +1500,8 @@ async function processPrecotizPilot(env) {
     if (tF && tM && tI) { // completó los 3 → handoff a Joaco
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', tiene_foto=1, tiene_medidas=1, tiene_intext=1, last_processed_ts=?, completed_at=?, updated_at=? WHERE phone=?").bind(lastInTs, nowIso, nowIso, lead.phone).run(); } catch (_) {}
       await precotizTag(env, lead.phone, false);
+      await paraCotizarTag(env, lead.phone, true);   // entra a la bandeja "Para cotizar" de Joaco
+      await precotizMarcarNoLeido(env, lead.phone);  // no leído -> sube arriba de todo
       await precotizNotifyGaspar(env, `termino la pre cotizacion de ${lead.nombre || lead.phone}\nya tiene foto, medidas e interior/exterior\npaso a la bandeja para que lo cotice Joaco`);
       continue;
     }
@@ -1537,6 +1581,8 @@ async function processPrecotizPilot(env) {
     if (tF && tM && tI) { // raro en el primer contacto, pero por las dudas
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', completed_at=?, updated_at=? WHERE phone=?").bind(nowIso, nowIso, phone).run(); } catch (_) {}
       await precotizTag(env, phone, false);
+      await paraCotizarTag(env, phone, true);   // entra a la bandeja "Para cotizar" de Joaco
+      await precotizMarcarNoLeido(env, phone);  // no leído -> sube arriba de todo
       await precotizNotifyGaspar(env, `termino la pre cotizacion de ${phone} (vino con todo)\npaso a la bandeja para Joaco`);
       continue;
     }

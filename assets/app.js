@@ -8060,6 +8060,21 @@ function visibleLabels() {
   return isCursosOnly() ? all.filter(l => CURSOS_LABEL_IDS.includes(l.id)) : all;
 }
 
+// Bandeja "Para cotizar": pre cotizaciones que el bot TERMINÓ y esperan que Joaco cotice.
+// El label lo crea/administra el backend (se pone al completar, se saca al enviar el
+// presupuesto); acá lo ubicamos por nombre para el chip fijo + su contador.
+function paraCotizarLabel() {
+  return (chatState.labels || []).find(l => l.name === '📋 Para cotizar') || null;
+}
+function paraCotizarCount() {
+  const l = paraCotizarLabel();
+  if (!l) return 0;
+  const cl = chatState.contactLabels || {};
+  let n = 0;
+  for (const p in cl) { if ((cl[p] || []).includes(l.id)) n++; }
+  return n;
+}
+
 function renderContactLabelChips(phone) {
   const ids = chatState.contactLabels[phone] || [];
   if (!ids.length) return '';
@@ -8085,6 +8100,13 @@ function renderLabelFilterBar() {
   return chanTabs + `<div class="label-filter-bar" id="label-filter-bar">
     <button class="label-filter-pill${noFilters ? ' active' : ''}" data-filter-fixed="all">Todos</button>
     <button class="label-filter-pill${chatState.filterUnreadOnly ? ' active' : ''}" data-filter-fixed="unread">No leídos</button>
+    ${(() => {
+      const l = paraCotizarLabel();
+      if (!l) return '';
+      const n = paraCotizarCount();
+      const active = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
+      return `<button class="label-filter-pill${active ? ' active' : ''}" data-filter-fixed="paracotizar">📋 Para cotizar${n ? ` (${n})` : ''}</button>`;
+    })()}
     ${visibleLabels().length ? `
       <div class="label-filter-dd-wrap">
         <button class="label-filter-pill label-filter-dd-btn${labelsCount ? ' active' : ''}" id="label-filter-dd-btn" aria-expanded="${chatState.labelDropdownOpen ? 'true' : 'false'}">
@@ -11375,6 +11397,15 @@ function bindChat() {
         chatState.labelDropdownOpen = false;
       } else if (kind === 'unread') {
         chatState.filterUnreadOnly = !chatState.filterUnreadOnly;
+      } else if (kind === 'paracotizar') {
+        // Toggle: filtra por la etiqueta "Para cotizar" (o la apaga si ya estaba sola).
+        const l = paraCotizarLabel();
+        if (l) {
+          const on = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
+          chatState.filterLabels = on ? [] : [l.id];
+          chatState.filterUnreadOnly = false;
+          chatState.labelDropdownOpen = false;
+        }
       }
       render();
     };
