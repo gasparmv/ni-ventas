@@ -1628,8 +1628,12 @@ function precotizNudgeMsg(lead) {
   if (!lead.tiene_medidas) faltan.push('las medidas aprox (alto y ancho)');
   if (!lead.tiene_intext) faltan.push('si es para interior o exterior');
   if (!faltan.length) return '';
-  if (faltan.length === 1) return `hola! seguimos con tu presupuesto, me quedo faltando ${faltan[0]} para poder cotizarte. me lo pasas cuando puedas?`;
-  return `hola! seguimos con tu presupuesto del cartel. para cotizarte todavia me falta:\n${faltan.map(f => '- ' + f).join('\n')}\nme lo pasas cuando puedas?`;
+  // Faltan los 3 datos (el cliente no mandó nada tras el opener): recordatorio SUAVE, sin
+  // repetir la lista de bullets — queda idéntica al opener y suena a robot.
+  if (faltan.length === 3) return `hola! seguís con la idea del cartel? cuando puedas mandame una foto de referencia y las medidas y seguimos con el presupuesto`;
+  // Faltan 1 o 2: los pedimos en una frase corta (sin bullets), mostrando lo que ya avanzó.
+  const lista = faltan.length === 2 ? `${faltan[0]} y ${faltan[1]}` : faltan[0];
+  return `hola! seguimos con tu presupuesto del cartel, me quedó faltando ${lista}. me lo pasás cuando puedas?`;
 }
 
 // Nudge del piloto: persigue a los leads que quedaron a mitad (les falta algún dato) y se
