@@ -1663,9 +1663,9 @@ async function processPrecotizNudges(env) {
     try { lastIn = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(lead.phone).first(); } catch (_) { continue; }
     const lastInTs = lastIn && lastIn.t; if (!lastInTs) continue;
     const silenceH = (nowMs - new Date(lastInTs).getTime()) / 3600000;
-    const umbral = (lead.nudge_count || 0) === 0 ? 4 : 24;
+    const umbral = (lead.nudge_count || 0) === 0 ? 4 : 20; // 2do a las 20h (NO 24): así sigue DENTRO de la ventana de 24h de WhatsApp y se manda como mensaje normal, no como plantilla
     if (silenceH < umbral || silenceH > 7 * 24) continue;
-    if (lead.last_nudge_at && (nowMs - new Date(lead.last_nudge_at).getTime()) / 3600000 < 16) continue;
+    if (lead.last_nudge_at && (nowMs - new Date(lead.last_nudge_at).getTime()) / 3600000 < 12) continue; // no dos nudges pegados; con 1er a 4h y 2do a 20h hay 16h de separación
     const msg = precotizNudgeMsg(lead);
     if (!msg) continue;
     try { await precotizSend(env, lead.phone, msg); } catch (_) { continue; }
