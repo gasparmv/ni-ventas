@@ -1648,7 +1648,7 @@ async function processPrecotizNudges(env) {
   let leads = [];
   try {
     leads = (await env.DB.prepare(
-      "SELECT * FROM precotiz_pilot WHERE estado='activo' AND NOT (tiene_foto=1 AND tiene_medidas=1 AND tiene_intext=1) AND IFNULL(nudge_count,0) < 2 AND IFNULL(msgs_bot,0) > 0 AND pending_draft IS NULL"
+      "SELECT * FROM precotiz_pilot WHERE estado='activo' AND NOT (tiene_foto=1 AND tiene_medidas=1 AND tiene_intext=1) AND IFNULL(nudge_count,0) < 2 AND IFNULL(msgs_bot,0) > 0 AND IFNULL(pending_draft,'') = ''"
     ).all()).results || [];
   } catch (_) {}
   for (const lead of leads) {
