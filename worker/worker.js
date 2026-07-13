@@ -11409,6 +11409,18 @@ async function processPresupuestoFollowups(env, opts = {}) {
       conv = rs.results || [];
     } catch (_) { continue; }
 
+    // Dedup ROBUSTO y directo (NO depende del LIMIT 200 del conv de arriba): en chats muy
+    // largos el conv no incluía el FUP recién mandado → se re-enviaba en CADA tick del cron
+    // (ej.: a Gaspar le salió 3 veces en 15'). Si ya salió un FUP automatizado (el texto que
+    // arranca con 'Hola ' o la plantilla) DESPUÉS de este presupuesto, no re-mandamos.
+    try {
+      const dupFup = await env.DB.prepare(
+        "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 1 AND ts > ? " +
+        "AND (body = '[plantilla: seguimiento_presupuesto]' OR substr(body, 1, 5) = 'Hola ') LIMIT 1"
+      ).bind(p.phone, p.ts).first();
+      if (dupFup) continue;
+    } catch (_) {}
+
     // ¿Respondió el cliente? ANTES: si respondía CUALQUIER cosa, se salteaba el
     // follow-up. AHORA (pedido de Gaspar, 18/06): el FUP de las 23h TAMBIÉN va a los
     // que respondieron con un NO-COMPROMISO ("dale, lo pienso", "hablo con mi socio",
