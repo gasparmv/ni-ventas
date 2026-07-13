@@ -1626,14 +1626,17 @@ function precotizNudgeMsg(lead) {
   const faltan = [];
   if (!lead.tiene_foto) faltan.push('una foto o referencia del diseño');
   if (!lead.tiene_medidas) faltan.push('las medidas aprox (alto y ancho)');
-  if (!lead.tiene_intext) faltan.push('si es para interior o exterior');
+  if (!lead.tiene_intext) faltan.push('saber si es para interior o exterior');
   if (!faltan.length) return '';
-  // Faltan los 3 datos (el cliente no mandó nada tras el opener): recordatorio SUAVE, sin
-  // repetir la lista de bullets — queda idéntica al opener y suena a robot.
-  if (faltan.length === 3) return `hola! seguís con la idea del cartel? cuando puedas mandame una foto de referencia y las medidas y seguimos con el presupuesto`;
-  // Faltan 1 o 2: los pedimos en una frase corta (sin bullets), mostrando lo que ya avanzó.
-  const lista = faltan.length === 2 ? `${faltan[0]} y ${faltan[1]}` : faltan[0];
-  return `hola! seguimos con tu presupuesto del cartel, me quedó faltando ${lista}. me lo pasás cuando puedas?`;
+  // Datos que faltan en UNA frase (NO la lista de bullets, que quedaba calcada del opener):
+  // "x" | "x y y" | "x, y y z".
+  const inline = faltan.length === 1 ? faltan[0] : faltan.slice(0, -1).join(', ') + ' y ' + faltan[faltan.length - 1];
+  // 1er seguimiento (~4h de silencio): NO volvemos a saludar (venimos hablando hace un rato) ni
+  // preguntamos tímido — vamos directos: avisá si seguimos + lo que falta.
+  if ((lead.nudge_count || 0) === 0) return `Avisame si seguimos con la cotización! Me faltaría ${inline}`;
+  // 2do seguimiento (~24h de silencio, un día después): ya pasó tiempo, saludamos de nuevo y
+  // preguntamos si sigue en pie.
+  return `hola! seguimos con la cotización? me faltaría ${inline}`;
 }
 
 // Nudge del piloto: persigue a los leads que quedaron a mitad (les falta algún dato) y se
