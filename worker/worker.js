@@ -1275,10 +1275,11 @@ async function precotizLog(env, phone, resultado, extra = {}) {
 
 // Una sola llamada IA por lead: clasifica si es carteles, detecta cuáles de los
 // 3 datos ya están, decide si frenar, y si falta algo redacta los mensajitos.
-const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (carteles de neón LED, Argentina). Manejás SOLO la PRE COTIZACIÓN de un lead: la etapa de relevamiento donde hay que juntar 3 datos para poder cotizar un cartel:
-1) una FOTO o imagen de referencia del diseño,
-2) las MEDIDAS aproximadas (alto y ancho),
-3) si es para INTERIOR o EXTERIOR.
+const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (carteles de neón LED, Argentina). Manejás SOLO la PRE COTIZACIÓN de un lead: la etapa de relevamiento donde hay que juntar los datos para poder cotizar un cartel:
+1) una FOTO o imagen de referencia del diseño (OBLIGATORIO),
+2) las MEDIDAS aproximadas (alto y ancho) (OBLIGATORIO),
+3) si es para INTERIOR o EXTERIOR (DESEABLE, NO obligatorio).
+Lo estrictamente necesario es la FOTO y las MEDIDAS. El interior/exterior es un plus: pedilo UNA sola vez. Si el cliente dice que no sabe / no está seguro / no lo tiene definido, O si ya se lo preguntaste y en su respuesta no te lo dio (te habló de otra cosa), NO insistas más — poné intext_no_sabe=true y damos por cerrada la pre cotización con la foto y las medidas (el equipo define el interior/exterior después). NUNCA machaques con el interior/exterior.
 
 Si te paso imágenes, MIRALAS bien. Una imagen cuenta como la foto del diseño (tiene_foto=true) SOLO si es un boceto, logo, foto o referencia del cartel/diseño que el cliente quiere. Si la imagen es un meme, una captura de otra app, un tweet, una promo, spam, o cualquier cosa que no tenga que ver con un cartel → tiene_foto=false (y si es spam o estafa, frenar=true y es_carteles=false).
 MUY IMPORTANTE sobre la ESTÉTICA de los diseños: los carteles de neón para bares, boliches, distribuidoras de bebidas, salones, kioscos, etc. MUCHAS veces tienen onda urbana/trap con dinero, fajos de billetes, botellas de alcohol, pasamontañas, diamantes, autos, joyas, caritas de emoji, etc. ESO ES UN DISEÑO DE CARTEL TOTALMENTE VÁLIDO — NO es spam, NO es estafa, NO es promo de casino/inversión. Si el cliente manda una imagen así pidiendo cotizar un cartel: tiene_foto=true, es_carteles=true, frenar=false. NUNCA descartes ni frenes por el CONTENIDO ARTÍSTICO de la imagen del diseño; el freno se decide SOLO por lo que ESCRIBE el cliente.
@@ -1313,10 +1314,10 @@ FRENO DE MANO — poné frenar=true y mensajes=[] si:
 - el CLIENTE ESCRIBE spam, una cadena, una promo de cripto / casino / inversión, un link sospechoso, o algo que claramente NO tiene que ver con pedir un cartel → frenar=true y es_carteles=false (NO le respondas). OJO: esto es por lo que ESCRIBE, NO por la imagen del diseño (un diseño con plata/alcohol/pasamontañas es un cartel válido, ver arriba),
 - o no parece un lead de carteles (curso, o ambiguo) → además es_carteles=false.
 
-Si ya están los 3 datos, mensajes=[] (el humano sigue desde acá). Nunca prometas el render/precio: eso lo hace una persona después.
+Cuando ya tenés lo necesario, mensajes=[] (el humano sigue desde acá). "Lo necesario" = FOTO + MEDIDAS, más el interior/exterior SOLO si el cliente lo dio o dijo que no sabe. O sea: si tenés foto + medidas + (tiene_intext=true O intext_no_sabe=true) → mensajes=[]. Nunca prometas el render/precio: eso lo hace una persona después.
 
 Devolvé SOLO un JSON, sin nada alrededor:
-{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"mensajes":["..."]}`;
+{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"mensajes":["..."]}`;
 
 // Arma bloques de imagen (base64) de las últimas imágenes inbound del lead, para
 // que el clasificador las VEA (Claude visión) — así distingue una foto de diseño
@@ -1514,12 +1515,12 @@ async function processPrecotizPilot(env) {
       await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${lead.nombre || lead.phone}\nmotivo: ${res.motivo_freno || 'revisar'}\nentra a verlo vos`);
       continue;
     }
-    if (tF && tM && tI) { // completó los 3 → handoff a Joaco
-      try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', tiene_foto=1, tiene_medidas=1, tiene_intext=1, last_processed_ts=?, completed_at=?, updated_at=? WHERE phone=?").bind(lastInTs, nowIso, nowIso, lead.phone).run(); } catch (_) {}
+    if (tF && tM && (tI || res.intext_no_sabe)) { // ya tiene lo necesario (foto+medidas; el int/ext lo dio o dijo que no sabe) → handoff a Joaco
+      try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, completed_at=?, updated_at=? WHERE phone=?").bind(tF, tM, tI, lastInTs, nowIso, nowIso, lead.phone).run(); } catch (_) {}
       await precotizTag(env, lead.phone, false);
       await paraCotizarTag(env, lead.phone, true);   // entra a la bandeja "Para cotizar" de Joaco
       await precotizMarcarNoLeido(env, lead.phone);  // no leído -> sube arriba de todo
-      await precotizNotifyGaspar(env, `termino la pre cotizacion de ${lead.nombre || lead.phone}\nya tiene foto, medidas e interior/exterior\npaso a la bandeja para que lo cotice Joaco`);
+      await precotizNotifyGaspar(env, `termino la pre cotizacion de ${lead.nombre || lead.phone}\nya tiene foto y medidas${tI ? ' e interior/exterior' : ' (falta confirmar interior/exterior, el cliente no lo tenia definido)'}\npaso a la bandeja para que lo cotice Joaco`);
       continue;
     }
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
@@ -1603,7 +1604,7 @@ async function processPrecotizPilot(env) {
     await precotizLog(env, phone, 'entro', { es_carteles: true, tiene_foto: res.tiene_foto, tiene_medidas: res.tiene_medidas, tiene_intext: res.tiene_intext });
     await precotizTag(env, phone, true); // etiqueta VISIBLE (no oculta) — Joaco+Gaspar monitorean
 
-    if (tF && tM && tI) { // raro en el primer contacto, pero por las dudas
+    if (tF && tM && (tI || res.intext_no_sabe)) { // ya tiene lo necesario (foto+medidas) → completo
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', completed_at=?, updated_at=? WHERE phone=?").bind(nowIso, nowIso, phone).run(); } catch (_) {}
       await precotizTag(env, phone, false);
       await paraCotizarTag(env, phone, true);   // entra a la bandeja "Para cotizar" de Joaco
