@@ -8102,7 +8102,7 @@ function renderLabelFilterBar() {
     <button class="label-filter-pill${chatState.filterUnreadOnly ? ' active' : ''}" data-filter-fixed="unread">No leídos</button>
     ${(() => {
       const l = paraCotizarLabel();
-      if (!l) return '';
+      if (!l || isCursosOnly()) return '';   // bandeja de carteles: no aplica para el rol cursos (Abril)
       const n = paraCotizarCount();
       const active = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
       return `<button class="label-filter-pill${active ? ' active' : ''}" data-filter-fixed="paracotizar">📋 Para cotizar${n ? ` (${n})` : ''}</button>`;
