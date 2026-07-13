@@ -1157,6 +1157,7 @@ async function removeUnreachable(env, phone) {
 // ============================================================
 const PRECOTIZ_CAP = 10;                       // tope de leads en el piloto
 const PRECOTIZ_DEBOUNCE_MS = 60 * 1000;        // esperar a que el cliente pare de escribir (manda foto + medidas en mensajes seguidos) antes de armar la respuesta
+const PRECOTIZ_HUMAN_GRACE_MS = 5 * 60 * 1000; // si un humano YA intervino en el chat, darle 5 min para seguir contestando antes de que el bot retome (evita pisar a Joaco si está tipeando)
 const PRECOTIZ_GASPAR_PHONE = '5491155604999'; // a quién avisar al completar
 
 // kv_cache como settings store (genérico, idempotente).
@@ -1467,7 +1468,7 @@ async function processPrecotizPilot(env) {
     // FRENO ANTI-PISÓN: si un HUMANO contestó DESPUÉS del último mensaje del cliente, el bot
     // no manda (Joaco/Gaspar están atendiendo). Cuando el cliente vuelva a escribir (su mensaje
     // pasa a ser el último), el bot retoma el proceso de precotización si todavía falta relevar.
-    try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status'").bind(lead.phone).first(); if (lh && lh.t && lh.t > lastInTs) continue; } catch (_) {}
+    try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status'").bind(lead.phone).first(); if (lh && lh.t) { if (lh.t > lastInTs) continue; if (Date.now() - new Date(lastInTs).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
     // Si el lead PASÓ a un flujo de cursos estando en el piloto (Abril lo tomó o se
     // registró al minicurso), lo sacamos del precotiz (escalado) para no pisarnos con
     // esas automatizaciones — sin gastar la llamada de IA.
@@ -1561,7 +1562,7 @@ async function processPrecotizPilot(env) {
     // FRENO ANTI-PISÓN: si un HUMANO (Joaco/Gaspar) ya respondió DESPUÉS del último mensaje
     // del cliente, el bot no se mete. NO marcamos seen -> si el cliente sigue la charla, se
     // re-evalúa en los próximos ticks y el bot retoma el relevamiento si todavía falta un dato.
-    try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status'").bind(phone).first(); if (lh && lh.t && lh.t > c.last_ts) continue; } catch (_) {}
+    try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status'").bind(phone).first(); if (lh && lh.t) { if (lh.t > c.last_ts) continue; if (Date.now() - new Date(c.last_ts).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
     await kvSet(env, 'precotiz_seen:' + phone, '1');                        // marcar visto pase lo que pase
     try { const intn = await env.DB.prepare('SELECT 1 AS x FROM wa_internal_phones WHERE phone = ?').bind(phone).first(); if (intn) continue; } catch (_) {}
     try { const ped = await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1').bind(phone).first(); if (ped) continue; } catch (_) {} // cliente existente, no lead nuevo
