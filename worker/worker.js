@@ -1419,6 +1419,14 @@ async function processPrecotizPilot(env) {
       continue; // sin draft y sin nada nuevo
     }
 
+    // Reserva ATÓMICA antes de procesar. Los dos crons (*/1 y */5) disparan juntos en los minutos
+    // múltiplos de 5 -> processPrecotizPilot corre 2 veces en paralelo. Sin esto, las dos pasan el
+    // chequeo de arriba y las dos llaman a la IA + mandan (doble envío, "buenas te habla Joaco" x2).
+    // Con el UPDATE condicional, la 2da corrida ve changes=0 y saltea SIN llamar a la IA ni mandar.
+    let _claim;
+    try { _claim = await env.DB.prepare("UPDATE precotiz_pilot SET last_processed_ts = ?, updated_at = ? WHERE phone = ? AND (last_processed_ts IS NULL OR last_processed_ts < ?)").bind(lastInTs, nowIso, lead.phone, lastInTs).run(); } catch (_) { continue; }
+    if (!_claim || !_claim.meta || !_claim.meta.changes) continue; // otra corrida ya lo tomó
+
     const ctx = await buildChatContext(env, lead.phone, 40);
     if (!ctx) continue;
     const fw = await getActiveFramework(env);
@@ -1498,9 +1506,13 @@ async function processPrecotizPilot(env) {
 
     const tF = res.tiene_foto ? 1 : 0;
     const tM = res.tiene_medidas ? 1 : 0, tI = res.tiene_intext ? 1 : 0;
+    let _ins;
     try {
-      await env.DB.prepare("INSERT OR IGNORE INTO precotiz_pilot (phone, estado, tiene_foto, tiene_medidas, tiene_intext, nombre, last_inbound_ts, last_processed_ts, created_at, updated_at) VALUES (?, 'activo', ?, ?, ?, '', ?, ?, ?, ?)").bind(phone, tF, tM, tI, c.last_ts, c.last_ts, nowIso, nowIso).run();
+      _ins = await env.DB.prepare("INSERT OR IGNORE INTO precotiz_pilot (phone, estado, tiene_foto, tiene_medidas, tiene_intext, nombre, last_inbound_ts, last_processed_ts, created_at, updated_at) VALUES (?, 'activo', ?, ?, ?, '', ?, ?, ?, ?)").bind(phone, tF, tM, tI, c.last_ts, c.last_ts, nowIso, nowIso).run();
     } catch (_) { continue; }
+    // Si el INSERT fue IGNORADO (changes=0), otra corrida concurrente ya capturó este lead ->
+    // NO mandamos el opener de nuevo (ese era el "buenas te habla Joaco" x2 en la captura).
+    if (!_ins || !_ins.meta || !_ins.meta.changes) continue;
     await precotizTag(env, phone, true); // etiqueta VISIBLE (no oculta) — Joaco+Gaspar monitorean
 
     if (tF && tM && tI) { // raro en el primer contacto, pero por las dudas
@@ -10865,9 +10877,16 @@ export default {
     // Piloto de pre cotización automática (carteles): capta leads del 20% y los
     // releva con freno de mano. Gateado internamente (kill-switch OFF por defecto
     // + horario 8-22 AR). Corre en cada tick para responder en ~1-2 min.
-    ctx.waitUntil(processPrecotizPilot(env));
-    // Nudge del piloto: persigue leads a medias que se callaron (cada 15 min; gate 9-21 AR adentro).
-    if (minute % 15 === 0) ctx.waitUntil(processPrecotizNudges(env));
+    // SOLO en el cron de cada minuto (*/1). Antes corría en ambos crons (*/1 y */5) y en los
+    // minutos múltiplos de 5 se disparaba 2 veces en paralelo -> doble procesamiento/envío. Las
+    // reservas atómicas ya evitan el duplicado, pero gatearlo a un cron evita el trabajo doble.
+    if (event.cron === '* * * * *') {
+      ctx.waitUntil(processPrecotizPilot(env));
+      // Nudge del piloto: persigue leads a medias que se callaron (cada 15 min; gate 9-21 AR adentro).
+      // OJO: usamos getUTCMinutes() INLINE, no la var `minute` (que recién se declara con const más
+      // abajo, línea ~10932 -> referenciarla acá era ReferenceError por TDZ en cada tick */1).
+      if (new Date().getUTCMinutes() % 15 === 0) ctx.waitUntil(processPrecotizNudges(env));
+    }
     // Landing del minicurso gratuito: opener a los 45 min (plantilla) + branch por
     // IA + follow-up 23h. Gateado (kill-switch OFF por defecto + horario 8-22 AR).
     // Corre en cada tick para responder rápido; guardia anti-choque con el flujo de ads.
