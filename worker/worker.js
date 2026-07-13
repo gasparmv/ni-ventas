@@ -1410,6 +1410,17 @@ async function processPrecotizPilot(env) {
     // respondemos apresurado — esperamos a que el último inbound tenga > DEBOUNCE
     // de antigüedad (que haya parado de escribir).
     if (Date.now() - new Date(lastInTs).getTime() < PRECOTIZ_DEBOUNCE_MS) continue;
+    // Si el lead PASÓ a un flujo de cursos estando en el piloto (Abril lo tomó o se
+    // registró al minicurso), lo sacamos del precotiz (escalado) para no pisarnos con
+    // esas automatizaciones — sin gastar la llamada de IA.
+    try {
+      const _cur = await env.DB.prepare("SELECT 1 AS x FROM wa_chats_summary WHERE phone = ? AND inbox = 'cursos' LIMIT 1").bind(lead.phone).first();
+      if (_cur) {
+        try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo='paso a cursos', last_processed_ts=?, updated_at=? WHERE phone=?").bind(lastInTs, nowIso, lead.phone).run(); } catch (_) {}
+        await precotizTag(env, lead.phone, false);
+        continue;
+      }
+    } catch (_) {}
     if (lead.pending_draft) {
       // Hay un borrador esperando tu OK. Si el cliente NO mandó nada nuevo desde
       // que se generó, lo dejamos quieto. Si mandó algo después (ej. las medidas),
@@ -1490,6 +1501,14 @@ async function processPrecotizPilot(env) {
     await kvSet(env, 'precotiz_seen:' + phone, '1');                        // marcar visto pase lo que pase
     try { const intn = await env.DB.prepare('SELECT 1 AS x FROM wa_internal_phones WHERE phone = ?').bind(phone).first(); if (intn) continue; } catch (_) {}
     try { const ped = await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1').bind(phone).first(); if (ped) continue; } catch (_) {} // cliente existente, no lead nuevo
+    // Excluir gente que YA está en un flujo de CURSOS: minicurso/cursos tienen sus
+    // propias automatizaciones (Abril) y el precotiz NO se debe pisar con ellas ni
+    // gastar una llamada de IA para rechazarlas. Señal universal: inbox='cursos' en
+    // wa_chats_summary (lo setean TODOS los flujos de cursos). Backup: estar en
+    // minicurso_landing por si el inbox aún no se marcó (los crons corren en el mismo
+    // tick → puede haber carrera y el flujo de cursos todavía no seteó el inbox).
+    try { const cur = await env.DB.prepare("SELECT 1 AS x FROM wa_chats_summary WHERE phone = ? AND inbox = 'cursos' LIMIT 1").bind(phone).first(); if (cur) continue; } catch (_) {}
+    try { const mc = await env.DB.prepare("SELECT 1 AS x FROM minicurso_landing WHERE phone = ? LIMIT 1").bind(phone).first(); if (mc) continue; } catch (_) {}
     let first;
     try { first = await env.DB.prepare("SELECT MIN(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(phone).first(); } catch (_) { continue; }
     const firstTs = first?.t || '';
