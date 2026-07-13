@@ -1260,6 +1260,17 @@ async function paraCotizarTag(env, phone, on) {
 async function precotizMarcarNoLeido(env, phone) {
   try { await env.DB.prepare('DELETE FROM wa_read_cursor WHERE phone = ?').bind(phone).run(); } catch (_) {}
 }
+// Registra el veredicto de la IA para cada lead evaluado en la captación (sección A), para
+// poder AUDITAR por qué un lead entró o NO al piloto (antes era una caja negra). resultado:
+// 'entro' | 'rechazo' | 'error_ia'. Se consulta en GET /admin/precotiz/evaluaciones.
+async function precotizLog(env, phone, resultado, extra = {}) {
+  const b = (v) => v == null ? null : (v ? 1 : 0);
+  try {
+    await env.DB.prepare(
+      "INSERT INTO precotiz_eval_log (phone, resultado, motivo, es_carteles, frenar, tiene_foto, tiene_medidas, tiene_intext, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(phone, resultado, String(extra.motivo || '').slice(0, 300), b(extra.es_carteles), b(extra.frenar), b(extra.tiene_foto), b(extra.tiene_medidas), b(extra.tiene_intext), new Date().toISOString()).run();
+  } catch (_) {}
+}
 
 // Una sola llamada IA por lead: clasifica si es carteles, detecta cuáles de los
 // 3 datos ya están, decide si frenar, y si falta algo redacta los mensajitos.
@@ -1269,6 +1280,7 @@ const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (ca
 3) si es para INTERIOR o EXTERIOR.
 
 Si te paso imágenes, MIRALAS bien. Una imagen cuenta como la foto del diseño (tiene_foto=true) SOLO si es un boceto, logo, foto o referencia del cartel/diseño que el cliente quiere. Si la imagen es un meme, una captura de otra app, un tweet, una promo, spam, o cualquier cosa que no tenga que ver con un cartel → tiene_foto=false (y si es spam o estafa, frenar=true y es_carteles=false).
+MUY IMPORTANTE sobre la ESTÉTICA de los diseños: los carteles de neón para bares, boliches, distribuidoras de bebidas, salones, kioscos, etc. MUCHAS veces tienen onda urbana/trap con dinero, fajos de billetes, botellas de alcohol, pasamontañas, diamantes, autos, joyas, caritas de emoji, etc. ESO ES UN DISEÑO DE CARTEL TOTALMENTE VÁLIDO — NO es spam, NO es estafa, NO es promo de casino/inversión. Si el cliente manda una imagen así pidiendo cotizar un cartel: tiene_foto=true, es_carteles=true, frenar=false. NUNCA descartes ni frenes por el CONTENIDO ARTÍSTICO de la imagen del diseño; el freno se decide SOLO por lo que ESCRIBE el cliente.
 
 Te paso la conversación de WhatsApp (CLIENTE = el lead, JOACO = nosotros/el bot). Mirá qué de los 3 datos ya dio el cliente y, si corresponde, escribí el/los próximos mensajes para pedir SOLO lo que falta.
 
@@ -1297,7 +1309,7 @@ FRENO DE MANO — poné frenar=true y mensajes=[] si:
 - hay objeción fuerte de precio o pedido de financiación,
 - es una queja o cliente enojado,
 - pide algo fuera del relevamiento simple (factura, garantía, instalación compleja),
-- es SPAM, una cadena, una promo de cripto / casino / inversión, un link sospechoso, o cualquier cosa que claramente NO tiene que ver con pedir un cartel → frenar=true y es_carteles=false (NO le respondas),
+- el CLIENTE ESCRIBE spam, una cadena, una promo de cripto / casino / inversión, un link sospechoso, o algo que claramente NO tiene que ver con pedir un cartel → frenar=true y es_carteles=false (NO le respondas). OJO: esto es por lo que ESCRIBE, NO por la imagen del diseño (un diseño con plata/alcohol/pasamontañas es un cartel válido, ver arriba),
 - o no parece un lead de carteles (curso, o ambiguo) → además es_carteles=false.
 
 Si ya están los 3 datos, mensajes=[] (el humano sigue desde acá). Nunca prometas el render/precio: eso lo hace una persona después.
@@ -1563,9 +1575,12 @@ async function processPrecotizPilot(env) {
     const fw = await getActiveFramework(env);
     const imgs = await precotizImageBlocks(env, phone);
     const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs);
-    if (!out.ok) continue;
+    if (!out.ok) { await precotizLog(env, phone, 'error_ia', { motivo: out.error }); continue; } // la IA falló (429/refusal/etc.) — queda logueado para auditar
     const res = out.data;
-    if (!res || res.es_carteles === false || res.frenar) continue;          // no entra al piloto
+    if (!res || res.es_carteles === false || res.frenar) {                   // no entra al piloto
+      await precotizLog(env, phone, 'rechazo', { motivo: (res && res.motivo_freno) || (res && res.es_carteles === false ? 'no es carteles' : 'sin datos'), es_carteles: res && res.es_carteles, frenar: res && res.frenar, tiene_foto: res && res.tiene_foto, tiene_medidas: res && res.tiene_medidas, tiene_intext: res && res.tiene_intext });
+      continue;
+    }
 
     const tF = res.tiene_foto ? 1 : 0;
     const tM = res.tiene_medidas ? 1 : 0, tI = res.tiene_intext ? 1 : 0;
@@ -1576,6 +1591,7 @@ async function processPrecotizPilot(env) {
     // Si el INSERT fue IGNORADO (changes=0), otra corrida concurrente ya capturó este lead ->
     // NO mandamos el opener de nuevo (ese era el "buenas te habla Joaco" x2 en la captura).
     if (!_ins || !_ins.meta || !_ins.meta.changes) continue;
+    await precotizLog(env, phone, 'entro', { es_carteles: true, tiene_foto: res.tiene_foto, tiene_medidas: res.tiene_medidas, tiene_intext: res.tiene_intext });
     await precotizTag(env, phone, true); // etiqueta VISIBLE (no oculta) — Joaco+Gaspar monitorean
 
     if (tF && tM && tI) { // raro en el primer contacto, pero por las dudas
@@ -7388,6 +7404,24 @@ export default {
           let leads = [];
           try { const rs = await env.DB.prepare('SELECT * FROM precotiz_pilot ORDER BY updated_at DESC').all(); leads = rs.results || []; } catch (_) {}
           return json({ ok: true, on, modo, cap, sample, count: leads.length, leads });
+        }
+
+        // GET /admin/precotiz/evaluaciones → veredictos de la IA (por qué entró/no entró cada lead).
+        // ?phone=549... filtra por lead | ?resultado=rechazo|error_ia|entro | ?limit=N (máx 300)
+        if (request.method === 'GET' && path === '/admin/precotiz/evaluaciones') {
+          const u = new URL(request.url);
+          const qPhone = (u.searchParams.get('phone') || '').replace(/\D/g, '');
+          const qRes = u.searchParams.get('resultado') || '';
+          const lim = Math.min(parseInt(u.searchParams.get('limit') || '50', 10) || 50, 300);
+          let sql = "SELECT phone, resultado, motivo, es_carteles, frenar, tiene_foto, tiene_medidas, tiene_intext, ts FROM precotiz_eval_log";
+          const conds = [], binds = [];
+          if (qPhone) { conds.push('phone = ?'); binds.push(qPhone); }
+          if (qRes) { conds.push('resultado = ?'); binds.push(qRes); }
+          if (conds.length) sql += ' WHERE ' + conds.join(' AND ');
+          sql += ' ORDER BY ts DESC LIMIT ?'; binds.push(lim);
+          let rows = [];
+          try { const rs = await env.DB.prepare(sql).bind(...binds).all(); rows = rs.results || []; } catch (_) {}
+          return json({ ok: true, count: rows.length, evaluaciones: rows });
         }
 
         // POST /admin/precotiz/control → { on?, modo? } prender/apagar + draft|auto
