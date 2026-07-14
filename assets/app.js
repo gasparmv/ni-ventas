@@ -9359,22 +9359,35 @@ function findMessageByWamid(wamid) {
 
 // HTML del bloque de cita (quoted reply) que va arriba del bubble cuando
 // el mensaje tiene context_id apuntando a otro mensaje.
+function quotePreviewFor(type, body) {
+  if (type === 'image') return '📷 Imagen' + (body ? ' · ' + body : '');
+  if (type === 'audio') return '🎤 Audio';
+  if (type === 'video') return '🎬 Video';
+  if (type === 'document') return '📄 ' + (body || 'Documento');
+  if (type === 'sticker') return 'Sticker';
+  return body || '';
+}
 function quoteBlockHtml(m) {
   if (!m.context_id) return '';
+  let parentDir, author, preview;
   const parent = findMessageByWamid(m.context_id);
-  if (!parent) return ''; // padre no esta cargado, no mostramos nada
-  const parentDir = parent.direction || 'inbound';
-  const isMine = parentDir === 'outbound';
-  const author = isMine ? 'Vos' : (parent.sender_name || 'Cliente');
-  let preview = '';
-  if (parent.msg_type === 'image') preview = '📷 Imagen' + (parent.body ? ' · ' + parent.body : '');
-  else if (parent.msg_type === 'audio') preview = '🎤 Audio';
-  else if (parent.msg_type === 'video') preview = '🎬 Video';
-  else if (parent.msg_type === 'document') preview = '📄 ' + (parent.body || 'Documento');
-  else if (parent.msg_type === 'sticker') preview = 'Sticker';
-  else preview = parent.body || '';
-  preview = preview.slice(0, 120);
-  return `<div class="chat-msg-quote ${isMine ? 'mine' : 'theirs'}" data-jump-to="${escapeHtml(m.context_id)}">
+  if (parent) {
+    // Mensaje citado cargado en pantalla (respuesta reciente o mensaje optimista).
+    parentDir = parent.direction || 'inbound';
+    author = parentDir === 'outbound' ? 'Vos' : (parent.sender_name || 'Cliente');
+    preview = quotePreviewFor(parent.msg_type, parent.body);
+  } else if (m.quoted_meta) {
+    // Padre FUERA de la ventana cargada (respuesta a un mensaje viejo): usamos el preview
+    // que resolvió el backend por context_id. Formato: dir⏹type⏹sender⏹body (sep char 31).
+    const parts = String(m.quoted_meta).split('\x1f');
+    parentDir = parts[0] || 'inbound';
+    author = parentDir === 'outbound' ? 'Vos' : (parts[2] || 'Cliente');
+    preview = quotePreviewFor(parts[1], (parts.slice(3).join('\x1f')) || '');
+  } else {
+    return ''; // ni cargado ni resuelto por backend → nada
+  }
+  preview = (preview || '').slice(0, 120);
+  return `<div class="chat-msg-quote ${parentDir === 'outbound' ? 'mine' : 'theirs'}" data-jump-to="${escapeHtml(m.context_id)}">
     <div class="cmq-author">${escapeHtml(author)}</div>
     <div class="cmq-text">${escapeHtml(preview)}</div>
   </div>`;

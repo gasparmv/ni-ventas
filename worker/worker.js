@@ -8918,8 +8918,16 @@ export default {
         if (from) { where += ' AND ts >= ?'; params.push(from); }
         if (to) { where += ' AND ts <= ?'; params.push(to); }
         if (dir === 'inbound' || dir === 'outbound') { where += ' AND direction = ?'; params.push(dir); }
+        // quoted_meta: preview del mensaje CITADO (cuando este mensaje es una respuesta a otro).
+        // Lo resolvemos acá con un self-lookup por context_id para que el chat muestre "a cuál
+        // le responde" AUNQUE el mensaje citado no esté en la ventana cargada (chats largos).
+        // Formato: direction ⏹ msg_type ⏹ sender_name ⏹ body(120) — separador char(31), que
+        // nunca aparece en texto. El front lo parsea.
         const rs = await env.DB.prepare(
-          `SELECT id, ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, automated FROM wa_messages WHERE ${where} ORDER BY ts DESC LIMIT ?`
+          `SELECT id, ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, automated,
+             (SELECT p.direction || char(31) || p.msg_type || char(31) || COALESCE(p.sender_name,'') || char(31) || substr(COALESCE(p.body,''),1,120)
+                FROM wa_messages p WHERE p.wamid = wa_messages.context_id AND wa_messages.context_id != '' LIMIT 1) AS quoted_meta
+           FROM wa_messages WHERE ${where} ORDER BY ts DESC LIMIT ?`
         ).bind(...params, limit).all();
         return json({ messages: rs.results || [] });
       }
