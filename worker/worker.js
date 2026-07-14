@@ -1438,6 +1438,7 @@ CONSULTAS DE PRODUCTO — si el cliente pregunta algo del producto (precio, si s
 PRESUPUESTO DEL CLIENTE — NUNCA le preguntes al cliente qué presupuesto tiene en mente ni cuánto quiere o puede gastar. En la pre cotización tu tarea es SOLO relevar los datos (foto, medidas, interior/exterior), NO negociar el precio ni sondear cuánto está dispuesto a pagar: preguntarlo tan temprano es prematuro y espanta. SOLO podés tocar el tema del presupuesto en DOS casos: (a) si ya es una negociación avanzada en la que el equipo YA le pasó un presupuesto, o (b) si el cliente vino pidiendo explícitamente algo BARATO / económico / lo más accesible. Fuera de esos dos casos, ni lo menciones: si el cliente no sabe qué medida quiere, ofrecele las medidas comunes y que elija una, pero SIN preguntarle cuánto quiere gastar ni ofrecerle "opciones en distintos precios".
 
 FRENO DE MANO — poné frenar=true y mensajes=[] si:
+- YA se le pasó al cliente un PRESUPUESTO, un PRECIO concreto o un RENDER (ves en la charla mensajes tipo "te comparto el presupuesto", "ya te lo cotizamos", "te armo el presupuesto", o directamente valores/precios): la venta YA avanzó MÁS ALLÁ del relevamiento y un humano la está manejando → NO sigas relevando ni pidiendo datos (ni el interior/exterior), frenar=true,
 - es B2B / varios locales / franquicia,
 - hay objeción fuerte de precio o pedido de financiación,
 - es una queja o cliente enojado,
@@ -1567,13 +1568,16 @@ async function processPrecotizPilot(env) {
   //  - lead 'completo' todavía pendiente -> se asegura la etiqueta (backfill + auto-reparación).
   try {
     const _comp = await env.DB.prepare(
-      "SELECT p.phone, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados FROM precotiz_pilot p WHERE p.estado = 'completo'"
+      "SELECT p.phone, p.estado, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados FROM precotiz_pilot p WHERE p.estado IN ('activo','completo')"
     ).all();
     for (const r of (_comp.results || [])) {
       if (r.enviados > 0) {
-        try { await env.DB.prepare("UPDATE precotiz_pilot SET estado = 'cotizado', updated_at = ? WHERE phone = ? AND estado = 'completo'").bind(new Date().toISOString(), r.phone).run(); } catch (_) {}
+        // Joaco YA le pasó el presupuesto (brief enviado) -> sale de la precotización esté activo
+        // o completo. Frena al bot si Joaco cotizó a mano mientras el bot todavía relevaba.
+        try { await env.DB.prepare("UPDATE precotiz_pilot SET estado = 'cotizado', updated_at = ? WHERE phone = ? AND estado IN ('activo','completo')").bind(new Date().toISOString(), r.phone).run(); } catch (_) {}
         await paraCotizarTag(env, r.phone, false);
-      } else {
+        await precotizTag(env, r.phone, false);
+      } else if (r.estado === 'completo') {
         await paraCotizarTag(env, r.phone, true);
       }
     }
