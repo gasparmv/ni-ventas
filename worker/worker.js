@@ -401,9 +401,42 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
       if(!r.data||!r.data.trans)return showErr('No se pudo calcular.');
       var ent=(r.data.entrega==='retiro')?'RETIRO EN TALLER - envio descontado':'ENVIO INCLUIDO';
       var head='<div class="entnote">'+ent+'</div>'+(nombre?'<div class="card" style="padding:12px 16px;margin-bottom:10px"><b style="font-size:15px">'+esc(nombre)+'</b></div>':'');
-      $('res').innerHTML=head+baseCard('Transparente','#cbd5e1',r.data.trans)+baseCard('Negro','#1f2937',r.data.negro);
+      $('res').innerHTML=head+baseCard('Transparente','#cbd5e1',r.data.trans)+baseCard('Negro','#1f2937',r.data.negro)+'<button class="btn" id="b_copy" style="margin-top:2px">Copiar presupuesto</button><div class="note" style="margin-top:8px">Listo para mandarle a tu cliente (con tus precios de reventa). Pod&eacute;s editarlo antes de enviar.</div>';
+      var _bc=$('b_copy'); if(_bc)_bc.onclick=function(){ copyText(presupuestoTexto(r.data,nombre,ancho,alto),_bc); };
       loadHist();
     });
+  }
+  function num(n){return Number(Math.round(n||0)).toLocaleString('es-AR');}
+  function presupuestoTexto(d,nombre,ancho,alto){
+    var t=d.trans||{},n=d.negro||{},L=[];
+    L.push('Te comparto el presupuesto con la información detallada!');
+    L.push('');
+    L.push('Trabajo: '+(nombre||''));
+    L.push('Medidas: '+Math.round(ancho)+'x'+Math.round(alto)+' cm');
+    L.push('Base acrílica transparente: $'+num(t.reventaMax));
+    L.push('Base negra: $'+num(n.reventaMax));
+    L.push('');
+    L.push('Controladores opcionales:');
+    L.push('');
+    L.push('Slim: $18.700');
+    L.push('');
+    L.push('Control remoto: $24.900');
+    L.push('');
+    L.push('App: $38.000');
+    L.push('');
+    L.push('Trabajamos con bases acrílicas transparentes de 3mm, la mejor calidad (NO mdf/fibrofácil/policarbonato/PETG/etc.)');
+    L.push('Para iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña. Aceptamos todos los medios de pago!');
+    L.push('');
+    L.push('Tiempo de entrega: 15/20 días.');
+    L.push('');
+    L.push('Hacemos envíos GRATIS a todo el país!');
+    return L.join('\\n');
+  }
+  function copyFallback(txt){ var ta=document.createElement('textarea');ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta); }
+  function copyText(txt,btn){
+    var done=function(){ if(btn){var o=btn.getAttribute('data-lbl')||btn.textContent;btn.setAttribute('data-lbl',o);btn.textContent='Copiado!';setTimeout(function(){btn.textContent=o;},1600);} };
+    if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(done,function(){copyFallback(txt);done();}); }
+    else { copyFallback(txt); done(); }
   }
   function videoCardHtml(){
     if(VIDEO_YT){ return '<div class="card"><h1 style="font-size:16px">Como cotizar en 10 minutos</h1><div class="vwrap"><iframe src="https://www.youtube.com/embed/'+VIDEO_YT+'" allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" allowfullscreen></iframe></div></div>'; }
@@ -428,9 +461,9 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     h+='<h2>3. Controladores (extras opcionales)</h2>';
     h+='<p>Le dan mas efectos y un encendido/apagado comodo. <b>No son RGB</b> (no cambian de color): regulan intensidad, efectos e intermitencia.</p>';
     h+='<ul>';
-    h+='<li><b>Slim</b> &mdash; regulador de intensidad + 5 efectos + on/off &rarr; <b>$7.800</b></li>';
-    h+='<li><b>Control remoto</b> &mdash; 8 efectos + regulador de velocidad + on/off &rarr; <b>$10.400</b></li>';
-    h+='<li><b>App</b> &mdash; control desde el celu, programas horarios, funcion audioritmica, compatible con Alexa/Google &rarr; <b>$21.000</b></li>';
+    h+='<li><b>Slim</b> &mdash; regulador de intensidad + 5 efectos + on/off<br>tu costo <b>$7.800</b> &middot; venta sugerida <b>$18.700</b></li>';
+    h+='<li><b>Control remoto</b> &mdash; 8 efectos + regulador de velocidad + on/off<br>tu costo <b>$10.400</b> &middot; venta sugerida <b>$24.900</b></li>';
+    h+='<li><b>App</b> &mdash; control desde el celu, programas horarios, funcion audioritmica, compatible con Alexa/Google<br>tu costo <b>$21.000</b> &middot; venta sugerida <b>$38.000</b></li>';
     h+='</ul>';
     h+='<h2>4. Como cotizar</h2>';
     h+='<p>Usa el cotizador. Necesitas del cliente:</p>';
