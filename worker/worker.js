@@ -408,28 +408,27 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   }
   function num(n){return Number(Math.round(n||0)).toLocaleString('es-AR');}
   function presupuestoTexto(d,nombre,ancho,alto){
-    var t=d.trans||{},n=d.negro||{},L=[];
+    var L=[];
     L.push('Te comparto el presupuesto con la información detallada!');
     L.push('');
     L.push('Trabajo: '+(nombre||''));
     L.push('Medidas: '+Math.round(ancho)+'x'+Math.round(alto)+' cm');
-    L.push('Base acrílica transparente: $'+num(t.reventaMax));
-    L.push('Base negra: $'+num(n.reventaMax));
+    L.push('Base acrílica transparente: $ ');
+    L.push('Base negra: $ ');
     L.push('');
     L.push('Controladores opcionales:');
     L.push('');
-    L.push('Slim: $18.700');
+    L.push('Slim: $ ');
     L.push('');
-    L.push('Control remoto: $24.900');
+    L.push('Control remoto: $ ');
     L.push('');
-    L.push('App: $38.000');
+    L.push('App: $ ');
     L.push('');
     L.push('Trabajamos con bases acrílicas transparentes de 3mm, la mejor calidad (NO mdf/fibrofácil/policarbonato/PETG/etc.)');
-    L.push('Para iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña. Aceptamos todos los medios de pago!');
+    L.push('');
+    L.push('Para iniciar el trabajo, se requiere el 50% del total del cartel en concepto de seña.');
     L.push('');
     L.push('Tiempo de entrega: 15/20 días.');
-    L.push('');
-    L.push('Hacemos envíos GRATIS a todo el país!');
     return L.join('\\n');
   }
   function copyFallback(txt){ var ta=document.createElement('textarea');ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta); }
@@ -440,7 +439,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   }
   function videoCardHtml(){
     if(VIDEO_YT){ return '<div class="card"><h1 style="font-size:16px">Como cotizar en 10 minutos</h1><div class="vwrap"><iframe src="https://www.youtube.com/embed/'+VIDEO_YT+'" allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" allowfullscreen></iframe></div></div>'; }
-    return '<div class="card vsoon"><div class="vicon">&#127916;</div><b style="font-size:15px">Como cotizar en 10 minutos</b><div class="note" style="margin-top:6px">Video en camino: te muestro como instalar Inkscape, vectorizar el logo y cotizar paso a paso.</div></div>';
+    return '<div class="card vsoon"><div class="vicon">&#127916;</div><b style="font-size:15px">Como cotizar en 10 minutos</b><div class="note" style="margin-top:6px">Video en camino: te muestro como usar el Illustrator, vectorizar el logo y cotizar paso a paso.</div></div>';
   }
   function guiaHtml(){
     var h='<button class="tb-btn" id="b_guia_back" style="margin-bottom:16px">&#8592; Volver al cotizador</button>';
@@ -468,7 +467,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     h+='<h2>4. Como cotizar</h2>';
     h+='<p>Usa el cotizador. Necesitas del cliente:</p>';
     h+='<ul><li>Foto o imagen de referencia del diseno.</li><li>Medidas aprox (ancho y alto en cm).</li><li>Metros de neon y tramos (el video te ensena a sacarlos).</li><li>Interior o exterior.</li><li>Entrega: envio incluido o retiro (mas barato).</li></ul>';
-    h+='<p>Mira el video de abajo del cotizador: te muestro como instalar Inkscape, vectorizar y cotizar en 10 minutos.</p>';
+    h+='<p>Mira el video de abajo del cotizador: te muestro como usar el Illustrator, vectorizar y cotizar en 10 minutos.</p>';
     h+='<h2>5. Precios y tu ganancia</h2>';
     h+='<p>El cotizador te muestra, por cada cartel: <b>tu costo</b> (lo que nos pagas), la <b>reventa sugerida</b> (25% a 35% arriba de tu costo) y <b>tu ganancia</b>. Podes marcar el precio que quieras; el sugerido es una referencia sana. Guarda cada cotizacion con un nombre para tenerlas a mano.</p>';
     h+='<h2>6. Como vender (lo que funciona)</h2>';
@@ -491,7 +490,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     h+='<p><b>SI:</b> responder rapido, mostrar como queda, ofrecer el controlador, seguir a los que no contestan, cerrar con sena.</p>';
     h+='<p><b>NO:</b> cotizar a ojo, prometer fechas imposibles, saturar con 20 medidas, cerrar sin sena.</p>';
     h+='<h2>10. Materiales de apoyo</h2>';
-    h+='<ul><li><b>Inkscape</b> (gratis) para vectorizar &mdash; boton arriba a la izquierda.</li><li><b>Cotizador</b> &mdash; tu herramienta de precios.</li><li><b>Video</b> &mdash; como cotizar en 10 min, abajo del cotizador.</li></ul>';
+    h+='<ul><li><b>Illustrator</b> descargable para vectorizar &mdash; boton arriba a la izquierda.</li><li><b>Cotizador</b> &mdash; tu herramienta de precios.</li><li><b>Video</b> &mdash; como cotizar en 10 min, abajo del cotizador.</li></ul>';
     h+='<button class="tb-btn" id="b_guia_back2" style="margin-top:18px">&#8592; Volver al cotizador</button>';
     h+='</div>';
     return h;
