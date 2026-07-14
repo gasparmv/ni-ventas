@@ -1298,6 +1298,10 @@ async function kvSet(env, k, v) {
 // ¿Piloto prendido? Default OFF (kill-switch): arranca apagado hasta estar
 // deployado y probado. Gaspar lo prende con kv 'precotiz_on'='1'.
 async function precotizOn(env) { return (await kvGet(env, 'precotiz_on', '0')) === '1'; }
+// Freno de mano MANUAL por chat: Gaspar aprieta "Frenar bot" en una conversación y el bot no
+// vuelve a hablar ahí NUNCA MÁS (kv precotiz_frozen:<phone>). Para los casos raros que el bot no
+// puede entender (ej: un cliente que escribe por un pedido ya existente desde otro número).
+async function precotizFrozen(env, phone) { try { return (await kvGet(env, 'precotiz_frozen:' + phone, '')) === '1'; } catch (_) { return false; } }
 // Modo: 'auto' (auto-envío) | 'draft' (Gaspar aprueba los mensajitos). Default draft.
 async function precotizModo(env) { return (await kvGet(env, 'precotiz_modo', 'draft')) === 'auto' ? 'auto' : 'draft'; }
 
@@ -1583,6 +1587,7 @@ async function processPrecotizPilot(env) {
   let activos = [];
   try { const rs = await env.DB.prepare("SELECT * FROM precotiz_pilot WHERE estado = 'activo'").all(); activos = rs.results || []; } catch (_) {}
   for (const lead of activos) {
+    if (await precotizFrozen(env, lead.phone)) continue;                   // freno de mano MANUAL: el bot no habla más en este chat
     let lastIn;
     try { lastIn = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'status'").bind(lead.phone).first(); } catch (_) { continue; }
     const lastInTs = lastIn?.t || '';
@@ -1678,6 +1683,7 @@ async function processPrecotizPilot(env) {
     // (números largos de 15-17 dígitos) y números no-AR: no son leads de
     // carteles que el bot pueda atender por este canal.
     if (!/^54\d{10,11}$/.test(phone)) continue;
+    if (await precotizFrozen(env, phone)) continue;                        // freno de mano MANUAL: el bot no habla más en este chat
     if (!precotizPicks(phone, samplePct)) continue;                        // fuera de la muestra
     if (await precotizGet(env, phone)) continue;                           // ya en el piloto
     if ((await kvGet(env, 'precotiz_seen:' + phone)) === '1') continue;     // ya evaluado
@@ -1786,6 +1792,7 @@ async function processPrecotizNudges(env) {
     ).all()).results || [];
   } catch (_) {}
   for (const lead of leads) {
+    if (await precotizFrozen(env, lead.phone)) continue;                   // freno de mano MANUAL
     let lastIn;
     try { lastIn = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(lead.phone).first(); } catch (_) { continue; }
     const lastInTs = lastIn && lastIn.t; if (!lastInTs) continue;
@@ -7551,7 +7558,9 @@ export default {
           const sample = parseInt(await kvGet(env, 'precotiz_sample', '20'), 10) || 20;
           let leads = [];
           try { const rs = await env.DB.prepare('SELECT * FROM precotiz_pilot ORDER BY updated_at DESC').all(); leads = rs.results || []; } catch (_) {}
-          return json({ ok: true, on, modo, cap, sample, count: leads.length, leads });
+          let frozen = [];
+          try { const fr = await env.DB.prepare("SELECT substr(k, 17) AS phone FROM kv_cache WHERE k LIKE 'precotiz_frozen:%' AND v = '1'").all(); frozen = (fr.results || []).map(r => r.phone); } catch (_) {}
+          return json({ ok: true, on, modo, cap, sample, count: leads.length, leads, frozen });
         }
 
         // GET /admin/precotiz/evaluaciones → veredictos de la IA (por qué entró/no entró cada lead).
@@ -7570,6 +7579,23 @@ export default {
           let rows = [];
           try { const rs = await env.DB.prepare(sql).bind(...binds).all(); rows = rs.results || []; } catch (_) {}
           return json({ ok: true, count: rows.length, evaluaciones: rows });
+        }
+
+        // POST /admin/precotiz/freeze → { phone, on } FRENO DE MANO manual por chat (el bot no vuelve a hablar ahí)
+        if (request.method === 'POST' && path === '/admin/precotiz/freeze') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          const num = String(body?.phone || '').replace(/\D/g, '');
+          if (!num) return json({ error: 'missing phone' }, 400);
+          const on = body?.on !== false; // default true (frenar)
+          await kvSet(env, 'precotiz_frozen:' + num, on ? '1' : '0');
+          return json({ ok: true, phone: num, frozen: on });
+        }
+
+        // GET /admin/precotiz/frozen → teléfonos con el bot frenado a mano
+        if (request.method === 'GET' && path === '/admin/precotiz/frozen') {
+          let phones = [];
+          try { const rs = await env.DB.prepare("SELECT substr(k, 17) AS phone FROM kv_cache WHERE k LIKE 'precotiz_frozen:%' AND v = '1'").all(); phones = (rs.results || []).map(r => r.phone); } catch (_) {}
+          return json({ ok: true, frozen: phones });
         }
 
         // POST /admin/precotiz/control → { on?, modo? } prender/apagar + draft|auto
