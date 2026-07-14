@@ -2275,11 +2275,15 @@ function renderPrecotizChatBanner(phone) {
   const estado = lead.estado === 'completo' ? 'pre cotización completa' : lead.estado === 'escalado' ? ('freno de mano — ' + (lead.escalado_motivo || 'revisar')) : 'en pre cotización · el bot releva';
   const dato = (ok, l) => `<span style="color:${ok ? '#25D366' : 'var(--fg-subtle)'}">${ok ? '✓' : '○'} ${l}</span>`;
   const frozen = STATE.precotiz && Array.isArray(STATE.precotiz.frozen) && STATE.precotiz.frozen.includes(phone);
+  // El botón "Frenar bot" solo tiene sentido si el bot está TRABAJANDO (estado 'activo'). Si la
+  // pre cotización ya está completa/cotizada/escalada, el bot ya no habla → no mostramos el botón.
+  // Si el chat está frenado a mano, sí lo mostramos (como "Reactivar") para poder revertir.
+  const mostrarFreno = frozen || lead.estado === 'activo';
   return `
     <div style="background:${frozen ? 'rgba(224,108,108,.10)' : 'rgba(143,212,222,.08)'};border-bottom:1px solid var(--border);padding:8px 14px;font-size:12px;position:relative;z-index:1">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <span style="color:${frozen ? '#e06c6c' : 'var(--accent-cyan,#8FD4DE)'};font-weight:600">${frozen ? '🛑 bot frenado a mano en este chat' : '◐ ' + escapeHtml(estado)}</span>
-        <span style="display:flex;gap:8px;align-items:center;font-size:11px">${dato(lead.tiene_foto, 'foto')} ${dato(lead.tiene_medidas, 'medidas')} ${dato(lead.tiene_intext, 'int/ext')}<button id="precotiz-freeze-btn" data-frozen="${frozen ? '1' : '0'}" title="${frozen ? 'Reactivar el bot en este chat' : 'Frenar el bot en este chat — no vuelve a hablar acá'}" style="font-size:11px;padding:3px 10px;border-radius:var(--r-sm);cursor:pointer;background:transparent;border:1px solid ${frozen ? '#25D366' : '#e06c6c'};color:${frozen ? '#25D366' : '#e06c6c'};font-weight:600;white-space:nowrap">${frozen ? '▶ Reactivar bot' : '🛑 Frenar bot'}</button></span>
+        <span style="display:flex;gap:8px;align-items:center;font-size:11px">${dato(lead.tiene_foto, 'foto')} ${dato(lead.tiene_medidas, 'medidas')} ${dato(lead.tiene_intext, 'int/ext')}${mostrarFreno ? `<button id="precotiz-freeze-btn" data-frozen="${frozen ? '1' : '0'}" title="${frozen ? 'Reactivar el bot en este chat' : 'Frenar el bot en este chat — no vuelve a hablar acá'}" style="font-size:11px;padding:3px 10px;border-radius:var(--r-sm);cursor:pointer;background:transparent;border:1px solid ${frozen ? '#25D366' : '#e06c6c'};color:${frozen ? '#25D366' : '#e06c6c'};font-weight:600;white-space:nowrap">${frozen ? '▶ Reactivar bot' : '🛑 Frenar bot'}</button>` : ''}</span>
       </div>
       ${draft.length ? `
         <div style="margin-top:8px;background:var(--ink-100);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);padding:8px">
