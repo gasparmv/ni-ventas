@@ -272,14 +272,30 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
 .segb{flex:1;border:0;background:transparent;color:var(--sub);padding:11px 8px;border-radius:8px;font-family:var(--fsans);font-weight:700;cursor:pointer;font-size:13px;text-transform:uppercase;letter-spacing:.03em}
 .segb.on{background:var(--red);color:#fff;box-shadow:var(--glow-red)}
 .entnote{text-align:center;font-family:var(--fmono);font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--sub);margin:2px 0 10px}
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+.tb-btn{background:var(--card);border:1px solid var(--bd);border-radius:9px;padding:8px 12px;color:var(--fg);font-family:var(--fmono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;cursor:pointer;text-decoration:none;font-weight:600;display:inline-block}
+.tb-btn:hover{border-color:var(--cyan);color:var(--cyan)}
+.vwrap{position:relative;padding-top:56.25%;border-radius:12px;overflow:hidden;margin-top:10px;background:#000}
+.vwrap iframe{position:absolute;top:0;left:0;width:100%;height:100%;border:0}
+.vsoon{text-align:center;padding:24px 18px}
+.vicon{font-size:32px;margin-bottom:4px}
+.guia h2{font-family:var(--fdisp);font-size:19px;text-transform:uppercase;margin:22px 0 8px;color:var(--cyan)}
+.guia h3{font-size:15px;margin:14px 0 4px;color:var(--fg)}
+.guia p{color:var(--mut);font-size:14px;line-height:1.6;margin:6px 0}
+.guia li{color:var(--mut);font-size:14px;line-height:1.55;margin:3px 0}
+.guia ul{padding-left:18px;margin:6px 0}
+.guia .qa{border-top:1px solid var(--bd);padding:9px 0}
+.guia .qa b{color:var(--fg);font-size:14px}
 .hide{display:none}
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div class="topbar"><a class="tb-btn" href="https://inkscape.org/release/" target="_blank" rel="noopener">&#127912; Inkscape gratis</a><button class="tb-btn" id="b_guia">&#128214; Guia</button></div>
   <div class="brand"><svg class="logo" viewBox="1500 600 1300 800" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="NEON INFINITO"><path fill="#FF1515" d="M1830.98,943.35c-3.12,0-6.17-1.29-8.36-3.67l-236.8-257.99v250.24c0,6.26-5.08,11.34-11.34,11.34 s-11.34-5.08-11.34-11.34V652.57c0-4.67,2.87-8.87,7.22-10.57c4.36-1.7,9.31-0.54,12.47,2.9l236.8,257.99V652.57 c0-6.26,5.08-11.34,11.34-11.34s11.34,5.08,11.34,11.34v279.44c0,4.67-2.87,8.87-7.22,10.57 C1833.75,943.1,1832.36,943.35,1830.98,943.35z"/><path fill="#FF1515" d="M2081.45,940.36h-178.79c-6.26,0-11.34-5.08-11.34-11.34V647.9c0-6.26,5.08-11.34,11.34-11.34h178.79 c6.26,0,11.34,5.08,11.34,11.34s-5.08,11.34-11.34,11.34H1914v258.45h167.45c6.26,0,11.34,5.08,11.34,11.34 S2087.71,940.36,2081.45,940.36z"/><path fill="#FF1515" d="M2246.82,944.74c-86.17,0-156.28-70.11-156.28-156.28c0-86.17,70.11-156.28,156.28-156.28 s156.28,70.11,156.28,156.28C2403.1,874.63,2332.99,944.74,2246.82,944.74z M2246.82,654.86c-73.67,0-133.6,59.93-133.6,133.6 s59.93,133.6,133.6,133.6s133.6-59.93,133.6-133.6S2320.49,654.86,2246.82,654.86z"/><path fill="#FF1515" d="M2708.34,943.35c-3.12,0-6.17-1.29-8.36-3.67l-236.8-257.99v250.32c0,6.26-5.08,11.34-11.34,11.34 s-11.34-5.08-11.34-11.34V652.57c0-4.67,2.87-8.87,7.22-10.57c4.36-1.7,9.31-0.54,12.47,2.9L2697,902.89V652.57 c0-6.26,5.08-11.34,11.34-11.34s11.34,5.08,11.34,11.34v279.44c0,4.67-2.87,8.87-7.22,10.57 C2711.12,943.1,2709.72,943.35,2708.34,943.35z"/><path fill="#FF1515" d="M1995.54,796.87h-57.82c-6.26,0-11.34-5.08-11.34-11.34s5.08-11.34,11.34-11.34h57.82 c6.26,0,11.34,5.08,11.34,11.34S2001.8,796.87,1995.54,796.87z"/><path fill="#2AD8FF" d="M2420.21,1351.48c-20.88,0-41.89-3.86-62.74-11.54c-26.3-9.69-50.25-24.92-71.18-45.27l-106.05-103.06 l-106.14,102.08c-42.21,40.6-99.11,60.48-156.12,54.55c-37.24-3.87-71.06-18.04-97.81-40.97c-62.45-53.54-60.97-133.61-60.88-137 c1.65-59.37,34.98-115.4,86.98-146.21c43.23-25.61,97.1-31.28,147.81-15.54c29.11,9.03,56.52,25.5,79.29,47.62l106.95,103.93 l109.47-105.28c14.69-14.13,31.05-25.69,48.62-34.37c28.64-14.15,73.59-28.37,125.08-15.8c37.07,9.05,71.41,30.39,96.7,60.09 c27.05,31.77,41.44,69.79,41.61,109.93c0.18,43.03-16.83,84.77-47.87,117.52c-28.52,30.09-67.58,50.95-107.16,57.23 C2437.96,1350.78,2429.09,1351.48,2420.21,1351.48z M2196.59,1175.88l105.5,102.52c18.65,18.12,39.92,31.67,63.22,40.26 c26.03,9.6,52.24,12.4,77.9,8.33c67.07-10.64,136.24-70.5,135.91-152.26c-0.32-77.9-61.11-133.46-121.01-148.08 c-44.87-10.95-84.4,1.62-109.66,14.1c-15.48,7.65-29.93,17.87-42.94,30.38L2196.59,1175.88z M1936.82,1022.44 c-28.07,0-55.38,7.14-78.98,21.13c-45.37,26.88-74.44,75.67-75.88,127.33c-0.08,2.94-1.36,72.57,52.97,119.15 c23.24,19.92,52.76,32.24,85.4,35.64c50.35,5.23,100.67-12.39,138.06-48.34l105.58-101.55l-106.4-103.4 c-20.21-19.64-44.49-34.24-70.2-42.22C1970.68,1024.99,1953.61,1022.44,1936.82,1022.44z"/></svg><span class="tag">Revendedores</span></div>
   <div id="auth"></div>
   <div id="app" class="hide"></div>
+  <div id="guia" class="hide"></div>
 </div>
 <script>
 (function(){
@@ -287,6 +303,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   var token=localStorage.getItem(TKEY)||'';
   var me=null;
   var entrega='envio';
+  var VIDEO_YT='';  // ID del video de YouTube "como cotizar en 10 min" (Gaspar lo pasa despues)
   function $(id){return document.getElementById(id);}
   function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
   function money(n){return '$'+Number(Math.round(n||0)).toLocaleString('es-AR');}
@@ -357,6 +374,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     h+='<label>Entrega</label><div class="seg" id="i_entrega"><button type="button" class="segb'+(entrega==='envio'?' on':'')+'" data-ent="envio">Env&iacute;o incluido</button><button type="button" class="segb'+(entrega==='retiro'?' on':'')+'" data-ent="retiro">Retiro en taller</button></div>';
     h+='<button class="btn" id="b_calc">Calcular precio</button><div class="err" id="err"></div></div>';
     h+='<div id="res"></div>';
+    h+=videoCardHtml();
     h+='<div class="card"><h1 style="font-size:16px">Tus cotizaciones</h1><div id="hist" class="hist"><div class="note" style="margin:8px 0 0">Todavia no hiciste ninguna.</div></div></div>';
     h+='<div class="note">Reventa sugerida = 25% a 35% sobre tu costo.<br>Precios de referencia; la cotizacion final la confirma Neon Infinito.</div>';
     $('app').innerHTML=h;
@@ -387,6 +405,70 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
       loadHist();
     });
   }
+  function videoCardHtml(){
+    if(VIDEO_YT){ return '<div class="card"><h1 style="font-size:16px">Como cotizar en 10 minutos</h1><div class="vwrap"><iframe src="https://www.youtube.com/embed/'+VIDEO_YT+'" allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" allowfullscreen></iframe></div></div>'; }
+    return '<div class="card vsoon"><div class="vicon">&#127916;</div><b style="font-size:15px">Como cotizar en 10 minutos</b><div class="note" style="margin-top:6px">Video en camino: te muestro como instalar Inkscape, vectorizar el logo y cotizar paso a paso.</div></div>';
+  }
+  function guiaHtml(){
+    var h='<button class="tb-btn" id="b_guia_back" style="margin-bottom:16px">&#8592; Volver al cotizador</button>';
+    h+='<div class="brand" style="margin:0 0 16px"><span class="tag">Guia del revendedor</span></div>';
+    h+='<div class="guia card">';
+    h+='<h1 style="font-family:var(--fdisp);font-size:23px;text-transform:uppercase;line-height:1.05">La biblia de la reventa</h1>';
+    h+='<p>Todo lo que tenes que saber para vender carteles de neon LED de Neon Infinito. Leela una vez y tenes casi todas las respuestas.</p>';
+    h+='<h2>1. El producto</h2>';
+    h+='<p>Vendes <b>carteles de neon LED personalizados</b>: un objeto fisico hecho a medida. No es neon de gas: es <b>tira LED tipo neon</b> montada sobre una base de <b>acrilico</b> cortada con la forma del diseno (texto, logo o figura). Cada uno se fabrica desde cero segun el diseno y las medidas.</p>';
+    h+='<ul><li><b>Interior:</b> para adentro de un local, oficina o cuarto.</li><li><b>Exterior:</b> sellado para aguantar la intemperie (sale un poco mas).</li></ul>';
+    h+='<h2>2. Especificaciones y cuidados</h2>';
+    h+='<ul>';
+    h+='<li><b>Exterior / sol y lluvia:</b> los sellamos con silicona para impermeabilizarlos. Igual conviene que no le pegue el sol directo todo el dia y, si esta bajo alero, mejor.</li>';
+    h+='<li><b>Consumo y enchufe:</b> es LED, bajo consumo y larga vida. Viene con su fuente y se enchufa a 220V como cualquier electrodomestico.</li>';
+    h+='<li><b>Instalacion:</b> viene listo para colgar y usar.</li>';
+    h+='<li><b>Garantia:</b> 1 ano por fallas propias del producto (no cubre golpes ni dano externo).</li>';
+    h+='</ul>';
+    h+='<h2>3. Controladores (extras opcionales)</h2>';
+    h+='<p>Le dan mas efectos y un encendido/apagado comodo. <b>No son RGB</b> (no cambian de color): regulan intensidad, efectos e intermitencia.</p>';
+    h+='<ul>';
+    h+='<li><b>Slim</b> &mdash; regulador de intensidad + 5 efectos + on/off &rarr; <b>$7.800</b></li>';
+    h+='<li><b>Control remoto</b> &mdash; 8 efectos + regulador de velocidad + on/off &rarr; <b>$10.400</b></li>';
+    h+='<li><b>App</b> &mdash; control desde el celu, programas horarios, funcion audioritmica, compatible con Alexa/Google &rarr; <b>$21.000</b></li>';
+    h+='</ul>';
+    h+='<h2>4. Como cotizar</h2>';
+    h+='<p>Usa el cotizador. Necesitas del cliente:</p>';
+    h+='<ul><li>Foto o imagen de referencia del diseno.</li><li>Medidas aprox (ancho y alto en cm).</li><li>Metros de neon y tramos (el video te ensena a sacarlos).</li><li>Interior o exterior.</li><li>Entrega: envio incluido o retiro (mas barato).</li></ul>';
+    h+='<p>Mira el video de abajo del cotizador: te muestro como instalar Inkscape, vectorizar y cotizar en 10 minutos.</p>';
+    h+='<h2>5. Precios y tu ganancia</h2>';
+    h+='<p>El cotizador te muestra, por cada cartel: <b>tu costo</b> (lo que nos pagas), la <b>reventa sugerida</b> (25% a 35% arriba de tu costo) y <b>tu ganancia</b>. Podes marcar el precio que quieras; el sugerido es una referencia sana. Guarda cada cotizacion con un nombre para tenerlas a mano.</p>';
+    h+='<h2>6. Como vender (lo que funciona)</h2>';
+    h+='<ul>';
+    h+='<li><b>Responde rapido</b> &mdash; el cliente se enfria en horas.</li>';
+    h+='<li><b>Pedi foto + medidas + interior/exterior</b> antes de cotizar.</li>';
+    h+='<li><b>Mostra como queda</b> &mdash; una imagen de referencia o una foto de un trabajo similar vende muchisimo.</li>';
+    h+='<li><b>Ofrece el controlador</b> al cierre.</li>';
+    h+='<li><b>Segui</b> a los que no contestan (al dia siguiente, a los 3 y a los 7 dias).</li>';
+    h+='<li><b>Cerra con sena</b> (ej. 50%) para arrancar la produccion.</li>';
+    h+='</ul>';
+    h+='<h3>Objecion tipica: "tiene muchas letras chiquitas"</h3>';
+    h+='<p>Recomenda simplificar: las letras muy juntas en neon se empastan, se leen peor de lejos y encarecen por la mano de obra. Una version mas limpia queda mejor y mas barata.</p>';
+    h+='<h2>7. Envios y produccion</h2>';
+    h+='<ul><li><b>Produccion:</b> ~15 a 20 dias.</li><li><b>Entrega:</b> podes <b>retirar en el taller</b> (mas barato, se descuenta el envio) o pedir <b>envio</b>. Lo despachamos directo a vos o directo a tu cliente; la entrega corre por tu cuenta.</li></ul>';
+    h+='<h2>8. Preguntas frecuentes del cliente</h2>';
+    var faq=[['Cuanto sale?','Depende del tamano y la complejidad. Pasame foto + medidas y cotizas al toque.'],['Sirve para exterior?','Si, va sellado. Evita el sol directo permanente y, si hay alero, mejor.'],['Cuanto tarda?','La produccion ~15-20 dias.'],['Puedo ver como queda antes de pagar?','Si, con una imagen de referencia o un ejemplo similar.'],['Hacen mi logo?','Si, se vectoriza y se adapta al neon. Pasa la imagen en la mejor calidad posible.'],['Consume mucho? Como se enchufa?','Es LED, bajo consumo. Viene con fuente y va a 220V.'],['Como se instala?','Viene listo para colgar y usar.'],['Tiene garantia?','1 ano por fallas de fabrica (no cubre golpes).'],['Se puede regular / manejar del celu?','Si, con un controlador (Slim / Remoto / App).']];
+    for(var f=0;f<faq.length;f++){ h+='<div class="qa"><b>'+faq[f][0]+'</b><p style="margin-top:2px">'+faq[f][1]+'</p></div>'; }
+    h+='<h2>9. Que SI y que NO</h2>';
+    h+='<p><b>SI:</b> responder rapido, mostrar como queda, ofrecer el controlador, seguir a los que no contestan, cerrar con sena.</p>';
+    h+='<p><b>NO:</b> cotizar a ojo, prometer fechas imposibles, saturar con 20 medidas, cerrar sin sena.</p>';
+    h+='<h2>10. Materiales de apoyo</h2>';
+    h+='<ul><li><b>Inkscape</b> (gratis) para vectorizar &mdash; boton arriba a la izquierda.</li><li><b>Cotizador</b> &mdash; tu herramienta de precios.</li><li><b>Video</b> &mdash; como cotizar en 10 min, abajo del cotizador.</li></ul>';
+    h+='<button class="tb-btn" id="b_guia_back2" style="margin-top:18px">&#8592; Volver al cotizador</button>';
+    h+='</div>';
+    return h;
+  }
+  function renderGuia(){
+    var g=$('guia'); g.innerHTML=guiaHtml();
+    var back=function(){ g.className='hide'; if(token){$('app').className='';}else{$('auth').className='';} window.scrollTo(0,0); };
+    if($('b_guia_back'))$('b_guia_back').onclick=back;
+    if($('b_guia_back2'))$('b_guia_back2').onclick=back;
+  }
   function loadHist(){
     api('/revendedor/historial').then(function(r){
       if(!r.ok||!r.data||!r.data.items||!r.data.items.length)return;
@@ -401,6 +483,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
       $('hist').innerHTML=h;
     });
   }
+  var _bg=$('b_guia'); if(_bg)_bg.onclick=function(){ renderGuia(); $('guia').className=''; $('app').className='hide'; $('auth').className='hide'; window.scrollTo(0,0); };
   if(token){ api('/revendedor/me').then(function(r){ if(r.ok&&r.data&&r.data.id){me=r.data;enterApp();} else {token='';localStorage.removeItem(TKEY);renderAuth();} }); }
   else renderAuth();
 })();
