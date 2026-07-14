@@ -7807,7 +7807,16 @@ async function sendChatMessage(phone, text) {
       });
       const j = await r.json();
       if (!r.ok) {
-        toast('Error: ' + (j.error || 'no se pudo enviar'));
+        // IG: traducimos los errores crípticos de Meta a algo entendible (así Abril entiende y
+        // no reintenta 7 veces). "cannot be found" = esa cuenta quedó inalcanzable por la API
+        // (se desactivó, te bloqueó o borró la conversación) — se puede responder desde la app.
+        let msg = 'Error: ' + (j.error || 'no se pudo enviar');
+        if (_isIg && /cannot be found|user.*not.*found|does not exist/i.test(String(j.error || ''))) {
+          msg = '⚠️ No se puede responder a este contacto por Instagram: la cuenta se desactivó, te bloqueó o borró la conversación. Podés intentar desde la app de Instagram.';
+        } else if (_isIg) {
+          msg = 'Instagram — ' + (j.error || 'no se pudo enviar');
+        }
+        toast(msg);
         restoreOnFail(parts.slice(sent).join('\n\n'));
         return;
       }
