@@ -268,6 +268,10 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
 .hist .pr{text-align:right;white-space:nowrap}
 .hist .pr .c{color:var(--cyan);font-weight:700;font-size:13px;font-family:var(--fmono)}
 .note{color:var(--faint);font-size:11px;margin-top:10px;text-align:center;line-height:1.6}
+.seg{display:flex;gap:6px;background:var(--raised);border:1px solid var(--bd);border-radius:11px;padding:4px}
+.segb{flex:1;border:0;background:transparent;color:var(--sub);padding:11px 8px;border-radius:8px;font-family:var(--fsans);font-weight:700;cursor:pointer;font-size:13px;text-transform:uppercase;letter-spacing:.03em}
+.segb.on{background:var(--red);color:#fff;box-shadow:var(--glow-red)}
+.entnote{text-align:center;font-family:var(--fmono);font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--sub);margin:2px 0 10px}
 .hide{display:none}
 </style>
 </head>
@@ -282,6 +286,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   var TKEY='rev_token';
   var token=localStorage.getItem(TKEY)||'';
   var me=null;
+  var entrega='envio';
   function $(id){return document.getElementById(id);}
   function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
   function money(n){return '$'+Number(Math.round(n||0)).toLocaleString('es-AR');}
@@ -349,13 +354,16 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     h+='<div class="r"><div><label>Ancho (cm)</label><input id="i_ancho" type="number" inputmode="numeric" placeholder="50"></div><div><label>Alto (cm)</label><input id="i_alto" type="number" inputmode="numeric" placeholder="30"></div></div>';
     h+='<div class="r"><div><label>Metros de neon</label><input id="i_neon" type="number" inputmode="decimal" placeholder="3"></div><div><label>Tramos</label><input id="i_tramos" type="number" inputmode="numeric" placeholder="3"></div></div>';
     h+='<label>Tipo</label><select id="i_tipo"><option value="INT">Interior</option><option value="EXT">Exterior (resistente)</option></select>';
+    h+='<label>Entrega</label><div class="seg" id="i_entrega"><button type="button" class="segb'+(entrega==='envio'?' on':'')+'" data-ent="envio">Env&iacute;o incluido</button><button type="button" class="segb'+(entrega==='retiro'?' on':'')+'" data-ent="retiro">Retiro en taller</button></div>';
     h+='<button class="btn" id="b_calc">Calcular precio</button><div class="err" id="err"></div></div>';
     h+='<div id="res"></div>';
     h+='<div class="card"><h1 style="font-size:16px">Tus cotizaciones</h1><div id="hist" class="hist"><div class="note" style="margin:8px 0 0">Todavia no hiciste ninguna.</div></div></div>';
-    h+='<div class="note">Tu costo = 5% menos del precio sugerido. Reventa sugerida = 25% a 35% sobre tu costo.<br>Precios de referencia; la cotizacion final la confirma Neon Infinito.</div>';
+    h+='<div class="note">Reventa sugerida = 25% a 35% sobre tu costo.<br>Precios de referencia; la cotizacion final la confirma Neon Infinito.</div>';
     $('app').innerHTML=h;
     $('b_out').onclick=logout;
     $('b_calc').onclick=doCalc;
+    var _sg=document.querySelectorAll('#app .segb');
+    for(var _i=0;_i<_sg.length;_i++){_sg[_i].onclick=function(){for(var _j=0;_j<_sg.length;_j++)_sg[_j].className='segb';this.className='segb on';entrega=this.getAttribute('data-ent');};}
   }
   function baseCard(title,sw,o){
     var h='<div class="base"><h3><span class="sw" style="background:'+sw+'"></span>'+title+'</h3>';
@@ -369,11 +377,12 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     var ancho=+$('i_ancho').value, alto=+$('i_alto').value, neon=+$('i_neon').value, tramos=+$('i_tramos').value, tipo=$('i_tipo').value;
     if(!ancho||!alto||!neon||!tramos)return showErr('Carga ancho, alto, metros de neon y tramos.');
     var b=$('b_calc');b.disabled=true;b.textContent='Calculando...';
-    api('/revendedor/cotizar',{method:'POST',body:{nombre:nombre,ancho:ancho,alto:alto,neon:neon,tramos:tramos,tipo:tipo}}).then(function(r){
+    api('/revendedor/cotizar',{method:'POST',body:{nombre:nombre,ancho:ancho,alto:alto,neon:neon,tramos:tramos,tipo:tipo,entrega:entrega}}).then(function(r){
       b.disabled=false;b.textContent='Calcular precio';
       if(!r.ok){ if(r.data&&r.data.error==='unauthorized')return logout(); return showErr((r.data&&r.data.error)||'No se pudo calcular.'); }
       if(!r.data||!r.data.trans)return showErr('No se pudo calcular.');
-      var head=nombre?'<div class="card" style="padding:12px 16px;margin-bottom:10px"><b style="font-size:15px">'+esc(nombre)+'</b></div>':'';
+      var ent=(r.data.entrega==='retiro')?'RETIRO EN TALLER - envio descontado':'ENVIO INCLUIDO';
+      var head='<div class="entnote">'+ent+'</div>'+(nombre?'<div class="card" style="padding:12px 16px;margin-bottom:10px"><b style="font-size:15px">'+esc(nombre)+'</b></div>':'');
       $('res').innerHTML=head+baseCard('Transparente','#cbd5e1',r.data.trans)+baseCard('Negro','#1f2937',r.data.negro);
       loadHist();
     });
@@ -7197,10 +7206,16 @@ export default {
         const tramos = +body.tramos || 1;
         const tipo = String(body.tipo || 'INT').toUpperCase() === 'EXT' ? 'EXT' : 'INT';
         const nombre = String(body.nombre || '').slice(0, 80).trim();
+        const entrega = String(body.entrega || 'envio').toLowerCase() === 'retiro' ? 'retiro' : 'envio';
         if (ancho <= 0 || alto <= 0 || neon <= 0) return json({ error: 'Carga ancho, alto y metros de neon.' }, 400);
         if (ancho > 2000 || alto > 2000 || neon > 200) return json({ error: 'Medidas fuera de rango.' }, 400);
         const p = await revPriceParams(env);
-        const { transFinal, negroFinal } = revCalcPrecio({ ancho, alto, neon, tramos, tipo }, p);
+        let { transFinal, negroFinal } = revCalcPrecio({ ancho, alto, neon, tramos, tipo }, p);
+        // El envio YA esta incluido en el precio. Si el revendedor elige RETIRO en taller,
+        // se descuenta el envio segun tamano (m2 del sheet = ancho*alto/100): <=25 $10k, <=50 $20k, resto $35k.
+        const m2Sheet = (ancho * alto) / 100;
+        const envioCost = m2Sheet <= 25 ? 10000 : m2Sheet <= 50 ? 20000 : 35000;
+        if (entrega === 'retiro') { transFinal = Math.max(0, transFinal - envioCost); negroFinal = Math.max(0, negroFinal - envioCost); }
         const trans = revNumbers(transFinal), negro = revNumbers(negroFinal);
         const now = new Date().toISOString();
         try {
@@ -7208,7 +7223,7 @@ export default {
             'INSERT INTO revendedor_cotizaciones (revendedor_id, nombre, ancho, alto, neon, tramos, tipo, sugerido, costo, reventa_min, reventa_max, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
           ).bind(sess.id, nombre, ancho, alto, neon, tramos, tipo, trans.sugerido, trans.costo, trans.reventaMin, trans.reventaMax, now).run();
         } catch (_) {}
-        return json({ ok: true, trans, negro });
+        return json({ ok: true, trans, negro, entrega, envioCost });
       }
       if (request.method === 'GET' && path === '/revendedor/historial') {
         const rs = await env.DB.prepare(
