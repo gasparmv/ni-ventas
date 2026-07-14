@@ -2161,7 +2161,7 @@ async function fetchPrecotiz() {
     const leads = j.leads || [];
     STATE.precotiz = {
       on: !!j.on, modo: j.modo || 'draft', cap: j.cap || 10, count: j.count != null ? j.count : leads.length,
-      leads, draftCount: leads.filter(l => l.pending_draft && l.pending_draft !== '').length
+      leads, frozen: j.frozen || [], draftCount: leads.filter(l => l.pending_draft && l.pending_draft !== '').length
     };
   } catch (e) { STATE.precotiz = { error: String((e && e.message) || e) }; }
 }
