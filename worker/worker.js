@@ -261,8 +261,13 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
 .line.big{padding-top:8px}
 .line.big .v{font-size:23px;color:var(--cyan);text-shadow:var(--glow-cyan)}
 .line.win .v{color:var(--gr)}
-.hist .it{border-top:1px solid var(--bd);padding:11px 0;display:flex;justify-content:space-between;gap:8px}
+.hist .it{border-top:1px solid var(--bd);padding:11px 0;display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .hist .it:first-child{border-top:0}
+.hist .it:hover .sp{color:var(--cyan)}
+.hist .it:active{opacity:.55}
+.hist .rt{display:flex;align-items:center;gap:12px}
+.hist .ed{color:var(--sub);font-size:17px;opacity:.5;flex-shrink:0;line-height:1}
+.hist .it:hover .ed{opacity:1;color:var(--cyan)}
 .hist .d{color:var(--faint);font-size:11px;font-family:var(--fmono)}
 .hist .sp{font-weight:700;font-size:13px}
 .hist .pr{text-align:right;white-space:nowrap}
@@ -303,6 +308,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   var token=localStorage.getItem(TKEY)||'';
   var me=null;
   var entrega='envio';
+  var histItems=[];  // ultimas cotizaciones cargadas (para reabrir en el form al tocarlas)
   var VIDEO_YT='zhmP4d1wEgk';  // ID del video de YouTube "como cotizar en 10 min" (https://youtu.be/zhmP4d1wEgk)
   function $(id){return document.getElementById(id);}
   function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
@@ -504,16 +510,34 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   function loadHist(){
     api('/revendedor/historial').then(function(r){
       if(!r.ok||!r.data||!r.data.items||!r.data.items.length)return;
-      var its=r.data.items,h='';
+      var its=r.data.items,h='';histItems=its;
       for(var i=0;i<its.length;i++){var it=its[i];
         var dt=new Date(it.created_at);var ds=isNaN(dt.getTime())?'':dt.toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit'});
         var sp=Math.round(it.ancho)+'x'+Math.round(it.alto)+' cm - '+it.neon+'m'+(it.tipo==='EXT'?' - ext':'');
         var nm=(it.nombre&&String(it.nombre).trim())?String(it.nombre):'';
         var title=nm||sp; var sub=nm?(sp+' - '+ds):ds;
-        h+='<div class="it"><div><div class="sp">'+esc(title)+'</div><div class="d">'+esc(sub)+'</div></div><div class="pr"><div class="c">'+money(it.costo)+'</div><div class="d">rev '+money(it.reventa_min)+' a '+money(it.reventa_max)+'</div></div></div>';
+        h+='<div class="it" data-idx="'+i+'" title="Toca para editar esta cotizacion"><div><div class="sp">'+esc(title)+'</div><div class="d">'+esc(sub)+'</div></div><div class="rt"><div class="pr"><div class="c">'+money(it.costo)+'</div><div class="d">rev '+money(it.reventa_min)+' a '+money(it.reventa_max)+'</div></div><span class="ed" aria-hidden="true">&#9998;</span></div></div>';
       }
       $('hist').innerHTML=h;
+      var _its=$('hist').querySelectorAll('.it');
+      for(var _k=0;_k<_its.length;_k++){_its[_k].onclick=function(){editarCotizacion(+this.getAttribute('data-idx'));};}
     });
+  }
+  function flashCard(el){ if(!el)return; el.style.transition='box-shadow .25s'; el.style.boxShadow='0 0 0 2px var(--cyan)'; setTimeout(function(){el.style.boxShadow='';},900); }
+  function editarCotizacion(idx){
+    var it=histItems[idx]; if(!it)return;
+    var v=function(x){return (x==null)?'':x;};
+    var nm=(it.nombre&&String(it.nombre).trim())?String(it.nombre):'';
+    if($('i_nombre'))$('i_nombre').value=nm;
+    if($('i_ancho'))$('i_ancho').value=v(it.ancho);
+    if($('i_alto'))$('i_alto').value=v(it.alto);
+    if($('i_neon'))$('i_neon').value=v(it.neon);
+    if($('i_tramos'))$('i_tramos').value=v(it.tramos);
+    if($('i_tipo'))$('i_tipo').value=(it.tipo==='EXT')?'EXT':'INT';
+    if($('res'))$('res').innerHTML='';   // el precio viejo ya no aplica; se recalcula al tocar "Calcular"
+    var card=$('i_ancho')?$('i_ancho').closest('.card'):null;
+    if(card&&card.scrollIntoView){ card.scrollIntoView({behavior:'smooth',block:'start'}); flashCard(card); }
+    else window.scrollTo(0,0);
   }
   var _bg=$('b_guia'); if(_bg)_bg.onclick=function(){ renderGuia(); $('guia').className=''; $('app').className='hide'; $('auth').className='hide'; window.scrollTo(0,0); };
   if(token){ api('/revendedor/me').then(function(r){ if(r.ok&&r.data&&r.data.id){me=r.data;enterApp();} else {token='';localStorage.removeItem(TKEY);renderAuth();} }); }
