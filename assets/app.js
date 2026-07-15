@@ -9291,6 +9291,16 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
+        ${(getUserRole() === 'comercial') ? (() => {
+          const _lbls = chatState.labels || [];
+          const _pre = _lbls.find(l => l.name === '🤖 Precotización');
+          const _fre = _lbls.find(l => l.name === '🛑 Bot frenado');
+          const _ids = chatState.contactLabels[phone] || [];
+          const _activo = _pre && _ids.includes(_pre.id);
+          const _frozen = _fre && _ids.includes(_fre.id);
+          if (!_activo && !_frozen) return '';
+          return `<button id="btn-frenar-bot" data-frozen="${_frozen ? '1' : '0'}" title="${_frozen ? 'Reactivar el bot en este chat' : 'Frenar el bot en este chat — no vuelve a hablar acá'}" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3;border-radius:var(--r-sm);cursor:pointer;background:transparent;border:1px solid ${_frozen ? '#25D366' : '#e06c6c'};color:${_frozen ? '#25D366' : '#e06c6c'}">${_frozen ? '▶ Reactivar bot' : '🛑 Frenar bot'}</button>`;
+        })() : ''}
         ${(isCursosOnly() || getUserRole() === 'admin') ? (() => {
           const _venta = (chatState.contactLabels[phone] || []).includes(VENTA_ABRIL_LABEL_ID);
           return `<button class="btn ${_venta ? 'btn-cyan' : 'btn-ghost'}" id="btn-venta-abril" title="Marcar/desmarcar esta conversación como Venta de curso de Abril" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">${_venta ? '✅ Venta Abril' : '💰 Venta Abril'}</button>`;
@@ -10901,6 +10911,20 @@ function bindChatConversation() {
   // ese modal por si quedó abierto tras este render.
   const chatBriefBtn = document.getElementById('btn-chat-brief');
   if (chatBriefBtn) chatBriefBtn.onclick = chooseBriefTypeFromChat;
+  const frenarBotBtn = document.getElementById('btn-frenar-bot');
+  if (frenarBotBtn) frenarBotBtn.onclick = async () => {
+    const _ph = chatState.selectedPhone;
+    const wasFrozen = frenarBotBtn.dataset.frozen === '1';
+    const _msg = wasFrozen ? 'Reactivar el bot en este chat?' : 'Frenar el bot en este chat? No vuelve a hablar acá hasta que lo reactives a mano.';
+    if (!await showConfirm(_msg, { title: wasFrozen ? 'Reactivar bot' : 'Frenar bot', confirmLabel: wasFrozen ? 'Reactivar' : 'Frenar' }).catch(() => false)) return;
+    frenarBotBtn.disabled = true;
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/precotiz/freeze', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: _ph, on: !wasFrozen }) });
+      toast(r.ok ? (wasFrozen ? '✓ Bot reactivado' : '🛑 Bot frenado en este chat') : 'Error');
+    } catch (_) { toast('Error de red'); }
+    try { await loadChatContacts(true); } catch (_) {}
+    render();
+  };
   bindQuickCreateModal();
   const backBtn = document.getElementById('chat-back-btn');
   bindChatPostit();

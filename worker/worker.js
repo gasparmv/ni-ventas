@@ -1384,6 +1384,19 @@ async function paraCotizarTag(env, phone, on) {
     else await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
   } catch (_) {}
 }
+// Etiqueta "🛑 Bot frenado": la pone/saca el botón "Frenar bot" (freeze). Es VISIBLE en la lista
+// de chats — así Joaco (comercial) ve qué chats tienen el bot frenado y puede reactivarlo, sin
+// acceder al piloto completo.
+const BOT_FRENADO_LABEL_NAME = '🛑 Bot frenado';
+const BOT_FRENADO_LABEL_COLOR = '#e06c6c';
+async function botFrenadoTag(env, phone, on) {
+  try {
+    const id = await ensureLabelId(env, BOT_FRENADO_LABEL_NAME, BOT_FRENADO_LABEL_COLOR);
+    if (!id) return;
+    if (on) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, id, new Date().toISOString()).run();
+    else await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
+  } catch (_) {}
+}
 // Marca el chat como NO leído (borra el read_cursor, igual que POST /admin/wa/mark-unread)
 // para que aparezca pendiente arriba en la bandeja de Joaco.
 async function precotizMarcarNoLeido(env, phone) {
@@ -7553,7 +7566,10 @@ export default {
 
       // ----- Piloto de pre cotización (solo Gaspar): estado, control, dry-run, aprobar -----
       if (path.startsWith('/admin/precotiz')) {
-        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        // Frenar/reanudar el bot en un chat (freeze/frozen) lo puede usar cualquier usuario del
+        // CRM (Joaco/comercial), no solo Gaspar. El resto del piloto sigue siendo solo-admin.
+        const _precotizAnyUser = (path === '/admin/precotiz/freeze' || path === '/admin/precotiz/frozen');
+        if (!isAdminSession && !_precotizAnyUser) return json({ error: 'forbidden: admin only' }, 403);
 
         // GET /admin/precotiz → on/off + modo + leads del piloto
         if (request.method === 'GET' && path === '/admin/precotiz') {
@@ -7593,6 +7609,7 @@ export default {
           if (!num) return json({ error: 'missing phone' }, 400);
           const on = body?.on !== false; // default true (frenar)
           await kvSet(env, 'precotiz_frozen:' + num, on ? '1' : '0');
+          await botFrenadoTag(env, num, on);
           return json({ ok: true, phone: num, frozen: on });
         }
 
