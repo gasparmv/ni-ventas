@@ -303,7 +303,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   var token=localStorage.getItem(TKEY)||'';
   var me=null;
   var entrega='envio';
-  var VIDEO_YT='';  // ID del video de YouTube "como cotizar en 10 min" (Gaspar lo pasa despues)
+  var VIDEO_YT='zhmP4d1wEgk';  // ID del video de YouTube "como cotizar en 10 min" (https://youtu.be/zhmP4d1wEgk)
   function $(id){return document.getElementById(id);}
   function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
   function money(n){return '$'+Number(Math.round(n||0)).toLocaleString('es-AR');}
