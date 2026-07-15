@@ -14373,8 +14373,8 @@ function renderCotizacion(producto = 'neon') {
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" id="briefs-refresh" title="Refrescar">↻</button>
-        ${(getUserRole() === 'disenador' || getUserRole() === 'admin') ? `<button class="btn btn-ghost" id="btn-rectify-foto" title="Enderezar la perspectiva de una foto (llevarla a vista frontal) con IA — para usarla de base de diseño">🔧 Rectificar foto</button>
-        <button class="btn btn-ghost" id="btn-vectorize" title="Convertir un logo/diseño a silueta B&N maciza de alto contraste, lista para vectorizar con el Calco de Imagen de Illustrator">⬛ Vectorizar</button>` : ''}
+        ${(getUserRole() === 'disenador' || getUserRole() === 'admin' || getUserRole() === 'comercial') ? `<button class="btn btn-ghost" id="btn-rectify-foto" title="Enderezar la perspectiva de una foto (llevarla a vista frontal) con IA — para usarla de base de diseño">🔧 Rectificar foto</button>` : ''}
+        ${(getUserRole() === 'disenador' || getUserRole() === 'admin') ? `<button class="btn btn-ghost" id="btn-vectorize" title="Convertir un logo/diseño a silueta B&N maciza de alto contraste, lista para vectorizar con el Calco de Imagen de Illustrator">⬛ Vectorizar</button>` : ''}
         ${(getUserRole() === 'disenador' || getUserRole() === 'admin' || getUserRole() === 'comercial') ? `<button class="btn btn-ghost" id="btn-mockup" title="Montar el render de un cartel sobre la foto del local del cliente para ver cómo queda puesto (montaje hiperrealista con IA)">🏠 Montaje</button>` : ''}
         ${canCotizar() ? `<button class="btn btn-ghost" id="briefs-verificar-enviados" title="Revisar los 'Listos' y 'Colgados' tipo WhatsApp contra el historial y pasar a Enviados los que ya tienen presupuesto mandado">${STATE.verificandoEnviados ? '⏳ Verificando…' : '🔍 Verificar enviados'}</button>` : ''}
         ${canCreateBriefs() ? '<button class="btn btn-cyan" id="brief-new">+ Nuevo brief</button>' : ''}
