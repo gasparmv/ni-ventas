@@ -11717,10 +11717,18 @@ async function processPresupuestoFollowups(env, opts = {}) {
     // (ej.: a Gaspar le salió 3 veces en 15'). Si ya salió un FUP automatizado (el texto que
     // arranca con 'Hola ' o la plantilla) DESPUÉS de este presupuesto, no re-mandamos.
     try {
+      // Cubre TODAS las variantes (high 'Buenas!', low 'Holaa', copa, legacy, plantilla)
+      // derivando los prefijos de la MISMA lista que el dedup de conv, así no se
+      // desincronizan. Antes esta condición solo miraba 'Hola ' y la plantilla → las
+      // variantes reales ('Buenas!' / 'Holaa') se colaban, y en chats largos (conv >
+      // LIMIT 200) el FUP viejo quedaba fuera del conv → se re-enviaba en CADA tick del
+      // cron (a Gaspar le llegó cada 5'). El LIKE por prefijo NO depende del LIMIT.
+      const dupLike = ALL_FOLLOWUP_PREFIXES_TEXT.map(() => "body LIKE ? ESCAPE '\\'").join(' OR ');
+      const dupParams = ALL_FOLLOWUP_PREFIXES_TEXT.map(pref => pref.replace(/([%_\\])/g, '\\$1') + '%');
       const dupFup = await env.DB.prepare(
         "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 1 AND ts > ? " +
-        "AND (body = '[plantilla: seguimiento_presupuesto]' OR substr(body, 1, 5) = 'Hola ') LIMIT 1"
-      ).bind(p.phone, p.ts).first();
+        "AND (" + dupLike + ") LIMIT 1"
+      ).bind(p.phone, p.ts, ...dupParams).first();
       if (dupFup) continue;
     } catch (_) {}
 
