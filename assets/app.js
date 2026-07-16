@@ -7680,6 +7680,11 @@ async function loadChatContacts() {
         chatState._clRefreshAt = _now;
         const _clr = await fetch(CONFIG.trackerUrl + '/admin/contact-labels', { headers: authHeaders() });
         if (_clr.ok) { const _cj = await _clr.json(); chatState.contactLabels = _cj.contactLabels || {}; }
+        // Refrescar nombres/@usuarios/fotos (Instagram incluido): igual que las
+        // etiquetas, antes solo se cargaban 1 vez (guard waContactNamesLoaded), así
+        // que el @usuario y la foto de un chat de IG nuevo no aparecían hasta
+        // recargar. Ahora el poll los trae solos.
+        try { await loadWaContactNames(); } catch (_) {}
       }
     } catch (_) {}
     // NO tocar chatState.messages — loadChatMessages(phone) maneja el
@@ -9279,6 +9284,13 @@ function renderChatConversation() {
   const name = chatState.selectedName;
   loadProfilePic(phone);
   const msgCount = chatState.messages.length;
+  // En Instagram el "phone" es el ID interno de IG (no un teléfono): mostramos el
+  // @usuario. En WhatsApp mostramos el teléfono (+ @usuario si lo hay).
+  const _chat = chatState.contacts.find(c => c.phone === phone) || {};
+  const _uname = (chatState.waContactUsernames && chatState.waContactUsernames[phone]) || '';
+  const _sub = _chat.channel === 'ig'
+    ? (_uname ? '@' + escapeHtml(_uname) : 'Instagram')
+    : (escapeHtml(formatPhoneDisplay(phone)) + (_uname ? ' · @' + escapeHtml(_uname) : ''));
   return `
     <div class="chat-header">
       <button class="chat-back-btn" id="chat-back-btn" title="Volver a la lista" aria-label="Volver">
@@ -9287,7 +9299,7 @@ function renderChatConversation() {
       ${avatarHtml(phone, name, 40)}
       <div style="flex:1;min-width:0">
         <div class="chat-header-name">${escapeHtml(name || formatPhoneDisplay(phone))}</div>
-        <div class="chat-header-phone">${escapeHtml(formatPhoneDisplay(phone))}${(chatState.waContactUsernames && chatState.waContactUsernames[phone]) ? ' · @' + escapeHtml(chatState.waContactUsernames[phone]) : ''}</div>
+        <div class="chat-header-phone">${_sub}</div>
       </div>
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
