@@ -1463,6 +1463,7 @@ Si te paso imágenes, MIRALAS bien. Una imagen cuenta como la foto del diseño (
 MUY IMPORTANTE sobre la ESTÉTICA de los diseños: los carteles de neón para bares, boliches, distribuidoras de bebidas, salones, kioscos, etc. MUCHAS veces tienen onda urbana/trap con dinero, fajos de billetes, botellas de alcohol, pasamontañas, diamantes, autos, joyas, caritas de emoji, etc. ESO ES UN DISEÑO DE CARTEL TOTALMENTE VÁLIDO — NO es spam, NO es estafa, NO es promo de casino/inversión. Si el cliente manda una imagen así pidiendo cotizar un cartel: tiene_foto=true, es_carteles=true, frenar=false. NUNCA descartes ni frenes por el CONTENIDO ARTÍSTICO de la imagen del diseño; el freno se decide SOLO por lo que ESCRIBE el cliente.
 
 Te paso la conversación de WhatsApp (CLIENTE = el lead, JOACO = nosotros/el bot). Mirá qué de los 3 datos ya dio el cliente y, si corresponde, escribí el/los próximos mensajes para pedir SOLO lo que falta.
+Si un mensaje del cliente arranca con una marca tipo [citando: "..."], significa que el cliente RESPONDIÓ CITANDO ese mensaje anterior (el texto entre comillas). Usá esa referencia para entender a qué se refiere cuando dice "esto", "esta", "eso", "ese", "lo que dijiste", etc. — NO le vuelvas a preguntar de qué habla si te lo está citando.
 
 ESTILO DE LOS MENSAJES (clave, para parecer humano y no un bot):
 - Súper natural, tono argentino informal de WhatsApp.
@@ -1471,6 +1472,7 @@ ESTILO DE LOS MENSAJES (clave, para parecer humano y no un bot):
 - Varios mensajes CORTOS y separados, MÁXIMO 4 (idealmente 2-3). NUNCA mandes un mensaje por cada dato.
 - NUNCA uses la palabra "cositas".
 - SIEMPRE cerrá con una PREGUNTA, para darle pie al cliente a responder.
+- NUNCA reafirmes ni acuses recibo de los datos que el cliente ya te dio. NO digas "perfecto, ya tengo las medidas", "genial, ya tengo el logo", "listo, anoté todo" ni nada parecido: se sobreentiende que lo recibiste (está en el chat) y reafirmar cada dato suena a robot. Seguí directo con lo que falta o el próximo paso, como haría una persona.
 - Si es el primer mensaje nuestro, presentate ("buenas, te habla Joaco de neon infinito").
 
 FORMATO PARA PEDIR LOS DATOS QUE FALTAN: un mensaje con la lista (cada dato en su propio renglón, arrancando con un guion "- "), y DESPUÉS un mensaje APARTE preguntando si los tiene. Ejemplo de primer contacto (3 mensajes):
@@ -1486,6 +1488,9 @@ CONSULTAS DE PRODUCTO — si el cliente pregunta algo del producto (precio, si s
 
 PRESUPUESTO DEL CLIENTE — NUNCA le preguntes al cliente qué presupuesto tiene en mente ni cuánto quiere o puede gastar. En la pre cotización tu tarea es SOLO relevar los datos (foto, medidas, interior/exterior), NO negociar el precio ni sondear cuánto está dispuesto a pagar: preguntarlo tan temprano es prematuro y espanta. SOLO podés tocar el tema del presupuesto en DOS casos: (a) si ya es una negociación avanzada en la que el equipo YA le pasó un presupuesto, o (b) si el cliente vino pidiendo explícitamente algo BARATO / económico / lo más accesible. Fuera de esos dos casos, ni lo menciones: si el cliente no sabe qué medida quiere, ofrecele las medidas comunes y que elija una, pero SIN preguntarle cuánto quiere gastar ni ofrecerle "opciones en distintos precios".
 
+DISEÑO Y TIPOGRAFÍAS — muchos clientes NO tienen un diseño hecho y quieren que se lo armemos nosotros, o piden ver opciones de letras/tipografías. En ese caso NO le exijas la "foto del diseño" (no la tiene): ofrecele que le pasás las tipografías que trabajamos para que elija una, y poné enviar_tipografias=true. En "mensajes" avisale en texto natural que se las pasás (ej: "dale, te paso las tipografias que trabajamos y elegí la que más te guste"); el sistema adjunta las imágenes de las tipografías automáticamente. Después seguí pidiendo lo que falte (sobre todo las medidas). Mandá las tipografías UNA sola vez: si en la charla ya se las pasaste, NO pongas enviar_tipografias de nuevo.
+IMPORTANTE: VOS NO PODÉS ADJUNTAR NADA ESCRIBIÉNDOLO. La ÚNICA forma de mandar las tipografías (o cualquier imagen) es con enviar_tipografias=true. NUNCA escribas dentro de un mensaje una "acción" o instrucción entre corchetes tipo "[ACCION: mandar imagen con las tipografias]", "[mando las fotos]" o "[adjunto imagen]": ese texto le llega TAL CUAL al cliente y queda pésimo. Si querés mandar tipografías usá el campo; si no corresponde mandar una imagen, no la prometas.
+
 FRENO DE MANO — poné frenar=true y mensajes=[] si:
 - YA se le pasó al cliente un PRESUPUESTO, un PRECIO concreto o un RENDER (ves en la charla mensajes tipo "te comparto el presupuesto", "ya te lo cotizamos", "te armo el presupuesto", o directamente valores/precios): la venta YA avanzó MÁS ALLÁ del relevamiento y un humano la está manejando → NO sigas relevando ni pidiendo datos (ni el interior/exterior), frenar=true,
 - es B2B / varios locales / franquicia,
@@ -1498,7 +1503,7 @@ FRENO DE MANO — poné frenar=true y mensajes=[] si:
 Cuando ya tenés lo necesario, mensajes=[] (el humano sigue desde acá). "Lo necesario" = FOTO + MEDIDAS, más el interior/exterior SOLO si el cliente lo dio o dijo que no sabe. O sea: si tenés foto + medidas + (tiene_intext=true O intext_no_sabe=true) → mensajes=[]. Nunca prometas el render/precio: eso lo hace una persona después.
 
 Devolvé SOLO un JSON, sin nada alrededor:
-{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"mensajes":["..."]}`;
+{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"enviar_tipografias":bool,"mensajes":["..."]}`;
 
 // Arma bloques de imagen (base64) de las últimas imágenes inbound del lead, para
 // que el clasificador las VEA (Claude visión) — así distingue una foto de diseño
@@ -1602,6 +1607,45 @@ async function precotizEmitir(env, phone, nombre, msgs, modo, nowIso) {
   try { await env.DB.prepare('UPDATE precotiz_pilot SET pending_draft = ?, draft_ts = ?, updated_at = ? WHERE phone = ?').bind(JSON.stringify(msgs), nowIso, nowIso, phone).run(); } catch (_) {}
   await precotizNotifyGaspar(env, `hay un borrador para aprobar en la pre cotizacion de ${nombre || phone}\nentra al crm a revisarlo`);
   return { sent: false };
+}
+
+// Imágenes de las tipografías que ofrecemos (para cuando el cliente no tiene diseño
+// propio y quiere que se lo armemos). Viven en R2; getPromoMediaId las sube a WhatsApp
+// y cachea el media_id. Para cambiarlas o agregar más: subí/actualizá estas keys en el
+// bucket MEDIA (R2). Si una key no existe en R2 todavía, se saltea (no rompe el flujo).
+const PRECOTIZ_TIPOGRAFIAS_KEYS = ['precotiz/tipografias-1.jpg', 'precotiz/tipografias-2.jpg'];
+
+// ¿Ya se le mandaron las tipografías a este chat? (para no repetirlas en cada tick).
+async function precotizYaMandoTipografias(env, phone) {
+  try {
+    const q = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND msg_type = 'image' AND media_url LIKE 'precotiz/tipografias%' LIMIT 1").bind(phone).first();
+    return !!q;
+  } catch (_) { return false; }
+}
+
+// Manda las imágenes de tipografías por WhatsApp (best-effort). Registra cada envío en
+// wa_messages para que el chat del CRM lo muestre y para el guard de "ya mandó".
+async function precotizSendTipografias(env, phone) {
+  let sent = 0;
+  for (let i = 0; i < PRECOTIZ_TIPOGRAFIAS_KEYS.length; i++) {
+    const key = PRECOTIZ_TIPOGRAFIAS_KEYS[i];
+    try {
+      const mediaId = await getPromoMediaId(env, key);
+      if (!mediaId) continue;                         // no está en R2 todavía → saltear
+      const caption = i === 0 ? 'estas son las tipografias que trabajamos, decime cual te gusta mas' : undefined;
+      const r = await waSendImage(env, phone, mediaId, caption);
+      if (r && r.ok) {
+        sent++;
+        try {
+          await env.DB.prepare(
+            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'image', ?, ?, 'sent', '', 1)"
+          ).bind(new Date().toISOString(), r.id || ('precotiz-tipo:' + phone + ':' + i + ':' + Date.now()), phone, caption ? ('[imagen] ' + caption) : '[imagen] tipografias', key).run();
+        } catch (_) {}
+      }
+      await new Promise(rs => setTimeout(rs, 800));
+    } catch (_) {}
+  }
+  return sent;
 }
 
 // Motor del piloto. Corre en el cron de 1 min. Gateado por kill-switch (OFF por
@@ -1709,13 +1753,18 @@ async function processPrecotizPilot(env) {
       continue;
     }
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
+    const wantTipos = !!res.enviar_tipografias;
     try { await env.DB.prepare("UPDATE precotiz_pilot SET tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
-    if (!msgs.length) continue;
+    if (!msgs.length && !wantTipos) continue;
     if (modo === 'auto') {
-      await precotizEmitir(env, lead.phone, lead.nombre, msgs, 'auto', nowIso);
+      if (msgs.length) await precotizEmitir(env, lead.phone, lead.nombre, msgs, 'auto', nowIso);
+      // Adjuntar las tipografías si el bot lo pidió (enviar_tipografias) y no se mandaron ya.
+      if (wantTipos && !(await precotizYaMandoTipografias(env, lead.phone))) {
+        try { await precotizSendTipografias(env, lead.phone); } catch (_) {}
+      }
       try { await env.DB.prepare('UPDATE precotiz_pilot SET msgs_bot = msgs_bot + 1, updated_at = ? WHERE phone = ?').bind(nowIso, lead.phone).run(); } catch (_) {}
     } else {
-      await precotizEmitir(env, lead.phone, lead.nombre, msgs, 'draft', nowIso);
+      if (msgs.length) await precotizEmitir(env, lead.phone, lead.nombre, msgs, 'draft', nowIso);
     }
   }
 
@@ -3265,7 +3314,9 @@ Respondé SOLO el JSON, sin texto adicional.`;
 // pasar a Claude. Limita a últimos N msgs para no explotar el context window.
 async function buildChatContext(env, phone, maxMsgs = 100) {
   const rs = await env.DB.prepare(
-    `SELECT ts, direction, msg_type, body, media_url FROM wa_messages
+    `SELECT ts, direction, msg_type, body, media_url, context_id,
+            (SELECT p.body FROM wa_messages p WHERE p.wamid = wa_messages.context_id AND wa_messages.context_id != '' LIMIT 1) AS quoted_body
+     FROM wa_messages
      WHERE phone = ? AND msg_type != 'reaction'
      ORDER BY ts ASC LIMIT ?`
   ).bind(phone, maxMsgs).all();
@@ -3292,6 +3343,12 @@ async function buildChatContext(env, phone, maxMsgs = 100) {
     if (m.msg_type === 'audio' && !content.startsWith('[audio')) content = '[audio] (sin transcripción)';
     if (m.msg_type === 'document') content = `[documento] ${content}`;
     if (m.msg_type === 'location') content = `[ubicación] ${content}`;
+    // Si el cliente citó/respondió a un mensaje anterior, mostrar a cuál (para que
+    // el bot entienda el "esto"/"esta" que menciona, sin repreguntar).
+    if (m.context_id && m.quoted_body) {
+      const q = String(m.quoted_body).replace(/^\[(?:audio|imagen|documento)\]\s*/i, '').replace(/\s+/g, ' ').trim().slice(0, 140);
+      if (q) content = `[citando: "${q}"] ${content}`;
+    }
     return `${m.ts} ${who}: ${content}`;
   }).join('\n');
 
@@ -5710,9 +5767,44 @@ async function processPaymentProof(env, m) {
   }
 }
 
-// ===== Audio transcription (Whisper via Workers AI) =====
+// ===== Transcripción de audio con Gemini (transcribe MUCHO mejor el español
+// rioplatense que Whisper). Devuelve el texto o null. =====
+async function transcribeAudioGemini(env, r2Key) {
+  if (!env.GEMINI_API_KEY || !env.MEDIA || !r2Key) return null;
+  try {
+    const obj = await env.MEDIA.get(r2Key);
+    if (!obj) return null;
+    const buf = await obj.arrayBuffer();
+    if (!buf || buf.byteLength < 64 || buf.byteLength > 20 * 1024 * 1024) return null; // vacío o >20MB
+    let mime = String(obj.httpMetadata?.contentType || 'audio/ogg').split(';')[0].trim().toLowerCase();
+    if (!/^audio\//.test(mime)) mime = 'audio/ogg';
+    const model = env.GEMINI_AUDIO_MODEL || 'gemini-2.5-flash';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+    const prompt = 'Transcribí literalmente este audio de WhatsApp hablado en español rioplatense (Argentina). Es una conversación real sobre carteles de neón LED: medidas en centímetros, colores, diseños, logos, presupuestos, envíos, pagos. Devolvé SOLO el texto transcripto tal cual lo dice la persona, sin comillas, sin corchetes, sin aclaraciones ni traducción. Si el audio no tiene habla o no se entiende nada, devolvé exactamente una cadena vacía.';
+    const body = {
+      contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: abToBase64(buf) } }] }],
+      generationConfig: { temperature: 0 }
+    };
+    // timeout: la transcripción corre dentro del webhook; si Gemini se cuelga,
+    // abortamos y el caller cae a Whisper (no bloqueamos el procesamiento del mensaje).
+    const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000) });
+    if (!resp.ok) return null;
+    const data = await resp.json().catch(() => null);
+    if (!data) return null;
+    try { await geminiTrackUsage(env, model, 'transcribe', data?.usageMetadata, ''); } catch (_) {}
+    const txt = (data?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim();
+    return txt ? txt.replace(/^\[audio\]\s*/i, '').trim() : null;
+  } catch (e) { console.error('gemini transcription error:', e); return null; }
+}
+
+// ===== Audio transcription. Gemini primero (mejor rioplatense); si no está
+// configurado o falla, cae a Whisper (Workers AI). =====
 async function transcribeAudio(env, r2Key) {
-  if (!env.AI || !env.MEDIA || !r2Key) return null;
+  if (!env.MEDIA || !r2Key) return null;
+  if (env.GEMINI_API_KEY) {
+    try { const g = await transcribeAudioGemini(env, r2Key); if (g) return g; } catch (_) {}
+  }
+  if (!env.AI) return null;
   try {
     const obj = await env.MEDIA.get(r2Key);
     if (!obj) return null;
