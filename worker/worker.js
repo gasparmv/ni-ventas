@@ -3881,9 +3881,21 @@ async function processIgWebhook(env, body) {
           const k = await downloadIgMedia(env, rawMediaUrl, mid, attType);
           if (k) storedMedia = k;
         }
-        // Echo de story/reacción/share SIN texto ni media -> nada que mostrar. No lo guardamos
-        // (si no, aparece una fila vacía que se ve como "[text]" en la lista).
-        if (!isAdRef && !String(body).trim() && !storedMedia) continue;
+        // SIN texto ni media -> normalmente nada que mostrar.
+        if (!isAdRef && !String(body).trim() && !storedMedia) {
+          // Excepción: el ECHO de un mensaje mandado por una app EXTERNA (ManyChat/GHL)
+          // llega sin el contenido —Instagram no comparte el texto entre apps distintas,
+          // solo el mid—. Si lo descartáramos, la conversación aparecería "cortada":
+          // arranca con la respuesta del lead sin el automático que la disparó. Lo
+          // guardamos con un marcador para que se vea que hubo un saliente automático.
+          // (Los mensajes propios del CRM llegan CON texto, así que no caen acá.)
+          if (isEcho) {
+            body = '🤖 Mensaje automático (ManyChat)';
+            msgType = 'text';
+          } else {
+            continue; // entrante vacío real (story/reacción sin contenido) -> se ignora
+          }
+        }
         // Nombre del cliente: en inbound es el sender; en echo igual lo resolvemos (populando
         // wa_contacts) para que los contactos a los que SOLO les escribimos no salgan como el ID.
         // El sender_name del mensaje va '' en echo (el remitente somos nosotros).
