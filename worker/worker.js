@@ -3845,6 +3845,10 @@ async function syncIgAdMap(env) {
 // reponemos con este texto fijo cuando es el PRIMER saliente de un chat de IG (el welcome
 // siempre es lo primero). Ver processIgWebhook y el endpoint /admin/ig/backfill-manychat.
 const IG_MANYCHAT_WELCOME = 'Buenas! Te mandamos mensajito para darte la bienvenida a nuestra cuenta 🚀\nY para hacerte un regalo especial si es que buscás aprender a armar y vender carteles Neon LED\n[Botón: Quiero el regalo 🎁]';
+// Segundo mensaje automático de ManyChat: la respuesta cuando el lead toca "Quiero el
+// regalo 🎁" (texto fijo confirmado por Gaspar, jul 2026). Llega como echo vacío igual
+// que el welcome; lo reponemos cuando el saliente viene justo después de ese postback.
+const IG_MANYCHAT_REGALO = 'Genial que quieras arrancar 🤜\nAcá te dejo el enlace para que veas nuestra formación gratuita de 2 clases! Para aprender de 0 TODO sobre el Neon LED 🇦🇷\n[Botón: Formación GRATUITA]';
 
 async function processIgWebhook(env, body) {
   if (body?.object !== 'instagram') return;
@@ -3924,12 +3928,19 @@ async function processIgWebhook(env, body) {
           // guardamos con un marcador para que se vea que hubo un saliente automático.
           // (Los mensajes propios del CRM llegan CON texto, así que no caen acá.)
           if (isEcho) {
-            // El welcome de ManyChat es SIEMPRE el primer saliente del chat y su texto es
-            // fijo (IG_MANYCHAT_WELCOME): lo reponemos. Los demás automáticos (ej: la
-            // respuesta al botón del regalo, que no conocemos) -> marcador genérico.
-            let _tieneSaliente = null;
+            // Reponemos el texto de los automáticos de ManyChat (llegan vacíos):
+            //  - si el último mensaje fue el toque del botón "Quiero el regalo" -> es la
+            //    respuesta al regalo (IG_MANYCHAT_REGALO);
+            //  - si no hay ningún saliente previo -> es el welcome (siempre va primero);
+            //  - cualquier otro -> marcador genérico (no lo conocemos).
+            let _prev = null, _tieneSaliente = null;
+            try { _prev = await env.DB.prepare("SELECT direction, body FROM wa_messages WHERE phone=? ORDER BY ts DESC, id DESC LIMIT 1").bind(custId).first(); } catch (_) {}
             try { _tieneSaliente = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone=? AND direction='outbound' LIMIT 1").bind(custId).first(); } catch (_) {}
-            body = _tieneSaliente ? '🤖 Mensaje automático (ManyChat)' : IG_MANYCHAT_WELCOME;
+            if (_prev && _prev.direction === 'inbound' && /Quiero el regalo/i.test(String(_prev.body || ''))) {
+              body = IG_MANYCHAT_REGALO;
+            } else {
+              body = _tieneSaliente ? '🤖 Mensaje automático (ManyChat)' : IG_MANYCHAT_WELCOME;
+            }
             msgType = 'text';
           } else {
             continue; // entrante vacío real (story/reacción sin contenido) -> se ignora
@@ -8478,7 +8489,7 @@ export default {
       // Idempotente: INSERT OR IGNORE por mid. El trigger no ensucia el orden (ts viejo).
       if (request.method === 'POST' && path === '/admin/ig/backfill-manychat') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
-        const out = { postbacks: 0, welcomes: 0, marcadores: 0, corregidos: 0, skipped: 0 };
+        const out = { postbacks: 0, welcomes: 0, marcadores: 0, corregidos: 0, regalos: 0, skipped: 0 };
         try {
           // ===== PASO 1: postbacks históricos ("Quiero el regalo 🎁") -> inbound =====
           // Instagram manda el toque de botón como postback, no como message, así que nunca se
@@ -8550,6 +8561,14 @@ export default {
             "UPDATE wa_messages SET body = ? WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts ASC, id ASC) rn FROM wa_messages WHERE channel='ig' AND direction='outbound') WHERE rn = 1) AND body = '🤖 Mensaje automático (ManyChat)'"
           ).bind(IG_MANYCHAT_WELCOME).run();
           out.corregidos = (upd.meta && upd.meta.changes) || 0;
+
+          // ===== PASO 4: reponer la respuesta al regalo (2º saliente tras "Quiero el regalo") =====
+          // El echo vacío que sigue al toque del botón es la respuesta con la formación gratuita.
+          // Heurística: el 2º saliente del chat, si quedó genérico y el chat tiene ese postback.
+          const updR = await env.DB.prepare(
+            "UPDATE wa_messages SET body = ? WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts ASC, id ASC) rn FROM wa_messages WHERE channel='ig' AND direction='outbound') WHERE rn = 2) AND body = '🤖 Mensaje automático (ManyChat)' AND phone IN (SELECT phone FROM wa_messages WHERE channel='ig' AND direction='inbound' AND body LIKE '%Quiero el regalo%')"
+          ).bind(IG_MANYCHAT_REGALO).run();
+          out.regalos = (updR.meta && updR.meta.changes) || 0;
 
           return json({ ok: true, ...out });
         } catch (e) { return json({ error: String(e && e.message || e), ...out }, 500); }
