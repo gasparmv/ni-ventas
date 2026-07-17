@@ -12111,48 +12111,104 @@ function showCreateTemplateModal() {
   if (!chatState.selectedPhone) { toast('Abrí un chat primero'); return; }
   const content = `
     <div class="manage-qr">
-      <p class="manage-qr-hint">Creá una plantilla a medida para este cliente. Cuando Meta la apruebe (unos minutos), <b>se manda sola</b> — no tenés que esperar acá.</p>
-      <textarea id="new-tpl-body" placeholder="Escribí el mensaje… ej: Hola! Quería saber si seguís interesado, cualquier cosa quedamos a disposición 🙂" rows="4"></textarea>
+      <div style="display:flex;gap:6px;margin-bottom:10px">
+        <button type="button" class="btn btn-cyan tpl-mode-btn" data-mode="once">Mandar una vez</button>
+        <button type="button" class="btn btn-ghost tpl-mode-btn" data-mode="reuse">Guardar como atajo</button>
+      </div>
+      <p class="manage-qr-hint" id="tpl-hint">Creá una plantilla a medida para este cliente. Cuando Meta la apruebe (unos minutos), <b>se manda sola</b> a este chat — no tenés que esperar acá.</p>
+      <div id="tpl-shortcut-wrap" style="display:none;margin-bottom:8px">
+        <input id="new-tpl-shortcut" class="nc-input" placeholder="Atajo para el menú / (ej: revendedores)" autocomplete="off" style="width:100%">
+      </div>
+      <textarea id="new-tpl-body" class="nc-input" placeholder="Escribí el mensaje… ej: Hola! Quería saber si seguís interesado, cualquier cosa quedamos a disposición" rows="4" style="resize:vertical"></textarea>
       <div id="new-tpl-warn" style="color:#ff6b6b;font-size:12px;min-height:16px;margin:4px 0"></div>
+      <label style="font-size:12px;color:var(--fg-subtle,#8696a0);display:flex;align-items:center;gap:6px;margin:4px 0;cursor:pointer"><input type="checkbox" id="new-tpl-btn-on"> Agregar un botón con link (ej. "Ver portal")</label>
+      <div id="new-tpl-btn-wrap" style="display:none;gap:6px;margin:6px 0">
+        <input id="new-tpl-btn-text" class="nc-input" placeholder="Texto del botón" maxlength="25" style="flex:1;min-width:0">
+        <input id="new-tpl-btn-url" class="nc-input" placeholder="https://..." style="flex:2;min-width:0">
+      </div>
       <div style="font-size:12px;color:var(--fg-subtle,#8696a0);line-height:1.7;margin:6px 0">
         <b>Para que Meta la apruebe:</b><br>
         ✅ Mensaje claro y amable (tipo "retomemos la charla").<br>
-        🚫 Sin links · 🚫 Sin teléfonos · 🚫 Sin palabras en MAYÚSCULAS.
+        🚫 Sin links en el texto (para un link usá el botón) · 🚫 Sin teléfonos · 🚫 Sin MAYÚSCULAS.
       </div>
       <button class="btn btn-cyan" id="create-tpl-btn" disabled>Crear y mandar al aprobarse</button>
     </div>
   `;
   openDrawer('Crear plantilla nueva', content);
+  let mode = 'once';
   const ta = document.getElementById('new-tpl-body');
   const warn = document.getElementById('new-tpl-warn');
   const btn = document.getElementById('create-tpl-btn');
-  const check = () => {
-    const err = validateAdhocTemplateClient(ta.value);
-    warn.textContent = err || '';
-    btn.disabled = !!err || !ta.value.trim();
+  const scWrap = document.getElementById('tpl-shortcut-wrap');
+  const scIn = document.getElementById('new-tpl-shortcut');
+  const hint = document.getElementById('tpl-hint');
+  const btnOn = document.getElementById('new-tpl-btn-on');
+  const btnWrap = document.getElementById('new-tpl-btn-wrap');
+  const btnText = document.getElementById('new-tpl-btn-text');
+  const btnUrl = document.getElementById('new-tpl-btn-url');
+  const modeBtns = Array.from(document.querySelectorAll('.tpl-mode-btn'));
+  const paint = () => {
+    modeBtns.forEach(b => { b.className = 'btn tpl-mode-btn ' + (b.dataset.mode === mode ? 'btn-cyan' : 'btn-ghost'); });
+    if (scWrap) scWrap.style.display = mode === 'reuse' ? '' : 'none';
+    if (hint) hint.innerHTML = mode === 'reuse'
+      ? 'Creá una plantilla <b>reutilizable</b> con un atajo. Cuando Meta la apruebe (unos min), la encontrás en el menú <b>/</b> por su atajo y la mandás a quien quieras, las veces que quieras.'
+      : 'Creá una plantilla a medida para este cliente. Cuando Meta la apruebe (unos minutos), <b>se manda sola</b> a este chat — no tenés que esperar acá.';
+    if (btn) btn.textContent = mode === 'reuse' ? 'Crear atajo reutilizable' : 'Crear y mandar al aprobarse';
   };
-  if (ta) { ta.oninput = check; setTimeout(() => ta.focus(), 50); }
+  const check = () => {
+    const t = (ta.value || '').trim();
+    if (!t) { warn.textContent = ''; btn.disabled = true; return; }
+    let err = validateAdhocTemplateClient(t);
+    if (!err && mode === 'reuse' && !(scIn.value || '').trim()) err = 'Poné un atajo para guardarla.';
+    if (!err && btnOn.checked) {
+      if (!(btnText.value || '').trim()) err = 'Poné el texto del botón.';
+      else if (!/^https?:\/\/\S+/i.test((btnUrl.value || '').trim())) err = 'El botón necesita un link válido (https://...).';
+    }
+    warn.textContent = err || '';
+    btn.disabled = !!err;
+  };
+  modeBtns.forEach(b => { b.onclick = () => { mode = b.dataset.mode; paint(); check(); }; });
+  if (btnOn) btnOn.onchange = () => { btnWrap.style.display = btnOn.checked ? 'flex' : 'none'; check(); };
+  [ta, scIn, btnText, btnUrl].forEach(el => { if (el) el.oninput = check; });
+  paint();
+  setTimeout(() => ta && ta.focus(), 50);
   if (btn) btn.onclick = async () => {
     const text = (ta.value || '').trim();
     const err = validateAdhocTemplateClient(text);
     if (err) { warn.textContent = err; return; }
+    const useBtn = btnOn.checked;
+    const bTxt = (btnText.value || '').trim();
+    const bUrl = (btnUrl.value || '').trim();
+    if (useBtn && (!bTxt || !/^https?:\/\/\S+/i.test(bUrl))) { warn.textContent = 'Completá el texto y el link del botón.'; return; }
     btn.disabled = true; btn.textContent = 'Creando…';
     try {
-      const r = await fetch(CONFIG.trackerUrl + '/admin/wa/template-create-send', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ to: chatState.selectedPhone, body_text: text })
-      });
-      const j = await r.json().catch(() => ({}));
-      if (r.ok && j.ok) {
-        closeDrawer();
-        toast('✓ Plantilla creada. Se manda sola cuando Meta la apruebe (unos min).');
+      let r, j;
+      if (mode === 'reuse') {
+        const sc = (scIn.value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+        if (!sc) { warn.textContent = 'Atajo inválido (usá letras o números).'; btn.disabled = false; paint(); return; }
+        r = await fetch(CONFIG.trackerUrl + '/admin/wa/template-create', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ name: sc, category: 'MARKETING', language: 'es_AR', body_text: text, button_url: useBtn ? bUrl : undefined, button_text: useBtn ? bTxt : undefined })
+        });
+        j = await r.json().catch(() => ({}));
+        if (r.ok && j.ok) {
+          closeDrawer(); loadChatTemplates();
+          toast('✓ Atajo creado. Cuando Meta lo apruebe (unos min) aparece en el menú / como /' + sc);
+        } else { warn.textContent = j.error || 'No se pudo crear'; btn.disabled = false; paint(); }
       } else {
-        warn.textContent = j.error || 'No se pudo crear';
-        btn.disabled = false; btn.textContent = 'Crear y mandar al aprobarse';
+        r = await fetch(CONFIG.trackerUrl + '/admin/wa/template-create-send', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ to: chatState.selectedPhone, body_text: text, button_url: useBtn ? bUrl : undefined, button_text: useBtn ? bTxt : undefined })
+        });
+        j = await r.json().catch(() => ({}));
+        if (r.ok && j.ok) {
+          closeDrawer();
+          toast('✓ Plantilla creada. Se manda sola cuando Meta la apruebe (unos min).');
+        } else { warn.textContent = j.error || 'No se pudo crear'; btn.disabled = false; paint(); }
       }
     } catch (e) {
       warn.textContent = 'Error: ' + (e.message || e);
-      btn.disabled = false; btn.textContent = 'Crear y mandar al aprobarse';
+      btn.disabled = false; paint();
     }
   };
 }

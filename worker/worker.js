@@ -10313,6 +10313,11 @@ export default {
         if (Array.isArray(example_params) && example_params.length) {
           components[0].example = { body_text: [example_params] };
         }
+        // Botón URL opcional (ej. "Ver portal"). URL estática (sin variable) → no
+        // requiere params al enviar; el botón se manda solo con la plantilla.
+        if (body.button_url && /^https?:\/\//i.test(String(body.button_url))) {
+          components.push({ type: 'BUTTONS', buttons: [{ type: 'URL', text: String(body.button_text || 'Ver más').slice(0, 25), url: String(body.button_url) }] });
+        }
         const r = await fetch(_waT.templatesUrl(), {
           method: 'POST',
           headers: { ..._waT.headers, 'Content-Type': 'application/json' },
@@ -10346,9 +10351,13 @@ export default {
         } catch (_) {}
         const tplName = 'adhoc_' + Date.now();
         const _waT = getWaClient(env);
+        const _components = [{ type: 'BODY', text }];
+        if (body.button_url && /^https?:\/\//i.test(String(body.button_url))) {
+          _components.push({ type: 'BUTTONS', buttons: [{ type: 'URL', text: String(body.button_text || 'Ver más').slice(0, 25), url: String(body.button_url) }] });
+        }
         const r = await fetch(_waT.templatesUrl(), {
           method: 'POST', headers: { ..._waT.headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: tplName, category: 'MARKETING', language: 'es_AR', components: [{ type: 'BODY', text }] })
+          body: JSON.stringify({ name: tplName, category: 'MARKETING', language: 'es_AR', components: _components })
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) return json({ error: data?.error?.message || 'Meta rechazó la creación de la plantilla', raw: data }, r.status || 500);
