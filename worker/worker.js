@@ -3834,6 +3834,14 @@ async function syncIgAdMap(env) {
   } catch (e) { error = String(e); }
   return { ok: !error, count, pages, error };
 }
+
+// Texto REAL del mensaje de bienvenida que ManyChat manda automáticamente a cada nuevo
+// seguidor/DM en Instagram (confirmado por Gaspar, jul 2026). Instagram NO nos manda el
+// contenido de los mensajes de ManyChat —llegan como echo VACÍO, solo el mid— así que lo
+// reponemos con este texto fijo cuando es el PRIMER saliente de un chat de IG (el welcome
+// siempre es lo primero). Ver processIgWebhook y el endpoint /admin/ig/backfill-manychat.
+const IG_MANYCHAT_WELCOME = 'Buenas! Te mandamos mensajito para darte la bienvenida a nuestra cuenta 🚀\nY para hacerte un regalo especial si es que buscás aprender a armar y vender carteles Neon LED\n[Botón: Quiero el regalo 🎁]';
+
 async function processIgWebhook(env, body) {
   if (body?.object !== 'instagram') return;
   for (const entry of (body?.entry || [])) {
@@ -3891,7 +3899,12 @@ async function processIgWebhook(env, body) {
           // guardamos con un marcador para que se vea que hubo un saliente automático.
           // (Los mensajes propios del CRM llegan CON texto, así que no caen acá.)
           if (isEcho) {
-            body = '🤖 Mensaje automático (ManyChat)';
+            // El welcome de ManyChat es SIEMPRE el primer saliente del chat y su texto es
+            // fijo (IG_MANYCHAT_WELCOME): lo reponemos. Los demás automáticos (ej: la
+            // respuesta al botón del regalo, que no conocemos) -> marcador genérico.
+            let _tieneSaliente = null;
+            try { _tieneSaliente = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone=? AND direction='outbound' LIMIT 1").bind(custId).first(); } catch (_) {}
+            body = _tieneSaliente ? '🤖 Mensaje automático (ManyChat)' : IG_MANYCHAT_WELCOME;
             msgType = 'text';
           } else {
             continue; // entrante vacío real (story/reacción sin contenido) -> se ignora
@@ -8429,6 +8442,56 @@ export default {
           }
           return json({ ok: true, deleted, replayed });
         } catch (e) { return json({ error: String(e), deleted, replayed }, 500); }
+      }
+
+      // Backfill de los mensajes automáticos de ManyChat (welcome) que Instagram nos mandó
+      // como echo VACÍO (solo el mid, sin texto) y por eso nunca se guardaron -> las convos
+      // de IG arrancaban "cortadas". Recorre los logs crudos en orden cronológico: el PRIMER
+      // echo vacío de cada chat = welcome (texto fijo IG_MANYCHAT_WELCOME); los siguientes ->
+      // marcador genérico. SOLO toca chats donde el lead respondió (>=1 inbound) para no
+      // llenar la bandeja con seguidores que recibieron el welcome y nunca contestaron.
+      // Idempotente: INSERT OR IGNORE por mid. El trigger no ensucia el orden (ts viejo).
+      if (request.method === 'POST' && path === '/admin/ig/backfill-manychat') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let scanned = 0, welcomes = 0, marcadores = 0, skipped = 0;
+        try {
+          const conInbound = new Set();
+          const ib = await env.DB.prepare("SELECT DISTINCT phone FROM wa_messages WHERE channel='ig' AND direction='inbound'").all();
+          for (const r of (ib.results || [])) conInbound.add(String(r.phone));
+          const yaWelcome = new Set();
+          const ex = await env.DB.prepare("SELECT DISTINCT phone FROM wa_messages WHERE channel='ig' AND body LIKE 'Buenas! Te mandamos mensajito%'").all();
+          for (const r of (ex.results || [])) yaWelcome.add(String(r.phone));
+          const rs = await env.DB.prepare(
+            "SELECT ts, payload FROM wa_webhook_log WHERE payload LIKE 'IG:%' AND payload LIKE '%is_echo%' AND payload NOT LIKE '%\"text\"%' AND payload NOT LIKE '%attachments%' ORDER BY ts ASC"
+          ).all();
+          const insSql = env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, '', 'text', ?, '', '', '', 'ig')");
+          const stmts = [];
+          for (const row of (rs.results || [])) {
+            let obj; try { const raw = String(row.payload || ''); obj = JSON.parse(raw.slice(raw.indexOf('{'))); } catch (_) { continue; }
+            for (const entry of (obj?.entry || [])) {
+              for (const m of (entry?.messaging || [])) {
+                const msg = m?.message;
+                if (!msg || !msg.is_echo) continue;
+                if (msg.text || (Array.isArray(msg.attachments) && msg.attachments.length)) continue;
+                const custId = m?.recipient?.id;
+                if (!custId) continue;
+                if (!conInbound.has(String(custId))) { skipped++; continue; }
+                scanned++;
+                const mid = msg.mid || ('ig-' + custId + '-' + (m.timestamp || ''));
+                const ts = m.timestamp ? new Date(m.timestamp).toISOString() : String(row.ts);
+                if (!yaWelcome.has(String(custId))) {
+                  yaWelcome.add(String(custId)); welcomes++;
+                  stmts.push(insSql.bind(ts, mid, custId, IG_MANYCHAT_WELCOME));
+                } else {
+                  marcadores++;
+                  stmts.push(insSql.bind(ts, mid, custId, '🤖 Mensaje automático (ManyChat)'));
+                }
+              }
+            }
+          }
+          for (let i = 0; i < stmts.length; i += 50) { await env.DB.batch(stmts.slice(i, i + 50)); }
+          return json({ ok: true, scanned, welcomes, marcadores, skipped_sin_inbound: skipped });
+        } catch (e) { return json({ error: String(e && e.message || e), scanned, welcomes, marcadores }, 500); }
       }
 
       // Backfill: manda a la bandeja de Abril (cursos) los chats de IG que recibieron el
