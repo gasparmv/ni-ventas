@@ -3847,6 +3847,27 @@ async function processIgWebhook(env, body) {
   for (const entry of (body?.entry || [])) {
     for (const m of (entry?.messaging || [])) {
       try {
+        // POSTBACK = el lead tocó un botón de ManyChat (ej: "Quiero el regalo 🎁"). Instagram
+        // NO lo manda como message, así que antes se perdía. Es una interacción ENTRANTE fuerte
+        // (lead caliente que pidió algo): la guardamos como inbound para que se vea en el chat y
+        // el contacto cuente como que "respondió".
+        const pb = m?.postback;
+        if (pb && !m?.message) {
+          const pbCust = m?.sender?.id;
+          if (pbCust) {
+            const pbMid = pb.mid || ('ig-pb-' + pbCust + '-' + (m.timestamp || ''));
+            const pbTs = m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString();
+            const pbTitle = String(pb.title || '').replace(/\s+/g, ' ').trim();
+            let pbName = ''; try { pbName = await igResolveName(env, pbCust); } catch (_) {}
+            try {
+              await env.DB.prepare(
+                "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'inbound', ?, ?, 'text', ?, '', '', '', 'ig')"
+              ).bind(pbTs, pbMid, pbCust, pbName || '', '👆 Tocó el botón: ' + (pbTitle || '(botón)')).run();
+            } catch (_) {}
+            try { await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone = ?").bind(pbCust).run(); } catch (_) {}
+          }
+          continue;
+        }
         const msg = m?.message;
         if (!msg) continue;
         // ECHO = lo que mandamos NOSOTROS (desde el CRM, la app de IG, ManyChat o GHL). Antes
@@ -8453,8 +8474,35 @@ export default {
       // Idempotente: INSERT OR IGNORE por mid. El trigger no ensucia el orden (ts viejo).
       if (request.method === 'POST' && path === '/admin/ig/backfill-manychat') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
-        let scanned = 0, welcomes = 0, marcadores = 0, skipped = 0;
+        const out = { postbacks: 0, welcomes: 0, marcadores: 0, corregidos: 0, skipped: 0 };
         try {
+          // ===== PASO 1: postbacks históricos ("Quiero el regalo 🎁") -> inbound =====
+          // Instagram manda el toque de botón como postback, no como message, así que nunca se
+          // guardó. Lo reponemos como inbound para que se vea la interacción y el chat cuente
+          // como "respondió" (además así el PASO 2 incluye a esos chats).
+          const pbRs = await env.DB.prepare(
+            "SELECT ts, payload FROM wa_webhook_log WHERE payload LIKE 'IG:%' AND payload LIKE '%postback%' ORDER BY ts ASC"
+          ).all();
+          const pbIns = env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'inbound', ?, '', 'text', ?, '', '', '', 'ig')");
+          const pbStmts = [];
+          for (const row of (pbRs.results || [])) {
+            let obj; try { const raw = String(row.payload || ''); obj = JSON.parse(raw.slice(raw.indexOf('{'))); } catch (_) { continue; }
+            for (const entry of (obj?.entry || [])) {
+              for (const m of (entry?.messaging || [])) {
+                const pb = m?.postback; if (!pb || m?.message) continue;
+                const cust = m?.sender?.id; if (!cust) continue;
+                const mid = pb.mid || ('ig-pb-' + cust + '-' + (m.timestamp || ''));
+                const ts = m.timestamp ? new Date(m.timestamp).toISOString() : String(row.ts);
+                const title = String(pb.title || '').replace(/\s+/g, ' ').trim();
+                out.postbacks++;
+                pbStmts.push(pbIns.bind(ts, mid, cust, '👆 Tocó el botón: ' + (title || '(botón)')));
+              }
+            }
+          }
+          for (let i = 0; i < pbStmts.length; i += 50) { await env.DB.batch(pbStmts.slice(i, i + 50)); }
+
+          // ===== PASO 2: welcomes/marcadores de los echo vacíos (chats con interacción) =====
+          // conInbound ahora incluye los postbacks recién insertados (Luciana y cía. ya cuentan).
           const conInbound = new Set();
           const ib = await env.DB.prepare("SELECT DISTINCT phone FROM wa_messages WHERE channel='ig' AND direction='inbound'").all();
           for (const r of (ib.results || [])) conInbound.add(String(r.phone));
@@ -8475,23 +8523,32 @@ export default {
                 if (msg.text || (Array.isArray(msg.attachments) && msg.attachments.length)) continue;
                 const custId = m?.recipient?.id;
                 if (!custId) continue;
-                if (!conInbound.has(String(custId))) { skipped++; continue; }
-                scanned++;
+                if (!conInbound.has(String(custId))) { out.skipped++; continue; }
                 const mid = msg.mid || ('ig-' + custId + '-' + (m.timestamp || ''));
                 const ts = m.timestamp ? new Date(m.timestamp).toISOString() : String(row.ts);
                 if (!yaWelcome.has(String(custId))) {
-                  yaWelcome.add(String(custId)); welcomes++;
+                  yaWelcome.add(String(custId)); out.welcomes++;
                   stmts.push(insSql.bind(ts, mid, custId, IG_MANYCHAT_WELCOME));
                 } else {
-                  marcadores++;
+                  out.marcadores++;
                   stmts.push(insSql.bind(ts, mid, custId, '🤖 Mensaje automático (ManyChat)'));
                 }
               }
             }
           }
           for (let i = 0; i < stmts.length; i += 50) { await env.DB.batch(stmts.slice(i, i + 50)); }
-          return json({ ok: true, scanned, welcomes, marcadores, skipped_sin_inbound: skipped });
-        } catch (e) { return json({ error: String(e && e.message || e), scanned, welcomes, marcadores }, 500); }
+
+          // ===== PASO 3: corregir el PRIMER saliente de cada chat que quedó como marcador =====
+          // Los chats procesados antes del welcome real (ventana entre deploys) tienen su welcome
+          // como marcador genérico. El 1er saliente de un chat de IG siempre es el welcome, así
+          // que lo pisamos con el texto real. Idempotente (si ya es welcome, no matchea).
+          const upd = await env.DB.prepare(
+            "UPDATE wa_messages SET body = ? WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts ASC, id ASC) rn FROM wa_messages WHERE channel='ig' AND direction='outbound') WHERE rn = 1) AND body = '🤖 Mensaje automático (ManyChat)'"
+          ).bind(IG_MANYCHAT_WELCOME).run();
+          out.corregidos = (upd.meta && upd.meta.changes) || 0;
+
+          return json({ ok: true, ...out });
+        } catch (e) { return json({ error: String(e && e.message || e), ...out }, 500); }
       }
 
       // Backfill: manda a la bandeja de Abril (cursos) los chats de IG que recibieron el
