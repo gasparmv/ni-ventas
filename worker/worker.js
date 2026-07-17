@@ -1039,9 +1039,9 @@ function getWaClient(env) {
 // rompa aunque la libreta tenga un problema.
 const CHATS_SUMMARY_FALLBACK_SQL = `
   WITH last_msg AS (
-    SELECT phone, ts AS last_ts, body AS last_body, direction AS last_direction, msg_type AS last_msg_type
+    SELECT phone, ts AS last_ts, body AS last_body, direction AS last_direction, msg_type AS last_msg_type, channel AS last_channel
     FROM (
-      SELECT phone, ts, body, direction, msg_type,
+      SELECT phone, ts, body, direction, msg_type, channel,
              ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts DESC, id DESC) AS rn
       FROM wa_messages
       WHERE phone IS NOT NULL AND phone != ''
@@ -1053,6 +1053,9 @@ const CHATS_SUMMARY_FALLBACK_SQL = `
       SELECT phone, sender_name, ROW_NUMBER() OVER (PARTITION BY phone ORDER BY ts DESC) AS rn
       FROM wa_messages WHERE direction = 'inbound' AND sender_name IS NOT NULL AND sender_name != ''
     ) t WHERE rn = 1
+  ),
+  has_in AS (
+    SELECT DISTINCT phone FROM wa_messages WHERE direction = 'inbound' AND msg_type != 'status'
   ),
   unread_counts AS (
     SELECT m.phone, COUNT(*) AS unread FROM wa_messages m
@@ -1067,6 +1070,7 @@ const CHATS_SUMMARY_FALLBACK_SQL = `
   FROM last_msg lm
   LEFT JOIN inbound_name inm ON inm.phone = lm.phone
   LEFT JOIN unread_counts uc ON uc.phone = lm.phone
+  WHERE NOT (lm.last_channel = 'ig' AND lm.phone NOT IN (SELECT phone FROM has_in))
   ORDER BY lm.last_ts DESC
 `;
 
@@ -8831,7 +8835,7 @@ export default {
           const rs = await env.DB.prepare(
             `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread, inbox, channel
              FROM wa_chats_summary
-             WHERE last_ts != '' ${inboxClause}
+             WHERE last_ts != '' AND NOT (channel = 'ig' AND has_inbound = 0) ${inboxClause}
              ORDER BY last_ts DESC`
           ).all();
           chats = rs.results || [];
