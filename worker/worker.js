@@ -2545,6 +2545,22 @@ async function minicursoLandingActivo(env, phone) {
   } catch (_) { return false; }
 }
 
+// ¿El contacto YA es alumno (compró/entró al programa de cursos)? Se determina por
+// etiqueta: "Alumno" (id 26) o "seña lanzamiento junio" (id 33). A un alumno NO le
+// mandamos automáticos de CURSOS (opener/follow-up del minicurso ni el flujo de la
+// formación cf_*) — ya compró, no tiene sentido seguir vendiéndole el curso. Las
+// automatizaciones de CARTELES no se tocan. (La hoja contable de CURSOS no tiene
+// teléfono, así que la fuente de verdad es la etiqueta, que Abril/Gaspar ya usan.)
+async function esAlumnoCursos(env, phone) {
+  if (!phone) return false;
+  try {
+    const r = await env.DB.prepare(
+      "SELECT 1 AS x FROM contact_labels WHERE phone = ? AND label_id IN (26, 33) LIMIT 1"
+    ).bind(phone).first();
+    return !!r;
+  } catch (_) { return false; }
+}
+
 // ¿El cliente indicó que YA vio/terminó la clase 2? Gate del follow-up (que SOLO
 // sale si NO vio la clase 2). Conservadores para el "sí vio": solo true ante señal
 // clara; ante duda -> false (mandamos el recordatorio, es suave y barato).
@@ -2614,6 +2630,8 @@ async function processMinicursoLanding(env) {
         let guard = '';
         try { const inFlow = await env.DB.prepare("SELECT stage FROM wa_cursos_flow WHERE phone = ?").bind(phone).first(); if (inFlow && inFlow.stage && inFlow.stage !== 'done') guard = 'en_flujo_ads:' + inFlow.stage; } catch (_) {}
         if (!guard && await gotMinicurso(env, phone)) guard = 'ya_recibio_minicurso';
+        // Ya es alumno (compró el curso) -> no le mandamos el opener del minicurso.
+        if (!guard && await esAlumnoCursos(env, phone)) guard = 'ya_es_alumno';
         if (guard) {
           try { await env.DB.prepare("UPDATE minicurso_landing SET stage = 'guarded', guard_reason = ?, updated_at = ? WHERE phone = ? AND stage = 'registered'").bind(guard, nowIso, phone).run(); } catch (_) {}
           try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'oculto', updated_at = ? WHERE phone = ? AND (inbox IS NULL OR inbox IN ('general',''))").bind(nowIso, phone).run(); } catch (_) {}
@@ -2680,6 +2698,8 @@ async function processMinicursoLanding(env) {
         // Claim atómico.
         let cl; try { cl = await env.DB.prepare("UPDATE minicurso_landing SET followup_sent_at = 'sending', updated_at = ? WHERE phone = ? AND followup_sent_at IS NULL").bind(nowIso, phone).run(); } catch (_) { continue; }
         if (!cl?.meta?.changes) continue;
+        // Gate 0: ya es alumno (compró el curso) -> no le mandamos el follow-up.
+        if (await esAlumnoCursos(env, phone)) { try { await env.DB.prepare("UPDATE minicurso_landing SET followup_sent_at = 'skipped', guard_reason = 'ya_es_alumno', stage = 'done', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {} continue; }
         // Gate 1: ya pidió los regalos (cotizador+guía) -> no lo molestamos.
         if (await gotMinicurso(env, phone)) { try { await env.DB.prepare("UPDATE minicurso_landing SET followup_sent_at = 'skipped', guard_reason = 'pidio_regalos', stage = 'done', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {} continue; }
         // Gate 2: ¿ya vio la clase 2 (según la conversación)? Si sí -> no mandamos.
@@ -2762,6 +2782,8 @@ async function processCursosFlow(env) {
       let claim;
       try { claim = await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sending' WHERE phone = ? AND kind = ? AND status = 'queued'").bind(phone, kind).run(); } catch (_) { continue; }
       if (!claim?.meta?.changes) continue;
+      // Ya es alumno (compró el curso) -> no le mandamos el flujo de la formación.
+      if (await esAlumnoCursos(env, phone)) { try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = ?").bind(phone, kind).run(); } catch (_) {} continue; }
       const body = cursosFlowBody(kind);
       let res, asTemplate = false;
       if (kind === 'cf_6') {
