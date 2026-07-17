@@ -10615,13 +10615,22 @@ export default {
       if (request.method === 'GET' && path === '/admin/wa/templates') {
         const _waL = getWaClient(env);
         if (_waL.provider === 'meta' && (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN)) return json({ error: 'WA not configured (meta)' }, 500);
-        const sep = _waL.templatesUrl().includes('?') ? '&' : '?';
-        const r = await fetch(`${_waL.templatesUrl()}${sep}limit=100&fields=name,status,category,language,components`, {
-          headers: _waL.headers
-        });
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok) return json({ error: data?.error?.message || 'list failed' }, r.status || 500);
-        return json({ templates: data.data || data.waba_templates || [], provider: _waL.provider });
+        // 360dialog pagina de a 100 (ignora limit>100) → hay que recorrer las páginas
+        // con offset. Con 100+ plantillas adhoc_ (de un solo uso) que llenan el listado,
+        // sin paginar las plantillas reutilizables nuevas quedaban fuera del corte de 100.
+        const _allTpls = [];
+        try {
+          for (let _off = 0; _off < 3000; _off += 100) {   // tope de seguridad: 3000 plantillas
+            const _sep = _waL.templatesUrl().includes('?') ? '&' : '?';
+            const _r = await fetch(`${_waL.templatesUrl()}${_sep}limit=100&offset=${_off}&fields=name,status,category,language,components`, { headers: _waL.headers });
+            const _d = await _r.json().catch(() => ({}));
+            if (!_r.ok) { if (_off === 0) return json({ error: _d?.error?.message || 'list failed' }, _r.status || 500); break; }
+            const _batch = _d.data || _d.waba_templates || [];
+            _allTpls.push(..._batch);
+            if (_batch.length < 100) break;   // última página
+          }
+        } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        return json({ templates: _allTpls, provider: _waL.provider });
       }
 
       // Servir medios desde R2
@@ -11634,16 +11643,21 @@ async function monitorTemplateStatus(env) {
   if (_waM.provider === 'meta' && (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN)) return;
   try {
     await env.DB.prepare('CREATE TABLE IF NOT EXISTS template_status_cache (name TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL)').run();
-    const sep = _waM.templatesUrl().includes('?') ? '&' : '?';
-    const r = await fetch(`${_waM.templatesUrl()}${sep}limit=100&fields=name,status,category`, {
-      headers: _waM.headers
-    });
-    if (!r.ok) return;
-    const data = await r.json().catch(() => ({}));
-    const templates = data?.data || data?.waba_templates || [];
+    // 360dialog pagina de a 100 → recorrer con offset (sino las plantillas de la
+    // página 2+ nunca se monitorean y no se notifica su aprobación/rechazo).
+    const templates = [];
+    for (let _off = 0; _off < 3000; _off += 100) {
+      const sep = _waM.templatesUrl().includes('?') ? '&' : '?';
+      const r = await fetch(`${_waM.templatesUrl()}${sep}limit=100&offset=${_off}&fields=name,status,category`, { headers: _waM.headers });
+      if (!r.ok) break;
+      const data = await r.json().catch(() => ({}));
+      const batch = data?.data || data?.waba_templates || [];
+      templates.push(...batch);
+      if (batch.length < 100) break;
+    }
     for (const t of templates) {
       const name = t.name;
-      const status = t.status;
+      const status = String(t.status || '').toUpperCase();   // 360dialog devuelve 'approved' en minúsculas; normalizamos
       if (!name || !status) continue;
       const cached = await env.DB.prepare('SELECT status FROM template_status_cache WHERE name = ?').bind(name).first();
       const prevStatus = cached?.status || null;
