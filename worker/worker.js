@@ -1815,6 +1815,12 @@ async function processPrecotizPilot(env) {
     // tick → puede haber carrera y el flujo de cursos todavía no seteó el inbox).
     try { const cur = await env.DB.prepare("SELECT 1 AS x FROM wa_chats_summary WHERE phone = ? AND inbox = 'cursos' LIMIT 1").bind(phone).first(); if (cur) continue; } catch (_) {}
     try { const mc = await env.DB.prepare("SELECT 1 AS x FROM minicurso_landing WHERE phone = ? LIMIT 1").bind(phone).first(); if (mc) continue; } catch (_) {}
+    // Excluir leads de REVENTA (revendedores): vienen del ad de reventa y los maneja
+    // Gaspar desde el principio (sumarlos como revendedores + cotizarles a mano). El bot
+    // de precotización NO se activa para ellos. Señal: estar en reventa_leads o tener la
+    // etiqueta "revendedor" (id 2289).
+    try { const rv = await env.DB.prepare("SELECT 1 AS x FROM reventa_leads WHERE phone = ? LIMIT 1").bind(phone).first(); if (rv) continue; } catch (_) {}
+    try { const rl = await env.DB.prepare("SELECT 1 AS x FROM contact_labels WHERE phone = ? AND label_id = 2289 LIMIT 1").bind(phone).first(); if (rl) continue; } catch (_) {}
     let first;
     try { first = await env.DB.prepare("SELECT MIN(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(phone).first(); } catch (_) { continue; }
     const firstTs = first?.t || '';
