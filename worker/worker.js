@@ -8244,6 +8244,16 @@ export default {
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, '', 'text', String(text), '', reply_to || '', 'sent').run();
         } catch (_) {}
+        // Auto-etiquetar ALUMNO (id 26): si Abril manda el mensaje de ALTA al programa (el de
+        // "LEE BIEN A CONCIENCIA..." o el link a la plataforma alinfinito.app.clientclub.net),
+        // el contacto ya compró el curso -> con la etiqueta se le cortan los automáticos de
+        // cursos (ver esAlumnoCursos). Disparadores validados: los 71 alumnos ya etiquetados
+        // recibieron uno de estos, sin falsos positivos.
+        try {
+          if (/LEE BIEN A CONCIENCIA ESTE MENSAJE|alinfinito\.app\.clientclub\.net/i.test(String(text))) {
+            await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, 26, ?)").bind(num || to, new Date().toISOString()).run();
+          }
+        } catch (_) {}
         return json({ id: r.id });
       }
 
