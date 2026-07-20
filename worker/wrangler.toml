@@ -28,6 +28,11 @@ database_id = "bf9f0a63-0a68-45bd-b65b-d78ab61f0924"
 [ai]
 binding = "AI"
 
+# Cloudflare Images binding: redimensionar imágenes en el worker (ej. achicar las
+# capturas grandes antes de mandarlas a Gemini, que corta a los ~30s con inputs pesados).
+[images]
+binding = "IMAGES"
+
 [[r2_buckets]]
 binding = "MEDIA"
 bucket_name = "ni-ventas-media"

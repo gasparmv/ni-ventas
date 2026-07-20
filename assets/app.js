@@ -12620,7 +12620,31 @@ async function fetchBriefDetail(id) {
   }
 }
 
+// Redimensiona un blob de imagen si supera maxDim (lado mayor) o maxArea (px totales).
+// Los screenshots que pega Joaco pueden venir ENORMES (ej. 23624x8034 px); con imágenes
+// tan pesadas Gemini corta el render a los ~30s (deadline). Achicarlas acá lo evita.
+// Usa createImageBitmap (aguanta imágenes muy grandes). Si ya es chica o falla, no toca nada.
+async function resizeImageBlob(file, maxDim = 1600, maxArea = 3000000) {
+  try {
+    if (!/^image\//.test(file.type || '') || /gif/i.test(file.type || '')) return { blob: file, type: file.type || 'image/png' };
+    let bmp = await createImageBitmap(file);
+    const w = bmp.width, h = bmp.height;
+    let scale = Math.min(1, maxDim / Math.max(w, h));
+    if (w * h * scale * scale > maxArea) scale = Math.min(scale, Math.sqrt(maxArea / (w * h)));
+    if (scale >= 1) { if (bmp.close) bmp.close(); return { blob: file, type: file.type || 'image/png' }; }
+    const cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
+    if (bmp.close) bmp.close();
+    bmp = await createImageBitmap(file, { resizeWidth: cw, resizeHeight: ch, resizeQuality: 'high' });
+    const cv = document.createElement('canvas'); cv.width = cw; cv.height = ch;
+    cv.getContext('2d').drawImage(bmp, 0, 0);
+    if (bmp.close) bmp.close();
+    const blob = await new Promise(res => cv.toBlob(b => res(b), 'image/jpeg', 0.85));
+    return blob ? { blob, type: 'image/jpeg' } : { blob: file, type: file.type || 'image/png' };
+  } catch (e) { return { blob: file, type: file.type || 'image/png' }; }
+}
 async function uploadBriefImage(briefId, blob, contentType, tipo = 'chat') {
+  // Achicar imágenes grandes antes de subir (ver resizeImageBlob).
+  try { const rz = await resizeImageBlob(blob.type ? blob : new Blob([blob], { type: contentType }), 1600, 3000000); if (rz && rz.blob) { blob = rz.blob; contentType = rz.type; } } catch (_) {}
   const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/imagen?tipo=${tipo}`, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': contentType },

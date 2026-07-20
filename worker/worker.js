@@ -5326,6 +5326,19 @@ async function geminiTrackUsage(env, model, kind, usage, ref) {
 
 // Toma el boceto (bytes + mime) + medidas, llama a Gemini, devuelve { ok, base64, mime }
 // con la imagen generada, o { error }.
+// Achica una imagen base64 grande antes de mandarla a Gemini (que corta a los ~30s
+// con inputs pesados). Solo toca imágenes > ~400KB. Si falla (ej. imagen > 100 MP,
+// el máximo del binding Images), devuelve la original. fit scale-down limita ambos lados.
+async function _shrinkB64ForGemini(env, b64, mime) {
+  if (!env.IMAGES || !b64) return { data: b64, mime: mime || 'image/png' };
+  try {
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    if (bytes.byteLength < 400 * 1024) return { data: b64, mime: mime || 'image/png' };
+    const res = await env.IMAGES.input(new Response(bytes).body).transform({ width: 1600, height: 1600, fit: 'scale-down' }).output({ format: 'image/jpeg', quality: 82 });
+    const buf = await res.response().arrayBuffer();
+    return { data: abToBase64(buf), mime: 'image/jpeg' };
+  } catch (_) { return { data: b64, mime: mime || 'image/png' }; }
+}
 async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto, opts = {}) {
   if (!env.GEMINI_API_KEY) return { error: 'GEMINI_API_KEY no configurada' };
   const model = opts.model || geminiImageModel(env);
@@ -5333,15 +5346,16 @@ async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto, op
   // basePrompt permite usar otro prompt (ej. corpóreas) sin tocar el de carteles.
   const basePrompt = opts.basePrompt || GEMINI_RENDER_PROMPT;
   const promptText = basePrompt + (extraTexto ? `\n\n${extraTexto}` : '');
+  const _main = await _shrinkB64ForGemini(env, opts.mainBase64 || abToBase64(bocetoBuf), bocetoMime || 'image/png');
   const reqParts = [
     { text: promptText },
-    { inline_data: { mime_type: bocetoMime || 'image/png', data: opts.mainBase64 || abToBase64(bocetoBuf) } }
+    { inline_data: { mime_type: _main.mime, data: _main.data } }
   ];
   // Imágenes extra (ej: montaje = foto del local marcada + render del cartel). Van
   // después de la principal, en el orden que las referencia el prompt.
   if (Array.isArray(opts.extraImages)) {
     for (const im of opts.extraImages) {
-      if (im && im.base64) reqParts.push({ inline_data: { mime_type: im.mime || 'image/png', data: im.base64 } });
+      if (im && im.base64) { const _e = await _shrinkB64ForGemini(env, im.base64, im.mime || 'image/png'); reqParts.push({ inline_data: { mime_type: _e.mime, data: _e.data } }); }
     }
   }
   const body = {
@@ -8010,6 +8024,48 @@ export default {
 
       // ----- Copiloto: contador de gasto IA (solo Gaspar) -----
       // ----- Gasto de Gemini: renders + estimación de medidas (solo Gaspar) -----
+      // Diagnóstico: prueba un modelo de imagen de Gemini directo y devuelve status/tiempo/error REAL.
+      if (request.method === 'GET' && path === '/admin/gemini/test') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        if (!env.GEMINI_API_KEY) return json({ error: 'sin GEMINI_API_KEY' }, 500);
+        const model = url.searchParams.get('model') || geminiImageModel(env);
+        const _stream = url.searchParams.get('stream') === '1';
+        const gurl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:${_stream ? 'streamGenerateContent?alt=sse&' : 'generateContent?'}key=${env.GEMINI_API_KEY}`;
+        // Con ?render_key=<r2key> replica la CARGA real del render (prompt de render + imagen);
+        // sin él, un test liviano de solo texto.
+        let _parts = [{ text: 'Genera una imagen simple de un cartel de neon que diga TEST sobre fondo negro.' }];
+        let _inBytes = 0, _outBytes = 0, _rzErr = null;
+        const _rk = url.searchParams.get('render_key') || '';
+        const _rw = parseInt(url.searchParams.get('resize') || '0', 10);
+        if (_rk && env.MEDIA) {
+          try {
+            const _o = await env.MEDIA.get(_rk);
+            if (_o) {
+              let _b = await _o.arrayBuffer(); let _m = _o.httpMetadata?.contentType || 'image/png'; _inBytes = _b.byteLength;
+              if (_rw > 0 && env.IMAGES) {
+                try { const _res = await env.IMAGES.input(new Response(_b).body).transform({ width: _rw }).output({ format: 'image/jpeg', quality: 82 }); _b = await _res.response().arrayBuffer(); _m = 'image/jpeg'; } catch (e) { _rzErr = String((e && e.message) || e); }
+              }
+              _outBytes = _b.byteLength;
+              _parts = [{ text: GEMINI_RENDER_PROMPT }, { inline_data: { mime_type: _m, data: abToBase64(_b) } }];
+            }
+          } catch (_) {}
+        }
+        const gbody = { contents: [{ parts: _parts }], generationConfig: { responseModalities: ['IMAGE', 'TEXT'] } };
+        const t0 = Date.now();
+        let resp, raw = '';
+        try { resp = await fetch(gurl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(gbody) }); raw = await resp.text(); }
+        catch (e) { return json({ model, stream: _stream, fetch_error: String((e && e.message) || e), ms: Date.now() - t0 }); }
+        const ms = Date.now() - t0;
+        let hasImg = false, gErr = null;
+        if (_stream) {
+          for (const line of raw.split('\n')) { if (line.startsWith('data:')) { try { const ev = JSON.parse(line.slice(5).trim()); if ((ev?.candidates?.[0]?.content?.parts || []).find(p => p.inlineData || p.inline_data)) hasImg = true; if (ev?.error) gErr = ev.error; } catch (_) {} } }
+        } else {
+          let parsed = null; try { parsed = JSON.parse(raw); } catch (_) {}
+          hasImg = !!(parsed?.candidates?.[0]?.content?.parts || []).find(p => p.inlineData || p.inline_data);
+          gErr = parsed?.error || null;
+        }
+        return json({ model, stream: _stream, in_bytes: _inBytes, out_bytes: _outBytes, rz_err: _rzErr, status: resp.status, ok: resp.ok, ms, has_image: hasImg, gemini_error: gErr, raw_snippet: hasImg ? '(imagen ok)' : raw.slice(0, 300) });
+      }
       if (request.method === 'GET' && path === '/admin/gemini/usage') {
         if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
         const ms = new Date(); ms.setUTCDate(1); ms.setUTCHours(0, 0, 0, 0); const m = ms.toISOString();
