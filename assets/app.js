@@ -2093,7 +2093,7 @@ function renderShell() {
         <div class="user-pick-label">Usuario ${canAccessChat() ? '<span class="admin-tag">' + (isAdmin() ? 'admin' : 'chat') + '</span>' : ''}</div>
         <div class="user-pick-chips">
           ${STATE.users.map(u => {
-            const locked = u === 'Gaspar' && !STATE.token;
+            const locked = !tokenBelongsTo(u);  // 🔒 = requiere login (todos tienen contraseña)
             return `<button class="user-chip ${STATE.user===u?'active':''}" data-set-user="${escapeHtml(u)}">${locked?'🔒 ':''}${escapeHtml(u)}</button>`;
           }).join('')}
           <button class="user-chip add" data-add-user>+</button>
