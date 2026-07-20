@@ -2039,6 +2039,88 @@ async function maybeCapiReadyNotice(env) {
   } catch (_) {}
 }
 
+// ===== Reporte diario de ventas (21:00 AR) =====
+// Se manda por WhatsApp a Gaspar y a su hermano con las métricas del día (día AR).
+// El "día AR" va de 00:00 AR (=03:00 UTC) a 00:00 AR del día siguiente. Las queries
+// fueron verificadas contra la D1. Nota: "pasaron la precotización" es del piloto del
+// bot (muestra ~20%, tope 10/día); "chats por vendedor" y "presupuestos de Nadia"
+// arrancan en 0 hasta que Nadia empiece a operar (assigned_to / comercial_id='nadia').
+const REPORTE_DIARIO_PHONES = ['5491155604999', '5491155604996']; // Gaspar, hermano
+const REPORTE_DIA_DESDE = "(date('now','-3 hours') || 'T03:00:00Z')";
+const REPORTE_DIA_HASTA = "(date('now','-3 hours','+1 day') || 'T03:00:00Z')";
+async function buildReporteDiario(env) {
+  const out = { total: 0, carteles: 0, cursos: 0, precotiz: 0, presupTotal: 0, presupJoaco: 0, presupNadia: 0, chatsJoaco: 0, chatsNadia: 0 };
+  // 1) Conversaciones nuevas (primer inbound hoy, WhatsApp) + split carteles/cursos.
+  //    LEFT JOIN + inbox: garantiza total = carteles + cursos (los sin fila caen en carteles).
+  try {
+    const r = await env.DB.prepare(
+      `WITH fi AS (
+         SELECT phone FROM wa_messages
+         WHERE direction='inbound' AND msg_type!='status' AND (channel IS NULL OR channel='wa')
+           AND ts >= ${REPORTE_DIA_DESDE} AND ts < ${REPORTE_DIA_HASTA}
+         GROUP BY phone
+       )
+       SELECT COUNT(*) AS total,
+              SUM(CASE WHEN s.inbox='cursos' THEN 1 ELSE 0 END) AS cursos,
+              SUM(CASE WHEN s.inbox IS NULL OR s.inbox!='cursos' THEN 1 ELSE 0 END) AS carteles
+       FROM fi LEFT JOIN wa_chats_summary s ON s.phone = fi.phone`
+    ).first();
+    out.total = (r && r.total) || 0; out.cursos = (r && r.cursos) || 0; out.carteles = (r && r.carteles) || 0;
+  } catch (_) {}
+  // 2) Precotizaciones completadas hoy (EVENTO por completed_at: cuenta aunque Joaco ya haya cotizado).
+  try {
+    const r = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM precotiz_pilot WHERE completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ${REPORTE_DIA_DESDE} AND completed_at < ${REPORTE_DIA_HASTA}`
+    ).first();
+    out.precotiz = (r && r.n) || 0;
+  } catch (_) {}
+  // 3) Presupuestos enviados hoy + split por vendedor (comercial_id; todo lo no-'nadia' = Joaco).
+  try {
+    const rs = await env.DB.prepare(
+      `SELECT comercial_id, COUNT(*) AS n FROM briefs WHERE estado='enviado' AND enviado_at IS NOT NULL AND enviado_at != '' AND enviado_at >= ${REPORTE_DIA_DESDE} AND enviado_at < ${REPORTE_DIA_HASTA} GROUP BY comercial_id`
+    ).all();
+    for (const r of (rs.results || [])) {
+      const n = r.n || 0; out.presupTotal += n;
+      if (r.comercial_id === 'nadia') out.presupNadia += n; else out.presupJoaco += n;
+    }
+  } catch (_) {}
+  // 4) Chats asignados hoy por vendedor (assigned_to + assigned_at, mig 037).
+  try {
+    const rs = await env.DB.prepare(
+      `SELECT assigned_to, COUNT(DISTINCT phone) AS n FROM wa_chats_summary WHERE assigned_to != '' AND assigned_at >= ${REPORTE_DIA_DESDE} AND assigned_at < ${REPORTE_DIA_HASTA} GROUP BY assigned_to`
+    ).all();
+    for (const r of (rs.results || [])) {
+      if (r.assigned_to === 'nadia') out.chatsNadia += (r.n || 0);
+      else if (r.assigned_to === 'joaco' || r.assigned_to === 'joaquin') out.chatsJoaco += (r.n || 0);
+    }
+  } catch (_) {}
+  return out;
+}
+function formatReporteDiario(d) {
+  const fecha = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10).split('-').reverse().join('/');
+  const repartoNota = (d.chatsJoaco + d.chatsNadia) === 0 ? '  (arranca cuando sumemos a Nadia)' : '';
+  return (
+    `📊 Reporte del día ${fecha}\n\n` +
+    `💬 Conversaciones nuevas: ${d.total}\n` +
+    `   Carteles: ${d.carteles} · Cursos: ${d.cursos}\n\n` +
+    `🤖 Pasaron la precotización: ${d.precotiz}\n\n` +
+    `👥 Chats asignados hoy:${repartoNota}\n` +
+    `   Joaco: ${d.chatsJoaco} · Nadia: ${d.chatsNadia}\n\n` +
+    `📋 Presupuestos enviados: ${d.presupTotal}\n` +
+    `   Joaco: ${d.presupJoaco} · Nadia: ${d.presupNadia}`
+  );
+}
+async function maybeReporteDiario(env) {
+  try {
+    const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    if ((await kvGet(env, 'reporte_diario_sent', '')) === fechaAR) return; // ya se mandó hoy
+    const d = await buildReporteDiario(env);
+    const msg = formatReporteDiario(d);
+    for (const ph of REPORTE_DIARIO_PHONES) { try { await waSendText(env, ph, msg); } catch (_) {} }
+    await kvSet(env, 'reporte_diario_sent', fechaAR);
+  } catch (_) {}
+}
+
 // ===== Auto-respuesta del minicurso (regalos) =====
 // Cuando un contacto ESCRIBE pidiendo la guía + cotizador del minicurso, le
 // respondemos automáticamente con el link de regalos. Es respuesta dentro de la
@@ -8630,6 +8712,16 @@ export default {
         } catch (e) { return json({ error: String(e), deleted, replayed }, 500); }
       }
 
+      // POST /admin/reporte-diario/test → arma el reporte diario y lo devuelve; con {send:true} lo manda por WA a Gaspar+hermano.
+      if (request.method === 'POST' && path === '/admin/reporte-diario/test') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let body = {}; try { body = await request.json(); } catch (_) {}
+        const d = await buildReporteDiario(env);
+        const preview = formatReporteDiario(d);
+        if (body && body.send) { for (const ph of REPORTE_DIARIO_PHONES) { try { await waSendText(env, ph, preview); } catch (_) {} } }
+        return json({ ok: true, data: d, preview, sent: !!(body && body.send) });
+      }
+
       // Backfill de los mensajes automáticos de ManyChat (welcome) que Instagram nos mandó
       // como echo VACÍO (solo el mid, sin texto) y por eso nunca se guardaron -> las convos
       // de IG arrancaban "cortadas". Recorre los logs crudos en orden cronológico: el PRIMER
@@ -11697,6 +11789,8 @@ export default {
     // if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processColgados(env));
     // Aviso a Gaspar cuando el dataset ya tiene suficientes QualifiedLead (CAPI) para cambiar la campaña.
     if (hAR >= 9 && hAR <= 20) ctx.waitUntil(maybeCapiReadyNotice(env));
+    // Reporte diario de ventas a las 21:00 AR (a Gaspar + su hermano). Dedup por día adentro.
+    if (hAR === 21) ctx.waitUntil(maybeReporteDiario(env));
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
     if (hAR >= 8 && hAR < 21) ctx.waitUntil(processPendingTemplateSends(env));
     // Monitor de status de templates: 1 vez por hora, no cada 5 min. El polling
