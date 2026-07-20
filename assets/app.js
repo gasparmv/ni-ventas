@@ -6,7 +6,7 @@
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Diseñador', 'Abril'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Nadia', 'Diseñador', 'Abril'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -894,6 +894,8 @@ function _userKey(s) {
   return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
 function isJoaquinUser(s) { return _userKey(s) === 'joaquin' || _userKey(s) === 'joaco'; }
+// Nadia: 2da vendedora (rol comercial, como Joaco). Ve el Chat WA y trabaja carteles.
+function isNadiaUser(s) { return _userKey(s) === 'nadia'; }
 function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
 function isDisenadorUser(s) { const k = _userKey(s); return k === 'disenador' || k === 'emma' || k === 'emmanuel'; }
 // Abril: usuario de la bandeja de Cursos. Solo ve el Chat WA, y dentro solo los
@@ -987,7 +989,7 @@ async function logout() {
 // isAdmin requiere que el TOKEN sea de Gaspar (no solo el nombre activo). Sin esto,
 // un token de bajo privilegio podría usarse para mostrar la UI admin.
 function isAdmin() { return !!STATE.token && isGasparUser(STATE.tokenUser) && isGasparUser(STATE.user); }
-function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isCursosUser(STATE.user)); }
+function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isNadiaUser(STATE.user) || isCursosUser(STATE.user)); }
 // Abril (rol cursos): SOLO ve la sección Chat WA, nada más.
 function isCursosOnly() { return isCursosUser(STATE.user); }
 function authHeaders() {
