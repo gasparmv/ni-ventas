@@ -1942,12 +1942,15 @@ async function waSendText(env, to, body) {
   return waSend(env, { messaging_product: 'whatsapp', to: num, type: 'text', text: { body: String(body || '') } });
 }
 
-async function waSendTemplate(env, to, name, lang = 'es', params = []) {
+async function waSendTemplate(env, to, name, lang = 'es', params = [], headerMediaId = null) {
   const num = normalizeArPhone(to);
   if (!num) return { ok: false, status: 400, error: 'numero invalido' };
-  const components = params && params.length
-    ? [{ type: 'body', parameters: params.map(p => ({ type: 'text', text: String(p) })) }]
-    : [];
+  const components = [];
+  // Header de imagen (media template): permite mandar una imagen fuera de la
+  // ventana de 24h (ej. el render del cartel con el presupuesto). El id es un
+  // media_id de Meta (getPromoMediaId sube el render de R2 y lo cachea).
+  if (headerMediaId) components.push({ type: 'header', parameters: [{ type: 'image', image: { id: headerMediaId } }] });
+  if (params && params.length) components.push({ type: 'body', parameters: params.map(p => ({ type: 'text', text: String(p) })) });
   return waSend(env, {
     messaging_product: 'whatsapp',
     to: num,
@@ -8290,10 +8293,14 @@ export default {
       if (request.method === 'POST' && path === '/admin/wa/template') {
         let body;
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        const { to, name, lang, params } = body || {};
+        const { to, name, lang, params, header_image_key } = body || {};
         if (!to || !name) return json({ error: 'missing fields (to, name)' }, 400);
         const num = normalizeArPhone(to);
-        const r = await waSendTemplate(env, to, name, lang || 'es', Array.isArray(params) ? params : []);
+        // Si viene header_image_key (r2 key del render), lo subimos a Meta y lo mandamos
+        // en el header de la plantilla (para media templates tipo presupuesto_detallado_img).
+        let headerMediaId = null;
+        if (header_image_key) { try { headerMediaId = await getPromoMediaId(env, header_image_key); } catch (_) {} }
+        const r = await waSendTemplate(env, to, name, lang || 'es', Array.isArray(params) ? params : [], headerMediaId);
         await logWaEvent(env, { to, kind: 'template:' + name, ref: '', ok: r.ok, messageId: r.id, error: r.error });
         if (!r.ok) return json({ error: r.error, raw: r.raw }, r.status || 500);
         // Guardar en wa_messages para que aparezca en el chat
@@ -9838,20 +9845,9 @@ export default {
         const num = normalizeArPhone(to);
         if (!num) return json({ error: 'numero invalido' }, 400);
 
-        // ¿Ventana de 24h abierta? (el cliente escribió en las últimas 24h). Si NO,
-        // no intentamos el envío libre (imagen/texto): Meta lo acepta y después lo
-        // rechaza async con 131047 ("Re-engagement message"), dejando el brief mal
-        // marcado como enviado. Avisamos al front (window_closed) para que mande la
-        // plantilla aprobada presupuesto_detallado, que SÍ se puede fuera de ventana.
-        try {
-          const since24 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-          const inb = await env.DB.prepare(
-            "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1"
-          ).bind(num, since24).first();
-          if (!inb) return json({ error: 'Re-engagement message', window_closed: true }, 409);
-        } catch (_) {}
-
-        // Buscar el render más reciente del brief.
+        // Buscar el render más reciente del brief (ANTES del check de ventana: si la
+        // ventana está cerrada, le avisamos al front si HAY render para que mande la
+        // plantilla CON imagen (presupuesto_detallado_img) en vez de la de solo texto).
         let renderKey = null;
         if (brief_id) {
           try {
@@ -9861,6 +9857,19 @@ export default {
             if (row && row.r2_key) renderKey = row.r2_key;
           } catch (_) {}
         }
+
+        // ¿Ventana de 24h abierta? (el cliente escribió en las últimas 24h). Si NO,
+        // no intentamos el envío libre (imagen/texto): Meta lo acepta y después lo
+        // rechaza async con 131047 ("Re-engagement message"). Avisamos al front
+        // (window_closed + has_render) para que mande la plantilla aprobada
+        // (con imagen si hay render), que SÍ se puede fuera de ventana.
+        try {
+          const since24 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const inb = await env.DB.prepare(
+            "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1"
+          ).bind(num, since24).first();
+          if (!inb) return json({ error: 'Re-engagement message', window_closed: true, has_render: !!renderKey, render_key: renderKey || '' }, 409);
+        } catch (_) {}
 
         const CAPTION_MAX = 1024;
         const nowIso = () => new Date().toISOString();
@@ -10349,6 +10358,12 @@ export default {
         const components = [{ type: 'BODY', text: body_text }];
         if (Array.isArray(example_params) && example_params.length) {
           components[0].example = { body_text: [example_params] };
+        }
+        // Header de imagen opcional (media template): el example lleva una URL pública de
+        // muestra (Meta la usa solo para aprobar; el header real se pasa al enviar). Va
+        // PRIMERO en components (Meta exige HEADER antes que BODY).
+        if (body.header_image_url && /^https?:\/\//i.test(String(body.header_image_url))) {
+          components.unshift({ type: 'HEADER', format: 'IMAGE', example: { header_handle: [String(body.header_image_url)] } });
         }
         // Botón URL opcional (ej. "Ver portal"). URL estática (sin variable) → no
         // requiere params al enviar; el botón se manda solo con la plantilla.

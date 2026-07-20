@@ -308,7 +308,7 @@ function copiarPresupuesto() {
 // nombre, ancho, alto, precio transparente, precio negro). Se usa cuando la
 // ventana de 24h está cerrada (ej. presupuesto del lunes de una consulta del
 // sábado) y Meta no deja mandar texto libre. La plantilla es de UN diseño.
-async function enviarPresupuestoComoPlantilla(tel, carteles) {
+async function enviarPresupuestoComoPlantilla(tel, carteles, renderKey) {
   if (!carteles || carteles.length !== 1) {
     return { ok: false, error: 'La ventana de 24h está cerrada y la plantilla de presupuesto es para UN diseño. Para varios carteles, esperá que el cliente escriba o mandá uno por uno.' };
   }
@@ -318,20 +318,24 @@ async function enviarPresupuestoComoPlantilla(tel, carteles) {
   const ancho = String(Math.round(+c.ancho));
   const alto = String(Math.round(+c.alto));
   const params = [nombre, ancho, alto, fmtMoney(r.transFinal), fmtMoney(r.negroFinal)];
+  const useImg = !!renderKey;
   const ok = await showConfirm(
-    `La ventana de 24h está cerrada, así que el presupuesto va como PLANTILLA aprobada (incluye los controladores, seña 50%, 3 cuotas con 10%, 10 días hábiles y envío gratis).\n\n` +
+    `La ventana de 24h está cerrada, así que el presupuesto va como PLANTILLA aprobada${useImg ? ' CON el render' : ''} (incluye los controladores, seña 50%, 3 cuotas con 10%, 10 días hábiles y envío gratis).\n\n` +
     `Trabajo: ${nombre}\nMedidas: ${ancho} x ${alto}\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}\n\n¿Lo mando?`,
     { title: 'Enviar como plantilla', confirmLabel: '📤 Mandar plantilla', cancelLabel: 'Cancelar' }
   );
   if (!ok) return { ok: false, cancelled: true };
+  const post = (name, withImg) => fetch(CONFIG.trackerUrl + '/admin/wa/template', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ to: tel, name, lang: 'es', params, header_image_key: withImg ? renderKey : undefined })
+  });
   try {
-    const tr = await fetch(CONFIG.trackerUrl + '/admin/wa/template', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ to: tel, name: 'presupuesto_detallado', lang: 'es', params })
-    });
-    const tj = await tr.json().catch(() => ({}));
+    let tr = await post(useImg ? 'presupuesto_detallado_img' : 'presupuesto_detallado', useImg);
+    let tj = await tr.json().catch(() => ({}));
+    // Si la plantilla CON imagen todavía no está aprobada por Meta, caemos a la de texto.
+    if (!tr.ok && useImg) { tr = await post('presupuesto_detallado', false); tj = await tr.json().catch(() => ({})); }
     if (!tr.ok) return { ok: false, error: 'No se pudo mandar la plantilla: ' + (tj.error || ('HTTP ' + tr.status)) };
-    toast('Mandado como plantilla aprobada ✓');
+    toast(useImg && tr.ok ? 'Mandado como plantilla con render ✓' : 'Mandado como plantilla aprobada ✓');
     return { ok: true, wamid: tj.id || '' };
   } catch (e) {
     return { ok: false, error: 'Error de red al mandar la plantilla' };
@@ -14125,25 +14129,29 @@ function renderCorpPopup() {
 // Fallback fuera de la ventana de 24 h: igual que en neón (enviarPresupuestoComoPlantilla),
 // manda el presupuesto como PLANTILLA aprobada (presupuesto_corporea, 7 variables).
 // El render NO va acá — se manda cuando el cliente responde y se reabre la ventana.
-async function enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj) {
+async function enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj, renderKey) {
   const f = corpPresupuestoFields(brief, cj);
   // Meta no acepta variables vacías: default para los campos que puedan venir sin dato.
   const nombre = (f.nombre || '').trim() || 'tu trabajo';
   const medidas = (f.medidas || '').trim() || 'a confirmar';
   const precio = fmtMoney(f.precio);
   const params = [nombre, medidas, f.frente, f.laterales, f.fondo, f.iluminacion, precio];
+  const useImg = !!renderKey;
   const ok = await showConfirm(
-    `La ventana de 24 h está cerrada, así que el presupuesto va como PLANTILLA aprobada (texto, sin el render — eso se manda cuando el cliente responda y se reabra la ventana).\n\n` +
+    `La ventana de 24 h está cerrada, así que el presupuesto va como PLANTILLA aprobada${useImg ? ' CON el render' : ' (texto, sin el render — eso se manda cuando el cliente responda y se reabra la ventana)'}.\n\n` +
     `Trabajo: ${nombre}\nMedidas: ${medidas}\nPrecio: ${precio}\n\n¿Lo mando?`,
     { title: 'Enviar como plantilla', confirmLabel: '📤 Mandar plantilla', cancelLabel: 'Cancelar' }
   );
   if (!ok) return { ok: false, cancelled: true };
+  const post = (name, withImg) => fetch(CONFIG.trackerUrl + '/admin/wa/template', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ to: tel, name, lang: 'es', params, header_image_key: withImg ? renderKey : undefined })
+  });
   try {
-    const tr = await fetch(CONFIG.trackerUrl + '/admin/wa/template', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ to: tel, name: 'presupuesto_corporea', lang: 'es', params })
-    });
-    const tj = await tr.json().catch(() => ({}));
+    let tr = await post(useImg ? 'presupuesto_corporea_img' : 'presupuesto_corporea', useImg);
+    let tj = await tr.json().catch(() => ({}));
+    // Si la plantilla CON imagen todavía no está aprobada por Meta, caemos a la de texto.
+    if (!tr.ok && useImg) { tr = await post('presupuesto_corporea', false); tj = await tr.json().catch(() => ({})); }
     if (!tr.ok) return { ok: false, error: 'No se pudo mandar la plantilla: ' + (tj.error || ('HTTP ' + tr.status)) };
     return { ok: true, wamid: tj.id || '' };
   } catch (e) {
@@ -14174,7 +14182,7 @@ async function enviarCorporeaPresupuesto(briefId, textOverride) {
       // seguimos al guardado en Sheet + marcado de enviado. El render se manda cuando
       // el cliente responda y se reabra la ventana.
       if (res.status === 409 || data.window_closed) {
-        const sent = await enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj);
+        const sent = await enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj, data.render_key);
         if (!sent.ok) {
           if (!sent.cancelled) toast(sent.error || 'No se pudo mandar la plantilla');
           return;
@@ -15987,7 +15995,7 @@ function bindCotizacion() {
           // lo rechaza): mandamos el presupuesto como PLANTILLA aprobada (1 diseño).
           const windowClosed = j.window_closed || /outside|24|window|template|131047|re-?engag/i.test(String(detail));
           if (windowClosed) {
-            const sent = await enviarPresupuestoComoPlantilla(telDigits, getCarteles());
+            const sent = await enviarPresupuestoComoPlantilla(telDigits, getCarteles(), j.render_key);
             if (sent.cancelled) { render(); return; }
             if (!sent.ok) { await showAlert(sent.error || 'No se pudo mandar la plantilla.', { title: 'No se pudo enviar', variant: 'warn' }); return; }
             waOk = true; wamid = sent.wamid || '';
