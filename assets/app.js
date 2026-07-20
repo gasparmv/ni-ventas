@@ -2231,6 +2231,13 @@ function renderPrecotiz() {
         <span class="muted" style="font-size:12px">${P.count}/${P.cap} leads</span>
       </div>
       <div class="muted" style="font-size:11px;margin-top:8px">Con el piloto prendido y en modo borrador, el bot arma los mensajitos y te avisa acá para que los apruebes. Solo vos ves estos chats hasta que junten los 3 datos.</div>
+      <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:8px">👤 Reparto a Nadia — leads por día:
+          <input type="number" min="0" step="1" data-nadia-cuota value="${P.nadia_cuota != null ? P.nadia_cuota : 0}" style="width:64px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:5px 8px;color:var(--fg);font-size:13px">
+        </label>
+        <span class="muted" style="font-size:12px">hoy le tocaron ${P.nadia_hoy || 0}/${P.nadia_cuota || 0}</span>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:6px">Cuando el bot termina de relevar un lead de carteles, se lo asigna a Nadia hasta ese tope por día (el resto queda para Joaco). En 0, Nadia no recibe nada del bot — le asignás a mano con el botón 👤N en cada chat.</div>
     </div>
     ${(P.leads && P.leads.length) ? leadsHtml : '<div class="muted" style="font-size:13px">Todavía no entró ningún lead al piloto.</div>'}
   `;
@@ -2243,6 +2250,8 @@ function bindPrecotiz() {
   if (onChk) onChk.onchange = async () => { await precotizControl({ on: onChk.checked }); reload(); };
   const modoSel = document.querySelector('[data-precotiz-modo]');
   if (modoSel) modoSel.onchange = async () => { await precotizControl({ modo: modoSel.value }); toast('Modo: ' + modoSel.value); };
+  const nadiaCuotaInp = document.querySelector('[data-nadia-cuota]');
+  if (nadiaCuotaInp) nadiaCuotaInp.onchange = async () => { const q = Math.max(0, parseInt(nadiaCuotaInp.value, 10) || 0); await precotizControl({ nadia_cuota: q }); toast('Reparto a Nadia: ' + q + '/día'); reload(); };
   document.querySelectorAll('[data-precotiz-approve]').forEach(el => el.onclick = async () => {
     const phone = el.dataset.precotizApprove;
     const ta = document.querySelector(`[data-precotiz-draft="${phone}"]`);

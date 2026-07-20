@@ -1391,6 +1391,23 @@ async function precotizNotifyGaspar(env, msg) {
   try { await waSendText(env, PRECOTIZ_GASPAR_PHONE, msg); } catch (_) {}
 }
 
+// Reparto automático a Nadia: cuando el bot completa la pre cotización de un lead de
+// carteles, si la CUOTA DIARIA de Nadia lo permite, le asigna el chat (lo ve en su bandeja);
+// si no, queda para Joaco. Cuota configurable por Gaspar (kv nadia_cuota_diaria, arranca en
+// 0 = el bot NO le manda nada al automático). Cuenta los asignados a Nadia HOY (día AR) para
+// no pasar de la cuota. Notifica a Nadia por WhatsApp si hay un teléfono cargado (kv nadia_phone).
+async function maybeRepartirANadia(env, phone) {
+  try {
+    const cuota = parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0;
+    if (cuota <= 0 || !phone) return;
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'nadia' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first();
+    if (((r && r.n) || 0) >= cuota) return; // ya llegó a la cuota del día
+    await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = 'nadia', assigned_at = ? WHERE phone = ?").bind(new Date().toISOString(), phone).run();
+    const nadiaPhone = await kvGet(env, 'nadia_phone', '');
+    if (nadiaPhone) { try { await waSendText(env, nadiaPhone, 'Tenés un lead nuevo de carteles para cotizar en el CRM 🙌'); } catch (_) {} }
+  } catch (_) {}
+}
+
 // Mueve el chat de bandeja (reusa wa_chats_summary.inbox, mig. 012):
 // 'precotiz' = solo Gaspar lo ve; 'general' = vuelve a la bandeja de Joaco.
 async function precotizSetInbox(env, phone, inbox) {
@@ -1785,6 +1802,7 @@ async function processPrecotizPilot(env) {
       await paraCotizarTag(env, lead.phone, true);   // entra a la bandeja "Para cotizar" de Joaco
       await precotizMarcarNoLeido(env, lead.phone);  // no leído -> sube arriba de todo
       await precotizNotifyGaspar(env, `termino la pre cotizacion de ${lead.nombre || lead.phone}\nya tiene foto y medidas${tI ? ' e interior/exterior' : ' (falta confirmar interior/exterior, el cliente no lo tenia definido)'}\npaso a la bandeja para que lo cotice Joaco`);
+      await maybeRepartirANadia(env, lead.phone);   // reparto automático a Nadia según la cuota diaria (arranca en 0)
       continue;
     }
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
@@ -7953,7 +7971,12 @@ export default {
           try { const rs = await env.DB.prepare('SELECT * FROM precotiz_pilot ORDER BY updated_at DESC').all(); leads = rs.results || []; } catch (_) {}
           let frozen = [];
           try { const fr = await env.DB.prepare("SELECT substr(k, 17) AS phone FROM kv_cache WHERE k LIKE 'precotiz_frozen:%' AND v = '1'").all(); frozen = (fr.results || []).map(r => r.phone); } catch (_) {}
-          return json({ ok: true, on, modo, cap, sample, count: leads.length, leads, frozen });
+          // Reparto a Nadia: cuota diaria configurable + cuántos se le asignaron hoy (día AR).
+          const nadiaCuota = parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0;
+          let nadiaHoy = 0;
+          try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'nadia' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first(); nadiaHoy = (nr && nr.n) || 0; } catch (_) {}
+          const nadiaPhone = await kvGet(env, 'nadia_phone', '');
+          return json({ ok: true, on, modo, cap, sample, count: leads.length, leads, frozen, nadia_cuota: nadiaCuota, nadia_hoy: nadiaHoy, nadia_phone: nadiaPhone });
         }
 
         // GET /admin/precotiz/evaluaciones → veredictos de la IA (por qué entró/no entró cada lead).
@@ -7997,7 +8020,10 @@ export default {
           let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
           if (typeof body?.on === 'boolean') await kvSet(env, 'precotiz_on', body.on ? '1' : '0');
           if (body?.modo === 'auto' || body?.modo === 'draft') await kvSet(env, 'precotiz_modo', body.modo);
-          return json({ ok: true, on: (await kvGet(env, 'precotiz_on', '0')) === '1', modo: await kvGet(env, 'precotiz_modo', 'draft') });
+          // Reparto a Nadia: cuota diaria de leads del bot (0 = nada) + teléfono para avisarle.
+          if (body?.nadia_cuota !== undefined) { const q = Math.max(0, parseInt(body.nadia_cuota, 10) || 0); await kvSet(env, 'nadia_cuota_diaria', String(q)); }
+          if (body?.nadia_phone !== undefined) { await kvSet(env, 'nadia_phone', String(body.nadia_phone || '').replace(/\D/g, '')); }
+          return json({ ok: true, on: (await kvGet(env, 'precotiz_on', '0')) === '1', modo: await kvGet(env, 'precotiz_modo', 'draft'), nadia_cuota: parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0, nadia_phone: await kvGet(env, 'nadia_phone', '') });
         }
 
         // POST /admin/precotiz/dry-run → { phone } qué decidiría el motor, SIN enviar
