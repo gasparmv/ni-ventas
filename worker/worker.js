@@ -2403,6 +2403,13 @@ async function maybeBranchBroadcastReply(env, phone) {
       "SELECT b.id AS bid FROM wa_autoreply_log a JOIN wa_broadcasts b ON ('bc_' || b.id) = a.kind WHERE a.phone = ? AND a.status = 'sent' AND b.reply_ai = 1 AND b.status = 'running' ORDER BY a.sent_at DESC LIMIT 1"
     ).bind(phone).first();
     if (!row?.bid) return;
+    // No ramificar la respuesta-IA del broadcast si el bot de precotización ya está
+    // trabajando o completó a este lead: lo maneja el bot (o Joaco en "Para cotizar"),
+    // no el reflote pidiéndole otra vez la foto y las medidas que ya dio.
+    try {
+      const _pc = await env.DB.prepare("SELECT 1 FROM precotiz_pilot WHERE phone = ? AND estado IN ('activo','completo','cotizado') LIMIT 1").bind(phone).first();
+      if (_pc) return;
+    } catch (_) {}
     const exists = await env.DB.prepare("SELECT 1 FROM wa_broadcast_events WHERE broadcast_id = ? AND phone = ?").bind(row.bid, phone).first();
     if (exists) return;
     const now = new Date().toISOString();
