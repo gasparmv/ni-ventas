@@ -5101,6 +5101,10 @@ async function computeRefloteSegment(env) {
       AND NOT (p.has_img = 1 AND p.has_med = 1)
       AND p.phone NOT IN (SELECT phone FROM wa_unreachable_phones)
       AND p.phone NOT IN (SELECT phone FROM contact_labels WHERE label_id = ${labelId || 0})
+      -- Excluir los que el bot de precotización ya está trabajando o completó. El
+      -- reflote detecta medidas por GLOB (débil: no reconoce "30 alto 80 largo"),
+      -- pero el bot (LLM) ya sabe que tienen foto+medidas → no pedírselas de nuevo.
+      AND p.phone NOT IN (SELECT phone FROM precotiz_pilot WHERE estado IN ('activo','completo','cotizado'))
     ORDER BY p.last_in_ts DESC`;
   let rows = [];
   try { rows = (await env.DB.prepare(sql).bind(desde15d).all()).results || []; } catch (e) { return { error: String(e && e.message || e), count: 0, rows: [] }; }
