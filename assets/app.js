@@ -50,6 +50,7 @@ const CONFIG = {
     // Multiplicadores
     reventa_mult: 0.8,        // reventa = trans × 0.8
     comision_pct: 0.05,       // 5% Joaco sobre trans
+    nv_nadia_comision_pct: 0.04,  // 4% Nadia (2da vendedora)
     descuento_mult: 0.88,     // si m2 > descuento_min_m2
     descuento_min_m2: 100,
     recargo_5: 2,             // m2 ≤ 5  → trans × 2
@@ -91,13 +92,18 @@ const CONFIG = {
     // Acrílico negro: precio = transparente × ratio (siempre 7% más barato)
     nv_negro_ratio: 0.93,
     // Fallback del sueldo fijo de Joaco si un mes no está en joacoFijoByMonth.
-    nv_joaquin_fijo: 250000
+    nv_joaquin_fijo: 250000,
+    // Sueldo fijo de Nadia (2da vendedora): PENDIENTE de definir → 0 por ahora.
+    nv_nadia_fijo: 0
   },
   // Sueldo fijo mensual de Joaco — espejo de la hoja COGS fila 50 ("Sueldos
   // Joaquin"), indexado por número de mes (fila 47 = 1..12). El dashboard suma
   // el fijo REAL de cada mes del período elegido (varía mes a mes). Si cambia
   // en el Excel, actualizá acá (o conectamos el Apps Script para sincronizar).
   joacoFijoByMonth: { 1: 492500, 2: 267000, 3: 250000, 4: 326000, 5: 290000, 6: 250000, 7: 250000, 8: 250000, 9: 250000, 10: 250000, 11: 250000, 12: 250000 },
+  // Sueldo fijo mensual de Nadia — PENDIENTE de definir (arranca vacío = 0). Cargar acá
+  // cuando Gaspar lo defina (mismo formato que joacoFijoByMonth: { mes: monto }).
+  nadiaFijoByMonth: {},
   postventaMilestones: [
     { id: 'D30', days: 30, label: 'Foto / feedback', tagClass: 'tag-d30',
       template: (n) => `Holaa ${n}, cómo va? cómo te quedó el cartel?\n\nsi tenés una foto cuando puedas pasame, nos re sirve mostrar como queda en el local 🤙` },
@@ -158,6 +164,63 @@ function joacoFijoMes(yyyymm) {
   const cfgMap = CONFIG.joacoFijoByMonth || {};
   if (+cfgMap[m]) return +cfgMap[m];
   return (+getCotizadorParams().nv_joaquin_fijo) || 250000;
+}
+// Sueldo fijo de Nadia para un mes 'YYYY-MM' (mismo patrón que joacoFijoMes). Arranca en 0
+// hasta que se defina (CONFIG.nadiaFijoByMonth vacío, nv_nadia_fijo=0).
+function nadiaFijoMes(yyyymm) {
+  const m = parseInt(String(yyyymm || '').split('-')[1], 10);
+  const cogsMap = (STATE.cotizadorCogs && STATE.cotizadorCogs.fijoByMonthNadia) || null;
+  if (cogsMap && +cogsMap[m]) return +cogsMap[m];
+  const cfgMap = CONFIG.nadiaFijoByMonth || {};
+  if (+cfgMap[m]) return +cfgMap[m];
+  return (+getCotizadorParams().nv_nadia_fijo) || 0;
+}
+// Panel "Tu sueldo" de un vendedor ('joaco'|'nadia'): fijo del mes + comisión sobre SUS
+// ventas (filtradas por comercial_id) + total. Joaco: 5% desde may-2026; Nadia: 4% desde
+// jul-2026. El filtro (p.comercial_id||'joaco')===vendedor deja a Joaco IGUAL que antes
+// (todo el histórico es suyo por el default 'joaco').
+function panelSueldoHtml(vendedor) {
+  const esNadia = vendedor === 'nadia';
+  const DESDE = esNadia ? '2026-07' : '2026-05';
+  const params = getCotizadorParams();
+  const rate = esNadia
+    ? ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.nadia) || params.nv_nadia_comision_pct || 0.04)
+    : ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.joaquin) || params.comision_pct || 0.05);
+  const ratePct = +(rate * 100).toFixed(1);
+  const fijoMes = esNadia ? nadiaFijoMes : joacoFijoMes;
+  const sel = getDashMonths();
+  const periodMonths = (sel || availableMonths()).filter(m => m >= DESDE);
+  let inner, periodLbl;
+  if (!periodMonths.length) {
+    const desdeLbl = esNadia ? 'desde julio 2026' : 'desde mayo 2026';
+    periodLbl = desdeLbl;
+    inner = `<div style="color:var(--fg-subtle);font-size:13px">El sueldo se muestra <b>${desdeLbl}</b> en adelante. Elegí ese período (o "Todos") para verlo.</div>`;
+  } else {
+    const nMonths = periodMonths.length;
+    const fijo = periodMonths.reduce((a, m) => a + fijoMes(m), 0);
+    const ventas = STATE.pedidos
+      .filter(p => periodMonths.indexOf(getMonth(p.fecha)) !== -1 && (p.comercial_id || 'joaco') === vendedor)
+      .reduce((a, p) => a + (p.precio || 0) + (p.precioDimmer || 0), 0);
+    const comision = Math.round(ventas * rate);
+    const sueldo = fijo + comision;
+    const por100k = Math.round(100000 * rate);
+    periodLbl = nMonths === 1
+      ? new Date(+periodMonths[0].split('-')[0], +periodMonths[0].split('-')[1] - 1, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
+      : nMonths + ' meses';
+    const fijoNota = (esNadia && fijo === 0) ? 'fijo a definir' : (nMonths === 1 ? 'fijo del mes' : 'suma real · ' + nMonths + ' meses');
+    inner = `
+        <div class="kpi-grid" style="margin:0">
+          <div class="kpi"><div class="kpi-label">Sueldo fijo</div><div class="kpi-value">${fmtMoney(fijo)}</div><div class="kpi-delta">${fijoNota}</div></div>
+          <div class="kpi cyan"><div class="kpi-label">Comisión ${ratePct}%</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">sobre ${fmtMoney(ventas)} en carteles directo</div></div>
+          <div class="kpi"><div class="kpi-label">Te estás llevando</div><div class="kpi-value">${fmtMoney(sueldo)}</div><div class="kpi-delta">fijo + comisión</div></div>
+        </div>
+        <div style="margin-top:var(--s-3);color:var(--fg-subtle);font-size:12px">Por cada ${fmtMoney(100000)} en carteles directo sumás ${fmtMoney(por100k)} de comisión 🚀</div>`;
+  }
+  return `
+      <div style="background:linear-gradient(135deg,rgba(37,211,102,.07),transparent 55%),var(--bg-card);border:1px solid rgba(37,211,102,.35);border-radius:var(--r-md);padding:var(--s-4);margin-bottom:var(--s-5)">
+        <h3 style="margin:0 0 var(--s-3);font-size:15px;letter-spacing:var(--tr-tight)">💰 Tu sueldo · ${escapeHtml(periodLbl)}</h3>
+        ${inner}
+      </div>`;
 }
 
 async function loadCotizadorParams() {
@@ -2854,48 +2917,7 @@ function renderDashboard() {
       </div>`;
     })()}
 
-    ${isJoaquinUser(STATE.user) ? (() => {
-      // Panel "Tu sueldo" — solo Joaco. Sueldo = fijo del mes (COGS fila 50
-      // "Sueldos Joaquin") + comisión 5% de carteles directo. Solo se cuenta
-      // desde mayo 2026 en adelante: lo anterior no se muestra (pagos sin confirmar).
-      const DESDE = '2026-05';
-      const params = getCotizadorParams();
-      const rate = (STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.joaquin) || params.comision_pct || 0.05;
-      const ratePct = +(rate * 100).toFixed(1);
-      const sel = getDashMonths();                                  // null = todos, array = meses
-      const periodMonths = (sel || availableMonths()).filter(m => m >= DESDE);
-      let inner, periodLbl;
-      if (!periodMonths.length) {
-        periodLbl = 'desde mayo 2026';
-        inner = `<div style="color:var(--fg-subtle);font-size:13px">El sueldo se muestra <b>desde mayo 2026</b> en adelante. Elegí mayo, junio o "Todos" en el período para verlo.</div>`;
-      } else {
-        const nMonths = periodMonths.length;
-        // Fijo = suma del sueldo REAL de cada mes (COGS fila 50, varía mes a mes).
-        const fijo = periodMonths.reduce((a, m) => a + joacoFijoMes(m), 0);
-        // Comisión = 5% de carteles directo (ventas del dashboard) de esos meses.
-        const ventas = STATE.pedidos
-          .filter(p => periodMonths.indexOf(getMonth(p.fecha)) !== -1)
-          .reduce((a, p) => a + (p.precio || 0) + (p.precioDimmer || 0), 0);
-        const comision = Math.round(ventas * rate);
-        const sueldo = fijo + comision;
-        const por100k = Math.round(100000 * rate);
-        periodLbl = nMonths === 1
-          ? new Date(+periodMonths[0].split('-')[0], +periodMonths[0].split('-')[1] - 1, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
-          : nMonths + ' meses (desde may)';
-        inner = `
-        <div class="kpi-grid" style="margin:0">
-          <div class="kpi"><div class="kpi-label">Sueldo fijo</div><div class="kpi-value">${fmtMoney(fijo)}</div><div class="kpi-delta">${nMonths === 1 ? 'fijo del mes' : 'suma real · ' + nMonths + ' meses'}</div></div>
-          <div class="kpi cyan"><div class="kpi-label">Comisión ${ratePct}%</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">sobre ${fmtMoney(ventas)} en carteles directo</div></div>
-          <div class="kpi"><div class="kpi-label">Te estás llevando</div><div class="kpi-value">${fmtMoney(sueldo)}</div><div class="kpi-delta">fijo + comisión</div></div>
-        </div>
-        <div style="margin-top:var(--s-3);color:var(--fg-subtle);font-size:12px">Por cada ${fmtMoney(100000)} en carteles directo sumás ${fmtMoney(por100k)} de comisión 🚀</div>`;
-      }
-      return `
-      <div style="background:linear-gradient(135deg,rgba(37,211,102,.07),transparent 55%),var(--bg-card);border:1px solid rgba(37,211,102,.35);border-radius:var(--r-md);padding:var(--s-4);margin-bottom:var(--s-5)">
-        <h3 style="margin:0 0 var(--s-3);font-size:15px;letter-spacing:var(--tr-tight)">💰 Tu sueldo · ${escapeHtml(periodLbl)}</h3>
-        ${inner}
-      </div>`;
-    })() : ''}
+    ${isJoaquinUser(STATE.user) ? panelSueldoHtml('joaco') : (isNadiaUser(STATE.user) ? panelSueldoHtml('nadia') : '')}
 
     <div class="chart-grid">
       <div class="card chart-card">
@@ -14486,7 +14508,7 @@ async function createCorporeaBrief() {
       tipo: 'corporea', cliente_nombre: f.cliente || 'Corpórea', origen_lead: 'wpp',
       cliente_wa_id: (f.telefono || '').replace(/\D/g, ''),
       estado: 'nuevo', ancho_cm: +f.ancho, alto_cm: +f.alto, m2: r.m2,
-      precio_final: r.precio, corporea_json: JSON.stringify(cj), comercial_id: 'joaco'
+      precio_final: r.precio, corporea_json: JSON.stringify(cj)
     };
     const res = await fetch(`${CONFIG.trackerUrl}/admin/briefs`, {
       method: 'POST',

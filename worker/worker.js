@@ -631,9 +631,29 @@ async function ensurePedidosSchema(env) {
   // Columnas agregadas después de crear la tabla en prod: red de seguridad del espejo.
   // mirror_attempts = intentos fallidos; mirror_error = motivo del último fallo (ej.
   // valor que infringe la validación de datos del Excel). El ALTER tira si ya existen.
-  for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT']) {
+  for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT', "comercial_id TEXT NOT NULL DEFAULT 'joaco'"]) {
     try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
   }
+  // comercial_id: vendedor dueño de la venta (para la comisión por vendedor). DEFAULT 'joaco'
+  // → todo el histórico y lo no atribuido queda de Joaco, su número no se mueve.
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedidos_comercial ON pedidos(comercial_id)').run(); } catch (_) {}
+}
+// Resuelve a qué vendedor (comercial) se atribuye una venta/brief. Reglas, en orden:
+//  (1) el usuario logueado si es un vendedor comercial conocido (cada vendedor carga lo suyo);
+//  (2) si no (admin/proceso), el vendedor asignado al chat de ese teléfono (assigned_to);
+//  (3) fallback 'joaco'. Normaliza alias joaquin/joaco. body.comercial_id solo lo respeta si
+//  lo manda un admin (reasignación manual desde el CRM).
+async function resolveComercial(env, { bodyComercial, sessionUser, phone } = {}) {
+  const slug = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const norm = (s) => { const k = slug(s); if (k === 'joaquin' || k === 'joaco') return 'joaco'; if (k === 'nadia') return 'nadia'; return ''; };
+  const us = slug(sessionUser);
+  // (0) reasignación manual: un admin (Gaspar) puede forzar el vendedor por body.
+  if (bodyComercial && us === 'gaspar') { const v = norm(bodyComercial); if (v) return v; }
+  // (1) el vendedor logueado que carga la venta.
+  const v1 = norm(sessionUser); if (v1) return v1;
+  // (2) el vendedor asignado al chat del teléfono.
+  if (phone) { try { const r = await env.DB.prepare("SELECT assigned_to FROM wa_chats_summary WHERE phone = ?").bind(String(phone).replace(/\D/g, '')).first(); const v2 = norm(r && r.assigned_to); if (v2) return v2; } catch (_) {} }
+  return 'joaco';
 }
 // Número de precio → entero. Los precios de NI son SIEMPRE enteros en pesos (sin
 // centavos). Google CSV puede mandar "149500", "149.500", "149,500", "$149.500",
@@ -11072,15 +11092,17 @@ export default {
         const estadoPago = String(body.estado_pago || '1er pago');
         const ad = String(body.ad || '');
         const telefono = String(body.telefono || '').replace(/\D/g, '');
+        // Vendedor de la venta: el usuario logueado que la carga (o el vendedor del chat).
+        const comercialId = await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: telefono });
         const stmts = carteles.map(c => env.DB.prepare(
-          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, sheet_row, origen, mirror_dirty, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, NULL, 'crm', 1, ?, ?)`
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, sheet_row, origen, mirror_dirty, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, NULL, 'crm', 1, ?, ?)`
         ).bind(
           numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
           num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
           num(c.cantidad) || 1, num(c.precio), String(c.dimer || 'NO').trim(), num(c.precio_dimmer),
           String(c.envio || '').trim(), String(c.aclaracion || '').trim(), num(c.tramos), String(c.tipo || '').trim(),
-          plataforma, estadoPago, pagado, restante, ad, telefono, now, now
+          plataforma, estadoPago, pagado, restante, ad, telefono, comercialId, now, now
         ));
         await env.DB.batch(stmts);
         const rs = await env.DB.prepare('SELECT * FROM pedidos WHERE numero = ? AND origen = ? ORDER BY id').bind(numero, 'crm').all();
@@ -11255,8 +11277,8 @@ export default {
       if (request.method === 'POST' && path === '/admin/briefs') {
         let body;
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        // Comercial siempre joaco por default (equipo actual: solo Joaco + Emma).
-        const comercial_id = body.comercial_id || 'joaco';
+        // Vendedor del brief: el usuario logueado que lo carga (o el vendedor del chat).
+        const comercial_id = await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: body.cliente_wa_id });
         const now = new Date().toISOString();
         const cols = [
           'cliente_wa_id', 'cliente_nombre', 'origen_lead', 'estado', 'tipo', 'diseno', 'corporea_json',
