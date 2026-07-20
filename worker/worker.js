@@ -5348,17 +5348,25 @@ async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto, op
     contents: [{ parts: reqParts }],
     generationConfig: { responseModalities: ['IMAGE', 'TEXT'] }
   };
-  let resp;
-  try {
-    resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  } catch (e) {
-    return { error: 'fetch a Gemini falló: ' + e.message };
-  }
-  if (!resp.ok) {
+  // Reintento ante errores TRANSITORIOS de Gemini (503 deadline/overloaded, 500, 429):
+  // el render es pesado y Google a veces satura o corta por deadline. Un reintento
+  // resuelve la mayoría sin tirarle el error al usuario. Errores definitivos (400 prompt
+  // inválido, etc.) no se reintentan.
+  let resp = null, lastErr = 'Gemini no respondió';
+  for (let intento = 0; intento < 2; intento++) {
+    if (intento > 0) await new Promise(r => setTimeout(r, 2000));
+    try {
+      resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    } catch (e) { lastErr = 'fetch a Gemini falló: ' + e.message; resp = null; continue; }
+    if (resp.ok) break;
     let detail = '';
-    try { detail = (await resp.json())?.error?.message || ''; } catch(e) {}
-    return { error: `Gemini HTTP ${resp.status}${detail ? ': ' + detail : ''}` };
+    try { detail = (await resp.json())?.error?.message || ''; } catch (e) {}
+    lastErr = `Gemini HTTP ${resp.status}${detail ? ': ' + detail : ''}`;
+    const transient = resp.status === 503 || resp.status === 500 || resp.status === 429 || /deadline|unavailable|overloaded|timeout|try again/i.test(detail);
+    resp = null;
+    if (!transient) break;
   }
+  if (!resp || !resp.ok) return { error: lastErr };
   let data;
   try { data = await resp.json(); } catch (e) { return { error: 'respuesta de Gemini no es JSON' }; }
   const parts = data?.candidates?.[0]?.content?.parts || [];
