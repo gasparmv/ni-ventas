@@ -1421,9 +1421,22 @@ async function paraCotizarTag(env, phone, on) {
   try {
     const id = await ensureLabelId(env, PARA_COTIZAR_LABEL_NAME, PARA_COTIZAR_LABEL_COLOR);
     if (!id) return;
-    if (on) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, id, new Date().toISOString()).run();
-    else await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
+    if (on) {
+      if (await labelSuppressed(env, phone, id)) return;   // la quitaron a mano → respetar, no re-etiquetar
+      await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, id, new Date().toISOString()).run();
+    } else {
+      await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
+    }
   } catch (_) {}
+}
+// Supresión manual de etiquetas auto (📋 Para cotizar / 💰 Sin cotizar): si un vendedor
+// las quita a mano, se registra en label_overrides para que los reconciliadores NO las
+// vuelvan a poner. Se limpia si la etiqueta se re-agrega a mano (POST /admin/contact-labels).
+async function labelSuppressed(env, phone, labelId) {
+  try {
+    const r = await env.DB.prepare("SELECT 1 FROM label_overrides WHERE phone = ? AND label_id = ? LIMIT 1").bind(phone, labelId).first();
+    return !!r;
+  } catch (_) { return false; }
 }
 // Etiqueta "🛑 Bot frenado": la pone/saca el botón "Frenar bot" (freeze). Es VISIBLE en la lista
 // de chats — así Joaco (comercial) ve qué chats tienen el bot frenado y puede reactivarlo, sin
@@ -5004,7 +5017,7 @@ async function syncSinCotizar(env, opts = {}) {
         const res = await env.DB.prepare("INSERT OR IGNORE INTO sin_cotizar (phone, name, canal, quotable_since, created_at) VALUES (?, ?, ?, ?, ?)")
           .bind(r.phone, r.contact_name || '', r.canal || 'wa', r.quotable_since || nowIso, nowIso).run();
         if (res.meta && res.meta.changes) {
-          if (labelId) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(r.phone, labelId, nowIso).run();
+          if (labelId && !(await labelSuppressed(env, r.phone, labelId))) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(r.phone, labelId, nowIso).run();
           added++;
         }
       } catch (_) {}
@@ -10174,6 +10187,8 @@ export default {
         if (!phone || !label_id) return json({ error: 'missing phone or label_id' }, 400);
         await env.DB.prepare('CREATE TABLE IF NOT EXISTS contact_labels (phone TEXT NOT NULL, label_id INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (phone, label_id))').run();
         await env.DB.prepare('INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)').bind(phone, label_id, new Date().toISOString()).run();
+        // Si la reponen a mano, dejar de suprimirla (limpia el override).
+        try { await env.DB.prepare('DELETE FROM label_overrides WHERE phone = ? AND label_id = ?').bind(phone, label_id).run(); } catch (_) {}
         return json({ ok: true });
       }
       if (request.method === 'DELETE' && path === '/admin/contact-labels') {
@@ -10181,6 +10196,11 @@ export default {
         const { phone, label_id } = body || {};
         if (!phone || !label_id) return json({ error: 'missing phone or label_id' }, 400);
         await env.DB.prepare('DELETE FROM contact_labels WHERE phone = ? AND label_id = ?').bind(phone, label_id).run();
+        // Quitada A MANO → registrar el override para que los reconciliadores no la repongan.
+        try {
+          await env.DB.prepare('CREATE TABLE IF NOT EXISTS label_overrides (phone TEXT NOT NULL, label_id INTEGER NOT NULL, removed_at TEXT NOT NULL, PRIMARY KEY (phone, label_id))').run();
+          await env.DB.prepare('INSERT OR REPLACE INTO label_overrides (phone, label_id, removed_at) VALUES (?, ?, ?)').bind(phone, label_id, new Date().toISOString()).run();
+        } catch (_) {}
         return json({ ok: true });
       }
 
