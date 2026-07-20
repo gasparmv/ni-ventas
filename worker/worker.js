@@ -6151,15 +6151,20 @@ async function inboxAccessOk(env, role, phone) {
 }
 
 // Invalida las variantes (por rol) del cache de chats-summary.
+// Vendedores comerciales SECUNDARIOS: ven SOLO los chats asignados a ellos (assigned_to).
+// El comercial "principal" (Joaco) ve todo lo NO asignado a un secundario. Es el reparto
+// de chats entre vendedores (assigned_to en wa_chats_summary, mig 037). Sumar un 3er
+// vendedor secundario = agregar su slug acá (y queda cubierto en la invalidación de cache).
+const VENDEDORES_SECUNDARIOS = ['nadia'];
 async function invalidateChatsSummaryCache(request) {
   try {
     const cache = caches.default;
     const base = new URL(request.url);
     base.pathname = '/admin/wa/chats-summary';
-    for (const role of ['admin', 'comercial', 'disenador', 'cursos']) {
-      base.search = '?role=' + role;
-      await cache.delete(new Request(base.toString(), { method: 'GET' }));
-    }
+    const variants = ['?role=admin', '?role=comercial', '?role=disenador', '?role=cursos'];
+    // El rol comercial se cachea POR USUARIO (reparto por vendedor): borrar cada variante.
+    for (const u of ['joaco', 'joaquin', ...VENDEDORES_SECUNDARIOS]) variants.push('?role=comercial&u=' + u);
+    for (const s of variants) { base.search = s; await cache.delete(new Request(base.toString(), { method: 'GET' })); }
   } catch (_) {}
 }
 
@@ -7995,68 +8000,6 @@ export default {
           return json({ ok: true, on: (await kvGet(env, 'precotiz_on', '0')) === '1', modo: await kvGet(env, 'precotiz_modo', 'draft') });
         }
 
-        // GET /admin/minicurso-landing → estado + leads del flujo de la landing del minicurso
-        if (request.method === 'GET' && path === '/admin/minicurso-landing') {
-          const on = (await kvGet(env, 'minicurso_landing_on', '0')) === '1';
-          let leads = [];
-          try { const rs = await env.DB.prepare('SELECT * FROM minicurso_landing ORDER BY updated_at DESC LIMIT 300').all(); leads = rs.results || []; } catch (_) {}
-          const by_stage = {};
-          for (const l of leads) by_stage[l.stage] = (by_stage[l.stage] || 0) + 1;
-          return json({ ok: true, on, count: leads.length, by_stage, leads });
-        }
-        // POST /admin/minicurso-landing/control → { on? } prender/apagar (kill-switch)
-        if (request.method === 'POST' && path === '/admin/minicurso-landing/control') {
-          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-          if (typeof body?.on === 'boolean') await kvSet(env, 'minicurso_landing_on', body.on ? '1' : '0');
-          return json({ ok: true, on: (await kvGet(env, 'minicurso_landing_on', '0')) === '1' });
-        }
-        // POST /admin/minicurso-landing/test → { phone, nombre, now? } registra un lead
-        // de prueba. Con now:true el opener sale en el próximo tick (probar sin esperar 45min).
-        if (request.method === 'POST' && path === '/admin/minicurso-landing/test') {
-          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-          const num = normalizeArPhone(String(body?.phone || '')) || '';
-          if (!num) return json({ error: 'missing/invalid phone' }, 400);
-          const nombre = (String(body?.nombre || body?.firstName || '').trim().split(/\s+/)[0]) || '';
-          const now = new Date().toISOString();
-          const due = body?.now ? now : new Date(Date.now() + MINICURSO_LANDING_DELAY_MS).toISOString();
-          try {
-            await env.DB.prepare(
-              "INSERT INTO minicurso_landing (phone, nombre, stage, registered_at, opener_due_at, source, updated_at, created_at) VALUES (?, ?, 'registered', ?, ?, 'test', ?, ?) ON CONFLICT(phone) DO UPDATE SET stage='registered', nombre=excluded.nombre, opener_due_at=excluded.opener_due_at, opener_sent_at=NULL, reply_due=NULL, followup_sent_at=NULL, followup_due_at=NULL, guard_reason='', vio_clase2=0, updated_at=excluded.updated_at"
-            ).bind(num, nombre, now, due, now, now).run();
-          } catch (e) { return json({ error: String(e?.message || e) }, 500); }
-          return json({ ok: true, phone: num, nombre, opener_due_at: due });
-        }
-
-        // GET /admin/reventa → estado + leads del flujo de reventa B2B
-        if (request.method === 'GET' && path === '/admin/reventa') {
-          const on = (await kvGet(env, 'reventa_on', '0')) === '1';
-          let leads = [];
-          try { const rs = await env.DB.prepare('SELECT * FROM reventa_leads ORDER BY created_at DESC LIMIT 300').all(); leads = rs.results || []; } catch (_) {}
-          const cual = leads.filter(l => l.cualificado).length;
-          return json({ ok: true, on, count: leads.length, cualificados: cual, no_cualificados: leads.length - cual, leads });
-        }
-        // POST /admin/reventa/control → { on? } (kill-switch)
-        if (request.method === 'POST' && path === '/admin/reventa/control') {
-          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-          if (typeof body?.on === 'boolean') await kvSet(env, 'reventa_on', body.on ? '1' : '0');
-          return json({ ok: true, on: (await kvGet(env, 'reventa_on', '0')) === '1' });
-        }
-        // POST /admin/reventa/test → simula un lead { phone, nombre, p1, p2, p3, id? }
-        if (request.method === 'POST' && path === '/admin/reventa/test') {
-          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-          const row = { id: body.id || ('test-' + String(body.phone || '').replace(/\D/g, '')), phone: body.phone || '', full_name: body.nombre || '', 'tenes experiencia en venta de productos': body.p1 || '', 'tenes clientes para venderles': body.p2 || '', 'te dedicas a alguno de estos rubros': body.p3 || '' };
-          await processReventaLead(env, { row_data: row });
-          const lead = await env.DB.prepare('SELECT lead_id, phone, nombre, cualificado, template_status FROM reventa_leads WHERE lead_id = ?').bind(row.id).first();
-          return json({ ok: true, lead });
-        }
-
-        // POST /admin/capi/test → { phone?, leadId?, event? } manda un evento de prueba a la CAPI de Meta
-        if (request.method === 'POST' && path === '/admin/capi/test') {
-          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-          const out = await sendCapiEvent(env, { leadId: body.leadId || '', phone: body.phone || '', email: body.email || '', eventName: body.event || 'Lead', ref: 'admin-test' });
-          return json(out);
-        }
-
         // POST /admin/precotiz/dry-run → { phone } qué decidiría el motor, SIN enviar
         if (request.method === 'POST' && path === '/admin/precotiz/dry-run') {
           let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
@@ -8102,6 +8045,68 @@ export default {
         }
 
         return json({ error: 'not found' }, 404);
+      }
+
+      // GET /admin/minicurso-landing → estado + leads del flujo de la landing del minicurso
+      if (request.method === 'GET' && path === '/admin/minicurso-landing') {
+        const on = (await kvGet(env, 'minicurso_landing_on', '0')) === '1';
+        let leads = [];
+        try { const rs = await env.DB.prepare('SELECT * FROM minicurso_landing ORDER BY updated_at DESC LIMIT 300').all(); leads = rs.results || []; } catch (_) {}
+        const by_stage = {};
+        for (const l of leads) by_stage[l.stage] = (by_stage[l.stage] || 0) + 1;
+        return json({ ok: true, on, count: leads.length, by_stage, leads });
+      }
+      // POST /admin/minicurso-landing/control → { on? } prender/apagar (kill-switch)
+      if (request.method === 'POST' && path === '/admin/minicurso-landing/control') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        if (typeof body?.on === 'boolean') await kvSet(env, 'minicurso_landing_on', body.on ? '1' : '0');
+        return json({ ok: true, on: (await kvGet(env, 'minicurso_landing_on', '0')) === '1' });
+      }
+      // POST /admin/minicurso-landing/test → { phone, nombre, now? } registra un lead
+      // de prueba. Con now:true el opener sale en el próximo tick (probar sin esperar 45min).
+      if (request.method === 'POST' && path === '/admin/minicurso-landing/test') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const num = normalizeArPhone(String(body?.phone || '')) || '';
+        if (!num) return json({ error: 'missing/invalid phone' }, 400);
+        const nombre = (String(body?.nombre || body?.firstName || '').trim().split(/\s+/)[0]) || '';
+        const now = new Date().toISOString();
+        const due = body?.now ? now : new Date(Date.now() + MINICURSO_LANDING_DELAY_MS).toISOString();
+        try {
+          await env.DB.prepare(
+            "INSERT INTO minicurso_landing (phone, nombre, stage, registered_at, opener_due_at, source, updated_at, created_at) VALUES (?, ?, 'registered', ?, ?, 'test', ?, ?) ON CONFLICT(phone) DO UPDATE SET stage='registered', nombre=excluded.nombre, opener_due_at=excluded.opener_due_at, opener_sent_at=NULL, reply_due=NULL, followup_sent_at=NULL, followup_due_at=NULL, guard_reason='', vio_clase2=0, updated_at=excluded.updated_at"
+          ).bind(num, nombre, now, due, now, now).run();
+        } catch (e) { return json({ error: String(e?.message || e) }, 500); }
+        return json({ ok: true, phone: num, nombre, opener_due_at: due });
+      }
+
+      // GET /admin/reventa → estado + leads del flujo de reventa B2B
+      if (request.method === 'GET' && path === '/admin/reventa') {
+        const on = (await kvGet(env, 'reventa_on', '0')) === '1';
+        let leads = [];
+        try { const rs = await env.DB.prepare('SELECT * FROM reventa_leads ORDER BY created_at DESC LIMIT 300').all(); leads = rs.results || []; } catch (_) {}
+        const cual = leads.filter(l => l.cualificado).length;
+        return json({ ok: true, on, count: leads.length, cualificados: cual, no_cualificados: leads.length - cual, leads });
+      }
+      // POST /admin/reventa/control → { on? } (kill-switch)
+      if (request.method === 'POST' && path === '/admin/reventa/control') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        if (typeof body?.on === 'boolean') await kvSet(env, 'reventa_on', body.on ? '1' : '0');
+        return json({ ok: true, on: (await kvGet(env, 'reventa_on', '0')) === '1' });
+      }
+      // POST /admin/reventa/test → simula un lead { phone, nombre, p1, p2, p3, id? }
+      if (request.method === 'POST' && path === '/admin/reventa/test') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const row = { id: body.id || ('test-' + String(body.phone || '').replace(/\D/g, '')), phone: body.phone || '', full_name: body.nombre || '', 'tenes experiencia en venta de productos': body.p1 || '', 'tenes clientes para venderles': body.p2 || '', 'te dedicas a alguno de estos rubros': body.p3 || '' };
+        await processReventaLead(env, { row_data: row });
+        const lead = await env.DB.prepare('SELECT lead_id, phone, nombre, cualificado, template_status FROM reventa_leads WHERE lead_id = ?').bind(row.id).first();
+        return json({ ok: true, lead });
+      }
+
+      // POST /admin/capi/test → { phone?, leadId?, event? } manda un evento de prueba a la CAPI de Meta
+      if (request.method === 'POST' && path === '/admin/capi/test') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const out = await sendCapiEvent(env, { leadId: body.leadId || '', phone: body.phone || '', email: body.email || '', eventName: body.event || 'Lead', ref: 'admin-test' });
+        return json(out);
       }
 
       // ----- Copiloto: contador de gasto IA (solo Gaspar) -----
@@ -9084,30 +9089,43 @@ export default {
         // lista distinta: Abril solo 'cursos', Joaco todo menos 'cursos',
         // Gaspar todo). Sin esto, el cache mezclaría las listas entre usuarios.
         const role = await getSessionRole(env, session.user);
+        // Slug normalizado del usuario (para el reparto por vendedor: Nadia ve solo lo suyo).
+        const uslug = String(session.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+        const esSecundario = role === 'comercial' && VENDEDORES_SECUNDARIOS.includes(uslug);
         const cache = caches.default;
         const cacheUrl = new URL(request.url);
-        cacheUrl.search = '?role=' + encodeURIComponent(role); // separa el cache por rol
+        // El rol comercial se cachea POR USUARIO (Joaco y Nadia ven listas distintas).
+        cacheUrl.search = '?role=' + encodeURIComponent(role) + (role === 'comercial' ? '&u=' + encodeURIComponent(uslug) : '');
         const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
         const cached = await cache.match(cacheKey);
         if (cached) return cached;
         const inboxClause = inboxClauseForRole(role);
+        // Reparto por vendedor (solo comercial): el secundario (Nadia) ve SOLO lo asignado a
+        // él; el principal (Joaco) ve todo lo NO asignado a un secundario. uslug se interpola
+        // solo cuando es un secundario conocido (lista fija VENDEDORES_SECUNDARIOS) -> seguro.
+        let assignClause = '';
+        if (role === 'comercial') {
+          assignClause = esSecundario
+            ? ` AND assigned_to = '${uslug}'`
+            : ` AND assigned_to NOT IN (${VENDEDORES_SECUNDARIOS.map(s => `'${s}'`).join(',')})`;
+        }
         let chats = null;
         try {
           const rs = await env.DB.prepare(
-            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread, inbox, channel
+            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread, inbox, channel, assigned_to
              FROM wa_chats_summary
-             WHERE last_ts != '' AND NOT (channel = 'ig' AND has_inbound = 0) ${inboxClause}
+             WHERE last_ts != '' AND NOT (channel = 'ig' AND has_inbound = 0) ${inboxClause}${assignClause}
              ORDER BY last_ts DESC`
           ).all();
           chats = rs.results || [];
           // Si la libreta está vacía (ej. base sin migrar), caer al fallback.
           if (!chats.length) chats = null;
         } catch (e) { chats = null; }
-        // Fallback a la query vieja (red de seguridad). No tiene info de bandeja:
-        // para 'cursos' devolvemos vacío (no puede saber cuáles son suyos sin la
-        // libreta); admin/comercial reciben la lista completa como degradación.
+        // Fallback a la query vieja (red de seguridad). No tiene info de bandeja ni asignación:
+        // para 'cursos' y para vendedores SECUNDARIOS (Nadia) devolvemos vacío (no se puede
+        // saber cuáles son suyos sin la libreta); admin/Joaco reciben la lista completa.
         if (chats === null) {
-          if (role === 'cursos') {
+          if (role === 'cursos' || esSecundario) {
             chats = [];
           } else {
             try {
@@ -9781,6 +9799,28 @@ export default {
         ).bind(phone, inbox, new Date().toISOString()).run();
         ctx.waitUntil(invalidateChatsSummaryCache(request));
         return json({ ok: true, phone, inbox });
+      }
+
+      // POST /admin/wa/chat-assign → asignar un chat a un vendedor (solo Gaspar/admin).
+      // body { phone, assigned_to: 'nadia'|'joaco'|'' }. '' = sin asignar (vuelve a la
+      // bandeja de Joaco). El secundario (Nadia) ve SOLO lo asignado a él (filtro en
+      // /admin/wa/chats-summary). assigned_at alimenta el reporte diario (chats/día).
+      if (request.method === 'POST' && path === '/admin/wa/chat-assign') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden: solo admin asigna' }, 403);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const phone = String(body?.phone || '').replace(/\D/g, '');
+        const to = String(body?.assigned_to || '').trim().toLowerCase();
+        if (!phone) return json({ error: 'phone requerido' }, 400);
+        const validos = ['', 'joaco', ...VENDEDORES_SECUNDARIOS];
+        if (!validos.includes(to)) return json({ error: 'assigned_to inválido' }, 400);
+        const now = new Date().toISOString();
+        await env.DB.prepare(
+          `INSERT INTO wa_chats_summary (phone, assigned_to, assigned_at, updated_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(phone) DO UPDATE SET assigned_to = excluded.assigned_to, assigned_at = excluded.assigned_at`
+        ).bind(phone, to, to ? now : '', now).run();
+        ctx.waitUntil(invalidateChatsSummaryCache(request));
+        return json({ ok: true, phone, assigned_to: to });
       }
 
       // Bulk: derivar varios chats a una bandeja de una (solo admin).

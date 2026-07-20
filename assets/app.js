@@ -7672,7 +7672,8 @@ async function loadChatContacts() {
         lastType: c.last_msg_type,
         unread: c.unread || 0,
         inbox: c.inbox || 'general',  // bandeja: general | cursos (para el botón 🎓)
-        channel: c.channel || 'wa'    // canal: wa | ig (pestaña WhatsApp / Instagram)
+        channel: c.channel || 'wa',   // canal: wa | ig (pestaña WhatsApp / Instagram)
+        assigned_to: c.assigned_to || ''  // vendedor asignado (reparto Joaco/Nadia)
       };
     }).sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
     // Refrescar etiquetas de contactos (throttle ~12s). Antes solo se cargaban
@@ -9329,6 +9330,12 @@ function renderChatConversation() {
           const _enCursos = _c && _c.inbox === 'cursos';
           // Abril (cursos) solo ve chats de su bandeja → siempre "Sacar de Cursos".
           return `<button class="btn-label-toggle${_enCursos ? ' has-note' : ''}" id="btn-cursos-toggle" data-en-cursos="${_enCursos ? '1' : '0'}" title="${_enCursos ? 'Sacar de la bandeja Cursos' : 'Derivar a la bandeja Cursos (Abril)'}" style="font-size:17px;line-height:1">🎓</button>`;
+        })() : ''}
+        ${getUserRole() === 'admin' ? (() => {
+          const _c = (chatState.contacts || []).find(x => x.phone === phone);
+          const _enNadia = _c && _c.assigned_to === 'nadia';
+          // Reparto de vendedores: asignar/sacar el chat a Nadia (solo Gaspar). Sin asignar = lo ve Joaco.
+          return `<button class="btn-label-toggle${_enNadia ? ' has-note' : ''}" id="btn-nadia-toggle" title="${_enNadia ? 'Sacar de Nadia (vuelve a Joaco)' : 'Asignar este chat a Nadia'}" style="font-size:13px;font-weight:700;line-height:1">👤${_enNadia ? 'N✓' : 'N'}</button>`;
         })() : ''}
         <button class="btn-label-toggle ${getContactNote(phone) ? 'has-note' : ''}" id="btn-note" title="${getContactNote(phone) ? 'Editar nota' : 'Agregar nota'}">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
@@ -11146,6 +11153,8 @@ function bindChatConversation() {
   // 🎓 Derivar / sacar de la bandeja Cursos (solo admin).
   const cursosBtn = document.getElementById('btn-cursos-toggle');
   if (cursosBtn) cursosBtn.onclick = () => handleToggleCursos();
+  const nadiaBtn = document.getElementById('btn-nadia-toggle');
+  if (nadiaBtn) nadiaBtn.onclick = () => handleToggleNadia();
   // Scroll-to-bottom FAB
   if (msgEl && scrollBtn) {
     msgEl.addEventListener('scroll', () => {
@@ -11192,6 +11201,39 @@ async function handleToggleCursos() {
     loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
   } catch (e) {
     await showAlert('No se pudo cambiar la bandeja: ' + (e.message || e), { title: 'Error', variant: 'warn' });
+  }
+}
+
+// Asigna (o saca) el chat activo a la vendedora Nadia. Solo Gaspar (admin). Sin asignar
+// = vuelve a la bandeja de Joaco. Reparto de vendedores (backend /admin/wa/chat-assign).
+// Gaspar sigue viendo el chat igual (ve todo); cambia quién MÁS lo ve (Nadia sí, Joaco no).
+async function handleToggleNadia() {
+  const phone = chatState.selectedPhone;
+  if (!phone || getUserRole() !== 'admin') return;
+  const c = (chatState.contacts || []).find(x => x.phone === phone);
+  const enNadia = c && c.assigned_to === 'nadia';
+  const nuevo = enNadia ? '' : 'nadia';
+  const nombre = (c && c.contact_name) || formatPhoneDisplay(phone);
+  const ok = await showConfirm(
+    enNadia
+      ? `Sacar a "${nombre}" de Nadia.\n\nVuelve a la bandeja de Joaco.`
+      : `Asignar a "${nombre}" a Nadia.\n\nLo va a ver Nadia y sale de la bandeja de Joaco.`,
+    { title: enNadia ? 'Sacar de Nadia' : 'Asignar a Nadia', confirmLabel: enNadia ? 'Sacar' : '👤 Asignar', cancelLabel: 'Cancelar' }
+  ).catch(() => false);
+  if (!ok) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/chat-assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ phone, assigned_to: nuevo })
+    });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
+    if (c) c.assigned_to = nuevo;  // refleja al instante en el botón
+    toast(nuevo === 'nadia' ? '👤 Asignado a Nadia' : 'Devuelto a la bandeja de Joaco');
+    chatState.contactsLoaded = false;
+    loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
+  } catch (e) {
+    await showAlert('No se pudo asignar: ' + (e.message || e), { title: 'Error', variant: 'warn' });
   }
 }
 
