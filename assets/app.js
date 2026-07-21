@@ -2300,7 +2300,7 @@ function renderPrecotiz() {
         </label>
         <span class="muted" style="font-size:12px">hoy le tocaron ${P.nadia_hoy || 0}/${P.nadia_cuota || 0}</span>
       </div>
-      <div class="muted" style="font-size:11px;margin-top:6px">Cuando el bot termina de relevar un lead de carteles, se lo asigna a Nadia hasta ese tope por día (el resto queda para Joaco). En 0, Nadia no recibe nada del bot — le asignás a mano con el botón 👤N en cada chat.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">Cada lead NUEVO de carteles que entra se reparte: hasta ese tope por día va a Nadia (lo atiende ella desde el primer mensaje), el resto queda para Joaco. En 0, Nadia no recibe nada automático — le asignás a mano con el botón 👤N en cada chat.</div>
     </div>
     ${(P.leads && P.leads.length) ? leadsHtml : '<div class="muted" style="font-size:13px">Todavía no entró ningún lead al piloto.</div>'}
   `;

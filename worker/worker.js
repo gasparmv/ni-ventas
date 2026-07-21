@@ -1411,20 +1411,32 @@ async function precotizNotifyGaspar(env, msg) {
   try { await waSendText(env, PRECOTIZ_GASPAR_PHONE, msg); } catch (_) {}
 }
 
-// Reparto automático a Nadia: cuando el bot completa la pre cotización de un lead de
-// carteles, si la CUOTA DIARIA de Nadia lo permite, le asigna el chat (lo ve en su bandeja);
-// si no, queda para Joaco. Cuota configurable por Gaspar (kv nadia_cuota_diaria, arranca en
-// 0 = el bot NO le manda nada al automático). Cuenta los asignados a Nadia HOY (día AR) para
-// no pasar de la cuota. Notifica a Nadia por WhatsApp si hay un teléfono cargado (kv nadia_phone).
+// Reparto automático a Nadia de los leads NUEVOS de carteles (en la ENTRADA): cuando entra
+// un lead de carteles que todavía no agarró nadie, si la cuota diaria de Nadia lo permite se
+// lo asigna (ella lo atiende desde el primer mensaje; si no, queda para Joaco). Así se reparte
+// el flujo REAL de carteles, no solo lo que completa el bot. Cuota configurable (kv
+// nadia_cuota_diaria, arranca en 0). Excluye cursos/reventa/clientes/internos, no pisa si el
+// chat ya tiene dueño, y respeta el freno anti-pisón (si un humano ya respondió, no lo mueve).
+// Notifica a Nadia por WhatsApp si hay un teléfono cargado (kv nadia_phone).
 async function maybeRepartirANadia(env, phone) {
   try {
     const cuota = parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0;
     if (cuota <= 0 || !phone) return;
+    const s = await env.DB.prepare("SELECT inbox, assigned_to FROM wa_chats_summary WHERE phone = ?").bind(phone).first();
+    if (!s || (s.assigned_to && s.assigned_to !== '')) return;         // no existe aún o ya tiene dueño
+    if (s.inbox === 'cursos' || s.inbox === 'oculto') return;          // cursos/oculto no son carteles
+    try { if (await env.DB.prepare("SELECT 1 AS x FROM reventa_leads WHERE phone = ? LIMIT 1").bind(phone).first()) return; } catch (_) {}
+    try { if (await env.DB.prepare("SELECT 1 AS x FROM contact_labels WHERE phone = ? AND label_id = 2289 LIMIT 1").bind(phone).first()) return; } catch (_) {}
+    try { if (await env.DB.prepare("SELECT 1 AS x FROM minicurso_landing WHERE phone = ? LIMIT 1").bind(phone).first()) return; } catch (_) {}
+    try { if (await env.DB.prepare("SELECT 1 AS x FROM wa_internal_phones WHERE phone = ?").bind(phone).first()) return; } catch (_) {}
+    try { if (await env.DB.prepare("SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1").bind(phone).first()) return; } catch (_) {} // cliente existente
+    // Freno anti-pisón: si un humano (Joaco/Gaspar) ya respondió, NO se lo movemos a Nadia.
+    try { if (await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status' LIMIT 1").bind(phone).first()) return; } catch (_) {}
     const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'nadia' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first();
     if (((r && r.n) || 0) >= cuota) return; // ya llegó a la cuota del día
     await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = 'nadia', assigned_at = ? WHERE phone = ?").bind(new Date().toISOString(), phone).run();
     const nadiaPhone = await kvGet(env, 'nadia_phone', '');
-    if (nadiaPhone) { try { await waSendText(env, nadiaPhone, 'Tenés un lead nuevo de carteles para cotizar en el CRM 🙌'); } catch (_) {} }
+    if (nadiaPhone) { try { await waSendText(env, nadiaPhone, 'Tenés un lead nuevo de carteles para atender en el CRM 🙌'); } catch (_) {} }
   } catch (_) {}
 }
 
@@ -1823,7 +1835,6 @@ async function processPrecotizPilot(env) {
       await paraCotizarTag(env, lead.phone, true);   // entra a la bandeja "Para cotizar" de Joaco
       await precotizMarcarNoLeido(env, lead.phone);  // no leído -> sube arriba de todo
       await precotizNotifyGaspar(env, `termino la pre cotizacion de ${lead.nombre || lead.phone}\nya tiene foto y medidas${tI ? ' e interior/exterior' : ' (falta confirmar interior/exterior, el cliente no lo tenia definido)'}\npaso a la bandeja para que lo cotice Joaco`);
-      await maybeRepartirANadia(env, lead.phone);   // reparto automático a Nadia según la cuota diaria (arranca en 0)
       continue;
     }
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
@@ -7359,6 +7370,8 @@ export default {
                   try { await minicursoLandingOnInbound(env, phone, ts); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
+                  // Reparto de leads NUEVOS de carteles a Nadia según su cuota diaria (arranca en 0).
+                  try { await maybeRepartirANadia(env, phone); } catch (_) {}
                 }
               }
 
