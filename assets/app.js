@@ -12267,7 +12267,7 @@ function showCreateTemplateModal() {
         if (!sc) { warn.textContent = 'Atajo inválido (usá letras o números).'; btn.disabled = false; paint(); return; }
         r = await fetch(CONFIG.trackerUrl + '/admin/wa/template-create', {
           method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ name: sc, category: 'MARKETING', language: 'es_AR', body_text: text, button_url: useBtn ? bUrl : undefined, button_text: useBtn ? bTxt : undefined })
+          body: JSON.stringify({ name: sc, category: 'UTILITY', allow_category_change: true, language: 'es_AR', body_text: text, button_url: useBtn ? bUrl : undefined, button_text: useBtn ? bTxt : undefined })
         });
         j = await r.json().catch(() => ({}));
         if (r.ok && j.ok) {
@@ -12282,7 +12282,7 @@ function showCreateTemplateModal() {
         j = await r.json().catch(() => ({}));
         if (r.ok && j.ok) {
           closeDrawer();
-          toast('✓ Plantilla creada. Se manda sola cuando Meta la apruebe (unos min).');
+          toast(j.reused ? '✓ Mensaje enviado (se reusó una plantilla ya aprobada).' : '✓ Plantilla creada. Se manda sola cuando Meta la apruebe (unos min).');
         } else { warn.textContent = j.error || 'No se pudo crear'; btn.disabled = false; paint(); }
       }
     } catch (e) {

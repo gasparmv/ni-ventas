@@ -6876,6 +6876,23 @@ function validateAdhocTemplate(text) {
   return null;
 }
 
+// --- Dedup de plantillas adhoc (fix restricción Meta jul-2026) ---------------
+// El feature "crear plantilla al toque" creaba una plantilla MARKETING NUEVA por
+// cada mensaje fuera de ventana → ~155 plantillas casi todas MARKETING → patrón
+// que Meta penaliza como spam (causó la inhabilitación de la cuenta). body_norm
+// es el texto normalizado; sirve para detectar un texto ya usado y REUSAR la
+// plantilla aprobada en vez de crear otra.
+function adhocBodyNorm(text) {
+  return String(text || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 600);
+}
+let _adhocSchemaReady = false;
+async function ensureAdhocSchema(env) {
+  if (_adhocSchemaReady) return;
+  try { await env.DB.prepare("ALTER TABLE wa_pending_template_send ADD COLUMN body_norm TEXT DEFAULT ''").run(); } catch (_) {}
+  try { await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_pending_tpl_bodynorm ON wa_pending_template_send(body_norm, status)").run(); } catch (_) {}
+  _adhocSchemaReady = true;
+}
+
 // Cron: manda las plantillas "al toque" apenas Meta las aprueba (el vendedor no
 // espera en el chat). Reintenta si el envío falla; marca rejected/expired.
 // Se llama SOLO en horario hábil AR para no escribir de madrugada.
@@ -10676,7 +10693,7 @@ export default {
         const r = await fetch(_waT.templatesUrl(), {
           method: 'POST',
           headers: { ..._waT.headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, category, language, components })
+          body: JSON.stringify({ name, category, language, components, ...(body.allow_category_change === true ? { allow_category_change: true } : {}) })
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) return json({ error: data?.error?.message || 'create failed', raw: data }, r.status || 500);
@@ -10698,28 +10715,53 @@ export default {
         const text = String(body?.body_text || '').trim();
         const vErr = validateAdhocTemplate(text);
         if (vErr) return json({ error: vErr }, 400);
-        // Tope diario: 5 plantillas nuevas por usuario.
+        const hasButton = !!(body.button_url && /^https?:\/\//i.test(String(body.button_url)));
+        const bodyNorm = adhocBodyNorm(text) + (hasButton ? 'btn:' + String(body.button_url) : '');
+        await ensureAdhocSchema(env);
+        // 1) REUSO: si ya existe una plantilla adhoc APROBADA (status 'sent') con este
+        //    mismo texto, la reusamos y la mandamos ya — NO creamos una nueva. Así las
+        //    plantillas dejan de multiplicarse (lo que gatilló la restricción jul-2026).
+        try {
+          const hit = await env.DB.prepare(
+            "SELECT template_name FROM wa_pending_template_send WHERE body_norm = ? AND status = 'sent' ORDER BY updated_at DESC LIMIT 1"
+          ).bind(bodyNorm).first();
+          if (hit && hit.template_name) {
+            const rs = await waSendTemplate(env, num, hit.template_name, 'es_AR', []);
+            if (rs.ok) return json({ ok: true, template_name: hit.template_name, status: 'sent', reused: true });
+            // si el reuso falla (plantilla borrada/deshabilitada), seguimos a crear una nueva.
+          }
+        } catch (_) {}
+        // 2) Freno de creación: kv 'adhoc_send_enabled' = '0' → no se crean plantillas
+        //    nuevas (solo reuso). Backstop para no volver a inflar la cuenta si Meta aprieta.
+        if ((await kvGet(env, 'adhoc_send_enabled', '1')) === '0') {
+          return json({ error: 'La creación de plantillas nuevas está pausada. Podés reusar una ya aprobada o esperar a que el cliente responda (ventana de 24h).' }, 409);
+        }
+        // Tope diario de plantillas NUEVAS por usuario (los reusos NO cuentan).
         const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
         try {
           const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_pending_template_send WHERE created_by = ? AND created_at >= ?").bind(session.user, dayStart.toISOString()).first();
-          if (c && c.n >= 100) return json({ error: 'Llegaste al máximo de 100 plantillas nuevas por día.' }, 429);
+          if (c && c.n >= 30) return json({ error: 'Llegaste al máximo de 30 plantillas nuevas por día.' }, 429);
         } catch (_) {}
         const tplName = 'adhoc_' + Date.now();
         const _waT = getWaClient(env);
         const _components = [{ type: 'BODY', text }];
-        if (body.button_url && /^https?:\/\//i.test(String(body.button_url))) {
+        if (hasButton) {
           _components.push({ type: 'BUTTONS', buttons: [{ type: 'URL', text: String(body.button_text || 'Ver más').slice(0, 25), url: String(body.button_url) }] });
         }
+        // Categoría UTILITY (son mensajes de servicio/seguimiento a clientes que ya nos
+        // escribieron) + allow_category_change: si Meta detecta contenido promocional la
+        // reclasifica a MARKETING en vez de rechazarla. Antes se forzaba MARKETING por
+        // cada mensaje → justo el patrón que Meta penaliza como spam.
         const r = await fetch(_waT.templatesUrl(), {
           method: 'POST', headers: { ..._waT.headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: tplName, category: 'MARKETING', language: 'es_AR', components: _components })
+          body: JSON.stringify({ name: tplName, category: 'UTILITY', allow_category_change: true, language: 'es_AR', components: _components })
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) return json({ error: data?.error?.message || 'Meta rechazó la creación de la plantilla', raw: data }, r.status || 500);
         try {
           await env.DB.prepare(
-            "INSERT OR REPLACE INTO wa_pending_template_send (template_name, phone, body_preview, created_by, created_at, status, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)"
-          ).bind(tplName, num, text.slice(0, 300), session.user, new Date().toISOString(), new Date().toISOString()).run();
+            "INSERT OR REPLACE INTO wa_pending_template_send (template_name, phone, body_preview, body_norm, created_by, created_at, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)"
+          ).bind(tplName, num, text.slice(0, 300), bodyNorm, session.user, new Date().toISOString(), new Date().toISOString()).run();
         } catch (_) {}
         return json({ ok: true, template_name: tplName, status: data.status || 'pending' });
       }
