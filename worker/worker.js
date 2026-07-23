@@ -3794,7 +3794,10 @@ function inferLeadVertical(formName, adName) {
 // en carteles (la mayoria de los click-to-WhatsApp, y el comercial puede re-derivar).
 function classifyAdVertical(...parts) {
   const t = parts.filter(Boolean).join(' ').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  if (/\bcurso|mastery|comunidad|supernova|al infinito|aprend(e|er|iz)|emprend/.test(t)) return 'cursos';
+  // OJO con "emprend": "emprendimiento" (para tu local/comercio/emprendimiento) es
+  // contexto de VENTA de carteles, NO de cursos. El lookahead lo excluye para no
+  // clasificar mal ads de venta (pasó con un ad de la competencia -> disparó el minicurso).
+  if (/\bcurso|mastery|comunidad|supernova|al infinito|aprend(e|er|iz)|emprend(?!imiento)/.test(t)) return 'cursos';
   return 'carteles';
 }
 
