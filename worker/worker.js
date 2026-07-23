@@ -2163,11 +2163,22 @@ function formatReporteDiario(d) {
 async function maybeReporteDiario(env) {
   try {
     const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
-    if ((await kvGet(env, 'reporte_diario_sent', '')) === fechaAR) return; // ya se mandó hoy
+    if ((await kvGet(env, 'reporte_diario_sent', '')) === fechaAR) return; // ya se ENTREGÓ hoy
     const d = await buildReporteDiario(env);
-    const msg = formatReporteDiario(d);
-    for (const ph of REPORTE_DIARIO_PHONES) { try { await waSendText(env, ph, msg); } catch (_) {} }
-    await kvSet(env, 'reporte_diario_sent', fechaAR);
+    const fechaDisplay = fechaAR.split('-').reverse().join('/');
+    // Plantilla (se entrega fuera de la ventana de 24h de WhatsApp). 10 variables en orden.
+    const params = [fechaDisplay, d.total, d.carteles, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
+    const texto = formatReporteDiario(d);
+    let anyOk = false;
+    for (const ph of REPORTE_DIARIO_PHONES) {
+      let r = null;
+      try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas', 'es_AR', params); } catch (_) {}
+      if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} } // fallback: texto libre (solo llega si la ventana de 24h está abierta)
+      if (r && r.ok) anyOk = true;
+    }
+    // Solo marcamos el día como enviado si AL MENOS UNO se entregó — así el reporte no
+    // se pierde cuando la plantilla aún no está aprobada / la ventana está cerrada (reintenta).
+    if (anyOk) await kvSet(env, 'reporte_diario_sent', fechaAR);
   } catch (_) {}
 }
 
