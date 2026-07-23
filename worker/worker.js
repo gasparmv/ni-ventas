@@ -1183,6 +1183,11 @@ async function fetchJunioLeads(env) {
 }
 
 async function waSend(env, payload) {
+  // Kill-switch GLOBAL de envíos (kv wa_send_paused). Se prende cuando Meta restringe la cuenta,
+  // para NO seguir intentando mandar (empeora la restricción y hace ruido). Frena TODO el envío
+  // saliente (automático y manual). Se apaga con POST /admin/wa/pause {on:false} cuando la cuenta
+  // vuelve a andar, y todos los flujos siguen funcionando solos.
+  try { if ((await kvGet(env, 'wa_send_paused', '0')) === '1') return { ok: false, status: 0, error: 'wa_send_paused' }; } catch (_) {}
   if (!env.WA_PHONE_NUMBER_ID) {
     return { ok: false, status: 500, error: 'WA_PHONE_NUMBER_ID no configurado' };
   }
@@ -8799,6 +8804,17 @@ export default {
         const preview = formatReporteDiario(d);
         if (body && body.send) { for (const ph of REPORTE_DIARIO_PHONES) { try { await waSendText(env, ph, preview); } catch (_) {} } }
         return json({ ok: true, data: d, preview, sent: !!(body && body.send) });
+      }
+
+      // POST /admin/envios-pausa → freno GLOBAL de envíos de WhatsApp (kv wa_send_paused).
+      // {on:true} frena TODO envío saliente (usar cuando Meta restringe la cuenta);
+      // {on:false} lo reanuda y todos los flujos siguen solos. Sin body: devuelve el estado.
+      // (Ojo: NO usar el prefijo /admin/wa/ acá — ese lo intercepta otro bloque de rutas.)
+      if (request.method === 'POST' && path === '/admin/envios-pausa') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let body = {}; try { body = await request.json(); } catch (_) {}
+        if (typeof body.on === 'boolean') await kvSet(env, 'wa_send_paused', body.on ? '1' : '0');
+        return json({ ok: true, paused: (await kvGet(env, 'wa_send_paused', '0')) === '1' });
       }
 
       // Backfill de los mensajes automáticos de ManyChat (welcome) que Instagram nos mandó
