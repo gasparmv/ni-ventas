@@ -2834,9 +2834,10 @@ async function processRecoveryQueue(env) {
       }
     } catch (_) {}
     if (!approved.length) return;
-    const rows = await env.DB.prepare("SELECT phone, template_name, param FROM recovery_queue WHERE status = 'pending' ORDER BY caso ASC, created_at ASC LIMIT 40").all();
-    const r = (rows.results || []).find(x => x.phone && approved.includes(x.template_name));
-    if (!r) return;
+    const inList = approved.map(() => '?').join(',');
+    const rr2 = await env.DB.prepare(`SELECT phone, template_name, param FROM recovery_queue WHERE status = 'pending' AND template_name IN (${inList}) ORDER BY caso ASC, created_at ASC LIMIT 1`).bind(...approved).all();
+    const r = (rr2.results || [])[0];
+    if (!r || !r.phone) return;
     const nowIso = new Date().toISOString();
     // Reservar el slot de tiempo YA (aunque falle) para no martillar el número.
     await kvSet(env, 'recovery_last_sent', nowIso);
