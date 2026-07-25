@@ -2802,6 +2802,54 @@ async function minicursoLandingOnInbound(env, phone, ts) {
   } catch (_) {}
 }
 
+// ===== Motor de recuperación post-migración de número (25-jul-2026) =====
+// Contacta gradualmente a los leads colgados por la caída/migración (Caso 1 pedido
+// en curso, Caso 2 presupuesto sin seguimiento, Caso 3 consulta sin respuesta),
+// avisando el número nuevo. FRENO DE MANO: manda 1 cada `recovery_spacing_min` min
+// (kv, default 8) para no golpear el número fresco. Prioriza por caso (1<2<3).
+// Master switch kv 'recovery_on' ('1' prende; default apagado). Respeta wa_send_paused.
+async function processRecoveryQueue(env) {
+  try {
+    if ((await kvGet(env, 'wa_send_paused', '0')) === '1') return;
+    if ((await kvGet(env, 'recovery_on', '0')) !== '1') return;
+    const spacingMin = parseInt(await kvGet(env, 'recovery_spacing_min', '8'), 10) || 8;
+    const last = await kvGet(env, 'recovery_last_sent', '');
+    if (last) { const dt = Date.parse(last); if (dt && (Date.now() - dt) < spacingMin * 60 * 1000) return; }
+    // Set de plantillas APROBADAS (cache 10 min): solo mandamos filas cuya plantilla
+    // ya esté aprobada; las pending se saltean hasta que Meta las apruebe.
+    let approved = [];
+    try {
+      const cv = await kvGet(env, 'recovery_approved_tpls', '');
+      const ct = parseInt(await kvGet(env, 'recovery_approved_ts', '0'), 10) || 0;
+      if (cv && (Date.now() - ct) < 10 * 60 * 1000) {
+        approved = cv.split(',').filter(Boolean);
+      } else {
+        const _wa = getWaClient(env);
+        const sep = _wa.templatesUrl().includes('?') ? '&' : '?';
+        const rr = await fetch(`${_wa.templatesUrl()}${sep}limit=200&fields=name,status`, { headers: _wa.headers });
+        const dd = await rr.json().catch(() => ({}));
+        for (const t of (dd.data || dd.waba_templates || [])) if (String(t.status || '').toLowerCase() === 'approved') approved.push(t.name);
+        await kvSet(env, 'recovery_approved_tpls', approved.join(','));
+        await kvSet(env, 'recovery_approved_ts', String(Date.now()));
+      }
+    } catch (_) {}
+    if (!approved.length) return;
+    const rows = await env.DB.prepare("SELECT phone, template_name, param FROM recovery_queue WHERE status = 'pending' ORDER BY caso ASC, created_at ASC LIMIT 40").all();
+    const r = (rows.results || []).find(x => x.phone && approved.includes(x.template_name));
+    if (!r) return;
+    const nowIso = new Date().toISOString();
+    // Reservar el slot de tiempo YA (aunque falle) para no martillar el número.
+    await kvSet(env, 'recovery_last_sent', nowIso);
+    const params = r.param ? [String(r.param)] : [];
+    const res = await waSendTemplate(env, r.phone, r.template_name, 'es_AR', params);
+    if (res && res.ok) {
+      try { await env.DB.prepare("UPDATE recovery_queue SET status='sent', sent_at=?, attempts=attempts+1, updated_at=? WHERE phone=?").bind(nowIso, nowIso, r.phone).run(); } catch (_) {}
+    } else {
+      try { await env.DB.prepare("UPDATE recovery_queue SET attempts=attempts+1, status=(CASE WHEN attempts+1 >= 3 THEN 'failed' ELSE 'pending' END), updated_at=? WHERE phone=?").bind(nowIso, r.phone).run(); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
 // Cron (*/1): motor del flujo de la landing. (a) manda el opener a los 45 min
 // (plantilla) con guardia + horario; (b) analiza la respuesta con IA y ramifica;
 // (c) follow-up a las 23h si no vio la clase 2 y no pidió los regalos.
@@ -11961,6 +12009,8 @@ export default {
     // tanto, hay que verlo bien después"). El código de processColgados queda intacto;
     // para reactivar, descomentar la línea de abajo.
     // if (hAR >= 8 && hAR <= 20) ctx.waitUntil(processColgados(env));
+    // Motor de recuperación post-migración de número (drena a ritmo controlado, 9-20h).
+    if (hAR >= 9 && hAR <= 20) ctx.waitUntil(processRecoveryQueue(env));
     // Aviso a Gaspar cuando el dataset ya tiene suficientes QualifiedLead (CAPI) para cambiar la campaña.
     if (hAR >= 9 && hAR <= 20) ctx.waitUntil(maybeCapiReadyNotice(env));
     // Reporte diario de ventas a las 21:00 AR (a Gaspar + su hermano). Dedup por día adentro.
