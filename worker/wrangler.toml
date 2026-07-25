@@ -4,13 +4,13 @@ compatibility_date = "2026-05-01"
 
 # Variables de entorno (no secretos). Los secretos se setean con `wrangler secret put`.
 [vars]
-WA_PHONE_NUMBER_ID = "919964037861500"
+WA_PHONE_NUMBER_ID = "1164739390066122"
 WA_API_VERSION = "v25.0"
-WA_BUSINESS_ACCOUNT_ID = "800446462838166"
+WA_BUSINESS_ACCOUNT_ID = "1374216464651634"
 # Número del business en formato E.164 sin "+" (solo dígitos). Usado para detectar
 # mensajes echoes (los que Joaco manda desde la app de WA Business) cuando el
 # webhook de 360dialog no incluye metadata.display_phone_number.
-WA_BUSINESS_PHONE = "5491144366573"
+WA_BUSINESS_PHONE = "5491133708544"
 # URL del Apps Script "Cotizador Writer" — la usa el worker para leer la hoja
 # COGS del Excel 2026v4 (proxy server-to-server, evita CORS en el front).
 # Misma URL que CONFIG.appsScriptUrl en app.js. No es secreta.

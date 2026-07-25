@@ -5054,7 +5054,7 @@ async function analyticsPrecotizFunnel(env, url) {
         ) THEN 1 ELSE 0 END) AS has_quote
       FROM wa_messages
       WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
-        AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573')
+        AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573','5491133708544')
       GROUP BY phone
     ),
     leads AS (
@@ -5169,7 +5169,7 @@ async function syncSinCotizar(env, opts = {}) {
           MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND ${_SC_QUOTE_SQL} THEN 1 ELSE 0 END) AS has_quote
         FROM wa_messages
         WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
-          AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573')
+          AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573','5491133708544')
         GROUP BY phone
       )
       SELECT p.phone, p.canal, p.last_in_ts, max(p.first_img_ts, p.first_med_ts) AS quotable_since, s.contact_name
@@ -5279,7 +5279,7 @@ async function computeRefloteSegment(env) {
         MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND ${_SC_QUOTE_SQL} THEN 1 ELSE 0 END) AS has_quote
       FROM wa_messages
       WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
-        AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573')
+        AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573','5491133708544')
       GROUP BY phone
     )
     SELECT p.phone, p.canal, p.first_in_ts, p.last_in_ts, s.contact_name
@@ -5609,7 +5609,7 @@ async function estimarParametrosConGemini(env, imageBuf, imageMime, contextoClie
 // Todos los inserts son INSERT OR IGNORE — wamid UNIQUE evita duplicados.
 // Para cada media (image/video/audio/document/sticker) hace downloadMedia → R2.
 async function processCoexistenceHistory(env, data) {
-  const businessPhone = String(env.WA_BUSINESS_PHONE || '5491144366573').replace(/\D/g, '');
+  const businessPhone = String(env.WA_BUSINESS_PHONE || '5491133708544').replace(/\D/g, '');
 
   // Cache de nombres si hay state_sync o contacts.
   const nameByPhone = {};
