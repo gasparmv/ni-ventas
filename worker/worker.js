@@ -2844,6 +2844,9 @@ async function processRecoveryQueue(env) {
     const res = await waSendTemplate(env, r.phone, r.template_name, 'es_AR', params);
     if (res && res.ok) {
       try { await env.DB.prepare("UPDATE recovery_queue SET status='sent', sent_at=?, attempts=attempts+1, updated_at=? WHERE phone=?").bind(nowIso, nowIso, r.phone).run(); } catch (_) {}
+      // Registrar el envío en el chat para que los vendedores vean qué recibió el lead.
+      const preview = '📩 Aviso automático de cambio de número' + (r.param ? ' — cotización del cartel de ' + r.param : '');
+      if (res.id) { try { await env.DB.prepare(`INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1) ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`).bind(nowIso, res.id, r.phone, preview).run(); } catch (_) {} }
     } else {
       try { await env.DB.prepare("UPDATE recovery_queue SET attempts=attempts+1, status=(CASE WHEN attempts+1 >= 3 THEN 'failed' ELSE 'pending' END), updated_at=? WHERE phone=?").bind(nowIso, r.phone).run(); } catch (_) {}
     }
