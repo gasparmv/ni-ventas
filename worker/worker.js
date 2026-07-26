@@ -4636,16 +4636,24 @@ async function processMinicursoLead(env, body) {
 }
 
 // ============================================================================
-// LANZAMIENTO (Fase Semilla) — MISMO mecanismo que la landing del minicurso pero
-// SEPARADO (mensajes propios). La landing del lanzamiento hace POST a
-// /webhook/lanzamiento-lead con {firstName, phone} (mismo header X-Sheet-Secret).
-// Guardamos el lead y a los 45 min se manda un OPENER (plantilla de Meta).
-// ARRANCA APAGADO (freno de mano) Y sin plantilla configurada -> NO manda nada.
-// Para prenderlo: crear la plantilla en Meta, setear kv 'lanzamiento_opener_tpl'
-// con su nombre, y kv 'lanzamiento_landing_on'='1'. El branch/follow-ups se
-// agregan cuando esté el copy completo del lanzamiento.
+// LANZAMIENTO (Fase Semilla) — flujo del evento (clases gratis 4 y 6 de agosto).
+// Híbrido para minimizar salientes (plantillas):
+//  · CAMINO 1 (gratis): la thanks page tiene un botón walink; el lead manda un texto
+//    pre-cargado ("...me registré al evento del 4 y 6...") → le respondemos con el link
+//    del grupo (TEXTO LIBRE, ventana 24h, SIN plantilla). Ver hook en el webhook +
+//    sendEventoGroupLink. La mayoría entra por acá → casi no gastamos plantillas.
+//  · CAMINO 2 (plantilla): al que registró (POST /webhook/lanzamiento-lead) pero NO
+//    tocó el botón, a los 10 min le mandamos el OPENER por plantilla; cuando responde,
+//    le mandamos el link (texto libre). DEDUP: si ya escribió (Camino 1), su stage pasó
+//    a 'link_enviado' y processLanzamientoLanding lo saltea → nunca lo templateamos.
+// El link del grupo vive en kv 'lanzamiento_link_grupo' (se cambia con 1 comando cuando
+// el grupo se llena; NUNCA va dentro de una plantilla, así no hay que re-aprobar nada).
+// Los leads del evento se marcan inbox='cursos' → el bot de precotización los IGNORA
+// (chequea 'cursos') + caen en la bandeja de Abril.
+// ARRANCA APAGADO: kv 'lanzamiento_landing_on'='1' prende TODO (Camino 1 y 2). El opener
+// (Camino 2) además necesita kv 'lanzamiento_opener_tpl' con la plantilla Meta aprobada.
 // ============================================================================
-const LANZAMIENTO_LANDING_DELAY_MS = 45 * 60 * 1000; // opener a los 45 min (como el minicurso)
+const LANZAMIENTO_LANDING_DELAY_MS = 10 * 60 * 1000; // opener (Camino 2) a los 10 min
 async function lanzamientoLandingOn(env) { return (await kvGet(env, 'lanzamiento_landing_on', '0')) === '1'; }
 async function lanzamientoOpenerTpl(env) { return String(await kvGet(env, 'lanzamiento_opener_tpl', '') || '').trim(); }
 
@@ -4695,10 +4703,57 @@ async function processLanzamientoLanding(env) {
       continue;
     }
     const sentTs = new Date().toISOString();
-    try { await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'opener_sent', opener_sent_at = ?, updated_at = ? WHERE phone = ?").bind(sentTs, sentTs, phone).run(); } catch (_) {}
+    // stage='await1' → cuando responda, lanzamientoLandingOnInbound le manda el link.
+    try { await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'await1', opener_sent_at = ?, updated_at = ? WHERE phone = ?").bind(sentTs, sentTs, phone).run(); } catch (_) {}
+    // Chat 'oculto' hasta que responda (no ensuciar la bandeja de Abril con no-respondedores).
+    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('general','')").bind(phone, sentTs).run(); } catch (_) {}
     if (res.id) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)").bind(sentTs, res.id, phone, '[plantilla: ' + tpl + ']').run(); } catch (_) {} }
     await new Promise(rs => setTimeout(rs, 600));
   }
+}
+
+// El link del grupo va SIEMPRE como texto libre (nunca en plantilla) → cuando el grupo se
+// llena, se cambia el kv 'lanzamiento_link_grupo' con 1 comando y no hay que re-aprobar nada.
+// Se manda UNA sola vez por contacto (dedup atómico wa_autoreply_log kind='evento_link').
+// Además marca inbox='cursos' (precotización lo ignora + cae en la bandeja de Abril) y pasa
+// el lead a stage='link_enviado' → processLanzamientoLanding (Camino 2) lo saltea.
+async function sendEventoGroupLink(env, phone) {
+  if (!phone || !(await lanzamientoLandingOn(env))) return;
+  const link = String(await kvGet(env, 'lanzamiento_link_grupo', '') || '').trim();
+  if (!link) return; // sin link configurado → no manda nada
+  let reserva;
+  try {
+    reserva = await env.DB.prepare(
+      "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'evento_link', '', 'sending', '', '')"
+    ).bind(phone).run();
+  } catch (_) { return; }
+  if (!reserva?.meta?.changes) return; // ya se le mandó → no duplicar
+  const nowIso = new Date().toISOString();
+  // Aislar del bot de ventas + revelar en la bandeja de Abril (cursos).
+  try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('oculto','general','')").bind(phone, nowIso).run(); } catch (_) {}
+  try { await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'link_enviado', updated_at = ? WHERE phone = ? AND stage != 'link_enviado'").bind(nowIso, phone).run(); } catch (_) {}
+  const msg = 'Buenísimoo, ahí te paso el enlace para unirte al grupo: ' + link + '\n\nTodo lo que necesitás saber lo vamos a compartir por ese grupo. *Esta línea de teléfono no está habilitada para responder consultas hasta finalizado el evento.*';
+  const res = await waSendText(env, phone, msg);
+  if (!res || !res.ok) {
+    // liberar la reserva para poder reintentar en el próximo inbound
+    try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'evento_link'").bind(phone).run(); } catch (_) {}
+    return;
+  }
+  const sentTs = new Date().toISOString();
+  try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(sentTs, res.id || ('evento-' + phone + '-' + Date.now()), phone, msg).run(); } catch (_) {}
+  try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'evento_link'").bind(sentTs, phone).run(); } catch (_) {}
+}
+
+// Cualquier inbound de un lead del evento que todavía no recibió el link → mandárselo.
+// (Camino 1: tocó el walink antes del opener. Camino 2: respondió al opener.) El envío,
+// dedup y aislamiento viven en sendEventoGroupLink; acá solo filtramos que sea del evento.
+async function lanzamientoLandingOnInbound(env, phone) {
+  if (!phone || !(await lanzamientoLandingOn(env))) return;
+  try {
+    const row = await env.DB.prepare("SELECT stage FROM lanzamiento_landing WHERE phone = ?").bind(phone).first();
+    if (!row || row.stage === 'link_enviado') return;
+    await sendEventoGroupLink(env, phone);
+  } catch (_) {}
 }
 
 // ============================================================================
@@ -7479,6 +7534,12 @@ export default {
                     ).bind(phone, ts).run();
                   } catch (_) {}
                 }
+                // ===== Lanzamiento (evento 4 y 6 de agosto): botón walink de la thanks page =====
+                // El lead tocó el botón y mandó el texto pre-cargado → le mandamos el link del
+                // grupo (texto libre, ventana 24h). Dedup + aislamiento adentro de la función.
+                if (direction === 'inbound' && _normTxt(msgBody).includes('registre al evento del 4 y 6')) {
+                  try { await sendEventoGroupLink(env, phone); } catch (_) {}
+                }
                 // ===== Minicurso: si este inbound responde al gate de feedback,
                 // la IA evalúa y le manda el link de regalos si es positiva. =====
                 if (direction === 'inbound') {
@@ -7571,6 +7632,9 @@ export default {
                   try { await cursosFlowOnInbound(env, phone, msgBody, ts); } catch (_) {}
                   // Landing del minicurso: respuesta al opener -> branch por IA / follow-up.
                   try { await minicursoLandingOnInbound(env, phone, ts); } catch (_) {}
+                  // Landing del lanzamiento: respuesta al opener (o entró por otro lado sin el
+                  // texto exacto del walink) -> mandar el link del grupo.
+                  try { await lanzamientoLandingOnInbound(env, phone); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
                   // Reparto de leads NUEVOS de carteles a Nadia según su cuota diaria (arranca en 0).
