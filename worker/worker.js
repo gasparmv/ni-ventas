@@ -3148,6 +3148,36 @@ async function processPendingMedia(env) {
   } catch (_) { /* best-effort */ }
 }
 
+// Cron: transcribe audios que YA están bajados a R2 (wa/) pero que el webhook no
+// logró transcribir en vivo. La transcripción síncrona dentro del webhook falla
+// seguido (race con la consistencia de R2 apenas se hace el put, o el timeout de
+// Gemini corta dentro del handler), y el body queda vacío. Este barrido de red
+// (Gemini/Whisper, casi todo I/O) los levanta en <5 min. Idempotente: solo toca
+// audios con body vacío/placeholder. Pocos por tick para no estirar el cron.
+async function processPendingTranscripts(env) {
+  if (!env.MEDIA || (!env.GEMINI_API_KEY && !env.AI)) return;
+  try {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const rs = await env.DB.prepare(
+      "SELECT id, media_url FROM wa_messages " +
+      "WHERE msg_type='audio' AND media_url LIKE 'wa/%' " +
+      "  AND (body = '' OR body = '[audio]' OR body IS NULL OR length(body) < 10) " +
+      "  AND ts >= ? " +
+      "ORDER BY id DESC LIMIT 4"
+    ).bind(cutoff).all();
+    for (const row of (rs.results || [])) {
+      try {
+        const transcript = await transcribeAudio(env, row.media_url);
+        if (transcript && transcript.trim().length > 0) {
+          await env.DB.prepare('UPDATE wa_messages SET body = ? WHERE id = ?').bind(
+            '[audio] ' + transcript, row.id
+          ).run();
+        }
+      } catch (_) { /* siguiente */ }
+    }
+  } catch (_) { /* best-effort */ }
+}
+
 // Cron: procesa las respuestas pendientes de la campaña de cursos cuando vence
 // la ventana de 2 min. Junta TODOS los mensajes inbound del cliente desde
 // sent_1_at, los manda a la IA, decide: positiva → encola cursos_evento;
@@ -11987,6 +12017,8 @@ export default {
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
+    // Levanta audios que el webhook bajó a R2 pero no logró transcribir en vivo.
+    ctx.waitUntil(processPendingTranscripts(env));
     // Refresca el token largo de IG antes de que venza (se autogatea a 1 vez/día).
     ctx.waitUntil(igMaybeRefreshToken(env));
     // Cada ~30 min: traer del Excel de Ventas el campo `productor` (Gaspar lo carga ahí).
