@@ -4636,6 +4636,72 @@ async function processMinicursoLead(env, body) {
 }
 
 // ============================================================================
+// LANZAMIENTO (Fase Semilla) — MISMO mecanismo que la landing del minicurso pero
+// SEPARADO (mensajes propios). La landing del lanzamiento hace POST a
+// /webhook/lanzamiento-lead con {firstName, phone} (mismo header X-Sheet-Secret).
+// Guardamos el lead y a los 45 min se manda un OPENER (plantilla de Meta).
+// ARRANCA APAGADO (freno de mano) Y sin plantilla configurada -> NO manda nada.
+// Para prenderlo: crear la plantilla en Meta, setear kv 'lanzamiento_opener_tpl'
+// con su nombre, y kv 'lanzamiento_landing_on'='1'. El branch/follow-ups se
+// agregan cuando esté el copy completo del lanzamiento.
+// ============================================================================
+const LANZAMIENTO_LANDING_DELAY_MS = 45 * 60 * 1000; // opener a los 45 min (como el minicurso)
+async function lanzamientoLandingOn(env) { return (await kvGet(env, 'lanzamiento_landing_on', '0')) === '1'; }
+async function lanzamientoOpenerTpl(env) { return String(await kvGet(env, 'lanzamiento_opener_tpl', '') || '').trim(); }
+
+async function processLanzamientoLead(env, body) {
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS lanzamiento_landing (phone TEXT PRIMARY KEY, nombre TEXT, stage TEXT, registered_at TEXT, opener_due_at TEXT, opener_sent_at TEXT, source TEXT, updated_at TEXT, created_at TEXT)").run();
+    const phoneRaw = String(body?.phone || body?.telefono || body?.['teléfono'] || body?.phone_number || body?.celular || '').trim();
+    const nombreRaw = String(body?.firstName || body?.first_name || body?.nombre || body?.name || '').trim();
+    const phone = normalizeArPhone(phoneRaw) || '';
+    if (!phone) {
+      try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'LANZAMIENTO_LEAD_NO_PHONE: ' + JSON.stringify(body).slice(0, 500)).run(); } catch (_) {}
+      return;
+    }
+    const nombre = (nombreRaw.split(/\s+/)[0] || '').replace(/[^\p{L}\p{M}'\-]/gu, '');
+    try { const ex = await env.DB.prepare('SELECT 1 AS x FROM lanzamiento_landing WHERE phone = ?').bind(phone).first(); if (ex) return; } catch (_) {}
+    const now = new Date().toISOString();
+    const due = new Date(Date.now() + LANZAMIENTO_LANDING_DELAY_MS).toISOString();
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO lanzamiento_landing (phone, nombre, stage, registered_at, opener_due_at, source, updated_at, created_at) VALUES (?, ?, 'registered', ?, ?, 'landing', ?, ?)"
+    ).bind(phone, nombre, now, due, now, now).run();
+  } catch (err) {
+    try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'LANZAMIENTO_LEAD_ERR: ' + (err?.message || String(err))).run(); } catch (_) {}
+  }
+}
+
+// Cron: opener a los registros cuyo +45min venció. GATE TRIPLE (kill-switch prendido +
+// plantilla configurada + no bloqueado por Meta). Sin eso, NO-OP -> los leads solo se
+// acumulan en la tabla, no se les manda nada.
+async function processLanzamientoLanding(env) {
+  if (!(await lanzamientoLandingOn(env)) || await isWaBillingBlocked(env)) return;
+  const tpl = await lanzamientoOpenerTpl(env);
+  if (!tpl) return; // sin plantilla aprobada configurada -> no manda todavía
+  const nowIso = new Date().toISOString();
+  let rows;
+  // Solo registros de los últimos 3 días (evita openers "recién te registraste" rancios
+  // si se prende días después con backlog acumulado).
+  try { rows = (await env.DB.prepare("SELECT phone, nombre FROM lanzamiento_landing WHERE stage = 'registered' AND opener_due_at <= ? AND registered_at > datetime('now','-3 days') ORDER BY opener_due_at ASC LIMIT 10").bind(nowIso).all()).results || []; } catch (_) { return; }
+  for (const r of rows) {
+    const phone = r.phone;
+    let cl; try { cl = await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'sending_opener', updated_at = ? WHERE phone = ? AND stage = 'registered'").bind(nowIso, phone).run(); } catch (_) { continue; }
+    if (!cl?.meta?.changes) continue; // otro tick lo tomó
+    const nombre = (r.nombre || '').trim() || 'buenas';
+    const res = await waSendTemplate(env, phone, tpl, 'es_AR', [nombre]);
+    if (!res || !res.ok) {
+      try { await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'registered', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+      try { await logWaEvent(env, { to: phone, kind: 'lanzamiento-opener', ref: '', ok: false, error: res?.error }); } catch (_) {}
+      continue;
+    }
+    const sentTs = new Date().toISOString();
+    try { await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'opener_sent', opener_sent_at = ?, updated_at = ? WHERE phone = ?").bind(sentTs, sentTs, phone).run(); } catch (_) {}
+    if (res.id) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)").bind(sentTs, res.id, phone, '[plantilla: ' + tpl + ']').run(); } catch (_) {} }
+    await new Promise(rs => setTimeout(rs, 600));
+  }
+}
+
+// ============================================================================
 // Leads B2B de REVENTA (revendedores). Un App Script en el Sheet de reventa
 // reenvía cada fila nueva a POST /webhook/reventa-lead. Filtramos los
 // CUALIFICADOS (tiene experiencia en venta Y clientes) y a esos les mandamos la
@@ -7134,6 +7200,21 @@ export default {
       try { body = await request.json(); } catch { return json({ ok: true }); }
       try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'MINICURSO_LEAD: ' + JSON.stringify(body).slice(0, 2000)).run(); } catch (_) {}
       ctx.waitUntil(processMinicursoLead(env, body));
+      return json({ ok: true });
+    }
+
+    // ===== Registro de leads de la landing del LANZAMIENTO (Fase Semilla) =====
+    // MISMO formato que el minicurso ({firstName, phone} + header X-Sheet-Secret), pero
+    // URL y flujo SEPARADOS. Los leads entran a lanzamiento_landing; el opener NO se manda
+    // hasta que se configure la plantilla + se prenda el freno (ver processLanzamientoLanding).
+    if (request.method === 'POST' && path === '/webhook/lanzamiento-lead') {
+      const incoming = request.headers.get('x-sheet-secret') || '';
+      const okSecret = (env.SHEET_BRIDGE_SECRET && incoming === env.SHEET_BRIDGE_SECRET) || (env.MINICURSO_WEBHOOK_SECRET && incoming === env.MINICURSO_WEBHOOK_SECRET);
+      if (!okSecret) return json({ error: 'forbidden' }, 403);
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: true }); }
+      try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'LANZAMIENTO_LEAD: ' + JSON.stringify(body).slice(0, 2000)).run(); } catch (_) {}
+      ctx.waitUntil(processLanzamientoLead(env, body));
       return json({ ok: true });
     }
 
@@ -12014,6 +12095,10 @@ export default {
     // IA + follow-up 23h. Gateado (kill-switch OFF por defecto + horario 8-22 AR).
     // Corre en cada tick para responder rápido; guardia anti-choque con el flujo de ads.
     ctx.waitUntil(processMinicursoLanding(env));
+    // Landing del LANZAMIENTO (Fase Semilla): mismo mecanismo (opener a los 45 min por
+    // plantilla). NO-OP hasta que se configure kv 'lanzamiento_opener_tpl' + kv
+    // 'lanzamiento_landing_on'='1' — los leads solo se acumulan en la tabla mientras tanto.
+    ctx.waitUntil(processLanzamientoLanding(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
