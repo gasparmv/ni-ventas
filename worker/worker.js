@@ -2844,8 +2844,13 @@ async function processRecoveryQueue(env) {
     const res = await waSendTemplate(env, r.phone, r.template_name, 'es_AR', params);
     if (res && res.ok) {
       try { await env.DB.prepare("UPDATE recovery_queue SET status='sent', sent_at=?, attempts=attempts+1, updated_at=? WHERE phone=?").bind(nowIso, nowIso, r.phone).run(); } catch (_) {}
-      // Registrar el envío en el chat para que los vendedores vean qué recibió el lead.
-      const preview = '📩 Aviso automático de cambio de número' + (r.param ? ' — cotización del cartel de ' + r.param : '');
+      // Registrar el envío en el chat con el TEXTO REAL que recibió el lead (no un marcador).
+      const _rb = {
+        aviso_cotizacion_pendiente: 'Hola, te escribe Joaco de Neon Infinito. Cambiamos nuestro número de WhatsApp y este es el nuevo, lo avisamos también en nuestras redes oficiales. Tenemos lista tu cotización del cartel de ' + (r.param || 'neón') + '. Respondé este mensaje así te la reenvío por acá.',
+        aviso_consulta_sin_respuesta: 'Hola, te escribe Joaco de Neon Infinito. Estos días cambiamos nuestro número de WhatsApp y quizás por eso no te respondimos a tiempo, disculpá. Este es el número nuevo. Si querés avanzar con la cotización de tu cartel de neón, respondé este mensaje y seguimos por acá.',
+        aviso_pedido_en_curso: 'Hola, te escribe Joaco de Neon Infinito. Cambiamos nuestro número de WhatsApp y este es el nuevo. Tu pedido del cartel de ' + (r.param || 'neón') + ' sigue en marcha con nosotros, sin cambios. Guardá este contacto y cualquier cosa sobre tu cartel respondé por acá.',
+      };
+      const preview = _rb[r.template_name] || '📩 Aviso automático de cambio de número';
       if (res.id) { try { await env.DB.prepare(`INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1) ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`).bind(nowIso, res.id, r.phone, preview).run(); } catch (_) {} }
     } else {
       try { await env.DB.prepare("UPDATE recovery_queue SET attempts=attempts+1, status=(CASE WHEN attempts+1 >= 3 THEN 'failed' ELSE 'pending' END), updated_at=? WHERE phone=?").bind(nowIso, r.phone).run(); } catch (_) {}
