@@ -4700,8 +4700,9 @@ async function processLanzamientoLanding(env) {
     const phone = r.phone;
     let cl; try { cl = await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'sending_opener', updated_at = ? WHERE phone = ? AND stage = 'registered'").bind(nowIso, phone).run(); } catch (_) { continue; }
     if (!cl?.meta?.changes) continue; // otro tick lo tomó
-    const nombre = (r.nombre || '').trim() || 'buenas';
-    const res = await waSendTemplate(env, phone, tpl, 'es_AR', [nombre]);
+    // Sin nombre: la plantilla del opener (lanzamiento_evento_opener3) NO tiene variable → evita el
+    // "amigo/a" feo de los sin-nombre + nombres inconsistentes (a veces venían apellidos).
+    const res = await waSendTemplate(env, phone, tpl, 'es_AR', []);
     if (!res || !res.ok) {
       try { await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'registered', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
       try { await logWaEvent(env, { to: phone, kind: 'lanzamiento-opener', ref: '', ok: false, error: res?.error }); } catch (_) {}
@@ -4736,8 +4737,10 @@ async function sendEventoGroupLink(env, phone) {
   const nowIso = new Date().toISOString();
   // OCULTO por defecto: no ensuciamos la bandeja de Abril con los que solo piden el link.
   // Se revelan (inbox='cursos') recién si responden A NUESTRA RESPUESTA (ver lanzamientoLandingOnInbound).
-  // Aislado del bot de ventas igual (precotización ignora 'oculto' de cursos por las otras señales).
-  try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('general','')").bind(phone, nowIso).run(); } catch (_) {}
+  // Oculta AUNQUE esté en 'cursos' (ej: lead del minicurso que además toca el walink), PERO NO si es
+  // un lead genuinamente enganchado: que ya escribió algo real aparte del walink, o que un humano
+  // (automated=0) ya le respondió → esos se dejan como están.
+  try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox <> 'oculto' AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = wa_chats_summary.phone AND m.direction = 'inbound' AND m.msg_type <> 'status' AND m.body NOT LIKE '%evento del 4 y 6%') AND NOT EXISTS (SELECT 1 FROM wa_messages h WHERE h.phone = wa_chats_summary.phone AND h.direction = 'outbound' AND h.automated = 0 AND h.msg_type <> 'status')").bind(phone, nowIso).run(); } catch (_) {}
   // Marca/crea el lead como 'link_enviado' (crea la fila si vino PURO por walink sin pasar por
   // el form) → el opener del Camino 2 lo saltea (dedup). No pisa a los ya 'revealed'.
   try { await env.DB.prepare("INSERT INTO lanzamiento_landing (phone, nombre, stage, registered_at, source, updated_at, created_at) VALUES (?, '', 'link_enviado', ?, 'walink', ?, ?) ON CONFLICT(phone) DO UPDATE SET stage = 'link_enviado', updated_at = excluded.updated_at WHERE lanzamiento_landing.stage != 'revealed'").bind(phone, nowIso, nowIso, nowIso).run(); } catch (_) {}
