@@ -2016,9 +2016,9 @@ function renderUserPicker() {
         <img class="brand-logo" src="assets/logo.svg" alt="Neon Infinito" style="width:80px;margin-bottom:var(--s-3)">
         <h2 style="margin:0 0 var(--s-1)">NEON · Ventas</h2>
         <p class="muted" style="margin:0 0 var(--s-4);font-size:13px">¿Quién sos?</p>
-        <div style="display:flex;gap:var(--s-3);justify-content:center">
+        <div style="display:flex;flex-wrap:wrap;gap:var(--s-3);justify-content:center">
           ${CONFIG.defaultUsers.map(u => `
-            <button class="btn btn-cyan user-pick-big" data-pick-user="${escapeHtml(u)}" style="min-width:120px;padding:var(--s-3) var(--s-4);font-size:16px">${escapeHtml(u)}</button>
+            <button class="btn btn-cyan user-pick-big" data-pick-user="${escapeHtml(u)}" style="min-width:110px;padding:var(--s-3) var(--s-4);font-size:16px">${escapeHtml(u)}</button>
           `).join('')}
         </div>
       </div>
