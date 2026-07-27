@@ -2847,6 +2847,7 @@ async function processRecoveryQueue(env) {
       // Registrar el envío en el chat con el TEXTO REAL que recibió el lead (no un marcador).
       const _rb = {
         aviso_cotizacion_lista: 'Hola, te escribe Joaco de Neon Infinito. Cambiamos nuestro número de WhatsApp y este es el nuevo, lo avisamos también en nuestras redes oficiales. Tenemos lista tu cotización del cartel de ' + (r.param || 'neón') + '. Respondé este mensaje así te la reenvío por acá.',
+        aviso_presupuesto_listo: 'Hola, soy Joaco de Neon Infinito. Cambiamos de número de WhatsApp y este es el nuevo, tal como avisamos en nuestras redes oficiales. Ya tenemos tu presupuesto listo para pasártelo. Respondé este mensaje y lo retomamos por acá.',
         aviso_consulta_sin_respuesta: 'Hola, te escribe Joaco de Neon Infinito. Estos días cambiamos nuestro número de WhatsApp y quizás por eso no te respondimos a tiempo, disculpá. Este es el número nuevo. Si querés avanzar con la cotización de tu cartel de neón, respondé este mensaje y seguimos por acá.',
         aviso_pedido_en_curso: 'Hola, te escribe Joaco de Neon Infinito. Cambiamos nuestro número de WhatsApp y este es el nuevo. Tu pedido del cartel de ' + (r.param || 'neón') + ' sigue en marcha con nosotros, sin cambios. Guardá este contacto y cualquier cosa sobre tu cartel respondé por acá.',
       };
