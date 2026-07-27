@@ -6796,26 +6796,37 @@ function showNewChatModal(prefillPhone) {
     <div class="modal new-chat-modal" style="max-width:460px;width:92vw">
       <div class="modal-h"><h3>Nuevo chat</h3></div>
       <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
-        <div class="nc-note">Es un número nuevo, fuera de la ventana de 24 h: el primer mensaje tiene que ser una <strong>plantilla aprobada</strong>.</div>
+        <div class="nc-note">Es un número nuevo, fuera de la ventana de 24 h: el primer mensaje tiene que salir como <strong>plantilla</strong>.</div>
         <label class="nc-field">
           <span class="nc-label">Número de teléfono</span>
           <input type="tel" id="nc-phone" class="nc-input" placeholder="11 2345-6789" value="${escapeHtml(prefillPhone || '')}" autocomplete="off">
           <span class="nc-hint" id="nc-hint"></span>
         </label>
-        <div class="nc-field">
-          <span class="nc-label">Plantilla de inicio</span>
-          <div class="nc-tpl-list" id="nc-tpl-list">
-            ${tplRows}
-            <div class="qr-item" data-tpl-create="1"><div class="qr-item-text"><span class="qr-shortcut" style="color:var(--neon-cyan,#8FD4DE)">📋 Crear plantilla nueva (Meta)</span></div></div>
+        <div style="display:flex;gap:6px">
+          <button type="button" class="btn btn-cyan nc-mode-btn" data-mode="tpl">Elegir plantilla</button>
+          <button type="button" class="btn btn-ghost nc-mode-btn" data-mode="msg">Escribir mensaje</button>
+        </div>
+        <div id="nc-mode-tpl">
+          <div class="nc-field">
+            <span class="nc-label">Plantilla de inicio · sale al instante</span>
+            <div class="nc-tpl-list" id="nc-tpl-list">${tplRows}</div>
+          </div>
+          <label class="nc-field" id="nc-name-field" style="display:none">
+            <span class="nc-label">Nombre (reemplaza {{1}} en la plantilla)</span>
+            <input type="text" id="nc-name" class="nc-input" placeholder="amigo/a" autocomplete="off">
+          </label>
+          <div class="nc-field" id="nc-preview-field" style="display:none">
+            <span class="nc-label">Vista previa — así se manda</span>
+            <div class="nc-preview" id="nc-preview"></div>
           </div>
         </div>
-        <label class="nc-field" id="nc-name-field" style="display:none">
-          <span class="nc-label">Nombre (reemplaza {{1}} en la plantilla)</span>
-          <input type="text" id="nc-name" class="nc-input" placeholder="amigo/a" autocomplete="off">
-        </label>
-        <div class="nc-field" id="nc-preview-field" style="display:none">
-          <span class="nc-label">Vista previa — así se manda</span>
-          <div class="nc-preview" id="nc-preview"></div>
+        <div id="nc-mode-msg" style="display:none">
+          <div class="nc-field">
+            <span class="nc-label">Mensaje nuevo · sale como plantilla</span>
+            <textarea id="nc-msg-body" class="nc-input" placeholder="Escribí el mensaje… ej: Hola! Te escribo de Neon Infinito por tu consulta, cualquier cosa quedo a disposición" rows="4" style="resize:vertical"></textarea>
+            <div id="nc-msg-warn" style="color:#ff6b6b;font-size:12px;min-height:16px;margin:4px 0"></div>
+            <div style="font-size:12px;color:var(--fg-subtle,#8696a0);line-height:1.6">Se crea como plantilla: Meta la aprueba en unos minutos y ahí se manda sola. 🚫 Sin links en el texto · 🚫 Sin teléfonos · 🚫 Sin MAYÚSCULAS.</div>
+          </div>
         </div>
       </div>
       <div class="modal-actions">
@@ -6834,8 +6845,15 @@ function showNewChatModal(prefillPhone) {
   const sendBtn = bg.querySelector('#nc-send');
   const previewField = bg.querySelector('#nc-preview-field');
   const previewEl = bg.querySelector('#nc-preview');
+  const modeTplEl = bg.querySelector('#nc-mode-tpl');
+  const modeMsgEl = bg.querySelector('#nc-mode-msg');
+  const msgBodyEl = bg.querySelector('#nc-msg-body');
+  const msgWarnEl = bg.querySelector('#nc-msg-warn');
+  const modeBtns = Array.from(bg.querySelectorAll('.nc-mode-btn'));
 
-  // Plantilla elegida (se setea al clickear un row del listado estilo "/").
+  // Dos modos: 'tpl' = elegir plantilla ya aprobada (sale al instante);
+  // 'msg' = escribir un mensaje nuevo que sale como plantilla (create-send, lo aprueba Meta).
+  let mode = 'tpl';
   let selectedName = null, selectedLang = 'es_AR', selectedParams = 0;
 
   const close = () => bg.remove();
@@ -6851,21 +6869,37 @@ function showNewChatModal(prefillPhone) {
       hintEl.innerHTML = `Se enviará a <strong>${escapeHtml(formatPhoneDisplay(norm))}</strong>${exists ? ' · <span class="nc-exists">ya tenés un chat con este número</span>' : ''}`;
       hintEl.className = 'nc-hint ok';
     } else { hintEl.textContent = 'Número inválido — revisá el código de área.'; hintEl.className = 'nc-hint err'; }
-    nameField.style.display = (selectedName && selectedParams >= 1) ? '' : 'none';
-    // Vista previa: el body completo de la plantilla con {{1}} ya reemplazado.
-    const tpl = selectedName ? (chatState.templates || []).find(t => t.name === selectedName) : null;
-    if (tpl) {
-      const fn = (nameEl.value || '').trim() || 'amigo/a';
-      previewEl.textContent = tplBodyText(tpl).replace(/\{\{\s*\d+\s*\}\}/g, fn);
-      previewField.style.display = '';
-    } else { previewField.style.display = 'none'; }
-    sendBtn.disabled = !(phoneOk && selectedName);
+    if (mode === 'tpl') {
+      nameField.style.display = (selectedName && selectedParams >= 1) ? '' : 'none';
+      const tpl = selectedName ? (chatState.templates || []).find(t => t.name === selectedName) : null;
+      if (tpl) {
+        const fn = (nameEl.value || '').trim() || 'amigo/a';
+        previewEl.textContent = tplBodyText(tpl).replace(/\{\{\s*\d+\s*\}\}/g, fn);
+        previewField.style.display = '';
+      } else { previewField.style.display = 'none'; }
+      sendBtn.textContent = 'Chatear';
+      sendBtn.disabled = !(phoneOk && selectedName);
+    } else {
+      const text = (msgBodyEl.value || '').trim();
+      const err = text ? validateAdhocTemplateClient(text) : '';
+      msgWarnEl.textContent = text ? (err || '') : '';
+      sendBtn.textContent = 'Crear y mandar';
+      sendBtn.disabled = !(phoneOk && text && !err);
+    }
   }
 
-  // Rows del listado: elegir una plantilla (resalta) o crear una nueva en Meta.
+  modeBtns.forEach(b => { b.onclick = () => {
+    mode = b.dataset.mode;
+    modeBtns.forEach(x => { x.className = 'btn nc-mode-btn ' + (x.dataset.mode === mode ? 'btn-cyan' : 'btn-ghost'); });
+    modeTplEl.style.display = mode === 'tpl' ? '' : 'none';
+    modeMsgEl.style.display = mode === 'msg' ? '' : 'none';
+    refresh();
+    if (mode === 'msg') setTimeout(() => msgBodyEl.focus(), 20);
+  }; });
+
+  // Rows del listado: elegir una plantilla (resalta).
   listEl.querySelectorAll('.qr-item').forEach(row => {
     row.onclick = () => {
-      if (row.dataset.tplCreate === '1') { close(); showCreateTemplateModal(); return; }
       if (!row.dataset.tplName) return;
       selectedName = row.dataset.tplName;
       selectedLang = row.dataset.tplLang || 'es_AR';
@@ -6878,25 +6912,55 @@ function showNewChatModal(prefillPhone) {
 
   phoneEl.addEventListener('input', refresh);
   nameEl.addEventListener('input', refresh);
+  msgBodyEl.addEventListener('input', refresh);
   refresh();
   setTimeout(() => phoneEl.focus(), 30);
 
   sendBtn.onclick = async () => {
     const norm = normalizeArPhoneFE(phoneEl.value);
-    if (!norm || norm.length < 12 || !selectedName) return;
-    const params = selectedParams >= 1 ? [((nameEl.value || '').trim() || 'amigo/a')] : [];
-    sendBtn.disabled = true; sendBtn.textContent = 'Enviando…';
-    const j = await sendTemplateToChat(norm, selectedName, selectedLang, params);
-    if (j && j.id) {
-      toast('✓ Plantilla enviada');
-      close();
-      const si = document.getElementById('chat-search'); if (si) si.value = '';
-      chatState.search = ''; updateNewChatSuggest('');
-      await selectChatContact(norm); // abre la conversación con el mensaje de la plantilla
-      loadChatContacts().then(() => { if (STATE.view === 'chat') refreshContactList(); }); // que aparezca en la lista
+    if (!norm || norm.length < 12) return;
+    if (mode === 'tpl') {
+      // Plantilla ya aprobada → sale al instante.
+      if (!selectedName) return;
+      const params = selectedParams >= 1 ? [((nameEl.value || '').trim() || 'amigo/a')] : [];
+      sendBtn.disabled = true; sendBtn.textContent = 'Enviando…';
+      const j = await sendTemplateToChat(norm, selectedName, selectedLang, params);
+      if (j && j.id) {
+        toast('✓ Plantilla enviada');
+        close();
+        const si = document.getElementById('chat-search'); if (si) si.value = '';
+        chatState.search = ''; updateNewChatSuggest('');
+        await selectChatContact(norm); // abre la conversación con el mensaje de la plantilla
+        loadChatContacts().then(() => { if (STATE.view === 'chat') refreshContactList(); });
+      } else {
+        toast('Error al enviar la plantilla');
+        sendBtn.disabled = false; sendBtn.textContent = 'Chatear';
+      }
     } else {
-      toast('Error al enviar la plantilla');
-      sendBtn.disabled = false; sendBtn.textContent = 'Chatear';
+      // Mensaje nuevo → se crea como plantilla (Meta la aprueba y se manda sola).
+      const text = (msgBodyEl.value || '').trim();
+      const err = validateAdhocTemplateClient(text);
+      if (err) { msgWarnEl.textContent = err; return; }
+      sendBtn.disabled = true; sendBtn.textContent = 'Creando…';
+      try {
+        const r = await fetch(CONFIG.trackerUrl + '/admin/wa/template-create-send', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ to: norm, body_text: text })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j.ok) {
+          toast(j.reused ? '✓ Mensaje enviado (se reusó una plantilla ya aprobada).' : '✓ Plantilla creada. Se manda sola cuando Meta la apruebe (unos min).');
+          close();
+          const si = document.getElementById('chat-search'); if (si) si.value = '';
+          chatState.search = ''; updateNewChatSuggest('');
+        } else {
+          msgWarnEl.textContent = j.error || 'No se pudo crear la plantilla';
+          sendBtn.disabled = false; sendBtn.textContent = 'Crear y mandar';
+        }
+      } catch (e) {
+        msgWarnEl.textContent = 'Error: ' + (e.message || e);
+        sendBtn.disabled = false; sendBtn.textContent = 'Crear y mandar';
+      }
     }
   };
 }
