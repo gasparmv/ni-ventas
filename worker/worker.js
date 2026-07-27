@@ -407,7 +407,8 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
       if(!r.data||!r.data.trans)return showErr('No se pudo calcular.');
       var ent=(r.data.entrega==='retiro')?'RETIRO EN TALLER - envio descontado':'ENVIO INCLUIDO';
       var head='<div class="entnote">'+ent+'</div>'+(nombre?'<div class="card" style="padding:12px 16px;margin-bottom:10px"><b style="font-size:15px">'+esc(nombre)+'</b></div>':'');
-      $('res').innerHTML=head+baseCard('Transparente','#cbd5e1',r.data.trans)+baseCard('Negro','#1f2937',r.data.negro)+'<button class="btn" id="b_copy" style="margin-top:2px">Copiar presupuesto</button><div class="note" style="margin-top:8px">Listo para mandarle a tu cliente (con tus precios de reventa). Pod&eacute;s editarlo antes de enviar.</div>';
+      // Base negra desactivada (jul-2026, hasta nuevo aviso). Reactivar: volver a sumar +baseCard('Negro','#1f2937',r.data.negro)
+      $('res').innerHTML=head+baseCard('Transparente','#cbd5e1',r.data.trans)+'<button class="btn" id="b_copy" style="margin-top:2px">Copiar presupuesto</button><div class="note" style="margin-top:8px">Listo para mandarle a tu cliente (con tus precios de reventa). Pod&eacute;s editarlo antes de enviar.</div>';
       var _bc=$('b_copy'); if(_bc)_bc.onclick=function(){ copyText(presupuestoTexto(r.data,nombre,ancho,alto),_bc); };
       loadHist();
     });
@@ -420,7 +421,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     L.push('Trabajo: '+(nombre||''));
     L.push('Medidas: '+Math.round(ancho)+'x'+Math.round(alto)+' cm');
     L.push('Base acrílica transparente: $ ');
-    L.push('Base negra: $ ');
+    // Base negra desactivada (jul-2026, hasta nuevo aviso). Reactivar: L.push('Base negra: $ ');
     L.push('');
     L.push('Controladores opcionales:');
     L.push('');

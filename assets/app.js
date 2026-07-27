@@ -4,6 +4,23 @@
  * Routing: hash-based (#dashboard, #pedidos, etc.)
  */
 
+// ============================================================
+// FLAG TEMPORAL — ofrecer base negra (acrílico negro) al cliente.
+// Puesto en false (jul-2026) HASTA NUEVO AVISO: se cotiza y presupuesta
+// SOLO con base transparente (no se muestra ni se manda la opción negra).
+// El cálculo del precio negro sigue intacto por si se reactiva.
+// Controla: panel de cotización + texto de presupuesto (dentro de ventana 24h).
+// Para REACTIVAR: poner en true.
+const OFRECER_BASE_NEGRA = false;
+
+// Estado REAL del template de Meta 'presupuesto_detallado'(_img): su body
+// aprobado todavía tiene la línea "Base negra: {{5}}" (5 variables). El envío
+// FUERA de la ventana de 24h usa ese template, así que hay que mandarle 5
+// params o Meta lo rechaza. Cuando se edite el body en Meta a 4 variables
+// (quitando esa línea) y se re-apruebe, poner esto en false para dejar de
+// mandar la base negra también en los envíos fuera de ventana.
+const TEMPLATE_DETALLADO_TIENE_NEGRA = true;
+
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
   defaultUsers: ['Gaspar', 'Joaquín', 'Nadia', 'Diseñador', 'Abril'],
@@ -327,7 +344,8 @@ function buildPresupuestoTexto() {
     const c = carteles[0];
     const r = calcCotizadorActivo(c);
     const nombre = (c.cliente || '').trim() || 'Custom name';
-    return `Te comparto el presupuesto con la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+c.ancho)}x${Math.round(+c.alto)}\nBase acrílica transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}${closing}`;
+    const lineaNegra = OFRECER_BASE_NEGRA ? `\nBase negra: ${fmtMoney(r.negroFinal)}` : '';
+    return `Te comparto el presupuesto con la información detallada!\n\nTrabajo: ${nombre}\nMedidas: ${Math.round(+c.ancho)}x${Math.round(+c.alto)}\nBase acrílica transparente: ${fmtMoney(r.transFinal)}${lineaNegra}${closing}`;
   }
 
   // 2+ carteles — cada uno con su propio nombre de diseño
@@ -337,11 +355,14 @@ function buildPresupuestoTexto() {
     totalTrans += r.transFinal;
     totalNegro += r.negroFinal;
     const disen = (c.cliente || '').trim() || `Cartel ${i+1}`;
-    return `${disen} — ${Math.round(+c.ancho)}x${Math.round(+c.alto)} cm\nBase acrílica transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}`;
+    const lineaNegraB = OFRECER_BASE_NEGRA ? `\nBase negra: ${fmtMoney(r.negroFinal)}` : '';
+    return `${disen} — ${Math.round(+c.ancho)}x${Math.round(+c.alto)} cm\nBase acrílica transparente: ${fmtMoney(r.transFinal)}${lineaNegraB}`;
   }).join('\n\n');
 
   const trabajo = carteles.map(c => (c.cliente || '').trim()).filter(Boolean).join(' · ') || 'Custom name';
-  return `Te comparto el presupuesto con la información detallada!\n\nTrabajo: ${trabajo}\n\n${bloques}\n\nTotal transparente: ${fmtMoney(totalTrans)}\nTotal negro: ${fmtMoney(totalNegro)}${closing}`;
+  const totalLabel = OFRECER_BASE_NEGRA ? 'Total transparente' : 'Total';
+  const totalNegroLinea = OFRECER_BASE_NEGRA ? `\nTotal negro: ${fmtMoney(totalNegro)}` : '';
+  return `Te comparto el presupuesto con la información detallada!\n\nTrabajo: ${trabajo}\n\n${bloques}\n\n${totalLabel}: ${fmtMoney(totalTrans)}${totalNegroLinea}${closing}`;
 }
 
 function getPresupuestoTextoFinal() {
@@ -380,11 +401,15 @@ async function enviarPresupuestoComoPlantilla(tel, carteles, renderKey) {
   const nombre = (c.cliente || '').trim() || 'tu local';
   const ancho = String(Math.round(+c.ancho));
   const alto = String(Math.round(+c.alto));
-  const params = [nombre, ancho, alto, fmtMoney(r.transFinal), fmtMoney(r.negroFinal)];
+  // El template de Meta manda tantos params como variables tenga su body aprobado.
+  const params = TEMPLATE_DETALLADO_TIENE_NEGRA
+    ? [nombre, ancho, alto, fmtMoney(r.transFinal), fmtMoney(r.negroFinal)]
+    : [nombre, ancho, alto, fmtMoney(r.transFinal)];
   const useImg = !!renderKey;
+  const lineaNegraConf = TEMPLATE_DETALLADO_TIENE_NEGRA ? `\nBase negra: ${fmtMoney(r.negroFinal)}` : '';
   const ok = await showConfirm(
     `La ventana de 24h está cerrada, así que el presupuesto va como PLANTILLA aprobada${useImg ? ' CON el render' : ''} (incluye los controladores, seña 50%, 3 cuotas con 10%, 10 días hábiles y envío gratis).\n\n` +
-    `Trabajo: ${nombre}\nMedidas: ${ancho} x ${alto}\nBase transparente: ${fmtMoney(r.transFinal)}\nBase negra: ${fmtMoney(r.negroFinal)}\n\n¿Lo mando?`,
+    `Trabajo: ${nombre}\nMedidas: ${ancho} x ${alto}\nBase transparente: ${fmtMoney(r.transFinal)}${lineaNegraConf}\n\n¿Lo mando?`,
     { title: 'Enviar como plantilla', confirmLabel: '📤 Mandar plantilla', cancelLabel: 'Cancelar' }
   );
   if (!ok) return { ok: false, cancelled: true };
@@ -4720,7 +4745,7 @@ function renderRevendedorBlock(baseTrans, baseNegro) {
         </tr></thead>
         <tbody>
           ${fila('Transparente', baseTrans)}
-          ${fila('Negro', baseNegro)}
+          ${OFRECER_BASE_NEGRA ? fila('Negro', baseNegro) : ''}
         </tbody>
       </table>
     </div>`;
@@ -4749,9 +4774,9 @@ function renderCotizadorResults() {
         <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${escapeHtml(disen)} · ${Math.round(+c.ancho)}×${Math.round(+c.alto)} cm${useNueva && rr.cf ? ' · CF '+fmtMoney(rr.cf)+' · margen '+Math.round(rr.margen*100)+'%' : ' · m² '+rr.m2.toFixed(2)}</div>
         <div class="cot-result-grid">
           <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${fmtMoney(rr.transFinal)}</div></div>
-          <div class="cot-result"><div class="lbl">Negro</div><div class="val">${fmtMoney(rr.negroFinal)}</div></div>
+          ${OFRECER_BASE_NEGRA ? `<div class="cot-result"><div class="lbl">Negro</div><div class="val">${fmtMoney(rr.negroFinal)}</div></div>` : ''}
         </div>
-        <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">↔ ${labelOtra}: trans ${fmtMoney(rrOtra.transFinal)} · negro ${fmtMoney(rrOtra.negroFinal)}</div>
+        <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">↔ ${labelOtra}: trans ${fmtMoney(rrOtra.transFinal)}${OFRECER_BASE_NEGRA ? ` · negro ${fmtMoney(rrOtra.negroFinal)}` : ''}</div>
       </div>`;
   }).join('') : '';
 
@@ -4765,23 +4790,23 @@ function renderCotizadorResults() {
       ${multi ? `
         ${blocksHtml}
         <div class="cot-result-grid" style="border-top:2px solid var(--accent-cyan);padding-top:var(--s-2);margin-top:var(--s-2)">
-          <div class="cot-result"><div class="lbl">Total transparente</div><div class="val"><b>${fmtMoney(totalTrans)}</b></div></div>
-          <div class="cot-result"><div class="lbl">Total negro</div><div class="val"><b>${fmtMoney(totalNegro)}</b></div></div>
+          <div class="cot-result"><div class="lbl">${OFRECER_BASE_NEGRA ? 'Total transparente' : 'Total'}</div><div class="val"><b>${fmtMoney(totalTrans)}</b></div></div>
+          ${OFRECER_BASE_NEGRA ? `<div class="cot-result"><div class="lbl">Total negro</div><div class="val"><b>${fmtMoney(totalNegro)}</b></div></div>` : ''}
         </div>
-        <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">↔ ${labelOtra}: total trans ${fmtMoney(totalTransOtra)} · total negro ${fmtMoney(totalNegroOtra)}</div>
+        <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">↔ ${labelOtra}: total trans ${fmtMoney(totalTransOtra)}${OFRECER_BASE_NEGRA ? ` · total negro ${fmtMoney(totalNegroOtra)}` : ''}</div>
       ` : `
       <div class="cot-meta">
         ${useNueva && r.cf ? `CF: <b>${fmtMoney(r.cf)}</b> · margen: <b>${Math.round(r.margen*100)}%</b>${r.densidad ? ' · densidad '+r.densidad.toFixed(2)+'<small style="color:var(--fg-mute);font-size:10px">tramos/m</small>' : ''}` : `m² (sheet): <b>${r.m2.toFixed(2)}</b>`}
       </div>
       <div class="cot-result-grid">
         <div class="cot-result"><div class="lbl">Transparente</div><div class="val">${fmtMoney(r.transFinal)}</div></div>
-        <div class="cot-result"><div class="lbl">Negro</div><div class="val">${fmtMoney(r.negroFinal)}</div></div>
+        ${OFRECER_BASE_NEGRA ? `<div class="cot-result"><div class="lbl">Negro</div><div class="val">${fmtMoney(r.negroFinal)}</div></div>` : ''}
         <div class="cot-result"><div class="lbl">Reventa (×${p.reventa_mult})</div><div class="val">${fmtMoney(r.reventa)}</div></div>
         <div class="cot-result"><div class="lbl">Comisión (${(p.comision_pct*100).toFixed(0)}%)</div><div class="val">${fmtMoney(r.comision)}</div></div>
       </div>
       <div style="font-size:11px;color:var(--fg-mute);margin-top:8px;padding:8px;background:rgba(255,255,255,.02);border-radius:var(--r-sm);border:1px dashed var(--border)">
         <b style="color:var(--fg-subtle)">↔ ${labelOtra}:</b>
-        trans <s>${fmtMoney(rOtra.transFinal)}</s> · negro <s>${fmtMoney(rOtra.negroFinal)}</s>
+        trans <s>${fmtMoney(rOtra.transFinal)}</s>${OFRECER_BASE_NEGRA ? ` · negro <s>${fmtMoney(rOtra.negroFinal)}</s>` : ''}
         <span style="margin-left:6px;font-size:10px;opacity:.7">${useNueva ? '(la spec dice "abaratar grandes / cobrar chicos complejos")' : '(toggle transicionUseNueva en cotizador_params para activar)'}</span>
       </div>
       `}
@@ -12661,6 +12686,7 @@ async function fetchBriefs() {
     const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs?limit=500`, {
       headers: { Authorization: `Bearer ${STATE.token}` }
     });
+    if (r.status === 401) throw new Error('SESION_VENCIDA');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     STATE.briefs = data.briefs || [];
@@ -14561,6 +14587,9 @@ function renderCotizacion(producto = 'neon') {
     return `<div style="padding:var(--s-4)">${headerActions}<div class="muted" style="text-align:center;padding:var(--s-4)">Cargando briefs…</div></div>`;
   }
   if (STATE.briefsError) {
+    if (STATE.briefsError === 'SESION_VENCIDA') {
+      return `<div style="padding:var(--s-4)">${headerActions}<div style="padding:var(--s-3);background:rgba(255,24,48,.08);border:1px solid rgba(255,24,48,.3);border-radius:var(--r-sm);color:#FF5566"><b>Tu sesión venció en este dispositivo.</b><br><span style="font-size:12px;opacity:.85">Volvé a entrar con tu usuario y contraseña para seguir cargando presupuestos.</span><br><button class="btn" onclick="logout()" style="margin-top:12px;background:#FF1830;color:#fff;border:none;padding:9px 18px;border-radius:8px;font-weight:600">Cerrar sesión y volver a entrar</button></div></div>`;
+    }
     return `<div style="padding:var(--s-4)">${headerActions}<div style="padding:var(--s-3);background:rgba(255,24,48,.08);border:1px solid rgba(255,24,48,.3);border-radius:var(--r-sm);color:#FF5566">Error: ${escapeHtml(STATE.briefsError)}<br><span style="font-size:11px;opacity:.7">¿Falta aplicar la migración 001_briefs.sql al worker?</span></div></div>`;
   }
 
@@ -15272,12 +15301,12 @@ function renderBriefCotizadorPopup() {
             <div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>
           `}
           <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.transFinal)}</b></div>
-          <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico negro</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.negroFinal)}</b></div>
+          ${OFRECER_BASE_NEGRA ? `<div><span style="color:var(--fg-subtle);font-size:11px">Acrílico negro</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.negroFinal)}</b></div>` : ''}
         </div>
         ${rOtra ? `
         <div style="font-size:11px;color:var(--fg-mute);margin-bottom:var(--s-3);padding:8px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm)">
           <b style="color:var(--fg-subtle)">↔ ${labelOtra}:</b>
-          trans <s>${fmtMoney(rOtra.transFinal)}</s> · negro <s>${fmtMoney(rOtra.negroFinal)}</s>
+          trans <s>${fmtMoney(rOtra.transFinal)}</s>${OFRECER_BASE_NEGRA ? ` · negro <s>${fmtMoney(rOtra.negroFinal)}</s>` : ''}
         </div>
         ` : ''}
         ` : '<div class="muted" style="text-align:center;padding:var(--s-2)">No se pudo calcular precio (revisá medidas).</div>'}
