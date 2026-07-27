@@ -6493,23 +6493,29 @@ function showPasswordPrompt(userName) {
   return new Promise(resolve => {
     const bg = document.createElement('div');
     bg.className = 'modal-bg';
+    // El input + botones van DENTRO de un <form>: así el botón "Go/Ir" del teclado
+    // de iOS dispara el submit (un input suelto no lo hace de forma confiable). Y
+    // los botones van junto al campo (no en .modal-actions al fondo) porque en
+    // mobile el modal es full-screen y el fondo queda tapado por el teclado / las
+    // barras del 100vh de Safari — ahí no se veían.
     bg.innerHTML = `
       <div class="modal modal--login">
         <div class="modal-h"><h3>Iniciar sesión</h3></div>
         <div class="modal-body">
-          <label class="nc-field">
-            <span class="nc-label">Contraseña de ${escapeHtml(userName || 'usuario')}</span>
-            <input type="password" class="nc-input" autocomplete="current-password" placeholder="••••••••">
-          </label>
-        </div>
-        <div class="modal-actions">
-          <button class="btn btn-ghost modal-cancel">Cancelar</button>
-          <button class="btn btn-cyan modal-confirm">Entrar</button>
+          <form class="login-form" novalidate>
+            <label class="nc-field">
+              <span class="nc-label">Contraseña de ${escapeHtml(userName || 'usuario')}</span>
+              <input type="password" class="nc-input" autocomplete="current-password" placeholder="••••••••" enterkeyhint="go">
+            </label>
+            <button type="submit" class="btn btn-cyan modal-confirm" style="width:100%;margin-top:16px">Entrar</button>
+            <button type="button" class="btn btn-ghost modal-cancel" style="width:100%;margin-top:8px">Cancelar</button>
+          </form>
         </div>
       </div>`;
     document.body.appendChild(bg);
     void bg.offsetWidth; bg.classList.add('open'); requestAnimationFrame(() => bg.classList.add('open'));
     const input = bg.querySelector('input');
+    const form = bg.querySelector('form');
     const finish = (val) => {
       bg.classList.remove('open');
       setTimeout(() => bg.remove(), 150);
@@ -6518,9 +6524,9 @@ function showPasswordPrompt(userName) {
     };
     function onKey(e) {
       if (e.key === 'Escape') finish(null);
-      else if (e.key === 'Enter') { e.preventDefault(); finish(input.value || null); }
     }
-    bg.querySelector('.modal-confirm').onclick = () => finish(input.value || null);
+    // submit cubre: Enter en el input, botón "Go/Ir" del teclado iOS y click en "Entrar".
+    form.addEventListener('submit', e => { e.preventDefault(); finish(input.value || null); });
     bg.querySelector('.modal-cancel').onclick = () => finish(null);
     bg.addEventListener('click', e => { if (e.target === bg) finish(null); });
     document.addEventListener('keydown', onKey);
