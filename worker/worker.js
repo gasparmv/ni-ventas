@@ -5341,7 +5341,7 @@ async function analyticsPrecotizFunnel(env, url) {
 // un lead destildado a mano NO se re-etiqueta (evita falsas oportunidades repetidas).
 const SIN_COTIZAR_LABEL_NAME = '💰 Sin cotizar';
 const SIN_COTIZAR_LABEL_COLOR = '#22c55e';
-const _SC_QUOTE_SQL = "(substr(body,1,26)='Te comparto el presupuesto' OR substr(body,1,26)='Te comparto la información' OR substr(body,1,34)='[plantilla: presupuesto_detallado]' OR substr(body,1,33)='[plantilla: presupuesto_corporea]')";
+const _SC_QUOTE_SQL = "(substr(body,1,26)='Te comparto el presupuesto' OR substr(body,1,26)='Te comparto la información' OR substr(body,1,34)='[plantilla: presupuesto_detallado]' OR substr(body,1,33)='[plantilla: presupuesto_corporea]' OR substr(body,1,38)='[plantilla: presupuesto_detallado_img]' OR substr(body,1,37)='[plantilla: presupuesto_corporea_img]')";
 async function syncSinCotizar(env, opts = {}) {
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS sin_cotizar (phone TEXT PRIMARY KEY, name TEXT, canal TEXT, quotable_since TEXT, created_at TEXT, quoted_at TEXT, escalated_at TEXT)").run(); } catch (_) {}
   try { await env.DB.prepare("ALTER TABLE sin_cotizar ADD COLUMN escalated_at TEXT").run(); } catch (_) {}
