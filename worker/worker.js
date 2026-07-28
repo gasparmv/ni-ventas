@@ -8822,9 +8822,11 @@ export default {
         // Guardar en wa_messages para que aparezca en el chat
         try {
           const previewBody = `[plantilla: ${name}]${Array.isArray(params) && params.length ? ' ' + params.join(', ') : ''}`;
+          // Trazabilidad: marcamos el vendedor que la envió (presupuesto por plantilla / ventana cerrada).
+          const senderSlug = await resolveComercial(env, { sessionUser: session.user, phone: num || String(to).replace(/\D/g, '') });
           await env.DB.prepare(
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-          ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, '', 'template', previewBody, '', '', 'sent').run();
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, senderSlug, 'template', previewBody, '', '', 'sent').run();
         } catch (_) {}
         return json({ id: r.id });
       }
@@ -10445,11 +10447,14 @@ export default {
 
         const CAPTION_MAX = 1024;
         const nowIso = () => new Date().toISOString();
+        // Trazabilidad: marcamos QUIÉN mandó el presupuesto (el vendedor logueado: 'joaco'/'nadia')
+        // en sender_name del mensaje saliente, para poder rastrear después de qué vendedor salió.
+        const senderSlug = await resolveComercial(env, { sessionUser: session.user, phone: num });
         const saveMsg = async (wamid, type, bodyTxt, mediaKey) => {
           try {
             await env.DB.prepare(
               'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-            ).bind(nowIso(), wamid || '', 'outbound', num, '', type, bodyTxt, mediaKey || '', '', 'sent').run();
+            ).bind(nowIso(), wamid || '', 'outbound', num, senderSlug, type, bodyTxt, mediaKey || '', '', 'sent').run();
           } catch (_) {}
         };
 
@@ -11573,8 +11578,12 @@ export default {
       //   - first_render_key + render_count (renders del diseñador)
       if (request.method === 'GET' && path === '/admin/briefs') {
         const estado = url.searchParams.get('estado');
-        const comercialId = url.searchParams.get('comercial_id');
+        let comercialId = url.searchParams.get('comercial_id');
         const disenadorId = url.searchParams.get('disenador_id');
+        // Enforcement por rol: un COMERCIAL (Joaco/Nadia) SOLO ve SUS propios briefs — no puede
+        // ver los del otro ni tocando la API a mano. Admin (Gaspar) y diseñador (Emma) ven TODOS.
+        const _briefRole = await getSessionRole(env, session.user);
+        if (_briefRole === 'comercial') comercialId = await resolveComercial(env, { sessionUser: session.user });
         const limit = Math.min(parseInt(url.searchParams.get('limit') || '500'), 2000);
         const where = [];
         const args = [];

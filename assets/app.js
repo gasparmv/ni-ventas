@@ -13351,6 +13351,16 @@ function renderBriefCard(b) {
           </div>
           <div style="display:flex;gap:3px;flex-shrink:0">
             ${(() => {
+              // Badge del VENDEDOR (de quién es el brief): SOLO lo ven Emma (diseñador) y Gaspar
+              // (admin) — así Emma sabe a quién le cotiza. Joaco/Nadia ven solo los suyos, no lo necesitan.
+              const _r = getUserRole();
+              if (_r !== 'admin' && _r !== 'disenador') return '';
+              const _c = String(b.comercial_id || '').toLowerCase();
+              const _nom = _c === 'nadia' ? 'Nadia' : (_c === 'joaco' ? 'Joaquín' : (_c || '—'));
+              const _col = _c === 'nadia' ? '#c084fc' : '#8FD4DE';
+              return `<span title="Vendedor: ${escapeHtml(_nom)}" style="background:${_col}22;color:${_col};font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600">${escapeHtml(_nom)}</span>`;
+            })()}
+            ${(() => {
               // Chip de origen: 📱 (WA, con tel) o 📷 (IG). Ayuda a Joaco a
               // identificar de un vistazo si el brief puede enviarse por API.
               const o = String(b.origen_lead || '').toLowerCase();
