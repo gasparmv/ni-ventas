@@ -13341,7 +13341,7 @@ function renderBriefCard(b) {
   const borderColor = colgado ? 'rgba(255,167,38,.45)' : sinPresupuesto ? 'rgba(255,167,38,.35)' : 'var(--border)';
   const canDelete = canCreateBriefs();  // mismo gate: comercial/admin
   return `
-    <div class="brief-card" data-brief-id="${b.id}"
+    <div class="brief-card" data-brief-id="${b.id}" data-sig="${briefCardSig(b)}"
          style="background:var(--ink-100);border:1px solid ${generando ? 'var(--accent-cyan,#8FD4DE)' : borderColor};border-radius:var(--r-sm);overflow:hidden;margin-bottom:var(--s-2);cursor:pointer;transition:border-color .15s;position:relative">
       ${generando ? `<div style="position:absolute;top:6px;left:6px;background:rgba(143,212,222,.92);color:#000;font-size:9px;font-weight:700;padding:3px 7px;border-radius:10px;z-index:3;animation:nv-pulse 1.4s ease-in-out infinite">✨ Generando IA…</div>` : ''}
       ${canDelete ? `<button class="brief-card-delete" data-brief-delete="${b.id}" title="Eliminar brief" aria-label="Eliminar"
@@ -15823,10 +15823,117 @@ function briefsSignature() {
     .join('|');
 }
 
+// ===== Bindeo de las tarjetas del kanban (abrir / borrar / urgente) =====
+// Extraído para reusarlo desde el refresh incremental sin re-correr TODO bindCotizacion.
+// Todos los handlers son `.onclick` (property) → idempotentes, re-llamar no duplica.
+function bindBriefCards() {
+  document.querySelectorAll('.brief-card').forEach(el => {
+    el.onclick = () => openBriefDrawer(parseInt(el.dataset.briefId, 10));
+  });
+  document.querySelectorAll('[data-brief-delete]').forEach(btn => {
+    btn.onclick = (ev) => { ev.stopPropagation(); handleBriefDelete(parseInt(btn.dataset.briefDelete, 10), true); };
+  });
+  document.querySelectorAll('[data-brief-urgente]').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const id = parseInt(btn.dataset.briefUrgente, 10);
+      const b = STATE.briefs.find(x => x.id === id);
+      if (!b) return;
+      const prev = b.urgente ? 1 : 0;
+      b.urgente = prev ? 0 : 1;
+      if (!refreshBriefBoardIncremental()) render();
+      try { await saveBrief({ id, urgente: b.urgente }); }
+      catch (e) { b.urgente = prev; if (!refreshBriefBoardIncremental()) render(); toast('No se pudo marcar urgente'); }
+    };
+  });
+}
+
+// ===== Refresh INCREMENTAL del kanban (evita el flash de rebuildear todo) =====
+// En vez de reemplazar #main entero (que destruye las ~500 tarjetas + sus imágenes →
+// parpadeo + pierde scroll), reconcilia SOLO los .brief-card dentro de cada .brief-col-list
+// por brief-id. Compara una FIRMA por-card que EXCLUYE relativeTime (para no reemplazar cada
+// tarjeta cada minuto): solo reemplaza las que cambiaron, agrega las nuevas, saca las que se
+// fueron, respeta el orden (urgentes arriba en "A cotizar") y preserva el scroll de cada
+// columna. Devuelve false si el tablero no está montado → el caller cae a render() completo.
+// Firma HASH de una tarjeta: incluye TODO lo que pinta renderBriefCard (para no perder cambios
+// de urgente/vendedor/thumb/etc), MENOS relativeTime (que cambia solo con el tiempo → si no,
+// reemplazaría cada tarjeta cada minuto). Se guarda como data-sig en la propia card (auto-
+// consistente: la primera reconciliación tras un render() completo NO reemplaza nada).
+function briefCardSig(b) {
+  const colg = isBriefColgado(b) ? 1 : 0;
+  const gen = STATE.briefsGenerando[b.id] ? 1 : 0;
+  const pm = b.estado === 'enviado' ? (findPresupuestoMatch(b) ? 1 : 0) : -1;
+  const s = [b.id, b.estado, b.urgente ? 1 : 0, b.modificar ? 1 : 0, b.chat_count || 0, b.render_count || 0,
+    b.first_render_key || '', b.first_chat_key || '', b.comercial_id || '', b.origen_lead || '',
+    b.cliente_nombre || '', b.medidas_libre || '', b.alto_cm || '', b.ancho_cm || '',
+    b.intentos_followup || 0, b.tipo || '', b.cliente_wa_id || '', colg, gen, pm].join('');
+  let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return String(h >>> 0);
+}
+function _briefHtmlToCard(html) {
+  const t = document.createElement('template');
+  t.innerHTML = String(html).trim();
+  return t.content.firstElementChild;
+}
+function refreshBriefBoardIncremental() {
+  const kanban = document.querySelector('.brief-kanban');
+  if (!kanban) return false;
+  for (const col of BRIEF_COLUMNAS) {
+    const colEl = kanban.querySelector(`.brief-col[data-col="${col.id}"]`);
+    if (!colEl) return false;
+    const listEl = colEl.querySelector('.brief-col-list');
+    if (!listEl) return false;
+    let briefs = STATE.briefs.filter(b => briefBelongsToColumn(b, col.id) && briefMatchesProducto(b));
+    if (col.id === 'nuevo') briefs = briefs.slice().sort((a, b) => (b.urgente ? 1 : 0) - (a.urgente ? 1 : 0));
+    const cntEl = colEl.querySelector('[data-col-count]');
+    if (cntEl) { cntEl.dataset.total = String(briefs.length); if (!briefSearch) cntEl.textContent = String(briefs.length); }
+    if (!briefs.length) {
+      // Columna vacía → hint (igual que renderBriefColumn). Solo si todavía hay cards o está vacía del todo.
+      if (listEl.querySelector('.brief-card') || !listEl.firstElementChild) {
+        const drop = col.id === 'nuevo' && canCreateBriefs();
+        listEl.innerHTML = drop
+          ? '<div style="font-size:11px;color:var(--accent-cyan);text-align:center;padding:var(--s-4);line-height:1.5;opacity:.7">📋 Pegá Ctrl+V<br>o arrastrá una imagen<br>acá adentro</div>'
+          : '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-4)">—</div>';
+      }
+      continue;
+    }
+    const scrollTop = listEl.scrollTop;
+    const existing = new Map();
+    listEl.querySelectorAll(':scope > .brief-card').forEach(n => existing.set(String(n.dataset.briefId), n));
+    const desired = new Set();
+    let anchor = null;
+    for (const b of briefs) {
+      const id = String(b.id);
+      desired.add(id);
+      const sig = briefCardSig(b);
+      let node = existing.get(id);
+      if (node) {
+        // Reemplazar SOLO si la firma (guardada en data-sig al renderizar) cambió.
+        if (node.dataset.sig !== sig) { const nn = _briefHtmlToCard(renderBriefCard(b)); listEl.replaceChild(nn, node); node = nn; }
+      } else {
+        node = _briefHtmlToCard(renderBriefCard(b));
+      }
+      const expected = anchor ? anchor.nextElementSibling : listEl.firstElementChild;
+      if (node !== expected) listEl.insertBefore(node, anchor ? anchor.nextElementSibling : listEl.firstElementChild);
+      anchor = node;
+    }
+    // Sacar cards que ya no van + cualquier hint/nodo suelto que quedó de antes.
+    Array.from(listEl.children).forEach(n => {
+      if (n.classList && n.classList.contains('brief-card')) {
+        if (!desired.has(String(n.dataset.briefId))) n.remove();
+      } else { n.remove(); }
+    });
+    listEl.scrollTop = scrollTop;
+  }
+  bindBriefCards();                       // re-bindea las cards nuevas/reemplazadas (idempotente)
+  if (briefSearch) filterBriefBoard();    // re-aplica el filtro (setea display:none en las que no matchean)
+  return true;
+}
+
 // Polling: refresca los briefs cada 30s mientras se está en la vista Cotización.
-// (Era 10s; se subió a 30s como palliative del parpadeo: con mucha actividad + muchos
-// briefs, el re-render del tablero entero flasheaba. Fix de fondo pendiente: render
-// incremental de la tarjeta que cambió en vez de rebuildear todo.)
+// Ahora con REFRESH INCREMENTAL (refreshBriefBoardIncremental) en vez de render() completo:
+// reconcilia solo las tarjetas que cambiaron → sin parpadeo, sin perder scroll. Cae a render()
+// si el tablero no está montado. Se sube el intervalo a 30s igual (menos carga del endpoint lento).
 // Re-renderiza solo si (a) la lista cambió y (b) el usuario no está en medio de
 // algo (drawer/popup/lightbox abierto), para no pisarle la interacción.
 function startBriefsPolling() {
@@ -15842,7 +15949,7 @@ function startBriefsPolling() {
       // crear brief abierto (quickModalOpen). Sin esto, cuando Emma manda algo a
       // "Listos" el poll re-renderizaba y le borraba a Joaco lo que estaba cargando.
       const busy = STATE.briefSelected || STATE.briefDraft || STATE.briefCotPopupOpen || STATE.imgLightboxUrl || STATE.quickModalOpen;
-      if (!busy) render();
+      if (!busy) { if (!refreshBriefBoardIncremental()) render(); }
     }
   }, 30000);
 }
@@ -15918,33 +16025,9 @@ function bindCotizacion() {
   // Re-aplicar el filtro tras este render (el polling de briefs re-renderiza el board).
   if (briefSearch) filterBriefBoard();
 
-  // Tarjetas → abrir drawer.
-  document.querySelectorAll('.brief-card').forEach(el => {
-    el.onclick = () => openBriefDrawer(parseInt(el.dataset.briefId, 10));
-  });
-
-  // Cruz "✕" para borrar desde la card (intercepta el click del card).
-  document.querySelectorAll('[data-brief-delete]').forEach(btn => {
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      handleBriefDelete(parseInt(btn.dataset.briefDelete, 10), true);
-    };
-  });
-
-  // 🔥 Toggle urgente desde la card (Joaco/Gaspar). Optimista; revierte si falla.
-  document.querySelectorAll('[data-brief-urgente]').forEach(btn => {
-    btn.onclick = async (ev) => {
-      ev.stopPropagation();
-      const id = parseInt(btn.dataset.briefUrgente, 10);
-      const b = STATE.briefs.find(x => x.id === id);
-      if (!b) return;
-      const prev = b.urgente ? 1 : 0;
-      b.urgente = prev ? 0 : 1;
-      render();
-      try { await saveBrief({ id, urgente: b.urgente }); }
-      catch (e) { b.urgente = prev; render(); toast('No se pudo marcar urgente'); }
-    };
-  });
+  // Tarjetas: abrir drawer / borrar / toggle urgente. Extraído a bindBriefCards() para
+  // reusarlo desde el refresh incremental del board (mismos handlers, idempotentes).
+  bindBriefCards();
 
   // ===== Drop + paste sobre columna "A cotizar" (Joaco/admin) =====
   if (canCreateBriefs()) {
