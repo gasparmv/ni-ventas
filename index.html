@@ -55,7 +55,7 @@
 // Permite que la PWA cachee assets y siga abriendo sin internet.
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/ni-ventas/sw.js', { scope: '/ni-ventas/' })
+    navigator.serviceWorker.register('sw.js', { scope: './' })
       .then(reg => console.log('SW registered', reg.scope))
       .catch(err => console.log('SW failed', err));
   });

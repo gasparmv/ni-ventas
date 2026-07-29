@@ -5,18 +5,24 @@
 
 // IMPORTANTE: bumpear CACHE_NAME cada vez que cambia app.js o app.css —
 // el activate borra los caches viejos y fuerza re-descarga del bundle.
-const CACHE_NAME = 'neon-ni-v183';
+const CACHE_NAME = 'neon-ni-v184';
+// Rutas RELATIVAS (se resuelven contra la ubicación del SW) para que la app
+// funcione IGUAL en la subruta vieja (/ni-ventas/) y en la raíz del dominio nuevo
+// (neoninfinitosoftware.com) sin tocar nada. Sin esto, atar a /ni-ventas/ rompía
+// la raíz y atar a / rompía la subruta durante la migración.
 const STATIC_ASSETS = [
-  '/ni-ventas/',
-  '/ni-ventas/index.html',
-  '/ni-ventas/manifest.webmanifest',
-  '/ni-ventas/assets/logo.svg',
-  '/ni-ventas/assets/brand.css'
+  './',
+  './index.html',
+  './manifest.webmanifest',
+  './assets/logo.svg',
+  './assets/brand.css'
 ];
 // app.js y app.css se sirven NETWORK-FIRST (no precacheamos) porque cambian
 // seguido. Antes con stale-while-revalidate el usuario veía la versión vieja
 // hasta el segundo refresh — problema serio cuando hay un bugfix urgente.
-const NETWORK_FIRST_ASSETS = ['/ni-ventas/assets/app.js', '/ni-ventas/assets/app.css'];
+// Sufijos: se matchean con endsWith para no atarlos a la base /ni-ventas/ (así
+// valen tanto /ni-ventas/assets/app.js como /assets/app.js en el dominio nuevo).
+const NETWORK_FIRST_ASSETS = ['/assets/app.js', '/assets/app.css'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -54,7 +60,7 @@ self.addEventListener('fetch', (event) => {
   // app.js y app.css → network-first SIEMPRE. Si hay red, traer fresco.
   // Solo caer al cache si la red falla (modo offline). Así un bugfix se
   // ve al primer refresh, no al segundo.
-  if (url.origin === location.origin && NETWORK_FIRST_ASSETS.some(p => url.pathname === p || url.pathname.startsWith(p))) {
+  if (url.origin === location.origin && NETWORK_FIRST_ASSETS.some(p => url.pathname.endsWith(p))) {
     event.respondWith(
       // cache: 'reload' fuerza ir a la red ignorando el HTTP cache del navegador.
       // Sin esto, GitHub Pages servía la versión vieja de app.js hasta ~10 min

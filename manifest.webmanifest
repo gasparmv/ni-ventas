@@ -2,8 +2,8 @@
   "name": "NEON Infinito · CRM",
   "short_name": "NEON",
   "description": "CRM y dashboard de Neon Infinito — pedidos, presupuestos, follow-ups y chat WhatsApp.",
-  "start_url": "/ni-ventas/",
-  "scope": "/ni-ventas/",
+  "start_url": ".",
+  "scope": ".",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#0A0A0F",
@@ -40,19 +40,19 @@
     {
       "name": "Chat WhatsApp",
       "short_name": "Chat",
-      "url": "/ni-ventas/#chat",
+      "url": "./#chat",
       "description": "Abrir chat de WhatsApp del CRM"
     },
     {
       "name": "Dashboard",
       "short_name": "Dashboard",
-      "url": "/ni-ventas/#dashboard",
+      "url": "./#dashboard",
       "description": "Ver dashboard de ventas"
     },
     {
       "name": "Pedidos",
       "short_name": "Pedidos",
-      "url": "/ni-ventas/#pedidos",
+      "url": "./#pedidos",
       "description": "Listado de pedidos"
     }
   ]
