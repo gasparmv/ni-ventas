@@ -1369,7 +1369,10 @@ async function precotizOn(env) { return (await kvGet(env, 'precotiz_on', '0')) =
 // puede entender (ej: un cliente que escribe por un pedido ya existente desde otro número).
 async function precotizFrozen(env, phone) { try { return (await kvGet(env, 'precotiz_frozen:' + phone, '')) === '1'; } catch (_) { return false; } }
 // Modo: 'auto' (auto-envío) | 'draft' (Gaspar aprueba los mensajitos). Default draft.
-async function precotizModo(env) { return (await kvGet(env, 'precotiz_modo', 'draft')) === 'auto' ? 'auto' : 'draft'; }
+// El modo 'draft' (borradores para aprobar) se ELIMINÓ a pedido de Gaspar (29-jul):
+// el bot SIEMPRE auto-envía. Se dejó de usar porque un glitch de lectura del kv
+// dejaba leads colgados esperando una aprobación que ya nadie da.
+async function precotizModo(env) { return 'auto'; }
 
 // Selección determinística por número, muestra CONFIGURABLE (kv precotiz_sample %):
 // un mismo cliente cae siempre del mismo lado (no random por mensaje). Hash sobre los
@@ -1801,13 +1804,14 @@ async function processPrecotizPilot(env) {
         continue;
       }
     } catch (_) {}
+    // Modo 'draft' eliminado (29-jul): el bot siempre auto-envía. Si quedó un
+    // pending_draft viejo de antes, lo ignoramos y re-procesamos en auto (así no
+    // queda ningún lead colgado esperando aprobación). Si no hay nada nuevo desde
+    // el último proceso, no re-procesamos.
     if (lead.pending_draft) {
-      // Hay un borrador esperando tu OK. Si el cliente NO mandó nada nuevo desde
-      // que se generó, lo dejamos quieto. Si mandó algo después (ej. las medidas),
-      // el borrador quedó viejo → seguimos y lo RE-GENERAMOS con la info al día.
-      if (lead.draft_ts && lastInTs <= lead.draft_ts) continue;
+      try { await env.DB.prepare("UPDATE precotiz_pilot SET pending_draft=NULL, draft_ts=NULL, last_processed_ts=NULL WHERE phone=?").bind(lead.phone).run(); } catch (_) {}
     } else if (lead.last_processed_ts && lastInTs <= lead.last_processed_ts) {
-      continue; // sin draft y sin nada nuevo
+      continue; // sin nada nuevo
     }
 
     // Reserva ATÓMICA antes de procesar. Los dos crons (*/1 y */5) disparan juntos en los minutos
@@ -2136,10 +2140,16 @@ async function buildReporteDiario(env) {
     ).first();
     out.total = (r && r.total) || 0; out.cursos = (r && r.cursos) || 0; out.carteles = out.total - out.cursos;
   } catch (_) {}
-  // 2) Precotizaciones completadas hoy (EVENTO por completed_at: cuenta aunque Joaco ya haya cotizado).
+  // 2) Pasaron la precotización hoy = leads del piloto que (a) completaron el
+  //    relevamiento (completed_at hoy) O (b) Joaco cotizó a mano igual aunque
+  //    faltara algún dato (int/ext), detectado por un brief 'enviado' hoy de un
+  //    teléfono que está en el piloto. A pedido de Gaspar (29-jul): si se cotizó,
+  //    cuenta como que pasó la precotización. DISTINCT para no duplicar.
   try {
     const r = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM precotiz_pilot WHERE completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ${REPORTE_DIA_DESDE} AND completed_at < ${REPORTE_DIA_HASTA}`
+      `SELECT COUNT(DISTINCT p.phone) AS n FROM precotiz_pilot p
+       WHERE (p.completed_at IS NOT NULL AND p.completed_at != '' AND p.completed_at >= ${REPORTE_DIA_DESDE} AND p.completed_at < ${REPORTE_DIA_HASTA})
+          OR p.phone IN (SELECT cliente_wa_id FROM briefs WHERE estado='enviado' AND enviado_at >= ${REPORTE_DIA_DESDE} AND enviado_at < ${REPORTE_DIA_HASTA})`
     ).first();
     out.precotiz = (r && r.n) || 0;
   } catch (_) {}
