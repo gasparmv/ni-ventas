@@ -3140,7 +3140,7 @@ async function processPendingMedia(env) {
       "WHERE msg_type IN ('image','video','audio','document','sticker') " +
       "  AND media_url GLOB '[0-9]*' AND length(media_url) > 8 " +
       "  AND ts >= ? " +
-      "ORDER BY id DESC LIMIT 60"
+      "ORDER BY id DESC LIMIT 150"
     ).bind(cutoff).all();
     for (const row of (rs.results || [])) {
       try {
@@ -4916,11 +4916,14 @@ async function downloadMedia(env, mediaId) {
 // Reintenta downloadMedia ante fallo transitorio. Causa #1 de imágenes/audios
 // vacíos: el webhook llega ANTES de que Meta/360dialog tenga el media listo para
 // descargar (race condition). El primer intento es inmediato; si falla, espera y
-// reintenta. Solo agrega latencia en el ~14% de casos que fallan a la primera;
-// los que andan al toque no se demoran. Corre dentro de ctx.waitUntil (no bloquea
-// la respuesta al webhook), así que los segundos de espera son seguros.
-async function downloadMediaWithRetry(env, mediaId, attempts = 3) {
-  const delays = [0, 1500, 4000];
+// reintenta. Solo agrega latencia en los casos que fallan a la primera; los que
+// andan al toque no se demoran. Corre dentro de ctx.waitUntil (no bloquea la
+// respuesta al webhook), así que los segundos de espera son seguros.
+// Backoff ampliado a ~12s (jul-2026): con el número/WABA nuevo el media tarda
+// más en estar disponible para descargar en 360dialog; con solo ~5s quedaban
+// demasiadas fotos/audios pendientes hasta que el cron (1 min) los recuperaba.
+async function downloadMediaWithRetry(env, mediaId, attempts = 4) {
+  const delays = [0, 2000, 4000, 6000];
   for (let i = 0; i < attempts; i++) {
     if (delays[i]) await new Promise(r => setTimeout(r, delays[i]));
     try {

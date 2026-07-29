@@ -7884,7 +7884,20 @@ async function loadChatMessages(phone, opts) {
     } else {
       // Incremental (polling): deltas desde el último ts conocido.
       const lastTs = chatState.messages.length ? chatState.messages[chatState.messages.length - 1].ts : '';
-      const sinceTs = lastTs ? new Date(new Date(lastTs).getTime() - 60000).toISOString() : '';
+      let sinceTs = lastTs ? new Date(new Date(lastTs).getTime() - 60000).toISOString() : '';
+      // Si hay media todavía "crudo" en la vista (media_id sin bajar a R2: el webhook
+      // no lo bajó al toque y lo está recuperando el retry/cron del backend), retroceder
+      // el 'from' hasta el crudo más viejo (de las últimas 6h) para re-traerlo en cada
+      // poll. Cuando el backend termina de bajarlo, el merge de abajo actualiza su
+      // media_url a wa/... y la foto/audio aparece SOLA, sin tener que refrescar la página.
+      const isRawMedia = (m) => (m.msg_type === 'image' || m.msg_type === 'audio' || m.msg_type === 'video' || m.msg_type === 'sticker' || m.msg_type === 'document') && m.media_url && !/^(wa|ig|promo|briefs)\//.test(String(m.media_url));
+      const limiteReciente = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+      const crudos = chatState.messages.filter(m => isRawMedia(m) && m.ts >= limiteReciente);
+      if (crudos.length) {
+        const oldest = crudos.reduce((min, m) => (m.ts < min ? m.ts : min), crudos[0].ts);
+        const oldestSince = new Date(new Date(oldest).getTime() - 1).toISOString();
+        if (!sinceTs || oldestSince < sinceTs) sinceTs = oldestSince;
+      }
       url += '&limit=500' + (sinceTs ? '&from=' + encodeURIComponent(sinceTs) : '');
     }
     const r = await fetch(url, { headers: authHeaders() });
