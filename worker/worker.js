@@ -1851,7 +1851,10 @@ async function processPrecotizPilot(env) {
     // queda ningún lead colgado esperando aprobación). Si no hay nada nuevo desde
     // el último proceso, no re-procesamos.
     if (lead.pending_draft) {
-      try { await env.DB.prepare("UPDATE precotiz_pilot SET pending_draft=NULL, draft_ts=NULL, last_processed_ts=NULL WHERE phone=?").bind(lead.phone).run(); } catch (_) {}
+      // OJO: pending_draft/draft_ts son NOT NULL → limpiar con '' (no NULL, que
+      // tira SQLITE_CONSTRAINT_NOTNULL y el UPDATE falla). last_processed_ts='' hace
+      // que el claim de abajo lo re-tome ('' < cualquier ts) y le responda en auto.
+      try { await env.DB.prepare("UPDATE precotiz_pilot SET pending_draft='', draft_ts='', last_processed_ts='' WHERE phone=?").bind(lead.phone).run(); } catch (_) {}
     } else if (lead.last_processed_ts && lastInTs <= lead.last_processed_ts) {
       continue; // sin nada nuevo
     }
