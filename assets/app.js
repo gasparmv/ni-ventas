@@ -997,12 +997,15 @@ function tokenBelongsTo(name) {
 
 async function setUser(name) {
   // SEGURIDAD: el token está atado a un usuario. Si el token actual NO pertenece
-  // al usuario que se quiere activar, lo descartamos y re-autenticamos. Esto evita
-  // que un token de bajo privilegio (Joaquín/Diseñador) se reutilice para pasar
-  // como admin (Gaspar).
+  // al usuario que se quiere activar, hay que re-autenticar. IMPORTANTE: NO
+  // descartamos el token viejo ANTES de loguear — si el login se cancela o falla
+  // (no te acordás la contraseña, cerrás el prompt), el usuario debe quedar como
+  // estaba, con su sesión intacta, NO deslogueado. loginPrompt, al tener éxito,
+  // reemplaza el token de forma atómica (saveToken con owner=name). Si falla,
+  // volvemos sin tocar nada: el token viejo sigue siendo del usuario viejo y
+  // STATE.user tampoco se actualiza → no hay escalada de privilegios.
   if (!tokenBelongsTo(name)) {
-    saveToken(null);
-    // Todos los usuarios requieren contraseña ahora (Gaspar, Joaquín, Diseñador).
+    // Todos los usuarios requieren contraseña (Gaspar, Joaquín, Nadia, Diseñador, Abril).
     const ok = await loginPrompt(name);
     if (!ok) return;
   }
