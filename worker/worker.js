@@ -2109,8 +2109,12 @@ const REPORTE_DIA_DESDE = "(date('now','-3 hours') || 'T03:00:00Z')";
 const REPORTE_DIA_HASTA = "(date('now','-3 hours','+1 day') || 'T03:00:00Z')";
 async function buildReporteDiario(env) {
   const out = { total: 0, carteles: 0, cursos: 0, precotiz: 0, presupTotal: 0, presupJoaco: 0, presupNadia: 0, chatsJoaco: 0, chatsNadia: 0 };
-  // 1) Conversaciones nuevas (primer inbound hoy, WhatsApp) + split carteles/cursos.
-  //    LEFT JOIN + inbox: garantiza total = carteles + cursos (los sin fila caen en carteles).
+  // 1) Conversaciones nuevas (inbound hoy, WhatsApp) + split carteles/cursos.
+  //    Cursos = inbox='cursos' O el chat tiene señales del funnel de cursos/evento en
+  //    algún inbound (los leads del evento/minicurso NO se marcan inbox='cursos' — entran
+  //    por el anuncio con "quiero el regalo"/"unirme al grupo"/etc. y antes caían en
+  //    carteles, inflando el denominador y tirando abajo el ratio de cotización).
+  //    carteles = total - cursos (garantiza total = carteles + cursos).
   try {
     const r = await env.DB.prepare(
       `WITH fi AS (
@@ -2120,11 +2124,17 @@ async function buildReporteDiario(env) {
          GROUP BY phone
        )
        SELECT COUNT(*) AS total,
-              SUM(CASE WHEN s.inbox='cursos' THEN 1 ELSE 0 END) AS cursos,
-              SUM(CASE WHEN s.inbox IS NULL OR s.inbox!='cursos' THEN 1 ELSE 0 END) AS carteles
+              SUM(CASE WHEN s.inbox='cursos' OR EXISTS(
+                    SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction='inbound' AND (
+                      lower(m.body) LIKE '%el regalo%' OR lower(m.body) LIKE '%al grupo%'
+                      OR lower(m.body) LIKE '%minicurso%' OR lower(m.body) LIKE '%registr%'
+                      OR lower(m.body) LIKE '%la clase%' OR lower(m.body) LIKE '%las clases%'
+                      OR lower(m.body) LIKE '%formaci%' OR lower(m.body) LIKE '%evento gratu%'
+                      OR lower(m.body) LIKE '%4 y 6%' OR lower(m.body) LIKE '%agosto%')
+                  ) THEN 1 ELSE 0 END) AS cursos
        FROM fi LEFT JOIN wa_chats_summary s ON s.phone = fi.phone`
     ).first();
-    out.total = (r && r.total) || 0; out.cursos = (r && r.cursos) || 0; out.carteles = (r && r.carteles) || 0;
+    out.total = (r && r.total) || 0; out.cursos = (r && r.cursos) || 0; out.carteles = out.total - out.cursos;
   } catch (_) {}
   // 2) Precotizaciones completadas hoy (EVENTO por completed_at: cuenta aunque Joaco ya haya cotizado).
   try {
