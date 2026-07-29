@@ -14,9 +14,11 @@ let trackerUrl = null;
 let lastSeenTs = '';
 let pollHandle = null;
 let inFlight = false;
+let backoffUntil = 0;
 
 async function poll() {
   if (!token || !trackerUrl || inFlight) return;
+  if (Date.now() < backoffUntil) return;  // backoff: D1 saturada -> saltar el tick
   inFlight = true;
   try {
     let url = trackerUrl.replace(/\/$/, '') + '/admin/wa/messages?direction=inbound&limit=30';
@@ -24,7 +26,13 @@ async function poll() {
     const r = await fetch(url, {
       headers: { 'Authorization': 'Bearer ' + token }
     });
-    if (!r.ok) return;
+    if (!r.ok) {
+      // 503 (db_busy) o 5xx: la base está saturada. Backoff 20-40s (con jitter)
+      // para no sumar a la cascada de sobrecarga.
+      if (r.status >= 500) backoffUntil = Date.now() + 20000 + Math.floor(Math.random() * 20000);
+      return;
+    }
+    backoffUntil = 0;  // la base responde -> limpiar backoff
     const j = await r.json();
     const msgs = (j.messages || [])
       .filter(m => m.msg_type !== 'status')
@@ -47,7 +55,8 @@ async function poll() {
     }
     lastSeenTs = msgs[msgs.length - 1].ts || lastSeenTs;
   } catch (e) {
-    // silencioso: errores de red transientes no deben spamear console
+    // Error de red/timeout: backoff para no martillar (mismo criterio que el 5xx).
+    backoffUntil = Date.now() + 20000 + Math.floor(Math.random() * 20000);
   } finally {
     inFlight = false;
   }

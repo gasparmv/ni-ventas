@@ -1376,6 +1376,38 @@ async function fetchWithTimeout(url, opts, timeoutMs) {
   }
 }
 
+// ===== Backoff global de polling (anti-cascada de sobrecarga de D1) =====
+// Si el worker responde 503 (db_busy, típ. "D1 DB is overloaded") o un poll falla
+// por red, frenamos los POLLS de fondo 20-40s (con jitter, para no re-sincronizar
+// a todos los clientes) en vez de seguir martillando una D1 saturada -> corta la
+// cascada. Un wrapper fino de fetch OBSERVA las respuestas del tracker y marca el
+// flag; NO bloquea nada. Los timers de polling consultan pollBackoffActive() y se
+// saltan el tick; las acciones del usuario (abrir chat, enviar, refrescar) pasan
+// siempre, y una respuesta ok del tracker limpia el backoff.
+let _pollBackoffUntil = 0;
+function pollBackoffActive() { return Date.now() < _pollBackoffUntil; }
+function _notePollBusy() { _pollBackoffUntil = Date.now() + 20000 + Math.floor(Math.random() * 20000); }
+(function installPollBackoffProbe() {
+  if (typeof window === 'undefined' || !window.fetch || window.__niPollBackoff) return;
+  window.__niPollBackoff = true;
+  const _orig = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    let url = '';
+    try { url = typeof input === 'string' ? input : (input && input.url) || ''; } catch (_) {}
+    const isTracker = !!(CONFIG && CONFIG.trackerUrl) && url.indexOf(CONFIG.trackerUrl) === 0;
+    return _orig(input, init).then(res => {
+      if (isTracker) {
+        if (res.status === 503) _notePollBusy();
+        else if (res.ok) _pollBackoffUntil = 0;
+      }
+      return res;
+    }, err => {
+      if (isTracker) _notePollBusy();
+      throw err;
+    });
+  };
+})();
+
 async function fetchSheet(id, sheet) {
   const url = csvUrl(id, sheet);
   try {
@@ -2148,7 +2180,7 @@ function startSinCotizarWatch() {
     if (t.closest('[data-sc-dismiss]') || (t.matches && t.matches('[data-sc-bg]'))) { _sinCotizarAck(); render(); return; }
   });
   fetchSinCotizarStatus();
-  setInterval(fetchSinCotizarStatus, 75000);
+  setInterval(() => { if (!pollBackoffActive()) fetchSinCotizarStatus(); }, 75000);
 }
 function renderSinCotizarModal() {
   if (!_sinCotizarShouldShow()) return '';
@@ -11819,6 +11851,7 @@ function bindChat() {
     clearInterval(chatState.pollTimer);
     chatState.pollTimer = setInterval(() => {
       if (STATE.view !== 'chat') { clearInterval(chatState.pollTimer); return; }
+      if (pollBackoffActive()) return;  // D1 saturada: saltar el tick (el timer sigue)
       scheduleTick();
       const last = chatState._lastTickMs || 0;
       reschedulePolling(last > 3000 ? 8000 : 4000);
@@ -13082,6 +13115,7 @@ function startTeamChatPolling() {
     // en AMBAS vistas, no solo en cotizacion (si no, en corpóreas el chat de equipo
     // no recibía mensajes nuevos: badge sin actualizar, sin sonido).
     if (STATE.view !== 'cotizacion' && STATE.view !== 'corporeas') { stopTeamChatPolling(); return; }
+    if (pollBackoffActive()) return;  // D1 saturada: saltar el tick (el timer sigue)
     pollTeamChat();
   }, 8000);
 }
@@ -15944,6 +15978,7 @@ function startBriefsPolling() {
   STATE.briefsPollTimer = setInterval(async () => {
     if ((STATE.view !== 'cotizacion' && STATE.view !== 'corporeas') || !STATE.token) return;
     if (document.hidden) return;  // no pollear si la pestaña está oculta
+    if (pollBackoffActive()) return;  // D1 saturada: saltar el tick (el timer sigue)
     const before = briefsSignature();
     await fetchBriefs();
     const after = briefsSignature();
@@ -15969,6 +16004,7 @@ function startPedidosPolling() {
   STATE.pedidosPollTimer = setInterval(async () => {
     if (STATE.view !== 'pedidos' || !STATE.token) return;
     if (document.hidden) return;  // no pollear si la pestaña está oculta
+    if (pollBackoffActive()) return;  // D1 saturada: saltar el tick (el timer sigue)
     // No pisar al usuario mientras edita: modal "Cargar pedido", drawer abierto,
     // un input/select con foco (búsqueda o dropdown inline), o el lightbox.
     const ae = document.activeElement;
