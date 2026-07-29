@@ -15823,7 +15823,10 @@ function briefsSignature() {
     .join('|');
 }
 
-// Polling: refresca los briefs cada 10s mientras se está en la vista Cotización.
+// Polling: refresca los briefs cada 30s mientras se está en la vista Cotización.
+// (Era 10s; se subió a 30s como palliative del parpadeo: con mucha actividad + muchos
+// briefs, el re-render del tablero entero flasheaba. Fix de fondo pendiente: render
+// incremental de la tarjeta que cambió en vez de rebuildear todo.)
 // Re-renderiza solo si (a) la lista cambió y (b) el usuario no está en medio de
 // algo (drawer/popup/lightbox abierto), para no pisarle la interacción.
 function startBriefsPolling() {
@@ -15841,7 +15844,7 @@ function startBriefsPolling() {
       const busy = STATE.briefSelected || STATE.briefDraft || STATE.briefCotPopupOpen || STATE.imgLightboxUrl || STATE.quickModalOpen;
       if (!busy) render();
     }
-  }, 10000);
+  }, 30000);
 }
 
 // Auto-refresco del panel de Pedidos (igual que el de Cotización). Sin esto, un
