@@ -11433,11 +11433,33 @@ const handler = {
         // apertura del día (antes era 24h y se vencía cada noche). promo/ puede
         // re-subirse con la misma key → cache corto de 24h.
         const immutableMedia = key.startsWith('wa/') || key.startsWith('briefs/') || key.startsWith('ig/');
+        const cacheCtl = immutableMedia ? 'public, max-age=31536000, immutable' : 'public, max-age=86400';
+        const ctype = obj.httpMetadata?.contentType || 'application/octet-stream';
+        // Compresión al vuelo para el panel de cotización (?w=<ancho>): las capturas y
+        // fotos de referencia que sube Joaco pesan y el panel de Emma junta muchas → se
+        // traba. Con ?w se redimensionan+recomprimen. Los RENDER de IA se piden SIN ?w,
+        // así se sirven en calidad full. Cache con la key+query, no re-transforma.
+        const w = parseInt(url.searchParams.get('w') || '0', 10);
+        if (w >= 200 && w <= 2000 && env.IMAGES && /^image\/(jpe?g|png|webp)/i.test(ctype)) {
+          try {
+            const buf = await obj.arrayBuffer();
+            if (buf.byteLength > 60000) { // no vale la pena tocar las ya livianas
+              const res = await env.IMAGES.input(new Response(buf).body).transform({ width: w, fit: 'scale-down' }).output({ format: 'image/jpeg', quality: 76 });
+              const outBuf = await res.response().arrayBuffer();
+              return new Response(outBuf, { headers: { ...cors(), 'Content-Type': 'image/jpeg', 'Cache-Control': cacheCtl } });
+            }
+            return new Response(buf, { headers: { ...cors(), 'Content-Type': ctype, 'Cache-Control': cacheCtl } });
+          } catch (_) {
+            // el resize falló tras consumir el body → re-get para servir el original
+            try { const o2 = await env.MEDIA.get(key); if (o2) return new Response(o2.body, { headers: { ...cors(), 'Content-Type': ctype, 'Cache-Control': cacheCtl } }); } catch (_) {}
+            return json({ error: 'media error' }, 500);
+          }
+        }
         return new Response(obj.body, {
           headers: {
             ...cors(),
-            'Content-Type': obj.httpMetadata?.contentType || 'application/octet-stream',
-            'Cache-Control': immutableMedia ? 'public, max-age=31536000, immutable' : 'public, max-age=86400'
+            'Content-Type': ctype,
+            'Cache-Control': cacheCtl
           }
         });
       }

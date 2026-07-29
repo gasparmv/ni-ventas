@@ -13807,11 +13807,17 @@ function renderBriefImagesGridFor(tipo, isDraft, editable) {
   }
   const imgs = STATE.briefDetailImages.filter(x => (x.tipo || 'chat') === tipo);
   if (!imgs.length) return '';
+  // Los RENDER de IA se muestran en calidad FULL (sin ?w). Las capturas del chat /
+  // referencias se comprimen al vuelo (el worker redimensiona con ?w) porque el panel
+  // junta muchas y se pone pesado/lento para Emma. Miniatura chica, zoom mediano.
+  const isRender = tipo === 'render';
   return imgs.map(img => {
-    const url = `${CONFIG.trackerUrl}/admin/media/${encodeURIComponent(img.r2_key)}?token=${STATE.token}`;
+    const base = `${CONFIG.trackerUrl}/admin/media/${encodeURIComponent(img.r2_key)}?token=${STATE.token}`;
+    const thumbUrl = isRender ? base : base + '&w=560';
+    const zoomUrl = isRender ? base : base + '&w=1400';
     return `
       <div style="position:relative;width:100%;aspect-ratio:1;border-radius:4px;overflow:hidden;background:var(--ink-050)">
-        <img src="${url}" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" data-img-zoom="${escapeHtml(url)}">
+        <img src="${thumbUrl}" loading="lazy" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" data-img-zoom="${escapeHtml(zoomUrl)}">
         ${editable ? `<button type="button" data-img-remove="${img.id}" title="Eliminar"
                 style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;border:0;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">✕</button>` : ''}
       </div>
