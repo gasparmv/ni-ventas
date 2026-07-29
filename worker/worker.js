@@ -63,6 +63,24 @@ function noContent() {
 }
 function unauthorized(msg = 'unauthorized') { return json({ error: msg }, 401); }
 
+// Respuesta de error para excepciones NO atrapadas del handler fetch. CLAVE:
+// devuelve SIEMPRE con cabeceras CORS (via json()). Sin esto, una excepción que
+// se escapa hace que Cloudflare responda un 1101 crudo SIN CORS, y el navegador
+// lo reporta como "Failed to fetch" — eso rompía el login y disparaba cascadas de
+// reintentos que saturaban más a D1. Si el error es de D1 saturada, devolvemos 503
+// 'db_busy' para que el front sepa que debe hacer backoff (no es un bug del cliente).
+function fetchErrorResponse(e) {
+  const msg = String((e && e.message) || e || 'error');
+  try { console.error('UNHANDLED fetch error:', msg); } catch (_) {}
+  const busy = /D1_ERROR|overloaded|queued for too long|Network connection lost|reset because the Worker|too many|storage (?:limit|error|caused)/i.test(msg);
+  return json(
+    busy
+      ? { error: 'db_busy', message: 'La base está sobrecargada, reintentá en unos segundos.' }
+      : { error: 'internal_error', message: 'Error interno del servidor.' },
+    busy ? 503 : 500
+  );
+}
+
 async function sha256hex(str) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
   return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1359,6 +1377,30 @@ async function kvGet(env, k, def = null) {
 async function kvSet(env, k, v) {
   try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at').bind(k, String(v), new Date().toISOString()).run(); }
   catch (_) {}
+}
+
+// Índices de performance en las tablas calientes. SIN estos, cada poll de
+// /admin/wa/messages hace full-scan + sort de TODA la tabla wa_messages (decenas
+// de miles de filas) y /admin/briefs escanea briefs — con varios clientes
+// polleando en paralelo eso satura D1 ("D1 DB is overloaded"). Corre 1 sola vez
+// (guard kv perf_idx_v1); IF NOT EXISTS lo hace idempotente. En waitUntil desde el
+// cron para no meter latencia en el request path.
+async function ensurePerfIndexes(env) {
+  try {
+    if ((await kvGet(env, 'perf_idx_v1', '0')) === '1') return;
+    // wamid ya está indexado por el autoindex UNIQUE de wa_messages, y
+    // (brief_id, tipo) por idx_brief_img_brief_tipo -> no los recreamos (serían
+    // índices duplicados con overhead de escritura al pedo). El que faltaba y
+    // realmente destrababa D1 es idx_wa_messages_ts (148k filas, ORDER BY ts).
+    const stmts = [
+      'CREATE INDEX IF NOT EXISTS idx_wa_messages_ts ON wa_messages(ts)',
+      'CREATE INDEX IF NOT EXISTS idx_wa_messages_phone_ts ON wa_messages(phone, ts)',
+      'CREATE INDEX IF NOT EXISTS idx_briefs_comercial ON briefs(comercial_id)',
+      'CREATE INDEX IF NOT EXISTS idx_briefs_updated ON briefs(updated_at)',
+    ];
+    for (const s of stmts) { try { await env.DB.prepare(s).run(); } catch (_) {} }
+    await kvSet(env, 'perf_idx_v1', '1');
+  } catch (_) {}
 }
 
 // ¿Piloto prendido? Default OFF (kill-switch): arranca apagado hasta estar
@@ -7220,8 +7262,21 @@ async function processPendingTemplateSends(env) {
   }
 }
 
-export default {
+const handler = {
   async fetch(request, env, ctx) {
+    // Envoltorio anti-crash: cualquier excepción NO atrapada del handler (típico
+    // "D1_ERROR: D1 DB is overloaded") DEBE devolver una respuesta CON CORS. Sin
+    // esto Cloudflare responde un 1101 crudo sin CORS -> el navegador lo ve como
+    // "Failed to fetch" (rompía el login y disparaba la cascada de reintentos que
+    // saturaba más a D1). Referenciamos handler._fetch explícito (no `this`) para
+    // no depender de cómo el runtime bindea el método.
+    try {
+      return await handler._fetch(request, env, ctx);
+    } catch (e) {
+      return fetchErrorResponse(e);
+    }
+  },
+  async _fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
     const url = new URL(request.url);
     const path = url.pathname;
@@ -12224,6 +12279,8 @@ export default {
   // ===== Cron Trigger =====
   // Corre cada 5 min. Procesa: 1) mensajes programados, 2) followups (solo a las 13:00 UTC).
   async scheduled(event, env, ctx) {
+    // Índices de performance (1 sola vez, guard kv). Evita full-scans que saturan D1.
+    ctx.waitUntil(ensurePerfIndexes(env));
     // Cola de auto-respuestas (minicurso): corre en CADA tick, incluido el cron
     // dedicado de cada minuto, para que la demora sea ~1-2 min y no más.
     ctx.waitUntil(processAutoReplyQueue(env));
@@ -12349,6 +12406,8 @@ export default {
     }
   }
 };
+
+export default handler;
 
 // Cron handler: procesa chats con actividad nueva. Limit conservador (5/hora)
 // para respetar rate limits del tier 1 de Anthropic API (8k output tokens/min,
