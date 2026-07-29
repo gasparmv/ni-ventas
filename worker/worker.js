@@ -3131,16 +3131,18 @@ async function processCursosFlow(env) {
 async function processPendingMedia(env) {
   if (!env.MEDIA) return;
   try {
-    // Ventana de 24h (antes 2h): la media de 360dialog puede tardar en estar
-    // disponible o el worker pudo estar saturado; 24h da margen sin reintentar
-    // eternamente media ya caducada.
-    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    // Ventana de 3h (bajada de 24h, jul-2026): un media válido se baja en los
+    // primeros segundos/minutos; si sigue crudo tras 3h es porque expiró en Meta o
+    // el media_id es inválido, y reintentarlo solo suma "wrong media_id requests"
+    // que hacen que 360dialog nos BLOQUEE la descarga de media (429) — tumbando
+    // también los media nuevos y válidos. No reintentar media viejo.
+    const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
     const rs = await env.DB.prepare(
       "SELECT id, media_url FROM wa_messages " +
       "WHERE msg_type IN ('image','video','audio','document','sticker') " +
       "  AND media_url GLOB '[0-9]*' AND length(media_url) > 8 " +
       "  AND ts >= ? " +
-      "ORDER BY id DESC LIMIT 150"
+      "ORDER BY id DESC LIMIT 40"
     ).bind(cutoff).all();
     for (const row of (rs.results || [])) {
       try {
@@ -4872,12 +4874,26 @@ async function processReventaLead(env, body) {
 // ===== Media download (WhatsApp → R2, vía Meta o 360dialog) =====
 async function downloadMedia(env, mediaId) {
   if (!mediaId || !env.MEDIA) return null;
+  // Si 360dialog nos bloqueó temporalmente por "too many wrong media_id requests"
+  // (429), NO insistir: cada intento durante el bloqueo lo prolonga y arrastra
+  // también a la descarga de los media NUEVOS y válidos. Esperar a que pase.
+  try {
+    const until = parseInt(await kvGet(env, 'media_dl_blocked_until', '0'), 10) || 0;
+    if (until > Date.now()) return null;
+  } catch (_) {}
   let wa;
   try { wa = getWaClient(env); } catch (_) { return null; }
   if (wa.provider === 'meta' && !env.WA_TOKEN) return null;
   try {
     // Step 1: get media URL from WA API (Meta o 360dialog)
     const meta = await fetch(wa.mediaUrl(mediaId), { headers: wa.headers });
+    // 429 = 360dialog bloqueó la descarga de media (demasiados media_id inválidos,
+    // típicamente por reintentar media ya expirado en Meta). Cortar y pausar 15 min
+    // para que el bloqueo se levante y no arrastre a los media nuevos y válidos.
+    if (meta.status === 429) {
+      try { await kvSet(env, 'media_dl_blocked_until', String(Date.now() + 15 * 60 * 1000)); } catch (_) {}
+      return null;
+    }
     const info = await meta.json();
     if (!info.url) return null;
     const mime = info.mime_type || 'application/octet-stream';
@@ -7904,9 +7920,13 @@ export default {
     // DEBUG público temporal — reprocesar imágenes pendientes (media_url con id raw).
     if (request.method === 'POST' && path === '/debug/media-reprocess') {
       // Trae media images con media_url numérico (no wa/...) y las baja a R2.
+      // Solo media reciente (<3h): reintentar media viejo/expirado dispara el
+      // bloqueo 429 de 360dialog ("too many wrong media_id requests") que tumba
+      // también la descarga de los media nuevos y válidos.
+      const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
       const rs = await env.DB.prepare(
-        "SELECT id, media_url FROM wa_messages WHERE msg_type IN ('image','video','audio','document','sticker') AND media_url GLOB '[0-9]*' AND length(media_url) > 8 ORDER BY id DESC LIMIT 200"
-      ).all();
+        "SELECT id, media_url FROM wa_messages WHERE msg_type IN ('image','video','audio','document','sticker') AND media_url GLOB '[0-9]*' AND length(media_url) > 8 AND ts >= ? ORDER BY id DESC LIMIT 60"
+      ).bind(cutoff).all();
       const pending = rs.results || [];
       let ok = 0, fail = 0;
       const errors = [];
@@ -7937,6 +7957,43 @@ export default {
       } catch (e) {
         return json({ ok: false, error: e.message, mediaId });
       }
+    }
+
+    // DEBUG temporal — diagnóstico DETALLADO de descarga de media: expone el
+    // status HTTP y el cuerpo de error de cada paso (downloadMedia falla silencioso).
+    if (request.method === 'GET' && /^\/debug\/media-info\/\d+$/.test(path)) {
+      const mediaId = path.split('/').pop();
+      const out = { mediaId };
+      try {
+        const wa = getWaClient(env);
+        out.provider = wa.provider;
+        out.base = wa.base || null;
+        out.hasKey = !!(wa.headers && (wa.headers['D360-API-KEY'] || wa.headers['Authorization']));
+        const step1Url = wa.mediaUrl(mediaId);
+        out.step1_url = step1Url;
+        const meta = await fetch(step1Url, { headers: wa.headers });
+        out.step1_status = meta.status;
+        const step1Text = await meta.text();
+        let info = {};
+        try { info = JSON.parse(step1Text); } catch (_) { out.step1_body = step1Text.slice(0, 500); }
+        if (info && info.url) {
+          out.media_url_host = (String(info.url).match(/^https?:\/\/([^\/]+)/) || [])[1] || '';
+          out.mime = info.mime_type || null;
+          let downloadUrl = info.url;
+          if (wa.provider === '360dialog' && /lookaside\.fbsbx\.com/.test(downloadUrl)) {
+            downloadUrl = downloadUrl.replace('https://lookaside.fbsbx.com', wa.base);
+          }
+          out.step2_host = (String(downloadUrl).match(/^https?:\/\/([^\/]+)/) || [])[1] || '';
+          out.step2_proxied = downloadUrl !== info.url;
+          const file = await fetch(downloadUrl, { headers: wa.headers });
+          out.step2_status = file.status;
+          if (!file.ok) out.step2_body = (await file.text()).slice(0, 500);
+          else out.step2_bytes = (await file.arrayBuffer()).byteLength;
+        } else {
+          out.step1_info = info;
+        }
+      } catch (e) { out.error = e.message; }
+      return json(out);
     }
 
     // ----- Cotizador params (público lectura) -----
