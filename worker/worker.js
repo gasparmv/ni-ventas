@@ -7789,8 +7789,12 @@ export default {
                       if (shouldNotify && env.ADMIN_NOTIFY_PHONE) {
                         try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp BLOQUEADO por pago — Meta error 131042 (pagos pendientes en la cuenta de WhatsApp Business).\nRegularizá en el Billing Hub de META: business.facebook.com/billing_hub (OJO: es de Meta, NO el saldo de 360dialog).\nPausé los envíos automáticos para no quemar contactos — se reanudan solos cuando vuelva a andar.'); } catch (_) {}
                       }
-                    } else if (env.ADMIN_NOTIFY_PHONE) {
+                    } else if (env.ADMIN_NOTIFY_PHONE && phone !== env.ADMIN_NOTIFY_PHONE) {
                       // Fallo puntual (destinatario, etc.) → aviso por mensaje, como antes.
+                      // GUARDIA phone !== ADMIN_NOTIFY_PHONE: si el envío que falló era un aviso
+                      // al PROPIO admin (su ventana de 24h cerrada → rebota 131047), NO generamos
+                      // otro aviso, porque ese aviso también fallaría → recursión infinita
+                      // (~1 msg cada 2s). Los fallos hacia CLIENTES sí se siguen avisando.
                       const preview = prevBody ? prevBody.slice(0, 100) + (prevBody.length > 100 ? '…' : '') : '';
                       const summary = `⚠ Falló envío WA a ${phone}\nError: ${errMsg}` + (preview ? `\nMensaje: "${preview}"` : '');
                       try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
