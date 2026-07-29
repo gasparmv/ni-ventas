@@ -15038,10 +15038,25 @@ async function confirmQuickCreate() {
       urgente
     });
     STATE.briefs.unshift(saved);
-    // Subir todas las imágenes pegadas.
+    // Subir todas las imágenes pegadas. ANTES el error se tragaba (console.error) y el
+    // modal cerraba como éxito → el brief quedaba SIN la foto obligatoria y Joaco lo
+    // recreaba (duplicados). Ahora contamos las que subieron:
+    let okImgs = 0, failImgs = 0;
     for (const img of STATE.quickModalImages) {
-      try { await uploadBriefImage(saved.id, img.blob, img.contentType, 'chat'); } catch(e) { console.error('upload', e); }
+      try { await uploadBriefImage(saved.id, img.blob, img.contentType, 'chat'); okImgs++; } catch(e) { console.error('upload', e); failImgs++; }
     }
+    if (STATE.quickModalImages.length && okImgs === 0) {
+      // NINGUNA foto subió → el brief quedó sin la referencia (Emma no lo puede cotizar).
+      // Avisar fuerte: el brief YA existe, hay que subirle la foto desde la bandeja, NO
+      // recrearlo (eso genera los duplicados). Cerramos el modal para que no lo re-cree.
+      STATE.quickModalOpen = false;
+      STATE.quickModalImages = [];
+      STATE.quickModalSaving = false;
+      render();
+      await showAlert('El brief se creó pero la FOTO no se pudo subir (revisá la conexión). Está en la bandeja "A cotizar" sin imagen: abrilo y subile la foto ahí. NO lo crees de nuevo — ya existe.', { title: '⚠ Falta subir la foto', variant: 'warn' });
+      return;
+    }
+    if (failImgs > 0) toast(`Brief creado, pero ${failImgs} foto(s) no subieron — abrilo y revisá que estén todas.`);
     // Cerrar modal y volver al kanban. NO abrimos el drawer porque el form
     // que se completó en el modal ya tiene todos los datos del brief — abrirlo
     // sería pedir los mismos campos otra vez. El brief queda visible como
