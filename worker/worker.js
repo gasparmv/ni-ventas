@@ -2903,10 +2903,24 @@ async function processRecoveryQueue(env) {
       }
     } catch (_) {}
     if (!approved.length) return;
-    const rows = await env.DB.prepare("SELECT phone, template_name, param FROM recovery_queue WHERE status = 'pending' ORDER BY caso ASC, created_at ASC LIMIT 500").all();
+    const rows = await env.DB.prepare("SELECT phone, template_name, param, created_at FROM recovery_queue WHERE status = 'pending' ORDER BY caso ASC, created_at ASC LIMIT 500").all();
     const r = (rows.results || []).find(x => x.phone && approved.includes(x.template_name));
     if (!r) return;
     const nowIso = new Date().toISOString();
+    // NO mandar el aviso si el lead YA se reactivó desde que entró a la cola: si respondió
+    // o un HUMANO le contestó/cotizó, ya no es un "colgado" y el aviso ("no te respondimos,
+    // ¿querés avanzar?") molesta a un cliente activo (p.ej. uno que ya pagó — caso Mané).
+    // Se marca 'reactivado' y se sale SIN gastar el ritmo. Solo cuenta inbound o outbound
+    // HUMANO (automated=0), no el bot ni el propio aviso.
+    try {
+      const react = await env.DB.prepare(
+        "SELECT 1 FROM wa_messages WHERE phone=? AND msg_type!='status' AND (direction='inbound' OR (direction='outbound' AND automated=0)) AND ts > ? LIMIT 1"
+      ).bind(r.phone, r.created_at || '').first();
+      if (react) {
+        try { await env.DB.prepare("UPDATE recovery_queue SET status='reactivado', updated_at=? WHERE phone=?").bind(nowIso, r.phone).run(); } catch (_) {}
+        return;
+      }
+    } catch (_) {}
     // Reservar el slot de tiempo YA (aunque falle) para no martillar el número.
     await kvSet(env, 'recovery_last_sent', nowIso);
     const params = r.param ? [String(r.param)] : [];
