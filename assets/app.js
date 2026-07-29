@@ -2085,6 +2085,13 @@ function render() {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
+  // Nadia (2da vendedora): set reducido por ahora. Views permitidas: dashboard (solo
+  // su panel "Tu sueldo"), pedidos, presupuestos, cotizacion, chat. Si cae en otra
+  // (seguimientos/actividad/etc. por hash directo), al dashboard.
+  if (isNadiaUser(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat'].includes(STATE.view)) {
+    STATE.view = 'dashboard';
+    if (location.hash !== '#dashboard') location.hash = 'dashboard';
+  }
   document.getElementById('app').innerHTML = renderShell();
   try { startSinCotizarWatch(); } catch (_) {}
   // El Chat WA carga su data del worker (no de Sheets), así que se renderiza
@@ -2128,7 +2135,7 @@ function render() {
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
     if (isAdmin()) bindBusinessPanel();
-    else drawCharts();
+    else if (!isNadiaUser(STATE.user)) drawCharts();  // Nadia: dashboard reducido, sin gráficos
   }
   if (STATE.view === 'panel-joaco') bindPanelJoaco();
   if (STATE.view === 'actividad') bindActividad();
@@ -2241,10 +2248,10 @@ function renderShell() {
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
         ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
-        <button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
+        ${!isNadiaUser(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
-        </button>
-        <button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>
+        </button>` : ''}
+        ${!isNadiaUser(STATE.user) ? `<button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>` : ''}
         ${canAccessChat() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
           <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '')}</span>
         </button>` : ''}
@@ -2922,6 +2929,19 @@ function showCreateTemplateBroadcast(opts) {
 
 // ---------- DASHBOARD ----------
 function renderDashboard() {
+  // Nadia (2da vendedora): dashboard reducido -> SOLO su panel "Tu sueldo". No ve
+  // las métricas del negocio (ventas totales, AOV, cobrado, gráficos, etc.).
+  if (isNadiaUser(STATE.user)) {
+    return `
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">${new Date().toLocaleDateString('es-AR', {day:'2-digit', month:'long', year:'numeric'})}</div>
+        <h1>Dashboard</h1>
+      </div>
+    </div>
+    ${panelSueldoHtml('nadia')}
+  `;
+  }
   const cur = pedidosDash();
   const totalMes = cur.reduce((a,p)=>a+p.precio+p.precioDimmer, 0);
   // AOV = ventas / total de UNIDADES (no pedidos). Un pedido puede tener
