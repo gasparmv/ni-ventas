@@ -2267,14 +2267,14 @@ async function maybeReporteLlamar(env) {
     const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
     if ((await kvGet(env, 'reporte_llamar_sent', '')) === fechaAR) return;
     // El body es un fup de presupuesto si arranca con alguno de los prefijos conocidos.
-    const fupCond = ALL_FOLLOWUP_PREFIXES_TEXT.map(() => 'substr(body,1,?)=?').join(' OR ');
-    const fupBinds = [];
-    for (const p of ALL_FOLLOWUP_PREFIXES_TEXT) { fupBinds.push(p.length, p); }
+    const fupCond = ALL_FOLLOWUP_PREFIXES_TEXT.map(() => 'body LIKE ?').join(' OR ');
+    const fupBinds = ALL_FOLLOWUP_PREFIXES_TEXT.map(p => p + '%');
     const cierreCond = FUP_CIERRE_MARKERS.map(() => 'lower(m.body) LIKE ?').join(' OR ');
     const cierreBinds = FUP_CIERRE_MARKERS.map(k => '%' + k.toLowerCase() + '%');
     const sql =
       "WITH fups AS (SELECT phone, MIN(ts) AS first_fup FROM wa_messages " +
-      "  WHERE direction='outbound' AND (" + fupCond + ") GROUP BY phone) " +
+      "  WHERE direction='outbound' AND (" + fupCond + ") " +
+      "    AND (channel IS NULL OR channel='wa') AND length(phone) <= 14 GROUP BY phone) " + // excluir IG: sus 'phone' son IDs largos, no teléfonos llamables
       "SELECT f.phone, f.first_fup, s.contact_name FROM fups f " +
       "  LEFT JOIN wa_chats_summary s ON s.phone = f.phone " +
       "WHERE f.first_fup >= (date('now','-3 hours','-1 day') || 'T03:00:00Z') " +
@@ -11209,13 +11209,14 @@ const handler = {
         if (hasButton) {
           _components.push({ type: 'BUTTONS', buttons: [{ type: 'URL', text: String(body.button_text || 'Ver más').slice(0, 25), url: String(body.button_url) }] });
         }
-        // Categoría UTILITY (son mensajes de servicio/seguimiento a clientes que ya nos
-        // escribieron) + allow_category_change: si Meta detecta contenido promocional la
-        // reclasifica a MARKETING en vez de rechazarla. Antes se forzaba MARKETING por
-        // cada mensaje → justo el patrón que Meta penaliza como spam.
+        // Categoría MARKETING directa: en la práctica Meta recategoriza estos follow-ups de
+        // venta a MARKETING casi siempre (son promocionales), así que se crean ya en MARKETING
+        // para evitar la corrección/discrepancia. allow_category_change=true: si alguna es
+        // genuinamente utility, Meta la reclasifica sin rechazarla. El VOLUMEN (la causa real
+        // del baneo jul-2026) lo controla el REUSO de arriba, NO la categoría.
         const r = await fetch(_waT.templatesUrl(), {
           method: 'POST', headers: { ..._waT.headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: tplName, category: 'UTILITY', allow_category_change: true, language: 'es_AR', components: _components })
+          body: JSON.stringify({ name: tplName, category: 'MARKETING', allow_category_change: true, language: 'es_AR', components: _components })
         });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) return json({ error: data?.error?.message || 'Meta rechazó la creación de la plantilla', raw: data }, r.status || 500);
@@ -11588,7 +11589,19 @@ const handler = {
       // GET /admin/pedidos → todas las filas de la tabla pedidos.
       if (request.method === 'GET' && path === '/admin/pedidos') {
         await ensurePedidosSchema(env);
-        const rs = await env.DB.prepare('SELECT * FROM pedidos ORDER BY fecha DESC, numero DESC, id DESC').all();
+        // Cada vendedor comercial ve SOLO sus pedidos (Joaco los suyos, Nadia los
+        // suyos); admin (Gaspar) ve todo. comercial_id existe con DEFAULT 'joaco',
+        // así que todo el histórico queda de Joaco (su número no se mueve).
+        const _pedRole = await getSessionRole(env, session.user);
+        let _pedSql = 'SELECT * FROM pedidos';
+        const _pedArgs = [];
+        if (_pedRole === 'comercial') {
+          const _pedComercial = await resolveComercial(env, { sessionUser: session.user });
+          _pedSql += " WHERE IFNULL(comercial_id,'joaco') = ?";
+          _pedArgs.push(_pedComercial);
+        }
+        _pedSql += ' ORDER BY fecha DESC, numero DESC, id DESC';
+        const rs = await env.DB.prepare(_pedSql).bind(..._pedArgs).all();
         return json({ pedidos: rs.results || [] });
       }
 
@@ -12129,8 +12142,20 @@ const handler = {
         if (role !== 'admin' && role !== 'comercial') return json({ error: 'forbidden' }, 403);
         try {
           const labelId = await ensureLabelId(env, SIN_COTIZAR_LABEL_NAME, SIN_COTIZAR_LABEL_COLOR);
+          // Scope por vendedor (mismo patrón que la lista de chats): cada comercial ve
+          // solo lo suyo. Secundario (Nadia) → assigned_to = su slug; principal (Joaco)
+          // → lo NO asignado a un secundario (incluye assigned_to NULL por el LEFT JOIN);
+          // admin (Gaspar) → todo. uslug sale de la lista fija VENDEDORES_SECUNDARIOS → seguro.
+          const uslug = String(session.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+          const esSecundario = role === 'comercial' && VENDEDORES_SECUNDARIOS.includes(uslug);
+          let filtroVend = '';
+          if (role === 'comercial') {
+            filtroVend = esSecundario
+              ? ` AND s.assigned_to = '${uslug}'`
+              : ` AND (s.assigned_to IS NULL OR s.assigned_to NOT IN (${VENDEDORES_SECUNDARIOS.map(v => `'${v}'`).join(',')}))`;
+          }
           const lista = (await env.DB.prepare(
-            "SELECT cl.phone, cl.created_at, s.contact_name AS name FROM contact_labels cl LEFT JOIN wa_chats_summary s ON s.phone = cl.phone WHERE cl.label_id = ? ORDER BY cl.created_at DESC"
+            "SELECT cl.phone, cl.created_at, s.contact_name AS name FROM contact_labels cl LEFT JOIN wa_chats_summary s ON s.phone = cl.phone WHERE cl.label_id = ?" + filtroVend + " ORDER BY cl.created_at DESC"
           ).bind(labelId).all()).results || [];
           return json({
             ok: true, label_id: labelId, count: lista.length,

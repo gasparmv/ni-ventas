@@ -1503,6 +1503,7 @@ function mapPedidoFromD1(row) {
     canalAd: row.ad || '',
     tramos: row.tramos || '',
     tipo: row.tipo || '',
+    comercial_id: row.comercial_id || 'joaco',
     mirrorError: row.mirror_error || ''
   };
 }
