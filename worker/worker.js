@@ -2256,6 +2256,52 @@ async function maybeReporteDiario(env) {
   } catch (_) {}
 }
 
+// ===== Aviso diario "leads para LLAMAR" (a pedido de Gaspar, 29-jul) =====
+// Cada mañana (9 AR) manda a Gaspar + hermano la lista de leads que recibieron el
+// fup 1 del presupuesto AYER y NO contestaron nada desde entonces (para llamarlos
+// por teléfono). Excluye a los que ya avanzaron al cierre/compra. Va por plantilla
+// (llega fuera de ventana) con fallback a texto libre. Dedup por día. Si no hay
+// nadie que llamar, marca el día y no molesta.
+async function maybeReporteLlamar(env) {
+  try {
+    const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    if ((await kvGet(env, 'reporte_llamar_sent', '')) === fechaAR) return;
+    // El body es un fup de presupuesto si arranca con alguno de los prefijos conocidos.
+    const fupCond = ALL_FOLLOWUP_PREFIXES_TEXT.map(() => 'substr(body,1,?)=?').join(' OR ');
+    const fupBinds = [];
+    for (const p of ALL_FOLLOWUP_PREFIXES_TEXT) { fupBinds.push(p.length, p); }
+    const cierreCond = FUP_CIERRE_MARKERS.map(() => 'lower(m.body) LIKE ?').join(' OR ');
+    const cierreBinds = FUP_CIERRE_MARKERS.map(k => '%' + k.toLowerCase() + '%');
+    const sql =
+      "WITH fups AS (SELECT phone, MIN(ts) AS first_fup FROM wa_messages " +
+      "  WHERE direction='outbound' AND (" + fupCond + ") GROUP BY phone) " +
+      "SELECT f.phone, f.first_fup, s.contact_name FROM fups f " +
+      "  LEFT JOIN wa_chats_summary s ON s.phone = f.phone " +
+      "WHERE f.first_fup >= (date('now','-3 hours','-1 day') || 'T03:00:00Z') " +
+      "  AND f.first_fup <  (date('now','-3 hours') || 'T03:00:00Z') " +
+      "  AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='inbound' AND m.msg_type!='status' AND m.ts > f.first_fup) " +
+      "  AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='outbound' AND (" + cierreCond + ")) " +
+      "ORDER BY f.first_fup ASC LIMIT 60";
+    let rows = [];
+    try { rows = (await env.DB.prepare(sql).bind(...fupBinds, ...cierreBinds).all()).results || []; } catch (_) { return; }
+    if (!rows.length) { await kvSet(env, 'reporte_llamar_sent', fechaAR); return; }
+    const lines = rows.map((r, i) => {
+      const nom = (r.contact_name || '').trim() || 's/nombre';
+      return `${i + 1}. ${nom} — +${r.phone}`;
+    });
+    const listaTxt = lines.join('\n');
+    const texto = `📞 Para llamar hoy — ${rows.length} lead(s) que no contestaron el seguimiento del presupuesto:\n\n${listaTxt}`;
+    let anyOk = false;
+    for (const ph of REPORTE_DIARIO_PHONES) {
+      let r = null;
+      try { r = await waSendTemplate(env, ph, 'reporte_llamar', 'es_AR', [listaTxt.slice(0, 900)]); } catch (_) {}
+      if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} }
+      if (r && r.ok) anyOk = true;
+    }
+    if (anyOk) await kvSet(env, 'reporte_llamar_sent', fechaAR);
+  } catch (_) {}
+}
+
 // ===== Auto-respuesta del minicurso (regalos) =====
 // Cuando un contacto ESCRIBE pidiendo la guía + cotizador del minicurso, le
 // respondemos automáticamente con el link de regalos. Es respuesta dentro de la
@@ -12416,6 +12462,8 @@ const handler = {
     if (hAR >= 9 && hAR <= 20) ctx.waitUntil(maybeCapiReadyNotice(env));
     // Reporte diario de ventas a las 21:00 AR (a Gaspar + su hermano). Dedup por día adentro.
     if (hAR === 21) ctx.waitUntil(maybeReporteDiario(env));
+    // Aviso "leads para llamar" (fup 1 del presupuesto sin respuesta) a las 9 AR.
+    if (hAR === 9) ctx.waitUntil(maybeReporteLlamar(env));
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
     if (hAR >= 8 && hAR < 21) ctx.waitUntil(processPendingTemplateSends(env));
     // Monitor de status de templates: 1 vez por hora, no cada 5 min. El polling
