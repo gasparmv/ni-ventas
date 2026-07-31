@@ -2275,7 +2275,10 @@ async function maybeReporteLlamar(env) {
       "WITH fups AS (SELECT phone, MIN(ts) AS first_fup FROM wa_messages " +
       "  WHERE direction='outbound' AND (" + fupCond + ") " +
       "    AND (channel IS NULL OR channel='wa') AND length(phone) <= 14 GROUP BY phone) " + // excluir IG: sus 'phone' son IDs largos, no teléfonos llamables
-      "SELECT f.phone, f.first_fup, s.contact_name FROM fups f " +
+      "SELECT f.phone, f.first_fup, s.contact_name, " +
+      "  (SELECT b.cliente_nombre FROM briefs b WHERE b.cliente_wa_id = f.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS pedido, " +
+      "  (SELECT COALESCE(NULLIF(b.precio_final,0), NULLIF(b.precio_trans,0), NULLIF(b.precio_negro,0)) FROM briefs b WHERE b.cliente_wa_id = f.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS precio " +
+      "FROM fups f " +
       "  LEFT JOIN wa_chats_summary s ON s.phone = f.phone " +
       "WHERE f.first_fup >= (date('now','-3 hours','-1 day') || 'T03:00:00Z') " +
       "  AND f.first_fup <  (date('now','-3 hours') || 'T03:00:00Z') " +
@@ -2287,7 +2290,11 @@ async function maybeReporteLlamar(env) {
     if (!rows.length) { await kvSet(env, 'reporte_llamar_sent', fechaAR); return; }
     const lines = rows.map((r, i) => {
       const nom = (r.contact_name || '').trim() || 's/nombre';
-      return `${i + 1}. ${nom} — +${r.phone}`;
+      const pedido = (r.pedido || '').trim();
+      const precioN = parseInt(r.precio, 10) || 0;
+      const precio = precioN ? '$' + String(precioN).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
+      const extra = [pedido ? `"${pedido}"` : '', precio].filter(Boolean).join(' · ');
+      return `${i + 1}. ${nom} — +${r.phone}${extra ? ' · ' + extra : ''}`;
     });
     const listaTxt = lines.join('\n');
     const texto = `📞 Para llamar hoy — ${rows.length} lead(s) que no contestaron el seguimiento del presupuesto:\n\n${listaTxt}`;
