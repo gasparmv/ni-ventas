@@ -9292,6 +9292,15 @@ const handler = {
         return json({ ok: true, paused: (await kvGet(env, 'wa_send_paused', '0')) === '1' });
       }
 
+      // Forzar el aviso "leads para llamar" AHORA (para probarlo fuera del cron de las 9 AR).
+      // Resetea el dedup del día y ejecuta la función real (plantilla + fallback a texto).
+      if (request.method === 'POST' && path === '/admin/reporte-llamar-test') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        await kvSet(env, 'reporte_llamar_sent', '');
+        await maybeReporteLlamar(env);
+        return json({ ok: true, forced: true });
+      }
+
       // Backfill de los mensajes automáticos de ManyChat (welcome) que Instagram nos mandó
       // como echo VACÍO (solo el mid, sin texto) y por eso nunca se guardaron -> las convos
       // de IG arrancaban "cortadas". Recorre los logs crudos en orden cronológico: el PRIMER
