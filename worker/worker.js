@@ -1913,11 +1913,35 @@ async function processPrecotizPilot(env) {
   const cap = parseInt(await kvGet(env, 'precotiz_cap', String(PRECOTIZ_CAP)), 10) || PRECOTIZ_CAP;
   const samplePct = parseInt(await kvGet(env, 'precotiz_sample', '20'), 10) || 20;
   if ((await precotizCount(env)) >= cap) return;
+  // BARRIDO MATUTINO: la ventana normal es de 20 min, así que el que escribe DESPUÉS DE HORA
+  // (22-8, cuando el bot está dormido) nunca lo veía a la mañana (mensaje > 20 min). A las 8 AR
+  // (primera hora) barremos a esos: leads con PRIMER contacto fuera de horario en las últimas 14h,
+  // no capturados y no evaluados (los excluimos en la query para no starvearnos con los ya vistos
+  // que la ventana ancha traería al tope). La red de exclusiones de abajo (freno, cursos, reventa,
+  // internos, clientes, sample...) es la MISMA — sirve para todos los vendedores de carteles.
+  const _hAR = (new Date().getUTCHours() - 3 + 24) % 24;
+  const catchup = _hAR === 8;
   let cands = [];
   try {
+    // SIEMPRE: leads frescos (últimos 20 min) — el flujo normal, no se toca.
     const since = new Date(Date.now() - 20 * 60 * 1000).toISOString();
     const rs = await env.DB.prepare("SELECT phone, MAX(ts) AS last_ts FROM wa_messages WHERE direction='inbound' AND msg_type!='status' AND ts > ? GROUP BY phone ORDER BY last_ts DESC LIMIT 15").bind(since).all();
     cands = rs.results || [];
+    // A las 8 AR SUMAMOS (no reemplazamos) el barrido de los que escribieron de noche.
+    if (catchup) {
+      const desde = new Date(Date.now() - 14 * 60 * 60 * 1000).toISOString();
+      const rs2 = await env.DB.prepare(
+        "SELECT phone, MAX(ts) AS last_ts FROM wa_messages m " +
+        "WHERE direction='inbound' AND msg_type!='status' AND ts > ? AND phone GLOB '54[0-9]*' AND length(phone) BETWEEN 12 AND 13 " +
+        "AND phone NOT IN (SELECT phone FROM precotiz_pilot) " +
+        "AND NOT EXISTS (SELECT 1 FROM kv_cache k WHERE k.k = 'precotiz_seen:' || m.phone) " +
+        "GROUP BY phone " +
+        "HAVING (CAST(strftime('%H', datetime(MIN(ts),'-3 hours')) AS INTEGER) >= 22 OR CAST(strftime('%H', datetime(MIN(ts),'-3 hours')) AS INTEGER) < 8) " +
+        "ORDER BY last_ts ASC LIMIT 15"
+      ).bind(desde).all();
+      const vistos = new Set(cands.map(c => c.phone));
+      for (const c of (rs2.results || [])) { if (!vistos.has(c.phone)) cands.push(c); }
+    }
   } catch (_) { return; }
 
   for (const c of cands) {
@@ -1962,7 +1986,7 @@ async function processPrecotizPilot(env) {
     let first;
     try { first = await env.DB.prepare("SELECT MIN(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(phone).first(); } catch (_) { continue; }
     const firstTs = first?.t || '';
-    if (!firstTs || firstTs < new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()) continue; // primer contacto debe ser reciente (<3h)
+    if (!firstTs || firstTs < new Date(Date.now() - (catchup ? 14 : 3) * 60 * 60 * 1000).toISOString()) continue; // primer contacto reciente (<3h normal; <14h en el barrido matutino de las 8)
 
     const ctx = await buildChatContext(env, phone, 40);
     if (!ctx) continue;
