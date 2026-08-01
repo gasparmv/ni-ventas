@@ -10959,12 +10959,15 @@ const handler = {
       }
       if (request.method === 'POST' && path === '/admin/labels') {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        const { name, color } = body || {};
-        if (!name || !color) return json({ error: 'missing name or color' }, 400);
+        const name = String((body || {}).name || '').trim();
+        const color = String((body || {}).color || '').trim();
+        if (!name || !color) return json({ error: 'Falta el nombre o el color de la etiqueta' }, 400);
         await env.DB.prepare('CREATE TABLE IF NOT EXISTS labels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, color TEXT NOT NULL, created_at TEXT NOT NULL)').run();
-        await env.DB.prepare('INSERT OR REPLACE INTO labels (name, color, created_at) VALUES (?, ?, ?)').bind(name, color, new Date().toISOString()).run();
-        const row = await env.DB.prepare('SELECT id FROM labels WHERE name = ?').bind(name).first();
-        return json({ ok: true, id: row?.id });
+        // ON CONFLICT DO UPDATE (no OR REPLACE): no cambia el id de una etiqueta existente.
+        // OR REPLACE borraba+reinsertaba -> id nuevo -> dejaba huerfanas las contact_labels.
+        await env.DB.prepare('INSERT INTO labels (name, color, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET color = excluded.color').bind(name, color, new Date().toISOString()).run();
+        const row = await env.DB.prepare('SELECT id, name, color FROM labels WHERE name = ?').bind(name).first();
+        return json({ ok: true, id: row && row.id, label: row });
       }
       if (request.method === 'DELETE' && path.startsWith('/admin/labels/')) {
         const id = path.split('/').pop();

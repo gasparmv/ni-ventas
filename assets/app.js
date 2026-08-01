@@ -7179,7 +7179,8 @@ async function saveLabel(name, color) {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ name, color })
   });
-  const j = await r.json();
+  let j = {}; try { j = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error(j.error || ('No se pudo crear la etiqueta (HTTP ' + r.status + ')'));
   chatState.labelsLoaded = false;
   await loadLabels();
   return j.id;
@@ -7867,7 +7868,14 @@ async function loadChatContacts() {
       const _now = Date.now();
       if (!chatState._clRefreshAt || (_now - chatState._clRefreshAt) >= 12000) {
         chatState._clRefreshAt = _now;
-        const _clr = await fetch(CONFIG.trackerUrl + '/admin/contact-labels', { headers: authHeaders() });
+        const [_lr2, _clr] = await Promise.all([
+          fetch(CONFIG.trackerUrl + '/admin/labels', { headers: authHeaders() }),
+          fetch(CONFIG.trackerUrl + '/admin/contact-labels', { headers: authHeaders() })
+        ]);
+        // Refrescar la LISTA de etiquetas (definiciones), no solo las asignaciones.
+        // Sin esto, una etiqueta nueva (creada por cualquiera) no aparecia en los menus
+        // hasta recargar la pagina (los menus leen chatState.labels).
+        if (_lr2.ok) { const _lj = await _lr2.json(); if (Array.isArray(_lj.labels)) chatState.labels = _lj.labels; }
         if (_clr.ok) { const _cj = await _clr.json(); chatState.contactLabels = _cj.contactLabels || {}; }
         // Refrescar nombres/@usuarios/fotos (Instagram incluido): igual que las
         // etiquetas, antes solo se cargaban 1 vez (guard waContactNamesLoaded), así
@@ -12294,9 +12302,16 @@ function showManageLabelsModal() {
   const submit = async () => {
     const name = nameInput?.value?.trim();
     if (!name) return;
-    await saveLabel(name, selectedColor);
-    showManageLabelsModal();
-    render();
+    if (addBtn) { addBtn.disabled = true; addBtn.textContent = 'Creando…'; }
+    try {
+      await saveLabel(name, selectedColor);
+      toast('✓ Etiqueta creada');
+      showManageLabelsModal();
+      render();
+    } catch (e) {
+      if (addBtn) { addBtn.disabled = false; addBtn.textContent = 'Crear'; }
+      toast('✗ ' + ((e && e.message) || 'No se pudo crear la etiqueta'));
+    }
   };
   if (addBtn) addBtn.onclick = submit;
   if (nameInput) {
