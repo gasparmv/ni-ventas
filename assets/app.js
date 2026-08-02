@@ -8940,15 +8940,19 @@ window.approveImprovement = approveImprovement;
 window.rejectImprovement = rejectImprovement;
 
 // ===== Panel de costos del sitio (admin) =====
-let costsState = { data: null, editingId: null, adding: false };
+let costsState = { data: null, editingId: null, adding: false, gemini: null };
 
 async function loadCosts() {
   if (typeof getUserRole === 'function' && getUserRole() !== 'admin') return;
   const el = document.getElementById('costs-panel');
   if (!el) return;
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/costs', { headers: { ...authHeaders() } });
-    const j = await r.json();
+    const [rc, rg] = await Promise.all([
+      fetch(CONFIG.trackerUrl + '/admin/costs', { headers: { ...authHeaders() } }),
+      fetch(CONFIG.trackerUrl + '/admin/gemini/usage', { headers: { ...authHeaders() } }).catch(() => null)
+    ]);
+    if (rg) { try { const g = await rg.json(); if (g && g.ok) costsState.gemini = g; } catch (_) {} }
+    const j = await rc.json();
     if (j && j.ok) { costsState.data = j; renderCostsPanel(); }
     else el.innerHTML = '<div class="muted" style="font-size:12px">no se pudo cargar</div>';
   } catch (_) { el.innerHTML = '<div class="muted" style="font-size:12px">no se pudo cargar</div>'; }
@@ -8982,10 +8986,11 @@ function renderCostsHTML(j) {
   const totalsHead = `
     <div class="kpi-grid" style="margin-bottom:var(--s-3)">
       <div class="kpi cyan"><div class="kpi-label">Infra del sitio / mes</div><div class="kpi-value">$${(t.infra_usd || 0).toFixed(2)}${t.infra_incomplete ? ' <span class="muted" style="font-size:11px">+faltan</span>' : ''}</div></div>
-      <div class="kpi"><div class="kpi-label">IA este mes (auto)</div><div class="kpi-value">$${(anth.total || 0).toFixed(2)}</div></div>
+      <div class="kpi"><div class="kpi-label">Anthropic (Claude) / mes</div><div class="kpi-value">$${(anth.total || 0).toFixed(2)}</div></div>
+      <div class="kpi"><div class="kpi-label" title="Gasto trackeado por el CRM en cada llamada a Gemini (render, medidas, transcripción, diseño). Se actualiza al toque; puede diferir un poco del billing de Google Cloud, que además tarda ~1 día.">Gemini / mes (en vivo)</div><div class="kpi-value">$${(((costsState.gemini||{}).month||{}).cost_usd || 0).toFixed(2)}</div>${(costsState.gemini||{}).month ? `<div class="kpi-delta">${costsState.gemini.month.renders || 0} renders · hoy $${(((costsState.gemini||{}).today||{}).cost_usd || 0).toFixed(2)}</div>` : ''}</div>
       <div class="kpi"><div class="kpi-label">Ads / mes (aparte)</div><div class="kpi-value">$${(t.ads_usd || 0).toFixed(2)}${t.ads_incomplete ? ' <span class="muted" style="font-size:11px">+faltan</span>' : ''}</div></div>
     </div>
-    <div class="muted" style="font-size:12px;margin-bottom:var(--s-2)">IA desglose: copiloto $${(anth.suggest || 0).toFixed(2)} · análisis de chats $${(anth.analysis || 0).toFixed(2)} · síntesis $${(anth.synthesis || 0).toFixed(2)}</div>`;
+    <div class="muted" style="font-size:12px;margin-bottom:var(--s-2)">IA total (Claude + Gemini): <b>$${((anth.total || 0) + ((((costsState.gemini||{}).month||{}).cost_usd) || 0)).toFixed(2)}</b> · copiloto $${(anth.suggest || 0).toFixed(2)} · análisis $${(anth.analysis || 0).toFixed(2)} · síntesis $${(anth.synthesis || 0).toFixed(2)} · Gemini $${((((costsState.gemini||{}).month||{}).cost_usd) || 0).toFixed(2)}</div>`;
 
   const itemHtml = (s) => {
     if (costsState.editingId === s.id) return editFormHtml(s);
