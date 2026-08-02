@@ -12431,9 +12431,20 @@ const handler = {
         if (b.medidas_libre) ctxParts.push('Medida pedida por el cliente: ' + b.medidas_libre + '.');
         if (b.notas) ctxParts.push('Tipografía / nota del pedido: ' + b.notas + '.');
         ctxParts.push('Ubicación: ' + (b.tipo === 'EXT' ? 'exterior' : 'interior') + '.');
-        if (b.ancho_cm && b.alto_cm) ctxParts.push('El cartel mide ' + b.ancho_cm + ' cm de ancho por ' + b.alto_cm + ' cm de alto (relación ' + (b.ancho_cm / b.alto_cm).toFixed(1) + ':1).');
+        // Si Emma todavía no cargó ancho/alto, los sacamos de la medida que pidió el
+        // cliente (medidas_libre) para poder forzar el aspecto y darle los cm al planner.
+        let aW = b.ancho_cm, aH = b.alto_cm;
+        if ((!aW || !aH) && b.medidas_libre) {
+          const ml = String(b.medidas_libre).toLowerCase();
+          const nums = (ml.match(/[0-9]+(?:[.,][0-9]+)?/g) || []).map(x => parseFloat(x.replace(',', '.')));
+          const conv = (v) => (/\bm\b|mt|metro/.test(ml) && v > 0 && v < 10) ? v * 100 : v;
+          if (nums.length >= 2 && /x/.test(ml)) { if (!aW) aW = Math.round(conv(nums[0])); if (!aH) aH = Math.round(conv(nums[1])); }
+          else if (nums.length >= 1 && !aW) aW = Math.round(conv(nums[0]));
+        }
+        if (aW && aH) ctxParts.push('El cartel mide ' + aW + ' cm de ancho por ' + aH + ' cm de alto (relación ' + (aW / aH).toFixed(1) + ':1).');
+        else if (aW) ctxParts.push('El cartel mide aproximadamente ' + aW + ' cm de ancho.');
         const ctxTxt = ctxParts.join('\n');
-        const aspect = iaAspectFromDims(b.ancho_cm, b.alto_cm);
+        const aspect = iaAspectFromDims(aW, aH);
         // ETAPA 1 — planner (texto+visión) razona el plan con el criterio de Emma
         let planText = null;
         try {

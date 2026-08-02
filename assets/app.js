@@ -13678,6 +13678,17 @@ function filterBriefBoard() {
 function _iaMedia(key) { return (key && STATE.token) ? (CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(key) + '?token=' + encodeURIComponent(STATE.token)) : ''; }
 function _iaMoney(n) { return (n == null || isNaN(n)) ? '—' : ('$' + Math.round(n).toLocaleString('es-AR')); }
 function _iaPrecio(a, al, n, t, tipo) { if (!a || !al || !n) return null; try { return calcCotizadorNuevo({ ancho: +a, alto: +al, neon: +n, tramos: +t || 0, tipo: tipo || 'INT' }).transFinal; } catch (e) { return null; } }
+// Ancho (cm) que pidió el cliente, parseado de medidas_libre ("90x50", "1 mt", "90").
+// Se usa para escalar la medición CV cuando Emma todavía no cargó el ancho.
+function parseAnchoDeMedida(txt) {
+  if (!txt) return 0;
+  const s = String(txt).toLowerCase();
+  const nums = (s.match(/[0-9]+(?:[.,][0-9]+)?/g) || []).map(x => parseFloat(x.replace(',', '.')));
+  if (!nums.length) return 0;
+  let w = nums[0]; // convención "ancho x alto" → el primero es el ancho
+  if (/\bm\b|mt|metro/.test(s) && w > 0 && w < 10) w = w * 100; // "1 mt" → 100 cm
+  return Math.round(w) || 0;
+}
 
 async function generarDisenioIA(briefId) {
   STATE.iaGenerando = STATE.iaGenerando || {};
@@ -13690,7 +13701,7 @@ async function generarDisenioIA(briefId) {
     if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
     // Medir el boceto con CV en el navegador + cotizar + guardar.
     const brief = STATE.briefs.find(b => b.id === briefId) || {};
-    const ancho = Number(brief.ancho_cm) || 0;
+    const ancho = Number(brief.ancho_cm) || parseAnchoDeMedida(brief.medidas_libre) || 0;
     if (ancho > 0 && j.ia_boceto_key) {
       let med = null;
       try { med = await medirBocetoIA(_iaMedia(j.ia_boceto_key), ancho); } catch (e) { med = null; }
@@ -15087,6 +15098,7 @@ function openNuevoBriefModal() {
   STATE.quickModalSaving = false;
   STATE.quickModalOrigen = 'wpp';
   STATE.quickModalUrgente = false;
+  STATE.quickModalIA = false;
   STATE.quickModalPrefillPhone = '';
   STATE.quickModalTipo = (briefProducto === 'corporea' ? 'corporea' : null);
   STATE.quickModalIntExt = null;
@@ -15134,6 +15146,7 @@ function openBriefFromChat(corporea) {
   STATE.quickModalSaving = false;
   STATE.quickModalOrigen = 'wpp';
   STATE.quickModalUrgente = false;
+  STATE.quickModalIA = false;
   STATE.quickModalPrefillPhone = String(phone).replace(/\D/g, '');
   STATE.quickModalIntExt = null;
   STATE.quickModalTipo = corporea ? 'corporea' : null;
@@ -15167,6 +15180,18 @@ function bindQuickCreateModal() {
       lbl.style.background = qUrg.checked ? 'rgba(255,24,48,.08)' : 'transparent';
       const sp = lbl.querySelector('span');
       if (sp) sp.style.color = qUrg.checked ? '#ff5468' : 'var(--fg)';
+    }
+  };
+  // Checkbox "diseñar también con IA" (persiste en STATE + feedback visual).
+  const qIA = document.getElementById('quick-modal-ia');
+  if (qIA) qIA.onchange = () => {
+    STATE.quickModalIA = qIA.checked;
+    const lbl = document.getElementById('quick-modal-ia-lbl');
+    if (lbl) {
+      lbl.style.borderColor = qIA.checked ? 'rgba(143,212,222,.5)' : 'var(--border)';
+      lbl.style.background = qIA.checked ? 'rgba(143,212,222,.10)' : 'transparent';
+      const sp = lbl.querySelector('span');
+      if (sp) sp.style.color = qIA.checked ? 'var(--accent-cyan,#8FD4DE)' : 'var(--fg)';
     }
   };
   // Toggle origen WhatsApp / Instagram.
@@ -15307,6 +15332,7 @@ async function confirmQuickCreate() {
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Creando…'; }
   try {
     const urgente = document.getElementById('quick-modal-urgente')?.checked ? 1 : 0;
+    const wantIA = document.getElementById('quick-modal-ia')?.checked || false;
     const saved = await saveBrief({
       cliente_nombre: titulo,
       cliente_wa_id: origen === 'wpp' ? telDigits : '',
@@ -15345,6 +15371,12 @@ async function confirmQuickCreate() {
     STATE.quickModalImages = [];
     STATE.quickModalSaving = false;
     render();
+    // Si Joaco marcó "diseñar también con IA": arranca ya, en segundo plano, con la
+    // medida que pidió el cliente (no espera a Emma). Fire-and-forget (~30s).
+    if (wantIA && !esCorpBrief && okImgs > 0) {
+      toast('🤖 Generando diseño IA en segundo plano…');
+      generarDisenioIA(saved.id);
+    }
   } catch (e) {
     STATE.quickModalSaving = false;
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '✓ Crear brief'; }
@@ -15444,6 +15476,14 @@ function renderQuickCreateModal() {
           <span style="font-size:13px;font-weight:600;color:${STATE.quickModalUrgente ? '#ff5468' : 'var(--fg)'}">🔥 Marcar como urgente</span>
           <span style="font-size:11px;color:var(--fg-subtle)">prioridad para Emma</span>
         </label>
+
+        ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user)) ? `
+        <!-- Diseñar también con IA (modo comparación — solo Joaco/Gaspar) -->
+        <label id="quick-modal-ia-lbl" style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:9px 11px;border:1px solid ${STATE.quickModalIA ? 'rgba(143,212,222,.5)' : 'var(--border)'};border-radius:var(--r-sm);margin-bottom:var(--s-4);background:${STATE.quickModalIA ? 'rgba(143,212,222,.10)' : 'transparent'};transition:border-color .15s,background .15s">
+          <input type="checkbox" id="quick-modal-ia" ${STATE.quickModalIA ? 'checked' : ''} style="width:16px;height:16px;accent-color:#8FD4DE;cursor:pointer;margin:0">
+          <span style="font-size:13px;font-weight:600;color:${STATE.quickModalIA ? 'var(--accent-cyan,#8FD4DE)' : 'var(--fg)'}">🤖 Diseñar también con IA</span>
+          <span style="font-size:11px;color:var(--fg-subtle)">arranca al crear · para comparar vs Emma</span>
+        </label>` : ''}
 
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button id="quick-modal-cancel" class="btn btn-ghost">Cancelar</button>
