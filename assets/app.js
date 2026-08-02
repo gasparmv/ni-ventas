@@ -12730,6 +12730,143 @@ if (canAccessChat()) {
   initPollWorker();
 }
 
+// ===== Diseñador IA: medición CV del boceto en el navegador (modo comparación Emma vs IA) =====
+// ===== Medición CV del boceto IA en el navegador =====
+// Mide neón (m), alto (cm) y tramos desde el line-art, replicando el método Python
+// validado (~8-10% vs Emma). El browser decodifica el JPEG con canvas (gratis).
+// neon = area_linea / ancho_linea × (ancho_cm / bbox_ancho_px) / 100
+//   ancho_linea = 2 × mediana(distanceTransform en los máximos locales de la cresta)
+// tramos = componentes conexos ; alto = ancho_cm × bbox_alto/bbox_ancho
+function _loadImg(url) {
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.crossOrigin = 'anonymous';
+    im.onload = () => res(im);
+    im.onerror = () => rej(new Error('no se pudo cargar la imagen'));
+    im.src = url;
+  });
+}
+
+// Distance transform euclídeo exacto (Felzenszwalb-Huttenlocher, 1D lower envelope
+// por columnas y luego por filas). Entra máscara 0/1, sale distancia al borde (px).
+function _edt(mask, W, H) {
+  const INF = 1e20;
+  const g = new Float64Array(W * H);
+  for (let i = 0; i < W * H; i++) g[i] = mask[i] ? INF : 0; // distancia al pixel de fondo más cercano
+  const f = new Float64Array(Math.max(W, H));
+  const d = new Float64Array(Math.max(W, H));
+  const v = new Int32Array(Math.max(W, H));
+  const z = new Float64Array(Math.max(W, H) + 1);
+  const dt1d = (n, get, set) => {
+    for (let i = 0; i < n; i++) f[i] = get(i);
+    let k = 0; v[0] = 0; z[0] = -INF; z[1] = INF;
+    for (let q = 1; q < n; q++) {
+      let s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+      while (s <= z[k]) { k--; s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]); }
+      k++; v[k] = q; z[k] = s; z[k + 1] = INF;
+    }
+    k = 0;
+    for (let q = 0; q < n; q++) {
+      while (z[k + 1] < q) k++;
+      const dx = q - v[k];
+      set(q, dx * dx + f[v[k]]);
+    }
+  };
+  // columnas
+  for (let x = 0; x < W; x++) dt1d(H, (y) => g[y * W + x], (y, val) => { g[y * W + x] = val; });
+  // filas
+  for (let y = 0; y < H; y++) dt1d(W, (x) => g[y * W + x], (x, val) => { g[y * W + x] = val; });
+  const out = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) out[i] = Math.sqrt(g[i]);
+  return out;
+}
+
+async function medirBocetoIA(url, anchoCm) {
+  const img = await _loadImg(url);
+  const scale = img.width > 600 ? 600 / img.width : 1;
+  const W = Math.max(1, Math.round(img.width * scale)), H = Math.max(1, Math.round(img.height * scale));
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, W, H);
+  const px = ctx.getImageData(0, 0, W, H).data;
+  return _measureFromPixels(px, W, H, anchoCm);
+}
+
+function _measureFromPixels(px, W, H, anchoCm) {
+  const N = W * H;
+  const Varr = new Uint8Array(N), Sarr = new Uint8Array(N), hist = new Uint32Array(256);
+  for (let i = 0; i < N; i++) {
+    const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    Varr[i] = mx; Sarr[i] = mx === 0 ? 0 : Math.round((mx - mn) / mx * 255); hist[mx]++;
+  }
+  let bg = 0, best = 0;
+  for (let v = 0; v < 256; v++) if (hist[v] > best) { best = hist[v]; bg = v; }
+  let mask = new Uint8Array(N);
+  for (let i = 0; i < N; i++) { const v = Varr[i]; if (Sarr[i] > 55 || (v - bg) > 55 || (bg - v) > 75) mask[i] = 1; }
+  // CLOSE 3x3 (dilate -> erode) para conectar la línea sin fragmentarla
+  const morph = (src, dilate) => {
+    const out = new Uint8Array(N);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let hit = dilate ? 0 : 1;
+      for (let dy = -1; dy <= 1 && (dilate ? !hit : hit); dy++) for (let dx = -1; dx <= 1; dx++) {
+        const ny = y + dy, nx = x + dx;
+        const val = (ny < 0 || ny >= H || nx < 0 || nx >= W) ? 0 : src[ny * W + nx];
+        if (dilate) { if (val) { hit = 1; break; } } else { if (!val) { hit = 0; break; } }
+      }
+      out[y * W + x] = hit;
+    }
+    return out;
+  };
+  mask = morph(morph(mask, true), false);
+  // Componentes conexos (BFS 8-conn): remover chicos + contar
+  const labels = new Int32Array(N).fill(0);
+  const minpx = Math.max(6, Math.round(N * 0.0002));
+  const stack = new Int32Array(N); let ncomp = 0;
+  for (let i = 0; i < N; i++) {
+    if (!mask[i] || labels[i]) continue;
+    let sp = 0, cnt = 0; stack[sp++] = i; labels[i] = -1; const px2 = [];
+    while (sp > 0) {
+      const p = stack[--sp]; px2.push(p); cnt++;
+      const y = (p / W) | 0, x = p - y * W;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue; const ny = y + dy, nx = x + dx;
+        if (ny < 0 || ny >= H || nx < 0 || nx >= W) continue;
+        const q = ny * W + nx; if (mask[q] && !labels[q]) { labels[q] = -1; stack[sp++] = q; }
+      }
+    }
+    if (cnt >= minpx) { ncomp++; for (const p of px2) labels[p] = ncomp; }
+    else for (const p of px2) mask[p] = 0;
+  }
+  let area = 0, minx = W, maxx = 0, miny = H, maxy = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (mask[y * W + x]) {
+    area++; if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+  }
+  if (area < 40) return null;
+  const bw = maxx - minx + 1, bh = maxy - miny + 1;
+  const dt = _edt(mask, W, H);
+  // máximos locales del DT (cresta) → mediana → ancho de línea
+  const ridge = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const p = y * W + x; if (!mask[p] || dt[p] <= 0.7) continue;
+    let isMax = true;
+    for (let dy = -1; dy <= 1 && isMax; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const ny = y + dy, nx = x + dx; if (ny < 0 || ny >= H || nx < 0 || nx >= W) continue;
+      if (dt[ny * W + nx] > dt[p]) { isMax = false; break; }
+    }
+    if (isMax) ridge.push(dt[p]);
+  }
+  if (ridge.length < 3) return null;
+  ridge.sort((a, b) => a - b);
+  const med = ridge[ridge.length >> 1];
+  const width = Math.max(2 * med, 1);
+  const cmPerPx = anchoCm / bw;
+  const neon = Math.round((area / width) * cmPerPx / 100 * 10) / 10;
+  const alto = Math.round(anchoCm * bh / bw);
+  return { neon, alto, tramos: ncomp };
+}
+
+
 // ============ COTIZACIÓN — panel conversacional ============
 // Kanban de briefs. Cada brief es la unidad de trabajo entre comercial
 // (Joaco) y diseñador (Emma): nace de una conversación de WhatsApp,
@@ -13537,6 +13674,104 @@ function filterBriefBoard() {
   });
 }
 
+// ===== Modo comparación Emma vs IA (diseñador IA — solo Joaco + Gaspar) =====
+function _iaMedia(key) { return (key && STATE.token) ? (CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(key) + '?token=' + encodeURIComponent(STATE.token)) : ''; }
+function _iaMoney(n) { return (n == null || isNaN(n)) ? '—' : ('$' + Math.round(n).toLocaleString('es-AR')); }
+function _iaPrecio(a, al, n, t, tipo) { if (!a || !al || !n) return null; try { return calcCotizadorNuevo({ ancho: +a, alto: +al, neon: +n, tramos: +t || 0, tipo: tipo || 'INT' }).transFinal; } catch (e) { return null; } }
+
+async function generarDisenioIA(briefId) {
+  STATE.iaGenerando = STATE.iaGenerando || {};
+  if (STATE.iaGenerando[briefId]) return;
+  if (!STATE.token) { await showAlert('Tenés que estar logueado', { title: 'Diseño IA', variant: 'warn' }); return; }
+  STATE.iaGenerando[briefId] = true; render();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/briefs/' + briefId + '/generar-ia', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() } });
+    const j = await r.json().catch(() => ({ error: 'respuesta inválida' }));
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    // Medir el boceto con CV en el navegador + cotizar + guardar.
+    const brief = STATE.briefs.find(b => b.id === briefId) || {};
+    const ancho = Number(brief.ancho_cm) || 0;
+    if (ancho > 0 && j.ia_boceto_key) {
+      let med = null;
+      try { med = await medirBocetoIA(_iaMedia(j.ia_boceto_key), ancho); } catch (e) { med = null; }
+      if (med) {
+        const precio = _iaPrecio(ancho, med.alto, med.neon, med.tramos, brief.tipo);
+        await fetch(CONFIG.trackerUrl + '/admin/briefs/' + briefId, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ ia_alto_cm: med.alto, ia_neon_mt: med.neon, ia_tramos: med.tramos, ia_precio_trans: precio }) });
+      }
+    }
+    await fetchBriefDetail(briefId);
+  } catch (e) {
+    await showAlert('No se pudo generar el diseño IA: ' + (e.message || e), { title: 'Diseño IA', variant: 'warn' });
+  } finally {
+    STATE.iaGenerando[briefId] = false; render();
+  }
+}
+
+async function guardarFeedbackIA(briefId, feedback) {
+  const el = document.getElementById('ia-feedback-nota');
+  const nota = el ? el.value : '';
+  try {
+    await fetch(CONFIG.trackerUrl + '/admin/briefs/' + briefId, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ ia_feedback: feedback, ia_feedback_nota: nota }) });
+    const b = STATE.briefs.find(x => x.id === briefId); if (b) { b.ia_feedback = feedback; b.ia_feedback_nota = nota; }
+    render();
+  } catch (e) { await showAlert('No se pudo guardar el feedback', { title: 'Feedback', variant: 'warn' }); }
+}
+
+// Sección de comparación para el drawer. Devuelve '' si no aplica (gate Joaco+Gaspar).
+function renderIACompare(data) {
+  if (!data || !data.id) return '';
+  if (!(isJoaquinUser(STATE.user) || isGasparUser(STATE.user))) return '';
+  if (data.tipo === 'corporea') return '';
+  const gen = STATE.iaGenerando && STATE.iaGenerando[data.id];
+  const box = 'background:var(--card,#12121a);border:1px solid var(--border);border-radius:var(--r-md,10px);padding:10px';
+  const head = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span style="font-weight:700;font-size:14px">🤖 Diseñador IA vs Emma</span><span style="font-size:11px;color:var(--sub);border:1px solid var(--border);border-radius:6px;padding:1px 6px">prueba</span></div>`;
+  const wrap = (inner) => `<fieldset style="border:1px dashed var(--accent-cyan,#8FD4DE);border-radius:var(--r-md,10px);padding:12px;margin-top:14px">${head}${inner}</fieldset>`;
+
+  if (gen) return wrap(`<div style="display:flex;align-items:center;gap:8px;color:var(--sub);font-size:13px"><span class="spin" style="width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent-cyan);border-radius:50%;display:inline-block;animation:spin 1s linear infinite"></span> Generando diseño IA + midiendo… (planner + imagen, ~30s)</div>`);
+
+  if (!data.ia_boceto_key) {
+    return wrap(`<button class="btn btn-cyan" id="brief-generar-ia" data-brief-id="${data.id}" style="width:100%">Diseñar con IA</button><div style="font-size:12px;color:var(--sub);margin-top:8px">La IA diseña el boceto desde la referencia del cliente, lo mide (ancho/alto/neón/tramos) y cotiza — para comparar con Emma.</div>`);
+  }
+
+  const tipo = data.tipo || 'INT';
+  const eA = Number(data.ancho_cm) || 0, eAl = Number(data.alto_cm) || 0, eN = Number(data.neon_mt) || 0, eT = Number(data.tramos) || 0;
+  const ePrecio = _iaPrecio(eA, eAl, eN, eT, tipo);
+  const iaAl = data.ia_alto_cm, iaN = data.ia_neon_mt, iaT = data.ia_tramos, iaP = data.ia_precio_trans;
+  const pdiff = (ePrecio && iaP) ? Math.round((iaP - ePrecio) / ePrecio * 100) : null;
+  // Imagen de Emma: su render si existe, si no su boceto.
+  const emmaImg = (STATE.briefDetailImages.find(x => x.tipo === 'render') || STATE.briefDetailImages.find(x => x.tipo === 'boceto'));
+  const emmaUrl = emmaImg ? _iaMedia(emmaImg.r2_key) : '';
+  const iaUrl = _iaMedia(data.ia_boceto_key);
+  const cell = (title, imgUrl, a, al, n, t, precio, diffPill) => `
+    <div style="${box}">
+      <div style="font-size:10px;font-weight:700;letter-spacing:.5px;color:var(--sub);margin-bottom:6px">${title}${diffPill || ''}</div>
+      ${imgUrl ? `<img src="${imgUrl}" style="width:100%;height:96px;object-fit:contain;background:#3a3d42;border-radius:6px;border:1px solid var(--border)">` : `<div style="height:96px;display:flex;align-items:center;justify-content:center;color:var(--sub);font-size:11px;background:#22222c;border-radius:6px">sin imagen</div>`}
+      <div style="font-size:12px;color:var(--sub);margin-top:6px;line-height:1.7">
+        <div>Ancho·Alto: <b style="color:var(--fg)">${a || '—'} · ${al || '—'} cm</b></div>
+        <div>Neón·Tramos: <b style="color:var(--fg)">${n || '—'} m · ${t || '—'}</b></div>
+        <div style="margin-top:2px;font-size:14px">Precio: <b style="color:var(--fg)">${_iaMoney(precio)}</b></div>
+      </div>
+    </div>`;
+  const diffPill = pdiff != null ? ` <span style="color:${Math.abs(pdiff) <= 10 ? 'var(--ok,#4fca77)' : (Math.abs(pdiff) <= 20 ? 'var(--warn,#e0a94f)' : 'var(--red,#f0644a)')};font-weight:700">${pdiff > 0 ? '+' : ''}${pdiff}%</span>` : '';
+  const fbOk = data.ia_feedback === 'bien', fbMal = data.ia_feedback === 'mal';
+  return wrap(`
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      ${cell('EMMA', emmaUrl, eA, eAl, eN, eT, ePrecio, '')}
+      ${cell('IA', iaUrl, eA, iaAl, iaN, iaT, iaP, diffPill)}
+    </div>
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+      <div style="font-size:12px;color:var(--sub);margin-bottom:6px">¿La cotización de la IA está bien?</div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <button class="btn" id="ia-fb-bien" data-brief-id="${data.id}" style="border-color:${fbOk ? 'var(--ok,#4fca77)' : 'var(--border)'};color:${fbOk ? 'var(--ok,#4fca77)' : 'var(--fg)'}">✓ Bien</button>
+        <button class="btn" id="ia-fb-mal" data-brief-id="${data.id}" style="border-color:${fbMal ? 'var(--red,#f0644a)' : 'var(--border)'};color:${fbMal ? 'var(--red,#f0644a)' : 'var(--fg)'}">✗ Mal</button>
+        <input type="text" id="ia-feedback-nota" placeholder="nota (opcional)…" value="${(data.ia_feedback_nota || '').replace(/"/g, '&quot;')}" style="flex:1;min-width:140px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm,7px);padding:7px 9px;color:var(--fg);font-size:13px">
+        <button class="btn btn-ghost" id="brief-regenerar-ia" data-brief-id="${data.id}" title="Volver a generar">↻</button>
+      </div>
+      ${data.ia_feedback ? `<div style="font-size:11px;color:var(--sub);margin-top:6px">Marcado: <b style="color:var(--fg)">${data.ia_feedback === 'bien' ? 'Bien ✓' : 'Mal ✗'}</b></div>` : ''}
+    </div>`);
+}
+
+
 function renderBriefDrawer() {
   if (!STATE.briefSelected && !STATE.briefDraft) return '';
   const isNew = !STATE.briefSelected;
@@ -13799,6 +14034,8 @@ function renderBriefDrawer() {
           ` : ''}
         </fieldset>
         ` : ''}
+
+        ${renderIACompare(data)}
 
         <!-- Notas (cualquier rol puede escribir) -->
         <div>
@@ -16308,6 +16545,16 @@ function bindCotizacion() {
     // Botón generar render IA.
     const genBtn = document.getElementById('brief-generar-render');
     if (genBtn) genBtn.onclick = generarRenderBrief;
+
+    // Modo comparación Emma vs IA (diseñador IA — solo Joaco + Gaspar).
+    const iaGenBtn = document.getElementById('brief-generar-ia');
+    if (iaGenBtn) iaGenBtn.onclick = () => generarDisenioIA(parseInt(iaGenBtn.dataset.briefId, 10));
+    const iaReGenBtn = document.getElementById('brief-regenerar-ia');
+    if (iaReGenBtn) iaReGenBtn.onclick = () => generarDisenioIA(parseInt(iaReGenBtn.dataset.briefId, 10));
+    const iaFbBien = document.getElementById('ia-fb-bien');
+    if (iaFbBien) iaFbBien.onclick = () => guardarFeedbackIA(parseInt(iaFbBien.dataset.briefId, 10), 'bien');
+    const iaFbMal = document.getElementById('ia-fb-mal');
+    if (iaFbMal) iaFbMal.onclick = () => guardarFeedbackIA(parseInt(iaFbMal.dataset.briefId, 10), 'mal');
 
     // El render YA no tiene dropzone manual — solo se genera con IA.
     // Igual mantenemos el grid como zona target por si se pega/dropea desde

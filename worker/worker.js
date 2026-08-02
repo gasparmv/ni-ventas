@@ -5236,6 +5236,91 @@ const GEMINI_RENDER_PROMPT = [
   '- Restricciones físicas (1cm corte, 2-3cm tamaño mínimo, sin puntitos).'
 ].join('\n');
 
+// ===== Diseñador IA: boceto line-art (reemplaza el diseño manual de Emma) =====
+// A diferencia de GEMINI_RENDER_PROMPT (que da el render glowing final para el
+// cliente), este produce el BOCETO técnico: line-art plano, medible por CV, con
+// el mismo estilo que dibuja Emma (fondo gris, líneas finas uniformes de color,
+// sin brillo). Ese boceto después se MIDE (ancho/alto/neón/tramos) y se renderiza.
+const GEMINI_BOCETO_PROMPT = [
+  'Sos diseñador técnico de carteles de neón LED en Neon Infinito. A partir de la imagen de referencia del cliente (puede ser texto, un logo relleno, o la foto de un cartel de neón), generá el BOCETO TÉCNICO en LINE-ART: el dibujo plano de las líneas EXACTAS que va a recorrer la manguera de neón. NO es un render con brillo — es un plano limpio, plano y frontal, como un trazado vectorial técnico.',
+  '',
+  '═══ ESTILO DE SALIDA (line-art plano y medible) ═══',
+  '- Fondo: gris medio liso y parejo (tipo #6b6b6b), sin textura, sin degradé, sin viñeta, ocupando TODO el cuadro.',
+  '- Cada manguera = UNA línea FINA de ancho UNIFORME (trazo vectorial fino y parejo), de color sólido y plano. PROHIBIDO: brillo, glow, halo, resplandor, 3D, sombra, degradé, grosor variable. Es un dibujo plano, NO una foto de neón encendido.',
+  '- Vista frontal recta (ortográfica), sin perspectiva ni inclinación. Diseño centrado, ocupando el cuadro con un margen chico parejo.',
+  '- SIN pared, SIN base de acrílico, SIN escena, SIN reflejos, SIN cables. Solo las líneas de neón sobre el gris.',
+  '',
+  '═══ QUÉ DIBUJAR — el RECORRIDO de la manguera, NUNCA el relleno ═══',
+  'El neón es un tubo hueco: dibuja LÍNEAS, jamás rellena áreas. Convertí cada elemento en el TRAZO que recorrería la manguera:',
+  '- Texto/letras: dibujá cada letra como la línea que la ESCRIBE, con la tipografía pedida en el contexto (ej: Pacifico=cursiva script, Cocogoose=sans-serif) y las formas de la referencia. Si la referencia muestra letras gruesas o rellenas, NO las pintes rellenas: representalas con su trazo/contorno de ancho uniforme.',
+  '- Figuras/logos rellenos: dibujá SOLO el contorno exterior (outline) como línea. El interior queda gris (vacío), nunca relleno.',
+  '- Detalles internos finos, texturas, sombras, degradés, brillos: NO se dibujan.',
+  '',
+  '═══ SIMPLIFICACIÓN FÍSICA (obligatoria) ═══',
+  '- Nada de puntos/chispas/motas sueltas menores a ~1cm en el cartel real: omitilos.',
+  '- Cada elemento debe medir al menos 2-3cm real; lo más chico, omitir.',
+  '- Si una letra tiene contorno + relleno de otro color, dejá UNA sola línea (la dominante).',
+  '',
+  '═══ COLORES (paleta física del neón) ═══',
+  'Usá SOLO estos colores planos y sólidos: blanco cálido, blanco frío, rojo, naranja, amarillo, verde lima, verde, celeste, azul, rosa, violeta. Cada tramo/tubo es de UN color uniforme. Mapeá los que no existen: negro/gris/plateado→blanco frío, marrón/dorado→amarillo o naranja, beige→blanco cálido. Respetá la asignación de colores de la referencia dentro de la paleta (ej: texto amarillo + acentos verdes + una línea violeta).',
+  '',
+  '═══ FIDELIDAD ═══',
+  'Reproducí FIEL la composición, el layout, la cantidad de elementos, las poses y la tipografía de la referencia. NO rediseñes ni agregues nada que la referencia no tenga. Respetá la proporción ancho/alto del pedido si viene en el contexto.',
+  '',
+  'Salida: SOLO la imagen del boceto line-art. Nada de texto.'
+].join('\n');
+
+// ===== Diseñador IA en 2 etapas (reemplaza a Emma en el diseño) =====
+// Etapa 1: PLANNER (gemini-2.5-pro, texto+visión) razona el plan aplicando el criterio
+// de Emma (trazo simple/doble por tamaño, fuente, 6mm, fidelidad, colores).
+const GEMINI_IA_PLAN_PROMPT = `Sos el director de diseño de Neon Infinito. Mirá la referencia del cliente y el contexto, y escribí un PLAN preciso y corto para fabricar el cartel de neón LED con el MÍNIMO de material (criterio de Emma), que después otro va a dibujar. El cartel se hace con manguera de 6mm de grosor real. Aplicá EXACTO estas reglas:
+
+1. CONTENIDO: ¿Qué dice / qué muestra el cartel? Si la referencia es un chat, extraé SOLO el texto que va en el cartel (ignorá "quiero", "un cartel", "del nombre", "que diga", medidas, colores dichos aparte). Si es un logo o la foto de un cartel, listá sus elementos reales (texto + figuras). Sé FIEL a la referencia, no inventes.
+
+2. PROPORCIÓN Y LAYOUT: el cartel tiene la relación ancho×alto del contexto. Decidí el layout que la respeta. Si es finito y ancho (relación alta), el texto va en UNA sola línea horizontal — NO lo partas en varias líneas.
+
+3. TRAZO SIMPLE vs DOBLE por tamaño — para CADA texto, estimá su altura real en cm (según el alto del cartel y cuántas líneas hay) y decidí:
+   - altura >= 10cm -> puede ir DOBLE contorno (outline). ChunkFive: solo si >= 12.5cm.
+   - altura entre 6.5 y 10cm -> SIMPLE (una sola línea que escribe la letra).
+   - altura < 6.5cm -> NO se fabrica: agrandá ese texto o sacalo.
+   - PREFERÍ SIEMPRE simple salvo que la letra sea grande y el diseño pida look bold. Texto secundario/chico -> simple.
+
+4. FUENTE: usá la del contexto si la indican. Si no, elegí de las de Neon Infinito: finas de trazo simple (Yellowtail, Learning Curve, Gotham Thin) o gruesas de doble contorno (Pacific, Melt, ChunkFive, Gotham Ultra, Cocogoose).
+
+5. COLORES: por elemento, de la paleta física del neón (blanco cálido, blanco frío, rojo, naranja, amarillo, verde lima, verde, celeste, azul, rosa, violeta). Copiá los colores de la referencia (amarillo queda amarillo). Mapeá: negro/gris/plateado->blanco frío, marrón/dorado->amarillo, beige->blanco cálido.
+
+6. SIMPLIFICAR al tubo de 6mm: sacá filigranas, ornamentos, detalles internos finos, texto diminuto, marcos finos — nada más chico que el tubo. Figuras: solo su contorno exterior.
+
+Devolvé el PLAN cortito, elemento por elemento, con este formato:
+- Elemento: "<qué dice o qué es>" | fuente: <X> | altura ~<N>cm | trazo: <simple/doble> | color: <X>
+(repetí por cada elemento)
+LAYOUT: <una frase: cómo se distribuyen, respetando la proporción ancho:alto>`;
+
+// Etapa 2: el modelo de imagen dibuja EXACTO ese plan como line-art plano y medible.
+const GEMINI_IA_IMG_PROMPT = `Dibujá el BOCETO TÉCNICO en LINE-ART de neón siguiendo EXACTO el PLAN DEL DISEÑO de abajo y la imagen de referencia. Es un plano plano y frontal (como un trazado vectorial), NO un render con brillo.
+
+CÓMO DIBUJAR CADA ELEMENTO (según el plan):
+- Trazo SIMPLE = UNA sola línea que ESCRIBE la letra/figura (su recorrido central), como escrita a mano. NO la outlinees.
+- Trazo DOBLE = las DOS líneas del contorno de la letra (outline), bien juntas (gap mínimo).
+- Respetá qué elementos van simple y cuáles doble según el plan, y los colores del plan.
+
+ESTILO DE SALIDA (plano y medible):
+- Fondo: gris medio liso y parejo (#6b6b6b), plano, todo el cuadro. Sin textura ni degradé.
+- Cada manguera = una línea de grosor UNIFORME (el tubo de 6mm a escala del cartel), color sólido y plano.
+- PROHIBIDO: brillo, glow, halo, resplandor, sombra, drop-shadow, contorno oscuro alrededor de las líneas, 3D, degradé, grosor variable.
+- NO dibujes cotas, medidas, flechas, números ni etiquetas. NO dibujes el contorno del acrílico ni ninguna línea que rodee el conjunto. Solo las letras y figuras del neón.
+- Vista frontal recta, sin perspectiva.
+
+PROPORCIÓN: respetá la relación ancho×alto del cartel (la que dice el plan). Si es finito y ancho, el diseño ocupa una franja ancha y baja — NO lo hagas cuadrado ni lo partas en más líneas de las que dice el plan. Ocupá el cuadro con un margen chico parejo.
+
+Colores: solo la paleta del neón, un color uniforme por tramo, según el plan.
+
+Salida: SOLO la imagen del boceto line-art. Nada de texto.`;
+
+// ancho:alto -> relación de aspecto soportada por gemini image más cercana.
+const IA_ASPECT_RATIOS = [['21:9', 21 / 9], ['16:9', 16 / 9], ['3:2', 1.5], ['4:3', 4 / 3], ['5:4', 1.25], ['1:1', 1], ['4:5', 0.8], ['3:4', 0.75], ['2:3', 2 / 3], ['9:16', 9 / 16]];
+function iaAspectFromDims(w, h) { if (!w || !h) return null; const r = w / h; let best = IA_ASPECT_RATIOS[0]; for (const a of IA_ASPECT_RATIOS) if (Math.abs(a[1] - r) < Math.abs(best[1] - r)) best = a; return best[0]; }
+
 // Prompt para que la IA estime medidas + mts de neón a partir de la imagen y
 // del texto que escribió el cliente. Usa gemini-2.5-flash (mucho más barato
 // que el modelo de imagen) y devuelve JSON estructurado.
@@ -5861,10 +5946,13 @@ function abToBase64(buf) {
 // tokens de la imagen generada (el grueso del costo). Ajustables si Google cambia
 // precios — la fuente de verdad sigue siendo la factura de Google.
 const GEMINI_PRICES = {
-  'gemini-3.1-flash-image': { in: 0.30, out: 30 },
-  'gemini-2.5-flash-image': { in: 0.30, out: 30 },
-  'gemini-3-pro-image':     { in: 2.00, out: 120 },
-  'gemini-2.5-pro':         { in: 1.25, out: 5 },
+  // Tarifas STANDARD (no batch) por 1M tokens, verificadas contra ai.google.dev/gemini-api/docs/pricing.
+  // OJO: antes estaban las de batch (out 30/5 = mitad) → subestimaba ~2x el flash-image.
+  // Validado 2026-08: julio corregido = $157.24 vs Google $156.32 (0.6%).
+  'gemini-3.1-flash-image': { in: 0.50, out: 60 },  // img: $0.067/1K, $0.101/2K, $0.151/4K
+  'gemini-2.5-flash-image': { in: 0.50, out: 60 },
+  'gemini-3-pro-image':     { in: 2.00, out: 120 }, // img: $0.134/1K-2K, $0.24/4K
+  'gemini-2.5-pro':         { in: 1.25, out: 10 },
   'gemini-2.5-flash':       { in: 0.30, out: 2.50 },
 };
 function geminiCost(model, usage) {
@@ -5919,9 +6007,13 @@ async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto, op
       if (im && im.base64) { const _e = await _shrinkB64ForGemini(env, im.base64, im.mime || 'image/png'); reqParts.push({ inline_data: { mime_type: _e.mime, data: _e.data } }); }
     }
   }
+  const genCfg = { responseModalities: ['IMAGE', 'TEXT'] };
+  // aspectRatio (ej '16:9','3:2','21:9') fuerza la proporción de salida — clave para
+  // que un cartel finito no salga cuadrado. Solo modelos de imagen que lo soportan.
+  if (opts.aspectRatio) genCfg.imageConfig = { aspectRatio: opts.aspectRatio };
   const body = {
     contents: [{ parts: reqParts }],
-    generationConfig: { responseModalities: ['IMAGE', 'TEXT'] }
+    generationConfig: genCfg
   };
   // Reintento ante errores TRANSITORIOS de Gemini (503 deadline/overloaded, 500, 429):
   // el render es pesado y Google a veces satura o corta por deadline. Un reintento
@@ -11949,7 +12041,9 @@ const handler = {
           'precio_trans', 'precio_negro', 'precio_final',
           'descuento', 'recargo', 'reventa', 'comision_joaco',
           'disenador_id', 'intentos_followup', 'notas', 'sheet_row',
-          'urgente', 'modificar'
+          'urgente', 'modificar',
+          // Modo comparación IA vs Emma (diseñador IA). ia_* separadas de las de Emma.
+          'ia_modo', 'ia_alto_cm', 'ia_neon_mt', 'ia_tramos', 'ia_precio_trans', 'ia_feedback', 'ia_feedback_nota'
         ];
         const sets = [];
         const args = [];
@@ -12316,6 +12410,54 @@ const handler = {
           params: paramsOut,
           params_error: paramsResult.error || null
         }, 201);
+      }
+
+      // POST /admin/briefs/:id/generar-ia  →  DISEÑADOR IA en 2 etapas (planner gemini-2.5-pro
+      // que razona el criterio de Emma + imagen gemini-3-pro-image) con aspecto forzado.
+      // Guarda el boceto en R2 + ia_boceto_key / ia_plan / ia_generado_at. La MEDICIÓN
+      // (neón/alto/tramos) la hace el frontend por CV sobre el boceto y la guarda vía PATCH ia_*.
+      if (request.method === 'POST' && /^\/admin\/briefs\/\d+\/generar-ia$/.test(path)) {
+        const briefId = path.split('/')[3];
+        if (!env.GEMINI_API_KEY || !env.MEDIA) return json({ error: 'falta GEMINI_API_KEY o MEDIA' }, 503);
+        const b = await env.DB.prepare("SELECT tipo, medidas_libre, notas, ancho_cm, alto_cm FROM briefs WHERE id=?").bind(briefId).first();
+        if (!b) return json({ error: 'brief no existe' }, 404);
+        const img = await env.DB.prepare("SELECT r2_key, content_type FROM brief_imagenes WHERE brief_id=? AND tipo='chat' ORDER BY orden DESC, id DESC LIMIT 1").bind(briefId).first();
+        if (!img) return json({ error: 'el brief no tiene imagen de referencia del cliente (chat)' }, 400);
+        const obj = await env.MEDIA.get(img.r2_key);
+        if (!obj) return json({ error: 'no se encontró la referencia en R2' }, 404);
+        const buf = await obj.arrayBuffer();
+        const mime = (img.content_type || 'image/png').split(';')[0];
+        const ctxParts = [];
+        if (b.medidas_libre) ctxParts.push('Medida pedida por el cliente: ' + b.medidas_libre + '.');
+        if (b.notas) ctxParts.push('Tipografía / nota del pedido: ' + b.notas + '.');
+        ctxParts.push('Ubicación: ' + (b.tipo === 'EXT' ? 'exterior' : 'interior') + '.');
+        if (b.ancho_cm && b.alto_cm) ctxParts.push('El cartel mide ' + b.ancho_cm + ' cm de ancho por ' + b.alto_cm + ' cm de alto (relación ' + (b.ancho_cm / b.alto_cm).toFixed(1) + ':1).');
+        const ctxTxt = ctxParts.join('\n');
+        const aspect = iaAspectFromDims(b.ancho_cm, b.alto_cm);
+        // ETAPA 1 — planner (texto+visión) razona el plan con el criterio de Emma
+        let planText = null;
+        try {
+          const planFull = GEMINI_IA_PLAN_PROMPT + '\n\nCONTEXTO DEL PEDIDO:\n' + ctxTxt;
+          const pbody = { contents: [{ parts: [{ text: planFull }, { inline_data: { mime_type: mime, data: abToBase64(buf) } }] }], generationConfig: { temperature: 0.3 } };
+          const pr = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${env.GEMINI_API_KEY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(pbody) });
+          if (pr.ok) { const pd = await pr.json(); planText = pd?.candidates?.[0]?.content?.parts?.map(x => x.text).filter(Boolean).join('') || null; try { await geminiTrackUsage(env, 'gemini-2.5-pro', 'ia-plan', pd?.usageMetadata, 'ia-plan-' + briefId); } catch (_) {} }
+        } catch (_) {}
+        // ETAPA 2 — imagen dibuja el plan
+        const extraTexto = 'CONTEXTO DEL PEDIDO:\n' + ctxTxt + (planText ? '\n\n═══ PLAN DEL DISEÑO (seguilo EXACTO) ═══\n' + planText : '');
+        const iaImgModel = env.GEMINI_IA_IMAGE_MODEL || 'gemini-3-pro-image';
+        const opts = { basePrompt: GEMINI_IA_IMG_PROMPT, ref: 'ia-boceto-' + briefId, model: iaImgModel };
+        if (aspect) opts.aspectRatio = aspect;
+        const r = await generarRenderConGemini(env, buf, mime, extraTexto, opts);
+        if (!r.ok) return json({ error: 'diseño IA: ' + r.error }, 502);
+        let bytes;
+        try { bytes = Uint8Array.from(atob(r.base64), c => c.charCodeAt(0)); } catch (e) { return json({ error: 'no se pudo decodificar la imagen' }, 500); }
+        const ext = (r.mime.split('/')[1] || 'jpeg').replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'jpeg';
+        const key = `briefs/${briefId}/ia-boceto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: r.mime } });
+        const now = new Date().toISOString();
+        await env.DB.prepare("UPDATE briefs SET ia_boceto_key=?, ia_plan=?, ia_generado_at=?, ia_modo=COALESCE(NULLIF(ia_modo,''),'ambos'), ia_feedback=NULL, updated_at=? WHERE id=?")
+          .bind(key, planText || '', now, now, briefId).run();
+        return json({ ok: true, ia_boceto_key: key, content_type: r.mime, plan: planText, aspect, generado_at: now });
       }
 
       // DELETE /admin/briefs/:id/imagen/:imgId  →  borra de R2 + DB.
