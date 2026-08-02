@@ -6067,7 +6067,7 @@ function renderActividad() {
 window.loadActivity = loadActivity;
 
 // ---------- ADMIN ----------
-let adminData = { rows: [], loading: false, error: null, range: '7d' };
+let adminData = { rows: [], loading: false, error: null, range: '7d', loaded: false };
 
 async function loadAdminActivity() {
   if (!isAdmin()) { adminData.error = 'No autorizado'; render(); return; }
@@ -6085,16 +6085,18 @@ async function loadAdminActivity() {
     if (r.status === 401) { saveToken(null); throw new Error('Sesión expirada — re-logueate'); }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    adminData = { rows: j.rows || [], loading: false, error: null, range: adminData.range };
+    adminData = { rows: j.rows || [], loading: false, error: null, range: adminData.range, loaded: true };
   } catch (e) {
-    adminData = { rows: [], loading: false, error: e.message, range: adminData.range };
+    adminData = { rows: [], loading: false, error: e.message, range: adminData.range, loaded: true };
   }
   render();
 }
 
 function bindAdmin() {
   document.querySelectorAll('[data-admin-range]').forEach(b => b.onclick = () => { adminData.range = b.dataset.adminRange; loadAdminActivity(); });
-  if (!adminData.rows.length && !adminData.error && !adminData.loading && isAdmin()) loadAdminActivity();
+  // Usar el flag `loaded` (no rows.length): si Joaquin tiene 0 actividad, rows=[] y
+  // el guard viejo re-disparaba loadAdminActivity en cada render -> loop infinito -> spinner eterno.
+  if (!adminData.loaded && !adminData.loading && isAdmin()) loadAdminActivity();
   // Stats del copiloto IA (generadas / enviadas / editadas / descartadas).
   maybeRefreshCopilotCost();
   // Fase 2C: propuestas de mejora al playbook pendientes de aprobar.
