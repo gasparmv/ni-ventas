@@ -368,7 +368,14 @@ function buildPresupuestoTexto() {
 function getPresupuestoTextoFinal() {
   // Si el usuario editó manualmente, usamos esa versión. Si no, la auto-generada.
   const override = STATE.cotizadorForm.textoOverride;
-  return (override && override.trim()) ? override : buildPresupuestoTexto();
+  if (override && override.trim()) return override;
+  // Los precios del presupuesto que se MANDA al cliente van SIEMPRE con el valor real,
+  // aunque el modo privacidad (STATE.privacy) esté activo en pantalla — sino se le manda
+  // "$•••" al cliente (bug: con privacy activo, Nadia mandó un presupuesto sin precios).
+  const prevPriv = STATE.privacy;
+  STATE.privacy = false;
+  try { return buildPresupuestoTexto(); }
+  finally { STATE.privacy = prevPriv; }
 }
 
 function copiarPresupuesto() {
@@ -402,9 +409,13 @@ async function enviarPresupuestoComoPlantilla(tel, carteles, renderKey) {
   const ancho = String(Math.round(+c.ancho));
   const alto = String(Math.round(+c.alto));
   // El template de Meta manda tantos params como variables tenga su body aprobado.
+  // Precios SIEMPRE reales en la plantilla (ignorar el modo privacidad de pantalla,
+  // sino los precios salen "$•••" al cliente).
+  const _pp = STATE.privacy; STATE.privacy = false;
   const params = TEMPLATE_DETALLADO_TIENE_NEGRA
     ? [nombre, ancho, alto, fmtMoney(r.transFinal), fmtMoney(r.negroFinal)]
     : [nombre, ancho, alto, fmtMoney(r.transFinal)];
+  STATE.privacy = _pp;
   const useImg = !!renderKey;
   const lineaNegraConf = TEMPLATE_DETALLADO_TIENE_NEGRA ? `\nBase negra: ${fmtMoney(r.negroFinal)}` : '';
   const ok = await showConfirm(
@@ -14686,8 +14697,10 @@ async function enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj, renderKey)
   // Meta no acepta variables vacías: default para los campos que puedan venir sin dato.
   const nombre = (f.nombre || '').trim() || 'tu trabajo';
   const medidas = (f.medidas || '').trim() || 'a confirmar';
+  const _pp = STATE.privacy; STATE.privacy = false;
   const precio = fmtMoney(f.precio);
   const params = [nombre, medidas, f.frente, f.laterales, f.fondo, f.iluminacion, precio];
+  STATE.privacy = _pp;
   const useImg = !!renderKey;
   const ok = await showConfirm(
     `La ventana de 24 h está cerrada, así que el presupuesto va como PLANTILLA aprobada${useImg ? ' CON el render' : ' (texto, sin el render — eso se manda cuando el cliente responda y se reabra la ventana)'}.\n\n` +
