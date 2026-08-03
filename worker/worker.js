@@ -4943,6 +4943,90 @@ async function lanzamientoLandingOnInbound(env, phone, msgBody) {
 }
 
 // ============================================================================
+// RECORDATORIO del evento (Fase Semilla, 4 ago 19hs): goteo seguro a TODOS los
+// anotados de lanzamiento_landing. Master switch kv 'evento_recordatorio_on'
+// (default OFF). Fase kv 'evento_recordatorio_fase':
+//   'ventana' → SOLO a los que tienen la ventana de 24h abierta (texto libre, gratis);
+//   'todos'   → a todos (ventana → texto libre; fuera de ventana → plantilla aprobada).
+// Mensaje CONDICIONAL según el día AR: víspera → "mañana 19hs"; día del evento → "HOY 19hs".
+// Deadline: no manda pasado EVENTO_RECORDATORIO_DEADLINE (se apaga solo). Horario 9-21 AR.
+// El chat queda OCULTO; se revela a la bandeja de Abril ('cursos') solo si el lead RESPONDE
+// (eventoRecordatorioOnInbound). Ritmo: kv 'evento_recordatorio_pertick' (default 4) por
+// corrida del cron de 1 min. Dedup atómico con wa_autoreply_log kind='evento_record'.
+// ============================================================================
+const EVENTO_MSG_MANANA = '🚀 Buenas! Te mandamos mensajito para recordarte que mañana 19 hs es el primer día del evento. Mandamos el enlace de la transmisión en vivo por el grupo ♾️\n\n(Queda grabado, pero recomendamos estar EN VIVO… 🎁)';
+const EVENTO_MSG_HOY = '🚀 Buenas! Te mandamos mensajito para recordarte que HOY 19 hs es el primer día del evento. Mandamos el enlace de la transmisión en vivo por el grupo ♾️\n\n(Queda grabado, pero recomendamos estar EN VIVO… 🎁)';
+const EVENTO_TPL_MANANA = 'recordatorio_evento_manana';
+const EVENTO_TPL_HOY = 'recordatorio_evento_hoy';
+const EVENTO_FECHA_AR = '2026-08-04';                            // día del evento (AR)
+const EVENTO_RECORDATORIO_DEADLINE = '2026-08-04T19:30:00.000Z'; // 16:30 AR = límite duro de envío
+
+// ¿Día del evento (o después)? → variante "HOY"; si es la víspera → variante "mañana". AR = UTC-3.
+function _eventoVarianteHoy(nowMs) {
+  return new Date(nowMs - 3 * 3600 * 1000).toISOString().slice(0, 10) >= EVENTO_FECHA_AR;
+}
+
+async function processEventoRecordatorio(env) {
+  if ((await kvGet(env, 'evento_recordatorio_on', '0')) !== '1') return;
+  if ((await kvGet(env, 'wa_send_paused', '0')) === '1') return;
+  if (await isWaBillingBlocked(env)) return;
+  const nowMs = Date.now();
+  if (nowMs > Date.parse(EVENTO_RECORDATORIO_DEADLINE)) { try { await kvSet(env, 'evento_recordatorio_on', '0'); } catch (_) {} return; }
+  const hAR = new Date(nowMs - 3 * 3600 * 1000).getUTCHours();
+  if (hAR < 9 || hAR >= 21) return; // solo horario diurno AR
+  const fase = String(await kvGet(env, 'evento_recordatorio_fase', 'ventana') || 'ventana');
+  const perTick = Math.max(1, Math.min(20, parseInt(await kvGet(env, 'evento_recordatorio_pertick', '4'), 10) || 4));
+  const esHoy = _eventoVarianteHoy(nowMs);
+  const textoLibre = esHoy ? EVENTO_MSG_HOY : EVENTO_MSG_MANANA;
+  const tplName = esHoy ? EVENTO_TPL_HOY : EVENTO_TPL_MANANA;
+  const ventanaCutoff = new Date(nowMs - 24 * 3600 * 1000).toISOString();
+  let rows;
+  try {
+    const ventanaClause = fase === 'ventana'
+      ? "AND EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = ll.phone AND m.direction = 'inbound' AND m.ts > ?) "
+      : '';
+    const q = "SELECT ll.phone FROM lanzamiento_landing ll " +
+      "WHERE NOT EXISTS (SELECT 1 FROM wa_autoreply_log a WHERE a.phone = ll.phone AND a.kind = 'evento_record') " +
+      "AND ll.phone NOT IN (SELECT phone FROM wa_unreachable_phones) " + ventanaClause + "LIMIT ?";
+    const st = fase === 'ventana' ? env.DB.prepare(q).bind(ventanaCutoff, perTick) : env.DB.prepare(q).bind(perTick);
+    rows = (await st.all()).results || [];
+  } catch (_) { return; }
+  for (const r of rows) {
+    const phone = r.phone;
+    let reserva;
+    try { reserva = await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'evento_record', '', 'sending', '', '')").bind(phone).run(); } catch (_) { continue; }
+    if (!reserva?.meta?.changes) continue; // ya reservado por otro tick
+    let enVentana = false;
+    try { const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1").bind(phone, ventanaCutoff).first(); enVentana = !!inb; } catch (_) {}
+    const res = enVentana ? await waSendText(env, phone, textoLibre) : await waSendTemplate(env, phone, tplName, 'es_AR', []);
+    if (!res || !res.ok) {
+      try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'evento_record'").bind(phone).run(); } catch (_) {}
+      try { await logWaEvent(env, { to: phone, kind: 'evento-recordatorio', ref: '', ok: false, error: res?.error }); } catch (_) {}
+      continue;
+    }
+    const sentTs = new Date().toISOString();
+    try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'evento_record'").bind(sentTs, phone).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', ?, ?, 'sent', '', 1)").bind(sentTs, res.id || ('evrec-' + phone + '-' + nowMs), phone, enVentana ? 'text' : 'template', enVentana ? textoLibre : ('[plantilla: ' + tplName + ']')).run(); } catch (_) {}
+    // Ocultar el chat (no ensuciar la bandeja de Abril con los que no responden). NO oculta a los
+    // que ya están 'cursos'/atendidos: solo NULL/general/vacío. Los revealed activos se dejan como están.
+    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('general','')").bind(phone, sentTs).run(); } catch (_) {}
+    await new Promise(rs => setTimeout(rs, 400));
+  }
+}
+
+// Revela a la bandeja de Abril ('cursos') a un lead que RECIBIÓ el recordatorio, quedó OCULTO
+// y ahora RESPONDE. Se llama en el webhook inbound. Así el chat aparece solo si contesta.
+async function eventoRecordatorioOnInbound(env, phone) {
+  if (!phone) return;
+  try {
+    const got = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind = 'evento_record' AND status = 'sent' LIMIT 1").bind(phone).first();
+    if (!got) return;
+    const nowIso = new Date().toISOString();
+    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(phone, nowIso).run();
+  } catch (_) {}
+}
+
+// ============================================================================
 // Leads B2B de REVENTA (revendedores). Un App Script en el Sheet de reventa
 // reenvía cada fila nueva a POST /webhook/reventa-lead. Filtramos los
 // CUALIFICADOS (tiene experiencia en venta Y clientes) y a esos les mandamos la
@@ -7935,6 +8019,7 @@ const handler = {
                   // Landing del minicurso: respuesta al opener -> branch por IA / follow-up.
                   try { await minicursoLandingOnInbound(env, phone, ts); } catch (_) {}
                   // Landing del lanzamiento: walink → link (oculto); respuesta posterior → revelar.
+                  try { await eventoRecordatorioOnInbound(env, phone); } catch (_) {}
                   try { await lanzamientoLandingOnInbound(env, phone, msgBody); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
@@ -8182,6 +8267,27 @@ const handler = {
     // ----- Reportes (público para tracking básico) -----
     if (request.method === 'GET' && path === '/report') {
       return reportHandler(env, url, false);
+    }
+
+    // DEBUG temporal — probar rutas de calidad/estado del número en 360dialog
+    // (quality_rating + messaging_limit_tier). Los paths estándar dan "Not found",
+    // acá probamos varias para encontrar la correcta del WABA nuevo.
+    if (request.method === 'GET' && path === '/debug/wa-quality') {
+      const wa = getWaClient(env);
+      const out = { provider: wa.provider, base: wa.base || null, phone_id_env: env.WA_PHONE_NUMBER_ID || null, waba_id_env: env.WA_BUSINESS_ACCOUNT_ID || null };
+      const tryPath = async (label, u) => {
+        try {
+          const r = await fetch(u, { headers: wa.headers });
+          const t = await r.text();
+          out[label] = { status: r.status, body: t.slice(0, 500) };
+        } catch (e) { out[label] = { error: String(e && e.message || e) }; }
+      };
+      await tryPath('a_health_status', `${wa.base}/v1/health_status`);
+      await tryPath('b_waba_config', `${wa.base}/v1/configs/whatsapp_business_account`);
+      await tryPath('c_phone_by_id', `${wa.base}/${env.WA_PHONE_NUMBER_ID}?fields=quality_rating,messaging_limit_tier,display_phone_number,verified_name,throughput,health_status`);
+      await tryPath('d_waba_phones', `${wa.base}/${env.WA_BUSINESS_ACCOUNT_ID}/phone_numbers?fields=quality_rating,messaging_limit_tier,display_phone_number`);
+      await tryPath('e_settings', `${wa.base}/v1/settings`);
+      return json(out);
     }
 
     // DEBUG público temporal — reprocesar imágenes pendientes (media_url con id raw).
@@ -9413,6 +9519,36 @@ const handler = {
         let body = {}; try { body = await request.json(); } catch (_) {}
         if (typeof body.on === 'boolean') await kvSet(env, 'wa_send_paused', body.on ? '1' : '0');
         return json({ ok: true, paused: (await kvGet(env, 'wa_send_paused', '0')) === '1' });
+      }
+
+      // Recordatorio del evento (Fase Semilla): control del goteo + preview de números.
+      // GET → estado + cuántos anotados/mandados/pendientes/en-ventana. POST {on, fase, pertick} → configura.
+      //   on: bool (prende/apaga) · fase: 'ventana' (solo texto libre a los de 24h) | 'todos' (suma plantilla)
+      //   pertick: 1..20 mensajes por corrida del cron de 1 min (~pertick*60/h).
+      if (path === '/admin/evento-recordatorio') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        if (request.method === 'POST') {
+          let body = {}; try { body = await request.json(); } catch (_) {}
+          if (typeof body.on === 'boolean') await kvSet(env, 'evento_recordatorio_on', body.on ? '1' : '0');
+          if (body.fase === 'ventana' || body.fase === 'todos') await kvSet(env, 'evento_recordatorio_fase', body.fase);
+          if (body.pertick != null) await kvSet(env, 'evento_recordatorio_pertick', String(Math.max(1, Math.min(20, parseInt(body.pertick, 10) || 4))));
+        }
+        const on = (await kvGet(env, 'evento_recordatorio_on', '0')) === '1';
+        const fase = String(await kvGet(env, 'evento_recordatorio_fase', 'ventana') || 'ventana');
+        const perTick = parseInt(await kvGet(env, 'evento_recordatorio_pertick', '4'), 10) || 4;
+        const cutoff = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+        let total = 0, mandados = 0, enVentana = 0;
+        try { total = (await env.DB.prepare("SELECT COUNT(*) AS n FROM lanzamiento_landing").first())?.n || 0; } catch (_) {}
+        try { mandados = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_autoreply_log WHERE kind='evento_record' AND status='sent'").first())?.n || 0; } catch (_) {}
+        try { enVentana = (await env.DB.prepare("SELECT COUNT(*) AS n FROM lanzamiento_landing ll WHERE NOT EXISTS (SELECT 1 FROM wa_autoreply_log a WHERE a.phone=ll.phone AND a.kind='evento_record') AND EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=ll.phone AND m.direction='inbound' AND m.ts > ?)").bind(cutoff).first())?.n || 0; } catch (_) {}
+        const hAR = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours();
+        return json({
+          ok: true, on, fase, perTick,
+          total_anotados: total, ya_mandados: mandados, pendientes: total - mandados, pendientes_en_ventana: enVentana,
+          variante_mensaje: _eventoVarianteHoy(Date.now()) ? 'HOY 19hs' : 'mañana 19hs',
+          horario_ok: (hAR >= 9 && hAR < 21), deadline: EVENTO_RECORDATORIO_DEADLINE,
+          wa_send_paused: (await kvGet(env, 'wa_send_paused', '0')) === '1', ritmo_por_hora: perTick * 60
+        });
       }
 
       // Forzar el aviso "leads para llamar" AHORA (para probarlo fuera del cron de las 9 AR).
@@ -12642,6 +12778,9 @@ const handler = {
     // plantilla). NO-OP hasta que se configure kv 'lanzamiento_opener_tpl' + kv
     // 'lanzamiento_landing_on'='1' — los leads solo se acumulan en la tabla mientras tanto.
     ctx.waitUntil(processLanzamientoLanding(env));
+    // Recordatorio del evento (Fase Semilla): goteo a los anotados. Master switch OFF por
+    // defecto (kv 'evento_recordatorio_on'); no manda nada hasta prenderlo.
+    ctx.waitUntil(processEventoRecordatorio(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
