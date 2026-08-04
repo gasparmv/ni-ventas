@@ -9612,6 +9612,8 @@ const handler = {
         let body = {}; if (request.method === 'POST') { try { body = await request.json(); } catch (_) {} }
         const dias = Math.max(1, Math.min(14, parseInt(body.dias, 10) || 7));
         const desde = new Date(Date.now() - dias * 24 * 3600 * 1000).toISOString();
+        // Solo presupuestos cuyo FUP1 YA venció (>23h): los de hoy los agarra el cron normal.
+        const venc = new Date(Date.now() - 23 * 3600 * 1000).toISOString();
         const pfx1 = PRESUPUESTO_PREFIXES_TEXT[0].substring(0, 26);
         const pfx2 = PRESUPUESTO_PREFIXES_TEXT[1].substring(0, 26);
         const fupLike = ALL_FOLLOWUP_PREFIXES_TEXT.map(() => "f.body LIKE ? ESCAPE '\\'").join(' OR ');
@@ -9630,9 +9632,10 @@ const handler = {
           "  AND NOT EXISTS (SELECT 1 FROM wa_messages i WHERE i.phone=pr.phone AND i.direction='inbound' AND i.msg_type!='status' AND i.ts > pr.pts) " +
           "  AND NOT EXISTS (SELECT 1 FROM wa_messages c WHERE c.phone=pr.phone AND c.direction='outbound' AND (" + cierreLike + ")) " +
           "  AND pr.phone NOT IN (SELECT phone FROM wa_unreachable_phones) " +
+          "  AND pr.pts < ? " +
           "ORDER BY pr.pts DESC LIMIT 250";
         let rows = [];
-        try { rows = (await env.DB.prepare(sql).bind(desde, pfx1, pfx2, ...fupParams, ...cierreParams).all()).results || []; } catch (e) { return json({ error: 'query: ' + e.message }, 500); }
+        try { rows = (await env.DB.prepare(sql).bind(desde, pfx1, pfx2, ...fupParams, ...cierreParams, venc).all()).results || []; } catch (e) { return json({ error: 'query: ' + e.message }, 500); }
         const leads = rows.map(r => ({ phone: r.phone, nombre: (r.nombre || '').split(/\s+/)[0] || '', fecha: (r.pts || '').slice(0, 10), monto: extractPresupuestoAmount(r.body) }));
         if (request.method === 'POST' && body.ejecutar === true) {
           const limit = Math.max(1, Math.min(250, parseInt(body.limit, 10) || 50));
