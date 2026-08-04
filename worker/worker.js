@@ -2316,7 +2316,7 @@ async function maybeReporteDiario(env) {
     let anyOk = false;
     for (const ph of REPORTE_DIARIO_PHONES) {
       let r = null;
-      try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas2', 'es_AR', params11); } catch (_) {}
+      try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas3', 'es_AR', params11); } catch (_) {}
       if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas', 'es_AR', params10); } catch (_) {} }
       if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} } // fallback: texto libre (solo llega si la ventana de 24h está abierta)
       if (r && r.ok) anyOk = true;
@@ -2432,7 +2432,7 @@ async function notifyOCEnviada(env, oc) {
   let anyOk = false;
   for (const ph of REPORTE_DIARIO_PHONES) {
     let r = null;
-    try { r = await waSendTemplate(env, ph, 'oc_enviada', 'es_AR', params); } catch (_) {}
+    try { r = await waSendTemplate(env, ph, 'oc_enviada_v2', 'es_AR', params); } catch (_) {}
     if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} }
     if (r && r.ok) anyOk = true;
   }
@@ -12685,6 +12685,27 @@ const handler = {
             }))
           });
         } catch (e) { return json({ error: String(e && e.message || e) }, 500); }
+      }
+
+      // POST /admin/oc/test-aviso  →  dispara a mano el aviso "OC ENVIADA" a Gaspar + hermano
+      // (usa la última OC real, o {phone,cartel,importe} del body). Para probar la notif. Admin.
+      if (request.method === 'POST' && path === '/admin/oc/test-aviso') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        let oc = null;
+        try {
+          const b = await request.json().catch(() => ({}));
+          if (b && b.phone) oc = { phone: String(b.phone).replace(/\D/g, ''), cartel: String(b.cartel || 'TEST'), importe: String(b.importe || '$0'), canal: 'wa' };
+        } catch (_) {}
+        if (!oc) {
+          try {
+            const m = await env.DB.prepare("SELECT phone, body FROM wa_messages WHERE direction='outbound' AND msg_type!='status' AND body LIKE '%Orden de compra:%' ORDER BY ts DESC LIMIT 1").first();
+            if (m) oc = parseOC(m.body, m.phone);
+          } catch (_) {}
+        }
+        if (!oc || !oc.phone) return json({ error: 'no hay OC para probar' }, 404);
+        const ok = await notifyOCEnviada(env, oc);
+        return json({ ok, delivered: ok, oc });
       }
 
       // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
