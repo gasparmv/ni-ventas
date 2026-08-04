@@ -2031,22 +2031,44 @@ async function processPrecotizPilot(env) {
   }
 }
 
-// Mensaje de nudge (SIN IA — barato): pide SOLO los datos que faltan, en el tono del bot.
-function precotizNudgeMsg(lead) {
+// Datos que faltan en UNA frase ("x" | "x y y" | "x, y y z"). Compartido por el nudge de
+// texto libre y la plantilla de re-enganche, para que digan EXACTAMENTE lo mismo.
+function precotizNudgeFaltan(lead) {
   const faltan = [];
   if (!lead.tiene_foto) faltan.push('una foto o referencia del diseño');
   if (!lead.tiene_medidas) faltan.push('las medidas aprox (alto y ancho)');
   if (!lead.tiene_intext) faltan.push('saber si es para interior o exterior');
   if (!faltan.length) return '';
-  // Datos que faltan en UNA frase (NO la lista de bullets, que quedaba calcada del opener):
-  // "x" | "x y y" | "x, y y z".
-  const inline = faltan.length === 1 ? faltan[0] : faltan.slice(0, -1).join(', ') + ' y ' + faltan[faltan.length - 1];
+  return faltan.length === 1 ? faltan[0] : faltan.slice(0, -1).join(', ') + ' y ' + faltan[faltan.length - 1];
+}
+// Mensaje de nudge (SIN IA — barato): pide SOLO los datos que faltan, en el tono del bot.
+function precotizNudgeMsg(lead) {
+  const inline = precotizNudgeFaltan(lead);
+  if (!inline) return '';
   // 1er seguimiento (~4h de silencio): NO volvemos a saludar (venimos hablando hace un rato) ni
   // preguntamos tímido — vamos directos: avisá si seguimos + lo que falta.
   if ((lead.nudge_count || 0) === 0) return `Avisame si seguimos con la cotización! Me faltaría ${inline}`;
   // 2do seguimiento (~24h de silencio, un día después): ya pasó tiempo, saludamos de nuevo y
   // preguntamos si sigue en pie.
   return `hola! seguimos con la cotización? me faltaría ${inline}`;
+}
+// Fallback fuera de la ventana de 24h: manda el nudge como PLANTILLA aprobada
+// (precotiz_seguimiento, UTILITY) con lo que falta como variable {{1}}. Se usa cuando el
+// texto libre rebota con 131047 (el cliente no escribió hace +24h). Loguea en wa_messages
+// igual que precotizSend para que el mensaje aparezca en el historial del chat.
+async function precotizSendNudgeTpl(env, phone, inline) {
+  if (!inline) return { ok: false };
+  const r = await waSendTemplate(env, phone, 'precotiz_seguimiento', 'es_AR', [inline]);
+  if (r && r.ok) {
+    const body = `Hola 👋 ¿Seguimos con tu cotización de neón? Para avanzar me faltaría ${inline}. Cuando puedas me lo pasás 🙌`;
+    try {
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+         VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)`
+      ).bind(new Date().toISOString(), r.id || ('precotiztpl:' + phone + ':' + Date.now()), phone, body).run();
+    } catch (_) {}
+  }
+  return r;
 }
 
 // Nudge del piloto: persigue a los leads que quedaron a mitad (les falta algún dato) y se
@@ -2079,7 +2101,14 @@ async function processPrecotizNudges(env) {
     if (lead.last_nudge_at && (nowMs - new Date(lead.last_nudge_at).getTime()) / 3600000 < 12) continue; // no dos nudges pegados; con 1er a 4h y 2do a 20h hay 16h de separación
     const msg = precotizNudgeMsg(lead);
     if (!msg) continue;
-    try { await precotizSend(env, lead.phone, msg); } catch (_) { continue; }
+    let sr;
+    try { sr = await precotizSend(env, lead.phone, msg); } catch (_) { continue; }
+    // Fuera de la ventana de 24h el texto libre rebota (131047): reintentar como plantilla
+    // aprobada. Pasa sobre todo con el 2do nudge de leads que escribieron de noche (el
+    // recordatorio se resbala a la mañana siguiente, ya con +24h de silencio).
+    if (sr && !sr.ok && sr.code === 131047) {
+      try { await precotizSendNudgeTpl(env, lead.phone, precotizNudgeFaltan(lead)); } catch (_) {}
+    }
     const now = new Date().toISOString();
     try { await env.DB.prepare('UPDATE precotiz_pilot SET nudge_count = IFNULL(nudge_count,0) + 1, last_nudge_at = ?, updated_at = ? WHERE phone = ?').bind(now, now, lead.phone).run(); } catch (_) {}
   }
