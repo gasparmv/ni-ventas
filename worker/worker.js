@@ -13379,6 +13379,7 @@ async function processPresupuestoFollowups(env, opts = {}) {
       "SELECT phone, ts, body, sender_name FROM wa_messages " +
       "WHERE direction = 'outbound' " +
       "  AND ts >= ? AND ts <= ? " +
+      "  AND length(phone) <= 14 " +   // excluir Instagram (phone = ID largo): el FUP es de WhatsApp; mandarlo por WA a un IG-id rebota
       "  AND (substr(body, 1, 26) = ? OR substr(body, 1, 26) = ?) " +
       "ORDER BY ts DESC"
     ).bind(maxAgeAgo, minAgeAgo, pfx1, pfx2).all();
