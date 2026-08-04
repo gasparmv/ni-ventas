@@ -2096,18 +2096,24 @@ async function processPrecotizNudges(env) {
     try { lastIn = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(lead.phone).first(); } catch (_) { continue; }
     const lastInTs = lastIn && lastIn.t; if (!lastInTs) continue;
     const silenceH = (nowMs - new Date(lastInTs).getTime()) / 3600000;
-    const umbral = (lead.nudge_count || 0) === 0 ? 4 : 20; // 2do a las 20h (NO 24): así sigue DENTRO de la ventana de 24h de WhatsApp y se manda como mensaje normal, no como plantilla
+    const umbral = (lead.nudge_count || 0) === 0 ? 4 : 20; // 2do a las 20h: si aún está dentro de la ventana (<23h) va como texto libre; si se pasó (ej. escribió de noche → +24h) va como plantilla (abajo)
     if (silenceH < umbral || silenceH > 7 * 24) continue;
     if (lead.last_nudge_at && (nowMs - new Date(lead.last_nudge_at).getTime()) / 3600000 < 12) continue; // no dos nudges pegados; con 1er a 4h y 2do a 20h hay 16h de separación
     const msg = precotizNudgeMsg(lead);
     if (!msg) continue;
     let sr;
-    try { sr = await precotizSend(env, lead.phone, msg); } catch (_) { continue; }
-    // Fuera de la ventana de 24h el texto libre rebota (131047): reintentar como plantilla
-    // aprobada. Pasa sobre todo con el 2do nudge de leads que escribieron de noche (el
-    // recordatorio se resbala a la mañana siguiente, ya con +24h de silencio).
-    if (sr && !sr.ok && sr.code === 131047) {
-      try { await precotizSendNudgeTpl(env, lead.phone, precotizNudgeFaltan(lead)); } catch (_) {}
+    // La ventana de 24h: fuera de ella el texto libre rebota con 131047, y ese rebote llega
+    // ASYNC (webhook de estado) → no se puede atrapar en el return. Por eso decidimos por el
+    // silencio: si ya pasaron +23h, mandamos DIRECTO la plantilla aprobada (pasa con el 2do
+    // nudge de leads que escribieron de noche, que se resbala a la mañana siguiente, +24h).
+    if (silenceH >= 23) {
+      try { sr = await precotizSendNudgeTpl(env, lead.phone, precotizNudgeFaltan(lead)); } catch (_) { continue; }
+    } else {
+      try { sr = await precotizSend(env, lead.phone, msg); } catch (_) { continue; }
+      // seguro extra por si algún rebote llega sincrónico justo en el borde de las 24h.
+      if (sr && !sr.ok && sr.code === 131047) {
+        try { await precotizSendNudgeTpl(env, lead.phone, precotizNudgeFaltan(lead)); } catch (_) {}
+      }
     }
     const now = new Date().toISOString();
     try { await env.DB.prepare('UPDATE precotiz_pilot SET nudge_count = IFNULL(nudge_count,0) + 1, last_nudge_at = ?, updated_at = ? WHERE phone = ?').bind(now, now, lead.phone).run(); } catch (_) {}
