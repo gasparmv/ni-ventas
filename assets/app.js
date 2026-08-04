@@ -2106,6 +2106,7 @@ function render() {
   }
   document.getElementById('app').innerHTML = renderShell();
   try { startSinCotizarWatch(); } catch (_) {}
+  try { startOcUrgenteWatch(); } catch (_) {}
   // El Chat WA carga su data del worker (no de Sheets), así que se renderiza
   // SIEMPRE — aunque Sheets siga cargando o haya fallado. Antes el gate de abajo
   // (!STATE.loaded) tapaba el chat con "Conectando con Google Sheets…" y, si el
@@ -2219,6 +2220,84 @@ function renderSinCotizarModal() {
       </div>
     </div>`;
 }
+
+// ===== Alarma "🔥 Pedido por vender URGENTE" — OC enviada hace +3h sin respuesta del cliente =====
+// Clon del popup "Sin cotizar" pero por ITEM (cada uno con su botón "Ver chat →", IG o WPP).
+// El backend (/admin/wa/oc-urgente-status) filtra por vendedor (quién mandó la OC) y por
+// "3h sin inbound posterior". Poll liviano cada 75s. Mismo gate que sin-cotizar (admin+comercial).
+function _canSeeOcUrgente() { const r = getUserRole(); return r === 'admin' || r === 'comercial'; }
+function _ocUrgenteShouldShow() {
+  const oc = STATE.ocUrgente;
+  if (!oc || !_canSeeOcUrgente() || !oc.count) return false;
+  const ack = localStorage.getItem('ocUrgenteAck') || '';
+  return !!oc.maxCreatedAt && oc.maxCreatedAt > ack;
+}
+async function fetchOcUrgenteStatus() {
+  if (!STATE.token || !CONFIG.trackerUrl || !_canSeeOcUrgente()) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/oc-urgente-status', { headers: authHeaders() });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!j.ok) return;
+    const prev = STATE.ocUrgente;
+    STATE.ocUrgente = { count: j.count || 0, maxCreatedAt: j.max_created_at || '', items: j.items || [] };
+    if (!prev || prev.count !== STATE.ocUrgente.count || prev.maxCreatedAt !== STATE.ocUrgente.maxCreatedAt) render();
+  } catch (_) {}
+}
+function _ocUrgenteAck() { if (STATE.ocUrgente) localStorage.setItem('ocUrgenteAck', STATE.ocUrgente.maxCreatedAt || ''); }
+function startOcUrgenteWatch() {
+  if (window._ocUrgenteWatch || !_canSeeOcUrgente()) return;
+  window._ocUrgenteWatch = true;
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t || !t.closest) return;
+    const ver = t.closest('[data-oc-ver]');
+    if (ver) {
+      const ph = ver.getAttribute('data-oc-phone') || '';
+      _ocUrgenteAck();
+      STATE.view = 'chat';
+      chatState.selectedPhone = ph;
+      if (typeof enterMobileChatConversation === 'function') enterMobileChatConversation();
+      try { selectChatContact(ph); } catch (_) {}
+      location.hash = 'chat';
+      render();
+      return;
+    }
+    if (t.closest('[data-oc-dismiss]') || (t.matches && t.matches('[data-oc-bg]'))) { _ocUrgenteAck(); render(); return; }
+  });
+  fetchOcUrgenteStatus();
+  setInterval(() => { if (!pollBackoffActive()) fetchOcUrgenteStatus(); }, 75000);
+}
+function renderOcUrgenteModal() {
+  if (!_ocUrgenteShouldShow()) return '';
+  const oc = STATE.ocUrgente;
+  const items = (oc.items || []).slice(0, 8);
+  const rows = items.map(it => {
+    const nombre = escapeHtml((it.nombre || '').trim() || ('+' + it.phone));
+    const importe = it.importe ? escapeHtml(it.importe) : '';
+    const canalTag = it.canal === 'ig' ? '📷 ' : '';
+    return `
+      <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;padding:8px 10px;border:1px solid var(--border);border-radius:var(--r-sm);margin-bottom:6px">
+        <div style="min-width:0">
+          <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${canalTag}${nombre}</div>
+          ${importe ? `<div style="font-size:12px;color:var(--fg-mute)">${importe}</div>` : ''}
+        </div>
+        <button class="btn btn-cyan btn-sm" data-oc-ver data-oc-phone="${escapeHtml(it.phone)}" style="flex:none">Ver chat →</button>
+      </div>`;
+  }).join('');
+  return `
+    <div data-oc-bg style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:7100;display:flex;align-items:center;justify-content:center;padding:16px">
+      <div style="background:var(--bg);border:1px solid #f59e0b;border-radius:var(--r-md);width:min(440px,94vw);padding:var(--s-4);box-shadow:0 10px 40px rgba(0,0,0,.45)">
+        <div style="font-size:34px;text-align:center;margin-bottom:4px">🔥</div>
+        <h2 style="margin:0 0 6px;font-size:17px;text-align:center">${oc.count === 1 ? 'Pedido por vender URGENTE' : oc.count + ' pedidos por vender URGENTE'}</h2>
+        <p style="margin:0 0 12px;font-size:13px;color:var(--fg-mute);text-align:center;line-height:1.5">Mandaste la orden de compra hace más de 3 h y el cliente todavía no respondió.</p>
+        <div style="margin-bottom:12px">${rows}</div>
+        <div style="display:flex;justify-content:center">
+          <button class="btn btn-ghost" data-oc-dismiss style="padding:8px 16px">Después</button>
+        </div>
+      </div>
+    </div>`;
+}
 function renderShell() {
   // Counts for badges
   const sgts = STATE.loaded ? getSeguimientosWeek() : [];
@@ -2282,6 +2361,7 @@ function renderShell() {
     <div id="drawer" class="drawer"></div>
     <div id="toast" class="toast"></div>
     ${renderSinCotizarModal()}
+    ${renderOcUrgenteModal()}
   `;
 }
 

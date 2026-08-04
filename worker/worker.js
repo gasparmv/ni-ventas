@@ -2216,7 +2216,7 @@ const REPORTE_DIARIO_PHONES = ['5491155604999', '5491155604996']; // Gaspar, her
 const REPORTE_DIA_DESDE = "(date('now','-3 hours') || 'T03:00:00Z')";
 const REPORTE_DIA_HASTA = "(date('now','-3 hours','+1 day') || 'T03:00:00Z')";
 async function buildReporteDiario(env) {
-  const out = { total: 0, carteles: 0, cursos: 0, precotiz: 0, presupTotal: 0, presupJoaco: 0, presupNadia: 0, chatsJoaco: 0, chatsNadia: 0 };
+  const out = { total: 0, carteles: 0, cursos: 0, precotiz: 0, presupTotal: 0, presupJoaco: 0, presupNadia: 0, chatsJoaco: 0, chatsNadia: 0, ocEnviadas: 0 };
   // 1) Conversaciones nuevas (inbound hoy, WhatsApp) + split carteles/cursos.
   //    Cursos = inbox='cursos' O el chat tiene señales del funnel de cursos/evento en
   //    algún inbound (los leads del evento/minicurso NO se marcan inbox='cursos' — entran
@@ -2277,6 +2277,13 @@ async function buildReporteDiario(env) {
       else if (r.assigned_to === 'joaco' || r.assigned_to === 'joaquin') out.chatsJoaco += (r.n || 0);
     }
   } catch (_) {}
+  // 5) Órdenes de compra enviadas hoy (snapshot oc_enviadas, ya deduplicado por wamid).
+  try {
+    const r = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM oc_enviadas WHERE ts_out >= ${REPORTE_DIA_DESDE} AND ts_out < ${REPORTE_DIA_HASTA}`
+    ).first();
+    out.ocEnviadas = (r && r.n) || 0;
+  } catch (_) {}
   return out;
 }
 function formatReporteDiario(d) {
@@ -2290,7 +2297,8 @@ function formatReporteDiario(d) {
     `👥 Chats asignados hoy:${repartoNota}\n` +
     `   Joaco: ${d.chatsJoaco} · Nadia: ${d.chatsNadia}\n\n` +
     `📋 Presupuestos enviados: ${d.presupTotal}\n` +
-    `   Joaco: ${d.presupJoaco} · Nadia: ${d.presupNadia}`
+    `   Joaco: ${d.presupJoaco} · Nadia: ${d.presupNadia}\n\n` +
+    `🧾 Órdenes de compra: ${d.ocEnviadas}`
   );
 }
 async function maybeReporteDiario(env) {
@@ -2299,13 +2307,17 @@ async function maybeReporteDiario(env) {
     if ((await kvGet(env, 'reporte_diario_sent', '')) === fechaAR) return; // ya se ENTREGÓ hoy
     const d = await buildReporteDiario(env);
     const fechaDisplay = fechaAR.split('-').reverse().join('/');
-    // Plantilla (se entrega fuera de la ventana de 24h de WhatsApp). 10 variables en orden.
-    const params = [fechaDisplay, d.total, d.carteles, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
+    // Plantilla (se entrega fuera de la ventana de 24h de WhatsApp). Cadena de fallback:
+    // reporte_diario_ventas2 (11 vars, incluye Órdenes de compra) → reporte_diario_ventas
+    // (10 vars, la vieja, por si la v2 todavía no la aprobó Meta) → texto libre (en ventana).
+    const params11 = [fechaDisplay, d.total, d.carteles, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia, d.ocEnviadas].map(String);
+    const params10 = [fechaDisplay, d.total, d.carteles, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
     const texto = formatReporteDiario(d);
     let anyOk = false;
     for (const ph of REPORTE_DIARIO_PHONES) {
       let r = null;
-      try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas', 'es_AR', params); } catch (_) {}
+      try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas2', 'es_AR', params11); } catch (_) {}
+      if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas', 'es_AR', params10); } catch (_) {} }
       if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} } // fallback: texto libre (solo llega si la ventana de 24h está abierta)
       if (r && r.ok) anyOk = true;
     }
@@ -2370,6 +2382,107 @@ async function maybeReporteLlamar(env) {
       if (r && r.ok) anyOk = true;
     }
     if (anyOk) await kvSet(env, 'reporte_llamar_sent', fechaAR);
+  } catch (_) {}
+}
+
+// ===== Órdenes de compra (OC) — a pedido de Gaspar (ago-2026) =====
+// La OC la tipea a mano el vendedor (Joaco/Nadia) desde la guía de ventas y arranca
+// SIEMPRE con "Orden de compra:". No se genera por código: la LEEMOS del saliente ya
+// enviado (entra como echo por ≥2 ramas del webhook + /admin/wa/send), por eso escaneamos
+// wa_messages en un cron cada 5 min (choke point común, NO toca la ingesta ni puede romperla).
+// Por cada OC nueva: (1) etiqueta "POR PAGAR" en el chat, (2) avisa a Gaspar + hermano
+// (plantilla oc_enviada fuera de ventana + fallback texto), (3) queda en oc_enviadas para
+// la métrica del reporte y el popup "Pedido por vender URGENTE" (3h sin respuesta del cliente).
+const POR_PAGAR_LABEL_NAME = 'POR PAGAR';
+const POR_PAGAR_LABEL_COLOR = '#16a34a'; // verde fuerte (green-600). ensureLabelId es INSERT OR IGNORE → el color se fija al crear la etiqueta (es nueva).
+async function porPagarTag(env, phone, on) {
+  try {
+    const id = await ensureLabelId(env, POR_PAGAR_LABEL_NAME, POR_PAGAR_LABEL_COLOR);
+    if (!id) return;
+    if (on) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, id, new Date().toISOString()).run();
+    else await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
+  } catch (_) {}
+}
+// Extrae los datos de una OC del cuerpo (tipeado a mano → regex tolerantes a espacios).
+// cartel = "Trabajo:"; importe = "Total:" con fallback a "Precio:" (el ~7% sin controlador
+// no lleva "Total:"). El importe se relaya como STRING crudo (mezcla $238,000 / $263.000 /
+// $ 295.500 — NO se parsea a número). canal 'ig' si el phone es un IG-id (16 díg, no discable).
+function parseOC(body, phone) {
+  const b = String(body || '');
+  if (!/Orden de compra:/.test(b)) return null;
+  const grab = (re) => { const m = b.match(re); return m ? m[1].trim() : ''; };
+  const money = (re) => { const m = b.match(re); return m ? m[1].replace(/\s+/g, '').trim() : ''; };
+  const ph = String(phone || '').replace(/\D/g, '');
+  return {
+    phone: ph,
+    cartel: grab(/Trabajo\s*:\s*(.+)/i),
+    importe: money(/Total\s*:\s*(\$?\s*[\d.,]+)/i) || money(/Precio\s*:\s*(\$?\s*[\d.,]+)/i),
+    canal: ph.length > 14 ? 'ig' : 'wa',
+  };
+}
+// Avisa a Gaspar + hermano que salió una OC. Plantilla (llega fuera de la ventana de 24h)
+// con fallback a texto libre. Cada dato va como variable SEPARADA (Meta rechaza params con
+// \n o 4+ espacios). Devuelve true si al menos uno se entregó.
+async function notifyOCEnviada(env, oc) {
+  const tel = oc.canal === 'ig' ? ('IG ' + oc.phone) : oc.phone;
+  const cartel = String(oc.cartel || 's/nombre').replace(/\s+/g, ' ').trim().slice(0, 120) || 's/nombre';
+  const importe = String(oc.importe || 's/importe').slice(0, 40);
+  const params = [tel, cartel, importe].map(String);
+  const texto = `OC ENVIADA!!!\n${tel}\n${cartel}\n${importe}`;
+  let anyOk = false;
+  for (const ph of REPORTE_DIARIO_PHONES) {
+    let r = null;
+    try { r = await waSendTemplate(env, ph, 'oc_enviada', 'es_AR', params); } catch (_) {}
+    if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} }
+    if (r && r.ok) anyOk = true;
+  }
+  return anyOk;
+}
+// Escaneo cada 5 min: (A) detecta OCs salientes nuevas (últimas 6h) → snapshot + etiqueta
+// POR PAGAR; (B) notifica las pendientes. Dedup por wamid (PK de oc_enviadas + NOT IN). La
+// ventana de 6h evita re-disparar sobre el backfill histórico. Todo best-effort (no rompe el cron).
+async function processOrdenesCompra(env) {
+  try {
+    try {
+      await env.DB.prepare(
+        "CREATE TABLE IF NOT EXISTS oc_enviadas (wamid TEXT PRIMARY KEY, phone TEXT, cartel TEXT, importe TEXT, canal TEXT, vendedor TEXT, ts_out TEXT, notified INTEGER DEFAULT 0, created_at TEXT)"
+      ).run();
+    } catch (_) {}
+    // A) OCs salientes nuevas de las últimas 6h → snapshot + etiqueta POR PAGAR.
+    let nuevas = [];
+    try {
+      nuevas = (await env.DB.prepare(
+        "SELECT wamid, phone, body, ts FROM wa_messages" +
+        " WHERE direction='outbound' AND msg_type!='status'" +
+        "   AND ts >= datetime('now','-6 hours')" +
+        "   AND body LIKE '%Orden de compra:%'" +
+        "   AND wamid NOT IN (SELECT wamid FROM oc_enviadas)" +
+        " ORDER BY ts ASC LIMIT 40"
+      ).all()).results || [];
+    } catch (_) {}
+    for (const row of nuevas) {
+      const oc = parseOC(row.body, row.phone);
+      if (!oc || !oc.phone) continue;
+      let vendedor = 'joaco';
+      try { vendedor = await resolveComercial(env, { phone: oc.phone }); } catch (_) {}
+      try {
+        await env.DB.prepare(
+          "INSERT OR IGNORE INTO oc_enviadas (wamid, phone, cartel, importe, canal, vendedor, ts_out, notified, created_at) VALUES (?,?,?,?,?,?,?,0,?)"
+        ).bind(row.wamid, oc.phone, oc.cartel, oc.importe, oc.canal, vendedor, row.ts, new Date().toISOString()).run();
+      } catch (_) {}
+      try { await porPagarTag(env, oc.phone, true); } catch (_) {}
+    }
+    // B) Notificar a Gaspar + hermano las OC pendientes (notified=0) de las últimas 6h.
+    let pend = [];
+    try {
+      pend = (await env.DB.prepare(
+        "SELECT wamid, phone, cartel, importe, canal FROM oc_enviadas WHERE notified=0 AND ts_out >= datetime('now','-6 hours') ORDER BY ts_out ASC LIMIT 20"
+      ).all()).results || [];
+    } catch (_) {}
+    for (const oc of pend) {
+      const ok = await notifyOCEnviada(env, oc);
+      if (ok) { try { await env.DB.prepare("UPDATE oc_enviadas SET notified=1 WHERE wamid=?").bind(oc.wamid).run(); } catch (_) {} }
+    }
   } catch (_) {}
 }
 
@@ -12534,6 +12647,46 @@ const handler = {
         } catch (e) { return json({ error: String(e && e.message || e) }, 500); }
       }
 
+      // GET /admin/wa/oc-urgente-status  →  popup "Pedido por vender URGENTE": OC enviada
+      // hace +3h (y menos de 48h) sin que el cliente respondiera. Scope por VENDEDOR (quién
+      // mandó la OC, columna oc_enviadas.vendedor): secundario (Nadia) ve las suyas; principal
+      // (Joaco) las no-secundarias; admin (Gaspar) todas. Filtra cartel!='' para excluir las
+      // filas históricas seedeadas (sin parsear). Barato: lee oc_enviadas + un NOT EXISTS.
+      if (request.method === 'GET' && path === '/admin/wa/oc-urgente-status') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin' && role !== 'comercial') return json({ error: 'forbidden' }, 403);
+        try {
+          const uslug = String(session.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+          const esSecundario = role === 'comercial' && VENDEDORES_SECUNDARIOS.includes(uslug);
+          let filtroVend = '';
+          if (role === 'comercial') {
+            filtroVend = esSecundario
+              ? ` AND o.vendedor = '${uslug}'`
+              : ` AND (o.vendedor IS NULL OR o.vendedor NOT IN (${VENDEDORES_SECUNDARIOS.map(v => `'${v}'`).join(',')}))`;
+          }
+          let lista = [];
+          try {
+            lista = (await env.DB.prepare(
+              "SELECT o.wamid, o.phone, o.cartel, o.importe, o.canal, o.ts_out, s.contact_name AS name" +
+              " FROM oc_enviadas o LEFT JOIN wa_chats_summary s ON s.phone = o.phone" +
+              " WHERE o.ts_out <= datetime('now','-3 hours') AND o.ts_out >= datetime('now','-48 hours')" +
+              "   AND o.cartel != ''" + filtroVend +
+              "   AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = o.phone AND m.direction='inbound' AND m.msg_type!='status' AND m.ts > o.ts_out)" +
+              " ORDER BY o.ts_out DESC LIMIT 30"
+            ).all()).results || [];
+          } catch (_) { lista = []; }
+          return json({
+            ok: true, count: lista.length,
+            max_created_at: lista[0] ? lista[0].ts_out : null,
+            items: lista.slice(0, 8).map(r => ({
+              phone: r.phone,
+              nombre: (r.cartel && r.cartel.trim()) ? r.cartel.trim() : ((r.name && r.name.trim()) ? r.name.trim() : ('+' + r.phone)),
+              importe: r.importe || '', canal: r.canal || 'wa'
+            }))
+          });
+        } catch (e) { return json({ error: String(e && e.message || e) }, 500); }
+      }
+
       // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
       // + cohorte revivible (últimos 60 días sin presupuesto). Solo admin; query pesada
       // (scan de wa_messages) — no llamar en polls.
@@ -12880,6 +13033,9 @@ const handler = {
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
+    // Órdenes de compra: detecta las OC salientes nuevas → etiqueta "POR PAGAR" + avisa a
+    // Gaspar/hermano + snapshot (métrica del reporte + popup "Pedido por vender URGENTE").
+    ctx.waitUntil(processOrdenesCompra(env));
     // Levanta audios que el webhook bajó a R2 pero no logró transcribir en vivo.
     ctx.waitUntil(processPendingTranscripts(env));
     // Refresca el token largo de IG antes de que venza (se autogatea a 1 vez/día).
