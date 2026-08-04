@@ -5037,9 +5037,10 @@ async function processEventoRecordatorio(env) {
     const sentTs = new Date().toISOString();
     try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'evento_record'").bind(sentTs, phone).run(); } catch (_) {}
     try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', ?, ?, 'sent', '', 1)").bind(sentTs, res.id || ('evrec-' + phone + '-' + nowMs), phone, enVentana ? 'text' : 'template', enVentana ? textoLibre : ('[plantilla: ' + tplName + ']')).run(); } catch (_) {}
-    // Ocultar el chat (no ensuciar la bandeja de Abril con los que no responden). NO oculta a los
-    // que ya están 'cursos'/atendidos: solo NULL/general/vacío. Los revealed activos se dejan como están.
-    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('general','')").bind(phone, sentTs).run(); } catch (_) {}
+    // Ocultar el chat SIEMPRE al mandar el aviso, sin importar el estado previo (aunque ya esté
+    // 'cursos'/revelado por la automatización vieja del lanzamiento). Se revela recién si el lead
+    // RESPONDE al aviso (eventoRecordatorioOnInbound, llamado en el webhook inbound).
+    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at").bind(phone, sentTs).run(); } catch (_) {}
     await new Promise(rs => setTimeout(rs, 400));
   }
 }
