@@ -9603,6 +9603,56 @@ const handler = {
         return json({ ok: true, forced: true });
       }
 
+      // Recuperar FUPs perdidos: presupuestos recientes SIN seguimiento efectivo (sin FUP
+      // 'sent', sin respuesta del cliente, sin cierre). GET = dry-run (lista sin mandar).
+      // POST {ejecutar:true, dias?, limit?} = re-manda el FUP por plantilla seguimiento_presupuesto
+      // (sale fuera de ventana), con goteo (delay) y respetando wa_send_paused.
+      if (path === '/admin/recuperar-fups') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let body = {}; if (request.method === 'POST') { try { body = await request.json(); } catch (_) {} }
+        const dias = Math.max(1, Math.min(14, parseInt(body.dias, 10) || 7));
+        const desde = new Date(Date.now() - dias * 24 * 3600 * 1000).toISOString();
+        const pfx1 = PRESUPUESTO_PREFIXES_TEXT[0].substring(0, 26);
+        const pfx2 = PRESUPUESTO_PREFIXES_TEXT[1].substring(0, 26);
+        const fupLike = ALL_FOLLOWUP_PREFIXES_TEXT.map(() => "f.body LIKE ? ESCAPE '\\'").join(' OR ');
+        const fupParams = ALL_FOLLOWUP_PREFIXES_TEXT.map(pref => pref.replace(/([%_\\])/g, '\\$1') + '%');
+        const cierreLike = FUP_CIERRE_MARKERS.map(() => "lower(c.body) LIKE ?").join(' OR ');
+        const cierreParams = FUP_CIERRE_MARKERS.map(k => '%' + k.toLowerCase() + '%');
+        const sql =
+          "WITH presup AS (SELECT phone, MAX(ts) AS pts FROM wa_messages " +
+          "  WHERE direction='outbound' AND ts >= ? AND (substr(body,1,26)=? OR substr(body,1,26)=?) " +
+          "    AND length(phone) BETWEEN 10 AND 14 GROUP BY phone) " +
+          "SELECT pr.phone, pr.pts, " +
+          "  (SELECT x.sender_name FROM wa_messages x WHERE x.phone=pr.phone AND x.direction='outbound' AND x.ts=pr.pts LIMIT 1) AS nombre, " +
+          "  (SELECT x.body FROM wa_messages x WHERE x.phone=pr.phone AND x.direction='outbound' AND x.ts=pr.pts LIMIT 1) AS body " +
+          "FROM presup pr " +
+          "WHERE NOT EXISTS (SELECT 1 FROM wa_messages f WHERE f.phone=pr.phone AND f.direction='outbound' AND f.automated=1 AND IFNULL(f.status,'')!='failed' AND f.ts > pr.pts AND (" + fupLike + ")) " +
+          "  AND NOT EXISTS (SELECT 1 FROM wa_messages i WHERE i.phone=pr.phone AND i.direction='inbound' AND i.msg_type!='status' AND i.ts > pr.pts) " +
+          "  AND NOT EXISTS (SELECT 1 FROM wa_messages c WHERE c.phone=pr.phone AND c.direction='outbound' AND (" + cierreLike + ")) " +
+          "  AND pr.phone NOT IN (SELECT phone FROM wa_unreachable_phones) " +
+          "ORDER BY pr.pts DESC LIMIT 250";
+        let rows = [];
+        try { rows = (await env.DB.prepare(sql).bind(desde, pfx1, pfx2, ...fupParams, ...cierreParams).all()).results || []; } catch (e) { return json({ error: 'query: ' + e.message }, 500); }
+        const leads = rows.map(r => ({ phone: r.phone, nombre: (r.nombre || '').split(/\s+/)[0] || '', fecha: (r.pts || '').slice(0, 10), monto: extractPresupuestoAmount(r.body) }));
+        if (request.method === 'POST' && body.ejecutar === true) {
+          const limit = Math.max(1, Math.min(250, parseInt(body.limit, 10) || 50));
+          let ok = 0, fail = 0;
+          for (const lead of leads.slice(0, limit)) {
+            if ((await kvGet(env, 'wa_send_paused', '0')) === '1') break;
+            const firstName = capitalizeName(lead.nombre) || 'amigo/a';
+            let rt = null;
+            try { rt = await waSendTemplate(env, lead.phone, 'seguimiento_presupuesto', 'es_AR', [firstName]); } catch (_) {}
+            if (rt && rt.ok) {
+              ok++;
+              try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', '[plantilla: seguimiento_presupuesto]', 'sent', '', 1)").bind(new Date().toISOString(), rt.id || ('fu-recover:' + lead.phone), lead.phone).run(); } catch (_) {}
+            } else { fail++; }
+            await new Promise(rs => setTimeout(rs, 500));
+          }
+          return json({ ok: true, ejecutado: true, enviados: ok, fallidos: fail, pendientes_restantes: leads.length - ok });
+        }
+        return json({ ok: true, dry_run: true, dias, total: leads.length, leads: leads.slice(0, 80) });
+      }
+
       // Backfill de los mensajes automáticos de ManyChat (welcome) que Instagram nos mandó
       // como echo VACÍO (solo el mid, sin texto) y por eso nunca se guardaron -> las convos
       // de IG arrancaban "cortadas". Recorre los logs crudos en orden cronológico: el PRIMER
@@ -13352,7 +13402,7 @@ async function processPresupuestoFollowups(env, opts = {}) {
     let conv;
     try {
       const rs = await env.DB.prepare(
-        'SELECT direction, body, ts FROM wa_messages WHERE phone = ? AND ts > ? ORDER BY ts LIMIT 200'
+        'SELECT direction, body, ts, status FROM wa_messages WHERE phone = ? AND ts > ? ORDER BY ts LIMIT 200'
       ).bind(p.phone, p.ts).all();
       conv = rs.results || [];
     } catch (_) { continue; }
@@ -13370,8 +13420,11 @@ async function processPresupuestoFollowups(env, opts = {}) {
       // cron (a Gaspar le llegó cada 5'). El LIKE por prefijo NO depende del LIMIT.
       const dupLike = ALL_FOLLOWUP_PREFIXES_TEXT.map(() => "body LIKE ? ESCAPE '\\'").join(' OR ');
       const dupParams = ALL_FOLLOWUP_PREFIXES_TEXT.map(pref => pref.replace(/([%_\\])/g, '\\$1') + '%');
+      // IFNULL(status,'')!='failed': un FUP que REBOTÓ (marcado 'failed' por el status
+      // webhook, típ. 131047 ventana cerrada) NO cuenta como enviado → se reintenta (por
+      // plantilla, ver windowOpen abajo). Antes quedaba deduped y el lead sin seguimiento.
       const dupFup = await env.DB.prepare(
-        "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 1 AND ts > ? " +
+        "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 1 AND IFNULL(status,'') != 'failed' AND ts > ? " +
         "AND (" + dupLike + ") LIMIT 1"
       ).bind(p.phone, p.ts, ...dupParams).first();
       if (dupFup) continue;
@@ -13400,7 +13453,7 @@ async function processPresupuestoFollowups(env, opts = {}) {
     // ¿Ya tiene follow-up (cualquier variante: legacy, copa, low, high)?
     // Si el outbound posterior arranca con ALGUNO de los prefijos conocidos,
     // ya recibió follow-up.
-    if (conv.some(m => m.direction === 'outbound' && ALL_FOLLOWUP_PREFIXES_TEXT.some(pref => (m.body || '').startsWith(pref)))) continue;
+    if (conv.some(m => m.direction === 'outbound' && m.status !== 'failed' && ALL_FOLLOWUP_PREFIXES_TEXT.some(pref => (m.body || '').startsWith(pref)))) continue;
 
     // 4) Decidir qué variante mandar según fecha y monto.
     // - Entre 24-jun y 30-jun: PROMO COPA (imagen + caption) a TODOS.
@@ -13462,6 +13515,16 @@ async function processPresupuestoFollowups(env, opts = {}) {
       const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound'").bind(p.phone).first();
       windowOpen = !!(li && li.t && (now - new Date(li.t).getTime()) < 24 * 60 * 60 * 1000);
     } catch (_) {}
+    // Si YA hubo un intento de FUP que REBOTÓ (status='failed', típ. 131047 ventana cerrada),
+    // NO confiar en windowOpen: el último inbound de la DB puede estar desfasado (mensajes
+    // re-importados en la migración del número → ts recientes falsos → texto libre que rebota).
+    // Forzamos la plantilla, que sí sale fuera de la ventana de 24h.
+    if (windowOpen) {
+      try {
+        const prevFail = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 1 AND status = 'failed' AND ts > ? LIMIT 1").bind(p.phone, p.ts).first();
+        if (prevFail) windowOpen = false;
+      } catch (_) {}
+    }
     if (!windowOpen) {
       const firstName = capitalizeName((p.sender_name || '').split(/\s+/)[0]) || 'amigo/a';
       const rt = await waSendTemplate(env, p.phone, 'seguimiento_presupuesto', 'es_AR', [firstName]);
