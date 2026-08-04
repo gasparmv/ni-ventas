@@ -2356,11 +2356,16 @@ async function maybeReporteLlamar(env) {
       return `${i + 1}. ${nom} — +${r.phone}${extra ? ' · ' + extra : ''}`;
     });
     const listaTxt = lines.join('\n');
+    // Meta RECHAZA parámetros de plantilla con saltos de línea (o 4+ espacios seguidos):
+    // el reporte fallaba, caía a texto libre, y a Gaspar/hermano (casi siempre FUERA de
+    // la ventana de 24h) le daba 131047 y no llegaba. Para la plantilla mandamos la lista
+    // en UNA sola línea con separador " | "; el texto libre de fallback sí usa saltos.
+    const listaTpl = lines.join('  |  ').replace(/\n+/g, ' ').replace(/\s{4,}/g, '   ');
     const texto = `📞 Para llamar hoy — ${rows.length} lead(s) que no contestaron el seguimiento del presupuesto:\n\n${listaTxt}`;
     let anyOk = false;
     for (const ph of REPORTE_DIARIO_PHONES) {
       let r = null;
-      try { r = await waSendTemplate(env, ph, 'reporte_llamar', 'es_AR', [listaTxt.slice(0, 900)]); } catch (_) {}
+      try { r = await waSendTemplate(env, ph, 'reporte_llamar', 'es_AR', [listaTpl.slice(0, 900)]); } catch (_) {}
       if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} }
       if (r && r.ok) anyOk = true;
     }
