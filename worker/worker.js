@@ -4973,7 +4973,8 @@ async function processEventoRecordatorio(env) {
   const nowMs = Date.now();
   if (nowMs > Date.parse(EVENTO_RECORDATORIO_DEADLINE)) { try { await kvSet(env, 'evento_recordatorio_on', '0'); } catch (_) {} return; }
   const hAR = new Date(nowMs - 3 * 3600 * 1000).getUTCHours();
-  if (hAR < 9 || hAR >= 21) return; // solo horario diurno AR
+  const hFin = Math.max(10, Math.min(24, parseInt(await kvGet(env, 'evento_recordatorio_hora_fin', '21'), 10) || 21));
+  if (hAR < 9 || hAR >= hFin) return; // horario AR (hora de fin configurable por kv evento_recordatorio_hora_fin)
   const fase = String(await kvGet(env, 'evento_recordatorio_fase', 'ventana') || 'ventana');
   const perTick = Math.max(1, Math.min(20, parseInt(await kvGet(env, 'evento_recordatorio_pertick', '4'), 10) || 4));
   const esHoy = _eventoVarianteHoy(nowMs);
@@ -9542,11 +9543,12 @@ const handler = {
         try { mandados = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_autoreply_log WHERE kind='evento_record' AND status='sent'").first())?.n || 0; } catch (_) {}
         try { enVentana = (await env.DB.prepare("SELECT COUNT(*) AS n FROM lanzamiento_landing ll WHERE NOT EXISTS (SELECT 1 FROM wa_autoreply_log a WHERE a.phone=ll.phone AND a.kind='evento_record') AND EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=ll.phone AND m.direction='inbound' AND m.ts > ?)").bind(cutoff).first())?.n || 0; } catch (_) {}
         const hAR = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours();
+        const hFin = Math.max(10, Math.min(24, parseInt(await kvGet(env, 'evento_recordatorio_hora_fin', '21'), 10) || 21));
         return json({
           ok: true, on, fase, perTick,
           total_anotados: total, ya_mandados: mandados, pendientes: total - mandados, pendientes_en_ventana: enVentana,
           variante_mensaje: _eventoVarianteHoy(Date.now()) ? 'HOY 19hs' : 'mañana 19hs',
-          horario_ok: (hAR >= 9 && hAR < 21), deadline: EVENTO_RECORDATORIO_DEADLINE,
+          horario_ok: (hAR >= 9 && hAR < hFin), hora_fin_ar: hFin, deadline: EVENTO_RECORDATORIO_DEADLINE,
           wa_send_paused: (await kvGet(env, 'wa_send_paused', '0')) === '1', ritmo_por_hora: perTick * 60
         });
       }
