@@ -5174,11 +5174,71 @@ async function processEventoRecordatorio(env) {
 async function eventoRecordatorioOnInbound(env, phone) {
   if (!phone) return;
   try {
-    const got = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind = 'evento_record' AND status = 'sent' LIMIT 1").bind(phone).first();
+    const got = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind IN ('evento_record', 'sorteo_dia2') AND status = 'sent' LIMIT 1").bind(phone).first();
     if (!got) return;
     const nowIso = new Date().toISOString();
     await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(phone, nowIso).run();
   } catch (_) {}
+}
+
+// ============================================================================
+// SORTEO DÍA 2 — recordatorio a los participantes del formulario del sorteo del
+// evento de agosto. Goteo seguro: manda de a poco (kv sorteo_dia2_pertick, def 3),
+// horario 9-21 AR, deadline SORTEO_DIA2_DEADLINE (6/8 14hs AR). Texto libre si el
+// lead está en ventana de 24h, plantilla (sorteo_evento_dia2) si no. Personaliza
+// con el nombre. Oculta el chat al enviar; se revela recién si RESPONDE
+// (eventoRecordatorioOnInbound cubre kind='sorteo_dia2'). Dedup atómico con
+// wa_autoreply_log kind='sorteo_dia2'. Kill-switch kv sorteo_dia2_on. La lista sale
+// de la tabla sorteo_dia2 (phone, nombre), importada del Sheet del sorteo.
+// ============================================================================
+const SORTEO_DIA2_TPL = 'sorteo_evento_dia2';
+const SORTEO_DIA2_DEADLINE = '2026-08-06T17:00:00.000Z'; // 14:00 AR = límite duro de envío
+function sorteoDia2Msg(nombre) {
+  const n = String(nombre || '').trim();
+  return (n ? ('buenas ' + n + '!') : 'buenas!') + ' Vimos que completaste el formulario que pasamos al final de la primera clase del evento sobre armado de carteles Neon LED. Ya estás participando del sorteo! 🎉 Recordá que el jueves 6/8 a las 19hs, al comienzo de la 2da clase, anunciamos los ganadores 🚀';
+}
+
+async function processSorteoDia2(env) {
+  if ((await kvGet(env, 'sorteo_dia2_on', '0')) !== '1') return;
+  if ((await kvGet(env, 'wa_send_paused', '0')) === '1') return;
+  if (await isWaBillingBlocked(env)) return;
+  const nowMs = Date.now();
+  if (nowMs > Date.parse(SORTEO_DIA2_DEADLINE)) { try { await kvSet(env, 'sorteo_dia2_on', '0'); } catch (_) {} return; }
+  const hAR = new Date(nowMs - 3 * 3600 * 1000).getUTCHours();
+  if (hAR < 9 || hAR >= 21) return; // horario AR 9-21
+  const perTick = Math.max(1, Math.min(20, parseInt(await kvGet(env, 'sorteo_dia2_pertick', '3'), 10) || 3));
+  const ventanaCutoff = new Date(nowMs - 24 * 3600 * 1000).toISOString();
+  let rows;
+  try {
+    rows = (await env.DB.prepare(
+      "SELECT s.phone AS phone, s.nombre AS nombre FROM sorteo_dia2 s " +
+      "WHERE NOT EXISTS (SELECT 1 FROM wa_autoreply_log a WHERE a.phone = s.phone AND a.kind = 'sorteo_dia2') " +
+      "AND s.phone NOT IN (SELECT phone FROM wa_unreachable_phones) LIMIT ?"
+    ).bind(perTick).all()).results || [];
+  } catch (_) { return; }
+  for (const r of rows) {
+    const phone = r.phone;
+    let reserva;
+    try { reserva = await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'sorteo_dia2', '', 'sending', '', '')").bind(phone).run(); } catch (_) { continue; }
+    if (!reserva?.meta?.changes) continue; // ya reservado por otro tick
+    const nombre = String(r.nombre || '').trim().split(/\s+/)[0] || '';
+    let enVentana = false;
+    try { const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1").bind(phone, ventanaCutoff).first(); enVentana = !!inb; } catch (_) {}
+    const textoLibre = sorteoDia2Msg(nombre);
+    const res = enVentana ? await waSendText(env, phone, textoLibre) : await waSendTemplate(env, phone, SORTEO_DIA2_TPL, 'es_AR', [nombre || 'Hola']);
+    if (!res || !res.ok) {
+      // Libera la reserva para reintentar (ej. plantilla todavía en aprobación por Meta).
+      try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'sorteo_dia2'").bind(phone).run(); } catch (_) {}
+      try { await logWaEvent(env, { to: phone, kind: 'sorteo-dia2', ref: '', ok: false, error: res?.error }); } catch (_) {}
+      continue;
+    }
+    const sentTs = new Date().toISOString();
+    try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'sorteo_dia2'").bind(sentTs, phone).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', ?, ?, 'sent', '', 1)").bind(sentTs, res.id || ('sorteo2-' + phone + '-' + nowMs), phone, enVentana ? 'text' : 'template', enVentana ? textoLibre : ('[plantilla: ' + SORTEO_DIA2_TPL + ']')).run(); } catch (_) {}
+    // Ocultar el chat al enviar; se revela recién si el lead responde (mismo mecanismo que el recordatorio).
+    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at").bind(phone, sentTs).run(); } catch (_) {}
+    await new Promise(rs => setTimeout(rs, 400));
+  }
 }
 
 // ============================================================================
@@ -13062,6 +13122,7 @@ const handler = {
     // Recordatorio del evento (Fase Semilla): goteo a los anotados. Master switch OFF por
     // defecto (kv 'evento_recordatorio_on'); no manda nada hasta prenderlo.
     ctx.waitUntil(processEventoRecordatorio(env));
+    ctx.waitUntil(processSorteoDia2(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
