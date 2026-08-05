@@ -5208,13 +5208,20 @@ async function processSorteoDia2(env) {
   if (hAR < 9 || hAR >= 21) return; // horario AR 9-21
   const perTick = Math.max(1, Math.min(20, parseInt(await kvGet(env, 'sorteo_dia2_pertick', '3'), 10) || 3));
   const ventanaCutoff = new Date(nowMs - 24 * 3600 * 1000).toISOString();
+  // ¿La plantilla ya está aprobada por Meta? Mientras NO lo esté, SOLO mandamos a los que están
+  // EN ventana de 24h (texto libre) — así no fallamos contra Meta con la plantilla pending (eso
+  // castiga la calidad del número). Los de fuera de ventana esperan la aprobación; el cache lo
+  // sincroniza monitorTemplateStatus en el cron y avisa al admin cuando aprueba.
+  let tplApproved = false;
+  try { const ts = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(SORTEO_DIA2_TPL).first(); tplApproved = !!(ts && String(ts.status).toUpperCase() === 'APPROVED'); } catch (_) {}
+  const ventanaClause = tplApproved ? '' : "AND EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = s.phone AND m.direction = 'inbound' AND m.ts > ?) ";
   let rows;
   try {
-    rows = (await env.DB.prepare(
-      "SELECT s.phone AS phone, s.nombre AS nombre FROM sorteo_dia2 s " +
+    const q = "SELECT s.phone AS phone, s.nombre AS nombre FROM sorteo_dia2 s " +
       "WHERE NOT EXISTS (SELECT 1 FROM wa_autoreply_log a WHERE a.phone = s.phone AND a.kind = 'sorteo_dia2') " +
-      "AND s.phone NOT IN (SELECT phone FROM wa_unreachable_phones) LIMIT ?"
-    ).bind(perTick).all()).results || [];
+      "AND s.phone NOT IN (SELECT phone FROM wa_unreachable_phones) " + ventanaClause + "LIMIT ?";
+    const stmt = tplApproved ? env.DB.prepare(q).bind(perTick) : env.DB.prepare(q).bind(ventanaCutoff, perTick);
+    rows = (await stmt.all()).results || [];
   } catch (_) { return; }
   for (const r of rows) {
     const phone = r.phone;
