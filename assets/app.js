@@ -485,7 +485,7 @@ async function enviarPresupuestoWA() {
       r = await fetch(CONFIG.trackerUrl + '/admin/wa/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ to: tel, body: texto })
+        body: JSON.stringify({ to: tel, body: texto, check_window: true })
       });
     }
     const j = await r.json().catch(() => ({}));

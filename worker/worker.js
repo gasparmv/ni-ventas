@@ -9370,6 +9370,15 @@ const handler = {
             return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
           }
         }
+        // Chequeo de ventana 24h OPT-IN (check_window): el texto libre fuera de ventana rebota
+        // ASYNC con 131047 (Meta lo acepta y lo falla por webhook → no se atrapa en el return).
+        // Si el caller lo pide (ej. presupuesto), avisamos 409 window_closed ANTES de mandar,
+        // para que el front caiga a la plantilla aprobada en vez de perder el mensaje.
+        if (body.check_window && num) {
+          const since24 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const inb = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1").bind(num, since24).first();
+          if (!inb) return json({ error: 'Re-engagement message', window_closed: true }, 409);
+        }
         // Si reply_to viene, incluimos context.message_id para que WA lo muestre como cita.
         const payload = { messaging_product: 'whatsapp', to: num || to, type: 'text', text: { body: String(text) } };
         if (reply_to) payload.context = { message_id: reply_to };
