@@ -11123,7 +11123,9 @@ const handler = {
           const inb = await env.DB.prepare(
             "SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1"
           ).bind(num, since24).first();
-          if (!inb) return json({ error: 'Re-engagement message', window_closed: true, has_render: !!renderKey, render_key: renderKey || '' }, 409);
+          // render_key para la plantilla con foto: el del brief si lo hay; si no, la key R2
+          // del blob que ACABAMOS de subir (el cotizador manda el render en memoria, sin brief).
+          if (!inb) { const rk = renderKey || (type === 'image' ? r2Key : ''); return json({ error: 'Re-engagement message', window_closed: true, has_render: !!rk, render_key: rk }, 409); }
         } catch (_) {}
 
         const CAPTION_MAX = 1024;

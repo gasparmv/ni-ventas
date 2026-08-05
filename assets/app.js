@@ -13,13 +13,10 @@
 // Para REACTIVAR: poner en true.
 const OFRECER_BASE_NEGRA = false;
 
-// Estado REAL del template de Meta 'presupuesto_detallado'(_img): su body
-// aprobado todavía tiene la línea "Base negra: {{5}}" (5 variables). El envío
-// FUERA de la ventana de 24h usa ese template, así que hay que mandarle 5
-// params o Meta lo rechaza. Cuando se edite el body en Meta a 4 variables
-// (quitando esa línea) y se re-apruebe, poner esto en false para dejar de
-// mandar la base negra también en los envíos fuera de ventana.
-const TEMPLATE_DETALLADO_TIENE_NEGRA = true;
+// Fuera de ventana el presupuesto va por PLANTILLA. Las 'presupuesto_detallado(_img)2'
+// (jul-2026) NO tienen base negra (4 vars); enviarPresupuestoComoPlantilla las prefiere y
+// cae a las viejas 'presupuesto_detallado(_img)' (con negra, 5 vars) SOLO hasta que Meta
+// apruebe las nuevas. Cuando estén aprobadas y estables, se pueden borrar las viejas.
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
@@ -408,33 +405,42 @@ async function enviarPresupuestoComoPlantilla(tel, carteles, renderKey) {
   const nombre = (c.cliente || '').trim() || 'tu local';
   const ancho = String(Math.round(+c.ancho));
   const alto = String(Math.round(+c.alto));
-  // El template de Meta manda tantos params como variables tenga su body aprobado.
   // Precios SIEMPRE reales en la plantilla (ignorar el modo privacidad de pantalla,
   // sino los precios salen "$•••" al cliente).
   const _pp = STATE.privacy; STATE.privacy = false;
-  const params = TEMPLATE_DETALLADO_TIENE_NEGRA
-    ? [nombre, ancho, alto, fmtMoney(r.transFinal), fmtMoney(r.negroFinal)]
-    : [nombre, ancho, alto, fmtMoney(r.transFinal)];
+  const precioTrans = fmtMoney(r.transFinal), precioNegro = fmtMoney(r.negroFinal);
   STATE.privacy = _pp;
+  // Plantillas 'presupuesto_detallado(_img)2' = SIN base negra (4 vars, jul-2026). Se prefieren;
+  // las viejas (con negra, 5 vars) quedan de red hasta que Meta apruebe las nuevas.
+  const paramsNew = [nombre, ancho, alto, precioTrans];
+  const paramsOld = [nombre, ancho, alto, precioTrans, precioNegro];
   const useImg = !!renderKey;
-  const lineaNegraConf = TEMPLATE_DETALLADO_TIENE_NEGRA ? `\nBase negra: ${fmtMoney(r.negroFinal)}` : '';
   const ok = await showConfirm(
     `La ventana de 24h está cerrada, así que el presupuesto va como PLANTILLA aprobada${useImg ? ' CON el render' : ''} (incluye los controladores, seña 50%, 3 cuotas con 10%, 10 días hábiles y envío gratis).\n\n` +
-    `Trabajo: ${nombre}\nMedidas: ${ancho} x ${alto}\nBase transparente: ${fmtMoney(r.transFinal)}${lineaNegraConf}\n\n¿Lo mando?`,
+    `Trabajo: ${nombre}\nMedidas: ${ancho} x ${alto}\nBase transparente: ${precioTrans}\n\n¿Lo mando?`,
     { title: 'Enviar como plantilla', confirmLabel: '📤 Mandar plantilla', cancelLabel: 'Cancelar' }
   );
   if (!ok) return { ok: false, cancelled: true };
-  const post = (name, withImg) => fetch(CONFIG.trackerUrl + '/admin/wa/template', {
+  const post = (name, withImg, prms) => fetch(CONFIG.trackerUrl + '/admin/wa/template', {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ to: tel, name, lang: 'es', params, header_image_key: withImg ? renderKey : undefined })
+    body: JSON.stringify({ to: tel, name, lang: 'es', params: prms, header_image_key: withImg ? renderKey : undefined })
   });
+  // Cascada: nueva-con-img → nueva-texto → vieja-con-img → vieja-texto. La 1ra que Meta
+  // acepta gana. Sin bache: hasta que aprueben las "2" (sin negra), siguen andando las viejas.
+  const attempts = [];
+  if (useImg) attempts.push(['presupuesto_detallado_img2', true, paramsNew]);
+  attempts.push(['presupuesto_detallado2', false, paramsNew]);
+  if (useImg) attempts.push(['presupuesto_detallado_img', true, paramsOld]);
+  attempts.push(['presupuesto_detallado', false, paramsOld]);
   try {
-    let tr = await post(useImg ? 'presupuesto_detallado_img' : 'presupuesto_detallado', useImg);
-    let tj = await tr.json().catch(() => ({}));
-    // Si la plantilla CON imagen todavía no está aprobada por Meta, caemos a la de texto.
-    if (!tr.ok && useImg) { tr = await post('presupuesto_detallado', false); tj = await tr.json().catch(() => ({})); }
-    if (!tr.ok) return { ok: false, error: 'No se pudo mandar la plantilla: ' + (tj.error || ('HTTP ' + tr.status)) };
-    toast(useImg && tr.ok ? 'Mandado como plantilla con render ✓' : 'Mandado como plantilla aprobada ✓');
+    let tj = {}, okSent = false, usedImg = false;
+    for (const [nm, wi, pr] of attempts) {
+      const tr = await post(nm, wi, pr);
+      tj = await tr.json().catch(() => ({}));
+      if (tr.ok) { okSent = true; usedImg = wi; break; }
+    }
+    if (!okSent) return { ok: false, error: 'No se pudo mandar la plantilla: ' + (tj.error || 'sin detalle') };
+    toast(usedImg ? 'Mandado como plantilla con render ✓' : 'Mandado como plantilla aprobada ✓');
     return { ok: true, wamid: tj.id || '' };
   } catch (e) {
     return { ok: false, error: 'Error de red al mandar la plantilla' };
@@ -489,7 +495,7 @@ async function enviarPresupuestoWA() {
       // rechaza el texto libre. Lo mandamos como plantilla aprobada.
       const windowClosed = /outside|24|window|template|131047|re-?engag/i.test(String(detail));
       if (windowClosed) {
-        const sent = await enviarPresupuestoComoPlantilla(tel, carteles);
+        const sent = await enviarPresupuestoComoPlantilla(tel, carteles, j.render_key);
         if (sent.ok) { waOk = true; wamid = sent.wamid || ''; }
         else { if (!sent.cancelled) await showAlert(sent.error || detail, { title: 'No se pudo enviar', variant: 'warn' }); return; }
       } else {
