@@ -2403,6 +2403,16 @@ async function porPagarTag(env, phone, on) {
     else await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
   } catch (_) {}
 }
+// ¿El contacto tiene la etiqueta "POR PAGAR"? (le mandaron una OC y todavía no pagó).
+// Gate del OCR de comprobantes para CARTELES: anda siempre, sin depender del lanzamiento.
+async function hasPorPagarLabel(env, phone) {
+  try {
+    const id = await ensureLabelId(env, POR_PAGAR_LABEL_NAME, POR_PAGAR_LABEL_COLOR);
+    if (!id) return false;
+    const r = await env.DB.prepare("SELECT 1 FROM contact_labels WHERE phone = ? AND label_id = ? LIMIT 1").bind(String(phone || '').replace(/\D/g, ''), id).first();
+    return !!r;
+  } catch (_) { return false; }
+}
 // Extrae los datos de una OC del cuerpo (tipeado a mano → regex tolerantes a espacios).
 // cartel = "Trabajo:"; importe = "Total:" con fallback a "Precio:" (el ~7% sin controlador
 // no lleva "Total:"). El importe se relaya como STRING crudo (mezcla $238,000 / $263.000 /
@@ -6726,10 +6736,10 @@ async function analyzeImage(env, r2Key) {
 // a su WhatsApp personal eran solo para la noche del 11/06. Este interruptor
 // apaga las tres piezas (OCR, reenvío en vivo y backfill). Para reactivar todo,
 // poner PAGO_CAPTURA_ACTIVA = true.
-const PAGO_CAPTURA_ACTIVA = false;
-// Ventana 11/06 00:00 → 16/06 00:00 (AR, incluye todo el 15/06). AR = UTC-3.
-const PAGO_LANZAMIENTO_START_UTC = '2026-06-11T03:00:00.000Z';
-const PAGO_LANZAMIENTO_END_UTC   = '2026-06-16T03:00:00.000Z';
+const PAGO_CAPTURA_ACTIVA = true;   // reactivado 06/08/2026 para el lanzamiento del curso
+// Ventana del lanzamiento: desde 18:00 AR del 06/08 hasta fin del 09/08 AR. AR = UTC-3.
+const PAGO_LANZAMIENTO_START_UTC = '2026-08-06T21:00:00.000Z';
+const PAGO_LANZAMIENTO_END_UTC   = '2026-08-10T03:00:00.000Z';
 const PAGO_SENA_MIN = 30000;   // banda de la seña del acceso (~40.000 ARS)
 const PAGO_SENA_MAX = 50000;
 function isPagoLanzamientoWindow(tsIso) {
@@ -6912,10 +6922,16 @@ async function processPaymentProof(env, m) {
   const cuenta = resolveCuenta(a);
   let clasificacion = '', labelName = null;
   if (esPago) {
-    const esSena = monto >= PAGO_SENA_MIN && monto <= PAGO_SENA_MAX;  // ~40k → seña
-    if (esSena) { clasificacion = 'sena'; labelName = 'seña lanzamiento junio'; }
-    else if (await hasLaunchKeyPhrase(env, m.phone, m.caption)) { clasificacion = 'lanzamiento'; labelName = 'pago lanzamiento junio'; }
-    else { clasificacion = 'a_definir'; labelName = 'a definir - lanzamiento'; }  // catch-all en la ventana: ningún pago queda sin etiquetar
+    // CARTELES: si el contacto tiene "POR PAGAR" (le mandaron una OC), este pago es la seña del
+    // cartel → sacamos "POR PAGAR" y ponemos "cartel primer pago". Anda SIEMPRE (no depende del
+    // lanzamiento). Si NO tiene POR PAGAR → es del lanzamiento del curso → "pago lanzamiento".
+    if (await hasPorPagarLabel(env, m.phone)) {
+      clasificacion = 'cartel_primer_pago'; labelName = 'cartel primer pago';
+      try { await porPagarTag(env, m.phone, false); } catch (_) {}   // saca "POR PAGAR"
+    } else {
+      clasificacion = (monto >= PAGO_SENA_MIN && monto <= PAGO_SENA_MAX) ? 'sena' : 'full';  // seña ~40k vs completo
+      labelName = 'pago lanzamiento';
+    }
   }
   try {
     await env.DB.prepare(
@@ -6923,7 +6939,7 @@ async function processPaymentProof(env, m) {
     ).bind(esPago ? 1 : 0, clasificacion, monto, (a && a.moneda) || 'ARS', cuenta, (a && a.titular_destino) || '', (a && a.banco) || '', (a && +a.confianza) || 0, JSON.stringify(a || {}).slice(0, 1500), m.wamid).run();
   } catch (_) {}
   if (labelName) {
-    const color = labelName.indexOf('seña') === 0 ? '#06b6d4' : labelName.indexOf('pago') === 0 ? '#22c55e' : '#f59e0b';
+    const color = labelName === 'cartel primer pago' ? '#a855f7' : '#22c55e';  // cartel=violeta, lanzamiento=verde
     const lid = await ensureLabelId(env, labelName, color);
     if (lid) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(m.phone, lid, new Date().toISOString()).run(); } catch (_) {} }
   }
@@ -8203,7 +8219,7 @@ const handler = {
                 // ===== Lanzamiento junio: capturar comprobantes de pago =====
                 // En la ventana (11-15/06), todo inbound con imagen/PDF se OCRea,
                 // se clasifica, se etiqueta y se respalda en D1 (NO se responde nada).
-                if (direction === 'inbound' && (msgType === 'image' || msgType === 'document') && r2Key && isPagoLanzamientoWindow(ts)) {
+                if (direction === 'inbound' && (msgType === 'image' || msgType === 'document') && r2Key && (isPagoLanzamientoWindow(ts) || await hasPorPagarLabel(env, phone))) {
                   // 1) OCR + clasificación + backup en D1. 2) reenvío a Gaspar
                   // (solo hoy/mañana). El reenvío corre SIEMPRE tras el intento de
                   // OCR (aunque el OCR falle) para no perder ningún comprobante; el
