@@ -2486,6 +2486,53 @@ async function processOrdenesCompra(env) {
   } catch (_) {}
 }
 
+// ===== Vigilador de pago de la OC (a pedido de Gaspar, ago-2026) =====
+// Cada chat con la etiqueta "POR PAGAR" (una OC enviada) queda vigilado: cuando el cliente
+// manda una FOTO/PDF que el OCR confirma como comprobante de pago, se le SACA "POR PAGAR" y
+// se le pone la etiqueta existente "Cartel primer pago" (id 1). Solo OCR-ea imágenes de chats
+// POR PAGAR posteriores a la OC y NO repite (tabla oc_pago_check → control de costo). Reusa
+// analyzePaymentProof (visión). Corre en el cron */5. Devuelve un reporte (para el endpoint
+// de test). NO le responde nada al cliente.
+const CARTEL_PRIMER_PAGO_LABEL_NAME = 'Cartel primer pago';
+const CARTEL_PRIMER_PAGO_LABEL_COLOR = '#10b981';
+async function processCartelPagos(env, { phone = null, force = false } = {}) {
+  const report = [];
+  try {
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS oc_pago_check (wamid TEXT PRIMARY KEY, phone TEXT, es_comprobante INTEGER, checked_at TEXT)").run(); } catch (_) {}
+    try { await env.DB.prepare("ALTER TABLE oc_enviadas ADD COLUMN pagado_at TEXT").run(); } catch (_) {}
+    const porPagarId = await ensureLabelId(env, POR_PAGAR_LABEL_NAME, POR_PAGAR_LABEL_COLOR);
+    const primerPagoId = await ensureLabelId(env, CARTEL_PRIMER_PAGO_LABEL_NAME, CARTEL_PRIMER_PAGO_LABEL_COLOR);
+    if (!porPagarId || !primerPagoId) return report;
+    const phoneNorm = phone ? String(phone).replace(/\D/g, '') : null;
+    const phoneClause = phoneNorm ? " AND cl.phone = ?" : "";
+    const checkedClause = force ? "" : " AND m.wamid NOT IN (SELECT wamid FROM oc_pago_check)";
+    const sql =
+      "SELECT DISTINCT m.wamid, m.phone, m.media_url AS r2Key, m.msg_type AS msgType, m.ts " +
+      "FROM contact_labels cl " +
+      "JOIN oc_enviadas o ON o.phone = cl.phone AND o.pagado_at IS NULL " +
+      "JOIN wa_messages m ON m.phone = cl.phone AND m.direction='inbound' AND m.msg_type IN ('image','document') AND m.media_url IS NOT NULL AND m.media_url != '' AND m.ts > o.ts_out " +
+      "WHERE cl.label_id = ?" + phoneClause + checkedClause +
+      "  AND o.ts_out >= datetime('now','-30 days') " +
+      "ORDER BY m.ts ASC LIMIT 8";
+    let cands = [];
+    try { cands = (await env.DB.prepare(sql).bind(...(phoneNorm ? [porPagarId, phoneNorm] : [porPagarId])).all()).results || []; } catch (_) {}
+    for (const c of cands) {
+      let esPago = false;
+      try { const a = await analyzePaymentProof(env, c.r2Key, c.msgType === 'document' ? 'application/pdf' : ''); esPago = !!(a && a.es_comprobante); } catch (_) {}
+      try { await env.DB.prepare("INSERT OR IGNORE INTO oc_pago_check (wamid, phone, es_comprobante, checked_at) VALUES (?,?,?,?)").bind(c.wamid, c.phone, esPago ? 1 : 0, new Date().toISOString()).run(); } catch (_) {}
+      let action = 'no_comprobante';
+      if (esPago) {
+        try { await env.DB.prepare("DELETE FROM contact_labels WHERE phone=? AND label_id=?").bind(c.phone, porPagarId).run(); } catch (_) {}
+        try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?,?,?)").bind(c.phone, primerPagoId, new Date().toISOString()).run(); } catch (_) {}
+        try { await env.DB.prepare("UPDATE oc_enviadas SET pagado_at=? WHERE phone=? AND pagado_at IS NULL").bind(new Date().toISOString(), c.phone).run(); } catch (_) {}
+        action = 'pagado→Cartel primer pago';
+      }
+      report.push({ phone: c.phone, wamid: c.wamid, es_comprobante: esPago, action });
+    }
+  } catch (_) {}
+  return report;
+}
+
 // ===== Auto-respuesta del minicurso (regalos) =====
 // Cuando un contacto ESCRIBE pidiendo la guía + cotizador del minicurso, le
 // respondemos automáticamente con el link de regalos. Es respuesta dentro de la
@@ -12681,7 +12728,7 @@ const handler = {
               "SELECT o.wamid, o.phone, o.cartel, o.importe, o.canal, o.ts_out, s.contact_name AS name" +
               " FROM oc_enviadas o LEFT JOIN wa_chats_summary s ON s.phone = o.phone" +
               " WHERE o.ts_out <= datetime('now','-3 hours') AND o.ts_out >= datetime('now','-48 hours')" +
-              "   AND o.cartel != ''" + filtroVend +
+              "   AND o.cartel != '' AND o.pagado_at IS NULL" + filtroVend +
               "   AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = o.phone AND m.direction='inbound' AND m.msg_type!='status' AND m.ts > o.ts_out)" +
               " ORDER BY o.ts_out DESC LIMIT 30"
             ).all()).results || [];
@@ -12717,6 +12764,18 @@ const handler = {
         if (!oc || !oc.phone) return json({ error: 'no hay OC para probar' }, 404);
         const ok = await notifyOCEnviada(env, oc);
         return json({ ok, delivered: ok, oc });
+      }
+
+      // POST /admin/oc/check-pagos  →  corre el vigilador de comprobantes a mano (opcional
+      // ?phone=<tel> para un solo chat, ?force=1 para re-OCRear aunque ya se haya chequeado).
+      // Devuelve qué imágenes vio, el veredicto OCR y si hizo el swap de etiquetas. Admin.
+      if (request.method === 'POST' && path === '/admin/oc/check-pagos') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin') return json({ error: 'forbidden' }, 403);
+        const ph = url.searchParams.get('phone') || null;
+        const force = url.searchParams.get('force') === '1';
+        const rep = await processCartelPagos(env, { phone: ph, force });
+        return json({ ok: true, checked: rep.length, report: rep });
       }
 
       // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
@@ -13068,6 +13127,9 @@ const handler = {
     // Órdenes de compra: detecta las OC salientes nuevas → etiqueta "POR PAGAR" + avisa a
     // Gaspar/hermano + snapshot (métrica del reporte + popup "Pedido por vender URGENTE").
     ctx.waitUntil(processOrdenesCompra(env));
+    // Vigilador de pago: en los chats "POR PAGAR", cuando entra un comprobante (OCR) →
+    // saca "POR PAGAR" y pone "Cartel primer pago".
+    ctx.waitUntil(processCartelPagos(env));
     // Levanta audios que el webhook bajó a R2 pero no logró transcribir en vivo.
     ctx.waitUntil(processPendingTranscripts(env));
     // Refresca el token largo de IG antes de que venza (se autogatea a 1 vez/día).
