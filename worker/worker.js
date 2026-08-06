@@ -6938,7 +6938,36 @@ async function processPaymentProof(env, m) {
     const color = '#22c55e';  // pago lanzamiento = verde
     const lid = await ensureLabelId(env, labelName, color);
     if (lid) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(m.phone, lid, new Date().toISOString()).run(); } catch (_) {} }
+    // Aviso a Gaspar + Bruno por cada pago (+ el inicial "ya arrancaron" una sola vez).
+    try { await avisoPagoLanzamiento(env, { nombre: m.senderName, phone: m.phone, monto, esSena: clasificacion === 'sena' }); } catch (_) {}
   }
+}
+
+// Manda un aviso del lanzamiento a un número interno: plantilla aviso_lanzamiento (porque
+// Gaspar/Bruno casi siempre están FUERA de la ventana 24h) con fallback a texto libre.
+async function avisoLanzamientoSend(env, ph, texto) {
+  const t = String(texto || '').replace(/\s+/g, ' ').trim().slice(0, 300);  // 1 línea (Meta rechaza \n / 4+ espacios en params)
+  let r = null;
+  try { r = await waSendTemplate(env, ph, 'aviso_lanzamiento', 'es_AR', [t]); } catch (_) {}
+  if (!r || !r.ok) { try { r = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + t); } catch (_) {} }
+  return r;
+}
+// Por cada pago del lanzamiento detectado: (1) el aviso inicial "ya arrancaron" una sola vez
+// (marca kv SOLO si salió OK, así no se pierde si la plantilla aún no está aprobada), (2) el
+// aviso del pago con nombre + teléfono + importe + si es seña. A Gaspar y Bruno.
+async function avisoPagoLanzamiento(env, { nombre, phone, monto, esSena }) {
+  const fmt = (n) => '$' + String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  const who = (nombre && String(nombre).trim()) || phone;
+  try {
+    const seen = await env.DB.prepare("SELECT 1 FROM kv_cache WHERE k = 'lanzamiento_aviso_inicial'").first();
+    if (!seen) {
+      let anyOk = false;
+      for (const p of REPORTE_DIARIO_PHONES) { const r = await avisoLanzamientoSend(env, p, 'Ya arrancaron a entrar pagos! 🎉'); if (r && r.ok) anyOk = true; }
+      if (anyOk) { try { await env.DB.prepare("INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES ('lanzamiento_aviso_inicial','1',?)").bind(new Date().toISOString()).run(); } catch (_) {} }
+    }
+  } catch (_) {}
+  const detalle = 'Nuevo pago 💰 ' + String(who).slice(0, 40) + ' · ' + phone + (monto > 0 ? (' · ' + fmt(monto)) : '') + (esSena ? ' (seña ~40k)' : '');
+  for (const p of REPORTE_DIARIO_PHONES) { try { await avisoLanzamientoSend(env, p, detalle); } catch (_) {} }
 }
 
 // ===== Transcripción de audio con Gemini (transcribe MUCHO mejor el español
