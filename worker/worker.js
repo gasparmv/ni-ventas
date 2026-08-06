@@ -6910,6 +6910,9 @@ function resolveCuenta(a) {
 // NO responde nada (eso lo hacen a mano). Corre en ctx.waitUntil (no bloquea el webhook).
 async function processPaymentProof(env, m) {
   if (!m || !m.wamid || !m.phone) return;
+  // Los comprobantes de CARTELES (contacto con "POR PAGAR") los maneja processCartelPagos
+  // (saca "POR PAGAR" + pone "Cartel primer pago"). Acá SOLO procesamos los del lanzamiento.
+  try { if (await hasPorPagarLabel(env, m.phone)) return; } catch (_) {}
   try {
     const res = await env.DB.prepare(
       "INSERT OR IGNORE INTO wa_pago_proof (wamid, phone, nombre, media_key, caption, ts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
@@ -6922,16 +6925,9 @@ async function processPaymentProof(env, m) {
   const cuenta = resolveCuenta(a);
   let clasificacion = '', labelName = null;
   if (esPago) {
-    // CARTELES: si el contacto tiene "POR PAGAR" (le mandaron una OC), este pago es la seña del
-    // cartel → sacamos "POR PAGAR" y ponemos "cartel primer pago". Anda SIEMPRE (no depende del
-    // lanzamiento). Si NO tiene POR PAGAR → es del lanzamiento del curso → "pago lanzamiento".
-    if (await hasPorPagarLabel(env, m.phone)) {
-      clasificacion = 'cartel_primer_pago'; labelName = 'cartel primer pago';
-      try { await porPagarTag(env, m.phone, false); } catch (_) {}   // saca "POR PAGAR"
-    } else {
-      clasificacion = (monto >= PAGO_SENA_MIN && monto <= PAGO_SENA_MAX) ? 'sena' : 'full';  // seña ~40k vs completo
-      labelName = 'pago lanzamiento';
-    }
+    // (los carteles / POR PAGAR ya se filtraron arriba → acá solo llegan pagos del lanzamiento)
+    clasificacion = (monto >= PAGO_SENA_MIN && monto <= PAGO_SENA_MAX) ? 'sena' : 'full';  // seña ~40k vs completo
+    labelName = 'pago lanzamiento';
   }
   try {
     await env.DB.prepare(
@@ -6939,7 +6935,7 @@ async function processPaymentProof(env, m) {
     ).bind(esPago ? 1 : 0, clasificacion, monto, (a && a.moneda) || 'ARS', cuenta, (a && a.titular_destino) || '', (a && a.banco) || '', (a && +a.confianza) || 0, JSON.stringify(a || {}).slice(0, 1500), m.wamid).run();
   } catch (_) {}
   if (labelName) {
-    const color = labelName === 'cartel primer pago' ? '#a855f7' : '#22c55e';  // cartel=violeta, lanzamiento=verde
+    const color = '#22c55e';  // pago lanzamiento = verde
     const lid = await ensureLabelId(env, labelName, color);
     if (lid) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(m.phone, lid, new Date().toISOString()).run(); } catch (_) {} }
   }
@@ -8219,7 +8215,7 @@ const handler = {
                 // ===== Lanzamiento junio: capturar comprobantes de pago =====
                 // En la ventana (11-15/06), todo inbound con imagen/PDF se OCRea,
                 // se clasifica, se etiqueta y se respalda en D1 (NO se responde nada).
-                if (direction === 'inbound' && (msgType === 'image' || msgType === 'document') && r2Key && (isPagoLanzamientoWindow(ts) || await hasPorPagarLabel(env, phone))) {
+                if (direction === 'inbound' && (msgType === 'image' || msgType === 'document') && r2Key && isPagoLanzamientoWindow(ts)) {
                   // 1) OCR + clasificación + backup en D1. 2) reenvío a Gaspar
                   // (solo hoy/mañana). El reenvío corre SIEMPRE tras el intento de
                   // OCR (aunque el OCR falle) para no perder ningún comprobante; el
