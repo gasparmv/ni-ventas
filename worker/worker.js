@@ -6737,9 +6737,11 @@ async function analyzeImage(env, r2Key) {
 // apaga las tres piezas (OCR, reenvío en vivo y backfill). Para reactivar todo,
 // poner PAGO_CAPTURA_ACTIVA = true.
 const PAGO_CAPTURA_ACTIVA = true;   // reactivado 06/08/2026 para el lanzamiento del curso
-// Ventana del lanzamiento: desde 18:00 AR del 06/08 hasta fin del 09/08 AR. AR = UTC-3.
+// Ventana del lanzamiento: desde 18:00 AR del 06/08 hasta fin del 12/08 AR (extendida el 09/08
+// para no cortar mientras siguen entrando pagos). El corte real: apagar PAGO_CAPTURA_ACTIVA
+// cuando cierre el lanzamiento. AR = UTC-3.
 const PAGO_LANZAMIENTO_START_UTC = '2026-08-06T21:00:00.000Z';
-const PAGO_LANZAMIENTO_END_UTC   = '2026-08-10T03:00:00.000Z';
+const PAGO_LANZAMIENTO_END_UTC   = '2026-08-13T03:00:00.000Z';
 const PAGO_SENA_MIN = 30000;   // banda de la seña del acceso (~40.000 ARS)
 const PAGO_SENA_MAX = 50000;
 function isPagoLanzamientoWindow(tsIso) {
