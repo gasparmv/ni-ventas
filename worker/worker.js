@@ -5238,6 +5238,48 @@ async function eventoRecordatorioOnInbound(env, phone) {
   } catch (_) {}
 }
 
+// ===== Envío masivo goteo "lanzamiento agosto" (Comunidad Al Infinito) =====
+// A pedido de Gaspar (10-ago): manda la plantilla cupo_comunidad_junio a los ~521
+// del form de la clase 1 de ESTA semana que NO pagaron (tabla lanz_ago). Goteo por
+// el cron */1 en horario AR (9-22), oculta el chat hasta que respondan y etiqueta
+// "lead lanzamiento agosto". El reveal a la bandeja de Abril (cursos) reusa
+// eventoRecordatorioOnInbound (registramos el envío como kind='evento_record').
+// Kill-switch kv 'lanz_ago_on' (default 0). Se apaga solo cuando no queda pendiente.
+const LANZ_AGO_LABEL_NAME = 'lead lanzamiento agosto';
+const LANZ_AGO_LABEL_COLOR = '#a855f7';
+async function processLanzAgosto(env) {
+  if ((await kvGet(env, 'lanz_ago_on', '0')) !== '1') return;
+  if ((await kvGet(env, 'wa_send_paused', '0')) === '1') return;
+  if (await isWaBillingBlocked(env)) return;
+  const hAR = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours();
+  if (hAR < 9 || hAR >= 22) return;
+  const perTick = Math.max(1, Math.min(40, parseInt(await kvGet(env, 'lanz_ago_pertick', '10'), 10) || 10));
+  let rows;
+  try { rows = (await env.DB.prepare("SELECT phone, nombre FROM lanz_ago WHERE status = 'pending' LIMIT ?").bind(perTick).all()).results || []; } catch (_) { return; }
+  if (!rows.length) { try { await kvSet(env, 'lanz_ago_on', '0'); } catch (_) {} return; }   // terminó → se apaga solo
+  const labelId = await ensureLabelId(env, LANZ_AGO_LABEL_NAME, LANZ_AGO_LABEL_COLOR);
+  for (const r of rows) {
+    const phone = r.phone;
+    let rz;
+    try { rz = await env.DB.prepare("UPDATE lanz_ago SET status = 'sending' WHERE phone = ? AND status = 'pending'").bind(phone).run(); } catch (_) { continue; }
+    if (!rz?.meta?.changes) continue;   // ya lo tomó otro tick
+    const nombre = String(r.nombre || 'Hola');
+    const res = await waSendTemplate(env, phone, 'cupo_comunidad_junio', 'es_AR', [nombre]);
+    const nowIso = new Date().toISOString();
+    if (!res || !res.ok) {
+      try { await env.DB.prepare("UPDATE lanz_ago SET status = 'failed', sent_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+      try { await logWaEvent(env, { to: phone, kind: 'lanz-ago', ref: '', ok: false, error: res?.error }); } catch (_) {}
+      continue;
+    }
+    try { await env.DB.prepare("UPDATE lanz_ago SET status = 'sent', sent_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)").bind(nowIso, res.id || ('lanzago-' + phone + '-' + Date.now()), phone, '[plantilla: cupo_comunidad_junio]').run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at").bind(phone, nowIso).run(); } catch (_) {}
+    try { if (labelId) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, labelId, nowIso).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'evento_record', ?, 'sent', '', '')").bind(phone, nowIso).run(); } catch (_) {}
+    await new Promise(rs => setTimeout(rs, 300));
+  }
+}
+
 // ============================================================================
 // SORTEO DÍA 2 — recordatorio a los participantes del formulario del sorteo del
 // evento de agosto. Goteo seguro: manda de a poco (kv sorteo_dia2_pertick, def 3),
@@ -13232,6 +13274,10 @@ const handler = {
     // defecto (kv 'evento_recordatorio_on'); no manda nada hasta prenderlo.
     ctx.waitUntil(processEventoRecordatorio(env));
     ctx.waitUntil(processSorteoDia2(env));
+    // Envío masivo goteo "lanzamiento agosto" (Comunidad Al Infinito): plantilla
+    // cupo_comunidad_junio a los ~521 del form clase 1 sin pagar. OFF por defecto
+    // (kv 'lanz_ago_on'); no manda nada hasta prenderlo.
+    ctx.waitUntil(processLanzAgosto(env));
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
