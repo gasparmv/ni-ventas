@@ -8397,9 +8397,16 @@ const VENTA_ABRIL_LABEL_ID = 2154;
 // 2965437 = seña (pagos de seña del lanzamiento) · 2954729 = lead lanzamiento agosto.
 // Ambas son de cursos/lanzamiento → Abril las tiene que ver y filtrar.
 const CURSOS_LABEL_IDS = [5, 13, 26, 23, 25, 27, 17, 18, VENTA_ABRIL_LABEL_ID, 2965437, 2954729];
+// Etiquetas creadas a mano desde el dropdown (persisten en localStorage): se muestran
+// SIEMPRE aunque el rol cursos tenga whitelist — si la creaste, la tenés que ver/usar/borrar.
+function createdLabelIds() { try { return JSON.parse(localStorage.getItem('nv_created_labels') || '[]'); } catch (_) { return []; } }
+function rememberCreatedLabel(id) { if (!id) return; try { const s = new Set(createdLabelIds()); s.add(id); localStorage.setItem('nv_created_labels', JSON.stringify([...s])); } catch (_) {} }
+function forgetCreatedLabel(id) { try { const s = new Set(createdLabelIds()); s.delete(id); localStorage.setItem('nv_created_labels', JSON.stringify([...s])); } catch (_) {} }
 function visibleLabels() {
   const all = chatState.labels || [];
-  return isCursosOnly() ? all.filter(l => CURSOS_LABEL_IDS.includes(l.id)) : all;
+  if (!isCursosOnly()) return all;
+  const created = new Set(createdLabelIds());
+  return all.filter(l => CURSOS_LABEL_IDS.includes(l.id) || created.has(l.id));
 }
 
 // Bandeja "Para cotizar": pre cotizaciones que el bot TERMINÓ y esperan que Joaco cotice.
@@ -8462,6 +8469,7 @@ function renderLabelFilterBar() {
               <span class="label-filter-item-dot" style="background:${l.color}"></span>
               <span class="label-filter-item-name">${escapeHtml(l.name)}</span>
               ${active ? '<span class="label-filter-item-check">✓</span>' : ''}
+              <span class="label-filter-item-del" data-del-label="${l.id}" title="Eliminar etiqueta" style="margin-left:auto;padding:0 4px 0 10px;color:#8696a0;font-size:17px;line-height:1;cursor:pointer">×</span>
             </button>`;
           }).join('')}
           ${labelsCount ? `<button class="label-filter-clear" id="clear-label-filter">Limpiar etiquetas</button>` : ''}
@@ -11878,6 +11886,18 @@ function bindChat() {
       render();
     };
   });
+  // Eliminar etiqueta (× dentro de cada item). stopPropagation → no togglea el filtro.
+  document.querySelectorAll('#label-filter-dd-menu .label-filter-item-del').forEach(x => {
+    x.onclick = (e) => {
+      e.stopPropagation(); e.preventDefault();
+      const id = parseInt(x.dataset.delLabel);
+      const lab = (chatState.labels || []).find(l => l.id === id);
+      if (!confirm('¿Eliminar la etiqueta "' + (lab ? lab.name : '') + '"? Se saca de todos los chats.')) return;
+      forgetCreatedLabel(id);
+      chatState.filterLabels = chatState.filterLabels.filter(l => l !== id);
+      deleteLabel(id).then(() => render()).catch(() => toast('✗ No se pudo eliminar la etiqueta'));
+    };
+  });
   // Click afuera del dropdown lo cierra.
   if (chatState.labelDropdownOpen && !chatState._ddOutsideBound) {
     chatState._ddOutsideBound = true;
@@ -11912,7 +11932,8 @@ function bindChat() {
       const color = palette[(chatState.labels?.length || 0) % palette.length];
       try {
         if (btn) btn.disabled = true;
-        await saveLabel(name, color);
+        const newId = await saveLabel(name, color);
+        rememberCreatedLabel(newId);
         toast('✓ Etiqueta "' + name + '" creada');
         render();
       } catch (err) {
