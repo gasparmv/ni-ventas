@@ -4782,6 +4782,8 @@ function bindCotRender() {
   if (regenBtn) regenBtn.onclick = () => cotGenerarRender();
   const clearBtn = document.getElementById('cot-render-clear');
   if (clearBtn) clearBtn.onclick = () => cotRenderClear();
+  const notasEl = document.getElementById('cot-render-notas');
+  if (notasEl) notasEl.oninput = (e) => { STATE.cotizadorForm.renderNotas = e.target.value; };
 
   // Paste de imagen (Ctrl/Cmd+V) sobre el Render IA. Un <div> no recibe el
   // evento 'paste' (solo inputs/contenteditable/document), por eso el "📋 Pegá"
@@ -4833,7 +4835,11 @@ async function cotGenerarRender() {
     const fd = new FormData();
     fd.append('file', inp.blob, 'boceto' + (inp.contentType === 'image/png' ? '.png' : '.jpg'));
     const nombre = (STATE.cotizadorForm.cliente || '').trim();
-    if (nombre) fd.append('notas', 'Cartel de neón LED para: ' + nombre);
+    const notasUser = (STATE.cotizadorForm.renderNotas || '').trim();
+    const notasParts = [];
+    if (nombre) notasParts.push('Cartel de neón LED para: ' + nombre);
+    if (notasUser) notasParts.push(notasUser);
+    if (notasParts.length) fd.append('notas', notasParts.join('\n'));
     const r = await fetch(CONFIG.trackerUrl + '/admin/render-adhoc', { method: 'POST', headers: authHeaders(), body: fd });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.base64) {
@@ -5073,6 +5079,7 @@ function renderCotizadorRenderBlock() {
   return `
     <div style="margin-top:var(--s-3);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-2)">
       <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">✨ Render IA <span style="text-transform:none;color:var(--fg-mute)">(opcional · se envía como foto con el presupuesto)</span></div>
+      <textarea id="cot-render-notas" rows="2" placeholder="Notas para el render (opcional): ej. letras en cursiva, color verde, agregá un marco…" style="width:100%;font-size:11px;margin-bottom:8px;resize:vertical;box-sizing:border-box;color:inherit;background:transparent;border:1px solid var(--border);border-radius:var(--r-sm);padding:6px">${escapeHtml(f.renderNotas || '')}</textarea>
       ${!input && !result ? `
         <div id="cot-render-dropzone" style="border:2px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-2);text-align:center;color:var(--fg-mute);font-size:11px;cursor:pointer;transition:border-color .15s,background .15s">
           📋 Pegá, arrastrá o tocá para subir la foto / boceto del cartel
