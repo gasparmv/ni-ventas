@@ -8463,6 +8463,10 @@ function renderLabelFilterBar() {
             </button>`;
           }).join('')}
           ${labelsCount ? `<button class="label-filter-clear" id="clear-label-filter">Limpiar etiquetas</button>` : ''}
+          <div class="label-filter-newrow" style="display:flex;gap:4px;padding:6px;border-top:1px solid var(--border);margin-top:4px">
+            <input id="label-filter-new-input" type="text" placeholder="Nueva etiqueta…" maxlength="40" autocomplete="off" style="flex:1;min-width:0;background:var(--bg-elev,#2a3942);border:1px solid var(--border);border-radius:6px;color:var(--fg);padding:5px 8px;font-size:13px" />
+            <button id="label-filter-new-btn" title="Crear etiqueta" style="flex:0 0 auto;background:var(--accent-cyan,#8FD4DE);border:none;border-radius:6px;color:#0b141a;font-weight:700;padding:5px 11px;cursor:pointer;font-size:15px;line-height:1">+</button>
+          </div>
         </div>
       </div>
     ` : ''}
@@ -11893,6 +11897,30 @@ function bindChat() {
     chatState.filterLabels = [];
     render();
   };
+  // Crear una etiqueta NUEVA directo desde el dropdown (input + botón "+").
+  const newLabelInput = document.getElementById('label-filter-new-input');
+  const newLabelBtn = document.getElementById('label-filter-new-btn');
+  const doCreateLabel = async () => {
+    const name = (newLabelInput?.value || '').trim();
+    if (!name) return;
+    const palette = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#a855f7', '#ec4899', '#14b8a6', '#eab308'];
+    const color = palette[(chatState.labels?.length || 0) % palette.length];
+    try {
+      if (newLabelBtn) newLabelBtn.disabled = true;
+      await saveLabel(name, color);
+      if (newLabelInput) newLabelInput.value = '';
+      toast('✓ Etiqueta creada');
+      render(); // re-abre el dropdown ya con la etiqueta nueva
+    } catch (e) {
+      toast('✗ ' + ((e && e.message) || 'No se pudo crear la etiqueta'));
+      if (newLabelBtn) newLabelBtn.disabled = false;
+    }
+  };
+  if (newLabelBtn) newLabelBtn.onclick = (e) => { e.stopPropagation(); doCreateLabel(); };
+  if (newLabelInput) {
+    newLabelInput.onclick = (e) => e.stopPropagation();       // no cerrar el dropdown al tocar el input
+    newLabelInput.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); doCreateLabel(); } };
+  }
   // Nuevo chat a un número nuevo (botón "+")
   const newChatBtn = document.getElementById('btn-new-chat');
   if (newChatBtn) newChatBtn.onclick = () => showNewChatModal('');
