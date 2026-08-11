@@ -8394,7 +8394,9 @@ function formatPhoneDisplay(phone) {
 // "Venta Abril": Abril la marca (botón dedicado en el chat) cada vez que vende un
 // curso; a fin de mes Gaspar filtra por esta etiqueta para revisar comisiones.
 const VENTA_ABRIL_LABEL_ID = 2154;
-const CURSOS_LABEL_IDS = [5, 13, 26, 23, 25, 27, 17, 18, VENTA_ABRIL_LABEL_ID];
+// 2965437 = seña (pagos de seña del lanzamiento) · 2954729 = lead lanzamiento agosto.
+// Ambas son de cursos/lanzamiento → Abril las tiene que ver y filtrar.
+const CURSOS_LABEL_IDS = [5, 13, 26, 23, 25, 27, 17, 18, VENTA_ABRIL_LABEL_ID, 2965437, 2954729];
 function visibleLabels() {
   const all = chatState.labels || [];
   return isCursosOnly() ? all.filter(l => CURSOS_LABEL_IDS.includes(l.id)) : all;
@@ -11897,29 +11899,34 @@ function bindChat() {
     chatState.filterLabels = [];
     render();
   };
-  // Crear una etiqueta NUEVA directo desde el dropdown (input + botón "+").
-  const newLabelInput = document.getElementById('label-filter-new-input');
-  const newLabelBtn = document.getElementById('label-filter-new-btn');
-  const doCreateLabel = async () => {
-    const name = (newLabelInput?.value || '').trim();
-    if (!name) return;
-    const palette = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#a855f7', '#ec4899', '#14b8a6', '#eab308'];
-    const color = palette[(chatState.labels?.length || 0) % palette.length];
-    try {
-      if (newLabelBtn) newLabelBtn.disabled = true;
-      await saveLabel(name, color);
-      if (newLabelInput) newLabelInput.value = '';
-      toast('✓ Etiqueta creada');
-      render(); // re-abre el dropdown ya con la etiqueta nueva
-    } catch (e) {
-      toast('✗ ' + ((e && e.message) || 'No se pudo crear la etiqueta'));
-      if (newLabelBtn) newLabelBtn.disabled = false;
-    }
-  };
-  if (newLabelBtn) newLabelBtn.onclick = (e) => { e.stopPropagation(); doCreateLabel(); };
-  if (newLabelInput) {
-    newLabelInput.onclick = (e) => e.stopPropagation();       // no cerrar el dropdown al tocar el input
-    newLabelInput.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); doCreateLabel(); } };
+  // Crear una etiqueta NUEVA desde el dropdown. Delegación en document (se instala
+  // UNA sola vez) → inmune a re-renders y a cuándo aparece el input en el DOM.
+  if (!chatState._newLabelDelegated) {
+    chatState._newLabelDelegated = true;
+    const createFromInput = async () => {
+      const inp = document.getElementById('label-filter-new-input');
+      const btn = document.getElementById('label-filter-new-btn');
+      const name = (inp && inp.value || '').trim();
+      if (!name) { if (inp) inp.focus(); return; }
+      const palette = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#a855f7', '#ec4899', '#14b8a6', '#eab308'];
+      const color = palette[(chatState.labels?.length || 0) % palette.length];
+      try {
+        if (btn) btn.disabled = true;
+        await saveLabel(name, color);
+        toast('✓ Etiqueta "' + name + '" creada');
+        render();
+      } catch (err) {
+        toast('✗ ' + ((err && err.message) || 'No se pudo crear la etiqueta'));
+        if (btn) btn.disabled = false;
+      }
+    };
+    document.addEventListener('click', (e) => {
+      const t = e.target;
+      if (t && t.closest && t.closest('#label-filter-new-btn')) { e.stopPropagation(); e.preventDefault(); createFromInput(); }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target && e.target.id === 'label-filter-new-input') { e.stopPropagation(); e.preventDefault(); createFromInput(); }
+    });
   }
   // Nuevo chat a un número nuevo (botón "+")
   const newChatBtn = document.getElementById('btn-new-chat');
