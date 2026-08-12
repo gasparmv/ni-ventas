@@ -1406,6 +1406,11 @@ async function ensurePerfIndexes(env) {
 // ¿Piloto prendido? Default OFF (kill-switch): arranca apagado hasta estar
 // deployado y probado. Gaspar lo prende con kv 'precotiz_on'='1'.
 async function precotizOn(env) { return (await kvGet(env, 'precotiz_on', '0')) === '1'; }
+// Gate SEPARADO para Instagram (default OFF). El bot de precotización solo atiende leads de
+// IG si precotiz_ig_on='1'. Independiente de precotiz_on para poder rampear IG aparte (muestra
+// propia en precotiz_ig_sample). En IG el bot solo responde DENTRO de la ventana de 24 h (IG no
+// tiene plantillas de re-enganche como WhatsApp).
+async function precotizIgOn(env) { return (await kvGet(env, 'precotiz_ig_on', '0')) === '1'; }
 // Freno de mano MANUAL por chat: Gaspar aprieta "Frenar bot" en una conversación y el bot no
 // vuelve a hablar ahí NUNCA MÁS (kv precotiz_frozen:<phone>). Para los casos raros que el bot no
 // puede entender (ej: un cliente que escribe por un pedido ya existente desde otro número).
@@ -1446,6 +1451,8 @@ async function precotizCount(env) {
 // Envía un mensaje del bot Y lo persiste en wa_messages (waSend no guarda solo).
 // automated=1 para distinguir lo que mandó el piloto. Aparece en el chat del CRM.
 async function precotizSend(env, phone, body) {
+  // Instagram: IGSID largo (>14 díg) → rutea al DM de IG. WhatsApp queda igual.
+  if (String(phone).replace(/\D/g, '').length > 14) return precotizSendIg(env, phone, body);
   const r = await waSendText(env, phone, body);
   if (r && r.ok) {
     try {
@@ -1453,6 +1460,29 @@ async function precotizSend(env, phone, body) {
         `INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
          VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)`
       ).bind(new Date().toISOString(), r.id || ('precotiz:' + phone + ':' + Date.now()), phone, String(body || '')).run();
+    } catch (_) {}
+  }
+  return r;
+}
+
+// Envío del bot por DM de Instagram. Gateado por precotiz_ig_on (defensa: si se apaga el gate,
+// el bot deja de mandar por IG al instante aunque queden leads IG en el piloto). Solo DENTRO de
+// la ventana de 24 h de IG (no hay plantilla de re-enganche). Marca automated=1 para que el freno
+// anti-pisón no cuente el mensaje del bot como intervención humana. Devuelve { ok } como waSendText.
+async function precotizSendIg(env, igId, body) {
+  try { if (!(await precotizIgOn(env))) return { ok: false, error: 'ig precotiz off' }; } catch (_) { return { ok: false, error: 'ig gate err' }; }
+  // Ventana de 24 h: el cliente escribió en las últimas 24 h por IG.
+  try {
+    const lastIn = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND channel = 'ig'").bind(igId).first();
+    const lt = lastIn && lastIn.t ? new Date(lastIn.t).getTime() : 0;
+    if (!(lt && (Date.now() - lt) < 24 * 3600 * 1000)) return { ok: false, error: 'ig window closed' };
+  } catch (_) { return { ok: false, error: 'ig window check failed' }; }
+  const r = await igSend(env, igId, body);
+  if (r && r.ok) {
+    try {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, channel, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 'ig', 1)"
+      ).bind(new Date().toISOString(), r.id || ('precotiz-ig:' + igId + ':' + Date.now()), igId, String(body || '')).run();
     } catch (_) {}
   }
   return r;
@@ -1762,6 +1792,9 @@ async function precotizYaMandoTipografias(env, phone) {
 // Manda las imágenes de tipografías por WhatsApp (best-effort). Registra cada envío en
 // wa_messages para que el chat del CRM lo muestre y para el guard de "ya mandó".
 async function precotizSendTipografias(env, phone) {
+  // IG (v1): saltamos las imágenes de tipografías (van por waSendImage, key no pública para IG).
+  // El bot igual releva por texto; las tipografías en IG quedan pendientes.
+  if (String(phone).replace(/\D/g, '').length > 14) return 0;
   let sent = 0;
   for (let i = 0; i < PRECOTIZ_TIPOGRAFIAS_KEYS.length; i++) {
     const key = PRECOTIZ_TIPOGRAFIAS_KEYS[i];
@@ -1912,6 +1945,8 @@ async function processPrecotizPilot(env) {
   // Muestra (precotiz_sample %) y tope (precotiz_cap) configurables via kv para el rollout gradual.
   const cap = parseInt(await kvGet(env, 'precotiz_cap', String(PRECOTIZ_CAP)), 10) || PRECOTIZ_CAP;
   const samplePct = parseInt(await kvGet(env, 'precotiz_sample', '20'), 10) || 20;
+  const igOn = await precotizIgOn(env);                                    // gate IG (default OFF)
+  const igSample = parseInt(await kvGet(env, 'precotiz_ig_sample', '20'), 10) || 20; // muestra propia de IG
   if ((await precotizCount(env)) >= cap) return;
   // BARRIDO MATUTINO: la ventana normal es de 20 min, así que el que escribe DESPUÉS DE HORA
   // (22-8, cuando el bot está dormido) nunca lo veía a la mañana (mensaje > 20 min). A las 8 AR
@@ -1947,12 +1982,13 @@ async function processPrecotizPilot(env) {
   for (const c of cands) {
     if ((await precotizCount(env)) >= cap) break;
     const phone = c.phone;
-    // Solo WhatsApp Argentina (54 + 10/11 dígitos). Excluye IDs de Instagram
-    // (números largos de 15-17 dígitos) y números no-AR: no son leads de
-    // carteles que el bot pueda atender por este canal.
-    if (!/^54\d{10,11}$/.test(phone)) continue;
+    // Canal: WhatsApp Argentina (54 + 10/11 díg) SIEMPRE; Instagram (IGSID largo, 15-17 díg)
+    // solo si el gate IG está ON (precotiz_ig_on). El resto de números no-AR se excluye.
+    const esIgLead = phone.replace(/\D/g, '').length > 14;
+    if (esIgLead) { if (!igOn) continue; }                                 // IG: solo con el gate IG prendido
+    else if (!/^54\d{10,11}$/.test(phone)) continue;                       // WA: solo AR
     if (await precotizFrozen(env, phone)) continue;                        // freno de mano MANUAL: el bot no habla más en este chat
-    if (!precotizPicks(phone, samplePct)) continue;                        // fuera de la muestra
+    if (!precotizPicks(phone, esIgLead ? igSample : samplePct)) continue;  // fuera de la muestra (IG usa su propia muestra)
     if (await precotizGet(env, phone)) continue;                           // ya en el piloto
     if ((await kvGet(env, 'precotiz_seen:' + phone)) === '1') continue;     // ya evaluado
     // Debounce: esperar a que el lead nuevo pare de escribir (manda hola + foto +
