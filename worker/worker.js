@@ -12777,8 +12777,11 @@ const handler = {
         const tipoRaw = url.searchParams.get('tipo') || 'chat';
         const tipo = ['chat', 'boceto', 'render'].includes(tipoRaw) ? tipoRaw : 'chat';
         if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
-        const ct = request.headers.get('content-type') || 'application/octet-stream';
-        if (!ct.startsWith('image/')) return json({ error: 'only image/* content-type allowed' }, 400);
+        // Este endpoint es SOLO para imágenes; si el content-type no viene como image/*
+        // (pegado sin type / octet-stream desde el front), asumimos jpeg en vez de rechazar
+        // con 400 — rechazar acá era una de las causas de "briefs sin foto de Joaco".
+        let ct = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        if (!ct.startsWith('image/')) ct = 'image/jpeg';
 
         const buf = await request.arrayBuffer();
         if (!buf || buf.byteLength === 0) return json({ error: 'empty body' }, 400);

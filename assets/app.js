@@ -13198,13 +13198,27 @@ async function resizeImageBlob(file, maxDim = 1600, maxArea = 3000000) {
 async function uploadBriefImage(briefId, blob, contentType, tipo = 'chat') {
   // Achicar imágenes grandes antes de subir (ver resizeImageBlob).
   try { const rz = await resizeImageBlob(blob.type ? blob : new Blob([blob], { type: contentType }), 1600, 3000000); if (rz && rz.blob) { blob = rz.blob; contentType = rz.type; } } catch (_) {}
-  const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/imagen?tipo=${tipo}`, {
-    method: 'PUT',
-    headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': contentType },
-    body: blob
-  });
-  if (!r.ok) throw new Error('upload failed: HTTP ' + r.status);
-  return r.json();
+  // El content-type SIEMPRE tiene que ser image/* (si no, el backend rechaza con 400 y el
+  // brief queda sin foto). Ante la duda (pegado sin type / octet-stream), jpeg.
+  if (!/^image\//i.test(contentType || '')) contentType = 'image/jpeg';
+  // Reintentos: la causa #1 de "brief sin foto de Joaco" es una subida que falla por un hipo
+  // de red en una sola pasada — es INTERMITENTE (la mayoría suben bien, ~1/día falla). Se
+  // reintenta hasta 3 veces con backoff. Los 4xx "duros" (no 408/429) no se reintentan.
+  let lastErr = null;
+  for (let intento = 0; intento < 3; intento++) {
+    if (intento > 0) await new Promise(res => setTimeout(res, 300 + 500 * intento * intento));
+    try {
+      const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs/${briefId}/imagen?tipo=${tipo}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${STATE.token}`, 'Content-Type': contentType },
+        body: blob
+      });
+      if (r.ok) return r.json();
+      if (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429) throw new Error('upload failed: HTTP ' + r.status);
+      lastErr = new Error('upload failed: HTTP ' + r.status);
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('upload failed');
 }
 
 async function deleteBriefAPI(id) {
