@@ -13877,8 +13877,16 @@ async function processPresupuestoFollowups(env, opts = {}) {
   const failures = [];
   let sent = 0;
   let skippedInvalid = 0;
+  // ID de la etiqueta "FUP": si un vendedor se la pone a un chat, es porque lo sigue
+  // él a mano → lo salteamos del fupeo automático (pedido de Gaspar).
+  let fupLabelId = null;
+  try { const _fl = await env.DB.prepare("SELECT id FROM labels WHERE name = 'FUP' LIMIT 1").first(); fupLabelId = _fl && _fl.id; } catch (_) {}
 
   for (const p of byPhone.values()) {
+    // Freno manual: chat con etiqueta "FUP" puesta → NO mandamos el seguimiento automático.
+    if (fupLabelId) {
+      try { const _h = await env.DB.prepare("SELECT 1 FROM contact_labels WHERE phone = ? AND label_id = ? LIMIT 1").bind(p.phone, fupLabelId).first(); if (_h) continue; } catch (_) {}
+    }
     // 3) Conversación posterior al presupuesto
     let conv;
     try {
