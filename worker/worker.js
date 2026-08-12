@@ -1792,9 +1792,9 @@ async function precotizYaMandoTipografias(env, phone) {
 // Manda las imágenes de tipografías por WhatsApp (best-effort). Registra cada envío en
 // wa_messages para que el chat del CRM lo muestre y para el guard de "ya mandó".
 async function precotizSendTipografias(env, phone) {
-  // IG (v1): saltamos las imágenes de tipografías (van por waSendImage, key no pública para IG).
-  // El bot igual releva por texto; las tipografías en IG quedan pendientes.
-  if (String(phone).replace(/\D/g, '').length > 14) return 0;
+  // Instagram: rutea a la versión IG (copia las tipografías a una key pública ig/out_ y las
+  // manda por DM, porque waSendImage/getPromoMediaId es de WhatsApp).
+  if (String(phone).replace(/\D/g, '').length > 14) return precotizSendTipografiasIg(env, phone);
   let sent = 0;
   for (let i = 0; i < PRECOTIZ_TIPOGRAFIAS_KEYS.length; i++) {
     const key = PRECOTIZ_TIPOGRAFIAS_KEYS[i];
@@ -2409,6 +2409,7 @@ async function maybeReporteLlamar(env) {
           "  0 AS respondio " +
           "FROM contact_labels cl LEFT JOIN wa_chats_summary s ON s.phone = cl.phone " +
           "WHERE cl.label_id = ? " +
+          "  AND substr(cl.created_at,1,10) >= date('now','-3 hours','-7 days') " +   // solo los etiquetados "FUP" en los últimos 7 días (no arrastra etiquetas viejas)
           "  AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=cl.phone AND m.direction='outbound' AND (" + cierreCond + ")) LIMIT 60";
         const fupRows = (await env.DB.prepare(sqlFup).bind(fupLabelId, ...cierreBinds).all()).results || [];
         for (const t of fupRows) { if (t.phone && !seen.has(t.phone)) { t.esFup = 1; rows.push(t); seen.add(t.phone); } }
