@@ -15223,6 +15223,7 @@ async function quickCreateBriefFromImage(file) {
     STATE.quickModalOpen = true;
     STATE.quickModalSaving = false;
     STATE.quickModalOrigen = 'wpp';  // default: la mayoría llega por WhatsApp
+    STATE.quickModalPrefillPhone = ''; // limpiar: si no, se queda el teléfono de un brief anterior (creado desde un chat) y el nuevo brief de IG hereda un número WA ajeno
     STATE.quickModalIntExt = null;   // sin default: Joaco DEBE elegir Interior/Exterior
     STATE.quickModalTipo = (briefProducto === 'corporea' ? 'corporea' : null);
     render();
@@ -15240,6 +15241,7 @@ function cancelQuickCreate() {
   STATE.quickModalImages = [];
   STATE.quickModalSaving = false;
   STATE.quickModalOrigen = 'wpp';
+  STATE.quickModalPrefillPhone = ''; // no dejar el teléfono cargado para el próximo brief
   render();
 }
 
@@ -15296,13 +15298,18 @@ function openBriefFromChat(corporea) {
   if (!canCreateBriefs()) { toast('No tenés permiso para crear briefs'); return; }
   const phone = chatState.selectedPhone;
   if (!phone) return;
+  const digits = String(phone).replace(/\D/g, '');
+  // Detectar el canal del chat: los IDs de Instagram son largos (>14 díg), no teléfonos.
+  // Un brief creado desde un chat de IG debe quedar como 'ig' (sin número), NO como 'wpp'
+  // (antes se hardcodeaba 'wpp' y los briefs de IG quedaban atribuidos como WhatsApp).
+  const esIG = digits.length > 14;
   STATE.quickModalImages = [];
   STATE.quickModalOpen = true;
   STATE.quickModalSaving = false;
-  STATE.quickModalOrigen = 'wpp';
+  STATE.quickModalOrigen = esIG ? 'ig' : 'wpp';
   STATE.quickModalUrgente = false;
   STATE.quickModalIA = false;
-  STATE.quickModalPrefillPhone = String(phone).replace(/\D/g, '');
+  STATE.quickModalPrefillPhone = esIG ? '' : digits;
   STATE.quickModalIntExt = null;
   STATE.quickModalTipo = corporea ? 'corporea' : null;
   render();
