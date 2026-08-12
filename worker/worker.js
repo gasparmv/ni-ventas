@@ -2327,12 +2327,14 @@ async function maybeReporteDiario(env) {
   } catch (_) {}
 }
 
-// ===== Aviso diario "leads para LLAMAR" (a pedido de Gaspar, 29-jul) =====
-// Cada mañana (9 AR) manda a Gaspar + hermano la lista de leads que recibieron el
-// fup 1 del presupuesto AYER y NO contestaron nada desde entonces (para llamarlos
-// por teléfono). Excluye a los que ya avanzaron al cierre/compra. Va por plantilla
-// (llega fuera de ventana) con fallback a texto libre. Dedup por día. Si no hay
-// nadie que llamar, marca el día y no molesta.
+// ===== Aviso diario "leads para SEGUIR" (a pedido de Gaspar, 29-jul; ampliado ago) =====
+// Cada mañana (9 AR) manda a Gaspar + hermano la lista de leads que recibieron el fup 1
+// del presupuesto AYER y todavía NO cerraron. Incluye a los que NO contestaron y a los
+// que contestaron algo pero no llegaron al cierre (marca "respondió" a estos últimos, y
+// los pone primero). Incluye también los de Instagram (se muestran con @usuario/nombre,
+// sin teléfono, porque el id de IG no es llamable). Excluye a los que ya avanzaron al
+// cierre/compra (orden de compra / datos de pago / CBU / alias). Va por plantilla (llega
+// fuera de ventana) con fallback a texto libre. Dedup por día. Si no hay nadie, no molesta.
 async function maybeReporteLlamar(env) {
   try {
     const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
@@ -2344,36 +2346,46 @@ async function maybeReporteLlamar(env) {
     const cierreBinds = FUP_CIERRE_MARKERS.map(k => '%' + k.toLowerCase() + '%');
     const sql =
       "WITH fups AS (SELECT phone, MIN(ts) AS first_fup FROM wa_messages " +
-      "  WHERE direction='outbound' AND (" + fupCond + ") " +
-      "    AND (channel IS NULL OR channel='wa') AND length(phone) <= 14 GROUP BY phone) " + // excluir IG: sus 'phone' son IDs largos, no teléfonos llamables
+      "  WHERE direction='outbound' AND (" + fupCond + ") GROUP BY phone) " + // incluye IG (se muestran con @usuario, no con teléfono)
       "SELECT f.phone, f.first_fup, s.contact_name, " +
       "  (SELECT b.cliente_nombre FROM briefs b WHERE b.cliente_wa_id = f.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS pedido, " +
-      "  (SELECT COALESCE(NULLIF(b.precio_final,0), NULLIF(b.precio_trans,0), NULLIF(b.precio_negro,0)) FROM briefs b WHERE b.cliente_wa_id = f.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS precio " +
+      "  (SELECT COALESCE(NULLIF(b.precio_final,0), NULLIF(b.precio_trans,0), NULLIF(b.precio_negro,0)) FROM briefs b WHERE b.cliente_wa_id = f.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS precio, " +
+      "  (SELECT CASE WHEN EXISTS(SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='inbound' AND m.msg_type!='status' AND m.ts > f.first_fup) THEN 1 ELSE 0 END) AS respondio " + // contestó algo después del fup
       "FROM fups f " +
       "  LEFT JOIN wa_chats_summary s ON s.phone = f.phone " +
       "WHERE f.first_fup >= (date('now','-3 hours','-1 day') || 'T03:00:00Z') " +
       "  AND f.first_fup <  (date('now','-3 hours') || 'T03:00:00Z') " +
-      "  AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='inbound' AND m.msg_type!='status' AND m.ts > f.first_fup) " +
-      "  AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='outbound' AND (" + cierreCond + ")) " +
-      "ORDER BY f.first_fup ASC LIMIT 60";
+      "  AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='outbound' AND (" + cierreCond + ")) " + // sigue excluyendo a los que ya arrancaron el cierre/pago
+      "ORDER BY respondio DESC, f.first_fup ASC LIMIT 60";
     let rows = [];
     try { rows = (await env.DB.prepare(sql).bind(...fupBinds, ...cierreBinds).all()).results || []; } catch (_) { return; }
     if (!rows.length) { await kvSet(env, 'reporte_llamar_sent', fechaAR); return; }
     const lines = rows.map((r, i) => {
       const nom = (r.contact_name || '').trim() || 's/nombre';
+      const esIg = String(r.phone).length > 14; // IG: id largo, no es teléfono → se muestra el @usuario/nombre, sin "+"
+      const quien = esIg ? `${nom} (IG)` : `${nom} — +${r.phone}`;
       const pedido = (r.pedido || '').trim();
       const precioN = parseInt(r.precio, 10) || 0;
       const precio = precioN ? '$' + String(precioN).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
-      const extra = [pedido ? `"${pedido}"` : '', precio].filter(Boolean).join(' · ');
-      return `${i + 1}. ${nom} — +${r.phone}${extra ? ' · ' + extra : ''}`;
+      const marca = r.respondio ? 'respondió' : '';
+      const extra = [pedido ? `"${pedido}"` : '', precio, marca].filter(Boolean).join(' · ');
+      return `${i + 1}. ${quien}${extra ? ' · ' + extra : ''}`;
     });
     const listaTxt = lines.join('\n');
-    // Meta RECHAZA parámetros de plantilla con saltos de línea (o 4+ espacios seguidos):
-    // el reporte fallaba, caía a texto libre, y a Gaspar/hermano (casi siempre FUERA de
-    // la ventana de 24h) le daba 131047 y no llegaba. Para la plantilla mandamos la lista
-    // en UNA sola línea con separador " | "; el texto libre de fallback sí usa saltos.
-    const listaTpl = lines.join('  |  ').replace(/\n+/g, ' ').replace(/\s{4,}/g, '   ');
-    const texto = `📞 Para llamar hoy — ${rows.length} lead(s) que no contestaron el seguimiento del presupuesto:\n\n${listaTxt}`;
+    // Meta RECHAZA parámetros de plantilla con saltos de línea (o 4+ espacios seguidos) y el
+    // body topea ~900 chars. Metemos en la plantilla las que entran (1 sola línea, separador
+    // " | ") y el resto lo marcamos como "+N más"; el texto libre de fallback lleva la lista
+    // completa con saltos.
+    let tplParts = [], usados = 0, mostrados = 0;
+    for (const ln of lines) {
+      const una = ln.replace(/\n+/g, ' ');
+      if (mostrados > 0 && usados + una.length + 5 > 850) break;
+      tplParts.push(una); usados += una.length + 5; mostrados++;
+    }
+    let listaTpl = tplParts.join('  |  ');
+    if (mostrados < lines.length) listaTpl += `  |  +${lines.length - mostrados} más (ver WhatsApp)`;
+    listaTpl = listaTpl.replace(/\s{4,}/g, '   ');
+    const texto = `📞 Para seguir hoy — ${rows.length} lead(s) del presupuesto que todavía no cerraron:\n\n${listaTxt}`;
     let anyOk = false;
     for (const ph of REPORTE_DIARIO_PHONES) {
       let r = null;
