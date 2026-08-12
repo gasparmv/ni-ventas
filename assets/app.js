@@ -14851,6 +14851,7 @@ async function enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj, renderKey)
   const _pp = STATE.privacy; STATE.privacy = false;
   const precio = fmtMoney(f.precio);
   const params = [nombre, medidas, f.frente, f.laterales, f.fondo, f.iluminacion, precio];
+  const paramsV2 = [nombre, medidas, f.frente, f.laterales, f.fondo, f.iluminacion, precio, (f.descripcion || '').trim() || 'Listo para instalar.'];
   STATE.privacy = _pp;
   const useImg = !!renderKey;
   const ok = await showConfirm(
@@ -14859,16 +14860,23 @@ async function enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj, renderKey)
     { title: 'Enviar como plantilla', confirmLabel: '📤 Mandar plantilla', cancelLabel: 'Cancelar' }
   );
   if (!ok) return { ok: false, cancelled: true };
-  const post = (name, withImg) => fetch(CONFIG.trackerUrl + '/admin/wa/template', {
+  const post = (name, withImg, prms) => fetch(CONFIG.trackerUrl + '/admin/wa/template', {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ to: tel, name, lang: 'es', params, header_image_key: withImg ? renderKey : undefined })
+    body: JSON.stringify({ to: tel, name, lang: 'es', params: prms, header_image_key: withImg ? renderKey : undefined })
   });
+  // Preferimos la v2 (texto nuevo + descripción, 8 vars). Si Meta todavía no la aprobó,
+  // caemos a la v1 (aprobada, texto viejo, 7 vars). Cuando v2 apruebe, se usa sola.
+  const cadena = useImg
+    ? [['presupuesto_corporea_v2_img', true, paramsV2], ['presupuesto_corporea_v2', false, paramsV2], ['presupuesto_corporea_img', true, params], ['presupuesto_corporea', false, params]]
+    : [['presupuesto_corporea_v2', false, paramsV2], ['presupuesto_corporea', false, params]];
   try {
-    let tr = await post(useImg ? 'presupuesto_corporea_img' : 'presupuesto_corporea', useImg);
-    let tj = await tr.json().catch(() => ({}));
-    // Si la plantilla CON imagen todavía no está aprobada por Meta, caemos a la de texto.
-    if (!tr.ok && useImg) { tr = await post('presupuesto_corporea', false); tj = await tr.json().catch(() => ({})); }
-    if (!tr.ok) return { ok: false, error: 'No se pudo mandar la plantilla: ' + (tj.error || ('HTTP ' + tr.status)) };
+    let tr = null, tj = {};
+    for (const [name, withImg, prms] of cadena) {
+      tr = await post(name, withImg, prms);
+      tj = await tr.json().catch(() => ({}));
+      if (tr.ok) break;
+    }
+    if (!tr || !tr.ok) return { ok: false, error: 'No se pudo mandar la plantilla: ' + (tj.error || ('HTTP ' + (tr ? tr.status : '?'))) };
     return { ok: true, wamid: tj.id || '' };
   } catch (e) {
     return { ok: false, error: 'Error de red al mandar la plantilla' };
