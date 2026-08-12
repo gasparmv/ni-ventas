@@ -2389,7 +2389,7 @@ async function maybeReporteLlamar(env) {
     let anyOk = false;
     for (const ph of REPORTE_DIARIO_PHONES) {
       let r = null;
-      try { r = await waSendTemplate(env, ph, 'reporte_llamar', 'es_AR', [listaTpl.slice(0, 900)]); } catch (_) {}
+      try { r = await waSendTemplate(env, ph, 'reporte_seguir', 'es_AR', [listaTpl.slice(0, 900)]); } catch (_) {}
       if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} }
       if (r && r.ok) anyOk = true;
     }
