@@ -2359,6 +2359,25 @@ async function maybeReporteLlamar(env) {
       "ORDER BY respondio DESC, f.first_fup ASC LIMIT 60";
     let rows = [];
     try { rows = (await env.DB.prepare(sql).bind(...fupBinds, ...cierreBinds).all()).results || []; } catch (_) { return; }
+    // + Chats etiquetados "FUP" que todavía NO cerraron (seguimiento manual del vendedor):
+    //   se suman a la lista de llamadas aunque no tengan un fup automático de ayer.
+    try {
+      const _fl = await env.DB.prepare("SELECT id FROM labels WHERE name = 'FUP' LIMIT 1").first();
+      const fupLabelId = _fl && _fl.id;
+      if (fupLabelId) {
+        const seen = new Set(rows.map(r => r.phone));
+        const sqlFup =
+          "SELECT cl.phone, NULL AS first_fup, s.contact_name, " +
+          "  (SELECT b.cliente_nombre FROM briefs b WHERE b.cliente_wa_id = cl.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS pedido, " +
+          "  (SELECT COALESCE(NULLIF(b.precio_final,0), NULLIF(b.precio_trans,0), NULLIF(b.precio_negro,0)) FROM briefs b WHERE b.cliente_wa_id = cl.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS precio, " +
+          "  0 AS respondio " +
+          "FROM contact_labels cl LEFT JOIN wa_chats_summary s ON s.phone = cl.phone " +
+          "WHERE cl.label_id = ? " +
+          "  AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=cl.phone AND m.direction='outbound' AND (" + cierreCond + ")) LIMIT 60";
+        const fupRows = (await env.DB.prepare(sqlFup).bind(fupLabelId, ...cierreBinds).all()).results || [];
+        for (const t of fupRows) { if (t.phone && !seen.has(t.phone)) { t.esFup = 1; rows.push(t); seen.add(t.phone); } }
+      }
+    } catch (_) {}
     if (!rows.length) { await kvSet(env, 'reporte_llamar_sent', fechaAR); return; }
     const lines = rows.map((r, i) => {
       const nom = (r.contact_name || '').trim() || 's/nombre';
@@ -2367,7 +2386,7 @@ async function maybeReporteLlamar(env) {
       const pedido = (r.pedido || '').trim();
       const precioN = parseInt(r.precio, 10) || 0;
       const precio = precioN ? '$' + String(precioN).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
-      const marca = r.respondio ? 'respondió' : '';
+      const marca = r.esFup ? 'FUP' : (r.respondio ? 'respondió' : '');
       const extra = [pedido ? `"${pedido}"` : '', precio, marca].filter(Boolean).join(' · ');
       return `${i + 1}. ${quien}${extra ? ' · ' + extra : ''}`;
     });
