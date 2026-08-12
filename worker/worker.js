@@ -2467,26 +2467,32 @@ async function maybeReporteLlamar(env) {
       return `${i + 1}. ${quien}${extra ? ' · ' + extra : ''}`;
     });
     const listaTxt = lines.join('\n');
-    // Meta RECHAZA parámetros de plantilla con saltos de línea (o 4+ espacios seguidos) y el
-    // body topea ~900 chars. Metemos en la plantilla las que entran (1 sola línea, separador
-    // " | ") y el resto lo marcamos como "+N más"; el texto libre de fallback lleva la lista
-    // completa con saltos.
-    let tplParts = [], usados = 0, mostrados = 0;
-    for (const ln of lines) {
-      const una = ln.replace(/\n+/g, ' ');
-      if (mostrados > 0 && usados + una.length + 5 > 850) break;
-      tplParts.push(una); usados += una.length + 5; mostrados++;
+    // La plantilla topea ~900 chars por variable y NO acepta saltos de línea. Si la lista es
+    // larga, la partimos en TRAMOS (cada uno entra en el límite, separador " | ") y mandamos
+    // un mensaje por tramo → se ve TODA la lista, sin el "+N más" que la cortaba.
+    const chunks = [];
+    {
+      let cur = [], curLen = 0;
+      for (const ln of lines) {
+        const una = ln.replace(/\n+/g, ' ').replace(/\s{4,}/g, '   ');
+        if (cur.length && curLen + una.length + 5 > 850) { chunks.push(cur.join('  |  ')); cur = []; curLen = 0; }
+        cur.push(una); curLen += una.length + 5;
+      }
+      if (cur.length) chunks.push(cur.join('  |  '));
     }
-    let listaTpl = tplParts.join('  |  ');
-    if (mostrados < lines.length) listaTpl += `  |  +${lines.length - mostrados} más (ver WhatsApp)`;
-    listaTpl = listaTpl.replace(/\s{4,}/g, '   ');
     const texto = `📞 Para seguir hoy — ${rows.length} lead(s) del presupuesto que todavía no cerraron:\n\n${listaTxt}`;
     let anyOk = false;
     for (const ph of REPORTE_DIARIO_PHONES) {
-      let r = null;
-      try { r = await waSendTemplate(env, ph, 'reporte_seguir', 'es_AR', [listaTpl.slice(0, 900)]); } catch (_) {}
-      if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} }
-      if (r && r.ok) anyOk = true;
+      let tplOk = false, tplFailed = false;
+      for (let i = 0; i < chunks.length; i++) {
+        const parte = chunks.length > 1 ? `(${i + 1}/${chunks.length}) ${chunks[i]}` : chunks[i];
+        let r = null;
+        try { r = await waSendTemplate(env, ph, 'reporte_seguir', 'es_AR', [parte.slice(0, 900)]); } catch (_) {}
+        if (r && r.ok) { tplOk = true; anyOk = true; } else { tplFailed = true; break; }
+        if (i < chunks.length - 1) await new Promise(rs => setTimeout(rs, 400));   // pequeño delay entre tramos
+      }
+      // Si la plantilla no salió (ninguna parte), fallback a texto libre con la lista COMPLETA.
+      if (!tplOk && tplFailed) { try { const r = await waSendText(env, ph, texto); if (r && r.ok) anyOk = true; } catch (_) {} }
     }
     if (anyOk) await kvSet(env, 'reporte_llamar_sent', fechaAR);
   } catch (_) {}
