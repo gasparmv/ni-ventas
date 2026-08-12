@@ -1784,7 +1784,7 @@ const PRECOTIZ_TIPOGRAFIAS_KEYS = ['precotiz/tipografias-1.jpg', 'precotiz/tipog
 // ¿Ya se le mandaron las tipografías a este chat? (para no repetirlas en cada tick).
 async function precotizYaMandoTipografias(env, phone) {
   try {
-    const q = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND msg_type = 'image' AND media_url LIKE 'precotiz/tipografias%' LIMIT 1").bind(phone).first();
+    const q = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND msg_type = 'image' AND (media_url LIKE 'precotiz/tipografias%' OR media_url LIKE 'ig/out_tipografias%') LIMIT 1").bind(phone).first();
     return !!q;
   } catch (_) { return false; }
 }
@@ -1809,6 +1809,45 @@ async function precotizSendTipografias(env, phone) {
           await env.DB.prepare(
             "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'image', ?, ?, 'sent', '', 1)"
           ).bind(new Date().toISOString(), r.id || ('precotiz-tipo:' + phone + ':' + i + ':' + Date.now()), phone, caption ? ('[imagen] ' + caption) : '[imagen] tipografias', key).run();
+        } catch (_) {}
+      }
+      await new Promise(rs => setTimeout(rs, 800));
+    } catch (_) {}
+  }
+  return sent;
+}
+
+// URL pública del worker (para las media URLs que Instagram baja server-side). El bot corre
+// en el cron (sin request), así que no hay new URL(request.url) → se hardcodea el origin.
+const WORKER_PUBLIC_ORIGIN = 'https://ni-ventas-tracker.neoninfinito.workers.dev';
+// Tipografías por DM de Instagram: los 2 jpg viven en precotiz/... (no público). Los copiamos
+// (lazy, una vez) a keys ig/out_tipografias-N.jpg (que la ruta pública SÍ sirve) y los mandamos
+// por igSendImage; el caption va como texto aparte. Respeta gate IG + ventana de 24 h. Registra
+// con media_url ig/out_tipografias% para que precotizYaMandoTipografias no los repita.
+async function precotizSendTipografiasIg(env, igId) {
+  if (!env.MEDIA) return 0;
+  try { if (!(await precotizIgOn(env))) return 0; } catch (_) { return 0; }
+  try { const lastIn = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND channel = 'ig'").bind(igId).first(); const lt = lastIn && lastIn.t ? new Date(lastIn.t).getTime() : 0; if (!(lt && (Date.now() - lt) < 24 * 3600 * 1000)) return 0; } catch (_) { return 0; }
+  try { await precotizSendIg(env, igId, 'estas son las tipografias que trabajamos, decime cual te gusta mas'); } catch (_) {}
+  let sent = 0;
+  for (let i = 0; i < PRECOTIZ_TIPOGRAFIAS_KEYS.length; i++) {
+    const src = PRECOTIZ_TIPOGRAFIAS_KEYS[i];
+    const igKey = 'ig/out_tipografias-' + (i + 1) + '.jpg';
+    try {
+      // Copiar a la key pública si aún no está.
+      const pub = await env.MEDIA.get(igKey);
+      if (!pub) {
+        const s = await env.MEDIA.get(src);
+        if (!s) continue;
+        await env.MEDIA.put(igKey, await s.arrayBuffer(), { httpMetadata: { contentType: s.httpMetadata?.contentType || 'image/jpeg' } });
+      }
+      const r = await igSendImage(env, igId, WORKER_PUBLIC_ORIGIN + '/admin/media/' + igKey);
+      if (r && r.ok) {
+        sent++;
+        try {
+          await env.DB.prepare(
+            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, status, context_id, channel, automated) VALUES (?, ?, 'outbound', ?, '', 'image', '[imagen] tipografias', ?, 'sent', '', 'ig', 1)"
+          ).bind(new Date().toISOString(), r.id || ('precotiz-tipo-ig:' + igId + ':' + i + ':' + Date.now()), igId, igKey).run();
         } catch (_) {}
       }
       await new Promise(rs => setTimeout(rs, 800));
