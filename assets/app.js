@@ -14383,7 +14383,7 @@ function corpPresupuestoFields(brief, cj) {
   // Frente: material + color/diseño + acabado.
   let frente;
   if (esReplica) {
-    frente = 'gráfica impresa full color, reproduciendo tu diseño';
+    frente = 'frente full color, reproduciendo tu diseño';
   } else {
     const col = fmtCol(cj.frente_color);
     frente = mat + (col ? ` color ${col}` : '');
@@ -14402,7 +14402,15 @@ function corpPresupuestoFields(brief, cj) {
     laterales,
     fondo,
     conLuz,
-    iluminacion: conLuz ? 'con LED interno' : 'sin luz',
+    iluminacion: conLuz ? 'con luz LED' : 'sin iluminación',
+    // Descripción del producto: cambia si el cartel supera 1 m de largo/alto (→ viene sobre bastidor de caño).
+    descripcion: (Math.max(Number(cj.ancho_cm) || 0, Number(cj.alto_cm) || 0) > 100)
+      ? (conLuz
+          ? 'Con luz led 12v, incluye su fuente de alimentación a 220v. Viene montado sobre un bastidor de caño, ya listo para instalar muy fácilmente.'
+          : 'Sin luz. Viene montado sobre un bastidor de caño, ya listo para instalar muy fácilmente.')
+      : (conLuz
+          ? 'Con luz led 12v, incluye su fuente de alimentación a 220v, ya listo para colocar muy fácilmente.'
+          : 'Sin luz, ya listo para colocar.'),
     precio,
   };
 }
@@ -14419,9 +14427,10 @@ function corpPresupuestoTexto(brief, cj) {
   L.push(`Fondo: ${f.fondo}`);
   L.push(`Iluminación: ${f.iluminacion}`);
   L.push('', `Precio: ${fmtMoney(f.precio)}`, '',
-    `Fabricación en letras 3D${f.conLuz ? ' con LED interno' : ''}. Para arrancar pedimos el 50% de seña — aceptamos todos los medios de pago. Hacemos envíos a todo el país!`,
-    'Cualquier duda quedo a disposición 🙌',
-    '', 'Tiempo de producción: 15/20 días');
+    f.descripcion, '',
+    'Tiempo de entrega: 20/25 días (avisá si lo necesitás antes).',
+    'La producción se comienza con el 50% de anticipo.',
+    'Aceptamos todos los medios de pago y hacemos envíos a TODO el país!');
   return L.join('\n');
 }
 function openCorpPopup(id) { STATE.corpPopupBrief = id; STATE.corpPopupText = null; render(); }
