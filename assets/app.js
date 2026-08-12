@@ -15241,6 +15241,7 @@ async function quickCreateBriefFromImage(file) {
     STATE.quickModalSaving = false;
     STATE.quickModalOrigen = 'wpp';  // default: la mayoría llega por WhatsApp
     STATE.quickModalPrefillPhone = ''; // limpiar: si no, se queda el teléfono de un brief anterior (creado desde un chat) y el nuevo brief de IG hereda un número WA ajeno
+    STATE.quickModalIgsid = '';
     STATE.quickModalIntExt = null;   // sin default: Joaco DEBE elegir Interior/Exterior
     STATE.quickModalTipo = (briefProducto === 'corporea' ? 'corporea' : null);
     render();
@@ -15259,6 +15260,7 @@ function cancelQuickCreate() {
   STATE.quickModalSaving = false;
   STATE.quickModalOrigen = 'wpp';
   STATE.quickModalPrefillPhone = ''; // no dejar el teléfono cargado para el próximo brief
+  STATE.quickModalIgsid = '';
   render();
 }
 
@@ -15274,6 +15276,7 @@ function openNuevoBriefModal() {
   STATE.quickModalUrgente = false;
   STATE.quickModalIA = false;
   STATE.quickModalPrefillPhone = '';
+  STATE.quickModalIgsid = '';
   STATE.quickModalTipo = (briefProducto === 'corporea' ? 'corporea' : null);
   STATE.quickModalIntExt = null;
   render();
@@ -15327,6 +15330,7 @@ function openBriefFromChat(corporea) {
   STATE.quickModalUrgente = false;
   STATE.quickModalIA = false;
   STATE.quickModalPrefillPhone = esIG ? '' : digits;
+  STATE.quickModalIgsid = esIG ? digits : ''; // IG: guardamos el id de la conversación (IGSID) para poder mandarle el presupuesto por DM desde el panel
   STATE.quickModalIntExt = null;
   STATE.quickModalTipo = corporea ? 'corporea' : null;
   render();
@@ -15514,7 +15518,7 @@ async function confirmQuickCreate() {
     const wantIA = document.getElementById('quick-modal-ia')?.checked || false;
     const saved = await saveBrief({
       cliente_nombre: titulo,
-      cliente_wa_id: origen === 'wpp' ? telDigits : '',
+      cliente_wa_id: origen === 'wpp' ? telDigits : (STATE.quickModalIgsid || ''),
       origen_lead: origen,
       medidas_libre: medidas || null,
       notas: notas || null,
@@ -15997,6 +16001,20 @@ function renderBriefCotizadorPopup() {
           const isWa = !esIg && (o === 'wpp' || o === 'whatsapp' || (o === '' && tel.length >= 8)) && tel.length >= 8;
           const sending = STATE.briefsEnviando && STATE.briefsEnviando[b.id];
           if (esIg) {
+            // Si el brief IG tiene la conversación vinculada (IGSID guardado en cliente_wa_id),
+            // se puede mandar el DM directo. Si no (briefs IG viejos o creados a mano), queda
+            // solo el fallback copiar/pegar.
+            const igid = String(b.cliente_wa_id || '').replace(/\D/g, '');
+            const hasIgsid = igid.length >= 15;
+            if (hasIgsid) {
+              return `
+                <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+                  <button class="btn btn-ghost" id="brief-cot-popup-copy-ig" ${sending ? 'disabled' : ''}>📋 Copiar y marcar</button>
+                  <button class="btn btn-cyan" id="brief-cot-popup-send-ig" ${sending ? 'disabled' : ''}>${sending ? '⏳ Enviando…' : '📤 Enviar por Instagram'}</button>
+                </div>
+                <div style="font-size:10px;color:var(--fg-mute);text-align:right;margin-top:6px">📷 Instagram: manda el render + presupuesto al DM del cliente (dentro de la ventana de 24 h). Si está cerrada, usá "Copiar y marcar" y pegalo a mano.</div>
+              `;
+            }
             return `
               <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
                 <button class="btn btn-cyan" id="brief-cot-popup-copy-ig" ${sending ? 'disabled' : ''}>${sending ? '⏳…' : '📋 Copiar y marcar como enviado'}</button>
@@ -16943,6 +16961,80 @@ function bindCotizacion() {
       } catch (e) { console.warn('marcar enviado:', e); }
       STATE.briefsEnviando[briefId] = false;
       toast(sheetOk ? '✓ Copiado · brief pasó a "Enviados". Pegalo en el DM de IG.' : '✓ Marcado enviado · ⚠ no guardó en Sheet. Pegalo en el DM.');
+      closeBriefCotizadorPopup();
+      closeBriefDrawer();
+    };
+
+    // 📤 (IG) Enviar por Instagram — manda el render + presupuesto al DM del cliente via
+    // Graph API, guarda en el Sheet, marca el brief como enviado y cierra. Solo aparece
+    // cuando origen=ig + el brief tiene la conversación vinculada (IGSID en cliente_wa_id).
+    // IG no tiene plantilla de rescate: si la ventana de 24 h está cerrada, avisa y NO marca.
+    const sendIgBtn = document.getElementById('brief-cot-popup-send-ig');
+    if (sendIgBtn) sendIgBtn.onclick = async () => {
+      if (!STATE.briefSelected) return;
+      const briefId = STATE.briefSelected;
+      if (STATE.briefsEnviando[briefId]) return;
+      const brief = STATE.briefs.find(b => b.id === briefId);
+      if (!brief) return;
+      const igid = String(brief.cliente_wa_id || '').replace(/\D/g, '');
+      if (igid.length < 15) {
+        await showAlert('Este brief de Instagram no tiene la conversación vinculada. Copiá el presupuesto y pegalo en el DM a mano.', { title: 'Sin conversación de IG', variant: 'warn' });
+        return;
+      }
+      if (!STATE.token || !CONFIG.trackerUrl) { await showAlert('Tenés que estar logueado para enviar.', { title: 'Login requerido', variant: 'warn' }); return; }
+      const ta = document.getElementById('brief-cot-popup-text');
+      const texto = (ta?.value || '').trim();
+      if (!texto) { await showAlert('El texto del presupuesto está vacío.', { title: 'Sin texto', variant: 'warn' }); return; }
+
+      const tieneRender = (STATE.briefDetailImages || []).some(x => x.tipo === 'render');
+      const ok = await showConfirm(
+        `Voy a mandarle por el DM de Instagram ${tieneRender ? 'el render con el presupuesto' : 'el presupuesto'} y marcar el brief como enviado.\n\n¿Confirmás?`,
+        { title: 'Enviar por Instagram', confirmLabel: '📤 Mandar', cancelLabel: 'Cancelar' }
+      ).catch(() => false);
+      if (!ok) return;
+
+      STATE.briefsEnviando[briefId] = true;
+      setStatus('Enviando por Instagram…', 'var(--fg-subtle)');
+      render();
+
+      let igOk = false;
+      try {
+        const r = await fetch(CONFIG.trackerUrl + '/admin/ig/send-brief-presupuesto', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ brief_id: briefId, to: igid, caption: texto })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok) {
+          igOk = true;
+        } else if (j.window_closed) {
+          // IG no tiene plantilla de rescate: avisamos y NO marcamos como enviado.
+          await showAlert('La ventana de 24 h de Instagram está cerrada (el cliente no escribió en las últimas 24 h). Instagram no deja mandar fuera de la ventana. Copiá el presupuesto con "Copiar y marcar" y pegalo en el DM a mano.', { title: 'Ventana de IG cerrada', variant: 'warn' });
+          return;
+        } else {
+          await showAlert(j.error || 'No se pudo enviar por Instagram.', { title: 'No se pudo enviar', variant: 'warn' });
+          return;
+        }
+      } catch (e) {
+        await showAlert('Error de red al enviar: ' + (e.message || e), { title: 'Error de conexión', variant: 'warn' });
+        return;
+      } finally {
+        STATE.briefsEnviando[briefId] = false;
+      }
+
+      if (!igOk) { render(); return; }
+
+      // Guardar en el Sheet + marcar enviado (igual que WhatsApp, sin verificarEntregaWA).
+      let sheetOk = false;
+      try { const sr = await saveCotToSheetFromPopup(); sheetOk = !sr.error; } catch (e) { console.warn('Sheet:', e); }
+      try {
+        const calc = (function(){ try { return calcCotizadorActivo(STATE.cotizadorForm); } catch(e){ return null; } })();
+        const updated = await marcarBriefEnviado(briefId, calc ? { precio_final: calc.transFinal } : {});
+        const i = STATE.briefs.findIndex(b => b.id === updated.id);
+        if (i >= 0) STATE.briefs[i] = updated;
+      } catch (e) { console.warn('No pude marcar brief como enviado:', e); }
+
+      toast(sheetOk ? '✓ Presupuesto enviado por Instagram · brief pasó a "Enviados"' : '✓ Enviado por IG y marcado · ⚠ no se guardó en el Sheet');
       closeBriefCotizadorPopup();
       closeBriefDrawer();
     };

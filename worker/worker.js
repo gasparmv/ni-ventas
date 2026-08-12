@@ -10184,6 +10184,64 @@ const handler = {
         return json({ id: r.id, r2Key, media_url: r2Key });
       }
 
+      // ===== Enviar presupuesto de un brief por DM de Instagram =====
+      // body: { brief_id, to (=IGSID), caption }. Espejo de /admin/wa/send-brief-presupuesto
+      // pero por IG: manda el render como IMAGEN + el presupuesto como TEXTO aparte (IG no
+      // lleva caption en el attachment). Respeta la ventana de 24 h de IG (SIN plantilla de
+      // rescate, a diferencia de WhatsApp). El render (briefs/<id>/render-...) se COPIA a una
+      // key ig/out_ porque la ruta pública sin-auth solo sirve esas (IG baja la imagen sin token).
+      if (request.method === 'POST' && path === '/admin/ig/send-brief-presupuesto') {
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const { brief_id, to, caption } = body || {};
+        if (!to || !caption) return json({ error: 'missing to or caption' }, 400);
+        if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+        const igId = String(to).replace(/\D/g, '');
+        if (igId.length < 15) return json({ error: 'IGSID invalido' }, 400);
+        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, igId))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
+        // Ventana de 24 h de IG (el cliente escribió en las últimas 24 h). Sin rescate por plantilla.
+        let lastTs = 0;
+        try { const lastIn = await env.DB.prepare("SELECT MAX(ts) AS ts FROM wa_messages WHERE phone=? AND direction='inbound' AND channel='ig'").bind(igId).first(); lastTs = lastIn && lastIn.ts ? new Date(lastIn.ts).getTime() : 0; } catch (_) {}
+        if (!(lastTs && (Date.now() - lastTs) < 24 * 3600 * 1000)) return json({ error: 'Ventana de 24 h de Instagram cerrada: el cliente no escribio en las ultimas 24 h.', window_closed: true }, 409);
+        // Render más reciente del brief.
+        let renderKey = null;
+        if (brief_id) {
+          try { const row = await env.DB.prepare("SELECT r2_key FROM brief_imagenes WHERE brief_id=? AND tipo='render' ORDER BY created_at DESC, id DESC LIMIT 1").bind(brief_id).first(); if (row && row.r2_key) renderKey = row.r2_key; } catch (_) {}
+        }
+        const senderSlug = await resolveComercial(env, { sessionUser: session.user, phone: igId });
+        const saveIg = async (wamid, mtype, bodyTxt, mediaKey) => {
+          try {
+            await env.DB.prepare(
+              "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, ?, ?, ?, ?, '', 'sent', 'ig')"
+            ).bind(new Date().toISOString(), wamid || ('ig-brief-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)), igId, senderSlug, mtype, bodyTxt, mediaKey || '').run();
+          } catch (_) {}
+        };
+        // 1) Render como imagen: copiar el blob a una key pública ig/out_ y mandarlo por IG.
+        let usedImage = false;
+        if (renderKey) {
+          try {
+            const obj = await env.MEDIA.get(renderKey);
+            if (obj) {
+              const ct = obj.httpMetadata?.contentType || 'image/jpeg';
+              const igKey = `ig/out_render_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.jpg`;
+              await env.MEDIA.put(igKey, await obj.arrayBuffer(), { httpMetadata: { contentType: ct } });
+              const mediaUrl = new URL(request.url).origin + '/admin/media/' + igKey;
+              const ri = await igSendImage(env, igId, mediaUrl);
+              await logWaEvent(env, { to: igId, kind: 'ig-image', ref: 'brief:' + (brief_id || ''), ok: ri.ok, messageId: ri.id, error: ri.error });
+              if (!ri.ok) return json({ error: ri.error || 'ig image send failed', raw: ri.raw }, 500);
+              usedImage = true;
+              await saveIg(ri.id, 'image', '', igKey);
+            }
+          } catch (e) { return json({ error: 'ig image error: ' + String(e && e.message || e) }, 500); }
+        }
+        // 2) Presupuesto como texto (mensaje aparte).
+        const rt = await igSend(env, igId, String(caption));
+        await logWaEvent(env, { to: igId, kind: 'ig-text', ref: 'brief:' + (brief_id || ''), ok: rt.ok, messageId: rt.id, error: rt.error });
+        if (!rt.ok) return json({ error: rt.error || 'ig text send failed', raw: rt.raw, image_sent: usedImage }, 500);
+        await saveIg(rt.id, 'text', String(caption), '');
+        try { await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone=?").bind(igId).run(); } catch (_) {}
+        return json({ id: rt.id, hasImage: usedImage });
+      }
+
       // ===== WA LABELS BULK IMPORT (desde el scraper) =====
       // Body: { labels: [{name, color}], assignments: [{phone, labelName}], replaceAll?: bool }
       // Si replaceAll=true → borra TODAS las assignments antes de insertar (sync limpio).
