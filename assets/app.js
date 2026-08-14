@@ -13740,7 +13740,9 @@ function renderBriefCard(b) {
           ${isRenderThumb ? '<div style="position:absolute;top:4px;left:4px;background:rgba(143,212,222,.85);color:#000;font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;z-index:1">RENDER</div>' : ''}
           ${(chatCount + renderCount) > 1 ? `<div style="position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.7);color:#fff;font-size:10px;padding:2px 6px;border-radius:10px;z-index:1">+${(chatCount + renderCount) - 1}</div>` : ''}
         </div>
-      ` : ''}
+      ` : ((chatCount + renderCount) === 0 ? `
+        <div style="width:100%;padding:9px 12px;background:rgba(255,24,48,.12);border-bottom:1px solid rgba(255,24,48,.3);color:#ff5468;font-size:11px;font-weight:700;display:flex;align-items:center;gap:6px">⚠ FALTA FOTO — abrí y subila (Emma no lo ve sin foto)</div>
+      ` : '')}
       <div style="padding:var(--s-2)">
         <div style="display:flex;justify-content:space-between;align-items:start;gap:6px;margin-bottom:4px">
           <div style="font-weight:600;font-size:13px;line-height:1.3;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">

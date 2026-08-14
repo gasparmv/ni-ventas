@@ -12687,6 +12687,11 @@ const handler = {
         const limit = Math.min(parseInt(url.searchParams.get('limit') || '500'), 2000);
         const where = [];
         const args = [];
+        // GUARD anti "brief sin foto": Emma (diseñador) NO ve briefs SIN NINGUNA imagen — cuando la
+        // subida de la foto de Joaco falla (hipo de red), el brief queda sin la referencia y no sirve
+        // para cotizar. Se oculta de la cola de Emma pero SIGUE visible para Joaco (comercial), que lo
+        // abre y le sube la foto → recién ahí (chat_count > 0) aparece para Emma. Admin (Gaspar) ve todo.
+        if (_briefRole === 'disenador') where.push("EXISTS (SELECT 1 FROM brief_imagenes bi WHERE bi.brief_id = b.id)");
         if (estado)      { where.push('b.estado = ?');       args.push(estado); }
         if (comercialId) { where.push('b.comercial_id = ?'); args.push(comercialId); }
         if (disenadorId) { where.push('b.disenador_id = ?'); args.push(disenadorId); }
