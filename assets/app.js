@@ -9356,7 +9356,7 @@ function _contactItemKey(c) {
   // Si cualquiera de estos cambia, regeneramos. Sino, reusamos el cache.
   const labels = (chatState.contactLabels[c.phone] || []).join(',');
   const isActive = chatState.selectedPhone === c.phone ? '1' : '0';
-  return `${c.phone}|${c.name || ''}|${c.lastTs || ''}|${c.unread || 0}|${c.lastDir || ''}|${c.lastType || ''}|${c.lastMsg || ''}|${isActive}|${labels}`;
+  return `${c.phone}|${c.name || ''}|${c.lastTs || ''}|${c.unread || 0}|${c.lastDir || ''}|${c.lastType || ''}|${c.lastMsg || ''}|${isActive}|${labels}|${c.inbox || ''}`;
 }
 function renderContactItem(c) {
   // Cache hit: HTML idéntico al previo. Devolvemos directo sin recomputar.
@@ -9393,7 +9393,7 @@ function renderContactItem(c) {
       ${avatarHtml(c.phone, c.name, 49)}
       <div class="chat-contact-info">
         <div class="chat-contact-top">
-          <div class="chat-contact-name">${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
+          <div class="chat-contact-name">${c.inbox === 'privado' ? '🔒 ' : ''}${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
           <div class="chat-contact-time${hasUnread ? ' unread' : ''}">${formatChatTime(c.lastTs)}</div>
         </div>
         <div class="chat-contact-bottom">
@@ -9660,6 +9660,12 @@ function renderChatConversation() {
           const _enNadia = _c && _c.assigned_to === 'nadia';
           // Reparto de vendedores: asignar/sacar el chat a Nadia (solo Gaspar). Sin asignar = lo ve Joaco.
           return `<button class="btn-label-toggle${_enNadia ? ' has-note' : ''}" id="btn-nadia-toggle" title="${_enNadia ? 'Sacar de Nadia (vuelve a Joaco)' : 'Asignar este chat a Nadia'}" style="font-size:13px;font-weight:700;line-height:1">👤${_enNadia ? 'N✓' : 'N'}</button>`;
+        })() : ''}
+        ${getUserRole() === 'admin' ? (() => {
+          const _c = (chatState.contacts || []).find(x => x.phone === phone);
+          const _enPriv = _c && _c.inbox === 'privado';
+          // Bandeja PRIVADA de Gaspar: mover/sacar un chat de clientes especiales que SOLO ve él.
+          return `<button class="btn-label-toggle${_enPriv ? ' has-note' : ''}" id="btn-privado-toggle" title="${_enPriv ? 'Sacar de tu bandeja Privada (lo vuelve a ver el equipo)' : 'Mover a tu bandeja PRIVADA — solo lo ves vos'}" style="font-size:15px;line-height:1">${_enPriv ? '🔒✓' : '🔒'}</button>`;
         })() : ''}
         <button class="btn-label-toggle ${getContactNote(phone) ? 'has-note' : ''}" id="btn-note" title="${getContactNote(phone) ? 'Editar nota' : 'Agregar nota'}">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
@@ -11479,6 +11485,8 @@ function bindChatConversation() {
   if (cursosBtn) cursosBtn.onclick = () => handleToggleCursos();
   const nadiaBtn = document.getElementById('btn-nadia-toggle');
   if (nadiaBtn) nadiaBtn.onclick = () => handleToggleNadia();
+  const privadoBtn = document.getElementById('btn-privado-toggle');
+  if (privadoBtn) privadoBtn.onclick = () => handleTogglePrivado();
   // Scroll-to-bottom FAB
   if (msgEl && scrollBtn) {
     msgEl.addEventListener('scroll', () => {
@@ -11521,6 +11529,38 @@ async function handleToggleCursos() {
     const yaNoVisible = (role === 'cursos' && nuevo === 'general') || (role === 'comercial' && nuevo === 'cursos');
     if (yaNoVisible) chatState.selectedPhone = null;
     // Refrescar la lista para que el chat salga (o entre) en la bandeja correcta.
+    chatState.contactsLoaded = false;
+    loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
+  } catch (e) {
+    await showAlert('No se pudo cambiar la bandeja: ' + (e.message || e), { title: 'Error', variant: 'warn' });
+  }
+}
+
+// Mueve (o saca) el chat activo a la bandeja PRIVADA (admin-only de Gaspar): clientes
+// especiales que SOLO ve él. Ningún otro usuario los ve (backend /admin/wa/private-toggle
+// + inboxClauseForRole + inboxAccessOk gatean 'privado' a admin).
+async function handleTogglePrivado() {
+  const phone = chatState.selectedPhone;
+  if (!phone || getUserRole() !== 'admin') return;
+  const c = (chatState.contacts || []).find(x => x.phone === phone);
+  const enPrivado = c && c.inbox === 'privado';
+  const nombre = (c && c.contact_name) || formatPhoneDisplay(phone);
+  const ok = await showConfirm(
+    enPrivado
+      ? `Sacar a "${nombre}" de tu bandeja Privada.\n\nVuelve a la bandeja general (lo vuelve a ver el equipo).`
+      : `Mover a "${nombre}" a tu bandeja PRIVADA 🔒.\n\nQueda solo para vos — ningún otro usuario lo va a ver.`,
+    { title: enPrivado ? 'Sacar de Privado' : 'Mover a Privado', confirmLabel: enPrivado ? 'Sacar' : '🔒 Mover a Privado', cancelLabel: 'Cancelar' }
+  ).catch(() => false);
+  if (!ok) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/private-toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ phone, on: !enPrivado })
+    });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
+    if (c) c.inbox = enPrivado ? 'general' : 'privado';
+    toast(enPrivado ? 'Sacado de Privado' : '🔒 Movido a tu bandeja Privada — solo lo ves vos');
     chatState.contactsLoaded = false;
     loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
   } catch (e) {

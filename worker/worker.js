@@ -7265,18 +7265,25 @@ function inboxClauseForRole(role) {
   if (role === 'cursos') return "AND inbox = 'cursos'";
   // 'precotiz' = lead en pre cotización automática (piloto): solo Gaspar (admin)
   // lo ve mientras está en relevamiento; vuelve a 'general' al completar los 3 datos.
-  return "AND inbox NOT IN ('cursos','oculto','precotiz')";
+  // 'privado' = bandeja admin-only de Gaspar (clientes especiales que asigna a mano):
+  // solo admin lo ve, comercial/cursos NUNCA. Mismo patrón que precotiz.
+  return "AND inbox NOT IN ('cursos','oculto','precotiz','privado')";
 }
 
-// Control de acceso por chat para el rol 'cursos': solo puede leer/escribir
-// chats que estén en la bandeja 'cursos'. Otros roles no se restringen acá.
+// Control de acceso por chat: 'cursos' solo su bandeja; la bandeja 'privado' (admin-only de
+// Gaspar) NO la tocan ni comercial ni cursos; admin ve/toca todo. La usan messages/send/send-media.
 async function inboxAccessOk(env, role, phone) {
-  if (role !== 'cursos') return true;
-  if (!phone) return false;
-  try {
-    const r = await env.DB.prepare('SELECT inbox FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
-    return !!r && r.inbox === 'cursos';
-  } catch (e) { return false; }
+  if (role === 'admin') return true;
+  if (phone) {
+    try {
+      const r = await env.DB.prepare('SELECT inbox FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
+      const inbox = (r && r.inbox) || '';
+      if (inbox === 'privado') return false;             // bandeja privada = SOLO admin
+      if (role === 'cursos') return inbox === 'cursos';  // cursos: solo su bandeja
+      return true;                                       // comercial/otros: todo menos privado
+    } catch (e) { return role !== 'cursos'; }
+  }
+  return role !== 'cursos';                              // sin phone puntual: cursos no, resto sí
 }
 
 // Invalida las variantes (por rol) del cache de chats-summary.
@@ -10905,6 +10912,25 @@ const handler = {
         }
       }
 
+      // Bandeja PRIVADA (admin-only): asignar/sacar un chat a la bandeja 'privado' de Gaspar.
+      // Solo admin la ve (inboxClauseForRole + inboxAccessOk gatean 'privado'). on=true → privado;
+      // on=false → 'general' (vuelve a la bandeja normal). Invalida el cache para que se refleje ya.
+      if (request.method === 'POST' && path === '/admin/wa/private-toggle') {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const raw = String(body?.to || body?.phone || '');
+        const num = normalizeArPhone(raw) || raw.replace(/\D/g, '');
+        if (!num) return json({ error: 'teléfono inválido' }, 400);
+        const on = body?.on !== false; // default true
+        try {
+          await env.DB.prepare(
+            "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at"
+          ).bind(num, on ? 'privado' : 'general', new Date().toISOString()).run();
+        } catch (e) { return json({ error: 'no se pudo actualizar' }, 500); }
+        try { await invalidateChatsSummaryCache(request); } catch (_) {}
+        return json({ ok: true, phone: num, inbox: on ? 'privado' : 'general' });
+      }
+
       // Consultar mensajes de WhatsApp guardados (para análisis)
       if (request.method === 'GET' && path === '/admin/wa/messages') {
         const phone = url.searchParams.get('phone') || '';
@@ -10917,7 +10943,7 @@ const handler = {
         const params = [];
         if (phone) {
           // Consulta de un chat puntual. Rol 'cursos' solo accede a su bandeja.
-          if (_role === 'cursos' && !(await inboxAccessOk(env, _role, phone.replace(/\D/g, '')))) {
+          if (_role !== 'admin' && !(await inboxAccessOk(env, _role, phone.replace(/\D/g, '')))) {
             return json({ error: 'forbidden: chat fuera de tu bandeja', messages: [] }, 403);
           }
           where += ' AND phone = ?'; params.push(phone);
@@ -10933,7 +10959,7 @@ const handler = {
           } else if (_role === 'admin') {
             where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox = 'oculto')";
           } else {
-            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox IN ('cursos','oculto'))";
+            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox IN ('cursos','oculto','privado'))";
           }
         }
         if (from) { where += ' AND ts >= ?'; params.push(from); }
@@ -11218,6 +11244,12 @@ const handler = {
         if (role === 'cursos') {
           if (inbox !== 'general') return json({ error: 'forbidden: solo podés sacar chats de Cursos' }, 403);
           if (!(await inboxAccessOk(env, 'cursos', phone))) return json({ error: 'forbidden: ese chat no está en tu bandeja' }, 403);
+        }
+        // La bandeja 'privado' (admin-only de Gaspar) no la toca nadie más: si el chat YA está
+        // en privado, solo admin lo puede sacar. (Meterlo a privado ya está bloqueado: arriba
+        // solo se aceptan 'cursos'|'general'.) Se cambia con /admin/wa/private-toggle (admin).
+        if (role !== 'admin') {
+          try { const cur = await env.DB.prepare("SELECT inbox FROM wa_chats_summary WHERE phone = ?").bind(phone).first(); if (cur && cur.inbox === 'privado') return json({ error: 'forbidden' }, 403); } catch (_) {}
         }
         // Upsert: el chat ya suele existir en la libreta (tiene mensajes). Si no,
         // lo creamos con la bandeja seteada (aparecerá cuando tenga mensajes).
