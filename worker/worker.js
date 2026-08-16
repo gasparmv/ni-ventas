@@ -2402,6 +2402,81 @@ async function maybeReporteDiario(env) {
   } catch (_) {}
 }
 
+// ===== Ranking semanal de insumos por ITEMS (a pedido de Gaspar, 16-ago) =====
+// Cada MARTES 9 AR manda a Gaspar + hermano el top 5 de clientes de la semana
+// PASADA (lunes a domingo) por CANTIDAD DE ITEMS (no por plata). Lee Venta_Insumos
+// del Sheet (mismo SID que el panel de finanzas), filtra el uso interno (neon) con
+// isInternalNeon. Va por plantilla (llega fuera de la ventana de 24h) con fallback a
+// texto libre. Dedup por semana (kv 'ranking_insumos_sent' = lunes de la semana).
+async function buildRankingInsumosSemanal(env) {
+  // Rango: semana pasada (lunes 00:00 → domingo 23:59, hora AR). Corre un martes.
+  const nowAR = new Date(Date.now() - 3 * 3600 * 1000);
+  const monThis = new Date(nowAR);
+  monThis.setUTCDate(nowAR.getUTCDate() - ((nowAR.getUTCDay() + 6) % 7)); // lunes de ESTA semana
+  const monPrev = new Date(monThis); monPrev.setUTCDate(monThis.getUTCDate() - 7); // lunes pasado
+  const sunPrev = new Date(monThis); sunPrev.setUTCDate(monThis.getUTCDate() - 1); // domingo pasado
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const ddmm = (d) => `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+  const desde = iso(monPrev), hasta = iso(sunPrev);
+
+  // Venta_Insumos vía gviz CSV (mismo Sheet " 2026 v4" que parsePanelData).
+  const SID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE';
+  const url = `https://docs.google.com/spreadsheets/d/${SID}/gviz/tq?tqx=out:csv&sheet=Venta_Insumos`;
+  let csv = '';
+  try { const r = await fetch(url); if (r.ok) csv = await r.text(); } catch (_) {}
+  // Cols (0-idx): 1=FECHA, 2=cliente, 7=CANTIDAD, 9=Precio. 2 filas de header (igual que parsePanelData).
+  const rows = parseCsv(csv).slice(2);
+  const byCli = new Map(); // cliente -> { items, monto }
+  for (const r of rows) {
+    const fecha = parseDateAR(r[1]); // 'yyyy-MM-dd' o null
+    if (!fecha || fecha < desde || fecha > hasta) continue;
+    const cli = (r[2] || '').trim();
+    if (!cli || isInternalNeon(cli)) continue;
+    const cant = parseAmt(r[7]) || 1;
+    const cur = byCli.get(cli) || { items: 0, monto: 0 };
+    cur.items += cant; cur.monto += parseAmt(r[9]);
+    byCli.set(cli, cur);
+  }
+  const ranked = [...byCli.entries()]
+    .map(([cli, v]) => ({ cli, items: v.items, monto: v.monto }))
+    .sort((a, b) => (b.items - a.items) || (b.monto - a.monto)); // por ITEMS; desempate por $
+  return {
+    desde, rangoDisplay: `${ddmm(monPrev)} al ${ddmm(sunPrev)}`,
+    top5: ranked.slice(0, 5),
+    totalItems: ranked.reduce((s, x) => s + x.items, 0),
+    totalClientes: ranked.length,
+  };
+}
+async function maybeRankingInsumosSemanal(env) {
+  try {
+    // weekKey = lunes de la semana pasada (AR). Chequeo dedup ANTES de leer el Sheet.
+    const nowAR = new Date(Date.now() - 3 * 3600 * 1000);
+    const monThis = new Date(nowAR);
+    monThis.setUTCDate(nowAR.getUTCDate() - ((nowAR.getUTCDay() + 6) % 7));
+    const weekKey = new Date(monThis.getTime() - 7 * 86400000).toISOString().slice(0, 10);
+    if ((await kvGet(env, 'ranking_insumos_sent', '')) === weekKey) return; // ya se entregó esta semana
+    const rk = await buildRankingInsumosSemanal(env);
+    if (!rk.top5.length) return; // semana sin ventas de insumos → no molestar
+    const medal = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+    const puestos = [];
+    for (let i = 0; i < 5; i++) { const t = rk.top5[i]; puestos.push(t ? `${t.cli} — ${t.items} items` : '—'); }
+    const totalStr = `${rk.totalItems} items · ${rk.totalClientes} clientes`;
+    // Template ranking_insumos_sem: {{1}}=rango, {{2..6}}=puestos, {{7}}=total.
+    const params = [rk.rangoDisplay, ...puestos, totalStr].map(String);
+    let texto = `🏆 Top clientes de la semana — insumos (por items)\n📅 ${rk.rangoDisplay}\n\n`;
+    for (let i = 0; i < 5; i++) texto += `${medal[i]} ${puestos[i]}\n`;
+    texto += `\n📦 Total semana: ${totalStr}`;
+    let anyOk = false;
+    for (const ph of REPORTE_DIARIO_PHONES) {
+      let r = null;
+      try { r = await waSendTemplate(env, ph, 'ranking_insumos_sem', 'es_AR', params); } catch (_) {}
+      if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} } // fallback: solo llega en ventana de 24h
+      if (r && r.ok) anyOk = true;
+    }
+    if (anyOk) await kvSet(env, 'ranking_insumos_sent', weekKey);
+  } catch (_) {}
+}
+
 // ===== Aviso diario "leads para SEGUIR" (a pedido de Gaspar, 29-jul; ampliado ago) =====
 // Cada mañana (9 AR) manda a Gaspar + hermano la lista de leads que recibieron el fup 1
 // del presupuesto AYER y todavía NO cerraron. Incluye a los que NO contestaron y a los
@@ -13562,6 +13637,9 @@ const handler = {
     // cualificado de WA en el goteo de broadcast (rama IA prendida, sin ocultar).
     // Gated por kv reflote_on='1' + lock diario adentro.
     if (dowAR === 1 && hAR === 9 && minute === 0) ctx.waitUntil(processRefloteSweep(env));
+    // Ranking semanal de insumos por ITEMS → Gaspar + hermano, MARTES 9 AR. Corre en
+    // cada tick de las 9 (dedup por semana adentro) para tolerar un fallo puntual de red.
+    if (dowAR === 2 && hAR === 9) ctx.waitUntil(maybeRankingInsumosSemanal(env));
     // Análisis de chats nuevos: 1 vez por hora (procesa hasta 15 chats que
     // tengan actividad nueva desde su último análisis o que nunca se analizaron).
     // Ignora phones internos. Idempotente: si no hay nada que analizar, no hace nada.
