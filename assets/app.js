@@ -1002,6 +1002,9 @@ function isJoaquinUser(s) { return _userKey(s) === 'joaquin' || _userKey(s) === 
 // Nadia: 2da vendedora (rol comercial, como Joaco). Ve el Chat WA y trabaja carteles.
 function isNadiaUser(s) { return _userKey(s) === 'nadia'; }
 function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
+// SOLO DISPLAY: el user "Gaspar" se muestra como "Administrador" en la UI. El valor INTERNO
+// sigue siendo "Gaspar" (login, isAdmin, API, gates de rol) → no rompe nada, es solo el tag visible.
+function displayUser(u) { return isGasparUser(u) ? 'Administrador' : u; }
 function isDisenadorUser(s) { const k = _userKey(s); return k === 'disenador' || k === 'emma' || k === 'emmanuel'; }
 // Abril: usuario de la bandeja de Cursos. Solo ve el Chat WA, y dentro solo los
 // chats derivados a 'cursos'.
@@ -2071,7 +2074,7 @@ function renderUserPicker() {
         <p class="muted" style="margin:0 0 var(--s-4);font-size:13px">¿Quién sos?</p>
         <div style="display:flex;flex-wrap:wrap;gap:var(--s-3);justify-content:center">
           ${CONFIG.defaultUsers.map(u => `
-            <button class="btn btn-cyan user-pick-big" data-pick-user="${escapeHtml(u)}" style="min-width:110px;padding:var(--s-3) var(--s-4);font-size:16px">${escapeHtml(u)}</button>
+            <button class="btn btn-cyan user-pick-big" data-pick-user="${escapeHtml(u)}" style="min-width:110px;padding:var(--s-3) var(--s-4);font-size:16px">${escapeHtml(displayUser(u))}</button>
           `).join('')}
         </div>
       </div>
@@ -2321,7 +2324,7 @@ function renderShell() {
         <div class="user-pick-chips">
           ${STATE.users.map(u => {
             const locked = !tokenBelongsTo(u);  // 🔒 = requiere login (todos tienen contraseña)
-            return `<button class="user-chip ${STATE.user===u?'active':''}" data-set-user="${escapeHtml(u)}">${locked?'🔒 ':''}${escapeHtml(u)}</button>`;
+            return `<button class="user-chip ${STATE.user===u?'active':''}" data-set-user="${escapeHtml(u)}">${locked?'🔒 ':''}${escapeHtml(displayUser(u))}</button>`;
           }).join('')}
           <button class="user-chip add" data-add-user>+</button>
           ${canAccessChat() ? '<button class="user-chip add" data-logout title="Cerrar sesión">⎋</button>' : ''}
