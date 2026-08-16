@@ -9256,11 +9256,16 @@ function renderChat() {
   chatState.contactRenderLimit = CHAT_CONTACT_PAGE;
   const search = chatState.search.toLowerCase();
   let filtered = chatState.contacts.filter(c => (c.channel || 'wa') === (chatState.channel || 'wa'));
-  // Archivados: por defecto fuera. Solo se muestran si chatState.showArchived = true.
+  // Vistas mutuamente excluyentes: Archivados / Privado / normal.
+  // Los chats 'privado' solo se los manda el backend al admin (para el resto del
+  // equipo este filtro es no-op). Por defecto los sacamos de la lista normal —
+  // viven en su bandeja dedicada 🔒 — y se ven activando showPrivadoOnly.
   if (chatState.showArchived) {
     filtered = filtered.filter(c => isArchived(c.phone));
+  } else if (chatState.showPrivadoOnly) {
+    filtered = filtered.filter(c => c.inbox === 'privado' && !isArchived(c.phone));
   } else {
-    filtered = filtered.filter(c => !isArchived(c.phone));
+    filtered = filtered.filter(c => !isArchived(c.phone) && c.inbox !== 'privado');
   }
   if (search) {
     filtered = filtered.filter(c =>
@@ -9309,6 +9314,7 @@ function renderChat() {
             <button class="btn-send ${chatState.showArchived ? 'active' : ''}" id="btn-toggle-archived" style="width:34px;height:34px;font-size:14px" title="${chatState.showArchived ? 'Volver a chats activos' : 'Ver chats archivados'}">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM12 17.5L6.5 12H10v-2h4v2h3.5L12 17.5zM5.12 5l.81-1h12l.94 1H5.12z"/></svg>
             </button>
+            ${getUserRole() === 'admin' ? `<button class="btn-send ${chatState.showPrivadoOnly ? 'active' : ''}" id="btn-toggle-privado-view" style="width:34px;height:34px;font-size:15px" title="${chatState.showPrivadoOnly ? 'Volver a todos los chats' : 'Ver solo tu bandeja privada'}">🔒</button>` : ''}
             <button class="btn-send" id="chat-refresh" style="width:34px;height:34px;font-size:16px" title="Actualizar">↻</button>
             ${getUserRole() === 'admin' ? '<span id="copilot-cost" class="copilot-cost" title="Gasto IA del mes en sugerencias"></span>' : ''}
           </div>
@@ -9318,10 +9324,11 @@ function renderChat() {
         </div>
         <div id="new-chat-suggest" class="new-chat-suggest" style="display:none"></div>
         ${chatState.showArchived ? '<div class="archived-banner">📦 Mostrando solo chats archivados</div>' : ''}
+        ${chatState.showPrivadoOnly ? '<div class="archived-banner">🔒 Bandeja privada — solo vos ves estos chats</div>' : ''}
         ${(() => {
           // Fila estilo WA "Archivados · N" — solo si NO estamos viendo archivados
           // y hay alguno. CSS la oculta en desktop (botón del header sigue ahí).
-          if (chatState.showArchived) return '';
+          if (chatState.showArchived || chatState.showPrivadoOnly) return '';
           const archCount = chatState.contacts.filter(c => isArchived(c.phone)).length;
           if (!archCount) return '';
           return `<button class="chat-archived-row" id="chat-archived-row" type="button">
@@ -11999,9 +12006,12 @@ function bindChat() {
   const manageLabelsBtn = document.getElementById('btn-manage-labels');
   if (manageLabelsBtn) manageLabelsBtn.onclick = () => showManageLabelsModal();
   // Toggle ver archivados (botón del header desktop + fila mobile)
-  const toggleArchived = () => { chatState.showArchived = !chatState.showArchived; render(); };
+  const toggleArchived = () => { chatState.showArchived = !chatState.showArchived; if (chatState.showArchived) chatState.showPrivadoOnly = false; render(); };
+  const togglePrivadoOnly = () => { chatState.showPrivadoOnly = !chatState.showPrivadoOnly; if (chatState.showPrivadoOnly) chatState.showArchived = false; render(); };
   const archivedBtn = document.getElementById('btn-toggle-archived');
   if (archivedBtn) archivedBtn.onclick = toggleArchived;
+  const privadoViewBtn = document.getElementById('btn-toggle-privado-view');
+  if (privadoViewBtn) privadoViewBtn.onclick = togglePrivadoOnly;
   const archivedRow = document.getElementById('chat-archived-row');
   if (archivedRow) archivedRow.onclick = toggleArchived;
   // Manage quick replies button
