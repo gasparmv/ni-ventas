@@ -3876,6 +3876,13 @@ async function processMinicursoGiftPending(env) {
         try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'minicurso_gift'").bind(phone).run(); } catch (_) {}
         continue;
       }
+      // FRESHNESS GATE: si el prompt del minicurso es viejo (>7 días), la "respuesta" de ahora NO
+      // es feedback del curso (ej. un lead de hace meses que HOY volvió por CARTELES) → skip, para
+      // no misfirear los regalos en medio de otra conversación. El feedback real llega a las horas.
+      if (new Date(anchor.sent_at).getTime() < Date.now() - 7 * 24 * 60 * 60 * 1000) {
+        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'minicurso_gift'").bind(phone).run(); } catch (_) {}
+        continue;
+      }
       // Juntar todos los mensajes inbound del cliente posteriores al template.
       // Solo texto utilizable: descartamos reactions y placeholders vacíos.
       const msgs = await env.DB.prepare(
