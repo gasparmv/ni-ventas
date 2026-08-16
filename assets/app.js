@@ -12303,11 +12303,15 @@ function refreshContactList() {
   if (!list) return;
   const search = chatState.search.toLowerCase().trim();
   let filtered = chatState.contacts.filter(c => (c.channel || 'wa') === (chatState.channel || 'wa'));
-  // Filtrar archivados (salvo que el filtro esté en "ver archivados")
+  // Vistas mutuamente excluyentes: Archivados / Privado / normal.
+  // OJO: esta lógica está DUPLICADA con renderChat (~9259). Si tocás una,
+  // tocá la otra o la lista parpadea entre bandejas en el polling de 4s.
   if (chatState.showArchived) {
     filtered = filtered.filter(c => isArchived(c.phone));
+  } else if (chatState.showPrivadoOnly) {
+    filtered = filtered.filter(c => c.inbox === 'privado' && !isArchived(c.phone));
   } else {
-    filtered = filtered.filter(c => !isArchived(c.phone));
+    filtered = filtered.filter(c => !isArchived(c.phone) && c.inbox !== 'privado');
   }
   // Filtrado local rápido
   if (search) filtered = filtered.filter(c => (c.name || '').toLowerCase().includes(search) || c.phone.includes(search) || (c.lastMsg || '').toLowerCase().includes(search));
