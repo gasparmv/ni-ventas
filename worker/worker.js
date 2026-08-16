@@ -2460,12 +2460,11 @@ async function maybeRankingInsumosSemanal(env) {
     const medal = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
     const puestos = [];
     for (let i = 0; i < 5; i++) { const t = rk.top5[i]; puestos.push(t ? `${t.cli} — ${t.items} items` : '—'); }
-    const totalStr = `${rk.totalItems} items · ${rk.totalClientes} clientes`;
-    // Template ranking_insumos_sem: {{1}}=rango, {{2..6}}=puestos, {{7}}=total.
-    const params = [rk.rangoDisplay, ...puestos, totalStr].map(String);
-    let texto = `🏆 Top clientes de la semana — insumos (por items)\n📅 ${rk.rangoDisplay}\n\n`;
-    for (let i = 0; i < 5; i++) texto += `${medal[i]} ${puestos[i]}\n`;
-    texto += `\n📦 Total semana: ${totalStr}`;
+    // Template ranking_insumos_sem: {{1}}=rango, {{2..6}}=puestos (top 5 por items).
+    const params = [rk.rangoDisplay, ...puestos].map(String);
+    let texto = `🏆 Top clientes de la semana — insumos (por items)\n📅 ${rk.rangoDisplay}\n`;
+    for (let i = 0; i < 5; i++) texto += `\n${medal[i]} ${puestos[i]}`;
+    texto += `\n\n💪 ¡Buena semana!`;
     let anyOk = false;
     for (const ph of REPORTE_DIARIO_PHONES) {
       let r = null;
