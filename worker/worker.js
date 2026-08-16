@@ -4637,6 +4637,69 @@ async function syncIgAdMap(env) {
   return { ok: !error, count, pages, error };
 }
 
+// Resuelve el ad_id de un CTWA (referral.source_id) -> {ad_name, ad_set_name, campaign_name} vía
+// Graph API y lo cachea en meta_ad_map. La referral de Meta en WhatsApp NO trae el nombre de la
+// campaña (solo el ad_id), por eso wa_ad_attributions.campaign_name venía siempre NULL. Resuelve por
+// ad_id DIRECTO (no listando una sola cuenta) -> robusto aunque los ads vivan en distintas cuentas
+// publicitarias. De paso backfillea las columnas ad_name/ad_set_name/campaign_name de las filas ya
+// guardadas. Se corre por cron (diario) y se puede forzar con POST /admin/meta/sync-ad-map.
+// Devuelve {ok, resolved, backfilled, seen, error} para diagnóstico.
+async function syncMetaAdMap(env, opts = {}) {
+  const token = env.META_ADS_TOKEN || env.META_PAGE_ACCESS_TOKEN || env.IG_ACCESS_TOKEN || '';
+  if (!token) return { ok: false, error: 'no token' };
+  const limit = Math.max(1, Math.min(200, opts.limit || 80));
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS meta_ad_map (ad_id TEXT PRIMARY KEY, ad_name TEXT, ad_set_name TEXT, campaign_name TEXT, updated_at TEXT)").run(); } catch (_) {}
+  // ad_ids que aparecen en atribuciones y todavía no están resueltos (nuevos, o vistos hace +7 días
+  // sin nombre). El upsert-en-error-permanente marca el ad como "visto" para no reintentarlo en loop.
+  const stale = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+  let rows = [];
+  try {
+    rows = ((await env.DB.prepare(
+      `SELECT DISTINCT a.source_id AS ad_id
+         FROM wa_ad_attributions a
+         LEFT JOIN meta_ad_map m ON m.ad_id = a.source_id
+        WHERE a.source_id IS NOT NULL AND a.source_id != ''
+          AND (m.ad_id IS NULL OR (COALESCE(m.campaign_name,'') = '' AND COALESCE(m.updated_at,'') < ?))
+        ORDER BY a.id DESC
+        LIMIT ?`).bind(stale, limit).all()).results) || [];
+  } catch (_) {}
+  let resolved = 0, backfilled = 0, seen = 0, error = '';
+  for (const row of rows) {
+    const adId = String(row.ad_id || '');
+    if (!adId) continue;
+    seen++;
+    let adName = '', adsetName = '', campName = '';
+    try {
+      const u = `https://graph.facebook.com/v21.0/${encodeURIComponent(adId)}?fields=name,adset{name},campaign{name}&access_token=${encodeURIComponent(token)}`;
+      const r = await fetch(u);
+      const j = await r.json();
+      if (j && j.error) {
+        error = '(#' + (j.error.code || '?') + ') ' + (j.error.message || '');
+        // Rate limit / transitorio -> NO marcar visto (reintenta en la próxima corrida).
+        if ([4, 17, 32, 613, 80004].includes(j.error.code)) continue;
+        // Error permanente (ad borrado / sin acceso): cae al upsert-vacío de abajo (marca visto).
+      } else {
+        adName = String(j.name || '');
+        adsetName = String((j.adset && j.adset.name) || '');
+        campName = String((j.campaign && j.campaign.name) || '');
+        if (campName) resolved++;
+      }
+    } catch (e) { error = String(e); continue; }
+    try {
+      await env.DB.prepare("INSERT INTO meta_ad_map (ad_id, ad_name, ad_set_name, campaign_name, updated_at) VALUES (?,?,?,?,?) ON CONFLICT(ad_id) DO UPDATE SET ad_name=excluded.ad_name, ad_set_name=excluded.ad_set_name, campaign_name=excluded.campaign_name, updated_at=excluded.updated_at")
+        .bind(adId, adName, adsetName, campName, new Date().toISOString()).run();
+    } catch (_) {}
+    if (campName || adName) {
+      try {
+        const res = await env.DB.prepare("UPDATE wa_ad_attributions SET ad_name=?, ad_set_name=?, campaign_name=? WHERE source_id=? AND (COALESCE(campaign_name,'') = '' OR COALESCE(ad_name,'') = '')")
+          .bind(adName, adsetName, campName, adId).run();
+        backfilled += (res.meta && res.meta.changes) || 0;
+      } catch (_) {}
+    }
+  }
+  return { ok: (!error || resolved > 0), resolved, backfilled, seen, error };
+}
+
 // Texto REAL del mensaje de bienvenida que ManyChat manda automáticamente a cada nuevo
 // seguidor/DM en Instagram (confirmado por Gaspar, jul 2026). Instagram NO nos manda el
 // contenido de los mensajes de ManyChat —llegan como echo VACÍO, solo el mid— así que lo
@@ -8457,6 +8520,11 @@ const handler = {
                     await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_wa_ad_attr_phone ON wa_ad_attributions(phone)`).run();
                     await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_wa_ad_attr_source ON wa_ad_attributions(source_id)`).run();
                     const nowIso = new Date().toISOString();
+                    // Dedup: 360dialog/Meta reentregan webhooks (at-least-once). Sin este guard el
+                    // mismo wamid se insertaba 2-3x e inflaba cualquier conteo por filas (~20%).
+                    // Mismo patrón que las otras dos ramas de atribución (IG y Meta-style).
+                    const _dupAttr = wamid ? await env.DB.prepare('SELECT 1 FROM wa_ad_attributions WHERE wamid = ?').bind(wamid).first() : null;
+                    if (!_dupAttr) {
                     await env.DB.prepare(`INSERT INTO wa_ad_attributions
                       (phone, wamid, ts, source_id, source_type, source_url, headline, body, media_type, image_url, video_url, thumbnail_url, ctwa_clid, created_at)
                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -8476,6 +8544,7 @@ const handler = {
                       String(ref.ctwa_clid || ''),
                       nowIso
                     ).run();
+                    }
                   } catch (e) {
                     try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'AD_ATTR_ERR: ' + (e?.message || String(e))).run(); } catch(_) {}
                   }
@@ -10217,6 +10286,17 @@ const handler = {
       if (request.method === 'POST' && path === '/admin/ig/sync-ad-map') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         const res = await syncIgAdMap(env);
+        return json(res, res.ok ? 200 : 502);
+      }
+
+      // Sincroniza/backfillea el mapa de campañas de Meta para leads de CTWA (WhatsApp). Resuelve
+      // los ad_id de wa_ad_attributions -> nombre de campaña/ad y rellena las columnas (venían NULL).
+      // Forzable a mano para backfillear el histórico (procesa hasta `limit` ad_ids por corrida,
+      // default 80; correr varias veces hasta que resolved/seen den 0).
+      if (request.method === 'POST' && path === '/admin/meta/sync-ad-map') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let _b = {}; try { _b = await request.json(); } catch (_) {}
+        const res = await syncMetaAdMap(env, { limit: _b && _b.limit });
         return json(res, res.ok ? 200 : 502);
       }
 
@@ -13525,6 +13605,9 @@ const handler = {
     // Sync diario del mapa de anuncios de IG (post promocionado -> ad_id + campaña), para darle
     // a los leads de IG la misma trazabilidad que WhatsApp. No-op hasta que exista META_ADS_TOKEN.
     if (hour === 13) ctx.waitUntil(syncIgAdMap(env));
+    // Sync del mapa de campañas de Meta para los leads de CTWA (WhatsApp): resuelve el ad_id de la
+    // referral -> nombre de campaña/ad y backfillea wa_ad_attributions (venía siempre NULL). Diario.
+    if (hour === 13) ctx.waitUntil(syncMetaAdMap(env));
     // Follow-up automático de presupuestos del cotizador: solo horario hábil AR (8-20).
     // Usa hAR (calculado más arriba en este mismo handler) para consistencia
     // con processCursosFollowup/processMinicursoFollowup.
