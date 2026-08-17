@@ -2084,6 +2084,8 @@ async function processPrecotizPilot(env) {
     // etiqueta "revendedor" (id 2289).
     try { const rv = await env.DB.prepare("SELECT 1 AS x FROM reventa_leads WHERE phone = ? LIMIT 1").bind(phone).first(); if (rv) continue; } catch (_) {}
     try { const rl = await env.DB.prepare("SELECT 1 AS x FROM contact_labels WHERE phone = ? AND label_id = 2289 LIMIT 1").bind(phone).first(); if (rl) continue; } catch (_) {}
+    // Alumnos del servicio de CORTE (B2B): NO son leads de carteles → los maneja el bot de corte, no la precotización.
+    try { const ca = await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono = ? LIMIT 1").bind(phone).first(); if (ca) continue; } catch (_) {}
     let first;
     try { first = await env.DB.prepare("SELECT MIN(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(phone).first(); } catch (_) { continue; }
     const firstTs = first?.t || '';
@@ -2754,6 +2756,132 @@ async function processCartelPagos(env, { phone = null, force = false } = {}) {
     }
   } catch (_) {}
   return report;
+}
+
+// ===== Bot de intake del Servicio de Corte (vertical B2B/alumnos) =====
+// Conversacional, clon del motor de precotización pero para pedidos de CORTE de bases acrílicas.
+// Gateado por kv corte_bot_on (default OFF). Solo atiende a los alumnos que YA están en
+// corte_alumnos (los ~227 de LTV). Intent-gate: si no está claro que el alumno quiere cortar,
+// pregunta explícito (una vez); si es otra cosa (comunidad/cursos) → NO toma el pedido, lo deja a
+// una persona (Abril). Al juntar los datos de un diseño (medida+nombre+foto) crea un corte_pedido
+// (estado 'pedido' → cola "Para matriz" de Emma). NO cotiza (el precio sale de la medida real).
+async function corteBotOn(env) { return (await kvGet(env, 'corte_bot_on', '0')) === '1'; }
+const CORTE_LLM_SYSTEM = `Sos parte del equipo de Neon Infinito. Atendés EXCLUSIVAMENTE el SERVICIO DE CORTE de bases acrílicas para ALUMNOS (gente que hizo el curso y arma sus propios carteles). Tu única tarea es TOMAR PEDIDOS DE CORTE de bases acrílicas transparentes.
+
+Un pedido de corte necesita, POR CADA DISEÑO:
+- Medida (en cm)
+- Nombre del diseño
+- Foto del diseño (una imagen)
+- Aclaraciones (OPCIONAL)
+
+REGLAS:
+- Primero decidí si el alumno quiere hacer un pedido de CORTE de base acrílica. Señales: manda un diseño/imagen para cortar, una medida, dice "quiero sumar un corte", "para el finde", etc.
+- Si escribe por OTRA cosa (dudas de la comunidad, del curso, pagos, un envío ya hecho, un reclamo, etc.) o NO está claro que quiera cortar → frenar=true (lo atiende una persona, NO tomes el pedido).
+- Si es el primer mensaje y NO sabés qué quiere, NO asumas: preguntá explícito y natural qué necesita (intencion_clara=false + un mensaje preguntando, como lo haría un humano).
+- Si YA está claro que quiere cortar → es_corte=true, intencion_clara=true.
+- Por cada diseño que mandó, extraé nombre, medida (texto tal cual lo dijo) y aclaraciones, y si adjuntó la foto (mirá las imágenes). completo=true SOLO si tiene medida + nombre + foto.
+- Si a un diseño le falta algún dato, pedí SOLO el que falta, natural y corto.
+- El alumno puede mandar VARIOS diseños.
+- NUNCA des precio ni cotices (el precio se calcula después con la medida real del diseñador).
+- Solo cortamos TRANSPARENTE (el negro está pausado). Si pide negro, aclaralo.
+- Estilo: natural, argentino, SIN signos de apertura (¿¡), mensajes cortos, como una persona.
+
+Cuando faltan datos, un buen mensaje es: "Me pasarías los datos así de cada diseño por favor: Medida (en cm): / Aclaraciones: / Nombre del diseño: / foto del diseño:".
+
+Devolvé SOLO un JSON, sin nada alrededor:
+{"es_corte":bool,"intencion_clara":bool,"frenar":bool,"motivo":"string corto","cortes":[{"nombre":"string","medida":"string","aclaraciones":"string","tiene_foto":bool,"completo":bool}],"mensajes":["..."]}`;
+async function corteLlm(env, fullText, imageBlocks) {
+  if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'sin ANTHROPIC_API_KEY' };
+  const userContent = (Array.isArray(imageBlocks) && imageBlocks.length) ? [...imageBlocks, { type: 'text', text: fullText }] : fullText;
+  const payload = { model: 'claude-sonnet-4-5', max_tokens: 1024, system: CORTE_LLM_SYSTEM, messages: [{ role: 'user', content: userContent }] };
+  for (let i = 0; i < 2; i++) {
+    try {
+      const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { if ((r.status === 429 || r.status === 529) && i === 0) { await new Promise(s => setTimeout(s, 1500)); continue; } return { ok: false, error: (j && j.error && j.error.message) || ('HTTP ' + r.status) }; }
+      const jsonStr = extractFirstJson(j.content?.[0]?.text || '');
+      if (!jsonStr) return { ok: false, error: 'sin JSON' };
+      try { return { ok: true, data: JSON.parse(jsonStr) }; } catch (_) { return { ok: false, error: 'JSON parse' }; }
+    } catch (e) { if (i === 0) { await new Promise(s => setTimeout(s, 1500)); continue; } return { ok: false, error: String(e && e.message || e) }; }
+  }
+  return { ok: false, error: 'sin respuesta' };
+}
+// Envío del bot de corte (número de NI). Marca automated=1 (el anti-pisón no lo cuenta como humano).
+async function corteSend(env, phone, body) {
+  const r = await waSendText(env, phone, body);
+  if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte:' + phone + ':' + Date.now()), phone, String(body || '')).run(); } catch (_) {} }
+  return r;
+}
+async function processCortePilot(env) {
+  try {
+    if (!(await corteBotOn(env))) return;
+    if (await isWaBillingBlocked(env)) return;
+    const hAR = (new Date().getUTCHours() - 3 + 24) % 24;
+    if (hAR < 8 || hAR >= 22) return;                         // horario hábil AR
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_conversaciones (phone TEXT PRIMARY KEY, estado TEXT, last_processed_ts TEXT, intencion_preguntada INTEGER DEFAULT 0, updated_at TEXT)").run(); } catch (_) {}
+    const nowIso = new Date().toISOString();
+    const since = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    let cands = [];
+    try {
+      cands = (await env.DB.prepare(
+        "SELECT m.phone, MAX(m.ts) AS last_ts FROM wa_messages m " +
+        "WHERE m.direction='inbound' AND m.msg_type!='status' AND (m.channel IS NULL OR m.channel='wa') AND m.ts > ? " +
+        "  AND m.phone IN (SELECT telefono FROM corte_alumnos WHERE telefono!='') " +
+        "GROUP BY m.phone ORDER BY last_ts ASC LIMIT 10"
+      ).bind(since).all()).results || [];
+    } catch (_) { return; }
+    for (const c of cands) {
+      const phone = c.phone, lastTs = c.last_ts;
+      if (Date.now() - new Date(lastTs).getTime() < PRECOTIZ_DEBOUNCE_MS) continue;   // esperar que pare de escribir
+      // Anti-pisón: si un humano (Abril/Gaspar) contestó después del último inbound, no se mete.
+      try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='outbound' AND automated=0 AND msg_type!='status'").bind(phone).first(); if (lh && lh.t) { if (lh.t > lastTs) continue; if (Date.now() - new Date(lastTs).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
+      let conv = null;
+      try { conv = await env.DB.prepare("SELECT * FROM corte_conversaciones WHERE phone=?").bind(phone).first(); } catch (_) {}
+      if (conv && conv.estado === 'escalado') continue;                                // ya se lo dejamos a una persona
+      if (conv && conv.last_processed_ts && lastTs <= conv.last_processed_ts) continue; // nada nuevo
+      // Claim atómico (evita doble proceso si */1 y */5 pegan juntos).
+      try {
+        const res = await env.DB.prepare("INSERT INTO corte_conversaciones (phone, estado, last_processed_ts, intencion_preguntada, updated_at) VALUES (?, 'nuevo', ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET last_processed_ts=excluded.last_processed_ts, updated_at=excluded.updated_at WHERE corte_conversaciones.last_processed_ts IS NULL OR corte_conversaciones.last_processed_ts < excluded.last_processed_ts").bind(phone, lastTs, (conv && conv.intencion_preguntada) || 0, nowIso).run();
+        if (!res || !res.meta || !res.meta.changes) continue;
+      } catch (_) { continue; }
+      const ctx = await buildChatContext(env, phone, 40);
+      if (!ctx) continue;
+      const imgs = await precotizImageBlocks(env, phone);
+      const out = await corteLlm(env, ctx.fullText, imgs);
+      if (!out.ok) continue;
+      const res = out.data || {};
+      // No es corte / otra cosa → dejar a una persona (Abril).
+      if (res.frenar || res.es_corte === false) {
+        try { await env.DB.prepare("UPDATE corte_conversaciones SET estado='escalado', updated_at=? WHERE phone=?").bind(nowIso, phone).run(); } catch (_) {}
+        continue;
+      }
+      // Intención no clara → preguntar explícito (una sola vez).
+      if (!res.intencion_clara) {
+        if (!(conv && conv.intencion_preguntada)) {
+          const msgs = (Array.isArray(res.mensajes) && res.mensajes.length) ? res.mensajes : ['Buenas! Contame, venís por un pedido de corte de base acrílica?'];
+          for (const m of msgs.slice(0, 2)) { await corteSend(env, phone, m); await new Promise(r => setTimeout(r, 1200)); }
+          try { await env.DB.prepare("UPDATE corte_conversaciones SET estado='preguntado', intencion_preguntada=1, updated_at=? WHERE phone=?").bind(nowIso, phone).run(); } catch (_) {}
+        }
+        continue;
+      }
+      // Es corte y claro → crear los diseños completos + pedir lo que falta.
+      const alumno = await env.DB.prepare("SELECT id, nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
+      let fotoKey = '';
+      try { const fr = await env.DB.prepare("SELECT media_url FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type='image' AND media_url!='' ORDER BY ts DESC LIMIT 1").bind(phone).first(); fotoKey = (fr && fr.media_url) || ''; } catch (_) {}
+      for (const co of (Array.isArray(res.cortes) ? res.cortes : [])) {
+        if (!co || !co.completo) continue;
+        const nombre = String(co.nombre || '').trim();
+        if (!nombre) continue;
+        try { const ya = await env.DB.prepare("SELECT 1 FROM corte_pedidos WHERE telefono=? AND lower(diseno_nombre)=lower(?) AND created_at > datetime('now','-7 days') LIMIT 1").bind(phone, nombre).first(); if (ya) continue; } catch (_) {}
+        try {
+          await env.DB.prepare("INSERT INTO corte_pedidos (alumno_id, telefono, cliente_nombre, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, estado, created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,'TRANS','pedido',?,?)").bind((alumno && alumno.id) || null, phone, (alumno && alumno.nombre) || '', nombre, String(co.aclaraciones || ''), fotoKey, String(co.medida || ''), nowIso, nowIso).run();
+        } catch (_) {}
+      }
+      const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 3) : [];
+      for (const m of msgs) { await corteSend(env, phone, m); await new Promise(r => setTimeout(r, 1200)); }
+      try { await env.DB.prepare("UPDATE corte_conversaciones SET estado='relevando', updated_at=? WHERE phone=?").bind(nowIso, phone).run(); } catch (_) {}
+    }
+  } catch (_) {}
 }
 
 // ===== Auto-respuesta del minicurso (regalos) =====
@@ -13813,6 +13941,8 @@ const handler = {
     // Vigilador de pago: en los chats "POR PAGAR", cuando entra un comprobante (OCR) →
     // saca "POR PAGAR" y pone "Cartel primer pago".
     ctx.waitUntil(processCartelPagos(env));
+    // Bot de intake del servicio de corte (alumnos B2B). Gateado por corte_bot_on (default OFF).
+    ctx.waitUntil(processCortePilot(env));
     // Levanta audios que el webhook bajó a R2 pero no logró transcribir en vivo.
     ctx.waitUntil(processPendingTranscripts(env));
     // Refresca el token largo de IG antes de que venza (se autogatea a 1 vez/día).
