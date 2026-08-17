@@ -10176,10 +10176,26 @@ function _postProcessBubbles(container, reactionsByParent, scope) {
   root.querySelectorAll('[data-jump-to]').forEach(q => {
     if (q.dataset._bound) return; q.dataset._bound = '1';
     q.style.cursor = 'pointer';
-    q.onclick = (e) => {
+    q.onclick = async (e) => {
       e.stopPropagation();
-      const target = container.querySelector(`.chat-msg[data-wamid="${q.dataset.jumpTo}"]`);
-      if (!target) return;
+      const wid = q.dataset.jumpTo;
+      if (!wid) return;
+      // Valor para el selector de atributo: entre comillas solo hay que escapar " y \
+      // (los wamids son base64 con '.', '=', '+', '/', pero esos son literales válidos).
+      const selVal = wid.replace(/["\\]/g, '\\$&');
+      const find = () => { const c = document.getElementById('chat-messages'); return c ? c.querySelector('.chat-msg[data-wamid="' + selVal + '"]') : null; };
+      let target = find();
+      // El mensaje citado puede estar MÁS ARRIBA de lo cargado en pantalla (el chat trae
+      // solo una ventana). ANTES: si no estaba cargado, el click no hacía NADA en silencio
+      // ("no me redirecciona"). AHORA: cargamos tandas de mensajes viejos hasta encontrarlo.
+      let tries = 0;
+      while (!target && chatState.hasMoreOlder && tries < 8) {
+        tries++;
+        try { await handleLoadOlderMessages(); } catch (_) {}
+        await new Promise(res => setTimeout(res, 80));
+        target = find();
+      }
+      if (!target) { toast('No encontré el mensaje original (puede estar más arriba en el chat)'); return; }
       target.scrollIntoView({ behavior: 'smooth', block: 'center' });
       target.classList.add('chat-msg-flash');
       setTimeout(() => target.classList.remove('chat-msg-flash'), 1500);
