@@ -3265,6 +3265,84 @@ function cursosFlowBody(kind) {
 }
 
 // ============================================================================
+// Drip "Pack Emprendedor": a los 7 días de sumarse a la comunidad (alta a
+// Alumno = label 26), se le manda UNA sola vez la promo del pack por plantilla
+// MARKETING aprobada (header de imagen). Reusa wa_autoreply_log (PK phone+kind)
+// para dedup de por vida, igual que los demás goteos. Se prende con el kv
+// comunidad_promo_on='1' y SOLO manda si la plantilla ya está APPROVED en Meta
+// y la imagen está en R2 (no castiga la calidad del número con pendings/fallos).
+// ============================================================================
+const COMUNIDAD_PROMO_TPL = 'pack_emprendedor_premium';       // plantilla Meta MARKETING (es_AR)
+const COMUNIDAD_PROMO_IMG_KEY = 'promo/pack-emprendedor.jpg'; // R2 key del header de imagen
+const COMUNIDAD_PROMO_DELAY_MS = 7 * 24 * 60 * 60 * 1000;     // 7 días
+const COMUNIDAD_PROMO_EXCLUDE = '5491165634012';             // número a NO contactar nunca
+
+// Encola la promo a 7 días cuando alguien se suma a la comunidad (alta a Alumno).
+// INSERT OR IGNORE sobre (phone,'comunidad_promo') → como mucho UNA promo por persona.
+async function enqueueComunidadPromo(env, phone) {
+  const p = normalizeArPhone(phone) || String(phone || '').replace(/\D/g, '');
+  if (!p || p === COMUNIDAD_PROMO_EXCLUDE) return;
+  try {
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'comunidad_promo', '', 'queued', ?, '')"
+    ).bind(p, new Date(Date.now() + COMUNIDAD_PROMO_DELAY_MS).toISOString()).run();
+  } catch (_) {}
+}
+
+async function processComunidadPromo(env) {
+  if ((await kvGet(env, 'comunidad_promo_on', '0')) !== '1') return;      // apagado por defecto
+  if ((await kvGet(env, 'wa_send_paused', '0')) === '1') return;          // freno global
+  if (await isWaBillingBlocked(env)) return;                             // bloqueo por pago
+  const nowMs = Date.now();
+  const hAR = new Date(nowMs - 3 * 3600 * 1000).getUTCHours();
+  if (hAR < 9 || hAR >= 21) return;                                      // horario AR (no de madrugada)
+  // Solo si Meta ya aprobó la plantilla (evita quemar filas contra un pending).
+  let tplApproved = false;
+  try {
+    const t = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(COMUNIDAD_PROMO_TPL).first();
+    tplApproved = !!(t && String(t.status).toUpperCase() === 'APPROVED');
+  } catch (_) {}
+  if (!tplApproved) return;
+  const nowIso = new Date(nowMs).toISOString();
+  const perTick = Math.max(1, Math.min(20, parseInt(await kvGet(env, 'comunidad_promo_pertick', '5'), 10) || 5));
+  let rows;
+  try {
+    rows = (await env.DB.prepare(
+      "SELECT phone FROM wa_autoreply_log WHERE kind = 'comunidad_promo' AND status = 'queued' AND due_at <= ? ORDER BY due_at ASC LIMIT ?"
+    ).bind(nowIso, perTick).all()).results || [];
+  } catch (_) { return; }
+  if (!rows.length) return;
+  const mediaId = await getPromoMediaId(env, COMUNIDAD_PROMO_IMG_KEY);    // header de imagen
+  if (!mediaId) return;                                                  // sin imagen no mandamos (la plantilla la exige)
+  for (const r of rows) {
+    const phone = r.phone;
+    // claim atómico: solo un tick agarra cada fila.
+    let cl;
+    try { cl = await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sending' WHERE phone = ? AND kind = 'comunidad_promo' AND status = 'queued'").bind(phone).run(); } catch (_) { continue; }
+    if (!cl?.meta?.changes) continue;
+    if (phone === COMUNIDAD_PROMO_EXCLUDE || await isUnreachable(env, phone)) {
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'comunidad_promo'").bind(phone).run(); } catch (_) {}
+      continue;
+    }
+    const res = await waSendTemplate(env, phone, COMUNIDAD_PROMO_TPL, 'es_AR', [], mediaId);
+    if (!res || !res.ok) {
+      const revert = isTransientSendError(res) ? 'queued' : 'failed';
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = ? WHERE phone = ? AND kind = 'comunidad_promo'").bind(revert, phone).run(); } catch (_) {}
+      try { await logWaEvent(env, { to: phone, kind: 'comunidad-promo', ref: '', ok: false, error: res && res.error }); } catch (_) {}
+      continue;
+    }
+    const sentTs = new Date().toISOString();
+    try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'comunidad_promo'").bind(sentTs, phone).run(); } catch (_) {}
+    try {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, 'outbound', ?, '', 'template', ?, '', '', 'sent')"
+      ).bind(sentTs, res.id || ('compromo-' + phone + '-' + nowMs), phone, '[plantilla: ' + COMUNIDAD_PROMO_TPL + ']').run();
+    } catch (_) {}
+    await new Promise(rs => setTimeout(rs, 400));                        // anti rate-limit
+  }
+}
+
+// ============================================================================
 // Landing del minicurso gratuito (leads que se REGISTRAN en la web).
 // La landing manda cada registro (nombre + teléfono) a /webhook/minicurso-lead
 // (2da acción de webhook, en paralelo a la que ya escribe en el Google Sheet).
@@ -9893,6 +9971,7 @@ const handler = {
         try {
           if (/LEE BIEN A CONCIENCIA ESTE MENSAJE|alinfinito\.app\.clientclub\.net/i.test(String(text))) {
             await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, 26, ?)").bind(num || to, new Date().toISOString()).run();
+            await enqueueComunidadPromo(env, num || to);   // drip Pack Emprendedor a los 7 días
           }
         } catch (_) {}
         return json({ id: r.id });
@@ -12057,6 +12136,8 @@ const handler = {
         if (!phone || !label_id) return json({ error: 'missing phone or label_id' }, 400);
         await env.DB.prepare('CREATE TABLE IF NOT EXISTS contact_labels (phone TEXT NOT NULL, label_id INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (phone, label_id))').run();
         await env.DB.prepare('INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)').bind(phone, label_id, new Date().toISOString()).run();
+        // Drip Pack Emprendedor: si la etiqueta es Alumno (26), encolar la promo a 7 días.
+        if (Number(label_id) === 26) { try { await enqueueComunidadPromo(env, phone); } catch (_) {} }
         // Si la reponen a mano, dejar de suprimirla (limpia el override).
         try { await env.DB.prepare('DELETE FROM label_overrides WHERE phone = ? AND label_id = ?').bind(phone, label_id).run(); } catch (_) {}
         return json({ ok: true });
@@ -13695,6 +13776,7 @@ const handler = {
     // cupo_comunidad_junio a los ~521 del form clase 1 sin pagar. OFF por defecto
     // (kv 'lanz_ago_on'); no manda nada hasta prenderlo.
     ctx.waitUntil(processLanzAgosto(env));
+    ctx.waitUntil(processComunidadPromo(env));   // drip Pack Emprendedor a los 7 días del alta
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
