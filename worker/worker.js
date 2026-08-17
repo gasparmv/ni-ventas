@@ -1683,6 +1683,18 @@ Cuando ya tenés lo necesario, mensajes=[] (el humano sigue desde acá). "Lo nec
 Devolvé SOLO un JSON, sin nada alrededor:
 {"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"enviar_tipografias":bool,"mensajes":["..."]}`;
 
+// Detecta el tipo de imagen por los MAGIC BYTES, no por el content-type guardado. El CDN de
+// Meta (IG) a veces sirve un PNG con content-type image/jpeg, y así queda en R2. Si a Claude
+// visión le pasás un media_type que no coincide con los bytes, NO lee la imagen → la IA nunca
+// "ve" la foto (tiene_foto=false aunque el cliente la mandó). Devuelve '' si no reconoce.
+function sniffImageMime(buf) {
+  const b = new Uint8Array(buf.slice(0, 12));
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return 'image/jpeg';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+  return '';
+}
 // Arma bloques de imagen (base64) de las últimas imágenes inbound del lead, para
 // que el clasificador las VEA (Claude visión) — así distingue una foto de diseño
 // real de un spam/captura random. Reusa el formato de analyzePaymentProof.
@@ -1700,8 +1712,10 @@ async function precotizImageBlocks(env, phone, max = 2) {
       if (!obj) continue;
       const buf = await obj.arrayBuffer();
       if (!buf || buf.byteLength < 64 || buf.byteLength > 4 * 1024 * 1024) continue; // vacía o >4MB
-      let mime = String(obj.httpMetadata?.contentType || 'image/jpeg').split(';')[0].trim().toLowerCase();
-      if (mime === 'image/jpg') mime = 'image/jpeg';
+      // media_type desde los BYTES (magic numbers), NO del content-type guardado: el CDN de
+      // Meta sirve PNGs como image/jpeg y a Claude eso lo hace descartar la imagen (bug IG).
+      let mime = sniffImageMime(buf);
+      if (!mime) { mime = String(obj.httpMetadata?.contentType || 'image/jpeg').split(';')[0].trim().toLowerCase(); if (mime === 'image/jpg') mime = 'image/jpeg'; }
       if (!/^image\/(png|jpeg|webp|gif)$/.test(mime)) continue;
       blocks.push({ type: 'image', source: { type: 'base64', media_type: mime, data: abToBase64(buf) } });
     } catch (_) {}
