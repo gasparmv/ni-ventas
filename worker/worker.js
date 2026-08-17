@@ -3267,7 +3267,7 @@ const MINICURSO_LANDING_DEBOUNCE_MS = 90 * 1000;            // esperar a que el 
 const MINICURSO_LANDING_OPENER_TPL = 'minicurso_landing_opener';     // plantilla Meta (opener, fuera de ventana)
 const MINICURSO_LANDING_FOLLOWUP_TPL = 'minicurso_landing_followup_v2'; // plantilla Meta (follow-up, fuera de ventana). v2: la v1 se borró para sacar "che"/"jej" y Meta bloquea reusar el nombre 4 semanas.
 // Mensajes de texto libre (dentro de la ventana de 24h: el lead ya respondió).
-const MINICURSO_LANDING_CLASE2_MSG = 'buenísimo entonces ✨ avisame cuando hayas visto la clase 2 completa y seguimos charlando! Que al final hay una propuesta que te va a interesar seguro';
+const MINICURSO_LANDING_CLASE2_MSG = 'buenísimo entonces ✨ avisame cuando hayas visto la clase 2 completa y seguimos charlando! Que al final hay una propuesta que te va a interesar seguro\nte dejo los links de las clases por acá 👇🏻\nneoninfinito.com/clase1\nneoninfinito.com/clase2';
 const MINICURSO_LANDING_FU_1 = 'buenass, cómo va? Abril de nuevoo';
 const MINICURSO_LANDING_FU_2 = 'avisame cuando hayas podido ver la clase 2 hasta el final! Me ayudaría mucho saber qué te pareció ✨';
 
