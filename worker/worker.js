@@ -3265,7 +3265,7 @@ function cursosFlowBody(kind) {
 }
 
 // ============================================================================
-// Drip "Pack Emprendedor": a los 7 días de sumarse a la comunidad (alta a
+// Drip "Pack Emprendedor": a los 14 días de sumarse a la comunidad (alta a
 // Alumno = label 26), se le manda UNA sola vez la promo del pack por plantilla
 // MARKETING aprobada (header de imagen). Reusa wa_autoreply_log (PK phone+kind)
 // para dedup de por vida, igual que los demás goteos. Se prende con el kv
@@ -3274,10 +3274,10 @@ function cursosFlowBody(kind) {
 // ============================================================================
 const COMUNIDAD_PROMO_TPL = 'pack_emprendedor_premium';       // plantilla Meta MARKETING (es_AR)
 const COMUNIDAD_PROMO_IMG_KEY = 'promo/pack-emprendedor.jpg'; // R2 key del header de imagen
-const COMUNIDAD_PROMO_DELAY_MS = 7 * 24 * 60 * 60 * 1000;     // 7 días
+const COMUNIDAD_PROMO_DELAY_MS = 14 * 24 * 60 * 60 * 1000;    // 14 días
 const COMUNIDAD_PROMO_EXCLUDE = '5491165634012';             // número a NO contactar nunca
 
-// Encola la promo a 7 días cuando alguien se suma a la comunidad (alta a Alumno).
+// Encola la promo a 14 días cuando alguien se suma a la comunidad (alta a Alumno).
 // INSERT OR IGNORE sobre (phone,'comunidad_promo') → como mucho UNA promo por persona.
 async function enqueueComunidadPromo(env, phone) {
   const p = normalizeArPhone(phone) || String(phone || '').replace(/\D/g, '');
@@ -9971,7 +9971,7 @@ const handler = {
         try {
           if (/LEE BIEN A CONCIENCIA ESTE MENSAJE|alinfinito\.app\.clientclub\.net/i.test(String(text))) {
             await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, 26, ?)").bind(num || to, new Date().toISOString()).run();
-            await enqueueComunidadPromo(env, num || to);   // drip Pack Emprendedor a los 7 días
+            await enqueueComunidadPromo(env, num || to);   // drip Pack Emprendedor a los 14 días
           }
         } catch (_) {}
         return json({ id: r.id });
@@ -12136,7 +12136,7 @@ const handler = {
         if (!phone || !label_id) return json({ error: 'missing phone or label_id' }, 400);
         await env.DB.prepare('CREATE TABLE IF NOT EXISTS contact_labels (phone TEXT NOT NULL, label_id INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (phone, label_id))').run();
         await env.DB.prepare('INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)').bind(phone, label_id, new Date().toISOString()).run();
-        // Drip Pack Emprendedor: si la etiqueta es Alumno (26), encolar la promo a 7 días.
+        // Drip Pack Emprendedor: si la etiqueta es Alumno (26), encolar la promo a 14 días.
         if (Number(label_id) === 26) { try { await enqueueComunidadPromo(env, phone); } catch (_) {} }
         // Si la reponen a mano, dejar de suprimirla (limpia el override).
         try { await env.DB.prepare('DELETE FROM label_overrides WHERE phone = ? AND label_id = ?').bind(phone, label_id).run(); } catch (_) {}
@@ -13776,7 +13776,7 @@ const handler = {
     // cupo_comunidad_junio a los ~521 del form clase 1 sin pagar. OFF por defecto
     // (kv 'lanz_ago_on'); no manda nada hasta prenderlo.
     ctx.waitUntil(processLanzAgosto(env));
-    ctx.waitUntil(processComunidadPromo(env));   // drip Pack Emprendedor a los 7 días del alta
+    ctx.waitUntil(processComunidadPromo(env));   // drip Pack Emprendedor a los 14 días del alta
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
