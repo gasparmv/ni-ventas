@@ -11202,6 +11202,10 @@ if (typeof window !== 'undefined' && !window._chatPopstateBound) {
 }
 
 async function selectChatContact(phone) {
+  // Al cambiar de chat, cortar cualquier "respondiendo a…" a medias: si no, el reply
+  // quedaba pegado y el próximo mensaje que mandabas en el chat nuevo salía citando un
+  // mensaje de OTRA conversación (bug de la cita cruzada, ej. chat de Bruno citando a akbar).
+  if (chatState.selectedPhone !== phone) chatState.replyingTo = null;
   chatState.selectedPhone = phone;
   const contact = chatState.contacts.find(c => c.phone === phone);
   chatState.selectedName = contact?.name || '';
