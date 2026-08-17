@@ -5630,8 +5630,15 @@ function openDrawerPedido(idx) {
       <div class="drawer-section">
         <h4>Trazabilidad y envío</h4>
         <div style="display:flex;flex-direction:column;gap:10px">
-          <div><label style="${lblD}">Trazabilidad (Ad)</label><input id="ped-edit-ad" value="${escapeHtml(p.canalAd||'')}" placeholder="de qué ad vino / cómo llegó" style="${inpD}"></div>
-          <button class="btn btn-ghost" onclick="verAnuncioPedido(${idx})" style="font-size:12px;align-self:flex-start;padding:5px 10px">🔗 Ver anuncio</button>
+          <div>
+            <label style="${lblD}">Trazabilidad (Ad)</label>
+            <input id="ped-edit-ad" list="ad-datalist" value="${escapeHtml(p.canalAd||'')}" placeholder="elegí de la lista o escribí" style="${inpD}">
+            <datalist id="ad-datalist">${adDatalistOptions()}</datalist>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-ghost" onclick="verConversacionPedido(${idx})" style="font-size:12px;padding:5px 10px">💬 Ver conversación</button>
+            <button class="btn btn-ghost" onclick="verAnuncioPedido(${idx})" style="font-size:12px;padding:5px 10px">🔗 Ver anuncio</button>
+          </div>
           <div><label style="${lblD}">Envío</label><textarea id="ped-edit-envio" rows="4" style="${inpD};resize:vertical">${escapeHtml(p.envio||'')}</textarea></div>
           <div><label style="${lblD}">Aclaración</label><input id="ped-edit-aclaracion" value="${escapeHtml(p.aclaracion||'')}" style="${inpD}"></div>
           <div style="font-size:11px;color:var(--fg-subtle)">Plataforma: ${escapeHtml(p.plataforma||'—')}</div>
@@ -5640,6 +5647,7 @@ function openDrawerPedido(idx) {
       <div class="drawer-section">
         <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:10px">Total del pedido: <b style="color:var(--fg)">${fmtMoney(totalPedido)}</b> · Restante actual: <b style="color:var(--fg)">${fmtMoney(p.restante)}</b></div>
         <button class="btn btn-cyan" id="ped-edit-save" onclick="savePedidoEdit(${idx})" style="width:100%">Guardar cambios</button>
+        ${isAdmin() ? `<button class="btn" onclick="eliminarPedido(${idx})" style="width:100%;margin-top:8px;background:transparent;border:1px solid rgba(255,24,48,.4);color:#ff5a6e;font-size:12px">🗑 Eliminar este cartel del pedido</button>` : ''}
       </div>
       <div class="drawer-section">
         <h4>Timeline post-venta</h4>
@@ -5674,6 +5682,50 @@ function openDrawerPedido(idx) {
   document.getElementById('drawer-bg').onclick = closeDrawer;
 }
 
+// Opciones del dropdown "de qué ad viene": los ads/orígenes ya usados en pedidos + un
+// set fijo estándar (Carteles B2C, retargeting, B2B, link bio, directo, frecuente,
+// referido). Es un <datalist>, así que podés ELEGIR de la lista O escribir libre.
+// Excluye los "REVISAR:" (esos son para corregir, no para re-elegir).
+function adDatalistOptions() {
+  const fixed = [
+    'El neon es una *** (b2c)','Locales nuevo - corto (b2c)','Te sobran 5 millones (b2c)','Locales (b2c)','Carteles B2C (b2c)',
+    'Diseno gratis (retargeting)','tu logo en neon (retargeting)','COPA-REGALO (retargeting)','Mostranos tu Local (retargeting)',
+    'Franquicias - resolver (b2b)','Tercerizacion (b2b)','Franquicias (b2b)','Franquicias - resolver (b2b form)','Tercerizacion (b2b form)',
+    'Link bio perfil ig','Directo (no pudimos trazabilizar ad)','Cliente frecuente (no viene de ad)','Referido (no viene de ad)'
+  ];
+  const usados = (STATE.pedidos || []).map(p => String(p.canalAd || '').trim()).filter(v => v && !/^REVISAR/i.test(v));
+  const set = new Set([...fixed, ...usados]);
+  return [...set].sort((a, b) => a.localeCompare(b)).map(v => `<option value="${escapeHtml(v)}"></option>`).join('');
+}
+// Abre la conversación (IG o WPP) del cliente del pedido, para corroborar de qué ad vino.
+// Usa el teléfono/wa_id backfilleado (o lo saca del envío). El chat resuelve IG vs WPP.
+function verConversacionPedido(idx) {
+  const p = STATE.pedidos.find(x => x.idx === idx);
+  if (!p) return;
+  const ph = String(p.telefono || '').trim() || extractPhone(p.envio) || '';
+  if (!ph) { toast('Este pedido no tiene teléfono/usuario cargado para abrir el chat'); return; }
+  if (!canAccessChat()) { toast('No tenés acceso al chat'); return; }
+  closeDrawer();
+  STATE.view = 'chat';
+  render();
+  setTimeout(() => { try { selectChatContact(ph); } catch (_) {} }, 60);
+}
+// Borra una fila de pedido (ej: el Dr Alvarez duplicado). Confirma, DELETE al worker
+// (que deja tombstone si vino del Excel para que no se re-importe), saca de STATE.
+async function eliminarPedido(idx) {
+  const p = STATE.pedidos.find(x => x.idx === idx);
+  if (!p) return;
+  if (!confirm('¿Eliminar este cartel del pedido?\n\n' + (p.cartel || '') + ' · ' + fmtMoney(p.precio) + '\n\nSe borra del CRM. Si vino del Excel, no se vuelve a importar.')) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx, { method: 'DELETE', headers: authHeaders() });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    STATE.pedidos = STATE.pedidos.filter(x => x.idx !== idx);
+    closeDrawer();
+    if (STATE.view === 'pedidos') renderTablePedidos();
+    toast('Pedido eliminado ✓');
+  } catch (e) { toast('Error al eliminar: ' + e.message); }
+}
 // Abre el anuncio del que vino el cliente: busca en vivo la atribución de ad por el
 // teléfono del pedido y abre el link de Meta (source_url o Ads Library por id).
 async function verAnuncioPedido(idx) {

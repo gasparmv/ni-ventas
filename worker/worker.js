@@ -739,6 +739,9 @@ async function importNewPedidosFromVentas(env) {
     const have = new Set();
     const rs = await env.DB.prepare('SELECT sheet_row FROM pedidos WHERE sheet_row IS NOT NULL').all();
     for (const x of (rs.results || [])) have.add(Number(x.sheet_row));
+    // Tombstones: filas borradas a mano en el CRM (ej: duplicados) que NO deben
+    // re-importarse del Excel aunque sigan en el sheet. Ver DELETE /admin/pedidos/{id}.
+    try { const del = await env.DB.prepare('SELECT sheet_row FROM pedidos_deleted').all(); for (const x of (del.results || [])) have.add(Number(x.sheet_row)); } catch (_) {}
     const now = new Date().toISOString();
     const stmts = [];
     for (let i = 1; i < rows.length; i++) {
@@ -12657,6 +12660,25 @@ const handler = {
         _pedSql += ' ORDER BY fecha DESC, numero DESC, id DESC';
         const rs = await env.DB.prepare(_pedSql).bind(..._pedArgs).all();
         return json({ pedidos: rs.results || [] });
+      }
+
+      // DELETE /admin/pedidos/{id} → borra UNA fila de pedido (ej: un duplicado como
+      // Dr Alvarez). Si vino del Excel (tiene sheet_row) deja un tombstone en
+      // pedidos_deleted para que importNewPedidosFromVentas NO la vuelva a traer.
+      // Las creadas en el CRM (sin sheet_row) se borran directo. Solo Gaspar.
+      if (request.method === 'DELETE' && /^\/admin\/pedidos\/\d+$/.test(path)) {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const pid = parseInt(path.split('/').pop(), 10);
+        try {
+          const prow = await env.DB.prepare('SELECT id, sheet_row FROM pedidos WHERE id = ?').bind(pid).first();
+          if (!prow) return json({ error: 'pedido no encontrado' }, 404);
+          if (prow.sheet_row != null) {
+            try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS pedidos_deleted (sheet_row INTEGER PRIMARY KEY, deleted_at TEXT)').run(); } catch (_) {}
+            try { await env.DB.prepare('INSERT OR IGNORE INTO pedidos_deleted (sheet_row, deleted_at) VALUES (?, ?)').bind(Number(prow.sheet_row), new Date().toISOString()).run(); } catch (_) {}
+          }
+          await env.DB.prepare('DELETE FROM pedidos WHERE id = ?').bind(pid).run();
+          return json({ ok: true, deleted: pid });
+        } catch (e) { return json({ error: String(e && e.message || e) }, 500); }
       }
 
       // POST /admin/pedidos/backfill → importa (idempotente) los pedidos del Excel
