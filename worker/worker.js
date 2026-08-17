@@ -1453,7 +1453,15 @@ async function precotizCount(env) {
 
 // Envía un mensaje del bot Y lo persiste en wa_messages (waSend no guarda solo).
 // automated=1 para distinguir lo que mandó el piloto. Aparece en el chat del CRM.
+// Primera letra en MAYÚSCULA (pedido de Gaspar): el bot de precotización arranca cada
+// mensaje con mayúscula, en WhatsApp y en IG. Respeta espacios/emoji al inicio.
+function capFirst(s) {
+  const t = String(s || '');
+  const i = t.search(/\S/);
+  return i < 0 ? t : t.slice(0, i) + t.charAt(i).toUpperCase() + t.slice(i + 1);
+}
 async function precotizSend(env, phone, body) {
+  body = capFirst(body);
   // Instagram: IGSID largo (>14 díg) → rutea al DM de IG. WhatsApp queda igual.
   if (String(phone).replace(/\D/g, '').length > 14) return precotizSendIg(env, phone, body);
   const r = await waSendText(env, phone, body);
@@ -1473,6 +1481,7 @@ async function precotizSend(env, phone, body) {
 // la ventana de 24 h de IG (no hay plantilla de re-enganche). Marca automated=1 para que el freno
 // anti-pisón no cuente el mensaje del bot como intervención humana. Devuelve { ok } como waSendText.
 async function precotizSendIg(env, igId, body) {
+  body = capFirst(body);
   try { if (!(await precotizIgOn(env))) return { ok: false, error: 'ig precotiz off' }; } catch (_) { return { ok: false, error: 'ig gate err' }; }
   // Ventana de 24 h: el cliente escribió en las últimas 24 h por IG.
   try {
