@@ -2821,14 +2821,20 @@ async function processCortePilot(env) {
     try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_conversaciones (phone TEXT PRIMARY KEY, estado TEXT, last_processed_ts TEXT, intencion_preguntada INTEGER DEFAULT 0, updated_at TEXT)").run(); } catch (_) {}
     const nowIso = new Date().toISOString();
     const since = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    // Limitador de prueba: si corte_bot_test_phone está seteado, el bot atiende SOLO ese número
+    // (ignora el resto de alumnos y no exige estar en corte_alumnos) → para testear sin tocar a nadie.
+    const testPhone = String(await kvGet(env, 'corte_bot_test_phone', '')).replace(/\D/g, '');
     let cands = [];
     try {
-      cands = (await env.DB.prepare(
-        "SELECT m.phone, MAX(m.ts) AS last_ts FROM wa_messages m " +
-        "WHERE m.direction='inbound' AND m.msg_type!='status' AND (m.channel IS NULL OR m.channel='wa') AND m.ts > ? " +
-        "  AND m.phone IN (SELECT telefono FROM corte_alumnos WHERE telefono!='') " +
-        "GROUP BY m.phone ORDER BY last_ts ASC LIMIT 10"
-      ).bind(since).all()).results || [];
+      if (testPhone) {
+        cands = (await env.DB.prepare(
+          "SELECT m.phone, MAX(m.ts) AS last_ts FROM wa_messages m WHERE m.direction='inbound' AND m.msg_type!='status' AND (m.channel IS NULL OR m.channel='wa') AND m.ts > ? AND m.phone = ? GROUP BY m.phone"
+        ).bind(since, testPhone).all()).results || [];
+      } else {
+        cands = (await env.DB.prepare(
+          "SELECT m.phone, MAX(m.ts) AS last_ts FROM wa_messages m WHERE m.direction='inbound' AND m.msg_type!='status' AND (m.channel IS NULL OR m.channel='wa') AND m.ts > ? AND m.phone IN (SELECT telefono FROM corte_alumnos WHERE telefono!='') GROUP BY m.phone ORDER BY last_ts ASC LIMIT 10"
+        ).bind(since).all()).results || [];
+      }
     } catch (_) { return; }
     for (const c of cands) {
       const phone = c.phone, lastTs = c.last_ts;
