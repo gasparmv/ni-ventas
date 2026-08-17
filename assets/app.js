@@ -2130,6 +2130,7 @@ function render() {
     else if (v === 'presupuestos') document.getElementById('main').innerHTML = renderPresupuestos();
     else if (v === 'cotizacion')   document.getElementById('main').innerHTML = renderCotizacion();
     else if (v === 'corporeas')    document.getElementById('main').innerHTML = renderCorporeas();
+    else if (v === 'corte')        document.getElementById('main').innerHTML = renderCorte();
     else if (v === 'seguimientos') document.getElementById('main').innerHTML = renderSeguimientos();
     else if (v === 'panel-joaco')   document.getElementById('main').innerHTML = renderPanelJoaco();
     else if (v === 'actividad')    document.getElementById('main').innerHTML = renderActividad();
@@ -2154,6 +2155,7 @@ function render() {
   if (STATE.view === 'presupuestos') bindPresupuestos();
   if (STATE.view === 'cotizacion')   bindCotizacion();
   if (STATE.view === 'corporeas')    bindCorporeas();
+  if (STATE.view === 'corte')        bindCorte();
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
     if (isAdmin()) bindBusinessPanel();
@@ -2307,6 +2309,82 @@ function renderOcUrgenteModal() {
       </div>
     </div>`;
 }
+// ===== Vista "Servicio de corte" (vertical B2B/alumnos) — Etapa 1 (solo lectura) =====
+const CORTE_ESTADOS = [
+  ['pedido', '📥 Pedido'], ['matriz_lista', '✏️ Matriz'], ['cortado', '🪚 Cortado'],
+  ['embalado', '📦 Embalado'], ['cobrado', '💰 Cobrado'], ['despachado', '🚚 Despachado'], ['entregado', '✅ Entregado']
+];
+function renderCorte() {
+  const all = STATE.corteAlumnos;               // undefined = cargando
+  const pedidos = STATE.cortePedidos || [];
+  const q = (STATE.corteQuery || '').trim().toLowerCase();
+  const alumnos = all === undefined ? undefined : (q
+    ? all.filter(a => String(a.nombre || '').toLowerCase().includes(q) || String(a.telefono || '').includes(q.replace(/\D/g, '')))
+    : all);
+  const cell = 'padding:7px 10px';
+  return `
+    <div style="padding:var(--s-4);max-width:1100px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
+        <h1 style="margin:0;font-size:20px">✂ Servicio de corte</h1>
+        <span style="font-size:11px;background:rgba(124,58,237,.14);color:#7c3aed;padding:2px 8px;border-radius:10px;font-weight:700">Etapa 1 · en construcción</span>
+      </div>
+      <p style="color:var(--fg-mute);font-size:13px;margin:0 0 18px">Corte de bases acrílicas para alumnos. Por ahora se ve la base: alumnos + el tablero de pedidos (el bot de intake llega en la próxima etapa).</p>
+
+      <div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin-bottom:8px">Tablero de pedidos <span style="text-transform:none;color:var(--fg-mute)">· ${pedidos.length} en curso</span></div>
+      <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:12px;margin-bottom:22px">
+        ${CORTE_ESTADOS.map(([k, lbl]) => { const it = pedidos.filter(p => p.estado === k); return `
+          <div style="flex:0 0 170px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;min-height:70px">
+            <div style="font-size:11px;font-weight:700;margin-bottom:6px">${lbl} <span style="color:var(--fg-mute)">${it.length}</span></div>
+            ${it.length ? it.map(p => `<div style="font-size:12px;padding:6px;border:1px solid var(--border);border-radius:4px;margin-bottom:4px"><b>${escapeHtml(p.cliente_nombre || '')}</b><br><span style="color:var(--fg-mute)">${escapeHtml(p.diseno_nombre || '')}</span></div>`).join('') : `<div style="font-size:11px;color:var(--fg-subtle);padding:4px 2px">—</div>`}
+          </div>`; }).join('')}
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+        <div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle)">Alumnos (${alumnos === undefined ? '…' : alumnos.length}${q && all ? ' de ' + all.length : ''}) <span style="text-transform:none;color:var(--fg-mute)">· fuente: LTV_Alumnos</span></div>
+        <input id="corte-alumnos-q" placeholder="Buscar alumno o teléfono…" value="${escapeHtml(STATE.corteQuery || '')}" style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:6px 10px;color:var(--fg);font-size:13px;width:260px;max-width:60vw">
+      </div>
+      <div style="border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden">
+        ${alumnos === undefined ? `<div style="padding:22px;text-align:center;color:var(--fg-mute)">Cargando alumnos…</div>`
+          : !alumnos.length ? `<div style="padding:22px;text-align:center;color:var(--fg-mute)">Sin resultados</div>`
+          : `<table style="width:100%;border-collapse:collapse;font-size:13px">
+              <thead><tr style="text-align:left;color:var(--fg-subtle);font-size:11px;text-transform:uppercase">
+                <th style="${cell}">Cliente</th><th style="${cell}">Teléfono</th><th style="${cell}">Envío</th><th style="${cell};text-align:right">Pedidos</th><th style="${cell};text-align:right">Acumulado</th></tr></thead>
+              <tbody>${alumnos.slice(0, 300).map(a => `<tr style="border-top:1px solid var(--border)">
+                <td style="${cell};font-weight:600">${escapeHtml(a.nombre || '')}</td>
+                <td style="${cell};color:var(--fg-mute)">${a.telefono ? '+' + escapeHtml(a.telefono) : '<span style="color:#FFA726">sin tel</span>'}</td>
+                <td style="${cell};color:var(--fg-mute)">${escapeHtml(String(a.datos_envio || '').slice(0, 34))}</td>
+                <td style="${cell};text-align:right">${a.cantidad_pedidos || 0}</td>
+                <td style="${cell};text-align:right;color:var(--fg-mute)">${escapeHtml(a.importe_acumulado || '')}</td></tr>`).join('')}</tbody>
+            </table>${alumnos.length > 300 ? `<div style="padding:8px 10px;color:var(--fg-subtle);font-size:11px">Mostrando 300 de ${alumnos.length}</div>` : ''}`}
+      </div>
+    </div>`;
+}
+async function bindCorte() {
+  if (STATE.corteAlumnos === undefined && !STATE._corteLoading) {
+    STATE._corteLoading = true;
+    try {
+      const [ra, rp] = await Promise.all([
+        fetch(CONFIG.trackerUrl + '/admin/corte/alumnos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})),
+        fetch(CONFIG.trackerUrl + '/admin/corte/pedidos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({}))
+      ]);
+      STATE.corteAlumnos = (ra && ra.alumnos) || [];
+      STATE.cortePedidos = (rp && rp.pedidos) || [];
+    } catch (_) { STATE.corteAlumnos = STATE.corteAlumnos || []; }
+    STATE._corteLoading = false;
+    render();
+    return;
+  }
+  const inp = document.getElementById('corte-alumnos-q');
+  if (inp && !inp._bound) {
+    inp._bound = true;
+    inp.oninput = () => {
+      STATE.corteQuery = inp.value;
+      render();
+      const nq = document.getElementById('corte-alumnos-q');
+      if (nq) { nq.focus(); const L = (STATE.corteQuery || '').length; try { nq.setSelectionRange(L, L); } catch (_) {} }
+    };
+  }
+}
 function renderShell() {
   // Counts for badges
   const sgts = STATE.loaded ? getSeguimientosWeek() : [];
@@ -2348,6 +2426,7 @@ function renderShell() {
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
         ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
         ${!isNadiaUser(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>` : ''}

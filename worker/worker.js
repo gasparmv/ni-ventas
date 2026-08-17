@@ -13428,6 +13428,33 @@ const handler = {
         return json({ ok: true, checked: rep.length, report: rep });
       }
 
+      // ===== Módulo Servicio de Corte (vertical B2B/alumnos) =====
+      // GET /admin/corte/alumnos?q=  →  lista de alumnos (espejo de LTV_Alumnos). Admin.
+      if (request.method === 'GET' && path === '/admin/corte/alumnos') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+        let rows = [];
+        try {
+          if (q) {
+            rows = (await env.DB.prepare(
+              "SELECT id, nro_cliente, nombre, telefono, datos_envio, cantidad_pedidos, importe_acumulado FROM corte_alumnos WHERE lower(nombre) LIKE ? OR telefono LIKE ? ORDER BY nombre LIMIT 500"
+            ).bind('%' + q + '%', '%' + q.replace(/\D/g, '') + '%').all()).results || [];
+          } else {
+            rows = (await env.DB.prepare(
+              "SELECT id, nro_cliente, nombre, telefono, datos_envio, cantidad_pedidos, importe_acumulado FROM corte_alumnos ORDER BY nombre LIMIT 500"
+            ).all()).results || [];
+          }
+        } catch (_) {}
+        return json({ ok: true, alumnos: rows });
+      }
+      // GET /admin/corte/pedidos  →  pedidos de corte (para el tablero). Admin.
+      if (request.method === 'GET' && path === '/admin/corte/pedidos') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let rows = [];
+        try { rows = (await env.DB.prepare("SELECT * FROM corte_pedidos ORDER BY updated_at DESC, id DESC LIMIT 500").all()).results || []; } catch (_) {}
+        return json({ ok: true, pedidos: rows });
+      }
+
       // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
       // + cohorte revivible (últimos 60 días sin presupuesto). Solo admin; query pesada
       // (scan de wa_messages) — no llamar en polls.
