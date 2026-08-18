@@ -1521,6 +1521,7 @@ function mapPedidoFromD1(row) {
     restante: row.restante || 0,
     estadoPedido: row.estado_pedido || '',
     canalAd: row.ad || '',
+    telefono: row.telefono || '',
     tramos: row.tramos || '',
     tipo: row.tipo || '',
     comercial_id: row.comercial_id || 'joaco',
@@ -5658,7 +5659,7 @@ function renderSegPostventa(items) {
 function openDrawerPedido(idx) {
   const p = STATE.pedidos.find(p => p.idx === idx);
   if (!p) return;
-  const tel = extractPhone(p.envio);
+  const tel = String(p.telefono || '').replace(/\D/g, '') || extractPhone(p.envio);
   const ms = postventaMilestones(p);
   // Carteles del mismo pedido (numero+fecha): los cambios de estado/pago/productor aplican a todos.
   const hermanos = STATE.pedidos.filter(x => x.numero === p.numero && +x.fecha === +p.fecha);
@@ -5789,8 +5790,8 @@ function adSelectOptions() {
 function verConversacionPedido(idx) {
   const p = STATE.pedidos.find(x => x.idx === idx);
   if (!p) return;
-  const ph = String(p.telefono || '').trim() || extractPhone(p.envio) || '';
-  if (!ph) { toast('Este pedido no tiene teléfono/usuario cargado para abrir el chat'); return; }
+  const ph = String(p.telefono || '').replace(/[\s-]/g, '').trim();
+  if (!ph) { toast('Este pedido no tiene teléfono/usuario cargado — cargalo y reintentá'); return; }
   if (!canAccessChat()) { toast('No tenés acceso al chat'); return; }
   closeDrawer();
   STATE.view = 'chat';
@@ -5818,7 +5819,7 @@ async function eliminarPedido(idx) {
 async function verAnuncioPedido(idx) {
   const p = STATE.pedidos.find(x => x.idx === idx);
   if (!p) return;
-  const tel = String(p.telefono || extractPhone(p.envio) || '').replace(/\D/g, '');
+  const tel = String(p.telefono || '').replace(/\D/g, '');
   if (!tel) { toast('Este pedido no tiene teléfono para trazar el anuncio'); return; }
   toast('Buscando el anuncio…');
   try {
