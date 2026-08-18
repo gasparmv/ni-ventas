@@ -33,6 +33,9 @@ function doPost(e) {
     if (data.action === 'pedido_upsert') {
       return pedidoUpsert(data);
     }
+    if (data.action === 'set_ad_bulk') {
+      return setAdBulk(data);
+    }
 
     const ss = SpreadsheetApp.openById(SHEET_ID);
 
@@ -129,6 +132,26 @@ function pedidoUpsert(data) {
     var insertRow = last + 1;
     sheet.getRange(insertRow, 1, 1, 21).setValues([row.slice(0, 21)]);
     return jsonOut({ ok: true, row: insertRow });
+  } catch (err) {
+    return jsonOut({ error: err.message });
+  }
+}
+
+// Escribe SOLO la columna U (Ad) de la hoja 2026 de Ventas, fila por fila. No toca
+// ninguna otra columna. data.items = [{ row: <nro de fila del Excel>, ad: <texto> }, ...].
+function setAdBulk(data) {
+  try {
+    var VENTAS_ID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
+    var ss = SpreadsheetApp.openById(VENTAS_ID);
+    var sheet = ss.getSheetByName('2026');
+    if (!sheet) return jsonOut({ error: 'hoja 2026 de Ventas no encontrada' });
+    var items = data.items || [];
+    var written = 0;
+    for (var i = 0; i < items.length; i++) {
+      var sr = parseInt(items[i].row, 10) || 0;
+      if (sr > 1) { sheet.getRange(sr, 21).setValue(String(items[i].ad || '')); written++; }
+    }
+    return jsonOut({ ok: true, written: written });
   } catch (err) {
     return jsonOut({ error: err.message });
   }
