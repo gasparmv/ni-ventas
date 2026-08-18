@@ -5711,8 +5711,11 @@ function openDrawerPedido(idx) {
         <div style="display:flex;flex-direction:column;gap:10px">
           <div>
             <label style="${lblD}">Trazabilidad (Ad)</label>
-            <input id="ped-edit-ad" list="ad-datalist" value="${escapeHtml(p.canalAd||'')}" placeholder="elegí de la lista o escribí" style="${inpD}">
-            <datalist id="ad-datalist">${adDatalistOptions()}</datalist>
+            <select id="ped-edit-ad-sel" onchange="if(this.value){document.getElementById('ped-edit-ad').value=this.value;this.value='';}" style="${inpD};margin-bottom:6px">
+              <option value="">— elegí de la lista —</option>
+              ${adSelectOptions()}
+            </select>
+            <input id="ped-edit-ad" value="${escapeHtml(p.canalAd||'')}" placeholder="o escribí el ad a mano" style="${inpD}">
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn btn-ghost" onclick="verConversacionPedido(${idx})" style="font-size:12px;padding:5px 10px">💬 Ver conversación</button>
@@ -5761,20 +5764,25 @@ function openDrawerPedido(idx) {
   document.getElementById('drawer-bg').onclick = closeDrawer;
 }
 
-// Opciones del dropdown "de qué ad viene": los ads/orígenes ya usados en pedidos + un
-// set fijo estándar (Carteles B2C, retargeting, B2B, link bio, directo, frecuente,
-// referido). Es un <datalist>, así que podés ELEGIR de la lista O escribir libre.
-// Excluye los "REVISAR:" (esos son para corregir, no para re-elegir).
-function adDatalistOptions() {
-  const fixed = [
-    'El neon es una *** (b2c)','Locales nuevo - corto (b2c)','Te sobran 5 millones (b2c)','Locales (b2c)','Carteles B2C (b2c)',
-    'Diseno gratis (retargeting)','tu logo en neon (retargeting)','COPA-REGALO (retargeting)','Mostranos tu Local (retargeting)',
-    'Franquicias - resolver (b2b)','Tercerizacion (b2b)','Franquicias (b2b)','Franquicias - resolver (b2b form)','Tercerizacion (b2b form)',
-    'Link bio perfil ig','Directo (no pudimos trazabilizar ad)','Cliente frecuente (no viene de ad)','Referido (no viene de ad)'
+// Opciones del dropdown (SELECT) "de qué ad viene", agrupadas por vertical + un grupo
+// con los ya usados que no estén en la lista fija. Excluye los "REVISAR:" (esos son
+// para corregir, no para re-elegir). Elegir una opción rellena el input de texto de al
+// lado (que es el valor que se guarda), así podés elegir de la lista O escribir libre.
+// (Antes era un <datalist>, que filtraba las opciones por el texto ya escrito y quedaba
+//  vacío cuando el valor no matcheaba nada — ej "REVISAR:..." — por eso "no andaba".)
+function adSelectOptions() {
+  const groups = [
+    ['Carteles B2C', ['El neon es una *** (b2c)', 'Locales nuevo - corto (b2c)', 'Te sobran 5 millones (b2c)', 'Locales (b2c)', 'Tenes que llamar la atencion (b2c)', 'Carteles B2C (b2c)']],
+    ['Retargeting', ['Diseno gratis (retargeting)', 'tu logo en neon (retargeting)', 'COPA-REGALO (retargeting)', 'Mostranos tu Local (retargeting)', 'Tu Marca en Neon Led (retargeting)']],
+    ['B2B', ['Franquicias - resolver (b2b)', 'Tercerizacion (b2b)', 'Franquicias (b2b)', 'Franquicias - resolver (b2b form)', 'Tercerizacion (b2b form)']],
+    ['No vino de ad', ['Link bio perfil ig', 'Directo (no pudimos trazabilizar ad)', 'Cliente frecuente (no viene de ad)', 'Referido (no viene de ad)']]
   ];
-  const usados = (STATE.pedidos || []).map(p => String(p.canalAd || '').trim()).filter(v => v && !/^REVISAR/i.test(v));
-  const set = new Set([...fixed, ...usados]);
-  return [...set].sort((a, b) => a.localeCompare(b)).map(v => `<option value="${escapeHtml(v)}"></option>`).join('');
+  const fixedSet = new Set(groups.reduce((a, g) => a.concat(g[1]), []));
+  const usados = [...new Set((STATE.pedidos || []).map(p => String(p.canalAd || '').trim()).filter(v => v && !/^REVISAR/i.test(v) && !fixedSet.has(v)))].sort((a, b) => a.localeCompare(b));
+  const opt = v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`;
+  let html = groups.map(g => `<optgroup label="${g[0]}">${g[1].map(opt).join('')}</optgroup>`).join('');
+  if (usados.length) html += `<optgroup label="Otros ya usados">${usados.map(opt).join('')}</optgroup>`;
+  return html;
 }
 // Abre la conversación (IG o WPP) del cliente del pedido, para corroborar de qué ad vino.
 // Usa el teléfono/wa_id backfilleado (o lo saca del envío). El chat resuelve IG vs WPP.
