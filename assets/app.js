@@ -8544,9 +8544,10 @@ function formatPhoneDisplay(phone) {
 // "Venta Abril": Abril la marca (botón dedicado en el chat) cada vez que vende un
 // curso; a fin de mes Gaspar filtra por esta etiqueta para revisar comisiones.
 const VENTA_ABRIL_LABEL_ID = 2154;
-// 2965437 = seña (pagos de seña del lanzamiento) · 2954729 = lead lanzamiento agosto.
-// Ambas son de cursos/lanzamiento → Abril las tiene que ver y filtrar.
-const CURSOS_LABEL_IDS = [5, 13, 26, 23, 25, 27, 17, 18, VENTA_ABRIL_LABEL_ID, 2965437, 2954729];
+// 2965437 = seña (pagos de seña del lanzamiento) · 2954729 = lead lanzamiento agosto
+// · 4507385 = vender pack (drip comunidad +14d: Abril les vende el pack al responder).
+// Todas de cursos/lanzamiento → Abril las tiene que ver y filtrar.
+const CURSOS_LABEL_IDS = [5, 13, 26, 23, 25, 27, 17, 18, VENTA_ABRIL_LABEL_ID, 2965437, 2954729, 4507385];
 // Etiquetas creadas a mano desde el dropdown (persisten en localStorage): se muestran
 // SIEMPRE aunque el rol cursos tenga whitelist — si la creaste, la tenés que ver/usar/borrar.
 function createdLabelIds() { try { return JSON.parse(localStorage.getItem('nv_created_labels') || '[]'); } catch (_) { return []; } }
