@@ -1698,11 +1698,14 @@ function sniffImageMime(buf) {
 // Arma bloques de imagen (base64) de las últimas imágenes inbound del lead, para
 // que el clasificador las VEA (Claude visión) — así distingue una foto de diseño
 // real de un spam/captura random. Reusa el formato de analyzePaymentProof.
-async function precotizImageBlocks(env, phone, max = 2) {
+async function precotizImageBlocks(env, phone, max = 2, sinceHours = 0) {
   if (!env.MEDIA) return [];
   let rows = [];
   try {
-    const rs = await env.DB.prepare("SELECT media_url FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type = 'image' AND media_url != '' ORDER BY ts DESC LIMIT ?").bind(phone, max).all();
+    // sinceHours > 0 → solo imágenes de las últimas N horas (esta conversación), para no
+    // arrastrar fotos viejas del historial del número (el bot "veía" diseños que no eran del pedido).
+    const _tf = sinceHours > 0 ? " AND ts > datetime('now','-" + parseInt(sinceHours, 10) + " hours')" : "";
+    const rs = await env.DB.prepare("SELECT media_url FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type = 'image' AND media_url != ''" + _tf + " ORDER BY ts DESC LIMIT ?").bind(phone, max).all();
     rows = rs.results || [];
   } catch (_) { return []; }
   const blocks = [];
@@ -2781,6 +2784,7 @@ REGLAS:
 - Si YA está claro (mandó un diseño/medida o confirmó que quiere cortar) → es_corte=true, intencion_clara=true.
 - frenar=true SOLO si es CLARAMENTE otra cosa que no tiene que ver con pedir un corte (dudas de la comunidad/curso, un pago, un envío ya hecho, un reclamo/postventa, spam, algo random) → lo atiende una persona.
 - Por cada diseño que mandó, extraé nombre, medida (texto tal cual lo dijo) y aclaraciones, y si adjuntó la foto (mirá las imágenes). completo=true SOLO si tiene medida + nombre + foto.
+- MUY IMPORTANTE: si en la conversación NO hay ninguna imagen adjunta, NO digas que "viste las fotos" ni des por hecho ningún diseño → pedile la foto. tiene_foto=true SOLO si REALMENTE ves una imagen. NO inventes diseños ni medidas que el alumno no dijo.
 - Si a un diseño le falta algún dato, pedí SOLO el que falta, natural y corto.
 - El alumno puede mandar VARIOS diseños.
 - NUNCA des precio ni cotices (el precio se calcula después con la medida real del diseñador).
@@ -2853,7 +2857,7 @@ async function processCortePilot(env) {
       } catch (_) { continue; }
       const ctx = await buildChatContext(env, phone, 40);
       if (!ctx) continue;
-      const imgs = await precotizImageBlocks(env, phone);
+      const imgs = await precotizImageBlocks(env, phone, 3, 3); // solo imágenes de las últimas 3h (esta charla)
       const out = await corteLlm(env, ctx.fullText, imgs);
       if (!out.ok) continue;
       const res = out.data || {};
@@ -2874,7 +2878,7 @@ async function processCortePilot(env) {
       // Es corte y claro → crear los diseños completos + pedir lo que falta.
       const alumno = await env.DB.prepare("SELECT id, nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
       let fotoKey = '';
-      try { const fr = await env.DB.prepare("SELECT media_url FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type='image' AND media_url!='' ORDER BY ts DESC LIMIT 1").bind(phone).first(); fotoKey = (fr && fr.media_url) || ''; } catch (_) {}
+      try { const fr = await env.DB.prepare("SELECT media_url FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type='image' AND media_url!='' AND ts > datetime('now','-3 hours') ORDER BY ts DESC LIMIT 1").bind(phone).first(); fotoKey = (fr && fr.media_url) || ''; } catch (_) {}
       for (const co of (Array.isArray(res.cortes) ? res.cortes : [])) {
         if (!co || !co.completo) continue;
         const nombre = String(co.nombre || '').trim();
