@@ -13603,6 +13603,18 @@ const handler = {
         try { rows = (await env.DB.prepare("SELECT * FROM corte_pedidos ORDER BY updated_at DESC, id DESC LIMIT 500").all()).results || []; } catch (_) {}
         return json({ ok: true, pedidos: rows });
       }
+      // POST /admin/corte/run  →  dispara el bot de corte a mano (diagnóstico). Admin. Devuelve el estado.
+      if (request.method === 'POST' && path === '/admin/corte/run') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let err = null;
+        try { await processCortePilot(env); } catch (e) { err = String((e && e.message) || e); }
+        const tp = String(await kvGet(env, 'corte_bot_test_phone', '')).replace(/\D/g, '');
+        let conv = null, peds = 0, lastBot = null;
+        try { conv = await env.DB.prepare("SELECT estado, intencion_preguntada, substr(last_processed_ts,11,8) AS lp FROM corte_conversaciones WHERE phone=?").bind(tp).first(); } catch (_) {}
+        try { const r = await env.DB.prepare("SELECT count(*) AS n FROM corte_pedidos WHERE telefono=? AND created_at > datetime('now','-40 minutes')").bind(tp).first(); peds = (r && r.n) || 0; } catch (_) {}
+        try { const lb = await env.DB.prepare("SELECT substr(body,1,140) AS body FROM wa_messages WHERE phone=? AND direction='outbound' AND automated=1 AND ts > datetime('now','-20 minutes') ORDER BY ts DESC LIMIT 1").bind(tp).first(); lastBot = lb && lb.body; } catch (_) {}
+        return json({ ok: true, err, test_phone: tp, conv, pedidos_recientes: peds, ultimo_bot: lastBot });
+      }
 
       // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
       // + cohorte revivible (últimos 60 días sin presupuesto). Solo admin; query pesada
