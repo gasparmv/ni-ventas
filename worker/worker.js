@@ -2843,7 +2843,8 @@ async function processCortePilot(env) {
     } catch (_) { return; }
     for (const c of cands) {
       const phone = c.phone, lastTs = c.last_ts;
-      if (Date.now() - new Date(lastTs).getTime() < PRECOTIZ_DEBOUNCE_MS) continue;   // esperar que pare de escribir
+      const debMs = (testPhone && phone === testPhone) ? 5000 : PRECOTIZ_DEBOUNCE_MS; // en modo prueba, espera corta (5s)
+      if (Date.now() - new Date(lastTs).getTime() < debMs) continue;   // esperar que pare de escribir
       // Anti-pisón: si un humano (Abril/Gaspar) contestó después del último inbound, no se mete.
       try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='outbound' AND automated=0 AND msg_type!='status'").bind(phone).first(); if (lh && lh.t) { if (lh.t > lastTs) continue; if (Date.now() - new Date(lastTs).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
       let conv = null;
@@ -13921,6 +13922,7 @@ const handler = {
     // reservas atómicas ya evitan el duplicado, pero gatearlo a un cron evita el trabajo doble.
     if (event.cron === '* * * * *') {
       ctx.waitUntil(processPrecotizPilot(env));
+      ctx.waitUntil(processCortePilot(env));   // bot de corte: cada minuto para responder rápido (gate corte_bot_on)
       // Nudge del piloto: persigue leads a medias que se callaron (cada 15 min; gate 9-21 AR adentro).
       // OJO: usamos getUTCMinutes() INLINE, no la var `minute` (que recién se declara con const más
       // abajo, línea ~10932 -> referenciarla acá era ReferenceError por TDZ en cada tick */1).
@@ -13952,8 +13954,6 @@ const handler = {
     // Vigilador de pago: en los chats "POR PAGAR", cuando entra un comprobante (OCR) →
     // saca "POR PAGAR" y pone "Cartel primer pago".
     ctx.waitUntil(processCartelPagos(env));
-    // Bot de intake del servicio de corte (alumnos B2B). Gateado por corte_bot_on (default OFF).
-    ctx.waitUntil(processCortePilot(env));
     // Levanta audios que el webhook bajó a R2 pero no logró transcribir en vivo.
     ctx.waitUntil(processPendingTranscripts(env));
     // Refresca el token largo de IG antes de que venza (se autogatea a 1 vez/día).
