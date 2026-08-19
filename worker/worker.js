@@ -2821,14 +2821,14 @@ async function processCortePilot(env) {
   try {
     if (!(await corteBotOn(env))) return;
     if (await isWaBillingBlocked(env)) return;
+    const testPhone = String(await kvGet(env, 'corte_bot_test_phone', '')).replace(/\D/g, '');
     const hAR = (new Date().getUTCHours() - 3 + 24) % 24;
-    if (hAR < 8 || hAR >= 22) return;                         // horario hábil AR
+    if (!testPhone && (hAR < 8 || hAR >= 22)) return;         // horario hábil AR (en modo prueba NO se aplica)
     try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_conversaciones (phone TEXT PRIMARY KEY, estado TEXT, last_processed_ts TEXT, intencion_preguntada INTEGER DEFAULT 0, updated_at TEXT)").run(); } catch (_) {}
     const nowIso = new Date().toISOString();
     const since = new Date(Date.now() - 20 * 60 * 1000).toISOString();
-    // Limitador de prueba: si corte_bot_test_phone está seteado, el bot atiende SOLO ese número
-    // (ignora el resto de alumnos y no exige estar en corte_alumnos) → para testear sin tocar a nadie.
-    const testPhone = String(await kvGet(env, 'corte_bot_test_phone', '')).replace(/\D/g, '');
+    // (testPhone ya calculado arriba) Limitador de prueba: si está seteado, el bot atiende SOLO ese
+    // número (ignora el resto de alumnos y no exige estar en corte_alumnos) → para testear sin tocar a nadie.
     let cands = [];
     try {
       if (testPhone) {
