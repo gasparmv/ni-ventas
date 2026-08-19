@@ -3405,17 +3405,26 @@ function cursosFlowBody(kind) {
 }
 
 // ============================================================================
-// Drip "Pack Emprendedor": a los 14 días de sumarse a la comunidad (alta a
-// Alumno = label 26), se le manda UNA sola vez la promo del pack por plantilla
-// MARKETING aprobada (header de imagen). Reusa wa_autoreply_log (PK phone+kind)
-// para dedup de por vida, igual que los demás goteos. Se prende con el kv
-// comunidad_promo_on='1' y SOLO manda si la plantilla ya está APPROVED en Meta
-// y la imagen está en R2 (no castiga la calidad del número con pendings/fallos).
+// Drip "check-in comunidad": a los 14 días de sumarse a la comunidad (alta a
+// Alumno = label 26), se le manda UNA sola vez un mensaje de check-in calentito
+// ("cómo venís, recibiste el kit, avanzaste con la plataforma?") por plantilla
+// aprobada, SIN imagen, y se lo etiqueta "vender pack" para que Abril le venda
+// el pack cuando responda (venta indirecta). Reusa wa_autoreply_log (PK
+// phone+kind) para dedup de por vida. Se prende con el kv comunidad_promo_on='1'
+// y SOLO manda si la plantilla ya está APPROVED en Meta.
 // ============================================================================
-const COMUNIDAD_PROMO_TPL = 'pack_emprendedor_premium';       // plantilla Meta MARKETING (es_AR)
-const COMUNIDAD_PROMO_IMG_KEY = 'promo/pack-emprendedor.jpg'; // R2 key del header de imagen
+const COMUNIDAD_PROMO_TPL = 'comunidad_checkin';             // plantilla Meta (es_AR): check-in "cómo venís" (sin imagen)
 const COMUNIDAD_PROMO_DELAY_MS = 14 * 24 * 60 * 60 * 1000;    // 14 días
 const COMUNIDAD_PROMO_EXCLUDE = '5491165634012';             // número a NO contactar nunca
+const VENDER_PACK_LABEL_NAME = 'vender pack';                // Abril vende el pack cuando el cliente responda
+const VENDER_PACK_LABEL_COLOR = '#f97316';                   // naranja
+async function venderPackTag(env, phone) {
+  try {
+    const id = await ensureLabelId(env, VENDER_PACK_LABEL_NAME, VENDER_PACK_LABEL_COLOR);
+    if (!id) return;
+    await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, id, new Date().toISOString()).run();
+  } catch (_) {}
+}
 
 // Encola la promo a 14 días cuando alguien se suma a la comunidad (alta a Alumno).
 // INSERT OR IGNORE sobre (phone,'comunidad_promo') → como mucho UNA promo por persona.
@@ -3452,8 +3461,6 @@ async function processComunidadPromo(env) {
     ).bind(nowIso, perTick).all()).results || [];
   } catch (_) { return; }
   if (!rows.length) return;
-  const mediaId = await getPromoMediaId(env, COMUNIDAD_PROMO_IMG_KEY);    // header de imagen
-  if (!mediaId) return;                                                  // sin imagen no mandamos (la plantilla la exige)
   for (const r of rows) {
     const phone = r.phone;
     // claim atómico: solo un tick agarra cada fila.
@@ -3464,13 +3471,15 @@ async function processComunidadPromo(env) {
       try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'comunidad_promo'").bind(phone).run(); } catch (_) {}
       continue;
     }
-    const res = await waSendTemplate(env, phone, COMUNIDAD_PROMO_TPL, 'es_AR', [], mediaId);
+    const res = await waSendTemplate(env, phone, COMUNIDAD_PROMO_TPL, 'es_AR', []);   // check-in, sin imagen
     if (!res || !res.ok) {
       const revert = isTransientSendError(res) ? 'queued' : 'failed';
       try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = ? WHERE phone = ? AND kind = 'comunidad_promo'").bind(revert, phone).run(); } catch (_) {}
       try { await logWaEvent(env, { to: phone, kind: 'comunidad-promo', ref: '', ok: false, error: res && res.error }); } catch (_) {}
       continue;
     }
+    // Enviado OK: etiquetar "vender pack" para que Abril le venda el pack cuando responda.
+    await venderPackTag(env, phone);
     const sentTs = new Date().toISOString();
     try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'comunidad_promo'").bind(sentTs, phone).run(); } catch (_) {}
     try {
