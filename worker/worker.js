@@ -5223,20 +5223,34 @@ async function buildAdsFunnel(env, opts = {}) {
     }
   } catch (_) {}
 
-  // ---- LEADS + mapa teléfono->vertical (un solo scan de atribuciones en ventana amplia) ----
+  // ---- mapa teléfono->vertical + LEADS de CTWA (b2c / retargeting) ----
+  // b2c y retargeting entran por click-to-WhatsApp (wa_ad_attributions). B2B NO: entra por el
+  // FORMULARIO (Lead Ads) -> se cuenta abajo desde wa_leads. Acá contamos solo b2c/retargeting.
   const phoneVert = {};
   try {
     const rs = await env.DB.prepare("SELECT phone, source_id, headline, ts FROM wa_ad_attributions WHERE COALESCE(source_id,'')!='' AND ts>=? AND ts<? ORDER BY phone, ts DESC").bind(sinceWide, untilEx).all();
     const rows = rs.results || [];
-    // teléfono -> vertical del último touch (en toda la ventana): filas ya vienen ts DESC por phone
-    for (const r of rows) { const p = norm(r.phone); if (phoneVert[p] === undefined) phoneVert[p] = verticalOfSource(r.source_id, r.headline); }
-    // LEADS del período: distinct teléfono con su último touch DENTRO de [since, untilEx)
+    for (const r of rows) { const p = norm(r.phone); if (phoneVert[p] === undefined) { const v = verticalOfSource(r.source_id, r.headline); if (v) phoneVert[p] = v; } }
     const seen = new Set();
     for (const r of rows) {
       if (String(r.ts).slice(0, 10) < since) continue; // solo touches del período
       const p = norm(r.phone); if (seen.has(p)) continue; seen.add(p);
       const v = verticalOfSource(r.source_id, r.headline);
-      if (v && agg[v]) agg[v].leads++;
+      if ((v === 'b2c' || v === 'retargeting') && agg[v]) agg[v].leads++;
+    }
+  } catch (_) {}
+
+  // ---- LEADS B2B del FORMULARIO (wa_leads) + overlay al mapa teléfono->vertical ----
+  // wa_leads = submissions del Lead Ad B2B (campaign_id con prefijo 'c:'). El form es señal fuerte
+  // de B2B -> pisa lo que dijera CTWA para ese teléfono (así el presupuesto también linkea a b2b).
+  try {
+    const rs = await env.DB.prepare("SELECT phone, campaign_id, received_at FROM wa_leads WHERE COALESCE(phone,'')!='' AND received_at>=? AND received_at<? ORDER BY received_at DESC").bind(sinceWide, untilEx).all();
+    const b2bSeen = new Set();
+    for (const r of (rs.results || [])) {
+      if (CARTELES_CAMPAIGNS[norm(r.campaign_id)] !== 'b2b') continue; // solo B2B de carteles
+      const p = norm(r.phone);
+      phoneVert[p] = 'b2b';
+      if (String(r.received_at).slice(0, 10) >= since && !b2bSeen.has(p)) { b2bSeen.add(p); agg.b2b.leads++; }
     }
   } catch (_) {}
 
