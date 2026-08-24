@@ -2138,6 +2138,7 @@ function render() {
     else if (v === 'chat')         document.getElementById('main').innerHTML = renderChat();
     else if (v === 'insights')     document.getElementById('main').innerHTML = renderInsights();
     else if (v === 'automatizaciones') document.getElementById('main').innerHTML = renderAutomatizaciones();
+    else if (v === 'funnel-ads')   document.getElementById('main').innerHTML = renderFunnelAds();
     else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
@@ -2167,6 +2168,7 @@ function render() {
   if (STATE.view === 'chat') bindChat();
   if (STATE.view === 'insights') bindInsights();
   if (STATE.view === 'automatizaciones') bindAutomatizaciones();
+  if (STATE.view === 'funnel-ads') bindFunnelAds();
   if (STATE.view === 'admin') bindAdmin();
   // Sincronizar classes mobile del chat (chat-mobile-list / chat-mobile-conv)
   // en el .app raíz. Solo el CSS bajo el media query mobile las usa.
@@ -2437,6 +2439,7 @@ function renderShell() {
         </button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='insights'?'active':''}" data-view="insights"><span class="icon">⚡</span> Insights IA</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='automatizaciones'?'active':''}" data-view="automatizaciones"><span class="icon">⚙</span> Automatiz.</button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${v==='funnel-ads'?'active':''}" data-view="funnel-ads"><span class="icon">▽</span> Funnel Ads</button>` : ''}
         `}
         ${isAdmin() ? `<button class="nav-item ${v==='admin'?'active':''}" data-view="admin"><span class="icon">★</span> Admin</button>` : ''}
       </nav>
@@ -9200,6 +9203,299 @@ async function rejectImprovement(id, btn) {
 window.generateImprovements = generateImprovements;
 window.approveImprovement = approveImprovement;
 window.rejectImprovement = rejectImprovement;
+
+// ===== Panel Funnel de Ads (admin) =====
+// Gasto (Meta) -> leads -> presupuestos -> ventas, campaña por campaña (por vertical de carteles).
+// Consume GET /admin/ads/funnel. Data dura: gasto real de Meta + ventas trazadas 1x1.
+let funnelState = { period: 'agosto', rate: 1400, data: null, loading: false };
+
+const FA_VLABEL = {
+  b2c:        { name: 'Carteles B2C',              tag: 'CTWA · B2C' },
+  retargeting:{ name: 'Neon carteles RETARGETING', tag: 'CTWA · retargeting' },
+  b2b:        { name: 'Neon B2B FORM',             tag: 'Lead Ads · B2B' }
+};
+const FA_MIX = [
+  ['b2c', 'Carteles B2C', '#8B2FD6'], ['retargeting', 'Retargeting', '#B84DFF'], ['b2b', 'B2B Formulario', '#6E2FB0'],
+  ['linkbio', 'Link bio IG', '#2E9BD6'], ['directo', 'Directo', '#7A7291'], ['frecuente', 'Frecuente', '#12A163'],
+  ['referido', 'Referido', '#33CF88'], ['revisar', 'Sin trazar / revisar', '#B67916']
+];
+const FA_TIPS = {
+  gasto: ['Gasto', 'Lo invertido en esa campaña en el período (convertido a pesos con el tipo de cambio de arriba).', 'Meta Ads API, por campaña de carteles', ''],
+  leads: ['Leads', 'Personas distintas que escribieron por WhatsApp viniendo de un aviso de esa campaña (click-to-WhatsApp). Se descartan los leads de cursos.', 'wa_ad_attributions · último touch por persona', ''],
+  cpl: ['CPL (costo por lead)', 'Gasto ÷ Leads reales del CRM. Lo que te cuesta traer a alguien que escribe.', 'Meta ÷ CRM', '🟢 < $2.500 · 🔴 > $4.000'],
+  presup: ['Presupuestos', 'Leads de esa campaña a los que se les envió presupuesto (linkeado por teléfono).', 'briefs enviados · precio_final', ''],
+  lp: ['L→P (lead a presupuesto)', 'Qué % de los leads llegó a recibir presupuesto. Bajo = se pierden en la conversación.', 'Presup ÷ Leads', '🟢 > 40%'],
+  ventas: ['Ventas', 'Pedidos atribuidos a esa campaña con data dura (source_id de Meta / formulario). Órdenes con nombre distinto.', 'pedidos.ad', ''],
+  pv: ['Cierre (P→V)', 'Qué % de los presupuestos terminó en venta. Tu tasa de cierre real por campaña.', 'Ventas ÷ Presup', '🟢 > 6%'],
+  cac: ['CAC (costo por cliente)', 'Lo que te sale cada venta. Gasto ÷ Ventas. Compará contra tu margen por cartel.', 'Meta ÷ pedidos', '🟢 < $100k'],
+  roas: ['ROAS', 'Retorno: cuántos pesos facturás por cada peso de pauta. Ingresos reales ÷ Gasto.', 'CRM (precio real) ÷ Meta', '🟢 > 4×'],
+  funnel: ['Embudo del período', 'Cómo se achica: del gasto salen leads, de los leads presupuestos, y de esos las ventas. Los % entre pasos muestran dónde se cae la gente.', 'Meta + CRM', ''],
+  mix: ['Origen de las ventas', 'Cada venta del período trazada a de dónde vino el cliente. Violeta = pauta (ad). El resto es orgánico o a confirmar.', 'pedidos.ad (trazabilidad con data dura)', '']
+};
+
+function faToday() {
+  try { if (typeof localDateKey === 'function') return localDateKey(new Date()); } catch (_) {}
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function faRange(p) {
+  if (p === 'junio') return ['2026-06-01', '2026-06-30'];
+  if (p === 'julio') return ['2026-07-01', '2026-07-31'];
+  return ['2026-08-01', faToday()]; // agosto (parcial, hasta hoy)
+}
+function faMoney(n) { return '$' + Math.round(n || 0).toLocaleString('es-AR'); }
+function faUsd(n) { return 'US$' + (Math.round((n || 0) * 100) / 100).toLocaleString('es-AR'); }
+function faPct(n) { return (n == null) ? '—' : (n * 100).toFixed(1).replace('.', ',') + '%'; }
+function faSem(v, g, b, inv) { if (v == null) return ''; if (inv) return v <= g ? 'good' : (v <= b ? 'warn' : 'bad'); return v >= g ? 'good' : (v >= b ? 'warn' : 'bad'); }
+
+function renderFunnelAds() {
+  const st = funnelState;
+  const pBtn = (p, lbl) => `<button data-fa-p="${p}" aria-pressed="${st.period === p}">${lbl}</button>`;
+  return `
+  <style>
+  .fa-wrap{--fa-bg:transparent;--fa-surf:var(--surface,#fff);--fa-surf2:#F5F1FB;--fa-bd:#E7E1F1;--fa-tx:#1B1622;--fa-mut:#6E6684;--fa-fnt:#948CA6;--fa-acc:#8B2FD6;--fa-good:#12A163;--fa-gs:rgba(18,161,99,.13);--fa-warn:#B67916;--fa-ws:rgba(182,121,22,.14);--fa-bad:#D23A3F;--fa-bs:rgba(210,58,63,.13);--fa-sh:0 1px 2px rgba(30,20,50,.05),0 8px 24px -12px rgba(60,30,110,.14)}
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .fa-wrap{--fa-surf:#1B1726;--fa-surf2:#231D33;--fa-bd:#322A44;--fa-tx:#ECE7F6;--fa-mut:#9A92AD;--fa-fnt:#7A7291;--fa-acc:#C77DFF;--fa-good:#33CF88;--fa-gs:rgba(51,207,136,.15);--fa-warn:#E4B052;--fa-ws:rgba(228,176,82,.16);--fa-bad:#F15A5F;--fa-bs:rgba(241,90,95,.16);--fa-sh:0 1px 2px rgba(0,0,0,.3),0 12px 30px -14px rgba(0,0,0,.6)}}
+  :root[data-theme="dark"] .fa-wrap{--fa-surf:#1B1726;--fa-surf2:#231D33;--fa-bd:#322A44;--fa-tx:#ECE7F6;--fa-mut:#9A92AD;--fa-fnt:#7A7291;--fa-acc:#C77DFF;--fa-good:#33CF88;--fa-gs:rgba(51,207,136,.15);--fa-warn:#E4B052;--fa-ws:rgba(228,176,82,.16);--fa-bad:#F15A5F;--fa-bs:rgba(241,90,95,.16);--fa-sh:0 1px 2px rgba(0,0,0,.3),0 12px 30px -14px rgba(0,0,0,.6)}
+  .fa-wrap{color:var(--fa-tx);max-width:1120px;margin:0 auto;padding:4px 2px 40px}
+  .fa-wrap .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+  .fa-head{display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px 20px;margin-bottom:16px}
+  .fa-head h1{margin:0;font-size:23px;font-weight:800;letter-spacing:-.02em;display:flex;align-items:center;gap:9px}
+  .fa-head .di{color:var(--fa-acc)} .fa-head .sub{color:var(--fa-mut);font-size:13px}
+  .fa-ctrls{display:flex;flex-wrap:wrap;gap:10px;margin-left:auto;align-items:center}
+  .fa-seg{display:inline-flex;background:var(--fa-surf2);border:1px solid var(--fa-bd);border-radius:10px;padding:3px}
+  .fa-seg button{border:0;background:transparent;color:var(--fa-mut);font:inherit;font-size:13px;font-weight:600;padding:6px 13px;border-radius:7px;cursor:pointer}
+  .fa-seg button[aria-pressed="true"]{background:var(--fa-surf);color:var(--fa-tx);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+  .fa-rate{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fa-mut)}
+  .fa-rate input{width:74px;padding:5px 8px;border:1px solid var(--fa-bd);border-radius:8px;background:var(--fa-surf);color:var(--fa-tx);font:inherit;font-size:13px}
+  .fa-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:11px;margin-bottom:15px}
+  .fa-tile{background:var(--fa-surf);border:1px solid var(--fa-bd);border-radius:14px;padding:13px 14px;box-shadow:var(--fa-sh)}
+  .fa-tile .lab{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--fa-mut);font-weight:600;margin-bottom:7px}
+  .fa-tile .val{font-size:24px;font-weight:800;letter-spacing:-.02em}
+  .fa-tile .val small{font-size:13px;font-weight:600;color:var(--fa-mut)}
+  .fa-tile .foot{margin-top:5px;font-size:12px;color:var(--fa-fnt);display:flex;align-items:center;gap:6px}
+  .fa-dot{width:8px;height:8px;border-radius:50%;flex:none}
+  .fa-dot.good{background:var(--fa-good)} .fa-dot.warn{background:var(--fa-warn)} .fa-dot.bad{background:var(--fa-bad)}
+  .fa-i{width:15px;height:15px;border-radius:50%;border:1px solid var(--fa-bd);color:var(--fa-fnt);font-size:10px;font-weight:700;line-height:13px;text-align:center;cursor:pointer;background:transparent;padding:0;flex:none}
+  .fa-i:hover{color:var(--fa-acc);border-color:var(--fa-acc)}
+  .fa-card{background:var(--fa-surf);border:1px solid var(--fa-bd);border-radius:16px;box-shadow:var(--fa-sh);margin-bottom:15px}
+  .fa-card h2{margin:0;padding:14px 17px 0;font-size:14px;font-weight:700;display:flex;align-items:center;gap:7px}
+  .fa-card .cap{padding:2px 17px 0;color:var(--fa-mut);font-size:12.5px}
+  .fa-funnel{display:flex;align-items:stretch;gap:6px;padding:15px 17px;overflow-x:auto}
+  .fa-step{flex:1;min-width:118px;background:var(--fa-surf2);border:1px solid var(--fa-bd);border-radius:12px;padding:11px 13px}
+  .fa-step .n{font-size:21px;font-weight:800;letter-spacing:-.02em} .fa-step .k{font-size:11.5px;color:var(--fa-mut);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+  .fa-conv{display:flex;flex-direction:column;justify-content:center;align-items:center;color:var(--fa-fnt);font-size:12px;font-weight:700;min-width:50px}
+  .fa-conv .aw{font-size:16px;color:var(--fa-acc)}
+  .fa-tblw{overflow-x:auto;padding:6px 6px 12px}
+  .fa-tbl{border-collapse:collapse;width:100%;min-width:820px}
+  .fa-tbl th,.fa-tbl td{padding:10px 11px;text-align:right;font-size:13.5px;white-space:nowrap}
+  .fa-tbl th{color:var(--fa-mut);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--fa-bd)}
+  .fa-tbl th:first-child,.fa-tbl td:first-child{text-align:left}
+  .fa-tbl th .ih{display:inline-flex;align-items:center;gap:4px}
+  .fa-tbl tbody tr{border-bottom:1px solid var(--fa-bd)} .fa-tbl tbody tr:last-child{border-bottom:0}
+  .fa-tbl td.camp{font-weight:700} .fa-tbl td.camp .tag{display:block;font-size:11px;font-weight:600;color:var(--fa-fnt);text-transform:uppercase;letter-spacing:.04em}
+  .fa-pill{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:999px;font-size:12.5px;font-weight:700}
+  .fa-pill.good{background:var(--fa-gs);color:var(--fa-good)} .fa-pill.warn{background:var(--fa-ws);color:var(--fa-warn)} .fa-pill.bad{background:var(--fa-bs);color:var(--fa-bad)}
+  .fa-tbl tr.tot{border-top:2px solid var(--fa-bd);font-weight:800;background:var(--fa-surf2)} .fa-tbl tr.tot td:first-child{color:var(--fa-acc)}
+  .fa-mix{padding:15px 17px} .fa-mixbar{display:flex;height:32px;border-radius:9px;overflow:hidden;border:1px solid var(--fa-bd)}
+  .fa-mixbar span{display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#fff;min-width:2px}
+  .fa-mixleg{display:flex;flex-wrap:wrap;gap:9px 15px;margin-top:11px} .fa-mixleg .li{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--fa-mut)} .fa-mixleg .sw{width:11px;height:11px;border-radius:3px}
+  .fa-legend{display:flex;flex-wrap:wrap;gap:8px 16px;padding:13px 17px;font-size:12px;color:var(--fa-mut);align-items:center}
+  .fa-legend .g{display:flex;align-items:center;gap:6px}
+  .fa-note{color:var(--fa-fnt);font-size:12px;margin-top:12px;line-height:1.6}
+  .fa-pop{position:fixed;z-index:60;max-width:290px;background:var(--fa-surf);border:1px solid var(--fa-bd);border-radius:12px;padding:12px 14px;box-shadow:0 10px 40px -8px rgba(0,0,0,.4);font-size:12.5px;line-height:1.5;display:none;color:var(--fa-tx)}
+  .fa-pop.on{display:block} .fa-pop .src{color:var(--fa-mut);margin-top:6px;display:block} .fa-pop .th{color:var(--fa-acc);margin-top:6px;display:block;font-weight:600}
+  </style>
+  <div class="fa-wrap">
+    <div class="fa-head">
+      <div>
+        <h1><span class="di">◆</span> Funnel de Ads</h1>
+        <span class="sub">Gasto → leads → presupuestos → ventas, campaña por campaña</span>
+      </div>
+      <div class="fa-ctrls">
+        <div class="fa-seg" id="fa-period">${pBtn('junio', 'Junio')}${pBtn('julio', 'Julio')}${pBtn('agosto', 'Agosto')}</div>
+        <label class="fa-rate">USD→ARS <input id="fa-rate" type="number" step="10" value="${st.rate}"></label>
+      </div>
+    </div>
+    <div class="fa-kpis" id="fa-kpis"></div>
+    <div class="fa-card">
+      <h2>Embudo del período <button class="fa-i" data-fa-tip="funnel">i</button></h2>
+      <div class="cap" id="fa-funnelcap"></div>
+      <div class="fa-funnel" id="fa-funnel"></div>
+    </div>
+    <div class="fa-card">
+      <h2>Rendimiento por campaña</h2>
+      <div class="cap">Una fila por vertical de carteles. Los semáforos usan umbrales de tu economía. Tocá la <b>i</b> de cada columna para ver qué es y de dónde sale.</div>
+      <div class="fa-tblw">
+        <table class="fa-tbl">
+          <thead><tr>
+            <th>Campaña</th>
+            <th><span class="ih">Gasto <button class="fa-i" data-fa-tip="gasto">i</button></span></th>
+            <th><span class="ih">Leads <button class="fa-i" data-fa-tip="leads">i</button></span></th>
+            <th><span class="ih">CPL <button class="fa-i" data-fa-tip="cpl">i</button></span></th>
+            <th><span class="ih">Presup. <button class="fa-i" data-fa-tip="presup">i</button></span></th>
+            <th><span class="ih">L→P <button class="fa-i" data-fa-tip="lp">i</button></span></th>
+            <th><span class="ih">Ventas <button class="fa-i" data-fa-tip="ventas">i</button></span></th>
+            <th><span class="ih">Cierre <button class="fa-i" data-fa-tip="pv">i</button></span></th>
+            <th><span class="ih">CAC <button class="fa-i" data-fa-tip="cac">i</button></span></th>
+            <th><span class="ih">ROAS <button class="fa-i" data-fa-tip="roas">i</button></span></th>
+          </tr></thead>
+          <tbody id="fa-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="fa-card">
+      <h2>De dónde vienen tus ventas <button class="fa-i" data-fa-tip="mix">i</button></h2>
+      <div class="cap" id="fa-mixcap">Trazabilidad real de las ventas del período, cada una a su origen con data dura.</div>
+      <div class="fa-mix"><div class="fa-mixbar" id="fa-mixbar"></div><div class="fa-mixleg" id="fa-mixleg"></div></div>
+    </div>
+    <div class="fa-card"><div class="fa-legend">
+      <span style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fa-fnt);font-weight:600">Semáforo</span>
+      <span class="g"><span class="fa-dot good"></span> saludable</span>
+      <span class="g"><span class="fa-dot warn"></span> mirar</span>
+      <span class="g"><span class="fa-dot bad"></span> corregir / no escalar</span>
+      <span style="margin-left:auto;color:var(--fa-fnt)" id="fa-spendfoot"></span>
+    </div></div>
+    <p class="fa-note" id="fa-note"></p>
+  </div>
+  <div class="fa-pop" id="fa-pop"></div>`;
+}
+
+async function loadFunnelAds() {
+  const st = funnelState;
+  const [since, until] = faRange(st.period);
+  st.loading = true;
+  const kp = document.getElementById('fa-kpis');
+  if (kp) kp.innerHTML = '<div class="fa-tile"><div class="loading"><div class="spinner"></div></div></div>';
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/ads/funnel?since=' + since + '&until=' + until + '&rate=' + st.rate, { headers: { ...authHeaders() } });
+    const j = await r.json();
+    if (j && j.ok) { st.data = j; renderFaAll(); }
+    else if (kp) kp.innerHTML = '<div class="muted" style="font-size:12px">no se pudo cargar el funnel</div>';
+  } catch (_) { if (kp) kp.innerHTML = '<div class="muted" style="font-size:12px">no se pudo cargar el funnel</div>'; }
+  st.loading = false;
+}
+
+function renderFaAll() {
+  const d = funnelState.data; if (!d) return;
+  renderFaKpis(d); renderFaFunnel(d); renderFaTable(d); renderFaMix(d);
+  const pl = { junio: 'Junio', julio: 'Julio', agosto: 'Agosto (parcial)' }[funnelState.period] || funnelState.period;
+  const fc = document.getElementById('fa-funnelcap'); if (fc) fc.textContent = 'Carteles · ' + pl + ' · ' + d.since + ' → ' + d.until;
+  const sf = document.getElementById('fa-spendfoot');
+  if (sf) sf.textContent = 'Gasto Meta act. ' + (d.spend_updated ? d.spend_updated.slice(0, 10) : '—') + ' · US$→ARS $' + Number(d.rate).toLocaleString('es-AR');
+  const nt = document.getElementById('fa-note');
+  if (nt) nt.innerHTML = 'Gasto = Meta Ads (real). Ventas = trazabilidad con data dura (source_id / formulario). Leads = WhatsApp por CTWA (Instagram todavía no incluido). Presupuestos linkeados por teléfono.';
+  faBindTips();
+}
+
+function renderFaKpis(d) {
+  const t = d.total;
+  const K = [
+    ['Gasto', faMoney(t.gasto_ars), '<small> ARS</small>', '', faUsd(t.gasto_usd), 'gasto'],
+    ['Leads', (t.leads || 0).toLocaleString('es-AR'), '', faSem(t.cpl, 2500, 4000, true), 'CPL ' + faMoney(t.cpl), 'leads'],
+    ['CPL', t.cpl == null ? '—' : faMoney(t.cpl), '', faSem(t.cpl, 2500, 4000, true), 'Meta ref. ~US$0,5', 'cpl'],
+    ['Ventas', (t.ventas || 0), '', faSem(t.roas, 4, 2.5), (t.presup || 0) + ' presup.', 'ventas'],
+    ['CAC', t.cac == null ? '—' : faMoney(t.cac), '', faSem(t.cac, 100000, 180000, true), '', 'cac'],
+    ['ROAS', t.roas == null ? '—' : (t.roas.toFixed(1).replace('.', ',') + '×'), '', faSem(t.roas, 4, 2.5), faMoney(t.ingresos) + ' fact.', 'roas']
+  ];
+  const el = document.getElementById('fa-kpis'); if (!el) return;
+  el.innerHTML = K.map(k => {
+    const dot = k[3] ? '<span class="fa-dot ' + k[3] + '"></span>' : '';
+    return '<div class="fa-tile"><div class="lab">' + k[0] + ' <button class="fa-i" data-fa-tip="' + k[5] + '">i</button></div>' +
+      '<div class="val mono">' + k[1] + k[2] + '</div><div class="foot">' + dot + '<span>' + (k[4] || '') + '</span></div></div>';
+  }).join('');
+}
+
+function renderFaFunnel(d) {
+  const t = d.total;
+  const steps = [['Gasto', faMoney(t.gasto_ars)], ['Leads', (t.leads || 0).toLocaleString('es-AR')], ['Presupuestos', (t.presup || 0).toLocaleString('es-AR')], ['Ventas', String(t.ventas || 0)]];
+  const convs = [null, faPct(t.lp), faPct(t.pv)];
+  let html = '';
+  steps.forEach((s, i) => {
+    html += '<div class="fa-step"><div class="k">' + s[0] + '</div><div class="n mono">' + s[1] + '</div></div>';
+    if (i === 0) html += '<div class="fa-conv"><span class="aw">→</span></div>';
+    else if (i < steps.length && convs[i]) html += '<div class="fa-conv"><span class="aw">→</span>' + convs[i] + '</div>';
+  });
+  const el = document.getElementById('fa-funnel'); if (el) el.innerHTML = html;
+}
+
+function renderFaTable(d) {
+  const tb = document.getElementById('fa-tbody'); if (!tb) return;
+  let html = '';
+  d.rows.forEach(r => {
+    const L = FA_VLABEL[r.vertical] || { name: r.vertical, tag: '' };
+    const cpl = faSem(r.cpl, 2500, 4000, true), lp = faSem(r.lp, .40, .25), pv = faSem(r.pv, .06, .04), cac = faSem(r.cac, 100000, 180000, true), roas = faSem(r.roas, 4, 2.5);
+    const pill = (cls, txt) => cls ? '<span class="fa-pill ' + cls + ' mono">' + txt + '</span>' : '<span class="mono">' + txt + '</span>';
+    html += '<tr>' +
+      '<td class="camp">' + L.name + '<span class="tag">' + L.tag + '</span></td>' +
+      '<td class="mono">' + faMoney(r.gasto_ars) + '</td>' +
+      '<td class="mono">' + (r.leads || 0) + '</td>' +
+      '<td>' + pill(cpl, r.cpl == null ? '—' : faMoney(r.cpl)) + '</td>' +
+      '<td class="mono">' + (r.presup || 0) + '</td>' +
+      '<td>' + pill(lp, faPct(r.lp)) + '</td>' +
+      '<td class="mono">' + (r.ventas || 0) + '</td>' +
+      '<td>' + pill(pv, faPct(r.pv)) + '</td>' +
+      '<td>' + pill(cac, r.cac == null ? '—' : faMoney(r.cac)) + '</td>' +
+      '<td>' + pill(roas, r.roas == null ? '—' : (r.roas.toFixed(1).replace('.', ',') + '×')) + '</td>' +
+      '</tr>';
+  });
+  const t = d.total;
+  html += '<tr class="tot"><td>TOTAL</td>' +
+    '<td class="mono">' + faMoney(t.gasto_ars) + '</td><td class="mono">' + (t.leads || 0) + '</td>' +
+    '<td class="mono">' + (t.cpl == null ? '—' : faMoney(t.cpl)) + '</td><td class="mono">' + (t.presup || 0) + '</td>' +
+    '<td class="mono">' + faPct(t.lp) + '</td><td class="mono">' + (t.ventas || 0) + '</td>' +
+    '<td class="mono">' + faPct(t.pv) + '</td><td class="mono">' + (t.cac == null ? '—' : faMoney(t.cac)) + '</td>' +
+    '<td class="mono">' + (t.roas == null ? '—' : (t.roas.toFixed(1).replace('.', ',') + '×')) + '</td></tr>';
+  tb.innerHTML = html;
+}
+
+function renderFaMix(d) {
+  const m = d.mix || {};
+  const items = FA_MIX.map(x => [x[1], m[x[0]] || 0, x[2]]).filter(x => x[1] > 0);
+  const tot = items.reduce((a, x) => a + x[1], 0) || 1;
+  const bar = document.getElementById('fa-mixbar'), leg = document.getElementById('fa-mixleg');
+  if (bar) bar.innerHTML = items.map(x => { const w = x[1] / tot * 100; return '<span style="background:' + x[2] + ';flex:' + x[1] + ' 0 0" title="' + x[0] + ': ' + x[1] + '">' + (w > 7 ? x[1] : '') + '</span>'; }).join('');
+  if (leg) leg.innerHTML = items.map(x => '<span class="li"><span class="sw" style="background:' + x[2] + '"></span>' + x[0] + ' · <b>' + x[1] + '</b></span>').join('');
+  const cap = document.getElementById('fa-mixcap');
+  if (cap) cap.textContent = 'Trazabilidad real de las ' + tot + ' ventas del período, cada una a su origen con data dura.';
+}
+
+// tooltips del panel (popover reusable)
+function faBindTips() {
+  const pop = document.getElementById('fa-pop'); if (!pop) return;
+  let open = null;
+  const show = (btn) => {
+    const t = FA_TIPS[btn.getAttribute('data-fa-tip')]; if (!t) return;
+    let h = '<b>' + t[0] + '</b><div>' + t[1] + '</div>';
+    if (t[2]) h += '<span class="src">📊 ' + t[2] + '</span>';
+    if (t[3]) h += '<span class="th">Semáforo: ' + t[3] + '</span>';
+    pop.innerHTML = h; pop.classList.add('on');
+    const r = btn.getBoundingClientRect(), pw = Math.min(290, window.innerWidth - 24);
+    let left = Math.min(r.left, window.innerWidth - pw - 12); left = Math.max(12, left);
+    let top = r.bottom + 8; if (top + pop.offsetHeight > window.innerHeight - 8) top = r.top - pop.offsetHeight - 8;
+    pop.style.left = left + 'px'; pop.style.top = Math.max(8, top) + 'px'; open = btn;
+  };
+  const hide = () => { pop.classList.remove('on'); open = null; };
+  document.querySelectorAll('.fa-wrap .fa-i').forEach(b => {
+    b.onclick = (e) => { e.stopPropagation(); if (open === b) hide(); else show(b); };
+    b.onmouseenter = () => show(b); b.onmouseleave = () => { if (open === b) hide(); };
+  });
+  if (!funnelState._popDoc) { funnelState._popDoc = true; document.addEventListener('click', (e) => { if (!e.target.closest('.fa-i') && !e.target.closest('.fa-pop')) hide(); }); }
+}
+
+function bindFunnelAds() {
+  const seg = document.getElementById('fa-period');
+  if (seg) seg.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    funnelState.period = b.getAttribute('data-fa-p');
+    seg.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+    loadFunnelAds();
+  });
+  const rate = document.getElementById('fa-rate');
+  if (rate) rate.addEventListener('change', () => { const v = parseFloat(rate.value) || 1400; funnelState.rate = v; loadFunnelAds(); });
+  loadFunnelAds();
+}
+window.renderFunnelAds = renderFunnelAds;
+window.bindFunnelAds = bindFunnelAds;
 
 // ===== Panel de costos del sitio (admin) =====
 let costsState = { data: null, editingId: null, adding: false, gemini: null };

@@ -792,6 +792,33 @@ function adLabelFromSource(sourceId, headline) {
   if (/regalo|clase|formaci|minicurso|comunidad|registr|apertura carrito/.test(h)) return ''; // cursos: no atribuir a carteles
   return 'Carteles B2C (b2c)'; // genérico (Chatea con nosotros / ¿Querés un cartel? / etc.)
 }
+// ===== Panel Funnel de Ads: config de campañas de carteles y clasificación por vertical =====
+// Las campañas de Meta de la cuenta "Lau - Neon" (882517310728279) mezclan carteles + cursos.
+// Estas son SOLO las de carteles, con su vertical. Las copias/optimizados son variantes A/B de la
+// misma campaña -> se agregan al mismo vertical. Confirmado 1×1 contra Meta (ad->campaign) ago 2026.
+const CARTELES_CAMPAIGNS = {
+  '120231380386180143': 'b2c',         // Carteles B2C
+  '120235712854110143': 'retargeting', // Neon carteles - RETARGETING
+  '120248560811180143': 'retargeting', // Retargeting - Interaccion - Copia
+  '120239284677530143': 'b2b',         // Neon B2B FORM - Campana
+  '120248248940760143': 'b2b',         // Neon B2B FORM - Campana - Copia
+  '120248245464960143': 'b2b',         // Neon B2B FORM - Campana - Optimizado
+  '120239191828290143': 'b2b'          // Neon B2B (inactivo)
+};
+// Vertical a partir del TEXTO de un ad (pedidos.ad o etiqueta): parsea el sufijo entre paréntesis.
+// Matchea (b2c)/(b2c*), (retargeting), (b2b)/(b2b*)/(b2b form)/(b2b(. '' si no es carteles-ad.
+function verticalOfAdText(txt) {
+  const t = String(txt || '').toLowerCase();
+  if (t.indexOf('(retarget') >= 0) return 'retargeting';
+  if (t.indexOf('(b2b') >= 0) return 'b2b';
+  if (t.indexOf('(b2c') >= 0) return 'b2c';
+  return '';
+}
+// Vertical de una atribución CTWA por su source_id (ad_id) + headline. Reusa adLabelFromSource
+// (que devuelve '' para ads de cursos) -> así los leads de cursos NO cuentan en el funnel de carteles.
+function verticalOfSource(sourceId, headline) {
+  return verticalOfAdText(adLabelFromSource(sourceId, headline));
+}
 // Traza el ad de UN pedido: encuentra el teléfono del cliente (el del pedido, o por nombre
 // en briefs) y su atribución real (CTWA source_id / formulario B2B / plantilla link-bio).
 // Devuelve {ad, telefono}. ad='' si no se pudo trazar (queda para revisar/directo).
@@ -5124,6 +5151,162 @@ async function syncMetaAdMap(env, opts = {}) {
     }
   }
   return { ok: (!error || resolved > 0), resolved, backfilled, seen, error };
+}
+
+// ===== Panel Funnel de Ads =====
+// Trae el GASTO por campaña/día desde Meta Ads (insights) y lo cachea en meta_ad_spend.
+// Necesita META_ADS_TOKEN con permiso ads_read. Guarda TODAS las campañas (el funnel filtra
+// las de carteles); granularidad diaria -> cualquier rango del panel se calcula desde acá.
+// Se corre por cron (diario, refresca ~10 días) y se puede forzar con POST /admin/ads/spend-sync.
+async function syncMetaAdSpend(env, opts = {}) {
+  const token = env.META_ADS_TOKEN || env.META_PAGE_ACCESS_TOKEN || env.IG_ACCESS_TOKEN || '';
+  if (!token) return { ok: false, error: 'no token' };
+  const acct = String(env.META_AD_ACCOUNT_ID || '882517310728279').replace(/^act_/, '');
+  const today = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10); // día AR
+  const until = String(opts.until || today).slice(0, 10);
+  const since = String(opts.since || new Date(Date.now() - 3 * 3600 * 1000 - 95 * 24 * 3600 * 1000).toISOString().slice(0, 10)).slice(0, 10);
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS meta_ad_spend (campaign_id TEXT, day TEXT, spend_usd REAL, impressions INTEGER, clicks INTEGER, updated_at TEXT, PRIMARY KEY(campaign_id, day))").run(); } catch (_) {}
+  const tr = encodeURIComponent(JSON.stringify({ since, until }));
+  let url = `https://graph.facebook.com/v21.0/act_${acct}/insights?level=campaign&fields=campaign_id,spend,impressions,clicks&time_increment=1&time_range=${tr}&limit=500&access_token=${encodeURIComponent(token)}`;
+  let count = 0, pages = 0, error = '';
+  const now = new Date().toISOString();
+  try {
+    while (url && pages < 40) {
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.error) { error = '(#' + (j.error.code || '?') + ') ' + (j.error.message || ''); break; }
+      for (const row of (j.data || [])) {
+        const cid = String(row.campaign_id || ''); const day = String(row.date_start || '');
+        if (!cid || !day) continue;
+        try {
+          await env.DB.prepare("INSERT INTO meta_ad_spend (campaign_id, day, spend_usd, impressions, clicks, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(campaign_id, day) DO UPDATE SET spend_usd=excluded.spend_usd, impressions=excluded.impressions, clicks=excluded.clicks, updated_at=excluded.updated_at")
+            .bind(cid, day, parseFloat(row.spend || 0) || 0, parseInt(row.impressions || 0) || 0, parseInt(row.clicks || 0) || 0, now).run();
+          count++;
+        } catch (_) {}
+      }
+      url = (j.paging && j.paging.next) || '';
+      pages++;
+    }
+  } catch (e) { error = String(e); }
+  return { ok: !error, count, pages, error, since, until };
+}
+
+// Arma el funnel de carteles por vertical (b2c / retargeting / b2b) para un rango [since, until].
+//   GASTO   -> meta_ad_spend (USD, sumado por vertical vía CARTELES_CAMPAIGNS)
+//   LEADS   -> wa_ad_attributions (CTWA WhatsApp): distinct teléfono, clasificado por último touch
+//              del período (regla multi-touch de Gaspar). Descarta ads de cursos.
+//   PRESUP  -> briefs enviados en el período, linkeados por teléfono -> vertical del lead (último
+//              touch histórico). Suma precio_final.
+//   VENTAS  -> pedidos con ad de carteles (sufijo de vertical), órdenes distintas (numero|fecha),
+//              ingresos = SUM(precio + precio_dimmer) REAL.
+//   MIX     -> todas las órdenes del período por origen (los 3 verticals + link bio / directo /
+//              frecuente / referido / revisar) para el gráfico "de dónde vienen las ventas".
+// CPL/CAC/ROAS convierten USD->ARS con `rate`. Todo en día calendario (fecha/enviado_at/ts ISO).
+async function buildAdsFunnel(env, opts = {}) {
+  const since = String(opts.since || '').slice(0, 10);
+  const until = String(opts.until || '').slice(0, 10); // inclusivo
+  const rate = Number(opts.rate) || 1400;
+  const untilEx = new Date(new Date(until + 'T00:00:00Z').getTime() + 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const sinceWide = new Date(new Date(since + 'T00:00:00Z').getTime() - 120 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const VS = ['b2c', 'retargeting', 'b2b'];
+  const agg = {}; VS.forEach(v => agg[v] = { vertical: v, gasto_usd: 0, leads: 0, presup: 0, presup_monto: 0, ventas: 0, ingresos: 0 });
+  const norm = p => String(p || '').replace(/[^\d]/g, '');
+
+  // ---- GASTO (meta_ad_spend, USD) por vertical ----
+  let spendUpdated = '';
+  try {
+    const rs = await env.DB.prepare("SELECT campaign_id, SUM(spend_usd) g, MAX(updated_at) u FROM meta_ad_spend WHERE day>=? AND day<=? GROUP BY campaign_id").bind(since, until).all();
+    for (const r of (rs.results || [])) {
+      const v = CARTELES_CAMPAIGNS[String(r.campaign_id)];
+      if (v && agg[v]) agg[v].gasto_usd += (r.g || 0);
+      if (r.u && r.u > spendUpdated) spendUpdated = r.u;
+    }
+  } catch (_) {}
+
+  // ---- LEADS + mapa teléfono->vertical (un solo scan de atribuciones en ventana amplia) ----
+  const phoneVert = {};
+  try {
+    const rs = await env.DB.prepare("SELECT phone, source_id, headline, ts FROM wa_ad_attributions WHERE COALESCE(source_id,'')!='' AND ts>=? AND ts<? ORDER BY phone, ts DESC").bind(sinceWide, untilEx).all();
+    const rows = rs.results || [];
+    // teléfono -> vertical del último touch (en toda la ventana): filas ya vienen ts DESC por phone
+    for (const r of rows) { const p = norm(r.phone); if (phoneVert[p] === undefined) phoneVert[p] = verticalOfSource(r.source_id, r.headline); }
+    // LEADS del período: distinct teléfono con su último touch DENTRO de [since, untilEx)
+    const seen = new Set();
+    for (const r of rows) {
+      if (String(r.ts).slice(0, 10) < since) continue; // solo touches del período
+      const p = norm(r.phone); if (seen.has(p)) continue; seen.add(p);
+      const v = verticalOfSource(r.source_id, r.headline);
+      if (v && agg[v]) agg[v].leads++;
+    }
+  } catch (_) {}
+
+  // ---- PRESUPUESTOS (briefs enviados) por vertical del lead ----
+  try {
+    const rs = await env.DB.prepare("SELECT cliente_wa_id, COALESCE(precio_final,0) pf FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<?").bind(since, untilEx).all();
+    for (const r of (rs.results || [])) {
+      const v = phoneVert[norm(r.cliente_wa_id)];
+      if (v && agg[v]) { agg[v].presup++; agg[v].presup_monto += (r.pf || 0); }
+    }
+  } catch (_) {}
+
+  // ---- VENTAS + INGRESOS + MIX (pedidos del período) ----
+  const mix = { b2c: 0, retargeting: 0, b2b: 0, linkbio: 0, directo: 0, frecuente: 0, referido: 0, revisar: 0 };
+  try {
+    const rs = await env.DB.prepare("SELECT ad, numero, fecha, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE cartel NOT LIKE '%orpore%' AND fecha>=? AND fecha<?").bind(since, untilEx).all();
+    const ordVenta = {}; VS.forEach(v => ordVenta[v] = new Set());
+    const ordMix = new Set();
+    for (const r of (rs.results || [])) {
+      const k = String(r.numero) + '|' + String(r.fecha);
+      const v = verticalOfAdText(r.ad);
+      if (v && agg[v]) {
+        agg[v].ingresos += (r.monto || 0);
+        if (!ordVenta[v].has(k)) { ordVenta[v].add(k); agg[v].ventas++; }
+      }
+      // MIX: una vez por orden
+      if (!ordMix.has(k)) {
+        ordMix.add(k);
+        const t = String(r.ad || '').toLowerCase();
+        if (v) mix[v]++;
+        else if (t.indexOf('revisar') === 0) mix.revisar++;
+        else if (t.indexOf('link bio') >= 0) mix.linkbio++;
+        else if (t.indexOf('frecuente') >= 0) mix.frecuente++;
+        else if (t.indexOf('referido') >= 0) mix.referido++;
+        else if (t.indexOf('directo') >= 0) mix.directo++;
+        else mix.revisar++; // vacío / sin trazar -> a revisar
+      }
+    }
+  } catch (_) {}
+
+  // ---- métricas derivadas ----
+  const rows = VS.map(v => {
+    const a = agg[v];
+    const gastoA = a.gasto_usd * rate;
+    return {
+      vertical: v,
+      gasto_usd: Math.round(a.gasto_usd * 100) / 100,
+      gasto_ars: Math.round(gastoA),
+      leads: a.leads,
+      cpl: a.leads ? Math.round(gastoA / a.leads) : null,
+      presup: a.presup,
+      presup_monto: Math.round(a.presup_monto),
+      lp: a.leads ? a.presup / a.leads : null,
+      ventas: a.ventas,
+      pv: a.presup ? a.ventas / a.presup : null,
+      cac: a.ventas ? Math.round(gastoA / a.ventas) : null,
+      ingresos: Math.round(a.ingresos),
+      roas: gastoA ? a.ingresos / gastoA : null
+    };
+  });
+  const T = rows.reduce((o, r) => ({ gasto_usd: o.gasto_usd + r.gasto_usd, gasto_ars: o.gasto_ars + r.gasto_ars, leads: o.leads + r.leads, presup: o.presup + r.presup, presup_monto: o.presup_monto + r.presup_monto, ventas: o.ventas + r.ventas, ingresos: o.ingresos + r.ingresos }), { gasto_usd: 0, gasto_ars: 0, leads: 0, presup: 0, presup_monto: 0, ventas: 0, ingresos: 0 });
+  const total = Object.assign({}, T, {
+    gasto_usd: Math.round(T.gasto_usd * 100) / 100,
+    cpl: T.leads ? Math.round(T.gasto_ars / T.leads) : null,
+    lp: T.leads ? T.presup / T.leads : null,
+    pv: T.presup ? T.ventas / T.presup : null,
+    cac: T.ventas ? Math.round(T.gasto_ars / T.ventas) : null,
+    roas: T.gasto_ars ? T.ingresos / T.gasto_ars : null
+  });
+  return { ok: true, since, until, rate, rows, total, mix, spend_updated: spendUpdated };
 }
 
 // Texto REAL del mensaje de bienvenida que ManyChat manda automáticamente a cada nuevo
@@ -13224,6 +13407,26 @@ const handler = {
         return json({ ok: true, trazados, sync });
       }
 
+      // GET /admin/ads/funnel?since=&until=&rate= → funnel de carteles por vertical (panel de control).
+      // Cruza el gasto de Meta (meta_ad_spend) con leads/presupuestos/ventas de D1. Solo Gaspar.
+      if (request.method === 'GET' && path === '/admin/ads/funnel') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const today = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+        const since = url.searchParams.get('since') || (today.slice(0, 7) + '-01');
+        const until = url.searchParams.get('until') || today;
+        const rate = parseFloat(url.searchParams.get('rate') || '') || 1400;
+        const data = await buildAdsFunnel(env, { since, until, rate });
+        return json(data);
+      }
+
+      // POST /admin/ads/spend-sync {since,until} → trae el gasto de Meta Ads a meta_ad_spend. Solo Gaspar.
+      if (request.method === 'POST' && path === '/admin/ads/spend-sync') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let b = {}; try { b = await request.json(); } catch (_) {}
+        const res = await syncMetaAdSpend(env, { since: b.since, until: b.until });
+        return json(res, res.ok ? 200 : 502);
+      }
+
       // GET /admin/pedidos/mirror-debug → testea el path POST worker→Apps Script con un
       // pedido_ping (NO escribe nada) y reporta si llegó al doPost. Diagnóstico.
       if (request.method === 'GET' && path === '/admin/pedidos/mirror-debug') {
@@ -14099,6 +14302,9 @@ const handler = {
     // Sync del mapa de campañas de Meta para los leads de CTWA (WhatsApp): resuelve el ad_id de la
     // referral -> nombre de campaña/ad y backfillea wa_ad_attributions (venía siempre NULL). Diario.
     if (hour === 13) ctx.waitUntil(syncMetaAdMap(env));
+    // Sync diario del GASTO de Meta por campaña -> meta_ad_spend (panel Funnel de Ads). Refresca
+    // los últimos ~10 días (Meta ajusta el gasto hasta ~72h). No-op sin META_ADS_TOKEN.
+    if (hour === 13) ctx.waitUntil(syncMetaAdSpend(env, { since: new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString().slice(0, 10) }));
     // Follow-up automático de presupuestos del cotizador: solo horario hábil AR (8-20).
     // Usa hAR (calculado más arriba en este mismo handler) para consistencia
     // con processCursosFollowup/processMinicursoFollowup.
