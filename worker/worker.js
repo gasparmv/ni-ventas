@@ -771,6 +771,105 @@ async function importNewPedidosFromVentas(env) {
     return stmts.length;
   } catch (e) { return 0; }
 }
+
+// ===== Trazabilidad automática de ads en pedidos =====
+// Mapa ad_id (source_id de CTWA) -> etiqueta. Los que no están se clasifican por headline.
+const AD_LABELS = {
+  '120248733337930143':'El neon es una mierda (b2c)','120248733349900143':'El neon es una mierda (b2c)',
+  '120248733357530143':'Te sobran 5 millones (b2c)','120248733382170143':'Locales nuevo - corto (b2c)',
+  '120248733382130143':'Locales (b2c)','120248733382120143':'Locales (b2c)','120248733382140143':'Tenes que llamar la atencion (b2c)',
+  '120248733357550143':'Tu local no para de perder plata (b2c)','120238865043590143':'comenta neon (b2c)',
+  '120236526127800143':'Diseno gratis (retargeting)','120236526218410143':'tu logo en neon (retargeting)',
+  '120244506326770143':'Mostranos tu Local (retargeting)','120244506326740143':'Tu Marca en Neon Led (retargeting)',
+  '120245296257830143':'COPA-REGALO (retargeting)','120243515675710143':'antes y despues (retargeting)',
+  '120243077278850143':'Franquicias - resolver (b2b)','120239287134360143':'Tercerizacion (b2b)',
+  '120239287396020143':'Franquicias (b2b)','120242991012990143':'Reventa (b2b)'
+};
+function adLabelFromSource(sourceId, headline) {
+  if (AD_LABELS[sourceId]) return AD_LABELS[sourceId];
+  const h = String(headline || '').toLowerCase();
+  if (/franquicia|tercerizaci|evento|reventa|\bb2b\b/.test(h)) return 'Carteles B2B (b2b)';
+  if (/regalo|clase|formaci|minicurso|comunidad|registr|apertura carrito/.test(h)) return ''; // cursos: no atribuir a carteles
+  return 'Carteles B2C (b2c)'; // genérico (Chatea con nosotros / ¿Querés un cartel? / etc.)
+}
+// Traza el ad de UN pedido: encuentra el teléfono del cliente (el del pedido, o por nombre
+// en briefs) y su atribución real (CTWA source_id / formulario B2B / plantilla link-bio).
+// Devuelve {ad, telefono}. ad='' si no se pudo trazar (queda para revisar/directo).
+async function traceAdForPedido(env, pedido) {
+  const cartel = String(pedido.cartel || '').trim();
+  let phone = String(pedido.telefono || '').replace(/[^\d]/g, '');
+  if (!phone && cartel.length > 2) {
+    try {
+      const b = await env.DB.prepare("SELECT cliente_wa_id FROM briefs WHERE lower(trim(cliente_nombre))=lower(trim(?)) AND COALESCE(cliente_wa_id,'')!='' ORDER BY id DESC LIMIT 1").bind(cartel).first();
+      if (b && b.cliente_wa_id) phone = String(b.cliente_wa_id).replace(/[^\d]/g, '');
+    } catch (_) {}
+  }
+  if (!phone) return { ad: '', telefono: '' };
+  let ad = '';
+  try {
+    const a = await env.DB.prepare("SELECT source_id, headline FROM wa_ad_attributions WHERE phone=? AND COALESCE(source_id,'')!='' ORDER BY ts ASC LIMIT 1").bind(phone).first();
+    if (a && a.source_id) ad = adLabelFromSource(a.source_id, a.headline);
+  } catch (_) {}
+  if (!ad) {
+    try {
+      const l = await env.DB.prepare("SELECT ad_name FROM wa_leads WHERE phone=? AND COALESCE(ad_id,'')!='' ORDER BY id DESC LIMIT 1").bind(phone).first();
+      if (l && l.ad_name) ad = String(l.ad_name).split(' - B2B')[0].trim() + ' (b2b form)';
+    } catch (_) {}
+  }
+  if (!ad) {
+    try {
+      const lb = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone=? AND direction='inbound' AND lower(body) LIKE '%pedido personalizado en neon%' LIMIT 1").bind(phone).first();
+      if (lb) ad = 'Link bio perfil ig';
+    } catch (_) {}
+  }
+  return { ad, telefono: phone };
+}
+// Cron: barre los pedidos de carteles SIN ad (recientes) y los traza automáticamente.
+// Rellena pedidos.ad + pedidos.telefono en D1. Devuelve cuántos trazó.
+async function traceUntaggedPedidos(env) {
+  let n = 0;
+  try {
+    const rows = await env.DB.prepare("SELECT id, cartel, numero, telefono FROM pedidos WHERE COALESCE(ad,'')='' AND cartel NOT LIKE '%orpore%' AND fecha >= date('now','-120 days') LIMIT 30").all();
+    for (const p of (rows.results || [])) {
+      const t = await traceAdForPedido(env, p);
+      if (t.ad) {
+        await env.DB.prepare("UPDATE pedidos SET ad=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END WHERE id=?").bind(t.ad, t.telefono, p.id).run();
+        n++;
+      } else if (t.telefono) {
+        await env.DB.prepare("UPDATE pedidos SET telefono=? WHERE id=? AND COALESCE(telefono,'')=''").bind(t.telefono, p.id).run();
+      }
+    }
+  } catch (_) {}
+  return n;
+}
+// Cron: sincroniza la columna Ad (U) del Excel de Ventas desde D1, matcheando por NOMBRE
+// de cartel (NO por sheet_row, que se desalinea si se borran/mueven filas). Solo rellena
+// celdas U vacías -> no pisa etiquetas ya cargadas. Drift-proof.
+async function syncAdColumnToExcel(env) {
+  if (!env.APPS_SCRIPT_URL) return { skipped: 'no url' };
+  try {
+    const d1 = await env.DB.prepare("SELECT cartel, ad FROM pedidos WHERE COALESCE(ad,'')!='' AND cartel NOT LIKE '%orpore%'").all();
+    const byCartel = {};
+    for (const r of (d1.results || [])) { const k = String(r.cartel || '').trim().toLowerCase(); if (k && !byCartel[k]) byCartel[k] = r.ad; }
+    const VENTAS_SID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
+    const r = await fetch(`https://docs.google.com/spreadsheets/d/${VENTAS_SID}/gviz/tq?tqx=out:csv&sheet=2026`);
+    if (!r.ok) return { error: 'csv ' + r.status };
+    const rows = parseCsv(await r.text());
+    const items = [];
+    for (let i = 1; i < rows.length; i++) {
+      const cartel = String((rows[i][2] || '')).trim().toLowerCase();
+      const curU = String((rows[i][20] || '')).trim();
+      if (cartel && byCartel[cartel] && curU === '') items.push({ row: i + 1, ad: byCartel[cartel] });
+    }
+    if (!items.length) return { written: 0 };
+    let written = 0;
+    for (let j = 0; j < items.length; j += 100) {
+      const jr = await appsScriptPost(env, { action: 'set_ad_bulk', col: 21, items: items.slice(j, j + 100) });
+      written += (jr && jr.written) || 0;
+    }
+    return { written };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
 // ISO "YYYY-MM-DD" → "D/M/YYYY" (formato del Excel de Ventas).
 function pedidoFechaToExcel(iso) {
   const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -13116,6 +13215,15 @@ const handler = {
         return json({ ok: true, result });
       }
 
+      // POST /admin/pedidos/trace-ads → traza los pedidos sin ad (cliente -> atribución real)
+      // y sincroniza la columna Ad del Excel (match por nombre). Corre solo por cron; esto
+      // lo fuerza a mano. Idempotente (solo toca pedidos sin ad y celdas U vacías).
+      if (request.method === 'POST' && path === '/admin/pedidos/trace-ads') {
+        const trazados = await traceUntaggedPedidos(env);
+        const sync = await syncAdColumnToExcel(env);
+        return json({ ok: true, trazados, sync });
+      }
+
       // GET /admin/pedidos/mirror-debug → testea el path POST worker→Apps Script con un
       // pedido_ping (NO escribe nada) y reporta si llegó al doPost. Diagnóstico.
       if (request.method === 'GET' && path === '/admin/pedidos/mirror-debug') {
@@ -13969,8 +14077,13 @@ const handler = {
     ctx.waitUntil(igMaybeRefreshToken(env));
     // Cada ~30 min: traer del Excel de Ventas el campo `productor` (Gaspar lo carga ahí).
     if (new Date().getUTCMinutes() % 30 < 5) ctx.waitUntil(syncProductoresFromVentas(env));
-    // Cada ~15 min: importar al CRM los pedidos nuevos cargados a mano en el Excel.
-    if (new Date().getUTCMinutes() % 15 < 5) ctx.waitUntil(importNewPedidosFromVentas(env));
+    // Cada ~15 min: importar los pedidos nuevos del Excel -> trazarles el ad automáticamente.
+    if (new Date().getUTCMinutes() % 15 < 5) ctx.waitUntil((async () => {
+      try { await importNewPedidosFromVentas(env); } catch (_) {}
+      try { await traceUntaggedPedidos(env); } catch (_) {}
+    })());
+    // 1×/hora: sincronizar la columna Ad al Excel desde D1 (match por nombre, drift-proof, solo huecos).
+    if (new Date().getUTCMinutes() < 5) ctx.waitUntil(syncAdColumnToExcel(env));
     // Follow-ups en horario hábil AR (8-20): campaña de cursos + minicurso (4h sin responder).
     const hAR = (new Date(event.scheduledTime).getUTCHours() - 3 + 24) % 24;
     if (hAR >= 8 && hAR < 20) {
