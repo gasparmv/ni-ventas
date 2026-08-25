@@ -2214,6 +2214,147 @@ function startSinCotizarWatch() {
   fetchSinCotizarStatus();
   setInterval(() => { if (!pollBackoffActive()) fetchSinCotizarStatus(); }, 75000);
 }
+// ===== Modal "Crear OC" (Orden de Compra) — a pedido de Gaspar (ago-2026) =====
+// Arma la Orden de Compra desde un formulario (en vez de tipearla a mano), muestra un
+// PREVIEW editable y la manda al cliente por el chat con sendChatMessage. Al salir, el
+// backend ya la detecta (processOrdenesCompra): etiqueta POR PAGAR + aviso a Gaspar +
+// popup + vigilador de pago. Fase 1: SOLO front, auto-contenido (no toca el modal de pedidos).
+const OC_FONDO_OPTS = ['Transparente', 'Negro', 'Espejo', 'Transparente y vinilo'];
+const OC_CONTROLADOR_OPTS = ['no', 'slim', 'control remoto', 'app'];
+const OC_CONTROLADOR_PRECIO = { 'no': 0, 'slim': 18700, 'control remoto': 25000, 'app': 38000 };
+const OC_DATOS_PAGO = 'Datos de pago:\nMELINA VICTORIA TOGNOCCHI\nCBU: 3840200500000051390011\nAlias: neoninfinito.ok\nBanco: Ualá Bank S.A.U.';
+function ocMoney(n) { const x = Number(n) || 0; return '$' + String(x).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+function ocCalcTotales(m) {
+  const precio = Number(String(m.precio).replace(/\D/g, '')) || 0;
+  const ctrl = OC_CONTROLADOR_PRECIO[m.controlador] || 0;
+  const total = precio + ctrl;
+  return { total, sena: Math.round(total / 2) };
+}
+function openCrearOcModal() {
+  if (!canCotizar()) return;
+  const phone = chatState.selectedPhone;
+  if (!phone) { toast('Abrí el chat del cliente primero'); return; }
+  const digits = String(phone).replace(/\D/g, '');
+  const esIG = digits.length > 14;
+  STATE.ocModal = {
+    numero: '', plataforma: esIG ? 'Instagram' : 'Whatsapp',
+    cartel: '', medidas: '', color: '', fondo: 'Transparente', precio: '', controlador: 'no',
+    ubicacion: 'interior', total: '', sena: '', texto: ''
+  };
+  STATE.ocModalOpen = true; STATE.ocModalSaving = false;
+  render();
+  setTimeout(() => { const el = document.getElementById('oc-cartel'); if (el) el.focus(); }, 60);
+}
+function cancelCrearOc() { STATE.ocModalOpen = false; render(); }
+// Compone el texto de la OC en el formato de la guía (arranca "Orden de compra:" y trae
+// Trabajo:/Total: que el backend necesita para detectarla y parsearla).
+function composeOcText(m) {
+  const { total, sena } = ocCalcTotales(m);
+  const totalUse = String(m.total).replace(/\D/g, '') ? Number(String(m.total).replace(/\D/g, '')) : total;
+  const senaUse = String(m.sena).replace(/\D/g, '') ? Number(String(m.sena).replace(/\D/g, '')) : sena;
+  const precioN = Number(String(m.precio).replace(/\D/g, '')) || 0;
+  const L = [];
+  L.push('Orden de compra:' + (String(m.numero).trim() ? ' Nro ' + String(m.numero).trim() : ''));
+  L.push('Plataforma: ' + m.plataforma);
+  L.push('Trabajo: ' + (m.cartel || ''));
+  L.push('Medidas: ' + (m.medidas || ''));
+  L.push('Color: ' + (m.color || ''));
+  L.push('Fondo: ' + (m.fondo || ''));
+  L.push('Precio: ' + ocMoney(precioN));
+  L.push('Controlador: ' + (m.controlador || 'no'));
+  L.push('Ubicación: ' + (m.ubicacion || ''));
+  L.push('Total: ' + ocMoney(totalUse));
+  L.push('Seña del 50%: ' + ocMoney(senaUse));
+  L.push('');
+  L.push(OC_DATOS_PAGO);
+  return L.join('\n');
+}
+function readOcModalDOM() {
+  const m = STATE.ocModal; if (!m) return;
+  const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
+  ['numero', 'cartel', 'medidas', 'color', 'fondo', 'ubicacion', 'precio', 'controlador', 'total', 'sena', 'texto'].forEach(f => { const x = v('oc-' + f); if (x !== undefined) m[f] = x; });
+}
+function renderCrearOcModal() {
+  if (!STATE.ocModalOpen || !STATE.ocModal) return '';
+  const m = STATE.ocModal;
+  const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;color:var(--fg);font-size:13px';
+  const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
+  const { total, sena } = ocCalcTotales(m);
+  const fondoOpts = OC_FONDO_OPTS.map(o => `<option ${m.fondo === o ? 'selected' : ''}>${o}</option>`).join('');
+  const ctrlOpts = OC_CONTROLADOR_OPTS.map(o => `<option ${m.controlador === o ? 'selected' : ''}>${o}</option>`).join('');
+  return `
+    <div id="oc-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:290;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
+      <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:560px;width:100%;margin:auto;padding:var(--s-4)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
+          <h2 style="margin:0;font-size:16px">🧾 Crear orden de compra</h2>
+          <button id="oc-close" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <div style="width:110px"><label style="${lbl}">N° OC</label><input id="oc-numero" value="${escapeHtml(String(m.numero || ''))}" placeholder="opcional" style="${inp}"></div>
+          <div style="flex:1"><label style="${lbl}">Plataforma</label><input value="${escapeHtml(m.plataforma)}" disabled style="${inp};opacity:.6"></div>
+        </div>
+        <div style="margin-bottom:8px"><label style="${lbl}">Trabajo / cartel *</label><input id="oc-cartel" value="${escapeHtml(m.cartel || '')}" placeholder="ej. Perfumería" style="${inp}"></div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <div style="flex:1"><label style="${lbl}">Medidas *</label><input id="oc-medidas" value="${escapeHtml(m.medidas || '')}" placeholder="ej. 80x70" style="${inp}"></div>
+          <div style="flex:1"><label style="${lbl}">Color *</label><input id="oc-color" value="${escapeHtml(m.color || '')}" placeholder="ej. Blanco cálido" style="${inp}"></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <div style="flex:1"><label style="${lbl}">Fondo</label><select id="oc-fondo" style="${inp}">${fondoOpts}</select></div>
+          <div style="flex:1"><label style="${lbl}">Ubicación</label><input id="oc-ubicacion" value="${escapeHtml(m.ubicacion || '')}" placeholder="interior / exterior" style="${inp}"></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <div style="flex:1"><label style="${lbl}">Precio cartel * $</label><input id="oc-precio" type="number" value="${escapeHtml(String(m.precio || ''))}" style="${inp}" data-oc-calc></div>
+          <div style="flex:1"><label style="${lbl}">Controlador</label><select id="oc-controlador" style="${inp}" data-oc-calc>${ctrlOpts}</select></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <div style="flex:1"><label style="${lbl}">Total (auto, editable) $</label><input id="oc-total" type="number" value="${escapeHtml(String(m.total || ''))}" placeholder="${total}" style="${inp}"></div>
+          <div style="flex:1"><label style="${lbl}">Seña 50% (auto, editable) $</label><input id="oc-sena" type="number" value="${escapeHtml(String(m.sena || ''))}" placeholder="${sena}" style="${inp}"></div>
+        </div>
+        <button id="oc-gen" class="btn btn-ghost" style="width:100%;margin-bottom:6px;font-size:12px">🔄 Generar / actualizar el texto de la OC</button>
+        <label style="${lbl}">Texto que se le manda al cliente (revisalo / editalo)</label>
+        <textarea id="oc-texto" style="${inp};min-height:190px;font-family:inherit;line-height:1.45">${escapeHtml(m.texto || composeOcText(m))}</textarea>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:var(--s-3);padding-top:var(--s-2);border-top:1px solid var(--border)">
+          <button id="oc-cancel" class="btn btn-ghost">Cancelar</button>
+          <button id="oc-confirm" class="btn btn-cyan">${STATE.ocModalSaving ? 'Enviando…' : '🧾 Enviar OC al cliente'}</button>
+        </div>
+      </div>
+    </div>`;
+}
+function bindCrearOcModal() {
+  if (!STATE.ocModalOpen) return;
+  const c1 = document.getElementById('oc-close'); if (c1) c1.onclick = cancelCrearOc;
+  const c2 = document.getElementById('oc-cancel'); if (c2) c2.onclick = cancelCrearOc;
+  const bk = document.getElementById('oc-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'oc-backdrop') cancelCrearOc(); };
+  // Al tocar precio/controlador, sugerir total+seña en el placeholder (sin re-render, no pierde foco).
+  document.querySelectorAll('[data-oc-calc]').forEach(el => el.addEventListener('input', () => {
+    readOcModalDOM();
+    const { total, sena } = ocCalcTotales(STATE.ocModal);
+    const tE = document.getElementById('oc-total'); if (tE && !tE.value) tE.placeholder = String(total);
+    const sE = document.getElementById('oc-sena'); if (sE && !sE.value) sE.placeholder = String(sena);
+  }));
+  const gen = document.getElementById('oc-gen'); if (gen) gen.onclick = () => { readOcModalDOM(); STATE.ocModal.texto = composeOcText(STATE.ocModal); render(); };
+  const cf = document.getElementById('oc-confirm'); if (cf) cf.onclick = confirmCrearOc;
+}
+async function confirmCrearOc() {
+  if (STATE.ocModalSaving) return;
+  readOcModalDOM();
+  const m = STATE.ocModal;
+  const phone = chatState.selectedPhone;
+  if (!phone) { toast('No hay chat abierto'); return; }
+  let texto = String(m.texto || '').trim();
+  if (!texto) texto = composeOcText(m);
+  if (!/Orden de compra:/.test(texto)) { toast('El texto debe empezar con "Orden de compra:" para que el sistema la detecte'); return; }
+  if (!/Trabajo\s*:/i.test(texto) || !/(Total|Precio)\s*:/i.test(texto)) { toast('Falta "Trabajo:" o "Total:" en el texto de la OC'); return; }
+  STATE.ocModalSaving = true; render();
+  try {
+    await sendChatMessage(phone, texto);
+    STATE.ocModalOpen = false; STATE.ocModalSaving = false; render();
+    toast('OC enviada ✓ — se etiqueta POR PAGAR y quedás avisado');
+  } catch (e) {
+    STATE.ocModalSaving = false; render();
+    toast('Error al enviar la OC: ' + (e && e.message || e));
+  }
+}
 function renderSinCotizarModal() {
   if (!_sinCotizarShouldShow()) return '';
   const sc = STATE.sinCotizar;
@@ -2451,6 +2592,7 @@ function renderShell() {
     <div id="toast" class="toast"></div>
     ${renderSinCotizarModal()}
     ${renderOcUrgenteModal()}
+    ${renderCrearOcModal()}
   `;
 }
 
@@ -9789,6 +9931,7 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
+        ${canCotizar() ? `<button class="btn btn-cyan" id="btn-chat-oc" title="Crear la Orden de Compra y enviarla al cliente (se etiqueta POR PAGAR y quedás avisado)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 Crear OC</button>` : ''}
         ${(getUserRole() === 'comercial') ? (() => {
           const _lbls = chatState.labels || [];
           const _pre = _lbls.find(l => l.name === '🤖 Precotización');
@@ -11441,6 +11584,8 @@ function bindChatConversation() {
   // ese modal por si quedó abierto tras este render.
   const chatBriefBtn = document.getElementById('btn-chat-brief');
   if (chatBriefBtn) chatBriefBtn.onclick = chooseBriefTypeFromChat;
+  const chatOcBtn = document.getElementById('btn-chat-oc');
+  if (chatOcBtn) chatOcBtn.onclick = openCrearOcModal;
   const frenarBotBtn = document.getElementById('btn-frenar-bot');
   if (frenarBotBtn) frenarBotBtn.onclick = async () => {
     const _ph = chatState.selectedPhone;
@@ -11456,6 +11601,7 @@ function bindChatConversation() {
     render();
   };
   bindQuickCreateModal();
+  bindCrearOcModal();
   const backBtn = document.getElementById('chat-back-btn');
   bindChatPostit();
   // Hidratar los bubbles recién renderizados: inyectar acciones (chevron + iconos
@@ -17301,6 +17447,7 @@ function bindCotizacion() {
 
   // ===== Quick-create modal (paste/drop sobre A cotizar) =====
   bindQuickCreateModal();
+  bindCrearOcModal();
 
   // ===== Team chat widget (flotante) =====
   const fab = document.getElementById('team-chat-fab');
