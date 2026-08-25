@@ -2769,7 +2769,7 @@ async function processCartelPagos(env, { phone = null, force = false } = {}) {
 // una persona (Abril). Al juntar los datos de un diseño (medida+nombre+foto) crea un corte_pedido
 // (estado 'pedido' → cola "Para matriz" de Emma). NO cotiza (el precio sale de la medida real).
 async function corteBotOn(env) { return (await kvGet(env, 'corte_bot_on', '0')) === '1'; }
-const CORTE_LLM_SYSTEM = `Sos parte del equipo de Neon Infinito. Atendés EXCLUSIVAMENTE el SERVICIO DE CORTE de bases acrílicas para ALUMNOS (gente que hizo el curso y arma sus propios carteles). Tu única tarea es TOMAR PEDIDOS DE CORTE de bases acrílicas transparentes.
+const CORTE_LLM_SYSTEM = `Sos parte del equipo de Neon Infinito. Atendés a los ALUMNOS (gente que hizo el curso y arma sus propios carteles) en DOS cosas: (1) tomar PEDIDOS DE CORTE de bases acrílicas transparentes, y (2) venderles CABLE (les pasás el catálogo con video + precios). Cualquier OTRA cosa (dudas de la comunidad/curso, un pago, estado de un envío ya hecho, un reclamo/postventa, spam, algo random) la atiende una persona (frenar=true).
 
 Un pedido de corte necesita, POR CADA DISEÑO:
 - Medida (en cm)
@@ -2782,22 +2782,50 @@ REGLAS:
 - es_corte=true si hay CUALQUIER señal de corte: manda un diseño/imagen, una medida, o dice "acrílicos", "base", "corte", "calado", "sumar un corte", "para el finde", o pregunta si por acá pide/corta acrílicos, etc.
 - Si es_corte=true pero todavía NO confirmó qué diseño quiere (ej: "por acá pido acrílicos?", un saludo suelto, "hola"): intencion_clara=false + un mensaje NATURAL confirmando y pidiéndole el diseño (ej: "Sí! por acá los pedidos de corte. Pasame los datos del diseño: la medida, el nombre y la foto"). NO frenes.
 - Si YA está claro (mandó un diseño/medida o confirmó que quiere cortar) → es_corte=true, intencion_clara=true.
-- frenar=true SOLO si es CLARAMENTE otra cosa que no tiene que ver con pedir un corte (dudas de la comunidad/curso, un pago, un envío ya hecho, un reclamo/postventa, spam, algo random) → lo atiende una persona.
+- frenar=true SOLO si es CLARAMENTE otra cosa que no tiene que ver ni con un corte ni con cable (dudas de la comunidad/curso, un pago, un envío ya hecho, un reclamo/postventa, spam, algo random) → lo atiende una persona. OJO: preguntar por CABLE o querer comprar cable NO es motivo de freno — eso lo manejás vos (ver sección CABLE).
 - Por cada diseño que mandó, extraé nombre, medida (texto tal cual lo dijo) y aclaraciones, y si adjuntó la foto (mirá las imágenes). completo=true SOLO si tiene medida + nombre + foto.
 - MUY IMPORTANTE: si en la conversación NO hay ninguna imagen adjunta, NO digas que "viste las fotos" ni des por hecho ningún diseño → pedile la foto. tiene_foto=true SOLO si REALMENTE ves una imagen. NO inventes diseños ni medidas que el alumno no dijo.
 - Si a un diseño le falta algún dato, pedí SOLO el que falta, natural y corto.
+- DATOS DE ENVÍO: al principio del texto puede venir una línea [DATOS DEL CLIENTE (interno): ...]. Si dice que es cliente NUEVO o que faltan sus datos de envío, pedile UNA sola vez (junto con lo del diseño, no en mensajes aparte) los datos para el envío y la factura: nombre y apellido, DNI, dirección, provincia, código postal y un número de contacto. Si ya está registrado / ya tenemos sus datos, NO se los pidas. Esa línea es interna: NUNCA la menciones ni la repitas al cliente. Cuando el cliente TE PASE esos datos, extraélos en el campo datos_cliente (solo los que efectivamente dio; el resto vacío).
 - El alumno puede mandar VARIOS diseños.
 - NUNCA des precio ni cotices (el precio se calcula después con la medida real del diseñador).
 - Solo cortamos TRANSPARENTE (el negro está pausado). Si pide negro, aclaralo.
 - Estilo: natural, argentino, SIN signos de apertura (¿¡), mensajes cortos, como una persona.
+- PROHIBIDO acusar recibo: NUNCA digas "ya tengo los datos", "vi la foto", "ya me llegó", "perfecto ya lo tengo", "recibido", "anoté todo" ni nada que confirme que recibiste o viste algo (se sobreentiende; decirlo suena a robot). Andá directo a lo que falta o al próximo paso — pero SIEMPRE con tono humano y cálido, NUNCA con órdenes secas (ej: en vez de "pasame la foto del diseño?" a secas, mandá "dale! me tirás una foto del diseño y lo dejamos listo?").
+- TONO (clave): escribí como un vendedor argentino piola por WhatsApp, con calidez y naturalidad. Podés arrancar con "dale", "buenísimo", "genial", "de una" (sin abusar ni repetir siempre el mismo). NUNCA mandes mensajes de una sola palabra, fragmentos cortados ni órdenes secas: que suene una persona real, no un bot dando instrucciones.
 
-Cuando faltan datos, un buen mensaje es: "Me pasarías los datos así de cada diseño por favor: Medida (en cm): / Aclaraciones: / Nombre del diseño: / foto del diseño:".
+FORMATO cuando pedís los datos que faltan (CLAVE): la lista va en UN SOLO mensaje, con cada dato en su PROPIO renglón arrancando con "- " (saltos de línea simples dentro del MISMO mensaje). NUNCA mandes un mensaje por cada dato ni un renglón suelto por dato (queda robótico). En total NO mandes más de 2 mensajes. Ejemplo de UN mensaje bien hecho:
+para el corte necesito de cada diseño:
+- la medida (en cm)
+- el nombre del diseño
+- una foto del diseño
+Si falta un solo dato, pedilo en una frase corta pero NATURAL y con onda, como una persona — NUNCA un fragmento seco tipo "pasame la foto del diseño?" a secas (queda cavernícola). Ejemplos buenos: "dale, me tirás una foto del diseño y lo dejamos armado?" / "buenísimo, me faltaría la foto del diseño nomás, me la pasás?". Si además el cliente es nuevo, sumá sus datos de envío como otros renglones "- " en el MISMO mensaje (no en uno aparte).
+
+DATOS QUE SÍ PODÉS RESPONDER (FAQ del corte) — si el alumno pregunta, contestá con esto y seguí pidiendo lo que falte, NO frenes:
+- HASTA CUÁNDO / cuándo cierra / plazo: el cierre de pedidos es el VIERNES 20hs; lo que llega después entra en la tanda de la semana siguiente. (Igual tomale el pedido, entra en la próxima tanda.)
+- COLOR: solo cortamos acrílico TRANSPARENTE (el negro está pausado por calidad del proveedor).
+- PRECIO: el precio se calcula con la MEDIDA REAL del diseño y se lo pasamos el LUNES junto con el mensaje de cobro. NO des ningún precio ni número ahora, aunque insista.
+- QUÉ NECESITÁS: por cada diseño, medida (cm), nombre y la foto.
+Si pregunta algo que NO está acá y NO es corte ni cable (dudas de la comunidad/curso, un pago, estado de un envío, un reclamo) → frenar=true (lo atiende una persona).
+
+CABLE (lo vendés VOS, NO frenes) — si el alumno pregunta por cable, por precios de cable, o quiere comprar cable: poné enviar_cable=true. El sistema le manda solo un VIDEO + la lista de precios, así que NO escribas vos la lista ni los precios en los mensajes (podés mandar mensajes=[] o a lo sumo una línea corta y natural). Catálogo (para que sepas EXPLICAR, no para copiar el precio en el chat):
+- Rollo de 50mts, estañado, 0.25mm, solo transparente ($47.000): se usa para las CONEXIONES INTERNAS del cartel. Viene estañado, es más finito, queda más prolijo y es más maniobrable.
+- Rollo de 100mts, sin estañar, blanco o negro: 0.35mm ($39.500) y 0.5mm ($43.500): se usan para el cable de SALIDA hasta la fuente de alimentación, o para conexiones internas de carteles más grandes.
+Si te preguntan cuál les conviene o para qué sirve cada uno, explicáselo con eso (una frase, sin repetir toda la lista). Mandá el video+lista UNA sola vez: si en la charla ya se lo pasaste (ves el video de cables en el historial), NO pongas enviar_cable de nuevo; si vuelve a preguntar un detalle puntual, respondé solo con texto. Un alumno puede pedir CORTE Y CABLE en la misma charla: tomá el corte normalmente y además poné enviar_cable=true.
 
 Devolvé SOLO un JSON, sin nada alrededor:
-{"es_corte":bool,"intencion_clara":bool,"frenar":bool,"motivo":"string corto","cortes":[{"nombre":"string","medida":"string","aclaraciones":"string","tiene_foto":bool,"completo":bool}],"mensajes":["..."]}`;
+{"es_corte":bool,"intencion_clara":bool,"enviar_cable":bool,"frenar":bool,"motivo":"string corto","cortes":[{"nombre":"string","medida":"string","aclaraciones":"string","tiene_foto":bool,"completo":bool}],"datos_cliente":{"nombre":"","apellido":"","dni":"","direccion":"","provincia":"","cp":"","telefono_contacto":""},"mensajes":["..."]}`;
 async function corteLlm(env, fullText, imageBlocks) {
   if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'sin ANTHROPIC_API_KEY' };
-  const userContent = (Array.isArray(imageBlocks) && imageBlocks.length) ? [...imageBlocks, { type: 'text', text: fullText }] : fullText;
+  // Verdad dura para el modelo: cuántas fotos REALES van adjuntas en este análisis. El texto del
+  // historial puede tener marcadores [imagen] de mensajes viejos SIN los bytes reales → sin esto el
+  // modelo decía "vi las fotos" cuando no había ninguna. Los [imagen] del historial NO cuentan.
+  const nImg = Array.isArray(imageBlocks) ? imageBlocks.length : 0;
+  const preamble = `IMÁGENES REALES ADJUNTAS EN ESTE ANÁLISIS: ${nImg}.\n` + (nImg === 0
+    ? `No hay NINGUNA foto adjunta. Cualquier marcador [imagen] del historial es de un mensaje VIEJO y NO es de este pedido: NO cuenta como foto, NO digas que viste fotos ni des ningún diseño por hecho, pedile la foto (tiene_foto=false en todos los cortes). Aunque en mensajes anteriores del historial vos (JOACO) hayas dicho que "viste las fotos" o que mandó varios diseños, eso fue un ERROR previo: si acá adjuntas=0, no hay foto, corregí el rumbo y pedila.`
+    : `Esas ${nImg} son las ÚNICAS fotos que tenés; cualquier [imagen] del historial que no esté adjunta acá es vieja y NO cuenta.`) + `\n\n`;
+  const text = preamble + fullText;
+  const userContent = (nImg) ? [...imageBlocks, { type: 'text', text }] : text;
   const payload = { model: 'claude-sonnet-4-5', max_tokens: 1024, system: CORTE_LLM_SYSTEM, messages: [{ role: 'user', content: userContent }] };
   for (let i = 0; i < 2; i++) {
     try {
@@ -2816,6 +2844,26 @@ async function corteSend(env, phone, body) {
   const r = await waSendText(env, phone, body);
   if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte:' + phone + ':' + Date.now()), phone, String(body || '')).run(); } catch (_) {} }
   return r;
+}
+// Catálogo de cables (venta a alumnos). El video vive en R2 y se manda por WhatsApp.
+const CORTE_CABLE_VIDEO_KEY = 'promo/cable-video.mp4';
+const CORTE_CABLE_MSG = 'Mando los cables disponibles:\n\n- Rollo de 50mts estañado 0.25mm, solo transparente: $47.000\n- Rollo de 100mts sin estañar, blanco o negro:\n  - 0.35mm: $39.500\n  - 0.5mm: $43.500';
+// Manda el video de cables + la lista de precios. El caller debe dedupear (no reenviar el video en cada mensaje).
+async function corteSendCableInfo(env, phone) {
+  let okv = false;
+  try {
+    const mediaId = await getPromoMediaId(env, CORTE_CABLE_VIDEO_KEY);
+    if (mediaId) {
+      const r = await waSendVideo(env, phone, mediaId);
+      if (r && r.ok) {
+        okv = true;
+        try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'video', '[video] cables', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-cable-vid:' + phone + ':' + Date.now()), phone, CORTE_CABLE_VIDEO_KEY).run(); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  await new Promise(rs => setTimeout(rs, 800));
+  try { await corteSend(env, phone, CORTE_CABLE_MSG); } catch (_) {}
+  return okv;
 }
 async function processCortePilot(env) {
   try {
@@ -2845,11 +2893,20 @@ async function processCortePilot(env) {
       const phone = c.phone, lastTs = c.last_ts;
       const debMs = (testPhone && phone === testPhone) ? 5000 : PRECOTIZ_DEBOUNCE_MS; // en modo prueba, espera corta (5s)
       if (Date.now() - new Date(lastTs).getTime() < debMs) continue;   // esperar que pare de escribir
-      // Anti-pisón: si un humano (Abril/Gaspar) contestó después del último inbound, no se mete.
-      try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='outbound' AND automated=0 AND msg_type!='status'").bind(phone).first(); if (lh && lh.t) { if (lh.t > lastTs) continue; if (Date.now() - new Date(lastTs).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
+      // Anti-pisón: si un humano (Abril/Gaspar) contestó DESPUÉS del último inbound, no se mete; y si un
+      // humano contestó RECIÉN (hace <5min), le damos gracia. OJO: la gracia mira lh.t (cuándo contestó el
+      // humano), NO lastTs (cuándo escribió el cliente) — si mirara lastTs, un chat con CUALQUIER humano
+      // histórico (ej: el número del dueño, o un alumno viejo) frenaba al bot 5 min tras cada mensaje.
+      try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='outbound' AND automated=0 AND msg_type!='status'").bind(phone).first(); if (lh && lh.t) { if (lh.t > lastTs) continue; if (Date.now() - new Date(lh.t).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
       let conv = null;
       try { conv = await env.DB.prepare("SELECT * FROM corte_conversaciones WHERE phone=?").bind(phone).first(); } catch (_) {}
-      if (conv && conv.estado === 'escalado') continue;                                // ya se lo dejamos a una persona
+      // Handoff manual a Abril: si Gaspar movió este chat a la bandeja de cursos a mano, el bot NO se mete
+      // más (queda en 'handoff_abril'). Y NO tocamos la bandeja privada de Gaspar.
+      if (conv && conv.estado === 'handoff_abril') continue;
+      try { const ci = await env.DB.prepare("SELECT inbox FROM wa_chats_summary WHERE phone=?").bind(phone).first(); if (ci && ci.inbox === 'privado') continue; } catch (_) {}
+      // NOTA: escalado ya NO es permanente. Si el chat estaba escalado pero el cliente vuelve con intención
+      // de corte, el bot retoma (más abajo la rama frenar lo deja escalado de nuevo si sigue off-topic, sin
+      // mandar nada). El anti-pisón de arriba evita pisar a una persona que esté atendiendo en vivo.
       if (conv && conv.last_processed_ts && lastTs <= conv.last_processed_ts) continue; // nada nuevo
       // Claim atómico (evita doble proceso si */1 y */5 pegan juntos).
       try {
@@ -2859,12 +2916,62 @@ async function processCortePilot(env) {
       const ctx = await buildChatContext(env, phone, 40);
       if (!ctx) continue;
       const imgs = await precotizImageBlocks(env, phone, 3, 3); // solo imágenes de las últimas 3h (esta charla)
-      const out = await corteLlm(env, ctx.fullText, imgs);
+      // Estado del cliente: si es nuevo (no está en corte_alumnos) o no tenemos sus datos de envío, el bot
+      // se los pide (nombre/DNI/dirección/etc.). Se le pasa como línea interna al modelo.
+      let infoCliente = '';
+      try {
+        const al = await env.DB.prepare("SELECT nombre, datos_envio FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
+        const nuevo = !al;
+        const faltanEnvio = !al || !String(al.datos_envio || '').trim();
+        infoCliente = '[DATOS DEL CLIENTE (interno): ' + (nuevo ? 'Es cliente NUEVO, no está en la base.' : ('Cliente registrado' + (al.nombre ? ' (' + al.nombre + ')' : '') + '.')) + ' ' + (faltanEnvio ? 'NO tenemos sus datos de envío.' : 'Ya tenemos sus datos de envío.') + ']\n\n';
+      } catch (_) {}
+      const out = await corteLlm(env, infoCliente + ctx.fullText, imgs);
       if (!out.ok) continue;
       const res = out.data || {};
-      // No es corte / otra cosa → dejar a una persona (Abril).
+      // El chat es del servicio de corte → bandeja 'corte' (admin-only de Gaspar). Reclama el chat de
+      // general/cursos/oculto (por si un auto-ruteo de cursos lo movió) pero NO pisa 'privado' ni un
+      // handoff manual (ese ya se filtró arriba con estado 'handoff_abril'). Abril nunca ve 'corte'.
+      try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'corte', ?) ON CONFLICT(phone) DO UPDATE SET inbox='corte', updated_at=excluded.updated_at WHERE wa_chats_summary.inbox NOT IN ('privado','corte')").bind(phone, nowIso).run(); } catch (_) {}
+      // Guardar datos del cliente NUEVO si los pasó (crea/actualiza su ficha en corte_alumnos, así el
+      // lunes/despacho tenemos dirección/DNI). El bot los pide; acá los persistimos apenas los da.
+      try {
+        const dc = res.datos_cliente || {};
+        const nom = String(dc.nombre || '').trim(), ape = String(dc.apellido || '').trim(), dni = String(dc.dni || '').trim();
+        const dir = String(dc.direccion || '').trim(), prov = String(dc.provincia || '').trim(), cp = String(dc.cp || '').trim();
+        const tel = String(dc.telefono_contacto || '').trim();
+        if (dir || dni || tel || (nom && ape)) {
+          const nombreFull = [nom, ape].filter(Boolean).join(' ').trim();
+          const datosEnvio = [nombreFull, dni ? ('DNI ' + dni) : '', dir, prov, cp ? ('CP ' + cp) : '', tel ? ('Tel ' + tel) : ''].filter(Boolean).join(', ');
+          const ex = await env.DB.prepare("SELECT id FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
+          if (ex) {
+            await env.DB.prepare("UPDATE corte_alumnos SET nombre=COALESCE(NULLIF(?,''),nombre), apellido=COALESCE(NULLIF(?,''),apellido), direccion=COALESCE(NULLIF(?,''),direccion), provincia=COALESCE(NULLIF(?,''),provincia), cp=COALESCE(NULLIF(?,''),cp), dni=COALESCE(NULLIF(?,''),dni), datos_envio=COALESCE(NULLIF(?,''),datos_envio), updated_at=? WHERE telefono=?").bind(nombreFull, ape, dir, prov, cp, dni, datosEnvio, nowIso, phone).run();
+          } else {
+            await env.DB.prepare("INSERT INTO corte_alumnos (nombre, apellido, telefono, direccion, provincia, cp, dni, datos_envio, origen, activo, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?, 'nuevo', 1, ?, ?)").bind(nombreFull, ape, phone, dir, prov, cp, dni, datosEnvio, nowIso, nowIso).run();
+          }
+        }
+      } catch (_) {}
+      // CABLE (en scope): si pidió cable, mandarle el video + lista de precios (una sola vez cada 24h).
+      let cableSent = false;
+      if (res.enviar_cable) {
+        let yaCable = false;
+        try { const yc = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone=? AND direction='outbound' AND media_url=? AND ts > datetime('now','-24 hours') LIMIT 1").bind(phone, CORTE_CABLE_VIDEO_KEY).first(); yaCable = !!yc; } catch (_) {}
+        if (!yaCable) { try { await corteSendCableInfo(env, phone); cableSent = true; } catch (_) {} }
+      }
+      // No es corte / otra cosa → se lo dejamos a GASPAR (es su negocio; NO a Abril ni a Joaco). El chat ya
+      // está en la bandeja 'corte'. Si era consulta de cable (en scope), NO escalar.
       if (res.frenar || res.es_corte === false) {
-        try { await env.DB.prepare("UPDATE corte_conversaciones SET estado='escalado', updated_at=? WHERE phone=?").bind(nowIso, phone).run(); } catch (_) {}
+        const est = (cableSent || res.enviar_cable) ? 'cable' : 'escalado';
+        try { await env.DB.prepare("UPDATE corte_conversaciones SET estado=?, updated_at=? WHERE phone=?").bind(est, nowIso, phone).run(); } catch (_) {}
+        // Avisar a Gaspar UNA vez, al entrar en escalado (no en cada mensaje), y marcar no-leído para que suba.
+        if (est === 'escalado' && !(conv && conv.estado === 'escalado')) {
+          try {
+            const al = await env.DB.prepare("SELECT nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
+            const quien = (al && al.nombre) ? (al.nombre + ' (' + phone + ')') : phone;
+            const mot = String(res.motivo || '').trim();
+            await precotizNotifyGaspar(env, 'Servicio de corte: un alumno necesita que lo atiendas vos.\n' + quien + (mot ? ('\nMotivo: ' + mot) : '') + '\nlo tenes en tu bandeja de corte');
+          } catch (_) {}
+          try { await precotizMarcarNoLeido(env, phone); } catch (_) {}
+        }
         continue;
       }
       // Intención no clara → preguntar explícito (una sola vez).
@@ -4440,12 +4547,21 @@ Respondé SOLO el JSON, sin texto adicional.`;
 // Junta el contexto completo de un chat (text+transcripciones+adjuntos) para
 // pasar a Claude. Limita a últimos N msgs para no explotar el context window.
 async function buildChatContext(env, phone, maxMsgs = 100) {
+  // Traemos los maxMsgs mensajes MÁS RECIENTES (subquery DESC) y después los ordenamos
+  // cronológicamente (ASC) para mostrarlos. Antes era ORDER BY ts ASC LIMIT, que devolvía
+  // los más VIEJOS: para un chat largo (ej: un alumno o el dueño, con miles de mensajes) el
+  // bot veía historial de hace meses en vez de la charla actual y alucinaba. Excluimos
+  // 'status' (recibos de entrega, sin contenido) que si no coparían la ventana reciente.
   const rs = await env.DB.prepare(
-    `SELECT ts, direction, msg_type, body, media_url, context_id,
-            (SELECT p.body FROM wa_messages p WHERE p.wamid = wa_messages.context_id AND wa_messages.context_id != '' LIMIT 1) AS quoted_body
-     FROM wa_messages
-     WHERE phone = ? AND msg_type != 'reaction'
-     ORDER BY ts ASC LIMIT ?`
+    `SELECT t.ts, t.direction, t.msg_type, t.body, t.media_url, t.context_id,
+            (SELECT p.body FROM wa_messages p WHERE p.wamid = t.context_id AND t.context_id != '' LIMIT 1) AS quoted_body
+     FROM (
+       SELECT ts, direction, msg_type, body, media_url, context_id
+       FROM wa_messages
+       WHERE phone = ? AND msg_type NOT IN ('reaction','status')
+       ORDER BY ts DESC LIMIT ?
+     ) t
+     ORDER BY t.ts ASC`
   ).bind(phone, maxMsgs).all();
   const msgs = rs.results || [];
   if (!msgs.length) return null;
@@ -5786,6 +5902,72 @@ async function processLanzAgosto(env) {
     try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at").bind(phone, nowIso).run(); } catch (_) {}
     try { if (labelId) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, labelId, nowIso).run(); } catch (_) {}
     try { await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'evento_record', ?, 'sent', '', '')").bind(phone, nowIso).run(); } catch (_) {}
+    await new Promise(rs => setTimeout(rs, 300));
+  }
+}
+
+// ===== Difusión "Seminario presencial" (evento del sábado 29/08) =====
+// A pedido de Gaspar (25-ago): manda una plantilla (de parte de Bruno) a los ~324
+// registrados al seminario presencial invitándolos a reservar el cupo. Goteo por el
+// cron */1 en horario AR (9-22); OCULTA el chat hasta que respondan. Al RESPONDER,
+// seminarioOnInbound los manda a la bandeja PRIVADA (solo Gaspar; Abril NO la ve) y
+// les pone la etiqueta 'seminario'. Dos plantillas: con nombre (cargaron una sola
+// palabra) y genérica (si dejaron apellido). Kill-switch kv 'seminario_on' (def 0);
+// se apaga solo al vaciar 'pending'. Gate: no manda hasta que Meta apruebe AMBAS.
+const SEMINARIO_TPL_NOMBRE = 'seminario_cupo_nombre';   // con {{1}}=nombre
+const SEMINARIO_TPL_GRL = 'seminario_cupo';             // genérica (sin variable)
+const SEMINARIO_LABEL_NAME = 'seminario';
+const SEMINARIO_LABEL_COLOR = '#0ea5e9';
+
+// Al responder un contacto que recibió la difusión y quedó OCULTO: lo revela a la
+// bandeja PRIVADA (admin-only) y lo etiqueta 'seminario'. Kind propio para no cruzarse.
+async function seminarioOnInbound(env, phone) {
+  if (!phone) return;
+  try {
+    const got = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind = 'seminario' AND status = 'sent' LIMIT 1").bind(phone).first();
+    if (!got) return;
+    const nowIso = new Date().toISOString();
+    // Revela a 'privado' SOLO si estaba oculto (no pisa un chat movido a mano a otra bandeja).
+    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'privado', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'privado', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(phone, nowIso).run();
+    // Etiqueta 'seminario' a todo el que responde (aunque ya no esté oculto).
+    const lid = await ensureLabelId(env, SEMINARIO_LABEL_NAME, SEMINARIO_LABEL_COLOR);
+    if (lid) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, lid, nowIso).run();
+  } catch (_) {}
+}
+
+async function processEventoPres(env) {
+  if ((await kvGet(env, 'seminario_on', '0')) !== '1') return;
+  if ((await kvGet(env, 'wa_send_paused', '0')) === '1') return;
+  if (await isWaBillingBlocked(env)) return;
+  const hAR = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours();
+  if (hAR < 9 || hAR >= 22) return;
+  // Gate: no mandar hasta que Meta apruebe AMBAS plantillas (evita quemar filas 'failed' sin reintento).
+  let ok1 = false, ok2 = false;
+  try { const a = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(SEMINARIO_TPL_NOMBRE).first(); ok1 = !!(a && String(a.status).toUpperCase() === 'APPROVED'); } catch (_) {}
+  try { const b = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(SEMINARIO_TPL_GRL).first(); ok2 = !!(b && String(b.status).toUpperCase() === 'APPROVED'); } catch (_) {}
+  if (!ok1 || !ok2) return;
+  const perTick = Math.max(1, Math.min(20, parseInt(await kvGet(env, 'seminario_pertick', '6'), 10) || 6));
+  let rows;
+  try { rows = (await env.DB.prepare("SELECT phone, nombre FROM evento_seminario WHERE status = 'pending' LIMIT ?").bind(perTick).all()).results || []; } catch (_) { return; }
+  if (!rows.length) { try { await kvSet(env, 'seminario_on', '0'); } catch (_) {} return; }   // terminó → se apaga solo
+  for (const r of rows) {
+    const phone = r.phone;
+    let rz;
+    try { rz = await env.DB.prepare("UPDATE evento_seminario SET status = 'sending' WHERE phone = ? AND status = 'pending'").bind(phone).run(); } catch (_) { continue; }
+    if (!rz?.meta?.changes) continue;   // ya lo tomó otro tick
+    const nombre = String(r.nombre || '').trim();
+    const tpl = nombre ? SEMINARIO_TPL_NOMBRE : SEMINARIO_TPL_GRL;
+    const res = await waSendTemplate(env, phone, tpl, 'es_AR', nombre ? [nombre] : []);
+    const nowIso = new Date().toISOString();
+    if (!res || !res.ok) {
+      try { await env.DB.prepare("UPDATE evento_seminario SET status = 'failed', sent_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+      try { await logWaEvent(env, { to: phone, kind: 'seminario', ref: '', ok: false, error: res?.error }); } catch (_) {}
+      continue;
+    }
+    try { await env.DB.prepare("UPDATE evento_seminario SET status = 'sent', sent_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)").bind(nowIso, res.id || ('seminario-' + phone + '-' + Date.now()), phone, '[plantilla: ' + tpl + ']').run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at").bind(phone, nowIso).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'seminario', ?, 'sent', '', '')").bind(phone, nowIso).run(); } catch (_) {}
     await new Promise(rs => setTimeout(rs, 300));
   }
 }
@@ -7657,7 +7839,9 @@ function inboxClauseForRole(role) {
   // lo ve mientras está en relevamiento; vuelve a 'general' al completar los 3 datos.
   // 'privado' = bandeja admin-only de Gaspar (clientes especiales que asigna a mano):
   // solo admin lo ve, comercial/cursos NUNCA. Mismo patrón que precotiz.
-  return "AND inbox NOT IN ('cursos','oculto','precotiz','privado')";
+  // 'corte' = bandeja del Servicio de Corte, admin-only de Gaspar (es un negocio suyo; ni Abril ni
+  // comercial se meten). Mismo patrón que 'privado'. El bot de corte manda los chats acá.
+  return "AND inbox NOT IN ('cursos','oculto','precotiz','privado','corte')";
 }
 
 // Control de acceso por chat: 'cursos' solo su bandeja; la bandeja 'privado' (admin-only de
@@ -7668,7 +7852,7 @@ async function inboxAccessOk(env, role, phone) {
     try {
       const r = await env.DB.prepare('SELECT inbox FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
       const inbox = (r && r.inbox) || '';
-      if (inbox === 'privado') return false;             // bandeja privada = SOLO admin
+      if (inbox === 'privado' || inbox === 'corte') return false; // privado y corte = SOLO admin (Gaspar)
       if (role === 'cursos') return inbox === 'cursos';  // cursos: solo su bandeja
       return true;                                       // comercial/otros: todo menos privado
     } catch (e) { return role !== 'cursos'; }
@@ -8897,6 +9081,7 @@ const handler = {
                   try { await minicursoLandingOnInbound(env, phone, ts); } catch (_) {}
                   // Landing del lanzamiento: walink → link (oculto); respuesta posterior → revelar.
                   try { await eventoRecordatorioOnInbound(env, phone); } catch (_) {}
+                  try { await seminarioOnInbound(env, phone); } catch (_) {}
                   try { await lanzamientoLandingOnInbound(env, phone, msgBody); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
@@ -11665,6 +11850,15 @@ const handler = {
           `INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?)
            ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox`
         ).bind(phone, inbox, new Date().toISOString()).run();
+        // Handoff manual del servicio de corte: si Gaspar manda un chat de corte a la bandeja de Abril
+        // (cursos), marcamos la conversación 'handoff_abril' para que el bot de corte NO lo reclame. Si lo
+        // saca de vuelta a 'general', limpiamos el handoff (el bot lo puede volver a atender). Si el chat no
+        // es de corte (sin fila en corte_conversaciones), estos UPDATE no tocan nada.
+        try {
+          const _ts = new Date().toISOString();
+          if (inbox === 'cursos') await env.DB.prepare("UPDATE corte_conversaciones SET estado='handoff_abril', updated_at=? WHERE phone=?").bind(_ts, phone).run();
+          else if (inbox === 'general') await env.DB.prepare("UPDATE corte_conversaciones SET estado='nuevo', updated_at=? WHERE phone=? AND estado='handoff_abril'").bind(_ts, phone).run();
+        } catch (_) {}
         ctx.waitUntil(invalidateChatsSummaryCache(request));
         return json({ ok: true, phone, inbox });
       }
@@ -13613,7 +13807,48 @@ const handler = {
         try { conv = await env.DB.prepare("SELECT estado, intencion_preguntada, substr(last_processed_ts,11,8) AS lp FROM corte_conversaciones WHERE phone=?").bind(tp).first(); } catch (_) {}
         try { const r = await env.DB.prepare("SELECT count(*) AS n FROM corte_pedidos WHERE telefono=? AND created_at > datetime('now','-40 minutes')").bind(tp).first(); peds = (r && r.n) || 0; } catch (_) {}
         try { const lb = await env.DB.prepare("SELECT substr(body,1,140) AS body FROM wa_messages WHERE phone=? AND direction='outbound' AND automated=1 AND ts > datetime('now','-20 minutes') ORDER BY ts DESC LIMIT 1").bind(tp).first(); lastBot = lb && lb.body; } catch (_) {}
-        return json({ ok: true, err, test_phone: tp, conv, pedidos_recientes: peds, ultimo_bot: lastBot });
+        // diag: corre el pipeline (ctx + IA) para el test phone y reporta qué devuelve. SOLO con ?diag=1
+        // (gasta una llamada extra a la IA). El bombeo rápido llama sin diag → liviano.
+        let diag = undefined;
+        if (new URL(request.url).searchParams.get('diag') === '1') {
+          diag = {};
+          try {
+            const ctx = await buildChatContext(env, tp, 40);
+            diag.ctx = ctx ? ('fullText len ' + String((ctx.fullText || '')).length) : 'NULL';
+            if (ctx) {
+              const imgs = await precotizImageBlocks(env, tp, 3, 3);
+              diag.imgs = imgs.length;
+              const out = await corteLlm(env, ctx.fullText, imgs);
+              diag.llm = out.ok ? { ok: true, data: out.data } : { ok: false, error: out.error, raw: out.raw };
+            }
+          } catch (e) { diag.exc = String((e && e.message) || e); }
+        }
+        return json({ ok: true, err, test_phone: tp, conv, pedidos_recientes: peds, ultimo_bot: lastBot, diag });
+      }
+      // POST /admin/corte/simulate → corre SOLO el cerebro (corteLlm) sobre un transcript sintético, sin
+      // mandar nada. Para testear escenarios. Body: { text, imgKey? }. imgKey = key R2 de una imagen a adjuntar.
+      if (request.method === 'POST' && path === '/admin/corte/simulate') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body = {};
+        try { body = await request.json(); } catch (_) {}
+        const text = String(body.text || '');
+        if (!text) return json({ error: 'falta text' }, 400);
+        let imgs = [];
+        if (body.imgKey && env.MEDIA) {
+          try {
+            const obj = await env.MEDIA.get(String(body.imgKey));
+            if (obj) {
+              const buf = await obj.arrayBuffer();
+              let mime = sniffImageMime(buf) || 'image/jpeg';
+              if (/^image\/(png|jpeg|webp|gif)$/.test(mime)) imgs.push({ type: 'image', source: { type: 'base64', media_type: mime, data: abToBase64(buf) } });
+            }
+          } catch (_) {}
+        }
+        let pre = '';
+        if (body.nuevo === true) pre = '[DATOS DEL CLIENTE (interno): Es cliente NUEVO, no está en la base. NO tenemos sus datos de envío.]\n\n';
+        else if (body.nuevo === false) pre = '[DATOS DEL CLIENTE (interno): Cliente registrado. Ya tenemos sus datos de envío.]\n\n';
+        const out = await corteLlm(env, pre + text, imgs);
+        return json({ ok: out.ok, imgs: imgs.length, data: out.data, error: out.error });
       }
 
       // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
@@ -13966,6 +14201,7 @@ const handler = {
     // (kv 'lanz_ago_on'); no manda nada hasta prenderlo.
     ctx.waitUntil(processLanzAgosto(env));
     ctx.waitUntil(processComunidadPromo(env));   // drip Pack Emprendedor a los 14 días del alta
+    ctx.waitUntil(processEventoPres(env));       // difusión seminario presencial (kv 'seminario_on')
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
@@ -14446,6 +14682,17 @@ async function waSendDocument(env, to, mediaId, filename, caption) {
     to: num,
     type: 'document',
     document: { id: mediaId, filename: filename || undefined, caption: caption || undefined }
+  });
+}
+
+async function waSendVideo(env, to, mediaId, caption) {
+  const num = normalizeArPhone(to);
+  if (!num) return { ok: false, status: 400, error: 'numero invalido' };
+  return waSend(env, {
+    messaging_product: 'whatsapp',
+    to: num,
+    type: 'video',
+    video: { id: mediaId, caption: caption || undefined }
   });
 }
 
