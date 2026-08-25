@@ -2231,7 +2231,7 @@ function ocCalcTotales(m) {
   return { total, sena: Math.round(total / 2) };
 }
 function openCrearOcModal() {
-  if (!canCotizar()) return;
+  if (!canCreateBriefs()) return; // solo carteles (comercial/admin) — oculto para cursos (Abril)
   const phone = chatState.selectedPhone;
   if (!phone) { toast('Abrí el chat del cliente primero'); return; }
   const digits = String(phone).replace(/\D/g, '');
@@ -9931,7 +9931,7 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
-        ${canCotizar() ? `<button class="btn btn-cyan" id="btn-chat-oc" title="Crear la Orden de Compra y enviarla al cliente (se etiqueta POR PAGAR y quedás avisado)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 Crear OC</button>` : ''}
+        ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-oc" title="Crear la Orden de Compra y enviarla al cliente (se etiqueta POR PAGAR y quedás avisado)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 Crear OC</button>` : ''}
         ${(getUserRole() === 'comercial') ? (() => {
           const _lbls = chatState.labels || [];
           const _pre = _lbls.find(l => l.name === '🤖 Precotización');
