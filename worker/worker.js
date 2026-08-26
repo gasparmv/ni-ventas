@@ -1571,6 +1571,20 @@ async function paraCotizarTag(env, phone, on) {
     }
   } catch (_) {}
 }
+// Etiqueta "Corpóreo": leads que entran por los ads Corporeas 1/2 (producto nuevo, letra
+// 3D maciza). Se atienden A MANO hasta tener un bot de precotización propio del corpóreo,
+// así que NO entran al bot de neón. El vertical se mapea por ad_id en wa_ad_verticals
+// ('corporeo'); esta etiqueta los hace visibles para que Joaco/Gaspar los agarren.
+const CORPOREO_LABEL_NAME = '🔠 Corpóreo';
+const CORPOREO_LABEL_COLOR = '#a855f7';
+async function corporeoTag(env, phone, on) {
+  try {
+    const id = await ensureLabelId(env, CORPOREO_LABEL_NAME, CORPOREO_LABEL_COLOR);
+    if (!id) return;
+    if (on) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, id, new Date().toISOString()).run();
+    else await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
+  } catch (_) {}
+}
 // Supresión manual de etiquetas auto (📋 Para cotizar / 💰 Sin cotizar): si un vendedor
 // las quita a mano, se registra en label_overrides para que los reconciliadores NO las
 // vuelvan a poner. Se limpia si la etiqueta se re-agrega a mano (POST /admin/contact-labels).
@@ -2089,6 +2103,13 @@ async function processPrecotizPilot(env) {
     try { const rl = await env.DB.prepare("SELECT 1 AS x FROM contact_labels WHERE phone = ? AND label_id = 2289 LIMIT 1").bind(phone).first(); if (rl) continue; } catch (_) {}
     // Alumnos del servicio de CORTE (B2B): NO son leads de carteles → los maneja el bot de corte, no la precotización.
     try { const ca = await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono = ? LIMIT 1").bind(phone).first(); if (ca) continue; } catch (_) {}
+    // Excluir leads de CORPÓREO (ads Corporeas 1/2): producto nuevo que se atiende A MANO
+    // hasta tener un bot propio. El vertical se mapea por ad_id en wa_ad_verticals. Se los
+    // etiqueta "Corpóreo" para que Joaco/Gaspar los agarren; el bot de neón NO los toca.
+    try {
+      const _adc = await env.DB.prepare("SELECT source_id, headline, body FROM wa_ad_attributions WHERE phone = ? ORDER BY ts DESC LIMIT 1").bind(phone).first();
+      if (_adc && _adc.source_id && (await adVerticalForSource(env, _adc.source_id, _adc.headline, _adc.body)) === 'corporeo') { await corporeoTag(env, phone, true); continue; }
+    } catch (_) {}
     let first;
     try { first = await env.DB.prepare("SELECT MIN(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(phone).first(); } catch (_) { continue; }
     const firstTs = first?.t || '';
@@ -9068,6 +9089,8 @@ const handler = {
                     if (!(_vert === 'cursos' && await cursosFlowOn(env))) {
                       await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox = 'oculto'").bind(phone, _vert === 'cursos' ? 'cursos' : 'general', ts).run();
                     }
+                    // Corpóreo (ads Corporeas 1/2): etiqueta para atención manual (bot de neón excluido).
+                    if (_vert === 'corporeo') await corporeoTag(env, phone, true);
                   } catch (_) {}
                 }
 
@@ -9841,6 +9864,32 @@ const handler = {
           if (body?.nadia_cuota !== undefined) { const q = Math.max(0, parseInt(body.nadia_cuota, 10) || 0); await kvSet(env, 'nadia_cuota_diaria', String(q)); }
           if (body?.nadia_phone !== undefined) { await kvSet(env, 'nadia_phone', String(body.nadia_phone || '').replace(/\D/g, '')); }
           return json({ ok: true, on: (await kvGet(env, 'precotiz_on', '0')) === '1', modo: await kvGet(env, 'precotiz_modo', 'draft'), nadia_cuota: parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0, nadia_phone: await kvGet(env, 'nadia_phone', '') });
+        }
+
+        // POST /admin/precotiz/corporeo-backfill → etiqueta a los leads que YA entraron por ads mapeados
+        // a vertical 'corporeo' (wa_ad_verticals) y los saca del bot de precotización si cayeron.
+        // Idempotente; se re-corre al agregar ads corpóreos nuevos al mapa.
+        if (request.method === 'POST' && path === '/admin/precotiz/corporeo-backfill') {
+          let n = 0, escal = 0;
+          try {
+            const rs = await env.DB.prepare(
+              "SELECT DISTINCT a.phone AS phone FROM wa_ad_attributions a JOIN wa_ad_verticals v ON v.ad_id = a.source_id WHERE v.vertical = 'corporeo' AND a.phone IS NOT NULL AND a.phone != ''"
+            ).all();
+            for (const r of (rs.results || [])) {
+              const ph = r.phone;
+              await corporeoTag(env, ph, true); n++;
+              try {
+                const inb = await env.DB.prepare("SELECT 1 AS x FROM precotiz_pilot WHERE phone = ? AND estado IN ('activo','completo') LIMIT 1").bind(ph).first();
+                if (inb) {
+                  await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo='corporeo', updated_at=? WHERE phone=? AND estado IN ('activo','completo')").bind(new Date().toISOString(), ph).run();
+                  await precotizTag(env, ph, false);
+                  await paraCotizarTag(env, ph, false);
+                  escal++;
+                }
+              } catch (_) {}
+            }
+          } catch (e) { return json({ error: String(e?.message || e) }, 500); }
+          return json({ ok: true, etiquetados: n, sacados_del_bot: escal });
         }
 
         // POST /admin/precotiz/dry-run → { phone } qué decidiría el motor, SIN enviar
