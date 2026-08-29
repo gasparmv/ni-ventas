@@ -2224,10 +2224,12 @@ const OC_CONTROLADOR_OPTS = ['no', 'slim', 'control remoto', 'app'];
 const OC_CONTROLADOR_PRECIO = { 'no': 0, 'slim': 18700, 'control remoto': 25000, 'app': 38000 };
 const OC_DATOS_PAGO = 'Datos de pago:\nMELINA VICTORIA TOGNOCCHI\nCBU: 3840200500000051390011\nAlias: neoninfinito.ok\nBanco: Ualá Bank S.A.U.';
 function ocMoney(n) { const x = Number(n) || 0; return '$' + String(x).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+function nuevoOcCartel() { return { cartel: '', medidas: '', color: '', fondo: 'Transparente', precio: '', controlador: 'no' }; }
 function ocCalcTotales(m) {
-  const precio = Number(String(m.precio).replace(/\D/g, '')) || 0;
-  const ctrl = OC_CONTROLADOR_PRECIO[m.controlador] || 0;
-  const total = precio + ctrl;
+  const total = (m.carteles || []).reduce((s, c) => {
+    const precio = Number(String(c.precio).replace(/\D/g, '')) || 0;
+    return s + precio + (OC_CONTROLADOR_PRECIO[c.controlador] || 0);
+  }, 0);
   return { total, sena: Math.round(total / 2) };
 }
 function openCrearOcModal() {
@@ -2238,12 +2240,12 @@ function openCrearOcModal() {
   const esIG = digits.length > 14;
   STATE.ocModal = {
     numero: '', plataforma: esIG ? 'Instagram' : 'Whatsapp',
-    cartel: '', medidas: '', color: '', fondo: 'Transparente', precio: '', controlador: 'no',
-    ubicacion: 'interior', total: '', sena: '', texto: ''
+    ubicacion: 'interior', total: '', sena: '', texto: '',
+    carteles: [nuevoOcCartel()]
   };
   STATE.ocModalOpen = true; STATE.ocModalSaving = false;
   render();
-  setTimeout(() => { const el = document.getElementById('oc-cartel'); if (el) el.focus(); }, 60);
+  setTimeout(() => { const el = document.getElementById('oc-cartel-0'); if (el) el.focus(); }, 60);
 }
 function cancelCrearOc() { STATE.ocModalOpen = false; render(); }
 // Compone el texto de la OC en el formato de la guía (arranca "Orden de compra:" y trae
@@ -2252,16 +2254,23 @@ function composeOcText(m) {
   const { total, sena } = ocCalcTotales(m);
   const totalUse = String(m.total).replace(/\D/g, '') ? Number(String(m.total).replace(/\D/g, '')) : total;
   const senaUse = String(m.sena).replace(/\D/g, '') ? Number(String(m.sena).replace(/\D/g, '')) : sena;
-  const precioN = Number(String(m.precio).replace(/\D/g, '')) || 0;
+  const cs = m.carteles || [];
+  const multi = cs.length > 1;
   const L = [];
   L.push('Orden de compra:' + (String(m.numero).trim() ? ' Nro ' + String(m.numero).trim() : ''));
   L.push('Plataforma: ' + m.plataforma);
-  L.push('Trabajo: ' + (m.cartel || ''));
-  L.push('Medidas: ' + (m.medidas || ''));
-  L.push('Color: ' + (m.color || ''));
-  L.push('Fondo: ' + (m.fondo || ''));
-  L.push('Precio: ' + ocMoney(precioN));
-  L.push('Controlador: ' + (m.controlador || 'no'));
+  cs.forEach((c, i) => {
+    const precioN = Number(String(c.precio).replace(/\D/g, '')) || 0;
+    L.push('');
+    if (multi) L.push('Cartel ' + (i + 1) + ':');
+    L.push('Trabajo: ' + (c.cartel || ''));
+    L.push('Medidas: ' + (c.medidas || ''));
+    L.push('Color: ' + (c.color || ''));
+    L.push('Fondo: ' + (c.fondo || ''));
+    L.push('Precio: ' + ocMoney(precioN));
+    L.push('Controlador: ' + (c.controlador || 'no'));
+  });
+  L.push('');
   L.push('Ubicación: ' + (m.ubicacion || ''));
   L.push('Total: ' + ocMoney(totalUse));
   L.push('Seña del 50%: ' + ocMoney(senaUse));
@@ -2272,7 +2281,35 @@ function composeOcText(m) {
 function readOcModalDOM() {
   const m = STATE.ocModal; if (!m) return;
   const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
-  ['numero', 'cartel', 'medidas', 'color', 'fondo', 'ubicacion', 'precio', 'controlador', 'total', 'sena', 'texto'].forEach(f => { const x = v('oc-' + f); if (x !== undefined) m[f] = x; });
+  ['numero', 'ubicacion', 'total', 'sena', 'texto'].forEach(f => { const x = v('oc-' + f); if (x !== undefined) m[f] = x; });
+  (m.carteles || []).forEach((c, i) => {
+    ['cartel', 'medidas', 'color', 'fondo', 'precio', 'controlador'].forEach(f => { const x = v(`oc-${f}-${i}`); if (x !== undefined) c[f] = x; });
+  });
+}
+function ocAddCartel() { readOcModalDOM(); STATE.ocModal.carteles.push(nuevoOcCartel()); render(); }
+function ocRemoveCartel(i) { readOcModalDOM(); STATE.ocModal.carteles.splice(i, 1); if (!STATE.ocModal.carteles.length) STATE.ocModal.carteles.push(nuevoOcCartel()); render(); }
+function renderOcCartelBlock(c, i, n) {
+  const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;color:var(--fg);font-size:13px';
+  const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
+  const fondoOpts = OC_FONDO_OPTS.map(o => `<option ${c.fondo === o ? 'selected' : ''}>${o}</option>`).join('');
+  const ctrlOpts = OC_CONTROLADOR_OPTS.map(o => `<option ${c.controlador === o ? 'selected' : ''}>${o}</option>`).join('');
+  return `
+    <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:11px;color:var(--accent-cyan);font-weight:700">Cartel ${i + 1}</span>
+        ${n > 1 ? `<button class="btn btn-ghost" data-oc-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
+      </div>
+      <div style="margin-bottom:6px"><label style="${lbl}">Trabajo / cartel *</label><input id="oc-cartel-${i}" value="${escapeHtml(c.cartel || '')}" placeholder="ej. Perfumería" style="${inp}"></div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><label style="${lbl}">Medidas *</label><input id="oc-medidas-${i}" value="${escapeHtml(c.medidas || '')}" placeholder="ej. 80x70" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Color *</label><input id="oc-color-${i}" value="${escapeHtml(c.color || '')}" placeholder="ej. Blanco cálido" style="${inp}"></div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <div style="flex:1"><label style="${lbl}">Fondo</label><select id="oc-fondo-${i}" style="${inp}">${fondoOpts}</select></div>
+        <div style="flex:1"><label style="${lbl}">Precio * $</label><input id="oc-precio-${i}" type="number" value="${escapeHtml(String(c.precio || ''))}" style="${inp}" data-oc-calc></div>
+        <div style="flex:1"><label style="${lbl}">Controlador</label><select id="oc-controlador-${i}" style="${inp}" data-oc-calc>${ctrlOpts}</select></div>
+      </div>
+    </div>`;
 }
 function renderCrearOcModal() {
   if (!STATE.ocModalOpen || !STATE.ocModal) return '';
@@ -2280,8 +2317,6 @@ function renderCrearOcModal() {
   const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;color:var(--fg);font-size:13px';
   const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
   const { total, sena } = ocCalcTotales(m);
-  const fondoOpts = OC_FONDO_OPTS.map(o => `<option ${m.fondo === o ? 'selected' : ''}>${o}</option>`).join('');
-  const ctrlOpts = OC_CONTROLADOR_OPTS.map(o => `<option ${m.controlador === o ? 'selected' : ''}>${o}</option>`).join('');
   return `
     <div id="oc-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:290;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
       <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:560px;width:100%;margin:auto;padding:var(--s-4)">
@@ -2293,19 +2328,10 @@ function renderCrearOcModal() {
           <div style="width:110px"><label style="${lbl}">N° OC</label><input id="oc-numero" value="${escapeHtml(String(m.numero || ''))}" placeholder="opcional" style="${inp}"></div>
           <div style="flex:1"><label style="${lbl}">Plataforma</label><input value="${escapeHtml(m.plataforma)}" disabled style="${inp};opacity:.6"></div>
         </div>
-        <div style="margin-bottom:8px"><label style="${lbl}">Trabajo / cartel *</label><input id="oc-cartel" value="${escapeHtml(m.cartel || '')}" placeholder="ej. Perfumería" style="${inp}"></div>
-        <div style="display:flex;gap:8px;margin-bottom:8px">
-          <div style="flex:1"><label style="${lbl}">Medidas *</label><input id="oc-medidas" value="${escapeHtml(m.medidas || '')}" placeholder="ej. 80x70" style="${inp}"></div>
-          <div style="flex:1"><label style="${lbl}">Color *</label><input id="oc-color" value="${escapeHtml(m.color || '')}" placeholder="ej. Blanco cálido" style="${inp}"></div>
-        </div>
-        <div style="display:flex;gap:8px;margin-bottom:8px">
-          <div style="flex:1"><label style="${lbl}">Fondo</label><select id="oc-fondo" style="${inp}">${fondoOpts}</select></div>
-          <div style="flex:1"><label style="${lbl}">Ubicación</label><input id="oc-ubicacion" value="${escapeHtml(m.ubicacion || '')}" placeholder="interior / exterior" style="${inp}"></div>
-        </div>
-        <div style="display:flex;gap:8px;margin-bottom:8px">
-          <div style="flex:1"><label style="${lbl}">Precio cartel * $</label><input id="oc-precio" type="number" value="${escapeHtml(String(m.precio || ''))}" style="${inp}" data-oc-calc></div>
-          <div style="flex:1"><label style="${lbl}">Controlador</label><select id="oc-controlador" style="${inp}" data-oc-calc>${ctrlOpts}</select></div>
-        </div>
+        <label style="${lbl}">Carteles de la orden</label>
+        <div id="oc-carteles">${m.carteles.map((c, i) => renderOcCartelBlock(c, i, m.carteles.length)).join('')}</div>
+        <button id="oc-add" class="btn btn-ghost" style="width:100%;margin-bottom:8px;font-size:12px">＋ Agregar otro cartel a la orden</button>
+        <div style="margin-bottom:8px"><label style="${lbl}">Ubicación</label><input id="oc-ubicacion" value="${escapeHtml(m.ubicacion || '')}" placeholder="interior / exterior" style="${inp}"></div>
         <div style="display:flex;gap:8px;margin-bottom:10px">
           <div style="flex:1"><label style="${lbl}">Total (auto, editable) $</label><input id="oc-total" type="number" value="${escapeHtml(String(m.total || ''))}" placeholder="${total}" style="${inp}"></div>
           <div style="flex:1"><label style="${lbl}">Seña 50% (auto, editable) $</label><input id="oc-sena" type="number" value="${escapeHtml(String(m.sena || ''))}" placeholder="${sena}" style="${inp}"></div>
@@ -2325,6 +2351,8 @@ function bindCrearOcModal() {
   const c1 = document.getElementById('oc-close'); if (c1) c1.onclick = cancelCrearOc;
   const c2 = document.getElementById('oc-cancel'); if (c2) c2.onclick = cancelCrearOc;
   const bk = document.getElementById('oc-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'oc-backdrop') cancelCrearOc(); };
+  const add = document.getElementById('oc-add'); if (add) add.onclick = ocAddCartel;
+  document.querySelectorAll('[data-oc-remove]').forEach(b => b.onclick = () => ocRemoveCartel(parseInt(b.dataset.ocRemove, 10)));
   // Al tocar precio/controlador, sugerir total+seña en el placeholder (sin re-render, no pierde foco).
   document.querySelectorAll('[data-oc-calc]').forEach(el => el.addEventListener('input', () => {
     readOcModalDOM();
