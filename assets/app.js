@@ -20,7 +20,7 @@ const OFRECER_BASE_NEGRA = false;
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Nadia', 'Diseñador', 'Abril'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Diseñador', 'Abril'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -64,7 +64,8 @@ const CONFIG = {
     // Multiplicadores
     reventa_mult: 0.8,        // reventa = trans × 0.8
     comision_pct: 0.05,       // 5% Joaco sobre trans
-    nv_nadia_comision_pct: 0.04,  // 4% Nadia (2da vendedora)
+    nv_nadia_comision_pct: 0.04,  // 4% Nadia (histórico, ya no se usa)
+    nv_facundo_comision_pct: 0.095,  // 9,5% Facundo (neutro perfecto: vende +5%, negocio queda igual que con Joaco)
     descuento_mult: 0.88,     // si m2 > descuento_min_m2
     descuento_min_m2: 100,
     recargo_5: 2,             // m2 ≤ 5  → trans × 2
@@ -194,11 +195,11 @@ function nadiaFijoMes(yyyymm) {
 // jul-2026. El filtro (p.comercial_id||'joaco')===vendedor deja a Joaco IGUAL que antes
 // (todo el histórico es suyo por el default 'joaco').
 function panelSueldoHtml(vendedor) {
-  const esNadia = vendedor === 'nadia';
-  const DESDE = esNadia ? '2026-07' : '2026-05';
+  const esNadia = vendedor === 'facundo';
+  const DESDE = esNadia ? '2026-08' : '2026-05';
   const params = getCotizadorParams();
   const rate = esNadia
-    ? ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.nadia) || params.nv_nadia_comision_pct || 0.04)
+    ? ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.facundo) || params.nv_facundo_comision_pct || 0.095)
     : ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.joaquin) || params.comision_pct || 0.05);
   const ratePct = +(rate * 100).toFixed(1);
   const fijoMes = esNadia ? nadiaFijoMes : joacoFijoMes;
@@ -206,7 +207,7 @@ function panelSueldoHtml(vendedor) {
   const periodMonths = (sel || availableMonths()).filter(m => m >= DESDE);
   let inner, periodLbl;
   if (!periodMonths.length) {
-    const desdeLbl = esNadia ? 'desde julio 2026' : 'desde mayo 2026';
+    const desdeLbl = esNadia ? 'desde agosto 2026' : 'desde mayo 2026';
     periodLbl = desdeLbl;
     inner = `<div style="color:var(--fg-subtle);font-size:13px">El sueldo se muestra <b>${desdeLbl}</b> en adelante. Elegí ese período (o "Todos") para verlo.</div>`;
   } else {
@@ -927,6 +928,7 @@ function calcCotizadorNuevo(input) {
   if (tipo === 'EXT') {
     precio += m2Sheet <= 25 ? p.ext_25 : m2Sheet <= 50 ? p.ext_50 : p.ext_99;
   }
+  if (typeof STATE !== 'undefined' && isFacundoUser(STATE.user)) precio *= 1.05;   // +5% oculto solo para Facundo (neutro perfecto)
   const transFinal = redondMult(precio, 500);
   const negroFinal = redondMult(transFinal * p.nv_negro_ratio, 500);
 
@@ -999,8 +1001,8 @@ function _userKey(s) {
   return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
 function isJoaquinUser(s) { return _userKey(s) === 'joaquin' || _userKey(s) === 'joaco'; }
-// Nadia: 2da vendedora (rol comercial, como Joaco). Ve el Chat WA y trabaja carteles.
-function isNadiaUser(s) { return _userKey(s) === 'nadia'; }
+// Facundo: 2do vendedor (rol comercial, como Joaco). Ve el Chat WA y trabaja carteles.
+function isFacundoUser(s) { return _userKey(s) === 'facundo'; }
 function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
 // SOLO DISPLAY: el user "Gaspar" se muestra como "Administrador" en la UI. El valor INTERNO
 // sigue siendo "Gaspar" (login, isAdmin, API, gates de rol) → no rompe nada, es solo el tag visible.
@@ -1100,7 +1102,7 @@ async function logout() {
 // isAdmin requiere que el TOKEN sea de Gaspar (no solo el nombre activo). Sin esto,
 // un token de bajo privilegio podría usarse para mostrar la UI admin.
 function isAdmin() { return !!STATE.token && isGasparUser(STATE.tokenUser) && isGasparUser(STATE.user); }
-function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isNadiaUser(STATE.user) || isCursosUser(STATE.user)); }
+function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isFacundoUser(STATE.user) || isCursosUser(STATE.user)); }
 // Abril (rol cursos): SOLO ve la sección Chat WA, nada más.
 function isCursosOnly() { return isCursosUser(STATE.user); }
 function authHeaders() {
@@ -2110,7 +2112,7 @@ function render() {
   // Nadia (2da vendedora): set reducido por ahora. Views permitidas: dashboard (solo
   // su panel "Tu sueldo"), pedidos, presupuestos, cotizacion, chat. Si cae en otra
   // (seguimientos/actividad/etc. por hash directo), al dashboard.
-  if (isNadiaUser(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat'].includes(STATE.view)) {
+  if (isFacundoUser(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat'].includes(STATE.view)) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
@@ -2160,7 +2162,7 @@ function render() {
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
     if (isAdmin()) bindBusinessPanel();
-    else if (!isNadiaUser(STATE.user)) drawCharts();  // Nadia: dashboard reducido, sin gráficos
+    else if (!isFacundoUser(STATE.user)) drawCharts();  // Nadia: dashboard reducido, sin gráficos
   }
   if (STATE.view === 'panel-joaco') bindPanelJoaco();
   if (STATE.view === 'actividad') bindActividad();
@@ -2597,10 +2599,10 @@ function renderShell() {
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
         ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
-        ${!isNadiaUser(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
+        ${!isFacundoUser(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>` : ''}
-        ${!isNadiaUser(STATE.user) ? `<button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>` : ''}
+        ${!isFacundoUser(STATE.user) ? `<button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>` : ''}
         ${canAccessChat() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
           <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '')}</span>
         </button>` : ''}
@@ -2713,12 +2715,12 @@ function renderPrecotiz() {
       </div>
       <div class="muted" style="font-size:11px;margin-top:8px">Con el piloto prendido y en modo borrador, el bot arma los mensajitos y te avisa acá para que los apruebes. Solo vos ves estos chats hasta que junten los 3 datos.</div>
       <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <label style="display:flex;align-items:center;gap:8px">👤 Reparto a Nadia — leads por día:
+        <label style="display:flex;align-items:center;gap:8px">👤 Reparto a Facundo — leads por día:
           <input type="number" min="0" step="1" data-nadia-cuota value="${P.nadia_cuota != null ? P.nadia_cuota : 0}" style="width:64px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:5px 8px;color:var(--fg);font-size:13px">
         </label>
         <span class="muted" style="font-size:12px">hoy le tocaron ${P.nadia_hoy || 0}/${P.nadia_cuota || 0}</span>
       </div>
-      <div class="muted" style="font-size:11px;margin-top:6px">Cada lead NUEVO de carteles que entra se reparte: hasta ese tope por día va a Nadia (lo atiende ella desde el primer mensaje), el resto queda para Joaco. En 0, Nadia no recibe nada automático — le asignás a mano con el botón 👤N en cada chat.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">Cada lead NUEVO de carteles que entra se reparte: hasta ese tope por día va a Facundo (lo atiende él desde el primer mensaje), el resto queda para Joaco. En 0, Facundo no recibe nada automático — le asignás a mano con el botón 👤F en cada chat.</div>
     </div>
     ${(P.leads && P.leads.length) ? leadsHtml : '<div class="muted" style="font-size:13px">Todavía no entró ningún lead al piloto.</div>'}
   `;
@@ -2732,7 +2734,7 @@ function bindPrecotiz() {
   const modoSel = document.querySelector('[data-precotiz-modo]');
   if (modoSel) modoSel.onchange = async () => { await precotizControl({ modo: modoSel.value }); toast('Modo: ' + modoSel.value); };
   const nadiaCuotaInp = document.querySelector('[data-nadia-cuota]');
-  if (nadiaCuotaInp) nadiaCuotaInp.onchange = async () => { const q = Math.max(0, parseInt(nadiaCuotaInp.value, 10) || 0); await precotizControl({ nadia_cuota: q }); toast('Reparto a Nadia: ' + q + '/día'); reload(); };
+  if (nadiaCuotaInp) nadiaCuotaInp.onchange = async () => { const q = Math.max(0, parseInt(nadiaCuotaInp.value, 10) || 0); await precotizControl({ nadia_cuota: q }); toast('Reparto a Facundo: ' + q + '/día'); reload(); };
   document.querySelectorAll('[data-precotiz-approve]').forEach(el => el.onclick = async () => {
     const phone = el.dataset.precotizApprove;
     const ta = document.querySelector(`[data-precotiz-draft="${phone}"]`);
@@ -3282,7 +3284,7 @@ function showCreateTemplateBroadcast(opts) {
 function renderDashboard() {
   // Nadia (2da vendedora): dashboard reducido -> SOLO su panel "Tu sueldo". No ve
   // las métricas del negocio (ventas totales, AOV, cobrado, gráficos, etc.).
-  if (isNadiaUser(STATE.user)) {
+  if (isFacundoUser(STATE.user)) {
     return `
     <div class="page-head">
       <div>
@@ -3290,7 +3292,7 @@ function renderDashboard() {
         <h1>Dashboard</h1>
       </div>
     </div>
-    ${panelSueldoHtml('nadia')}
+    ${panelSueldoHtml('facundo')}
   `;
   }
   const cur = pedidosDash();
@@ -3348,7 +3350,7 @@ function renderDashboard() {
       </div>`;
     })()}
 
-    ${isJoaquinUser(STATE.user) ? panelSueldoHtml('joaco') : (isNadiaUser(STATE.user) ? panelSueldoHtml('nadia') : '')}
+    ${isJoaquinUser(STATE.user) ? panelSueldoHtml('joaco') : (isFacundoUser(STATE.user) ? panelSueldoHtml('facundo') : '')}
 
     <div class="chart-grid">
       <div class="card chart-card">
@@ -9983,9 +9985,9 @@ function renderChatConversation() {
         })() : ''}
         ${getUserRole() === 'admin' ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
-          const _enNadia = _c && _c.assigned_to === 'nadia';
+          const _enNadia = _c && _c.assigned_to === 'facundo';
           // Reparto de vendedores: asignar/sacar el chat a Nadia (solo Gaspar). Sin asignar = lo ve Joaco.
-          return `<button class="btn-label-toggle${_enNadia ? ' has-note' : ''}" id="btn-nadia-toggle" title="${_enNadia ? 'Sacar de Nadia (vuelve a Joaco)' : 'Asignar este chat a Nadia'}" style="font-size:13px;font-weight:700;line-height:1">👤${_enNadia ? 'N✓' : 'N'}</button>`;
+          return `<button class="btn-label-toggle${_enNadia ? ' has-note' : ''}" id="btn-nadia-toggle" title="${_enNadia ? 'Sacar de Facundo (vuelve a Joaco)' : 'Asignar este chat a Facundo'}" style="font-size:13px;font-weight:700;line-height:1">👤${_enNadia ? 'F✓' : 'F'}</button>`;
         })() : ''}
         ${getUserRole() === 'admin' ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
@@ -11924,8 +11926,8 @@ async function handleToggleNadia() {
   const phone = chatState.selectedPhone;
   if (!phone || getUserRole() !== 'admin') return;
   const c = (chatState.contacts || []).find(x => x.phone === phone);
-  const enNadia = c && c.assigned_to === 'nadia';
-  const nuevo = enNadia ? '' : 'nadia';
+  const enNadia = c && c.assigned_to === 'facundo';
+  const nuevo = enNadia ? '' : 'facundo';
   const nombre = (c && c.contact_name) || formatPhoneDisplay(phone);
   const ok = await showConfirm(
     enNadia
@@ -11942,7 +11944,7 @@ async function handleToggleNadia() {
     });
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
     if (c) c.assigned_to = nuevo;  // refleja al instante en el botón
-    toast(nuevo === 'nadia' ? '👤 Asignado a Nadia' : 'Devuelto a la bandeja de Joaco');
+    toast(nuevo === 'facundo' ? '👤 Asignado a Facundo' : 'Devuelto a la bandeja de Joaco');
     chatState.contactsLoaded = false;
     loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
   } catch (e) {
@@ -14154,8 +14156,8 @@ function renderBriefCard(b) {
               const _r = getUserRole();
               if (_r !== 'admin' && _r !== 'disenador') return '';
               const _c = String(b.comercial_id || '').toLowerCase();
-              const _nom = _c === 'nadia' ? 'Nadia' : (_c === 'joaco' ? 'Joaquín' : (_c || '—'));
-              const _col = _c === 'nadia' ? '#c084fc' : '#8FD4DE';
+              const _nom = _c === 'facundo' ? 'Nadia' : (_c === 'joaco' ? 'Joaquín' : (_c || '—'));
+              const _col = _c === 'facundo' ? '#c084fc' : '#8FD4DE';
               return `<span title="Vendedor: ${escapeHtml(_nom)}" style="background:${_col}22;color:${_col};font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600">${escapeHtml(_nom)}</span>`;
             })()}
             ${(() => {

@@ -664,7 +664,7 @@ async function ensurePedidosSchema(env) {
 //  lo manda un admin (reasignación manual desde el CRM).
 async function resolveComercial(env, { bodyComercial, sessionUser, phone } = {}) {
   const slug = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  const norm = (s) => { const k = slug(s); if (k === 'joaquin' || k === 'joaco') return 'joaco'; if (k === 'nadia') return 'nadia'; return ''; };
+  const norm = (s) => { const k = slug(s); if (k === 'joaquin' || k === 'joaco') return 'joaco'; if (k === 'facundo') return 'facundo'; return ''; };
   const us = slug(sessionUser);
   // (0) reasignación manual: un admin (Gaspar) puede forzar el vendedor por body.
   if (bodyComercial && us === 'gaspar') { const v = norm(bodyComercial); if (v) return v; }
@@ -1525,9 +1525,9 @@ async function maybeRepartirANadia(env, phone) {
     try { if (await env.DB.prepare("SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1").bind(phone).first()) return; } catch (_) {} // cliente existente
     // Freno anti-pisón: si un humano (Joaco/Gaspar) ya respondió, NO se lo movemos a Nadia.
     try { if (await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status' LIMIT 1").bind(phone).first()) return; } catch (_) {}
-    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'nadia' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first();
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'facundo' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first();
     if (((r && r.n) || 0) >= cuota) return; // ya llegó a la cuota del día
-    await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = 'nadia', assigned_at = ? WHERE phone = ?").bind(new Date().toISOString(), phone).run();
+    await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = 'facundo', assigned_at = ? WHERE phone = ?").bind(new Date().toISOString(), phone).run();
     const nadiaPhone = await kvGet(env, 'nadia_phone', '');
     if (nadiaPhone) { try { await waSendText(env, nadiaPhone, 'Tenés un lead nuevo de carteles para atender en el CRM 🙌'); } catch (_) {} }
   } catch (_) {}
@@ -2391,7 +2391,7 @@ async function buildReporteDiario(env) {
     ).all();
     for (const r of (rs.results || [])) {
       const n = r.n || 0; out.presupTotal += n;
-      if (r.comercial_id === 'nadia') out.presupNadia += n; else out.presupJoaco += n;
+      if (r.comercial_id === 'facundo') out.presupNadia += n; else out.presupJoaco += n;
     }
   } catch (_) {}
   // 4) Chats asignados hoy por vendedor (assigned_to + assigned_at, mig 037).
@@ -2400,7 +2400,7 @@ async function buildReporteDiario(env) {
       `SELECT assigned_to, COUNT(DISTINCT phone) AS n FROM wa_chats_summary WHERE assigned_to != '' AND assigned_at >= ${REPORTE_DIA_DESDE} AND assigned_at < ${REPORTE_DIA_HASTA} GROUP BY assigned_to`
     ).all();
     for (const r of (rs.results || [])) {
-      if (r.assigned_to === 'nadia') out.chatsNadia += (r.n || 0);
+      if (r.assigned_to === 'facundo') out.chatsNadia += (r.n || 0);
       else if (r.assigned_to === 'joaco' || r.assigned_to === 'joaquin') out.chatsJoaco += (r.n || 0);
     }
   } catch (_) {}
@@ -2415,16 +2415,16 @@ async function buildReporteDiario(env) {
 }
 function formatReporteDiario(d) {
   const fecha = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10).split('-').reverse().join('/');
-  const repartoNota = (d.chatsJoaco + d.chatsNadia) === 0 ? '  (arranca cuando sumemos a Nadia)' : '';
+  const repartoNota = (d.chatsJoaco + d.chatsNadia) === 0 ? '  (arranca cuando sumemos a Facundo)' : '';
   return (
     `📊 Reporte del día ${fecha}\n\n` +
     `💬 Conversaciones nuevas: ${d.total}\n` +
     `   Carteles: ${d.carteles} · Cursos: ${d.cursos}\n\n` +
     `🤖 Pasaron la precotización: ${d.precotiz}\n\n` +
     `👥 Chats asignados hoy:${repartoNota}\n` +
-    `   Joaco: ${d.chatsJoaco} · Nadia: ${d.chatsNadia}\n\n` +
+    `   Joaco: ${d.chatsJoaco} · Facundo: ${d.chatsNadia}\n\n` +
     `📋 Presupuestos enviados: ${d.presupTotal}\n` +
-    `   Joaco: ${d.presupJoaco} · Nadia: ${d.presupNadia}\n\n` +
+    `   Joaco: ${d.presupJoaco} · Facundo: ${d.presupNadia}\n\n` +
     `🧾 Órdenes de compra: ${d.ocEnviadas}`
   );
 }
@@ -7886,7 +7886,7 @@ async function inboxAccessOk(env, role, phone) {
 // El comercial "principal" (Joaco) ve todo lo NO asignado a un secundario. Es el reparto
 // de chats entre vendedores (assigned_to en wa_chats_summary, mig 037). Sumar un 3er
 // vendedor secundario = agregar su slug acá (y queda cubierto en la invalidación de cache).
-const VENDEDORES_SECUNDARIOS = ['nadia'];
+const VENDEDORES_SECUNDARIOS = ['facundo'];
 async function invalidateChatsSummaryCache(request) {
   try {
     const cache = caches.default;
@@ -9814,7 +9814,7 @@ const handler = {
           // Reparto a Nadia: cuota diaria configurable + cuántos se le asignaron hoy (día AR).
           const nadiaCuota = parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0;
           let nadiaHoy = 0;
-          try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'nadia' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first(); nadiaHoy = (nr && nr.n) || 0; } catch (_) {}
+          try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'facundo' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first(); nadiaHoy = (nr && nr.n) || 0; } catch (_) {}
           const nadiaPhone = await kvGet(env, 'nadia_phone', '');
           return json({ ok: true, on, modo, cap, sample, count: leads.length, leads, frozen, nadia_cuota: nadiaCuota, nadia_hoy: nadiaHoy, nadia_phone: nadiaPhone });
         }
