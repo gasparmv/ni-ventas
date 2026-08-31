@@ -5759,7 +5759,11 @@ async function processLanzamientoLanding(env) {
 // el lead a stage='link_enviado' → processLanzamientoLanding (Camino 2) lo saltea.
 async function sendEventoGroupLink(env, phone) {
   if (!phone || !(await lanzamientoLandingOn(env))) return;
-  const link = String(await kvGet(env, 'lanzamiento_link_grupo', '') || '').trim();
+  // PARCHE (31-ago-2026): la API de escritura de D1 estaba caida (7500) y no se pudo
+  // actualizar el flag. Se hardcodea el link nuevo del grupo. REVERTIR a la linea kvGet
+  // de abajo cuando D1 vuelva y quede grabado el kv 'lanzamiento_link_grupo'.
+  const link = 'https://chat.whatsapp.com/FRwG2hSvT7o7BGsIFOtnzg';
+  // const link = String(await kvGet(env, 'lanzamiento_link_grupo', '') || '').trim();
   if (!link) return; // sin link configurado → no manda nada
   let reserva;
   try {
