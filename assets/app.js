@@ -8746,8 +8746,12 @@ function paraCotizarCount() {
   const l = paraCotizarLabel();
   if (!l) return 0;
   const cl = chatState.contactLabels || {};
+  // contactLabels es GLOBAL, pero cada vendedor ve solo SUS chats (scopeados por el
+  // backend en chatState.contacts). Contar solo dentro de los chats visibles, así el
+  // secundario (Facundo) ve el contador de SUS para-cotizar, no el total de Joaco.
+  const visibles = new Set((chatState.contacts || []).map(c => c.phone));
   let n = 0;
-  for (const p in cl) { if ((cl[p] || []).includes(l.id)) n++; }
+  for (const p in cl) { if (visibles.has(p) && (cl[p] || []).includes(l.id)) n++; }
   return n;
 }
 
