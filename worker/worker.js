@@ -395,9 +395,11 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     h+='<label>Que cotizas</label><div class="seg" id="i_modo"><button type="button" class="segb'+(modo==='completo'?' on':'')+'" data-modo="completo">Cartel completo</button><button type="button" class="segb'+(modo==='acrilico'?' on':'')+'" data-modo="acrilico">Solo acr&iacute;lico calado</button></div>';
     h+='<label>Nombre del dise&ntilde;o <span style="opacity:.6">(opcional)</span></label><input id="i_nombre" maxlength="60" placeholder="Ej: Logo del local">';
     h+='<div class="r"><div><label>Ancho (cm)</label><input id="i_ancho" type="number" inputmode="numeric" placeholder="50"></div><div><label>Alto (cm)</label><input id="i_alto" type="number" inputmode="numeric" placeholder="30"></div></div>';
+    h+='<div id="grp-completo"'+(modo==='acrilico'?' style="display:none"':'')+'>';
     h+='<div class="r"><div><label>Metros de neon</label><input id="i_neon" type="number" inputmode="decimal" placeholder="3"></div><div><label>Tramos</label><input id="i_tramos" type="number" inputmode="numeric" placeholder="3"></div></div>';
     h+='<label>Tipo</label><select id="i_tipo"><option value="INT">Interior</option><option value="EXT">Exterior (resistente)</option></select>';
     h+='<label>Entrega</label><div class="seg" id="i_entrega"><button type="button" class="segb'+(entrega==='envio'?' on':'')+'" data-ent="envio">Env&iacute;o incluido</button><button type="button" class="segb'+(entrega==='retiro'?' on':'')+'" data-ent="retiro">Retiro en taller</button></div>';
+    h+='</div>';
     h+='<button class="btn" id="b_calc">Calcular precio</button><div class="err" id="err"></div></div>';
     h+='<div id="res"></div>';
     h+=videoCardHtml();
@@ -409,7 +411,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     var _sg=document.querySelectorAll('#app #i_entrega .segb');
     for(var _i=0;_i<_sg.length;_i++){_sg[_i].onclick=function(){for(var _j=0;_j<_sg.length;_j++)_sg[_j].className='segb';this.className='segb on';entrega=this.getAttribute('data-ent');};}
     var _md=document.querySelectorAll('#app #i_modo .segb');
-    for(var _k=0;_k<_md.length;_k++){_md[_k].onclick=function(){for(var _l=0;_l<_md.length;_l++)_md[_l].className='segb';this.className='segb on';modo=this.getAttribute('data-modo');};}
+    for(var _k=0;_k<_md.length;_k++){_md[_k].onclick=function(){for(var _l=0;_l<_md.length;_l++)_md[_l].className='segb';this.className='segb on';modo=this.getAttribute('data-modo');var _g=$('grp-completo');if(_g)_g.style.display=(modo==='acrilico'?'none':'');var _r=$('res');if(_r)_r.innerHTML='';};}
   }
   function baseCard(title,sw,o){
     var h='<div class="base"><h3><span class="sw" style="background:'+sw+'"></span>'+title+'</h3>';
@@ -425,9 +427,8 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
       if(!ancho||!alto)return showErr('Carga el ancho y el alto.');
       var m2=(ancho*alto)/10000;
       var costoAc=Math.round(175000*m2);
-      var o={costo:costoAc,reventaMin:Math.round(costoAc*1.25),reventaMax:Math.round(costoAc*1.35),gananciaMin:Math.round(costoAc*0.25),gananciaMax:Math.round(costoAc*0.35)};
       var headA='<div class="entnote">SOLO ACRILICO CALADO ('+num(ancho)+'x'+num(alto)+' cm = '+m2.toFixed(2)+' m2)</div>'+(nombre?'<div class="card" style="padding:12px 16px;margin-bottom:10px"><b style="font-size:15px">'+esc(nombre)+'</b></div>':'');
-      $('res').innerHTML=headA+baseCard('Acrilico calado','#cbd5e1',o)+'<div class="note" style="margin-top:8px">Precio del acr&iacute;lico calado suelto ($175.000 el m&sup2;). No incluye ne&oacute;n ni armado.</div>';
+      $('res').innerHTML=headA+'<div class="base"><h3><span class="sw" style="background:#cbd5e1"></span>Acrilico calado</h3><div class="line big"><span class="k">Precio</span><span class="v">'+money(costoAc)+'</span></div></div><div class="note" style="margin-top:8px">Solo el acr&iacute;lico cortado ($175.000 el m&sup2;), sin ne&oacute;n ni armado.</div>';
       return;
     }
     if(!ancho||!alto||!neon||!tramos)return showErr('Carga ancho, alto, metros de neon y tramos.');
