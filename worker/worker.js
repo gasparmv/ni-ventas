@@ -326,6 +326,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   var token=localStorage.getItem(TKEY)||'';
   var me=null;
   var entrega='envio';
+  var modo='completo';  // 'completo' = cartel entero (server) | 'acrilico' = solo acrilico calado ($175000/m2, client-side)
   var histItems=[];  // ultimas cotizaciones cargadas (para reabrir en el form al tocarlas)
   var VIDEO_YT='zhmP4d1wEgk';  // ID del video de YouTube "como cotizar en 10 min" (https://youtu.be/zhmP4d1wEgk)
   function $(id){return document.getElementById(id);}
@@ -391,6 +392,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     var nm=(me&&me.nombre)?me.nombre:'';
     var h='<div class="top"><div class="hi">Hola <b>'+esc(nm)+'</b></div><button class="linkb" id="b_out">Salir</button></div>';
     h+='<div class="card"><h1>Cotizador</h1><div class="sub">Carga las medidas y te muestra tu costo y a cuanto revenderlo.</div>';
+    h+='<label>Que cotizas</label><div class="seg" id="i_modo"><button type="button" class="segb'+(modo==='completo'?' on':'')+'" data-modo="completo">Cartel completo</button><button type="button" class="segb'+(modo==='acrilico'?' on':'')+'" data-modo="acrilico">Solo acr&iacute;lico calado</button></div>';
     h+='<label>Nombre del dise&ntilde;o <span style="opacity:.6">(opcional)</span></label><input id="i_nombre" maxlength="60" placeholder="Ej: Logo del local">';
     h+='<div class="r"><div><label>Ancho (cm)</label><input id="i_ancho" type="number" inputmode="numeric" placeholder="50"></div><div><label>Alto (cm)</label><input id="i_alto" type="number" inputmode="numeric" placeholder="30"></div></div>';
     h+='<div class="r"><div><label>Metros de neon</label><input id="i_neon" type="number" inputmode="decimal" placeholder="3"></div><div><label>Tramos</label><input id="i_tramos" type="number" inputmode="numeric" placeholder="3"></div></div>';
@@ -404,8 +406,10 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     $('app').innerHTML=h;
     $('b_out').onclick=logout;
     $('b_calc').onclick=doCalc;
-    var _sg=document.querySelectorAll('#app .segb');
+    var _sg=document.querySelectorAll('#app #i_entrega .segb');
     for(var _i=0;_i<_sg.length;_i++){_sg[_i].onclick=function(){for(var _j=0;_j<_sg.length;_j++)_sg[_j].className='segb';this.className='segb on';entrega=this.getAttribute('data-ent');};}
+    var _md=document.querySelectorAll('#app #i_modo .segb');
+    for(var _k=0;_k<_md.length;_k++){_md[_k].onclick=function(){for(var _l=0;_l<_md.length;_l++)_md[_l].className='segb';this.className='segb on';modo=this.getAttribute('data-modo');};}
   }
   function baseCard(title,sw,o){
     var h='<div class="base"><h3><span class="sw" style="background:'+sw+'"></span>'+title+'</h3>';
@@ -417,6 +421,15 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   function doCalc(){
     var nombre=$('i_nombre')?$('i_nombre').value.trim():'';
     var ancho=+$('i_ancho').value, alto=+$('i_alto').value, neon=+$('i_neon').value, tramos=+$('i_tramos').value, tipo=$('i_tipo').value;
+    if(modo==='acrilico'){
+      if(!ancho||!alto)return showErr('Carga el ancho y el alto.');
+      var m2=(ancho*alto)/10000;
+      var costoAc=Math.round(175000*m2);
+      var o={costo:costoAc,reventaMin:Math.round(costoAc*1.25),reventaMax:Math.round(costoAc*1.35),gananciaMin:Math.round(costoAc*0.25),gananciaMax:Math.round(costoAc*0.35)};
+      var headA='<div class="entnote">SOLO ACRILICO CALADO ('+num(ancho)+'x'+num(alto)+' cm = '+m2.toFixed(2)+' m2)</div>'+(nombre?'<div class="card" style="padding:12px 16px;margin-bottom:10px"><b style="font-size:15px">'+esc(nombre)+'</b></div>':'');
+      $('res').innerHTML=headA+baseCard('Acrilico calado','#cbd5e1',o)+'<div class="note" style="margin-top:8px">Precio del acr&iacute;lico calado suelto ($175.000 el m&sup2;). No incluye ne&oacute;n ni armado.</div>';
+      return;
+    }
     if(!ancho||!alto||!neon||!tramos)return showErr('Carga ancho, alto, metros de neon y tramos.');
     var b=$('b_calc');b.disabled=true;b.textContent='Calculando...';
     api('/revendedor/cotizar',{method:'POST',body:{nombre:nombre,ancho:ancho,alto:alto,neon:neon,tramos:tramos,tipo:tipo,entrega:entrega}}).then(function(r){
