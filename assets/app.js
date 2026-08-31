@@ -2108,15 +2108,15 @@ function render() {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
-  // Corpóreas: solo Joaquín + Gaspar. Si alguien más cae acá (hash directo), al dashboard.
-  if (STATE.view === 'corporeas' && !(isJoaquinUser(STATE.user) || isGasparUser(STATE.user))) {
+  // Corpóreas: Joaquín + Gaspar + Facundo. Si alguien más cae acá (hash directo), al dashboard.
+  if (STATE.view === 'corporeas' && !(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isFacundoUser(STATE.user))) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
   // Nadia (2da vendedora): set reducido por ahora. Views permitidas: dashboard (solo
   // su panel "Tu sueldo"), pedidos, presupuestos, cotizacion, chat. Si cae en otra
   // (seguimientos/actividad/etc. por hash directo), al dashboard.
-  if (isFacundoUser(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat'].includes(STATE.view)) {
+  if (isFacundoUser(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas'].includes(STATE.view)) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
@@ -2601,7 +2601,7 @@ function renderShell() {
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
-        ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
+        ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isFacundoUser(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
         ${!isFacundoUser(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
@@ -11939,9 +11939,9 @@ async function handleToggleNadia() {
   const nombre = (c && c.contact_name) || formatPhoneDisplay(phone);
   const ok = await showConfirm(
     enNadia
-      ? `Sacar a "${nombre}" de Nadia.\n\nVuelve a la bandeja de Joaco.`
-      : `Asignar a "${nombre}" a Nadia.\n\nLo va a ver Nadia y sale de la bandeja de Joaco.`,
-    { title: enNadia ? 'Sacar de Nadia' : 'Asignar a Nadia', confirmLabel: enNadia ? 'Sacar' : '👤 Asignar', cancelLabel: 'Cancelar' }
+      ? `Sacar a "${nombre}" de Facundo.\n\nVuelve a la bandeja de Joaco.`
+      : `Asignar a "${nombre}" a Facundo.\n\nLo va a ver Facundo y sale de la bandeja de Joaco.`,
+    { title: enNadia ? 'Sacar de Facundo' : 'Asignar a Facundo', confirmLabel: enNadia ? 'Sacar' : '👤 Asignar', cancelLabel: 'Cancelar' }
   ).catch(() => false);
   if (!ok) return;
   try {
@@ -14164,7 +14164,7 @@ function renderBriefCard(b) {
               const _r = getUserRole();
               if (_r !== 'admin' && _r !== 'disenador') return '';
               const _c = String(b.comercial_id || '').toLowerCase();
-              const _nom = _c === 'facundo' ? 'Nadia' : (_c === 'joaco' ? 'Joaquín' : (_c || '—'));
+              const _nom = _c === 'facundo' ? 'Facundo' : (_c === 'joaco' ? 'Joaquín' : (_c || '—'));
               const _col = _c === 'facundo' ? '#c084fc' : '#8FD4DE';
               return `<span title="Vendedor: ${escapeHtml(_nom)}" style="background:${_col}22;color:${_col};font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600">${escapeHtml(_nom)}</span>`;
             })()}
