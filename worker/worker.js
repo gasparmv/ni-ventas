@@ -1527,6 +1527,11 @@ async function maybeRepartirANadia(env, phone) {
     try { if (await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status' LIMIT 1").bind(phone).first()) return; } catch (_) {}
     const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'facundo' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first();
     if (((r && r.n) || 0) >= cuota) return; // ya llegó a la cuota del día
+    // ALEATORIO por-lead (estable por teléfono): solo una fracción de los eligibles va a Facundo,
+    // así no se lleva SIEMPRE los primeros del día sino un ~random repartido. kv facundo_reparto_prob.
+    const prob = parseFloat(await kvGet(env, 'facundo_reparto_prob', '0.25')) || 0.25;
+    let _h = 0; const _ps = String(phone); for (let _i = 0; _i < _ps.length; _i++) _h = (_h * 31 + _ps.charCodeAt(_i)) >>> 0;
+    if ((_h % 100) >= Math.round(prob * 100)) return;   // a este teléfono no le toca (determinístico, no depende de cuántos mensajes mande)
     await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = 'facundo', assigned_at = ? WHERE phone = ?").bind(new Date().toISOString(), phone).run();
     const nadiaPhone = await kvGet(env, 'nadia_phone', '');
     if (nadiaPhone) { try { await waSendText(env, nadiaPhone, 'Tenés un lead nuevo de carteles para atender en el CRM 🙌'); } catch (_) {} }

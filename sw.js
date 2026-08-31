@@ -5,7 +5,7 @@
 
 // IMPORTANTE: bumpear CACHE_NAME cada vez que cambia app.js o app.css —
 // el activate borra los caches viejos y fuerza re-descarga del bundle.
-const CACHE_NAME = 'neon-ni-v206';
+const CACHE_NAME = 'neon-ni-v207';
 // Rutas RELATIVAS (se resuelven contra la ubicación del SW) para que la app
 // funcione IGUAL en la subruta vieja (/ni-ventas/) y en la raíz del dominio nuevo
 // (neoninfinitosoftware.com) sin tocar nada. Sin esto, atar a /ni-ventas/ rompía

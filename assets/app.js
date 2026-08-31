@@ -965,11 +965,15 @@ function loadUser() {
   let stored = [];
   try { stored = JSON.parse(localStorage.getItem('niventas.users') || 'null') || []; }
   catch(e) { stored = []; }
+  // Poda usuarios viejos que ya no existen (ej. 'Nadia', reemplazada por Facundo).
+  const OBSOLETOS = ['nadia'];
+  stored = stored.filter(u => !OBSOLETOS.includes(String(u).toLowerCase()));
   const merged = CONFIG.defaultUsers.slice();
   for (const u of stored) {
     if (!merged.some(x => x.toLowerCase() === String(u).toLowerCase())) merged.push(u);
   }
   STATE.users = merged;
+  try { localStorage.setItem('niventas.users', JSON.stringify(merged)); } catch(e) {}
   STATE.user = localStorage.getItem('niventas.user') || null;
   STATE.token = localStorage.getItem('niventas.token') || null;
   STATE.tokenUser = localStorage.getItem('niventas.tokenUser') || null;
