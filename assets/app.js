@@ -199,7 +199,7 @@ function panelSueldoHtml(vendedor) {
   const DESDE = esNadia ? '2026-08' : '2026-05';
   const params = getCotizadorParams();
   const rate = esNadia
-    ? ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.facundo) || params.nv_facundo_comision_pct || 0.095)
+    ? 0.10  // Facu VE 10% (lo prometido). El neutro real calibrado es 9,5% (vende +5% oculto) — ver nv_facundo_comision_pct.
     : ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.joaquin) || params.comision_pct || 0.05);
   const ratePct = +(rate * 100).toFixed(1);
   const fijoMes = esNadia ? nadiaFijoMes : joacoFijoMes;
@@ -15237,7 +15237,7 @@ function renderCorpPopup() {
           <b>${escapeHtml(brief.cliente_nombre || 'Sin título')}</b> · ${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm${m2 ? ' · ' + m2 + ' m²' : ''} · corpórea · caso ${caso} · ${luz} · frente ${mat}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:14px;margin-bottom:var(--s-3);background:rgba(143,212,222,.04);padding:var(--s-3);border-radius:var(--r-sm)">
-          <div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco 3%</span><br><b>${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</b></div>
+          ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco 3%</span><br><b>${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</b></div>` : '<div></div>'}
           ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Costo · margen</span><br><b>${fmtMoney(cj.costo || 0)} · ×${cj.margen || ''}</b></div>` : '<div></div>'}
           <div style="grid-column:1 / -1"><span style="color:var(--fg-subtle);font-size:11px">Precio final</span><br><b style="color:var(--accent-cyan);font-size:18px">${fmtMoney(brief.precio_final || 0)}</b></div>
         </div>
@@ -16377,7 +16377,7 @@ function renderBriefCotizadorPopup() {
             <div><span style="color:var(--fg-subtle);font-size:11px">Margen objetivo</span><br><b>${Math.round(r.margen*100)}%</b></div>
           ` : `
             <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${r.m2.toFixed(2)}</b></div>
-            <div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>
+            ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>` : '<div></div>'}
           `}
           <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.transFinal)}</b></div>
           ${OFRECER_BASE_NEGRA ? `<div><span style="color:var(--fg-subtle);font-size:11px">Acrílico negro</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.negroFinal)}</b></div>` : ''}
