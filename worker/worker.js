@@ -6019,6 +6019,140 @@ async function processEventoPres(env) {
   }
 }
 
+// ===== Difusión "MiniSupernova" — alumnos que YA pagaron el curso (Comunidad Al Infinito) =====
+// A pedido de Gaspar (2-sep): manda la plantilla minisupernova_comunidad a los ~733 alumnos del
+// CSV de la comunidad (tabla minisupernova). Goteo por el cron */1 en horario AR (9-21) con TOPE
+// DIARIO EXACTO de 50 (contador de enviados-hoy, no alcanza el perTick). Etiqueta dinámica
+// "Lead MiniSupernova #<grupo>" (el grupo viene del CSV, #1-#10). OCULTA el chat hasta que
+// respondan, PERO con GUARDIA anti-pisar: NO oculta a quien ya tiene un chat vivo (bandeja
+// especial o inbound reciente), para no tapar una conversación en curso. Al RESPONDER,
+// miniSupernovaOnInbound lo revela a la bandeja de Abril ('cursos'). Kill-switch PROPIO kv
+// 'minisupernova_on' (def 0) — NO usa wa_send_paused para frenar solo esta campaña. Gate: no
+// manda hasta que Meta apruebe la plantilla. Reporte diario a Gaspar+Bruno (maybeReporteMiniSupernova).
+const MINISUPER_TPL = 'minisupernova_comunidad';          // con {{1}}=nombre (los ~340 con nombre)
+const MINISUPER_TPL_GRL = 'minisupernova_comunidad_grl';  // genérica sin variable (los ~391 sin nombre en el CSV)
+const MINISUPER_CAP_DIARIO = 50;        // tope duro de envíos por día (AR)
+const MINISUPER_LABEL_COLOR = '#ec4899';
+const MINISUPER_LIVE_DAYS = 30;         // "chat vivo" = inbound en los últimos N días → NO ocultar
+
+// Al RESPONDER un alumno que recibió el mensaje y quedó OCULTO: marca la respuesta (para el
+// reporte) y lo revela a la bandeja de Abril ('cursos'). Kind propio 'minisupernova'. Solo mueve
+// 'oculto'→'cursos' (candado WHERE inbox='oculto'), así no pisa un chat movido a mano ni uno vivo
+// que dejamos sin ocultar. Se llama en el webhook inbound.
+async function miniSupernovaOnInbound(env, phone) {
+  if (!phone) return;
+  try {
+    const got = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind = 'minisupernova' AND status = 'sent' LIMIT 1").bind(phone).first();
+    if (!got) return;
+    const nowIso = new Date().toISOString();
+    try { await env.DB.prepare("UPDATE minisupernova SET replied_at = ? WHERE phone = ? AND replied_at IS NULL").bind(nowIso, phone).run(); } catch (_) {}
+    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(phone, nowIso).run();
+  } catch (_) {}
+}
+
+async function processMiniSupernova(env) {
+  if ((await kvGet(env, 'minisupernova_on', '0')) !== '1') return;
+  if ((await kvGet(env, 'wa_send_paused', '0')) === '1') return;
+  if (await isWaBillingBlocked(env)) return;
+  const nowMs = Date.now();
+  const hAR = new Date(nowMs - 3 * 3600 * 1000).getUTCHours();
+  if (hAR < 9 || hAR >= 21) return; // horario hábil AR 9-21
+  // Gate: no mandar hasta que Meta apruebe AMBAS plantillas (con nombre + genérica), así no
+  // quemamos filas 'failed' sin reintento contra una plantilla pending.
+  let okN = false, okG = false;
+  try { const a = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(MINISUPER_TPL).first(); okN = !!(a && String(a.status).toUpperCase() === 'APPROVED'); } catch (_) {}
+  try { const b = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(MINISUPER_TPL_GRL).first(); okG = !!(b && String(b.status).toUpperCase() === 'APPROVED'); } catch (_) {}
+  if (!okN || !okG) return;
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS minisupernova (phone TEXT PRIMARY KEY, nombre TEXT, grupo TEXT, status TEXT DEFAULT 'pending', sent_at TEXT, claimed_at TEXT, replied_at TEXT)").run(); } catch (_) {}
+  // OJO: NO recuperar filas colgadas en 'sending' (revirtiéndolas a 'pending'). Si el isolate muere
+  // ENTRE el envío OK y el UPDATE a 'sent', la fila queda 'sending' con el mensaje YA entregado; re-
+  // encolarla la reenviaría (doble envío a un número bajo restricción de Meta). Igual que el molde
+  // processLanzAgosto: una fila colgada queda skippeada (el SELECT solo toma 'pending'), nunca se
+  // reenvía. El costo (1 contacto que quizá no reciba, por un crash raro) es preferible a duplicar.
+  // TOPE DIARIO EXACTO: cuántos mandé HOY (AR). Si ya llegué a 50 → corto (la única defensa real,
+  // no hay cap global del número).
+  let sentToday = 0;
+  try { const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status = 'sent' AND sent_at >= " + REPORTE_DIA_DESDE).first(); sentToday = (c && c.n) || 0; } catch (_) { return; }
+  if (sentToday >= MINISUPER_CAP_DIARIO) return;
+  const perTick = Math.max(1, Math.min(10, parseInt(await kvGet(env, 'minisupernova_pertick', '3'), 10) || 3));
+  const room = Math.min(perTick, MINISUPER_CAP_DIARIO - sentToday);
+  let rows;
+  try { rows = (await env.DB.prepare("SELECT phone, nombre, grupo FROM minisupernova WHERE status = 'pending' ORDER BY rowid LIMIT ?").bind(room).all()).results || []; } catch (_) { return; }
+  if (!rows.length) { try { await kvSet(env, 'minisupernova_on', '0'); } catch (_) {} return; } // terminó → se apaga solo
+  const liveCutoff = new Date(nowMs - MINISUPER_LIVE_DAYS * 24 * 3600 * 1000).toISOString();
+  for (const r of rows) {
+    const phone = r.phone;
+    let rz;
+    try { rz = await env.DB.prepare("UPDATE minisupernova SET status = 'sending', claimed_at = ? WHERE phone = ? AND status = 'pending'").bind(new Date().toISOString(), phone).run(); } catch (_) { continue; }
+    if (!rz?.meta?.changes) continue; // ya lo tomó otro tick (evita doble envío entre */1 y */5)
+    const nombre = String(r.nombre || '').trim();
+    const tpl = nombre ? MINISUPER_TPL : MINISUPER_TPL_GRL;   // sin nombre → genérica natural
+    const res = await waSendTemplate(env, phone, tpl, 'es_AR', nombre ? [nombre] : []);
+    const nowIso = new Date().toISOString();
+    if (!res || !res.ok) {
+      // REVERT-ON-FAIL: vuelve a 'pending' (reintentable), NO 'failed'. No cuenta para el tope.
+      try { await env.DB.prepare("UPDATE minisupernova SET status = 'pending' WHERE phone = ? AND status = 'sending'").bind(phone).run(); } catch (_) {}
+      try { await logWaEvent(env, { to: phone, kind: 'minisupernova', ref: '', ok: false, error: res?.error }); } catch (_) {}
+      continue;
+    }
+    try { await env.DB.prepare("UPDATE minisupernova SET status = 'sent', sent_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)").bind(nowIso, res.id || ('minisuper-' + phone + '-' + Date.now()), phone, '[plantilla: ' + tpl + ']').run(); } catch (_) {}
+    // Etiqueta SIEMPRE (esté vivo o no): "Lead MiniSupernova #<grupo del CSV>".
+    try {
+      const grupo = String(r.grupo || '').replace(/\D/g, '') || 's-g';
+      const labelId = await ensureLabelId(env, 'Lead MiniSupernova #' + grupo, MINISUPER_LABEL_COLOR);
+      if (labelId) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, labelId, nowIso).run();
+    } catch (_) {}
+    // GUARDIA anti-pisar (pedido por Gaspar): solo OCULTA si NO tiene chat vivo. "Vivo" = bandeja
+    // especial/activa (cursos/privado/precotiz/corte) o inbound reciente. Si está vivo lo dejamos
+    // donde está (visible) para no tapar una conversación en curso.
+    let isLive = false;
+    try {
+      const s = await env.DB.prepare("SELECT inbox FROM wa_chats_summary WHERE phone = ?").bind(phone).first();
+      const inbox = s && s.inbox ? String(s.inbox) : '';
+      if (['cursos', 'privado', 'precotiz', 'corte'].includes(inbox)) isLive = true;
+      if (!isLive) {
+        const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1").bind(phone, liveCutoff).first();
+        if (inb) isLive = true;
+      }
+    } catch (_) {}
+    if (!isLive) {
+      try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at").bind(phone, nowIso).run(); } catch (_) {}
+    }
+    // Registro para el reveal-on-reply (dedup). Si está vivo/ya en cursos, el reveal es no-op por el candado.
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'minisupernova', ?, 'sent', '', '')").bind(phone, nowIso).run(); } catch (_) {}
+    await new Promise(rs => setTimeout(rs, 300));
+  }
+}
+
+// Reporte diario de la campaña MiniSupernova a Gaspar + Bruno (21h AR). Métricas de la tabla
+// minisupernova. Plantilla reporte_minisupernova (fallback texto libre). Dedup PROPIO kv
+// 'reporte_minisupernova_sent'. Solo reporta mientras la campaña tiene actividad.
+async function maybeReporteMiniSupernova(env) {
+  try {
+    const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    if ((await kvGet(env, 'reporte_minisupernova_sent', '')) === fechaAR) return; // ya se entregó hoy
+    let hoy = 0, total = 0, pend = 0, resp = 0;
+    try { const a = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status = 'sent' AND sent_at >= " + REPORTE_DIA_DESDE).first(); hoy = (a && a.n) || 0; } catch (_) {}
+    try { const b = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status = 'sent'").first(); total = (b && b.n) || 0; } catch (_) {}
+    try { const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status = 'pending'").first(); pend = (c && c.n) || 0; } catch (_) {}
+    try { const d = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE replied_at IS NOT NULL").first(); resp = (d && d.n) || 0; } catch (_) {}
+    if (total === 0) return;                    // todavía no arrancó → nada que reportar
+    if (pend === 0 && hoy === 0) return;        // ya terminó y hoy no salió nada → dejar de reportar
+    const fechaDisplay = fechaAR.split('-').reverse().join('/');
+    const params = [fechaDisplay, String(hoy), String(total), String(resp), String(pend)];
+    const texto = 'MiniSupernova ' + fechaDisplay + '\nEnviados hoy: ' + hoy + '\nTotal enviados: ' + total + '\nRespondieron: ' + resp + '\nPendientes: ' + pend;
+    let anyOk = false;
+    for (const ph of REPORTE_DIARIO_PHONES) {
+      let r = null;
+      try { r = await waSendTemplate(env, ph, 'reporte_minisupernova', 'es_AR', params); } catch (_) {}
+      if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} } // fallback: solo llega si la ventana de 24h está abierta
+      if (r && r.ok) anyOk = true;
+    }
+    if (anyOk) await kvSet(env, 'reporte_minisupernova_sent', fechaAR);
+  } catch (_) {}
+}
+
 // ============================================================================
 // SORTEO DÍA 2 — recordatorio a los participantes del formulario del sorteo del
 // evento de agosto. Goteo seguro: manda de a poco (kv sorteo_dia2_pertick, def 3),
@@ -9130,6 +9264,11 @@ const handler = {
                   try { await minicursoLandingOnInbound(env, phone, ts); } catch (_) {}
                   // Landing del lanzamiento: walink → link (oculto); respuesta posterior → revelar.
                   try { await eventoRecordatorioOnInbound(env, phone); } catch (_) {}
+                  // MiniSupernova ANTES que seminario: para el solapamiento alumno∩seminario (el
+                  // seminario ya pasó, 29/08), cuando responde gana el reveal a 'cursos' (Abril,
+                  // campaña activa) y NO el de seminario a 'privado' (que Abril no ve). El candado
+                  // WHERE inbox='oculto' hace que el que corre 2do sea no-op.
+                  try { await miniSupernovaOnInbound(env, phone); } catch (_) {}
                   try { await seminarioOnInbound(env, phone); } catch (_) {}
                   try { await lanzamientoLandingOnInbound(env, phone, msgBody); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
@@ -10696,6 +10835,44 @@ const handler = {
           variante_mensaje: _eventoVarianteHoy(Date.now()) ? 'HOY 19hs' : 'mañana 19hs',
           horario_ok: (hAR >= 9 && hAR < hFin), hora_fin_ar: hFin, deadline: EVENTO_RECORDATORIO_DEADLINE,
           wa_send_paused: (await kvGet(env, 'wa_send_paused', '0')) === '1', ritmo_por_hora: perTick * 60
+        });
+      }
+
+      // Panel de control de la campaña MiniSupernova (difusión a alumnos). GET = métricas;
+      // POST {on:bool, pertick:int} = prender/apagar + ritmo por tick. Tope diario fijo 50.
+      if (path === '/admin/minisupernova') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS minisupernova (phone TEXT PRIMARY KEY, nombre TEXT, grupo TEXT, status TEXT DEFAULT 'pending', sent_at TEXT, claimed_at TEXT, replied_at TEXT)").run(); } catch (_) {}
+        if (request.method === 'POST') {
+          let body = {}; try { body = await request.json(); } catch (_) {}
+          if (typeof body.on === 'boolean') await kvSet(env, 'minisupernova_on', body.on ? '1' : '0');
+          if (body.pertick != null) await kvSet(env, 'minisupernova_pertick', String(Math.max(1, Math.min(10, parseInt(body.pertick, 10) || 3))));
+        }
+        const on = (await kvGet(env, 'minisupernova_on', '0')) === '1';
+        const perTick = parseInt(await kvGet(env, 'minisupernova_pertick', '3'), 10) || 3;
+        let total = 0, enviados = 0, pend = 0, resp = 0, hoy = 0, porGrupo = [];
+        try { total = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova").first())?.n || 0; } catch (_) {}
+        try { enviados = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status='sent'").first())?.n || 0; } catch (_) {}
+        try { pend = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status='pending'").first())?.n || 0; } catch (_) {}
+        try { resp = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE replied_at IS NOT NULL").first())?.n || 0; } catch (_) {}
+        try { hoy = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status='sent' AND sent_at >= " + REPORTE_DIA_DESDE).first())?.n || 0; } catch (_) {}
+        try { porGrupo = (await env.DB.prepare("SELECT grupo, COUNT(*) AS n, SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) AS sent FROM minisupernova GROUP BY grupo ORDER BY CAST(grupo AS INTEGER)").all()).results || []; } catch (_) {}
+        let tplN = 'unknown', tplG = 'unknown';
+        try { const t = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(MINISUPER_TPL).first(); tplN = (t && t.status) || 'unknown'; } catch (_) {}
+        try { const t = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(MINISUPER_TPL_GRL).first(); tplG = (t && t.status) || 'unknown'; } catch (_) {}
+        let sinNombre = 0;
+        try { sinNombre = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE nombre IS NULL OR nombre = ''").first())?.n || 0; } catch (_) {}
+        const hAR = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours();
+        return json({
+          ok: true, on, perTick, cap_diario: MINISUPER_CAP_DIARIO,
+          total, enviados, pendientes: pend, respondieron: resp, enviados_hoy: hoy, sin_nombre: sinNombre,
+          por_grupo: porGrupo,
+          plantilla_nombre: MINISUPER_TPL, plantilla_nombre_status: tplN,
+          plantilla_generica: MINISUPER_TPL_GRL, plantilla_generica_status: tplG,
+          listo_para_enviar: (tplN.toUpperCase?.() === 'APPROVED' && tplG.toUpperCase?.() === 'APPROVED'),
+          horario_ok: (hAR >= 9 && hAR < 21), hora_ar: hAR,
+          wa_send_paused: (await kvGet(env, 'wa_send_paused', '0')) === '1',
+          dias_estimados: pend > 0 ? Math.ceil(pend / MINISUPER_CAP_DIARIO) : 0
         });
       }
 
@@ -14277,6 +14454,10 @@ const handler = {
     ctx.waitUntil(processLanzAgosto(env));
     ctx.waitUntil(processComunidadPromo(env));   // drip Pack Emprendedor a los 14 días del alta
     ctx.waitUntil(processEventoPres(env));       // difusión seminario presencial (kv 'seminario_on')
+    // MiniSupernova SOLO en el cron */1 (NO en el */5 simultáneo): así nunca corren dos ticks en
+    // paralelo en los minutos múltiplos de 5 y el tope de 50/día es EXACTO (sin carrera entre ticks
+    // que lean el mismo contador de enviados-hoy y cada uno mande su cupo). Patrón de processPrecotizPilot.
+    if (event.cron === '* * * * *') ctx.waitUntil(processMiniSupernova(env));   // difusión a alumnos (kv 'minisupernova_on')
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
@@ -14327,6 +14508,8 @@ const handler = {
     if (hAR >= 9 && hAR <= 20) ctx.waitUntil(maybeCapiReadyNotice(env));
     // Reporte diario de ventas a las 21:00 AR (a Gaspar + su hermano). Dedup por día adentro.
     if (hAR === 21) ctx.waitUntil(maybeReporteDiario(env));
+    // Reporte diario de la campaña MiniSupernova a las 21:00 AR (a Gaspar + Bruno). Dedup por día adentro.
+    if (hAR === 21) ctx.waitUntil(maybeReporteMiniSupernova(env));
     // Aviso "leads para llamar" (fup 1 del presupuesto sin respuesta) a las 9 AR.
     if (hAR === 9) ctx.waitUntil(maybeReporteLlamar(env));
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
