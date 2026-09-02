@@ -6116,7 +6116,10 @@ async function processMiniSupernova(env) {
   const perTick = Math.max(1, Math.min(10, parseInt(await kvGet(env, 'minisupernova_pertick', '3'), 10) || 3));
   const room = Math.min(perTick, MINISUPER_CAP_DIARIO - sentToday);
   let rows;
-  try { rows = (await env.DB.prepare("SELECT phone, nombre, grupo FROM minisupernova WHERE status = 'pending' ORDER BY rowid LIMIT ?").bind(room).all()).results || []; } catch (_) { return; }
+  // Orden de envío: de los alumnos MÁS VIEJOS a los MÁS NUEVOS (pedido de Gaspar). El grupo del CSV
+  // es la cohorte: #1 = comunidad más vieja, #10 = más nueva. Ordenamos por grupo ASC (numérico) y,
+  // dentro del grupo, por rowid (orden del CSV). Así drena el #1 completo, después el #2, etc.
+  try { rows = (await env.DB.prepare("SELECT phone, nombre, grupo FROM minisupernova WHERE status = 'pending' ORDER BY CAST(grupo AS INTEGER) ASC, rowid ASC LIMIT ?").bind(room).all()).results || []; } catch (_) { return; }
   if (!rows.length) { try { await kvSet(env, 'minisupernova_on', '0'); } catch (_) {} return; } // terminó → se apaga solo
   const liveCutoff = new Date(nowMs - MINISUPER_LIVE_DAYS * 24 * 3600 * 1000).toISOString();
   for (const r of rows) {
