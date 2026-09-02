@@ -2837,7 +2837,7 @@ function bindPrecotizChatBanner(phone) {
 }
 
 // ¿Puede ver el estado de pre cotización en el chat? Admin (Gaspar) y comercial (Joaco/Facu).
-function precotizChatVisible() { return ['admin', 'comercial'].includes(getUserRole()); }
+function precotizChatVisible() { return !isCursosOnly() && ['admin', 'comercial'].includes(getUserRole()); }
 
 // Lead del piloto de pre cotización para un teléfono (o null).
 function precotizLeadFor(phone) {
