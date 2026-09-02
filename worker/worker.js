@@ -8848,6 +8848,73 @@ async function processPendingTemplateSends(env) {
   }
 }
 
+// ===== Limpieza de plantillas ad-hoc viejas =====
+// Meta penaliza tener MUCHAS plantillas MARKETING (nos costó un ban en jul-2026 con ~155).
+// Las adhoc de reflote son de UN SOLO USO: a los N días ya cumplieron. Esta limpieza borra de
+// Meta las adhoc cuya última actividad (creación por el ts del nombre adhoc_<ms>, o el último
+// envío registrado) es > N días, SALVO que tengan un envío pendiente. Mantiene el total bajo
+// (equilibrio ~ ritmo_de_creación × N). Solo Cloud API (meta): DELETE .../message_templates?name=.
+async function adhocCleanup(env, opts) {
+  opts = opts || {};
+  const days = parseInt(opts.days != null ? opts.days : await kvGet(env, 'adhoc_cleanup_days', '7'), 10) || 7;
+  const dryRun = !!opts.dryRun;
+  const _waT = getWaClient(env);
+  const is360 = _waT.provider === '360dialog';
+  if (_waT.provider !== 'meta' && !is360) return { ok: false, error: 'provider no soportado para cleanup', provider: _waT.provider };
+  const sep = _waT.templatesUrl().includes('?') ? '&' : '?';
+  const max = (opts.max != null && opts.max !== '') ? (parseInt(opts.max, 10) || 0) : Infinity;
+  let all = [];
+  try {
+    const rr = await fetch(`${_waT.templatesUrl()}${sep}limit=500&fields=name,status`, { headers: _waT.headers });
+    const dd = await rr.json().catch(() => ({}));
+    all = (dd.data || dd.waba_templates || []);
+  } catch (e) { return { ok: false, error: 'no se pudo listar plantillas: ' + ((e && e.message) || e) }; }
+  const adhoc = all.filter(t => String(t.name || '').startsWith('adhoc_'));
+  const cutoff = Date.now() - days * 86400000;
+  // último envío + si hay pendientes, por template_name (para NO borrar algo en uso/por salir)
+  const pend = {};
+  try {
+    const rs = await env.DB.prepare(
+      "SELECT template_name, MAX(created_at) AS last_at, SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS n_pend FROM wa_pending_template_send WHERE template_name LIKE 'adhoc\\_%' ESCAPE '\\' GROUP BY template_name"
+    ).all();
+    for (const r of (rs.results || [])) pend[r.template_name] = { last: r.last_at ? new Date(r.last_at).getTime() : 0, pending: (r.n_pend || 0) > 0 };
+  } catch (_) {}
+  const toDelete = [];
+  for (const t of adhoc) {
+    const nm = t.name;
+    const m = String(nm).match(/^adhoc_(\d+)/);
+    const createdTs = m ? parseInt(m[1], 10) : 0;
+    const info = pend[nm] || { last: 0, pending: false };
+    if (info.pending) continue;                              // tiene un envío pendiente -> no tocar
+    if (Math.max(createdTs, info.last) > cutoff) continue;   // creada/usada hace poco -> no tocar
+    toDelete.push(nm);
+  }
+  if (dryRun) return { ok: true, dry_run: true, days, total_adhoc: adhoc.length, to_delete: toDelete.length, keep: adhoc.length - toDelete.length, sample: toDelete.slice(0, 8) };
+  let deleted = 0, failed = 0; const errs = [];
+  for (const nm of toDelete.slice(0, max)) {
+    try {
+      // 360dialog borra por nombre en el PATH; Meta (Cloud API) por ?name=.
+      const durl = is360 ? `${_waT.templatesUrl()}/${encodeURIComponent(nm)}` : `${_waT.templatesUrl()}${sep}name=${encodeURIComponent(nm)}`;
+      const dr = await fetch(durl, { method: 'DELETE', headers: _waT.headers });
+      if (dr.ok) { deleted++; try { await env.DB.prepare("DELETE FROM wa_pending_template_send WHERE template_name = ?").bind(nm).run(); } catch (_) {} }
+      else { failed++; if (errs.length < 3) errs.push(dr.status + ': ' + (await dr.text().catch(() => '')).slice(0, 140)); }
+      await new Promise(rs => setTimeout(rs, 40));   // no martillar la API
+    } catch (_) { failed++; }
+  }
+  return { ok: true, days, total_adhoc: adhoc.length, deleted, failed, remaining_adhoc: adhoc.length - deleted, errs };
+}
+// Corre la limpieza 1 vez por día (gate por fecha AR en kv). Llamada desde el cron.
+async function maybeAdhocCleanup(env) {
+  try {
+    if ((await kvGet(env, 'adhoc_cleanup_on', '1')) !== '1') return;   // kill-switch
+    const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    if ((await kvGet(env, 'adhoc_cleanup_last', '')) === fechaAR) return;
+    await kvSet(env, 'adhoc_cleanup_last', fechaAR);   // marcar ANTES para no repetir aunque tarde/falle
+    const res = await adhocCleanup(env, {});
+    if (res && res.deleted) { try { await waSendText(env, '5491155604999', `🧹 Limpieza plantillas ad-hoc: borré ${res.deleted} viejas, quedan ${res.remaining_adhoc}.`); } catch (_) {} }
+  } catch (_) {}
+}
+
 const handler = {
   async fetch(request, env, ctx) {
     // Envoltorio anti-crash: cualquier excepción NO atrapada del handler (típico
@@ -13046,6 +13113,16 @@ const handler = {
         return json({ templates: arr.map(x => ({ name: x.name, status: String(x.status || '').toLowerCase() })) });
       }
 
+      // Limpieza de plantillas ad-hoc viejas (baja el nº total -> menos riesgo de ban de Meta).
+      // POST {dry_run:true} para SOLO contar; {dry_run:false, days:N} para borrar. Solo admin.
+      if (request.method === 'POST' && path === '/admin/wa/adhoc-cleanup') {
+        const _role = await getSessionRole(env, session.user);
+        if (_role !== 'admin') return json({ error: 'forbidden' }, 403);
+        let _b = {}; try { _b = await request.json(); } catch (_) {}
+        const res = await adhocCleanup(env, { days: _b.days, dryRun: !!_b.dry_run, max: _b.max });
+        return json(res);
+      }
+
       // ===== Crear plantilla "al toque" + mandarla sola cuando Meta la apruebe =====
       // Para vendedores (Joaco/Abril): crean una plantilla a medida para ESTE chat
       // sin esperar la aprobación en pantalla. Guardrails de contenido + tope diario
@@ -14644,6 +14721,7 @@ const handler = {
     if (hAR === 9) ctx.waitUntil(maybeReporteLlamar(env));
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
     if (hAR >= 8 && hAR < 21) ctx.waitUntil(processPendingTemplateSends(env));
+    if (hAR === 5) ctx.waitUntil(maybeAdhocCleanup(env));   // limpieza diaria de plantillas ad-hoc viejas (kv adhoc_cleanup_on/_days)
     // Monitor de status de templates: 1 vez por hora, no cada 5 min. El polling
     // es fallback; lo ideal es suscribir al webhook field 'message_template_status_update'
     // en el hub de 360dialog (lo manejamos abajo en notifyTemplateStatusChange).
