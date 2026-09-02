@@ -5194,9 +5194,16 @@ const IG_MANYCHAT_WELCOME = 'Buenas! Te mandamos mensajito para darte la bienven
 // que el welcome; lo reponemos cuando el saliente viene justo después de ese postback.
 const IG_MANYCHAT_REGALO = 'Genial que quieras arrancar 🤜\nAcá te dejo el enlace para que veas nuestra formación gratuita de 2 clases! Para aprender de 0 TODO sobre el Neon LED 🇦🇷\n[Botón: Formación GRATUITA]';
 
+// Cuenta de IG de Neon Infinito: la ÚNICA que debe entrar al CRM.
+const IG_ACCOUNT_ID = '17841406783093240';
+
 async function processIgWebhook(env, body) {
   if (body?.object !== 'instagram') return;
   for (const entry of (body?.entry || [])) {
+    // Cortafuego por cuenta: solo procesamos la cuenta de IG de Neon Infinito. Otras cuentas
+    // (ej. la personal de Bruno) quedaron suscriptas a la misma app de Meta y colaban sus DMs
+    // privados al CRM del negocio. Si el entry trae id y no es la cuenta del negocio, lo ignoramos.
+    if (entry?.id && String(entry.id) !== IG_ACCOUNT_ID) continue;
     for (const m of (entry?.messaging || [])) {
       try {
         // POSTBACK = el lead tocó un botón de ManyChat (ej: "Quiero el regalo 🎁"). Instagram
