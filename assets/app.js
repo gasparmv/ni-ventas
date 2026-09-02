@@ -14756,7 +14756,7 @@ function defaultCorpForm() {
     lat_acabado:'translucido', lat_color:'#ffffff',
     esp_acabado:'translucida', esp_color:'#ffffff' };
 }
-const CORP_PRECIOS = { conluz: { impreso: 320000, acrilico: 400000 }, sinluz: { impreso: 200000, acrilico: 300000 } };
+const CORP_PRECIOS = { conluz: { impreso: 450000, acrilico: 520000 }, sinluz: { impreso: 280000, acrilico: 330000 } };
 function calcCorporea(f) {
   const ancho = +f.ancho || 0, alto = +f.alto || 0;
   const m2 = (ancho * alto) / 10000;
@@ -15426,7 +15426,7 @@ function renderCorpPopup() {
             <tr><td>Comisión Joaco (3% — es costo)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</td></tr>
             <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Ganancia neta</b> (precio − costo − comisión)</td><td style="text-align:right;padding-top:5px;color:#4ade80"><b>${fmtMoney((brief.precio_final || 0) - (cj.costo || 0) - Math.round((brief.precio_final || 0) * 0.03))}</b></td></tr>
           </table>
-          <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Margen: ≤2 m² ×2 · 2–5 m² ×1.75 · +5 m² ×1.5 · costo/m²: impreso 320k / acrílico 400k (con luz), 200k / 300k (sin luz)</div>
+          <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Margen: ≤2 m² ×2 · 2–5 m² ×1.75 · +5 m² ×1.5 · costo/m²: impreso 450k / acrílico 520k (con luz), 280k / 330k (sin luz)</div>
         </div>
         ` : ''}
         <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto</label>
