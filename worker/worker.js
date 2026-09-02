@@ -8777,6 +8777,17 @@ async function ensureAdhocSchema(env) {
   _adhocSchemaReady = true;
 }
 
+// Mapea el vendedor que creó la plantilla ad-hoc (created_by = nombre visible del user:
+// Gaspar/Joaquín/Bruno/Abril/Facundo) a su teléfono, para avisarle A ÉL si su plantilla
+// salió o falló — antes el aviso iba solo a env.ADMIN_NOTIFY_PHONE, que estaba SIN setear
+// (por eso "no avisan"). Desconocidos (Abril/Facundo) -> Gaspar, así el aviso nunca es mudo.
+function adhocNotifyPhone(createdBy) {
+  const u = String(createdBy || '').trim().toLowerCase();
+  if (u.startsWith('joaqu') || u === 'joaco') return '5491137593269';
+  if (u.startsWith('bruno')) return '5491155604996';
+  return '5491155604999'; // Gaspar (y fallback para Abril/Facundo/desconocido)
+}
+
 // Cron: manda las plantillas "al toque" apenas Meta las aprueba (el vendedor no
 // espera en el chat). Reintenta si el envío falla; marca rejected/expired.
 // Se llama SOLO en horario hábil AR para no escribir de madrugada.
@@ -8785,7 +8796,7 @@ async function processPendingTemplateSends(env) {
   let pend;
   try {
     const rs = await env.DB.prepare(
-      "SELECT template_name, phone, body_preview, created_at FROM wa_pending_template_send WHERE status = 'pending' ORDER BY created_at ASC LIMIT 20"
+      "SELECT template_name, phone, body_preview, created_at, created_by FROM wa_pending_template_send WHERE status = 'pending' ORDER BY created_at ASC LIMIT 20"
     ).all();
     pend = rs.results || [];
   } catch (_) { return; }
@@ -8795,7 +8806,11 @@ async function processPendingTemplateSends(env) {
   try {
     const _wa = getWaClient(env);
     const sep = _wa.templatesUrl().includes('?') ? '&' : '?';
-    const r = await fetch(`${_wa.templatesUrl()}${sep}limit=200&fields=name,status`, { headers: _wa.headers });
+    // limit=500: hay ~320 plantillas (270 son adhoc_) y con limit=200 el cron NO veía las
+    // que quedaban fuera de las primeras 200 -> plantillas que Meta YA aprobó nunca se
+    // enviaban y expiraban en silencio (causa principal de "muchas no salen"). TODO: limpiar
+    // plantillas adhoc viejas en Meta (crecen ~/día y Meta penaliza tener muchas MARKETING).
+    const r = await fetch(`${_wa.templatesUrl()}${sep}limit=500&fields=name,status`, { headers: _wa.headers });
     const data = await r.json().catch(() => ({}));
     for (const t of (data.data || data.waba_templates || [])) statusByName[t.name] = String(t.status || '').toLowerCase();
   } catch (_) { return; }
@@ -8823,9 +8838,12 @@ async function processPendingTemplateSends(env) {
       // si el envío falla, queda 'pending' y reintenta el próximo tick
     } else if (st === 'rejected') {
       try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='rejected', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
-      if (env.ADMIN_NOTIFY_PHONE) { try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, `❌ Meta rechazó una plantilla nueva para ${row.phone}. Probá de nuevo con un texto más simple (sin links ni MAYÚSCULAS).`); } catch (_) {} }
+      // Avisar AL VENDEDOR que la creó (antes solo a env.ADMIN_NOTIFY_PHONE, sin setear -> mudo).
+      try { await waSendText(env, adhocNotifyPhone(row.created_by), `❌ Meta rechazó tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Probá de nuevo con un texto más simple (sin links ni MAYÚSCULAS) o escribile a mano.`); } catch (_) {}
     } else if ((now - new Date(row.created_at).getTime()) > 24 * 60 * 60 * 1000) {
       try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='expired', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
+      // Avisar AL VENDEDOR: Meta no la aprobó en 24h -> NO salió (antes expiraba en silencio).
+      try { await waSendText(env, adhocNotifyPhone(row.created_by), `⌛ Meta no aprobó en 24h tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Reintentá (a veces aprueba al 2º intento) o escribile a mano.`); } catch (_) {}
     }
   }
 }
