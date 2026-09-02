@@ -1547,6 +1547,7 @@ async function maybeRepartirANadia(env, phone) {
     let _h = 0; const _ps = String(phone); for (let _i = 0; _i < _ps.length; _i++) _h = (_h * 31 + _ps.charCodeAt(_i)) >>> 0;
     if ((_h % 100) >= Math.round(prob * 100)) return;   // a este teléfono no le toca (determinístico, no depende de cuántos mensajes mande)
     await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = 'facundo', assigned_at = ? WHERE phone = ?").bind(new Date().toISOString(), phone).run();
+    try { await env.DB.prepare("UPDATE briefs SET comercial_id = 'facundo' WHERE cliente_wa_id = ?").bind(phone).run(); } catch (_) {} // el brief/comisión sigue al lead
     const nadiaPhone = await kvGet(env, 'nadia_phone', '');
     if (nadiaPhone) { try { await waSendText(env, nadiaPhone, 'Tenés un lead nuevo de carteles para atender en el CRM 🙌'); } catch (_) {} }
   } catch (_) {}
@@ -2156,6 +2157,11 @@ async function processPrecotizPilot(env) {
     // NO mandamos el opener de nuevo (ese era el "buenas te habla Joaco" x2 en la captura).
     if (!_ins || !_ins.meta || !_ins.meta.changes) continue;
     await precotizLog(env, phone, 'entro', { es_carteles: true, tiene_foto: res.tiene_foto, tiene_medidas: res.tiene_medidas, tiene_intext: res.tiene_intext });
+    // Reparto a Facundo APENAS se confirma carteles: único punto con es_carteles=true y TODAS las
+    // exclusiones ya aplicadas arriba (cursos/reventa/corte/corpóreo/lanzamiento/internos/cliente).
+    // ~25% (kv facundo_reparto_prob) según cuota diaria (kv nadia_cuota_diaria). Corre 1 sola vez por
+    // lead (el INSERT OR IGNORE de precotiz_pilot de arriba garantiza changes=1).
+    try { await maybeRepartirANadia(env, phone); } catch (_) {}
     await precotizTag(env, phone, true); // etiqueta VISIBLE (no oculta) — Joaco+Gaspar monitorean
 
     if (tF && tM && (tI || res.intext_no_sabe)) { // ya tiene lo necesario (foto+medidas) → completo
@@ -2384,7 +2390,7 @@ async function buildReporteDiario(env) {
                       OR lower(m.body) LIKE '%minicurso%' OR lower(m.body) LIKE '%registr%'
                       OR lower(m.body) LIKE '%la clase%' OR lower(m.body) LIKE '%las clases%'
                       OR lower(m.body) LIKE '%formaci%' OR lower(m.body) LIKE '%evento gratu%'
-                      OR lower(m.body) LIKE '%4 y 6%' OR lower(m.body) LIKE '%agosto%')
+                      OR lower(m.body) LIKE '%8 y 10%' OR lower(m.body) LIKE '%agosto%')
                   ) THEN 1 ELSE 0 END) AS cursos
        FROM fi LEFT JOIN wa_chats_summary s ON s.phone = fi.phone`
     ).first();
@@ -5344,6 +5350,11 @@ async function processIgWebhook(env, body) {
               await env.DB.prepare("UPDATE wa_chats_summary SET inbox='general' WHERE phone = ? AND (inbox IS NULL OR inbox = '')").bind(custId).run();
             }
           } catch (_) {}
+          // Reparto de leads de CARTELES de IG a Facundo (misma cuota/prob que WhatsApp).
+          // Gate POSITIVO por vert==='carteles': deja fuera cursos (vert='cursos') y corpóreo
+          // (ads de corpóreo mapean vert='corporeo'; IG no setea corporeoTag -> este gate es la
+          // única barrera contra corpóreo). custId (IGSID) es la key wa_chats_summary.phone.
+          if (vert === 'carteles') { try { await maybeRepartirANadia(env, custId); } catch (_) {} }
           // Atribución de anuncio (igual que CTWA en WhatsApp): si el cliente vino de un anuncio
           // (referral con ad_id) o respondió al post de un aviso (ig_post), lo guardamos en
           // wa_ad_attributions -> el banner del chat aparece solo (mismo endpoint que WhatsApp).
@@ -5781,7 +5792,7 @@ async function sendEventoGroupLink(env, phone) {
   // Oculta AUNQUE esté en 'cursos' (ej: lead del minicurso que además toca el walink), PERO NO si es
   // un lead genuinamente enganchado: que ya escribió algo real aparte del walink, o que un humano
   // (automated=0) ya le respondió → esos se dejan como están.
-  try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox <> 'oculto' AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = wa_chats_summary.phone AND m.direction = 'inbound' AND m.msg_type <> 'status' AND m.body NOT LIKE '%evento del 4 y 6%') AND NOT EXISTS (SELECT 1 FROM wa_messages h WHERE h.phone = wa_chats_summary.phone AND h.direction = 'outbound' AND h.automated = 0 AND h.msg_type <> 'status')").bind(phone, nowIso).run(); } catch (_) {}
+  try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox <> 'oculto' AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = wa_chats_summary.phone AND m.direction = 'inbound' AND m.msg_type <> 'status' AND m.body NOT LIKE '%evento del 8 y 10%') AND NOT EXISTS (SELECT 1 FROM wa_messages h WHERE h.phone = wa_chats_summary.phone AND h.direction = 'outbound' AND h.automated = 0 AND h.msg_type <> 'status')").bind(phone, nowIso).run(); } catch (_) {}
   // Marca/crea el lead como 'link_enviado' (crea la fila si vino PURO por walink sin pasar por
   // el form) → el opener del Camino 2 lo saltea (dedup). No pisa a los ya 'revealed'.
   try { await env.DB.prepare("INSERT INTO lanzamiento_landing (phone, nombre, stage, registered_at, source, updated_at, created_at) VALUES (?, '', 'link_enviado', ?, 'walink', ?, ?) ON CONFLICT(phone) DO UPDATE SET stage = 'link_enviado', updated_at = excluded.updated_at WHERE lanzamiento_landing.stage != 'revealed'").bind(phone, nowIso, nowIso, nowIso).run(); } catch (_) {}
@@ -5845,7 +5856,7 @@ async function corporeoAskOnInbound(env, phone, msgBody) {
 async function lanzamientoLandingOnInbound(env, phone, msgBody) {
   if (!phone || !(await lanzamientoLandingOn(env))) return;
   try {
-    const isWalink = _normTxt(msgBody).includes('registre al evento del 4 y 6');
+    const isWalink = _normTxt(msgBody).includes('registre al evento del 8 y 10');
     const row = await env.DB.prepare("SELECT stage FROM lanzamiento_landing WHERE phone = ?").bind(phone).first();
     const stage = row?.stage || '';
     if (stage === 'link_enviado') {
@@ -8069,15 +8080,24 @@ function inboxClauseForRole(role) {
 
 // Control de acceso por chat: 'cursos' solo su bandeja; la bandeja 'privado' (admin-only de
 // Gaspar) NO la tocan ni comercial ni cursos; admin ve/toca todo. La usan messages/send/send-media.
-async function inboxAccessOk(env, role, phone) {
+async function inboxAccessOk(env, role, phone, sessionUser) {
   if (role === 'admin') return true;
   if (phone) {
     try {
-      const r = await env.DB.prepare('SELECT inbox FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
+      const r = await env.DB.prepare('SELECT inbox, assigned_to FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
       const inbox = (r && r.inbox) || '';
       if (inbox === 'privado' || inbox === 'corte') return false; // privado y corte = SOLO admin (Gaspar)
       if (role === 'cursos') return inbox === 'cursos';  // cursos: solo su bandeja
-      return true;                                       // comercial/otros: todo menos privado
+      // comercial: scope por vendedor (igual que la lista). El secundario (Facundo) SOLO abre/
+      // responde lo asignado a él; el principal (Joaco) todo lo NO asignado a un secundario.
+      // Cierra el hueco de que dos vendedores atendieran el mismo chat (por búsqueda/API).
+      if (role === 'comercial') {
+        const _u = String(sessionUser || '').toLowerCase();
+        const asg = (r && r.assigned_to) || '';
+        if (VENDEDORES_SECUNDARIOS.includes(_u)) return asg === _u;
+        return !VENDEDORES_SECUNDARIOS.includes(asg);
+      }
+      return true;                                       // otros roles: todo menos privado
     } catch (e) { return role !== 'cursos'; }
   }
   return role !== 'cursos';                              // sin phone puntual: cursos no, resto sí
@@ -9318,7 +9338,7 @@ const handler = {
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
                   // Reparto de leads NUEVOS de carteles a Nadia según su cuota diaria (arranca en 0).
-                  try { await maybeRepartirANadia(env, phone); } catch (_) {}
+                  // reparto: ya NO corre en cada inbound. Se dispara al confirmar carteles en el captador de precotización (ver maybeRepartirANadia junto a precotizLog 'entro').
                 }
               }
 
@@ -10538,7 +10558,7 @@ const handler = {
         // Rol 'cursos' (Abril) solo puede escribir a chats de su bandeja.
         {
           const _role = await getSessionRole(env, session.user);
-          if (!(await inboxAccessOk(env, _role, num || String(to).replace(/\D/g, '')))) {
+          if (!(await inboxAccessOk(env, _role, num || String(to).replace(/\D/g, ''), session.user))) {
             return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
           }
         }
@@ -10612,6 +10632,20 @@ const handler = {
         // pero acá normalizamos a lowercase para consistencia.
         const qLower = q.toLowerCase();
         const like = '%' + qLower + '%';
+        // Scope por rol/vendedor: el secundario (Facundo) SOLO busca en SUS chats; el principal
+        // (Joaco) en todo lo NO asignado a un secundario; cursos su bandeja; admin todo. Cierra
+        // el hueco de encontrar (y responder) chats ajenos por la búsqueda.
+        const _srole = await getSessionRole(env, session.user);
+        let scopeClause = '';
+        if (_srole !== 'admin') {
+          if (_srole === 'cursos') {
+            scopeClause = " AND wa_messages.phone IN (SELECT phone FROM wa_chats_summary WHERE inbox='cursos')";
+          } else {
+            const _su = String(session.user || '').toLowerCase();
+            const _asg = VENDEDORES_SECUNDARIOS.includes(_su) ? `assigned_to = '${_su}'` : `assigned_to NOT IN (${VENDEDORES_SECUNDARIOS.map(s => `'${s}'`).join(',')})`;
+            scopeClause = ` AND wa_messages.phone IN (SELECT phone FROM wa_chats_summary WHERE inbox NOT IN ('cursos','oculto','precotiz','privado','corte') AND ${_asg})`;
+          }
+        }
 
         // Contactos: phones únicos cuyos mensajes contienen el query.
         // También matchea si el query es parte del phone (para buscar por número).
@@ -10619,9 +10653,9 @@ const handler = {
           `SELECT phone, COUNT(*) AS hits, MAX(ts) AS last_match_ts,
                   MAX(CASE WHEN LOWER(sender_name) != '' THEN sender_name END) AS contact_name
            FROM wa_messages
-           WHERE LOWER(body) LIKE ?
+           WHERE (LOWER(body) LIKE ?
               OR LOWER(sender_name) LIKE ?
-              OR phone LIKE ?
+              OR phone LIKE ?)${scopeClause}
            GROUP BY phone
            ORDER BY last_match_ts DESC
            LIMIT 50`
@@ -10631,7 +10665,7 @@ const handler = {
         const messagesQ = await env.DB.prepare(
           `SELECT ts, phone, sender_name, direction, msg_type, body, wamid
            FROM wa_messages
-           WHERE LOWER(body) LIKE ?
+           WHERE LOWER(body) LIKE ?${scopeClause}
            ORDER BY ts DESC
            LIMIT 50`
         ).bind(like).all();
@@ -11129,7 +11163,7 @@ const handler = {
         // Rol 'cursos' (Abril) solo puede escribir a chats de su bandeja.
         {
           const _role = await getSessionRole(env, session.user);
-          if (!(await inboxAccessOk(env, _role, igId))) {
+          if (!(await inboxAccessOk(env, _role, igId, session.user))) {
             return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
           }
         }
@@ -11166,7 +11200,7 @@ const handler = {
         const caption = fd.get('caption') || '';
         const file = fd.get('file');
         if (!igId || !file) return json({ error: 'missing to or file' }, 400);
-        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, igId))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
+        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, igId, session.user))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
         const fileMime = (file.type || '').split(';')[0].trim();
         const isImg = fileMime.startsWith('image/');
         const isAud = fileMime.startsWith('audio/');
@@ -11208,7 +11242,7 @@ const handler = {
         if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
         const igId = String(to).replace(/\D/g, '');
         if (igId.length < 15) return json({ error: 'IGSID invalido' }, 400);
-        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, igId))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
+        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, igId, session.user))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
         // Ventana de 24 h de IG (el cliente escribió en las últimas 24 h). Sin rescate por plantilla.
         let lastTs = 0;
         try { const lastIn = await env.DB.prepare("SELECT MAX(ts) AS ts FROM wa_messages WHERE phone=? AND direction='inbound' AND channel='ig'").bind(igId).first(); lastTs = lastIn && lastIn.ts ? new Date(lastIn.ts).getTime() : 0; } catch (_) {}
@@ -11839,7 +11873,7 @@ const handler = {
         const params = [];
         if (phone) {
           // Consulta de un chat puntual. Rol 'cursos' solo accede a su bandeja.
-          if (_role !== 'admin' && !(await inboxAccessOk(env, _role, phone.replace(/\D/g, '')))) {
+          if (_role !== 'admin' && !(await inboxAccessOk(env, _role, phone.replace(/\D/g, ''), session.user))) {
             return json({ error: 'forbidden: chat fuera de tu bandeja', messages: [] }, 403);
           }
           where += ' AND phone = ?'; params.push(phone);
@@ -11855,7 +11889,18 @@ const handler = {
           } else if (_role === 'admin') {
             where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox = 'oculto')";
           } else {
-            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox IN ('cursos','oculto','privado'))";
+            // comercial: excluir cursos/oculto/precotiz/privado/corte (igual que inboxClauseForRole).
+            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox IN ('cursos','oculto','precotiz','privado','corte'))";
+            // Scope por vendedor (espeja /admin/wa/chats-summary): el secundario (Facundo) SOLO
+            // ve/pollea lo asignado a él; el principal (Joaco) todo lo NO asignado a un secundario.
+            // Así el poll de notificaciones no se filtra entre vendedores. _uslug se interpola solo
+            // si está en la whitelist fija VENDEDORES_SECUNDARIOS -> sin riesgo de inyección.
+            const _uslug = String(session.user || '').toLowerCase();
+            if (VENDEDORES_SECUNDARIOS.includes(_uslug)) {
+              where += ` AND phone IN (SELECT phone FROM wa_chats_summary WHERE assigned_to = '${_uslug}')`;
+            } else {
+              where += ` AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE assigned_to IN (${VENDEDORES_SECUNDARIOS.map(s => `'${s}'`).join(',')}))`;
+            }
           }
         }
         if (from) { where += ' AND ts >= ?'; params.push(from); }
@@ -12184,6 +12229,9 @@ const handler = {
           `INSERT INTO wa_chats_summary (phone, assigned_to, assigned_at, updated_at) VALUES (?, ?, ?, ?)
            ON CONFLICT(phone) DO UPDATE SET assigned_to = excluded.assigned_to, assigned_at = excluded.assigned_at`
         ).bind(phone, to, to ? now : '', now).run();
+        // El brief/comisión sigue al lead: al reasignar, movemos el comercial_id de los briefs de
+        // este chat al vendedor asignado (secundario -> él; sin asignar / Joaco -> 'joaco').
+        try { const _bc = VENDEDORES_SECUNDARIOS.includes(to) ? to : 'joaco'; await env.DB.prepare("UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?").bind(_bc, phone).run(); } catch (_) {}
         ctx.waitUntil(invalidateChatsSummaryCache(request));
         return json({ ok: true, phone, assigned_to: to });
       }
@@ -12286,7 +12334,7 @@ const handler = {
         if (!to || !r2_key) return json({ error: 'missing to or r2_key' }, 400);
         const num = normalizeArPhone(to);
         if (!num) return json({ error: 'numero invalido' }, 400);
-        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, num))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
+        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, num, session.user))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
         if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
         const obj = await env.MEDIA.get(r2_key);
         if (!obj) return json({ error: 'sticker no encontrado' }, 404);
@@ -12307,7 +12355,7 @@ const handler = {
         // Rol 'cursos' (Abril) solo puede mandar media a chats de su bandeja.
         {
           const _role = await getSessionRole(env, session.user);
-          if (!(await inboxAccessOk(env, _role, String(to || '').replace(/\D/g, '')))) {
+          if (!(await inboxAccessOk(env, _role, String(to || '').replace(/\D/g, ''), session.user))) {
             return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
           }
         }
@@ -12968,6 +13016,18 @@ const handler = {
         return json({ ok: true, id: data.id, status: data.status, category: data.category, provider: _waT.provider });
       }
 
+      // Estado de aprobacion de plantillas (para pollear si Meta aprobo una recien creada).
+      if (request.method === 'GET' && path === '/admin/wa/template-status') {
+        const _waT = getWaClient(env);
+        const sep = _waT.templatesUrl().includes('?') ? '&' : '?';
+        const rr = await fetch(`${_waT.templatesUrl()}${sep}limit=500&fields=name,status`, { headers: _waT.headers });
+        const dd = await rr.json().catch(() => ({}));
+        const arr = (dd.data || dd.waba_templates || []);
+        const nm = url.searchParams.get('name');
+        if (nm) { const t = arr.find(x => x.name === nm); return json({ name: nm, status: t ? String(t.status).toLowerCase() : 'not_found' }); }
+        return json({ templates: arr.map(x => ({ name: x.name, status: String(x.status || '').toLowerCase() })) });
+      }
+
       // ===== Crear plantilla "al toque" + mandarla sola cuando Meta la apruebe =====
       // Para vendedores (Joaco/Abril): crean una plantilla a medida para ESTE chat
       // sin esperar la aprobación en pantalla. Guardrails de contenido + tope diario
@@ -12979,7 +13039,7 @@ const handler = {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const num = normalizeArPhone(String(body?.to || ''));
         if (!num) return json({ error: 'teléfono inválido' }, 400);
-        if (!(await inboxAccessOk(env, role, num))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
+        if (!(await inboxAccessOk(env, role, num, session.user))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
         const text = String(body?.body_text || '').trim();
         const vErr = validateAdhocTemplate(text);
         if (vErr) return json({ error: vErr }, 400);
@@ -13008,7 +13068,8 @@ const handler = {
         const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
         try {
           const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_pending_template_send WHERE created_by = ? AND created_at >= ?").bind(session.user, dayStart.toISOString()).first();
-          if (c && c.n >= 30) return json({ error: 'Llegaste al máximo de 30 plantillas nuevas por día.' }, 429);
+          const _adhocCap = parseInt(await kvGet(env, 'adhoc_template_daily_cap', '30'), 10) || 30;
+          if (c && c.n >= _adhocCap) return json({ error: 'Llegaste al máximo de ' + _adhocCap + ' plantillas nuevas por día.' }, 429);
         } catch (_) {}
         const tplName = 'adhoc_' + Date.now();
         const _waT = getWaClient(env);
