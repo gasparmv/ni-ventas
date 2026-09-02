@@ -9964,7 +9964,14 @@ const handler = {
         // Frenar/reanudar el bot en un chat (freeze/frozen) lo puede usar cualquier usuario del
         // CRM (Joaco/comercial), no solo Gaspar. El resto del piloto sigue siendo solo-admin.
         const _precotizAnyUser = (path === '/admin/precotiz/freeze' || path === '/admin/precotiz/frozen');
-        if (!isAdminSession && !_precotizAnyUser) return json({ error: 'forbidden: admin only' }, 403);
+        // El GET del estado del piloto lo puede leer también el comercial (Joaco/Facu): lo usa el
+        // chat para mostrar el cartel de "Freno precotización" y el estado de datos. Las acciones
+        // (approve/discard/on-off/cap) siguen siendo solo-admin.
+        let _precotizComercialGet = false;
+        if (!isAdminSession && request.method === 'GET' && path === '/admin/precotiz') {
+          try { _precotizComercialGet = (await getSessionRole(env, session.user)) === 'comercial'; } catch (_) {}
+        }
+        if (!isAdminSession && !_precotizAnyUser && !_precotizComercialGet) return json({ error: 'forbidden: admin only' }, 403);
 
         // GET /admin/precotiz → on/off + modo + leads del piloto
         if (request.method === 'GET' && path === '/admin/precotiz') {

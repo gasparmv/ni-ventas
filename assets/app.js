@@ -2769,7 +2769,7 @@ async function precotizControl(body) {
 // es un lead del piloto, muestra estado + datos juntados + (si hay) el borrador
 // del bot para aprobar/editar/descartar. '' si no aplica.
 function renderPrecotizChatBanner(phone) {
-  if (!isAdmin() || !STATE.precotiz || !Array.isArray(STATE.precotiz.leads)) return '';
+  if (!precotizChatVisible() || !STATE.precotiz || !Array.isArray(STATE.precotiz.leads)) return '';
   const lead = STATE.precotiz.leads.find(l => l.phone === phone);
   if (!lead) return '';
   let draft = [];
@@ -2787,7 +2787,7 @@ function renderPrecotizChatBanner(phone) {
         <span style="color:${frozen ? '#e06c6c' : 'var(--accent-cyan,#8FD4DE)'};font-weight:600">${frozen ? '🛑 bot frenado a mano en este chat' : '◐ ' + escapeHtml(estado)}</span>
         <span style="display:flex;gap:8px;align-items:center;font-size:11px">${dato(lead.tiene_foto, 'foto')} ${dato(lead.tiene_medidas, 'medidas')} ${dato(lead.tiene_intext, 'int/ext')}${mostrarFreno ? `<button id="precotiz-freeze-btn" data-frozen="${frozen ? '1' : '0'}" title="${frozen ? 'Reactivar el bot en este chat' : 'Frenar el bot en este chat — no vuelve a hablar acá'}" style="font-size:11px;padding:3px 10px;border-radius:var(--r-sm);cursor:pointer;background:transparent;border:1px solid ${frozen ? '#25D366' : '#e06c6c'};color:${frozen ? '#25D366' : '#e06c6c'};font-weight:600;white-space:nowrap">${frozen ? '▶ Reactivar bot' : '🛑 Frenar bot'}</button>` : ''}</span>
       </div>
-      ${draft.length ? `
+      ${(isAdmin() && draft.length) ? `
         <div style="margin-top:8px;background:var(--ink-100);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);padding:8px">
           <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:5px">Borrador del bot — esperando tu OK</div>
           <textarea id="precotiz-chat-draft" rows="${Math.min(12, draft.join('\n\n').split('\n').length + 1)}" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-size:13px;font-family:inherit;resize:vertical">${escapeHtml(draft.join('\n\n'))}</textarea>
@@ -2833,6 +2833,52 @@ function bindPrecotizChatBanner(phone) {
       toast(r.ok ? (wasFrozen ? '✓ Bot reactivado' : '🛑 Bot frenado en este chat') : 'Error');
     } catch (_) { toast('Error de red'); }
     await fetchPrecotiz(); render();
+  };
+}
+
+// ¿Puede ver el estado de pre cotización en el chat? Admin (Gaspar) y comercial (Joaco/Facu).
+function precotizChatVisible() { return ['admin', 'comercial'].includes(getUserRole()); }
+
+// Lead del piloto de pre cotización para un teléfono (o null).
+function precotizLeadFor(phone) {
+  if (!STATE.precotiz || !Array.isArray(STATE.precotiz.leads)) return null;
+  return STATE.precotiz.leads.find(l => l.phone === phone) || null;
+}
+
+// Etiqueta "Freno precotización" cuando el bot escaló el chat (freno de mano). La ven admin/Joaco/Facu.
+function renderPrecotizFrenoLabel(phone) {
+  if (!precotizChatVisible()) return '';
+  const lead = precotizLeadFor(phone);
+  if (!lead || lead.estado !== 'escalado') return '';
+  return `<span style="display:inline-block;background:rgba(224,108,108,.16);color:#e06c6c;font-weight:600;font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid rgba(224,108,108,.4)">🛑 Freno precotización</span>`;
+}
+
+// ¿El usuario descartó el cartel de freno de este chat? (por chat, en este navegador)
+function precotizFrenoDismissed(phone) {
+  try { return localStorage.getItem('precotizFrenoOff:' + phone) === '1'; } catch (_) { return false; }
+}
+
+// Cartelito al pie del chat (arriba del input) con el MOTIVO del freno de mano + cruz para
+// sacarlo y seguir respondiendo a mano. Lo ven admin/Joaco/Facu.
+function renderPrecotizFrenoCard(phone) {
+  if (!precotizChatVisible()) return '';
+  const lead = precotizLeadFor(phone);
+  if (!lead || lead.estado !== 'escalado') return '';
+  if (precotizFrenoDismissed(phone)) return '';
+  const motivo = lead.escalado_motivo || 'Proyecto que necesita atención humana.';
+  return `
+    <div id="precotiz-freno-card" style="margin:0 10px 8px;background:rgba(224,108,108,.10);border:1px solid rgba(224,108,108,.5);border-radius:var(--r-sm,8px);padding:10px 36px 10px 12px;position:relative;font-size:12.5px;color:var(--fg)">
+      <button id="precotiz-freno-x" title="Sacar este aviso y seguir respondiendo a mano" style="position:absolute;top:5px;right:7px;background:transparent;border:none;color:var(--fg-subtle);font-size:17px;line-height:1;cursor:pointer;padding:2px 5px">✕</button>
+      <div style="color:#e06c6c;font-weight:700;margin-bottom:3px">🛑 Freno de precotización</div>
+      <div style="line-height:1.45">${escapeHtml(motivo)}</div>
+    </div>`;
+}
+
+function bindPrecotizFrenoCard(phone) {
+  const x = document.getElementById('precotiz-freno-x');
+  if (x) x.onclick = () => {
+    try { localStorage.setItem('precotizFrenoOff:' + phone, '1'); } catch (_) {}
+    const c = document.getElementById('precotiz-freno-card'); if (c) c.remove();
   };
 }
 
@@ -10010,7 +10056,7 @@ function renderChatConversation() {
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg>
         </button>
       </div>
-      <div class="chat-label-chips" id="chat-label-chips">${renderContactLabelChips(phone)}</div>
+      <div class="chat-label-chips" id="chat-label-chips">${renderPrecotizFrenoLabel(phone)}${renderContactLabelChips(phone)}</div>
     </div>
     ${renderChatNotePostit(phone)}
     ${renderAdAttributionBanner(phone)}
@@ -10025,6 +10071,7 @@ function renderChatConversation() {
     </button>
     ${render24hBanner()}
     <div id="suggest-panel" class="suggest-panel" style="display:none"></div>
+    ${renderPrecotizFrenoCard(phone)}
     <div class="chat-input-bar">
       ${['admin', 'comercial', 'cursos'].includes(getUserRole()) ? '<button class="btn-send btn-suggest" id="btn-suggest" title="Sugerir respuesta con IA">✨</button>' : ''}
       <button class="btn-send btn-attach" id="btn-attach" title="Adjuntar imagen"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647a5.58 5.58 0 003.972-1.645l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.501.501 1.134.79 1.737.79.558 0 1.031-.224 1.37-.564l5.582-5.58a.747.747 0 10-1.055-1.06l-5.58 5.58c-.172.172-.42.156-.614-.04-.508-.51-.427-1.122-.07-1.478l7.916-7.916c.866-.866 2.358-.764 3.46.34.556.557.876 1.203.918 1.818.036.526-.176 1.047-.595 1.466L10.11 18.526a4.09 4.09 0 01-2.913 1.205 4.09 4.09 0 01-2.913-1.205 4.09 4.09 0 01-1.205-2.913c0-1.1.428-2.134 1.205-2.911l8.647-8.646a.747.747 0 00-1.055-1.06l-8.647 8.646A5.58 5.58 0 001.816 15.556z"/></svg></button>
@@ -11532,7 +11579,7 @@ async function selectChatContact(phone) {
 
   // Refrescar el estado del piloto al abrir un chat, así el banner de pre
   // cotización (si aplica) muestra el borrador/datos al día. Solo Gaspar.
-  if (isAdmin()) { try { await fetchPrecotiz(); } catch (_) {} }
+  if (precotizChatVisible()) { try { await fetchPrecotiz(); } catch (_) {} }
   // Re-render conversation with actual messages
   if (STATE.view === 'chat') {
     const main = document.querySelector('.chat-main');
@@ -11588,7 +11635,7 @@ function scrollChatToBottom() {
   });
 }
 function bindChatConversation() {
-  if (isAdmin()) bindPrecotizChatBanner(chatState.selectedPhone);
+  if (precotizChatVisible()) { bindPrecotizChatBanner(chatState.selectedPhone); bindPrecotizFrenoCard(chatState.selectedPhone); }
   const ta = document.getElementById('chat-input');
   const btn = document.getElementById('chat-send-btn');
   const msgEl = document.getElementById('chat-messages');
@@ -12154,6 +12201,9 @@ function bindChat() {
   if (isAdmin()) {
     bindPrecotizControl();
     // Carga inicial del estado del piloto (una vez al entrar a la sección chat).
+    if (!STATE._precotizInit) { STATE._precotizInit = true; fetchPrecotiz().then(() => { if (STATE.view === 'chat') render(); }); }
+  } else if (getUserRole() === 'comercial') {
+    // Joaco/Facu: cargan el estado del piloto (una vez) para ver el cartel de freno y los datos.
     if (!STATE._precotizInit) { STATE._precotizInit = true; fetchPrecotiz().then(() => { if (STATE.view === 'chat') render(); }); }
   }
   // Load data
