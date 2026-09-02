@@ -14421,8 +14421,10 @@ function renderBriefDrawer() {
   const isDis = role === 'disenador' || role === 'admin';
   const esCorpBrief = data.tipo === 'corporea';
   let corpCj = {}; if (esCorpBrief) { try { corpCj = JSON.parse(data.corporea_json || '{}') || {}; } catch(e){} }
-  const corpSinLuz = esCorpBrief && corpCj.con_luz === false;
-  const corpPr = esCorpBrief ? calcCorporea({ ancho: data.ancho_cm, alto: data.alto_cm, con_luz: corpSinLuz ? '0' : '1', frente_material: corpCj.frente_material || 'impreso' }) : null;
+  const corpSecs = esCorpBrief ? corpSeccionesFromCj(corpCj, data) : [];
+  // El cartel se considera "sin luz" (acabados opacos) solo si TODAS las secciones son sin luz.
+  const corpSinLuz = esCorpBrief && corpSecs.length > 0 && corpSecs.every(s => String(s.con_luz) === '0');
+  const corpPr = esCorpBrief ? calcCorporeaTotal(corpSecs) : null;
   const corpAc = (field, val, l0, l1) => corpSinLuz ? '<span class="pill" style="font-size:11px">opaco</span>' : `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="translucido" ${String(val||'').startsWith('transl')?'selected':''}>${l0}</option><option value="opaco" ${!String(val||'').startsWith('transl')?'selected':''}>${l1}</option></select>`;
   const corpColorSel = (field, val) => {
     const baseKeys = Object.keys(CORP_COLOR_MAP);
@@ -14629,14 +14631,12 @@ function renderBriefDrawer() {
             </div>
           </div>` : ''}
           ${esCorpBrief ? `
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho (cm)</label><input type="number" step="1" data-bf="ancho_cm" value="${data.ancho_cm || ''}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"></div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Alto (cm)</label><input type="number" step="1" data-bf="alto_cm" value="${data.alto_cm || ''}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"></div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Iluminación</label><select data-corp-bf="con_luz" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="1" ${!corpSinLuz?'selected':''}>Con luz</option><option value="0" ${corpSinLuz?'selected':''}>Sin luz</option></select></div>
-          </div>
+          <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-2) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Secciones / tramos</div>
+          <div style="font-size:11px;color:var(--fg-mute);margin-bottom:6px">Cargá cada tramo del cartel (ancho, alto, luz y material). El precio suma todas las secciones; el render usa la foto del cartel completo.</div>
+          <div id="corp-secciones">${corpSecs.map(s => corpSeccionRowHtml(s, corpSecs.length > 1)).join('')}</div>
+          <button type="button" data-corp-sec-add style="width:100%;background:transparent;border:1px dashed var(--accent-cyan);border-radius:var(--r-sm);color:var(--accent-cyan);padding:7px;cursor:pointer;font-size:12px;margin-bottom:var(--s-2)">+ Agregar sección</button>
           <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-3) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Frente</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Material</label><select data-corp-bf="frente_material" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="impreso" ${(corpCj.frente_material||'impreso')!=='acrilico'?'selected':''}>Impreso</option><option value="acrilico" ${corpCj.frente_material==='acrilico'?'selected':''}>Acrílico</option></select></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Acabado</label>${corpAc('frente_acabado', corpCj.frente_acabado||'translucido','Translúcido','Opaco')}</div>
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Color</label>${corpColorSel('frente_color', corpCj.frente_color)}</div>
           </div>
@@ -14768,6 +14768,74 @@ function calcCorporea(f) {
   const precio = Math.round(costo * margen / 1000) * 1000;
   return { m2, conLuz, costoM2, costo, margen, precio };
 }
+// ===== SECCIONES / TRAMOS =====
+// Un corpóreo se puede hacer en varios tramos (secciones), cada uno con SU medida,
+// iluminación y material. El precio se calcula por sección (calcCorporea, margen por
+// el m² de CADA sección) y se SUMA. El render sigue usando la foto del cartel completo
+// (las secciones son solo para el cálculo). Un corpóreo viejo (sin 'secciones' en
+// corporea_json) se trata como UNA sección derivada de sus campos single → retrocompat.
+function calcCorporeaTotal(secciones) {
+  // Descartar tramos SIN medida real (ancho/alto vacío o 0): no ensucian el total, ni la
+  // persistencia (corporea_json.secciones), ni el presupuesto del cliente (evita "0x0 cm").
+  const secs = (secciones || []).filter(s => (+s.ancho > 0) && (+s.alto > 0)).map(s => {
+    const r = calcCorporea({ ancho: s.ancho, alto: s.alto, con_luz: s.con_luz, frente_material: s.frente_material });
+    return {
+      ancho_cm: +s.ancho || 0, alto_cm: +s.alto || 0,
+      con_luz: String(s.con_luz) !== '0',
+      frente_material: s.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
+      m2: r.m2, costo_m2: r.costoM2, margen: r.margen, costo: r.costo, precio: r.precio,
+    };
+  });
+  const precio = secs.reduce((a, s) => a + s.precio, 0);
+  const m2 = secs.reduce((a, s) => a + s.m2, 0);
+  const costo = secs.reduce((a, s) => a + s.costo, 0);
+  return { secciones: secs, precio, m2, costo, comision_joaco: Math.round(precio * 0.03) };
+}
+// Deriva el array de secciones (para el drawer) desde corporea_json. Si no hay
+// 'secciones' (brief viejo / 1 tramo), arma UNA sección desde los campos single.
+// Devuelve secciones con con_luz como '1'/'0' (string, para los <select> del drawer).
+function corpSeccionesFromCj(cj, data) {
+  cj = cj || {};
+  if (Array.isArray(cj.secciones) && cj.secciones.length) {
+    return cj.secciones.map(s => ({
+      ancho: (s.ancho_cm != null ? s.ancho_cm : (s.ancho || '')),
+      alto: (s.alto_cm != null ? s.alto_cm : (s.alto || '')),
+      con_luz: (s.con_luz === false || String(s.con_luz) === '0') ? '0' : '1',
+      frente_material: s.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
+    }));
+  }
+  const ancho = (data && data.ancho_cm) || cj.ancho_cm || '';
+  const alto = (data && data.alto_cm) || cj.alto_cm || '';
+  return [{ ancho, alto, con_luz: (cj.con_luz === false) ? '0' : '1', frente_material: cj.frente_material === 'acrilico' ? 'acrilico' : 'impreso' }];
+}
+// Lee las filas de sección del DOM del drawer (en orden). Cada fila expone sus inputs
+// con [data-sec-field]; NO usa [data-corp-bf] (ese es global y aplanaría todo en uno).
+function readCorpSeccionesDom() {
+  const rows = [];
+  document.querySelectorAll('#corp-secciones [data-corp-sec-row]').forEach(row => {
+    const g = (f) => { const el = row.querySelector(`[data-sec-field="${f}"]`); return el ? el.value : ''; };
+    rows.push({ ancho: g('ancho'), alto: g('alto'), con_luz: g('con_luz') || '1', frente_material: g('frente_material') || 'impreso' });
+  });
+  return rows;
+}
+// HTML de una fila de sección del drawer. removable=false oculta el botón de quitar
+// (cuando queda una sola sección). Los inputs usan [data-sec-field] para leerlos por fila.
+function corpSeccionRowHtml(sec, removable) {
+  sec = sec || {};
+  const sinLuz = String(sec.con_luz) === '0' || sec.con_luz === false;
+  const mat = sec.frente_material === 'acrilico' ? 'acrilico' : 'impreso';
+  const inS = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)';
+  const lb = 'display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px';
+  const av = (sec.ancho_cm != null ? sec.ancho_cm : (sec.ancho != null ? sec.ancho : ''));
+  const hv = (sec.alto_cm != null ? sec.alto_cm : (sec.alto != null ? sec.alto : ''));
+  return `<div data-corp-sec-row style="display:grid;grid-template-columns:1fr 1fr 1.1fr 1.1fr auto;gap:6px;align-items:end;margin-bottom:6px">
+    <div><label style="${lb}">Ancho (cm)</label><input type="number" step="1" data-sec-field="ancho" value="${av}" style="${inS}"></div>
+    <div><label style="${lb}">Alto (cm)</label><input type="number" step="1" data-sec-field="alto" value="${hv}" style="${inS}"></div>
+    <div><label style="${lb}">Iluminación</label><select data-sec-field="con_luz" style="${inS}"><option value="1" ${!sinLuz?'selected':''}>Con luz</option><option value="0" ${sinLuz?'selected':''}>Sin luz</option></select></div>
+    <div><label style="${lb}">Material</label><select data-sec-field="frente_material" style="${inS}"><option value="impreso" ${mat!=='acrilico'?'selected':''}>Impreso</option><option value="acrilico" ${mat==='acrilico'?'selected':''}>Acrílico</option></select></div>
+    <button type="button" data-corp-sec-remove title="Quitar sección" style="background:transparent;border:1px solid var(--border);border-radius:var(--r-sm);color:#FF5566;padding:8px 10px;cursor:pointer;height:37px;${removable?'':'visibility:hidden'}">🗑</button>
+  </div>`;
+}
 // Deriva el caso visual A-E (igual que el worker) para mostrarlo de referencia.
 function corporeaCaso(f) {
   const conLuz = String(f.con_luz) !== '0';
@@ -14783,25 +14851,62 @@ function corporeaCaso(f) {
 }
 // Contenido de la cajita de precio del drawer corpóreo (reusable para el live-update).
 function corpPriceBoxHtml(r) {
-  return `<div style="display:flex;justify-content:space-between;align-items:center;padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(r.precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${r.m2.toLocaleString('es-AR',{maximumFractionDigits:2})} m²${isAdmin()?` · costo ${fmtMoney(r.costo)} · ×${r.margen}`:''}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(r.precio*0.03))}</div></div>`;
+  r = r || {};
+  const secs = Array.isArray(r.secciones) ? r.secciones : null;
+  const multi = secs && secs.length > 1;
+  const m2 = Number(r.m2) || 0;
+  const precio = Number(r.precio) || 0;
+  const breakdown = multi
+    ? `<div style="font-size:10px;color:var(--fg-mute);margin-top:5px;line-height:1.5">${secs.map((s, i) => `Sección ${i + 1}: ${s.ancho_cm}×${s.alto_cm} cm${s.con_luz ? '' : ' · sin luz'}${s.frente_material === 'acrilico' ? ' · acrílico' : ''} — ${fmtMoney(s.precio)}`).join('<br>')}</div>`
+    : '';
+  const adminExtra = isAdmin()
+    ? (multi ? ` · ${secs.length} secciones`
+      : (secs && secs[0] ? ` · costo ${fmtMoney(r.costo || 0)} · ×${secs[0].margen}`
+        : (r.costo != null ? ` · costo ${fmtMoney(r.costo)} · ×${r.margen}` : '')))
+    : '';
+  return `<div style="padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final${multi ? ` (${secs.length} secciones)` : ''}</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${m2.toLocaleString('es-AR', { maximumFractionDigits: 2 })} m²${adminExtra}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(precio * 0.03))}</div></div>${breakdown}</div>`;
 }
 // Recalcula el precio del drawer corpóreo en vivo (sin re-render, mantiene foco).
 function updateCorpDrawerPrice() {
   const box = document.getElementById('corp-price-box');
   if (!box) return;
-  const val = (s, d) => { const el = document.querySelector(s); return el ? el.value : d; };
-  box.innerHTML = corpPriceBoxHtml(calcCorporea({
-    ancho: val('[data-bf="ancho_cm"]', 0), alto: val('[data-bf="alto_cm"]', 0),
-    con_luz: val('[data-corp-bf="con_luz"]', '1'), frente_material: val('[data-corp-bf="frente_material"]', 'impreso')
-  }));
+  box.innerHTML = corpPriceBoxHtml(calcCorporeaTotal(readCorpSeccionesDom()));
 }
 document.addEventListener('input', (ev) => {
   const t = ev.target;
-  if (t && t.matches && t.matches('[data-bf="ancho_cm"],[data-bf="alto_cm"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+  if (t && t.matches && t.matches('[data-bf="ancho_cm"],[data-bf="alto_cm"],[data-sec-field="ancho"],[data-sec-field="alto"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
 });
 document.addEventListener('change', (ev) => {
   const t = ev.target;
-  if (t && t.matches && t.matches('[data-corp-bf="con_luz"],[data-corp-bf="frente_material"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+  if (t && t.matches && t.matches('[data-corp-bf="con_luz"],[data-corp-bf="frente_material"],[data-sec-field="con_luz"],[data-sec-field="frente_material"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+});
+// Agregar / quitar secciones del drawer corpóreo (sin re-render: preserva los otros valores).
+document.addEventListener('click', (ev) => {
+  const addBtn = ev.target.closest && ev.target.closest('[data-corp-sec-add]');
+  if (addBtn) {
+    const cont = document.getElementById('corp-secciones');
+    if (cont) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = corpSeccionRowHtml({}, true);
+      const row = tmp.firstElementChild;
+      if (row) cont.appendChild(row);
+      cont.querySelectorAll('[data-corp-sec-row] [data-corp-sec-remove]').forEach(b => { b.style.visibility = 'visible'; });
+      updateCorpDrawerPrice();
+    }
+    return;
+  }
+  const rmBtn = ev.target.closest && ev.target.closest('[data-corp-sec-remove]');
+  if (rmBtn) {
+    const cont = document.getElementById('corp-secciones');
+    const row = rmBtn.closest('[data-corp-sec-row]');
+    if (cont && row && cont.querySelectorAll('[data-corp-sec-row]').length > 1) {
+      row.remove();
+      const rows = cont.querySelectorAll('[data-corp-sec-row]');
+      if (rows.length === 1) { const b = rows[0].querySelector('[data-corp-sec-remove]'); if (b) b.style.visibility = 'hidden'; }
+      updateCorpDrawerPrice();
+    }
+    return;
+  }
 });
 // Paleta de colores corpóreos (nombre → hex) — usada por el dropdown custom del drawer.
 const CORP_COLOR_MAP = {'Blanco':'#ffffff','Blanco cálido':'#fff1d6','Blanco frío':'#e9f1ff','Crema':'#f7efd6','Beige':'#e3d3a8','Marfil':'#fbf8ef','Negro':'#141414','Gris oscuro':'#454545','Gris':'#8a8a8a','Gris claro':'#c9c9c9','Plateado':'#c6cace','Rojo':'#e10600','Rojo oscuro':'#8b0000','Bordó':'#5c0a1e','Coral':'#ff6f5e','Rosa':'#ff5fa2','Rosa pastel':'#ffc2d4','Fucsia':'#ff2d8e','Magenta':'#cc0a78','Naranja':'#ff7a00','Naranja oscuro':'#cc5200','Ámbar':'#ffbf00','Amarillo':'#ffd400','Amarillo oro':'#f0c000','Dorado':'#d4af37','Verde lima':'#7ce000','Verde':'#1db954','Verde oscuro':'#0b6b35','Verde agua':'#22c9a9','Menta':'#9ff0c8','Celeste':'#5ec8ff','Cyan':'#00cfd4','Turquesa':'#1fc7c7','Azul':'#1565ff','Azul marino':'#0a2a66','Violeta':'#7c3aed','Lila':'#b794f6','Púrpura':'#6b21a8','Marrón':'#7b4a21','Chocolate':'#4a2c11'};
@@ -14852,7 +14957,18 @@ function corpPresupuestoFields(brief, cj) {
   const conLuz = !(cj.con_luz === false || cj.con_luz === '0' || cj.con_luz === 0 || cj.con_luz === 'no');
   const fTrans = String(cj.frente_acabado || 'translucido').toLowerCase().startsWith('transl');
   const mat = String(cj.frente_material) === 'acrilico' ? 'acrílico' : 'impreso';
-  const med = (cj.ancho_cm && cj.alto_cm) ? `${cj.ancho_cm}x${cj.alto_cm} cm` : (brief.medidas_libre || '');
+  const secsAll = Array.isArray(cj.secciones) ? cj.secciones.filter(s => (Number(s.ancho_cm) || 0) > 0 && (Number(s.alto_cm) || 0) > 0) : null;
+  const secs = (secsAll && secsAll.length) ? secsAll : null;   // defensivo: ignorar tramos 0x0 (datos viejos)
+  const multi = secs && secs.length > 1;
+  // Medidas: con varias secciones, resumen de UNA sola línea (las variables de plantilla de Meta
+  // NO admiten saltos de línea). Con una sola sección / brief viejo, el ancho x alto de siempre.
+  const med = multi
+    ? secs.map((s, i) => `Sección ${i + 1}: ${s.ancho_cm}x${s.alto_cm} cm${(s.con_luz === false || String(s.con_luz) === '0') ? ' sin luz' : ''}${s.frente_material === 'acrilico' ? ' acrílico' : ''}`).join(' · ')
+    : ((cj.ancho_cm && cj.alto_cm) ? `${cj.ancho_cm}x${cj.alto_cm} cm` : (brief.medidas_libre || ''));
+  // Umbral de bastidor (>1 m): la medida más grande ENTRE TODAS las secciones.
+  const maxDim = secs
+    ? Math.max(0, ...secs.flatMap(s => [Number(s.ancho_cm) || 0, Number(s.alto_cm) || 0]))
+    : Math.max(Number(cj.ancho_cm) || 0, Number(cj.alto_cm) || 0);
   const precio = brief.precio_final || cj.precio || 0;
 
   // Frente: material + color/diseño + acabado.
@@ -14879,7 +14995,7 @@ function corpPresupuestoFields(brief, cj) {
     conLuz,
     iluminacion: conLuz ? 'con luz LED' : 'sin iluminación',
     // Descripción del producto: cambia si el cartel supera 1 m de largo/alto (→ viene sobre bastidor de caño).
-    descripcion: (Math.max(Number(cj.ancho_cm) || 0, Number(cj.alto_cm) || 0) > 100)
+    descripcion: (maxDim > 100)
       ? (conLuz
           ? 'Con luz led 12v, incluye su fuente de alimentación a 220v. Viene montado sobre un bastidor de caño, ya listo para instalar muy fácilmente.'
           : 'Sin luz. Viene montado sobre un bastidor de caño, ya listo para instalar muy fácilmente.')
@@ -15276,6 +15392,10 @@ function renderCorpPopup() {
   const luz = cj.con_luz === false ? 'sin luz' : 'con luz';
   const mat = cj.frente_material === 'acrilico' ? 'acrílico' : 'impreso';
   const m2 = (typeof cj.m2 === 'number') ? cj.m2.toFixed(2) : '';
+  const secsAll = Array.isArray(cj.secciones) ? cj.secciones.filter(s => (Number(s.ancho_cm) || 0) > 0 && (Number(s.alto_cm) || 0) > 0) : null;
+  const secs = (secsAll && secsAll.length) ? secsAll : null;   // defensivo: ignorar tramos 0x0
+  const multi = secs && secs.length > 1;
+  const medHdr = multi ? `${secs.length} secciones` : `${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm`;
   return `
     <div data-corp-popup-bg style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:flex;align-items:center;justify-content:center;padding:var(--s-4)">
       <div style="background:var(--bg, #0A0A0F);border:1px solid var(--accent-cyan);border-radius:var(--r-md);max-width:560px;width:100%;max-height:90vh;overflow-y:auto;padding:var(--s-4)">
@@ -15284,22 +15404,25 @@ function renderCorpPopup() {
           <button class="btn btn-ghost btn-icon" data-corp-popup-close aria-label="Cerrar">✕</button>
         </div>
         <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:var(--s-3)">
-          <b>${escapeHtml(brief.cliente_nombre || 'Sin título')}</b> · ${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm${m2 ? ' · ' + m2 + ' m²' : ''} · corpórea · caso ${caso} · ${luz} · frente ${mat}
+          <b>${escapeHtml(brief.cliente_nombre || 'Sin título')}</b> · ${medHdr}${m2 ? ' · ' + m2 + ' m²' : ''} · corpórea${multi ? '' : ` · caso ${caso} · ${luz} · frente ${mat}`}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:14px;margin-bottom:var(--s-3);background:rgba(143,212,222,.04);padding:var(--s-3);border-radius:var(--r-sm)">
           ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco 3%</span><br><b>${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</b></div>` : '<div></div>'}
-          ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Costo · margen</span><br><b>${fmtMoney(cj.costo || 0)} · ×${cj.margen || ''}</b></div>` : '<div></div>'}
+          ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Costo · margen</span><br><b>${fmtMoney(cj.costo || 0)}${multi ? ` · ${secs.length} secc.` : ` · ×${cj.margen || ''}`}</b></div>` : '<div></div>'}
           <div style="grid-column:1 / -1"><span style="color:var(--fg-subtle);font-size:11px">Precio final</span><br><b style="color:var(--accent-cyan);font-size:18px">${fmtMoney(brief.precio_final || 0)}</b></div>
         </div>
         ${isAdmin() ? `
         <div style="font-size:12px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);margin-bottom:var(--s-3)">
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent-cyan);margin-bottom:6px">🔒 Desglose de costos · solo admin</div>
           <table style="width:100%;font-family:ui-monospace,monospace;font-size:12px;color:var(--fg-subtle)">
-            <tr><td>Superficie</td><td style="text-align:right;color:var(--fg)">${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm = <b>${m2 || '?'} m²</b></td></tr>
+            ${multi
+              ? secs.map((s, i) => `<tr><td>Sección ${i + 1} · ${s.ancho_cm}×${s.alto_cm} (${s.frente_material === 'acrilico' ? 'acríl.' : 'impr.'}, ${s.con_luz ? 'c/luz' : 's/luz'})</td><td style="text-align:right;color:var(--fg)">${(Number(s.m2) || 0).toFixed(2)} m² · ×${s.margen} = <b>${fmtMoney(s.precio)}</b></td></tr>`).join('')
+                + `<tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Superficie total</td><td style="text-align:right;padding-top:5px;color:var(--fg)"><b>${m2 || '?'} m²</b></td></tr><tr><td>Costo base total</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo || 0)}</td></tr>`
+              : `<tr><td>Superficie</td><td style="text-align:right;color:var(--fg)">${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm = <b>${m2 || '?'} m²</b></td></tr>
             <tr><td>Costo/m² (${mat}, ${luz})</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo_m2 || 0)}</td></tr>
             <tr><td>Costo base (m² × costo/m²)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo || 0)}</td></tr>
-            <tr><td>Margen por superficie</td><td style="text-align:right;color:var(--fg)">×${cj.margen || '?'}</td></tr>
-            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio final (costo × margen)</td><td style="text-align:right;padding-top:5px"><b style="color:var(--accent-cyan)">${fmtMoney(brief.precio_final || 0)}</b></td></tr>
+            <tr><td>Margen por superficie</td><td style="text-align:right;color:var(--fg)">×${cj.margen || '?'}</td></tr>`}
+            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio final ${multi ? '(suma de secciones)' : '(costo × margen)'}</td><td style="text-align:right;padding-top:5px"><b style="color:var(--accent-cyan)">${fmtMoney(brief.precio_final || 0)}</b></td></tr>
             <tr><td>Comisión Joaco (3% — es costo)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</td></tr>
             <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Ganancia neta</b> (precio − costo − comisión)</td><td style="text-align:right;padding-top:5px;color:#4ade80"><b>${fmtMoney((brief.precio_final || 0) - (cj.costo || 0) - Math.round((brief.precio_final || 0) * 0.03))}</b></td></tr>
           </table>
@@ -15404,7 +15527,7 @@ async function enviarCorporeaPresupuesto(briefId, textOverride) {
           body: JSON.stringify({
             cliente: brief.cliente_nombre || '',
             alto: cj.alto_cm || 0, ancho: cj.ancho_cm || 0,
-            neon: 0, tramos: 0, tipo: 'CORP', m2: cj.m2 || 0,
+            neon: 0, tramos: (Array.isArray(cj.secciones) ? cj.secciones.length : 0), tipo: 'CORP', m2: cj.m2 || 0,
             trans: brief.precio_final || 0, negro: 0, reventa: 0,
             descuento: 0, recargo: 0,
             telefono: tel, canal: 'WPP',
@@ -16252,25 +16375,39 @@ function readBriefDrawerForm() {
   // Corpóreas: si el drawer tiene specs (data-corp-bf), armamos corporea_json +
   // precio_final + comisión Joaco (3%) desde esos campos. No toca tipo (queda 'corporea').
   const corpEls = document.querySelectorAll('[data-corp-bf]');
-  if (corpEls.length) {
+  const secRows = readCorpSeccionesDom();
+  if (corpEls.length || secRows.length) {
     const cf = {};
     corpEls.forEach(el => { if (!el.disabled) cf[el.dataset.corpBf] = el.value; });
-    const ancho = +out.ancho_cm || +cf.ancho_cm || 0;
-    const alto  = +out.alto_cm  || +cf.alto_cm  || 0;
-    const sinLuz = String(cf.con_luz) === '0';
-    const r = calcCorporea({ ancho, alto, con_luz: cf.con_luz, frente_material: cf.frente_material });
+    // Secciones: si el drawer tiene filas, usarlas; si no (fallback raro), 1 sección del single legacy.
+    const secsIn = secRows.length ? secRows : [{
+      ancho: +out.ancho_cm || +cf.ancho_cm || 0, alto: +out.alto_cm || +cf.alto_cm || 0,
+      con_luz: cf.con_luz, frente_material: cf.frente_material,
+    }];
+    const agg = calcCorporeaTotal(secsIn);
+    const s1 = agg.secciones[0] || { ancho_cm: 0, alto_cm: 0, frente_material: 'impreso', costo_m2: 0, margen: 0 };
+    const anyLuz = agg.secciones.some(s => s.con_luz);   // el cartel "tiene luz" si CUALQUIER sección la tiene
+    const sinLuz = !anyLuz;
     out.corporea_json = JSON.stringify({
-      frente_material: cf.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
-      con_luz: !sinLuz,
+      // Campos single top-level = SECCIÓN 1 / totales -> retrocompat de todos los lectores viejos
+      // (popup, presupuesto, Sheet) y del prompt de render del worker (corporeaContexto lee estos).
+      frente_material: s1.frente_material,
+      con_luz: anyLuz,
       frente_acabado: sinLuz ? 'opaco' : cf.frente_acabado, frente_color: cf.frente_color,
       lat_acabado: sinLuz ? 'opaco' : cf.lat_acabado, lat_color: cf.lat_color,
       esp_acabado: sinLuz ? 'opaca' : cf.esp_acabado, esp_color: cf.esp_color,
-      ancho_cm: ancho, alto_cm: alto, m2: r.m2,
-      costo_m2: r.costoM2, margen: r.margen, costo: r.costo, precio: r.precio,
-      comision_joaco: Math.round(r.precio * 0.03)
+      ancho_cm: s1.ancho_cm, alto_cm: s1.alto_cm, m2: agg.m2,
+      costo_m2: s1.costo_m2, margen: s1.margen, costo: agg.costo, precio: agg.precio,
+      comision_joaco: agg.comision_joaco,
+      secciones: agg.secciones,   // NUEVO: desglose por tramo para precio/presupuesto
     });
-    out.precio_final = r.precio;
-    out.m2 = r.m2;
+    out.precio_final = agg.precio;   // TOTAL = suma de secciones (calcCorporeaTotal ya descartó las vacías)
+    out.m2 = agg.m2;
+    // top-level ancho/alto = 1ª sección CON medida (agg.secciones ya viene filtrado). Lo necesitan
+    // la auto-transición a 'listo' (exige ancho/alto>0) y la card. Si NINGUNA sección tiene medida,
+    // NO tocamos ancho_cm/alto_cm: quedan undefined -> el PATCH no los manda -> el backend conserva
+    // el valor previo en vez de pisarlo con 0.
+    if (s1.ancho_cm > 0 && s1.alto_cm > 0) { out.ancho_cm = s1.ancho_cm; out.alto_cm = s1.alto_cm; }
   }
   return out;
 }
