@@ -6081,7 +6081,7 @@ async function processEventoPres(env) {
 // manda hasta que Meta apruebe la plantilla. Reporte diario a Gaspar+Bruno (maybeReporteMiniSupernova).
 const MINISUPER_TPL = 'minisupernova_comunidad';          // con {{1}}=nombre (los ~340 con nombre)
 const MINISUPER_TPL_GRL = 'minisupernova_comunidad_grl';  // genérica sin variable (los ~391 sin nombre en el CSV)
-const MINISUPER_CAP_DIARIO = 50;        // tope duro de envíos por día (AR)
+const MINISUPER_CAP_DIARIO = 25;        // tope duro de envíos por día (AR) — bajado de 50 a 25 (2-sep, Gaspar: cuidar el número)
 const MINISUPER_LABEL_COLOR = '#ec4899';
 const MINISUPER_LIVE_DAYS = 30;         // "chat vivo" = inbound en los últimos N días → NO ocultar
 
