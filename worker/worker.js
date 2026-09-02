@@ -5797,6 +5797,45 @@ async function sendEventoGroupLink(env, phone) {
   try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'evento_link'").bind(sentTs, phone).run(); } catch (_) {}
 }
 
+// Auto-respuesta a los leads de CORPÓREO: cuando mandan el mensaje canned del ad
+// ("Hola! Quiero cotizar un cartel corporeo") les pedimos los 3 datos (foto, medidas,
+// int/ext) — lo mismo que releva el bot de neón — pero como texto fijo. El corpóreo se
+// atiende A MANO hasta tener un bot propio; esto solo evita que queden sin respuesta y
+// ya arranca a juntar datos. UNA sola vez por contacto (dedup wa_autoreply_log
+// kind='corporeo_ask'). Gate kv corporeo_ask_on (default ON).
+async function corporeoAskOn(env) { return (await kvGet(env, 'corporeo_ask_on', '1')) === '1'; }
+const CORPOREO_ASK_MSGS = [
+  'Buenísimo, para pasarte el precio necesito 3 cosas',
+  'Una foto o referencia de lo que querés (diseño, logo o texto)',
+  'Las medidas: ancho y alto en cm',
+  'Y si es para interior o exterior'
+];
+async function corporeoAskOnInbound(env, phone, msgBody) {
+  if (!phone || !(await corporeoAskOn(env))) return;
+  if (!_normTxt(msgBody).includes('quiero cotizar un cartel corporeo')) return;
+  let reserva;
+  try {
+    reserva = await env.DB.prepare(
+      "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'corporeo_ask', '', 'sending', '', '')"
+    ).bind(phone).run();
+  } catch (_) { return; }
+  if (!reserva?.meta?.changes) return; // ya se le mandó → no duplicar
+  let anyFail = false;
+  for (const m of CORPOREO_ASK_MSGS) {
+    const res = await waSendText(env, phone, m);
+    if (!res || !res.ok) { anyFail = true; break; }
+    const sentTs = new Date().toISOString();
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(sentTs, res.id || ('corpask-' + phone + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7)), phone, m).run(); } catch (_) {}
+    await new Promise(r => setTimeout(r, 800));
+  }
+  if (anyFail) {
+    // liberar la reserva para reintentar en el próximo inbound
+    try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'corporeo_ask'").bind(phone).run(); } catch (_) {}
+    return;
+  }
+  try { await env.DB.prepare("UPDATE wa_autoreply_log SET status='sent', sent_at=? WHERE phone=? AND kind='corporeo_ask'").bind(new Date().toISOString(), phone).run(); } catch (_) {}
+}
+
 // Maneja los inbounds del evento:
 //  · Tocó el walink (o es un lead ya registrado que responde al opener del Camino 2) y
 //    todavía NO recibió el link → se lo mandamos (sendEventoGroupLink) y queda OCULTO.
@@ -9271,6 +9310,8 @@ const handler = {
                   try { await miniSupernovaOnInbound(env, phone); } catch (_) {}
                   try { await seminarioOnInbound(env, phone); } catch (_) {}
                   try { await lanzamientoLandingOnInbound(env, phone, msgBody); } catch (_) {}
+                  // Auto-respuesta a leads de corpóreo (mensaje canned del ad Corporeas): pide foto+medidas+int/ext.
+                  try { await corporeoAskOnInbound(env, phone, msgBody); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
                   // Reparto de leads NUEVOS de carteles a Nadia según su cuota diaria (arranca en 0).
