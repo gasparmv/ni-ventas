@@ -8326,6 +8326,7 @@ async function loadChatContacts() {
         lastType: c.last_msg_type,
         unread: c.unread || 0,
         inbox: c.inbox || 'general',  // bandeja: general | cursos (para el botón 🎓)
+        pinPrivado: !!c.pin_privado,  // chat de Bruno: ADEMÁS aparece en la bandeja privada (sin salir de la suya)
         channel: c.channel || 'wa',   // canal: wa | ig (pestaña WhatsApp / Instagram)
         assigned_to: c.assigned_to || ''  // vendedor asignado (reparto Joaco/Nadia)
       };
@@ -9637,7 +9638,9 @@ function renderChat() {
   if (chatState.showArchived) {
     filtered = filtered.filter(c => isArchived(c.phone));
   } else if (chatState.showPrivadoOnly) {
-    filtered = filtered.filter(c => c.inbox === 'privado' && !isArchived(c.phone));
+    // Bandeja privada = movidos a 'privado' (inbox) + pin_privado de Bruno (que NO salieron de su
+    // bandeja original, Bruno los quiere a la vista para seguimientos).
+    filtered = filtered.filter(c => (c.inbox === 'privado' || c.pinPrivado) && !isArchived(c.phone));
   } else {
     filtered = filtered.filter(c => !isArchived(c.phone) && c.inbox !== 'privado');
   }
@@ -9774,7 +9777,7 @@ function renderContactItem(c) {
       ${avatarHtml(c.phone, c.name, 49)}
       <div class="chat-contact-info">
         <div class="chat-contact-top">
-          <div class="chat-contact-name">${c.inbox === 'privado' ? '🔒 ' : ''}${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
+          <div class="chat-contact-name">${(c.inbox === 'privado' || c.pinPrivado) ? '🔒 ' : ''}${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
           <div class="chat-contact-time${hasUnread ? ' unread' : ''}">${formatChatTime(c.lastTs)}</div>
         </div>
         <div class="chat-contact-bottom">
@@ -10045,8 +10048,9 @@ function renderChatConversation() {
         })() : ''}
         ${getUserRole() === 'admin' ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
-          const _enPriv = _c && _c.inbox === 'privado';
+          const _enPriv = _c && (_c.inbox === 'privado' || _c.pinPrivado);
           // Bandeja PRIVADA de Gaspar: mover/sacar un chat de clientes especiales que SOLO ve él.
+          // _enPriv incluye los pin_privado de Bruno (aparecen en la privada sin salir de su bandeja).
           return `<button class="btn-label-toggle${_enPriv ? ' has-note' : ''}" id="btn-privado-toggle" title="${_enPriv ? 'Sacar de tu bandeja Privada (lo vuelve a ver el equipo)' : 'Mover a tu bandeja PRIVADA — solo lo ves vos'}" style="font-size:15px;line-height:1">${_enPriv ? '🔒✓' : '🔒'}</button>`;
         })() : ''}
         <button class="btn-label-toggle ${getContactNote(phone) ? 'has-note' : ''}" id="btn-note" title="${getContactNote(phone) ? 'Editar nota' : 'Agregar nota'}">
@@ -11949,7 +11953,9 @@ async function handleTogglePrivado() {
   const phone = chatState.selectedPhone;
   if (!phone || getUserRole() !== 'admin') return;
   const c = (chatState.contacts || []).find(x => x.phone === phone);
-  const enPrivado = c && c.inbox === 'privado';
+  // "En privado" = movido a la bandeja privada (inbox) O pinneado por Bruno (pin_privado). En ambos
+  // casos el botón 🔒 lo SACA de la vista privada ({on:false} limpia inbox y pin_privado en el backend).
+  const enPrivado = c && (c.inbox === 'privado' || c.pinPrivado);
   const nombre = (c && c.contact_name) || formatPhoneDisplay(phone);
   const ok = await showConfirm(
     enPrivado
@@ -11965,7 +11971,10 @@ async function handleTogglePrivado() {
       body: JSON.stringify({ phone, on: !enPrivado })
     });
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
-    if (c) c.inbox = enPrivado ? 'general' : 'privado';
+    if (c) {
+      if (!enPrivado) { c.inbox = 'privado'; }               // mover a privada
+      else { if (c.inbox === 'privado') c.inbox = 'general'; c.pinPrivado = false; }  // sacar/des-pinnear (conserva cursos/corte)
+    }
     toast(enPrivado ? 'Sacado de Privado' : '🔒 Movido a tu bandeja Privada — solo lo ves vos');
     chatState.contactsLoaded = false;
     loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
@@ -12711,7 +12720,9 @@ function refreshContactList() {
   if (chatState.showArchived) {
     filtered = filtered.filter(c => isArchived(c.phone));
   } else if (chatState.showPrivadoOnly) {
-    filtered = filtered.filter(c => c.inbox === 'privado' && !isArchived(c.phone));
+    // Bandeja privada = movidos a 'privado' (inbox) + pin_privado de Bruno (que NO salieron de su
+    // bandeja original, Bruno los quiere a la vista para seguimientos).
+    filtered = filtered.filter(c => (c.inbox === 'privado' || c.pinPrivado) && !isArchived(c.phone));
   } else {
     filtered = filtered.filter(c => !isArchived(c.phone) && c.inbox !== 'privado');
   }

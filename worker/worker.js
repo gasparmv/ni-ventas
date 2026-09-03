@@ -2585,8 +2585,7 @@ async function maybeReporteLlamar(env) {
       "WITH fups AS (SELECT phone, MIN(ts) AS first_fup FROM wa_messages " +
       "  WHERE direction='outbound' AND (" + fupCond + ") GROUP BY phone) " + // incluye IG (se muestran con @usuario, no con teléfono)
       "SELECT f.phone, f.first_fup, s.contact_name, " +
-      "  (SELECT b.cliente_nombre FROM briefs b WHERE b.cliente_wa_id = f.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS pedido, " +
-      "  (SELECT COALESCE(NULLIF(b.precio_final,0), NULLIF(b.precio_trans,0), NULLIF(b.precio_negro,0)) FROM briefs b WHERE b.cliente_wa_id = f.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS precio, " +
+      // pedido/precio se calculan en JS (sumando la TANDA de carteles), no acá — ver bloque precioInfo abajo.
       "  (SELECT CASE WHEN EXISTS(SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='inbound' AND m.msg_type!='status' AND m.ts > f.first_fup) THEN 1 ELSE 0 END) AS respondio " + // contestó algo después del fup
       "FROM fups f " +
       "  LEFT JOIN wa_chats_summary s ON s.phone = f.phone " +
@@ -2604,10 +2603,7 @@ async function maybeReporteLlamar(env) {
       if (fupLabelId) {
         const seen = new Set(rows.map(r => r.phone));
         const sqlFup =
-          "SELECT cl.phone, NULL AS first_fup, s.contact_name, " +
-          "  (SELECT b.cliente_nombre FROM briefs b WHERE b.cliente_wa_id = cl.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS pedido, " +
-          "  (SELECT COALESCE(NULLIF(b.precio_final,0), NULLIF(b.precio_trans,0), NULLIF(b.precio_negro,0)) FROM briefs b WHERE b.cliente_wa_id = cl.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS precio, " +
-          "  0 AS respondio " +
+          "SELECT cl.phone, NULL AS first_fup, s.contact_name, 0 AS respondio " +
           "FROM contact_labels cl LEFT JOIN wa_chats_summary s ON s.phone = cl.phone " +
           "WHERE cl.label_id = ? " +
           "  AND substr(cl.created_at,1,10) >= date('now','-3 hours','-7 days') " +   // solo los etiquetados "FUP" en los últimos 7 días (no arrastra etiquetas viejas)
@@ -2617,13 +2613,65 @@ async function maybeReporteLlamar(env) {
       }
     } catch (_) {}
     if (!rows.length) { await kvSet(env, 'reporte_llamar_sent', fechaAR); return; }
+    // ===== PRECIO CORRECTO (fix multi-cartel, 3-sep) =====
+    // El bug viejo tomaba UN solo brief (el más nuevo por enviado_at) → en multi-cartel mostraba un
+    // cartel suelto (ej. $130k en vez de $1.088.000). Ahora, por lead, sumamos la TANDA de cotización
+    // (todos los briefs 'enviado' de esa sesión) y mostramos total + cantidad. Tanda = briefs con
+    // enviado_at <= first_fup+2h (o el último si no hay first_fup), agrupados a <=6h del más reciente.
+    // Fallback si no hay brief (leads del formulario→Sheet): parsear el mayor $ del mensaje de presupuesto.
+    const precioInfo = {}; // phone -> { precio, count, pedido }
+    try {
+      const phones = rows.map(r => String(r.phone));
+      const phPlace = phones.map(() => '?').join(',');
+      const briefsRs = phones.length ? ((await env.DB.prepare(
+        "SELECT cliente_wa_id AS phone, id, enviado_at, cliente_nombre, COALESCE(NULLIF(precio_final,0),NULLIF(precio_trans,0),NULLIF(precio_negro,0)) AS p " +
+        "FROM briefs WHERE estado='enviado' AND cliente_wa_id IN (" + phPlace + ") ORDER BY cliente_wa_id, enviado_at DESC, id DESC"
+      ).bind(...phones).all()).results || []) : [];
+      const byPhone = {};
+      for (const b of briefsRs) { (byPhone[String(b.phone)] = byPhone[String(b.phone)] || []).push(b); }
+      const SIX_H = 6 * 3600 * 1000, TWO_H = 2 * 3600 * 1000;
+      for (const r of rows) {
+        const p = String(r.phone);
+        const bl = byPhone[p] || [];
+        if (!bl.length) continue;
+        let ref;
+        if (r.first_fup) {
+          const cut = Date.parse(r.first_fup) + TWO_H;
+          ref = bl.find(b => b.enviado_at && Date.parse(b.enviado_at) <= cut) || bl[bl.length - 1];
+        } else { ref = bl[0]; }
+        const refT = ref && ref.enviado_at ? Date.parse(ref.enviado_at) : 0;
+        const tanda = bl.filter(b => { const t = b.enviado_at ? Date.parse(b.enviado_at) : 0; return t && Math.abs(refT - t) <= SIX_H; });
+        const usar = tanda.length ? tanda : [ref];
+        const total = usar.reduce((s, b) => s + (parseInt(b.p, 10) || 0), 0);
+        const principal = usar.reduce((a, b) => ((parseInt(b.p, 10) || 0) > (parseInt(a.p, 10) || 0) ? b : a), usar[0]);
+        // Solo si hay monto real; si todos los briefs vienen en 0/NULL, dejamos que caiga al fallback del mensaje.
+        if (total > 0) precioInfo[p] = { precio: total, count: usar.length, pedido: (principal && principal.cliente_nombre) || '' };
+      }
+      // Fallback: leads SIN brief (cotizados por el formulario→Sheet) → parsear el $ del mensaje de presupuesto.
+      const sinBrief = rows.filter(r => !precioInfo[String(r.phone)]).map(r => String(r.phone));
+      if (sinBrief.length) {
+        const ph3 = sinBrief.map(() => '?').join(',');
+        const msgRs = (await env.DB.prepare(
+          "SELECT phone, body FROM wa_messages WHERE direction='outbound' AND phone IN (" + ph3 + ") AND body LIKE 'Te comparto%' ORDER BY phone, ts DESC"
+        ).bind(...sinBrief).all()).results || [];
+        const seenP = new Set();
+        for (const m of msgRs) {
+          const p = String(m.phone);
+          if (seenP.has(p)) continue; seenP.add(p);
+          const monto = extractPresupuestoAmount(m.body) || 0;
+          if (monto) precioInfo[p] = { precio: monto, count: 1, pedido: '' };
+        }
+      }
+    } catch (_) {}
     const lines = rows.map((r, i) => {
       const nom = (r.contact_name || '').trim() || 's/nombre';
       const esIg = String(r.phone).length > 14; // IG: id largo, no es teléfono → se muestra el @usuario/nombre, sin "+"
       const quien = esIg ? `${nom} (IG)` : `${nom} — +${r.phone}`;
-      const pedido = (r.pedido || '').trim();
-      const precioN = parseInt(r.precio, 10) || 0;
-      const precio = precioN ? '$' + String(precioN).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
+      const pi = precioInfo[String(r.phone)] || {};
+      const pedido = (pi.pedido || '').trim();
+      const precioN = pi.precio || 0;
+      const precioStr = precioN ? '$' + String(precioN).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
+      const precio = precioStr && pi.count > 1 ? `${precioStr} · ${pi.count} carteles` : precioStr;
       const marca = r.esFup ? 'FUP' : (r.respondio ? 'respondió' : '');
       const extra = [pedido ? `"${pedido}"` : '', precio, marca].filter(Boolean).join(' · ');
       return `${i + 1}. ${quien}${extra ? ' · ' + extra : ''}`;
@@ -8003,6 +8051,60 @@ async function avisoLanzamientoSend(env, ph, texto) {
   if (!r || !r.ok) { try { r = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + t); } catch (_) {} }
   return r;
 }
+
+// ===== Aviso de PLANTILLA FALLIDA (a Bruno + Gaspar) — pedido Bruno 3-sep =====
+// Cuando falla una plantilla de VENTA/SEGUIMIENTO (las que Bruno/Joaco mandan a los leads: adhoc,
+// presupuesto_*, cotizamos, aviso_presupuesto_listo, cambionro, etc.), avisar al toque a Bruno y a
+// Gaspar para que la escriban a mano. Se EXCLUYEN las campañas masivas (broadcasts) que rebotan a
+// montones y solo harían ruido. Anti-loop: destinatarios internos ya excluidos en el hook; el aviso
+// va por plantilla aviso_lanzamiento (que ES campaña masiva → nunca se re-rutea) con fallback a texto.
+function esCampanaMasiva(name) {
+  const n = String(name || '').toLowerCase();
+  if (/^(minisupernova|minicurso|lanzamiento|cupo_comunidad|seminario|sorteo|comunidad|pack_emprendedor|reporte_)/.test(n)) return true;
+  if (n === 'aviso_lanzamiento' || n === 'aviso_arranque_equipo') return true;
+  return false;
+}
+async function notifyTplFail(env, { name, phone, reason } = {}) {
+  try {
+    const ph = String(phone || '').replace(/\D/g, '');
+    if (!ph || !name) return;
+    const fecha = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    const dk = 'tplfail:' + name + ':' + ph + ':' + fecha;   // dedup por plantilla+phone+día
+    try { const seen = await env.DB.prepare("SELECT 1 AS x FROM kv_cache WHERE k = ?").bind(dk).first(); if (seen) return; } catch (_) {}
+    // Tope global de avisos por hora (evita flood si Meta falla en masa).
+    const hourKey = 'tplfail_h:' + new Date().toISOString().slice(0, 13);
+    let cnt = 0;
+    try { const c = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = ?").bind(hourKey).first(); cnt = c ? (parseInt(c.v, 10) || 0) : 0; } catch (_) {}
+    if (cnt >= 15) return;
+    // Marcar dedup + contador ANTES de enviar (evita doble por sync+async o concurrencia).
+    const nowIso = new Date().toISOString();
+    try { await env.DB.prepare("INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?)").bind(dk, nowIso).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?) ON CONFLICT(k) DO UPDATE SET v = CAST(kv_cache.v AS INTEGER) + 1, updated_at = excluded.updated_at").bind(hourKey, nowIso).run(); } catch (_) {}
+    const texto = 'Falló una plantilla a +' + ph + ': ' + (reason || 'no se pudo enviar') + '. Fijate de escribirle a mano.';
+    for (const dest of ['5491155604996', '5491155604999']) {   // Bruno + Gaspar
+      try { await avisoLanzamientoSend(env, dest, texto); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+// Pin a la bandeja PRIVADA (pedido Bruno 3-sep): marca el chat para que ADEMÁS aparezca en la
+// bandeja privada, SIN sacarlo de su bandeja actual (no toca inbox). Se llama cuando Bruno manda
+// un mensaje/plantilla con su firma. El flag pin_privado lo incluye la lista de chats y el front
+// lo suma a la vista privada. Un-pin: /admin/wa/private-toggle {on:false} lo limpia.
+async function pinPrivadoBruno(env, phone) {
+  const ph = String(phone || '').replace(/\D/g, '');
+  if (!ph) return;
+  try { await env.DB.prepare("UPDATE wa_chats_summary SET pin_privado = 1 WHERE phone = ?").bind(ph).run(); } catch (_) {}
+}
+// Auto-heal de la columna wa_chats_summary.pin_privado (una vez por isolate): así el SELECT de la
+// lista de chats nunca rompe por 'no such column' si se deploya contra una D1 sin la migración.
+let _pinPrivadoColOk = false;
+async function ensurePinPrivadoCol(env) {
+  if (_pinPrivadoColOk) return;
+  try { await env.DB.prepare("ALTER TABLE wa_chats_summary ADD COLUMN pin_privado INTEGER DEFAULT 0").run(); } catch (_) {}
+  _pinPrivadoColOk = true;
+}
+
 // Por cada pago del lanzamiento detectado: (1) el aviso inicial "ya arrancaron" una sola vez
 // (marca kv SOLO si salió OK, así no se pierde si la plantilla aún no está aprobada), (2) el
 // aviso del pago con nombre + teléfono + importe + si es seña. A Gaspar y Bruno.
@@ -9615,17 +9717,24 @@ const handler = {
                       if (shouldNotify && env.ADMIN_NOTIFY_PHONE) {
                         try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp BLOQUEADO por pago — Meta error 131042 (pagos pendientes en la cuenta de WhatsApp Business).\nRegularizá en el Billing Hub de META: business.facebook.com/billing_hub (OJO: es de Meta, NO el saldo de 360dialog).\nPausé los envíos automáticos para no quemar contactos — se reanudan solos cuando vuelva a andar.'); } catch (_) {}
                       }
-                    } else if (env.ADMIN_NOTIFY_PHONE && !['5491155604999', '5491155604996', '5491137593269'].includes(String(phone).replace(/\D/g, ''))) {
-                      // Fallo puntual (destinatario, etc.) → aviso por mensaje, como antes.
-                      // GUARDIA números internos (Gaspar/hermano/Joaco, normalizados): si el envío
-                      // que falló era un aviso a un interno (su ventana de 24h cerrada → rebota
-                      // 131047), NO generamos otro aviso, porque ese aviso también fallaría →
-                      // recursión infinita (~1 msg cada 2s, 250+/h, satura la D1 y traba todo el
-                      // CRM). Se compara por dígitos para no fallar por el formato del +.
-                      // Los fallos hacia CLIENTES sí se siguen avisando.
-                      const preview = prevBody ? prevBody.slice(0, 100) + (prevBody.length > 100 ? '…' : '') : '';
-                      const summary = `⚠ Falló envío WA a ${phone}\nError: ${errMsg}` + (preview ? `\nMensaje: "${preview}"` : '');
-                      try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
+                    } else if (!['5491155604999', '5491155604996', '5491137593269'].includes(String(phone).replace(/\D/g, ''))) {
+                      // Fallo puntual hacia un CLIENTE (no interno, no billing).
+                      // GUARDIA números internos (Gaspar/hermano/Joaco): si el envío que falló era un
+                      // aviso a un interno (su ventana de 24h cerrada → rebota 131047), NO generamos
+                      // otro aviso, porque ese también fallaría → recursión infinita (bug histórico que
+                      // saturó la D1). Se compara por dígitos. Los fallos hacia CLIENTES sí se avisan.
+                      const _m = prevBody && prevBody.match(/\[plantilla:\s*([^\]\s]+)/);
+                      const _tpl = _m ? _m[1] : null;
+                      if (_tpl && !esCampanaMasiva(_tpl)) {
+                        // Plantilla de venta/seguimiento (Bruno/Joaco) falló → aviso CONFIABLE a Bruno + Gaspar
+                        // (plantilla + fallback), deduplicado, con tope por hora. Pedido de Bruno (3-sep).
+                        try { await notifyTplFail(env, { name: _tpl, phone, reason: describeSendFailure({ code: errCode, error: errMsg }) }); } catch (_) {}
+                      } else if (env.ADMIN_NOTIFY_PHONE) {
+                        // Texto libre o plantilla de campaña masiva → aviso a Gaspar por texto (como antes).
+                        const preview = prevBody ? prevBody.slice(0, 100) + (prevBody.length > 100 ? '…' : '') : '';
+                        const summary = `⚠ Falló envío WA a ${phone}\nError: ${errMsg}` + (preview ? `\nMensaje: "${preview}"` : '');
+                        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
+                      }
                     }
                   }
                 } catch (_) {}
@@ -10771,6 +10880,9 @@ const handler = {
             await enqueueComunidadPromo(env, num || to);   // drip Pack Emprendedor a los 14 días
           }
         } catch (_) {}
+        // Pin privado (pedido Bruno 3-sep): texto libre con su firma → el chat ADEMÁS a la privada.
+        // Solo si la sesión es admin (Bruno/Gaspar) → evita falsos pin de Joaco/Abril al nombrar a Bruno.
+        if (isAdminSession && /\bbruno\b/i.test(String(text))) { try { await pinPrivadoBruno(env, num || String(to).replace(/\D/g, '')); } catch (_) {} }
         return json({ id: r.id });
       }
 
@@ -11644,6 +11756,7 @@ const handler = {
         const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
         const cached = await cache.match(cacheKey);
         if (cached) return cached;
+        await ensurePinPrivadoCol(env);   // garantiza la columna pin_privado antes del SELECT (auto-heal)
         const inboxClause = inboxClauseForRole(role);
         // Reparto por vendedor (solo comercial): el secundario (Nadia) ve SOLO lo asignado a
         // él; el principal (Joaco) ve todo lo NO asignado a un secundario. uslug se interpola
@@ -11657,7 +11770,7 @@ const handler = {
         let chats = null;
         try {
           const rs = await env.DB.prepare(
-            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread, inbox, channel, assigned_to
+            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread, inbox, channel, assigned_to, pin_privado
              FROM wa_chats_summary
              WHERE last_ts != '' AND NOT (channel = 'ig' AND has_inbound = 0) ${inboxClause}${assignClause}
              ORDER BY last_ts DESC`
@@ -12033,9 +12146,19 @@ const handler = {
         if (!num) return json({ error: 'teléfono inválido' }, 400);
         const on = body?.on !== false; // default true
         try {
-          await env.DB.prepare(
-            "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at"
-          ).bind(num, on ? 'privado' : 'general', new Date().toISOString()).run();
+          if (on) {
+            // Mover a la bandeja privada (movimiento manual del admin): sale de su bandeja actual.
+            await env.DB.prepare(
+              "INSERT INTO wa_chats_summary (phone, inbox, pin_privado, updated_at) VALUES (?, 'privado', 0, ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'privado', pin_privado = 0, updated_at = excluded.updated_at"
+            ).bind(num, new Date().toISOString()).run();
+          } else {
+            // Sacar de la privada / des-pinnear. Solo volvemos a 'general' si estaba en 'privado'; si es
+            // un chat auto-pinneado (Bruno) que vive en OTRA bandeja (cursos/corte/precotiz), conservamos
+            // su bandeja y solo le sacamos el pin (no lo relocalizamos ni lo filtramos mal).
+            await env.DB.prepare(
+              "UPDATE wa_chats_summary SET pin_privado = 0, inbox = CASE WHEN inbox = 'privado' THEN 'general' ELSE inbox END, updated_at = ? WHERE phone = ?"
+            ).bind(new Date().toISOString(), num).run();
+          }
         } catch (e) { return json({ error: 'no se pudo actualizar' }, 500); }
         try { await invalidateChatsSummaryCache(request); } catch (_) {}
         return json({ ok: true, phone: num, inbox: on ? 'privado' : 'general' });
@@ -13233,6 +13356,11 @@ const handler = {
         const text = String(body?.body_text || '').trim();
         const vErr = validateAdhocTemplate(text);
         if (vErr) return json({ error: vErr }, 400);
+        // Pin privado (pedido Bruno 3-sep): si el mensaje lleva su firma, el chat ADEMÁS aparece en la
+        // bandeja privada (sin salir de su bandeja). Acá cubre reuso Y creación nueva (ambos tienen text).
+        // Solo si la sesión es admin (Bruno/Gaspar comparten el user admin) → evita que Joaco/Abril
+        // pinneen de más al nombrar a Bruno.
+        if (isAdminSession && /\bbruno\b/i.test(text)) { try { await pinPrivadoBruno(env, num); } catch (_) {} }
         const hasButton = !!(body.button_url && /^https?:\/\//i.test(String(body.button_url)));
         const bodyNorm = adhocBodyNorm(text) + (hasButton ? 'btn:' + String(body.button_url) : '');
         await ensureAdhocSchema(env);
