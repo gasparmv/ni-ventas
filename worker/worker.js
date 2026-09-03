@@ -6207,6 +6207,75 @@ async function maybeReporteMiniSupernova(env) {
   } catch (_) {}
 }
 
+// ===== AVISO DE ARRANQUE DEL EQUIPO (a Gaspar) =====
+// A pedido de Gaspar (2-sep): avisar por WhatsApp cuando cada vendedor/diseñador arranca a
+// trabajar en el CRM, y a las 9 AR mandar un resumen de quién arrancó y quién todavía no.
+// Señal = ACTIVIDAD real: cada request autenticado estampa user_activity.last_active (throttled
+// 5 min, solo para los vigilados). El login solo no alcanza (quedan logueados). El ping en tiempo
+// real va por texto libre (llega si la ventana de Gaspar está abierta); el resumen de las 9 va por
+// plantilla aviso_arranque_equipo (+ fallback texto) para que llegue seguro. Kill-switch kv
+// 'aviso_arranque_on' (def 1). Corre en el cron */5.
+// Normaliza el nombre de sesión a un id canónico del vigilado (o null si no se vigila, incl. Gaspar).
+function canonWorker(name) {
+  const s = String(name || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (s.includes('joaqu') || s === 'joaco') return 'joaco';
+  if (s.includes('facu')) return 'facu';
+  if (s.includes('abril') || s === 'cursos') return 'abril';
+  if (s.includes('emma') || s.includes('emmanuel') || s.includes('disena')) return 'emma';
+  return null;
+}
+const AVISO_WORKERS = [
+  { id: 'joaco', nombre: 'Joaco' },
+  { id: 'facu', nombre: 'Facu' },
+  { id: 'abril', nombre: 'Abril' },
+  { id: 'emma', nombre: 'Emma' },
+];
+function _arHHMM(iso) {
+  try { const d = new Date(new Date(iso).getTime() - 3 * 3600 * 1000); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); } catch (_) { return ''; }
+}
+async function maybeAvisoArranque(env) {
+  try {
+    if ((await kvGet(env, 'aviso_arranque_on', '1')) !== '1') return;
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS user_activity (user TEXT PRIMARY KEY, last_active TEXT)").run(); } catch (_) {}
+    const nowMs = Date.now();
+    const arAR = new Date(nowMs - 3 * 3600 * 1000);
+    const hAR = arAR.getUTCHours();
+    const fechaAR = arAR.toISOString().slice(0, 10);
+    const todayStartIso = fechaAR + 'T03:00:00.000Z';  // 00:00 AR expresado en UTC
+    const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+    // Estado de cada vigilado
+    const arrancaron = [], faltan = [];
+    for (const w of AVISO_WORKERS) {
+      let la = null;
+      try { const r = await env.DB.prepare("SELECT last_active FROM user_activity WHERE user = ?").bind(w.id).first(); la = r && r.last_active; } catch (_) {}
+      const arrancoHoy = !!(la && la >= todayStartIso);
+      if (arrancoHoy) {
+        arrancaron.push({ nombre: w.nombre, hhmm: _arHHMM(la) });
+        // Ping en tiempo real (una vez por día, en horario razonable 6-22 AR).
+        if (hAR >= 6 && hAR < 22 && (await kvGet(env, 'arranque_ping_' + w.id, '')) !== fechaAR) {
+          try {
+            const r = await waSendText(env, gaspar, w.nombre + ' arrancó a trabajar (' + _arHHMM(la) + ')');
+            if (r && r.ok) await kvSet(env, 'arranque_ping_' + w.id, fechaAR);
+          } catch (_) {}
+        }
+      } else {
+        faltan.push(w.nombre);
+      }
+    }
+    // Resumen de las 9 AR (una vez por día). Plantilla + fallback texto libre.
+    if (hAR >= 9 && (await kvGet(env, 'arranque_resumen_sent', '')) !== fechaAR) {
+      const fechaDisplay = fechaAR.split('-').reverse().join('/');
+      const arrStr = arrancaron.length ? arrancaron.map(a => a.nombre + ' (' + a.hhmm + ')').join(', ') : 'nadie todavía';
+      const faltanStr = faltan.length ? faltan.join(', ') : 'ninguno, arrancaron todos';
+      const texto = 'Equipo hoy ' + fechaDisplay + '\nYa arrancaron: ' + arrStr + '\nTodavía no arrancaron: ' + faltanStr;
+      let ok = false;
+      try { const r = await waSendTemplate(env, gaspar, 'aviso_arranque_equipo', 'es_AR', [fechaDisplay, arrStr, faltanStr]); ok = !!(r && r.ok); } catch (_) {}
+      if (!ok) { try { const r = await waSendText(env, gaspar, texto); ok = !!(r && r.ok); } catch (_) {} }
+      if (ok) await kvSet(env, 'arranque_resumen_sent', fechaAR);
+    }
+  } catch (_) {}
+}
+
 // ============================================================================
 // SORTEO DÍA 2 — recordatorio a los participantes del formulario del sorteo del
 // evento de agosto. Goteo seguro: manda de a poco (kv sorteo_dia2_pertick, def 3),
@@ -9946,6 +10015,18 @@ const handler = {
         if (row && new Date(row.expires_at) >= new Date()) session = { token: qToken, user: row.user };
       }
       if (!session) return unauthorized();
+
+      // Registro de actividad por usuario (para el aviso de arranque del equipo): estampa
+      // last_active SOLO para los vendedores/diseñador vigilados, throttled a 5 min, sin bloquear
+      // la respuesta (waitUntil). Es la señal real de "arrancó a trabajar" (mejor que el login).
+      try {
+        const _cw = canonWorker(session.user);
+        if (_cw) {
+          const _nowA = new Date().toISOString();
+          const _thrA = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+          ctx.waitUntil(env.DB.prepare("INSERT INTO user_activity (user, last_active) VALUES (?, ?) ON CONFLICT(user) DO UPDATE SET last_active = excluded.last_active WHERE user_activity.last_active < ?").bind(_cw, _nowA, _thrA).run().catch(() => {}));
+        }
+      } catch (_) {}
 
       // Defensa en profundidad: endpoints con datos sensibles (P&L, márgenes,
       // actividad global) requieren que la sesión sea del admin (Gaspar), no
@@ -14716,6 +14797,9 @@ const handler = {
     if (hAR >= 9 && hAR <= 20) ctx.waitUntil(processRecoveryQueue(env));
     // Aviso a Gaspar cuando el dataset ya tiene suficientes QualifiedLead (CAPI) para cambiar la campaña.
     if (hAR >= 9 && hAR <= 20) ctx.waitUntil(maybeCapiReadyNotice(env));
+    // Aviso de arranque del equipo (a Gaspar): ping en tiempo real cuando cada uno arranca a
+    // trabajar + resumen a las 9 AR de quién arrancó y quién no. Dedup por día adentro. Corre cada */5.
+    ctx.waitUntil(maybeAvisoArranque(env));
     // Reporte diario de ventas a las 21:00 AR (a Gaspar + su hermano). Dedup por día adentro.
     if (hAR === 21) ctx.waitUntil(maybeReporteDiario(env));
     // Reporte diario de la campaña MiniSupernova a las 21:00 AR (a Gaspar + Bruno). Dedup por día adentro.
