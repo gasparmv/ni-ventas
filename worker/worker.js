@@ -2250,14 +2250,27 @@ async function processPrecotizNudges(env) {
     const silenceH = (nowMs - new Date(lastInTs).getTime()) / 3600000;
     const umbral = (lead.nudge_count || 0) === 0 ? 4 : 20; // 2do a las 20h: si aún está dentro de la ventana (<23h) va como texto libre; si se pasó (ej. escribió de noche → +24h) va como plantilla (abajo)
     if (silenceH < umbral || silenceH > 7 * 24) continue;
-    if (lead.last_nudge_at && (nowMs - new Date(lead.last_nudge_at).getTime()) / 3600000 < 12) continue; // no dos nudges pegados; con 1er a 4h y 2do a 20h hay 16h de separación
+    if (lead.last_nudge_at && (nowMs - new Date(lead.last_nudge_at).getTime()) / 3600000 < 12) continue; // pre-check rápido (el claim atómico de abajo es la garantía real)
     const msg = precotizNudgeMsg(lead);
     if (!msg) continue;
+    // CLAIM ATÓMICO antes de mandar: incrementa nudge_count + marca last_nudge_at en UN solo
+    // UPDATE, SOLO si el lead SIGUE elegible (nudge_count<2 y sin nudge en <12h). Si otra
+    // invocación concurrente del cron ya lo tomó, changes=0 → NO mandamos. Esto evita el spam
+    // de N mensajes iguales cuando varias corridas del cron pisan el mismo lead a la vez
+    // (bug "se nos volvió loco el asistente": 8 nudges idénticos al mismo segundo).
+    const now = new Date().toISOString();
+    const cut12h = new Date(nowMs - 12 * 3600000).toISOString();   // hace 12h; comparación de strings ISO (todos toISOString, mismo formato) — sin julianday, que puede fallar el parseo del 'Z'/ms
+    let claimed = false;
+    try {
+      const up = await env.DB.prepare(
+        "UPDATE precotiz_pilot SET nudge_count = IFNULL(nudge_count,0) + 1, last_nudge_at = ?, updated_at = ? WHERE phone = ? AND IFNULL(nudge_count,0) < 2 AND (last_nudge_at IS NULL OR last_nudge_at <= ?)"
+      ).bind(now, now, lead.phone, cut12h).run();
+      claimed = (((up.meta && up.meta.changes) || 0) === 1);
+    } catch (_) { continue; }
+    if (!claimed) continue;   // otra corrida concurrente ya lo tomó / dejó de ser elegible
     let sr;
-    // La ventana de 24h: fuera de ella el texto libre rebota con 131047, y ese rebote llega
-    // ASYNC (webhook de estado) → no se puede atrapar en el return. Por eso decidimos por el
-    // silencio: si ya pasaron +23h, mandamos DIRECTO la plantilla aprobada (pasa con el 2do
-    // nudge de leads que escribieron de noche, que se resbala a la mañana siguiente, +24h).
+    // Ventana de 24h: fuera de ella el texto libre rebota con 131047 (rebote ASYNC, no se
+    // atrapa en el return). Si ya pasaron +23h de silencio, mandamos DIRECTO la plantilla.
     if (silenceH >= 23) {
       try { sr = await precotizSendNudgeTpl(env, lead.phone, precotizNudgeFaltan(lead)); } catch (_) { continue; }
     } else {
@@ -2267,8 +2280,6 @@ async function processPrecotizNudges(env) {
         try { await precotizSendNudgeTpl(env, lead.phone, precotizNudgeFaltan(lead)); } catch (_) {}
       }
     }
-    const now = new Date().toISOString();
-    try { await env.DB.prepare('UPDATE precotiz_pilot SET nudge_count = IFNULL(nudge_count,0) + 1, last_nudge_at = ?, updated_at = ? WHERE phone = ?').bind(now, now, lead.phone).run(); } catch (_) {}
   }
 }
 
