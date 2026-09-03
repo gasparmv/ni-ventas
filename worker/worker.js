@@ -5894,8 +5894,14 @@ async function corporeoAskOnInbound(env, phone, msgBody) {
     ).bind(phone).run();
   } catch (_) { return; }
   if (!reserva?.meta?.changes) return; // ya se le mandó → no duplicar
+  // Saludo personalizado según el vendedor asignado (el reparto corrió ANTES en el webhook): Facu si
+  // el chat quedó asignado a él, Joaco si no (default). Pedido de Gaspar: que no arranque de golpe.
+  let _asg = '';
+  try { const s = await env.DB.prepare("SELECT assigned_to FROM wa_chats_summary WHERE phone = ?").bind(phone).first(); _asg = String((s && s.assigned_to) || '').toLowerCase(); } catch (_) {}
+  const _saludo = _asg === 'facundo' ? 'Holaa! Acá Facu de Neon Infinito' : 'Holaa! Acá Joaco de Neon Infinito';
+  const msgs = [_saludo, ...CORPOREO_ASK_MSGS];
   let anyFail = false;
-  for (const m of CORPOREO_ASK_MSGS) {
+  for (const m of msgs) {
     const res = await waSendText(env, phone, m);
     if (!res || !res.ok) { anyFail = true; break; }
     const sentTs = new Date().toISOString();
@@ -9605,17 +9611,18 @@ const handler = {
                   try { await miniSupernovaOnInbound(env, phone); } catch (_) {}
                   try { await seminarioOnInbound(env, phone); } catch (_) {}
                   try { await lanzamientoLandingOnInbound(env, phone, msgBody); } catch (_) {}
-                  // Auto-respuesta a leads de corpóreo (mensaje canned del ad Corporeas): pide foto+medidas+int/ext.
+                  // Reparto de leads de carteles a Facundo APENAS entra el lead (pedido Gaspar 3-sep):
+                  // funciona igual que para Joaco, con su cuota/hash. Corre en CADA inbound EN VIVO (antes
+                  // solo lo hacía el captador de precotización ~1 min tarde y Joaco los agarraba primero →
+                  // Facu se quedaba con casi nada). Idempotente, determinístico, respeta anti-pisón, excluye
+                  // cursos(inbox)/reventa/minicurso/cliente/corte. Facu SÍ recibe corpóreos. Va ANTES de la
+                  // auto-respuesta de corpóreo para que el saludo ya sepa a quién quedó asignado (Facu/Joaco).
+                  try { await maybeRepartirANadia(env, phone); } catch (_) {}
+                  // Auto-respuesta a leads de corpóreo (mensaje del ad Corporeas): saluda (Facu/Joaco según
+                  // asignación) + pide foto+medidas+int/ext.
                   try { await corporeoAskOnInbound(env, phone, msgBody); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
-                  // Reparto de leads de carteles a Facundo APENAS entra el lead (pedido Gaspar 3-sep):
-                  // funciona igual que para Joaco, con su cuota/hash. Vuelve a correr en CADA inbound EN
-                  // VIVO (antes solo lo hacía el captador de precotización ~1 min tarde y Joaco los agarraba
-                  // primero → Facu se quedaba con casi nada). Es idempotente (si ya tiene dueño, no hace
-                  // nada), determinístico por teléfono, respeta la anti-pisón (no toca lo que Joaco ya
-                  // atiende) y excluye cursos(inbox)/reventa/minicurso/cliente/corte. Facu SÍ recibe corpóreos.
-                  try { await maybeRepartirANadia(env, phone); } catch (_) {}
                 }
               }
 
