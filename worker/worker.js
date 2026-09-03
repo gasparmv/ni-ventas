@@ -1537,6 +1537,7 @@ async function maybeRepartirANadia(env, phone) {
     try { if (await env.DB.prepare("SELECT 1 AS x FROM minicurso_landing WHERE phone = ? LIMIT 1").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM wa_internal_phones WHERE phone = ?").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1").bind(phone).first()) return; } catch (_) {} // cliente existente
+    try { if (await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono = ? LIMIT 1").bind(phone).first()) return; } catch (_) {} // alumno del servicio de corte (B2B, no carteles)
     // Freno anti-pisón: si un humano (Joaco/Gaspar) ya respondió, NO se lo movemos a Nadia.
     try { if (await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status' LIMIT 1").bind(phone).first()) return; } catch (_) {}
     const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'facundo' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first();
@@ -9605,8 +9606,13 @@ const handler = {
                   try { await corporeoAskOnInbound(env, phone, msgBody); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
-                  // Reparto de leads NUEVOS de carteles a Nadia según su cuota diaria (arranca en 0).
-                  // reparto: ya NO corre en cada inbound. Se dispara al confirmar carteles en el captador de precotización (ver maybeRepartirANadia junto a precotizLog 'entro').
+                  // Reparto de leads de carteles a Facundo APENAS entra el lead (pedido Gaspar 3-sep):
+                  // funciona igual que para Joaco, con su cuota/hash. Vuelve a correr en CADA inbound EN
+                  // VIVO (antes solo lo hacía el captador de precotización ~1 min tarde y Joaco los agarraba
+                  // primero → Facu se quedaba con casi nada). Es idempotente (si ya tiene dueño, no hace
+                  // nada), determinístico por teléfono, respeta la anti-pisón (no toca lo que Joaco ya
+                  // atiende) y excluye cursos(inbox)/reventa/minicurso/cliente/corte. Facu SÍ recibe corpóreos.
+                  try { await maybeRepartirANadia(env, phone); } catch (_) {}
                 }
               }
 
