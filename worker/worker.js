@@ -1932,8 +1932,11 @@ async function processPrecotizPilot(env) {
   //    bandeja (pasa a 'cotizado' y se le saca la etiqueta).
   //  - lead 'completo' todavía pendiente -> se asegura la etiqueta (backfill + auto-reparación).
   try {
+    // Acotado a pilots RECIENTES (últimos 3 días): antes reconciliaba TODOS los 'activo'/'completo'
+    // (llegaron a 829 acumulados) cada tick → sobrecargó el cron y frenó el bot (3-sep). Los viejos
+    // que quedan colgados no necesitan reconciliación (el lead ya se enfrió). Esto evita que se repita.
     const _comp = await env.DB.prepare(
-      "SELECT p.phone, p.estado, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados FROM precotiz_pilot p WHERE p.estado IN ('activo','completo')"
+      "SELECT p.phone, p.estado, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados FROM precotiz_pilot p WHERE p.estado IN ('activo','completo') AND p.updated_at >= datetime('now','-3 days')"
     ).all();
     for (const r of (_comp.results || [])) {
       if (r.enviados > 0) {
