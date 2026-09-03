@@ -6081,7 +6081,7 @@ async function processEventoPres(env) {
 // manda hasta que Meta apruebe la plantilla. Reporte diario a Gaspar+Bruno (maybeReporteMiniSupernova).
 const MINISUPER_TPL = 'minisupernova_comunidad';          // con {{1}}=nombre (los ~340 con nombre)
 const MINISUPER_TPL_GRL = 'minisupernova_comunidad_grl';  // genérica sin variable (los ~391 sin nombre en el CSV)
-const MINISUPER_CAP_DIARIO = 25;        // tope duro de envíos por día (AR) — bajado de 50 a 25 (2-sep, Gaspar: cuidar el número)
+const MINISUPER_CAP_DIARIO = 35;        // tope diario POR DEFECTO (AR); override en vivo por kv 'minisupernova_cap'. Gaspar lo movió 50→25→35 (2-sep)
 const MINISUPER_LABEL_COLOR = '#ec4899';
 const MINISUPER_LIVE_DAYS = 30;         // "chat vivo" = inbound en los últimos N días → NO ocultar
 
@@ -6123,9 +6123,10 @@ async function processMiniSupernova(env) {
   // no hay cap global del número).
   let sentToday = 0;
   try { const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status = 'sent' AND sent_at >= " + REPORTE_DIA_DESDE).first(); sentToday = (c && c.n) || 0; } catch (_) { return; }
-  if (sentToday >= MINISUPER_CAP_DIARIO) return;
+  const capDiario = Math.max(1, Math.min(200, parseInt(await kvGet(env, 'minisupernova_cap', String(MINISUPER_CAP_DIARIO)), 10) || MINISUPER_CAP_DIARIO));
+  if (sentToday >= capDiario) return;
   const perTick = Math.max(1, Math.min(10, parseInt(await kvGet(env, 'minisupernova_pertick', '3'), 10) || 3));
-  const room = Math.min(perTick, MINISUPER_CAP_DIARIO - sentToday);
+  const room = Math.min(perTick, capDiario - sentToday);
   let rows;
   // Orden de envío: de los alumnos MÁS VIEJOS a los MÁS NUEVOS (pedido de Gaspar). El grupo del CSV
   // es la cohorte: #1 = comunidad más vieja, #10 = más nueva. Ordenamos por grupo ASC (numérico) y,
@@ -11017,9 +11018,11 @@ const handler = {
           let body = {}; try { body = await request.json(); } catch (_) {}
           if (typeof body.on === 'boolean') await kvSet(env, 'minisupernova_on', body.on ? '1' : '0');
           if (body.pertick != null) await kvSet(env, 'minisupernova_pertick', String(Math.max(1, Math.min(10, parseInt(body.pertick, 10) || 3))));
+          if (body.cap != null) await kvSet(env, 'minisupernova_cap', String(Math.max(1, Math.min(200, parseInt(body.cap, 10) || MINISUPER_CAP_DIARIO))));
         }
         const on = (await kvGet(env, 'minisupernova_on', '0')) === '1';
         const perTick = parseInt(await kvGet(env, 'minisupernova_pertick', '3'), 10) || 3;
+        const capDiario = Math.max(1, Math.min(200, parseInt(await kvGet(env, 'minisupernova_cap', String(MINISUPER_CAP_DIARIO)), 10) || MINISUPER_CAP_DIARIO));
         let total = 0, enviados = 0, pend = 0, resp = 0, hoy = 0, porGrupo = [];
         try { total = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova").first())?.n || 0; } catch (_) {}
         try { enviados = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status='sent'").first())?.n || 0; } catch (_) {}
@@ -11034,7 +11037,7 @@ const handler = {
         try { sinNombre = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE nombre IS NULL OR nombre = ''").first())?.n || 0; } catch (_) {}
         const hAR = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours();
         return json({
-          ok: true, on, perTick, cap_diario: MINISUPER_CAP_DIARIO,
+          ok: true, on, perTick, cap_diario: capDiario,
           total, enviados, pendientes: pend, respondieron: resp, enviados_hoy: hoy, sin_nombre: sinNombre,
           por_grupo: porGrupo,
           plantilla_nombre: MINISUPER_TPL, plantilla_nombre_status: tplN,
@@ -11042,7 +11045,7 @@ const handler = {
           listo_para_enviar: (tplN.toUpperCase?.() === 'APPROVED' && tplG.toUpperCase?.() === 'APPROVED'),
           horario_ok: (hAR >= 9 && hAR < 21), hora_ar: hAR,
           wa_send_paused: (await kvGet(env, 'wa_send_paused', '0')) === '1',
-          dias_estimados: pend > 0 ? Math.ceil(pend / MINISUPER_CAP_DIARIO) : 0
+          dias_estimados: pend > 0 ? Math.ceil(pend / capDiario) : 0
         });
       }
 
