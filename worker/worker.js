@@ -326,6 +326,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   var token=localStorage.getItem(TKEY)||'';
   var me=null;
   var entrega='envio';
+  var modo='completo';  // 'completo' = cartel entero (server) | 'acrilico' = solo acrilico calado ($175000/m2, client-side)
   var histItems=[];  // ultimas cotizaciones cargadas (para reabrir en el form al tocarlas)
   var VIDEO_YT='zhmP4d1wEgk';  // ID del video de YouTube "como cotizar en 10 min" (https://youtu.be/zhmP4d1wEgk)
   function $(id){return document.getElementById(id);}
@@ -391,11 +392,14 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     var nm=(me&&me.nombre)?me.nombre:'';
     var h='<div class="top"><div class="hi">Hola <b>'+esc(nm)+'</b></div><button class="linkb" id="b_out">Salir</button></div>';
     h+='<div class="card"><h1>Cotizador</h1><div class="sub">Carga las medidas y te muestra tu costo y a cuanto revenderlo.</div>';
+    h+='<label>Que cotizas</label><div class="seg" id="i_modo"><button type="button" class="segb'+(modo==='completo'?' on':'')+'" data-modo="completo">Cartel completo</button><button type="button" class="segb'+(modo==='acrilico'?' on':'')+'" data-modo="acrilico">Solo acr&iacute;lico calado</button></div>';
     h+='<label>Nombre del dise&ntilde;o <span style="opacity:.6">(opcional)</span></label><input id="i_nombre" maxlength="60" placeholder="Ej: Logo del local">';
     h+='<div class="r"><div><label>Ancho (cm)</label><input id="i_ancho" type="number" inputmode="numeric" placeholder="50"></div><div><label>Alto (cm)</label><input id="i_alto" type="number" inputmode="numeric" placeholder="30"></div></div>';
+    h+='<div id="grp-completo"'+(modo==='acrilico'?' style="display:none"':'')+'>';
     h+='<div class="r"><div><label>Metros de neon</label><input id="i_neon" type="number" inputmode="decimal" placeholder="3"></div><div><label>Tramos</label><input id="i_tramos" type="number" inputmode="numeric" placeholder="3"></div></div>';
     h+='<label>Tipo</label><select id="i_tipo"><option value="INT">Interior</option><option value="EXT">Exterior (resistente)</option></select>';
     h+='<label>Entrega</label><div class="seg" id="i_entrega"><button type="button" class="segb'+(entrega==='envio'?' on':'')+'" data-ent="envio">Env&iacute;o incluido</button><button type="button" class="segb'+(entrega==='retiro'?' on':'')+'" data-ent="retiro">Retiro en taller</button></div>';
+    h+='</div>';
     h+='<button class="btn" id="b_calc">Calcular precio</button><div class="err" id="err"></div></div>';
     h+='<div id="res"></div>';
     h+=videoCardHtml();
@@ -404,8 +408,10 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     $('app').innerHTML=h;
     $('b_out').onclick=logout;
     $('b_calc').onclick=doCalc;
-    var _sg=document.querySelectorAll('#app .segb');
+    var _sg=document.querySelectorAll('#app #i_entrega .segb');
     for(var _i=0;_i<_sg.length;_i++){_sg[_i].onclick=function(){for(var _j=0;_j<_sg.length;_j++)_sg[_j].className='segb';this.className='segb on';entrega=this.getAttribute('data-ent');};}
+    var _md=document.querySelectorAll('#app #i_modo .segb');
+    for(var _k=0;_k<_md.length;_k++){_md[_k].onclick=function(){for(var _l=0;_l<_md.length;_l++)_md[_l].className='segb';this.className='segb on';modo=this.getAttribute('data-modo');var _g=$('grp-completo');if(_g)_g.style.display=(modo==='acrilico'?'none':'');var _r=$('res');if(_r)_r.innerHTML='';};}
   }
   function baseCard(title,sw,o){
     var h='<div class="base"><h3><span class="sw" style="background:'+sw+'"></span>'+title+'</h3>';
@@ -417,6 +423,14 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
   function doCalc(){
     var nombre=$('i_nombre')?$('i_nombre').value.trim():'';
     var ancho=+$('i_ancho').value, alto=+$('i_alto').value, neon=+$('i_neon').value, tramos=+$('i_tramos').value, tipo=$('i_tipo').value;
+    if(modo==='acrilico'){
+      if(!ancho||!alto)return showErr('Carga el ancho y el alto.');
+      var m2=(ancho*alto)/10000;
+      var costoAc=Math.round(175000*m2);
+      var headA='<div class="entnote">SOLO ACRILICO CALADO ('+num(ancho)+'x'+num(alto)+' cm = '+m2.toFixed(2)+' m2)</div>'+(nombre?'<div class="card" style="padding:12px 16px;margin-bottom:10px"><b style="font-size:15px">'+esc(nombre)+'</b></div>':'');
+      $('res').innerHTML=headA+'<div class="base"><h3><span class="sw" style="background:#cbd5e1"></span>Acrilico calado</h3><div class="line big"><span class="k">Precio</span><span class="v">'+money(costoAc)+'</span></div></div><div class="note" style="margin-top:8px">Solo el acr&iacute;lico cortado ($175.000 el m&sup2;), sin ne&oacute;n ni armado.</div>';
+      return;
+    }
     if(!ancho||!alto||!neon||!tramos)return showErr('Carga ancho, alto, metros de neon y tramos.');
     var b=$('b_calc');b.disabled=true;b.textContent='Calculando...';
     api('/revendedor/cotizar',{method:'POST',body:{nombre:nombre,ancho:ancho,alto:alto,neon:neon,tramos:tramos,tipo:tipo,entrega:entrega}}).then(function(r){
@@ -664,7 +678,7 @@ async function ensurePedidosSchema(env) {
 //  lo manda un admin (reasignación manual desde el CRM).
 async function resolveComercial(env, { bodyComercial, sessionUser, phone } = {}) {
   const slug = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  const norm = (s) => { const k = slug(s); if (k === 'joaquin' || k === 'joaco') return 'joaco'; if (k === 'nadia') return 'nadia'; return ''; };
+  const norm = (s) => { const k = slug(s); if (k === 'joaquin' || k === 'joaco') return 'joaco'; if (k === 'facundo') return 'facundo'; return ''; };
   const us = slug(sessionUser);
   // (0) reasignación manual: un admin (Gaspar) puede forzar el vendedor por body.
   if (bodyComercial && us === 'gaspar') { const v = norm(bodyComercial); if (v) return v; }
@@ -1657,11 +1671,18 @@ async function maybeRepartirANadia(env, phone) {
     try { if (await env.DB.prepare("SELECT 1 AS x FROM minicurso_landing WHERE phone = ? LIMIT 1").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM wa_internal_phones WHERE phone = ?").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1").bind(phone).first()) return; } catch (_) {} // cliente existente
+    try { if (await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono = ? LIMIT 1").bind(phone).first()) return; } catch (_) {} // alumno del servicio de corte (B2B, no carteles)
     // Freno anti-pisón: si un humano (Joaco/Gaspar) ya respondió, NO se lo movemos a Nadia.
     try { if (await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status' LIMIT 1").bind(phone).first()) return; } catch (_) {}
-    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'nadia' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first();
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'facundo' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first();
     if (((r && r.n) || 0) >= cuota) return; // ya llegó a la cuota del día
-    await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = 'nadia', assigned_at = ? WHERE phone = ?").bind(new Date().toISOString(), phone).run();
+    // ALEATORIO por-lead (estable por teléfono): solo una fracción de los eligibles va a Facundo,
+    // así no se lleva SIEMPRE los primeros del día sino un ~random repartido. kv facundo_reparto_prob.
+    const prob = parseFloat(await kvGet(env, 'facundo_reparto_prob', '0.25')) || 0.25;
+    let _h = 0; const _ps = String(phone); for (let _i = 0; _i < _ps.length; _i++) _h = (_h * 31 + _ps.charCodeAt(_i)) >>> 0;
+    if ((_h % 100) >= Math.round(prob * 100)) return;   // a este teléfono no le toca (determinístico, no depende de cuántos mensajes mande)
+    await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = 'facundo', assigned_at = ? WHERE phone = ?").bind(new Date().toISOString(), phone).run();
+    try { await env.DB.prepare("UPDATE briefs SET comercial_id = 'facundo' WHERE cliente_wa_id = ?").bind(phone).run(); } catch (_) {} // el brief/comisión sigue al lead
     const nadiaPhone = await kvGet(env, 'nadia_phone', '');
     if (nadiaPhone) { try { await waSendText(env, nadiaPhone, 'Tenés un lead nuevo de carteles para atender en el CRM 🙌'); } catch (_) {} }
   } catch (_) {}
@@ -1703,6 +1724,20 @@ async function paraCotizarTag(env, phone, on) {
     } else {
       await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
     }
+  } catch (_) {}
+}
+// Etiqueta "Corpóreo": leads que entran por los ads Corporeas 1/2 (producto nuevo, letra
+// 3D maciza). Se atienden A MANO hasta tener un bot de precotización propio del corpóreo,
+// así que NO entran al bot de neón. El vertical se mapea por ad_id en wa_ad_verticals
+// ('corporeo'); esta etiqueta los hace visibles para que Joaco/Gaspar los agarren.
+const CORPOREO_LABEL_NAME = '🔠 Corpóreo';
+const CORPOREO_LABEL_COLOR = '#a855f7';
+async function corporeoTag(env, phone, on) {
+  try {
+    const id = await ensureLabelId(env, CORPOREO_LABEL_NAME, CORPOREO_LABEL_COLOR);
+    if (!id) return;
+    if (on) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, id, new Date().toISOString()).run();
+    else await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
   } catch (_) {}
 }
 // Supresión manual de etiquetas auto (📋 Para cotizar / 💰 Sin cotizar): si un vendedor
@@ -2031,8 +2066,11 @@ async function processPrecotizPilot(env) {
   //    bandeja (pasa a 'cotizado' y se le saca la etiqueta).
   //  - lead 'completo' todavía pendiente -> se asegura la etiqueta (backfill + auto-reparación).
   try {
+    // Acotado a pilots RECIENTES (últimos 3 días): antes reconciliaba TODOS los 'activo'/'completo'
+    // (llegaron a 829 acumulados) cada tick → sobrecargó el cron y frenó el bot (3-sep). Los viejos
+    // que quedan colgados no necesitan reconciliación (el lead ya se enfrió). Esto evita que se repita.
     const _comp = await env.DB.prepare(
-      "SELECT p.phone, p.estado, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados FROM precotiz_pilot p WHERE p.estado IN ('activo','completo')"
+      "SELECT p.phone, p.estado, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados FROM precotiz_pilot p WHERE p.estado IN ('activo','completo') AND p.updated_at >= datetime('now','-3 days')"
     ).all();
     for (const r of (_comp.results || [])) {
       if (r.enviados > 0) {
@@ -2223,6 +2261,13 @@ async function processPrecotizPilot(env) {
     try { const rl = await env.DB.prepare("SELECT 1 AS x FROM contact_labels WHERE phone = ? AND label_id = 2289 LIMIT 1").bind(phone).first(); if (rl) continue; } catch (_) {}
     // Alumnos del servicio de CORTE (B2B): NO son leads de carteles → los maneja el bot de corte, no la precotización.
     try { const ca = await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono = ? LIMIT 1").bind(phone).first(); if (ca) continue; } catch (_) {}
+    // Excluir leads de CORPÓREO (ads Corporeas 1/2): producto nuevo que se atiende A MANO
+    // hasta tener un bot propio. El vertical se mapea por ad_id en wa_ad_verticals. Se los
+    // etiqueta "Corpóreo" para que Joaco/Gaspar los agarren; el bot de neón NO los toca.
+    try {
+      const _adc = await env.DB.prepare("SELECT source_id, headline, body FROM wa_ad_attributions WHERE phone = ? ORDER BY ts DESC LIMIT 1").bind(phone).first();
+      if (_adc && _adc.source_id && (await adVerticalForSource(env, _adc.source_id, _adc.headline, _adc.body)) === 'corporeo') { await corporeoTag(env, phone, true); continue; }
+    } catch (_) {}
     let first;
     try { first = await env.DB.prepare("SELECT MIN(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(phone).first(); } catch (_) { continue; }
     const firstTs = first?.t || '';
@@ -2250,6 +2295,11 @@ async function processPrecotizPilot(env) {
     // NO mandamos el opener de nuevo (ese era el "buenas te habla Joaco" x2 en la captura).
     if (!_ins || !_ins.meta || !_ins.meta.changes) continue;
     await precotizLog(env, phone, 'entro', { es_carteles: true, tiene_foto: res.tiene_foto, tiene_medidas: res.tiene_medidas, tiene_intext: res.tiene_intext });
+    // Reparto a Facundo APENAS se confirma carteles: único punto con es_carteles=true y TODAS las
+    // exclusiones ya aplicadas arriba (cursos/reventa/corte/corpóreo/lanzamiento/internos/cliente).
+    // ~25% (kv facundo_reparto_prob) según cuota diaria (kv nadia_cuota_diaria). Corre 1 sola vez por
+    // lead (el INSERT OR IGNORE de precotiz_pilot de arriba garantiza changes=1).
+    try { await maybeRepartirANadia(env, phone); } catch (_) {}
     await precotizTag(env, phone, true); // etiqueta VISIBLE (no oculta) — Joaco+Gaspar monitorean
 
     if (tF && tM && (tI || res.intext_no_sabe)) { // ya tiene lo necesario (foto+medidas) → completo
@@ -2338,14 +2388,27 @@ async function processPrecotizNudges(env) {
     const silenceH = (nowMs - new Date(lastInTs).getTime()) / 3600000;
     const umbral = (lead.nudge_count || 0) === 0 ? 4 : 20; // 2do a las 20h: si aún está dentro de la ventana (<23h) va como texto libre; si se pasó (ej. escribió de noche → +24h) va como plantilla (abajo)
     if (silenceH < umbral || silenceH > 7 * 24) continue;
-    if (lead.last_nudge_at && (nowMs - new Date(lead.last_nudge_at).getTime()) / 3600000 < 12) continue; // no dos nudges pegados; con 1er a 4h y 2do a 20h hay 16h de separación
+    if (lead.last_nudge_at && (nowMs - new Date(lead.last_nudge_at).getTime()) / 3600000 < 12) continue; // pre-check rápido (el claim atómico de abajo es la garantía real)
     const msg = precotizNudgeMsg(lead);
     if (!msg) continue;
+    // CLAIM ATÓMICO antes de mandar: incrementa nudge_count + marca last_nudge_at en UN solo
+    // UPDATE, SOLO si el lead SIGUE elegible (nudge_count<2 y sin nudge en <12h). Si otra
+    // invocación concurrente del cron ya lo tomó, changes=0 → NO mandamos. Esto evita el spam
+    // de N mensajes iguales cuando varias corridas del cron pisan el mismo lead a la vez
+    // (bug "se nos volvió loco el asistente": 8 nudges idénticos al mismo segundo).
+    const now = new Date().toISOString();
+    const cut12h = new Date(nowMs - 12 * 3600000).toISOString();   // hace 12h; comparación de strings ISO (todos toISOString, mismo formato) — sin julianday, que puede fallar el parseo del 'Z'/ms
+    let claimed = false;
+    try {
+      const up = await env.DB.prepare(
+        "UPDATE precotiz_pilot SET nudge_count = IFNULL(nudge_count,0) + 1, last_nudge_at = ?, updated_at = ? WHERE phone = ? AND IFNULL(nudge_count,0) < 2 AND (last_nudge_at IS NULL OR last_nudge_at <= ?)"
+      ).bind(now, now, lead.phone, cut12h).run();
+      claimed = (((up.meta && up.meta.changes) || 0) === 1);
+    } catch (_) { continue; }
+    if (!claimed) continue;   // otra corrida concurrente ya lo tomó / dejó de ser elegible
     let sr;
-    // La ventana de 24h: fuera de ella el texto libre rebota con 131047, y ese rebote llega
-    // ASYNC (webhook de estado) → no se puede atrapar en el return. Por eso decidimos por el
-    // silencio: si ya pasaron +23h, mandamos DIRECTO la plantilla aprobada (pasa con el 2do
-    // nudge de leads que escribieron de noche, que se resbala a la mañana siguiente, +24h).
+    // Ventana de 24h: fuera de ella el texto libre rebota con 131047 (rebote ASYNC, no se
+    // atrapa en el return). Si ya pasaron +23h de silencio, mandamos DIRECTO la plantilla.
     if (silenceH >= 23) {
       try { sr = await precotizSendNudgeTpl(env, lead.phone, precotizNudgeFaltan(lead)); } catch (_) { continue; }
     } else {
@@ -2355,8 +2418,6 @@ async function processPrecotizNudges(env) {
         try { await precotizSendNudgeTpl(env, lead.phone, precotizNudgeFaltan(lead)); } catch (_) {}
       }
     }
-    const now = new Date().toISOString();
-    try { await env.DB.prepare('UPDATE precotiz_pilot SET nudge_count = IFNULL(nudge_count,0) + 1, last_nudge_at = ?, updated_at = ? WHERE phone = ?').bind(now, now, lead.phone).run(); } catch (_) {}
   }
 }
 
@@ -2478,7 +2539,7 @@ async function buildReporteDiario(env) {
                       OR lower(m.body) LIKE '%minicurso%' OR lower(m.body) LIKE '%registr%'
                       OR lower(m.body) LIKE '%la clase%' OR lower(m.body) LIKE '%las clases%'
                       OR lower(m.body) LIKE '%formaci%' OR lower(m.body) LIKE '%evento gratu%'
-                      OR lower(m.body) LIKE '%4 y 6%' OR lower(m.body) LIKE '%agosto%')
+                      OR lower(m.body) LIKE '%8 y 10%' OR lower(m.body) LIKE '%agosto%')
                   ) THEN 1 ELSE 0 END) AS cursos
        FROM fi LEFT JOIN wa_chats_summary s ON s.phone = fi.phone`
     ).first();
@@ -2504,7 +2565,7 @@ async function buildReporteDiario(env) {
     ).all();
     for (const r of (rs.results || [])) {
       const n = r.n || 0; out.presupTotal += n;
-      if (r.comercial_id === 'nadia') out.presupNadia += n; else out.presupJoaco += n;
+      if (r.comercial_id === 'facundo') out.presupNadia += n; else out.presupJoaco += n;
     }
   } catch (_) {}
   // 4) Chats asignados hoy por vendedor (assigned_to + assigned_at, mig 037).
@@ -2513,7 +2574,7 @@ async function buildReporteDiario(env) {
       `SELECT assigned_to, COUNT(DISTINCT phone) AS n FROM wa_chats_summary WHERE assigned_to != '' AND assigned_at >= ${REPORTE_DIA_DESDE} AND assigned_at < ${REPORTE_DIA_HASTA} GROUP BY assigned_to`
     ).all();
     for (const r of (rs.results || [])) {
-      if (r.assigned_to === 'nadia') out.chatsNadia += (r.n || 0);
+      if (r.assigned_to === 'facundo') out.chatsNadia += (r.n || 0);
       else if (r.assigned_to === 'joaco' || r.assigned_to === 'joaquin') out.chatsJoaco += (r.n || 0);
     }
   } catch (_) {}
@@ -2528,16 +2589,16 @@ async function buildReporteDiario(env) {
 }
 function formatReporteDiario(d) {
   const fecha = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10).split('-').reverse().join('/');
-  const repartoNota = (d.chatsJoaco + d.chatsNadia) === 0 ? '  (arranca cuando sumemos a Nadia)' : '';
+  const repartoNota = (d.chatsJoaco + d.chatsNadia) === 0 ? '  (arranca cuando sumemos a Facundo)' : '';
   return (
     `📊 Reporte del día ${fecha}\n\n` +
     `💬 Conversaciones nuevas: ${d.total}\n` +
     `   Carteles: ${d.carteles} · Cursos: ${d.cursos}\n\n` +
     `🤖 Pasaron la precotización: ${d.precotiz}\n\n` +
     `👥 Chats asignados hoy:${repartoNota}\n` +
-    `   Joaco: ${d.chatsJoaco} · Nadia: ${d.chatsNadia}\n\n` +
+    `   Joaco: ${d.chatsJoaco} · Facundo: ${d.chatsNadia}\n\n` +
     `📋 Presupuestos enviados: ${d.presupTotal}\n` +
-    `   Joaco: ${d.presupJoaco} · Nadia: ${d.presupNadia}\n\n` +
+    `   Joaco: ${d.presupJoaco} · Facundo: ${d.presupNadia}\n\n` +
     `🧾 Órdenes de compra: ${d.ocEnviadas}`
   );
 }
@@ -2662,8 +2723,7 @@ async function maybeReporteLlamar(env) {
       "WITH fups AS (SELECT phone, MIN(ts) AS first_fup FROM wa_messages " +
       "  WHERE direction='outbound' AND (" + fupCond + ") GROUP BY phone) " + // incluye IG (se muestran con @usuario, no con teléfono)
       "SELECT f.phone, f.first_fup, s.contact_name, " +
-      "  (SELECT b.cliente_nombre FROM briefs b WHERE b.cliente_wa_id = f.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS pedido, " +
-      "  (SELECT COALESCE(NULLIF(b.precio_final,0), NULLIF(b.precio_trans,0), NULLIF(b.precio_negro,0)) FROM briefs b WHERE b.cliente_wa_id = f.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS precio, " +
+      // pedido/precio se calculan en JS (sumando la TANDA de carteles), no acá — ver bloque precioInfo abajo.
       "  (SELECT CASE WHEN EXISTS(SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='inbound' AND m.msg_type!='status' AND m.ts > f.first_fup) THEN 1 ELSE 0 END) AS respondio " + // contestó algo después del fup
       "FROM fups f " +
       "  LEFT JOIN wa_chats_summary s ON s.phone = f.phone " +
@@ -2681,10 +2741,7 @@ async function maybeReporteLlamar(env) {
       if (fupLabelId) {
         const seen = new Set(rows.map(r => r.phone));
         const sqlFup =
-          "SELECT cl.phone, NULL AS first_fup, s.contact_name, " +
-          "  (SELECT b.cliente_nombre FROM briefs b WHERE b.cliente_wa_id = cl.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS pedido, " +
-          "  (SELECT COALESCE(NULLIF(b.precio_final,0), NULLIF(b.precio_trans,0), NULLIF(b.precio_negro,0)) FROM briefs b WHERE b.cliente_wa_id = cl.phone AND b.estado='enviado' ORDER BY b.enviado_at DESC, b.id DESC LIMIT 1) AS precio, " +
-          "  0 AS respondio " +
+          "SELECT cl.phone, NULL AS first_fup, s.contact_name, 0 AS respondio " +
           "FROM contact_labels cl LEFT JOIN wa_chats_summary s ON s.phone = cl.phone " +
           "WHERE cl.label_id = ? " +
           "  AND substr(cl.created_at,1,10) >= date('now','-3 hours','-7 days') " +   // solo los etiquetados "FUP" en los últimos 7 días (no arrastra etiquetas viejas)
@@ -2694,13 +2751,65 @@ async function maybeReporteLlamar(env) {
       }
     } catch (_) {}
     if (!rows.length) { await kvSet(env, 'reporte_llamar_sent', fechaAR); return; }
+    // ===== PRECIO CORRECTO (fix multi-cartel, 3-sep) =====
+    // El bug viejo tomaba UN solo brief (el más nuevo por enviado_at) → en multi-cartel mostraba un
+    // cartel suelto (ej. $130k en vez de $1.088.000). Ahora, por lead, sumamos la TANDA de cotización
+    // (todos los briefs 'enviado' de esa sesión) y mostramos total + cantidad. Tanda = briefs con
+    // enviado_at <= first_fup+2h (o el último si no hay first_fup), agrupados a <=6h del más reciente.
+    // Fallback si no hay brief (leads del formulario→Sheet): parsear el mayor $ del mensaje de presupuesto.
+    const precioInfo = {}; // phone -> { precio, count, pedido }
+    try {
+      const phones = rows.map(r => String(r.phone));
+      const phPlace = phones.map(() => '?').join(',');
+      const briefsRs = phones.length ? ((await env.DB.prepare(
+        "SELECT cliente_wa_id AS phone, id, enviado_at, cliente_nombre, COALESCE(NULLIF(precio_final,0),NULLIF(precio_trans,0),NULLIF(precio_negro,0)) AS p " +
+        "FROM briefs WHERE estado='enviado' AND cliente_wa_id IN (" + phPlace + ") ORDER BY cliente_wa_id, enviado_at DESC, id DESC"
+      ).bind(...phones).all()).results || []) : [];
+      const byPhone = {};
+      for (const b of briefsRs) { (byPhone[String(b.phone)] = byPhone[String(b.phone)] || []).push(b); }
+      const SIX_H = 6 * 3600 * 1000, TWO_H = 2 * 3600 * 1000;
+      for (const r of rows) {
+        const p = String(r.phone);
+        const bl = byPhone[p] || [];
+        if (!bl.length) continue;
+        let ref;
+        if (r.first_fup) {
+          const cut = Date.parse(r.first_fup) + TWO_H;
+          ref = bl.find(b => b.enviado_at && Date.parse(b.enviado_at) <= cut) || bl[bl.length - 1];
+        } else { ref = bl[0]; }
+        const refT = ref && ref.enviado_at ? Date.parse(ref.enviado_at) : 0;
+        const tanda = bl.filter(b => { const t = b.enviado_at ? Date.parse(b.enviado_at) : 0; return t && Math.abs(refT - t) <= SIX_H; });
+        const usar = tanda.length ? tanda : [ref];
+        const total = usar.reduce((s, b) => s + (parseInt(b.p, 10) || 0), 0);
+        const principal = usar.reduce((a, b) => ((parseInt(b.p, 10) || 0) > (parseInt(a.p, 10) || 0) ? b : a), usar[0]);
+        // Solo si hay monto real; si todos los briefs vienen en 0/NULL, dejamos que caiga al fallback del mensaje.
+        if (total > 0) precioInfo[p] = { precio: total, count: usar.length, pedido: (principal && principal.cliente_nombre) || '' };
+      }
+      // Fallback: leads SIN brief (cotizados por el formulario→Sheet) → parsear el $ del mensaje de presupuesto.
+      const sinBrief = rows.filter(r => !precioInfo[String(r.phone)]).map(r => String(r.phone));
+      if (sinBrief.length) {
+        const ph3 = sinBrief.map(() => '?').join(',');
+        const msgRs = (await env.DB.prepare(
+          "SELECT phone, body FROM wa_messages WHERE direction='outbound' AND phone IN (" + ph3 + ") AND body LIKE 'Te comparto%' ORDER BY phone, ts DESC"
+        ).bind(...sinBrief).all()).results || [];
+        const seenP = new Set();
+        for (const m of msgRs) {
+          const p = String(m.phone);
+          if (seenP.has(p)) continue; seenP.add(p);
+          const monto = extractPresupuestoAmount(m.body) || 0;
+          if (monto) precioInfo[p] = { precio: monto, count: 1, pedido: '' };
+        }
+      }
+    } catch (_) {}
     const lines = rows.map((r, i) => {
       const nom = (r.contact_name || '').trim() || 's/nombre';
       const esIg = String(r.phone).length > 14; // IG: id largo, no es teléfono → se muestra el @usuario/nombre, sin "+"
       const quien = esIg ? `${nom} (IG)` : `${nom} — +${r.phone}`;
-      const pedido = (r.pedido || '').trim();
-      const precioN = parseInt(r.precio, 10) || 0;
-      const precio = precioN ? '$' + String(precioN).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
+      const pi = precioInfo[String(r.phone)] || {};
+      const pedido = (pi.pedido || '').trim();
+      const precioN = pi.precio || 0;
+      const precioStr = precioN ? '$' + String(precioN).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
+      const precio = precioStr && pi.count > 1 ? `${precioStr} · ${pi.count} carteles` : precioStr;
       const marca = r.esFup ? 'FUP' : (r.respondio ? 'respondió' : '');
       const extra = [pedido ? `"${pedido}"` : '', precio, marca].filter(Boolean).join(' · ');
       return `${i + 1}. ${quien}${extra ? ' · ' + extra : ''}`;
@@ -2903,7 +3012,7 @@ async function processCartelPagos(env, { phone = null, force = false } = {}) {
 // una persona (Abril). Al juntar los datos de un diseño (medida+nombre+foto) crea un corte_pedido
 // (estado 'pedido' → cola "Para matriz" de Emma). NO cotiza (el precio sale de la medida real).
 async function corteBotOn(env) { return (await kvGet(env, 'corte_bot_on', '0')) === '1'; }
-const CORTE_LLM_SYSTEM = `Sos parte del equipo de Neon Infinito. Atendés EXCLUSIVAMENTE el SERVICIO DE CORTE de bases acrílicas para ALUMNOS (gente que hizo el curso y arma sus propios carteles). Tu única tarea es TOMAR PEDIDOS DE CORTE de bases acrílicas transparentes.
+const CORTE_LLM_SYSTEM = `Sos parte del equipo de Neon Infinito. Atendés a los ALUMNOS (gente que hizo el curso y arma sus propios carteles) en DOS cosas: (1) tomar PEDIDOS DE CORTE de bases acrílicas transparentes, y (2) venderles CABLE (les pasás el catálogo con video + precios). Cualquier OTRA cosa (dudas de la comunidad/curso, un pago, estado de un envío ya hecho, un reclamo/postventa, spam, algo random) la atiende una persona (frenar=true).
 
 Un pedido de corte necesita, POR CADA DISEÑO:
 - Medida (en cm)
@@ -2916,22 +3025,50 @@ REGLAS:
 - es_corte=true si hay CUALQUIER señal de corte: manda un diseño/imagen, una medida, o dice "acrílicos", "base", "corte", "calado", "sumar un corte", "para el finde", o pregunta si por acá pide/corta acrílicos, etc.
 - Si es_corte=true pero todavía NO confirmó qué diseño quiere (ej: "por acá pido acrílicos?", un saludo suelto, "hola"): intencion_clara=false + un mensaje NATURAL confirmando y pidiéndole el diseño (ej: "Sí! por acá los pedidos de corte. Pasame los datos del diseño: la medida, el nombre y la foto"). NO frenes.
 - Si YA está claro (mandó un diseño/medida o confirmó que quiere cortar) → es_corte=true, intencion_clara=true.
-- frenar=true SOLO si es CLARAMENTE otra cosa que no tiene que ver con pedir un corte (dudas de la comunidad/curso, un pago, un envío ya hecho, un reclamo/postventa, spam, algo random) → lo atiende una persona.
+- frenar=true SOLO si es CLARAMENTE otra cosa que no tiene que ver ni con un corte ni con cable (dudas de la comunidad/curso, un pago, un envío ya hecho, un reclamo/postventa, spam, algo random) → lo atiende una persona. OJO: preguntar por CABLE o querer comprar cable NO es motivo de freno — eso lo manejás vos (ver sección CABLE).
 - Por cada diseño que mandó, extraé nombre, medida (texto tal cual lo dijo) y aclaraciones, y si adjuntó la foto (mirá las imágenes). completo=true SOLO si tiene medida + nombre + foto.
 - MUY IMPORTANTE: si en la conversación NO hay ninguna imagen adjunta, NO digas que "viste las fotos" ni des por hecho ningún diseño → pedile la foto. tiene_foto=true SOLO si REALMENTE ves una imagen. NO inventes diseños ni medidas que el alumno no dijo.
 - Si a un diseño le falta algún dato, pedí SOLO el que falta, natural y corto.
+- DATOS DE ENVÍO: al principio del texto puede venir una línea [DATOS DEL CLIENTE (interno): ...]. Si dice que es cliente NUEVO o que faltan sus datos de envío, pedile UNA sola vez (junto con lo del diseño, no en mensajes aparte) los datos para el envío y la factura: nombre y apellido, DNI, dirección, provincia, código postal y un número de contacto. Si ya está registrado / ya tenemos sus datos, NO se los pidas. Esa línea es interna: NUNCA la menciones ni la repitas al cliente. Cuando el cliente TE PASE esos datos, extraélos en el campo datos_cliente (solo los que efectivamente dio; el resto vacío).
 - El alumno puede mandar VARIOS diseños.
 - NUNCA des precio ni cotices (el precio se calcula después con la medida real del diseñador).
 - Solo cortamos TRANSPARENTE (el negro está pausado). Si pide negro, aclaralo.
 - Estilo: natural, argentino, SIN signos de apertura (¿¡), mensajes cortos, como una persona.
+- PROHIBIDO acusar recibo: NUNCA digas "ya tengo los datos", "vi la foto", "ya me llegó", "perfecto ya lo tengo", "recibido", "anoté todo" ni nada que confirme que recibiste o viste algo (se sobreentiende; decirlo suena a robot). Andá directo a lo que falta o al próximo paso — pero SIEMPRE con tono humano y cálido, NUNCA con órdenes secas (ej: en vez de "pasame la foto del diseño?" a secas, mandá "dale! me tirás una foto del diseño y lo dejamos listo?").
+- TONO (clave): escribí como un vendedor argentino piola por WhatsApp, con calidez y naturalidad. Podés arrancar con "dale", "buenísimo", "genial", "de una" (sin abusar ni repetir siempre el mismo). NUNCA mandes mensajes de una sola palabra, fragmentos cortados ni órdenes secas: que suene una persona real, no un bot dando instrucciones.
 
-Cuando faltan datos, un buen mensaje es: "Me pasarías los datos así de cada diseño por favor: Medida (en cm): / Aclaraciones: / Nombre del diseño: / foto del diseño:".
+FORMATO cuando pedís los datos que faltan (CLAVE): la lista va en UN SOLO mensaje, con cada dato en su PROPIO renglón arrancando con "- " (saltos de línea simples dentro del MISMO mensaje). NUNCA mandes un mensaje por cada dato ni un renglón suelto por dato (queda robótico). En total NO mandes más de 2 mensajes. Ejemplo de UN mensaje bien hecho:
+para el corte necesito de cada diseño:
+- la medida (en cm)
+- el nombre del diseño
+- una foto del diseño
+Si falta un solo dato, pedilo en una frase corta pero NATURAL y con onda, como una persona — NUNCA un fragmento seco tipo "pasame la foto del diseño?" a secas (queda cavernícola). Ejemplos buenos: "dale, me tirás una foto del diseño y lo dejamos armado?" / "buenísimo, me faltaría la foto del diseño nomás, me la pasás?". Si además el cliente es nuevo, sumá sus datos de envío como otros renglones "- " en el MISMO mensaje (no en uno aparte).
+
+DATOS QUE SÍ PODÉS RESPONDER (FAQ del corte) — si el alumno pregunta, contestá con esto y seguí pidiendo lo que falte, NO frenes:
+- HASTA CUÁNDO / cuándo cierra / plazo: el cierre de pedidos es el VIERNES 20hs; lo que llega después entra en la tanda de la semana siguiente. (Igual tomale el pedido, entra en la próxima tanda.)
+- COLOR: solo cortamos acrílico TRANSPARENTE (el negro está pausado por calidad del proveedor).
+- PRECIO: el precio se calcula con la MEDIDA REAL del diseño y se lo pasamos el LUNES junto con el mensaje de cobro. NO des ningún precio ni número ahora, aunque insista.
+- QUÉ NECESITÁS: por cada diseño, medida (cm), nombre y la foto.
+Si pregunta algo que NO está acá y NO es corte ni cable (dudas de la comunidad/curso, un pago, estado de un envío, un reclamo) → frenar=true (lo atiende una persona).
+
+CABLE (lo vendés VOS, NO frenes) — si el alumno pregunta por cable, por precios de cable, o quiere comprar cable: poné enviar_cable=true. El sistema le manda solo un VIDEO + la lista de precios, así que NO escribas vos la lista ni los precios en los mensajes (podés mandar mensajes=[] o a lo sumo una línea corta y natural). Catálogo (para que sepas EXPLICAR, no para copiar el precio en el chat):
+- Rollo de 50mts, estañado, 0.25mm, solo transparente ($47.000): se usa para las CONEXIONES INTERNAS del cartel. Viene estañado, es más finito, queda más prolijo y es más maniobrable.
+- Rollo de 100mts, sin estañar, blanco o negro: 0.35mm ($39.500) y 0.5mm ($43.500): se usan para el cable de SALIDA hasta la fuente de alimentación, o para conexiones internas de carteles más grandes.
+Si te preguntan cuál les conviene o para qué sirve cada uno, explicáselo con eso (una frase, sin repetir toda la lista). Mandá el video+lista UNA sola vez: si en la charla ya se lo pasaste (ves el video de cables en el historial), NO pongas enviar_cable de nuevo; si vuelve a preguntar un detalle puntual, respondé solo con texto. Un alumno puede pedir CORTE Y CABLE en la misma charla: tomá el corte normalmente y además poné enviar_cable=true.
 
 Devolvé SOLO un JSON, sin nada alrededor:
-{"es_corte":bool,"intencion_clara":bool,"frenar":bool,"motivo":"string corto","cortes":[{"nombre":"string","medida":"string","aclaraciones":"string","tiene_foto":bool,"completo":bool}],"mensajes":["..."]}`;
+{"es_corte":bool,"intencion_clara":bool,"enviar_cable":bool,"frenar":bool,"motivo":"string corto","cortes":[{"nombre":"string","medida":"string","aclaraciones":"string","tiene_foto":bool,"completo":bool}],"datos_cliente":{"nombre":"","apellido":"","dni":"","direccion":"","provincia":"","cp":"","telefono_contacto":""},"mensajes":["..."]}`;
 async function corteLlm(env, fullText, imageBlocks) {
   if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'sin ANTHROPIC_API_KEY' };
-  const userContent = (Array.isArray(imageBlocks) && imageBlocks.length) ? [...imageBlocks, { type: 'text', text: fullText }] : fullText;
+  // Verdad dura para el modelo: cuántas fotos REALES van adjuntas en este análisis. El texto del
+  // historial puede tener marcadores [imagen] de mensajes viejos SIN los bytes reales → sin esto el
+  // modelo decía "vi las fotos" cuando no había ninguna. Los [imagen] del historial NO cuentan.
+  const nImg = Array.isArray(imageBlocks) ? imageBlocks.length : 0;
+  const preamble = `IMÁGENES REALES ADJUNTAS EN ESTE ANÁLISIS: ${nImg}.\n` + (nImg === 0
+    ? `No hay NINGUNA foto adjunta. Cualquier marcador [imagen] del historial es de un mensaje VIEJO y NO es de este pedido: NO cuenta como foto, NO digas que viste fotos ni des ningún diseño por hecho, pedile la foto (tiene_foto=false en todos los cortes). Aunque en mensajes anteriores del historial vos (JOACO) hayas dicho que "viste las fotos" o que mandó varios diseños, eso fue un ERROR previo: si acá adjuntas=0, no hay foto, corregí el rumbo y pedila.`
+    : `Esas ${nImg} son las ÚNICAS fotos que tenés; cualquier [imagen] del historial que no esté adjunta acá es vieja y NO cuenta.`) + `\n\n`;
+  const text = preamble + fullText;
+  const userContent = (nImg) ? [...imageBlocks, { type: 'text', text }] : text;
   const payload = { model: 'claude-sonnet-4-5', max_tokens: 1024, system: CORTE_LLM_SYSTEM, messages: [{ role: 'user', content: userContent }] };
   for (let i = 0; i < 2; i++) {
     try {
@@ -2950,6 +3087,26 @@ async function corteSend(env, phone, body) {
   const r = await waSendText(env, phone, body);
   if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte:' + phone + ':' + Date.now()), phone, String(body || '')).run(); } catch (_) {} }
   return r;
+}
+// Catálogo de cables (venta a alumnos). El video vive en R2 y se manda por WhatsApp.
+const CORTE_CABLE_VIDEO_KEY = 'promo/cable-video.mp4';
+const CORTE_CABLE_MSG = 'Mando los cables disponibles:\n\n- Rollo de 50mts estañado 0.25mm, solo transparente: $47.000\n- Rollo de 100mts sin estañar, blanco o negro:\n  - 0.35mm: $39.500\n  - 0.5mm: $43.500';
+// Manda el video de cables + la lista de precios. El caller debe dedupear (no reenviar el video en cada mensaje).
+async function corteSendCableInfo(env, phone) {
+  let okv = false;
+  try {
+    const mediaId = await getPromoMediaId(env, CORTE_CABLE_VIDEO_KEY);
+    if (mediaId) {
+      const r = await waSendVideo(env, phone, mediaId);
+      if (r && r.ok) {
+        okv = true;
+        try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'video', '[video] cables', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-cable-vid:' + phone + ':' + Date.now()), phone, CORTE_CABLE_VIDEO_KEY).run(); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  await new Promise(rs => setTimeout(rs, 800));
+  try { await corteSend(env, phone, CORTE_CABLE_MSG); } catch (_) {}
+  return okv;
 }
 async function processCortePilot(env) {
   try {
@@ -2979,11 +3136,20 @@ async function processCortePilot(env) {
       const phone = c.phone, lastTs = c.last_ts;
       const debMs = (testPhone && phone === testPhone) ? 5000 : PRECOTIZ_DEBOUNCE_MS; // en modo prueba, espera corta (5s)
       if (Date.now() - new Date(lastTs).getTime() < debMs) continue;   // esperar que pare de escribir
-      // Anti-pisón: si un humano (Abril/Gaspar) contestó después del último inbound, no se mete.
-      try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='outbound' AND automated=0 AND msg_type!='status'").bind(phone).first(); if (lh && lh.t) { if (lh.t > lastTs) continue; if (Date.now() - new Date(lastTs).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
+      // Anti-pisón: si un humano (Abril/Gaspar) contestó DESPUÉS del último inbound, no se mete; y si un
+      // humano contestó RECIÉN (hace <5min), le damos gracia. OJO: la gracia mira lh.t (cuándo contestó el
+      // humano), NO lastTs (cuándo escribió el cliente) — si mirara lastTs, un chat con CUALQUIER humano
+      // histórico (ej: el número del dueño, o un alumno viejo) frenaba al bot 5 min tras cada mensaje.
+      try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='outbound' AND automated=0 AND msg_type!='status'").bind(phone).first(); if (lh && lh.t) { if (lh.t > lastTs) continue; if (Date.now() - new Date(lh.t).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
       let conv = null;
       try { conv = await env.DB.prepare("SELECT * FROM corte_conversaciones WHERE phone=?").bind(phone).first(); } catch (_) {}
-      if (conv && conv.estado === 'escalado') continue;                                // ya se lo dejamos a una persona
+      // Handoff manual a Abril: si Gaspar movió este chat a la bandeja de cursos a mano, el bot NO se mete
+      // más (queda en 'handoff_abril'). Y NO tocamos la bandeja privada de Gaspar.
+      if (conv && conv.estado === 'handoff_abril') continue;
+      try { const ci = await env.DB.prepare("SELECT inbox FROM wa_chats_summary WHERE phone=?").bind(phone).first(); if (ci && ci.inbox === 'privado') continue; } catch (_) {}
+      // NOTA: escalado ya NO es permanente. Si el chat estaba escalado pero el cliente vuelve con intención
+      // de corte, el bot retoma (más abajo la rama frenar lo deja escalado de nuevo si sigue off-topic, sin
+      // mandar nada). El anti-pisón de arriba evita pisar a una persona que esté atendiendo en vivo.
       if (conv && conv.last_processed_ts && lastTs <= conv.last_processed_ts) continue; // nada nuevo
       // Claim atómico (evita doble proceso si */1 y */5 pegan juntos).
       try {
@@ -2993,12 +3159,62 @@ async function processCortePilot(env) {
       const ctx = await buildChatContext(env, phone, 40);
       if (!ctx) continue;
       const imgs = await precotizImageBlocks(env, phone, 3, 3); // solo imágenes de las últimas 3h (esta charla)
-      const out = await corteLlm(env, ctx.fullText, imgs);
+      // Estado del cliente: si es nuevo (no está en corte_alumnos) o no tenemos sus datos de envío, el bot
+      // se los pide (nombre/DNI/dirección/etc.). Se le pasa como línea interna al modelo.
+      let infoCliente = '';
+      try {
+        const al = await env.DB.prepare("SELECT nombre, datos_envio FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
+        const nuevo = !al;
+        const faltanEnvio = !al || !String(al.datos_envio || '').trim();
+        infoCliente = '[DATOS DEL CLIENTE (interno): ' + (nuevo ? 'Es cliente NUEVO, no está en la base.' : ('Cliente registrado' + (al.nombre ? ' (' + al.nombre + ')' : '') + '.')) + ' ' + (faltanEnvio ? 'NO tenemos sus datos de envío.' : 'Ya tenemos sus datos de envío.') + ']\n\n';
+      } catch (_) {}
+      const out = await corteLlm(env, infoCliente + ctx.fullText, imgs);
       if (!out.ok) continue;
       const res = out.data || {};
-      // No es corte / otra cosa → dejar a una persona (Abril).
+      // El chat es del servicio de corte → bandeja 'corte' (admin-only de Gaspar). Reclama el chat de
+      // general/cursos/oculto (por si un auto-ruteo de cursos lo movió) pero NO pisa 'privado' ni un
+      // handoff manual (ese ya se filtró arriba con estado 'handoff_abril'). Abril nunca ve 'corte'.
+      try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'corte', ?) ON CONFLICT(phone) DO UPDATE SET inbox='corte', updated_at=excluded.updated_at WHERE wa_chats_summary.inbox NOT IN ('privado','corte')").bind(phone, nowIso).run(); } catch (_) {}
+      // Guardar datos del cliente NUEVO si los pasó (crea/actualiza su ficha en corte_alumnos, así el
+      // lunes/despacho tenemos dirección/DNI). El bot los pide; acá los persistimos apenas los da.
+      try {
+        const dc = res.datos_cliente || {};
+        const nom = String(dc.nombre || '').trim(), ape = String(dc.apellido || '').trim(), dni = String(dc.dni || '').trim();
+        const dir = String(dc.direccion || '').trim(), prov = String(dc.provincia || '').trim(), cp = String(dc.cp || '').trim();
+        const tel = String(dc.telefono_contacto || '').trim();
+        if (dir || dni || tel || (nom && ape)) {
+          const nombreFull = [nom, ape].filter(Boolean).join(' ').trim();
+          const datosEnvio = [nombreFull, dni ? ('DNI ' + dni) : '', dir, prov, cp ? ('CP ' + cp) : '', tel ? ('Tel ' + tel) : ''].filter(Boolean).join(', ');
+          const ex = await env.DB.prepare("SELECT id FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
+          if (ex) {
+            await env.DB.prepare("UPDATE corte_alumnos SET nombre=COALESCE(NULLIF(?,''),nombre), apellido=COALESCE(NULLIF(?,''),apellido), direccion=COALESCE(NULLIF(?,''),direccion), provincia=COALESCE(NULLIF(?,''),provincia), cp=COALESCE(NULLIF(?,''),cp), dni=COALESCE(NULLIF(?,''),dni), datos_envio=COALESCE(NULLIF(?,''),datos_envio), updated_at=? WHERE telefono=?").bind(nombreFull, ape, dir, prov, cp, dni, datosEnvio, nowIso, phone).run();
+          } else {
+            await env.DB.prepare("INSERT INTO corte_alumnos (nombre, apellido, telefono, direccion, provincia, cp, dni, datos_envio, origen, activo, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?, 'nuevo', 1, ?, ?)").bind(nombreFull, ape, phone, dir, prov, cp, dni, datosEnvio, nowIso, nowIso).run();
+          }
+        }
+      } catch (_) {}
+      // CABLE (en scope): si pidió cable, mandarle el video + lista de precios (una sola vez cada 24h).
+      let cableSent = false;
+      if (res.enviar_cable) {
+        let yaCable = false;
+        try { const yc = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone=? AND direction='outbound' AND media_url=? AND ts > datetime('now','-24 hours') LIMIT 1").bind(phone, CORTE_CABLE_VIDEO_KEY).first(); yaCable = !!yc; } catch (_) {}
+        if (!yaCable) { try { await corteSendCableInfo(env, phone); cableSent = true; } catch (_) {} }
+      }
+      // No es corte / otra cosa → se lo dejamos a GASPAR (es su negocio; NO a Abril ni a Joaco). El chat ya
+      // está en la bandeja 'corte'. Si era consulta de cable (en scope), NO escalar.
       if (res.frenar || res.es_corte === false) {
-        try { await env.DB.prepare("UPDATE corte_conversaciones SET estado='escalado', updated_at=? WHERE phone=?").bind(nowIso, phone).run(); } catch (_) {}
+        const est = (cableSent || res.enviar_cable) ? 'cable' : 'escalado';
+        try { await env.DB.prepare("UPDATE corte_conversaciones SET estado=?, updated_at=? WHERE phone=?").bind(est, nowIso, phone).run(); } catch (_) {}
+        // Avisar a Gaspar UNA vez, al entrar en escalado (no en cada mensaje), y marcar no-leído para que suba.
+        if (est === 'escalado' && !(conv && conv.estado === 'escalado')) {
+          try {
+            const al = await env.DB.prepare("SELECT nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
+            const quien = (al && al.nombre) ? (al.nombre + ' (' + phone + ')') : phone;
+            const mot = String(res.motivo || '').trim();
+            await precotizNotifyGaspar(env, 'Servicio de corte: un alumno necesita que lo atiendas vos.\n' + quien + (mot ? ('\nMotivo: ' + mot) : '') + '\nlo tenes en tu bandeja de corte');
+          } catch (_) {}
+          try { await precotizMarcarNoLeido(env, phone); } catch (_) {}
+        }
         continue;
       }
       // Intención no clara → preguntar explícito (una sola vez).
@@ -4574,12 +4790,21 @@ Respondé SOLO el JSON, sin texto adicional.`;
 // Junta el contexto completo de un chat (text+transcripciones+adjuntos) para
 // pasar a Claude. Limita a últimos N msgs para no explotar el context window.
 async function buildChatContext(env, phone, maxMsgs = 100) {
+  // Traemos los maxMsgs mensajes MÁS RECIENTES (subquery DESC) y después los ordenamos
+  // cronológicamente (ASC) para mostrarlos. Antes era ORDER BY ts ASC LIMIT, que devolvía
+  // los más VIEJOS: para un chat largo (ej: un alumno o el dueño, con miles de mensajes) el
+  // bot veía historial de hace meses en vez de la charla actual y alucinaba. Excluimos
+  // 'status' (recibos de entrega, sin contenido) que si no coparían la ventana reciente.
   const rs = await env.DB.prepare(
-    `SELECT ts, direction, msg_type, body, media_url, context_id,
-            (SELECT p.body FROM wa_messages p WHERE p.wamid = wa_messages.context_id AND wa_messages.context_id != '' LIMIT 1) AS quoted_body
-     FROM wa_messages
-     WHERE phone = ? AND msg_type != 'reaction'
-     ORDER BY ts ASC LIMIT ?`
+    `SELECT t.ts, t.direction, t.msg_type, t.body, t.media_url, t.context_id,
+            (SELECT p.body FROM wa_messages p WHERE p.wamid = t.context_id AND t.context_id != '' LIMIT 1) AS quoted_body
+     FROM (
+       SELECT ts, direction, msg_type, body, media_url, context_id
+       FROM wa_messages
+       WHERE phone = ? AND msg_type NOT IN ('reaction','status')
+       ORDER BY ts DESC LIMIT ?
+     ) t
+     ORDER BY t.ts ASC`
   ).bind(phone, maxMsgs).all();
   const msgs = rs.results || [];
   if (!msgs.length) return null;
@@ -5377,9 +5602,16 @@ const IG_MANYCHAT_WELCOME = 'Buenas! Te mandamos mensajito para darte la bienven
 // que el welcome; lo reponemos cuando el saliente viene justo después de ese postback.
 const IG_MANYCHAT_REGALO = 'Genial que quieras arrancar 🤜\nAcá te dejo el enlace para que veas nuestra formación gratuita de 2 clases! Para aprender de 0 TODO sobre el Neon LED 🇦🇷\n[Botón: Formación GRATUITA]';
 
+// Cuenta de IG de Neon Infinito: la ÚNICA que debe entrar al CRM.
+const IG_ACCOUNT_ID = '17841406783093240';
+
 async function processIgWebhook(env, body) {
   if (body?.object !== 'instagram') return;
   for (const entry of (body?.entry || [])) {
+    // Cortafuego por cuenta: solo procesamos la cuenta de IG de Neon Infinito. Otras cuentas
+    // (ej. la personal de Bruno) quedaron suscriptas a la misma app de Meta y colaban sus DMs
+    // privados al CRM del negocio. Si el entry trae id y no es la cuenta del negocio, lo ignoramos.
+    if (entry?.id && String(entry.id) !== IG_ACCOUNT_ID) continue;
     for (const m of (entry?.messaging || [])) {
       try {
         // POSTBACK = el lead tocó un botón de ManyChat (ej: "Quiero el regalo 🎁"). Instagram
@@ -5520,6 +5752,11 @@ async function processIgWebhook(env, body) {
               await env.DB.prepare("UPDATE wa_chats_summary SET inbox='general' WHERE phone = ? AND (inbox IS NULL OR inbox = '')").bind(custId).run();
             }
           } catch (_) {}
+          // Reparto de leads de CARTELES de IG a Facundo (misma cuota/prob que WhatsApp).
+          // Gate POSITIVO por vert==='carteles': deja fuera cursos (vert='cursos') y corpóreo
+          // (ads de corpóreo mapean vert='corporeo'; IG no setea corporeoTag -> este gate es la
+          // única barrera contra corpóreo). custId (IGSID) es la key wa_chats_summary.phone.
+          if (vert === 'carteles') { try { await maybeRepartirANadia(env, custId); } catch (_) {} }
           // Atribución de anuncio (igual que CTWA en WhatsApp): si el cliente vino de un anuncio
           // (referral con ad_id) o respondió al post de un aviso (ig_post), lo guardamos en
           // wa_ad_attributions -> el banner del chat aparece solo (mismo endpoint que WhatsApp).
@@ -5957,7 +6194,7 @@ async function sendEventoGroupLink(env, phone) {
   // Oculta AUNQUE esté en 'cursos' (ej: lead del minicurso que además toca el walink), PERO NO si es
   // un lead genuinamente enganchado: que ya escribió algo real aparte del walink, o que un humano
   // (automated=0) ya le respondió → esos se dejan como están.
-  try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox <> 'oculto' AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = wa_chats_summary.phone AND m.direction = 'inbound' AND m.msg_type <> 'status' AND m.body NOT LIKE '%evento del 4 y 6%') AND NOT EXISTS (SELECT 1 FROM wa_messages h WHERE h.phone = wa_chats_summary.phone AND h.direction = 'outbound' AND h.automated = 0 AND h.msg_type <> 'status')").bind(phone, nowIso).run(); } catch (_) {}
+  try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox <> 'oculto' AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = wa_chats_summary.phone AND m.direction = 'inbound' AND m.msg_type <> 'status' AND m.body NOT LIKE '%evento del 8 y 10%') AND NOT EXISTS (SELECT 1 FROM wa_messages h WHERE h.phone = wa_chats_summary.phone AND h.direction = 'outbound' AND h.automated = 0 AND h.msg_type <> 'status')").bind(phone, nowIso).run(); } catch (_) {}
   // Marca/crea el lead como 'link_enviado' (crea la fila si vino PURO por walink sin pasar por
   // el form) → el opener del Camino 2 lo saltea (dedup). No pisa a los ya 'revealed'.
   try { await env.DB.prepare("INSERT INTO lanzamiento_landing (phone, nombre, stage, registered_at, source, updated_at, created_at) VALUES (?, '', 'link_enviado', ?, 'walink', ?, ?) ON CONFLICT(phone) DO UPDATE SET stage = 'link_enviado', updated_at = excluded.updated_at WHERE lanzamiento_landing.stage != 'revealed'").bind(phone, nowIso, nowIso, nowIso).run(); } catch (_) {}
@@ -5973,6 +6210,51 @@ async function sendEventoGroupLink(env, phone) {
   try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'evento_link'").bind(sentTs, phone).run(); } catch (_) {}
 }
 
+// Auto-respuesta a los leads de CORPÓREO: cuando mandan el mensaje canned del ad
+// ("Hola! Quiero cotizar un cartel corporeo") les pedimos los 3 datos (foto, medidas,
+// int/ext) — lo mismo que releva el bot de neón — pero como texto fijo. El corpóreo se
+// atiende A MANO hasta tener un bot propio; esto solo evita que queden sin respuesta y
+// ya arranca a juntar datos. UNA sola vez por contacto (dedup wa_autoreply_log
+// kind='corporeo_ask'). Gate kv corporeo_ask_on (default ON).
+async function corporeoAskOn(env) { return (await kvGet(env, 'corporeo_ask_on', '1')) === '1'; }
+const CORPOREO_ASK_MSGS = [
+  'Buenísimo, para pasarte el precio necesito 3 cosas',
+  'Una foto o referencia de lo que querés (diseño, logo o texto)',
+  'Las medidas: ancho y alto en cm',
+  'Y si es para interior o exterior'
+];
+async function corporeoAskOnInbound(env, phone, msgBody) {
+  if (!phone || !(await corporeoAskOn(env))) return;
+  if (!_normTxt(msgBody).includes('quiero cotizar un cartel corporeo')) return;
+  let reserva;
+  try {
+    reserva = await env.DB.prepare(
+      "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'corporeo_ask', '', 'sending', '', '')"
+    ).bind(phone).run();
+  } catch (_) { return; }
+  if (!reserva?.meta?.changes) return; // ya se le mandó → no duplicar
+  // Saludo personalizado según el vendedor asignado (el reparto corrió ANTES en el webhook): Facu si
+  // el chat quedó asignado a él, Joaco si no (default). Pedido de Gaspar: que no arranque de golpe.
+  let _asg = '';
+  try { const s = await env.DB.prepare("SELECT assigned_to FROM wa_chats_summary WHERE phone = ?").bind(phone).first(); _asg = String((s && s.assigned_to) || '').toLowerCase(); } catch (_) {}
+  const _saludo = _asg === 'facundo' ? 'Holaa! Acá Facu de Neon Infinito' : 'Holaa! Acá Joaco de Neon Infinito';
+  const msgs = [_saludo, ...CORPOREO_ASK_MSGS];
+  let anyFail = false;
+  for (const m of msgs) {
+    const res = await waSendText(env, phone, m);
+    if (!res || !res.ok) { anyFail = true; break; }
+    const sentTs = new Date().toISOString();
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(sentTs, res.id || ('corpask-' + phone + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7)), phone, m).run(); } catch (_) {}
+    await new Promise(r => setTimeout(r, 800));
+  }
+  if (anyFail) {
+    // liberar la reserva para reintentar en el próximo inbound
+    try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'corporeo_ask'").bind(phone).run(); } catch (_) {}
+    return;
+  }
+  try { await env.DB.prepare("UPDATE wa_autoreply_log SET status='sent', sent_at=? WHERE phone=? AND kind='corporeo_ask'").bind(new Date().toISOString(), phone).run(); } catch (_) {}
+}
+
 // Maneja los inbounds del evento:
 //  · Tocó el walink (o es un lead ya registrado que responde al opener del Camino 2) y
 //    todavía NO recibió el link → se lo mandamos (sendEventoGroupLink) y queda OCULTO.
@@ -5982,7 +6264,7 @@ async function sendEventoGroupLink(env, phone) {
 async function lanzamientoLandingOnInbound(env, phone, msgBody) {
   if (!phone || !(await lanzamientoLandingOn(env))) return;
   try {
-    const isWalink = _normTxt(msgBody).includes('registre al evento del 4 y 6');
+    const isWalink = _normTxt(msgBody).includes('registre al evento del 8 y 10');
     const row = await env.DB.prepare("SELECT stage FROM lanzamiento_landing WHERE phone = ?").bind(phone).first();
     const stage = row?.stage || '';
     if (stage === 'link_enviado') {
@@ -6127,6 +6409,343 @@ async function processLanzAgosto(env) {
     try { await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'evento_record', ?, 'sent', '', '')").bind(phone, nowIso).run(); } catch (_) {}
     await new Promise(rs => setTimeout(rs, 300));
   }
+}
+
+// ===== Difusión "Seminario presencial" (evento del sábado 29/08) =====
+// A pedido de Gaspar (25-ago): manda una plantilla (de parte de Bruno) a los ~324
+// registrados al seminario presencial invitándolos a reservar el cupo. Goteo por el
+// cron */1 en horario AR (9-22); OCULTA el chat hasta que respondan. Al RESPONDER,
+// seminarioOnInbound los manda a la bandeja PRIVADA (solo Gaspar; Abril NO la ve) y
+// les pone la etiqueta 'seminario'. Dos plantillas: con nombre (cargaron una sola
+// palabra) y genérica (si dejaron apellido). Kill-switch kv 'seminario_on' (def 0);
+// se apaga solo al vaciar 'pending'. Gate: no manda hasta que Meta apruebe AMBAS.
+const SEMINARIO_TPL_NOMBRE = 'seminario_cupo_nombre';   // con {{1}}=nombre
+const SEMINARIO_TPL_GRL = 'seminario_cupo';             // genérica (sin variable)
+const SEMINARIO_LABEL_NAME = 'seminario';
+const SEMINARIO_LABEL_COLOR = '#0ea5e9';
+
+// Al responder un contacto que recibió la difusión y quedó OCULTO: lo revela a la
+// bandeja PRIVADA (admin-only) y lo etiqueta 'seminario'. Kind propio para no cruzarse.
+async function seminarioOnInbound(env, phone) {
+  if (!phone) return;
+  try {
+    const got = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind = 'seminario' AND status = 'sent' LIMIT 1").bind(phone).first();
+    if (!got) return;
+    const nowIso = new Date().toISOString();
+    // Revela a 'privado' SOLO si estaba oculto (no pisa un chat movido a mano a otra bandeja).
+    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'privado', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'privado', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(phone, nowIso).run();
+    // Etiqueta 'seminario' a todo el que responde (aunque ya no esté oculto).
+    const lid = await ensureLabelId(env, SEMINARIO_LABEL_NAME, SEMINARIO_LABEL_COLOR);
+    if (lid) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, lid, nowIso).run();
+  } catch (_) {}
+}
+
+async function processEventoPres(env) {
+  if ((await kvGet(env, 'seminario_on', '0')) !== '1') return;
+  if ((await kvGet(env, 'wa_send_paused', '0')) === '1') return;
+  if (await isWaBillingBlocked(env)) return;
+  const hAR = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours();
+  if (hAR < 9 || hAR >= 22) return;
+  // Gate: no mandar hasta que Meta apruebe AMBAS plantillas (evita quemar filas 'failed' sin reintento).
+  let ok1 = false, ok2 = false;
+  try { const a = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(SEMINARIO_TPL_NOMBRE).first(); ok1 = !!(a && String(a.status).toUpperCase() === 'APPROVED'); } catch (_) {}
+  try { const b = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(SEMINARIO_TPL_GRL).first(); ok2 = !!(b && String(b.status).toUpperCase() === 'APPROVED'); } catch (_) {}
+  if (!ok1 || !ok2) return;
+  const perTick = Math.max(1, Math.min(20, parseInt(await kvGet(env, 'seminario_pertick', '6'), 10) || 6));
+  let rows;
+  try { rows = (await env.DB.prepare("SELECT phone, nombre FROM evento_seminario WHERE status = 'pending' LIMIT ?").bind(perTick).all()).results || []; } catch (_) { return; }
+  if (!rows.length) { try { await kvSet(env, 'seminario_on', '0'); } catch (_) {} return; }   // terminó → se apaga solo
+  for (const r of rows) {
+    const phone = r.phone;
+    let rz;
+    try { rz = await env.DB.prepare("UPDATE evento_seminario SET status = 'sending' WHERE phone = ? AND status = 'pending'").bind(phone).run(); } catch (_) { continue; }
+    if (!rz?.meta?.changes) continue;   // ya lo tomó otro tick
+    const nombre = String(r.nombre || '').trim();
+    const tpl = nombre ? SEMINARIO_TPL_NOMBRE : SEMINARIO_TPL_GRL;
+    const res = await waSendTemplate(env, phone, tpl, 'es_AR', nombre ? [nombre] : []);
+    const nowIso = new Date().toISOString();
+    if (!res || !res.ok) {
+      try { await env.DB.prepare("UPDATE evento_seminario SET status = 'failed', sent_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+      try { await logWaEvent(env, { to: phone, kind: 'seminario', ref: '', ok: false, error: res?.error }); } catch (_) {}
+      continue;
+    }
+    try { await env.DB.prepare("UPDATE evento_seminario SET status = 'sent', sent_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)").bind(nowIso, res.id || ('seminario-' + phone + '-' + Date.now()), phone, '[plantilla: ' + tpl + ']').run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at").bind(phone, nowIso).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'seminario', ?, 'sent', '', '')").bind(phone, nowIso).run(); } catch (_) {}
+    await new Promise(rs => setTimeout(rs, 300));
+  }
+}
+
+// ===== Difusión "MiniSupernova" — alumnos que YA pagaron el curso (Comunidad Al Infinito) =====
+// A pedido de Gaspar (2-sep): manda la plantilla minisupernova_comunidad a los ~733 alumnos del
+// CSV de la comunidad (tabla minisupernova). Goteo por el cron */1 en horario AR (9-21) con TOPE
+// DIARIO EXACTO de 50 (contador de enviados-hoy, no alcanza el perTick). Etiqueta dinámica
+// "Lead MiniSupernova #<grupo>" (el grupo viene del CSV, #1-#10). OCULTA el chat hasta que
+// respondan, PERO con GUARDIA anti-pisar: NO oculta a quien ya tiene un chat vivo (bandeja
+// especial o inbound reciente), para no tapar una conversación en curso. Al RESPONDER,
+// miniSupernovaOnInbound lo revela a la bandeja de Abril ('cursos'). Kill-switch PROPIO kv
+// 'minisupernova_on' (def 0) — NO usa wa_send_paused para frenar solo esta campaña. Gate: no
+// manda hasta que Meta apruebe la plantilla. Reporte diario a Gaspar+Bruno (maybeReporteMiniSupernova).
+const MINISUPER_TPL = 'minisupernova_comunidad';          // con {{1}}=nombre (los ~340 con nombre)
+const MINISUPER_TPL_GRL = 'minisupernova_comunidad_grl';  // genérica sin variable (los ~391 sin nombre en el CSV)
+const MINISUPER_CAP_DIARIO = 35;        // tope diario POR DEFECTO (AR); override en vivo por kv 'minisupernova_cap'. Gaspar lo movió 50→25→35 (2-sep)
+const MINISUPER_LABEL_COLOR = '#ec4899';
+const MINISUPER_LIVE_DAYS = 30;         // "chat vivo" = inbound en los últimos N días → NO ocultar
+
+// Al RESPONDER un alumno que recibió el mensaje y quedó OCULTO: marca la respuesta (para el
+// reporte) y lo revela a la bandeja de Abril ('cursos'). Kind propio 'minisupernova'. Solo mueve
+// 'oculto'→'cursos' (candado WHERE inbox='oculto'), así no pisa un chat movido a mano ni uno vivo
+// que dejamos sin ocultar. Se llama en el webhook inbound.
+async function miniSupernovaOnInbound(env, phone) {
+  if (!phone) return;
+  try {
+    const got = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind = 'minisupernova' AND status = 'sent' LIMIT 1").bind(phone).first();
+    if (!got) return;
+    const nowIso = new Date().toISOString();
+    try { await env.DB.prepare("UPDATE minisupernova SET replied_at = ? WHERE phone = ? AND replied_at IS NULL").bind(nowIso, phone).run(); } catch (_) {}
+    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(phone, nowIso).run();
+  } catch (_) {}
+}
+
+async function processMiniSupernova(env) {
+  if ((await kvGet(env, 'minisupernova_on', '0')) !== '1') return;
+  if ((await kvGet(env, 'wa_send_paused', '0')) === '1') return;
+  if (await isWaBillingBlocked(env)) return;
+  const nowMs = Date.now();
+  const hAR = new Date(nowMs - 3 * 3600 * 1000).getUTCHours();
+  if (hAR < 9 || hAR >= 21) return; // horario hábil AR 9-21
+  // Gate: no mandar hasta que Meta apruebe AMBAS plantillas (con nombre + genérica), así no
+  // quemamos filas 'failed' sin reintento contra una plantilla pending.
+  let okN = false, okG = false;
+  try { const a = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(MINISUPER_TPL).first(); okN = !!(a && String(a.status).toUpperCase() === 'APPROVED'); } catch (_) {}
+  try { const b = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(MINISUPER_TPL_GRL).first(); okG = !!(b && String(b.status).toUpperCase() === 'APPROVED'); } catch (_) {}
+  if (!okN || !okG) return;
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS minisupernova (phone TEXT PRIMARY KEY, nombre TEXT, grupo TEXT, status TEXT DEFAULT 'pending', sent_at TEXT, claimed_at TEXT, replied_at TEXT)").run(); } catch (_) {}
+  // OJO: NO recuperar filas colgadas en 'sending' (revirtiéndolas a 'pending'). Si el isolate muere
+  // ENTRE el envío OK y el UPDATE a 'sent', la fila queda 'sending' con el mensaje YA entregado; re-
+  // encolarla la reenviaría (doble envío a un número bajo restricción de Meta). Igual que el molde
+  // processLanzAgosto: una fila colgada queda skippeada (el SELECT solo toma 'pending'), nunca se
+  // reenvía. El costo (1 contacto que quizá no reciba, por un crash raro) es preferible a duplicar.
+  // TOPE DIARIO EXACTO: cuántos mandé HOY (AR). Si ya llegué a 50 → corto (la única defensa real,
+  // no hay cap global del número).
+  let sentToday = 0;
+  try { const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status = 'sent' AND sent_at >= " + REPORTE_DIA_DESDE).first(); sentToday = (c && c.n) || 0; } catch (_) { return; }
+  const capDiario = Math.max(1, Math.min(200, parseInt(await kvGet(env, 'minisupernova_cap', String(MINISUPER_CAP_DIARIO)), 10) || MINISUPER_CAP_DIARIO));
+  if (sentToday >= capDiario) return;
+  const perTick = Math.max(1, Math.min(10, parseInt(await kvGet(env, 'minisupernova_pertick', '3'), 10) || 3));
+  const room = Math.min(perTick, capDiario - sentToday);
+  let rows;
+  // Orden de envío: de los alumnos MÁS VIEJOS a los MÁS NUEVOS (pedido de Gaspar). El grupo del CSV
+  // es la cohorte: #1 = comunidad más vieja, #10 = más nueva. Ordenamos por grupo ASC (numérico) y,
+  // dentro del grupo, por rowid (orden del CSV). Así drena el #1 completo, después el #2, etc.
+  try { rows = (await env.DB.prepare("SELECT phone, nombre, grupo FROM minisupernova WHERE status = 'pending' ORDER BY CAST(grupo AS INTEGER) ASC, rowid ASC LIMIT ?").bind(room).all()).results || []; } catch (_) { return; }
+  if (!rows.length) { try { await kvSet(env, 'minisupernova_on', '0'); } catch (_) {} return; } // terminó → se apaga solo
+  const liveCutoff = new Date(nowMs - MINISUPER_LIVE_DAYS * 24 * 3600 * 1000).toISOString();
+  for (const r of rows) {
+    const phone = r.phone;
+    let rz;
+    try { rz = await env.DB.prepare("UPDATE minisupernova SET status = 'sending', claimed_at = ? WHERE phone = ? AND status = 'pending'").bind(new Date().toISOString(), phone).run(); } catch (_) { continue; }
+    if (!rz?.meta?.changes) continue; // ya lo tomó otro tick (evita doble envío entre */1 y */5)
+    const nombre = String(r.nombre || '').trim();
+    const tpl = nombre ? MINISUPER_TPL : MINISUPER_TPL_GRL;   // sin nombre → genérica natural
+    const res = await waSendTemplate(env, phone, tpl, 'es_AR', nombre ? [nombre] : []);
+    const nowIso = new Date().toISOString();
+    if (!res || !res.ok) {
+      // REVERT-ON-FAIL: vuelve a 'pending' (reintentable), NO 'failed'. No cuenta para el tope.
+      try { await env.DB.prepare("UPDATE minisupernova SET status = 'pending' WHERE phone = ? AND status = 'sending'").bind(phone).run(); } catch (_) {}
+      try { await logWaEvent(env, { to: phone, kind: 'minisupernova', ref: '', ok: false, error: res?.error }); } catch (_) {}
+      continue;
+    }
+    try { await env.DB.prepare("UPDATE minisupernova SET status = 'sent', sent_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)").bind(nowIso, res.id || ('minisuper-' + phone + '-' + Date.now()), phone, '[plantilla: ' + tpl + ']').run(); } catch (_) {}
+    // Etiqueta SIEMPRE (esté vivo o no): "Lead MiniSupernova #<grupo del CSV>".
+    try {
+      const grupo = String(r.grupo || '').replace(/\D/g, '') || 's-g';
+      const labelId = await ensureLabelId(env, 'Lead MiniSupernova #' + grupo, MINISUPER_LABEL_COLOR);
+      if (labelId) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, labelId, nowIso).run();
+    } catch (_) {}
+    // GUARDIA anti-pisar (pedido por Gaspar): solo OCULTA si NO tiene chat vivo. "Vivo" = bandeja
+    // especial/activa (cursos/privado/precotiz/corte) o inbound reciente. Si está vivo lo dejamos
+    // donde está (visible) para no tapar una conversación en curso.
+    let isLive = false;
+    try {
+      const s = await env.DB.prepare("SELECT inbox FROM wa_chats_summary WHERE phone = ?").bind(phone).first();
+      const inbox = s && s.inbox ? String(s.inbox) : '';
+      if (['cursos', 'privado', 'precotiz', 'corte'].includes(inbox)) isLive = true;
+      if (!isLive) {
+        const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1").bind(phone, liveCutoff).first();
+        if (inb) isLive = true;
+      }
+    } catch (_) {}
+    if (!isLive) {
+      try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at").bind(phone, nowIso).run(); } catch (_) {}
+    }
+    // Registro para el reveal-on-reply (dedup). Si está vivo/ya en cursos, el reveal es no-op por el candado.
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'minisupernova', ?, 'sent', '', '')").bind(phone, nowIso).run(); } catch (_) {}
+    await new Promise(rs => setTimeout(rs, 300));
+  }
+}
+
+// Reporte diario de la campaña MiniSupernova a Gaspar + Bruno (21h AR). Métricas de la tabla
+// minisupernova. Plantilla reporte_minisupernova (fallback texto libre). Dedup PROPIO kv
+// 'reporte_minisupernova_sent'. Solo reporta mientras la campaña tiene actividad.
+async function maybeReporteMiniSupernova(env) {
+  try {
+    const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    if ((await kvGet(env, 'reporte_minisupernova_sent', '')) === fechaAR) return; // ya se entregó hoy
+    let hoy = 0, total = 0, pend = 0, resp = 0;
+    try { const a = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status = 'sent' AND sent_at >= " + REPORTE_DIA_DESDE).first(); hoy = (a && a.n) || 0; } catch (_) {}
+    try { const b = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status = 'sent'").first(); total = (b && b.n) || 0; } catch (_) {}
+    try { const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status = 'pending'").first(); pend = (c && c.n) || 0; } catch (_) {}
+    try { const d = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE replied_at IS NOT NULL").first(); resp = (d && d.n) || 0; } catch (_) {}
+    if (total === 0) return;                    // todavía no arrancó → nada que reportar
+    if (pend === 0 && hoy === 0) return;        // ya terminó y hoy no salió nada → dejar de reportar
+    const fechaDisplay = fechaAR.split('-').reverse().join('/');
+    const params = [fechaDisplay, String(hoy), String(total), String(resp), String(pend)];
+    const texto = 'MiniSupernova ' + fechaDisplay + '\nEnviados hoy: ' + hoy + '\nTotal enviados: ' + total + '\nRespondieron: ' + resp + '\nPendientes: ' + pend;
+    let anyOk = false;
+    for (const ph of REPORTE_DIARIO_PHONES) {
+      let r = null;
+      try { r = await waSendTemplate(env, ph, 'reporte_minisupernova', 'es_AR', params); } catch (_) {}
+      if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} } // fallback: solo llega si la ventana de 24h está abierta
+      if (r && r.ok) anyOk = true;
+    }
+    if (anyOk) await kvSet(env, 'reporte_minisupernova_sent', fechaAR);
+  } catch (_) {}
+}
+
+// ===== AVISO DE ARRANQUE DEL EQUIPO (a Gaspar) =====
+// A pedido de Gaspar (2-sep): avisar por WhatsApp cuando cada vendedor/diseñador arranca a
+// trabajar en el CRM, y a las 9 AR mandar un resumen de quién arrancó y quién todavía no.
+// Señal = ACTIVIDAD real: cada request autenticado estampa user_activity.last_active (throttled
+// 5 min, solo para los vigilados). El login solo no alcanza (quedan logueados). El ping en tiempo
+// real va por texto libre (llega si la ventana de Gaspar está abierta); el resumen de las 9 va por
+// plantilla aviso_arranque_equipo (+ fallback texto) para que llegue seguro. Kill-switch kv
+// 'aviso_arranque_on' (def 1). Corre en el cron */5.
+// Normaliza el nombre de sesión a un id canónico del vigilado (o null si no se vigila, incl. Gaspar).
+function canonWorker(name) {
+  const s = String(name || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (s.includes('joaqu') || s === 'joaco') return 'joaco';
+  if (s.includes('facu')) return 'facu';
+  if (s.includes('abril') || s === 'cursos') return 'abril';
+  if (s.includes('emma') || s.includes('emmanuel') || s.includes('disena')) return 'emma';
+  return null;
+}
+const AVISO_WORKERS = [
+  { id: 'joaco', nombre: 'Joaco' },
+  { id: 'facu', nombre: 'Facu' },
+  { id: 'abril', nombre: 'Abril' },
+  { id: 'emma', nombre: 'Emma' },
+];
+function _arHHMM(iso) {
+  try { const d = new Date(new Date(iso).getTime() - 3 * 3600 * 1000); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); } catch (_) { return ''; }
+}
+async function maybeAvisoArranque(env) {
+  try {
+    if ((await kvGet(env, 'aviso_arranque_on', '1')) !== '1') return;
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS user_activity (user TEXT PRIMARY KEY, last_active TEXT)").run(); } catch (_) {}
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS user_activity_log (user TEXT, ts TEXT)").run(); } catch (_) {}
+    try { await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_ual_user_ts ON user_activity_log (user, ts)").run(); } catch (_) {}
+    const nowMs = Date.now();
+    const arAR = new Date(nowMs - 3 * 3600 * 1000);
+    const hAR = arAR.getUTCHours();
+    const fechaAR = arAR.toISOString().slice(0, 10);
+    const todayStartIso = fechaAR + 'T03:00:00.000Z';  // 00:00 AR expresado en UTC
+    const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+    // Estado de cada vigilado
+    const arrancaron = [], faltan = [];
+    for (const w of AVISO_WORKERS) {
+      let la = null;
+      try { const r = await env.DB.prepare("SELECT last_active FROM user_activity WHERE user = ?").bind(w.id).first(); la = r && r.last_active; } catch (_) {}
+      const arrancoHoy = !!(la && la >= todayStartIso);
+      if (arrancoHoy) {
+        arrancaron.push({ nombre: w.nombre, hhmm: _arHHMM(la) });
+        // Ping en tiempo real (una vez por día, en horario razonable 6-22 AR).
+        if (hAR >= 6 && hAR < 22 && (await kvGet(env, 'arranque_ping_' + w.id, '')) !== fechaAR) {
+          try {
+            const r = await waSendText(env, gaspar, w.nombre + ' arrancó a trabajar (' + _arHHMM(la) + ')');
+            if (r && r.ok) await kvSet(env, 'arranque_ping_' + w.id, fechaAR);
+          } catch (_) {}
+        }
+      } else {
+        faltan.push(w.nombre);
+      }
+    }
+    // Resumen de las 9 AR (una vez por día). Plantilla + fallback texto libre.
+    if (hAR >= 9 && (await kvGet(env, 'arranque_resumen_sent', '')) !== fechaAR) {
+      const fechaDisplay = fechaAR.split('-').reverse().join('/');
+      const arrStr = arrancaron.length ? arrancaron.map(a => a.nombre + ' (' + a.hhmm + ')').join(', ') : 'nadie todavía';
+      const faltanStr = faltan.length ? faltan.join(', ') : 'ninguno, arrancaron todos';
+      const texto = 'Equipo hoy ' + fechaDisplay + '\nYa arrancaron: ' + arrStr + '\nTodavía no arrancaron: ' + faltanStr;
+      let ok = false;
+      try { const r = await waSendTemplate(env, gaspar, 'aviso_arranque_equipo', 'es_AR', [fechaDisplay, arrStr, faltanStr]); ok = !!(r && r.ok); } catch (_) {}
+      if (!ok) { try { const r = await waSendText(env, gaspar, texto); ok = !!(r && r.ok); } catch (_) {} }
+      if (ok) await kvSet(env, 'arranque_resumen_sent', fechaAR);
+    }
+  } catch (_) {}
+}
+
+// ===== Horas trabajadas del equipo (a pedido de Gaspar, 4-sep) =====
+// Del historial user_activity_log (una marca cada ≤5 min de actividad real en el CRM) calcula,
+// por cada vigilado y para el día AR: hora de arranque, hora del último movimiento, duración
+// (arranque→fin) y las PAUSAS de +1h (tramos sin tocar el CRM). Se manda por WhatsApp al cierre
+// del día (21 AR) con la plantilla reporte_horas_equipo + fallback a texto libre. Dedup por día.
+function _fmtDur(mins) {
+  if (mins < 0) mins = 0;
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return h + 'h' + (m ? String(m).padStart(2, '0') : '');
+}
+async function buildHorasEquipo(env) {
+  const out = [];
+  for (const w of AVISO_WORKERS) {
+    let rows = [];
+    try {
+      rows = (await env.DB.prepare(
+        `SELECT ts FROM user_activity_log WHERE user = ? AND ts >= ${REPORTE_DIA_DESDE} AND ts < ${REPORTE_DIA_HASTA} ORDER BY ts`
+      ).bind(w.id).all()).results || [];
+    } catch (_) {}
+    if (!rows.length) { out.push({ nombre: w.nombre, trabajo: false }); continue; }
+    const first = rows[0].ts, last = rows[rows.length - 1].ts;
+    const mins = Math.round((new Date(last) - new Date(first)) / 60000);
+    const gaps = [];
+    for (let i = 1; i < rows.length; i++) {
+      const d = Math.round((new Date(rows[i].ts) - new Date(rows[i - 1].ts)) / 60000);
+      if (d > 60) gaps.push({ desde: _arHHMM(rows[i - 1].ts), hasta: _arHHMM(rows[i].ts), min: d });
+    }
+    const gapMin = gaps.reduce((s, g) => s + g.min, 0);
+    out.push({ nombre: w.nombre, trabajo: true, arranque: _arHHMM(first), fin: _arHHMM(last), mins, netMins: Math.max(0, mins - gapMin), gaps });
+  }
+  return out;
+}
+function formatLineaHoras(e) {
+  if (!e.trabajo) return e.nombre + ': no laburó en el CRM';
+  let s = e.nombre + ': ' + e.arranque + '–' + e.fin + ' · ' + _fmtDur(e.mins);
+  if (e.gaps.length) {
+    const gs = e.gaps.map(g => g.desde + '–' + g.hasta).join(', ');
+    s += ' · ' + e.gaps.length + (e.gaps.length === 1 ? ' pausa' : ' pausas') + ' +1h (' + gs + ')';
+  }
+  return s;
+}
+async function maybeReporteHoras(env) {
+  try {
+    if ((await kvGet(env, 'reporte_horas_on', '1')) !== '1') return;
+    const arAR = new Date(Date.now() - 3 * 3600 * 1000);
+    if (arAR.getUTCHours() < 21) return;                       // recién al cierre del día (21 AR)
+    const fechaAR = arAR.toISOString().slice(0, 10);
+    if ((await kvGet(env, 'reporte_horas_sent', '')) === fechaAR) return;
+    const eq = await buildHorasEquipo(env);
+    const fechaDisplay = fechaAR.split('-').reverse().join('/');
+    const lineas = eq.map(formatLineaHoras);
+    const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+    // Plantilla reporte_horas_equipo: {{1}}=fecha, {{2..5}}=una línea por vigilado (Joaco/Facu/Abril/Emma).
+    const params = [fechaDisplay, ...lineas].map(String);
+    const texto = '⏱️ Horas del equipo ' + fechaDisplay + '\n\n' + lineas.join('\n') + '\n\nUna "pausa +1h" = 1h sin tocar el CRM.';
+    let ok = false;
+    try { const r = await waSendTemplate(env, gaspar, 'reporte_horas_equipo', 'es_AR', params); ok = !!(r && r.ok); } catch (_) {}
+    if (!ok) { try { const r = await waSendText(env, gaspar, texto); ok = !!(r && r.ok); } catch (_) {} }
+    if (ok) await kvSet(env, 'reporte_horas_sent', fechaAR);
+  } catch (_) {}
 }
 
 // ============================================================================
@@ -7845,6 +8464,60 @@ async function avisoLanzamientoSend(env, ph, texto) {
   if (!r || !r.ok) { try { r = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + t); } catch (_) {} }
   return r;
 }
+
+// ===== Aviso de PLANTILLA FALLIDA (a Bruno + Gaspar) — pedido Bruno 3-sep =====
+// Cuando falla una plantilla de VENTA/SEGUIMIENTO (las que Bruno/Joaco mandan a los leads: adhoc,
+// presupuesto_*, cotizamos, aviso_presupuesto_listo, cambionro, etc.), avisar al toque a Bruno y a
+// Gaspar para que la escriban a mano. Se EXCLUYEN las campañas masivas (broadcasts) que rebotan a
+// montones y solo harían ruido. Anti-loop: destinatarios internos ya excluidos en el hook; el aviso
+// va por plantilla aviso_lanzamiento (que ES campaña masiva → nunca se re-rutea) con fallback a texto.
+function esCampanaMasiva(name) {
+  const n = String(name || '').toLowerCase();
+  if (/^(minisupernova|minicurso|lanzamiento|cupo_comunidad|seminario|sorteo|comunidad|pack_emprendedor|reporte_)/.test(n)) return true;
+  if (n === 'aviso_lanzamiento' || n === 'aviso_arranque_equipo') return true;
+  return false;
+}
+async function notifyTplFail(env, { name, phone, reason } = {}) {
+  try {
+    const ph = String(phone || '').replace(/\D/g, '');
+    if (!ph || !name) return;
+    const fecha = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    const dk = 'tplfail:' + name + ':' + ph + ':' + fecha;   // dedup por plantilla+phone+día
+    try { const seen = await env.DB.prepare("SELECT 1 AS x FROM kv_cache WHERE k = ?").bind(dk).first(); if (seen) return; } catch (_) {}
+    // Tope global de avisos por hora (evita flood si Meta falla en masa).
+    const hourKey = 'tplfail_h:' + new Date().toISOString().slice(0, 13);
+    let cnt = 0;
+    try { const c = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = ?").bind(hourKey).first(); cnt = c ? (parseInt(c.v, 10) || 0) : 0; } catch (_) {}
+    if (cnt >= 15) return;
+    // Marcar dedup + contador ANTES de enviar (evita doble por sync+async o concurrencia).
+    const nowIso = new Date().toISOString();
+    try { await env.DB.prepare("INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?)").bind(dk, nowIso).run(); } catch (_) {}
+    try { await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?) ON CONFLICT(k) DO UPDATE SET v = CAST(kv_cache.v AS INTEGER) + 1, updated_at = excluded.updated_at").bind(hourKey, nowIso).run(); } catch (_) {}
+    const texto = 'Falló una plantilla a +' + ph + ': ' + (reason || 'no se pudo enviar') + '. Fijate de escribirle a mano.';
+    for (const dest of ['5491155604996', '5491155604999']) {   // Bruno + Gaspar
+      try { await avisoLanzamientoSend(env, dest, texto); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+// Pin a la bandeja PRIVADA (pedido Bruno 3-sep): marca el chat para que ADEMÁS aparezca en la
+// bandeja privada, SIN sacarlo de su bandeja actual (no toca inbox). Se llama cuando Bruno manda
+// un mensaje/plantilla con su firma. El flag pin_privado lo incluye la lista de chats y el front
+// lo suma a la vista privada. Un-pin: /admin/wa/private-toggle {on:false} lo limpia.
+async function pinPrivadoBruno(env, phone) {
+  const ph = String(phone || '').replace(/\D/g, '');
+  if (!ph) return;
+  try { await env.DB.prepare("UPDATE wa_chats_summary SET pin_privado = 1 WHERE phone = ?").bind(ph).run(); } catch (_) {}
+}
+// Auto-heal de la columna wa_chats_summary.pin_privado (una vez por isolate): así el SELECT de la
+// lista de chats nunca rompe por 'no such column' si se deploya contra una D1 sin la migración.
+let _pinPrivadoColOk = false;
+async function ensurePinPrivadoCol(env) {
+  if (_pinPrivadoColOk) return;
+  try { await env.DB.prepare("ALTER TABLE wa_chats_summary ADD COLUMN pin_privado INTEGER DEFAULT 0").run(); } catch (_) {}
+  _pinPrivadoColOk = true;
+}
+
 // Por cada pago del lanzamiento detectado: (1) el aviso inicial "ya arrancaron" una sola vez
 // (marca kv SOLO si salió OK, así no se pierde si la plantilla aún no está aprobada), (2) el
 // aviso del pago con nombre + teléfono + importe + si es seña. A Gaspar y Bruno.
@@ -7996,20 +8669,31 @@ function inboxClauseForRole(role) {
   // lo ve mientras está en relevamiento; vuelve a 'general' al completar los 3 datos.
   // 'privado' = bandeja admin-only de Gaspar (clientes especiales que asigna a mano):
   // solo admin lo ve, comercial/cursos NUNCA. Mismo patrón que precotiz.
-  return "AND inbox NOT IN ('cursos','oculto','precotiz','privado')";
+  // 'corte' = bandeja del Servicio de Corte, admin-only de Gaspar (es un negocio suyo; ni Abril ni
+  // comercial se meten). Mismo patrón que 'privado'. El bot de corte manda los chats acá.
+  return "AND inbox NOT IN ('cursos','oculto','precotiz','privado','corte')";
 }
 
 // Control de acceso por chat: 'cursos' solo su bandeja; la bandeja 'privado' (admin-only de
 // Gaspar) NO la tocan ni comercial ni cursos; admin ve/toca todo. La usan messages/send/send-media.
-async function inboxAccessOk(env, role, phone) {
+async function inboxAccessOk(env, role, phone, sessionUser) {
   if (role === 'admin') return true;
   if (phone) {
     try {
-      const r = await env.DB.prepare('SELECT inbox FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
+      const r = await env.DB.prepare('SELECT inbox, assigned_to FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
       const inbox = (r && r.inbox) || '';
-      if (inbox === 'privado') return false;             // bandeja privada = SOLO admin
+      if (inbox === 'privado' || inbox === 'corte') return false; // privado y corte = SOLO admin (Gaspar)
       if (role === 'cursos') return inbox === 'cursos';  // cursos: solo su bandeja
-      return true;                                       // comercial/otros: todo menos privado
+      // comercial: scope por vendedor (igual que la lista). El secundario (Facundo) SOLO abre/
+      // responde lo asignado a él; el principal (Joaco) todo lo NO asignado a un secundario.
+      // Cierra el hueco de que dos vendedores atendieran el mismo chat (por búsqueda/API).
+      if (role === 'comercial') {
+        const _u = String(sessionUser || '').toLowerCase();
+        const asg = (r && r.assigned_to) || '';
+        if (VENDEDORES_SECUNDARIOS.includes(_u)) return asg === _u;
+        return !VENDEDORES_SECUNDARIOS.includes(asg);
+      }
+      return true;                                       // otros roles: todo menos privado
     } catch (e) { return role !== 'cursos'; }
   }
   return role !== 'cursos';                              // sin phone puntual: cursos no, resto sí
@@ -8020,7 +8704,7 @@ async function inboxAccessOk(env, role, phone) {
 // El comercial "principal" (Joaco) ve todo lo NO asignado a un secundario. Es el reparto
 // de chats entre vendedores (assigned_to en wa_chats_summary, mig 037). Sumar un 3er
 // vendedor secundario = agregar su slug acá (y queda cubierto en la invalidación de cache).
-const VENDEDORES_SECUNDARIOS = ['nadia'];
+const VENDEDORES_SECUNDARIOS = ['facundo'];
 async function invalidateChatsSummaryCache(request) {
   try {
     const cache = caches.default;
@@ -8689,6 +9373,17 @@ async function ensureAdhocSchema(env) {
   _adhocSchemaReady = true;
 }
 
+// Mapea el vendedor que creó la plantilla ad-hoc (created_by = nombre visible del user:
+// Gaspar/Joaquín/Bruno/Abril/Facundo) a su teléfono, para avisarle A ÉL si su plantilla
+// salió o falló — antes el aviso iba solo a env.ADMIN_NOTIFY_PHONE, que estaba SIN setear
+// (por eso "no avisan"). Desconocidos (Abril/Facundo) -> Gaspar, así el aviso nunca es mudo.
+function adhocNotifyPhone(createdBy) {
+  const u = String(createdBy || '').trim().toLowerCase();
+  if (u.startsWith('joaqu') || u === 'joaco') return '5491137593269';
+  if (u.startsWith('bruno')) return '5491155604996';
+  return '5491155604999'; // Gaspar (y fallback para Abril/Facundo/desconocido)
+}
+
 // Cron: manda las plantillas "al toque" apenas Meta las aprueba (el vendedor no
 // espera en el chat). Reintenta si el envío falla; marca rejected/expired.
 // Se llama SOLO en horario hábil AR para no escribir de madrugada.
@@ -8697,7 +9392,7 @@ async function processPendingTemplateSends(env) {
   let pend;
   try {
     const rs = await env.DB.prepare(
-      "SELECT template_name, phone, body_preview, created_at FROM wa_pending_template_send WHERE status = 'pending' ORDER BY created_at ASC LIMIT 20"
+      "SELECT template_name, phone, body_preview, created_at, created_by FROM wa_pending_template_send WHERE status = 'pending' ORDER BY created_at ASC LIMIT 20"
     ).all();
     pend = rs.results || [];
   } catch (_) { return; }
@@ -8707,7 +9402,11 @@ async function processPendingTemplateSends(env) {
   try {
     const _wa = getWaClient(env);
     const sep = _wa.templatesUrl().includes('?') ? '&' : '?';
-    const r = await fetch(`${_wa.templatesUrl()}${sep}limit=200&fields=name,status`, { headers: _wa.headers });
+    // limit=500: hay ~320 plantillas (270 son adhoc_) y con limit=200 el cron NO veía las
+    // que quedaban fuera de las primeras 200 -> plantillas que Meta YA aprobó nunca se
+    // enviaban y expiraban en silencio (causa principal de "muchas no salen"). TODO: limpiar
+    // plantillas adhoc viejas en Meta (crecen ~/día y Meta penaliza tener muchas MARKETING).
+    const r = await fetch(`${_wa.templatesUrl()}${sep}limit=500&fields=name,status`, { headers: _wa.headers });
     const data = await r.json().catch(() => ({}));
     for (const t of (data.data || data.waba_templates || [])) statusByName[t.name] = String(t.status || '').toLowerCase();
   } catch (_) { return; }
@@ -8735,11 +9434,81 @@ async function processPendingTemplateSends(env) {
       // si el envío falla, queda 'pending' y reintenta el próximo tick
     } else if (st === 'rejected') {
       try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='rejected', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
-      if (env.ADMIN_NOTIFY_PHONE) { try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, `❌ Meta rechazó una plantilla nueva para ${row.phone}. Probá de nuevo con un texto más simple (sin links ni MAYÚSCULAS).`); } catch (_) {} }
+      // Avisar AL VENDEDOR que la creó (antes solo a env.ADMIN_NOTIFY_PHONE, sin setear -> mudo).
+      try { await waSendText(env, adhocNotifyPhone(row.created_by), `❌ Meta rechazó tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Probá de nuevo con un texto más simple (sin links ni MAYÚSCULAS) o escribile a mano.`); } catch (_) {}
     } else if ((now - new Date(row.created_at).getTime()) > 24 * 60 * 60 * 1000) {
       try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='expired', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
+      // Avisar AL VENDEDOR: Meta no la aprobó en 24h -> NO salió (antes expiraba en silencio).
+      try { await waSendText(env, adhocNotifyPhone(row.created_by), `⌛ Meta no aprobó en 24h tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Reintentá (a veces aprueba al 2º intento) o escribile a mano.`); } catch (_) {}
     }
   }
+}
+
+// ===== Limpieza de plantillas ad-hoc viejas =====
+// Meta penaliza tener MUCHAS plantillas MARKETING (nos costó un ban en jul-2026 con ~155).
+// Las adhoc de reflote son de UN SOLO USO: a los N días ya cumplieron. Esta limpieza borra de
+// Meta las adhoc cuya última actividad (creación por el ts del nombre adhoc_<ms>, o el último
+// envío registrado) es > N días, SALVO que tengan un envío pendiente. Mantiene el total bajo
+// (equilibrio ~ ritmo_de_creación × N). Solo Cloud API (meta): DELETE .../message_templates?name=.
+async function adhocCleanup(env, opts) {
+  opts = opts || {};
+  const days = parseInt(opts.days != null ? opts.days : await kvGet(env, 'adhoc_cleanup_days', '7'), 10) || 7;
+  const dryRun = !!opts.dryRun;
+  const _waT = getWaClient(env);
+  const is360 = _waT.provider === '360dialog';
+  if (_waT.provider !== 'meta' && !is360) return { ok: false, error: 'provider no soportado para cleanup', provider: _waT.provider };
+  const sep = _waT.templatesUrl().includes('?') ? '&' : '?';
+  const max = (opts.max != null && opts.max !== '') ? (parseInt(opts.max, 10) || 0) : Infinity;
+  let all = [];
+  try {
+    const rr = await fetch(`${_waT.templatesUrl()}${sep}limit=500&fields=name,status`, { headers: _waT.headers });
+    const dd = await rr.json().catch(() => ({}));
+    all = (dd.data || dd.waba_templates || []);
+  } catch (e) { return { ok: false, error: 'no se pudo listar plantillas: ' + ((e && e.message) || e) }; }
+  const adhoc = all.filter(t => String(t.name || '').startsWith('adhoc_'));
+  const cutoff = Date.now() - days * 86400000;
+  // último envío + si hay pendientes, por template_name (para NO borrar algo en uso/por salir)
+  const pend = {};
+  try {
+    const rs = await env.DB.prepare(
+      "SELECT template_name, MAX(created_at) AS last_at, SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS n_pend FROM wa_pending_template_send WHERE template_name LIKE 'adhoc\\_%' ESCAPE '\\' GROUP BY template_name"
+    ).all();
+    for (const r of (rs.results || [])) pend[r.template_name] = { last: r.last_at ? new Date(r.last_at).getTime() : 0, pending: (r.n_pend || 0) > 0 };
+  } catch (_) {}
+  const toDelete = [];
+  for (const t of adhoc) {
+    const nm = t.name;
+    const m = String(nm).match(/^adhoc_(\d+)/);
+    const createdTs = m ? parseInt(m[1], 10) : 0;
+    const info = pend[nm] || { last: 0, pending: false };
+    if (info.pending) continue;                              // tiene un envío pendiente -> no tocar
+    if (Math.max(createdTs, info.last) > cutoff) continue;   // creada/usada hace poco -> no tocar
+    toDelete.push(nm);
+  }
+  if (dryRun) return { ok: true, dry_run: true, days, total_adhoc: adhoc.length, to_delete: toDelete.length, keep: adhoc.length - toDelete.length, sample: toDelete.slice(0, 8) };
+  let deleted = 0, failed = 0; const errs = [];
+  for (const nm of toDelete.slice(0, max)) {
+    try {
+      // 360dialog borra por nombre en el PATH; Meta (Cloud API) por ?name=.
+      const durl = is360 ? `${_waT.templatesUrl()}/${encodeURIComponent(nm)}` : `${_waT.templatesUrl()}${sep}name=${encodeURIComponent(nm)}`;
+      const dr = await fetch(durl, { method: 'DELETE', headers: _waT.headers });
+      if (dr.ok) { deleted++; try { await env.DB.prepare("DELETE FROM wa_pending_template_send WHERE template_name = ?").bind(nm).run(); } catch (_) {} }
+      else { failed++; if (errs.length < 3) errs.push(dr.status + ': ' + (await dr.text().catch(() => '')).slice(0, 140)); }
+      await new Promise(rs => setTimeout(rs, 40));   // no martillar la API
+    } catch (_) { failed++; }
+  }
+  return { ok: true, days, total_adhoc: adhoc.length, deleted, failed, remaining_adhoc: adhoc.length - deleted, errs };
+}
+// Corre la limpieza 1 vez por día (gate por fecha AR en kv). Llamada desde el cron.
+async function maybeAdhocCleanup(env) {
+  try {
+    if ((await kvGet(env, 'adhoc_cleanup_on', '1')) !== '1') return;   // kill-switch
+    const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    if ((await kvGet(env, 'adhoc_cleanup_last', '')) === fechaAR) return;
+    await kvSet(env, 'adhoc_cleanup_last', fechaAR);   // marcar ANTES para no repetir aunque tarde/falle
+    const res = await adhocCleanup(env, {});
+    if (res && res.deleted) { try { await waSendText(env, '5491155604999', `🧹 Limpieza plantillas ad-hoc: borré ${res.deleted} viejas, quedan ${res.remaining_adhoc}.`); } catch (_) {} }
+  } catch (_) {}
 }
 
 const handler = {
@@ -9223,6 +9992,8 @@ const handler = {
                     if (!(_vert === 'cursos' && await cursosFlowOn(env))) {
                       await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox = 'oculto'").bind(phone, _vert === 'cursos' ? 'cursos' : 'general', ts).run();
                     }
+                    // Corpóreo (ads Corporeas 1/2): etiqueta para atención manual (bot de neón excluido).
+                    if (_vert === 'corporeo') await corporeoTag(env, phone, true);
                   } catch (_) {}
                 }
 
@@ -9236,11 +10007,25 @@ const handler = {
                   try { await minicursoLandingOnInbound(env, phone, ts); } catch (_) {}
                   // Landing del lanzamiento: walink → link (oculto); respuesta posterior → revelar.
                   try { await eventoRecordatorioOnInbound(env, phone); } catch (_) {}
+                  // MiniSupernova ANTES que seminario: para el solapamiento alumno∩seminario (el
+                  // seminario ya pasó, 29/08), cuando responde gana el reveal a 'cursos' (Abril,
+                  // campaña activa) y NO el de seminario a 'privado' (que Abril no ve). El candado
+                  // WHERE inbox='oculto' hace que el que corre 2do sea no-op.
+                  try { await miniSupernovaOnInbound(env, phone); } catch (_) {}
+                  try { await seminarioOnInbound(env, phone); } catch (_) {}
                   try { await lanzamientoLandingOnInbound(env, phone, msgBody); } catch (_) {}
+                  // Reparto de leads de carteles a Facundo APENAS entra el lead (pedido Gaspar 3-sep):
+                  // funciona igual que para Joaco, con su cuota/hash. Corre en CADA inbound EN VIVO (antes
+                  // solo lo hacía el captador de precotización ~1 min tarde y Joaco los agarraba primero →
+                  // Facu se quedaba con casi nada). Idempotente, determinístico, respeta anti-pisón, excluye
+                  // cursos(inbox)/reventa/minicurso/cliente/corte. Facu SÍ recibe corpóreos. Va ANTES de la
+                  // auto-respuesta de corpóreo para que el saludo ya sepa a quién quedó asignado (Facu/Joaco).
+                  try { await maybeRepartirANadia(env, phone); } catch (_) {}
+                  // Auto-respuesta a leads de corpóreo (mensaje del ad Corporeas): saluda (Facu/Joaco según
+                  // asignación) + pide foto+medidas+int/ext.
+                  try { await corporeoAskOnInbound(env, phone, msgBody); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
-                  // Reparto de leads NUEVOS de carteles a Nadia según su cuota diaria (arranca en 0).
-                  try { await maybeRepartirANadia(env, phone); } catch (_) {}
                 }
               }
 
@@ -9351,17 +10136,24 @@ const handler = {
                       if (shouldNotify && env.ADMIN_NOTIFY_PHONE) {
                         try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp BLOQUEADO por pago — Meta error 131042 (pagos pendientes en la cuenta de WhatsApp Business).\nRegularizá en el Billing Hub de META: business.facebook.com/billing_hub (OJO: es de Meta, NO el saldo de 360dialog).\nPausé los envíos automáticos para no quemar contactos — se reanudan solos cuando vuelva a andar.'); } catch (_) {}
                       }
-                    } else if (env.ADMIN_NOTIFY_PHONE && !['5491155604999', '5491155604996', '5491137593269'].includes(String(phone).replace(/\D/g, ''))) {
-                      // Fallo puntual (destinatario, etc.) → aviso por mensaje, como antes.
-                      // GUARDIA números internos (Gaspar/hermano/Joaco, normalizados): si el envío
-                      // que falló era un aviso a un interno (su ventana de 24h cerrada → rebota
-                      // 131047), NO generamos otro aviso, porque ese aviso también fallaría →
-                      // recursión infinita (~1 msg cada 2s, 250+/h, satura la D1 y traba todo el
-                      // CRM). Se compara por dígitos para no fallar por el formato del +.
-                      // Los fallos hacia CLIENTES sí se siguen avisando.
-                      const preview = prevBody ? prevBody.slice(0, 100) + (prevBody.length > 100 ? '…' : '') : '';
-                      const summary = `⚠ Falló envío WA a ${phone}\nError: ${errMsg}` + (preview ? `\nMensaje: "${preview}"` : '');
-                      try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
+                    } else if (!['5491155604999', '5491155604996', '5491137593269'].includes(String(phone).replace(/\D/g, ''))) {
+                      // Fallo puntual hacia un CLIENTE (no interno, no billing).
+                      // GUARDIA números internos (Gaspar/hermano/Joaco): si el envío que falló era un
+                      // aviso a un interno (su ventana de 24h cerrada → rebota 131047), NO generamos
+                      // otro aviso, porque ese también fallaría → recursión infinita (bug histórico que
+                      // saturó la D1). Se compara por dígitos. Los fallos hacia CLIENTES sí se avisan.
+                      const _m = prevBody && prevBody.match(/\[plantilla:\s*([^\]\s]+)/);
+                      const _tpl = _m ? _m[1] : null;
+                      if (_tpl && !esCampanaMasiva(_tpl)) {
+                        // Plantilla de venta/seguimiento (Bruno/Joaco) falló → aviso CONFIABLE a Bruno + Gaspar
+                        // (plantilla + fallback), deduplicado, con tope por hora. Pedido de Bruno (3-sep).
+                        try { await notifyTplFail(env, { name: _tpl, phone, reason: describeSendFailure({ code: errCode, error: errMsg }) }); } catch (_) {}
+                      } else if (env.ADMIN_NOTIFY_PHONE) {
+                        // Texto libre o plantilla de campaña masiva → aviso a Gaspar por texto (como antes).
+                        const preview = prevBody ? prevBody.slice(0, 100) + (prevBody.length > 100 ? '…' : '') : '';
+                        const summary = `⚠ Falló envío WA a ${phone}\nError: ${errMsg}` + (preview ? `\nMensaje: "${preview}"` : '');
+                        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
+                      }
                     }
                   }
                 } catch (_) {}
@@ -9763,6 +10555,29 @@ const handler = {
       }
       if (!session) return unauthorized();
 
+      // Registro de actividad por usuario (para el aviso de arranque del equipo): estampa
+      // last_active SOLO para los vendedores/diseñador vigilados, throttled a 5 min, sin bloquear
+      // la respuesta (waitUntil). Es la señal real de "arrancó a trabajar" (mejor que el login).
+      try {
+        const _cw = canonWorker(session.user);
+        if (_cw) {
+          const _nowA = new Date().toISOString();
+          const _thrA = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+          // Estampa last_active y, SOLO cuando pasó el throttle (>5 min o primera del día),
+          // agrega una marca al historial user_activity_log. Ese historial permite calcular
+          // horas trabajadas y pausas >1h en el reporte diario. La lectura extra es barata (4 vigilados).
+          ctx.waitUntil((async () => {
+            try {
+              const _r = await env.DB.prepare("SELECT last_active FROM user_activity WHERE user = ?").bind(_cw).first();
+              if (!_r || !_r.last_active || _r.last_active < _thrA) {
+                await env.DB.prepare("INSERT INTO user_activity (user, last_active) VALUES (?, ?) ON CONFLICT(user) DO UPDATE SET last_active = excluded.last_active").bind(_cw, _nowA).run();
+                await env.DB.prepare("INSERT INTO user_activity_log (user, ts) VALUES (?, ?)").bind(_cw, _nowA).run();
+              }
+            } catch (_) {}
+          })());
+        }
+      } catch (_) {}
+
       // Defensa en profundidad: endpoints con datos sensibles (P&L, márgenes,
       // actividad global) requieren que la sesión sea del admin (Gaspar), no
       // cualquier token válido de bajo privilegio.
@@ -9930,7 +10745,14 @@ const handler = {
         // Frenar/reanudar el bot en un chat (freeze/frozen) lo puede usar cualquier usuario del
         // CRM (Joaco/comercial), no solo Gaspar. El resto del piloto sigue siendo solo-admin.
         const _precotizAnyUser = (path === '/admin/precotiz/freeze' || path === '/admin/precotiz/frozen');
-        if (!isAdminSession && !_precotizAnyUser) return json({ error: 'forbidden: admin only' }, 403);
+        // El GET del estado del piloto lo puede leer también el comercial (Joaco/Facu): lo usa el
+        // chat para mostrar el cartel de "Freno precotización" y el estado de datos. Las acciones
+        // (approve/discard/on-off/cap) siguen siendo solo-admin.
+        let _precotizComercialGet = false;
+        if (!isAdminSession && request.method === 'GET' && path === '/admin/precotiz') {
+          try { _precotizComercialGet = (await getSessionRole(env, session.user)) === 'comercial'; } catch (_) {}
+        }
+        if (!isAdminSession && !_precotizAnyUser && !_precotizComercialGet) return json({ error: 'forbidden: admin only' }, 403);
 
         // GET /admin/precotiz → on/off + modo + leads del piloto
         if (request.method === 'GET' && path === '/admin/precotiz') {
@@ -9945,7 +10767,7 @@ const handler = {
           // Reparto a Nadia: cuota diaria configurable + cuántos se le asignaron hoy (día AR).
           const nadiaCuota = parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0;
           let nadiaHoy = 0;
-          try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'nadia' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first(); nadiaHoy = (nr && nr.n) || 0; } catch (_) {}
+          try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'facundo' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first(); nadiaHoy = (nr && nr.n) || 0; } catch (_) {}
           const nadiaPhone = await kvGet(env, 'nadia_phone', '');
           return json({ ok: true, on, modo, cap, sample, count: leads.length, leads, frozen, nadia_cuota: nadiaCuota, nadia_hoy: nadiaHoy, nadia_phone: nadiaPhone });
         }
@@ -9995,6 +10817,32 @@ const handler = {
           if (body?.nadia_cuota !== undefined) { const q = Math.max(0, parseInt(body.nadia_cuota, 10) || 0); await kvSet(env, 'nadia_cuota_diaria', String(q)); }
           if (body?.nadia_phone !== undefined) { await kvSet(env, 'nadia_phone', String(body.nadia_phone || '').replace(/\D/g, '')); }
           return json({ ok: true, on: (await kvGet(env, 'precotiz_on', '0')) === '1', modo: await kvGet(env, 'precotiz_modo', 'draft'), nadia_cuota: parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0, nadia_phone: await kvGet(env, 'nadia_phone', '') });
+        }
+
+        // POST /admin/precotiz/corporeo-backfill → etiqueta a los leads que YA entraron por ads mapeados
+        // a vertical 'corporeo' (wa_ad_verticals) y los saca del bot de precotización si cayeron.
+        // Idempotente; se re-corre al agregar ads corpóreos nuevos al mapa.
+        if (request.method === 'POST' && path === '/admin/precotiz/corporeo-backfill') {
+          let n = 0, escal = 0;
+          try {
+            const rs = await env.DB.prepare(
+              "SELECT DISTINCT a.phone AS phone FROM wa_ad_attributions a JOIN wa_ad_verticals v ON v.ad_id = a.source_id WHERE v.vertical = 'corporeo' AND a.phone IS NOT NULL AND a.phone != ''"
+            ).all();
+            for (const r of (rs.results || [])) {
+              const ph = r.phone;
+              await corporeoTag(env, ph, true); n++;
+              try {
+                const inb = await env.DB.prepare("SELECT 1 AS x FROM precotiz_pilot WHERE phone = ? AND estado IN ('activo','completo') LIMIT 1").bind(ph).first();
+                if (inb) {
+                  await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo='corporeo', updated_at=? WHERE phone=? AND estado IN ('activo','completo')").bind(new Date().toISOString(), ph).run();
+                  await precotizTag(env, ph, false);
+                  await paraCotizarTag(env, ph, false);
+                  escal++;
+                }
+              } catch (_) {}
+            }
+          } catch (e) { return json({ error: String(e?.message || e) }, 500); }
+          return json({ ok: true, etiquetados: n, sacados_del_bot: escal });
         }
 
         // POST /admin/precotiz/dry-run → { phone } qué decidiría el motor, SIN enviar
@@ -10427,7 +11275,7 @@ const handler = {
         // Rol 'cursos' (Abril) solo puede escribir a chats de su bandeja.
         {
           const _role = await getSessionRole(env, session.user);
-          if (!(await inboxAccessOk(env, _role, num || String(to).replace(/\D/g, '')))) {
+          if (!(await inboxAccessOk(env, _role, num || String(to).replace(/\D/g, ''), session.user))) {
             return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
           }
         }
@@ -10462,6 +11310,9 @@ const handler = {
             await enqueueComunidadPromo(env, num || to);   // drip Pack Emprendedor a los 14 días
           }
         } catch (_) {}
+        // Pin privado (pedido Bruno 3-sep): texto libre con su firma → el chat ADEMÁS a la privada.
+        // Solo si la sesión es admin (Bruno/Gaspar) → evita falsos pin de Joaco/Abril al nombrar a Bruno.
+        if (isAdminSession && /\bbruno\b/i.test(String(text))) { try { await pinPrivadoBruno(env, num || String(to).replace(/\D/g, '')); } catch (_) {} }
         return json({ id: r.id });
       }
 
@@ -10501,6 +11352,20 @@ const handler = {
         // pero acá normalizamos a lowercase para consistencia.
         const qLower = q.toLowerCase();
         const like = '%' + qLower + '%';
+        // Scope por rol/vendedor: el secundario (Facundo) SOLO busca en SUS chats; el principal
+        // (Joaco) en todo lo NO asignado a un secundario; cursos su bandeja; admin todo. Cierra
+        // el hueco de encontrar (y responder) chats ajenos por la búsqueda.
+        const _srole = await getSessionRole(env, session.user);
+        let scopeClause = '';
+        if (_srole !== 'admin') {
+          if (_srole === 'cursos') {
+            scopeClause = " AND wa_messages.phone IN (SELECT phone FROM wa_chats_summary WHERE inbox='cursos')";
+          } else {
+            const _su = String(session.user || '').toLowerCase();
+            const _asg = VENDEDORES_SECUNDARIOS.includes(_su) ? `assigned_to = '${_su}'` : `assigned_to NOT IN (${VENDEDORES_SECUNDARIOS.map(s => `'${s}'`).join(',')})`;
+            scopeClause = ` AND wa_messages.phone IN (SELECT phone FROM wa_chats_summary WHERE inbox NOT IN ('cursos','oculto','precotiz','privado','corte') AND ${_asg})`;
+          }
+        }
 
         // Contactos: phones únicos cuyos mensajes contienen el query.
         // También matchea si el query es parte del phone (para buscar por número).
@@ -10508,9 +11373,9 @@ const handler = {
           `SELECT phone, COUNT(*) AS hits, MAX(ts) AS last_match_ts,
                   MAX(CASE WHEN LOWER(sender_name) != '' THEN sender_name END) AS contact_name
            FROM wa_messages
-           WHERE LOWER(body) LIKE ?
+           WHERE (LOWER(body) LIKE ?
               OR LOWER(sender_name) LIKE ?
-              OR phone LIKE ?
+              OR phone LIKE ?)${scopeClause}
            GROUP BY phone
            ORDER BY last_match_ts DESC
            LIMIT 50`
@@ -10520,7 +11385,7 @@ const handler = {
         const messagesQ = await env.DB.prepare(
           `SELECT ts, phone, sender_name, direction, msg_type, body, wamid
            FROM wa_messages
-           WHERE LOWER(body) LIKE ?
+           WHERE LOWER(body) LIKE ?${scopeClause}
            ORDER BY ts DESC
            LIMIT 50`
         ).bind(like).all();
@@ -10778,6 +11643,46 @@ const handler = {
         });
       }
 
+      // Panel de control de la campaña MiniSupernova (difusión a alumnos). GET = métricas;
+      // POST {on:bool, pertick:int} = prender/apagar + ritmo por tick. Tope diario fijo 50.
+      if (path === '/admin/minisupernova') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS minisupernova (phone TEXT PRIMARY KEY, nombre TEXT, grupo TEXT, status TEXT DEFAULT 'pending', sent_at TEXT, claimed_at TEXT, replied_at TEXT)").run(); } catch (_) {}
+        if (request.method === 'POST') {
+          let body = {}; try { body = await request.json(); } catch (_) {}
+          if (typeof body.on === 'boolean') await kvSet(env, 'minisupernova_on', body.on ? '1' : '0');
+          if (body.pertick != null) await kvSet(env, 'minisupernova_pertick', String(Math.max(1, Math.min(10, parseInt(body.pertick, 10) || 3))));
+          if (body.cap != null) await kvSet(env, 'minisupernova_cap', String(Math.max(1, Math.min(200, parseInt(body.cap, 10) || MINISUPER_CAP_DIARIO))));
+        }
+        const on = (await kvGet(env, 'minisupernova_on', '0')) === '1';
+        const perTick = parseInt(await kvGet(env, 'minisupernova_pertick', '3'), 10) || 3;
+        const capDiario = Math.max(1, Math.min(200, parseInt(await kvGet(env, 'minisupernova_cap', String(MINISUPER_CAP_DIARIO)), 10) || MINISUPER_CAP_DIARIO));
+        let total = 0, enviados = 0, pend = 0, resp = 0, hoy = 0, porGrupo = [];
+        try { total = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova").first())?.n || 0; } catch (_) {}
+        try { enviados = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status='sent'").first())?.n || 0; } catch (_) {}
+        try { pend = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status='pending'").first())?.n || 0; } catch (_) {}
+        try { resp = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE replied_at IS NOT NULL").first())?.n || 0; } catch (_) {}
+        try { hoy = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status='sent' AND sent_at >= " + REPORTE_DIA_DESDE).first())?.n || 0; } catch (_) {}
+        try { porGrupo = (await env.DB.prepare("SELECT grupo, COUNT(*) AS n, SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) AS sent FROM minisupernova GROUP BY grupo ORDER BY CAST(grupo AS INTEGER)").all()).results || []; } catch (_) {}
+        let tplN = 'unknown', tplG = 'unknown';
+        try { const t = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(MINISUPER_TPL).first(); tplN = (t && t.status) || 'unknown'; } catch (_) {}
+        try { const t = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(MINISUPER_TPL_GRL).first(); tplG = (t && t.status) || 'unknown'; } catch (_) {}
+        let sinNombre = 0;
+        try { sinNombre = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE nombre IS NULL OR nombre = ''").first())?.n || 0; } catch (_) {}
+        const hAR = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours();
+        return json({
+          ok: true, on, perTick, cap_diario: capDiario,
+          total, enviados, pendientes: pend, respondieron: resp, enviados_hoy: hoy, sin_nombre: sinNombre,
+          por_grupo: porGrupo,
+          plantilla_nombre: MINISUPER_TPL, plantilla_nombre_status: tplN,
+          plantilla_generica: MINISUPER_TPL_GRL, plantilla_generica_status: tplG,
+          listo_para_enviar: (tplN.toUpperCase?.() === 'APPROVED' && tplG.toUpperCase?.() === 'APPROVED'),
+          horario_ok: (hAR >= 9 && hAR < 21), hora_ar: hAR,
+          wa_send_paused: (await kvGet(env, 'wa_send_paused', '0')) === '1',
+          dias_estimados: pend > 0 ? Math.ceil(pend / capDiario) : 0
+        });
+      }
+
       // Forzar el aviso "leads para llamar" AHORA (para probarlo fuera del cron de las 9 AR).
       // Resetea el dedup del día y ejecuta la función real (plantilla + fallback a texto).
       if (request.method === 'POST' && path === '/admin/reporte-llamar-test') {
@@ -10980,7 +11885,7 @@ const handler = {
         // Rol 'cursos' (Abril) solo puede escribir a chats de su bandeja.
         {
           const _role = await getSessionRole(env, session.user);
-          if (!(await inboxAccessOk(env, _role, igId))) {
+          if (!(await inboxAccessOk(env, _role, igId, session.user))) {
             return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
           }
         }
@@ -11017,7 +11922,7 @@ const handler = {
         const caption = fd.get('caption') || '';
         const file = fd.get('file');
         if (!igId || !file) return json({ error: 'missing to or file' }, 400);
-        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, igId))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
+        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, igId, session.user))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
         const fileMime = (file.type || '').split(';')[0].trim();
         const isImg = fileMime.startsWith('image/');
         const isAud = fileMime.startsWith('audio/');
@@ -11059,7 +11964,7 @@ const handler = {
         if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
         const igId = String(to).replace(/\D/g, '');
         if (igId.length < 15) return json({ error: 'IGSID invalido' }, 400);
-        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, igId))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
+        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, igId, session.user))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
         // Ventana de 24 h de IG (el cliente escribió en las últimas 24 h). Sin rescate por plantilla.
         let lastTs = 0;
         try { const lastIn = await env.DB.prepare("SELECT MAX(ts) AS ts FROM wa_messages WHERE phone=? AND direction='inbound' AND channel='ig'").bind(igId).first(); lastTs = lastIn && lastIn.ts ? new Date(lastIn.ts).getTime() : 0; } catch (_) {}
@@ -11281,6 +12186,7 @@ const handler = {
         const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
         const cached = await cache.match(cacheKey);
         if (cached) return cached;
+        await ensurePinPrivadoCol(env);   // garantiza la columna pin_privado antes del SELECT (auto-heal)
         const inboxClause = inboxClauseForRole(role);
         // Reparto por vendedor (solo comercial): el secundario (Nadia) ve SOLO lo asignado a
         // él; el principal (Joaco) ve todo lo NO asignado a un secundario. uslug se interpola
@@ -11294,7 +12200,7 @@ const handler = {
         let chats = null;
         try {
           const rs = await env.DB.prepare(
-            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread, inbox, channel, assigned_to
+            `SELECT phone, last_ts, last_body, last_direction, last_msg_type, contact_name, unread, inbox, channel, assigned_to, pin_privado
              FROM wa_chats_summary
              WHERE last_ts != '' AND NOT (channel = 'ig' AND has_inbound = 0) ${inboxClause}${assignClause}
              ORDER BY last_ts DESC`
@@ -11670,9 +12576,19 @@ const handler = {
         if (!num) return json({ error: 'teléfono inválido' }, 400);
         const on = body?.on !== false; // default true
         try {
-          await env.DB.prepare(
-            "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at"
-          ).bind(num, on ? 'privado' : 'general', new Date().toISOString()).run();
+          if (on) {
+            // Mover a la bandeja privada (movimiento manual del admin): sale de su bandeja actual.
+            await env.DB.prepare(
+              "INSERT INTO wa_chats_summary (phone, inbox, pin_privado, updated_at) VALUES (?, 'privado', 0, ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'privado', pin_privado = 0, updated_at = excluded.updated_at"
+            ).bind(num, new Date().toISOString()).run();
+          } else {
+            // Sacar de la privada / des-pinnear. Solo volvemos a 'general' si estaba en 'privado'; si es
+            // un chat auto-pinneado (Bruno) que vive en OTRA bandeja (cursos/corte/precotiz), conservamos
+            // su bandeja y solo le sacamos el pin (no lo relocalizamos ni lo filtramos mal).
+            await env.DB.prepare(
+              "UPDATE wa_chats_summary SET pin_privado = 0, inbox = CASE WHEN inbox = 'privado' THEN 'general' ELSE inbox END, updated_at = ? WHERE phone = ?"
+            ).bind(new Date().toISOString(), num).run();
+          }
         } catch (e) { return json({ error: 'no se pudo actualizar' }, 500); }
         try { await invalidateChatsSummaryCache(request); } catch (_) {}
         return json({ ok: true, phone: num, inbox: on ? 'privado' : 'general' });
@@ -11690,7 +12606,7 @@ const handler = {
         const params = [];
         if (phone) {
           // Consulta de un chat puntual. Rol 'cursos' solo accede a su bandeja.
-          if (_role !== 'admin' && !(await inboxAccessOk(env, _role, phone.replace(/\D/g, '')))) {
+          if (_role !== 'admin' && !(await inboxAccessOk(env, _role, phone.replace(/\D/g, ''), session.user))) {
             return json({ error: 'forbidden: chat fuera de tu bandeja', messages: [] }, 403);
           }
           where += ' AND phone = ?'; params.push(phone);
@@ -11706,7 +12622,18 @@ const handler = {
           } else if (_role === 'admin') {
             where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox = 'oculto')";
           } else {
-            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox IN ('cursos','oculto','privado'))";
+            // comercial: excluir cursos/oculto/precotiz/privado/corte (igual que inboxClauseForRole).
+            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox IN ('cursos','oculto','precotiz','privado','corte'))";
+            // Scope por vendedor (espeja /admin/wa/chats-summary): el secundario (Facundo) SOLO
+            // ve/pollea lo asignado a él; el principal (Joaco) todo lo NO asignado a un secundario.
+            // Así el poll de notificaciones no se filtra entre vendedores. _uslug se interpola solo
+            // si está en la whitelist fija VENDEDORES_SECUNDARIOS -> sin riesgo de inyección.
+            const _uslug = String(session.user || '').toLowerCase();
+            if (VENDEDORES_SECUNDARIOS.includes(_uslug)) {
+              where += ` AND phone IN (SELECT phone FROM wa_chats_summary WHERE assigned_to = '${_uslug}')`;
+            } else {
+              where += ` AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE assigned_to IN (${VENDEDORES_SECUNDARIOS.map(s => `'${s}'`).join(',')}))`;
+            }
           }
         }
         if (from) { where += ' AND ts >= ?'; params.push(from); }
@@ -12004,6 +12931,15 @@ const handler = {
           `INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?)
            ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox`
         ).bind(phone, inbox, new Date().toISOString()).run();
+        // Handoff manual del servicio de corte: si Gaspar manda un chat de corte a la bandeja de Abril
+        // (cursos), marcamos la conversación 'handoff_abril' para que el bot de corte NO lo reclame. Si lo
+        // saca de vuelta a 'general', limpiamos el handoff (el bot lo puede volver a atender). Si el chat no
+        // es de corte (sin fila en corte_conversaciones), estos UPDATE no tocan nada.
+        try {
+          const _ts = new Date().toISOString();
+          if (inbox === 'cursos') await env.DB.prepare("UPDATE corte_conversaciones SET estado='handoff_abril', updated_at=? WHERE phone=?").bind(_ts, phone).run();
+          else if (inbox === 'general') await env.DB.prepare("UPDATE corte_conversaciones SET estado='nuevo', updated_at=? WHERE phone=? AND estado='handoff_abril'").bind(_ts, phone).run();
+        } catch (_) {}
         ctx.waitUntil(invalidateChatsSummaryCache(request));
         return json({ ok: true, phone, inbox });
       }
@@ -12026,6 +12962,9 @@ const handler = {
           `INSERT INTO wa_chats_summary (phone, assigned_to, assigned_at, updated_at) VALUES (?, ?, ?, ?)
            ON CONFLICT(phone) DO UPDATE SET assigned_to = excluded.assigned_to, assigned_at = excluded.assigned_at`
         ).bind(phone, to, to ? now : '', now).run();
+        // El brief/comisión sigue al lead: al reasignar, movemos el comercial_id de los briefs de
+        // este chat al vendedor asignado (secundario -> él; sin asignar / Joaco -> 'joaco').
+        try { const _bc = VENDEDORES_SECUNDARIOS.includes(to) ? to : 'joaco'; await env.DB.prepare("UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?").bind(_bc, phone).run(); } catch (_) {}
         ctx.waitUntil(invalidateChatsSummaryCache(request));
         return json({ ok: true, phone, assigned_to: to });
       }
@@ -12128,7 +13067,7 @@ const handler = {
         if (!to || !r2_key) return json({ error: 'missing to or r2_key' }, 400);
         const num = normalizeArPhone(to);
         if (!num) return json({ error: 'numero invalido' }, 400);
-        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, num))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
+        { const _role = await getSessionRole(env, session.user); if (!(await inboxAccessOk(env, _role, num, session.user))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403); }
         if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
         const obj = await env.MEDIA.get(r2_key);
         if (!obj) return json({ error: 'sticker no encontrado' }, 404);
@@ -12149,7 +13088,7 @@ const handler = {
         // Rol 'cursos' (Abril) solo puede mandar media a chats de su bandeja.
         {
           const _role = await getSessionRole(env, session.user);
-          if (!(await inboxAccessOk(env, _role, String(to || '').replace(/\D/g, '')))) {
+          if (!(await inboxAccessOk(env, _role, String(to || '').replace(/\D/g, ''), session.user))) {
             return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
           }
         }
@@ -12810,6 +13749,28 @@ const handler = {
         return json({ ok: true, id: data.id, status: data.status, category: data.category, provider: _waT.provider });
       }
 
+      // Estado de aprobacion de plantillas (para pollear si Meta aprobo una recien creada).
+      if (request.method === 'GET' && path === '/admin/wa/template-status') {
+        const _waT = getWaClient(env);
+        const sep = _waT.templatesUrl().includes('?') ? '&' : '?';
+        const rr = await fetch(`${_waT.templatesUrl()}${sep}limit=500&fields=name,status`, { headers: _waT.headers });
+        const dd = await rr.json().catch(() => ({}));
+        const arr = (dd.data || dd.waba_templates || []);
+        const nm = url.searchParams.get('name');
+        if (nm) { const t = arr.find(x => x.name === nm); return json({ name: nm, status: t ? String(t.status).toLowerCase() : 'not_found' }); }
+        return json({ templates: arr.map(x => ({ name: x.name, status: String(x.status || '').toLowerCase() })) });
+      }
+
+      // Limpieza de plantillas ad-hoc viejas (baja el nº total -> menos riesgo de ban de Meta).
+      // POST {dry_run:true} para SOLO contar; {dry_run:false, days:N} para borrar. Solo admin.
+      if (request.method === 'POST' && path === '/admin/wa/adhoc-cleanup') {
+        const _role = await getSessionRole(env, session.user);
+        if (_role !== 'admin') return json({ error: 'forbidden' }, 403);
+        let _b = {}; try { _b = await request.json(); } catch (_) {}
+        const res = await adhocCleanup(env, { days: _b.days, dryRun: !!_b.dry_run, max: _b.max });
+        return json(res);
+      }
+
       // ===== Crear plantilla "al toque" + mandarla sola cuando Meta la apruebe =====
       // Para vendedores (Joaco/Abril): crean una plantilla a medida para ESTE chat
       // sin esperar la aprobación en pantalla. Guardrails de contenido + tope diario
@@ -12821,10 +13782,15 @@ const handler = {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const num = normalizeArPhone(String(body?.to || ''));
         if (!num) return json({ error: 'teléfono inválido' }, 400);
-        if (!(await inboxAccessOk(env, role, num))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
+        if (!(await inboxAccessOk(env, role, num, session.user))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
         const text = String(body?.body_text || '').trim();
         const vErr = validateAdhocTemplate(text);
         if (vErr) return json({ error: vErr }, 400);
+        // Pin privado (pedido Bruno 3-sep): si el mensaje lleva su firma, el chat ADEMÁS aparece en la
+        // bandeja privada (sin salir de su bandeja). Acá cubre reuso Y creación nueva (ambos tienen text).
+        // Solo si la sesión es admin (Bruno/Gaspar comparten el user admin) → evita que Joaco/Abril
+        // pinneen de más al nombrar a Bruno.
+        if (isAdminSession && /\bbruno\b/i.test(text)) { try { await pinPrivadoBruno(env, num); } catch (_) {} }
         const hasButton = !!(body.button_url && /^https?:\/\//i.test(String(body.button_url)));
         const bodyNorm = adhocBodyNorm(text) + (hasButton ? 'btn:' + String(body.button_url) : '');
         await ensureAdhocSchema(env);
@@ -12850,7 +13816,8 @@ const handler = {
         const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
         try {
           const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_pending_template_send WHERE created_by = ? AND created_at >= ?").bind(session.user, dayStart.toISOString()).first();
-          if (c && c.n >= 30) return json({ error: 'Llegaste al máximo de 30 plantillas nuevas por día.' }, 429);
+          const _adhocCap = parseInt(await kvGet(env, 'adhoc_template_daily_cap', '30'), 10) || 30;
+          if (c && c.n >= _adhocCap) return json({ error: 'Llegaste al máximo de ' + _adhocCap + ' plantillas nuevas por día.' }, 429);
         } catch (_) {}
         const tplName = 'adhoc_' + Date.now();
         const _waT = getWaClient(env);
@@ -13971,6 +14938,59 @@ const handler = {
         try { rows = (await env.DB.prepare("SELECT * FROM corte_pedidos ORDER BY updated_at DESC, id DESC LIMIT 500").all()).results || []; } catch (_) {}
         return json({ ok: true, pedidos: rows });
       }
+      // POST /admin/corte/run  →  dispara el bot de corte a mano (diagnóstico). Admin. Devuelve el estado.
+      if (request.method === 'POST' && path === '/admin/corte/run') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let err = null;
+        try { await processCortePilot(env); } catch (e) { err = String((e && e.message) || e); }
+        const tp = String(await kvGet(env, 'corte_bot_test_phone', '')).replace(/\D/g, '');
+        let conv = null, peds = 0, lastBot = null;
+        try { conv = await env.DB.prepare("SELECT estado, intencion_preguntada, substr(last_processed_ts,11,8) AS lp FROM corte_conversaciones WHERE phone=?").bind(tp).first(); } catch (_) {}
+        try { const r = await env.DB.prepare("SELECT count(*) AS n FROM corte_pedidos WHERE telefono=? AND created_at > datetime('now','-40 minutes')").bind(tp).first(); peds = (r && r.n) || 0; } catch (_) {}
+        try { const lb = await env.DB.prepare("SELECT substr(body,1,140) AS body FROM wa_messages WHERE phone=? AND direction='outbound' AND automated=1 AND ts > datetime('now','-20 minutes') ORDER BY ts DESC LIMIT 1").bind(tp).first(); lastBot = lb && lb.body; } catch (_) {}
+        // diag: corre el pipeline (ctx + IA) para el test phone y reporta qué devuelve. SOLO con ?diag=1
+        // (gasta una llamada extra a la IA). El bombeo rápido llama sin diag → liviano.
+        let diag = undefined;
+        if (new URL(request.url).searchParams.get('diag') === '1') {
+          diag = {};
+          try {
+            const ctx = await buildChatContext(env, tp, 40);
+            diag.ctx = ctx ? ('fullText len ' + String((ctx.fullText || '')).length) : 'NULL';
+            if (ctx) {
+              const imgs = await precotizImageBlocks(env, tp, 3, 3);
+              diag.imgs = imgs.length;
+              const out = await corteLlm(env, ctx.fullText, imgs);
+              diag.llm = out.ok ? { ok: true, data: out.data } : { ok: false, error: out.error, raw: out.raw };
+            }
+          } catch (e) { diag.exc = String((e && e.message) || e); }
+        }
+        return json({ ok: true, err, test_phone: tp, conv, pedidos_recientes: peds, ultimo_bot: lastBot, diag });
+      }
+      // POST /admin/corte/simulate → corre SOLO el cerebro (corteLlm) sobre un transcript sintético, sin
+      // mandar nada. Para testear escenarios. Body: { text, imgKey? }. imgKey = key R2 de una imagen a adjuntar.
+      if (request.method === 'POST' && path === '/admin/corte/simulate') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body = {};
+        try { body = await request.json(); } catch (_) {}
+        const text = String(body.text || '');
+        if (!text) return json({ error: 'falta text' }, 400);
+        let imgs = [];
+        if (body.imgKey && env.MEDIA) {
+          try {
+            const obj = await env.MEDIA.get(String(body.imgKey));
+            if (obj) {
+              const buf = await obj.arrayBuffer();
+              let mime = sniffImageMime(buf) || 'image/jpeg';
+              if (/^image\/(png|jpeg|webp|gif)$/.test(mime)) imgs.push({ type: 'image', source: { type: 'base64', media_type: mime, data: abToBase64(buf) } });
+            }
+          } catch (_) {}
+        }
+        let pre = '';
+        if (body.nuevo === true) pre = '[DATOS DEL CLIENTE (interno): Es cliente NUEVO, no está en la base. NO tenemos sus datos de envío.]\n\n';
+        else if (body.nuevo === false) pre = '[DATOS DEL CLIENTE (interno): Cliente registrado. Ya tenemos sus datos de envío.]\n\n';
+        const out = await corteLlm(env, pre + text, imgs);
+        return json({ ok: out.ok, imgs: imgs.length, data: out.data, error: out.error });
+      }
 
       // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
       // + cohorte revivible (últimos 60 días sin presupuesto). Solo admin; query pesada
@@ -14322,6 +15342,11 @@ const handler = {
     // (kv 'lanz_ago_on'); no manda nada hasta prenderlo.
     ctx.waitUntil(processLanzAgosto(env));
     ctx.waitUntil(processComunidadPromo(env));   // drip Pack Emprendedor a los 14 días del alta
+    ctx.waitUntil(processEventoPres(env));       // difusión seminario presencial (kv 'seminario_on')
+    // MiniSupernova SOLO en el cron */1 (NO en el */5 simultáneo): así nunca corren dos ticks en
+    // paralelo en los minutos múltiplos de 5 y el tope de 50/día es EXACTO (sin carrera entre ticks
+    // que lean el mismo contador de enviados-hoy y cada uno mande su cupo). Patrón de processPrecotizPilot.
+    if (event.cron === '* * * * *') ctx.waitUntil(processMiniSupernova(env));   // difusión a alumnos (kv 'minisupernova_on')
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
     ctx.waitUntil(processScheduledMessages(env));
@@ -14378,12 +15403,19 @@ const handler = {
     if (hAR >= 9 && hAR <= 20) ctx.waitUntil(processRecoveryQueue(env));
     // Aviso a Gaspar cuando el dataset ya tiene suficientes QualifiedLead (CAPI) para cambiar la campaña.
     if (hAR >= 9 && hAR <= 20) ctx.waitUntil(maybeCapiReadyNotice(env));
+    // Aviso de arranque del equipo (a Gaspar): ping en tiempo real cuando cada uno arranca a
+    // trabajar + resumen a las 9 AR de quién arrancó y quién no. Dedup por día adentro. Corre cada */5.
+    ctx.waitUntil(maybeAvisoArranque(env));
     // Reporte diario de ventas a las 21:00 AR (a Gaspar + su hermano). Dedup por día adentro.
     if (hAR === 21) ctx.waitUntil(maybeReporteDiario(env));
+    if (hAR === 21) ctx.waitUntil(maybeReporteHoras(env));
+    // Reporte diario de la campaña MiniSupernova a las 21:00 AR (a Gaspar + Bruno). Dedup por día adentro.
+    if (hAR === 21) ctx.waitUntil(maybeReporteMiniSupernova(env));
     // Aviso "leads para llamar" (fup 1 del presupuesto sin respuesta) a las 9 AR.
     if (hAR === 9) ctx.waitUntil(maybeReporteLlamar(env));
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
     if (hAR >= 8 && hAR < 21) ctx.waitUntil(processPendingTemplateSends(env));
+    if (hAR === 5) ctx.waitUntil(maybeAdhocCleanup(env));   // limpieza diaria de plantillas ad-hoc viejas (kv adhoc_cleanup_on/_days)
     // Monitor de status de templates: 1 vez por hora, no cada 5 min. El polling
     // es fallback; lo ideal es suscribir al webhook field 'message_template_status_update'
     // en el hub de 360dialog (lo manejamos abajo en notifyTemplateStatusChange).
@@ -14810,6 +15842,17 @@ async function waSendDocument(env, to, mediaId, filename, caption) {
     to: num,
     type: 'document',
     document: { id: mediaId, filename: filename || undefined, caption: caption || undefined }
+  });
+}
+
+async function waSendVideo(env, to, mediaId, caption) {
+  const num = normalizeArPhone(to);
+  if (!num) return { ok: false, status: 400, error: 'numero invalido' };
+  return waSend(env, {
+    messaging_product: 'whatsapp',
+    to: num,
+    type: 'video',
+    video: { id: mediaId, caption: caption || undefined }
   });
 }
 

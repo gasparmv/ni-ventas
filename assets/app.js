@@ -20,7 +20,7 @@ const OFRECER_BASE_NEGRA = false;
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Nadia', 'Diseñador', 'Abril'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Diseñador', 'Abril'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -64,7 +64,8 @@ const CONFIG = {
     // Multiplicadores
     reventa_mult: 0.8,        // reventa = trans × 0.8
     comision_pct: 0.05,       // 5% Joaco sobre trans
-    nv_nadia_comision_pct: 0.04,  // 4% Nadia (2da vendedora)
+    nv_nadia_comision_pct: 0.04,  // 4% Nadia (histórico, ya no se usa)
+    nv_facundo_comision_pct: 0.095,  // 9,5% Facundo (neutro perfecto: vende +5%, negocio queda igual que con Joaco)
     descuento_mult: 0.88,     // si m2 > descuento_min_m2
     descuento_min_m2: 100,
     recargo_5: 2,             // m2 ≤ 5  → trans × 2
@@ -194,11 +195,11 @@ function nadiaFijoMes(yyyymm) {
 // jul-2026. El filtro (p.comercial_id||'joaco')===vendedor deja a Joaco IGUAL que antes
 // (todo el histórico es suyo por el default 'joaco').
 function panelSueldoHtml(vendedor) {
-  const esNadia = vendedor === 'nadia';
-  const DESDE = esNadia ? '2026-07' : '2026-05';
+  const esNadia = vendedor === 'facundo';
+  const DESDE = esNadia ? '2026-08' : '2026-05';
   const params = getCotizadorParams();
   const rate = esNadia
-    ? ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.nadia) || params.nv_nadia_comision_pct || 0.04)
+    ? 0.10  // Facu VE 10% (lo prometido). El neutro real calibrado es 9,5% (vende +5% oculto) — ver nv_facundo_comision_pct.
     : ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.joaquin) || params.comision_pct || 0.05);
   const ratePct = +(rate * 100).toFixed(1);
   const fijoMes = esNadia ? nadiaFijoMes : joacoFijoMes;
@@ -206,7 +207,7 @@ function panelSueldoHtml(vendedor) {
   const periodMonths = (sel || availableMonths()).filter(m => m >= DESDE);
   let inner, periodLbl;
   if (!periodMonths.length) {
-    const desdeLbl = esNadia ? 'desde julio 2026' : 'desde mayo 2026';
+    const desdeLbl = esNadia ? 'desde agosto 2026' : 'desde mayo 2026';
     periodLbl = desdeLbl;
     inner = `<div style="color:var(--fg-subtle);font-size:13px">El sueldo se muestra <b>${desdeLbl}</b> en adelante. Elegí ese período (o "Todos") para verlo.</div>`;
   } else {
@@ -927,6 +928,7 @@ function calcCotizadorNuevo(input) {
   if (tipo === 'EXT') {
     precio += m2Sheet <= 25 ? p.ext_25 : m2Sheet <= 50 ? p.ext_50 : p.ext_99;
   }
+  if (typeof STATE !== 'undefined' && isFacundoUser(STATE.user)) precio *= 1.05;   // +5% oculto solo para Facundo (neutro perfecto)
   const transFinal = redondMult(precio, 500);
   const negroFinal = redondMult(transFinal * p.nv_negro_ratio, 500);
 
@@ -963,11 +965,15 @@ function loadUser() {
   let stored = [];
   try { stored = JSON.parse(localStorage.getItem('niventas.users') || 'null') || []; }
   catch(e) { stored = []; }
+  // Poda usuarios viejos que ya no existen (ej. 'Nadia', reemplazada por Facundo).
+  const OBSOLETOS = ['nadia'];
+  stored = stored.filter(u => !OBSOLETOS.includes(String(u).toLowerCase()));
   const merged = CONFIG.defaultUsers.slice();
   for (const u of stored) {
     if (!merged.some(x => x.toLowerCase() === String(u).toLowerCase())) merged.push(u);
   }
   STATE.users = merged;
+  try { localStorage.setItem('niventas.users', JSON.stringify(merged)); } catch(e) {}
   STATE.user = localStorage.getItem('niventas.user') || null;
   STATE.token = localStorage.getItem('niventas.token') || null;
   STATE.tokenUser = localStorage.getItem('niventas.tokenUser') || null;
@@ -999,8 +1005,8 @@ function _userKey(s) {
   return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
 function isJoaquinUser(s) { return _userKey(s) === 'joaquin' || _userKey(s) === 'joaco'; }
-// Nadia: 2da vendedora (rol comercial, como Joaco). Ve el Chat WA y trabaja carteles.
-function isNadiaUser(s) { return _userKey(s) === 'nadia'; }
+// Facundo: 2do vendedor (rol comercial, como Joaco). Ve el Chat WA y trabaja carteles.
+function isFacundoUser(s) { return _userKey(s) === 'facundo'; }
 function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
 // SOLO DISPLAY: el user "Gaspar" se muestra como "Administrador" en la UI. El valor INTERNO
 // sigue siendo "Gaspar" (login, isAdmin, API, gates de rol) → no rompe nada, es solo el tag visible.
@@ -1100,7 +1106,7 @@ async function logout() {
 // isAdmin requiere que el TOKEN sea de Gaspar (no solo el nombre activo). Sin esto,
 // un token de bajo privilegio podría usarse para mostrar la UI admin.
 function isAdmin() { return !!STATE.token && isGasparUser(STATE.tokenUser) && isGasparUser(STATE.user); }
-function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isNadiaUser(STATE.user) || isCursosUser(STATE.user)); }
+function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isFacundoUser(STATE.user) || isCursosUser(STATE.user)); }
 // Abril (rol cursos): SOLO ve la sección Chat WA, nada más.
 function isCursosOnly() { return isCursosUser(STATE.user); }
 function authHeaders() {
@@ -2102,15 +2108,15 @@ function render() {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
-  // Corpóreas: solo Joaquín + Gaspar. Si alguien más cae acá (hash directo), al dashboard.
-  if (STATE.view === 'corporeas' && !(isJoaquinUser(STATE.user) || isGasparUser(STATE.user))) {
+  // Corpóreas: Joaquín + Gaspar + Facundo. Si alguien más cae acá (hash directo), al dashboard.
+  if (STATE.view === 'corporeas' && !(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isFacundoUser(STATE.user))) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
   // Nadia (2da vendedora): set reducido por ahora. Views permitidas: dashboard (solo
   // su panel "Tu sueldo"), pedidos, presupuestos, cotizacion, chat. Si cae en otra
   // (seguimientos/actividad/etc. por hash directo), al dashboard.
-  if (isNadiaUser(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat'].includes(STATE.view)) {
+  if (isFacundoUser(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas'].includes(STATE.view)) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
@@ -2161,7 +2167,7 @@ function render() {
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
     if (isAdmin()) bindBusinessPanel();
-    else if (!isNadiaUser(STATE.user)) drawCharts();  // Nadia: dashboard reducido, sin gráficos
+    else if (!isFacundoUser(STATE.user)) drawCharts();  // Nadia: dashboard reducido, sin gráficos
   }
   if (STATE.view === 'panel-joaco') bindPanelJoaco();
   if (STATE.view === 'actividad') bindActividad();
@@ -2215,6 +2221,175 @@ function startSinCotizarWatch() {
   });
   fetchSinCotizarStatus();
   setInterval(() => { if (!pollBackoffActive()) fetchSinCotizarStatus(); }, 75000);
+}
+// ===== Modal "Crear OC" (Orden de Compra) — a pedido de Gaspar (ago-2026) =====
+// Arma la Orden de Compra desde un formulario (en vez de tipearla a mano), muestra un
+// PREVIEW editable y la manda al cliente por el chat con sendChatMessage. Al salir, el
+// backend ya la detecta (processOrdenesCompra): etiqueta POR PAGAR + aviso a Gaspar +
+// popup + vigilador de pago. Fase 1: SOLO front, auto-contenido (no toca el modal de pedidos).
+const OC_FONDO_OPTS = ['Transparente', 'Negro', 'Espejo', 'Transparente y vinilo'];
+const OC_CONTROLADOR_OPTS = ['no', 'slim', 'control remoto', 'app'];
+const OC_CONTROLADOR_PRECIO = { 'no': 0, 'slim': 18700, 'control remoto': 25000, 'app': 38000 };
+const OC_DATOS_PAGO = 'Datos de pago:\nMELINA VICTORIA TOGNOCCHI\nCBU: 3840200500000051390011\nAlias: neoninfinito.ok\nBanco: Ualá Bank S.A.U.';
+function ocMoney(n) { const x = Number(n) || 0; return '$' + String(x).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+function nuevoOcCartel() { return { cartel: '', medidas: '', color: '', fondo: 'Transparente', precio: '', controlador: 'no' }; }
+function ocCalcTotales(m) {
+  const total = (m.carteles || []).reduce((s, c) => {
+    const precio = Number(String(c.precio).replace(/\D/g, '')) || 0;
+    return s + precio + (OC_CONTROLADOR_PRECIO[c.controlador] || 0);
+  }, 0);
+  return { total, sena: Math.round(total / 2) };
+}
+function openCrearOcModal() {
+  if (!canCreateBriefs()) return; // solo carteles (comercial/admin) — oculto para cursos (Abril)
+  const phone = chatState.selectedPhone;
+  if (!phone) { toast('Abrí el chat del cliente primero'); return; }
+  const digits = String(phone).replace(/\D/g, '');
+  const esIG = digits.length > 14;
+  STATE.ocModal = {
+    numero: '', plataforma: esIG ? 'Instagram' : 'Whatsapp',
+    ubicacion: 'interior', total: '', sena: '', texto: '',
+    carteles: [nuevoOcCartel()]
+  };
+  STATE.ocModalOpen = true; STATE.ocModalSaving = false;
+  render();
+  setTimeout(() => { const el = document.getElementById('oc-cartel-0'); if (el) el.focus(); }, 60);
+}
+function cancelCrearOc() { STATE.ocModalOpen = false; render(); }
+// Compone el texto de la OC en el formato de la guía (arranca "Orden de compra:" y trae
+// Trabajo:/Total: que el backend necesita para detectarla y parsearla).
+function composeOcText(m) {
+  const { total, sena } = ocCalcTotales(m);
+  const totalUse = String(m.total).replace(/\D/g, '') ? Number(String(m.total).replace(/\D/g, '')) : total;
+  const senaUse = String(m.sena).replace(/\D/g, '') ? Number(String(m.sena).replace(/\D/g, '')) : sena;
+  const cs = m.carteles || [];
+  const multi = cs.length > 1;
+  const L = [];
+  L.push('Orden de compra:' + (String(m.numero).trim() ? ' Nro ' + String(m.numero).trim() : ''));
+  L.push('Plataforma: ' + m.plataforma);
+  cs.forEach((c, i) => {
+    const precioN = Number(String(c.precio).replace(/\D/g, '')) || 0;
+    L.push('');
+    if (multi) L.push('Cartel ' + (i + 1) + ':');
+    L.push('Trabajo: ' + (c.cartel || ''));
+    L.push('Medidas: ' + (c.medidas || ''));
+    L.push('Color: ' + (c.color || ''));
+    L.push('Fondo: ' + (c.fondo || ''));
+    L.push('Precio: ' + ocMoney(precioN));
+    L.push('Controlador: ' + (c.controlador || 'no'));
+  });
+  L.push('');
+  L.push('Ubicación: ' + (m.ubicacion || ''));
+  L.push('Total: ' + ocMoney(totalUse));
+  L.push('Seña del 50%: ' + ocMoney(senaUse));
+  L.push('');
+  L.push(OC_DATOS_PAGO);
+  return L.join('\n');
+}
+function readOcModalDOM() {
+  const m = STATE.ocModal; if (!m) return;
+  const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
+  ['numero', 'ubicacion', 'total', 'sena', 'texto'].forEach(f => { const x = v('oc-' + f); if (x !== undefined) m[f] = x; });
+  (m.carteles || []).forEach((c, i) => {
+    ['cartel', 'medidas', 'color', 'fondo', 'precio', 'controlador'].forEach(f => { const x = v(`oc-${f}-${i}`); if (x !== undefined) c[f] = x; });
+  });
+}
+function ocAddCartel() { readOcModalDOM(); STATE.ocModal.carteles.push(nuevoOcCartel()); render(); }
+function ocRemoveCartel(i) { readOcModalDOM(); STATE.ocModal.carteles.splice(i, 1); if (!STATE.ocModal.carteles.length) STATE.ocModal.carteles.push(nuevoOcCartel()); render(); }
+function renderOcCartelBlock(c, i, n) {
+  const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;color:var(--fg);font-size:13px';
+  const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
+  const fondoOpts = OC_FONDO_OPTS.map(o => `<option ${c.fondo === o ? 'selected' : ''}>${o}</option>`).join('');
+  const ctrlOpts = OC_CONTROLADOR_OPTS.map(o => `<option ${c.controlador === o ? 'selected' : ''}>${o}</option>`).join('');
+  return `
+    <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:11px;color:var(--accent-cyan);font-weight:700">Cartel ${i + 1}</span>
+        ${n > 1 ? `<button class="btn btn-ghost" data-oc-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
+      </div>
+      <div style="margin-bottom:6px"><label style="${lbl}">Trabajo / cartel *</label><input id="oc-cartel-${i}" value="${escapeHtml(c.cartel || '')}" placeholder="ej. Perfumería" style="${inp}"></div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><label style="${lbl}">Medidas *</label><input id="oc-medidas-${i}" value="${escapeHtml(c.medidas || '')}" placeholder="ej. 80x70" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Color *</label><input id="oc-color-${i}" value="${escapeHtml(c.color || '')}" placeholder="ej. Blanco cálido" style="${inp}"></div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <div style="flex:1"><label style="${lbl}">Fondo</label><select id="oc-fondo-${i}" style="${inp}">${fondoOpts}</select></div>
+        <div style="flex:1"><label style="${lbl}">Precio * $</label><input id="oc-precio-${i}" type="number" value="${escapeHtml(String(c.precio || ''))}" style="${inp}" data-oc-calc></div>
+        <div style="flex:1"><label style="${lbl}">Controlador</label><select id="oc-controlador-${i}" style="${inp}" data-oc-calc>${ctrlOpts}</select></div>
+      </div>
+    </div>`;
+}
+function renderCrearOcModal() {
+  if (!STATE.ocModalOpen || !STATE.ocModal) return '';
+  const m = STATE.ocModal;
+  const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;color:var(--fg);font-size:13px';
+  const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
+  const { total, sena } = ocCalcTotales(m);
+  return `
+    <div id="oc-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:290;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
+      <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:560px;width:100%;margin:auto;padding:var(--s-4)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
+          <h2 style="margin:0;font-size:16px">🧾 Crear orden de compra</h2>
+          <button id="oc-close" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <div style="width:110px"><label style="${lbl}">N° OC</label><input id="oc-numero" value="${escapeHtml(String(m.numero || ''))}" placeholder="opcional" style="${inp}"></div>
+          <div style="flex:1"><label style="${lbl}">Plataforma</label><input value="${escapeHtml(m.plataforma)}" disabled style="${inp};opacity:.6"></div>
+        </div>
+        <label style="${lbl}">Carteles de la orden</label>
+        <div id="oc-carteles">${m.carteles.map((c, i) => renderOcCartelBlock(c, i, m.carteles.length)).join('')}</div>
+        <button id="oc-add" class="btn btn-ghost" style="width:100%;margin-bottom:8px;font-size:12px">＋ Agregar otro cartel a la orden</button>
+        <div style="margin-bottom:8px"><label style="${lbl}">Ubicación</label><input id="oc-ubicacion" value="${escapeHtml(m.ubicacion || '')}" placeholder="interior / exterior" style="${inp}"></div>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <div style="flex:1"><label style="${lbl}">Total (auto, editable) $</label><input id="oc-total" type="number" value="${escapeHtml(String(m.total || ''))}" placeholder="${total}" style="${inp}"></div>
+          <div style="flex:1"><label style="${lbl}">Seña 50% (auto, editable) $</label><input id="oc-sena" type="number" value="${escapeHtml(String(m.sena || ''))}" placeholder="${sena}" style="${inp}"></div>
+        </div>
+        <button id="oc-gen" class="btn btn-ghost" style="width:100%;margin-bottom:6px;font-size:12px">🔄 Generar / actualizar el texto de la OC</button>
+        <label style="${lbl}">Texto que se le manda al cliente (revisalo / editalo)</label>
+        <textarea id="oc-texto" style="${inp};min-height:190px;font-family:inherit;line-height:1.45">${escapeHtml(m.texto || composeOcText(m))}</textarea>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:var(--s-3);padding-top:var(--s-2);border-top:1px solid var(--border)">
+          <button id="oc-cancel" class="btn btn-ghost">Cancelar</button>
+          <button id="oc-confirm" class="btn btn-cyan">${STATE.ocModalSaving ? 'Enviando…' : '🧾 Enviar OC al cliente'}</button>
+        </div>
+      </div>
+    </div>`;
+}
+function bindCrearOcModal() {
+  if (!STATE.ocModalOpen) return;
+  const c1 = document.getElementById('oc-close'); if (c1) c1.onclick = cancelCrearOc;
+  const c2 = document.getElementById('oc-cancel'); if (c2) c2.onclick = cancelCrearOc;
+  const bk = document.getElementById('oc-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'oc-backdrop') cancelCrearOc(); };
+  const add = document.getElementById('oc-add'); if (add) add.onclick = ocAddCartel;
+  document.querySelectorAll('[data-oc-remove]').forEach(b => b.onclick = () => ocRemoveCartel(parseInt(b.dataset.ocRemove, 10)));
+  // Al tocar precio/controlador, sugerir total+seña en el placeholder (sin re-render, no pierde foco).
+  document.querySelectorAll('[data-oc-calc]').forEach(el => el.addEventListener('input', () => {
+    readOcModalDOM();
+    const { total, sena } = ocCalcTotales(STATE.ocModal);
+    const tE = document.getElementById('oc-total'); if (tE && !tE.value) tE.placeholder = String(total);
+    const sE = document.getElementById('oc-sena'); if (sE && !sE.value) sE.placeholder = String(sena);
+  }));
+  const gen = document.getElementById('oc-gen'); if (gen) gen.onclick = () => { readOcModalDOM(); STATE.ocModal.texto = composeOcText(STATE.ocModal); render(); };
+  const cf = document.getElementById('oc-confirm'); if (cf) cf.onclick = confirmCrearOc;
+}
+async function confirmCrearOc() {
+  if (STATE.ocModalSaving) return;
+  readOcModalDOM();
+  const m = STATE.ocModal;
+  const phone = chatState.selectedPhone;
+  if (!phone) { toast('No hay chat abierto'); return; }
+  let texto = String(m.texto || '').trim();
+  if (!texto) texto = composeOcText(m);
+  if (!/Orden de compra:/.test(texto)) { toast('El texto debe empezar con "Orden de compra:" para que el sistema la detecte'); return; }
+  if (!/Trabajo\s*:/i.test(texto) || !/(Total|Precio)\s*:/i.test(texto)) { toast('Falta "Trabajo:" o "Total:" en el texto de la OC'); return; }
+  STATE.ocModalSaving = true; render();
+  try {
+    await sendChatMessage(phone, texto);
+    STATE.ocModalOpen = false; STATE.ocModalSaving = false; render();
+    toast('OC enviada ✓ — se etiqueta POR PAGAR y quedás avisado');
+  } catch (e) {
+    STATE.ocModalSaving = false; render();
+    toast('Error al enviar la OC: ' + (e && e.message || e));
+  }
 }
 function renderSinCotizarModal() {
   if (!_sinCotizarShouldShow()) return '';
@@ -2428,12 +2603,12 @@ function renderShell() {
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
-        ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
+        ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isFacundoUser(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
-        ${!isNadiaUser(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
+        ${!isFacundoUser(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>` : ''}
-        ${!isNadiaUser(STATE.user) ? `<button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>` : ''}
+        ${!isFacundoUser(STATE.user) ? `<button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>` : ''}
         ${canAccessChat() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
           <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '')}</span>
         </button>` : ''}
@@ -2454,6 +2629,7 @@ function renderShell() {
     <div id="toast" class="toast"></div>
     ${renderSinCotizarModal()}
     ${renderOcUrgenteModal()}
+    ${renderCrearOcModal()}
   `;
 }
 
@@ -2546,12 +2722,12 @@ function renderPrecotiz() {
       </div>
       <div class="muted" style="font-size:11px;margin-top:8px">Con el piloto prendido y en modo borrador, el bot arma los mensajitos y te avisa acá para que los apruebes. Solo vos ves estos chats hasta que junten los 3 datos.</div>
       <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <label style="display:flex;align-items:center;gap:8px">👤 Reparto a Nadia — leads por día:
+        <label style="display:flex;align-items:center;gap:8px">👤 Reparto a Facundo — leads por día:
           <input type="number" min="0" step="1" data-nadia-cuota value="${P.nadia_cuota != null ? P.nadia_cuota : 0}" style="width:64px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:5px 8px;color:var(--fg);font-size:13px">
         </label>
         <span class="muted" style="font-size:12px">hoy le tocaron ${P.nadia_hoy || 0}/${P.nadia_cuota || 0}</span>
       </div>
-      <div class="muted" style="font-size:11px;margin-top:6px">Cada lead NUEVO de carteles que entra se reparte: hasta ese tope por día va a Nadia (lo atiende ella desde el primer mensaje), el resto queda para Joaco. En 0, Nadia no recibe nada automático — le asignás a mano con el botón 👤N en cada chat.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">Cada lead NUEVO de carteles que entra se reparte: hasta ese tope por día va a Facundo (lo atiende él desde el primer mensaje), el resto queda para Joaco. En 0, Facundo no recibe nada automático — le asignás a mano con el botón 👤F en cada chat.</div>
     </div>
     ${(P.leads && P.leads.length) ? leadsHtml : '<div class="muted" style="font-size:13px">Todavía no entró ningún lead al piloto.</div>'}
   `;
@@ -2565,7 +2741,7 @@ function bindPrecotiz() {
   const modoSel = document.querySelector('[data-precotiz-modo]');
   if (modoSel) modoSel.onchange = async () => { await precotizControl({ modo: modoSel.value }); toast('Modo: ' + modoSel.value); };
   const nadiaCuotaInp = document.querySelector('[data-nadia-cuota]');
-  if (nadiaCuotaInp) nadiaCuotaInp.onchange = async () => { const q = Math.max(0, parseInt(nadiaCuotaInp.value, 10) || 0); await precotizControl({ nadia_cuota: q }); toast('Reparto a Nadia: ' + q + '/día'); reload(); };
+  if (nadiaCuotaInp) nadiaCuotaInp.onchange = async () => { const q = Math.max(0, parseInt(nadiaCuotaInp.value, 10) || 0); await precotizControl({ nadia_cuota: q }); toast('Reparto a Facundo: ' + q + '/día'); reload(); };
   document.querySelectorAll('[data-precotiz-approve]').forEach(el => el.onclick = async () => {
     const phone = el.dataset.precotizApprove;
     const ta = document.querySelector(`[data-precotiz-draft="${phone}"]`);
@@ -2596,7 +2772,7 @@ async function precotizControl(body) {
 // es un lead del piloto, muestra estado + datos juntados + (si hay) el borrador
 // del bot para aprobar/editar/descartar. '' si no aplica.
 function renderPrecotizChatBanner(phone) {
-  if (!isAdmin() || !STATE.precotiz || !Array.isArray(STATE.precotiz.leads)) return '';
+  if (!precotizChatVisible() || !STATE.precotiz || !Array.isArray(STATE.precotiz.leads)) return '';
   const lead = STATE.precotiz.leads.find(l => l.phone === phone);
   if (!lead) return '';
   let draft = [];
@@ -2614,7 +2790,7 @@ function renderPrecotizChatBanner(phone) {
         <span style="color:${frozen ? '#e06c6c' : 'var(--accent-cyan,#8FD4DE)'};font-weight:600">${frozen ? '🛑 bot frenado a mano en este chat' : '◐ ' + escapeHtml(estado)}</span>
         <span style="display:flex;gap:8px;align-items:center;font-size:11px">${dato(lead.tiene_foto, 'foto')} ${dato(lead.tiene_medidas, 'medidas')} ${dato(lead.tiene_intext, 'int/ext')}${mostrarFreno ? `<button id="precotiz-freeze-btn" data-frozen="${frozen ? '1' : '0'}" title="${frozen ? 'Reactivar el bot en este chat' : 'Frenar el bot en este chat — no vuelve a hablar acá'}" style="font-size:11px;padding:3px 10px;border-radius:var(--r-sm);cursor:pointer;background:transparent;border:1px solid ${frozen ? '#25D366' : '#e06c6c'};color:${frozen ? '#25D366' : '#e06c6c'};font-weight:600;white-space:nowrap">${frozen ? '▶ Reactivar bot' : '🛑 Frenar bot'}</button>` : ''}</span>
       </div>
-      ${draft.length ? `
+      ${(isAdmin() && draft.length) ? `
         <div style="margin-top:8px;background:var(--ink-100);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);padding:8px">
           <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:5px">Borrador del bot — esperando tu OK</div>
           <textarea id="precotiz-chat-draft" rows="${Math.min(12, draft.join('\n\n').split('\n').length + 1)}" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);font-size:13px;font-family:inherit;resize:vertical">${escapeHtml(draft.join('\n\n'))}</textarea>
@@ -2660,6 +2836,52 @@ function bindPrecotizChatBanner(phone) {
       toast(r.ok ? (wasFrozen ? '✓ Bot reactivado' : '🛑 Bot frenado en este chat') : 'Error');
     } catch (_) { toast('Error de red'); }
     await fetchPrecotiz(); render();
+  };
+}
+
+// ¿Puede ver el estado de pre cotización en el chat? Admin (Gaspar) y comercial (Joaco/Facu).
+function precotizChatVisible() { return !isCursosOnly() && ['admin', 'comercial'].includes(getUserRole()); }
+
+// Lead del piloto de pre cotización para un teléfono (o null).
+function precotizLeadFor(phone) {
+  if (!STATE.precotiz || !Array.isArray(STATE.precotiz.leads)) return null;
+  return STATE.precotiz.leads.find(l => l.phone === phone) || null;
+}
+
+// Etiqueta "Freno precotización" cuando el bot escaló el chat (freno de mano). La ven admin/Joaco/Facu.
+function renderPrecotizFrenoLabel(phone) {
+  if (!precotizChatVisible()) return '';
+  const lead = precotizLeadFor(phone);
+  if (!lead || lead.estado !== 'escalado') return '';
+  return `<span style="display:inline-block;background:rgba(224,108,108,.16);color:#e06c6c;font-weight:600;font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid rgba(224,108,108,.4)">🛑 Freno precotización</span>`;
+}
+
+// ¿El usuario descartó el cartel de freno de este chat? (por chat, en este navegador)
+function precotizFrenoDismissed(phone) {
+  try { return localStorage.getItem('precotizFrenoOff:' + phone) === '1'; } catch (_) { return false; }
+}
+
+// Cartelito al pie del chat (arriba del input) con el MOTIVO del freno de mano + cruz para
+// sacarlo y seguir respondiendo a mano. Lo ven admin/Joaco/Facu.
+function renderPrecotizFrenoCard(phone) {
+  if (!precotizChatVisible()) return '';
+  const lead = precotizLeadFor(phone);
+  if (!lead || lead.estado !== 'escalado') return '';
+  if (precotizFrenoDismissed(phone)) return '';
+  const motivo = lead.escalado_motivo || 'Proyecto que necesita atención humana.';
+  return `
+    <div id="precotiz-freno-card" style="margin:0 10px 8px;background:rgba(224,108,108,.10);border:1px solid rgba(224,108,108,.5);border-radius:var(--r-sm,8px);padding:10px 36px 10px 12px;position:relative;font-size:12.5px;color:var(--fg)">
+      <button id="precotiz-freno-x" title="Sacar este aviso y seguir respondiendo a mano" style="position:absolute;top:5px;right:7px;background:transparent;border:none;color:var(--fg-subtle);font-size:17px;line-height:1;cursor:pointer;padding:2px 5px">✕</button>
+      <div style="color:#e06c6c;font-weight:700;margin-bottom:3px">🛑 Freno de precotización</div>
+      <div style="line-height:1.45">${escapeHtml(motivo)}</div>
+    </div>`;
+}
+
+function bindPrecotizFrenoCard(phone) {
+  const x = document.getElementById('precotiz-freno-x');
+  if (x) x.onclick = () => {
+    try { localStorage.setItem('precotizFrenoOff:' + phone, '1'); } catch (_) {}
+    const c = document.getElementById('precotiz-freno-card'); if (c) c.remove();
   };
 }
 
@@ -3115,7 +3337,7 @@ function showCreateTemplateBroadcast(opts) {
 function renderDashboard() {
   // Nadia (2da vendedora): dashboard reducido -> SOLO su panel "Tu sueldo". No ve
   // las métricas del negocio (ventas totales, AOV, cobrado, gráficos, etc.).
-  if (isNadiaUser(STATE.user)) {
+  if (isFacundoUser(STATE.user)) {
     return `
     <div class="page-head">
       <div>
@@ -3123,7 +3345,7 @@ function renderDashboard() {
         <h1>Dashboard</h1>
       </div>
     </div>
-    ${panelSueldoHtml('nadia')}
+    ${panelSueldoHtml('facundo')}
   `;
   }
   const cur = pedidosDash();
@@ -3181,7 +3403,7 @@ function renderDashboard() {
       </div>`;
     })()}
 
-    ${isJoaquinUser(STATE.user) ? panelSueldoHtml('joaco') : (isNadiaUser(STATE.user) ? panelSueldoHtml('nadia') : '')}
+    ${isJoaquinUser(STATE.user) ? panelSueldoHtml('joaco') : (isFacundoUser(STATE.user) ? panelSueldoHtml('facundo') : '')}
 
     <div class="chart-grid">
       <div class="card chart-card">
@@ -8107,6 +8329,7 @@ async function loadChatContacts() {
         lastType: c.last_msg_type,
         unread: c.unread || 0,
         inbox: c.inbox || 'general',  // bandeja: general | cursos (para el botón 🎓)
+        pinPrivado: !!c.pin_privado,  // chat de Bruno: ADEMÁS aparece en la bandeja privada (sin salir de la suya)
         channel: c.channel || 'wa',   // canal: wa | ig (pestaña WhatsApp / Instagram)
         assigned_to: c.assigned_to || ''  // vendedor asignado (reparto Joaco/Nadia)
       };
@@ -8573,8 +8796,12 @@ function paraCotizarCount() {
   const l = paraCotizarLabel();
   if (!l) return 0;
   const cl = chatState.contactLabels || {};
+  // contactLabels es GLOBAL, pero cada vendedor ve solo SUS chats (scopeados por el
+  // backend en chatState.contacts). Contar solo dentro de los chats visibles, así el
+  // secundario (Facundo) ve el contador de SUS para-cotizar, no el total de Joaco.
+  const visibles = new Set((chatState.contacts || []).map(c => c.phone));
   let n = 0;
-  for (const p in cl) { if ((cl[p] || []).includes(l.id)) n++; }
+  for (const p in cl) { if (visibles.has(p) && (cl[p] || []).includes(l.id)) n++; }
   return n;
 }
 
@@ -9709,7 +9936,9 @@ function renderChat() {
   if (chatState.showArchived) {
     filtered = filtered.filter(c => isArchived(c.phone));
   } else if (chatState.showPrivadoOnly) {
-    filtered = filtered.filter(c => c.inbox === 'privado' && !isArchived(c.phone));
+    // Bandeja privada = movidos a 'privado' (inbox) + pin_privado de Bruno (que NO salieron de su
+    // bandeja original, Bruno los quiere a la vista para seguimientos).
+    filtered = filtered.filter(c => (c.inbox === 'privado' || c.pinPrivado) && !isArchived(c.phone));
   } else {
     filtered = filtered.filter(c => !isArchived(c.phone) && c.inbox !== 'privado');
   }
@@ -9846,7 +10075,7 @@ function renderContactItem(c) {
       ${avatarHtml(c.phone, c.name, 49)}
       <div class="chat-contact-info">
         <div class="chat-contact-top">
-          <div class="chat-contact-name">${c.inbox === 'privado' ? '🔒 ' : ''}${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
+          <div class="chat-contact-name">${(c.inbox === 'privado' || c.pinPrivado) ? '🔒 ' : ''}${escapeHtml(c.name || formatPhoneDisplay(c.phone))}</div>
           <div class="chat-contact-time${hasUnread ? ' unread' : ''}">${formatChatTime(c.lastTs)}</div>
         </div>
         <div class="chat-contact-bottom">
@@ -10087,6 +10316,7 @@ function renderChatConversation() {
       </div>
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
+        ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-oc" title="Crear la Orden de Compra y enviarla al cliente (se etiqueta POR PAGAR y quedás avisado)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 Crear OC</button>` : ''}
         ${(getUserRole() === 'comercial') ? (() => {
           const _lbls = chatState.labels || [];
           const _pre = _lbls.find(l => l.name === '🤖 Precotización');
@@ -10110,14 +10340,15 @@ function renderChatConversation() {
         })() : ''}
         ${getUserRole() === 'admin' ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
-          const _enNadia = _c && _c.assigned_to === 'nadia';
+          const _enNadia = _c && _c.assigned_to === 'facundo';
           // Reparto de vendedores: asignar/sacar el chat a Nadia (solo Gaspar). Sin asignar = lo ve Joaco.
-          return `<button class="btn-label-toggle${_enNadia ? ' has-note' : ''}" id="btn-nadia-toggle" title="${_enNadia ? 'Sacar de Nadia (vuelve a Joaco)' : 'Asignar este chat a Nadia'}" style="font-size:13px;font-weight:700;line-height:1">👤${_enNadia ? 'N✓' : 'N'}</button>`;
+          return `<button class="btn-label-toggle${_enNadia ? ' has-note' : ''}" id="btn-nadia-toggle" title="${_enNadia ? 'Sacar de Facundo (vuelve a Joaco)' : 'Asignar este chat a Facundo'}" style="font-size:13px;font-weight:700;line-height:1">👤${_enNadia ? 'F✓' : 'F'}</button>`;
         })() : ''}
         ${getUserRole() === 'admin' ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
-          const _enPriv = _c && _c.inbox === 'privado';
+          const _enPriv = _c && (_c.inbox === 'privado' || _c.pinPrivado);
           // Bandeja PRIVADA de Gaspar: mover/sacar un chat de clientes especiales que SOLO ve él.
+          // _enPriv incluye los pin_privado de Bruno (aparecen en la privada sin salir de su bandeja).
           return `<button class="btn-label-toggle${_enPriv ? ' has-note' : ''}" id="btn-privado-toggle" title="${_enPriv ? 'Sacar de tu bandeja Privada (lo vuelve a ver el equipo)' : 'Mover a tu bandeja PRIVADA — solo lo ves vos'}" style="font-size:15px;line-height:1">${_enPriv ? '🔒✓' : '🔒'}</button>`;
         })() : ''}
         <button class="btn-label-toggle ${getContactNote(phone) ? 'has-note' : ''}" id="btn-note" title="${getContactNote(phone) ? 'Editar nota' : 'Agregar nota'}">
@@ -10127,7 +10358,7 @@ function renderChatConversation() {
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z"/></svg>
         </button>
       </div>
-      <div class="chat-label-chips" id="chat-label-chips">${renderContactLabelChips(phone)}</div>
+      <div class="chat-label-chips" id="chat-label-chips">${renderPrecotizFrenoLabel(phone)}${renderContactLabelChips(phone)}</div>
     </div>
     ${renderChatNotePostit(phone)}
     ${renderAdAttributionBanner(phone)}
@@ -10142,6 +10373,7 @@ function renderChatConversation() {
     </button>
     ${render24hBanner()}
     <div id="suggest-panel" class="suggest-panel" style="display:none"></div>
+    ${renderPrecotizFrenoCard(phone)}
     <div class="chat-input-bar">
       ${['admin', 'comercial', 'cursos'].includes(getUserRole()) ? '<button class="btn-send btn-suggest" id="btn-suggest" title="Sugerir respuesta con IA">✨</button>' : ''}
       <button class="btn-send btn-attach" id="btn-attach" title="Adjuntar imagen"><svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M1.816 15.556v.002c0 1.502.584 2.912 1.646 3.972s2.472 1.647 3.974 1.647a5.58 5.58 0 003.972-1.645l9.547-9.548c.769-.768 1.147-1.767 1.058-2.817-.079-.968-.548-1.927-1.319-2.698-1.594-1.592-4.068-1.711-5.517-.262l-7.916 7.915c-.881.881-.792 2.25.214 3.261.501.501 1.134.79 1.737.79.558 0 1.031-.224 1.37-.564l5.582-5.58a.747.747 0 10-1.055-1.06l-5.58 5.58c-.172.172-.42.156-.614-.04-.508-.51-.427-1.122-.07-1.478l7.916-7.916c.866-.866 2.358-.764 3.46.34.556.557.876 1.203.918 1.818.036.526-.176 1.047-.595 1.466L10.11 18.526a4.09 4.09 0 01-2.913 1.205 4.09 4.09 0 01-2.913-1.205 4.09 4.09 0 01-1.205-2.913c0-1.1.428-2.134 1.205-2.911l8.647-8.646a.747.747 0 00-1.055-1.06l-8.647 8.646A5.58 5.58 0 001.816 15.556z"/></svg></button>
@@ -11649,7 +11881,7 @@ async function selectChatContact(phone) {
 
   // Refrescar el estado del piloto al abrir un chat, así el banner de pre
   // cotización (si aplica) muestra el borrador/datos al día. Solo Gaspar.
-  if (isAdmin()) { try { await fetchPrecotiz(); } catch (_) {} }
+  if (precotizChatVisible()) { try { await fetchPrecotiz(); } catch (_) {} }
   // Re-render conversation with actual messages
   if (STATE.view === 'chat') {
     const main = document.querySelector('.chat-main');
@@ -11705,7 +11937,7 @@ function scrollChatToBottom() {
   });
 }
 function bindChatConversation() {
-  if (isAdmin()) bindPrecotizChatBanner(chatState.selectedPhone);
+  if (precotizChatVisible()) { bindPrecotizChatBanner(chatState.selectedPhone); bindPrecotizFrenoCard(chatState.selectedPhone); }
   const ta = document.getElementById('chat-input');
   const btn = document.getElementById('chat-send-btn');
   const msgEl = document.getElementById('chat-messages');
@@ -11739,6 +11971,8 @@ function bindChatConversation() {
   // ese modal por si quedó abierto tras este render.
   const chatBriefBtn = document.getElementById('btn-chat-brief');
   if (chatBriefBtn) chatBriefBtn.onclick = chooseBriefTypeFromChat;
+  const chatOcBtn = document.getElementById('btn-chat-oc');
+  if (chatOcBtn) chatOcBtn.onclick = openCrearOcModal;
   const frenarBotBtn = document.getElementById('btn-frenar-bot');
   if (frenarBotBtn) frenarBotBtn.onclick = async () => {
     const _ph = chatState.selectedPhone;
@@ -11754,6 +11988,7 @@ function bindChatConversation() {
     render();
   };
   bindQuickCreateModal();
+  bindCrearOcModal();
   const backBtn = document.getElementById('chat-back-btn');
   bindChatPostit();
   // Hidratar los bubbles recién renderizados: inyectar acciones (chevron + iconos
@@ -12016,7 +12251,9 @@ async function handleTogglePrivado() {
   const phone = chatState.selectedPhone;
   if (!phone || getUserRole() !== 'admin') return;
   const c = (chatState.contacts || []).find(x => x.phone === phone);
-  const enPrivado = c && c.inbox === 'privado';
+  // "En privado" = movido a la bandeja privada (inbox) O pinneado por Bruno (pin_privado). En ambos
+  // casos el botón 🔒 lo SACA de la vista privada ({on:false} limpia inbox y pin_privado en el backend).
+  const enPrivado = c && (c.inbox === 'privado' || c.pinPrivado);
   const nombre = (c && c.contact_name) || formatPhoneDisplay(phone);
   const ok = await showConfirm(
     enPrivado
@@ -12032,7 +12269,10 @@ async function handleTogglePrivado() {
       body: JSON.stringify({ phone, on: !enPrivado })
     });
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
-    if (c) c.inbox = enPrivado ? 'general' : 'privado';
+    if (c) {
+      if (!enPrivado) { c.inbox = 'privado'; }               // mover a privada
+      else { if (c.inbox === 'privado') c.inbox = 'general'; c.pinPrivado = false; }  // sacar/des-pinnear (conserva cursos/corte)
+    }
     toast(enPrivado ? 'Sacado de Privado' : '🔒 Movido a tu bandeja Privada — solo lo ves vos');
     chatState.contactsLoaded = false;
     loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
@@ -12048,14 +12288,14 @@ async function handleToggleNadia() {
   const phone = chatState.selectedPhone;
   if (!phone || getUserRole() !== 'admin') return;
   const c = (chatState.contacts || []).find(x => x.phone === phone);
-  const enNadia = c && c.assigned_to === 'nadia';
-  const nuevo = enNadia ? '' : 'nadia';
+  const enNadia = c && c.assigned_to === 'facundo';
+  const nuevo = enNadia ? '' : 'facundo';
   const nombre = (c && c.contact_name) || formatPhoneDisplay(phone);
   const ok = await showConfirm(
     enNadia
-      ? `Sacar a "${nombre}" de Nadia.\n\nVuelve a la bandeja de Joaco.`
-      : `Asignar a "${nombre}" a Nadia.\n\nLo va a ver Nadia y sale de la bandeja de Joaco.`,
-    { title: enNadia ? 'Sacar de Nadia' : 'Asignar a Nadia', confirmLabel: enNadia ? 'Sacar' : '👤 Asignar', cancelLabel: 'Cancelar' }
+      ? `Sacar a "${nombre}" de Facundo.\n\nVuelve a la bandeja de Joaco.`
+      : `Asignar a "${nombre}" a Facundo.\n\nLo va a ver Facundo y sale de la bandeja de Joaco.`,
+    { title: enNadia ? 'Sacar de Facundo' : 'Asignar a Facundo', confirmLabel: enNadia ? 'Sacar' : '👤 Asignar', cancelLabel: 'Cancelar' }
   ).catch(() => false);
   if (!ok) return;
   try {
@@ -12066,7 +12306,7 @@ async function handleToggleNadia() {
     });
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
     if (c) c.assigned_to = nuevo;  // refleja al instante en el botón
-    toast(nuevo === 'nadia' ? '👤 Asignado a Nadia' : 'Devuelto a la bandeja de Joaco');
+    toast(nuevo === 'facundo' ? '👤 Asignado a Facundo' : 'Devuelto a la bandeja de Joaco');
     chatState.contactsLoaded = false;
     loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
   } catch (e) {
@@ -12268,6 +12508,9 @@ function bindChat() {
   if (isAdmin()) {
     bindPrecotizControl();
     // Carga inicial del estado del piloto (una vez al entrar a la sección chat).
+    if (!STATE._precotizInit) { STATE._precotizInit = true; fetchPrecotiz().then(() => { if (STATE.view === 'chat') render(); }); }
+  } else if (getUserRole() === 'comercial') {
+    // Joaco/Facu: cargan el estado del piloto (una vez) para ver el cartel de freno y los datos.
     if (!STATE._precotizInit) { STATE._precotizInit = true; fetchPrecotiz().then(() => { if (STATE.view === 'chat') render(); }); }
   }
   // Load data
@@ -12775,7 +13018,9 @@ function refreshContactList() {
   if (chatState.showArchived) {
     filtered = filtered.filter(c => isArchived(c.phone));
   } else if (chatState.showPrivadoOnly) {
-    filtered = filtered.filter(c => c.inbox === 'privado' && !isArchived(c.phone));
+    // Bandeja privada = movidos a 'privado' (inbox) + pin_privado de Bruno (que NO salieron de su
+    // bandeja original, Bruno los quiere a la vista para seguimientos).
+    filtered = filtered.filter(c => (c.inbox === 'privado' || c.pinPrivado) && !isArchived(c.phone));
   } else {
     filtered = filtered.filter(c => !isArchived(c.phone) && c.inbox !== 'privado');
   }
@@ -14278,8 +14523,8 @@ function renderBriefCard(b) {
               const _r = getUserRole();
               if (_r !== 'admin' && _r !== 'disenador') return '';
               const _c = String(b.comercial_id || '').toLowerCase();
-              const _nom = _c === 'nadia' ? 'Nadia' : (_c === 'joaco' ? 'Joaquín' : (_c || '—'));
-              const _col = _c === 'nadia' ? '#c084fc' : '#8FD4DE';
+              const _nom = _c === 'facundo' ? 'Facundo' : (_c === 'joaco' ? 'Joaquín' : (_c || '—'));
+              const _col = _c === 'facundo' ? '#c084fc' : '#8FD4DE';
               return `<span title="Vendedor: ${escapeHtml(_nom)}" style="background:${_col}22;color:${_col};font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600">${escapeHtml(_nom)}</span>`;
             })()}
             ${(() => {
@@ -14485,8 +14730,10 @@ function renderBriefDrawer() {
   const isDis = role === 'disenador' || role === 'admin';
   const esCorpBrief = data.tipo === 'corporea';
   let corpCj = {}; if (esCorpBrief) { try { corpCj = JSON.parse(data.corporea_json || '{}') || {}; } catch(e){} }
-  const corpSinLuz = esCorpBrief && corpCj.con_luz === false;
-  const corpPr = esCorpBrief ? calcCorporea({ ancho: data.ancho_cm, alto: data.alto_cm, con_luz: corpSinLuz ? '0' : '1', frente_material: corpCj.frente_material || 'impreso' }) : null;
+  const corpSecs = esCorpBrief ? corpSeccionesFromCj(corpCj, data) : [];
+  // El cartel se considera "sin luz" (acabados opacos) solo si TODAS las secciones son sin luz.
+  const corpSinLuz = esCorpBrief && corpSecs.length > 0 && corpSecs.every(s => String(s.con_luz) === '0');
+  const corpPr = esCorpBrief ? calcCorporeaTotal(corpSecs) : null;
   const corpAc = (field, val, l0, l1) => corpSinLuz ? '<span class="pill" style="font-size:11px">opaco</span>' : `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="translucido" ${String(val||'').startsWith('transl')?'selected':''}>${l0}</option><option value="opaco" ${!String(val||'').startsWith('transl')?'selected':''}>${l1}</option></select>`;
   const corpColorSel = (field, val) => {
     const baseKeys = Object.keys(CORP_COLOR_MAP);
@@ -14693,14 +14940,12 @@ function renderBriefDrawer() {
             </div>
           </div>` : ''}
           ${esCorpBrief ? `
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho (cm)</label><input type="number" step="1" data-bf="ancho_cm" value="${data.ancho_cm || ''}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"></div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Alto (cm)</label><input type="number" step="1" data-bf="alto_cm" value="${data.alto_cm || ''}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"></div>
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Iluminación</label><select data-corp-bf="con_luz" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="1" ${!corpSinLuz?'selected':''}>Con luz</option><option value="0" ${corpSinLuz?'selected':''}>Sin luz</option></select></div>
-          </div>
+          <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-2) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Secciones / tramos</div>
+          <div style="font-size:11px;color:var(--fg-mute);margin-bottom:6px">Cargá cada tramo del cartel (ancho, alto, luz y material). El precio suma todas las secciones; el render usa la foto del cartel completo.</div>
+          <div id="corp-secciones">${corpSecs.map(s => corpSeccionRowHtml(s, corpSecs.length > 1)).join('')}</div>
+          <button type="button" data-corp-sec-add style="width:100%;background:transparent;border:1px dashed var(--accent-cyan);border-radius:var(--r-sm);color:var(--accent-cyan);padding:7px;cursor:pointer;font-size:12px;margin-bottom:var(--s-2)">+ Agregar sección</button>
           <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-3) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Frente</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
-            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Material</label><select data-corp-bf="frente_material" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="impreso" ${(corpCj.frente_material||'impreso')!=='acrilico'?'selected':''}>Impreso</option><option value="acrilico" ${corpCj.frente_material==='acrilico'?'selected':''}>Acrílico</option></select></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Acabado</label>${corpAc('frente_acabado', corpCj.frente_acabado||'translucido','Translúcido','Opaco')}</div>
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Color</label>${corpColorSel('frente_color', corpCj.frente_color)}</div>
           </div>
@@ -14820,7 +15065,7 @@ function defaultCorpForm() {
     lat_acabado:'translucido', lat_color:'#ffffff',
     esp_acabado:'translucida', esp_color:'#ffffff' };
 }
-const CORP_PRECIOS = { conluz: { impreso: 320000, acrilico: 400000 }, sinluz: { impreso: 200000, acrilico: 300000 } };
+const CORP_PRECIOS = { conluz: { impreso: 450000, acrilico: 520000 }, sinluz: { impreso: 280000, acrilico: 330000 } };
 function calcCorporea(f) {
   const ancho = +f.ancho || 0, alto = +f.alto || 0;
   const m2 = (ancho * alto) / 10000;
@@ -14831,6 +15076,74 @@ function calcCorporea(f) {
   const margen = m2 <= 2 ? 2 : (m2 <= 5 ? 1.75 : 1.5);
   const precio = Math.round(costo * margen / 1000) * 1000;
   return { m2, conLuz, costoM2, costo, margen, precio };
+}
+// ===== SECCIONES / TRAMOS =====
+// Un corpóreo se puede hacer en varios tramos (secciones), cada uno con SU medida,
+// iluminación y material. El precio se calcula por sección (calcCorporea, margen por
+// el m² de CADA sección) y se SUMA. El render sigue usando la foto del cartel completo
+// (las secciones son solo para el cálculo). Un corpóreo viejo (sin 'secciones' en
+// corporea_json) se trata como UNA sección derivada de sus campos single → retrocompat.
+function calcCorporeaTotal(secciones) {
+  // Descartar tramos SIN medida real (ancho/alto vacío o 0): no ensucian el total, ni la
+  // persistencia (corporea_json.secciones), ni el presupuesto del cliente (evita "0x0 cm").
+  const secs = (secciones || []).filter(s => (+s.ancho > 0) && (+s.alto > 0)).map(s => {
+    const r = calcCorporea({ ancho: s.ancho, alto: s.alto, con_luz: s.con_luz, frente_material: s.frente_material });
+    return {
+      ancho_cm: +s.ancho || 0, alto_cm: +s.alto || 0,
+      con_luz: String(s.con_luz) !== '0',
+      frente_material: s.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
+      m2: r.m2, costo_m2: r.costoM2, margen: r.margen, costo: r.costo, precio: r.precio,
+    };
+  });
+  const precio = secs.reduce((a, s) => a + s.precio, 0);
+  const m2 = secs.reduce((a, s) => a + s.m2, 0);
+  const costo = secs.reduce((a, s) => a + s.costo, 0);
+  return { secciones: secs, precio, m2, costo, comision_joaco: Math.round(precio * 0.03) };
+}
+// Deriva el array de secciones (para el drawer) desde corporea_json. Si no hay
+// 'secciones' (brief viejo / 1 tramo), arma UNA sección desde los campos single.
+// Devuelve secciones con con_luz como '1'/'0' (string, para los <select> del drawer).
+function corpSeccionesFromCj(cj, data) {
+  cj = cj || {};
+  if (Array.isArray(cj.secciones) && cj.secciones.length) {
+    return cj.secciones.map(s => ({
+      ancho: (s.ancho_cm != null ? s.ancho_cm : (s.ancho || '')),
+      alto: (s.alto_cm != null ? s.alto_cm : (s.alto || '')),
+      con_luz: (s.con_luz === false || String(s.con_luz) === '0') ? '0' : '1',
+      frente_material: s.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
+    }));
+  }
+  const ancho = (data && data.ancho_cm) || cj.ancho_cm || '';
+  const alto = (data && data.alto_cm) || cj.alto_cm || '';
+  return [{ ancho, alto, con_luz: (cj.con_luz === false) ? '0' : '1', frente_material: cj.frente_material === 'acrilico' ? 'acrilico' : 'impreso' }];
+}
+// Lee las filas de sección del DOM del drawer (en orden). Cada fila expone sus inputs
+// con [data-sec-field]; NO usa [data-corp-bf] (ese es global y aplanaría todo en uno).
+function readCorpSeccionesDom() {
+  const rows = [];
+  document.querySelectorAll('#corp-secciones [data-corp-sec-row]').forEach(row => {
+    const g = (f) => { const el = row.querySelector(`[data-sec-field="${f}"]`); return el ? el.value : ''; };
+    rows.push({ ancho: g('ancho'), alto: g('alto'), con_luz: g('con_luz') || '1', frente_material: g('frente_material') || 'impreso' });
+  });
+  return rows;
+}
+// HTML de una fila de sección del drawer. removable=false oculta el botón de quitar
+// (cuando queda una sola sección). Los inputs usan [data-sec-field] para leerlos por fila.
+function corpSeccionRowHtml(sec, removable) {
+  sec = sec || {};
+  const sinLuz = String(sec.con_luz) === '0' || sec.con_luz === false;
+  const mat = sec.frente_material === 'acrilico' ? 'acrilico' : 'impreso';
+  const inS = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)';
+  const lb = 'display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px';
+  const av = (sec.ancho_cm != null ? sec.ancho_cm : (sec.ancho != null ? sec.ancho : ''));
+  const hv = (sec.alto_cm != null ? sec.alto_cm : (sec.alto != null ? sec.alto : ''));
+  return `<div data-corp-sec-row style="display:grid;grid-template-columns:1fr 1fr 1.1fr 1.1fr auto;gap:6px;align-items:end;margin-bottom:6px">
+    <div><label style="${lb}">Ancho (cm)</label><input type="number" step="1" data-sec-field="ancho" value="${av}" style="${inS}"></div>
+    <div><label style="${lb}">Alto (cm)</label><input type="number" step="1" data-sec-field="alto" value="${hv}" style="${inS}"></div>
+    <div><label style="${lb}">Iluminación</label><select data-sec-field="con_luz" style="${inS}"><option value="1" ${!sinLuz?'selected':''}>Con luz</option><option value="0" ${sinLuz?'selected':''}>Sin luz</option></select></div>
+    <div><label style="${lb}">Material</label><select data-sec-field="frente_material" style="${inS}"><option value="impreso" ${mat!=='acrilico'?'selected':''}>Impreso</option><option value="acrilico" ${mat==='acrilico'?'selected':''}>Acrílico</option></select></div>
+    <button type="button" data-corp-sec-remove title="Quitar sección" style="background:transparent;border:1px solid var(--border);border-radius:var(--r-sm);color:#FF5566;padding:8px 10px;cursor:pointer;height:37px;${removable?'':'visibility:hidden'}">🗑</button>
+  </div>`;
 }
 // Deriva el caso visual A-E (igual que el worker) para mostrarlo de referencia.
 function corporeaCaso(f) {
@@ -14847,25 +15160,62 @@ function corporeaCaso(f) {
 }
 // Contenido de la cajita de precio del drawer corpóreo (reusable para el live-update).
 function corpPriceBoxHtml(r) {
-  return `<div style="display:flex;justify-content:space-between;align-items:center;padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(r.precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${r.m2.toLocaleString('es-AR',{maximumFractionDigits:2})} m²${isAdmin()?` · costo ${fmtMoney(r.costo)} · ×${r.margen}`:''}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(r.precio*0.03))}</div></div>`;
+  r = r || {};
+  const secs = Array.isArray(r.secciones) ? r.secciones : null;
+  const multi = secs && secs.length > 1;
+  const m2 = Number(r.m2) || 0;
+  const precio = Number(r.precio) || 0;
+  const breakdown = multi
+    ? `<div style="font-size:10px;color:var(--fg-mute);margin-top:5px;line-height:1.5">${secs.map((s, i) => `Sección ${i + 1}: ${s.ancho_cm}×${s.alto_cm} cm${s.con_luz ? '' : ' · sin luz'}${s.frente_material === 'acrilico' ? ' · acrílico' : ''} — ${fmtMoney(s.precio)}`).join('<br>')}</div>`
+    : '';
+  const adminExtra = isAdmin()
+    ? (multi ? ` · ${secs.length} secciones`
+      : (secs && secs[0] ? ` · costo ${fmtMoney(r.costo || 0)} · ×${secs[0].margen}`
+        : (r.costo != null ? ` · costo ${fmtMoney(r.costo)} · ×${r.margen}` : '')))
+    : '';
+  return `<div style="padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final${multi ? ` (${secs.length} secciones)` : ''}</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${m2.toLocaleString('es-AR', { maximumFractionDigits: 2 })} m²${adminExtra}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(precio * 0.03))}</div></div>${breakdown}</div>`;
 }
 // Recalcula el precio del drawer corpóreo en vivo (sin re-render, mantiene foco).
 function updateCorpDrawerPrice() {
   const box = document.getElementById('corp-price-box');
   if (!box) return;
-  const val = (s, d) => { const el = document.querySelector(s); return el ? el.value : d; };
-  box.innerHTML = corpPriceBoxHtml(calcCorporea({
-    ancho: val('[data-bf="ancho_cm"]', 0), alto: val('[data-bf="alto_cm"]', 0),
-    con_luz: val('[data-corp-bf="con_luz"]', '1'), frente_material: val('[data-corp-bf="frente_material"]', 'impreso')
-  }));
+  box.innerHTML = corpPriceBoxHtml(calcCorporeaTotal(readCorpSeccionesDom()));
 }
 document.addEventListener('input', (ev) => {
   const t = ev.target;
-  if (t && t.matches && t.matches('[data-bf="ancho_cm"],[data-bf="alto_cm"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+  if (t && t.matches && t.matches('[data-bf="ancho_cm"],[data-bf="alto_cm"],[data-sec-field="ancho"],[data-sec-field="alto"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
 });
 document.addEventListener('change', (ev) => {
   const t = ev.target;
-  if (t && t.matches && t.matches('[data-corp-bf="con_luz"],[data-corp-bf="frente_material"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+  if (t && t.matches && t.matches('[data-corp-bf="con_luz"],[data-corp-bf="frente_material"],[data-sec-field="con_luz"],[data-sec-field="frente_material"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+});
+// Agregar / quitar secciones del drawer corpóreo (sin re-render: preserva los otros valores).
+document.addEventListener('click', (ev) => {
+  const addBtn = ev.target.closest && ev.target.closest('[data-corp-sec-add]');
+  if (addBtn) {
+    const cont = document.getElementById('corp-secciones');
+    if (cont) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = corpSeccionRowHtml({}, true);
+      const row = tmp.firstElementChild;
+      if (row) cont.appendChild(row);
+      cont.querySelectorAll('[data-corp-sec-row] [data-corp-sec-remove]').forEach(b => { b.style.visibility = 'visible'; });
+      updateCorpDrawerPrice();
+    }
+    return;
+  }
+  const rmBtn = ev.target.closest && ev.target.closest('[data-corp-sec-remove]');
+  if (rmBtn) {
+    const cont = document.getElementById('corp-secciones');
+    const row = rmBtn.closest('[data-corp-sec-row]');
+    if (cont && row && cont.querySelectorAll('[data-corp-sec-row]').length > 1) {
+      row.remove();
+      const rows = cont.querySelectorAll('[data-corp-sec-row]');
+      if (rows.length === 1) { const b = rows[0].querySelector('[data-corp-sec-remove]'); if (b) b.style.visibility = 'hidden'; }
+      updateCorpDrawerPrice();
+    }
+    return;
+  }
 });
 // Paleta de colores corpóreos (nombre → hex) — usada por el dropdown custom del drawer.
 const CORP_COLOR_MAP = {'Blanco':'#ffffff','Blanco cálido':'#fff1d6','Blanco frío':'#e9f1ff','Crema':'#f7efd6','Beige':'#e3d3a8','Marfil':'#fbf8ef','Negro':'#141414','Gris oscuro':'#454545','Gris':'#8a8a8a','Gris claro':'#c9c9c9','Plateado':'#c6cace','Rojo':'#e10600','Rojo oscuro':'#8b0000','Bordó':'#5c0a1e','Coral':'#ff6f5e','Rosa':'#ff5fa2','Rosa pastel':'#ffc2d4','Fucsia':'#ff2d8e','Magenta':'#cc0a78','Naranja':'#ff7a00','Naranja oscuro':'#cc5200','Ámbar':'#ffbf00','Amarillo':'#ffd400','Amarillo oro':'#f0c000','Dorado':'#d4af37','Verde lima':'#7ce000','Verde':'#1db954','Verde oscuro':'#0b6b35','Verde agua':'#22c9a9','Menta':'#9ff0c8','Celeste':'#5ec8ff','Cyan':'#00cfd4','Turquesa':'#1fc7c7','Azul':'#1565ff','Azul marino':'#0a2a66','Violeta':'#7c3aed','Lila':'#b794f6','Púrpura':'#6b21a8','Marrón':'#7b4a21','Chocolate':'#4a2c11'};
@@ -14916,7 +15266,18 @@ function corpPresupuestoFields(brief, cj) {
   const conLuz = !(cj.con_luz === false || cj.con_luz === '0' || cj.con_luz === 0 || cj.con_luz === 'no');
   const fTrans = String(cj.frente_acabado || 'translucido').toLowerCase().startsWith('transl');
   const mat = String(cj.frente_material) === 'acrilico' ? 'acrílico' : 'impreso';
-  const med = (cj.ancho_cm && cj.alto_cm) ? `${cj.ancho_cm}x${cj.alto_cm} cm` : (brief.medidas_libre || '');
+  const secsAll = Array.isArray(cj.secciones) ? cj.secciones.filter(s => (Number(s.ancho_cm) || 0) > 0 && (Number(s.alto_cm) || 0) > 0) : null;
+  const secs = (secsAll && secsAll.length) ? secsAll : null;   // defensivo: ignorar tramos 0x0 (datos viejos)
+  const multi = secs && secs.length > 1;
+  // Medidas: con varias secciones, resumen de UNA sola línea (las variables de plantilla de Meta
+  // NO admiten saltos de línea). Con una sola sección / brief viejo, el ancho x alto de siempre.
+  const med = multi
+    ? secs.map((s, i) => `Sección ${i + 1}: ${s.ancho_cm}x${s.alto_cm} cm${(s.con_luz === false || String(s.con_luz) === '0') ? ' sin luz' : ''}${s.frente_material === 'acrilico' ? ' acrílico' : ''}`).join(' · ')
+    : ((cj.ancho_cm && cj.alto_cm) ? `${cj.ancho_cm}x${cj.alto_cm} cm` : (brief.medidas_libre || ''));
+  // Umbral de bastidor (>1 m): la medida más grande ENTRE TODAS las secciones.
+  const maxDim = secs
+    ? Math.max(0, ...secs.flatMap(s => [Number(s.ancho_cm) || 0, Number(s.alto_cm) || 0]))
+    : Math.max(Number(cj.ancho_cm) || 0, Number(cj.alto_cm) || 0);
   const precio = brief.precio_final || cj.precio || 0;
 
   // Frente: material + color/diseño + acabado.
@@ -14943,7 +15304,7 @@ function corpPresupuestoFields(brief, cj) {
     conLuz,
     iluminacion: conLuz ? 'con luz LED' : 'sin iluminación',
     // Descripción del producto: cambia si el cartel supera 1 m de largo/alto (→ viene sobre bastidor de caño).
-    descripcion: (Math.max(Number(cj.ancho_cm) || 0, Number(cj.alto_cm) || 0) > 100)
+    descripcion: (maxDim > 100)
       ? (conLuz
           ? 'Con luz led 12v, incluye su fuente de alimentación a 220v. Viene montado sobre un bastidor de caño, ya listo para instalar muy fácilmente.'
           : 'Sin luz. Viene montado sobre un bastidor de caño, ya listo para instalar muy fácilmente.')
@@ -15340,6 +15701,10 @@ function renderCorpPopup() {
   const luz = cj.con_luz === false ? 'sin luz' : 'con luz';
   const mat = cj.frente_material === 'acrilico' ? 'acrílico' : 'impreso';
   const m2 = (typeof cj.m2 === 'number') ? cj.m2.toFixed(2) : '';
+  const secsAll = Array.isArray(cj.secciones) ? cj.secciones.filter(s => (Number(s.ancho_cm) || 0) > 0 && (Number(s.alto_cm) || 0) > 0) : null;
+  const secs = (secsAll && secsAll.length) ? secsAll : null;   // defensivo: ignorar tramos 0x0
+  const multi = secs && secs.length > 1;
+  const medHdr = multi ? `${secs.length} secciones` : `${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm`;
   return `
     <div data-corp-popup-bg style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:flex;align-items:center;justify-content:center;padding:var(--s-4)">
       <div style="background:var(--bg, #0A0A0F);border:1px solid var(--accent-cyan);border-radius:var(--r-md);max-width:560px;width:100%;max-height:90vh;overflow-y:auto;padding:var(--s-4)">
@@ -15348,26 +15713,29 @@ function renderCorpPopup() {
           <button class="btn btn-ghost btn-icon" data-corp-popup-close aria-label="Cerrar">✕</button>
         </div>
         <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:var(--s-3)">
-          <b>${escapeHtml(brief.cliente_nombre || 'Sin título')}</b> · ${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm${m2 ? ' · ' + m2 + ' m²' : ''} · corpórea · caso ${caso} · ${luz} · frente ${mat}
+          <b>${escapeHtml(brief.cliente_nombre || 'Sin título')}</b> · ${medHdr}${m2 ? ' · ' + m2 + ' m²' : ''} · corpórea${multi ? '' : ` · caso ${caso} · ${luz} · frente ${mat}`}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:14px;margin-bottom:var(--s-3);background:rgba(143,212,222,.04);padding:var(--s-3);border-radius:var(--r-sm)">
-          <div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco 3%</span><br><b>${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</b></div>
-          ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Costo · margen</span><br><b>${fmtMoney(cj.costo || 0)} · ×${cj.margen || ''}</b></div>` : '<div></div>'}
+          ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco 3%</span><br><b>${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</b></div>` : '<div></div>'}
+          ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Costo · margen</span><br><b>${fmtMoney(cj.costo || 0)}${multi ? ` · ${secs.length} secc.` : ` · ×${cj.margen || ''}`}</b></div>` : '<div></div>'}
           <div style="grid-column:1 / -1"><span style="color:var(--fg-subtle);font-size:11px">Precio final</span><br><b style="color:var(--accent-cyan);font-size:18px">${fmtMoney(brief.precio_final || 0)}</b></div>
         </div>
         ${isAdmin() ? `
         <div style="font-size:12px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);margin-bottom:var(--s-3)">
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent-cyan);margin-bottom:6px">🔒 Desglose de costos · solo admin</div>
           <table style="width:100%;font-family:ui-monospace,monospace;font-size:12px;color:var(--fg-subtle)">
-            <tr><td>Superficie</td><td style="text-align:right;color:var(--fg)">${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm = <b>${m2 || '?'} m²</b></td></tr>
+            ${multi
+              ? secs.map((s, i) => `<tr><td>Sección ${i + 1} · ${s.ancho_cm}×${s.alto_cm} (${s.frente_material === 'acrilico' ? 'acríl.' : 'impr.'}, ${s.con_luz ? 'c/luz' : 's/luz'})</td><td style="text-align:right;color:var(--fg)">${(Number(s.m2) || 0).toFixed(2)} m² · ×${s.margen} = <b>${fmtMoney(s.precio)}</b></td></tr>`).join('')
+                + `<tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Superficie total</td><td style="text-align:right;padding-top:5px;color:var(--fg)"><b>${m2 || '?'} m²</b></td></tr><tr><td>Costo base total</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo || 0)}</td></tr>`
+              : `<tr><td>Superficie</td><td style="text-align:right;color:var(--fg)">${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm = <b>${m2 || '?'} m²</b></td></tr>
             <tr><td>Costo/m² (${mat}, ${luz})</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo_m2 || 0)}</td></tr>
             <tr><td>Costo base (m² × costo/m²)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo || 0)}</td></tr>
-            <tr><td>Margen por superficie</td><td style="text-align:right;color:var(--fg)">×${cj.margen || '?'}</td></tr>
-            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio final (costo × margen)</td><td style="text-align:right;padding-top:5px"><b style="color:var(--accent-cyan)">${fmtMoney(brief.precio_final || 0)}</b></td></tr>
+            <tr><td>Margen por superficie</td><td style="text-align:right;color:var(--fg)">×${cj.margen || '?'}</td></tr>`}
+            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio final ${multi ? '(suma de secciones)' : '(costo × margen)'}</td><td style="text-align:right;padding-top:5px"><b style="color:var(--accent-cyan)">${fmtMoney(brief.precio_final || 0)}</b></td></tr>
             <tr><td>Comisión Joaco (3% — es costo)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</td></tr>
             <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Ganancia neta</b> (precio − costo − comisión)</td><td style="text-align:right;padding-top:5px;color:#4ade80"><b>${fmtMoney((brief.precio_final || 0) - (cj.costo || 0) - Math.round((brief.precio_final || 0) * 0.03))}</b></td></tr>
           </table>
-          <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Margen: ≤2 m² ×2 · 2–5 m² ×1.75 · +5 m² ×1.5 · costo/m²: impreso 320k / acrílico 400k (con luz), 200k / 300k (sin luz)</div>
+          <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Margen: ≤2 m² ×2 · 2–5 m² ×1.75 · +5 m² ×1.5 · costo/m²: impreso 450k / acrílico 520k (con luz), 280k / 330k (sin luz)</div>
         </div>
         ` : ''}
         <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto</label>
@@ -15468,7 +15836,7 @@ async function enviarCorporeaPresupuesto(briefId, textOverride) {
           body: JSON.stringify({
             cliente: brief.cliente_nombre || '',
             alto: cj.alto_cm || 0, ancho: cj.ancho_cm || 0,
-            neon: 0, tramos: 0, tipo: 'CORP', m2: cj.m2 || 0,
+            neon: 0, tramos: (Array.isArray(cj.secciones) ? cj.secciones.length : 0), tipo: 'CORP', m2: cj.m2 || 0,
             trans: brief.precio_final || 0, negro: 0, reventa: 0,
             descuento: 0, recargo: 0,
             telefono: tel, canal: 'WPP',
@@ -16316,25 +16684,39 @@ function readBriefDrawerForm() {
   // Corpóreas: si el drawer tiene specs (data-corp-bf), armamos corporea_json +
   // precio_final + comisión Joaco (3%) desde esos campos. No toca tipo (queda 'corporea').
   const corpEls = document.querySelectorAll('[data-corp-bf]');
-  if (corpEls.length) {
+  const secRows = readCorpSeccionesDom();
+  if (corpEls.length || secRows.length) {
     const cf = {};
     corpEls.forEach(el => { if (!el.disabled) cf[el.dataset.corpBf] = el.value; });
-    const ancho = +out.ancho_cm || +cf.ancho_cm || 0;
-    const alto  = +out.alto_cm  || +cf.alto_cm  || 0;
-    const sinLuz = String(cf.con_luz) === '0';
-    const r = calcCorporea({ ancho, alto, con_luz: cf.con_luz, frente_material: cf.frente_material });
+    // Secciones: si el drawer tiene filas, usarlas; si no (fallback raro), 1 sección del single legacy.
+    const secsIn = secRows.length ? secRows : [{
+      ancho: +out.ancho_cm || +cf.ancho_cm || 0, alto: +out.alto_cm || +cf.alto_cm || 0,
+      con_luz: cf.con_luz, frente_material: cf.frente_material,
+    }];
+    const agg = calcCorporeaTotal(secsIn);
+    const s1 = agg.secciones[0] || { ancho_cm: 0, alto_cm: 0, frente_material: 'impreso', costo_m2: 0, margen: 0 };
+    const anyLuz = agg.secciones.some(s => s.con_luz);   // el cartel "tiene luz" si CUALQUIER sección la tiene
+    const sinLuz = !anyLuz;
     out.corporea_json = JSON.stringify({
-      frente_material: cf.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
-      con_luz: !sinLuz,
+      // Campos single top-level = SECCIÓN 1 / totales -> retrocompat de todos los lectores viejos
+      // (popup, presupuesto, Sheet) y del prompt de render del worker (corporeaContexto lee estos).
+      frente_material: s1.frente_material,
+      con_luz: anyLuz,
       frente_acabado: sinLuz ? 'opaco' : cf.frente_acabado, frente_color: cf.frente_color,
       lat_acabado: sinLuz ? 'opaco' : cf.lat_acabado, lat_color: cf.lat_color,
       esp_acabado: sinLuz ? 'opaca' : cf.esp_acabado, esp_color: cf.esp_color,
-      ancho_cm: ancho, alto_cm: alto, m2: r.m2,
-      costo_m2: r.costoM2, margen: r.margen, costo: r.costo, precio: r.precio,
-      comision_joaco: Math.round(r.precio * 0.03)
+      ancho_cm: s1.ancho_cm, alto_cm: s1.alto_cm, m2: agg.m2,
+      costo_m2: s1.costo_m2, margen: s1.margen, costo: agg.costo, precio: agg.precio,
+      comision_joaco: agg.comision_joaco,
+      secciones: agg.secciones,   // NUEVO: desglose por tramo para precio/presupuesto
     });
-    out.precio_final = r.precio;
-    out.m2 = r.m2;
+    out.precio_final = agg.precio;   // TOTAL = suma de secciones (calcCorporeaTotal ya descartó las vacías)
+    out.m2 = agg.m2;
+    // top-level ancho/alto = 1ª sección CON medida (agg.secciones ya viene filtrado). Lo necesitan
+    // la auto-transición a 'listo' (exige ancho/alto>0) y la card. Si NINGUNA sección tiene medida,
+    // NO tocamos ancho_cm/alto_cm: quedan undefined -> el PATCH no los manda -> el backend conserva
+    // el valor previo en vez de pisarlo con 0.
+    if (s1.ancho_cm > 0 && s1.alto_cm > 0) { out.ancho_cm = s1.ancho_cm; out.alto_cm = s1.alto_cm; }
   }
   return out;
 }
@@ -16491,7 +16873,7 @@ function renderBriefCotizadorPopup() {
             <div><span style="color:var(--fg-subtle);font-size:11px">Margen objetivo</span><br><b>${Math.round(r.margen*100)}%</b></div>
           ` : `
             <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${r.m2.toFixed(2)}</b></div>
-            <div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>
+            ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>` : '<div></div>'}
           `}
           <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.transFinal)}</b></div>
           ${OFRECER_BASE_NEGRA ? `<div><span style="color:var(--fg-subtle);font-size:11px">Acrílico negro</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.negroFinal)}</b></div>` : ''}
@@ -17599,6 +17981,7 @@ function bindCotizacion() {
 
   // ===== Quick-create modal (paste/drop sobre A cotizar) =====
   bindQuickCreateModal();
+  bindCrearOcModal();
 
   // ===== Team chat widget (flotante) =====
   const fab = document.getElementById('team-chat-fab');
