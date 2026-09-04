@@ -6306,6 +6306,8 @@ async function maybeAvisoArranque(env) {
   try {
     if ((await kvGet(env, 'aviso_arranque_on', '1')) !== '1') return;
     try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS user_activity (user TEXT PRIMARY KEY, last_active TEXT)").run(); } catch (_) {}
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS user_activity_log (user TEXT, ts TEXT)").run(); } catch (_) {}
+    try { await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_ual_user_ts ON user_activity_log (user, ts)").run(); } catch (_) {}
     const nowMs = Date.now();
     const arAR = new Date(nowMs - 3 * 3600 * 1000);
     const hAR = arAR.getUTCHours();
@@ -6342,6 +6344,68 @@ async function maybeAvisoArranque(env) {
       if (!ok) { try { const r = await waSendText(env, gaspar, texto); ok = !!(r && r.ok); } catch (_) {} }
       if (ok) await kvSet(env, 'arranque_resumen_sent', fechaAR);
     }
+  } catch (_) {}
+}
+
+// ===== Horas trabajadas del equipo (a pedido de Gaspar, 4-sep) =====
+// Del historial user_activity_log (una marca cada ≤5 min de actividad real en el CRM) calcula,
+// por cada vigilado y para el día AR: hora de arranque, hora del último movimiento, duración
+// (arranque→fin) y las PAUSAS de +1h (tramos sin tocar el CRM). Se manda por WhatsApp al cierre
+// del día (21 AR) con la plantilla reporte_horas_equipo + fallback a texto libre. Dedup por día.
+function _fmtDur(mins) {
+  if (mins < 0) mins = 0;
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return h + 'h' + (m ? String(m).padStart(2, '0') : '');
+}
+async function buildHorasEquipo(env) {
+  const out = [];
+  for (const w of AVISO_WORKERS) {
+    let rows = [];
+    try {
+      rows = (await env.DB.prepare(
+        `SELECT ts FROM user_activity_log WHERE user = ? AND ts >= ${REPORTE_DIA_DESDE} AND ts < ${REPORTE_DIA_HASTA} ORDER BY ts`
+      ).bind(w.id).all()).results || [];
+    } catch (_) {}
+    if (!rows.length) { out.push({ nombre: w.nombre, trabajo: false }); continue; }
+    const first = rows[0].ts, last = rows[rows.length - 1].ts;
+    const mins = Math.round((new Date(last) - new Date(first)) / 60000);
+    const gaps = [];
+    for (let i = 1; i < rows.length; i++) {
+      const d = Math.round((new Date(rows[i].ts) - new Date(rows[i - 1].ts)) / 60000);
+      if (d > 60) gaps.push({ desde: _arHHMM(rows[i - 1].ts), hasta: _arHHMM(rows[i].ts), min: d });
+    }
+    const gapMin = gaps.reduce((s, g) => s + g.min, 0);
+    out.push({ nombre: w.nombre, trabajo: true, arranque: _arHHMM(first), fin: _arHHMM(last), mins, netMins: Math.max(0, mins - gapMin), gaps });
+  }
+  return out;
+}
+function formatLineaHoras(e) {
+  if (!e.trabajo) return e.nombre + ': no laburó en el CRM';
+  let s = e.nombre + ': ' + e.arranque + '–' + e.fin + ' · ' + _fmtDur(e.mins);
+  if (e.gaps.length) {
+    const gs = e.gaps.map(g => g.desde + '–' + g.hasta).join(', ');
+    s += ' · ' + e.gaps.length + (e.gaps.length === 1 ? ' pausa' : ' pausas') + ' +1h (' + gs + ')';
+  }
+  return s;
+}
+async function maybeReporteHoras(env) {
+  try {
+    if ((await kvGet(env, 'reporte_horas_on', '1')) !== '1') return;
+    const arAR = new Date(Date.now() - 3 * 3600 * 1000);
+    if (arAR.getUTCHours() < 21) return;                       // recién al cierre del día (21 AR)
+    const fechaAR = arAR.toISOString().slice(0, 10);
+    if ((await kvGet(env, 'reporte_horas_sent', '')) === fechaAR) return;
+    const eq = await buildHorasEquipo(env);
+    const fechaDisplay = fechaAR.split('-').reverse().join('/');
+    const lineas = eq.map(formatLineaHoras);
+    const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+    // Plantilla reporte_horas_equipo: {{1}}=fecha, {{2..5}}=una línea por vigilado (Joaco/Facu/Abril/Emma).
+    const params = [fechaDisplay, ...lineas].map(String);
+    const texto = '⏱️ Horas del equipo ' + fechaDisplay + '\n\n' + lineas.join('\n') + '\n\nUna "pausa +1h" = 1h sin tocar el CRM.';
+    let ok = false;
+    try { const r = await waSendTemplate(env, gaspar, 'reporte_horas_equipo', 'es_AR', params); ok = !!(r && r.ok); } catch (_) {}
+    if (!ok) { try { const r = await waSendText(env, gaspar, texto); ok = !!(r && r.ok); } catch (_) {} }
+    if (ok) await kvSet(env, 'reporte_horas_sent', fechaAR);
   } catch (_) {}
 }
 
@@ -10160,7 +10224,18 @@ const handler = {
         if (_cw) {
           const _nowA = new Date().toISOString();
           const _thrA = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-          ctx.waitUntil(env.DB.prepare("INSERT INTO user_activity (user, last_active) VALUES (?, ?) ON CONFLICT(user) DO UPDATE SET last_active = excluded.last_active WHERE user_activity.last_active < ?").bind(_cw, _nowA, _thrA).run().catch(() => {}));
+          // Estampa last_active y, SOLO cuando pasó el throttle (>5 min o primera del día),
+          // agrega una marca al historial user_activity_log. Ese historial permite calcular
+          // horas trabajadas y pausas >1h en el reporte diario. La lectura extra es barata (4 vigilados).
+          ctx.waitUntil((async () => {
+            try {
+              const _r = await env.DB.prepare("SELECT last_active FROM user_activity WHERE user = ?").bind(_cw).first();
+              if (!_r || !_r.last_active || _r.last_active < _thrA) {
+                await env.DB.prepare("INSERT INTO user_activity (user, last_active) VALUES (?, ?) ON CONFLICT(user) DO UPDATE SET last_active = excluded.last_active").bind(_cw, _nowA).run();
+                await env.DB.prepare("INSERT INTO user_activity_log (user, ts) VALUES (?, ?)").bind(_cw, _nowA).run();
+              }
+            } catch (_) {}
+          })());
         }
       } catch (_) {}
 
@@ -14957,6 +15032,7 @@ const handler = {
     ctx.waitUntil(maybeAvisoArranque(env));
     // Reporte diario de ventas a las 21:00 AR (a Gaspar + su hermano). Dedup por día adentro.
     if (hAR === 21) ctx.waitUntil(maybeReporteDiario(env));
+    if (hAR === 21) ctx.waitUntil(maybeReporteHoras(env));
     // Reporte diario de la campaña MiniSupernova a las 21:00 AR (a Gaspar + Bruno). Dedup por día adentro.
     if (hAR === 21) ctx.waitUntil(maybeReporteMiniSupernova(env));
     // Aviso "leads para llamar" (fup 1 del presupuesto sin respuesta) a las 9 AR.
