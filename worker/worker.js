@@ -783,8 +783,14 @@ const AD_LABELS = {
   '120244506326770143':'Mostranos tu Local (retargeting)','120244506326740143':'Tu Marca en Neon Led (retargeting)',
   '120245296257830143':'COPA-REGALO (retargeting)','120243515675710143':'antes y despues (retargeting)',
   '120243077278850143':'Franquicias - resolver (b2b)','120239287134360143':'Tercerizacion (b2b)',
-  '120239287396020143':'Franquicias (b2b)','120242991012990143':'Reventa (b2b)'
+  '120239287396020143':'Franquicias (b2b)','120242991012990143':'Reventa (b2b)',
+  // Corpóreas (letras 3D): creativos NUEVOS (26/8) que viven DENTRO de la campaña Carteles B2C.
+  // Se etiquetan aparte para que NO se cuenten como b2c (su economía es distinta).
+  '120249428135510143':'Corpóreas (corporeas)','120249428166590143':'Corpóreas (corporeas)',
+  '120249428108890143':'Corpóreas (corporeas)','120249427968160143':'Corpóreas (corporeas)'
 };
+// ad_ids de los creativos de corpóreas (para separar su gasto ad-level de la campaña Carteles B2C).
+const CORPOREAS_ADS = ['120249428135510143', '120249428166590143', '120249428108890143', '120249427968160143'];
 function adLabelFromSource(sourceId, headline) {
   if (AD_LABELS[sourceId]) return AD_LABELS[sourceId];
   const h = String(headline || '').toLowerCase();
@@ -803,12 +809,14 @@ const CARTELES_CAMPAIGNS = {
   '120239284677530143': 'b2b',         // Neon B2B FORM - Campana
   '120248248940760143': 'b2b',         // Neon B2B FORM - Campana - Copia
   '120248245464960143': 'b2b',         // Neon B2B FORM - Campana - Optimizado
-  '120239191828290143': 'b2b'          // Neon B2B (inactivo)
+  '120239191828290143': 'b2b',         // Neon B2B (inactivo)
+  'corporeas': 'corporeas'             // sintético: gasto ad-level de los creativos de corpóreas
 };
 // Vertical a partir del TEXTO de un ad (pedidos.ad o etiqueta): parsea el sufijo entre paréntesis.
 // Matchea (b2c)/(b2c*), (retargeting), (b2b)/(b2b*)/(b2b form)/(b2b(. '' si no es carteles-ad.
 function verticalOfAdText(txt) {
   const t = String(txt || '').toLowerCase();
+  if (t.indexOf('(corporea') >= 0) return 'corporeas';
   if (t.indexOf('(retarget') >= 0) return 'retargeting';
   if (t.indexOf('(b2b') >= 0) return 'b2b';
   if (t.indexOf('(b2c') >= 0) return 'b2c';
@@ -856,7 +864,7 @@ async function traceAdForPedido(env, pedido) {
 async function traceUntaggedPedidos(env) {
   let n = 0;
   try {
-    const rows = await env.DB.prepare("SELECT id, cartel, numero, telefono FROM pedidos WHERE COALESCE(ad,'')='' AND cartel NOT LIKE '%orpore%' AND fecha >= date('now','-120 days') LIMIT 30").all();
+    const rows = await env.DB.prepare("SELECT id, cartel, numero, telefono FROM pedidos WHERE COALESCE(ad,'')='' AND fecha >= date('now','-120 days') LIMIT 30").all();
     for (const p of (rows.results || [])) {
       const t = await traceAdForPedido(env, p);
       if (t.ad) {
@@ -5188,6 +5196,31 @@ async function syncMetaAdSpend(env, opts = {}) {
       pages++;
     }
   } catch (e) { error = String(e); }
+  // Gasto AD-level de los creativos de corpóreas (viven DENTRO de Carteles B2C): se suman por día y
+  // se guardan bajo campaign_id sintético 'corporeas' para poder restarlos de B2C en el panel.
+  try {
+    const filt = encodeURIComponent(JSON.stringify([{ field: 'ad.id', operator: 'IN', value: CORPOREAS_ADS }]));
+    let u2 = `https://graph.facebook.com/v21.0/act_${acct}/insights?level=ad&fields=spend,impressions,clicks&time_increment=1&time_range=${tr}&filtering=${filt}&limit=500&access_token=${encodeURIComponent(token)}`;
+    const byDay = {};
+    let p2 = 0;
+    while (u2 && p2 < 40) {
+      const r = await fetch(u2); const j = await r.json();
+      if (j.error) break;
+      for (const row of (j.data || [])) {
+        const day = String(row.date_start || ''); if (!day) continue;
+        if (!byDay[day]) byDay[day] = { s: 0, i: 0, c: 0 };
+        byDay[day].s += parseFloat(row.spend || 0) || 0; byDay[day].i += parseInt(row.impressions || 0) || 0; byDay[day].c += parseInt(row.clicks || 0) || 0;
+      }
+      u2 = (j.paging && j.paging.next) || ''; p2++;
+    }
+    for (const day of Object.keys(byDay)) {
+      try {
+        await env.DB.prepare("INSERT INTO meta_ad_spend (campaign_id, day, spend_usd, impressions, clicks, updated_at) VALUES ('corporeas',?,?,?,?,?) ON CONFLICT(campaign_id, day) DO UPDATE SET spend_usd=excluded.spend_usd, impressions=excluded.impressions, clicks=excluded.clicks, updated_at=excluded.updated_at")
+          .bind(day, byDay[day].s, byDay[day].i, byDay[day].c, now).run();
+        count++;
+      } catch (_) {}
+    }
+  } catch (_) {}
   return { ok: !error, count, pages, error, since, until };
 }
 
@@ -5208,7 +5241,7 @@ async function buildAdsFunnel(env, opts = {}) {
   const rate = Number(opts.rate) || 1400;
   const untilEx = new Date(new Date(until + 'T00:00:00Z').getTime() + 24 * 3600 * 1000).toISOString().slice(0, 10);
   const sinceWide = new Date(new Date(since + 'T00:00:00Z').getTime() - 120 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-  const VS = ['b2c', 'retargeting', 'b2b'];
+  const VS = ['b2c', 'retargeting', 'b2b', 'corporeas'];
   const agg = {}; VS.forEach(v => agg[v] = { vertical: v, gasto_usd: 0, leads: 0, presup: 0, presup_monto: 0, ventas: 0, ingresos: 0 });
   const norm = p => String(p || '').replace(/[^\d]/g, '');
 
@@ -5222,6 +5255,9 @@ async function buildAdsFunnel(env, opts = {}) {
       if (r.u && r.u > spendUpdated) spendUpdated = r.u;
     }
   } catch (_) {}
+  // Los ads de corpóreas viven DENTRO de la campaña Carteles B2C -> su gasto ya está sumado en b2c.
+  // Se lo restamos a b2c (para que b2c quede "solo neon") y queda en la fila corpóreas aparte.
+  agg.b2c.gasto_usd = Math.max(0, agg.b2c.gasto_usd - agg.corporeas.gasto_usd);
 
   // ---- mapa teléfono->vertical + LEADS de CTWA (b2c / retargeting) ----
   // b2c y retargeting entran por click-to-WhatsApp (wa_ad_attributions). B2B NO: entra por el
@@ -5236,7 +5272,7 @@ async function buildAdsFunnel(env, opts = {}) {
       if (String(r.ts).slice(0, 10) < since) continue; // solo touches del período
       const p = norm(r.phone); if (seen.has(p)) continue; seen.add(p);
       const v = verticalOfSource(r.source_id, r.headline);
-      if ((v === 'b2c' || v === 'retargeting') && agg[v]) agg[v].leads++;
+      if ((v === 'b2c' || v === 'retargeting' || v === 'corporeas') && agg[v]) agg[v].leads++;
     }
   } catch (_) {}
 
@@ -5264,29 +5300,36 @@ async function buildAdsFunnel(env, opts = {}) {
   } catch (_) {}
 
   // ---- VENTAS + INGRESOS + MIX (pedidos del período) ----
-  const mix = { b2c: 0, retargeting: 0, b2b: 0, linkbio: 0, directo: 0, frecuente: 0, referido: 0, revisar: 0 };
+  // Se incluyen los pedidos corpóreos (antes se excluían): los que vienen del AD de corpóreas
+  // cuentan en la fila 'corporeas'; el corpóreo ORGÁNICO (sin ad) queda fuera del mix de carteles.
+  const mix = { corporeas: 0, b2c: 0, retargeting: 0, b2b: 0, linkbio: 0, directo: 0, frecuente: 0, referido: 0, revisar: 0 };
   try {
-    const rs = await env.DB.prepare("SELECT ad, numero, fecha, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE cartel NOT LIKE '%orpore%' AND fecha>=? AND fecha<?").bind(since, untilEx).all();
+    const rs = await env.DB.prepare("SELECT ad, cartel, numero, fecha, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE fecha>=? AND fecha<?").bind(since, untilEx).all();
     const ordVenta = {}; VS.forEach(v => ordVenta[v] = new Set());
     const ordMix = new Set();
     for (const r of (rs.results || [])) {
       const k = String(r.numero) + '|' + String(r.fecha);
-      const v = verticalOfAdText(r.ad);
+      const esCorporeo = /orpore/i.test(String(r.cartel || ''));
+      let v = verticalOfAdText(r.ad);
+      if (esCorporeo && v !== 'corporeas') v = ''; // corpóreo que no vino del ad de corpóreas -> orgánico
       if (v && agg[v]) {
         agg[v].ingresos += (r.monto || 0);
         if (!ordVenta[v].has(k)) { ordVenta[v].add(k); agg[v].ventas++; }
       }
-      // MIX: una vez por orden
+      // MIX: una vez por orden. El corpóreo orgánico (producto distinto, sin ad) queda afuera.
       if (!ordMix.has(k)) {
         ordMix.add(k);
-        const t = String(r.ad || '').toLowerCase();
-        if (v) mix[v]++;
-        else if (t.indexOf('revisar') === 0) mix.revisar++;
-        else if (t.indexOf('link bio') >= 0) mix.linkbio++;
-        else if (t.indexOf('frecuente') >= 0) mix.frecuente++;
-        else if (t.indexOf('referido') >= 0) mix.referido++;
-        else if (t.indexOf('directo') >= 0) mix.directo++;
-        else mix.revisar++; // vacío / sin trazar -> a revisar
+        if (esCorporeo && v !== 'corporeas') { /* corpóreo orgánico: fuera del mix de carteles */ }
+        else {
+          const t = String(r.ad || '').toLowerCase();
+          if (v) mix[v]++;
+          else if (t.indexOf('revisar') === 0) mix.revisar++;
+          else if (t.indexOf('link bio') >= 0) mix.linkbio++;
+          else if (t.indexOf('frecuente') >= 0) mix.frecuente++;
+          else if (t.indexOf('referido') >= 0) mix.referido++;
+          else if (t.indexOf('directo') >= 0) mix.directo++;
+          else mix.revisar++; // vacío / sin trazar -> a revisar
+        }
       }
     }
   } catch (_) {}

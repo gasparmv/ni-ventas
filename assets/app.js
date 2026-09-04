@@ -9212,10 +9212,12 @@ let funnelState = { period: 'agosto', rate: 1400, data: null, loading: false };
 const FA_VLABEL = {
   b2c:        { name: 'Carteles B2C',              tag: 'CTWA · B2C' },
   retargeting:{ name: 'Neon carteles RETARGETING', tag: 'CTWA · retargeting' },
-  b2b:        { name: 'Neon B2B FORM',             tag: 'Lead Ads · B2B' }
+  b2b:        { name: 'Neon B2B FORM',             tag: 'Lead Ads · B2B' },
+  corporeas:  { name: 'Corpóreas (letras 3D)',     tag: 'Ad dentro de Carteles B2C' }
 };
 const FA_MIX = [
   ['b2c', 'Carteles B2C', '#8B2FD6'], ['retargeting', 'Retargeting', '#B84DFF'], ['b2b', 'B2B Formulario', '#6E2FB0'],
+  ['corporeas', 'Corpóreas', '#D6409F'],
   ['linkbio', 'Link bio IG', '#2E9BD6'], ['directo', 'Directo', '#7A7291'], ['frecuente', 'Frecuente', '#12A163'],
   ['referido', 'Referido', '#33CF88'], ['revisar', 'Sin trazar / revisar', '#B67916']
 ];
