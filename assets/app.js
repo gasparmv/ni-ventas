@@ -10096,7 +10096,7 @@ function mediaUrl(r2Key) {
   const tkParam = STATE.token ? '?token=' + encodeURIComponent(STATE.token) : '';
   // wa/  → media bajado del webhook (imagen del cliente, audio, etc.)
   // promo/ → assets promocionales (foto de copa para follow-up de presupuesto)
-  if (r2Key.startsWith('wa/') || r2Key.startsWith('promo/') || r2Key.startsWith('briefs/') || r2Key.startsWith('ig/')) {
+  if (r2Key.startsWith('wa/') || r2Key.startsWith('promo/') || r2Key.startsWith('briefs/') || r2Key.startsWith('ig/') || r2Key.startsWith('precotiz/')) {
     return CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(r2Key) + tkParam;
   }
   return r2Key;
@@ -10296,7 +10296,7 @@ function renderChatBubbles(msgs, opts) {
       // downloadMedia falló en el webhook y el media ya no se puede recuperar
       // (Meta expira las URLs en ~30 días). Mostramos placeholder en vez de
       // burbuja vacía con un <img> roto.
-      const hasValidMedia = m.media_url && (String(m.media_url).startsWith('wa/') || String(m.media_url).startsWith('promo/') || String(m.media_url).startsWith('briefs/') || String(m.media_url).startsWith('ig/'));
+      const hasValidMedia = m.media_url && (String(m.media_url).startsWith('wa/') || String(m.media_url).startsWith('promo/') || String(m.media_url).startsWith('briefs/') || String(m.media_url).startsWith('ig/') || String(m.media_url).startsWith('precotiz/'));
       if (hasValidMedia) {
         const imgSrc = mediaUrl(m.media_url);
         html += `<div class="chat-msg ${dir} has-media${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'image')}">

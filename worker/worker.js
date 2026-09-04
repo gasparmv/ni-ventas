@@ -1829,6 +1829,15 @@ async function precotizLlm(env, fullText, fwText, imageBlocks) {
 
 // Manda (auto) o deja en borrador (draft) los mensajitos que generó la IA.
 async function precotizEmitir(env, phone, nombre, msgs, modo, nowIso) {
+  // El bot se presenta como "Joaco" (hardcodeado en el prompt). Si el lead quedó asignado a Facu
+  // (reparto), reemplazamos el nombre para que el saludo COINCIDA con la bandeja — pedido de Gaspar
+  // (4-sep): "lo cotizó Joaco pero aparece en la bandeja de Facu". 1 lookup por lead; cubre auto y draft.
+  try {
+    const _s = await env.DB.prepare("SELECT assigned_to FROM wa_chats_summary WHERE phone = ?").bind(String(phone).replace(/\D/g, '')).first();
+    if (_s && String(_s.assigned_to || '').toLowerCase() === 'facundo') {
+      msgs = (msgs || []).map(m => String(m).replace(/Joaco/g, 'Facu').replace(/joaco/g, 'facu'));
+    }
+  } catch (_) {}
   if (modo === 'auto') {
     for (const m of msgs) { await precotizSend(env, phone, m); await new Promise(r => setTimeout(r, 1200)); }
     return { sent: true };
