@@ -13654,12 +13654,18 @@ const handler = {
       }
 
       // ===== Marcar conversación como NO leída =====
-      // (Borra el read_cursor para que la UI lo cuente como no leído otra vez)
+      // Marca el chat como NO leído para TODO el equipo (estado compartido, sincronizado en todos los
+      // dispositivos — pedido Gaspar 4-sep). Antes solo borraba el read_cursor, pero la lista de chats
+      // se muestra desde la COLUMNA wa_chats_summary.unread (que el trigger sube y mark-read pone en 0),
+      // así que otros usuarios seguían viéndolo como leído. Ahora también sube esa columna a >=1.
       if (request.method === 'POST' && path === '/admin/wa/mark-unread') {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const { phone } = body || {};
         if (!phone) return json({ error: 'missing phone' }, 400);
-        await env.DB.prepare('DELETE FROM wa_read_cursor WHERE phone = ?').bind(phone).run();
+        // Invalidar la cache del chats-summary para que el resto del equipo lo vea YA (no en 4s).
+        ctx.waitUntil(invalidateChatsSummaryCache(request));
+        try { await env.DB.prepare('DELETE FROM wa_read_cursor WHERE phone = ?').bind(phone).run(); } catch (_) {}
+        try { await env.DB.prepare('UPDATE wa_chats_summary SET unread = MAX(unread, 1) WHERE phone = ?').bind(phone).run(); } catch (_) {}
         return json({ ok: true });
       }
 
