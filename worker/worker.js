@@ -688,6 +688,30 @@ async function resolveComercial(env, { bodyComercial, sessionUser, phone } = {})
   if (phone) { try { const r = await env.DB.prepare("SELECT assigned_to FROM wa_chats_summary WHERE phone = ?").bind(String(phone).replace(/\D/g, '')).first(); const v2 = norm(r && r.assigned_to); if (v2) return v2; } catch (_) {} }
   return 'joaco';
 }
+
+// "El que trabaja el lead se queda con él" (pedido de Gaspar 4-sep): cuando un VENDEDOR comercial
+// (Joaco o Facu) manda un mensaje a mano desde el CRM, el chat se le asigna a ÉL — así el lead no
+// queda con el vendedor equivocado (ej: el reparto lo asignó a Facu pero lo cotizó Joaco). Admin
+// (Gaspar/Bruno) y cursos (Abril) NO reasignan (ayudan pero no se apropian). Joaco (principal) =
+// assigned_to ''; Facu (secundario) = 'facundo'. No pisa bandejas especiales (cursos/oculto/etc.).
+async function reasignarAlQueTrabaja(env, phone, sessionUser) {
+  try {
+    const slug = String(sessionUser || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    let vendedor = '';
+    if (slug === 'joaquin' || slug === 'joaco') vendedor = 'joaco';
+    else if (slug === 'facundo') vendedor = 'facundo';
+    else return; // admin/cursos/otros → no reasignan
+    const ph = String(phone || '').replace(/\D/g, '');
+    if (!ph) return;
+    const nuevoAsg = vendedor === 'facundo' ? 'facundo' : '';
+    const cur = await env.DB.prepare("SELECT assigned_to, inbox FROM wa_chats_summary WHERE phone = ?").bind(ph).first();
+    if (!cur) return;
+    if (String(cur.assigned_to || '') === nuevoAsg) return; // ya está bien asignado
+    if (['cursos', 'oculto', 'privado', 'corte', 'precotiz'].includes(String(cur.inbox || ''))) return; // no son del reparto comercial
+    await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = ?, assigned_at = ? WHERE phone = ?").bind(nuevoAsg, new Date().toISOString(), ph).run();
+    try { await env.DB.prepare("UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?").bind(vendedor, ph).run(); } catch (_) {}
+  } catch (_) {}
+}
 // Número de precio → entero. Los precios de NI son SIEMPRE enteros en pesos (sin
 // centavos). Google CSV puede mandar "149500", "149.500", "149,500", "$149.500",
 // "1,110,000", "149500.00", etc. Misma lógica que parseNum() del front: saca el
@@ -11322,6 +11346,9 @@ const handler = {
         // Pin privado (pedido Bruno 3-sep): texto libre con su firma → el chat ADEMÁS a la privada.
         // Solo si la sesión es admin (Bruno/Gaspar) → evita falsos pin de Joaco/Abril al nombrar a Bruno.
         if (isAdminSession && /\bbruno\b/i.test(String(text))) { try { await pinPrivadoBruno(env, num || String(to).replace(/\D/g, '')); } catch (_) {} }
+        // "El que trabaja el lead se queda con él" (Gaspar 4-sep): si lo manda un vendedor comercial,
+        // el chat se le asigna a él (Joaco/Facu), así el lead no queda con el vendedor equivocado.
+        try { await reasignarAlQueTrabaja(env, num || String(to).replace(/\D/g, ''), session.user); } catch (_) {}
         return json({ id: r.id });
       }
 
@@ -11347,6 +11374,9 @@ const handler = {
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, senderSlug, 'template', previewBody, '', '', 'sent').run();
         } catch (_) {}
+        // "El que trabaja el lead se queda con él" (Gaspar 4-sep): el presupuesto/plantilla que manda
+        // un vendedor comercial le asigna el chat a él (caso Bre: lo cotizó Joaco, quedaba en Facu).
+        try { await reasignarAlQueTrabaja(env, num || String(to).replace(/\D/g, ''), session.user); } catch (_) {}
         return json({ id: r.id });
       }
 
@@ -13800,6 +13830,9 @@ const handler = {
         // Solo si la sesión es admin (Bruno/Gaspar comparten el user admin) → evita que Joaco/Abril
         // pinneen de más al nombrar a Bruno.
         if (isAdminSession && /\bbruno\b/i.test(text)) { try { await pinPrivadoBruno(env, num); } catch (_) {} }
+        // "El que trabaja el lead se queda con él" (Gaspar 4-sep): si el que compone es un vendedor
+        // comercial, el chat se le asigna a él (cubre reuso Y creación de la adhoc).
+        try { await reasignarAlQueTrabaja(env, num, session.user); } catch (_) {}
         const hasButton = !!(body.button_url && /^https?:\/\//i.test(String(body.button_url)));
         const bodyNorm = adhocBodyNorm(text) + (hasButton ? 'btn:' + String(body.button_url) : '');
         await ensureAdhocSchema(env);
