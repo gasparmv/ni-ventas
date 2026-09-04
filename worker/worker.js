@@ -664,9 +664,12 @@ async function ensurePedidosSchema(env) {
   // Columnas agregadas después de crear la tabla en prod: red de seguridad del espejo.
   // mirror_attempts = intentos fallidos; mirror_error = motivo del último fallo (ej.
   // valor que infringe la validación de datos del Excel). El ALTER tira si ya existen.
-  for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT', "comercial_id TEXT NOT NULL DEFAULT 'joaco'"]) {
+  for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT', "comercial_id TEXT NOT NULL DEFAULT 'joaco'", 'cargado_por TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
   }
+  // cargado_por: usuario logueado que apretó "Cargar pedido" (verbatim: Gaspar/Joaquín/
+  // Facundo/Abril). Distinto de comercial_id (atribución de comisión): sirve para ver
+  // QUIÉN cargó el pedido, aunque sea el admin. NULL en el histórico/backfill.
   // comercial_id: vendedor dueño de la venta (para la comisión por vendedor). DEFAULT 'joaco'
   // → todo el histórico y lo no atribuido queda de Joaco, su número no se mueve.
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedidos_comercial ON pedidos(comercial_id)').run(); } catch (_) {}
@@ -14359,15 +14362,17 @@ const handler = {
         const telefono = String(body.telefono || '').replace(/\D/g, '');
         // Vendedor de la venta: el usuario logueado que la carga (o el vendedor del chat).
         const comercialId = await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: telefono });
+        // Usuario literal que cargó el pedido (para ver si lo cargó Facu/Joaco/Gaspar).
+        const cargadoPor = String(session.user || '');
         const stmts = carteles.map(c => env.DB.prepare(
-          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, sheet_row, origen, mirror_dirty, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, NULL, 'crm', 1, ?, ?)`
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', 1, ?, ?)`
         ).bind(
           numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
           num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
           num(c.cantidad) || 1, num(c.precio), String(c.dimer || 'NO').trim(), num(c.precio_dimmer),
           String(c.envio || '').trim(), String(c.aclaracion || '').trim(), num(c.tramos), String(c.tipo || '').trim(),
-          plataforma, estadoPago, pagado, restante, ad, telefono, comercialId, now, now
+          plataforma, estadoPago, pagado, restante, ad, telefono, comercialId, cargadoPor, now, now
         ));
         await env.DB.batch(stmts);
         const rs = await env.DB.prepare('SELECT * FROM pedidos WHERE numero = ? AND origen = ? ORDER BY id').bind(numero, 'crm').all();

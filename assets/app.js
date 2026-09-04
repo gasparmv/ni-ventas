@@ -1531,6 +1531,7 @@ function mapPedidoFromD1(row) {
     tramos: row.tramos || '',
     tipo: row.tipo || '',
     comercial_id: row.comercial_id || 'joaco',
+    cargadoPor: row.cargado_por || '',
     mirrorError: row.mirror_error || ''
   };
 }
@@ -4603,15 +4604,17 @@ function renderTablePedidos() {
   document.getElementById('row-count').textContent = filtered.length;
   // Columnas pedidas: C cartel, H base, J precio, K dimer, M envio, N aclaracion,
   // Q estado_pago, T estado_pedido, U ad. Fecha queda como primera (ordena).
+  const _pedAdmin = isAdmin(); // solo Gaspar ve quién cargó (los comerciales ven solo lo suyo)
   const headers = [
-    ['fecha','Fecha'],['cartel','Cartel'],['base','Base'],['precio','Precio'],['dimmer','Dimer'],['envio','Envío'],['aclaracion','Aclar.'],['estadoPago','Pago'],['estadoPedido','Estado'],['canalAd','Ad']
+    ['fecha','Fecha'],['cartel','Cartel'],['base','Base'],['precio','Precio'],['dimmer','Dimer'],['envio','Envío'],['aclaracion','Aclar.'],['estadoPago','Pago'],['estadoPedido','Estado'],['canalAd','Ad'],
+    ...(_pedAdmin ? [['cargadoPor','Cargó']] : [])
   ];
   const trunc = (s, n) => { s = String(s||'').replace(/\s+/g,' ').trim(); return s ? (escapeHtml(s.slice(0,n)) + (s.length>n?'…':'')) : '—'; };
   wrap.innerHTML = `
     <table class="t">
       <thead><tr>${headers.map(([c,l]) => `<th data-sort="${c}" class="${pedidoSort.col===c?'sorted':''}">${l} <span class="sort">${pedidoSort.col===c?(pedidoSort.dir>0?'▲':'▼'):''}</span></th>`).join('')}</tr></thead>
       <tbody>
-        ${filtered.length === 0 ? '<tr class="empty-row"><td colspan="10">No hay pedidos con esos filtros</td></tr>' :
+        ${filtered.length === 0 ? `<tr class="empty-row"><td colspan="${headers.length}">No hay pedidos con esos filtros</td></tr>` :
           filtered.map(p => `
             <tr data-pid="${p.idx}">
               <td class="num">${fmtDate(p.fecha)}</td>
@@ -4624,6 +4627,7 @@ function renderTablePedidos() {
               <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pago',p.estadoPago,PAGO_OPTS_TABLE)}</td>
               <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pedido',p.estadoPedido,PED_OPTS_TABLE)}</td>
               <td><span class="muted" style="font-size:12px">${escapeHtml(p.canalAd||'—')}</span></td>
+              ${_pedAdmin ? `<td>${loaderCell(p)}</td>` : ''}
             </tr>
           `).join('')}
       </tbody>
@@ -4662,6 +4666,12 @@ function pillEstadoPedido(s){ return `<span class="pill ${pedidoEstadoColor(s)}"
 function dimerPillHtml(s){ if (!s) return '<span style="color:var(--fg-subtle)">—</span>'; return `<span class="pill ${dimerColor(s)}">${escapeHtml(s)}</span>`; }
 // Base con un puntito del color del acrílico (NEGRO negro, TRANS blanco, etc.).
 function baseSwatch(s){ if (!s) return '<span style="color:var(--fg-subtle)">—</span>'; return `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:11px;height:11px;border-radius:50%;background:${baseHex(s)};border:1px solid var(--border);flex:none"></span><span style="font-size:12px">${escapeHtml(s)}</span></span>`; }
+// ¿Quién cargó el pedido? Normaliza el user (verbatim del login) a un nombre corto + color.
+function loaderNorm(u){ return String(u||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,''); }
+function loaderLabel(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'Facu'; if(s==='joaquin'||s==='joaco')return 'Joaco'; if(s==='gaspar'||s==='bruno')return 'Gaspar'; if(s==='abril')return 'Abril'; if(s==='emma'||s==='emmanuel')return 'Emma'; return u?(String(u).charAt(0).toUpperCase()+String(u).slice(1)):''; }
+function loaderColor(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'violet'; if(s==='joaquin'||s==='joaco')return 'cyan'; if(s==='gaspar'||s==='bruno')return 'blue'; if(s==='abril')return 'amber'; return 'muted'; }
+// Celda/píldora con quién cargó el pedido. cargado_por (user literal) y, si falta (histórico), comercial_id.
+function loaderCell(p){ const who=p.cargadoPor||p.comercial_id||''; const lbl=loaderLabel(who); if(!lbl)return '<span style="color:var(--fg-subtle)">—</span>'; return `<span class="pill ${loaderColor(who)}" style="font-size:11px">${escapeHtml(lbl)}</span>`; }
 // Dropdown inline (tabla) coloreado según el valor actual, para editar el estado sin
 // abrir el drawer (a nivel pedido: el worker lo aplica a todos los carteles del nro+fecha).
 const PAGO_OPTS_TABLE = ['1er pago','2do pago'];
@@ -4932,27 +4942,67 @@ function bindPedidoModal() {
   document.querySelectorAll('[data-pm-tipo]').forEach(b => b.onclick = () => { const p = b.dataset.pmTipo.split('|'); readPedidoModalDOM(); STATE.pedidoModal.carteles[parseInt(p[0], 10)].tipo = p[1]; render(); });
   const tel = document.getElementById('pm-telefono'); if (tel) tel.addEventListener('blur', pmTraceAd);
   const cf = document.getElementById('pm-confirm'); if (cf) cf.onclick = confirmCargarPedido;
+  // Validación en vivo: una vez que se intentó "Crear pedido", re-marcar en rojo lo que
+  // falte tras cada re-render (agregar color/cartel, etc.) y limpiarlo apenas se completa.
+  if (STATE.pedidoModal && STATE.pedidoModal._validated) pmApplyMarks(pmValidate());
+  document.querySelectorAll('#pm-backdrop input, #pm-backdrop select').forEach(el => {
+    const h = () => { if (!STATE.pedidoModal || !STATE.pedidoModal._validated) return; readPedidoModalDOM(); pmApplyMarks(pmValidate()); };
+    el.addEventListener('input', h); el.addEventListener('change', h);
+  });
+}
+// ── Validación del modal con marcado en ROJO de los campos faltantes ──
+// Devuelve la lista de campos inválidos: cada uno con {id | sel} para ubicar el
+// elemento en el DOM + msg para el toast. Lee de STATE (llamar readPedidoModalDOM antes).
+// Los índices son los ORIGINALES de m.carteles → matchean los ids del DOM y el "Cartel N" visible.
+function pmValidate() {
+  const m = STATE.pedidoModal; if (!m) return [];
+  const invalid = [];
+  const named = (m.carteles||[]).map((c,i)=>({c,i})).filter(x => String(x.c.cartel||'').trim());
+  if (!named.length) invalid.push({ id:'pm-cartel-0', msg:'Poné al menos un cartel con nombre' });
+  if (m.plataforma === 'WPP' && String(m.telefono||'').replace(/\D/g,'').length < 8) invalid.push({ id:'pm-telefono', msg:'Falta el teléfono (obligatorio en WhatsApp)' });
+  for (const { c, i } of named) {
+    const nro = i + 1;
+    if (!String(c.colores||'').trim())   invalid.push({ sel:`[data-pm-color-trigger="${i}"]`, msg:`Cartel ${nro}: elegí al menos un color` });
+    if (!(Number(c.cantidad) > 0))       invalid.push({ id:`pm-cantidad-${i}`, msg:`Cartel ${nro}: falta la cantidad` });
+    if (!(Number(c.alto) > 0))           invalid.push({ id:`pm-alto-${i}`, msg:`Cartel ${nro}: falta el alto` });
+    if (!(Number(c.ancho) > 0))          invalid.push({ id:`pm-ancho-${i}`, msg:`Cartel ${nro}: falta el ancho` });
+    if (!(Number(c.cmNeon) > 0))         invalid.push({ id:`pm-cmNeon-${i}`, msg:`Cartel ${nro}: faltan los cm de neón` });
+    if (!String(c.base||'').trim())      invalid.push({ id:`pm-base-${i}`, msg:`Cartel ${nro}: falta la base` });
+    if (!(Number(c.precio) > 0))         invalid.push({ id:`pm-precio-${i}`, msg:`Cartel ${nro}: falta el precio` });
+    if (c.dimer && c.dimer !== 'NO' && !(Number(c.precioDimmer) > 0)) invalid.push({ id:`pm-precioDimmer-${i}`, msg:`Cartel ${nro}: falta el precio del dimmer` });
+    if (!String(c.envio||'').trim())     invalid.push({ id:`pm-envio-${i}`, msg:`Cartel ${nro}: falta el envío` });
+  }
+  if (!(Number(m.pagado) > 0)) invalid.push({ id:'pm-pagado', msg:'Falta el monto de la seña (pagado)' });
+  return invalid;
+}
+function pmInvalidEl(it) { return it.id ? document.getElementById(it.id) : document.querySelector('#pm-backdrop ' + it.sel); }
+function pmClearMarks() {
+  document.querySelectorAll('#pm-backdrop [data-pm-invalid]').forEach(el => {
+    el.style.borderColor = 'var(--border)'; el.style.boxShadow = ''; delete el.dataset.pmInvalid;
+  });
+}
+function pmApplyMarks(invalid) {
+  pmClearMarks();
+  for (const it of invalid) {
+    const el = pmInvalidEl(it); if (!el) continue;
+    el.style.borderColor = '#FF5566'; el.style.boxShadow = '0 0 0 2px rgba(255,85,102,.22)'; el.dataset.pmInvalid = '1';
+  }
 }
 async function confirmCargarPedido() {
   if (STATE.pedidoModalSaving) return;
   readPedidoModalDOM();
   const m = STATE.pedidoModal;
-  const carteles = (m.carteles||[]).filter(c => String(c.cartel||'').trim());
-  if (!carteles.length) { toast('Poné al menos un cartel con nombre'); return; }
-  if (m.plataforma === 'WPP' && String(m.telefono||'').replace(/\D/g,'').length < 8) { toast('El teléfono es obligatorio para WhatsApp'); return; }
-  for (let k = 0; k < carteles.length; k++) {
-    const c = carteles[k], nro = k + 1;
-    if (!String(c.colores||'').trim())   { toast(`Cartel ${nro}: elegí al menos un color`); return; }
-    if (!(Number(c.cantidad) > 0))       { toast(`Cartel ${nro}: falta la cantidad`); return; }
-    if (!(Number(c.alto) > 0))           { toast(`Cartel ${nro}: falta el alto`); return; }
-    if (!(Number(c.ancho) > 0))          { toast(`Cartel ${nro}: falta el ancho`); return; }
-    if (!(Number(c.cmNeon) > 0))         { toast(`Cartel ${nro}: faltan los cm de neón`); return; }
-    if (!String(c.base||'').trim())      { toast(`Cartel ${nro}: falta la base`); return; }
-    if (!(Number(c.precio) > 0))         { toast(`Cartel ${nro}: falta el precio`); return; }
-    if (c.dimer && c.dimer !== 'NO' && !(Number(c.precioDimmer) > 0)) { toast(`Cartel ${nro}: falta el precio del dimmer`); return; }
-    if (!String(c.envio||'').trim())     { toast(`Cartel ${nro}: falta el envío`); return; }
+  m._validated = true; // a partir de acá, la validación se re-aplica en vivo
+  const invalid = pmValidate();
+  if (invalid.length) {
+    pmApplyMarks(invalid);
+    const el0 = pmInvalidEl(invalid[0]);
+    if (el0) { try { el0.scrollIntoView({ block:'center', behavior:'smooth' }); } catch(_){} try { el0.focus(); } catch(_){} }
+    toast(invalid.length === 1 ? invalid[0].msg : `Faltan ${invalid.length} datos (marcados en rojo)`);
+    return;
   }
-  if (!(Number(m.pagado) > 0)) { toast('Falta el monto de la seña (pagado)'); return; }
+  pmClearMarks();
+  const carteles = (m.carteles||[]).filter(c => String(c.cartel||'').trim());
   STATE.pedidoModalSaving = true; render();
   try {
     const payload = {
@@ -5915,6 +5965,7 @@ function openDrawerPedido(idx) {
         <dl class="kv" style="margin-top:10px">
           <dt>Fecha</dt><dd>${fmtDateLong(p.fecha)}</dd>
           <dt>Número</dt><dd>${p.numero || '—'}</dd>
+          ${isAdmin() ? `<dt>Cargado por</dt><dd>${loaderCell(p)}</dd>` : ''}
           <dt>Medidas</dt><dd>${p.alto}×${p.ancho} cm · ${p.cmNeon} cm neón</dd>
           <dt>Colores</dt><dd>${escapeHtml(p.colores)}</dd>
           <dt>Cantidad</dt><dd>${p.cantidad}</dd>
