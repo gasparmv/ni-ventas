@@ -785,6 +785,140 @@ async function importNewPedidosFromVentas(env) {
     return stmts.length;
   } catch (e) { return 0; }
 }
+
+// ===== Trazabilidad automática de ads en pedidos =====
+// Mapa ad_id (source_id de CTWA) -> etiqueta. Los que no están se clasifican por headline.
+const AD_LABELS = {
+  '120248733337930143':'El neon es una mierda (b2c)','120248733349900143':'El neon es una mierda (b2c)',
+  '120248733357530143':'Te sobran 5 millones (b2c)','120248733382170143':'Locales nuevo - corto (b2c)',
+  '120248733382130143':'Locales (b2c)','120248733382120143':'Locales (b2c)','120248733382140143':'Tenes que llamar la atencion (b2c)',
+  '120248733357550143':'Tu local no para de perder plata (b2c)','120238865043590143':'comenta neon (b2c)',
+  '120236526127800143':'Diseno gratis (retargeting)','120236526218410143':'tu logo en neon (retargeting)',
+  '120244506326770143':'Mostranos tu Local (retargeting)','120244506326740143':'Tu Marca en Neon Led (retargeting)',
+  '120245296257830143':'COPA-REGALO (retargeting)','120243515675710143':'antes y despues (retargeting)',
+  '120243077278850143':'Franquicias - resolver (b2b)','120239287134360143':'Tercerizacion (b2b)',
+  '120239287396020143':'Franquicias (b2b)','120242991012990143':'Reventa (b2b)',
+  // Corpóreas (letras 3D): creativos NUEVOS (26/8) que viven DENTRO de la campaña Carteles B2C.
+  // Se etiquetan aparte para que NO se cuenten como b2c (su economía es distinta).
+  '120249428135510143':'Corpóreas (corporeas)','120249428166590143':'Corpóreas (corporeas)',
+  '120249428108890143':'Corpóreas (corporeas)','120249427968160143':'Corpóreas (corporeas)'
+};
+// ad_ids de los creativos de corpóreas (para separar su gasto ad-level de la campaña Carteles B2C).
+const CORPOREAS_ADS = ['120249428135510143', '120249428166590143', '120249428108890143', '120249427968160143'];
+function adLabelFromSource(sourceId, headline) {
+  if (AD_LABELS[sourceId]) return AD_LABELS[sourceId];
+  const h = String(headline || '').toLowerCase();
+  if (/franquicia|tercerizaci|evento|reventa|\bb2b\b/.test(h)) return 'Carteles B2B (b2b)';
+  if (/regalo|clase|formaci|minicurso|comunidad|registr|apertura carrito/.test(h)) return ''; // cursos: no atribuir a carteles
+  return 'Carteles B2C (b2c)'; // genérico (Chatea con nosotros / ¿Querés un cartel? / etc.)
+}
+// ===== Panel Funnel de Ads: config de campañas de carteles y clasificación por vertical =====
+// Las campañas de Meta de la cuenta "Lau - Neon" (882517310728279) mezclan carteles + cursos.
+// Estas son SOLO las de carteles, con su vertical. Las copias/optimizados son variantes A/B de la
+// misma campaña -> se agregan al mismo vertical. Confirmado 1×1 contra Meta (ad->campaign) ago 2026.
+const CARTELES_CAMPAIGNS = {
+  '120231380386180143': 'b2c',         // Carteles B2C
+  '120235712854110143': 'retargeting', // Neon carteles - RETARGETING
+  '120248560811180143': 'retargeting', // Retargeting - Interaccion - Copia
+  '120239284677530143': 'b2b',         // Neon B2B FORM - Campana
+  '120248248940760143': 'b2b',         // Neon B2B FORM - Campana - Copia
+  '120248245464960143': 'b2b',         // Neon B2B FORM - Campana - Optimizado
+  '120239191828290143': 'b2b',         // Neon B2B (inactivo)
+  'corporeas': 'corporeas'             // sintético: gasto ad-level de los creativos de corpóreas
+};
+// Vertical a partir del TEXTO de un ad (pedidos.ad o etiqueta): parsea el sufijo entre paréntesis.
+// Matchea (b2c)/(b2c*), (retargeting), (b2b)/(b2b*)/(b2b form)/(b2b(. '' si no es carteles-ad.
+function verticalOfAdText(txt) {
+  const t = String(txt || '').toLowerCase();
+  if (t.indexOf('(corporea') >= 0) return 'corporeas';
+  if (t.indexOf('(retarget') >= 0) return 'retargeting';
+  if (t.indexOf('(b2b') >= 0) return 'b2b';
+  if (t.indexOf('(b2c') >= 0) return 'b2c';
+  return '';
+}
+// Vertical de una atribución CTWA por su source_id (ad_id) + headline. Reusa adLabelFromSource
+// (que devuelve '' para ads de cursos) -> así los leads de cursos NO cuentan en el funnel de carteles.
+function verticalOfSource(sourceId, headline) {
+  return verticalOfAdText(adLabelFromSource(sourceId, headline));
+}
+// Traza el ad de UN pedido: encuentra el teléfono del cliente (el del pedido, o por nombre
+// en briefs) y su atribución real (CTWA source_id / formulario B2B / plantilla link-bio).
+// Devuelve {ad, telefono}. ad='' si no se pudo trazar (queda para revisar/directo).
+async function traceAdForPedido(env, pedido) {
+  const cartel = String(pedido.cartel || '').trim();
+  let phone = String(pedido.telefono || '').replace(/[^\d]/g, '');
+  if (!phone && cartel.length > 2) {
+    try {
+      const b = await env.DB.prepare("SELECT cliente_wa_id FROM briefs WHERE lower(trim(cliente_nombre))=lower(trim(?)) AND COALESCE(cliente_wa_id,'')!='' ORDER BY id DESC LIMIT 1").bind(cartel).first();
+      if (b && b.cliente_wa_id) phone = String(b.cliente_wa_id).replace(/[^\d]/g, '');
+    } catch (_) {}
+  }
+  if (!phone) return { ad: '', telefono: '' };
+  let ad = '';
+  try {
+    const a = await env.DB.prepare("SELECT source_id, headline FROM wa_ad_attributions WHERE phone=? AND COALESCE(source_id,'')!='' ORDER BY ts ASC LIMIT 1").bind(phone).first();
+    if (a && a.source_id) ad = adLabelFromSource(a.source_id, a.headline);
+  } catch (_) {}
+  if (!ad) {
+    try {
+      const l = await env.DB.prepare("SELECT ad_name FROM wa_leads WHERE phone=? AND COALESCE(ad_id,'')!='' ORDER BY id DESC LIMIT 1").bind(phone).first();
+      if (l && l.ad_name) ad = String(l.ad_name).split(' - B2B')[0].trim() + ' (b2b form)';
+    } catch (_) {}
+  }
+  if (!ad) {
+    try {
+      const lb = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone=? AND direction='inbound' AND lower(body) LIKE '%pedido personalizado en neon%' LIMIT 1").bind(phone).first();
+      if (lb) ad = 'Link bio perfil ig';
+    } catch (_) {}
+  }
+  return { ad, telefono: phone };
+}
+// Cron: barre los pedidos de carteles SIN ad (recientes) y los traza automáticamente.
+// Rellena pedidos.ad + pedidos.telefono en D1. Devuelve cuántos trazó.
+async function traceUntaggedPedidos(env) {
+  let n = 0;
+  try {
+    const rows = await env.DB.prepare("SELECT id, cartel, numero, telefono FROM pedidos WHERE COALESCE(ad,'')='' AND fecha >= date('now','-120 days') LIMIT 30").all();
+    for (const p of (rows.results || [])) {
+      const t = await traceAdForPedido(env, p);
+      if (t.ad) {
+        await env.DB.prepare("UPDATE pedidos SET ad=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END WHERE id=?").bind(t.ad, t.telefono, p.id).run();
+        n++;
+      } else if (t.telefono) {
+        await env.DB.prepare("UPDATE pedidos SET telefono=? WHERE id=? AND COALESCE(telefono,'')=''").bind(t.telefono, p.id).run();
+      }
+    }
+  } catch (_) {}
+  return n;
+}
+// Cron: sincroniza la columna Ad (U) del Excel de Ventas desde D1, matcheando por NOMBRE
+// de cartel (NO por sheet_row, que se desalinea si se borran/mueven filas). Solo rellena
+// celdas U vacías -> no pisa etiquetas ya cargadas. Drift-proof.
+async function syncAdColumnToExcel(env) {
+  if (!env.APPS_SCRIPT_URL) return { skipped: 'no url' };
+  try {
+    const d1 = await env.DB.prepare("SELECT cartel, ad FROM pedidos WHERE COALESCE(ad,'')!='' AND cartel NOT LIKE '%orpore%'").all();
+    const byCartel = {};
+    for (const r of (d1.results || [])) { const k = String(r.cartel || '').trim().toLowerCase(); if (k && !byCartel[k]) byCartel[k] = r.ad; }
+    const VENTAS_SID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
+    const r = await fetch(`https://docs.google.com/spreadsheets/d/${VENTAS_SID}/gviz/tq?tqx=out:csv&sheet=2026`);
+    if (!r.ok) return { error: 'csv ' + r.status };
+    const rows = parseCsv(await r.text());
+    const items = [];
+    for (let i = 1; i < rows.length; i++) {
+      const cartel = String((rows[i][2] || '')).trim().toLowerCase();
+      const curU = String((rows[i][20] || '')).trim();
+      if (cartel && byCartel[cartel] && curU === '') items.push({ row: i + 1, ad: byCartel[cartel] });
+    }
+    if (!items.length) return { written: 0 };
+    let written = 0;
+    for (let j = 0; j < items.length; j += 100) {
+      const jr = await appsScriptPost(env, { action: 'set_ad_bulk', col: 21, items: items.slice(j, j + 100) });
+      written += (jr && jr.written) || 0;
+    }
+    return { written };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
 // ISO "YYYY-MM-DD" → "D/M/YYYY" (formato del Excel de Ventas).
 function pedidoFechaToExcel(iso) {
   const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -5261,6 +5395,211 @@ async function syncMetaAdMap(env, opts = {}) {
   return { ok: (!error || resolved > 0), resolved, backfilled, seen, error };
 }
 
+// ===== Panel Funnel de Ads =====
+// Trae el GASTO por campaña/día desde Meta Ads (insights) y lo cachea en meta_ad_spend.
+// Necesita META_ADS_TOKEN con permiso ads_read. Guarda TODAS las campañas (el funnel filtra
+// las de carteles); granularidad diaria -> cualquier rango del panel se calcula desde acá.
+// Se corre por cron (diario, refresca ~10 días) y se puede forzar con POST /admin/ads/spend-sync.
+async function syncMetaAdSpend(env, opts = {}) {
+  const token = env.META_ADS_TOKEN || env.META_PAGE_ACCESS_TOKEN || env.IG_ACCESS_TOKEN || '';
+  if (!token) return { ok: false, error: 'no token' };
+  const acct = String(env.META_AD_ACCOUNT_ID || '882517310728279').replace(/^act_/, '');
+  const today = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10); // día AR
+  const until = String(opts.until || today).slice(0, 10);
+  const since = String(opts.since || new Date(Date.now() - 3 * 3600 * 1000 - 95 * 24 * 3600 * 1000).toISOString().slice(0, 10)).slice(0, 10);
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS meta_ad_spend (campaign_id TEXT, day TEXT, spend_usd REAL, impressions INTEGER, clicks INTEGER, updated_at TEXT, PRIMARY KEY(campaign_id, day))").run(); } catch (_) {}
+  const tr = encodeURIComponent(JSON.stringify({ since, until }));
+  let url = `https://graph.facebook.com/v21.0/act_${acct}/insights?level=campaign&fields=campaign_id,spend,impressions,clicks&time_increment=1&time_range=${tr}&limit=500&access_token=${encodeURIComponent(token)}`;
+  let count = 0, pages = 0, error = '';
+  const now = new Date().toISOString();
+  try {
+    while (url && pages < 40) {
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.error) { error = '(#' + (j.error.code || '?') + ') ' + (j.error.message || ''); break; }
+      for (const row of (j.data || [])) {
+        const cid = String(row.campaign_id || ''); const day = String(row.date_start || '');
+        if (!cid || !day) continue;
+        try {
+          await env.DB.prepare("INSERT INTO meta_ad_spend (campaign_id, day, spend_usd, impressions, clicks, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(campaign_id, day) DO UPDATE SET spend_usd=excluded.spend_usd, impressions=excluded.impressions, clicks=excluded.clicks, updated_at=excluded.updated_at")
+            .bind(cid, day, parseFloat(row.spend || 0) || 0, parseInt(row.impressions || 0) || 0, parseInt(row.clicks || 0) || 0, now).run();
+          count++;
+        } catch (_) {}
+      }
+      url = (j.paging && j.paging.next) || '';
+      pages++;
+    }
+  } catch (e) { error = String(e); }
+  // Gasto AD-level de los creativos de corpóreas (viven DENTRO de Carteles B2C): se suman por día y
+  // se guardan bajo campaign_id sintético 'corporeas' para poder restarlos de B2C en el panel.
+  try {
+    const filt = encodeURIComponent(JSON.stringify([{ field: 'ad.id', operator: 'IN', value: CORPOREAS_ADS }]));
+    let u2 = `https://graph.facebook.com/v21.0/act_${acct}/insights?level=ad&fields=spend,impressions,clicks&time_increment=1&time_range=${tr}&filtering=${filt}&limit=500&access_token=${encodeURIComponent(token)}`;
+    const byDay = {};
+    let p2 = 0;
+    while (u2 && p2 < 40) {
+      const r = await fetch(u2); const j = await r.json();
+      if (j.error) break;
+      for (const row of (j.data || [])) {
+        const day = String(row.date_start || ''); if (!day) continue;
+        if (!byDay[day]) byDay[day] = { s: 0, i: 0, c: 0 };
+        byDay[day].s += parseFloat(row.spend || 0) || 0; byDay[day].i += parseInt(row.impressions || 0) || 0; byDay[day].c += parseInt(row.clicks || 0) || 0;
+      }
+      u2 = (j.paging && j.paging.next) || ''; p2++;
+    }
+    for (const day of Object.keys(byDay)) {
+      try {
+        await env.DB.prepare("INSERT INTO meta_ad_spend (campaign_id, day, spend_usd, impressions, clicks, updated_at) VALUES ('corporeas',?,?,?,?,?) ON CONFLICT(campaign_id, day) DO UPDATE SET spend_usd=excluded.spend_usd, impressions=excluded.impressions, clicks=excluded.clicks, updated_at=excluded.updated_at")
+          .bind(day, byDay[day].s, byDay[day].i, byDay[day].c, now).run();
+        count++;
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return { ok: !error, count, pages, error, since, until };
+}
+
+// Arma el funnel de carteles por vertical (b2c / retargeting / b2b) para un rango [since, until].
+//   GASTO   -> meta_ad_spend (USD, sumado por vertical vía CARTELES_CAMPAIGNS)
+//   LEADS   -> wa_ad_attributions (CTWA WhatsApp): distinct teléfono, clasificado por último touch
+//              del período (regla multi-touch de Gaspar). Descarta ads de cursos.
+//   PRESUP  -> briefs enviados en el período, linkeados por teléfono -> vertical del lead (último
+//              touch histórico). Suma precio_final.
+//   VENTAS  -> pedidos con ad de carteles (sufijo de vertical), órdenes distintas (numero|fecha),
+//              ingresos = SUM(precio + precio_dimmer) REAL.
+//   MIX     -> todas las órdenes del período por origen (los 3 verticals + link bio / directo /
+//              frecuente / referido / revisar) para el gráfico "de dónde vienen las ventas".
+// CPL/CAC/ROAS convierten USD->ARS con `rate`. Todo en día calendario (fecha/enviado_at/ts ISO).
+async function buildAdsFunnel(env, opts = {}) {
+  const since = String(opts.since || '').slice(0, 10);
+  const until = String(opts.until || '').slice(0, 10); // inclusivo
+  const rate = Number(opts.rate) || 1400;
+  const untilEx = new Date(new Date(until + 'T00:00:00Z').getTime() + 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const sinceWide = new Date(new Date(since + 'T00:00:00Z').getTime() - 120 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const VS = ['b2c', 'retargeting', 'b2b', 'corporeas'];
+  const agg = {}; VS.forEach(v => agg[v] = { vertical: v, gasto_usd: 0, leads: 0, presup: 0, presup_monto: 0, ventas: 0, ingresos: 0 });
+  const norm = p => String(p || '').replace(/[^\d]/g, '');
+
+  // ---- GASTO (meta_ad_spend, USD) por vertical ----
+  let spendUpdated = '';
+  try {
+    const rs = await env.DB.prepare("SELECT campaign_id, SUM(spend_usd) g, MAX(updated_at) u FROM meta_ad_spend WHERE day>=? AND day<=? GROUP BY campaign_id").bind(since, until).all();
+    for (const r of (rs.results || [])) {
+      const v = CARTELES_CAMPAIGNS[String(r.campaign_id)];
+      if (v && agg[v]) agg[v].gasto_usd += (r.g || 0);
+      if (r.u && r.u > spendUpdated) spendUpdated = r.u;
+    }
+  } catch (_) {}
+  // Los ads de corpóreas viven DENTRO de la campaña Carteles B2C -> su gasto ya está sumado en b2c.
+  // Se lo restamos a b2c (para que b2c quede "solo neon") y queda en la fila corpóreas aparte.
+  agg.b2c.gasto_usd = Math.max(0, agg.b2c.gasto_usd - agg.corporeas.gasto_usd);
+
+  // ---- mapa teléfono->vertical + LEADS de CTWA (b2c / retargeting) ----
+  // b2c y retargeting entran por click-to-WhatsApp (wa_ad_attributions). B2B NO: entra por el
+  // FORMULARIO (Lead Ads) -> se cuenta abajo desde wa_leads. Acá contamos solo b2c/retargeting.
+  const phoneVert = {};
+  try {
+    const rs = await env.DB.prepare("SELECT phone, source_id, headline, ts FROM wa_ad_attributions WHERE COALESCE(source_id,'')!='' AND ts>=? AND ts<? ORDER BY phone, ts DESC").bind(sinceWide, untilEx).all();
+    const rows = rs.results || [];
+    for (const r of rows) { const p = norm(r.phone); if (phoneVert[p] === undefined) { const v = verticalOfSource(r.source_id, r.headline); if (v) phoneVert[p] = v; } }
+    const seen = new Set();
+    for (const r of rows) {
+      if (String(r.ts).slice(0, 10) < since) continue; // solo touches del período
+      const p = norm(r.phone); if (seen.has(p)) continue; seen.add(p);
+      const v = verticalOfSource(r.source_id, r.headline);
+      if ((v === 'b2c' || v === 'retargeting' || v === 'corporeas') && agg[v]) agg[v].leads++;
+    }
+  } catch (_) {}
+
+  // ---- LEADS B2B del FORMULARIO (wa_leads) + overlay al mapa teléfono->vertical ----
+  // wa_leads = submissions del Lead Ad B2B (campaign_id con prefijo 'c:'). El form es señal fuerte
+  // de B2B -> pisa lo que dijera CTWA para ese teléfono (así el presupuesto también linkea a b2b).
+  try {
+    const rs = await env.DB.prepare("SELECT phone, campaign_id, received_at FROM wa_leads WHERE COALESCE(phone,'')!='' AND received_at>=? AND received_at<? ORDER BY received_at DESC").bind(sinceWide, untilEx).all();
+    const b2bSeen = new Set();
+    for (const r of (rs.results || [])) {
+      if (CARTELES_CAMPAIGNS[norm(r.campaign_id)] !== 'b2b') continue; // solo B2B de carteles
+      const p = norm(r.phone);
+      phoneVert[p] = 'b2b';
+      if (String(r.received_at).slice(0, 10) >= since && !b2bSeen.has(p)) { b2bSeen.add(p); agg.b2b.leads++; }
+    }
+  } catch (_) {}
+
+  // ---- PRESUPUESTOS (briefs enviados) por vertical del lead ----
+  try {
+    const rs = await env.DB.prepare("SELECT cliente_wa_id, COALESCE(precio_final,0) pf FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<?").bind(since, untilEx).all();
+    for (const r of (rs.results || [])) {
+      const v = phoneVert[norm(r.cliente_wa_id)];
+      if (v && agg[v]) { agg[v].presup++; agg[v].presup_monto += (r.pf || 0); }
+    }
+  } catch (_) {}
+
+  // ---- VENTAS + INGRESOS + MIX (pedidos del período) ----
+  // Se incluyen los pedidos corpóreos (antes se excluían): los que vienen del AD de corpóreas
+  // cuentan en la fila 'corporeas'; el corpóreo ORGÁNICO (sin ad) queda fuera del mix de carteles.
+  const mix = { corporeas: 0, b2c: 0, retargeting: 0, b2b: 0, linkbio: 0, directo: 0, frecuente: 0, referido: 0, revisar: 0 };
+  try {
+    const rs = await env.DB.prepare("SELECT ad, cartel, numero, fecha, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE fecha>=? AND fecha<?").bind(since, untilEx).all();
+    const ordVenta = {}; VS.forEach(v => ordVenta[v] = new Set());
+    const ordMix = new Set();
+    for (const r of (rs.results || [])) {
+      const k = String(r.numero) + '|' + String(r.fecha);
+      const esCorporeo = /orpore/i.test(String(r.cartel || ''));
+      let v = verticalOfAdText(r.ad);
+      if (esCorporeo && v !== 'corporeas') v = ''; // corpóreo que no vino del ad de corpóreas -> orgánico
+      if (v && agg[v]) {
+        agg[v].ingresos += (r.monto || 0);
+        if (!ordVenta[v].has(k)) { ordVenta[v].add(k); agg[v].ventas++; }
+      }
+      // MIX: una vez por orden. El corpóreo orgánico (producto distinto, sin ad) queda afuera.
+      if (!ordMix.has(k)) {
+        ordMix.add(k);
+        if (esCorporeo && v !== 'corporeas') { /* corpóreo orgánico: fuera del mix de carteles */ }
+        else {
+          const t = String(r.ad || '').toLowerCase();
+          if (v) mix[v]++;
+          else if (t.indexOf('revisar') === 0) mix.revisar++;
+          else if (t.indexOf('link bio') >= 0) mix.linkbio++;
+          else if (t.indexOf('frecuente') >= 0) mix.frecuente++;
+          else if (t.indexOf('referido') >= 0) mix.referido++;
+          else if (t.indexOf('directo') >= 0) mix.directo++;
+          else mix.revisar++; // vacío / sin trazar -> a revisar
+        }
+      }
+    }
+  } catch (_) {}
+
+  // ---- métricas derivadas ----
+  const rows = VS.map(v => {
+    const a = agg[v];
+    const gastoA = a.gasto_usd * rate;
+    return {
+      vertical: v,
+      gasto_usd: Math.round(a.gasto_usd * 100) / 100,
+      gasto_ars: Math.round(gastoA),
+      leads: a.leads,
+      cpl: a.leads ? Math.round(gastoA / a.leads) : null,
+      presup: a.presup,
+      presup_monto: Math.round(a.presup_monto),
+      lp: a.leads ? a.presup / a.leads : null,
+      ventas: a.ventas,
+      pv: a.presup ? a.ventas / a.presup : null,
+      cac: a.ventas ? Math.round(gastoA / a.ventas) : null,
+      ingresos: Math.round(a.ingresos),
+      roas: gastoA ? a.ingresos / gastoA : null
+    };
+  });
+  const T = rows.reduce((o, r) => ({ gasto_usd: o.gasto_usd + r.gasto_usd, gasto_ars: o.gasto_ars + r.gasto_ars, leads: o.leads + r.leads, presup: o.presup + r.presup, presup_monto: o.presup_monto + r.presup_monto, ventas: o.ventas + r.ventas, ingresos: o.ingresos + r.ingresos }), { gasto_usd: 0, gasto_ars: 0, leads: 0, presup: 0, presup_monto: 0, ventas: 0, ingresos: 0 });
+  const total = Object.assign({}, T, {
+    gasto_usd: Math.round(T.gasto_usd * 100) / 100,
+    cpl: T.leads ? Math.round(T.gasto_ars / T.leads) : null,
+    lp: T.leads ? T.presup / T.leads : null,
+    pv: T.presup ? T.ventas / T.presup : null,
+    cac: T.ventas ? Math.round(T.gasto_ars / T.ventas) : null,
+    roas: T.gasto_ars ? T.ingresos / T.gasto_ars : null
+  });
+  return { ok: true, since, until, rate, rows, total, mix, spend_updated: spendUpdated };
+}
+
 // Texto REAL del mensaje de bienvenida que ManyChat manda automáticamente a cada nuevo
 // seguidor/DM en Instagram (confirmado por Gaspar, jul 2026). Instagram NO nos manda el
 // contenido de los mensajes de ManyChat —llegan como echo VACÍO, solo el mid— así que lo
@@ -6315,6 +6654,8 @@ async function maybeAvisoArranque(env) {
   try {
     if ((await kvGet(env, 'aviso_arranque_on', '1')) !== '1') return;
     try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS user_activity (user TEXT PRIMARY KEY, last_active TEXT)").run(); } catch (_) {}
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS user_activity_log (user TEXT, ts TEXT)").run(); } catch (_) {}
+    try { await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_ual_user_ts ON user_activity_log (user, ts)").run(); } catch (_) {}
     const nowMs = Date.now();
     const arAR = new Date(nowMs - 3 * 3600 * 1000);
     const hAR = arAR.getUTCHours();
@@ -6351,6 +6692,68 @@ async function maybeAvisoArranque(env) {
       if (!ok) { try { const r = await waSendText(env, gaspar, texto); ok = !!(r && r.ok); } catch (_) {} }
       if (ok) await kvSet(env, 'arranque_resumen_sent', fechaAR);
     }
+  } catch (_) {}
+}
+
+// ===== Horas trabajadas del equipo (a pedido de Gaspar, 4-sep) =====
+// Del historial user_activity_log (una marca cada ≤5 min de actividad real en el CRM) calcula,
+// por cada vigilado y para el día AR: hora de arranque, hora del último movimiento, duración
+// (arranque→fin) y las PAUSAS de +1h (tramos sin tocar el CRM). Se manda por WhatsApp al cierre
+// del día (21 AR) con la plantilla reporte_horas_equipo + fallback a texto libre. Dedup por día.
+function _fmtDur(mins) {
+  if (mins < 0) mins = 0;
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return h + 'h' + (m ? String(m).padStart(2, '0') : '');
+}
+async function buildHorasEquipo(env) {
+  const out = [];
+  for (const w of AVISO_WORKERS) {
+    let rows = [];
+    try {
+      rows = (await env.DB.prepare(
+        `SELECT ts FROM user_activity_log WHERE user = ? AND ts >= ${REPORTE_DIA_DESDE} AND ts < ${REPORTE_DIA_HASTA} ORDER BY ts`
+      ).bind(w.id).all()).results || [];
+    } catch (_) {}
+    if (!rows.length) { out.push({ nombre: w.nombre, trabajo: false }); continue; }
+    const first = rows[0].ts, last = rows[rows.length - 1].ts;
+    const mins = Math.round((new Date(last) - new Date(first)) / 60000);
+    const gaps = [];
+    for (let i = 1; i < rows.length; i++) {
+      const d = Math.round((new Date(rows[i].ts) - new Date(rows[i - 1].ts)) / 60000);
+      if (d > 60) gaps.push({ desde: _arHHMM(rows[i - 1].ts), hasta: _arHHMM(rows[i].ts), min: d });
+    }
+    const gapMin = gaps.reduce((s, g) => s + g.min, 0);
+    out.push({ nombre: w.nombre, trabajo: true, arranque: _arHHMM(first), fin: _arHHMM(last), mins, netMins: Math.max(0, mins - gapMin), gaps });
+  }
+  return out;
+}
+function formatLineaHoras(e) {
+  if (!e.trabajo) return e.nombre + ': no laburó en el CRM';
+  let s = e.nombre + ': ' + e.arranque + '–' + e.fin + ' · ' + _fmtDur(e.mins);
+  if (e.gaps.length) {
+    const gs = e.gaps.map(g => g.desde + '–' + g.hasta).join(', ');
+    s += ' · ' + e.gaps.length + (e.gaps.length === 1 ? ' pausa' : ' pausas') + ' +1h (' + gs + ')';
+  }
+  return s;
+}
+async function maybeReporteHoras(env) {
+  try {
+    if ((await kvGet(env, 'reporte_horas_on', '1')) !== '1') return;
+    const arAR = new Date(Date.now() - 3 * 3600 * 1000);
+    if (arAR.getUTCHours() < 21) return;                       // recién al cierre del día (21 AR)
+    const fechaAR = arAR.toISOString().slice(0, 10);
+    if ((await kvGet(env, 'reporte_horas_sent', '')) === fechaAR) return;
+    const eq = await buildHorasEquipo(env);
+    const fechaDisplay = fechaAR.split('-').reverse().join('/');
+    const lineas = eq.map(formatLineaHoras);
+    const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+    // Plantilla reporte_horas_equipo: {{1}}=fecha, {{2..5}}=una línea por vigilado (Joaco/Facu/Abril/Emma).
+    const params = [fechaDisplay, ...lineas].map(String);
+    const texto = '⏱️ Horas del equipo ' + fechaDisplay + '\n\n' + lineas.join('\n') + '\n\nUna "pausa +1h" = 1h sin tocar el CRM.';
+    let ok = false;
+    try { const r = await waSendTemplate(env, gaspar, 'reporte_horas_equipo', 'es_AR', params); ok = !!(r && r.ok); } catch (_) {}
+    if (!ok) { try { const r = await waSendText(env, gaspar, texto); ok = !!(r && r.ok); } catch (_) {} }
+    if (ok) await kvSet(env, 'reporte_horas_sent', fechaAR);
   } catch (_) {}
 }
 
@@ -10169,7 +10572,18 @@ const handler = {
         if (_cw) {
           const _nowA = new Date().toISOString();
           const _thrA = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-          ctx.waitUntil(env.DB.prepare("INSERT INTO user_activity (user, last_active) VALUES (?, ?) ON CONFLICT(user) DO UPDATE SET last_active = excluded.last_active WHERE user_activity.last_active < ?").bind(_cw, _nowA, _thrA).run().catch(() => {}));
+          // Estampa last_active y, SOLO cuando pasó el throttle (>5 min o primera del día),
+          // agrega una marca al historial user_activity_log. Ese historial permite calcular
+          // horas trabajadas y pausas >1h en el reporte diario. La lectura extra es barata (4 vigilados).
+          ctx.waitUntil((async () => {
+            try {
+              const _r = await env.DB.prepare("SELECT last_active FROM user_activity WHERE user = ?").bind(_cw).first();
+              if (!_r || !_r.last_active || _r.last_active < _thrA) {
+                await env.DB.prepare("INSERT INTO user_activity (user, last_active) VALUES (?, ?) ON CONFLICT(user) DO UPDATE SET last_active = excluded.last_active").bind(_cw, _nowA).run();
+                await env.DB.prepare("INSERT INTO user_activity_log (user, ts) VALUES (?, ?)").bind(_cw, _nowA).run();
+              }
+            } catch (_) {}
+          })());
         }
       } catch (_) {}
 
@@ -14017,6 +14431,35 @@ const handler = {
         return json({ ok: true, result });
       }
 
+      // POST /admin/pedidos/trace-ads → traza los pedidos sin ad (cliente -> atribución real)
+      // y sincroniza la columna Ad del Excel (match por nombre). Corre solo por cron; esto
+      // lo fuerza a mano. Idempotente (solo toca pedidos sin ad y celdas U vacías).
+      if (request.method === 'POST' && path === '/admin/pedidos/trace-ads') {
+        const trazados = await traceUntaggedPedidos(env);
+        const sync = await syncAdColumnToExcel(env);
+        return json({ ok: true, trazados, sync });
+      }
+
+      // GET /admin/ads/funnel?since=&until=&rate= → funnel de carteles por vertical (panel de control).
+      // Cruza el gasto de Meta (meta_ad_spend) con leads/presupuestos/ventas de D1. Solo Gaspar.
+      if (request.method === 'GET' && path === '/admin/ads/funnel') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const today = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+        const since = url.searchParams.get('since') || (today.slice(0, 7) + '-01');
+        const until = url.searchParams.get('until') || today;
+        const rate = parseFloat(url.searchParams.get('rate') || '') || 1400;
+        const data = await buildAdsFunnel(env, { since, until, rate });
+        return json(data);
+      }
+
+      // POST /admin/ads/spend-sync {since,until} → trae el gasto de Meta Ads a meta_ad_spend. Solo Gaspar.
+      if (request.method === 'POST' && path === '/admin/ads/spend-sync') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let b = {}; try { b = await request.json(); } catch (_) {}
+        const res = await syncMetaAdSpend(env, { since: b.since, until: b.until });
+        return json(res, res.ok ? 200 : 502);
+      }
+
       // GET /admin/pedidos/mirror-debug → testea el path POST worker→Apps Script con un
       // pedido_ping (NO escribe nada) y reporta si llegó al doPost. Diagnóstico.
       if (request.method === 'GET' && path === '/admin/pedidos/mirror-debug') {
@@ -14928,8 +15371,13 @@ const handler = {
     ctx.waitUntil(igMaybeRefreshToken(env));
     // Cada ~30 min: traer del Excel de Ventas el campo `productor` (Gaspar lo carga ahí).
     if (new Date().getUTCMinutes() % 30 < 5) ctx.waitUntil(syncProductoresFromVentas(env));
-    // Cada ~15 min: importar al CRM los pedidos nuevos cargados a mano en el Excel.
-    if (new Date().getUTCMinutes() % 15 < 5) ctx.waitUntil(importNewPedidosFromVentas(env));
+    // Cada ~15 min: importar los pedidos nuevos del Excel -> trazarles el ad automáticamente.
+    if (new Date().getUTCMinutes() % 15 < 5) ctx.waitUntil((async () => {
+      try { await importNewPedidosFromVentas(env); } catch (_) {}
+      try { await traceUntaggedPedidos(env); } catch (_) {}
+    })());
+    // 1×/hora: sincronizar la columna Ad al Excel desde D1 (match por nombre, drift-proof, solo huecos).
+    if (new Date().getUTCMinutes() < 5) ctx.waitUntil(syncAdColumnToExcel(env));
     // Follow-ups en horario hábil AR (8-20): campaña de cursos + minicurso (4h sin responder).
     const hAR = (new Date(event.scheduledTime).getUTCHours() - 3 + 24) % 24;
     if (hAR >= 8 && hAR < 20) {
@@ -14945,6 +15393,9 @@ const handler = {
     // Sync del mapa de campañas de Meta para los leads de CTWA (WhatsApp): resuelve el ad_id de la
     // referral -> nombre de campaña/ad y backfillea wa_ad_attributions (venía siempre NULL). Diario.
     if (hour === 13) ctx.waitUntil(syncMetaAdMap(env));
+    // Sync diario del GASTO de Meta por campaña -> meta_ad_spend (panel Funnel de Ads). Refresca
+    // los últimos ~10 días (Meta ajusta el gasto hasta ~72h). No-op sin META_ADS_TOKEN.
+    if (hour === 13) ctx.waitUntil(syncMetaAdSpend(env, { since: new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString().slice(0, 10) }));
     // Follow-up automático de presupuestos del cotizador: solo horario hábil AR (8-20).
     // Usa hAR (calculado más arriba en este mismo handler) para consistencia
     // con processCursosFollowup/processMinicursoFollowup.
@@ -14966,6 +15417,7 @@ const handler = {
     ctx.waitUntil(maybeAvisoArranque(env));
     // Reporte diario de ventas a las 21:00 AR (a Gaspar + su hermano). Dedup por día adentro.
     if (hAR === 21) ctx.waitUntil(maybeReporteDiario(env));
+    if (hAR === 21) ctx.waitUntil(maybeReporteHoras(env));
     // Reporte diario de la campaña MiniSupernova a las 21:00 AR (a Gaspar + Bruno). Dedup por día adentro.
     if (hAR === 21) ctx.waitUntil(maybeReporteMiniSupernova(env));
     // Aviso "leads para llamar" (fup 1 del presupuesto sin respuesta) a las 9 AR.
