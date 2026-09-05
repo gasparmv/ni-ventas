@@ -1527,6 +1527,8 @@ function mapPedidoFromD1(row) {
     restante: row.restante || 0,
     estadoPedido: row.estado_pedido || '',
     canalAd: row.ad || '',
+    sourceId: row.source_id || '',
+    sourceCampaign: row.source_campaign || '',
     telefono: row.telefono || '',
     tramos: row.tramos || '',
     tipo: row.tipo || '',
@@ -5993,6 +5995,14 @@ function openDrawerPedido(idx) {
               ${adSelectOptions()}
             </select>
             <input id="ped-edit-ad" value="${escapeHtml(p.canalAd||'')}" placeholder="o escribí el ad a mano" style="${inpD}">
+            ${p.sourceId ? `
+            <div style="background:rgba(139,47,214,.08);border-left:3px solid var(--accent,#8B2FD6);padding:8px 12px;margin-top:6px;border-radius:0 6px 6px 0;font-size:12px;display:flex;gap:10px;align-items:center">
+              <div style="flex:1;min-width:0">
+                <div style="color:var(--fg-subtle);font-size:11px">Ad ID exacto (Meta)${p.sourceCampaign?` · campaña <span style="font-family:ui-monospace,monospace">${escapeHtml(p.sourceCampaign)}</span>`:''}</div>
+                <div style="font-family:ui-monospace,monospace;font-size:12.5px;color:var(--fg);word-break:break-all">${escapeHtml(p.sourceId)}</div>
+              </div>
+              <a href="https://www.facebook.com/ads/library/?id=${encodeURIComponent(p.sourceId)}" target="_blank" rel="noopener" style="color:var(--accent,#8B2FD6);text-decoration:none;font-size:12px;flex-shrink:0;white-space:nowrap">Ver anuncio ↗</a>
+            </div>` : ''}
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn btn-ghost" onclick="verConversacionPedido(${idx})" style="font-size:12px;padding:5px 10px">💬 Ver conversación</button>
@@ -6095,8 +6105,10 @@ async function eliminarPedido(idx) {
 async function verAnuncioPedido(idx) {
   const p = STATE.pedidos.find(x => x.idx === idx);
   if (!p) return;
+  // Si ya tenemos el ad_id exacto guardado, abrimos la biblioteca de anuncios de Meta directo.
+  if (p.sourceId) { window.open('https://www.facebook.com/ads/library/?id=' + encodeURIComponent(p.sourceId), '_blank'); return; }
   const tel = String(p.telefono || '').replace(/\D/g, '');
-  if (!tel) { toast('Este pedido no tiene teléfono para trazar el anuncio'); return; }
+  if (!tel) { toast('Este pedido no tiene ad_id ni teléfono para trazar el anuncio'); return; }
   toast('Buscando el anuncio…');
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/wa/ad-attribution?phone=' + encodeURIComponent(tel), { headers: authHeaders() });
