@@ -8561,10 +8561,18 @@ async function sendChatMessage(phone, text) {
       const r = await fetch(CONFIG.trackerUrl + (_isIg ? '/admin/ig/send' : '/admin/wa/send'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify(_isIg ? { to: phone, text: partBody } : { to: phone, body: partBody, reply_to: partReply || undefined })
+        body: JSON.stringify(_isIg ? { to: phone, text: partBody } : { to: phone, body: partBody, reply_to: partReply || undefined, check_window: true })
       });
       const j = await r.json();
       if (!r.ok) {
+        // Ventana de 24h cerrada (check_window lo detecta ANTES de mandar): el texto libre
+        // rebotaría con 131047 y no llega. Avisamos claro para que usen una PLANTILLA en vez
+        // de que rebote en silencio (fue lo que pasó con la tanda de Abril del 4-sep).
+        if (!_isIg && (r.status === 409 || j.window_closed)) {
+          toast('⚠️ Pasaron +24h desde el último mensaje de este contacto. WhatsApp no deja mandar texto libre — usá una PLANTILLA para reengancharlo (sino no le llega).');
+          restoreOnFail(parts.slice(sent).join('\n\n'));
+          return;
+        }
         // IG: traducimos los errores crípticos de Meta a algo entendible (así Abril entiende y
         // no reintenta 7 veces). "cannot be found" = esa cuenta quedó inalcanzable por la API
         // (se desactivó, te bloqueó o borró la conversación) — se puede responder desde la app.
