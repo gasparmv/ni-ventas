@@ -664,9 +664,12 @@ async function ensurePedidosSchema(env) {
   // Columnas agregadas después de crear la tabla en prod: red de seguridad del espejo.
   // mirror_attempts = intentos fallidos; mirror_error = motivo del último fallo (ej.
   // valor que infringe la validación de datos del Excel). El ALTER tira si ya existen.
-  for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT', "comercial_id TEXT NOT NULL DEFAULT 'joaco'", 'cargado_por TEXT']) {
+  for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT', "comercial_id TEXT NOT NULL DEFAULT 'joaco'", 'cargado_por TEXT', 'source_id TEXT', 'source_campaign TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
   }
+  // source_id = ad_id EXACTO de Meta que trajo la venta (auditable, no un título adivinado).
+  // source_campaign = campaign_id de ese ad. Los llena traceAdForPedido con data dura (CTWA /
+  // formulario B2B). El funnel clasifica por source_campaign->vertical (exacto), no por el texto.
   // cargado_por: usuario logueado que apretó "Cargar pedido" (verbatim: Gaspar/Joaquín/
   // Facundo/Abril). Distinto de comercial_id (atribución de comisión): sirve para ver
   // QUIÉN cargó el pedido, aunque sea el admin. NULL en el histórico/backfill.
@@ -868,6 +871,28 @@ function verticalOfAdText(txt) {
 function verticalOfSource(sourceId, headline) {
   return verticalOfAdText(adLabelFromSource(sourceId, headline));
 }
+// Vertical EXACTO de una atribución CTWA: source_id -> campaign_id (meta_ad_map) -> vertical.
+// Más preciso que verticalOfSource (que adivina por título/headline si el ad no está en la lista
+// fija de 19). campBySource = {source_id: campaign_id} cargado de meta_ad_map en buildAdsFunnel.
+function verticalFromSourceMapped(sourceId, headline, campBySource) {
+  const sid = String(sourceId || '');
+  if (!sid) return '';
+  if (CORPOREAS_ADS.indexOf(sid) >= 0) return 'corporeas';  // corpóreas vive en la campaña B2C -> override
+  const cid = campBySource && campBySource[sid];
+  if (cid && CARTELES_CAMPAIGNS[cid]) return CARTELES_CAMPAIGNS[cid];
+  return verticalOfSource(sid, headline);                   // fallback: lista fija / headline
+}
+// Vertical EXACTO de un pedido ya trazado, por su source_id/source_campaign guardados.
+// Fallback al label (verticalOfAdText) para pedidos sin backfill todavía -> sin regresión.
+function verticalFromPedido(p, campBySource) {
+  const sid = String(p.source_id || '');
+  if (sid && CORPOREAS_ADS.indexOf(sid) >= 0) return 'corporeas';
+  const scamp = String(p.source_campaign || '').replace(/[^\d]/g, '');
+  if (scamp && CARTELES_CAMPAIGNS[scamp]) return CARTELES_CAMPAIGNS[scamp];
+  const cid = sid && campBySource ? campBySource[sid] : '';
+  if (cid && CARTELES_CAMPAIGNS[cid]) return CARTELES_CAMPAIGNS[cid];
+  return verticalOfAdText(p.ad);
+}
 // Traza el ad de UN pedido: encuentra el teléfono del cliente (el del pedido, o por nombre
 // en briefs) y su atribución real (CTWA source_id / formulario B2B / plantilla link-bio).
 // Devuelve {ad, telefono}. ad='' si no se pudo trazar (queda para revisar/directo).
@@ -880,25 +905,32 @@ async function traceAdForPedido(env, pedido) {
       if (b && b.cliente_wa_id) phone = String(b.cliente_wa_id).replace(/[^\d]/g, '');
     } catch (_) {}
   }
-  if (!phone) return { ad: '', telefono: '' };
-  let ad = '';
+  if (!phone) return { ad: '', telefono: '', source_id: '', source_campaign: '' };
+  let ad = '', sourceId = '', sourceCamp = '';
+  // (1) CTWA (WhatsApp): ÚLTIMO touch — regla de Gaspar: el último ad clickeado se lleva la venta.
   try {
-    const a = await env.DB.prepare("SELECT source_id, headline FROM wa_ad_attributions WHERE phone=? AND COALESCE(source_id,'')!='' ORDER BY ts ASC LIMIT 1").bind(phone).first();
-    if (a && a.source_id) ad = adLabelFromSource(a.source_id, a.headline);
+    const a = await env.DB.prepare("SELECT source_id, headline FROM wa_ad_attributions WHERE phone=? AND COALESCE(source_id,'')!='' ORDER BY ts DESC LIMIT 1").bind(phone).first();
+    if (a && a.source_id) { sourceId = String(a.source_id); ad = adLabelFromSource(a.source_id, a.headline); }
   } catch (_) {}
+  // (2) Formulario B2B (Lead Ad): wa_leads trae ad_id ('ag:...') y campaign_id ('c:...') exactos.
   if (!ad) {
     try {
-      const l = await env.DB.prepare("SELECT ad_name FROM wa_leads WHERE phone=? AND COALESCE(ad_id,'')!='' ORDER BY id DESC LIMIT 1").bind(phone).first();
-      if (l && l.ad_name) ad = String(l.ad_name).split(' - B2B')[0].trim() + ' (b2b form)';
+      const l = await env.DB.prepare("SELECT ad_id, campaign_id, ad_name FROM wa_leads WHERE phone=? AND COALESCE(ad_id,'')!='' ORDER BY received_at DESC LIMIT 1").bind(phone).first();
+      if (l && l.ad_name) {
+        sourceId = String(l.ad_id || '').replace(/[^\d]/g, '');
+        sourceCamp = String(l.campaign_id || '').replace(/[^\d]/g, '');
+        ad = String(l.ad_name).split(' - B2B')[0].trim() + ' (b2b form)';
+      }
     } catch (_) {}
   }
+  // (3) Link bio IG (plantilla determinística) — no tiene ad_id.
   if (!ad) {
     try {
       const lb = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone=? AND direction='inbound' AND lower(body) LIKE '%pedido personalizado en neon%' LIMIT 1").bind(phone).first();
       if (lb) ad = 'Link bio perfil ig';
     } catch (_) {}
   }
-  return { ad, telefono: phone };
+  return { ad, telefono: phone, source_id: sourceId, source_campaign: sourceCamp };
 }
 // Cron: barre los pedidos de carteles SIN ad (recientes) y los traza automáticamente.
 // Rellena pedidos.ad + pedidos.telefono en D1. Devuelve cuántos trazó.
@@ -909,7 +941,7 @@ async function traceUntaggedPedidos(env) {
     for (const p of (rows.results || [])) {
       const t = await traceAdForPedido(env, p);
       if (t.ad) {
-        await env.DB.prepare("UPDATE pedidos SET ad=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END WHERE id=?").bind(t.ad, t.telefono, p.id).run();
+        await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, p.id).run();
         n++;
       } else if (t.telefono) {
         await env.DB.prepare("UPDATE pedidos SET telefono=? WHERE id=? AND COALESCE(telefono,'')=''").bind(t.telefono, p.id).run();
@@ -917,6 +949,31 @@ async function traceUntaggedPedidos(env) {
     }
   } catch (_) {}
   return n;
+}
+// Backfill del ad_id EXACTO en pedidos YA trazados (tienen label de ad pero no source_id).
+// SEGURO: solo re-traza los que tienen un label de vertical de ad (b2c/b2b/retargeting/corpóreas);
+// a los marcados a mano por Gaspar (directo/frecuente/referido/link bio/REVISAR) NO les pone
+// source_id (respeta su juicio de que NO vienen de un ad) y los marca con '' para no reprocesar.
+// NUNCA cambia el label. Batched (LIMIT). Devuelve {done, withsrc}.
+async function backfillPedidoSources(env, limit = 60) {
+  let done = 0, withsrc = 0;
+  try {
+    const rows = await env.DB.prepare("SELECT id, cartel, numero, telefono, ad FROM pedidos WHERE COALESCE(ad,'')!='' AND source_id IS NULL ORDER BY id DESC LIMIT ?").bind(limit).all();
+    for (const p of (rows.results || [])) {
+      const adl = String(p.ad || '').toLowerCase();
+      const esVerticalAd = adl.indexOf('(b2c') >= 0 || adl.indexOf('(b2b') >= 0 || adl.indexOf('(retarget') >= 0 || adl.indexOf('(corporea') >= 0;
+      const esOrganico = adl.indexOf('revisar') === 0 || adl.indexOf('frecuente') >= 0 || adl.indexOf('referido') >= 0 || adl.indexOf('directo') >= 0 || adl.indexOf('link bio') >= 0;
+      let sid = '', scamp = '';
+      if (esVerticalAd && !esOrganico) {
+        const t = await traceAdForPedido(env, p);
+        sid = t.source_id || ''; scamp = t.source_campaign || '';
+      }
+      await env.DB.prepare("UPDATE pedidos SET source_id=?, source_campaign=? WHERE id=?").bind(sid, scamp, p.id).run();
+      if (sid) withsrc++;
+      done++;
+    }
+  } catch (_) {}
+  return { done, withsrc };
 }
 // Cron: sincroniza la columna Ad (U) del Excel de Ventas desde D1, matcheando por NOMBRE
 // de cartel (NO por sheet_row, que se desalinea si se borran/mueven filas). Solo rellena
@@ -5371,8 +5428,9 @@ async function syncMetaAdMap(env, opts = {}) {
   if (!token) return { ok: false, error: 'no token' };
   const limit = Math.max(1, Math.min(200, opts.limit || 80));
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS meta_ad_map (ad_id TEXT PRIMARY KEY, ad_name TEXT, ad_set_name TEXT, campaign_name TEXT, updated_at TEXT)").run(); } catch (_) {}
+  try { await env.DB.prepare("ALTER TABLE meta_ad_map ADD COLUMN campaign_id TEXT").run(); } catch (_) {} // campaign_id = clave estable para clasificar por campaña exacta
   // ad_ids que aparecen en atribuciones y todavía no están resueltos (nuevos, o vistos hace +7 días
-  // sin nombre). El upsert-en-error-permanente marca el ad como "visto" para no reintentarlo en loop.
+  // sin nombre), O que ya tienen nombre pero les falta el campaign_id (columna nueva -> se re-resuelven).
   const stale = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
   let rows = [];
   try {
@@ -5381,7 +5439,7 @@ async function syncMetaAdMap(env, opts = {}) {
          FROM wa_ad_attributions a
          LEFT JOIN meta_ad_map m ON m.ad_id = a.source_id
         WHERE a.source_id IS NOT NULL AND a.source_id != ''
-          AND (m.ad_id IS NULL OR (COALESCE(m.campaign_name,'') = '' AND COALESCE(m.updated_at,'') < ?))
+          AND (m.ad_id IS NULL OR (COALESCE(m.campaign_name,'') = '' AND COALESCE(m.updated_at,'') < ?) OR COALESCE(m.campaign_id,'') = '')
         ORDER BY a.id DESC
         LIMIT ?`).bind(stale, limit).all()).results) || [];
   } catch (_) {}
@@ -5390,9 +5448,9 @@ async function syncMetaAdMap(env, opts = {}) {
     const adId = String(row.ad_id || '');
     if (!adId) continue;
     seen++;
-    let adName = '', adsetName = '', campName = '';
+    let adName = '', adsetName = '', campName = '', campId = '';
     try {
-      const u = `https://graph.facebook.com/v21.0/${encodeURIComponent(adId)}?fields=name,adset{name},campaign{name}&access_token=${encodeURIComponent(token)}`;
+      const u = `https://graph.facebook.com/v21.0/${encodeURIComponent(adId)}?fields=name,adset{name},campaign{id,name}&access_token=${encodeURIComponent(token)}`;
       const r = await fetch(u);
       const j = await r.json();
       if (j && j.error) {
@@ -5404,12 +5462,13 @@ async function syncMetaAdMap(env, opts = {}) {
         adName = String(j.name || '');
         adsetName = String((j.adset && j.adset.name) || '');
         campName = String((j.campaign && j.campaign.name) || '');
+        campId = String((j.campaign && j.campaign.id) || '');
         if (campName) resolved++;
       }
     } catch (e) { error = String(e); continue; }
     try {
-      await env.DB.prepare("INSERT INTO meta_ad_map (ad_id, ad_name, ad_set_name, campaign_name, updated_at) VALUES (?,?,?,?,?) ON CONFLICT(ad_id) DO UPDATE SET ad_name=excluded.ad_name, ad_set_name=excluded.ad_set_name, campaign_name=excluded.campaign_name, updated_at=excluded.updated_at")
-        .bind(adId, adName, adsetName, campName, new Date().toISOString()).run();
+      await env.DB.prepare("INSERT INTO meta_ad_map (ad_id, ad_name, ad_set_name, campaign_name, campaign_id, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(ad_id) DO UPDATE SET ad_name=excluded.ad_name, ad_set_name=excluded.ad_set_name, campaign_name=excluded.campaign_name, campaign_id=excluded.campaign_id, updated_at=excluded.updated_at")
+        .bind(adId, adName, adsetName, campName, campId, new Date().toISOString()).run();
     } catch (_) {}
     if (campName || adName) {
       try {
@@ -5497,6 +5556,7 @@ async function syncMetaAdSpend(env, opts = {}) {
 //              frecuente / referido / revisar) para el gráfico "de dónde vienen las ventas".
 // CPL/CAC/ROAS convierten USD->ARS con `rate`. Todo en día calendario (fecha/enviado_at/ts ISO).
 async function buildAdsFunnel(env, opts = {}) {
+  try { await ensurePedidosSchema(env); } catch (_) {} // garantiza columnas source_id/source_campaign
   const since = String(opts.since || '').slice(0, 10);
   const until = String(opts.until || '').slice(0, 10); // inclusivo
   const rate = Number(opts.rate) || 1400;
@@ -5505,6 +5565,14 @@ async function buildAdsFunnel(env, opts = {}) {
   const VS = ['b2c', 'retargeting', 'b2b', 'corporeas'];
   const agg = {}; VS.forEach(v => agg[v] = { vertical: v, gasto_usd: 0, leads: 0, presup: 0, presup_monto: 0, ventas: 0, ingresos: 0 });
   const norm = p => String(p || '').replace(/[^\d]/g, '');
+
+  // Mapa source_id (ad_id) -> campaign_id desde meta_ad_map: clasificar leads/ventas por CAMPAÑA
+  // EXACTA (no por el texto del título). Los ads que aún no están en el mapa caen al fallback.
+  const campBySource = {};
+  try {
+    const rs = await env.DB.prepare("SELECT ad_id, campaign_id FROM meta_ad_map WHERE COALESCE(campaign_id,'')!=''").all();
+    for (const r of (rs.results || [])) campBySource[String(r.ad_id)] = String(r.campaign_id);
+  } catch (_) {}
 
   // ---- GASTO (meta_ad_spend, USD) por vertical ----
   let spendUpdated = '';
@@ -5527,12 +5595,12 @@ async function buildAdsFunnel(env, opts = {}) {
   try {
     const rs = await env.DB.prepare("SELECT phone, source_id, headline, ts FROM wa_ad_attributions WHERE COALESCE(source_id,'')!='' AND ts>=? AND ts<? ORDER BY phone, ts DESC").bind(sinceWide, untilEx).all();
     const rows = rs.results || [];
-    for (const r of rows) { const p = norm(r.phone); if (phoneVert[p] === undefined) { const v = verticalOfSource(r.source_id, r.headline); if (v) phoneVert[p] = v; } }
+    for (const r of rows) { const p = norm(r.phone); if (phoneVert[p] === undefined) { const v = verticalFromSourceMapped(r.source_id, r.headline, campBySource); if (v) phoneVert[p] = v; } }
     const seen = new Set();
     for (const r of rows) {
       if (String(r.ts).slice(0, 10) < since) continue; // solo touches del período
       const p = norm(r.phone); if (seen.has(p)) continue; seen.add(p);
-      const v = verticalOfSource(r.source_id, r.headline);
+      const v = verticalFromSourceMapped(r.source_id, r.headline, campBySource);
       if ((v === 'b2c' || v === 'retargeting' || v === 'corporeas') && agg[v]) agg[v].leads++;
     }
   } catch (_) {}
@@ -5565,13 +5633,14 @@ async function buildAdsFunnel(env, opts = {}) {
   // cuentan en la fila 'corporeas'; el corpóreo ORGÁNICO (sin ad) queda fuera del mix de carteles.
   const mix = { corporeas: 0, b2c: 0, retargeting: 0, b2b: 0, linkbio: 0, directo: 0, frecuente: 0, referido: 0, revisar: 0 };
   try {
-    const rs = await env.DB.prepare("SELECT ad, cartel, numero, fecha, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE fecha>=? AND fecha<?").bind(since, untilEx).all();
+    const rs = await env.DB.prepare("SELECT ad, cartel, numero, fecha, source_id, source_campaign, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE fecha>=? AND fecha<?").bind(since, untilEx).all();
     const ordVenta = {}; VS.forEach(v => ordVenta[v] = new Set());
     const ordMix = new Set();
     for (const r of (rs.results || [])) {
       const k = String(r.numero) + '|' + String(r.fecha);
       const esCorporeo = /orpore/i.test(String(r.cartel || ''));
-      let v = verticalOfAdText(r.ad);
+      // Clasificación EXACTA: source_id/source_campaign guardados -> campaña -> vertical. Fallback al label.
+      let v = verticalFromPedido(r, campBySource);
       if (esCorporeo && v !== 'corporeas') v = ''; // corpóreo que no vino del ad de corpóreas -> orgánico
       if (v && agg[v]) {
         agg[v].ingresos += (r.monto || 0);
@@ -14482,6 +14551,21 @@ const handler = {
         const trazados = await traceUntaggedPedidos(env);
         const sync = await syncAdColumnToExcel(env);
         return json({ ok: true, trazados, sync });
+      }
+
+      // POST /admin/pedidos/backfill-source → guarda el ad_id EXACTO (source_id/source_campaign) en
+      // los pedidos ya trazados que no lo tienen. SEGURO: no cambia labels ni toca los marcados a
+      // mano como orgánicos. Batched en un solo request. Solo Gaspar. Idempotente.
+      if (request.method === 'POST' && path === '/admin/pedidos/backfill-source') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        await ensurePedidosSchema(env);
+        let done = 0, withSource = 0, iters = 0;
+        while (iters < 12) {
+          const r = await backfillPedidoSources(env, 60);
+          done += r.done; withSource += r.withsrc; iters++;
+          if (r.done < 60) break;
+        }
+        return json({ ok: true, done, with_source: withSource, iters });
       }
 
       // GET /admin/ads/funnel?since=&until=&rate= → funnel de carteles por vertical (panel de control).
