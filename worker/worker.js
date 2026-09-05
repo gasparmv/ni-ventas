@@ -2610,7 +2610,7 @@ const REPORTE_DIARIO_PHONES = ['5491155604999', '5491155604996']; // Gaspar, her
 const REPORTE_DIA_DESDE = "(date('now','-3 hours') || 'T03:00:00Z')";
 const REPORTE_DIA_HASTA = "(date('now','-3 hours','+1 day') || 'T03:00:00Z')";
 async function buildReporteDiario(env) {
-  const out = { total: 0, carteles: 0, cursos: 0, precotiz: 0, presupTotal: 0, presupJoaco: 0, presupNadia: 0, chatsJoaco: 0, chatsNadia: 0, ocEnviadas: 0 };
+  const out = { total: 0, carteles: 0, cartelesNeon: 0, corporeas: 0, cursos: 0, precotiz: 0, presupTotal: 0, presupJoaco: 0, presupNadia: 0, chatsJoaco: 0, chatsNadia: 0, ocEnviadas: 0 };
   // 1) Conversaciones nuevas (inbound hoy, WhatsApp) + split carteles/cursos.
   //    Cursos = inbox='cursos' O el chat tiene señales del funnel de cursos/evento en
   //    algún inbound (los leads del evento/minicurso NO se marcan inbox='cursos' — entran
@@ -2638,6 +2638,20 @@ async function buildReporteDiario(env) {
     ).first();
     out.total = (r && r.total) || 0; out.cursos = (r && r.cursos) || 0; out.carteles = out.total - out.cursos;
   } catch (_) {}
+  // 1b) De los "carteles", separar CORPÓREAS (letras 3D): leads con atribución a un ad de
+  //     corpóreas (CORPOREAS_ADS, creativos DENTRO de la campaña Carteles B2C). No son cursos
+  //     (no tienen sus señales), así que son un subconjunto de carteles. cartelesNeon = resto.
+  try {
+    const inList = CORPOREAS_ADS.map(a => `'${a}'`).join(',');
+    const r = await env.DB.prepare(
+      `SELECT COUNT(DISTINCT m.phone) AS n FROM wa_messages m
+       WHERE m.direction='inbound' AND m.msg_type!='status' AND (m.channel IS NULL OR m.channel='wa')
+         AND m.ts >= ${REPORTE_DIA_DESDE} AND m.ts < ${REPORTE_DIA_HASTA}
+         AND m.phone IN (SELECT phone FROM wa_ad_attributions WHERE source_id IN (${inList}))`
+    ).first();
+    out.corporeas = (r && r.n) || 0;
+  } catch (_) { out.corporeas = 0; }
+  out.cartelesNeon = Math.max(0, out.carteles - out.corporeas);
   // 2) Pasaron la precotización hoy = leads del piloto que (a) completaron el
   //    relevamiento (completed_at hoy) O (b) Joaco cotizó a mano igual aunque
   //    faltara algún dato (int/ext), detectado por un brief 'enviado' hoy de un
@@ -2686,7 +2700,9 @@ function formatReporteDiario(d) {
   return (
     `📊 Reporte del día ${fecha}\n\n` +
     `💬 Conversaciones nuevas: ${d.total}\n` +
-    `   Carteles: ${d.carteles} · Cursos: ${d.cursos}\n\n` +
+    (d.corporeas > 0
+      ? `   Carteles: ${d.cartelesNeon} · Corpóreas: ${d.corporeas} · Cursos: ${d.cursos}\n\n`
+      : `   Carteles: ${d.carteles} · Cursos: ${d.cursos}\n\n`) +
     `🤖 Pasaron la precotización: ${d.precotiz}\n\n` +
     `👥 Chats asignados hoy:${repartoNota}\n` +
     `   Joaco: ${d.chatsJoaco} · Facundo: ${d.chatsNadia}\n\n` +
@@ -2704,8 +2720,11 @@ async function maybeReporteDiario(env) {
     // Plantilla (se entrega fuera de la ventana de 24h de WhatsApp). Cadena de fallback:
     // reporte_diario_ventas2 (11 vars, incluye Órdenes de compra) → reporte_diario_ventas
     // (10 vars, la vieja, por si la v2 todavía no la aprobó Meta) → texto libre (en ventana).
-    const params11 = [fechaDisplay, d.total, d.carteles, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia, d.ocEnviadas].map(String);
-    const params10 = [fechaDisplay, d.total, d.carteles, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
+    // Var {{3}} (carteles): si hubo corpóreas, mostramos el desglose inline (ej "62 (39 corp)")
+    // para que se vea en la plantilla SIN cambiarle las variables (reporte_diario_ventas3).
+    const cartVar = d.corporeas > 0 ? `${d.cartelesNeon} (${d.corporeas} corp)` : String(d.carteles);
+    const params11 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia, d.ocEnviadas].map(String);
+    const params10 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
     const texto = formatReporteDiario(d);
     let anyOk = false;
     for (const ph of REPORTE_DIARIO_PHONES) {
