@@ -2616,11 +2616,11 @@ const REPORTE_DIA_HASTA = "(date('now','-3 hours','+1 day') || 'T03:00:00Z')";
 async function buildReporteDiario(env) {
   const out = { total: 0, carteles: 0, cartelesNeon: 0, corporeas: 0, cursos: 0, precotiz: 0, presupTotal: 0, presupJoaco: 0, presupNadia: 0, chatsJoaco: 0, chatsNadia: 0, ocEnviadas: 0 };
   // 1) Conversaciones nuevas (inbound hoy, WhatsApp) + split carteles/cursos.
-  //    Cursos = inbox='cursos' O el chat tiene señales del funnel de cursos/evento en
-  //    algún inbound (los leads del evento/minicurso NO se marcan inbox='cursos' — entran
-  //    por el anuncio con "quiero el regalo"/"unirme al grupo"/etc. y antes caían en
-  //    carteles, inflando el denominador y tirando abajo el ratio de cotización).
-  //    carteles = total - cursos (garantiza total = carteles + cursos).
+  //    Cursos (señal DURA primero, texto después): inbox='cursos' O está en el flujo del
+  //    evento (lanzamiento_landing: recibió el opener lanzamiento_evento_opener y quedó en
+  //    'oculto' aunque respondiera "sí/dale/link") O tiene señales del funnel en algún inbound.
+  //    Sin lo del flujo, los del evento se colaban en carteles: el 04-09 metió ~262 leads de
+  //    cursos en carteles (reporte decía 230 carteles cuando eran ~73). carteles = total - cursos.
   try {
     const r = await env.DB.prepare(
       `WITH fi AS (
@@ -2630,7 +2630,9 @@ async function buildReporteDiario(env) {
          GROUP BY phone
        )
        SELECT COUNT(*) AS total,
-              SUM(CASE WHEN s.inbox='cursos' OR EXISTS(
+              SUM(CASE WHEN s.inbox='cursos'
+                    OR fi.phone IN (SELECT phone FROM lanzamiento_landing)
+                    OR EXISTS(
                     SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction='inbound' AND (
                       lower(m.body) LIKE '%el regalo%' OR lower(m.body) LIKE '%al grupo%'
                       OR lower(m.body) LIKE '%minicurso%' OR lower(m.body) LIKE '%registr%'
