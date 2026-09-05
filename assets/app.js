@@ -9505,7 +9505,7 @@ window.rejectImprovement = rejectImprovement;
 // ===== Panel Funnel de Ads (admin) =====
 // Gasto (Meta) -> leads -> presupuestos -> ventas, campaña por campaña (por vertical de carteles).
 // Consume GET /admin/ads/funnel. Data dura: gasto real de Meta + ventas trazadas 1x1.
-let funnelState = { period: 'agosto', rate: 1400, data: null, loading: false };
+let funnelState = { period: '', rate: 1400, data: null, loading: false }; // period se setea al mes en curso al renderizar
 
 const FA_VLABEL = {
   b2c:        { name: 'Carteles B2C',              tag: 'CTWA · B2C' },
@@ -9538,10 +9538,28 @@ function faToday() {
   const d = new Date();
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
+const FA_MES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+// Últimos 4 meses calendario (más viejo -> mes en curso), como {key:'YYYY-MM', label}.
+function faMonths() {
+  const t = faToday(); const y = parseInt(t.slice(0, 4), 10), m = parseInt(t.slice(5, 7), 10);
+  const out = [];
+  for (let i = 3; i >= 0; i--) {
+    let yy = y, mm = m - i; while (mm < 1) { mm += 12; yy -= 1; }
+    out.push({ key: yy + '-' + String(mm).padStart(2, '0'), label: FA_MES[mm - 1] + (yy !== y ? " '" + String(yy).slice(2) : '') });
+  }
+  return out;
+}
+function faIsCurrentMonth(p) { return p === faToday().slice(0, 7); }
+// p = 'YYYY-MM'. Devuelve [primer día, último día del mes] — el mes EN CURSO se capa a hoy
+// (antes 'agosto' se comía septiembre porque usaba faToday() como fin fijo).
 function faRange(p) {
-  if (p === 'junio') return ['2026-06-01', '2026-06-30'];
-  if (p === 'julio') return ['2026-07-01', '2026-07-31'];
-  return ['2026-08-01', faToday()]; // agosto (parcial, hasta hoy)
+  if (!/^\d{4}-\d{2}$/.test(p)) { const ms = faMonths(); p = ms[ms.length - 1].key; }
+  const y = parseInt(p.slice(0, 4), 10), m = parseInt(p.slice(5, 7), 10);
+  const first = p + '-01';
+  const lastDay = new Date(y, m, 0).getDate();
+  const last = p + '-' + String(lastDay).padStart(2, '0');
+  const today = faToday();
+  return [first, last < today ? last : today];
 }
 function faMoney(n) { return '$' + Math.round(n || 0).toLocaleString('es-AR'); }
 function faUsd(n) { return 'US$' + (Math.round((n || 0) * 100) / 100).toLocaleString('es-AR'); }
@@ -9550,6 +9568,7 @@ function faSem(v, g, b, inv) { if (v == null) return ''; if (inv) return v <= g 
 
 function renderFunnelAds() {
   const st = funnelState;
+  if (!/^\d{4}-\d{2}$/.test(st.period)) { const ms = faMonths(); st.period = ms[ms.length - 1].key; } // default: mes en curso
   const pBtn = (p, lbl) => `<button data-fa-p="${p}" aria-pressed="${st.period === p}">${lbl}</button>`;
   return `
   <style>
@@ -9612,7 +9631,7 @@ function renderFunnelAds() {
         <span class="sub">Gasto → leads → presupuestos → ventas, campaña por campaña</span>
       </div>
       <div class="fa-ctrls">
-        <div class="fa-seg" id="fa-period">${pBtn('junio', 'Junio')}${pBtn('julio', 'Julio')}${pBtn('agosto', 'Agosto')}</div>
+        <div class="fa-seg" id="fa-period">${faMonths().map(mo => pBtn(mo.key, mo.label)).join('')}</div>
         <label class="fa-rate">USD→ARS <input id="fa-rate" type="number" step="10" value="${st.rate}"></label>
       </div>
     </div>
@@ -9678,12 +9697,26 @@ async function loadFunnelAds() {
 function renderFaAll() {
   const d = funnelState.data; if (!d) return;
   renderFaKpis(d); renderFaFunnel(d); renderFaTable(d); renderFaMix(d);
-  const pl = { junio: 'Junio', julio: 'Julio', agosto: 'Agosto (parcial)' }[funnelState.period] || funnelState.period;
+  const _mo = faMonths().find(x => x.key === funnelState.period);
+  const pl = (_mo ? _mo.label : funnelState.period) + (faIsCurrentMonth(funnelState.period) ? ' (en curso)' : '');
   const fc = document.getElementById('fa-funnelcap'); if (fc) fc.textContent = 'Carteles · ' + pl + ' · ' + d.since + ' → ' + d.until;
   const sf = document.getElementById('fa-spendfoot');
   if (sf) sf.textContent = 'Gasto Meta act. ' + (d.spend_updated ? d.spend_updated.slice(0, 10) : '—') + ' · US$→ARS $' + Number(d.rate).toLocaleString('es-AR');
   const nt = document.getElementById('fa-note');
-  if (nt) nt.innerHTML = 'Gasto = Meta Ads (real). Ventas = trazabilidad con data dura (source_id / formulario). Leads = WhatsApp por CTWA (Instagram todavía no incluido). Presupuestos linkeados por teléfono.';
+  if (nt) {
+    const c = d.contexto || {}; const ad = c.ad || {}, org = c.organico || {}, st = c.sintrazar || {}, cor = c.corporeo || {};
+    const totOrd = (ad.ordenes || 0) + (org.ordenes || 0) + (st.ordenes || 0);
+    const totIng = (ad.ingresos || 0) + (org.ingresos || 0) + (st.ingresos || 0);
+    let h = '<b>Ventas del período (carteles):</b> <b style="color:var(--fa-acc)">' + (ad.ordenes || 0) + ' de ad</b> · ' +
+      (org.ordenes || 0) + ' orgánicas (link bio/directo/frecuente) · ' + (st.ordenes || 0) + ' sin trazar' +
+      (cor.ordenes ? ' · <b>' + cor.ordenes + ' corpóreo</b> (fila aparte)' : '') +
+      ' — total ' + totOrd + ' órdenes / ' + faMoney(totIng) + '. <b>El funnel cuenta SOLO las de ad</b> (para que el ROAS sea real; el resto es orgánico o sin trazar).';
+    const sinAtr = (d.presup_sin_tel || 0) + (d.presup_sin_atrib || 0);
+    if (sinAtr) h += '<br>Presupuestos: ' + (d.presup_enviados || 0) + ' enviados en el mes, ' + sinAtr + ' sin atribuir a un ad (no entran al L→P por vertical).';
+    h += '<br><span style="color:var(--fa-fnt)">Gasto = Meta (real). Leads/ventas clasificados por campaña exacta (membresía). Días en hora Argentina. Instagram todavía no incluido.</span>';
+    if (d.partial && (d.warnings || []).length) h = '<span style="color:var(--fa-bad);font-weight:600">⚠ Datos parciales — falló: ' + d.warnings.join('; ') + '</span><br>' + h;
+    nt.innerHTML = h;
+  }
   faBindTips();
 }
 

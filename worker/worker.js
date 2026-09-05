@@ -879,19 +879,23 @@ function verticalFromSourceMapped(sourceId, headline, campBySource) {
   if (!sid) return '';
   if (CORPOREAS_ADS.indexOf(sid) >= 0) return 'corporeas';  // corpóreas vive en la campaña B2C -> override
   const cid = campBySource && campBySource[sid];
-  if (cid && CARTELES_CAMPAIGNS[cid]) return CARTELES_CAMPAIGNS[cid];
-  return verticalOfSource(sid, headline);                   // fallback: lista fija / headline
+  // Membresía de campaña ESTRICTA: si la campaña es CONOCIDA, cuenta SOLO si es de carteles; si es de
+  // cursos/otra, devuelve '' (NO se filtra a b2c). Simétrico con el gasto (que también se restringe a
+  // CARTELES_CAMPAIGNS). El fallback por título/headline queda SOLO para ads sin campaña mapeada
+  // (borrados/nuevos), donde no hay mejor señal.
+  if (cid) return CARTELES_CAMPAIGNS[cid] || '';
+  return verticalOfSource(sid, headline);
 }
-// Vertical EXACTO de un pedido ya trazado, por su source_id/source_campaign guardados.
-// Fallback al label (verticalOfAdText) para pedidos sin backfill todavía -> sin regresión.
+// Vertical EXACTO de un pedido ya trazado, por su source_id/source_campaign guardados. Misma regla
+// de membresía estricta. Fallback al label (verticalOfAdText) solo para pedidos sin source_id.
 function verticalFromPedido(p, campBySource) {
   const sid = String(p.source_id || '');
   if (sid && CORPOREAS_ADS.indexOf(sid) >= 0) return 'corporeas';
   const scamp = String(p.source_campaign || '').replace(/[^\d]/g, '');
-  if (scamp && CARTELES_CAMPAIGNS[scamp]) return CARTELES_CAMPAIGNS[scamp];
+  if (scamp) return CARTELES_CAMPAIGNS[scamp] || '';       // campaña del formulario (conocida)
   const cid = sid && campBySource ? campBySource[sid] : '';
-  if (cid && CARTELES_CAMPAIGNS[cid]) return CARTELES_CAMPAIGNS[cid];
-  return verticalOfAdText(p.ad);
+  if (cid) return CARTELES_CAMPAIGNS[cid] || '';            // campaña CTWA (conocida)
+  return verticalOfAdText(p.ad);                            // sin source_id -> label
 }
 // Traza el ad de UN pedido: encuentra el teléfono del cliente (el del pedido, o por nombre
 // en briefs) y su atribución real (CTWA source_id / formulario B2B / plantilla link-bio).
@@ -5581,9 +5585,17 @@ async function buildAdsFunnel(env, opts = {}) {
   const rate = Number(opts.rate) || 1400;
   const untilEx = new Date(new Date(until + 'T00:00:00Z').getTime() + 24 * 3600 * 1000).toISOString().slice(0, 10);
   const sinceWide = new Date(new Date(since + 'T00:00:00Z').getTime() - 120 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  // Límites de DÍA AR (UTC-3) para los timestamps guardados en UTC (ts / enviado_at / received_at): el
+  // día AR arranca a las 03:00Z. pedidos.fecha y meta_ad_spend.day YA son fecha AR -> se comparan con
+  // since/until directo. Sin esto, leads/presup se agrupaban por día UTC y no cerraban con gasto/ventas.
+  const sinceUTC = since + 'T03:00:00Z';
+  const untilExUTC = untilEx + 'T03:00:00Z';
+  const sinceWideUTC = sinceWide + 'T03:00:00Z';
   const VS = ['b2c', 'retargeting', 'b2b', 'corporeas'];
   const agg = {}; VS.forEach(v => agg[v] = { vertical: v, gasto_usd: 0, leads: 0, presup: 0, presup_monto: 0, ventas: 0, ingresos: 0 });
   const norm = p => String(p || '').replace(/[^\d]/g, '');
+  const warnings = [];
+  const warn = (sec, e) => { warnings.push(sec + ': ' + String((e && e.message) || e || 'error')); }; // falla parcial visible, no silenciosa
 
   // Mapa source_id (ad_id) -> campaign_id desde meta_ad_map: clasificar leads/ventas por CAMPAÑA
   // EXACTA (no por el texto del título). Los ads que aún no están en el mapa caen al fallback.
@@ -5591,7 +5603,7 @@ async function buildAdsFunnel(env, opts = {}) {
   try {
     const rs = await env.DB.prepare("SELECT ad_id, campaign_id FROM meta_ad_map WHERE COALESCE(campaign_id,'')!=''").all();
     for (const r of (rs.results || [])) campBySource[String(r.ad_id)] = String(r.campaign_id);
-  } catch (_) {}
+  } catch (e) { warn('mapa', e); }
 
   // ---- GASTO (meta_ad_spend, USD) por vertical ----
   let spendUpdated = '';
@@ -5602,88 +5614,98 @@ async function buildAdsFunnel(env, opts = {}) {
       if (v && agg[v]) agg[v].gasto_usd += (r.g || 0);
       if (r.u && r.u > spendUpdated) spendUpdated = r.u;
     }
-  } catch (_) {}
+  } catch (e) { warn('gasto', e); }
   // Los ads de corpóreas viven DENTRO de la campaña Carteles B2C -> su gasto ya está sumado en b2c.
   // Se lo restamos a b2c (para que b2c quede "solo neon") y queda en la fila corpóreas aparte.
   agg.b2c.gasto_usd = Math.max(0, agg.b2c.gasto_usd - agg.corporeas.gasto_usd);
 
-  // ---- mapa teléfono->vertical + LEADS de CTWA (b2c / retargeting / corpóreas) ----
-  // b2c/retargeting/corpóreas entran por click-to-WhatsApp (wa_ad_attributions). B2B entra por AMBOS:
-  // el FORMULARIO (wa_leads) Y click-to-WhatsApp -> se juntan en b2bPhones (dedup) más abajo.
+  // ---- LEADS: UN vertical por teléfono (dedup entre verticales) ----
+  // phoneVert = último touch en ventana ancha (para linkear presupuestos). leadVert = vertical del
+  // lead DENTRO del período, una sola entrada por teléfono. B2B entra por CTWA (ad B2B) Y por el
+  // FORMULARIO (wa_leads); el form pisa. Todo en día AR (ts en UTC -> límites a 03:00Z).
   const phoneVert = {};
-  const b2bPhones = new Set(); // leads B2B: WhatsApp (CTWA desde ad B2B) + formulario, deduplicados
+  const leadVert = {};
   try {
-    const rs = await env.DB.prepare("SELECT phone, source_id, headline, ts FROM wa_ad_attributions WHERE COALESCE(source_id,'')!='' AND ts>=? AND ts<? ORDER BY phone, ts DESC").bind(sinceWide, untilEx).all();
+    const rs = await env.DB.prepare("SELECT phone, source_id, headline, ts FROM wa_ad_attributions WHERE COALESCE(source_id,'')!='' AND ts>=? AND ts<? ORDER BY phone, ts DESC").bind(sinceWideUTC, untilExUTC).all();
     const rows = rs.results || [];
     for (const r of rows) { const p = norm(r.phone); if (phoneVert[p] === undefined) { const v = verticalFromSourceMapped(r.source_id, r.headline, campBySource); if (v) phoneVert[p] = v; } }
     const seen = new Set();
     for (const r of rows) {
-      if (String(r.ts).slice(0, 10) < since) continue; // solo touches del período
+      if (r.ts < sinceUTC) continue; // solo touches del período (día AR)
       const p = norm(r.phone); if (seen.has(p)) continue; seen.add(p);
       const v = verticalFromSourceMapped(r.source_id, r.headline, campBySource);
-      if ((v === 'b2c' || v === 'retargeting' || v === 'corporeas') && agg[v]) agg[v].leads++;
-      else if (v === 'b2b') b2bPhones.add(p); // clickeó un ad B2B y escribió por WhatsApp (sin form)
+      if (v) leadVert[p] = v; // último touch del período
     }
-  } catch (_) {}
-
-  // ---- LEADS B2B del FORMULARIO (wa_leads) + overlay al mapa teléfono->vertical ----
-  // wa_leads = submissions del Lead Ad B2B (campaign_id con prefijo 'c:'). El form es señal fuerte
-  // de B2B -> pisa lo que dijera CTWA para ese teléfono (así el presupuesto también linkea a b2b).
+  } catch (e) { warn('leads', e); }
+  // Formulario B2B: pisa a b2b en phoneVert (para presup) y, si es del período, en leadVert (lead).
   try {
-    const rs = await env.DB.prepare("SELECT phone, campaign_id, received_at FROM wa_leads WHERE COALESCE(phone,'')!='' AND received_at>=? AND received_at<? ORDER BY received_at DESC").bind(sinceWide, untilEx).all();
+    const rs = await env.DB.prepare("SELECT phone, campaign_id, received_at FROM wa_leads WHERE COALESCE(phone,'')!='' AND received_at>=? AND received_at<? ORDER BY received_at DESC").bind(sinceWideUTC, untilExUTC).all();
     for (const r of (rs.results || [])) {
       if (CARTELES_CAMPAIGNS[norm(r.campaign_id)] !== 'b2b') continue; // solo B2B de carteles
       const p = norm(r.phone);
       phoneVert[p] = 'b2b';
-      if (String(r.received_at).slice(0, 10) >= since) b2bPhones.add(p); // submission del formulario
+      if (r.received_at >= sinceUTC) leadVert[p] = 'b2b'; // submission del período -> b2b (pisa CTWA)
     }
-  } catch (_) {}
-  agg.b2b.leads = b2bPhones.size; // WhatsApp + formulario, deduplicados
+  } catch (e) { warn('leads_b2b', e); }
+  for (const p in leadVert) { const v = leadVert[p]; if (agg[v]) agg[v].leads++; } // 1 teléfono -> 1 vertical
 
-  // ---- PRESUPUESTOS (briefs enviados) por vertical del lead ----
+  // ---- PRESUPUESTOS (briefs enviados) — presup = teléfonos DISTINTOS con presupuesto (dedup, misma
+  // unidad que leads, para que L→P sea una tasa real). Se expone la cobertura: sin teléfono (pipeline
+  // IG) y sin atribuir (no matchean ningún ad) — antes se dropeaban en silencio. Día AR. ----
+  let presupTotal = 0, presupMontoTotal = 0, presupSinTel = 0, presupSinAtrib = 0;
   try {
-    const rs = await env.DB.prepare("SELECT cliente_wa_id, COALESCE(precio_final,0) pf FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<?").bind(since, untilEx).all();
+    const rs = await env.DB.prepare("SELECT cliente_wa_id, COALESCE(precio_final,0) pf FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<?").bind(sinceUTC, untilExUTC).all();
+    const pp = {}; VS.forEach(v => pp[v] = new Set());
     for (const r of (rs.results || [])) {
-      const v = phoneVert[norm(r.cliente_wa_id)];
-      if (v && agg[v]) { agg[v].presup++; agg[v].presup_monto += (r.pf || 0); }
+      presupTotal++; presupMontoTotal += (r.pf || 0);
+      const ph = norm(r.cliente_wa_id);
+      if (!ph) { presupSinTel++; continue; }
+      const v = phoneVert[ph];
+      if (v && agg[v]) { pp[v].add(ph); agg[v].presup_monto += (r.pf || 0); }
+      else presupSinAtrib++;
     }
-  } catch (_) {}
+    VS.forEach(v => agg[v].presup = pp[v].size); // presup = leads distintos que recibieron presupuesto
+  } catch (e) { warn('presup', e); }
 
-  // ---- VENTAS + INGRESOS + MIX (pedidos del período) ----
-  // Se incluyen los pedidos corpóreos (antes se excluían): los que vienen del AD de corpóreas
-  // cuentan en la fila 'corporeas'; el corpóreo ORGÁNICO (sin ad) queda fuera del mix de carteles.
+  // ---- VENTAS + INGRESOS + MIX + CONTEXTO (pedidos del período, día AR = fecha) ----
+  // Orden distinta = numero+fecha+TELÉFONO (el numero se carga a mano y puede colisionar entre clientes
+  // el mismo día). Ingresos se suman por FILA (varios carteles por orden); ventas/mix/contexto una vez
+  // por orden. CONTEXTO = todas las órdenes del período por categoría (ad / orgánica / sin trazar / corpóreo)
+  // -> deja explícito "N de ad de M totales", no solo las de ad.
   const mix = { corporeas: 0, b2c: 0, retargeting: 0, b2b: 0, linkbio: 0, directo: 0, frecuente: 0, referido: 0, revisar: 0 };
+  const ctx = { ad: { ord: 0, ing: 0 }, organico: { ord: 0, ing: 0 }, sintrazar: { ord: 0, ing: 0 }, corporeo: { ord: 0, ing: 0 } };
   try {
-    const rs = await env.DB.prepare("SELECT ad, cartel, numero, fecha, source_id, source_campaign, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE fecha>=? AND fecha<?").bind(since, untilEx).all();
+    const rs = await env.DB.prepare("SELECT ad, cartel, numero, fecha, telefono, source_id, source_campaign, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE fecha>=? AND fecha<?").bind(since, untilEx).all();
     const ordVenta = {}; VS.forEach(v => ordVenta[v] = new Set());
-    const ordMix = new Set();
+    const ordSeen = new Set();
     for (const r of (rs.results || [])) {
-      const k = String(r.numero) + '|' + String(r.fecha);
-      const esCorporeo = /orpore/i.test(String(r.cartel || ''));
-      // Clasificación EXACTA: source_id/source_campaign guardados -> campaña -> vertical. Fallback al label.
+      const k = String(r.numero) + '|' + String(r.fecha) + '|' + norm(r.telefono);
+      const monto = r.monto || 0;
+      const esCorporeo = /orpore/i.test(String(r.cartel || '')) || verticalOfAdText(r.ad) === 'corporeas';
       let v = verticalFromPedido(r, campBySource);
       if (esCorporeo && v !== 'corporeas') v = ''; // corpóreo que no vino del ad de corpóreas -> orgánico
-      if (v && agg[v]) {
-        agg[v].ingresos += (r.monto || 0);
+      const t = String(r.ad || '').toLowerCase();
+      const esCorpOrg = esCorporeo && v !== 'corporeas';
+      let cat, mixKey = '';
+      if (esCorpOrg) cat = 'corporeo';
+      else if (v) { cat = 'ad'; mixKey = v; }
+      else if (t.indexOf('link bio') >= 0) { cat = 'organico'; mixKey = 'linkbio'; }
+      else if (t.indexOf('frecuente') >= 0) { cat = 'organico'; mixKey = 'frecuente'; }
+      else if (t.indexOf('referido') >= 0) { cat = 'organico'; mixKey = 'referido'; }
+      else if (t.indexOf('directo') >= 0) { cat = 'organico'; mixKey = 'directo'; }
+      else { cat = 'sintrazar'; mixKey = 'revisar'; }
+      if (v && agg[v]) { // VENTAS: ingresos por fila, orden distinta una vez
+        agg[v].ingresos += monto;
         if (!ordVenta[v].has(k)) { ordVenta[v].add(k); agg[v].ventas++; }
       }
-      // MIX: una vez por orden. El corpóreo orgánico (producto distinto, sin ad) queda afuera.
-      if (!ordMix.has(k)) {
-        ordMix.add(k);
-        if (esCorporeo && v !== 'corporeas') { /* corpóreo orgánico: fuera del mix de carteles */ }
-        else {
-          const t = String(r.ad || '').toLowerCase();
-          if (v) mix[v]++;
-          else if (t.indexOf('revisar') === 0) mix.revisar++;
-          else if (t.indexOf('link bio') >= 0) mix.linkbio++;
-          else if (t.indexOf('frecuente') >= 0) mix.frecuente++;
-          else if (t.indexOf('referido') >= 0) mix.referido++;
-          else if (t.indexOf('directo') >= 0) mix.directo++;
-          else mix.revisar++; // vacío / sin trazar -> a revisar
-        }
+      ctx[cat].ing += monto; // CONTEXTO: ingresos por fila (por categoría)
+      if (!ordSeen.has(k)) { // MIX + CONTEXTO órdenes: una vez por orden
+        ordSeen.add(k);
+        ctx[cat].ord++;
+        if (mixKey && mix[mixKey] !== undefined) mix[mixKey]++;
       }
     }
-  } catch (_) {}
+  } catch (e) { warn('ventas', e); }
 
   // ---- métricas derivadas ----
   const rows = VS.map(v => {
@@ -5714,7 +5736,21 @@ async function buildAdsFunnel(env, opts = {}) {
     cac: T.ventas ? Math.round(T.gasto_ars / T.ventas) : null,
     roas: T.gasto_ars ? T.ingresos / T.gasto_ars : null
   });
-  return { ok: true, since, until, rate, rows, total, mix, spend_updated: spendUpdated };
+  return {
+    ok: true, since, until, rate, rows, total, mix,
+    // CONTEXTO: total de órdenes del período por origen -> el panel puede mostrar "N de ad de M totales"
+    // en vez de dejar creer que "Ventas" es el total del mes (es solo lo atribuido a ads).
+    contexto: {
+      ad: { ordenes: ctx.ad.ord, ingresos: Math.round(ctx.ad.ing) },
+      organico: { ordenes: ctx.organico.ord, ingresos: Math.round(ctx.organico.ing) },
+      sintrazar: { ordenes: ctx.sintrazar.ord, ingresos: Math.round(ctx.sintrazar.ing) },
+      corporeo: { ordenes: ctx.corporeo.ord, ingresos: Math.round(ctx.corporeo.ing) }
+    },
+    presup_enviados: presupTotal, presup_monto_enviados: Math.round(presupMontoTotal),
+    presup_sin_tel: presupSinTel, presup_sin_atrib: presupSinAtrib,
+    warnings, partial: warnings.length > 0,
+    spend_updated: spendUpdated
+  };
 }
 
 // Texto REAL del mensaje de bienvenida que ManyChat manda automáticamente a cada nuevo
