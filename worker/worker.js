@@ -5607,10 +5607,11 @@ async function buildAdsFunnel(env, opts = {}) {
   // Se lo restamos a b2c (para que b2c quede "solo neon") y queda en la fila corpóreas aparte.
   agg.b2c.gasto_usd = Math.max(0, agg.b2c.gasto_usd - agg.corporeas.gasto_usd);
 
-  // ---- mapa teléfono->vertical + LEADS de CTWA (b2c / retargeting) ----
-  // b2c y retargeting entran por click-to-WhatsApp (wa_ad_attributions). B2B NO: entra por el
-  // FORMULARIO (Lead Ads) -> se cuenta abajo desde wa_leads. Acá contamos solo b2c/retargeting.
+  // ---- mapa teléfono->vertical + LEADS de CTWA (b2c / retargeting / corpóreas) ----
+  // b2c/retargeting/corpóreas entran por click-to-WhatsApp (wa_ad_attributions). B2B entra por AMBOS:
+  // el FORMULARIO (wa_leads) Y click-to-WhatsApp -> se juntan en b2bPhones (dedup) más abajo.
   const phoneVert = {};
+  const b2bPhones = new Set(); // leads B2B: WhatsApp (CTWA desde ad B2B) + formulario, deduplicados
   try {
     const rs = await env.DB.prepare("SELECT phone, source_id, headline, ts FROM wa_ad_attributions WHERE COALESCE(source_id,'')!='' AND ts>=? AND ts<? ORDER BY phone, ts DESC").bind(sinceWide, untilEx).all();
     const rows = rs.results || [];
@@ -5621,6 +5622,7 @@ async function buildAdsFunnel(env, opts = {}) {
       const p = norm(r.phone); if (seen.has(p)) continue; seen.add(p);
       const v = verticalFromSourceMapped(r.source_id, r.headline, campBySource);
       if ((v === 'b2c' || v === 'retargeting' || v === 'corporeas') && agg[v]) agg[v].leads++;
+      else if (v === 'b2b') b2bPhones.add(p); // clickeó un ad B2B y escribió por WhatsApp (sin form)
     }
   } catch (_) {}
 
@@ -5629,14 +5631,14 @@ async function buildAdsFunnel(env, opts = {}) {
   // de B2B -> pisa lo que dijera CTWA para ese teléfono (así el presupuesto también linkea a b2b).
   try {
     const rs = await env.DB.prepare("SELECT phone, campaign_id, received_at FROM wa_leads WHERE COALESCE(phone,'')!='' AND received_at>=? AND received_at<? ORDER BY received_at DESC").bind(sinceWide, untilEx).all();
-    const b2bSeen = new Set();
     for (const r of (rs.results || [])) {
       if (CARTELES_CAMPAIGNS[norm(r.campaign_id)] !== 'b2b') continue; // solo B2B de carteles
       const p = norm(r.phone);
       phoneVert[p] = 'b2b';
-      if (String(r.received_at).slice(0, 10) >= since && !b2bSeen.has(p)) { b2bSeen.add(p); agg.b2b.leads++; }
+      if (String(r.received_at).slice(0, 10) >= since) b2bPhones.add(p); // submission del formulario
     }
   } catch (_) {}
+  agg.b2b.leads = b2bPhones.size; // WhatsApp + formulario, deduplicados
 
   // ---- PRESUPUESTOS (briefs enviados) por vertical del lead ----
   try {
