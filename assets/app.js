@@ -4744,10 +4744,13 @@ function cargarPedidoDesdeOC(wamid) {
   const m = (chatState.messages || []).find(x => x.wamid === wamid);
   if (!m || !m.body) { toast('No pude leer la OC'); return; }
   STATE.pedidoModal = parseOcToPedido(m.body, m.phone);
-  STATE.pedidoModalOpen = true;
   STATE.pedidoModalSaving = false;
+  STATE.pedidoModalOpen = true;
+  // El modal de pedido SOLO se dibuja/bindea en la vista Pedidos → navegamos ahí y lo abrimos.
+  STATE.view = 'pedidos';
+  if (location.hash !== '#pedidos') location.hash = 'pedidos';
   render();
-  setTimeout(() => { try { pmTraceAd(); } catch (_) {} }, 200);
+  setTimeout(() => { try { pmTraceAd(); } catch (_) {} }, 250);
 }
 function cancelCargarPedido() { STATE.pedidoModalOpen = false; render(); }
 // Vuelca el DOM a STATE para que los valores sobrevivan a un re-render (agregar/quitar cartel, cambiar plataforma).
