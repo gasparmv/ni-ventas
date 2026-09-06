@@ -4711,6 +4711,44 @@ function openCargarPedidoModal() {
   render();
   setTimeout(() => { const el = document.getElementById('pm-cartel-0'); if (el) el.focus(); }, 60);
 }
+// Parsea el texto de una OC ("Orden de compra:...") y arma el objeto de pedido para el modal.
+// La OC la compone composeOcText() con labels fijos, así que el parseo es directo.
+function parseOcToPedido(body, phone) {
+  const t = String(body || '').replace(/\r/g, '');
+  const g = (str, re) => { const mm = str.match(re); return mm ? mm[1].trim() : ''; };
+  const numero = g(t, /Orden de compra:\s*Nro\s*([^\n]+)/i) || suggestProximoNumero();
+  const platRaw = g(t, /Plataforma:\s*([^\n]+)/i).toLowerCase().trim();
+  const plataforma = (platRaw.includes('insta') || platRaw === 'ig') ? 'IG' : 'WPP';
+  const tipo = /ext/i.test(g(t, /Ubicaci[oó]n:\s*([^\n]+)/i)) ? 'EXT' : 'INT';
+  const senaN = Number(g(t, /Se[ñn]a[^:\n]*:\s*([^\n]+)/i).replace(/\D/g, '')) || 0;
+  const carteles = t.split(/Trabajo:/i).slice(1).map(seg => {
+    const b = 'Trabajo:' + seg;
+    const c = nuevoCartelPedido();
+    c.cartel = g(b, /Trabajo:\s*([^\n]*)/i);
+    c.colores = g(b, /Color:\s*([^\n]*)/i);
+    const med = g(b, /Medidas:\s*([^\n]*)/i).match(/(\d+)\s*[x×]\s*(\d+)/i);
+    if (med) { c.ancho = med[1]; c.alto = med[2]; }
+    c.precio = Number(g(b, /Precio:\s*([^\n]*)/i).replace(/\D/g, '')) || '';
+    if (/transp/i.test(g(b, /Fondo:\s*([^\n]*)/i))) c.base = 'TRANS';
+    const ctrl = g(b, /Controlador:\s*([^\n]*)/i).toLowerCase();
+    c.dimer = (ctrl && ctrl !== 'no') ? 'SI' : 'NO';
+    c.tipo = tipo;
+    return c;
+  });
+  if (!carteles.length) carteles.push(nuevoCartelPedido());
+  return { numero, plataforma, telefono: (plataforma === 'WPP' && phone) ? String(phone) : '', estadoPago: '1er pago', pagado: senaN ? String(senaN) : '', ad: '', carteles };
+}
+// Abre el modal de cargar pedido pre-llenado desde una OC del chat (botón en el bubble).
+function cargarPedidoDesdeOC(wamid) {
+  if (!canCotizar()) return;
+  const m = (chatState.messages || []).find(x => x.wamid === wamid);
+  if (!m || !m.body) { toast('No pude leer la OC'); return; }
+  STATE.pedidoModal = parseOcToPedido(m.body, m.phone);
+  STATE.pedidoModalOpen = true;
+  STATE.pedidoModalSaving = false;
+  render();
+  setTimeout(() => { try { pmTraceAd(); } catch (_) {} }, 200);
+}
 function cancelCargarPedido() { STATE.pedidoModalOpen = false; render(); }
 // Vuelca el DOM a STATE para que los valores sobrevivan a un re-render (agregar/quitar cartel, cambiar plataforma).
 function readPedidoModalDOM() {
@@ -10895,6 +10933,18 @@ function _postProcessBubbles(container, reactionsByParent, scope) {
     el.insertAdjacentHTML('beforeend', '<button class="chat-msg-caret" data-caret aria-label="Más opciones"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg></button>');
     const chips = reactionsBadgeHtml(wamid, reactionsByParent);
     if (chips) el.insertAdjacentHTML('beforeend', chips);
+    // Botón "Cargar pedido" en los mensajes de OC (los que mandamos) → abre el modal de
+    // cargar pedido pre-llenado con los datos de la OC. Solo para quien puede cotizar.
+    if (m && m.direction === 'outbound' && typeof canCotizar === 'function' && canCotizar()
+        && String(m.body || '').trimStart().startsWith('Orden de compra:')
+        && !el.querySelector('.oc-cargar-btn')) {
+      const ocb = document.createElement('button');
+      ocb.type = 'button'; ocb.className = 'oc-cargar-btn';
+      ocb.textContent = '📦 Cargar pedido';
+      ocb.style.cssText = 'display:block;margin-top:6px;width:100%;background:#1fb6a6;color:#042a25;border:0;border-radius:8px;padding:7px 10px;font-size:12.5px;font-weight:700;cursor:pointer';
+      ocb.onclick = (ev) => { ev.stopPropagation(); cargarPedidoDesdeOC(wamid); };
+      el.appendChild(ocb);
+    }
   });
   root.querySelectorAll('[data-jump-to]').forEach(q => {
     if (q.dataset._bound) return; q.dataset._bound = '1';
