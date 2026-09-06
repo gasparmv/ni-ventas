@@ -6374,6 +6374,43 @@ async function sendEventoGroupLink(env, phone) {
   try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'evento_link'").bind(sentTs, phone).run(); } catch (_) {}
 }
 
+// Re-envío del link del grupo a los que recibieron el link viejo (el grupo se llenó). Gateado por
+// kv 'resend_evento_link_on'='1'; ventana desde kv 'resend_evento_link_desde' (default hoy). Dedup
+// por kind='evento_link_resend'. Gotea en lotes por tick y se apaga solo (kv a '0') cuando no queda
+// nadie. Solo TEXTO LIBRE → llega a los que están dentro de la ventana de 24h (los de hoy, que
+// escribieron hoy). Los de afuera de ventana rebotan y quedan marcados 'failed' (no reintenta).
+async function processResendEventoLink(env) {
+  if (String(await kvGet(env, 'resend_evento_link_on', '')) !== '1') return;
+  const link = String(await kvGet(env, 'lanzamiento_link_grupo', '') || '').trim();
+  if (!link) return;
+  const desde = String(await kvGet(env, 'resend_evento_link_desde', '2026-09-06') || '2026-09-06');
+  let rows = [];
+  try {
+    rows = ((await env.DB.prepare(
+      `SELECT l.phone FROM wa_autoreply_log l
+        WHERE l.kind = 'evento_link' AND l.status = 'sent' AND l.sent_at >= ?
+          AND NOT EXISTS (SELECT 1 FROM wa_autoreply_log r WHERE r.phone = l.phone AND r.kind = 'evento_link_resend')
+        LIMIT 40`).bind(desde).all()).results) || [];
+  } catch (_) { return; }
+  if (!rows.length) { await kvSet(env, 'resend_evento_link_on', '0'); return; } // terminado → se apaga solo
+  const msg = 'Hola! 👋 Perdón, el grupo anterior se nos llenó. Acá te dejo el nuevo link para que puedas unirte: ' + link + '\n\nTodo lo que necesitás saber lo compartimos por ese grupo. *Esta línea de teléfono no está habilitada para responder consultas hasta finalizado el evento.*';
+  for (const row of rows) {
+    const phone = row.phone; if (!phone) continue;
+    let reserva;
+    try { reserva = await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'evento_link_resend', '', 'sending', '', '')").bind(phone).run(); } catch (_) { continue; }
+    if (!reserva?.meta?.changes) continue; // ya se le reenvió
+    let res; try { res = await waSendText(env, phone, msg); } catch (_) { res = null; }
+    const ts = new Date().toISOString();
+    if (res && res.ok) {
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = 'evento_link_resend'").bind(ts, phone).run(); } catch (_) {}
+      try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(ts, res.id || ('resend-' + phone + '-' + Date.now()), phone, msg).run(); } catch (_) {}
+    } else {
+      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'failed', sent_at = ? WHERE phone = ? AND kind = 'evento_link_resend'").bind(ts, phone).run(); } catch (_) {}
+    }
+    await new Promise(rs => setTimeout(rs, 350));
+  }
+}
+
 // Auto-respuesta a los leads de CORPÓREO: cuando mandan el mensaje canned del ad
 // ("Hola! Quiero cotizar un cartel corporeo") les pedimos los 3 datos (foto, medidas,
 // int/ext) — lo mismo que releva el bot de neón — pero como texto fijo. El corpóreo se
@@ -15529,6 +15566,9 @@ const handler = {
     // plantilla). NO-OP hasta que se configure kv 'lanzamiento_opener_tpl' + kv
     // 'lanzamiento_landing_on'='1' — los leads solo se acumulan en la tabla mientras tanto.
     ctx.waitUntil(processLanzamientoLanding(env));
+    // Re-envío del nuevo link del grupo a los que recibieron el link viejo (grupo lleno).
+    // OFF por defecto (kv 'resend_evento_link_on'); gotea en lotes y se apaga solo al terminar.
+    ctx.waitUntil(processResendEventoLink(env));
     // Recordatorio del evento (Fase Semilla): goteo a los anotados. Master switch OFF por
     // defecto (kv 'evento_recordatorio_on'); no manda nada hasta prenderlo.
     ctx.waitUntil(processEventoRecordatorio(env));
