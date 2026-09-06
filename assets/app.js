@@ -4713,12 +4713,16 @@ function openCargarPedidoModal() {
 }
 // Parsea el texto de una OC ("Orden de compra:...") y arma el objeto de pedido para el modal.
 // La OC la compone composeOcText() con labels fijos, así que el parseo es directo.
-function parseOcToPedido(body, phone) {
+function parseOcToPedido(body, phone, channel) {
   const t = String(body || '').replace(/\r/g, '');
   const g = (str, re) => { const mm = str.match(re); return mm ? mm[1].trim() : ''; };
   const numero = g(t, /Orden de compra:\s*Nro\s*([^\n]+)/i) || suggestProximoNumero();
+  // Plataforma = DATO DURO: el canal real de la conversación (pestaña WhatsApp/Instagram del chat)
+  // manda por sobre el texto de la OC. Si no vino el canal, caemos al texto ("Plataforma: Instagram").
   const platRaw = g(t, /Plataforma:\s*([^\n]+)/i).toLowerCase().trim();
-  const plataforma = (platRaw.includes('insta') || platRaw === 'ig') ? 'IG' : 'WPP';
+  const plataforma = channel === 'ig' ? 'IG'
+    : channel === 'wa' ? 'WPP'
+    : ((platRaw.includes('insta') || platRaw === 'ig') ? 'IG' : 'WPP');
   const tipo = /ext/i.test(g(t, /Ubicaci[oó]n:\s*([^\n]+)/i)) ? 'EXT' : 'INT';
   const senaN = Number(g(t, /Se[ñn]a[^:\n]*:\s*([^\n]+)/i).replace(/\D/g, '')) || 0;
   const carteles = t.split(/Trabajo:/i).slice(1).map(seg => {
@@ -4738,12 +4742,50 @@ function parseOcToPedido(body, phone) {
   if (!carteles.length) carteles.push(nuevoCartelPedido());
   return { numero, plataforma, telefono: (plataforma === 'WPP' && phone) ? String(phone) : '', estadoPago: '1er pago', pagado: senaN ? String(senaN) : '', ad: '', carteles };
 }
+// Trae el brief más reciente de un cliente por teléfono (wa_id). Lo usa "Cargar pedido"
+// para sacar cm de neón / tramos del brief (data dura), no adivinarlos. Endpoint filtra por phone.
+async function fetchBriefByPhone(phone) {
+  const tel = String(phone || '').replace(/\D/g, '');
+  if (!tel || !CONFIG.trackerUrl || !STATE.token) return null;
+  // 1) si ya está en memoria (kanban de cotización abierto), lo usamos sin pegarle al server.
+  const inMem = (STATE.briefs || []).filter(b => String(b.cliente_wa_id || '').replace(/\D/g, '') === tel);
+  if (inMem.length) return inMem.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')))[0];
+  try {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs?phone=${encodeURIComponent(tel)}&limit=5`, {
+      headers: { Authorization: `Bearer ${STATE.token}` }
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return (data.briefs || [])[0] || null; // ya vienen ordenados por updated_at DESC
+  } catch (_) { return null; }
+}
+// Completa cm de neón / tramos (+ medidas/precio como fallback) del primer cartel vacío desde el brief.
+function fillPedidoNeonFromBrief(brief) {
+  const m = STATE.pedidoModal;
+  if (!m || !brief) return false;
+  const neonMt = Number(brief.neon_mt) || Number(brief.ia_neon_mt) || 0;
+  const tramos = Number(brief.tramos) || Number(brief.ia_tramos) || 0;
+  const carteles = m.carteles || [];
+  // El brief describe UN diseño → aplicamos al primer cartel que no tenga ya cm de neón cargado.
+  const c = carteles.find(x => !String(x.cmNeon || '').trim()) || carteles[0];
+  if (!c) return false;
+  let changed = false;
+  if (neonMt && !String(c.cmNeon || '').trim()) { c.cmNeon = Math.round(neonMt * 100); changed = true; } // mt → cm
+  if (tramos && !String(c.tramos || '').trim()) { c.tramos = tramos; changed = true; }
+  if (!String(c.alto || '').trim() && Number(brief.alto_cm))  { c.alto = String(Number(brief.alto_cm)); changed = true; }
+  if (!String(c.ancho || '').trim() && Number(brief.ancho_cm)) { c.ancho = String(Number(brief.ancho_cm)); changed = true; }
+  if (!String(c.precio || '').trim() && Number(brief.precio_final)) { c.precio = Number(brief.precio_final); changed = true; }
+  return changed;
+}
 // Abre el modal de cargar pedido pre-llenado desde una OC del chat (botón en el bubble).
 function cargarPedidoDesdeOC(wamid) {
   if (!canCotizar()) return;
   const m = (chatState.messages || []).find(x => x.wamid === wamid);
   if (!m || !m.body) { toast('No pude leer la OC'); return; }
-  STATE.pedidoModal = parseOcToPedido(m.body, m.phone);
+  // Canal real de la conversación (pestaña WhatsApp/Instagram) = dato duro para la plataforma.
+  const contact = (chatState.contacts || []).find(c => c.phone === (m.phone || chatState.selectedPhone));
+  const channel = (contact && contact.channel) || chatState.channel || 'wa';
+  STATE.pedidoModal = parseOcToPedido(m.body, m.phone, channel);
   STATE.pedidoModalSaving = false;
   STATE.pedidoModalOpen = true;
   // El modal de pedido SOLO se dibuja/bindea en la vista Pedidos → navegamos ahí y lo abrimos.
@@ -4751,6 +4793,12 @@ function cargarPedidoDesdeOC(wamid) {
   if (location.hash !== '#pedidos') location.hash = 'pedidos';
   render();
   setTimeout(() => { try { pmTraceAd(); } catch (_) {} }, 250);
+  // Async: traer cm de neón / tramos del brief del cliente y rellenar (sin bloquear la apertura).
+  fetchBriefByPhone(m.phone).then(brief => {
+    if (!brief || !STATE.pedidoModalOpen) return;
+    readPedidoModalDOM(); // preservar lo que ya se ve antes de re-renderizar
+    if (fillPedidoNeonFromBrief(brief)) { render(); toast('Cm de neón y tramos traídos del brief'); }
+  }).catch(() => {});
 }
 function cancelCargarPedido() { STATE.pedidoModalOpen = false; render(); }
 // Vuelca el DOM a STATE para que los valores sobrevivan a un re-render (agregar/quitar cartel, cambiar plataforma).

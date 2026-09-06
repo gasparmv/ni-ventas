@@ -14803,6 +14803,12 @@ const handler = {
         if (estado)      { where.push('b.estado = ?');       args.push(estado); }
         if (comercialId) { where.push('b.comercial_id = ?'); args.push(comercialId); }
         if (disenadorId) { where.push('b.disenador_id = ?'); args.push(disenadorId); }
+        // Filtro por teléfono (wa_id): lo usa "Cargar pedido" desde la OC del chat para traer
+        // el brief del cliente y auto-completar cm de neón / tramos. cliente_wa_id se guarda como
+        // dígitos (== wa_id del chat), pero por las dudas comparamos también contra la versión
+        // normalizada por si algún brief viejo quedó con '+' o espacios.
+        const phoneQ = (url.searchParams.get('phone') || '').replace(/\D/g, '');
+        if (phoneQ) { where.push("REPLACE(REPLACE(REPLACE(b.cliente_wa_id,'+',''),' ',''),'-','') = ?"); args.push(phoneQ); }
         const sql = `
           SELECT b.*,
                  (SELECT r2_key FROM brief_imagenes WHERE brief_id = b.id AND tipo = 'chat'   ORDER BY orden, id LIMIT 1) AS first_chat_key,
