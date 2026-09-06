@@ -6384,13 +6384,16 @@ async function processResendEventoLink(env) {
   const link = String(await kvGet(env, 'lanzamiento_link_grupo', '') || '').trim();
   if (!link) return;
   const desde = String(await kvGet(env, 'resend_evento_link_desde', '2026-09-06') || '2026-09-06');
+  // Límite superior: NO reenviar a los que ya recibieron el link NUEVO (ellos ya lo tienen bien).
+  // Se setea al momento en que se cambió el link en kv 'lanzamiento_link_grupo'. Default = futuro lejano.
+  const hasta = String(await kvGet(env, 'resend_evento_link_hasta', '2099-01-01') || '2099-01-01');
   let rows = [];
   try {
     rows = ((await env.DB.prepare(
       `SELECT l.phone FROM wa_autoreply_log l
-        WHERE l.kind = 'evento_link' AND l.status = 'sent' AND l.sent_at >= ?
+        WHERE l.kind = 'evento_link' AND l.status = 'sent' AND l.sent_at >= ? AND l.sent_at < ?
           AND NOT EXISTS (SELECT 1 FROM wa_autoreply_log r WHERE r.phone = l.phone AND r.kind = 'evento_link_resend')
-        LIMIT 40`).bind(desde).all()).results) || [];
+        LIMIT 40`).bind(desde, hasta).all()).results) || [];
   } catch (_) { return; }
   if (!rows.length) { await kvSet(env, 'resend_evento_link_on', '0'); return; } // terminado → se apaga solo
   const msg = 'Hola! 👋 Perdón, el grupo anterior se nos llenó. Acá te dejo el nuevo link para que puedas unirte: ' + link + '\n\nTodo lo que necesitás saber lo compartimos por ese grupo. *Esta línea de teléfono no está habilitada para responder consultas hasta finalizado el evento.*';
