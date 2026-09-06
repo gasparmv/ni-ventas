@@ -6336,6 +6336,68 @@ async function processLanzamientoLanding(env) {
   }
 }
 
+// ===== Guardia de gasto del lanzamiento (alerta anti-sangría de plantillas) =====
+// Nació del 5-6 sep: el botón de la landing iba al GRUPO en vez del walink, así que el
+// opener PAGO se disparaba a TODOS (~US$60/día). Esta guardia vigila el gasto y avisa a
+// Gaspar por WhatsApp ANTES de que se vea en la factura. Se auto-activa solo si hay un
+// lanzamiento en curso (kv 'lanzamiento_opener_tpl' seteado). Corre cada 5 min pero evalúa
+// como mucho 1 vez/hora. Umbrales por kv (sin deploy). Dedup: 1 aviso cada 'launch_guard_cooldown_h'.
+async function processLaunchGuard(env) {
+  try {
+    const tpl = String(await kvGet(env, 'lanzamiento_opener_tpl', '') || '').trim();
+    if (!tpl) return;                                  // sin lanzamiento activo -> nada que vigilar
+    const nowMs = Date.now();
+    const lastCheck = Number(await kvGet(env, 'launch_guard_last_check', '0')) || 0;
+    if (nowMs - lastCheck < 55 * 60 * 1000) return;    // como mucho 1 evaluación/hora (el COUNT no es gratis)
+    await kvSet(env, 'launch_guard_last_check', String(nowMs));
+
+    const maxOpeners = Number(await kvGet(env, 'launch_guard_max_openers', '300')) || 300;
+    const minRatio   = Number(await kvGet(env, 'launch_guard_min_ratio', '0.25')) || 0.25;
+    const usdPerTpl  = Number(await kvGet(env, 'launch_guard_usd_por_plantilla', '0.06')) || 0.06;
+    const walinkLike = String(await kvGet(env, 'launch_guard_walink_like', '') || '').trim();
+    const cutoff = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString();
+
+    // Openers PAGOS en 24h (la plantilla del lanzamiento, tal como la loguea processLanzamientoLanding).
+    let openers = 0;
+    try {
+      const r = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM wa_messages WHERE direction='outbound' AND msg_type='template' AND body = ? AND ts >= ?"
+      ).bind('[plantilla: ' + tpl + ']', cutoff).first();
+      openers = (r && r.n) || 0;
+    } catch (_) { return; }
+    if (openers < maxOpeners) return;                  // gasto dentro de lo esperado -> no molesto
+
+    // Salud del walink: inbounds con la frase del evento en 24h (si se configuró la frase por kv).
+    let walink = 0;
+    if (walinkLike) {
+      try {
+        const r2 = await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM wa_messages WHERE direction='inbound' AND body LIKE ? AND ts >= ?"
+        ).bind('%' + walinkLike + '%', cutoff).first();
+        walink = (r2 && r2.n) || 0;
+      } catch (_) {}
+    }
+    const ratio = openers ? walink / openers : 0;
+    const botonRoto = walinkLike && ratio < minRatio;
+
+    // Dedup por cooldown (no spamear).
+    const cooldownH = Number(await kvGet(env, 'launch_guard_cooldown_h', '12')) || 12;
+    const lastAlert = Number(await kvGet(env, 'launch_guard_last_alert', '0')) || 0;
+    if (nowMs - lastAlert < cooldownH * 60 * 60 * 1000) return;
+
+    const usd = Math.round(openers * usdPerTpl);
+    let msg = `⚠ GUARDIA LANZAMIENTO\n${openers} plantillas pagas (${tpl}) en 24h ≈ US$${usd}.`;
+    if (walinkLike) msg += `\nMensajes del walink: ${walink} (ratio ${Math.round(ratio * 100)}%).`;
+    if (botonRoto) {
+      msg += '\n\n🔴 El botón del walink parece ROTO: estás pagando openers que deberían ser gratis. Revisá que la landing lleve al WALINK (wa.me al número), NO al grupo. Freno: kv lanzamiento_landing_on=0.';
+    } else {
+      msg += '\n\nSi es esperado, ignoralo. Si no, revisá landing/ads. Freno: kv lanzamiento_landing_on=0.';
+    }
+    const to = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+    try { await waSendText(env, to, msg); await kvSet(env, 'launch_guard_last_alert', String(nowMs)); } catch (_) {}
+  } catch (_) {}
+}
+
 // El link del grupo va SIEMPRE como texto libre (nunca en plantilla) → cuando el grupo se
 // llena, se cambia el kv 'lanzamiento_link_grupo' con 1 comando y no hay que re-aprobar nada.
 // Se manda UNA sola vez por contacto (dedup atómico wa_autoreply_log kind='evento_link').
@@ -15595,6 +15657,9 @@ const handler = {
     if (event.cron === '* * * * *') ctx.waitUntil(processMiniSupernova(env));   // difusión a alumnos (kv 'minisupernova_on')
     // Tick rápido (cron */1): solo la cola, no el resto de tareas pesadas.
     if (event.cron === '* * * * *') return;
+    // Guardia de gasto del lanzamiento: avisa a Gaspar si el gasto de plantillas se dispara
+    // (p.ej. el botón de la landing volvió a apuntar al grupo en vez del walink). Se auto-gatea.
+    ctx.waitUntil(processLaunchGuard(env));
     ctx.waitUntil(processScheduledMessages(env));
     // Órdenes de compra: detecta las OC salientes nuevas → etiqueta "POR PAGAR" + avisa a
     // Gaspar/hermano + snapshot (métrica del reporte + popup "Pedido por vender URGENTE").
