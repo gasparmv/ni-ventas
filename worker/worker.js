@@ -6383,22 +6383,28 @@ async function processResendEventoLink(env) {
   if (String(await kvGet(env, 'resend_evento_link_on', '')) !== '1') return;
   const link = String(await kvGet(env, 'lanzamiento_link_grupo', '') || '').trim();
   if (!link) return;
-  const desde = String(await kvGet(env, 'resend_evento_link_desde', '2026-09-06') || '2026-09-06');
-  // Límite superior: NO reenviar a los que ya recibieron el link NUEVO (ellos ya lo tienen bien).
-  // Se setea al momento en que se cambió el link en kv 'lanzamiento_link_grupo'. Default = futuro lejano.
-  const hasta = String(await kvGet(env, 'resend_evento_link_hasta', '2099-01-01') || '2099-01-01');
-  let rows = [];
-  try {
-    rows = ((await env.DB.prepare(
-      `SELECT l.phone FROM wa_autoreply_log l
-        WHERE l.kind = 'evento_link' AND l.status = 'sent' AND l.sent_at >= ? AND l.sent_at < ?
-          AND NOT EXISTS (SELECT 1 FROM wa_autoreply_log r WHERE r.phone = l.phone AND r.kind = 'evento_link_resend')
-        LIMIT 40`).bind(desde, hasta).all()).results) || [];
-  } catch (_) { return; }
-  if (!rows.length) { await kvSet(env, 'resend_evento_link_on', '0'); return; } // terminado → se apaga solo
+  // Modo LISTA puntual: si kv 'resend_evento_link_only' tiene teléfonos (coma-separados) manda SOLO
+  // a esos (una sola pasada, después se apaga) — imposible que toque a otro. Si está vacío, modo RANGO.
+  const only = String(await kvGet(env, 'resend_evento_link_only', '') || '').trim();
+  let phones = [];
+  if (only) {
+    phones = only.split(',').map(s => s.trim()).filter(Boolean);
+  } else {
+    const desde = String(await kvGet(env, 'resend_evento_link_desde', '2026-09-06') || '2026-09-06');
+    // Límite superior: NO reenviar a los que ya recibieron el link NUEVO (default = futuro lejano).
+    const hasta = String(await kvGet(env, 'resend_evento_link_hasta', '2099-01-01') || '2099-01-01');
+    try {
+      phones = (((await env.DB.prepare(
+        `SELECT l.phone FROM wa_autoreply_log l
+          WHERE l.kind = 'evento_link' AND l.status = 'sent' AND l.sent_at >= ? AND l.sent_at < ?
+            AND NOT EXISTS (SELECT 1 FROM wa_autoreply_log r WHERE r.phone = l.phone AND r.kind = 'evento_link_resend')
+          LIMIT 40`).bind(desde, hasta).all()).results) || []).map(r => r.phone);
+    } catch (_) { return; }
+  }
+  if (!phones.length) { await kvSet(env, 'resend_evento_link_on', '0'); return; } // terminado → se apaga solo
   const msg = 'Hola! 👋 Perdón, el grupo anterior se nos llenó. Acá te dejo el nuevo link para que puedas unirte: ' + link + '\n\nTodo lo que necesitás saber lo compartimos por ese grupo. *Esta línea de teléfono no está habilitada para responder consultas hasta finalizado el evento.*';
-  for (const row of rows) {
-    const phone = row.phone; if (!phone) continue;
+  for (const phone of phones) {
+    if (!phone) continue;
     let reserva;
     try { reserva = await env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'evento_link_resend', '', 'sending', '', '')").bind(phone).run(); } catch (_) { continue; }
     if (!reserva?.meta?.changes) continue; // ya se le reenvió
@@ -6412,6 +6418,7 @@ async function processResendEventoLink(env) {
     }
     await new Promise(rs => setTimeout(rs, 350));
   }
+  if (only) await kvSet(env, 'resend_evento_link_on', '0'); // lista puntual = una sola pasada, se apaga sola
 }
 
 // Auto-respuesta a los leads de CORPÓREO: cuando mandan el mensaje canned del ad
