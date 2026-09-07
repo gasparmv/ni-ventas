@@ -5104,6 +5104,12 @@ function pmPickCotizacion(i, k) {
 function renderPedidoCartelBlock(c, i, n) {
   const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px';
   const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
+  // Toggle Cartel/Corpóreo: cambia el layout del bloque al vuelo (setea es_corporeo). Sirve para
+  // cargar un corpóreo DIRECTO, sin pasar por la OC. pmSetCorporeo guarda lo tipeado antes de re-render.
+  const tipoToggle = `<span style="display:inline-flex;border:1px solid var(--border);border-radius:999px;overflow:hidden;font-size:10px">`
+    + `<button type="button" data-pm-esc="${i}|0" style="border:0;cursor:pointer;padding:3px 11px;font-weight:700;background:${c.es_corporeo ? 'transparent' : 'var(--accent-cyan,#8FD4DE)'};color:${c.es_corporeo ? 'var(--fg-subtle)' : '#08262b'}">Cartel</button>`
+    + `<button type="button" data-pm-esc="${i}|1" style="border:0;cursor:pointer;padding:3px 11px;font-weight:700;background:${c.es_corporeo ? 'var(--accent-cyan,#8FD4DE)' : 'transparent'};color:${c.es_corporeo ? '#08262b' : 'var(--fg-subtle)'}">Corpóreo</button>`
+    + `</span>`;
   // Cartel CORPÓREO (letra 3D): layout con specs de producción propios (frente/laterales/
   // espalda/iluminación/bastidor/instalación) en vez de los de neón (cmNeon/tramos/dimer/base/
   // colores/tipo). Los datos vienen de la OC corpórea + brief. Ver [[project-pedidos-corporeo-hoja]].
@@ -5116,7 +5122,7 @@ function renderPedidoCartelBlock(c, i, n) {
     <div style="border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:rgba(143,212,222,.05)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
         <span style="font-size:11px;color:var(--accent-cyan);font-weight:700">🔤 Corpóreo ${i+1}</span>
-        ${n>1 ? `<button class="btn btn-ghost" data-pm-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
+        <div style="display:flex;gap:8px;align-items:center">${tipoToggle}${n>1 ? `<button class="btn btn-ghost" data-pm-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}</div>
       </div>
       <div style="margin-bottom:6px"><label style="${lbl}">Cliente / trabajo *</label><input id="pm-cartel-${i}" autocomplete="off" value="${escapeHtml(c.cartel||'')}" placeholder="ej. Pilates Flow" style="${inp}"></div>
       <div style="margin-bottom:6px"><label style="${lbl}">Producto</label><select id="pm-producto-${i}" style="${inp}">${prodOpts}</select></div>
@@ -5157,7 +5163,7 @@ function renderPedidoCartelBlock(c, i, n) {
     <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
         <span style="font-size:11px;color:var(--accent-cyan);font-weight:700">Cartel ${i+1}</span>
-        ${n>1 ? `<button class="btn btn-ghost" data-pm-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
+        <div style="display:flex;gap:8px;align-items:center">${tipoToggle}${n>1 ? `<button class="btn btn-ghost" data-pm-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}</div>
       </div>
       <div style="margin-bottom:6px;position:relative">
         <label style="${lbl}">Cartel / diseño * <span style="opacity:.5;text-transform:none;letter-spacing:0">— si fue cotizado, elegilo y se prellena</span></label>
@@ -5273,6 +5279,8 @@ function bindPedidoModal() {
   document.querySelectorAll('[data-pm-coloradd]').forEach(el => el.onclick = () => { const p = el.dataset.pmColoradd.split('|'); pmAddColor(parseInt(p[0], 10), p[1]); });
   document.querySelectorAll('[data-pm-color-rm]').forEach(b => b.onclick = () => { const p = b.dataset.pmColorRm.split('|'); pmRemoveColor(parseInt(p[0], 10), p[1]); });
   document.querySelectorAll('[data-pm-tipo]').forEach(b => b.onclick = () => { const p = b.dataset.pmTipo.split('|'); readPedidoModalDOM(); STATE.pedidoModal.carteles[parseInt(p[0], 10)].tipo = p[1]; render(); });
+  // Toggle Cartel/Corpóreo: cambia el layout del bloque (carga directa de corpóreos sin OC).
+  document.querySelectorAll('[data-pm-esc]').forEach(b => b.onclick = () => { const p = b.dataset.pmEsc.split('|'); readPedidoModalDOM(); STATE.pedidoModal.carteles[parseInt(p[0], 10)].es_corporeo = (p[1] === '1') ? 1 : 0; render(); });
   const tel = document.getElementById('pm-telefono'); if (tel) tel.addEventListener('blur', pmTraceAd);
   const cf = document.getElementById('pm-confirm'); if (cf) cf.onclick = confirmCargarPedido;
   // Validación en vivo: una vez que se intentó "Crear pedido", re-marcar en rojo lo que
