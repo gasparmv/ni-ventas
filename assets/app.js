@@ -2342,10 +2342,11 @@ function renderOcCartelBlock(c, i, n, corporea) {
         ${n > 1 ? `<button class="btn btn-ghost" data-oc-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
       </div>`;
   if (corporea) {
-    const ilumOpts = ['con luz', 'sin luz'].map(o => `<option ${c.iluminacion === o ? 'selected' : ''}>${o}</option>`).join('');
-    const bastOpts = ['no', 'si'].map(o => `<option ${c.bastidor === o ? 'selected' : ''}>${o}</option>`).join('');
-    const prodOpts = OC_CORP_PRODUCTO_OPTS.map(o => `<option ${c.producto === o ? 'selected' : ''}>${o}</option>`).join('');
-    const instOpts = ['no', 'si'].map(o => `<option ${c.instalacion === o ? 'selected' : ''}>${o}</option>`).join('');
+    const _oSt = 'background:var(--ink-100);color:var(--fg)';
+    const ilumOpts = ['con luz', 'sin luz'].map(o => `<option style="${_oSt}" ${c.iluminacion === o ? 'selected' : ''}>${o}</option>`).join('');
+    const bastOpts = ['no', 'si'].map(o => `<option style="${_oSt}" ${c.bastidor === o ? 'selected' : ''}>${o}</option>`).join('');
+    const prodOpts = OC_CORP_PRODUCTO_OPTS.map(o => `<option style="${_oSt}" ${c.producto === o ? 'selected' : ''}>${o}</option>`).join('');
+    const instOpts = ['no', 'si'].map(o => `<option style="${_oSt}" ${c.instalacion === o ? 'selected' : ''}>${o}</option>`).join('');
     return `
     <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
       ${head}
@@ -5115,9 +5116,10 @@ function renderPedidoCartelBlock(c, i, n) {
   // colores/tipo). Los datos vienen de la OC corpórea + brief. Ver [[project-pedidos-corporeo-hoja]].
   if (c.es_corporeo) {
     const a = Number(c.alto)||0, an = Number(c.ancho)||0; const m2 = (a&&an) ? (a*an/10000).toFixed(2) : '';
-    const ilumOpts = ['con luz','sin luz'].map(o=>`<option ${c.iluminacion===o?'selected':''}>${o}</option>`).join('');
-    const prodOpts = OC_CORP_PRODUCTO_OPTS.map(o=>`<option ${c.producto===o?'selected':''}>${o}</option>`).join('');
-    const siNo = (v) => ['no','si'].map(o=>`<option ${v===o?'selected':''}>${o}</option>`).join('');
+    const _oSt = 'background:var(--ink-100);color:var(--fg)';
+    const ilumOpts = ['con luz','sin luz'].map(o=>`<option style="${_oSt}" ${c.iluminacion===o?'selected':''}>${o}</option>`).join('');
+    const prodOpts = OC_CORP_PRODUCTO_OPTS.map(o=>`<option style="${_oSt}" ${c.producto===o?'selected':''}>${o}</option>`).join('');
+    const siNo = (v) => ['no','si'].map(o=>`<option style="${_oSt}" ${v===o?'selected':''}>${o}</option>`).join('');
     return `
     <div style="border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:rgba(143,212,222,.05)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
