@@ -4665,7 +4665,25 @@ function bindPedidos() {
   });
   const nuevoBtn = document.getElementById('pedido-nuevo');
   if (nuevoBtn) nuevoBtn.onclick = openCargarPedidoModal;
+  const traceBtn = document.getElementById('pedido-trace-ads');
+  if (traceBtn) traceBtn.onclick = trazarAdsFaltantes;
   bindPedidoModal();
+}
+// Dispara el backfill de ads en el worker (histórico completo de pedidos sin atribuir) y refresca.
+async function trazarAdsFaltantes() {
+  const btn = document.getElementById('pedido-trace-ads');
+  if (btn) { btn.disabled = true; btn.textContent = 'Trazando…'; }
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/trace-backfill', { method: 'POST', headers: authHeaders() });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    toast(`Trazados ${j.trazados || 0} pedidos ✓`);
+    await loadAll();
+  } catch (e) {
+    toast('Error al trazar ads: ' + e.message);
+    const b2 = document.getElementById('pedido-trace-ads');
+    if (b2) { b2.disabled = false; b2.textContent = '⛓ Trazar ads faltantes'; }
+  }
 }
 function renderPedidos() {
   const estadosPago = uniq(STATE.pedidos.map(p=>p.estadoPago).filter(Boolean));
@@ -4675,7 +4693,7 @@ function renderPedidos() {
   return `
     <div class="page-head">
       <div><div class="eyebrow" id="pedidos-total-count">${STATE.pedidos.length} totales</div><h1>Pedidos</h1></div>
-      <div class="actions">${canCotizar() ? '<button class="btn btn-cyan" id="pedido-nuevo">＋ Cargar pedido</button>' : ''}<button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
+      <div class="actions">${canCotizar() ? '<button class="btn btn-cyan" id="pedido-nuevo">＋ Cargar pedido</button>' : ''}${isAdmin() ? '<button class="btn btn-ghost" id="pedido-trace-ads" title="Traza el ad de los pedidos sin atribuir (histórico completo): WPP por teléfono, IG por IGSID vía la OC del chat">⛓ Trazar ads faltantes</button>' : ''}<button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
     </div>
     ${(() => {
       const fallos = STATE.pedidos.filter(p => p.mirrorError);
