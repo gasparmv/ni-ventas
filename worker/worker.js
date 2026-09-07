@@ -14809,6 +14809,12 @@ const handler = {
         // normalizada por si algún brief viejo quedó con '+' o espacios.
         const phoneQ = (url.searchParams.get('phone') || '').replace(/\D/g, '');
         if (phoneQ) { where.push("REPLACE(REPLACE(REPLACE(b.cliente_wa_id,'+',''),' ',''),'-','') = ?"); args.push(phoneQ); }
+        // Filtro por NOMBRE del diseño/cartel: lo usa "Cargar pedido" para matchear el brief
+        // cuando NO hay teléfono WA (pedidos por Instagram) o el brief quedó sin cliente_wa_id.
+        // Match EXACTO normalizado (lower/trim) contra cliente_nombre o diseno para no traer
+        // falsos positivos por substring (ej. "chicle" no debe matchear "La bichicleta").
+        const nombreQ = (url.searchParams.get('nombre') || '').trim().toLowerCase();
+        if (nombreQ) { where.push("(lower(trim(b.cliente_nombre)) = ? OR lower(trim(COALESCE(b.diseno,''))) = ?)"); args.push(nombreQ, nombreQ); }
         const sql = `
           SELECT b.*,
                  (SELECT r2_key FROM brief_imagenes WHERE brief_id = b.id AND tipo = 'chat'   ORDER BY orden, id LIMIT 1) AS first_chat_key,

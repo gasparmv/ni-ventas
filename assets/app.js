@@ -4742,16 +4742,20 @@ function parseOcToPedido(body, phone, channel) {
   if (!carteles.length) carteles.push(nuevoCartelPedido());
   return { numero, plataforma, telefono: (plataforma === 'WPP' && phone) ? String(phone) : '', estadoPago: '1er pago', pagado: senaN ? String(senaN) : '', ad: '', carteles };
 }
-// Trae el brief más reciente de un cliente por teléfono (wa_id). Lo usa "Cargar pedido"
-// para sacar cm de neón / tramos del brief (data dura), no adivinarlos. Endpoint filtra por phone.
-async function fetchBriefByPhone(phone) {
-  const tel = String(phone || '').replace(/\D/g, '');
-  if (!tel || !CONFIG.trackerUrl || !STATE.token) return null;
-  // 1) si ya está en memoria (kanban de cotización abierto), lo usamos sin pegarle al server.
-  const inMem = (STATE.briefs || []).filter(b => String(b.cliente_wa_id || '').replace(/\D/g, '') === tel);
+// Trae el brief del cliente por NOMBRE del diseño/cartel. Es la vía que funciona SIEMPRE
+// (incl. pedidos por Instagram, que no tienen teléfono WA, y briefs sin cliente_wa_id): el
+// brief se matchea por cliente_nombre/diseno, no por teléfono. `tramos` SOLO vive acá (la
+// cotización del Sheet no tiene esa columna) → es la única fuente para autocompletarlo.
+async function fetchBriefByName(nombre) {
+  const q = String(nombre || '').trim();
+  if (q.length < 2 || !CONFIG.trackerUrl || !STATE.token) return null;
+  const norm = s => normName(String(s || ''));
+  const nq = norm(q);
+  // 1) si ya está en memoria (kanban de cotización abierto), evitamos el fetch.
+  const inMem = (STATE.briefs || []).filter(b => norm(b.cliente_nombre) === nq || norm(b.diseno) === nq);
   if (inMem.length) return inMem.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')))[0];
   try {
-    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs?phone=${encodeURIComponent(tel)}&limit=5`, {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs?nombre=${encodeURIComponent(q)}&limit=5`, {
       headers: { Authorization: `Bearer ${STATE.token}` }
     });
     if (!r.ok) return null;
@@ -4759,22 +4763,29 @@ async function fetchBriefByPhone(phone) {
     return (data.briefs || [])[0] || null; // ya vienen ordenados por updated_at DESC
   } catch (_) { return null; }
 }
-// Completa cm de neón / tramos (+ medidas/precio como fallback) del primer cartel vacío desde el brief.
-function fillPedidoNeonFromBrief(brief) {
-  const m = STATE.pedidoModal;
-  if (!m || !brief) return false;
+// Aplica los datos de un brief a UN cartel: tramos (única fuente = brief) siempre que falte,
+// y cm de neón / medidas / precio como respaldo si el cartel no los tiene ya cargados.
+function applyBriefToCartel(c, brief) {
+  if (!c || !brief) return false;
   const neonMt = Number(brief.neon_mt) || Number(brief.ia_neon_mt) || 0;
   const tramos = Number(brief.tramos) || Number(brief.ia_tramos) || 0;
-  const carteles = m.carteles || [];
-  // El brief describe UN diseño → aplicamos al primer cartel que no tenga ya cm de neón cargado.
-  const c = carteles.find(x => !String(x.cmNeon || '').trim()) || carteles[0];
-  if (!c) return false;
   let changed = false;
-  if (neonMt && !String(c.cmNeon || '').trim()) { c.cmNeon = Math.round(neonMt * 100); changed = true; } // mt → cm
   if (tramos && !String(c.tramos || '').trim()) { c.tramos = tramos; changed = true; }
-  if (!String(c.alto || '').trim() && Number(brief.alto_cm))  { c.alto = String(Number(brief.alto_cm)); changed = true; }
-  if (!String(c.ancho || '').trim() && Number(brief.ancho_cm)) { c.ancho = String(Number(brief.ancho_cm)); changed = true; }
-  if (!String(c.precio || '').trim() && Number(brief.precio_final)) { c.precio = Number(brief.precio_final); changed = true; }
+  if (neonMt && !String(c.cmNeon || '').trim()) { c.cmNeon = Math.round(neonMt * 100); changed = true; } // mt → cm
+  if (!String(c.alto || '').trim()  && Number(brief.alto_cm))     { c.alto = String(Number(brief.alto_cm));   changed = true; }
+  if (!String(c.ancho || '').trim() && Number(brief.ancho_cm))    { c.ancho = String(Number(brief.ancho_cm)); changed = true; }
+  if (!String(c.precio || '').trim() && Number(brief.precio_final)) { c.precio = Number(brief.precio_final);  changed = true; }
+  return changed;
+}
+// Recorre los carteles del modal y completa cada uno con su brief (matcheado por nombre).
+async function fillPedidoModalFromBriefs() {
+  const m = STATE.pedidoModal; if (!m) return false;
+  const briefs = await Promise.all((m.carteles || []).map(c =>
+    (String(c.cmNeon || '').trim() && String(c.tramos || '').trim()) ? Promise.resolve(null) : fetchBriefByName(c.cartel)
+  ));
+  if (!STATE.pedidoModalOpen) return false;
+  let changed = false;
+  (m.carteles || []).forEach((c, i) => { if (briefs[i] && applyBriefToCartel(c, briefs[i])) changed = true; });
   return changed;
 }
 // Abre el modal de cargar pedido pre-llenado desde una OC del chat (botón en el bubble).
@@ -4793,11 +4804,9 @@ function cargarPedidoDesdeOC(wamid) {
   if (location.hash !== '#pedidos') location.hash = 'pedidos';
   render();
   setTimeout(() => { try { pmTraceAd(); } catch (_) {} }, 250);
-  // Async: traer cm de neón / tramos del brief del cliente y rellenar (sin bloquear la apertura).
-  fetchBriefByPhone(m.phone).then(brief => {
-    if (!brief || !STATE.pedidoModalOpen) return;
-    readPedidoModalDOM(); // preservar lo que ya se ve antes de re-renderizar
-    if (fillPedidoNeonFromBrief(brief)) { render(); toast('Cm de neón y tramos traídos del brief'); }
+  // Async: traer cm de neón / tramos del brief (matcheado por nombre del cartel) y rellenar.
+  fillPedidoModalFromBriefs().then(changed => {
+    if (changed && STATE.pedidoModalOpen) { render(); toast('Cm de neón y tramos traídos del brief'); }
   }).catch(() => {});
 }
 function cancelCargarPedido() { STATE.pedidoModalOpen = false; render(); }
@@ -4898,6 +4907,13 @@ function pmPickCotizacion(i, k) {
   render();
   pmTraceAd(); // trazar el ad con el teléfono recién prellenado (WPP)
   toast('Prellenado desde la cotización "' + p.nombre + '" — revisá medidas y poné el precio');
+  // La cotización del Sheet NO tiene tramos → lo buscamos en el brief (por nombre) y lo completamos.
+  fetchBriefByName(p.nombre).then(brief => {
+    if (!brief || !STATE.pedidoModalOpen) return;
+    readPedidoModalDOM();
+    const cc = STATE.pedidoModal.carteles[i]; if (!cc) return;
+    if (applyBriefToCartel(cc, brief)) { render(); toast('Tramos traídos del brief'); }
+  }).catch(() => {});
 }
 function renderPedidoCartelBlock(c, i, n) {
   const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px';
