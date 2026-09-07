@@ -2236,14 +2236,18 @@ const OC_CONTROLADOR_PRECIO = { 'no': 0, 'slim': 18700, 'control remoto': 25000,
 const OC_DATOS_PAGO = 'Datos de pago:\nMELINA VICTORIA TOGNOCCHI\nCBU: 3840200500000051390011\nAlias: neoninfinito.ok\nBanco: Ualá Bank S.A.U.';
 function ocMoney(n) { const x = Number(n) || 0; return '$' + String(x).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
 function nuevoOcCartel() { return { cartel: '', medidas: '', color: '', fondo: 'Transparente', precio: '', controlador: 'no' }; }
+// Ítem de OC corpórea (letra 3D): campos de producción propios (frente/laterales/fondo=espalda/
+// iluminación/bastidor) en vez de color/fondo/controlador del neón. Ver [[project-pedidos-corporeo-hoja]].
+function nuevoOcCorporeo() { return { cartel: '', medidas: '', frente: '', laterales: '', fondo: '', iluminacion: 'con luz', bastidor: 'no', colorBastidor: '', precio: '' }; }
 function ocCalcTotales(m) {
+  const corp = m && m.corporea;
   const total = (m.carteles || []).reduce((s, c) => {
     const precio = Number(String(c.precio).replace(/\D/g, '')) || 0;
-    return s + precio + (OC_CONTROLADOR_PRECIO[c.controlador] || 0);
+    return s + precio + (corp ? 0 : (OC_CONTROLADOR_PRECIO[c.controlador] || 0));
   }, 0);
   return { total, sena: Math.round(total / 2) };
 }
-function openCrearOcModal() {
+function openCrearOcModal(corporea) {
   if (!canCreateBriefs()) return; // solo carteles (comercial/admin) — oculto para cursos (Abril)
   const phone = chatState.selectedPhone;
   if (!phone) { toast('Abrí el chat del cliente primero'); return; }
@@ -2252,7 +2256,8 @@ function openCrearOcModal() {
   STATE.ocModal = {
     numero: '', plataforma: esIG ? 'Instagram' : 'Whatsapp',
     ubicacion: 'interior', total: '', sena: '', texto: '',
-    carteles: [nuevoOcCartel()]
+    corporea: !!corporea,
+    carteles: [corporea ? nuevoOcCorporeo() : nuevoOcCartel()]
   };
   STATE.ocModalOpen = true; STATE.ocModalSaving = false;
   render();
@@ -2267,19 +2272,34 @@ function composeOcText(m) {
   const senaUse = String(m.sena).replace(/\D/g, '') ? Number(String(m.sena).replace(/\D/g, '')) : sena;
   const cs = m.carteles || [];
   const multi = cs.length > 1;
+  const corp = !!m.corporea;
   const L = [];
   L.push('Orden de compra:' + (String(m.numero).trim() ? ' Nro ' + String(m.numero).trim() : ''));
   L.push('Plataforma: ' + m.plataforma);
   cs.forEach((c, i) => {
     const precioN = Number(String(c.precio).replace(/\D/g, '')) || 0;
     L.push('');
-    if (multi) L.push('Cartel ' + (i + 1) + ':');
-    L.push('Trabajo: ' + (c.cartel || ''));
-    L.push('Medidas: ' + (c.medidas || ''));
-    L.push('Color: ' + (c.color || ''));
-    L.push('Fondo: ' + (c.fondo || ''));
-    L.push('Precio: ' + ocMoney(precioN));
-    L.push('Controlador: ' + (c.controlador || 'no'));
+    if (corp) {
+      // OC corpórea: campos de producción de la letra 3D (frente/laterales/fondo=espalda/
+      // iluminación/bastidor). Arranca igual con "Orden de compra:" → hereda POR PAGAR + aviso.
+      if (multi) L.push('Corpóreo ' + (i + 1) + ':');
+      L.push('Trabajo: ' + (c.cartel || ''));
+      L.push('Medidas: ' + (c.medidas || ''));
+      L.push('Frente: ' + (c.frente || ''));
+      L.push('Laterales: ' + (c.laterales || ''));
+      L.push('Fondo: ' + (c.fondo || ''));
+      L.push('Iluminación: ' + (c.iluminacion || ''));
+      L.push('Bastidor: ' + (c.bastidor || 'no') + (String(c.colorBastidor || '').trim() ? ' (' + c.colorBastidor.trim() + ')' : ''));
+      L.push('Precio: ' + ocMoney(precioN));
+    } else {
+      if (multi) L.push('Cartel ' + (i + 1) + ':');
+      L.push('Trabajo: ' + (c.cartel || ''));
+      L.push('Medidas: ' + (c.medidas || ''));
+      L.push('Color: ' + (c.color || ''));
+      L.push('Fondo: ' + (c.fondo || ''));
+      L.push('Precio: ' + ocMoney(precioN));
+      L.push('Controlador: ' + (c.controlador || 'no'));
+    }
   });
   L.push('');
   L.push('Ubicación: ' + (m.ubicacion || ''));
@@ -2293,23 +2313,51 @@ function readOcModalDOM() {
   const m = STATE.ocModal; if (!m) return;
   const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
   ['numero', 'ubicacion', 'total', 'sena', 'texto'].forEach(f => { const x = v('oc-' + f); if (x !== undefined) m[f] = x; });
+  const itemFields = m.corporea
+    ? ['cartel', 'medidas', 'frente', 'laterales', 'fondo', 'iluminacion', 'bastidor', 'colorBastidor', 'precio']
+    : ['cartel', 'medidas', 'color', 'fondo', 'precio', 'controlador'];
   (m.carteles || []).forEach((c, i) => {
-    ['cartel', 'medidas', 'color', 'fondo', 'precio', 'controlador'].forEach(f => { const x = v(`oc-${f}-${i}`); if (x !== undefined) c[f] = x; });
+    itemFields.forEach(f => { const x = v(`oc-${f}-${i}`); if (x !== undefined) c[f] = x; });
   });
 }
-function ocAddCartel() { readOcModalDOM(); STATE.ocModal.carteles.push(nuevoOcCartel()); render(); }
-function ocRemoveCartel(i) { readOcModalDOM(); STATE.ocModal.carteles.splice(i, 1); if (!STATE.ocModal.carteles.length) STATE.ocModal.carteles.push(nuevoOcCartel()); render(); }
-function renderOcCartelBlock(c, i, n) {
+function ocAddCartel() { readOcModalDOM(); STATE.ocModal.carteles.push(STATE.ocModal.corporea ? nuevoOcCorporeo() : nuevoOcCartel()); render(); }
+function ocRemoveCartel(i) { readOcModalDOM(); STATE.ocModal.carteles.splice(i, 1); if (!STATE.ocModal.carteles.length) STATE.ocModal.carteles.push(STATE.ocModal.corporea ? nuevoOcCorporeo() : nuevoOcCartel()); render(); }
+function renderOcCartelBlock(c, i, n, corporea) {
   const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;color:var(--fg);font-size:13px';
   const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
+  const head = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:11px;color:var(--accent-cyan);font-weight:700">${corporea ? 'Corpóreo' : 'Cartel'} ${i + 1}</span>
+        ${n > 1 ? `<button class="btn btn-ghost" data-oc-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
+      </div>`;
+  if (corporea) {
+    const ilumOpts = ['con luz', 'sin luz'].map(o => `<option ${c.iluminacion === o ? 'selected' : ''}>${o}</option>`).join('');
+    const bastOpts = ['no', 'si'].map(o => `<option ${c.bastidor === o ? 'selected' : ''}>${o}</option>`).join('');
+    return `
+    <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
+      ${head}
+      <div style="margin-bottom:6px"><label style="${lbl}">Trabajo / cliente *</label><input id="oc-cartel-${i}" data-oc-corp-nombre="${i}" autocomplete="off" value="${escapeHtml(c.cartel || '')}" placeholder="ej. Pilates Flow (trae del brief)" style="${inp}"></div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><label style="${lbl}">Medidas</label><input id="oc-medidas-${i}" value="${escapeHtml(c.medidas || '')}" placeholder="ej. 100x100 cm" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Precio * $</label><input id="oc-precio-${i}" type="number" value="${escapeHtml(String(c.precio || ''))}" style="${inp}" data-oc-calc></div>
+      </div>
+      <div style="margin-bottom:6px"><label style="${lbl}">Frente</label><input id="oc-frente-${i}" value="${escapeHtml(c.frente || '')}" placeholder="acabado + color del frente" style="${inp}"></div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><label style="${lbl}">Laterales</label><input id="oc-laterales-${i}" value="${escapeHtml(c.laterales || '')}" placeholder="color (acabado)" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Fondo (espalda)</label><input id="oc-fondo-${i}" value="${escapeHtml(c.fondo || '')}" placeholder="color (acabado)" style="${inp}"></div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <div style="flex:1"><label style="${lbl}">Iluminación</label><select id="oc-iluminacion-${i}" style="${inp}">${ilumOpts}</select></div>
+        <div style="flex:1"><label style="${lbl}">Bastidor</label><select id="oc-bastidor-${i}" style="${inp}">${bastOpts}</select></div>
+        <div style="flex:1"><label style="${lbl}">Color bastidor</label><input id="oc-colorBastidor-${i}" value="${escapeHtml(c.colorBastidor || '')}" placeholder="opcional" style="${inp}"></div>
+      </div>
+    </div>`;
+  }
   const fondoOpts = OC_FONDO_OPTS.map(o => `<option ${c.fondo === o ? 'selected' : ''}>${o}</option>`).join('');
   const ctrlOpts = OC_CONTROLADOR_OPTS.map(o => `<option ${c.controlador === o ? 'selected' : ''}>${o}</option>`).join('');
   return `
     <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-size:11px;color:var(--accent-cyan);font-weight:700">Cartel ${i + 1}</span>
-        ${n > 1 ? `<button class="btn btn-ghost" data-oc-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
-      </div>
+      ${head}
       <div style="margin-bottom:6px"><label style="${lbl}">Trabajo / cartel *</label><input id="oc-cartel-${i}" value="${escapeHtml(c.cartel || '')}" placeholder="ej. Perfumería" style="${inp}"></div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
         <div style="flex:1"><label style="${lbl}">Medidas *</label><input id="oc-medidas-${i}" value="${escapeHtml(c.medidas || '')}" placeholder="ej. 80x70" style="${inp}"></div>
@@ -2332,16 +2380,16 @@ function renderCrearOcModal() {
     <div id="oc-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:290;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
       <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:560px;width:100%;margin:auto;padding:var(--s-4)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-3);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
-          <h2 style="margin:0;font-size:16px">🧾 Crear orden de compra</h2>
+          <h2 style="margin:0;font-size:16px">${m.corporea ? '🧾 Crear OC corpórea' : '🧾 Crear orden de compra'}</h2>
           <button id="oc-close" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
         </div>
         <div style="display:flex;gap:8px;margin-bottom:8px">
           <div style="width:110px"><label style="${lbl}">N° OC</label><input id="oc-numero" value="${escapeHtml(String(m.numero || ''))}" placeholder="opcional" style="${inp}"></div>
           <div style="flex:1"><label style="${lbl}">Plataforma</label><input value="${escapeHtml(m.plataforma)}" disabled style="${inp};opacity:.6"></div>
         </div>
-        <label style="${lbl}">Carteles de la orden</label>
-        <div id="oc-carteles">${m.carteles.map((c, i) => renderOcCartelBlock(c, i, m.carteles.length)).join('')}</div>
-        <button id="oc-add" class="btn btn-ghost" style="width:100%;margin-bottom:8px;font-size:12px">＋ Agregar otro cartel a la orden</button>
+        <label style="${lbl}">${m.corporea ? 'Corpóreos de la orden' : 'Carteles de la orden'}</label>
+        <div id="oc-carteles">${m.carteles.map((c, i) => renderOcCartelBlock(c, i, m.carteles.length, m.corporea)).join('')}</div>
+        <button id="oc-add" class="btn btn-ghost" style="width:100%;margin-bottom:8px;font-size:12px">＋ Agregar otro ${m.corporea ? 'corpóreo' : 'cartel'} a la orden</button>
         <div style="margin-bottom:8px"><label style="${lbl}">Ubicación</label><input id="oc-ubicacion" value="${escapeHtml(m.ubicacion || '')}" placeholder="interior / exterior" style="${inp}"></div>
         <div style="display:flex;gap:8px;margin-bottom:10px">
           <div style="flex:1"><label style="${lbl}">Total (auto, editable) $</label><input id="oc-total" type="number" value="${escapeHtml(String(m.total || ''))}" placeholder="${total}" style="${inp}"></div>
@@ -2371,8 +2419,42 @@ function bindCrearOcModal() {
     const tE = document.getElementById('oc-total'); if (tE && !tE.value) tE.placeholder = String(total);
     const sE = document.getElementById('oc-sena'); if (sE && !sE.value) sE.placeholder = String(sena);
   }));
+  // OC corpórea: al terminar de escribir el Trabajo/cliente, traer frente/laterales/fondo/
+  // iluminación del brief corpóreo (matcheado por nombre) para pre-llenar; Gaspar revisa/edita.
+  document.querySelectorAll('[data-oc-corp-nombre]').forEach(el => el.addEventListener('change', () => {
+    fillOcCorporeoFromBrief(parseInt(el.dataset.ocCorpNombre, 10));
+  }));
   const gen = document.getElementById('oc-gen'); if (gen) gen.onclick = () => { readOcModalDOM(); STATE.ocModal.texto = composeOcText(STATE.ocModal); render(); };
   const cf = document.getElementById('oc-confirm'); if (cf) cf.onclick = confirmCrearOc;
+}
+// Pre-llena un ítem de OC corpórea con los datos del brief corpóreo del cliente (por nombre del
+// Trabajo). Reusa corpPresupuestoFields() → frente/laterales/fondo/iluminación legibles. Solo
+// completa campos vacíos (no pisa lo que Gaspar ya editó); iluminación/bastidor sí se setean.
+async function fillOcCorporeoFromBrief(i) {
+  const m = STATE.ocModal; if (!m || !m.corporea) return;
+  readOcModalDOM();
+  const c = (m.carteles || [])[i]; if (!c) return;
+  const nombre = String(c.cartel || '').trim();
+  if (nombre.length < 2) return;
+  let brief = null;
+  try { brief = await fetchBriefByName(nombre); } catch (_) {}
+  if (!brief || !STATE.ocModalOpen) return;
+  let cj = {};
+  try { cj = brief.corporea_json ? JSON.parse(brief.corporea_json) : {}; } catch (_) {}
+  let f;
+  try { f = corpPresupuestoFields(brief, cj); } catch (_) { return; }
+  const setIf = (k, val) => { if (val && !String(c[k] || '').trim()) c[k] = val; };
+  setIf('medidas', f.medidas);
+  setIf('frente', f.frente);
+  setIf('laterales', f.laterales);
+  setIf('fondo', f.fondo);
+  if (!String(c.precio || '').trim() && f.precio) c.precio = f.precio;
+  c.iluminacion = f.conLuz ? 'con luz' : 'sin luz';
+  c.bastidor = /bastidor/i.test(f.descripcion || '') ? 'si' : 'no';
+  // Regenerar el texto de la OC para que el preview refleje lo traído del brief (readOcModalDOM
+  // arriba capturó el texto viejo con campos vacíos → hay que recomponerlo).
+  m.texto = composeOcText(m);
+  if (STATE.ocModalOpen) { render(); toast('Traído del brief ✓ — revisá/editá'); }
 }
 async function confirmCrearOc() {
   if (STATE.ocModalSaving) return;
@@ -10547,6 +10629,7 @@ function renderChatConversation() {
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-oc" title="Crear la Orden de Compra y enviarla al cliente (se etiqueta POR PAGAR y quedás avisado)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 Crear OC</button>` : ''}
+        ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-oc-corp" title="Crear la OC de un corpóreo (letra 3D) — pre-llena frente/laterales/color del brief; se etiqueta POR PAGAR y quedás avisado" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 OC corpórea</button>` : ''}
         ${(getUserRole() === 'comercial') ? (() => {
           const _lbls = chatState.labels || [];
           const _pre = _lbls.find(l => l.name === '🤖 Precotización');
@@ -12214,7 +12297,9 @@ function bindChatConversation() {
   const chatBriefBtn = document.getElementById('btn-chat-brief');
   if (chatBriefBtn) chatBriefBtn.onclick = chooseBriefTypeFromChat;
   const chatOcBtn = document.getElementById('btn-chat-oc');
-  if (chatOcBtn) chatOcBtn.onclick = openCrearOcModal;
+  if (chatOcBtn) chatOcBtn.onclick = () => openCrearOcModal(false);
+  const chatOcCorpBtn = document.getElementById('btn-chat-oc-corp');
+  if (chatOcCorpBtn) chatOcCorpBtn.onclick = () => openCrearOcModal(true);
   const frenarBotBtn = document.getElementById('btn-frenar-bot');
   if (frenarBotBtn) frenarBotBtn.onclick = async () => {
     const _ph = chatState.selectedPhone;
