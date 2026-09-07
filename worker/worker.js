@@ -3250,7 +3250,7 @@ para el corte necesito de cada diseño:
 Si falta un solo dato, pedilo en una frase corta pero NATURAL y con onda, como una persona — NUNCA un fragmento seco tipo "pasame la foto del diseño?" a secas (queda cavernícola). Ejemplos buenos: "dale, me tirás una foto del diseño y lo dejamos armado?" / "buenísimo, me faltaría la foto del diseño nomás, me la pasás?". Si además el cliente es nuevo, sumá sus datos de envío como otros renglones "- " en el MISMO mensaje (no en uno aparte).
 
 DATOS QUE SÍ PODÉS RESPONDER (FAQ del corte) — si el alumno pregunta, contestá con esto y seguí pidiendo lo que falte, NO frenes:
-- HASTA CUÁNDO / cuándo cierra / plazo: el cierre es el VIERNES 20hs, con margen REAL hasta el SÁBADO 12hs para entrar en la tanda de ESTE finde. Mirá la [FECHA Y HORA ACTUAL] que te paso arriba y razoná según eso: si TODAVÍA no pasó el sábado 12hs, decile que si llega a mandarlo entra en este finde (preguntale si llega); si YA pasó el sábado 12hs (sábado a la tarde, domingo, o durante la semana ya cortando), NO le digas que llega a este finde — decile con onda que ya cerró y que entra en la tanda de la semana que viene. NUNCA le afirmes que "llega justo" si por la fecha/hora ya NO llega.
+- HASTA CUÁNDO / cuándo cierra / plazo: para responder CUALQUIER duda de plazo, seguí EXACTAMENTE la directiva [PLAZO AHORA] que te paso arriba (ya tiene calculado el día y la hora reales — vos NO hagas la cuenta de la hora, usá esa directiva tal cual). En general el cierre es el viernes 20hs con margen real hasta el sábado 12hs; pasado el sábado al mediodía no prometas nada.
 - COLOR: solo cortamos acrílico TRANSPARENTE (el negro está pausado por calidad del proveedor).
 - PRECIO: el precio se calcula el LUNES según las MEDIDAS FINALES que da el DISEÑADOR (el diseñador arma el diseño final y Gaspar cobra el lunes según las medidas reales, en proporción y escala de lo que el cliente haya pasado). VOS NO des ningún número. Si el cliente YA lo calculó por su cuenta: decile que si hizo bien la cuenta el precio debería darle igual, pero que igual el diseñador hace el diseño final y el lunes se cobra según esas medidas reales finales.
 - MEDIDAS / TAMAÑO MÁXIMO: no hay límite de medida. La placa de acrílico viene de 122x244cm, pero tratamos de resolver todo en paños de MÁXIMO 120x120cm (para facilitar el envío, la mano de obra y el armado). Si pide algo grande, tomalo igual y aclarale que se resuelve en paños de hasta 120x120.
@@ -3274,15 +3274,23 @@ async function corteLlm(env, fullText, imageBlocks, ahoraOverride) {
   // Verdad dura para el modelo: cuántas fotos REALES van adjuntas en este análisis. El texto del
   // historial puede tener marcadores [imagen] de mensajes viejos SIN los bytes reales → sin esto el
   // modelo decía "vi las fotos" cuando no había ninguna. Los [imagen] del historial NO cuentan.
-  // Fecha/hora AR actual: para que el bot razone el plazo (cierre viernes 20hs, margen real sábado 12hs).
-  const _arNow = new Date(Date.now() - 3 * 3600 * 1000);
+  // Fecha/hora AR + ESTADO DEL PLAZO calculado en CÓDIGO (el modelo no razona bien la comparación de horas, así
+  // que se la damos masticada). ahoraOverride (para tests) es un ISO tratado como hora AR-local (ej
+  // "2026-09-06T15:00:00Z" = sábado 15hs). Reglas: cierre viernes 20hs; margen real hasta sábado 12hs.
+  const _arNow = ahoraOverride ? new Date(ahoraOverride) : new Date(Date.now() - 3 * 3600 * 1000);
   const _dias = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
-  const _fechaAr = ahoraOverride ? String(ahoraOverride) : (_dias[_arNow.getUTCDay()] + ' ' + _arNow.getUTCDate() + '/' + (_arNow.getUTCMonth() + 1) + ', ' + String(_arNow.getUTCHours()).padStart(2, '0') + ':' + String(_arNow.getUTCMinutes()).padStart(2, '0') + 'hs');
+  const _dow = _arNow.getUTCDay(), _hAr = _arNow.getUTCHours();
+  const _fechaAr = _dias[_dow] + ' ' + _arNow.getUTCDate() + '/' + (_arNow.getUTCMonth() + 1) + ', ' + String(_hAr).padStart(2, '0') + ':' + String(_arNow.getUTCMinutes()).padStart(2, '0') + 'hs';
+  let _plazoDir;
+  if (_dow === 0) _plazoDir = 'ESTE finde YA CERRÓ (es domingo, ya se está/se cortó). Decile con onda que este finde ya cerró y que su pedido entra en la tanda de la semana que viene.';
+  else if (_dow >= 1 && _dow <= 4) _plazoDir = 'ABIERTO. El cierre es el viernes 20hs; si manda el diseño entra en la tanda de ESTE finde.';
+  else if (_dow === 5) _plazoDir = (_hAr < 20) ? 'ABIERTO (es viernes, antes de las 20hs). Si manda ahora entra en la tanda de este finde.' : 'Pasó el cierre del viernes 20hs pero HAY MARGEN hasta el sábado 12hs. Decile que si llega a mandarlo ahora entra en este finde; preguntale si llega.';
+  else _plazoDir = (_hAr < 12) ? 'Es sábado antes de las 12hs: ÚLTIMO margen para entrar en la tanda de este finde. Decile que si lo manda ya entra; preguntale si llega.' : 'Es sábado pasado el mediodía (YA pasó el margen de las 12hs). NO le prometas que entra, pero decile que igual lo mande y que fijás si el diseñador todavía está diseñando (a veces llega a entrar).';
   const nImg = Array.isArray(imageBlocks) ? imageBlocks.length : 0;
   const preamble = `IMÁGENES REALES ADJUNTAS EN ESTE ANÁLISIS: ${nImg}.\n` + (nImg === 0
     ? `No hay NINGUNA foto adjunta. Cualquier marcador [imagen] del historial es de un mensaje VIEJO y NO es de este pedido: NO cuenta como foto, NO digas que viste fotos ni des ningún diseño por hecho, pedile la foto (tiene_foto=false en todos los cortes). Aunque en mensajes anteriores del historial vos (JOACO) hayas dicho que "viste las fotos" o que mandó varios diseños, eso fue un ERROR previo: si acá adjuntas=0, no hay foto, corregí el rumbo y pedila.`
     : `Esas ${nImg} son las ÚNICAS fotos que tenés; cualquier [imagen] del historial que no esté adjunta acá es vieja y NO cuenta.`) + `\n\n`;
-  const text = '[FECHA Y HORA ACTUAL en Argentina: ' + _fechaAr + ']\n' + preamble + fullText;
+  const text = '[FECHA Y HORA ACTUAL en Argentina: ' + _fechaAr + ']\n[PLAZO AHORA (para CUALQUIER pregunta de plazo/cuándo cierra, usá EXACTAMENTE esto): ' + _plazoDir + ']\n' + preamble + fullText;
   const userContent = (nImg) ? [...imageBlocks, { type: 'text', text }] : text;
   const payload = { model: 'claude-sonnet-4-5', max_tokens: 1024, system: sys, messages: [{ role: 'user', content: userContent }] };
   for (let i = 0; i < 2; i++) {
