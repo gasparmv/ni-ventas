@@ -2260,6 +2260,7 @@ function openCrearOcModal(corporea) {
     carteles: [corporea ? nuevoOcCorporeo() : nuevoOcCartel()]
   };
   STATE.ocModalOpen = true; STATE.ocModalSaving = false;
+  if (corporea) ensureOcCorpBriefs(); // precarga los briefs corpóreos para el autocomplete
   render();
   setTimeout(() => { const el = document.getElementById('oc-cartel-0'); if (el) el.focus(); }, 60);
 }
@@ -2336,7 +2337,7 @@ function renderOcCartelBlock(c, i, n, corporea) {
     return `
     <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
       ${head}
-      <div style="margin-bottom:6px"><label style="${lbl}">Trabajo / cliente *</label><input id="oc-cartel-${i}" data-oc-corp-nombre="${i}" autocomplete="off" value="${escapeHtml(c.cartel || '')}" placeholder="ej. Pilates Flow (trae del brief)" style="${inp}"></div>
+      <div style="margin-bottom:6px;position:relative"><label style="${lbl}">Trabajo / cliente *</label><input id="oc-cartel-${i}" data-oc-corp-ac="${i}" autocomplete="off" value="${escapeHtml(c.cartel || '')}" placeholder="ej. Scombro — elegí del brief" style="${inp}"><div id="oc-corp-ac-${i}" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:6;background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);max-height:190px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5)"></div></div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
         <div style="flex:1"><label style="${lbl}">Medidas</label><input id="oc-medidas-${i}" value="${escapeHtml(c.medidas || '')}" placeholder="ej. 100x100 cm" style="${inp}"></div>
         <div style="flex:1"><label style="${lbl}">Precio * $</label><input id="oc-precio-${i}" type="number" value="${escapeHtml(String(c.precio || ''))}" style="${inp}" data-oc-calc></div>
@@ -2419,42 +2420,75 @@ function bindCrearOcModal() {
     const tE = document.getElementById('oc-total'); if (tE && !tE.value) tE.placeholder = String(total);
     const sE = document.getElementById('oc-sena'); if (sE && !sE.value) sE.placeholder = String(sena);
   }));
-  // OC corpórea: al terminar de escribir el Trabajo/cliente, traer frente/laterales/fondo/
-  // iluminación del brief corpóreo (matcheado por nombre) para pre-llenar; Gaspar revisa/edita.
-  document.querySelectorAll('[data-oc-corp-nombre]').forEach(el => el.addEventListener('change', () => {
-    fillOcCorporeoFromBrief(parseInt(el.dataset.ocCorpNombre, 10));
-  }));
+  // OC corpórea: autocomplete del Trabajo/cliente contra los briefs corpóreos (desplegable).
+  // Al elegir uno, se pre-llenan frente/laterales/fondo/iluminación/medidas/precio; Gaspar edita.
+  document.querySelectorAll('[data-oc-corp-ac]').forEach(el => {
+    const i = parseInt(el.dataset.ocCorpAc, 10);
+    el.addEventListener('input', () => ocCorpAutocomplete(i));
+    el.addEventListener('focus', () => ocCorpAutocomplete(i));
+    el.onblur = () => setTimeout(() => { const box = document.getElementById('oc-corp-ac-' + i); if (box) box.style.display = 'none'; }, 150);
+  });
   const gen = document.getElementById('oc-gen'); if (gen) gen.onclick = () => { readOcModalDOM(); STATE.ocModal.texto = composeOcText(STATE.ocModal); render(); };
   const cf = document.getElementById('oc-confirm'); if (cf) cf.onclick = confirmCrearOc;
 }
-// Pre-llena un ítem de OC corpórea con los datos del brief corpóreo del cliente (por nombre del
-// Trabajo). Reusa corpPresupuestoFields() → frente/laterales/fondo/iluminación legibles. Solo
-// completa campos vacíos (no pisa lo que Gaspar ya editó); iluminación/bastidor sí se setean.
-async function fillOcCorporeoFromBrief(i) {
-  const m = STATE.ocModal; if (!m || !m.corporea) return;
+// Carga (1 vez por apertura del modal) los briefs corpóreos para el autocomplete del Trabajo.
+// /admin/briefs no filtra por tipo ni hace búsqueda parcial → traemos hasta 2000 y filtramos
+// tipo='corporea' en el front. Cache en STATE._ocCorpBriefs.
+async function ensureOcCorpBriefs() {
+  if (Array.isArray(STATE._ocCorpBriefs) && STATE._ocCorpBriefs.length) return;
+  try {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs?limit=2000`, { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    STATE._ocCorpBriefs = (data.briefs || []).filter(b => String(b.tipo) === 'corporea');
+  } catch (_) {}
+}
+// Desplegable de autocompletado del Trabajo/cliente contra los briefs corpóreos (por nombre/diseño).
+function ocCorpAutocomplete(i) {
+  const input = document.getElementById('oc-cartel-' + i);
+  const box = document.getElementById('oc-corp-ac-' + i);
+  if (!input || !box) return;
+  const q = normName(input.value);
+  if (q.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const matches = (STATE._ocCorpBriefs || []).filter(b => {
+    const n = normName(b.cliente_nombre), d = normName(b.diseno);
+    return (n && n.includes(q)) || (d && d.includes(q));
+  }).slice(0, 8);
+  if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  STATE._ocCorpAcMatches = matches;
+  box.innerHTML = matches.map((b, k) => {
+    const med = (b.ancho_cm && b.alto_cm) ? ` · ${b.ancho_cm}×${b.alto_cm}cm` : '';
+    const pr = b.precio_final ? ` · ${fmtMoney(b.precio_final)}` : '';
+    return `<div data-oc-corp-pick="${i}|${k}" style="padding:7px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border)"><b>${escapeHtml(b.cliente_nombre || '(sin nombre)')}</b><span style="color:var(--fg-mute)">${escapeHtml(med + pr)}</span></div>`;
+  }).join('');
+  box.style.display = 'block';
+  box.querySelectorAll('[data-oc-corp-pick]').forEach(el => el.onmousedown = (ev) => {
+    ev.preventDefault(); // antes del blur del input
+    const parts = el.dataset.ocCorpPick.split('|');
+    ocCorpPickBrief(parseInt(parts[0], 10), parseInt(parts[1], 10));
+  });
+}
+// Elige un brief del desplegable y pre-llena el ítem corpóreo (reusa corpPresupuestoFields →
+// frente/laterales/fondo/iluminación legibles). Gaspar edita lo que quiera antes de mandar.
+function ocCorpPickBrief(i, k) {
+  const b = (STATE._ocCorpAcMatches || [])[k];
+  if (!b) return;
   readOcModalDOM();
-  const c = (m.carteles || [])[i]; if (!c) return;
-  const nombre = String(c.cartel || '').trim();
-  if (nombre.length < 2) return;
-  let brief = null;
-  try { brief = await fetchBriefByName(nombre); } catch (_) {}
-  if (!brief || !STATE.ocModalOpen) return;
-  let cj = {};
-  try { cj = brief.corporea_json ? JSON.parse(brief.corporea_json) : {}; } catch (_) {}
-  let f;
-  try { f = corpPresupuestoFields(brief, cj); } catch (_) { return; }
-  const setIf = (k, val) => { if (val && !String(c[k] || '').trim()) c[k] = val; };
-  setIf('medidas', f.medidas);
-  setIf('frente', f.frente);
-  setIf('laterales', f.laterales);
-  setIf('fondo', f.fondo);
-  if (!String(c.precio || '').trim() && f.precio) c.precio = f.precio;
+  const c = (STATE.ocModal.carteles || [])[i]; if (!c) return;
+  let cj = {}; try { cj = b.corporea_json ? JSON.parse(b.corporea_json) : {}; } catch (_) {}
+  let f = {}; try { f = corpPresupuestoFields(b, cj); } catch (_) {}
+  c.cartel = b.cliente_nombre || c.cartel;
+  if (f.medidas) c.medidas = f.medidas;
+  if (f.frente) c.frente = f.frente;
+  if (f.laterales) c.laterales = f.laterales;
+  if (f.fondo) c.fondo = f.fondo;
+  if (f.precio) c.precio = f.precio;
   c.iluminacion = f.conLuz ? 'con luz' : 'sin luz';
   c.bastidor = /bastidor/i.test(f.descripcion || '') ? 'si' : 'no';
-  // Regenerar el texto de la OC para que el preview refleje lo traído del brief (readOcModalDOM
-  // arriba capturó el texto viejo con campos vacíos → hay que recomponerlo).
-  m.texto = composeOcText(m);
-  if (STATE.ocModalOpen) { render(); toast('Traído del brief ✓ — revisá/editá'); }
+  STATE.ocModal.texto = composeOcText(STATE.ocModal);
+  const box = document.getElementById('oc-corp-ac-' + i); if (box) box.style.display = 'none';
+  render();
+  toast('Traído del brief: ' + (b.cliente_nombre || ''));
 }
 async function confirmCrearOc() {
   if (STATE.ocModalSaving) return;
