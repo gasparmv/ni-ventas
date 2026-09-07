@@ -909,6 +909,28 @@ async function traceAdForPedido(env, pedido) {
       if (b && b.cliente_wa_id) phone = String(b.cliente_wa_id).replace(/[^\d]/g, '');
     } catch (_) {}
   }
+  // Fallback CLAVE para pedidos sin teléfono (típico en IG, y en cargas viejas): la OC que se le
+  // mandó al cliente en el chat lleva el cartel (Trabajo:) y el Nro de pedido. El phone de ese
+  // mensaje es el del cliente → sirve para WPP (teléfono) e IG (IGSID, que wa_ad_attributions
+  // guarda en la MISMA columna phone). Match por CARTEL (no por número, que se reusa); si varios
+  // clientes comparten ese cartel, se desempata por el Nro de pedido. Si sigue ambiguo, no se toca.
+  if (!phone && cartel.length > 2) {
+    try {
+      const like = '%' + cartel.toLowerCase() + '%';
+      const rs = await env.DB.prepare(
+        "SELECT DISTINCT phone FROM wa_messages WHERE direction='outbound' AND body LIKE 'Orden de compra%' AND lower(body) LIKE ? LIMIT 6"
+      ).bind(like).all();
+      const phones = [...new Set((rs.results || []).map(r => String(r.phone || '').replace(/[^\d]/g, '')).filter(Boolean))];
+      if (phones.length === 1) {
+        phone = phones[0];
+      } else if (phones.length > 1 && pedido.numero) {
+        const r2 = await env.DB.prepare(
+          "SELECT phone FROM wa_messages WHERE direction='outbound' AND body LIKE 'Orden de compra%' AND lower(body) LIKE ? AND body LIKE ? ORDER BY ts DESC LIMIT 1"
+        ).bind(like, '%Nro%' + pedido.numero + '%').first();
+        if (r2 && r2.phone) phone = String(r2.phone).replace(/[^\d]/g, '');
+      }
+    } catch (_) {}
+  }
   if (!phone) return { ad: '', telefono: '', source_id: '', source_campaign: '' };
   let ad = '', sourceId = '', sourceCamp = '';
   // (1) CTWA (WhatsApp): ÚLTIMO touch — regla de Gaspar: el último ad clickeado se lleva la venta.
@@ -936,23 +958,29 @@ async function traceAdForPedido(env, pedido) {
   }
   return { ad, telefono: phone, source_id: sourceId, source_campaign: sourceCamp };
 }
-// Cron: barre los pedidos de carteles SIN ad (recientes) y los traza automáticamente.
-// Rellena pedidos.ad + pedidos.telefono en D1. Devuelve cuántos trazó.
-async function traceUntaggedPedidos(env) {
-  let n = 0;
+// Cron: barre los pedidos de carteles SIN ad y los traza automáticamente (cliente -> atribución).
+// Rellena pedidos.ad + pedidos.telefono en D1. Devuelve {n, scanned}.
+//   opts.allDates = true → sin límite de fecha (para el backfill histórico). Default: últimos 120 días.
+//   opts.limit    = cuántos pedidos escanear por pasada (default 30).
+async function traceUntaggedPedidos(env, opts = {}) {
+  const lim = Math.max(1, Math.min(Number(opts.limit) || 30, 200));
+  const dateClause = opts.allDates ? '' : "AND fecha >= date('now','-120 days')";
+  let n = 0, scanned = 0;
   try {
-    const rows = await env.DB.prepare("SELECT id, cartel, numero, telefono FROM pedidos WHERE COALESCE(ad,'')='' AND fecha >= date('now','-120 days') LIMIT 30").all();
+    const rows = await env.DB.prepare(`SELECT id, cartel, numero, telefono FROM pedidos WHERE COALESCE(ad,'')='' ${dateClause} ORDER BY fecha DESC LIMIT ${lim}`).all();
     for (const p of (rows.results || [])) {
+      scanned++;
       const t = await traceAdForPedido(env, p);
       if (t.ad) {
-        await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, p.id).run();
+        // mirror_dirty=1 → el cron de espejo re-empuja la columna Ad al Excel (backfill histórico).
+        await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END, mirror_dirty=1 WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, p.id).run();
         n++;
       } else if (t.telefono) {
         await env.DB.prepare("UPDATE pedidos SET telefono=? WHERE id=? AND COALESCE(telefono,'')=''").bind(t.telefono, p.id).run();
       }
     }
   } catch (_) {}
-  return n;
+  return { n, scanned };
 }
 // Backfill del ad_id EXACTO en pedidos YA trazados (tienen label de ad pero no source_id).
 // SEGURO: solo re-traza los que tienen un label de vertical de ad (b2c/b2b/retargeting/corpóreas);
@@ -14617,6 +14645,20 @@ const handler = {
         ));
         await env.DB.batch(stmts);
         const rs = await env.DB.prepare('SELECT * FROM pedidos WHERE numero = ? AND origen = ? ORDER BY id').bind(numero, 'crm').all();
+        // Red de seguridad: si el pedido quedó SIN ad (no se trazó en el front, o se cargó a mano),
+        // intentar trazarlo server-side ya mismo. WPP por teléfono; IG por IGSID vía la OC del chat
+        // (traceAdForPedido resuelve el phone del cliente aunque telefono venga como @usuario/vacío).
+        // Best-effort: si falla, el cron lo agarra igual en el próximo minuto.
+        try {
+          for (const row of (rs.results || [])) {
+            if (String(row.ad || '').trim()) continue;
+            const t = await traceAdForPedido(env, row);
+            if (t.ad) {
+              await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END, mirror_dirty=1 WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, row.id).run();
+              row.ad = t.ad;
+            }
+          }
+        } catch (_) {}
         return json({ ok: true, numero, pedidos: rs.results || [] });
       }
 
@@ -14720,9 +14762,29 @@ const handler = {
       // y sincroniza la columna Ad del Excel (match por nombre). Corre solo por cron; esto
       // lo fuerza a mano. Idempotente (solo toca pedidos sin ad y celdas U vacías).
       if (request.method === 'POST' && path === '/admin/pedidos/trace-ads') {
-        const trazados = await traceUntaggedPedidos(env);
+        const r = await traceUntaggedPedidos(env);
         const sync = await syncAdColumnToExcel(env);
-        return json({ ok: true, trazados, sync });
+        return json({ ok: true, trazados: r.n, scanned: r.scanned, sync });
+      }
+
+      // POST /admin/pedidos/trace-backfill?limit=N → barre TODO el histórico de pedidos sin ad
+      // (sin límite de 120 días) y los traza (WPP por teléfono, IG por IGSID vía la OC del chat).
+      // Batched en varias pasadas dentro del mismo request. Idempotente. Solo Gaspar.
+      if (request.method === 'POST' && path === '/admin/pedidos/trace-backfill') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        await ensurePedidosSchema(env);
+        const batch = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '60'), 120));
+        let trazados = 0, scanned = 0, iters = 0;
+        // Varias pasadas: cada una toma los primeros `batch` sin ad. Los que se trazan salen del
+        // conjunto (ya tienen ad); los que no, quedan pero no frenan (scanned avanza). Cortamos
+        // cuando una pasada no traza NADA nuevo (todo lo restante es no-trazable) o a las 10 pasadas.
+        while (iters < 10) {
+          const r = await traceUntaggedPedidos(env, { allDates: true, limit: batch });
+          trazados += r.n; scanned += r.scanned; iters++;
+          if (r.n === 0) break; // nada nuevo trazado → el resto no se puede trazar, cortar
+        }
+        const sync = await syncAdColumnToExcel(env);
+        return json({ ok: true, trazados, iters, sync });
       }
 
       // POST /admin/pedidos/backfill-source → guarda el ad_id EXACTO (source_id/source_campaign) en
