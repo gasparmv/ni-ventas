@@ -664,7 +664,10 @@ async function ensurePedidosSchema(env) {
   // Columnas agregadas después de crear la tabla en prod: red de seguridad del espejo.
   // mirror_attempts = intentos fallidos; mirror_error = motivo del último fallo (ej.
   // valor que infringe la validación de datos del Excel). El ALTER tira si ya existen.
-  for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT', "comercial_id TEXT NOT NULL DEFAULT 'joaco'", 'cargado_por TEXT', 'source_id TEXT', 'source_campaign TEXT']) {
+  for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT', "comercial_id TEXT NOT NULL DEFAULT 'joaco'", 'cargado_por TEXT', 'source_id TEXT', 'source_campaign TEXT',
+    // Corpóreos (letras 3D): specs de producción propios + flag. Van a la hoja contable
+    // 2026v2 (Pedidos_Corporeo), NO al espejo del Excel de Ventas. Ver [[project-pedidos-corporeo-hoja]].
+    'es_corporeo INTEGER NOT NULL DEFAULT 0', 'frente TEXT', 'laterales TEXT', 'espalda TEXT', 'iluminacion TEXT', 'bastidor TEXT', 'color_bastidor TEXT', 'instalacion TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
   }
   // source_id = ad_id EXACTO de Meta que trajo la venta (auditable, no un título adivinado).
@@ -973,7 +976,7 @@ async function traceUntaggedPedidos(env, opts = {}) {
       const t = await traceAdForPedido(env, p);
       if (t.ad) {
         // mirror_dirty=1 → el cron de espejo re-empuja la columna Ad al Excel (backfill histórico).
-        await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END, mirror_dirty=1 WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, p.id).run();
+        await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END, mirror_dirty=CASE WHEN es_corporeo=1 THEN 0 ELSE 1 END WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, p.id).run();
         n++;
       } else if (t.telefono) {
         await env.DB.prepare("UPDATE pedidos SET telefono=? WHERE id=? AND COALESCE(telefono,'')=''").bind(t.telefono, p.id).run();
@@ -14633,16 +14636,26 @@ const handler = {
         const comercialId = await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: telefono });
         // Usuario literal que cargó el pedido (para ver si lo cargó Facu/Joaco/Gaspar).
         const cargadoPor = String(session.user || '');
-        const stmts = carteles.map(c => env.DB.prepare(
-          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', 1, ?, ?)`
+        const stmts = carteles.map(c => {
+          // Un ítem es corpóreo (letra 3D) si el front lo marca. Los corpóreos NO se espejan al
+          // Excel de Ventas (mirror_dirty=0) — van a la hoja contable 2026v2 por su propio flujo.
+          const esCorp = (c.es_corporeo === 1 || c.es_corporeo === true || c.es_corporeo === '1') ? 1 : 0;
+          const mirrorDirty = esCorp ? 0 : 1;
+          return env.DB.prepare(
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
           num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
           num(c.cantidad) || 1, num(c.precio), String(c.dimer || 'NO').trim(), num(c.precio_dimmer),
           String(c.envio || '').trim(), String(c.aclaracion || '').trim(), num(c.tramos), String(c.tipo || '').trim(),
-          plataforma, estadoPago, pagado, restante, ad, telefono, comercialId, cargadoPor, now, now
-        ));
+          plataforma, estadoPago, pagado, restante, ad, telefono, comercialId, cargadoPor,
+          mirrorDirty, esCorp,
+          String(c.frente || '').trim(), String(c.laterales || '').trim(), String(c.espalda || '').trim(),
+          String(c.iluminacion || '').trim(), String(c.bastidor || '').trim(), String(c.color_bastidor || '').trim(), String(c.instalacion || '').trim(),
+          now, now
+        );
+        });
         await env.DB.batch(stmts);
         const rs = await env.DB.prepare('SELECT * FROM pedidos WHERE numero = ? AND origen = ? ORDER BY id').bind(numero, 'crm').all();
         // Red de seguridad: si el pedido quedó SIN ad (no se trazó en el front, o se cargó a mano),
@@ -14654,7 +14667,7 @@ const handler = {
             if (String(row.ad || '').trim()) continue;
             const t = await traceAdForPedido(env, row);
             if (t.ad) {
-              await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END, mirror_dirty=1 WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, row.id).run();
+              await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END, mirror_dirty=CASE WHEN es_corporeo=1 THEN 0 ELSE 1 END WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, row.id).run();
               row.ad = t.ad;
             }
           }

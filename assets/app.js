@@ -4825,7 +4825,9 @@ function inlinePedidoSelect(idx, field, current, opts) {
 // del ad por telefono (WPP).
 const DIMMER_PRECIOS = { NO: '', SLIM: 18700, CONTROL: 25000, APP: 38000 };
 function nuevoCartelPedido() {
-  return { cartel:'', colores:'', tipo:'INT', alto:'', ancho:'', cmNeon:'', tramos:'', base:'TRANS', cantidad:1, precio:'', dimer:'NO', precioDimmer:'', envio:'', aclaracion:'' };
+  return { cartel:'', colores:'', tipo:'INT', alto:'', ancho:'', cmNeon:'', tramos:'', base:'TRANS', cantidad:1, precio:'', dimer:'NO', precioDimmer:'', envio:'', aclaracion:'',
+           // Corpóreos (se completan al parsear una OC corpórea): flag + specs de producción.
+           es_corporeo:0, frente:'', laterales:'', espalda:'', iluminacion:'con luz', bastidor:'no', colorBastidor:'', instalacion:'no' };
 }
 function suggestProximoNumero() {
   const ps = (STATE.pedidos || []).filter(p => p.numero);
@@ -4861,16 +4863,30 @@ function parseOcToPedido(body, phone, channel, igId) {
   const senaN = Number(g(t, /Se[ñn]a[^:\n]*:\s*([^\n]+)/i).replace(/\D/g, '')) || 0;
   const carteles = t.split(/Trabajo:/i).slice(1).map(seg => {
     const b = 'Trabajo:' + seg;
+    const esCorp = /Frente:/i.test(b); // una OC corpórea trae "Frente:" (el neón no)
     const c = nuevoCartelPedido();
     c.cartel = g(b, /Trabajo:\s*([^\n]*)/i);
-    c.colores = g(b, /Color:\s*([^\n]*)/i);
     const med = g(b, /Medidas:\s*([^\n]*)/i).match(/(\d+)\s*[x×]\s*(\d+)/i);
     if (med) { c.ancho = med[1]; c.alto = med[2]; }
     c.precio = Number(g(b, /Precio:\s*([^\n]*)/i).replace(/\D/g, '')) || '';
-    if (/transp/i.test(g(b, /Fondo:\s*([^\n]*)/i))) c.base = 'TRANS';
-    const ctrl = g(b, /Controlador:\s*([^\n]*)/i).toLowerCase();
-    c.dimer = (ctrl && ctrl !== 'no') ? 'SI' : 'NO';
-    c.tipo = tipo;
+    if (esCorp) {
+      // OC corpórea: specs de producción de la letra 3D. Fondo = espalda (en el neón es el fondo/base).
+      c.es_corporeo = 1;
+      c.frente = g(b, /Frente:\s*([^\n]*)/i);
+      c.laterales = g(b, /Laterales:\s*([^\n]*)/i);
+      c.espalda = g(b, /Fondo:\s*([^\n]*)/i);
+      c.iluminacion = /sin\s*luz/i.test(g(b, /Iluminaci[oó]n:\s*([^\n]*)/i)) ? 'sin luz' : 'con luz';
+      const bast = g(b, /Bastidor:\s*([^\n]*)/i);
+      c.bastidor = /^\s*s[ií]/i.test(bast) ? 'si' : 'no';
+      const mb = bast.match(/\(([^)]+)\)/); if (mb) c.colorBastidor = mb[1].trim();
+      c.instalacion = /^\s*s[ií]/i.test(g(b, /Instalaci[oó]n:\s*([^\n]*)/i)) ? 'si' : 'no';
+    } else {
+      c.colores = g(b, /Color:\s*([^\n]*)/i);
+      if (/transp/i.test(g(b, /Fondo:\s*([^\n]*)/i))) c.base = 'TRANS';
+      const ctrl = g(b, /Controlador:\s*([^\n]*)/i).toLowerCase();
+      c.dimer = (ctrl && ctrl !== 'no') ? 'SI' : 'NO';
+      c.tipo = tipo;
+    }
     return c;
   });
   if (!carteles.length) carteles.push(nuevoCartelPedido());
@@ -4961,7 +4977,8 @@ function readPedidoModalDOM() {
   ['numero','telefono','pagado','ad'].forEach(f => { const x = v('pm-'+f); if (x !== undefined) m[f] = x; });
   const ep = v('pm-estadopago'); if (ep !== undefined) m.estadoPago = ep;
   (m.carteles||[]).forEach((c,i) => {
-    ['cartel','alto','ancho','cmNeon','tramos','cantidad','precio','precioDimmer','envio','aclaracion','base','dimer','tipo'].forEach(f => {
+    ['cartel','alto','ancho','cmNeon','tramos','cantidad','precio','precioDimmer','envio','aclaracion','base','dimer','tipo',
+     'frente','laterales','espalda','iluminacion','bastidor','colorBastidor','instalacion'].forEach(f => {
       const x = v(`pm-${f}-${i}`); if (x !== undefined) c[f] = x;
     });
   });
@@ -5070,6 +5087,44 @@ function pmPickCotizacion(i, k) {
 function renderPedidoCartelBlock(c, i, n) {
   const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px';
   const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
+  // Cartel CORPÓREO (letra 3D): layout con specs de producción propios (frente/laterales/
+  // espalda/iluminación/bastidor/instalación) en vez de los de neón (cmNeon/tramos/dimer/base/
+  // colores/tipo). Los datos vienen de la OC corpórea + brief. Ver [[project-pedidos-corporeo-hoja]].
+  if (c.es_corporeo) {
+    const a = Number(c.alto)||0, an = Number(c.ancho)||0; const m2 = (a&&an) ? (a*an/10000).toFixed(2) : '';
+    const ilumOpts = ['con luz','sin luz'].map(o=>`<option ${c.iluminacion===o?'selected':''}>${o}</option>`).join('');
+    const siNo = (v) => ['no','si'].map(o=>`<option ${v===o?'selected':''}>${o}</option>`).join('');
+    return `
+    <div style="border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:rgba(143,212,222,.05)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:11px;color:var(--accent-cyan);font-weight:700">🔤 Corpóreo ${i+1}</span>
+        ${n>1 ? `<button class="btn btn-ghost" data-pm-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
+      </div>
+      <div style="margin-bottom:6px"><label style="${lbl}">Cliente / trabajo *</label><input id="pm-cartel-${i}" autocomplete="off" value="${escapeHtml(c.cartel||'')}" placeholder="ej. Pilates Flow" style="${inp}"></div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><label style="${lbl}">Alto cm</label><input id="pm-alto-${i}" type="number" value="${escapeHtml(String(c.alto||''))}" style="${inp}" data-pm-calc></div>
+        <div style="flex:1"><label style="${lbl}">Ancho cm</label><input id="pm-ancho-${i}" type="number" value="${escapeHtml(String(c.ancho||''))}" style="${inp}" data-pm-calc></div>
+        <div style="flex:0.7"><label style="${lbl}">m²</label><input value="${m2}" disabled style="${inp};opacity:.6"></div>
+        <div style="flex:0.7"><label style="${lbl}">Cant. *</label><input id="pm-cantidad-${i}" type="number" value="${escapeHtml(String(c.cantidad??1))}" style="${inp}"></div>
+        <div style="flex:1.2"><label style="${lbl}">Precio *</label><input id="pm-precio-${i}" type="number" value="${escapeHtml(String(c.precio||''))}" placeholder="$" style="${inp}" data-pm-calc></div>
+      </div>
+      <div style="margin-bottom:6px"><label style="${lbl}">Frente</label><input id="pm-frente-${i}" value="${escapeHtml(c.frente||'')}" placeholder="acabado + color del frente" style="${inp}"></div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><label style="${lbl}">Laterales</label><input id="pm-laterales-${i}" value="${escapeHtml(c.laterales||'')}" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}">Base (espalda)</label><input id="pm-espalda-${i}" value="${escapeHtml(c.espalda||'')}" style="${inp}"></div>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:1"><label style="${lbl}">Iluminación</label><select id="pm-iluminacion-${i}" style="${inp}">${ilumOpts}</select></div>
+        <div style="flex:1"><label style="${lbl}">Instalación</label><select id="pm-instalacion-${i}" style="${inp}">${siNo(c.instalacion||'no')}</select></div>
+        <div style="flex:1"><label style="${lbl}">Bastidor</label><select id="pm-bastidor-${i}" style="${inp}">${siNo(c.bastidor||'no')}</select></div>
+        <div style="flex:1"><label style="${lbl}">Color bastidor</label><input id="pm-colorBastidor-${i}" value="${escapeHtml(c.colorBastidor||'')}" placeholder="opcional" style="${inp}"></div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <div style="flex:1"><label style="${lbl}">Envío</label><input id="pm-envio-${i}" value="${escapeHtml(c.envio||'')}" placeholder="ej. CABA / exterior" style="${inp}"></div>
+        <div style="flex:1.6"><label style="${lbl}">Aclaración</label><input id="pm-aclaracion-${i}" value="${escapeHtml(c.aclaracion||'')}" style="${inp}"></div>
+      </div>
+    </div>`;
+  }
   const baseOpts = ['TRANS','NEGRO','ESPEJO','TRANS Y VINILO'].map(o=>`<option ${c.base===o?'selected':''}>${o}</option>`).join('');
   const dimerOpts = ['NO','SLIM','CONTROL','APP'].map(o=>`<option ${c.dimer===o?'selected':''}>${o}</option>`).join('');
   const tipoOpts = [['INT','Interior'],['EXT','Exterior']].map(([v,l])=>`<option value="${v}" ${c.tipo===v?'selected':''}>${l}</option>`).join('');
@@ -5221,6 +5276,12 @@ function pmValidate() {
   if (m.plataforma === 'WPP' && String(m.telefono||'').replace(/\D/g,'').length < 8) invalid.push({ id:'pm-telefono', msg:'Falta el teléfono (obligatorio en WhatsApp)' });
   for (const { c, i } of named) {
     const nro = i + 1;
+    if (c.es_corporeo) {
+      // Corpóreo: solo exigimos cantidad + precio (las medidas/frente pueden faltar, ej. Hannon).
+      if (!(Number(c.cantidad) > 0)) invalid.push({ id:`pm-cantidad-${i}`, msg:`Corpóreo ${nro}: falta la cantidad` });
+      if (!(Number(c.precio) > 0))   invalid.push({ id:`pm-precio-${i}`, msg:`Corpóreo ${nro}: falta el precio` });
+      continue;
+    }
     if (!String(c.colores||'').trim())   invalid.push({ sel:`[data-pm-color-trigger="${i}"]`, msg:`Cartel ${nro}: elegí al menos un color` });
     if (!(Number(c.cantidad) > 0))       invalid.push({ id:`pm-cantidad-${i}`, msg:`Cartel ${nro}: falta la cantidad` });
     if (!(Number(c.alto) > 0))           invalid.push({ id:`pm-alto-${i}`, msg:`Cartel ${nro}: falta el alto` });
@@ -5273,7 +5334,10 @@ async function confirmCargarPedido() {
       carteles: carteles.map(c => ({
         cartel: c.cartel, colores: c.colores, tipo: c.tipo, alto: c.alto, ancho: c.ancho, cm_neon: c.cmNeon,
         tramos: c.tramos, base: c.base, cantidad: c.cantidad, precio: c.precio, dimer: c.dimer, precio_dimmer: c.precioDimmer,
-        envio: c.envio, aclaracion: c.aclaracion
+        envio: c.envio, aclaracion: c.aclaracion,
+        // Corpóreos: flag + specs de producción (van a la hoja 2026v2, no al espejo de Ventas).
+        es_corporeo: c.es_corporeo ? 1 : 0, frente: c.frente, laterales: c.laterales, espalda: c.espalda,
+        iluminacion: c.iluminacion, bastidor: c.bastidor, color_bastidor: c.colorBastidor, instalacion: c.instalacion
       }))
     };
     const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos', { method:'POST', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
