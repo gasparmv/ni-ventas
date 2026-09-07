@@ -4713,7 +4713,7 @@ function openCargarPedidoModal() {
 }
 // Parsea el texto de una OC ("Orden de compra:...") y arma el objeto de pedido para el modal.
 // La OC la compone composeOcText() con labels fijos, así que el parseo es directo.
-function parseOcToPedido(body, phone, channel) {
+function parseOcToPedido(body, phone, channel, igId) {
   const t = String(body || '').replace(/\r/g, '');
   const g = (str, re) => { const mm = str.match(re); return mm ? mm[1].trim() : ''; };
   const numero = g(t, /Orden de compra:\s*Nro\s*([^\n]+)/i) || suggestProximoNumero();
@@ -4740,7 +4740,11 @@ function parseOcToPedido(body, phone, channel) {
     return c;
   });
   if (!carteles.length) carteles.push(nuevoCartelPedido());
-  return { numero, plataforma, telefono: (plataforma === 'WPP' && phone) ? String(phone) : '', estadoPago: '1er pago', pagado: senaN ? String(senaN) : '', ad: '', carteles };
+  // Contacto: en WPP el teléfono; en IG el @usuario / id de Instagram (para tener a quién es el pedido).
+  const contacto = plataforma === 'IG'
+    ? String(igId || phone || '')
+    : (phone ? String(phone) : '');
+  return { numero, plataforma, telefono: contacto, estadoPago: '1er pago', pagado: senaN ? String(senaN) : '', ad: '', carteles };
 }
 // Trae el brief del cliente por NOMBRE del diseño/cartel. Es la vía que funciona SIEMPRE
 // (incl. pedidos por Instagram, que no tienen teléfono WA, y briefs sin cliente_wa_id): el
@@ -4796,7 +4800,10 @@ function cargarPedidoDesdeOC(wamid) {
   // Canal real de la conversación (pestaña WhatsApp/Instagram) = dato duro para la plataforma.
   const contact = (chatState.contacts || []).find(c => c.phone === (m.phone || chatState.selectedPhone));
   const channel = (contact && contact.channel) || chatState.channel || 'wa';
-  STATE.pedidoModal = parseOcToPedido(m.body, m.phone, channel);
+  // Id de Instagram del cliente: preferimos el @usuario (legible); fallback al IGSID (m.phone).
+  const uname = (contact && contact.username) || (chatState.waContactUsernames && chatState.waContactUsernames[m.phone]) || '';
+  const igId = uname ? ('@' + String(uname).replace(/^@/, '')) : (m.phone || '');
+  STATE.pedidoModal = parseOcToPedido(m.body, m.phone, channel, igId);
   STATE.pedidoModalSaving = false;
   STATE.pedidoModalOpen = true;
   // El modal de pedido SOLO se dibuja/bindea en la vista Pedidos → navegamos ahí y lo abrimos.
@@ -4997,9 +5004,9 @@ function renderPedidoModal() {
           <button type="button" data-pm-plat="WPP" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(m.plataforma==='WPP')}">📱 WhatsApp</button>
           <button type="button" data-pm-plat="IG" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(m.plataforma==='IG')}">📷 Instagram</button>
         </div>
-        <div id="pm-tel-wrap" style="margin-bottom:var(--s-3);${m.plataforma==='WPP'?'':'display:none'}">
-          <label style="${lbl}">Teléfono del cliente <span style="opacity:.6">(para trazar el ad)</span></label>
-          <input id="pm-telefono" type="tel" value="${escapeHtml(m.telefono||'')}" placeholder="5491155604999" style="${inp}">
+        <div id="pm-tel-wrap" style="margin-bottom:var(--s-3)">
+          <label style="${lbl}">${m.plataforma==='IG' ? 'Usuario / ID de Instagram <span style="opacity:.6">(a quién es el pedido)</span>' : 'Teléfono del cliente <span style="opacity:.6">(para trazar el ad)</span>'}</label>
+          <input id="pm-telefono" type="text" value="${escapeHtml(m.telefono||'')}" placeholder="${m.plataforma==='IG' ? '@usuario' : '5491155604999'}" style="${inp}">
         </div>
         <label style="${lbl}">Carteles del pedido</label>
         <div id="pm-carteles">${m.carteles.map((c,i)=>renderPedidoCartelBlock(c,i,m.carteles.length)).join('')}</div>

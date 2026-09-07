@@ -14596,7 +14596,11 @@ const handler = {
         const plataforma = body.plataforma === 'IG' ? 'IG' : 'WPP';
         const estadoPago = String(body.estado_pago || '1er pago');
         const ad = String(body.ad || '');
-        const telefono = String(body.telefono || '').replace(/\D/g, '');
+        // Contacto del cliente: en WPP es el teléfono (solo dígitos). En IG es el @usuario / id
+        // de Instagram → NO stripeamos no-dígitos ahí (si no, un @usuario quedaría vacío).
+        const telefono = plataforma === 'IG'
+          ? String(body.telefono || '').trim().slice(0, 120)
+          : String(body.telefono || '').replace(/\D/g, '');
         // Vendedor de la venta: el usuario logueado que la carga (o el vendedor del chat).
         const comercialId = await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: telefono });
         // Usuario literal que cargó el pedido (para ver si lo cargó Facu/Joaco/Gaspar).
