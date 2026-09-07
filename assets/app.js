@@ -446,8 +446,15 @@ async function enviarPresupuestoComoPlantilla(tel, carteles, renderKey) {
       if (tr.ok) { okSent = true; usedImg = wi; break; }
     }
     if (!okSent) return { ok: false, error: 'No se pudo mandar la plantilla: ' + (tj.error || 'sin detalle') };
-    toast(usedImg ? 'Mandado como plantilla con render ✓' : 'Mandado como plantilla aprobada ✓');
-    return { ok: true, wamid: tj.id || '' };
+    if (usedImg) {
+      toast('Mandado como plantilla con render ✓');
+    } else {
+      // Cayeron TODAS las variantes _img (con render) y ganó una de TEXTO: el cliente recibió el
+      // presupuesto pero SIN la foto. Aviso fuerte para que se pueda reenviar el render después.
+      toast('⚠ Se mandó SIN el render — el cliente recibió solo el texto');
+      try { await showAlert('El presupuesto salió como plantilla de TEXTO, SIN la foto del render (falló el envío con imagen). El cliente lo recibió igual, pero sin el diseño. Cuando conteste y se reabra la ventana de 24h, reenviale el render.', { title: 'Se mandó sin la foto', variant: 'warn' }); } catch (_) {}
+    }
+    return { ok: true, wamid: tj.id || '', usedImg };
   } catch (e) {
     return { ok: false, error: 'Error de red al mandar la plantilla' };
   }
@@ -16303,14 +16310,19 @@ async function enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj, renderKey)
     ? [['presupuesto_corporea_v2_img', true, paramsV2], ['presupuesto_corporea_v2', false, paramsV2], ['presupuesto_corporea_img', true, params], ['presupuesto_corporea', false, params]]
     : [['presupuesto_corporea_v2', false, paramsV2], ['presupuesto_corporea', false, params]];
   try {
-    let tr = null, tj = {};
+    let tr = null, tj = {}, usedImg = false;
     for (const [name, withImg, prms] of cadena) {
       tr = await post(name, withImg, prms);
       tj = await tr.json().catch(() => ({}));
-      if (tr.ok) break;
+      if (tr.ok) { usedImg = withImg; break; }
     }
     if (!tr || !tr.ok) return { ok: false, error: 'No se pudo mandar la plantilla: ' + (tj.error || ('HTTP ' + (tr ? tr.status : '?'))) };
-    return { ok: true, wamid: tj.id || '' };
+    if (useImg && !usedImg) {
+      // Había render pero ganó una variante de TEXTO (sin foto): avisar para reenviar después.
+      toast('⚠ Se mandó SIN el render — el cliente recibió solo el texto');
+      try { await showAlert('El presupuesto corpóreo salió como plantilla de TEXTO, SIN la foto del render (falló el envío con imagen). El cliente lo recibió igual, pero sin el diseño. Cuando conteste y se reabra la ventana de 24h, reenviale el render.', { title: 'Se mandó sin la foto', variant: 'warn' }); } catch (_) {}
+    }
+    return { ok: true, wamid: tj.id || '', usedImg };
   } catch (e) {
     return { ok: false, error: 'Error de red al mandar la plantilla' };
   }

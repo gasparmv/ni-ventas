@@ -3215,15 +3215,23 @@ Un pedido de corte necesita, POR CADA DISEÑO:
 - Medida (en cm)
 - Nombre del diseño
 - Foto del diseño (una imagen)
+- Cantidad (cuántas unidades de ese diseño; si no aclara, es 1)
 - Aclaraciones (OPCIONAL)
 
+REGLA DE ORO — NO INVENTES NUNCA: solo respondé lo que está EXPLÍCITO en este playbook (el FAQ, la sección CABLE, las MEDIDAS y, si aparece más abajo, el CONOCIMIENTO ADICIONAL). Si te preguntan algo que NO está acá, o algo de lo que no estás 100% seguro (un dato técnico, una política, un "por qué", facturación/impuestos, medios de pago, tiempos exactos, si hacen tal otra cosa), NO improvises NI inventes una explicación → frenar=true y en "motivo" poné TEXTUAL la pregunta del cliente (así una persona la responde y la sumamos al playbook para la próxima vez). SIEMPRE es mejor frenar y preguntar que inventar. Ejemplo real a EVITAR: si preguntan "para qué el DNI?" y no está en el playbook, NO inventes nada de AFIP → frenar.
+
 REGLAS:
-- Tu default es AYUDAR con el pedido de corte. frenar es el ÚLTIMO recurso.
+- Tu default es AYUDAR con el pedido de corte. frenar es el ÚLTIMO recurso PARA LO QUE SÍ SABÉS; pero ante una pregunta que NO sabés, frená (REGLA DE ORO).
+- REGATEO / DESCUENTO: si pide descuento, "me hacés precio", precio por cantidad, promo o 2x1 — de CORTE o de CABLE → frenar=true (vos NO negociás ni autorizás descuentos). Si estaba pidiendo cable pero regatea, NO mandes el catálogo: frená.
+- CARTEL COMPLETO (NO es corte): si pide un CARTEL de neón LED terminado/armado, no una base para cortar (ej "me hacen un cartel con mi logo?", "quiero un neón de X", "cuánto un cartel armado") → NO es corte, lo maneja VENTAS. Poné derivar_ventas=true, frenar=true, mensajes=[] (no le respondas vos).
+- AUDIOS: te llegan transcriptos como "[audio] <lo que dijo>"; tratá ese texto como el mensaje del cliente. Solo si ves "[audio] (sin transcripción)" (no se pudo transcribir), frenar=true (no adivines qué dijo).
 - es_corte=true si hay CUALQUIER señal de corte: manda un diseño/imagen, una medida, o dice "acrílicos", "base", "corte", "calado", "sumar un corte", "para el finde", o pregunta si por acá pide/corta acrílicos, etc.
 - Si es_corte=true pero todavía NO confirmó qué diseño quiere (ej: "por acá pido acrílicos?", un saludo suelto, "hola"): intencion_clara=false + un mensaje NATURAL confirmando y pidiéndole el diseño (ej: "Sí! por acá los pedidos de corte. Pasame los datos del diseño: la medida, el nombre y la foto"). NO frenes.
 - Si YA está claro (mandó un diseño/medida o confirmó que quiere cortar) → es_corte=true, intencion_clara=true.
+- es_corte=true TAMBIÉN si pregunta algo del servicio de corte (precio, plazo, medidas, color, qué necesita, cómo es) aunque todavía NO haya dado un diseño: ahí es_corte=true, intencion_clara=false, respondés la duda con el FAQ y de paso pedís los datos. NO uses es_corte=false para una consulta que SÍ es de corte.
+- EMOJI / OK / GRACIAS suelto: si manda SOLO un emoji (👍, 🙏, 😅), o un "ok", "gracias", "dale", "joya", "genial" sin nada más, NO frenes ni escales (no molestes a una persona por eso): es_corte=false, frenar=false y mensajes=[] (o a lo sumo un "dale! cualquier cosa me avisás").
 - frenar=true SOLO si es CLARAMENTE otra cosa que no tiene que ver ni con un corte ni con cable (dudas de la comunidad/curso, un pago, un envío ya hecho, un reclamo/postventa, spam, algo random) → lo atiende una persona. OJO: preguntar por CABLE o querer comprar cable NO es motivo de freno — eso lo manejás vos (ver sección CABLE).
-- Por cada diseño que mandó, extraé nombre, medida (texto tal cual lo dijo) y aclaraciones, y si adjuntó la foto (mirá las imágenes). completo=true SOLO si tiene medida + nombre + foto.
+- Por cada diseño que mandó, extraé nombre, medida (texto tal cual lo dijo), cantidad (cuántas unidades; 1 si no aclara) y aclaraciones, y si adjuntó la foto (mirá las imágenes). completo=true SOLO si tiene medida + nombre + foto. Si pide varias unidades del mismo diseño (ej "5 iguales", "3 bases"), poné esa cantidad.
 - MUY IMPORTANTE: si en la conversación NO hay ninguna imagen adjunta, NO digas que "viste las fotos" ni des por hecho ningún diseño → pedile la foto. tiene_foto=true SOLO si REALMENTE ves una imagen. NO inventes diseños ni medidas que el alumno no dijo.
 - Si a un diseño le falta algún dato, pedí SOLO el que falta, natural y corto.
 - DATOS DE ENVÍO: al principio del texto puede venir una línea [DATOS DEL CLIENTE (interno): ...]. Si dice que es cliente NUEVO o que faltan sus datos de envío, pedile UNA sola vez (junto con lo del diseño, no en mensajes aparte) los datos para el envío y la factura: nombre y apellido, DNI, dirección, provincia, código postal y un número de contacto. Si ya está registrado / ya tenemos sus datos, NO se los pidas. Esa línea es interna: NUNCA la menciones ni la repitas al cliente. Cuando el cliente TE PASE esos datos, extraélos en el campo datos_cliente (solo los que efectivamente dio; el resto vacío).
@@ -3231,7 +3239,7 @@ REGLAS:
 - NUNCA des precio ni cotices (el precio se calcula después con la medida real del diseñador).
 - Solo cortamos TRANSPARENTE (el negro está pausado). Si pide negro, aclaralo.
 - Estilo: natural, argentino, SIN signos de apertura (¿¡), mensajes cortos, como una persona.
-- PROHIBIDO acusar recibo: NUNCA digas "ya tengo los datos", "vi la foto", "ya me llegó", "perfecto ya lo tengo", "recibido", "anoté todo" ni nada que confirme que recibiste o viste algo (se sobreentiende; decirlo suena a robot). Andá directo a lo que falta o al próximo paso — pero SIEMPRE con tono humano y cálido, NUNCA con órdenes secas (ej: en vez de "pasame la foto del diseño?" a secas, mandá "dale! me tirás una foto del diseño y lo dejamos listo?").
+- PROHIBIDO acusar recibo: NUNCA digas "ya tengo los datos", "ya tengo todo", "vi la foto", "vi la imagen", "quedó anotado", "ya me llegó", "perfecto ya lo tengo", "recibido", "anoté todo" ni nada que confirme que recibiste o viste algo (se sobreentiende; decirlo suena a robot). Esto vale TAMBIÉN cuando el pedido queda COMPLETO o cuando el cliente manda una foto: NO lo "confirmes". Si está todo completo, cerrá natural y directo, sin acusar recibo (ej: "listo! el lunes te paso el precio final con la medida real"). Andá siempre directo a lo que falta o al próximo paso, con tono humano y cálido, NUNCA con órdenes secas (ej: en vez de "pasame la foto del diseño?" a secas, "dale! me tirás una foto del diseño y lo dejamos listo?").
 - TONO (clave): escribí como un vendedor argentino piola por WhatsApp, con calidez y naturalidad. Podés arrancar con "dale", "buenísimo", "genial", "de una" (sin abusar ni repetir siempre el mismo). NUNCA mandes mensajes de una sola palabra, fragmentos cortados ni órdenes secas: que suene una persona real, no un bot dando instrucciones.
 
 FORMATO cuando pedís los datos que faltan (CLAVE): la lista va en UN SOLO mensaje, con cada dato en su PROPIO renglón arrancando con "- " (saltos de línea simples dentro del MISMO mensaje). NUNCA mandes un mensaje por cada dato ni un renglón suelto por dato (queda robótico). En total NO mandes más de 2 mensajes. Ejemplo de UN mensaje bien hecho:
@@ -3242,11 +3250,12 @@ para el corte necesito de cada diseño:
 Si falta un solo dato, pedilo en una frase corta pero NATURAL y con onda, como una persona — NUNCA un fragmento seco tipo "pasame la foto del diseño?" a secas (queda cavernícola). Ejemplos buenos: "dale, me tirás una foto del diseño y lo dejamos armado?" / "buenísimo, me faltaría la foto del diseño nomás, me la pasás?". Si además el cliente es nuevo, sumá sus datos de envío como otros renglones "- " en el MISMO mensaje (no en uno aparte).
 
 DATOS QUE SÍ PODÉS RESPONDER (FAQ del corte) — si el alumno pregunta, contestá con esto y seguí pidiendo lo que falte, NO frenes:
-- HASTA CUÁNDO / cuándo cierra / plazo: el cierre de pedidos es el VIERNES 20hs; lo que llega después entra en la tanda de la semana siguiente. (Igual tomale el pedido, entra en la próxima tanda.)
+- HASTA CUÁNDO / cuándo cierra / plazo: el cierre es el VIERNES 20hs, con margen REAL hasta el SÁBADO 12hs para entrar en la tanda de ESTE finde. Mirá la [FECHA Y HORA ACTUAL] que te paso arriba y razoná según eso: si TODAVÍA no pasó el sábado 12hs, decile que si llega a mandarlo entra en este finde (preguntale si llega); si YA pasó el sábado 12hs (sábado a la tarde, domingo, o durante la semana ya cortando), NO le digas que llega a este finde — decile con onda que ya cerró y que entra en la tanda de la semana que viene. NUNCA le afirmes que "llega justo" si por la fecha/hora ya NO llega.
 - COLOR: solo cortamos acrílico TRANSPARENTE (el negro está pausado por calidad del proveedor).
-- PRECIO: el precio se calcula con la MEDIDA REAL del diseño y se lo pasamos el LUNES junto con el mensaje de cobro. NO des ningún precio ni número ahora, aunque insista.
-- QUÉ NECESITÁS: por cada diseño, medida (cm), nombre y la foto.
-Si pregunta algo que NO está acá y NO es corte ni cable (dudas de la comunidad/curso, un pago, estado de un envío, un reclamo) → frenar=true (lo atiende una persona).
+- PRECIO: el precio se calcula el LUNES según las MEDIDAS FINALES que da el DISEÑADOR (el diseñador arma el diseño final y Gaspar cobra el lunes según las medidas reales, en proporción y escala de lo que el cliente haya pasado). VOS NO des ningún número. Si el cliente YA lo calculó por su cuenta: decile que si hizo bien la cuenta el precio debería darle igual, pero que igual el diseñador hace el diseño final y el lunes se cobra según esas medidas reales finales.
+- MEDIDAS / TAMAÑO MÁXIMO: no hay límite de medida. La placa de acrílico viene de 122x244cm, pero tratamos de resolver todo en paños de MÁXIMO 120x120cm (para facilitar el envío, la mano de obra y el armado). Si pide algo grande, tomalo igual y aclarale que se resuelve en paños de hasta 120x120.
+- QUÉ NECESITÁS: por cada diseño, medida (cm), nombre, cantidad y la foto.
+Cualquier otra pregunta que NO esté en este FAQ ni en el CONOCIMIENTO ADICIONAL → REGLA DE ORO: frenar y NO inventes (poné la pregunta en "motivo").
 
 CABLE (lo vendés VOS, NO frenes) — si el alumno pregunta por cable, por precios de cable, o quiere comprar cable: poné enviar_cable=true. El sistema le manda solo un VIDEO + la lista de precios, así que NO escribas vos la lista ni los precios en los mensajes (podés mandar mensajes=[] o a lo sumo una línea corta y natural). Catálogo (para que sepas EXPLICAR, no para copiar el precio en el chat):
 - Rollo de 50mts, estañado, 0.25mm, solo transparente ($47.000): se usa para las CONEXIONES INTERNAS del cartel. Viene estañado, es más finito, queda más prolijo y es más maniobrable.
@@ -3254,19 +3263,28 @@ CABLE (lo vendés VOS, NO frenes) — si el alumno pregunta por cable, por preci
 Si te preguntan cuál les conviene o para qué sirve cada uno, explicáselo con eso (una frase, sin repetir toda la lista). Mandá el video+lista UNA sola vez: si en la charla ya se lo pasaste (ves el video de cables en el historial), NO pongas enviar_cable de nuevo; si vuelve a preguntar un detalle puntual, respondé solo con texto. Un alumno puede pedir CORTE Y CABLE en la misma charla: tomá el corte normalmente y además poné enviar_cable=true.
 
 Devolvé SOLO un JSON, sin nada alrededor:
-{"es_corte":bool,"intencion_clara":bool,"enviar_cable":bool,"frenar":bool,"motivo":"string corto","cortes":[{"nombre":"string","medida":"string","aclaraciones":"string","tiene_foto":bool,"completo":bool}],"datos_cliente":{"nombre":"","apellido":"","dni":"","direccion":"","provincia":"","cp":"","telefono_contacto":""},"mensajes":["..."]}`;
-async function corteLlm(env, fullText, imageBlocks) {
+{"es_corte":bool,"intencion_clara":bool,"enviar_cable":bool,"derivar_ventas":bool,"frenar":bool,"motivo":"string corto (si frenás por una pregunta que NO sabés, poné acá la pregunta TEXTUAL del cliente)","cortes":[{"nombre":"string","medida":"string","cantidad":1,"aclaraciones":"string","tiene_foto":bool,"completo":bool}],"datos_cliente":{"nombre":"","apellido":"","dni":"","direccion":"","provincia":"","cp":"","telefono_contacto":""},"mensajes":["..."]}`;
+async function corteLlm(env, fullText, imageBlocks, ahoraOverride) {
   if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'sin ANTHROPIC_API_KEY' };
+  // Base de conocimiento que CRECE: respuestas curadas que vamos sumando (kv corte_knowledge). Se
+  // inyectan al system prompt así el bot aprende sin re-deploy. Cuando el bot frena por una pregunta
+  // que no sabe, la registramos; Gaspar la responde y esa respuesta se agrega acá.
+  let sys = CORTE_LLM_SYSTEM;
+  try { const kb = String(await kvGet(env, 'corte_knowledge', '') || '').trim(); if (kb) sys += '\n\nCONOCIMIENTO ADICIONAL (respuestas curadas que fuimos sumando — usalas como parte del playbook):\n' + kb; } catch (_) {}
   // Verdad dura para el modelo: cuántas fotos REALES van adjuntas en este análisis. El texto del
   // historial puede tener marcadores [imagen] de mensajes viejos SIN los bytes reales → sin esto el
   // modelo decía "vi las fotos" cuando no había ninguna. Los [imagen] del historial NO cuentan.
+  // Fecha/hora AR actual: para que el bot razone el plazo (cierre viernes 20hs, margen real sábado 12hs).
+  const _arNow = new Date(Date.now() - 3 * 3600 * 1000);
+  const _dias = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+  const _fechaAr = ahoraOverride ? String(ahoraOverride) : (_dias[_arNow.getUTCDay()] + ' ' + _arNow.getUTCDate() + '/' + (_arNow.getUTCMonth() + 1) + ', ' + String(_arNow.getUTCHours()).padStart(2, '0') + ':' + String(_arNow.getUTCMinutes()).padStart(2, '0') + 'hs');
   const nImg = Array.isArray(imageBlocks) ? imageBlocks.length : 0;
   const preamble = `IMÁGENES REALES ADJUNTAS EN ESTE ANÁLISIS: ${nImg}.\n` + (nImg === 0
     ? `No hay NINGUNA foto adjunta. Cualquier marcador [imagen] del historial es de un mensaje VIEJO y NO es de este pedido: NO cuenta como foto, NO digas que viste fotos ni des ningún diseño por hecho, pedile la foto (tiene_foto=false en todos los cortes). Aunque en mensajes anteriores del historial vos (JOACO) hayas dicho que "viste las fotos" o que mandó varios diseños, eso fue un ERROR previo: si acá adjuntas=0, no hay foto, corregí el rumbo y pedila.`
     : `Esas ${nImg} son las ÚNICAS fotos que tenés; cualquier [imagen] del historial que no esté adjunta acá es vieja y NO cuenta.`) + `\n\n`;
-  const text = preamble + fullText;
+  const text = '[FECHA Y HORA ACTUAL en Argentina: ' + _fechaAr + ']\n' + preamble + fullText;
   const userContent = (nImg) ? [...imageBlocks, { type: 'text', text }] : text;
-  const payload = { model: 'claude-sonnet-4-5', max_tokens: 1024, system: CORTE_LLM_SYSTEM, messages: [{ role: 'user', content: userContent }] };
+  const payload = { model: 'claude-sonnet-4-5', max_tokens: 1024, system: sys, messages: [{ role: 'user', content: userContent }] };
   for (let i = 0; i < 2; i++) {
     try {
       const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify(payload) });
@@ -3368,6 +3386,17 @@ async function processCortePilot(env) {
       const out = await corteLlm(env, infoCliente + ctx.fullText, imgs);
       if (!out.ok) continue;
       const res = out.data || {};
+      // CARTEL COMPLETO (no corte) → lo maneja VENTAS (Joaco). Sacamos el chat a 'general' (ahí lo toma
+      // precotización/Joaco), avisamos a Gaspar una vez, y NO seguimos con el flujo de corte. Es por turno:
+      // si en el próximo mensaje el alumno pide un corte real, el bot lo retoma normalmente.
+      if (res.derivar_ventas) {
+        try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox='general', updated_at=? WHERE phone=? AND inbox != 'privado'").bind(nowIso, phone).run(); } catch (_) {}
+        if (!(conv && conv.estado === 'derivado_ventas')) {
+          try { const al = await env.DB.prepare("SELECT nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first(); const quien = (al && al.nombre) ? (al.nombre + ' (' + phone + ')') : phone; await precotizNotifyGaspar(env, 'Servicio de corte: ' + quien + ' pidió un CARTEL completo (no un corte). Lo mandé a ventas (bandeja general) para que lo tome Joaco.'); } catch (_) {}
+        }
+        try { await env.DB.prepare("UPDATE corte_conversaciones SET estado='derivado_ventas', updated_at=? WHERE phone=?").bind(nowIso, phone).run(); } catch (_) {}
+        continue;
+      }
       // El chat es del servicio de corte → bandeja 'corte' (admin-only de Gaspar). Reclama el chat de
       // general/cursos/oculto (por si un auto-ruteo de cursos lo movió) pero NO pisa 'privado' ni un
       // handoff manual (ese ya se filtró arriba con estado 'handoff_abril'). Abril nunca ve 'corte'.
@@ -3397,21 +3426,34 @@ async function processCortePilot(env) {
         try { const yc = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone=? AND direction='outbound' AND media_url=? AND ts > datetime('now','-24 hours') LIMIT 1").bind(phone, CORTE_CABLE_VIDEO_KEY).first(); yaCable = !!yc; } catch (_) {}
         if (!yaCable) { try { await corteSendCableInfo(env, phone); cableSent = true; } catch (_) {} }
       }
-      // No es corte / otra cosa → se lo dejamos a GASPAR (es su negocio; NO a Abril ni a Joaco). El chat ya
-      // está en la bandeja 'corte'. Si era consulta de cable (en scope), NO escalar.
-      if (res.frenar || res.es_corte === false) {
-        const est = (cableSent || res.enviar_cable) ? 'cable' : 'escalado';
-        try { await env.DB.prepare("UPDATE corte_conversaciones SET estado=?, updated_at=? WHERE phone=?").bind(est, nowIso, phone).run(); } catch (_) {}
-        // Avisar a Gaspar UNA vez, al entrar en escalado (no en cada mensaje), y marcar no-leído para que suba.
-        if (est === 'escalado' && !(conv && conv.estado === 'escalado')) {
+      // FRENAR = off-topic o pregunta que NO sabe → se lo dejamos a GASPAR (su negocio; NO Abril ni Joaco). El
+      // chat ya está en la bandeja 'corte'. Avisamos a Gaspar UNA vez, con la pregunta, y la REGISTRAMOS (base
+      // de conocimiento: Gaspar la responde y después se suma al playbook via kv corte_knowledge). Marca no-leído.
+      if (res.frenar) {
+        try { await env.DB.prepare("UPDATE corte_conversaciones SET estado='escalado', updated_at=? WHERE phone=?").bind(nowIso, phone).run(); } catch (_) {}
+        if (!(conv && conv.estado === 'escalado')) {
+          const mot = String(res.motivo || '').trim();
+          let ultimoTxt = '';
+          try { const lm = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type IN ('text','audio') AND ts <= ? ORDER BY ts DESC LIMIT 1").bind(phone, lastTs).first(); ultimoTxt = String((lm && lm.body) || '').slice(0, 200); } catch (_) {}
+          try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_preguntas (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, pregunta TEXT, motivo TEXT, respondida INTEGER DEFAULT 0, created_at TEXT)").run(); } catch (_) {}
+          try { await env.DB.prepare("INSERT INTO corte_preguntas (phone, pregunta, motivo, created_at) VALUES (?,?,?,?)").bind(phone, ultimoTxt, mot, nowIso).run(); } catch (_) {}
           try {
             const al = await env.DB.prepare("SELECT nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
             const quien = (al && al.nombre) ? (al.nombre + ' (' + phone + ')') : phone;
-            const mot = String(res.motivo || '').trim();
-            await precotizNotifyGaspar(env, 'Servicio de corte: un alumno necesita que lo atiendas vos.\n' + quien + (mot ? ('\nMotivo: ' + mot) : '') + '\nlo tenes en tu bandeja de corte');
+            await precotizNotifyGaspar(env, 'Servicio de corte: un alumno necesita que lo atiendas vos.\n' + quien + (ultimoTxt ? ('\nDijo: "' + ultimoTxt + '"') : '') + (mot ? ('\nMotivo: ' + mot) : '') + '\nlo tenes en tu bandeja de corte');
           } catch (_) {}
           try { await precotizMarcarNoLeido(env, phone); } catch (_) {}
         }
+        continue;
+      }
+      // No frena, pero NO es un corte concreto (es_corte=false: cable, una consulta suelta, un saludo). Si el bot
+      // igual armó una respuesta, MANDALA — no escales de gusto (antes es_corte=false escalaba y se comía respuestas
+      // buenas de FAQ). Si no armó nada, no hacemos nada (no molestamos a nadie).
+      if (res.es_corte === false) {
+        const est = (cableSent || res.enviar_cable) ? 'cable' : 'consulta';
+        const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 2) : [];
+        for (const m of msgs) { await corteSend(env, phone, m); await new Promise(r => setTimeout(r, 1200)); }
+        try { await env.DB.prepare("UPDATE corte_conversaciones SET estado=?, updated_at=? WHERE phone=?").bind(est, nowIso, phone).run(); } catch (_) {}
         continue;
       }
       // Intención no clara → preguntar explícito (una sola vez).
@@ -3432,8 +3474,9 @@ async function processCortePilot(env) {
         const nombre = String(co.nombre || '').trim();
         if (!nombre) continue;
         try { const ya = await env.DB.prepare("SELECT 1 FROM corte_pedidos WHERE telefono=? AND lower(diseno_nombre)=lower(?) AND created_at > datetime('now','-7 days') LIMIT 1").bind(phone, nombre).first(); if (ya) continue; } catch (_) {}
+        const cantidad = Math.max(1, parseInt(String(co.cantidad != null ? co.cantidad : '1').replace(/\D/g, ''), 10) || 1);
         try {
-          await env.DB.prepare("INSERT INTO corte_pedidos (alumno_id, telefono, cliente_nombre, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, estado, created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,'TRANS','pedido',?,?)").bind((alumno && alumno.id) || null, phone, (alumno && alumno.nombre) || '', nombre, String(co.aclaraciones || ''), fotoKey, String(co.medida || ''), nowIso, nowIso).run();
+          await env.DB.prepare("INSERT INTO corte_pedidos (alumno_id, telefono, cliente_nombre, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, estado, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'TRANS','pedido',?,?)").bind((alumno && alumno.id) || null, phone, (alumno && alumno.nombre) || '', nombre, String(co.aclaraciones || ''), fotoKey, String(co.medida || ''), cantidad, nowIso, nowIso).run();
         } catch (_) {}
       }
       const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 3) : [];
@@ -11689,9 +11732,14 @@ const handler = {
           const previewBody = `[plantilla: ${name}]${Array.isArray(params) && params.length ? ' ' + params.join(', ') : ''}`;
           // Trazabilidad: marcamos el vendedor que la envió (presupuesto por plantilla / ventana cerrada).
           const senderSlug = await resolveComercial(env, { sessionUser: session.user, phone: num || String(to).replace(/\D/g, '') });
+          // Si la plantilla se mandó CON el render en el header (header_image_key resuelto a un
+          // media_id), la guardamos como IMAGEN con el render como media_url → así el chat MUESTRA
+          // la foto (igual que un presupuesto dentro de la ventana), no solo el rótulo "plantilla
+          // enviada". El body sigue siendo el marcador → tplMarkerToText reconstruye el texto de pie.
+          const sentWithImg = !!(header_image_key && headerMediaId);
           await env.DB.prepare(
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-          ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, senderSlug, 'template', previewBody, '', '', 'sent').run();
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, senderSlug, sentWithImg ? 'image' : 'template', previewBody, sentWithImg ? header_image_key : '', '', 'sent').run();
         } catch (_) {}
         // "El que trabaja el lead se queda con él" (Gaspar 4-sep): el presupuesto/plantilla que manda
         // un vendedor comercial le asigna el chat a él (caso Bre: lo cotizó Joaco, quedaba en Facu).
@@ -15445,8 +15493,30 @@ const handler = {
         let pre = '';
         if (body.nuevo === true) pre = '[DATOS DEL CLIENTE (interno): Es cliente NUEVO, no está en la base. NO tenemos sus datos de envío.]\n\n';
         else if (body.nuevo === false) pre = '[DATOS DEL CLIENTE (interno): Cliente registrado. Ya tenemos sus datos de envío.]\n\n';
-        const out = await corteLlm(env, pre + text, imgs);
+        const out = await corteLlm(env, pre + text, imgs, body.ahora);
         return json({ ok: out.ok, imgs: imgs.length, data: out.data, error: out.error });
+      }
+      // GET /admin/corte/preguntas → preguntas que el bot no supo responder (base de conocimiento a curar). Admin.
+      if (request.method === 'GET' && path === '/admin/corte/preguntas') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let rows = [];
+        try { rows = (await env.DB.prepare("SELECT id, phone, pregunta, motivo, respondida, substr(created_at,1,19) AS ts FROM corte_preguntas ORDER BY respondida ASC, id DESC LIMIT 200").all()).results || []; } catch (_) {}
+        let kb = '';
+        try { kb = String(await kvGet(env, 'corte_knowledge', '') || ''); } catch (_) {}
+        return json({ ok: true, preguntas: rows, knowledge: kb });
+      }
+      // POST /admin/corte/knowledge → suma/reemplaza el CONOCIMIENTO ADICIONAL del bot (kv corte_knowledge).
+      // body { add:"texto" } agrega un renglón; { set:"texto" } reemplaza todo. Opcional { marcar_respondida:id }.
+      if (request.method === 'POST' && path === '/admin/corte/knowledge') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body = {}; try { body = await request.json(); } catch (_) {}
+        let kb = '';
+        try { kb = String(await kvGet(env, 'corte_knowledge', '') || ''); } catch (_) {}
+        if (typeof body.set === 'string') kb = body.set.trim();
+        else if (typeof body.add === 'string' && body.add.trim()) kb = (kb ? (kb + '\n') : '') + '- ' + body.add.trim();
+        try { await kvSet(env, 'corte_knowledge', kb); } catch (_) {}
+        if (body.marcar_respondida) { try { await env.DB.prepare("UPDATE corte_preguntas SET respondida=1 WHERE id=?").bind(parseInt(body.marcar_respondida, 10)).run(); } catch (_) {} }
+        return json({ ok: true, knowledge: kb });
       }
 
       // GET /admin/analytics/precotiz-funnel  →  funnel pre-cotización de carteles por mes
