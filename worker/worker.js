@@ -667,7 +667,7 @@ async function ensurePedidosSchema(env) {
   for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT', "comercial_id TEXT NOT NULL DEFAULT 'joaco'", 'cargado_por TEXT', 'source_id TEXT', 'source_campaign TEXT',
     // Corpóreos (letras 3D): specs de producción propios + flag. Van a la hoja contable
     // 2026v2 (Pedidos_Corporeo), NO al espejo del Excel de Ventas. Ver [[project-pedidos-corporeo-hoja]].
-    'es_corporeo INTEGER NOT NULL DEFAULT 0', 'frente TEXT', 'laterales TEXT', 'espalda TEXT', 'iluminacion TEXT', 'bastidor TEXT', 'color_bastidor TEXT', 'instalacion TEXT']) {
+    'es_corporeo INTEGER NOT NULL DEFAULT 0', 'producto TEXT', 'frente TEXT', 'laterales TEXT', 'espalda TEXT', 'iluminacion TEXT', 'bastidor TEXT', 'color_bastidor TEXT', 'instalacion TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
   }
   // source_id = ad_id EXACTO de Meta que trajo la venta (auditable, no un título adivinado).
@@ -1088,6 +1088,46 @@ async function pushPedidoToVentas(env, row) {
     return { error: (j && j.error) ? String(j.error) : 'el Apps Script no devolvió row' };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
+// Empuja UNA fila de pedido CORPÓREO a la hoja "Pedidos_Corporeo" del Sheet 2026 v4 vía el
+// Apps Script (action=corporeo_upsert). Mapea a las columnas A-U del v4 (layout corpóreo:
+// Frente/Laterales/Base(espalda)/Iluminación/Bastidor/Color bastidor). m² = alto*ancho/10000.
+// El neón sigue yendo al Excel viejo por pushPedidoToVentas; esto es SOLO para corpóreos.
+const PEDIDO_VEND_MAP = { joaco: 'joaquin', joaquin: 'joaquin', facundo: 'facundo', gaspar: 'gaspar', bruno: 'gaspar', nadia: 'facundo', abril: 'abril' };
+async function pushPedidoCorporeoToV4(env, row) {
+  if (!env.APPS_SCRIPT_URL) return { error: 'no APPS_SCRIPT_URL' };
+  const a = Number(row.alto) || 0, an = Number(row.ancho) || 0;
+  const m2 = (a && an) ? Number((a * an / 10000).toFixed(2)) : '';
+  const vk = String(row.cargado_por || row.comercial_id || '').toLowerCase().trim();
+  const vend = PEDIDO_VEND_MAP[vk] || vk;
+  const arr = [
+    pedidoFechaToExcel(row.fecha),   // A Fecha
+    row.numero ?? '',                // B N° pedido
+    vend,                            // C Vendedor
+    row.producto || '',              // D Producto
+    row.cartel || '',                // E Cliente
+    row.alto ?? '',                  // F Alto
+    row.ancho ?? '',                 // G Ancho
+    m2,                              // H m²
+    row.frente || '',                // I Frente
+    row.laterales || '',             // J Laterales
+    row.espalda || '',               // K Base (fondo/espalda)
+    row.iluminacion || '',           // L Iluminación
+    row.bastidor || '',              // M Bastidor
+    row.color_bastidor || '',        // N Color bastidor
+    row.precio ?? '',                // O Precio venta
+    row.instalacion || '',           // P Instalación
+    row.estado_pago || '',           // Q Estado pago
+    row.pagado ?? '',                // R Pagado
+    row.restante ?? '',              // S Restante
+    row.envio || '',                 // T Envío
+    row.aclaracion || ''             // U Aclaración
+  ];
+  try {
+    const j = await appsScriptPost(env, { action: 'corporeo_upsert', sheet_row: row.sheet_row || 0, row: arr });
+    if (j && j.ok && j.row) return { row: Number(j.row) };
+    return { error: (j && j.error) ? String(j.error) : 'el Apps Script no devolvió row' };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
 // Cron: replica al Excel los pedidos marcados mirror_dirty=1 (creados/editados en
 // el CRM). GATEADO por el flag kv 'pedidos_mirror_on' (se prende DESPUÉS de
 // deployar el Apps Script, para no pushear contra el viejo). El clear es condicional
@@ -1097,11 +1137,19 @@ async function processPedidosMirror(env) {
   try {
     const flag = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'pedidos_mirror_on'").first();
     if (!flag || flag.v !== '1') return { skipped: 'flag_off' };
-    const rs = await env.DB.prepare('SELECT * FROM pedidos WHERE mirror_dirty = 1 ORDER BY id LIMIT 8').all();
+    // Flag propio del espejo de corpóreos al Sheet 2026 v4 (default OFF): así se prende SOLO
+    // después de redeployar el Apps Script con el handler corporeo_upsert. Con el flag apagado
+    // NO se seleccionan los corpóreos (quedan mirror_dirty=1 esperando), y no frenan al neón.
+    const corpFlag = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'corporeo_mirror_on'").first();
+    const corpMirrorOn = !!(corpFlag && corpFlag.v === '1');
+    const rs = await env.DB.prepare(corpMirrorOn
+      ? 'SELECT * FROM pedidos WHERE mirror_dirty = 1 ORDER BY id LIMIT 8'
+      : 'SELECT * FROM pedidos WHERE mirror_dirty = 1 AND es_corporeo = 0 ORDER BY id LIMIT 8').all();
     const rows = rs.results || [];
     let pushed = 0, failed = 0;
     for (const row of rows) {
-      const res = await pushPedidoToVentas(env, row);
+      // Corpóreos → Sheet 2026 v4 (Pedidos_Corporeo); neón → Excel de Ventas de siempre.
+      const res = row.es_corporeo ? await pushPedidoCorporeoToV4(env, row) : await pushPedidoToVentas(env, row);
       if (res && res.row) {
         await env.DB.prepare('UPDATE pedidos SET mirror_dirty = 0, mirror_attempts = 0, mirror_error = NULL, sheet_row = ? WHERE id = ? AND updated_at = ?').bind(res.row, row.id, row.updated_at).run();
         pushed++;
@@ -14649,20 +14697,21 @@ const handler = {
         // Usuario literal que cargó el pedido (para ver si lo cargó Facu/Joaco/Gaspar).
         const cargadoPor = String(session.user || '');
         const stmts = carteles.map(c => {
-          // Un ítem es corpóreo (letra 3D) si el front lo marca. Los corpóreos NO se espejan al
-          // Excel de Ventas (mirror_dirty=0) — van a la hoja contable 2026v2 por su propio flujo.
+          // Un ítem es corpóreo (letra 3D) si el front lo marca. TODOS se espejan (mirror_dirty=1):
+          // los corpóreos van al Sheet 2026 v4 (Pedidos_Corporeo) y el neón al Excel de Ventas de
+          // siempre — el ruteo por es_corporeo lo hace processPedidosMirror.
           const esCorp = (c.es_corporeo === 1 || c.es_corporeo === true || c.es_corporeo === '1') ? 1 : 0;
-          const mirrorDirty = esCorp ? 0 : 1;
+          const mirrorDirty = 1;
           return env.DB.prepare(
-          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, producto, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
           num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
           num(c.cantidad) || 1, num(c.precio), String(c.dimer || 'NO').trim(), num(c.precio_dimmer),
           String(c.envio || '').trim(), String(c.aclaracion || '').trim(), num(c.tramos), String(c.tipo || '').trim(),
           plataforma, estadoPago, pagado, restante, ad, telefono, comercialId, cargadoPor,
-          mirrorDirty, esCorp,
+          mirrorDirty, esCorp, String(c.producto || '').trim(),
           String(c.frente || '').trim(), String(c.laterales || '').trim(), String(c.espalda || '').trim(),
           String(c.iluminacion || '').trim(), String(c.bastidor || '').trim(), String(c.color_bastidor || '').trim(), String(c.instalacion || '').trim(),
           now, now
@@ -14679,7 +14728,7 @@ const handler = {
             if (String(row.ad || '').trim()) continue;
             const t = await traceAdForPedido(env, row);
             if (t.ad) {
-              await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END, mirror_dirty=CASE WHEN es_corporeo=1 THEN 0 ELSE 1 END WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, row.id).run();
+              await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END, mirror_dirty=1 WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, row.id).run();
               row.ad = t.ad;
             }
           }

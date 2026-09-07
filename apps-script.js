@@ -33,6 +33,9 @@ function doPost(e) {
     if (data.action === 'pedido_upsert') {
       return pedidoUpsert(data);
     }
+    if (data.action === 'corporeo_upsert') {
+      return corporeoUpsert(data);
+    }
     if (data.action === 'set_ad_bulk') {
       return setAdBulk(data);
     }
@@ -130,6 +133,35 @@ function pedidoUpsert(data) {
     var last = 0;
     for (var i = colC.length - 1; i >= 0; i--) { if (colC[i][0] !== '' && colC[i][0] !== null) { last = i + 1; break; } }
     var insertRow = last + 1;
+    sheet.getRange(insertRow, 1, 1, 21).setValues([row.slice(0, 21)]);
+    return jsonOut({ ok: true, row: insertRow });
+  } catch (err) {
+    return jsonOut({ error: err.message });
+  }
+}
+
+// Upsert de un pedido CORPÓREO en el Sheet 2026 v4 (hoja "Pedidos_Corporeo"). data.row =
+// array de 21 valores (cols A..U del v4). Con data.sheet_row actualiza esa fila; sin él,
+// agrega una fila nueva y devuelve su número. Acá se escriben las 21 columnas (la col O del
+// v4 es "Precio venta", NO "Productor" como en el Excel viejo, así que no se saltea ninguna).
+function corporeoUpsert(data) {
+  try {
+    var CORP_ID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE';
+    var ss = SpreadsheetApp.openById(CORP_ID);
+    var sheet = ss.getSheetByName('Pedidos_Corporeo');
+    if (!sheet) return jsonOut({ error: 'hoja Pedidos_Corporeo no encontrada' });
+    var row = data.row || [];
+    while (row.length < 21) row.push('');
+    var sheetRow = parseInt(data.sheet_row, 10) || 0;
+    if (sheetRow && sheetRow > 1) {
+      sheet.getRange(sheetRow, 1, 1, 21).setValues([row.slice(0, 21)]);
+      return jsonOut({ ok: true, row: sheetRow });
+    }
+    // APPEND: después de la última fila con datos en la col B (N° pedido).
+    var colB = sheet.getRange('B:B').getValues();
+    var last = 0;
+    for (var i = colB.length - 1; i >= 0; i--) { if (colB[i][0] !== '' && colB[i][0] !== null) { last = i + 1; break; } }
+    var insertRow = (last < 1 ? 1 : last) + 1;
     sheet.getRange(insertRow, 1, 1, 21).setValues([row.slice(0, 21)]);
     return jsonOut({ ok: true, row: insertRow });
   } catch (err) {

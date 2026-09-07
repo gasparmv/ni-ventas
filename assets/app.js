@@ -2244,7 +2244,9 @@ function ocMoney(n) { const x = Number(n) || 0; return '$' + String(x).replace(/
 function nuevoOcCartel() { return { cartel: '', medidas: '', color: '', fondo: 'Transparente', precio: '', controlador: 'no' }; }
 // Ítem de OC corpórea (letra 3D): campos de producción propios (frente/laterales/fondo=espalda/
 // iluminación/bastidor) en vez de color/fondo/controlador del neón. Ver [[project-pedidos-corporeo-hoja]].
-function nuevoOcCorporeo() { return { cartel: '', medidas: '', frente: '', laterales: '', fondo: '', iluminacion: 'con luz', bastidor: 'no', colorBastidor: '', precio: '' }; }
+function nuevoOcCorporeo() { return { cartel: '', producto: 'cartel exterior con luz', medidas: '', frente: '', laterales: '', fondo: '', iluminacion: 'con luz', bastidor: 'no', colorBastidor: '', instalacion: 'no', precio: '' }; }
+// Opciones del desplegable "Producto" del Sheet 2026 v4 (col D). Corpóreos.
+const OC_CORP_PRODUCTO_OPTS = ['cartel exterior con luz', 'cartel exterior sin luz', 'cartel interior con luz', 'cartel interior sin luz', 'saliente', 'lightbox'];
 function ocCalcTotales(m) {
   const corp = m && m.corporea;
   const total = (m.carteles || []).reduce((s, c) => {
@@ -2291,12 +2293,14 @@ function composeOcText(m) {
       // iluminación/bastidor). Arranca igual con "Orden de compra:" → hereda POR PAGAR + aviso.
       if (multi) L.push('Corpóreo ' + (i + 1) + ':');
       L.push('Trabajo: ' + (c.cartel || ''));
+      L.push('Producto: ' + (c.producto || ''));
       L.push('Medidas: ' + (c.medidas || ''));
       L.push('Frente: ' + (c.frente || ''));
       L.push('Laterales: ' + (c.laterales || ''));
       L.push('Fondo: ' + (c.fondo || ''));
       L.push('Iluminación: ' + (c.iluminacion || ''));
       L.push('Bastidor: ' + (c.bastidor || 'no') + (String(c.colorBastidor || '').trim() ? ' (' + c.colorBastidor.trim() + ')' : ''));
+      L.push('Instalación: ' + (c.instalacion || 'no'));
       L.push('Precio: ' + ocMoney(precioN));
     } else {
       if (multi) L.push('Cartel ' + (i + 1) + ':');
@@ -2321,7 +2325,7 @@ function readOcModalDOM() {
   const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
   ['numero', 'ubicacion', 'total', 'sena', 'texto'].forEach(f => { const x = v('oc-' + f); if (x !== undefined) m[f] = x; });
   const itemFields = m.corporea
-    ? ['cartel', 'medidas', 'frente', 'laterales', 'fondo', 'iluminacion', 'bastidor', 'colorBastidor', 'precio']
+    ? ['cartel', 'producto', 'medidas', 'frente', 'laterales', 'fondo', 'iluminacion', 'bastidor', 'colorBastidor', 'instalacion', 'precio']
     : ['cartel', 'medidas', 'color', 'fondo', 'precio', 'controlador'];
   (m.carteles || []).forEach((c, i) => {
     itemFields.forEach(f => { const x = v(`oc-${f}-${i}`); if (x !== undefined) c[f] = x; });
@@ -2340,10 +2344,16 @@ function renderOcCartelBlock(c, i, n, corporea) {
   if (corporea) {
     const ilumOpts = ['con luz', 'sin luz'].map(o => `<option ${c.iluminacion === o ? 'selected' : ''}>${o}</option>`).join('');
     const bastOpts = ['no', 'si'].map(o => `<option ${c.bastidor === o ? 'selected' : ''}>${o}</option>`).join('');
+    const prodOpts = OC_CORP_PRODUCTO_OPTS.map(o => `<option ${c.producto === o ? 'selected' : ''}>${o}</option>`).join('');
+    const instOpts = ['no', 'si'].map(o => `<option ${c.instalacion === o ? 'selected' : ''}>${o}</option>`).join('');
     return `
     <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
       ${head}
       <div style="margin-bottom:6px;position:relative"><label style="${lbl}">Trabajo / cliente *</label><input id="oc-cartel-${i}" data-oc-corp-ac="${i}" autocomplete="off" value="${escapeHtml(c.cartel || '')}" placeholder="ej. Scombro — elegí del brief" style="${inp}"><div id="oc-corp-ac-${i}" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:6;background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);max-height:190px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5)"></div></div>
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <div style="flex:2"><label style="${lbl}">Producto</label><select id="oc-producto-${i}" style="${inp}">${prodOpts}</select></div>
+        <div style="flex:1"><label style="${lbl}">Instalación</label><select id="oc-instalacion-${i}" style="${inp}">${instOpts}</select></div>
+      </div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
         <div style="flex:1"><label style="${lbl}">Medidas</label><input id="oc-medidas-${i}" value="${escapeHtml(c.medidas || '')}" placeholder="ej. 100x100 cm" style="${inp}"></div>
         <div style="flex:1"><label style="${lbl}">Precio * $</label><input id="oc-precio-${i}" type="number" value="${escapeHtml(String(c.precio || ''))}" style="${inp}" data-oc-calc></div>
@@ -4833,7 +4843,7 @@ const DIMMER_PRECIOS = { NO: '', SLIM: 18700, CONTROL: 25000, APP: 38000 };
 function nuevoCartelPedido() {
   return { cartel:'', colores:'', tipo:'INT', alto:'', ancho:'', cmNeon:'', tramos:'', base:'TRANS', cantidad:1, precio:'', dimer:'NO', precioDimmer:'', envio:'', aclaracion:'',
            // Corpóreos (se completan al parsear una OC corpórea): flag + specs de producción.
-           es_corporeo:0, frente:'', laterales:'', espalda:'', iluminacion:'con luz', bastidor:'no', colorBastidor:'', instalacion:'no' };
+           es_corporeo:0, producto:'', frente:'', laterales:'', espalda:'', iluminacion:'con luz', bastidor:'no', colorBastidor:'', instalacion:'no' };
 }
 function suggestProximoNumero() {
   const ps = (STATE.pedidos || []).filter(p => p.numero);
@@ -4878,6 +4888,7 @@ function parseOcToPedido(body, phone, channel, igId) {
     if (esCorp) {
       // OC corpórea: specs de producción de la letra 3D. Fondo = espalda (en el neón es el fondo/base).
       c.es_corporeo = 1;
+      c.producto = g(b, /Producto:\s*([^\n]*)/i);
       c.frente = g(b, /Frente:\s*([^\n]*)/i);
       c.laterales = g(b, /Laterales:\s*([^\n]*)/i);
       c.espalda = g(b, /Fondo:\s*([^\n]*)/i);
@@ -4984,7 +4995,7 @@ function readPedidoModalDOM() {
   const ep = v('pm-estadopago'); if (ep !== undefined) m.estadoPago = ep;
   (m.carteles||[]).forEach((c,i) => {
     ['cartel','alto','ancho','cmNeon','tramos','cantidad','precio','precioDimmer','envio','aclaracion','base','dimer','tipo',
-     'frente','laterales','espalda','iluminacion','bastidor','colorBastidor','instalacion'].forEach(f => {
+     'producto','frente','laterales','espalda','iluminacion','bastidor','colorBastidor','instalacion'].forEach(f => {
       const x = v(`pm-${f}-${i}`); if (x !== undefined) c[f] = x;
     });
   });
@@ -5099,6 +5110,7 @@ function renderPedidoCartelBlock(c, i, n) {
   if (c.es_corporeo) {
     const a = Number(c.alto)||0, an = Number(c.ancho)||0; const m2 = (a&&an) ? (a*an/10000).toFixed(2) : '';
     const ilumOpts = ['con luz','sin luz'].map(o=>`<option ${c.iluminacion===o?'selected':''}>${o}</option>`).join('');
+    const prodOpts = OC_CORP_PRODUCTO_OPTS.map(o=>`<option ${c.producto===o?'selected':''}>${o}</option>`).join('');
     const siNo = (v) => ['no','si'].map(o=>`<option ${v===o?'selected':''}>${o}</option>`).join('');
     return `
     <div style="border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:rgba(143,212,222,.05)">
@@ -5107,6 +5119,7 @@ function renderPedidoCartelBlock(c, i, n) {
         ${n>1 ? `<button class="btn btn-ghost" data-pm-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}
       </div>
       <div style="margin-bottom:6px"><label style="${lbl}">Cliente / trabajo *</label><input id="pm-cartel-${i}" autocomplete="off" value="${escapeHtml(c.cartel||'')}" placeholder="ej. Pilates Flow" style="${inp}"></div>
+      <div style="margin-bottom:6px"><label style="${lbl}">Producto</label><select id="pm-producto-${i}" style="${inp}">${prodOpts}</select></div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
         <div style="flex:1"><label style="${lbl}">Alto cm</label><input id="pm-alto-${i}" type="number" value="${escapeHtml(String(c.alto||''))}" style="${inp}" data-pm-calc></div>
         <div style="flex:1"><label style="${lbl}">Ancho cm</label><input id="pm-ancho-${i}" type="number" value="${escapeHtml(String(c.ancho||''))}" style="${inp}" data-pm-calc></div>
@@ -5342,7 +5355,7 @@ async function confirmCargarPedido() {
         tramos: c.tramos, base: c.base, cantidad: c.cantidad, precio: c.precio, dimer: c.dimer, precio_dimmer: c.precioDimmer,
         envio: c.envio, aclaracion: c.aclaracion,
         // Corpóreos: flag + specs de producción (van a la hoja 2026v2, no al espejo de Ventas).
-        es_corporeo: c.es_corporeo ? 1 : 0, frente: c.frente, laterales: c.laterales, espalda: c.espalda,
+        es_corporeo: c.es_corporeo ? 1 : 0, producto: c.producto, frente: c.frente, laterales: c.laterales, espalda: c.espalda,
         iluminacion: c.iluminacion, bastidor: c.bastidor, color_bastidor: c.colorBastidor, instalacion: c.instalacion
       }))
     };
