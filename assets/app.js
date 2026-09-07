@@ -5061,6 +5061,41 @@ function pmRemoveColor(i, color) {
 }
 // Autocomplete del diseño contra las cotizaciones (STATE.presupuestos). Si el
 // pedido siguió el flujo de cotización aparece acá y prellena medidas/tipo/tel.
+// Autocomplete corpóreo del modal de pedido: mismo mecanismo que el de neón (pmCartelAutocomplete)
+// pero contra los briefs corpóreos (STATE._ocCorpBriefs) y prellenando los specs 3D.
+function pmCorpAutocomplete(i) {
+  const input = document.getElementById('pm-cartel-' + i);
+  const box = document.getElementById('pm-corp-ac-' + i);
+  if (!input || !box) return;
+  const q = normName(input.value);
+  if (q.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const matches = (STATE._ocCorpBriefs || []).filter(b => { const n = normName(b.cliente_nombre), d = normName(b.diseno); return (n && n.includes(q)) || (d && d.includes(q)); }).slice(0, 8);
+  if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  STATE._pmCorpAcMatches = matches;
+  box.innerHTML = matches.map((b, k) => { const med = (b.ancho_cm && b.alto_cm) ? ` · ${b.ancho_cm}×${b.alto_cm}cm` : ''; const pr = b.precio_final ? ` · ${fmtMoney(b.precio_final)}` : ''; return `<div data-pm-corp-pick="${i}|${k}" style="padding:7px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border)"><b>${escapeHtml(b.cliente_nombre || '(sin nombre)')}</b><span style="color:var(--fg-mute)">${escapeHtml(med + pr)}</span></div>`; }).join('');
+  box.style.display = 'block';
+  box.querySelectorAll('[data-pm-corp-pick]').forEach(el => el.onmousedown = (ev) => { ev.preventDefault(); const parts = el.dataset.pmCorpPick.split('|'); pmCorpPickBrief(parseInt(parts[0], 10), parseInt(parts[1], 10)); });
+}
+function pmCorpPickBrief(i, k) {
+  const b = (STATE._pmCorpAcMatches || [])[k];
+  if (!b) return;
+  readPedidoModalDOM();
+  const c = STATE.pedidoModal.carteles[i]; if (!c) return;
+  let cj = {}; try { cj = b.corporea_json ? JSON.parse(b.corporea_json) : {}; } catch (_) {}
+  let f = {}; try { f = corpPresupuestoFields(b, cj); } catch (_) {}
+  c.cartel = b.cliente_nombre || c.cartel;
+  if (b.ancho_cm) c.ancho = b.ancho_cm;
+  if (b.alto_cm) c.alto = b.alto_cm;
+  if (f.frente) c.frente = f.frente;
+  if (f.laterales) c.laterales = f.laterales;
+  if (f.fondo) c.espalda = f.fondo;
+  if (f.precio) c.precio = f.precio;
+  c.iluminacion = f.conLuz ? 'con luz' : 'sin luz';
+  c.bastidor = /bastidor/i.test(f.descripcion || '') ? 'si' : 'no';
+  const box = document.getElementById('pm-corp-ac-' + i); if (box) box.style.display = 'none';
+  render();
+  toast('Traído del brief: ' + (b.cliente_nombre || ''));
+}
 function pmCartelAutocomplete(i) {
   const input = document.getElementById('pm-cartel-' + i);
   const box = document.getElementById('pm-ac-' + i);
@@ -5126,7 +5161,11 @@ function renderPedidoCartelBlock(c, i, n) {
         <span style="font-size:11px;color:var(--accent-cyan);font-weight:700">🔤 Corpóreo ${i+1}</span>
         <div style="display:flex;gap:8px;align-items:center">${tipoToggle}${n>1 ? `<button class="btn btn-ghost" data-pm-remove="${i}" style="padding:1px 8px;font-size:11px;color:#FF5566">✕ quitar</button>` : ''}</div>
       </div>
-      <div style="margin-bottom:6px"><label style="${lbl}">Cliente / trabajo *</label><input id="pm-cartel-${i}" autocomplete="off" value="${escapeHtml(c.cartel||'')}" placeholder="ej. Pilates Flow" style="${inp}"></div>
+      <div style="margin-bottom:6px;position:relative">
+        <label style="${lbl}">Cliente / trabajo * <span style="opacity:.5;text-transform:none;letter-spacing:0">— elegí del brief y se prellena</span></label>
+        <input id="pm-cartel-${i}" data-pm-corp-ac="${i}" autocomplete="off" value="${escapeHtml(c.cartel||'')}" placeholder="ej. Scombro — elegí del brief" style="${inp}">
+        <div id="pm-corp-ac-${i}" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:6;background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);max-height:190px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5)"></div>
+      </div>
       <div style="margin-bottom:6px"><label style="${lbl}">Producto</label><select id="pm-producto-${i}" style="${inp}">${prodOpts}</select></div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
         <div style="flex:1"><label style="${lbl}">Alto cm</label><input id="pm-alto-${i}" type="number" value="${escapeHtml(String(c.alto||''))}" style="${inp}" data-pm-calc></div>
@@ -5275,6 +5314,13 @@ function bindPedidoModal() {
     const i = parseInt(el.dataset.pmAc, 10);
     el.oninput = () => pmCartelAutocomplete(i);
     el.onblur = () => setTimeout(() => { const box = document.getElementById('pm-ac-' + i); if (box) box.style.display = 'none'; }, 150);
+  });
+  // Autocomplete corpóreo: mismo mecanismo que neón, contra los briefs corpóreos (precarga la cache).
+  if (document.querySelector('[data-pm-corp-ac]')) ensureOcCorpBriefs();
+  document.querySelectorAll('[data-pm-corp-ac]').forEach(el => {
+    const i = parseInt(el.dataset.pmCorpAc, 10);
+    el.oninput = () => pmCorpAutocomplete(i);
+    el.onblur = () => setTimeout(() => { const box = document.getElementById('pm-corp-ac-' + i); if (box) box.style.display = 'none'; }, 150);
   });
   // Colores: dropdown agrega chip / ✕ quita.
   document.querySelectorAll('[data-pm-color-trigger]').forEach(b => b.onclick = (e) => { e.stopPropagation(); const panel = document.getElementById('pm-colorpanel-' + b.dataset.pmColorTrigger); if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none'; });
