@@ -417,7 +417,7 @@ async function enviarPresupuestoComoPlantilla(tel, carteles, renderKey) {
   const paramsOld = [nombre, ancho, alto, precioTrans, precioNegro];
   const useImg = !!renderKey;
   const ok = await showConfirm(
-    `La ventana de 24h está cerrada, así que el presupuesto va como PLANTILLA aprobada${useImg ? ' CON el render' : ''} (incluye los controladores, seña 50%, 3 cuotas con 10%, 10 días hábiles y envío gratis).\n\n` +
+    `La ventana de 24h está cerrada, así que el presupuesto va como PLANTILLA aprobada${useImg ? ' CON el render' : ''} (incluye los controladores, seña 50%, 3 cuotas con 10%, 15/20 días y envío gratis).\n\n` +
     `Trabajo: ${nombre}\nMedidas: ${ancho} x ${alto}\nBase transparente: ${precioTrans}\n\n¿Lo mando?`,
     { title: 'Enviar como plantilla', confirmLabel: '📤 Mandar plantilla', cancelLabel: 'Cancelar' }
   );
@@ -429,8 +429,13 @@ async function enviarPresupuestoComoPlantilla(tel, carteles, renderKey) {
   // Cascada: nueva-con-img → nueva-texto → vieja-con-img → vieja-texto. La 1ra que Meta
   // acepta gana. Sin bache: hasta que aprueben las "2" (sin negra), siguen andando las viejas.
   const attempts = [];
+  // Preferidas: las _3 (SIN base negra, "15/20 días"). Recreadas 7-sep: Meta NO deja editar el
+  // texto de una plantilla aprobada y BLOQUEA recrear el MISMO nombre por 4 semanas — por eso _3.
+  if (useImg) attempts.push(['presupuesto_detallado_img3', true, paramsNew]);
+  attempts.push(['presupuesto_detallado3', false, paramsNew]);
+  // Respaldo mientras Meta aprueba las _3: la _img2 sigue viva (sin negra, dice "10 días").
+  // (presupuesto_detallado2 fue borrada — bloqueada 4 semanas — ya no se usa.)
   if (useImg) attempts.push(['presupuesto_detallado_img2', true, paramsNew]);
-  attempts.push(['presupuesto_detallado2', false, paramsNew]);
   if (useImg) attempts.push(['presupuesto_detallado_img', true, paramsOld]);
   attempts.push(['presupuesto_detallado', false, paramsOld]);
   try {
