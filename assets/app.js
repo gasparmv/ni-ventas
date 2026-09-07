@@ -4804,6 +4804,9 @@ function cargarPedidoDesdeOC(wamid) {
   const uname = (contact && contact.username) || (chatState.waContactUsernames && chatState.waContactUsernames[m.phone]) || '';
   const igId = uname ? ('@' + String(uname).replace(/^@/, '')) : (m.phone || '');
   STATE.pedidoModal = parseOcToPedido(m.body, m.phone, channel, igId);
+  // IGSID numérico del cliente (m.phone en IG) → sirve para trazar el ad de IG (wa_ad_attributions
+  // guarda la atribución de IG con phone=IGSID). El @usuario del campo NO sirve para eso.
+  STATE.pedidoModal._igsid = channel === 'ig' ? String(m.phone || '') : '';
   STATE.pedidoModalSaving = false;
   STATE.pedidoModalOpen = true;
   // El modal de pedido SOLO se dibuja/bindea en la vista Pedidos → navegamos ahí y lo abrimos.
@@ -4841,13 +4844,21 @@ function pmRecalc() {
 }
 // Trae el ad por telefono (WPP) y lo pone en "de que ad viene" (override manual ok).
 async function pmTraceAd() {
-  const m = STATE.pedidoModal; if (!m || m.plataforma !== 'WPP') return;
-  const tel = (document.getElementById('pm-telefono')?.value || '').replace(/\D/g,'');
-  if (tel.length < 8) return;
+  const m = STATE.pedidoModal; if (!m) return;
+  // WPP: se traza por el teléfono del campo. IG: por el IGSID numérico del cliente (guardado en
+  // _igsid al cargar desde el chat) — la atribución de IG vive en wa_ad_attributions con phone=IGSID.
+  let id;
+  if (m.plataforma === 'WPP') {
+    id = (document.getElementById('pm-telefono')?.value || '').replace(/\D/g,'');
+    if (id.length < 8) return;
+  } else if (m.plataforma === 'IG') {
+    id = String(m._igsid || '').replace(/\D/g,'');
+    if (!id) return;
+  } else return;
   const adEl = document.getElementById('pm-ad');
   if (!adEl || adEl.value.trim()) return; // no pisar si ya hay algo cargado a mano
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/ad-attribution?phone=' + encodeURIComponent(tel), { headers: authHeaders() });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/ad-attribution?phone=' + encodeURIComponent(id), { headers: authHeaders() });
     if (!r.ok) return;
     const j = await r.json();
     const a = j.attribution;
