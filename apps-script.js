@@ -17,6 +17,7 @@ const SHEET_NAME = '2026';
 
 // Spreadsheet 2026 v4 — de ahí leemos la hoja COGS para el cotizador nuevo.
 // (Es OTRO spreadsheet, distinto del SHEET_ID de presupuestos de arriba.)
+// TAMBIÉN es donde vive la hoja "Pedidos_Corporeo" (espejo de pedidos corpóreos).
 const COGS_SHEET_ID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE';
 
 function doPost(e) {
@@ -169,8 +170,9 @@ function corporeoUpsert(data) {
   }
 }
 
-// Escribe SOLO la columna U (Ad) de la hoja 2026 de Ventas, fila por fila. No toca
-// ninguna otra columna. data.items = [{ row: <nro de fila del Excel>, ad: <texto> }, ...].
+// Escribe valores por fila en UNA columna de la hoja 2026 de Ventas (default U=21).
+// No toca ninguna otra columna. data.items = [{ row: <nro de fila>, ad: <texto> }, ...].
+// data.col opcional: 21 = U (Ad); 22 = V (Ad ID de Meta); etc.
 function setAdBulk(data) {
   try {
     var VENTAS_ID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
@@ -178,10 +180,11 @@ function setAdBulk(data) {
     var sheet = ss.getSheetByName('2026');
     if (!sheet) return jsonOut({ error: 'hoja 2026 de Ventas no encontrada' });
     var items = data.items || [];
+    var col = parseInt(data.col, 10) || 21; // 21 = U (Ad); 22 = V (Ad ID de Meta)
     var written = 0;
     for (var i = 0; i < items.length; i++) {
       var sr = parseInt(items[i].row, 10) || 0;
-      if (sr > 1) { sheet.getRange(sr, 21).setValue(String(items[i].ad || '')); written++; }
+      if (sr > 1) { sheet.getRange(sr, col).setValue(String(items[i].ad || '')); written++; }
     }
     return jsonOut({ ok: true, written: written });
   } catch (err) {
