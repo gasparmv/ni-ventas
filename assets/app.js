@@ -9184,7 +9184,15 @@ function visibleLabels() {
   const all = chatState.labels || [];
   if (!isCursosOnly()) return all;
   const created = new Set(createdLabelIds());
-  return all.filter(l => CURSOS_LABEL_IDS.includes(l.id) || created.has(l.id));
+  // También: cualquier etiqueta APLICADA a un chat que Abril ve (sus leads). Así puede
+  // ver/filtrar etiquetas que puso el backend (ej. "Lead MiniSupernova") sin hardcodear
+  // ids. Se scopea a SUS chats visibles (chatState.contacts ya viene filtrado por bandeja),
+  // así que no expone etiquetas de chats ajenos.
+  const onHerChats = new Set();
+  const visibles = new Set((chatState.contacts || []).map(c => c.phone));
+  const cl = chatState.contactLabels || {};
+  for (const p in cl) { if (visibles.has(p)) for (const id of (cl[p] || [])) onHerChats.add(id); }
+  return all.filter(l => CURSOS_LABEL_IDS.includes(l.id) || created.has(l.id) || onHerChats.has(l.id));
 }
 
 // Bandeja "Para cotizar": pre cotizaciones que el bot TERMINÓ y esperan que Joaco cotice.
