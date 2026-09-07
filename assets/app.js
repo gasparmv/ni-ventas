@@ -5132,6 +5132,9 @@ async function confirmCargarPedido() {
   try {
     const payload = {
       numero: m.numero ? Number(m.numero) : undefined,
+      // Fecha en hora local Argentina (la máquina de Gaspar). Sin esto el worker cae a la fecha
+      // UTC, que de noche en ART ya es el día siguiente → el pedido quedaba fechado un día después.
+      fecha: localDateKey(new Date()),
       plataforma: m.plataforma, telefono: m.telefono, estado_pago: m.estadoPago, pagado: m.pagado, ad: m.ad,
       carteles: carteles.map(c => ({
         cartel: c.cartel, colores: c.colores, tipo: c.tipo, alto: c.alto, ancho: c.ancho, cm_neon: c.cmNeon,
