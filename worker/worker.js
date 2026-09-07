@@ -13429,6 +13429,18 @@ const handler = {
         const mime = fileMime || defaultMime;
         const cleanMime = mime.split(';')[0].trim();
         await env.MEDIA.put(r2Key, buf, { httpMetadata: { contentType: cleanMime } });
+        // Presupuesto del cotizador (render en memoria) con la ventana de 24h CERRADA: Meta acepta
+        // el envío libre y lo rechaza async (131047) → la foto nunca llega y salía texto pelado.
+        // Cortamos ANTES y devolvemos la key R2 del render recién subido para que el front lo mande
+        // como plantilla aprobada CON foto (presupuesto_detallado_img). Solo para el flujo de
+        // presupuesto (form 'presupuesto'=1); NO toca el adjuntar-imagen normal del chat.
+        if (type === 'image' && String(fd.get('presupuesto') || '') === '1') {
+          try {
+            const _since24 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+            const _inb = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1").bind(num, _since24).first();
+            if (!_inb) return json({ error: 'Re-engagement message', window_closed: true, has_render: true, render_key: r2Key }, 409);
+          } catch (_) {}
+        }
         // 2. Upload media a WhatsApp (Meta o 360dialog) para obtener el media id.
         // Subimos con el mime LIMPIO (360dialog rechaza el param "; codecs=opus").
         // La NOTA DE VOZ no depende del mime del upload, sino del flag voice:true

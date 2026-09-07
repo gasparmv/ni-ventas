@@ -480,6 +480,7 @@ async function enviarPresupuestoWA() {
       fd.append('to', tel);
       fd.append('type', 'image');
       fd.append('caption', texto);
+      fd.append('presupuesto', '1');   // marca de presupuesto: si la ventana de 24h está cerrada, el back devuelve la render_key para mandar la plantilla CON foto (presupuesto_detallado_img)
       fd.append('file', blob, 'render.png');
       r = await fetch(CONFIG.trackerUrl + '/admin/wa/send-media', { method: 'POST', headers: authHeaders(), body: fd });
     } else {
