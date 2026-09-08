@@ -6772,14 +6772,18 @@ async function guiaProduccionOnInbound(env, phone, msgBody) {
   try { await env.DB.prepare("UPDATE wa_autoreply_log SET status='sent', sent_at=? WHERE phone=? AND kind='guia_produccion'").bind(new Date().toISOString(), phone).run(); } catch (_) {}
 }
 
-// Oculta la conversación de la guía APENAS se detecta el trigger, como PRIMERA acción del
-// inbound — antes de todos los hooks lentos y del getPromoMediaId (llamada a Meta). Sin esto,
-// la libreta wa_chats_summary queda expuesta como 'general' en toda esa ventana; durante el
-// flood del evento el poll de /chats-summary la agarra mid-race y la cachea 5s → el chat
-// aparece en la bandeja del admin aunque termine oculto. El chequeo de texto es barato (solo
-// los mensajes-trigger tocan la DB). Guard: no pisa cursos/privado/corte ni chats con un
-// humano ya respondiendo (outbound automated=0). Idempotente; el hide de guiaProduccionOnInbound
-// queda como backstop.
+// Oculta la conversación de la guía cuando se detecta el trigger. Se llama DOS veces por inbound:
+// (1) como PRIMERA acción — antes de los hooks lentos y del getPromoMediaId (llamada a Meta) — para
+//     que la libreta wa_chats_summary no quede expuesta como 'general' en esa ventana (si no, durante
+//     el flood del evento el poll de /chats-summary la agarra mid-race y la cachea 5s → aparece en la
+//     bandeja del admin aunque termine oculta);
+// (2) como ÚLTIMA acción — después de todos los hooks de reveal de otras campañas (MiniSupernova,
+//     lanzamiento, cursos…), que si el lead está en ellas revelan el chat oculto → 'cursos'. El
+//     trigger de la guía tiene que GANAR (oculto hasta el jueves → después Abril, igual que harían
+//     esas campañas). Por eso el guard oculta AUNQUE esté en 'cursos'.
+// Guard: NO toca 'privado'/'corte' (bandejas admin-only) ni chats con un humano ya respondiendo
+// (outbound automated=0 → lo está atendiendo alguien). Chequeo de texto barato (solo el trigger
+// toca la DB). Idempotente.
 async function guiaProduccionHideFast(env, phone, msgBody) {
   try {
     if (!phone || !_normTxt(msgBody).includes('quiero guia de produccion')) return;
@@ -6787,7 +6791,7 @@ async function guiaProduccionHideFast(env, phone, msgBody) {
     const _dl = await kvGet(env, 'guia_produccion_deadline', '');
     if (_dl && Date.now() >= Date.parse(_dl)) return;
     await env.DB.prepare(
-      "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox='oculto', updated_at=excluded.updated_at WHERE wa_chats_summary.inbox NOT IN ('oculto','cursos','privado','corte') AND NOT EXISTS (SELECT 1 FROM wa_messages h WHERE h.phone = wa_chats_summary.phone AND h.direction='outbound' AND h.automated=0 AND h.msg_type <> 'status')"
+      "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox='oculto', updated_at=excluded.updated_at WHERE wa_chats_summary.inbox NOT IN ('oculto','privado','corte') AND NOT EXISTS (SELECT 1 FROM wa_messages h WHERE h.phone = wa_chats_summary.phone AND h.direction='outbound' AND h.automated=0 AND h.msg_type <> 'status')"
     ).bind(phone, new Date().toISOString()).run();
   } catch (_) {}
 }
@@ -10660,6 +10664,11 @@ const handler = {
                   try { await guiaProduccionOnInbound(env, phone, msgBody); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
+                  // Guía de Producción — re-ocultar como ÚLTIMA acción: si el lead está en otra campaña
+                  // de cursos (MiniSupernova/lanzamiento), sus hooks de reveal recién corridos movieron el
+                  // chat oculto → 'cursos'. El trigger de la guía gana: vuelve a 'oculto' (hasta el jueves).
+                  // El guard protege a los que un humano ya atiende y a privado/corte.
+                  try { await guiaProduccionHideFast(env, phone, msgBody); } catch (_) {}
                 }
               }
 
