@@ -1553,7 +1553,17 @@ function mapPedidoFromD1(row) {
     tipo: row.tipo || '',
     comercial_id: row.comercial_id || 'joaco',
     cargadoPor: row.cargado_por || '',
-    mirrorError: row.mirror_error || ''
+    mirrorError: row.mirror_error || '',
+    // Corpóreos (letras 3D): flag + specs de producción propios.
+    esCorporeo: row.es_corporeo || 0,
+    producto: row.producto || '',
+    frente: row.frente || '',
+    laterales: row.laterales || '',
+    espalda: row.espalda || '',
+    iluminacion: row.iluminacion || '',
+    bastidor: row.bastidor || '',
+    colorBastidor: row.color_bastidor || '',
+    instalacion: row.instalacion || ''
   };
 }
 
@@ -6538,6 +6548,53 @@ function openDrawerPedido(idx) {
   // Dropdowns alineados a la validación del Excel (base col H, dimer col K).
   const baseOptsD = ['NEGRO','TRANS','ESPEJO','TRANS Y VINILO'].map(o=>`<option ${p.base===o?'selected':''}>${o}</option>`).join('');
   const dimerOptsD = ['NO','SLIM','CONTROL','APP'].map(o=>`<option ${p.dimmer===o?'selected':''}>${o}</option>`).join('');
+  // Datos del cartel: layout distinto para CORPÓREO (specs 3D, sin cm neón/dimmer/colores) vs
+  // NEÓN. En ambos las medidas son editables (alto/ancho, + cm neón en neón). Ver savePedidoEdit.
+  const esCorp = !!(p.esCorporeo && Number(p.esCorporeo));
+  const _oStD = 'background:var(--ink-100);color:var(--fg)';
+  const m2D = (Number(p.alto) && Number(p.ancho)) ? (Number(p.alto) * Number(p.ancho) / 10000).toFixed(2) : '';
+  const prodOptsD = OC_CORP_PRODUCTO_OPTS.map(o=>`<option style="${_oStD}" ${p.producto===o?'selected':''}>${o}</option>`).join('');
+  const ilumOptsD = ['con luz','sin luz'].map(o=>`<option style="${_oStD}" ${p.iluminacion===o?'selected':''}>${o}</option>`).join('');
+  const siNoD = (v)=>['no','si'].map(o=>`<option style="${_oStD}" ${v===o?'selected':''}>${o}</option>`).join('');
+  const datosCartel = esCorp ? `
+          <div><label style="${lblD}">Diseño / cliente</label><input id="ped-edit-cartel" value="${escapeHtml(p.cartel||'')}" style="${inpD}"></div>
+          <div><label style="${lblD}">Producto</label><select id="ped-edit-producto" style="${inpD}">${prodOptsD}</select></div>
+          <div style="display:flex;gap:8px">
+            <div style="flex:1"><label style="${lblD}">Alto cm</label><input id="ped-edit-alto" type="number" value="${p.alto||''}" style="${inpD}"></div>
+            <div style="flex:1"><label style="${lblD}">Ancho cm</label><input id="ped-edit-ancho" type="number" value="${p.ancho||''}" style="${inpD}"></div>
+            <div style="flex:1"><label style="${lblD}">m²</label><input value="${m2D}" disabled style="${inpD};opacity:.6"></div>
+          </div>
+          <div><label style="${lblD}">Frente</label><input id="ped-edit-frente" value="${escapeHtml(p.frente||'')}" style="${inpD}"></div>
+          <div style="display:flex;gap:8px">
+            <div style="flex:1"><label style="${lblD}">Laterales</label><input id="ped-edit-laterales" value="${escapeHtml(p.laterales||'')}" style="${inpD}"></div>
+            <div style="flex:1"><label style="${lblD}">Base (espalda)</label><input id="ped-edit-espalda" value="${escapeHtml(p.espalda||'')}" style="${inpD}"></div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <div style="flex:1"><label style="${lblD}">Iluminación</label><select id="ped-edit-iluminacion" style="${inpD}">${ilumOptsD}</select></div>
+            <div style="flex:1"><label style="${lblD}">Instalación</label><select id="ped-edit-instalacion" style="${inpD}">${siNoD(p.instalacion||'no')}</select></div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <div style="flex:1"><label style="${lblD}">Bastidor</label><select id="ped-edit-bastidor" style="${inpD}">${siNoD(p.bastidor||'no')}</select></div>
+            <div style="flex:1"><label style="${lblD}">Color bastidor</label><input id="ped-edit-colorbastidor" value="${escapeHtml(p.colorBastidor||'')}" style="${inpD}"></div>
+          </div>
+          <div><label style="${lblD}">Precio</label><input id="ped-edit-precio" type="number" value="${p.precio||''}" style="${inpD}"></div>
+  ` : `
+          <div><label style="${lblD}">Diseño / cartel</label><input id="ped-edit-cartel" value="${escapeHtml(p.cartel||'')}" style="${inpD}"></div>
+          <div style="display:flex;gap:8px">
+            <div style="flex:1"><label style="${lblD}">Base</label><select id="ped-edit-base" style="${inpD}">${baseOptsD}</select></div>
+            <div style="flex:1"><label style="${lblD}">Dimmer</label><select id="ped-edit-dimer" style="${inpD}">${dimerOptsD}</select></div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <div style="flex:1"><label style="${lblD}">Alto cm</label><input id="ped-edit-alto" type="number" value="${p.alto||''}" style="${inpD}"></div>
+            <div style="flex:1"><label style="${lblD}">Ancho cm</label><input id="ped-edit-ancho" type="number" value="${p.ancho||''}" style="${inpD}"></div>
+            <div style="flex:1"><label style="${lblD}">CM neón</label><input id="ped-edit-cmneon" type="number" value="${p.cmNeon||''}" style="${inpD}"></div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <div style="flex:2"><label style="${lblD}">Colores</label><input id="ped-edit-colores" value="${escapeHtml(p.colores||'')}" style="${inpD}"></div>
+            <div style="flex:1"><label style="${lblD}">Cantidad</label><input id="ped-edit-cantidad" type="number" value="${p.cantidad||1}" style="${inpD}"></div>
+          </div>
+          <div><label style="${lblD}">Precio del cartel</label><input id="ped-edit-precio" type="number" value="${p.precio||''}" style="${inpD}"></div>
+  `;
   document.getElementById('drawer').innerHTML = `
     <div class="drawer-h">
       <h2>${escapeHtml(p.cartel)}</h2>
@@ -6545,23 +6602,15 @@ function openDrawerPedido(idx) {
     </div>
     <div class="drawer-body">
       <div class="drawer-section">
-        <h4>Datos del cartel</h4>
+        <h4>Datos del ${esCorp ? 'corpóreo' : 'cartel'}</h4>
         <div style="display:flex;flex-direction:column;gap:10px">
-          <div><label style="${lblD}">Diseño / cartel</label><input id="ped-edit-cartel" value="${escapeHtml(p.cartel||'')}" style="${inpD}"></div>
-          <div style="display:flex;gap:8px">
-            <div style="flex:1"><label style="${lblD}">Base</label><select id="ped-edit-base" style="${inpD}">${baseOptsD}</select></div>
-            <div style="flex:1"><label style="${lblD}">Dimmer</label><select id="ped-edit-dimer" style="${inpD}">${dimerOptsD}</select></div>
-          </div>
-          <div><label style="${lblD}">Precio del cartel</label><input id="ped-edit-precio" type="number" value="${p.precio||''}" style="${inpD}"></div>
+          ${datosCartel}
         </div>
         <dl class="kv" style="margin-top:10px">
           <dt>Fecha</dt><dd>${fmtDateLong(p.fecha)}</dd>
           <dt>Número</dt><dd>${p.numero || '—'}</dd>
           ${isAdmin() ? `<dt>Cargado por</dt><dd>${loaderCell(p)}</dd>` : ''}
-          <dt>Medidas</dt><dd>${p.alto}×${p.ancho} cm · ${p.cmNeon} cm neón</dd>
-          <dt>Colores</dt><dd>${escapeHtml(p.colores)}</dd>
-          <dt>Cantidad</dt><dd>${p.cantidad}</dd>
-          ${p.precioDimmer ? `<dt>Precio dimmer</dt><dd>${fmtMoney(p.precioDimmer)}</dd>` : ''}
+          ${!esCorp && p.precioDimmer ? `<dt>Precio dimmer</dt><dd>${fmtMoney(p.precioDimmer)}</dd>` : ''}
         </dl>
       </div>
       <div class="drawer-section">
@@ -6733,6 +6782,21 @@ async function savePedidoEdit(idx) {
     base:          document.getElementById('ped-edit-base')?.value,
     dimer:         document.getElementById('ped-edit-dimer')?.value,
     precio:        document.getElementById('ped-edit-precio')?.value,
+    // Medidas (editables en ambos layouts) + campos específicos. Los que no existan en el
+    // layout actual salen undefined → JSON los omite → el PATCH no los toca.
+    alto:          document.getElementById('ped-edit-alto')?.value,
+    ancho:         document.getElementById('ped-edit-ancho')?.value,
+    cm_neon:       document.getElementById('ped-edit-cmneon')?.value,
+    colores:       document.getElementById('ped-edit-colores')?.value,
+    cantidad:      document.getElementById('ped-edit-cantidad')?.value,
+    producto:      document.getElementById('ped-edit-producto')?.value,
+    frente:        document.getElementById('ped-edit-frente')?.value,
+    laterales:     document.getElementById('ped-edit-laterales')?.value,
+    espalda:       document.getElementById('ped-edit-espalda')?.value,
+    iluminacion:   document.getElementById('ped-edit-iluminacion')?.value,
+    bastidor:      document.getElementById('ped-edit-bastidor')?.value,
+    color_bastidor:document.getElementById('ped-edit-colorbastidor')?.value,
+    instalacion:   document.getElementById('ped-edit-instalacion')?.value,
     ad:            document.getElementById('ped-edit-ad')?.value,
     envio:         document.getElementById('ped-edit-envio')?.value,
     aclaracion:    document.getElementById('ped-edit-aclaracion')?.value,

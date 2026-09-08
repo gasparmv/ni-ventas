@@ -14823,6 +14823,21 @@ const handler = {
           const pv = (body.precio === '' || body.precio == null) ? null : (isNaN(Number(body.precio)) ? null : Number(body.precio));
           cSets.push('precio = ?'); cArgs.push(pv); precioChanged = true;
         }
+        // Medidas + specs (cartel/corpóreo), editables desde el drawer. Números → null si vacío/NaN.
+        const _numOrNull = (v) => (v === '' || v == null || isNaN(Number(v))) ? null : Number(v);
+        if ('alto' in body)           { cSets.push('alto = ?');           cArgs.push(_numOrNull(body.alto)); }
+        if ('ancho' in body)          { cSets.push('ancho = ?');          cArgs.push(_numOrNull(body.ancho)); }
+        if ('cm_neon' in body)        { cSets.push('cm_neon = ?');        cArgs.push(_numOrNull(body.cm_neon)); }
+        if ('cantidad' in body)       { cSets.push('cantidad = ?');       cArgs.push(_numOrNull(body.cantidad)); }
+        if ('colores' in body)        { cSets.push('colores = ?');        cArgs.push(String(body.colores || '').trim()); }
+        if ('producto' in body)       { cSets.push('producto = ?');       cArgs.push(String(body.producto || '').trim()); }
+        if ('frente' in body)         { cSets.push('frente = ?');         cArgs.push(String(body.frente || '').trim()); }
+        if ('laterales' in body)      { cSets.push('laterales = ?');      cArgs.push(String(body.laterales || '').trim()); }
+        if ('espalda' in body)        { cSets.push('espalda = ?');        cArgs.push(String(body.espalda || '').trim()); }
+        if ('iluminacion' in body)    { cSets.push('iluminacion = ?');    cArgs.push(String(body.iluminacion || '').trim()); }
+        if ('bastidor' in body)       { cSets.push('bastidor = ?');       cArgs.push(String(body.bastidor || '').trim()); }
+        if ('color_bastidor' in body) { cSets.push('color_bastidor = ?'); cArgs.push(String(body.color_bastidor || '').trim()); }
+        if ('instalacion' in body)    { cSets.push('instalacion = ?');    cArgs.push(String(body.instalacion || '').trim()); }
         if (cSets.length) {
           cSets.push('mirror_dirty = 1', 'mirror_attempts = 0', 'mirror_error = NULL', 'updated_at = ?');
           cArgs.push(now, id);
