@@ -6724,6 +6724,10 @@ const GUIA_PROD_TXT2 = 'Y de paso te mando el enlace del evento en vivo, así no
 async function guiaProduccionOnInbound(env, phone, msgBody) {
   if (!phone) return;
   if ((await kvGet(env, 'guia_produccion_on', '1')) !== '1') return;
+  // Deadline: se desactiva SOLA a la hora del evento (kv guia_produccion_deadline, ISO UTC).
+  // Pedido de Gaspar: apagar a las 19hs AR (= 22:00 UTC). Una vez pasada, no responde más.
+  const _dl = await kvGet(env, 'guia_produccion_deadline', '');
+  if (_dl && Date.now() >= Date.parse(_dl)) return;
   if (!_normTxt(msgBody).includes('quiero guia de produccion')) return;
   // Modo prueba: si hay test_phone seteado, SOLO respondemos a ese número (compara por los últimos 10 dígitos).
   const testPhone = String(await kvGet(env, 'guia_produccion_test_phone', '')).replace(/\D/g, '');
