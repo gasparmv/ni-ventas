@@ -3236,7 +3236,7 @@ REGLAS:
 - Por cada diseño que mandó, extraé nombre, medida (texto tal cual lo dijo), cantidad (cuántas unidades; 1 si no aclara) y aclaraciones, y si adjuntó la foto (mirá las imágenes). completo=true SOLO si tiene medida + nombre + foto. Si pide varias unidades del mismo diseño (ej "5 iguales", "3 bases"), poné esa cantidad.
 - MUY IMPORTANTE: si en la conversación NO hay ninguna imagen adjunta, NO digas que "viste las fotos" ni des por hecho ningún diseño → pedile la foto. tiene_foto=true SOLO si REALMENTE ves una imagen. NO inventes diseños ni medidas que el alumno no dijo.
 - Si a un diseño le falta algún dato, pedí SOLO el que falta, natural y corto.
-- DATOS DE ENVÍO (van al FINAL, NO al principio): al principio del texto puede venir una línea [DATOS DEL CLIENTE (interno): ...] — es interna, NUNCA la menciones. PRIMERO enfocate SOLO en el diseño (medida, nombre, foto). Los datos de envío pedilos DESPUÉS, recién cuando el cliente YA te haya pasado los datos del diseño, y en un mensaje APARTE (separado del pedido del diseño). NUNCA los mezcles con el diseño en el primer mensaje ni los pidas antes de tener el diseño (queda feo y robótico). Si es cliente NUEVO o faltan sus datos de envío, cuando ya tengas el diseño pedile: nombre y apellido, DNI, dirección, provincia, código postal y un número de contacto. Si ya está registrado / ya tenemos sus datos, NO se los pidas. Cuando el cliente TE PASE esos datos, extraélos en datos_cliente (solo los que dio; el resto vacío).
+- DATOS DE ENVÍO (van al FINAL, NO al principio): al principio del texto puede venir una línea [DATOS DEL CLIENTE (interno): ...] — es interna, NUNCA la menciones. PRIMERO enfocate SOLO en el diseño (medida, nombre, foto). Los datos de envío pedilos DESPUÉS, recién cuando el diseño esté 100% COMPLETO (medida + nombre + foto, los TRES), y en un mensaje APARTE (separado del pedido del diseño). Si falta AUNQUE SEA UN dato del diseño, pedí SOLO ese dato del diseño y NADA de envío todavía. NUNCA mezcles los datos de envío con el pedido del diseño en el mismo mensaje ni los pidas antes de que el diseño esté completo (queda feo y robótico). Si es cliente NUEVO o faltan sus datos de envío, cuando ya tengas el diseño pedile: nombre y apellido, DNI, dirección, provincia, código postal y un número de contacto. Si ya está registrado / ya tenemos sus datos, NO se los pidas. Cuando el cliente TE PASE esos datos, extraélos en datos_cliente (solo los que dio; el resto vacío).
 - El alumno puede mandar VARIOS diseños.
 - NUNCA des precio ni cotices (el precio se calcula después con la medida real del diseñador).
 - Solo cortamos TRANSPARENTE (el negro está pausado). Si pide negro, aclaralo.
@@ -3360,7 +3360,7 @@ async function processCortePilot(env) {
     } catch (_) { return; }
     for (const c of cands) {
       const phone = c.phone, lastTs = c.last_ts;
-      const debMs = (testPhone && phone === testPhone) ? 5000 : PRECOTIZ_DEBOUNCE_MS; // en modo prueba, espera corta (5s)
+      const debMs = (testPhone && phone === testPhone) ? 12000 : PRECOTIZ_DEBOUNCE_MS; // en modo prueba, espera 12s (evita saltar entre mensajes)
       if (Date.now() - new Date(lastTs).getTime() < debMs) continue;   // esperar que pare de escribir
       // Anti-pisón: si un humano (Abril/Gaspar) contestó DESPUÉS del último inbound, no se mete; y si un
       // humano contestó RECIÉN (hace <5min), le damos gracia. OJO: la gracia mira lh.t (cuándo contestó el
