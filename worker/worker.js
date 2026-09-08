@@ -15449,10 +15449,59 @@ const handler = {
       }
       // GET /admin/corte/pedidos  →  pedidos de corte (para el tablero). Admin.
       if (request.method === 'GET' && path === '/admin/corte/pedidos') {
-        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        const _cpRole = await getSessionRole(env, session.user);
+        if (!['admin', 'disenador', 'produccion'].includes(_cpRole)) return json({ error: 'forbidden' }, 403);
         let rows = [];
         try { rows = (await env.DB.prepare("SELECT * FROM corte_pedidos ORDER BY updated_at DESC, id DESC LIMIT 500").all()).results || []; } catch (_) {}
-        return json({ ok: true, pedidos: rows });
+        return json({ ok: true, pedidos: rows, role: _cpRole, user: String(session.user || '').toLowerCase() });
+      }
+      // POST /admin/corte/pedido → colas operativas: transición de estado + carga de datos, por rol.
+      // body { id, action, ... }. action: 'medidas' (Emma: ancho_real/alto_real/matriz → matriz_lista + precio),
+      // 'cortado' (Aníbal/produccion), 'embalado' (Neyen/produccion: entrega retira/envio), 'estado' (admin libre).
+      if (request.method === 'POST' && path === '/admin/corte/pedido') {
+        const _role = await getSessionRole(env, session.user);
+        if (!['admin', 'disenador', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const id = parseInt(body.id, 10);
+        if (!id) return json({ error: 'falta id' }, 400);
+        const action = String(body.action || '');
+        const ped = await env.DB.prepare("SELECT * FROM corte_pedidos WHERE id=?").bind(id).first();
+        if (!ped) return json({ error: 'pedido no existe' }, 404);
+        const nowIso = new Date().toISOString();
+        const _slug = String(session.user || '').toLowerCase();
+        try {
+          if (action === 'medidas') {
+            if (!['admin', 'disenador'].includes(_role)) return json({ error: 'solo el diseñador' }, 403);
+            const ancho = parseFloat(String(body.ancho_real != null ? body.ancho_real : '').replace(',', '.')) || 0;
+            const alto = parseFloat(String(body.alto_real != null ? body.alto_real : '').replace(',', '.')) || 0;
+            if (!(ancho > 0 && alto > 0)) return json({ error: 'ancho y alto (cm) requeridos' }, 400);
+            const cant = Math.max(1, parseInt(ped.cantidad, 10) || 1);
+            const precio = (ancho / 100) * (alto / 100) * 175000 * cant; // exacto, sin redondear
+            const matrizKey = String(body.matriz_key != null ? body.matriz_key : (ped.matriz_key || ''));
+            const matrizUrl = String(body.matriz_drive_url != null ? body.matriz_drive_url : (ped.matriz_drive_url || ''));
+            await env.DB.prepare("UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, matriz_key=?, matriz_drive_url=?, estado='matriz_lista', updated_at=? WHERE id=?").bind(ancho, alto, precio, matrizKey, matrizUrl, nowIso, id).run();
+            return json({ ok: true, id, estado: 'matriz_lista', precio });
+          }
+          if (action === 'cortado') {
+            if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
+            await env.DB.prepare("UPDATE corte_pedidos SET estado='cortado', productor=?, updated_at=? WHERE id=?").bind(_slug, nowIso, id).run();
+            return json({ ok: true, id, estado: 'cortado' });
+          }
+          if (action === 'embalado') {
+            if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
+            const entrega = (String(body.entrega || '') === 'envio') ? 'envio' : ((String(body.entrega || '') === 'retira') ? 'retira' : (ped.entrega || ''));
+            await env.DB.prepare("UPDATE corte_pedidos SET estado='embalado', entrega=?, updated_at=? WHERE id=?").bind(entrega, nowIso, id).run();
+            return json({ ok: true, id, estado: 'embalado', entrega });
+          }
+          if (action === 'estado') {
+            if (_role !== 'admin') return json({ error: 'solo admin' }, 403);
+            const est = String(body.estado || '');
+            if (!['pedido', 'matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(est)) return json({ error: 'estado inválido' }, 400);
+            await env.DB.prepare("UPDATE corte_pedidos SET estado=?, updated_at=? WHERE id=?").bind(est, nowIso, id).run();
+            return json({ ok: true, id, estado: est });
+          }
+        } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        return json({ error: 'action desconocida' }, 400);
       }
       // POST /admin/corte/run  →  dispara el bot de corte a mano (diagnóstico). Admin. Devuelve el estado.
       if (request.method === 'POST' && path === '/admin/corte/run') {

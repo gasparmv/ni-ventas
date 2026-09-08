@@ -20,7 +20,7 @@ const OFRECER_BASE_NEGRA = false;
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Diseñador', 'Abril'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Diseñador', 'Abril', 'Aníbal', 'Neyen'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -1028,6 +1028,10 @@ function isDisenadorUser(s) { const k = _userKey(s); return k === 'disenador' ||
 // Abril: usuario de la bandeja de Cursos. Solo ve el Chat WA, y dentro solo los
 // chats derivados a 'cursos'.
 function isCursosUser(s) { const k = _userKey(s); return k === 'abril' || k === 'cursos'; }
+// Aníbal / Neyen (rol produccion del Servicio de Corte). Cada uno ve SOLO su cola.
+function isAnibalUser(s) { return _userKey(s) === 'anibal'; }
+function isNeyenUser(s) { return _userKey(s) === 'neyen'; }
+function isProduccionUser(s) { return isAnibalUser(s) || isNeyenUser(s); }
 // El token cargado pertenece a este usuario? (evita reutilizar token de bajo
 // privilegio para pasar como admin).
 function tokenBelongsTo(name) {
@@ -1122,6 +1126,8 @@ function isAdmin() { return !!STATE.token && isGasparUser(STATE.tokenUser) && is
 function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isFacundoUser(STATE.user) || isCursosUser(STATE.user)); }
 // Abril (rol cursos): SOLO ve la sección Chat WA, nada más.
 function isCursosOnly() { return isCursosUser(STATE.user); }
+// Aníbal / Neyen (rol produccion): SOLO ven la sección Corte (su cola).
+function isProduccionOnly() { return isProduccionUser(STATE.user); }
 function authHeaders() {
   return STATE.token ? { 'Authorization': 'Bearer ' + STATE.token } : {};
 }
@@ -2072,9 +2078,10 @@ function isDisenadorOnly() {
   return getUserRole() === 'disenador';
 }
 function setView(v) {
-  // Diseñador queda confinado a Cotización; Abril (cursos) al Chat WA.
+  // Diseñador confinado a Cotización (+ puede ir a Corte); Abril (cursos) al Chat WA; produccion (Aníbal/Neyen) a Corte.
   if (isCursosOnly()) v = 'chat';
-  else if (isDisenadorOnly()) v = 'cotizacion';
+  else if (isProduccionOnly()) v = 'corte';
+  else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
   STATE.view = v;
   STATE.selected = null;
   location.hash = v;
@@ -2083,7 +2090,8 @@ function setView(v) {
 window.addEventListener('hashchange', () => {
   let h = location.hash.replace('#','') || 'dashboard';
   if (isCursosOnly()) h = 'chat';
-  else if (isDisenadorOnly()) h = 'cotizacion';
+  else if (isProduccionOnly()) h = 'corte';
+  else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
   if (h !== STATE.view) { STATE.view = h; render(); }
 });
 
@@ -2120,7 +2128,10 @@ function render() {
   if (isCursosOnly() && STATE.view !== 'chat') {
     STATE.view = 'chat';
     if (location.hash !== '#chat') location.hash = 'chat';
-  } else if (isDisenadorOnly() && STATE.view !== 'cotizacion') {
+  } else if (isProduccionOnly() && STATE.view !== 'corte') {
+    STATE.view = 'corte';
+    if (location.hash !== '#corte') location.hash = 'corte';
+  } else if (isDisenadorOnly() && !['cotizacion', 'corte'].includes(STATE.view)) {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
@@ -2144,6 +2155,7 @@ function render() {
   // (!STATE.loaded) tapaba el chat con "Conectando con Google Sheets…" y, si el
   // fetch de Sheets se colgaba en un arranque sin caché, la app quedaba trabada.
   if (STATE.view === 'chat') document.getElementById('main').innerHTML = renderChat();
+  else if (STATE.view === 'corte') document.getElementById('main').innerHTML = renderCorte(); // corte carga su propia data (no depende del Sheet ni de /admin/pedidos)
   else if (STATE.error)   document.getElementById('main').innerHTML = renderError();
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
   else {
@@ -2635,9 +2647,101 @@ const CORTE_ESTADOS = [
   ['pedido', '📥 Pedido'], ['matriz_lista', '✏️ Matriz'], ['cortado', '🪚 Cortado'],
   ['embalado', '📦 Embalado'], ['cobrado', '💰 Cobrado'], ['despachado', '🚚 Despachado'], ['entregado', '✅ Entregado']
 ];
+// Cola que trabaja cada usuario NO-admin del corte. null = admin (ve el board completo).
+function corteRolInfo() {
+  if (isAdmin()) return null;
+  if (isAnibalUser(STATE.user)) return { estado: 'matriz_lista', titulo: 'Para cortar', accion: 'cortado' };
+  if (isNeyenUser(STATE.user))  return { estado: 'cortado', titulo: 'Para embalar', accion: 'embalado' };
+  if (isDisenadorUser(STATE.user)) return { estado: 'pedido', titulo: 'Para diseñar / matriz', accion: 'medidas' };
+  return null;
+}
+function cortePrecioPreview(ped) {
+  const a = parseFloat(String((document.getElementById('corte-ancho') || {}).value || '').replace(',', '.')) || 0;
+  const al = parseFloat(String((document.getElementById('corte-alto') || {}).value || '').replace(',', '.')) || 0;
+  const cant = Math.max(1, parseInt(ped.cantidad, 10) || 1);
+  const el = document.getElementById('corte-precio-prev');
+  if (!el) return;
+  if (a > 0 && al > 0) { const precio = (a / 100) * (al / 100) * 175000 * cant; el.textContent = 'Precio: $' + precio.toLocaleString('es-AR') + (cant > 1 ? (' (' + cant + ' u.)') : ''); }
+  else el.textContent = '';
+}
+function corteCardHtml(p, clickable) {
+  return `<div ${clickable ? `data-corte-card="${p.id}" style="cursor:pointer"` : ''} style="font-size:12px;padding:7px;border:1px solid var(--border);border-radius:5px;margin-bottom:5px;background:var(--ink-100)">
+    <b>${escapeHtml(p.cliente_nombre || '')}</b><br>
+    <span style="color:var(--fg-mute)">${escapeHtml(p.diseno_nombre || '')}${p.medida_declarada ? ' · ' + escapeHtml(p.medida_declarada) : ''}</span>
+    ${p.precio ? `<br><span style="color:#22c55e;font-weight:700">$${Number(p.precio).toLocaleString('es-AR')}</span>` : ''}
+  </div>`;
+}
+// Detalle de un pedido con la acción según rol/estado.
+function corteDetalleHtml(p) {
+  const admin = isAdmin();
+  const cant = Math.max(1, parseInt(p.cantidad, 10) || 1);
+  const foto = p.foto_key ? `<a href="${mediaUrl(p.foto_key)}" target="_blank" rel="noopener"><img src="${mediaUrl(p.foto_key)}" style="max-width:220px;max-height:220px;border-radius:8px;border:1px solid var(--border)" loading="lazy"></a>` : '<span style="color:var(--fg-mute);font-size:12px">sin foto del diseño</span>';
+  let acciones = '';
+  if (p.estado === 'pedido' && (admin || isDisenadorUser(STATE.user))) {
+    acciones = `
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+        <div style="font-size:12px;font-weight:700;margin-bottom:8px">Cargar medidas reales (cm) → matriz lista</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input id="corte-ancho" placeholder="ancho" inputmode="decimal" style="width:82px;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg)">
+          <span style="color:var(--fg-mute)">×</span>
+          <input id="corte-alto" placeholder="alto" inputmode="decimal" style="width:82px;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg)">
+          <span id="corte-precio-prev" style="font-size:12px;color:#22c55e;font-weight:700"></span>
+        </div>
+        <input id="corte-matriz-url" placeholder="link de la matriz en Drive (opcional)" style="width:100%;box-sizing:border-box;margin-top:8px;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg);font-size:12px">
+        <button class="btn" data-corte-accion="medidas" data-ped="${p.id}" style="margin-top:10px">Marcar matriz lista</button>
+      </div>`;
+  } else if (p.estado === 'matriz_lista' && (admin || isAnibalUser(STATE.user))) {
+    acciones = `<button class="btn" data-corte-accion="cortado" data-ped="${p.id}" style="margin-top:12px">🪚 Marcar cortado</button>`;
+  } else if (p.estado === 'cortado' && (admin || isNeyenUser(STATE.user))) {
+    acciones = `
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+        <div style="font-size:12px;font-weight:700;margin-bottom:8px">Embalar → cómo se entrega</div>
+        <label style="margin-right:16px;cursor:pointer"><input type="radio" name="corte-entrega" value="retira" checked> Retira por el taller</label>
+        <label style="cursor:pointer"><input type="radio" name="corte-entrega" value="envio"> Envío al interior</label>
+        <button class="btn" data-corte-accion="embalado" data-ped="${p.id}" style="margin-top:10px;display:block">📦 Marcar embalado</button>
+      </div>`;
+  }
+  const adminEstado = admin ? `
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+      <span style="font-size:11px;color:var(--fg-subtle)">Mover a mano (admin):</span>
+      <select id="corte-estado-manual" style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--fg);margin-left:6px">
+        ${CORTE_ESTADOS.map(([k, l]) => `<option value="${k}" ${p.estado === k ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+      <button class="btn ghost" data-corte-accion="estado" data-ped="${p.id}" style="margin-left:6px">Mover</button>
+    </div>` : '';
+  return `
+    <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:16px;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+        <div>
+          <div style="font-size:16px;font-weight:700">${escapeHtml(p.cliente_nombre || '')} — ${escapeHtml(p.diseno_nombre || 'diseño')}</div>
+          <div style="font-size:13px;color:var(--fg-mute);margin-top:2px">Medida declarada: ${escapeHtml(p.medida_declarada || '—')} · Cantidad: ${cant}${p.aclaraciones ? ' · ' + escapeHtml(p.aclaraciones) : ''}</div>
+          ${p.precio ? `<div style="font-size:13px;color:#22c55e;font-weight:700;margin-top:4px">Precio: $${Number(p.precio).toLocaleString('es-AR')}${p.ancho_real ? ` (${p.ancho_real}×${p.alto_real}cm real)` : ''}</div>` : ''}
+          ${p.entrega ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:2px">Entrega: ${p.entrega === 'envio' ? 'envío al interior' : 'retira'}</div>` : ''}
+        </div>
+        <button class="btn ghost" data-corte-cerrar style="flex:0 0 auto">✕</button>
+      </div>
+      <div style="margin-top:10px">${foto}</div>
+      ${acciones}
+      ${adminEstado}
+    </div>`;
+}
 function renderCorte() {
-  const all = STATE.corteAlumnos;               // undefined = cargando
   const pedidos = STATE.cortePedidos || [];
+  const info = corteRolInfo();
+  const sel = STATE.corteSelected ? pedidos.find(p => p.id === STATE.corteSelected) : null;
+  // --- Vista CONFINADA (Emma / Aníbal / Neyen): solo su cola ---
+  if (info) {
+    const cola = pedidos.filter(p => p.estado === info.estado);
+    return `
+      <div style="padding:var(--s-4);max-width:760px">
+        <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — ${info.titulo}</h1>
+        <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">${cola.length} pedido${cola.length === 1 ? '' : 's'} en tu cola${STATE.cortePedidos === undefined ? ' · cargando…' : ''}</p>
+        ${sel && sel.estado === info.estado ? corteDetalleHtml(sel) : ''}
+        ${cola.length ? cola.map(p => corteCardHtml(p, true)).join('') : (STATE.cortePedidos === undefined ? '' : '<div style="padding:26px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px">No hay pedidos en tu cola por ahora ✨</div>')}
+      </div>`;
+  }
+  // --- Vista ADMIN (Gaspar): board completo + detalle + alumnos ---
+  const all = STATE.corteAlumnos;
   const q = (STATE.corteQuery || '').trim().toLowerCase();
   const alumnos = all === undefined ? undefined : (q
     ? all.filter(a => String(a.nombre || '').toLowerCase().includes(q) || String(a.telefono || '').includes(q.replace(/\D/g, '')))
@@ -2647,16 +2751,16 @@ function renderCorte() {
     <div style="padding:var(--s-4);max-width:1100px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
         <h1 style="margin:0;font-size:20px">✂ Servicio de corte</h1>
-        <span style="font-size:11px;background:rgba(124,58,237,.14);color:#7c3aed;padding:2px 8px;border-radius:10px;font-weight:700">Etapa 1 · en construcción</span>
+        <span style="font-size:11px;background:rgba(124,58,237,.14);color:#7c3aed;padding:2px 8px;border-radius:10px;font-weight:700">Etapa 1 · operativo</span>
       </div>
-      <p style="color:var(--fg-mute);font-size:13px;margin:0 0 18px">Corte de bases acrílicas para alumnos. Por ahora se ve la base: alumnos + el tablero de pedidos (el bot de intake llega en la próxima etapa).</p>
-
+      <p style="color:var(--fg-mute);font-size:13px;margin:0 0 18px">Tocá un pedido para ver el detalle y moverlo de etapa. Emma carga medidas → Aníbal corta → Neyen embala.</p>
+      ${sel ? corteDetalleHtml(sel) : ''}
       <div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin-bottom:8px">Tablero de pedidos <span style="text-transform:none;color:var(--fg-mute)">· ${pedidos.length} en curso</span></div>
       <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:12px;margin-bottom:22px">
         ${CORTE_ESTADOS.map(([k, lbl]) => { const it = pedidos.filter(p => p.estado === k); return `
-          <div style="flex:0 0 170px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;min-height:70px">
+          <div style="flex:0 0 175px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;min-height:70px">
             <div style="font-size:11px;font-weight:700;margin-bottom:6px">${lbl} <span style="color:var(--fg-mute)">${it.length}</span></div>
-            ${it.length ? it.map(p => `<div style="font-size:12px;padding:6px;border:1px solid var(--border);border-radius:4px;margin-bottom:4px"><b>${escapeHtml(p.cliente_nombre || '')}</b><br><span style="color:var(--fg-mute)">${escapeHtml(p.diseno_nombre || '')}</span></div>`).join('') : `<div style="font-size:11px;color:var(--fg-subtle);padding:4px 2px">—</div>`}
+            ${it.length ? it.map(p => corteCardHtml(p, true)).join('') : `<div style="font-size:11px;color:var(--fg-subtle);padding:4px 2px">—</div>`}
           </div>`; }).join('')}
       </div>
 
@@ -2681,16 +2785,16 @@ function renderCorte() {
     </div>`;
 }
 async function bindCorte() {
-  if (STATE.corteAlumnos === undefined && !STATE._corteLoading) {
+  const admin = isAdmin();
+  if (STATE.cortePedidos === undefined && !STATE._corteLoading) {
     STATE._corteLoading = true;
     try {
-      const [ra, rp] = await Promise.all([
-        fetch(CONFIG.trackerUrl + '/admin/corte/alumnos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})),
-        fetch(CONFIG.trackerUrl + '/admin/corte/pedidos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({}))
-      ]);
-      STATE.corteAlumnos = (ra && ra.alumnos) || [];
-      STATE.cortePedidos = (rp && rp.pedidos) || [];
-    } catch (_) { STATE.corteAlumnos = STATE.corteAlumnos || []; }
+      const proms = [fetch(CONFIG.trackerUrl + '/admin/corte/pedidos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({}))];
+      if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/alumnos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
+      const res = await Promise.all(proms);
+      STATE.cortePedidos = (res[0] && res[0].pedidos) || [];
+      STATE.corteAlumnos = admin ? ((res[1] && res[1].alumnos) || []) : [];
+    } catch (_) { STATE.cortePedidos = STATE.cortePedidos || []; STATE.corteAlumnos = STATE.corteAlumnos || []; }
     STATE._corteLoading = false;
     render();
     return;
@@ -2705,6 +2809,29 @@ async function bindCorte() {
       if (nq) { nq.focus(); const L = (STATE.corteQuery || '').length; try { nq.setSelectionRange(L, L); } catch (_) {} }
     };
   }
+  document.querySelectorAll('[data-corte-card]').forEach(el => { el.onclick = () => { STATE.corteSelected = parseInt(el.getAttribute('data-corte-card'), 10); render(); }; });
+  const cerrar = document.querySelector('[data-corte-cerrar]'); if (cerrar) cerrar.onclick = () => { STATE.corteSelected = null; render(); };
+  const ai = document.getElementById('corte-ancho'), ali = document.getElementById('corte-alto');
+  if (ai || ali) { const sel = (STATE.cortePedidos || []).find(p => p.id === STATE.corteSelected); if (sel) { const upd = () => cortePrecioPreview(sel); if (ai) ai.oninput = upd; if (ali) ali.oninput = upd; } }
+  document.querySelectorAll('[data-corte-accion]').forEach(btn => { btn.onclick = () => corteAccion(btn.getAttribute('data-corte-accion'), parseInt(btn.getAttribute('data-ped'), 10)); });
+}
+async function corteAccion(accion, id) {
+  const body = { id, action: accion };
+  if (accion === 'medidas') {
+    const a = document.getElementById('corte-ancho'), al = document.getElementById('corte-alto'), mu = document.getElementById('corte-matriz-url');
+    body.ancho_real = a ? a.value : ''; body.alto_real = al ? al.value : ''; if (mu && mu.value.trim()) body.matriz_drive_url = mu.value.trim();
+    if (!(parseFloat(String(body.ancho_real).replace(',', '.')) > 0 && parseFloat(String(body.alto_real).replace(',', '.')) > 0)) { toast('Cargá ancho y alto (cm)'); return; }
+  }
+  if (accion === 'embalado') { const r = document.querySelector('input[name="corte-entrega"]:checked'); body.entrega = r ? r.value : 'retira'; }
+  if (accion === 'estado') { const s = document.getElementById('corte-estado-manual'); body.estado = s ? s.value : ''; }
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/pedido', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(x => x.json());
+    if (r && r.ok) {
+      toast(accion === 'medidas' ? ('Matriz lista · $' + Number(r.precio || 0).toLocaleString('es-AR')) : 'Listo ✓');
+      STATE.corteSelected = null; STATE.cortePedidos = undefined; STATE._corteLoading = false;
+      render();
+    } else { toast((r && r.error) || 'No se pudo'); }
+  } catch (_) { toast('Error de red'); }
 }
 function renderShell() {
   // Counts for badges
@@ -2739,8 +2866,11 @@ function renderShell() {
           <button class="nav-item active" data-view="chat"><span class="icon">✉</span> Chat WA
             <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '')}</span>
           </button>
+        ` : isProduccionOnly() ? `
+          <button class="nav-item active" data-view="corte"><span class="icon">✂</span> Corte</button>
         ` : isDisenadorOnly() ? `
-          <button class="nav-item active" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
+          <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
+          <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
         ` : `
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
