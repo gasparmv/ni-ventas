@@ -5255,7 +5255,7 @@ function pedidoModalTotal() {
 }
 function openCargarPedidoModal() {
   if (!canCotizar()) return;
-  STATE.pedidoModal = { numero: suggestProximoNumero(), plataforma:'WPP', telefono:'', estadoPago:'1er pago', pagado:'', ad:'', carteles:[nuevoCartelPedido()] };
+  STATE.pedidoModal = { numero: suggestProximoNumero(), plataforma:'WPP', telefono:'', estadoPago:'1er pago', pagado:'', ad:'', sourceId:'', carteles:[nuevoCartelPedido()] };
   STATE.pedidoModalOpen = true;
   STATE.pedidoModalSaving = false;
   render();
@@ -5309,7 +5309,7 @@ function parseOcToPedido(body, phone, channel, igId) {
   const contacto = plataforma === 'IG'
     ? String(igId || phone || '')
     : (phone ? String(phone) : '');
-  return { numero, plataforma, telefono: contacto, estadoPago: '1er pago', pagado: senaN ? String(senaN) : '', ad: '', carteles };
+  return { numero, plataforma, telefono: contacto, estadoPago: '1er pago', pagado: senaN ? String(senaN) : '', ad: '', sourceId: '', carteles };
 }
 // Trae el brief del cliente por NOMBRE del diseño/cartel. Es la vía que funciona SIEMPRE
 // (incl. pedidos por Instagram, que no tienen teléfono WA, y briefs sin cliente_wa_id): el
@@ -5429,10 +5429,19 @@ async function pmTraceAd() {
     const j = await r.json();
     const a = j.attribution;
     if (!a) return;
-    const plat = ((a.source_url||'').includes('instagram') || (a.media_type||'').toLowerCase().includes('instagram')) ? 'IG ad' : 'FB ad';
-    const det = a.headline || (a.body ? a.body.slice(0,60) : '') || a.source_id || '';
-    const txt = det ? `${plat}: ${det}` : plat;
-    adEl.value = txt; m.ad = txt;
+    // El server ya resuelve el label de vertical (adLabelFromSource) + el source_id (ad_id de Meta)
+    // de la última atribución CON ad_id. Si vino source_id real Y su label, usamos ESO: el campo
+    // queda con el vertical ("Corpóreas (corporeas)"/"Carteles B2C (b2c)") y guardamos el ad_id para
+    // mandarlo al guardar → el pedido nace trazado. Si NO vino source_id (o ad_label='' de cursos),
+    // caemos al texto legible y dejamos m.sourceId='' → la red de seguridad del server lo re-traza.
+    if (j.source_id && j.ad_label) {
+      adEl.value = j.ad_label; m.ad = j.ad_label; m.sourceId = String(j.source_id);
+    } else {
+      const plat = ((a.source_url||'').includes('instagram') || (a.media_type||'').toLowerCase().includes('instagram')) ? 'IG ad' : 'FB ad';
+      const det = a.headline || (a.body ? a.body.slice(0,60) : '') || a.source_id || '';
+      const txt = det ? `${plat}: ${det}` : plat;
+      adEl.value = txt; m.ad = txt; m.sourceId = '';
+    }
     adEl.style.borderColor = '#25D366';
     setTimeout(() => { adEl.style.borderColor = 'var(--border)'; }, 1600);
   } catch (e) {}
@@ -5727,6 +5736,10 @@ function bindPedidoModal() {
   // Toggle Cartel/Corpóreo: cambia el layout del bloque (carga directa de corpóreos sin OC).
   document.querySelectorAll('[data-pm-esc]').forEach(b => b.onclick = () => { const p = b.dataset.pmEsc.split('|'); readPedidoModalDOM(); STATE.pedidoModal.carteles[parseInt(p[0], 10)].es_corporeo = (p[1] === '1') ? 1 : 0; render(); });
   const tel = document.getElementById('pm-telefono'); if (tel) tel.addEventListener('blur', pmTraceAd);
+  // Si el usuario edita el campo Ad a mano (ej. corrige el auto-trazado a "Frecuente"/"Directo"),
+  // invalidamos el ad_id capturado: sin esto el pedido se guardaría con el texto manual PERO con el
+  // source_id del ad viejo pegado, y el funnel prioriza el source_id → contaría mal esa venta.
+  const adI = document.getElementById('pm-ad'); if (adI) adI.addEventListener('input', () => { const m = STATE.pedidoModal; if (m) m.sourceId = ''; });
   const cf = document.getElementById('pm-confirm'); if (cf) cf.onclick = confirmCargarPedido;
   // Validación en vivo: una vez que se intentó "Crear pedido", re-marcar en rojo lo que
   // falte tras cada re-render (agregar color/cartel, etc.) y limpiarlo apenas se completa.
@@ -5803,6 +5816,9 @@ async function confirmCargarPedido() {
       // UTC, que de noche en ART ya es el día siguiente → el pedido quedaba fechado un día después.
       fecha: localDateKey(new Date()),
       plataforma: m.plataforma, telefono: m.telefono, estado_pago: m.estadoPago, pagado: m.pagado, ad: m.ad,
+      // ad_id de Meta capturado por pmTraceAd (vacío si se cargó a mano o no vino de un ad). El worker
+      // lo persiste en pedidos.source_id → el pedido nace trazado en el funnel.
+      source_id: m.sourceId || '',
       carteles: carteles.map(c => ({
         cartel: c.cartel, colores: c.colores, tipo: c.tipo, alto: c.alto, ancho: c.ancho, cm_neon: c.cmNeon,
         tramos: c.tramos, base: c.base, cantidad: c.cantidad, precio: c.precio, dimer: c.dimer, precio_dimmer: c.precioDimmer,
