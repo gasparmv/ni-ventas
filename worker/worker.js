@@ -6772,6 +6772,26 @@ async function guiaProduccionOnInbound(env, phone, msgBody) {
   try { await env.DB.prepare("UPDATE wa_autoreply_log SET status='sent', sent_at=? WHERE phone=? AND kind='guia_produccion'").bind(new Date().toISOString(), phone).run(); } catch (_) {}
 }
 
+// Oculta la conversación de la guía APENAS se detecta el trigger, como PRIMERA acción del
+// inbound — antes de todos los hooks lentos y del getPromoMediaId (llamada a Meta). Sin esto,
+// la libreta wa_chats_summary queda expuesta como 'general' en toda esa ventana; durante el
+// flood del evento el poll de /chats-summary la agarra mid-race y la cachea 5s → el chat
+// aparece en la bandeja del admin aunque termine oculto. El chequeo de texto es barato (solo
+// los mensajes-trigger tocan la DB). Guard: no pisa cursos/privado/corte ni chats con un
+// humano ya respondiendo (outbound automated=0). Idempotente; el hide de guiaProduccionOnInbound
+// queda como backstop.
+async function guiaProduccionHideFast(env, phone, msgBody) {
+  try {
+    if (!phone || !_normTxt(msgBody).includes('quiero guia de produccion')) return;
+    if ((await kvGet(env, 'guia_produccion_on', '1')) !== '1') return;
+    const _dl = await kvGet(env, 'guia_produccion_deadline', '');
+    if (_dl && Date.now() >= Date.parse(_dl)) return;
+    await env.DB.prepare(
+      "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox='oculto', updated_at=excluded.updated_at WHERE wa_chats_summary.inbox NOT IN ('oculto','cursos','privado','corte') AND NOT EXISTS (SELECT 1 FROM wa_messages h WHERE h.phone = wa_chats_summary.phone AND h.direction='outbound' AND h.automated=0 AND h.msg_type <> 'status')"
+    ).bind(phone, new Date().toISOString()).run();
+  } catch (_) {}
+}
+
 // Al terminar el evento: reporte a Gaspar + Bruno con la cantidad de guías enviadas.
 // Gate por kv 'guia_produccion_reporte_at' (ISO UTC; Gaspar pidió DESPUÉS de las 19hs AR).
 // Dedup POR NÚMERO (kv 'guia_reporte_sent' = lista de teléfonos ya entregados): reintenta en
@@ -10475,6 +10495,10 @@ const handler = {
                 // escribe, significa que NO está muerto. Lo desmarcamos para que
                 // los flows automáticos vuelvan a considerarlo.
                 if (direction === 'inbound' && phone) {
+                  // Guía de Producción: ocultar YA, antes de cualquier otro hook, para cerrar la
+                  // ventana de carrera que exponía el chat como 'general' en la libreta durante el
+                  // flood del evento (ensuciaba la bandeja del admin ~5s por lote por el cache).
+                  try { await guiaProduccionHideFast(env, phone, msgBody); } catch (_) {}
                   try { await removeUnreachable(env, phone); } catch (_) {}
                 }
                 // ===== Auto-respuesta del minicurso (regalos) =====
@@ -10593,7 +10617,11 @@ const handler = {
                     const _vert = await adVerticalForSource(env, ref.source_id, String(ref.headline || ''), String(ref.body || ''));
                     // Si es lead de cursos y el flujo automatico esta activo, el flujo
                     // maneja la bandeja (oculto durante el opener). No ruteamos aca.
-                    if (!(_vert === 'cursos' && await cursosFlowOn(env))) {
+                    // Tampoco ruteamos si es el trigger de la Guía de Producción: esa automatización
+                    // ya ocultó el chat (guiaProduccionHideFast) y este INSERT lo pisaría de vuelta a
+                    // 'general'/'cursos' (su WHERE incluye inbox='oculto') → volvería a ensuciar la bandeja.
+                    const _esGuiaTrigger = _normTxt(msgBody).includes('quiero guia de produccion');
+                    if (!_esGuiaTrigger && !(_vert === 'cursos' && await cursosFlowOn(env))) {
                       await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox = 'oculto'").bind(phone, _vert === 'cursos' ? 'cursos' : 'general', ts).run();
                     }
                     // Corpóreo (ads Corporeas 1/2): etiqueta para atención manual (bot de neón excluido).
