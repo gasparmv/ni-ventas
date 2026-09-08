@@ -6712,6 +6712,53 @@ async function processResendEventoLink(env) {
   if (only) await kvSet(env, 'resend_evento_link_on', '0'); // lista puntual = una sola pasada, se apaga sola
 }
 
+// Auto-respuesta "Guía de Producción" (evento ON LED): cuando mandan el mensaje pre-armado
+// ("Quiero GUÍA DE PRODUCCIÓN, por favor!") se les responde en 3 partes: (1) texto intro, (2) el
+// PDF de la guía (adjunto), (3) texto + link del evento en vivo. UNA vez por contacto (dedup
+// wa_autoreply_log kind='guia_produccion'). Gate kv guia_produccion_on (default ON). Modo prueba:
+// kv guia_produccion_test_phone → si está seteado, SOLO responde a ese número (para testear).
+const GUIA_PROD_R2_KEY = 'promo/guia-produccion.pdf';
+const GUIA_PROD_FILENAME = 'Guia de Produccion - Neon Infinito.pdf';
+const GUIA_PROD_TXT1 = 'Perfecto, te dejo la Guía de Producción de 9 pasos, para que repases antes del evento de hoy:';
+const GUIA_PROD_TXT2 = 'Y de paso te mando el enlace del evento en vivo, así nos vemos ahí 19:00 hs!! 👇🏼\nhttps://youtube.com/live/DiCBnZvysz8?feature=share';
+async function guiaProduccionOnInbound(env, phone, msgBody) {
+  if (!phone) return;
+  if ((await kvGet(env, 'guia_produccion_on', '1')) !== '1') return;
+  if (!_normTxt(msgBody).includes('quiero guia de produccion')) return;
+  // Modo prueba: si hay test_phone seteado, SOLO respondemos a ese número (compara por los últimos 10 dígitos).
+  const testPhone = String(await kvGet(env, 'guia_produccion_test_phone', '')).replace(/\D/g, '');
+  if (testPhone && !String(phone).replace(/\D/g, '').endsWith(testPhone.slice(-10))) return;
+  let reserva;
+  try {
+    reserva = await env.DB.prepare(
+      "INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, 'guia_produccion', '', 'sending', '', '')"
+    ).bind(phone).run();
+  } catch (_) { return; }
+  if (!reserva?.meta?.changes) return; // ya se le mandó → no duplicar
+  // Preparar el PDF (subir a Meta / cache) ANTES de mandar nada: si falla, liberamos la reserva y
+  // reintentamos en el próximo inbound (no dejamos un envío a medias, sin la guía).
+  let mediaId = null;
+  try { mediaId = await getPromoMediaId(env, GUIA_PROD_R2_KEY); } catch (_) {}
+  if (!mediaId) {
+    try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'guia_produccion'").bind(phone).run(); } catch (_) {}
+    return;
+  }
+  const logMsg = async (wamid, type, bodyTxt, mediaKey) => {
+    try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, automated) VALUES (?, ?, 'outbound', ?, '', ?, ?, ?, '', 'sent', 1)").bind(new Date().toISOString(), wamid || ('guia-' + phone + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)), phone, type, bodyTxt, mediaKey || '').run(); } catch (_) {}
+  };
+  try {
+    const r1 = await waSendText(env, phone, GUIA_PROD_TXT1);
+    if (r1 && r1.ok) await logMsg(r1.id, 'text', GUIA_PROD_TXT1, '');
+    await new Promise(r => setTimeout(r, 700));
+    const rd = await waSendDocument(env, phone, mediaId, GUIA_PROD_FILENAME, '');
+    if (rd && rd.ok) await logMsg(rd.id, 'document', '[documento] ' + GUIA_PROD_FILENAME, GUIA_PROD_R2_KEY);
+    await new Promise(r => setTimeout(r, 700));
+    const r3 = await waSendText(env, phone, GUIA_PROD_TXT2);
+    if (r3 && r3.ok) await logMsg(r3.id, 'text', GUIA_PROD_TXT2, '');
+  } catch (_) {}
+  try { await env.DB.prepare("UPDATE wa_autoreply_log SET status='sent', sent_at=? WHERE phone=? AND kind='guia_produccion'").bind(new Date().toISOString(), phone).run(); } catch (_) {}
+}
+
 // Auto-respuesta a los leads de CORPÓREO: cuando mandan el mensaje canned del ad
 // ("Hola! Quiero cotizar un cartel corporeo") les pedimos los 3 datos (foto, medidas,
 // int/ext) — lo mismo que releva el bot de neón — pero como texto fijo. El corpóreo se
@@ -10526,6 +10573,8 @@ const handler = {
                   // Auto-respuesta a leads de corpóreo (mensaje del ad Corporeas): saluda (Facu/Joaco según
                   // asignación) + pide foto+medidas+int/ext.
                   try { await corporeoAskOnInbound(env, phone, msgBody); } catch (_) {}
+                  // Auto-respuesta "Guía de Producción" (evento ON LED): mensaje pre-armado → intro + PDF + link.
+                  try { await guiaProduccionOnInbound(env, phone, msgBody); } catch (_) {}
                   // CAPI: un lead B2B que responde = señal de calidad -> "QualifiedLead" a Meta.
                   try { await maybeCapiQualifiedLead(env, phone); } catch (_) {}
                 }
