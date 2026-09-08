@@ -986,10 +986,11 @@ async function traceUntaggedPedidos(env, opts = {}) {
   return { n, scanned };
 }
 // Backfill del ad_id EXACTO en pedidos YA trazados (tienen label de ad pero no source_id).
-// SEGURO: solo re-traza los que tienen un label de vertical de ad (b2c/b2b/retargeting/corpóreas);
-// a los marcados a mano por Gaspar (directo/frecuente/referido/link bio/REVISAR) NO les pone
-// source_id (respeta su juicio de que NO vienen de un ad) y los marca con '' para no reprocesar.
-// NUNCA cambia el label. Batched (LIMIT). Devuelve {done, withsrc}.
+// SEGURO: re-traza los que tienen un label de vertical de ad (b2c/b2b/retargeting/corpóreas) o el
+// label genérico del front ("IG ad: ..."/"FB ad: ..."); a los marcados a mano por Gaspar
+// (directo/frecuente/referido/link bio/REVISAR) NO les pone source_id (respeta su juicio de que NO
+// vienen de un ad) y los marca con '' para no reprocesar. Al label genérico (que descartó el ad_id)
+// además le corrige el texto al label real de vertical. Batched (LIMIT). Devuelve {done, withsrc}.
 async function backfillPedidoSources(env, limit = 60) {
   let done = 0, withsrc = 0;
   try {
@@ -997,13 +998,20 @@ async function backfillPedidoSources(env, limit = 60) {
     for (const p of (rows.results || [])) {
       const adl = String(p.ad || '').toLowerCase();
       const esVerticalAd = adl.indexOf('(b2c') >= 0 || adl.indexOf('(b2b') >= 0 || adl.indexOf('(retarget') >= 0 || adl.indexOf('(corporea') >= 0;
+      // Label genérico del front: trae el nombre del ad pero DESCARTÓ el ad_id → hay que trazarlo.
+      const esGenericoAd = adl.indexOf('ig ad') === 0 || adl.indexOf('fb ad') === 0;
       const esOrganico = adl.indexOf('revisar') === 0 || adl.indexOf('frecuente') >= 0 || adl.indexOf('referido') >= 0 || adl.indexOf('directo') >= 0 || adl.indexOf('link bio') >= 0;
-      let sid = '', scamp = '';
-      if (esVerticalAd && !esOrganico) {
+      let sid = '', scamp = '', newAd = null;
+      if ((esVerticalAd || esGenericoAd) && !esOrganico) {
         const t = await traceAdForPedido(env, p);
         sid = t.source_id || ''; scamp = t.source_campaign || '';
+        if (esGenericoAd && t.ad) newAd = t.ad; // corrige el label genérico al vertical real
       }
-      await env.DB.prepare("UPDATE pedidos SET source_id=?, source_campaign=? WHERE id=?").bind(sid, scamp, p.id).run();
+      if (newAd) {
+        await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, mirror_dirty=CASE WHEN es_corporeo=1 THEN 0 ELSE 1 END WHERE id=?").bind(newAd, sid, scamp, p.id).run();
+      } else {
+        await env.DB.prepare("UPDATE pedidos SET source_id=?, source_campaign=? WHERE id=?").bind(sid, scamp, p.id).run();
+      }
       if (sid) withsrc++;
       done++;
     }
@@ -3343,6 +3351,68 @@ function corteCobroMsg(g) {
   const lineas = (g.piezas || []).map(p => '- ' + (p.diseno || 'diseño') + (p.medida ? ' (' + p.medida + ')' : '') + ((parseInt(p.cantidad, 10) || 1) > 1 ? ' x' + p.cantidad : '') + ': $' + Number(p.precio || 0).toLocaleString('es-AR')).join('\n');
   return (nombre ? 'Hola ' + nombre + ', ' : 'Hola, ') + 'te paso el detalle de tu corte de esta semana:\n' + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR') + '\n\nPara confirmarlo transferí a ' + CORTE_ALIAS + ' (' + CORTE_TITULAR + ') y mandame el comprobante por acá.';
 }
+// ===== Google Drive (cuenta de servicio) — respaldo de archivos del corte =====
+const DRIVE_FOLDER_MATRICES = '1B9APyJdXQa5M9BxZ32Ct7jq8EEudNID_'; // matrices (sube Emma)
+const DRIVE_FOLDER_ANIBAL = '1PohYYIec4pidCjJt42lzfod4vUWkjAsj';   // placas anidadas (sube Aníbal)
+function _b64url(buf) { let s = ''; const b = new Uint8Array(buf); for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function _b64urlStr(str) { return btoa(unescape(encodeURIComponent(str))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function _pemToArrayBuffer(pem) {
+  const b64 = String(pem).replace(/-----BEGIN [^-]+-----/, '').replace(/-----END [^-]+-----/, '').replace(/\s+/g, '');
+  const bin = atob(b64); const buf = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i); return buf.buffer;
+}
+// Token OAuth de la cuenta de servicio (JWT RS256 → access_token). Cacheado ~55min en kv_cache.
+async function driveAccessToken(env) {
+  if (!env.GOOGLE_SA_KEY) return null;
+  try { const c = await env.DB.prepare("SELECT v, updated_at FROM kv_cache WHERE k='drive_token'").first(); if (c && c.v && c.updated_at && (Date.now() - new Date(c.updated_at).getTime()) < 55 * 60 * 1000) return c.v; } catch (_) {}
+  let sa; try { sa = JSON.parse(env.GOOGLE_SA_KEY); } catch (_) { return null; }
+  const now = Math.floor(Date.now() / 1000);
+  const unsigned = _b64urlStr(JSON.stringify({ alg: 'RS256', typ: 'JWT' })) + '.' + _b64urlStr(JSON.stringify({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/drive', aud: 'https://oauth2.googleapis.com/token', exp: now + 3600, iat: now }));
+  try {
+    const key = await crypto.subtle.importKey('pkcs8', _pemToArrayBuffer(sa.private_key), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(unsigned));
+    const jwt = unsigned + '.' + _b64url(sig);
+    const r = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=' + jwt });
+    const j = await r.json().catch(() => ({}));
+    const token = j.access_token || null;
+    if (token) { try { await env.DB.prepare("INSERT INTO kv_cache (k,v,updated_at) VALUES ('drive_token',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(token, new Date().toISOString()).run(); } catch (_) {} }
+    return token;
+  } catch (_) { return null; }
+}
+// Sube bytes a una carpeta de Drive (multipart). bytes = ArrayBuffer/Uint8Array. Devuelve {ok,id,link}.
+async function driveUploadFile(env, folderId, name, mime, bytes) {
+  const token = await driveAccessToken(env);
+  if (!token) return { ok: false, error: 'sin token drive' };
+  const boundary = 'nifb' + Math.random().toString(36).slice(2);
+  const enc = new TextEncoder();
+  const pre = enc.encode('--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify({ name, parents: [folderId] }) + '\r\n--' + boundary + '\r\nContent-Type: ' + (mime || 'application/octet-stream') + '\r\n\r\n');
+  const post = enc.encode('\r\n--' + boundary + '--');
+  const b = new Uint8Array(bytes);
+  const body = new Uint8Array(pre.length + b.length + post.length);
+  body.set(pre, 0); body.set(b, pre.length); body.set(post, pre.length + b.length);
+  try {
+    const r = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,webViewLink', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'multipart/related; boundary=' + boundary }, body });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return { ok: false, error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+    return { ok: true, id: j.id, link: j.webViewLink };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+}
+function corteIsoSemana(d) {
+  const dt = new Date(d.getTime()); dt.setUTCHours(0, 0, 0, 0);
+  dt.setUTCDate(dt.getUTCDate() + 4 - (dt.getUTCDay() || 7));
+  const yStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
+  const wk = Math.ceil((((dt - yStart) / 86400000) + 1) / 7);
+  return dt.getUTCFullYear() + '-W' + String(wk).padStart(2, '0');
+}
+// Tanda de corte de la semana actual (AR). La crea si no existe. Una por semana ISO.
+async function corteTandaActual(env) {
+  const sem = corteIsoSemana(new Date(Date.now() - 3 * 3600 * 1000));
+  const nowIso = new Date().toISOString();
+  try {
+    let t = await env.DB.prepare("SELECT * FROM corte_tandas WHERE semana=? LIMIT 1").bind(sem).first();
+    if (!t) { await env.DB.prepare("INSERT INTO corte_tandas (semana, estado, created_at, updated_at) VALUES (?, 'abierta', ?, ?)").bind(sem, nowIso, nowIso).run(); t = await env.DB.prepare("SELECT * FROM corte_tandas WHERE semana=? LIMIT 1").bind(sem).first(); }
+    return t;
+  } catch (_) { return null; }
+}
 async function processCortePilot(env) {
   try {
     if (!(await corteBotOn(env))) return;
@@ -3487,6 +3557,7 @@ async function processCortePilot(env) {
       }
       // Es corte y claro → crear los diseños completos + pedir lo que falta.
       const alumno = await env.DB.prepare("SELECT id, nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
+      const _tanda = await corteTandaActual(env); // los pedidos entran en la tanda de la semana
       let fotoKey = '';
       try { const fr = await env.DB.prepare("SELECT media_url FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type='image' AND media_url!='' AND ts > datetime('now','-3 hours') ORDER BY ts DESC LIMIT 1").bind(phone).first(); fotoKey = (fr && fr.media_url) || ''; } catch (_) {}
       for (const co of (Array.isArray(res.cortes) ? res.cortes : [])) {
@@ -3496,7 +3567,7 @@ async function processCortePilot(env) {
         try { const ya = await env.DB.prepare("SELECT 1 FROM corte_pedidos WHERE telefono=? AND lower(diseno_nombre)=lower(?) AND created_at > datetime('now','-7 days') LIMIT 1").bind(phone, nombre).first(); if (ya) continue; } catch (_) {}
         const cantidad = Math.max(1, parseInt(String(co.cantidad != null ? co.cantidad : '1').replace(/\D/g, ''), 10) || 1);
         try {
-          await env.DB.prepare("INSERT INTO corte_pedidos (alumno_id, telefono, cliente_nombre, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, estado, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'TRANS','pedido',?,?)").bind((alumno && alumno.id) || null, phone, (alumno && alumno.nombre) || '', nombre, String(co.aclaraciones || ''), fotoKey, String(co.medida || ''), cantidad, nowIso, nowIso).run();
+          await env.DB.prepare("INSERT INTO corte_pedidos (alumno_id, telefono, cliente_nombre, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, estado, tanda_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'TRANS','pedido',?,?,?)").bind((alumno && alumno.id) || null, phone, (alumno && alumno.nombre) || '', nombre, String(co.aclaraciones || ''), fotoKey, String(co.medida || ''), cantidad, (_tanda && _tanda.id) || null, nowIso, nowIso).run();
         } catch (_) {}
       }
       const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 3) : [];
@@ -12561,7 +12632,17 @@ const handler = {
           const row = await env.DB.prepare(
             'SELECT * FROM wa_ad_attributions WHERE phone = ? ORDER BY ts DESC LIMIT 1'
           ).bind(phone).first();
-          return json({ attribution: row || null });
+          // Atribución "dura" (con ad_id de Meta) para que el modal de Cargar pedido guarde el
+          // source_id y trace bien en el funnel. MISMA regla que traceAdForPedido (último touch
+          // CON source_id no vacío — el más reciente puede ser un referral sin ad_id). ad_label =
+          // label de vertical ya resuelto server-side (adLabelFromSource) para no duplicar lógica
+          // en el front; queda '' para ads de cursos (que no se atribuyen a carteles).
+          let source_id = '', ad_label = '';
+          try {
+            const src = await env.DB.prepare("SELECT source_id, headline FROM wa_ad_attributions WHERE phone=? AND COALESCE(source_id,'')!='' ORDER BY ts DESC LIMIT 1").bind(phone).first();
+            if (src && src.source_id) { source_id = String(src.source_id); ad_label = adLabelFromSource(source_id, src.headline); }
+          } catch (_) {}
+          return json({ attribution: row || null, source_id, ad_label });
         } catch (e) {
           return json({ attribution: null, error: e.message });
         }
@@ -14755,6 +14836,11 @@ const handler = {
         const plataforma = body.plataforma === 'IG' ? 'IG' : 'WPP';
         const estadoPago = String(body.estado_pago || '1er pago');
         const ad = String(body.ad || '');
+        // source_id = ad_id EXACTO de Meta que el modal capturó de la atribución (opcional). Se
+        // guarda directo en el INSERT así el pedido nace trazado y el funnel lo clasifica al toque
+        // (sin esperar a la red de seguridad). Vacío → NULL (no ''), para que el backfill —que
+        // filtra source_id IS NULL— siga alcanzando a los pedidos sin atribución del front.
+        const sourceId = String(body.source_id || '').trim();
         // Contacto del cliente: en WPP es el teléfono (solo dígitos). En IG es el @usuario / id
         // de Instagram → NO stripeamos no-dígitos ahí (si no, un @usuario quedaría vacío).
         const telefono = plataforma === 'IG'
@@ -14771,8 +14857,8 @@ const handler = {
           const esCorp = (c.es_corporeo === 1 || c.es_corporeo === true || c.es_corporeo === '1') ? 1 : 0;
           const mirrorDirty = 1;
           return env.DB.prepare(
-          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, producto, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, producto, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at, source_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
           num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
@@ -14782,7 +14868,7 @@ const handler = {
           mirrorDirty, esCorp, String(c.producto || '').trim(),
           String(c.frente || '').trim(), String(c.laterales || '').trim(), String(c.espalda || '').trim(),
           String(c.iluminacion || '').trim(), String(c.bastidor || '').trim(), String(c.color_bastidor || '').trim(), String(c.instalacion || '').trim(),
-          now, now
+          now, now, (sourceId || null)
         );
         });
         await env.DB.batch(stmts);
@@ -14793,7 +14879,17 @@ const handler = {
         // Best-effort: si falla, el cron lo agarra igual en el próximo minuto.
         try {
           for (const row of (rs.results || [])) {
-            if (String(row.ad || '').trim()) continue;
+            const adTxt = String(row.ad || '').trim();
+            const hasSource = String(row.source_id || '').trim() !== '';
+            // Ya trazado (ad + source_id) → listo, no tocar.
+            if (adTxt && hasSource) continue;
+            // Con ad de texto pero SIN source_id: solo re-trazamos el label genérico que arma el
+            // front ("IG ad: ..."/"FB ad: ..."), que trae el nombre del ad pero DESCARTA el ad_id
+            // → sin source_id el funnel no lo puede clasificar. Los labels cargados a mano
+            // (directo/frecuente/referido/link bio) se respetan y NO se tocan.
+            const adl = adTxt.toLowerCase();
+            const esGenericoAd = adl.indexOf('ig ad') === 0 || adl.indexOf('fb ad') === 0;
+            if (adTxt && !esGenericoAd) continue;
             const t = await traceAdForPedido(env, row);
             if (t.ad) {
               await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END, mirror_dirty=1 WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, row.id).run();
@@ -15588,6 +15684,75 @@ const handler = {
           } else { res.push({ tel, ok: false, error: 'no se pudo enviar', total: g.total }); }
         }
         return json({ ok: true, resultados: res });
+      }
+      // GET /admin/corte/tanda → info de la tanda de la semana: archivo, m² vendidos/cortados, aprovechamiento.
+      if (request.method === 'GET' && path === '/admin/corte/tanda') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['admin', 'disenador', 'produccion'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        const t = await corteTandaActual(env);
+        if (!t) return json({ error: 'sin tanda' }, 500);
+        let m2vend = 0, npze = 0;
+        try { const rs = await env.DB.prepare("SELECT ancho_real, alto_real, cantidad FROM corte_pedidos WHERE tanda_id=? AND ancho_real>0 AND alto_real>0").bind(t.id).all(); for (const p of (rs.results || [])) { m2vend += (Number(p.ancho_real) / 100) * (Number(p.alto_real) / 100) * (Math.max(1, parseInt(p.cantidad, 10) || 1)); npze++; } } catch (_) {}
+        const m2cort = Number(t.m2_cortados) || 0;
+        return json({ ok: true, semana: t.semana, role: _r, archivo_matriz: !!t.archivo_matriz_key, archivo_matriz_link: t.archivo_matriz_link || '', archivo_placas: !!t.archivo_placas_key, m2_vendidos: Math.round(m2vend * 100) / 100, m2_cortados: m2cort, aprovechamiento: m2cort > 0 ? Math.round((m2vend / m2cort) * 1000) / 10 : null, piezas_relevadas: npze });
+      }
+      // POST /admin/corte/tanda/archivo?name=... → Emma sube la matriz (body = archivo raw) → R2 + Drive (best-effort).
+      if (request.method === 'POST' && path === '/admin/corte/tanda/archivo') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['admin', 'disenador'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        const _u = new URL(request.url);
+        const name = (_u.searchParams.get('name') || 'matriz').replace(/[^\w.\- ]/g, '_').slice(0, 120);
+        const buf = await request.arrayBuffer().catch(() => null);
+        if (!buf || buf.byteLength < 8) return json({ error: 'archivo vacío' }, 400);
+        if (buf.byteLength > 80 * 1024 * 1024) return json({ error: 'archivo mayor a 80MB' }, 400);
+        const t = await corteTandaActual(env);
+        const key = 'corte/tandas/' + (t ? t.id : 'x') + '/matriz-' + Date.now() + '-' + name;
+        const mime = request.headers.get('content-type') || 'application/octet-stream';
+        try { await env.MEDIA.put(key, buf, { httpMetadata: { contentType: mime } }); } catch (e) { return json({ error: 'no se pudo guardar en R2' }, 500); }
+        let driveLink = '';
+        try { const dr = await driveUploadFile(env, DRIVE_FOLDER_MATRICES, (t ? t.semana + '-' : '') + name, mime, buf); if (dr.ok) driveLink = dr.link || dr.id || ''; } catch (_) {}
+        try { await env.DB.prepare("UPDATE corte_tandas SET archivo_matriz_key=?, archivo_matriz_link=?, updated_at=? WHERE id=?").bind(key, driveLink, new Date().toISOString(), t.id).run(); } catch (_) {}
+        return json({ ok: true, size: buf.byteLength, drive: driveLink ? true : false });
+      }
+      // GET /admin/corte/tanda/archivo → descarga la matriz de la tanda (para Aníbal). produccion/disenador/admin.
+      if (request.method === 'GET' && path === '/admin/corte/tanda/archivo') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['admin', 'disenador', 'produccion'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        const t = await corteTandaActual(env);
+        if (!t || !t.archivo_matriz_key) return json({ error: 'sin archivo' }, 404);
+        const obj = await env.MEDIA.get(t.archivo_matriz_key);
+        if (!obj) return json({ error: 'no encontrado' }, 404);
+        const fname = (t.archivo_matriz_key.split('/').pop() || 'matriz').replace(/^matriz-\d+-/, '');
+        return new Response(obj.body, { headers: { 'Content-Type': obj.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': 'attachment; filename="' + fname + '"' } });
+      }
+      // POST /admin/corte/tanda/placas?name=&m2= → Aníbal sube placas (body opcional) + carga m² cortados. produccion/admin.
+      if (request.method === 'POST' && path === '/admin/corte/tanda/placas') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['admin', 'produccion'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        const _u = new URL(request.url);
+        const m2 = parseFloat(String(_u.searchParams.get('m2') || '').replace(',', '.'));
+        const name = (_u.searchParams.get('name') || '').replace(/[^\w.\- ]/g, '_').slice(0, 120);
+        const t = await corteTandaActual(env);
+        if (!t) return json({ error: 'sin tanda' }, 500);
+        let key = t.archivo_placas_key || '', driveLink = t.archivo_placas_link || '';
+        const buf = await request.arrayBuffer().catch(() => null);
+        if (buf && buf.byteLength > 8) {
+          if (buf.byteLength > 80 * 1024 * 1024) return json({ error: 'archivo mayor a 80MB' }, 400);
+          key = 'corte/tandas/' + t.id + '/placas-' + Date.now() + '-' + (name || 'placas');
+          const mime = request.headers.get('content-type') || 'application/octet-stream';
+          try { await env.MEDIA.put(key, buf, { httpMetadata: { contentType: mime } }); } catch (_) {}
+          try { const dr = await driveUploadFile(env, DRIVE_FOLDER_ANIBAL, t.semana + '-' + (name || 'placas'), mime, buf); if (dr.ok) driveLink = dr.link || dr.id || ''; } catch (_) {}
+        }
+        const m2f = (!isNaN(m2) && m2 > 0) ? m2 : (Number(t.m2_cortados) || 0);
+        try { await env.DB.prepare("UPDATE corte_tandas SET m2_cortados=?, archivo_placas_key=?, archivo_placas_link=?, updated_at=? WHERE id=?").bind(m2f, key, driveLink, new Date().toISOString(), t.id).run(); } catch (_) {}
+        return json({ ok: true, m2_cortados: m2f, drive: driveLink ? true : false });
+      }
+      // GET /admin/corte/drive-test → sube un archivito de prueba a la carpeta de matrices (verifica acceso). Admin.
+      if (request.method === 'GET' && path === '/admin/corte/drive-test') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        const bytes = new TextEncoder().encode('prueba de acceso del software de Neon Infinito al Drive - ' + new Date().toISOString());
+        const r = await driveUploadFile(env, DRIVE_FOLDER_MATRICES, 'test-acceso-software.txt', 'text/plain', bytes);
+        return json(r);
       }
       // POST /admin/corte/run  →  dispara el bot de corte a mano (diagnóstico). Admin. Devuelve el estado.
       if (request.method === 'POST' && path === '/admin/corte/run') {

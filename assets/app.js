@@ -2735,6 +2735,68 @@ function corteDetalleHtml(p) {
       ${adminEstado}
     </div>`;
 }
+function corteArchivoEmmaHtml() {
+  const t = STATE.corteTanda; const subido = t && t.archivo_matriz;
+  return `
+    <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:16px">
+      <div style="font-size:14px;font-weight:700;margin-bottom:6px">📁 Archivo de corte de la semana${t ? ' · ' + escapeHtml(t.semana) : ''}</div>
+      <div style="font-size:12px;color:var(--fg-mute);margin-bottom:10px">${subido ? '✅ Archivo subido' + (t && t.archivo_matriz_link ? ' + respaldado en Drive' : '') + '. Podés reemplazarlo si rehiciste algo.' : 'Cuando termines todos los diseños, subí el archivo (.ai) con toda la tanda para que Aníbal lo corte.'}</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="file" id="corte-archivo-input" style="font-size:12px;max-width:220px">
+        <button class="btn" data-corte-subir-archivo>${subido ? 'Reemplazar' : 'Subir archivo'}</button>
+        <span id="corte-archivo-status" style="font-size:12px;color:var(--fg-mute)"></span>
+      </div>
+    </div>`;
+}
+function corteArchivoAnibalHtml() {
+  const t = STATE.corteTanda; const hay = t && t.archivo_matriz;
+  return `
+    <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px">
+      <div style="font-size:14px;font-weight:700;margin-bottom:8px">📁 Archivo de la semana${t ? ' · ' + escapeHtml(t.semana) : ''}</div>
+      ${hay ? '<button class="btn" data-corte-descargar-archivo>⬇ Descargar para cortar</button>' : '<span style="font-size:12px;color:var(--fg-mute)">Emma todavía no subió el archivo de esta tanda.</span>'}
+      <span id="corte-descarga-status" style="font-size:12px;color:var(--fg-mute);margin-left:8px"></span>
+    </div>`;
+}
+function corteM2AnibalHtml() {
+  const t = STATE.corteTanda;
+  return `
+    <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:16px">
+      <div style="font-size:14px;font-weight:700;margin-bottom:8px">Al terminar de cortar</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:13px">m² cortados:</span>
+        <input id="corte-m2" inputmode="decimal" placeholder="ej 7.5" value="${t && t.m2_cortados ? t.m2_cortados : ''}" style="width:90px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:8px;color:var(--fg)">
+        <span style="font-size:11px;color:var(--fg-mute)">(placas + recortes que usaste)</span>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="file" id="corte-placas-input" style="font-size:12px;max-width:200px">
+        <span style="font-size:11px;color:var(--fg-mute)">subí las placas anidadas (opcional)</span>
+      </div>
+      <button class="btn" data-corte-subir-placas style="margin-top:10px">Guardar</button>
+      <span id="corte-placas-status" style="font-size:12px;color:var(--fg-mute);margin-left:8px"></span>
+    </div>`;
+}
+function corteTandaPanelAdminHtml() {
+  const t = STATE.corteTanda; if (!t) return '';
+  const apr = t.aprovechamiento;
+  return `
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px">
+      <div style="flex:1;min-width:150px;background:var(--ink-100);border:1px solid var(--border);border-radius:10px;padding:12px">
+        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase">m² vendidos · ${escapeHtml(t.semana)}</div>
+        <div style="font-size:20px;font-weight:800">${t.m2_vendidos != null ? t.m2_vendidos : 0} m²</div>
+        <div style="font-size:11px;color:var(--fg-mute)">${t.piezas_relevadas || 0} piezas relevadas</div>
+      </div>
+      <div style="flex:1;min-width:150px;background:var(--ink-100);border:1px solid var(--border);border-radius:10px;padding:12px">
+        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase">m² cortados</div>
+        <div style="font-size:20px;font-weight:800">${t.m2_cortados != null ? t.m2_cortados : 0} m²</div>
+        <div style="font-size:11px;color:var(--fg-mute)">${t.archivo_matriz ? '📁 matriz ✓' : 'sin matriz'}${t.archivo_placas ? ' · placas ✓' : ''}</div>
+      </div>
+      <div style="flex:1;min-width:150px;background:var(--ink-100);border:1px solid var(--border);border-radius:10px;padding:12px">
+        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase">Aprovechamiento</div>
+        <div style="font-size:20px;font-weight:800;color:${apr == null ? 'var(--fg-mute)' : (apr >= 80 ? '#22c55e' : '#FFA726')}">${apr == null ? '—' : apr + '%'}</div>
+        <div style="font-size:11px;color:var(--fg-mute)">vendidos / cortados</div>
+      </div>
+    </div>`;
+}
 function renderCorteCobros() {
   const cs = STATE.corteCobros; // undefined = cargando
   if (cs === undefined) return '<div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:16px;margin-bottom:16px;color:var(--fg-mute)">Cargando cobranza…</div>';
@@ -2790,15 +2852,17 @@ function renderCorte() {
             </div>`; }).join('') : vacio('No hay nada para embalar')}
         </div>`;
     }
-    // ANÍBAL: lista + botón "marcar todos como cortados".
+    // ANÍBAL: descargar archivo + lista + "marcar todos como cortados" + cargar m²/placas.
     if (isAnibalUser(STATE.user)) {
       return `
         <div style="padding:var(--s-4);max-width:760px">
           <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — Para cortar</h1>
-          <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">${cola.length} pedido${cola.length === 1 ? '' : 's'} para cortar${cargando ? ' · cargando…' : ''}</p>
+          <p style="color:var(--fg-mute);font-size:13px;margin:0 0 14px">${cola.length} pedido${cola.length === 1 ? '' : 's'} para cortar${cargando ? ' · cargando…' : ''}</p>
+          ${corteArchivoAnibalHtml()}
           ${cola.length ? `<button class="btn" data-corte-cortar-todos style="margin-bottom:14px">🪚 Marcar todos como cortados (${cola.length})</button>` : ''}
           ${sel && sel.estado === info.estado ? corteDetalleHtml(sel) : ''}
           ${cola.length ? cola.map(p => corteCardHtml(p, true)).join('') : vacio('No hay nada para cortar')}
+          ${corteM2AnibalHtml()}
         </div>`;
     }
     // EMMA (disenador): MODO RELEVAMIENTO — un pedido a la vez, línea de montaje.
@@ -2812,6 +2876,7 @@ function renderCorte() {
               <div style="font-weight:700;margin-top:8px">Relevamiento al día</div>
               <div style="color:var(--fg-mute);font-size:13px;margin-top:4px">No hay diseños esperando la matriz.</div>
             </div>`}
+          ${corteArchivoEmmaHtml()}
         </div>`;
     }
     let idx = STATE.corteRelevIdx || 0; if (idx >= cola.length) idx = 0;
@@ -2841,6 +2906,7 @@ function renderCorte() {
             <button class="btn ghost" data-corte-relev-skip>Saltear</button>
           </div>
         </div>
+        ${corteArchivoEmmaHtml()}
       </div>`;
   }
   // --- Vista ADMIN (Gaspar): board completo + detalle + alumnos ---
@@ -2859,6 +2925,7 @@ function renderCorte() {
       <p style="color:var(--fg-mute);font-size:13px;margin:0 0 14px">Tocá un pedido para ver el detalle y moverlo de etapa. Emma carga medidas → Aníbal corta → Neyen embala.</p>
       <button class="btn" data-corte-cobrar-abrir style="margin-bottom:16px">💰 Cobrar la semana</button>
       ${STATE.corteCobrosView ? renderCorteCobros() : ''}
+      ${corteTandaPanelAdminHtml()}
       ${sel ? corteDetalleHtml(sel) : ''}
       <div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin-bottom:8px">Tablero de pedidos <span style="text-transform:none;color:var(--fg-mute)">· ${pedidos.length} en curso</span></div>
       <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:12px;margin-bottom:22px">
@@ -2894,11 +2961,15 @@ async function bindCorte() {
   if (STATE.cortePedidos === undefined && !STATE._corteLoading) {
     STATE._corteLoading = true;
     try {
-      const proms = [fetch(CONFIG.trackerUrl + '/admin/corte/pedidos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({}))];
+      const proms = [
+        fetch(CONFIG.trackerUrl + '/admin/corte/pedidos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})),
+        fetch(CONFIG.trackerUrl + '/admin/corte/tanda', { headers: authHeaders() }).then(r => r.json()).catch(() => ({}))
+      ];
       if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/alumnos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
       const res = await Promise.all(proms);
       STATE.cortePedidos = (res[0] && res[0].pedidos) || [];
-      STATE.corteAlumnos = admin ? ((res[1] && res[1].alumnos) || []) : [];
+      STATE.corteTanda = (res[1] && res[1].ok) ? res[1] : null;
+      STATE.corteAlumnos = admin ? ((res[2] && res[2].alumnos) || []) : [];
     } catch (_) { STATE.cortePedidos = STATE.cortePedidos || []; STATE.corteAlumnos = STATE.corteAlumnos || []; }
     STATE._corteLoading = false;
     render();
@@ -2964,6 +3035,38 @@ async function bindCorte() {
       STATE.corteCobrosView = false; STATE.corteCobros = undefined; STATE.cortePedidos = undefined; STATE._corteLoading = false; render();
     } catch (_) { toast('Error de red'); cobrarEnviar.disabled = false; cobrarEnviar.textContent = 'Enviar cobros seleccionados'; }
   };
+  // Archivo de la tanda: Emma sube, Aníbal descarga; Aníbal sube placas + m².
+  const subirArch = document.querySelector('[data-corte-subir-archivo]');
+  if (subirArch) subirArch.onclick = () => corteSubirArchivo('corte-archivo-input', '/admin/corte/tanda/archivo', 'corte-archivo-status', {}, true);
+  const descArch = document.querySelector('[data-corte-descargar-archivo]');
+  if (descArch) descArch.onclick = () => corteDescargarArchivo();
+  const subirPlacas = document.querySelector('[data-corte-subir-placas]');
+  if (subirPlacas) subirPlacas.onclick = () => { const m2 = (document.getElementById('corte-m2') || {}).value || ''; corteSubirArchivo('corte-placas-input', '/admin/corte/tanda/placas', 'corte-placas-status', { m2 }, false); };
+}
+async function corteSubirArchivo(inputId, endpoint, statusId, extraQuery, requireFile) {
+  const inp = document.getElementById(inputId);
+  const f = inp && inp.files && inp.files[0];
+  const st = document.getElementById(statusId);
+  if (requireFile && !f) { if (st) st.textContent = 'elegí un archivo'; return; }
+  if (st) st.textContent = 'subiendo…';
+  try {
+    const qs = new URLSearchParams(extraQuery || {});
+    if (f) qs.set('name', f.name);
+    const r = await fetch(CONFIG.trackerUrl + endpoint + '?' + qs.toString(), { method: 'POST', headers: { ...authHeaders(), 'Content-Type': (f && f.type) || 'application/octet-stream' }, body: f || '' }).then(x => x.json());
+    if (r && r.ok) { if (st) st.textContent = '✓ guardado'; toast('Listo ✓'); STATE.cortePedidos = undefined; STATE._corteLoading = false; render(); }
+    else { if (st) st.textContent = (r && r.error) || 'no se pudo'; }
+  } catch (_) { if (st) st.textContent = 'error de red'; }
+}
+async function corteDescargarArchivo() {
+  const st = document.getElementById('corte-descarga-status'); if (st) st.textContent = 'descargando…';
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/tanda/archivo', { headers: authHeaders() });
+    if (!r.ok) { if (st) st.textContent = 'sin archivo'; return; }
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || ''; const m = cd.match(/filename="?([^"]+)"?/); const fn = (m && m[1]) || 'matriz';
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fn; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    if (st) st.textContent = '✓';
+  } catch (_) { if (st) st.textContent = 'error'; }
 }
 async function corteBulk(action, extra) {
   try {
