@@ -2698,7 +2698,6 @@ function corteDetalleHtml(p) {
           <input id="corte-alto" placeholder="alto" inputmode="decimal" style="width:82px;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg)">
           <span id="corte-precio-prev" style="font-size:12px;color:#22c55e;font-weight:700"></span>
         </div>
-        <input id="corte-matriz-url" placeholder="link de la matriz en Drive (opcional)" style="width:100%;box-sizing:border-box;margin-top:8px;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg);font-size:12px">
         <button class="btn" data-corte-accion="medidas" data-ped="${p.id}" style="margin-top:10px">Marcar matriz lista</button>
       </div>`;
   } else if (p.estado === 'matriz_lista' && (admin || isAnibalUser(STATE.user))) {
@@ -2802,13 +2801,46 @@ function renderCorte() {
           ${cola.length ? cola.map(p => corteCardHtml(p, true)).join('') : vacio('No hay nada para cortar')}
         </div>`;
     }
-    // EMMA (disenador): un pedido por vez, con el form de medidas.
+    // EMMA (disenador): MODO RELEVAMIENTO — un pedido a la vez, línea de montaje.
+    if (!cola.length) {
+      return `
+        <div style="padding:var(--s-4);max-width:640px">
+          <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — Relevamiento</h1>
+          ${cargando ? '<p style="color:var(--fg-mute);font-size:13px">Cargando…</p>' : `
+            <div style="text-align:center;padding:44px 20px;border:1px dashed var(--border);border-radius:12px;margin-top:14px">
+              <div style="font-size:34px">✅</div>
+              <div style="font-weight:700;margin-top:8px">Relevamiento al día</div>
+              <div style="color:var(--fg-mute);font-size:13px;margin-top:4px">No hay diseños esperando la matriz.</div>
+            </div>`}
+        </div>`;
+    }
+    let idx = STATE.corteRelevIdx || 0; if (idx >= cola.length) idx = 0;
+    const rp = cola[idx];
+    const rcant = Math.max(1, parseInt(rp.cantidad, 10) || 1);
+    const rfoto = rp.foto_key ? `<img src="${mediaUrl(rp.foto_key)}" style="max-width:100%;max-height:320px;border-radius:10px;border:1px solid var(--border)" loading="lazy">` : '<div style="padding:40px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:10px">sin foto del diseño</div>';
     return `
-      <div style="padding:var(--s-4);max-width:760px">
-        <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — ${info.titulo}</h1>
-        <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">${cola.length} pedido${cola.length === 1 ? '' : 's'} en tu cola${cargando ? ' · cargando…' : ''}</p>
-        ${sel && sel.estado === info.estado ? corteDetalleHtml(sel) : ''}
-        ${cola.length ? cola.map(p => corteCardHtml(p, true)).join('') : vacio('No hay pedidos en tu cola por ahora')}
+      <div style="padding:var(--s-4);max-width:640px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h1 style="margin:0;font-size:20px">✂ Relevamiento</h1>
+          <span style="font-size:13px;color:var(--fg-mute);font-weight:600">${idx + 1} de ${cola.length}</span>
+        </div>
+        <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:16px">
+          <div style="text-align:center;margin-bottom:14px">${rfoto}</div>
+          <div style="font-size:16px;font-weight:700">${escapeHtml(rp.cliente_nombre || 'cliente')} — ${escapeHtml(rp.diseno_nombre || 'diseño')}</div>
+          <div style="font-size:13px;color:var(--fg-mute);margin-top:2px">Pidió: ${escapeHtml(rp.medida_declarada || '—')} · Cantidad: ${rcant}${rp.aclaraciones ? ' · ' + escapeHtml(rp.aclaraciones) : ''}</div>
+          <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:13px;font-weight:700">Medida real:</span>
+            <input id="corte-ancho" placeholder="ancho" inputmode="decimal" style="width:88px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px">
+            <span style="color:var(--fg-mute)">×</span>
+            <input id="corte-alto" placeholder="alto" inputmode="decimal" style="width:88px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px">
+            <span style="color:var(--fg-mute)">cm</span>
+            <span id="corte-precio-prev" style="font-size:14px;color:#22c55e;font-weight:700;margin-left:auto"></span>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:16px">
+            <button class="btn" data-corte-relev-ok data-ped="${rp.id}" style="flex:1">Matriz lista → siguiente</button>
+            <button class="btn ghost" data-corte-relev-skip>Saltear</button>
+          </div>
+        </div>
       </div>`;
   }
   // --- Vista ADMIN (Gaspar): board completo + detalle + alumnos ---
@@ -2887,6 +2919,19 @@ async function bindCorte() {
   const ai = document.getElementById('corte-ancho'), ali = document.getElementById('corte-alto');
   if (ai || ali) { const sel = (STATE.cortePedidos || []).find(p => p.id === STATE.corteSelected); if (sel) { const upd = () => cortePrecioPreview(sel); if (ai) ai.oninput = upd; if (ali) ali.oninput = upd; } }
   document.querySelectorAll('[data-corte-accion]').forEach(btn => { btn.onclick = () => corteAccion(btn.getAttribute('data-corte-accion'), parseInt(btn.getAttribute('data-ped'), 10)); });
+  // Relevamiento (Emma): preview de precio en vivo, Enter para avanzar, siguiente, saltear.
+  const relevOk = document.querySelector('[data-corte-relev-ok]');
+  if (relevOk) {
+    const pid = parseInt(relevOk.getAttribute('data-ped'), 10);
+    const rp = (STATE.cortePedidos || []).find(p => p.id === pid);
+    relevOk.onclick = () => corteAccion('medidas', pid);
+    const rai = document.getElementById('corte-ancho'), rali = document.getElementById('corte-alto');
+    const upd = () => { if (rp) cortePrecioPreview(rp); };
+    if (rai) { rai.oninput = upd; rai.onkeydown = (e) => { if (e.key === 'Enter' && rali) rali.focus(); }; try { rai.focus(); } catch (_) {} }
+    if (rali) { rali.oninput = upd; rali.onkeydown = (e) => { if (e.key === 'Enter') relevOk.click(); }; }
+  }
+  const relevSkip = document.querySelector('[data-corte-relev-skip]');
+  if (relevSkip) relevSkip.onclick = () => { STATE.corteRelevIdx = (STATE.corteRelevIdx || 0) + 1; render(); };
   // Aníbal: marcar TODA la tanda como cortada.
   const cortarTodos = document.querySelector('[data-corte-cortar-todos]');
   if (cortarTodos) cortarTodos.onclick = () => corteBulk('cortado_bulk', {});
@@ -2930,8 +2975,8 @@ async function corteBulk(action, extra) {
 async function corteAccion(accion, id) {
   const body = { id, action: accion };
   if (accion === 'medidas') {
-    const a = document.getElementById('corte-ancho'), al = document.getElementById('corte-alto'), mu = document.getElementById('corte-matriz-url');
-    body.ancho_real = a ? a.value : ''; body.alto_real = al ? al.value : ''; if (mu && mu.value.trim()) body.matriz_drive_url = mu.value.trim();
+    const a = document.getElementById('corte-ancho'), al = document.getElementById('corte-alto');
+    body.ancho_real = a ? a.value : ''; body.alto_real = al ? al.value : '';
     if (!(parseFloat(String(body.ancho_real).replace(',', '.')) > 0 && parseFloat(String(body.alto_real).replace(',', '.')) > 0)) { toast('Cargá ancho y alto (cm)'); return; }
   }
   if (accion === 'embalado') { const r = document.querySelector('input[name="corte-entrega"]:checked'); body.entrega = r ? r.value : 'retira'; }
