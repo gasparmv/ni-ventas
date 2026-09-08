@@ -3362,6 +3362,22 @@ function _pemToArrayBuffer(pem) {
 }
 // Token OAuth de la cuenta de servicio (JWT RS256 → access_token). Cacheado ~55min en kv_cache.
 async function driveAccessToken(env) {
+  // Camino preferido: OAuth como usuario (Gaspar). La cuenta de servicio NO tiene cuota en My Drive,
+  // así que para SUBIR archivos usamos un refresh token de Gaspar (los archivos quedan a su nombre).
+  if (env.GOOGLE_OAUTH_CLIENT_ID && env.GOOGLE_OAUTH_CLIENT_SECRET) {
+    let rt = env.GOOGLE_OAUTH_REFRESH_TOKEN || '';
+    if (!rt) { try { const rr = await env.DB.prepare("SELECT v FROM kv_cache WHERE k='drive_refresh_token'").first(); rt = (rr && rr.v) || ''; } catch (_) {} }
+    if (rt) {
+      try { const c = await env.DB.prepare("SELECT v, updated_at FROM kv_cache WHERE k='drive_token'").first(); if (c && c.v && c.updated_at && (Date.now() - new Date(c.updated_at).getTime()) < 55 * 60 * 1000) return c.v; } catch (_) {}
+      try {
+        const r = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(rt) + '&client_id=' + encodeURIComponent(env.GOOGLE_OAUTH_CLIENT_ID) + '&client_secret=' + encodeURIComponent(env.GOOGLE_OAUTH_CLIENT_SECRET) });
+        const j = await r.json().catch(() => ({}));
+        const token = j.access_token || null;
+        if (token) { try { await env.DB.prepare("INSERT INTO kv_cache (k,v,updated_at) VALUES ('drive_token',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(token, new Date().toISOString()).run(); } catch (_) {} }
+        return token;
+      } catch (_) { return null; }
+    }
+  }
   if (!env.GOOGLE_SA_KEY) return null;
   try { const c = await env.DB.prepare("SELECT v, updated_at FROM kv_cache WHERE k='drive_token'").first(); if (c && c.v && c.updated_at && (Date.now() - new Date(c.updated_at).getTime()) < 55 * 60 * 1000) return c.v; } catch (_) {}
   let sa; try { sa = JSON.parse(env.GOOGLE_SA_KEY); } catch (_) { return null; }
@@ -11029,6 +11045,50 @@ const handler = {
         const _obj = await env.MEDIA.get(_k);
         if (_obj) return new Response(_obj.body, { headers: { ...cors(), 'Content-Type': _obj.httpMetadata?.contentType || 'application/octet-stream', 'Cache-Control': 'public, max-age=31536000, immutable' } });
       }
+    }
+
+    // ===== OAuth de Google Drive (una sola vez, "como Gaspar") =====
+    // El callback lo llama Google SIN token de sesión, por eso van ANTES del muro de /admin/.
+    // Seguridad: /start (admin) genera un `state` de un solo uso guardado en kv; /callback lo exige.
+    if (request.method === 'GET' && path === '/admin/corte/oauth/start') {
+      // Gate manual por token (el muro está más abajo). Solo Gaspar.
+      const qTok = url.searchParams.get('token') || '';
+      let okAdmin = false;
+      try { const row = await env.DB.prepare('SELECT user, expires_at FROM sessions WHERE token = ?').bind(qTok).first(); if (row && new Date(row.expires_at) >= new Date() && String(row.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '') === 'gaspar') okAdmin = true; } catch (_) {}
+      if (!okAdmin) return unauthorized();
+      if (!env.GOOGLE_OAUTH_CLIENT_ID || !env.GOOGLE_OAUTH_CLIENT_SECRET) return new Response('Falta configurar GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET (secrets del worker) antes de autorizar.', { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+      const state = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
+      await kvSet(env, 'drive_oauth_state', state);
+      const redirectUri = url.origin + '/admin/corte/oauth/callback';
+      const auth = 'https://accounts.google.com/o/oauth2/v2/auth?' +
+        'client_id=' + encodeURIComponent(env.GOOGLE_OAUTH_CLIENT_ID) +
+        '&redirect_uri=' + encodeURIComponent(redirectUri) +
+        '&response_type=code' +
+        '&scope=' + encodeURIComponent('https://www.googleapis.com/auth/drive') +
+        '&access_type=offline&prompt=consent&include_granted_scopes=true' +
+        '&state=' + encodeURIComponent(state);
+      return new Response(null, { status: 302, headers: { Location: auth } });
+    }
+    if (request.method === 'GET' && path === '/admin/corte/oauth/callback') {
+      const okHtml = (msg) => new Response('<!doctype html><meta charset=utf-8><body style="font-family:system-ui;max-width:640px;margin:60px auto;padding:0 20px;line-height:1.5"><h2>Neon Infinito · Drive</h2><p>' + msg + '</p></body>', { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      const errHtml = (msg) => new Response('<!doctype html><meta charset=utf-8><body style="font-family:system-ui;max-width:640px;margin:60px auto;padding:0 20px;line-height:1.5"><h2>Neon Infinito · Drive</h2><p style="color:#b00">' + msg + '</p></body>', { status: 400, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      const code = url.searchParams.get('code') || '';
+      const state = url.searchParams.get('state') || '';
+      const gErr = url.searchParams.get('error') || '';
+      if (gErr) return errHtml('Google devolvió un error: ' + gErr + '. Volvé a intentar desde el link de autorización.');
+      if (!code) return errHtml('Falta el código de autorización.');
+      const savedState = await kvGet(env, 'drive_oauth_state', '');
+      if (!state || !savedState || state !== savedState) return errHtml('El link de autorización expiró o no es válido. Pedile a Claude un link nuevo.');
+      const redirectUri = url.origin + '/admin/corte/oauth/callback';
+      try {
+        const r = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=authorization_code&code=' + encodeURIComponent(code) + '&client_id=' + encodeURIComponent(env.GOOGLE_OAUTH_CLIENT_ID) + '&client_secret=' + encodeURIComponent(env.GOOGLE_OAUTH_CLIENT_SECRET) + '&redirect_uri=' + encodeURIComponent(redirectUri) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.refresh_token) return errHtml('No se pudo obtener el permiso permanente (refresh_token). Detalle: ' + ((j.error_description || j.error) || ('HTTP ' + r.status)) + '. Asegurate de haber aceptado con tu cuenta y volvé a intentar.');
+        await kvSet(env, 'drive_refresh_token', j.refresh_token);
+        await env.DB.prepare("DELETE FROM kv_cache WHERE k='drive_oauth_state'").run().catch(() => {});
+        await env.DB.prepare("DELETE FROM kv_cache WHERE k='drive_token'").run().catch(() => {});
+        return okHtml('Listo. El software ya quedó autorizado para guardar los archivos de corte en tu Drive. Podés cerrar esta pestaña.');
+      } catch (e) { return errHtml('Error al canjear el código: ' + String((e && e.message) || e)); }
     }
 
     if (path.startsWith('/admin/')) {
