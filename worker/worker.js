@@ -3334,6 +3334,15 @@ async function corteSendCableInfo(env, phone) {
   try { await corteSend(env, phone, CORTE_CABLE_MSG); } catch (_) {}
   return okv;
 }
+// Datos de transferencia para el cobro del corte.
+const CORTE_ALIAS = 'neoninfinito.mp';
+const CORTE_TITULAR = 'Gaspar Martinez';
+// Arma el mensaje de cobro de un cliente (g = {cliente_nombre, piezas:[{diseno,medida,cantidad,precio}], total}).
+function corteCobroMsg(g) {
+  const nombre = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
+  const lineas = (g.piezas || []).map(p => '- ' + (p.diseno || 'diseño') + (p.medida ? ' (' + p.medida + ')' : '') + ((parseInt(p.cantidad, 10) || 1) > 1 ? ' x' + p.cantidad : '') + ': $' + Number(p.precio || 0).toLocaleString('es-AR')).join('\n');
+  return (nombre ? 'Hola ' + nombre + ', ' : 'Hola, ') + 'te paso el detalle de tu corte de esta semana:\n' + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR') + '\n\nPara confirmarlo transferí a ' + CORTE_ALIAS + ' (' + CORTE_TITULAR + ') y mandame el comprobante por acá.';
+}
 async function processCortePilot(env) {
   try {
     if (!(await corteBotOn(env))) return;
@@ -15530,6 +15539,55 @@ const handler = {
           }
         } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         return json({ error: 'action desconocida' }, 400);
+      }
+      // GET /admin/corte/cobros → preview de la cobranza: pedidos con precio, cortados/embalados, sin pagar,
+      // agrupados por cliente, con total + estado de ventana 24h + el mensaje armado. Admin. NO manda nada.
+      if (request.method === 'GET' && path === '/admin/corte/cobros') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let rows = [];
+        try { rows = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE precio > 0 AND estado_pago='pendiente' AND estado IN ('cortado','embalado') ORDER BY telefono, id").all()).results || []; } catch (_) {}
+        const grupos = {};
+        for (const p of rows) {
+          const k = p.telefono || ('id' + p.id);
+          if (!grupos[k]) grupos[k] = { telefono: p.telefono || '', cliente_nombre: p.cliente_nombre || '', piezas: [], total: 0 };
+          grupos[k].piezas.push({ id: p.id, diseno: p.diseno_nombre, medida: p.medida_declarada, cantidad: p.cantidad, precio: p.precio });
+          grupos[k].total += Number(p.precio) || 0;
+        }
+        const nowMs = Date.now(); const out = [];
+        for (const k of Object.keys(grupos)) {
+          const g = grupos[k];
+          let ventana = false;
+          if (g.telefono) { try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(g.telefono).first(); ventana = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 24 * 3600 * 1000); } catch (_) {} }
+          g.ventana_abierta = ventana;
+          g.mensaje = corteCobroMsg(g);
+          out.push(g);
+        }
+        return json({ ok: true, clientes: out });
+      }
+      // POST /admin/corte/cobrar → manda el cobro a los clientes seleccionados (body {telefonos:[...]}). Recalcula
+      // el total en el server (no confía en el front). Texto libre si la ventana 24h está abierta; si no, marca
+      // "necesita plantilla". Al mandar, deja los pedidos en estado_pago='cobrando' (para el vigía). Admin.
+      if (request.method === 'POST' && path === '/admin/corte/cobrar') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const tels = Array.isArray(body.telefonos) ? body.telefonos.map(t => String(t).replace(/\D/g, '')).filter(Boolean) : [];
+        if (!tels.length) return json({ error: 'sin telefonos' }, 400);
+        const nowIso = new Date().toISOString(); const nowMs = Date.now(); const res = [];
+        for (const tel of tels) {
+          let rows = [];
+          try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago='pendiente' AND estado IN ('cortado','embalado')").bind(tel).all()).results || []; } catch (_) {}
+          if (!rows.length) { res.push({ tel, ok: false, error: 'nada para cobrar' }); continue; }
+          const g = { telefono: tel, cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+          let ventana = false;
+          try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ventana = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 24 * 3600 * 1000); } catch (_) {}
+          if (!ventana) { res.push({ tel, ok: false, error: 'ventana cerrada (necesita plantilla)', total: g.total }); continue; }
+          const r = await corteSend(env, tel, corteCobroMsg(g));
+          if (r && r.ok) {
+            try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE telefono=? AND estado_pago='pendiente' AND estado IN ('cortado','embalado')").bind(nowIso, tel).run(); } catch (_) {}
+            res.push({ tel, ok: true, total: g.total });
+          } else { res.push({ tel, ok: false, error: 'no se pudo enviar', total: g.total }); }
+        }
+        return json({ ok: true, resultados: res });
       }
       // POST /admin/corte/run  →  dispara el bot de corte a mano (diagnóstico). Admin. Devuelve el estado.
       if (request.method === 'POST' && path === '/admin/corte/run') {

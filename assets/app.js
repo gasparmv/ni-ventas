@@ -2736,6 +2736,31 @@ function corteDetalleHtml(p) {
       ${adminEstado}
     </div>`;
 }
+function renderCorteCobros() {
+  const cs = STATE.corteCobros; // undefined = cargando
+  if (cs === undefined) return '<div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:16px;margin-bottom:16px;color:var(--fg-mute)">Cargando cobranza…</div>';
+  if (!cs.length) return '<div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:16px;margin-bottom:16px">Nada para cobrar por ahora (pedidos cortados con precio, sin pagar). <button class="btn ghost" data-corte-cobrar-cerrar style="margin-left:8px">cerrar</button></div>';
+  const enVentana = cs.filter(c => c.ventana_abierta).length;
+  return `
+    <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:16px;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-size:15px;font-weight:700">💰 Cobranza de la semana · ${cs.length} cliente${cs.length === 1 ? '' : 's'}</div>
+        <button class="btn ghost" data-corte-cobrar-cerrar>✕</button>
+      </div>
+      ${cs.map(c => `
+        <div style="border-top:1px solid var(--border);padding:10px 0">
+          <label style="display:flex;gap:8px;align-items:flex-start;cursor:${c.ventana_abierta ? 'pointer' : 'not-allowed'}">
+            <input type="checkbox" class="corte-cobro-chk" data-tel="${escapeHtml(c.telefono)}" ${c.ventana_abierta ? 'checked' : 'disabled'} style="margin-top:3px">
+            <div style="flex:1">
+              <div style="font-weight:700">${escapeHtml(c.cliente_nombre || c.telefono || 'cliente')} <span style="color:#22c55e">$${Number(c.total).toLocaleString('es-AR')}</span>${c.ventana_abierta ? '' : ' <span style="color:#FFA726;font-size:11px">· fuera de ventana (necesita plantilla)</span>'}</div>
+              <div style="font-size:12px;color:var(--fg-mute);white-space:pre-wrap;margin-top:4px">${escapeHtml(c.mensaje || '')}</div>
+            </div>
+          </label>
+        </div>`).join('')}
+      <button class="btn" data-corte-cobrar-enviar style="margin-top:12px">Enviar cobros seleccionados</button>
+      ${enVentana < cs.length ? `<div style="font-size:11px;color:#FFA726;margin-top:8px">${cs.length - enVentana} cliente(s) fuera de la ventana de 24h — esos necesitan una plantilla de Meta (los dejamos para después).</div>` : ''}
+    </div>`;
+}
 function renderCorte() {
   const pedidos = STATE.cortePedidos || [];
   const info = corteRolInfo();
@@ -2799,7 +2824,9 @@ function renderCorte() {
         <h1 style="margin:0;font-size:20px">✂ Servicio de corte</h1>
         <span style="font-size:11px;background:rgba(124,58,237,.14);color:#7c3aed;padding:2px 8px;border-radius:10px;font-weight:700">Etapa 1 · operativo</span>
       </div>
-      <p style="color:var(--fg-mute);font-size:13px;margin:0 0 18px">Tocá un pedido para ver el detalle y moverlo de etapa. Emma carga medidas → Aníbal corta → Neyen embala.</p>
+      <p style="color:var(--fg-mute);font-size:13px;margin:0 0 14px">Tocá un pedido para ver el detalle y moverlo de etapa. Emma carga medidas → Aníbal corta → Neyen embala.</p>
+      <button class="btn" data-corte-cobrar-abrir style="margin-bottom:16px">💰 Cobrar la semana</button>
+      ${STATE.corteCobrosView ? renderCorteCobros() : ''}
       ${sel ? corteDetalleHtml(sel) : ''}
       <div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin-bottom:8px">Tablero de pedidos <span style="text-transform:none;color:var(--fg-mute)">· ${pedidos.length} en curso</span></div>
       <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:12px;margin-bottom:22px">
@@ -2871,6 +2898,27 @@ async function bindCorte() {
       corteBulk('embalado_bulk', { telefono: btn.getAttribute('data-corte-embalar-tel'), entrega: r ? r.value : 'retira' });
     };
   });
+  // Cobranza de la semana (admin)
+  const cobrarAbrir = document.querySelector('[data-corte-cobrar-abrir]');
+  if (cobrarAbrir) cobrarAbrir.onclick = async () => {
+    STATE.corteCobrosView = true; STATE.corteCobros = undefined; render();
+    try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/cobros', { headers: authHeaders() }).then(x => x.json()); STATE.corteCobros = (r && r.clientes) || []; } catch (_) { STATE.corteCobros = []; }
+    render();
+  };
+  const cobrarCerrar = document.querySelector('[data-corte-cobrar-cerrar]');
+  if (cobrarCerrar) cobrarCerrar.onclick = () => { STATE.corteCobrosView = false; render(); };
+  const cobrarEnviar = document.querySelector('[data-corte-cobrar-enviar]');
+  if (cobrarEnviar) cobrarEnviar.onclick = async () => {
+    const tels = [...document.querySelectorAll('.corte-cobro-chk:checked')].map(c => c.getAttribute('data-tel')).filter(Boolean);
+    if (!tels.length) { toast('Seleccioná al menos un cliente'); return; }
+    cobrarEnviar.disabled = true; cobrarEnviar.textContent = 'Enviando…';
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/corte/cobrar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ telefonos: tels }) }).then(x => x.json());
+      const okN = ((r && r.resultados) || []).filter(x => x.ok).length;
+      toast('Cobros enviados: ' + okN + '/' + tels.length);
+      STATE.corteCobrosView = false; STATE.corteCobros = undefined; STATE.cortePedidos = undefined; STATE._corteLoading = false; render();
+    } catch (_) { toast('Error de red'); cobrarEnviar.disabled = false; cobrarEnviar.textContent = 'Enviar cobros seleccionados'; }
+  };
 }
 async function corteBulk(action, extra) {
   try {
