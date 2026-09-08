@@ -2665,10 +2665,11 @@ function cortePrecioPreview(ped) {
   else el.textContent = '';
 }
 function corteCardHtml(p, clickable) {
+  const verPrecio = !isProduccionUser(STATE.user); // Aníbal/Neyen NO ven precios (es data de venta)
   return `<div ${clickable ? `data-corte-card="${p.id}" style="cursor:pointer"` : ''} style="font-size:12px;padding:7px;border:1px solid var(--border);border-radius:5px;margin-bottom:5px;background:var(--ink-100)">
     <b>${escapeHtml(p.cliente_nombre || '')}</b><br>
     <span style="color:var(--fg-mute)">${escapeHtml(p.diseno_nombre || '')}${p.medida_declarada ? ' · ' + escapeHtml(p.medida_declarada) : ''}</span>
-    ${p.precio ? `<br><span style="color:#22c55e;font-weight:700">$${Number(p.precio).toLocaleString('es-AR')}</span>` : ''}
+    ${verPrecio && p.precio ? `<br><span style="color:#22c55e;font-weight:700">$${Number(p.precio).toLocaleString('es-AR')}</span>` : ''}
   </div>`;
 }
 // Detalle de un pedido con la acción según rol/estado.
@@ -2715,7 +2716,7 @@ function corteDetalleHtml(p) {
         <div>
           <div style="font-size:16px;font-weight:700">${escapeHtml(p.cliente_nombre || '')} — ${escapeHtml(p.diseno_nombre || 'diseño')}</div>
           <div style="font-size:13px;color:var(--fg-mute);margin-top:2px">Medida declarada: ${escapeHtml(p.medida_declarada || '—')} · Cantidad: ${cant}${p.aclaraciones ? ' · ' + escapeHtml(p.aclaraciones) : ''}</div>
-          ${p.precio ? `<div style="font-size:13px;color:#22c55e;font-weight:700;margin-top:4px">Precio: $${Number(p.precio).toLocaleString('es-AR')}${p.ancho_real ? ` (${p.ancho_real}×${p.alto_real}cm real)` : ''}</div>` : ''}
+          ${(!isProduccionUser(STATE.user)) && p.precio ? `<div style="font-size:13px;color:#22c55e;font-weight:700;margin-top:4px">Precio: $${Number(p.precio).toLocaleString('es-AR')}${p.ancho_real ? ` (${p.ancho_real}×${p.alto_real}cm real)` : ''}</div>` : ''}
           ${p.entrega ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:2px">Entrega: ${p.entrega === 'envio' ? 'envío al interior' : 'retira'}</div>` : ''}
         </div>
         <button class="btn ghost" data-corte-cerrar style="flex:0 0 auto">✕</button>
@@ -2732,12 +2733,47 @@ function renderCorte() {
   // --- Vista CONFINADA (Emma / Aníbal / Neyen): solo su cola ---
   if (info) {
     const cola = pedidos.filter(p => p.estado === info.estado);
+    const cargando = STATE.cortePedidos === undefined;
+    const vacio = (txt) => cargando ? '' : `<div style="padding:26px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px">${txt} ✨</div>`;
+    // NEYEN: agrupado por cliente (arma el paquete con todos los pedidos de una persona).
+    if (isNeyenUser(STATE.user)) {
+      const grupos = {};
+      cola.forEach(p => { const k = p.telefono || ('id' + p.id); if (!grupos[k]) grupos[k] = { nombre: p.cliente_nombre, tel: p.telefono || '', items: [] }; grupos[k].items.push(p); });
+      const gk = Object.keys(grupos);
+      return `
+        <div style="padding:var(--s-4);max-width:760px">
+          <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — Para embalar</h1>
+          <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">${cola.length} pieza${cola.length === 1 ? '' : 's'} · ${gk.length} paquete${gk.length === 1 ? '' : 's'} (por cliente)${cargando ? ' · cargando…' : ''}</p>
+          ${gk.length ? gk.map(k => { const g = grupos[k]; return `
+            <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
+              <div style="font-size:15px;font-weight:700;margin-bottom:8px">${escapeHtml(g.nombre || 'cliente')} <span style="color:var(--fg-mute);font-weight:400;font-size:12px">· ${g.items.length} pieza${g.items.length === 1 ? '' : 's'}</span></div>
+              ${g.items.map(p => `<div style="font-size:13px;color:var(--fg-mute);padding:2px 0">• ${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ' — ' + escapeHtml(p.medida_declarada) : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</div>`).join('')}
+              <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+                <label style="margin-right:16px;cursor:pointer"><input type="radio" name="entrega-${escapeHtml(k)}" value="retira" checked> Retira</label>
+                <label style="cursor:pointer"><input type="radio" name="entrega-${escapeHtml(k)}" value="envio"> Envío</label>
+                <button class="btn" data-corte-embalar-tel="${escapeHtml(g.tel)}" style="margin-top:10px;display:block">📦 Marcar paquete embalado</button>
+              </div>
+            </div>`; }).join('') : vacio('No hay nada para embalar')}
+        </div>`;
+    }
+    // ANÍBAL: lista + botón "marcar todos como cortados".
+    if (isAnibalUser(STATE.user)) {
+      return `
+        <div style="padding:var(--s-4);max-width:760px">
+          <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — Para cortar</h1>
+          <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">${cola.length} pedido${cola.length === 1 ? '' : 's'} para cortar${cargando ? ' · cargando…' : ''}</p>
+          ${cola.length ? `<button class="btn" data-corte-cortar-todos style="margin-bottom:14px">🪚 Marcar todos como cortados (${cola.length})</button>` : ''}
+          ${sel && sel.estado === info.estado ? corteDetalleHtml(sel) : ''}
+          ${cola.length ? cola.map(p => corteCardHtml(p, true)).join('') : vacio('No hay nada para cortar')}
+        </div>`;
+    }
+    // EMMA (disenador): un pedido por vez, con el form de medidas.
     return `
       <div style="padding:var(--s-4);max-width:760px">
         <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — ${info.titulo}</h1>
-        <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">${cola.length} pedido${cola.length === 1 ? '' : 's'} en tu cola${STATE.cortePedidos === undefined ? ' · cargando…' : ''}</p>
+        <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">${cola.length} pedido${cola.length === 1 ? '' : 's'} en tu cola${cargando ? ' · cargando…' : ''}</p>
         ${sel && sel.estado === info.estado ? corteDetalleHtml(sel) : ''}
-        ${cola.length ? cola.map(p => corteCardHtml(p, true)).join('') : (STATE.cortePedidos === undefined ? '' : '<div style="padding:26px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px">No hay pedidos en tu cola por ahora ✨</div>')}
+        ${cola.length ? cola.map(p => corteCardHtml(p, true)).join('') : vacio('No hay pedidos en tu cola por ahora')}
       </div>`;
   }
   // --- Vista ADMIN (Gaspar): board completo + detalle + alumnos ---
@@ -2814,6 +2850,24 @@ async function bindCorte() {
   const ai = document.getElementById('corte-ancho'), ali = document.getElementById('corte-alto');
   if (ai || ali) { const sel = (STATE.cortePedidos || []).find(p => p.id === STATE.corteSelected); if (sel) { const upd = () => cortePrecioPreview(sel); if (ai) ai.oninput = upd; if (ali) ali.oninput = upd; } }
   document.querySelectorAll('[data-corte-accion]').forEach(btn => { btn.onclick = () => corteAccion(btn.getAttribute('data-corte-accion'), parseInt(btn.getAttribute('data-ped'), 10)); });
+  // Aníbal: marcar TODA la tanda como cortada.
+  const cortarTodos = document.querySelector('[data-corte-cortar-todos]');
+  if (cortarTodos) cortarTodos.onclick = () => corteBulk('cortado_bulk', {});
+  // Neyen: embalar el paquete completo de un cliente (con su entrega).
+  document.querySelectorAll('[data-corte-embalar-tel]').forEach(btn => {
+    btn.onclick = () => {
+      const cont = btn.parentElement;
+      const r = cont ? cont.querySelector('input[type=radio]:checked') : null;
+      corteBulk('embalado_bulk', { telefono: btn.getAttribute('data-corte-embalar-tel'), entrega: r ? r.value : 'retira' });
+    };
+  });
+}
+async function corteBulk(action, extra) {
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/pedido', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...extra }) }).then(x => x.json());
+    if (r && r.ok) { toast('Listo ✓ (' + (r.n || 0) + ')'); STATE.corteSelected = null; STATE.cortePedidos = undefined; STATE._corteLoading = false; render(); }
+    else { toast((r && r.error) || 'No se pudo'); }
+  } catch (_) { toast('Error de red'); }
 }
 async function corteAccion(accion, id) {
   const body = { id, action: accion };

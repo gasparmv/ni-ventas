@@ -15462,13 +15462,26 @@ const handler = {
         const _role = await getSessionRole(env, session.user);
         if (!['admin', 'disenador', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
         let body; try { body = await request.json(); } catch { body = {}; }
-        const id = parseInt(body.id, 10);
-        if (!id) return json({ error: 'falta id' }, 400);
         const action = String(body.action || '');
-        const ped = await env.DB.prepare("SELECT * FROM corte_pedidos WHERE id=?").bind(id).first();
-        if (!ped) return json({ error: 'pedido no existe' }, 404);
         const nowIso = new Date().toISOString();
         const _slug = String(session.user || '').toLowerCase();
+        // Acciones MASIVAS (sin id puntual): Aníbal corta toda la tanda; Neyen embala el paquete de un cliente.
+        if (action === 'cortado_bulk') {
+          if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
+          try { const rr = await env.DB.prepare("UPDATE corte_pedidos SET estado='cortado', productor=?, updated_at=? WHERE estado='matriz_lista'").bind(_slug, nowIso).run(); return json({ ok: true, action, n: (rr.meta && rr.meta.changes) || 0 }); } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        }
+        if (action === 'embalado_bulk') {
+          if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
+          const tel = String(body.telefono || '').replace(/\D/g, '');
+          if (!tel) return json({ error: 'falta telefono' }, 400);
+          const entrega = (String(body.entrega || '') === 'envio') ? 'envio' : 'retira';
+          try { const rr = await env.DB.prepare("UPDATE corte_pedidos SET estado='embalado', entrega=?, updated_at=? WHERE estado='cortado' AND telefono=?").bind(entrega, nowIso, tel).run(); return json({ ok: true, action, n: (rr.meta && rr.meta.changes) || 0 }); } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        }
+        // Acciones sobre un pedido puntual (requieren id).
+        const id = parseInt(body.id, 10);
+        if (!id) return json({ error: 'falta id' }, 400);
+        const ped = await env.DB.prepare("SELECT * FROM corte_pedidos WHERE id=?").bind(id).first();
+        if (!ped) return json({ error: 'pedido no existe' }, 404);
         try {
           if (action === 'medidas') {
             if (!['admin', 'disenador'].includes(_role)) return json({ error: 'solo el diseñador' }, 403);
