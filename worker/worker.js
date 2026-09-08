@@ -6772,6 +6772,48 @@ async function guiaProduccionOnInbound(env, phone, msgBody) {
   try { await env.DB.prepare("UPDATE wa_autoreply_log SET status='sent', sent_at=? WHERE phone=? AND kind='guia_produccion'").bind(new Date().toISOString(), phone).run(); } catch (_) {}
 }
 
+// Al terminar el evento: reporte a Gaspar + Bruno con la cantidad de guías enviadas.
+// Gate por kv 'guia_produccion_reporte_at' (ISO UTC; Gaspar pidió DESPUÉS de las 19hs AR).
+// Dedup POR NÚMERO (kv 'guia_reporte_sent' = lista de teléfonos ya entregados): reintenta en
+// cada tick con el que todavía no lo recibió (p.ej. su ventana de 24h estaba cerrada) sin
+// re-spamear al que ya lo tiene. La cuenta es estable a esa hora (la automatización ya está
+// apagada por el deadline), así que el número no cambia entre reintentos.
+async function maybeGuiaReporte(env) {
+  try {
+    const at = await kvGet(env, 'guia_produccion_reporte_at', '');
+    if (!at || Date.now() < Date.parse(at)) return;
+    const doneRaw = await kvGet(env, 'guia_reporte_sent', '');
+    const done = new Set((doneRaw || '').split(',').filter(Boolean));
+    if (REPORTE_DIARIO_PHONES.every(p => done.has(p))) return; // ya llegó a los dos
+    const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_autoreply_log WHERE kind='guia_produccion' AND status='sent'").first();
+    const n = (row && row.n) || 0;
+    const msg = `📘 Guía de Producción — evento de hoy\n\nSe enviaron ${n} guía${n === 1 ? '' : 's'} automáticamente a quienes la pidieron.`;
+    for (const ph of REPORTE_DIARIO_PHONES) {
+      if (done.has(ph)) continue;
+      let r = null;
+      try { r = await waSendText(env, ph, msg); } catch (_) {}
+      if (r && r.ok) done.add(ph);
+    }
+    await kvSet(env, 'guia_reporte_sent', Array.from(done).join(','));
+  } catch (_) {}
+}
+
+// A partir del jueves 18hs AR: las conversaciones de la guía que siguen OCULTAS pasan a la
+// bandeja de Abril (inbox='cursos'), así ella las ve. Gate por kv 'guia_produccion_reveal_at'
+// (ISO UTC). Solo tocamos las que siguen en 'oculto' (si un humano ya la movió a otra bandeja,
+// la respetamos). Dedup: kv 'guia_reveal_done' (corre una sola vez; el UPDATE ya es idempotente).
+async function maybeGuiaReveal(env) {
+  try {
+    if ((await kvGet(env, 'guia_reveal_done', '')) === '1') return;
+    const at = await kvGet(env, 'guia_produccion_reveal_at', '');
+    if (!at || Date.now() < Date.parse(at)) return;
+    await env.DB.prepare(
+      "UPDATE wa_chats_summary SET inbox='cursos', updated_at=? WHERE inbox='oculto' AND phone IN (SELECT phone FROM wa_autoreply_log WHERE kind='guia_produccion')"
+    ).bind(new Date().toISOString()).run();
+    await kvSet(env, 'guia_reveal_done', '1');
+  } catch (_) {}
+}
+
 // Auto-respuesta a los leads de CORPÓREO: cuando mandan el mensaje canned del ad
 // ("Hola! Quiero cotizar un cartel corporeo") les pedimos los 3 datos (foto, medidas,
 // int/ext) — lo mismo que releva el bot de neón — pero como texto fijo. El corpóreo se
@@ -16377,6 +16419,12 @@ const handler = {
     if (hAR === 21) ctx.waitUntil(maybeReporteHoras(env));
     // Reporte diario de la campaña MiniSupernova a las 21:00 AR (a Gaspar + Bruno). Dedup por día adentro.
     if (hAR === 21) ctx.waitUntil(maybeReporteMiniSupernova(env));
+    // Guía de Producción (evento 8-sep): (1) reporte a Gaspar+Bruno con la cantidad de guías
+    // enviadas, DESPUÉS de las 19hs AR; (2) a partir del JUEVES 18hs AR, las conversaciones
+    // ocultas de la guía pasan a la bandeja de Abril (cursos). Ambas gateadas por kv de tiempo
+    // absoluto (guia_produccion_reporte_at / _reveal_at) + dedup adentro, así corren en cualquier tick.
+    ctx.waitUntil(maybeGuiaReporte(env));
+    ctx.waitUntil(maybeGuiaReveal(env));
     // Aviso "leads para llamar" (fup 1 del presupuesto sin respuesta) a las 9 AR.
     if (hAR === 9) ctx.waitUntil(maybeReporteLlamar(env));
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
