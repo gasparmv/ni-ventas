@@ -6747,6 +6747,15 @@ async function guiaProduccionOnInbound(env, phone, msgBody) {
     try { await env.DB.prepare("DELETE FROM wa_autoreply_log WHERE phone = ? AND kind = 'guia_produccion'").bind(phone).run(); } catch (_) {}
     return;
   }
+  // Las conversaciones NUEVAS que arrancan por esta automatización NO deben ensuciar ninguna bandeja
+  // → las ocultamos (inbox='oculto'). GUARD: NO ocultamos si un humano ya la está atendiendo (hay un
+  // outbound automated=0) ni si ya está asignada a una bandeja (cursos/privado). Si el contacto es
+  // nuevo (no hay fila), la crea directamente oculta.
+  try {
+    await env.DB.prepare(
+      "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO UPDATE SET inbox='oculto', updated_at=excluded.updated_at WHERE wa_chats_summary.inbox NOT IN ('oculto','cursos','privado') AND NOT EXISTS (SELECT 1 FROM wa_messages h WHERE h.phone = wa_chats_summary.phone AND h.direction='outbound' AND h.automated=0 AND h.msg_type <> 'status')"
+    ).bind(phone, new Date().toISOString()).run();
+  } catch (_) {}
   const logMsg = async (wamid, type, bodyTxt, mediaKey) => {
     try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, automated) VALUES (?, ?, 'outbound', ?, '', ?, ?, ?, '', 'sent', 1)").bind(new Date().toISOString(), wamid || ('guia-' + phone + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)), phone, type, bodyTxt, mediaKey || '').run(); } catch (_) {}
   };
