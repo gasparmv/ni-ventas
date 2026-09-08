@@ -2338,7 +2338,9 @@ async function processPrecotizPilot(env) {
       await precotizTag(env, lead.phone, false);
       await paraCotizarTag(env, lead.phone, true);   // entra a la bandeja "Para cotizar" de Joaco
       await precotizMarcarNoLeido(env, lead.phone);  // no leído -> sube arriba de todo
-      await precotizNotifyGaspar(env, `termino la pre cotizacion de ${lead.nombre || lead.phone}\nya tiene foto y medidas${tI ? ' e interior/exterior' : ' (falta confirmar interior/exterior, el cliente no lo tenia definido)'}\npaso a la bandeja para que lo cotice Joaco`);
+      // Aviso de "terminó la precotización" DESACTIVADO (pedido Gaspar 7-sep): no quiere que le
+      // avisen cada vez que un lead pasa a la bandeja de Joaco (ya lo ve en "Para cotizar"). Solo
+      // quiere el aviso de FRENO DE MANO (ese sigue, más arriba).
       continue;
     }
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
@@ -2483,7 +2485,7 @@ async function processPrecotizPilot(env) {
       await precotizTag(env, phone, false);
       await paraCotizarTag(env, phone, true);   // entra a la bandeja "Para cotizar" de Joaco
       await precotizMarcarNoLeido(env, phone);  // no leído -> sube arriba de todo
-      await precotizNotifyGaspar(env, `termino la pre cotizacion de ${phone} (vino con todo)\npaso a la bandeja para Joaco`);
+      // Aviso de "terminó la precotización" DESACTIVADO (pedido Gaspar 7-sep): solo freno de mano.
       continue;
     }
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
