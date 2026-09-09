@@ -11232,6 +11232,35 @@ const handler = {
       } catch (e) { return errHtml('Error al canjear el código: ' + String((e && e.message) || e)); }
     }
 
+    // ===== Páginas públicas (home + privacidad) =====
+    // Requeridas por Google para publicar la app OAuth a producción (deben vivir en el
+    // dominio autorizado). Describen el software y el uso del acceso a Google Drive.
+    if (request.method === 'GET' && (path === '/' || path === '/inicio')) {
+      const html = '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Neon Infinito · Software</title>'
+        + '<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px;margin:0 auto;padding:48px 24px;line-height:1.6;color:#111}h1{margin-bottom:4px}h2{margin-top:32px}.muted{color:#666}a{color:#1a56db}</style></head><body>'
+        + '<h1>Neon Infinito · Software interno</h1>'
+        + '<p class="muted">Herramienta de gestión interna de Neon Infinito (carteles de neón LED y servicio de corte de acrílicos, Argentina).</p>'
+        + '<h2>Qué es</h2><p>Es el sistema privado que Neon Infinito usa para tomar y organizar los pedidos del servicio de corte, coordinar el trabajo del equipo de producción y respaldar los archivos de diseño de cada tanda.</p>'
+        + '<h2>Uso de Google Drive</h2><p>El software guarda una copia de respaldo de los archivos de diseño y de las placas cortadas en carpetas de Google Drive de la propia cuenta de Neon Infinito. Solo escribe esos archivos de trabajo; no accede a otros datos personales ni los comparte con terceros.</p>'
+        + '<h2>Contacto</h2><p>neoninfinitok@gmail.com</p>'
+        + '<p class="muted"><a href="/privacy">Política de privacidad</a></p>'
+        + '</body></html>';
+      return new Response(html, { status: 200, headers: { ...cors(), 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+    if (request.method === 'GET' && (path === '/privacy' || path === '/privacidad')) {
+      const html = '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Política de privacidad · Neon Infinito</title>'
+        + '<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px;margin:0 auto;padding:48px 24px;line-height:1.6;color:#111}h1{margin-bottom:4px}h2{margin-top:28px}.muted{color:#666}a{color:#1a56db}</style></head><body>'
+        + '<h1>Política de privacidad</h1><p class="muted">Neon Infinito · Software interno — última actualización: septiembre 2026</p>'
+        + '<p>Esta aplicación es una herramienta interna de Neon Infinito para gestionar el servicio de corte de acrílicos y respaldar sus archivos de trabajo. La usa el propio equipo de Neon Infinito; no está destinada al público general.</p>'
+        + '<h2>Datos de Google que utilizamos</h2><p>Cuando autorizás el acceso, la aplicación usa el permiso de Google Drive (<code>drive</code>) con un único fin: crear y guardar los archivos de diseño y de placas cortadas de cada tanda en carpetas de Google Drive de la propia cuenta de Neon Infinito. La aplicación no lee ni recopila tu correo, tus contactos ni otros archivos ajenos a esa función.</p>'
+        + '<h2>Cómo usamos y protegemos los datos</h2><p>Los archivos se almacenan en la cuenta de Google de Neon Infinito y en la infraestructura del propio software (Cloudflare). Se usan exclusivamente para la operación interna del servicio de corte. No vendemos, alquilamos ni compartimos los datos de Google del usuario con terceros, y no los usamos para publicidad. El acceso a Google Drive se limita al mínimo necesario para respaldar los archivos de trabajo.</p>'
+        + '<h2>Uso limitado (Google API Services)</h2><p>El uso de la información recibida de las APIs de Google por parte de esta aplicación se ajusta a la <a href="https://developers.google.com/terms/api-services-user-data-policy" rel="noopener">Política de datos de usuario de los servicios de las API de Google</a>, incluidos los requisitos de Uso limitado.</p>'
+        + '<h2>Cómo revocar el acceso</h2><p>Podés revocar el permiso en cualquier momento desde <a href="https://myaccount.google.com/permissions" rel="noopener">la configuración de tu Cuenta de Google</a>.</p>'
+        + '<h2>Contacto</h2><p>Ante cualquier consulta: neoninfinitok@gmail.com</p>'
+        + '</body></html>';
+      return new Response(html, { status: 200, headers: { ...cors(), 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+
     if (path.startsWith('/admin/')) {
       // Allow token via query param for resources loaded by <img>, <audio>, etc.
       let session = await getSession(env, request);
