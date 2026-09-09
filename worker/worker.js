@@ -16352,7 +16352,12 @@ const handler = {
     ctx.waitUntil(processAutoReplyQueue(env));
     // Espejo de pedidos al Excel de Ventas (gateado por flag kv 'pedidos_mirror_on';
     // no hace nada hasta que se active tras deployar el Apps Script).
-    ctx.waitUntil(processPedidosMirror(env));
+    // SOLO en el cron de cada minuto (*/1): en ambos crons (*/1 y */5), los minutos múltiplos de 5
+    // lo disparaban 2× EN PARALELO y, como el APPEND de un pedido nuevo (sheet_row=0) no tiene
+    // reserva atómica (a diferencia del write-back, que sí chequea updated_at), apendeaba el mismo
+    // pedido DOS veces → filas duplicadas en el Sheet (caso corpóreo LOOP #359, 8-sep). Gatearlo a
+    // un cron lo evita, sin perder latencia (igual corre cada minuto). Mismo criterio que el piloto.
+    if (event.cron === '* * * * *') ctx.waitUntil(processPedidosMirror(env));
     // Procesar respuestas pendientes del gate de feedback del minicurso:
     // espera 2 min al cliente, junta todos los mensajes, manda a la IA y decide.
     ctx.waitUntil(processMinicursoGiftPending(env));
