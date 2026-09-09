@@ -2710,6 +2710,9 @@ async function buildReporteDiario(env) {
   //    'oculto' aunque respondiera "sí/dale/link") O tiene señales del funnel en algún inbound.
   //    Sin lo del flujo, los del evento se colaban en carteles: el 04-09 metió ~262 leads de
   //    cursos en carteles (reporte decía 230 carteles cuando eran ~73). carteles = total - cursos.
+  //    Idem 08-09 con la "Guía de Producción" (evento ON LED): sus leads quedan inbox='oculto',
+  //    NO en lanzamiento_landing y su trigger no matchea keywords → se colaban en carteles (128 de
+  //    los 202). Se suman por wa_autoreply_log kind='guia_produccion' (revelan a 'cursos' el jueves).
   try {
     const r = await env.DB.prepare(
       `WITH fi AS (
@@ -2721,6 +2724,7 @@ async function buildReporteDiario(env) {
        SELECT COUNT(*) AS total,
               SUM(CASE WHEN s.inbox='cursos'
                     OR fi.phone IN (SELECT phone FROM lanzamiento_landing)
+                    OR fi.phone IN (SELECT phone FROM wa_autoreply_log WHERE kind='guia_produccion')
                     OR EXISTS(
                     SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction='inbound' AND (
                       lower(m.body) LIKE '%el regalo%' OR lower(m.body) LIKE '%al grupo%'
