@@ -2817,10 +2817,11 @@ async function maybeReporteDiario(env) {
     const d = await buildReporteDiario(env);
     const fechaDisplay = fechaAR.split('-').reverse().join('/');
     // Plantilla (se entrega fuera de la ventana de 24h de WhatsApp). Cadena de fallback:
-    // reporte_diario_ventas2 (11 vars, incluye Órdenes de compra) → reporte_diario_ventas
-    // (10 vars, la vieja, por si la v2 todavía no la aprobó Meta) → texto libre (en ventana).
+    // reporte_diario_ventas4 (11 vars, "Facu" en vez de "Nadia") → reporte_diario_ventas3 (11 vars,
+    // igual pero dice "Nadia"; se usa hasta que Meta apruebe la v4) → reporte_diario_ventas (10 vars,
+    // sin Órdenes de compra) → texto libre (solo en ventana; ese ya dice "Facundo").
     // Var {{3}} (carteles): si hubo corpóreas, mostramos el desglose inline (ej "62 (39 corp)")
-    // para que se vea en la plantilla SIN cambiarle las variables (reporte_diario_ventas3).
+    // para que se vea en la plantilla SIN cambiarle las variables.
     const cartVar = d.corporeas > 0 ? `${d.cartelesNeon} (${d.corporeas} corp)` : String(d.carteles);
     const params11 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia, d.ocEnviadas].map(String);
     const params10 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
@@ -2828,7 +2829,8 @@ async function maybeReporteDiario(env) {
     let anyOk = false;
     for (const ph of REPORTE_DIARIO_PHONES) {
       let r = null;
-      try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas3', 'es_AR', params11); } catch (_) {}
+      try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas4', 'es_AR', params11); } catch (_) {}
+      if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas3', 'es_AR', params11); } catch (_) {} }
       if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas', 'es_AR', params10); } catch (_) {} }
       if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} } // fallback: texto libre (solo llega si la ventana de 24h está abierta)
       if (r && r.ok) anyOk = true;
