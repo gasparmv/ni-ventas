@@ -15731,7 +15731,10 @@ function renderBriefDrawer() {
   // El cartel se considera "sin luz" (acabados opacos) solo si TODAS las secciones son sin luz.
   const corpSinLuz = esCorpBrief && corpSecs.length > 0 && corpSecs.every(s => String(s.con_luz) === '0');
   const corpPr = esCorpBrief ? calcCorporeaTotal(corpSecs) : null;
-  const corpAc = (field, val, l0, l1) => corpSinLuz ? '<span class="pill" style="font-size:11px">opaco</span>' : `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="translucido" ${String(val||'').startsWith('transl')?'selected':''}>${l0}</option><option value="opaco" ${!String(val||'').startsWith('transl')?'selected':''}>${l1}</option></select>`;
+  // Wrapper [data-corp-acabado] para poder refrescar el acabado en vivo cuando cambia la
+  // iluminación (ver refreshCorpAcabados). corpAcabadoHtml es la fuente única del HTML (pill vs
+  // select) y de las etiquetas por cara. Los args l0/l1 quedan por compat de las llamadas (se ignoran).
+  const corpAc = (field, val) => `<span data-corp-acabado="${field}" style="display:block">${corpAcabadoHtml(field, val, corpSinLuz)}</span>`;
   const corpColorSel = (field, val) => {
     const baseKeys = Object.keys(CORP_COLOR_MAP);
     // Solo el FRENTE ofrece "Replicar diseño" (gráfica impresa full color).
@@ -16168,9 +16171,36 @@ function corpPriceBoxHtml(r) {
   const adminExtra = isAdmin()
     ? (multi ? ` · ${secs.length} secciones`
       : (secs && secs[0] ? ` · costo ${fmtMoney(r.costo || 0)} · ×${secs[0].margen}`
-        : (r.costo != null ? ` · costo ${fmtMoney(r.costo)} · ×${r.margen}` : '')))
+        : (r.costo != null && r.margen != null ? ` · costo ${fmtMoney(r.costo)} · ×${r.margen}` : '')))
     : '';
   return `<div style="padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final${multi ? ` (${secs.length} secciones)` : ''}</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${m2.toLocaleString('es-AR', { maximumFractionDigits: 2 })} m²${adminExtra}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(precio * 0.03))}</div></div>${breakdown}</div>`;
+}
+// Etiquetas de acabado por cara (la espalda va en femenino). Fuente única para el render inicial
+// (corpAc) y para el refresh en vivo (refreshCorpAcabados).
+const CORP_ACABADO_LABELS = { frente_acabado: ['Translúcido', 'Opaco'], lat_acabado: ['Translúcido', 'Opaco'], esp_acabado: ['Translúcida', 'Opaca'] };
+// HTML de UN acabado: pill fija "opaco" si el cartel es sin luz (un frente translúcido solo sirve
+// con luz atrás), o el <select> translúcido/opaco si tiene luz. Cuando NO hay luz, es un pill SIN
+// [data-corp-bf], así que el guardado ya fuerza opaco por su cuenta.
+function corpAcabadoHtml(field, val, sinLuz) {
+  if (sinLuz) return '<span class="pill" style="font-size:11px">opaco</span>';
+  const lbls = CORP_ACABADO_LABELS[field] || ['Translúcido', 'Opaco'];
+  const t = String(val || '').startsWith('transl');
+  return `<select data-corp-bf="${field}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"><option value="translucido" ${t ? 'selected' : ''}>${lbls[0]}</option><option value="opaco" ${!t ? 'selected' : ''}>${lbls[1]}</option></select>`;
+}
+// Refresca los acabados en vivo cuando cambia la iluminación de alguna sección (o se agrega/quita
+// una), SIN re-render del drawer (no pierde lo que se está cargando). Al pasar a "con luz" los
+// acabados dejan de ser pill y se vuelven <select> (default translúcido, que es lo que se busca al
+// iluminar); si TODAS quedan "sin luz", vuelven a pill "opaco". Sin esto, cambiar la iluminación no
+// desbloqueaba los acabados hasta guardar y reabrir — el chat quedaba "sin poder editarse".
+function refreshCorpAcabados() {
+  const secs = readCorpSeccionesDom();
+  const sinLuz = secs.length > 0 && secs.every(s => String(s.con_luz) === '0');
+  document.querySelectorAll('[data-corp-acabado]').forEach(wrap => {
+    const field = wrap.getAttribute('data-corp-acabado');
+    const curSel = wrap.querySelector('[data-corp-bf]');
+    const curVal = curSel ? curSel.value : 'translucido';
+    wrap.innerHTML = corpAcabadoHtml(field, curVal, sinLuz);
+  });
 }
 // Recalcula el precio del drawer corpóreo en vivo (sin re-render, mantiene foco).
 function updateCorpDrawerPrice() {
@@ -16184,7 +16214,11 @@ document.addEventListener('input', (ev) => {
 });
 document.addEventListener('change', (ev) => {
   const t = ev.target;
-  if (t && t.matches && t.matches('[data-corp-bf="con_luz"],[data-corp-bf="frente_material"],[data-sec-field="con_luz"],[data-sec-field="frente_material"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+  if (!t || !t.matches || !document.getElementById('corp-price-box')) return;
+  // Al cambiar la iluminación, primero desbloquear/bloquear los acabados (pill ↔ select) y después
+  // recalcular el precio.
+  if (t.matches('[data-sec-field="con_luz"],[data-corp-bf="con_luz"]')) refreshCorpAcabados();
+  if (t.matches('[data-corp-bf="con_luz"],[data-corp-bf="frente_material"],[data-sec-field="con_luz"],[data-sec-field="frente_material"]')) updateCorpDrawerPrice();
 });
 // Agregar / quitar secciones del drawer corpóreo (sin re-render: preserva los otros valores).
 document.addEventListener('click', (ev) => {
@@ -16197,6 +16231,7 @@ document.addEventListener('click', (ev) => {
       const row = tmp.firstElementChild;
       if (row) cont.appendChild(row);
       cont.querySelectorAll('[data-corp-sec-row] [data-corp-sec-remove]').forEach(b => { b.style.visibility = 'visible'; });
+      refreshCorpAcabados();   // la sección nueva arranca "con luz" → puede destrabar los acabados
       updateCorpDrawerPrice();
     }
     return;
@@ -16209,6 +16244,7 @@ document.addEventListener('click', (ev) => {
       row.remove();
       const rows = cont.querySelectorAll('[data-corp-sec-row]');
       if (rows.length === 1) { const b = rows[0].querySelector('[data-corp-sec-remove]'); if (b) b.style.visibility = 'hidden'; }
+      refreshCorpAcabados();   // al quitar una sección puede cambiar si el cartel queda todo sin luz
       updateCorpDrawerPrice();
     }
     return;
@@ -17697,16 +17733,22 @@ function readBriefDrawerForm() {
     }];
     const agg = calcCorporeaTotal(secsIn);
     const s1 = agg.secciones[0] || { ancho_cm: 0, alto_cm: 0, frente_material: 'impreso', costo_m2: 0, margen: 0 };
-    const anyLuz = agg.secciones.some(s => s.con_luz);   // el cartel "tiene luz" si CUALQUIER sección la tiene
+    // "Tiene luz" si CUALQUIER sección está marcada Con luz — mirando las secciones CRUDAS del DOM
+    // (secsIn), NO las filtradas por medida (agg.secciones). Si el usuario marcó "Con luz" pero
+    // todavía no cargó ancho/alto, igual respetamos su elección: antes la sección sin medida se
+    // descartaba → con_luz volvía a false → los acabados quedaban trabados en opaco sin poder editarse.
+    const anyLuz = secsIn.some(s => String(s.con_luz) !== '0');
     const sinLuz = !anyLuz;
     out.corporea_json = JSON.stringify({
       // Campos single top-level = SECCIÓN 1 / totales -> retrocompat de todos los lectores viejos
       // (popup, presupuesto, Sheet) y del prompt de render del worker (corporeaContexto lee estos).
       frente_material: s1.frente_material,
       con_luz: anyLuz,
-      frente_acabado: sinLuz ? 'opaco' : cf.frente_acabado, frente_color: cf.frente_color,
-      lat_acabado: sinLuz ? 'opaco' : cf.lat_acabado, lat_color: cf.lat_color,
-      esp_acabado: sinLuz ? 'opaca' : cf.esp_acabado, esp_color: cf.esp_color,
+      // Con luz: si el acabado venía como pill (sin [data-corp-bf], cf.* undefined) usamos translúcido
+      // por defecto — es lo que se busca al iluminar; el usuario lo ajusta con el select ya destrabado.
+      frente_acabado: sinLuz ? 'opaco' : (cf.frente_acabado || 'translucido'), frente_color: cf.frente_color,
+      lat_acabado: sinLuz ? 'opaco' : (cf.lat_acabado || 'translucido'), lat_color: cf.lat_color,
+      esp_acabado: sinLuz ? 'opaca' : (cf.esp_acabado || 'translucida'), esp_color: cf.esp_color,
       ancho_cm: s1.ancho_cm, alto_cm: s1.alto_cm, m2: agg.m2,
       costo_m2: s1.costo_m2, margen: s1.margen, costo: agg.costo, precio: agg.precio,
       comision_joaco: agg.comision_joaco,
