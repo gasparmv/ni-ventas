@@ -5244,11 +5244,15 @@ function nuevoCartelPedido() {
            es_corporeo:0, producto:'', frente:'', laterales:'', espalda:'', iluminacion:'con luz', bastidor:'no', colorBastidor:'', instalacion:'no' };
 }
 function suggestProximoNumero() {
-  const ps = (STATE.pedidos || []).filter(p => p.numero);
-  if (!ps.length) return '';
-  const sorted = ps.slice().sort((a,b) => (b.fecha - a.fecha) || (b.idx - a.idx));
-  const n = parseInt(sorted[0].numero, 10);
-  return isNaN(n) ? '' : n + 1;
+  // Próximo N° = MÁXIMO real + 1 (colisión-proof). Antes ordenaba por (b.fecha - a.fecha), pero
+  // fecha es un STRING ("2026-09-08") → la resta daba NaN, el orden quedaba roto y devolvía un
+  // número ya usado (por eso salieron 357/358/359 DUPLICADOS). Ignora outliers legacy (>1000:
+  // typos de imports viejos, ej. 2231/3321) que si no dispararían números absurdos.
+  const nums = (STATE.pedidos || [])
+    .map(p => parseInt(p.numero, 10))
+    .filter(n => !isNaN(n) && n < 1000);
+  if (!nums.length) return '';
+  return Math.max(...nums) + 1;
 }
 function pedidoModalTotal() {
   return ((STATE.pedidoModal && STATE.pedidoModal.carteles) || []).reduce((s,c) => s + (Number(c.precio)||0) + (Number(c.precioDimmer)||0), 0);
