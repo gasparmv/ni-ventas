@@ -8890,12 +8890,11 @@ async function analyzeImage(env, r2Key) {
 // a su WhatsApp personal eran solo para la noche del 11/06. Este interruptor
 // apaga las tres piezas (OCR, reenvío en vivo y backfill). Para reactivar todo,
 // poner PAGO_CAPTURA_ACTIVA = true.
-const PAGO_CAPTURA_ACTIVA = true;   // reactivado 06/08/2026 para el lanzamiento del curso
-// Ventana del lanzamiento: desde 18:00 AR del 06/08 hasta fin del 12/08 AR (extendida el 09/08
-// para no cortar mientras siguen entrando pagos). El corte real: apagar PAGO_CAPTURA_ACTIVA
-// cuando cierre el lanzamiento. AR = UTC-3.
-const PAGO_LANZAMIENTO_START_UTC = '2026-08-06T21:00:00.000Z';
-const PAGO_LANZAMIENTO_END_UTC   = '2026-08-13T03:00:00.000Z';
+const PAGO_CAPTURA_ACTIVA = true;   // re-apuntado 10/09/2026 para el lanzamiento de septiembre
+// Ventana del lanzamiento: desde 18:00 AR del 10/09 hasta fin del 15/09 AR (~5 días). Para cortar
+// antes cuando cierre el lanzamiento: poner PAGO_CAPTURA_ACTIVA = false. AR = UTC-3.
+const PAGO_LANZAMIENTO_START_UTC = '2026-09-10T21:00:00.000Z';
+const PAGO_LANZAMIENTO_END_UTC   = '2026-09-16T03:00:00.000Z';
 const PAGO_SENA_MIN = 30000;   // banda de la seña del acceso (~40.000 ARS)
 const PAGO_SENA_MAX = 50000;
 function isPagoLanzamientoWindow(tsIso) {
