@@ -7392,11 +7392,11 @@ async function maybeReporteHoras(env) {
 // wa_autoreply_log kind='sorteo_dia2'. Kill-switch kv sorteo_dia2_on. La lista sale
 // de la tabla sorteo_dia2 (phone, nombre), importada del Sheet del sorteo.
 // ============================================================================
-const SORTEO_DIA2_TPL = 'sorteo_evento_dia2';
-const SORTEO_DIA2_DEADLINE = '2026-08-06T17:00:00.000Z'; // 14:00 AR = límite duro de envío
+const SORTEO_DIA2_TPL = 'sorteo_evento_dia2_sep';
+const SORTEO_DIA2_DEADLINE = '2026-09-10T21:30:00.000Z'; // 18:30 AR = límite duro de envío (evento 19h, sep-2026)
 function sorteoDia2Msg(nombre) {
   const n = String(nombre || '').trim();
-  return (n ? ('buenas ' + n + '!') : 'buenas!') + ' Vimos que completaste el formulario que pasamos al final de la primera clase del evento sobre armado de carteles Neon LED. Ya estás participando del sorteo! 🎉 Recordá que el jueves 6/8 a las 19hs, al comienzo de la 2da clase, anunciamos los ganadores 🚀';
+  return (n ? ('buenas ' + n + '!') : 'buenas!') + ' Vimos que completaste el formulario que pasamos al final de la primera clase del evento sobre armado de carteles Neon LED. Ya estás participando del sorteo! 🎉 Recordá que hoy jueves 10/9 a las 19hs, al comienzo de la 2da clase, anunciamos los ganadores 🚀';
 }
 
 async function processSorteoDia2(env) {
@@ -7420,7 +7420,7 @@ async function processSorteoDia2(env) {
   try {
     const q = "SELECT s.phone AS phone, s.nombre AS nombre FROM sorteo_dia2 s " +
       "WHERE NOT EXISTS (SELECT 1 FROM wa_autoreply_log a WHERE a.phone = s.phone AND a.kind = 'sorteo_dia2') " +
-      "AND s.phone NOT IN (SELECT phone FROM wa_unreachable_phones) " + ventanaClause + "LIMIT ?";
+      "AND s.phone NOT IN (SELECT phone FROM wa_unreachable_phones) " + ventanaClause + "ORDER BY s.created_at ASC LIMIT ?";
     const stmt = tplApproved ? env.DB.prepare(q).bind(perTick) : env.DB.prepare(q).bind(ventanaCutoff, perTick);
     rows = (await stmt.all()).results || [];
   } catch (_) { return; }
