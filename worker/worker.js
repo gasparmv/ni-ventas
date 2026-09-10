@@ -10657,7 +10657,9 @@ const handler = {
                   // Landing del minicurso: respuesta al opener -> branch por IA / follow-up.
                   try { await minicursoLandingOnInbound(env, phone, ts); } catch (_) {}
                   // Landing del lanzamiento: walink → link (oculto); respuesta posterior → revelar.
-                  try { await eventoRecordatorioOnInbound(env, phone); } catch (_) {}
+                  // Las REACCIONES (emoji) NO cuentan como respuesta: no des-ocultan el chat
+                  // (si no, un like al recordatorio del sorteo llenaba la bandeja de basura).
+                  try { if (msgType !== 'reaction') await eventoRecordatorioOnInbound(env, phone); } catch (_) {}
                   // MiniSupernova ANTES que seminario: para el solapamiento alumno∩seminario (el
                   // seminario ya pasó, 29/08), cuando responde gana el reveal a 'cursos' (Abril,
                   // campaña activa) y NO el de seminario a 'privado' (que Abril no ve). El candado
