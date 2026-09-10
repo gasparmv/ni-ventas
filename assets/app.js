@@ -15777,8 +15777,11 @@ function renderBriefDrawer() {
   const corpAc = (field, val) => `<span data-corp-acabado="${field}" style="display:block">${corpAcabadoHtml(field, val, corpSinLuz)}</span>`;
   const corpColorSel = (field, val) => {
     const baseKeys = Object.keys(CORP_COLOR_MAP);
-    // Solo el FRENTE ofrece "Replicar diseño" (gráfica impresa full color).
-    const keys = (field === 'frente_color') ? [CORP_REPLICAR, ...baseKeys] : baseKeys;
+    // FRENTE y LATERALES ofrecen "Replicar diseño". En el frente = gráfica impresa
+    // full color. En los laterales = los cantos replican esa misma gráfica/colores del
+    // frente (para logos multicolor: cada canto sigue el color de SU letra en vez de un
+    // color sólido único). La espalda queda en color sólido (va contra la pared).
+    const keys = (field === 'frente_color' || field === 'lat_color') ? [CORP_REPLICAR, ...baseKeys] : baseKeys;
     const cur = keys.find(k => k.toLowerCase() === String(val||'').toLowerCase()) || baseKeys[0];
     const dot = (k) => `<span class="corp-cdot" style="width:13px;height:13px;border-radius:50%;background:${k===CORP_REPLICAR?CORP_REPLICAR_GRAD:(CORP_COLOR_MAP[k]||'#888')};border:1px solid rgba(255,255,255,.35);flex-shrink:0;display:inline-block"></span>`;
     const opts = keys.map(k => `<div data-corp-color="${field}|${k}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:13px${k===cur?';background:rgba(143,212,222,.12)':''}${k===CORP_REPLICAR?';border-bottom:1px solid var(--border);font-weight:600':''}">${dot(k)}${k}</div>`).join('');
@@ -16364,8 +16367,11 @@ function corpPresupuestoFields(brief, cj) {
   frente += fTrans ? ', translúcido (el frente ilumina)' : ', opaco';
 
   // Laterales y fondo (espalda): color + acabado (opaco/translúcido).
+  const latReplica = /replic|dise[ñn]o/i.test(String(cj.lat_color || ''));
   const latCol = fmtCol(cj.lat_color), espCol = fmtCol(cj.esp_color);
-  const laterales = latCol ? `${latCol} (${acab(cj.lat_acabado, 'translucido')})` : acab(cj.lat_acabado, 'translucido');
+  const laterales = latReplica
+    ? `full color, replicando el diseño (${acab(cj.lat_acabado, 'translucido')})`
+    : (latCol ? `${latCol} (${acab(cj.lat_acabado, 'translucido')})` : acab(cj.lat_acabado, 'translucido'));
   const fondo = espCol ? `${espCol} (${acab(cj.esp_acabado, 'opaca')})` : acab(cj.esp_acabado, 'opaca');
 
   return {

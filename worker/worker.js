@@ -8449,7 +8449,18 @@ function corporeaContexto(brief) {
   const colF = fReplicar
     ? ' — GRÁFICA IMPRESA FULL COLOR: el frente reproduce EXACTAMENTE el diseño/logo de la imagen de referencia (todos sus colores, formas y tipografía tal cual), NO es un color sólido'
     : (p.frente_color ? `, color ${p.frente_color}` : '');
-  const colL = p.lat_color ? `, color ${p.lat_color}` : '';
+  // "Replicar diseño" en LATERALES: los cantos NO son un color sólido único — cada canto
+  // toma EL MISMO color que su letra/zona en el frente (siguiendo la gráfica del diseño de
+  // referencia). Clave para logos/letras multicolor. Si el frente es gráfica full color, los
+  // cantos continúan esos mismos colores letra por letra.
+  const lReplicar = /replic|dise[ñn]o/i.test(String(p.lat_color || ''));
+  // El texto cambia según si el FRENTE es gráfica full color o un color sólido: si el frente
+  // es sólido, "replicar" en los cantos = ese mismo color sólido (no inventar multicolor).
+  const colL = lReplicar
+    ? (fReplicar
+        ? ' — REPLICAN EL DISEÑO DEL FRENTE: cada canto lleva EXACTAMENTE el MISMO color que su letra/zona correspondiente en el frente (siguiendo la gráfica y los colores del diseño de referencia), NO un color sólido único ni blanco. Letra roja → sus cantos rojos; letra azul → sus cantos azules; etc.'
+        : ' — cada canto lleva EXACTAMENTE el MISMO color que su letra/zona correspondiente en el frente (si el frente es un color sólido, los cantos son ese mismo color; NO blanco). Letra roja → cantos rojos; letra azul → cantos azules; etc.')
+    : (p.lat_color ? `, color ${p.lat_color}` : '');
   const colE = p.esp_color ? `, color ${p.esp_color}` : '';
   const med = (p.ancho_cm && p.alto_cm) ? `${p.ancho_cm} × ${p.alto_cm} cm` : (brief.medidas_libre || 's/d');
   return [
