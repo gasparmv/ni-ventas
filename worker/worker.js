@@ -8543,13 +8543,23 @@ async function generarRenderConGemini(env, bocetoBuf, bocetoMime, extraTexto, op
   if (!resp || !resp.ok) return { error: lastErr };
   let data;
   try { data = await resp.json(); } catch (e) { return { error: 'respuesta de Gemini no es JSON' }; }
-  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const cand = data?.candidates?.[0];
+  const parts = cand?.content?.parts || [];
   const imgPart = parts.find(p => p.inlineData || p.inline_data);
   const inline = imgPart?.inlineData || imgPart?.inline_data;
   if (!inline || !inline.data) {
-    // A veces devuelve solo texto (rechazo / safety). Lo reportamos.
-    const txt = parts.find(p => p.text)?.text || 'sin imagen en la respuesta';
-    return { error: 'Gemini no devolvió imagen: ' + txt.slice(0, 200) };
+    // No vino imagen. Motivos posibles: (a) rechazo por seguridad/copyright — finishReason
+    // (IMAGE_SAFETY/PROHIBITED_CONTENT/RECITATION/SAFETY) o promptFeedback.blockReason: típico
+    // con personajes de marca/Disney (ej. Dumbo); (b) el modelo "responde" con texto en vez de
+    // generar. Capturamos el motivo real para que el error sea legible (antes salía opaco).
+    const fr = cand?.finishReason || '';
+    const block = data?.promptFeedback?.blockReason || '';
+    const txt = parts.find(p => p.text)?.text || '';
+    const bloqueado = /SAFETY|PROHIBITED|RECITATION|BLOCK|IMAGE_OTHER/i.test(String(fr) + ' ' + String(block));
+    const motivo = bloqueado
+      ? `Gemini bloqueó la generación (${block || fr}). Suele pasar con personajes de marca / copyright (ej. Disney). Simplificá el boceto para que no sea reconocible o sacale el nombre de la marca del título/notas.`
+      : (txt ? txt.slice(0, 200) : `sin imagen en la respuesta (finishReason=${fr || '—'}${block ? ', block=' + block : ''})`);
+    return { error: 'Gemini no devolvió imagen: ' + motivo };
   }
   // Registrar el costo de este render (tokens reales que devuelve Gemini).
   try { await geminiTrackUsage(env, model, 'render', data?.usageMetadata, opts.ref || ''); } catch (_) {}
