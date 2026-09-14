@@ -1096,42 +1096,43 @@ async function pushPedidoToVentas(env, row) {
     return { error: (j && j.error) ? String(j.error) : 'el Apps Script no devolvió row' };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
-// Empuja UNA fila de pedido CORPÓREO a la hoja "Pedidos_Corporeo" del Sheet 2026 v4 vía el
-// Apps Script (action=corporeo_upsert). Mapea a las columnas A-U del v4 (layout corpóreo:
-// Frente/Laterales/Base(espalda)/Iluminación/Bastidor/Color bastidor). m² = alto*ancho/10000.
+// Empuja UNA fila de pedido CORPÓREO a la hoja "Pedidos_Corporeo" del Sheet 2026 v4 (layout
+// DEFINITIVO, 14-sep) vía el Apps Script (action=corporeo_upsert). El CRM administra SOLO dos
+// bloques de columnas; el resto (costos P–X, Caja Y, cobros/pendiente AB–AE, resumen VENTA
+// AG–AL) lo carga Gaspar a mano y NO se toca (ni al re-mirrorear cuando entra el 2º pago):
+//   Bloque 1 (A:O, 15): ID(=N°), Fecha, Vendedor, Producto, Diseño(=cartel), Alto, Ancho,
+//                       Frente, Laterales, Base(=espalda), Iluminación, Bastidor, Instalación, Precio venta, Envío
+//   Bloque 2 (Z:AA, 2): Estado pago, Pagado (COBRO 1)
+// Ya NO se mandan m²/Color bastidor/Aclaración/Restante (no existen en el layout nuevo).
 // El neón sigue yendo al Excel viejo por pushPedidoToVentas; esto es SOLO para corpóreos.
 const PEDIDO_VEND_MAP = { joaco: 'joaquin', joaquin: 'joaquin', facundo: 'facundo', gaspar: 'gaspar', bruno: 'gaspar', nadia: 'facundo', abril: 'abril' };
 async function pushPedidoCorporeoToV4(env, row) {
   if (!env.APPS_SCRIPT_URL) return { error: 'no APPS_SCRIPT_URL' };
-  const a = Number(row.alto) || 0, an = Number(row.ancho) || 0;
-  const m2 = (a && an) ? Number((a * an / 10000).toFixed(2)) : '';
   const vk = String(row.cargado_por || row.comercial_id || '').toLowerCase().trim();
   const vend = PEDIDO_VEND_MAP[vk] || vk;
-  const arr = [
-    pedidoFechaToExcel(row.fecha),   // A Fecha
-    row.numero ?? '',                // B N° pedido
+  const row_ao = [
+    row.numero ?? '',                // A ID (= N° de pedido)
+    pedidoFechaToExcel(row.fecha),   // B Fecha
     vend,                            // C Vendedor
     row.producto || '',              // D Producto
-    row.cartel || '',                // E Cliente
+    row.cartel || '',                // E Diseño
     row.alto ?? '',                  // F Alto
     row.ancho ?? '',                 // G Ancho
-    m2,                              // H m²
-    row.frente || '',                // I Frente
-    row.laterales || '',             // J Laterales
-    row.espalda || '',               // K Base (fondo/espalda)
-    row.iluminacion || '',           // L Iluminación
-    row.bastidor || '',              // M Bastidor
-    row.color_bastidor || '',        // N Color bastidor
-    row.precio ?? '',                // O Precio venta
-    row.instalacion || '',           // P Instalación
-    row.estado_pago || '',           // Q Estado pago
-    row.pagado ?? '',                // R Pagado
-    row.restante ?? '',              // S Restante
-    row.envio || '',                 // T Envío
-    row.aclaracion || ''             // U Aclaración
+    row.frente || '',                // H Frente
+    row.laterales || '',             // I Laterales
+    row.espalda || '',               // J Base (fondo/espalda)
+    row.iluminacion || '',           // K Iluminación
+    row.bastidor || '',              // L Bastidor
+    row.instalacion || '',           // M Instalación
+    row.precio ?? '',                // N Precio venta
+    row.envio || ''                  // O Envío
+  ];
+  const row_zaa = [
+    row.estado_pago || '',           // Z Estado pago
+    row.pagado ?? ''                 // AA Pagado (COBRO 1)
   ];
   try {
-    const j = await appsScriptPost(env, { action: 'corporeo_upsert', sheet_row: row.sheet_row || 0, row: arr });
+    const j = await appsScriptPost(env, { action: 'corporeo_upsert', sheet_row: row.sheet_row || 0, row_ao, row_zaa });
     if (j && j.ok && j.row) return { row: Number(j.row) };
     return { error: (j && j.error) ? String(j.error) : 'el Apps Script no devolvió row' };
   } catch (e) { return { error: String((e && e.message) || e) }; }
