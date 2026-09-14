@@ -3900,7 +3900,8 @@ async function ensureBroadcastsSchema(env) {
     "followup_template TEXT",
     "followup_lang TEXT",
     "followup_param_mode TEXT",
-    "followup_preview TEXT"
+    "followup_preview TEXT",
+    "reveal_inbox TEXT"
   ]) { try { await env.DB.prepare("ALTER TABLE wa_broadcasts ADD COLUMN " + c).run(); } catch (_) {} }
   // Estado por contacto del flujo: respondio / sentimiento / branch / followup.
   try {
@@ -3968,7 +3969,8 @@ async function processCustomBroadcasts(env) {
 // como 'positiva' o 'no_positiva'. Generoso: ante la duda, positiva.
 async function analyzeBroadcastReply(env, texto) {
   const t = String(texto || '').trim();
-  if (!t || !env.ANTHROPIC_API_KEY) return 'positiva';
+  if (!t) return 'no_positiva';               // sin texto (ej. solo reacción/imagen) -> NO disparar la rama positiva
+  if (!env.ANTHROPIC_API_KEY) return 'positiva';
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -4019,7 +4021,7 @@ async function processBroadcastReplies(env) {
   try {
     const nowIso = new Date().toISOString();
     const rs = await env.DB.prepare(
-      "SELECT e.broadcast_id AS bid, e.phone AS phone, e.replied_at AS replied_at, b.reply_pos_msg AS pos, b.reply_neg_msg AS neg FROM wa_broadcast_events e JOIN wa_broadcasts b ON b.id = e.broadcast_id WHERE e.sentiment IS NULL AND e.analyze_due_at IS NOT NULL AND e.analyze_due_at <= ? ORDER BY e.analyze_due_at ASC LIMIT 4"
+      "SELECT e.broadcast_id AS bid, e.phone AS phone, e.replied_at AS replied_at, b.reply_pos_msg AS pos, b.reply_neg_msg AS neg, b.reveal_inbox AS reveal_inbox FROM wa_broadcast_events e JOIN wa_broadcasts b ON b.id = e.broadcast_id WHERE e.sentiment IS NULL AND e.analyze_due_at IS NOT NULL AND e.analyze_due_at <= ? ORDER BY e.analyze_due_at ASC LIMIT 4"
     ).bind(nowIso).all();
     if (!rs.results?.length) return;
     for (const row of rs.results) {
@@ -4032,8 +4034,21 @@ async function processBroadcastReplies(env) {
         texto = (m.results || []).map(x => x.body).join('\n');
       } catch (_) {}
       const sentiment = await analyzeBroadcastReply(env, texto);
+      // Rama positiva: si el broadcast tiene reveal_inbox, des-ocultar el chat a esa bandeja
+      // (ej. 'cursos' = Abril) para que cierren el pago. La rama negativa NO revela (queda oculto).
+      if (sentiment === 'positiva' && row.reveal_inbox) {
+        try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(row.phone, row.reveal_inbox, new Date().toISOString()).run(); } catch (_) {}
+      }
       const msg = (sentiment === 'positiva') ? row.pos : row.neg;
-      if (msg && String(msg).trim()) { try { await waSendText(env, row.phone, String(msg)); } catch (_) {} }
+      // El pos/neg puede traer VARIOS mensajes separados por '\n||\n' -> se mandan por separado.
+      if (msg && String(msg).trim()) {
+        for (const part of String(msg).split('\n||\n')) {
+          const p = part.trim();
+          if (!p) continue;
+          try { await waSendText(env, row.phone, p); } catch (_) {}
+          await new Promise(rs => setTimeout(rs, 800));
+        }
+      }
       try { await env.DB.prepare("UPDATE wa_broadcast_events SET sentiment = ?, branch_sent_at = ? WHERE broadcast_id = ? AND phone = ?").bind(sentiment, new Date().toISOString(), row.bid, row.phone).run(); } catch (_) {}
     }
   } catch (_) { /* best-effort */ }
@@ -6998,6 +7013,13 @@ async function eventoRecordatorioOnInbound(env, phone) {
   try {
     const got = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind IN ('evento_record', 'sorteo_dia2') AND status = 'sent' LIMIT 1").bind(phone).first();
     if (!got) return;
+    // No des-ocultar si el lead está en un broadcast reply-IA activo SIN resolver (o resuelto
+    // negativo): ese flujo revela SOLO si contesta afirmativo (rama positiva). Sin esto, una
+    // respuesta negativa/ambigua al "último cupo" te llenaría la bandeja igual.
+    try {
+      const inBc = await env.DB.prepare("SELECT 1 FROM wa_broadcast_events e JOIN wa_broadcasts b ON b.id = e.broadcast_id WHERE e.phone = ? AND b.reply_ai = 1 AND b.status = 'running' AND (e.sentiment IS NULL OR e.sentiment != 'positiva') LIMIT 1").bind(phone).first();
+      if (inBc) return;
+    } catch (_) {}
     const nowIso = new Date().toISOString();
     await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(phone, nowIso).run();
   } catch (_) {}
@@ -10537,8 +10559,10 @@ const handler = {
                   try { await revealCursosCampaign(env, phone, msgBody); } catch (_) {}
                 }
                 // Broadcast custom con respuesta-IA activada: marcar para branch X/Y (Fase 2.5).
+                // Las REACCIONES (emoji) NO cuentan como respuesta: no ramifican (si no, un like
+                // podía disparar la rama positiva y mandar el checkout a alguien que solo reaccionó).
                 if (direction === 'inbound') {
-                  try { await maybeBranchBroadcastReply(env, phone); } catch (_) {}
+                  try { if (msgType !== 'reaction') await maybeBranchBroadcastReply(env, phone); } catch (_) {}
                 }
                 // ===== wa.me "Neón Mastery": ruteo directo a bandeja de cursos =====
                 // Gente que entra por el link de wa.me del grupo de precalentamiento
