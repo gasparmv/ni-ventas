@@ -397,7 +397,29 @@ function copiarPresupuesto() {
 // nombre, ancho, alto, precio transparente, precio negro). Se usa cuando la
 // ventana de 24h está cerrada (ej. presupuesto del lunes de una consulta del
 // sábado) y Meta no deja mandar texto libre. La plantilla es de UN diseño.
-async function enviarPresupuestoComoPlantilla(tel, carteles, renderKey) {
+// ===== Precio MANUAL de "Cotizar y enviar" =====
+// Segundo (o cualquier vendedor) puede redondear/ajustar el precio a mano en el input del modal.
+// Ese precio manda en TODO: plantilla, texto libre y registro (Sheet/comisión). Se lee del input
+// en el momento de enviar (no hay estado global) → nunca se filtra un precio viejo a otra cotización.
+function _leerPrecioManual(inputId) {
+  const el = document.getElementById(inputId);
+  if (!el) return null;
+  const n = Math.round(Number(String(el.value || '').replace(/[^\d]/g, '')));
+  return (Number.isFinite(n) && n > 0) ? n : null;
+}
+// Reemplaza el importe del precio principal en el texto del presupuesto por `precio`, ubicándolo
+// por su etiqueta (neón: "Base acrílica transparente:"; corpóreo: "Precio:"). Así el texto libre y
+// el pie de foto siempre muestran el precio manual, aunque el vendedor no toque el textarea.
+function _patchPrecioEnTexto(texto, precio) {
+  const m = fmtMoney(precio);
+  // Reemplazo con FUNCIÓN (no string): fmtMoney arranca con "$" + dígitos (ej "$240.000") y en un
+  // string de reemplazo el "$2" se interpretaría como el backreference del grupo 2 → rompía el
+  // corpóreo ("Precio: Precio: 40.000"). La función devuelve el texto literal, sin interpretar "$".
+  return String(texto || '')
+    .replace(/(Base acr[íi]lica transparente:[ \t]*)\$?[\d.]+/i, (mm, g1) => g1 + m)
+    .replace(/(^|\n)([ \t]*Precio:[ \t]*)\$?[\d.]+/i, (mm, g1, g2) => g1 + g2 + m);
+}
+async function enviarPresupuestoComoPlantilla(tel, carteles, renderKey, precioOverride) {
   if (!carteles || carteles.length !== 1) {
     return { ok: false, error: 'La ventana de 24h está cerrada y la plantilla de presupuesto es para UN diseño. Para varios carteles, esperá que el cliente escriba o mandá uno por uno.' };
   }
@@ -409,7 +431,9 @@ async function enviarPresupuestoComoPlantilla(tel, carteles, renderKey) {
   // Precios SIEMPRE reales en la plantilla (ignorar el modo privacidad de pantalla,
   // sino los precios salen "$•••" al cliente).
   const _pp = STATE.privacy; STATE.privacy = false;
-  const precioTrans = fmtMoney(r.transFinal), precioNegro = fmtMoney(r.negroFinal);
+  // Precio MANUAL si el vendedor lo ajustó en el modal; si no, el de la calculadora.
+  const transNum = (precioOverride != null && precioOverride > 0) ? precioOverride : r.transFinal;
+  const precioTrans = fmtMoney(transNum), precioNegro = fmtMoney(r.negroFinal);
   STATE.privacy = _pp;
   // Plantillas 'presupuesto_detallado(_img)2' = SIN base negra (4 vars, jul-2026). Se prefieren;
   // las viejas (con negra, 5 vars) quedan de red hasta que Meta apruebe las nuevas.
@@ -16751,7 +16775,7 @@ function renderCorpPopup() {
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:14px;margin-bottom:var(--s-3);background:rgba(143,212,222,.04);padding:var(--s-3);border-radius:var(--r-sm)">
           ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco 3%</span><br><b>${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</b></div>` : '<div></div>'}
           ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Costo · margen</span><br><b>${fmtMoney(cj.costo || 0)}${multi ? ` · ${secs.length} secc.` : ` · ×${cj.margen || ''}`}</b></div>` : '<div></div>'}
-          <div style="grid-column:1 / -1"><span style="color:var(--fg-subtle);font-size:11px">Precio final</span><br><b style="color:var(--accent-cyan);font-size:18px">${fmtMoney(brief.precio_final || 0)}</b></div>
+          <div style="grid-column:1 / -1"><span style="color:var(--fg-subtle);font-size:11px">Precio final <span style="color:var(--accent-cyan);text-transform:none">· editable, se manda ESTE</span></span><br><span style="color:var(--accent-cyan);font-size:18px;font-weight:600">$</span><input id="corp-popup-precio" type="text" inputmode="numeric" value="${Math.round(brief.precio_final || 0)}" title="Ajustá el precio a mano (redondear/subir/bajar). Se manda ESTE valor: al cliente, en la plantilla y en el Sheet." style="background:var(--ink-100);border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:3px 6px;color:var(--accent-cyan);font-size:18px;font-weight:600;font-family:inherit;width:150px"></div>
         </div>
         ${isAdmin() ? `
         <div style="font-size:12px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);margin-bottom:var(--s-3)">
@@ -16827,9 +16851,13 @@ async function enviarPresupuestoCorporeaComoPlantilla(tel, brief, cj, renderKey)
     return { ok: false, error: 'Error de red al mandar la plantilla' };
   }
 }
-async function enviarCorporeaPresupuesto(briefId, textOverride) {
+async function enviarCorporeaPresupuesto(briefId, textOverride, precioOverride) {
   const brief = STATE.briefs.find(b => b.id === briefId);
   if (!brief || STATE.briefsEnviando[briefId]) return;
+  // Precio MANUAL (redondeo/ajuste del vendedor): pisa precio_final del brief. Todo lo de abajo
+  // lee brief.precio_final → se propaga solo a la plantilla, al texto, a la comisión (3%), al
+  // Sheet y a marcarBriefEnviado. El desglose de COGS (cj.costo/margen) NO se toca.
+  if (precioOverride != null && precioOverride > 0) brief.precio_final = precioOverride;
   const tel = String(brief.cliente_wa_id || '').replace(/\D/g, '');
   if (!tel) { toast('Falta el teléfono del cliente para enviar por WhatsApp'); return; }
   let cj = {}; try { cj = JSON.parse(brief.corporea_json || '{}') || {}; } catch (e) {}
@@ -16903,13 +16931,27 @@ async function enviarCorporeaPresupuesto(briefId, textOverride) {
     STATE.briefsEnviando[briefId] = false; render();
   }
 }
+// Sync en vivo: al ajustar el precio en el input del modal "Cotizar y enviar" (neón o corpóreo),
+// actualizamos el importe en el textarea del presupuesto para que lo que ve el vendedor (y lo que
+// se manda como texto libre) coincida con el precio manual. La plantilla y el Sheet lo leen aparte.
+document.addEventListener('input', (ev) => {
+  const t = ev.target;
+  if (!t || !t.id) return;
+  let taId = null;
+  if (t.id === 'brief-cot-popup-precio') taId = 'brief-cot-popup-text';
+  else if (t.id === 'corp-popup-precio') taId = 'corp-popup-text';
+  else return;
+  const ta = document.getElementById(taId);
+  const n = _leerPrecioManual(t.id);
+  if (ta && n) ta.value = _patchPrecioEnTexto(ta.value, n);
+});
 document.addEventListener('click', (ev) => {
   const t = ev.target;
   if (t.closest && t.closest('#corp-ver-presupuesto') && STATE.briefSelected) { openCorpPopup(STATE.briefSelected); return; }
   if (t.closest && t.closest('[data-corp-popup-close]')) { closeCorpPopup(); return; }
   if (t.matches && t.matches('[data-corp-popup-bg]')) { closeCorpPopup(); return; }
   if (t.closest && t.closest('[data-corp-popup-copy]')) { const ta = document.getElementById('corp-popup-text'); if (ta) { try { navigator.clipboard.writeText(ta.value); } catch(e){ ta.select(); document.execCommand('copy'); } toast('Copiado'); } return; }
-  if (t.closest && t.closest('[data-corp-popup-send]')) { const ta = document.getElementById('corp-popup-text'); if (ta && STATE.corpPopupBrief) enviarCorporeaPresupuesto(STATE.corpPopupBrief, ta.value); return; }
+  if (t.closest && t.closest('[data-corp-popup-send]')) { const ta = document.getElementById('corp-popup-text'); if (ta && STATE.corpPopupBrief) { const pm = _leerPrecioManual('corp-popup-precio'); enviarCorporeaPresupuesto(STATE.corpPopupBrief, pm ? _patchPrecioEnTexto(ta.value, pm) : ta.value, pm); } return; }
 });
 function renderCorporeaPrice() {
   const f = STATE.corporeaForm;
@@ -17824,19 +17866,24 @@ function closeBriefCotizadorPopup() {
 // Guarda la cotización actual al Sheet "Cotizador Joaco" vía Apps Script.
 // Si el brief abierto no tenía sheet_row, lo persistimos para idempotencia/traza.
 // Devuelve { ok, row } o { error }.
-async function saveCotToSheetFromPopup() {
+async function saveCotToSheetFromPopup(precioOverride) {
   const f = STATE.cotizadorForm;
   if (!f) return { error: 'no form' };
   const r       = (function(){ try { return calcCotizadorActivo(f); } catch(e){ return null; } })();
   const rNueva  = (function(){ try { return calcCotizadorNuevo(f); }  catch(e){ return null; } })();
   const rViejo  = (function(){ try { return calcCotizador(f); }       catch(e){ return null; } })();
   if (!r) return { error: 'no calc' };
+  // Precio MANUAL (redondeo/ajuste del vendedor): pisa el precio cotizado (trans) y escala la
+  // comisión proporcionalmente. Las columnas de fórmula (precio_nuevo/viejo) quedan de referencia.
+  const usaManual = precioOverride != null && precioOverride > 0;
+  const transReg = usaManual ? precioOverride : r.transFinal;
+  const comisionReg = (usaManual && r.transFinal > 0) ? Math.round(r.comision * precioOverride / r.transFinal) : r.comision;
   const payload = {
     cliente: f.cliente, alto: f.alto, ancho: f.ancho, neon: f.neon,
     tramos: +f.tramos || 0,
     tipo: f.tipo, m2: r.m2,
-    trans: r.transFinal, negro: r.negroFinal,
-    reventa: r.reventa, comision: r.comision,
+    trans: transReg, negro: r.negroFinal,
+    reventa: r.reventa, comision: comisionReg,
     descuento: r.descuento || 0, recargo: r.recargo || 0,
     telefono: f.telefono || '', canal: f.canal || 'WPP',
     // Campos de transición — grabados al final del row para validar:
@@ -17919,7 +17966,7 @@ function renderBriefCotizadorPopup() {
             <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${r.m2.toFixed(2)}</b></div>
             ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>` : '<div></div>'}
           `}
-          <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.transFinal)}</b></div>
+          <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente <span style="color:var(--accent-cyan);text-transform:none">· editable, se manda ESTE</span></span><br><span style="color:var(--accent-cyan);font-size:16px;font-weight:600">$</span><input id="brief-cot-popup-precio" type="text" inputmode="numeric" value="${Math.round(r.transFinal)}" title="Ajustá el precio a mano (redondear/subir/bajar). Se manda ESTE valor: al cliente, en la plantilla y en el Sheet." style="background:var(--ink-100);border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:3px 6px;color:var(--accent-cyan);font-size:16px;font-weight:600;font-family:inherit;width:130px"></div>
           ${OFRECER_BASE_NEGRA ? `<div><span style="color:var(--fg-subtle);font-size:11px">Acrílico negro</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.negroFinal)}</b></div>` : ''}
         </div>
         ${rOtra ? `
@@ -18819,8 +18866,12 @@ function bindCotizacion() {
       }
       if (!CONFIG.trackerUrl) { await showAlert('Tracker no configurado', { title: 'Error', variant: 'warn' }); return; }
       const ta = document.getElementById('brief-cot-popup-text');
-      const texto = (ta?.value || '').trim();
+      let texto = (ta?.value || '').trim();
       if (!texto) { await showAlert('El texto del presupuesto está vacío.', { title: 'Sin texto', variant: 'warn' }); return; }
+      // Precio MANUAL del modal (redondeo/ajuste del vendedor). Se manda ESTE: en el texto libre
+      // (parcheamos el importe por si tocó solo el input), en la plantilla y en el registro/Sheet.
+      const precioManual = _leerPrecioManual('brief-cot-popup-precio');
+      if (precioManual) texto = _patchPrecioEnTexto(texto, precioManual);
 
       const tieneRender = (STATE.briefDetailImages || []).some(x => x.tipo === 'render');
       const ok = await showConfirm(
@@ -18854,7 +18905,7 @@ function bindCotizacion() {
           // lo rechaza): mandamos el presupuesto como PLANTILLA aprobada (1 diseño).
           const windowClosed = j.window_closed || /outside|24|window|template|131047|re-?engag/i.test(String(detail));
           if (windowClosed) {
-            const sent = await enviarPresupuestoComoPlantilla(telDigits, getCarteles(), j.render_key);
+            const sent = await enviarPresupuestoComoPlantilla(telDigits, getCarteles(), j.render_key, precioManual);
             if (sent.cancelled) { render(); return; }
             if (!sent.ok) { await showAlert(sent.error || 'No se pudo mandar la plantilla.', { title: 'No se pudo enviar', variant: 'warn' }); return; }
             waOk = true; wamid = sent.wamid || '';
@@ -18871,19 +18922,20 @@ function bindCotizacion() {
 
       if (!waOk) { render(); return; }
 
-      // CHECK 2 — guardar en el Sheet del cotizador Joaco.
+      // CHECK 2 — guardar en el Sheet del cotizador Joaco (con el precio MANUAL si lo hubo).
       let sheetOk = false;
       try {
-        const sheetResp = await saveCotToSheetFromPopup();
+        const sheetResp = await saveCotToSheetFromPopup(precioManual);
         sheetOk = !sheetResp.error;
         if (sheetResp.error) console.warn('Sheet falló:', sheetResp.error);
       } catch(e) { console.warn('Sheet exception:', e); }
 
       // CHECK 3 cumplido (API ok = waOk) + tel (gate) + sheet → marcar enviado.
-      // El precio guardado usa la fórmula ACTIVA (la nueva) para que matchee el Sheet.
+      // El precio guardado = el MANUAL si el vendedor lo ajustó; si no, la fórmula ACTIVA.
       try {
         const calc = (function(){ try { return calcCotizadorActivo(STATE.cotizadorForm); } catch(e){ return null; } })();
-        const updated = await marcarBriefEnviado(briefId, calc ? { precio_final: calc.transFinal } : {});
+        const precioReg = precioManual || (calc ? calc.transFinal : null);
+        const updated = await marcarBriefEnviado(briefId, precioReg != null ? { precio_final: precioReg } : {});
         const i = STATE.briefs.findIndex(b => b.id === updated.id);
         if (i >= 0) STATE.briefs[i] = updated;
       } catch (e) {
@@ -18907,20 +18959,23 @@ function bindCotizacion() {
       const briefId = STATE.briefSelected;
       if (STATE.briefsEnviando[briefId]) return;
       const ta = document.getElementById('brief-cot-popup-text');
-      const texto = (ta?.value || '').trim();
+      let texto = (ta?.value || '').trim();
       if (!texto) { await showAlert('El texto del presupuesto está vacío.', { title: 'Sin texto', variant: 'warn' }); return; }
+      const precioManual = _leerPrecioManual('brief-cot-popup-precio');
+      if (precioManual) texto = _patchPrecioEnTexto(texto, precioManual);
       STATE.briefsEnviando[briefId] = true;
       setStatus('Copiando y guardando…', 'var(--fg-subtle)');
       render();
-      // 1) Clipboard.
+      // 1) Clipboard (con el precio manual ya parcheado).
       try { await navigator.clipboard.writeText(texto); } catch (e) { ta.select(); document.execCommand('copy'); }
-      // 2) Sheet.
+      // 2) Sheet (precio manual si lo hubo).
       let sheetOk = false;
-      try { const sr = await saveCotToSheetFromPopup(); sheetOk = !sr.error; } catch (e) { console.warn('Sheet:', e); }
+      try { const sr = await saveCotToSheetFromPopup(precioManual); sheetOk = !sr.error; } catch (e) { console.warn('Sheet:', e); }
       // 3) Marcar enviado (sin API — IG no se verifica).
       try {
         const calc = (function(){ try { return calcCotizadorActivo(STATE.cotizadorForm); } catch(e){ return null; } })();
-        const updated = await marcarBriefEnviado(briefId, calc ? { precio_final: calc.transFinal } : {});
+        const precioReg = precioManual || (calc ? calc.transFinal : null);
+        const updated = await marcarBriefEnviado(briefId, precioReg != null ? { precio_final: precioReg } : {});
         const i = STATE.briefs.findIndex(b => b.id === updated.id);
         if (i >= 0) STATE.briefs[i] = updated;
       } catch (e) { console.warn('marcar enviado:', e); }
@@ -18948,8 +19003,10 @@ function bindCotizacion() {
       }
       if (!STATE.token || !CONFIG.trackerUrl) { await showAlert('Tenés que estar logueado para enviar.', { title: 'Login requerido', variant: 'warn' }); return; }
       const ta = document.getElementById('brief-cot-popup-text');
-      const texto = (ta?.value || '').trim();
+      let texto = (ta?.value || '').trim();
       if (!texto) { await showAlert('El texto del presupuesto está vacío.', { title: 'Sin texto', variant: 'warn' }); return; }
+      const precioManual = _leerPrecioManual('brief-cot-popup-precio');
+      if (precioManual) texto = _patchPrecioEnTexto(texto, precioManual);
 
       const tieneRender = (STATE.briefDetailImages || []).some(x => x.tipo === 'render');
       const ok = await showConfirm(
@@ -18991,10 +19048,11 @@ function bindCotizacion() {
 
       // Guardar en el Sheet + marcar enviado (igual que WhatsApp, sin verificarEntregaWA).
       let sheetOk = false;
-      try { const sr = await saveCotToSheetFromPopup(); sheetOk = !sr.error; } catch (e) { console.warn('Sheet:', e); }
+      try { const sr = await saveCotToSheetFromPopup(precioManual); sheetOk = !sr.error; } catch (e) { console.warn('Sheet:', e); }
       try {
         const calc = (function(){ try { return calcCotizadorActivo(STATE.cotizadorForm); } catch(e){ return null; } })();
-        const updated = await marcarBriefEnviado(briefId, calc ? { precio_final: calc.transFinal } : {});
+        const precioReg = precioManual || (calc ? calc.transFinal : null);
+        const updated = await marcarBriefEnviado(briefId, precioReg != null ? { precio_final: precioReg } : {});
         const i = STATE.briefs.findIndex(b => b.id === updated.id);
         if (i >= 0) STATE.briefs[i] = updated;
       } catch (e) { console.warn('No pude marcar brief como enviado:', e); }
