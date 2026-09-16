@@ -398,14 +398,30 @@ function copiarPresupuesto() {
 // ventana de 24h está cerrada (ej. presupuesto del lunes de una consulta del
 // sábado) y Meta no deja mandar texto libre. La plantilla es de UN diseño.
 // ===== Precio MANUAL de "Cotizar y enviar" =====
-// Segundo (o cualquier vendedor) puede redondear/ajustar el precio a mano en el input del modal.
-// Ese precio manda en TODO: plantilla, texto libre y registro (Sheet/comisión). Se lee del input
-// en el momento de enviar (no hay estado global) → nunca se filtra un precio viejo a otra cotización.
+// El vendedor ajusta el precio EDITÁNDOLO EN EL TEXTO del presupuesto (como siempre lo hizo) o en
+// el campo "Precio final" (que sincroniza el texto). La FUENTE de verdad al enviar es el TEXTO:
+// _precioDeTexto lo extrae por su etiqueta y ese precio manda en TODO (plantilla, texto libre,
+// Sheet, comisión). Así respeta lo que el vendedor escribió, incluso fuera de la ventana de 24h.
+// (Antes leíamos solo el campo y PISÁBAMOS el texto con él → si editaba el texto y no el campo,
+// se mandaba el precio de calculadora. Ese era el bug del "le pasó 796".)
+function _precioDeTexto(texto) {
+  const t = String(texto || '');
+  const m = t.match(/Base acr[íi]lica transparente:[ \t]*\$?\s*([\d][\d.]*)/i)
+         || t.match(/(?:^|\n)[ \t]*Precio:[ \t]*\$?\s*([\d][\d.]*)/i);
+  if (!m) return null;
+  const n = Math.round(Number(String(m[1]).replace(/[^\d]/g, '')));
+  return (Number.isFinite(n) && n > 0) ? n : null;
+}
 function _leerPrecioManual(inputId) {
   const el = document.getElementById(inputId);
   if (!el) return null;
   const n = Math.round(Number(String(el.value || '').replace(/[^\d]/g, '')));
   return (Number.isFinite(n) && n > 0) ? n : null;
+}
+// Precio a mandar: prioridad al TEXTO editado; si no se pudo leer, al campo; si no, null (usa calc).
+function _precioAEnviar(texto, inputId) {
+  const p = _precioDeTexto(texto);
+  return (p != null) ? p : _leerPrecioManual(inputId);
 }
 // Reemplaza el importe del precio principal en el texto del presupuesto por `precio`, ubicándolo
 // por su etiqueta (neón: "Base acrílica transparente:"; corpóreo: "Precio:"). Así el texto libre y
@@ -16775,7 +16791,7 @@ function renderCorpPopup() {
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:14px;margin-bottom:var(--s-3);background:rgba(143,212,222,.04);padding:var(--s-3);border-radius:var(--r-sm)">
           ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco 3%</span><br><b>${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</b></div>` : '<div></div>'}
           ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Costo · margen</span><br><b>${fmtMoney(cj.costo || 0)}${multi ? ` · ${secs.length} secc.` : ` · ×${cj.margen || ''}`}</b></div>` : '<div></div>'}
-          <div style="grid-column:1 / -1"><span style="color:var(--fg-subtle);font-size:11px">Precio final <span style="color:var(--accent-cyan);text-transform:none">· editable, se manda ESTE</span></span><br><span style="color:var(--accent-cyan);font-size:18px;font-weight:600">$</span><input id="corp-popup-precio" type="text" inputmode="numeric" value="${Math.round(brief.precio_final || 0)}" title="Ajustá el precio a mano (redondear/subir/bajar). Se manda ESTE valor: al cliente, en la plantilla y en el Sheet." style="background:var(--ink-100);border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:3px 6px;color:var(--accent-cyan);font-size:18px;font-weight:600;font-family:inherit;width:150px"></div>
+          <div style="grid-column:1 / -1"><span style="color:var(--fg-subtle);font-size:11px">Precio final <span style="color:var(--accent-cyan);text-transform:none">· editable (o cambialo en el texto)</span></span><br><span style="color:var(--accent-cyan);font-size:18px;font-weight:600">$</span><input id="corp-popup-precio" type="text" inputmode="numeric" value="${Math.round(brief.precio_final || 0)}" title="Ajustá el precio a mano (redondear/subir/bajar). Se manda ESTE valor: al cliente, en la plantilla y en el Sheet." style="background:var(--ink-100);border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:3px 6px;color:var(--accent-cyan);font-size:18px;font-weight:600;font-family:inherit;width:150px"></div>
         </div>
         ${isAdmin() ? `
         <div style="font-size:12px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);margin-bottom:var(--s-3)">
@@ -16937,13 +16953,16 @@ async function enviarCorporeaPresupuesto(briefId, textOverride, precioOverride) 
 document.addEventListener('input', (ev) => {
   const t = ev.target;
   if (!t || !t.id) return;
+  // Editar el TEXTO del corpóreo → persistir en STATE para que un re-render (poll) no borre lo escrito.
+  if (t.id === 'corp-popup-text') { STATE.corpPopupText = t.value; return; }
+  // Ajustar el campo "Precio final" → sincroniza el importe en el textarea (y persiste si es corpóreo).
   let taId = null;
   if (t.id === 'brief-cot-popup-precio') taId = 'brief-cot-popup-text';
   else if (t.id === 'corp-popup-precio') taId = 'corp-popup-text';
   else return;
   const ta = document.getElementById(taId);
   const n = _leerPrecioManual(t.id);
-  if (ta && n) ta.value = _patchPrecioEnTexto(ta.value, n);
+  if (ta && n) { ta.value = _patchPrecioEnTexto(ta.value, n); if (t.id === 'corp-popup-precio') STATE.corpPopupText = ta.value; }
 });
 document.addEventListener('click', (ev) => {
   const t = ev.target;
@@ -16951,7 +16970,7 @@ document.addEventListener('click', (ev) => {
   if (t.closest && t.closest('[data-corp-popup-close]')) { closeCorpPopup(); return; }
   if (t.matches && t.matches('[data-corp-popup-bg]')) { closeCorpPopup(); return; }
   if (t.closest && t.closest('[data-corp-popup-copy]')) { const ta = document.getElementById('corp-popup-text'); if (ta) { try { navigator.clipboard.writeText(ta.value); } catch(e){ ta.select(); document.execCommand('copy'); } toast('Copiado'); } return; }
-  if (t.closest && t.closest('[data-corp-popup-send]')) { const ta = document.getElementById('corp-popup-text'); if (ta && STATE.corpPopupBrief) { const pm = _leerPrecioManual('corp-popup-precio'); enviarCorporeaPresupuesto(STATE.corpPopupBrief, pm ? _patchPrecioEnTexto(ta.value, pm) : ta.value, pm); } return; }
+  if (t.closest && t.closest('[data-corp-popup-send]')) { const ta = document.getElementById('corp-popup-text'); if (ta && STATE.corpPopupBrief) { const pm = _precioAEnviar(ta.value, 'corp-popup-precio'); enviarCorporeaPresupuesto(STATE.corpPopupBrief, ta.value, pm); } return; }
 });
 function renderCorporeaPrice() {
   const f = STATE.corporeaForm;
@@ -17966,7 +17985,7 @@ function renderBriefCotizadorPopup() {
             <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${r.m2.toFixed(2)}</b></div>
             ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>` : '<div></div>'}
           `}
-          <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente <span style="color:var(--accent-cyan);text-transform:none">· editable, se manda ESTE</span></span><br><span style="color:var(--accent-cyan);font-size:16px;font-weight:600">$</span><input id="brief-cot-popup-precio" type="text" inputmode="numeric" value="${Math.round(r.transFinal)}" title="Ajustá el precio a mano (redondear/subir/bajar). Se manda ESTE valor: al cliente, en la plantilla y en el Sheet." style="background:var(--ink-100);border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:3px 6px;color:var(--accent-cyan);font-size:16px;font-weight:600;font-family:inherit;width:130px"></div>
+          <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente <span style="color:var(--accent-cyan);text-transform:none">· editable (o cambialo en el texto)</span></span><br><span style="color:var(--accent-cyan);font-size:16px;font-weight:600">$</span><input id="brief-cot-popup-precio" type="text" inputmode="numeric" value="${Math.round(r.transFinal)}" title="Ajustá el precio a mano (redondear/subir/bajar). Se manda ESTE valor: al cliente, en la plantilla y en el Sheet." style="background:var(--ink-100);border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:3px 6px;color:var(--accent-cyan);font-size:16px;font-weight:600;font-family:inherit;width:130px"></div>
           ${OFRECER_BASE_NEGRA ? `<div><span style="color:var(--fg-subtle);font-size:11px">Acrílico negro</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.negroFinal)}</b></div>` : ''}
         </div>
         ${rOtra ? `
@@ -18870,8 +18889,7 @@ function bindCotizacion() {
       if (!texto) { await showAlert('El texto del presupuesto está vacío.', { title: 'Sin texto', variant: 'warn' }); return; }
       // Precio MANUAL del modal (redondeo/ajuste del vendedor). Se manda ESTE: en el texto libre
       // (parcheamos el importe por si tocó solo el input), en la plantilla y en el registro/Sheet.
-      const precioManual = _leerPrecioManual('brief-cot-popup-precio');
-      if (precioManual) texto = _patchPrecioEnTexto(texto, precioManual);
+      const precioManual = _precioAEnviar(texto, 'brief-cot-popup-precio');
 
       const tieneRender = (STATE.briefDetailImages || []).some(x => x.tipo === 'render');
       const ok = await showConfirm(
@@ -18961,8 +18979,7 @@ function bindCotizacion() {
       const ta = document.getElementById('brief-cot-popup-text');
       let texto = (ta?.value || '').trim();
       if (!texto) { await showAlert('El texto del presupuesto está vacío.', { title: 'Sin texto', variant: 'warn' }); return; }
-      const precioManual = _leerPrecioManual('brief-cot-popup-precio');
-      if (precioManual) texto = _patchPrecioEnTexto(texto, precioManual);
+      const precioManual = _precioAEnviar(texto, 'brief-cot-popup-precio');
       STATE.briefsEnviando[briefId] = true;
       setStatus('Copiando y guardando…', 'var(--fg-subtle)');
       render();
@@ -19005,8 +19022,7 @@ function bindCotizacion() {
       const ta = document.getElementById('brief-cot-popup-text');
       let texto = (ta?.value || '').trim();
       if (!texto) { await showAlert('El texto del presupuesto está vacío.', { title: 'Sin texto', variant: 'warn' }); return; }
-      const precioManual = _leerPrecioManual('brief-cot-popup-precio');
-      if (precioManual) texto = _patchPrecioEnTexto(texto, precioManual);
+      const precioManual = _precioAEnviar(texto, 'brief-cot-popup-precio');
 
       const tieneRender = (STATE.briefDetailImages || []).some(x => x.tipo === 'render');
       const ok = await showConfirm(
