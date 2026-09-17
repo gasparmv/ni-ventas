@@ -1157,6 +1157,16 @@ async function processPedidosMirror(env) {
     const rows = rs.results || [];
     let pushed = 0, failed = 0;
     for (const row of rows) {
+      // Claim ATÓMICO antes de empujar. El APPEND (pedido sin sheet_row) NO es idempotente:
+      // si dos ejecuciones del cron se SOLAPAN (un tick tarda >60s con varios pedidos en cola
+      // y el siguiente arranca), ambas leían la MISMA fila dirty=1 y la apendeaban DOS veces
+      // → fila huérfana en el Sheet (caso Olivos #367, fila 29). El gate al cron de 1-min no
+      // cubre el solape entre ticks consecutivos; este claim sí: el UPDATE condicional dirty
+      // 1→0 solo lo gana UNA ejecución (la otra ve 0 filas por RETURNING vacío y saltea).
+      const claimed = await env.DB.prepare(
+        'UPDATE pedidos SET mirror_dirty = 0 WHERE id = ? AND mirror_dirty = 1 AND updated_at = ? RETURNING id'
+      ).bind(row.id, row.updated_at).first().catch(() => null);
+      if (!claimed) continue; // otra ejecución ya la agarró (o la fila se editó entremedio)
       // Corpóreos → Sheet 2026 v4 (Pedidos_Corporeo); neón → Excel de Ventas de siempre.
       const res = row.es_corporeo ? await pushPedidoCorporeoToV4(env, row) : await pushPedidoToVentas(env, row);
       if (res && res.row) {
