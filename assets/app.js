@@ -1032,6 +1032,7 @@ function loadUser() {
   STATE.user = localStorage.getItem('niventas.user') || null;
   STATE.token = localStorage.getItem('niventas.token') || null;
   STATE.tokenUser = localStorage.getItem('niventas.tokenUser') || null;
+  STATE.adminToken = localStorage.getItem('niventas.adminToken') || null;  // token del admin (Gaspar) → habilita el switcher
   // Si el token cargado no corresponde al usuario activo (estado viejo/manipulado),
   // lo descartamos por seguridad: hay que re-autenticar.
   if (STATE.token && STATE.user && _userKey(STATE.tokenUser) !== _userKey(STATE.user)) {
@@ -1054,6 +1055,14 @@ function saveToken(t, owner) {
     localStorage.removeItem('niventas.tokenUser');
   }
 }
+// El admin (Gaspar) guarda su token aparte para poder saltar entre usuarios SIN contraseña
+// (impersonación). Mientras exista adminToken se muestra el switcher de usuarios en el sidebar.
+function saveAdminToken(t) {
+  STATE.adminToken = t || null;
+  if (t) localStorage.setItem('niventas.adminToken', t);
+  else localStorage.removeItem('niventas.adminToken');
+}
+function isImpersonatingAdmin() { return !!STATE.adminToken; }
 // Normaliza nombre de usuario para comparaciones tolerantes a tilde.
 // Soporta variantes históricas en localStorage (Joaquin / Joaquín).
 function _userKey(s) {
@@ -1141,6 +1150,50 @@ async function loginPrompt(userName) {
     return false;
   }
 }
+// Login directo con usuario + contraseña (form "Iniciar sesión"). Si entra el admin (Gaspar),
+// guardamos su token como adminToken → habilita el switcher de usuarios. Devuelve true/false (sin alerts).
+async function loginWithCreds(user, pass) {
+  if (!CONFIG.trackerUrl) return false;
+  try {
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user, password: pass })
+    });
+    if (!r.ok) return false;
+    const j = await r.json();
+    saveToken(j.token, user);
+    if (isGasparUser(user)) saveAdminToken(j.token); else saveAdminToken(null);
+    return true;
+  } catch (e) { return false; }
+}
+// Cambio de usuario SIN contraseña — SOLO el admin (tiene adminToken). Volver a Gaspar restaura su
+// token; ir a otro usuario le pide al backend un token de sesión de ESE usuario (POST /auth/switch,
+// gate admin) para ver su vista scopeada tal cual la ve él.
+async function switchUser(name) {
+  if (!isImpersonatingAdmin()) return;
+  if (_userKey(name) === _userKey(STATE.user)) return;
+  if (isGasparUser(name)) { saveToken(STATE.adminToken, 'Gaspar'); STATE.user = 'Gaspar'; saveUser(); afterUserSwitch(); return; }
+  try {
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/auth/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + STATE.adminToken, 'X-NI-Human': '1' },
+      body: JSON.stringify({ user: name })
+    });
+    if (!r.ok) { await showAlert('No se pudo cambiar a ' + displayUser(name), { title: 'Error', variant: 'warn' }); return; }
+    const j = await r.json();
+    saveToken(j.token, name);   // token impersonado (adminToken queda intacto para volver)
+    STATE.user = name; saveUser(); afterUserSwitch();
+  } catch (e) { await showAlert('Error de red', { title: 'Error', variant: 'warn' }); }
+}
+// Tras cambiar de usuario o loguear: limpia el cache (no es por-usuario), recarga el scope nuevo y re-renderiza.
+function afterUserSwitch() {
+  try { localStorage.removeItem(CACHE_KEY); } catch (_) {}
+  STATE.loaded = false; STATE.pedidos = [];
+  chatState.contactsLoaded = false; chatState.contacts = [];
+  render();
+  loadAll().catch(() => {});
+  if (canAccessChat()) { ensureNotificationPermission(); initPollWorker(); loadChatContacts().then(() => updateUnreadBadge()); }
+}
 async function autoLogin(userName) {
   if (!CONFIG.trackerUrl) return false;
   try {
@@ -1165,12 +1218,13 @@ async function logout() {
     } catch(e) {}
   }
   saveToken(null);
+  saveAdminToken(null);
   teardownPollWorker();
-  // Si estaba con usuario privilegiado, lo dejo sin usuario para que tenga que re-loguearse
-  if (isGasparUser(STATE.user) || isJoaquinUser(STATE.user)) { STATE.user = null; saveUser(); }
-  // Si estaba en vista admin, salir
-  if (STATE.view === 'admin') setView('dashboard');
-  else render();
+  // Cerrar sesión = volver al formulario de login (para todos).
+  STATE.user = null; saveUser();
+  try { localStorage.removeItem(CACHE_KEY); } catch (_) {}
+  STATE.view = 'dashboard';
+  render();
 }
 // isAdmin requiere que el TOKEN sea de Gaspar (no solo el nombre activo). Sin esto,
 // un token de bajo privilegio podría usarse para mostrar la UI admin.
@@ -2171,25 +2225,40 @@ window.addEventListener('hashchange', () => {
 
 // ============ RENDER ============
 function renderUserPicker() {
+  const inp = 'background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:11px 13px;color:var(--fg);font-size:15px;width:100%';
   return `
     <div class="user-picker-overlay">
       <div class="user-picker-box">
         <img class="brand-logo" src="assets/logo.svg" alt="Neon Infinito" style="width:80px;margin-bottom:var(--s-3)">
         <h2 style="margin:0 0 var(--s-1)">NEON · Ventas</h2>
-        <p class="muted" style="margin:0 0 var(--s-4);font-size:13px">¿Quién sos?</p>
-        <div style="display:flex;flex-wrap:wrap;gap:var(--s-3);justify-content:center">
-          ${CONFIG.defaultUsers.map(u => `
-            <button class="btn btn-cyan user-pick-big" data-pick-user="${escapeHtml(u)}" style="min-width:110px;padding:var(--s-3) var(--s-4);font-size:16px">${escapeHtml(displayUser(u))}</button>
-          `).join('')}
-        </div>
+        <p class="muted" style="margin:0 0 var(--s-4);font-size:13px">Iniciá sesión</p>
+        <form id="login-form" autocomplete="on" style="display:flex;flex-direction:column;gap:12px;width:min(280px,82vw);margin:0 auto">
+          <input id="login-user" type="text" name="username" autocomplete="username" placeholder="Usuario" required style="${inp}">
+          <input id="login-pass" type="password" name="password" autocomplete="current-password" placeholder="Contraseña" style="${inp}">
+          <button type="submit" id="login-submit" class="btn btn-cyan" style="padding:11px;font-size:15px;font-weight:600;margin-top:2px">Iniciar sesión</button>
+          <div id="login-error" style="color:#ff5a6e;font-size:12.5px;min-height:16px;text-align:center"></div>
+        </form>
       </div>
     </div>
   `;
 }
 function bindUserPicker() {
-  document.querySelectorAll('[data-pick-user]').forEach(el => {
-    el.onclick = () => setUser(el.dataset.pickUser);
-  });
+  const form = document.getElementById('login-form');
+  if (!form) return;
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const user = (document.getElementById('login-user').value || '').trim();
+    const pass = document.getElementById('login-pass').value || '';
+    const errEl = document.getElementById('login-error');
+    const btn = document.getElementById('login-submit');
+    if (!user) { if (errEl) errEl.textContent = 'Ingresá tu usuario'; return; }
+    if (errEl) errEl.textContent = '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Entrando…'; }
+    const ok = await loginWithCreds(user, pass);
+    if (ok) { STATE.user = user; saveUser(); afterUserSwitch(); }
+    else { if (btn) { btn.disabled = false; btn.textContent = 'Iniciar sesión'; } if (errEl) errEl.textContent = 'Usuario o contraseña incorrectos'; }
+  };
+  const u = document.getElementById('login-user'); if (u) u.focus();
 }
 function render() {
   if (!STATE.user) {
@@ -3172,12 +3241,10 @@ function renderShell() {
       <div class="user-pick">
         <div class="user-pick-label">Usuario ${canAccessChat() ? '<span class="admin-tag">' + (isAdmin() ? 'admin' : 'chat') + '</span>' : ''}</div>
         <div class="user-pick-chips">
-          ${STATE.users.map(u => {
-            const locked = !tokenBelongsTo(u);  // 🔒 = requiere login (todos tienen contraseña)
-            return `<button class="user-chip ${STATE.user===u?'active':''}" data-set-user="${escapeHtml(u)}">${locked?'🔒 ':''}${escapeHtml(displayUser(u))}</button>`;
-          }).join('')}
-          <button class="user-chip add" data-add-user>+</button>
-          ${canAccessChat() ? '<button class="user-chip add" data-logout title="Cerrar sesión">⎋</button>' : ''}
+          ${isImpersonatingAdmin()
+            ? STATE.users.map(u => `<button class="user-chip ${_userKey(STATE.user)===_userKey(u)?'active':''}" data-switch-user="${escapeHtml(u)}">${escapeHtml(displayUser(u))}</button>`).join('')
+            : `<button class="user-chip active" style="cursor:default">${escapeHtml(displayUser(STATE.user))}</button>`}
+          <button class="user-chip add" data-logout title="Cerrar sesión">⎋</button>
           <button class="user-chip add privacy-toggle ${STATE.privacy ? 'on' : ''}" data-privacy-toggle title="${STATE.privacy ? 'Mostrar montos' : 'Ocultar montos (modo billetera)'}">
             ${STATE.privacy
               ? '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>'
@@ -7892,6 +7959,7 @@ window.loadAdminActivity = loadAdminActivity;
 function bindNav() {
   document.querySelectorAll('.nav-item').forEach(b => b.onclick = () => setView(b.dataset.view));
   document.querySelectorAll('[data-set-user]').forEach(b => b.onclick = () => setUser(b.dataset.setUser));
+  document.querySelectorAll('[data-switch-user]').forEach(b => b.onclick = () => switchUser(b.dataset.switchUser));
   const addBtn = document.querySelector('[data-add-user]');
   if (addBtn) addBtn.onclick = () => addUser();
   const logoutBtn = document.querySelector('[data-logout]');

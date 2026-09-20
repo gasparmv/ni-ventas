@@ -11021,6 +11021,31 @@ const handler = {
       return json({ user: session.user });
     }
 
+    // POST /auth/switch { user } — cambiar de usuario SIN contraseña. SOLO el admin (Gaspar): se
+    // autentica con SU token y el backend le emite un token de sesión del usuario destino, así ve la
+    // vista scopeada de esa persona (impersonación). Ningún otro rol puede usarlo.
+    if (request.method === 'POST' && path === '/auth/switch') {
+      const session = await getSession(env, request);
+      if (!session) return unauthorized();
+      if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden: admin only' }, 403);
+      let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+      const target = String(body?.user || '').trim();
+      if (!target) return json({ error: 'missing user' }, 400);
+      const tslug = target.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+      // El destino debe existir y estar activo (o ser el propio admin).
+      let okTarget = tslug === 'gaspar';
+      if (!okTarget) {
+        const ids = userLookupIds(tslug); const ph = ids.map(() => '?').join(',');
+        try { okTarget = !!(await env.DB.prepare(`SELECT 1 AS x FROM users_panel WHERE id IN (${ph}) AND activo = 1 LIMIT 1`).bind(...ids).first()); } catch (_) {}
+      }
+      if (!okTarget) return json({ error: 'usuario desconocido' }, 404);
+      const token = randomToken();
+      const now = new Date();
+      const expires = new Date(now.getTime() + SESSION_DAYS * 86400000);
+      await env.DB.prepare('INSERT INTO sessions (token, user, expires_at, created_at) VALUES (?, ?, ?, ?)').bind(token, target, expires.toISOString(), now.toISOString()).run();
+      return json({ token, user: target, expiresAt: expires.toISOString() });
+    }
+
     // ----- Reportes (público para tracking básico) -----
     if (request.method === 'GET' && path === '/report') {
       return reportHandler(env, url, false);
