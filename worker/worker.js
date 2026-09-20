@@ -3400,6 +3400,36 @@ function corteCobroMsg(g) {
   const lineas = (g.piezas || []).map(p => '- ' + (p.diseno || 'diseño') + (p.medida ? ' (' + p.medida + ')' : '') + ((parseInt(p.cantidad, 10) || 1) > 1 ? ' x' + p.cantidad : '') + ': $' + Number(p.precio || 0).toLocaleString('es-AR')).join('\n');
   return (nombre ? 'Hola ' + nombre + ', ' : 'Hola, ') + 'te paso el detalle de tu corte de esta semana:\n' + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR') + '\n\nPara confirmarlo transferí a ' + CORTE_ALIAS + ' (' + CORTE_TITULAR + ') y mandame el comprobante por acá.';
 }
+// VIGÍA DE PAGOS DEL CORTE: si el cliente tiene pedidos en estado_pago='cobrando' (ya se le mandó el cobro)
+// y mandó un comprobante (imagen/PDF), lo OCReamos y, si el monto cubre el total, marcamos PAGADO + avisamos
+// a Gaspar. Si es menor, lo dejamos en 'parcial' y avisamos para revisar. Devuelve true si tomó el turno (para
+// que NO corra el intake sobre un comprobante). Self-dedup: al pasar a pagado/parcial, deja de estar 'cobrando'.
+async function corteVigiaPago(env, phone) {
+  let cobr;
+  try { cobr = await env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(precio),0) AS total, MAX(cliente_nombre) AS nombre FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando'").bind(phone).first(); } catch (_) { return false; }
+  if (!cobr || !cobr.n) return false; // no hay cobranza en curso para este número
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pago_check (wamid TEXT PRIMARY KEY, phone TEXT, monto REAL, es_comprobante INTEGER, checked_at TEXT)").run(); } catch (_) {}
+  let img;
+  try { img = await env.DB.prepare("SELECT wamid, media_url AS r2Key, msg_type AS msgType FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type IN ('image','document') AND media_url IS NOT NULL AND media_url!='' AND ts > datetime('now','-2 hours') AND wamid NOT IN (SELECT wamid FROM corte_pago_check) ORDER BY ts DESC LIMIT 1").bind(phone).first(); } catch (_) {}
+  if (!img || !img.r2Key) return false; // todavía no mandó comprobante (imagen/PDF)
+  const proof = await analyzePaymentProof(env, img.r2Key, img.msgType === 'document' ? 'application/pdf' : '');
+  const es = !!(proof && proof.es_comprobante);
+  const monto = (proof && +proof.monto) || 0;
+  try { await env.DB.prepare("INSERT OR IGNORE INTO corte_pago_check (wamid, phone, monto, es_comprobante, checked_at) VALUES (?,?,?,?,?)").bind(img.wamid, phone, monto, es ? 1 : 0, new Date().toISOString()).run(); } catch (_) {}
+  if (!es || !(monto > 0)) return false; // no es un comprobante válido → que siga el flujo normal
+  const total = Number(cobr.total) || 0;
+  const quien = cobr.nombre ? (cobr.nombre + ' (' + phone + ')') : phone;
+  const nowIso = new Date().toISOString();
+  if (total > 0 && monto >= total * 0.99) {
+    try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pagado', comprobante_key=?, updated_at=? WHERE telefono=? AND estado_pago='cobrando'").bind(img.r2Key, nowIso, phone).run(); } catch (_) {}
+    try { await corteSend(env, phone, 'recibido, gracias! tu corte queda confirmado'); } catch (_) {}
+    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' pagó $' + monto.toLocaleString('es-AR') + ' (total $' + total.toLocaleString('es-AR') + '). Lo marqué PAGADO.'); } catch (_) {}
+  } else {
+    try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='parcial', comprobante_key=?, updated_at=? WHERE telefono=? AND estado_pago='cobrando'").bind(img.r2Key, nowIso, phone).run(); } catch (_) {}
+    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó un comprobante por $' + monto.toLocaleString('es-AR') + ' pero el total es $' + total.toLocaleString('es-AR') + '. Revisalo (¿parcial o error?).'); } catch (_) {}
+  }
+  return true;
+}
 // ===== Google Drive (cuenta de servicio) — respaldo de archivos del corte =====
 const DRIVE_FOLDER_MATRICES = '1B9APyJdXQa5M9BxZ32Ct7jq8EEudNID_'; // matrices (sube Emma)
 const DRIVE_FOLDER_ANIBAL = '1PohYYIec4pidCjJt42lzfod4vUWkjAsj';   // placas anidadas (sube Aníbal)
@@ -3526,6 +3556,8 @@ async function processCortePilot(env) {
         const res = await env.DB.prepare("INSERT INTO corte_conversaciones (phone, estado, last_processed_ts, intencion_preguntada, updated_at) VALUES (?, 'nuevo', ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET last_processed_ts=excluded.last_processed_ts, updated_at=excluded.updated_at WHERE corte_conversaciones.last_processed_ts IS NULL OR corte_conversaciones.last_processed_ts < excluded.last_processed_ts").bind(phone, lastTs, (conv && conv.intencion_preguntada) || 0, nowIso).run();
         if (!res || !res.meta || !res.meta.changes) continue;
       } catch (_) { continue; }
+      // VIGÍA DE PAGOS: si el cliente está en cobranza y mandó el comprobante, lo procesa acá y NO corre el intake.
+      try { if (await corteVigiaPago(env, phone)) continue; } catch (_) {}
       const ctx = await buildChatContext(env, phone, 40);
       if (!ctx) continue;
       const imgs = await precotizImageBlocks(env, phone, 3, 3); // solo imágenes de las últimas 3h (esta charla)
