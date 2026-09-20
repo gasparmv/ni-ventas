@@ -687,7 +687,7 @@ async function ensurePedidosSchema(env) {
 //  lo manda un admin (reasignación manual desde el CRM).
 async function resolveComercial(env, { bodyComercial, sessionUser, phone } = {}) {
   const slug = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  const norm = (s) => { const k = slug(s); if (k === 'joaquin' || k === 'joaco') return 'joaco'; if (k === 'facundo') return 'facundo'; return ''; };
+  const norm = (s) => { const k = slug(s); if (k === 'joaquin' || k === 'joaco') return 'joaco'; if (VENDEDORES_SECUNDARIOS.includes(k)) return k; return ''; };
   const us = slug(sessionUser);
   // (0) reasignación manual: un admin (Gaspar) puede forzar el vendedor por body.
   if (bodyComercial && us === 'gaspar') { const v = norm(bodyComercial); if (v) return v; }
@@ -708,11 +708,11 @@ async function reasignarAlQueTrabaja(env, phone, sessionUser) {
     const slug = String(sessionUser || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
     let vendedor = '';
     if (slug === 'joaquin' || slug === 'joaco') vendedor = 'joaco';
-    else if (slug === 'facundo') vendedor = 'facundo';
+    else if (VENDEDORES_SECUNDARIOS.includes(slug)) vendedor = slug;
     else return; // admin/cursos/otros → no reasignan
     const ph = String(phone || '').replace(/\D/g, '');
     if (!ph) return;
-    const nuevoAsg = vendedor === 'facundo' ? 'facundo' : '';
+    const nuevoAsg = VENDEDORES_SECUNDARIOS.includes(vendedor) ? vendedor : '';
     const cur = await env.DB.prepare("SELECT assigned_to, inbox FROM wa_chats_summary WHERE phone = ?").bind(ph).first();
     if (!cur) return;
     if (String(cur.assigned_to || '') === nuevoAsg) return; // ya está bien asignado
@@ -1105,7 +1105,7 @@ async function pushPedidoToVentas(env, row) {
 //   Bloque 2 (Z:AA, 2): Estado pago, Pagado (COBRO 1)
 // Ya NO se mandan m²/Color bastidor/Aclaración/Restante (no existen en el layout nuevo).
 // El neón sigue yendo al Excel viejo por pushPedidoToVentas; esto es SOLO para corpóreos.
-const PEDIDO_VEND_MAP = { joaco: 'joaquin', joaquin: 'joaquin', facundo: 'facundo', gaspar: 'gaspar', bruno: 'gaspar', nadia: 'facundo', abril: 'abril' };
+const PEDIDO_VEND_MAP = { joaco: 'joaquin', joaquin: 'joaquin', facundo: 'facundo', agustina: 'agustina', gaspar: 'gaspar', bruno: 'gaspar', nadia: 'facundo', abril: 'abril' };
 async function pushPedidoCorporeoToV4(env, row) {
   if (!env.APPS_SCRIPT_URL) return { error: 'no APPS_SCRIPT_URL' };
   const vk = String(row.cargado_por || row.comercial_id || '').toLowerCase().trim();
@@ -1838,17 +1838,36 @@ async function precotizNotifyGaspar(env, msg) {
   try { await waSendText(env, PRECOTIZ_GASPAR_PHONE, msg); } catch (_) {}
 }
 
-// Reparto automático a Nadia de los leads NUEVOS de carteles (en la ENTRADA): cuando entra
-// un lead de carteles que todavía no agarró nadie, si la cuota diaria de Nadia lo permite se
-// lo asigna (ella lo atiende desde el primer mensaje; si no, queda para Joaco). Así se reparte
-// el flujo REAL de carteles, no solo lo que completa el bot. Cuota configurable (kv
-// nadia_cuota_diaria, arranca en 0). Excluye cursos/reventa/clientes/internos, no pisa si el
-// chat ya tiene dueño, y respeta el freno anti-pisón (si un humano ya respondió, no lo mueve).
-// Notifica a Nadia por WhatsApp si hay un teléfono cargado (kv nadia_phone).
+// ===== Registro único de vendedores comerciales SECUNDARIOS (molde Facu) =====
+// Fuente de verdad para sumar un comercial nuevo. Cada entrada: slug (=assigned_to / comercial_id),
+// nombre para el saludo al cliente, y las kv de su reparto (cuota diaria / probabilidad / teléfono de
+// aviso opcional). Sumar un vendedor futuro = 1 entrada acá + 1 fila en users_panel + 1 nombre en
+// CONFIG.defaultUsers (front) + 1 en el registro espejo del front. VENDEDORES_SECUNDARIOS (más abajo,
+// usado por todo el scoping de chats/cache) se DERIVA de este array. canonWorker/AVISO_WORKERS (tracking)
+// y PEDIDO_VEND_MAP (hoja contable) se sincronizan aparte por tener namespaces propios.
+const COMERCIALES_SECUNDARIOS = [
+  { slug: 'facundo',  nombre: 'Facu', cuotaKv: 'nadia_cuota_diaria',    probKv: 'facundo_reparto_prob', phoneKv: 'nadia_phone',    defProb: 0.25 },
+  { slug: 'agustina', nombre: 'Agus', cuotaKv: 'agustina_cuota_diaria', probKv: 'agustina_reparto_prob', phoneKv: 'agustina_phone', defProb: 0.30 },
+];
+// Nombre para el saludo del bot/auto-reply según a quién quedó asignado el chat (default Joaco).
+function saludoVendedor(assignedTo) {
+  const a = String(assignedTo || '').toLowerCase();
+  const c = COMERCIALES_SECUNDARIOS.find(x => x.slug === a);
+  return c ? c.nombre : 'Joaco';
+}
+
+// Reparto automático de los leads NUEVOS de carteles (en la ENTRADA) entre los vendedores
+// SECUNDARIOS (Facu, Agus, …): cuando entra un lead de carteles que todavía no agarró nadie, si la
+// cuota diaria de alguno lo permite se lo asigna (lo atiende desde el primer mensaje; si no, queda
+// para Joaco). Así se reparte el flujo REAL de carteles, no solo lo que completa el bot. Cada
+// secundario tiene su cuota (kv), su probabilidad (kv) y su teléfono de aviso (kv, opcional).
+// Excluye cursos/reventa/clientes/internos, no pisa si el chat ya tiene dueño, y respeta el freno
+// anti-pisón. El orden de "primera opción" rota por teléfono para que ninguno se lleve siempre los
+// primeros del día; el sorteo es determinístico por teléfono+vendedor (independiente entre ellos).
+// [compat] la función mantiene el nombre viejo maybeRepartirANadia (3 call sites).
 async function maybeRepartirANadia(env, phone) {
   try {
-    const cuota = parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0;
-    if (cuota <= 0 || !phone) return;
+    if (!phone) return;
     const s = await env.DB.prepare("SELECT inbox, assigned_to FROM wa_chats_summary WHERE phone = ?").bind(phone).first();
     if (!s || (s.assigned_to && s.assigned_to !== '')) return;         // no existe aún o ya tiene dueño
     if (s.inbox === 'cursos' || s.inbox === 'oculto') return;          // cursos/oculto no son carteles
@@ -1858,19 +1877,29 @@ async function maybeRepartirANadia(env, phone) {
     try { if (await env.DB.prepare("SELECT 1 AS x FROM wa_internal_phones WHERE phone = ?").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1").bind(phone).first()) return; } catch (_) {} // cliente existente
     try { if (await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono = ? LIMIT 1").bind(phone).first()) return; } catch (_) {} // alumno del servicio de corte (B2B, no carteles)
-    // Freno anti-pisón: si un humano (Joaco/Gaspar) ya respondió, NO se lo movemos a Nadia.
+    // Freno anti-pisón: si un humano (Joaco/Gaspar) ya respondió, NO se lo movemos a un secundario.
     try { if (await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status' LIMIT 1").bind(phone).first()) return; } catch (_) {}
-    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'facundo' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first();
-    if (((r && r.n) || 0) >= cuota) return; // ya llegó a la cuota del día
-    // ALEATORIO por-lead (estable por teléfono): solo una fracción de los eligibles va a Facundo,
-    // así no se lleva SIEMPRE los primeros del día sino un ~random repartido. kv facundo_reparto_prob.
-    const prob = parseFloat(await kvGet(env, 'facundo_reparto_prob', '0.25')) || 0.25;
+    // Hash determinístico por teléfono (base para rotar el orden y para el sorteo por vendedor).
     let _h = 0; const _ps = String(phone); for (let _i = 0; _i < _ps.length; _i++) _h = (_h * 31 + _ps.charCodeAt(_i)) >>> 0;
-    if ((_h % 100) >= Math.round(prob * 100)) return;   // a este teléfono no le toca (determinístico, no depende de cuántos mensajes mande)
-    await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = 'facundo', assigned_at = ? WHERE phone = ?").bind(new Date().toISOString(), phone).run();
-    try { await env.DB.prepare("UPDATE briefs SET comercial_id = 'facundo' WHERE cliente_wa_id = ?").bind(phone).run(); } catch (_) {} // el brief/comisión sigue al lead
-    const nadiaPhone = await kvGet(env, 'nadia_phone', '');
-    if (nadiaPhone) { try { await waSendText(env, nadiaPhone, 'Tenés un lead nuevo de carteles para atender en el CRM 🙌'); } catch (_) {} }
+    // Rotar el orden de "primera opción" por teléfono así ninguno se lleva siempre los primeros del día.
+    const rot = COMERCIALES_SECUNDARIOS.length ? (_h % COMERCIALES_SECUNDARIOS.length) : 0;
+    const orden = COMERCIALES_SECUNDARIOS.slice(rot).concat(COMERCIALES_SECUNDARIOS.slice(0, rot));
+    for (const c of orden) {
+      const cuota = parseInt(await kvGet(env, c.cuotaKv, '0'), 10) || 0;
+      if (cuota <= 0) continue;                                        // ese vendedor no recibe reparto automático
+      const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").bind(c.slug).first();
+      if (((r && r.n) || 0) >= cuota) continue;                        // ya llegó a SU cuota del día
+      const prob = parseFloat(await kvGet(env, c.probKv, String(c.defProb))) || c.defProb;
+      // Sorteo determinístico por teléfono PERO independiente por vendedor (mezclamos el slug al hash),
+      // así el mismo lead puede tocarle a uno u otro con probabilidades independientes.
+      let _hv = _h; for (let _i = 0; _i < c.slug.length; _i++) _hv = (_hv * 31 + c.slug.charCodeAt(_i)) >>> 0;
+      if ((_hv % 100) >= Math.round(prob * 100)) continue;             // a este lead no le toca este vendedor
+      await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = ?, assigned_at = ? WHERE phone = ?").bind(c.slug, new Date().toISOString(), phone).run();
+      try { await env.DB.prepare("UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?").bind(c.slug, phone).run(); } catch (_) {} // el brief/comisión sigue al lead
+      const notif = await kvGet(env, c.phoneKv, '');
+      if (notif) { try { await waSendText(env, notif, 'Tenés un lead nuevo de carteles para atender en el CRM 🙌'); } catch (_) {} }
+      return;                                                          // asignado; no seguir con los demás
+    }
   } catch (_) {}
 }
 
@@ -2154,8 +2183,11 @@ async function precotizEmitir(env, phone, nombre, msgs, modo, nowIso) {
   // (4-sep): "lo cotizó Joaco pero aparece en la bandeja de Facu". 1 lookup por lead; cubre auto y draft.
   try {
     const _s = await env.DB.prepare("SELECT assigned_to FROM wa_chats_summary WHERE phone = ?").bind(String(phone).replace(/\D/g, '')).first();
-    if (_s && String(_s.assigned_to || '').toLowerCase() === 'facundo') {
-      msgs = (msgs || []).map(m => String(m).replace(/Joaco/g, 'Facu').replace(/joaco/g, 'facu'));
+    const _asgP = _s && String(_s.assigned_to || '').toLowerCase();
+    const _secP = _asgP && COMERCIALES_SECUNDARIOS.find(x => x.slug === _asgP);
+    if (_secP) {
+      const _n = _secP.nombre;
+      msgs = (msgs || []).map(m => String(m).replace(/Joaco/g, _n).replace(/joaco/g, _n.toLowerCase()));
     }
   } catch (_) {}
   if (modo === 'auto') {
@@ -2782,7 +2814,7 @@ async function buildReporteDiario(env) {
     ).all();
     for (const r of (rs.results || [])) {
       const n = r.n || 0; out.presupTotal += n;
-      if (r.comercial_id === 'facundo') out.presupNadia += n; else out.presupJoaco += n;
+      if (VENDEDORES_SECUNDARIOS.includes(r.comercial_id)) out.presupNadia += n; else out.presupJoaco += n;
     }
   } catch (_) {}
   // 4) Chats asignados hoy por vendedor (assigned_to + assigned_at, mig 037).
@@ -2791,7 +2823,7 @@ async function buildReporteDiario(env) {
       `SELECT assigned_to, COUNT(DISTINCT phone) AS n FROM wa_chats_summary WHERE assigned_to != '' AND assigned_at >= ${REPORTE_DIA_DESDE} AND assigned_at < ${REPORTE_DIA_HASTA} GROUP BY assigned_to`
     ).all();
     for (const r of (rs.results || [])) {
-      if (r.assigned_to === 'facundo') out.chatsNadia += (r.n || 0);
+      if (VENDEDORES_SECUNDARIOS.includes(r.assigned_to)) out.chatsNadia += (r.n || 0);
       else if (r.assigned_to === 'joaco' || r.assigned_to === 'joaquin') out.chatsJoaco += (r.n || 0);
     }
   } catch (_) {}
@@ -2815,9 +2847,9 @@ function formatReporteDiario(d) {
       : `   Carteles: ${d.carteles} · Cursos: ${d.cursos}\n\n`) +
     `🤖 Pasaron la precotización: ${d.precotiz}\n\n` +
     `👥 Chats asignados hoy:${repartoNota}\n` +
-    `   Joaco: ${d.chatsJoaco} · Facundo: ${d.chatsNadia}\n\n` +
+    `   Joaco: ${d.chatsJoaco} · 2° (Facu/Agus): ${d.chatsNadia}\n\n` +
     `📋 Presupuestos enviados: ${d.presupTotal}\n` +
-    `   Joaco: ${d.presupJoaco} · Facundo: ${d.presupNadia}\n\n` +
+    `   Joaco: ${d.presupJoaco} · 2° (Facu/Agus): ${d.presupNadia}\n\n` +
     `🧾 Órdenes de compra: ${d.ocEnviadas}`
   );
 }
@@ -6897,7 +6929,7 @@ async function corporeoAskOnInbound(env, phone, msgBody) {
   // el chat quedó asignado a él, Joaco si no (default). Pedido de Gaspar: que no arranque de golpe.
   let _asg = '';
   try { const s = await env.DB.prepare("SELECT assigned_to FROM wa_chats_summary WHERE phone = ?").bind(phone).first(); _asg = String((s && s.assigned_to) || '').toLowerCase(); } catch (_) {}
-  const _saludo = _asg === 'facundo' ? 'Holaa! Acá Facu de Neon Infinito' : 'Holaa! Acá Joaco de Neon Infinito';
+  const _saludo = 'Holaa! Acá ' + saludoVendedor(_asg) + ' de Neon Infinito';
   const msgs = [_saludo, ...CORPOREO_ASK_MSGS];
   let anyFail = false;
   for (const m of msgs) {
@@ -7295,6 +7327,7 @@ function canonWorker(name) {
   const s = String(name || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   if (s.includes('joaqu') || s === 'joaco') return 'joaco';
   if (s.includes('facu')) return 'facu';
+  if (s.includes('agus')) return 'agustina';
   if (s.includes('abril') || s === 'cursos') return 'abril';
   if (s.includes('emma') || s.includes('emmanuel') || s.includes('disena')) return 'emma';
   return null;
@@ -7302,6 +7335,7 @@ function canonWorker(name) {
 const AVISO_WORKERS = [
   { id: 'joaco', nombre: 'Joaco' },
   { id: 'facu', nombre: 'Facu' },
+  { id: 'agustina', nombre: 'Agus' },
   { id: 'abril', nombre: 'Abril' },
   { id: 'emma', nombre: 'Emma' },
 ];
@@ -7409,11 +7443,16 @@ async function maybeReporteHoras(env) {
     const fechaDisplay = fechaAR.split('-').reverse().join('/');
     const lineas = eq.map(formatLineaHoras);
     const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
-    // Plantilla reporte_horas_equipo: {{1}}=fecha, {{2..5}}=una línea por vigilado (Joaco/Facu/Abril/Emma).
-    const params = [fechaDisplay, ...lineas].map(String);
+    // Plantilla reporte_horas_equipo2: {{1}}=fecha, {{2}}=cuerpo (TODAS las líneas en UNA sola variable,
+    // unidas con ' · ' porque Meta rechaza saltos de línea en params). Antes era 1 var por vigilado (5
+    // fijas) y sumar/sacar gente rompía el envío; ahora es a prueba de N personas. El texto libre (fallback)
+    // sí va multilínea. NOTA: hay que dar de alta/aprobar 'reporte_horas_equipo2' (2 vars) en 360dialog;
+    // hasta entonces el envío cae al texto libre (llega solo si la ventana de 24h de Gaspar está abierta).
+    const cuerpoLinea = lineas.join('  ·  ');
+    const params = [fechaDisplay, cuerpoLinea].map(String);
     const texto = '⏱️ Horas del equipo ' + fechaDisplay + '\n\n' + lineas.join('\n') + '\n\nUna "pausa +1h" = 1h sin tocar el CRM.';
     let ok = false;
-    try { const r = await waSendTemplate(env, gaspar, 'reporte_horas_equipo', 'es_AR', params); ok = !!(r && r.ok); } catch (_) {}
+    try { const r = await waSendTemplate(env, gaspar, 'reporte_horas_equipo2', 'es_AR', params); ok = !!(r && r.ok); } catch (_) {}
     if (!ok) { try { const r = await waSendText(env, gaspar, texto); ok = !!(r && r.ok); } catch (_) {} }
     if (ok) await kvSet(env, 'reporte_horas_sent', fechaAR);
   } catch (_) {}
@@ -9395,7 +9434,7 @@ async function inboxAccessOk(env, role, phone, sessionUser) {
 // El comercial "principal" (Joaco) ve todo lo NO asignado a un secundario. Es el reparto
 // de chats entre vendedores (assigned_to en wa_chats_summary, mig 037). Sumar un 3er
 // vendedor secundario = agregar su slug acá (y queda cubierto en la invalidación de cache).
-const VENDEDORES_SECUNDARIOS = ['facundo'];
+const VENDEDORES_SECUNDARIOS = COMERCIALES_SECUNDARIOS.map(c => c.slug);
 async function invalidateChatsSummaryCache(request) {
   try {
     const cache = caches.default;
@@ -11552,12 +11591,19 @@ const handler = {
           try { const rs = await env.DB.prepare('SELECT * FROM precotiz_pilot ORDER BY updated_at DESC').all(); leads = rs.results || []; } catch (_) {}
           let frozen = [];
           try { const fr = await env.DB.prepare("SELECT substr(k, 17) AS phone FROM kv_cache WHERE k LIKE 'precotiz_frozen:%' AND v = '1'").all(); frozen = (fr.results || []).map(r => r.phone); } catch (_) {}
-          // Reparto a Nadia: cuota diaria configurable + cuántos se le asignaron hoy (día AR).
-          const nadiaCuota = parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0;
-          let nadiaHoy = 0;
-          try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = 'facundo' AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").first(); nadiaHoy = (nr && nr.n) || 0; } catch (_) {}
-          const nadiaPhone = await kvGet(env, 'nadia_phone', '');
-          return json({ ok: true, on, modo, cap, sample, count: leads.length, leads, frozen, nadia_cuota: nadiaCuota, nadia_hoy: nadiaHoy, nadia_phone: nadiaPhone });
+          // Reparto a los vendedores SECUNDARIOS: cuota diaria por cada uno + cuántos se le asignaron
+          // hoy (día AR) + su teléfono de aviso. secundarios[] alimenta la UI; nadia_* quedan por
+          // compatibilidad (= el primer secundario, Facu).
+          const secundarios = [];
+          for (const c of COMERCIALES_SECUNDARIOS) {
+            const cu = parseInt(await kvGet(env, c.cuotaKv, '0'), 10) || 0;
+            let hoy = 0;
+            try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").bind(c.slug).first(); hoy = (nr && nr.n) || 0; } catch (_) {}
+            const ph = await kvGet(env, c.phoneKv, '');
+            secundarios.push({ slug: c.slug, nombre: c.nombre, cuota: cu, hoy, phone: ph });
+          }
+          const _facu = secundarios.find(x => x.slug === 'facundo') || { cuota: 0, hoy: 0, phone: '' };
+          return json({ ok: true, on, modo, cap, sample, count: leads.length, leads, frozen, secundarios, nadia_cuota: _facu.cuota, nadia_hoy: _facu.hoy, nadia_phone: _facu.phone });
         }
 
         // GET /admin/precotiz/evaluaciones → veredictos de la IA (por qué entró/no entró cada lead).
@@ -11601,7 +11647,15 @@ const handler = {
           let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
           if (typeof body?.on === 'boolean') await kvSet(env, 'precotiz_on', body.on ? '1' : '0');
           if (body?.modo === 'auto' || body?.modo === 'draft') await kvSet(env, 'precotiz_modo', body.modo);
-          // Reparto a Nadia: cuota diaria de leads del bot (0 = nada) + teléfono para avisarle.
+          // Reparto: cuota diaria (0 = nada) + teléfono de aviso, por vendedor secundario.
+          // Genérico: body.reparto = { slug: { cuota?, phone? } }. Legacy: nadia_cuota/nadia_phone = Facu.
+          if (body?.reparto && typeof body.reparto === 'object') {
+            for (const c of COMERCIALES_SECUNDARIOS) {
+              const rr = body.reparto[c.slug]; if (!rr || typeof rr !== 'object') continue;
+              if (rr.cuota !== undefined) { const q = Math.max(0, parseInt(rr.cuota, 10) || 0); await kvSet(env, c.cuotaKv, String(q)); }
+              if (rr.phone !== undefined) { await kvSet(env, c.phoneKv, String(rr.phone || '').replace(/\D/g, '')); }
+            }
+          }
           if (body?.nadia_cuota !== undefined) { const q = Math.max(0, parseInt(body.nadia_cuota, 10) || 0); await kvSet(env, 'nadia_cuota_diaria', String(q)); }
           if (body?.nadia_phone !== undefined) { await kvSet(env, 'nadia_phone', String(body.nadia_phone || '').replace(/\D/g, '')); }
           return json({ ok: true, on: (await kvGet(env, 'precotiz_on', '0')) === '1', modo: await kvGet(env, 'precotiz_modo', 'draft'), nadia_cuota: parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0, nadia_phone: await kvGet(env, 'nadia_phone', '') });

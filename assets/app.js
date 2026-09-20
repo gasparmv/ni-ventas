@@ -20,7 +20,7 @@ const OFRECER_BASE_NEGRA = false;
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Diseñador', 'Abril', 'Aníbal', 'Neyen'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Diseñador', 'Abril', 'Aníbal', 'Neyen'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -66,6 +66,7 @@ const CONFIG = {
     comision_pct: 0.05,       // 5% Joaco sobre trans
     nv_nadia_comision_pct: 0.04,  // 4% Nadia (histórico, ya no se usa)
     nv_facundo_comision_pct: 0.095,  // 9,5% Facundo (neutro perfecto: vende +5%, negocio queda igual que con Joaco)
+    nv_agustina_comision_pct: 0.095,  // 9,5% Agustina (misma economía que Facu: ve 10%, vende +5% oculto)
     descuento_mult: 0.88,     // si m2 > descuento_min_m2
     descuento_min_m2: 100,
     recargo_5: 2,             // m2 ≤ 5  → trans × 2
@@ -195,19 +196,20 @@ function nadiaFijoMes(yyyymm) {
 // jul-2026. El filtro (p.comercial_id||'joaco')===vendedor deja a Joaco IGUAL que antes
 // (todo el histórico es suyo por el default 'joaco').
 function panelSueldoHtml(vendedor) {
-  const esNadia = vendedor === 'facundo';
-  const DESDE = esNadia ? '2026-08' : '2026-05';
+  const sec = COMERCIALES_SECUNDARIOS[vendedor] || null;
+  const esNadia = !!sec;   // histórico: "esNadia" = es vendedor secundario (Facu/Agus/…)
+  const DESDE = sec ? sec.desde : '2026-05';
   const params = getCotizadorParams();
-  const rate = esNadia
-    ? 0.10  // Facu VE 10% (lo prometido). El neutro real calibrado es 9,5% (vende +5% oculto) — ver nv_facundo_comision_pct.
+  const rate = sec
+    ? sec.rate  // lo que VE el secundario (Facu/Agus = 10%). El neutro real calibrado es 9,5% (vende +5% oculto).
     : ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.joaquin) || params.comision_pct || 0.05);
   const ratePct = +(rate * 100).toFixed(1);
-  const fijoMes = esNadia ? nadiaFijoMes : joacoFijoMes;
+  const fijoMes = sec ? nadiaFijoMes : joacoFijoMes;   // secundarios: 100% comisión (fijo 0) salvo carga manual
   const sel = getDashMonths();
   const periodMonths = (sel || availableMonths()).filter(m => m >= DESDE);
   let inner, periodLbl;
   if (!periodMonths.length) {
-    const desdeLbl = esNadia ? 'desde agosto 2026' : 'desde mayo 2026';
+    const desdeLbl = 'desde ' + new Date(+DESDE.split('-')[0], +DESDE.split('-')[1] - 1, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' });
     periodLbl = desdeLbl;
     inner = `<div style="color:var(--fg-subtle);font-size:13px">El sueldo se muestra <b>${desdeLbl}</b> en adelante. Elegí ese período (o "Todos") para verlo.</div>`;
   } else {
@@ -981,7 +983,7 @@ function calcCotizadorNuevo(input) {
   if (tipo === 'EXT') {
     precio += m2Sheet <= 25 ? p.ext_25 : m2Sheet <= 50 ? p.ext_50 : p.ext_99;
   }
-  if (typeof STATE !== 'undefined' && isFacundoUser(STATE.user)) precio *= 1.05;   // +5% oculto solo para Facundo (neutro perfecto)
+  if (typeof STATE !== 'undefined' && isSecundario(STATE.user) && COMERCIALES_SECUNDARIOS[_userKey(STATE.user)].mas5) precio *= 1.05;   // +5% oculto para los secundarios con comisión neutra (Facu/Agus)
   const transFinal = redondMult(precio, 500);
   const negroFinal = redondMult(transFinal * p.nv_negro_ratio, 500);
 
@@ -1060,6 +1062,16 @@ function _userKey(s) {
 function isJoaquinUser(s) { return _userKey(s) === 'joaquin' || _userKey(s) === 'joaco'; }
 // Facundo: 2do vendedor (rol comercial, como Joaco). Ve el Chat WA y trabaja carteles.
 function isFacundoUser(s) { return _userKey(s) === 'facundo'; }
+function isAgustinaUser(s) { return _userKey(s) === 'agustina'; }
+// Registro de vendedores comerciales SECUNDARIOS (rol comercial como Joaco, pero con vista REDUCIDA
+// + leads asignados al azar). Espejo del COMERCIALES_SECUNDARIOS del worker. Sumar uno futuro = 1
+// entrada acá (+ fila en users_panel + nombre en CONFIG.defaultUsers). Config por vendedor: comisión
+// visible (rate), +5% oculto (mas5), mes de inicio del panel "Tu sueldo" (desde), color de píldora.
+const COMERCIALES_SECUNDARIOS = {
+  facundo:  { nombre: 'Facu', rate: 0.10, mas5: true, desde: '2026-08', color: 'violet' },
+  agustina: { nombre: 'Agus', rate: 0.10, mas5: true, desde: '2026-09', color: 'rose' },
+};
+function isSecundario(s) { return Object.prototype.hasOwnProperty.call(COMERCIALES_SECUNDARIOS, _userKey(s)); }
 function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
 // SOLO DISPLAY: el user "Gaspar" se muestra como "Administrador" en la UI. El valor INTERNO
 // sigue siendo "Gaspar" (login, isAdmin, API, gates de rol) → no rompe nada, es solo el tag visible.
@@ -1163,7 +1175,7 @@ async function logout() {
 // isAdmin requiere que el TOKEN sea de Gaspar (no solo el nombre activo). Sin esto,
 // un token de bajo privilegio podría usarse para mostrar la UI admin.
 function isAdmin() { return !!STATE.token && isGasparUser(STATE.tokenUser) && isGasparUser(STATE.user); }
-function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isFacundoUser(STATE.user) || isCursosUser(STATE.user)); }
+function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isSecundario(STATE.user) || isCursosUser(STATE.user)); }
 // Abril (rol cursos): SOLO ve la sección Chat WA, nada más.
 function isCursosOnly() { return isCursosUser(STATE.user); }
 // Aníbal / Neyen (rol produccion): SOLO ven la sección Corte (su cola).
@@ -2197,15 +2209,15 @@ function render() {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
-  // Corpóreas: Joaquín + Gaspar + Facundo. Si alguien más cae acá (hash directo), al dashboard.
-  if (STATE.view === 'corporeas' && !(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isFacundoUser(STATE.user))) {
+  // Corpóreas: Joaquín + Gaspar + vendedores secundarios (Facu/Agus). Si otro cae acá (hash directo), al dashboard.
+  if (STATE.view === 'corporeas' && !(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isSecundario(STATE.user))) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
   // Nadia (2da vendedora): set reducido por ahora. Views permitidas: dashboard (solo
   // su panel "Tu sueldo"), pedidos, presupuestos, cotizacion, chat. Si cae en otra
   // (seguimientos/actividad/etc. por hash directo), al dashboard.
-  if (isFacundoUser(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas'].includes(STATE.view)) {
+  if (isSecundario(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas'].includes(STATE.view)) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
@@ -2257,7 +2269,7 @@ function render() {
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
     if (isAdmin()) bindBusinessPanel();
-    else if (!isFacundoUser(STATE.user)) drawCharts();  // Nadia: dashboard reducido, sin gráficos
+    else if (!isSecundario(STATE.user)) drawCharts();  // secundarios (Facu/Agus): dashboard reducido, sin gráficos
   }
   if (STATE.view === 'panel-joaco') bindPanelJoaco();
   if (STATE.view === 'actividad') bindActividad();
@@ -3188,12 +3200,12 @@ function renderShell() {
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
-        ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isFacundoUser(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
+        ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isSecundario(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
-        ${!isFacundoUser(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
+        ${!isSecundario(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>` : ''}
-        ${!isFacundoUser(STATE.user) ? `<button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>` : ''}
+        ${!isSecundario(STATE.user) ? `<button class="nav-item ${v==='actividad'?'active':''}" data-view="actividad"><span class="icon">⌬</span> Actividad</button>` : ''}
         ${canAccessChat() ? `<button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
           <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '')}</span>
         </button>` : ''}
@@ -3306,13 +3318,16 @@ function renderPrecotiz() {
         <span class="muted" style="font-size:12px">${P.count}/${P.cap} leads</span>
       </div>
       <div class="muted" style="font-size:11px;margin-top:8px">Con el piloto prendido y en modo borrador, el bot arma los mensajitos y te avisa acá para que los apruebes. Solo vos ves estos chats hasta que junten los 3 datos.</div>
-      <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <label style="display:flex;align-items:center;gap:8px">👤 Reparto a Facundo — leads por día:
-          <input type="number" min="0" step="1" data-nadia-cuota value="${P.nadia_cuota != null ? P.nadia_cuota : 0}" style="width:64px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:5px 8px;color:var(--fg);font-size:13px">
-        </label>
-        <span class="muted" style="font-size:12px">hoy le tocaron ${P.nadia_hoy || 0}/${P.nadia_cuota || 0}</span>
+      <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px;display:flex;flex-direction:column;gap:8px">
+        ${(P.secundarios && P.secundarios.length ? P.secundarios : [{ slug: 'facundo', nombre: 'Facu', cuota: P.nadia_cuota, hoy: P.nadia_hoy }]).map(sv => `
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:8px">👤 Reparto a ${escapeHtml(sv.nombre)} — leads por día:
+              <input type="number" min="0" step="1" data-sec-cuota="${sv.slug}" value="${sv.cuota != null ? sv.cuota : 0}" style="width:64px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:5px 8px;color:var(--fg);font-size:13px">
+            </label>
+            <span class="muted" style="font-size:12px">hoy le tocaron ${sv.hoy || 0}/${sv.cuota || 0}</span>
+          </div>`).join('')}
       </div>
-      <div class="muted" style="font-size:11px;margin-top:6px">Cada lead NUEVO de carteles que entra se reparte: hasta ese tope por día va a Facundo (lo atiende él desde el primer mensaje), el resto queda para Joaco. En 0, Facundo no recibe nada automático — le asignás a mano con el botón 👤F en cada chat.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">Cada lead NUEVO de carteles que entra se reparte al azar entre los vendedores (hasta su tope diario cada uno); el resto queda para Joaco. En 0, ese vendedor no recibe nada automático — le asignás a mano en cada chat.</div>
     </div>
     ${(P.leads && P.leads.length) ? leadsHtml : '<div class="muted" style="font-size:13px">Todavía no entró ningún lead al piloto.</div>'}
   `;
@@ -3325,8 +3340,11 @@ function bindPrecotiz() {
   if (onChk) onChk.onchange = async () => { await precotizControl({ on: onChk.checked }); reload(); };
   const modoSel = document.querySelector('[data-precotiz-modo]');
   if (modoSel) modoSel.onchange = async () => { await precotizControl({ modo: modoSel.value }); toast('Modo: ' + modoSel.value); };
-  const nadiaCuotaInp = document.querySelector('[data-nadia-cuota]');
-  if (nadiaCuotaInp) nadiaCuotaInp.onchange = async () => { const q = Math.max(0, parseInt(nadiaCuotaInp.value, 10) || 0); await precotizControl({ nadia_cuota: q }); toast('Reparto a Facundo: ' + q + '/día'); reload(); };
+  document.querySelectorAll('[data-sec-cuota]').forEach(inp => inp.onchange = async () => {
+    const slug = inp.dataset.secCuota; const q = Math.max(0, parseInt(inp.value, 10) || 0);
+    await precotizControl({ reparto: { [slug]: { cuota: q } } });
+    toast('Reparto a ' + slug + ': ' + q + '/día'); reload();
+  });
   document.querySelectorAll('[data-precotiz-approve]').forEach(el => el.onclick = async () => {
     const phone = el.dataset.precotizApprove;
     const ta = document.querySelector(`[data-precotiz-draft="${phone}"]`);
@@ -3922,7 +3940,7 @@ function showCreateTemplateBroadcast(opts) {
 function renderDashboard() {
   // Nadia (2da vendedora): dashboard reducido -> SOLO su panel "Tu sueldo". No ve
   // las métricas del negocio (ventas totales, AOV, cobrado, gráficos, etc.).
-  if (isFacundoUser(STATE.user)) {
+  if (isSecundario(STATE.user)) {
     return `
     <div class="page-head">
       <div>
@@ -3930,7 +3948,7 @@ function renderDashboard() {
         <h1>Dashboard</h1>
       </div>
     </div>
-    ${panelSueldoHtml('facundo')}
+    ${panelSueldoHtml(_userKey(STATE.user))}
   `;
   }
   const cur = pedidosDash();
@@ -3988,7 +4006,7 @@ function renderDashboard() {
       </div>`;
     })()}
 
-    ${isJoaquinUser(STATE.user) ? panelSueldoHtml('joaco') : (isFacundoUser(STATE.user) ? panelSueldoHtml('facundo') : '')}
+    ${isJoaquinUser(STATE.user) ? panelSueldoHtml('joaco') : (isSecundario(STATE.user) ? panelSueldoHtml(_userKey(STATE.user)) : '')}
 
     <div class="chart-grid">
       <div class="card chart-card">
@@ -5253,6 +5271,7 @@ const PILL_HEX = {
   cyan:   { bg:'rgba(143,212,222,.12)', fg:'var(--neon-cyan)', bd:'rgba(143,212,222,.3)' },
   blue:   { bg:'rgba(80,140,255,.14)',  fg:'#8ab4ff',          bd:'rgba(80,140,255,.32)' },
   violet: { bg:'rgba(155,92,255,.14)',  fg:'#c4a0ff',          bd:'rgba(155,92,255,.32)' },
+  rose:   { bg:'rgba(244,114,182,.14)', fg:'#f9a8d4',          bd:'rgba(244,114,182,.32)' },
   muted:  { bg:'var(--ink-200)',        fg:'var(--fg-subtle)', bd:'var(--border)' }
 };
 // 1er pago → rojo · 2do pago → verde.
@@ -5270,8 +5289,8 @@ function dimerPillHtml(s){ if (!s) return '<span style="color:var(--fg-subtle)">
 function baseSwatch(s){ if (!s) return '<span style="color:var(--fg-subtle)">—</span>'; return `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:11px;height:11px;border-radius:50%;background:${baseHex(s)};border:1px solid var(--border);flex:none"></span><span style="font-size:12px">${escapeHtml(s)}</span></span>`; }
 // ¿Quién cargó el pedido? Normaliza el user (verbatim del login) a un nombre corto + color.
 function loaderNorm(u){ return String(u||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,''); }
-function loaderLabel(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'Facu'; if(s==='joaquin'||s==='joaco')return 'Joaco'; if(s==='gaspar'||s==='bruno')return 'Gaspar'; if(s==='abril')return 'Abril'; if(s==='emma'||s==='emmanuel')return 'Emma'; return u?(String(u).charAt(0).toUpperCase()+String(u).slice(1)):''; }
-function loaderColor(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'violet'; if(s==='joaquin'||s==='joaco')return 'cyan'; if(s==='gaspar'||s==='bruno')return 'blue'; if(s==='abril')return 'amber'; return 'muted'; }
+function loaderLabel(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'Facu'; if(s==='agustina'||s==='agus')return 'Agus'; if(s==='joaquin'||s==='joaco')return 'Joaco'; if(s==='gaspar'||s==='bruno')return 'Gaspar'; if(s==='abril')return 'Abril'; if(s==='emma'||s==='emmanuel')return 'Emma'; return u?(String(u).charAt(0).toUpperCase()+String(u).slice(1)):''; }
+function loaderColor(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'violet'; if(s==='agustina'||s==='agus')return 'rose'; if(s==='joaquin'||s==='joaco')return 'cyan'; if(s==='gaspar'||s==='bruno')return 'blue'; if(s==='abril')return 'amber'; return 'muted'; }
 // Celda/píldora con quién cargó el pedido. cargado_por (user literal) y, si falta (histórico), comercial_id.
 function loaderCell(p){ const who=p.cargadoPor||p.comercial_id||''; const lbl=loaderLabel(who); if(!lbl)return '<span style="color:var(--fg-subtle)">—</span>'; return `<span class="pill ${loaderColor(who)}" style="font-size:11px">${escapeHtml(lbl)}</span>`; }
 // Dropdown inline (tabla) coloreado según el valor actual, para editar el estado sin
@@ -15572,8 +15591,8 @@ function renderBriefCard(b) {
               const _r = getUserRole();
               if (_r !== 'admin' && _r !== 'disenador') return '';
               const _c = String(b.comercial_id || '').toLowerCase();
-              const _nom = _c === 'facundo' ? 'Facundo' : (_c === 'joaco' ? 'Joaquín' : (_c || '—'));
-              const _col = _c === 'facundo' ? '#c084fc' : '#8FD4DE';
+              const _nom = _c === 'facundo' ? 'Facundo' : (_c === 'agustina' ? 'Agustina' : (_c === 'joaco' ? 'Joaquín' : (_c || '—')));
+              const _col = _c === 'facundo' ? '#c084fc' : (_c === 'agustina' ? '#f472b6' : '#8FD4DE');
               return `<span title="Vendedor: ${escapeHtml(_nom)}" style="background:${_col}22;color:${_col};font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600">${escapeHtml(_nom)}</span>`;
             })()}
             ${(() => {
