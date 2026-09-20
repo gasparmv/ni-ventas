@@ -44,8 +44,8 @@ function cors(headers = {}) {
   return {
     'Access-Control-Allow-Origin': ALLOWED_ORIGINS,
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Max-Age': '86400',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-NI-Human',
+    'Access-Control-Max-Age': '600',
     ...headers
   };
 }
