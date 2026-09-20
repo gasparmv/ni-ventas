@@ -1168,8 +1168,20 @@ function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) &&
 function isCursosOnly() { return isCursosUser(STATE.user); }
 // Aníbal / Neyen (rol produccion): SOLO ven la sección Corte (su cola).
 function isProduccionOnly() { return isProduccionUser(STATE.user); }
+// Señal de actividad HUMANA para el "arranque"/horas del equipo: marcamos el último gesto real
+// del usuario (click/tecla/touch/scroll). Cada request lleva X-NI-Human=1 solo si hubo
+// interacción hace <5 min; si no (polls automáticos, app en segundo plano, celu dormido) va 0
+// y el server NO lo cuenta como actividad → mata los "arranques" fantasma de las 4 AM.
+let _lastHumanTs = 0;
+try {
+  ['pointerdown', 'keydown', 'touchstart', 'wheel'].forEach(ev =>
+    window.addEventListener(ev, () => { _lastHumanTs = Date.now(); }, { capture: true, passive: true }));
+} catch (_) {}
+function humanActiveRecently() { return (Date.now() - _lastHumanTs) < 5 * 60 * 1000; }
 function authHeaders() {
-  return STATE.token ? { 'Authorization': 'Bearer ' + STATE.token } : {};
+  const h = STATE.token ? { 'Authorization': 'Bearer ' + STATE.token } : {};
+  h['X-NI-Human'] = humanActiveRecently() ? '1' : '0';
+  return h;
 }
 function addUser() {
   const name = (prompt('Nombre del nuevo usuario:') || '').trim();

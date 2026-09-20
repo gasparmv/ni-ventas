@@ -24,7 +24,9 @@ async function poll() {
     let url = trackerUrl.replace(/\/$/, '') + '/admin/wa/messages?direction=inbound&limit=30';
     if (lastSeenTs) url += '&from=' + encodeURIComponent(lastSeenTs);
     const r = await fetch(url, {
-      headers: { 'Authorization': 'Bearer ' + token }
+      // X-NI-Human: '0' → este poll es 100% automático (background, cada 5s), NUNCA es
+      // actividad humana. El worker NO lo cuenta como "arranque" (mata los pings fantasma 4 AM).
+      headers: { 'Authorization': 'Bearer ' + token, 'X-NI-Human': '0' }
     });
     if (!r.ok) {
       // 503 (db_busy) o 5xx: la base está saturada. Backoff 20-40s (con jitter)

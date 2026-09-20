@@ -7327,11 +7327,15 @@ async function maybeAvisoArranque(env) {
       try { const r = await env.DB.prepare("SELECT last_active FROM user_activity WHERE user = ?").bind(w.id).first(); la = r && r.last_active; } catch (_) {}
       const arrancoHoy = !!(la && la >= todayStartIso);
       if (arrancoHoy) {
-        arrancaron.push({ nombre: w.nombre, hhmm: _arHHMM(la) });
+        // Hora de ARRANQUE = PRIMERA marca de actividad del día (no la última). last_active
+        // solo sirve para saber SI arrancó hoy; el arranque real es el MIN(ts) del log.
+        let first = la;
+        try { const fr = await env.DB.prepare("SELECT MIN(ts) AS t FROM user_activity_log WHERE user = ? AND ts >= ?").bind(w.id, todayStartIso).first(); if (fr && fr.t) first = fr.t; } catch (_) {}
+        arrancaron.push({ nombre: w.nombre, hhmm: _arHHMM(first) });
         // Ping en tiempo real (una vez por día, en horario razonable 6-22 AR).
         if (hAR >= 6 && hAR < 22 && (await kvGet(env, 'arranque_ping_' + w.id, '')) !== fechaAR) {
           try {
-            const r = await waSendText(env, gaspar, w.nombre + ' arrancó a trabajar (' + _arHHMM(la) + ')');
+            const r = await waSendText(env, gaspar, w.nombre + ' arrancó a trabajar (' + _arHHMM(first) + ')');
             if (r && r.ok) await kvSet(env, 'arranque_ping_' + w.id, fechaAR);
           } catch (_) {}
         }
@@ -11339,7 +11343,12 @@ const handler = {
       // la respuesta (waitUntil). Es la señal real de "arrancó a trabajar" (mejor que el login).
       try {
         const _cw = canonWorker(session.user);
-        if (_cw) {
+        // Solo cuenta como actividad si NO es un request automático. El front manda
+        // X-NI-Human='1' cuando hubo interacción humana real hace <5min y '0' en los polls
+        // (main-thread + poll-worker de 5s). Así NO se estampan "arranques" fantasma de las
+        // 4 AM (celu dormido con la app abierta). Un request sin el header (frontend viejo
+        // cacheado) se sigue contando hasta que el cliente actualice (bump de sw).
+        if (_cw && request.headers.get('X-NI-Human') !== '0') {
           const _nowA = new Date().toISOString();
           const _thrA = new Date(Date.now() - 5 * 60 * 1000).toISOString();
           // Estampa last_active y, SOLO cuando pasó el throttle (>5 min o primera del día),
