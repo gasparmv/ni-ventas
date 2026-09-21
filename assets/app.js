@@ -2978,8 +2978,9 @@ function corteClientGroups(pedidos) {
   const g = {};
   (pedidos || []).forEach(p => {
     const k = p.telefono || ('id' + p.id);
-    if (!g[k]) g[k] = { key: k, nombre: p.cliente_nombre || 'cliente', tel: p.telefono || '', items: [], total: 0, m2: 0, minStage: 99, maxStage: -1, pagos: {} };
+    if (!g[k]) g[k] = { key: k, nombre: p.cliente_nombre || 'cliente', tel: p.telefono || '', items: [], total: 0, m2: 0, minStage: 99, maxStage: -1, pagos: {}, entrega: '' };
     const o = g[k]; o.items.push(p);
+    if (p.entrega && !o.entrega) o.entrega = p.entrega;
     o.total += Number(p.precio) || 0;
     if (p.ancho_real && p.alto_real) o.m2 += (Number(p.ancho_real) / 100) * (Number(p.alto_real) / 100) * (Math.max(1, parseInt(p.cantidad, 10) || 1));
     const si = CORTE_STAGE_IDX[p.estado]; if (si != null) { o.minStage = Math.min(o.minStage, si); o.maxStage = Math.max(o.maxStage, si); }
@@ -3067,7 +3068,7 @@ function corteHybridBoard(pedidos) {
           <span style="color:${psm.c};font-size:11px;font-weight:600;flex:0 0 auto">${psm.l}</span>
           <span style="min-width:78px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto">${p.precio ? '$' + Number(p.precio).toLocaleString('es-AR') : '—'}</span>
         </div>`; }).join('')}
-        ${g.tel && g.items.some(p => p.estado === 'cortado') ? `<button class="btn ghost" data-corte-embalar-tel="${escapeHtml(g.tel)}" style="margin-top:8px;font-size:11px;padding:4px 10px">📦 Embalar paquete (retira)</button>` : ''}
+        ${g.tel && g.items.some(p => p.estado === 'cortado') ? `<button class="btn ghost" data-corte-embalar-tel="${escapeHtml(g.tel)}" data-corte-entrega="${escapeHtml(g.entrega || 'retira')}" style="margin-top:8px;font-size:11px;padding:4px 10px">📦 Embalar paquete (${g.entrega === 'envio' ? 'envío' : 'retira'})</button>` : ''}
       </div>` : '';
     return head + detail;
   }).join('');
@@ -3132,9 +3133,7 @@ function renderCorte() {
               <div style="font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${escapeHtml(g.nombre || 'cliente')} <span style="color:var(--fg-mute);font-weight:400;font-size:12px">· ${g.items.length} pieza${g.items.length === 1 ? '' : 's'}</span>${g.entrega ? `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:${g.entrega === 'envio' ? '#f59e0b' : '#22c55e'};background:color-mix(in srgb, ${g.entrega === 'envio' ? '#f59e0b' : '#22c55e'} 16%, transparent)">${g.entrega === 'envio' ? '📦 Envío' : '🏠 Retira'}</span>` : ''}</div>
               ${g.items.map(p => `<div style="font-size:13px;color:var(--fg-mute);padding:2px 0">• ${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ' — ' + escapeHtml(p.medida_declarada) : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</div>`).join('')}
               <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-                <label style="margin-right:16px;cursor:pointer"><input type="radio" name="entrega-${escapeHtml(k)}" value="retira" ${g.entrega === 'envio' ? '' : 'checked'}> Retira</label>
-                <label style="cursor:pointer"><input type="radio" name="entrega-${escapeHtml(k)}" value="envio" ${g.entrega === 'envio' ? 'checked' : ''}> Envío</label>
-                <button class="btn" data-corte-embalar-tel="${escapeHtml(g.tel)}" style="margin-top:10px;display:block">📦 Marcar paquete embalado</button>
+                <button class="btn" data-corte-embalar-tel="${escapeHtml(g.tel)}" data-corte-entrega="${escapeHtml(g.entrega || 'retira')}">📦 Marcar paquete embalado</button>
               </div>
             </div>`; }).join('') : vacio('No hay nada para embalar')}
         </div>`;
@@ -3297,9 +3296,7 @@ async function bindCorte() {
   // Neyen: embalar el paquete completo de un cliente (con su entrega).
   document.querySelectorAll('[data-corte-embalar-tel]').forEach(btn => {
     btn.onclick = () => {
-      const cont = btn.parentElement;
-      const r = cont ? cont.querySelector('input[type=radio]:checked') : null;
-      corteBulk('embalado_bulk', { telefono: btn.getAttribute('data-corte-embalar-tel'), entrega: r ? r.value : 'retira' });
+      corteBulk('embalado_bulk', { telefono: btn.getAttribute('data-corte-embalar-tel'), entrega: btn.getAttribute('data-corte-entrega') || 'retira' });
     };
   });
   // Cobranza de la semana (admin)
