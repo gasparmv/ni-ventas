@@ -1716,6 +1716,153 @@ async function kvSet(env, k, v) {
   catch (_) {}
 }
 
+// ===================== AGENDA DEL EQUIPO =====================
+// Calendario interno: reuniones y tareas con participantes, recurrencia (semanal / días
+// hábiles) y (fase 2) recordatorios por WhatsApp. Cada uno ve lo suyo; el admin ve todo.
+// Los participantes se guardan como SLUG (normalize del nombre de usuario del CRM): así
+// 'Diseñador'→'disenador', 'Joaquín'→'joaquin', etc. — el mismo slug que manda el front.
+const AGENDA_ROSTER = [
+  { slug: 'gaspar', nombre: 'Gaspar' },
+  { slug: 'joaquin', nombre: 'Joaco' },
+  { slug: 'facundo', nombre: 'Facu' },
+  { slug: 'agustina', nombre: 'Agus' },
+  { slug: 'disenador', nombre: 'Emma' },
+  { slug: 'abril', nombre: 'Abril' },
+  { slug: 'anibal', nombre: 'Aníbal' },
+  { slug: 'neyen', nombre: 'Neyen' },
+];
+function _agSlug(u) { return String(u || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim(); }
+function _agParse(s) { return new Date(String(s || '') + 'T00:00:00Z'); }
+function _agFmt(d) { return d.toISOString().slice(0, 10); }
+// Expande las OCURRENCIAS (fechas YYYY-MM-DD) de un evento dentro de [desde, hasta].
+function _agOccurrences(ev, desde, hasta) {
+  const out = [];
+  const start = ev.fecha; if (!start) return out;
+  const rec = ev.recurrencia || 'none';
+  const end = ev.recurrencia_hasta || '';
+  if (rec === 'none' || (rec !== 'semanal' && rec !== 'habil')) { if (start >= desde && start <= hasta) out.push(start); return out; }
+  const from = desde > start ? desde : start;
+  const to = (end && end < hasta) ? end : hasta;
+  if (from > to) return out;
+  const startD = _agParse(start), toD = _agParse(to);
+  let d = _agParse(from), guard = 0;
+  while (d <= toD && guard++ < 400) {
+    if (rec === 'semanal') { if (Math.round((d - startD) / 86400000) % 7 === 0) out.push(_agFmt(d)); }
+    else if (rec === 'habil') { const wd = d.getUTCDay(); if (wd >= 1 && wd <= 5) out.push(_agFmt(d)); }
+    d = new Date(d.getTime() + 86400000);
+  }
+  return out;
+}
+async function ensureAgendaSchema(env) {
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS agenda_eventos (id INTEGER PRIMARY KEY AUTOINCREMENT, tipo TEXT NOT NULL DEFAULT 'reunion', titulo TEXT NOT NULL, detalle TEXT DEFAULT '', fecha TEXT NOT NULL, hora TEXT DEFAULT '', hora_fin TEXT DEFAULT '', lugar TEXT DEFAULT '', recurrencia TEXT DEFAULT 'none', recurrencia_hasta TEXT DEFAULT '', creado_por TEXT DEFAULT '', created_at TEXT DEFAULT '', updated_at TEXT DEFAULT '')").run();
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS agenda_participantes (evento_id INTEGER, usuario TEXT)").run();
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_agenda_part ON agenda_participantes (evento_id, usuario)").run();
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS agenda_hechos (evento_id INTEGER, ocurrencia TEXT, done_at TEXT)").run();
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_agenda_hechos ON agenda_hechos (evento_id, ocurrencia)").run();
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS agenda_recordatorios (evento_id INTEGER, ocurrencia TEXT, usuario TEXT, tipo TEXT, sent_at TEXT)").run();
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS agenda_phones (usuario TEXT PRIMARY KEY, phone TEXT)").run();
+    const seed = [['gaspar', '5491155604999'], ['bruno', '5491155604996'], ['agustina', '5492325472278'], ['facundo', '5491138785084'], ['joaquin', '5491137593269'], ['neyen', '5491162080023'], ['anibal', '5491162889259']];
+    for (const [u, p] of seed) { try { await env.DB.prepare("INSERT INTO agenda_phones (usuario, phone) VALUES (?, ?) ON CONFLICT(usuario) DO NOTHING").bind(u, p).run(); } catch (_) {} }
+  } catch (_) {}
+}
+// Router de /admin/agenda*. Siempre devuelve Response (incluye 401/404). Auth por sesión.
+async function agendaRoute(env, request, url, path) {
+  const session = await getSession(env, request);
+  if (!session) return unauthorized();
+  await ensureAgendaSchema(env);
+  const me = _agSlug(session.user);
+  const esAdmin = (await getSessionRole(env, session.user)) === 'admin';
+  const mId = path.match(/^\/admin\/agenda\/(\d+)(\/hecho)?$/);
+  const eid = mId ? parseInt(mId[1], 10) : 0;
+
+  if (request.method === 'GET' && path === '/admin/agenda') {
+    let desde = url.searchParams.get('desde') || '';
+    let hasta = url.searchParams.get('hasta') || '';
+    if (!desde || !hasta) { const t = new Date().toISOString().slice(0, 10); desde = t; hasta = _agFmt(new Date(Date.now() + 7 * 86400000)); }
+    const evs = (await env.DB.prepare("SELECT * FROM agenda_eventos").all()).results || [];
+    const parts = (await env.DB.prepare("SELECT evento_id, usuario FROM agenda_participantes").all()).results || [];
+    const hechos = (await env.DB.prepare("SELECT evento_id, ocurrencia FROM agenda_hechos WHERE ocurrencia >= ? AND ocurrencia <= ?").bind(desde, hasta).all()).results || [];
+    const pmap = {}; for (const p of parts) { (pmap[p.evento_id] = pmap[p.evento_id] || []).push(p.usuario); }
+    const hset = new Set(hechos.map(h => h.evento_id + '|' + h.ocurrencia));
+    const out = [];
+    for (const ev of evs) {
+      const ps = pmap[ev.id] || [];
+      if (!(esAdmin || ps.includes(me) || _agSlug(ev.creado_por) === me)) continue;
+      for (const oc of _agOccurrences(ev, desde, hasta)) {
+        out.push({ id: ev.id, tipo: ev.tipo, titulo: ev.titulo, detalle: ev.detalle, fecha: oc, hora: ev.hora, hora_fin: ev.hora_fin, lugar: ev.lugar, recurrencia: ev.recurrencia, recurrencia_hasta: ev.recurrencia_hasta, creado_por: ev.creado_por, participantes: ps, hecho: ev.tipo === 'tarea' && hset.has(ev.id + '|' + oc) });
+      }
+    }
+    out.sort((a, b) => (a.fecha + (a.hora || '99')).localeCompare(b.fecha + (b.hora || '99')));
+    return json({ ok: true, eventos: out, roster: AGENDA_ROSTER, yo: me, puedeVerTodo: esAdmin });
+  }
+
+  if (request.method === 'POST' && path === '/admin/agenda') {
+    let b; try { b = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+    const titulo = String(b.titulo || '').trim(), fecha = String(b.fecha || '').trim();
+    if (!titulo || !fecha) return json({ error: 'faltan titulo o fecha' }, 400);
+    const tipo = b.tipo === 'tarea' ? 'tarea' : 'reunion';
+    const rec = ['semanal', 'habil'].includes(b.recurrencia) ? b.recurrencia : 'none';
+    const now = new Date().toISOString();
+    const r = await env.DB.prepare("INSERT INTO agenda_eventos (tipo,titulo,detalle,fecha,hora,hora_fin,lugar,recurrencia,recurrencia_hasta,creado_por,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(tipo, titulo, String(b.detalle || ''), fecha, String(b.hora || ''), String(b.hora_fin || ''), String(b.lugar || ''), rec, String(b.recurrencia_hasta || ''), me, now, now).run();
+    const id = r.meta.last_row_id;
+    let ps = Array.from(new Set((Array.isArray(b.participantes) ? b.participantes : []).map(_agSlug).filter(Boolean)));
+    if (!ps.length) ps = [me];
+    for (const u of ps) { try { await env.DB.prepare("INSERT INTO agenda_participantes (evento_id, usuario) VALUES (?, ?)").bind(id, u).run(); } catch (_) {} }
+    return json({ ok: true, id });
+  }
+
+  if (request.method === 'PATCH' && eid && !mId[2]) {
+    const ev = await env.DB.prepare("SELECT * FROM agenda_eventos WHERE id = ?").bind(eid).first();
+    if (!ev) return json({ error: 'not found' }, 404);
+    if (!esAdmin && _agSlug(ev.creado_por) !== me) return json({ error: 'forbidden' }, 403);
+    let b; try { b = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+    const tipo = b.tipo === undefined ? ev.tipo : (b.tipo === 'tarea' ? 'tarea' : 'reunion');
+    const rec = b.recurrencia === undefined ? ev.recurrencia : (['semanal', 'habil'].includes(b.recurrencia) ? b.recurrencia : 'none');
+    await env.DB.prepare("UPDATE agenda_eventos SET tipo=?, titulo=?, detalle=?, fecha=?, hora=?, hora_fin=?, lugar=?, recurrencia=?, recurrencia_hasta=?, updated_at=? WHERE id=?")
+      .bind(tipo, String(b.titulo ?? ev.titulo), String(b.detalle ?? ev.detalle), String(b.fecha ?? ev.fecha), String(b.hora ?? ev.hora), String(b.hora_fin ?? ev.hora_fin), String(b.lugar ?? ev.lugar), rec, String(b.recurrencia_hasta ?? ev.recurrencia_hasta), new Date().toISOString(), eid).run();
+    if (Array.isArray(b.participantes)) {
+      await env.DB.prepare("DELETE FROM agenda_participantes WHERE evento_id = ?").bind(eid).run();
+      let ps = Array.from(new Set(b.participantes.map(_agSlug).filter(Boolean)));
+      if (!ps.length) ps = [me];
+      for (const u of ps) { try { await env.DB.prepare("INSERT INTO agenda_participantes (evento_id, usuario) VALUES (?, ?)").bind(eid, u).run(); } catch (_) {} }
+    }
+    return json({ ok: true });
+  }
+
+  if (request.method === 'DELETE' && eid && !mId[2]) {
+    const ev = await env.DB.prepare("SELECT creado_por FROM agenda_eventos WHERE id = ?").bind(eid).first();
+    if (!ev) return json({ error: 'not found' }, 404);
+    if (!esAdmin && _agSlug(ev.creado_por) !== me) return json({ error: 'forbidden' }, 403);
+    await env.DB.prepare("DELETE FROM agenda_eventos WHERE id = ?").bind(eid).run();
+    await env.DB.prepare("DELETE FROM agenda_participantes WHERE evento_id = ?").bind(eid).run();
+    await env.DB.prepare("DELETE FROM agenda_hechos WHERE evento_id = ?").bind(eid).run();
+    await env.DB.prepare("DELETE FROM agenda_recordatorios WHERE evento_id = ?").bind(eid).run();
+    return json({ ok: true });
+  }
+
+  if (request.method === 'POST' && eid && mId[2]) {
+    let b; try { b = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+    const oc = String(b.ocurrencia || '').trim();
+    if (!oc) return json({ error: 'falta ocurrencia' }, 400);
+    if (!esAdmin) {
+      const p = await env.DB.prepare("SELECT 1 AS x FROM agenda_participantes WHERE evento_id = ? AND usuario = ?").bind(eid, me).first();
+      const ev = await env.DB.prepare("SELECT creado_por FROM agenda_eventos WHERE id = ?").bind(eid).first();
+      if (!p && (!ev || _agSlug(ev.creado_por) !== me)) return json({ error: 'forbidden' }, 403);
+    }
+    if (b.done === false) {
+      await env.DB.prepare("DELETE FROM agenda_hechos WHERE evento_id = ? AND ocurrencia = ?").bind(eid, oc).run();
+    } else {
+      const ex = await env.DB.prepare("SELECT 1 AS x FROM agenda_hechos WHERE evento_id = ? AND ocurrencia = ?").bind(eid, oc).first();
+      if (!ex) await env.DB.prepare("INSERT INTO agenda_hechos (evento_id, ocurrencia, done_at) VALUES (?, ?, ?)").bind(eid, oc, new Date().toISOString()).run();
+    }
+    return json({ ok: true });
+  }
+
+  return json({ error: 'agenda: ruta no soportada' }, 404);
+}
+
 // Índices de performance en las tablas calientes. SIN estos, cada poll de
 // /admin/wa/messages hace full-scan + sort de TODA la tabla wa_messages (decenas
 // de miles de filas) y /admin/briefs escanea briefs — con varios clientes
@@ -3324,8 +3471,16 @@ CABLE (lo vendés VOS, NO frenes) — si el alumno pregunta por cable, por preci
 - Rollo de 100mts, sin estañar, blanco o negro: 0.35mm ($39.500) y 0.5mm ($43.500): se usan para el cable de SALIDA hasta la fuente de alimentación, o para conexiones internas de carteles más grandes.
 Si te preguntan cuál les conviene o para qué sirve cada uno, explicáselo con eso (una frase, sin repetir toda la lista). Mandá el video+lista UNA sola vez: si en la charla ya se lo pasaste (ves el video de cables en el historial), NO pongas enviar_cable de nuevo; si vuelve a preguntar un detalle puntual, respondé solo con texto. Un alumno puede pedir CORTE Y CABLE en la misma charla: tomá el corte normalmente y además poné enviar_cable=true.
 
+DINÁMICA SEMANAL (ubicate en el tiempo): el corte va por tandas SEMANALES — los pedidos entran toda la semana, se cortan el fin de semana, y el COBRO se hace el LUNES. Usá la fecha/hora de arriba para saber en qué parte de la semana estás. El LUNES es día de cobros: mucha gente que escribe ese día viene por su PAGO, no por un pedido nuevo. Leé el contexto antes de empujar un pedido.
+
+COBRO / PAGO PENDIENTE (importante): si arriba ves una línea [COBRO PENDIENTE (interno): ...], ese cliente YA tiene un corte de esta semana SIN pagar y estamos esperando su pago. En ese caso NO le insistas con un pedido nuevo, NO le pidas medida/nombre/foto: el foco es cerrar el pago. Manejalo así, y NO frenes por esto:
+- Si dice que ya pagó / transfirió / "ahí va" / "ahí te mando": agradecé cálido y decile que quedamos a la espera del comprobante (o que si ya lo mandó, lo estamos viendo). es_corte=false.
+- Si pregunta cuánto es, por qué, o PIDE el detalle de lo que está pagando: poné enviar_detalle_cobro=true (el sistema le manda el desglose completo con los diseños). Podés acompañar con una línea corta.
+- Si de verdad arranca OTRO pedido NUEVO distinto (una medida/diseño nuevo): ahí sí tomáselo normal, además del pago.
+Un "pago" solo se FRENA (lo atiende una persona) cuando NO hay línea [COBRO PENDIENTE] (ej. un tema de plata que no es este corte, o un comprobante suelto sin que le hayamos cobrado).
+
 Devolvé SOLO un JSON, sin nada alrededor:
-{"es_corte":bool,"intencion_clara":bool,"enviar_cable":bool,"derivar_ventas":bool,"frenar":bool,"motivo":"string corto (si frenás por una pregunta que NO sabés, poné acá la pregunta TEXTUAL del cliente)","cortes":[{"nombre":"string","medida":"string","cantidad":1,"aclaraciones":"string","tiene_foto":bool,"completo":bool}],"datos_cliente":{"nombre":"","apellido":"","dni":"","direccion":"","provincia":"","cp":"","telefono_contacto":""},"mensajes":["..."]}`;
+{"es_corte":bool,"intencion_clara":bool,"enviar_cable":bool,"enviar_detalle_cobro":bool,"derivar_ventas":bool,"frenar":bool,"motivo":"string corto (si frenás por una pregunta que NO sabés, poné acá la pregunta TEXTUAL del cliente)","cortes":[{"nombre":"string","medida":"string","cantidad":1,"aclaraciones":"string","tiene_foto":bool,"completo":bool}],"datos_cliente":{"nombre":"","apellido":"","dni":"","direccion":"","provincia":"","cp":"","telefono_contacto":""},"mensajes":["..."]}`;
 async function corteLlm(env, fullText, imageBlocks, ahoraOverride) {
   if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'sin ANTHROPIC_API_KEY' };
   // Base de conocimiento que CRECE: respuestas curadas que vamos sumando (kv corte_knowledge). Se
@@ -3572,9 +3727,28 @@ async function processCortePilot(env) {
         const faltanEnvio = !al || !String(al.datos_envio || '').trim();
         infoCliente = '[DATOS DEL CLIENTE (interno): ' + (nuevo ? 'Es cliente NUEVO, no está en la base.' : ('Cliente registrado' + (al.nombre ? ' (' + al.nombre + ')' : '') + '.')) + ' ' + (faltanEnvio ? 'NO tenemos sus datos de envío.' : 'Ya tenemos sus datos de envío.') + ']\n\n';
       } catch (_) {}
-      const out = await corteLlm(env, infoCliente + ctx.fullText, imgs);
+      // Contexto de COBRO: si el cliente tiene un corte de esta semana SIN pagar (ya se le cobró, estado_pago='cobrando'),
+      // el bot NO empuja un pedido nuevo — el foco es el pago. Se lo pasamos como línea interna al modelo.
+      let cobroCtx = '';
+      try {
+        const cob = await env.DB.prepare("SELECT count(*) AS n, COALESCE(SUM(precio),0) AS total FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando'").bind(phone).first();
+        if (cob && cob.n) cobroCtx = '[COBRO PENDIENTE (interno): a este cliente YA le mandamos el cobro de su corte de esta semana, total $' + Number(cob.total).toLocaleString('es-AR') + ', y estamos esperando el pago/comprobante. NO le insistas con un pedido nuevo ni le pidas medida/nombre/foto: el foco es el pago. Seguí la sección COBRO / PAGO PENDIENTE del playbook.]\n\n';
+      } catch (_) {}
+      const out = await corteLlm(env, cobroCtx + infoCliente + ctx.fullText, imgs);
       if (!out.ok) continue;
       const res = out.data || {};
+      // DETALLE DE COBRO: el cliente pidió el detalle de lo que está pagando → le mandamos el desglose completo.
+      if (res.enviar_detalle_cobro) {
+        try {
+          const rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando'").bind(phone).all()).results || [];
+          if (rows.length) {
+            const g = { cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+            await corteSend(env, phone, corteCobroMsg(g));
+          }
+        } catch (_) {}
+        try { await env.DB.prepare("UPDATE corte_conversaciones SET estado='cobrando_detalle', updated_at=? WHERE phone=?").bind(nowIso, phone).run(); } catch (_) {}
+        continue;
+      }
       // CARTEL COMPLETO (no corte) → lo maneja VENTAS (Joaco). Sacamos el chat a 'general' (ahí lo toma
       // precotización/Joaco), avisamos a Gaspar una vez, y NO seguimos con el flujo de corte. Es por turno:
       // si en el próximo mensaje el alumno pide un corte real, el bot lo retoma normalmente.
@@ -11113,6 +11287,11 @@ const handler = {
       const session = await getSession(env, request);
       if (!session) return unauthorized();
       return json({ user: session.user });
+    }
+
+    // ===== Agenda del equipo (calendario interno) =====
+    if (path === '/admin/agenda' || path.startsWith('/admin/agenda/')) {
+      return await agendaRoute(env, request, url, path);
     }
 
     // POST /auth/switch { user } — cambiar de usuario SIN contraseña. SOLO el admin (Gaspar): se
