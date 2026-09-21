@@ -16440,6 +16440,35 @@ const handler = {
         }
         return json({ ok: true, resultados: res });
       }
+      // POST /admin/corte/aviso → manda la plantilla corte_aviso_migracion ({{1}}=nombre) a una lista de
+      // teléfonos (body {telefonos}), o por default a los clientes de la tanda (cortado/embalado). Con
+      // pausa entre envíos y dedup (no reenvía si ya se avisó en 30 días). Admin. Es el aviso de "los
+      // pedidos y pagos ahora van por este número".
+      if (request.method === 'POST' && path === '/admin/corte/aviso') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        let tels = Array.isArray(body.telefonos) ? body.telefonos.map(t => String(t).replace(/\D/g, '')).filter(Boolean) : [];
+        if (!tels.length) {
+          try { tels = ((await env.DB.prepare("SELECT DISTINCT telefono FROM corte_pedidos WHERE telefono!='' AND estado IN ('cortado','embalado')").all()).results || []).map(r => r.telefono); } catch (_) { tels = []; }
+        }
+        tels = [...new Set(tels)];
+        if (!tels.length) return json({ error: 'sin telefonos' }, 400);
+        const res = [];
+        for (const tel of tels) {
+          try { const ya = await env.DB.prepare("SELECT 1 FROM wa_messages WHERE phone=? AND direction='outbound' AND body LIKE '%[aviso corte migracion]%' AND ts > datetime('now','-30 days') LIMIT 1").bind(tel).first(); if (ya) { res.push({ tel, ok: false, skip: 'ya avisado' }); continue; } } catch (_) {}
+          let nom = '';
+          try { const a = await env.DB.prepare("SELECT nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(tel).first(); nom = (a && a.nombre) || ''; } catch (_) {}
+          if (!nom) { try { const p = await env.DB.prepare("SELECT cliente_nombre FROM corte_pedidos WHERE telefono=? LIMIT 1").bind(tel).first(); nom = (p && p.cliente_nombre) || ''; } catch (_) {} }
+          const _nom = String(nom || '').trim().replace(/([a-záéíóúüñ])([A-ZÁÉÍÓÚÜÑ])/g, '$1 $2').split(/\s+/)[0] || 'hola';
+          const r = await waSendTemplate(env, tel, 'corte_aviso_migracion', 'es_AR', [_nom]);
+          if (r && r.ok) {
+            try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-aviso:' + tel + ':' + Date.now()), tel, '[aviso corte migracion]').run(); } catch (_) {}
+            res.push({ tel, ok: true });
+          } else { res.push({ tel, ok: false, error: (r && r.error) || 'no se pudo enviar' }); }
+          await new Promise(s => setTimeout(s, 1500));
+        }
+        return json({ ok: true, enviados: res.filter(x => x.ok).length, total: tels.length, resultados: res });
+      }
       // GET /admin/corte/tanda → info de la tanda de la semana: archivo, m² vendidos/cortados, aprovechamiento.
       if (request.method === 'GET' && path === '/admin/corte/tanda') {
         const _r = await getSessionRole(env, session.user);
