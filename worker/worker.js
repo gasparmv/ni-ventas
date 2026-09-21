@@ -3636,15 +3636,27 @@ function corteCobroMsg(g) {
 // y mandó un comprobante (imagen/PDF), lo OCReamos y, si el monto cubre el total, marcamos PAGADO + avisamos
 // a Gaspar. Si es menor, lo dejamos en 'parcial' y avisamos para revisar. Devuelve true si tomó el turno (para
 // que NO corra el intake sobre un comprobante). Self-dedup: al pasar a pagado/parcial, deja de estar 'cobrando'.
-async function corteVigiaPago(env, phone) {
+// Cola de reintento del marcado en la planilla: si la escritura a Sheets falla por algo TRANSITORIO
+// (token vencido, 5xx), guardamos el pendiente y processCorteVigiaAuto lo reintenta (corteMarcarPagadoSheet
+// es idempotente: una vez marcada la fila, devuelve "sin filas pendientes").
+async function corteSheetPendingAdd(env, phone, cliente, total, caja) {
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_sheet_pending (phone TEXT PRIMARY KEY, cliente TEXT, total REAL, caja TEXT, created_at TEXT)").run(); } catch (_) {}
+  try { await env.DB.prepare("INSERT INTO corte_sheet_pending (phone, cliente, total, caja, created_at) VALUES (?,?,?,?,?) ON CONFLICT(phone) DO UPDATE SET cliente=excluded.cliente, total=excluded.total, caja=excluded.caja").bind(phone, cliente || '', total, caja || '', new Date().toISOString()).run(); } catch (_) {}
+}
+async function corteVigiaPago(env, phone, opts = {}) {
+  if ((await kvGet(env, 'corte_vigia_on', '1')) !== '1') return false; // kill-switch: aplica a TODOS los callers (cron, bot y sweep manual)
   let cobr;
   try { cobr = await env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(precio),0) AS total, MAX(cliente_nombre) AS nombre FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando'").bind(phone).first(); } catch (_) { return false; }
   if (!cobr || !cobr.n) return false; // no hay cobranza en curso para este número
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pago_check (wamid TEXT PRIMARY KEY, phone TEXT, monto REAL, es_comprobante INTEGER, checked_at TEXT)").run(); } catch (_) {}
+  // Ventana de búsqueda del comprobante: default 6h (mayor que el cooldown de billing de 3h para no perder
+  // pagos tras un bloqueo); el sweep manual pasa una ventana amplia para recuperar comprobantes viejos.
+  const winMod = '-' + Math.max(1, parseInt(opts.hours, 10) || 6) + ' hours';
   let img;
-  try { img = await env.DB.prepare("SELECT wamid, media_url AS r2Key, msg_type AS msgType FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type IN ('image','document') AND media_url IS NOT NULL AND media_url!='' AND ts > datetime('now','-2 hours') AND wamid NOT IN (SELECT wamid FROM corte_pago_check) ORDER BY ts DESC LIMIT 1").bind(phone).first(); } catch (_) {}
+  try { img = await env.DB.prepare("SELECT wamid, media_url AS r2Key, msg_type AS msgType FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type IN ('image','document') AND media_url IS NOT NULL AND media_url!='' AND ts > datetime('now', ?) AND wamid NOT IN (SELECT wamid FROM corte_pago_check) ORDER BY ts DESC LIMIT 1").bind(phone, winMod).first(); } catch (_) {}
   if (!img || !img.r2Key) return false; // todavía no mandó comprobante (imagen/PDF)
   const proof = await analyzePaymentProof(env, img.r2Key, img.msgType === 'document' ? 'application/pdf' : '');
+  if (!proof) return false; // fallo TRANSITORIO del OCR (R2 sin el archivo, media 429, hipo de Anthropic) → NO quemar el wamid: se reintenta el próximo tick
   const es = !!(proof && proof.es_comprobante);
   const monto = (proof && +proof.monto) || 0;
   try { await env.DB.prepare("INSERT OR IGNORE INTO corte_pago_check (wamid, phone, monto, es_comprobante, checked_at) VALUES (?,?,?,?,?)").bind(img.wamid, phone, monto, es ? 1 : 0, new Date().toISOString()).run(); } catch (_) {}
@@ -3660,7 +3672,11 @@ async function corteVigiaPago(env, phone) {
     let sheetMsg = '';
     if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') {
       const caja = corteCajaFromProof(proof);
-      try { const sr = await corteMarcarPagadoSheet(env, cobr.nombre, total, caja); sheetMsg = sr.ok ? ' · planilla: ' + sr.marcadas + ' fila(s) → pagado' + (sr.caja ? ' (caja ' + sr.caja + ')' : ' (sin caja visible)') : ' · planilla NO marcada (' + sr.error + ')'; } catch (_) { sheetMsg = ' · planilla error'; }
+      try {
+        const sr = await corteMarcarPagadoSheet(env, cobr.nombre, total, caja);
+        if (sr.ok) sheetMsg = ' · planilla: ' + sr.marcadas + ' fila(s) → pagado' + (sr.caja ? ' (caja ' + sr.caja + ')' : ' (sin caja visible)');
+        else { sheetMsg = ' · planilla NO marcada (' + sr.error + ')'; if (/token|HTTP/i.test(String(sr.error))) await corteSheetPendingAdd(env, phone, cobr.nombre, total, caja); }
+      } catch (e) { sheetMsg = ' · planilla error'; await corteSheetPendingAdd(env, phone, cobr.nombre, total, corteCajaFromProof(proof)); }
     }
     try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' pagó $' + monto.toLocaleString('es-AR') + ' (total $' + total.toLocaleString('es-AR') + '). Lo marqué PAGADO.' + sheetMsg); } catch (_) {}
   } else {
@@ -3679,6 +3695,17 @@ async function processCorteVigiaAuto(env) {
     let phones = [];
     try { phones = ((await env.DB.prepare("SELECT DISTINCT telefono FROM corte_pedidos WHERE estado_pago='cobrando' AND telefono IS NOT NULL AND telefono!=''").all()).results || []).map(r => r.telefono); } catch (_) { return; }
     for (const ph of phones) { try { await corteVigiaPago(env, ph); } catch (_) {} }
+    // Reintento de marcados a la planilla que fallaron por algo transitorio (token/5xx). Idempotente.
+    try {
+      const pend = (await env.DB.prepare("SELECT phone, cliente, total, caja, created_at FROM corte_sheet_pending").all()).results || [];
+      for (const p of pend) {
+        if (Date.now() - new Date(p.created_at).getTime() > 2 * 86400000) { try { await env.DB.prepare("DELETE FROM corte_sheet_pending WHERE phone=?").bind(p.phone).run(); } catch (_) {} continue; } // >2 días → se abandona
+        try {
+          const sr = await corteMarcarPagadoSheet(env, p.cliente, Number(p.total) || 0, p.caja || '');
+          if (sr.ok || /sin filas pendientes/i.test(String(sr.error || ''))) { try { await env.DB.prepare("DELETE FROM corte_sheet_pending WHERE phone=?").bind(p.phone).run(); } catch (_) {} }
+        } catch (_) {}
+      }
+    } catch (_) {}
   } catch (_) {}
 }
 // ===== Google Drive (cuenta de servicio) — respaldo de archivos del corte =====
@@ -3796,16 +3823,25 @@ async function corteMarcarPagadoSheet(env, cliente, totalEsperado, caja) {
     rows = j.values || [];
   } catch (e) { return { error: String((e && e.message) || e) }; }
   const target = norm(cliente);
-  let total = 0; const rowIdx = [];
+  // Agrupamos las filas PENDIENTES del cliente por FECHA (= tanda) y marcamos SOLO la tanda cuya SUMA coincide
+  // con el total esperado (±500). Así una fila vieja suelta de OTRA tanda del mismo cliente (ej. un cable
+  // impago) no se marca por error; y un pago atrasado se resuelve igual (el match es por total, no por
+  // "semana actual"). Sin esto, sumar todas las pendientes podía pisar deuda vieja dentro del margen.
+  const byFecha = {};
   for (let i = 1; i < rows.length; i++) {
     const rr = rows[i];
     if (norm(rr[2]) !== target) continue;              // col C cliente
     if (norm(rr[8]) !== 'pendiente de pago') continue; // col I Pago
-    total += parsePrice(rr[9]);                        // col J Precio
-    rowIdx.push(i + 1);                                // fila 1-based (header = fila 1)
+    const f = String(rr[1] || '').trim() || '(sf)';    // col B FECHA (= tanda)
+    if (!byFecha[f]) byFecha[f] = { total: 0, idx: [] };
+    byFecha[f].total += parsePrice(rr[9]);             // col J Precio
+    byFecha[f].idx.push(i + 1);                        // fila 1-based (header = fila 1)
   }
-  if (!rowIdx.length) return { error: 'sin filas pendientes que matcheen' };
-  if (Math.abs(total - totalEsperado) > 500) return { error: `total no coincide (planilla $${total} vs esperado $${totalEsperado})` };
+  if (!Object.keys(byFecha).length) return { error: 'sin filas pendientes que matcheen' };
+  let best = null;
+  for (const f of Object.keys(byFecha)) { const g = byFecha[f]; const diff = Math.abs(g.total - totalEsperado); if (diff <= 500 && (!best || diff < best.diff)) best = { fecha: f, total: g.total, idx: g.idx, diff }; }
+  if (!best) return { error: `ninguna tanda del cliente coincide con el total (esperado $${totalEsperado})` };
+  const rowIdx = best.idx;
   const cajaOk = ['Melina', 'Gaspar', 'Favio', 'Bruno'].includes(caja) ? caja : '';
   const data = [];
   rowIdx.forEach(ri => { data.push({ range: `Venta_Insumos!I${ri}`, values: [['pagado']] }); if (cajaOk) data.push({ range: `Venta_Insumos!R${ri}`, values: [[cajaOk]] }); });
@@ -10022,6 +10058,9 @@ async function suggestReply(env, phone, opts = {}) {
   let esCorte = false;
   try { esCorte = !!(await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first()); } catch (_) {}
   if (!esCorte) { try { const ci = await env.DB.prepare("SELECT inbox FROM wa_chats_summary WHERE phone=?").bind(phone).first(); if (ci && ci.inbox === 'corte') esCorte = true; } catch (_) {} }
+  // 3ª señal: ya tiene un pedido de corte cargado (cubre cobranzas que atiende el vigía con el bot apagado,
+  // y clientes fuera del seed de corte_alumnos).
+  if (!esCorte) { try { esCorte = !!(await env.DB.prepare("SELECT 1 AS x FROM corte_pedidos WHERE telefono=? LIMIT 1").bind(phone).first()); } catch (_) {} }
 
   let conv = null, examples = [], frameworkText = '', frameworkVersion = null, system, userContent;
 
@@ -10228,14 +10267,17 @@ async function gatherSynthesisEvidence(env) {
   const safe = async (q, ...b) => { try { return (await env.DB.prepare(q).bind(...b).all()).results || []; } catch (_) { return []; } };
   // (a) Ediciones con cambio significativo: el draft estuvo flojo y el humano lo
   //     corrigió. El "final" es el patrón correcto.
+  // OJO: excluimos vertical='corte' — el servicio de corte tiene su PROPIO bucle de aprendizaje
+  // (synthesizeCorteKnowledge → corte_knowledge). Meter sus correcciones acá contaminaría el
+  // playbook de ventas de carteles/cursos.
   const edits = await safe(
     `SELECT suggested_text, final_text, vertical, objection, edit_distance
-       FROM suggestion_feedback WHERE action='edited' AND edit_distance >= 3
+       FROM suggestion_feedback WHERE action='edited' AND edit_distance >= 3 AND COALESCE(vertical,'') != 'corte'
        ORDER BY created_at DESC LIMIT 40`);
   // (b) Descartes: lo que NO había que sugerir.
   const discards = await safe(
     `SELECT suggested_text, vertical, objection
-       FROM suggestion_feedback WHERE action='ignored'
+       FROM suggestion_feedback WHERE action='ignored' AND COALESCE(vertical,'') != 'corte'
        ORDER BY created_at DESC LIMIT 25`);
   // (c) Ventas cerradas: qué funcionó (por vertical/producto).
   const wins = await safe(
@@ -10378,6 +10420,71 @@ async function synthesizeFrameworkImprovements(env, opts = {}) {
   }
 }
 
+// ===== Aprendizaje del SERVICIO DE CORTE (paralelo a la síntesis de ventas, pero sobre corte_knowledge) =====
+// Toma las correcciones del humano a las sugerencias del copiloto de corte (suggestion_feedback
+// vertical='corte'), los descartes y las preguntas que el bot no supo, y propone líneas para SUMAR
+// a la base de conocimiento del corte (kv corte_knowledge). Las propuestas quedan 'pending' en
+// framework_improvements (vertical='corte') hasta que Gaspar las aprueba → se appendean al KB.
+const SYNTHESIS_CORTE_RULES = `Sos el analista de mejora continua del SERVICIO DE CORTE de Neon Infinito (cortamos bases acrílicas transparentes para los alumnos + les vendemos cable). Tu trabajo: leer (a) la BASE DE CONOCIMIENTO actual del corte y (b) EVIDENCIA real — correcciones que el humano le hizo a las sugerencias del copiloto (el copiloto sugirió X, el humano mandó Y), sugerencias que el humano descartó, y preguntas que el bot no supo responder — y proponer líneas CONCRETAS para SUMAR a la base de conocimiento, para que la próxima vez el copiloto/bot no se equivoque.
+
+REGLAS:
+1. Proponé SOLO hechos que se deducen CLARAMENTE de la evidencia (una corrección del humano que revela un dato real, o una pregunta recurrente cuya respuesta el humano dejó). Si no hay un hecho sólido y reutilizable, NO lo propongas (devolvé lista vacía).
+2. NO inventes datos operativos (precios, plazos, medios de pago, políticas de envío): capturá SOLO lo que el HUMANO ya dijo/corrigió. Si la evidencia muestra que el copiloto INVENTÓ algo (ej: dijo "envío sin cargo" y el humano lo corrigió), la propuesta debe ser la regla CORRECTIVA basada en lo que el humano puso; si el humano no dejó claro el dato correcto, proponé la regla de NO afirmarlo (ej: "no afirmar que el envío es sin cargo ni el correo/logística hasta confirmarlo con una persona").
+3. Cada propuesta = UNA línea corta y accionable, redactada como parte del playbook (un dato o una regla), lista para pegar en la base de conocimiento.
+4. Priorizá los errores que se REPITEN o que son de cara al cliente (plata, envío, plazos, medios de pago).
+
+Devolvé SOLO un JSON (sin markdown) con este shape:
+{"improvements":[{"title":"título corto","rationale":"por qué, con la evidencia","evidence":"la corrección/pregunta concreta","proposed_content":"la línea exacta a sumar al conocimiento","confidence":0.0}]}
+Si no hay nada sólido, devolvé {"improvements":[]}.`;
+
+async function synthesizeCorteKnowledge(env, opts = {}) {
+  try {
+    if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'ANTHROPIC_API_KEY no configurada' };
+    await ensureImprovementsSchema(env);
+    const safe = async (q, ...b) => { try { return (await env.DB.prepare(q).bind(...b).all()).results || []; } catch (_) { return []; } };
+    // Gate: ¿hay material nuevo (correcciones/descartes de corte + preguntas abiertas) desde la última corrida?
+    let newSince = null;
+    try {
+      const last = await env.DB.prepare("SELECT MAX(created_at) AS t FROM framework_improvements WHERE vertical='corte'").first();
+      const fbq = last?.t
+        ? await env.DB.prepare("SELECT COUNT(*) AS n FROM suggestion_feedback WHERE vertical='corte' AND action IN ('edited','ignored') AND created_at > ?").bind(last.t).first()
+        : await env.DB.prepare("SELECT COUNT(*) AS n FROM suggestion_feedback WHERE vertical='corte' AND action IN ('edited','ignored')").first();
+      newSince = fbq?.n || 0;
+    } catch (_) {}
+    let openQ = 0; try { const q = await env.DB.prepare("SELECT COUNT(*) AS n FROM corte_preguntas WHERE respondida=0").first(); openQ = q?.n || 0; } catch (_) {}
+    if (!opts.force && (newSince || 0) < 4 && openQ < 3) {
+      return { ok: true, generated: 0, skipped: true, reason: `poco material nuevo (correcciones ${newSince || 0}, preguntas abiertas ${openQ})`, new_feedback: newSince };
+    }
+    const edits = await safe("SELECT suggested_text, final_text, edit_distance FROM suggestion_feedback WHERE vertical='corte' AND action='edited' AND edit_distance>=3 ORDER BY created_at DESC LIMIT 30");
+    const discards = await safe("SELECT suggested_text FROM suggestion_feedback WHERE vertical='corte' AND action='ignored' ORDER BY created_at DESC LIMIT 15");
+    const preguntas = await safe("SELECT pregunta, motivo FROM corte_preguntas WHERE respondida=0 ORDER BY id DESC LIMIT 25");
+    if (!edits.length && !discards.length && !preguntas.length) return { ok: true, generated: 0, skipped: true, reason: 'sin evidencia todavía' };
+    let ev = '';
+    if (edits.length) { ev += '## CORRECCIONES DEL HUMANO (el copiloto sugirió X, el humano mandó Y)\n'; edits.forEach((e, i) => { ev += `${i + 1}.\n   SUGERIDO: ${String(e.suggested_text || '').slice(0, 400)}\n   ENVIADO:  ${String(e.final_text || '').slice(0, 400)}\n`; }); ev += '\n'; }
+    if (discards.length) { ev += '## SUGERENCIAS DESCARTADAS (no había que mandar eso)\n'; discards.forEach((e, i) => { ev += `${i + 1}. ${String(e.suggested_text || '').slice(0, 300)}\n`; }); ev += '\n'; }
+    if (preguntas.length) { ev += '## PREGUNTAS QUE EL BOT NO SUPO RESPONDER\n'; preguntas.forEach((e, i) => { ev += `${i + 1}. ${String(e.pregunta || '').slice(0, 300)}${e.motivo ? ' (' + String(e.motivo).slice(0, 150) + ')' : ''}\n`; }); ev += '\n'; }
+    let kb = CORTE_LLM_SYSTEM;
+    try { const extra = String(await kvGet(env, 'corte_knowledge', '') || '').trim(); if (extra) kb += '\n\nCONOCIMIENTO ADICIONAL (curado):\n' + extra; } catch (_) {}
+    const userContent = `# EVIDENCIA REAL\n\n${ev}\n---\nAnalizá la evidencia contra la base de conocimiento y proponé líneas concretas para SUMAR. Devolvé SOLO el JSON.`;
+    const system = [ { type: 'text', text: SYNTHESIS_CORTE_RULES }, { type: 'text', text: '## BASE DE CONOCIMIENTO ACTUAL DEL CORTE\n\n' + kb } ];
+    const model = 'claude-opus-4-5';
+    const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model, max_tokens: 3000, system, messages: [{ role: 'user', content: userContent }] }) });
+    const j = await r.json();
+    if (!r.ok) return { ok: false, error: j.error?.message || ('HTTP ' + r.status), raw: j };
+    let parsed; try { parsed = JSON.parse(String(j.content?.[0]?.text || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()); } catch (e) { return { ok: false, error: 'JSON parse error', raw: String(j.content?.[0]?.text || '').slice(0, 1500) }; }
+    const improvements = Array.isArray(parsed.improvements) ? parsed.improvements.slice(0, 6) : [];
+    const ti = j.usage?.input_tokens || 0, to = j.usage?.output_tokens || 0, tcr = j.usage?.cache_read_input_tokens || 0, tcw = j.usage?.cache_creation_input_tokens || 0;
+    const cost = +(((ti * 15 + tcw * 18.75 + tcr * 1.5 + to * 75) / 1000000).toFixed(5));
+    try { await env.DB.prepare("INSERT INTO copilot_usage (phone, kind, model, tokens_in, tokens_out, cache_read, cache_creation, cost_usd, created_by, created_at) VALUES (NULL,'synthesis',?,?,?,?,?,?,?,?)").bind(model, ti, to, tcr, tcw, cost, opts.createdBy || 'cron', new Date().toISOString()).run(); } catch (_) {}
+    const batchId = 'cor_' + Date.now(); const now = new Date().toISOString(); let saved = 0;
+    for (const imp of improvements) {
+      const content = String(imp?.proposed_content || '').trim(); const title = String(imp?.title || '').trim();
+      if (!content || !title) continue;
+      try { await env.DB.prepare("INSERT INTO framework_improvements (status, vertical, title, rationale, evidence, target_heading, operation, proposed_content, confidence, based_on_version, source_model, batch_id, created_at) VALUES ('pending','corte',?,?,?,'(corte_knowledge)','append',?,?,NULL,?,?,?)").bind(title.slice(0, 200), String(imp?.rationale || '').slice(0, 2000), String(imp?.evidence || '').slice(0, 2000), content.slice(0, 4000), (typeof imp?.confidence === 'number' ? imp.confidence : null), model, batchId, now).run(); saved++; } catch (_) {}
+    }
+    return { ok: true, generated: saved, batch_id: batchId, cost_usd: cost, evidence_counts: { edits: edits.length, discards: discards.length, preguntas: preguntas.length }, new_feedback: newSince };
+  } catch (e) { return { ok: false, error: 'corte synthesis: ' + String((e && e.message) || e) }; }
+}
 // Wrapper del cron para la síntesis (Fase 2C): se chequea 1 vez/día pero corre solo si pasaron
 // ~7 días desde la última síntesis que EFECTIVAMENTE gastó (copilot_usage). Mantiene la cadencia
 // semanal pero SE AUTO-RECUPERA: si el lunes falla (hipo de API, cron salteado, deploy en ese
@@ -10397,6 +10504,11 @@ async function maybeWeeklySynthesis(env) {
         : ('SYNTH FALLO: ' + (res.error || 'desconocido'));
       try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(new Date().toISOString(), msg).run(); } catch (_) {}
     }
+    // Aprendizaje del CORTE: misma cadencia semanal, sobre corte_knowledge (correcciones del copiloto + preguntas).
+    try {
+      const rc = await synthesizeCorteKnowledge(env, { createdBy: 'cron' });
+      if (rc && !rc.skipped && rc.generated) { try { await precotizNotifyGaspar(env, 'Corte: aprendí de las correcciones y tengo ' + rc.generated + ' mejora(s) para la base de conocimiento del corte. Revisalas y aprobá en el board (sección Aprendizaje).'); } catch (_) {} }
+    } catch (_) {}
   } catch (e) {
     try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(new Date().toISOString(), 'SYNTH ERR: ' + ((e && e.message) || String(e))).run(); } catch (_) {}
   }
@@ -12020,6 +12132,18 @@ const handler = {
         const imp = await env.DB.prepare(`SELECT * FROM framework_improvements WHERE id = ?`).bind(id).first();
         if (!imp) return json({ error: 'propuesta no encontrada' }, 404);
         if (imp.status !== 'pending') return json({ error: 'ya fue revisada (' + imp.status + ')' }, 409);
+        // Propuesta del SERVICIO DE CORTE → se suma a la base de conocimiento del corte (kv corte_knowledge),
+        // no al playbook de ventas.
+        if (imp.vertical === 'corte') {
+          const line = (body?.edited_content != null && String(body.edited_content).trim()) ? String(body.edited_content).trim() : String(imp.proposed_content || '').trim();
+          if (!line) return json({ error: 'la propuesta está vacía' }, 400);
+          let kb = ''; try { kb = String(await kvGet(env, 'corte_knowledge', '') || ''); } catch (_) {}
+          const norm = s => String(s || '').replace(/^[-•\s]+/, '').trim().toLowerCase();
+          if (kb.split('\n').some(l => norm(l) === norm(line))) return json({ error: 'esa línea ya está en el conocimiento' }, 409);
+          try { await kvSet(env, 'corte_knowledge', (kb ? kb + '\n' : '') + '- ' + line.replace(/^[-•\s]+/, '')); } catch (_) {}
+          await env.DB.prepare(`UPDATE framework_improvements SET status='approved', reviewed_by=?, reviewed_at=? WHERE id = ?`).bind(session.user, new Date().toISOString(), id).run();
+          return json({ ok: true, corte: true });
+        }
         const applied = await applyImprovementToFramework(env, imp, session.user, body?.edited_content);
         if (!applied.ok) return json({ error: applied.error }, 400);
         await env.DB.prepare(
@@ -16743,7 +16867,7 @@ const handler = {
         const detalle = [];
         for (const ph of phones) {
           let hit = false, err = '';
-          try { hit = await corteVigiaPago(env, ph); } catch (e) { err = String((e && e.message) || e); }
+          try { hit = await corteVigiaPago(env, ph, { hours: 336 }); } catch (e) { err = String((e && e.message) || e); } // ventana amplia (2 sem): el sweep recupera comprobantes viejos
           let ep = '', nom = '';
           try { const r = await env.DB.prepare("SELECT MAX(estado_pago) AS ep, MAX(cliente_nombre) AS nom FROM corte_pedidos WHERE telefono=?").bind(ph).first(); if (r) { ep = r.ep || ''; nom = r.nom || ''; } } catch (_) {}
           detalle.push({ telefono: ph, nombre: nom, procesado: hit, estado_pago: ep, err });
@@ -16787,7 +16911,17 @@ const handler = {
         try { rows = (await env.DB.prepare("SELECT id, phone, pregunta, motivo, respondida, substr(created_at,1,19) AS ts FROM corte_preguntas ORDER BY respondida ASC, id DESC LIMIT 200").all()).results || []; } catch (_) {}
         let kb = '';
         try { kb = String(await kvGet(env, 'corte_knowledge', '') || ''); } catch (_) {}
-        return json({ ok: true, preguntas: rows, knowledge: kb });
+        // Propuestas de aprendizaje pendientes (correcciones del copiloto → líneas para el KB).
+        let propuestas = [];
+        try { await ensureImprovementsSchema(env); propuestas = (await env.DB.prepare("SELECT id, title, rationale, evidence, proposed_content, confidence, substr(created_at,1,19) AS ts FROM framework_improvements WHERE vertical='corte' AND status='pending' ORDER BY id DESC LIMIT 50").all()).results || []; } catch (_) {}
+        return json({ ok: true, preguntas: rows, knowledge: kb, propuestas });
+      }
+      // POST /admin/corte/aprender → corre la síntesis del corte (correcciones del copiloto + preguntas → propuestas al KB). Admin.
+      if (request.method === 'POST' && path === '/admin/corte/aprender') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body = {}; try { body = await request.json(); } catch (_) {}
+        const res = await synthesizeCorteKnowledge(env, { force: body?.force !== false, createdBy: session.user });
+        return json(res);
       }
       // POST /admin/corte/knowledge → suma/reemplaza el CONOCIMIENTO ADICIONAL del bot (kv corte_knowledge).
       // body { add:"texto" } agrega un renglón; { set:"texto" } reemplaza todo. Opcional { marcar_respondida:id }.

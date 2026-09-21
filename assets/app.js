@@ -3100,7 +3100,7 @@ function corteDetalleHtml(p) {
         <button class="btn ghost" data-corte-cerrar style="flex:0 0 auto">✕</button>
       </div>
       <div style="margin-top:10px">${foto}</div>
-      ${p.comprobante_key && (p.estado_pago === 'pagado' || p.estado_pago === 'parcial') ? (/\.pdf($|\?)/i.test(p.comprobante_key)
+      ${p.comprobante_key && (p.estado_pago === 'pagado' || p.estado_pago === 'parcial') ? (!/\.(jpe?g|png|webp|gif)($|\?)/i.test(p.comprobante_key)
         ? `<div style="margin-top:10px"><a href="${mediaUrl(p.comprobante_key)}" target="_blank" rel="noopener" style="font-size:13px;color:#22c55e;font-weight:600;text-decoration:none">🧾 Comprobante de pago (PDF)</a></div>`
         : `<div style="margin-top:10px"><div style="font-size:12px;color:var(--fg-subtle);margin-bottom:5px">🧾 Comprobante de pago${p.estado_pago === 'parcial' ? ' (parcial)' : ''}</div><a href="${mediaUrl(p.comprobante_key)}" target="_blank" rel="noopener"><img src="${mediaUrl(p.comprobante_key)}" style="max-width:200px;max-height:260px;border-radius:8px;border:1px solid var(--border)" loading="lazy"></a></div>`) : ''}
       ${acciones}
@@ -3271,6 +3271,28 @@ function corteStepperHtml(pedidos) {
     </div>`;
 }
 // El board híbrido completo (hero + stepper + segmentado + tabla por cliente + cobranza).
+// Panel de aprendizaje del corte: propuestas para la base de conocimiento nacidas de las correcciones
+// del humano a las sugerencias del copiloto. Gaspar aprueba (se suman al KB) o descarta.
+function corteAprendizajeHtml() {
+  const props = STATE.cortePropuestas || [];
+  const card = (inner) => `<div style="border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:16px;background:var(--ink-100)">${inner}</div>`;
+  const header = `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap${props.length ? ';margin-bottom:6px' : ''}">
+      <div style="font-size:13px;font-weight:700">🧠 Aprendizaje del corte${props.length ? ` <span style="color:#7c3aed">${props.length}</span>` : ''}</div>
+      <button class="btn ghost" data-corte-aprender style="font-size:12px;padding:5px 11px">Buscar mejoras</button>
+    </div>`;
+  if (!props.length) return card(header + `<div style="font-size:12px;color:var(--fg-mute)">Cuando corregís las sugerencias del copiloto de un cliente de corte, junto esas correcciones y te propongo líneas para sumar a la base de conocimiento. No hay propuestas pendientes.</div>`);
+  const items = props.map(p => `<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:5px">${escapeHtml(p.title || 'mejora')}${p.confidence != null ? ` <span style="font-weight:400;color:var(--fg-mute);font-size:11px">· conf ${Math.round(p.confidence * 100)}%</span>` : ''}</div>
+      <div style="font-size:13px;color:var(--fg);background:rgba(124,58,237,.10);border-radius:8px;padding:8px 10px;margin-bottom:6px">➕ ${escapeHtml(p.proposed_content || '')}</div>
+      ${p.rationale ? `<div style="font-size:12px;color:var(--fg-mute);margin-bottom:3px">${escapeHtml(p.rationale)}</div>` : ''}
+      ${p.evidence ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:8px">evidencia: ${escapeHtml(String(p.evidence).slice(0, 240))}</div>` : ''}
+      <div style="display:flex;gap:8px">
+        <button class="btn" data-corte-prop-ok="${p.id}" style="font-size:12px;padding:5px 12px">✓ Sumar al conocimiento</button>
+        <button class="btn ghost" data-corte-prop-no="${p.id}" style="font-size:12px;padding:5px 11px">Descartar</button>
+      </div>
+    </div>`).join('');
+  return card(header + items);
+}
 function corteHybridBoard(pedidos) {
   const groups = corteClientGroups(pedidos);
   const seg = STATE.corteSeg || 'todo';
@@ -3301,7 +3323,7 @@ function corteHybridBoard(pedidos) {
         ${corteChip(pm.l, pm.c)}
       </div>`;
     const compKey = (g.items.find(p => p.comprobante_key && (p.estado_pago === 'pagado' || p.estado_pago === 'parcial')) || {}).comprobante_key || '';
-    const compHtml = compKey ? (/\.pdf($|\?)/i.test(compKey)
+    const compHtml = compKey ? (!/\.(jpe?g|png|webp|gif)($|\?)/i.test(compKey)
       ? `<div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border)"><a href="${mediaUrl(compKey)}" target="_blank" rel="noopener" style="font-size:12px;color:${cortePagoMeta(g.pago).c};font-weight:600;text-decoration:none">🧾 Comprobante de pago (PDF)</a></div>`
       : `<div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border)"><div style="font-size:11px;color:var(--fg-subtle);margin-bottom:5px">🧾 Comprobante de pago</div><a href="${mediaUrl(compKey)}" target="_blank" rel="noopener"><img src="${mediaUrl(compKey)}" style="max-width:150px;max-height:210px;border-radius:8px;border:1px solid var(--border)" loading="lazy"></a></div>`) : '';
     const detail = exp ? `<div style="background:rgba(0,0,0,.16);border-top:1px solid var(--border);padding:6px 12px 12px 30px">
@@ -3476,6 +3498,7 @@ function renderCorte() {
       ${sel ? corteDetalleHtml(sel) : ''}
       ${corteHybridBoard(pedidos)}
       <div style="height:22px"></div>
+      ${corteAprendizajeHtml()}
 
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap">
         <div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle)">Alumnos (${alumnos === undefined ? '…' : alumnos.length}${q && all ? ' de ' + all.length : ''}) <span style="text-transform:none;color:var(--fg-mute)">· fuente: LTV_Alumnos</span></div>
@@ -3507,10 +3530,12 @@ async function bindCorte() {
         fetch(CONFIG.trackerUrl + '/admin/corte/tanda', { headers: authHeaders() }).then(r => r.json()).catch(() => ({}))
       ];
       if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/alumnos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
+      if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/preguntas', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
       const res = await Promise.all(proms);
       STATE.cortePedidos = (res[0] && res[0].pedidos) || [];
       STATE.corteTanda = (res[1] && res[1].ok) ? res[1] : null;
       STATE.corteAlumnos = admin ? ((res[2] && res[2].alumnos) || []) : [];
+      STATE.cortePropuestas = admin ? ((res[3] && res[3].propuestas) || []) : [];
     } catch (_) { STATE.cortePedidos = STATE.cortePedidos || []; STATE.corteAlumnos = STATE.corteAlumnos || []; }
     STATE._corteLoading = false;
     render();
@@ -3524,6 +3549,17 @@ async function bindCorte() {
       render();
       const nq = document.getElementById('corte-alumnos-q');
       if (nq) { nq.focus(); const L = (STATE.corteQuery || '').length; try { nq.setSelectionRange(L, L); } catch (_) {} }
+    };
+  }
+  // Buscador de la vista "Para embalar" de Neyen (filtra por cliente o diseño, en vivo).
+  const embInp = document.getElementById('corte-emb-q');
+  if (embInp && !embInp._bound) {
+    embInp._bound = true;
+    embInp.oninput = () => {
+      STATE.corteEmbQuery = embInp.value;
+      render();
+      const nq = document.getElementById('corte-emb-q');
+      if (nq) { nq.focus(); const L = (STATE.corteEmbQuery || '').length; try { nq.setSelectionRange(L, L); } catch (_) {} }
     };
   }
   document.querySelectorAll('[data-corte-card]').forEach(el => { el.onclick = (e) => { e.stopPropagation(); STATE.corteSelected = parseInt(el.getAttribute('data-corte-card'), 10); render(); }; });
@@ -3563,6 +3599,28 @@ async function bindCorte() {
       corteBulk('embalado_bulk', { telefono: btn.getAttribute('data-corte-embalar-tel'), entrega: btn.getAttribute('data-corte-entrega') || 'retira' });
     };
   });
+  // Neyen: "Deshacer" un paquete ya embalado → vuelve a 'cortado' (para revisar/re-embalar).
+  document.querySelectorAll('[data-corte-desembalar]').forEach(btn => {
+    btn.onclick = () => corteBulk('avanzar_bulk', { ids: btn.getAttribute('data-corte-desembalar').split(',').map(Number).filter(Boolean), estado: 'cortado' });
+  });
+  // Aprendizaje del corte: buscar mejoras (síntesis) + aprobar/descartar propuestas al KB.
+  const aprender = document.querySelector('[data-corte-aprender]');
+  if (aprender) aprender.onclick = async () => {
+    aprender.disabled = true; aprender.textContent = 'Buscando…';
+    try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/aprender', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: '{}' }).then(x => x.json()); if (r && r.skipped) toast(r.reason || 'sin material nuevo'); else if (r && r.ok) toast((r.generated || 0) + ' propuesta(s)'); else toast((r && r.error) || 'no se pudo'); } catch (_) { toast('Error de red'); }
+    try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/preguntas', { headers: authHeaders() }).then(x => x.json()); STATE.cortePropuestas = (r && r.propuestas) || []; } catch (_) {}
+    render();
+  };
+  document.querySelectorAll('[data-corte-prop-ok]').forEach(b => { b.onclick = async () => {
+    const id = parseInt(b.getAttribute('data-corte-prop-ok'), 10); b.disabled = true;
+    try { const r = await fetch(CONFIG.trackerUrl + '/admin/framework/improvements/approve', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }).then(x => x.json()); if (r && r.ok) { STATE.cortePropuestas = (STATE.cortePropuestas || []).filter(p => p.id !== id); toast('Sumado al conocimiento ✓'); } else toast((r && r.error) || 'no se pudo'); } catch (_) { toast('Error de red'); }
+    render();
+  }; });
+  document.querySelectorAll('[data-corte-prop-no]').forEach(b => { b.onclick = async () => {
+    const id = parseInt(b.getAttribute('data-corte-prop-no'), 10); b.disabled = true;
+    try { await fetch(CONFIG.trackerUrl + '/admin/framework/improvements/reject', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }).then(x => x.json()); } catch (_) {}
+    STATE.cortePropuestas = (STATE.cortePropuestas || []).filter(p => p.id !== id); render();
+  }; });
   // Cobranza de la semana (admin)
   const cobrarAbrir = document.querySelector('[data-corte-cobrar-abrir]');
   if (cobrarAbrir) cobrarAbrir.onclick = async () => {
