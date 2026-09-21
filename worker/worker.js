@@ -1870,7 +1870,7 @@ async function maybeRepartirANadia(env, phone) {
     if (!phone) return;
     const s = await env.DB.prepare("SELECT inbox, assigned_to FROM wa_chats_summary WHERE phone = ?").bind(phone).first();
     if (!s || (s.assigned_to && s.assigned_to !== '')) return;         // no existe aún o ya tiene dueño
-    if (s.inbox === 'cursos' || s.inbox === 'oculto') return;          // cursos/oculto no son carteles
+    if (['cursos', 'oculto', 'privado', 'corte', 'precotiz'].includes(s.inbox)) return;  // solo el pool de carteles ('general') se reparte; nunca pisar bandejas especiales
     try { if (await env.DB.prepare("SELECT 1 AS x FROM reventa_leads WHERE phone = ? LIMIT 1").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM contact_labels WHERE phone = ? AND label_id = 2289 LIMIT 1").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM minicurso_landing WHERE phone = ? LIMIT 1").bind(phone).first()) return; } catch (_) {}
@@ -1887,6 +1887,8 @@ async function maybeRepartirANadia(env, phone) {
     for (const c of orden) {
       const cuota = parseInt(await kvGet(env, c.cuotaKv, '0'), 10) || 0;
       if (cuota <= 0) continue;                                        // ese vendedor no recibe reparto automático
+      // No asignar a un vendedor dado de baja (activo=0) aunque su cuota haya quedado >0 por olvido.
+      try { const _av = await env.DB.prepare("SELECT activo FROM users_panel WHERE id = ?").bind(c.slug).first(); if (_av && _av.activo === 0) continue; } catch (_) {}
       const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").bind(c.slug).first();
       if (((r && r.n) || 0) >= cuota) continue;                        // ya llegó a SU cuota del día
       const prob = parseFloat(await kvGet(env, c.probKv, String(c.defProb))) || c.defProb;
@@ -7464,6 +7466,65 @@ function formatLineaHoras(e) {
   }
   return s;
 }
+// ===== CENTINELA DE RUTEO (blindaje del invariante "cada contacto lo ve exactamente uno") =====
+// A pedido de Gaspar (sep-2026): con cursos (Abril) + carteles a 3 vendedores, garantizar que ningún
+// contacto quede sin atender (invisible para todos) ni se duplique ni se mal-segmente. Barre
+// wa_chats_summary y (1) AUTO-CURA los casos 100% seguros y (2) AVISA a Gaspar lo ambiguo. Kill-switch
+// kv 'centinela_ruteo_on' (def '1'). Se auto-throttlea a 1×/30min; aviso dedup 1×/día. Corre en el cron.
+async function processCentinelaRuteo(env) {
+  try {
+    if ((await kvGet(env, 'centinela_ruteo_on', '1')) !== '1') return;
+    const nowMs = Date.now();
+    if (nowMs - (parseInt(await kvGet(env, 'centinela_last_run', '0'), 10) || 0) < 30 * 60 * 1000) return;
+    await kvSet(env, 'centinela_last_run', String(nowMs));
+    const nowIso = new Date().toISOString();
+    const secs = VENDEDORES_SECUNDARIOS;                 // ['facundo','agustina']
+    const cured = {};
+    // --- AUTO-CURA 1: assigned_to a un slug INVÁLIDO (ni vacío ni secundario actual) → pool de Joaco.
+    try { const r = await env.DB.prepare(`UPDATE wa_chats_summary SET assigned_to='' WHERE assigned_to != '' AND assigned_to NOT IN (${secs.map(() => '?').join(',')})`).bind(...secs).run(); cured.slug_invalido = r?.meta?.changes || 0; } catch (_) {}
+    // --- AUTO-CURA 2: chats de un vendedor secundario DADO DE BAJA (activo=0) → pool.
+    try { const r = await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to='' WHERE assigned_to != '' AND assigned_to IN (SELECT id FROM users_panel WHERE rol='comercial' AND activo=0)").run(); cured.vendedor_inactivo = r?.meta?.changes || 0; } catch (_) {}
+    // --- AUTO-CURA 3: lead de cursos que dijo "sí" (positiva) y quedó 'oculto' sin revelar → a Abril.
+    try {
+      const r = await env.DB.prepare("UPDATE wa_chats_summary SET inbox='cursos', updated_at=? WHERE inbox='oculto' AND phone IN (SELECT phone FROM wa_cursos_campaign WHERE sentiment='positiva' AND revealed_at IS NULL)").bind(nowIso).run();
+      cured.cursos_positiva = r?.meta?.changes || 0;
+      if (cured.cursos_positiva) { try { await env.DB.prepare("UPDATE wa_cursos_campaign SET revealed_at=? WHERE sentiment='positiva' AND revealed_at IS NULL").bind(nowIso).run(); } catch (_) {} }
+    } catch (_) {}
+    // --- AUTO-CURA 4: análisis de cursos pegado en 'analyzing' > 15min → reset para reprocesar.
+    try { const r = await env.DB.prepare("UPDATE wa_cursos_campaign SET sentiment=NULL WHERE sentiment='analyzing' AND updated_at < ?").bind(new Date(nowMs - 15 * 60 * 1000).toISOString()).run(); cured.analisis_pegado = r?.meta?.changes || 0; } catch (_) {}
+
+    // --- DETECTAR (avisar; ambiguo, no se auto-mueve) ---
+    const al = {};
+    try { al.asignado_escondido = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to != '' AND inbox != 'general'").first())?.n || 0; } catch (_) {}
+    try { al.oculto_respondido = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE inbox='oculto' AND last_direction='inbound' AND last_ts < ? AND last_ts > ?").bind(new Date(nowMs - 3 * 3600 * 1000).toISOString(), new Date(nowMs - 14 * 86400 * 1000).toISOString()).first())?.n || 0; } catch (_) {}
+    try { al.carteles_pero_cursos = (await env.DB.prepare("SELECT COUNT(DISTINCT s.phone) AS n FROM wa_chats_summary s JOIN wa_ad_attributions a ON a.phone=s.phone JOIN wa_ad_verticals v ON v.ad_id=a.source_id WHERE s.inbox='general' AND v.vertical='cursos'").first())?.n || 0; } catch (_) {}
+    try { al.ads_sin_mapear = (await env.DB.prepare("SELECT COUNT(DISTINCT a.source_id) AS n FROM wa_ad_attributions a LEFT JOIN wa_ad_verticals v ON v.ad_id=a.source_id WHERE a.source_id IS NOT NULL AND a.source_id != '' AND v.ad_id IS NULL AND a.ts > ?").bind(new Date(nowMs - 7 * 86400 * 1000).toISOString()).first())?.n || 0; } catch (_) {}
+    try { al.privado_con_inbound = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE inbox IN ('privado','corte') AND last_direction='inbound' AND last_ts > ?").bind(new Date(nowMs - 3 * 86400 * 1000).toISOString()).first())?.n || 0; } catch (_) {}
+
+    const totalCurado = Object.values(cured).reduce((a, b) => a + b, 0);
+    const rev = [];
+    if (al.asignado_escondido) rev.push(al.asignado_escondido + ' asignados pero en bandeja que los esconde');
+    if (al.oculto_respondido) rev.push(al.oculto_respondido + ' que respondieron y siguen ocultos');
+    if (al.carteles_pero_cursos) rev.push(al.carteles_pero_cursos + ' en carteles pero el ad dice cursos');
+    if (al.ads_sin_mapear) rev.push(al.ads_sin_mapear + ' ads nuevos sin clasificar (wa_ad_verticals)');
+    if (al.privado_con_inbound) rev.push(al.privado_con_inbound + ' en privado/corte con mensaje reciente sin responder');
+    const fechaAR = new Date(nowMs - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    if ((totalCurado > 0 || rev.length > 0) && (await kvGet(env, 'centinela_aviso_dia', '')) !== fechaAR) {
+      const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+      const L = ['🛡️ Centinela de ruteo ' + fechaAR.split('-').reverse().join('/')];
+      if (totalCurado > 0) {
+        L.push('Curado automático:');
+        if (cured.slug_invalido) L.push('· ' + cured.slug_invalido + ' asignación inválida → pool');
+        if (cured.vendedor_inactivo) L.push('· ' + cured.vendedor_inactivo + ' de vendedor de baja → pool');
+        if (cured.cursos_positiva) L.push('· ' + cured.cursos_positiva + ' curso "sí" oculto → revelado a Abril');
+        if (cured.analisis_pegado) L.push('· ' + cured.analisis_pegado + ' análisis pegado → reseteado');
+      }
+      if (rev.length) L.push('A revisar (no lo toqué): ' + rev.join(' · '));
+      try { const r = await waSendText(env, gaspar, L.join('\n')); if (r && r.ok) await kvSet(env, 'centinela_aviso_dia', fechaAR); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
 async function maybeReporteHoras(env) {
   try {
     if ((await kvGet(env, 'reporte_horas_on', '1')) !== '1') return;
@@ -16567,6 +16628,7 @@ const handler = {
     // de Meta o ventana 24h momentáneamente cerrada). Idempotente vía kv_cache,
     // se auto-apaga pasada la ventana, y si no hay pendientes no hace nada.
     ctx.waitUntil(processGasparResendBackfill(env));
+    ctx.waitUntil(processCentinelaRuteo(env));   // centinela de ruteo: cura/avisa perdidos·duplicados·mal-segmentados (self-throttle 30min)
     // Piloto de pre cotización automática (carteles): capta leads del 20% y los
     // releva con freno de mano. Gateado internamente (kill-switch OFF por defecto
     // + horario 8-22 AR). Corre en cada tick para responder en ~1-2 min.
