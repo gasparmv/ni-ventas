@@ -7496,7 +7496,8 @@ async function processCentinelaRuteo(env) {
     // --- DETECTAR (avisar; ambiguo, no se auto-mueve) ---
     const al = {};
     try { al.asignado_escondido = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to != '' AND inbox != 'general'").first())?.n || 0; } catch (_) {}
-    try { al.oculto_respondido = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE inbox='oculto' AND last_direction='inbound' AND last_ts < ? AND last_ts > ?").bind(new Date(nowMs - 3 * 3600 * 1000).toISOString(), new Date(nowMs - 14 * 86400 * 1000).toISOString()).first())?.n || 0; } catch (_) {}
+    // Solo los que respondieron CON INTENCIÓN (pregunta / compra / precio), no los "no gracias" que se ocultan a propósito.
+    try { al.oculto_respondido = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE inbox='oculto' AND last_direction='inbound' AND last_ts < ? AND last_ts > ? AND (lower(last_body) LIKE '%precio%' OR lower(last_body) LIKE '%costo%' OR lower(last_body) LIKE '%cuanto%' OR lower(last_body) LIKE '%cuánto%' OR lower(last_body) LIKE '%comprar%' OR lower(last_body) LIKE '%acceso%' OR lower(last_body) LIKE '%quiero%' OR lower(last_body) LIKE '%me interesa%' OR lower(last_body) LIKE '%sumarme%' OR lower(last_body) LIKE '%info%' OR last_body LIKE '%?%') AND NOT (lower(last_body) LIKE '%por ahora no%' OR lower(last_body) LIKE '%esta vez paso%' OR lower(last_body) LIKE '%no cuento%' OR lower(last_body) LIKE '%mas adelante%' OR lower(last_body) LIKE '%más adelante%')").bind(new Date(nowMs - 3 * 3600 * 1000).toISOString(), new Date(nowMs - 14 * 86400 * 1000).toISOString()).first())?.n || 0; } catch (_) {}
     try { al.carteles_pero_cursos = (await env.DB.prepare("SELECT COUNT(DISTINCT s.phone) AS n FROM wa_chats_summary s JOIN wa_ad_attributions a ON a.phone=s.phone JOIN wa_ad_verticals v ON v.ad_id=a.source_id WHERE s.inbox='general' AND v.vertical='cursos'").first())?.n || 0; } catch (_) {}
     try { al.ads_sin_mapear = (await env.DB.prepare("SELECT COUNT(DISTINCT a.source_id) AS n FROM wa_ad_attributions a LEFT JOIN wa_ad_verticals v ON v.ad_id=a.source_id WHERE a.source_id IS NOT NULL AND a.source_id != '' AND v.ad_id IS NULL AND a.ts > ?").bind(new Date(nowMs - 7 * 86400 * 1000).toISOString()).first())?.n || 0; } catch (_) {}
     try { al.privado_con_inbound = (await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE inbox IN ('privado','corte') AND last_direction='inbound' AND last_ts > ?").bind(new Date(nowMs - 3 * 86400 * 1000).toISOString()).first())?.n || 0; } catch (_) {}
@@ -7504,7 +7505,7 @@ async function processCentinelaRuteo(env) {
     const totalCurado = Object.values(cured).reduce((a, b) => a + b, 0);
     const rev = [];
     if (al.asignado_escondido) rev.push(al.asignado_escondido + ' asignados pero en bandeja que los esconde');
-    if (al.oculto_respondido) rev.push(al.oculto_respondido + ' que respondieron y siguen ocultos');
+    if (al.oculto_respondido) rev.push(al.oculto_respondido + ' que respondieron CON INTENCIÓN y siguen ocultos');
     if (al.carteles_pero_cursos) rev.push(al.carteles_pero_cursos + ' en carteles pero el ad dice cursos');
     if (al.ads_sin_mapear) rev.push(al.ads_sin_mapear + ' ads nuevos sin clasificar (wa_ad_verticals)');
     if (al.privado_con_inbound) rev.push(al.privado_con_inbound + ' en privado/corte con mensaje reciente sin responder');
