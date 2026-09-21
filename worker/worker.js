@@ -16072,6 +16072,25 @@ const handler = {
           const entrega = (String(body.entrega || '') === 'envio') ? 'envio' : 'retira';
           try { const rr = await env.DB.prepare("UPDATE corte_pedidos SET estado='embalado', entrega=?, updated_at=? WHERE estado='cortado' AND telefono=?").bind(entrega, nowIso, tel).run(); return json({ ok: true, action, n: (rr.meta && rr.meta.changes) || 0 }); } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         }
+        // Selección múltiple: mueve una LISTA de pedidos (ids) al estado destino. produccion solo puede
+        // cortado/embalado; admin puede cualquier estado. Usado por la barra de acciones masivas del board.
+        if (action === 'avanzar_bulk') {
+          if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
+          const ids = (Array.isArray(body.ids) ? body.ids : []).map(x => parseInt(x, 10)).filter(Boolean).slice(0, 300);
+          const est = String(body.estado || '');
+          if (!ids.length) return json({ error: 'sin ids' }, 400);
+          if (!['pedido', 'matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(est)) return json({ error: 'estado inválido' }, 400);
+          if (_role !== 'admin' && !['cortado', 'embalado'].includes(est)) return json({ error: 'solo admin puede mover a ese estado' }, 403);
+          const ph = ids.map(() => '?').join(',');
+          const entrega = (String(body.entrega || '') === 'envio') ? 'envio' : 'retira';
+          try {
+            let rr;
+            if (est === 'embalado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET estado='embalado', entrega=?, updated_at=? WHERE id IN (${ph})`).bind(entrega, nowIso, ...ids).run();
+            else if (est === 'cortado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET estado='cortado', productor=?, updated_at=? WHERE id IN (${ph})`).bind(_slug, nowIso, ...ids).run();
+            else rr = await env.DB.prepare(`UPDATE corte_pedidos SET estado=?, updated_at=? WHERE id IN (${ph})`).bind(est, nowIso, ...ids).run();
+            return json({ ok: true, action, estado: est, n: (rr.meta && rr.meta.changes) || 0 });
+          } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        }
         // Acciones sobre un pedido puntual (requieren id).
         const id = parseInt(body.id, 10);
         if (!id) return json({ error: 'falta id' }, 400);

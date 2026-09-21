@@ -3047,7 +3047,9 @@ function corteHybridBoard(pedidos) {
     const sm = CORTE_STAGE_META[g.stage]; const pm = cortePagoMeta(g.pago);
     const frac = Math.round(((CORTE_STAGE_IDX[g.stage] || 0) + 1) / 6 * 100);
     const exp = STATE.corteExpanded && STATE.corteExpanded[g.key];
-    const head = `<div data-corte-grow="${escapeHtml(g.key)}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer${i ? ';border-top:1px solid var(--border)' : ''}">
+    const isSel = STATE.corteSel && STATE.corteSel[g.key];
+    const head = `<div data-corte-grow="${escapeHtml(g.key)}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer${i ? ';border-top:1px solid var(--border)' : ''}${isSel ? ';background:rgba(124,58,237,.12)' : ''}">
+        <input type="checkbox" data-corte-sel="${escapeHtml(g.key)}" ${isSel ? 'checked' : ''} style="cursor:pointer;flex:0 0 auto;accent-color:#7c3aed">
         <span style="color:var(--fg-subtle);font-size:11px;flex:0 0 auto;display:inline-block;${exp ? 'transform:rotate(90deg)' : ''}">▸</span>
         <span style="font-weight:700;font-size:14px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(g.nombre)}</span>
         <span class="corte-hide-sm" style="font-size:11px;color:var(--fg-subtle);font-variant-numeric:tabular-nums;flex:0 0 auto">${g.npz} pz</span>
@@ -3070,6 +3072,26 @@ function corteHybridBoard(pedidos) {
     return head + detail;
   }).join('');
   const vacio = seg === 'cobrar' ? 'No hay nada para cobrar por ahora' : (seg === 'trab' ? 'Nada trabado ✨' : 'Sin pedidos esta semana');
+  // Selección múltiple → acciones masivas.
+  const sel = STATE.corteSel || {};
+  const selGroups = groups.filter(g => sel[g.key]);
+  const selPiezas = selGroups.reduce((s, g) => s + g.npz, 0);
+  const selTotal = selGroups.reduce((s, g) => s + g.total, 0);
+  const nMatriz = selGroups.reduce((s, g) => s + g.items.filter(p => p.estado === 'matriz_lista').length, 0);
+  const nCortado = selGroups.reduce((s, g) => s + g.items.filter(p => p.estado === 'cortado').length, 0);
+  const nCobrar = selGroups.filter(g => g.priced && g.pago !== 'pagado').length;
+  const allVisSel = list.length > 0 && list.every(g => sel[g.key]);
+  const selallHead = list.length ? `<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);background:rgba(0,0,0,.14)">
+      <input type="checkbox" data-corte-selall ${allVisSel ? 'checked' : ''} style="cursor:pointer;accent-color:#7c3aed">
+      <span style="font-size:11px;color:var(--fg-subtle)">Seleccionar ${list.length === 1 ? 'el cliente' : 'los ' + list.length}</span>
+    </div>` : '';
+  const barra = selGroups.length ? `<div style="position:fixed;bottom:calc(16px + env(safe-area-inset-bottom,0px));left:50%;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:10px 14px;box-shadow:0 10px 34px rgba(0,0,0,.55);max-width:calc(100vw - 24px)">
+      <span style="font-size:12px;font-weight:700;white-space:nowrap">${selGroups.length} cliente${selGroups.length === 1 ? '' : 's'} · ${selPiezas} pz${selTotal ? ' · $' + selTotal.toLocaleString('es-AR') : ''}</span>
+      ${nMatriz ? `<button class="btn" data-corte-bulk-avanzar="cortado" style="font-size:12px;padding:6px 12px">🪚 Cortados (${nMatriz})</button>` : ''}
+      ${nCortado ? `<button class="btn" data-corte-bulk-avanzar="embalado" style="font-size:12px;padding:6px 12px">📦 Embalados (${nCortado})</button>` : ''}
+      ${nCobrar ? `<button class="btn" data-corte-bulk-cobrar style="font-size:12px;padding:6px 12px">💰 Cobrar (${nCobrar})</button>` : ''}
+      <button class="btn ghost" data-corte-bulk-deselect style="font-size:12px;padding:6px 10px" title="Deseleccionar">✕</button>
+    </div>` : '';
   return `
     <style>@media(max-width:560px){.corte-hide-sm{display:none!important}}</style>
     ${corteHeroHtml(pedidos, groups)}
@@ -3084,7 +3106,8 @@ function corteHybridBoard(pedidos) {
       </div>
     </div>
     ${STATE.corteCobrosView ? renderCorteCobros() : ''}
-    ${list.length ? `<div style="border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;background:var(--ink-100)">${rows}</div>` : `<div style="padding:24px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:var(--r-sm)">${vacio}</div>`}`;
+    ${list.length ? `<div style="border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;background:var(--ink-100)">${selallHead}${rows}</div>` : `<div style="padding:24px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:var(--r-sm)">${vacio}</div>`}
+    ${barra}`;
 }
 function renderCorte() {
   const pedidos = STATE.cortePedidos || [];
@@ -3244,6 +3267,13 @@ async function bindCorte() {
   // Board híbrido (admin): segmentado + expandir/colapsar cliente.
   document.querySelectorAll('[data-corte-seg]').forEach(b => { b.onclick = () => { STATE.corteSeg = b.getAttribute('data-corte-seg'); render(); }; });
   document.querySelectorAll('[data-corte-grow]').forEach(row => { row.onclick = () => { const k = row.getAttribute('data-corte-grow'); STATE.corteExpanded = STATE.corteExpanded || {}; STATE.corteExpanded[k] = !STATE.corteExpanded[k]; render(); }; });
+  // Selección múltiple (checkbox por cliente + seleccionar todos + barra de acciones).
+  document.querySelectorAll('[data-corte-sel]').forEach(cb => { cb.onclick = (e) => { e.stopPropagation(); STATE.corteSel = STATE.corteSel || {}; STATE.corteSel[cb.getAttribute('data-corte-sel')] = cb.checked; render(); }; });
+  const selAll = document.querySelector('[data-corte-selall]');
+  if (selAll) selAll.onclick = (e) => { e.stopPropagation(); STATE.corteSel = STATE.corteSel || {}; const on = selAll.checked; document.querySelectorAll('[data-corte-sel]').forEach(b => { STATE.corteSel[b.getAttribute('data-corte-sel')] = on; }); render(); };
+  document.querySelectorAll('[data-corte-bulk-avanzar]').forEach(b => { b.onclick = () => corteBulkAvanzar(b.getAttribute('data-corte-bulk-avanzar')); });
+  const bulkDes = document.querySelector('[data-corte-bulk-deselect]'); if (bulkDes) bulkDes.onclick = () => { STATE.corteSel = {}; render(); };
+  const bulkCob = document.querySelector('[data-corte-bulk-cobrar]'); if (bulkCob) bulkCob.onclick = () => { const b = document.querySelector('[data-corte-cobrar-abrir]'); if (b) b.click(); };
   const cerrar = document.querySelector('[data-corte-cerrar]'); if (cerrar) cerrar.onclick = () => { STATE.corteSelected = null; render(); };
   const ai = document.getElementById('corte-ancho'), ali = document.getElementById('corte-alto');
   if (ai || ali) { const sel = (STATE.cortePedidos || []).find(p => p.id === STATE.corteSelected); if (sel) { const upd = () => cortePrecioPreview(sel); if (ai) ai.oninput = upd; if (ali) ali.oninput = upd; } }
@@ -3329,9 +3359,19 @@ async function corteDescargarArchivo() {
 async function corteBulk(action, extra) {
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/corte/pedido', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...extra }) }).then(x => x.json());
-    if (r && r.ok) { toast('Listo ✓ (' + (r.n || 0) + ')'); STATE.corteSelected = null; STATE.cortePedidos = undefined; STATE._corteLoading = false; render(); }
+    if (r && r.ok) { toast('Listo ✓ (' + (r.n || 0) + ')'); STATE.corteSelected = null; STATE.corteSel = {}; STATE.cortePedidos = undefined; STATE._corteLoading = false; render(); }
     else { toast((r && r.error) || 'No se pudo'); }
   } catch (_) { toast('Error de red'); }
+}
+// Acción masiva desde la selección: junta los ids elegibles de los clientes tildados y los mueve de etapa.
+function corteBulkAvanzar(estado) {
+  const groups = corteClientGroups(STATE.cortePedidos || []);
+  const sel = STATE.corteSel || {};
+  const wantStage = estado === 'cortado' ? 'matriz_lista' : (estado === 'embalado' ? 'cortado' : null);
+  const ids = [];
+  groups.forEach(g => { if (sel[g.key]) g.items.forEach(p => { if (!wantStage || p.estado === wantStage) ids.push(p.id); }); });
+  if (!ids.length) { toast('Nada elegible para eso'); return; }
+  corteBulk('avanzar_bulk', { ids, estado });
 }
 async function corteAccion(accion, id) {
   const body = { id, action: accion };
