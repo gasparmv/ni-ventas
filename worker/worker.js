@@ -3662,6 +3662,18 @@ async function corteVigiaPago(env, phone) {
   }
   return true;
 }
+// Vigía de pagos AUTÓNOMO: corre en el cron aunque el bot conversacional del corte esté APAGADO.
+// Solo procesa comprobantes de clientes en cobranza (marca pagado/parcial + confirma + avisa a Gaspar);
+// NO charla ni toma pedidos. Ideal para el día de cobro con el bot off. Kill-switch kv corte_vigia_on (default ON).
+async function processCorteVigiaAuto(env) {
+  try {
+    if (await isWaBillingBlocked(env)) return;
+    if ((await kvGet(env, 'corte_vigia_on', '1')) !== '1') return;
+    let phones = [];
+    try { phones = ((await env.DB.prepare("SELECT DISTINCT telefono FROM corte_pedidos WHERE estado_pago='cobrando' AND telefono IS NOT NULL AND telefono!=''").all()).results || []).map(r => r.telefono); } catch (_) { return; }
+    for (const ph of phones) { try { await corteVigiaPago(env, ph); } catch (_) {} }
+  } catch (_) {}
+}
 // ===== Google Drive (cuenta de servicio) — respaldo de archivos del corte =====
 const DRIVE_FOLDER_MATRICES = '1B9APyJdXQa5M9BxZ32Ct7jq8EEudNID_'; // matrices (sube Emma)
 const DRIVE_FOLDER_ANIBAL = '1PohYYIec4pidCjJt42lzfod4vUWkjAsj';   // placas anidadas (sube Aníbal)
@@ -16975,6 +16987,7 @@ const handler = {
     if (event.cron === '* * * * *') {
       ctx.waitUntil(processPrecotizPilot(env));
       ctx.waitUntil(processCortePilot(env));   // bot de corte: cada minuto para responder rápido (gate corte_bot_on)
+      ctx.waitUntil(processCorteVigiaAuto(env)); // vigía de pagos: corre SIEMPRE (aunque el bot esté off) para el día de cobro (gate corte_vigia_on)
       // Nudge del piloto: persigue leads a medias que se callaron (cada 15 min; gate 9-21 AR adentro).
       // OJO: usamos getUTCMinutes() INLINE, no la var `minute` (que recién se declara con const más
       // abajo, línea ~10932 -> referenciarla acá era ReferenceError por TDZ en cada tick */1).
