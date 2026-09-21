@@ -17601,7 +17601,7 @@ function renderCorpBriefCard(b) {
 }
 function renderCorporeas() {
   // Corpóreas = MISMO kanban que Cotización, scopeado a tipo='corporea'.
-  return renderCotizacion('corporea');
+  return renderCotizacion('corporea') + renderTicketCorporeoModal();
 }
 function _corporeasFormV1_dead() {
   if (!STATE.token) {
@@ -17678,6 +17678,161 @@ function bindCorporeas() {
   // Reusa el binding del kanban (mismos IDs). briefProducto ya quedó en 'corporea'
   // porque renderCorporeas llamó a renderCotizacion('corporea').
   bindCotizacion();
+  bindTicketCorporeoModal();
+}
+
+// ===================== Ticket de producción CORPÓREO =====================
+// Botón en la vista Corpóreas → formulario con los datos que pide Sin Frontera (los que
+// fabrican los corpóreos) → al generar se numera, se guarda en D1 y se manda el detalle
+// por WhatsApp al número personal de Gaspar. Schema (secciones+campos) maneja tanto el
+// render del form como el texto del ticket.
+const TICKET_CORP_SECS = [
+  ['👤 Cliente', [
+    { k:'empresa', l:'Empresa / Emprendimiento' },
+    { k:'nombre', l:'Nombre y apellido' },
+    { k:'telefono', l:'Teléfono', t:'tel' },
+    { k:'mail', l:'Mail' },
+    { k:'provincia', l:'Provincia / Ciudad' },
+    { k:'direccion', l:'Dirección del local' },
+  ]],
+  ['📅 Fechas', [
+    { k:'fecha_sena', l:'Fecha seña cliente', t:'date' },
+    { k:'fecha_compromiso', l:'Fecha compromiso', t:'date' },
+    { k:'fecha_entrega', l:'Fecha entrega', t:'date' },
+  ]],
+  ['📦 Producto', [
+    { k:'producto', l:'Producto', t:'select', o:['—','Cartelería','Merch Empresarial / Emprendimiento','Solución / Repuesto / Pieza','Producto / Deco'] },
+    { k:'tipo_producto', l:'Tipo de producto', t:'select', o:['—','Corpóreo sin iluminación','Corpóreo con iluminación','Corpóreo frente de acrílico','Pastilla doble faz'] },
+    { k:'carteleria', l:'Cartelería', t:'select', o:['—','Interior','Exterior','Ambas'] },
+    { k:'precisa_instalacion', l:'Precisa instalación', t:'select', o:['No','Sí'] },
+    { k:'asesor', l:'Asesor comercial' },
+    { k:'prioridad', l:'Prioridad', t:'select', o:['—','Baja','Media','Alta','Urgente'] },
+    { k:'medidas', l:'Medidas del cartel', t:'area' },
+    { k:'descripcion_cliente', l:'Descripción del cliente', t:'area' },
+  ]],
+  ['🎨 Diseño', [
+    { k:'requiere_estructura', l:'Requiere estructura / bastidor', t:'select', o:['No','Sí'] },
+    { k:'llaveros', l:'Llaveros (cantidad)', t:'num' },
+    { k:'light_box', l:'Light box', t:'select', o:['No','Sí'] },
+    { k:'disenador', l:'Diseñador designado' },
+    { k:'desc_diseno', l:'Descripción para diseño', t:'area' },
+  ]],
+  ['🖨️ Impresión', [
+    { k:'impresora', l:'Impresora' },
+    { k:'tiempos_hs', l:'Tiempos (hs)', t:'num' },
+    { k:'filamento', l:'Filamento' },
+    { k:'consumo_kg', l:'Consumo (kg)', t:'num' },
+    { k:'cambio_color', l:'Cambio de color', t:'select', o:['No','Sí'] },
+    { k:'nro_archivos', l:'Nro archivos de impresión', t:'num' },
+    { k:'colores', l:'Colores', t:'area' },
+    { k:'desc_impresion', l:'Descripción para impresión', t:'area' },
+  ]],
+  ['🔧 Ensamble', [
+    { k:'salida_cables', l:'Salida de cables' },
+    { k:'lado_cables', l:'Lado salida de cables' },
+    { k:'tipo_luz', l:'Tipo de luz' },
+    { k:'color_luz', l:'Color de luz' },
+    { k:'fuente', l:'Fuente' },
+    { k:'fotocelula', l:'Fotocélula', t:'select', o:['No','Sí'] },
+    { k:'dimmer', l:'Dimmer', t:'select', o:['No','Sí'] },
+    { k:'estanco', l:'Estanco', t:'select', o:['No','Sí'] },
+    { k:'desc_ensamble', l:'Descripción para ensamble', t:'area' },
+  ]],
+  ['🗂️ Otros', [
+    { k:'mantenimiento', l:'Descripción mantenimiento', t:'area' },
+    { k:'fase', l:'En qué fase se encuentra' },
+    { k:'carpeta', l:'Carpeta cliente (URL)' },
+  ]],
+];
+function tcVal(k){ return (STATE.ticketCorp && STATE.ticketCorp[k] != null) ? STATE.ticketCorp[k] : ''; }
+function openTicketCorporeoModal(){
+  if (!canCotizar()) return;
+  // Defaults de los Sí/No en "No" (como el sistema de Sin Frontera).
+  STATE.ticketCorp = { precisa_instalacion:'No', requiere_estructura:'No', light_box:'No', cambio_color:'No', fotocelula:'No', dimmer:'No', estanco:'No' };
+  STATE.ticketCorpModalOpen = true; STATE.ticketCorpSaving = false;
+  render();
+}
+function tcReadDOM(){
+  const t = STATE.ticketCorp || (STATE.ticketCorp = {});
+  for (const [,flds] of TICKET_CORP_SECS) for (const f of flds){ const el = document.getElementById('tc-'+f.k); if (el) t[f.k] = el.value; }
+}
+function renderTicketCorpField(f){
+  const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px';
+  const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
+  const v = escapeHtml(String(tcVal(f.k)));
+  let ctrl;
+  if (f.t === 'select') ctrl = `<select id="tc-${f.k}" style="${inp}">${f.o.map(o=>`<option ${String(tcVal(f.k))===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select>`;
+  else if (f.t === 'area') ctrl = `<textarea id="tc-${f.k}" rows="2" style="${inp};resize:vertical">${v}</textarea>`;
+  else if (f.t === 'num') ctrl = `<input id="tc-${f.k}" type="number" value="${v}" style="${inp}">`;
+  else if (f.t === 'date') ctrl = `<input id="tc-${f.k}" type="date" value="${v}" style="${inp}">`;
+  else ctrl = `<input id="tc-${f.k}" type="${f.t==='tel'?'tel':'text'}" value="${v}" style="${inp}">`;
+  return `<div style="${f.t==='area'?'grid-column:1/-1':''}"><label style="${lbl}">${escapeHtml(f.l)}</label>${ctrl}</div>`;
+}
+// Arma el texto del ticket: por sección, solo los campos con valor (ignora vacíos y "—").
+function tcCompose(){
+  const parts = [];
+  for (const [sec, flds] of TICKET_CORP_SECS){
+    const lines = [];
+    for (const f of flds){
+      let v = String(tcVal(f.k) == null ? '' : tcVal(f.k)).trim();
+      if (!v || v === '—') continue;
+      lines.push(`${f.l}: ${v}`);
+    }
+    if (lines.length) parts.push(`*${sec}*\n${lines.join('\n')}`);
+  }
+  return parts.join('\n\n');
+}
+function renderTicketCorporeoModal(){
+  if (!STATE.ticketCorpModalOpen) return '';
+  const secs = TICKET_CORP_SECS.map(([sec, flds]) => `
+    <div style="margin-top:var(--s-3)">
+      <div style="font-size:12px;font-weight:700;color:var(--accent-cyan,#8FD4DE);margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:4px">${sec}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px">${flds.map(renderTicketCorpField).join('')}</div>
+    </div>`).join('');
+  return `
+    <div id="tc-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:280;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
+      <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:820px;width:100%;margin:auto;padding:var(--s-4)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
+          <h2 style="margin:0;font-size:16px">🎫 Ticket de producción · Corpóreo</h2>
+          <button id="tc-close" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
+        </div>
+        <p class="muted" style="margin:0;font-size:12px">Completá lo que tengas y generá el ticket — te llega el detalle por WhatsApp a tu número.</p>
+        ${secs}
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:var(--s-4);padding-top:var(--s-2);border-top:1px solid var(--border)">
+          <button id="tc-cancel" class="btn btn-ghost">Cancelar</button>
+          <button id="tc-confirm" class="btn btn-cyan">${STATE.ticketCorpSaving ? 'Generando…' : '🎫 Generar ticket'}</button>
+        </div>
+      </div>
+    </div>`;
+}
+function bindTicketCorporeoModal(){
+  const btn = document.getElementById('btn-ticket-corporeo'); if (btn) btn.onclick = openTicketCorporeoModal;
+  if (!STATE.ticketCorpModalOpen) return;
+  const close = () => { STATE.ticketCorpModalOpen = false; render(); };
+  const c1 = document.getElementById('tc-close'); if (c1) c1.onclick = close;
+  const c2 = document.getElementById('tc-cancel'); if (c2) c2.onclick = close;
+  const bk = document.getElementById('tc-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'tc-backdrop') close(); };
+  const cf = document.getElementById('tc-confirm'); if (cf) cf.onclick = confirmTicketCorporeo;
+}
+async function confirmTicketCorporeo(){
+  if (STATE.ticketCorpSaving) return;
+  tcReadDOM();
+  const t = STATE.ticketCorp || {};
+  if (!String(t.empresa||'').trim() && !String(t.nombre||'').trim()) { toast('Poné al menos la empresa o el nombre del cliente'); return; }
+  const body = tcCompose();
+  if (!body) { toast('Cargá algún dato del ticket'); return; }
+  STATE.ticketCorpSaving = true; render();
+  try {
+    const cliente = String(t.empresa || t.nombre || '').trim();
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/ticket', { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ body, cliente }) });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
+    STATE.ticketCorpModalOpen = false; STATE.ticketCorpSaving = false; render();
+    toast(`Ticket #${j.numero} generado${j.sent ? ' y enviado por WhatsApp ✓' : ' (⚠ no se pudo mandar el WhatsApp)'}`);
+  } catch (e) {
+    STATE.ticketCorpSaving = false; render();
+    toast('Error al generar el ticket: ' + e.message);
+  }
 }
 function _bindCorporeasV1_dead() {
   if (!STATE.token) return;
@@ -17773,6 +17928,7 @@ function renderCotizacion(producto = 'neon') {
         ${(getUserRole() === 'disenador' || getUserRole() === 'admin') ? `<button class="btn btn-ghost" id="btn-vectorize" title="Convertir un logo/diseño a silueta B&N maciza de alto contraste, lista para vectorizar con el Calco de Imagen de Illustrator">⬛ Vectorizar</button>` : ''}
         ${(getUserRole() === 'disenador' || getUserRole() === 'admin' || getUserRole() === 'comercial') ? `<button class="btn btn-ghost" id="btn-mockup" title="Montar el render de un cartel sobre la foto del local del cliente para ver cómo queda puesto (montaje hiperrealista con IA)">🏠 Montaje</button>` : ''}
         ${canCotizar() ? `<button class="btn btn-ghost" id="briefs-verificar-enviados" title="Revisar los 'Listos' y 'Colgados' tipo WhatsApp contra el historial y pasar a Enviados los que ya tienen presupuesto mandado">${STATE.verificandoEnviados ? '⏳ Verificando…' : '🔍 Verificar enviados'}</button>` : ''}
+        ${esCorp && canCotizar() ? `<button class="btn btn-cyan" id="btn-ticket-corporeo" title="Generar un ticket de producción para Sin Frontera y mandártelo por WhatsApp">🎫 Ticket producción</button>` : ''}
         ${canCreateBriefs() ? '<button class="btn btn-cyan" id="brief-new">+ Nuevo brief</button>' : ''}
       </div>
     </div>
@@ -19145,7 +19301,7 @@ function startBriefsPolling() {
       // No pisar un form en progreso: drawer, cotizador, lightbox o el MODAL de
       // crear brief abierto (quickModalOpen). Sin esto, cuando Emma manda algo a
       // "Listos" el poll re-renderizaba y le borraba a Joaco lo que estaba cargando.
-      const busy = STATE.briefSelected || STATE.briefDraft || STATE.briefCotPopupOpen || STATE.imgLightboxUrl || STATE.quickModalOpen;
+      const busy = STATE.briefSelected || STATE.briefDraft || STATE.briefCotPopupOpen || STATE.imgLightboxUrl || STATE.quickModalOpen || STATE.ticketCorpModalOpen;
       if (!busy) { if (!refreshBriefBoardIncremental()) render(); }
     }
   }, 30000);

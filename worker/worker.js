@@ -12298,6 +12298,28 @@ const handler = {
           return json({ ok: true, on: (await kvGet(env, 'precotiz_on', '0')) === '1', modo: await kvGet(env, 'precotiz_modo', 'draft'), nadia_cuota: parseInt(await kvGet(env, 'nadia_cuota_diaria', '0'), 10) || 0, nadia_phone: await kvGet(env, 'nadia_phone', '') });
         }
 
+        // POST /admin/corporeo/ticket → genera un ticket de producción de corpóreo (los datos que
+        // pide Sin Frontera), lo numera + guarda en corporeo_tickets, y manda el detalle por
+        // WhatsApp al número personal de Gaspar. El front compone el cuerpo (body); acá se numera,
+        // se prepende el encabezado y se envía.
+        if (request.method === 'POST' && path === '/admin/corporeo/ticket') {
+          let tb; try { tb = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          const detalle = String((tb && tb.body) || '').trim();
+          if (!detalle) return json({ error: 'ticket vacío' }, 400);
+          const cliente = String((tb && tb.cliente) || '').trim();
+          try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS corporeo_tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, cliente TEXT, detalle TEXT, created_by TEXT, created_at TEXT)').run(); } catch (_) {}
+          const mx = await env.DB.prepare('SELECT MAX(numero) AS m FROM corporeo_tickets').first();
+          const numero = ((mx && mx.m) ? Math.floor(Number(mx.m)) : 0) + 1;
+          const now = new Date().toISOString();
+          try { await env.DB.prepare('INSERT INTO corporeo_tickets (numero, cliente, detalle, created_by, created_at) VALUES (?,?,?,?,?)').bind(numero, cliente, detalle, session.user, now).run(); } catch (_) {}
+          const fecha = now.slice(8, 10) + '/' + now.slice(5, 7) + '/' + now.slice(0, 4);
+          const txt = `🎫 TICKET DE PRODUCCIÓN CORPÓREO #${numero}\n${fecha}${cliente ? ' · ' + cliente : ''} · cargó ${session.user}\n\n${detalle}`;
+          const to = '5491155604999'; // número personal de Gaspar (pedido explícito)
+          let sent = false;
+          try { const r = await waSendText(env, to, txt); sent = !!(r && r.ok); } catch (_) {}
+          return json({ ok: true, numero, sent });
+        }
+
         // POST /admin/precotiz/corporeo-backfill → etiqueta a los leads que YA entraron por ads mapeados
         // a vertical 'corporeo' (wa_ad_verticals) y los saca del bot de precotización si cayeron.
         // Idempotente; se re-corre al agregar ads corpóreos nuevos al mapa.
