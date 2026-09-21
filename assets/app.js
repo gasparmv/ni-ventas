@@ -2261,23 +2261,27 @@ function bindUserPicker() {
   const u = document.getElementById('login-user'); if (u) u.focus();
 }
 // ===================== AGENDA DEL EQUIPO (frontend) =====================
-const agendaState = { weekStart: null, eventos: [], roster: [], yo: '', puedeVerTodo: false, filtro: 'todos', editId: null };
+const agendaState = { monthAnchor: null, eventos: [], roster: [], yo: '', puedeVerTodo: false, filtro: 'todos', editId: null };
 const AG_DIAS = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
 const AG_MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+const AG_MESES_L = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 const AGI = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);margin-bottom:10px;font-family:inherit;font-size:13px';
 const AGL = 'display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em';
 function _agISO(d) { return d.toISOString().slice(0, 10); }
 function _agAdd(d, n) { return new Date(d.getTime() + n * 86400000); }
 function _agMonday(d) { const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); const wd = (x.getUTCDay() + 6) % 7; return _agAdd(x, -wd); }
-function agInitWeek() { if (!agendaState.weekStart) agendaState.weekStart = _agMonday(new Date()); }
+function _agMonthStart(d) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)); }
+function _agAddMonth(d, n) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + n, 1)); }
+function _agSemanasMes(m) { const firstWd = (m.getUTCDay() + 6) % 7; const dias = new Date(Date.UTC(m.getUTCFullYear(), m.getUTCMonth() + 1, 0)).getUTCDate(); return Math.ceil((firstWd + dias) / 7); }
+function agInitMonth() { if (!agendaState.monthAnchor) agendaState.monthAnchor = _agMonthStart(new Date()); }
 function _agNombre(slug) { const r = (agendaState.roster || []).find(x => x.slug === slug); return r ? r.nombre : slug; }
 function _agEsAdmin() { return !!agendaState.puedeVerTodo; }
 function agEditable(ev) { return !ev || _agEsAdmin() || ev.creado_por === agendaState.yo; }
 
 function renderAgenda() {
-  agInitWeek();
-  const mon = agendaState.weekStart, sun = _agAdd(mon, 6);
-  const label = `${mon.getUTCDate()} – ${sun.getUTCDate()} ${AG_MESES[sun.getUTCMonth()]}`;
+  agInitMonth();
+  const m = agendaState.monthAnchor;
+  const label = `${AG_MESES_L[m.getUTCMonth()]} ${m.getUTCFullYear()}`;
   const filtro = _agEsAdmin() ? `<select id="ag-filtro" style="width:auto;height:34px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);padding:0 8px;font-size:13px">
       <option value="todos" ${agendaState.filtro === 'todos' ? 'selected' : ''}>Ver: todos</option>
       <option value="mios" ${agendaState.filtro === 'mios' ? 'selected' : ''}>Solo míos</option>
@@ -2290,19 +2294,25 @@ function renderAgenda() {
     .ag-chip{border:1px solid var(--border);border-radius:999px;padding:4px 10px;font-size:12px;cursor:pointer;background:transparent;color:var(--fg-subtle)}
     .ag-chip.ag-on{background:rgba(143,212,222,.12);color:var(--accent-cyan);border-color:var(--accent-cyan)}
     .ag-ev:hover{filter:brightness(1.15)}
+    .ag-dow{text-align:center;font-size:11px;font-weight:600;color:var(--fg-subtle);padding:4px 0;text-transform:uppercase;letter-spacing:.04em}
+    .ag-cell{background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:5px 5px 4px;min-height:96px;display:flex;flex-direction:column}
+    .ag-cell.ag-out{background:transparent;opacity:.4}
+    .ag-cell.ag-today{border-color:var(--accent-cyan)}
+    .ag-daynum{font-size:12px;color:var(--fg-subtle);text-align:right;margin-bottom:3px;line-height:1}
+    .ag-cell.ag-today .ag-daynum{color:var(--accent-cyan);font-weight:700}
   </style>
   <div class="page-head" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
     <h1 style="margin:0">Agenda del equipo</h1>
     <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-      <button class="btn btn-ghost btn-icon" id="ag-prev" title="Semana anterior">‹</button>
-      <span style="font-size:13px;color:var(--fg-subtle);min-width:90px;text-align:center">${label}</span>
-      <button class="btn btn-ghost btn-icon" id="ag-next" title="Semana siguiente">›</button>
+      <button class="btn btn-ghost btn-icon" id="ag-prev" title="Mes anterior">‹</button>
+      <span style="font-size:14px;color:var(--fg);font-weight:600;min-width:130px;text-align:center">${label}</span>
+      <button class="btn btn-ghost btn-icon" id="ag-next" title="Mes siguiente">›</button>
       <button class="btn btn-ghost" id="ag-hoy">Hoy</button>
       ${filtro}
       <button class="btn btn-cyan" id="ag-nuevo">＋ Nuevo</button>
     </div>
   </div>
-  <div style="overflow-x:auto"><div id="agenda-grid" style="min-width:640px">${renderAgendaGridHtml()}</div></div>
+  <div style="overflow-x:auto"><div id="agenda-grid" style="min-width:760px">${renderAgendaGridHtml()}</div></div>
   <div style="display:flex;gap:16px;margin-top:10px;font-size:12px;color:var(--fg-mute);flex-wrap:wrap">
     <span><span style="color:var(--accent-cyan)">●</span> reunión</span>
     <span><span style="color:#a855f7">●</span> tarea</span>
@@ -2312,29 +2322,38 @@ function renderAgenda() {
 }
 
 function renderAgendaGridHtml() {
-  agInitWeek();
-  const mon = agendaState.weekStart, f = agendaState.filtro, hoy = _agISO(new Date());
-  const cols = [];
-  for (let i = 0; i < 7; i++) {
-    const d = _agAdd(mon, i), iso = _agISO(d), isToday = iso === hoy;
+  agInitMonth();
+  const m = agendaState.monthAnchor, f = agendaState.filtro, hoy = _agISO(new Date());
+  const gridStart = _agMonday(m), curMonth = m.getUTCMonth();
+  const total = _agSemanasMes(m) * 7;
+  const head = AG_DIAS.map(d => `<div class="ag-dow">${d}</div>`).join('');
+  const cells = [];
+  for (let i = 0; i < total; i++) {
+    const d = _agAdd(gridStart, i), iso = _agISO(d);
+    const inMonth = d.getUTCMonth() === curMonth, isToday = iso === hoy;
     let evs = agendaState.eventos.filter(e => e.fecha === iso);
     if (f === 'mios') evs = evs.filter(e => e.participantes.includes(agendaState.yo) || e.creado_por === agendaState.yo);
     else if (f && f !== 'todos') evs = evs.filter(e => e.participantes.includes(f));
-    const chips = evs.map(agEventChip).join('') || '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding-top:6px">—</div>';
-    cols.push(`<div style="background:var(--ink-100);border:1px solid ${isToday ? 'var(--accent-cyan)' : 'var(--border)'};border-radius:var(--r-sm);padding:7px;min-height:124px">
-      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--fg-subtle);margin-bottom:6px"><b style="color:var(--fg)">${AG_DIAS[i]}</b><span>${d.getUTCDate()}</span></div>${chips}</div>`);
+    const chips = evs.map(e => agEventChip(e, true)).join('');
+    cells.push(`<div class="ag-cell ${inMonth ? '' : 'ag-out'} ${isToday ? 'ag-today' : ''}">
+      <div class="ag-daynum">${d.getUTCDate()}</div>${chips}</div>`);
   }
-  return `<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px">${cols.join('')}</div>`;
+  return `<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px;margin-bottom:4px">${head}</div>
+    <div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px">${cells.join('')}</div>`;
 }
 
-function agEventChip(e) {
+function agEventChip(e, compact) {
   const reunion = e.tipo !== 'tarea';
   const col = reunion ? 'var(--accent-cyan)' : '#a855f7';
   const bg = reunion ? 'rgba(143,212,222,.10)' : 'rgba(168,85,247,.12)';
   const rep = (e.recurrencia && e.recurrencia !== 'none') ? '↻ ' : '';
-  const meta = (e.hora || (reunion && e.participantes.length)) ? `<div style="font-size:10px;color:var(--fg-mute)">${e.hora ? e.hora + (e.hora_fin ? '–' + e.hora_fin : '') : ''}${(e.hora && reunion && e.participantes.length) ? ' · ' : ''}${reunion && e.participantes.length ? e.participantes.slice(0, 3).map(_agNombre).join(', ') : ''}</div>` : '';
+  const meta = compact
+    ? (e.hora ? `<div style="font-size:9.5px;color:var(--fg-mute)">${e.hora}</div>` : '')
+    : ((e.hora || (reunion && e.participantes.length)) ? `<div style="font-size:10px;color:var(--fg-mute)">${e.hora ? e.hora + (e.hora_fin ? '–' + e.hora_fin : '') : ''}${(e.hora && reunion && e.participantes.length) ? ' · ' : ''}${reunion && e.participantes.length ? e.participantes.slice(0, 3).map(_agNombre).join(', ') : ''}</div>` : '');
   const chk = (e.tipo === 'tarea') ? `<span data-ag-chk="${e.id}" data-ag-oc="${e.fecha}" title="Marcar hecho" style="cursor:pointer;margin-right:3px">${e.hecho ? '☑' : '☐'}</span>` : '';
-  return `<div class="ag-ev" data-ag-ev="${e.id}" data-ag-oc="${e.fecha}" style="border-left:3px solid ${col};background:${bg};border-radius:6px;padding:4px 6px;margin-bottom:5px;font-size:11.5px;line-height:1.25;cursor:pointer;${e.hecho ? 'opacity:.55' : ''}">${chk}${rep}<span style="${e.hecho ? 'text-decoration:line-through' : ''}">${escapeHtml(e.titulo)}</span>${meta}</div>`;
+  const pad = compact ? '2px 5px' : '4px 6px';
+  const fs = compact ? '10.5px' : '11.5px';
+  return `<div class="ag-ev" data-ag-ev="${e.id}" data-ag-oc="${e.fecha}" style="border-left:3px solid ${col};background:${bg};border-radius:5px;padding:${pad};margin-bottom:4px;font-size:${fs};line-height:1.2;cursor:pointer;${e.hecho ? 'opacity:.55' : ''}">${chk}${rep}<span style="${e.hecho ? 'text-decoration:line-through' : ''}">${escapeHtml(e.titulo)}</span>${meta}</div>`;
 }
 
 function renderAgendaModalHtml() {
@@ -2437,9 +2456,9 @@ async function agToggleHecho(id, oc, done) {
 }
 function agendaBindHandlers() {
   const $ = id => document.getElementById(id);
-  if ($('ag-prev')) $('ag-prev').onclick = () => { agendaState.weekStart = _agAdd(agendaState.weekStart, -7); agendaFetch(); };
-  if ($('ag-next')) $('ag-next').onclick = () => { agendaState.weekStart = _agAdd(agendaState.weekStart, 7); agendaFetch(); };
-  if ($('ag-hoy')) $('ag-hoy').onclick = () => { agendaState.weekStart = _agMonday(new Date()); agendaFetch(); };
+  if ($('ag-prev')) $('ag-prev').onclick = () => { agendaState.monthAnchor = _agAddMonth(agendaState.monthAnchor, -1); agendaFetch(); };
+  if ($('ag-next')) $('ag-next').onclick = () => { agendaState.monthAnchor = _agAddMonth(agendaState.monthAnchor, 1); agendaFetch(); };
+  if ($('ag-hoy')) $('ag-hoy').onclick = () => { agendaState.monthAnchor = _agMonthStart(new Date()); agendaFetch(); };
   if ($('ag-filtro')) $('ag-filtro').onchange = e => { agendaState.filtro = e.target.value; agendaPaint(); };
   if ($('ag-nuevo')) $('ag-nuevo').onclick = () => agOpenModal(null);
   if ($('ag-cerrar')) $('ag-cerrar').onclick = agCloseModal;
@@ -2458,8 +2477,9 @@ function agBindGrid() {
 }
 function agendaPaint() { const m = document.getElementById('main'); if (m) { m.innerHTML = renderAgenda(); agendaBindHandlers(); } }
 async function agendaFetch() {
-  agInitWeek();
-  const desde = _agISO(agendaState.weekStart), hasta = _agISO(_agAdd(agendaState.weekStart, 6));
+  agInitMonth();
+  const m = agendaState.monthAnchor, gridStart = _agMonday(m);
+  const desde = _agISO(gridStart), hasta = _agISO(_agAdd(gridStart, _agSemanasMes(m) * 7 - 1));
   try {
     const r = await fetch(`${CONFIG.trackerUrl}/admin/agenda?desde=${desde}&hasta=${hasta}`, { headers: authHeaders() });
     const j = await r.json();
@@ -2477,13 +2497,13 @@ function render() {
   }
   // Diseñador queda confinado a Cotización; Abril (cursos) al Chat WA, aunque
   // la URL o el state digan otra cosa.
-  if (isCursosOnly() && !['chat', 'agenda'].includes(STATE.view)) {
+  if (isCursosOnly() && !['chat'].includes(STATE.view)) {
     STATE.view = 'chat';
     if (location.hash !== '#chat') location.hash = 'chat';
-  } else if (isProduccionOnly() && !['corte', 'agenda'].includes(STATE.view)) {
+  } else if (isProduccionOnly() && !['corte'].includes(STATE.view)) {
     STATE.view = 'corte';
     if (location.hash !== '#corte') location.hash = 'corte';
-  } else if (isDisenadorOnly() && !['cotizacion', 'corte', 'agenda'].includes(STATE.view)) {
+  } else if (isDisenadorOnly() && !['cotizacion', 'corte'].includes(STATE.view)) {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
@@ -2495,7 +2515,12 @@ function render() {
   // Nadia (2da vendedora): set reducido por ahora. Views permitidas: dashboard (solo
   // su panel "Tu sueldo"), pedidos, presupuestos, cotizacion, chat. Si cae en otra
   // (seguimientos/actividad/etc. por hash directo), al dashboard.
-  if (isSecundario(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas','agenda'].includes(STATE.view)) {
+  if (isSecundario(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas'].includes(STATE.view)) {
+    STATE.view = 'dashboard';
+    if (location.hash !== '#dashboard') location.hash = 'dashboard';
+  }
+  // Agenda: solo admin por ahora (visible/accesible únicamente para admin).
+  if (STATE.view === 'agenda' && !isAdmin()) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
@@ -3630,20 +3655,17 @@ function renderShell() {
           <button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
             <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '')}</span>
           </button>
-          <button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>
         ` : isProduccionOnly() ? `
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
-          <button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>
         ` : isDisenadorOnly() ? `
           <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
-          <button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>
         ` : `
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
-        <button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>
+        ${isAdmin() ? `<button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>` : ''}
         ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isSecundario(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
         ${!isSecundario(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
