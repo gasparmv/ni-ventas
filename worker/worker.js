@@ -16422,12 +16422,21 @@ const handler = {
           const g = { telefono: tel, cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
           let ventana = false;
           try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ventana = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 24 * 3600 * 1000); } catch (_) {}
-          if (!ventana) { res.push({ tel, ok: false, error: 'ventana cerrada (necesita plantilla)', total: g.total }); continue; }
-          const r = await corteSend(env, tel, corteCobroMsg(g));
+          // En ventana → texto libre (desglose completo). Fuera de ventana → plantilla aprobada
+          // corte_cobro_semanal ({{1}}=nombre, {{2}}=total). Ambas dejan los pedidos en 'cobrando' (para el vigía).
+          let r, via;
+          if (ventana) { r = await corteSend(env, tel, corteCobroMsg(g)); via = 'texto'; }
+          else {
+            const _nom = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
+            const _tot = '$' + Number(g.total || 0).toLocaleString('es-AR');
+            r = await waSendTemplate(env, tel, 'corte_cobro_semanal', 'es_AR', [_nom, _tot]);
+            via = 'plantilla';
+            if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-cobro-tpl:' + tel + ':' + Date.now()), tel, '[plantilla corte_cobro_semanal] total ' + _tot).run(); } catch (_) {} }
+          }
           if (r && r.ok) {
             try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE telefono=? AND estado_pago='pendiente' AND estado IN ('cortado','embalado')").bind(nowIso, tel).run(); } catch (_) {}
-            res.push({ tel, ok: true, total: g.total });
-          } else { res.push({ tel, ok: false, error: 'no se pudo enviar', total: g.total }); }
+            res.push({ tel, ok: true, total: g.total, via });
+          } else { res.push({ tel, ok: false, error: 'no se pudo enviar', total: g.total, via }); }
         }
         return json({ ok: true, resultados: res });
       }

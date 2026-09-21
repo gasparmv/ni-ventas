@@ -3179,16 +3179,16 @@ function renderCorteCobros() {
       </div>
       ${cs.map(c => `
         <div style="border-top:1px solid var(--border);padding:10px 0">
-          <label style="display:flex;gap:8px;align-items:flex-start;cursor:${c.ventana_abierta ? 'pointer' : 'not-allowed'}">
-            <input type="checkbox" class="corte-cobro-chk" data-tel="${escapeHtml(c.telefono)}" ${c.ventana_abierta ? 'checked' : 'disabled'} style="margin-top:3px">
+          <label style="display:flex;gap:8px;align-items:flex-start;cursor:${c.telefono ? 'pointer' : 'not-allowed'}">
+            <input type="checkbox" class="corte-cobro-chk" data-tel="${escapeHtml(c.telefono)}" ${c.telefono ? 'checked' : 'disabled'} style="margin-top:3px">
             <div style="flex:1">
-              <div style="font-weight:700">${escapeHtml(c.cliente_nombre || c.telefono || 'cliente')} <span style="color:#22c55e">$${Number(c.total).toLocaleString('es-AR')}</span>${c.ventana_abierta ? '' : ' <span style="color:#FFA726;font-size:11px">· fuera de ventana (necesita plantilla)</span>'}</div>
+              <div style="font-weight:700">${escapeHtml(c.cliente_nombre || c.telefono || 'cliente')} <span style="color:#22c55e">$${Number(c.total).toLocaleString('es-AR')}</span>${c.telefono ? (c.ventana_abierta ? '' : ' <span style="color:#FFA726;font-size:11px">· por plantilla</span>') : ' <span style="color:#f87171;font-size:11px">· sin teléfono</span>'}</div>
               <div style="font-size:12px;color:var(--fg-mute);white-space:pre-wrap;margin-top:4px">${escapeHtml(c.mensaje || '')}</div>
             </div>
           </label>
         </div>`).join('')}
       <button class="btn" data-corte-cobrar-enviar style="margin-top:12px">Enviar cobros seleccionados</button>
-      ${enVentana < cs.length ? `<div style="font-size:11px;color:#FFA726;margin-top:8px">${cs.length - enVentana} cliente(s) fuera de la ventana de 24h — esos necesitan una plantilla de Meta (los dejamos para después).</div>` : ''}
+      ${enVentana < cs.length ? `<div style="font-size:11px;color:var(--fg-mute);margin-top:8px">${cs.length - enVentana} cliente(s) fuera de la ventana de 24h → se les manda la plantilla aprobada (nombre + total + alias). Los que están en ventana reciben el desglose completo por texto.</div>` : ''}
     </div>`;
 }
 // ===== Board admin del corte — HÍBRIDO: pulso (KPIs + etapas) + tabla por CLIENTE =====
