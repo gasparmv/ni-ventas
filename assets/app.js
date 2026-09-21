@@ -3357,21 +3357,41 @@ function renderCorte() {
     const vacio = (txt) => cargando ? '' : `<div style="padding:26px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px">${txt} ✨</div>`;
     // NEYEN: agrupado por cliente (arma el paquete con todos los pedidos de una persona).
     if (isNeyenUser(STATE.user)) {
-      const grupos = {};
-      cola.forEach(p => { const k = p.telefono || ('id' + p.id); if (!grupos[k]) grupos[k] = { nombre: p.cliente_nombre, tel: p.telefono || '', items: [], entrega: '' }; grupos[k].items.push(p); if (p.entrega && !grupos[k].entrega) grupos[k].entrega = p.entrega; });
-      const gk = Object.keys(grupos);
+      const q = (STATE.corteEmbQuery || '').trim().toLowerCase();
+      const groupBy = (list) => {
+        const gr = {};
+        list.forEach(p => { const k = p.telefono || ('id' + p.id); if (!gr[k]) gr[k] = { nombre: p.cliente_nombre, tel: p.telefono || '', items: [], entrega: '' }; gr[k].items.push(p); if (p.entrega && !gr[k].entrega) gr[k].entrega = p.entrega; });
+        return Object.values(gr).filter(g => !q || String(g.nombre || '').toLowerCase().includes(q) || g.items.some(p => String(p.diseno_nombre || '').toLowerCase().includes(q) || String(p.medida_declarada || '').toLowerCase().includes(q)));
+      };
+      const paraEmbalar = groupBy(pedidos.filter(p => p.estado === 'cortado'));
+      const embalados = groupBy(pedidos.filter(p => p.estado === 'embalado'));
+      const totalCort = pedidos.filter(p => p.estado === 'cortado').length, totalEmb = pedidos.filter(p => p.estado === 'embalado').length;
+      const entregaBadge = (e) => e ? `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:${e === 'envio' ? '#f59e0b' : '#22c55e'};background:color-mix(in srgb, ${e === 'envio' ? '#f59e0b' : '#22c55e'} 16%, transparent)">${e === 'envio' ? '📦 Envío' : '🏠 Retira'}</span>` : '';
+      const cardHtml = (g, done) => `
+        <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
+          <div style="font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${done ? '<span style="color:#22c55e">✓</span> ' : ''}${escapeHtml(g.nombre || 'cliente')} <span style="color:var(--fg-mute);font-weight:400;font-size:12px">· ${g.items.length} pieza${g.items.length === 1 ? '' : 's'}</span>${entregaBadge(g.entrega)}</div>
+          ${g.items.map(p => `<div style="font-size:13px;color:var(--fg-mute);padding:2px 0">• ${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ' — ' + escapeHtml(p.medida_declarada) : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</div>`).join('')}
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+            ${done ? `<button class="btn ghost" data-corte-desembalar="${g.items.map(p => p.id).join(',')}" style="font-size:12px;padding:5px 11px">↩ Deshacer</button>` : `<button class="btn" data-corte-embalar-tel="${escapeHtml(g.tel)}" data-corte-entrega="${escapeHtml(g.entrega || 'retira')}">📦 Marcar paquete embalado</button>`}
+          </div>
+        </div>`;
+      const vacioBox = (txt) => cargando ? '' : `<div style="padding:20px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px;font-size:13px">${txt}</div>`;
       return `
-        <div style="padding:var(--s-4);max-width:760px">
+        <div style="padding:var(--s-4);max-width:1040px">
+          <style>@media(max-width:640px){.corte-emb-cols{grid-template-columns:1fr!important}}</style>
           <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — Para embalar</h1>
-          <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">${cola.length} pieza${cola.length === 1 ? '' : 's'} · ${gk.length} paquete${gk.length === 1 ? '' : 's'} (por cliente)${cargando ? ' · cargando…' : ''}</p>
-          ${gk.length ? gk.map(k => { const g = grupos[k]; return `
-            <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
-              <div style="font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${escapeHtml(g.nombre || 'cliente')} <span style="color:var(--fg-mute);font-weight:400;font-size:12px">· ${g.items.length} pieza${g.items.length === 1 ? '' : 's'}</span>${g.entrega ? `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:${g.entrega === 'envio' ? '#f59e0b' : '#22c55e'};background:color-mix(in srgb, ${g.entrega === 'envio' ? '#f59e0b' : '#22c55e'} 16%, transparent)">${g.entrega === 'envio' ? '📦 Envío' : '🏠 Retira'}</span>` : ''}</div>
-              ${g.items.map(p => `<div style="font-size:13px;color:var(--fg-mute);padding:2px 0">• ${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ' — ' + escapeHtml(p.medida_declarada) : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</div>`).join('')}
-              <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-                <button class="btn" data-corte-embalar-tel="${escapeHtml(g.tel)}" data-corte-entrega="${escapeHtml(g.entrega || 'retira')}">📦 Marcar paquete embalado</button>
-              </div>
-            </div>`; }).join('') : vacio('No hay nada para embalar')}
+          <p style="color:var(--fg-mute);font-size:13px;margin:0 0 12px">${totalCort} para embalar · ${totalEmb} ya embalado${cargando ? ' · cargando…' : ''}</p>
+          <input id="corte-emb-q" placeholder="Buscar cliente o diseño…" value="${escapeHtml(STATE.corteEmbQuery || '')}" style="width:100%;max-width:360px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:9px 12px;color:var(--fg);font-size:13px;margin-bottom:16px">
+          <div class="corte-emb-cols" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
+            <div>
+              <div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin-bottom:8px">📦 Para embalar <span style="color:var(--fg-mute)">${paraEmbalar.length}</span></div>
+              ${paraEmbalar.length ? paraEmbalar.map(g => cardHtml(g, false)).join('') : vacioBox(q ? 'Sin coincidencias' : 'No hay nada para embalar ✨')}
+            </div>
+            <div>
+              <div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin-bottom:8px">✅ Ya embalado <span style="color:var(--fg-mute)">${embalados.length}</span> <span style="text-transform:none;color:var(--fg-mute)">· revisá antes de despachar</span></div>
+              ${embalados.length ? embalados.map(g => cardHtml(g, true)).join('') : vacioBox(q ? 'Sin coincidencias' : 'Todavía nada embalado')}
+            </div>
+          </div>
         </div>`;
     }
     // ANÍBAL: descargar archivo + lista + "marcar todos como cortados" + cargar m²/placas.

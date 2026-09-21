@@ -3545,6 +3545,8 @@ Si te preguntan cuál les conviene o para qué sirve cada uno, explicáselo con 
 
 DINÁMICA SEMANAL (ubicate en el tiempo): el corte va por tandas SEMANALES — los pedidos entran toda la semana, se cortan el fin de semana, y el COBRO se hace el LUNES. Usá la fecha/hora de arriba para saber en qué parte de la semana estás. El LUNES es día de cobros: mucha gente que escribe ese día viene por su PAGO, no por un pedido nuevo. Leé el contexto antes de empujar un pedido.
 
+CORTE EN PROCESO (importante): si arriba ves una línea [CORTE EN PROCESO (interno): ...], el cliente YA tiene un corte de esta semana TOMADO y en producción — NO lo trates como pedido nuevo, NO le pidas de nuevo medida/nombre/foto de eso. Seguí esa directiva: si pregunta por el estado/cuándo/cómo lo recibe, respondé (ya cortado, se despacha el lunes, envío 24-72hs o retiro en Colegiales); tomá un pedido nuevo SOLO si claramente quiere sumar algo DISTINTO.
+
 COBRO / PAGO PENDIENTE (importante): si arriba ves una línea [COBRO PENDIENTE (interno): ...], ese cliente YA tiene un corte de esta semana SIN pagar y estamos esperando su pago. En ese caso NO le insistas con un pedido nuevo, NO le pidas medida/nombre/foto: el foco es cerrar el pago. Manejalo así, y NO frenes por esto:
 - Si dice que ya pagó / transfirió / "ahí va" / "ahí te mando": agradecé cálido y decile que quedamos a la espera del comprobante (o que si ya lo mandó, lo estamos viendo). es_corte=false.
 - Si pregunta cuánto es, por qué, o PIDE el detalle de lo que está pagando: poné enviar_detalle_cobro=true (el sistema le manda el desglose completo con los diseños). Podés acompañar con una línea corta.
@@ -3804,8 +3806,13 @@ async function processCortePilot(env) {
       // el bot NO empuja un pedido nuevo — el foco es el pago. Se lo pasamos como línea interna al modelo.
       let cobroCtx = '';
       try {
-        const cob = await env.DB.prepare("SELECT count(*) AS n, COALESCE(SUM(precio),0) AS total FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando'").bind(phone).first();
-        if (cob && cob.n) cobroCtx = '[COBRO PENDIENTE (interno): a este cliente YA le mandamos el cobro de su corte de esta semana, total $' + Number(cob.total).toLocaleString('es-AR') + ', y estamos esperando el pago/comprobante. NO le insistas con un pedido nuevo ni le pidas medida/nombre/foto: el foco es el pago. Seguí la sección COBRO / PAGO PENDIENTE del playbook.]\n\n';
+        // ¿El cliente YA tiene un corte de esta semana tomado/en proceso? (ya relevado/cortado/embalado, o con
+        // cobro en curso). Si sí, el bot NO lo trata como pedido nuevo ni le pide de nuevo los datos del diseño.
+        const act = await env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(precio),0) AS total, MAX(CASE WHEN estado_pago IN ('cobrando','parcial') THEN 1 ELSE 0 END) AS enCobro FROM corte_pedidos WHERE telefono=? AND (estado IN ('matriz_lista','cortado','embalado') OR estado_pago IN ('cobrando','parcial'))").bind(phone).first();
+        if (act && act.n) {
+          if (act.enCobro) cobroCtx = '[COBRO PENDIENTE (interno): a este cliente YA le mandamos el cobro de su corte de esta semana, total $' + Number(act.total).toLocaleString('es-AR') + ', y estamos esperando el pago/comprobante. NO le insistas con un pedido nuevo ni le pidas medida/nombre/foto: el foco es el pago. Seguí la sección COBRO / PAGO PENDIENTE del playbook.]\n\n';
+          else cobroCtx = '[CORTE EN PROCESO (interno): este cliente YA tiene un corte de esta semana TOMADO y en producción (' + act.n + ' diseño(s), ya cortado). Su pedido YA está — NO le pidas medida/nombre/foto de eso ni lo trates como pedido nuevo. Si pregunta por el estado / cuándo está / cómo lo recibe: su corte ya está cortado y se despacha el LUNES (envío 24-72hs a todo el país, o retiro en el taller de Colegiales). Si menciona un pago o manda un comprobante, decile que lo estás viendo. Tomá un pedido NUEVO SOLO si CLARAMENTE quiere sumar algo DISTINTO a lo ya pedido.]\n\n';
+        }
       } catch (_) {}
       const out = await corteLlm(env, cobroCtx + infoCliente + ctx.fullText, imgs);
       if (!out.ok) continue;
@@ -16590,6 +16597,26 @@ const handler = {
         else if (body.nuevo === false) pre = '[DATOS DEL CLIENTE (interno): Cliente registrado. Ya tenemos sus datos de envío.]\n\n';
         const out = await corteLlm(env, pre + text, imgs, body.ahora);
         return json({ ok: out.ok, imgs: imgs.length, data: out.data, error: out.error });
+      }
+      // POST /admin/corte/vigia-sweep → corre SOLO el vigía de pagos sobre TODOS los clientes en cobranza
+      // (estado_pago='cobrando'). Detecta comprobante (imagen/PDF), lo OCRea, marca pagado/parcial y avisa a Gaspar.
+      // NO corre el LLM ni responde conversacionalmente — sirve para procesar pagos con el bot apagado.
+      if (request.method === 'POST' && path === '/admin/corte/vigia-sweep') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let phones = [];
+        try { phones = ((await env.DB.prepare("SELECT DISTINCT telefono FROM corte_pedidos WHERE estado_pago='cobrando' AND telefono IS NOT NULL AND telefono!=''").all()).results || []).map(r => r.telefono); } catch (_) {}
+        const detalle = [];
+        for (const ph of phones) {
+          let hit = false, err = '';
+          try { hit = await corteVigiaPago(env, ph); } catch (e) { err = String((e && e.message) || e); }
+          let ep = '', nom = '';
+          try { const r = await env.DB.prepare("SELECT MAX(estado_pago) AS ep, MAX(cliente_nombre) AS nom FROM corte_pedidos WHERE telefono=?").bind(ph).first(); if (r) { ep = r.ep || ''; nom = r.nom || ''; } } catch (_) {}
+          detalle.push({ telefono: ph, nombre: nom, procesado: hit, estado_pago: ep, err });
+        }
+        const pagados = detalle.filter(o => o.estado_pago === 'pagado').length;
+        const parciales = detalle.filter(o => o.estado_pago === 'parcial').length;
+        const pendientes = detalle.filter(o => o.estado_pago === 'cobrando').length;
+        return json({ ok: true, revisados: phones.length, pagados, parciales, pendientes, detalle });
       }
       // GET /admin/corte/preguntas → preguntas que el bot no supo responder (base de conocimiento a curar). Admin.
       if (request.method === 'GET' && path === '/admin/corte/preguntas') {
