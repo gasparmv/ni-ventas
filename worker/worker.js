@@ -1860,7 +1860,78 @@ async function agendaRoute(env, request, url, path) {
     return json({ ok: true });
   }
 
+  if (request.method === 'POST' && path === '/admin/agenda/plantilla') {
+    if (!esAdmin) return json({ error: 'forbidden' }, 403);
+    return json(await agendaCrearPlantilla(env));
+  }
+  if (request.method === 'POST' && path === '/admin/agenda/test') {
+    if (!esAdmin) return json({ error: 'forbidden' }, 403);
+    const phones = {}; for (const p of (await env.DB.prepare("SELECT usuario, phone FROM agenda_phones").all()).results || []) phones[p.usuario] = p.phone;
+    const to = phones[me] || phones['gaspar'];
+    if (!to) return json({ error: 'sin teléfono' }, 400);
+    let out = { template: null, texto: null };
+    try { const r = await waSendTemplate(env, to, 'recordatorio_agenda', 'es_AR', ['Mañana 10:00 · Reunión de equipo (prueba) · En la oficina']); out.template = { ok: !!(r && r.ok), id: r && r.id }; } catch (e) { out.template = { error: String(e && e.message || e) }; }
+    if (!out.template || !out.template.ok) { try { const r2 = await waSendText(env, to, '📅 Recordatorio (prueba)\n\nMañana 10:00\nReunión de equipo\nEn la oficina'); out.texto = { ok: !!(r2 && r2.ok) }; } catch (e) { out.texto = { error: String(e && e.message || e) }; } }
+    return json({ ok: true, to, ...out });
+  }
+
   return json({ error: 'agenda: ruta no soportada' }, 404);
+}
+// Crea (una vez) la plantilla de recordatorio de agenda en Meta. UTILITY, 3 variables:
+// {{1}}=cuándo (ej "Mañana 10:00"), {{2}}=título, {{3}}=detalle/lugar. Reutilizable (una sola
+// plantilla estándar, NO adhoc por mensaje) → sin riesgo de proliferación.
+async function agendaCrearPlantilla(env) {
+  const _wa = getWaClient(env);
+  const components = [{ type: 'BODY', text: 'Recordatorio de la agenda del equipo de Neon Infinito.\n\n{{1}}\n\nPodés ver todos tus eventos y reuniones en el sistema. ¡Nos vemos!', example: { body_text: [['Mañana 10:00 · Reunión de equipo · En la oficina']] } }];
+  try {
+    const r = await fetch(_wa.templatesUrl(), { method: 'POST', headers: { ..._wa.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'recordatorio_agenda', category: 'UTILITY', allow_category_change: true, language: 'es_AR', components }) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return { ok: false, error: data?.error?.message || 'Meta rechazó la plantilla', raw: data };
+    return { ok: true, status: data.status || 'pending', id: data.id || '' };
+  } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+}
+// Motor de recordatorios de la agenda (cron */5). Gate kv 'agenda_recordatorios_on' (default OFF).
+// Reuniones → 1 día antes (18hs AR del día previo) + 1h antes. Tareas → la mañana (08hs AR) + 1h
+// antes si tienen hora. Dedup por (evento, ocurrencia, usuario, tipo). Plantilla → fallback a texto.
+async function maybeAgendaRecordatorios(env) {
+  try {
+    if ((await kvGet(env, 'agenda_recordatorios_on', '0')) !== '1') return;
+    await ensureAgendaSchema(env);
+    const nowAR = Date.now() - 3 * 3600 * 1000;
+    const hoy = new Date(nowAR).toISOString().slice(0, 10);
+    const fin = _agFmt(new Date(nowAR + 2 * 86400000));
+    const evs = (await env.DB.prepare("SELECT * FROM agenda_eventos").all()).results || [];
+    if (!evs.length) return;
+    const phones = {}; for (const p of (await env.DB.prepare("SELECT usuario, phone FROM agenda_phones").all()).results || []) phones[p.usuario] = p.phone;
+    const parts = {}; for (const p of (await env.DB.prepare("SELECT evento_id, usuario FROM agenda_participantes").all()).results || []) (parts[p.evento_id] = parts[p.evento_id] || []).push(p.usuario);
+    const sent = new Set(((await env.DB.prepare("SELECT evento_id, ocurrencia, usuario, tipo FROM agenda_recordatorios").all()).results || []).map(r => [r.evento_id, r.ocurrencia, r.usuario, r.tipo].join('|')));
+    const CATCH = 3 * 3600 * 1000;
+    for (const ev of evs) {
+      const who = parts[ev.id] || []; if (!who.length) continue;
+      for (const oc of _agOccurrences(ev, hoy, fin)) {
+        const hora = (ev.hora && /^\d{2}:\d{2}$/.test(ev.hora)) ? ev.hora : '';
+        const evMs = Date.parse(oc + 'T' + (hora || '09:00') + ':00Z');
+        const kinds = [];
+        if (ev.tipo === 'reunion') { kinds.push(['dia_antes', Date.parse(_agFmt(new Date(Date.parse(oc + 'T00:00:00Z') - 86400000)) + 'T18:00:00Z'), evMs]); if (hora) kinds.push(['hora_antes', evMs - 3600000, evMs]); }
+        else { kinds.push(['manana', Date.parse(oc + 'T08:00:00Z'), Date.parse(oc + 'T20:00:00Z')]); if (hora) kinds.push(['hora_antes', evMs - 3600000, evMs]); }
+        for (const [kind, remAt, upper] of kinds) {
+          if (!(remAt <= nowAR && (nowAR - remAt) < CATCH && nowAR < upper)) continue;
+          const cuando = kind === 'dia_antes' ? ('Mañana' + (hora ? ' ' + hora : '')) : kind === 'hora_antes' ? ('En 1 hora' + (hora ? ' (' + hora + ')' : '')) : ('Hoy' + (hora ? ' ' + hora : ''));
+          const extra = (ev.tipo === 'reunion' && ev.lugar) ? ('📍 ' + ev.lugar) : (String(ev.detalle || '').trim());
+          const linea = (cuando + ' · ' + ev.titulo + (extra ? ' · ' + extra : '')).replace(/\s*\n\s*/g, ' · ').slice(0, 320);
+          for (const u of who) {
+            const key = [ev.id, oc, u, kind].join('|');
+            if (sent.has(key)) continue;
+            const to = phones[u]; if (!to) continue;
+            let ok = false;
+            try { const r = await waSendTemplate(env, to, 'recordatorio_agenda', 'es_AR', [linea]); ok = !!(r && r.ok); } catch (_) {}
+            if (!ok) { try { const r2 = await waSendText(env, to, '📅 Recordatorio\n\n' + cuando + '\n' + ev.titulo + (extra ? '\n' + extra : '')); ok = !!(r2 && r2.ok); } catch (_) {} }
+            if (ok) { try { await env.DB.prepare("INSERT INTO agenda_recordatorios (evento_id, ocurrencia, usuario, tipo, sent_at) VALUES (?,?,?,?,?)").bind(ev.id, oc, u, kind, new Date().toISOString()).run(); sent.add(key); } catch (_) {} }
+          }
+        }
+      }
+    }
+  } catch (_) {}
 }
 
 // Índices de performance en las tablas calientes. SIN estos, cada poll de
@@ -16929,6 +17000,9 @@ const handler = {
     // Aviso de arranque del equipo (a Gaspar): ping en tiempo real cuando cada uno arranca a
     // trabajar + resumen a las 9 AR de quién arrancó y quién no. Dedup por día adentro. Corre cada */5.
     ctx.waitUntil(maybeAvisoArranque(env));
+    // Recordatorios de la Agenda del equipo (reuniones/tareas). Gate kv 'agenda_recordatorios_on'
+    // (default OFF hasta aprobar la plantilla). Dedup por (evento, ocurrencia, usuario, tipo) adentro.
+    ctx.waitUntil(maybeAgendaRecordatorios(env));
     // Reporte diario de ventas a las 21:00 AR (a Gaspar + su hermano). Dedup por día adentro.
     if (hAR === 21) ctx.waitUntil(maybeReporteDiario(env));
     if (hAR === 21) ctx.waitUntil(maybeReporteHoras(env));
