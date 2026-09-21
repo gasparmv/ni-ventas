@@ -3100,6 +3100,9 @@ function corteDetalleHtml(p) {
         <button class="btn ghost" data-corte-cerrar style="flex:0 0 auto">✕</button>
       </div>
       <div style="margin-top:10px">${foto}</div>
+      ${p.comprobante_key && (p.estado_pago === 'pagado' || p.estado_pago === 'parcial') ? (/\.pdf($|\?)/i.test(p.comprobante_key)
+        ? `<div style="margin-top:10px"><a href="${mediaUrl(p.comprobante_key)}" target="_blank" rel="noopener" style="font-size:13px;color:#22c55e;font-weight:600;text-decoration:none">🧾 Comprobante de pago (PDF)</a></div>`
+        : `<div style="margin-top:10px"><div style="font-size:12px;color:var(--fg-subtle);margin-bottom:5px">🧾 Comprobante de pago${p.estado_pago === 'parcial' ? ' (parcial)' : ''}</div><a href="${mediaUrl(p.comprobante_key)}" target="_blank" rel="noopener"><img src="${mediaUrl(p.comprobante_key)}" style="max-width:200px;max-height:260px;border-radius:8px;border:1px solid var(--border)" loading="lazy"></a></div>`) : ''}
       ${acciones}
       ${adminEstado}
     </div>`;
@@ -3297,6 +3300,10 @@ function corteHybridBoard(pedidos) {
         </span>
         ${corteChip(pm.l, pm.c)}
       </div>`;
+    const compKey = (g.items.find(p => p.comprobante_key && (p.estado_pago === 'pagado' || p.estado_pago === 'parcial')) || {}).comprobante_key || '';
+    const compHtml = compKey ? (/\.pdf($|\?)/i.test(compKey)
+      ? `<div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border)"><a href="${mediaUrl(compKey)}" target="_blank" rel="noopener" style="font-size:12px;color:${cortePagoMeta(g.pago).c};font-weight:600;text-decoration:none">🧾 Comprobante de pago (PDF)</a></div>`
+      : `<div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border)"><div style="font-size:11px;color:var(--fg-subtle);margin-bottom:5px">🧾 Comprobante de pago</div><a href="${mediaUrl(compKey)}" target="_blank" rel="noopener"><img src="${mediaUrl(compKey)}" style="max-width:150px;max-height:210px;border-radius:8px;border:1px solid var(--border)" loading="lazy"></a></div>`) : '';
     const detail = exp ? `<div style="background:rgba(0,0,0,.16);border-top:1px solid var(--border);padding:6px 12px 12px 30px">
         ${g.items.map(p => { const psm = CORTE_STAGE_META[p.estado] || CORTE_STAGE_META.pedido; return `<div data-corte-card="${p.id}" style="display:flex;gap:10px;align-items:center;padding:6px 0;font-size:12.5px;cursor:pointer;border-top:1px dashed var(--border)">
           <span style="flex:1;min-width:0;color:var(--fg-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(p.diseno_nombre || 'diseño')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</span>
@@ -3304,6 +3311,7 @@ function corteHybridBoard(pedidos) {
           <span style="color:${psm.c};font-size:11px;font-weight:600;flex:0 0 auto">${psm.l}</span>
           <span style="min-width:78px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto">${p.precio ? '$' + Number(p.precio).toLocaleString('es-AR') : '—'}</span>
         </div>`; }).join('')}
+        ${compHtml}
         ${g.tel && g.items.some(p => p.estado === 'cortado') ? `<button class="btn ghost" data-corte-embalar-tel="${escapeHtml(g.tel)}" data-corte-entrega="${escapeHtml(g.entrega || 'retira')}" style="margin-top:8px;font-size:11px;padding:4px 10px">📦 Embalar paquete (${g.entrega === 'envio' ? 'envío' : 'retira'})</button>` : ''}
       </div>` : '';
     return head + detail;
