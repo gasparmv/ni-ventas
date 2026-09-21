@@ -3121,7 +3121,7 @@ function renderCorte() {
     // NEYEN: agrupado por cliente (arma el paquete con todos los pedidos de una persona).
     if (isNeyenUser(STATE.user)) {
       const grupos = {};
-      cola.forEach(p => { const k = p.telefono || ('id' + p.id); if (!grupos[k]) grupos[k] = { nombre: p.cliente_nombre, tel: p.telefono || '', items: [] }; grupos[k].items.push(p); });
+      cola.forEach(p => { const k = p.telefono || ('id' + p.id); if (!grupos[k]) grupos[k] = { nombre: p.cliente_nombre, tel: p.telefono || '', items: [], entrega: '' }; grupos[k].items.push(p); if (p.entrega && !grupos[k].entrega) grupos[k].entrega = p.entrega; });
       const gk = Object.keys(grupos);
       return `
         <div style="padding:var(--s-4);max-width:760px">
@@ -3129,11 +3129,11 @@ function renderCorte() {
           <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">${cola.length} pieza${cola.length === 1 ? '' : 's'} · ${gk.length} paquete${gk.length === 1 ? '' : 's'} (por cliente)${cargando ? ' · cargando…' : ''}</p>
           ${gk.length ? gk.map(k => { const g = grupos[k]; return `
             <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
-              <div style="font-size:15px;font-weight:700;margin-bottom:8px">${escapeHtml(g.nombre || 'cliente')} <span style="color:var(--fg-mute);font-weight:400;font-size:12px">· ${g.items.length} pieza${g.items.length === 1 ? '' : 's'}</span></div>
+              <div style="font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${escapeHtml(g.nombre || 'cliente')} <span style="color:var(--fg-mute);font-weight:400;font-size:12px">· ${g.items.length} pieza${g.items.length === 1 ? '' : 's'}</span>${g.entrega ? `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:${g.entrega === 'envio' ? '#f59e0b' : '#22c55e'};background:color-mix(in srgb, ${g.entrega === 'envio' ? '#f59e0b' : '#22c55e'} 16%, transparent)">${g.entrega === 'envio' ? '📦 Envío' : '🏠 Retira'}</span>` : ''}</div>
               ${g.items.map(p => `<div style="font-size:13px;color:var(--fg-mute);padding:2px 0">• ${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ' — ' + escapeHtml(p.medida_declarada) : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</div>`).join('')}
               <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-                <label style="margin-right:16px;cursor:pointer"><input type="radio" name="entrega-${escapeHtml(k)}" value="retira" checked> Retira</label>
-                <label style="cursor:pointer"><input type="radio" name="entrega-${escapeHtml(k)}" value="envio"> Envío</label>
+                <label style="margin-right:16px;cursor:pointer"><input type="radio" name="entrega-${escapeHtml(k)}" value="retira" ${g.entrega === 'envio' ? '' : 'checked'}> Retira</label>
+                <label style="cursor:pointer"><input type="radio" name="entrega-${escapeHtml(k)}" value="envio" ${g.entrega === 'envio' ? 'checked' : ''}> Envío</label>
                 <button class="btn" data-corte-embalar-tel="${escapeHtml(g.tel)}" style="margin-top:10px;display:block">📦 Marcar paquete embalado</button>
               </div>
             </div>`; }).join('') : vacio('No hay nada para embalar')}
