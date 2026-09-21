@@ -2260,6 +2260,215 @@ function bindUserPicker() {
   };
   const u = document.getElementById('login-user'); if (u) u.focus();
 }
+// ===================== AGENDA DEL EQUIPO (frontend) =====================
+const agendaState = { weekStart: null, eventos: [], roster: [], yo: '', puedeVerTodo: false, filtro: 'todos', editId: null };
+const AG_DIAS = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+const AG_MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+const AGI = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg);margin-bottom:10px;font-family:inherit;font-size:13px';
+const AGL = 'display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em';
+function _agISO(d) { return d.toISOString().slice(0, 10); }
+function _agAdd(d, n) { return new Date(d.getTime() + n * 86400000); }
+function _agMonday(d) { const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); const wd = (x.getUTCDay() + 6) % 7; return _agAdd(x, -wd); }
+function agInitWeek() { if (!agendaState.weekStart) agendaState.weekStart = _agMonday(new Date()); }
+function _agNombre(slug) { const r = (agendaState.roster || []).find(x => x.slug === slug); return r ? r.nombre : slug; }
+function _agEsAdmin() { return !!agendaState.puedeVerTodo; }
+function agEditable(ev) { return !ev || _agEsAdmin() || ev.creado_por === agendaState.yo; }
+
+function renderAgenda() {
+  agInitWeek();
+  const mon = agendaState.weekStart, sun = _agAdd(mon, 6);
+  const label = `${mon.getUTCDate()} – ${sun.getUTCDate()} ${AG_MESES[sun.getUTCMonth()]}`;
+  const filtro = _agEsAdmin() ? `<select id="ag-filtro" style="width:auto;height:34px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);padding:0 8px;font-size:13px">
+      <option value="todos" ${agendaState.filtro === 'todos' ? 'selected' : ''}>Ver: todos</option>
+      <option value="mios" ${agendaState.filtro === 'mios' ? 'selected' : ''}>Solo míos</option>
+      ${(agendaState.roster || []).map(r => `<option value="${r.slug}" ${agendaState.filtro === r.slug ? 'selected' : ''}>${escapeHtml(r.nombre)}</option>`).join('')}
+    </select>` : '';
+  return `
+  <style>
+    .ag-seg{border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 14px;font-size:13px;cursor:pointer;background:transparent;color:var(--fg-subtle)}
+    .ag-seg.ag-on{background:rgba(143,212,222,.12);color:var(--accent-cyan);border-color:var(--accent-cyan)}
+    .ag-chip{border:1px solid var(--border);border-radius:999px;padding:4px 10px;font-size:12px;cursor:pointer;background:transparent;color:var(--fg-subtle)}
+    .ag-chip.ag-on{background:rgba(143,212,222,.12);color:var(--accent-cyan);border-color:var(--accent-cyan)}
+    .ag-ev:hover{filter:brightness(1.15)}
+  </style>
+  <div class="page-head" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+    <h1 style="margin:0">Agenda del equipo</h1>
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-icon" id="ag-prev" title="Semana anterior">‹</button>
+      <span style="font-size:13px;color:var(--fg-subtle);min-width:90px;text-align:center">${label}</span>
+      <button class="btn btn-ghost btn-icon" id="ag-next" title="Semana siguiente">›</button>
+      <button class="btn btn-ghost" id="ag-hoy">Hoy</button>
+      ${filtro}
+      <button class="btn btn-cyan" id="ag-nuevo">＋ Nuevo</button>
+    </div>
+  </div>
+  <div style="overflow-x:auto"><div id="agenda-grid" style="min-width:640px">${renderAgendaGridHtml()}</div></div>
+  <div style="display:flex;gap:16px;margin-top:10px;font-size:12px;color:var(--fg-mute);flex-wrap:wrap">
+    <span><span style="color:var(--accent-cyan)">●</span> reunión</span>
+    <span><span style="color:#a855f7">●</span> tarea</span>
+    <span>↻ se repite</span>
+  </div>
+  ${renderAgendaModalHtml()}`;
+}
+
+function renderAgendaGridHtml() {
+  agInitWeek();
+  const mon = agendaState.weekStart, f = agendaState.filtro, hoy = _agISO(new Date());
+  const cols = [];
+  for (let i = 0; i < 7; i++) {
+    const d = _agAdd(mon, i), iso = _agISO(d), isToday = iso === hoy;
+    let evs = agendaState.eventos.filter(e => e.fecha === iso);
+    if (f === 'mios') evs = evs.filter(e => e.participantes.includes(agendaState.yo) || e.creado_por === agendaState.yo);
+    else if (f && f !== 'todos') evs = evs.filter(e => e.participantes.includes(f));
+    const chips = evs.map(agEventChip).join('') || '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding-top:6px">—</div>';
+    cols.push(`<div style="background:var(--ink-100);border:1px solid ${isToday ? 'var(--accent-cyan)' : 'var(--border)'};border-radius:var(--r-sm);padding:7px;min-height:124px">
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--fg-subtle);margin-bottom:6px"><b style="color:var(--fg)">${AG_DIAS[i]}</b><span>${d.getUTCDate()}</span></div>${chips}</div>`);
+  }
+  return `<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px">${cols.join('')}</div>`;
+}
+
+function agEventChip(e) {
+  const reunion = e.tipo !== 'tarea';
+  const col = reunion ? 'var(--accent-cyan)' : '#a855f7';
+  const bg = reunion ? 'rgba(143,212,222,.10)' : 'rgba(168,85,247,.12)';
+  const rep = (e.recurrencia && e.recurrencia !== 'none') ? '↻ ' : '';
+  const meta = (e.hora || (reunion && e.participantes.length)) ? `<div style="font-size:10px;color:var(--fg-mute)">${e.hora ? e.hora + (e.hora_fin ? '–' + e.hora_fin : '') : ''}${(e.hora && reunion && e.participantes.length) ? ' · ' : ''}${reunion && e.participantes.length ? e.participantes.slice(0, 3).map(_agNombre).join(', ') : ''}</div>` : '';
+  const chk = (e.tipo === 'tarea') ? `<span data-ag-chk="${e.id}" data-ag-oc="${e.fecha}" title="Marcar hecho" style="cursor:pointer;margin-right:3px">${e.hecho ? '☑' : '☐'}</span>` : '';
+  return `<div class="ag-ev" data-ag-ev="${e.id}" data-ag-oc="${e.fecha}" style="border-left:3px solid ${col};background:${bg};border-radius:6px;padding:4px 6px;margin-bottom:5px;font-size:11.5px;line-height:1.25;cursor:pointer;${e.hecho ? 'opacity:.55' : ''}">${chk}${rep}<span style="${e.hecho ? 'text-decoration:line-through' : ''}">${escapeHtml(e.titulo)}</span>${meta}</div>`;
+}
+
+function renderAgendaModalHtml() {
+  const roster = agendaState.roster || [];
+  return `<div id="ag-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:flex-start;justify-content:center;padding:24px;overflow-y:auto">
+    <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan);border-radius:var(--r-md);max-width:460px;width:100%;padding:16px 18px;max-height:90vh;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0;font-size:16px;color:var(--accent-cyan)" id="ag-modal-title">Nuevo evento</h2>
+        <button class="btn btn-ghost btn-icon" id="ag-cerrar" aria-label="Cerrar">✕</button>
+      </div>
+      <label style="${AGL}">Tipo</label>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button type="button" class="ag-seg ag-on" data-ag-tipo="reunion">Reunión</button>
+        <button type="button" class="ag-seg" data-ag-tipo="tarea">Tarea</button>
+      </div>
+      <label style="${AGL}">Título</label>
+      <input id="ag-titulo" style="${AGI}" placeholder="Ej. Reunión de equipo">
+      <div style="display:flex;gap:10px">
+        <div style="flex:1"><label style="${AGL}">Fecha</label><input id="ag-fecha" type="date" style="${AGI}"></div>
+        <div style="flex:1" id="ag-hora-wrap"><label style="${AGL}">Hora</label><input id="ag-hora" type="time" style="${AGI}"></div>
+      </div>
+      <label style="${AGL}">Participantes</label>
+      <div id="ag-parts" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+        <button type="button" class="ag-chip" data-ag-all>Todos</button>
+        ${roster.map(r => `<button type="button" class="ag-chip" data-ag-p="${r.slug}">${escapeHtml(r.nombre)}</button>`).join('')}
+      </div>
+      <div style="display:flex;gap:10px">
+        <div style="flex:1"><label style="${AGL}">Se repite</label>
+          <select id="ag-rec" style="${AGI}"><option value="none">No se repite</option><option value="semanal">Cada semana</option><option value="habil">Cada día hábil</option></select>
+        </div>
+        <div style="flex:1" id="ag-lugar-wrap"><label style="${AGL}">Lugar / link</label><input id="ag-lugar" style="${AGI}" placeholder="Oficina o link"></div>
+      </div>
+      <label style="${AGL}">Detalle</label>
+      <textarea id="ag-detalle" rows="2" style="${AGI};resize:vertical"></textarea>
+      <div style="font-size:11px;color:var(--fg-mute);margin-bottom:12px">Los avisos por WhatsApp a los participantes se activan en la fase 2.</div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <button class="btn btn-ghost" id="ag-borrar" style="display:none;color:#FF5566">🗑 Borrar</button>
+        <div style="display:flex;gap:8px;margin-left:auto">
+          <button class="btn btn-ghost" id="ag-cancelar">Cancelar</button>
+          <button class="btn btn-cyan" id="ag-guardar">Guardar</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function agSetTipo(tipo) {
+  document.querySelectorAll('.ag-seg').forEach(s => s.classList.toggle('ag-on', s.dataset.agTipo === tipo));
+  const reunion = tipo === 'reunion';
+  const hw = document.getElementById('ag-hora-wrap'), lw = document.getElementById('ag-lugar-wrap');
+  if (hw) hw.style.visibility = reunion ? 'visible' : 'hidden';
+  if (lw) lw.style.visibility = reunion ? 'visible' : 'hidden';
+}
+function agOpenModal(ev) {
+  agendaState.editId = ev ? ev.id : null;
+  const $ = id => document.getElementById(id);
+  const editable = agEditable(ev);
+  $('ag-modal-title').textContent = ev ? (editable ? 'Editar evento' : 'Ver evento') : 'Nuevo evento';
+  agSetTipo(ev ? ev.tipo : 'reunion');
+  $('ag-titulo').value = ev ? ev.titulo : '';
+  $('ag-fecha').value = ev ? ev.fecha : _agISO(new Date());
+  $('ag-hora').value = ev ? (ev.hora || '') : '';
+  $('ag-lugar').value = ev ? (ev.lugar || '') : '';
+  $('ag-detalle').value = ev ? (ev.detalle || '') : '';
+  $('ag-rec').value = ev ? (ev.recurrencia || 'none') : 'none';
+  const sel = new Set(ev ? ev.participantes : [agendaState.yo]);
+  document.querySelectorAll('[data-ag-p]').forEach(c => c.classList.toggle('ag-on', sel.has(c.dataset.agP)));
+  ['ag-titulo', 'ag-fecha', 'ag-hora', 'ag-lugar', 'ag-detalle', 'ag-rec'].forEach(id => { const el = $(id); if (el) el.disabled = !editable; });
+  document.querySelectorAll('.ag-seg,[data-ag-p],[data-ag-all]').forEach(el => el.style.pointerEvents = editable ? '' : 'none');
+  $('ag-guardar').style.display = editable ? '' : 'none';
+  $('ag-borrar').style.display = (ev && editable) ? '' : 'none';
+  $('ag-modal').style.display = 'flex';
+}
+function agCloseModal() { const m = document.getElementById('ag-modal'); if (m) m.style.display = 'none'; }
+async function agGuardar() {
+  const $ = id => document.getElementById(id);
+  const titulo = $('ag-titulo').value.trim();
+  if (!titulo) { toast('Falta el título'); return; }
+  const tipo = document.querySelector('.ag-seg.ag-on') ? document.querySelector('.ag-seg.ag-on').dataset.agTipo : 'reunion';
+  const participantes = Array.from(document.querySelectorAll('[data-ag-p].ag-on')).map(c => c.dataset.agP);
+  const body = { tipo, titulo, fecha: $('ag-fecha').value, hora: tipo === 'reunion' ? $('ag-hora').value : '', lugar: tipo === 'reunion' ? $('ag-lugar').value : '', detalle: $('ag-detalle').value, recurrencia: $('ag-rec').value, participantes };
+  const editId = agendaState.editId;
+  try {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/agenda${editId ? '/' + editId : ''}`, { method: editId ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(j.error || 'No se pudo guardar'); return; }
+    agCloseModal(); agendaFetch();
+  } catch (e) { toast('Error de red'); }
+}
+async function agBorrar() {
+  if (!agendaState.editId) return;
+  const ok = await showConfirm('¿Borrar este evento? Si es recurrente, se borra toda la serie.', { title: 'Borrar evento', confirmLabel: 'Borrar', cancelLabel: 'Cancelar', variant: 'warn' }).catch(() => false);
+  if (!ok) return;
+  try { const r = await fetch(`${CONFIG.trackerUrl}/admin/agenda/${agendaState.editId}`, { method: 'DELETE', headers: authHeaders() }); if (!r.ok) { const j = await r.json().catch(() => ({})); toast(j.error || 'No se pudo borrar'); return; } } catch (e) { toast('Error de red'); return; }
+  agCloseModal(); agendaFetch();
+}
+async function agToggleHecho(id, oc, done) {
+  try { await fetch(`${CONFIG.trackerUrl}/admin/agenda/${id}/hecho`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ ocurrencia: oc, done }) }); } catch (e) {}
+  agendaFetch();
+}
+function agendaBindHandlers() {
+  const $ = id => document.getElementById(id);
+  if ($('ag-prev')) $('ag-prev').onclick = () => { agendaState.weekStart = _agAdd(agendaState.weekStart, -7); agendaFetch(); };
+  if ($('ag-next')) $('ag-next').onclick = () => { agendaState.weekStart = _agAdd(agendaState.weekStart, 7); agendaFetch(); };
+  if ($('ag-hoy')) $('ag-hoy').onclick = () => { agendaState.weekStart = _agMonday(new Date()); agendaFetch(); };
+  if ($('ag-filtro')) $('ag-filtro').onchange = e => { agendaState.filtro = e.target.value; agendaPaint(); };
+  if ($('ag-nuevo')) $('ag-nuevo').onclick = () => agOpenModal(null);
+  if ($('ag-cerrar')) $('ag-cerrar').onclick = agCloseModal;
+  if ($('ag-cancelar')) $('ag-cancelar').onclick = agCloseModal;
+  if ($('ag-guardar')) $('ag-guardar').onclick = agGuardar;
+  if ($('ag-borrar')) $('ag-borrar').onclick = agBorrar;
+  if ($('ag-modal')) $('ag-modal').onclick = e => { if (e.target === $('ag-modal')) agCloseModal(); };
+  document.querySelectorAll('.ag-seg').forEach(s => s.onclick = () => agSetTipo(s.dataset.agTipo));
+  document.querySelectorAll('[data-ag-p]').forEach(c => c.onclick = () => c.classList.toggle('ag-on'));
+  document.querySelectorAll('[data-ag-all]').forEach(a => a.onclick = () => document.querySelectorAll('[data-ag-p]').forEach(c => c.classList.add('ag-on')));
+  agBindGrid();
+}
+function agBindGrid() {
+  document.querySelectorAll('[data-ag-chk]').forEach(c => c.onclick = e => { e.stopPropagation(); agToggleHecho(+c.dataset.agChk, c.dataset.agOc, c.textContent.trim() === '☐'); });
+  document.querySelectorAll('[data-ag-ev]').forEach(el => el.onclick = () => { const id = +el.dataset.agEv, oc = el.dataset.agOc; const ev = agendaState.eventos.find(x => x.id === id && x.fecha === oc) || agendaState.eventos.find(x => x.id === id); if (ev) agOpenModal(ev); });
+}
+function agendaPaint() { const m = document.getElementById('main'); if (m) { m.innerHTML = renderAgenda(); agendaBindHandlers(); } }
+async function agendaFetch() {
+  agInitWeek();
+  const desde = _agISO(agendaState.weekStart), hasta = _agISO(_agAdd(agendaState.weekStart, 6));
+  try {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/agenda?desde=${desde}&hasta=${hasta}`, { headers: authHeaders() });
+    const j = await r.json();
+    if (j && j.ok) { agendaState.eventos = j.eventos || []; agendaState.roster = j.roster || []; agendaState.yo = j.yo || ''; agendaState.puedeVerTodo = !!j.puedeVerTodo; }
+  } catch (e) {}
+  if (STATE.view === 'agenda') agendaPaint();
+}
+function bindAgenda() { agendaBindHandlers(); agendaFetch(); }
+
 function render() {
   if (!STATE.user) {
     document.getElementById('app').innerHTML = renderUserPicker();
@@ -2268,13 +2477,13 @@ function render() {
   }
   // Diseñador queda confinado a Cotización; Abril (cursos) al Chat WA, aunque
   // la URL o el state digan otra cosa.
-  if (isCursosOnly() && STATE.view !== 'chat') {
+  if (isCursosOnly() && !['chat', 'agenda'].includes(STATE.view)) {
     STATE.view = 'chat';
     if (location.hash !== '#chat') location.hash = 'chat';
-  } else if (isProduccionOnly() && STATE.view !== 'corte') {
+  } else if (isProduccionOnly() && !['corte', 'agenda'].includes(STATE.view)) {
     STATE.view = 'corte';
     if (location.hash !== '#corte') location.hash = 'corte';
-  } else if (isDisenadorOnly() && !['cotizacion', 'corte'].includes(STATE.view)) {
+  } else if (isDisenadorOnly() && !['cotizacion', 'corte', 'agenda'].includes(STATE.view)) {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
@@ -2286,7 +2495,7 @@ function render() {
   // Nadia (2da vendedora): set reducido por ahora. Views permitidas: dashboard (solo
   // su panel "Tu sueldo"), pedidos, presupuestos, cotizacion, chat. Si cae en otra
   // (seguimientos/actividad/etc. por hash directo), al dashboard.
-  if (isSecundario(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas'].includes(STATE.view)) {
+  if (isSecundario(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas','agenda'].includes(STATE.view)) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
@@ -2316,6 +2525,7 @@ function render() {
     else if (v === 'insights')     document.getElementById('main').innerHTML = renderInsights();
     else if (v === 'automatizaciones') document.getElementById('main').innerHTML = renderAutomatizaciones();
     else if (v === 'funnel-ads')   document.getElementById('main').innerHTML = renderFunnelAds();
+    else if (v === 'agenda')       document.getElementById('main').innerHTML = renderAgenda();
     else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
   }
@@ -2346,6 +2556,7 @@ function render() {
   if (STATE.view === 'insights') bindInsights();
   if (STATE.view === 'automatizaciones') bindAutomatizaciones();
   if (STATE.view === 'funnel-ads') bindFunnelAds();
+  if (STATE.view === 'agenda') bindAgenda();
   if (STATE.view === 'admin') bindAdmin();
   // Sincronizar classes mobile del chat (chat-mobile-list / chat-mobile-conv)
   // en el .app raíz. Solo el CSS bajo el media query mobile las usa.
@@ -3416,19 +3627,23 @@ function renderShell() {
       </div>
       <nav class="nav">
         ${isCursosOnly() ? `
-          <button class="nav-item active" data-view="chat"><span class="icon">✉</span> Chat WA
+          <button class="nav-item ${v==='chat'?'active':''}" data-view="chat"><span class="icon">✉</span> Chat WA
             <span class="badge cyan" data-chat-badge style="display:${chatState.totalUnread ? '' : 'none'}">${chatState.totalUnread > 99 ? '99+' : (chatState.totalUnread || '')}</span>
           </button>
+          <button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>
         ` : isProduccionOnly() ? `
-          <button class="nav-item active" data-view="corte"><span class="icon">✂</span> Corte</button>
+          <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
+          <button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>
         ` : isDisenadorOnly() ? `
           <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
+          <button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>
         ` : `
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
+        <button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>
         ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isSecundario(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
         ${!isSecundario(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
