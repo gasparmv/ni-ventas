@@ -9996,6 +9996,20 @@ REGLAS DURAS (no negociables):
 Devolvé SOLO un objeto JSON (sin markdown, sin texto extra) con EXACTAMENTE este shape (draft = los mensajes separados por doble salto de línea):
 {"vertical":"carteles|cursos|supernova|ambiguo","intent":"string corto","draft":"mensaje 1\\n\\nmensaje 2\\n\\nmensaje 3","confidence":0.0,"sources_used":["secciones del playbook usadas"],"missing_info":["datos que faltan y NO inventaste, ej: precio, plazo, garantía"],"should_escalate":false,"escalation_reason":""}`;
 
+// Reglas del copiloto para CLIENTES DEL SERVICIO DE CORTE (alumnos). Se apoya en la base de conocimiento /
+// playbook del corte (el mismo que usa el bot), no en el de ventas de carteles/cursos.
+const SUGGEST_CORTE_RULES = `Sos parte del equipo de Neon Infinito y atendés a los ALUMNOS del SERVICIO DE CORTE: cortamos bases acrílicas transparentes para que armen sus carteles, y también les vendemos cable. Te paso una conversación real de WhatsApp con un alumno y la BASE DE CONOCIMIENTO / PLAYBOOK del servicio de corte. Tu tarea: sugerir el PRÓXIMO mensaje para mandarle, listo para enviar.
+
+REGLAS DURAS (no negociables):
+1. Respondé SOLO con lo que está EXPLÍCITO en el chat o en la base de conocimiento del corte. NUNCA inventes ni afirmes precios, plazos, medios de pago, condiciones, ni el estado de un pedido. Si no lo sabés con certeza, no lo afirmes: decí que lo chequeás y confirmás, ponelo en "missing_info" y bajá la confianza.
+2. Es el SERVICIO DE CORTE, NO ventas de carteles ni cursos: no ofrezcas cotización de carteles, renders, seña, ni charla de escalar ventas. Si el alumno quiere un CARTEL completo (no un corte), o es algo de la comunidad/curso, un reclamo/postventa o algo random → poné should_escalate=true (lo toma una persona).
+3. Situate en la DINÁMICA SEMANAL (los pedidos entran toda la semana, se corta el finde, se cobra el lunes) y en el contexto interno que te paso: si hay un COBRO PENDIENTE o un CORTE EN PROCESO, seguí esa directiva (no empujes un pedido nuevo cuando el foco es el pago; si pregunta por el estado, respondé lo que dice el contexto).
+4. TONO — WhatsApp argentino informal: SIN signos de apertura (NUNCA ¿ ni ¡), sin punto final, emojis al mínimo (0 o 1), voseo, frases cortas, humano. Si no sabés el nombre, arrancá con "Buenas".
+5. FORMATO — varios mensajes CORTOS (entre 1 y 4), uno por idea, separados por DOBLE salto de línea (una línea en blanco entre cada uno).
+
+Devolvé SOLO un objeto JSON (sin markdown, sin texto extra) con este shape (draft = los mensajes separados por doble salto de línea):
+{"vertical":"corte","intent":"string corto","draft":"mensaje 1\\n\\nmensaje 2","confidence":0.0,"sources_used":["parte del playbook del corte usada"],"missing_info":["datos que faltan y NO inventaste"],"should_escalate":false,"escalation_reason":""}`;
+
 // Genera una respuesta sugerida para el último mensaje de un chat. NO la envía.
 // opts.dry=true devuelve el contexto armado sin llamar a Claude (para test/inspección).
 async function suggestReply(env, phone, opts = {}) {
@@ -10003,48 +10017,76 @@ async function suggestReply(env, phone, opts = {}) {
   const ctx = await buildChatContext(env, phone, 40);
   if (!ctx) return { ok: false, error: 'sin mensajes para este phone' };
 
-  const conv = await env.DB.prepare(
-    `SELECT vertical, product_type, customer_profile, objections, what_worked, next_action
-     FROM wa_conversations WHERE phone = ?`
-  ).bind(phone).first();
+  // ¿Cliente del SERVICIO DE CORTE? (está en corte_alumnos o su chat está en la bandeja 'corte').
+  // Si sí, el copiloto se apoya en la base de conocimiento / playbook del corte, NO en el de ventas.
+  let esCorte = false;
+  try { esCorte = !!(await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first()); } catch (_) {}
+  if (!esCorte) { try { const ci = await env.DB.prepare("SELECT inbox FROM wa_chats_summary WHERE phone=?").bind(phone).first(); if (ci && ci.inbox === 'corte') esCorte = true; } catch (_) {} }
 
-  // Ejemplos ganadores: qué cerró en ventas concretadas del mismo producto.
-  let examples = [];
-  try {
-    const exr = conv?.product_type
-      ? await env.DB.prepare(`SELECT what_worked FROM wa_conversations WHERE outcome='sold' AND what_worked != '' AND product_type = ? ORDER BY last_analyzed_at DESC LIMIT 3`).bind(conv.product_type).all()
-      : await env.DB.prepare(`SELECT what_worked FROM wa_conversations WHERE outcome='sold' AND what_worked != '' ORDER BY last_analyzed_at DESC LIMIT 3`).all();
-    examples = (exr.results || []).map(e => e.what_worked).filter(Boolean);
-  } catch (_) {}
+  let conv = null, examples = [], frameworkText = '', frameworkVersion = null, system, userContent;
 
-  const fw = await getActiveFramework(env);
-  const frameworkText = fw?.content || '';
-  const frameworkVersion = fw?.version || null;
+  if (esCorte) {
+    // Base de conocimiento del corte = el system del bot (playbook operativo) + el conocimiento curado (kv corte_knowledge).
+    let kb = CORTE_LLM_SYSTEM;
+    try { const extra = String(await kvGet(env, 'corte_knowledge', '') || '').trim(); if (extra) kb += '\n\nCONOCIMIENTO ADICIONAL (curado):\n' + extra; } catch (_) {}
+    frameworkText = kb; frameworkVersion = 'corte-kb';
+    // Contexto operativo del alumno (cobro pendiente / corte en proceso), mismo criterio que el bot de corte.
+    let estadoCtx = '';
+    try {
+      const act = await env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(precio),0) AS total, MAX(CASE WHEN estado_pago IN ('cobrando','parcial') THEN 1 ELSE 0 END) AS enCobro FROM corte_pedidos WHERE telefono=? AND (estado IN ('matriz_lista','cortado','embalado') OR estado_pago IN ('cobrando','parcial'))").bind(phone).first();
+      if (act && act.n) {
+        if (act.enCobro) estadoCtx = '[COBRO PENDIENTE (interno): a este alumno YA le mandamos el cobro de su corte de esta semana, total $' + Number(act.total).toLocaleString('es-AR') + ', y esperamos el pago/comprobante. El foco es el pago, no un pedido nuevo.]\n\n';
+        else estadoCtx = '[CORTE EN PROCESO (interno): este alumno YA tiene un corte de esta semana tomado y en producción (' + act.n + ' diseño(s)). Su pedido YA está; si pregunta por el estado / cuándo lo recibe: se despacha el LUNES (envío 24-72hs o retiro en el taller de Colegiales).]\n\n';
+      }
+    } catch (_) {}
+    userContent = estadoCtx + ctx.fullText + '\n\nSugerí el PRÓXIMO mensaje para mandarle al alumno ahora. Devolvé SOLO el JSON.';
+    system = [
+      { type: 'text', text: SUGGEST_CORTE_RULES },
+      { type: 'text', text: '## BASE DE CONOCIMIENTO / PLAYBOOK DEL SERVICIO DE CORTE\n\n' + kb + '\n\n(NOTA: las instrucciones de salida en formato JSON del bot automático que aparecen arriba NO aplican al copiloto — seguí el shape de las REGLAS DURAS.)', cache_control: { type: 'ephemeral' } }
+    ];
+  } else {
+    conv = await env.DB.prepare(
+      `SELECT vertical, product_type, customer_profile, objections, what_worked, next_action
+       FROM wa_conversations WHERE phone = ?`
+    ).bind(phone).first();
 
-  let userContent = ctx.fullText + '\n\n';
-  if (conv) {
-    userContent += `## ANÁLISIS PREVIO DEL CLIENTE\n`;
-    if (conv.vertical) userContent += `Vertical: ${conv.vertical}\n`;
-    if (conv.customer_profile) userContent += `Perfil: ${conv.customer_profile}\n`;
-    if (conv.objections) userContent += `Objeciones detectadas: ${conv.objections}\n`;
-    if (conv.next_action) userContent += `Próxima acción (del análisis): ${conv.next_action}\n`;
-    userContent += '\n';
+    // Ejemplos ganadores: qué cerró en ventas concretadas del mismo producto.
+    try {
+      const exr = conv?.product_type
+        ? await env.DB.prepare(`SELECT what_worked FROM wa_conversations WHERE outcome='sold' AND what_worked != '' AND product_type = ? ORDER BY last_analyzed_at DESC LIMIT 3`).bind(conv.product_type).all()
+        : await env.DB.prepare(`SELECT what_worked FROM wa_conversations WHERE outcome='sold' AND what_worked != '' ORDER BY last_analyzed_at DESC LIMIT 3`).all();
+      examples = (exr.results || []).map(e => e.what_worked).filter(Boolean);
+    } catch (_) {}
+
+    const fw = await getActiveFramework(env);
+    frameworkText = fw?.content || '';
+    frameworkVersion = fw?.version || null;
+
+    userContent = ctx.fullText + '\n\n';
+    if (conv) {
+      userContent += `## ANÁLISIS PREVIO DEL CLIENTE\n`;
+      if (conv.vertical) userContent += `Vertical: ${conv.vertical}\n`;
+      if (conv.customer_profile) userContent += `Perfil: ${conv.customer_profile}\n`;
+      if (conv.objections) userContent += `Objeciones detectadas: ${conv.objections}\n`;
+      if (conv.next_action) userContent += `Próxima acción (del análisis): ${conv.next_action}\n`;
+      userContent += '\n';
+    }
+    if (examples.length) {
+      userContent += `## QUÉ FUNCIONÓ EN VENTAS CERRADAS PARECIDAS (referencia, no copiar literal)\n`;
+      examples.forEach((e, i) => { userContent += `${i + 1}. ${e}\n`; });
+      userContent += '\n';
+    }
+    userContent += `Sugerí el PRÓXIMO mensaje para mandarle al cliente ahora. Devolvé SOLO el JSON.`;
   }
-  if (examples.length) {
-    userContent += `## QUÉ FUNCIONÓ EN VENTAS CERRADAS PARECIDAS (referencia, no copiar literal)\n`;
-    examples.forEach((e, i) => { userContent += `${i + 1}. ${e}\n`; });
-    userContent += '\n';
-  }
-  userContent += `Sugerí el PRÓXIMO mensaje para mandarle al cliente ahora. Devolvé SOLO el JSON.`;
 
   if (opts.dry) {
-    return { ok: true, dry: true, framework_version: frameworkVersion, framework_chars: frameworkText.length,
+    return { ok: true, dry: true, corte: esCorte, framework_version: frameworkVersion, framework_chars: frameworkText.length,
              examples: examples.length, has_analysis: !!conv, user_chars: userContent.length,
              user_preview: userContent.slice(0, 1400) };
   }
   if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'ANTHROPIC_API_KEY no configurada' };
 
-  const system = [
+  if (!esCorte) system = [
     { type: 'text', text: SUGGEST_SYSTEM_RULES },
     { type: 'text', text: '## PLAYBOOK DE VENTAS\n\n' + frameworkText, cache_control: { type: 'ephemeral' } }
   ];
