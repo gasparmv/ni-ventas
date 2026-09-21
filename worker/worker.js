@@ -3655,10 +3655,12 @@ async function corteVigiaPago(env, phone) {
   if (total > 0 && monto >= total * 0.99) {
     try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pagado', comprobante_key=?, updated_at=? WHERE telefono=? AND estado_pago='cobrando'").bind(img.r2Key, nowIso, phone).run(); } catch (_) {}
     try { await corteSend(env, phone, 'recibido, gracias! tu corte queda confirmado'); } catch (_) {}
-    // Espejo al Excel 2026 v4: marca "pagado" en la col I de Venta_Insumos (gate kv corte_sheet_pago_on, default ON).
+    // Espejo al Excel 2026 v4: marca "pagado" en la col I de Venta_Insumos + la CAJA (cuenta que recibió) en
+    // la col R si el comprobante la muestra (gate kv corte_sheet_pago_on, default ON).
     let sheetMsg = '';
     if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') {
-      try { const sr = await corteMarcarPagadoSheet(env, cobr.nombre, total); sheetMsg = sr.ok ? ' · planilla: ' + sr.marcadas + ' fila(s) → pagado' : ' · planilla NO marcada (' + sr.error + ')'; } catch (_) { sheetMsg = ' · planilla error'; }
+      const caja = corteCajaFromProof(proof);
+      try { const sr = await corteMarcarPagadoSheet(env, cobr.nombre, total, caja); sheetMsg = sr.ok ? ' · planilla: ' + sr.marcadas + ' fila(s) → pagado' + (sr.caja ? ' (caja ' + sr.caja + ')' : ' (sin caja visible)') : ' · planilla NO marcada (' + sr.error + ')'; } catch (_) { sheetMsg = ' · planilla error'; }
     }
     try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' pagó $' + monto.toLocaleString('es-AR') + ' (total $' + total.toLocaleString('es-AR') + '). Lo marqué PAGADO.' + sheetMsg); } catch (_) {}
   } else {
@@ -3760,10 +3762,27 @@ async function sheetsAccessToken(env) {
     return token;
   } catch (_) { return null; }
 }
+// Deduce la CAJA (cuenta que recibió) desde el comprobante OCReado. Las 4 cajas tienen nombres propios
+// DISTINTOS (Melina/Gaspar/Favio/Bruno) → matcheo por el nombre en titular_destino. Si no aparece ninguno
+// con claridad → '' (no se pone caja; regla de Gaspar: "si no se ve, no pongas ninguna"). Devuelve el casing
+// de la planilla. OJO: el campo 'cuenta' del OCR mapea CUALQUIER Mercado Pago a mp_gaspar, así que NO es
+// confiable para distinguir cajas — solo uso bna_bruno (específico) como respaldo.
+function corteCajaFromProof(proof) {
+  if (!proof) return '';
+  const t = String(proof.titular_destino || '').toLowerCase();
+  if (/\bmelina\b/.test(t)) return 'Melina';
+  if (/\bfav?io\b|\bfabio\b/.test(t)) return 'Favio';
+  if (/\bbruno\b/.test(t)) return 'Bruno';
+  if (/\bgaspar\b/.test(t)) return 'Gaspar';
+  if (String(proof.cuenta || '') === 'bna_bruno') return 'Bruno';
+  return '';
+}
 // Marca "pagado" en la col I (Pago) de Venta_Insumos para las filas PENDIENTES del cliente, verificando
 // que la suma de precios (col J) coincida con el total esperado (±500) para no marcar filas equivocadas.
-// Match del cliente por col C (case-insensitive, espacios colapsados). Devuelve {ok,marcadas} o {error}.
-async function corteMarcarPagadoSheet(env, cliente, totalEsperado) {
+// Si `caja` viene (Melina/Gaspar/Favio/Bruno), también la escribe en la col R (Caja) de esas mismas filas;
+// si viene '' NO toca la col R (regla: sin caja visible, no se pone nada). Match del cliente por col C
+// (case-insensitive, espacios colapsados). Devuelve {ok,marcadas,caja} o {error}.
+async function corteMarcarPagadoSheet(env, cliente, totalEsperado, caja) {
   if (!cliente || !(totalEsperado > 0)) return { error: 'faltan datos' };
   const token = await sheetsAccessToken(env);
   if (!token) return { error: 'sin token sheets' };
@@ -3787,12 +3806,14 @@ async function corteMarcarPagadoSheet(env, cliente, totalEsperado) {
   }
   if (!rowIdx.length) return { error: 'sin filas pendientes que matcheen' };
   if (Math.abs(total - totalEsperado) > 500) return { error: `total no coincide (planilla $${total} vs esperado $${totalEsperado})` };
-  const data = rowIdx.map(ri => ({ range: `Venta_Insumos!I${ri}`, values: [['pagado']] }));
+  const cajaOk = ['Melina', 'Gaspar', 'Favio', 'Bruno'].includes(caja) ? caja : '';
+  const data = [];
+  rowIdx.forEach(ri => { data.push({ range: `Venta_Insumos!I${ri}`, values: [['pagado']] }); if (cajaOk) data.push({ range: `Venta_Insumos!R${ri}`, values: [[cajaOk]] }); });
   try {
     const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values:batchUpdate`, { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ valueInputOption: 'RAW', data }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
-    return { ok: true, marcadas: rowIdx.length };
+    return { ok: true, marcadas: rowIdx.length, caja: cajaOk };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 function corteIsoSemana(d) {
@@ -16690,6 +16711,15 @@ const handler = {
         const pendientes = detalle.filter(o => o.estado_pago === 'cobrando').length;
         return json({ ok: true, revisados: phones.length, pagados, parciales, pendientes, detalle });
       }
+      // POST /admin/corte/ocr-test {key} → corre analyzePaymentProof sobre una key R2 y devuelve el JSON crudo. Admin.
+      if (request.method === 'POST' && path === '/admin/corte/ocr-test') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body = {}; try { body = await request.json(); } catch (_) {}
+        const key = String(body.key || '');
+        if (!key) return json({ error: 'falta key' }, 400);
+        const out = await analyzePaymentProof(env, key, /\.pdf$/i.test(key) ? 'application/pdf' : '');
+        return json({ ok: true, key, proof: out });
+      }
       // GET /admin/corte/sheet-test → confirma identidad + acceso de la SA del worker a Venta_Insumos (sin escribir).
       if (request.method === 'GET' && path === '/admin/corte/sheet-test') {
         if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
@@ -16705,7 +16735,7 @@ const handler = {
       if (request.method === 'POST' && path === '/admin/corte/sheet-marcar') {
         if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
         let body = {}; try { body = await request.json(); } catch (_) {}
-        const res = await corteMarcarPagadoSheet(env, String(body.cliente || ''), Number(body.total) || 0);
+        const res = await corteMarcarPagadoSheet(env, String(body.cliente || ''), Number(body.total) || 0, String(body.caja || ''));
         return json(res);
       }
       // GET /admin/corte/preguntas → preguntas que el bot no supo responder (base de conocimiento a curar). Admin.
