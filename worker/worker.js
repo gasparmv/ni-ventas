@@ -3655,7 +3655,12 @@ async function corteVigiaPago(env, phone) {
   if (total > 0 && monto >= total * 0.99) {
     try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pagado', comprobante_key=?, updated_at=? WHERE telefono=? AND estado_pago='cobrando'").bind(img.r2Key, nowIso, phone).run(); } catch (_) {}
     try { await corteSend(env, phone, 'recibido, gracias! tu corte queda confirmado'); } catch (_) {}
-    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' pagó $' + monto.toLocaleString('es-AR') + ' (total $' + total.toLocaleString('es-AR') + '). Lo marqué PAGADO.'); } catch (_) {}
+    // Espejo al Excel 2026 v4: marca "pagado" en la col I de Venta_Insumos (gate kv corte_sheet_pago_on, default ON).
+    let sheetMsg = '';
+    if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') {
+      try { const sr = await corteMarcarPagadoSheet(env, cobr.nombre, total); sheetMsg = sr.ok ? ' · planilla: ' + sr.marcadas + ' fila(s) → pagado' : ' · planilla NO marcada (' + sr.error + ')'; } catch (_) { sheetMsg = ' · planilla error'; }
+    }
+    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' pagó $' + monto.toLocaleString('es-AR') + ' (total $' + total.toLocaleString('es-AR') + '). Lo marqué PAGADO.' + sheetMsg); } catch (_) {}
   } else {
     try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='parcial', comprobante_key=?, updated_at=? WHERE telefono=? AND estado_pago='cobrando'").bind(img.r2Key, nowIso, phone).run(); } catch (_) {}
     try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó un comprobante por $' + monto.toLocaleString('es-AR') + ' pero el total es $' + total.toLocaleString('es-AR') + '. Revisalo (¿parcial o error?).'); } catch (_) {}
@@ -3734,6 +3739,61 @@ async function driveUploadFile(env, folderId, name, mime, bytes) {
     if (!r.ok) return { ok: false, error: (j.error && j.error.message) || ('HTTP ' + r.status) };
     return { ok: true, id: j.id, link: j.webViewLink };
   } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+}
+// ===== Sheets: marcar "pagado" en Venta_Insumos (col I) cuando el vigía cobra =====
+const CORTE_SHEET_ID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE'; // Sheet " 2026 v4", tab Venta_Insumos
+// Token de la SA (env.GOOGLE_SA_KEY) con scope Sheets (escritura). Cacheado 55min en kv 'sheets_token'.
+async function sheetsAccessToken(env) {
+  if (!env.GOOGLE_SA_KEY) return null;
+  try { const c = await env.DB.prepare("SELECT v, updated_at FROM kv_cache WHERE k='sheets_token'").first(); if (c && c.v && c.updated_at && (Date.now() - new Date(c.updated_at).getTime()) < 55 * 60 * 1000) return c.v; } catch (_) {}
+  let sa; try { sa = JSON.parse(env.GOOGLE_SA_KEY); } catch (_) { return null; }
+  const now = Math.floor(Date.now() / 1000);
+  const unsigned = _b64urlStr(JSON.stringify({ alg: 'RS256', typ: 'JWT' })) + '.' + _b64urlStr(JSON.stringify({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/spreadsheets', aud: 'https://oauth2.googleapis.com/token', exp: now + 3600, iat: now }));
+  try {
+    const key = await crypto.subtle.importKey('pkcs8', _pemToArrayBuffer(sa.private_key), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(unsigned));
+    const jwt = unsigned + '.' + _b64url(sig);
+    const r = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=' + jwt });
+    const j = await r.json().catch(() => ({}));
+    const token = j.access_token || null;
+    if (token) { try { await env.DB.prepare("INSERT INTO kv_cache (k,v,updated_at) VALUES ('sheets_token',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(token, new Date().toISOString()).run(); } catch (_) {} }
+    return token;
+  } catch (_) { return null; }
+}
+// Marca "pagado" en la col I (Pago) de Venta_Insumos para las filas PENDIENTES del cliente, verificando
+// que la suma de precios (col J) coincida con el total esperado (±500) para no marcar filas equivocadas.
+// Match del cliente por col C (case-insensitive, espacios colapsados). Devuelve {ok,marcadas} o {error}.
+async function corteMarcarPagadoSheet(env, cliente, totalEsperado) {
+  if (!cliente || !(totalEsperado > 0)) return { error: 'faltan datos' };
+  const token = await sheetsAccessToken(env);
+  if (!token) return { error: 'sin token sheets' };
+  const norm = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const parsePrice = raw => parseFloat(String(raw || '0').replace(/\$/g, '').replace(/\./g, '').replace(',', '.')) || 0;
+  let rows;
+  try {
+    const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values/Venta_Insumos`, { headers: { Authorization: 'Bearer ' + token } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+    rows = j.values || [];
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+  const target = norm(cliente);
+  let total = 0; const rowIdx = [];
+  for (let i = 1; i < rows.length; i++) {
+    const rr = rows[i];
+    if (norm(rr[2]) !== target) continue;              // col C cliente
+    if (norm(rr[8]) !== 'pendiente de pago') continue; // col I Pago
+    total += parsePrice(rr[9]);                        // col J Precio
+    rowIdx.push(i + 1);                                // fila 1-based (header = fila 1)
+  }
+  if (!rowIdx.length) return { error: 'sin filas pendientes que matcheen' };
+  if (Math.abs(total - totalEsperado) > 500) return { error: `total no coincide (planilla $${total} vs esperado $${totalEsperado})` };
+  const data = rowIdx.map(ri => ({ range: `Venta_Insumos!I${ri}`, values: [['pagado']] }));
+  try {
+    const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values:batchUpdate`, { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ valueInputOption: 'RAW', data }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+    return { ok: true, marcadas: rowIdx.length };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 function corteIsoSemana(d) {
   const dt = new Date(d.getTime()); dt.setUTCHours(0, 0, 0, 0);
@@ -16629,6 +16689,24 @@ const handler = {
         const parciales = detalle.filter(o => o.estado_pago === 'parcial').length;
         const pendientes = detalle.filter(o => o.estado_pago === 'cobrando').length;
         return json({ ok: true, revisados: phones.length, pagados, parciales, pendientes, detalle });
+      }
+      // GET /admin/corte/sheet-test → confirma identidad + acceso de la SA del worker a Venta_Insumos (sin escribir).
+      if (request.method === 'GET' && path === '/admin/corte/sheet-test') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let email = ''; try { email = (JSON.parse(env.GOOGLE_SA_KEY || '{}').client_email) || ''; } catch (_) {}
+        const token = await sheetsAccessToken(env);
+        let read = null, err = '';
+        if (token) {
+          try { const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values/Venta_Insumos!A1:J1`, { headers: { Authorization: 'Bearer ' + token } }); const j = await r.json().catch(() => ({})); if (r.ok) read = (j.values && j.values[0]) || []; else err = (j.error && j.error.message) || ('HTTP ' + r.status); } catch (e) { err = String((e && e.message) || e); }
+        } else err = 'sin token (falta GOOGLE_SA_KEY o firma falló)';
+        return json({ ok: !!read, sa_email: email, header: read, error: err });
+      }
+      // POST /admin/corte/sheet-marcar {cliente,total} → prueba/forzado del marcado "pagado" en Venta_Insumos. Admin.
+      if (request.method === 'POST' && path === '/admin/corte/sheet-marcar') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body = {}; try { body = await request.json(); } catch (_) {}
+        const res = await corteMarcarPagadoSheet(env, String(body.cliente || ''), Number(body.total) || 0);
+        return json(res);
       }
       // GET /admin/corte/preguntas → preguntas que el bot no supo responder (base de conocimiento a curar). Admin.
       if (request.method === 'GET' && path === '/admin/corte/preguntas') {
