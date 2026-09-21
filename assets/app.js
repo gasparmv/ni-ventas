@@ -2955,6 +2955,137 @@ function renderCorteCobros() {
       ${enVentana < cs.length ? `<div style="font-size:11px;color:#FFA726;margin-top:8px">${cs.length - enVentana} cliente(s) fuera de la ventana de 24h — esos necesitan una plantilla de Meta (los dejamos para después).</div>` : ''}
     </div>`;
 }
+// ===== Board admin del corte — HÍBRIDO: pulso (KPIs + etapas) + tabla por CLIENTE =====
+const CORTE_STAGE_KEYS = ['pedido', 'matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'];
+const CORTE_STAGE_IDX = { pedido: 0, matriz_lista: 1, cortado: 2, embalado: 3, cobrado: 4, despachado: 5, entregado: 6 };
+const CORTE_STAGE_META = {
+  pedido: { l: 'Pedido', c: 'var(--fg-subtle)' }, matriz_lista: { l: 'Matriz', c: '#a78bfa' },
+  cortado: { l: 'Cortado', c: '#60a5fa' }, embalado: { l: 'Embalado', c: '#c084fc' },
+  cobrado: { l: 'Cobrado', c: '#22c55e' }, despachado: { l: 'Despachado', c: '#22c55e' }, entregado: { l: 'Entregado', c: '#22c55e' }
+};
+function cortePagoMeta(pago) {
+  if (pago === 'pagado') return { l: 'Pagado', c: '#22c55e' };
+  if (pago === 'parcial') return { l: 'Parcial', c: '#FFA726' };
+  if (pago === 'cobrando') return { l: 'Cobrando', c: '#60a5fa' };
+  if (pago === 'sinmedir') return { l: 'sin medir', c: 'var(--fg-subtle)' };
+  return { l: 'A cobrar', c: '#f87171' };
+}
+function corteChip(txt, color) {
+  return `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:${color};background:color-mix(in srgb, ${color} 16%, transparent);white-space:nowrap">${escapeHtml(txt)}</span>`;
+}
+// Agrupa los pedidos por CLIENTE (teléfono) con sus totales, etapa del lote y estado de pago.
+function corteClientGroups(pedidos) {
+  const g = {};
+  (pedidos || []).forEach(p => {
+    const k = p.telefono || ('id' + p.id);
+    if (!g[k]) g[k] = { key: k, nombre: p.cliente_nombre || 'cliente', tel: p.telefono || '', items: [], total: 0, m2: 0, minStage: 99, maxStage: -1, pagos: {} };
+    const o = g[k]; o.items.push(p);
+    o.total += Number(p.precio) || 0;
+    if (p.ancho_real && p.alto_real) o.m2 += (Number(p.ancho_real) / 100) * (Number(p.alto_real) / 100) * (Math.max(1, parseInt(p.cantidad, 10) || 1));
+    const si = CORTE_STAGE_IDX[p.estado]; if (si != null) { o.minStage = Math.min(o.minStage, si); o.maxStage = Math.max(o.maxStage, si); }
+    const pg = p.estado_pago || 'pendiente'; o.pagos[pg] = (o.pagos[pg] || 0) + 1;
+  });
+  return Object.values(g).map(o => {
+    o.npz = o.items.length;
+    o.mixed = o.maxStage > o.minStage;
+    o.stage = CORTE_STAGE_KEYS[o.minStage === 99 ? 0 : o.minStage] || 'pedido';
+    o.priced = o.total > 0;
+    o.pago = o.pagos['parcial'] ? 'parcial'
+      : (o.pagos['pagado'] && !o.pagos['pendiente'] && !o.pagos['cobrando'] ? 'pagado'
+        : (o.pagos['cobrando'] ? 'cobrando' : (o.priced ? 'debe' : 'sinmedir')));
+    return o;
+  });
+}
+// Banda de KPIs: plata + avance + aprovechamiento (funde el panel de m² viejo).
+function corteHeroHtml(pedidos, groups) {
+  const t = STATE.corteTanda;
+  const total = pedidos.reduce((s, p) => s + (Number(p.precio) || 0), 0);
+  const cobrado = pedidos.filter(p => p.estado_pago === 'pagado').reduce((s, p) => s + (Number(p.precio) || 0), 0);
+  const pend = total - cobrado;
+  const hechas = pedidos.filter(p => (CORTE_STAGE_IDX[p.estado] || 0) >= 2).length;
+  const avance = pedidos.length ? Math.round(hechas / pedidos.length * 100) : 0;
+  const apr = t ? t.aprovechamiento : null;
+  const m2v = t && t.m2_vendidos != null ? t.m2_vendidos : 0, m2c = t && t.m2_cortados != null ? t.m2_cortados : 0;
+  const tile = (lbl, big, meta, col) => `<div style="flex:1;min-width:148px;background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:13px 15px">
+      <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em">${lbl}</div>
+      <div style="font-size:22px;font-weight:800;margin-top:5px;font-variant-numeric:tabular-nums${col ? ';color:' + col : ''}">${big}</div>
+      <div style="font-size:11px;color:var(--fg-mute);margin-top:2px">${meta}</div></div>`;
+  return `<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+      ${tile('Total de la tanda', '$' + total.toLocaleString('es-AR'), groups.length + ' clientes · ' + pedidos.length + ' piezas', '')}
+      ${tile('Cobrado', '$' + cobrado.toLocaleString('es-AR'), 'Pendiente $' + pend.toLocaleString('es-AR'), '#22c55e')}
+      ${tile('Avance del lote', avance + '%', hechas + ' de ' + pedidos.length + ' cortadas', '')}
+      ${tile('Aprovechamiento', apr == null ? '—' : apr + '%', m2v + ' / ' + m2c + ' m²', apr == null ? 'var(--fg-mute)' : (apr >= 80 ? '#22c55e' : '#FFA726'))}
+    </div>`;
+}
+// Stepper fino: el avance del LOTE (piezas por etapa), como pulso — no como navegación.
+function corteStepperHtml(pedidos) {
+  const by = {}; CORTE_STAGE_KEYS.slice(0, 5).forEach(k => by[k] = 0);
+  pedidos.forEach(p => { if (by[p.estado] != null) by[p.estado]++; });
+  return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
+      ${CORTE_STAGE_KEYS.slice(0, 5).map(k => { const n = by[k] || 0; const m = CORTE_STAGE_META[k]; return `
+        <div style="flex:1;min-width:84px;background:var(--ink-100);border:1px solid var(--border);border-radius:10px;padding:8px 10px">
+          <div style="font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em">${m.l}</div>
+          <div style="font-size:15px;font-weight:800;margin-top:1px;font-variant-numeric:tabular-nums">${n} <span style="font-size:10px;color:var(--fg-mute);font-weight:400">pz</span></div>
+          <div style="height:3px;border-radius:9px;margin-top:6px;background:${n ? m.c : 'var(--border)'};opacity:${n ? 1 : .4}"></div>
+        </div>`; }).join('')}
+    </div>`;
+}
+// El board híbrido completo (hero + stepper + segmentado + tabla por cliente + cobranza).
+function corteHybridBoard(pedidos) {
+  const groups = corteClientGroups(pedidos);
+  const seg = STATE.corteSeg || 'todo';
+  const sinMedir = groups.filter(g => !g.priced).length;
+  const parciales = groups.filter(g => g.pago === 'parcial').length;
+  const porCobrar = groups.filter(g => g.priced && g.pago !== 'pagado');
+  let list;
+  if (seg === 'cobrar') list = porCobrar.slice().sort((a, b) => b.total - a.total);
+  else if (seg === 'trab') list = groups.filter(g => !g.priced || g.pago === 'parcial' || g.mixed);
+  else list = groups.slice().sort((a, b) => b.total - a.total);
+  const matrizN = pedidos.filter(p => p.estado === 'matriz_lista').length;
+  const segBtn = (v, l, n) => `<button data-corte-seg="${v}" class="btn ${seg === v ? '' : 'ghost'}" style="padding:6px 12px;font-size:12px">${l}${n != null ? ` <span style="opacity:.65">${n}</span>` : ''}</button>`;
+  const rows = list.map((g, i) => {
+    const sm = CORTE_STAGE_META[g.stage]; const pm = cortePagoMeta(g.pago);
+    const frac = Math.round(((CORTE_STAGE_IDX[g.stage] || 0) + 1) / 6 * 100);
+    const exp = STATE.corteExpanded && STATE.corteExpanded[g.key];
+    const head = `<div data-corte-grow="${escapeHtml(g.key)}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer${i ? ';border-top:1px solid var(--border)' : ''}">
+        <span style="color:var(--fg-subtle);font-size:11px;flex:0 0 auto;display:inline-block;${exp ? 'transform:rotate(90deg)' : ''}">▸</span>
+        <span style="font-weight:700;font-size:14px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(g.nombre)}</span>
+        <span class="corte-hide-sm" style="font-size:11px;color:var(--fg-subtle);font-variant-numeric:tabular-nums;flex:0 0 auto">${g.npz} pz</span>
+        <span style="font-weight:700;font-size:14px;min-width:92px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto${g.priced ? '' : ';color:var(--fg-subtle);font-weight:400'}">${g.priced ? '$' + g.total.toLocaleString('es-AR') : '—'}</span>
+        <span class="corte-hide-sm" style="display:inline-flex;align-items:center;gap:6px;flex:0 0 auto">
+          <span style="width:42px;height:6px;border-radius:9px;background:var(--border);overflow:hidden;display:inline-block"><span style="display:block;height:100%;width:${frac}%;background:${sm.c}"></span></span>
+          ${corteChip(sm.l + (g.mixed ? ' +' : ''), sm.c)}
+        </span>
+        ${corteChip(pm.l, pm.c)}
+      </div>`;
+    const detail = exp ? `<div style="background:rgba(0,0,0,.16);border-top:1px solid var(--border);padding:6px 12px 12px 30px">
+        ${g.items.map(p => { const psm = CORTE_STAGE_META[p.estado] || CORTE_STAGE_META.pedido; return `<div data-corte-card="${p.id}" style="display:flex;gap:10px;align-items:center;padding:6px 0;font-size:12.5px;cursor:pointer;border-top:1px dashed var(--border)">
+          <span style="flex:1;min-width:0;color:var(--fg-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(p.diseno_nombre || 'diseño')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</span>
+          <span class="corte-hide-sm" style="font-size:11px;color:var(--fg-subtle)">${escapeHtml(p.medida_declarada || '—')}</span>
+          <span style="color:${psm.c};font-size:11px;font-weight:600;flex:0 0 auto">${psm.l}</span>
+          <span style="min-width:78px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto">${p.precio ? '$' + Number(p.precio).toLocaleString('es-AR') : '—'}</span>
+        </div>`; }).join('')}
+        ${g.tel && g.items.some(p => p.estado === 'cortado') ? `<button class="btn ghost" data-corte-embalar-tel="${escapeHtml(g.tel)}" style="margin-top:8px;font-size:11px;padding:4px 10px">📦 Embalar paquete (retira)</button>` : ''}
+      </div>` : '';
+    return head + detail;
+  }).join('');
+  const vacio = seg === 'cobrar' ? 'No hay nada para cobrar por ahora' : (seg === 'trab' ? 'Nada trabado ✨' : 'Sin pedidos esta semana');
+  return `
+    <style>@media(max-width:560px){.corte-hide-sm{display:none!important}}</style>
+    ${corteHeroHtml(pedidos, groups)}
+    ${corteStepperHtml(pedidos)}
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      ${segBtn('todo', 'Toda la tanda', groups.length)}
+      ${segBtn('cobrar', 'Por cobrar', porCobrar.length)}
+      ${segBtn('trab', 'Trabados', sinMedir + parciales)}
+      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+        ${matrizN ? `<button class="btn ghost" data-corte-cortar-todos style="font-size:12px;padding:6px 12px">🪚 Cortar matrices (${matrizN})</button>` : ''}
+        <button class="btn" data-corte-cobrar-abrir style="font-size:12px;padding:6px 12px">💰 Cobrar la semana</button>
+      </div>
+    </div>
+    ${STATE.corteCobrosView ? renderCorteCobros() : ''}
+    ${list.length ? `<div style="border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;background:var(--ink-100)">${rows}</div>` : `<div style="padding:24px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:var(--r-sm)">${vacio}</div>`}`;
+}
 function renderCorte() {
   const pedidos = STATE.cortePedidos || [];
   const info = corteRolInfo();
@@ -3055,19 +3186,10 @@ function renderCorte() {
         <h1 style="margin:0;font-size:20px">✂ Servicio de corte</h1>
         <span style="font-size:11px;background:rgba(124,58,237,.14);color:#7c3aed;padding:2px 8px;border-radius:10px;font-weight:700">Etapa 1 · operativo</span>
       </div>
-      <p style="color:var(--fg-mute);font-size:13px;margin:0 0 14px">Tocá un pedido para ver el detalle y moverlo de etapa. Emma carga medidas → Aníbal corta → Neyen embala.</p>
-      <button class="btn" data-corte-cobrar-abrir style="margin-bottom:16px">💰 Cobrar la semana</button>
-      ${STATE.corteCobrosView ? renderCorteCobros() : ''}
-      ${corteTandaPanelAdminHtml()}
+      <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">Tu semana de un vistazo — una fila por cliente. Tocá un cliente para ver sus diseños; tocá un diseño para moverlo de etapa.</p>
       ${sel ? corteDetalleHtml(sel) : ''}
-      <div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin-bottom:8px">Tablero de pedidos <span style="text-transform:none;color:var(--fg-mute)">· ${pedidos.length} en curso</span></div>
-      <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:12px;margin-bottom:22px">
-        ${CORTE_ESTADOS.map(([k, lbl]) => { const it = pedidos.filter(p => p.estado === k); return `
-          <div style="flex:0 0 175px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;min-height:70px">
-            <div style="font-size:11px;font-weight:700;margin-bottom:6px">${lbl} <span style="color:var(--fg-mute)">${it.length}</span></div>
-            ${it.length ? it.map(p => corteCardHtml(p, true)).join('') : `<div style="font-size:11px;color:var(--fg-subtle);padding:4px 2px">—</div>`}
-          </div>`; }).join('')}
-      </div>
+      ${corteHybridBoard(pedidos)}
+      <div style="height:22px"></div>
 
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap">
         <div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle)">Alumnos (${alumnos === undefined ? '…' : alumnos.length}${q && all ? ' de ' + all.length : ''}) <span style="text-transform:none;color:var(--fg-mute)">· fuente: LTV_Alumnos</span></div>
@@ -3118,7 +3240,10 @@ async function bindCorte() {
       if (nq) { nq.focus(); const L = (STATE.corteQuery || '').length; try { nq.setSelectionRange(L, L); } catch (_) {} }
     };
   }
-  document.querySelectorAll('[data-corte-card]').forEach(el => { el.onclick = () => { STATE.corteSelected = parseInt(el.getAttribute('data-corte-card'), 10); render(); }; });
+  document.querySelectorAll('[data-corte-card]').forEach(el => { el.onclick = (e) => { e.stopPropagation(); STATE.corteSelected = parseInt(el.getAttribute('data-corte-card'), 10); render(); }; });
+  // Board híbrido (admin): segmentado + expandir/colapsar cliente.
+  document.querySelectorAll('[data-corte-seg]').forEach(b => { b.onclick = () => { STATE.corteSeg = b.getAttribute('data-corte-seg'); render(); }; });
+  document.querySelectorAll('[data-corte-grow]').forEach(row => { row.onclick = () => { const k = row.getAttribute('data-corte-grow'); STATE.corteExpanded = STATE.corteExpanded || {}; STATE.corteExpanded[k] = !STATE.corteExpanded[k]; render(); }; });
   const cerrar = document.querySelector('[data-corte-cerrar]'); if (cerrar) cerrar.onclick = () => { STATE.corteSelected = null; render(); };
   const ai = document.getElementById('corte-ancho'), ali = document.getElementById('corte-alto');
   if (ai || ali) { const sel = (STATE.cortePedidos || []).find(p => p.id === STATE.corteSelected); if (sel) { const upd = () => cortePrecioPreview(sel); if (ai) ai.oninput = upd; if (ali) ali.oninput = upd; } }
