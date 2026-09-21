@@ -17749,8 +17749,38 @@ function openTicketCorporeoModal(){
   if (!canCotizar()) return;
   // Defaults de los Sí/No en "No" (como el sistema de Sin Frontera).
   STATE.ticketCorp = { precisa_instalacion:'No', requiere_estructura:'No', light_box:'No', cambio_color:'No', fotocelula:'No', dimmer:'No', estanco:'No' };
+  STATE.ticketCorpPhotos = [];
   STATE.ticketCorpModalOpen = true; STATE.ticketCorpSaving = false;
   render();
+}
+// Downscale de una foto a JPEG (máx 1920px, calidad 0.82) para no exceder el límite de
+// WhatsApp (~5MB) ni mandar payloads gigantes. Devuelve { mime, data(base64 sin prefijo) }.
+function tcDownscale(file, cb){
+  const img = new Image();
+  const url = URL.createObjectURL(file);
+  img.onload = () => {
+    try { URL.revokeObjectURL(url); } catch(_){}
+    let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+    const scale = Math.min(1, 1920 / Math.max(w, h || 1));
+    w = Math.max(1, Math.round(w * scale)); h = Math.max(1, Math.round(h * scale));
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(img, 0, 0, w, h);
+    try { cb({ mime:'image/jpeg', data: cv.toDataURL('image/jpeg', 0.82).split(',')[1] }); }
+    catch(_){ cb(null); }
+  };
+  img.onerror = () => { try { URL.revokeObjectURL(url); } catch(_){}; cb(null); };
+  img.src = url;
+}
+function tcAddFotos(e){
+  tcReadDOM(); // preservar los campos antes del re-render
+  const files = Array.from((e.target && e.target.files) || []).filter(f => /^image\//.test(f.type));
+  if (!files.length) return;
+  STATE.ticketCorpPhotos = STATE.ticketCorpPhotos || [];
+  let pending = files.length;
+  files.forEach(f => tcDownscale(f, (p) => {
+    if (p && p.data) STATE.ticketCorpPhotos.push(p);
+    if (--pending <= 0) render();
+  }));
 }
 function tcReadDOM(){
   const t = STATE.ticketCorp || (STATE.ticketCorp = {});
@@ -17796,7 +17826,12 @@ function renderTicketCorporeoModal(){
           <h2 style="margin:0;font-size:16px">🎫 Ticket de producción · Corpóreo</h2>
           <button id="tc-close" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
         </div>
-        <p class="muted" style="margin:0;font-size:12px">Completá lo que tengas y generá el ticket — te llega el detalle por WhatsApp a tu número.</p>
+        <p class="muted" style="margin:0;font-size:12px">Completá lo que tengas y generá el ticket — te llega el detalle + las fotos por WhatsApp a tu número.</p>
+        <div style="margin-top:var(--s-3)">
+          <div style="font-size:12px;font-weight:700;color:var(--accent-cyan,#8FD4DE);margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:4px">📷 Fotos <span style="color:#FF5566;font-weight:400">· obligatorio (1 o más)</span></div>
+          <input type="file" id="tc-fotos" accept="image/*" multiple style="font-size:12px;color:var(--fg)">
+          <div id="tc-fotos-preview" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">${(STATE.ticketCorpPhotos||[]).map((p,i)=>`<div style="position:relative"><img src="data:${p.mime};base64,${p.data}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--border)"><button type="button" data-tc-rmfoto="${i}" title="Quitar" style="position:absolute;top:-7px;right:-7px;background:#FF1830;color:#fff;border:none;border-radius:50%;width:19px;height:19px;font-size:11px;cursor:pointer;line-height:1;padding:0">✕</button></div>`).join('') || '<span class="muted" style="font-size:11px">Ninguna foto todavía</span>'}</div>
+        </div>
         ${secs}
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:var(--s-4);padding-top:var(--s-2);border-top:1px solid var(--border)">
           <button id="tc-cancel" class="btn btn-ghost">Cancelar</button>
@@ -17813,22 +17848,27 @@ function bindTicketCorporeoModal(){
   const c2 = document.getElementById('tc-cancel'); if (c2) c2.onclick = close;
   const bk = document.getElementById('tc-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'tc-backdrop') close(); };
   const cf = document.getElementById('tc-confirm'); if (cf) cf.onclick = confirmTicketCorporeo;
+  const fotos = document.getElementById('tc-fotos'); if (fotos) fotos.onchange = tcAddFotos;
+  document.querySelectorAll('[data-tc-rmfoto]').forEach(b => b.onclick = () => { tcReadDOM(); (STATE.ticketCorpPhotos || []).splice(parseInt(b.dataset.tcRmfoto, 10), 1); render(); });
 }
 async function confirmTicketCorporeo(){
   if (STATE.ticketCorpSaving) return;
   tcReadDOM();
   const t = STATE.ticketCorp || {};
   if (!String(t.empresa||'').trim() && !String(t.nombre||'').trim()) { toast('Poné al menos la empresa o el nombre del cliente'); return; }
+  const photos = STATE.ticketCorpPhotos || [];
+  if (!photos.length) { toast('Subí al menos una foto'); return; }
   const body = tcCompose();
   if (!body) { toast('Cargá algún dato del ticket'); return; }
   STATE.ticketCorpSaving = true; render();
   try {
     const cliente = String(t.empresa || t.nombre || '').trim();
-    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/ticket', { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ body, cliente }) });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/ticket', { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ body, cliente, photos }) });
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
     STATE.ticketCorpModalOpen = false; STATE.ticketCorpSaving = false; render();
-    toast(`Ticket #${j.numero} generado${j.sent ? ' y enviado por WhatsApp ✓' : ' (⚠ no se pudo mandar el WhatsApp)'}`);
+    const fotoTxt = j.photos_sent ? ` + ${j.photos_sent} foto${j.photos_sent>1?'s':''}` : (photos.length ? ' (⚠ las fotos no salieron)' : '');
+    toast(`Ticket #${j.numero} generado${j.sent ? ' y enviado por WhatsApp ✓' : ' (⚠ no salió el texto)'}${fotoTxt}`);
   } catch (e) {
     STATE.ticketCorpSaving = false; render();
     toast('Error al generar el ticket: ' + e.message);

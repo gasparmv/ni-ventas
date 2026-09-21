@@ -789,15 +789,29 @@ async function importNewPedidosFromVentas(env) {
     // Tombstones: filas borradas a mano en el CRM (ej: duplicados) que NO deben
     // re-importarse del Excel aunque sigan en el sheet. Ver DELETE /admin/pedidos/{id}.
     try { const del = await env.DB.prepare('SELECT sheet_row FROM pedidos_deleted').all(); for (const x of (del.results || [])) have.add(Number(x.sheet_row)); } catch (_) {}
+    // ⚠️ Dedup por CONTENIDO (numero|cartel|fecha), NO solo por sheet_row: un pedido cargado
+    // por el CRM ya está en D1 y su fila espejada aparece en el Excel; si el mirror dejó una
+    // fila extra (race/orphan) con el MISMO pedido, dedupear solo por sheet_row la re-importaba
+    // como origen='excel' → duplicados recurrentes (2x1/Miel/Sporty/Diversi). Con este set, si
+    // ya existe un pedido con ese numero+cartel+fecha, NO se re-importa.
+    const seen = new Set();
+    const key = (num, cartel, fecha) => `${num}|${String(cartel || '').normalize('NFC').trim().toLowerCase()}|${fecha}`;
+    try {
+      const ex = await env.DB.prepare("SELECT numero, cartel, substr(fecha,1,10) AS f FROM pedidos WHERE es_corporeo = 0").all();
+      for (const x of (ex.results || [])) seen.add(key(pedidoNum(x.numero) || x.numero, x.cartel, x.f));
+    } catch (_) {}
     const now = new Date().toISOString();
     const stmts = [];
     for (let i = 1; i < rows.length; i++) {
       const sheetRow = i + 1;
-      if (have.has(sheetRow)) continue;                 // ya está en D1
+      if (have.has(sheetRow)) continue;                 // ya está en D1 (por fila)
       const c = rows[i];
       if (!c || !String(c[2] || '').trim()) continue;   // necesita cartel
       const fecha = pedidoFecha(c[0]);
       if (!fecha) continue;                             // necesita fecha válida
+      const k = key(pedidoNum(c[1]), c[2], fecha);
+      if (seen.has(k)) continue;                        // ya existe ese pedido en D1 (por contenido)
+      seen.add(k);                                      // y no duplicar filas idénticas del propio Excel
       stmts.push(env.DB.prepare(
         `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, sheet_row, origen, created_at, updated_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'excel', ?, ?)`
@@ -12218,10 +12232,37 @@ const handler = {
         const now = new Date().toISOString();
         try { await env.DB.prepare('INSERT INTO corporeo_tickets (numero, cliente, detalle, created_by, created_at) VALUES (?,?,?,?,?)').bind(numero, cliente, detalle, session.user, now).run(); } catch (_) {}
         const fecha = now.slice(8, 10) + '/' + now.slice(5, 7) + '/' + now.slice(0, 4);
+        const to = '5491155604999'; // número personal de Gaspar (pedido explícito)
         const txt = `🎫 TICKET DE PRODUCCIÓN CORPÓREO #${numero}\n${fecha}${cliente ? ' · ' + cliente : ''} · cargó ${session.user}\n\n${detalle}`;
         let sent = false;
-        try { const r = await waSendText(env, '5491155604999', txt); sent = !!(r && r.ok); } catch (_) {}
-        return json({ ok: true, numero, sent });
+        try { const r = await waSendText(env, to, txt); sent = !!(r && r.ok); } catch (_) {}
+        // Fotos del ticket (base64 desde el front, ya downscaleadas): subir cada una a WhatsApp
+        // y mandarla a Gaspar. Caption en la 1ª. Tope 10 por las dudas.
+        let photos_sent = 0;
+        const photos = Array.isArray(tb.photos) ? tb.photos.slice(0, 10) : [];
+        if (photos.length) {
+          const _waT = getWaClient(env);
+          for (let pi = 0; pi < photos.length; pi++) {
+            try {
+              const b64 = String((photos[pi] && photos[pi].data) || '').trim();
+              if (!b64) continue;
+              const mime = String((photos[pi] && photos[pi].mime) || 'image/jpeg');
+              const buf = Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer;
+              const fd = new FormData();
+              fd.append('messaging_product', 'whatsapp');
+              fd.append('file', new Blob([buf], { type: mime }), 'ticket.jpg');
+              fd.append('type', mime);
+              const upR = await fetch(_waT.mediaUploadUrl(), { method: 'POST', headers: _waT.headers, body: fd });
+              const upJ = await upR.json().catch(() => ({}));
+              if (upR.ok && upJ.id) {
+                const cap = pi === 0 ? `🎫 Fotos ticket #${numero}${cliente ? ' · ' + cliente : ''}` : undefined;
+                const sr = await waSendImage(env, to, upJ.id, cap);
+                if (sr && sr.ok) photos_sent++;
+              }
+            } catch (_) {}
+          }
+        }
+        return json({ ok: true, numero, sent, photos_sent });
       }
 
       // ----- Piloto de pre cotización (solo Gaspar): estado, control, dry-run, aprobar -----
