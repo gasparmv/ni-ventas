@@ -12243,6 +12243,7 @@ const handler = {
         try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS corporeo_tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, cliente TEXT, detalle TEXT, created_by TEXT, created_at TEXT)').run(); } catch (_) {}
         try { await env.DB.prepare('ALTER TABLE corporeo_tickets ADD COLUMN pedido_id INTEGER').run(); } catch (_) {}
         try { await env.DB.prepare('ALTER TABLE corporeo_tickets ADD COLUMN data TEXT').run(); } catch (_) {}
+        try { await env.DB.prepare('ALTER TABLE corporeo_tickets ADD COLUMN photo_keys TEXT').run(); } catch (_) {}
         // Si ese pedido ya tenía ticket, reusar su número (re-generar / actualizar) en vez de crear otro.
         let numero = null;
         if (pedidoId) {
@@ -12253,15 +12254,20 @@ const handler = {
           numero = ((mx && mx.m) ? Math.floor(Number(mx.m)) : 0) + 1;
         }
         const now = new Date().toISOString();
-        try { await env.DB.prepare('INSERT INTO corporeo_tickets (numero, cliente, detalle, created_by, created_at, pedido_id, data) VALUES (?,?,?,?,?,?,?)').bind(numero, cliente, detalle, session.user, now, pedidoId, fieldsJson).run(); } catch (_) {}
+        // RETURNING id para saber la fila y poder guardar las fotos en R2 (reenvío futuro).
+        let rowId = null;
+        try { const ins = await env.DB.prepare('INSERT INTO corporeo_tickets (numero, cliente, detalle, created_by, created_at, pedido_id, data) VALUES (?,?,?,?,?,?,?) RETURNING id').bind(numero, cliente, detalle, session.user, now, pedidoId, fieldsJson).first(); rowId = ins && ins.id; } catch (_) {}
         const fecha = now.slice(8, 10) + '/' + now.slice(5, 7) + '/' + now.slice(0, 4);
         const to = '5491155604999'; // número personal de Gaspar (pedido explícito)
         const txt = `🎫 TICKET DE PRODUCCIÓN CORPÓREO #${numero}\n${fecha}${cliente ? ' · ' + cliente : ''} · cargó ${session.user}\n\n${detalle}`;
         let sent = false;
         try { const r = await waSendText(env, to, txt); sent = !!(r && r.ok); } catch (_) {}
         // Fotos del ticket (base64 desde el front, ya downscaleadas): subir cada una a WhatsApp
-        // y mandarla a Gaspar. Caption en la 1ª. Tope 10 por las dudas.
+        // y mandarla a Gaspar. Caption en la 1ª. Tope 10 por las dudas. Además se GUARDAN en R2
+        // (corporeo-ticket/<rowId>/<i>.jpg) para poder reenviar el ticket completo si el 1er
+        // envío falla por la ventana de 24h de WhatsApp.
         let photos_sent = 0;
+        const photoKeys = [];
         const photos = Array.isArray(tb.photos) ? tb.photos.slice(0, 10) : [];
         if (photos.length) {
           const _waT = getWaClient(env);
@@ -12270,10 +12276,14 @@ const handler = {
               const b64 = String((photos[pi] && photos[pi].data) || '').trim();
               if (!b64) continue;
               const mime = String((photos[pi] && photos[pi].mime) || 'image/jpeg');
-              const buf = Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer;
+              const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+              // Persistir en R2 (si tenemos la fila) antes de mandarla.
+              if (rowId != null && env.MEDIA) {
+                try { const key = `corporeo-ticket/${rowId}/${pi}.jpg`; await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: mime } }); photoKeys.push(key); } catch (_) {}
+              }
               const fd = new FormData();
               fd.append('messaging_product', 'whatsapp');
-              fd.append('file', new Blob([buf], { type: mime }), 'ticket.jpg');
+              fd.append('file', new Blob([bytes.buffer], { type: mime }), 'ticket.jpg');
               fd.append('type', mime);
               const upR = await fetch(_waT.mediaUploadUrl(), { method: 'POST', headers: _waT.headers, body: fd });
               const upJ = await upR.json().catch(() => ({}));
@@ -12284,8 +12294,52 @@ const handler = {
               }
             } catch (_) {}
           }
+          if (rowId != null && photoKeys.length) { try { await env.DB.prepare('UPDATE corporeo_tickets SET photo_keys=? WHERE id=?').bind(JSON.stringify(photoKeys), rowId).run(); } catch (_) {} }
         }
         return json({ ok: true, numero, sent, photos_sent });
+      }
+
+      // POST /admin/corporeo/ticket/resend { id? , pedido_id? } → reenvía por WhatsApp un ticket ya
+      // guardado (texto + fotos desde R2) al número personal de Gaspar. Para cuando el 1er envío
+      // falló por la ventana de 24h de WhatsApp y después se reabre.
+      if (request.method === 'POST' && path === '/admin/corporeo/ticket/resend') {
+        let rb; try { rb = await request.json(); } catch { rb = {}; }
+        const rid = parseInt(rb && rb.id, 10) || 0;
+        const rpid = parseInt(rb && rb.pedido_id, 10) || 0;
+        if (!rid && !rpid) return json({ error: 'falta id o pedido_id' }, 400);
+        let tk = null;
+        try {
+          if (rid) tk = await env.DB.prepare('SELECT id, numero, cliente, detalle, created_by, created_at, photo_keys FROM corporeo_tickets WHERE id=?').bind(rid).first();
+          else tk = await env.DB.prepare('SELECT id, numero, cliente, detalle, created_by, created_at, photo_keys FROM corporeo_tickets WHERE pedido_id=? ORDER BY id DESC LIMIT 1').bind(rpid).first();
+        } catch (_) {}
+        if (!tk) return json({ error: 'ticket no encontrado' }, 404);
+        const ca = String(tk.created_at || '');
+        const fecha = ca.length >= 10 ? (ca.slice(8, 10) + '/' + ca.slice(5, 7) + '/' + ca.slice(0, 4)) : '';
+        const to = '5491155604999';
+        const txt = `🎫 TICKET DE PRODUCCIÓN CORPÓREO #${tk.numero} (reenvío)\n${fecha}${tk.cliente ? ' · ' + tk.cliente : ''}${tk.created_by ? ' · cargó ' + tk.created_by : ''}\n\n${tk.detalle}`;
+        let sent = false, err = '';
+        try { const r = await waSendText(env, to, txt); sent = !!(r && r.ok); if (!sent) err = JSON.stringify(r || {}).slice(0, 300); } catch (e) { err = String((e && e.message) || e); }
+        let photos_sent = 0, keys = [];
+        try { if (tk.photo_keys) keys = JSON.parse(tk.photo_keys) || []; } catch (_) {}
+        if (Array.isArray(keys) && keys.length && env.MEDIA) {
+          const _waT = getWaClient(env);
+          for (let pi = 0; pi < keys.length && pi < 10; pi++) {
+            try {
+              const obj = await env.MEDIA.get(keys[pi]);
+              if (!obj) continue;
+              const ab = await obj.arrayBuffer();
+              const mime = (obj.httpMetadata && obj.httpMetadata.contentType) || 'image/jpeg';
+              const fd = new FormData();
+              fd.append('messaging_product', 'whatsapp');
+              fd.append('file', new Blob([ab], { type: mime }), 'ticket.jpg');
+              fd.append('type', mime);
+              const upR = await fetch(_waT.mediaUploadUrl(), { method: 'POST', headers: _waT.headers, body: fd });
+              const upJ = await upR.json().catch(() => ({}));
+              if (upR.ok && upJ.id) { const cap = pi === 0 ? `🎫 Fotos ticket #${tk.numero}${tk.cliente ? ' · ' + tk.cliente : ''}` : undefined; const sr = await waSendImage(env, to, upJ.id, cap); if (sr && sr.ok) photos_sent++; }
+            } catch (_) {}
+          }
+        }
+        return json({ ok: true, sent, numero: tk.numero, photos_sent, photos_stored: (Array.isArray(keys) ? keys.length : 0), error: err || undefined });
       }
 
       // GET /admin/corporeo/tickets → ids de pedidos que YA tienen ticket (para pintar el botón

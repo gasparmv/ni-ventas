@@ -17894,8 +17894,9 @@ function renderTicketCorpView(){
         </div>
         <p class="muted" style="margin:0 0 10px;font-size:12px">Generado${fecha ? ' ' + fecha : ''}${tk.created_by ? ' · ' + escapeHtml(tk.created_by) : ''}${tk.cliente ? ' · ' + escapeHtml(tk.cliente) : ''}</p>
         <div style="white-space:pre-wrap;font-size:13px;line-height:1.55;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:12px 14px">${det || '<span class="muted">Sin detalle</span>'}</div>
-        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:var(--s-4);padding-top:var(--s-2);border-top:1px solid var(--border)">
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:var(--s-4);padding-top:var(--s-2);border-top:1px solid var(--border);flex-wrap:wrap">
           <button id="tc-close2" class="btn btn-ghost">Cerrar</button>
+          <button id="tc-resend" class="btn btn-ghost">${STATE.ticketCorpResending ? 'Reenviando…' : '📱 Reenviar por WhatsApp'}</button>
           <button id="tc-edit" class="btn btn-cyan">✏️ Editar / regenerar</button>
         </div>
       </div>
@@ -17939,6 +17940,7 @@ function bindTicketCorporeoModal(){
   // Modo VISTA: cerrar + editar/regenerar (pre-carga desde los campos guardados, o del pedido).
   if (STATE.ticketCorpMode === 'view') {
     const c2 = document.getElementById('tc-close2'); if (c2) c2.onclick = close;
+    const rs = document.getElementById('tc-resend'); if (rs) rs.onclick = resendTicketCorporeo;
     const ed = document.getElementById('tc-edit'); if (ed) ed.onclick = () => {
       const tk = STATE.ticketCorpView || {};
       const p = (STATE.pedidos || []).find(x => x.idx === STATE.ticketCorpPedidoId);
@@ -17978,6 +17980,26 @@ async function confirmTicketCorporeo(){
   } catch (e) {
     STATE.ticketCorpSaving = false; render();
     toast('Error al generar el ticket: ' + e.message);
+  }
+}
+// Reenvía por WhatsApp un ticket ya guardado (texto + fotos desde R2), sin regenerarlo. Se usa
+// desde la vista "Ver ticket" cuando el 1er envío falló por la ventana de 24h de WhatsApp.
+async function resendTicketCorporeo(){
+  if (STATE.ticketCorpResending) return;
+  const pid = STATE.ticketCorpPedidoId || null;
+  const num = (STATE.ticketCorpView && STATE.ticketCorpView.numero) || '';
+  if (!pid) { toast('No puedo identificar el pedido del ticket'); return; }
+  STATE.ticketCorpResending = true; render();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/ticket/resend', { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ pedido_id: pid }) });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
+    STATE.ticketCorpResending = false; render();
+    const fotoTxt = j.photos_stored ? ` + ${j.photos_sent}/${j.photos_stored} foto${j.photos_stored>1?'s':''}` : ' (sin fotos guardadas)';
+    toast(j.sent ? `Ticket #${j.numero} reenviado ✓${fotoTxt}` : `No salió el reenvío (¿ventana 24h cerrada?)`);
+  } catch (e) {
+    STATE.ticketCorpResending = false; render();
+    toast('Error al reenviar: ' + e.message);
   }
 }
 function _bindCorporeasV1_dead() {
