@@ -2531,10 +2531,13 @@ async function processPrecotizPilot(env) {
     // (llegaron a 829 acumulados) cada tick → sobrecargó el cron y frenó el bot (3-sep). Los viejos
     // que quedan colgados no necesitan reconciliación (el lead ya se enfrió). Esto evita que se repita.
     const _comp = await env.DB.prepare(
-      "SELECT p.phone, p.estado, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados FROM precotiz_pilot p WHERE p.estado IN ('activo','completo') AND p.updated_at >= datetime('now','-3 days')"
+      "SELECT p.phone, p.estado, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados, (SELECT COUNT(*) FROM wa_messages m WHERE m.phone = p.phone AND m.direction = 'outbound' AND m.body LIKE '%concepto de seña%') AS presup_manual FROM precotiz_pilot p WHERE p.estado IN ('activo','completo') AND p.updated_at >= datetime('now','-3 days')"
     ).all();
     for (const r of (_comp.results || [])) {
-      if (r.enviados > 0) {
+      // Sale de la bandeja si YA se le pasó presupuesto: por brief 'enviado' (flujo del CRM) O por un
+      // presupuesto mandado A MANO (saliente con "concepto de seña", la firma del presupuesto). Sin
+      // esto, si el vendedor cotiza a mano sin crear brief, la etiqueta "Para cotizar" quedaba pegada.
+      if (r.enviados > 0 || r.presup_manual > 0) {
         // Joaco YA le pasó el presupuesto (brief enviado) -> sale de la precotización esté activo
         // o completo. Frena al bot si Joaco cotizó a mano mientras el bot todavía relevaba.
         try { await env.DB.prepare("UPDATE precotiz_pilot SET estado = 'cotizado', updated_at = ? WHERE phone = ? AND estado IN ('activo','completo')").bind(new Date().toISOString(), r.phone).run(); } catch (_) {}
@@ -2629,7 +2632,12 @@ async function processPrecotizPilot(env) {
       continue;
     }
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
-    const wantTipos = !!res.enviar_tipografias;
+    // Fallback anti-inconsistencia del AI: a veces escribe "te paso las tipografías" en el texto
+    // pero NO pone el flag enviar_tipografias -> la imagen nunca sale. Si el mensaje PROMETE pasar
+    // las tipografías (verbo de envío + "tipograf"), las mandamos igual (el dedup evita repetir).
+    const _tipoTxt = _normTxt(msgs.join(' '));
+    const _promeTipos = /tipograf/.test(_tipoTxt) && /(te paso|te mando|te muestro|te envio|te comparto|que trabajamos|que usamos)/.test(_tipoTxt);
+    const wantTipos = !!res.enviar_tipografias || _promeTipos;
     try { await env.DB.prepare("UPDATE precotiz_pilot SET tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
     if (!msgs.length && !wantTipos) continue;
     if (modo === 'auto') {
@@ -12226,11 +12234,26 @@ const handler = {
         const detalle = String((tb && tb.body) || '').trim();
         if (!detalle) return json({ error: 'ticket vacío' }, 400);
         const cliente = String((tb && tb.cliente) || '').trim();
+        // Vínculo con el pedido corpóreo que lo originó (flujo "todo desde el pedido"): permite
+        // luego el botón "Ver ticket" en la tabla de Pedidos. fields = campos estructurados en JSON
+        // (para re-render/edición); si no vienen, no rompe (queda solo el detalle de texto).
+        const pedidoId = parseInt((tb && tb.pedido_id), 10) || null;
+        let fieldsJson = null;
+        try { if (tb && tb.fields && typeof tb.fields === 'object') fieldsJson = JSON.stringify(tb.fields); } catch (_) {}
         try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS corporeo_tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, cliente TEXT, detalle TEXT, created_by TEXT, created_at TEXT)').run(); } catch (_) {}
-        const mx = await env.DB.prepare('SELECT MAX(numero) AS m FROM corporeo_tickets').first();
-        const numero = ((mx && mx.m) ? Math.floor(Number(mx.m)) : 0) + 1;
+        try { await env.DB.prepare('ALTER TABLE corporeo_tickets ADD COLUMN pedido_id INTEGER').run(); } catch (_) {}
+        try { await env.DB.prepare('ALTER TABLE corporeo_tickets ADD COLUMN data TEXT').run(); } catch (_) {}
+        // Si ese pedido ya tenía ticket, reusar su número (re-generar / actualizar) en vez de crear otro.
+        let numero = null;
+        if (pedidoId) {
+          try { const prev = await env.DB.prepare('SELECT numero FROM corporeo_tickets WHERE pedido_id=? ORDER BY id DESC LIMIT 1').bind(pedidoId).first(); if (prev && prev.numero) numero = Math.floor(Number(prev.numero)); } catch (_) {}
+        }
+        if (!numero) {
+          const mx = await env.DB.prepare('SELECT MAX(numero) AS m FROM corporeo_tickets').first();
+          numero = ((mx && mx.m) ? Math.floor(Number(mx.m)) : 0) + 1;
+        }
         const now = new Date().toISOString();
-        try { await env.DB.prepare('INSERT INTO corporeo_tickets (numero, cliente, detalle, created_by, created_at) VALUES (?,?,?,?,?)').bind(numero, cliente, detalle, session.user, now).run(); } catch (_) {}
+        try { await env.DB.prepare('INSERT INTO corporeo_tickets (numero, cliente, detalle, created_by, created_at, pedido_id, data) VALUES (?,?,?,?,?,?,?)').bind(numero, cliente, detalle, session.user, now, pedidoId, fieldsJson).run(); } catch (_) {}
         const fecha = now.slice(8, 10) + '/' + now.slice(5, 7) + '/' + now.slice(0, 4);
         const to = '5491155604999'; // número personal de Gaspar (pedido explícito)
         const txt = `🎫 TICKET DE PRODUCCIÓN CORPÓREO #${numero}\n${fecha}${cliente ? ' · ' + cliente : ''} · cargó ${session.user}\n\n${detalle}`;
@@ -12263,6 +12286,28 @@ const handler = {
           }
         }
         return json({ ok: true, numero, sent, photos_sent });
+      }
+
+      // GET /admin/corporeo/tickets → ids de pedidos que YA tienen ticket (para pintar el botón
+      // "Ver ticket #N" vs "Armar ticket" en la tabla de Pedidos). Devuelve el último por pedido.
+      if (request.method === 'GET' && path === '/admin/corporeo/tickets') {
+        let rows = [];
+        try {
+          const r = await env.DB.prepare('SELECT pedido_id, MAX(numero) AS numero FROM corporeo_tickets WHERE pedido_id IS NOT NULL GROUP BY pedido_id').all();
+          rows = (r && r.results) ? r.results : [];
+        } catch (_) { rows = []; }
+        return json({ ok: true, tickets: rows });
+      }
+
+      // GET /admin/corporeo/ticket?pedido_id=N → el último ticket de ese pedido (para "Ver ticket").
+      if (request.method === 'GET' && path === '/admin/corporeo/ticket') {
+        const pid = parseInt(url.searchParams.get('pedido_id'), 10) || 0;
+        if (!pid) return json({ error: 'missing pedido_id' }, 400);
+        let t = null;
+        try { t = await env.DB.prepare('SELECT numero, cliente, detalle, data, created_by, created_at FROM corporeo_tickets WHERE pedido_id=? ORDER BY id DESC LIMIT 1').bind(pid).first(); } catch (_) {}
+        if (!t) return json({ ok: true, ticket: null });
+        let fields = null; try { if (t.data) fields = JSON.parse(t.data); } catch (_) {}
+        return json({ ok: true, ticket: { numero: t.numero, cliente: t.cliente, detalle: t.detalle, fields, created_by: t.created_by, created_at: t.created_at } });
       }
 
       // ----- Piloto de pre cotización (solo Gaspar): estado, control, dry-run, aprobar -----

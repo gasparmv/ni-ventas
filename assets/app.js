@@ -5704,6 +5704,7 @@ function bindPedidos() {
   const traceBtn = document.getElementById('pedido-trace-ads');
   if (traceBtn) traceBtn.onclick = trazarAdsFaltantes;
   bindPedidoModal();
+  bindTicketCorporeoModal();
 }
 // Dispara el backfill de ads en el worker (histórico completo de pedidos sin atribuir) y refresca.
 async function trazarAdsFaltantes() {
@@ -5748,6 +5749,7 @@ function renderPedidos() {
       <div id="table-pedidos"></div>
     </div>
     ${renderPedidoModal()}
+    ${renderTicketCorporeoModal()}
   `;
 }
 function renderTablePedidos() {
@@ -5790,7 +5792,7 @@ function renderTablePedidos() {
           filtered.map(p => `
             <tr data-pid="${p.idx}">
               <td class="num">${fmtDate(p.fecha)}</td>
-              <td class="cliente">${escapeHtml(p.cartel)}</td>
+              <td class="cliente">${escapeHtml(p.cartel)}${tcPedidoBtn(p)}</td>
               <td>${baseSwatch(p.base)}</td>
               <td class="num">${fmtMoney(p.precio)}</td>
               <td>${dimerPillHtml(p.dimmer)}</td>
@@ -5806,6 +5808,7 @@ function renderTablePedidos() {
     </table>
   `;
   document.querySelectorAll('tr[data-pid]').forEach(el => el.onclick = () => openDrawerPedido(parseInt(el.dataset.pid)));
+  document.querySelectorAll('[data-tc-pedido]').forEach(b => b.onclick = (e) => { e.stopPropagation(); openTicketFromPedido(parseInt(b.dataset.tcPedido, 10)); });
   document.querySelectorAll('[data-sort]').forEach(el => {
     el.onclick = () => {
       const c = el.dataset.sort;
@@ -5814,6 +5817,8 @@ function renderTablePedidos() {
       renderTablePedidos();
     };
   });
+  // Traer qué corpóreos ya tienen ticket (una vez por sesión de vista) para pintar los chips.
+  if (canCotizar() && !STATE.corpTicketsLoaded && !STATE.corpTicketsLoading && filtered.some(p => p.esCorporeo)) loadCorpTickets();
 }
 // Paleta de pills (mismo look que el timeline post-venta). Mapea cada valor a un color.
 const PILL_HEX = {
@@ -5845,6 +5850,17 @@ function loaderLabel(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')ret
 function loaderColor(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'violet'; if(s==='agustina'||s==='agus')return 'rose'; if(s==='joaquin'||s==='joaco')return 'cyan'; if(s==='gaspar'||s==='bruno')return 'blue'; if(s==='abril')return 'amber'; return 'muted'; }
 // Celda/píldora con quién cargó el pedido. cargado_por (user literal) y, si falta (histórico), comercial_id.
 function loaderCell(p){ const who=p.cargadoPor||p.comercial_id||''; const lbl=loaderLabel(who); if(!lbl)return '<span style="color:var(--fg-subtle)">—</span>'; return `<span class="pill ${loaderColor(who)}" style="font-size:11px">${escapeHtml(lbl)}</span>`; }
+// Chip 🎫 para pedidos corpóreos en la tabla: "Ver #N" (verde) si ya tiene ticket, o "Armar"
+// (cyan) si no. Al tocar (sin abrir el drawer) genera/muestra el ticket de producción.
+function tcPedidoBtn(p){
+  if (!p.esCorporeo || !canCotizar()) return '';
+  const num = (STATE.corpTickets && STATE.corpTickets[p.idx]) || null;
+  const has = !!num;
+  const st = has
+    ? 'background:rgba(74,222,128,.14);color:#6ef0a0;border:1px solid rgba(74,222,128,.35)'
+    : 'background:rgba(143,212,222,.14);color:var(--neon-cyan,#8FD4DE);border:1px solid rgba(143,212,222,.35)';
+  return ` <button data-tc-pedido="${p.idx}" onclick="event.stopPropagation()" title="${has?'Ver ticket de producción #'+num:'Armar ticket de producción'}" style="${st};border-radius:var(--r-pill);padding:1px 7px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;vertical-align:middle">🎫 ${has?'Ver #'+num:'Armar'}</button>`;
+}
 // Dropdown inline (tabla) coloreado según el valor actual, para editar el estado sin
 // abrir el drawer (a nivel pedido: el worker lo aplica a todos los carteles del nro+fecha).
 const PAGO_OPTS_TABLE = ['1er pago','2do pago'];
@@ -7485,6 +7501,7 @@ function openDrawerPedido(idx) {
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn btn-ghost" onclick="verConversacionPedido(${idx})" style="font-size:12px;padding:5px 10px">💬 Ver conversación</button>
             <button class="btn btn-ghost" onclick="verAnuncioPedido(${idx})" style="font-size:12px;padding:5px 10px">🔗 Ver anuncio</button>
+            ${p.esCorporeo && canCotizar() ? `<button class="btn btn-cyan" onclick="closeDrawer();openTicketFromPedido(${idx})" style="font-size:12px;padding:5px 10px">🎫 ${(STATE.corpTickets && STATE.corpTickets[idx]) ? 'Ver ticket #' + STATE.corpTickets[idx] : 'Armar ticket producción'}</button>` : ''}
           </div>
           <div><label style="${lblD}">Envío</label><textarea id="ped-edit-envio" rows="4" style="${inpD};resize:vertical">${escapeHtml(p.envio||'')}</textarea></div>
           <div><label style="${lblD}">Aclaración</label><input id="ped-edit-aclaracion" value="${escapeHtml(p.aclaracion||'')}" style="${inpD}"></div>
@@ -17687,71 +17704,120 @@ function bindCorporeas() {
 // por WhatsApp al número personal de Gaspar. Schema (secciones+campos) maneja tanto el
 // render del form como el texto del ticket.
 const TICKET_CORP_SECS = [
+  // Campos filtrados por Gaspar (21-sep). Los 🔄 se autocompletan del pedido corpóreo.
   ['👤 Cliente', [
-    { k:'empresa', l:'Empresa / Emprendimiento' },
-    { k:'nombre', l:'Nombre y apellido' },
-    { k:'telefono', l:'Teléfono', t:'tel' },
-    { k:'mail', l:'Mail' },
-    { k:'provincia', l:'Provincia / Ciudad' },
-    { k:'direccion', l:'Dirección del local' },
+    { k:'empresa', l:'Empresa / Emprendimiento' },   // 🔄 diseño del pedido
   ]],
   ['📅 Fechas', [
     { k:'fecha_sena', l:'Fecha seña cliente', t:'date' },
     { k:'fecha_compromiso', l:'Fecha compromiso', t:'date' },
-    { k:'fecha_entrega', l:'Fecha entrega', t:'date' },
   ]],
   ['📦 Producto', [
     { k:'producto', l:'Producto', t:'select', o:['—','Cartelería','Merch Empresarial / Emprendimiento','Solución / Repuesto / Pieza','Producto / Deco'] },
-    { k:'tipo_producto', l:'Tipo de producto', t:'select', o:['—','Corpóreo sin iluminación','Corpóreo con iluminación','Corpóreo frente de acrílico','Pastilla doble faz'] },
-    { k:'carteleria', l:'Cartelería', t:'select', o:['—','Interior','Exterior','Ambas'] },
+    { k:'tipo_producto', l:'Tipo de producto', t:'select', o:['—','Corpóreo sin iluminación','Corpóreo con iluminación','Corpóreo frente de acrílico','Pastilla doble faz'] },   // 🔄
+    { k:'carteleria', l:'Cartelería', t:'select', o:['—','Interior','Exterior','Ambas'] },   // 🔄
     { k:'precisa_instalacion', l:'Precisa instalación', t:'select', o:['No','Sí'] },
-    { k:'asesor', l:'Asesor comercial' },
     { k:'prioridad', l:'Prioridad', t:'select', o:['—','Baja','Media','Alta','Urgente'] },
-    { k:'medidas', l:'Medidas del cartel', t:'area' },
+    { k:'medidas', l:'Medidas del cartel', t:'area' },   // 🔄 alto × ancho
     { k:'descripcion_cliente', l:'Descripción del cliente', t:'area' },
   ]],
   ['🎨 Diseño', [
-    { k:'requiere_estructura', l:'Requiere estructura / bastidor', t:'select', o:['No','Sí'] },
-    { k:'llaveros', l:'Llaveros (cantidad)', t:'num' },
-    { k:'light_box', l:'Light box', t:'select', o:['No','Sí'] },
-    { k:'disenador', l:'Diseñador designado' },
+    { k:'requiere_estructura', l:'Requiere estructura / bastidor', t:'select', o:['No','Sí'] },   // 🔄
     { k:'desc_diseno', l:'Descripción para diseño', t:'area' },
   ]],
   ['🖨️ Impresión', [
     { k:'impresora', l:'Impresora' },
-    { k:'tiempos_hs', l:'Tiempos (hs)', t:'num' },
-    { k:'filamento', l:'Filamento' },
-    { k:'consumo_kg', l:'Consumo (kg)', t:'num' },
-    { k:'cambio_color', l:'Cambio de color', t:'select', o:['No','Sí'] },
-    { k:'nro_archivos', l:'Nro archivos de impresión', t:'num' },
-    { k:'colores', l:'Colores', t:'area' },
+    { k:'colores', l:'Colores', t:'area' },   // 🔄 frente/laterales/base
     { k:'desc_impresion', l:'Descripción para impresión', t:'area' },
   ]],
   ['🔧 Ensamble', [
     { k:'salida_cables', l:'Salida de cables' },
     { k:'lado_cables', l:'Lado salida de cables' },
-    { k:'tipo_luz', l:'Tipo de luz' },
-    { k:'color_luz', l:'Color de luz' },
-    { k:'fuente', l:'Fuente' },
-    { k:'fotocelula', l:'Fotocélula', t:'select', o:['No','Sí'] },
-    { k:'dimmer', l:'Dimmer', t:'select', o:['No','Sí'] },
-    { k:'estanco', l:'Estanco', t:'select', o:['No','Sí'] },
+    { k:'tipo_luz', l:'Tipo de luz' },   // 🔄 iluminación
     { k:'desc_ensamble', l:'Descripción para ensamble', t:'area' },
-  ]],
-  ['🗂️ Otros', [
-    { k:'mantenimiento', l:'Descripción mantenimiento', t:'area' },
-    { k:'fase', l:'En qué fase se encuentra' },
-    { k:'carpeta', l:'Carpeta cliente (URL)' },
   ]],
 ];
 function tcVal(k){ return (STATE.ticketCorp && STATE.ticketCorp[k] != null) ? STATE.ticketCorp[k] : ''; }
 function openTicketCorporeoModal(){
   if (!canCotizar()) return;
   // Defaults de los Sí/No en "No" (como el sistema de Sin Frontera).
-  STATE.ticketCorp = { precisa_instalacion:'No', requiere_estructura:'No', light_box:'No', cambio_color:'No', fotocelula:'No', dimmer:'No', estanco:'No' };
+  STATE.ticketCorp = { precisa_instalacion:'No', requiere_estructura:'No' };
   STATE.ticketCorpPhotos = [];
+  STATE.ticketCorpPedidoId = null;
+  STATE.ticketCorpMode = 'form';
   STATE.ticketCorpModalOpen = true; STATE.ticketCorpSaving = false;
   render();
+}
+// Mapea un pedido corpóreo (specs de producción de la letra 3D) a los campos del ticket de
+// Sin Frontera. Los 🔄 del schema: empresa←cartel, tipo_producto/tipo_luz←iluminación,
+// cartelería←producto (int/ext), medidas←alto×ancho, requiere_estructura←bastidor,
+// colores←frente/laterales/espalda. Gaspar edita lo que quiera antes de generar.
+function tcMapFromPedido(p){
+  const t = { precisa_instalacion:'No', requiere_estructura:'No' };
+  if (!p) return t;
+  const has = v => String(v == null ? '' : v).trim();
+  t.empresa = has(p.cartel);
+  const ilum = has(p.iluminacion).toLowerCase();
+  const prod = has(p.producto).toLowerCase();
+  const conLuz = ilum ? !/sin\s*luz/.test(ilum) : (prod ? !/sin\s*luz/.test(prod) : true);
+  t.tipo_producto = conLuz ? 'Corpóreo con iluminación' : 'Corpóreo sin iluminación';
+  t.tipo_luz = has(p.iluminacion) || (conLuz ? 'con luz' : 'sin luz');
+  if (/exterior/.test(prod)) t.carteleria = 'Exterior';
+  else if (/interior/.test(prod)) t.carteleria = 'Interior';
+  const a = +p.alto || 0, an = +p.ancho || 0;
+  if (a && an) t.medidas = `${a} × ${an} cm`;
+  t.requiere_estructura = /^s[ií]/i.test(has(p.bastidor)) ? 'Sí' : 'No';
+  t.precisa_instalacion = /^s[ií]/i.test(has(p.instalacion)) ? 'Sí' : 'No';
+  const col = [];
+  if (has(p.frente)) col.push('Frente: ' + has(p.frente));
+  if (has(p.laterales)) col.push('Laterales: ' + has(p.laterales));
+  if (has(p.espalda)) col.push('Base/Fondo: ' + has(p.espalda));
+  if (/^s[ií]/i.test(has(p.bastidor)) && has(p.colorBastidor)) col.push('Bastidor: ' + has(p.colorBastidor));
+  if (col.length) t.colores = col.join('\n');
+  if (has(p.aclaracion)) t.descripcion_cliente = has(p.aclaracion);
+  return t;
+}
+// Botón 🎫 de un pedido corpóreo (tabla/drawer): si ya tiene ticket lo abre para ver/editar;
+// si no, abre el form YA pre-cargado con los datos del pedido ("todo desde el pedido").
+async function openTicketFromPedido(pedidoId){
+  if (!canCotizar()) return;
+  const p = (STATE.pedidos || []).find(x => x.idx === pedidoId);
+  if (!p) { toast('No encuentro el pedido'); return; }
+  let existing = null;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/ticket?pedido_id=' + pedidoId, { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    if (j && j.ticket) existing = j.ticket;
+  } catch (_) {}
+  STATE.ticketCorpPedidoId = pedidoId;
+  if (existing) {
+    STATE.ticketCorpView = existing;
+    STATE.ticketCorpMode = 'view';
+    STATE.ticketCorpModalOpen = true; STATE.ticketCorpSaving = false;
+    render();
+    return;
+  }
+  STATE.ticketCorp = tcMapFromPedido(p);
+  STATE.ticketCorpPhotos = [];
+  STATE.ticketCorpMode = 'form';
+  STATE.ticketCorpModalOpen = true; STATE.ticketCorpSaving = false;
+  render();
+}
+// Trae del backend qué pedidos ya tienen ticket (para pintar "Ver ticket #N" vs "Armar ticket"
+// en la tabla). Se pide una vez por entrada a la vista; al terminar repinta la tabla.
+async function loadCorpTickets(){
+  if (STATE.corpTicketsLoading) return;
+  STATE.corpTicketsLoading = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/tickets', { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    const m = {};
+    (j.tickets || []).forEach(t => { if (t.pedido_id) m[t.pedido_id] = t.numero; });
+    STATE.corpTickets = m;
+    STATE.corpTicketsLoaded = true;
+  } catch (_) {}
+  STATE.corpTicketsLoading = false;
+  if (STATE.view === 'pedidos' && document.getElementById('table-pedidos')) renderTablePedidos();
 }
 // Downscale de una foto a JPEG (máx 1920px, calidad 0.82) para no exceder el límite de
 // WhatsApp (~5MB) ni mandar payloads gigantes. Devuelve { mime, data(base64 sin prefijo) }.
@@ -17812,8 +17878,32 @@ function tcCompose(){
   }
   return parts.join('\n\n');
 }
+// Vista de un ticket ya generado (read-only). Muestra el detalle formateado + botón para
+// editar/regenerar (reusa el mismo número de ticket, no crea otro).
+function renderTicketCorpView(){
+  const tk = STATE.ticketCorpView || {};
+  const det = escapeHtml(String(tk.detalle || '')).replace(/\*([^*\n]+)\*/g, '<b style="color:var(--accent-cyan,#8FD4DE)">$1</b>');
+  const ca = String(tk.created_at || '');
+  const fecha = ca.length >= 10 ? (ca.slice(8, 10) + '/' + ca.slice(5, 7) + '/' + ca.slice(0, 4)) : '';
+  return `
+    <div id="tc-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:280;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
+      <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:640px;width:100%;margin:auto;padding:var(--s-4)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
+          <h2 style="margin:0;font-size:16px">🎫 Ticket #${escapeHtml(String(tk.numero || ''))} · Corpóreo</h2>
+          <button id="tc-close" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
+        </div>
+        <p class="muted" style="margin:0 0 10px;font-size:12px">Generado${fecha ? ' ' + fecha : ''}${tk.created_by ? ' · ' + escapeHtml(tk.created_by) : ''}${tk.cliente ? ' · ' + escapeHtml(tk.cliente) : ''}</p>
+        <div style="white-space:pre-wrap;font-size:13px;line-height:1.55;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:12px 14px">${det || '<span class="muted">Sin detalle</span>'}</div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:var(--s-4);padding-top:var(--s-2);border-top:1px solid var(--border)">
+          <button id="tc-close2" class="btn btn-ghost">Cerrar</button>
+          <button id="tc-edit" class="btn btn-cyan">✏️ Editar / regenerar</button>
+        </div>
+      </div>
+    </div>`;
+}
 function renderTicketCorporeoModal(){
   if (!STATE.ticketCorpModalOpen) return '';
+  if (STATE.ticketCorpMode === 'view') return renderTicketCorpView();
   const secs = TICKET_CORP_SECS.map(([sec, flds]) => `
     <div style="margin-top:var(--s-3)">
       <div style="font-size:12px;font-weight:700;color:var(--accent-cyan,#8FD4DE);margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:4px">${sec}</div>
@@ -17844,9 +17934,22 @@ function bindTicketCorporeoModal(){
   const btn = document.getElementById('btn-ticket-corporeo'); if (btn) btn.onclick = openTicketCorporeoModal;
   if (!STATE.ticketCorpModalOpen) return;
   const close = () => { STATE.ticketCorpModalOpen = false; render(); };
-  const c1 = document.getElementById('tc-close'); if (c1) c1.onclick = close;
-  const c2 = document.getElementById('tc-cancel'); if (c2) c2.onclick = close;
   const bk = document.getElementById('tc-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'tc-backdrop') close(); };
+  const c1 = document.getElementById('tc-close'); if (c1) c1.onclick = close;
+  // Modo VISTA: cerrar + editar/regenerar (pre-carga desde los campos guardados, o del pedido).
+  if (STATE.ticketCorpMode === 'view') {
+    const c2 = document.getElementById('tc-close2'); if (c2) c2.onclick = close;
+    const ed = document.getElementById('tc-edit'); if (ed) ed.onclick = () => {
+      const tk = STATE.ticketCorpView || {};
+      const p = (STATE.pedidos || []).find(x => x.idx === STATE.ticketCorpPedidoId);
+      STATE.ticketCorp = (tk.fields && typeof tk.fields === 'object') ? Object.assign({ precisa_instalacion:'No', requiere_estructura:'No' }, tk.fields) : tcMapFromPedido(p);
+      STATE.ticketCorpPhotos = [];
+      STATE.ticketCorpMode = 'form';
+      render();
+    };
+    return;
+  }
+  const c2 = document.getElementById('tc-cancel'); if (c2) c2.onclick = close;
   const cf = document.getElementById('tc-confirm'); if (cf) cf.onclick = confirmTicketCorporeo;
   const fotos = document.getElementById('tc-fotos'); if (fotos) fotos.onchange = tcAddFotos;
   document.querySelectorAll('[data-tc-rmfoto]').forEach(b => b.onclick = () => { tcReadDOM(); (STATE.ticketCorpPhotos || []).splice(parseInt(b.dataset.tcRmfoto, 10), 1); render(); });
@@ -17863,9 +17966,12 @@ async function confirmTicketCorporeo(){
   STATE.ticketCorpSaving = true; render();
   try {
     const cliente = String(t.empresa || t.nombre || '').trim();
-    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/ticket', { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ body, cliente, photos }) });
+    const pedidoId = STATE.ticketCorpPedidoId || null;
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/ticket', { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ body, cliente, photos, pedido_id: pedidoId, fields: t }) });
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
+    // Recordar que este pedido ya tiene ticket (para el botón de la tabla).
+    if (pedidoId && j.numero) { STATE.corpTickets = STATE.corpTickets || {}; STATE.corpTickets[pedidoId] = j.numero; }
     STATE.ticketCorpModalOpen = false; STATE.ticketCorpSaving = false; render();
     const fotoTxt = j.photos_sent ? ` + ${j.photos_sent} foto${j.photos_sent>1?'s':''}` : (photos.length ? ' (⚠ las fotos no salieron)' : '');
     toast(`Ticket #${j.numero} generado${j.sent ? ' y enviado por WhatsApp ✓' : ' (⚠ no salió el texto)'}${fotoTxt}`);
