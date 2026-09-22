@@ -8488,6 +8488,22 @@ function bindCommon() {
     });
     document._quickModalPasteBound = true;
   }
+  // Paste de imagen (Ctrl+V) con el modal del Ticket corpóreo abierto → adjunta la foto al ticket
+  // en vez de abrir un brief. Bind único global (el modal vive en Corpóreas y en Pedidos). Corre
+  // primero (bindCommon se bindea antes que los paste de las vistas) y frena a los demás.
+  if (!document._ticketCorpPasteBound) {
+    document.addEventListener('paste', (ev) => {
+      if (!(STATE.ticketCorpModalOpen && STATE.ticketCorpMode === 'form')) return;
+      const items = ev.clipboardData?.items || [];
+      const files = [];
+      for (const it of items) { if (it.kind === 'file' && (it.type || '').startsWith('image/')) { const f = it.getAsFile(); if (f) files.push(f); } }
+      if (!files.length) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      tcAddFotoFiles(files);
+    });
+    document._ticketCorpPasteBound = true;
+  }
   document.querySelectorAll('[data-action="seg-cliente"]').forEach(b => b.onclick = () => {
     pedidoFilter.search = b.dataset.cliente;
     setView('pedidos');
@@ -17837,16 +17853,21 @@ function tcDownscale(file, cb){
   img.onerror = () => { try { URL.revokeObjectURL(url); } catch(_){}; cb(null); };
   img.src = url;
 }
-function tcAddFotos(e){
-  tcReadDOM(); // preservar los campos antes del re-render
-  const files = Array.from((e.target && e.target.files) || []).filter(f => /^image\//.test(f.type));
+// Núcleo de "agregar fotos al ticket": downscalea cada imagen y la mete en STATE.ticketCorpPhotos.
+// Lo usan el <input file> (tcAddFotos) y el paste global (Ctrl+V con el modal abierto).
+function tcAddFotoFiles(files){
+  files = Array.from(files || []).filter(f => f && /^image\//.test(f.type));
   if (!files.length) return;
+  tcReadDOM(); // preservar los campos antes del re-render
   STATE.ticketCorpPhotos = STATE.ticketCorpPhotos || [];
   let pending = files.length;
   files.forEach(f => tcDownscale(f, (p) => {
     if (p && p.data) STATE.ticketCorpPhotos.push(p);
     if (--pending <= 0) render();
   }));
+}
+function tcAddFotos(e){
+  tcAddFotoFiles((e.target && e.target.files) || []);
 }
 function tcReadDOM(){
   const t = STATE.ticketCorp || (STATE.ticketCorp = {});
@@ -17919,7 +17940,7 @@ function renderTicketCorporeoModal(){
         </div>
         <p class="muted" style="margin:0;font-size:12px">Completá lo que tengas y generá el ticket — te llega el detalle + las fotos por WhatsApp a tu número.</p>
         <div style="margin-top:var(--s-3)">
-          <div style="font-size:12px;font-weight:700;color:var(--accent-cyan,#8FD4DE);margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:4px">📷 Fotos <span style="color:#FF5566;font-weight:400">· obligatorio (1 o más)</span></div>
+          <div style="font-size:12px;font-weight:700;color:var(--accent-cyan,#8FD4DE);margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:4px">📷 Fotos <span style="color:#FF5566;font-weight:400">· obligatorio (1 o más)</span> <span class="muted" style="font-weight:400">· elegí archivos o pegá con Ctrl+V</span></div>
           <input type="file" id="tc-fotos" accept="image/*" multiple style="font-size:12px;color:var(--fg)">
           <div id="tc-fotos-preview" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">${(STATE.ticketCorpPhotos||[]).map((p,i)=>`<div style="position:relative"><img src="data:${p.mime};base64,${p.data}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--border)"><button type="button" data-tc-rmfoto="${i}" title="Quitar" style="position:absolute;top:-7px;right:-7px;background:#FF1830;color:#fff;border:none;border-radius:50%;width:19px;height:19px;font-size:11px;cursor:pointer;line-height:1;padding:0">✕</button></div>`).join('') || '<span class="muted" style="font-size:11px">Ninguna foto todavía</span>'}</div>
         </div>
@@ -19582,6 +19603,9 @@ function bindCotizacion() {
       // Si un modal de herramienta de imagen está abierto (rectificar/vectorizar o
       // montaje), el Ctrl+V es para ÉL: no abrir brief.
       if ((STATE.rectify && STATE.rectify.open) || (STATE.mockup && STATE.mockup.open)) return;
+      // Ticket de producción abierto: el Ctrl+V adjunta la foto al ticket (lo maneja su paste
+      // global), NO abre un brief. Bail acá por si este handler corre antes que el del ticket.
+      if (STATE.ticketCorpModalOpen && STATE.ticketCorpMode === 'form') return;
       const items = ev.clipboardData?.items || [];
       const drawerOpen = !!STATE.briefSelected || !!STATE.briefDraft;
       const role = getUserRole();
