@@ -1889,6 +1889,54 @@ async function agendaRoute(env, request, url, path) {
     return json({ ok: true, to, ...out });
   }
 
+  // POST /admin/agenda/:id/invitar  { ocurrencia?: 'YYYY-MM-DD', participantes?: [slug], forzar?: bool }
+  // Manda la plantilla aprobada 'recordatorio_agenda' como INVITACIÓN a los participantes del evento.
+  // Usa waSendTemplate DIRECTO (no /admin/wa/template) → NO crea filas en wa_messages ni reasigna el
+  // chat: así los números internos del equipo no ensucian la bandeja de ventas ni las métricas.
+  // Sin 'ocurrencia' toma la próxima fecha del evento (o la fecha base si no recurre / ya pasó).
+  // Dedup por (evento, ocurrencia, usuario, 'invitacion'); 'forzar' reenvía igual.
+  {
+    const mInv = path.match(/^\/admin\/agenda\/(\d+)\/invitar$/);
+    if (request.method === 'POST' && mInv) {
+      if (!esAdmin) return json({ error: 'forbidden' }, 403);
+      const iid = parseInt(mInv[1], 10);
+      const ev = await env.DB.prepare("SELECT * FROM agenda_eventos WHERE id = ?").bind(iid).first();
+      if (!ev) return json({ error: 'not found' }, 404);
+      let b = {}; try { b = await request.json(); } catch (_) {}
+      const hoy = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+      let oc = String(b.ocurrencia || '').trim();
+      if (!oc) { const fut = _agOccurrences(ev, hoy, _agFmt(new Date(Date.now() + 370 * 86400000))); oc = fut[0] || ev.fecha; }
+      const todos = ((await env.DB.prepare("SELECT usuario FROM agenda_participantes WHERE evento_id = ?").bind(iid).all()).results || []).map(r => r.usuario);
+      const pedidos = Array.isArray(b.participantes) && b.participantes.length ? b.participantes.map(_agSlug).filter(Boolean) : null;
+      const dest = pedidos ? todos.filter(u => pedidos.includes(u)) : todos;
+      if (!dest.length) return json({ error: 'evento sin participantes' }, 400);
+      const forzar = b.forzar === true;
+      const phones = {}; for (const p of (await env.DB.prepare("SELECT usuario, phone FROM agenda_phones").all()).results || []) phones[p.usuario] = p.phone;
+      const yaSent = new Set(((await env.DB.prepare("SELECT usuario FROM agenda_recordatorios WHERE evento_id = ? AND ocurrencia = ? AND tipo = 'invitacion'").bind(iid, oc).all()).results || []).map(r => r.usuario));
+      const DIAS_SEM = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+      const _dt = new Date(oc + 'T12:00:00Z');
+      const _dia = DIAS_SEM[_dt.getUTCDay()] || '';
+      const _dm = oc.slice(8, 10) + '/' + oc.slice(5, 7);
+      const _hora = (ev.hora && /^\d{2}:\d{2}$/.test(ev.hora)) ? ev.hora : '';
+      const _extra = (ev.tipo === 'reunion' && ev.lugar) ? String(ev.lugar) : String(ev.detalle || '').trim();
+      const _head = ev.tipo === 'tarea' ? 'Nueva tarea' : 'Te esperamos';
+      const _con = ev.tipo === 'tarea' ? ' para el ' : ' el ';
+      const linea = (_head + _con + _dia + ' ' + _dm + (_hora ? ' a las ' + _hora : '') + ' · ' + ev.titulo + (_extra ? ' · ' + _extra : '')).replace(/\s*\n\s*/g, ' · ').slice(0, 320);
+      const nowIso = new Date().toISOString();
+      const res = [];
+      for (const u of dest) {
+        const to = phones[u];
+        if (!to) { res.push({ usuario: u, ok: false, error: 'sin teléfono' }); continue; }
+        if (!forzar && yaSent.has(u)) { res.push({ usuario: u, to, ok: true, skipped: 'ya invitado' }); continue; }
+        let ok = false, err = '';
+        try { const r = await waSendTemplate(env, to, 'recordatorio_agenda', 'es_AR', [linea]); ok = !!(r && r.ok); if (!ok) err = (r && r.error) || 'fallo'; } catch (e) { err = String(e && e.message || e); }
+        if (ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO agenda_recordatorios (evento_id, ocurrencia, usuario, tipo, sent_at) VALUES (?, ?, ?, 'invitacion', ?)").bind(iid, oc, u, nowIso).run(); } catch (_) {} }
+        res.push({ usuario: u, to, ok, ...(err ? { error: err } : {}) });
+      }
+      return json({ ok: true, evento: iid, ocurrencia: oc, linea, enviados: res.filter(r => r.ok && !r.skipped).length, resultados: res });
+    }
+  }
+
   return json({ error: 'agenda: ruta no soportada' }, 404);
 }
 // Crea (una vez) la plantilla de recordatorio de agenda en Meta. UTILITY, 3 variables:
