@@ -3393,9 +3393,25 @@ function renderCorte() {
         list.forEach(p => { const k = p.telefono || ('id' + p.id); if (!gr[k]) gr[k] = { nombre: p.cliente_nombre, tel: p.telefono || '', items: [], entrega: '' }; gr[k].items.push(p); if (p.entrega && !gr[k].entrega) gr[k].entrega = p.entrega; });
         return Object.values(gr).filter(g => !q || String(g.nombre || '').toLowerCase().includes(q) || g.items.some(p => String(p.diseno_nombre || '').toLowerCase().includes(q) || String(p.medida_declarada || '').toLowerCase().includes(q)));
       };
-      const paraEmbalar = groupBy(pedidos.filter(p => p.estado === 'cortado'));
-      const embalados = groupBy(pedidos.filter(p => p.estado === 'embalado'));
-      const totalCort = pedidos.filter(p => p.estado === 'cortado').length, totalEmb = pedidos.filter(p => p.estado === 'embalado').length;
+      const esNeon = p => p.producto === 'NEON';
+      const paraEmbalar = groupBy(pedidos.filter(p => p.estado === 'cortado' && !esNeon(p)));
+      const embalados = groupBy(pedidos.filter(p => p.estado === 'embalado' && !esNeon(p)));
+      const totalCort = pedidos.filter(p => p.estado === 'cortado' && !esNeon(p)).length, totalEmb = pedidos.filter(p => p.estado === 'embalado' && !esNeon(p)).length;
+      // Neón: producción propia (van al productor, no a un alumno). Neyen los separa a un costado.
+      const neonMatch = p => !q || String(p.diseno_nombre || '').toLowerCase().includes(q) || String(p.medida_declarada || '').toLowerCase().includes(q);
+      const neonPend = pedidos.filter(p => esNeon(p) && p.estado === 'cortado').filter(neonMatch);
+      const neonSep = pedidos.filter(p => esNeon(p) && p.estado === 'embalado').filter(neonMatch);
+      const neonRow = (p, done) => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px dashed var(--border);font-size:13px">
+          <span style="flex:1;min-width:0">${done ? '<span style="color:#22c55e">✓</span> ' : ''}${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ` <span style="color:var(--fg-subtle)">${escapeHtml(p.medida_declarada)}</span>` : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</span>
+          ${done ? `<button class="btn ghost" data-corte-desembalar="${p.id}" style="font-size:11px;padding:3px 9px">↩</button>` : `<button class="btn" data-corte-separar="${p.id}" style="font-size:11px;padding:4px 11px">Separado</button>`}
+        </div>`;
+      const neonSection = (neonPend.length + neonSep.length) ? `
+        <div style="margin-top:22px;background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:16px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px"><span style="font-size:15px;font-weight:800;color:#ef4444">🔴 Neón — separar a un costado</span><span style="color:var(--fg-mute);font-size:12px">${neonPend.length} para separar${neonSep.length ? ' · ' + neonSep.length + ' separados' : ''}</span></div>
+          <div style="font-size:12px;color:var(--fg-mute);margin-bottom:6px">Cortes de neón (producción propia). Separalos y dejalos a un costado para el productor.</div>
+          ${neonPend.map(p => neonRow(p, false)).join('') || (q ? '' : '<div style="font-size:12px;color:var(--fg-mute);padding:8px 0">Todo separado ✨</div>')}
+          ${neonSep.length ? `<div style="margin-top:12px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle)">Ya separados</div>${neonSep.map(p => neonRow(p, true)).join('')}` : ''}
+        </div>` : '';
       const entregaBadge = (e) => e ? `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:${e === 'envio' ? '#f59e0b' : '#22c55e'};background:color-mix(in srgb, ${e === 'envio' ? '#f59e0b' : '#22c55e'} 16%, transparent)">${e === 'envio' ? '📦 Envío' : '🏠 Retira'}</span>` : '';
       const cardHtml = (g, done) => `
         <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
@@ -3422,6 +3438,7 @@ function renderCorte() {
               ${embalados.length ? embalados.map(g => cardHtml(g, true)).join('') : vacioBox(q ? 'Sin coincidencias' : 'Todavía nada embalado')}
             </div>
           </div>
+          ${neonSection}
         </div>`;
     }
     // ANÍBAL: descargar archivo + lista + "marcar todos como cortados" + cargar m²/placas.
@@ -3490,11 +3507,18 @@ function renderCorte() {
   const cell = 'padding:7px 10px';
   // Board = solo la tanda ACTUAL (max tanda_id) por defecto; toggle para ver todas (no se pierden los que
   // todavía deben de tandas anteriores).
-  const curTanda = pedidos.length ? Math.max(0, ...pedidos.map(p => +p.tanda_id || 0)) : 0;
+  // El board del admin es de cobros de ALUMNOS → excluye la producción propia de neón (producto='NEON').
+  const pedidosAlum = pedidos.filter(p => p.producto !== 'NEON');
+  const curTanda = pedidosAlum.length ? Math.max(0, ...pedidosAlum.map(p => +p.tanda_id || 0)) : 0;
   const verTodas = !!STATE.corteVerTodas;
-  const boardPedidos = verTodas ? pedidos : pedidos.filter(p => (+p.tanda_id || 0) === curTanda);
-  const nOtras = pedidos.length - pedidos.filter(p => (+p.tanda_id || 0) === curTanda).length;
-  const tandaToggle = nOtras > 0 ? `<div style="margin:-8px 0 12px;font-size:12px;color:var(--fg-mute)">${verTodas ? 'Mostrando TODAS las tandas · ' : 'Mostrando la semana actual · '}<a data-corte-ver-todas style="color:#7c3aed;cursor:pointer;text-decoration:underline">${verTodas ? 'ver solo esta semana' : 'ver todas (' + nOtras + ' de tandas anteriores)'}</a></div>` : '';
+  const boardPedidos = verTodas ? pedidosAlum : pedidosAlum.filter(p => (+p.tanda_id || 0) === curTanda);
+  const curCount = pedidosAlum.filter(p => (+p.tanda_id || 0) === curTanda).length;
+  const nOtras = pedidosAlum.length - curCount;
+  const segPill = (val, lbl, n, on) => `<button data-corte-tanda="${val}" style="border:0;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:6px 13px;border-radius:8px;transition:background .12s;background:${on ? '#7c3aed' : 'transparent'};color:${on ? '#fff' : 'var(--fg-mute)'}">${lbl} <span style="opacity:.7;font-variant-numeric:tabular-nums">${n}</span></button>`;
+  const tandaToggle = nOtras > 0 ? `<div style="margin:0 0 14px;display:inline-flex;align-items:center;gap:2px;background:var(--ink-100);border:1px solid var(--border);border-radius:10px;padding:3px">
+      ${segPill('actual', 'Esta semana', curCount, !verTodas)}
+      ${segPill('todas', 'Todas', pedidos.length, verTodas)}
+    </div>` : '';
   return `
     <div style="padding:var(--s-4);max-width:1100px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
@@ -3611,9 +3635,12 @@ async function bindCorte() {
   document.querySelectorAll('[data-corte-desembalar]').forEach(btn => {
     btn.onclick = () => corteBulk('avanzar_bulk', { ids: btn.getAttribute('data-corte-desembalar').split(',').map(Number).filter(Boolean), estado: 'cortado' });
   });
-  // Toggle tanda actual / todas las tandas en el board admin.
-  const verTodas = document.querySelector('[data-corte-ver-todas]');
-  if (verTodas) verTodas.onclick = () => { STATE.corteVerTodas = !STATE.corteVerTodas; render(); };
+  // Neyen: marcar un corte de neón como "separado" (reusa embalado como estado de separado).
+  document.querySelectorAll('[data-corte-separar]').forEach(btn => {
+    btn.onclick = () => corteBulk('avanzar_bulk', { ids: [parseInt(btn.getAttribute('data-corte-separar'), 10)], estado: 'embalado' });
+  });
+  // Segmentado tanda actual / todas las tandas en el board admin.
+  document.querySelectorAll('[data-corte-tanda]').forEach(b => { b.onclick = () => { STATE.corteVerTodas = b.getAttribute('data-corte-tanda') === 'todas'; render(); }; });
   // Aprendizaje del corte: buscar mejoras (síntesis) + aprobar/descartar propuestas al KB.
   const aprender = document.querySelector('[data-corte-aprender]');
   if (aprender) aprender.onclick = async () => {
