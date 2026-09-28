@@ -3755,6 +3755,26 @@ async function corteVigiaPago(env, phone, opts = {}) {
   }
   return true;
 }
+// DETALLE DEL COBRO AL CONTESTAR: la plantilla out-of-window solo lleva el TOTAL ("respondé para el detalle").
+// Cuando el cliente en cobranza CONTESTA, le mandamos el desglose (corteCobroMsg) — sin depender del bot.
+// Dedup por ciclo de cobro (updated_at de las filas 'cobrando'): un cobro nuevo re-habilita el envío.
+async function corteAutoDetalle(env, phone) {
+  let rows;
+  try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio, updated_at FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) { return false; }
+  if (!rows.length) return false;
+  const cobroAt = rows.reduce((m, r) => (r.updated_at && r.updated_at > m ? r.updated_at : m), '');
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
+  let prev; try { prev = await env.DB.prepare("SELECT cobro_at FROM corte_detalle_sent WHERE phone=?").bind(phone).first(); } catch (_) {}
+  if (prev && prev.cobro_at && prev.cobro_at >= cobroAt) return false; // ya se mandó el detalle de este cobro
+  // ¿Contestó DESPUÉS del cobro? (cualquier inbound que no sea status). Sin respuesta, no se manda nada.
+  let replied; try { replied = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type!='status' AND ts > ? LIMIT 1").bind(phone, cobroAt).first(); } catch (_) {}
+  if (!replied) return false;
+  const g = { cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+  let ok = false;
+  try { const r = await corteSend(env, phone, corteCobroMsg(g)); ok = !!(r && r.ok); } catch (_) {}
+  if (ok) { try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET cobro_at=excluded.cobro_at, sent_at=excluded.sent_at").bind(phone, cobroAt, new Date().toISOString()).run(); } catch (_) {} }
+  return ok;
+}
 // Vigía de pagos AUTÓNOMO: corre en el cron aunque el bot conversacional del corte esté APAGADO.
 // Solo procesa comprobantes de clientes en cobranza (marca pagado/parcial + confirma + avisa a Gaspar);
 // NO charla ni toma pedidos. Ideal para el día de cobro con el bot off. Kill-switch kv corte_vigia_on (default ON).
@@ -3764,7 +3784,12 @@ async function processCorteVigiaAuto(env) {
     if ((await kvGet(env, 'corte_vigia_on', '1')) !== '1') return;
     let phones = [];
     try { phones = ((await env.DB.prepare("SELECT DISTINCT telefono FROM corte_pedidos WHERE estado_pago='cobrando' AND telefono IS NOT NULL AND telefono!=''").all()).results || []).map(r => r.telefono); } catch (_) { return; }
-    for (const ph of phones) { try { await corteVigiaPago(env, ph); } catch (_) {} }
+    for (const ph of phones) {
+      let paid = false;
+      try { paid = await corteVigiaPago(env, ph); } catch (_) {}
+      if (paid) continue; // pagó → no hace falta el desglose
+      try { await corteAutoDetalle(env, ph); } catch (_) {} // contestó pidiendo el detalle → se lo mandamos
+    }
     // Reintento de marcados a la planilla que fallaron por algo transitorio (token/5xx). Idempotente.
     try {
       const pend = (await env.DB.prepare("SELECT phone, cliente, total, caja, created_at FROM corte_sheet_pending").all()).results || [];
