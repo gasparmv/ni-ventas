@@ -3488,6 +3488,13 @@ function renderCorte() {
     ? all.filter(a => String(a.nombre || '').toLowerCase().includes(q) || String(a.telefono || '').includes(q.replace(/\D/g, '')))
     : all);
   const cell = 'padding:7px 10px';
+  // Board = solo la tanda ACTUAL (max tanda_id) por defecto; toggle para ver todas (no se pierden los que
+  // todavía deben de tandas anteriores).
+  const curTanda = pedidos.length ? Math.max(0, ...pedidos.map(p => +p.tanda_id || 0)) : 0;
+  const verTodas = !!STATE.corteVerTodas;
+  const boardPedidos = verTodas ? pedidos : pedidos.filter(p => (+p.tanda_id || 0) === curTanda);
+  const nOtras = pedidos.length - pedidos.filter(p => (+p.tanda_id || 0) === curTanda).length;
+  const tandaToggle = nOtras > 0 ? `<div style="margin:-8px 0 12px;font-size:12px;color:var(--fg-mute)">${verTodas ? 'Mostrando TODAS las tandas · ' : 'Mostrando la semana actual · '}<a data-corte-ver-todas style="color:#7c3aed;cursor:pointer;text-decoration:underline">${verTodas ? 'ver solo esta semana' : 'ver todas (' + nOtras + ' de tandas anteriores)'}</a></div>` : '';
   return `
     <div style="padding:var(--s-4);max-width:1100px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
@@ -3496,7 +3503,8 @@ function renderCorte() {
       </div>
       <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">Tu semana de un vistazo — una fila por cliente. Tocá un cliente para ver sus diseños; tocá un diseño para moverlo de etapa.</p>
       ${sel ? corteDetalleHtml(sel) : ''}
-      ${corteHybridBoard(pedidos)}
+      ${tandaToggle}
+      ${corteHybridBoard(boardPedidos)}
       <div style="height:22px"></div>
       ${corteAprendizajeHtml()}
 
@@ -3603,6 +3611,9 @@ async function bindCorte() {
   document.querySelectorAll('[data-corte-desembalar]').forEach(btn => {
     btn.onclick = () => corteBulk('avanzar_bulk', { ids: btn.getAttribute('data-corte-desembalar').split(',').map(Number).filter(Boolean), estado: 'cortado' });
   });
+  // Toggle tanda actual / todas las tandas en el board admin.
+  const verTodas = document.querySelector('[data-corte-ver-todas]');
+  if (verTodas) verTodas.onclick = () => { STATE.corteVerTodas = !STATE.corteVerTodas; render(); };
   // Aprendizaje del corte: buscar mejoras (síntesis) + aprobar/descartar propuestas al KB.
   const aprender = document.querySelector('[data-corte-aprender]');
   if (aprender) aprender.onclick = async () => {
