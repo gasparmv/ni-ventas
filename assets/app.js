@@ -3509,15 +3509,23 @@ function renderCorte() {
   // todavía deben de tandas anteriores).
   // El board del admin es de cobros de ALUMNOS → excluye la producción propia de neón (producto='NEON').
   const pedidosAlum = pedidos.filter(p => p.producto !== 'NEON');
-  const curTanda = pedidosAlum.length ? Math.max(0, ...pedidosAlum.map(p => +p.tanda_id || 0)) : 0;
-  const verTodas = !!STATE.corteVerTodas;
-  const boardPedidos = verTodas ? pedidosAlum : pedidosAlum.filter(p => (+p.tanda_id || 0) === curTanda);
-  const curCount = pedidosAlum.filter(p => (+p.tanda_id || 0) === curTanda).length;
-  const nOtras = pedidosAlum.length - curCount;
-  const segPill = (val, lbl, n, on) => `<button data-corte-tanda="${val}" style="border:0;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:6px 13px;border-radius:8px;transition:background .12s;background:${on ? '#7c3aed' : 'transparent'};color:${on ? '#fff' : 'var(--fg-mute)'}">${lbl} <span style="opacity:.7;font-variant-numeric:tabular-nums">${n}</span></button>`;
-  const tandaToggle = nOtras > 0 ? `<div style="margin:0 0 14px;display:inline-flex;align-items:center;gap:2px;background:var(--ink-100);border:1px solid var(--border);border-radius:10px;padding:3px">
-      ${segPill('actual', 'Esta semana', curCount, !verTodas)}
-      ${segPill('todas', 'Todas', pedidos.length, verTodas)}
+  // Navegador de semanas (como un calendario): cada tanda es una semana. Slidear ‹ (más vieja) / › (más nueva).
+  const tandaMap = {};
+  pedidosAlum.forEach(p => { const t = +p.tanda_id || 0; const f = p.created_at || ''; if (!tandaMap[t]) tandaMap[t] = { id: t, fecha: f }; else if (f && (!tandaMap[t].fecha || f < tandaMap[t].fecha)) tandaMap[t].fecha = f; });
+  const tandas = Object.values(tandaMap).sort((a, b) => b.id - a.id); // más nueva primero
+  let curIdx = tandas.findIndex(t => t.id === STATE.corteTandaSel);
+  if (curIdx < 0) curIdx = 0; // por defecto la semana actual (la más nueva)
+  const selTanda = tandas[curIdx] || null;
+  const boardPedidos = selTanda ? pedidosAlum.filter(p => (+p.tanda_id || 0) === selTanda.id) : pedidosAlum;
+  const fmtFecha = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? (parseInt(m[3], 10) + '/' + parseInt(m[2], 10)) : ''; };
+  const arrowBtn = (dir, targetId) => `<button data-corte-week-to="${targetId == null ? '' : targetId}"${targetId == null ? ' disabled' : ''} title="${dir === 'prev' ? 'Semana anterior' : 'Semana siguiente'}" style="border:1px solid var(--border);background:var(--ink-100);color:var(--fg);width:34px;height:34px;border-radius:9px;cursor:${targetId == null ? 'default' : 'pointer'};font-size:17px;line-height:1;opacity:${targetId == null ? '.35' : '1'};display:inline-flex;align-items:center;justify-content:center">${dir === 'prev' ? '‹' : '›'}</button>`;
+  const navWeek = tandas.length > 1 ? `<div style="display:flex;align-items:center;justify-content:center;gap:14px;margin:0 0 14px">
+      ${arrowBtn('prev', curIdx < tandas.length - 1 ? tandas[curIdx + 1].id : null)}
+      <div style="text-align:center;min-width:110px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--fg-subtle)">Semana${curIdx === 0 ? ' actual' : ''}</div>
+        <div style="font-size:16px;font-weight:800;font-variant-numeric:tabular-nums">${fmtFecha(selTanda && selTanda.fecha) || ('#' + (selTanda ? selTanda.id : '?'))}</div>
+      </div>
+      ${arrowBtn('next', curIdx > 0 ? tandas[curIdx - 1].id : null)}
     </div>` : '';
   return `
     <div style="padding:var(--s-4);max-width:1100px">
@@ -3527,7 +3535,7 @@ function renderCorte() {
       </div>
       <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">Tu semana de un vistazo — una fila por cliente. Tocá un cliente para ver sus diseños; tocá un diseño para moverlo de etapa.</p>
       ${sel ? corteDetalleHtml(sel) : ''}
-      ${tandaToggle}
+      ${navWeek}
       ${corteHybridBoard(boardPedidos)}
       <div style="height:22px"></div>
       ${corteAprendizajeHtml()}
@@ -3639,8 +3647,8 @@ async function bindCorte() {
   document.querySelectorAll('[data-corte-separar]').forEach(btn => {
     btn.onclick = () => corteBulk('avanzar_bulk', { ids: [parseInt(btn.getAttribute('data-corte-separar'), 10)], estado: 'embalado' });
   });
-  // Segmentado tanda actual / todas las tandas en el board admin.
-  document.querySelectorAll('[data-corte-tanda]').forEach(b => { b.onclick = () => { STATE.corteVerTodas = b.getAttribute('data-corte-tanda') === 'todas'; render(); }; });
+  // Navegador de semanas del board admin: ‹ / › cambian la tanda seleccionada.
+  document.querySelectorAll('[data-corte-week-to]').forEach(b => { b.onclick = () => { const t = b.getAttribute('data-corte-week-to'); if (t) { STATE.corteTandaSel = parseInt(t, 10); render(); } }; });
   // Aprendizaje del corte: buscar mejoras (síntesis) + aprobar/descartar propuestas al KB.
   const aprender = document.querySelector('[data-corte-aprender]');
   if (aprender) aprender.onclick = async () => {
