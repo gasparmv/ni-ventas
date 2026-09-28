@@ -2774,7 +2774,7 @@ function renderOcCartelBlock(c, i, n, corporea) {
   return `
     <div style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-2);background:var(--ink-050)">
       ${head}
-      <div style="margin-bottom:6px"><label style="${lbl}">Trabajo / cartel *</label><input id="oc-cartel-${i}" value="${escapeHtml(c.cartel || '')}" placeholder="ej. Perfumería" style="${inp}"></div>
+      <div style="margin-bottom:6px;position:relative"><label style="${lbl}">Trabajo / cartel *</label><input id="oc-cartel-${i}" data-oc-ac="${i}" autocomplete="off" value="${escapeHtml(c.cartel || '')}" placeholder="ej. Perfumería — elegí de la cotización" style="${inp}"><div id="oc-ac-${i}" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:6;background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:var(--r-sm);max-height:190px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.5)"></div></div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
         <div style="flex:1"><label style="${lbl}">Medidas *</label><input id="oc-medidas-${i}" value="${escapeHtml(c.medidas || '')}" placeholder="ej. 80x70" style="${inp}"></div>
         <div style="flex:1"><label style="${lbl}">Color *</label><input id="oc-color-${i}" value="${escapeHtml(c.color || '')}" placeholder="ej. Blanco cálido" style="${inp}"></div>
@@ -2843,6 +2843,13 @@ function bindCrearOcModal() {
     el.addEventListener('focus', () => ocCorpAutocomplete(i));
     el.onblur = () => setTimeout(() => { const box = document.getElementById('oc-corp-ac-' + i); if (box) box.style.display = 'none'; }, 150);
   });
+  // OC neón: autocomplete del Trabajo/cartel contra las cotizaciones (STATE.presupuestos, por nombre).
+  document.querySelectorAll('[data-oc-ac]').forEach(el => {
+    const i = parseInt(el.dataset.ocAc, 10);
+    el.addEventListener('input', () => ocAutocomplete(i));
+    el.addEventListener('focus', () => ocAutocomplete(i));
+    el.onblur = () => setTimeout(() => { const box = document.getElementById('oc-ac-' + i); if (box) box.style.display = 'none'; }, 150);
+  });
   const gen = document.getElementById('oc-gen'); if (gen) gen.onclick = () => { readOcModalDOM(); STATE.ocModal.texto = composeOcText(STATE.ocModal); render(); };
   const cf = document.getElementById('oc-confirm'); if (cf) cf.onclick = confirmCrearOc;
 }
@@ -2904,6 +2911,41 @@ function ocCorpPickBrief(i, k) {
   const box = document.getElementById('oc-corp-ac-' + i); if (box) box.style.display = 'none';
   render();
   toast('Traído del brief: ' + (b.cliente_nombre || ''));
+}
+// OC NEÓN: autocomplete del Trabajo/cartel contra las cotizaciones (STATE.presupuestos) por nombre.
+// Mismo patrón que el modal "Cargar pedido" (pmCartelAutocomplete). Antes el campo neón no tenía
+// desplegable (solo el corpóreo) → "no matcheaba por nombre".
+function ocAutocomplete(i) {
+  const input = document.getElementById('oc-cartel-' + i);
+  const box = document.getElementById('oc-ac-' + i);
+  if (!input || !box) return;
+  const q = normName(input.value);
+  if (q.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const matches = (STATE.presupuestos || []).filter(p => p.nombre && normName(p.nombre).includes(q)).slice(0, 8);
+  if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  STATE._ocAcMatches = matches;
+  box.innerHTML = matches.map((p, k) => `<div data-oc-pick="${i}|${k}" style="padding:7px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border)"><b>${escapeHtml(p.nombre)}</b><span style="color:var(--fg-mute)"> · ${escapeHtml(p.tipo || '')}${p.ancho ? (' · ' + p.ancho + '×' + (p.tamCm || '?') + 'cm') : ''}${p.neonMt ? (' · ' + p.neonMt + 'm neón') : ''}</span></div>`).join('');
+  box.style.display = 'block';
+  box.querySelectorAll('[data-oc-pick]').forEach(el => el.onmousedown = (ev) => {
+    ev.preventDefault(); // antes del blur del input
+    const parts = el.dataset.ocPick.split('|');
+    ocPickCotizacion(parseInt(parts[0], 10), parseInt(parts[1], 10));
+  });
+}
+// Elige una cotización del desplegable y pre-llena el ítem neón (nombre + medidas). El precio y el
+// color los pone Gaspar (la cotización del Sheet no los trae fiables).
+function ocPickCotizacion(i, k) {
+  const p = (STATE._ocAcMatches || [])[k];
+  if (!p) return;
+  readOcModalDOM();
+  const c = (STATE.ocModal.carteles || [])[i]; if (!c) return;
+  c.cartel = p.nombre;
+  if (p.ancho && p.tamCm) c.medidas = `${p.ancho}x${p.tamCm}`;
+  else if (p.tamCm) c.medidas = String(p.tamCm);
+  STATE.ocModal.texto = composeOcText(STATE.ocModal);
+  const box = document.getElementById('oc-ac-' + i); if (box) box.style.display = 'none';
+  render();
+  toast('Traído de la cotización: ' + (p.nombre || ''));
 }
 async function confirmCrearOc() {
   if (STATE.ocModalSaving) return;
