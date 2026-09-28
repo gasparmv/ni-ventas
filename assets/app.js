@@ -9185,16 +9185,21 @@ async function loadWaContactNames() {
 
 // ===== Labels =====
 async function loadLabels() {
-  if (chatState.labelsLoaded) return;
+  if (chatState.labelsLoaded || chatState._labelsLoading) return;
+  chatState._labelsLoading = true;
   try {
     const [lr, clr] = await Promise.all([
       fetch(CONFIG.trackerUrl + '/admin/labels', { headers: authHeaders() }),
       fetch(CONFIG.trackerUrl + '/admin/contact-labels', { headers: authHeaders() })
     ]);
     if (lr.ok) { const j = await lr.json(); chatState.labels = j.labels || []; }
-    if (clr.ok) { const j = await clr.json(); chatState.contactLabels = j.contactLabels || {}; }
-    chatState.labelsLoaded = true;
-  } catch (_) {}
+    let clOk = false;
+    if (clr.ok) { const j = await clr.json(); chatState.contactLabels = j.contactLabels || {}; clOk = true; }
+    // Solo marcamos "cargado" si el fetch de contact-labels ANDUVO. Si falla (timeout de D1, intermitente),
+    // dejamos labelsLoaded=false para que reintente: si no, contactLabels queda {} y filtrar por etiqueta
+    // muestra la bandeja EN BLANCO hasta recargar la página (el mini-bug del filtro "Servicio de corte").
+    if (clOk) chatState.labelsLoaded = true;
+  } catch (_) {} finally { chatState._labelsLoading = false; }
 }
 
 // ===== Notas por contacto =====
@@ -11631,6 +11636,8 @@ function renderChat() {
   }
   // Filter by labels
   if (chatState.filterLabels.length) {
+    // Reintento si las etiquetas de contactos no cargaron (evita la bandeja en blanco permanente).
+    if (!chatState.labelsLoaded) loadLabels().then(() => { if (chatState.labelsLoaded && chatState.filterLabels.length) refreshContactList(); });
     filtered = filtered.filter(c => {
       const cLabels = chatState.contactLabels[c.phone] || [];
       return chatState.filterLabels.every(lid => cLabels.includes(lid));
@@ -14719,7 +14726,12 @@ function refreshContactList() {
   // Filtrado local rápido
   if (search) filtered = filtered.filter(c => (c.name || '').toLowerCase().includes(search) || c.phone.includes(search) || (c.lastMsg || '').toLowerCase().includes(search));
   if (chatState.filterUnreadOnly) filtered = filtered.filter(c => (c.unread || 0) > 0);
-  if (chatState.filterLabels.length) filtered = filtered.filter(c => { const cl = chatState.contactLabels[c.phone] || []; return chatState.filterLabels.every(lid => cl.includes(lid)); });
+  if (chatState.filterLabels.length) {
+    // Si las etiquetas de contactos todavía no cargaron (o el fetch falló), reintentamos y re-renderizamos
+    // cuando lleguen — así el filtro no deja la bandeja en blanco de forma permanente.
+    if (!chatState.labelsLoaded) loadLabels().then(() => { if (chatState.labelsLoaded && chatState.filterLabels.length) refreshContactList(); });
+    filtered = filtered.filter(c => { const cl = chatState.contactLabels[c.phone] || []; return chatState.filterLabels.every(lid => cl.includes(lid)); });
+  }
 
   // Si hay búsqueda activa, agregar contactos del backend que no están ya
   // en la lista (matchean por historial profundo).
