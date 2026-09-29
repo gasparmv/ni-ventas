@@ -2574,13 +2574,21 @@ async function processPrecotizPilot(env) {
   //  - lead 'completo' con el presupuesto YA enviado (algún brief 'enviado') -> sale de la
   //    bandeja (pasa a 'cotizado' y se le saca la etiqueta).
   //  - lead 'completo' todavía pendiente -> se asegura la etiqueta (backfill + auto-reparación).
+  // ID de "📋 Para cotizar" UNA vez por tick (antes cada paraCotizarTag hacía ensureLabelId + labelSuppressed
+  // + INSERT → ~196 queries/min re-poniendo etiquetas que ya estaban; mismo patrón que la sobrecarga del 3-sep).
+  let pcId = null;
+  try { pcId = await ensureLabelId(env, PARA_COTIZAR_LABEL_NAME, PARA_COTIZAR_LABEL_COLOR); } catch (_) {}
+  // Un presupuesto saliente recién cuenta pasados 3 min: la plantilla se guarda 'sent' y el 'failed' (asíncrono,
+  // por webhook) llega después. Sin este margen, un presupuesto que nunca le llegó al cliente lo sacaba de la
+  // bandeja para siempre (el pilot pasa a 'cotizado' y no se revierte).
+  const _presupMadura = "m.ts <= strftime('%Y-%m-%dT%H:%M:%fZ','now','-3 minutes')";
   try {
     // Acotado a pilots RECIENTES (últimos 3 días): antes reconciliaba TODOS los 'activo'/'completo'
     // (llegaron a 829 acumulados) cada tick → sobrecargó el cron y frenó el bot (3-sep). Los viejos
     // que quedan colgados no necesitan reconciliación (el lead ya se enfrió). Esto evita que se repita.
     const _comp = await env.DB.prepare(
-      "SELECT p.phone, p.estado, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados, (SELECT COUNT(*) FROM wa_messages m WHERE m.phone = p.phone AND m.direction = 'outbound' AND m.body LIKE '%concepto de seña%') AS presup_manual FROM precotiz_pilot p WHERE p.estado IN ('activo','completo') AND p.updated_at >= datetime('now','-3 days')"
-    ).all();
+      "SELECT p.phone, p.estado, (SELECT COUNT(*) FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'enviado') AS enviados, (SELECT COUNT(*) FROM wa_messages m WHERE m.phone = p.phone AND m.direction = 'outbound' AND IFNULL(m.status,'') != 'failed' AND " + _presupMadura + " AND (m.body LIKE '%concepto de seña%' OR " + _quoteSql('m.body') + ")) AS presup_manual, EXISTS(SELECT 1 FROM contact_labels c2 WHERE c2.phone = p.phone AND c2.label_id = ?) AS has_pc FROM precotiz_pilot p WHERE p.estado IN ('activo','completo') AND p.updated_at >= datetime('now','-3 days')"
+    ).bind(pcId || -1).all();
     for (const r of (_comp.results || [])) {
       // Sale de la bandeja si YA se le pasó presupuesto: por brief 'enviado' (flujo del CRM) O por un
       // presupuesto mandado A MANO (saliente con "concepto de seña", la firma del presupuesto). Sin
@@ -2591,8 +2599,29 @@ async function processPrecotizPilot(env) {
         try { await env.DB.prepare("UPDATE precotiz_pilot SET estado = 'cotizado', updated_at = ? WHERE phone = ? AND estado IN ('activo','completo')").bind(new Date().toISOString(), r.phone).run(); } catch (_) {}
         await paraCotizarTag(env, r.phone, false);
         await precotizTag(env, r.phone, false);
-      } else if (r.estado === 'completo') {
-        await paraCotizarTag(env, r.phone, true);
+      } else if (r.estado === 'completo' && !r.has_pc) {
+        await paraCotizarTag(env, r.phone, true);   // solo si FALTA (antes re-escribía cada minuto aunque ya estuviera)
+      }
+    }
+  } catch (_) {}
+  // Limpieza por ETIQUETA (independiente de la ventana de 3 días de arriba): todo chat con "📋 Para cotizar"
+  // que recibió presupuesto (brief 'enviado', "concepto de seña" o texto/plantilla de presupuesto) DESPUÉS de
+  // que se le puso la etiqueta sale de la bandeja. Sin esto, si el vendedor cotiza días después de que el bot
+  // completó (caso Facu, 29-sep), el pilot ya no entra en la ventana de 3 días y la etiqueta quedaba pegada.
+  // "Después de la etiqueta" (>= cl.created_at): si un cliente ya cotizado vuelve a pedir otro cartel y el
+  // vendedor le pone "Para cotizar" a mano, el presupuesto VIEJO no se la saca cada minuto. Acotado a los
+  // chats ETIQUETADOS (decenas; índices contact_labels(label_id), wa_messages(phone), briefs(cliente_wa_id)).
+  try {
+    if (pcId) {
+      const _stuck = (await env.DB.prepare(
+        "SELECT cl.phone FROM contact_labels cl WHERE cl.label_id = ? AND (" +
+        "EXISTS(SELECT 1 FROM briefs b WHERE b.cliente_wa_id = cl.phone AND b.estado = 'enviado' AND b.enviado_at >= cl.created_at) OR " +
+        "EXISTS(SELECT 1 FROM wa_messages m WHERE m.phone = cl.phone AND m.direction = 'outbound' AND IFNULL(m.status,'') != 'failed' AND m.ts >= cl.created_at AND " + _presupMadura + " AND (m.body LIKE '%concepto de seña%' OR " + _quoteSql('m.body') + ")))"
+      ).bind(pcId).all()).results || [];
+      for (const r of _stuck) {
+        try { await env.DB.prepare("UPDATE precotiz_pilot SET estado = 'cotizado', updated_at = ? WHERE phone = ? AND estado IN ('activo','completo')").bind(new Date().toISOString(), r.phone).run(); } catch (_) {}
+        await paraCotizarTag(env, r.phone, false);
+        await precotizTag(env, r.phone, false);
       }
     }
   } catch (_) {}
@@ -8701,12 +8730,7 @@ async function analyticsPrecotizFunnel(env, url) {
            OR lower(body) GLOB '*[0-9]cm*'      OR lower(body) GLOB '*[0-9] cm*'
            OR lower(body) GLOB '*[0-9] mts*'    OR lower(body) GLOB '*[0-9] metro*'
         ) THEN 1 ELSE 0 END) AS has_med,
-        MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND (
-              substr(body,1,26)='Te comparto el presupuesto'
-           OR substr(body,1,26)='Te comparto la información'
-           OR substr(body,1,34)='[plantilla: presupuesto_detallado]'
-           OR substr(body,1,33)='[plantilla: presupuesto_corporea]'
-        ) THEN 1 ELSE 0 END) AS has_quote
+        MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND ${_SC_QUOTE_SQL} THEN 1 ELSE 0 END) AS has_quote
       FROM wa_messages
       WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
         AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573','5491133708544')
@@ -8761,7 +8785,13 @@ async function analyticsPrecotizFunnel(env, url) {
 // un lead destildado a mano NO se re-etiqueta (evita falsas oportunidades repetidas).
 const SIN_COTIZAR_LABEL_NAME = '💰 Sin cotizar';
 const SIN_COTIZAR_LABEL_COLOR = '#22c55e';
-const _SC_QUOTE_SQL = "(substr(body,1,26)='Te comparto el presupuesto' OR substr(body,1,26)='Te comparto la información' OR substr(body,1,34)='[plantilla: presupuesto_detallado]' OR substr(body,1,33)='[plantilla: presupuesto_corporea]' OR substr(body,1,38)='[plantilla: presupuesto_detallado_img]' OR substr(body,1,37)='[plantilla: presupuesto_corporea_img]')";
+// Un saliente cuenta como PRESUPUESTO si es el texto del cotizador o CUALQUIER plantilla presupuesto_*
+// (detallado, _img, _img2, _img3, corporea, _v2_img…). Antes se listaban los nombres EXACTOS y al pasar a
+// presupuesto_detallado_img3 / presupuesto_corporea_v2_img dejó de matchear: la etiqueta "Sin cotizar" no
+// se sacaba y encima se le PONÍA a leads ya cotizados por plantilla (29-sep). Genérico = no se rompe con _img4.
+// substr (no LIKE) porque '_' es comodín en LIKE. col = columna del body ('body' o 'm.body').
+const _quoteSql = (col) => `(substr(${col},1,26)='Te comparto el presupuesto' OR substr(${col},1,26)='Te comparto la información' OR substr(${col},1,24)='[plantilla: presupuesto_')`;
+const _SC_QUOTE_SQL = _quoteSql('body');
 async function syncSinCotizar(env, opts = {}) {
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS sin_cotizar (phone TEXT PRIMARY KEY, name TEXT, canal TEXT, quotable_since TEXT, created_at TEXT, quoted_at TEXT, escalated_at TEXT)").run(); } catch (_) {}
   try { await env.DB.prepare("ALTER TABLE sin_cotizar ADD COLUMN escalated_at TEXT").run(); } catch (_) {}
@@ -8788,7 +8818,9 @@ async function syncSinCotizar(env, opts = {}) {
     if (phones.length) {
       const inList = phones.map(p => `'${p}'`).join(',');
       const quoted = (await env.DB.prepare(
-        `SELECT DISTINCT phone FROM wa_messages WHERE phone IN (${inList}) AND direction='outbound' AND IFNULL(status,'')!='failed' AND ${_SC_QUOTE_SQL}`
+        // ts <= now-3min: el 'failed' de una plantilla llega asíncrono por webhook; sin margen, un presupuesto que
+        // nunca llegó destildaba y seteaba quoted_at (tag-once → no se re-etiquetaba nunca más).
+        `SELECT DISTINCT phone FROM wa_messages WHERE phone IN (${inList}) AND direction='outbound' AND IFNULL(status,'')!='failed' AND ts <= strftime('%Y-%m-%dT%H:%M:%fZ','now','-3 minutes') AND ${_SC_QUOTE_SQL}`
       ).all()).results || [];
       for (const q of quoted) {
         try {
