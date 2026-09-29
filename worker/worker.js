@@ -3381,7 +3381,12 @@ async function maybeReporteLlamar(env) {
       for (let i = 0; i < chunks.length; i++) {
         const parte = chunks.length > 1 ? `(${i + 1}/${chunks.length}) ${chunks[i]}` : chunks[i];
         let r = null;
-        try { r = await waSendTemplate(env, ph, 'reporte_seguir', 'es_AR', [parte.slice(0, 900)]); } catch (_) {}
+        // reporte_seguir2 = UTILITY: Meta la entrega a Bruno aunque no tenga ventana ni interactúe.
+        // Si todavía no está aprobada, este waSendTemplate falla y cae a reporte_seguir (MARKETING, que
+        // Meta NO entrega a un contacto sin engagement — por eso a Bruno nunca le llegaba), y de ahí a
+        // texto libre (solo en ventana). Cuando la v2 apruebe COMO UTILITY, Bruno empieza a recibirla.
+        try { r = await waSendTemplate(env, ph, 'reporte_seguir2', 'es_AR', [fechaAR.split('-').reverse().join('/'), parte.slice(0, 900)]); } catch (_) {}
+        if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'reporte_seguir', 'es_AR', [parte.slice(0, 900)]); } catch (_) {} }
         if (r && r.ok) { tplOk = true; anyOk = true; } else { tplFailed = true; break; }
         if (i < chunks.length - 1) await new Promise(rs => setTimeout(rs, 400));   // pequeño delay entre tramos
       }
