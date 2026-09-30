@@ -3277,18 +3277,12 @@ async function maybeRankingInsumosSemanal(env) {
   } catch (_) {}
 }
 
-// ===== Aviso diario "leads para SEGUIR" (a pedido de Gaspar, 29-jul; ampliado ago) =====
-// Cada mañana (9 AR) manda a Gaspar + hermano la lista de leads que recibieron el fup 1
-// del presupuesto AYER y todavía NO cerraron. Incluye a los que NO contestaron y a los
-// que contestaron algo pero no llegaron al cierre (marca "respondió" a estos últimos, y
-// los pone primero). Incluye también los de Instagram (se muestran con @usuario/nombre,
-// sin teléfono, porque el id de IG no es llamable). Excluye a los que ya avanzaron al
-// cierre/compra (orden de compra / datos de pago / CBU / alias). Va por plantilla (llega
-// fuera de ventana) con fallback a texto libre. Dedup por día. Si no hay nadie, no molesta.
-async function maybeReporteLlamar(env) {
+// Arma la lista base "leads para llamar": fup de presupuesto de AYER + chats etiquetados "FUP" (7 días),
+// sin cierre/pago, con el precio de la tanda de carteles. La comparten el aviso de las 9 AR a Gaspar+Bruno
+// (maybeReporteLlamar) y la lista de Agus (maybeListaAgus). Cada fila trae assigned_to/inbox para poder
+// filtrar por bandeja. Devuelve { rows, precioInfo } o null si falla la query principal.
+async function buildLeadsParaLlamar(env) {
   try {
-    const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
-    if ((await kvGet(env, 'reporte_llamar_sent', '')) === fechaAR) return;
     // El body es un fup de presupuesto si arranca con alguno de los prefijos conocidos.
     const fupCond = ALL_FOLLOWUP_PREFIXES_TEXT.map(() => 'body LIKE ?').join(' OR ');
     const fupBinds = ALL_FOLLOWUP_PREFIXES_TEXT.map(p => p + '%');
@@ -3297,7 +3291,7 @@ async function maybeReporteLlamar(env) {
     const sql =
       "WITH fups AS (SELECT phone, MIN(ts) AS first_fup FROM wa_messages " +
       "  WHERE direction='outbound' AND (" + fupCond + ") GROUP BY phone) " + // incluye IG (se muestran con @usuario, no con teléfono)
-      "SELECT f.phone, f.first_fup, s.contact_name, " +
+      "SELECT f.phone, f.first_fup, s.contact_name, s.assigned_to, s.inbox, " +
       // pedido/precio se calculan en JS (sumando la TANDA de carteles), no acá — ver bloque precioInfo abajo.
       "  (SELECT CASE WHEN EXISTS(SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='inbound' AND m.msg_type!='status' AND m.ts > f.first_fup) THEN 1 ELSE 0 END) AS respondio " + // contestó algo después del fup
       "FROM fups f " +
@@ -3307,7 +3301,7 @@ async function maybeReporteLlamar(env) {
       "  AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='outbound' AND (" + cierreCond + ")) " + // sigue excluyendo a los que ya arrancaron el cierre/pago
       "ORDER BY respondio DESC, f.first_fup ASC LIMIT 60";
     let rows = [];
-    try { rows = (await env.DB.prepare(sql).bind(...fupBinds, ...cierreBinds).all()).results || []; } catch (_) { return; }
+    try { rows = (await env.DB.prepare(sql).bind(...fupBinds, ...cierreBinds).all()).results || []; } catch (_) { return null; }
     // + Chats etiquetados "FUP" que todavía NO cerraron (seguimiento manual del vendedor):
     //   se suman a la lista de llamadas aunque no tengan un fup automático de ayer.
     try {
@@ -3316,7 +3310,7 @@ async function maybeReporteLlamar(env) {
       if (fupLabelId) {
         const seen = new Set(rows.map(r => r.phone));
         const sqlFup =
-          "SELECT cl.phone, NULL AS first_fup, s.contact_name, 0 AS respondio " +
+          "SELECT cl.phone, NULL AS first_fup, s.contact_name, s.assigned_to, s.inbox, 0 AS respondio " +
           "FROM contact_labels cl LEFT JOIN wa_chats_summary s ON s.phone = cl.phone " +
           "WHERE cl.label_id = ? " +
           "  AND substr(cl.created_at,1,10) >= date('now','-3 hours','-7 days') " +   // solo los etiquetados "FUP" en los últimos 7 días (no arrastra etiquetas viejas)
@@ -3325,7 +3319,7 @@ async function maybeReporteLlamar(env) {
         for (const t of fupRows) { if (t.phone && !seen.has(t.phone)) { t.esFup = 1; rows.push(t); seen.add(t.phone); } }
       }
     } catch (_) {}
-    if (!rows.length) { await kvSet(env, 'reporte_llamar_sent', fechaAR); return; }
+    if (!rows.length) return { rows, precioInfo: {} };
     // ===== PRECIO CORRECTO (fix multi-cartel, 3-sep) =====
     // El bug viejo tomaba UN solo brief (el más nuevo por enviado_at) → en multi-cartel mostraba un
     // cartel suelto (ej. $130k en vez de $1.088.000). Ahora, por lead, sumamos la TANDA de cotización
@@ -3335,11 +3329,17 @@ async function maybeReporteLlamar(env) {
     const precioInfo = {}; // phone -> { precio, count, pedido }
     try {
       const phones = rows.map(r => String(r.phone));
-      const phPlace = phones.map(() => '?').join(',');
-      const briefsRs = phones.length ? ((await env.DB.prepare(
-        "SELECT cliente_wa_id AS phone, id, enviado_at, cliente_nombre, COALESCE(NULLIF(precio_final,0),NULLIF(precio_trans,0),NULLIF(precio_negro,0)) AS p " +
-        "FROM briefs WHERE estado='enviado' AND cliente_wa_id IN (" + phPlace + ") ORDER BY cliente_wa_id, enviado_at DESC, id DESC"
-      ).bind(...phones).all()).results || []) : [];
+      // En LOTES de 90: D1 acepta máx 100 parámetros por query; con >100 leads (60 de fup + 60 de la etiqueta
+      // FUP) la query fallaba, el catch la tragaba y la lista salía SIN precios.
+      const briefsRs = [];
+      for (let k = 0; k < phones.length; k += 90) {
+        const lote = phones.slice(k, k + 90);
+        const rsL = (await env.DB.prepare(
+          "SELECT cliente_wa_id AS phone, id, enviado_at, cliente_nombre, COALESCE(NULLIF(precio_final,0),NULLIF(precio_trans,0),NULLIF(precio_negro,0)) AS p " +
+          "FROM briefs WHERE estado='enviado' AND cliente_wa_id IN (" + lote.map(() => '?').join(',') + ") ORDER BY cliente_wa_id, enviado_at DESC, id DESC"
+        ).bind(...lote).all()).results || [];
+        briefsRs.push(...rsL);
+      }
       const byPhone = {};
       for (const b of briefsRs) { (byPhone[String(b.phone)] = byPhone[String(b.phone)] || []).push(b); }
       const SIX_H = 6 * 3600 * 1000, TWO_H = 2 * 3600 * 1000;
@@ -3363,10 +3363,14 @@ async function maybeReporteLlamar(env) {
       // Fallback: leads SIN brief (cotizados por el formulario→Sheet) → parsear el $ del mensaje de presupuesto.
       const sinBrief = rows.filter(r => !precioInfo[String(r.phone)]).map(r => String(r.phone));
       if (sinBrief.length) {
-        const ph3 = sinBrief.map(() => '?').join(',');
-        const msgRs = (await env.DB.prepare(
-          "SELECT phone, body FROM wa_messages WHERE direction='outbound' AND phone IN (" + ph3 + ") AND body LIKE 'Te comparto%' ORDER BY phone, ts DESC"
-        ).bind(...sinBrief).all()).results || [];
+        const msgRs = [];
+        for (let k = 0; k < sinBrief.length; k += 90) {   // lotes de 90 (límite de parámetros de D1)
+          const lote = sinBrief.slice(k, k + 90);
+          const rsL = (await env.DB.prepare(
+            "SELECT phone, body FROM wa_messages WHERE direction='outbound' AND phone IN (" + lote.map(() => '?').join(',') + ") AND body LIKE 'Te comparto%' ORDER BY phone, ts DESC"
+          ).bind(...lote).all()).results || [];
+          msgRs.push(...rsL);
+        }
         const seenP = new Set();
         for (const m of msgRs) {
           const p = String(m.phone);
@@ -3376,33 +3380,68 @@ async function maybeReporteLlamar(env) {
         }
       }
     } catch (_) {}
-    const lines = rows.map((r, i) => {
-      const nom = (r.contact_name || '').trim() || 's/nombre';
-      const esIg = String(r.phone).length > 14; // IG: id largo, no es teléfono → se muestra el @usuario/nombre, sin "+"
-      const quien = esIg ? `${nom} (IG)` : `${nom} — +${r.phone}`;
-      const pi = precioInfo[String(r.phone)] || {};
-      const pedido = (pi.pedido || '').trim();
-      const precioN = pi.precio || 0;
-      const precioStr = precioN ? '$' + String(precioN).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
-      const precio = precioStr && pi.count > 1 ? `${precioStr} · ${pi.count} carteles` : precioStr;
-      const marca = r.esFup ? 'FUP' : (r.respondio ? 'respondió' : '');
-      const extra = [pedido ? `"${pedido}"` : '', precio, marca].filter(Boolean).join(' · ');
-      return `${i + 1}. ${quien}${extra ? ' · ' + extra : ''}`;
-    });
+    return { rows, precioInfo };
+  } catch (_) { return null; }
+}
+// Línea de la lista para llamar (mismo formato para Bruno y Agus). tag = prefijo opcional (ej. "[Joaco]").
+function lineaLlamar(r, i, precioInfo, tag) {
+  const nom = (r.contact_name || '').trim() || 's/nombre';
+  const esIg = String(r.phone).length > 14; // IG: id largo, no es teléfono → se muestra el @usuario/nombre, sin "+"
+  const quien = esIg ? `${nom} (IG)` : `${nom} — +${r.phone}`;
+  const pi = precioInfo[String(r.phone)] || {};
+  const pedido = (pi.pedido || '').trim();
+  const precioN = pi.precio || 0;
+  const precioStr = precioN ? '$' + String(precioN).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
+  const precio = precioStr && pi.count > 1 ? `${precioStr} · ${pi.count} carteles` : precioStr;
+  const marca = r.esFup ? 'FUP' : (r.respondio ? 'respondió' : '');
+  const extra = [pedido ? `"${pedido}"` : '', precio, marca].filter(Boolean).join(' · ');
+  return `${i + 1}. ${tag ? tag + ' ' : ''}${quien}${extra ? ' · ' + extra : ''}`;
+}
+// La plantilla topea ~900 chars por variable y NO acepta saltos de línea. Si la lista es larga, la
+// partimos en TRAMOS (cada uno entra en el límite, separador " | ") y se manda un mensaje por tramo
+// → se ve TODA la lista, sin el "+N más" que la cortaba.
+function gruposTramos(lines) {   // → [[línea saneada, ...], ...] (un grupo por tramo)
+  const grupos = [];
+  let cur = [], curLen = 0;
+  for (const ln of lines) {
+    const una = ln.replace(/\n+/g, ' ').replace(/\s{4,}/g, '   ');
+    if (cur.length && curLen + una.length + 5 > 850) { grupos.push(cur); cur = []; curLen = 0; }
+    cur.push(una); curLen += una.length + 5;
+  }
+  if (cur.length) grupos.push(cur);
+  return grupos;
+}
+function tramosPlantilla(lines) { return gruposTramos(lines).map(g => g.join('  |  ')); }
+// Texto libre partido en bloques de <= 3800 chars (WhatsApp rechaza textos de más de 4096).
+function bloquesTexto(header, lines) {
+  const out = [];
+  let cur = header;
+  for (const ln of lines) {
+    if (cur.trim() && cur.length + ln.length + 1 > 3800) { out.push(cur.trimEnd()); cur = ''; }
+    cur += ln + '\n';
+  }
+  if (cur.trim()) out.push(cur.trimEnd());
+  return out;
+}
+// ===== Aviso diario "leads para SEGUIR" (a pedido de Gaspar, 29-jul; ampliado ago) =====
+// Cada mañana (9 AR) manda a Gaspar + hermano la lista de leads que recibieron el fup 1
+// del presupuesto AYER y todavía NO cerraron. Incluye a los que NO contestaron y a los
+// que contestaron algo pero no llegaron al cierre (marca "respondió" a estos últimos, y
+// los pone primero). Incluye también los de Instagram (se muestran con @usuario/nombre,
+// sin teléfono, porque el id de IG no es llamable). Excluye a los que ya avanzaron al
+// cierre/compra (orden de compra / datos de pago / CBU / alias). Va por plantilla (llega
+// fuera de ventana) con fallback a texto libre. Dedup por día. Si no hay nadie, no molesta.
+async function maybeReporteLlamar(env) {
+  try {
+    const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+    if ((await kvGet(env, 'reporte_llamar_sent', '')) === fechaAR) return;
+    const base = await buildLeadsParaLlamar(env);
+    if (!base) return;
+    const { rows, precioInfo } = base;
+    if (!rows.length) { await kvSet(env, 'reporte_llamar_sent', fechaAR); return; }
+    const lines = rows.map((r, i) => lineaLlamar(r, i, precioInfo, ''));
     const listaTxt = lines.join('\n');
-    // La plantilla topea ~900 chars por variable y NO acepta saltos de línea. Si la lista es
-    // larga, la partimos en TRAMOS (cada uno entra en el límite, separador " | ") y mandamos
-    // un mensaje por tramo → se ve TODA la lista, sin el "+N más" que la cortaba.
-    const chunks = [];
-    {
-      let cur = [], curLen = 0;
-      for (const ln of lines) {
-        const una = ln.replace(/\n+/g, ' ').replace(/\s{4,}/g, '   ');
-        if (cur.length && curLen + una.length + 5 > 850) { chunks.push(cur.join('  |  ')); cur = []; curLen = 0; }
-        cur.push(una); curLen += una.length + 5;
-      }
-      if (cur.length) chunks.push(cur.join('  |  '));
-    }
+    const chunks = tramosPlantilla(lines);
     const texto = `📞 Para seguir hoy — ${rows.length} lead(s) del presupuesto que todavía no cerraron:\n\n${listaTxt}`;
     let anyOk = false;
     for (const ph of REPORTE_DIARIO_PHONES) {
@@ -3424,6 +3463,113 @@ async function maybeReporteLlamar(env) {
     }
     if (anyOk) await kvSet(env, 'reporte_llamar_sent', fechaAR);
   } catch (_) {}
+}
+
+// ===== Lista diaria "para llamar" para AGUS (a pedido de Gaspar, 30-sep) =====
+// La MISMA lista que la de Gaspar+Bruno (fup de presupuesto de ayer + chats etiquetados "FUP", sin cierre),
+// pero solo los chats de la bandeja de Agus o la de Joaco, con la bandeja marcada en cada uno, para que ella
+// los llame a todos. Se pisa con la de Bruno A PROPÓSITO (llaman los dos). Va por reporte_seguir2 (UTILITY:
+// le llega aunque Agus no le escriba al número; una MARKETING Meta no se la entrega — lo que pasó con Bruno).
+// 9 AR (en serie después de la de Bruno). Robustez (review 30-sep):
+//  - la lista del día se arma UNA vez y se guarda en kv → los reintentos mandan la misma (sin re-correr la query);
+//  - el intento se cuenta ANTES de mandar → máx 3 intentos/día aunque falle guardar la marca (no 12 copias);
+//  - progreso por tramo en kv → si sale la parte 1 y falla la 2, el próximo tick sigue desde la 2;
+//  - texto libre de respaldo SOLO si la ventana de 24h de Agus está abierta (con la ventana cerrada la API igual
+//    devuelve ok y rebota después → ocultaría la falla), partido en bloques < 4096;
+//  - si al 3er intento no salió completa, avisa a Gaspar. Último resultado en kv 'lista_agus_last'.
+// Kill-switch kv 'lista_agus_on' (default '1').
+const LISTA_AGUS_PHONE = '5492325472278';
+const BANDEJAS_NO_COMERCIALES = ['cursos', 'oculto', 'precotiz', 'privado', 'corte'];
+async function maybeListaAgus(env, opts = {}) {
+  const force = !!opts.force, dry = !!opts.dry, again = !!opts.again;
+  const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+  const K = { sent: 'lista_agus_sent', tries: 'lista_agus_try:' + fechaAR, next: 'lista_agus_next:' + fechaAR, data: 'lista_agus_data:' + fechaAR, last: 'lista_agus_last' };
+  try {
+    let tries = 0;
+    if (!dry) {
+      if (!force && (await kvGet(env, 'lista_agus_on', '1')) !== '1') return { skipped: 'off' };
+      if (!again && (await kvGet(env, K.sent, '')) === fechaAR) return { skipped: 'ya_enviada' };
+      if (!force) {
+        tries = parseInt(await kvGet(env, K.tries, '0'), 10) || 0;
+        if (tries >= 3) return { skipped: 'max_intentos' };
+        tries += 1;
+        await kvSet(env, K.tries, String(tries));   // se cuenta ANTES de mandar
+      }
+    }
+    let data = null;
+    if (!dry && !again) { try { const raw = await kvGet(env, K.data, ''); if (raw) data = JSON.parse(raw); } catch (_) { data = null; } }
+    if (!data || !Array.isArray(data.lines)) {
+      const base = await buildLeadsParaLlamar(env);
+      if (!base) {
+        if (!dry) await kvSet(env, K.last, JSON.stringify({ fecha: fechaAR, ok: false, error: 'query', intento: tries }));
+        return { error: 'query' };
+      }
+      // Bandeja: Agus = assigned_to 'agustina'; Joaco = no asignado a un secundario ('' o 'joaco'). Afuera: los de
+      // Facu y las bandejas no comerciales (cursos/privado/corte/…), que no son de ninguno de los dos.
+      const conBandeja = base.rows.map(r => {
+        const asg = String(r.assigned_to || '').toLowerCase();
+        if (BANDEJAS_NO_COMERCIALES.includes(String(r.inbox || ''))) return null;
+        if (asg === 'agustina') return { r, band: 'Agus' };
+        if (asg === '' || asg === 'joaco') return { r, band: 'Joaco' };
+        return null;
+      }).filter(Boolean);
+      // Primero los de su bandeja, después los de Joaco (sort estable: dentro de cada grupo queda el orden base).
+      conBandeja.sort((a, b) => (a.band === b.band ? 0 : (a.band === 'Agus' ? -1 : 1)));
+      data = {
+        lines: conBandeja.map((x, i) => lineaLlamar(x.r, i, base.precioInfo, '[' + x.band + ']')),
+        agus: conBandeja.filter(x => x.band === 'Agus').length
+      };
+      if (!dry) { await kvSet(env, K.data, JSON.stringify(data)); await kvSet(env, K.next, '0'); }
+    }
+    const lines = data.lines;
+    const resumen = { total: lines.length, agus: data.agus || 0, joaco: lines.length - (data.agus || 0) };
+    if (dry) return { ok: true, dry: true, ...resumen, lines };
+    if (!lines.length) {
+      await kvSet(env, K.sent, fechaAR);
+      await kvSet(env, K.last, JSON.stringify({ fecha: fechaAR, ok: true, ...resumen, enviado: false }));
+      return { ok: true, ...resumen, enviado: false };
+    }
+    const grupos = gruposTramos(lines);
+    const fechaDisp = fechaAR.split('-').reverse().join('/');
+    let next = again ? 0 : Math.min(grupos.length, parseInt(await kvGet(env, K.next, '0'), 10) || 0);
+    for (let i = next; i < grupos.length; i++) {
+      const tramo = grupos[i].join('  |  ');
+      const parte = grupos.length > 1 ? `(${i + 1}/${grupos.length}) ${tramo}` : tramo;
+      let r = null;
+      try { r = await waSendTemplate(env, LISTA_AGUS_PHONE, 'reporte_seguir2', 'es_AR', [fechaDisp, parte.slice(0, 900)]); } catch (_) {}
+      if (!r || !r.ok) break;
+      next = i + 1;
+      await kvSet(env, K.next, String(next));   // progreso: si se corta, el próximo tick sigue desde acá
+      if (i < grupos.length - 1) await new Promise(rs => setTimeout(rs, 400));
+    }
+    let completo = next >= grupos.length, via = 'plantilla';
+    if (!completo) {
+      let ventana = false;
+      try {
+        const w = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'status'").bind(LISTA_AGUS_PHONE).first();
+        ventana = !!(w && w.t && Date.now() - Date.parse(w.t) < 23 * 3600 * 1000);
+      } catch (_) {}
+      if (ventana) {
+        const faltan = grupos.slice(next).flat();
+        const header = next ? '📞 (sigue) Para llamar hoy:\n\n' : `📞 Para llamar hoy — ${lines.length} lead(s) con presupuesto sin cerrar (tu bandeja y la de Joaco):\n\n`;
+        let okTxt = true;
+        for (const b of bloquesTexto(header, faltan)) {
+          let r = null;
+          try { r = await waSendText(env, LISTA_AGUS_PHONE, b); } catch (_) {}
+          if (!r || !r.ok) { okTxt = false; break; }
+          await new Promise(rs => setTimeout(rs, 400));
+        }
+        if (okTxt) { completo = true; via = next ? 'plantilla+texto' : 'texto'; }
+      }
+    }
+    const res = { fecha: fechaAR, ok: completo, via, ...resumen, tramos: grupos.length, tramos_enviados: next, intento: tries };
+    await kvSet(env, K.last, JSON.stringify(res));
+    if (completo) await kvSet(env, K.sent, fechaAR);
+    else if (!force && tries >= 3) {
+      try { await precotizNotifyGaspar(env, `⚠️ La lista "para llamar" de Agus de hoy no salió completa (${next}/${grupos.length} partes tras 3 intentos). Se puede reintentar con POST /admin/lista-agus-test {"send":true}.`); } catch (_) {}
+    }
+    return res;
+  } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 
 // ===== Órdenes de compra (OC) — a pedido de Gaspar (ago-2026) =====
@@ -13446,6 +13592,14 @@ const handler = {
         });
       }
 
+      // Lista "para llamar" de Agus. POST {} = PREVIEW (no manda nada). POST {send:true} = la manda YA (o sigue
+      // desde la parte que faltó); si ya salió hoy NO la reenvía, salvo {send:true, again:true}. Solo Gaspar.
+      if (request.method === 'POST' && path === '/admin/lista-agus-test') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const _b = (await request.json().catch(() => null)) || {};
+        const _send = _b.send === true;
+        return json(await maybeListaAgus(env, { force: _send, dry: !_send, again: _send && _b.again === true }));
+      }
       // Forzar el aviso "leads para llamar" AHORA (para probarlo fuera del cron de las 9 AR).
       // Resetea el dedup del día y ejecuta la función real (plantilla + fallback a texto).
       if (request.method === 'POST' && path === '/admin/reporte-llamar-test') {
@@ -17654,7 +17808,9 @@ const handler = {
     ctx.waitUntil(maybeGuiaReporte(env));
     ctx.waitUntil(maybeGuiaReveal(env));
     // Aviso "leads para llamar" (fup 1 del presupuesto sin respuesta) a las 9 AR.
-    if (hAR === 9) ctx.waitUntil(maybeReporteLlamar(env));
+    // + lista "para llamar" de Agus (bandejas Agus + Joaco, misma base). En SERIE: las dos corren la misma
+    // query pesada; en paralelo duplicaban la carga sobre D1 en el mismo tick.
+    if (hAR === 9) ctx.waitUntil((async () => { await maybeReporteLlamar(env); await maybeListaAgus(env); })());
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
     if (hAR >= 8 && hAR < 21) ctx.waitUntil(processPendingTemplateSends(env));
     if (hAR === 5) ctx.waitUntil(maybeAdhocCleanup(env));   // limpieza diaria de plantillas ad-hoc viejas (kv adhoc_cleanup_on/_days)
