@@ -3794,19 +3794,22 @@ async function corteVigiaPago(env, phone, opts = {}) {
 // Dedup por ciclo de cobro (updated_at de las filas 'cobrando'): un cobro nuevo re-habilita el envío.
 async function corteAutoDetalle(env, phone) {
   let rows;
-  try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio, updated_at FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) { return false; }
+  try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) { return false; }
   if (!rows.length) return false;
-  const cobroAt = rows.reduce((m, r) => (r.updated_at && r.updated_at > m ? r.updated_at : m), '');
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
-  let prev; try { prev = await env.DB.prepare("SELECT cobro_at FROM corte_detalle_sent WHERE phone=?").bind(phone).first(); } catch (_) {}
-  if (prev && prev.cobro_at && prev.cobro_at >= cobroAt) return false; // ya se mandó el detalle de este cobro
-  // ¿Contestó DESPUÉS del cobro? (cualquier inbound que no sea status). Sin respuesta, no se manda nada.
-  let replied; try { replied = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type!='status' AND ts > ? LIMIT 1").bind(phone, cobroAt).first(); } catch (_) {}
+  // DEDUP ROBUSTO: si YA le mandamos el detalle de este cobro (sent_at), NO reenviar — pase lo que pase.
+  // El dedup NO se ata al updated_at de los pedidos (cambia por mil motivos: parcial, bulk, etc. → antes eso
+  // hacía creer que era un cobro nuevo y REENVIABA el detalle cuando el cliente contestaba cualquier cosa,
+  // ej. un mensaje de otro flujo como MiniSupernova). Un cobro NUEVO borra la fila (en /admin/corte/cobrar) → re-habilita.
+  let prev; try { prev = await env.DB.prepare("SELECT sent_at FROM corte_detalle_sent WHERE phone=?").bind(phone).first(); } catch (_) {}
+  if (prev && prev.sent_at) return false;
+  // Solo si la ventana está abierta (contestó algo en las últimas 24h): fuera de ventana no se puede mandar texto libre.
+  let replied; try { replied = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type!='status' AND ts > datetime('now','-24 hours') LIMIT 1").bind(phone).first(); } catch (_) {}
   if (!replied) return false;
   const g = { cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
   let ok = false;
   try { const r = await corteSend(env, phone, corteCobroMsg(g)); ok = !!(r && r.ok); } catch (_) {}
-  if (ok) { try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET cobro_at=excluded.cobro_at, sent_at=excluded.sent_at").bind(phone, cobroAt, new Date().toISOString()).run(); } catch (_) {} }
+  if (ok) { const now = new Date().toISOString(); try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET sent_at=excluded.sent_at").bind(phone, now, now).run(); } catch (_) {} }
   return ok;
 }
 // Vigía de pagos AUTÓNOMO: corre en el cron aunque el bot conversacional del corte esté APAGADO.
@@ -16971,6 +16974,8 @@ const handler = {
           }
           if (r && r.ok) {
             try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE telefono=? AND estado_pago='pendiente' AND estado IN ('cortado','embalado')").bind(nowIso, tel).run(); } catch (_) {}
+            // Cobro NUEVO → reseteamos el dedup del detalle, para que corteAutoDetalle lo mande de nuevo cuando conteste.
+            try { await env.DB.prepare("DELETE FROM corte_detalle_sent WHERE phone=?").bind(tel).run(); } catch (_) {}
             res.push({ tel, ok: true, total: g.total, via });
           } else { res.push({ tel, ok: false, error: 'no se pudo enviar', total: g.total, via }); }
         }
