@@ -3281,8 +3281,11 @@ async function maybeRankingInsumosSemanal(env) {
 // sin cierre/pago, con el precio de la tanda de carteles. La comparten el aviso de las 9 AR a Gaspar+Bruno
 // (maybeReporteLlamar) y la lista de Agus (maybeListaAgus). Cada fila trae assigned_to/inbox para poder
 // filtrar por bandeja. Devuelve { rows, precioInfo } o null si falla la query principal.
-async function buildLeadsParaLlamar(env) {
+// opts.diasAtras: cuántos días de fup tomar (default 1 = ayer, lo de siempre). La lista de Agus usa 2 los
+// lunes (no labura domingos → el lunes trae también los fup del sábado). El LIMIT escala con los días.
+async function buildLeadsParaLlamar(env, opts = {}) {
   try {
+    const dias = Math.max(1, Math.min(7, parseInt(opts.diasAtras, 10) || 1));
     // El body es un fup de presupuesto si arranca con alguno de los prefijos conocidos.
     const fupCond = ALL_FOLLOWUP_PREFIXES_TEXT.map(() => 'body LIKE ?').join(' OR ');
     const fupBinds = ALL_FOLLOWUP_PREFIXES_TEXT.map(p => p + '%');
@@ -3296,10 +3299,10 @@ async function buildLeadsParaLlamar(env) {
       "  (SELECT CASE WHEN EXISTS(SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='inbound' AND m.msg_type!='status' AND m.ts > f.first_fup) THEN 1 ELSE 0 END) AS respondio " + // contestó algo después del fup
       "FROM fups f " +
       "  LEFT JOIN wa_chats_summary s ON s.phone = f.phone " +
-      "WHERE f.first_fup >= (date('now','-3 hours','-1 day') || 'T03:00:00Z') " +
+      "WHERE f.first_fup >= (date('now','-3 hours','-" + dias + " day') || 'T03:00:00Z') " +
       "  AND f.first_fup <  (date('now','-3 hours') || 'T03:00:00Z') " +
       "  AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone=f.phone AND m.direction='outbound' AND (" + cierreCond + ")) " + // sigue excluyendo a los que ya arrancaron el cierre/pago
-      "ORDER BY respondio DESC, f.first_fup ASC LIMIT 60";
+      "ORDER BY respondio DESC, f.first_fup ASC LIMIT " + (60 * dias);
     let rows = [];
     try { rows = (await env.DB.prepare(sql).bind(...fupBinds, ...cierreBinds).all()).results || []; } catch (_) { return null; }
     // + Chats etiquetados "FUP" que todavía NO cerraron (seguimiento manual del vendedor):
@@ -3470,7 +3473,8 @@ async function maybeReporteLlamar(env) {
 // pero solo los chats de la bandeja de Agus o la de Joaco, con la bandeja marcada en cada uno, para que ella
 // los llame a todos. Se pisa con la de Bruno A PROPÓSITO (llaman los dos). Va por reporte_seguir2 (UTILITY:
 // le llega aunque Agus no le escriba al número; una MARKETING Meta no se la entrega — lo que pasó con Bruno).
-// 9 AR (en serie después de la de Bruno). Robustez (review 30-sep):
+// 9 AR (en serie después de la de Bruno), de lunes a sábado: Agus no labura los domingos, así que el
+// domingo no sale y la del lunes trae los fup de sábado + domingo. Robustez (review 30-sep):
 //  - la lista del día se arma UNA vez y se guarda en kv → los reintentos mandan la misma (sin re-correr la query);
 //  - el intento se cuenta ANTES de mandar → máx 3 intentos/día aunque falle guardar la marca (no 12 copias);
 //  - progreso por tramo en kv → si sale la parte 1 y falla la 2, el próximo tick sigue desde la 2;
@@ -3483,11 +3487,13 @@ const BANDEJAS_NO_COMERCIALES = ['cursos', 'oculto', 'precotiz', 'privado', 'cor
 async function maybeListaAgus(env, opts = {}) {
   const force = !!opts.force, dry = !!opts.dry, again = !!opts.again;
   const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+  const dow = new Date(fechaAR + 'T12:00:00Z').getUTCDay();   // 0 = domingo (AR)
   const K = { sent: 'lista_agus_sent', tries: 'lista_agus_try:' + fechaAR, next: 'lista_agus_next:' + fechaAR, data: 'lista_agus_data:' + fechaAR, last: 'lista_agus_last' };
   try {
     let tries = 0;
     if (!dry) {
       if (!force && (await kvGet(env, 'lista_agus_on', '1')) !== '1') return { skipped: 'off' };
+      if (!force && dow === 0) return { skipped: 'domingo' };   // Agus no labura los domingos (Gaspar, 30-sep)
       if (!again && (await kvGet(env, K.sent, '')) === fechaAR) return { skipped: 'ya_enviada' };
       if (!force) {
         tries = parseInt(await kvGet(env, K.tries, '0'), 10) || 0;
@@ -3499,7 +3505,8 @@ async function maybeListaAgus(env, opts = {}) {
     let data = null;
     if (!dry && !again) { try { const raw = await kvGet(env, K.data, ''); if (raw) data = JSON.parse(raw); } catch (_) { data = null; } }
     if (!data || !Array.isArray(data.lines)) {
-      const base = await buildLeadsParaLlamar(env);
+      // Lunes: fup de sábado + domingo (el domingo no sale lista y los fup del sábado quedaban sin llamar).
+      const base = await buildLeadsParaLlamar(env, { diasAtras: dow === 1 ? 2 : 1 });
       if (!base) {
         if (!dry) await kvSet(env, K.last, JSON.stringify({ fecha: fechaAR, ok: false, error: 'query', intento: tries }));
         return { error: 'query' };
