@@ -2169,7 +2169,9 @@ async function maybeRepartirANadia(env, phone) {
       if (cuota <= 0) continue;                                        // ese vendedor no recibe reparto automático
       // No asignar a un vendedor dado de baja (activo=0) aunque su cuota haya quedado >0 por olvido.
       try { const _av = await env.DB.prepare("SELECT activo FROM users_panel WHERE id = ?").bind(c.slug).first(); if (_av && _av.activo === 0) continue; } catch (_) {}
-      const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").bind(c.slug).first();
+      // Los chats que la vendedora se TRAJO a mano ("Traer de Joaco", chat_assign_log via='import') no cuentan:
+      // la cuota es del reparto automático (si no, traerse contactos le cortaba los leads nuevos del día).
+      const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z') AND NOT EXISTS (SELECT 1 FROM chat_assign_log l WHERE l.phone = wa_chats_summary.phone AND l.via = 'import' AND l.ts = wa_chats_summary.assigned_at)").bind(c.slug).first();
       if (((r && r.n) || 0) >= cuota) continue;                        // ya llegó a SU cuota del día
       const prob = parseFloat(await kvGet(env, c.probKv, String(c.defProb))) || c.defProb;
       // Sorteo determinístico por teléfono PERO independiente por vendedor (mezclamos el slug al hash),
@@ -3139,7 +3141,7 @@ async function buildReporteDiario(env) {
   // 4) Chats asignados hoy por vendedor (assigned_to + assigned_at, mig 037).
   try {
     const rs = await env.DB.prepare(
-      `SELECT assigned_to, COUNT(DISTINCT phone) AS n FROM wa_chats_summary WHERE assigned_to != '' AND assigned_at >= ${REPORTE_DIA_DESDE} AND assigned_at < ${REPORTE_DIA_HASTA} GROUP BY assigned_to`
+      `SELECT assigned_to, COUNT(DISTINCT phone) AS n FROM wa_chats_summary WHERE assigned_to != '' AND assigned_at >= ${REPORTE_DIA_DESDE} AND assigned_at < ${REPORTE_DIA_HASTA} AND NOT EXISTS (SELECT 1 FROM chat_assign_log l WHERE l.phone = wa_chats_summary.phone AND l.via = 'import' AND l.ts = wa_chats_summary.assigned_at) GROUP BY assigned_to`
     ).all();
     for (const r of (rs.results || [])) {
       if (VENDEDORES_SECUNDARIOS.includes(r.assigned_to)) out.chatsNadia += (r.n || 0);
@@ -12661,7 +12663,7 @@ const handler = {
           for (const c of COMERCIALES_SECUNDARIOS) {
             const cu = parseInt(await kvGet(env, c.cuotaKv, '0'), 10) || 0;
             let hoy = 0;
-            try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z')").bind(c.slug).first(); hoy = (nr && nr.n) || 0; } catch (_) {}
+            try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z') AND NOT EXISTS (SELECT 1 FROM chat_assign_log l WHERE l.phone = wa_chats_summary.phone AND l.via = 'import' AND l.ts = wa_chats_summary.assigned_at)").bind(c.slug).first(); hoy = (nr && nr.n) || 0; } catch (_) {}   // sin los traídos a mano
             const ph = await kvGet(env, c.phoneKv, '');
             secundarios.push({ slug: c.slug, nombre: c.nombre, cuota: cu, hoy, phone: ph });
           }
@@ -14901,6 +14903,92 @@ const handler = {
         try { const _bc = VENDEDORES_SECUNDARIOS.includes(to) ? to : 'joaco'; await env.DB.prepare("UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?").bind(_bc, phone).run(); } catch (_) {}
         ctx.waitUntil(invalidateChatsSummaryCache(request));
         return json({ ok: true, phone, assigned_to: to });
+      }
+
+      // POST /admin/wa/chat-import {phone, dry?} — "Traer de Joaco" (pedido de Gaspar, 1-oct): una vendedora
+      // habilitada (hoy solo Agus) se trae a SU bandeja un chat que está en la de Joaco. Pasa el chat + la comisión
+      // de sus presupuestos (briefs.comercial_id), igual que chat-assign. SOLO desde la bandeja de Joaco (inbox
+      // 'general', assigned_to '' o 'joaco'): nunca de Facu ni de cursos/privado/corte/precotiz/oculto; no IG, no
+      // internos, no chats inexistentes (UPDATE condicional, no crea filas), no leads que el bot todavía releva
+      // (cambiaría de "Joaco" a "Agus" a mitad de la charla) ni clientes que ya arrancaron el cierre/pago con Joaco
+      // (mismo criterio que la lista "para llamar"). Todo en UN batch (transacción) + registro en chat_assign_log
+      // (via='import', ts = assigned_at) → NO consume la cuota del reparto ni cuenta en "chats asignados hoy".
+      // Errores genéricos para la vendedora (no revela en qué bandeja está un chat ajeno); detalle solo al admin.
+      // dry:true = valida sin cambiar nada. Admin puede hacerlo en nombre de una importadora con {para:'agustina'}.
+      // Review 1-oct: sin búsqueda "a ojo" por sufijo con área (traía el chat de OTRA persona de otra área).
+      if (request.method === 'POST' && path === '/admin/wa/chat-import') {
+        const IMPORTADORAS = ['agustina'];
+        const role = await getSessionRole(env, session.user);
+        const esAdm = role === 'admin';
+        const meSlug = String(session.user || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+        const body = (await request.json().catch(() => null)) || {};
+        const para = esAdm ? String(body.para || '').toLowerCase().trim() : (role === 'comercial' ? meSlug : '');
+        if (!IMPORTADORAS.includes(para)) return json({ error: 'No tenés habilitado traer chats de la bandeja de Joaco.' }, 403);
+        // La importadora tiene que seguir activa (una sesión dura 30 días y sobrevive a una baja).
+        try {
+          if (!(await env.DB.prepare("SELECT 1 AS x FROM users_panel WHERE id = ? AND activo = 1 AND rol = 'comercial'").bind(para).first())) return json({ error: 'Usuario no habilitado.' }, 403);
+        } catch (_) { return json({ error: 'No pude validar el usuario. Probá de nuevo.' }, 503); }
+        const dry = body.dry === true;
+        const dig = String(body.phone || '').replace(/\D/g, '');
+        if (dig.length < 8) return json({ error: 'Poné el teléfono completo, con código de área.' }, 400);
+        const sel = "SELECT phone, inbox, assigned_to, channel, last_ts, contact_name FROM wa_chats_summary WHERE phone = ?";
+        // Resolver SIN adivinar: (1) dígitos tal cual; (2) variantes argentinas EXACTAS: 549 + área + número
+        // (sacando 00/54/9/0 y el "15" después de un área de 2-4 dígitos); (3) solo si tipeó 8-9 dígitos (sin área):
+        // por los últimos 8 entre los chats que SÍ se pueden traer, y siempre pidiendo confirmación (needs_confirm).
+        let row = await env.DB.prepare(sel).bind(dig).first();
+        if (!row) {
+          let d = dig;
+          if (d.startsWith('00')) d = d.slice(2);
+          if (d.startsWith('54')) d = d.slice(2);
+          if (d.length === 11 && d.startsWith('9')) d = d.slice(1);
+          if (d.startsWith('0')) d = d.slice(1);
+          const vars = new Set();
+          if (d.length === 10) vars.add('549' + d);
+          if (d.length === 12) for (const a of [2, 3, 4]) if (d.substr(a, 2) === '15') vars.add('549' + d.slice(0, a) + d.slice(a + 2));
+          for (const v of vars) { if (v === dig) continue; row = await env.DB.prepare(sel).bind(v).first(); if (row) break; }
+        }
+        if (!row && dig.length <= 9) {
+          const cands = (await env.DB.prepare(
+            "SELECT phone, contact_name FROM wa_chats_summary WHERE substr(phone, -8) = ? AND phone LIKE '549%' AND length(phone) = 13 AND IFNULL(last_ts, '') != '' " +
+            "AND COALESCE(NULLIF(inbox, ''), 'general') = 'general' AND IFNULL(assigned_to, '') IN ('', 'joaco') AND phone NOT IN (SELECT phone FROM wa_internal_phones) LIMIT 5"
+          ).bind(dig.slice(-8)).all()).results || [];
+          if (cands.length) return json({ ok: false, needs_confirm: true, candidatos: cands.map(c => ({ phone: c.phone, nombre: c.contact_name || '' })) }, 409);
+        }
+        if (!row || !String(row.last_ts || '')) return json({ error: 'No encontré ningún chat con ese número. Revisá que tenga el código de área.' }, 404);
+        const ph = String(row.phone);
+        const nombre = row.contact_name || '';
+        const asg = String(row.assigned_to || '');
+        const inbox = String(row.inbox || '') || 'general';
+        const no = (detalle) => json({ error: esAdm ? detalle : 'Ese chat no está en la bandeja de Joaco.' }, 409);
+        if (String(row.channel || '') === 'ig' || ph.length >= 15) return json({ error: 'Ese contacto es de Instagram, no se puede traer por teléfono.' }, 400);
+        try { if (await env.DB.prepare('SELECT 1 AS x FROM wa_internal_phones WHERE phone = ?').bind(ph).first()) return no('Es un número interno del equipo.'); } catch (_) {}
+        if (inbox !== 'general') return no('Está en la bandeja "' + inbox + '".');
+        if (asg === para) return json({ ok: true, ya_era_tuyo: true, phone: ph, nombre, last_ts: row.last_ts || '' });
+        if (asg !== '' && asg !== 'joaco') return no('Está asignado a ' + asg + '.');
+        try { if (await env.DB.prepare("SELECT 1 AS x FROM precotiz_pilot WHERE phone = ? AND estado = 'activo' LIMIT 1").bind(ph).first()) return json({ error: 'El bot todavía le está pidiendo los datos a este lead. Traelo cuando termine.' }, 409); } catch (_) {}
+        try {
+          const cierre = FUP_CIERRE_MARKERS.map(() => 'lower(body) LIKE ?').join(' OR ');
+          const yaCierre = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND (" + cierre + ") LIMIT 1").bind(ph, ...FUP_CIERRE_MARKERS.map(k => '%' + k.toLowerCase() + '%')).first();
+          const yaPedido = yaCierre ? null : await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1').bind(ph).first();
+          if (yaCierre || yaPedido) return json({ error: 'Ese cliente ya arrancó el cierre o el pago con Joaco, se queda con él.' }, 409);
+        } catch (_) { return json({ error: 'No pude chequear el chat. Probá de nuevo.' }, 503); }
+        if (dry) return json({ ok: true, dry: true, phone: ph, nombre, de: 'joaco', a: para });
+        const now = new Date().toISOString();
+        // Las sentencias que dependen de la reasignación solo aplican si el UPDATE condicional de verdad movió el chat
+        // (guarda: assigned_to = para AND assigned_at = now). Todo en el mismo batch → o se aplica todo o nada.
+        const guard = ' AND EXISTS (SELECT 1 FROM wa_chats_summary WHERE phone = ? AND assigned_to = ? AND assigned_at = ?)';
+        let res;
+        try {
+          res = await env.DB.batch([
+            env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = ?, assigned_at = ? WHERE phone = ? AND COALESCE(NULLIF(inbox, ''), 'general') = 'general' AND IFNULL(assigned_to, '') IN ('', 'joaco')").bind(para, now, ph),
+            env.DB.prepare('UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?' + guard).bind(para, ph, ph, para, now),   // la comisión sigue al lead (OK de Gaspar)
+            env.DB.prepare('DELETE FROM archived_chats WHERE phone = ?' + guard).bind(ph, ph, para, now),                       // archivado es global: si Joaco lo archivó, a Agus le quedaba invisible
+            env.DB.prepare("INSERT INTO chat_assign_log (phone, from_asg, to_asg, via, by_user, ts) SELECT ?, 'joaco', ?, 'import', ?, ? WHERE EXISTS (SELECT 1 FROM wa_chats_summary WHERE phone = ? AND assigned_to = ? AND assigned_at = ?)").bind(ph, para, String(session.user || ''), now, ph, para, now),
+          ]);
+        } catch (_) { return json({ error: 'No se pudo traer el chat (la base no respondió). Probá de nuevo.' }, 503); }
+        if (!res || !res[0] || !res[0].meta || !res[0].meta.changes) return json({ error: 'El chat cambió de bandeja recién. Probá de nuevo.' }, 409);
+        await invalidateChatsSummaryCache(request);   // con await: el front recarga la lista apenas recibe el ok
+        return json({ ok: true, phone: ph, nombre, last_ts: row.last_ts || '', de: 'joaco', a: para });
       }
 
       // Bulk: derivar varios chats a una bandeja de una (solo admin).

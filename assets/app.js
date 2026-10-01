@@ -11732,6 +11732,7 @@ function renderChat() {
           <input type="text" id="chat-search" placeholder="${chatState.showArchived ? 'Buscar en archivados…' : 'Buscar o empezar un chat nuevo'}" value="${escapeHtml(chatState.search)}">
         </div>
         <div id="new-chat-suggest" class="new-chat-suggest" style="display:none"></div>
+        ${renderTraerJoacoBox()}
         ${chatState.showArchived ? '<div class="archived-banner">📦 Mostrando solo chats archivados</div>' : ''}
         ${chatState.showPrivadoOnly ? '<div class="archived-banner">🔒 Bandeja privada — solo vos ves estos chats</div>' : ''}
         ${(() => {
@@ -14303,6 +14304,7 @@ function bindChat() {
   updateNewChatSuggest(chatState.search);
   bindChatContactClicks();
   bindContactListInfiniteScroll();
+  bindTraerJoacoBox();
   // Refresh
   const refreshBtn = document.getElementById('chat-refresh');
   if (refreshBtn) {
@@ -14755,6 +14757,70 @@ function bindContactListInfiniteScroll() {
       refreshContactList();
     }
   });
+}
+// ===== "Traer de Joaco" (pedido de Gaspar, 1-oct) =====
+// Cajita SOLO para Agus arriba de su lista de chats (pestaña WhatsApp): escribe el teléfono de un chat de la bandeja
+// de Joaco y se lo trae a la suya (POST /admin/wa/chat-import; las reglas viven en el worker). Va FUERA de
+// #chat-contact-list para que el polling (que solo redibuja la lista) no le borre lo que está escribiendo.
+function puedeTraerDeJoaco() { return isAgustinaUser(STATE.user) && tokenBelongsTo(STATE.user); }
+function renderTraerJoacoBox() {
+  if (!puedeTraerDeJoaco() || chatState.showArchived || (chatState.channel || 'wa') !== 'wa') return '';
+  return `<div style="padding:6px 10px;background:var(--ink-100);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;font-size:12px">
+      <input type="tel" id="tj-tel" placeholder="Teléfono de un chat de Joaco" autocomplete="off" value="${escapeHtml(chatState._traerJoacoTel || '')}" style="background:#202c33;border:none;color:#e9edef;padding:6px 10px;border-radius:8px;font-size:13px;flex:1;min-width:0;outline:none">
+      <button class="btn btn-cyan btn-sm" id="tj-btn" type="button" style="white-space:nowrap">Traer de Joaco</button>
+    </div>`;
+}
+// Llama al worker. Si el número vino incompleto (sin área) y hay candidatos, pide confirmación antes de mover nada.
+async function traerDeJoacoReq(phone) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/wa/chat-import', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ phone }) });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok && j.ok) return j;
+  if (j.needs_confirm && Array.isArray(j.candidatos) && j.candidatos.length) {
+    if (j.candidatos.length === 1) {
+      const c = j.candidatos[0];
+      const si = await showConfirm('¿Traer a ' + (c.nombre || 's/nombre') + ' (' + formatPhoneDisplay(c.phone) + ') a tu bandeja?', { title: 'Traer de Joaco', confirmLabel: 'Sí, traer', cancelLabel: 'No' });
+      return si ? traerDeJoacoReq(c.phone) : { cancelado: true };
+    }
+    return { error: 'Hay varios chats de Joaco que terminan en esos números. Poné el teléfono completo, con código de área:\n\n' + j.candidatos.map(c => '• ' + (c.nombre || 's/nombre') + ' — ' + formatPhoneDisplay(c.phone)).join('\n') };
+  }
+  return { error: j.message || j.error || 'No se pudo traer el chat.' };
+}
+function bindTraerJoacoBox() {
+  const inp = document.getElementById('tj-tel'), btn = document.getElementById('tj-btn');
+  if (!inp || !btn) return;
+  inp.oninput = () => { chatState._traerJoacoTel = inp.value; };
+  inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); btn.click(); } };
+  btn.onclick = async () => {
+    const raw = (inp.value || '').trim();
+    if (raw.replace(/\D/g, '').length < 8) { showAlert('Poné el teléfono completo, con código de área.', { title: 'Traer de Joaco', variant: 'warn' }); return; }
+    if (btn.disabled) return;
+    btn.disabled = true; btn.textContent = 'Trayendo…';
+    try {
+      const j = await traerDeJoacoReq(raw);
+      if (j.cancelado) return;
+      if (!j.ok) { showAlert(j.error || 'No se pudo traer el chat.', { title: 'Traer de Joaco', variant: 'warn' }); return; }
+      inp.value = ''; chatState._traerJoacoTel = '';
+      const enArchivados = !!(chatState.archived && chatState.archived.has(j.phone));
+      if (!j.ya_era_tuyo && chatState.archived) chatState.archived.delete(j.phone);   // el worker lo desarchivó
+      toast(j.ya_era_tuyo ? (enArchivados ? 'Ese chat ya es tuyo (está en Archivados)' : 'Ese chat ya estaba en tu bandeja') : '✓ ' + (j.nombre || 'El chat') + ' ya está en tu bandeja');
+      // Que no lo esconda un filtro activo, y que aparezca al toque aunque la lista del server tarde unos segundos.
+      chatState.filterUnreadOnly = false; chatState.filterLabels = [];
+      const optimista = () => {
+        if (chatState.contacts.some(c => c.phone === j.phone)) return;
+        chatState.contacts.unshift({ phone: j.phone, name: j.nombre || '', lastMsg: '', lastTs: j.last_ts || '', lastDir: '', lastType: '', unread: 0, inbox: 'general', pinPrivado: false, channel: 'wa', assigned_to: 'agustina' });
+        chatState.contacts.sort((x, y) => (y.lastTs || '').localeCompare(x.lastTs || ''));
+      };
+      chatState.contactsLoaded = false;
+      try { await loadChatContacts(); } catch (_) {}
+      if (!j.ya_era_tuyo) optimista();
+      if (STATE.view === 'chat') render();
+      if (j.phone) await selectChatContact(j.phone);
+    } catch (e) {
+      showAlert('Error de conexión. Probá de nuevo.', { title: 'Traer de Joaco', variant: 'warn' });
+    } finally {
+      const b = document.getElementById('tj-btn'); if (b) { b.disabled = false; b.textContent = 'Traer de Joaco'; }
+    }
+  };
 }
 function refreshContactList() {
   const list = document.getElementById('chat-contact-list');
