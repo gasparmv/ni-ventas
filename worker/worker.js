@@ -17559,8 +17559,9 @@ const handler = {
         const _r = await getSessionRole(env, session.user);
         if (!['admin', 'disenador', 'produccion'].includes(_r)) return json({ error: 'forbidden' }, 403);
         let paraDisenar = 0, esperandoFoto = 0;
+        await ensureCorteNeonSchema(env);
         try {
-          const r = await env.DB.prepare("SELECT SUM(CASE WHEN IFNULL(foto_key,'')!='' THEN 1 ELSE 0 END) AS lista, SUM(CASE WHEN IFNULL(foto_key,'')='' THEN 1 ELSE 0 END) AS espera FROM corte_pedidos WHERE producto='NEON' AND estado='pedido'").first();
+          const r = await env.DB.prepare("SELECT SUM(CASE WHEN IFNULL(foto_key,'')='' AND pedido_id IS NOT NULL THEN 0 ELSE 1 END) AS lista, SUM(CASE WHEN IFNULL(foto_key,'')='' AND pedido_id IS NOT NULL THEN 1 ELSE 0 END) AS espera FROM corte_pedidos WHERE producto='NEON' AND estado='pedido'").first();
           paraDisenar = (r && r.lista) || 0; esperandoFoto = (r && r.espera) || 0;
         } catch (_) {}
         return json({ ok: true, neon_para_disenar: paraDisenar, neon_esperando_foto: esperandoFoto });

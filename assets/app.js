@@ -1681,7 +1681,12 @@ function mapPedidoFromD1(row) {
     iluminacion: row.iluminacion || '',
     bastidor: row.bastidor || '',
     colorBastidor: row.color_bastidor || '',
-    instalacion: row.instalacion || ''
+    instalacion: row.instalacion || '',
+    // Foto del DISEÑO FINAL y estado de su pieza en el corte (la matriz que diseña Emma). corteId
+    // vacío = el cartel no tiene pieza (corpóreo, o pedido anterior a esta función).
+    disenoKey: row.diseno_key || '',
+    corteEstado: row.corte_estado || '',
+    corteId: row.corte_id || null
   };
 }
 
@@ -2210,17 +2215,20 @@ function setView(v) {
   if (isCursosOnly()) v = 'chat';
   else if (isProduccionOnly()) v = 'corte';
   else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
+  const entraACorte = v === 'corte' && STATE.view !== 'corte';
   STATE.view = v;
   STATE.selected = null;
   location.hash = v;
   render();
+  // Volver a Corte con datos ya cargados: se muestran al toque y se refrescan en segundo plano.
+  if (entraACorte && STATE.cortePedidos !== undefined) corteCargar(true);
 }
 window.addEventListener('hashchange', () => {
   let h = location.hash.replace('#','') || 'dashboard';
   if (isCursosOnly()) h = 'chat';
   else if (isProduccionOnly()) h = 'corte';
   else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
-  if (h !== STATE.view) { STATE.view = h; render(); }
+  if (h !== STATE.view) { STATE.view = h; render(); if (h === 'corte' && STATE.cortePedidos !== undefined) corteCargar(true); }
 });
 
 // ============ RENDER ============
@@ -3082,13 +3090,22 @@ function cortePrecioPreview(ped) {
   const cant = Math.max(1, parseInt(ped.cantidad, 10) || 1);
   const el = document.getElementById('corte-precio-prev');
   if (!el) return;
+  if (ped.producto === 'NEON') { el.textContent = ''; return; } // producción propia: sin precio
   if (a > 0 && al > 0) { const precio = (a / 100) * (al / 100) * 175000 * cant; el.textContent = 'Precio: $' + precio.toLocaleString('es-AR') + (cant > 1 ? (' (' + cant + ' u.)') : ''); }
   else el.textContent = '';
 }
+// Piezas de NEON (producción propia, nacen al cargar un pedido de cartel en el CRM): se muestran como
+// "Neon Infinito #N" en vez del cliente_nombre interno 'neon'. Las cargadas a mano no tienen número.
+function corteNombre(p) {
+  if (p && p.producto === 'NEON') return 'Neon Infinito' + (p.pedido_numero ? ' #' + p.pedido_numero : '');
+  return (p && p.cliente_nombre) || 'cliente';
+}
+// Pieza de neón de un pedido del CRM que todavía no tiene la foto del diseño → no entra a la cola de Emma.
+function corteEsperandoFoto(p) { return p.producto === 'NEON' && !p.foto_key && !!p.pedido_id; }
 function corteCardHtml(p, clickable) {
   const verPrecio = !isProduccionUser(STATE.user); // Aníbal/Neyen NO ven precios (es data de venta)
   return `<div ${clickable ? `data-corte-card="${p.id}" style="cursor:pointer"` : ''} style="font-size:12px;padding:7px;border:1px solid var(--border);border-radius:5px;margin-bottom:5px;background:var(--ink-100)">
-    <b>${escapeHtml(p.cliente_nombre || '')}</b><br>
+    <b>${escapeHtml(corteNombre(p))}</b>${p.producto === 'NEON' ? ' <span style="font-size:10px;font-weight:700;color:#ef4444">NEÓN</span>' : ''}<br>
     <span style="color:var(--fg-mute)">${escapeHtml(p.diseno_nombre || '')}${p.medida_declarada ? ' · ' + escapeHtml(p.medida_declarada) : ''}</span>
     ${verPrecio && p.precio ? `<br><span style="color:#22c55e;font-weight:700">$${Number(p.precio).toLocaleString('es-AR')}</span>` : ''}
   </div>`;
@@ -3134,8 +3151,9 @@ function corteDetalleHtml(p) {
     <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:16px;margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
         <div>
-          <div style="font-size:16px;font-weight:700">${escapeHtml(p.cliente_nombre || '')} — ${escapeHtml(p.diseno_nombre || 'diseño')}</div>
+          <div style="font-size:16px;font-weight:700">${escapeHtml(corteNombre(p))} — ${escapeHtml(p.diseno_nombre || 'diseño')}</div>
           <div style="font-size:13px;color:var(--fg-mute);margin-top:2px">Medida declarada: ${escapeHtml(p.medida_declarada || '—')} · Cantidad: ${cant}${p.aclaraciones ? ' · ' + escapeHtml(p.aclaraciones) : ''}</div>
+          ${p.producto === 'NEON' && p.ped_productor ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:2px">Productor: ${escapeHtml(p.ped_productor)}</div>` : ''}
           ${(!isProduccionUser(STATE.user)) && p.precio ? `<div style="font-size:13px;color:#22c55e;font-weight:700;margin-top:4px">Precio: $${Number(p.precio).toLocaleString('es-AR')}${p.ancho_real ? ` (${p.ancho_real}×${p.alto_real}cm real)` : ''}</div>` : ''}
           ${p.entrega ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:2px">Entrega: ${p.entrega === 'envio' ? 'envío al interior' : 'retira'}</div>` : ''}
         </div>
@@ -3288,6 +3306,7 @@ function corteHeroHtml(pedidos, groups) {
   const avance = pedidos.length ? Math.round(hechas / pedidos.length * 100) : 0;
   const apr = t ? t.aprovechamiento : null;
   const m2v = t && t.m2_vendidos != null ? t.m2_vendidos : 0, m2c = t && t.m2_cortados != null ? t.m2_cortados : 0;
+  const m2i = t && t.m2_internos ? Number(t.m2_internos) : 0; // matrices de neón propio: usan placa pero no se cobran
   const tile = (lbl, big, meta, col) => `<div style="flex:1;min-width:148px;background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:13px 15px">
       <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em">${lbl}</div>
       <div style="font-size:22px;font-weight:800;margin-top:5px;font-variant-numeric:tabular-nums${col ? ';color:' + col : ''}">${big}</div>
@@ -3296,7 +3315,7 @@ function corteHeroHtml(pedidos, groups) {
       ${tile('Total de la tanda', '$' + total.toLocaleString('es-AR'), groups.length + ' clientes · ' + pedidos.length + ' piezas', '')}
       ${tile('Cobrado', '$' + cobrado.toLocaleString('es-AR'), 'Pendiente $' + pend.toLocaleString('es-AR'), '#22c55e')}
       ${tile('Avance del lote', avance + '%', hechas + ' de ' + pedidos.length + ' cortadas', '')}
-      ${tile('Aprovechamiento', apr == null ? '—' : apr + '%', m2v + ' / ' + m2c + ' m²', apr == null ? 'var(--fg-mute)' : (apr >= 80 ? '#22c55e' : '#FFA726'))}
+      ${tile('Aprovechamiento', apr == null ? '—' : apr + '%', (m2i ? (Math.round((Number(m2v) + m2i) * 100) / 100) + ' / ' + m2c + ' m² · ' + m2i + ' de neón' : m2v + ' / ' + m2c + ' m²'), apr == null ? 'var(--fg-mute)' : (apr >= 80 ? '#22c55e' : '#FFA726'))}
     </div>`;
 }
 // Stepper fino: el avance del LOTE (piezas por etapa), como pulso — no como navegación.
@@ -3334,6 +3353,38 @@ function corteAprendizajeHtml() {
       </div>
     </div>`).join('');
   return card(header + items);
+}
+// Admin: la producción propia de neón (fuera del board de cobros de alumnos). Una fila por cartel activo,
+// de la foto del diseño hasta "separado para el productor".
+function corteNeonAdminHtml(pedidos) {
+  const neon = (pedidos || []).filter(p => p.producto === 'NEON');
+  if (!neon.length) return '';
+  const etapa = p => p.estado === 'pedido' ? (corteEsperandoFoto(p) ? 'foto' : 'disenar') : p.estado;
+  const M = { foto: { l: 'Esperando foto', c: '#FF5566' }, disenar: { l: 'Emma: diseñar', c: '#FFB020' }, matriz_lista: { l: 'Matriz lista', c: '#a78bfa' }, cortado: { l: 'Cortado', c: '#60a5fa' }, embalado: { l: 'Separado', c: '#22c55e' } };
+  const orden = { foto: 0, disenar: 1, matriz_lista: 2, cortado: 3, embalado: 4 };
+  const hace7 = new Date(Date.now() - 7 * 864e5).toISOString();
+  const activos = neon.filter(p => ['pedido', 'matriz_lista', 'cortado'].includes(p.estado))
+    .sort((a, b) => (orden[etapa(a)] - orden[etapa(b)]) || String(a.created_at || '').localeCompare(String(b.created_at || '')));
+  const separados7 = neon.filter(p => p.estado === 'embalado' && String(p.updated_at || '') >= hace7).length;
+  const cnt = {}; activos.forEach(p => { const e = etapa(p); cnt[e] = (cnt[e] || 0) + 1; });
+  const chips = ['foto', 'disenar', 'matriz_lista', 'cortado'].map(k => cnt[k] ? corteChip(M[k].l + ' ' + cnt[k], M[k].c) : '').join(' ')
+    + (separados7 ? ' ' + corteChip('Separados 7d ' + separados7, M.embalado.c) : '');
+  const rows = activos.slice(0, 60).map((p, i) => { const e = etapa(p); return `<div data-corte-card="${p.id}" style="display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer${i ? ';border-top:1px solid var(--border)' : ''}">
+      ${p.foto_key ? `<img src="${escapeHtml(disenoThumb(p.foto_key, 200))}" loading="lazy" style="width:38px;height:38px;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border);flex:0 0 auto">` : '<span style="width:38px;height:38px;border-radius:6px;border:1px dashed var(--border);display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;font-size:15px">📷</span>'}
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px"><b>${p.pedido_numero ? '#' + escapeHtml(String(p.pedido_numero)) : 'manual'}</b> ${escapeHtml(p.diseno_nombre || 'cartel')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</span>
+      <span class="corte-hide-sm" style="font-size:11px;color:var(--fg-subtle);flex:0 0 auto">${escapeHtml(p.ancho_real ? p.ancho_real + '×' + p.alto_real + ' cm' : (p.medida_declarada || '—'))}</span>
+      <span class="corte-hide-sm" style="font-size:11px;color:var(--fg-mute);flex:0 0 auto;min-width:70px;text-align:right">${escapeHtml(p.ped_productor || p.vendedor || '')}</span>
+      ${corteChip(M[e] ? M[e].l : e, M[e] ? M[e].c : 'var(--fg-subtle)')}
+    </div>`; }).join('');
+  return `
+    <div style="margin-top:22px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <span style="font-size:15px;font-weight:800;color:#ef4444">🔴 Neón Infinito — producción propia</span>
+        <span style="display:inline-flex;gap:6px;flex-wrap:wrap">${chips}</span>
+      </div>
+      <div style="font-size:12px;color:var(--fg-mute);margin-bottom:8px">Matrices de los carteles vendidos (nacen solas al cargar el pedido con la foto del diseño). Sin precio: no entran a la cobranza.</div>
+      ${activos.length ? `<div style="border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;background:var(--ink-100)">${rows}</div>${activos.length > 60 ? `<div style="font-size:11px;color:var(--fg-subtle);margin-top:4px">Mostrando 60 de ${activos.length}</div>` : ''}` : '<div style="padding:16px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:var(--r-sm);font-size:13px">Nada de neón en proceso ✨</div>'}
+    </div>`;
 }
 function corteHybridBoard(pedidos) {
   const groups = corteClientGroups(pedidos);
@@ -3444,7 +3495,8 @@ function renderCorte() {
       const neonPend = pedidos.filter(p => esNeon(p) && p.estado === 'cortado').filter(neonMatch);
       const neonSep = pedidos.filter(p => esNeon(p) && p.estado === 'embalado').filter(neonMatch);
       const neonRow = (p, done) => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px dashed var(--border);font-size:13px">
-          <span style="flex:1;min-width:0">${done ? '<span style="color:#22c55e">✓</span> ' : ''}${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ` <span style="color:var(--fg-subtle)">${escapeHtml(p.medida_declarada)}</span>` : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</span>
+          ${p.foto_key ? `<a href="${escapeHtml(mediaUrl(p.foto_key))}" target="_blank" rel="noopener" style="flex:0 0 auto"><img src="${escapeHtml(disenoThumb(p.foto_key, 200))}" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border);display:block"></a>` : ''}
+          <span style="flex:1;min-width:0">${done ? '<span style="color:#22c55e">✓</span> ' : ''}${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> ` : ''}${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ` <span style="color:var(--fg-subtle)">${escapeHtml(p.medida_declarada)}</span>` : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}${p.ped_productor ? `<br><span style="font-size:11px;color:var(--fg-mute)">→ productor: ${escapeHtml(p.ped_productor)}</span>` : ''}</span>
           ${done ? `<button class="btn ghost" data-corte-desembalar="${p.id}" style="font-size:11px;padding:3px 9px">↩</button>` : `<button class="btn" data-corte-separar="${p.id}" style="font-size:11px;padding:4px 11px">Separado</button>`}
         </div>`;
       const neonSection = (neonPend.length + neonSep.length) ? `
@@ -3497,7 +3549,17 @@ function renderCorte() {
         </div>`;
     }
     // EMMA (disenador): MODO RELEVAMIENTO — un pedido a la vez, línea de montaje.
-    if (!cola.length) {
+    // Los carteles de Neon Infinito sin foto todavía ("la subo después") NO entran a la línea: se listan
+    // aparte como "esperando foto" hasta que el vendedor la suba desde el pedido.
+    const esperandoFoto = cola.filter(corteEsperandoFoto);
+    const colaEmma = cola.filter(p => !corteEsperandoFoto(p));
+    const esperandoHtml = esperandoFoto.length ? `
+      <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:16px">
+        <div style="font-size:13px;font-weight:700;margin-bottom:2px">⏳ Esperando la foto del diseño <span style="color:var(--fg-mute);font-weight:400">${esperandoFoto.length}</span></div>
+        <div style="font-size:12px;color:var(--fg-mute);margin-bottom:6px">Carteles de Neon Infinito ya vendidos: aparecen en tu línea apenas el vendedor sube la foto del diseño aprobado.</div>
+        ${esperandoFoto.map(p => `<div style="font-size:12.5px;padding:5px 0;border-top:1px dashed var(--border)"><b>${escapeHtml(corteNombre(p))}</b> — ${escapeHtml(p.diseno_nombre || 'cartel')}${p.medida_declarada ? ` <span style="color:var(--fg-subtle)">${escapeHtml(p.medida_declarada)}</span>` : ''}${p.vendedor ? ` <span style="color:var(--fg-mute)">· vendió ${escapeHtml(p.vendedor)}</span>` : ''}</div>`).join('')}
+      </div>` : '';
+    if (!colaEmma.length) {
       return `
         <div style="padding:var(--s-4);max-width:640px">
           <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — Relevamiento</h1>
@@ -3507,28 +3569,34 @@ function renderCorte() {
               <div style="font-weight:700;margin-top:8px">Relevamiento al día</div>
               <div style="color:var(--fg-mute);font-size:13px;margin-top:4px">No hay diseños esperando la matriz.</div>
             </div>`}
+          ${esperandoHtml}
           ${corteArchivoEmmaHtml()}
         </div>`;
     }
-    let idx = STATE.corteRelevIdx || 0; if (idx >= cola.length) idx = 0;
-    const rp = cola[idx];
+    let idx = STATE.corteRelevIdx || 0; if (idx >= colaEmma.length) idx = 0;
+    const rp = colaEmma[idx];
     const rcant = Math.max(1, parseInt(rp.cantidad, 10) || 1);
-    const rfoto = rp.foto_key ? `<img src="${mediaUrl(rp.foto_key)}" style="max-width:100%;max-height:320px;border-radius:10px;border:1px solid var(--border)" loading="lazy">` : '<div style="padding:40px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:10px">sin foto del diseño</div>';
+    const rNeon = rp.producto === 'NEON';
+    const rfoto = rp.foto_key ? `<a href="${escapeHtml(mediaUrl(rp.foto_key))}" target="_blank" rel="noopener" title="Abrir en grande"><img src="${mediaUrl(rp.foto_key)}" style="max-width:100%;max-height:${rNeon ? 440 : 320}px;border-radius:10px;border:1px solid var(--border)${rNeon ? ';background:#fff' : ''}" loading="lazy"></a>` : '<div style="padding:40px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:10px">sin foto del diseño</div>';
+    // Neón propio: la medida del pedido viene pre-cargada ("ancho 60 × alto 40 cm"); Emma la confirma o corrige.
+    const rMed = rNeon ? String(rp.medida_declarada || '').match(/ancho\s*([\d.,]+)\s*[×x]\s*alto\s*([\d.,]+)/i) : null;
+    const rAncho = rMed ? rMed[1].replace(',', '.') : '', rAlto = rMed ? rMed[2].replace(',', '.') : '';
     return `
       <div style="padding:var(--s-4);max-width:640px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
           <h1 style="margin:0;font-size:20px">✂ Relevamiento</h1>
-          <span style="font-size:13px;color:var(--fg-mute);font-weight:600">${idx + 1} de ${cola.length}</span>
+          <span style="font-size:13px;color:var(--fg-mute);font-weight:600">${idx + 1} de ${colaEmma.length}</span>
         </div>
-        <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:16px">
+        <div style="background:var(--ink-100);border:1px solid ${rNeon ? '#ef4444' : 'var(--border)'};border-radius:12px;padding:16px">
+          ${rNeon ? '<div style="display:inline-block;font-size:11px;font-weight:800;letter-spacing:.05em;color:#ef4444;background:rgba(239,68,68,.12);border-radius:7px;padding:3px 9px;margin-bottom:10px">🔴 NEON INFINITO · matriz a diseñar</div>' : ''}
           <div style="text-align:center;margin-bottom:14px">${rfoto}</div>
-          <div style="font-size:16px;font-weight:700">${escapeHtml(rp.cliente_nombre || 'cliente')} — ${escapeHtml(rp.diseno_nombre || 'diseño')}</div>
-          <div style="font-size:13px;color:var(--fg-mute);margin-top:2px">Pidió: ${escapeHtml(rp.medida_declarada || '—')} · Cantidad: ${rcant}${rp.aclaraciones ? ' · ' + escapeHtml(rp.aclaraciones) : ''}</div>
+          <div style="font-size:16px;font-weight:700">${escapeHtml(rNeon ? (rp.pedido_numero ? 'Pedido #' + rp.pedido_numero : 'Neon Infinito') : (rp.cliente_nombre || 'cliente'))} — ${escapeHtml(rp.diseno_nombre || 'diseño')}</div>
+          <div style="font-size:13px;color:var(--fg-mute);margin-top:2px">${rNeon ? 'Medida del pedido' : 'Pidió'}: ${escapeHtml(rp.medida_declarada || '—')} · Cantidad: ${rcant}${rp.aclaraciones ? ' · ' + escapeHtml(rp.aclaraciones) : ''}</div>
           <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
             <span style="font-size:13px;font-weight:700">Medida real:</span>
-            <input id="corte-ancho" placeholder="ancho" inputmode="decimal" style="width:88px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px">
+            <input id="corte-ancho" placeholder="ancho" inputmode="decimal" value="${escapeHtml(rAncho)}" style="width:88px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px">
             <span style="color:var(--fg-mute)">×</span>
-            <input id="corte-alto" placeholder="alto" inputmode="decimal" style="width:88px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px">
+            <input id="corte-alto" placeholder="alto" inputmode="decimal" value="${escapeHtml(rAlto)}" style="width:88px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px">
             <span style="color:var(--fg-mute)">cm</span>
             <span id="corte-precio-prev" style="font-size:14px;color:#22c55e;font-weight:700;margin-left:auto"></span>
           </div>
@@ -3537,6 +3605,7 @@ function renderCorte() {
             <button class="btn ghost" data-corte-relev-skip>Saltear</button>
           </div>
         </div>
+        ${esperandoHtml}
         ${corteArchivoEmmaHtml()}
       </div>`;
   }
@@ -3579,6 +3648,7 @@ function renderCorte() {
       ${sel ? corteDetalleHtml(sel) : ''}
       ${navWeek}
       ${corteHybridBoard(boardPedidos)}
+      ${corteNeonAdminHtml(pedidos)}
       <div style="height:22px"></div>
       ${corteAprendizajeHtml()}
 
@@ -3602,25 +3672,79 @@ function renderCorte() {
       </div>
     </div>`;
 }
-async function bindCorte() {
-  const admin = isAdmin();
-  if (STATE.cortePedidos === undefined && !STATE._corteLoading) {
-    STATE._corteLoading = true;
-    try {
-      const proms = [
-        fetch(CONFIG.trackerUrl + '/admin/corte/pedidos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})),
-        fetch(CONFIG.trackerUrl + '/admin/corte/tanda', { headers: authHeaders() }).then(r => r.json()).catch(() => ({}))
-      ];
-      if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/alumnos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
-      if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/preguntas', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
-      const res = await Promise.all(proms);
+// Firma de la cola del corte: si no cambió, el refresco silencioso no re-renderiza.
+function corteSig(list) { return (list || []).map(p => p.id + ':' + p.estado + ':' + (p.foto_key || '') + ':' + (p.updated_at || '')).join('|'); }
+// silent=true: refresco en segundo plano (al volver a Corte o cada 60s) — solo pedidos+tanda, conserva lo
+// que ya había si falla la red, y no re-renderiza si nada cambió o si el usuario está tipeando una medida.
+async function corteCargar(silent) {
+  if (STATE._corteLoading) return;
+  STATE._corteLoading = true;
+  const admin = isAdmin() && !silent;
+  const prevSig = corteSig(STATE.cortePedidos);
+  try {
+    const proms = [
+      fetch(CONFIG.trackerUrl + '/admin/corte/pedidos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})),
+      fetch(CONFIG.trackerUrl + '/admin/corte/tanda', { headers: authHeaders() }).then(r => r.json()).catch(() => ({}))
+    ];
+    if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/alumnos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
+    if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/preguntas', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
+    const res = await Promise.all(proms);
+    if (silent) {
+      if (res[0] && Array.isArray(res[0].pedidos)) STATE.cortePedidos = res[0].pedidos;
+      if (res[1] && res[1].ok) STATE.corteTanda = res[1];
+    } else {
       STATE.cortePedidos = (res[0] && res[0].pedidos) || [];
       STATE.corteTanda = (res[1] && res[1].ok) ? res[1] : null;
-      STATE.corteAlumnos = admin ? ((res[2] && res[2].alumnos) || []) : [];
-      STATE.cortePropuestas = admin ? ((res[3] && res[3].propuestas) || []) : [];
-    } catch (_) { STATE.cortePedidos = STATE.cortePedidos || []; STATE.corteAlumnos = STATE.corteAlumnos || []; }
-    STATE._corteLoading = false;
-    render();
+      STATE.corteAlumnos = isAdmin() ? ((res[2] && res[2].alumnos) || []) : [];
+      STATE.cortePropuestas = isAdmin() ? ((res[3] && res[3].propuestas) || []) : [];
+    }
+  } catch (_) { STATE.cortePedidos = STATE.cortePedidos || []; STATE.corteAlumnos = STATE.corteAlumnos || []; }
+  STATE._corteLoading = false;
+  STATE._corteLoadedAt = Date.now();
+  corteBadgePaint();
+  if (silent) {
+    if (STATE.view !== 'corte' || corteSig(STATE.cortePedidos) === prevSig) return;
+    const ae = document.activeElement; // no pisarle a Emma la medida que está tipeando
+    if (ae && ae.closest && ae.closest('#main') && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return;
+  }
+  if (STATE.view === 'corte') render();
+}
+// Badge del nav "Corte" para Emma: carteles de Neon Infinito con foto, esperando su matriz.
+function corteNeonParaDisenar() {
+  if (Array.isArray(STATE.cortePedidos)) return STATE.cortePedidos.filter(p => p.producto === 'NEON' && p.estado === 'pedido' && !corteEsperandoFoto(p)).length;
+  return (STATE.corteResumen && STATE.corteResumen.neon_para_disenar) || 0;
+}
+function corteBadgeHtml() {
+  if (!isDisenadorOnly()) return '';
+  const n = corteNeonParaDisenar();
+  return `<span class="badge" data-corte-badge title="Carteles de Neon Infinito para diseñar la matriz" style="display:${n ? '' : 'none'}">${n || ''}</span>`;
+}
+function corteBadgePaint() {
+  const b = document.querySelector('[data-corte-badge]'); if (!b) return;
+  const n = corteNeonParaDisenar();
+  b.textContent = n || ''; b.style.display = n ? '' : 'none';
+}
+async function corteResumenFetch() {
+  if (!STATE.token || document.hidden) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/resumen', { headers: authHeaders() }).then(x => x.json());
+    if (r && r.ok) { STATE.corteResumen = r; corteBadgePaint(); }
+  } catch (_) {}
+}
+// Un solo timer global: refresca la cola del corte mientras se está mirando (Emma ve los diseños nuevos
+// sin recargar) y, para Emma, el badge del nav aunque esté en Cotización.
+function corteStartPolling() {
+  if (window._cortePollT) return;
+  window._cortePollT = setInterval(() => {
+    if (document.hidden || !STATE.token) return;
+    if (STATE.view === 'corte' && STATE.cortePedidos !== undefined) corteCargar(true);
+    else if (isDisenadorOnly() && (Date.now() - (STATE._corteResAt || 0)) > 4 * 60000) { STATE._corteResAt = Date.now(); corteResumenFetch(); }
+  }, 60000);
+}
+async function bindCorte() {
+  corteStartPolling();
+  if (STATE.cortePedidos === undefined && !STATE._corteLoading) {
+    await corteCargar(false);
     return;
   }
   const inp = document.getElementById('corte-alumnos-q');
@@ -3644,7 +3768,7 @@ async function bindCorte() {
       if (nq) { nq.focus(); const L = (STATE.corteEmbQuery || '').length; try { nq.setSelectionRange(L, L); } catch (_) {} }
     };
   }
-  document.querySelectorAll('[data-corte-card]').forEach(el => { el.onclick = (e) => { e.stopPropagation(); STATE.corteSelected = parseInt(el.getAttribute('data-corte-card'), 10); render(); }; });
+  document.querySelectorAll('[data-corte-card]').forEach(el => { el.onclick = (e) => { e.stopPropagation(); STATE.corteSelected = parseInt(el.getAttribute('data-corte-card'), 10); render(); const d = document.querySelector('[data-corte-cerrar]'); if (d && d.scrollIntoView) d.scrollIntoView({ block: 'nearest' }); }; });
   // Board híbrido (admin): segmentado + expandir/colapsar cliente.
   document.querySelectorAll('[data-corte-seg]').forEach(b => { b.onclick = () => { STATE.corteSeg = b.getAttribute('data-corte-seg'); render(); }; });
   document.querySelectorAll('[data-corte-grow]').forEach(row => { row.onclick = () => { const k = row.getAttribute('data-corte-grow'); STATE.corteExpanded = STATE.corteExpanded || {}; STATE.corteExpanded[k] = !STATE.corteExpanded[k]; render(); }; });
@@ -3792,7 +3916,7 @@ async function corteAccion(accion, id) {
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/corte/pedido', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(x => x.json());
     if (r && r.ok) {
-      toast(accion === 'medidas' ? ('Matriz lista · $' + Number(r.precio || 0).toLocaleString('es-AR')) : 'Listo ✓');
+      toast(accion === 'medidas' ? (Number(r.precio) ? ('Matriz lista · $' + Number(r.precio).toLocaleString('es-AR')) : 'Matriz lista ✓') : 'Listo ✓');
       STATE.corteSelected = null; STATE.cortePedidos = undefined; STATE._corteLoading = false;
       render();
     } else { toast((r && r.error) || 'No se pudo'); }
@@ -3833,7 +3957,7 @@ function renderShell() {
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
         ` : isDisenadorOnly() ? `
           <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
-          <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
+          <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte ${corteBadgeHtml()}</button>
         ` : `
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
@@ -5880,7 +6004,7 @@ function renderTablePedidos() {
           filtered.map(p => `
             <tr data-pid="${p.idx}">
               <td class="num">${fmtDate(p.fecha)}</td>
-              <td class="cliente">${escapeHtml(p.cartel)}${tcPedidoBtn(p)}</td>
+              <td class="cliente">${escapeHtml(p.cartel)}${tcPedidoBtn(p)}${disenoBadgePedido(p)}</td>
               <td>${baseSwatch(p.base)}</td>
               <td class="num">${fmtMoney(p.precio)}</td>
               <td>${dimerPillHtml(p.dimmer)}</td>
@@ -5968,7 +6092,10 @@ const DIMMER_PRECIOS = { NO: '', SLIM: 18700, CONTROL: 25000, APP: 38000 };
 function nuevoCartelPedido() {
   return { cartel:'', colores:'', tipo:'INT', alto:'', ancho:'', cmNeon:'', tramos:'', base:'TRANS', cantidad:1, precio:'', dimer:'NO', precioDimmer:'', envio:'', aclaracion:'',
            // Corpóreos (se completan al parsear una OC corpórea): flag + specs de producción.
-           es_corporeo:0, producto:'', frente:'', laterales:'', espalda:'', iluminacion:'con luz', bastidor:'no', colorBastidor:'', instalacion:'no' };
+           es_corporeo:0, producto:'', frente:'', laterales:'', espalda:'', iluminacion:'con luz', bastidor:'no', colorBastidor:'', instalacion:'no',
+           // Foto del DISEÑO FINAL (solo neón): key de R2 ya subida, preview, estado ('' | 'subiendo' | 'error')
+           // y "la subo después". Vive SOLO en el modal (nunca en STATE.pedidos: el cache de localStorage).
+           foto_key:'', foto_preview:'', foto_estado:'', foto_despues:false };
 }
 function suggestProximoNumero() {
   // Próximo N° = MÁXIMO real + 1 (colisión-proof). Antes ordenaba por (b.fecha - a.fecha), pero
@@ -6274,6 +6401,154 @@ function pmPickCotizacion(i, k) {
     if (applyBriefToCartel(cc, brief)) { render(); toast('Tramos traídos del brief'); }
   }).catch(() => {});
 }
+// ===== Foto del DISEÑO FINAL por cartel de neón (→ matriz a diseñar de Emma en el corte) =====
+// Al crear el pedido, cada cartel de neón nace también como pieza en Corte → Relevamiento de Emma,
+// con esta foto y su medida. Obligatoria, con escape "la subo después" (nunca frena cargar una seña):
+// el pedido queda marcado SIN FOTO y se completa desde el drawer. El sistema SUGIERE lo último que se
+// le mandó al cliente por el chat (lo que vio y aprobó) y el vendedor confirma con un clic, o sube otra.
+function disenoThumb(key, w) { const u = mediaUrl(key); return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'w=' + (w || 320); }
+// Achica a JPEG ≤1920px: las fotos de celu pesan 3-8MB y los HEIC de iPhone no se ven en el navegador
+// de Emma. Fondo blanco (un PNG transparente pasado a JPEG quedaría negro). Si el navegador no puede
+// decodificar la imagen, va el original.
+function disenoDownscaleBlob(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        URL.revokeObjectURL(url);
+        let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+        const s = Math.min(1, 1920 / Math.max(w, h || 1));
+        w = Math.max(1, Math.round(w * s)); h = Math.max(1, Math.round(h * s));
+        const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+        const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
+        cv.toBlob(b => resolve(b || file), 'image/jpeg', 0.86);
+      } catch (_) { resolve(file); }
+    };
+    img.onerror = () => { try { URL.revokeObjectURL(url); } catch (_) {} resolve(file); };
+    img.src = url;
+  });
+}
+// Sube la foto (PUT raw) y devuelve la key de R2. Un reintento ante corte de red (pasa).
+async function disenoSubirArchivo(file) {
+  const blob = (file.type === 'image/png' && file.size <= 4 * 1024 * 1024) ? file : await disenoDownscaleBlob(file);
+  let lastErr = null;
+  for (let intento = 0; intento < 2; intento++) {
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/diseno-foto', { method: 'PUT', headers: { ...authHeaders(), 'Content-Type': blob.type || 'image/jpeg' }, body: blob });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.key) return j.key;
+      lastErr = new Error(j.error || ('HTTP ' + r.status));
+      if (r.status < 500) break; // error del pedido (tamaño, permisos): no tiene sentido reintentar
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('no se pudo subir');
+}
+// Usa como diseño final una imagen que ya está en R2 (lo que se le mandó al cliente): el server la COPIA.
+async function disenoCopiarKey(fromKey) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/diseno-foto/copiar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ from: fromKey }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.key) throw new Error(j.error || ('HTTP ' + r.status));
+  return j.key;
+}
+// Contacto para las sugerencias: WhatsApp = teléfono; Instagram = IGSID (si se abrió desde la OC del chat).
+function pmContactoSugerencias(m) {
+  if (!m) return '';
+  if (m.plataforma === 'IG') return String(m._igsid || '').replace(/\D/g, '');
+  return String(m.telefono || '').replace(/\D/g, '');
+}
+// Trae las últimas imágenes que se le mandaron al cliente (+ renders de sus briefs) para sugerirlas.
+async function pmCargarSugerencias() {
+  const m = STATE.pedidoModal; if (!m) return;
+  const contacto = pmContactoSugerencias(m);
+  if (contacto.length < 8 || m._fotoSugDe === contacto) return;
+  m._fotoSugDe = contacto;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/diseno-sugerencias?phone=' + encodeURIComponent(contacto), { headers: authHeaders() });
+    const j = await r.json();
+    if (STATE.pedidoModal !== m || !STATE.pedidoModalOpen) return;
+    m._fotoSug = (j && j.fotos) || [];
+    if (m._fotoSug.length && (m.carteles || []).some(c => !c.es_corporeo && !c.foto_key)) { readPedidoModalDOM(); render(); }
+  } catch (_) {}
+}
+async function pmFotoSetArchivo(i, file) {
+  const m = STATE.pedidoModal; if (!m || !file) return;
+  const c = m.carteles[i]; if (!c || c.es_corporeo) return;
+  if (!/^image\//.test(file.type || '')) { toast('Eso no es una imagen'); return; }
+  readPedidoModalDOM();
+  try { if (c.foto_preview && c.foto_preview.indexOf('blob:') === 0) URL.revokeObjectURL(c.foto_preview); } catch (_) {}
+  c.foto_preview = URL.createObjectURL(file); c.foto_estado = 'subiendo'; c.foto_key = '';
+  render();
+  try {
+    const key = await disenoSubirArchivo(file);
+    if (STATE.pedidoModal !== m) return;
+    c.foto_key = key; c.foto_estado = ''; c.foto_despues = false;
+  } catch (e) {
+    if (STATE.pedidoModal !== m) return;
+    c.foto_estado = 'error'; toast('No se pudo subir la foto: ' + (e.message || e) + ' — reintentá');
+  }
+  readPedidoModalDOM(); render();
+  if (m._validated) pmApplyMarks(pmValidate());
+}
+async function pmFotoUsarSugerida(i, fromKey) {
+  const m = STATE.pedidoModal; if (!m) return;
+  const c = m.carteles[i]; if (!c || c.es_corporeo) return;
+  readPedidoModalDOM();
+  c.foto_preview = disenoThumb(fromKey, 480); c.foto_estado = 'subiendo'; c.foto_key = '';
+  render();
+  try {
+    const key = await disenoCopiarKey(fromKey);
+    if (STATE.pedidoModal !== m) return;
+    c.foto_key = key; c.foto_estado = ''; c.foto_despues = false;
+  } catch (e) {
+    if (STATE.pedidoModal !== m) return;
+    c.foto_estado = 'error'; toast('No se pudo usar esa imagen: ' + (e.message || e));
+  }
+  readPedidoModalDOM(); render();
+  if (m._validated) pmApplyMarks(pmValidate());
+}
+function pmFotoQuitar(i) {
+  const m = STATE.pedidoModal; if (!m) return;
+  const c = m.carteles[i]; if (!c) return;
+  readPedidoModalDOM();
+  try { if (c.foto_preview && c.foto_preview.indexOf('blob:') === 0) URL.revokeObjectURL(c.foto_preview); } catch (_) {}
+  c.foto_key = ''; c.foto_preview = ''; c.foto_estado = '';
+  render();
+}
+// Primer cartel de neón sin foto (destino del Ctrl+V con el modal abierto).
+function pmCartelSinFoto() {
+  const m = STATE.pedidoModal; if (!m) return -1;
+  return (m.carteles || []).findIndex(c => !c.es_corporeo && !c.foto_key && c.foto_estado !== 'subiendo');
+}
+function pmFotoSlotHtml(c, i) {
+  const m = STATE.pedidoModal || {};
+  const btn = 'background:transparent;border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);cursor:pointer;font-size:12px;padding:6px 10px';
+  const fileBtn = (txt) => `<label style="${btn};display:inline-block">${txt}<input type="file" accept="image/*" data-pm-foto-file="${i}" style="display:none"></label>`;
+  let inner;
+  if (c.foto_estado === 'subiendo') {
+    inner = `<div style="display:flex;gap:10px;align-items:center">${c.foto_preview ? `<img src="${escapeHtml(c.foto_preview)}" style="height:64px;max-width:120px;object-fit:contain;border-radius:6px;opacity:.5">` : ''}<span style="font-size:12px;color:var(--fg-subtle)">Subiendo foto…</span></div>`;
+  } else if (c.foto_key) {
+    const src = c.foto_preview || disenoThumb(c.foto_key, 320);
+    inner = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <img src="${escapeHtml(src)}" style="height:72px;max-width:140px;object-fit:contain;border-radius:6px;background:#fff">
+        <div style="flex:1;min-width:140px"><div style="font-size:12px;color:#3DDC97;font-weight:700">✓ Diseño aprobado</div><div style="font-size:11px;color:var(--fg-subtle)">Le llega a Emma en el corte con la medida del cartel</div></div>
+        <div style="display:flex;gap:6px">${fileBtn('Cambiar')}<button type="button" data-pm-foto-quitar="${i}" style="${btn};color:#FF5566">Quitar</button></div>
+      </div>`;
+  } else {
+    const sug = (m._fotoSug || []).slice(0, 6);
+    const sugHtml = sug.length ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(lo último que se le mandó al cliente — tocá la que aprobó)</span></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${sug.map((f, k) => `<button type="button" data-pm-foto-sug="${i}|${escapeHtml(f.key)}" title="Usar esta como diseño aprobado" style="position:relative;border:1px solid ${k === 0 ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" style="display:block;height:64px;width:64px;object-fit:cover">${k === 0 ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}</button>`).join('')}</div>` : '';
+    inner = `${sugHtml}
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        ${fileBtn('📷 Subir foto')}
+        <span style="font-size:11px;color:var(--fg-mute)">o pegala con Ctrl+V</span>
+        <label style="margin-left:auto;font-size:12px;color:var(--fg-subtle);display:flex;gap:5px;align-items:center;cursor:pointer"><input type="checkbox" data-pm-foto-despues="${i}" ${c.foto_despues ? 'checked' : ''}> La subo después</label>
+      </div>
+      ${c.foto_estado === 'error' ? '<div style="font-size:11px;color:#FF5566;margin-top:4px">No se pudo subir — probá de nuevo.</div>' : ''}
+      ${c.foto_despues ? '<div style="font-size:11px;color:#FFB020;margin-top:6px">⚠ El pedido queda marcado SIN FOTO: subila desde el pedido apenas la tengas. Emma no puede hacer la matriz sin ella.</div>' : ''}`;
+  }
+  return `<div data-pm-foto-slot="${i}" style="border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;background:var(--ink-100)">${inner}</div>`;
+}
 function renderPedidoCartelBlock(c, i, n) {
   const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 9px;color:var(--fg);font-size:13px';
   const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
@@ -6371,6 +6646,10 @@ function renderPedidoCartelBlock(c, i, n) {
         <div style="flex:1"><label style="${lbl}">Tramos</label><input id="pm-tramos-${i}" type="number" value="${escapeHtml(String(c.tramos||''))}" style="${inp}"></div>
         <div style="flex:1"><label style="${lbl}">Base *</label><select id="pm-base-${i}" style="${inp}">${baseOpts}</select></div>
       </div>
+      <div style="margin-bottom:6px">
+        <label style="${lbl}">Foto del diseño final * <span style="opacity:.5;text-transform:none;letter-spacing:0">— la que aprobó el cliente · le llega a Emma para hacer la matriz</span></label>
+        ${pmFotoSlotHtml(c, i)}
+      </div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
         <div style="flex:1.3"><label style="${lbl}">Precio cartel *</label><input id="pm-precio-${i}" type="number" value="${escapeHtml(String(c.precio||''))}" placeholder="$" style="${inp}" data-pm-calc></div>
         <div style="flex:1"><label style="${lbl}">Dimmer *</label><select id="pm-dimer-${i}" data-pm-dimer="${i}" style="${inp}">${dimerOpts}</select></div>
@@ -6467,6 +6746,18 @@ function bindPedidoModal() {
   // Toggle Cartel/Corpóreo: cambia el layout del bloque (carga directa de corpóreos sin OC).
   document.querySelectorAll('[data-pm-esc]').forEach(b => b.onclick = () => { const p = b.dataset.pmEsc.split('|'); readPedidoModalDOM(); STATE.pedidoModal.carteles[parseInt(p[0], 10)].es_corporeo = (p[1] === '1') ? 1 : 0; render(); });
   const tel = document.getElementById('pm-telefono'); if (tel) tel.addEventListener('blur', pmTraceAd);
+  // Foto del diseño final (neón): subir archivo / usar una sugerida / quitar / "la subo después".
+  document.querySelectorAll('[data-pm-foto-file]').forEach(inp => inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) pmFotoSetArchivo(parseInt(inp.dataset.pmFotoFile, 10), f); });
+  document.querySelectorAll('[data-pm-foto-sug]').forEach(b => b.onclick = () => { const v = b.dataset.pmFotoSug; const k = v.indexOf('|'); pmFotoUsarSugerida(parseInt(v.slice(0, k), 10), v.slice(k + 1)); });
+  document.querySelectorAll('[data-pm-foto-quitar]').forEach(b => b.onclick = () => pmFotoQuitar(parseInt(b.dataset.pmFotoQuitar, 10)));
+  document.querySelectorAll('[data-pm-foto-despues]').forEach(cb => cb.onchange = () => {
+    readPedidoModalDOM();
+    const c = STATE.pedidoModal && STATE.pedidoModal.carteles[parseInt(cb.dataset.pmFotoDespues, 10)];
+    if (c) { c.foto_despues = !!cb.checked; render(); }
+  });
+  // Sugerencias de foto: al tener el contacto del cliente (OC del chat ya lo trae; carga manual, al salir del teléfono).
+  if (tel) tel.addEventListener('blur', () => { readPedidoModalDOM(); pmCargarSugerencias(); });
+  if (STATE.pedidoModal && !STATE.pedidoModal._fotoSugDe) setTimeout(pmCargarSugerencias, 0);
   // Si el usuario edita el campo Ad a mano (ej. corrige el auto-trazado a "Frecuente"/"Directo"),
   // invalidamos el ad_id capturado: sin esto el pedido se guardaría con el texto manual PERO con el
   // source_id del ad viejo pegado, y el funnel prioriza el source_id → contaría mal esa venta.
@@ -6507,6 +6798,9 @@ function pmValidate() {
     if (!(Number(c.precio) > 0))         invalid.push({ id:`pm-precio-${i}`, msg:`Cartel ${nro}: falta el precio` });
     if (c.dimer && c.dimer !== 'NO' && !(Number(c.precioDimmer) > 0)) invalid.push({ id:`pm-precioDimmer-${i}`, msg:`Cartel ${nro}: falta el precio del dimmer` });
     if (!String(c.envio||'').trim())     invalid.push({ id:`pm-envio-${i}`, msg:`Cartel ${nro}: falta el envío` });
+    // Foto del diseño final: obligatoria (le llega a Emma para la matriz), salvo "la subo después".
+    if (c.foto_estado === 'subiendo') invalid.push({ sel:`[data-pm-foto-slot="${i}"]`, msg:`Cartel ${nro}: esperá que termine de subir la foto del diseño` });
+    else if (!c.foto_key && !c.foto_despues) invalid.push({ sel:`[data-pm-foto-slot="${i}"]`, msg:`Cartel ${nro}: falta la foto del diseño final (o marcá "La subo después")` });
   }
   if (!(Number(m.pagado) > 0)) invalid.push({ id:'pm-pagado', msg:'Falta el monto de la seña (pagado)' });
   return invalid;
@@ -6556,7 +6850,9 @@ async function confirmCargarPedido() {
         envio: c.envio, aclaracion: c.aclaracion,
         // Corpóreos: flag + specs de producción (van a la hoja 2026v2, no al espejo de Ventas).
         es_corporeo: c.es_corporeo ? 1 : 0, producto: c.producto, frente: c.frente, laterales: c.laterales, espalda: c.espalda,
-        iluminacion: c.iluminacion, bastidor: c.bastidor, color_bastidor: c.colorBastidor, instalacion: c.instalacion
+        iluminacion: c.iluminacion, bastidor: c.bastidor, color_bastidor: c.colorBastidor, instalacion: c.instalacion,
+        // Foto del diseño final (ya subida a R2). Vacía = "la subo después" → la pieza nace "esperando foto".
+        foto_key: c.es_corporeo ? '' : (c.foto_key || '')
       }))
     };
     const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos', { method:'POST', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
@@ -7476,6 +7772,76 @@ function renderSegPostventa(items) {
 }
 
 // ---------- DRAWER ----------
+// ===== Foto del DISEÑO FINAL en la tabla y el drawer (matriz de Emma en el corte) =====
+// Badge rojo en la tabla: el cartel tiene pieza en el corte pero sin foto ("la subo después"). Los pedidos
+// anteriores a esta función (sin pieza) no muestran nada: se completan subiendo la foto desde el drawer.
+function disenoBadgePedido(p) {
+  if (!p || (p.esCorporeo && Number(p.esCorporeo))) return '';
+  if (p.corteId && !p.disenoKey) return ' <span title="Falta la foto del diseño final: abrí el pedido y subila (Emma la necesita para la matriz)" style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;background:rgba(255,85,102,.15);border:1px solid #FF5566;color:#FF5566;font-size:10px;font-weight:700;letter-spacing:.03em;vertical-align:middle">📷 SIN FOTO</span>';
+  return '';
+}
+const CORTE_ESTADO_TXT = { pedido: 'Emma: matriz por diseñar', matriz_lista: 'Matriz lista · falta cortar', cortado: 'Cortado · falta separar', embalado: 'Separado para el productor' };
+function disenoDrawerSection(p) {
+  if (p.esCorporeo && Number(p.esCorporeo)) return '';
+  const est = p.corteEstado ? (CORTE_ESTADO_TXT[p.corteEstado] || p.corteEstado) : '';
+  const fileBtn = (txt) => `<label class="btn btn-ghost" style="font-size:12px;padding:5px 10px;cursor:pointer;display:inline-block">${txt}<input type="file" accept="image/*" style="display:none" onchange="pedDisenoSubirInput(${p.idx}, this)"></label>`;
+  let body;
+  if (p.disenoKey) {
+    body = `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <a href="${escapeHtml(mediaUrl(p.disenoKey))}" target="_blank" rel="noopener" title="Ver en grande"><img src="${escapeHtml(disenoThumb(p.disenoKey, 480))}" style="height:110px;max-width:200px;object-fit:contain;border-radius:8px;background:#fff;border:1px solid var(--border)"></a>
+        <div style="flex:1;min-width:150px">
+          <div style="font-size:12px;color:#3DDC97;font-weight:700">✓ Diseño final cargado</div>
+          ${est ? `<div style="font-size:12px;color:var(--fg-subtle);margin-top:2px">Corte: ${escapeHtml(est)}</div>` : ''}
+          <div style="margin-top:8px">${fileBtn('Cambiar foto')}</div>
+        </div>
+      </div>`;
+  } else {
+    body = `<div style="font-size:12px;color:#FFB020;font-weight:700;margin-bottom:4px">📷 Falta la foto del diseño final</div>
+      <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:8px">${p.corteId ? 'Emma tiene este cartel en espera hasta que subas la foto.' : 'Al subirla, el cartel entra a la cola de Emma para hacer la matriz.'}</div>
+      <div id="ped-diseno-sug" style="margin-bottom:8px"></div>
+      ${fileBtn('📷 Subir foto')}`;
+  }
+  return `<div class="drawer-section"><h4>Diseño final <span style="font-size:11px;color:var(--fg-subtle);font-weight:400">· para la matriz de Emma</span></h4>${body}<div id="ped-diseno-status" style="font-size:12px;color:var(--fg-subtle);margin-top:6px"></div></div>`;
+}
+// Asigna la key (ya en R2) al cartel: el server crea la pieza si falta, o la actualiza / re-encola.
+async function pedDisenoAsignar(idx, key) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx + '/diseno-foto', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+  const updated = (j.pedidos || []).map(mapPedidoFromD1);
+  const ids = new Set(updated.map(x => x.idx));
+  STATE.pedidos = STATE.pedidos.filter(x => !ids.has(x.idx)).concat(updated);
+  if (STATE.view === 'pedidos') renderTablePedidos();
+  openDrawerPedido(idx);
+  toast(j.aviso || 'Foto del diseño cargada ✓ — ya le aparece a Emma');
+}
+async function pedDisenoSubirInput(idx, inp) {
+  const f = inp && inp.files && inp.files[0]; if (!f) return;
+  const st = document.getElementById('ped-diseno-status'); if (st) st.textContent = 'Subiendo foto…';
+  try { await pedDisenoAsignar(idx, await disenoSubirArchivo(f)); }
+  catch (e) { const s2 = document.getElementById('ped-diseno-status'); if (s2) s2.textContent = ''; toast('No se pudo cargar la foto: ' + (e.message || e)); }
+}
+async function pedDisenoUsarSugerida(idx, fromKey) {
+  const st = document.getElementById('ped-diseno-status'); if (st) st.textContent = 'Cargando la foto…';
+  try { await pedDisenoAsignar(idx, await disenoCopiarKey(fromKey)); }
+  catch (e) { const s2 = document.getElementById('ped-diseno-status'); if (s2) s2.textContent = ''; toast('No se pudo usar esa imagen: ' + (e.message || e)); }
+}
+// Drawer de un cartel SIN foto: sugiere lo último que se le mandó al cliente (un clic = "este es el aprobado").
+async function pedDisenoCargarSugerencias(p) {
+  if (!p || p.disenoKey || (p.esCorporeo && Number(p.esCorporeo))) return;
+  const contacto = String(p.telefono || '').replace(/\D/g, '');
+  if (contacto.length < 8) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/diseno-sugerencias?phone=' + encodeURIComponent(contacto), { headers: authHeaders() });
+    const j = await r.json();
+    const box = document.getElementById('ped-diseno-sug'); if (!box) return;
+    const fotos = ((j && j.fotos) || []).slice(0, 6);
+    if (!fotos.length) return;
+    box.innerHTML = `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(lo último que se le mandó al cliente — tocá la que aprobó)</span></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${fotos.map((f, k) => `<button type="button" data-ped-sug="${escapeHtml(f.key)}" title="Usar esta como diseño aprobado" style="position:relative;border:1px solid ${k === 0 ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" style="display:block;height:64px;width:64px;object-fit:cover">${k === 0 ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}</button>`).join('')}</div>`;
+    box.querySelectorAll('[data-ped-sug]').forEach(b => b.onclick = () => pedDisenoUsarSugerida(p.idx, b.dataset.pedSug));
+  } catch (_) {}
+}
 function openDrawerPedido(idx) {
   const p = STATE.pedidos.find(p => p.idx === idx);
   if (!p) return;
@@ -7556,6 +7922,7 @@ function openDrawerPedido(idx) {
           ${!esCorp && p.precioDimmer ? `<dt>Precio dimmer</dt><dd>${fmtMoney(p.precioDimmer)}</dd>` : ''}
         </dl>
       </div>
+      ${disenoDrawerSection(p)}
       <div class="drawer-section">
         <h4>Estado, pago y productor ${hermanos.length>1?`<span style="font-size:11px;color:var(--fg-subtle);font-weight:400">· aplica a los ${hermanos.length} carteles</span>`:''}</h4>
         <div style="display:flex;flex-direction:column;gap:10px">
@@ -7632,6 +7999,7 @@ function openDrawerPedido(idx) {
   document.getElementById('drawer').classList.add('open');
   document.getElementById('drawer-bg').classList.add('open');
   document.getElementById('drawer-bg').onclick = closeDrawer;
+  pedDisenoCargarSugerencias(p); // si le falta la foto del diseño, sugerir lo último que vio el cliente
 }
 
 // Opciones del dropdown (SELECT) "de qué ad viene", agrupadas por vertical + un grupo
@@ -8548,6 +8916,8 @@ window.loadAdminActivity = loadAdminActivity;
 // ---------- COMMON ----------
 function bindNav() {
   document.querySelectorAll('.nav-item').forEach(b => b.onclick = () => setView(b.dataset.view));
+  // Emma: badge de carteles de Neon Infinito para diseñar (se refresca solo, aunque esté en Cotización).
+  if (STATE.token && isDisenadorOnly()) { corteStartPolling(); if (!STATE._corteResAt) { STATE._corteResAt = Date.now(); corteResumenFetch(); } }
   document.querySelectorAll('[data-set-user]').forEach(b => b.onclick = () => setUser(b.dataset.setUser));
   document.querySelectorAll('[data-switch-user]').forEach(b => b.onclick = () => switchUser(b.dataset.switchUser));
   const addBtn = document.querySelector('[data-add-user]');
@@ -8591,6 +8961,24 @@ function bindCommon() {
       tcAddFotoFiles(files);
     });
     document._ticketCorpPasteBound = true;
+  }
+  // Ctrl+V con el modal "Cargar pedido" abierto → la imagen pegada es la FOTO DEL DISEÑO FINAL del primer
+  // cartel de neón que todavía no la tiene. Igual que el ticket: corre antes que los paste de las vistas y
+  // los frena (si no, pegar una imagen abriría un brief). Texto pegado (teléfono, etc.) no se toca.
+  if (!document._pedidoFotoPasteBound) {
+    document.addEventListener('paste', (ev) => {
+      if (!STATE.pedidoModalOpen || (STATE.ticketCorpModalOpen && STATE.ticketCorpMode === 'form')) return;
+      const items = ev.clipboardData?.items || [];
+      let file = null;
+      for (const it of items) { if (it.kind === 'file' && (it.type || '').startsWith('image/')) { file = it.getAsFile(); if (file) break; } }
+      if (!file) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      const i = pmCartelSinFoto();
+      if (i < 0) { toast('Todos los carteles de neón ya tienen foto (usá "Cambiar")'); return; }
+      pmFotoSetArchivo(i, file);
+    });
+    document._pedidoFotoPasteBound = true;
   }
   document.querySelectorAll('[data-action="seg-cliente"]').forEach(b => b.onclick = () => {
     pedidoFilter.search = b.dataset.cliente;
@@ -12130,7 +12518,8 @@ function mediaUrl(r2Key) {
   const tkParam = STATE.token ? '?token=' + encodeURIComponent(STATE.token) : '';
   // wa/  → media bajado del webhook (imagen del cliente, audio, etc.)
   // promo/ → assets promocionales (foto de copa para follow-up de presupuesto)
-  if (r2Key.startsWith('wa/') || r2Key.startsWith('promo/') || r2Key.startsWith('briefs/') || r2Key.startsWith('ig/') || r2Key.startsWith('precotiz/')) {
+  // pedidos/ → foto del diseño final de un cartel (la matriz que diseña Emma en el corte)
+  if (r2Key.startsWith('wa/') || r2Key.startsWith('promo/') || r2Key.startsWith('briefs/') || r2Key.startsWith('ig/') || r2Key.startsWith('precotiz/') || r2Key.startsWith('pedidos/')) {
     return CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(r2Key) + tkParam;
   }
   return r2Key;
@@ -19667,7 +20056,9 @@ function startBriefsPolling() {
 // "Refrescar" o recargar la página. Polleamos /admin/pedidos cada 15s, solo en la
 // vista Pedidos y solo si el usuario no está editando nada.
 function pedidosSignature() {
-  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}`).join('|');
+  // + foto del diseño / estado del corte: si la foto se sube desde otro dispositivo (o Emma avanza la
+  // matriz), el poll tiene que redibujar la tabla (badge "SIN FOTO").
+  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}:${p.disenoKey || ''}:${p.corteEstado || ''}`).join('|');
 }
 function startPedidosPolling() {
   if (STATE.pedidosPollTimer) return;
