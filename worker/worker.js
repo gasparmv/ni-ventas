@@ -16751,7 +16751,7 @@ const handler = {
         await ensurePedidosSchema(env);
         const id = parseInt(path.split('/').pop(), 10);
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        const ref = await env.DB.prepare("SELECT numero, fecha, IFNULL(comercial_id,'joaco') AS com FROM pedidos WHERE id = ?").bind(id).first();
+        const ref = await env.DB.prepare("SELECT numero, fecha, IFNULL(comercial_id,'joaco') AS com, origen, IFNULL(telefono,'') AS tel FROM pedidos WHERE id = ?").bind(id).first();
         if (!ref) return json({ error: 'pedido no encontrado' }, 404);
         // Un vendedor solo edita SUS pedidos (mismo criterio que la lista que ve).
         if (_pr === 'comercial' && ref.com !== await resolveComercial(env, { sessionUser: session.user })) return json({ error: 'ese pedido es de otro vendedor' }, 403);
@@ -16801,8 +16801,13 @@ const handler = {
         //    restante si cambió el precio (ya aplicado arriba) o el pagado. El N° se repite entre vendedores
         //    (ej. #378 del 22-09: 2 carteles de Joaco + 1 de Agustina): sin el vendedor en el grupo, el pagado
         //    de uno pisaba el de los pedidos del otro y lo espejaba corrupto al Excel.
-        const _grp = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?";
+        let _grp = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?";
         const _grpArgs = [ref.numero, ref.fecha, ref.com];
+        // Pedidos del CRM: además el MISMO CLIENTE (un alta guarda el mismo teléfono en todos sus carteles).
+        // El N° de la OC se tipea a mano y se repite dentro de un mismo vendedor (#362, #376, #382): sin esto,
+        // marcar 'Entregado' el de un cliente se lo marcaba al otro (y su pieza sin diseñar salía de la cola
+        // de Emma). Las filas del Excel/backfill no: ahí el teléfono suele estar solo en la primera fila.
+        if (ref.origen === 'crm' && ref.tel) { _grp += " AND origen = 'crm' AND IFNULL(telefono,'') = ?"; _grpArgs.push(ref.tel); }
         const oSets = [], oArgs = [];
         if ('estado_pedido' in body) { oSets.push('estado_pedido = ?'); oArgs.push(String(body.estado_pedido || '')); }
         if ('estado_pago' in body)   { oSets.push('estado_pago = ?');   oArgs.push(String(body.estado_pago || '')); }
@@ -16825,7 +16830,7 @@ const handler = {
         }
 
         if (!touched) return json({ error: 'nada para actualizar' }, 400);
-        const rs2 = { results: await pedidosConDiseno(env, "WHERE pedidos.numero = ? AND pedidos.fecha = ? AND IFNULL(pedidos.comercial_id,'joaco') = ? ORDER BY pedidos.id", _grpArgs) };
+        const rs2 = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs) };
         return json({ ok: true, numero: ref.numero, pedidos: rs2.results || [] });
       }
 
