@@ -203,7 +203,12 @@ function panelSueldoHtml(vendedor) {
   const rate = sec
     ? sec.rate  // lo que VE el secundario (Facu/Agus = 10%). El neutro real calibrado es 9,5% (vende +5% oculto).
     : ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.joaquin) || params.comision_pct || 0.05);
+  // Tasa propia para CORPÓREOS (ej. Facu: 10% neón / 7% corpóreo). Sin rateCorp → los corpóreos
+  // van a la misma tasa que el resto (comportamiento viejo intacto para Joaco/Agus).
+  const rateCorp = (sec && sec.rateCorp != null) ? sec.rateCorp : rate;
+  const splitCorp = rateCorp !== rate;   // desglosar neón vs corpóreo solo si las tasas difieren
   const ratePct = +(rate * 100).toFixed(1);
+  const rateCorpPct = +(rateCorp * 100).toFixed(1);
   const fijoMes = sec ? nadiaFijoMes : joacoFijoMes;   // secundarios: 100% comisión (fijo 0) salvo carga manual
   const sel = getDashMonths();
   const periodMonths = (sel || availableMonths()).filter(m => m >= DESDE);
@@ -215,23 +220,41 @@ function panelSueldoHtml(vendedor) {
   } else {
     const nMonths = periodMonths.length;
     const fijo = periodMonths.reduce((a, m) => a + fijoMes(m), 0);
-    const ventas = STATE.pedidos
-      .filter(p => periodMonths.indexOf(getMonth(p.fecha)) !== -1 && (p.comercial_id || 'joaco') === vendedor)
+    const misPedidos = STATE.pedidos
+      .filter(p => periodMonths.indexOf(getMonth(p.fecha)) !== -1 && (p.comercial_id || 'joaco') === vendedor);
+    const sumaVentas = (corp) => misPedidos
+      .filter(p => corp ? p.esCorporeo : !p.esCorporeo)
       .reduce((a, p) => a + (p.precio || 0) + (p.precioDimmer || 0), 0);
-    const comision = Math.round(ventas * rate);
+    const ventasNeon = sumaVentas(false);
+    const ventasCorp = sumaVentas(true);
+    const ventas = ventasNeon + ventasCorp;
+    const comisionNeon = Math.round(ventasNeon * rate);
+    const comisionCorp = Math.round(ventasCorp * rateCorp);
+    const comision = comisionNeon + comisionCorp;
     const sueldo = fijo + comision;
     const por100k = Math.round(100000 * rate);
     periodLbl = nMonths === 1
       ? new Date(+periodMonths[0].split('-')[0], +periodMonths[0].split('-')[1] - 1, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
       : nMonths + ' meses';
     const fijoNota = (esNadia && fijo === 0) ? 'fijo a definir' : (nMonths === 1 ? 'fijo del mes' : 'suma real · ' + nMonths + ' meses');
+    // KPI de comisión: con tasa de corpóreo propia (Facu) muestra el total + "10% neón + 7% corpóreo"
+    // y un desglose abajo; sin ella queda igual que siempre ("Comisión 10% sobre $X en carteles directo").
+    const comKpi = splitCorp
+      ? `<div class="kpi cyan"><div class="kpi-label">Comisión</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">${ratePct}% neón + ${rateCorpPct}% corpóreo</div></div>`
+      : `<div class="kpi cyan"><div class="kpi-label">Comisión ${ratePct}%</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">sobre ${fmtMoney(ventas)} en carteles directo</div></div>`;
+    const footer = splitCorp
+      ? `<div style="margin-top:var(--s-3);display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--fg-subtle)">
+           <span>🔷 Neón: <b>${fmtMoney(ventasNeon)}</b> × ${ratePct}% = <b style="color:var(--fg)">${fmtMoney(comisionNeon)}</b></span>
+           <span>🧊 Corpóreo: <b>${fmtMoney(ventasCorp)}</b> × ${rateCorpPct}% = <b style="color:var(--fg)">${fmtMoney(comisionCorp)}</b></span>
+         </div>`
+      : `<div style="margin-top:var(--s-3);color:var(--fg-subtle);font-size:12px">Por cada ${fmtMoney(100000)} en carteles directo sumás ${fmtMoney(por100k)} de comisión 🚀</div>`;
     inner = `
         <div class="kpi-grid" style="margin:0">
           <div class="kpi"><div class="kpi-label">Sueldo fijo</div><div class="kpi-value">${fmtMoney(fijo)}</div><div class="kpi-delta">${fijoNota}</div></div>
-          <div class="kpi cyan"><div class="kpi-label">Comisión ${ratePct}%</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">sobre ${fmtMoney(ventas)} en carteles directo</div></div>
+          ${comKpi}
           <div class="kpi"><div class="kpi-label">Te estás llevando</div><div class="kpi-value">${fmtMoney(sueldo)}</div><div class="kpi-delta">fijo + comisión</div></div>
         </div>
-        <div style="margin-top:var(--s-3);color:var(--fg-subtle);font-size:12px">Por cada ${fmtMoney(100000)} en carteles directo sumás ${fmtMoney(por100k)} de comisión 🚀</div>`;
+        ${footer}`;
   }
   return `
       <div style="background:linear-gradient(135deg,rgba(37,211,102,.07),transparent 55%),var(--bg-card);border:1px solid rgba(37,211,102,.35);border-radius:var(--r-md);padding:var(--s-4);margin-bottom:var(--s-5)">
@@ -1077,7 +1100,7 @@ function isAgustinaUser(s) { return _userKey(s) === 'agustina'; }
 // entrada acá (+ fila en users_panel + nombre en CONFIG.defaultUsers). Config por vendedor: comisión
 // visible (rate), +5% oculto (mas5), mes de inicio del panel "Tu sueldo" (desde), color de píldora.
 const COMERCIALES_SECUNDARIOS = {
-  facundo:  { nombre: 'Facu', rate: 0.10, mas5: true, desde: '2026-08', color: 'violet' },
+  facundo:  { nombre: 'Facu', rate: 0.10, rateCorp: 0.07, mas5: true, desde: '2026-08', color: 'violet' },
   agustina: { nombre: 'Agus', rate: 0.10, mas5: true, desde: '2026-09', color: 'rose' },
 };
 function isSecundario(s) { return Object.prototype.hasOwnProperty.call(COMERCIALES_SECUNDARIOS, _userKey(s)); }
