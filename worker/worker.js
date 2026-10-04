@@ -4269,7 +4269,7 @@ function stmtInsertCortePieza(env, pedidoIdSql, pedidoIdArg, numero, pz, fotoKey
 // quedaron SIN pieza de corte (si el alta de la pieza falló) → se crea sin foto ("esperando foto").
 // No toca pedidos anteriores (decisión de Gaspar: arrancar desde el deploy; los viejos se completan
 // subiendo la foto desde el drawer) ni lo que entra por el Excel (origen 'excel'/'backfill').
-const CORTE_NEON_DESDE = '2026-10-04';
+const CORTE_NEON_DESDE = '2026-10-04T23:50:00.000Z'; // hora del deploy (UTC): lo cargado antes no se barre
 async function ensureCortePiezasNeonPendientes(env) {
   try {
     await ensureCorteNeonSchema(env);
