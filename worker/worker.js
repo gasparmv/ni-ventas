@@ -4171,8 +4171,12 @@ async function ensureCorteNeonSchema(env) {
   for (const col of ['pedido_id INTEGER', 'pedido_numero INTEGER', 'origen TEXT', 'base TEXT', 'vendedor TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE corte_pedidos ADD COLUMN ${col}`).run(); } catch (_) {} // tira si ya existe
   }
-  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_corte_pedidos_pedido ON corte_pedidos(pedido_id)').run(); } catch (_) {}
-  _corteNeonSchemaOk = true;
+  // UNA pieza por cartel: índice único parcial (las manuales tienen pedido_id NULL) + INSERT OR IGNORE en
+  // stmtInsertCortePieza → dos altas concurrentes (drawer doble clic, barredor vs fallback) no duplican.
+  try { await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS uq_corte_pedidos_pedido ON corte_pedidos(pedido_id) WHERE pedido_id IS NOT NULL').run(); } catch (_) {}
+  // Memoizar solo si las columnas existen de verdad (un ALTER que falló por un corte transitorio no
+  // tiene que dejar el isolate entero sin la feature hasta que se recicle).
+  try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
 }
 // Solo se aceptan como foto del diseño keys que subió/copió el propio flujo (prefijo controlado):
 // evita que el front referencie una imagen de R2 que después se borra con el brief.
@@ -4227,7 +4231,7 @@ function stmtInsertCortePieza(env, pedidoIdSql, pedidoIdArg, numero, pz, fotoKey
   const args = [numero, pz.diseno_nombre, pz.aclaraciones, fotoKey || null, pz.medida_declarada, pz.cantidad, pz.base, vendedor || '', tandaId, nowIso, nowIso];
   if (pedidoIdSql === '?') args.unshift(pedidoIdArg);
   return env.DB.prepare(
-    `INSERT INTO corte_pedidos (pedido_id, pedido_numero, origen, telefono, cliente_nombre, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, base, vendedor, tanda_id, estado, precio, estado_pago, created_at, updated_at)
+    `INSERT OR IGNORE INTO corte_pedidos (pedido_id, pedido_numero, origen, telefono, cliente_nombre, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, base, vendedor, tanda_id, estado, precio, estado_pago, created_at, updated_at)
      VALUES (${pedidoIdSql}, ?, 'pedido', '', 'neon', ?, ?, ?, ?, ?, 'NEON', ?, ?, ?, 'pedido', 0, 'interno', ?, ?)`
   ).bind(...args);
 }
@@ -4264,8 +4268,12 @@ async function syncCortePiezaDesdePedido(env, pedidoId) {
     const p = await env.DB.prepare('SELECT * FROM pedidos WHERE id = ?').bind(pedidoId).first();
     if (!p || Number(p.es_corporeo) === 1) return;
     const pz = cortePiezaDesdeCartel(p, p.numero, p.cargado_por || p.comercial_id || '');
-    await env.DB.prepare("UPDATE corte_pedidos SET diseno_nombre=?, medida_declarada=?, cantidad=?, aclaraciones=?, base=?, updated_at=? WHERE pedido_id=? AND estado='pedido'")
-      .bind(pz.diseno_nombre, pz.medida_declarada, pz.cantidad, pz.aclaraciones, pz.base, new Date().toISOString(), pedidoId).run();
+    const cur = await env.DB.prepare("SELECT id, aclaraciones FROM corte_pedidos WHERE pedido_id=? AND estado='pedido'").bind(pedidoId).first();
+    if (!cur) return;
+    // Conservar los avisos para Emma ("⚠ FOTO CAMBIADA · ", "⚠ PEDIDO BORRADO · ") que van como prefijo.
+    const avisos = (String(cur.aclaraciones || '').match(/^(?:⚠[^·]*·\s*)+/) || [''])[0];
+    await env.DB.prepare("UPDATE corte_pedidos SET diseno_nombre=?, medida_declarada=?, cantidad=?, aclaraciones=?, base=?, updated_at=? WHERE id=?")
+      .bind(pz.diseno_nombre, pz.medida_declarada, pz.cantidad, (avisos + pz.aclaraciones).slice(0, 700), pz.base, new Date().toISOString(), cur.id).run();
   } catch (_) {}
 }
 async function processCortePilot(env) {
@@ -16394,12 +16402,15 @@ const handler = {
           }
           // Pieza de corte del cartel (matriz de Emma): si todavía no se cortó, se va con el pedido. Si ya
           // está cortada/separada queda (es una pieza física), marcada para que nadie la pierda de vista.
-          try {
-            await ensureCorteNeonSchema(env);
-            await env.DB.prepare("DELETE FROM corte_pedidos WHERE pedido_id = ? AND estado IN ('pedido','matriz_lista')").bind(pid).run();
-            await env.DB.prepare("UPDATE corte_pedidos SET aclaraciones = '⚠ PEDIDO BORRADO · ' || IFNULL(aclaraciones,''), updated_at = ? WHERE pedido_id = ? AND IFNULL(aclaraciones,'') NOT LIKE '⚠ PEDIDO BORRADO%'").bind(new Date().toISOString(), pid).run();
-          } catch (_) {}
-          await env.DB.prepare('DELETE FROM pedidos WHERE id = ?').bind(pid).run();
+          // Todo en UN batch (atómico): el barredor del cron no puede re-crear la pieza en el medio.
+          let _corteOk = false;
+          try { await ensureCorteNeonSchema(env); _corteOk = _corteNeonSchemaOk; } catch (_) {}
+          const _delStmts = [env.DB.prepare('DELETE FROM pedidos WHERE id = ?').bind(pid)];
+          if (_corteOk) {
+            _delStmts.push(env.DB.prepare("DELETE FROM corte_pedidos WHERE pedido_id = ? AND estado IN ('pedido','matriz_lista')").bind(pid));
+            _delStmts.push(env.DB.prepare("UPDATE corte_pedidos SET aclaraciones = '⚠ PEDIDO BORRADO · ' || IFNULL(aclaraciones,''), updated_at = ? WHERE pedido_id = ? AND IFNULL(aclaraciones,'') NOT LIKE '⚠ PEDIDO BORRADO%'").bind(new Date().toISOString(), pid));
+          }
+          await env.DB.batch(_delStmts);
           return json({ ok: true, deleted: pid });
         } catch (e) { return json({ error: String(e && e.message || e) }, 500); }
       }
@@ -16408,7 +16419,15 @@ const handler = {
       // de Ventas hoja "2026" a D1. Borra solo lo previamente importado (origen=
       // 'backfill') y reinserta; preserva los creados en el CRM (origen='crm').
       if (request.method === 'POST' && path === '/admin/pedidos/backfill') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         await ensurePedidosSchema(env);
+        // Re-importar borra y re-crea las filas 'backfill' con ids NUEVOS: si alguna ya tiene pieza de corte
+        // (foto del diseño subida desde el drawer), esa pieza quedaría huérfana → no se permite.
+        try {
+          await ensureCorteNeonSchema(env);
+          const _ref = await env.DB.prepare("SELECT COUNT(*) AS n FROM corte_pedidos c JOIN pedidos p ON p.id = c.pedido_id WHERE p.origen = 'backfill'").first();
+          if (_ref && _ref.n > 0) return json({ error: `hay ${_ref.n} pieza(s) de corte vinculadas a pedidos del backfill; re-importar las dejaría huérfanas` }, 409);
+        } catch (_) {}
         const VENTAS_SID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
         const u = `https://docs.google.com/spreadsheets/d/${VENTAS_SID}/gviz/tq?tqx=out:csv&sheet=2026`;
         const r = await fetch(u);
@@ -16458,6 +16477,8 @@ const handler = {
         if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
         let ct = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
         if (!ct.startsWith('image/')) ct = 'image/jpeg';
+        const _cl = parseInt(request.headers.get('content-length') || '0', 10) || 0;
+        if (_cl > 10 * 1024 * 1024) return json({ error: 'la foto pesa más de 10MB' }, 413); // antes de leerla a memoria
         const buf = await request.arrayBuffer().catch(() => null);
         if (!buf || buf.byteLength === 0) return json({ error: 'la foto llegó vacía' }, 400);
         if (buf.byteLength > 10 * 1024 * 1024) return json({ error: 'la foto pesa más de 10MB' }, 413);
@@ -16477,8 +16498,15 @@ const handler = {
         if (!/^(wa|ig|briefs|precotiz)\/[\w\-./]+$/.test(from) || from.indexOf('..') >= 0) return json({ error: 'imagen de origen inválida' }, 400);
         const obj = await env.MEDIA.get(from);
         if (!obj) return json({ error: 'esa imagen ya no existe' }, 404);
-        let ct = (obj.httpMetadata && obj.httpMetadata.contentType) || 'image/jpeg';
-        if (!/^image\//i.test(ct)) ct = 'image/jpeg';
+        if ((obj.size || 0) > 15 * 1024 * 1024) return json({ error: 'esa imagen pesa demasiado' }, 413);
+        let ct = String((obj.httpMetadata && obj.httpMetadata.contentType) || '').toLowerCase();
+        if (!/^image\//.test(ct)) {
+          // Un video/audio/PDF del chat NO es un diseño. Sin content-type (o genérico) se acepta: las
+          // sugerencias ya vienen solo de mensajes de tipo imagen.
+          if ((ct && ct !== 'application/octet-stream') || /\.(mp4|mov|3gp|webm|ogg|opus|mp3|m4a|pdf|docx?|xlsx?)$/i.test(from)) return json({ error: 'eso no es una imagen' }, 400);
+          const _ext = (from.match(/\.(jpe?g|png|webp|gif)$/i) || [])[1];
+          ct = _ext ? 'image/' + _ext.toLowerCase().replace('jpg', 'jpeg') : 'image/jpeg';
+        }
         const key = _disenoKeyNueva(ct);
         try { await env.MEDIA.put(key, await obj.arrayBuffer(), { httpMetadata: { contentType: ct } }); }
         catch (e) { return json({ error: 'no se pudo copiar la foto: ' + String((e && e.message) || e) }, 500); }
@@ -16488,10 +16516,13 @@ const handler = {
       // chat (lo que vio y aprobó; las más nuevas primero) + los últimos renders de sus briefs. El vendedor
       // elige una y la confirma como "diseño aprobado". Solo keys de R2 (las que no se pudieron bajar se omiten).
       if (request.method === 'GET' && path === '/admin/pedidos/diseno-sugerencias') {
-        if (!['admin', 'comercial'].includes(await getSessionRole(env, session.user))) return json({ error: 'forbidden' }, 403);
+        const _sr = await getSessionRole(env, session.user);
+        if (!['admin', 'comercial'].includes(_sr)) return json({ error: 'forbidden' }, 403);
         const raw = String(url.searchParams.get('phone') || '').trim();
         const dig = raw.replace(/\D/g, '');
         const phone = dig.length >= 8 ? dig : raw; // WPP = dígitos; IG = IGSID (también dígitos)
+        // Mismo control que el chat: un vendedor no ve imágenes de chats de otro ni de las bandejas de Gaspar.
+        if (phone && !(await inboxAccessOk(env, _sr, phone, session.user))) return json({ ok: true, fotos: [] });
         const fotos = [], seen = new Set();
         const push = (k, ts, origen) => { k = String(k || ''); if (!k || seen.has(k) || !/^(wa|ig|briefs|precotiz)\//.test(k)) return; seen.add(k); fotos.push({ key: k, ts: ts || '', origen }); };
         if (phone) {
@@ -16531,6 +16562,8 @@ const handler = {
           const t = await corteTandaActual(env);
           const vend = p.cargado_por || p.comercial_id || '';
           await stmtInsertCortePieza(env, '?', pid, p.numero, cortePiezaDesdeCartel(p, p.numero, vend), key, vend, t ? t.id : null, nowIso).run();
+          // Si otra subida simultánea la creó primero (el INSERT OR IGNORE no hizo nada), gana la última foto.
+          await env.DB.prepare("UPDATE corte_pedidos SET foto_key = ?, updated_at = ? WHERE pedido_id = ? AND estado = 'pedido'").bind(key, nowIso, pid).run();
         } else if (pieza.estado === 'pedido') {
           await env.DB.prepare('UPDATE corte_pedidos SET foto_key = ?, updated_at = ? WHERE id = ?').bind(key, nowIso, pieza.id).run();
         } else if (pieza.estado === 'matriz_lista') {
@@ -16630,14 +16663,17 @@ const handler = {
         } else {
           try { await env.DB.batch(stmts); }
           catch (_eCorte) {
-            await env.DB.batch(pedidoStmts);
-            try {
-              const nuevos = (await env.DB.prepare("SELECT id FROM pedidos WHERE numero = ? AND origen = 'crm' AND created_at = ? ORDER BY id").bind(numero, now).all()).results || [];
-              for (let i = 0; i < carteles.length && i < nuevos.length; i++) {
-                if (_esCorpC(carteles[i])) continue;
-                try { await _insCortePieza(carteles[i], '?', nuevos[i].id).run(); } catch (_) {}
-              }
-            } catch (_) {}
+            // ¿El batch se escribió igual y solo falló la respuesta (corte de red / reset)? D1 no reintenta
+            // escrituras: si los carteles YA están, NO re-insertar (duplicaría la venta y el espejo al Excel).
+            const _yaEstan = async () => ((await env.DB.prepare("SELECT id FROM pedidos WHERE numero = ? AND origen = 'crm' AND created_at = ? ORDER BY id").bind(numero, now).all()).results || []);
+            let nuevos = [];
+            try { nuevos = await _yaEstan(); } catch (_) {}
+            if (!nuevos.length) { await env.DB.batch(pedidoStmts); try { nuevos = await _yaEstan(); } catch (_) {} }
+            // Piezas que falten (INSERT OR IGNORE + índice único por pedido_id: no duplica si ya estaban).
+            for (let i = 0; i < carteles.length && i < nuevos.length; i++) {
+              if (_esCorpC(carteles[i])) continue;
+              try { await _insCortePieza(carteles[i], '?', nuevos[i].id).run(); } catch (_) {}
+            }
           }
         }
         const rs = { results: await pedidosConDiseno(env, 'WHERE pedidos.numero = ? AND pedidos.origen = ? ORDER BY pedidos.id', [numero, 'crm']) };
@@ -17412,6 +17448,9 @@ const handler = {
         try {
           if (action === 'medidas') {
             if (!['admin', 'disenador'].includes(_role)) return json({ error: 'solo el diseñador' }, 403);
+            // Solo piezas que esperan su matriz: un doble envío o una pantalla vieja no puede devolver a
+            // 'matriz_lista' una pieza que Aníbal ya cortó.
+            if (ped.estado !== 'pedido') return json({ error: 'esa pieza ya no está para diseñar (se actualizó la lista)' }, 409);
             const ancho = parseFloat(String(body.ancho_real != null ? body.ancho_real : '').replace(',', '.')) || 0;
             const alto = parseFloat(String(body.alto_real != null ? body.alto_real : '').replace(',', '.')) || 0;
             if (!(ancho > 0 && alto > 0)) return json({ error: 'ancho y alto (cm) requeridos' }, 400);
