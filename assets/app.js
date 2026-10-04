@@ -1678,6 +1678,7 @@ function mapPedidoFromD1(row) {
     tramos: row.tramos || '',
     tipo: row.tipo || '',
     comercial_id: row.comercial_id || 'joaco',
+    origen: row.origen || '',
     cargadoPor: row.cargado_por || '',
     mirrorError: row.mirror_error || '',
     // Corpóreos (letras 3D): flag + specs de producción propios.
@@ -3695,7 +3696,8 @@ function renderCorte() {
     </div>`;
 }
 // Firma de la cola del corte: si no cambió, el refresco silencioso no re-renderiza.
-function corteSig(list) { return (list || []).map(p => [p.id, p.estado, p.foto_key || '', p.updated_at || '', p.ped_productor || '', p.pedido_numero || '', p.ancho_real || ''].join(':')).join('|'); }
+// ped_estado incluido: si el pedido pasa a Entregado (o vuelve a producción) la pieza sale/entra de la línea de Emma.
+function corteSig(list) { return (list || []).map(p => [p.id, p.estado, p.foto_key || '', p.updated_at || '', p.ped_productor || '', p.ped_estado || '', p.pedido_numero || '', p.ancho_real || ''].join(':')).join('|'); }
 // ¿Se puede re-renderizar el corte "de fondo" sin romperle algo al usuario? No si está tipeando, con la
 // cobranza abierta (sus checkboxes viven solo en el DOM: re-tildaría alumnos que Gaspar destildó), con el
 // detalle de una pieza abierto (radio de entrega / select de estado) o con un archivo elegido sin subir.
@@ -6127,7 +6129,7 @@ function tcPedidoBtn(p){
   return ` <button data-tc-pedido="${p.idx}" onclick="event.stopPropagation()" title="${has?'Ver ticket de producción #'+num:'Armar ticket de producción'}" style="${st};border-radius:var(--r-pill);padding:1px 7px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;vertical-align:middle">🎫 ${has?'Ver #'+num:'Armar'}</button>`;
 }
 // Dropdown inline (tabla) coloreado según el valor actual, para editar el estado sin
-// abrir el drawer (a nivel pedido: el worker lo aplica a todos los carteles del nro+fecha).
+// abrir el drawer (a nivel pedido: el worker lo aplica a los carteles del mismo pedido — ver pedidoHermanos).
 const PAGO_OPTS_TABLE = ['1er pago','2do pago'];
 const PED_OPTS_TABLE = ['En produccion','para enviar','Entregado'];
 function inlinePedidoSelect(idx, field, current, opts) {
@@ -6614,8 +6616,10 @@ function pmFotoQuitar(i) {
   const c = m.carteles[i]; if (!c) return;
   c._fotoTok = (c._fotoTok || 0) + 1;
   pmFotoBlobLibre(c);
-  c.foto_key = ''; c.foto_preview = ''; c.foto_estado = '';
+  c.foto_key = ''; c.foto_preview = ''; c.foto_estado = ''; c._fotoFrom = '';
   pmFotoRepintar(m, c);
+  // La imagen que tenía vuelve a estar libre: los otros carteles sin foto dejan de verla como "otro cartel".
+  (m.carteles || []).forEach(o => { if (o !== c && !o.es_corporeo && !o.foto_key && o.foto_estado !== 'subiendo') pmFotoRepintar(m, o); });
 }
 function bindPmFotoSlots(root) {
   if (!root) return;
@@ -6634,14 +6638,27 @@ function bindPmFotoSlots(root) {
 // neón (si no, marcar la primera era sugerirle a "Soho shine" el render de "Parking").
 function pmSugerenciasParaCartel(m, c) {
   const base = ((m && m._fotoSug) || []);
+  const otros = ((m && m.carteles) || []).filter(o => o !== c && !o.es_corporeo);
   const nc = normName(String(c.cartel || ''));
-  const coincide = f => !!nc && [f.brief_diseno, f.brief_cliente].some(n => { const x = normName(String(n || '')); return !!x && (x === nc || x.includes(nc) || nc.includes(x)); });
-  const usadas = new Set(((m && m.carteles) || []).filter(o => o !== c && o.foto_key && o._fotoFrom).map(o => o._fotoFrom));
-  const rank = f => (coincide(f) ? 0 : 1) + (usadas.has(f.key) ? 2 : 0);
-  const lista = base.map((f, k) => ({ ...f, _k: k, _usada: usadas.has(f.key) })).sort((a, b) => rank(a) - rank(b) || a._k - b._k).slice(0, 6);
-  const neones = ((m && m.carteles) || []).filter(o => !o.es_corporeo).length;
-  let sugIdx = lista.findIndex(f => coincide(f) && !f._usada);
-  if (sugIdx < 0 && neones <= 1 && lista.length && !lista[0]._usada) sugIdx = 0;
+  const nombres = f => [f.brief_diseno, f.brief_cliente].map(n => normName(String(n || ''))).filter(Boolean);
+  // Puntaje de cuánto se parece el brief de esa imagen a ESTE cartel: 0 = mismo nombre; 1 = uno contiene
+  // al otro (los dos de 4+ letras, y ningún otro cartel del pedido se llama exactamente así — si hay un
+  // "Cono helado", su render no es candidato para "Helado"); 2 = sin relación.
+  const exactoDeOtro = x => otros.some(o => normName(String(o.cartel || '')) === x);
+  const puntaje = f => {
+    if (!nc) return 2;
+    const ns = nombres(f);
+    if (ns.some(x => x === nc)) return 0;
+    if (nc.length >= 4 && ns.some(x => x.length >= 4 && (x.includes(nc) || nc.includes(x)) && !exactoDeOtro(x))) return 1;
+    return 2;
+  };
+  // Elegidas por OTRO cartel de neón (un corpóreo no usa foto: no "ocupa" ninguna).
+  const usadas = new Set(otros.filter(o => o.foto_key && o._fotoFrom).map(o => o._fotoFrom));
+  const lista = base.map((f, k) => ({ ...f, _k: k, _p: puntaje(f), _usada: usadas.has(f.key) }))
+    .sort((a, b) => (a._p + (a._usada ? 3 : 0)) - (b._p + (b._usada ? 3 : 0)) || a._k - b._k).slice(0, 6);
+  let sugIdx = lista.findIndex(f => f._p === 0 && !f._usada);
+  if (sugIdx < 0) sugIdx = lista.findIndex(f => f._p === 1 && !f._usada);
+  if (sugIdx < 0 && !otros.length && lista.length && !lista[0]._usada) sugIdx = 0; // un solo cartel: lo último que vio
   return { lista, sugIdx };
 }
 // Primer cartel de neón sin foto (destino del Ctrl+V con el modal abierto).
@@ -6666,7 +6683,7 @@ function pmFotoSlotHtml(c, i) {
   } else {
     const { lista: sug, sugIdx } = pmSugerenciasParaCartel(m, c);
     const sugHtml = sug.length ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(lo último que se le mandó al cliente — tocá la que aprobó)</span></div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${sug.map((f, k) => `<button type="button" data-pm-foto-sug="${i}|${escapeHtml(f.key)}" title="${escapeHtml(f.brief_diseno ? 'Render de «' + f.brief_diseno + '» — usar como diseño aprobado' : 'Usar esta como diseño aprobado')}" style="position:relative;border:1px solid ${k === sugIdx ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" onerror="this.parentNode.style.display='none'" style="display:block;height:64px;width:64px;object-fit:cover">${k === sugIdx ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}${f._usada ? '<span style="position:absolute;left:0;right:0;top:0;background:rgba(0,0,0,.6);color:#fff;font-size:9px;padding:1px 0">otro cartel</span>' : ''}</button>`).join('')}</div>` : '';
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${sug.map((f, k) => `<button type="button" data-pm-foto-sug="${i}|${escapeHtml(f.key)}" title="${escapeHtml(f.brief_diseno || f.brief_cliente ? 'Render de «' + (f.brief_diseno || f.brief_cliente) + '» — usar como diseño aprobado' : 'Usar esta como diseño aprobado')}" style="position:relative;border:1px solid ${k === sugIdx ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" onerror="this.parentNode.style.display='none'" style="display:block;height:64px;width:64px;object-fit:cover">${k === sugIdx ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}${f._usada ? '<span style="position:absolute;left:0;right:0;top:0;background:rgba(0,0,0,.6);color:#fff;font-size:9px;padding:1px 0">otro cartel</span>' : ''}</button>`).join('')}</div>` : '';
     inner = `${sugHtml}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         ${fileBtn('📷 Subir foto')}
@@ -6876,9 +6893,12 @@ function bindPedidoModal() {
   document.querySelectorAll('[data-pm-esc]').forEach(b => b.onclick = () => {
     const p = b.dataset.pmEsc.split('|'); readPedidoModalDOM();
     const c = STATE.pedidoModal.carteles[parseInt(p[0], 10)];
+    const eraCorp = !!c.es_corporeo;
     c.es_corporeo = (p[1] === '1') ? 1 : 0;
     // Corpóreo no lleva dimmer: si venía de neón con dimmer, quedaba escondido sumando al total y se guardaba.
-    if (c.es_corporeo) { c.dimer = 'NO'; c.precioDimmer = ''; }
+    // Se guarda aparte por si fue un clic sin querer: al volver a Cartel, el dimmer vuelve como estaba.
+    if (c.es_corporeo && !eraCorp) { c._dimPrev = { dimer: c.dimer, precioDimmer: c.precioDimmer }; c.dimer = 'NO'; c.precioDimmer = ''; }
+    else if (!c.es_corporeo && eraCorp && c._dimPrev) { c.dimer = c._dimPrev.dimer; c.precioDimmer = c._dimPrev.precioDimmer; c._dimPrev = null; }
     render();
   });
   const tel = document.getElementById('pm-telefono'); if (tel) tel.addEventListener('blur', pmTraceAd);
@@ -7993,20 +8013,34 @@ async function pedDisenoCargarSugerencias(p) {
     const j = await r.json();
     const sec = pedDisenoSeccion(p.idx); if (!sec) return; // el drawer ya muestra otro pedido
     const box = sec.querySelector('#ped-diseno-sug'); if (!box) return;
-    const fotos = ((j && j.fotos) || []).slice(0, 6);
+    if (!((j && j.fotos) || []).length) return;
+    // Mismo criterio que el modal: con varios carteles de neón en el pedido, cada uno sugiere el render de
+    // SU brief (si no, todos marcaban como SUGERIDA lo último que se le mandó, que puede ser del otro cartel).
+    const herm = pedidoHermanos(p).filter(x => !Number(x.esCorporeo));
+    const cs = herm.map(x => ({ cartel: x.cartel, es_corporeo: 0, foto_key: '', _fotoFrom: '' }));
+    const yo = cs[herm.findIndex(x => x.idx === p.idx)] || { cartel: p.cartel, es_corporeo: 0 };
+    const { lista: fotos, sugIdx } = pmSugerenciasParaCartel({ _fotoSug: j.fotos, carteles: cs.length ? cs : [yo] }, yo);
     if (!fotos.length) return;
     box.innerHTML = `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(lo último que se le mandó al cliente — tocá la que aprobó)</span></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">${fotos.map((f, k) => `<button type="button" data-ped-sug="${escapeHtml(f.key)}" title="Usar esta como diseño aprobado" style="position:relative;border:1px solid ${k === 0 ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" style="display:block;height:64px;width:64px;object-fit:cover">${k === 0 ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}</button>`).join('')}</div>`;
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${fotos.map((f, k) => `<button type="button" data-ped-sug="${escapeHtml(f.key)}" title="${escapeHtml(f.brief_diseno || f.brief_cliente ? 'Render de «' + (f.brief_diseno || f.brief_cliente) + '» — usar como diseño aprobado' : 'Usar esta como diseño aprobado')}" style="position:relative;border:1px solid ${k === sugIdx ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" onerror="this.parentNode.style.display='none'" style="display:block;height:64px;width:64px;object-fit:cover">${k === sugIdx ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}</button>`).join('')}</div>`;
     box.querySelectorAll('[data-ped-sug]').forEach(b => b.onclick = () => pedDisenoUsarSugerida(p.idx, b.dataset.pedSug));
   } catch (_) {}
+}
+// Carteles del MISMO pedido = el mismo grupo que actualiza el PATCH del worker: N° + fecha + vendedor y,
+// en los cargados por el CRM, el mismo cliente (teléfono). El N° de la OC se tipea a mano y se repite
+// entre vendedores y hasta dentro de un vendedor: agrupar solo por N°+fecha mezclaba clientes distintos.
+function pedidoHermanos(p) {
+  const com = x => x.comercial_id || 'joaco';
+  const mismoCliente = (p.origen === 'crm' && p.telefono) ? (x => x.origen === 'crm' && x.telefono === p.telefono) : (() => true);
+  return STATE.pedidos.filter(x => x.numero === p.numero && +x.fecha === +p.fecha && com(x) === com(p) && mismoCliente(x));
 }
 function openDrawerPedido(idx) {
   const p = STATE.pedidos.find(p => p.idx === idx);
   if (!p) return;
   const tel = String(p.telefono || '').replace(/\D/g, '') || extractPhone(p.envio);
   const ms = postventaMilestones(p);
-  // Carteles del mismo pedido (numero+fecha): los cambios de estado/pago/productor aplican a todos.
-  const hermanos = STATE.pedidos.filter(x => x.numero === p.numero && +x.fecha === +p.fecha);
+  // Carteles del mismo pedido: los cambios de estado/pago/productor aplican a todos (mismo grupo que el PATCH).
+  const hermanos = pedidoHermanos(p);
   const totalPedido = hermanos.reduce((s,x) => s + (Number(x.precio)||0) + (Number(x.precioDimmer)||0), 0);
   const inpD = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:7px 9px;color:var(--fg);font-size:13px';
   const lblD = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px';
@@ -8270,7 +8304,7 @@ async function savePedidoEdit(idx) {
     ad:            document.getElementById('ped-edit-ad')?.value,
     envio:         document.getElementById('ped-edit-envio')?.value,
     aclaracion:    document.getElementById('ped-edit-aclaracion')?.value,
-    // Campos del pedido (aplican a todos los carteles del nro+fecha).
+    // Campos del pedido (aplican a todos los carteles del mismo pedido — ver pedidoHermanos).
     estado_pedido: document.getElementById('ped-edit-estadopedido')?.value,
     estado_pago:   document.getElementById('ped-edit-estadopago')?.value,
     pagado:        document.getElementById('ped-edit-pagado')?.value,

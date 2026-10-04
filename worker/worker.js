@@ -4178,6 +4178,28 @@ async function ensureCorteNeonSchema(env) {
   // tiene que dejar el isolate entero sin la feature hasta que se recicle).
   try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
 }
+// Teléfono WPP tipeado a mano (sin 549, con 0 o 15, con espacios) → el formato en que está el chat. Prueba
+// tal cual y normalizado AR contra wa_chats_summary; si no existe ninguno, normaliza solo lo que claramente
+// es argentino (≤10 dígitos o arranca con 54/0/15) — un número extranjero de 11 dígitos queda como vino.
+async function telefonoDelChat(env, raw) {
+  const dig = String(raw || '').replace(/\D/g, '');
+  if (!dig) return '';
+  if (dig.length >= 15) return dig; // IGSID
+  const norm = normalizeArPhone(dig);
+  const cands = [...new Set([dig, norm].filter(Boolean))];
+  try {
+    const rs = await env.DB.prepare(`SELECT phone FROM wa_chats_summary WHERE phone IN (${cands.map(() => '?').join(',')})`).bind(...cands).all();
+    const hay = new Set((rs.results || []).map(r => String(r.phone)));
+    for (const c of cands) if (hay.has(c)) return c;
+  } catch (_) {}
+  return (norm && (dig.length <= 10 || /^(54|0|15)/.test(dig))) ? norm : dig;
+}
+// @usuario de Instagram → IGSID (el chat y sus mensajes están por IGSID). '' si no se conoce.
+async function igsidDeUsuario(env, raw) {
+  const u = String(raw || '').trim().replace(/^@/, '');
+  if (!u || /^\d+$/.test(u)) return /^\d{15,}$/.test(u) ? u : '';
+  try { const c = await env.DB.prepare("SELECT phone FROM wa_contacts WHERE lower(username) = lower(?) LIMIT 1").bind(u).first(); return (c && c.phone) ? String(c.phone) : ''; } catch (_) { return ''; }
+}
 // Nombre del VENDEDOR de la venta (comercial_id → "Joaco"/"Facundo"/"Agustina") para la pieza de Emma:
 // si lo carga Gaspar en nombre de un vendedor, la pieza tiene que decir quién vendió, no quién tipeó.
 function corteVendedorNombre(comercialId) {
@@ -16529,11 +16551,9 @@ const handler = {
         const raw = String(url.searchParams.get('phone') || '').trim();
         const dig = raw.replace(/\D/g, '');
         let phone = '';
-        if (/^@|[a-z_.]/i.test(raw)) {
-          // Pedido de Instagram guardado con @usuario: se resuelve al IGSID (así están el chat y sus mensajes).
-          try { const c = await env.DB.prepare("SELECT phone FROM wa_contacts WHERE lower(username) = lower(?) LIMIT 1").bind(raw.replace(/^@/, '')).first(); phone = (c && c.phone) ? String(c.phone) : ''; } catch (_) {}
-        } else if (dig.length >= 15) phone = dig;                                  // IGSID
-        else if (dig.length >= 8) phone = normalizeArPhone(dig) || dig;            // WPP: tolera sin 549 / con 0 o 15
+        if (/^@|[a-z_.]/i.test(raw)) phone = await igsidDeUsuario(env, raw); // IG guardado con @usuario → IGSID
+        else if (dig.length >= 15) phone = dig;                              // IGSID
+        else if (dig.length >= 8) phone = await telefonoDelChat(env, dig);   // WPP: sin 549 / con 0 o 15; extranjeros tal cual
         // Mismo control que el chat: un vendedor no ve imágenes de chats de otro ni de las bandejas de Gaspar.
         if (!phone || !(await inboxAccessOk(env, _sr, phone, session.user))) return json({ ok: true, fotos: [] });
         const fotos = [], seen = new Set();
@@ -16640,14 +16660,17 @@ const handler = {
         const sourceId = String(body.source_id || '').trim();
         // Contacto del cliente: en WPP es el teléfono (solo dígitos). En IG es el @usuario / id
         // de Instagram → NO stripeamos no-dígitos ahí (si no, un @usuario quedaría vacío).
+        // WPP: en el formato del chat (un "1164791648" tipeado a mano no matcheaba el chat 5491164791648 →
+        // la venta se atribuía a Joaco aunque el chat fuera de Agustina, ej. #391; tampoco trazaba el ad).
         const telefono = plataforma === 'IG'
           ? String(body.telefono || '').trim().slice(0, 120)
-          : String(body.telefono || '').replace(/\D/g, '');
+          : await telefonoDelChat(env, body.telefono);
         // Vendedor de la venta: el usuario logueado que la carga (o el vendedor del chat). En IG el campo
         // telefono suele ser el @usuario (sin dígitos): para buscar a quién está asignado el chat se usa el
         // IGSID que manda el modal (ig_id) — si no, un admin cargando el IG de un cliente de Facu/Agus
         // se lo atribuía a Joaco.
-        const igId = String(body.ig_id || '').replace(/\D/g, '');
+        // Sin ig_id (pedido IG cargado a mano con @usuario): se resuelve el @usuario al IGSID.
+        const igId = String(body.ig_id || '').replace(/\D/g, '') || (plataforma === 'IG' ? await igsidDeUsuario(env, telefono) : '');
         const comercialId = await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: (plataforma === 'IG' && igId) ? igId : telefono });
         // Usuario literal que cargó el pedido (para ver si lo cargó Facu/Joaco/Gaspar).
         const cargadoPor = String(session.user || '');
