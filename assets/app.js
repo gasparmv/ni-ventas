@@ -3110,6 +3110,9 @@ function corteNombre(p) {
 }
 // Pieza de neón de un pedido del CRM que todavía no tiene la foto del diseño → no entra a la cola de Emma.
 function corteEsperandoFoto(p) { return p.producto === 'NEON' && !p.foto_key && !!p.pedido_id; }
+// Pieza de neón sin diseñar cuyo pedido ya se entregó / está para enviar: el cartel ya existe, la matriz
+// ya no sirve → fuera de la línea de Emma, de "esperando foto" y del badge (el admin la sigue viendo).
+function corteNeonPedidoHecho(p) { return p.producto === 'NEON' && p.estado === 'pedido' && !!p.pedido_id && /^(entregado|para enviar)$/i.test(String(p.ped_estado || '').trim()); }
 function corteCardHtml(p, clickable) {
   const verPrecio = !isProduccionUser(STATE.user); // Aníbal/Neyen NO ven precios (es data de venta)
   return `<div ${clickable ? `data-corte-card="${p.id}" style="cursor:pointer"` : ''} style="font-size:12px;padding:7px;border:1px solid var(--border);border-radius:5px;margin-bottom:5px;background:var(--ink-100)">
@@ -3367,9 +3370,9 @@ function corteAprendizajeHtml() {
 function corteNeonAdminHtml(pedidos) {
   const neon = (pedidos || []).filter(p => p.producto === 'NEON');
   if (!neon.length) return '';
-  const etapa = p => p.estado === 'pedido' ? (corteEsperandoFoto(p) ? 'foto' : 'disenar') : p.estado;
-  const M = { foto: { l: 'Esperando foto', c: '#FF5566' }, disenar: { l: 'Emma: diseñar', c: '#FFB020' }, matriz_lista: { l: 'Matriz lista', c: '#a78bfa' }, cortado: { l: 'Cortado', c: '#60a5fa' }, embalado: { l: 'Separado', c: '#22c55e' } };
-  const orden = { foto: 0, disenar: 1, matriz_lista: 2, cortado: 3, embalado: 4 };
+  const etapa = p => p.estado === 'pedido' ? (corteNeonPedidoHecho(p) ? 'hecho' : (corteEsperandoFoto(p) ? 'foto' : 'disenar')) : p.estado;
+  const M = { foto: { l: 'Esperando foto', c: '#FF5566' }, disenar: { l: 'Emma: diseñar', c: '#FFB020' }, matriz_lista: { l: 'Matriz lista', c: '#a78bfa' }, cortado: { l: 'Cortado', c: '#60a5fa' }, embalado: { l: 'Separado', c: '#22c55e' }, hecho: { l: 'Pedido ya entregado · sin matriz', c: 'var(--fg-subtle)' } };
+  const orden = { foto: 0, disenar: 1, matriz_lista: 2, cortado: 3, embalado: 4, hecho: 5 };
   const hace7 = new Date(Date.now() - 7 * 864e5).toISOString();
   const activos = neon.filter(p => ['pedido', 'matriz_lista', 'cortado'].includes(p.estado))
     .sort((a, b) => (orden[etapa(a)] - orden[etapa(b)]) || String(a.created_at || '').localeCompare(String(b.created_at || '')));
@@ -3483,7 +3486,7 @@ function renderCorte() {
   const sel = STATE.corteSelected ? pedidos.find(p => p.id === STATE.corteSelected) : null;
   // --- Vista CONFINADA (Emma / Aníbal / Neyen): solo su cola ---
   if (info) {
-    const cola = pedidos.filter(p => p.estado === info.estado);
+    const cola = pedidos.filter(p => p.estado === info.estado && !corteNeonPedidoHecho(p));
     const cargando = STATE.cortePedidos === undefined;
     const vacio = (txt) => cargando ? '' : `<div style="padding:26px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px">${txt} ✨</div>`;
     // NEYEN: agrupado por cliente (arma el paquete con todos los pedidos de una persona).
@@ -3501,7 +3504,9 @@ function renderCorte() {
       // Neón: producción propia (van al productor, no a un alumno). Neyen los separa a un costado.
       const neonMatch = p => !q || String(p.diseno_nombre || '').toLowerCase().includes(q) || String(p.medida_declarada || '').toLowerCase().includes(q);
       const neonPend = pedidos.filter(p => esNeon(p) && p.estado === 'cortado').filter(neonMatch);
-      const neonSep = pedidos.filter(p => esNeon(p) && p.estado === 'embalado').filter(neonMatch);
+      // "Ya separados": solo las últimas 2 semanas (ahora entra un neón por cada cartel vendido; sin tope la lista crecía 180 días).
+      const _hace14 = new Date(Date.now() - 14 * 864e5).toISOString();
+      const neonSep = pedidos.filter(p => esNeon(p) && p.estado === 'embalado' && String(p.updated_at || '') >= _hace14).filter(neonMatch);
       const neonRow = (p, done) => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px dashed var(--border);font-size:13px">
           ${p.foto_key ? `<a href="${escapeHtml(mediaUrl(p.foto_key))}" target="_blank" rel="noopener" style="flex:0 0 auto"><img src="${escapeHtml(disenoThumb(p.foto_key, 200))}" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border);display:block"></a>` : ''}
           <span style="flex:1;min-width:0">${done ? '<span style="color:#22c55e">✓</span> ' : ''}${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> ` : ''}${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ` <span style="color:var(--fg-subtle)">${escapeHtml(p.medida_declarada)}</span>` : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}${p.ped_productor ? `<br><span style="font-size:11px;color:var(--fg-mute)">→ productor: ${escapeHtml(p.ped_productor)}</span>` : ''}</span>
@@ -3745,7 +3750,7 @@ async function corteCargar(silent) {
 // la lista local no se refresca → se usa el contador liviano (/admin/corte/resumen) si es más nuevo.
 function corteNeonParaDisenar() {
   const local = Array.isArray(STATE.cortePedidos) && (STATE.view === 'corte' || !STATE.corteResumen || (STATE._corteLoadedAt || 0) >= (STATE._corteResOkAt || 0));
-  if (local) return STATE.cortePedidos.filter(p => p.producto === 'NEON' && p.estado === 'pedido' && !corteEsperandoFoto(p)).length;
+  if (local) return STATE.cortePedidos.filter(p => p.producto === 'NEON' && p.estado === 'pedido' && !corteEsperandoFoto(p) && !corteNeonPedidoHecho(p)).length;
   return (STATE.corteResumen && STATE.corteResumen.neon_para_disenar) || 0;
 }
 function corteBadgeHtml() {
@@ -6565,7 +6570,7 @@ async function pmFotoAsignar(i, preview, obtenerKey, errTxt) {
   pmFotoRepintar(m, c);
   let key = '', err = null;
   try { key = await obtenerKey(); } catch (e) { err = e; }
-  if (c._fotoTok !== tok) return; // cancelada o reemplazada
+  if (c._fotoTok !== tok) return false; // cancelada o reemplazada
   if (key) {
     const prev = c._fotoPrev; if (prev && prev.preview && prev.preview !== c.foto_preview && prev.preview.indexOf('blob:') === 0) { try { URL.revokeObjectURL(prev.preview); } catch (_) {} }
     c.foto_key = key; c.foto_estado = ''; c.foto_despues = false; c._fotoPrev = null;
@@ -6576,14 +6581,24 @@ async function pmFotoAsignar(i, preview, obtenerKey, errTxt) {
     if (pmModalVivo(m)) toast(errTxt + ((err && err.message) || err || ''));
   }
   pmFotoRepintar(m, c);
+  return !!key;
 }
-function pmFotoSetArchivo(i, file) {
+// Después de elegir/cambiar la foto de un cartel: anotar de qué sugerencia salió (o ninguna) y re-pintar
+// los demás carteles sin foto, para que esa imagen deje de sugerírseles como propia.
+function pmFotoTrasElegir(m, c, fromKey) {
+  if (!m || !c || !c.foto_key) return;
+  c._fotoFrom = fromKey || '';
+  (m.carteles || []).forEach(o => { if (o !== c && !o.es_corporeo && !o.foto_key && o.foto_estado !== 'subiendo') pmFotoRepintar(m, o); });
+}
+async function pmFotoSetArchivo(i, file) {
   if (!file) return;
   if (!/^image\//.test(file.type || '')) { toast('Eso no es una imagen'); return; }
-  pmFotoAsignar(i, URL.createObjectURL(file), () => disenoSubirArchivo(file), 'No se pudo subir la foto: ');
+  const m = STATE.pedidoModal, c = m && m.carteles[i];
+  if (await pmFotoAsignar(i, URL.createObjectURL(file), () => disenoSubirArchivo(file), 'No se pudo subir la foto: ')) pmFotoTrasElegir(m, c, '');
 }
-function pmFotoUsarSugerida(i, fromKey) {
-  pmFotoAsignar(i, disenoThumb(fromKey, 480), () => disenoCopiarKey(fromKey), 'No se pudo usar esa imagen: ');
+async function pmFotoUsarSugerida(i, fromKey) {
+  const m = STATE.pedidoModal, c = m && m.carteles[i];
+  if (await pmFotoAsignar(i, disenoThumb(fromKey, 480), () => disenoCopiarKey(fromKey), 'No se pudo usar esa imagen: ')) pmFotoTrasElegir(m, c, fromKey);
 }
 // Cancelar una subida colgada: vuelve a como estaba (y queda a mano "La subo después").
 function pmFotoCancelar(i) {
@@ -6613,6 +6628,22 @@ function bindPmFotoSlots(root) {
     if (c) { c.foto_despues = !!cb.checked; pmFotoRepintar(m, c); }
   });
 }
+// Sugerencias para UN cartel: la lista es por cliente (todo lo que se le mandó), pero con varios carteles
+// cada uno tiene su diseño. Primero los renders cuyo brief se llama como el cartel; las imágenes que ya
+// eligió otro cartel van al final marcadas. SUGERIDA solo cuando hay match por nombre o un solo cartel de
+// neón (si no, marcar la primera era sugerirle a "Soho shine" el render de "Parking").
+function pmSugerenciasParaCartel(m, c) {
+  const base = ((m && m._fotoSug) || []);
+  const nc = normName(String(c.cartel || ''));
+  const coincide = f => !!nc && [f.brief_diseno, f.brief_cliente].some(n => { const x = normName(String(n || '')); return !!x && (x === nc || x.includes(nc) || nc.includes(x)); });
+  const usadas = new Set(((m && m.carteles) || []).filter(o => o !== c && o.foto_key && o._fotoFrom).map(o => o._fotoFrom));
+  const rank = f => (coincide(f) ? 0 : 1) + (usadas.has(f.key) ? 2 : 0);
+  const lista = base.map((f, k) => ({ ...f, _k: k, _usada: usadas.has(f.key) })).sort((a, b) => rank(a) - rank(b) || a._k - b._k).slice(0, 6);
+  const neones = ((m && m.carteles) || []).filter(o => !o.es_corporeo).length;
+  let sugIdx = lista.findIndex(f => coincide(f) && !f._usada);
+  if (sugIdx < 0 && neones <= 1 && lista.length && !lista[0]._usada) sugIdx = 0;
+  return { lista, sugIdx };
+}
 // Primer cartel de neón sin foto (destino del Ctrl+V con el modal abierto).
 function pmCartelSinFoto() {
   const m = STATE.pedidoModal; if (!m) return -1;
@@ -6633,9 +6664,9 @@ function pmFotoSlotHtml(c, i) {
         <div style="display:flex;gap:6px">${fileBtn('Cambiar')}<button type="button" data-pm-foto-quitar="${i}" style="${btn};color:#FF5566">Quitar</button></div>
       </div>`;
   } else {
-    const sug = (m._fotoSug || []).slice(0, 6);
+    const { lista: sug, sugIdx } = pmSugerenciasParaCartel(m, c);
     const sugHtml = sug.length ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(lo último que se le mandó al cliente — tocá la que aprobó)</span></div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${sug.map((f, k) => `<button type="button" data-pm-foto-sug="${i}|${escapeHtml(f.key)}" title="Usar esta como diseño aprobado" style="position:relative;border:1px solid ${k === 0 ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" style="display:block;height:64px;width:64px;object-fit:cover">${k === 0 ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}</button>`).join('')}</div>` : '';
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${sug.map((f, k) => `<button type="button" data-pm-foto-sug="${i}|${escapeHtml(f.key)}" title="${escapeHtml(f.brief_diseno ? 'Render de «' + f.brief_diseno + '» — usar como diseño aprobado' : 'Usar esta como diseño aprobado')}" style="position:relative;border:1px solid ${k === sugIdx ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" onerror="this.parentNode.style.display='none'" style="display:block;height:64px;width:64px;object-fit:cover">${k === sugIdx ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}${f._usada ? '<span style="position:absolute;left:0;right:0;top:0;background:rgba(0,0,0,.6);color:#fff;font-size:9px;padding:1px 0">otro cartel</span>' : ''}</button>`).join('')}</div>` : '';
     inner = `${sugHtml}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         ${fileBtn('📷 Subir foto')}
@@ -6842,13 +6873,20 @@ function bindPedidoModal() {
   document.querySelectorAll('[data-pm-color-rm]').forEach(b => b.onclick = () => { const p = b.dataset.pmColorRm.split('|'); pmRemoveColor(parseInt(p[0], 10), p[1]); });
   document.querySelectorAll('[data-pm-tipo]').forEach(b => b.onclick = () => { const p = b.dataset.pmTipo.split('|'); readPedidoModalDOM(); STATE.pedidoModal.carteles[parseInt(p[0], 10)].tipo = p[1]; render(); });
   // Toggle Cartel/Corpóreo: cambia el layout del bloque (carga directa de corpóreos sin OC).
-  document.querySelectorAll('[data-pm-esc]').forEach(b => b.onclick = () => { const p = b.dataset.pmEsc.split('|'); readPedidoModalDOM(); STATE.pedidoModal.carteles[parseInt(p[0], 10)].es_corporeo = (p[1] === '1') ? 1 : 0; render(); });
+  document.querySelectorAll('[data-pm-esc]').forEach(b => b.onclick = () => {
+    const p = b.dataset.pmEsc.split('|'); readPedidoModalDOM();
+    const c = STATE.pedidoModal.carteles[parseInt(p[0], 10)];
+    c.es_corporeo = (p[1] === '1') ? 1 : 0;
+    // Corpóreo no lleva dimmer: si venía de neón con dimmer, quedaba escondido sumando al total y se guardaba.
+    if (c.es_corporeo) { c.dimer = 'NO'; c.precioDimmer = ''; }
+    render();
+  });
   const tel = document.getElementById('pm-telefono'); if (tel) tel.addEventListener('blur', pmTraceAd);
   // Foto del diseño final (neón): subir archivo / usar una sugerida / quitar / cancelar / "la subo después".
   bindPmFotoSlots(document.getElementById('pm-backdrop'));
   // Sugerencias de foto: al tener el contacto del cliente (OC del chat ya lo trae; carga manual, al salir del teléfono).
   if (tel) tel.addEventListener('blur', () => { readPedidoModalDOM(); pmCargarSugerencias(); });
-  if (STATE.pedidoModal && !STATE.pedidoModal._fotoSugDe) setTimeout(pmCargarSugerencias, 0);
+  if (STATE.pedidoModal && !STATE.pedidoModal._fotoSugDe && (STATE.pedidoModal.carteles || []).some(c => !c.es_corporeo)) setTimeout(pmCargarSugerencias, 0);
   // Si el usuario edita el campo Ad a mano (ej. corrige el auto-trazado a "Frecuente"/"Directo"),
   // invalidamos el ad_id capturado: sin esto el pedido se guardaría con el texto manual PERO con el
   // source_id del ad viejo pegado, y el funnel prioriza el source_id → contaría mal esa venta.
@@ -6932,6 +6970,8 @@ async function confirmCargarPedido() {
       // UTC, que de noche en ART ya es el día siguiente → el pedido quedaba fechado un día después.
       fecha: localDateKey(new Date()),
       plataforma: m.plataforma, telefono: m.telefono, estado_pago: m.estadoPago, pagado: m.pagado, ad: m.ad,
+      // IGSID del chat (si vino de una OC de Instagram): el server lo usa para saber de qué vendedor es el chat.
+      ig_id: m.plataforma === 'IG' ? String(m._igsid || '') : '',
       // ad_id de Meta capturado por pmTraceAd (vacío si se cargó a mano o no vino de un ad). El worker
       // lo persiste en pedidos.source_id → el pedido nace trazado en el funnel.
       source_id: m.sourceId || '',
@@ -6950,7 +6990,7 @@ async function confirmCargarPedido() {
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
     const nuevos = (j.pedidos||[]).map(mapPedidoFromD1);
-    STATE.pedidos = [...nuevos, ...STATE.pedidos];
+    { const _ids = new Set(nuevos.map(x => x.idx)); STATE.pedidos = [...nuevos, ...STATE.pedidos.filter(x => !_ids.has(x.idx))]; } // sin duplicar si el poll ya los trajo
     pmFotoLiberarTodo(STATE.pedidoModal);
     STATE.pedidoModalOpen = false;
     STATE.pedidoModalSaving = false;
@@ -7867,8 +7907,10 @@ function renderSegPostventa(items) {
 // ===== Foto del DISEÑO FINAL en la tabla y el drawer (matriz de Emma en el corte) =====
 // Badge rojo en la tabla: el cartel tiene pieza en el corte pero sin foto ("la subo después"). Los pedidos
 // anteriores a esta función (sin pieza) no muestran nada: se completan subiendo la foto desde el drawer.
+// Pedido que ya salió de producción: la matriz ya no hace falta (no se pide foto ni se espera a Emma).
+function pedidoYaHecho(estado) { return /^(entregado|para enviar)$/i.test(String(estado || '').trim()); }
 function disenoBadgePedido(p) {
-  if (!p || (p.esCorporeo && Number(p.esCorporeo))) return '';
+  if (!p || (p.esCorporeo && Number(p.esCorporeo)) || pedidoYaHecho(p.estadoPedido)) return '';
   if (p.corteId && !p.disenoKey) return ' <span title="Falta la foto del diseño final: abrí el pedido y subila (Emma la necesita para la matriz)" style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;background:rgba(255,85,102,.15);border:1px solid #FF5566;color:#FF5566;font-size:10px;font-weight:700;letter-spacing:.03em;vertical-align:middle">📷 SIN FOTO</span>';
   return '';
 }
@@ -7877,7 +7919,7 @@ function disenoDrawerSection(p) {
   if (p.esCorporeo && Number(p.esCorporeo)) return '';
   // Pedido viejo (sin pieza de corte) ya hecho o entregado: no se ofrece mandarlo a Emma (un clic de
   // curiosidad generaría una matriz para un cartel que ya existe).
-  if (!p.corteId && /^(entregado|para enviar)$/i.test(String(p.estadoPedido || '').trim())) return '';
+  if (!p.disenoKey && pedidoYaHecho(p.estadoPedido)) return '';
   const est = p.corteEstado ? (CORTE_ESTADO_TXT[p.corteEstado] || p.corteEstado) : '';
   const fileBtn = (txt) => `<label class="btn btn-ghost" style="font-size:12px;padding:5px 10px;cursor:pointer;display:inline-block">${txt}<input type="file" accept="image/*" style="display:none" onchange="pedDisenoSubirInput(${p.idx}, this)"></label>`;
   let body;
@@ -7941,8 +7983,11 @@ function pedDisenoUsarSugerida(idx, fromKey) {
 // Drawer de un cartel SIN foto: sugiere lo último que se le mandó al cliente (un clic = "este es el aprobado").
 async function pedDisenoCargarSugerencias(p) {
   if (!p || p.disenoKey || (p.esCorporeo && Number(p.esCorporeo))) return;
-  const contacto = String(p.telefono || '').replace(/\D/g, '');
-  if (contacto.length < 8) return;
+  // WPP: teléfono (dígitos). IG: puede estar guardado como @usuario → va tal cual y el server lo resuelve al IGSID.
+  const crudo = String(p.telefono || '').trim();
+  const esUsuarioIg = p.plataforma === 'IG' && /^@|[a-z_.]/i.test(crudo);
+  const contacto = esUsuarioIg ? crudo : crudo.replace(/\D/g, '');
+  if (esUsuarioIg ? contacto.replace(/^@/, '').length < 2 : contacto.length < 8) return;
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/diseno-sugerencias?phone=' + encodeURIComponent(contacto), { headers: authHeaders() });
     const j = await r.json();
@@ -9040,7 +9085,37 @@ function bindNav() {
   const privacyBtn = document.querySelector('[data-privacy-toggle]');
   if (privacyBtn) privacyBtn.onclick = () => togglePrivacy();
 }
+// ===== Aviso de versión nueva del CRM =====
+// La PWA / pestaña abierta no se actualiza sola: después de un deploy seguían con el JS viejo (p.ej. el
+// modal sin la foto del diseño). La "versión" es el CACHE_NAME de sw.js (se bumpea en cada cambio de
+// app.js): se toma la del arranque y cada 10 min (y al volver a la pestaña) se compara. Si cambió, banner
+// "Recargar" — no recarga solo para no pisar lo que la persona esté escribiendo.
+let _frontVersionBase = null;
+async function chequearVersionFront() {
+  try {
+    const r = await fetch('sw.js', { cache: 'no-store' });
+    if (!r.ok) return;
+    const v = ((await r.text()).match(/CACHE_NAME\s*=\s*'([^']+)'/) || [])[1];
+    if (!v) return;
+    if (_frontVersionBase === null) { _frontVersionBase = v; return; }
+    if (v !== _frontVersionBase && !document.getElementById('front-version-banner')) {
+      const b = document.createElement('div');
+      b.id = 'front-version-banner';
+      b.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9999;background:#1fb6a6;color:#042a25;border-radius:10px;padding:9px 14px;font-size:13px;font-weight:700;box-shadow:0 8px 28px rgba(0,0,0,.45);display:flex;gap:10px;align-items:center;max-width:calc(100vw - 24px)';
+      b.innerHTML = '<span>Hay una versión nueva del CRM</span><button type="button" style="background:#042a25;color:#fff;border:0;border-radius:7px;padding:5px 11px;font-weight:700;cursor:pointer">Recargar</button>';
+      b.querySelector('button').onclick = () => location.reload();
+      document.body.appendChild(b);
+    }
+  } catch (_) {}
+}
+function iniciarChequeoVersionFront() {
+  if (window._frontVersionT) return;
+  chequearVersionFront();
+  window._frontVersionT = setInterval(() => { if (!document.hidden) chequearVersionFront(); }, 10 * 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) chequearVersionFront(); });
+}
 function bindCommon() {
+  iniciarChequeoVersionFront();
   // Paste de imágenes en el modal "Nuevo brief" cuando está abierto FUERA de la
   // vista Cotización (ej. sobre el chat). En Cotización lo maneja el paste propio
   // de ese view. Global + guardado por flag: se bindea una sola vez para toda la app.
@@ -9082,6 +9157,8 @@ function bindCommon() {
     document.addEventListener('paste', (ev) => {
       // Solo con el modal VISIBLE (pedidoModalOpen puede quedar en true si se navegó con "atrás").
       if (!STATE.pedidoModalOpen || !document.getElementById('pm-backdrop') || (STATE.ticketCorpModalOpen && STATE.ticketCorpMode === 'form')) return;
+      // Pedido 100% corpóreo: no hay foto de diseño que cargar → el pegado sigue su camino normal.
+      if (!((STATE.pedidoModal && STATE.pedidoModal.carteles) || []).some(c => !c.es_corporeo)) return;
       const items = ev.clipboardData?.items || [];
       // Pegar TEXTO en un campo (teléfono/precio copiado de Excel trae también una imagen de la celda): es texto.
       const tgt = ev.target;

@@ -4178,6 +4178,14 @@ async function ensureCorteNeonSchema(env) {
   // tiene que dejar el isolate entero sin la feature hasta que se recicle).
   try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
 }
+// Nombre del VENDEDOR de la venta (comercial_id → "Joaco"/"Facundo"/"Agustina") para la pieza de Emma:
+// si lo carga Gaspar en nombre de un vendedor, la pieza tiene que decir quién vendió, no quién tipeó.
+function corteVendedorNombre(comercialId) {
+  const k = String(comercialId || '').trim().toLowerCase();
+  if (!k) return '';
+  if (k === 'joaco' || k === 'joaquin') return 'Joaco';
+  return k.charAt(0).toUpperCase() + k.slice(1);
+}
 // Solo se aceptan como foto del diseño keys que subió/copió el propio flujo (prefijo controlado):
 // evita que el front referencie una imagen de R2 que después se borra con el brief.
 function esKeyDisenoPedido(k) { return /^pedidos\/diseno\/[\w\-./]+$/.test(String(k || '')) && String(k).indexOf('..') < 0; }
@@ -4254,7 +4262,7 @@ async function ensureCortePiezasNeonPendientes(env) {
     const nowIso = new Date().toISOString();
     let n = 0;
     for (const p of rows) {
-      const vend = p.cargado_por || p.comercial_id || '';
+      const vend = corteVendedorNombre(p.comercial_id) || p.cargado_por || '';
       try { await stmtInsertCortePieza(env, '?', p.id, p.numero, cortePiezaDesdeCartel(p, p.numero, vend), null, vend, t ? t.id : null, nowIso).run(); n++; } catch (_) {}
     }
     return n;
@@ -4267,7 +4275,7 @@ async function syncCortePiezaDesdePedido(env, pedidoId) {
     await ensureCorteNeonSchema(env);
     const p = await env.DB.prepare('SELECT * FROM pedidos WHERE id = ?').bind(pedidoId).first();
     if (!p || Number(p.es_corporeo) === 1) return;
-    const pz = cortePiezaDesdeCartel(p, p.numero, p.cargado_por || p.comercial_id || '');
+    const pz = cortePiezaDesdeCartel(p, p.numero, corteVendedorNombre(p.comercial_id) || p.cargado_por || '');
     const cur = await env.DB.prepare("SELECT id, aclaraciones FROM corte_pedidos WHERE pedido_id=? AND estado='pedido'").bind(pedidoId).first();
     if (!cur) return;
     // Conservar los avisos para Emma ("⚠ FOTO CAMBIADA · ", "⚠ PEDIDO BORRADO · ") que van como prefijo.
@@ -16520,22 +16528,39 @@ const handler = {
         if (!['admin', 'comercial'].includes(_sr)) return json({ error: 'forbidden' }, 403);
         const raw = String(url.searchParams.get('phone') || '').trim();
         const dig = raw.replace(/\D/g, '');
-        const phone = dig.length >= 8 ? dig : raw; // WPP = dígitos; IG = IGSID (también dígitos)
+        let phone = '';
+        if (/^@|[a-z_.]/i.test(raw)) {
+          // Pedido de Instagram guardado con @usuario: se resuelve al IGSID (así están el chat y sus mensajes).
+          try { const c = await env.DB.prepare("SELECT phone FROM wa_contacts WHERE lower(username) = lower(?) LIMIT 1").bind(raw.replace(/^@/, '')).first(); phone = (c && c.phone) ? String(c.phone) : ''; } catch (_) {}
+        } else if (dig.length >= 15) phone = dig;                                  // IGSID
+        else if (dig.length >= 8) phone = normalizeArPhone(dig) || dig;            // WPP: tolera sin 549 / con 0 o 15
         // Mismo control que el chat: un vendedor no ve imágenes de chats de otro ni de las bandejas de Gaspar.
-        if (phone && !(await inboxAccessOk(env, _sr, phone, session.user))) return json({ ok: true, fotos: [] });
+        if (!phone || !(await inboxAccessOk(env, _sr, phone, session.user))) return json({ ok: true, fotos: [] });
         const fotos = [], seen = new Set();
         const push = (k, ts, origen) => { k = String(k || ''); if (!k || seen.has(k) || !/^(wa|ig|briefs|precotiz)\//.test(k)) return; seen.add(k); fotos.push({ key: k, ts: ts || '', origen }); };
-        if (phone) {
+        try {
+          const rs = await env.DB.prepare("SELECT media_url, ts FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND msg_type = 'image' AND COALESCE(media_url,'') != '' ORDER BY ts DESC LIMIT 8").bind(phone).all();
+          for (const m of (rs.results || [])) push(m.media_url, m.ts, 'chat');
+        } catch (_) {}
+        try {
+          const rs = await env.DB.prepare("SELECT bi.r2_key, bi.created_at FROM brief_imagenes bi JOIN briefs b ON b.id = bi.brief_id WHERE b.cliente_wa_id = ? AND bi.tipo IN ('render','render-ia') ORDER BY bi.created_at DESC LIMIT 4").bind(phone).all();
+          for (const m of (rs.results || [])) push(m.r2_key, m.created_at, 'render');
+        } catch (_) {}
+        // Solo las que siguen existiendo en R2 (un render regenerado/borrado del brief deja la key colgada en el chat).
+        const vivas = [];
+        await Promise.all(fotos.map(async (f, i) => { try { if (await env.MEDIA.head(f.key)) vivas[i] = f; } catch (_) {} }));
+        const out = vivas.filter(Boolean);
+        // Nombre del brief de cada render (briefs/<id>/...): el front lo usa para sugerirle a CADA cartel su
+        // propio diseño cuando el pedido tiene varios (si no, todos sugerían la misma imagen).
+        const bids = [...new Set(out.map(f => (f.key.match(/^briefs\/(\d+)\//) || [])[1]).filter(Boolean))];
+        if (bids.length) {
           try {
-            const rs = await env.DB.prepare("SELECT media_url, ts FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND msg_type = 'image' AND COALESCE(media_url,'') != '' ORDER BY ts DESC LIMIT 8").bind(phone).all();
-            for (const m of (rs.results || [])) push(m.media_url, m.ts, 'chat');
-          } catch (_) {}
-          try {
-            const rs = await env.DB.prepare("SELECT bi.r2_key, bi.created_at FROM brief_imagenes bi JOIN briefs b ON b.id = bi.brief_id WHERE b.cliente_wa_id = ? AND bi.tipo IN ('render','render-ia') ORDER BY bi.created_at DESC LIMIT 4").bind(phone).all();
-            for (const m of (rs.results || [])) push(m.r2_key, m.created_at, 'render');
+            const rs = await env.DB.prepare(`SELECT id, diseno, cliente_nombre FROM briefs WHERE id IN (${bids.map(() => '?').join(',')})`).bind(...bids.map(Number)).all();
+            const nom = {}; for (const b of (rs.results || [])) nom[b.id] = { diseno: b.diseno || '', cliente: b.cliente_nombre || '' };
+            for (const f of out) { const id = (f.key.match(/^briefs\/(\d+)\//) || [])[1]; if (id && nom[id]) { f.brief_diseno = nom[id].diseno; f.brief_cliente = nom[id].cliente; } }
           } catch (_) {}
         }
-        return json({ ok: true, fotos });
+        return json({ ok: true, fotos: out });
       }
       // POST /admin/pedidos/:id/diseno-foto {key} → asigna o cambia la foto del diseño final de un cartel ya
       // cargado (drawer: "la subo después", o pedidos viejos). Si el cartel no tiene pieza de corte, la crea.
@@ -16560,7 +16585,7 @@ const handler = {
         let aviso = '';
         if (!pieza) {
           const t = await corteTandaActual(env);
-          const vend = p.cargado_por || p.comercial_id || '';
+          const vend = corteVendedorNombre(p.comercial_id) || p.cargado_por || '';
           await stmtInsertCortePieza(env, '?', pid, p.numero, cortePiezaDesdeCartel(p, p.numero, vend), key, vend, t ? t.id : null, nowIso).run();
           // Si otra subida simultánea la creó primero (el INSERT OR IGNORE no hizo nada), gana la última foto.
           await env.DB.prepare("UPDATE corte_pedidos SET foto_key = ?, updated_at = ? WHERE pedido_id = ? AND estado = 'pedido'").bind(key, nowIso, pid).run();
@@ -16581,6 +16606,9 @@ const handler = {
       // 'En produccion'; pagado/restante a nivel pedido (restante = total − pagado)
       // replicados en cada fila. origen='crm' (lo distingue del backfill del Excel).
       if (request.method === 'POST' && path === '/admin/pedidos') {
+        // Solo vendedores y admin cargan ventas (diseño/producción/cursos no: con un POST armado a mano
+        // creaban pedidos + piezas para Emma y los espejaban al Excel).
+        if (!['admin', 'comercial'].includes(await getSessionRole(env, session.user))) return json({ error: 'forbidden' }, 403);
         await ensurePedidosSchema(env);
         let body;
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
@@ -16615,8 +16643,12 @@ const handler = {
         const telefono = plataforma === 'IG'
           ? String(body.telefono || '').trim().slice(0, 120)
           : String(body.telefono || '').replace(/\D/g, '');
-        // Vendedor de la venta: el usuario logueado que la carga (o el vendedor del chat).
-        const comercialId = await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: telefono });
+        // Vendedor de la venta: el usuario logueado que la carga (o el vendedor del chat). En IG el campo
+        // telefono suele ser el @usuario (sin dígitos): para buscar a quién está asignado el chat se usa el
+        // IGSID que manda el modal (ig_id) — si no, un admin cargando el IG de un cliente de Facu/Agus
+        // se lo atribuía a Joaco.
+        const igId = String(body.ig_id || '').replace(/\D/g, '');
+        const comercialId = await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: (plataforma === 'IG' && igId) ? igId : telefono });
         // Usuario literal que cargó el pedido (para ver si lo cargó Facu/Joaco/Gaspar).
         const cargadoPor = String(session.user || '');
         // Piezas de NEÓN PROPIO para el corte: cada cartel de neón nace también como pieza 'NEON' en
@@ -16624,7 +16656,7 @@ const handler = {
         try { await ensureCorteNeonSchema(env); } catch (_) {}
         const _tanda = await corteTandaActual(env);
         const _tandaId = _tanda ? _tanda.id : null;
-        const _vendedor = cargadoPor || comercialId || '';
+        const _vendedor = corteVendedorNombre(comercialId) || cargadoPor || ''; // el que VENDIÓ (no el que cargó)
         const _esCorpC = (c) => (c.es_corporeo === 1 || c.es_corporeo === true || c.es_corporeo === '1') ? 1 : 0;
         // foto_key null = "la subo después" (la pieza nace "esperando foto").
         const _insCortePieza = (c, pedidoIdSql, pedidoIdArg) => stmtInsertCortePieza(
@@ -16676,7 +16708,9 @@ const handler = {
             }
           }
         }
-        const rs = { results: await pedidosConDiseno(env, 'WHERE pedidos.numero = ? AND pedidos.origen = ? ORDER BY pedidos.id', [numero, 'crm']) };
+        // SOLO las filas recién creadas (mismo número + created_at de este alta): el N° se repite entre
+        // vendedores, y antes la respuesta (y el trazado de ad de abajo) arrastraba pedidos de otro.
+        const rs = { results: await pedidosConDiseno(env, 'WHERE pedidos.numero = ? AND pedidos.origen = ? AND pedidos.created_at = ? ORDER BY pedidos.id', [numero, 'crm', now]) };
         // Red de seguridad: si el pedido quedó SIN ad (no se trazó en el front, o se cargó a mano),
         // intentar trazarlo server-side ya mismo. WPP por teléfono; IG por IGSID vía la OC del chat
         // (traceAdForPedido resuelve el phone del cliente aunque telefono venga como @usuario/vacío).
@@ -16712,11 +16746,15 @@ const handler = {
       // Si cambia el precio (cartel) o el pagado (pedido), recalcula el restante del
       // pedido = (Σ precio + Σ precio_dimmer) − pagado. Todo marca mirror_dirty.
       if (request.method === 'PATCH' && /^\/admin\/pedidos\/\d+$/.test(path)) {
+        const _pr = await getSessionRole(env, session.user);
+        if (!['admin', 'comercial'].includes(_pr)) return json({ error: 'forbidden' }, 403);
         await ensurePedidosSchema(env);
         const id = parseInt(path.split('/').pop(), 10);
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
-        const ref = await env.DB.prepare('SELECT numero, fecha FROM pedidos WHERE id = ?').bind(id).first();
+        const ref = await env.DB.prepare("SELECT numero, fecha, IFNULL(comercial_id,'joaco') AS com FROM pedidos WHERE id = ?").bind(id).first();
         if (!ref) return json({ error: 'pedido no encontrado' }, 404);
+        // Un vendedor solo edita SUS pedidos (mismo criterio que la lista que ve).
+        if (_pr === 'comercial' && ref.com !== await resolveComercial(env, { sessionUser: session.user })) return json({ error: 'ese pedido es de otro vendedor' }, 403);
         const now = new Date().toISOString();
         let touched = false, precioChanged = false;
 
@@ -16759,8 +16797,12 @@ const handler = {
           }
         }
 
-        // 2) Campos del PEDIDO → UPDATE todas las filas del numero+fecha. Recalcula el
-        //    restante si cambió el precio (ya aplicado arriba) o el pagado.
+        // 2) Campos del PEDIDO → UPDATE todas las filas del numero+fecha DEL MISMO VENDEDOR. Recalcula el
+        //    restante si cambió el precio (ya aplicado arriba) o el pagado. El N° se repite entre vendedores
+        //    (ej. #378 del 22-09: 2 carteles de Joaco + 1 de Agustina): sin el vendedor en el grupo, el pagado
+        //    de uno pisaba el de los pedidos del otro y lo espejaba corrupto al Excel.
+        const _grp = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?";
+        const _grpArgs = [ref.numero, ref.fecha, ref.com];
         const oSets = [], oArgs = [];
         if ('estado_pedido' in body) { oSets.push('estado_pedido = ?'); oArgs.push(String(body.estado_pedido || '')); }
         if ('estado_pago' in body)   { oSets.push('estado_pago = ?');   oArgs.push(String(body.estado_pago || '')); }
@@ -16769,21 +16811,21 @@ const handler = {
         if (pagadoInBody || precioChanged) {
           let pagado;
           if (pagadoInBody) { pagado = (body.pagado === '' || body.pagado == null) ? null : Number(body.pagado); }
-          else { const cur = await env.DB.prepare('SELECT pagado FROM pedidos WHERE numero = ? AND fecha = ? LIMIT 1').bind(ref.numero, ref.fecha).first(); pagado = (cur && cur.pagado != null) ? Number(cur.pagado) : null; }
-          const tot = await env.DB.prepare('SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t FROM pedidos WHERE numero = ? AND fecha = ?').bind(ref.numero, ref.fecha).first();
+          else { const cur = await env.DB.prepare(`SELECT pagado FROM pedidos WHERE ${_grp} LIMIT 1`).bind(..._grpArgs).first(); pagado = (cur && cur.pagado != null) ? Number(cur.pagado) : null; }
+          const tot = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
           const total = tot ? Number(tot.t) : 0;
           const restante = pagado != null ? Math.max(0, total - pagado) : total;
           oSets.push('pagado = ?', 'restante = ?'); oArgs.push(pagado, restante);
         }
         if (oSets.length) {
           oSets.push('mirror_dirty = 1', 'mirror_attempts = 0', 'mirror_error = NULL', 'updated_at = ?');
-          oArgs.push(now, ref.numero, ref.fecha);
-          await env.DB.prepare(`UPDATE pedidos SET ${oSets.join(', ')} WHERE numero = ? AND fecha = ?`).bind(...oArgs).run();
+          oArgs.push(now, ..._grpArgs);
+          await env.DB.prepare(`UPDATE pedidos SET ${oSets.join(', ')} WHERE ${_grp}`).bind(...oArgs).run();
           touched = true;
         }
 
         if (!touched) return json({ error: 'nada para actualizar' }, 400);
-        const rs2 = { results: await pedidosConDiseno(env, 'WHERE pedidos.numero = ? AND pedidos.fecha = ? ORDER BY pedidos.id', [ref.numero, ref.fecha]) };
+        const rs2 = { results: await pedidosConDiseno(env, "WHERE pedidos.numero = ? AND pedidos.fecha = ? AND IFNULL(pedidos.comercial_id,'joaco') = ? ORDER BY pedidos.id", _grpArgs) };
         return json({ ok: true, numero: ref.numero, pedidos: rs2.results || [] });
       }
 
@@ -17600,7 +17642,8 @@ const handler = {
         let paraDisenar = 0, esperandoFoto = 0;
         await ensureCorteNeonSchema(env);
         try {
-          const r = await env.DB.prepare("SELECT SUM(CASE WHEN IFNULL(foto_key,'')='' AND pedido_id IS NOT NULL THEN 0 ELSE 1 END) AS lista, SUM(CASE WHEN IFNULL(foto_key,'')='' AND pedido_id IS NOT NULL THEN 1 ELSE 0 END) AS espera FROM corte_pedidos WHERE producto='NEON' AND estado='pedido'").first();
+          // Sin contar las de pedidos que ya se entregaron / están para enviar (el cartel ya existe: no hay matriz que hacer).
+          const r = await env.DB.prepare("SELECT SUM(CASE WHEN IFNULL(c.foto_key,'')='' AND c.pedido_id IS NOT NULL THEN 0 ELSE 1 END) AS lista, SUM(CASE WHEN IFNULL(c.foto_key,'')='' AND c.pedido_id IS NOT NULL THEN 1 ELSE 0 END) AS espera FROM corte_pedidos c LEFT JOIN pedidos p ON p.id = c.pedido_id WHERE c.producto='NEON' AND c.estado='pedido' AND lower(trim(IFNULL(p.estado_pedido,''))) NOT IN ('entregado','para enviar')").first();
           paraDisenar = (r && r.lista) || 0; esperandoFoto = (r && r.espera) || 0;
         } catch (_) {}
         return json({ ok: true, neon_para_disenar: paraDisenar, neon_esperando_foto: esperandoFoto });

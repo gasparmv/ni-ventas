@@ -22,7 +22,9 @@ const STATIC_ASSETS = [
 // hasta el segundo refresh — problema serio cuando hay un bugfix urgente.
 // Sufijos: se matchean con endsWith para no atarlos a la base /ni-ventas/ (así
 // valen tanto /ni-ventas/assets/app.js como /assets/app.js en el dominio nuevo).
-const NETWORK_FIRST_ASSETS = ['/assets/app.js', '/assets/app.css'];
+// sw.js también: el front lo consulta para saber si hay una versión nueva (aviso "Recargar") y con
+// stale-while-revalidate leía la versión vieja cacheada.
+const NETWORK_FIRST_ASSETS = ['/assets/app.js', '/assets/app.css', '/sw.js'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
