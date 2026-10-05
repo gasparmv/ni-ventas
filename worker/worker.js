@@ -746,17 +746,30 @@ function pedidoFecha(s) {
   let y = m[3]; if (y.length === 2) y = '20' + y;
   return `${y}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
 }
+// Lee la hoja "2026" del Excel de Ventas con POSICIONES REALES: rows[i] = fila i+1 del Sheet.
+// ⚠️ NO usar gviz para nada que dependa del N° de fila: gviz OMITE las filas totalmente vacías,
+// así que desde la primera fila vacía la "línea i" deja de ser la "fila i+1" (oct-2026: 4 filas
+// vacías — 389/391/392/403 — corrían todo 1 a 4 filas; así se pisó "Gracias Dios" al reparar
+// "A brillar mi amor"). El export por gid trae TODAS las filas, vacías incluidas, con los mismos
+// valores formateados que gviz. Devuelve null si falla o si la pestaña no es la esperada (si
+// alguien recrea la hoja cambia el gid → el export traería OTRA pestaña → mejor no tocar nada).
+const VENTAS_2026_GID = '1538740882';
+async function fetchVentas2026Rows() {
+  const r = await fetch(`https://docs.google.com/spreadsheets/d/1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg/export?format=csv&gid=${VENTAS_2026_GID}`);
+  if (!r.ok) return null;
+  const rows = parseCsv(await r.text());
+  const h = rows[0] || [];
+  if (String(h[1] || '').trim().toUpperCase() !== 'NUMERO' || String(h[2] || '').trim().toUpperCase() !== 'CARTEL') return null;
+  return rows;
+}
 // Sincroniza SOLO el campo `productor` desde el Excel de Ventas hacia D1 (Gaspar
 // lo completa en el Excel, no en el CRM). Matchea por sheet_row (posición en el
 // Excel) y solo toca filas origen='backfill' → NO pisa ediciones del CRM ni los
 // pedidos nuevos (origen='crm', sheet_row NULL). Devuelve cuántas filas cambiaron.
 async function syncProductoresFromVentas(env) {
   try {
-    const VENTAS_SID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
-    const u = `https://docs.google.com/spreadsheets/d/${VENTAS_SID}/gviz/tq?tqx=out:csv&sheet=2026`;
-    const r = await fetch(u);
-    if (!r.ok) return 0;
-    const rows = parseCsv(await r.text());
+    const rows = await fetchVentas2026Rows();
+    if (!rows) return 0;
     const now = new Date().toISOString();
     const stmts = [];
     for (let i = 1; i < rows.length; i++) {
@@ -780,11 +793,8 @@ async function syncProductoresFromVentas(env) {
 // Excel crece agregando filas al final (que es como se carga). Devuelve cuántos importó.
 async function importNewPedidosFromVentas(env) {
   try {
-    const VENTAS_SID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
-    const u = `https://docs.google.com/spreadsheets/d/${VENTAS_SID}/gviz/tq?tqx=out:csv&sheet=2026`;
-    const r = await fetch(u);
-    if (!r.ok) return 0;
-    const rows = parseCsv(await r.text());
+    const rows = await fetchVentas2026Rows();
+    if (!rows) return 0;
     if (rows.length < 2) return 0;
     const have = new Set();
     const rs = await env.DB.prepare('SELECT sheet_row FROM pedidos WHERE sheet_row IS NOT NULL').all();
@@ -1044,10 +1054,8 @@ async function syncAdColumnToExcel(env) {
     const d1 = await env.DB.prepare("SELECT cartel, ad FROM pedidos WHERE COALESCE(ad,'')!='' AND cartel NOT LIKE '%orpore%'").all();
     const byCartel = {};
     for (const r of (d1.results || [])) { const k = String(r.cartel || '').trim().toLowerCase(); if (k && !byCartel[k]) byCartel[k] = r.ad; }
-    const VENTAS_SID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
-    const r = await fetch(`https://docs.google.com/spreadsheets/d/${VENTAS_SID}/gviz/tq?tqx=out:csv&sheet=2026`);
-    if (!r.ok) return { error: 'csv ' + r.status };
-    const rows = parseCsv(await r.text());
+    const rows = await fetchVentas2026Rows();
+    if (!rows) return { error: 'no se pudo leer la hoja 2026 (export)' };
     const items = [];
     for (let i = 1; i < rows.length; i++) {
       const cartel = String((rows[i][2] || '')).trim().toLowerCase();
@@ -1076,14 +1084,19 @@ function pedidoFechaToExcel(iso) {
 // el JSON parseado, o null si falla.
 async function appsScriptPost(env, payload) {
   if (!env.APPS_SCRIPT_URL) return { error: 'no APPS_SCRIPT_URL' };
+  // TIMEOUT: Apps Script se cuelga/tarda seguido. Sin abort, un fetch colgado dejaba el
+  // pedido en dirty=0 (por el claim) sin write-back de éxito NI de fallo → venta perdida
+  // invisible (ni en mirror-failures). Con el timeout, el cuelgue tira TimeoutError → lo
+  // atrapa el caller → cuenta como fallo (mirror_attempts++, dirty vuelve a 1, reintenta).
   let r = await fetch(env.APPS_SCRIPT_URL, {
     method: 'POST', redirect: 'manual',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(25000)
   });
   if (r.status >= 300 && r.status < 400) {
     const loc = r.headers.get('location');
-    if (loc) r = await fetch(loc, { method: 'GET', redirect: 'follow' });
+    if (loc) r = await fetch(loc, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(25000) });
   }
   const text = await r.text();
   try { return JSON.parse(text); }
@@ -1108,7 +1121,11 @@ async function pushPedidoToVentas(env, row) {
     row.estado_pedido || '', row.ad || ''
   ];
   try {
-    const j = await appsScriptPost(env, { action: 'pedido_upsert', sheet_row: row.sheet_row || 0, row: arr });
+    // pedido_id = identidad ESTABLE de la fila: el Apps Script la busca primero por id (col AB
+    // id_sync) y recién después por numero+cartel / nombre. SIN esto, un pedido cuya fila se
+    // vació caía en la fila de OTRO pedido con el mismo nombre y la pisaba (caso "A brillar mi
+    // amor": #371 de Facu pisó a #356 de Joaco el 29-sep). NO sacar.
+    const j = await appsScriptPost(env, { action: 'pedido_upsert', pedido_id: row.id, sheet_row: row.sheet_row || 0, row: arr });
     if (j && j.ok && j.row) return { row: Number(j.row) };
     return { error: (j && j.error) ? String(j.error) : 'el Apps Script no devolvió row' };
   } catch (e) { return { error: String((e && e.message) || e) }; }
@@ -1149,7 +1166,7 @@ async function pushPedidoCorporeoToV4(env, row) {
     row.pagado ?? ''                 // AA Pagado (COBRO 1)
   ];
   try {
-    const j = await appsScriptPost(env, { action: 'corporeo_upsert', sheet_row: row.sheet_row || 0, row_ao, row_zaa });
+    const j = await appsScriptPost(env, { action: 'corporeo_upsert', pedido_id: row.id, sheet_row: row.sheet_row || 0, row_ao, row_zaa });
     if (j && j.ok && j.row) return { row: Number(j.row) };
     return { error: (j && j.error) ? String(j.error) : 'el Apps Script no devolvió row' };
   } catch (e) { return { error: String((e && e.message) || e) }; }
@@ -1187,7 +1204,13 @@ async function processPedidosMirror(env) {
       // Corpóreos → Sheet 2026 v4 (Pedidos_Corporeo); neón → Excel de Ventas de siempre.
       const res = row.es_corporeo ? await pushPedidoCorporeoToV4(env, row) : await pushPedidoToVentas(env, row);
       if (res && res.row) {
-        await env.DB.prepare('UPDATE pedidos SET mirror_dirty = 0, mirror_attempts = 0, mirror_error = NULL, sheet_row = ? WHERE id = ? AND updated_at = ?').bind(res.row, row.id, row.updated_at).run();
+        // El sheet_row es un HECHO FÍSICO del append: se persiste SIEMPRE por id, aunque el
+        // pedido se haya editado durante el push (updated_at cambió). Antes esa carrera hacía
+        // fallar todo el write-back y perdía el sheet_row.
+        await env.DB.prepare('UPDATE pedidos SET sheet_row = ?, mirror_attempts = 0, mirror_error = NULL WHERE id = ?').bind(res.row, row.id).run();
+        // Apagar dirty SOLO si no se re-editó desde el claim; si se editó, queda dirty=1 para
+        // re-espejar la edición (el upsert por id la actualiza en su MISMA fila, sin duplicar).
+        await env.DB.prepare('UPDATE pedidos SET mirror_dirty = 0 WHERE id = ? AND updated_at = ?').bind(row.id, row.updated_at).run();
         pushed++;
       } else {
         // Red de seguridad: tras 5 intentos deja de reintentar (dirty=0) y guarda el
@@ -16532,11 +16555,8 @@ const handler = {
           const _ref = await env.DB.prepare("SELECT COUNT(*) AS n FROM corte_pedidos c JOIN pedidos p ON p.id = c.pedido_id WHERE p.origen = 'backfill'").first();
           if (_ref && _ref.n > 0) return json({ error: `hay ${_ref.n} pieza(s) de corte vinculadas a pedidos del backfill; re-importar las dejaría huérfanas` }, 409);
         } catch (_) {}
-        const VENTAS_SID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
-        const u = `https://docs.google.com/spreadsheets/d/${VENTAS_SID}/gviz/tq?tqx=out:csv&sheet=2026`;
-        const r = await fetch(u);
-        if (!r.ok) return json({ error: 'no se pudo leer el Excel de Ventas: HTTP ' + r.status }, 502);
-        const rows = parseCsv(await r.text());
+        const rows = await fetchVentas2026Rows();
+        if (!rows) return json({ error: 'no se pudo leer el Excel de Ventas (export de la hoja 2026)' }, 502);
         if (rows.length < 2) return json({ error: 'el Excel de Ventas vino vacío' }, 502);
         const now = new Date().toISOString();
         let skipped = 0;
