@@ -222,14 +222,25 @@ function panelSueldoHtml(vendedor) {
     const fijo = periodMonths.reduce((a, m) => a + fijoMes(m), 0);
     const misPedidos = STATE.pedidos
       .filter(p => periodMonths.indexOf(getMonth(p.fecha)) !== -1 && (p.comercial_id || 'joaco') === vendedor);
-    const sumaVentas = (corp) => misPedidos
-      .filter(p => corp ? p.esCorporeo : !p.esCorporeo)
-      .reduce((a, p) => a + (p.precio || 0) + (p.precioDimmer || 0), 0);
-    const ventasNeon = sumaVentas(false);
-    const ventasCorp = sumaVentas(true);
+    // Multiplicador de comisión por pedido. Gesto de 1er mes (ej. Agus): media comisión en los
+    // pedidos HASTA cierta fecha (esas ventas las hizo el equipo), salvo los carteles que cerró
+    // ella misma (comisionCompletaCarteles) → comisión entera. Default = 1 (sin ajuste).
+    const comMult = (p) => {
+      if (!sec || !sec.mediaComisionHasta) return 1;
+      if ((sec.comisionCompletaCarteles || []).indexOf(p.cartel) !== -1) return 1;
+      return (String(p.fecha).slice(0, 10) <= sec.mediaComisionHasta) ? 0.5 : 1;
+    };
+    let ventasNeon = 0, ventasCorp = 0, comisionNeon = 0, comisionCorp = 0, huboMedia = false;
+    misPedidos.forEach(p => {
+      const v = (p.precio || 0) + (p.precioDimmer || 0);
+      const mult = comMult(p);
+      if (mult < 1) huboMedia = true;
+      if (p.esCorporeo) { ventasCorp += v; comisionCorp += v * rateCorp * mult; }
+      else { ventasNeon += v; comisionNeon += v * rate * mult; }
+    });
+    comisionNeon = Math.round(comisionNeon);
+    comisionCorp = Math.round(comisionCorp);
     const ventas = ventasNeon + ventasCorp;
-    const comisionNeon = Math.round(ventasNeon * rate);
-    const comisionCorp = Math.round(ventasCorp * rateCorp);
     const comision = comisionNeon + comisionCorp;
     const sueldo = fijo + comision;
     const por100k = Math.round(100000 * rate);
@@ -240,12 +251,13 @@ function panelSueldoHtml(vendedor) {
     // KPI de comisión: con tasa de corpóreo propia (Facu) muestra el total + "10% neón + 7% corpóreo"
     // y un desglose abajo; sin ella queda igual que siempre ("Comisión 10% sobre $X en carteles directo").
     const comKpi = splitCorp
-      ? `<div class="kpi cyan"><div class="kpi-label">Comisión</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">${ratePct}% neón + ${rateCorpPct}% corpóreo</div></div>`
+      ? `<div class="kpi cyan"><div class="kpi-label">Comisión</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">${ratePct}% neón + ${rateCorpPct}% corpóreo${huboMedia ? ' · 1er mes ½' : ''}</div></div>`
       : `<div class="kpi cyan"><div class="kpi-label">Comisión ${ratePct}%</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">sobre ${fmtMoney(ventas)} en carteles directo</div></div>`;
     const footer = splitCorp
       ? `<div style="margin-top:var(--s-3);display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--fg-subtle)">
-           <span>🔷 Neón: <b>${fmtMoney(ventasNeon)}</b> × ${ratePct}% = <b style="color:var(--fg)">${fmtMoney(comisionNeon)}</b></span>
-           <span>🧊 Corpóreo: <b>${fmtMoney(ventasCorp)}</b> × ${rateCorpPct}% = <b style="color:var(--fg)">${fmtMoney(comisionCorp)}</b></span>
+           <span>🔷 Neón: <b>${fmtMoney(ventasNeon)}</b>${huboMedia ? ' → ' : ' × ' + ratePct + '% = '}<b style="color:var(--fg)">${fmtMoney(comisionNeon)}</b></span>
+           <span>🧊 Corpóreo: <b>${fmtMoney(ventasCorp)}</b>${huboMedia ? ' → ' : ' × ' + rateCorpPct + '% = '}<b style="color:var(--fg)">${fmtMoney(comisionCorp)}</b></span>
+           ${huboMedia ? `<span style="opacity:.85">⚑ 1er mes: comisión al 50% (salvo lo que cerró ${escapeHtml(sec.nombre)})</span>` : ''}
          </div>`
       : `<div style="margin-top:var(--s-3);color:var(--fg-subtle);font-size:12px">Por cada ${fmtMoney(100000)} en carteles directo sumás ${fmtMoney(por100k)} de comisión 🚀</div>`;
     inner = `
@@ -1101,7 +1113,11 @@ function isAgustinaUser(s) { return _userKey(s) === 'agustina'; }
 // visible (rate), +5% oculto (mas5), mes de inicio del panel "Tu sueldo" (desde), color de píldora.
 const COMERCIALES_SECUNDARIOS = {
   facundo:  { nombre: 'Facu', rate: 0.10, rateCorp: 0.07, mas5: true, desde: '2026-08', color: 'violet' },
-  agustina: { nombre: 'Agus', rate: 0.10, mas5: true, desde: '2026-09', color: 'rose' },
+  agustina: { nombre: 'Agus', rate: 0.10, rateCorp: 0.07, mas5: true, desde: '2026-09', color: 'rose',
+              // 1er mes (arranque): media comisión en los pedidos hasta el 03/10 (esas ventas las
+              // hizo el equipo), salvo "Primero lo bueno" que cerró ella (comisión completa). Lo que
+              // venda del 04/10 en adelante = comisión completa automáticamente.
+              mediaComisionHasta: '2026-10-03', comisionCompletaCarteles: ['Primero lo bueno'] },
 };
 function isSecundario(s) { return Object.prototype.hasOwnProperty.call(COMERCIALES_SECUNDARIOS, _userKey(s)); }
 function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
