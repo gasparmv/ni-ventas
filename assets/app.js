@@ -3532,7 +3532,10 @@ function corteHybridBoard(pedidos) {
   const selTotal = selGroups.reduce((s, g) => s + g.total, 0);
   const nMatriz = selGroups.reduce((s, g) => s + g.items.filter(p => p.estado === 'matriz_lista').length, 0);
   const nCortado = selGroups.reduce((s, g) => s + g.items.filter(p => p.estado === 'cortado').length, 0);
-  const nCobrar = selGroups.filter(g => g.priced && g.pago !== 'pagado').length;
+  // Cobrables: con precio, con teléfono, y no pagados ni parciales (el parcial se revisa a mano).
+  const nCobrar = selGroups.filter(g => g.priced && g.tel && g.pago !== 'pagado' && g.pago !== 'parcial').length;
+  // Tanda que se está viendo (el board es de UNA tanda): las acciones masivas se acotan a ella.
+  const boardTanda = pedidos.length && pedidos.every(p => (+p.tanda_id || 0) === (+pedidos[0].tanda_id || 0)) ? (+pedidos[0].tanda_id || 0) : 0;
   const allVisSel = list.length > 0 && list.every(g => sel[g.key]);
   const selallHead = list.length ? `<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);background:rgba(0,0,0,.14)">
       <input type="checkbox" data-corte-selall ${allVisSel ? 'checked' : ''} style="cursor:pointer;accent-color:#7c3aed">
@@ -3540,9 +3543,9 @@ function corteHybridBoard(pedidos) {
     </div>` : '';
   const barra = selGroups.length ? `<div style="position:fixed;bottom:calc(16px + env(safe-area-inset-bottom,0px));left:50%;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:10px 14px;box-shadow:0 10px 34px rgba(0,0,0,.55);max-width:calc(100vw - 24px)">
       <span style="font-size:12px;font-weight:700;white-space:nowrap">${selGroups.length} cliente${selGroups.length === 1 ? '' : 's'} · ${selPiezas} pz${selTotal ? ' · $' + selTotal.toLocaleString('es-AR') : ''}</span>
-      ${nMatriz ? `<button class="btn" data-corte-bulk-avanzar="cortado" style="font-size:12px;padding:6px 12px">🪚 Cortados (${nMatriz})</button>` : ''}
-      ${nCortado ? `<button class="btn" data-corte-bulk-avanzar="embalado" style="font-size:12px;padding:6px 12px">📦 Embalados (${nCortado})</button>` : ''}
-      ${nCobrar ? `<button class="btn" data-corte-bulk-cobrar style="font-size:12px;padding:6px 12px">💰 Cobrar (${nCobrar})</button>` : ''}
+      ${nMatriz ? `<button class="btn" data-corte-bulk-avanzar="cortado" data-tanda="${boardTanda}" style="font-size:12px;padding:6px 12px">🪚 Cortados (${nMatriz})</button>` : ''}
+      ${nCortado ? `<button class="btn" data-corte-bulk-avanzar="embalado" data-tanda="${boardTanda}" style="font-size:12px;padding:6px 12px">📦 Embalados (${nCortado})</button>` : ''}
+      ${nCobrar ? `<button class="btn" data-corte-bulk-cobrar="${boardTanda}" style="font-size:12px;padding:6px 12px">💰 Cobrar (${nCobrar})</button>` : ''}
       <button class="btn ghost" data-corte-bulk-deselect style="font-size:12px;padding:6px 10px" title="Deseleccionar">✕</button>
     </div>` : '';
   return `
@@ -3898,9 +3901,10 @@ async function bindCorte() {
   document.querySelectorAll('[data-corte-sel]').forEach(cb => { cb.onclick = (e) => { e.stopPropagation(); STATE.corteSel = STATE.corteSel || {}; STATE.corteSel[cb.getAttribute('data-corte-sel')] = cb.checked; render(); }; });
   const selAll = document.querySelector('[data-corte-selall]');
   if (selAll) selAll.onclick = (e) => { e.stopPropagation(); STATE.corteSel = STATE.corteSel || {}; const on = selAll.checked; document.querySelectorAll('[data-corte-sel]').forEach(b => { STATE.corteSel[b.getAttribute('data-corte-sel')] = on; }); render(); };
-  document.querySelectorAll('[data-corte-bulk-avanzar]').forEach(b => { b.onclick = () => corteBulkAvanzar(b.getAttribute('data-corte-bulk-avanzar')); });
+  document.querySelectorAll('[data-corte-bulk-avanzar]').forEach(b => { b.onclick = () => corteBulkAvanzar(b.getAttribute('data-corte-bulk-avanzar'), parseInt(b.getAttribute('data-tanda'), 10) || 0); });
   const bulkDes = document.querySelector('[data-corte-bulk-deselect]'); if (bulkDes) bulkDes.onclick = () => { STATE.corteSel = {}; render(); };
-  const bulkCob = document.querySelector('[data-corte-bulk-cobrar]'); if (bulkCob) bulkCob.onclick = () => { const b = document.querySelector('[data-corte-cobrar-abrir]'); if (b) b.click(); };
+  // "💰 Cobrar (N)": cobra SOLO a los seleccionados (antes solo abría la vista de cobro completa).
+  const bulkCob = document.querySelector('[data-corte-bulk-cobrar]'); if (bulkCob) bulkCob.onclick = () => corteBulkCobrar(parseInt(bulkCob.getAttribute('data-corte-bulk-cobrar'), 10) || 0);
   const cerrar = document.querySelector('[data-corte-cerrar]'); if (cerrar) cerrar.onclick = () => { STATE.corteSelected = null; render(); };
   const ai = document.getElementById('corte-ancho'), ali = document.getElementById('corte-alto');
   if (ai || ali) { const sel = (STATE.cortePedidos || []).find(p => p.id === STATE.corteSelected); if (sel) { const upd = () => cortePrecioPreview(sel); if (ai) ai.oninput = upd; if (ali) ali.oninput = upd; } }
@@ -4025,8 +4029,33 @@ async function corteBulk(action, extra) {
   } catch (_) { toast('Error de red'); }
 }
 // Acción masiva desde la selección: junta los ids elegibles de los clientes tildados y los mueve de etapa.
-function corteBulkAvanzar(estado) {
-  const groups = corteClientGroups(STATE.cortePedidos || []);
+// Grupos por cliente del board que se está viendo: sin neón y acotados a la tanda (si viene).
+function corteBoardGroups(tandaId) {
+  return corteClientGroups((STATE.cortePedidos || []).filter(p => p.producto !== 'NEON' && (!tandaId || (+p.tanda_id || 0) === tandaId)));
+}
+// "💰 Cobrar (N)" de la barra: manda el cobro SOLO a los clientes seleccionados (de la tanda que se está viendo).
+// Si alguno ya tenía el cobro enviado (ej. se corrigió el pedido después de cobrar), se le RE-ENVÍA con el monto actual.
+async function corteBulkCobrar(tandaId) {
+  const sel = STATE.corteSel || {};
+  const elig = corteBoardGroups(tandaId).filter(g => sel[g.key] && g.priced && g.tel && g.pago !== 'pagado' && g.pago !== 'parcial');
+  if (!elig.length) { toast('Nada para cobrar en la selección'); return; }
+  const total = elig.reduce((s, g) => s + g.total, 0);
+  const reenv = elig.filter(g => g.pago === 'cobrando');
+  const lineas = elig.map(g => '• ' + g.nombre + ' — $' + g.total.toLocaleString('es-AR') + (g.pago === 'cobrando' ? ' (re-envío)' : '')).join('\n');
+  const msg = 'Mandar el cobro a ' + elig.length + ' cliente' + (elig.length === 1 ? '' : 's') + ' — total $' + total.toLocaleString('es-AR') + ':\n\n' + lineas
+    + (reenv.length ? '\n\n' + (reenv.length === 1 ? 'Uno ya tenía' : reenv.length + ' ya tenían') + ' un cobro enviado: se les vuelve a mandar con el monto actual.' : '');
+  if (!await showConfirm(msg, { title: 'Cobrar', confirmLabel: 'Mandar cobro' }).catch(() => false)) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/cobrar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ telefonos: elig.map(g => g.tel), recobrar: true, tanda_id: tandaId || 0 }) }).then(x => x.json());
+    const resultados = (r && r.resultados) || [];
+    const okN = resultados.filter(x => x.ok).length;
+    const fallos = resultados.filter(x => !x.ok).map(x => { const g = elig.find(e => String(e.tel).replace(/\D/g, '') === String(x.tel)); return (g ? g.nombre : x.tel) + ' (' + (x.error || 'error') + ')'; });
+    toast('Cobros enviados: ' + okN + '/' + elig.length + (fallos.length ? ' · fallaron: ' + fallos.join(', ') : ''));
+    STATE.corteSel = {}; STATE.cortePedidos = undefined; STATE._corteLoading = false; render();
+  } catch (_) { toast('Error de red'); }
+}
+function corteBulkAvanzar(estado, tandaId) {
+  const groups = corteBoardGroups(tandaId);
   const sel = STATE.corteSel || {};
   const wantStage = estado === 'cortado' ? 'matriz_lista' : (estado === 'embalado' ? 'cortado' : null);
   const ids = [];

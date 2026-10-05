@@ -17607,10 +17607,24 @@ const handler = {
         const tels = Array.isArray(body.telefonos) ? body.telefonos.map(t => String(t).replace(/\D/g, '')).filter(Boolean) : [];
         if (!tels.length) return json({ error: 'sin telefonos' }, 400);
         const nowIso = new Date().toISOString(); const nowMs = Date.now(); const res = [];
+        // recobrar: re-envía el cobro a clientes que YA estaban 'cobrando' (ej. se corrigió el pedido después de
+        // cobrar). tanda_id: acota todo a esa tanda (la barra de selección manda la tanda que se está viendo).
+        const recobrar = body.recobrar === true;
+        const tandaId = parseInt(body.tanda_id, 10) || 0;
+        const tf = tandaId ? ' AND tanda_id=?' : '';
+        const tb = tandaId ? [tandaId] : [];
         for (const tel of tels) {
+          // RE-COBRO: pasamos a 'pendiente' SOLO las filas 'cobrando' (nunca pagado/parcial) de esa tanda, guardando
+          // los ids para restaurarlas a 'cobrando' si el envío falla (así el vigía las sigue mirando).
+          let resetIds = [];
+          if (recobrar) {
+            try { resetIds = ((await env.DB.prepare("SELECT id FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0 AND estado IN ('cortado','embalado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []).map(x => x.id); } catch (_) {}
+            if (resetIds.length) { try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pendiente', updated_at=? WHERE id IN (" + resetIds.map(() => '?').join(',') + ")").bind(nowIso, ...resetIds).run(); } catch (_) {} }
+          }
+          const restaurar = async () => { if (resetIds.length) { try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE estado_pago='pendiente' AND id IN (" + resetIds.map(() => '?').join(',') + ")").bind(nowIso, ...resetIds).run(); } catch (_) {} } };
           let rows = [];
-          try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago='pendiente' AND estado IN ('cortado','embalado') AND IFNULL(producto,'TRANS')!='NEON'").bind(tel).all()).results || []; } catch (_) {}
-          if (!rows.length) { res.push({ tel, ok: false, error: 'nada para cobrar' }); continue; }
+          try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago='pendiente' AND estado IN ('cortado','embalado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
+          if (!rows.length) { await restaurar(); res.push({ tel, ok: false, error: 'nada para cobrar' }); continue; }
           const g = { telefono: tel, cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
           let ventana = false;
           try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ventana = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 24 * 3600 * 1000); } catch (_) {}
@@ -17626,11 +17640,16 @@ const handler = {
             if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-cobro-tpl:' + tel + ':' + Date.now()), tel, '[plantilla corte_cobro_semanal] total ' + _tot).run(); } catch (_) {} }
           }
           if (r && r.ok) {
-            try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE telefono=? AND estado_pago='pendiente' AND estado IN ('cortado','embalado') AND IFNULL(producto,'TRANS')!='NEON'").bind(nowIso, tel).run(); } catch (_) {}
+            // Pasan a 'cobrando' EXACTAMENTE las filas que se cobraron en este mensaje (por id).
+            const cobIds = rows.map(x => x.id);
+            try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE estado_pago='pendiente' AND id IN (" + cobIds.map(() => '?').join(',') + ")").bind(nowIso, ...cobIds).run(); } catch (_) {}
+            // Red de seguridad: si alguna fila reseteada no entró en el mensaje, vuelve a 'cobrando'.
+            const sobrantes = resetIds.filter(id => !cobIds.includes(id));
+            if (sobrantes.length) { try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE estado_pago='pendiente' AND id IN (" + sobrantes.map(() => '?').join(',') + ")").bind(nowIso, ...sobrantes).run(); } catch (_) {} }
             // Cobro NUEVO → reseteamos el dedup del detalle, para que corteAutoDetalle lo mande de nuevo cuando conteste.
             try { await env.DB.prepare("DELETE FROM corte_detalle_sent WHERE phone=?").bind(tel).run(); } catch (_) {}
-            res.push({ tel, ok: true, total: g.total, via });
-          } else { res.push({ tel, ok: false, error: 'no se pudo enviar', total: g.total, via }); }
+            res.push({ tel, ok: true, total: g.total, via, recobro: resetIds.length > 0 });
+          } else { await restaurar(); res.push({ tel, ok: false, error: 'no se pudo enviar', total: g.total, via }); }
         }
         return json({ ok: true, resultados: res });
       }
