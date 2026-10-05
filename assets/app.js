@@ -1716,7 +1716,9 @@ function mapPedidoFromD1(row) {
     instalacion: row.instalacion || '',
     // Foto del DISEÑO FINAL y estado de su pieza en el corte (la matriz que diseña Emma). corteId
     // vacío = el cartel no tiene pieza (corpóreo, o pedido anterior a esta función).
-    disenoKey: row.diseno_key || '',
+    disenoKey: row.diseno_key || row.foto_diseno_key || '',
+    // Corpóreo cargado con "la subo después" ('' en la base; NULL = pedido anterior a la foto obligatoria).
+    fotoDisenoPendiente: row.foto_diseno_key === '',
     corteEstado: row.corte_estado || '',
     corteId: row.corte_id || null
   };
@@ -6593,7 +6595,7 @@ async function pmCargarSugerencias() {
   if (m._fotoSugDe && m._fotoSugDe !== contacto && (m._fotoSug || []).length) {
     // Cambió el cliente: las imágenes del anterior no pueden quedar como "lo último que se le mandó".
     m._fotoSug = []; m._fotoSugDe = '';
-    (m.carteles || []).forEach(c => { if (!c.es_corporeo && !c.foto_key && c.foto_estado !== 'subiendo') pmFotoRepintar(m, c); });
+    (m.carteles || []).forEach(c => { if (!c.foto_key && c.foto_estado !== 'subiendo') pmFotoRepintar(m, c); });
   }
   if (contacto.length < 8 || m._fotoSugDe === contacto || m._fotoSugPidiendo === contacto) return;
   m._fotoSugPidiendo = contacto;
@@ -6603,14 +6605,14 @@ async function pmCargarSugerencias() {
     if (!pmModalVivo(m) || pmContactoSugerencias(m) !== contacto) return; // cambió el teléfono mientras tanto
     m._fotoSugDe = contacto; // solo si salió bien (si falla, se reintenta al próximo blur)
     m._fotoSug = (j && j.fotos) || [];
-    (m.carteles || []).forEach(c => { if (!c.es_corporeo && !c.foto_key && c.foto_estado !== 'subiendo') pmFotoRepintar(m, c); });
+    (m.carteles || []).forEach(c => { if (!c.foto_key && c.foto_estado !== 'subiendo') pmFotoRepintar(m, c); });
   } catch (_) {} finally { if (m._fotoSugPidiendo === contacto) m._fotoSugPidiendo = ''; }
 }
 // Sube/copia y deja la key en el cartel. Token por cartel: si el vendedor cancela o elige otra mientras
 // tanto, la respuesta vieja se ignora. Si falla un "Cambiar", vuelve la foto aprobada que había.
 async function pmFotoAsignar(i, preview, obtenerKey, errTxt) {
   const m = STATE.pedidoModal; if (!m) return;
-  const c = m.carteles[i]; if (!c || c.es_corporeo) return;
+  const c = m.carteles[i]; if (!c) return;
   const tok = (c._fotoTok || 0) + 1; c._fotoTok = tok;
   if (c.foto_estado !== 'subiendo') c._fotoPrev = { key: c.foto_key, preview: c.foto_preview };
   else pmFotoBlobLibre(c); // reemplaza a una subida en curso: su preview ya no se usa
@@ -6636,7 +6638,7 @@ async function pmFotoAsignar(i, preview, obtenerKey, errTxt) {
 function pmFotoTrasElegir(m, c, fromKey) {
   if (!m || !c || !c.foto_key) return;
   c._fotoFrom = fromKey || '';
-  (m.carteles || []).forEach(o => { if (o !== c && !o.es_corporeo && !o.foto_key && o.foto_estado !== 'subiendo') pmFotoRepintar(m, o); });
+  (m.carteles || []).forEach(o => { if (o !== c && !o.foto_key && o.foto_estado !== 'subiendo') pmFotoRepintar(m, o); });
 }
 async function pmFotoSetArchivo(i, file) {
   if (!file) return;
@@ -6665,7 +6667,7 @@ function pmFotoQuitar(i) {
   c.foto_key = ''; c.foto_preview = ''; c.foto_estado = ''; c._fotoFrom = '';
   pmFotoRepintar(m, c);
   // La imagen que tenía vuelve a estar libre: los otros carteles sin foto dejan de verla como "otro cartel".
-  (m.carteles || []).forEach(o => { if (o !== c && !o.es_corporeo && !o.foto_key && o.foto_estado !== 'subiendo') pmFotoRepintar(m, o); });
+  (m.carteles || []).forEach(o => { if (o !== c && !o.foto_key && o.foto_estado !== 'subiendo') pmFotoRepintar(m, o); });
 }
 function bindPmFotoSlots(root) {
   if (!root) return;
@@ -6684,7 +6686,7 @@ function bindPmFotoSlots(root) {
 // neón (si no, marcar la primera era sugerirle a "Soho shine" el render de "Parking").
 function pmSugerenciasParaCartel(m, c) {
   const base = ((m && m._fotoSug) || []);
-  const otros = ((m && m.carteles) || []).filter(o => o !== c && !o.es_corporeo);
+  const otros = ((m && m.carteles) || []).filter(o => o !== c); // neón y corpóreo: todos llevan foto del diseño
   const nc = normName(String(c.cartel || ''));
   const nombres = f => [f.brief_diseno, f.brief_cliente].map(n => normName(String(n || ''))).filter(Boolean);
   // Puntaje de cuánto se parece el brief de esa imagen a ESTE cartel: 0 = mismo nombre; 1 = uno contiene
@@ -6710,7 +6712,7 @@ function pmSugerenciasParaCartel(m, c) {
 // Primer cartel de neón sin foto (destino del Ctrl+V con el modal abierto).
 function pmCartelSinFoto() {
   const m = STATE.pedidoModal; if (!m) return -1;
-  return (m.carteles || []).findIndex(c => !c.es_corporeo && !c.foto_key && c.foto_estado !== 'subiendo');
+  return (m.carteles || []).findIndex(c => !c.foto_key && c.foto_estado !== 'subiendo');
 }
 function pmFotoSlotHtml(c, i) {
   const m = STATE.pedidoModal || {};
@@ -6723,7 +6725,7 @@ function pmFotoSlotHtml(c, i) {
     const src = c.foto_preview || disenoThumb(c.foto_key, 320);
     inner = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <img src="${escapeHtml(src)}" style="height:72px;max-width:140px;object-fit:contain;border-radius:6px;background:#fff">
-        <div style="flex:1;min-width:140px"><div style="font-size:12px;color:#3DDC97;font-weight:700">✓ Diseño aprobado</div><div style="font-size:11px;color:var(--fg-subtle)">Le llega a Emma en el corte con la medida del cartel</div></div>
+        <div style="flex:1;min-width:140px"><div style="font-size:12px;color:#3DDC97;font-weight:700">✓ Diseño aprobado</div><div style="font-size:11px;color:var(--fg-subtle)">${c.es_corporeo ? 'Va a las fotos del ticket de producción del corpóreo' : 'Le llega a Emma en el corte con la medida del cartel'}</div></div>
         <div style="display:flex;gap:6px">${fileBtn('Cambiar')}<button type="button" data-pm-foto-quitar="${i}" style="${btn};color:#FF5566">Quitar</button></div>
       </div>`;
   } else {
@@ -6737,7 +6739,7 @@ function pmFotoSlotHtml(c, i) {
         <label style="margin-left:auto;font-size:12px;color:var(--fg-subtle);display:flex;gap:5px;align-items:center;cursor:pointer"><input type="checkbox" data-pm-foto-despues="${i}" ${c.foto_despues ? 'checked' : ''}> La subo después</label>
       </div>
       ${c.foto_estado === 'error' ? '<div style="font-size:11px;color:#FF5566;margin-top:4px">No se pudo subir — probá de nuevo.</div>' : ''}
-      ${c.foto_despues ? '<div style="font-size:11px;color:#FFB020;margin-top:6px">⚠ El pedido queda marcado SIN FOTO: subila desde el pedido apenas la tengas. Emma no puede hacer la matriz sin ella.</div>' : ''}`;
+      ${c.foto_despues ? `<div style="font-size:11px;color:#FFB020;margin-top:6px">⚠ El pedido queda marcado SIN FOTO: subila desde el pedido apenas la tengas. ${c.es_corporeo ? 'Así entra sola al ticket de producción cuando lo armes.' : 'Emma no puede hacer la matriz sin ella.'}</div>` : ''}`;
   }
   return `<div data-pm-foto-slot="${i}" style="border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;background:var(--ink-100)">${inner}</div>`;
 }
@@ -6788,6 +6790,10 @@ function renderPedidoCartelBlock(c, i, n) {
         <div style="flex:1"><label style="${lbl}">Instalación</label><select id="pm-instalacion-${i}" style="${inp}">${siNo(c.instalacion||'no')}</select></div>
         <div style="flex:1"><label style="${lbl}">Bastidor</label><select id="pm-bastidor-${i}" style="${inp}">${siNo(c.bastidor||'no')}</select></div>
         <div style="flex:1"><label style="${lbl}">Color bastidor</label><input id="pm-colorBastidor-${i}" value="${escapeHtml(c.colorBastidor||'')}" placeholder="opcional" style="${inp}"></div>
+      </div>
+      <div style="margin-bottom:6px">
+        <label style="${lbl}">Foto del diseño final * <span style="opacity:.5;text-transform:none;letter-spacing:0">— la que aprobó el cliente · va a las fotos del ticket de producción</span></label>
+        ${pmFotoSlotHtml(c, i)}
       </div>
       <div style="display:flex;gap:6px">
         <div style="flex:1"><label style="${lbl}">Envío</label><input id="pm-envio-${i}" value="${escapeHtml(c.envio||'')}" placeholder="ej. CABA / exterior" style="${inp}"></div>
@@ -6952,7 +6958,7 @@ function bindPedidoModal() {
   bindPmFotoSlots(document.getElementById('pm-backdrop'));
   // Sugerencias de foto: al tener el contacto del cliente (OC del chat ya lo trae; carga manual, al salir del teléfono).
   if (tel) tel.addEventListener('blur', () => { readPedidoModalDOM(); pmCargarSugerencias(); });
-  if (STATE.pedidoModal && !STATE.pedidoModal._fotoSugDe && (STATE.pedidoModal.carteles || []).some(c => !c.es_corporeo)) setTimeout(pmCargarSugerencias, 0);
+  if (STATE.pedidoModal && !STATE.pedidoModal._fotoSugDe) setTimeout(pmCargarSugerencias, 0);
   // Si el usuario edita el campo Ad a mano (ej. corrige el auto-trazado a "Frecuente"/"Directo"),
   // invalidamos el ad_id capturado: sin esto el pedido se guardaría con el texto manual PERO con el
   // source_id del ad viejo pegado, y el funnel prioriza el source_id → contaría mal esa venta.
@@ -6979,9 +6985,12 @@ function pmValidate() {
   for (const { c, i } of named) {
     const nro = i + 1;
     if (c.es_corporeo) {
-      // Corpóreo: solo exigimos cantidad + precio (las medidas/frente pueden faltar, ej. Hannon).
+      // Corpóreo: solo exigimos cantidad + precio (las medidas/frente pueden faltar, ej. Hannon)…
       if (!(Number(c.cantidad) > 0)) invalid.push({ id:`pm-cantidad-${i}`, msg:`Corpóreo ${nro}: falta la cantidad` });
       if (!(Number(c.precio) > 0))   invalid.push({ id:`pm-precio-${i}`, msg:`Corpóreo ${nro}: falta el precio` });
+      // …y la foto del diseño final (va al ticket de producción), salvo "la subo después".
+      if (c.foto_estado === 'subiendo') invalid.push({ sel:`[data-pm-foto-slot="${i}"]`, msg:`Corpóreo ${nro}: esperá que termine de subir la foto del diseño` });
+      else if (!c.foto_key && !c.foto_despues) invalid.push({ sel:`[data-pm-foto-slot="${i}"]`, msg:`Corpóreo ${nro}: falta la foto del diseño final (o marcá "La subo después")` });
       continue;
     }
     if (!String(c.colores||'').trim())   invalid.push({ sel:`[data-pm-color-trigger="${i}"]`, msg:`Cartel ${nro}: elegí al menos un color` });
@@ -7049,7 +7058,8 @@ async function confirmCargarPedido() {
         es_corporeo: c.es_corporeo ? 1 : 0, producto: c.producto, frente: c.frente, laterales: c.laterales, espalda: c.espalda,
         iluminacion: c.iluminacion, bastidor: c.bastidor, color_bastidor: c.colorBastidor, instalacion: c.instalacion,
         // Foto del diseño final (ya subida a R2). Vacía = "la subo después" → la pieza nace "esperando foto".
-        foto_key: c.es_corporeo ? '' : (c.foto_key || '')
+        // Neón → pieza de corte para Emma; corpóreo → queda en el pedido para el ticket de producción.
+        foto_key: c.foto_key || ''
       }))
     };
     const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos', { method:'POST', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
@@ -7975,18 +7985,22 @@ function renderSegPostventa(items) {
 // anteriores a esta función (sin pieza) no muestran nada: se completan subiendo la foto desde el drawer.
 // Pedido que ya salió de producción: la matriz ya no hace falta (no se pide foto ni se espera a Emma).
 function pedidoYaHecho(estado) { return /^(entregado|para enviar)$/i.test(String(estado || '').trim()); }
+function esCorpPedido(p) { return !!(p && p.esCorporeo && Number(p.esCorporeo)); }
 function disenoBadgePedido(p) {
-  if (!p || (p.esCorporeo && Number(p.esCorporeo)) || pedidoYaHecho(p.estadoPedido)) return '';
-  if (p.corteId && !p.disenoKey) return ' <span title="Falta la foto del diseño final: abrí el pedido y subila (Emma la necesita para la matriz)" style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;background:rgba(255,85,102,.15);border:1px solid #FF5566;color:#FF5566;font-size:10px;font-weight:700;letter-spacing:.03em;vertical-align:middle">📷 SIN FOTO</span>';
-  return '';
+  if (!p || pedidoYaHecho(p.estadoPedido) || p.disenoKey) return '';
+  // Neón: tiene pieza en el corte pero sin foto. Corpóreo: se cargó con "la subo después" (va al ticket de producción).
+  const falta = esCorpPedido(p) ? !!p.fotoDisenoPendiente : !!p.corteId;
+  if (!falta) return '';
+  const para = esCorpPedido(p) ? 'va a las fotos del ticket de producción' : 'Emma la necesita para la matriz';
+  return ` <span title="Falta la foto del diseño final: abrí el pedido y subila (${para})" style="display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;background:rgba(255,85,102,.15);border:1px solid #FF5566;color:#FF5566;font-size:10px;font-weight:700;letter-spacing:.03em;vertical-align:middle">📷 SIN FOTO</span>`;
 }
 const CORTE_ESTADO_TXT = { pedido: 'Emma: matriz por diseñar', matriz_lista: 'Matriz lista · falta cortar', cortado: 'Cortado · falta separar', embalado: 'Separado para el productor' };
 function disenoDrawerSection(p) {
-  if (p.esCorporeo && Number(p.esCorporeo)) return '';
-  // Pedido viejo (sin pieza de corte) ya hecho o entregado: no se ofrece mandarlo a Emma (un clic de
-  // curiosidad generaría una matriz para un cartel que ya existe).
+  const corp = esCorpPedido(p);
+  // Pedido ya hecho o entregado sin foto: no se ofrece cargarla (en neón, un clic de curiosidad generaría
+  // una matriz para un cartel que ya existe).
   if (!p.disenoKey && pedidoYaHecho(p.estadoPedido)) return '';
-  const est = p.corteEstado ? (CORTE_ESTADO_TXT[p.corteEstado] || p.corteEstado) : '';
+  const est = (!corp && p.corteEstado) ? (CORTE_ESTADO_TXT[p.corteEstado] || p.corteEstado) : '';
   const fileBtn = (txt) => `<label class="btn btn-ghost" style="font-size:12px;padding:5px 10px;cursor:pointer;display:inline-block">${txt}<input type="file" accept="image/*" style="display:none" onchange="pedDisenoSubirInput(${p.idx}, this)"></label>`;
   let body;
   if (p.disenoKey) {
@@ -8000,11 +8014,11 @@ function disenoDrawerSection(p) {
       </div>`;
   } else {
     body = `<div style="font-size:12px;color:#FFB020;font-weight:700;margin-bottom:4px">📷 Falta la foto del diseño final</div>
-      <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:8px">${p.corteId ? 'Emma tiene este cartel en espera hasta que subas la foto.' : 'Al subirla, el cartel entra a la cola de Emma para hacer la matriz.'}</div>
+      <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:8px">${corp ? 'Al subirla, se suma sola a las fotos del ticket de producción cuando lo armes.' : (p.corteId ? 'Emma tiene este cartel en espera hasta que subas la foto.' : 'Al subirla, el cartel entra a la cola de Emma para hacer la matriz.')}</div>
       <div id="ped-diseno-sug" style="margin-bottom:8px"></div>
       ${fileBtn('📷 Subir foto')}`;
   }
-  return `<div class="drawer-section" data-ped-diseno-idx="${p.idx}"><h4>Diseño final <span style="font-size:11px;color:var(--fg-subtle);font-weight:400">· para la matriz de Emma</span></h4>${body}<div id="ped-diseno-status" style="font-size:12px;color:var(--fg-subtle);margin-top:6px"></div></div>`;
+  return `<div class="drawer-section" data-ped-diseno-idx="${p.idx}"><h4>Diseño final <span style="font-size:11px;color:var(--fg-subtle);font-weight:400">· ${corp ? 'para el ticket de producción' : 'para la matriz de Emma'}</span></h4>${body}<div id="ped-diseno-status" style="font-size:12px;color:var(--fg-subtle);margin-top:6px"></div></div>`;
 }
 // La sección "Diseño final" del drawer que está abierto AHORA, si es la de ese pedido (el drawer se pudo
 // cerrar o cambiar a otro pedido mientras subía la foto).
@@ -8027,7 +8041,7 @@ async function pedDisenoAsignar(idx, key) {
   if (STATE.view === 'pedidos') renderTablePedidos();
   const sec = pedDisenoSeccion(idx), np = updated.find(x => x.idx === idx);
   if (sec && np) { const tmp = document.createElement('div'); tmp.innerHTML = disenoDrawerSection(np); if (tmp.firstElementChild) sec.replaceWith(tmp.firstElementChild); }
-  toast(j.aviso || 'Foto del diseño cargada ✓ — ya le aparece a Emma');
+  toast(j.aviso || (esCorpPedido(np) ? 'Foto del diseño cargada ✓ — va al ticket de producción' : 'Foto del diseño cargada ✓ — ya le aparece a Emma'));
 }
 async function pedDisenoCorrer(idx, txt, obtenerKey, errTxt) {
   if (_pedDisenoEnVuelo[idx]) return; // un pedido a la vez: dos clics rápidos no compiten
@@ -8048,7 +8062,7 @@ function pedDisenoUsarSugerida(idx, fromKey) {
 }
 // Drawer de un cartel SIN foto: sugiere lo último que se le mandó al cliente (un clic = "este es el aprobado").
 async function pedDisenoCargarSugerencias(p) {
-  if (!p || p.disenoKey || (p.esCorporeo && Number(p.esCorporeo))) return;
+  if (!p || p.disenoKey) return;
   // WPP: teléfono (dígitos). IG: puede estar guardado como @usuario → va tal cual y el server lo resuelve al IGSID.
   const crudo = String(p.telefono || '').trim();
   const esUsuarioIg = p.plataforma === 'IG' && /^@|[a-z_.]/i.test(crudo);
@@ -8062,9 +8076,9 @@ async function pedDisenoCargarSugerencias(p) {
     if (!((j && j.fotos) || []).length) return;
     // Mismo criterio que el modal: con varios carteles de neón en el pedido, cada uno sugiere el render de
     // SU brief (si no, todos marcaban como SUGERIDA lo último que se le mandó, que puede ser del otro cartel).
-    const herm = pedidoHermanos(p).filter(x => !Number(x.esCorporeo));
-    const cs = herm.map(x => ({ cartel: x.cartel, es_corporeo: 0, foto_key: '', _fotoFrom: '' }));
-    const yo = cs[herm.findIndex(x => x.idx === p.idx)] || { cartel: p.cartel, es_corporeo: 0 };
+    const herm = pedidoHermanos(p); // neón y corpóreo del mismo pedido: cada uno sugiere el render de su brief
+    const cs = herm.map(x => ({ cartel: x.cartel, es_corporeo: esCorpPedido(x) ? 1 : 0, foto_key: '', _fotoFrom: '' }));
+    const yo = cs[herm.findIndex(x => x.idx === p.idx)] || { cartel: p.cartel, es_corporeo: esCorpPedido(p) ? 1 : 0 };
     const { lista: fotos, sugIdx } = pmSugerenciasParaCartel({ _fotoSug: j.fotos, carteles: cs.length ? cs : [yo] }, yo);
     if (!fotos.length) return;
     box.innerHTML = `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(lo último que se le mandó al cliente — tocá la que aprobó)</span></div>
@@ -9237,8 +9251,6 @@ function bindCommon() {
     document.addEventListener('paste', (ev) => {
       // Solo con el modal VISIBLE (pedidoModalOpen puede quedar en true si se navegó con "atrás").
       if (!STATE.pedidoModalOpen || !document.getElementById('pm-backdrop') || (STATE.ticketCorpModalOpen && STATE.ticketCorpMode === 'form')) return;
-      // Pedido 100% corpóreo: no hay foto de diseño que cargar → el pegado sigue su camino normal.
-      if (!((STATE.pedidoModal && STATE.pedidoModal.carteles) || []).some(c => !c.es_corporeo)) return;
       const items = ev.clipboardData?.items || [];
       // Pegar TEXTO en un campo (teléfono/precio copiado de Excel trae también una imagen de la celda): es texto.
       const tgt = ev.target;
@@ -18647,6 +18659,24 @@ async function openTicketFromPedido(pedidoId){
   STATE.ticketCorpMode = 'form';
   STATE.ticketCorpModalOpen = true; STATE.ticketCorpSaving = false;
   render();
+  // La foto del DISEÑO FINAL que se cargó con el pedido entra sola como primera foto del ticket.
+  if (p.disenoKey) tcAgregarFotoDiseno(p.disenoKey, pedidoId);
+}
+async function tcAgregarFotoDiseno(key, pedidoId) {
+  try {
+    const r = await fetch(mediaUrl(key));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    tcDownscale(blob, (ph) => {
+      // Solo si sigue abierto el form del ticket de ESE pedido (pudo cerrarse o cambiar mientras bajaba).
+      if (!ph || !ph.data || !STATE.ticketCorpModalOpen || STATE.ticketCorpMode !== 'form' || STATE.ticketCorpPedidoId !== pedidoId) return;
+      tcReadDOM();
+      STATE.ticketCorpPhotos = STATE.ticketCorpPhotos || [];
+      STATE.ticketCorpPhotos.unshift(ph);
+      render();
+      toast('Foto del diseño final agregada al ticket ✓');
+    });
+  } catch (e) { toast('No pude traer la foto del diseño para el ticket: ' + (e.message || e)); }
 }
 // Trae del backend qué pedidos ya tienen ticket (para pintar "Ver ticket #N" vs "Armar ticket"
 // en la tabla). Se pide una vez por entrada a la vista; al terminar repinta la tabla.

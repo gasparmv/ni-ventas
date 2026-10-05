@@ -667,7 +667,10 @@ async function ensurePedidosSchema(env) {
   for (const col of ['mirror_attempts INTEGER NOT NULL DEFAULT 0', 'mirror_error TEXT', "comercial_id TEXT NOT NULL DEFAULT 'joaco'", 'cargado_por TEXT', 'source_id TEXT', 'source_campaign TEXT',
     // Corpóreos (letras 3D): specs de producción propios + flag. Van a la hoja contable
     // 2026v2 (Pedidos_Corporeo), NO al espejo del Excel de Ventas. Ver [[project-pedidos-corporeo-hoja]].
-    'es_corporeo INTEGER NOT NULL DEFAULT 0', 'producto TEXT', 'frente TEXT', 'laterales TEXT', 'espalda TEXT', 'iluminacion TEXT', 'bastidor TEXT', 'color_bastidor TEXT', 'instalacion TEXT']) {
+    'es_corporeo INTEGER NOT NULL DEFAULT 0', 'producto TEXT', 'frente TEXT', 'laterales TEXT', 'espalda TEXT', 'iluminacion TEXT', 'bastidor TEXT', 'color_bastidor TEXT', 'instalacion TEXT',
+    // Foto del DISEÑO FINAL de un CORPÓREO (el neón la guarda en su pieza de corte_pedidos). Va a las fotos
+    // del ticket de producción. NULL = pedido anterior a esto; '' = "la subo después" (pendiente).
+    'foto_diseno_key TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
   }
   // source_id = ad_id EXACTO de Meta que trajo la venta (auditable, no un título adivinado).
@@ -4243,7 +4246,8 @@ async function pedidosConDiseno(env, whereSql, args) {
   try { await ensureCorteNeonSchema(env); } catch (_) {}
   try {
     return (await env.DB.prepare(
-      `SELECT pedidos.*, cp.foto_key AS diseno_key, cp.estado AS corte_estado, cp.id AS corte_id
+      // diseno_key: neón → la foto de su pieza de corte; corpóreo → pedidos.foto_diseno_key (no tiene pieza).
+      `SELECT pedidos.*, COALESCE(NULLIF(cp.foto_key, ''), NULLIF(pedidos.foto_diseno_key, '')) AS diseno_key, cp.estado AS corte_estado, cp.id AS corte_id
          FROM pedidos
          LEFT JOIN (SELECT pedido_id, MAX(id) AS cid FROM corte_pedidos WHERE pedido_id IS NOT NULL GROUP BY pedido_id) cx ON cx.pedido_id = pedidos.id
          LEFT JOIN corte_pedidos cp ON cp.id = cx.cid
@@ -16595,12 +16599,19 @@ const handler = {
         if (!esKeyDisenoPedido(key)) return json({ error: 'foto inválida' }, 400);
         const p = await env.DB.prepare('SELECT * FROM pedidos WHERE id = ?').bind(pid).first();
         if (!p) return json({ error: 'pedido no encontrado' }, 404);
-        if (Number(p.es_corporeo) === 1) return json({ error: 'los corpóreos no van a la matriz de Emma' }, 400);
         if (_r === 'comercial') {
           const mio = await resolveComercial(env, { sessionUser: session.user });
           if (String(p.comercial_id || 'joaco') !== mio) return json({ error: 'ese pedido es de otro vendedor' }, 403);
         }
         const nowIso = new Date().toISOString();
+        // CORPÓREO: no va al corte (Emma no tiene nada que ver): la foto queda en el pedido y se suma sola a las
+        // fotos del ticket de producción cuando se arma. Si el ticket YA estaba armado, se avisa (no se reenvía).
+        if (Number(p.es_corporeo) === 1) {
+          await env.DB.prepare('UPDATE pedidos SET foto_diseno_key = ?, updated_at = ? WHERE id = ?').bind(key, nowIso, pid).run();
+          let avisoC = '';
+          try { const t = await env.DB.prepare('SELECT numero FROM corporeo_tickets WHERE pedido_id = ? ORDER BY id DESC LIMIT 1').bind(pid).first(); if (t && t.numero) avisoC = `Este corpóreo ya tiene el ticket #${t.numero} armado: la foto quedó en el pedido pero no se agregó a ese ticket.`; } catch (_) {}
+          return json({ ok: true, aviso: avisoC, pedidos: await pedidosConDiseno(env, 'WHERE pedidos.id = ?', [pid]) });
+        }
         const pieza = await env.DB.prepare('SELECT id, estado FROM corte_pedidos WHERE pedido_id = ? ORDER BY id DESC LIMIT 1').bind(pid).first();
         let aviso = '';
         if (!pieza) {
@@ -16692,8 +16703,8 @@ const handler = {
           const esCorp = _esCorpC(c);
           const mirrorDirty = 1;
           return env.DB.prepare(
-          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, producto, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at, source_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, producto, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at, source_id, foto_diseno_key)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
           num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
@@ -16703,7 +16714,9 @@ const handler = {
           mirrorDirty, esCorp, String(c.producto || '').trim(),
           String(c.frente || '').trim(), String(c.laterales || '').trim(), String(c.espalda || '').trim(),
           String(c.iluminacion || '').trim(), String(c.bastidor || '').trim(), String(c.color_bastidor || '').trim(), String(c.instalacion || '').trim(),
-          now, now, (sourceId || null)
+          now, now, (sourceId || null),
+          // Corpóreo: su foto del diseño queda en el pedido (key, o '' = "la subo después"). Neón: NULL (va a su pieza de corte).
+          esCorp ? (esKeyDisenoPedido(c.foto_key) ? String(c.foto_key) : '') : null
         );
         });
         // Batch: cada INSERT de cartel de neón va seguido del INSERT de su pieza de corte, vinculada por
