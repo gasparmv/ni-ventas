@@ -16607,7 +16607,9 @@ const handler = {
         // CORPÓREO: no va al corte (Emma no tiene nada que ver): la foto queda en el pedido y se suma sola a las
         // fotos del ticket de producción cuando se arma. Si el ticket YA estaba armado, se avisa (no se reenvía).
         if (Number(p.es_corporeo) === 1) {
-          await env.DB.prepare('UPDATE pedidos SET foto_diseno_key = ?, updated_at = ? WHERE id = ?').bind(key, nowIso, pid).run();
+          // Sin tocar updated_at: el espejo al Excel reclama/guarda cada fila con "WHERE updated_at = <el que leyó>";
+          // cambiarlo a mitad de un push perdía el sheet_row y duplicaba la fila en Pedidos_Corporeo. La foto no se espeja.
+          await env.DB.prepare('UPDATE pedidos SET foto_diseno_key = ? WHERE id = ?').bind(key, pid).run();
           let avisoC = '';
           try { const t = await env.DB.prepare('SELECT numero FROM corporeo_tickets WHERE pedido_id = ? ORDER BY id DESC LIMIT 1').bind(pid).first(); if (t && t.numero) avisoC = `Este corpóreo ya tiene el ticket #${t.numero} armado: la foto quedó en el pedido pero no se agregó a ese ticket.`; } catch (_) {}
           return json({ ok: true, aviso: avisoC, pedidos: await pedidosConDiseno(env, 'WHERE pedidos.id = ?', [pid]) });

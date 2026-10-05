@@ -8014,7 +8014,9 @@ function disenoDrawerSection(p) {
       </div>`;
   } else {
     body = `<div style="font-size:12px;color:#FFB020;font-weight:700;margin-bottom:4px">📷 Falta la foto del diseño final</div>
-      <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:8px">${corp ? 'Al subirla, se suma sola a las fotos del ticket de producción cuando lo armes.' : (p.corteId ? 'Emma tiene este cartel en espera hasta que subas la foto.' : 'Al subirla, el cartel entra a la cola de Emma para hacer la matriz.')}</div>
+      <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:8px">${corp
+        ? ((STATE.corpTickets && STATE.corpTickets[p.idx]) ? `Ya tiene el ticket #${STATE.corpTickets[p.idx]} armado: subila y usá "Editar / regenerar" para sumarla.` : 'Al subirla, se suma sola a las fotos del ticket de producción cuando lo armes.')
+        : (p.corteId ? 'Emma tiene este cartel en espera hasta que subas la foto.' : 'Al subirla, el cartel entra a la cola de Emma para hacer la matriz.')}</div>
       <div id="ped-diseno-sug" style="margin-bottom:8px"></div>
       ${fileBtn('📷 Subir foto')}`;
   }
@@ -8042,6 +8044,8 @@ async function pedDisenoAsignar(idx, key) {
   const sec = pedDisenoSeccion(idx), np = updated.find(x => x.idx === idx);
   if (sec && np) { const tmp = document.createElement('div'); tmp.innerHTML = disenoDrawerSection(np); if (tmp.firstElementChild) sec.replaceWith(tmp.firstElementChild); }
   toast(j.aviso || (esCorpPedido(np) ? 'Foto del diseño cargada ✓ — va al ticket de producción' : 'Foto del diseño cargada ✓ — ya le aparece a Emma'));
+  // Si el form del ticket de ESE corpóreo quedó abierto mientras subía, la foto entra ahí también.
+  if (np && esCorpPedido(np) && np.disenoKey && STATE.ticketCorpModalOpen && STATE.ticketCorpMode === 'form' && STATE.ticketCorpPedidoId === idx) tcAgregarFotoDiseno(np.disenoKey, idx);
 }
 async function pedDisenoCorrer(idx, txt, obtenerKey, errTxt) {
   if (_pedDisenoEnVuelo[idx]) return; // un pedido a la vez: dos clics rápidos no compiten
@@ -9261,7 +9265,7 @@ function bindCommon() {
       ev.preventDefault();
       ev.stopImmediatePropagation();
       const i = pmCartelSinFoto();
-      if (i < 0) { toast('Todos los carteles de neón ya tienen foto (usá "Cambiar")'); return; }
+      if (i < 0) { toast('Todos los carteles ya tienen foto (usá "Cambiar")'); return; }
       pmFotoSetArchivo(i, file);
     });
     document._pedidoFotoPasteBound = true;
@@ -18598,6 +18602,7 @@ function tcVal(k){ return (STATE.ticketCorp && STATE.ticketCorp[k] != null) ? ST
 function openTicketCorporeoModal(){
   if (!canCotizar()) return;
   // Defaults de los Sí/No en "No" (como el sistema de Sin Frontera).
+  tcNuevaApertura();
   STATE.ticketCorp = { precisa_instalacion:'No', requiere_estructura:'No' };
   STATE.ticketCorpPhotos = [];
   STATE.ticketCorpPedidoId = null;
@@ -18638,14 +18643,17 @@ function tcMapFromPedido(p){
 // si no, abre el form YA pre-cargado con los datos del pedido ("todo desde el pedido").
 async function openTicketFromPedido(pedidoId){
   if (!canCotizar()) return;
+  if (STATE._ticketAbriendo) return; // doble clic en "Armar ticket": una sola apertura
   const p = (STATE.pedidos || []).find(x => x.idx === pedidoId);
   if (!p) { toast('No encuentro el pedido'); return; }
+  STATE._ticketAbriendo = true;
   let existing = null;
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/ticket?pedido_id=' + pedidoId, { headers: authHeaders() });
     const j = await r.json().catch(() => ({}));
     if (j && j.ticket) existing = j.ticket;
-  } catch (_) {}
+  } catch (_) {} finally { STATE._ticketAbriendo = false; }
+  tcNuevaApertura();
   STATE.ticketCorpPedidoId = pedidoId;
   if (existing) {
     STATE.ticketCorpView = existing;
@@ -18662,21 +18670,34 @@ async function openTicketFromPedido(pedidoId){
   // La foto del DISEÑO FINAL que se cargó con el pedido entra sola como primera foto del ticket.
   if (p.disenoKey) tcAgregarFotoDiseno(p.disenoKey, pedidoId);
 }
+// Cada apertura/cierre del modal del ticket invalida descargas de la foto del diseño todavía en vuelo
+// (si no, cerrar y reabrir mientras bajaba la metía dos veces).
+function tcNuevaApertura() { STATE.ticketCorpGen = (STATE.ticketCorpGen || 0) + 1; STATE.ticketCorpDisenoPend = ''; return STATE.ticketCorpGen; }
 async function tcAgregarFotoDiseno(key, pedidoId) {
+  const gen = STATE.ticketCorpGen || 0;
+  if ((STATE.ticketCorpPhotos || []).some(ph => ph._disenoKey === key)) return; // ya está en el ticket
+  const vigente = () => gen === (STATE.ticketCorpGen || 0) && STATE.ticketCorpModalOpen && STATE.ticketCorpMode === 'form' && STATE.ticketCorpPedidoId === pedidoId;
+  STATE.ticketCorpDisenoPend = key; render(); // "Cargando la foto del diseño…" y no deja generar hasta que esté
+  const fin = (ph, err) => {
+    if (!vigente()) return;
+    STATE.ticketCorpDisenoPend = '';
+    if (ph && ph.data) {
+      tcReadDOM();
+      STATE.ticketCorpPhotos = STATE.ticketCorpPhotos || [];
+      if (!STATE.ticketCorpPhotos.some(x => x._disenoKey === key)) STATE.ticketCorpPhotos.unshift({ ...ph, _disenoKey: key });
+      render();
+      toast('Foto del diseño final agregada al ticket ✓');
+    } else {
+      render();
+      toast('No pude agregar la foto del diseño al ticket' + (err ? ': ' + err : '') + ' — subila a mano');
+    }
+  };
   try {
     const r = await fetch(mediaUrl(key));
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const blob = await r.blob();
-    tcDownscale(blob, (ph) => {
-      // Solo si sigue abierto el form del ticket de ESE pedido (pudo cerrarse o cambiar mientras bajaba).
-      if (!ph || !ph.data || !STATE.ticketCorpModalOpen || STATE.ticketCorpMode !== 'form' || STATE.ticketCorpPedidoId !== pedidoId) return;
-      tcReadDOM();
-      STATE.ticketCorpPhotos = STATE.ticketCorpPhotos || [];
-      STATE.ticketCorpPhotos.unshift(ph);
-      render();
-      toast('Foto del diseño final agregada al ticket ✓');
-    });
-  } catch (e) { toast('No pude traer la foto del diseño para el ticket: ' + (e.message || e)); }
+    tcDownscale(blob, (ph) => fin(ph, ph ? '' : 'no se pudo leer la imagen'));
+  } catch (e) { fin(null, e.message || String(e)); }
 }
 // Trae del backend qué pedidos ya tienen ticket (para pintar "Ver ticket #N" vs "Armar ticket"
 // en la tabla). Se pide una vez por entrada a la vista; al terminar repinta la tabla.
@@ -18705,7 +18726,8 @@ function tcDownscale(file, cb){
     const scale = Math.min(1, 1920 / Math.max(w, h || 1));
     w = Math.max(1, Math.round(w * scale)); h = Math.max(1, Math.round(h * scale));
     const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-    cv.getContext('2d').drawImage(img, 0, 0, w, h);
+    // Fondo blanco: un PNG transparente (logo) pasado a JPEG quedaba como un cuadrado negro.
+    const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
     try { cb({ mime:'image/jpeg', data: cv.toDataURL('image/jpeg', 0.82).split(',')[1] }); }
     catch(_){ cb(null); }
   };
@@ -18801,7 +18823,7 @@ function renderTicketCorporeoModal(){
         <div style="margin-top:var(--s-3)">
           <div style="font-size:12px;font-weight:700;color:var(--accent-cyan,#8FD4DE);margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:4px">📷 Fotos <span style="color:#FF5566;font-weight:400">· obligatorio (1 o más)</span> <span class="muted" style="font-weight:400">· elegí archivos o pegá con Ctrl+V</span></div>
           <input type="file" id="tc-fotos" accept="image/*" multiple style="font-size:12px;color:var(--fg)">
-          <div id="tc-fotos-preview" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">${(STATE.ticketCorpPhotos||[]).map((p,i)=>`<div style="position:relative"><img src="data:${p.mime};base64,${p.data}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--border)"><button type="button" data-tc-rmfoto="${i}" title="Quitar" style="position:absolute;top:-7px;right:-7px;background:#FF1830;color:#fff;border:none;border-radius:50%;width:19px;height:19px;font-size:11px;cursor:pointer;line-height:1;padding:0">✕</button></div>`).join('') || '<span class="muted" style="font-size:11px">Ninguna foto todavía</span>'}</div>
+          <div id="tc-fotos-preview" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">${(STATE.ticketCorpPhotos||[]).map((p,i)=>`<div style="position:relative"><img src="data:${p.mime};base64,${p.data}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid var(--border)">${p._disenoKey ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:8px;font-weight:700;text-align:center;border-radius:0 0 6px 6px">DISEÑO</span>' : ''}<button type="button" data-tc-rmfoto="${i}" title="Quitar" style="position:absolute;top:-7px;right:-7px;background:#FF1830;color:#fff;border:none;border-radius:50%;width:19px;height:19px;font-size:11px;cursor:pointer;line-height:1;padding:0">✕</button></div>`).join('') || (STATE.ticketCorpDisenoPend ? '' : '<span class="muted" style="font-size:11px">Ninguna foto todavía</span>')}${STATE.ticketCorpDisenoPend ? '<span class="muted" style="font-size:11px;align-self:center">Cargando la foto del diseño final…</span>' : ''}</div>
         </div>
         ${secs}
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:var(--s-4);padding-top:var(--s-2);border-top:1px solid var(--border)">
@@ -18814,7 +18836,7 @@ function renderTicketCorporeoModal(){
 function bindTicketCorporeoModal(){
   const btn = document.getElementById('btn-ticket-corporeo'); if (btn) btn.onclick = openTicketCorporeoModal;
   if (!STATE.ticketCorpModalOpen) return;
-  const close = () => { STATE.ticketCorpModalOpen = false; render(); };
+  const close = () => { tcNuevaApertura(); STATE.ticketCorpModalOpen = false; render(); };
   const bk = document.getElementById('tc-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'tc-backdrop') close(); };
   const c1 = document.getElementById('tc-close'); if (c1) c1.onclick = close;
   // Modo VISTA: cerrar + editar/regenerar (pre-carga desde los campos guardados, o del pedido).
@@ -18825,9 +18847,12 @@ function bindTicketCorporeoModal(){
       const tk = STATE.ticketCorpView || {};
       const p = (STATE.pedidos || []).find(x => x.idx === STATE.ticketCorpPedidoId);
       STATE.ticketCorp = (tk.fields && typeof tk.fields === 'object') ? Object.assign({ precisa_instalacion:'No', requiere_estructura:'No' }, tk.fields) : tcMapFromPedido(p);
+      tcNuevaApertura();
       STATE.ticketCorpPhotos = [];
       STATE.ticketCorpMode = 'form';
       render();
+      // Regenerar es la vía para sumar la foto del diseño a un ticket que ya existía: entra sola.
+      if (p && p.disenoKey) tcAgregarFotoDiseno(p.disenoKey, STATE.ticketCorpPedidoId);
     };
     return;
   }
@@ -18841,7 +18866,8 @@ async function confirmTicketCorporeo(){
   tcReadDOM();
   const t = STATE.ticketCorp || {};
   if (!String(t.empresa||'').trim() && !String(t.nombre||'').trim()) { toast('Poné al menos la empresa o el nombre del cliente'); return; }
-  const photos = STATE.ticketCorpPhotos || [];
+  if (STATE.ticketCorpDisenoPend) { toast('Esperá que termine de cargar la foto del diseño final'); return; }
+  const photos = (STATE.ticketCorpPhotos || []).map(ph => ({ mime: ph.mime, data: ph.data }));
   if (!photos.length) { toast('Subí al menos una foto'); return; }
   const body = tcCompose();
   if (!body) { toast('Cargá algún dato del ticket'); return; }
