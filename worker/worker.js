@@ -9045,7 +9045,7 @@ async function analyticsPrecotizFunnel(env, url) {
         MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND ${_SC_QUOTE_SQL} THEN 1 ELSE 0 END) AS has_quote
       FROM wa_messages
       WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
-        AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573','5491133708544')
+        AND phone NOT IN ('5491144366573','5491133708544') AND phone NOT IN (SELECT phone FROM wa_internal_phones)
       GROUP BY phone
     ),
     leads AS (
@@ -9168,7 +9168,7 @@ async function syncSinCotizar(env, opts = {}) {
           MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND ${_SC_QUOTE_SQL} THEN 1 ELSE 0 END) AS has_quote
         FROM wa_messages
         WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
-          AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573','5491133708544')
+          AND phone NOT IN ('5491144366573','5491133708544') AND phone NOT IN (SELECT phone FROM wa_internal_phones)
         GROUP BY phone
       )
       SELECT p.phone, p.canal, p.last_in_ts, max(p.first_img_ts, p.first_med_ts) AS quotable_since, s.contact_name
@@ -9278,7 +9278,7 @@ async function computeRefloteSegment(env) {
         MAX(CASE WHEN direction='outbound' AND IFNULL(status,'')!='failed' AND ${_SC_QUOTE_SQL} THEN 1 ELSE 0 END) AS has_quote
       FROM wa_messages
       WHERE ts >= ?1 AND phone IS NOT NULL AND phone != ''
-        AND phone NOT IN ('5491137593269','5491155604999','5491155604996','5491144366573','5491133708544')
+        AND phone NOT IN ('5491144366573','5491133708544') AND phone NOT IN (SELECT phone FROM wa_internal_phones)
       GROUP BY phone
     )
     SELECT p.phone, p.canal, p.first_in_ts, p.last_in_ts, s.contact_name
@@ -19066,9 +19066,12 @@ async function processColgados(env) {
   }
 
   // 2) Determinar quiénes están colgados (respondieron + última palabra de ellos + ≥90 min).
+  //    Nunca el equipo: los fijos + todo wa_internal_phones (Agus/Facu/Abril/Emma/Bruno…).
+  const internos = new Set(COLGADO_INTERNAL_PHONES);
+  try { for (const r of ((await env.DB.prepare('SELECT phone FROM wa_internal_phones').all()).results || [])) internos.add(String(r.phone)); } catch (_) {}
   const colgados = [];
   for (const p of presRows) {
-    if (COLGADO_INTERNAL_PHONES.includes(p.phone)) continue;
+    if (internos.has(p.phone)) continue;
     let conv;
     try {
       const rs = await env.DB.prepare(
