@@ -141,6 +141,7 @@ const STATE = {
   view: 'dashboard',
   selected: null,
   dashMonths: null,   // null = mes actual; Set('YYYY-MM') = filtro activo; 'all' = todos
+  sueldoDetalleOpen: false,   // panel "Tu sueldo": desglose de comisión por pedido abierto/cerrado
   dashChartIdx: 0,    // 0 = ventas acumuladas, 1 = semanal stacked por canal
   done: new Map(),    // id -> ISO timestamp en que se marcó (persistido en localStorage)
   segPvFilter: 'all', // all | D30 | D60 | D90
@@ -233,16 +234,19 @@ function panelSueldoHtml(vendedor) {
       const fk = `${p.fecha.getFullYear()}-${String(p.fecha.getMonth() + 1).padStart(2, '0')}-${String(p.fecha.getDate()).padStart(2, '0')}`;
       return (fk <= sec.mediaComisionHasta) ? 0.5 : 1;
     };
-    let ventasNeon = 0, ventasCorp = 0, comisionNeon = 0, comisionCorp = 0, huboMedia = false;
-    misPedidos.forEach(p => {
+    // Una fila por pedido con SU comisión (redondeada) → el desglose suma EXACTO al total del KPI.
+    const filas = misPedidos.map(p => {
       const v = (p.precio || 0) + (p.precioDimmer || 0);
+      const tasa = p.esCorporeo ? rateCorp : rate;
       const mult = comMult(p);
-      if (mult < 1) huboMedia = true;
-      if (p.esCorporeo) { ventasCorp += v; comisionCorp += v * rateCorp * mult; }
-      else { ventasNeon += v; comisionNeon += v * rate * mult; }
+      return { p, v, tasa, mult, com: Math.round(v * tasa * mult) };
+    }).sort((a, b) => (+a.p.fecha || 0) - (+b.p.fecha || 0));
+    let ventasNeon = 0, ventasCorp = 0, comisionNeon = 0, comisionCorp = 0, huboMedia = false;
+    filas.forEach(f => {
+      if (f.mult < 1) huboMedia = true;
+      if (f.p.esCorporeo) { ventasCorp += f.v; comisionCorp += f.com; }
+      else { ventasNeon += f.v; comisionNeon += f.com; }
     });
-    comisionNeon = Math.round(comisionNeon);
-    comisionCorp = Math.round(comisionCorp);
     const ventas = ventasNeon + ventasCorp;
     const comision = comisionNeon + comisionCorp;
     const sueldo = fijo + comision;
@@ -253,9 +257,41 @@ function panelSueldoHtml(vendedor) {
     const fijoNota = (esNadia && fijo === 0) ? 'fijo a definir' : (nMonths === 1 ? 'fijo del mes' : 'suma real · ' + nMonths + ' meses');
     // KPI de comisión: con tasa de corpóreo propia (Facu) muestra el total + "10% neón + 7% corpóreo"
     // y un desglose abajo; sin ella queda igual que siempre ("Comisión 10% sobre $X en carteles directo").
+    // La tarjeta de Comisión es clickeable: despliega/oculta el desglose pedido por pedido
+    // (handler data-sueldo-toggle en el bind global; el estado abierto sobrevive re-renders).
+    const detOpen = !!STATE.sueldoDetalleOpen;
+    const kpiClick = `data-sueldo-toggle role="button" tabindex="0" title="Ver de qué pedido sale cada comisión" style="cursor:pointer"`;
+    const hint = `<div class="sueldo-hint" style="font-size:11px;color:var(--accent-cyan,#8FD4DE);margin-top:4px">${detOpen ? 'ocultar desglose ▴' : 'ver desglose ▾'}</div>`;
     const comKpi = splitCorp
-      ? `<div class="kpi cyan"><div class="kpi-label">Comisión</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">${ratePct}% neón + ${rateCorpPct}% corpóreo${huboMedia ? ' · 1er mes ½' : ''}</div></div>`
-      : `<div class="kpi cyan"><div class="kpi-label">Comisión ${ratePct}%</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">sobre ${fmtMoney(ventas)} en carteles directo</div></div>`;
+      ? `<div class="kpi cyan" ${kpiClick}><div class="kpi-label">Comisión</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">${ratePct}% neón + ${rateCorpPct}% corpóreo${huboMedia ? ' · 1er mes ½' : ''}</div>${hint}</div>`
+      : `<div class="kpi cyan" ${kpiClick}><div class="kpi-label">Comisión ${ratePct}%</div><div class="kpi-value">${fmtMoney(comision)}</div><div class="kpi-delta">sobre ${fmtMoney(ventas)} en carteles directo</div>${hint}</div>`;
+    // Desglose: LISTA (no tabla) para que entre en el celular: a la izquierda el cartel y abajo
+    // fecha · venta × tasa · ajuste (envuelve si no entra); a la derecha, SIEMPRE visible, la
+    // comisión de ese pedido. Abajo el total (= suma exacta de las filas = KPI).
+    const completas = (sec && sec.comisionCompletaCarteles) || [];
+    const fmtF = d => (d instanceof Date && !isNaN(d.getTime())) ? d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }) : '—';
+    const filaSt = 'display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)';
+    const filasHtml = filas.map(f => {
+      const ajuste = f.mult < 1
+        ? ' · <span style="color:#f5b14c">½ 1er mes</span>'
+        : (completas.indexOf(f.p.cartel) !== -1 ? ' · <span style="color:#25d366">completa ✓</span>' : '');
+      return `<div data-com-fila style="${filaSt}">
+          <div style="min-width:0">
+            <div style="color:var(--fg);font-size:13px;overflow-wrap:anywhere">${f.p.esCorporeo ? '🧊 ' : '🔷 '}${escapeHtml(f.p.cartel || '—')}</div>
+            <div style="font-size:11px;color:var(--fg-subtle);margin-top:2px">${fmtF(f.p.fecha)} · ${fmtMoney(f.v)} × ${+(f.tasa * 100).toFixed(1)}%${ajuste}</div>
+          </div>
+          <div class="com-fila-monto" style="white-space:nowrap;font-weight:600;color:var(--fg);font-size:13px">${fmtMoney(f.com)}</div>
+        </div>`;
+    }).join('');
+    const detalle = `
+        <div id="sueldo-detalle" style="display:${detOpen ? 'block' : 'none'};margin-top:var(--s-3);padding-top:var(--s-3);border-top:1px solid var(--border)">
+          <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:2px">De dónde sale tu comisión · ${filas.length} pedido${filas.length === 1 ? '' : 's'}</div>
+          ${filas.length ? `${filasHtml}
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0 0">
+            <div style="font-size:13px;font-weight:600;color:var(--fg-subtle)">Total comisión</div>
+            <div class="com-total" style="white-space:nowrap;font-weight:700;color:var(--fg);font-size:14px">${fmtMoney(comision)}</div>
+          </div>` : `<div style="font-size:12px;color:var(--fg-subtle);padding:6px 0">Sin ventas en este período.</div>`}
+        </div>`;
     const footer = splitCorp
       ? `<div style="margin-top:var(--s-3);display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--fg-subtle)">
            <span>🔷 Neón: <b>${fmtMoney(ventasNeon)}</b>${huboMedia ? ' → ' : ' × ' + ratePct + '% = '}<b style="color:var(--fg)">${fmtMoney(comisionNeon)}</b></span>
@@ -269,7 +305,8 @@ function panelSueldoHtml(vendedor) {
           ${comKpi}
           <div class="kpi"><div class="kpi-label">Te estás llevando</div><div class="kpi-value">${fmtMoney(sueldo)}</div><div class="kpi-delta">fijo + comisión</div></div>
         </div>
-        ${footer}`;
+        ${footer}
+        ${detalle}`;
   }
   return `
       <div style="background:linear-gradient(135deg,rgba(37,211,102,.07),transparent 55%),var(--bg-card);border:1px solid rgba(37,211,102,.35);border-radius:var(--r-md);padding:var(--s-4);margin-bottom:var(--s-5)">
@@ -9298,6 +9335,18 @@ function bindCommon() {
     else setDashCurrent();
   });
   document.querySelectorAll('[data-period-m]').forEach(b => b.onclick = () => toggleDashMonth(b.dataset.periodM));
+  // Tarjeta "Comisión" del panel Tu sueldo → despliega/oculta el desglose por pedido (sin re-render).
+  document.querySelectorAll('[data-sueldo-toggle]').forEach(b => {
+    const tog = () => {
+      STATE.sueldoDetalleOpen = !STATE.sueldoDetalleOpen;
+      const d = document.getElementById('sueldo-detalle');
+      if (d) d.style.display = STATE.sueldoDetalleOpen ? 'block' : 'none';
+      const h = b.querySelector('.sueldo-hint');
+      if (h) h.textContent = STATE.sueldoDetalleOpen ? 'ocultar desglose ▴' : 'ver desglose ▾';
+    };
+    b.onclick = tog;
+    b.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tog(); } };
+  });
   document.querySelectorAll('[data-chart-nav]').forEach(b => b.onclick = () => {
     const dir = b.dataset.chartNav === 'next' ? 1 : -1;
     STATE.dashChartIdx = (STATE.dashChartIdx + dir + DASH_CHARTS.length) % DASH_CHARTS.length;
