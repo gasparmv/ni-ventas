@@ -277,7 +277,7 @@ function panelSueldoHtml(vendedor) {
         : (completas.indexOf(f.p.cartel) !== -1 ? ' · <span style="color:#25d366">completa ✓</span>' : '');
       return `<div data-com-fila style="${filaSt}">
           <div style="min-width:0">
-            <div style="color:var(--fg);font-size:13px;overflow-wrap:anywhere">${f.p.esCorporeo ? '🧊 ' : '🔷 '}${escapeHtml(f.p.cartel || '—')}</div>
+            <div style="color:var(--fg);font-size:13px;overflow-wrap:anywhere"><button type="button" class="com-ped-link" data-com-ped="${escapeHtml(String(f.p.idx))}" title="Ver el detalle del pedido" style="background:none;border:0;padding:0;margin:0;font:inherit;color:var(--fg);cursor:pointer;text-align:left;overflow-wrap:anywhere">${f.p.esCorporeo ? '🧊 ' : '🔷 '}<span style="color:var(--accent-cyan,#8FD4DE);text-decoration:underline;text-underline-offset:2px">${escapeHtml(f.p.cartel || '—')}</span></button></div>
             <div style="font-size:11px;color:var(--fg-subtle);margin-top:2px">${fmtF(f.p.fecha)} · ${fmtMoney(f.v)} × ${+(f.tasa * 100).toFixed(1)}%${ajuste}</div>
           </div>
           <div class="com-fila-monto" style="white-space:nowrap;font-weight:600;color:var(--fg);font-size:13px">${fmtMoney(f.com)}</div>
@@ -309,10 +309,41 @@ function panelSueldoHtml(vendedor) {
         ${detalle}`;
   }
   return `
-      <div style="background:linear-gradient(135deg,rgba(37,211,102,.07),transparent 55%),var(--bg-card);border:1px solid rgba(37,211,102,.35);border-radius:var(--r-md);padding:var(--s-4);margin-bottom:var(--s-5)">
+      <div id="panel-sueldo" data-sueldo-vend="${escapeHtml(vendedor)}" style="background:linear-gradient(135deg,rgba(37,211,102,.07),transparent 55%),var(--bg-card);border:1px solid rgba(37,211,102,.35);border-radius:var(--r-md);padding:var(--s-4);margin-bottom:var(--s-5)">
         <h3 style="margin:0 0 var(--s-3);font-size:15px;letter-spacing:var(--tr-tight)">💰 Tu sueldo · ${escapeHtml(periodLbl)}</h3>
         ${inner}
       </div>`;
+}
+
+// Binds del panel "Tu sueldo": tarjeta Comisión (abre/cierra el desglose, sin re-render) + nombre de
+// cada pedido del desglose (abre su ficha, la misma de la vista Pedidos). Separado de bindCommon para
+// poder repintar SOLO el panel (refreshPanelSueldo). Idempotente (asigna onclick, no suma listeners).
+function bindPanelSueldo() {
+  document.querySelectorAll('[data-sueldo-toggle]').forEach(b => {
+    const tog = () => {
+      STATE.sueldoDetalleOpen = !STATE.sueldoDetalleOpen;
+      const d = document.getElementById('sueldo-detalle');
+      if (d) d.style.display = STATE.sueldoDetalleOpen ? 'block' : 'none';
+      const h = b.querySelector('.sueldo-hint');
+      if (h) h.textContent = STATE.sueldoDetalleOpen ? 'ocultar desglose ▴' : 'ver desglose ▾';
+    };
+    b.onclick = tog;
+    b.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tog(); } };
+  });
+  document.querySelectorAll('[data-com-ped]').forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
+    openDrawerPedido(parseInt(b.dataset.comPed, 10));
+  });
+}
+// Repinta SOLO el panel "Tu sueldo" con el STATE.pedidos actual: tras editar/borrar un pedido desde la
+// ficha abierta en el desglose, la comisión de atrás quedaba vieja. NO usar render() acá: el drawer
+// vive en el shell y render() lo cerraría. No-op si el panel no está en pantalla.
+function refreshPanelSueldo() {
+  const el = document.getElementById('panel-sueldo');
+  if (!el) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = panelSueldoHtml(el.dataset.sueldoVend).trim();
+  if (tmp.firstElementChild) { el.replaceWith(tmp.firstElementChild); bindPanelSueldo(); }
 }
 
 async function loadCotizadorParams() {
@@ -8419,6 +8450,7 @@ async function eliminarPedido(idx) {
     STATE.pedidos = STATE.pedidos.filter(x => x.idx !== idx);
     closeDrawer();
     if (STATE.view === 'pedidos') renderTablePedidos();
+    refreshPanelSueldo();
     toast('Pedido eliminado ✓');
   } catch (e) { toast('Error al eliminar: ' + e.message); }
 }
@@ -8499,6 +8531,7 @@ async function savePedidoEdit(idx) {
     const ids = new Set(updated.map(x => x.idx));
     STATE.pedidos = STATE.pedidos.filter(x => !ids.has(x.idx)).concat(updated);
     if (STATE.view === 'pedidos') renderTablePedidos();
+    refreshPanelSueldo(); // ficha abierta desde el desglose de comisión del Dashboard → comisión al día
     openDrawerPedido(idx); // refrescar el drawer con lo guardado
     toast('Pedido actualizado ✓');
   } catch (e) {
@@ -9394,18 +9427,8 @@ function bindCommon() {
     else setDashCurrent();
   });
   document.querySelectorAll('[data-period-m]').forEach(b => b.onclick = () => toggleDashMonth(b.dataset.periodM));
-  // Tarjeta "Comisión" del panel Tu sueldo → despliega/oculta el desglose por pedido (sin re-render).
-  document.querySelectorAll('[data-sueldo-toggle]').forEach(b => {
-    const tog = () => {
-      STATE.sueldoDetalleOpen = !STATE.sueldoDetalleOpen;
-      const d = document.getElementById('sueldo-detalle');
-      if (d) d.style.display = STATE.sueldoDetalleOpen ? 'block' : 'none';
-      const h = b.querySelector('.sueldo-hint');
-      if (h) h.textContent = STATE.sueldoDetalleOpen ? 'ocultar desglose ▴' : 'ver desglose ▾';
-    };
-    b.onclick = tog;
-    b.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tog(); } };
-  });
+  // Panel "Tu sueldo": toggle del desglose + link de cada pedido a su ficha.
+  bindPanelSueldo();
   document.querySelectorAll('[data-chart-nav]').forEach(b => b.onclick = () => {
     const dir = b.dataset.chartNav === 'next' ? 1 : -1;
     STATE.dashChartIdx = (STATE.dashChartIdx + dir + DASH_CHARTS.length) % DASH_CHARTS.length;
@@ -18802,6 +18825,10 @@ async function openTicketFromPedido(pedidoId){
     const j = await r.json().catch(() => ({}));
     if (j && j.ticket) existing = j.ticket;
   } catch (_) {} finally { STATE._ticketAbriendo = false; }
+  // El modal del ticket SOLO se dibuja/bindea en Pedidos y Corpóreas. Si se abre desde otra vista (ej. la
+  // ficha abierta desde el desglose de comisión del Dashboard) quedaba "abierto" pero invisible: no se
+  // veía, frenaba el poll de briefs y se comía los Ctrl+V de fotos en Cotización. → ir a Pedidos.
+  if (STATE.view !== 'pedidos' && STATE.view !== 'corporeas') { STATE.view = 'pedidos'; STATE.selected = null; location.hash = 'pedidos'; }
   tcNuevaApertura();
   STATE.ticketCorpPedidoId = pedidoId;
   if (existing) {
