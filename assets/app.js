@@ -228,7 +228,10 @@ function panelSueldoHtml(vendedor) {
     const comMult = (p) => {
       if (!sec || !sec.mediaComisionHasta) return 1;
       if ((sec.comisionCompletaCarteles || []).indexOf(p.cartel) !== -1) return 1;
-      return (String(p.fecha).slice(0, 10) <= sec.mediaComisionHasta) ? 0.5 : 1;
+      // OJO: p.fecha es un objeto Date (parseDate), NO un string → armar la clave YYYY-MM-DD local.
+      if (!(p.fecha instanceof Date) || isNaN(p.fecha.getTime())) return 1;
+      const fk = `${p.fecha.getFullYear()}-${String(p.fecha.getMonth() + 1).padStart(2, '0')}-${String(p.fecha.getDate()).padStart(2, '0')}`;
+      return (fk <= sec.mediaComisionHasta) ? 0.5 : 1;
     };
     let ventasNeon = 0, ventasCorp = 0, comisionNeon = 0, comisionCorp = 0, huboMedia = false;
     misPedidos.forEach(p => {
