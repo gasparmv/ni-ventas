@@ -3343,7 +3343,7 @@ function renderCorteCobros() {
             </div>
           </label>
         </div>`).join('')}
-      <button class="btn" data-corte-cobrar-enviar style="margin-top:12px">Enviar cobros seleccionados</button>
+      <button class="btn" data-corte-cobrar-enviar style="margin-top:12px"${STATE._corteCobrando ? ' disabled' : ''}>${STATE._corteCobrando ? 'Enviando…' : 'Enviar cobros seleccionados'}</button>
       ${enVentana < cs.length ? `<div style="font-size:11px;color:var(--fg-mute);margin-top:8px">${cs.length - enVentana} cliente(s) fuera de la ventana de 24h → se les manda la plantilla aprobada (nombre + total + alias). Los que están en ventana reciben el desglose completo por texto.</div>` : ''}
     </div>`;
 }
@@ -3978,15 +3978,27 @@ async function bindCorte() {
   if (cobrarCerrar) cobrarCerrar.onclick = () => { STATE.corteCobrosView = false; render(); };
   const cobrarEnviar = document.querySelector('[data-corte-cobrar-enviar]');
   if (cobrarEnviar) cobrarEnviar.onclick = async () => {
-    const tels = [...document.querySelectorAll('.corte-cobro-chk:checked')].map(c => c.getAttribute('data-tel')).filter(Boolean);
+    // Bloqueo en STATE (no solo en el botón): si un refresco re-dibuja la vista mientras se envía, el botón nuevo
+    // sale deshabilitado igual. Antes el re-render lo volvía a "Enviar" y un segundo click mandaba todo DOS veces.
+    if (STATE._corteCobrando) { toast('Ya se están enviando los cobros — esperá a que termine'); return; }
+    const tels = [...new Set([...document.querySelectorAll('.corte-cobro-chk:checked')].map(c => c.getAttribute('data-tel')).filter(Boolean))];
     if (!tels.length) { toast('Seleccioná al menos un cliente'); return; }
+    STATE._corteCobrando = true;
     cobrarEnviar.disabled = true; cobrarEnviar.textContent = 'Enviando…';
+    let ok = false;
     try {
       const r = await fetch(CONFIG.trackerUrl + '/admin/corte/cobrar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ telefonos: tels }) }).then(x => x.json());
-      const okN = ((r && r.resultados) || []).filter(x => x.ok).length;
-      toast('Cobros enviados: ' + okN + '/' + tels.length);
-      STATE.corteCobrosView = false; STATE.corteCobros = undefined; STATE.cortePedidos = undefined; STATE._corteLoading = false; render();
-    } catch (_) { toast('Error de red'); cobrarEnviar.disabled = false; cobrarEnviar.textContent = 'Enviar cobros seleccionados'; }
+      const resultados = (r && r.resultados) || [];
+      const okN = resultados.filter(x => x.ok).length;
+      const yaEnviados = resultados.filter(x => !x.ok && /hace instantes/.test(String(x.error || ''))).length;
+      toast('Cobros enviados: ' + okN + '/' + tels.length + (yaEnviados ? ' · ' + yaEnviados + ' ya se habían enviado recién (no se duplicaron)' : ''));
+      ok = true;
+    } catch (_) { toast('Error de red'); }
+    finally {
+      STATE._corteCobrando = false;
+      if (ok) { STATE.corteCobrosView = false; STATE.corteCobros = undefined; STATE.cortePedidos = undefined; STATE._corteLoading = false; }
+      render();
+    }
   };
   // Archivo de la tanda: Emma sube, Aníbal descarga; Aníbal sube placas + m².
   const subirArch = document.querySelector('[data-corte-subir-archivo]');
@@ -4036,6 +4048,7 @@ function corteBoardGroups(tandaId) {
 // "💰 Cobrar (N)" de la barra: manda el cobro SOLO a los clientes seleccionados (de la tanda que se está viendo).
 // Si alguno ya tenía el cobro enviado (ej. se corrigió el pedido después de cobrar), se le RE-ENVÍA con el monto actual.
 async function corteBulkCobrar(tandaId) {
+  if (STATE._corteCobrando) { toast('Ya hay un cobro enviándose — esperá a que termine'); return; }
   const sel = STATE.corteSel || {};
   const elig = corteBoardGroups(tandaId).filter(g => sel[g.key] && g.priced && g.tel && g.pago !== 'pagado' && g.pago !== 'parcial');
   if (!elig.length) { toast('Nada para cobrar en la selección'); return; }
@@ -4044,15 +4057,19 @@ async function corteBulkCobrar(tandaId) {
   const lineas = elig.map(g => '• ' + g.nombre + ' — $' + g.total.toLocaleString('es-AR') + (g.pago === 'cobrando' ? ' (re-envío)' : '')).join('\n');
   const msg = 'Mandar el cobro a ' + elig.length + ' cliente' + (elig.length === 1 ? '' : 's') + ' — total $' + total.toLocaleString('es-AR') + ':\n\n' + lineas
     + (reenv.length ? '\n\n' + (reenv.length === 1 ? 'Uno ya tenía' : reenv.length + ' ya tenían') + ' un cobro enviado: se les vuelve a mandar con el monto actual.' : '');
-  if (!await showConfirm(msg, { title: 'Cobrar', confirmLabel: 'Mandar cobro' }).catch(() => false)) return;
+  // Bloqueo de envío en curso (vive en STATE → sobrevive a re-renders): evita un segundo pedido de cobro paralelo.
+  STATE._corteCobrando = true;
   try {
+    if (!await showConfirm(msg, { title: 'Cobrar', confirmLabel: 'Mandar cobro' }).catch(() => false)) return;
+    toast('Enviando cobros…');
     const r = await fetch(CONFIG.trackerUrl + '/admin/corte/cobrar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ telefonos: elig.map(g => g.tel), recobrar: true, tanda_id: tandaId || 0 }) }).then(x => x.json());
     const resultados = (r && r.resultados) || [];
     const okN = resultados.filter(x => x.ok).length;
     const fallos = resultados.filter(x => !x.ok).map(x => { const g = elig.find(e => String(e.tel).replace(/\D/g, '') === String(x.tel)); return (g ? g.nombre : x.tel) + ' (' + (x.error || 'error') + ')'; });
     toast('Cobros enviados: ' + okN + '/' + elig.length + (fallos.length ? ' · fallaron: ' + fallos.join(', ') : ''));
-    STATE.corteSel = {}; STATE.cortePedidos = undefined; STATE._corteLoading = false; render();
+    STATE.corteSel = {}; STATE.cortePedidos = undefined; STATE._corteLoading = false;
   } catch (_) { toast('Error de red'); }
+  finally { STATE._corteCobrando = false; render(); }
 }
 function corteBulkAvanzar(estado, tandaId) {
   const groups = corteBoardGroups(tandaId);
