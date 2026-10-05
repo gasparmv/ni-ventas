@@ -3389,6 +3389,13 @@ function corteClientGroups(pedidos) {
     return o;
   });
 }
+// Lo que el server REALMENTE le cobraría a este cliente (mismo filtro que /admin/corte/cobrar): piezas cortadas o
+// embaladas, con precio, sin pagar (pendiente/cobrando), sin neón. g.total incluye piezas pagadas o sin cortar → no
+// sirve para el monto de la confirmación. recobro = alguna ya tenía el cobro enviado (se re-envía con el monto actual).
+function corteCobrable(g) {
+  const it = (g.items || []).filter(p => (p.estado === 'cortado' || p.estado === 'embalado') && (Number(p.precio) || 0) > 0 && (p.estado_pago === 'pendiente' || p.estado_pago === 'cobrando') && p.producto !== 'NEON');
+  return { n: it.length, total: it.reduce((s, p) => s + (Number(p.precio) || 0), 0), recobro: it.some(p => p.estado_pago === 'cobrando') };
+}
 // Banda de KPIs: plata + avance + aprovechamiento (funde el panel de m² viejo).
 function corteHeroHtml(pedidos, groups) {
   const t = STATE.corteTanda;
@@ -3532,8 +3539,8 @@ function corteHybridBoard(pedidos) {
   const selTotal = selGroups.reduce((s, g) => s + g.total, 0);
   const nMatriz = selGroups.reduce((s, g) => s + g.items.filter(p => p.estado === 'matriz_lista').length, 0);
   const nCortado = selGroups.reduce((s, g) => s + g.items.filter(p => p.estado === 'cortado').length, 0);
-  // Cobrables: con precio, con teléfono, y no pagados ni parciales (el parcial se revisa a mano).
-  const nCobrar = selGroups.filter(g => g.priced && g.tel && g.pago !== 'pagado' && g.pago !== 'parcial').length;
+  // Cobrables: con teléfono, no parciales (el parcial se revisa a mano) y con piezas que el server cobraría.
+  const nCobrar = selGroups.filter(g => g.tel && g.pago !== 'parcial' && corteCobrable(g).n > 0).length;
   // Tanda que se está viendo (el board es de UNA tanda): las acciones masivas se acotan a ella.
   const boardTanda = pedidos.length && pedidos.every(p => (+p.tanda_id || 0) === (+pedidos[0].tanda_id || 0)) ? (+pedidos[0].tanda_id || 0) : 0;
   const allVisSel = list.length > 0 && list.every(g => sel[g.key]);
@@ -3991,13 +3998,19 @@ async function bindCorte() {
       const resultados = (r && r.resultados) || [];
       const okN = resultados.filter(x => x.ok).length;
       const yaEnviados = resultados.filter(x => !x.ok && /hace instantes/.test(String(x.error || ''))).length;
-      toast('Cobros enviados: ' + okN + '/' + tels.length + (yaEnviados ? ' · ' + yaEnviados + ' ya se habían enviado recién (no se duplicaron)' : ''));
+      const otrosFallos = resultados.filter(x => !x.ok && !/hace instantes/.test(String(x.error || ''))).length;
+      toast('Cobros enviados: ' + okN + '/' + tels.length + (yaEnviados ? ' · ' + yaEnviados + ' ya se habían enviado recién (no se duplicaron)' : '') + (otrosFallos ? ' · ' + otrosFallos + ' fallaron' : ''));
       ok = true;
     } catch (_) { toast('Error de red'); }
     finally {
       STATE._corteCobrando = false;
-      if (ok) { STATE.corteCobrosView = false; STATE.corteCobros = undefined; STATE.cortePedidos = undefined; STATE._corteLoading = false; }
-      render();
+      if (ok) { STATE.corteCobrosView = false; STATE.corteCobros = undefined; STATE.cortePedidos = undefined; STATE._corteLoading = false; render(); }
+      else {
+        // Error de red: NO re-dibujar (perdería qué clientes estaban tildados); solo rehabilitar el botón actual
+        // (puede ser otro nodo si algo re-renderizó la vista mientras se enviaba).
+        const b = document.querySelector('[data-corte-cobrar-enviar]');
+        if (b) { b.disabled = false; b.textContent = 'Enviar cobros seleccionados'; }
+      }
     }
   };
   // Archivo de la tanda: Emma sube, Aníbal descarga; Aníbal sube placas + m².
@@ -4050,11 +4063,11 @@ function corteBoardGroups(tandaId) {
 async function corteBulkCobrar(tandaId) {
   if (STATE._corteCobrando) { toast('Ya hay un cobro enviándose — esperá a que termine'); return; }
   const sel = STATE.corteSel || {};
-  const elig = corteBoardGroups(tandaId).filter(g => sel[g.key] && g.priced && g.tel && g.pago !== 'pagado' && g.pago !== 'parcial');
+  const elig = corteBoardGroups(tandaId).filter(g => sel[g.key] && g.tel && g.pago !== 'parcial').map(g => ({ ...g, cob: corteCobrable(g) })).filter(g => g.cob.n > 0);
   if (!elig.length) { toast('Nada para cobrar en la selección'); return; }
-  const total = elig.reduce((s, g) => s + g.total, 0);
-  const reenv = elig.filter(g => g.pago === 'cobrando');
-  const lineas = elig.map(g => '• ' + g.nombre + ' — $' + g.total.toLocaleString('es-AR') + (g.pago === 'cobrando' ? ' (re-envío)' : '')).join('\n');
+  const total = elig.reduce((s, g) => s + g.cob.total, 0);
+  const reenv = elig.filter(g => g.cob.recobro);
+  const lineas = elig.map(g => '• ' + g.nombre + ' — $' + g.cob.total.toLocaleString('es-AR') + (g.cob.recobro ? ' (re-envío)' : '')).join('\n');
   const msg = 'Mandar el cobro a ' + elig.length + ' cliente' + (elig.length === 1 ? '' : 's') + ' — total $' + total.toLocaleString('es-AR') + ':\n\n' + lineas
     + (reenv.length ? '\n\n' + (reenv.length === 1 ? 'Uno ya tenía' : reenv.length + ' ya tenían') + ' un cobro enviado: se les vuelve a mandar con el monto actual.' : '');
   // Bloqueo de envío en curso (vive en STATE → sobrevive a re-renders): evita un segundo pedido de cobro paralelo.
@@ -4062,7 +4075,7 @@ async function corteBulkCobrar(tandaId) {
   try {
     if (!await showConfirm(msg, { title: 'Cobrar', confirmLabel: 'Mandar cobro' }).catch(() => false)) return;
     toast('Enviando cobros…');
-    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/cobrar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ telefonos: elig.map(g => g.tel), recobrar: true, tanda_id: tandaId || 0 }) }).then(x => x.json());
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/cobrar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ telefonos: elig.map(g => g.tel), recobrar_tels: reenv.map(g => g.tel), tanda_id: tandaId || 0 }) }).then(x => x.json());
     const resultados = (r && r.resultados) || [];
     const okN = resultados.filter(x => x.ok).length;
     const fallos = resultados.filter(x => !x.ok).map(x => { const g = elig.find(e => String(e.tel).replace(/\D/g, '') === String(x.tel)); return (g ? g.nombre : x.tel) + ' (' + (x.error || 'error') + ')'; });
