@@ -1657,6 +1657,30 @@ async function fetchWithTimeout(url, opts, timeoutMs) {
   }
 }
 
+// ===== Modales: que no se cierren al arrastrar hacia afuera =====
+// Los popups se cierran con un click en el fondo oscuro (e.target === backdrop). Pero si apretás
+// ADENTRO del popup (seleccionar texto, un date picker, scrollear con el mouse apretado) y soltás
+// sobre el fondo, el navegador dispara el click en el ancestro común = el fondo, y el popup se
+// cerraba solo (pedido de Gaspar, ticket de corpóreo). Guard global para TODOS los modales: un
+// click sobre un fondo de modal (overlay fixed que tapa la pantalla) solo cuenta si el botón se
+// apretó Y se soltó sobre ese mismo fondo. Clicks de teclado/JS (detail 0) no se tocan.
+(function guardBackdropDrag() {
+  let downT = null, upT = null;
+  window.addEventListener('mousedown', e => { downT = e.target; }, true);
+  window.addEventListener('mouseup', e => { upT = e.target; }, true);
+  window.addEventListener('click', e => {
+    const t = e.target;
+    if (!t || !t.getBoundingClientRect || e.detail === 0 || !downT) return;
+    if (downT === t && upT === t) return;
+    let esFondo = false;
+    try {
+      const r = t.getBoundingClientRect();
+      esFondo = getComputedStyle(t).position === 'fixed' && r.width >= window.innerWidth * 0.9 && r.height >= window.innerHeight * 0.9;
+    } catch (_) {}
+    if (esFondo) { e.stopPropagation(); e.preventDefault(); }
+  }, true);
+})();
+
 // ===== Backoff global de polling (anti-cascada de sobrecarga de D1) =====
 // Si el worker responde 503 (db_busy, típ. "D1 DB is overloaded") o un poll falla
 // por red, frenamos los POLLS de fondo 20-40s (con jitter, para no re-sincronizar
