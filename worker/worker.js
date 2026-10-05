@@ -1602,15 +1602,32 @@ async function waSend(env, payload) {
     const dd = await rr.json().catch(() => ({}));
     return { r: rr, data: dd };
   };
-  let { r, data } = await _doSend();
+  let r, data;
+  // Un fetch que tira (red/timeout) antes rompía al caller a mitad de camino y dejaba filas de
+  // campaña colgadas en 'sending'. Ahora vuelve como un fallo más (transitorio).
+  try { ({ r, data } = await _doSend()); } catch (e) { return { ok: false, status: 0, code: null, error: 'network: ' + String(e?.message || e).slice(0, 200), raw: null, provider: wa.provider }; }
   // Reintento del error transitorio #131000 de Meta ("Something went wrong"): el mensaje NO
   // salió (falló), Meta mismo recomienda reintentar, así que NO se duplica. Sin esto, a la gente
   // (ej. Abril) le aparecía "Error: (#131000)" en la cara por un glitch pasajero de Meta.
   if (!r.ok && (data?.error?.code === 131000 || data?.error?.code === 131016)) {
     await new Promise(res => setTimeout(res, 800));
-    ({ r, data } = await _doSend());
+    try { ({ r, data } = await _doSend()); } catch (e) { return { ok: false, status: 0, code: null, error: 'network: ' + String(e?.message || e).slice(0, 200), raw: null, provider: wa.provider }; }
   }
   if (!r.ok) {
+    const { msg: errText, code: errCodeAny } = extractWaSendError(data, r.status);
+    // Rechazo por PAGO en el envío mismo (síncrono). 360dialog lo devuelve como string ("This number
+    // is blocked due to lack of payment on client side.") y antes quedaba como el genérico 'wa send
+    // failed' → nadie se enteraba. Solo registra + avisa a Gaspar 1 vez cada 12h: las campañas se
+    // pausan solas (campaignSendFail → 'account'). NO arma el breaker global wa_billing_block porque
+    // ese frena también los bots de texto libre (precotización, corte), y en estos bloqueos el texto
+    // puede seguir saliendo (26/27-sep: 0 plantillas, pero sí cientos de textos).
+    if (isBillingBlockError(errCodeAny, errText)) {
+      try {
+        if ((await noteWaPayReject(env, errText)) && env.ADMIN_NOTIFY_PHONE) {
+          await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp rechaza envíos por un problema de PAGO.\nError: ' + errText + '\nRevisá el saldo/facturación en 360dialog y el Billing Hub de Meta (business.facebook.com/billing_hub).\nLas campañas automáticas quedan en pausa sin quemar contactos y se reanudan solas cuando vuelva a salir una plantilla.');
+        }
+      } catch (_) {}
+    }
     // Auto-detección de phones no alcanzables. Si Meta nos rechaza con un
     // código que indica que el destinatario está "muerto" (sin WA, bloqueado,
     // mala reputación, etc.), marcamos al phone en wa_unreachable_phones para
@@ -1626,10 +1643,43 @@ async function waSend(env, payload) {
         await markUnreachable(env, to, reason, errMsg, templateName).catch(() => {});
       }
     } catch (_) { /* no romper el flow del error original */ }
-    return { ok: false, status: r.status, code: data?.error?.code ?? null, error: data?.error?.message || 'wa send failed', raw: data, provider: wa.provider };
+    return { ok: false, status: r.status, code: errCodeAny, error: errText, raw: data, provider: wa.provider };
   }
   const id = data?.messages?.[0]?.id || null;
+  // Una plantilla salió OK → si había un rechazo por pago registrado, se cierra el episodio y se avisa.
+  if (payload?.type === 'template') {
+    try { if (await clearWaPayReject(env) && env.ADMIN_NOTIFY_PHONE) await waSendText(env, env.ADMIN_NOTIFY_PHONE, 'WhatsApp volvió a mandar plantillas — las campañas automáticas se reanudan solas'); } catch (_) {}
+  }
   return { ok: true, id, raw: data, provider: wa.provider };
+}
+
+// Normaliza el error de una respuesta de envío fallida. Meta manda {error:{message,code,
+// error_data:{details}}}; 360dialog a veces manda {error:"texto"} (string), {errors:[{code,title,
+// details}]} o {meta:{developer_message}}. Antes solo se leía error.message → todo lo de 360dialog
+// quedaba como el genérico 'wa send failed' (sep-2026: ~24k fallos sin causa visible en wa_log).
+function extractWaSendError(data, httpStatus) {
+  let msg = '', code = null;
+  const e = data && data.error;
+  if (e && typeof e === 'object') {
+    code = e.code ?? null;
+    msg = e.message || e.error_user_msg || e.title || '';
+    const det = e.error_data && typeof e.error_data.details === 'string' ? e.error_data.details : '';
+    if (det && !msg.includes(det)) msg = msg ? msg + ' — ' + det : det;
+  } else if (typeof e === 'string') {
+    msg = e;
+  }
+  if (!msg && Array.isArray(data?.errors) && data.errors[0]) {
+    const x = data.errors[0];
+    if (code == null) code = x.code ?? null;
+    msg = [x.title, x.details || x.message].filter(Boolean).join(': ');
+  }
+  if (!msg && data?.meta) msg = data.meta.developer_message || data.meta.message || '';
+  if (!msg && typeof data?.message === 'string') msg = data.message;
+  if (!msg) msg = 'wa send failed';
+  if (typeof code === 'string' && /^\d+$/.test(code)) code = parseInt(code, 10);
+  // Sin código de Meta (típico de 360dialog), el HTTP status es lo único que distingue 403/429/5xx.
+  if (code == null && httpStatus) msg += ' (HTTP ' + httpStatus + ')';
+  return { msg: String(msg).slice(0, 500), code };
 }
 
 // ===== Sistema de phones no alcanzables =====
@@ -1657,16 +1707,154 @@ function classifyUnreachableReason(code, subcode, message) {
 // dan por perdidos enseguida. El contador vive en kv_cache (sin schema nuevo).
 const SEND_FAIL_CAP = 3;
 
-// ¿El error conviene reintentarlo? Permanentes → false. Resto (incluido el
-// genérico "wa send failed" y el #131000 "Something went wrong") → true.
+// ¿El error conviene reintentarlo? Solo los permanentes del DESTINATARIO → false. Los de cuenta
+// (pago, bloqueo) y de plantilla NO son culpa del contacto: no se lo da por perdido (antes el
+// 131042/"payment" daba por perdido al contacto en vez de esperar a que se destrabe la cuenta).
 function isTransientSendError(res) {
-  const code = res && res.code;
+  return classifySendError(res) !== 'permanent';
+}
+
+// Clasifica un envío fallido (res de waSend) en:
+//   'account'   → la cuenta/canal no puede mandar (pago, kill-switch, credenciales, cuenta bloqueada).
+//   'template'  → la plantilla no se puede usar (pausada, deshabilitada, inexistente, params mal).
+//   'permanent' → el destinatario no sirve (número inválido, sin WhatsApp, opt-out, ventana cerrada).
+//   'transient' → glitch / rate-limit / 5xx / red / desconocido → vale reintentar más tarde.
+function classifySendError(res) {
+  const code = res && res.code != null && res.code !== '' ? Number(res.code) : null;
+  const status = Number((res && res.status) || 0);
   const msg = String((res && res.error) || '').toLowerCase();
-  if (code === 131047 || code === 131051) return false; // fuera de ventana 24h
-  if (code === 131026 || code === 131049) return false; // destinatario no alcanzable
-  if (code === 131042) return false;                     // cuenta bloqueada por pago
-  if (/re-?engag|outside|more than 24|undeliverable|ecosystem|eligibilit|payment/.test(msg)) return false;
-  return true;
+  if (isBillingBlockError(code, msg)) return 'account';
+  if (msg === 'wa_send_paused' || /no configurad/.test(msg)) return 'account';
+  if ([0, 3, 10, 190, 368, 131031, 131045, 131057, 133010].includes(code) || (code >= 200 && code < 300)) return 'account';
+  if (code == null && (status === 401 || status === 402 || status === 403)) return 'account';
+  if ([131008, 132000, 132001, 132005, 132007, 132012, 132015, 132016, 132068, 132069].includes(code)) return 'template';
+  if (/template/.test(msg) && /paused|disabled|does ?n.?t exist|not found|not approved|pending/.test(msg)) return 'template';
+  if ([131009, 131021, 131026, 131030, 131047, 131049, 131050, 131051, 132018].includes(code)) return 'permanent';
+  if (/numero invalido|undeliverable|ecosystem|stopped marketing|opted? ?out|re-?engag|more than 24|not a valid whatsapp|invalid (phone|recipient)/.test(msg)) return 'permanent';
+  return 'transient';
+}
+
+// Error REAL para logs: "#código mensaje (HTTP n)" y, si 360dialog no mandó nada legible, un
+// pedazo del body crudo. Nunca el genérico pelado.
+function sendErrorDetail(res) {
+  if (!res) return 'sin respuesta';
+  let s = (res.code != null ? '#' + res.code + ' ' : '') + String(res.error || '');
+  if (/^wa send failed/.test(String(res.error || '')) && res.raw) {
+    try { s += ' raw=' + JSON.stringify(res.raw).slice(0, 250); } catch (_) {}
+  }
+  return s.slice(0, 450);
+}
+
+// ===== Reintentos ACOTADOS de campañas automáticas (oct-2026) =====
+// Antes: comunidad-promo, lanzamiento-opener, minisupernova y pp-followup-tpl volvían a encolar la
+// fila ante CUALQUIER fallo y el cron la reintentaba cada minuto para siempre (sep-2026: ~24k fallos
+// en wa_log, hasta ~2.000 reintentos al mismo número; 9 FUPs de presupuesto se perdieron tras 168
+// intentos c/u). Eran caídas de PLANTILLAS a nivel cuenta (25→28-sep no salió ninguna), no números
+// malos: al destrabarse, todos salieron. Ahora cada fallo se clasifica (classifySendError):
+//   account/template → NO gasta intento; pausa el flujo (la fila vuelve a la cola con una espera).
+//   permanent        → 'failed' definitivo ya.
+//   transient        → reintento con backoff (CAMPAIGN_RETRY_BACKOFF_MS) hasta CAMPAIGN_RETRY_CAP
+//                      intentos; después 'failed' definitivo.
+// Red de seguridad: si el flujo encadena CAMPAIGN_TRIP_STREAK fallos transitorios sin ningún OK en
+// el medio, es una caída general (no de los contactos) → deja de gastar intentos y pausa el flujo
+// con espera creciente, probando de a una fila hasta que una vuelva a salir.
+// Estado: intentos/último error por (kind, phone, ref) en wa_send_retry (mig 043); racha y pausa del
+// flujo en kv_cache 'cmpgn_brk:<kind>'.
+const CAMPAIGN_RETRY_CAP = 3;
+const CAMPAIGN_RETRY_BACKOFF_MS = [30 * 60 * 1000, 3 * 60 * 60 * 1000]; // tras el 1er fallo 30', tras el 2do 3h
+const CAMPAIGN_TRIP_STREAK = 3;
+const CAMPAIGN_PAUSE_STEPS_MS = [15, 30, 60, 120].map(m => m * 60 * 1000);  // pausa del flujo, creciente
+const CAMPAIGN_TEMPLATE_PAUSE_MS = 3 * 60 * 60 * 1000;                      // Meta pausa plantillas 3h la 1ra vez
+
+let _sendRetryTableOk = false;
+async function ensureSendRetryTable(env) {
+  if (_sendRetryTableOk) return true;
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS wa_send_retry (kind TEXT NOT NULL, phone TEXT NOT NULL, ref TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, next_at TEXT, final INTEGER NOT NULL DEFAULT 0, last_class TEXT, last_error TEXT, first_at TEXT, updated_at TEXT, PRIMARY KEY (kind, phone, ref))").run();
+    _sendRetryTableOk = true;
+  } catch (_) {}
+  return _sendRetryTableOk;
+}
+
+// Estado del flujo (racha de fallos transitorios + pausa). Se lee 1 vez por tick.
+async function campaignState(env, kind) {
+  let s = null;
+  try { const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k = ?').bind('cmpgn_brk:' + kind).first(); if (row) s = JSON.parse(row.v); } catch (_) {}
+  return { streak: 0, trips: 0, until: 0, reason: '', ...(s || {}), kind, stored: !!s };
+}
+function campaignPaused(st) { return !!(st && st.until && Date.now() < st.until); }
+async function campaignSaveState(env, st) {
+  const v = JSON.stringify({ streak: st.streak || 0, trips: st.trips || 0, until: st.until || 0, reason: String(st.reason || '').slice(0, 300), updated_at: new Date().toISOString() });
+  try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at').bind('cmpgn_brk:' + st.kind, v, new Date().toISOString()).run(); st.stored = true; } catch (_) {}
+}
+
+// ¿La fila está en espera (backoff) o ya dada por perdida? Para flujos sin columna de vencimiento propia.
+async function campaignRetryGate(env, kind, phone, ref = '') {
+  try {
+    const row = await env.DB.prepare('SELECT next_at, final FROM wa_send_retry WHERE kind = ? AND phone = ? AND ref = ?').bind(kind, phone, String(ref || '')).first();
+    if (!row) return { skip: false };
+    if (row.final) return { skip: true, why: 'final' };
+    if (row.next_at && row.next_at > new Date().toISOString()) return { skip: true, why: 'backoff' };
+  } catch (_) {}
+  return { skip: false };
+}
+
+// Envío OK: corta la racha del flujo y borra el historial de reintentos de la fila.
+async function campaignSendOk(env, st, phone, ref = '') {
+  if (st && st.stored) {
+    try { await env.DB.prepare('DELETE FROM kv_cache WHERE k = ?').bind('cmpgn_brk:' + st.kind).run(); } catch (_) {}
+    st.streak = 0; st.trips = 0; st.until = 0; st.stored = false;
+  }
+  try { await env.DB.prepare('DELETE FROM wa_send_retry WHERE kind = ? AND phone = ? AND ref = ?').bind(st.kind, phone, String(ref || '')).run(); } catch (_) {}
+}
+
+// Envío fallido: clasifica, registra el error real (wa_send_retry + wa_log) y decide qué hacer con la
+// fila. Devuelve { action, nextAt, attempts, cls, detail }:
+//   'retry'  → volver a la cola con vencimiento nextAt (gastó 1 intento).
+//   'pause'  → volver a la cola con vencimiento nextAt SIN gastar intento; el flujo quedó pausado →
+//              el caller corta el loop del tick.
+//   'failed' → marcar la fila como fallida definitiva.
+async function campaignSendFail(env, st, { phone, ref = '', res, logKind }) {
+  ref = String(ref || '');
+  const cls = classifySendError(res);
+  const detail = sendErrorDetail(res);
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  await ensureSendRetryTable(env);
+  let prev = 0;
+  try { const row = await env.DB.prepare('SELECT attempts FROM wa_send_retry WHERE kind = ? AND phone = ? AND ref = ?').bind(st.kind, phone, ref).first(); prev = row ? (row.attempts || 0) : 0; } catch (_) {}
+  let action, attempts = prev, nextMs = null;
+  if (cls === 'permanent') {
+    action = 'failed'; attempts = prev + 1;
+  } else {
+    if (cls === 'transient') st.streak = (st.streak || 0) + 1;
+    if (cls !== 'transient' || st.streak >= CAMPAIGN_TRIP_STREAK) {
+      // Problema de la cuenta / de la plantilla / caída general → pausar el flujo, no gastar intento.
+      action = 'pause';
+      st.trips = (st.trips || 0) + 1;
+      const step = cls === 'template' ? CAMPAIGN_TEMPLATE_PAUSE_MS : CAMPAIGN_PAUSE_STEPS_MS[Math.min(st.trips, CAMPAIGN_PAUSE_STEPS_MS.length) - 1];
+      st.until = nowMs + step;
+      st.reason = cls + ': ' + detail;
+      nextMs = st.until;
+    } else {
+      attempts = prev + 1;
+      if (attempts >= CAMPAIGN_RETRY_CAP) action = 'failed';
+      else { action = 'retry'; nextMs = nowMs + CAMPAIGN_RETRY_BACKOFF_MS[Math.min(attempts, CAMPAIGN_RETRY_BACKOFF_MS.length) - 1]; }
+    }
+    await campaignSaveState(env, st);
+  }
+  const nextAt = nextMs ? new Date(nextMs).toISOString() : null;
+  try {
+    await env.DB.prepare(
+      "INSERT INTO wa_send_retry (kind, phone, ref, attempts, next_at, final, last_class, last_error, first_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(kind, phone, ref) DO UPDATE SET attempts = excluded.attempts, next_at = excluded.next_at, final = excluded.final, last_class = excluded.last_class, last_error = excluded.last_error, updated_at = excluded.updated_at"
+    ).bind(st.kind, phone, ref, attempts, nextAt, action === 'failed' ? 1 : 0, cls, detail, nowIso, nowIso).run();
+  } catch (_) {}
+  const tag = action === 'failed' ? 'FINAL ' + cls + ' ' + attempts + '/' + CAMPAIGN_RETRY_CAP
+    : action === 'pause' ? 'PAUSA flujo ' + cls + ' hasta ' + nextAt
+    : cls + ' ' + attempts + '/' + CAMPAIGN_RETRY_CAP + ' reintenta ' + nextAt;
+  try { await logWaEvent(env, { to: phone, kind: logKind || st.kind, ref: ref ? st.kind + ':' + ref : '', ok: false, error: tag + ' | ' + detail }); } catch (_) {}
+  return { action, nextAt, attempts, cls, detail };
 }
 
 // Motivo legible del fallo, para el aviso al admin (en vez del genérico fijo).
@@ -5212,6 +5400,8 @@ async function processComunidadPromo(env) {
     tplApproved = !!(t && String(t.status).toUpperCase() === 'APPROVED');
   } catch (_) {}
   if (!tplApproved) return;
+  const st = await campaignState(env, 'comunidad_promo');
+  if (campaignPaused(st)) return;                                        // flujo pausado por caída (ver campaignSendFail)
   const nowIso = new Date(nowMs).toISOString();
   const perTick = Math.max(1, Math.min(20, parseInt(await kvGet(env, 'comunidad_promo_pertick', '5'), 10) || 5));
   let rows;
@@ -5233,11 +5423,17 @@ async function processComunidadPromo(env) {
     }
     const res = await waSendTemplate(env, phone, COMUNIDAD_PROMO_TPL, 'es_AR', []);   // check-in, sin imagen
     if (!res || !res.ok) {
-      const revert = isTransientSendError(res) ? 'queued' : 'failed';
-      try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = ? WHERE phone = ? AND kind = 'comunidad_promo'").bind(revert, phone).run(); } catch (_) {}
-      try { await logWaEvent(env, { to: phone, kind: 'comunidad-promo', ref: '', ok: false, error: res && res.error }); } catch (_) {}
+      // Reintento ACOTADO: vuelve a 'queued' con due_at corrido (backoff) o queda 'failed' definitivo.
+      // Antes volvía a 'queued' con el mismo due_at → el cron lo reintentaba cada minuto para siempre.
+      const f = await campaignSendFail(env, st, { phone, res, logKind: 'comunidad-promo' });
+      try {
+        if (f.action === 'failed') await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'failed' WHERE phone = ? AND kind = 'comunidad_promo'").bind(phone).run();
+        else await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued', due_at = ? WHERE phone = ? AND kind = 'comunidad_promo'").bind(f.nextAt, phone).run();
+      } catch (_) {}
+      if (f.action === 'pause') break;
       continue;
     }
+    await campaignSendOk(env, st, phone);
     // Enviado OK: etiquetar "vender pack" para que Abril le venda el pack cuando responda.
     await venderPackTag(env, phone);
     const sentTs = new Date().toISOString();
@@ -7605,6 +7801,8 @@ async function processLanzamientoLanding(env) {
   if (!(await lanzamientoLandingOn(env)) || await isWaBillingBlocked(env)) return;
   const tpl = await lanzamientoOpenerTpl(env);
   if (!tpl) return; // sin plantilla aprobada configurada -> no manda todavía
+  const st = await campaignState(env, 'lanzamiento_opener');
+  if (campaignPaused(st)) return; // flujo pausado por caída (ver campaignSendFail)
   const nowIso = new Date().toISOString();
   let rows;
   // Solo registros de los últimos 3 días (evita openers "recién te registraste" rancios
@@ -7618,10 +7816,18 @@ async function processLanzamientoLanding(env) {
     // "amigo/a" feo de los sin-nombre + nombres inconsistentes (a veces venían apellidos).
     const res = await waSendTemplate(env, phone, tpl, 'es_AR', []);
     if (!res || !res.ok) {
-      try { await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'registered', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
-      try { await logWaEvent(env, { to: phone, kind: 'lanzamiento-opener', ref: '', ok: false, error: res?.error }); } catch (_) {}
+      // Reintento ACOTADO (antes volvía a 'registered' con el mismo opener_due_at → reintento cada
+      // minuto: 8.698 fallos contra 119 números entre el 1 y el 5-sep). Backoff corriendo el vencimiento;
+      // agotado o permanente → 'opener_failed' (si igual escribe, lanzamientoLandingOnInbound le manda el link).
+      const f = await campaignSendFail(env, st, { phone, res, logKind: 'lanzamiento-opener' });
+      try {
+        if (f.action === 'failed') await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'opener_failed', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run();
+        else await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'registered', opener_due_at = ?, updated_at = ? WHERE phone = ?").bind(f.nextAt, nowIso, phone).run();
+      } catch (_) {}
+      if (f.action === 'pause') break;
       continue;
     }
+    await campaignSendOk(env, st, phone);
     const sentTs = new Date().toISOString();
     // stage='await1' → cuando responda, lanzamientoLandingOnInbound le manda el link.
     try { await env.DB.prepare("UPDATE lanzamiento_landing SET stage = 'await1', opener_sent_at = ?, updated_at = ? WHERE phone = ?").bind(sentTs, sentTs, phone).run(); } catch (_) {}
@@ -8223,6 +8429,9 @@ async function processMiniSupernova(env) {
   try { const a = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(MINISUPER_TPL).first(); okN = !!(a && String(a.status).toUpperCase() === 'APPROVED'); } catch (_) {}
   try { const b = await env.DB.prepare("SELECT status FROM template_status_cache WHERE name = ?").bind(MINISUPER_TPL_GRL).first(); okG = !!(b && String(b.status).toUpperCase() === 'APPROVED'); } catch (_) {}
   if (!okN || !okG) return;
+  const st = await campaignState(env, 'minisupernova');
+  if (campaignPaused(st)) return; // flujo pausado por caída (ver campaignSendFail)
+  if (!(await ensureSendRetryTable(env))) return; // el SELECT de abajo filtra por wa_send_retry
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS minisupernova (phone TEXT PRIMARY KEY, nombre TEXT, grupo TEXT, status TEXT DEFAULT 'pending', sent_at TEXT, claimed_at TEXT, replied_at TEXT)").run(); } catch (_) {}
   // OJO: NO recuperar filas colgadas en 'sending' (revirtiéndolas a 'pending'). Si el isolate muere
   // ENTRE el envío OK y el UPDATE a 'sent', la fila queda 'sending' con el mensaje YA entregado; re-
@@ -8241,8 +8450,14 @@ async function processMiniSupernova(env) {
   // Orden de envío: de los alumnos MÁS VIEJOS a los MÁS NUEVOS (pedido de Gaspar). El grupo del CSV
   // es la cohorte: #1 = comunidad más vieja, #10 = más nueva. Ordenamos por grupo ASC (numérico) y,
   // dentro del grupo, por rowid (orden del CSV). Así drena el #1 completo, después el #2, etc.
-  try { rows = (await env.DB.prepare("SELECT phone, nombre, grupo FROM minisupernova WHERE status = 'pending' ORDER BY CAST(grupo AS INTEGER) ASC, rowid ASC LIMIT ?").bind(room).all()).results || []; } catch (_) { return; }
-  if (!rows.length) { try { await kvSet(env, 'minisupernova_on', '0'); } catch (_) {} return; } // terminó → se apaga solo
+  // Las filas en espera de reintento (backoff en wa_send_retry) no se toman: así no tapan la cola.
+  const nowIsoSel = new Date(nowMs).toISOString();
+  try { rows = (await env.DB.prepare("SELECT phone, nombre, grupo FROM minisupernova WHERE status = 'pending' AND phone NOT IN (SELECT phone FROM wa_send_retry WHERE kind = 'minisupernova' AND ref = '' AND next_at > ?) ORDER BY CAST(grupo AS INTEGER) ASC, rowid ASC LIMIT ?").bind(nowIsoSel, room).all()).results || []; } catch (_) { return; }
+  if (!rows.length) {
+    // Terminó → se apaga solo. Pero solo si NO queda ningún 'pending' (pueden quedar en espera de reintento).
+    try { const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status = 'pending'").first(); if (!(c && c.n)) await kvSet(env, 'minisupernova_on', '0'); } catch (_) {}
+    return;
+  }
   const liveCutoff = new Date(nowMs - MINISUPER_LIVE_DAYS * 24 * 3600 * 1000).toISOString();
   for (const r of rows) {
     const phone = r.phone;
@@ -8254,11 +8469,15 @@ async function processMiniSupernova(env) {
     const res = await waSendTemplate(env, phone, tpl, 'es_AR', nombre ? [nombre] : []);
     const nowIso = new Date().toISOString();
     if (!res || !res.ok) {
-      // REVERT-ON-FAIL: vuelve a 'pending' (reintentable), NO 'failed'. No cuenta para el tope.
-      try { await env.DB.prepare("UPDATE minisupernova SET status = 'pending' WHERE phone = ? AND status = 'sending'").bind(phone).run(); } catch (_) {}
-      try { await logWaEvent(env, { to: phone, kind: 'minisupernova', ref: '', ok: false, error: res?.error }); } catch (_) {}
+      // Reintento ACOTADO: vuelve a 'pending' con espera (backoff en wa_send_retry, no cuenta para el
+      // tope diario) o queda 'failed' definitivo. Antes volvía a 'pending' sin espera → reintento cada
+      // minuto (hasta 1.516 fallos al mismo número el 26/28-sep).
+      const f = await campaignSendFail(env, st, { phone, res, logKind: 'minisupernova' });
+      try { await env.DB.prepare("UPDATE minisupernova SET status = ? WHERE phone = ? AND status = 'sending'").bind(f.action === 'failed' ? 'failed' : 'pending', phone).run(); } catch (_) {}
+      if (f.action === 'pause') break;
       continue;
     }
+    await campaignSendOk(env, st, phone);
     try { await env.DB.prepare("UPDATE minisupernova SET status = 'sent', sent_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {}
     try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)").bind(nowIso, res.id || ('minisuper-' + phone + '-' + Date.now()), phone, '[plantilla: ' + tpl + ']').run(); } catch (_) {}
     // Etiqueta SIEMPRE (esté vivo o no): "Lead MiniSupernova #<grupo del CSV>".
@@ -11263,7 +11482,8 @@ const WA_BILLING_NOTIFY_MS = 12 * 60 * 60 * 1000;    // avisa como mucho 1 vez c
 function isBillingBlockError(code, msg) {
   if (code === 131042 || code === '131042') return true;
   const m = String(msg || '').toLowerCase();
-  return m.includes('eligibility') || (m.includes('payment') && m.includes('issue'));
+  // 'lack of payment': texto de 360dialog ("This number is blocked due to lack of payment on client side.").
+  return m.includes('eligibility') || m.includes('lack of payment') || (m.includes('payment') && m.includes('issue'));
 }
 
 async function setWaBillingBlock(env, errMsg) {
@@ -11281,6 +11501,29 @@ async function setWaBillingBlock(env, errMsg) {
   };
   try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at').bind(WA_BILLING_BLOCK_KEY, JSON.stringify(obj), new Date().toISOString()).run(); } catch (_) {}
   return { shouldNotify, count: obj.count };
+}
+
+// Registro del rechazo por pago SÍNCRONO (ver waSend). Separado de wa_billing_block a propósito: no
+// frena nada, solo deja constancia (GET /admin/envios-reintentos) y dedup del aviso (1 cada 12h).
+// Devuelve true si corresponde avisar. Lo cierra la próxima plantilla que salga OK (clearWaPayReject).
+const WA_PAY_REJECT_KEY = 'wa_pay_reject';
+async function noteWaPayReject(env, errMsg) {
+  const now = Date.now();
+  let prev = null;
+  try { const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k=?').bind(WA_PAY_REJECT_KEY).first(); if (row) prev = JSON.parse(row.v); } catch (_) {}
+  const lastNotify = (prev && prev.last_notify_at) || 0;
+  const shouldNotify = (now - lastNotify) > WA_BILLING_NOTIFY_MS;
+  const obj = { since: (prev && prev.since) || now, updated_at: now, count: ((prev && prev.count) || 0) + 1, last_error: String(errMsg || '').slice(0, 300), last_notify_at: shouldNotify ? now : lastNotify };
+  try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at').bind(WA_PAY_REJECT_KEY, JSON.stringify(obj), new Date().toISOString()).run(); } catch (_) {}
+  return shouldNotify;
+}
+async function clearWaPayReject(env) {
+  try {
+    const row = await env.DB.prepare('SELECT 1 AS x FROM kv_cache WHERE k=?').bind(WA_PAY_REJECT_KEY).first();
+    if (!row) return false;
+    await env.DB.prepare('DELETE FROM kv_cache WHERE k=?').bind(WA_PAY_REJECT_KEY).run();
+    return true;
+  } catch (_) { return false; }
 }
 
 async function clearWaBillingBlock(env) {
@@ -13879,6 +14122,33 @@ const handler = {
         return json({ ok: true, paused: (await kvGet(env, 'wa_send_paused', '0')) === '1' });
       }
 
+      // GET /admin/envios-reintentos → estado de los reintentos acotados de campañas (ver
+      // campaignSendFail): pausa/racha de cada flujo, bloqueo de pago, y por flujo cuántas filas en
+      // espera / perdidas + los últimos errores REALES. POST {kind, reanudar:true} → levanta la
+      // pausa de ese flujo (después de arreglar la causa, sin esperar el backoff).
+      if (path === '/admin/envios-reintentos') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const KINDS = ['comunidad_promo', 'lanzamiento_opener', 'minisupernova', 'pp-followup-tpl'];
+        if (request.method === 'POST') {
+          let body = {}; try { body = await request.json(); } catch (_) {}
+          if (body.reanudar && KINDS.includes(body.kind)) { try { await env.DB.prepare('DELETE FROM kv_cache WHERE k = ?').bind('cmpgn_brk:' + body.kind).run(); } catch (_) {} }
+        }
+        await ensureSendRetryTable(env);
+        const nowIso = new Date().toISOString();
+        const flujos = {};
+        for (const k of KINDS) {
+          const st = await campaignState(env, k);
+          let resumen = [], ultimos = [];
+          try { resumen = (await env.DB.prepare("SELECT final, last_class, COUNT(*) AS n, SUM(CASE WHEN next_at > ? THEN 1 ELSE 0 END) AS en_espera FROM wa_send_retry WHERE kind = ? GROUP BY final, last_class").bind(nowIso, k).all()).results || []; } catch (_) {}
+          try { ultimos = (await env.DB.prepare("SELECT phone, ref, attempts, final, next_at, last_class, last_error, updated_at FROM wa_send_retry WHERE kind = ? ORDER BY updated_at DESC LIMIT 10").bind(k).all()).results || []; } catch (_) {}
+          flujos[k] = { pausado: campaignPaused(st), pausa_hasta: st.until ? new Date(st.until).toISOString() : null, racha_fallos: st.streak || 0, pausas_seguidas: st.trips || 0, motivo: st.reason || '', resumen, ultimos };
+        }
+        let billing = null, payReject = null;
+        try { const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k = ?').bind(WA_BILLING_BLOCK_KEY).first(); if (row) billing = JSON.parse(row.v); } catch (_) {}
+        try { const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k = ?').bind(WA_PAY_REJECT_KEY).first(); if (row) payReject = JSON.parse(row.v); } catch (_) {}
+        return json({ ok: true, tope_intentos: CAMPAIGN_RETRY_CAP, bloqueo_pago_activo: await isWaBillingBlocked(env), bloqueo_pago_131042: billing, rechazo_pago_al_enviar: payReject, flujos });
+      }
+
       // Recordatorio del evento (Fase Semilla): control del goteo + preview de números.
       // GET → estado + cuántos anotados/mandados/pendientes/en-ventana. POST {on, fase, pertick} → configura.
       //   on: bool (prende/apaga) · fase: 'ventana' (solo texto libre a los de 24h) | 'todos' (suma plantilla)
@@ -13924,8 +14194,9 @@ const handler = {
         const on = (await kvGet(env, 'minisupernova_on', '0')) === '1';
         const perTick = parseInt(await kvGet(env, 'minisupernova_pertick', '3'), 10) || 3;
         const capDiario = Math.max(1, Math.min(200, parseInt(await kvGet(env, 'minisupernova_cap', String(MINISUPER_CAP_DIARIO)), 10) || MINISUPER_CAP_DIARIO));
-        let total = 0, enviados = 0, pend = 0, resp = 0, hoy = 0, porGrupo = [];
+        let total = 0, enviados = 0, pend = 0, resp = 0, hoy = 0, fallidos = 0, porGrupo = [];
         try { total = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova").first())?.n || 0; } catch (_) {}
+        try { fallidos = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status='failed'").first())?.n || 0; } catch (_) {}
         try { enviados = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status='sent'").first())?.n || 0; } catch (_) {}
         try { pend = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE status='pending'").first())?.n || 0; } catch (_) {}
         try { resp = (await env.DB.prepare("SELECT COUNT(*) AS n FROM minisupernova WHERE replied_at IS NOT NULL").first())?.n || 0; } catch (_) {}
@@ -13939,7 +14210,7 @@ const handler = {
         const hAR = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours();
         return json({
           ok: true, on, perTick, cap_diario: capDiario,
-          total, enviados, pendientes: pend, respondieron: resp, enviados_hoy: hoy, sin_nombre: sinNombre,
+          total, enviados, pendientes: pend, fallidos, respondieron: resp, enviados_hoy: hoy, sin_nombre: sinNombre,
           por_grupo: porGrupo,
           plantilla_nombre: MINISUPER_TPL, plantilla_nombre_status: tplN,
           plantilla_generica: MINISUPER_TPL_GRL, plantilla_generica_status: tplG,
@@ -19124,6 +19395,10 @@ async function processPresupuestoFollowups(env, opts = {}) {
   // él a mano → lo salteamos del fupeo automático (pedido de Gaspar).
   let fupLabelId = null;
   try { const _fl = await env.DB.prepare("SELECT id FROM labels WHERE name = 'FUP' LIMIT 1").first(); fupLabelId = _fl && _fl.id; } catch (_) {}
+  // Reintentos acotados de la PLANTILLA de seguimiento (ver campaignSendFail). Solo frena la rama de
+  // plantilla: en una caída de plantillas el FUP por texto libre (ventana abierta) sigue saliendo.
+  const tplSt = await campaignState(env, 'pp-followup-tpl');
+  await ensureSendRetryTable(env);
 
   for (const p of byPhone.values()) {
     // Freno manual: chat con etiqueta "FUP" puesta → NO mandamos el seguimiento automático.
@@ -19258,21 +19533,29 @@ async function processPresupuestoFollowups(env, opts = {}) {
       } catch (_) {}
     }
     if (!windowOpen) {
+      // Flujo de plantilla pausado (caída de cuenta/plantilla) o este presupuesto en espera de
+      // reintento / ya dado por perdido → no intentar en este tick. ref = ts del presupuesto: un
+      // presupuesto NUEVO al mismo cliente arranca con intentos limpios.
+      if (campaignPaused(tplSt)) continue;
+      if ((await campaignRetryGate(env, 'pp-followup-tpl', p.phone, p.ts)).skip) continue;
       const firstName = capitalizeName((p.sender_name || '').split(/\s+/)[0]) || 'amigo/a';
       const rt = await waSendTemplate(env, p.phone, 'seguimiento_presupuesto', 'es_AR', [firstName]);
       if (rt.ok) {
         // Marker 'sent' → dedup (body reconocido por ALL_FOLLOWUP_PREFIXES_TEXT).
         sent++;
+        await campaignSendOk(env, tplSt, p.phone, p.ts);
         try {
           await env.DB.prepare(
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, automated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)'
           ).bind(new Date().toISOString(), rt.id || ('fu-tpl:' + p.phone), 'outbound', p.phone, '', 'template', '[plantilla: seguimiento_presupuesto]', '', '', 'sent').run();
         } catch (_) {}
       } else {
-        // NO marcamos marker → reintenta el próximo cron (p.ej. si la plantilla
-        // todavía está 'pending' de aprobación). Solo log, sin notificar al admin
-        // (evita ruido en el hueco de aprobación). Acotado por el query de 24h.
-        await logWaEvent(env, { to: p.phone, kind: 'pp-followup-tpl', ref: 'pp-fu:' + p.phone, ok: false, error: rt.error });
+        // Reintento ACOTADO (antes: sin marker → reintento cada 5' durante las ~25h de la ventana de
+        // selección; el 25/26-sep 9 FUPs se perdieron tras 168 intentos c/u). Plantilla pending/pausada
+        // o cuenta bloqueada → pausa sin gastar intentos (y sin avisar: es ruido). Agotado o
+        // permanente → va al resumen al admin con el motivo real.
+        const f = await campaignSendFail(env, tplSt, { phone: p.phone, ref: p.ts, res: rt, logKind: 'pp-followup-tpl' });
+        if (f.action === 'failed') failures.push({ phone: p.phone, name: p.sender_name || '', error: describeSendFailure(rt) + ' (plantilla, ' + f.attempts + ' intento' + (f.attempts === 1 ? '' : 's') + ')' });
       }
       await new Promise(rs => setTimeout(rs, 600));
       continue;
