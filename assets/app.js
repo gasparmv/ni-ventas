@@ -11295,6 +11295,20 @@ function paraCotizarCount() {
   for (const p in cl) { if (visibles.has(p) && (cl[p] || []).includes(l.id)) n++; }
   return n;
 }
+// Bandeja rápida "Servicio de corte" (admin): igual que "Para cotizar" pero por la etiqueta "Servicio de corte",
+// que el backend pone en cada cobro del corte.
+function servicioCorteLabel() {
+  return (chatState.labels || []).find(l => l.name === 'Servicio de corte') || null;
+}
+function servicioCorteCount() {
+  const l = servicioCorteLabel();
+  if (!l) return 0;
+  const cl = chatState.contactLabels || {};
+  const visibles = new Set((chatState.contacts || []).map(c => c.phone));
+  let n = 0;
+  for (const p in cl) { if (visibles.has(p) && (cl[p] || []).includes(l.id)) n++; }
+  return n;
+}
 
 function renderContactLabelChips(phone) {
   const ids = chatState.contactLabels[phone] || [];
@@ -11352,6 +11366,14 @@ function renderLabelFilterBar() {
         </div>
       </div>
     ` : ''}
+    ${(() => {
+      // Bandeja rápida "Servicio de corte" (solo admin): los clientes del corte, por su etiqueta.
+      const l = servicioCorteLabel();
+      if (!l || !isAdmin()) return '';
+      const n = servicioCorteCount();
+      const active = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
+      return `<button class="label-filter-pill${active ? ' active' : ''}" data-filter-fixed="corte">✂ Servicio de corte${n ? ` (${n})` : ''}</button>`;
+    })()}
   </div>`;
 }
 
@@ -15144,9 +15166,9 @@ function bindChat() {
         chatState.labelDropdownOpen = false;
       } else if (kind === 'unread') {
         chatState.filterUnreadOnly = !chatState.filterUnreadOnly;
-      } else if (kind === 'paracotizar') {
-        // Toggle: filtra por la etiqueta "Para cotizar" (o la apaga si ya estaba sola).
-        const l = paraCotizarLabel();
+      } else if (kind === 'paracotizar' || kind === 'corte') {
+        // Toggle: filtra por la etiqueta de la bandeja rápida (o la apaga si ya estaba sola).
+        const l = kind === 'corte' ? servicioCorteLabel() : paraCotizarLabel();
         if (l) {
           const on = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
           chatState.filterLabels = on ? [] : [l.id];

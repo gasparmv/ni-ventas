@@ -3894,6 +3894,12 @@ function corteCobroMsg(g) {
   const lineas = (g.piezas || []).map(p => '- ' + (p.diseno || 'diseño') + (p.medida ? ' (' + p.medida + ')' : '') + ((parseInt(p.cantidad, 10) || 1) > 1 ? ' x' + p.cantidad : '') + ': $' + Number(p.precio || 0).toLocaleString('es-AR')).join('\n');
   return (nombre ? 'Hola ' + nombre + ', ' : 'Hola, ') + 'te paso el detalle de tu corte de esta semana:\n' + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR') + '\n\nPara confirmarlo transferí a ' + CORTE_ALIAS + ' (' + CORTE_TITULAR + ') y mandame el comprobante por acá.';
 }
+// Recibo con el desglose, para quien PAGÓ sin haber recibido nunca el detalle (el cobro le llegó por plantilla, solo el
+// total, y contestó directo con el comprobante). Mismo detalle que el cobro pero sin pedir transferencia.
+function corteReciboMsg(g) {
+  const lineas = (g.piezas || []).map(p => '- ' + (p.diseno || 'diseño') + (p.medida ? ' (' + p.medida + ')' : '') + ((parseInt(p.cantidad, 10) || 1) > 1 ? ' x' + p.cantidad : '') + ': $' + Number(p.precio || 0).toLocaleString('es-AR')).join('\n');
+  return 'te paso el detalle de lo que pagaste:\n' + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR');
+}
 // VIGÍA DE PAGOS DEL CORTE: si el cliente tiene pedidos en estado_pago='cobrando' (ya se le mandó el cobro)
 // y mandó un comprobante (imagen/PDF), lo OCReamos y, si el monto cubre el total, marcamos PAGADO + avisamos
 // a Gaspar. Si es menor, lo dejamos en 'parcial' y avisamos para revisar. Devuelve true si tomó el turno (para
@@ -3933,10 +3939,30 @@ async function corteVigiaPago(env, phone, opts = {}) {
     catch (_) { return -1; }
   };
   if (total > 0 && monto >= total * 0.99) {
+    // Piezas de ESTE cobro, leídas ANTES de la transición (después pasan a 'pagado') → para el recibo con detalle.
+    let piezas = [];
+    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) {}
     const ch = await transicion('pagado');
     if (ch === 0) return true; // otra ejecución ya lo marcó → no confirmar ni avisar dos veces
     if (ch < 0) { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó comprobante por $' + monto.toLocaleString('es-AR') + ' pero falló marcarlo PAGADO en la base. Revisalo a mano.'); } catch (_) {} return true; }
     try { await corteSend(env, phone, 'recibido, gracias! tu corte queda confirmado'); } catch (_) {}
+    // DETALLE AUNQUE HAYA PAGADO DIRECTO: si el cobro le llegó por plantilla (solo el total) y contestó directo con el
+    // comprobante, nunca recibió el desglose (corteAutoDetalle solo actúa sobre 'cobrando') → va ahora como recibo.
+    // Reserva atómica en corte_detalle_sent: si el cobro salió como TEXTO (ya era el desglose) o ya se lo mandamos, la
+    // marca está puesta y no se repite. Caso real 5-oct: Mari pagó con el comprobante y tuvo que pedir el detalle.
+    if (piezas.length) {
+      const nowD = new Date().toISOString();
+      let claimed = null;
+      try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
+      try { claimed = await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET sent_at=excluded.sent_at WHERE corte_detalle_sent.sent_at IS NULL OR corte_detalle_sent.sent_at='' RETURNING phone").bind(phone, nowD, nowD).first(); } catch (_) {}
+      if (claimed) {
+        const gR = { cliente_nombre: piezas[0].cliente_nombre, piezas: piezas.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: piezas.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+        await new Promise(rs => setTimeout(rs, 800)); // que llegue después del "recibido"
+        let okd = false;
+        try { const r = await corteSend(env, phone, corteReciboMsg(gR)); okd = !!(r && r.ok); } catch (_) {}
+        if (!okd) { try { await env.DB.prepare("UPDATE corte_detalle_sent SET sent_at=NULL WHERE phone=? AND sent_at=?").bind(phone, nowD).run(); } catch (_) {} }
+      }
+    }
     // Espejo al Excel 2026 v4: marca "pagado" en la col I de Venta_Insumos + la CAJA (cuenta que recibió) en
     // la col R si el comprobante la muestra (gate kv corte_sheet_pago_on, default ON).
     let sheetMsg = '';
@@ -17644,6 +17670,9 @@ const handler = {
         const tb = tandaId ? [tandaId] : [];
         try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_cobro_lock (phone TEXT PRIMARY KEY, ts TEXT)").run(); } catch (_) {}
         try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
+        // Etiqueta "Servicio de corte": se asegura en cada cobro → el filtro rápido de la bandeja siempre los incluye.
+        let corteLabelId = null;
+        try { corteLabelId = await ensureLabelId(env, 'Servicio de corte', '#14b8a6'); } catch (_) {}
         for (const tel of [...new Set(tels)]) {
           // CANDADO POR CLIENTE (90s): si corren dos pedidos de cobro a la vez (doble click, o el botón vuelve a
           // habilitarse por un refresco mientras se envía), solo UNO le manda el cobro a cada cliente. Caso real:
@@ -17693,8 +17722,43 @@ const handler = {
             //  · salió como PLANTILLA (solo total) → borramos la marca: el desglose sale cuando conteste.
             if (via === 'texto') { try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET cobro_at=excluded.cobro_at, sent_at=excluded.sent_at").bind(tel, nowIso, nowIso).run(); } catch (_) {} }
             else { try { await env.DB.prepare("DELETE FROM corte_detalle_sent WHERE phone=?").bind(tel).run(); } catch (_) {} }
+            if (corteLabelId) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, datetime('now'))").bind(tel, corteLabelId).run(); } catch (_) {} }
             res.push({ tel, ok: true, total: g.total, via, recobro: resetIds.length > 0 });
           } else { await restaurar(); await soltarLock(); res.push({ tel, ok: false, error: 'no se pudo enviar', total: g.total, via }); }
+        }
+        return json({ ok: true, resultados: res });
+      }
+      // POST /admin/corte/enviar-detalle {telefonos, tanda_id?} → manda el DESGLOSE a clientes que no lo recibieron
+      // (ej. pagaron directo con el comprobante). Si ya pagaron todo → recibo (sin pedir transferencia); si no → el
+      // detalle de cobro. Solo con ventana abierta (inbound en 24h). Reserva atómica en corte_detalle_sent: no duplica
+      // con el vigía ni si se llama dos veces. Admin.
+      if (request.method === 'POST' && path === '/admin/corte/enviar-detalle') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const tels = Array.isArray(body.telefonos) ? [...new Set(body.telefonos.map(t => String(t).replace(/\D/g, '')).filter(Boolean))] : [];
+        if (!tels.length) return json({ error: 'sin telefonos' }, 400);
+        const tandaId = parseInt(body.tanda_id, 10) || 0;
+        const tf = tandaId ? ' AND tanda_id=?' : '';
+        const tb = tandaId ? [tandaId] : [];
+        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
+        const res = [];
+        for (const tel of tels) {
+          let rows = [];
+          try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio, estado_pago FROM corte_pedidos WHERE telefono=? AND precio>0 AND IFNULL(producto,'TRANS')!='NEON' AND estado_pago IN ('pagado','cobrando','parcial')" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
+          if (!rows.length) { res.push({ tel, ok: false, error: 'sin pedidos cobrados' }); continue; }
+          let ventana = false;
+          try { ventana = !!(await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type!='status' AND ts > datetime('now','-24 hours') LIMIT 1").bind(tel).first()); } catch (_) {}
+          if (!ventana) { res.push({ tel, ok: false, error: 'fuera de ventana de 24h (no se puede mandar texto)' }); continue; }
+          const now = new Date().toISOString();
+          let claimed = null;
+          try { claimed = await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET sent_at=excluded.sent_at WHERE corte_detalle_sent.sent_at IS NULL OR corte_detalle_sent.sent_at='' RETURNING phone").bind(tel, now, now).first(); } catch (_) {}
+          if (!claimed) { res.push({ tel, ok: false, error: 'ya tenía el detalle' }); continue; }
+          const g = { cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+          const pagado = rows.every(r => r.estado_pago === 'pagado');
+          let ok = false;
+          try { const r = await corteSend(env, tel, pagado ? corteReciboMsg(g) : corteCobroMsg(g)); ok = !!(r && r.ok); } catch (_) {}
+          if (!ok) { try { await env.DB.prepare("UPDATE corte_detalle_sent SET sent_at=NULL WHERE phone=? AND sent_at=?").bind(tel, now).run(); } catch (_) {} }
+          res.push({ tel, ok, nombre: g.cliente_nombre, total: g.total, tipo: pagado ? 'recibo' : 'detalle_cobro', error: ok ? undefined : 'no se pudo enviar' });
         }
         return json({ ok: true, resultados: res });
       }
