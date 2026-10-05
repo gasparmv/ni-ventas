@@ -10036,9 +10036,12 @@ async function deleteQuickReply(id) {
 // ===== WA Contact Names (snapshot histórico, sincronizado en su momento desde la agenda del 6573) =====
 async function loadWaContactNames() {
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/contacts', { headers: authHeaders() });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/contacts' + listaVerQuery(chatState._wcVer, chatState._wcFullAt), { headers: authHeaders() });
     if (!r.ok) return;
     const j = await r.json();
+    if (j.unchanged) return;  // la agenda no cambió desde la última carga: lo que tenemos sigue al día
+    chatState._wcVer = j.ver || '';
+    chatState._wcFullAt = Date.now();
     const map = {};
     const pics = {};
     const usernames = {};
@@ -10061,18 +10064,37 @@ async function loadWaContactNames() {
   } catch (_) {}
 }
 
+// ===== Listas casi estáticas con versión (contact-labels, wa/contacts) =====
+// El server sube una versión cada vez que la tabla cambia (triggers en D1). Si le mandamos la
+// que ya tenemos (?v=), responde {unchanged:true} sin re-leer la tabla entera: el poll cada 12s
+// de cada usuario leía ~9k + ~7k filas de D1 aunque no hubiera cambiado nada. Por las dudas
+// (ej. si se perdiera un trigger) cada 5 min pedimos la lista completa igual.
+const LISTA_VER_FULL_MS = 5 * 60000;
+function listaVerQuery(ver, fullAt) {
+  return (ver && (Date.now() - (fullAt || 0)) < LISTA_VER_FULL_MS) ? '?v=' + encodeURIComponent(ver) : '';
+}
+// Trae las etiquetas por contacto (respetando la versión). true si el estado quedó al día.
+async function fetchContactLabels() {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/contact-labels' + listaVerQuery(chatState._clVer, chatState._clFullAt), { headers: authHeaders() });
+  if (!r.ok) return false;
+  const j = await r.json();
+  if (j.unchanged) return true;
+  chatState.contactLabels = j.contactLabels || {};
+  chatState._clVer = j.ver || '';
+  chatState._clFullAt = Date.now();
+  return true;
+}
+
 // ===== Labels =====
 async function loadLabels() {
   if (chatState.labelsLoaded || chatState._labelsLoading) return;
   chatState._labelsLoading = true;
   try {
-    const [lr, clr] = await Promise.all([
+    const [lr, clOk] = await Promise.all([
       fetch(CONFIG.trackerUrl + '/admin/labels', { headers: authHeaders() }),
-      fetch(CONFIG.trackerUrl + '/admin/contact-labels', { headers: authHeaders() })
+      fetchContactLabels()
     ]);
     if (lr.ok) { const j = await lr.json(); chatState.labels = j.labels || []; }
-    let clOk = false;
-    if (clr.ok) { const j = await clr.json(); chatState.contactLabels = j.contactLabels || {}; clOk = true; }
     // Solo marcamos "cargado" si el fetch de contact-labels ANDUVO. Si falla (timeout de D1, intermitente),
     // dejamos labelsLoaded=false para que reintente: si no, contactLabels queda {} y filtrar por etiqueta
     // muestra la bandeja EN BLANCO hasta recargar la página (el mini-bug del filtro "Servicio de corte").
@@ -10854,15 +10876,15 @@ async function loadChatContacts() {
       const _now = Date.now();
       if (!chatState._clRefreshAt || (_now - chatState._clRefreshAt) >= 12000) {
         chatState._clRefreshAt = _now;
-        const [_lr2, _clr] = await Promise.all([
+        // fetchContactLabels manda la versión que ya tenemos: si no cambió nada, no re-baja la tabla.
+        const [_lr2] = await Promise.all([
           fetch(CONFIG.trackerUrl + '/admin/labels', { headers: authHeaders() }),
-          fetch(CONFIG.trackerUrl + '/admin/contact-labels', { headers: authHeaders() })
+          fetchContactLabels()
         ]);
         // Refrescar la LISTA de etiquetas (definiciones), no solo las asignaciones.
         // Sin esto, una etiqueta nueva (creada por cualquiera) no aparecia en los menus
         // hasta recargar la pagina (los menus leen chatState.labels).
         if (_lr2.ok) { const _lj = await _lr2.json(); if (Array.isArray(_lj.labels)) chatState.labels = _lj.labels; }
-        if (_clr.ok) { const _cj = await _clr.json(); chatState.contactLabels = _cj.contactLabels || {}; }
         // Refrescar nombres/@usuarios/fotos (Instagram incluido): igual que las
         // etiquetas, antes solo se cargaban 1 vez (guard waContactNamesLoaded), así
         // que el @usuario y la foto de un chat de IG nuevo no aparecían hasta

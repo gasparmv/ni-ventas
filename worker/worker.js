@@ -2030,20 +2030,52 @@ async function maybeAgendaRecordatorios(env) {
 // cron para no meter latencia en el request path.
 async function ensurePerfIndexes(env) {
   try {
-    if ((await kvGet(env, 'perf_idx_v1', '0')) === '1') return;
-    // wamid ya está indexado por el autoindex UNIQUE de wa_messages, y
-    // (brief_id, tipo) por idx_brief_img_brief_tipo -> no los recreamos (serían
-    // índices duplicados con overhead de escritura al pedo). El que faltaba y
-    // realmente destrababa D1 es idx_wa_messages_ts (148k filas, ORDER BY ts).
-    const stmts = [
-      'CREATE INDEX IF NOT EXISTS idx_wa_messages_ts ON wa_messages(ts)',
-      'CREATE INDEX IF NOT EXISTS idx_wa_messages_phone_ts ON wa_messages(phone, ts)',
-      'CREATE INDEX IF NOT EXISTS idx_briefs_comercial ON briefs(comercial_id)',
-      'CREATE INDEX IF NOT EXISTS idx_briefs_updated ON briefs(updated_at)',
-    ];
-    for (const s of stmts) { try { await env.DB.prepare(s).run(); } catch (_) {} }
-    await kvSet(env, 'perf_idx_v1', '1');
+    if ((await kvGet(env, 'perf_idx_v1', '0')) !== '1') {
+      // wamid ya está indexado por el autoindex UNIQUE de wa_messages, y
+      // (brief_id, tipo) por idx_brief_img_brief_tipo -> no los recreamos (serían
+      // índices duplicados con overhead de escritura al pedo). El que faltaba y
+      // realmente destrababa D1 es idx_wa_messages_ts (148k filas, ORDER BY ts).
+      const stmts = [
+        'CREATE INDEX IF NOT EXISTS idx_wa_messages_ts ON wa_messages(ts)',
+        'CREATE INDEX IF NOT EXISTS idx_wa_messages_phone_ts ON wa_messages(phone, ts)',
+        'CREATE INDEX IF NOT EXISTS idx_briefs_comercial ON briefs(comercial_id)',
+        'CREATE INDEX IF NOT EXISTS idx_briefs_updated ON briefs(updated_at)',
+      ];
+      for (const s of stmts) { try { await env.DB.prepare(s).run(); } catch (_) {} }
+      await kvSet(env, 'perf_idx_v1', '1');
+    }
+    // v2 (oct-2026, excedente de filas leídas de D1):
+    //  - idx_wa_messages_oc: índice PARCIAL (solo las OC salientes, ~400 filas) para la búsqueda
+    //    por cartel de traceAdForPedido, que escaneaba las ~300k filas de wa_messages en cada corrida.
+    //    El planner lo usa porque la query repite LITERALMENTE los términos del WHERE del índice.
+    //  - Triggers de versión de contact_labels y wa_contacts: cada alta/baja/cambio sube un contador
+    //    en kv_cache ('ver:<tabla>'). Los GET de esas listas devuelven {unchanged:true} si el front
+    //    ya tiene esa versión, en vez de re-leer la tabla entera en cada poll de 12s.
+    if ((await kvGet(env, 'perf_idx_v2', '0')) !== '1') {
+      const stmts = [
+        "CREATE INDEX IF NOT EXISTS idx_wa_messages_oc ON wa_messages(phone) WHERE direction='outbound' AND body LIKE 'Orden de compra%'",
+        `CREATE TRIGGER IF NOT EXISTS trg_ver_contact_labels_ins AFTER INSERT ON contact_labels BEGIN ${verBumpSql('contact_labels')} END`,
+        `CREATE TRIGGER IF NOT EXISTS trg_ver_contact_labels_del AFTER DELETE ON contact_labels BEGIN ${verBumpSql('contact_labels')} END`,
+        `CREATE TRIGGER IF NOT EXISTS trg_ver_contact_labels_upd AFTER UPDATE ON contact_labels BEGIN ${verBumpSql('contact_labels')} END`,
+        `CREATE TRIGGER IF NOT EXISTS trg_ver_wa_contacts_ins AFTER INSERT ON wa_contacts BEGIN ${verBumpSql('wa_contacts')} END`,
+        `CREATE TRIGGER IF NOT EXISTS trg_ver_wa_contacts_del AFTER DELETE ON wa_contacts BEGIN ${verBumpSql('wa_contacts')} END`,
+        // Solo cuando cambia algo que el front muestra (los upserts que solo tocan updated_at no cuentan).
+        `CREATE TRIGGER IF NOT EXISTS trg_ver_wa_contacts_upd AFTER UPDATE ON wa_contacts WHEN OLD.name IS NOT NEW.name OR OLD.username IS NOT NEW.username OR OLD.pic_url IS NOT NEW.pic_url OR OLD.phone IS NOT NEW.phone BEGIN ${verBumpSql('wa_contacts')} END`,
+        // Sembrar las versiones para que el ahorro arranque ya (sin esperar al primer cambio).
+        "INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES ('ver:contact_labels', CAST(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) AS TEXT), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        "INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES ('ver:wa_contacts', CAST(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) AS TEXT), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+      ];
+      for (const s of stmts) { try { await env.DB.prepare(s).run(); } catch (_) {} }
+      await kvSet(env, 'perf_idx_v2', '1');
+    }
   } catch (_) {}
+}
+// SQL (para el cuerpo de un trigger) que sube la versión de una lista en kv_cache. Si la fila no
+// existe arranca en el epoch en ms: así, si alguien la borra, la versión nueva nunca coincide con
+// una vieja que tenga guardada un front (lo que haría que se quede con datos viejos).
+function verBumpSql(tabla) {
+  return `INSERT INTO kv_cache (k, v, updated_at) VALUES ('ver:${tabla}', CAST(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) AS TEXT), strftime('%Y-%m-%dT%H:%M:%fZ','now')) ` +
+    `ON CONFLICT(k) DO UPDATE SET v = CAST(CAST(kv_cache.v AS INTEGER) + 1 AS TEXT), updated_at = excluded.updated_at;`;
 }
 
 // ¿Piloto prendido? Default OFF (kill-switch): arranca apagado hasta estar
@@ -2765,7 +2797,10 @@ async function processPrecotizPilot(env) {
   const samplePct = parseInt(await kvGet(env, 'precotiz_sample', '20'), 10) || 20;
   const igOn = await precotizIgOn(env);                                    // gate IG (default OFF)
   const igSample = parseInt(await kvGet(env, 'precotiz_ig_sample', '20'), 10) || 20; // muestra propia de IG
-  if ((await precotizCount(env)) >= cap) return;
+  // Contamos el piloto UNA vez por tick y sumamos a mano cada lead que captamos acá (el único
+  // INSERT a precotiz_pilot): el COUNT(*) por candidato leía la tabla entera ~14 veces por tick.
+  let nPiloto = await precotizCount(env);
+  if (nPiloto >= cap) return;
   // BARRIDO MATUTINO: la ventana normal es de 20 min, así que el que escribe DESPUÉS DE HORA
   // (22-8, cuando el bot está dormido) nunca lo veía a la mañana (mensaje > 20 min). A las 8 AR
   // (primera hora) barremos a esos: leads con PRIMER contacto fuera de horario en las últimas 14h,
@@ -2778,17 +2813,22 @@ async function processPrecotizPilot(env) {
   try {
     // SIEMPRE: leads frescos (últimos 20 min) — el flujo normal, no se toca.
     const since = new Date(Date.now() - 20 * 60 * 1000).toISOString();
-    const rs = await env.DB.prepare("SELECT phone, MAX(ts) AS last_ts FROM wa_messages WHERE direction='inbound' AND msg_type!='status' AND ts > ? GROUP BY phone ORDER BY last_ts DESC LIMIT 15").bind(since).all();
+    // "+phone" (no-op en el valor) le saca al planner la opción de agrupar recorriendo el índice
+    // por phone, que leía las ~300k filas de wa_messages en cada tick. Así usa el índice de ts y
+    // lee solo la ventana de 20 min (~100 filas). Mismo resultado.
+    const rs = await env.DB.prepare("SELECT phone, MAX(ts) AS last_ts FROM wa_messages WHERE direction='inbound' AND msg_type!='status' AND ts > ? GROUP BY +phone ORDER BY last_ts DESC LIMIT 15").bind(since).all();
     cands = rs.results || [];
     // A las 8 AR SUMAMOS (no reemplazamos) el barrido de los que escribieron de noche.
     if (catchup) {
       const desde = new Date(Date.now() - 14 * 60 * 60 * 1000).toISOString();
       const rs2 = await env.DB.prepare(
         "SELECT phone, MAX(ts) AS last_ts FROM wa_messages m " +
-        "WHERE direction='inbound' AND msg_type!='status' AND ts > ? AND phone GLOB '54[0-9]*' AND length(phone) BETWEEN 12 AND 13 " +
+        // "+phone" en el GLOB y el GROUP BY: mismo truco que arriba (si no, el GLOB '54…' arma un
+        // rango sobre el índice de phone y recorre ~256k filas en vez de la ventana de 14 h por ts).
+        "WHERE direction='inbound' AND msg_type!='status' AND ts > ? AND +phone GLOB '54[0-9]*' AND length(phone) BETWEEN 12 AND 13 " +
         "AND phone NOT IN (SELECT phone FROM precotiz_pilot) " +
         "AND NOT EXISTS (SELECT 1 FROM kv_cache k WHERE k.k = 'precotiz_seen:' || m.phone) " +
-        "GROUP BY phone " +
+        "GROUP BY +phone " +
         "HAVING (CAST(strftime('%H', datetime(MIN(ts),'-3 hours')) AS INTEGER) >= 22 OR CAST(strftime('%H', datetime(MIN(ts),'-3 hours')) AS INTEGER) < 8) " +
         "ORDER BY last_ts ASC LIMIT 15"
       ).bind(desde).all();
@@ -2798,7 +2838,7 @@ async function processPrecotizPilot(env) {
   } catch (_) { return; }
 
   for (const c of cands) {
-    if ((await precotizCount(env)) >= cap) break;
+    if (nPiloto >= cap) break;
     const phone = c.phone;
     // Canal: WhatsApp Argentina (54 + 10/11 díg) SIEMPRE; Instagram (IGSID largo, 15-17 díg)
     // solo si el gate IG está ON (precotiz_ig_on). El resto de números no-AR se excluye.
@@ -2872,6 +2912,7 @@ async function processPrecotizPilot(env) {
     // Si el INSERT fue IGNORADO (changes=0), otra corrida concurrente ya capturó este lead ->
     // NO mandamos el opener de nuevo (ese era el "buenas te habla Joaco" x2 en la captura).
     if (!_ins || !_ins.meta || !_ins.meta.changes) continue;
+    nPiloto++;
     await precotizLog(env, phone, 'entro', { es_carteles: true, tiene_foto: res.tiene_foto, tiene_medidas: res.tiene_medidas, tiene_intext: res.tiene_intext });
     // Reparto a Facundo APENAS se confirma carteles: único punto con es_carteles=true y TODAS las
     // exclusiones ya aplicadas arriba (cursos/reventa/corte/corpóreo/lanzamiento/internos/cliente).
@@ -5557,7 +5598,9 @@ async function processCursosFlow(env) {
   // (a) Mandar mensajes cf_* vencidos (texto libre; cf_6 plantilla si cerro la ventana).
   try {
     const floorIso = new Date(nowMs - 72 * 60 * 60 * 1000).toISOString();
-    const rs = await env.DB.prepare("SELECT phone, kind FROM wa_autoreply_log WHERE kind LIKE 'cf/_%' ESCAPE '/' AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 6").bind(nowIso, floorIso).all();
+    // El rango kind >= 'cf_' AND kind < 'cf`' (` es el carácter siguiente a _) deja usar el índice
+    // (kind, status, due_at): el LIKE solo no puede y escaneaba toda la tabla en cada tick (~17k filas).
+    const rs = await env.DB.prepare("SELECT phone, kind FROM wa_autoreply_log WHERE kind >= 'cf_' AND kind < 'cf`' AND kind LIKE 'cf/_%' ESCAPE '/' AND status = 'queued' AND due_at <= ? AND due_at >= ? ORDER BY due_at ASC LIMIT 6").bind(nowIso, floorIso).all();
     for (const r of (rs.results || [])) {
       const phone = r.phone, kind = r.kind;
       let claim;
@@ -5663,12 +5706,15 @@ async function processPendingMedia(env) {
     // que hacen que 360dialog nos BLOQUEE la descarga de media (429) — tumbando
     // también los media nuevos y válidos. No reintentar media viejo.
     const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    // ORDER BY ts (no id): con "id DESC" el planner recorría la tabla entera por rowid buscando
+    // llenar el LIMIT (~300k filas leídas por minuto). Por ts usa idx_wa_messages_ts y lee solo
+    // la ventana de 3 h (~500 filas). El orden es el mismo en la práctica (más nuevos primero).
     const rs = await env.DB.prepare(
       "SELECT id, media_url FROM wa_messages " +
       "WHERE msg_type IN ('image','video','audio','document','sticker') " +
       "  AND media_url GLOB '[0-9]*' AND length(media_url) > 8 " +
       "  AND ts >= ? " +
-      "ORDER BY id DESC LIMIT 40"
+      "ORDER BY ts DESC LIMIT 40"
     ).bind(cutoff).all();
     for (const row of (rs.results || [])) {
       try {
@@ -10423,7 +10469,9 @@ function inboxClauseForRole(role) {
   // solo admin lo ve, comercial/cursos NUNCA. Mismo patrón que precotiz.
   // 'corte' = bandeja del Servicio de Corte, admin-only de Gaspar (es un negocio suyo; ni Abril ni
   // comercial se meten). Mismo patrón que 'privado'. El bot de corte manda los chats acá.
-  return "AND inbox NOT IN ('cursos','oculto','precotiz','privado','corte')";
+  // Cadena de != en vez de NOT IN (...): mismo resultado, pero D1 cuenta el doble de filas
+  // leídas con NOT IN sobre una lista (medido: 72k vs 39k por cada carga de la lista de Joaco).
+  return "AND inbox != 'cursos' AND inbox != 'oculto' AND inbox != 'precotiz' AND inbox != 'privado' AND inbox != 'corte'";
 }
 
 // Control de acceso por chat: 'cursos' solo su bandeja; la bandeja 'privado' (admin-only de
@@ -12267,7 +12315,7 @@ const handler = {
       // también la descarga de los media nuevos y válidos.
       const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
       const rs = await env.DB.prepare(
-        "SELECT id, media_url FROM wa_messages WHERE msg_type IN ('image','video','audio','document','sticker') AND media_url GLOB '[0-9]*' AND length(media_url) > 8 AND ts >= ? ORDER BY id DESC LIMIT 60"
+        "SELECT id, media_url FROM wa_messages WHERE msg_type IN ('image','video','audio','document','sticker') AND media_url GLOB '[0-9]*' AND length(media_url) > 8 AND ts >= ? ORDER BY ts DESC LIMIT 60"
       ).bind(cutoff).all();
       const pending = rs.results || [];
       let ok = 0, fail = 0;
@@ -12952,7 +13000,8 @@ const handler = {
           let leads = [];
           try { const rs = await env.DB.prepare('SELECT * FROM precotiz_pilot ORDER BY updated_at DESC').all(); leads = rs.results || []; } catch (_) {}
           let frozen = [];
-          try { const fr = await env.DB.prepare("SELECT substr(k, 17) AS phone FROM kv_cache WHERE k LIKE 'precotiz_frozen:%' AND v = '1'").all(); frozen = (fr.results || []).map(r => r.phone); } catch (_) {}
+          // El rango sobre k (';' es el carácter siguiente a ':') usa la PK; el LIKE solo escaneaba todo kv_cache.
+          try { const fr = await env.DB.prepare("SELECT substr(k, 17) AS phone FROM kv_cache WHERE k >= 'precotiz_frozen:' AND k < 'precotiz_frozen;' AND k LIKE 'precotiz_frozen:%' AND v = '1'").all(); frozen = (fr.results || []).map(r => r.phone); } catch (_) {}
           // Reparto a los vendedores SECUNDARIOS: cuota diaria por cada uno + cuántos se le asignaron
           // hoy (día AR) + su teléfono de aviso. secundarios[] alimenta la UI; nadia_* quedan por
           // compatibilidad (= el primer secundario, Facu).
@@ -13000,7 +13049,7 @@ const handler = {
         // GET /admin/precotiz/frozen → teléfonos con el bot frenado a mano
         if (request.method === 'GET' && path === '/admin/precotiz/frozen') {
           let phones = [];
-          try { const rs = await env.DB.prepare("SELECT substr(k, 17) AS phone FROM kv_cache WHERE k LIKE 'precotiz_frozen:%' AND v = '1'").all(); phones = (rs.results || []).map(r => r.phone); } catch (_) {}
+          try { const rs = await env.DB.prepare("SELECT substr(k, 17) AS phone FROM kv_cache WHERE k >= 'precotiz_frozen:' AND k < 'precotiz_frozen;' AND k LIKE 'precotiz_frozen:%' AND v = '1'").all(); phones = (rs.results || []).map(r => r.phone); } catch (_) {}
           return json({ ok: true, frozen: phones });
         }
 
@@ -13755,9 +13804,12 @@ const handler = {
 
       if (request.method === 'GET' && path === '/admin/wa/contacts') {
         try {
+          // ?v=: mismo esquema de versión que /admin/contact-labels (triggers trg_ver_wa_contacts_*).
+          const ver = await kvGet(env, 'ver:wa_contacts', null);
+          if (ver && url.searchParams.get('v') === ver) return json({ unchanged: true, ver });
           await env.DB.prepare("CREATE TABLE IF NOT EXISTS wa_contacts (phone TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)").run();
           const rs = await env.DB.prepare('SELECT phone, name, username, pic_url FROM wa_contacts').all();
-          return json({ contacts: rs.results || [] });
+          return json({ contacts: rs.results || [], ver });
         } catch (e) { return json({ contacts: [] }); }
       }
 
@@ -14850,22 +14902,30 @@ const handler = {
           //   admin    → sin filtro
           //   cursos   → solo chats de la bandeja cursos
           //   comercial→ todo MENOS cursos
+          // Los filtros van como (NOT) EXISTS correlacionados contra la PK de wa_chats_summary, NO
+          // como "phone (NOT) IN (SELECT phone FROM wa_chats_summary WHERE ...)": el IN materializa
+          // la lista entera de la bandeja (8k-17k filas) en CADA poll, aunque la ventana de mensajes
+          // sea de segundos. Con EXISTS se lee la ventana por idx_wa_messages_ts + 1 lookup por
+          // mensaje (~17k -> ~70 filas por poll). Mismo resultado (verificado contra prod).
+          // "phone IS NOT NULL" conserva la semántica del NOT IN (un phone NULL quedaba afuera).
+          const _cs = (cond) => `EXISTS (SELECT 1 FROM wa_chats_summary s WHERE s.phone = wa_messages.phone AND ${cond})`;
+          where += ' AND phone IS NOT NULL';
           if (_role === 'cursos') {
-            where += " AND phone IN (SELECT phone FROM wa_chats_summary WHERE inbox = 'cursos')";
+            where += ` AND ${_cs("s.inbox = 'cursos'")}`;
           } else if (_role === 'admin') {
-            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox = 'oculto')";
+            where += ` AND NOT ${_cs("s.inbox = 'oculto'")}`;
           } else {
             // comercial: excluir cursos/oculto/precotiz/privado/corte (igual que inboxClauseForRole).
-            where += " AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE inbox IN ('cursos','oculto','precotiz','privado','corte'))";
+            where += ` AND NOT ${_cs("s.inbox IN ('cursos','oculto','precotiz','privado','corte')")}`;
             // Scope por vendedor (espeja /admin/wa/chats-summary): el secundario (Facundo) SOLO
             // ve/pollea lo asignado a él; el principal (Joaco) todo lo NO asignado a un secundario.
             // Así el poll de notificaciones no se filtra entre vendedores. _uslug se interpola solo
             // si está en la whitelist fija VENDEDORES_SECUNDARIOS -> sin riesgo de inyección.
             const _uslug = String(session.user || '').toLowerCase();
             if (VENDEDORES_SECUNDARIOS.includes(_uslug)) {
-              where += ` AND phone IN (SELECT phone FROM wa_chats_summary WHERE assigned_to = '${_uslug}')`;
+              where += ` AND ${_cs(`s.assigned_to = '${_uslug}'`)}`;
             } else {
-              where += ` AND phone NOT IN (SELECT phone FROM wa_chats_summary WHERE assigned_to IN (${VENDEDORES_SECUNDARIOS.map(s => `'${s}'`).join(',')}))`;
+              where += ` AND NOT ${_cs(`s.assigned_to IN (${VENDEDORES_SECUNDARIOS.map(s => `'${s}'`).join(',')})`)}`;
             }
           }
         }
@@ -15877,6 +15937,12 @@ const handler = {
       // ===== Contact Labels =====
       if (request.method === 'GET' && path === '/admin/contact-labels') {
         try {
+          // ?v=<versión que ya tiene el front>: si la tabla no cambió desde entonces (versión que
+          // suben los triggers trg_ver_contact_labels_*), respondemos {unchanged:true} sin re-leer
+          // las ~9k filas. La versión se lee ANTES que los datos: si entra una escritura en el medio,
+          // el front recibe datos más nuevos que la versión y simplemente re-pide en el próximo poll.
+          const ver = await kvGet(env, 'ver:contact_labels', null);
+          if (ver && url.searchParams.get('v') === ver) return json({ unchanged: true, ver });
           await env.DB.prepare('CREATE TABLE IF NOT EXISTS contact_labels (phone TEXT NOT NULL, label_id INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (phone, label_id))').run();
           const rs = await env.DB.prepare('SELECT phone, label_id FROM contact_labels').all();
           // Group by phone
@@ -15885,7 +15951,7 @@ const handler = {
             if (!map[r.phone]) map[r.phone] = [];
             map[r.phone].push(r.label_id);
           }
-          return json({ contactLabels: map });
+          return json({ contactLabels: map, ver });
         } catch (e) { return json({ contactLabels: {} }); }
       }
       if (request.method === 'POST' && path === '/admin/contact-labels') {
