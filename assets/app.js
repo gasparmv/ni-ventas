@@ -4783,7 +4783,30 @@ function renderDashboard() {
   // Nadia (2da vendedora): dashboard reducido -> SOLO su panel "Tu sueldo". No ve
   // las métricas del negocio (ventas totales, AOV, cobrado, gráficos, etc.).
   if (isSecundario(STATE.user)) {
+    // Selector de mes también para los secundarios (Facu/Agus): pueden navegar su sueldo por
+    // período. Reusa los mismos chips .period-selector (los handlers data-period* son globales,
+    // y panelSueldoHtml ya recalcula según getDashMonths()). Chips desde el mes de inicio del vendedor.
+    const sec = COMERCIALES_SECUNDARIOS[_userKey(STATE.user)] || {};
+    const DESDE = sec.desde || '2026-01';
+    const months = availableMonths().filter(m => m >= DESDE);
+    const isAll = STATE.dashMonths === 'all';
+    const isDefault = STATE.dashMonths === null;
     return `
+    <div class="period-selector">
+      <span class="ps-label">Período</span>
+      <div class="ps-chips">
+        <button class="ps-chip ${isDefault?'active':''}" data-period="current">Mes actual</button>
+        <button class="ps-chip ${isAll?'active':''}" data-period="all">Todos</button>
+        ${months.map(m => {
+          const [y,mm] = m.split('-');
+          const label = new Date(parseInt(y), parseInt(mm)-1, 1).toLocaleDateString('es-AR', {month:'short'}).replace('.','');
+          const active = !isAll && !isDefault && STATE.dashMonths instanceof Set && STATE.dashMonths.has(m);
+          return `<button class="ps-chip ${active?'active':''}" data-period-m="${m}">${label} ${y.slice(2)}</button>`;
+        }).join('')}
+      </div>
+      <span class="ps-meta">${dashMonthsLabel()}</span>
+    </div>
+
     <div class="page-head">
       <div>
         <div class="eyebrow">${new Date().toLocaleDateString('es-AR', {day:'2-digit', month:'long', year:'numeric'})}</div>
