@@ -2442,7 +2442,8 @@ function extractFirstJson(text) {
 
 // Devuelve { ok, data, error, status, raw }. Reintenta 1 vez ante saturación
 // (429/529) o error de red. data = el JSON parseado del modelo.
-async function precotizLlm(env, fullText, fwText, imageBlocks) {
+// meta = { phone, by } → solo para registrar el gasto en copilot_usage (kind 'precotiz').
+async function precotizLlm(env, fullText, fwText, imageBlocks, meta) {
   if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'sin ANTHROPIC_API_KEY' };
   const userContent = (Array.isArray(imageBlocks) && imageBlocks.length)
     ? [...imageBlocks, { type: 'text', text: fullText }]
@@ -2473,6 +2474,7 @@ async function precotizLlm(env, fullText, fwText, imageBlocks) {
         if ((r.status === 429 || r.status === 529) && intento === 0) { await new Promise(s => setTimeout(s, 1500)); continue; }
         return { ok: false, error: (j && j.error && j.error.message) || ('HTTP ' + r.status), status: r.status };
       }
+      await logAnthropicUsage(env, 'precotiz', payload.model, j, meta && meta.phone, (meta && meta.by) || 'bot');
       const text = j.content?.[0]?.text || '';
       const jsonStr = extractFirstJson(text);
       if (!jsonStr) return { ok: false, error: 'sin JSON en la respuesta', raw: text.slice(0, 600) };
@@ -2713,7 +2715,7 @@ async function processPrecotizPilot(env) {
     if (!ctx) continue;
     const fw = await getActiveFramework(env);
     const imgs = await precotizImageBlocks(env, lead.phone);
-    const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs);
+    const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs, { phone: lead.phone });
     if (!out.ok) continue;
     const res = out.data;
 
@@ -2853,7 +2855,7 @@ async function processPrecotizPilot(env) {
     if (!ctx) continue;
     const fw = await getActiveFramework(env);
     const imgs = await precotizImageBlocks(env, phone);
-    const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs);
+    const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs, { phone });
     if (!out.ok) { await precotizLog(env, phone, 'error_ia', { motivo: out.error }); continue; } // la IA falló (429/refusal/etc.) — queda logueado para auditar
     const res = out.data;
     if (!res || res.es_carteles === false || res.frenar) {                   // no entra al piloto
@@ -3750,7 +3752,7 @@ async function processCartelPagos(env, { phone = null, force = false } = {}) {
     try { cands = (await env.DB.prepare(sql).bind(...(phoneNorm ? [porPagarId, phoneNorm] : [porPagarId])).all()).results || []; } catch (_) {}
     for (const c of cands) {
       let esPago = false;
-      try { const a = await analyzePaymentProof(env, c.r2Key, c.msgType === 'document' ? 'application/pdf' : ''); esPago = !!(a && a.es_comprobante); } catch (_) {}
+      try { const a = await analyzePaymentProof(env, c.r2Key, c.msgType === 'document' ? 'application/pdf' : '', { phone: c.phone, by: 'pago_cartel' }); esPago = !!(a && a.es_comprobante); } catch (_) {}
       try { await env.DB.prepare("INSERT OR IGNORE INTO oc_pago_check (wamid, phone, es_comprobante, checked_at) VALUES (?,?,?,?)").bind(c.wamid, c.phone, esPago ? 1 : 0, new Date().toISOString()).run(); } catch (_) {}
       let action = 'no_comprobante';
       if (esPago) {
@@ -3841,7 +3843,8 @@ Un "pago" solo se FRENA (lo atiende una persona) cuando NO hay línea [COBRO PEN
 
 Devolvé SOLO un JSON, sin nada alrededor:
 {"es_corte":bool,"intencion_clara":bool,"enviar_cable":bool,"enviar_detalle_cobro":bool,"derivar_ventas":bool,"frenar":bool,"motivo":"string corto (si frenás por una pregunta que NO sabés, poné acá la pregunta TEXTUAL del cliente)","cortes":[{"nombre":"string","medida":"string","cantidad":1,"aclaraciones":"string","tiene_foto":bool,"completo":bool}],"datos_cliente":{"nombre":"","apellido":"","dni":"","direccion":"","provincia":"","cp":"","telefono_contacto":""},"mensajes":["..."]}`;
-async function corteLlm(env, fullText, imageBlocks, ahoraOverride) {
+// meta = { phone, by } → solo para registrar el gasto en copilot_usage (kind 'corte').
+async function corteLlm(env, fullText, imageBlocks, ahoraOverride, meta) {
   if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'sin ANTHROPIC_API_KEY' };
   // Base de conocimiento que CRECE: respuestas curadas que vamos sumando (kv corte_knowledge). Se
   // inyectan al system prompt así el bot aprende sin re-deploy. Cuando el bot frena por una pregunta
@@ -3875,6 +3878,7 @@ async function corteLlm(env, fullText, imageBlocks, ahoraOverride) {
       const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify(payload) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) { if ((r.status === 429 || r.status === 529) && i === 0) { await new Promise(s => setTimeout(s, 1500)); continue; } return { ok: false, error: (j && j.error && j.error.message) || ('HTTP ' + r.status) }; }
+      await logAnthropicUsage(env, 'corte', payload.model, j, meta && meta.phone, (meta && meta.by) || 'bot');
       const jsonStr = extractFirstJson(j.content?.[0]?.text || '');
       if (!jsonStr) return { ok: false, error: 'sin JSON' };
       try { return { ok: true, data: JSON.parse(jsonStr) }; } catch (_) { return { ok: false, error: 'JSON parse' }; }
@@ -3950,7 +3954,7 @@ async function corteVigiaPago(env, phone, opts = {}) {
   let img;
   try { img = await env.DB.prepare("SELECT wamid, media_url AS r2Key, msg_type AS msgType FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type IN ('image','document') AND media_url IS NOT NULL AND media_url!='' AND ts > ? AND wamid NOT IN (SELECT wamid FROM corte_pago_check) ORDER BY ts DESC LIMIT 1").bind(phone, isoHace(winHours * 3600 * 1000)).first(); } catch (_) {}
   if (!img || !img.r2Key) return false; // todavía no mandó comprobante (imagen/PDF)
-  const proof = await analyzePaymentProof(env, img.r2Key, img.msgType === 'document' ? 'application/pdf' : '');
+  const proof = await analyzePaymentProof(env, img.r2Key, img.msgType === 'document' ? 'application/pdf' : '', { phone, by: 'pago_corte' });
   if (!proof) return false; // fallo TRANSITORIO del OCR (R2 sin el archivo, media 429, hipo de Anthropic) → NO quemar el wamid: se reintenta el próximo tick
   const es = !!(proof && proof.es_comprobante);
   const monto = (proof && +proof.monto) || 0;
@@ -4481,7 +4485,7 @@ async function processCortePilot(env) {
           else cobroCtx = '[CORTE EN PROCESO (interno): este cliente YA tiene un corte de esta semana TOMADO y en producción (' + act.n + ' diseño(s), ya cortado). Su pedido YA está — NO le pidas medida/nombre/foto de eso ni lo trates como pedido nuevo. Si pregunta por el estado / cuándo está / cómo lo recibe: su corte ya está cortado y se despacha el LUNES (envío 24-72hs a todo el país, o retiro en el taller de Colegiales). Si menciona un pago o manda un comprobante, decile que lo estás viendo. Tomá un pedido NUEVO SOLO si CLARAMENTE quiere sumar algo DISTINTO a lo ya pedido.]\n\n';
         }
       } catch (_) {}
-      const out = await corteLlm(env, cobroCtx + infoCliente + ctx.fullText, imgs);
+      const out = await corteLlm(env, cobroCtx + infoCliente + ctx.fullText, imgs, undefined, { phone });
       if (!out.ok) continue;
       const res = out.data || {};
       // DETALLE DE COBRO: el cliente pidió el detalle de lo que está pagando → le mandamos el desglose completo.
@@ -4619,7 +4623,7 @@ const JUNIO_VIVO_MSG = 'Perfectoo, acá vamos a transmitir en vivo mañana 19 hs
 // ambiguo caía en no_positiva) y se comía respuestas cortas afirmativas tipo
 // "Si por favor" → no recibían el link. Si la IA no está → no_positiva (Abril lo
 // maneja a mano viendo el chat revelado).
-async function analyzeResponseSentiment(env, texto) {
+async function analyzeResponseSentiment(env, texto, phone) {
   const t = String(texto || '').trim();
   if (!t || !env.ANTHROPIC_API_KEY) return 'no_positiva';
   try {
@@ -4635,6 +4639,7 @@ async function analyzeResponseSentiment(env, texto) {
     });
     const j = await r.json();
     if (!r.ok) return 'no_positiva';
+    await logAnthropicUsage(env, 'clasificador', 'claude-sonnet-4-5', j, phone, 'sentiment_vivo');
     // Generoso: positiva por defecto, no_positiva SOLO si la IA dice NEGATIVA.
     return (j.content?.[0]?.text || '').toUpperCase().includes('NEGATIVA') ? 'no_positiva' : 'positiva';
   } catch (e) { return 'no_positiva'; }
@@ -4643,7 +4648,7 @@ async function analyzeResponseSentiment(env, texto) {
 // Sentiment del feedback del minicurso. Como el regalo ya está prometido/ganado,
 // somos GENEROSOS: en duda → positiva. Solo 'no_positiva' si es claramente
 // hostil/spam/rechazo, o si la IA no está disponible (ahí lo maneja Abril).
-async function analyzeMinicursoFeedback(env, texto) {
+async function analyzeMinicursoFeedback(env, texto, phone) {
   const t = String(texto || '').trim();
   if (!t || !env.ANTHROPIC_API_KEY) return 'no_positiva';
   try {
@@ -4659,6 +4664,7 @@ async function analyzeMinicursoFeedback(env, texto) {
     });
     const j = await r.json();
     if (!r.ok) return 'no_positiva';
+    await logAnthropicUsage(env, 'clasificador', 'claude-sonnet-4-5', j, phone, 'minicurso_feedback');
     return (j.content?.[0]?.text || '').toUpperCase().includes('NEGATIVA') ? 'no_positiva' : 'positiva';
   } catch (e) { return 'no_positiva'; }
 }
@@ -4961,7 +4967,7 @@ async function processCustomBroadcasts(env) {
 
 // Sentiment GENERICO para broadcasts custom: clasifica la respuesta del contacto
 // como 'positiva' o 'no_positiva'. Generoso: ante la duda, positiva.
-async function analyzeBroadcastReply(env, texto) {
+async function analyzeBroadcastReply(env, texto, phone) {
   const t = String(texto || '').trim();
   if (!t) return 'no_positiva';               // sin texto (ej. solo reacción/imagen) -> NO disparar la rama positiva
   if (!env.ANTHROPIC_API_KEY) return 'positiva';
@@ -4978,6 +4984,7 @@ async function analyzeBroadcastReply(env, texto) {
     });
     const j = await r.json();
     if (!r.ok) return 'positiva';
+    await logAnthropicUsage(env, 'clasificador', 'claude-sonnet-4-5', j, phone, 'broadcast_reply');
     return (j.content?.[0]?.text || '').toUpperCase().includes('NEGATIVA') ? 'no_positiva' : 'positiva';
   } catch (e) { return 'positiva'; }
 }
@@ -5027,7 +5034,7 @@ async function processBroadcastReplies(env) {
         const m = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'reaction' AND ts >= ? AND body != '' ORDER BY ts ASC LIMIT 20").bind(row.phone, row.replied_at).all();
         texto = (m.results || []).map(x => x.body).join('\n');
       } catch (_) {}
-      const sentiment = await analyzeBroadcastReply(env, texto);
+      const sentiment = await analyzeBroadcastReply(env, texto, row.phone);
       // Rama positiva: si el broadcast tiene reveal_inbox, des-ocultar el chat a esa bandeja
       // (ej. 'cursos' = Abril) para que cierren el pago. La rama negativa NO revela (queda oculto).
       if (sentiment === 'positiva' && row.reveal_inbox) {
@@ -5266,7 +5273,7 @@ async function esAlumnoCursos(env, phone) {
 // ¿El cliente indicó que YA vio/terminó la clase 2? Gate del follow-up (que SOLO
 // sale si NO vio la clase 2). Conservadores para el "sí vio": solo true ante señal
 // clara; ante duda -> false (mandamos el recordatorio, es suave y barato).
-async function analyzeVioClase2(env, texto) {
+async function analyzeVioClase2(env, texto, phone) {
   const t = String(texto || '').trim();
   if (!t || !env.ANTHROPIC_API_KEY) return false;
   try {
@@ -5282,6 +5289,7 @@ async function analyzeVioClase2(env, texto) {
     });
     const j = await r.json();
     if (!r.ok) return false;
+    await logAnthropicUsage(env, 'clasificador', 'claude-sonnet-4-5', j, phone, 'vio_clase2');
     return (j.content?.[0]?.text || '').trim().toUpperCase().startsWith('S');
   } catch (e) { return false; }
 }
@@ -5441,7 +5449,7 @@ async function processMinicursoLanding(env) {
       if (!cl?.meta?.changes) continue;
       let texto = '';
       try { const m = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'reaction' AND ts >= ? AND body != '' ORDER BY ts ASC LIMIT 20").bind(phone, r.opener_sent_at || '').all(); texto = (m.results || []).map(x => x.body).join('\n'); } catch (_) {}
-      const sentiment = await analyzeMinicursoFeedback(env, texto); // generoso: duda -> positiva
+      const sentiment = await analyzeMinicursoFeedback(env, texto, phone); // generoso: duda -> positiva
       if (sentiment === 'positiva') {
         const res = await waSendText(env, phone, MINICURSO_LANDING_CLASE2_MSG);
         const sentTs = new Date().toISOString();
@@ -5478,7 +5486,7 @@ async function processMinicursoLanding(env) {
         // Gate 2: ¿ya vio la clase 2 (según la conversación)? Si sí -> no mandamos.
         let texto = '';
         try { const m = await env.DB.prepare("SELECT direction, body FROM wa_messages WHERE phone = ? AND ts >= ? AND body != '' AND msg_type != 'reaction' ORDER BY ts ASC LIMIT 30").bind(phone, r.opener_sent_at || '').all(); texto = (m.results || []).map(x => (x.direction === 'inbound' ? 'Cliente: ' : 'Abril: ') + x.body).join('\n'); } catch (_) {}
-        if (await analyzeVioClase2(env, texto)) { try { await env.DB.prepare("UPDATE minicurso_landing SET vio_clase2 = 1, followup_sent_at = 'skipped', guard_reason = 'vio_clase2', stage = 'done', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {} continue; }
+        if (await analyzeVioClase2(env, texto, phone)) { try { await env.DB.prepare("UPDATE minicurso_landing SET vio_clase2 = 1, followup_sent_at = 'skipped', guard_reason = 'vio_clase2', stage = 'done', updated_at = ? WHERE phone = ?").bind(nowIso, phone).run(); } catch (_) {} continue; }
         // Mandar. ¿Ventana abierta? (último inbound < 24h).
         let lastIn = null;
         try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound'").bind(phone).first(); lastIn = li && li.t; } catch (_) {}
@@ -5597,7 +5605,7 @@ async function processCursosFlow(env) {
       if (!cl?.meta?.changes) continue;
       let texto = '';
       try { const m = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'reaction' AND ts >= ? AND body != '' ORDER BY ts ASC LIMIT 20").bind(phone, sinceTs).all(); texto = (m.results || []).map(x => x.body).join('\n'); } catch (_) {}
-      const sentiment = await analyzeBroadcastReply(env, texto);
+      const sentiment = await analyzeBroadcastReply(env, texto, phone);
       if (r.stage === 'analyze1') {
         if (sentiment === 'positiva') {
           const b = Date.now() + 2 * 60 * 1000;
@@ -5731,7 +5739,7 @@ async function processCursosCampaignPending(env) {
       ).bind(phone, anchor).all();
       const combinedText = (msgs.results || []).map(m => String(m.body || '').trim()).filter(Boolean).join(' · ');
       let sentiment = 'no_positiva';
-      if (combinedText) sentiment = await analyzeResponseSentiment(env, combinedText);
+      if (combinedText) sentiment = await analyzeResponseSentiment(env, combinedText, phone);
       try { await env.DB.prepare("UPDATE wa_cursos_campaign SET sentiment = ? WHERE phone = ?").bind(sentiment, phone).run(); } catch (_) {}
       const now = new Date().toISOString();
       if (sentiment === 'positiva') {
@@ -5933,7 +5941,7 @@ async function processMinicursoGiftPending(env) {
         try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'minicurso_gift'").bind(phone).run(); } catch (_) {}
         continue;
       }
-      const sentiment = await analyzeMinicursoFeedback(env, combinedText);
+      const sentiment = await analyzeMinicursoFeedback(env, combinedText, phone);
       if (sentiment !== 'positiva') {
         try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE phone = ? AND kind = 'minicurso_gift'").bind(phone).run(); } catch (_) {}
         continue;
@@ -6289,9 +6297,7 @@ async function analyzeChatWithClaude(env, phone, modelOverride = 'sonnet') {
     // Estimación de costo (precios junio 2026, USD)
     const ti = j.usage?.input_tokens || 0;
     const to = j.usage?.output_tokens || 0;
-    const cost = model.includes('opus')
-      ? (ti * 15 + to * 75) / 1000000
-      : (ti * 3 + to * 15) / 1000000;
+    const cost = anthropicCostUsd(model, j.usage);
 
     // Guardar histórico
     await env.DB.prepare(
@@ -10089,7 +10095,8 @@ async function processGasparResendBackfill(env) {
 }
 
 // OCR potente del comprobante con Claude visión (imagen o PDF). Devuelve el JSON parseado o null.
-async function analyzePaymentProof(env, r2Key, mimeHint) {
+// meta = { phone, by } → solo para registrar el gasto en copilot_usage (kind 'ocr').
+async function analyzePaymentProof(env, r2Key, mimeHint, meta) {
   if (!env.ANTHROPIC_API_KEY || !env.MEDIA || !r2Key) return null;
   let obj; try { obj = await env.MEDIA.get(r2Key); } catch (_) { return null; }
   if (!obj) return null;
@@ -10118,6 +10125,7 @@ async function analyzePaymentProof(env, r2Key, mimeHint) {
   } catch (_) { return null; }
   let j; try { j = await r.json(); } catch (_) { return null; }
   if (!r.ok) return null;
+  await logAnthropicUsage(env, 'ocr', 'claude-sonnet-4-5', j, meta && meta.phone, (meta && meta.by) || '');
   let txt = String(j.content?.[0]?.text || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
   try { return JSON.parse(txt); } catch (_) { return { es_comprobante: false }; }
 }
@@ -10175,7 +10183,7 @@ async function processPaymentProof(env, m) {
     ).bind(m.wamid, m.phone, m.senderName || '', m.r2Key || '', String(m.caption || '').slice(0, 500), m.ts || new Date().toISOString(), new Date().toISOString()).run();
     if (!res?.meta?.changes) return; // ya procesado
   } catch (_) { return; }
-  const a = await analyzePaymentProof(env, m.r2Key, m.msgType === 'document' ? 'application/pdf' : '');
+  const a = await analyzePaymentProof(env, m.r2Key, m.msgType === 'document' ? 'application/pdf' : '', { phone: m.phone, by: 'pago_lanzamiento' });
   const esPago = !!(a && a.es_comprobante);
   const monto = (a && +a.monto) || 0;
   const cuenta = resolveCuenta(a);
@@ -10914,12 +10922,12 @@ async function synthesizeFrameworkImprovements(env, opts = {}) {
     catch (e) { return { ok: false, error: 'JSON parse error', raw: text.slice(0, 1500) }; }
     const improvements = Array.isArray(parsed.improvements) ? parsed.improvements.slice(0, 5) : [];
 
-    // Costo (Opus: input $15, output $75 /MTok).
+    // Costo (Opus 4.5: input $5, output $25 /MTok; ver anthropicCostUsd).
     const ti = j.usage?.input_tokens || 0;
     const to = j.usage?.output_tokens || 0;
     const tcr = j.usage?.cache_read_input_tokens || 0;
     const tcw = j.usage?.cache_creation_input_tokens || 0;
-    const cost = +(((ti * 15 + tcw * 18.75 + tcr * 1.5 + to * 75) / 1000000).toFixed(5));
+    const cost = anthropicCostUsd(model, j.usage);
     try {
       await env.DB.prepare(
         `INSERT INTO copilot_usage (phone, kind, model, tokens_in, tokens_out, cache_read, cache_creation, cost_usd, created_by, created_at)
@@ -11011,7 +11019,7 @@ async function synthesizeCorteKnowledge(env, opts = {}) {
     let parsed; try { parsed = JSON.parse(String(j.content?.[0]?.text || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()); } catch (e) { return { ok: false, error: 'JSON parse error', raw: String(j.content?.[0]?.text || '').slice(0, 1500) }; }
     const improvements = Array.isArray(parsed.improvements) ? parsed.improvements.slice(0, 6) : [];
     const ti = j.usage?.input_tokens || 0, to = j.usage?.output_tokens || 0, tcr = j.usage?.cache_read_input_tokens || 0, tcw = j.usage?.cache_creation_input_tokens || 0;
-    const cost = +(((ti * 15 + tcw * 18.75 + tcr * 1.5 + to * 75) / 1000000).toFixed(5));
+    const cost = anthropicCostUsd(model, j.usage);
     try { await env.DB.prepare("INSERT INTO copilot_usage (phone, kind, model, tokens_in, tokens_out, cache_read, cache_creation, cost_usd, created_by, created_at) VALUES (NULL,'synthesis',?,?,?,?,?,?,?,?)").bind(model, ti, to, tcr, tcw, cost, opts.createdBy || 'cron', new Date().toISOString()).run(); } catch (_) {}
     const batchId = 'cor_' + Date.now(); const now = new Date().toISOString(); let saved = 0;
     for (const imp of improvements) {
@@ -11124,23 +11132,65 @@ async function seedDefaultServices(env) {
   }
 }
 
-// Costo real de Anthropic del mes en curso (copilot_usage + wa_chat_analyses).
+// Precios Anthropic (USD por MTok) [input, output]. Cache write (5 min) = 1,25× input; cache read = 0,1× input.
+// Modelo desconocido → precio Sonnet (mejor estimar algo que dejarlo en 0).
+const ANTHROPIC_PRICES = { 'claude-opus-4-5': [5, 25], 'claude-sonnet-4-5': [3, 15], 'claude-haiku-4-5': [1, 5] };
+function anthropicCostUsd(model, u) {
+  const m = String(model || '');
+  const [pin, pout] = ANTHROPIC_PRICES[Object.keys(ANTHROPIC_PRICES).find(k => m.startsWith(k)) || 'claude-sonnet-4-5'];
+  const ti = (u && u.input_tokens) || 0, to = (u && u.output_tokens) || 0;
+  const tcr = (u && u.cache_read_input_tokens) || 0, tcw = (u && u.cache_creation_input_tokens) || 0;
+  return +(((ti * pin + tcw * pin * 1.25 + tcr * pin * 0.1 + to * pout) / 1000000).toFixed(6));
+}
+
+// Registra una llamada a Claude en copilot_usage para que /admin/costs muestre el gasto real.
+// kind: precotiz | corte | ocr | clasificador (suggest y synthesis insertan por su cuenta). by = origen
+// (bot, pago_cartel, broadcast_reply, dry-run...). j = la respuesta JSON de /v1/messages.
+// Best-effort: nunca tira, no puede frenar a un bot.
+async function logAnthropicUsage(env, kind, model, j, phone, by) {
+  try {
+    const u = j && j.usage;
+    if (!u) return;
+    await env.DB.prepare(
+      'INSERT INTO copilot_usage (phone, kind, model, tokens_in, tokens_out, cache_read, cache_creation, cost_usd, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).bind(phone ? String(phone) : null, kind, model, u.input_tokens || 0, u.output_tokens || 0, u.cache_read_input_tokens || 0, u.cache_creation_input_tokens || 0, anthropicCostUsd(model, u), by || '', new Date().toISOString()).run();
+  } catch (_) {}
+}
+
+// Costo real de Anthropic del mes en curso: copilot_usage (copiloto, síntesis, bots de precotización
+// y corte, OCR de comprobantes, clasificadores) + wa_chat_analyses. by_kind / by_source = desglose.
 async function computeAnthropicMonthCost(env) {
   const ms = new Date(); ms.setUTCDate(1); ms.setUTCHours(0, 0, 0, 0); const m = ms.toISOString();
-  const out = { total: 0, suggest: 0, synthesis: 0, analysis: 0 };
+  const out = { total: 0, suggest: 0, synthesis: 0, analysis: 0, precotiz: 0, corte: 0, ocr: 0, clasificador: 0, calls: 0, since: m, by_kind: [], by_source: [] };
+  const byKind = {};
   try {
-    const cu = (await env.DB.prepare(
-      `SELECT kind, ROUND(SUM(cost_usd), 4) AS c FROM copilot_usage WHERE created_at >= ? GROUP BY kind`
+    const rows = (await env.DB.prepare(
+      `SELECT kind, created_by, COUNT(*) AS n, SUM(cost_usd) AS c, SUM(tokens_in) AS ti, SUM(tokens_out) AS tout, SUM(cache_read) AS tcr, SUM(cache_creation) AS tcw
+       FROM copilot_usage WHERE created_at >= ? GROUP BY kind, created_by`
     ).bind(m).all()).results || [];
-    cu.forEach(r => { if (r.kind === 'suggest') out.suggest = r.c || 0; else if (r.kind === 'synthesis') out.synthesis = r.c || 0; });
+    for (const r of rows) {
+      const k = r.kind || '?';
+      const b = byKind[k] || (byKind[k] = { kind: k, calls: 0, cost_usd: 0, tokens_in: 0, tokens_out: 0, cache_read: 0, cache_creation: 0 });
+      b.calls += r.n || 0; b.cost_usd += r.c || 0;
+      b.tokens_in += r.ti || 0; b.tokens_out += r.tout || 0; b.cache_read += r.tcr || 0; b.cache_creation += r.tcw || 0;
+      // En suggest/synthesis created_by es el usuario del CRM (o 'cron'); en el resto, el origen de la llamada.
+      out.by_source.push({ kind: k, source: r.created_by || '', calls: r.n || 0, cost_usd: +((r.c || 0).toFixed(4)) });
+    }
   } catch (_) {}
   try {
     const an = await env.DB.prepare(
-      `SELECT ROUND(SUM(cost_usd_estimated), 4) AS c FROM wa_chat_analyses WHERE analyzed_at >= ?`
+      `SELECT COUNT(*) AS n, SUM(cost_usd_estimated) AS c, SUM(tokens_in) AS ti, SUM(tokens_out) AS tout FROM wa_chat_analyses WHERE analyzed_at >= ?`
     ).bind(m).first();
-    out.analysis = an?.c || 0;
+    if (an && an.n) byKind.analysis = { kind: 'analysis', calls: an.n, cost_usd: an.c || 0, tokens_in: an.ti || 0, tokens_out: an.tout || 0, cache_read: 0, cache_creation: 0 };
   } catch (_) {}
-  out.total = +((out.suggest + out.synthesis + out.analysis).toFixed(4));
+  out.by_kind = Object.values(byKind).map(b => ({ ...b, cost_usd: +b.cost_usd.toFixed(4) })).sort((a, b) => b.cost_usd - a.cost_usd);
+  out.by_source.sort((a, b) => b.cost_usd - a.cost_usd);
+  let total = 0;
+  for (const b of out.by_kind) {
+    total += b.cost_usd; out.calls += b.calls;
+    if (['suggest', 'synthesis', 'analysis', 'precotiz', 'corte', 'ocr', 'clasificador'].includes(b.kind)) out[b.kind] = b.cost_usd;
+  }
+  out.total = +total.toFixed(4);
   return out;
 }
 
@@ -13008,7 +13058,7 @@ const handler = {
           if (!ctx) return json({ error: 'sin mensajes para ese phone' }, 404);
           const fw = await getActiveFramework(env);
           const imgs = await precotizImageBlocks(env, num);
-          const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs);
+          const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs, { phone: num, by: 'dry-run' });
           return json({ ok: out.ok, phone: num, result: out.data || null, error: out.error || null, status: out.status || null, raw: out.raw || null });
         }
 
@@ -17950,7 +18000,7 @@ const handler = {
             if (ctx) {
               const imgs = await precotizImageBlocks(env, tp, 3, 3);
               diag.imgs = imgs.length;
-              const out = await corteLlm(env, ctx.fullText, imgs);
+              const out = await corteLlm(env, ctx.fullText, imgs, undefined, { phone: tp, by: 'diag' });
               diag.llm = out.ok ? { ok: true, data: out.data } : { ok: false, error: out.error, raw: out.raw };
             }
           } catch (e) { diag.exc = String((e && e.message) || e); }
@@ -17979,7 +18029,7 @@ const handler = {
         let pre = '';
         if (body.nuevo === true) pre = '[DATOS DEL CLIENTE (interno): Es cliente NUEVO, no está en la base. NO tenemos sus datos de envío.]\n\n';
         else if (body.nuevo === false) pre = '[DATOS DEL CLIENTE (interno): Cliente registrado. Ya tenemos sus datos de envío.]\n\n';
-        const out = await corteLlm(env, pre + text, imgs, body.ahora);
+        const out = await corteLlm(env, pre + text, imgs, body.ahora, { by: 'simulate' });
         return json({ ok: out.ok, imgs: imgs.length, data: out.data, error: out.error });
       }
       // POST /admin/corte/vigia-sweep → corre SOLO el vigía de pagos sobre TODOS los clientes en cobranza
@@ -18008,7 +18058,7 @@ const handler = {
         let body = {}; try { body = await request.json(); } catch (_) {}
         const key = String(body.key || '');
         if (!key) return json({ error: 'falta key' }, 400);
-        const out = await analyzePaymentProof(env, key, /\.pdf$/i.test(key) ? 'application/pdf' : '');
+        const out = await analyzePaymentProof(env, key, /\.pdf$/i.test(key) ? 'application/pdf' : '', { by: 'ocr-test' });
         return json({ ok: true, key, proof: out });
       }
       // GET /admin/corte/sheet-test → confirma identidad + acceso de la SA del worker a Venta_Insumos (sin escribir).
