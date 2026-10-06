@@ -1766,6 +1766,20 @@ const CAMPAIGN_TRIP_STREAK = 3;
 const CAMPAIGN_PAUSE_STEPS_MS = [15, 30, 60, 120].map(m => m * 60 * 1000);  // pausa del flujo, creciente
 const CAMPAIGN_TEMPLATE_PAUSE_MS = 3 * 60 * 60 * 1000;                      // Meta pausa plantillas 3h la 1ra vez
 
+// ===== Proformas (beta, oct-2026): presupuesto formal en PDF para trabajos grandes (Presupuestos → "📄 Proforma") =====
+// data_json = todo el documento (cliente, ítems, condiciones, imágenes por key de R2). numero = correlativo ÚNICO
+// (índice) → se asigna en el mismo INSERT con MAX+1 y se reintenta si dos guardados chocan.
+let _proformasOk = false;
+async function ensureProformasSchema(env) {
+  if (_proformasOk) return true;
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS proformas (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, cliente TEXT, telefono TEXT, total REAL, data_json TEXT, created_by TEXT, created_at TEXT, updated_at TEXT)").run();
+    await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS uq_proformas_numero ON proformas(numero)").run();
+    _proformasOk = true;
+  } catch (_) {}
+  return _proformasOk;
+}
+
 let _sendRetryTableOk = false;
 async function ensureSendRetryTable(env) {
   if (_sendRetryTableOk) return true;
@@ -13261,6 +13275,49 @@ const handler = {
         if (!t) return json({ ok: true, ticket: null });
         let fields = null; try { if (t.data) fields = JSON.parse(t.data); } catch (_) {}
         return json({ ok: true, ticket: { numero: t.numero, cliente: t.cliente, detalle: t.detalle, fields, created_by: t.created_by, created_at: t.created_at } });
+      }
+
+      // ----- Proformas (beta, solo admin): listar / abrir / guardar -----
+      if (path === '/admin/proformas' || /^\/admin\/proformas\/\d+$/.test(path)) {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        if (!(await ensureProformasSchema(env))) return json({ error: 'no se pudo preparar la tabla de proformas' }, 500);
+        const pfId = path === '/admin/proformas' ? 0 : parseInt(path.split('/').pop(), 10);
+        if (request.method === 'GET' && !pfId) {
+          const rs = await env.DB.prepare('SELECT id, numero, cliente, telefono, total, created_by, created_at, updated_at FROM proformas ORDER BY updated_at DESC, id DESC LIMIT 40').all();
+          return json({ ok: true, proformas: rs.results || [] });
+        }
+        if (request.method === 'GET' && pfId) {
+          const r = await env.DB.prepare('SELECT * FROM proformas WHERE id = ?').bind(pfId).first();
+          if (!r) return json({ error: 'no existe' }, 404);
+          let data = null; try { data = JSON.parse(r.data_json || 'null'); } catch (_) {}
+          return json({ ok: true, proforma: { id: r.id, numero: r.numero, data, created_by: r.created_by, created_at: r.created_at, updated_at: r.updated_at } });
+        }
+        if (request.method === 'POST' && !pfId) {
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const data = (body && typeof body.data === 'object' && body.data) ? body.data : null;
+          if (!data) return json({ error: 'faltan los datos de la proforma' }, 400);
+          const dataJson = JSON.stringify(data);
+          if (dataJson.length > 200000) return json({ error: 'la proforma es demasiado grande' }, 413);
+          const cliente = String(data.cliente || '').slice(0, 200);
+          const tel = String(data.telefono || '').replace(/\D/g, '').slice(0, 20);
+          const total = (Array.isArray(data.items) ? data.items : []).reduce((a, it) => a + (Number(it.cantidad) || 0) * (Number(it.precio) || 0), 0);
+          const now = new Date().toISOString();
+          const id = parseInt(body.id, 10) || 0;
+          if (id) {
+            const r = await env.DB.prepare('UPDATE proformas SET cliente=?, telefono=?, total=?, data_json=?, updated_at=? WHERE id=? RETURNING id, numero').bind(cliente, tel, total, dataJson, now, id).first();
+            if (!r) return json({ error: 'esa proforma ya no existe' }, 404);
+            return json({ ok: true, id: r.id, numero: r.numero });
+          }
+          for (let intento = 0; intento < 3; intento++) {
+            try {
+              const r = await env.DB.prepare('INSERT INTO proformas (numero, cliente, telefono, total, data_json, created_by, created_at, updated_at) SELECT COALESCE(MAX(numero), 0) + 1, ?, ?, ?, ?, ?, ?, ? FROM proformas RETURNING id, numero')
+                .bind(cliente, tel, total, dataJson, String(session.user || ''), now, now).first();
+              if (r) return json({ ok: true, id: r.id, numero: r.numero });
+            } catch (e) { if (!/UNIQUE/i.test(String(e && e.message))) return json({ error: String((e && e.message) || e) }, 500); }
+          }
+          return json({ error: 'no se pudo numerar la proforma, probá de nuevo' }, 500);
+        }
+        return json({ error: 'método no soportado' }, 405);
       }
 
       // ----- Piloto de pre cotización (solo Gaspar): estado, control, dry-run, aprobar -----

@@ -7396,6 +7396,9 @@ function bindPresupuestos() {
   if (fuBtn) fuBtn.onclick = () => enviarFollowupsPresupuesto();
   const failBtn = document.getElementById('btn-pp-failures');
   if (failBtn) failBtn.onclick = () => verFallosWA();
+  const pfBtn = document.getElementById('btn-pp-proforma');
+  if (pfBtn) pfBtn.onclick = () => openProforma();
+  bindProformaModal();
 }
 
 function updateCotizadorForm() {
@@ -7454,6 +7457,7 @@ function bindCotRender() {
   if (!document._cotRenderPasteBound) {
     document.addEventListener('paste', async (ev) => {
       if (STATE.quickModalOpen || (STATE.rectify && STATE.rectify.open) || (STATE.mockup && STATE.mockup.open)) return;
+      if (STATE.pf && STATE.pf.open && document.getElementById('pf-backdrop')) return; // proforma encima: sus campos reciben el pegado
       if (!document.getElementById('cot-render-dropzone')) return;
       const items = ev.clipboardData?.items || [];
       let file = null;
@@ -7789,6 +7793,547 @@ function renderContactoCell(p, withFup) {
   return `<span class="contact-cell">${pill}<a class="fup-btn" href="${escapeHtml(url)}" target="_blank" rel="noopener" title="Follow-up por WhatsApp" onclick="event.stopPropagation()">FUP</a></span>`;
 }
 
+// ===== PROFORMA (beta) — presupuesto formal en PDF para trabajos grandes (Presupuestos → "📄 Proforma") =====
+// Gaspar (oct-2026): proforma prolija en PDF para trabajos grandes con productos y condiciones distintos (caso
+// Del Norte: corpóreo + neón + saliente). Ítems importados de los briefs del cliente (neón / corpóreo) o cargados a
+// mano (saliente, lightbox, otro), una imagen por ítem, condiciones por trabajo. Se guarda en D1 (tabla proformas,
+// número único) y el PDF lo arma la impresión del navegador en una ventana nueva ("Guardar como PDF"), con el mismo
+// diseño que el generador local. Beta: solo admin. El estado vive en STATE.pf y cada input escribe ahí al tipear
+// (sin re-render) → sobrevive a los render() de fondo (polls de 75 s).
+const PF_EMPRESA = { nombre: 'Neon Infinito', bajada: 'Carteles de neón LED y corpóreos', whatsapp: '+54 9 11 4436-6573', instagram: '@neon.infinito' };
+const PF_TIPOS = {
+  neon: { label: 'Neón', titulo: 'Cartel de neón LED', chip: 'Interior', detalle: '**Medida:** ancho × alto cm, con N m de neón LED flexible.\nMontado sobre base de acrílico transparente con corte al contorno.' },
+  corporeo: { label: 'Corpóreo', titulo: 'Cartel corpóreo iluminado', chip: 'Exterior', detalle: '**Medida:** ancho × alto cm.\nLetras corpóreas de impresión 3D: frente …, laterales …, espalda ….\nIluminación LED interna.' },
+  saliente: { label: 'Saliente', titulo: 'Saliente corpóreo', chip: 'Exterior', detalle: '**Medida:** … cm de alto total.\nImpreso en 3D, sin iluminación.\nEnsamblado sobre una estructura de soporte para una fijación firme a la pared.' },
+  lightbox: { label: 'Lightbox', titulo: 'Lightbox (caja de luz)', chip: 'Exterior', detalle: '**Medida:** ancho × alto cm.\nCaja de luz con frente impreso e iluminación LED interna.' },
+  otro: { label: 'Otro', titulo: '', chip: '', detalle: '' },
+};
+const PF_CONDICIONES_DEF = [
+  '**Precios + IVA**, expresados en pesos argentinos.',
+  '**Financiación:** hasta 3 pagos. Consultá por precio de contado en efectivo.',
+  '**Plazo de producción:** a confirmar al aprobar el presupuesto.',
+  '**Envío e instalación:** no incluidos; se cotizan aparte según la ubicación del local.',
+  '**Imágenes:** son ilustrativas (renders o imágenes de referencia, no a escala); el resultado final puede tener leves variaciones.',
+].join('\n');
+function pfHoyISO() { return new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10); }
+function pfUid() { return 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+function pfNuevo() {
+  return { cliente: '', detalle: '', telefono: '', proyecto: '', intro: '', fecha: pfHoyISO(), validez: 15, condiciones: PF_CONDICIONES_DEF, items: [] };
+}
+function pfItemNuevo(tipo) {
+  const t = PF_TIPOS[tipo] || PF_TIPOS.otro;
+  return { uid: pfUid(), tipo: PF_TIPOS[tipo] ? tipo : 'otro', titulo: t.titulo, chip: t.chip, detalle: t.detalle, cantidad: 1, precio: 0, img: '', renders: [], briefId: null };
+}
+function pfPesos(n) { return '$ ' + String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+// Pesos enteros: "6.990.000" / "6990000" / "$ 6.990.000,50" → 6990000 (lo que va después de la coma, centavos, se ignora).
+function pfNum(v) { const d = String(v == null ? '' : v).split(',')[0].replace(/[^\d]/g, ''); return d ? parseInt(d, 10) : 0; }
+function pfTotal(d) { return (d.items || []).reduce((a, it) => a + (Number(it.cantidad) || 0) * (Number(it.precio) || 0), 0); }
+function pfFechaFmt(iso) { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; }
+function pfValidoHasta(d) {
+  const m = String(d.fecha || '').match(/^(\d{4})-(\d{2})-(\d{2})/); if (!m) return '';
+  const t = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]) + (Math.max(0, parseInt(d.validez, 10) || 0)) * 864e5);
+  return `${String(t.getUTCDate()).padStart(2, '0')}/${String(t.getUTCMonth() + 1).padStart(2, '0')}/${t.getUTCFullYear()}`;
+}
+function pfNumeroTxt(numero, fecha) { return numero ? `${String(fecha || pfHoyISO()).slice(0, 4)}-${String(numero).padStart(4, '0')}` : 'borrador'; }
+// Texto con **negrita** → HTML seguro (se escapa TODO y después se convierte solo el **…**).
+function pfMd(s) { return escapeHtml(String(s || '')).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>'); }
+// Medidas: espacios que no se cortan ("7,30 m × 0,30 m" en un solo renglón).
+function pfNbspMedidas(h) { return h.replace(/(\d+(?:[.,]\d+)?)\s?(m|cm)\s?(×|x)\s?(\d+(?:[.,]\d+)?)\s?(m|cm)\b/g, (_, a, u1, x, b, u2) => `${a}&nbsp;${u1}&nbsp;${x}&nbsp;${b}&nbsp;${u2}`); }
+// Número en letras (es-AR) para el "Son pesos …".
+function pfEnLetras(n) {
+  n = Math.round(Number(n) || 0);
+  if (!n) return 'cero';
+  const U = ['', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve', 'diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciséis', 'diecisiete', 'dieciocho', 'diecinueve', 'veinte', 'veintiuno', 'veintidós', 'veintitrés', 'veinticuatro', 'veinticinco', 'veintiséis', 'veintisiete', 'veintiocho', 'veintinueve'];
+  const D = ['', '', '', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+  const C = ['', 'ciento', 'doscientos', 'trescientos', 'cuatrocientos', 'quinientos', 'seiscientos', 'setecientos', 'ochocientos', 'novecientos'];
+  const cien = (x) => { if (!x) return ''; if (x === 100) return 'cien'; const c = Math.floor(x / 100), r = x % 100; const dec = r < 30 ? U[r] : D[Math.floor(r / 10)] + (r % 10 ? ' y ' + U[r % 10] : ''); return (C[c] + (dec ? ' ' + dec : '')).trim(); };
+  const apoc = (t) => t.replace(/veintiuno$/, 'veintiún').replace(/uno$/, 'un');
+  const mill = Math.floor(n / 1e6), miles = Math.floor((n % 1e6) / 1000), unid = n % 1000;
+  const p = [];
+  if (mill) p.push(mill === 1 ? 'un millón' : apoc(cien(mill)) + ' millones');
+  if (miles) p.push(miles === 1 ? 'mil' : apoc(cien(miles)) + ' mil');
+  if (unid) p.push(cien(unid));
+  return p.join(' ');
+}
+
+// ---- Briefs del cliente (importar como ítems) ----
+async function pfEnsureBriefs(force) {
+  const pf = STATE.pf; if (!pf) return;
+  if (!force && pf.briefs && Date.now() - (pf._briefsAt || 0) < 5 * 60e3) return;
+  if (pf._briefsP) return pf._briefsP; // ya hay una descarga en vuelo (tipeo rápido en el buscador)
+  pf._briefsP = (async () => {
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/briefs?limit=2000', { headers: authHeaders() });
+      const j = await r.json().catch(() => ({}));
+      if (Array.isArray(j.briefs)) { pf.briefs = j.briefs; pf._briefsAt = Date.now(); }
+    } catch (_) {} finally { pf._briefsP = null; }
+  })();
+  return pf._briefsP;
+}
+function pfBuscarBriefs(q) {
+  const pf = STATE.pf; if (!pf || !pf.briefs) return [];
+  const nq = normName(q || ''), dq = String(q || '').replace(/\D/g, '');
+  if (!nq && dq.length < 4) return [];
+  return pf.briefs.filter(b => {
+    if (dq.length >= 4 && String(b.cliente_wa_id || '').replace(/\D/g, '').includes(dq)) return true;
+    return nq && normName([b.cliente_nombre, b.diseno].join(' ')).includes(nq);
+  }).slice(0, 14);
+}
+function pfBriefTipo(b) { return b.tipo === 'corporea' ? 'corporeo' : 'neon'; }
+function pfBriefPrecio(b) {
+  const pf = Number(b.precio_final) || 0;
+  if (pf > 0) return pf;
+  if (b.tipo === 'corporea') { try { const cj = JSON.parse(b.corporea_json || '{}'); return Number(cj.precio) || 0; } catch (_) { return 0; } }
+  try {
+    const neon = Number(b.neon_mt || b.ia_neon_mt) || 0;
+    if (!(b.ancho_cm && b.alto_cm && neon)) return 0;
+    const r = calcCotizadorActivo({ ancho: Number(b.ancho_cm), alto: Number(b.alto_cm), neon, tramos: Number(b.tramos || b.ia_tramos) || 0, tipo: b.tipo === 'EXT' ? 'EXT' : 'INT' });
+    return Number(r && r.transFinal) || 0;
+  } catch (_) { return 0; }
+}
+function pfItemDesdeBrief(b) {
+  const it = pfItemNuevo(pfBriefTipo(b));
+  const nom = String(b.cliente_nombre || b.diseno || '').trim();
+  it.briefId = b.id;
+  it.precio = pfBriefPrecio(b);
+  if (b.tipo === 'corporea') {
+    let cj = {}; try { cj = JSON.parse(b.corporea_json || '{}'); } catch (_) {}
+    const f = corpPresupuestoFields(b, cj);
+    it.titulo = `Cartel corpóreo${f.conLuz ? ' iluminado' : ''}${nom ? ' · ' + nom : ''}`;
+    it.chip = '';
+    it.detalle = [f.medidas ? `**Medida:** ${f.medidas}.` : '', `**Frente:** ${f.frente}.`, `**Laterales:** ${f.laterales}.`, `**Espalda:** ${f.fondo}.`, `**Iluminación:** ${f.iluminacion}.`].filter(Boolean).join('\n');
+  } else {
+    const neon = Number(b.neon_mt || b.ia_neon_mt) || 0;
+    it.titulo = `Cartel de neón LED${nom ? ' · ' + nom : ''}`;
+    it.chip = b.tipo === 'EXT' ? 'Exterior' : 'Interior';
+    const med = (b.ancho_cm && b.alto_cm) ? `**${b.ancho_cm} × ${b.alto_cm} cm**` : (b.medidas_libre ? `**${b.medidas_libre}**` : '');
+    it.detalle = [med ? `${med}${neon ? `, con ${String(neon).replace('.', ',')} m de neón LED flexible` : ''}.` : '', 'Montado sobre base de acrílico transparente con corte al contorno.'].filter(Boolean).join('\n');
+  }
+  if (b.first_render_key) { it.img = b.first_render_key; it.renders = [b.first_render_key]; }
+  return it;
+}
+async function pfImportarBrief(id) {
+  const pf = STATE.pf; if (!pf) return;
+  const b = (pf.briefs || []).find(x => x.id === id); if (!b) return;
+  const it = pfItemDesdeBrief(b);
+  pf.data.items.push(it);
+  if (!pf.data.cliente) pf.data.cliente = String(b.cliente_nombre || '').trim();
+  if (!pf.data.telefono && b.cliente_wa_id) pf.data.telefono = String(b.cliente_wa_id);
+  render();
+  // Todas las imágenes del brief (renders + bocetos): para elegir la del PDF. Por defecto, el ÚLTIMO render.
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/briefs/' + id, { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    const imgs = (Array.isArray(j.imagenes) ? j.imagenes : []).filter(x => x.r2_key && x.tipo !== 'chat');
+    if (imgs.length) {
+      const cur = (STATE.pf && STATE.pf.data.items.find(x => x.uid === it.uid)); if (!cur) return;
+      cur.renders = imgs.map(x => x.r2_key).slice(-12);
+      const renders = imgs.filter(x => x.tipo === 'render');
+      if (renders.length) cur.img = renders[renders.length - 1].r2_key;
+      render();
+    }
+  } catch (_) {}
+}
+
+// ---- Abrir / cerrar / guardar / recientes ----
+function openProforma() {
+  if (!STATE.pf) STATE.pf = { data: pfNuevo(), id: null, numero: null, q: '', briefs: null, lista: null };
+  STATE.pf.open = true; STATE.pf.saving = false;
+  render();
+  pfEnsureBriefs().then(() => { if (STATE.pf && STATE.pf.open && STATE.pf.q) render(); });
+  pfCargarLista();
+}
+function closeProforma() { if (STATE.pf) STATE.pf.open = false; render(); }
+function pfNueva() {
+  if (!STATE.pf) return;
+  STATE.pf.data = pfNuevo(); STATE.pf.id = null; STATE.pf.numero = null; STATE.pf.q = '';
+  render();
+}
+async function pfCargarLista() {
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/proformas', { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    if (STATE.pf && Array.isArray(j.proformas)) { STATE.pf.lista = j.proformas; if (STATE.pf.open) render(); }
+  } catch (_) {}
+}
+async function pfAbrir(id) {
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/proformas/' + id, { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.proforma || !j.proforma.data) { toast(j.error || 'No se pudo abrir'); return; }
+    const d = Object.assign(pfNuevo(), j.proforma.data);
+    d.items = (Array.isArray(d.items) ? d.items : []).map(x => Object.assign(pfItemNuevo(x.tipo), x, { uid: x.uid || pfUid() }));
+    STATE.pf.data = d; STATE.pf.id = j.proforma.id; STATE.pf.numero = j.proforma.numero; STATE.pf.q = '';
+    render();
+  } catch (_) { toast('Error de red al abrir la proforma'); }
+}
+async function pfGuardar(silencioso) {
+  const pf = STATE.pf; if (!pf || pf.saving) return false;
+  if (!String(pf.data.cliente || '').trim()) { toast('Poné el nombre del cliente'); return false; }
+  if (!pf.data.items.length) { toast('Agregá al menos un ítem'); return false; }
+  if (pf.data.items.some(x => x._subiendo)) { toast('Esperá que termine de subir la imagen'); return false; }
+  const datos = pf.data; // si mientras guarda se abre otra / "Nueva", el id/N° NO se le asigna a esa
+  pf.saving = true; render();
+  try {
+    const data = JSON.parse(JSON.stringify(pf.data));
+    data.items.forEach(x => { delete x._subiendo; });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/proformas', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id: pf.id, data }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { toast(j.error || ('No se pudo guardar (HTTP ' + r.status + ')')); return false; }
+    if (pf.data !== datos) return false;
+    pf.id = j.id; pf.numero = j.numero;
+    if (!silencioso) toast('Proforma ' + pfNumeroTxt(pf.numero, pf.data.fecha) + ' guardada ✓');
+    pfCargarLista();
+    return true;
+  } catch (_) { toast('Error de red al guardar'); return false; }
+  finally { pf.saving = false; render(); }
+}
+// Generar PDF: la ventana se abre ANTES del await (si no, el navegador la bloquea como popup).
+async function pfGenerarPdf() {
+  const pf = STATE.pf; if (!pf) return;
+  const w = window.open('', '_blank');
+  if (!w) { toast('El navegador bloqueó la ventana: permití ventanas emergentes para este sitio'); return; }
+  w.document.write('<!doctype html><title>Preparando…</title><body style="font-family:system-ui;background:#0b0b10;color:#ddd;padding:40px">Preparando la proforma…</body>');
+  const ok = await pfGuardar(true);
+  if (!ok) { try { w.close(); } catch (_) {} return; }
+  w.document.open();
+  w.document.write(pfHtmlDoc(pf.data, pf.numero));
+  w.document.close();
+}
+
+// ---- Documento para imprimir (A4, flujo continuo: muchos ítems pasan solos a otra hoja) ----
+function pfHtmlDoc(d, numero) {
+  const logo = new URL('assets/logo.svg', location.href).href;
+  const nro = pfNumeroTxt(numero, d.fecha), total = pfTotal(d), cliente = String(d.cliente || '').trim();
+  const E = PF_EMPRESA;
+  const intro = String(d.intro || '').trim() || `Te compartimos la propuesta para ${cliente || 'tu proyecto'}, con el detalle de cada trabajo, sus medidas, terminaciones e importes.`;
+  const filas = (d.items || []).map((it, i) => {
+    const lines = String(it.detalle || '').split('\n').map(x => x.trim()).filter(Boolean);
+    return `<tr>
+      <td class="c"><div class="it-n">${String(i + 1).padStart(2, '0')}</div></td>
+      <td><div class="it-title">${escapeHtml(it.titulo || '')}${it.chip ? `<span class="chip">${escapeHtml(it.chip)}</span>` : ''}</div>${lines.length ? `<ul class="specs">${lines.map(l => `<li>${pfNbspMedidas(pfMd(l))}</li>`).join('')}</ul>` : ''}</td>
+      <td class="c">${Number(it.cantidad) || 0}</td>
+      <td class="r price">${pfPesos((Number(it.cantidad) || 0) * (Number(it.precio) || 0))}</td>
+    </tr>`;
+  }).join('');
+  const conds = String(d.condiciones || '').split('\n').map(x => x.trim()).filter(Boolean);
+  const venc = pfValidoHasta(d);
+  if ((parseInt(d.validez, 10) || 0) > 0 && venc) conds.push(`**Validez:** ${parseInt(d.validez, 10)} días (hasta el ${venc}).`);
+  const figs = (d.items || []).map((it, i) => ({ it, n: String(i + 1).padStart(2, '0') })).filter(x => x.it.img);
+  const hdr = `<header class="hdr">
+      <div class="brand"><img src="${escapeHtml(logo)}" alt="Neon Infinito"><div class="tag">${escapeHtml(E.bajada)}</div></div>
+      <div class="doc"><div class="t">PRESUPUESTO</div>
+        <div class="meta"><span>N°</span><b>${escapeHtml(nro)}</b><span>FECHA</span><b>${escapeHtml(pfFechaFmt(d.fecha))}</b>${venc && (parseInt(d.validez, 10) || 0) > 0 ? `<span>VÁLIDO HASTA</span><b>${escapeHtml(venc)}</b>` : ''}</div>
+      </div>
+    </header>`;
+  const ftr = `<footer class="ftr"><span><b>${escapeHtml(E.nombre)}</b> · ${escapeHtml(E.bajada)}</span><span>WhatsApp <b>${escapeHtml(E.whatsapp)}</b> · IG <b>${escapeHtml(E.instagram)}</b></span></footer>`;
+  const css = `
+@page { size: A4; margin: 11mm 12mm 12mm; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { font-family: 'Archivo', system-ui, sans-serif; color: #15151b; -webkit-print-color-adjust: exact; print-color-adjust: exact; background: #fff; }
+.sec + .sec { break-before: page; }
+.hdr { background: #0b0b10; color: #fff; padding: 6mm 9mm 7mm; display: flex; justify-content: space-between; align-items: center; position: relative; border-radius: 3mm; overflow: hidden; }
+.hdr::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 1.3mm; background: linear-gradient(90deg, #FF1830 0 50%, #2AD8FF 50% 100%); }
+.brand { display: flex; align-items: center; gap: 5mm; }
+.brand img { height: 17mm; }
+.brand .tag { font-family: 'JetBrains Mono', monospace; font-size: 7.3pt; letter-spacing: .14em; text-transform: uppercase; color: #9a9aa8; line-height: 1.6; border-left: .3mm solid #33333d; padding-left: 5mm; max-width: 52mm; }
+.doc { text-align: right; }
+.doc .t { font-family: 'Archivo Black', 'Archivo', sans-serif; font-size: 20pt; letter-spacing: .05em; line-height: 1; }
+.doc .meta { margin-top: 3mm; display: grid; grid-template-columns: auto auto; gap: .8mm 4mm; justify-content: end; font-family: 'JetBrains Mono', monospace; font-size: 8pt; color: #9a9aa8; }
+.doc .meta b { color: #fff; font-weight: 500; text-align: right; }
+.label { font-family: 'JetBrains Mono', monospace; font-size: 7.2pt; text-transform: uppercase; letter-spacing: .14em; color: #8a8a96; }
+.cliente { margin-top: 5mm; display: flex; justify-content: space-between; align-items: flex-end; gap: 6mm; background: #f4f4f7; border-left: 1.2mm solid #FF1830; padding: 4mm 5mm; border-radius: 0 2mm 2mm 0; }
+.cliente .name { font-family: 'Archivo Black', 'Archivo', sans-serif; font-size: 15pt; line-height: 1.15; margin-top: 1mm; }
+.cliente .sub { font-size: 9.5pt; color: #55555f; margin-top: .6mm; }
+.cliente .right { text-align: right; font-size: 9pt; color: #55555f; max-width: 95mm; }
+.intro { font-size: 9.8pt; color: #45454f; margin: 4mm 0 3mm; line-height: 1.5; text-wrap: pretty; }
+table.items { width: 100%; border-collapse: collapse; }
+table.items thead th { font-family: 'JetBrains Mono', monospace; font-size: 7.2pt; font-weight: 500; text-transform: uppercase; letter-spacing: .12em; color: #fff; background: #15151b; padding: 2.4mm 3mm; text-align: left; }
+table.items thead th:first-child { border-radius: 1.5mm 0 0 0; } table.items thead th:last-child { border-radius: 0 1.5mm 0 0; }
+table.items .c { text-align: center; } table.items .r { text-align: right; white-space: nowrap; }
+table.items tbody tr { break-inside: avoid; }
+table.items tbody td { padding: 3.1mm 3mm; border-bottom: .3mm solid #e4e4ea; vertical-align: top; font-size: 9.2pt; }
+.it-n { font-family: 'Archivo Black', 'Archivo', sans-serif; color: #FF1830; font-size: 13pt; line-height: 1; }
+.it-title { font-weight: 800; font-size: 10.6pt; margin-bottom: 1.4mm; }
+.chip { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 6.6pt; font-weight: 500; text-transform: uppercase; letter-spacing: .08em; padding: .5mm 1.8mm; border-radius: 1mm; background: #e6f8fc; color: #0f6f80; margin-left: 2mm; vertical-align: 1px; }
+.specs { margin: 0; padding-left: 3.8mm; color: #3c3c46; line-height: 1.45; }
+.specs li { margin-bottom: .6mm; text-wrap: pretty; } .specs b { color: #15151b; }
+.price { font-weight: 800; font-size: 10.5pt; }
+.totales { display: flex; justify-content: space-between; align-items: stretch; gap: 6mm; margin-top: 4mm; break-inside: avoid; }
+.letras { flex: 1; align-self: center; font-size: 8.8pt; color: #55555f; line-height: 1.5; text-wrap: pretty; } .letras b { color: #15151b; font-weight: 600; }
+.total-box { background: #0b0b10; color: #fff; padding: 4mm 6mm; border-radius: 2.5mm; min-width: 78mm; position: relative; overflow: hidden; }
+.total-box::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 1.2mm; background: linear-gradient(180deg, #FF1830, #2AD8FF); }
+.total-box .lbl { font-family: 'JetBrains Mono', monospace; font-size: 7.2pt; letter-spacing: .14em; text-transform: uppercase; color: #9a9aa8; }
+.total-box .amt { font-family: 'Archivo Black', 'Archivo', sans-serif; font-size: 20pt; line-height: 1.15; margin-top: 1mm; white-space: nowrap; }
+.total-box .iva { font-family: 'JetBrains Mono', monospace; font-size: 8.5pt; color: #2AD8FF; margin-left: 1.5mm; }
+.cierre1 { break-inside: avoid; }
+.cond { margin-top: 5mm; border-top: .3mm solid #e4e4ea; padding-top: 3.5mm; }
+.cond-grid { margin-top: 2.5mm; display: grid; grid-template-columns: 1fr 1fr; gap: 2.2mm 7mm; }
+.cond-item { font-size: 8.7pt; color: #3c3c46; padding-left: 4mm; position: relative; line-height: 1.45; text-wrap: pretty; }
+.cond-item::before { content: ''; position: absolute; left: 0; top: 1.5mm; width: 1.6mm; height: 1.6mm; border-radius: 50%; background: #FF1830; }
+.cond-item b { color: #15151b; }
+.ftr { margin-top: 5mm; padding-top: 3mm; border-top: .3mm solid #e4e4ea; display: flex; justify-content: space-between; gap: 4mm; font-family: 'JetBrains Mono', monospace; font-size: 7.4pt; color: #75757f; break-inside: avoid; }
+.ftr b { color: #15151b; font-weight: 500; }
+.vis-h { display: flex; align-items: baseline; justify-content: space-between; margin: 6mm 0 4mm; }
+.vis-h .t { font-family: 'Archivo Black', 'Archivo', sans-serif; font-size: 15pt; }
+.figs { display: flex; flex-wrap: wrap; gap: 5mm; }
+figure { margin: 0; break-inside: avoid; width: calc(50% - 2.5mm); }
+figure.wide { width: 100%; }
+.fig { background: #0b0b10; border-radius: 2.5mm; overflow: hidden; height: 98mm; display: flex; align-items: center; justify-content: center; }
+.fig img { display: block; width: 100%; height: 100%; object-fit: contain; }
+figure.cover .fig img { object-fit: cover; }
+figure.wide .fig { height: auto; } figure.wide .fig img { height: auto; }
+figcaption { display: flex; align-items: baseline; gap: 2.5mm; margin-top: 2.2mm; font-size: 9pt; color: #3c3c46; }
+figcaption .n { font-family: 'Archivo Black', 'Archivo', sans-serif; color: #FF1830; font-size: 11pt; }
+.nota { font-size: 8.3pt; color: #75757f; margin-top: 4mm; font-style: italic; }
+.cierre { margin-top: 6mm; background: #f4f4f7; border-radius: 2.5mm; padding: 5mm 6mm; display: flex; justify-content: space-between; align-items: center; gap: 6mm; break-inside: avoid; }
+.cierre .a { font-family: 'Archivo Black', 'Archivo', sans-serif; font-size: 12.5pt; line-height: 1.25; }
+.cierre .b { font-size: 9pt; color: #55555f; line-height: 1.5; text-align: right; } .cierre .b b { color: #15151b; }
+.bar { position: sticky; top: 0; z-index: 9; display: flex; gap: 12px; align-items: center; justify-content: center; padding: 10px; background: #0b0b10; color: #ddd; font: 13px system-ui; }
+.bar button { font: 600 13px system-ui; padding: 8px 14px; border-radius: 8px; border: 0; background: #8FD4DE; color: #0b0b10; cursor: pointer; }
+@media screen { body { background: #2a2a31; } .sheet { width: 210mm; margin: 14px auto; background: #fff; padding: 11mm 12mm 12mm; box-shadow: 0 6px 30px rgba(0,0,0,.4); } }
+@media print { .bar { display: none; } }`;
+  const sec1 = `<section class="sec">${hdr}
+      <div class="cliente">
+        <div><div class="label">Cliente</div><div class="name">${escapeHtml(cliente)}</div>${d.detalle ? `<div class="sub">${escapeHtml(d.detalle)}</div>` : ''}</div>
+        ${d.proyecto ? `<div class="right"><div class="label">Proyecto</div><div style="margin-top:1mm">${escapeHtml(d.proyecto)}</div></div>` : ''}
+      </div>
+      <div class="intro">${escapeHtml(intro)}</div>
+      <table class="items"><thead><tr><th class="c" style="width:12mm">Ítem</th><th>Detalle</th><th class="c" style="width:14mm">Cant.</th><th class="r" style="width:32mm">Importe</th></tr></thead><tbody>${filas}</tbody></table>
+      <div class="totales">
+        <div class="letras">Son pesos <b>${escapeHtml(pfEnLetras(total))}</b> con 00/100, más IVA.</div>
+        <div class="total-box"><div class="lbl">Total del proyecto</div><div class="amt">${pfPesos(total)}<span class="iva">+ IVA</span></div></div>
+      </div>
+      <div class="cierre1">${conds.length ? `<div class="cond"><div class="label">Condiciones</div><div class="cond-grid">${conds.map(c => `<div class="cond-item">${pfMd(c)}</div>`).join('')}</div></div>` : ''}
+      ${ftr}</div>
+    </section>`;
+  const sec2 = figs.length ? `<section class="sec">${hdr}
+      <div class="vis-h"><div class="t">Propuesta visual</div><div class="label">${escapeHtml(cliente)}</div></div>
+      <div class="figs">${figs.map(f => `<figure><div class="fig"><img src="${escapeHtml(mediaUrl(f.it.img))}" crossorigin="anonymous" alt=""></div><figcaption><span class="n">${f.n}</span><span>${escapeHtml(f.it.titulo || '')}</span></figcaption></figure>`).join('')}</div>
+      <div class="nota">Imágenes ilustrativas (renders o imágenes de referencia, no a escala). El producto final puede variar levemente.</div>
+      <div class="cierre"><div class="a">¿Avanzamos con tu proyecto?</div><div class="b">Para aprobar el presupuesto o coordinar la forma de pago,<br>escribinos por WhatsApp al <b>${escapeHtml(E.whatsapp)}</b>.</div></div>
+      ${ftr}
+    </section>` : '';
+  // Script de la ventana: espera fuentes + imágenes; imágenes muy anchas → a lo ancho; si la proporción de una
+  // imagen es parecida a la del recuadro, la recorta un poco (cover) en vez de dejarle bandas; después imprime.
+  const js = `(function(){
+    function listo(){
+      document.querySelectorAll('figure img').forEach(function(im){
+        var fg = im.closest('figure'); if (!im.naturalWidth) return;
+        var r = im.naturalWidth / im.naturalHeight;
+        if (r > 1.9) fg.classList.add('wide');
+        else {
+          var box = fg.querySelector('.fig'); var rb = box.clientWidth / box.clientHeight;
+          if (Math.abs(r - rb) / rb < 0.12) fg.classList.add('cover');
+          else {
+            // Entera (sin recorte): el fondo del recuadro toma el color promedio del borde de la imagen → sin costura.
+            try {
+              var c = document.createElement('canvas'), W = 64, H = Math.max(1, Math.round(64 / r)); c.width = W; c.height = H;
+              var g = c.getContext('2d'); g.drawImage(im, 0, 0, W, H);
+              var px = g.getImageData(0, 0, W, H).data, s = [0, 0, 0], n = 0;
+              for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) { if (x > 1 && x < W - 2 && y > 1 && y < H - 2) continue; var k = (y * W + x) * 4; s[0] += px[k]; s[1] += px[k + 1]; s[2] += px[k + 2]; n++; }
+              if (n) box.style.background = 'rgb(' + Math.round(s[0] / n) + ',' + Math.round(s[1] / n) + ',' + Math.round(s[2] / n) + ')';
+            } catch (e) {}
+          }
+        }
+      });
+      setTimeout(function(){ window.print(); }, 250);
+    }
+    var imgs = Array.prototype.slice.call(document.images);
+    var esperas = imgs.map(function(im){ return im.complete ? Promise.resolve() : new Promise(function(res){ im.onload = im.onerror = res; }); });
+    var fuentes = document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve();
+    Promise.race([Promise.all([fuentes].concat(esperas)), new Promise(function(res){ setTimeout(res, 9000); })]).then(listo);
+  })();`;
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>${escapeHtml('Presupuesto Neon Infinito - ' + (cliente || nro))}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=Archivo+Black&family=JetBrains+Mono:wght@400;500&display=block" rel="stylesheet">
+<style>${css}</style></head><body>
+<div class="bar">Para el PDF: en la ventana de impresión elegí <b>“Guardar como PDF”</b>. <button onclick="window.print()">Imprimir / Guardar PDF</button></div>
+<div class="sheet">${sec1}${sec2}</div>
+<script>${js}<\/script></body></html>`;
+}
+
+// ---- Editor (modal) ----
+function renderProformaModal() {
+  const pf = STATE.pf;
+  if (!pf || !pf.open || !isAdmin()) return '';
+  const d = pf.data, total = pfTotal(d);
+  const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:8px;padding:8px 10px;color:var(--fg);font-size:13px';
+  const lbl = 'display:block;font-size:10.5px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
+  const sec = 'margin-top:16px;padding-top:12px;border-top:1px solid var(--border)';
+  const res = pf.q ? pfBuscarBriefs(pf.q) : [];
+  const resHtml = !pf.q ? '' : (!pf.briefs ? '<div style="font-size:12px;color:var(--fg-subtle);padding:6px 0">Cargando briefs…</div>'
+    : (res.length ? res.map(b => {
+        const tipoL = b.tipo === 'corporea' ? 'Corpóreo' : (b.tipo === 'EXT' ? 'Neón ext.' : 'Neón');
+        const med = (b.ancho_cm && b.alto_cm) ? `${b.ancho_cm}×${b.alto_cm} cm` : (b.medidas_libre || '');
+        const pr = pfBriefPrecio(b);
+        return `<div style="display:flex;gap:10px;align-items:center;padding:6px 0;border-top:1px dashed var(--border);font-size:12.5px">
+          ${b.first_render_key ? `<img src="${escapeHtml(disenoThumb(b.first_render_key, 200))}" loading="lazy" style="width:40px;height:40px;object-fit:cover;border-radius:6px;background:#111">` : '<span style="width:40px;height:40px;border-radius:6px;background:var(--ink-100);display:inline-block"></span>'}
+          <span style="flex:1;min-width:0"><b>${escapeHtml(b.cliente_nombre || b.diseno || 'brief #' + b.id)}</b> <span style="color:var(--fg-subtle)">· ${tipoL}${med ? ' · ' + escapeHtml(med) : ''}${pr ? ' · ' + pfPesos(pr) : ''} · #${b.id}${b.cliente_wa_id ? ' · ' + escapeHtml(String(b.cliente_wa_id)) : ''}</span></span>
+          <button type="button" class="btn btn-ghost" data-pf-act="importar" data-id="${b.id}" style="font-size:12px;padding:4px 10px">＋ Agregar</button>
+        </div>`; }).join('') : '<div style="font-size:12px;color:var(--fg-subtle);padding:6px 0">No encontré briefs con eso (probá con otra parte del nombre o el teléfono).</div>'));
+  const items = d.items.map((it, i) => {
+    const tipoOpts = Object.keys(PF_TIPOS).map(k => `<option value="${k}" ${it.tipo === k ? 'selected' : ''}>${PF_TIPOS[k].label}</option>`).join('');
+    const rnd = (it.renders || []).filter(k => k !== it.img);
+    return `<div data-pf-item="${it.uid}" style="background:var(--ink-100);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px">
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div style="font-family:var(--font-display,'Archivo Black');color:#FF1830;font-size:18px;line-height:34px;width:28px">${String(i + 1).padStart(2, '0')}</div>
+        <div style="width:112px"><label style="${lbl}">Producto</label><select data-pfi="tipo" style="${inp}">${tipoOpts}</select></div>
+        <div style="flex:1;min-width:200px"><label style="${lbl}">Título</label><input data-pfi="titulo" value="${escapeHtml(it.titulo || '')}" style="${inp}"></div>
+        <div style="width:110px"><label style="${lbl}">Etiqueta</label><input data-pfi="chip" value="${escapeHtml(it.chip || '')}" placeholder="Exterior" style="${inp}"></div>
+        <div style="width:62px"><label style="${lbl}">Cant.</label><input data-pfi="cantidad" inputmode="numeric" value="${Number(it.cantidad) || 0}" style="${inp}"></div>
+        <div style="width:130px"><label style="${lbl}">Precio unit.</label><input data-pfi="precio" inputmode="numeric" value="${(Number(it.precio) || 0) ? String(Math.round(it.precio)).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : ''}" placeholder="0" style="${inp}"></div>
+        <div style="display:flex;gap:4px">
+          <button type="button" class="btn btn-ghost btn-icon" data-pf-act="subir" data-uid="${it.uid}" title="Subir" ${i === 0 ? 'disabled' : ''}>↑</button>
+          <button type="button" class="btn btn-ghost btn-icon" data-pf-act="bajar" data-uid="${it.uid}" title="Bajar" ${i === d.items.length - 1 ? 'disabled' : ''}>↓</button>
+          <button type="button" class="btn btn-ghost btn-icon" data-pf-act="borrar" data-uid="${it.uid}" title="Quitar ítem">🗑</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:8px;flex-wrap:wrap">
+        <div style="flex:1;min-width:260px"><label style="${lbl}">Detalle · una línea por renglón · **negrita**</label><textarea data-pfi="detalle" rows="4" style="${inp};resize:vertical;font-family:inherit;line-height:1.4">${escapeHtml(it.detalle || '')}</textarea></div>
+        <div style="width:200px"><label style="${lbl}">Imagen del PDF</label>
+          <div style="display:flex;gap:8px;align-items:flex-start">
+            ${it.img ? `<a href="${escapeHtml(mediaUrl(it.img))}" target="_blank" rel="noopener"><img src="${escapeHtml(disenoThumb(it.img, 240))}" style="width:84px;height:84px;object-fit:cover;border-radius:8px;border:1px solid var(--border);background:#111"></a>` : `<div style="width:84px;height:84px;border-radius:8px;border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--fg-subtle);text-align:center">${it._subiendo ? 'subiendo…' : 'sin imagen'}</div>`}
+            <div style="display:flex;flex-direction:column;gap:5px">
+              <label class="btn btn-ghost" style="font-size:11.5px;padding:4px 8px;cursor:pointer">Subir<input type="file" accept="image/*" data-pf-file="${it.uid}" style="display:none"></label>
+              ${it.img ? `<button type="button" class="btn btn-ghost" data-pf-act="sinimg" data-uid="${it.uid}" style="font-size:11.5px;padding:4px 8px">Quitar</button>` : ''}
+            </div>
+          </div>
+          ${rnd.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px">${rnd.map(k => `<img src="${escapeHtml(disenoThumb(k, 200))}" data-pf-act="usarimg" data-uid="${it.uid}" data-key="${escapeHtml(k)}" title="Usar esta" loading="lazy" style="width:36px;height:36px;object-fit:cover;border-radius:5px;border:1px solid var(--border);cursor:pointer;background:#111">`).join('')}</div>` : ''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  const recientes = (pf.lista || []).map(x => `<option value="${x.id}" ${pf.id === x.id ? 'selected' : ''}>${escapeHtml(pfNumeroTxt(x.numero, x.created_at))} · ${escapeHtml(x.cliente || '')} · ${pfPesos(x.total)}</option>`).join('');
+  return `
+  <div id="pf-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:290;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
+    <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;max-width:920px;width:100%;margin:auto;padding:var(--s-4)">
+      <style>@media(max-width:700px){.pf-g3,.pf-g2{grid-template-columns:1fr!important}.pf-span2{grid-column:auto!important}}</style>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <h2 style="margin:0;font-size:17px">📄 Proforma <span style="font-size:10px;font-weight:700;letter-spacing:.06em;color:#0b0b10;background:#f5b14c;border-radius:6px;padding:2px 7px;vertical-align:3px">BETA</span></h2>
+        <span style="font-family:var(--font-mono);font-size:12px;color:var(--fg-subtle)">N° ${escapeHtml(pfNumeroTxt(pf.numero, d.fecha))}</span>
+        <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap;max-width:100%">
+          <select data-pf-act-change="abrir" style="${inp};width:auto;flex:1 1 150px;min-width:0;max-width:260px;padding:6px 8px"><option value="">Abrir una guardada…</option>${recientes}</select>
+          <button type="button" class="btn btn-ghost" data-pf-act="nueva" style="font-size:12px">Nueva</button>
+          <button type="button" class="btn btn-ghost btn-icon" data-pf-act="cerrar" title="Cerrar">✕</button>
+        </div>
+      </div>
+      <div class="pf-g3" style="${sec};display:grid;grid-template-columns:2fr 1.4fr 1.2fr;gap:10px">
+        <div><label style="${lbl}">Cliente *</label><input data-pf="cliente" value="${escapeHtml(d.cliente)}" placeholder="Del Norte" style="${inp}"></div>
+        <div><label style="${lbl}">Rubro / subtítulo</label><input data-pf="detalle" value="${escapeHtml(d.detalle)}" placeholder="Librería y Papelería" style="${inp}"></div>
+        <div><label style="${lbl}">Teléfono</label><input data-pf="telefono" value="${escapeHtml(d.telefono)}" style="${inp}"></div>
+        <div class="pf-span2" style="grid-column:span 2"><label style="${lbl}">Proyecto</label><input data-pf="proyecto" value="${escapeHtml(d.proyecto)}" placeholder="Cartelería del local: fachada, interior y saliente" style="${inp}"></div>
+        <div style="display:flex;gap:8px"><div style="flex:1"><label style="${lbl}">Fecha</label><input type="date" data-pf="fecha" value="${escapeHtml(d.fecha)}" style="${inp}"></div><div style="width:84px"><label style="${lbl}">Validez (días)</label><input data-pf="validez" inputmode="numeric" value="${escapeHtml(String(d.validez ?? ''))}" style="${inp}"></div></div>
+      </div>
+      <div style="${sec}">
+        <label style="${lbl}">Traer de los briefs (nombre del trabajo o teléfono)</label>
+        <input data-pf-q value="${escapeHtml(pf.q || '')}" placeholder="Buscar…" style="${inp}">
+        <div id="pf-res">${resHtml}</div>
+      </div>
+      <div style="${sec}">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px"><span style="font-size:13px;font-weight:700">Ítems</span><span style="font-size:12px;color:var(--fg-subtle)">${d.items.length} ítem${d.items.length === 1 ? '' : 's'}</span></div>
+        ${items || '<div style="font-size:12px;color:var(--fg-subtle);padding:8px 0">Traé briefs de arriba o agregá ítems a mano.</div>'}
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${Object.keys(PF_TIPOS).map(k => `<button type="button" class="btn btn-ghost" data-pf-act="agregar" data-tipo="${k}" style="font-size:12px;padding:5px 10px">＋ ${PF_TIPOS[k].label}</button>`).join('')}</div>
+      </div>
+      <div class="pf-g2" style="${sec};display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div><label style="${lbl}">Condiciones · una por renglón · **negrita** (la validez se agrega sola)</label><textarea data-pf="condiciones" rows="6" style="${inp};resize:vertical;font-family:inherit;line-height:1.4">${escapeHtml(d.condiciones)}</textarea></div>
+        <div><label style="${lbl}">Texto de introducción (opcional)</label><textarea data-pf="intro" rows="6" placeholder="Te compartimos la propuesta para… (si lo dejás vacío va uno automático)" style="${inp};resize:vertical;font-family:inherit;line-height:1.4">${escapeHtml(d.intro)}</textarea></div>
+      </div>
+      <div style="${sec};display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="font-size:13px;color:var(--fg-subtle)">Total <b id="pf-total" style="font-size:18px;color:var(--fg);font-family:var(--font-mono)">${pfPesos(total)}</b> + IVA</div>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button type="button" class="btn btn-ghost" data-pf-act="cerrar">Cerrar</button>
+          <button type="button" class="btn btn-ghost" data-pf-act="guardar" ${pf.saving ? 'disabled' : ''}>${pf.saving ? 'Guardando…' : '💾 Guardar'}</button>
+          <button type="button" class="btn btn-cyan" data-pf-act="pdf" ${pf.saving ? 'disabled' : ''}>📄 Generar PDF</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+function bindProformaModal() {
+  const bk = document.getElementById('pf-backdrop');
+  const pf = STATE.pf;
+  if (!bk || !pf || !pf.open) return;
+  const itemDe = (el) => { const box = el.closest('[data-pf-item]'); return box ? pf.data.items.find(x => x.uid === box.getAttribute('data-pf-item')) : null; };
+  const pintarTotal = () => { const t = document.getElementById('pf-total'); if (t) t.textContent = pfPesos(pfTotal(pf.data)); };
+  // render() recrea el modal entero: volver al mismo scroll y al campo donde estaba escribiendo (con el cursor).
+  if (pf._scroll) bk.scrollTop = pf._scroll;
+  bk.onscroll = () => { pf._scroll = bk.scrollTop; };
+  const selDe = (el) => {
+    if (el.hasAttribute('data-pf')) return `[data-pf="${el.getAttribute('data-pf')}"]`;
+    if (el.hasAttribute('data-pf-q')) return '[data-pf-q]';
+    if (el.hasAttribute('data-pfi')) { const box = el.closest('[data-pf-item]'); return box ? `[data-pf-item="${box.getAttribute('data-pf-item')}"] [data-pfi="${el.getAttribute('data-pfi')}"]` : null; }
+    return null;
+  };
+  bk.addEventListener('focusin', (e) => { const sel = selDe(e.target); pf._focus = sel ? { sel } : null; });
+  // El cursor se guarda en cada tecla/clic/cambio (si un render borra el campo, Chrome no avisa con focusout).
+  const guardarCursor = (e) => { if (pf._focus && selDe(e.target) === pf._focus.sel) { try { pf._focus.a = e.target.selectionStart; pf._focus.b = e.target.selectionEnd; } catch (_) {} } };
+  ['keyup', 'mouseup', 'input', 'focusout'].forEach(ev => bk.addEventListener(ev, guardarCursor));
+  if (pf._focus && (!document.activeElement || document.activeElement === document.body)) {
+    const el = bk.querySelector(pf._focus.sel);
+    if (el) { try { el.focus({ preventScroll: true }); if (pf._focus.a != null) el.setSelectionRange(pf._focus.a, pf._focus.b); } catch (_) {} }
+  }
+  let qTimer = null;
+  bk.oninput = (e) => {
+    const el = e.target;
+    if (el.hasAttribute('data-pf')) { const k = el.getAttribute('data-pf'); pf.data[k] = (k === 'validez') ? pfNum(el.value) : el.value; return; }
+    if (el.hasAttribute('data-pf-q')) {
+      pf.q = el.value; clearTimeout(qTimer);
+      qTimer = setTimeout(async () => { await pfEnsureBriefs(); if (!document.getElementById('pf-res') || !STATE.pf || !STATE.pf.open) return; render(); }, 220);
+      return;
+    }
+    if (el.hasAttribute('data-pfi')) {
+      const it = itemDe(el); if (!it) return;
+      const k = el.getAttribute('data-pfi');
+      if (k === 'tipo') return; // lo maneja onchange (necesita el tipo ANTERIOR para reemplazar el texto de ejemplo)
+      if (k === 'cantidad' || k === 'precio') { it[k] = pfNum(el.value); pintarTotal(); }
+      else it[k] = el.value;
+    }
+  };
+  bk.onchange = async (e) => {
+    const el = e.target;
+    if (el.hasAttribute('data-pfi') && el.getAttribute('data-pfi') === 'tipo') {
+      const it = itemDe(el); if (!it) return;
+      const t = PF_TIPOS[el.value] || PF_TIPOS.otro, prev = PF_TIPOS[it.tipo] || PF_TIPOS.otro;
+      // Cambiar el producto reemplaza título/etiqueta/detalle SOLO si seguían con el texto de ejemplo del tipo anterior.
+      if (!it.titulo || it.titulo === prev.titulo) it.titulo = t.titulo;
+      if (!it.chip || it.chip === prev.chip) it.chip = t.chip;
+      if (!it.detalle || it.detalle === prev.detalle) it.detalle = t.detalle;
+      it.tipo = el.value; render(); return;
+    }
+    if (el.getAttribute('data-pf-act-change') === 'abrir' && el.value) { if (pf.saving) { toast('Esperá que termine de guardar'); render(); return; } pfAbrir(parseInt(el.value, 10)); return; }
+    if (el.hasAttribute('data-pf-file')) {
+      const it = pf.data.items.find(x => x.uid === el.getAttribute('data-pf-file')); const f = el.files && el.files[0];
+      if (!it || !f) return;
+      it._subiendo = true; render();
+      try { it.img = await disenoSubirArchivo(f); if (it.img && (it.renders || []).indexOf(it.img) === -1) it.renders = [...(it.renders || []), it.img]; }
+      catch (err) { toast('No se pudo subir la imagen: ' + ((err && err.message) || err)); }
+      finally { it._subiendo = false; render(); }
+    }
+  };
+  bk.onclick = (e) => {
+    if (e.target === bk) { closeProforma(); return; }
+    const b = e.target.closest('[data-pf-act]'); if (!b || b.disabled) return;
+    const act = b.getAttribute('data-pf-act'), uid = b.getAttribute('data-uid');
+    const idx = uid ? pf.data.items.findIndex(x => x.uid === uid) : -1;
+    if (act === 'cerrar') return closeProforma();
+    if (pf.saving && (act === 'nueva' || act === 'pdf' || act === 'guardar')) return;
+    if (act === 'nueva') { if (pf.data.items.length && !confirm('¿Empezar una proforma nueva? Lo que no guardaste se pierde.')) return; return pfNueva(); }
+    if (act === 'guardar') return pfGuardar(false);
+    if (act === 'pdf') return pfGenerarPdf();
+    if (act === 'importar') return pfImportarBrief(parseInt(b.getAttribute('data-id'), 10));
+    if (act === 'agregar') { pf.data.items.push(pfItemNuevo(b.getAttribute('data-tipo'))); return render(); }
+    if (idx < 0) return;
+    if (act === 'borrar') { pf.data.items.splice(idx, 1); return render(); }
+    if (act === 'subir' && idx > 0) { const a = pf.data.items; [a[idx - 1], a[idx]] = [a[idx], a[idx - 1]]; return render(); }
+    if (act === 'bajar' && idx < pf.data.items.length - 1) { const a = pf.data.items; [a[idx + 1], a[idx]] = [a[idx], a[idx + 1]]; return render(); }
+    if (act === 'sinimg') { pf.data.items[idx].img = ''; return render(); }
+    if (act === 'usarimg') { pf.data.items[idx].img = b.getAttribute('data-key') || ''; return render(); }
+  };
+  bk.onkeydown = (e) => { if (e.key === 'Escape') closeProforma(); };
+}
+
 function renderPresupuestos() {
   const list = STATE.presupuestos.map(p => ({...p, st: presupuestoStatus(p)}));
   const counts = {
@@ -7805,6 +8350,7 @@ function renderPresupuestos() {
         <button class="btn btn-cyan" data-cot-open>＋ Cotizador</button>
         <button class="btn btn-ghost" id="btn-pp-failures" title="Ver presupuestos del cotizador que fallaron en entregar por WhatsApp en las últimas 24hs">⚠ Fallos WA</button>
         <button class="btn btn-ghost" id="btn-pp-followups" title="Enviar follow-up a clientes que recibieron presupuesto hace +1hs y no respondieron">📱 Follow-ups</button>
+        ${isAdmin() ? '<button class="btn btn-ghost" id="btn-pp-proforma" title="Armar una proforma en PDF (corpóreos, neón, salientes…) con los briefs del cliente">📄 Proforma (beta)</button>' : ''}
         <button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button>
       </div>
     </div>
@@ -7821,6 +8367,7 @@ function renderPresupuestos() {
       </div>
       <div id="table-presupuestos"></div>
     </div>
+    ${renderProformaModal()}
   `;
 }
 
