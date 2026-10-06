@@ -18365,7 +18365,10 @@ const handler = {
           return `${r.pedido_numero ? '#' + r.pedido_numero + ' ' : ''}${String(r.diseno_nombre || 'cartel').trim()} ${m.txt || 'sin medida'}${cant > 1 ? ' x' + cant : ''}`;
         });
         // --- Aviso por WhatsApp (en paralelo con el armado del ZIP) ---
+        // sin_aviso (solo admin): bajar el ZIP sin mandar WhatsApp (pruebas / re-descargas de Gaspar).
+        const sinAviso = _r === 'admin' && body.sin_aviso === true;
         const avisar = (async () => {
+          if (sinAviso) return { estado: 'sin_aviso' };
           const sig = rows.map(r => r.id).sort((a, b) => a - b).join(',');
           try {
             const last = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'corte_disenos_aviso_last'").first();
