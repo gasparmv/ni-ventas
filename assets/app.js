@@ -107,6 +107,15 @@ const CONFIG = {
     nv_margen_max: 0.72,
     // Acrílico negro: precio = transparente × ratio (siempre 7% más barato)
     nv_negro_ratio: 0.93,
+    // CORPÓREOS — índice de complejidad (oct-2026, pedido de Gaspar). Densidad = piezas / m²
+    // (pieza = cada parte que se fabrica por separado: letra, parte del logo, el punto de la i).
+    // El $/m² va de corp_pm2_min (densidad ≤ corp_dens_simple) a corp_pm2_max (≥ corp_dens_compleja),
+    // interpolando en escala log. Es el precio de "con luz + frente impreso"; sin luz / acrílico
+    // mantienen la proporción de CORP_PRECIOS. Sin piezas cargadas → fórmula vieja (retrocompat).
+    corp_pm2_min: 800000,
+    corp_pm2_max: 1300000,
+    corp_dens_simple: 4,
+    corp_dens_compleja: 40,
     // Fallback del sueldo fijo de Joaco si un mes no está en joacoFijoByMonth.
     nv_joaquin_fijo: 250000,
     // Sueldo fijo de Nadia (2da vendedora): PENDIENTE de definir → 0 por ahora.
@@ -9868,6 +9877,12 @@ const COT_PARAM_GROUPS = [
     ['ext_25', 'm² ≤ 25'],
     ['ext_50', 'm² ≤ 50'],
     ['ext_99', 'm² > 50']
+  ]},
+  { title: 'Corpóreos — complejidad (piezas por m², con luz + impreso)', keys: [
+    ['corp_pm2_min', '$/m² muy simple (800000)'],
+    ['corp_pm2_max', '$/m² muy complejo (1300000)'],
+    ['corp_dens_simple', 'Piezas/m² muy simple (4)'],
+    ['corp_dens_compleja', 'Piezas/m² muy complejo (40)']
   ]}
 ];
 
@@ -18321,7 +18336,7 @@ function renderBriefDrawer() {
           </div>` : ''}
           ${esCorpBrief ? `
           <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-2) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Secciones / tramos</div>
-          <div style="font-size:11px;color:var(--fg-mute);margin-bottom:6px">Cargá cada tramo del cartel (ancho, alto, luz y material). El precio suma todas las secciones; el render usa la foto del cartel completo.</div>
+          <div style="font-size:11px;color:var(--fg-mute);margin-bottom:6px">Cargá cada tramo del cartel (ancho, alto, piezas, luz y material). <b>Piezas</b> = cada parte que se fabrica por separado (cada letra, cada parte del logo, el punto de la i): define la complejidad y el precio por m². El precio suma todas las secciones; el render usa la foto del cartel completo.</div>
           <div id="corp-secciones">${corpSecs.map(s => corpSeccionRowHtml(s, corpSecs.length > 1)).join('')}</div>
           <button type="button" data-corp-sec-add style="width:100%;background:transparent;border:1px dashed var(--accent-cyan);border-radius:var(--r-sm);color:var(--accent-cyan);padding:7px;cursor:pointer;font-size:12px;margin-bottom:var(--s-2)">+ Agregar sección</button>
           <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-3) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Frente</div>
@@ -18445,7 +18460,17 @@ function defaultCorpForm() {
     lat_acabado:'translucido', lat_color:'#ffffff',
     esp_acabado:'translucida', esp_color:'#ffffff' };
 }
+// Costo por m² (base del "costo" que ve el admin) y, desde oct-2026, la PROPORCIÓN entre variantes
+// para el índice de complejidad (con luz + impreso = 1; acrílico ×1,16; sin luz ×0,62; etc.).
 const CORP_PRECIOS = { conluz: { impreso: 450000, acrilico: 520000 }, sinluz: { impreso: 280000, acrilico: 330000 } };
+// Niveles del índice de complejidad, por posición en la escala (0 = muy simple … 1 = muy complejo).
+const CORP_NIVELES = [[0.1, 'Muy simple'], [0.3, 'Simple'], [0.55, 'Media'], [0.85, 'Compleja'], [Infinity, 'Muy compleja']];
+// Precio de UNA sección de corpóreo.
+//  - Con piezas (> 0): ÍNDICE DE COMPLEJIDAD. densidad = piezas / m² → $/m² entre corp_pm2_min y
+//    corp_pm2_max (interpolación log entre corp_dens_simple y corp_dens_compleja), × la proporción
+//    de la variante (luz/material). La complejidad ya pondera el tamaño (mismas piezas en más m² =
+//    menos densidad = más barato por m²), así que no hay descuento extra por superficie.
+//  - Sin piezas: fórmula VIEJA (costo/m² × margen por superficie) → los briefs de antes no cambian.
 function calcCorporea(f) {
   const ancho = +f.ancho || 0, alto = +f.alto || 0;
   const m2 = (ancho * alto) / 10000;
@@ -18453,13 +18478,28 @@ function calcCorporea(f) {
   const mat = f.frente_material === 'acrilico' ? 'acrilico' : 'impreso';
   const costoM2 = CORP_PRECIOS[conLuz ? 'conluz' : 'sinluz'][mat];
   const costo = m2 * costoM2;
-  const margen = m2 <= 2 ? 2 : (m2 <= 5 ? 1.75 : 1.5);
   // Vendedor con recargo oculto en corpóreos (Facu: +5%, compensa parte de su 10% de comisión). Igual que
   // el +5% de neón: lo aplica según quién está logueado y él solo ve el precio final.
   const _sec = (typeof STATE !== 'undefined' && isSecundario(STATE.user)) ? COMERCIALES_SECUNDARIOS[_userKey(STATE.user)] : null;
   const markup = (_sec && _sec.corpMarkup) || 1;
+  const piezas = Math.max(0, Math.round(+f.piezas || 0));
+  if (piezas > 0 && m2 > 0) {
+    const p = (typeof getCotizadorParams === 'function') ? getCotizadorParams() : {};
+    const pmin = +p.corp_pm2_min || 800000, pmax = +p.corp_pm2_max || 1300000;
+    const dS = +p.corp_dens_simple || 4, dC = Math.max(+p.corp_dens_compleja || 40, dS * 1.01);
+    const densidad = piezas / m2;
+    const t = Math.max(0, Math.min(1, (Math.log(densidad) - Math.log(dS)) / (Math.log(dC) - Math.log(dS))));
+    const proporcion = costoM2 / CORP_PRECIOS.conluz.impreso;
+    const pm2 = (pmin + (pmax - pmin) * t) * proporcion * markup;   // $/m² final (incluye el recargo del vendedor)
+    const precio = Math.round(m2 * pm2 / 1000) * 1000;
+    const nivel = CORP_NIVELES.find(([lim]) => t < lim)[1];
+    // margen = multiplicador efectivo sobre el costo (para el desglose admin), sin el recargo del vendedor.
+    const margen = +((pm2 / markup) / costoM2).toFixed(2);
+    return { m2, conLuz, costoM2, costo, margen, precio, modelo: 'complejidad', piezas, densidad, nivel, pm2: Math.round(pm2 / 1000) * 1000 };
+  }
+  const margen = m2 <= 2 ? 2 : (m2 <= 5 ? 1.75 : 1.5);
   const precio = Math.round(costo * margen * markup / 1000) * 1000;
-  return { m2, conLuz, costoM2, costo, margen, precio };
+  return { m2, conLuz, costoM2, costo, margen, precio, modelo: 'legacy', piezas: 0 };
 }
 // ===== SECCIONES / TRAMOS =====
 // Un corpóreo se puede hacer en varios tramos (secciones), cada uno con SU medida,
@@ -18471,18 +18511,24 @@ function calcCorporeaTotal(secciones) {
   // Descartar tramos SIN medida real (ancho/alto vacío o 0): no ensucian el total, ni la
   // persistencia (corporea_json.secciones), ni el presupuesto del cliente (evita "0x0 cm").
   const secs = (secciones || []).filter(s => (+s.ancho > 0) && (+s.alto > 0)).map(s => {
-    const r = calcCorporea({ ancho: s.ancho, alto: s.alto, con_luz: s.con_luz, frente_material: s.frente_material });
-    return {
+    const r = calcCorporea({ ancho: s.ancho, alto: s.alto, con_luz: s.con_luz, frente_material: s.frente_material, piezas: s.piezas });
+    const out = {
       ancho_cm: +s.ancho || 0, alto_cm: +s.alto || 0,
       con_luz: String(s.con_luz) !== '0',
       frente_material: s.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
       m2: r.m2, costo_m2: r.costoM2, margen: r.margen, costo: r.costo, precio: r.precio,
     };
+    // Índice de complejidad: se persiste por sección (historial para recalibrar la escala).
+    if (r.modelo === 'complejidad') Object.assign(out, { piezas: r.piezas, densidad: +r.densidad.toFixed(2), nivel: r.nivel, pm2: r.pm2 });
+    return out;
   });
   const precio = secs.reduce((a, s) => a + s.precio, 0);
   const m2 = secs.reduce((a, s) => a + s.m2, 0);
   const costo = secs.reduce((a, s) => a + s.costo, 0);
-  return { secciones: secs, precio, m2, costo, comision_joaco: Math.round(precio * 0.03) };
+  const piezas = secs.reduce((a, s) => a + (s.piezas || 0), 0);
+  // sinPiezas: alguna sección se cotizó con la fórmula vieja porque no tiene piezas cargadas.
+  const sinPiezas = secs.some(s => !s.piezas);
+  return { secciones: secs, precio, m2, costo, piezas, sinPiezas, comision_joaco: Math.round(precio * 0.03) };
 }
 // Deriva el array de secciones (para el drawer) desde corporea_json. Si no hay
 // 'secciones' (brief viejo / 1 tramo), arma UNA sección desde los campos single.
@@ -18495,11 +18541,12 @@ function corpSeccionesFromCj(cj, data) {
       alto: (s.alto_cm != null ? s.alto_cm : (s.alto || '')),
       con_luz: (s.con_luz === false || String(s.con_luz) === '0') ? '0' : '1',
       frente_material: s.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
+      piezas: s.piezas || '',
     }));
   }
   const ancho = (data && data.ancho_cm) || cj.ancho_cm || '';
   const alto = (data && data.alto_cm) || cj.alto_cm || '';
-  return [{ ancho, alto, con_luz: (cj.con_luz === false) ? '0' : '1', frente_material: cj.frente_material === 'acrilico' ? 'acrilico' : 'impreso' }];
+  return [{ ancho, alto, con_luz: (cj.con_luz === false) ? '0' : '1', frente_material: cj.frente_material === 'acrilico' ? 'acrilico' : 'impreso', piezas: cj.piezas || '' }];
 }
 // Lee las filas de sección del DOM del drawer (en orden). Cada fila expone sus inputs
 // con [data-sec-field]; NO usa [data-corp-bf] (ese es global y aplanaría todo en uno).
@@ -18507,7 +18554,7 @@ function readCorpSeccionesDom() {
   const rows = [];
   document.querySelectorAll('#corp-secciones [data-corp-sec-row]').forEach(row => {
     const g = (f) => { const el = row.querySelector(`[data-sec-field="${f}"]`); return el ? el.value : ''; };
-    rows.push({ ancho: g('ancho'), alto: g('alto'), con_luz: g('con_luz') || '1', frente_material: g('frente_material') || 'impreso' });
+    rows.push({ ancho: g('ancho'), alto: g('alto'), piezas: g('piezas'), con_luz: g('con_luz') || '1', frente_material: g('frente_material') || 'impreso' });
   });
   return rows;
 }
@@ -18521,9 +18568,13 @@ function corpSeccionRowHtml(sec, removable) {
   const lb = 'display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px';
   const av = (sec.ancho_cm != null ? sec.ancho_cm : (sec.ancho != null ? sec.ancho : ''));
   const hv = (sec.alto_cm != null ? sec.alto_cm : (sec.alto != null ? sec.alto : ''));
-  return `<div data-corp-sec-row style="display:grid;grid-template-columns:1fr 1fr 1.1fr 1.1fr auto;gap:6px;align-items:end;margin-bottom:6px">
+  const pz = (sec.piezas != null && +sec.piezas > 0) ? +sec.piezas : '';
+  // Piezas vacío = se cotiza con la fórmula vieja → borde ámbar para que no se olvide.
+  const pzS = inS + (pz === '' ? ';border-color:#f5b14c' : '');
+  return `<div data-corp-sec-row style="display:grid;grid-template-columns:1fr 1fr 0.9fr 1.1fr 1.1fr auto;gap:6px;align-items:end;margin-bottom:6px">
     <div><label style="${lb}">Ancho (cm)</label><input type="number" step="1" data-sec-field="ancho" value="${av}" style="${inS}"></div>
     <div><label style="${lb}">Alto (cm)</label><input type="number" step="1" data-sec-field="alto" value="${hv}" style="${inS}"></div>
+    <div title="Cantidad de piezas que se fabrican por separado: cada letra, cada parte del logo, el punto de la i. Define la complejidad (piezas por m²) y con eso el precio por m²."><label style="${lb}">Piezas</label><input type="number" step="1" min="0" data-sec-field="piezas" value="${pz}" placeholder="ej. 12" style="${pzS}"></div>
     <div><label style="${lb}">Iluminación</label><select data-sec-field="con_luz" style="${inS}"><option value="1" ${!sinLuz?'selected':''}>Con luz</option><option value="0" ${sinLuz?'selected':''}>Sin luz</option></select></div>
     <div><label style="${lb}">Material</label><select data-sec-field="frente_material" style="${inS}"><option value="impreso" ${mat!=='acrilico'?'selected':''}>Impreso</option><option value="acrilico" ${mat==='acrilico'?'selected':''}>Acrílico</option></select></div>
     <button type="button" data-corp-sec-remove title="Quitar sección" style="background:transparent;border:1px solid var(--border);border-radius:var(--r-sm);color:#FF5566;padding:8px 10px;cursor:pointer;height:37px;${removable?'':'visibility:hidden'}">🗑</button>
@@ -18549,15 +18600,24 @@ function corpPriceBoxHtml(r) {
   const multi = secs && secs.length > 1;
   const m2 = Number(r.m2) || 0;
   const precio = Number(r.precio) || 0;
+  // Complejidad de una sección: "Media · 12 piezas · 9,5 pz/m² · $1.020.000/m²" (o aviso si no tiene piezas).
+  const fmtDens = d => (+d || 0).toLocaleString('es-AR', { maximumFractionDigits: 1 });
+  const complejidadTxt = s => s.piezas
+    ? `<b style="color:var(--fg)">${escapeHtml(s.nivel || '')}</b> · ${s.piezas} pieza${s.piezas === 1 ? '' : 's'} · ${fmtDens(s.densidad)} pz/m² · ${fmtMoney(s.pm2 || 0)}/m²`
+    : '<span style="color:#f5b14c">sin piezas → fórmula vieja</span>';
   const breakdown = multi
-    ? `<div style="font-size:10px;color:var(--fg-mute);margin-top:5px;line-height:1.5">${secs.map((s, i) => `Sección ${i + 1}: ${s.ancho_cm}×${s.alto_cm} cm${s.con_luz ? '' : ' · sin luz'}${s.frente_material === 'acrilico' ? ' · acrílico' : ''} — ${fmtMoney(s.precio)}`).join('<br>')}</div>`
+    ? `<div style="font-size:10px;color:var(--fg-mute);margin-top:5px;line-height:1.5">${secs.map((s, i) => `Sección ${i + 1}: ${s.ancho_cm}×${s.alto_cm} cm${s.con_luz ? '' : ' · sin luz'}${s.frente_material === 'acrilico' ? ' · acrílico' : ''} — ${complejidadTxt(s)} — <b style="color:var(--fg)">${fmtMoney(s.precio)}</b>`).join('<br>')}</div>`
+    : (secs && secs[0] ? `<div style="font-size:11px;color:var(--fg-subtle);margin-top:5px">Complejidad: ${complejidadTxt(secs[0])}</div>` : '');
+  // Aviso si alguna sección con medida no tiene piezas (se cotiza con la fórmula vieja).
+  const avisoPiezas = (secs && secs.length && r.sinPiezas)
+    ? `<div style="font-size:11px;color:#f5b14c;margin-top:6px">⚠ Cargá la cantidad de piezas${multi ? ' en cada sección' : ''} para cotizar con el índice de complejidad.</div>`
     : '';
   const adminExtra = isAdmin()
     ? (multi ? ` · ${secs.length} secciones`
       : (secs && secs[0] ? ` · costo ${fmtMoney(r.costo || 0)} · ×${secs[0].margen}`
         : (r.costo != null && r.margen != null ? ` · costo ${fmtMoney(r.costo)} · ×${r.margen}` : '')))
     : '';
-  return `<div style="padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final${multi ? ` (${secs.length} secciones)` : ''}</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${m2.toLocaleString('es-AR', { maximumFractionDigits: 2 })} m²${adminExtra}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(precio * 0.03))}</div></div>${breakdown}</div>`;
+  return `<div style="padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final${multi ? ` (${secs.length} secciones)` : ''}</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${m2.toLocaleString('es-AR', { maximumFractionDigits: 2 })} m²${adminExtra}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(precio * 0.03))}</div></div>${breakdown}${avisoPiezas}</div>`;
 }
 // Etiquetas de acabado por cara (la espalda va en femenino). Fuente única para el render inicial
 // (corpAc) y para el refresh en vivo (refreshCorpAcabados).
@@ -18594,7 +18654,10 @@ function updateCorpDrawerPrice() {
 }
 document.addEventListener('input', (ev) => {
   const t = ev.target;
-  if (t && t.matches && t.matches('[data-bf="ancho_cm"],[data-bf="alto_cm"],[data-sec-field="ancho"],[data-sec-field="alto"]') && document.getElementById('corp-price-box')) updateCorpDrawerPrice();
+  if (t && t.matches && t.matches('[data-bf="ancho_cm"],[data-bf="alto_cm"],[data-sec-field="ancho"],[data-sec-field="alto"],[data-sec-field="piezas"]') && document.getElementById('corp-price-box')) {
+    if (t.matches('[data-sec-field="piezas"]')) t.style.borderColor = (+t.value > 0) ? 'var(--border)' : '#f5b14c';
+    updateCorpDrawerPrice();
+  }
 });
 document.addEventListener('change', (ev) => {
   const t = ev.target;
@@ -19124,6 +19187,7 @@ function renderCorpPopup() {
   const secsAll = Array.isArray(cj.secciones) ? cj.secciones.filter(s => (Number(s.ancho_cm) || 0) > 0 && (Number(s.alto_cm) || 0) > 0) : null;
   const secs = (secsAll && secsAll.length) ? secsAll : null;   // defensivo: ignorar tramos 0x0
   const multi = secs && secs.length > 1;
+  const s0 = secs && secs.length === 1 ? secs[0] : null;   // sección única (para mostrar su complejidad)
   const medHdr = multi ? `${secs.length} secciones` : `${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm`;
   return `
     <div data-corp-popup-bg style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:flex;align-items:center;justify-content:center;padding:var(--s-4)">
@@ -19145,17 +19209,19 @@ function renderCorpPopup() {
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent-cyan);margin-bottom:6px">🔒 Desglose de costos · solo admin</div>
           <table style="width:100%;font-family:ui-monospace,monospace;font-size:12px;color:var(--fg-subtle)">
             ${multi
-              ? secs.map((s, i) => `<tr><td>Sección ${i + 1} · ${s.ancho_cm}×${s.alto_cm} (${s.frente_material === 'acrilico' ? 'acríl.' : 'impr.'}, ${s.con_luz ? 'c/luz' : 's/luz'})</td><td style="text-align:right;color:var(--fg)">${(Number(s.m2) || 0).toFixed(2)} m² · ×${s.margen} = <b>${fmtMoney(s.precio)}</b></td></tr>`).join('')
+              ? secs.map((s, i) => `<tr><td>Sección ${i + 1} · ${s.ancho_cm}×${s.alto_cm} (${s.frente_material === 'acrilico' ? 'acríl.' : 'impr.'}, ${s.con_luz ? 'c/luz' : 's/luz'})${s.piezas ? ` · ${s.piezas} pz` : ''}</td><td style="text-align:right;color:var(--fg)">${(Number(s.m2) || 0).toFixed(2)} m² · ${s.piezas ? `${escapeHtml(s.nivel || '')} ${fmtMoney(s.pm2 || 0)}/m²` : `×${s.margen}`} = <b>${fmtMoney(s.precio)}</b></td></tr>`).join('')
                 + `<tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Superficie total</td><td style="text-align:right;padding-top:5px;color:var(--fg)"><b>${m2 || '?'} m²</b></td></tr><tr><td>Costo base total</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo || 0)}</td></tr>`
               : `<tr><td>Superficie</td><td style="text-align:right;color:var(--fg)">${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm = <b>${m2 || '?'} m²</b></td></tr>
             <tr><td>Costo/m² (${mat}, ${luz})</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo_m2 || 0)}</td></tr>
             <tr><td>Costo base (m² × costo/m²)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo || 0)}</td></tr>
-            <tr><td>Margen por superficie</td><td style="text-align:right;color:var(--fg)">×${cj.margen || '?'}</td></tr>`}
-            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio final ${multi ? '(suma de secciones)' : '(costo × margen)'}</td><td style="text-align:right;padding-top:5px"><b style="color:var(--accent-cyan)">${fmtMoney(brief.precio_final || 0)}</b></td></tr>
+            ${(s0 && s0.piezas)
+              ? `<tr><td>Complejidad (${s0.piezas} piezas · ${(+s0.densidad || 0).toLocaleString('es-AR', { maximumFractionDigits: 1 })} pz/m²)</td><td style="text-align:right;color:var(--fg)">${escapeHtml(s0.nivel || '')} · ${fmtMoney(s0.pm2 || 0)}/m² (×${s0.margen} s/costo)</td></tr>`
+              : `<tr><td>Margen por superficie</td><td style="text-align:right;color:var(--fg)">×${cj.margen || '?'}</td></tr>`}`}
+            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio final ${multi ? '(suma de secciones)' : ((s0 && s0.piezas) ? '(m² × $/m²)' : '(costo × margen)')}</td><td style="text-align:right;padding-top:5px"><b style="color:var(--accent-cyan)">${fmtMoney(brief.precio_final || 0)}</b></td></tr>
             <tr><td>Comisión Joaco (3% — es costo)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</td></tr>
             <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Ganancia neta</b> (precio − costo − comisión)</td><td style="text-align:right;padding-top:5px;color:#4ade80"><b>${fmtMoney((brief.precio_final || 0) - (cj.costo || 0) - Math.round((brief.precio_final || 0) * 0.03))}</b></td></tr>
           </table>
-          <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Margen: ≤2 m² ×2 · 2–5 m² ×1.75 · +5 m² ×1.5 · costo/m²: impreso 450k / acrílico 520k (con luz), 280k / 330k (sin luz)</div>
+          <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Índice de complejidad (con piezas): $/m² de ${fmtMoney(getCotizadorParams().corp_pm2_min || 800000)} (≤${getCotizadorParams().corp_dens_simple || 4} pz/m²) a ${fmtMoney(getCotizadorParams().corp_pm2_max || 1300000)} (≥${getCotizadorParams().corp_dens_compleja || 40} pz/m²), con luz + impreso; acrílico ×1,16 · sin luz ×0,62. Sin piezas (fórmula vieja): margen ≤2 m² ×2 · 2–5 m² ×1.75 · +5 m² ×1.5 · costo/m²: impreso 450k / acrílico 520k (con luz), 280k / 330k (sin luz)</div>
         </div>
         ` : ''}
         <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto</label>
@@ -20516,6 +20582,10 @@ function readBriefDrawerForm() {
       ancho_cm: s1.ancho_cm, alto_cm: s1.alto_cm, m2: agg.m2,
       costo_m2: s1.costo_m2, margen: s1.margen, costo: agg.costo, precio: agg.precio,
       comision_joaco: agg.comision_joaco,
+      // Índice de complejidad (oct-2026): piezas totales + qué fórmula se usó. 'mixto' = alguna
+      // sección sin piezas (esa va con la fórmula vieja). El detalle por sección va en `secciones`.
+      piezas: agg.piezas || 0,
+      modelo_precio: !agg.piezas ? 'legacy' : (agg.sinPiezas ? 'mixto' : 'complejidad'),
       secciones: agg.secciones,   // NUEVO: desglose por tramo para precio/presupuesto
     });
     out.precio_final = agg.precio;   // TOTAL = suma de secciones (calcCorporeaTotal ya descartó las vacías)
