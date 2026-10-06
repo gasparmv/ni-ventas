@@ -204,12 +204,22 @@ function panelSueldoHtml(vendedor) {
   const rate = sec
     ? sec.rate  // lo que VE el secundario (Facu/Agus = 10%). El neutro real calibrado es 9,5% (vende +5% oculto).
     : ((STATE.cotizadorCogs && STATE.cotizadorCogs.raw && +STATE.cotizadorCogs.raw.joaquin) || params.comision_pct || 0.05);
-  // Tasa propia para CORPÓREOS (ej. Facu: 10% neón / 7% corpóreo). Sin rateCorp → los corpóreos
-  // van a la misma tasa que el resto (comportamiento viejo intacto para Joaco/Agus).
+  // Tasa propia para CORPÓREOS (ej. Agus: 10% neón / 7% corpóreo). Sin rateCorp → los corpóreos
+  // van a la misma tasa que el resto (comportamiento viejo intacto para Joaco). Si cambió en el
+  // tiempo (Facu: 7% hasta el 05/10, 10% desde el 06/10), rateCorpAntes rige hasta rateCorpAntesHasta.
   const rateCorp = (sec && sec.rateCorp != null) ? sec.rateCorp : rate;
-  const splitCorp = rateCorp !== rate;   // desglosar neón vs corpóreo solo si las tasas difieren
   const ratePct = +(rate * 100).toFixed(1);
-  const rateCorpPct = +(rateCorp * 100).toFixed(1);
+  // Clave YYYY-MM-DD local del pedido (p.fecha es un Date de parseDate, NO un string). '' si no hay fecha.
+  const fechaKey = (p) => (p.fecha instanceof Date && !isNaN(p.fecha.getTime()))
+    ? `${p.fecha.getFullYear()}-${String(p.fecha.getMonth() + 1).padStart(2, '0')}-${String(p.fecha.getDate()).padStart(2, '0')}`
+    : '';
+  const tasaCorpDe = (p) => {
+    if (sec && sec.rateCorpAntesHasta && sec.rateCorpAntes != null) {
+      const fk = fechaKey(p);
+      if (fk && fk <= sec.rateCorpAntesHasta) return sec.rateCorpAntes;
+    }
+    return rateCorp;
+  };
   const fijoMes = sec ? nadiaFijoMes : joacoFijoMes;   // secundarios: 100% comisión (fijo 0) salvo carga manual
   const sel = getDashMonths();
   const periodMonths = (sel || availableMonths()).filter(m => m >= DESDE);
@@ -237,10 +247,17 @@ function panelSueldoHtml(vendedor) {
     // Una fila por pedido con SU comisión (redondeada) → el desglose suma EXACTO al total del KPI.
     const filas = misPedidos.map(p => {
       const v = (p.precio || 0) + (p.precioDimmer || 0);
-      const tasa = p.esCorporeo ? rateCorp : rate;
+      const tasa = p.esCorporeo ? tasaCorpDe(p) : rate;
       const mult = comMult(p);
       return { p, v, tasa, mult, com: Math.round(v * tasa * mult) };
     }).sort((a, b) => (+a.p.fecha || 0) - (+b.p.fecha || 0));
+    // Tasas de corpóreo que se aplicaron en el período (puede haber 2 si cae el cambio de tasa en
+    // el medio, ej. Facu 7%→10% en octubre). Si no hay corpóreos, se muestra la tasa vigente.
+    const tasasCorp = [...new Set(filas.filter(f => f.p.esCorporeo).map(f => f.tasa))].sort((a, b) => a - b);
+    if (!tasasCorp.length) tasasCorp.push(rateCorp);
+    const splitCorp = tasasCorp.some(t => t !== rate);   // desglosar neón vs corpóreo solo si las tasas difieren
+    const corpMixta = tasasCorp.length > 1;
+    const rateCorpPct = tasasCorp.map(t => +(t * 100).toFixed(1)).join('→');
     let ventasNeon = 0, ventasCorp = 0, comisionNeon = 0, comisionCorp = 0, huboMedia = false;
     filas.forEach(f => {
       if (f.mult < 1) huboMedia = true;
@@ -295,7 +312,7 @@ function panelSueldoHtml(vendedor) {
     const footer = splitCorp
       ? `<div style="margin-top:var(--s-3);display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--fg-subtle)">
            <span>🔷 Neón: <b>${fmtMoney(ventasNeon)}</b>${huboMedia ? ' → ' : ' × ' + ratePct + '% = '}<b style="color:var(--fg)">${fmtMoney(comisionNeon)}</b></span>
-           <span>🧊 Corpóreo: <b>${fmtMoney(ventasCorp)}</b>${huboMedia ? ' → ' : ' × ' + rateCorpPct + '% = '}<b style="color:var(--fg)">${fmtMoney(comisionCorp)}</b></span>
+           <span>🧊 Corpóreo: <b>${fmtMoney(ventasCorp)}</b>${(huboMedia || corpMixta) ? ' → ' : ' × ' + rateCorpPct + '% = '}<b style="color:var(--fg)">${fmtMoney(comisionCorp)}</b></span>
            ${huboMedia ? `<span style="opacity:.85">⚑ 1er mes: comisión al 50% (salvo lo que cerró ${escapeHtml(sec.nombre)})</span>` : ''}
          </div>`
       : `<div style="margin-top:var(--s-3);color:var(--fg-subtle);font-size:12px">Por cada ${fmtMoney(100000)} en carteles directo sumás ${fmtMoney(por100k)} de comisión 🚀</div>`;
@@ -1183,7 +1200,10 @@ function isAgustinaUser(s) { return _userKey(s) === 'agustina'; }
 // entrada acá (+ fila en users_panel + nombre en CONFIG.defaultUsers). Config por vendedor: comisión
 // visible (rate), +5% oculto (mas5), mes de inicio del panel "Tu sueldo" (desde), color de píldora.
 const COMERCIALES_SECUNDARIOS = {
-  facundo:  { nombre: 'Facu', rate: 0.10, rateCorp: 0.07, mas5: true, desde: '2026-08', color: 'violet' },
+  // Facu desde el 06/10: corpóreos al 10% (antes 7%: rateCorpAntes rige para los vendidos hasta
+  // rateCorpAntesHasta) + su calculadora de corpóreos cotiza 10% más caro, oculto (corpMarkup).
+  facundo:  { nombre: 'Facu', rate: 0.10, rateCorp: 0.10, rateCorpAntes: 0.07, rateCorpAntesHasta: '2026-10-05',
+              corpMarkup: 1.10, mas5: true, desde: '2026-08', color: 'violet' },
   agustina: { nombre: 'Agus', rate: 0.10, rateCorp: 0.07, mas5: true, desde: '2026-09', color: 'rose',
               // 1er mes (arranque): media comisión en los pedidos hasta el 03/10 (esas ventas las
               // hizo el equipo), salvo "Primero lo bueno" que cerró ella (comisión completa). Lo que
@@ -18434,7 +18454,11 @@ function calcCorporea(f) {
   const costoM2 = CORP_PRECIOS[conLuz ? 'conluz' : 'sinluz'][mat];
   const costo = m2 * costoM2;
   const margen = m2 <= 2 ? 2 : (m2 <= 5 ? 1.75 : 1.5);
-  const precio = Math.round(costo * margen / 1000) * 1000;
+  // Vendedor con recargo oculto en corpóreos (Facu: +10%, compensa su 10% de comisión). Igual que
+  // el +5% de neón: lo aplica según quién está logueado y él solo ve el precio final.
+  const _sec = (typeof STATE !== 'undefined' && isSecundario(STATE.user)) ? COMERCIALES_SECUNDARIOS[_userKey(STATE.user)] : null;
+  const markup = (_sec && _sec.corpMarkup) || 1;
+  const precio = Math.round(costo * margen * markup / 1000) * 1000;
   return { m2, conLuz, costoM2, costo, margen, precio };
 }
 // ===== SECCIONES / TRAMOS =====
