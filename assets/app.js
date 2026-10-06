@@ -3723,9 +3723,13 @@ function renderCorte() {
     const _hace14 = new Date(Date.now() - 14 * 864e5).toISOString();
     const porDisenarNeon = colaEmma.filter(p => p.producto === 'NEON');
     const relevVisId = colaEmma.length ? (colaEmma.find(p => p.id === STATE.corteRelevId) || colaEmma[0]).id : null;
+    // Fecha REAL de diseño (disenado_at, desde 6-oct-2026). Las piezas cortadas/separadas antes de eso no la
+    // tienen → caen a updated_at (último movimiento) y la tarjeta no muestra fecha.
+    const kFechaDis = (p) => String(p.disenado_at || p.updated_at || '');
     const disenadosNeon = pedidos
-      .filter(p => p.producto === 'NEON' && ['matriz_lista', 'cortado', 'embalado'].indexOf(p.estado) !== -1 && String(p.updated_at || '') >= _hace14)
-      .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')) || (b.id - a.id));
+      .filter(p => p.producto === 'NEON' && ['matriz_lista', 'cortado', 'embalado'].indexOf(p.estado) !== -1 && kFechaDis(p) >= _hace14)
+      .sort((a, b) => kFechaDis(b).localeCompare(kFechaDis(a)) || (b.id - a.id));
+    const kDia = (iso) => { const d = new Date(iso); return isNaN(d.getTime()) ? '' : d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }); };
     const kTitulo = (p) => `${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> · ` : ''}${escapeHtml(p.diseno_nombre || 'cartel')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + escapeHtml(String(p.cantidad)) : ''}`;
     const kThumb = (p) => p.foto_key ? `<img src="${escapeHtml(disenoThumb(p.foto_key, 200))}" loading="lazy" alt="" style="width:46px;height:46px;flex:0 0 auto;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border)">` : '';
     const kFmtCm = (v) => { const n = Number(v); return n > 0 ? String(Math.round(n * 10) / 10).replace('.', ',') : ''; };
@@ -3738,16 +3742,16 @@ function renderCorte() {
     const colPorDisenar = porDisenarNeon.map(p => { const enPantalla = p.id === relevVisId; return `<div data-corte-relev-ir="${p.id}" role="button" tabindex="0" title="Traer a la línea de relevamiento" style="${kCard};cursor:pointer${enPantalla ? ';border-color:#ef4444' : ''}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">${escapeHtml(p.medida_declarada || '—')}${p.vendedor ? ` · vendió ${escapeHtml(p.vendedor)}` : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;color:${enPantalla ? '#ef4444' : 'var(--accent-cyan,#8FD4DE)'}">${enPantalla ? 'en pantalla' : 'Medir →'}</span></div>`; }).join('');
     const K_DIS_MAX = 10;
     const disVisibles = STATE.corteNeonDisAll ? disenadosNeon : disenadosNeon.slice(0, K_DIS_MAX);
-    const colDisenados = disVisibles.map(p => { const paso = kPaso[p.estado] || ['', 'var(--fg-mute)']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">matriz ${med}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span></div>`; }).join('')
+    const colDisenados = disVisibles.map(p => { const paso = kPaso[p.estado] || ['', 'var(--fg-mute)']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span></div>`; }).join('')
       + (disenadosNeon.length > K_DIS_MAX ? `<button type="button" class="btn ghost" data-corte-neon-dis-all style="width:100%;font-size:12px;padding:6px 10px">${STATE.corteNeonDisAll ? 'ver solo las últimas ' + K_DIS_MAX : 'ver las ' + (disenadosNeon.length - K_DIS_MAX) + ' restantes'}</button>` : '');
     const neonKanban = `
       <div style="margin-top:22px">
         <style>@media(max-width:900px){.corte-neon-cols{grid-template-columns:1fr!important}}</style>
-        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span style="font-size:15px;font-weight:800;color:#ef4444">🔴 Neón — tablero</span><span style="color:var(--fg-mute);font-size:12px">${porDisenarNeon.length} por diseñar · ${disenadosNeon.length} diseñado${disenadosNeon.length === 1 ? '' : 's'} con movimiento en 2 semanas${esperandoFoto.length ? ' · ' + esperandoFoto.length + ' esperando foto' : ''}${cargando ? ' · cargando…' : ''}</span></div>
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span style="font-size:15px;font-weight:800;color:#ef4444">🔴 Neón — tablero</span><span style="color:var(--fg-mute);font-size:12px">${porDisenarNeon.length} por diseñar · ${disenadosNeon.length} diseñado${disenadosNeon.length === 1 ? '' : 's'} en 2 semanas${esperandoFoto.length ? ' · ' + esperandoFoto.length + ' esperando foto' : ''}${cargando ? ' · cargando…' : ''}</span></div>
         <div class="corte-neon-cols" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start">
           ${kCol('⏳ Esperando foto', esperandoFoto.length, 'falta que suban el diseño', colEsperando || kVacio('Nada esperando ✨'))}
           ${kCol('🎨 Por diseñar', porDisenarNeon.length, '', colPorDisenar || kVacio('Todo diseñado ✨'))}
-          ${kCol('✅ Diseñados', disenadosNeon.length, 'movidos en las últimas 2 semanas', colDisenados || kVacio('Nada movido en las últimas 2 semanas'))}
+          ${kCol('✅ Diseñados', disenadosNeon.length, 'últimas 2 semanas', colDisenados || kVacio('Nada diseñado en las últimas 2 semanas'))}
         </div>
       </div>`;
     if (!colaEmma.length) {

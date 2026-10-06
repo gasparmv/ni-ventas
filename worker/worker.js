@@ -4501,7 +4501,9 @@ async function corteTandaActual(env) {
 let _corteNeonSchemaOk = false;
 async function ensureCorteNeonSchema(env) {
   if (_corteNeonSchemaOk) return;
-  for (const col of ['pedido_id INTEGER', 'pedido_numero INTEGER', 'origen TEXT', 'base TEXT', 'vendedor TEXT']) {
+  // disenado_at: cuándo la pieza pasó la etapa de diseño (Emma marcó "Matriz lista", o el admin la movió
+  // a mano desde 'pedido'). updated_at NO sirve para eso: lo pisan el corte, el embalado y el cambio de foto.
+  for (const col of ['pedido_id INTEGER', 'pedido_numero INTEGER', 'origen TEXT', 'base TEXT', 'vendedor TEXT', 'disenado_at TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE corte_pedidos ADD COLUMN ${col}`).run(); } catch (_) {} // tira si ya existe
   }
   // UNA pieza por cartel: índice único parcial (las manuales tienen pedido_id NULL) + INSERT OR IGNORE en
@@ -4509,7 +4511,7 @@ async function ensureCorteNeonSchema(env) {
   try { await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS uq_corte_pedidos_pedido ON corte_pedidos(pedido_id) WHERE pedido_id IS NOT NULL').run(); } catch (_) {}
   // Memoizar solo si las columnas existen de verdad (un ALTER que falló por un corte transitorio no
   // tiene que dejar el isolate entero sin la feature hasta que se recicle).
-  try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
+  try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor, disenado_at FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
 }
 // Teléfono WPP tipeado a mano (sin 549, con 0 o 15, con espacios) → el formato en que está el chat. Prueba
 // tal cual y normalizado AR contra wa_chats_summary; si no existe ninguno, normaliza solo lo que claramente
@@ -17967,6 +17969,7 @@ const handler = {
       if (request.method === 'POST' && path === '/admin/corte/pedido') {
         const _role = await getSessionRole(env, session.user);
         if (!['admin', 'disenador', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
+        try { await ensureCorteNeonSchema(env); } catch (_) {} // columnas nuevas (disenado_at) antes de los UPDATE
         let body; try { body = await request.json(); } catch { body = {}; }
         const action = String(body.action || '');
         const nowIso = new Date().toISOString();
@@ -17996,9 +17999,12 @@ const handler = {
           const entrega = (String(body.entrega || '') === 'envio') ? 'envio' : 'retira';
           try {
             let rr;
-            if (est === 'embalado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET estado='embalado', entrega=?, updated_at=? WHERE id IN (${ph})`).bind(entrega, nowIso, ...ids).run();
-            else if (est === 'cortado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET estado='cortado', productor=?, updated_at=? WHERE id IN (${ph})`).bind(_slug, nowIso, ...ids).run();
-            else rr = await env.DB.prepare(`UPDATE corte_pedidos SET estado=?, updated_at=? WHERE id IN (${ph})`).bind(est, nowIso, ...ids).run();
+            // disenado_at: si la pieza estaba 'pedido' y se la saltea a un paso posterior, ese es su momento de diseño
+            // (en SQLite los SET leen los valores VIEJOS → 'estado' en el CASE es el estado anterior al UPDATE).
+            const _dis = `disenado_at = CASE WHEN estado='pedido' AND ?<>'pedido' THEN COALESCE(disenado_at, ?) ELSE disenado_at END`;
+            if (est === 'embalado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='embalado', entrega=?, updated_at=? WHERE id IN (${ph})`).bind(est, nowIso, entrega, nowIso, ...ids).run();
+            else if (est === 'cortado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='cortado', productor=?, updated_at=? WHERE id IN (${ph})`).bind(est, nowIso, _slug, nowIso, ...ids).run();
+            else rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado=?, updated_at=? WHERE id IN (${ph})`).bind(est, nowIso, est, nowIso, ...ids).run();
             return json({ ok: true, action, estado: est, n: (rr.meta && rr.meta.changes) || 0 });
           } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         }
@@ -18025,7 +18031,7 @@ const handler = {
             const matrizUrl = String(body.matriz_drive_url != null ? body.matriz_drive_url : (ped.matriz_drive_url || ''));
             let tandaId = ped.tanda_id;
             if (esNeonPropio) { const _t = await corteTandaActual(env); if (_t) tandaId = _t.id; }
-            await env.DB.prepare("UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, matriz_key=?, matriz_drive_url=?, tanda_id=?, estado='matriz_lista', updated_at=? WHERE id=?").bind(ancho, alto, precio, matrizKey, matrizUrl, tandaId, nowIso, id).run();
+            await env.DB.prepare("UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, matriz_key=?, matriz_drive_url=?, tanda_id=?, estado='matriz_lista', disenado_at=?, updated_at=? WHERE id=?").bind(ancho, alto, precio, matrizKey, matrizUrl, tandaId, nowIso, nowIso, id).run();
             return json({ ok: true, id, estado: 'matriz_lista', precio });
           }
           if (action === 'cortado') {
@@ -18043,7 +18049,7 @@ const handler = {
             if (_role !== 'admin') return json({ error: 'solo admin' }, 403);
             const est = String(body.estado || '');
             if (!['pedido', 'matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(est)) return json({ error: 'estado inválido' }, 400);
-            await env.DB.prepare("UPDATE corte_pedidos SET estado=?, updated_at=? WHERE id=?").bind(est, nowIso, id).run();
+            await env.DB.prepare("UPDATE corte_pedidos SET disenado_at = CASE WHEN estado='pedido' AND ?<>'pedido' THEN COALESCE(disenado_at, ?) ELSE disenado_at END, estado=?, updated_at=? WHERE id=?").bind(est, nowIso, est, nowIso, id).run();
             return json({ ok: true, id, estado: est });
           }
         } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
