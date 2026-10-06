@@ -1200,10 +1200,10 @@ function isAgustinaUser(s) { return _userKey(s) === 'agustina'; }
 // entrada acá (+ fila en users_panel + nombre en CONFIG.defaultUsers). Config por vendedor: comisión
 // visible (rate), +5% oculto (mas5), mes de inicio del panel "Tu sueldo" (desde), color de píldora.
 const COMERCIALES_SECUNDARIOS = {
-  // Facu desde el 06/10: corpóreos al 10% (antes 7%: rateCorpAntes rige para los vendidos hasta
-  // rateCorpAntesHasta) + su calculadora de corpóreos cotiza 10% más caro, oculto (corpMarkup).
-  facundo:  { nombre: 'Facu', rate: 0.10, rateCorp: 0.10, rateCorpAntes: 0.07, rateCorpAntesHasta: '2026-10-05',
-              corpMarkup: 1.10, mas5: true, desde: '2026-08', color: 'violet' },
+  // Facu (06/10, pedido de Gaspar): corpóreos al 10% TAMBIÉN para lo ya vendido (retroactivo) + su
+  // calculadora de corpóreos cotiza 5% más caro, oculto (corpMarkup) → el negocio solo pierde ~5%.
+  // (rateCorpAntes/rateCorpAntesHasta siguen soportados si alguna vez se cambia una tasa sin retroactividad.)
+  facundo:  { nombre: 'Facu', rate: 0.10, rateCorp: 0.10, corpMarkup: 1.05, mas5: true, desde: '2026-08', color: 'violet' },
   agustina: { nombre: 'Agus', rate: 0.10, rateCorp: 0.07, mas5: true, desde: '2026-09', color: 'rose',
               // 1er mes (arranque): media comisión en los pedidos hasta el 03/10 (esas ventas las
               // hizo el equipo), salvo "Primero lo bueno" que cerró ella (comisión completa). Lo que
@@ -18454,7 +18454,7 @@ function calcCorporea(f) {
   const costoM2 = CORP_PRECIOS[conLuz ? 'conluz' : 'sinluz'][mat];
   const costo = m2 * costoM2;
   const margen = m2 <= 2 ? 2 : (m2 <= 5 ? 1.75 : 1.5);
-  // Vendedor con recargo oculto en corpóreos (Facu: +10%, compensa su 10% de comisión). Igual que
+  // Vendedor con recargo oculto en corpóreos (Facu: +5%, compensa parte de su 10% de comisión). Igual que
   // el +5% de neón: lo aplica según quién está logueado y él solo ve el precio final.
   const _sec = (typeof STATE !== 'undefined' && isSecundario(STATE.user)) ? COMERCIALES_SECUNDARIOS[_userKey(STATE.user)] : null;
   const markup = (_sec && _sec.corpMarkup) || 1;
