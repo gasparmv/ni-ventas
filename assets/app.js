@@ -3720,15 +3720,15 @@ function renderCorte() {
     // Es solo para VER el estado del neón propio; el trabajo se sigue haciendo en la línea de arriba. Tocar
     // una pieza "por diseñar" la trae a la línea (data-corte-relev-ir). Diseñado = ya pasó por Emma
     // (matriz_lista → Aníbal la corta → cortado → Neyen la separa → embalado).
-    const _hace14 = new Date(Date.now() - 14 * 864e5).toISOString();
+    const _arNow = new Date(Date.now() - 3 * 3600e3);
+    const _lunesAR = new Date(Date.UTC(_arNow.getUTCFullYear(), _arNow.getUTCMonth(), _arNow.getUTCDate() - ((_arNow.getUTCDay() + 6) % 7)) + 3 * 3600e3).toISOString();
     const porDisenarNeon = colaEmma.filter(p => p.producto === 'NEON');
     const relevVisId = colaEmma.length ? (colaEmma.find(p => p.id === STATE.corteRelevId) || colaEmma[0]).id : null;
-    // Fecha REAL de diseño (disenado_at, desde 6-oct-2026). Las piezas cortadas/separadas antes de eso no la
-    // tienen → caen a updated_at (último movimiento) y la tarjeta no muestra fecha.
-    const kFechaDis = (p) => String(p.disenado_at || p.updated_at || '');
+    // Diseñados = lo que Emma diseñó ESTA SEMANA (desde el lunes 00:00 AR), por la fecha REAL de diseño
+    // (disenado_at, desde 6-oct-2026). Las piezas sin esa fecha (anteriores) no aparecen: ya están hechas.
     const disenadosNeon = pedidos
-      .filter(p => p.producto === 'NEON' && ['matriz_lista', 'cortado', 'embalado'].indexOf(p.estado) !== -1 && kFechaDis(p) >= _hace14)
-      .sort((a, b) => kFechaDis(b).localeCompare(kFechaDis(a)) || (b.id - a.id));
+      .filter(p => p.producto === 'NEON' && ['matriz_lista', 'cortado', 'embalado'].indexOf(p.estado) !== -1 && p.disenado_at && String(p.disenado_at) >= _lunesAR)
+      .sort((a, b) => String(b.disenado_at).localeCompare(String(a.disenado_at)) || (b.id - a.id));
     const kDia = (iso) => { const d = new Date(iso); return isNaN(d.getTime()) ? '' : d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }); };
     const kTitulo = (p) => `${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> · ` : ''}${escapeHtml(p.diseno_nombre || 'cartel')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + escapeHtml(String(p.cantidad)) : ''}`;
     const kThumb = (p) => p.foto_key ? `<img src="${escapeHtml(disenoThumb(p.foto_key, 200))}" loading="lazy" alt="" style="width:46px;height:46px;flex:0 0 auto;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border)">` : '';
@@ -3747,11 +3747,11 @@ function renderCorte() {
     const neonKanban = `
       <div style="margin-top:22px">
         <style>@media(max-width:900px){.corte-neon-cols{grid-template-columns:1fr!important}}</style>
-        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span style="font-size:15px;font-weight:800;color:#ef4444">🔴 Neón — tablero</span><span style="color:var(--fg-mute);font-size:12px">${porDisenarNeon.length} por diseñar · ${disenadosNeon.length} diseñado${disenadosNeon.length === 1 ? '' : 's'} en 2 semanas${esperandoFoto.length ? ' · ' + esperandoFoto.length + ' esperando foto' : ''}${cargando ? ' · cargando…' : ''}</span></div>
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span style="font-size:15px;font-weight:800;color:#ef4444">🔴 Neón — tablero</span><span style="color:var(--fg-mute);font-size:12px">${porDisenarNeon.length} por diseñar · ${disenadosNeon.length} diseñado${disenadosNeon.length === 1 ? '' : 's'} esta semana${esperandoFoto.length ? ' · ' + esperandoFoto.length + ' esperando foto' : ''}${cargando ? ' · cargando…' : ''}</span></div>
         <div class="corte-neon-cols" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start">
           ${kCol('⏳ Esperando foto', esperandoFoto.length, 'falta que suban el diseño', colEsperando || kVacio('Nada esperando ✨'))}
-          ${kCol('🎨 Por diseñar', porDisenarNeon.length, '', colPorDisenar || kVacio('Todo diseñado ✨'))}
-          ${kCol('✅ Diseñados', disenadosNeon.length, 'últimas 2 semanas', colDisenados || kVacio('Nada diseñado en las últimas 2 semanas'))}
+          ${kCol('🎨 Por diseñar', porDisenarNeon.length, '', porDisenarNeon.length ? `<button type="button" class="btn" data-corte-disenos-pack="${porDisenarNeon.map(p => p.id).join(',')}" title="Baja un ZIP con las fotos y te manda las medidas por WhatsApp (a vos y a Gaspar)" style="width:100%;margin-bottom:8px;font-size:12.5px">⬇ Descargar diseños y recibir medidas</button>${colPorDisenar}` : kVacio('Todo diseñado ✨'))}
+          ${kCol('✅ Diseñados', disenadosNeon.length, 'esta semana', colDisenados || kVacio('Todavía nada diseñado esta semana'))}
         </div>
       </div>`;
     if (!colaEmma.length) {
@@ -4021,6 +4021,7 @@ async function bindCorte() {
   }
   const relevSkip = document.querySelector('[data-corte-relev-skip]');
   if (relevSkip) relevSkip.onclick = () => { const n = parseInt(relevSkip.getAttribute('data-next') || '', 10); if (n) { STATE.corteRelevId = n; render(); } };
+  document.querySelectorAll('[data-corte-disenos-pack]').forEach(b => { b.onclick = () => corteDisenosPack(b); });
   const disAll = document.querySelector('[data-corte-neon-dis-all]');
   // El bind del relevamiento enfoca "ancho" en cada render (salta arriba) → volver a mostrar el botón.
   if (disAll) disAll.onclick = () => { STATE.corteNeonDisAll = !STATE.corteNeonDisAll; render(); const b = document.querySelector('[data-corte-neon-dis-all]'); if (b && b.scrollIntoView) b.scrollIntoView({ block: 'nearest' }); };
@@ -4141,6 +4142,40 @@ async function corteSubirArchivo(inputId, endpoint, statusId, extraQuery, requir
     if (r && r.ok) { if (st) st.textContent = '✓ guardado'; toast('Listo ✓'); STATE.cortePedidos = undefined; STATE._corteLoading = false; render(); }
     else { if (st) st.textContent = (r && r.error) || 'no se pudo'; }
   } catch (_) { if (st) st.textContent = 'error de red'; }
+}
+// "Descargar diseños y recibir medidas" (tablero de neón de Emma): baja un ZIP con las fotos de lo que está por
+// diseñar (nombre = N° · diseño · medida + medidas.txt) y el worker manda las medidas por WhatsApp a Emma y a
+// Gaspar. El resultado del aviso viene en el header X-Medidas.
+async function corteDisenosPack(btn) {
+  if (!btn || btn.disabled) return;
+  const ids = String(btn.getAttribute('data-corte-disenos-pack') || '').split(',').map(Number).filter(Boolean);
+  if (!ids.length) { toast('No hay diseños para descargar'); return; }
+  const txt0 = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Preparando el ZIP…';
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/disenos-pack', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      toast(j.error || ('No se pudo armar el ZIP (HTTP ' + r.status + ')'));
+      if (r.status === 409) corteCargar(true); // la lista cambió → refrescar
+      return;
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || ''; const m = cd.match(/filename="?([^"]+)"?/);
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = (m && m[1]) || 'disenos-neon.zip';
+    document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+    let info = null; try { info = JSON.parse(decodeURIComponent(r.headers.get('X-Medidas') || '')); } catch (_) {}
+    const est = info && info.estado;
+    toast(est === 'plantilla' ? 'ZIP descargado ✓ · medidas enviadas por WhatsApp a Emma y Gaspar'
+      : est === 'ya_avisado' ? 'ZIP descargado ✓ · las medidas ya se habían mandado hace un rato'
+      : est === 'texto' ? 'ZIP descargado ✓ · medidas enviadas por WhatsApp a Emma y Gaspar'
+      : est === 'parcial' ? 'ZIP descargado ✓ · las medidas le llegaron a uno solo (la plantilla de WhatsApp todavía está en aprobación)'
+      : 'ZIP descargado ✓ · no se pudieron mandar las medidas por WhatsApp (la plantilla todavía está en aprobación)');
+  } catch (_) {
+    toast('Error de red al descargar los diseños');
+  } finally {
+    btn.disabled = false; btn.textContent = txt0;
+  }
 }
 async function corteDescargarArchivo() {
   const st = document.getElementById('corte-descarga-status'); if (st) st.textContent = 'descargando…';

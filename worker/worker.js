@@ -4498,6 +4498,47 @@ async function corteTandaActual(env) {
 // precio=0 y estado_pago='interno': las piezas propias no se cobran (decisión de Gaspar, oct-2026).
 // Columnas nuevas: pedido_id (vínculo al cartel), pedido_numero, origen ('pedido' = alta automática),
 // base y vendedor (para que Emma/Aníbal/Neyen sepan qué es). Idempotente y memoizado por isolate.
+// ===== ZIP mínimo (método STORE, sin compresión) =====
+// Para el "Descargar diseños" de Emma: las fotos ya vienen comprimidas (jpg/png/webp), así que STORE alcanza y
+// evita depender de una librería. Nombres en UTF-8 (flag 0x0800). files: [{ name, data: Uint8Array }].
+const _ZIP_CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
+function zipCrc32(buf) { let crc = 0xFFFFFFFF; for (let i = 0; i < buf.length; i++) crc = _ZIP_CRC_TABLE[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8); return (crc ^ 0xFFFFFFFF) >>> 0; }
+function zipStore(files, when = new Date()) {
+  const enc = new TextEncoder();
+  // Fecha/hora DOS en hora AR (UTC-3), solo para que el explorador muestre algo razonable.
+  const ar = new Date(when.getTime() - 3 * 3600 * 1000);
+  const dosTime = (ar.getUTCHours() << 11) | (ar.getUTCMinutes() << 5) | Math.floor(ar.getUTCSeconds() / 2);
+  const dosDate = ((Math.max(1980, ar.getUTCFullYear()) - 1980) << 9) | ((ar.getUTCMonth() + 1) << 5) | ar.getUTCDate();
+  const parts = [], central = [];
+  let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name), data = f.data, crc = zipCrc32(data), size = data.length;
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
+    lh.setUint16(10, dosTime, true); lh.setUint16(12, dosDate, true); lh.setUint32(14, crc, true); lh.setUint32(18, size, true);
+    lh.setUint32(22, size, true); lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
+    parts.push(new Uint8Array(lh.buffer), name, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true);
+    ch.setUint16(12, dosTime, true); ch.setUint16(14, dosDate, true); ch.setUint32(16, crc, true); ch.setUint32(20, size, true); ch.setUint32(24, size, true);
+    ch.setUint16(28, name.length, true); ch.setUint16(30, 0, true); ch.setUint16(32, 0, true); ch.setUint16(34, 0, true); ch.setUint16(36, 0, true);
+    ch.setUint32(38, 0, true); ch.setUint32(42, offset, true);
+    central.push(new Uint8Array(ch.buffer), name);
+    offset += 30 + name.length + size;
+  }
+  const cdSize = central.reduce((a, b) => a + b.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(4, 0, true); end.setUint16(6, 0, true); end.setUint16(8, files.length, true);
+  end.setUint16(10, files.length, true); end.setUint32(12, cdSize, true); end.setUint32(16, offset, true); end.setUint16(20, 0, true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
+}
+// Medida de una pieza de neón en cm: la del pedido viene como "ancho 80 × alto 41 cm" (medida_declarada).
+function corteMedidaNeon(p) {
+  const t = String((p && p.medida_declarada) || '');
+  const a = t.match(/ancho\s*([\d]+(?:[.,]\d+)?)/i), l = t.match(/alto\s*([\d]+(?:[.,]\d+)?)/i);
+  return (a && l) ? { ancho: a[1].replace(',', '.'), alto: l[1].replace(',', '.'), txt: `${a[1].replace('.', ',')} x ${l[1].replace('.', ',')} cm` } : { ancho: '', alto: '', txt: t.trim() };
+}
+
 let _corteNeonSchemaOk = false;
 async function ensureCorteNeonSchema(env) {
   if (_corteNeonSchemaOk) return;
@@ -18291,7 +18332,112 @@ const handler = {
         const obj = await env.MEDIA.get(t.archivo_matriz_key);
         if (!obj) return json({ error: 'no encontrado' }, 404);
         const fname = (t.archivo_matriz_key.split('/').pop() || 'matriz').replace(/^matriz-\d+-/, '');
-        return new Response(obj.body, { headers: { 'Content-Type': obj.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': 'attachment; filename="' + fname + '"' } });
+        // CON CORS: el front (otro origen) descarga con fetch; sin estos headers el navegador bloqueaba la respuesta.
+        return new Response(obj.body, { headers: cors({ 'Content-Type': obj.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': 'attachment; filename="' + fname + '"', 'Access-Control-Expose-Headers': 'Content-Disposition' }) });
+      }
+      // POST /admin/corte/disenos-pack {ids} → "Descargar diseños y recibir medidas" (tablero de neón de Emma).
+      // Devuelve un ZIP con la foto de cada pieza de neón POR DISEÑAR (nombre = N° · diseño · medida) + medidas.txt,
+      // y manda las medidas por WhatsApp (plantilla UTILITY disenos_neon_medidas) a Emma y a Gaspar → Gaspar sabe
+      // que Emma arrancó. Mismo set de piezas dentro de 30 min = no se re-avisa (doble clic / re-descarga).
+      // El resultado del aviso viaja en el header X-Medidas (JSON url-encoded). disenador/admin.
+      if (request.method === 'POST' && path === '/admin/corte/disenos-pack') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['admin', 'disenador'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        if (!env.MEDIA) return json({ error: 'R2 no configurado' }, 500);
+        await ensureCorteNeonSchema(env);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map(x => parseInt(x, 10)).filter(Boolean))].slice(0, 40);
+        if (!ids.length) return json({ error: 'no hay diseños para descargar' }, 400);
+        const ph = ids.map(() => '?').join(',');
+        // Solo piezas de neón que siguen POR DISEÑAR y tienen foto (lo mismo que ve Emma en la columna).
+        const rows = (await env.DB.prepare(
+          `SELECT id, pedido_numero, diseno_nombre, medida_declarada, cantidad, foto_key, created_at FROM corte_pedidos
+            WHERE id IN (${ph}) AND producto = 'NEON' AND estado = 'pedido' AND IFNULL(foto_key, '') <> ''
+            ORDER BY created_at, id`
+        ).bind(...ids).all()).results || [];
+        if (!rows.length) return json({ error: 'esos diseños ya no están por diseñar (se actualizó la lista)' }, 409);
+        const nowD = new Date();
+        const ar = new Date(nowD.getTime() - 3 * 3600 * 1000);
+        const p2 = (n) => String(n).padStart(2, '0');
+        const cuandoAR = `${p2(ar.getUTCDate())}/${p2(ar.getUTCMonth() + 1)} ${p2(ar.getUTCHours())}:${p2(ar.getUTCMinutes())}`;
+        const lineas = rows.map(r => {
+          const m = corteMedidaNeon(r), cant = Math.max(1, parseInt(r.cantidad, 10) || 1);
+          return `${r.pedido_numero ? '#' + r.pedido_numero + ' ' : ''}${String(r.diseno_nombre || 'cartel').trim()} ${m.txt || 'sin medida'}${cant > 1 ? ' x' + cant : ''}`;
+        });
+        // --- Aviso por WhatsApp (en paralelo con el armado del ZIP) ---
+        const avisar = (async () => {
+          const sig = rows.map(r => r.id).sort((a, b) => a - b).join(',');
+          try {
+            const last = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'corte_disenos_aviso_last'").first();
+            const lv = last ? JSON.parse(last.v) : null;
+            if (lv && lv.sig === sig && (nowD.getTime() - Date.parse(lv.at)) < 30 * 60 * 1000) return { estado: 'ya_avisado' };
+          } catch (_) {}
+          const phones = {};
+          try { for (const x of (await env.DB.prepare("SELECT usuario, phone FROM agenda_phones WHERE usuario IN ('disenador', 'gaspar')").all()).results || []) phones[x.usuario] = x.phone; } catch (_) {}
+          const destinos = [...new Set([phones.disenador || '5491128982635', phones.gaspar || '5491155604999'])];
+          const tramos = tramosPlantilla(lineas);
+          let tplOk = 0, txtOk = 0, sinVentana = 0, fallos = 0;
+          for (const ph2 of destinos) {
+            let okTpl = true;
+            for (const t of tramos) {
+              let r = null;
+              try { r = await waSendTemplate(env, ph2, 'disenos_neon_medidas', 'es_AR', [String(rows.length), t.slice(0, 900), cuandoAR]); } catch (_) {}
+              if (!r || !r.ok) { okTpl = false; break; }
+            }
+            if (okTpl) { tplOk++; continue; }
+            // Plantilla todavía sin aprobar (o error) → texto libre, PERO solo con la ventana de 24 h abierta: fuera de
+            // ella waSend devuelve ok y Meta lo rebota después (131047) → se contaría como enviado sin haber llegado.
+            let ventana = false;
+            try {
+              const w = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'status'").bind(normalizeArPhone(ph2) || ph2).first();
+              ventana = !!(w && w.t && Date.now() - Date.parse(w.t) < 23 * 3600 * 1000);
+            } catch (_) {}
+            if (!ventana) { sinVentana++; continue; }
+            let okTxt = true;
+            for (const b of bloquesTexto(`Diseños de neón para hacer (${rows.length}) · ${cuandoAR}\n`, lineas.map(l => '• ' + l))) {
+              let r = null;
+              try { r = await waSendText(env, ph2, b); } catch (_) {}
+              if (!r || !r.ok) { okTxt = false; break; }
+            }
+            if (okTxt) txtOk++; else fallos++;
+          }
+          const llegaron = tplOk + txtOk;
+          // Dedup solo si a alguien le llegó (si no, que el próximo toque reintente).
+          if (llegaron > 0) {
+            try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at').bind('corte_disenos_aviso_last', JSON.stringify({ sig, at: nowD.toISOString(), por: String(session.user || '') }), nowD.toISOString()).run(); } catch (_) {}
+          }
+          const estado = llegaron === 0 ? 'fallo' : (llegaron < destinos.length ? 'parcial' : (tplOk === destinos.length ? 'plantilla' : 'texto'));
+          return { estado, plantilla: tplOk, texto: txtOk, sin_ventana: sinVentana, fallos, destinos: destinos.length };
+        })();
+        // --- ZIP: una foto por pieza, nombre legible y único + medidas.txt ---
+        const san = (x) => String(x || '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+        const files = [], usados = new Set(), faltan = [];
+        for (const r of rows) {
+          let obj = null;
+          try { obj = await env.MEDIA.get(r.foto_key); } catch (_) {}
+          if (!obj) { faltan.push(r); continue; }
+          const data = new Uint8Array(await obj.arrayBuffer());
+          const ct = String((obj.httpMetadata && obj.httpMetadata.contentType) || '');
+          const extKey = (String(r.foto_key).match(/\.([a-z0-9]{2,5})$/i) || [])[1];
+          const ext = (extKey || (ct.includes('png') ? 'png' : ct.includes('webp') ? 'webp' : 'jpg')).toLowerCase();
+          const m = corteMedidaNeon(r), cant = Math.max(1, parseInt(r.cantidad, 10) || 1);
+          const base = san([r.pedido_numero ? String(r.pedido_numero) : '', r.diseno_nombre || 'cartel', m.ancho && m.alto ? `${m.ancho}x${m.alto}cm` : '', cant > 1 ? 'x' + cant : ''].filter(Boolean).join(' - ')) || ('pieza ' + r.id);
+          let nm = `${base}.${ext}`, k = 2;
+          while (usados.has(nm.toLowerCase())) nm = `${base} (${k++}).${ext}`;
+          usados.add(nm.toLowerCase());
+          files.push({ name: nm, data });
+        }
+        const txt = `Diseños de neón para hacer · ${cuandoAR}\r\n\r\n` + lineas.join('\r\n') + (faltan.length ? `\r\n\r\nSin foto en el servidor: ${faltan.map(r => (r.pedido_numero ? '#' + r.pedido_numero + ' ' : '') + (r.diseno_nombre || '')).join(', ')}` : '') + '\r\n';
+        files.push({ name: 'medidas.txt', data: new TextEncoder().encode(txt) });
+        const aviso = await avisar;
+        const fname = `disenos-neon-${ar.getUTCFullYear()}-${p2(ar.getUTCMonth() + 1)}-${p2(ar.getUTCDate())}.zip`;
+        return new Response(zipStore(files, nowD), { headers: cors({
+          'Content-Type': 'application/zip',
+          'Content-Disposition': 'attachment; filename="' + fname + '"',
+          'X-Medidas': encodeURIComponent(JSON.stringify({ ...aviso, piezas: rows.length, fotos: files.length - 1 })),
+          'Access-Control-Expose-Headers': 'Content-Disposition, X-Medidas',
+          'Cache-Control': 'no-store'
+        }) });
       }
       // POST /admin/corte/tanda/placas?name=&m2= → Aníbal sube placas (body opcional) + carga m² cortados. produccion/admin.
       if (request.method === 'POST' && path === '/admin/corte/tanda/placas') {
