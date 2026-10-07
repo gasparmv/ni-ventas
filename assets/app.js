@@ -1336,7 +1336,9 @@ function afterUserSwitch() {
   corteResetEstado();
   STATE.loaded = false; STATE.pedidos = [];
   chatState.contactsLoaded = false; chatState.contacts = [];
+  STATE.ocPend = null;   // las OC sin pagar son por vendedor: no mostrarle al nuevo usuario la lista del anterior
   render();
+  try { fetchOcUrgenteStatus(); } catch (_) {}
   loadAll().catch(() => {});
   if (canAccessChat()) { ensureNotificationPermission(); initPollWorker(); loadChatContacts().then(() => updateUnreadBadge()); }
 }
@@ -1370,6 +1372,7 @@ async function logout() {
   STATE.user = null; saveUser();
   try { localStorage.removeItem(CACHE_KEY); } catch (_) {}
   corteResetEstado();
+  STATE.ocPend = null;
   STATE.view = 'dashboard';
   render();
 }
@@ -2706,7 +2709,12 @@ function render() {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
+  // Popup "OC sin pagar": cada render() recrea #app → guardar/restaurar el scroll de la lista y el foco del "Otro"
+  // (si no, con 15+ OC la lista saltaba arriba y el selector de motivo/el resultado quedaban fuera de vista).
+  const _ocpList = document.querySelector('[data-ocp-list]'), _ocpTop = _ocpList ? _ocpList.scrollTop : 0;
+  const _ocpAct = document.activeElement && document.activeElement.matches && document.activeElement.matches('[data-ocp-motivo-otro]') ? document.activeElement.getAttribute('data-ocp-motivo-otro') : null;
   document.getElementById('app').innerHTML = renderShell();
+  if (_ocpTop) { const nl = document.querySelector('[data-ocp-list]'); if (nl) nl.scrollTop = _ocpTop; }
   try { startSinCotizarWatch(); } catch (_) {}
   try { startOcUrgenteWatch(); } catch (_) {}
   // El Chat WA carga su data del worker (no de Sheets), así que se renderiza
@@ -2768,6 +2776,8 @@ function render() {
   // Sincronizar classes mobile del chat (chat-mobile-list / chat-mobile-conv)
   // en el .app raíz. Solo el CSS bajo el media query mobile las usa.
   if (typeof _applyMobileChatClass === 'function') _applyMobileChatClass();
+  // Foco del "Otro" del popup de OC: AL FINAL, después de todos los bind* (bindChat enfocaba el compositor).
+  if (_ocpAct) { const ni = document.querySelector(`[data-ocp-motivo-otro="${_ocpAct}"]`); if (ni) { ni.focus(); try { ni.setSelectionRange(ni.value.length, ni.value.length); } catch (_) {} } }
 }
 
 // ===== Alarma "💰 Sin cotizar" — pedidos con foto+medidas sin presupuesto hace +20hs =====
@@ -3168,41 +3178,103 @@ function renderSinCotizarModal() {
     </div>`;
 }
 
-// ===== Alarma "🔥 Pedido por vender URGENTE" — OC enviada hace +3h sin respuesta del cliente =====
-// Clon del popup "Sin cotizar" pero por ITEM (cada uno con su botón "Ver chat →", IG o WPP).
-// El backend (/admin/wa/oc-urgente-status) filtra por vendedor (quién mandó la OC) y por
-// "3h sin inbound posterior". Poll liviano cada 75s. Mismo gate que sin-cotizar (admin+comercial).
-function _canSeeOcUrgente() { const r = getUserRole(); return r === 'admin' || r === 'comercial'; }
-function _ocUrgenteShouldShow() {
-  const oc = STATE.ocUrgente;
-  if (!oc || !_canSeeOcUrgente() || !oc.count) return false;
-  const ack = localStorage.getItem('ocUrgenteAck') || '';
-  return !!oc.maxCreatedAt && oc.maxCreatedAt > ack;
+// ===== Popup "🧾 OC sin pagar" (reemplaza al de "🔥 Pedido por vender URGENTE", a pedido de Gaspar, 7-oct) =====
+// Las OC sin pagar del vendedor (las mismas de la lista diaria de WhatsApp; GET /admin/oc/pendientes; admin: todas) y
+// cada uno MARCA qué pasó: "✓ Ya pagó" → el server lo VERIFICA (pedido cargado o comprobante por OCR); si no lo puede
+// confirmar queda "⏳ marcaste que pagó" y SIGUE apareciendo hasta que entre el pago. "✕ Se cayó" → con motivo, sale de
+// la lista (le saca POR PAGAR) y queda registrado. Aparece 1 vez por día al abrir el CRM y de nuevo si entra una OC
+// "urgente" (3-48 h sin respuesta del cliente, lo que hacía el popup viejo). Poll cada 5 min.
+const OC_BAJA_MOTIVOS = ['No le interesa más', 'Le pareció caro', 'Se fue con otro proveedor', 'Lo pospuso / más adelante', 'OC duplicada o reemplazada', 'Otro'];
+function _canSeeOcUrgente() {
+  const r = getUserRole();
+  if (r !== 'admin' && r !== 'comercial') return false;
+  // getUserRole da 'comercial' a cualquiera que no sea Gaspar/Emma → excluir cursos (Abril), producción y diseño.
+  try { if (isCursosOnly() || isProduccionOnly() || isDisenadorOnly()) return false; } catch (_) {}
+  return true;
+}
+function _ocPendHoy() { return new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10); }
+function _ocPendAckKey() { return 'ocPendAck:' + _userKey(STATE.user); }
+function _ocPendShouldShow() {
+  const p = STATE.ocPend;
+  if (!p || !_canSeeOcUrgente() || !(p.items || []).length) return false;
+  if (p.forzado) return true;   // quedó abierto mientras marca (que un poll no lo cierre)
+  let ack = {}; try { ack = JSON.parse(localStorage.getItem(_ocPendAckKey()) || '{}') || {}; } catch (_) {}
+  if (ack.dia !== _ocPendHoy()) return true;                         // 1 vez por día
+  return !!p.urgentMax && p.urgentMax > (ack.urgent || '');          // o si entró una OC urgente nueva
+}
+function _ocPendAck() {
+  try { localStorage.setItem(_ocPendAckKey(), JSON.stringify({ dia: _ocPendHoy(), urgent: (STATE.ocPend && STATE.ocPend.urgentMax) || '' })); } catch (_) {}
+  if (STATE.ocPend) { STATE.ocPend.forzado = false; STATE.ocPend.baja = null; STATE.ocPend.bajaMotivo = ''; STATE.ocPend.bajaOtro = ''; STATE.ocPend.flash = null; }
 }
 async function fetchOcUrgenteStatus() {
-  if (!STATE.token || !CONFIG.trackerUrl || !_canSeeOcUrgente()) return;
+  if (!STATE.token || !CONFIG.trackerUrl) return;
+  if (!_canSeeOcUrgente()) { if (STATE.ocPend) { STATE.ocPend = null; render(); } return; }
+  const user = STATE.user;
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/oc-urgente-status', { headers: authHeaders() });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/oc/pendientes', { headers: authHeaders() });
+    if (STATE.user !== user) return;   // cambió de usuario mientras volvía la respuesta
+    if (r.status === 401 || r.status === 403) { if (STATE.ocPend) { STATE.ocPend = null; render(); } return; }
     if (!r.ok) return;
     const j = await r.json();
-    if (!j.ok) return;
-    const prev = STATE.ocUrgente;
-    STATE.ocUrgente = { count: j.count || 0, maxCreatedAt: j.max_created_at || '', items: j.items || [] };
-    if (!prev || prev.count !== STATE.ocUrgente.count || prev.maxCreatedAt !== STATE.ocUrgente.maxCreatedAt) render();
+    if (!j.ok || STATE.user !== user) return;
+    const prev = STATE.ocPend || {};
+    const antes = _ocPendShouldShow();
+    const sig = (j.items || []).map(x => x.phone + ':' + x.estado).join('|') + '#' + (j.urgent_max || '');
+    STATE.ocPend = Object.assign(prev, { items: j.items || [], urgentMax: j.urgent_max || '' });
+    if (prev._sig === sig) return;
+    STATE.ocPend._sig = sig;
+    // Re-render global SOLO si el popup aparece/desaparece, o si está a la vista y no hay una marca en curso
+    // (si no, cada cambio de estado de una OC repintaba la app entera y borraba lo tipeado en otros formularios).
+    const ahora = _ocPendShouldShow();
+    if (antes !== ahora || (ahora && !prev.busy && !prev.baja)) render();
   } catch (_) {}
 }
-function _ocUrgenteAck() { if (STATE.ocUrgente) localStorage.setItem('ocUrgenteAck', STATE.ocUrgente.maxCreatedAt || ''); }
+async function ocPendMarcar(phone, accion, motivo) {
+  const p = STATE.ocPend; if (!p || p.busy) return;
+  p.busy = phone; p.forzado = true; p.msg = p.msg || {}; delete p.msg[phone]; p.flash = null; render();
+  let flash = null, ok = false;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/oc/marcar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, accion, motivo: motivo || '' }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { p.msg[phone] = { t: j.error || ('No se pudo (HTTP ' + r.status + ')'), c: '#ef4444' }; return; }
+    ok = true;
+    if (j.baja || j.ya_cerrada || j.verificado) {
+      const it = (p.items || []).find(x => x.phone === phone);
+      const quien = it ? (String(it.name || '').replace(/\s+/g, ' ').trim() || it.cartel || ('+' + phone)) : ('+' + phone);
+      p.items = (p.items || []).filter(x => x.phone !== phone);
+      p._sig = '';
+      flash = j.baja ? `✓ ${quien}: OC dada de baja` : (j.verificado ? `✓ ${quien}: pago confirmado (${j.detalle || j.via})` : `✓ ${quien}: esa OC ya estaba cerrada`);
+      p.flash = { t: flash, c: '#22c55e' };
+      if (!p.items.length) _ocPendAck();
+    } else {
+      const it = (p.items || []).find(x => x.phone === phone);
+      if (it) { it.reclamado = { at: new Date().toISOString(), por: '' }; it.estado = 'marcaste que pagó: falta confirmar (cargá el pedido o pedile el comprobante)'; it.urgente = false; }
+      p.msg[phone] = { t: 'No encontré el pago: no hay pedido cargado ni comprobante en el chat. Cargá el pedido o pedile el comprobante; te va a seguir apareciendo hasta que se confirme.', c: '#f59e0b' };
+    }
+  } catch (_) { p.msg[phone] = { t: 'Error de red, probá de nuevo', c: '#ef4444' }; }
+  finally {
+    p.busy = null;
+    // Si falló (red/5xx/403) el selector queda abierto con el motivo y el texto, para reintentar.
+    if (ok && p.baja === phone) { p.baja = null; p.bajaMotivo = ''; p.bajaOtro = ''; }
+    render();
+    // El toast va DESPUÉS del render (render() recrea #toast y lo borraba); igual el resultado queda arriba del popup.
+    if (flash) { try { toast(flash); } catch (_) {} }
+  }
+}
 function startOcUrgenteWatch() {
   if (window._ocUrgenteWatch || !_canSeeOcUrgente()) return;
   window._ocUrgenteWatch = true;
   document.addEventListener('click', (e) => {
     const t = e.target;
     if (!t || !t.closest) return;
+    const p = STATE.ocPend;
     const ver = t.closest('[data-oc-ver]');
     if (ver) {
       const ph = ver.getAttribute('data-oc-phone') || '';
-      _ocUrgenteAck();
+      const it = p && (p.items || []).find(x => x.phone === ph);
+      _ocPendAck();
       STATE.view = 'chat';
+      if (it && it.canal === 'ig') chatState.channel = 'ig'; else chatState.channel = 'wa';
       chatState.selectedPhone = ph;
       if (typeof enterMobileChatConversation === 'function') enterMobileChatConversation();
       try { selectChatContact(ph); } catch (_) {}
@@ -3210,35 +3282,95 @@ function startOcUrgenteWatch() {
       render();
       return;
     }
-    if (t.closest('[data-oc-dismiss]') || (t.matches && t.matches('[data-oc-bg]'))) { _ocUrgenteAck(); render(); return; }
+    if (!p) return;
+    const pago = t.closest('[data-ocp-pago]');
+    if (pago) { if (!p.busy) ocPendMarcar(pago.getAttribute('data-ocp-pago'), 'pagado'); return; }
+    const baja = t.closest('[data-ocp-baja]');
+    if (baja) {
+      if (p.busy) return;
+      p.baja = baja.getAttribute('data-ocp-baja'); p.bajaMotivo = ''; p.bajaOtro = ''; p.forzado = true;
+      if (p.msg) delete p.msg[p.baja];
+      render(); return;
+    }
+    const bajaOk = t.closest('[data-ocp-baja-ok]');
+    if (bajaOk) {
+      if (p.busy) return;
+      const ph = bajaOk.getAttribute('data-ocp-baja-ok');
+      let motivo = p.bajaMotivo || '';
+      if (motivo === 'Otro') motivo = 'Otro: ' + String(p.bajaOtro || '').trim();
+      if (!motivo || motivo === 'Otro: ') {
+        p.msg = p.msg || {};
+        p.msg[ph] = { t: motivo ? 'Contá qué pasó (en el campo de al lado)' : 'Elegí el motivo', c: '#ef4444' };
+        render(); return;
+      }
+      ocPendMarcar(ph, 'baja', motivo);
+      return;
+    }
+    if (t.closest('[data-ocp-baja-cancel]')) { p.baja = null; p.bajaMotivo = ''; p.bajaOtro = ''; render(); return; }
+    if (t.closest('[data-oc-dismiss]') || (t.matches && t.matches('[data-oc-bg]'))) { if (p.busy) return; _ocPendAck(); render(); return; }
+  });
+  // El motivo vive en STATE (no solo en el DOM): cualquier render() global (poll del chat, etc.) lo repinta igual.
+  document.addEventListener('change', (e) => {
+    const sel = e.target && e.target.closest && e.target.closest('[data-ocp-motivo]');
+    if (!sel || !STATE.ocPend) return;
+    STATE.ocPend.bajaMotivo = sel.value;
+    if (STATE.ocPend.msg) delete STATE.ocPend.msg[sel.getAttribute('data-ocp-motivo')];
+    const otro = document.querySelector(`[data-ocp-motivo-otro="${sel.getAttribute('data-ocp-motivo')}"]`);
+    if (otro) { otro.style.display = sel.value === 'Otro' ? '' : 'none'; if (sel.value === 'Otro') otro.focus(); }
+  });
+  document.addEventListener('input', (e) => {
+    const otro = e.target && e.target.closest && e.target.closest('[data-ocp-motivo-otro]');
+    if (otro && STATE.ocPend) STATE.ocPend.bajaOtro = otro.value;
   });
   fetchOcUrgenteStatus();
-  setInterval(() => { if (!pollBackoffActive()) fetchOcUrgenteStatus(); }, 75000);
+  setInterval(() => { if (!pollBackoffActive()) fetchOcUrgenteStatus(); }, 5 * 60000);
 }
 function renderOcUrgenteModal() {
-  if (!_ocUrgenteShouldShow()) return '';
-  const oc = STATE.ocUrgente;
-  const items = (oc.items || []).slice(0, 8);
+  if (!_ocPendShouldShow()) return '';
+  const p = STATE.ocPend, items = p.items || [], admin = isAdmin();
+  const chip = (it) => {
+    const [txt, col] = it.reclamado ? ['⏳ marcaste que pagó · falta confirmar', '#f59e0b']
+      : it.urgente ? ['💬 te escribió, respondele', '#ef4444']
+      : /respondió/.test(it.estado) ? ['respondió, falta que pague', '#38bdf8'] : ['sin respuesta desde la OC', 'var(--fg-subtle)'];
+    return `<span style="font-size:11px;font-weight:700;color:${col}">${txt}</span>`;
+  };
   const rows = items.map(it => {
-    const nombre = escapeHtml((it.nombre || '').trim() || ('+' + it.phone));
-    const importe = it.importe ? escapeHtml(it.importe) : '';
-    const canalTag = it.canal === 'ig' ? '📷 ' : '';
+    const nombre = escapeHtml(String(it.name || '').replace(/\s+/g, ' ').trim() || ('+' + it.phone));
+    // Mientras se verifica UNA OC se bloquean los botones de TODAS (antes los de las otras se ignoraban sin aviso).
+    const busy = p.busy === it.phone, anyBusy = !!p.busy, enBaja = p.baja === it.phone, msg = (p.msg || {})[it.phone];
+    const motSel = enBaja ? String(p.bajaMotivo || '') : '';
+    const dias = it.dias == null ? '' : (it.dias === 0 ? 'OC de hoy' : `OC hace ${it.dias} día${it.dias === 1 ? '' : 's'}`);
     return `
-      <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;padding:8px 10px;border:1px solid var(--border);border-radius:var(--r-sm);margin-bottom:6px">
-        <div style="min-width:0">
-          <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${canalTag}${nombre}</div>
-          ${importe ? `<div style="font-size:12px;color:var(--fg-mute)">${importe}</div>` : ''}
+      <div style="padding:9px 10px;border:1px solid ${it.urgente ? '#ef4444' : 'var(--border)'};border-radius:var(--r-sm);margin-bottom:7px">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+          <div style="min-width:0;font-size:13px;font-weight:600;overflow-wrap:anywhere">${it.canal === 'ig' ? '📷 ' : ''}${nombre}${admin && it.dueno ? ` <span style="font-size:10px;font-weight:700;color:var(--fg-subtle);text-transform:uppercase">· ${escapeHtml(it.dueno === 'facundo' ? 'Facu' : it.dueno === 'agustina' ? 'Agus' : 'Joaco')}</span>` : ''}</div>
+          <div style="font-size:13px;font-weight:700;white-space:nowrap">${escapeHtml(it.importe || '')}</div>
         </div>
-        <button class="btn btn-cyan btn-sm" data-oc-ver data-oc-phone="${escapeHtml(it.phone)}" style="flex:none">Ver chat →</button>
+        <div style="font-size:12px;color:var(--fg-mute);margin-top:2px">${[it.cartel ? `«${escapeHtml(it.cartel)}»` : '', dias, it.n_oc > 1 ? `${it.n_oc} OC` : ''].filter(Boolean).join(' · ') || 'sin OC registrada'}</div>
+        <div style="margin-top:3px">${chip(it)}</div>
+        ${msg ? `<div style="font-size:12px;color:${msg.c};margin-top:5px;line-height:1.4">${escapeHtml(msg.t)}</div>` : ''}
+        ${enBaja ? `
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center">
+            <select data-ocp-motivo="${escapeHtml(it.phone)}" ${anyBusy ? 'disabled' : ''} style="flex:1 1 180px;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg);font-size:12.5px"><option value="">¿Por qué se cayó?</option>${OC_BAJA_MOTIVOS.map(m => `<option${m === motSel ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select>
+            <input data-ocp-motivo-otro="${escapeHtml(it.phone)}" placeholder="Contá qué pasó" value="${escapeHtml(p.bajaOtro || '')}" ${anyBusy ? 'disabled' : ''} style="display:${motSel === 'Otro' ? '' : 'none'};flex:1 1 180px;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg);font-size:12.5px">
+            <button class="btn btn-sm" data-ocp-baja-ok="${escapeHtml(it.phone)}" ${anyBusy ? 'disabled' : ''} style="background:#ef4444;color:#fff">${busy ? 'Dando de baja…' : 'Dar de baja'}</button>
+            <button class="btn btn-ghost btn-sm" data-ocp-baja-cancel ${anyBusy ? 'disabled' : ''}>Cancelar</button>
+          </div>` : `
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+            <button class="btn btn-cyan btn-sm" data-oc-ver data-oc-phone="${escapeHtml(it.phone)}">Ver chat →</button>
+            <button class="btn btn-ghost btn-sm" data-ocp-pago="${escapeHtml(it.phone)}" ${anyBusy ? 'disabled' : ''} title="Se verifica: pedido cargado o comprobante en el chat">${busy ? 'Verificando…' : '✓ Ya pagó'}</button>
+            <button class="btn btn-ghost btn-sm" data-ocp-baja="${escapeHtml(it.phone)}" ${anyBusy ? 'disabled' : ''}>✕ Se cayó</button>
+          </div>`}
       </div>`;
   }).join('');
   return `
     <div data-oc-bg style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:7100;display:flex;align-items:center;justify-content:center;padding:16px">
-      <div style="background:var(--bg);border:1px solid #f59e0b;border-radius:var(--r-md);width:min(440px,94vw);padding:var(--s-4);box-shadow:0 10px 40px rgba(0,0,0,.45)">
-        <div style="font-size:34px;text-align:center;margin-bottom:4px">🔥</div>
-        <h2 style="margin:0 0 6px;font-size:17px;text-align:center">${oc.count === 1 ? 'Pedido por vender URGENTE' : oc.count + ' pedidos por vender URGENTE'}</h2>
-        <p style="margin:0 0 12px;font-size:13px;color:var(--fg-mute);text-align:center;line-height:1.5">Mandaste la orden de compra hace más de 3 h y el cliente todavía no respondió.</p>
-        <div style="margin-bottom:12px">${rows}</div>
+      <div style="background:var(--bg);border:1px solid #f59e0b;border-radius:var(--r-md);width:min(560px,96vw);max-height:90vh;display:flex;flex-direction:column;padding:var(--s-4);box-shadow:0 10px 40px rgba(0,0,0,.45)">
+        <div style="font-size:30px;text-align:center;margin-bottom:2px">🧾</div>
+        <h2 style="margin:0 0 4px;font-size:17px;text-align:center">${items.length === 1 ? '1 orden de compra sin pagar' : items.length + ' órdenes de compra sin pagar'}</h2>
+        <p style="margin:0 0 10px;font-size:12.5px;color:var(--fg-mute);text-align:center;line-height:1.5">Marcá qué pasó con cada una. Si decís que pagó lo verifico (pedido cargado o comprobante); las que no estén pagadas te van a seguir apareciendo.</p>
+        ${p.flash ? `<div style="font-size:12.5px;font-weight:600;color:${p.flash.c};background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.35);border-radius:6px;padding:6px 9px;margin:0 0 8px;overflow-wrap:anywhere">${escapeHtml(p.flash.t)}</div>` : ''}
+        <div data-ocp-list style="overflow-y:auto;min-height:0;margin-bottom:10px">${rows}</div>
         <div style="display:flex;justify-content:center">
           <button class="btn btn-ghost" data-oc-dismiss style="padding:8px 16px">Después</button>
         </div>
@@ -15546,7 +15678,9 @@ function bindChatConversation() {
     // chat dispara el teclado de inmediato y tapa media pantalla (el usuario
     // todavía está leyendo, no escribiendo) — el teclado debe salir recién
     // cuando toca el input.
-    if (!_isMobileViewport()) ta.focus();
+    // Y nunca con el popup de OC sin pagar abierto: el teclado iría al compositor TAPADO por el overlay
+    // (lo tipeado para el motivo terminaba en el borrador del cliente y un Enter se lo mandaba).
+    if (!_isMobileViewport() && !document.querySelector('[data-oc-bg]')) ta.focus();
   }
   if (btn) {
     btn.onclick = () => {

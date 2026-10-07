@@ -3472,6 +3472,10 @@ async function buildReporteDiario(env) {
     try {
       const ab = await buildOcAbiertas(env);
       if (ab) out.ocAbiertas = { total: ab.total, joaco: ab.porVend.joaco.length, facundo: ab.porVend.facundo.length, agustina: ab.porVend.agustina.length };
+      // OC que los vendedores dieron de baja HOY (día AR) desde el popup.
+      const d0 = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+      const rb = await env.DB.prepare("SELECT COUNT(*) AS n FROM oc_estado_log WHERE accion = 'baja' AND substr(datetime(julianday(at) - 0.125), 1, 10) = ?").bind(d0).first();
+      if (out.ocAbiertas) out.ocAbiertas.bajasHoy = (rb && rb.n) || 0;
     } catch (_) {}
   } catch (_) {}
   return out;
@@ -3490,7 +3494,7 @@ function formatReporteDiario(d) {
     `   Joaco: ${d.chatsJoaco} · 2° (Facu/Agus): ${d.chatsNadia}\n\n` +
     `📋 Presupuestos enviados: ${d.presupTotal}\n` +
     `   Joaco: ${d.presupJoaco} · 2° (Facu/Agus): ${d.presupNadia}\n\n` +
-    `🧾 Órdenes de compra: ${d.ocEnviadas}${d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina})` : ''}`
+    `🧾 Órdenes de compra: ${d.ocEnviadas}${d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina})` : ''}${d.ocAbiertas && d.ocAbiertas.bajasHoy ? ` · dadas de baja hoy ${d.ocAbiertas.bajasHoy}` : ''}`
   );
 }
 async function maybeReporteDiario(env) {
@@ -3506,7 +3510,7 @@ async function maybeReporteDiario(env) {
     // Var {{3}} (carteles): si hubo corpóreas, mostramos el desglose inline (ej "62 (39 corp)")
     // para que se vea en la plantilla SIN cambiarle las variables.
     const cartVar = d.corporeas > 0 ? `${d.cartelesNeon} (${d.corporeas} corp)` : String(d.carteles);
-    const ocVar = String(d.ocEnviadas) + (d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina})` : '');
+    const ocVar = String(d.ocEnviadas) + (d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina})` : '') + (d.ocAbiertas && d.ocAbiertas.bajasHoy ? ` · dadas de baja hoy ${d.ocAbiertas.bajasHoy}` : '');
     const params11 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia, ocVar].map(String);
     const params10 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
     const texto = formatReporteDiario(d);
@@ -3917,17 +3921,33 @@ function ocDueno(asg, vend) {
   const v = String(vend || '').toLowerCase().trim();
   return (v === 'facundo' || v === 'agustina') ? v : 'joaco';
 }
+// Estado que MARCA el vendedor desde el popup "OC sin pagar": 'reclamado' (dijo que pagó pero no se pudo confirmar →
+// sigue apareciendo) o 'baja' (se cayó, con motivo → se le saca POR PAGAR). oc_ts = la OC a la que aplica: si después
+// se manda una OC nueva a ese cliente, la marca vieja deja de valer. oc_estado_log = historial (quién, qué, cuándo).
+let _ocEstadoOk = false;
+async function ensureOcEstado(env) {
+  if (_ocEstadoOk) return;
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS oc_estado (phone TEXT PRIMARY KEY, estado TEXT, motivo TEXT, por TEXT, at TEXT, oc_ts TEXT)").run();
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS oc_estado_log (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, accion TEXT, resultado TEXT, motivo TEXT, por TEXT, at TEXT, cartel TEXT, importe TEXT, dueno TEXT)").run();
+    _ocEstadoOk = true;
+  } catch (_) {}
+}
 async function buildOcAbiertas(env) {
   const porPagarId = await ensureLabelId(env, POR_PAGAR_LABEL_NAME, POR_PAGAR_LABEL_COLOR);
   if (!porPagarId) return null;
+  await ensureOcEstado(env);
   // Última OC por teléfono (bare columns con MAX(ts_out) → cartel/importe de ESA OC) + cuántas se le mandaron.
   const rows = (await env.DB.prepare(
     `SELECT cl.phone, cl.created_at AS tag_at, s.contact_name AS name, s.assigned_to, s.inbox, s.last_direction, s.last_msg_type,
-            o.cartel, o.importe, o.canal, o.vendedor, o.ts_out, o.n_oc
+            o.cartel, o.importe, o.canal, o.vendedor, o.ts_out, o.n_oc, e.at AS reclamado_at, e.por AS reclamado_por
        FROM contact_labels cl
        LEFT JOIN wa_chats_summary s ON s.phone = cl.phone
        LEFT JOIN (SELECT phone, cartel, importe, canal, vendedor, MAX(ts_out) AS ts_out, COUNT(*) AS n_oc
                     FROM oc_enviadas WHERE IFNULL(cartel, '') <> '' GROUP BY phone) o ON o.phone = cl.phone
+       LEFT JOIN oc_estado e ON e.phone = cl.phone AND e.estado = 'reclamado'
+                            AND julianday(e.at) >= IFNULL(julianday(cl.created_at), 0)
+                            AND (o.ts_out IS NULL OR IFNULL(e.oc_ts, '') >= o.ts_out)
       WHERE cl.label_id = ?`
   ).bind(porPagarId).all()).results || [];
   const vivos = rows.filter(r => !BANDEJAS_NO_COMERCIALES.includes(String(r.inbox || '')));
@@ -3950,9 +3970,13 @@ async function buildOcAbiertas(env) {
     const ui = ultIn[r.phone];
     // Una reacción (🤗), edición o borrado del cliente NO es "te escribió" (caso Kari: dijo que no y reaccionó con un emoji).
     const ultEsDelCliente = String(r.last_direction || '') === 'inbound' && !['reaction', 'revoke', 'edit', 'errors', 'system', 'unsupported'].includes(String(r.last_msg_type || ''));
-    const estado = ultEsDelCliente ? 'te escribió, respondele'
-      : (ui && ref && Date.parse(ui) > Date.parse(ref) ? 'respondió, falta que pague' : 'sin respuesta desde la OC');
-    porVend[dueno].push({ phone: r.phone, name: r.name || '', cartel: r.cartel || '', importe: r.importe || '', canal: r.canal || (String(r.phone).length > 14 ? 'ig' : 'wa'), dias, n_oc: r.n_oc || 0, estado, urgente: estado.startsWith('te escribió') });
+    const respondio = !!(ui && ref && Date.parse(ui) > Date.parse(ref));
+    const estado = r.reclamado_at ? 'marcaste que pagó: falta confirmar (cargá el pedido o pedile el comprobante)'
+      : (ultEsDelCliente ? 'te escribió, respondele' : (respondio ? 'respondió, falta que pague' : 'sin respuesta desde la OC'));
+    // "Urgente" del popup viejo: OC de 3 a 48 h sin respuesta del cliente → hace reaparecer el popup.
+    const horas = ref ? (now - Date.parse(ref)) / 36e5 : null;
+    const urgente3h = !r.reclamado_at && !respondio && horas != null && horas >= 3 && horas <= 48;
+    porVend[dueno].push({ phone: r.phone, name: r.name || '', cartel: r.cartel || '', importe: r.importe || '', canal: r.canal || (String(r.phone).length > 14 ? 'ig' : 'wa'), dias, n_oc: r.n_oc || 0, estado, urgente: !r.reclamado_at && ultEsDelCliente, reclamado: r.reclamado_at ? { at: r.reclamado_at, por: r.reclamado_por || '' } : null, ts_out: r.ts_out || null, ref, urgente3h, dueno });
   }
   for (const k in porVend) porVend[k].sort((a, b) => (b.urgente - a.urgente) || ((b.dias || 0) - (a.dias || 0)));
   return { porVend, viejas, total: Object.values(porVend).reduce((a, l) => a + l.length, 0) };
@@ -4049,6 +4073,66 @@ async function maybeListaOC(env, opts = {}) {
     await kvSet(env, 'lista_oc_last', JSON.stringify(out));
     return out;
   } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+// Slug de vendedor de la sesión (para el alcance del popup y quién puede marcar): Joaco = 'joaco'.
+function ocSlugSesion(user) {
+  const u = String(user || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (u === 'joaquin' || u === 'joaco') return 'joaco';
+  return u;
+}
+// ¿Ya está pagada la OC de este chat? 1) pedido de ESTE cliente cargado desde 12 h antes de la OC; 2) comprobante en el
+// chat (OCR del vigilador, forzado). Identidad del pedido: teléfono WA, IGSID, o @usuario de IG → IGSID (wa_contacts).
+// Si el pedido y la OC tienen identificador del MISMO tipo, decide el teléfono (nada de cartel). El nombre del cartel
+// es el último recurso (pedido sin teléfono, @usuario desconocido, o IG contra WhatsApp): IDÉNTICO normalizado y nunca
+// un pedido de OTRO chat con su propia OC. Con substring, "Studio" matcheaba "LB_detailing studio" de otro cliente y
+// daba por pagada una OC sin pagar (review 7-oct).
+async function ocVerificarPago(env, it) {
+  const desde = it.ts_out || it.ref || null;
+  const norm = (x) => String(x || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+  try {
+    const cand = (await env.DB.prepare("SELECT id, numero, cartel, telefono, estado_pago, created_at FROM pedidos WHERE " + (desde ? "julianday(created_at) >= julianday(?) - 0.5" : "julianday(created_at) >= julianday('now') - 30") + " ORDER BY id DESC LIMIT 300").bind(...(desde ? [desde] : [])).all()).results || [];
+    const phoneDig = String(it.phone || '').replace(/\D/g, '');
+    const esIg = phoneDig.length > 14;
+    const nc = norm(it.cartel);
+    // @usuario → IGSID, en una sola consulta para todos los candidatos.
+    const users = [...new Set(cand.map(p => String(p.telefono || '').trim()).filter(t => /[a-z@]/i.test(t)).map(t => t.replace(/^@/, '').toLowerCase()).filter(Boolean))];
+    const igDe = {};
+    for (let i = 0; i < users.length; i += 50) {
+      const lote = users.slice(i, i + 50);
+      try {
+        const rs = await env.DB.prepare(`SELECT phone, lower(username) AS u FROM wa_contacts WHERE lower(username) IN (${lote.map(() => '?').join(',')})`).bind(...lote).all();
+        for (const r of (rs.results || [])) if (r.u && !igDe[r.u]) igDe[r.u] = String(r.phone);
+      } catch (_) {}
+    }
+    const idDe = (p) => {
+      const raw = String(p.telefono || '').trim();
+      if (/[a-z@]/i.test(raw)) return igDe[raw.replace(/^@/, '').toLowerCase()] || '';
+      const d = raw.replace(/\D/g, '');
+      return d.length >= 8 ? d : '';
+    };
+    let hit = null;
+    for (const p of cand) {
+      const pid = idDe(p), pidIg = pid.length > 14;
+      if (pid && pidIg === esIg) {   // mismo tipo de identificador: decide el teléfono
+        if (esIg ? pid === phoneDig : pid.slice(-8) === phoneDig.slice(-8)) { hit = p; break; }
+        continue;
+      }
+      if (nc.length < 4 || norm(p.cartel) !== nc) continue;
+      if (pid) {   // el pedido es de otro chat (IG↔WA): si ESE chat tuvo su propia OC, el pedido es de esa OC
+        const otra = await env.DB.prepare(pidIg ? "SELECT 1 FROM oc_enviadas WHERE phone = ? AND IFNULL(cartel, '') <> '' LIMIT 1" : "SELECT 1 FROM oc_enviadas WHERE length(phone) <= 14 AND substr(phone, -8) = ? AND IFNULL(cartel, '') <> '' LIMIT 1").bind(pidIg ? pid : pid.slice(-8)).first().catch(() => null);
+        if (otra) continue;
+      }
+      hit = p; break;
+    }
+    if (hit) { await ocCerrarPorPedido(env, [it.phone], hit.estado_pago); return { verificado: true, via: 'pedido', detalle: `pedido #${hit.numero} ${hit.cartel}` }; }
+  } catch (_) {}
+  try {
+    await processCartelPagos(env, { phone: it.phone, force: true });
+    const porPagarId = await ensureLabelId(env, POR_PAGAR_LABEL_NAME, POR_PAGAR_LABEL_COLOR);
+    const sigue = await env.DB.prepare('SELECT 1 FROM contact_labels WHERE phone = ? AND label_id = ? LIMIT 1').bind(it.phone, porPagarId).first();
+    if (!sigue) return { verificado: true, via: 'comprobante', detalle: 'comprobante de pago en el chat' };
+  } catch (_) {}
+  return { verificado: false };
 }
 // Al CARGAR UN PEDIDO, la OC de ese cliente queda pagada: se saca POR PAGAR, se pone "Cartel primer pago" (salvo que sea
 // el 2do pago) y se marca oc_enviadas.pagado_at. Antes solo lo hacía el OCR del comprobante → si la venta se cargaba a
@@ -18628,6 +18712,54 @@ const handler = {
       // mandó la OC, columna oc_enviadas.vendedor): secundario (Nadia) ve las suyas; principal
       // (Joaco) las no-secundarias; admin (Gaspar) todas. Filtra cartel!='' para excluir las
       // filas históricas seedeadas (sin parsear). Barato: lee oc_enviadas + un NOT EXISTS.
+      // Popup "🧾 OC sin pagar": las OC abiertas del vendedor (admin: todas), con el estado y la marca "dijo que pagó".
+      if (request.method === 'GET' && path === '/admin/oc/pendientes') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin' && role !== 'comercial') return json({ error: 'forbidden' }, 403);
+        const b = await buildOcAbiertas(env);
+        if (!b) return json({ ok: true, items: [], urgent_max: '' });
+        const slug = ocSlugSesion(session.user);
+        const items = role === 'admin' ? [].concat(b.porVend.joaco, b.porVend.facundo, b.porVend.agustina) : (b.porVend[slug] || []);
+        items.sort((x, y) => (y.urgente - x.urgente) || ((y.dias || 0) - (x.dias || 0)));
+        const urg = items.filter(x => x.urgente3h).map(x => x.ref || '').sort();
+        return json({ ok: true, items, urgent_max: urg.length ? urg[urg.length - 1] : '' });
+      }
+      // Marcar una OC desde el popup: {phone, accion:'pagado'|'baja', motivo?}. 'pagado' se VERIFICA (pedido cargado o
+      // comprobante); si no se confirma queda "dijo que pagó" y sigue apareciendo. 'baja' (con motivo) saca POR PAGAR.
+      // El vendedor solo puede marcar SUS OC; admin, cualquiera. Todo queda en oc_estado_log.
+      if (request.method === 'POST' && path === '/admin/oc/marcar') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin' && role !== 'comercial') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const phone = String(body.phone || '').replace(/\D/g, '');
+        const accion = String(body.accion || '');
+        if (!phone || !['pagado', 'baja'].includes(accion)) return json({ error: 'faltan datos' }, 400);
+        const motivo = String(body.motivo || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+        if (accion === 'baja' && !motivo) return json({ error: 'elegí el motivo' }, 400);
+        const b = await buildOcAbiertas(env);
+        const it = b ? [].concat(b.porVend.joaco, b.porVend.facundo, b.porVend.agustina).find(x => x.phone === phone) : null;
+        if (!it) return json({ ok: true, ya_cerrada: true });   // ya no tiene POR PAGAR (la cerró otro / el comprobante)
+        const slug = ocSlugSesion(session.user);
+        if (role !== 'admin' && it.dueno !== slug) return json({ error: 'esa OC es de otro vendedor' }, 403);
+        await ensureOcEstado(env);
+        const nowIso = new Date().toISOString(), por = String(session.user || '');
+        const log = (resultado) => env.DB.prepare('INSERT INTO oc_estado_log (phone, accion, resultado, motivo, por, at, cartel, importe, dueno) VALUES (?,?,?,?,?,?,?,?,?)').bind(phone, accion, resultado, motivo, por, nowIso, it.cartel || '', it.importe || '', it.dueno || '').run().catch(() => null);
+        if (accion === 'baja') {
+          await porPagarTag(env, phone, false);
+          await env.DB.prepare("INSERT INTO oc_estado (phone, estado, motivo, por, at, oc_ts) VALUES (?, 'baja', ?, ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET estado='baja', motivo=excluded.motivo, por=excluded.por, at=excluded.at, oc_ts=excluded.oc_ts").bind(phone, motivo, por, nowIso, it.ts_out || it.ref || nowIso).run();
+          await log('baja');
+          return json({ ok: true, baja: true });
+        }
+        const v = await ocVerificarPago(env, it);
+        if (v.verificado) {
+          try { await env.DB.prepare('DELETE FROM oc_estado WHERE phone = ?').bind(phone).run(); } catch (_) {}
+          await log('pagado_' + v.via);
+          return json({ ok: true, verificado: true, via: v.via, detalle: v.detalle });
+        }
+        await env.DB.prepare("INSERT INTO oc_estado (phone, estado, motivo, por, at, oc_ts) VALUES (?, 'reclamado', '', ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET estado='reclamado', motivo='', por=excluded.por, at=excluded.at, oc_ts=excluded.oc_ts").bind(phone, por, nowIso, it.ts_out || it.ref || nowIso).run();
+        await log('reclamado_sin_confirmar');
+        return json({ ok: true, verificado: false });
+      }
       if (request.method === 'GET' && path === '/admin/wa/oc-urgente-status') {
         const role = await getSessionRole(env, session.user);
         if (role !== 'admin' && role !== 'comercial') return json({ error: 'forbidden' }, 403);
