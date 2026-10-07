@@ -2424,7 +2424,12 @@ async function maybeRepartirANadia(env, phone) {
     // Rotar el orden de "primera opción" por teléfono así ninguno se lleva siempre los primeros del día.
     const rot = COMERCIALES_SECUNDARIOS.length ? (_h % COMERCIALES_SECUNDARIOS.length) : 0;
     const orden = COMERCIALES_SECUNDARIOS.slice(rot).concat(COMERCIALES_SECUNDARIOS.slice(0, rot));
+    const hoyAR = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
     for (const c of orden) {
+      // Pausa por día (kv reparto_pausa_<slug> = 'YYYY-MM-DD' AR, inclusive): "frenalo hoy" sin tocar la
+      // cuota → el vendedor vuelve a recibir solo al día siguiente. Para frenar varios días, poner la última.
+      const pausaHasta = await kvGet(env, 'reparto_pausa_' + c.slug, '');
+      if (pausaHasta && hoyAR <= pausaHasta) continue;
       const cuota = parseInt(await kvGet(env, c.cuotaKv, '0'), 10) || 0;
       if (cuota <= 0) continue;                                        // ese vendedor no recibe reparto automático
       // No asignar a un vendedor dado de baja (activo=0) aunque su cuota haya quedado >0 por olvido.
