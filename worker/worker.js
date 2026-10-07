@@ -3920,8 +3920,9 @@ async function buildOcAbiertas(env) {
   return { porVend, viejas, total: Object.values(porVend).reduce((a, l) => a + l.length, 0) };
 }
 function lineaOc(r, i) {
-  const quien = (r.canal === 'ig' || String(r.phone).length > 14) ? `${r.name || 'cliente'} (IG)` : `${r.name || 'cliente'} +${r.phone}`;
-  const dias = r.dias == null ? '' : ` · OC hace ${r.dias} día${r.dias === 1 ? '' : 's'}`;
+  const nom = String(r.name || '').replace(/\s+/g, ' ').trim() || 'cliente';   // hay nombres de contacto con saltos de línea
+  const quien = (r.canal === 'ig' || String(r.phone).length > 14) ? `${nom} (IG)` : `${nom} +${r.phone}`;
+  const dias = r.dias == null ? '' : (r.dias === 0 ? ' · OC de hoy' : ` · OC hace ${r.dias} día${r.dias === 1 ? '' : 's'}`);
   return `${i + 1}. ${quien} · "${r.cartel || 's/nombre'}"${r.importe ? ' · ' + r.importe : ''}${dias} · ${r.estado}`;
 }
 // Lista diaria por vendedor (10 AR, lun-sáb). Mismo esqueleto robusto que maybeListaAgus: la lista del día se arma
