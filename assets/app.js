@@ -3846,8 +3846,12 @@ function renderCorte() {
   // --- Vista ADMIN (Gaspar): board completo + detalle + alumnos ---
   const all = STATE.corteAlumnos;
   const q = (STATE.corteQuery || '').trim().toLowerCase();
+  // Sin acentos ("algañaraz" encuentra "Alganaraz"). El teléfono solo se compara si la búsqueda tiene dígitos:
+  // antes, buscando un nombre, q sin dígitos = '' y String(tel).includes('') daba true → mostraba a todos.
+  const sinAcento = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const qTxt = sinAcento(q), qDig = q.replace(/\D/g, '');
   const alumnos = all === undefined ? undefined : (q
-    ? all.filter(a => String(a.nombre || '').toLowerCase().includes(q) || String(a.telefono || '').includes(q.replace(/\D/g, '')))
+    ? all.filter(a => sinAcento(a.nombre).includes(qTxt) || (qDig.length >= 3 && String(a.telefono || '').includes(qDig)))
     : all);
   const cell = 'padding:7px 10px';
   // Board = solo la tanda ACTUAL (max tanda_id) por defecto; toggle para ver todas (no se pierden los que
