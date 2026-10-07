@@ -9004,8 +9004,8 @@ function pedDisenoBusy(idx, txt) {
 const _pedDisenoEnVuelo = {};
 // Asigna la key (ya en R2) al cartel: el server crea la pieza si falta, o la actualiza / re-encola. NO
 // re-abre el drawer (perdería lo que el vendedor esté editando): re-pinta solo esta sección.
-async function pedDisenoAsignar(idx, key) {
-  const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx + '/diseno-foto', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+async function pedDisenoAsignar(idx, key, aCorte) {
+  const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx + '/diseno-foto', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(aCorte ? { key, a_corte: true } : { key }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
   const updated = (j.pedidos || []).map(mapPedidoFromD1);
@@ -9014,6 +9014,14 @@ async function pedDisenoAsignar(idx, key) {
   if (STATE.view === 'pedidos') renderTablePedidos();
   const sec = pedDisenoSeccion(idx), np = updated.find(x => x.idx === idx);
   if (sec && np) { const tmp = document.createElement('div'); tmp.innerHTML = disenoDrawerSection(np); if (tmp.firstElementChild) sec.replaceWith(tmp.firstElementChild); }
+  // Pedido de neón anterior al circuito de corte (antes del 4/10): la foto quedó en el pedido y NO fue a Emma.
+  // Se pregunta por si de verdad todavía falta hacerlo (si no, aparecía "por diseñar" algo ya cortado: caso Peuma 2).
+  if (j.pregunta_corte) {
+    const mandar = await showConfirm('La foto quedó guardada. Este pedido es anterior al circuito de corte (antes del 4/10), así que NO se mandó a la cola de Emma.\n\n¿Todavía falta hacer la matriz y cortarlo?', { title: 'Pedido anterior al corte', confirmLabel: 'Sí, mandarlo a Emma', cancelLabel: 'No, ya está hecho' }).catch(() => false);
+    if (mandar) return pedDisenoAsignar(idx, key, true);
+    toast('Foto del diseño guardada ✓');
+    return;
+  }
   toast(j.aviso || (esCorpPedido(np) ? 'Foto del diseño cargada ✓ — va al ticket de producción' : 'Foto del diseño cargada ✓ — ya le aparece a Emma'));
   // Si el form del ticket de ESE corpóreo quedó abierto mientras subía, la foto entra ahí también.
   if (np && esCorpPedido(np) && np.disenoKey && STATE.ticketCorpModalOpen && STATE.ticketCorpMode === 'form' && STATE.ticketCorpPedidoId === idx) tcAgregarFotoDiseno(np.disenoKey, idx);

@@ -17475,6 +17475,14 @@ const handler = {
         }
         const pieza = await env.DB.prepare('SELECT id, estado FROM corte_pedidos WHERE pedido_id = ? ORDER BY id DESC LIMIT 1').bind(pid).first();
         let aviso = '';
+        // Pedido ANTERIOR al circuito de corte de neón (CORTE_NEON_DESDE, lo mismo que usa el barredor): esos carteles se
+        // hicieron por fuera del sistema → la foto queda en el pedido y NO se crea pieza en la cola de Emma (caso Peuma 2
+        // #379, 6-oct: subieron la foto de un pedido del 25/9 YA cortado y le apareció "por diseñar"). Si de verdad falta
+        // hacerlo, el front pregunta y reenvía con a_corte:true. Sin tocar updated_at (mismo motivo que el corpóreo, arriba).
+        if (!pieza && String(p.created_at || '') < CORTE_NEON_DESDE && body.a_corte !== true) {
+          await env.DB.prepare('UPDATE pedidos SET foto_diseno_key = ? WHERE id = ?').bind(key, pid).run();
+          return json({ ok: true, pregunta_corte: true, aviso: 'Foto guardada en el pedido (pedido anterior al circuito de corte: no se mandó a la cola de Emma).', pedidos: await pedidosConDiseno(env, 'WHERE pedidos.id = ?', [pid]) });
+        }
         if (!pieza) {
           const t = await corteTandaActual(env);
           const vend = corteVendedorNombre(p.comercial_id) || p.cargado_por || '';
