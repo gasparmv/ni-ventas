@@ -1624,7 +1624,7 @@ async function waSend(env, payload) {
     if (isBillingBlockError(errCodeAny, errText)) {
       try {
         if ((await noteWaPayReject(env, errText)) && env.ADMIN_NOTIFY_PHONE) {
-          await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp rechaza envíos por un problema de PAGO.\nError: ' + errText + '\nRevisá el saldo/facturación en 360dialog y el Billing Hub de Meta (business.facebook.com/billing_hub).\nLas campañas automáticas quedan en pausa sin quemar contactos y se reanudan solas cuando vuelva a salir una plantilla.');
+          await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp rechaza envíos por un problema de PAGO.\nError: ' + errText + '\nLas plantillas se pagan con el SALDO de 360dialog: cargá fondos en hub.360dialog.com → Funds (si el saldo está bien, fijate que la licencia del número esté paga en Invoices).\nLas campañas automáticas quedan en pausa sin quemar contactos y se reanudan solas cuando vuelva a salir una plantilla.');
         }
       } catch (_) {}
     }
@@ -1875,6 +1875,7 @@ async function campaignSendFail(env, st, { phone, ref = '', res, logKind }) {
 function describeSendFailure(res) {
   const code = res && res.code;
   const msg = String((res && res.error) || '');
+  if (msg === 'wa_send_paused') return 'los envíos de WhatsApp están pausados (freno general activado)';
   if (code === 131047 || code === 131051 || /re-?engag|outside|more than 24|window/i.test(msg)) return 'ventana de 24h cerrada (el cliente no escribió hace +24h)';
   if (code === 131042 || /eligibilit|payment/i.test(msg)) return 'cuenta bloqueada por pago — revisá saldo en 360dialog';
   if (code === 131026 || code === 131049 || /undeliverable|ecosystem/i.test(msg)) return 'número no alcanzable (sin WhatsApp / bloqueado)';
@@ -11722,8 +11723,8 @@ async function seedDefaultServices(env) {
   const seed = [
     [10, 'Anthropic (Claude API)', 'ia', 'Anthropic', 'Copiloto de respuestas sugeridas, análisis de chats con IA y síntesis de mejoras al playbook (Fase 2C)', 'Cloudflare secret ANTHROPIC_API_KEY', 'auto', 0, 'USD', 'anthropic', 'https://console.anthropic.com/settings/billing', 'Se calcula solo y exacto desde el uso real. Modelos: Sonnet (copiloto/análisis) y Opus (síntesis).'],
     [20, 'Cloudflare (Workers + D1 + R2 + AI)', 'infra', 'Cloudflare', 'Backend del CRM (Worker), base de datos (D1), almacenamiento de media (R2) e IA de embeddings (Workers AI)', 'Cuenta Cloudflare (login) + wrangler', 'fixed', 0, 'USD', '', 'https://dash.cloudflare.com/?to=/:account/billing', 'Cargá tu costo: plan Workers Paid (~USD 5/mes) o gratis si estás en free tier. D1 actual ~92MB (dentro del free).'],
-    [30, '360dialog (WhatsApp BSP)', 'mensajeria', '360dialog', 'Envío y recepción de WhatsApp (Cloud API) + plantillas. Es el proveedor activo desde el 31-may', 'Cloudflare secret D360_API_KEY + login hub.360dialog.com', 'fixed', 0, 'USD', '', 'https://hub.360dialog.com', '360dialog es el BSP (Cloud API hosted by Meta). Tiene su saldo/fee propio en el hub, PERO las conversaciones/mensajes los cobra Meta DIRECTO a la tarjeta (ver fila Meta WhatsApp), no salen de este saldo.'],
-    [40, 'Meta WhatsApp (conversaciones)', 'mensajeria', 'Meta', 'Costo por MENSAJE de plantilla de WhatsApp (mayormente MARKETING). Lo cobra Meta directo a la tarjeta.', 'WABA 1748207462464731 + Visa ...1528 (Meta Billing Hub)', 'usage', 0, 'USD', '', 'https://business.facebook.com/billing_hub/accounts', 'Meta lo cobra DIRECTO a la tarjeta (Visa) cuando la cuenta llega al umbral de facturación, NO sale del saldo de 360dialog. El grueso son plantillas MARKETING (los broadcasts). Si la tarjeta rebota (Error en el hub), Meta bloquea los envíos.'],
+    [30, '360dialog (WhatsApp BSP)', 'mensajeria', '360dialog', 'Envío y recepción de WhatsApp (Cloud API) + plantillas. Es el proveedor activo desde el 31-may', 'Cloudflare secret D360_API_KEY + login hub.360dialog.com', 'fixed', 0, 'USD', '', 'https://hub.360dialog.com', '360dialog es el BSP (Cloud API hosted by Meta). Cobra la LICENCIA mensual del número (Regular 49 EUR, factura del 1° de cada mes) y maneja el SALDO PREPAGO (Funds) del que se descuentan las plantillas (ver fila Meta WhatsApp). Si el saldo o la licencia no están pagos, 360dialog bloquea las plantillas ("lack of payment").'],
+    [40, 'Meta WhatsApp (plantillas)', 'mensajeria', 'Meta vía 360dialog', 'Costo por MENSAJE de plantilla de WhatsApp (mayormente MARKETING, AR USD 0,0618; utility fuera de ventana USD 0,026). Desde el 1-oct-2026 también los mensajes de servicio después de los 1.000 gratis del mes.', 'WABA 1374216464651634 — saldo prepago en hub.360dialog.com (Funds)', 'usage', 0, 'USD', '', 'https://hub.360dialog.com', 'Desde la migración del 25-jul-2026 se paga con el SALDO PREPAGO de 360dialog: en la tarjeta aparece como "360dialog 20,80 EUR" (recarga de 20 EUR + 4% de comisión). NO lo cobra Meta directo a la Visa (eso era la WABA vieja 1748207462464731). Los cobros "Meta"/"FACEBK *" de la tarjeta son PAUTA. Monto exacto: avisos de Meta en wa_webhook_log (pricing por mensaje).'],
     [50, 'Google (Apps Script + Drive)', 'almacenamiento', 'Google', 'Apps Script (lee la Sheet de ventas + COGS del cotizador), Google Drive (Cerebro / base de conocimiento)', 'Cuenta Google neoninfinitok@gmail.com', 'free', 0, 'USD', '', 'https://one.google.com', 'Apps Script y Sheets son gratis. Solo cuesta si tenés Google One por almacenamiento extra de Drive.'],
     [60, 'GitHub Pages (frontend)', 'infra', 'GitHub', 'Hosting del frontend del CRM (sitio estático), deploy automático al pushear', 'Cuenta GitHub gasparmv', 'free', 0, 'USD', '', 'https://github.com/settings/billing', 'Gratis para GitHub Pages en repos públicos.'],
     [70, 'Meta Ads (publicidad)', 'ads', 'Meta', 'Anuncios B2B de captación de leads (campaña activa ~419 leads/mes)', 'Meta Ads Manager — cuenta "Lau - Neon" 882517310728279', 'usage', 0, 'ARS', '', 'https://adsmanager.facebook.com', 'Marketing, no es infraestructura del sitio. Se muestra aparte del total de infra.']
@@ -11808,10 +11809,12 @@ async function getUsdArsRate(env) {
   } catch (_) { return null; }
 }
 
-// ===== Circuit breaker: bloqueo de pago de WhatsApp (error Meta 131042) =====
-// Cuando Meta rechaza la ENTREGA con "Business eligibility payment issue" (131042),
-// es un problema de PAGO en la cuenta de WhatsApp Business de META (su Billing Hub),
-// NO del saldo de 360dialog ni del destinatario.
+// ===== Circuit breaker: bloqueo de pago de WhatsApp (error Meta 131042 / 360dialog) =====
+// Cuando Meta rechaza la ENTREGA con "Business eligibility payment issue" (131042) o 360dialog
+// rechaza el envío con "This number is blocked due to lack of payment on client side", es un
+// problema de PAGO de la cuenta, no del destinatario. Desde la migración a la WABA 1374216464651634
+// (25-jul-2026) las plantillas se pagan con el SALDO PREPAGO de 360dialog (Funds, recargas con la
+// tarjeta), NO las cobra Meta directo a la Visa: el destrabe es cargar fondos en hub.360dialog.com.
 // Pausamos los envíos automáticos para no quemar contactos ni spamear a Gaspar,
 // y reanudamos solos cuando un envío vuelve a salir OK (o tras un cooldown).
 const WA_BILLING_BLOCK_KEY = 'wa_billing_block';
@@ -11907,6 +11910,37 @@ function validateAdhocTemplate(text) {
 function adhocBodyNorm(text) {
   return String(text || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 600);
 }
+
+// Remitente que se guarda en el chat para una plantilla ad-hoc: solo si quien la escribió es un
+// vendedor comercial (Joaco o un secundario); si no (Abril, admin) → ''. Sin consultar la base a
+// propósito: getSessionRole/resolveComercial caen a 'comercial'/'joaco' si D1 falla, y le
+// atribuirían a Joaco algo que mandó otra persona.
+function adhocSenderSlug(user) {
+  const k = String(user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+  if (k === 'joaquin' || k === 'joaco') return 'joaco';
+  return VENDEDORES_SECUNDARIOS.includes(k) ? k : '';
+}
+
+// Registra en el chat una plantilla ad-hoc ya enviada (reuso inmediato o envío del cron cuando Meta
+// la aprueba). La escribió una persona → automated=0 (sin badge "automático"; el bot de precotización
+// la cuenta como humano). Si el webhook de estado de Meta llegó antes y creó la fila 'status' vacía,
+// el upsert la pisa con el texto; y como el trigger de la lista de chats es AFTER INSERT (no corre en
+// el DO UPDATE), también se corrige la vista previa si quedó mostrando esa fila fantasma.
+async function registrarPlantillaAdhocEnChat(env, { phone, wamid, texto, senderSlug }) {
+  if (!wamid) return;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+       VALUES (?, ?, 'outbound', ?, ?, 'template', ?, 'sent', '', 0)
+       ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', sender_name = excluded.sender_name, automated = 0
+         WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+    ).bind(new Date().toISOString(), wamid, phone, senderSlug || '', String(texto || '')).run();
+    // Solo si la vista previa es justo la fila de ESTE envío (no otra fantasma del mismo chat).
+    await env.DB.prepare(
+      "UPDATE wa_chats_summary SET last_body = ?, last_msg_type = 'template' WHERE phone = ? AND last_direction = 'outbound' AND last_msg_type = 'status' AND (last_body IS NULL OR last_body = '') AND last_ts = (SELECT ts FROM wa_messages WHERE wamid = ?)"
+    ).bind(String(texto || '').slice(0, 300), phone, wamid).run();
+  } catch (_) {}
+}
 let _adhocSchemaReady = false;
 async function ensureAdhocSchema(env) {
   if (_adhocSchemaReady) return;
@@ -11956,20 +11990,14 @@ async function processPendingTemplateSends(env) {
   for (const row of pend) {
     const st = statusByName[row.template_name];
     if (st === 'approved') {
+      // La plantilla la escribió un vendedor: se registra como mensaje de persona (automated=0, con su
+      // remitente), igual que el reuso inmediato. Antes quedaba automated=1 → badge "automático" y el
+      // bot de precotización no la contaba como humano.
+      const senderSlug = adhocSenderSlug(row.created_by);
       const rt = await waSendTemplate(env, row.phone, row.template_name, 'es_AR', []);
       if (rt.ok) {
+        await registrarPlantillaAdhocEnChat(env, { phone: row.phone, wamid: rt.id || '', texto: row.body_preview, senderSlug });
         try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='sent', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
-        const wamid = rt.id || '';
-        if (wamid) {
-          try {
-            await env.DB.prepare(
-              `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
-               VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)
-               ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1
-                 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
-            ).bind(new Date().toISOString(), wamid, row.phone, row.body_preview).run();
-          } catch (_) {}
-        }
         if (env.ADMIN_NOTIFY_PHONE) { try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, `✅ Plantilla aprobada y enviada a ${row.phone}:\n"${(row.body_preview || '').slice(0, 120)}"`); } catch (_) {} }
         await new Promise(rs => setTimeout(rs, 400));
       }
@@ -12695,7 +12723,7 @@ const handler = {
                       // Bloqueo de cuenta por pago: pausar envíos automáticos + avisar 1 vez por episodio.
                       const { shouldNotify } = await setWaBillingBlock(env, errMsg);
                       if (shouldNotify && env.ADMIN_NOTIFY_PHONE) {
-                        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp BLOQUEADO por pago — Meta error 131042 (pagos pendientes en la cuenta de WhatsApp Business).\nRegularizá en el Billing Hub de META: business.facebook.com/billing_hub (OJO: es de Meta, NO el saldo de 360dialog).\nPausé los envíos automáticos para no quemar contactos — se reanudan solos cuando vuelva a andar.'); } catch (_) {}
+                        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp BLOQUEADO por pago — Meta error 131042 (problema de pago de la cuenta de WhatsApp Business).\nLas plantillas se pagan con el SALDO de 360dialog: revisá fondos y licencia en hub.360dialog.com (Funds / Invoices). Si ahí está todo bien, escribile al soporte de 360dialog (ellos manejan la línea de crédito con Meta).\nPausé los envíos automáticos para no quemar contactos — se reanudan solos cuando vuelva a andar.'); } catch (_) {}
                       }
                     } else if (!['5491155604999', '5491155604996', '5491137593269'].includes(String(phone).replace(/\D/g, ''))) {
                       // Fallo puntual hacia un CLIENTE (no interno, no billing).
@@ -16858,12 +16886,30 @@ const handler = {
         //    plantillas dejan de multiplicarse (lo que gatilló la restricción jul-2026).
         try {
           const hit = await env.DB.prepare(
-            "SELECT template_name FROM wa_pending_template_send WHERE body_norm = ? AND status = 'sent' ORDER BY updated_at DESC LIMIT 1"
+            "SELECT template_name, body_preview FROM wa_pending_template_send WHERE body_norm = ? AND status = 'sent' ORDER BY updated_at DESC LIMIT 1"
           ).bind(bodyNorm).first();
           if (hit && hit.template_name) {
+            // Remitente calculado ANTES de mandar: así el registro sale pegado al envío y casi nunca
+            // pierde la carrera con el webhook de estado de Meta.
+            const senderSlug = adhocSenderSlug(session.user);
             const rs = await waSendTemplate(env, num, hit.template_name, 'es_AR', []);
-            if (rs.ok) return json({ ok: true, template_name: hit.template_name, status: 'sent', reused: true });
-            // si el reuso falla (plantilla borrada/deshabilitada), seguimos a crear una nueva.
+            if (rs.ok) {
+              // Registrar el envío en el chat (caso Agus→Pau 7-oct): antes el reuso salía y se cobraba
+              // pero no dejaba fila → el vendedor no lo veía, solo quedaba la fila 'status' vacía que crea
+              // el webhook de Meta.
+              const shown = (hit.body_preview && hit.body_preview.length < 300) ? hit.body_preview : text;
+              await registrarPlantillaAdhocEnChat(env, { phone: num, wamid: rs.id, texto: shown, senderSlug });
+              await logWaEvent(env, { to: num, kind: 'template:' + hit.template_name, ref: '', ok: true, messageId: rs.id });
+              return json({ ok: true, template_name: hit.template_name, status: 'sent', reused: true });
+            }
+            await logWaEvent(env, { to: num, kind: 'template:' + hit.template_name, ref: '', ok: false, messageId: rs.id, error: rs.error });
+            // Solo tiene sentido crear una plantilla nueva si ESTA ya no existe o está pausada en Meta
+            // (y se marca para no volver a elegirla). Cualquier otro fallo (bloqueo por pago, kill-switch,
+            // red, límite) se devuelve al vendedor SIN crear nada: antes creaba una MARKETING nueva idéntica
+            // en cada intento, justo lo que infla la cuenta (restricción jul-2026).
+            const tplGone = [132001, 132015, 132016].includes(Number(rs.code)) || /template/i.test(String(rs.error || ''));
+            if (!tplGone) return json({ error: 'No se pudo mandar la plantilla: ' + describeSendFailure(rs) }, 502);
+            try { await env.DB.prepare("UPDATE wa_pending_template_send SET status = 'gone', updated_at = ? WHERE template_name = ?").bind(new Date().toISOString(), hit.template_name).run(); } catch (_) {}
           }
         } catch (_) {}
         // 2) Freno de creación: kv 'adhoc_send_enabled' = '0' → no se crean plantillas

@@ -11693,7 +11693,7 @@ async function loadChatContacts() {
         name: displayName,
         lastMsg: (
           c.last_msg_type === 'revoke' ? 'Mensaje eliminado' :
-          isStatusPlaceholder ? '✓ Respondido desde WhatsApp' :
+          isStatusPlaceholder ? 'Mensaje enviado' :
           (body || ({ image: '📷 Foto', video: '🎥 Video', audio: '🎤 Audio', document: '📎 Archivo', sticker: 'Sticker', text: '' }[c.last_msg_type] ?? `[${c.last_msg_type}]`))
         ).slice(0, 60),
         lastTs: c.last_ts,
@@ -11814,7 +11814,13 @@ async function loadChatMessages(phone, opts) {
     const r = await fetch(url, { headers: authHeaders() });
     if (!r.ok) return;
     const j = await r.json();
-    const fresh = (j.messages || []).filter(m => m.msg_type !== 'status');
+    // Las filas 'status' son ruido, SALVO las salientes: son mensajes que el cliente recibió pero cuyo
+    // texto no quedó registrado (el webhook de Meta crea la fila vacía). Antes se descartaban y el
+    // vendedor no veía que se había mandado algo (caso Agus→Pau 7-oct); se muestran con un aviso.
+    // Solo si tienen +2 min: una fila 'status' recién creada suele ser "de paso" (el contenido real
+    // llega segundos después, ej. un audio mientras se transcribe) y el render incremental no
+    // reemplazaría la burbuja ya dibujada.
+    const fresh = (j.messages || []).filter(m => m.msg_type !== 'status' || (m.direction === 'outbound' && (Date.now() - Date.parse(m.ts || 0)) > 2 * 60 * 1000));
 
     // Si fue initial o loadOlder, calcular si hay más anteriores: si el server
     // devolvió un batch lleno, asumimos que sí. Si vino con menos rows, no hay más.
@@ -14129,13 +14135,13 @@ function renderChatBubbles(msgs, opts) {
       continue;
     }
 
-    // Outbound enviado desde WA Business app/web: no tenemos contenido (Cloud API
-    // sin Coexistencia), pero mostramos placeholder para que el chat no se vea vacío.
+    // Saliente sin texto registrado (fila 'status' que crea el webhook de Meta): puede venir de la app
+    // de WA Business o de un envío del CRM que no quedó guardado. El cliente SÍ lo recibió.
     if (!bodyText.trim() && dir === 'outbound' && m.msg_type === 'status') {
       html += `<div class="chat-msg ${dir}${hasTail ? ' has-tail' : ''}" data-wamid="${escapeHtml(m.wamid || '')}" data-msg-type="${escapeHtml(m.msg_type || 'text')}">
         <div class="chat-msg-unsupported" style="font-style:italic;opacity:.7">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="#8696a0"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
-          <span>Respondido desde WhatsApp</span>
+          <span>${m.status === 'failed' ? 'Mensaje no entregado' : 'Mensaje enviado'} (sin texto registrado)</span>
         </div>
         ${footer}
       </div>`;
@@ -14820,10 +14826,10 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-3.5 6c.83 0 1.5.67 1.5 1.5S9.33 11 8.5 11 7 10.33 7 9.5 7.67 8 8.5 8zm7 0c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5-1.5-.67-1.5-1.5.67-1.5 1.5-1.5zM12 17.5c-2.33 0-4.31-1.46-5.11-3.5h10.22c-.8 2.04-2.78 3.5-5.11 3.5z"/></svg>
       Reaccionar
     </button>
-    <button class="ccm-item" data-action="forward">
+    ${msgType === 'status' ? '' : `<button class="ccm-item" data-action="forward">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 8V4l8 8-8 8v-4H4V8h8z"/></svg>
       Reenviar
-    </button>
+    </button>`}
     ${msgType === 'image' ? `
     <button class="ccm-item" data-action="copy-image">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
@@ -14994,8 +15000,10 @@ function exitForwardSelection() {
 
 function showForwardModal(wamidOrIds, msgType) {
   // Acepta un wamid solo (compat) o un array (reenvío de varios mensajes a la vez).
-  const wamids = (Array.isArray(wamidOrIds) ? wamidOrIds : [wamidOrIds]).filter(Boolean);
-  if (!wamids.length) return;
+  // Las burbujas "sin texto registrado" (filas 'status') no tienen contenido: reenviarlas falla.
+  const wamids = (Array.isArray(wamidOrIds) ? wamidOrIds : [wamidOrIds]).filter(Boolean)
+    .filter(w => ((chatState.messages || []).find(x => x.wamid === w) || {}).msg_type !== 'status');
+  if (!wamids.length) { toast('Ese mensaje no tiene contenido registrado para reenviar.'); return; }
   document.getElementById('forward-modal')?.remove();
   const bg = document.createElement('div');
   bg.id = 'forward-modal';

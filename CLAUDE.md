@@ -27,14 +27,14 @@ Si vas a editar un archivo que también modificó un commit reciente del remoto,
 
 ## WhatsApp Business — info clave
 
-- **Número productivo**: +54 9 11 4436-6573, Phone Number ID `919964037861500`, WABA ID `800446462838166` (legacy Meta-directo). **WABA de facturación activa: `1748207462464731`** — es la que Meta factura (Billing Hub) por las conversaciones/mensajes. La `800446…` quedó como referencia vieja (solo la usa el fallback del provider `meta`).
+- **Número productivo (desde 25-jul-2026)**: +54 9 11 3370-8544, Phone Number ID `1164739390066122`, WABA ID `1374216464651634` (ver `worker/wrangler.toml`). El número viejo +54 9 11 4436-6573 (Phone Number ID `919964037861500`, WABA `800446462838166`, facturado en la WABA `1748207462464731`) quedó restringido por Meta el 23-jul-2026 y ya no manda mensajes.
 - **Provider activo (desde 2026-05-31)**: **360dialog** como BSP en modo Coexistencia.
   - API base: `https://waba-v2.360dialog.io`
   - API key en secret `D360_API_KEY` (Cloudflare worker)
   - Channel ID (interno 360dialog): `vrx5QVCH`
   - Hosting: Cloud API hosted by Meta (migrado de ON_PREMISE)
   - Webhook recibe en `/webhook` del worker (mismo endpoint que Meta direct)
-  - **Facturación (OJO):** Meta cobra las conversaciones/mensajes (mayormente plantillas MARKETING — los broadcasts) **DIRECTO a la tarjeta Visa** vía el Billing Hub (business.facebook.com/billing_hub), sobre la WABA `1748207462464731`. **NO sale del saldo prepago de 360dialog** (eso era un supuesto viejo y equivocado). El hub de 360dialog tiene su propio saldo/fee de BSP aparte. Si la tarjeta rebota (estado "Error" en el hub) → Meta bloquea los envíos (error 131042).
+  - **Facturación (OJO, actualizado 7-oct-2026):** con la WABA actual (`1374216464651634`) las plantillas se pagan con el **SALDO PREPAGO de 360dialog** (Funds en hub.360dialog.com, recarga automática con la tarjeta: en el resumen figura "360dialog 20,80 EUR" = 20 EUR + 4% de comisión), más la licencia mensual del número (49 EUR, factura del 1°). Meta **NO** cobra los mensajes directo a la Visa (eso era la WABA vieja `1748207462464731`); los cobros "Meta" / "FACEBK \*" de la tarjeta son **pauta**. Si el saldo o la licencia no están pagos, 360dialog rechaza las plantillas con "This number is blocked due to lack of payment on client side" (el texto libre dentro de la ventana puede seguir saliendo) → cargar fondos en el Hub. El número exacto de plantillas cobradas sale de los avisos de Meta en `wa_webhook_log` (`pricing.category` / `billable`).
 - **Modo Coexistencia activo**: Joaco mantiene la app WA Business del celular Y el CRM funciona con Cloud API. Regla: Joaco debe abrir la app al menos 1 vez cada 13 días o se desactiva. PIN 2FA configurado: `230204` (uso si se necesita re-migrar).
 - **App de Meta (legacy)**: "agente neon nuevo", App ID `866678322681866`. Antes del 31-may era el provider productivo via Meta directo con `WA_TOKEN`. Ya no se usa para sends, pero el secret WA_TOKEN se mantiene como fallback (si se setea WA_PROVIDER='meta' en el worker, vuelve al provider Meta direct).
 - **Pre-migración (histórico)**: el número estaba en ON_PREMISE con flag 2494160 que bloqueaba templates. PIP (`Fintech Solutions Wsp`, App ID `518523686767316`) era un BSP previo, removido del Business Portfolio durante la migración. Manychat también está en "Eliminadas" del portfolio.
