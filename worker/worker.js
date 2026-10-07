@@ -4508,6 +4508,281 @@ async function corteTandaActual(env) {
     return t;
   } catch (_) { return null; }
 }
+// ===== CARGA DE TANDA desde las planillas + teléfonos + entrega (reemplaza el script manual gen_05.js) =====
+// Reglas (oct-2026, después de 2 errores reales del script manual):
+//  · TELÉFONO: solo por nombre EXACTO (normalizado) en LTV_Alumnos, o por una asignación manual confirmada
+//    (corte_tel_override). NUNCA por nombre de pila: así "Gonzalo Alganaraz" quedó con el teléfono de
+//    "Gonzalo Martin Forns Herrera" y el cobro le llegó a otra persona. Sin match → la pieza entra SIN teléfono
+//    (Neyen la embala igual) y se avisa con sugerencias para que Gaspar confirme a mano.
+//  · ENTREGA: sale de "Servicio de cortes pedidos 2" (col E "DATOS DE ENVIO": RETIRA o vacío = ENVÍO). Si esa
+//    planilla no se puede leer, queda '' (sin definir) — nunca "retira" por default (Martin Guaragna, 5/10).
+//  · NEÓN: no se carga desde la hoja (las piezas de neón propio ya nacen solas desde los pedidos del CRM).
+const CORTE_PEDIDOS_SHEET_ID = '1wneNP7DJtaDnTdVnaOELuxU7-aEh4RJdWLKiRmt85to'; // "Servicio de cortes pedidos 2", tab sheet1
+function corteNormNombre(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, ''); }
+function corteTokens(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(t => t.length >= 3); }
+function cortePrecioHoja(raw) { return parseFloat(String(raw || '0').replace(/\$/g, '').replace(/\./g, '').replace(',', '.')) || 0; }
+// Teléfono de alumno: celular AR = EXACTAMENTE 13 dígitos (549 + área + número). Corrige el "9" duplicado típico de
+// LTV ("54 9 9 11..." → 14 díg, caso Ezequiel Carlos Sosa). Cualquier otro largo = inválido ('') → sin teléfono.
+function corteTel(raw) {
+  let n = normalizeArPhone(raw) || '';
+  if (n.length === 14 && n.startsWith('5499')) n = '549' + n.slice(4);
+  return n.length === 13 ? n : '';
+}
+// ¿Dos nombres son la MISMA persona? Nombre normalizado idéntico ("IvanPita" = "Ivan Pita"), o TODAS las palabras del
+// nombre con menos palabras (mínimo 2) están enteras en el otro ("Ariel Cardozo" ⊂ "Ariel Cardozo (gugu)"). Nunca por
+// subcadena ni por nombre de pila solo: "Gonzalo" ≠ "Gonzalo Martin Forns Herrera" (caso real del 5/10).
+function corteMismaPersona(a, b) {
+  const na = corteNormNombre(a), nb = corteNormNombre(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const ta = corteTokens(a), tb = corteTokens(b);
+  const [corto, largo] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+  return corto.length >= 2 && corto.every(t => largo.includes(t));
+}
+// Trazabilidad con la hoja: hoja_cliente (nombre TAL CUAL en Venta_Insumos), hoja_fila y hoja_fecha. Así un renombre a
+// mano en el CRM ("mirna" → "miriam aguirre") no duplica la pieza y una semana puede tener más de una fecha de corte.
+let _corteHojaSchemaOk = false;
+async function ensureCorteHojaSchema(env) {
+  if (_corteHojaSchemaOk) return;
+  for (const c of ['hoja_cliente TEXT', 'hoja_fila INTEGER', 'hoja_fecha TEXT']) { try { await env.DB.prepare('ALTER TABLE corte_pedidos ADD COLUMN ' + c).run(); } catch (_) {} }
+  _corteHojaSchemaOk = true;
+}
+function corteLev(a, b) { if (a === b) return 0; const m = a.length, n = b.length; if (!m || !n) return m || n; let prev = Array.from({ length: n + 1 }, (_, j) => j); for (let i = 1; i <= m; i++) { const cur = [i]; for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); prev = cur; } return prev[n]; }
+async function corteSheetValues(env, sheetId, range) {
+  const token = await sheetsAccessToken(env);
+  if (!token) return { error: 'sin token de Google Sheets' };
+  try {
+    const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(range)}`, { headers: { Authorization: 'Bearer ' + token } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+    return { ok: true, values: j.values || [] };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+// LTV_Alumnos (fuente de verdad de los teléfonos de los alumnos): [{nombre, norm, tel}]
+async function corteLtv(env) {
+  const r = await corteSheetValues(env, CORTE_SHEET_ID, 'LTV_Alumnos!A2:F');
+  if (!r.ok) return { error: r.error };
+  return { ok: true, rows: r.values.map(x => ({ nombre: String(x[1] || '').trim(), norm: corteNormNombre(x[1]), tel: corteTel(x[5]) })).filter(x => x.norm) };
+}
+// Asignaciones manuales confirmadas (cliente → teléfono). Solo cuentan para nombres con nombre Y apellido: con un solo
+// nombre ("mirna", "Eliana") sería volver al "teléfono por nombre de pila".
+async function corteTelOverrides(env) {
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_tel_override (nombre_norm TEXT PRIMARY KEY, nombre TEXT, telefono TEXT, created_by TEXT, created_at TEXT)").run(); } catch (_) {}
+  let rows = [];
+  try { rows = ((await env.DB.prepare("SELECT nombre_norm, nombre, telefono FROM corte_tel_override").all()).results || []).filter(r => r.telefono && corteTokens(r.nombre).length >= 2); } catch (_) {}
+  const tel = {}; rows.forEach(r => { tel[r.nombre_norm] = r.telefono; });
+  return { tel, rows };
+}
+// Teléfono de un cliente: asignación manual > nombre EXACTO en LTV con un único teléfono. Si no → '' (se avisa).
+function corteResolverTel(nombre, ltvRows, ov) {
+  const k = corteNormNombre(nombre);
+  if (corteTokens(nombre).length >= 2 && ov.tel[k]) return { tel: ov.tel[k], fuente: 'asignado a mano' };
+  const tels = [...new Set(ltvRows.filter(x => x.norm === k && x.tel).map(x => x.tel))];
+  if (tels.length === 1) return { tel: tels[0], fuente: 'LTV' };
+  return { tel: '', fuente: tels.length > 1 ? 'LTV ambiguo (' + tels.length + ' teléfonos)' : 'no está en LTV con teléfono válido' };
+}
+// Sugerencias (NUNCA se asignan solas): nombres parecidos en LTV y en los contactos del CRM.
+async function corteSugerenciasTel(env, nombre, ltvRows) {
+  const qn = corteNormNombre(nombre), qt = corteTokens(nombre);
+  const score = (cand) => {
+    const cn = corteNormNombre(cand), ct = corteTokens(cand);
+    if (!cn) return 0;
+    if (corteLev(qn, cn) <= 2) return 3;
+    let hits = 0; for (const a of qt) if (ct.some(b => (a.length >= 4 && b.length >= 4 && corteLev(a, b) <= 1))) hits++;
+    return hits >= 2 ? 2 : (hits === 1 && qt.length && ct.some(b => b.length >= 5 && corteLev(qt[qt.length - 1], b) <= 1) ? 1 : 0);
+  };
+  const out = [];
+  for (const x of ltvRows) { if (!x.tel) continue; const s = score(x.nombre); if (s) out.push({ nombre: x.nombre, tel: x.tel, fuente: 'LTV', s }); }
+  try {
+    const like = qt.filter(t => t.length >= 4).map(t => '%' + t.slice(0, 4) + '%');
+    if (like.length) {
+      const rs = (await env.DB.prepare("SELECT phone, contact_name FROM wa_chats_summary WHERE contact_name IS NOT NULL AND contact_name!='' AND (" + like.map(() => "lower(contact_name) LIKE ?").join(' OR ') + ") LIMIT 300").bind(...like).all()).results || [];
+      for (const r of rs) { const t = corteTel(r.phone); const s = score(r.contact_name); if (s && t) out.push({ nombre: r.contact_name, tel: t, fuente: 'contacto CRM', s }); }
+    }
+  } catch (_) {}
+  const seen = new Set();
+  return out.sort((a, b) => b.s - a.s).filter(x => { if (!x.tel || seen.has(x.tel)) return false; seen.add(x.tel); return true; }).slice(0, 4).map(({ s, ...r }) => r);
+}
+// Dueños conocidos de cada teléfono: LTV + asignaciones manuales + clientes del corte de los últimos 180 días.
+async function corteDuenios(env, ltvRows, ov) {
+  const m = {}; const add = (tel, nombre, fuente) => { const t = String(tel || '').replace(/\D/g, '').slice(-10); if (!t || !nombre) return; (m[t] = m[t] || []).push({ nombre, fuente }); };
+  ltvRows.forEach(x => add(x.tel, x.nombre, 'LTV'));
+  ov.rows.forEach(x => add(x.telefono, x.nombre, 'asignado a mano'));
+  try { ((await env.DB.prepare("SELECT DISTINCT telefono, cliente_nombre FROM corte_pedidos WHERE telefono IS NOT NULL AND telefono!='' AND IFNULL(producto,'')!='NEON' AND created_at > ?").bind(new Date(Date.now() - 180 * 86400000).toISOString()).all()).results || []).forEach(r => add(r.telefono, r.cliente_nombre, 'corte')); } catch (_) {}
+  return m;
+}
+// ¿El teléfono es de OTRA persona? Devuelve {nombre, fuente} del primer dueño que NO es la misma persona, o null.
+function corteTelDeOtro(tel, nombre, duenios) {
+  const t = String(tel || '').replace(/\D/g, '').slice(-10);
+  return (duenios[t] || []).find(d => !corteMismaPersona(d.nombre, nombre)) || null;
+}
+// Entrega desde "Servicio de cortes pedidos 2" (col B cliente, E "DATOS DE ENVIO", F fecha) → {fecha: {cliente_norm: 'retira'|'envio'}}.
+// Si alguna fila del cliente en esa fecha dice RETIRA → retira. Vacío = envío.
+async function corteEntregaHoja(env) {
+  const r = await corteSheetValues(env, CORTE_PEDIDOS_SHEET_ID, 'sheet1!A1:J');
+  if (!r.ok) return { error: r.error };
+  const byFecha = {};
+  for (const x of r.values) {
+    const f = String(x[5] || '').trim(); const k = corteNormNombre(x[1]);
+    if (!f || !k || k === 'neon') continue;
+    const e = /retir/i.test(String(x[4] || '')) ? 'retira' : 'envio';
+    const m = (byFecha[f] = byFecha[f] || {});
+    m[k] = (m[k] === 'retira' || e === 'retira') ? 'retira' : 'envio';
+  }
+  return { ok: true, byFecha };
+}
+function corteFechaValida(f) { const m = String(f || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if (!m) return null; const d = new Date(Date.UTC(+m[3], +m[2] - 1, +m[1], 12)); if (isNaN(d) || d.getUTCDate() !== +m[1]) return null; return { txt: `${+m[1]}/${+m[2]}/${m[3]}`, date: d }; }
+// Tanda de una fecha de corte: 1° la que ya tiene esa fecha_corte (las viejas no coinciden con su semana ISO: el 21/9
+// está en la tanda W38); 2° la de su semana (si ya tiene OTRA fecha, se suma a esa tanda y se avisa); 3° se crea.
+async function corteTandaDeFecha(env, f, dryRun) {
+  const sem = corteIsoSemana(f.date); const nowIso = new Date().toISOString();
+  let t = null;
+  try { t = await env.DB.prepare("SELECT * FROM corte_tandas WHERE fecha_corte=? ORDER BY id DESC LIMIT 1").bind(f.txt).first(); } catch (_) {}
+  if (t) return { tanda: t };
+  try { t = await env.DB.prepare("SELECT * FROM corte_tandas WHERE semana=? LIMIT 1").bind(sem).first(); } catch (_) {}
+  if (t && t.fecha_corte && t.fecha_corte !== f.txt) return { tanda: t, aviso: 'El ' + f.txt + ' cae en la misma semana que la tanda del ' + t.fecha_corte + ': las piezas se suman a esa tanda.' };
+  if (!t && !dryRun) { try { await env.DB.prepare("INSERT INTO corte_tandas (semana, fecha_corte, estado, created_at, updated_at) VALUES (?, ?, 'abierta', ?, ?)").bind(sem, f.txt, nowIso, nowIso).run(); t = await env.DB.prepare("SELECT * FROM corte_tandas WHERE semana=? LIMIT 1").bind(sem).first(); } catch (_) {} }
+  if (t && !t.fecha_corte && !dryRun) { try { await env.DB.prepare("UPDATE corte_tandas SET fecha_corte=?, updated_at=? WHERE id=?").bind(f.txt, nowIso, t.id).run(); t.fecha_corte = f.txt; } catch (_) {} }
+  return { tanda: t };
+}
+// Clave de una pieza: acrílico (TRANS/NEGRO) → cliente|diseño|cantidad; insumo → cliente|producto|cantidad.
+function corteClavePieza(cliente, producto, diseno, cantidad) {
+  const P = String(producto || 'TRANS').toUpperCase();
+  const esAcril = P === 'TRANS' || P === 'NEGRO';
+  return corteNormNombre(cliente) + '|' + (esAcril ? 'T:' + corteNormNombre(diseno || producto) : 'I:' + corteNormNombre(producto)) + '|' + (Math.max(1, parseInt(String(cantidad || '').replace(/\D/g, ''), 10) || 1));
+}
+const _corteClaveSufijo = k => k.split('|').slice(1).join('|');
+// Carga (o simula, dryRun) las piezas de UNA fecha de Venta_Insumos. Idempotente (compara contra lo ya cargado de esa
+// fecha). Las piezas que "se parecen" a una ya cargada que ya no está igual en la hoja (fila corregida, cliente
+// renombrado) quedan como POSIBLES DUPLICADOS y no entran salvo incluirSospechosas.
+async function corteCargarTanda(env, { fecha, dryRun = true, incluirSospechosas = false, estadoInicial = 'cortado' }) {
+  const f = corteFechaValida(fecha); if (!f) return { error: 'fecha inválida (usá D/M/AAAA, ej 12/10/2026)' };
+  let lockId = '';
+  if (!dryRun) {
+    lockId = String(Date.now()) + Math.random().toString(36).slice(2);
+    const stale = new Date(Date.now() - 3 * 60 * 1000).toISOString(), nowL = new Date().toISOString();
+    let lk = null;
+    try { lk = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('corte_carga_lock', ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at WHERE kv_cache.updated_at < ? RETURNING k").bind(lockId, nowL, stale).first(); } catch (_) {}
+    if (!lk) return { error: 'ya hay una carga de tanda en curso (esperá un minuto)' };
+  }
+  try {
+    const vi = await corteSheetValues(env, CORTE_SHEET_ID, 'Venta_Insumos!A1:J');
+    if (!vi.ok) return { error: 'no pude leer Venta_Insumos: ' + vi.error };
+    const filas = [];
+    vi.values.forEach((x, i) => { if (i > 0 && String(x[1] || '').trim() === f.txt && String(x[2] || '').trim()) filas.push({ fila: i + 1, cliente: String(x[2]).trim(), producto: String(x[3] || '').trim() || 'TRANS', diseno: String(x[4] || '').trim(), ancho: parseFloat(String(x[5] || '').replace(',', '.')) || 0, alto: parseFloat(String(x[6] || '').replace(',', '.')) || 0, cantidad: Math.max(1, parseInt(String(x[7] || '').replace(/\D/g, ''), 10) || 1), precio: cortePrecioHoja(x[9]) }); });
+    const neon = filas.filter(x => corteNormNombre(x.cliente) === 'neon');
+    const alumnos = filas.filter(x => corteNormNombre(x.cliente) !== 'neon');
+    const [ltv, ent, ov] = await Promise.all([corteLtv(env), corteEntregaHoja(env), corteTelOverrides(env)]);
+    const avisos = [];
+    if (!ltv.ok) avisos.push('No pude leer LTV_Alumnos (' + ltv.error + '): las piezas nuevas quedan sin teléfono.');
+    if (!ent.ok) avisos.push('No pude leer "Servicio de cortes pedidos 2" (' + ent.error + '): la entrega queda SIN DEFINIR.');
+    const ltvRows = ltv.ok ? ltv.rows : [];
+    const entMap = ent.ok ? (ent.byFecha[f.txt] || {}) : {};
+    await ensureCorteHojaSchema(env);
+    const td = await corteTandaDeFecha(env, f, dryRun);
+    const tanda = td.tanda;
+    if (td.aviso) avisos.push(td.aviso);
+    // Lo ya cargado DE ESA FECHA (hoja_fecha; las piezas viejas sin hoja_fecha cuentan si la tanda es de esa fecha).
+    const yaRows = {};
+    if (tanda) {
+      try {
+        ((await env.DB.prepare("SELECT id, cliente_nombre, hoja_cliente, producto, diseno_nombre, cantidad, precio, estado_pago FROM corte_pedidos WHERE tanda_id=? AND IFNULL(producto,'')!='NEON' AND (hoja_fecha=? OR (hoja_fecha IS NULL AND ?=?))").bind(tanda.id, f.txt, tanda.fecha_corte || '', f.txt).all()).results || []).forEach(r => {
+          const k = corteClavePieza(r.hoja_cliente || r.cliente_nombre, r.producto, r.diseno_nombre, r.cantidad); (yaRows[k] = yaRows[k] || []).push(r);
+        });
+      } catch (_) {}
+    }
+    const nuevas = [], yaCargadas = [];
+    for (const x of alumnos) { const k = corteClavePieza(x.cliente, x.producto, x.diseno || x.producto, x.cantidad); if (yaRows[k] && yaRows[k].length) { yaRows[k].shift(); yaCargadas.push(x); } else nuevas.push(x); }
+    const sobrantes = Object.values(yaRows).flat();
+    // Sospechosas: misma persona con otra pieza que sobra (fila corregida) o misma pieza con otro nombre (renombre).
+    const sospechosas = [], limpias = [];
+    for (const x of nuevas) {
+      const kx = corteClavePieza(x.cliente, x.producto, x.diseno || x.producto, x.cantidad);
+      const s = sobrantes.find(s => corteMismaPersona(s.hoja_cliente || s.cliente_nombre, x.cliente) || _corteClaveSufijo(corteClavePieza(s.hoja_cliente || s.cliente_nombre, s.producto, s.diseno_nombre, s.cantidad)) === _corteClaveSufijo(kx));
+      if (s) sospechosas.push({ ...x, parecida_a: { id: s.id, cliente: s.cliente_nombre, diseno: s.diseno_nombre, cantidad: s.cantidad, precio: s.precio, estado_pago: s.estado_pago } }); else limpias.push(x);
+    }
+    const aInsertar = incluirSospechosas ? nuevas : limpias;
+    // Teléfono + entrega por cliente.
+    const clientes = {};
+    for (const x of alumnos) {
+      const k = corteNormNombre(x.cliente);
+      if (!clientes[k]) { const rt = corteResolverTel(x.cliente, ltvRows, ov); clientes[k] = { nombre: x.cliente, tel: rt.tel, fuente: rt.fuente, entrega: entMap[k] || '', piezas: 0, nuevas: 0 }; }
+      clientes[k].piezas++;
+    }
+    aInsertar.forEach(x => { clientes[corteNormNombre(x.cliente)].nuevas++; });
+    const sinTel = [];
+    for (const c of Object.values(clientes)) if (!c.tel && c.nuevas > 0) sinTel.push({ nombre: c.nombre, piezas: c.nuevas, motivo: c.fuente, sugerencias: await corteSugerenciasTel(env, c.nombre, ltvRows) });
+    const pieza = x => ({ fila: x.fila, cliente: x.cliente, producto: x.producto, diseno: x.diseno, cantidad: x.cantidad, precio: x.precio });
+    const reporte = {
+      ok: true, fecha: f.txt, tanda_id: tanda ? tanda.id : null, semana: corteIsoSemana(f.date), dry_run: !!dryRun,
+      nuevas: aInsertar.length, ya_cargadas: yaCargadas.length, neon_salteadas: neon.length,
+      total_nuevas: aInsertar.reduce((s, x) => s + x.precio, 0),
+      clientes: Object.values(clientes).map(c => ({ nombre: c.nombre, tel: c.tel, fuente_tel: c.fuente, entrega: c.entrega || 'sin definir', piezas: c.piezas, nuevas: c.nuevas })),
+      sin_telefono: sinTel, avisos,
+      detalle_nuevas: aInsertar.map(pieza),
+      posibles_duplicados: incluirSospechosas ? [] : sospechosas.map(x => ({ ...pieza(x), parecida_a: x.parecida_a })),
+      sobrantes: sobrantes.map(s => ({ id: s.id, cliente: s.cliente_nombre, diseno: s.diseno_nombre, cantidad: s.cantidad, precio: s.precio, estado_pago: s.estado_pago })),
+    };
+    if (dryRun || !aInsertar.length) return reporte;
+    if (!tanda) return { ...reporte, ok: false, error: 'no pude crear/encontrar la tanda' };
+    const nowIso = new Date().toISOString();
+    const stmts = aInsertar.map(x => {
+      const c = clientes[corteNormNombre(x.cliente)];
+      const conMedida = x.ancho > 0 && x.alto > 0;
+      const prod = x.producto.toUpperCase() === 'TRANS' ? 'TRANS' : x.producto; // NEGRO sigue NEGRO, con su medida
+      return env.DB.prepare("INSERT INTO corte_pedidos (telefono, cliente_nombre, hoja_cliente, hoja_fila, hoja_fecha, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, ancho_real, alto_real, precio, estado, estado_pago, entrega, tanda_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '', NULL, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?)")
+        .bind(c.tel || '', x.cliente, x.cliente, x.fila, f.txt, x.diseno || x.producto, conMedida ? (x.ancho + 'x' + x.alto) : '', x.cantidad, prod, conMedida ? x.ancho : null, conMedida ? x.alto : null, x.precio, estadoInicial, c.entrega || '', tanda.id, nowIso, nowIso);
+    });
+    try { await env.DB.batch(stmts); } catch (e) { return { ...reporte, ok: false, error: 'falló el INSERT: ' + String((e && e.message) || e) }; }
+    try {
+      const sinTxt = sinTel.length ? '\n⚠ SIN TELÉFONO (no se les puede cobrar hasta asignarlo): ' + sinTel.map(s => s.nombre).join(', ') : '';
+      const sosTxt = reporte.posibles_duplicados.length ? '\n⚠ ' + reporte.posibles_duplicados.length + ' posible(s) duplicado(s) NO cargado(s): ' + reporte.posibles_duplicados.map(p => p.cliente + ' ' + (p.diseno || p.producto)).join(', ') : '';
+      await precotizNotifyGaspar(env, `Corte: tanda ${f.txt} cargada — ${aInsertar.length} piezas nuevas ($${Math.round(reporte.total_nuevas).toLocaleString('es-AR')}), ${yaCargadas.length} ya estaban.` + sinTxt + sosTxt + (avisos.length ? '\n' + avisos.join('\n') : ''));
+    } catch (_) {}
+    return reporte;
+  } finally {
+    if (lockId) { try { await env.DB.prepare("DELETE FROM kv_cache WHERE k='corte_carga_lock' AND v=?").bind(lockId).run(); } catch (_) {} }
+  }
+}
+function corteEntregaCambiosTxt(cambios) {
+  return 'Corte: actualicé la entrega desde la planilla de cortes:\n' + cambios.map(c => `· ${c.cliente} (${c.tanda}): ${c.de} → ${c.a}${c.ya_embalado ? ' ⚠ YA ESTABA EMBALADO, avisale a Neyen' : ''}`).join('\n');
+}
+// Sincroniza la ENTREGA de las piezas recientes (no despachadas) con la planilla de cortes, por la fecha de la hoja
+// de cada pieza (hoja_fecha) y su nombre original (hoja_cliente). La planilla es la ÚNICA fuente: en el CRM no se
+// cambia a mano. notify → avisa a Gaspar si cambió algo (sobre todo si ya estaba embalado).
+async function corteSyncEntrega(env, { soloTandaId = 0, notify = false } = {}) {
+  await ensureCorteHojaSchema(env);
+  let rows = [];
+  try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, hoja_cliente, hoja_fecha, entrega, estado FROM corte_pedidos WHERE IFNULL(producto,'')!='NEON' AND hoja_fecha IS NOT NULL AND hoja_fecha!='' AND estado NOT IN ('despachado','entregado') AND " + (soloTandaId ? "tanda_id=?" : "created_at > ?")).bind(soloTandaId ? soloTandaId : new Date(Date.now() - 35 * 86400000).toISOString()).all()).results || []; } catch (_) {}
+  if (!rows.length) return { ok: true, cambios: [], revisadas: 0 };
+  const ent = await corteEntregaHoja(env);
+  if (!ent.ok) return { error: ent.error };
+  const cambios = []; const nowIso = new Date().toISOString(); const grupos = {};
+  for (const p of rows) {
+    const want = (ent.byFecha[p.hoja_fecha] || {})[corteNormNombre(p.hoja_cliente || p.cliente_nombre)];
+    if (!want || (p.entrega || '') === want) continue;
+    const gk = p.hoja_fecha + '|' + p.cliente_nombre;
+    const g = (grupos[gk] = grupos[gk] || { tanda: p.hoja_fecha, cliente: p.cliente_nombre, de: p.entrega || 'sin definir', a: want, ids: [], ya_embalado: false });
+    g.ids.push(p.id); if (p.estado === 'embalado') g.ya_embalado = true;
+  }
+  for (const g of Object.values(grupos)) {
+    try { await env.DB.prepare("UPDATE corte_pedidos SET entrega=?, updated_at=? WHERE id IN (" + g.ids.map(() => '?').join(',') + ")").bind(g.a, nowIso, ...g.ids).run(); cambios.push({ tanda: g.tanda, cliente: g.cliente, de: g.de, a: g.a, piezas: g.ids.length, ya_embalado: g.ya_embalado }); } catch (_) {}
+  }
+  if (notify && cambios.length) { try { await precotizNotifyGaspar(env, corteEntregaCambiosTxt(cambios)); } catch (_) {} }
+  return { ok: true, cambios, revisadas: rows.length };
+}
+// Cron: cada 60 min (8 a 21 hs AR) sincroniza la entrega y avisa a Gaspar si cambió algo.
+async function processCorteEntregaSync(env) {
+  try {
+    if ((await kvGet(env, 'corte_entrega_sync_on', '1')) !== '1') return;
+    const h = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours(); if (h < 8 || h > 21) return;
+    const nowL = new Date().toISOString(), stale = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    let lk = null;
+    try { lk = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('corte_entrega_sync_at', ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at WHERE kv_cache.updated_at < ? RETURNING k").bind(nowL, nowL, stale).first(); } catch (_) {}
+    if (!lk) return; // ya corrió en la última hora
+    await corteSyncEntrega(env, { notify: true });
+  } catch (_) {}
+}
 // ===== Piezas de NEÓN PROPIO en el corte (matriz a diseñar de Neon Infinito) =====
 // Cada cartel de neón que carga un vendedor (POST /admin/pedidos) nace solo como una pieza
 // producto='NEON' en corte_pedidos, con la foto del diseño final y su medida, y le aparece a Emma
@@ -18026,6 +18301,61 @@ const handler = {
 
       // ===== Módulo Servicio de Corte (vertical B2B/alumnos) =====
       // GET /admin/corte/alumnos?q=  →  lista de alumnos (espejo de LTV_Alumnos). Admin.
+      // POST /admin/corte/cargar-tanda {fecha:'12/10/2026', dry_run:true|false} → carga las piezas de esa fecha de
+      // Venta_Insumos en su tanda (teléfono por nombre exacto en LTV, entrega desde la planilla de cortes, sin neón).
+      // dry_run (default) solo devuelve el reporte. Idempotente. Admin.
+      if (request.method === 'POST' && path === '/admin/corte/cargar-tanda') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const r = await corteCargarTanda(env, { fecha: body.fecha, dryRun: body.dry_run !== false, incluirSospechosas: body.incluir_sospechosas === true });
+        if (r.ok && body.dry_run === false && r.tanda_id) { try { r.sync_entrega = await corteSyncEntrega(env, { soloTandaId: r.tanda_id, notify: true }); } catch (_) {} }
+        return json(r, r.error && !r.nuevas ? 400 : 200);
+      }
+      // GET /admin/corte/sin-telefono?tanda_id= → clientes de la tanda SIN teléfono (no se les puede cobrar) + sugerencias.
+      if (request.method === 'GET' && path === '/admin/corte/sin-telefono') {
+        const _r = await getSessionRole(env, session.user);
+        if (_r !== 'admin') return json({ error: 'forbidden' }, 403);
+        const tandaId = parseInt(url.searchParams.get('tanda_id'), 10) || 0;
+        let rows = [];
+        try { rows = (await env.DB.prepare("SELECT cliente_nombre, COUNT(*) n, SUM(precio) total FROM corte_pedidos WHERE (telefono IS NULL OR telefono='') AND IFNULL(producto,'')!='NEON' AND lower(cliente_nombre)!='neon' AND estado_pago NOT IN ('pagado','interno')" + (tandaId ? " AND tanda_id=?" : "") + " GROUP BY cliente_nombre ORDER BY cliente_nombre").bind(...(tandaId ? [tandaId] : [])).all()).results || []; } catch (_) {}
+        const ltv = rows.length ? await corteLtv(env) : { ok: true, rows: [] };
+        const out = [];
+        for (const r of rows) out.push({ nombre: r.cliente_nombre, piezas: r.n, total: r.total || 0, sugerencias: await corteSugerenciasTel(env, r.cliente_nombre, ltv.ok ? ltv.rows : []) });
+        return json({ ok: true, sin_telefono: out, ltv_error: ltv.ok ? '' : ltv.error });
+      }
+      // POST /admin/corte/asignar-telefono {tanda_id?, cliente_nombre, telefono, forzar?} → asigna el teléfono a las
+      // piezas SIN teléfono de ese cliente y lo recuerda (corte_tel_override) para las próximas tandas. Si el número
+      // figura en LTV a nombre de OTRA persona, frena (409) salvo forzar:true.
+      if (request.method === 'POST' && path === '/admin/corte/asignar-telefono') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const nombre = String(body.cliente_nombre || '').trim();
+        const tel = corteTel(body.telefono);
+        if (!nombre) return json({ error: 'falta el cliente' }, 400);
+        if (!tel) return json({ error: 'teléfono inválido (tiene que quedar 549 + código de área + número, 13 dígitos)' }, 400);
+        const [ltv, ov] = await Promise.all([corteLtv(env), corteTelOverrides(env)]);
+        // Si LTV no se puede leer, NO se asigna sin confirmar (no se pudo verificar que el número no sea de otra persona).
+        let otro = null;
+        if (!ltv.ok) otro = { nombre: 'NO VERIFICADO (no pude leer LTV_Alumnos: ' + ltv.error + ')', fuente: 'LTV' };
+        else otro = corteTelDeOtro(tel, nombre, await corteDuenios(env, ltv.rows, ov));
+        if (otro && body.forzar !== true) return json({ ok: false, conflicto: otro.nombre, fuente: otro.fuente, error: 'Ese teléfono figura a nombre de ' + otro.nombre + ' (' + otro.fuente + ')' }, 409);
+        const tandaId = parseInt(body.tanda_id, 10) || 0;
+        const nowIso = new Date().toISOString();
+        let n = 0;
+        try { const u = await env.DB.prepare("UPDATE corte_pedidos SET telefono=?, updated_at=? WHERE cliente_nombre=? AND (telefono IS NULL OR telefono='') AND IFNULL(producto,'')!='NEON'" + (tandaId ? " AND tanda_id=?" : "")).bind(tel, nowIso, nombre, ...(tandaId ? [tandaId] : [])).run(); n = (u.meta && u.meta.changes) || 0; } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        // Se recuerda para las próximas tandas SOLO si el nombre tiene nombre y apellido (con uno solo sería volver al
+        // "teléfono por nombre de pila").
+        const recordado = corteTokens(nombre).length >= 2;
+        if (recordado) { try { await env.DB.prepare("INSERT INTO corte_tel_override (nombre_norm, nombre, telefono, created_by, created_at) VALUES (?,?,?,?,?) ON CONFLICT(nombre_norm) DO UPDATE SET telefono=excluded.telefono, nombre=excluded.nombre, created_by=excluded.created_by, created_at=excluded.created_at").bind(corteNormNombre(nombre), nombre, tel, String(session.user || ''), nowIso).run(); } catch (_) {} }
+        return json({ ok: true, telefono: tel, piezas: n, forzado: !!otro, recordado });
+      }
+      // POST /admin/corte/sync-entrega {tanda_id?} → trae la entrega (retira/envío) de la planilla de cortes ahora. Admin.
+      if (request.method === 'POST' && path === '/admin/corte/sync-entrega') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const r = await corteSyncEntrega(env, { soloTandaId: parseInt(body.tanda_id, 10) || 0, notify: true });
+        return json(r, r.error ? 502 : 200);
+      }
       if (request.method === 'GET' && path === '/admin/corte/alumnos') {
         if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
         const q = (url.searchParams.get('q') || '').trim().toLowerCase();
@@ -18086,8 +18416,10 @@ const handler = {
           if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
           const tel = String(body.telefono || '').replace(/\D/g, '');
           if (!tel) return json({ error: 'falta telefono' }, 400);
-          const entrega = (String(body.entrega || '') === 'envio') ? 'envio' : 'retira';
-          try { const rr = await env.DB.prepare("UPDATE corte_pedidos SET estado='embalado', entrega=?, updated_at=? WHERE estado='cortado' AND telefono=?").bind(entrega, nowIso, tel).run(); return json({ ok: true, action, n: (rr.meta && rr.meta.changes) || 0 }); } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+          // Embalar NO toca la entrega: la única fuente es la planilla de cortes (sync). Antes mandaba 'retira' por default y
+          // pisaba lo correcto (Martin Guaragna quedó "retira" yendo por envío, 5/10). Se ignora body.entrega a propósito
+          // (también la de pestañas con el app.js viejo cacheado).
+          try { const rr = await env.DB.prepare("UPDATE corte_pedidos SET estado='embalado', updated_at=? WHERE estado='cortado' AND telefono=?").bind(nowIso, tel).run(); return json({ ok: true, action, n: (rr.meta && rr.meta.changes) || 0 }); } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         }
         // Selección múltiple: mueve una LISTA de pedidos (ids) al estado destino. produccion solo puede
         // cortado/embalado; admin puede cualquier estado. Usado por la barra de acciones masivas del board.
@@ -18099,13 +18431,13 @@ const handler = {
           if (!['pedido', 'matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(est)) return json({ error: 'estado inválido' }, 400);
           if (_role !== 'admin' && !['cortado', 'embalado'].includes(est)) return json({ error: 'solo admin puede mover a ese estado' }, 403);
           const ph = ids.map(() => '?').join(',');
-          const entrega = (String(body.entrega || '') === 'envio') ? 'envio' : 'retira';
           try {
             let rr;
             // disenado_at: si la pieza estaba 'pedido' y se la saltea a un paso posterior, ese es su momento de diseño
             // (en SQLite los SET leen los valores VIEJOS → 'estado' en el CASE es el estado anterior al UPDATE).
             const _dis = `disenado_at = CASE WHEN estado='pedido' AND ?<>'pedido' THEN COALESCE(disenado_at, ?) ELSE disenado_at END`;
-            if (est === 'embalado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='embalado', entrega=?, updated_at=? WHERE id IN (${ph})`).bind(est, nowIso, entrega, nowIso, ...ids).run();
+            // Embalar: solo piezas 'cortado' (no hace retroceder despachadas/entregadas) y sin tocar la entrega (ver embalado_bulk).
+            if (est === 'embalado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='embalado', updated_at=? WHERE id IN (${ph}) AND estado='cortado'`).bind(est, nowIso, nowIso, ...ids).run();
             else if (est === 'cortado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='cortado', productor=?, updated_at=? WHERE id IN (${ph})`).bind(est, nowIso, _slug, nowIso, ...ids).run();
             else rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado=?, updated_at=? WHERE id IN (${ph})`).bind(est, nowIso, est, nowIso, ...ids).run();
             return json({ ok: true, action, estado: est, n: (rr.meta && rr.meta.changes) || 0 });
@@ -18144,9 +18476,9 @@ const handler = {
           }
           if (action === 'embalado') {
             if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
-            const entrega = (String(body.entrega || '') === 'envio') ? 'envio' : ((String(body.entrega || '') === 'retira') ? 'retira' : (ped.entrega || ''));
-            await env.DB.prepare("UPDATE corte_pedidos SET estado='embalado', entrega=?, updated_at=? WHERE id=?").bind(entrega, nowIso, id).run();
-            return json({ ok: true, id, estado: 'embalado', entrega });
+            // No toca la entrega (sale solo de la planilla de cortes; ver embalado_bulk).
+            await env.DB.prepare("UPDATE corte_pedidos SET estado='embalado', updated_at=? WHERE id=?").bind(nowIso, id).run();
+            return json({ ok: true, id, estado: 'embalado', entrega: ped.entrega || '' });
           }
           if (action === 'estado') {
             if (_role !== 'admin') return json({ error: 'solo admin' }, 403);
@@ -18200,6 +18532,11 @@ const handler = {
         const tandaId = parseInt(body.tanda_id, 10) || 0;
         const tf = tandaId ? ' AND tanda_id=?' : '';
         const tb = tandaId ? [tandaId] : [];
+        // CONTROL DE TELÉFONO: si el número figura en LTV a nombre de OTRA persona, ese cobro NO sale (caso real 5-oct:
+        // "Gonzalo Alganaraz" tenía el teléfono de "Gonzalo Martin Forns Herrera"). forzar_tels = los que el admin confirmó.
+        const forzarSet = new Set(Array.isArray(body.forzar_tels) ? body.forzar_tels.map(t => String(t).replace(/\D/g, '')).filter(Boolean) : []);
+        const [ltvGuard, ovGuard] = await Promise.all([corteLtv(env), corteTelOverrides(env)]);
+        const dueniosGuard = ltvGuard.ok ? await corteDuenios(env, ltvGuard.rows, ovGuard) : {};
         try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_cobro_lock (phone TEXT PRIMARY KEY, ts TEXT)").run(); } catch (_) {}
         try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
         // Etiqueta "Servicio de corte": se asegura en cada cobro → el filtro rápido de la bandeja siempre los incluye.
@@ -18226,6 +18563,20 @@ const handler = {
           let rows = [];
           try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio, estado_pago FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago IN " + estados + " AND estado IN ('cortado','embalado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
           if (!rows.length) { await soltarLock(); res.push({ tel, ok: false, error: recobrarSet.has(tel) ? 'nada para cobrar' : 'nada pendiente (si ya se le cobró, usá re-envío)' }); continue; }
+          // Se controlan TODOS los nombres del cobro (si un teléfono tiene piezas de dos clientes, eso mismo es un conflicto)
+          // contra todos los dueños conocidos del número (LTV + asignaciones + otros clientes del corte). Si LTV no se pudo
+          // leer, NO se manda sin confirmar.
+          let confl = null, nomConfl = rows[0].cliente_nombre;
+          if (!ltvGuard.ok) confl = { nombre: 'NO VERIFICADO (no pude leer LTV_Alumnos: ' + ltvGuard.error + ')', fuente: 'LTV' };
+          else {
+            const nombresCob = [...new Set(rows.map(x => String(x.cliente_nombre || '').trim()).filter(Boolean))];
+            for (const n of nombresCob) {
+              const otroCob = nombresCob.find(o => !corteMismaPersona(o, n));
+              const o = otroCob ? { nombre: otroCob, fuente: 'mismo cobro' } : corteTelDeOtro(tel, n, dueniosGuard);
+              if (o) { confl = o; nomConfl = n; break; }
+            }
+          }
+          if (confl && !forzarSet.has(tel)) { await soltarLock(); res.push({ tel, ok: false, conflicto: confl.nombre, fuente: confl.fuente, nombre: nomConfl, error: 'NO SE MANDÓ: ese teléfono figura a nombre de ' + confl.nombre + ' (' + confl.fuente + ')' }); continue; }
           const esRecobro = rows.some(x => x.estado_pago === 'cobrando');
           const g = { telefono: tel, cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
           let ventana = false;
@@ -18274,7 +18625,7 @@ const handler = {
         return res;
         })();
         ctx.waitUntil(work.catch(() => {}));
-        return json({ ok: true, resultados: await work });
+        return json({ ok: true, resultados: await work, ltv_error: ltvGuard.ok ? '' : ltvGuard.error });
       }
       // POST /admin/corte/enviar-detalle {telefonos, tanda_id?} → manda el DESGLOSE a clientes que no lo recibieron
       // (ej. pagaron directo con el comprobante). Si ya pagaron todo → recibo (sin pedir transferencia); si no → el
@@ -19001,6 +19352,7 @@ const handler = {
       ctx.waitUntil(processPrecotizPilot(env));
       ctx.waitUntil(processCortePilot(env));   // bot de corte: cada minuto para responder rápido (gate corte_bot_on)
       ctx.waitUntil(processCorteVigiaAuto(env)); // vigía de pagos: corre SIEMPRE (aunque el bot esté off) para el día de cobro (gate corte_vigia_on)
+      ctx.waitUntil(processCorteEntregaSync(env)); // entrega retira/envío desde la planilla de cortes (1×hora, 8-21 AR; kill-switch corte_entrega_sync_on)
       // Nudge del piloto: persigue leads a medias que se callaron (cada 15 min; gate 9-21 AR adentro).
       // OJO: usamos getUTCMinutes() INLINE, no la var `minute` (que recién se declara con const más
       // abajo, línea ~10932 -> referenciarla acá era ReferenceError por TDZ en cada tick */1).

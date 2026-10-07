@@ -3310,9 +3310,9 @@ function corteDetalleHtml(p) {
   } else if (p.estado === 'cortado' && (admin || isNeyenUser(STATE.user))) {
     acciones = `
       <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-        <div style="font-size:12px;font-weight:700;margin-bottom:8px">Embalar → cómo se entrega</div>
-        <label style="margin-right:16px;cursor:pointer"><input type="radio" name="corte-entrega" value="retira" checked> Retira por el taller</label>
-        <label style="cursor:pointer"><input type="radio" name="corte-entrega" value="envio"> Envío al interior</label>
+        <div style="font-size:12px;font-weight:700;margin-bottom:6px">Embalar</div>
+        <div style="font-size:13px;margin-bottom:4px">Entrega: ${p.entrega === 'envio' ? '<b>📦 Envío</b>' : (p.entrega === 'retira' ? '<b>🏠 Retira por el taller</b>' : '<b style="color:#ef4444">⚠ sin definir</b>')}</div>
+        <div style="font-size:11px;color:var(--fg-mute)">Se define en la planilla "Servicio de cortes pedidos 2" (col. E: RETIRA o vacío = envío) y se actualiza sola cada hora.</div>
         <button class="btn" data-corte-accion="embalado" data-ped="${p.id}" style="margin-top:10px;display:block">📦 Marcar embalado</button>
       </div>`;
   }
@@ -3453,7 +3453,7 @@ function corteChip(txt, color) {
 function corteClientGroups(pedidos) {
   const g = {};
   (pedidos || []).forEach(p => {
-    const k = p.telefono || ('id' + p.id);
+    const k = p.telefono || ('n:' + String(p.cliente_nombre || '').trim().toLowerCase()); // sin teléfono: agrupar por nombre (antes 1 tarjeta por pieza)
     if (!g[k]) g[k] = { key: k, nombre: p.cliente_nombre || 'cliente', tel: p.telefono || '', items: [], total: 0, m2: 0, minStage: 99, maxStage: -1, pagos: {}, entrega: '' };
     const o = g[k]; o.items.push(p);
     if (p.entrega && !o.entrega) o.entrega = p.entrega;
@@ -3611,7 +3611,7 @@ function corteHybridBoard(pedidos) {
           <span style="min-width:78px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto">${p.precio ? '$' + Number(p.precio).toLocaleString('es-AR') : '—'}</span>
         </div>`; }).join('')}
         ${compHtml}
-        ${g.tel && g.items.some(p => p.estado === 'cortado') ? `<button class="btn ghost" data-corte-embalar-tel="${escapeHtml(g.tel)}" data-corte-entrega="${escapeHtml(g.entrega || 'retira')}" style="margin-top:8px;font-size:11px;padding:4px 10px">📦 Embalar paquete (${g.entrega === 'envio' ? 'envío' : 'retira'})</button>` : ''}
+        ${g.items.some(p => p.estado === 'cortado') ? `<button class="btn ghost" ${g.tel ? `data-corte-embalar-tel="${escapeHtml(g.tel)}"` : `data-corte-embalar-ids="${g.items.filter(p => p.estado === 'cortado').map(p => p.id).join(',')}"`} data-corte-entrega="${escapeHtml(g.entrega || '')}" style="margin-top:8px;font-size:11px;padding:4px 10px">📦 Embalar paquete (${g.entrega === 'envio' ? 'envío' : (g.entrega === 'retira' ? 'retira' : '⚠ entrega sin definir')})</button>` : ''}
       </div>` : '';
     return head + detail;
   }).join('');
@@ -3670,7 +3670,7 @@ function renderCorte() {
       const q = (STATE.corteEmbQuery || '').trim().toLowerCase();
       const groupBy = (list) => {
         const gr = {};
-        list.forEach(p => { const k = p.telefono || ('id' + p.id); if (!gr[k]) gr[k] = { nombre: p.cliente_nombre, tel: p.telefono || '', items: [], entrega: '' }; gr[k].items.push(p); if (p.entrega && !gr[k].entrega) gr[k].entrega = p.entrega; });
+        list.forEach(p => { const k = p.telefono || ('n:' + String(p.cliente_nombre || '').trim().toLowerCase()); if (!gr[k]) gr[k] = { nombre: p.cliente_nombre, tel: p.telefono || '', items: [], entrega: '' }; gr[k].items.push(p); if (p.entrega && !gr[k].entrega) gr[k].entrega = p.entrega; });
         return Object.values(gr).filter(g => !q || String(g.nombre || '').toLowerCase().includes(q) || g.items.some(p => String(p.diseno_nombre || '').toLowerCase().includes(q) || String(p.medida_declarada || '').toLowerCase().includes(q)));
       };
       const esNeon = p => p.producto === 'NEON';
@@ -3695,13 +3695,14 @@ function renderCorte() {
           ${neonPend.map(p => neonRow(p, false)).join('') || (q ? '' : '<div style="font-size:12px;color:var(--fg-mute);padding:8px 0">Todo separado ✨</div>')}
           ${neonSep.length ? `<div style="margin-top:12px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle)">Ya separados</div>${neonSep.map(p => neonRow(p, true)).join('')}` : ''}
         </div>` : '';
-      const entregaBadge = (e) => e ? `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:${e === 'envio' ? '#f59e0b' : '#22c55e'};background:color-mix(in srgb, ${e === 'envio' ? '#f59e0b' : '#22c55e'} 16%, transparent)">${e === 'envio' ? '📦 Envío' : '🏠 Retira'}</span>` : '';
+      // Entrega: viene de la planilla de cortes. Vacía = SIN DEFINIR (nunca "retira" por default: Martin Guaragna, 5/10).
+      const entregaBadge = (e) => (e === 'envio' || e === 'retira') ? `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:${e === 'envio' ? '#f59e0b' : '#22c55e'};background:color-mix(in srgb, ${e === 'envio' ? '#f59e0b' : '#22c55e'} 16%, transparent)">${e === 'envio' ? '📦 Envío' : '🏠 Retira'}</span>` : `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:#ef4444;background:color-mix(in srgb, #ef4444 14%, transparent)">⚠ Entrega sin definir — consultá a Gaspar</span>`;
       const cardHtml = (g, done) => `
         <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
           <div style="font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${done ? '<span style="color:#22c55e">✓</span> ' : ''}${escapeHtml(g.nombre || 'cliente')} <span style="color:var(--fg-mute);font-weight:400;font-size:12px">· ${g.items.length} pieza${g.items.length === 1 ? '' : 's'}</span>${entregaBadge(g.entrega)}</div>
           ${g.items.map(p => `<div style="font-size:13px;color:var(--fg-mute);padding:2px 0">• ${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ' — ' + escapeHtml(p.medida_declarada) : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</div>`).join('')}
           <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-            ${done ? `<button class="btn ghost" data-corte-desembalar="${g.items.map(p => p.id).join(',')}" style="font-size:12px;padding:5px 11px">↩ Deshacer</button>` : `<button class="btn" data-corte-embalar-tel="${escapeHtml(g.tel)}" data-corte-entrega="${escapeHtml(g.entrega || 'retira')}">📦 Marcar paquete embalado</button>`}
+            ${done ? `<button class="btn ghost" data-corte-desembalar="${g.items.map(p => p.id).join(',')}" style="font-size:12px;padding:5px 11px">↩ Deshacer</button>` : `<button class="btn" ${g.tel ? `data-corte-embalar-tel="${escapeHtml(g.tel)}"` : `data-corte-embalar-ids="${g.items.map(p => p.id).join(',')}"`} data-corte-entrega="${escapeHtml(g.entrega || '')}">📦 Marcar paquete embalado</button>`}
           </div>
         </div>`;
       const vacioBox = (txt) => cargando ? '' : `<div style="padding:20px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px;font-size:13px">${txt}</div>`;
@@ -3883,6 +3884,7 @@ function renderCorte() {
         <span style="font-size:11px;background:rgba(124,58,237,.14);color:#7c3aed;padding:2px 8px;border-radius:10px;font-weight:700">Etapa 1 · operativo</span>
       </div>
       <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">Tu semana de un vistazo — una fila por cliente. Tocá un cliente para ver sus diseños; tocá un diseño para moverlo de etapa.</p>
+      ${corteHerramientasHtml()}
       ${sel ? corteDetalleHtml(sel) : ''}
       ${navWeek}
       ${corteHybridBoard(boardPedidos)}
@@ -3926,6 +3928,97 @@ function corteRenderFondoOk() {
 // que ya había si falla la red, y re-renderiza solo si algo cambió y corteRenderFondoOk(). Contador de
 // generación: una carga completa (tras una acción) invalida cualquier respuesta anterior todavía en vuelo,
 // así una respuesta vieja no devuelve a la cola la pieza que Emma acaba de terminar.
+// ===== Herramientas del admin: cargar tanda desde la planilla, entrega desde la planilla, clientes SIN teléfono =====
+function corteLunesReciente() { const d = new Date(Date.now() - 3 * 3600 * 1000); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); }
+function corteHerramientasHtml() {
+  const st = STATE.corteSinTel || [];
+  const inpSt = 'background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:5px 8px;color:var(--fg);font-size:12px';
+  const tools = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 14px">
+      <span style="font-size:12px;color:var(--fg-mute)">Cargar tanda desde la planilla:</span>
+      <input type="date" id="corte-cargar-fecha" value="${escapeHtml(STATE.corteCargarFecha || corteLunesReciente())}" style="${inpSt}">
+      <button class="btn" data-corte-cargar-tanda style="font-size:12px;padding:5px 11px"${STATE._corteCargandoTanda ? ' disabled' : ''}>⬇ Cargar tanda</button>
+      <button class="btn ghost" data-corte-sync-entrega style="font-size:12px;padding:5px 11px" title="Trae retira/envío de 'Servicio de cortes pedidos 2' (también corre solo cada hora)">↻ Entrega desde planilla</button>
+    </div>`;
+  if (!st.length) return tools;
+  return tools + `<div style="border:1px solid #ef4444;background:color-mix(in srgb,#ef4444 8%,transparent);border-radius:12px;padding:12px 14px;margin:0 0 16px">
+      <div style="font-weight:800;color:#ef4444;margin-bottom:3px">⚠ ${st.length} cliente${st.length === 1 ? '' : 's'} sin teléfono — no se les puede cobrar</div>
+      <div style="font-size:12px;color:var(--fg-mute);margin-bottom:6px">Asignale el número a cada uno (queda guardado para las próximas tandas). Las sugerencias son nombres parecidos: NO se aplican solas.</div>
+      ${st.map((c, i) => `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 0;border-top:1px dashed var(--border)">
+        <b style="min-width:150px">${escapeHtml(c.nombre)}</b>
+        <span style="font-size:12px;color:var(--fg-mute)">${c.piezas} pieza${c.piezas === 1 ? '' : 's'} · $${Math.round(c.total || 0).toLocaleString('es-AR')}</span>
+        ${(c.sugerencias || []).map((s, j) => `<button class="btn ghost" data-corte-asig-sug="${i}:${j}" style="font-size:11px;padding:3px 8px" title="Sugerencia (${escapeHtml(s.fuente)}) — confirmás antes de asignar">¿${escapeHtml(s.nombre)} · +${escapeHtml(s.tel)}?</button>`).join('')}
+        <input data-corte-asig-inp="${i}" value="${escapeHtml((STATE.corteAsigDraft || {})[c.nombre] || '')}" placeholder="+54 9 11 …" inputmode="tel" style="${inpSt};width:150px">
+        <button class="btn" data-corte-asig-btn="${i}" style="font-size:11px;padding:4px 10px">Asignar</button>
+      </div>`).join('')}
+    </div>`;
+}
+async function corteAsignarTel(nombre, tel, btn) {
+  const dig = String(tel || '').replace(/\D/g, '');
+  if (dig.length < 10) { toast('Teléfono incompleto'); return; }
+  if (!await showConfirm(`¿Asignar el teléfono ${tel} a ${nombre}?\n\nSe usa para cobrarle y queda guardado para las próximas tandas.`, { title: 'Asignar teléfono', confirmLabel: 'Asignar' }).catch(() => false)) return;
+  if (btn) btn.disabled = true;
+  const post = (forzar) => fetch(CONFIG.trackerUrl + '/admin/corte/asignar-telefono', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ cliente_nombre: nombre, telefono: tel, forzar }) }).then(r => r.json().then(j => ({ status: r.status, j })));
+  try {
+    let { status, j } = await post(false);
+    if (status === 409 && j && j.conflicto) {
+      const que = /^NO VERIFICADO/.test(j.conflicto) ? j.conflicto : `ese teléfono figura a nombre de ${j.conflicto}${j.fuente ? ' (' + j.fuente + ')' : ''}`;
+      if (!await showConfirm(`OJO: ${que}.\n\n¿Seguro que es de ${nombre}? Si no estás seguro, cancelá.`, { title: '⚠ Revisá el teléfono', confirmLabel: 'Sí, es de ' + nombre }).catch(() => false)) { if (btn) btn.disabled = false; return; }
+      ({ status, j } = await post(true));
+    }
+    if (j && j.ok) { toast(`Teléfono asignado a ${nombre} (${j.piezas} pieza${j.piezas === 1 ? '' : 's'})${j.recordado ? '' : ' · como tiene un solo nombre, no se recuerda para las próximas tandas'}`); if (STATE.corteAsigDraft) delete STATE.corteAsigDraft[nombre]; STATE.corteSinTel = undefined; STATE.cortePedidos = undefined; STATE._corteLoading = false; render(); }
+    else { toast((j && j.error) || 'No se pudo asignar'); if (btn) btn.disabled = false; }
+  } catch (_) { toast('Error de red'); if (btn) btn.disabled = false; }
+}
+async function corteCargarTandaUI() {
+  if (STATE._corteCargandoTanda) return;
+  const iso = (document.getElementById('corte-cargar-fecha') || {}).value || corteLunesReciente();
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})$/); if (!m) { toast('Elegí la fecha del corte'); return; }
+  const fecha = parseInt(m[3], 10) + '/' + parseInt(m[2], 10) + '/' + m[1];
+  STATE._corteCargandoTanda = true;
+  const post = (dry, sosp) => fetch(CONFIG.trackerUrl + '/admin/corte/cargar-tanda', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ fecha, dry_run: dry, incluir_sospechosas: !!sosp }) }).then(r => r.json());
+  try {
+    toast('Leyendo la planilla…');
+    const r = await post(true);
+    if (!r || !r.ok) { toast((r && r.error) || 'No se pudo leer la planilla'); return; }
+    const $ = n => '$' + Math.round(n || 0).toLocaleString('es-AR');
+    const piezaTxt = p => (p.cliente ? p.cliente + ' · ' : '') + (p.diseno || p.producto) + (p.cantidad > 1 ? ' ×' + p.cantidad : '') + ' · ' + $(p.precio);
+    const sinTel = (r.sin_telefono || []).map(s => '• ' + s.nombre + ' (' + s.piezas + ' pieza' + (s.piezas === 1 ? '' : 's') + ' · ' + s.motivo + ')' + ((s.sugerencias || []).length ? '\n   ¿será? ' + s.sugerencias.map(x => x.nombre + ' +' + x.tel).join(' / ') : '')).join('\n');
+    const retiran = (r.clientes || []).filter(c => c.entrega === 'retira').map(c => c.nombre).join(', ');
+    const sinDef = (r.clientes || []).filter(c => c.entrega === 'sin definir' && c.nuevas > 0).map(c => c.nombre).join(', ');
+    const dups = r.posibles_duplicados || [], sobr = r.sobrantes || [];
+    let msg = `Tanda del ${r.fecha}\n\n${r.nuevas} pieza${r.nuevas === 1 ? '' : 's'} nueva${r.nuevas === 1 ? '' : 's'} para cargar (${$(r.total_nuevas)}) · ${r.ya_cargadas} ya estaban · ${r.neon_salteadas} de neón salteadas (se cargan solas desde los pedidos)`;
+    if ((r.detalle_nuevas || []).length) msg += '\n\nSe cargan:\n' + r.detalle_nuevas.slice(0, 60).map(p => '• ' + piezaTxt(p)).join('\n') + (r.detalle_nuevas.length > 60 ? '\n… y ' + (r.detalle_nuevas.length - 60) + ' más' : '');
+    if (dups.length) msg += '\n\n⚠ POSIBLES DUPLICADOS (NO se cargan; se parecen a piezas que ya están):\n' + dups.map(p => '• ' + piezaTxt(p) + '\n   ≈ ya cargada: ' + p.parecida_a.cliente + ' · ' + p.parecida_a.diseno + (p.parecida_a.cantidad > 1 ? ' ×' + p.parecida_a.cantidad : '') + ' (' + p.parecida_a.estado_pago + ')').join('\n');
+    if (sobr.length) msg += '\n\nEn el software pero ya no igual en la hoja (no se tocan):\n' + sobr.map(s => '• ' + s.cliente + ' · ' + s.diseno + (s.cantidad > 1 ? ' ×' + s.cantidad : '') + ' (' + s.estado_pago + ')').join('\n');
+    if (retiran) msg += `\n\nRetiran: ${retiran}\n(el resto va por envío, según "Servicio de cortes pedidos 2")`;
+    if (sinDef) msg += `\n\n⚠ Entrega SIN DEFINIR (no figuran en la planilla de cortes): ${sinDef}`;
+    if (sinTel) msg += `\n\n⚠ SIN TELÉFONO — se cargan igual, pero no se les puede cobrar hasta asignarlo:\n${sinTel}`;
+    if ((r.avisos || []).length) msg += '\n\n⚠ ' + r.avisos.join('\n⚠ ');
+    let sosp = false;
+    if (!r.nuevas && !dups.length) { await showConfirm(msg + '\n\nNo hay nada nuevo para cargar.', { title: 'Cargar tanda', confirmLabel: 'OK' }).catch(() => {}); return; }
+    if (r.nuevas) { if (!await showConfirm(msg, { title: 'Cargar tanda', confirmLabel: 'Cargar ' + r.nuevas + ' pieza' + (r.nuevas === 1 ? '' : 's') }).catch(() => false)) return; }
+    if (dups.length) {
+      sosp = await showConfirm((r.nuevas ? '' : msg + '\n\n') + '¿Cargar TAMBIÉN los ' + dups.length + ' posibles duplicados?\n\n' + dups.map(p => '• ' + piezaTxt(p) + '  ≈  ' + p.parecida_a.cliente + ' · ' + p.parecida_a.diseno + ' (' + p.parecida_a.estado_pago + ')').join('\n') + '\n\nCargalos solo si son piezas NUEVAS de verdad (si es la misma pieza corregida en la hoja, NO).', { title: '⚠ Posibles duplicados', confirmLabel: 'Sí, son nuevas', cancelLabel: 'No, no cargar' }).catch(() => false);
+      if (!r.nuevas && !sosp) return;
+    }
+    const r2 = await post(false, sosp);
+    if (r2 && r2.ok) { toast('Tanda cargada: ' + r2.nuevas + ' piezas' + ((r2.sin_telefono || []).length ? ' · ⚠ ' + r2.sin_telefono.length + ' sin teléfono' : '') + ((r2.sync_entrega && (r2.sync_entrega.cambios || []).length) ? ' · entrega actualizada en ' + r2.sync_entrega.cambios.length : '')); if (r2.tanda_id) STATE.corteTandaSel = r2.tanda_id; STATE.corteSinTel = undefined; STATE.cortePedidos = undefined; STATE._corteLoading = false; }
+    else toast((r2 && r2.error) || 'No se pudo cargar');
+  } catch (_) { toast('Error de red'); }
+  finally { STATE._corteCargandoTanda = false; render(); }
+}
+async function corteSyncEntregaUI(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/sync-entrega', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: '{}' }).then(x => x.json());
+    if (r && r.ok) {
+      const c = r.cambios || [];
+      toast(!r.revisadas ? 'No hay piezas recientes con fecha de la hoja para sincronizar (cargá la tanda con "⬇ Cargar tanda")' : (c.length ? 'Entrega actualizada (te llega el detalle por WhatsApp): ' + c.map(x => x.cliente + ' → ' + x.a + (x.ya_embalado ? ' (ya embalado: avisale a Neyen)' : '')).join(' · ') : 'La entrega de ' + r.revisadas + ' piezas ya coincide con la planilla ✓'));
+      if (c.length) { STATE.cortePedidos = undefined; STATE._corteLoading = false; }
+    } else toast((r && r.error) || 'No se pudo leer la planilla de cortes');
+  } catch (_) { toast('Error de red'); }
+  finally { if (btn) btn.disabled = false; render(); }
+}
 async function corteCargar(silent) {
   if (silent ? (STATE._corteLoading || STATE._corteSilentLoading) : false) return;
   const gen = silent ? (STATE._corteGen || 0) : (STATE._corteGen = (STATE._corteGen || 0) + 1);
@@ -3940,6 +4033,7 @@ async function corteCargar(silent) {
     ];
     if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/alumnos', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
     if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/preguntas', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
+    if (admin) proms.push(fetch(CONFIG.trackerUrl + '/admin/corte/sin-telefono', { headers: authHeaders() }).then(r => r.json()).catch(() => ({})));
     res = await Promise.all(proms);
   } catch (_) { res = []; }
   if (silent) STATE._corteSilentLoading = false;
@@ -3953,6 +4047,7 @@ async function corteCargar(silent) {
     STATE.corteTanda = (res[1] && res[1].ok) ? res[1] : null;
     STATE.corteAlumnos = admin ? ((res[2] && res[2].alumnos) || []) : [];
     STATE.cortePropuestas = admin ? ((res[3] && res[3].propuestas) || []) : [];
+    STATE.corteSinTel = admin ? ((res[4] && res[4].sin_telefono) || []) : [];
   }
   STATE._corteLoadedAt = Date.now();
   corteBadgePaint();
@@ -4036,6 +4131,14 @@ async function bindCorte() {
   const bulkDes = document.querySelector('[data-corte-bulk-deselect]'); if (bulkDes) bulkDes.onclick = () => { STATE.corteSel = {}; render(); };
   // "💰 Cobrar (N)": cobra SOLO a los seleccionados (antes solo abría la vista de cobro completa).
   const bulkCob = document.querySelector('[data-corte-bulk-cobrar]'); if (bulkCob) bulkCob.onclick = () => corteBulkCobrar(parseInt(bulkCob.getAttribute('data-corte-bulk-cobrar'), 10) || 0);
+  // Herramientas del admin: cargar tanda / entrega desde la planilla / asignar teléfonos faltantes.
+  const cargarTanda = document.querySelector('[data-corte-cargar-tanda]'); if (cargarTanda) cargarTanda.onclick = () => corteCargarTandaUI();
+  const cargarFecha = document.getElementById('corte-cargar-fecha'); if (cargarFecha) cargarFecha.onchange = () => { STATE.corteCargarFecha = cargarFecha.value; };
+  const syncEnt = document.querySelector('[data-corte-sync-entrega]'); if (syncEnt) syncEnt.onclick = () => corteSyncEntregaUI(syncEnt);
+  document.querySelectorAll('[data-corte-asig-sug]').forEach(b => { b.onclick = () => { const [i, j] = String(b.getAttribute('data-corte-asig-sug')).split(':').map(Number); const c = (STATE.corteSinTel || [])[i]; const s = c && (c.sugerencias || [])[j]; if (c && s) corteAsignarTel(c.nombre, '+' + s.tel, b); }; });
+  // Lo tipeado en "Asignar" sobrevive a los refrescos de fondo del board.
+  document.querySelectorAll('[data-corte-asig-inp]').forEach(inp => { inp.oninput = () => { const c = (STATE.corteSinTel || [])[parseInt(inp.getAttribute('data-corte-asig-inp'), 10)]; if (c) { STATE.corteAsigDraft = STATE.corteAsigDraft || {}; STATE.corteAsigDraft[c.nombre] = inp.value; } }; });
+  document.querySelectorAll('[data-corte-asig-btn]').forEach(b => { b.onclick = () => { const i = parseInt(b.getAttribute('data-corte-asig-btn'), 10); const c = (STATE.corteSinTel || [])[i]; const inp = document.querySelector(`[data-corte-asig-inp="${i}"]`); if (c && inp && inp.value.trim()) corteAsignarTel(c.nombre, inp.value.trim(), b); else toast('Escribí el teléfono'); }; });
   const cerrar = document.querySelector('[data-corte-cerrar]'); if (cerrar) cerrar.onclick = () => { STATE.corteSelected = null; render(); };
   const ai = document.getElementById('corte-ancho'), ali = document.getElementById('corte-alto');
   if (ai || ali) { const sel = (STATE.cortePedidos || []).find(p => p.id === STATE.corteSelected); if (sel) { const upd = () => cortePrecioPreview(sel); if (ai) ai.oninput = upd; if (ali) ali.oninput = upd; } }
@@ -4084,7 +4187,15 @@ async function bindCorte() {
   // Neyen: embalar el paquete completo de un cliente (con su entrega).
   document.querySelectorAll('[data-corte-embalar-tel]').forEach(btn => {
     btn.onclick = () => {
-      corteBulk('embalado_bulk', { telefono: btn.getAttribute('data-corte-embalar-tel'), entrega: btn.getAttribute('data-corte-entrega') || 'retira' });
+      // La entrega solo viaja si está definida (envio/retira); vacía = el worker NO la toca (antes iba 'retira' por default).
+      corteBulk('embalado_bulk', { telefono: btn.getAttribute('data-corte-embalar-tel') }); // sin entrega: sale de la planilla
+    };
+  });
+  // Paquete de un cliente SIN teléfono: se embala por ids (embalado_bulk necesita teléfono y antes fallaba).
+  document.querySelectorAll('[data-corte-embalar-ids]').forEach(btn => {
+    btn.onclick = () => {
+      const ids = String(btn.getAttribute('data-corte-embalar-ids') || '').split(',').map(Number).filter(Boolean);
+      if (ids.length) corteBulk('avanzar_bulk', { ids, estado: 'embalado' });
     };
   });
   // Neyen: "Deshacer" un paquete ya embalado → vuelve a 'cortado' (para revisar/re-embalar).
@@ -4136,7 +4247,8 @@ async function bindCorte() {
     let ok = false;
     try {
       const r = await fetch(CONFIG.trackerUrl + '/admin/corte/cobrar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ telefonos: tels }) }).then(x => x.json());
-      const resultados = (r && r.resultados) || [];
+      let resultados = (r && r.resultados) || [];
+      resultados = await corteCobroConflictos(resultados, () => '', null); // teléfono de otra persona / no verificado → preguntar
       const okN = resultados.filter(x => x.ok).length;
       const yaEnviados = resultados.filter(x => !x.ok && /hace instantes/.test(String(x.error || ''))).length;
       const otrosFallos = resultados.filter(x => !x.ok && !/hace instantes/.test(String(x.error || ''))).length;
@@ -4233,25 +4345,47 @@ async function corteBulk(action, extra) {
 function corteBoardGroups(tandaId) {
   return corteClientGroups((STATE.cortePedidos || []).filter(p => p.producto !== 'NEON' && (!tandaId || (+p.tanda_id || 0) === tandaId)));
 }
+function corteFmtTel(t) { const d = String(t || '').replace(/\D/g, ''); return d.length === 13 ? '+' + d.slice(0, 2) + ' ' + d.slice(2, 3) + ' ' + d.slice(3, 6) + ' ' + d.slice(6) : '+' + d; }
+// Conflictos de teléfono que devolvió /admin/corte/cobrar (número de OTRA persona, o LTV sin verificar): pregunta y, si
+// se confirma, reenvía SOLO esos con forzar_tels. Si el reintento falla por red, quedan los resultados originales (los
+// cobros que ya salieron siguen contando). nombreDe(tel) → nombre a mostrar; extra(tels) → campos extra del body.
+async function corteCobroConflictos(resultados, nombreDe, extra) {
+  const confl = resultados.filter(x => !x.ok && x.conflicto);
+  if (!confl.length) return resultados;
+  const txt = confl.map(x => '• ' + (nombreDe(x.tel) || x.nombre || '') + ' (' + corteFmtTel(x.tel) + '): ' + (/^NO VERIFICADO/.test(x.conflicto) ? x.conflicto : 'figura a nombre de ' + x.conflicto + (x.fuente ? ' [' + x.fuente + ']' : ''))).join('\n');
+  const si = await showConfirm('NO se les mandó el cobro porque el teléfono no se pudo verificar o figura a nombre de OTRA persona:\n\n' + txt + '\n\nRevisalo antes. ¿Mandar igual a ' + (confl.length === 1 ? 'ese cliente' : 'esos ' + confl.length) + '?', { title: '⚠ Revisá el teléfono', confirmLabel: 'Mandar igual', cancelLabel: 'No mandar' }).catch(() => false);
+  if (!si) return resultados;
+  const tels2 = confl.map(x => String(x.tel));
+  try {
+    const r2 = await fetch(CONFIG.trackerUrl + '/admin/corte/cobrar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ ...(extra ? extra(tels2) : {}), telefonos: tels2, forzar_tels: tels2 }) }).then(x => x.json());
+    return resultados.filter(x => !x.conflicto).concat((r2 && r2.resultados) || []);
+  } catch (_) { toast('Error de red al reintentar los que tenían el teléfono en duda'); return resultados; }
+}
 // "💰 Cobrar (N)" de la barra: manda el cobro SOLO a los clientes seleccionados (de la tanda que se está viendo).
 // Si alguno ya tenía el cobro enviado (ej. se corrigió el pedido después de cobrar), se le RE-ENVÍA con el monto actual.
 async function corteBulkCobrar(tandaId) {
   if (STATE._corteCobrando) { toast('Ya hay un cobro enviándose — esperá a que termine'); return; }
   const sel = STATE.corteSel || {};
   const elig = corteBoardGroups(tandaId).filter(g => sel[g.key] && g.tel && g.pago !== 'parcial').map(g => ({ ...g, cob: corteCobrable(g) })).filter(g => g.cob.n > 0);
-  if (!elig.length) { toast('Nada para cobrar en la selección'); return; }
+  // Seleccionados SIN teléfono: no se les puede mandar → se avisan (antes quedaban afuera en silencio: Candela, Ezequiel Aranda).
+  const sinTelSel = corteBoardGroups(tandaId).filter(g => sel[g.key] && !g.tel && corteCobrable(g).n > 0);
+  if (!elig.length) { toast(sinTelSel.length ? 'Los seleccionados no tienen teléfono: asignáselo arriba (⚠ sin teléfono)' : 'Nada para cobrar en la selección'); return; }
   const total = elig.reduce((s, g) => s + g.cob.total, 0);
   const reenv = elig.filter(g => g.cob.recobro);
-  const lineas = elig.map(g => '• ' + g.nombre + ' — $' + g.cob.total.toLocaleString('es-AR') + (g.cob.recobro ? ' (re-envío)' : '')).join('\n');
+  const lineas = elig.map(g => '• ' + g.nombre + ' (' + corteFmtTel(g.tel) + ') — $' + g.cob.total.toLocaleString('es-AR') + (g.cob.recobro ? ' (re-envío)' : '')).join('\n');
   const msg = 'Mandar el cobro a ' + elig.length + ' cliente' + (elig.length === 1 ? '' : 's') + ' — total $' + total.toLocaleString('es-AR') + ':\n\n' + lineas
-    + (reenv.length ? '\n\n' + (reenv.length === 1 ? 'Uno ya tenía' : reenv.length + ' ya tenían') + ' un cobro enviado: se les vuelve a mandar con el monto actual.' : '');
+    + (reenv.length ? '\n\n' + (reenv.length === 1 ? 'Uno ya tenía' : reenv.length + ' ya tenían') + ' un cobro enviado: se les vuelve a mandar con el monto actual.' : '')
+    + (sinTelSel.length ? '\n\n⚠ SIN TELÉFONO (no se les manda): ' + sinTelSel.map(g => g.nombre).join(', ') : '');
   // Bloqueo de envío en curso (vive en STATE → sobrevive a re-renders): evita un segundo pedido de cobro paralelo.
   STATE._corteCobrando = true;
   try {
     if (!await showConfirm(msg, { title: 'Cobrar', confirmLabel: 'Mandar cobro' }).catch(() => false)) return;
     toast('Enviando cobros…');
     const r = await fetch(CONFIG.trackerUrl + '/admin/corte/cobrar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ telefonos: elig.map(g => g.tel), recobrar_tels: reenv.map(g => g.tel), tanda_id: tandaId || 0 }) }).then(x => x.json());
-    const resultados = (r && r.resultados) || [];
+    let resultados = (r && r.resultados) || [];
+    // CONTROL DE TELÉFONO: el server frenó a los que tienen un número de OTRA persona (o no pudo verificar) → preguntar.
+    resultados = await corteCobroConflictos(resultados, t => (elig.find(e => String(e.tel).replace(/\D/g, '') === String(t)) || {}).nombre,
+      tels2 => ({ recobrar_tels: reenv.map(g => String(g.tel).replace(/\D/g, '')).filter(t => tels2.includes(t)), tanda_id: tandaId || 0 }));
     const okN = resultados.filter(x => x.ok).length;
     const fallos = resultados.filter(x => !x.ok).map(x => { const g = elig.find(e => String(e.tel).replace(/\D/g, '') === String(x.tel)); return (g ? g.nombre : x.tel) + ' (' + (x.error || 'error') + ')'; });
     toast('Cobros enviados: ' + okN + '/' + elig.length + (fallos.length ? ' · fallaron: ' + fallos.join(', ') : ''));
@@ -4275,7 +4409,7 @@ async function corteAccion(accion, id) {
     body.ancho_real = a ? a.value : ''; body.alto_real = al ? al.value : '';
     if (!(parseFloat(String(body.ancho_real).replace(',', '.')) > 0 && parseFloat(String(body.alto_real).replace(',', '.')) > 0)) { toast('Cargá ancho y alto (cm)'); return; }
   }
-  if (accion === 'embalado') { const r = document.querySelector('input[name="corte-entrega"]:checked'); body.entrega = r ? r.value : 'retira'; }
+  // Embalar no manda entrega: sale solo de la planilla de cortes (antes mandaba 'retira' por default).
   if (accion === 'estado') { const s = document.getElementById('corte-estado-manual'); body.estado = s ? s.value : ''; }
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/corte/pedido', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(x => x.json());
