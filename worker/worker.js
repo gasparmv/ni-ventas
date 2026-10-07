@@ -2013,6 +2013,7 @@ async function ensureAgendaSchema(env) {
 async function agendaRoute(env, request, url, path) {
   const session = await getSession(env, request);
   if (!session) return unauthorized();
+  if (esUsuarioLogistica(session.user)) return json({ error: 'forbidden' }, 403); // usuario externo: no ve la agenda interna
   await ensureAgendaSchema(env);
   const me = _agSlug(session.user);
   const esAdmin = (await getSessionRole(env, session.user)) === 'admin';
@@ -4876,7 +4877,7 @@ async function corteSheetValues(env, sheetId, range) {
 async function corteLtv(env) {
   const r = await corteSheetValues(env, CORTE_SHEET_ID, 'LTV_Alumnos!A2:F');
   if (!r.ok) return { error: r.error };
-  return { ok: true, rows: r.values.map(x => ({ nombre: String(x[1] || '').trim(), norm: corteNormNombre(x[1]), tel: corteTel(x[5]) })).filter(x => x.norm) };
+  return { ok: true, rows: r.values.map(x => ({ nombre: String(x[1] || '').trim(), norm: corteNormNombre(x[1]), tel: corteTel(x[5]), datos: String(x[4] || '').trim() })).filter(x => x.norm) };
 }
 // Asignaciones manuales confirmadas (cliente → teléfono). Solo cuentan para nombres con nombre Y apellido: con un solo
 // nombre ("mirna", "Eliana") sería volver al "teléfono por nombre de pila".
@@ -5098,6 +5099,94 @@ async function processCorteEntregaSync(env) {
     if (!lk) return; // ya corrió en la última hora
     await corteSyncEntrega(env, { notify: true });
   } catch (_) {}
+}
+// ===== LOGÍSTICA (usuario externo: Siempre a Tiempo) =====
+// Cada lunes, con la tanda cargada, logística ve los paquetes que van por ENVÍO (cliente, teléfono, dirección y
+// tamaño) para contactar a los clientes mientras Neyen embala, y el martes solo los carga en el camión.
+// Paquete = todas las piezas de UN cliente en UNA tanda. Clave = teléfono, o "n:"+nombre si no tiene.
+function corteClaveCliente(p) { return p.telefono ? String(p.telefono) : 'n:' + corteNormNombre(p.cliente_nombre); }
+let _cortePaqSchemaOk = false;
+async function ensureCortePaquetesSchema(env) {
+  if (_cortePaqSchemaOk) return;
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_paquetes (tanda_id INTEGER NOT NULL, cliente_key TEXT NOT NULL, largo REAL, ancho REAL, alto REAL, peso REAL, bultos INTEGER, medido_por TEXT, medido_at TEXT, contactado INTEGER DEFAULT 0, contactado_at TEXT, contactado_por TEXT, cargado INTEGER DEFAULT 0, cargado_at TEXT, cargado_por TEXT, nota TEXT, nota_at TEXT, nota_por TEXT, PRIMARY KEY (tanda_id, cliente_key))").run(); _cortePaqSchemaOk = true; } catch (_) {}
+}
+// Medida de una pieza en cm: la real (ancho_real/alto_real) o la declarada ("60x44").
+function corteMedidaPieza(p) {
+  let a = Number(p.ancho_real) || 0, h = Number(p.alto_real) || 0;
+  if (!(a > 0 && h > 0)) { const m = String(p.medida_declarada || '').match(/(\d+(?:[.,]\d+)?)\s*[x×*]\s*(\d+(?:[.,]\d+)?)/i); if (m) { a = parseFloat(m[1].replace(',', '.')); h = parseFloat(m[2].replace(',', '.')); } }
+  return (a > 0 && h > 0) ? { a, h } : null;
+}
+// Paquete ESTIMADO a partir de las piezas (para el lunes temprano, antes de que Neyen embale y mida):
+//  · largo/ancho = la pieza más grande + 6 cm de embalaje; alto = 0,8 cm por pieza (acrílico 3 mm + protección) + 4 cm.
+//  · peso = acrílico 3 mm (1,19 g/cm³) + cartón/film; cada rollo de cable ~1,2 kg (+8 cm de alto), fuentes ~0,35 kg.
+function corteEstimarPaquete(items) {
+  let L = 0, W = 0, piezas = 0, kg = 0, cable = 0, fuentes = 0, otros = 0;
+  for (const p of items) {
+    const q = Math.max(1, parseInt(p.cantidad, 10) || 1);
+    const m = corteMedidaPieza(p);
+    if (m) {
+      L = Math.max(L, Math.max(m.a, m.h)); W = Math.max(W, Math.min(m.a, m.h)); piezas += q;
+      kg += (m.a * m.h * 0.3 * 1.19 / 1000) * q;
+    } else {
+      const pr = String(p.producto || '') + ' ' + String(p.diseno_nombre || '');
+      if (/cable|rollo/i.test(pr)) { cable += q; kg += 1.2 * q; }
+      else if (/fuen|fuet/i.test(pr)) { fuentes += q; kg += 0.35 * q; }
+      else { otros += q; kg += 0.5 * q; }
+    }
+  }
+  let largo = piezas ? L + 6 : 30, ancho = piezas ? W + 6 : 25, alto = piezas ? piezas * 0.8 + 4 : 0;
+  alto += cable * 8 + Math.ceil(fuentes / 4) * 5 + otros * 5;
+  if (!piezas) alto = Math.max(alto, 10);
+  kg += 0.4 + (largo * ancho / 10000) * 0.6;
+  return { largo: Math.round(largo), ancho: Math.round(ancho), alto: Math.round(alto), peso: Math.round(kg * 10) / 10, bultos: 1, piezas, cable, fuentes, pieza_mas_larga: Math.round(L) };
+}
+// Paquetes de una tanda para logística: SOLO envío (y los "sin definir", aparte, para que nada se caiga). Sin precios.
+async function logisticaPaquetes(env, tandaIdPedida) {
+  await ensureCortePaquetesSchema(env);
+  let tandas = [];
+  try { tandas = (await env.DB.prepare("SELECT id, fecha_corte FROM corte_tandas WHERE fecha_corte IS NOT NULL AND fecha_corte!='' ORDER BY id DESC LIMIT 8").all()).results || []; } catch (_) {}
+  const tanda = tandas.find(t => t.id === tandaIdPedida) || tandas[0] || null;
+  const base = { ok: true, tandas: tandas.map(t => ({ id: t.id, fecha: t.fecha_corte })), tanda: tanda ? { id: tanda.id, fecha: tanda.fecha_corte } : null, paquetes: [], retiran: 0 };
+  if (!tanda) return base;
+  let rows = [];
+  try { rows = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, producto, estado, estado_pago, entrega FROM corte_pedidos WHERE tanda_id=? AND IFNULL(producto,'')!='NEON' AND lower(cliente_nombre)!='neon' ORDER BY cliente_nombre, id").bind(tanda.id).all()).results || []; } catch (_) {}
+  let marcas = {};
+  try { ((await env.DB.prepare("SELECT * FROM corte_paquetes WHERE tanda_id=?").bind(tanda.id).all()).results || []).forEach(m => { marcas[m.cliente_key] = m; }); } catch (_) {}
+  const ltv = await corteLtv(env);
+  const ltvRows = ltv.ok ? ltv.rows : [];
+  const grupos = {};
+  for (const p of rows) { const k = corteClaveCliente(p); (grupos[k] = grupos[k] || []).push(p); }
+  const paquetes = [];
+  let retiran = 0;
+  for (const [k, items] of Object.entries(grupos)) {
+    const ents = [...new Set(items.map(p => p.entrega || ''))];
+    const entrega = ents.includes('envio') ? 'envio' : (ents.includes('retira') ? 'retira' : '');
+    if (entrega === 'retira') { retiran++; continue; } // retira por el taller: no es para logística
+    const c = items[0];
+    // Datos de envío: LTV (col E "Datos envio") por teléfono; si no, por nombre exacto.
+    const t10 = String(c.telefono || '').slice(-10);
+    const l = (t10 && ltvRows.find(x => x.tel && x.tel.slice(-10) === t10)) || ltvRows.find(x => x.norm === corteNormNombre(c.cliente_nombre)) || null;
+    const datos = l ? l.datos : '';
+    const est = corteEstimarPaquete(items);
+    const mk = marcas[k] || {};
+    const medido = mk.largo > 0 && mk.ancho > 0 && mk.alto > 0;
+    const pagos = new Set(items.map(p => p.estado_pago || 'pendiente'));
+    const pago = pagos.has('parcial') ? 'parcial' : ([...pagos].every(x => x === 'pagado') ? 'pagado' : 'pendiente');
+    const estados = new Set(items.map(p => p.estado));
+    paquetes.push({
+      key: k, cliente: c.cliente_nombre, telefono: c.telefono || '', datos_envio: datos, falta_direccion: !String(datos).replace(/\s+/g, '').length,
+      entrega: entrega || 'sin definir', entrega_mixta: ents.length > 1,
+      piezas: items.filter(p => corteMedidaPieza(p)).map(p => ({ diseno: p.diseno_nombre, medida: p.medida_declarada || (p.ancho_real ? p.ancho_real + 'x' + p.alto_real : ''), cantidad: Math.max(1, parseInt(p.cantidad, 10) || 1) })),
+      insumos: items.filter(p => !corteMedidaPieza(p)).map(p => ({ nombre: p.diseno_nombre || p.producto, cantidad: Math.max(1, parseInt(p.cantidad, 10) || 1) })),
+      estado: [...estados].every(e => e === 'embalado') ? 'embalado' : (estados.has('embalado') ? 'parcial' : 'para embalar'),
+      pago,
+      paquete: medido ? { largo: mk.largo, ancho: mk.ancho, alto: mk.alto, peso: mk.peso || null, bultos: mk.bultos || 1, fuente: 'medido', medido_at: mk.medido_at } : { ...est, fuente: 'estimado' },
+      pieza_mas_larga: est.pieza_mas_larga,
+      contactado: !!mk.contactado, contactado_at: mk.contactado_at || '', cargado: !!mk.cargado, cargado_at: mk.cargado_at || '', nota: mk.nota || '', nota_at: mk.nota_at || '',
+    });
+  }
+  paquetes.sort((a, b) => (a.entrega === 'sin definir') - (b.entrega === 'sin definir') || String(a.cliente).localeCompare(String(b.cliente), 'es'));
+  return { ...base, paquetes, retiran, ltv_error: ltv.ok ? '' : ltv.error };
 }
 // ===== Piezas de NEÓN PROPIO en el corte (matriz a diseñar de Neon Infinito) =====
 // Cada cartel de neón que carga un vendedor (POST /admin/pedidos) nace solo como una pieza
@@ -11414,7 +11503,10 @@ function userLookupIds(slug) {
   return [slug];
 }
 
-// Rol funcional del usuario de la sesión: admin | comercial | disenador | cursos.
+// Usuario EXTERNO de logística (Siempre a Tiempo). Fuera de /admin/logistica/* no puede leer NADA del CRM (chats,
+// ventas, clientes, plata): lo frena el muro de /admin/ y la agenda. El front no es una barrera de seguridad.
+function esUsuarioLogistica(userName) { return String(userName || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '') === 'logistica'; }
+// Rol funcional del usuario de la sesión: admin | comercial | disenador | cursos | produccion | logistica.
 // gaspar siempre admin; el resto se resuelve por su slug contra users_panel.
 async function getSessionRole(env, userName) {
   const slug = String(userName || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
@@ -13660,6 +13752,8 @@ const handler = {
         if (row && new Date(row.expires_at) >= new Date()) session = { token: qToken, user: row.user };
       }
       if (!session) return unauthorized();
+      // Logística (usuario externo): SOLO sus endpoints. Todo lo demás del CRM → 403 aunque tenga sesión válida.
+      if (esUsuarioLogistica(session.user) && !path.startsWith('/admin/logistica/')) return json({ error: 'forbidden' }, 403);
 
       // Registro de actividad por usuario (para el aviso de arranque del equipo): estampa
       // last_active SOLO para los vendedores/diseñador vigilados, throttled a 5 min, sin bloquear
@@ -18925,7 +19019,73 @@ const handler = {
         } catch (_) {
           try { rows = (await env.DB.prepare("SELECT * FROM corte_pedidos ORDER BY updated_at DESC, id DESC LIMIT 500").all()).results || []; } catch (_) {}
         }
-        return json({ ok: true, pedidos: rows, role: _cpRole, user: String(session.user || '').toLowerCase() });
+        // Medidas reales de los paquetes (las carga Neyen al embalar; las ve logística) de las tandas recientes.
+        let paquetes = [];
+        try { await ensureCortePaquetesSchema(env); paquetes = (await env.DB.prepare("SELECT tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_at, contactado, cargado FROM corte_paquetes WHERE tanda_id IN (SELECT id FROM corte_tandas ORDER BY id DESC LIMIT 4)").all()).results || []; } catch (_) {}
+        return json({ ok: true, pedidos: rows, paquetes, role: _cpRole, user: String(session.user || '').toLowerCase() });
+      }
+      // ===== LOGÍSTICA =====
+      // GET /admin/logistica/paquetes?tanda_id= → paquetes de ENVÍO de la tanda (default: la última cargada). Logística + admin.
+      if (request.method === 'GET' && path === '/admin/logistica/paquetes') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['logistica', 'admin'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        return json(await logisticaPaquetes(env, parseInt(url.searchParams.get('tanda_id'), 10) || 0));
+      }
+      // POST /admin/logistica/marcar {tanda_id, key, contactado?, cargado?, nota?} → avance de logística por paquete.
+      if (request.method === 'POST' && path === '/admin/logistica/marcar') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['logistica', 'admin'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const tandaId = parseInt(body.tanda_id, 10) || 0, key = String(body.key || '').slice(0, 80);
+        if (!tandaId || !key) return json({ error: 'faltan datos' }, 400);
+        await ensureCortePaquetesSchema(env);
+        // Solo paquetes que existen en esa tanda (no se pueden crear marcas sueltas).
+        let existe = false;
+        try { const rr = (await env.DB.prepare("SELECT telefono, cliente_nombre FROM corte_pedidos WHERE tanda_id=? AND IFNULL(producto,'')!='NEON'").bind(tandaId).all()).results || []; existe = rr.some(p => corteClaveCliente(p) === key); } catch (_) {}
+        if (!existe) return json({ error: 'ese paquete no está en la tanda' }, 404);
+        const nowIso = new Date().toISOString(), quien = String(session.user || '');
+        try { await env.DB.prepare("INSERT INTO corte_paquetes (tanda_id, cliente_key) VALUES (?, ?) ON CONFLICT(tanda_id, cliente_key) DO NOTHING").bind(tandaId, key).run(); } catch (_) {}
+        const sets = [], binds = [];
+        if (typeof body.contactado === 'boolean') { sets.push('contactado=?, contactado_at=?, contactado_por=?'); binds.push(body.contactado ? 1 : 0, body.contactado ? nowIso : null, quien); }
+        if (typeof body.cargado === 'boolean') { sets.push('cargado=?, cargado_at=?, cargado_por=?'); binds.push(body.cargado ? 1 : 0, body.cargado ? nowIso : null, quien); }
+        if (typeof body.nota === 'string') { sets.push('nota=?, nota_at=?, nota_por=?'); binds.push(body.nota.slice(0, 1000), nowIso, quien); }
+        if (!sets.length) return json({ error: 'nada para guardar' }, 400);
+        try { await env.DB.prepare("UPDATE corte_paquetes SET " + sets.join(', ') + " WHERE tanda_id=? AND cliente_key=?").bind(...binds, tandaId, key).run(); } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        return json({ ok: true });
+      }
+      // POST /admin/logistica/password {password} → SOLO admin: crea/actualiza el usuario "logistica" con esa contraseña
+      // (hash) y lo activa. Mientras no tenga contraseña queda INACTIVO (un usuario activo sin hash entra sin contraseña).
+      // Cambiarla cierra las sesiones abiertas de logística.
+      if (request.method === 'POST' && path === '/admin/logistica/password') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const pw = String(body.password || '');
+        if (pw.length < 8) return json({ error: 'la contraseña tiene que tener al menos 8 caracteres' }, 400);
+        const hash = await sha256hex(pw);
+        try {
+          await env.DB.prepare("INSERT INTO users_panel (id, nombre, rol, activo, password_hash, created_at) VALUES ('logistica', 'Logística', 'logistica', 1, ?, ?) ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash, rol='logistica', activo=1").bind(hash, new Date().toISOString()).run();
+          await env.DB.prepare("DELETE FROM sessions WHERE lower(user) IN ('logistica', 'logística')").run();
+        } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        return json({ ok: true, usuario: 'logistica' });
+      }
+      // POST /admin/corte/paquete {tanda_id, key, largo, ancho, alto, peso?, bultos?} → medidas REALES del paquete (Neyen al
+      // embalar). Reemplazan a la estimación en la vista de logística.
+      if (request.method === 'POST' && path === '/admin/corte/paquete') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['admin', 'produccion'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const tandaId = parseInt(body.tanda_id, 10) || 0, key = String(body.key || '').slice(0, 80);
+        const num = (v, max) => { const n = parseFloat(String(v == null ? '' : v).replace(',', '.')); return (n > 0 && n <= max) ? Math.round(n * 10) / 10 : null; };
+        const largo = num(body.largo, 400), ancho = num(body.ancho, 400), alto = num(body.alto, 400), peso = num(body.peso, 200);
+        const bultos = Math.max(1, Math.min(20, parseInt(body.bultos, 10) || 1));
+        if (!tandaId || !key) return json({ error: 'faltan datos' }, 400);
+        if (!(largo && ancho && alto)) return json({ error: 'largo, ancho y alto en cm (números)' }, 400);
+        await ensureCortePaquetesSchema(env);
+        try {
+          await env.DB.prepare("INSERT INTO corte_paquetes (tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_por, medido_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(tanda_id, cliente_key) DO UPDATE SET largo=excluded.largo, ancho=excluded.ancho, alto=excluded.alto, peso=excluded.peso, bultos=excluded.bultos, medido_por=excluded.medido_por, medido_at=excluded.medido_at")
+            .bind(tandaId, key, largo, ancho, alto, peso, bultos, String(session.user || ''), new Date().toISOString()).run();
+        } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        return json({ ok: true });
       }
       // POST /admin/corte/pedido → colas operativas: transición de estado + carga de datos, por rol.
       // body { id, action, ... }. action: 'medidas' (Emma: ancho_real/alto_real/matriz → matriz_lista + precio),

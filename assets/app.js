@@ -20,7 +20,7 @@ const OFRECER_BASE_NEGRA = false;
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Diseñador', 'Abril', 'Aníbal', 'Neyen'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Diseñador', 'Abril', 'Aníbal', 'Neyen', 'Logística'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -1232,6 +1232,8 @@ function isCursosUser(s) { const k = _userKey(s); return k === 'abril' || k === 
 function isAnibalUser(s) { return _userKey(s) === 'anibal'; }
 function isNeyenUser(s) { return _userKey(s) === 'neyen'; }
 function isProduccionUser(s) { return isAnibalUser(s) || isNeyenUser(s); }
+// Logística (usuario EXTERNO, Siempre a Tiempo): solo ve su vista de envíos. El backend le niega todo lo demás.
+function isLogisticaUser(s) { return _userKey(s) === 'logistica'; }
 // El token cargado pertenece a este usuario? (evita reutilizar token de bajo
 // privilegio para pasar como admin).
 function tokenBelongsTo(name) {
@@ -1384,6 +1386,7 @@ function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) &&
 function isCursosOnly() { return isCursosUser(STATE.user); }
 // Aníbal / Neyen (rol produccion): SOLO ven la sección Corte (su cola).
 function isProduccionOnly() { return isProduccionUser(STATE.user); }
+function isLogisticaOnly() { return isLogisticaUser(STATE.user); }
 // Señal de actividad HUMANA para el "arranque"/horas del equipo: marcamos el último gesto real
 // del usuario (click/tecla/touch/scroll). Cada request lleva X-NI-Human=1 solo si hubo
 // interacción hace <5 min; si no (polls automáticos, app en segundo plano, celu dormido) va 0
@@ -1880,6 +1883,7 @@ function setHistSheetCache(name, rows) {
 }
 
 async function loadAll(opts) {
+  if (isLogisticaUser(STATE.user)) return; // logística no carga ventas/presupuestos/cotizador (ni le llegan al navegador)
   const silent = !!(opts && opts.silent);
   // Stale-while-revalidate: si tenemos caché y no se pidió refresh forzado,
   // mostramos data al toque y refrescamos en background.
@@ -2391,7 +2395,9 @@ function setView(v) {
   // Diseñador confinado a Cotización (+ puede ir a Corte); Abril (cursos) al Chat WA; produccion (Aníbal/Neyen) a Corte.
   if (isCursosOnly()) v = 'chat';
   else if (isProduccionOnly()) v = 'corte';
+  else if (isLogisticaOnly()) v = 'logistica';
   else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
+  if (v === 'logistica' && !isLogisticaOnly() && !isAdmin()) v = 'dashboard';
   const entraACorte = v === 'corte' && STATE.view !== 'corte';
   STATE.view = v;
   STATE.selected = null;
@@ -2404,7 +2410,9 @@ window.addEventListener('hashchange', () => {
   let h = location.hash.replace('#','') || 'dashboard';
   if (isCursosOnly()) h = 'chat';
   else if (isProduccionOnly()) h = 'corte';
+  else if (isLogisticaOnly()) h = 'logistica';
   else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
+  if (h === 'logistica' && !isLogisticaOnly() && !isAdmin()) h = 'dashboard';
   if (h !== STATE.view) { STATE.view = h; render(); if (h === 'corte' && STATE.cortePedidos !== undefined) corteCargar(true); }
 });
 
@@ -2688,6 +2696,12 @@ function render() {
   } else if (isProduccionOnly() && !['corte'].includes(STATE.view)) {
     STATE.view = 'corte';
     if (location.hash !== '#corte') location.hash = 'corte';
+  } else if (isLogisticaOnly() && STATE.view !== 'logistica') {
+    STATE.view = 'logistica';
+    if (location.hash !== '#logistica') location.hash = 'logistica';
+  } else if (STATE.view === 'logistica' && !isLogisticaOnly() && !isAdmin()) {
+    STATE.view = 'dashboard';
+    if (location.hash !== '#dashboard') location.hash = 'dashboard';
   } else if (isDisenadorOnly() && !['cotizacion', 'corte'].includes(STATE.view)) {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
@@ -2723,6 +2737,7 @@ function render() {
   // fetch de Sheets se colgaba en un arranque sin caché, la app quedaba trabada.
   if (STATE.view === 'chat') document.getElementById('main').innerHTML = renderChat();
   else if (STATE.view === 'corte') document.getElementById('main').innerHTML = renderCorte(); // corte carga su propia data (no depende del Sheet ni de /admin/pedidos)
+  else if (STATE.view === 'logistica') document.getElementById('main').innerHTML = renderLogistica(); // idem: su propia data
   else if (STATE.error)   document.getElementById('main').innerHTML = renderError();
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
   else {
@@ -2760,6 +2775,7 @@ function render() {
   if (STATE.view === 'cotizacion')   bindCotizacion();
   if (STATE.view === 'corporeas')    bindCorporeas();
   if (STATE.view === 'corte')        bindCorte();
+  if (STATE.view === 'logistica')    bindLogistica();
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
     if (isAdmin()) bindBusinessPanel();
@@ -3833,6 +3849,7 @@ function renderCorte() {
         <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
           <div style="font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${done ? '<span style="color:#22c55e">✓</span> ' : ''}${escapeHtml(g.nombre || 'cliente')} <span style="color:var(--fg-mute);font-weight:400;font-size:12px">· ${g.items.length} pieza${g.items.length === 1 ? '' : 's'}</span>${entregaBadge(g.entrega)}</div>
           ${g.items.map(p => `<div style="font-size:13px;color:var(--fg-mute);padding:2px 0">• ${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ' — ' + escapeHtml(p.medida_declarada) : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</div>`).join('')}
+          ${g.entrega === 'envio' ? cortePaqMedidasHtml(g) : ''}
           <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
             ${done ? `<button class="btn ghost" data-corte-desembalar="${g.items.map(p => p.id).join(',')}" style="font-size:12px;padding:5px 11px">↩ Deshacer</button>` : `<button class="btn" ${g.tel ? `data-corte-embalar-tel="${escapeHtml(g.tel)}"` : `data-corte-embalar-ids="${g.items.map(p => p.id).join(',')}"`} data-corte-entrega="${escapeHtml(g.entrega || '')}">📦 Marcar paquete embalado</button>`}
           </div>
@@ -4060,6 +4077,199 @@ function corteRenderFondoOk() {
 // que ya había si falla la red, y re-renderiza solo si algo cambió y corteRenderFondoOk(). Contador de
 // generación: una carga completa (tras una acción) invalida cualquier respuesta anterior todavía en vuelo,
 // así una respuesta vieja no devuelve a la cola la pieza que Emma acaba de terminar.
+// ===== LOGÍSTICA (usuario externo: Siempre a Tiempo) =====
+// Los lunes, con la tanda cargada, ven los paquetes que van por ENVÍO (cliente, teléfono, dirección, tamaño) para
+// contactar a los clientes mientras Neyen embala; el martes los cargan en el camión. Sin precios ni montos.
+function _corteNormNombre(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, ''); }
+function corteClaveClienteFront(telefono, nombre) { return telefono ? String(telefono) : 'n:' + _corteNormNombre(nombre); }
+// Misma estimación que el worker (corteEstimarPaquete): la usa Neyen como referencia al medir.
+function corteEstimarPaqueteFront(items) {
+  let L = 0, W = 0, piezas = 0, kg = 0, cable = 0, fuentes = 0, otros = 0;
+  for (const p of items) {
+    const q = Math.max(1, parseInt(p.cantidad, 10) || 1);
+    let a = Number(p.ancho_real) || 0, h = Number(p.alto_real) || 0;
+    if (!(a > 0 && h > 0)) { const m = String(p.medida_declarada || '').match(/(\d+(?:[.,]\d+)?)\s*[x×*]\s*(\d+(?:[.,]\d+)?)/i); if (m) { a = parseFloat(m[1].replace(',', '.')); h = parseFloat(m[2].replace(',', '.')); } }
+    if (a > 0 && h > 0) { L = Math.max(L, Math.max(a, h)); W = Math.max(W, Math.min(a, h)); piezas += q; kg += (a * h * 0.3 * 1.19 / 1000) * q; }
+    else { const pr = String(p.producto || '') + ' ' + String(p.diseno_nombre || ''); if (/cable|rollo/i.test(pr)) { cable += q; kg += 1.2 * q; } else if (/fuen|fuet/i.test(pr)) { fuentes += q; kg += 0.35 * q; } else { otros += q; kg += 0.5 * q; } }
+  }
+  let largo = piezas ? L + 6 : 30, ancho = piezas ? W + 6 : 25, alto = piezas ? piezas * 0.8 + 4 : 0;
+  alto += cable * 8 + Math.ceil(fuentes / 4) * 5 + otros * 5;
+  if (!piezas) alto = Math.max(alto, 10);
+  kg += 0.4 + (largo * ancho / 10000) * 0.6;
+  return { largo: Math.round(largo), ancho: Math.round(ancho), alto: Math.round(alto), peso: Math.round(kg * 10) / 10 };
+}
+const _fmtKg = n => (Math.round((Number(n) || 0) * 10) / 10).toLocaleString('es-AR');
+function logiPaqTxt(pq) { return `${pq.largo} × ${pq.ancho} × ${pq.alto} cm${pq.peso ? ' · ' + (pq.fuente === 'estimado' ? '≈ ' : '') + _fmtKg(pq.peso) + ' kg' : ''}${(pq.bultos || 1) > 1 ? ' · ' + pq.bultos + ' bultos' : ''}`; }
+// Neyen: medidas REALES del paquete (solo los que van por envío) → reemplazan la estimación en la vista de logística.
+function cortePaqInfo(g) {
+  const tandaId = Math.max(0, ...g.items.map(p => +p.tanda_id || 0));
+  const key = corteClaveClienteFront(g.tel, g.nombre);
+  const saved = (STATE.cortePaquetes || []).find(x => x.tanda_id === tandaId && x.cliente_key === key) || null;
+  return { tandaId, key, saved, est: corteEstimarPaqueteFront(g.items) };
+}
+function cortePaqMedidasHtml(g) {
+  const { tandaId, key, saved, est } = cortePaqInfo(g);
+  if (!tandaId) return '';
+  const d = (STATE.cortePaqDraft || {})[key] || {};
+  const val = (f, def) => escapeHtml(String(d[f] != null ? d[f] : (saved && saved[f] != null ? saved[f] : (def != null ? def : ''))));
+  const inp = (f, ph, w, def) => `<input data-paq-f="${f}" data-paq-k="${escapeHtml(key)}" value="${val(f, def)}" placeholder="${ph}" inputmode="decimal" style="width:${w}px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:4px 6px;color:var(--fg);font-size:12px">`;
+  return `<div style="margin-top:8px;padding:8px 10px;border:1px dashed var(--border);border-radius:8px;font-size:12px">
+    <div style="color:var(--fg-mute);margin-bottom:6px">📏 Paquete para logística ${saved ? '<b style="color:#22c55e">· medido ✓</b>' : `· estimado ≈ ${est.largo}×${est.ancho}×${est.alto} cm · ${_fmtKg(est.peso)} kg — medilo al embalar`}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${inp('largo', 'largo', 58)}×${inp('ancho', 'ancho', 58)}×${inp('alto', 'alto', 52)} cm ${inp('peso', 'kg', 52)} kg ${inp('bultos', '1', 40, saved ? null : 1)} bulto(s)
+      <button class="btn ghost" data-paq-ok="${escapeHtml(key)}" data-paq-t="${tandaId}" style="font-size:11px;padding:4px 10px">Guardar medidas</button></div>
+  </div>`;
+}
+async function cortePaqGuardar(key, tandaId, btn) {
+  const get = f => { const el = document.querySelector(`[data-paq-k="${CSS.escape(key)}"][data-paq-f="${f}"]`); return el ? el.value.trim() : ''; };
+  const body = { tanda_id: tandaId, key, largo: get('largo'), ancho: get('ancho'), alto: get('alto'), peso: get('peso'), bultos: get('bultos') || 1 };
+  if (!(parseFloat(String(body.largo).replace(',', '.')) > 0 && parseFloat(String(body.ancho).replace(',', '.')) > 0 && parseFloat(String(body.alto).replace(',', '.')) > 0)) { toast('Completá largo, ancho y alto (cm)'); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/paquete', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(x => x.json());
+    if (r && r.ok) {
+      toast('Medidas guardadas: logística ya las ve');
+      const num = v => parseFloat(String(v).replace(',', '.')) || null;
+      STATE.cortePaquetes = (STATE.cortePaquetes || []).filter(x => !(x.tanda_id === tandaId && x.cliente_key === key)).concat([{ tanda_id: tandaId, cliente_key: key, largo: num(body.largo), ancho: num(body.ancho), alto: num(body.alto), peso: num(body.peso), bultos: parseInt(body.bultos, 10) || 1 }]);
+      if (STATE.cortePaqDraft) delete STATE.cortePaqDraft[key];
+      render();
+    } else { toast((r && r.error) || 'No se pudo guardar'); if (btn) btn.disabled = false; }
+  } catch (_) { toast('Error de red'); if (btn) btn.disabled = false; }
+}
+async function logisticaCargar(silent) {
+  if (STATE._logiLoading) return;
+  STATE._logiLoading = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/logistica/paquetes' + (STATE.logiTanda ? '?tanda_id=' + STATE.logiTanda : ''), { headers: authHeaders() }).then(x => x.json());
+    if (r && r.ok) STATE.logi = r; else if (!silent || !STATE.logi) STATE.logi = { error: (r && r.error) || 'No se pudo cargar' };
+  } catch (_) { if (!silent || !STATE.logi) STATE.logi = { error: 'Error de red' }; }
+  finally {
+    STATE._logiLoading = false;
+    // No re-dibujar mientras escriben una nota (perderían el foco); el borrador igual queda en STATE.
+    const ae = document.activeElement;
+    if (STATE.view === 'logistica' && !(ae && ae.matches && ae.matches('[data-logi-nota]'))) render();
+  }
+}
+function renderLogistica() {
+  const L = STATE.logi;
+  if (!L) return `<div style="padding:24px;color:var(--fg-mute)">Cargando envíos…</div>`;
+  if (L.error) return `<div style="padding:24px"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(L.error)}</div><button class="btn" data-logi-refresh>Reintentar</button></div>`;
+  const t = L.tanda, tandas = L.tandas || [];
+  const idx = t ? tandas.findIndex(x => x.id === t.id) : -1;
+  const prev = idx >= 0 && idx < tandas.length - 1 ? tandas[idx + 1] : null, next = idx > 0 ? tandas[idx - 1] : null;
+  const paq = L.paquetes || [];
+  const q = (STATE.logiQ || '').trim().toLowerCase(), f = STATE.logiFiltro || 'todos';
+  const envio = paq.filter(p => p.entrega === 'envio');
+  const cnt = { todos: envio.length, sin: envio.filter(p => !p.contactado).length, cont: envio.filter(p => p.contactado && !p.cargado).length, carg: envio.filter(p => p.cargado).length };
+  const pasa = p => (!q || [p.cliente, p.telefono, p.datos_envio].some(x => String(x || '').toLowerCase().includes(q)))
+    && (f === 'todos' || (f === 'sin' && !p.contactado) || (f === 'cont' && p.contactado && !p.cargado) || (f === 'carg' && p.cargado));
+  const badge = (txt, col) => `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;white-space:nowrap;color:${col};background:color-mix(in srgb, ${col} 15%, transparent)">${txt}</span>`;
+  const card = p => {
+    const tel = String(p.telefono || '').replace(/\D/g, '');
+    const nota = (STATE.logiNotaDraft && STATE.logiNotaDraft[p.key] != null) ? STATE.logiNotaDraft[p.key] : (p.nota || '');
+    return `<article data-logi-card="${escapeHtml(p.key)}" style="background:var(--ink-100);border:1px solid var(--border);border-left:4px solid ${p.cargado ? '#22c55e' : (p.contactado ? '#38bdf8' : 'var(--border)')};border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:9px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap">
+        <b style="font-size:15px">${escapeHtml(p.cliente || 'cliente')}</b>
+        <span style="display:flex;gap:6px;flex-wrap:wrap">${p.estado === 'embalado' ? badge('✓ Embalado', '#22c55e') : badge(p.estado === 'parcial' ? 'Embalando' : 'En preparación', '#94a3b8')}${p.pago === 'pagado' ? badge('Pagado', '#22c55e') : badge(p.pago === 'parcial' ? '⚠ Pago parcial — consultar' : '⚠ Pago pendiente — no despachar', '#f59e0b')}</span>
+      </div>
+      <div style="font-size:13px">${tel ? `📞 <a href="https://wa.me/${tel}" target="_blank" rel="noopener">${escapeHtml(corteFmtTel(tel))}</a> · <a href="tel:+${tel}">Llamar</a>` : '<span style="color:#ef4444">⚠ Sin teléfono — consultá con Neon Infinito</span>'}</div>
+      <div style="font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere">${p.falta_direccion ? '<span style="color:#ef4444">⚠ Falta la dirección: pedísela al cliente</span>' : '📍 ' + escapeHtml(p.datos_envio)}</div>
+      <div style="font-size:14px;font-weight:700">📦 ${logiPaqTxt(p.paquete)} <span style="font-weight:400;font-size:11px;color:var(--fg-mute)">${p.paquete.fuente === 'medido' ? '· medido al embalar' : '· estimado (se confirma al embalar)'}</span>${p.pieza_mas_larga >= 120 ? ' ' + badge('pieza larga: ' + p.pieza_mas_larga + ' cm', '#f59e0b') : ''}</div>
+      <details style="font-size:12px;color:var(--fg-mute)"><summary style="cursor:pointer">Contenido (${p.piezas.reduce((s, x) => s + x.cantidad, 0)} pieza${p.piezas.reduce((s, x) => s + x.cantidad, 0) === 1 ? '' : 's'}${p.insumos.length ? ' + ' + p.insumos.length + ' insumo' + (p.insumos.length === 1 ? '' : 's') : ''})</summary>
+        ${p.piezas.map(x => `<div>• ${escapeHtml(x.diseno || 'diseño')}${x.medida ? ' — ' + escapeHtml(x.medida) + ' cm' : ''}${x.cantidad > 1 ? ' ×' + x.cantidad : ''}</div>`).join('')}${p.insumos.map(x => `<div>• ${escapeHtml(x.nombre)}${x.cantidad > 1 ? ' ×' + x.cantidad : ''}</div>`).join('')}
+      </details>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;border-top:1px solid var(--border);padding-top:9px">
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" data-logi-check="contactado" data-k="${escapeHtml(p.key)}"${p.contactado ? ' checked' : ''}> Cliente contactado</label>
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" data-logi-check="cargado" data-k="${escapeHtml(p.key)}"${p.cargado ? ' checked' : ''}> Cargado en el camión</label>
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-start">
+        <textarea data-logi-nota="${escapeHtml(p.key)}" rows="1" placeholder="Nota (no contesta, cambia dirección, horario…)" style="flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:6px 8px;color:var(--fg);font:inherit;font-size:12px;resize:vertical">${escapeHtml(nota)}</textarea>
+        <button class="btn ghost" data-logi-nota-ok="${escapeHtml(p.key)}" style="font-size:12px;padding:5px 10px">Guardar</button>
+      </div>
+      ${p.nota_at ? `<div style="font-size:11px;color:var(--fg-mute);margin-top:-4px">nota guardada ${escapeHtml(new Date(p.nota_at).toLocaleString('es-AR', { day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' }))}</div>` : ''}
+    </article>`;
+  };
+  const chip = (k, lab, n) => `<button class="btn ${f === k ? '' : 'ghost'}" data-logi-filtro="${k}" style="font-size:12px;padding:5px 11px">${lab} <b>${n}</b></button>`;
+  const lista = envio.filter(pasa);
+  const sinDef = paq.filter(p => p.entrega !== 'envio').filter(pasa);
+  const navBtn = (tt, lab, dir) => `<button data-logi-tanda="${tt ? tt.id : ''}"${tt ? '' : ' disabled'} title="${dir}" style="border:1px solid var(--border);background:var(--ink-100);color:var(--fg);width:34px;height:34px;border-radius:9px;cursor:${tt ? 'pointer' : 'default'};opacity:${tt ? 1 : .35};font-size:17px">${lab}</button>`;
+  return `<div style="padding:var(--s-4);max-width:1180px">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px">
+      <h1 style="margin:0;font-size:20px">📦 Envíos de la semana</h1>
+      ${t ? `<div style="display:flex;align-items:center;gap:8px">${navBtn(prev, '‹', 'Semana anterior')}<b style="font-size:16px;min-width:84px;text-align:center">${escapeHtml(t.fecha)}</b>${navBtn(next, '›', 'Semana siguiente')}</div>` : ''}
+      <span style="flex:1"></span>
+      <button class="btn ghost" data-logi-print style="font-size:12px;padding:5px 11px">🖨 Imprimir lista</button>
+      <button class="btn ghost" data-logi-refresh style="font-size:12px;padding:5px 11px">↻ Actualizar</button>
+      ${isAdmin() ? `<button class="btn ghost" data-logi-password style="font-size:12px;padding:5px 11px" title="Crear o cambiar la contraseña del usuario 'logistica'">🔑 Contraseña de logística</button>` : ''}
+    </div>
+    <p style="color:var(--fg-mute);font-size:13px;margin:0 0 12px">${t ? `${envio.length} paquete${envio.length === 1 ? '' : 's'} para envío · ${L.retiran || 0} retiran en el taller (no figuran acá). Los lunes contactá a los clientes mientras se embala; el martes se cargan en el camión.` : 'Todavía no hay ninguna tanda cargada.'}</p>
+    ${L.ltv_error ? `<div style="color:#f59e0b;font-size:12px;margin-bottom:10px">⚠ No se pudieron leer las direcciones (${escapeHtml(L.ltv_error)}).</div>` : ''}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
+      ${chip('todos', 'Todos', cnt.todos)}${chip('sin', 'Sin contactar', cnt.sin)}${chip('cont', 'Contactados', cnt.cont)}${chip('carg', 'Cargados', cnt.carg)}
+      <input id="logi-q" placeholder="Buscar cliente, teléfono o localidad…" value="${escapeHtml(STATE.logiQ || '')}" style="flex:1;min-width:200px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:7px 11px;color:var(--fg);font-size:13px">
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px">${lista.map(card).join('') || `<div style="padding:22px;color:var(--fg-mute);border:1px dashed var(--border);border-radius:10px">${envio.length ? 'Sin coincidencias' : 'No hay paquetes para envío en esta semana'}</div>`}</div>
+    ${sinDef.length ? `<h2 style="font-size:15px;margin:22px 0 4px;color:#ef4444">⚠ Entrega sin definir (${sinDef.length})</h2><p style="font-size:12px;color:var(--fg-mute);margin:0 0 10px">Todavía no se sabe si van por envío o retiran: consultá con Neon Infinito antes de coordinar.</p><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px">${sinDef.map(card).join('')}</div>` : ''}
+  </div>`;
+}
+async function logiMarcar(key, cambios) {
+  const L = STATE.logi; if (!L || !L.tanda) return false;
+  const p = (L.paquetes || []).find(x => x.key === key); const antes = p ? { ...p } : null;
+  if (p) Object.assign(p, cambios, cambios.nota != null ? { nota_at: new Date().toISOString() } : {});
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/logistica/marcar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ tanda_id: L.tanda.id, key, ...cambios }) }).then(x => x.json());
+    if (!r || !r.ok) throw new Error((r && r.error) || 'No se pudo guardar');
+    return true;
+  } catch (e) { if (p && antes) Object.assign(p, antes); toast(e.message || 'Error de red'); return false; }
+  finally { render(); }
+}
+function logiImprimir() {
+  const L = STATE.logi; if (!L || !L.tanda) return;
+  const esc = s => escapeHtml(String(s == null ? '' : s));
+  const rows = (L.paquetes || []).filter(p => p.entrega === 'envio').map((p, i) => `<tr><td>${i + 1}</td><td><b>${esc(p.cliente)}</b><br>${esc(corteFmtTel(p.telefono))}</td><td style="white-space:pre-wrap">${p.falta_direccion ? '<i>FALTA DIRECCIÓN</i>' : esc(p.datos_envio)}</td><td>${esc(logiPaqTxt(p.paquete))}${p.paquete.fuente === 'estimado' ? ' (est.)' : ''}</td><td>${p.pago === 'pagado' ? 'Pagado' : '<b>NO DESPACHAR</b> (pago pendiente)'}</td><td>${p.contactado ? '✓' : ''}</td><td>${p.cargado ? '✓' : ''}</td><td>${esc(p.nota)}</td></tr>`).join('');
+  const w = window.open('', '_blank'); if (!w) { toast('Permití las ventanas emergentes para imprimir'); return; }
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Envíos ${esc(L.tanda.fecha)}</title><style>body{font:12px/1.35 system-ui,sans-serif;margin:18px}h1{font-size:16px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:5px;vertical-align:top;text-align:left}th{background:#eee}tr{break-inside:avoid}</style></head><body><h1>Envíos de la semana del ${esc(L.tanda.fecha)} — Neon Infinito</h1><table><thead><tr><th>#</th><th>Cliente</th><th>Dirección</th><th>Paquete</th><th>Pago</th><th>Contactado</th><th>Cargado</th><th>Nota</th></tr></thead><tbody>${rows}</tbody></table><script>window.onload=()=>window.print()<\/script></body></html>`);
+  w.document.close();
+}
+function logiPasswordModal() {
+  return new Promise(resolve => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>Contraseña del usuario de logística</h3></div><div class="modal-body"><form class="login-form" novalidate>
+      <div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Usuario: <b>logistica</b>. Mínimo 8 caracteres. Al cambiarla se cierran las sesiones abiertas de logística.</div>
+      <label class="nc-field"><span class="nc-label">Contraseña nueva</span><input type="password" class="nc-input" data-p1 autocomplete="new-password"></label>
+      <label class="nc-field" style="margin-top:10px"><span class="nc-label">Repetila</span><input type="password" class="nc-input" data-p2 autocomplete="new-password"></label>
+      <div data-perr style="color:#ef4444;font-size:12px;min-height:16px;margin-top:6px"></div>
+      <button type="submit" class="btn btn-cyan" style="width:100%;margin-top:8px">Guardar</button>
+      <button type="button" class="btn btn-ghost" data-pcancel style="width:100%;margin-top:8px">Cancelar</button></form></div></div>`;
+    document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+    const finish = v => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); resolve(v); };
+    const p1 = bg.querySelector('[data-p1]'), p2 = bg.querySelector('[data-p2]'), err = bg.querySelector('[data-perr]');
+    bg.querySelector('form').addEventListener('submit', e => { e.preventDefault(); if (p1.value.length < 8) { err.textContent = 'Mínimo 8 caracteres'; return; } if (p1.value !== p2.value) { err.textContent = 'No coinciden'; return; } finish(p1.value); });
+    bg.querySelector('[data-pcancel]').onclick = () => finish(null);
+    bg.addEventListener('click', e => { if (e.target === bg) finish(null); });
+    setTimeout(() => p1.focus(), 50);
+  });
+}
+async function logiPasswordUI() {
+  const pw = await logiPasswordModal(); if (!pw) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/logistica/password', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) }).then(x => x.json());
+    toast(r && r.ok ? 'Listo: el usuario "logistica" ya puede entrar con esa contraseña' : ((r && r.error) || 'No se pudo guardar'));
+  } catch (_) { toast('Error de red'); }
+}
+function bindLogistica() {
+  if (!STATE.logi && !STATE._logiLoading) logisticaCargar(false);
+  if (!window._logiTimer) window._logiTimer = setInterval(() => { if (STATE.view === 'logistica' && document.visibilityState === 'visible') logisticaCargar(true); }, 90 * 1000);
+  document.querySelectorAll('[data-logi-refresh]').forEach(b => { b.onclick = () => { if (STATE.logi && STATE.logi.error) STATE.logi = undefined; logisticaCargar(false); }; });
+  document.querySelectorAll('[data-logi-tanda]').forEach(b => { b.onclick = () => { const id = parseInt(b.getAttribute('data-logi-tanda'), 10); if (id) { STATE.logiTanda = id; STATE.logi = undefined; render(); } }; });
+  document.querySelectorAll('[data-logi-filtro]').forEach(b => { b.onclick = () => { STATE.logiFiltro = b.getAttribute('data-logi-filtro'); render(); }; });
+  const pb = document.querySelector('[data-logi-print]'); if (pb) pb.onclick = () => logiImprimir();
+  const pw = document.querySelector('[data-logi-password]'); if (pw) pw.onclick = () => logiPasswordUI();
+  const qi = document.getElementById('logi-q');
+  if (qi) qi.oninput = () => { STATE.logiQ = qi.value; render(); const n = document.getElementById('logi-q'); if (n) { n.focus(); const L = n.value.length; try { n.setSelectionRange(L, L); } catch (_) {} } };
+  document.querySelectorAll('[data-logi-check]').forEach(c => { c.onchange = () => logiMarcar(c.getAttribute('data-k'), { [c.getAttribute('data-logi-check')]: c.checked }); });
+  document.querySelectorAll('[data-logi-nota]').forEach(t => { t.oninput = () => { STATE.logiNotaDraft = STATE.logiNotaDraft || {}; STATE.logiNotaDraft[t.getAttribute('data-logi-nota')] = t.value; }; });
+  document.querySelectorAll('[data-logi-nota-ok]').forEach(b => { b.onclick = async () => { const k = b.getAttribute('data-logi-nota-ok'); const t = document.querySelector(`[data-logi-nota="${CSS.escape(k)}"]`); if (!t) return; b.disabled = true; const ok = await logiMarcar(k, { nota: t.value }); if (ok) { if (STATE.logiNotaDraft) delete STATE.logiNotaDraft[k]; toast('Nota guardada'); } }; });
+}
 // ===== Herramientas del admin: cargar tanda desde la planilla, entrega desde la planilla, clientes SIN teléfono =====
 function corteLunesReciente() { const d = new Date(Date.now() - 3 * 3600 * 1000); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); }
 function corteHerramientasHtml() {
@@ -4172,10 +4382,12 @@ async function corteCargar(silent) {
   if (gen !== STATE._corteGen) return; // llegó una carga más nueva (o cambió el usuario): descartar
   if (silent) {
     if (res[0] && Array.isArray(res[0].pedidos)) STATE.cortePedidos = res[0].pedidos;
+    if (res[0] && Array.isArray(res[0].paquetes)) STATE.cortePaquetes = res[0].paquetes;
     if (res[1] && res[1].ok) STATE.corteTanda = res[1];
   } else {
     STATE._corteLoading = false;
     STATE.cortePedidos = (res[0] && res[0].pedidos) || STATE.cortePedidos || [];
+    STATE.cortePaquetes = (res[0] && res[0].paquetes) || STATE.cortePaquetes || [];
     STATE.corteTanda = (res[1] && res[1].ok) ? res[1] : null;
     STATE.corteAlumnos = admin ? ((res[2] && res[2].alumnos) || []) : [];
     STATE.cortePropuestas = admin ? ((res[3] && res[3].propuestas) || []) : [];
@@ -4323,6 +4535,9 @@ async function bindCorte() {
       corteBulk('embalado_bulk', { telefono: btn.getAttribute('data-corte-embalar-tel') }); // sin entrega: sale de la planilla
     };
   });
+  // Neyen: medidas reales del paquete para logística (lo tipeado sobrevive a los refrescos de fondo).
+  document.querySelectorAll('[data-paq-f]').forEach(inp => { inp.oninput = () => { const k = inp.getAttribute('data-paq-k'); STATE.cortePaqDraft = STATE.cortePaqDraft || {}; STATE.cortePaqDraft[k] = Object.assign(STATE.cortePaqDraft[k] || {}, { [inp.getAttribute('data-paq-f')]: inp.value }); }; });
+  document.querySelectorAll('[data-paq-ok]').forEach(b => { b.onclick = () => cortePaqGuardar(b.getAttribute('data-paq-ok'), parseInt(b.getAttribute('data-paq-t'), 10) || 0, b); });
   // Paquete de un cliente SIN teléfono: se embala por ids (embalado_bulk necesita teléfono y antes fallaba).
   document.querySelectorAll('[data-corte-embalar-ids]').forEach(btn => {
     btn.onclick = () => {
@@ -4591,6 +4806,8 @@ function renderShell() {
           </button>
         ` : isProduccionOnly() ? `
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
+        ` : isLogisticaOnly() ? `
+          <button class="nav-item active" data-view="logistica"><span class="icon">📦</span> Envíos</button>
         ` : isDisenadorOnly() ? `
           <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte ${corteBadgeHtml()}</button>
@@ -4602,6 +4819,7 @@ function renderShell() {
         ${isAdmin() ? `<button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>` : ''}
         ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isSecundario(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${v==='logistica'?'active':''}" data-view="logistica"><span class="icon">📦</span> Logística</button>` : ''}
         ${!isSecundario(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>` : ''}
@@ -17535,6 +17753,7 @@ function getUserRole() {
   const u = (STATE.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   if (u === 'gaspar')                                   return 'admin';
   if (u === 'emma' || u === 'emmanuel' || u === 'disenador') return 'disenador';
+  if (u === 'logistica') return 'logistica'; // externo: ningún permiso de "comercial" (cotizar, OC, chats…)
   return 'comercial'; // joaco, joaquin, default
 }
 function canCreateBriefs() { if (isCursosUser(STATE.user)) return false; const r = getUserRole(); return r === 'comercial' || r === 'admin'; }
