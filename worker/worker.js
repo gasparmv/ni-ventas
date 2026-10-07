@@ -4753,7 +4753,9 @@ function corteEntregaCambiosTxt(cambios) {
 async function corteSyncEntrega(env, { soloTandaId = 0, notify = false } = {}) {
   await ensureCorteHojaSchema(env);
   let rows = [];
-  try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, hoja_cliente, hoja_fecha, entrega, estado FROM corte_pedidos WHERE IFNULL(producto,'')!='NEON' AND hoja_fecha IS NOT NULL AND hoja_fecha!='' AND estado NOT IN ('despachado','entregado') AND " + (soloTandaId ? "tanda_id=?" : "created_at > ?")).bind(soloTandaId ? soloTandaId : new Date(Date.now() - 35 * 86400000).toISOString()).all()).results || []; } catch (_) {}
+  // Solo la tanda EN CURSO (piezas de los últimos 8 días): las anteriores ya salieron aunque sigan "embalado" (nadie
+  // las marca despachadas) y tocarlas mandaría avisos falsos de "avisale a Neyen".
+  try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, hoja_cliente, hoja_fecha, entrega, estado FROM corte_pedidos WHERE IFNULL(producto,'')!='NEON' AND hoja_fecha IS NOT NULL AND hoja_fecha!='' AND estado NOT IN ('despachado','entregado') AND " + (soloTandaId ? "tanda_id=?" : "created_at > ?")).bind(soloTandaId ? soloTandaId : new Date(Date.now() - 8 * 86400000).toISOString()).all()).results || []; } catch (_) {}
   if (!rows.length) return { ok: true, cambios: [], revisadas: 0 };
   const ent = await corteEntregaHoja(env);
   if (!ent.ok) return { error: ent.error };
