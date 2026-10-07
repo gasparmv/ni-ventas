@@ -3431,6 +3431,10 @@ async function buildReporteDiario(env) {
       `SELECT COUNT(*) AS n FROM oc_enviadas WHERE ts_out >= ${REPORTE_DIA_DESDE} AND ts_out < ${REPORTE_DIA_HASTA}`
     ).first();
     out.ocEnviadas = (r && r.n) || 0;
+    try {
+      const ab = await buildOcAbiertas(env);
+      if (ab) out.ocAbiertas = { total: ab.total, joaco: ab.porVend.joaco.length, facundo: ab.porVend.facundo.length, agustina: ab.porVend.agustina.length };
+    } catch (_) {}
   } catch (_) {}
   return out;
 }
@@ -3448,7 +3452,7 @@ function formatReporteDiario(d) {
     `   Joaco: ${d.chatsJoaco} · 2° (Facu/Agus): ${d.chatsNadia}\n\n` +
     `📋 Presupuestos enviados: ${d.presupTotal}\n` +
     `   Joaco: ${d.presupJoaco} · 2° (Facu/Agus): ${d.presupNadia}\n\n` +
-    `🧾 Órdenes de compra: ${d.ocEnviadas}`
+    `🧾 Órdenes de compra: ${d.ocEnviadas}${d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina})` : ''}`
   );
 }
 async function maybeReporteDiario(env) {
@@ -3464,7 +3468,8 @@ async function maybeReporteDiario(env) {
     // Var {{3}} (carteles): si hubo corpóreas, mostramos el desglose inline (ej "62 (39 corp)")
     // para que se vea en la plantilla SIN cambiarle las variables.
     const cartVar = d.corporeas > 0 ? `${d.cartelesNeon} (${d.corporeas} corp)` : String(d.carteles);
-    const params11 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia, d.ocEnviadas].map(String);
+    const ocVar = String(d.ocEnviadas) + (d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina})` : '');
+    const params11 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia, ocVar].map(String);
     const params10 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
     const texto = formatReporteDiario(d);
     let anyOk = false;
@@ -3858,6 +3863,177 @@ async function maybeListaAgus(env, opts = {}) {
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 
+// ===== Seguimiento de OC ABIERTAS (a pedido de Gaspar, 7-oct-2026: "que no se olviden más") =====
+// Hasta acá una OC se seguía solo entre 3 y 48 h (popup) y se perdía apenas el cliente contestaba cualquier cosa →
+// OC de 7+ días sin seguimiento (Burgod, AMORA…). Fuente de verdad = la etiqueta POR PAGAR: la pone la OC y la sacan
+// el OCR del comprobante, el alta del pedido (ocCerrarPorPedido) o el vendedor a mano si la venta se cayó. Cada
+// vendedor recibe a las 10 AR (lun-sáb) SUS OC abiertas por WhatsApp (plantilla UTILITY oc_pendientes_vendedor) y
+// Gaspar ve el total en el reporte de las 21 h. Kill-switch kv 'lista_oc_on' (default '0' = apagado).
+const OC_SEG_DIAS_MAX = 45;   // más viejas: solo se cuentan ("si se cayeron, sacales la etiqueta")
+const LISTA_OC_VEND = [{ slug: 'joaco', agenda: 'joaquin', nombre: 'Joaco' }, { slug: 'facundo', agenda: 'facundo', nombre: 'Facu' }, { slug: 'agustina', agenda: 'agustina', nombre: 'Agus' }];
+// Dueño = el vendedor ACTUAL del chat (respeta reasignaciones y "Traer de Joaco"); si no es un vendedor, el de la OC.
+function ocDueno(asg, vend) {
+  const a = String(asg || '').toLowerCase().trim();
+  if (a === '' || a === 'joaco' || a === 'joaquin') return 'joaco';
+  if (a === 'facundo' || a === 'agustina') return a;
+  const v = String(vend || '').toLowerCase().trim();
+  return (v === 'facundo' || v === 'agustina') ? v : 'joaco';
+}
+async function buildOcAbiertas(env) {
+  const porPagarId = await ensureLabelId(env, POR_PAGAR_LABEL_NAME, POR_PAGAR_LABEL_COLOR);
+  if (!porPagarId) return null;
+  // Última OC por teléfono (bare columns con MAX(ts_out) → cartel/importe de ESA OC) + cuántas se le mandaron.
+  const rows = (await env.DB.prepare(
+    `SELECT cl.phone, cl.created_at AS tag_at, s.contact_name AS name, s.assigned_to, s.inbox, s.last_direction, s.last_msg_type,
+            o.cartel, o.importe, o.canal, o.vendedor, o.ts_out, o.n_oc
+       FROM contact_labels cl
+       LEFT JOIN wa_chats_summary s ON s.phone = cl.phone
+       LEFT JOIN (SELECT phone, cartel, importe, canal, vendedor, MAX(ts_out) AS ts_out, COUNT(*) AS n_oc
+                    FROM oc_enviadas WHERE IFNULL(cartel, '') <> '' GROUP BY phone) o ON o.phone = cl.phone
+      WHERE cl.label_id = ?`
+  ).bind(porPagarId).all()).results || [];
+  const vivos = rows.filter(r => !BANDEJAS_NO_COMERCIALES.includes(String(r.inbox || '')));
+  // Último mensaje del cliente por chat (una consulta por teléfono, en batch: son decenas, no miles).
+  const ultIn = {};
+  for (let i = 0; i < vivos.length; i += 40) {
+    const lote = vivos.slice(i, i + 40);
+    try {
+      const rs = await env.DB.batch(lote.map(r => env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status','reaction','revoke','edit','errors','system','unsupported')").bind(r.phone)));
+      lote.forEach((r, k) => { const x = rs[k] && rs[k].results && rs[k].results[0]; ultIn[r.phone] = (x && x.t) || null; });
+    } catch (_) {}
+  }
+  const now = Date.now();
+  const porVend = { joaco: [], facundo: [], agustina: [] }, viejas = { joaco: 0, facundo: 0, agustina: 0 };
+  for (const r of vivos) {
+    const ref = r.ts_out || r.tag_at || null;
+    const dias = ref ? Math.max(0, Math.floor((now - Date.parse(ref)) / 864e5)) : null;
+    const dueno = ocDueno(r.assigned_to, r.vendedor);
+    if (dias != null && dias > OC_SEG_DIAS_MAX) { viejas[dueno]++; continue; }
+    const ui = ultIn[r.phone];
+    // Una reacción (🤗), edición o borrado del cliente NO es "te escribió" (caso Kari: dijo que no y reaccionó con un emoji).
+    const ultEsDelCliente = String(r.last_direction || '') === 'inbound' && !['reaction', 'revoke', 'edit', 'errors', 'system', 'unsupported'].includes(String(r.last_msg_type || ''));
+    const estado = ultEsDelCliente ? 'te escribió, respondele'
+      : (ui && ref && Date.parse(ui) > Date.parse(ref) ? 'respondió, falta que pague' : 'sin respuesta desde la OC');
+    porVend[dueno].push({ phone: r.phone, name: r.name || '', cartel: r.cartel || '', importe: r.importe || '', canal: r.canal || (String(r.phone).length > 14 ? 'ig' : 'wa'), dias, n_oc: r.n_oc || 0, estado, urgente: estado.startsWith('te escribió') });
+  }
+  for (const k in porVend) porVend[k].sort((a, b) => (b.urgente - a.urgente) || ((b.dias || 0) - (a.dias || 0)));
+  return { porVend, viejas, total: Object.values(porVend).reduce((a, l) => a + l.length, 0) };
+}
+function lineaOc(r, i) {
+  const quien = (r.canal === 'ig' || String(r.phone).length > 14) ? `${r.name || 'cliente'} (IG)` : `${r.name || 'cliente'} +${r.phone}`;
+  const dias = r.dias == null ? '' : ` · OC hace ${r.dias} día${r.dias === 1 ? '' : 's'}`;
+  return `${i + 1}. ${quien} · "${r.cartel || 's/nombre'}"${r.importe ? ' · ' + r.importe : ''}${dias} · ${r.estado}`;
+}
+// Lista diaria por vendedor (10 AR, lun-sáb). Mismo esqueleto robusto que maybeListaAgus: la lista del día se arma
+// UNA vez (kv), el intento se cuenta ANTES de mandar (máx 3/día por vendedor), progreso por tramo, texto libre de
+// respaldo SOLO con la ventana de 24 h abierta, aviso a Gaspar si no sale. opts.vendedor = solo ese ('joaco'…).
+async function maybeListaOC(env, opts = {}) {
+  const force = !!opts.force, dry = !!opts.dry, again = !!opts.again;
+  const fechaAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+  const dow = new Date(fechaAR + 'T12:00:00Z').getUTCDay();
+  const out = { fecha: fechaAR, vendedores: {} };
+  try {
+    if (!dry) {
+      if (!force && (await kvGet(env, 'lista_oc_on', '0')) !== '1') return { skipped: 'off' };
+      if (!force && dow === 0) return { skipped: 'domingo' };
+    }
+    const KD = 'lista_oc_data:' + fechaAR;
+    let data = null;
+    if (!dry && !again) { try { const raw = await kvGet(env, KD, ''); if (raw) data = JSON.parse(raw); } catch (_) { data = null; } }
+    if (!data || !data.porVend) {
+      const b = await buildOcAbiertas(env);
+      if (!b) return { error: 'query' };
+      data = { porVend: {}, viejas: b.viejas, n: {} };
+      for (const v of LISTA_OC_VEND) {
+        const lines = (b.porVend[v.slug] || []).map(lineaOc);
+        data.n[v.slug] = lines.length;   // la cantidad real (sin la nota de las viejas)
+        if (b.viejas[v.slug]) lines.push(`(+${b.viejas[v.slug]} con más de ${OC_SEG_DIAS_MAX} días: si se cayeron, sacales la etiqueta POR PAGAR)`);
+        data.porVend[v.slug] = lines;
+      }
+      if (!dry) await kvSet(env, KD, JSON.stringify(data));
+    }
+    if (dry) return { ok: true, dry: true, ...data };
+    const phones = {};
+    try { for (const x of (await env.DB.prepare("SELECT usuario, phone FROM agenda_phones WHERE usuario IN ('joaquin','facundo','agustina')").all()).results || []) phones[x.usuario] = x.phone; } catch (_) {}
+    const fechaDisp = fechaAR.split('-').reverse().join('/');
+    for (const v of LISTA_OC_VEND) {
+      if (opts.vendedor && opts.vendedor !== v.slug) continue;
+      const K = { sent: 'lista_oc_sent:' + v.slug, tries: `lista_oc_try:${v.slug}:${fechaAR}`, next: `lista_oc_next:${v.slug}:${fechaAR}` };
+      const lines = data.porVend[v.slug] || [];
+      const ph = phones[v.agenda];
+      const nReal = (data.n && data.n[v.slug] != null) ? data.n[v.slug] : lines.length;
+      const res = { total: nReal };
+      out.vendedores[v.slug] = res;
+      if (!ph) { res.error = 'sin teléfono en agenda_phones'; continue; }
+      if (!again && (await kvGet(env, K.sent, '')) === fechaAR) { res.skipped = 'ya_enviada'; continue; }
+      if (!nReal) { await kvSet(env, K.sent, fechaAR); res.enviado = false; continue; }   // solo viejas (o nada): no se manda
+      let tries = 0;
+      if (!force) {
+        tries = parseInt(await kvGet(env, K.tries, '0'), 10) || 0;
+        if (tries >= 3) { res.skipped = 'max_intentos'; continue; }
+        tries += 1; await kvSet(env, K.tries, String(tries));
+      }
+      const grupos = gruposTramos(lines);
+      let next = again ? 0 : Math.min(grupos.length, parseInt(await kvGet(env, K.next, '0'), 10) || 0);
+      for (let i = next; i < grupos.length; i++) {
+        const tramo = grupos[i].join('  |  ');
+        const parte = grupos.length > 1 ? `(${i + 1}/${grupos.length}) ${tramo}` : tramo;
+        let r = null;
+        try { r = await waSendTemplate(env, ph, 'oc_pendientes_vendedor', 'es_AR', [fechaDisp, parte.slice(0, 900)]); } catch (_) {}
+        if (!r || !r.ok) break;
+        next = i + 1; await kvSet(env, K.next, String(next));
+        if (i < grupos.length - 1) await new Promise(rs => setTimeout(rs, 400));
+      }
+      let completo = next >= grupos.length, via = 'plantilla';
+      if (!completo) {
+        let ventana = false;
+        try {
+          const w = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'status'").bind(ph).first();
+          ventana = !!(w && w.t && Date.now() - Date.parse(w.t) < 23 * 3600 * 1000);
+        } catch (_) {}
+        if (ventana) {
+          const header = next ? '🧾 (sigue) Órdenes de compra sin pagar:\n\n' : `🧾 ${v.nombre}, tus órdenes de compra sin pagar (${nReal}):\n\n`;
+          let okTxt = true;
+          for (const bl of bloquesTexto(header, grupos.slice(next).flat())) {
+            let r = null;
+            try { r = await waSendText(env, ph, bl); } catch (_) {}
+            if (!r || !r.ok) { okTxt = false; break; }
+            await new Promise(rs => setTimeout(rs, 400));
+          }
+          if (okTxt) { completo = true; via = next ? 'plantilla+texto' : 'texto'; }
+        }
+      }
+      Object.assign(res, { ok: completo, via, tramos: grupos.length, tramos_enviados: next, intento: tries });
+      if (completo) await kvSet(env, K.sent, fechaAR);
+      else if (!force && tries >= 3) { try { await precotizNotifyGaspar(env, `⚠️ La lista de OC sin pagar de ${v.nombre} de hoy no salió (${next}/${grupos.length} partes tras 3 intentos). Reintentar: POST /admin/lista-oc-test {"send":true,"vendedor":"${v.slug}"}.`); } catch (_) {} }
+    }
+    await kvSet(env, 'lista_oc_last', JSON.stringify(out));
+    return out;
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+// Al CARGAR UN PEDIDO, la OC de ese cliente queda pagada: se saca POR PAGAR, se pone "Cartel primer pago" (salvo que sea
+// el 2do pago) y se marca oc_enviadas.pagado_at. Antes solo lo hacía el OCR del comprobante → si la venta se cargaba a
+// mano (pagó en efectivo, mandó el comprobante en texto o a otra cuenta) la OC quedaba abierta para siempre
+// (caso LB_detailing). Solo actúa si el chat tenía POR PAGAR (un pedido sin OC no toca etiquetas).
+async function ocCerrarPorPedido(env, phones, estadoPago) {
+  try {
+    const porPagarId = await ensureLabelId(env, POR_PAGAR_LABEL_NAME, POR_PAGAR_LABEL_COLOR);
+    const primerPagoId = await ensureLabelId(env, CARTEL_PRIMER_PAGO_LABEL_NAME, CARTEL_PRIMER_PAGO_LABEL_COLOR);
+    if (!porPagarId) return;
+    const nowIso = new Date().toISOString();
+    for (const raw of [...new Set((phones || []).map(x => String(x || '').replace(/\D/g, '')).filter(Boolean))]) {
+      const tiene = await env.DB.prepare('SELECT 1 FROM contact_labels WHERE phone = ? AND label_id = ? LIMIT 1').bind(raw, porPagarId).first();
+      if (!tiene) continue;
+      const st = [
+        env.DB.prepare('DELETE FROM contact_labels WHERE phone = ? AND label_id = ?').bind(raw, porPagarId),
+        env.DB.prepare('UPDATE oc_enviadas SET pagado_at = ? WHERE phone = ? AND pagado_at IS NULL').bind(nowIso, raw),
+      ];
+      if (primerPagoId && !/2/.test(String(estadoPago || ''))) st.push(env.DB.prepare('INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)').bind(raw, primerPagoId, nowIso));
+      await env.DB.batch(st);
+    }
+  } catch (_) {}
+}
+
 // ===== Órdenes de compra (OC) — a pedido de Gaspar (ago-2026) =====
 // La OC la tipea a mano el vendedor (Joaco/Nadia) desde la guía de ventas y arranca
 // SIEMPRE con "Orden de compra:". No se genera por código: la LEEMOS del saliente ya
@@ -3953,6 +4129,20 @@ async function processOrdenesCompra(env) {
           "INSERT OR IGNORE INTO oc_enviadas (wamid, phone, cartel, importe, canal, vendedor, ts_out, notified, created_at) VALUES (?,?,?,?,?,?,?,0,?)"
         ).bind(row.wamid, oc.phone, oc.cartel, oc.importe, oc.canal, vendedor, row.ts, new Date().toISOString()).run();
       } catch (_) {}
+      // Orden inverso (caso LB_detailing: OC 18:36, pedido 18:37, este cron 18:40): si el pedido de este cliente YA se
+      // cargó (desde 12 h antes de la OC), ocCerrarPorPedido corrió cuando todavía no había POR PAGAR → la OC nace
+      // pagada y NO se etiqueta (si no, quedaba "sin pagar" para siempre en la lista del vendedor).
+      let yaCargado = false;
+      if (oc.canal !== 'ig') {
+        try {
+          const pr = await env.DB.prepare("SELECT 1 FROM pedidos WHERE substr(replace(IFNULL(telefono,''),' ',''),-8) = ? AND julianday(created_at) >= julianday(?) - 0.5 LIMIT 1").bind(oc.phone.slice(-8), row.ts).first();
+          yaCargado = !!pr;
+        } catch (_) {}
+      }
+      if (yaCargado) {
+        try { await env.DB.prepare("UPDATE oc_enviadas SET pagado_at = ? WHERE wamid = ? AND pagado_at IS NULL").bind(new Date().toISOString(), row.wamid).run(); } catch (_) {}
+        continue;
+      }
       try { await porPagarTag(env, oc.phone, true); } catch (_) {}
     }
     // B) Notificar a Gaspar + hermano las OC pendientes (notified=0) de las últimas 6h.
@@ -14639,6 +14829,15 @@ const handler = {
         const _send = _b.send === true;
         return json(await maybeListaAgus(env, { force: _send, dry: !_send, again: _send && _b.again === true }));
       }
+      // Lista de OC sin pagar por vendedor. POST {} = PREVIEW (no manda nada). {send:true[, vendedor, again]} = la manda
+      // YA (aunque el kill-switch lista_oc_on esté apagado). Solo Gaspar.
+      if (request.method === 'POST' && path === '/admin/lista-oc-test') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const _b = (await request.json().catch(() => null)) || {};
+        const _send = _b.send === true;
+        const _v = ['joaco', 'facundo', 'agustina'].includes(_b.vendedor) ? _b.vendedor : undefined;
+        return json(await maybeListaOC(env, { force: _send, dry: !_send, again: _send && _b.again === true, vendedor: _v }));
+      }
       // Forzar el aviso "leads para llamar" AHORA (para probarlo fuera del cron de las 9 AR).
       // Resetea el dedup del día y ejecuta la función real (plantilla + fallback a texto).
       if (request.method === 'POST' && path === '/admin/reporte-llamar-test') {
@@ -17686,6 +17885,8 @@ const handler = {
             }
           }
         } catch (_) {}
+        // OC de ese cliente → pagada (saca POR PAGAR, pone "Cartel primer pago", oc_enviadas.pagado_at). Ver ocCerrarPorPedido.
+        await ocCerrarPorPedido(env, [telefono, igId], estadoPago);
         return json({ ok: true, numero, pedidos: rs.results || [] });
       }
 
@@ -18304,7 +18505,9 @@ const handler = {
             lista = (await env.DB.prepare(
               "SELECT o.wamid, o.phone, o.cartel, o.importe, o.canal, o.ts_out, s.contact_name AS name" +
               " FROM oc_enviadas o LEFT JOIN wa_chats_summary s ON s.phone = o.phone" +
-              " WHERE o.ts_out <= datetime('now','-3 hours') AND o.ts_out >= datetime('now','-48 hours')" +
+              // julianday: ts_out es ISO con 'T' y datetime() devuelve 'AAAA-MM-DD HH:MM:SS' → comparar strings fallaba y
+              // el popup salía recién al día siguiente (no a las 3 h).
+              " WHERE julianday(o.ts_out) <= julianday('now','-3 hours') AND julianday(o.ts_out) >= julianday('now','-48 hours')" +
               "   AND o.cartel != '' AND o.pagado_at IS NULL" + filtroVend +
               "   AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = o.phone AND m.direction='inbound' AND m.msg_type!='status' AND m.ts > o.ts_out)" +
               " ORDER BY o.ts_out DESC LIMIT 30"
@@ -19521,6 +19724,8 @@ const handler = {
     // + lista "para llamar" de Agus (bandejas Agus + Joaco, misma base). En SERIE: las dos corren la misma
     // query pesada; en paralelo duplicaban la carga sobre D1 en el mismo tick.
     if (hAR === 9) ctx.waitUntil((async () => { await maybeReporteLlamar(env); await maybeListaAgus(env); })());
+    // 10 AR (lun-sáb): a cada vendedor, SUS órdenes de compra sin pagar (kv lista_oc_on; default apagado).
+    if (hAR === 10) ctx.waitUntil(maybeListaOC(env));
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
     if (hAR >= 8 && hAR < 21) ctx.waitUntil(processPendingTemplateSends(env));
     if (hAR === 5) ctx.waitUntil(maybeAdhocCleanup(env));   // limpieza diaria de plantillas ad-hoc viejas (kv adhoc_cleanup_on/_days)

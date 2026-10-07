@@ -12198,6 +12198,21 @@ function paraCotizarCount() {
   for (const p in cl) { if (visibles.has(p) && (cl[p] || []).includes(l.id)) n++; }
   return n;
 }
+// Bandeja rápida "💰 Por cobrar" (vendedores + admin): los chats con la etiqueta POR PAGAR = OC enviada y todavía sin
+// pagar (la sacan el comprobante, la carga del pedido o el vendedor a mano si la venta se cayó). Siempre a la vista
+// para que ninguna OC quede sin seguimiento (antes solo había un popup de 3-48 h). Cuenta solo el canal visible (WA/IG).
+function porCobrarLabel() {
+  return (chatState.labels || []).find(l => l.name === 'POR PAGAR') || null;
+}
+function porCobrarCount() {
+  const l = porCobrarLabel();
+  if (!l) return 0;
+  const cl = chatState.contactLabels || {};
+  const ch = chatState.channel || 'wa';
+  let n = 0;
+  for (const c of (chatState.contacts || [])) { if ((c.channel || 'wa') === ch && (cl[c.phone] || []).includes(l.id)) n++; }
+  return n;
+}
 // Bandeja rápida "Servicio de corte" (admin): igual que "Para cotizar" pero por la etiqueta "Servicio de corte",
 // que el backend pone en cada cobro del corte.
 function servicioCorteLabel() {
@@ -12244,6 +12259,13 @@ function renderLabelFilterBar() {
       const n = paraCotizarCount();
       const active = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
       return `<button class="label-filter-pill${active ? ' active' : ''}" data-filter-fixed="paracotizar">📋 Para cotizar${n ? ` (${n})` : ''}</button>`;
+    })()}
+    ${(() => {
+      const l = porCobrarLabel();
+      if (!l || !canCreateBriefs()) return '';
+      const n = porCobrarCount();
+      const active = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
+      return `<button class="label-filter-pill${active ? ' active' : ''}" data-filter-fixed="porcobrar" title="Órdenes de compra enviadas que todavía no se pagaron">💰 Por cobrar${n ? ` (${n})` : ''}</button>`;
     })()}
     ${visibleLabels().length ? `
       <div class="label-filter-dd-wrap">
@@ -16074,9 +16096,9 @@ function bindChat() {
         chatState.labelDropdownOpen = false;
       } else if (kind === 'unread') {
         chatState.filterUnreadOnly = !chatState.filterUnreadOnly;
-      } else if (kind === 'paracotizar' || kind === 'corte') {
+      } else if (kind === 'paracotizar' || kind === 'corte' || kind === 'porcobrar') {
         // Toggle: filtra por la etiqueta de la bandeja rápida (o la apaga si ya estaba sola).
-        const l = kind === 'corte' ? servicioCorteLabel() : paraCotizarLabel();
+        const l = kind === 'corte' ? servicioCorteLabel() : (kind === 'porcobrar' ? porCobrarLabel() : paraCotizarLabel());
         if (l) {
           const on = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
           chatState.filterLabels = on ? [] : [l.id];
