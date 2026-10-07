@@ -2271,7 +2271,39 @@ async function ensurePerfIndexes(env) {
       for (const s of stmts) { try { await env.DB.prepare(s).run(); } catch (_) {} }
       await kvSet(env, 'perf_idx_v2', '1');
     }
+    // v3 (oct-2026, blindaje del ruteo de chats — auditoría de Gaspar):
+    //  - inbox_log: cada cambio de bandeja queda registrado (antes un chat podía terminar en cursos u
+    //    oculto sin rastro de quién/qué lo movió).
+    //  - Al pasar a 'cursos' o 'corte' se LIBERA el vendedor (assigned_to=''): ya no es un lead de
+    //    carteles, y si no le seguía comiendo el cupo diario al vendedor (+ queda en chat_assign_log).
+    //  - FRENO: un envío masivo / flujo de cursos NO puede esconder ('general' → 'oculto') un chat de
+    //    carteles ACTIVO (vendedor asignado, alguien escribió a mano en 7 días, brief en 60 días, bot de
+    //    cotización en 30 días o etiqueta de venta). RAISE(IGNORE) saltea ese UPDATE sin romper el
+    //    resto del envío; el intento queda en inbox_log como 'oculto (bloqueado)'.
+    if ((await kvGet(env, 'perf_idx_v3', '0')) !== '1') {
+      const ahora = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
+      const stmts = [
+        "CREATE TABLE IF NOT EXISTS inbox_log (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, from_inbox TEXT, to_inbox TEXT, assigned_to TEXT, ts TEXT NOT NULL)",
+        'CREATE INDEX IF NOT EXISTS idx_inbox_log_ts ON inbox_log(ts)',
+        'CREATE INDEX IF NOT EXISTS idx_inbox_log_phone ON inbox_log(phone)',
+        'CREATE INDEX IF NOT EXISTS idx_wa_ad_attr_ts ON wa_ad_attributions(ts)',   // ads nuevos del centinela sin escanear la tabla
+        `CREATE TRIGGER IF NOT EXISTS trg_inbox_log AFTER UPDATE OF inbox ON wa_chats_summary WHEN OLD.inbox IS NOT NEW.inbox BEGIN INSERT INTO inbox_log (phone, from_inbox, to_inbox, assigned_to, ts) VALUES (NEW.phone, OLD.inbox, NEW.inbox, OLD.assigned_to, ${ahora}); END`,
+        `CREATE TRIGGER IF NOT EXISTS trg_inbox_libera_vendedor AFTER UPDATE OF inbox ON wa_chats_summary WHEN NEW.inbox IN ('cursos','corte') AND OLD.inbox IS NOT NEW.inbox AND COALESCE(NEW.assigned_to,'') != '' BEGIN INSERT INTO chat_assign_log (phone, from_asg, to_asg, via, by_user, ts) VALUES (NEW.phone, NEW.assigned_to, '', 'auto_' || NEW.inbox, 'sistema', ${ahora}); UPDATE wa_chats_summary SET assigned_to = '' WHERE phone = NEW.phone; END`,
+        `CREATE TRIGGER IF NOT EXISTS trg_inbox_no_esconder_carteles BEFORE UPDATE OF inbox ON wa_chats_summary WHEN OLD.inbox = 'general' AND NEW.inbox = 'oculto' AND (${chatCartelesActivoSql('OLD.phone', 'OLD.assigned_to')}) BEGIN INSERT INTO inbox_log (phone, from_inbox, to_inbox, assigned_to, ts) VALUES (OLD.phone, OLD.inbox, 'oculto (bloqueado)', OLD.assigned_to, ${ahora}); SELECT RAISE(IGNORE); END`,
+      ];
+      for (const s of stmts) { try { await env.DB.prepare(s).run(); } catch (_) {} }
+      await kvSet(env, 'perf_idx_v3', '1');
+    }
   } catch (_) {}
+}
+// Condición SQL "este chat es un lead de CARTELES activo" (para el freno del trigger y el centinela).
+// phoneExpr/asgExpr = expresiones SQL del teléfono y del vendedor asignado.
+function chatCartelesActivoSql(phoneExpr, asgExpr) {
+  return `COALESCE(${asgExpr},'') != ''` +
+    ` OR EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = ${phoneExpr} AND m.direction = 'outbound' AND m.automated = 0 AND m.msg_type != 'status' AND m.ts >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-7 days'))` +
+    ` OR EXISTS (SELECT 1 FROM briefs b WHERE b.cliente_wa_id = ${phoneExpr} AND b.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 days'))` +
+    ` OR EXISTS (SELECT 1 FROM precotiz_pilot p WHERE p.phone = ${phoneExpr} AND p.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 days'))` +
+    ` OR EXISTS (SELECT 1 FROM contact_labels cl WHERE cl.phone = ${phoneExpr} AND cl.label_id IN (SELECT id FROM labels WHERE name IN ('📋 Para cotizar','💰 Sin cotizar','🔠 Corpóreo','POR PAGAR','🤖 Precotización')))`;
 }
 // SQL (para el cuerpo de un trigger) que sube la versión de una lista en kv_cache. Si la fila no
 // existe arranca en el epoch en ms: así, si alguien la borra, la versión nueva nunca coincide con
@@ -2412,6 +2444,12 @@ async function maybeRepartirANadia(env, phone) {
     const s = await env.DB.prepare("SELECT inbox, assigned_to FROM wa_chats_summary WHERE phone = ?").bind(phone).first();
     if (!s || (s.assigned_to && s.assigned_to !== '')) return;         // no existe aún o ya tiene dueño
     if (['cursos', 'oculto', 'privado', 'corte', 'precotiz'].includes(s.inbox)) return;  // solo el pool de carteles ('general') se reparte; nunca pisar bandejas especiales
+    // Lead que vino de un anuncio de CURSOS (por mapa, por la campaña de Meta o por el texto del ad):
+    // no es para los vendedores de carteles aunque todavía esté en 'general' (le comía el cupo diario).
+    try {
+      const _a = await env.DB.prepare("SELECT source_id, headline, body FROM wa_ad_attributions WHERE phone = ? AND COALESCE(source_id, '') != '' ORDER BY ts DESC LIMIT 1").bind(phone).first();
+      if (_a && (await adVerticalForSource(env, _a.source_id, _a.headline, _a.body)) === 'cursos') return;
+    } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM reventa_leads WHERE phone = ? LIMIT 1").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM contact_labels WHERE phone = ? AND label_id = 2289 LIMIT 1").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM minicurso_landing WHERE phone = ? LIMIT 1").bind(phone).first()) return; } catch (_) {}
@@ -7223,17 +7261,87 @@ function classifyAdVertical(...parts) {
   return 'carteles';
 }
 
-// Vertical de un ad priorizando el MAPA explicito por ad_id (wa_ad_verticals,
-// poblado a mano / desde Meta Ads cuando el texto no alcanza — ej. ads de cursos
-// con headline de carteles). Si no esta mapeado, cae en la heuristica por texto.
+// Vertical de un ad. Prioridad (oct-2026, blindaje de ruteo):
+//  1) MAPA explícito por ad_id (wa_ad_verticals, a mano) — manda siempre.
+//  2) NOMBRES que le puso el equipo en Meta (campaña / conjunto / anuncio, meta_ad_map). Es la señal
+//     más confiable para un ad NUEVO que nadie mapeó: el texto del anuncio suele ser genérico
+//     ("Chatea con nosotros") y un ad de cursos así caía en carteles. Si el ad todavía no está en
+//     meta_ad_map se lo pregunta a Meta en el momento (1 vez por ad, con timeout corto).
+//  3) Heurística por texto (classifyAdVertical).
 async function adVerticalForSource(env, sourceId, ...parts) {
   if (sourceId) {
     try {
       const row = await env.DB.prepare("SELECT vertical FROM wa_ad_verticals WHERE ad_id = ?").bind(String(sourceId)).first();
       if (row && row.vertical) return row.vertical;
     } catch (_) { /* la tabla puede no existir aun → cae en la heuristica */ }
+    try {
+      const v = verticalFromAdNames(await metaAdNombres(env, String(sourceId)));
+      if (v) return v;
+    } catch (_) {}
   }
   return classifyAdVertical(...parts);
+}
+
+// Vertical según los nombres de Meta de un ad ({campaign_name, ad_set_name, ad_name}). '' = los
+// nombres no alcanzan para decidir (sigue la heurística por texto). La campaña manda sobre el
+// anuncio: un ad "Corporeas 2" dentro de "Carteles B2C" es corpóreo; uno de una campaña de
+// lanzamiento/comunidad es cursos aunque el anuncio se llame "Video 1".
+const RX_NOMBRE_CURSOS = /curso|comunidad|lanzamiento|apertura carrito|mastery|supernova|formacion|alumn|\bclase|seminario|masterclass|webinar/;
+function verticalFromAdNames(m) {
+  if (!m) return '';
+  const n = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const camp = n(m.campaign_name), resto = n((m.ad_set_name || '') + ' ' + (m.ad_name || ''));
+  if (RX_NOMBRE_CURSOS.test(camp)) return 'cursos';
+  if (/corpor/.test(camp + ' ' + resto)) return 'corporeo';
+  if (RX_NOMBRE_CURSOS.test(resto)) return 'cursos';
+  return '';
+}
+
+// Nombres de Meta de un ad (meta_ad_map). Si no está, lo resuelve con la Graph API EN EL MOMENTO
+// (timeout 2,5 s) y lo guarda: así el PRIMER lead de un ad nuevo ya se rutea por su campaña, sin
+// esperar al sync diario. Reintenta como mucho cada 10 min por ad si Meta falla (kv meta_ad_try:<id>).
+async function metaAdNombres(env, adId) {
+  if (!adId) return null;
+  try {
+    const m = await env.DB.prepare("SELECT ad_name, ad_set_name, campaign_name FROM meta_ad_map WHERE ad_id = ?").bind(adId).first();
+    if (m) return m;
+  } catch (_) {}
+  const token = env.META_ADS_TOKEN || env.META_PAGE_ACCESS_TOKEN || env.IG_ACCESS_TOKEN || '';
+  if (!token) return null;
+  const tryKey = 'meta_ad_try:' + adId;
+  if (Date.now() - (parseInt(await kvGet(env, tryKey, '0'), 10) || 0) < 10 * 60 * 1000) return null;
+  await kvSet(env, tryKey, String(Date.now()));
+  const r = await fetchMetaAdNombres(token, adId, 2500);
+  if (r.transitorio) return null;                     // rate limit / timeout → reintenta más tarde
+  try {
+    await env.DB.prepare("INSERT INTO meta_ad_map (ad_id, ad_name, ad_set_name, campaign_name, campaign_id, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(ad_id) DO UPDATE SET ad_name=excluded.ad_name, ad_set_name=excluded.ad_set_name, campaign_name=excluded.campaign_name, campaign_id=excluded.campaign_id, updated_at=excluded.updated_at")
+      .bind(adId, r.adName, r.adsetName, r.campName, r.campId, new Date().toISOString()).run();
+  } catch (_) {}
+  return { ad_name: r.adName, ad_set_name: r.adsetName, campaign_name: r.campName };
+}
+
+// Pide a la Graph API nombre del ad + conjunto + campaña. transitorio=true si conviene reintentar
+// (rate limit, timeout, red); un error permanente (ad borrado / sin acceso / no es un ad) devuelve
+// nombres vacíos con transitorio=false (se guarda vacío = "visto").
+async function fetchMetaAdNombres(token, adId, timeoutMs = 0) {
+  const out = { adName: '', adsetName: '', campName: '', campId: '', error: '', transitorio: false };
+  const ctrl = timeoutMs ? new AbortController() : null;
+  const t = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+  try {
+    const u = `https://graph.facebook.com/v21.0/${encodeURIComponent(adId)}?fields=name,adset{name},campaign{id,name}&access_token=${encodeURIComponent(token)}`;
+    const j = await (await fetch(u, ctrl ? { signal: ctrl.signal } : undefined)).json();
+    if (j && j.error) {
+      out.error = '(#' + (j.error.code || '?') + ') ' + (j.error.message || '');
+      if ([4, 17, 32, 613, 80004].includes(j.error.code)) out.transitorio = true;
+    } else {
+      out.adName = String(j.name || '');
+      out.adsetName = String((j.adset && j.adset.name) || '');
+      out.campName = String((j.campaign && j.campaign.name) || '');
+      out.campId = String((j.campaign && j.campaign.id) || '');
+    }
+  } catch (e) { out.error = String(e); out.transitorio = true; }
+  finally { if (t) clearTimeout(t); }
+  return out;
 }
 
 // Extrae los valores típicos del field_data del lead. Meta usa slugs estándar
@@ -7496,24 +7604,13 @@ async function syncMetaAdMap(env, opts = {}) {
     const adId = String(row.ad_id || '');
     if (!adId) continue;
     seen++;
-    let adName = '', adsetName = '', campName = '', campId = '';
-    try {
-      const u = `https://graph.facebook.com/v21.0/${encodeURIComponent(adId)}?fields=name,adset{name},campaign{id,name}&access_token=${encodeURIComponent(token)}`;
-      const r = await fetch(u);
-      const j = await r.json();
-      if (j && j.error) {
-        error = '(#' + (j.error.code || '?') + ') ' + (j.error.message || '');
-        // Rate limit / transitorio -> NO marcar visto (reintenta en la próxima corrida).
-        if ([4, 17, 32, 613, 80004].includes(j.error.code)) continue;
-        // Error permanente (ad borrado / sin acceso): cae al upsert-vacío de abajo (marca visto).
-      } else {
-        adName = String(j.name || '');
-        adsetName = String((j.adset && j.adset.name) || '');
-        campName = String((j.campaign && j.campaign.name) || '');
-        campId = String((j.campaign && j.campaign.id) || '');
-        if (campName) resolved++;
-      }
-    } catch (e) { error = String(e); continue; }
+    const f = await fetchMetaAdNombres(token, adId);
+    if (f.error) error = f.error;
+    // Rate limit / red -> NO marcar visto (reintenta en la próxima corrida). Error permanente (ad
+    // borrado / sin acceso): cae al upsert-vacío de abajo (marca visto).
+    if (f.transitorio) continue;
+    const adName = f.adName, adsetName = f.adsetName, campName = f.campName, campId = f.campId;
+    if (campName) resolved++;
     try {
       await env.DB.prepare("INSERT INTO meta_ad_map (ad_id, ad_name, ad_set_name, campaign_name, campaign_id, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(ad_id) DO UPDATE SET ad_name=excluded.ad_name, ad_set_name=excluded.ad_set_name, campaign_name=excluded.campaign_name, campaign_id=excluded.campaign_id, updated_at=excluded.updated_at")
         .bind(adId, adName, adsetName, campName, campId, new Date().toISOString()).run();
@@ -7939,11 +8036,12 @@ async function processIgWebhook(env, body) {
               await env.DB.prepare("UPDATE wa_chats_summary SET inbox='general' WHERE phone = ? AND (inbox IS NULL OR inbox = '')").bind(custId).run();
             }
           } catch (_) {}
-          // Reparto de leads de CARTELES de IG a Facundo (misma cuota/prob que WhatsApp).
-          // Gate POSITIVO por vert==='carteles': deja fuera cursos (vert='cursos') y corpóreo
-          // (ads de corpóreo mapean vert='corporeo'; IG no setea corporeoTag -> este gate es la
-          // única barrera contra corpóreo). custId (IGSID) es la key wa_chats_summary.phone.
-          if (vert === 'carteles') { try { await maybeRepartirANadia(env, custId); } catch (_) {} }
+          // Reparto de leads de CARTELES de IG a los vendedores secundarios (misma cuota/prob que WhatsApp).
+          // Gate POSITIVO: carteles y corpóreo (oct-2026, Gaspar: "todos tienen que recibir leads de
+          // corpóreos o neones", igual que en WhatsApp); cursos queda afuera. Corpóreo además lleva la
+          // etiqueta 🔠 como en WhatsApp. custId (IGSID) es la key wa_chats_summary.phone.
+          if (vert === 'corporeo') { try { await corporeoTag(env, custId, true); } catch (_) {} }
+          if (vert === 'carteles' || vert === 'corporeo') { try { await maybeRepartirANadia(env, custId); } catch (_) {} }
           // Atribución de anuncio (igual que CTWA en WhatsApp): si el cliente vino de un anuncio
           // (referral con ad_id) o respondió al post de un aviso (ig_post), lo guardamos en
           // wa_ad_attributions -> el banner del chat aparece solo (mismo endpoint que WhatsApp).
@@ -9194,8 +9292,10 @@ async function processCentinelaRuteo(env) {
   try {
     if ((await kvGet(env, 'centinela_ruteo_on', '1')) !== '1') return;
     const nowMs = Date.now();
-    if (nowMs - (parseInt(await kvGet(env, 'centinela_last_run', '0'), 10) || 0) < 30 * 60 * 1000) return;
+    const prevRun = parseInt(await kvGet(env, 'centinela_last_run', '0'), 10) || 0;
+    if (nowMs - prevRun < 30 * 60 * 1000) return;
     await kvSet(env, 'centinela_last_run', String(nowMs));
+    await centinelaAvisosAlMomento(env, new Date(Math.max(prevRun, nowMs - 3 * 3600 * 1000)).toISOString());
     const nowIso = new Date().toISOString();
     const secs = VENDEDORES_SECUNDARIOS;                 // ['facundo','agustina']
     const cured = {};
@@ -9226,7 +9326,8 @@ async function processCentinelaRuteo(env) {
     if (al.asignado_escondido) rev.push(al.asignado_escondido + ' asignados pero en bandeja que los esconde');
     if (al.oculto_respondido) rev.push(al.oculto_respondido + ' que respondieron CON INTENCIÓN y siguen ocultos');
     if (al.carteles_pero_cursos) rev.push(al.carteles_pero_cursos + ' en carteles pero el ad dice cursos');
-    if (al.ads_sin_mapear) rev.push(al.ads_sin_mapear + ' ads nuevos sin clasificar (wa_ad_verticals)');
+    // (ads_sin_mapear ya no va al resumen: disparaba el aviso TODOS los días por ads de carteles conocidos.
+    // Los ads nuevos se avisan uno por uno al momento en centinelaAvisosAlMomento, con cómo se rutean.)
     if (al.privado_con_inbound) rev.push(al.privado_con_inbound + ' en privado/corte con mensaje reciente sin responder');
     const fechaAR = new Date(nowMs - 3 * 3600 * 1000).toISOString().slice(0, 10);
     if ((totalCurado > 0 || rev.length > 0) && (await kvGet(env, 'centinela_aviso_dia', '')) !== fechaAR) {
@@ -9242,6 +9343,44 @@ async function processCentinelaRuteo(env) {
       if (rev.length) L.push('A revisar (no lo toqué): ' + rev.join(' · '));
       try { const r = await waSendText(env, gaspar, L.join('\n')); if (r && r.ok) await kvSet(env, 'centinela_aviso_dia', fechaAR); } catch (_) {}
     }
+  } catch (_) {}
+}
+
+// Avisos del centinela que NO esperan al resumen del día (oct-2026, auditoría de ruteo). desdeIso =
+// desde la corrida anterior (máx. 3 h atrás) → cada evento se avisa una sola vez. Un solo WhatsApp a
+// Gaspar con: (a) anuncios NUEVOS sin mapear a mano y cómo los está ruteando el sistema (1 vez por ad),
+// (b) chats con señales de carteles que pasaron a CURSOS, (c) intentos frenados de esconder leads de
+// carteles activos (trigger trg_inbox_no_esconder_carteles). Kill-switch: el de centinela_ruteo_on.
+async function centinelaAvisosAlMomento(env, desdeIso) {
+  try {
+    const L = [];
+    const tel4 = (p) => '…' + String(p || '').slice(-4);
+    const nom = (r) => (String(r.contact_name || '').replace(/\s+/g, ' ').trim().slice(0, 24) || 'sin nombre') + ' (' + tel4(r.phone) + ')';
+    // (a) Anuncios nuevos.
+    try {
+      const ads = (await env.DB.prepare("SELECT a.source_id AS ad, COUNT(DISTINCT a.phone) AS leads, MAX(a.headline) AS headline, MAX(a.body) AS body FROM wa_ad_attributions a LEFT JOIN wa_ad_verticals v ON v.ad_id = a.source_id WHERE a.ts > ? AND COALESCE(a.source_id, '') != '' AND v.ad_id IS NULL GROUP BY a.source_id LIMIT 20").bind(desdeIso).all()).results || [];
+      for (const a of ads) {
+        const k = 'ad_avisado:' + a.ad;
+        if ((await kvGet(env, k, '')) === '1') continue;
+        await kvSet(env, k, '1');
+        const vert = await adVerticalForSource(env, a.ad, a.headline, a.body);
+        let n = null; try { n = await env.DB.prepare("SELECT ad_name, campaign_name FROM meta_ad_map WHERE ad_id = ?").bind(a.ad).first(); } catch (_) {}
+        const nombre = (n && (n.ad_name || n.campaign_name)) ? `«${n.ad_name || '?'}» (campaña ${n.campaign_name || '?'})` : `«${String(a.headline || a.ad).slice(0, 40)}»`;
+        L.push(`📣 Anuncio nuevo ${nombre} → lo mando a ${vert === 'cursos' ? 'CURSOS (Abril)' : vert === 'corporeo' ? 'CORPÓREO (carteles)' : 'CARTELES'}. Si está mal, avisame.`);
+      }
+    } catch (_) {}
+    // (b) Chats con señales de carteles que pasaron a cursos (y siguen ahí).
+    try {
+      const rs = (await env.DB.prepare(`SELECT l.phone AS phone, MAX(s.contact_name) AS contact_name FROM inbox_log l JOIN wa_chats_summary s ON s.phone = l.phone WHERE l.ts > ? AND l.to_inbox = 'cursos' AND s.inbox = 'cursos' AND (${chatCartelesActivoSql('l.phone', 'l.assigned_to')}) GROUP BY l.phone LIMIT 12`).bind(desdeIso).all()).results || [];
+      if (rs.length) L.push('⚠️ Pasaron a CURSOS pero parecen leads de carteles, revisalos: ' + rs.map(nom).join(', '));
+    } catch (_) {}
+    // (c) Intentos frenados de esconder leads de carteles activos.
+    try {
+      const rs = (await env.DB.prepare("SELECT l.phone AS phone, MAX(s.contact_name) AS contact_name FROM inbox_log l LEFT JOIN wa_chats_summary s ON s.phone = l.phone WHERE l.ts > ? AND l.to_inbox = 'oculto (bloqueado)' GROUP BY l.phone").bind(desdeIso).all()).results || [];
+      if (rs.length) L.push(`🛑 Frené ${rs.length} intento${rs.length === 1 ? '' : 's'} de esconder leads de carteles activos (envío/flujo de cursos), siguen en su bandeja: ` + rs.slice(0, 8).map(nom).join(', ') + (rs.length > 8 ? '…' : ''));
+    } catch (_) {}
+    if (!L.length) return;
+    await waSendText(env, env.ADMIN_NOTIFY_PHONE || '5491155604999', '🛡️ Ruteo de chats\n' + L.join('\n'));
   } catch (_) {}
 }
 
