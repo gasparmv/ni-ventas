@@ -2850,7 +2850,7 @@ function ocMoney(n) { const x = Number(n) || 0; return '$' + String(x).replace(/
 function nuevoOcCartel() { return { cartel: '', medidas: '', color: '', fondo: 'Transparente', precio: '', controlador: 'no' }; }
 // Ítem de OC corpórea (letra 3D): campos de producción propios (frente/laterales/fondo=espalda/
 // iluminación/bastidor) en vez de color/fondo/controlador del neón. Ver [[project-pedidos-corporeo-hoja]].
-function nuevoOcCorporeo() { return { cartel: '', producto: 'cartel exterior con luz', medidas: '', frente: '', laterales: '', fondo: '', iluminacion: 'con luz', bastidor: 'no', colorBastidor: '', instalacion: 'no', precio: '' }; }
+function nuevoOcCorporeo() { return { cartel: '', producto: 'cartel exterior con luz', medidas: '', detalle: '', frente: '', laterales: '', fondo: '', iluminacion: 'con luz', bastidor: 'no', colorBastidor: '', instalacion: 'no', precio: '' }; }
 // Opciones del desplegable "Producto" del Sheet 2026 v4 (col D). Corpóreos.
 const OC_CORP_PRODUCTO_OPTS = ['cartel exterior con luz', 'cartel exterior sin luz', 'cartel interior con luz', 'cartel interior sin luz', 'saliente', 'lightbox'];
 function ocCalcTotales(m) {
@@ -2874,7 +2874,7 @@ function openCrearOcModal(corporea) {
     carteles: [corporea ? nuevoOcCorporeo() : nuevoOcCartel()]
   };
   STATE.ocModalOpen = true; STATE.ocModalSaving = false;
-  if (corporea) ensureOcCorpBriefs(); // precarga los briefs corpóreos para el autocomplete
+  ensureOcCorpBriefs(); // precarga los briefs (neón y corpóreo) para el autocomplete por nombre
   render();
   setTimeout(() => { const el = document.getElementById('oc-cartel-0'); if (el) el.focus(); }, 60);
 }
@@ -2901,6 +2901,10 @@ function composeOcText(m) {
       L.push('Trabajo: ' + (c.cartel || ''));
       L.push('Producto: ' + (c.producto || ''));
       L.push('Medidas: ' + (c.medidas || ''));
+      // Detalle por sección (nombre: medida, como se cotizó). Label SIN "Medidas:"/"Precio:"/"Trabajo:"
+      // para no confundir a parseOcToPedido, que se guía por esas etiquetas.
+      const _det = String(c.detalle || '').split('\n').map(x => x.trim().replace(/^[•\-*]\s*/, '')).filter(Boolean);
+      if (_det.length) { L.push('Detalle por sección:'); _det.forEach(x => L.push('• ' + x)); }
       L.push('Frente: ' + (c.frente || ''));
       L.push('Laterales: ' + (c.laterales || ''));
       L.push('Fondo: ' + (c.fondo || ''));
@@ -2931,7 +2935,7 @@ function readOcModalDOM() {
   const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
   ['numero', 'ubicacion', 'total', 'sena', 'texto'].forEach(f => { const x = v('oc-' + f); if (x !== undefined) m[f] = x; });
   const itemFields = m.corporea
-    ? ['cartel', 'producto', 'medidas', 'frente', 'laterales', 'fondo', 'iluminacion', 'bastidor', 'colorBastidor', 'instalacion', 'precio']
+    ? ['cartel', 'producto', 'medidas', 'detalle', 'frente', 'laterales', 'fondo', 'iluminacion', 'bastidor', 'colorBastidor', 'instalacion', 'precio']
     : ['cartel', 'medidas', 'color', 'fondo', 'precio', 'controlador'];
   (m.carteles || []).forEach((c, i) => {
     itemFields.forEach(f => { const x = v(`oc-${f}-${i}`); if (x !== undefined) c[f] = x; });
@@ -2965,6 +2969,7 @@ function renderOcCartelBlock(c, i, n, corporea) {
         <div style="flex:1"><label style="${lbl}">Medidas</label><input id="oc-medidas-${i}" value="${escapeHtml(c.medidas || '')}" placeholder="ej. 100x100 cm" style="${inp}"></div>
         <div style="flex:1"><label style="${lbl}">Precio * $</label><input id="oc-precio-${i}" type="number" value="${escapeHtml(String(c.precio || ''))}" style="${inp}" data-oc-calc></div>
       </div>
+      <div style="margin-bottom:6px"><label style="${lbl}">Detalle por sección (una por línea, como se cotizó)</label><textarea id="oc-detalle-${i}" rows="2" placeholder="ej. Logo: 80x40 cm" style="${inp};resize:vertical;font-family:inherit">${escapeHtml(c.detalle || '')}</textarea></div>
       <div style="margin-bottom:6px"><label style="${lbl}">Frente</label><input id="oc-frente-${i}" value="${escapeHtml(c.frente || '')}" placeholder="acabado + color del frente" style="${inp}"></div>
       <div style="display:flex;gap:6px;margin-bottom:6px">
         <div style="flex:1"><label style="${lbl}">Laterales</label><input id="oc-laterales-${i}" value="${escapeHtml(c.laterales || '')}" placeholder="color (acabado)" style="${inp}"></div>
@@ -3064,14 +3069,45 @@ function bindCrearOcModal() {
 // Carga (1 vez por apertura del modal) los briefs corpóreos para el autocomplete del Trabajo.
 // /admin/briefs no filtra por tipo ni hace búsqueda parcial → traemos hasta 2000 y filtramos
 // tipo='corporea' en el front. Cache en STATE._ocCorpBriefs.
+// Briefs para el autocomplete por nombre de la OC y de "Cargar pedido", NEÓN y CORPÓREO. Se re-bajan si
+// pasó más de 1 min: antes el corpóreo cacheaba toda la sesión y el neón ni miraba los briefs (buscaba
+// en la copia del Sheet bajada al abrir el CRM) → un presupuesto recién mandado no aparecía (oct-2026).
 async function ensureOcCorpBriefs() {
-  if (Array.isArray(STATE._ocCorpBriefs) && STATE._ocCorpBriefs.length) return;
-  try {
-    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs?limit=2000`, { headers: authHeaders() });
-    if (!r.ok) return;
-    const data = await r.json();
-    STATE._ocCorpBriefs = (data.briefs || []).filter(b => String(b.tipo) === 'corporea');
-  } catch (_) {}
+  if (STATE._ocBriefsAt && Date.now() - STATE._ocBriefsAt < 60000) return;
+  if (STATE._ocBriefsLoading) return STATE._ocBriefsLoading;
+  STATE._ocBriefsLoading = (async () => {
+    try {
+      const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs?limit=2000`, { headers: authHeaders() });
+      if (!r.ok) return;
+      const all = (await r.json()).briefs || [];
+      STATE._ocCorpBriefs = all.filter(b => String(b.tipo) === 'corporea');
+      STATE._ocNeonBriefs = all.filter(b => String(b.tipo) !== 'corporea');
+      STATE._ocBriefsAt = Date.now();
+    } catch (_) {} finally { STATE._ocBriefsLoading = null; }
+  })();
+  return STATE._ocBriefsLoading;
+}
+// Candidatos NEÓN del autocomplete por nombre (OC y "Cargar pedido"): primero los BRIEFS (traen medidas,
+// metros de neón, tramos, interior/exterior y el precio cotizado, igual que en corpóreo), después la copia
+// del Sheet de cotizaciones como red (cotizaciones viejas sin brief). Sin repetir nombres ni corpóreos.
+function neonAcMatches(q) {
+  const out = [], vistos = new Set();
+  for (const b of (STATE._ocNeonBriefs || [])) {
+    const nom = String(b.cliente_nombre || b.diseno || '').trim();
+    if (!nom || !(normName(b.cliente_nombre || '').includes(q) || normName(b.diseno || '').includes(q))) continue;
+    const k = normName(nom); if (vistos.has(k)) continue; vistos.add(k);
+    out.push({ _brief: b, nombre: nom, tipo: b.tipo || '', ancho: Number(b.ancho_cm) || '', tamCm: Number(b.alto_cm) || '',
+      neonMt: Number(b.neon_mt) || Number(b.ia_neon_mt) || '', tramos: Number(b.tramos) || Number(b.ia_tramos) || '',
+      precio: Number(b.precio_final) || '', telefono: b.cliente_wa_id || '' });
+    if (out.length >= 8) return out;
+  }
+  for (const p of (STATE.presupuestos || [])) {
+    if (!p.nombre || String(p.tipo || '').toUpperCase() === 'CORP' || !normName(p.nombre).includes(q)) continue;
+    const k = normName(p.nombre); if (vistos.has(k)) continue; vistos.add(k);
+    out.push(p);
+    if (out.length >= 8) break;
+  }
+  return out;
 }
 // Desplegable de autocompletado del Trabajo/cliente contra los briefs corpóreos (por nombre/diseño).
 function ocCorpAutocomplete(i) {
@@ -3109,6 +3145,8 @@ function ocCorpPickBrief(i, k) {
   let f = {}; try { f = corpPresupuestoFields(b, cj); } catch (_) {}
   c.cartel = b.cliente_nombre || c.cartel;
   if (f.medidas) c.medidas = f.medidas;
+  // Detalle por sección con su nombre ("Logo: 80x40 cm"), una por línea: va en la OC, no en el presupuesto.
+  c.detalle = (f.detalleSecciones || []).join('\n');
   if (f.frente) c.frente = f.frente;
   if (f.laterales) c.laterales = f.laterales;
   if (f.fondo) c.fondo = f.fondo;
@@ -3129,10 +3167,12 @@ function ocAutocomplete(i) {
   if (!input || !box) return;
   const q = normName(input.value);
   if (q.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
-  const matches = (STATE.presupuestos || []).filter(p => p.nombre && normName(p.nombre).includes(q)).slice(0, 8);
+  // Briefs todavía no cargados (primer tecleo): se piden y se re-arma el desplegable al llegar.
+  if (!Array.isArray(STATE._ocNeonBriefs)) ensureOcCorpBriefs().then(() => { if (document.activeElement === input && Array.isArray(STATE._ocNeonBriefs)) ocAutocomplete(i); });
+  const matches = neonAcMatches(q);
   if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
   STATE._ocAcMatches = matches;
-  box.innerHTML = matches.map((p, k) => `<div data-oc-pick="${i}|${k}" style="padding:7px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border)"><b>${escapeHtml(p.nombre)}</b><span style="color:var(--fg-mute)"> · ${escapeHtml(p.tipo || '')}${p.ancho ? (' · ' + p.ancho + '×' + (p.tamCm || '?') + 'cm') : ''}${p.neonMt ? (' · ' + p.neonMt + 'm neón') : ''}</span></div>`).join('');
+  box.innerHTML = matches.map((p, k) => `<div data-oc-pick="${i}|${k}" style="padding:7px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border)"><b>${escapeHtml(p.nombre)}</b><span style="color:var(--fg-mute)"> · ${escapeHtml(p.tipo || '')}${p.ancho ? (' · ' + p.ancho + '×' + (p.tamCm || '?') + 'cm') : ''}${p.neonMt ? (' · ' + p.neonMt + 'm neón') : ''}${p.tramos ? (' · ' + p.tramos + ' tramos') : ''}${p.precio ? (' · ' + fmtMoney(p.precio)) : ''}</span></div>`).join('');
   box.style.display = 'block';
   box.querySelectorAll('[data-oc-pick]').forEach(el => el.onmousedown = (ev) => {
     ev.preventDefault(); // antes del blur del input
@@ -3150,10 +3190,15 @@ function ocPickCotizacion(i, k) {
   c.cartel = p.nombre;
   if (p.ancho && p.tamCm) c.medidas = `${p.ancho}x${p.tamCm}`;
   else if (p.tamCm) c.medidas = String(p.tamCm);
+  if (p._brief) {
+    // Del BRIEF: el precio cotizado (el que se le mandó al cliente) e interior/exterior si falta.
+    if (p.precio) c.precio = p.precio;
+    if ((p.tipo === 'EXT' || p.tipo === 'INT') && !String(STATE.ocModal.ubicacion || '').trim()) STATE.ocModal.ubicacion = p.tipo === 'EXT' ? 'exterior' : 'interior';
+  }
   STATE.ocModal.texto = composeOcText(STATE.ocModal);
   const box = document.getElementById('oc-ac-' + i); if (box) box.style.display = 'none';
   render();
-  toast('Traído de la cotización: ' + (p.nombre || ''));
+  toast((p._brief ? 'Traído del brief: ' : 'Traído de la cotización: ') + (p.nombre || ''));
 }
 async function confirmCrearOc() {
   if (STATE.ocModalSaving) return;
@@ -7030,6 +7075,9 @@ function parseOcToPedido(body, phone, channel, igId) {
       c.bastidor = /^\s*s[ií]/i.test(bast) ? 'si' : 'no';
       const mb = bast.match(/\(([^)]+)\)/); if (mb) c.colorBastidor = mb[1].trim();
       c.instalacion = /^\s*s[ií]/i.test(g(b, /Instalaci[oó]n:\s*([^\n]*)/i)) ? 'si' : 'no';
+      // "Detalle por sección:" + líneas "• Nombre: AxB cm" → aclaración del pedido (y de ahí al ticket).
+      const det = b.match(/Detalle por secci[oó]n:[ \t]*\n((?:[ \t]*•[^\n]*(?:\n|$))+)/i);
+      if (det) c.aclaracion = det[1].split('\n').map(x => x.replace(/^[ \t]*•\s*/, '').trim()).filter(Boolean).join(' · ');
     } else {
       c.colores = g(b, /Color:\s*([^\n]*)/i);
       if (/transp/i.test(g(b, /Fondo:\s*([^\n]*)/i))) c.base = 'TRANS';
@@ -7243,7 +7291,9 @@ function pmCartelAutocomplete(i) {
   if (!input || !box) return;
   const q = normName(input.value);
   if (q.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
-  const matches = (STATE.presupuestos || []).filter(p => p.nombre && normName(p.nombre).includes(q)).slice(0, 8);
+  // Briefs primero (frescos), la copia del Sheet como red — igual que en la OC (neonAcMatches).
+  if (!Array.isArray(STATE._ocNeonBriefs)) ensureOcCorpBriefs().then(() => { if (document.activeElement === input && Array.isArray(STATE._ocNeonBriefs)) pmCartelAutocomplete(i); });
+  const matches = neonAcMatches(q);
   if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
   STATE._pmAcMatches = matches;
   box.innerHTML = matches.map((p, k) => `<div data-pm-ac-pick="${i}|${k}" style="padding:7px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border)"><b>${escapeHtml(p.nombre)}</b><span style="color:var(--fg-mute)"> · ${escapeHtml(p.tipo||'')}${p.ancho?(' · '+p.ancho+'×'+(p.tamCm||'?')+'cm'):''}${p.neonMt?(' · '+p.neonMt+'m neón'):''}</span></div>`).join('');
@@ -7260,6 +7310,21 @@ function pmPickCotizacion(i, k) {
   readPedidoModalDOM();
   const c = STATE.pedidoModal.carteles[i];
   c.cartel = p.nombre;
+  if (p._brief) {
+    // Del BRIEF (como en corpóreo): medidas, metros de neón, tramos, interior/exterior y precio cotizado.
+    if (p.tamCm) c.alto = String(p.tamCm);
+    if (p.ancho) c.ancho = String(p.ancho);
+    if (p.neonMt) c.cmNeon = Math.round(p.neonMt * 100);   // brief en metros → cm
+    if (p.tramos) c.tramos = p.tramos;
+    if (p.precio) c.precio = p.precio;
+    if (p.tipo === 'INT' || p.tipo === 'EXT') c.tipo = p.tipo;
+    const mm = STATE.pedidoModal;
+    if (p.telefono && !String(mm.telefono || '').trim()) mm.telefono = String(p.telefono).replace(/\D/g, '');
+    render();
+    pmTraceAd();
+    toast('Prellenado desde el brief "' + p.nombre + '" — revisá los datos');
+    return;
+  }
   if (p.tamCm) c.alto = p.tamCm;        // "Tamaño (cm)" del cotizador ≈ alto
   if (p.ancho) c.ancho = p.ancho;
   if (p.neonMt) c.cmNeon = Math.round(p.neonMt * 100); // cotizador en metros → cm
@@ -7704,7 +7769,7 @@ function bindPedidoModal() {
     el.onblur = () => setTimeout(() => { const box = document.getElementById('pm-ac-' + i); if (box) box.style.display = 'none'; }, 150);
   });
   // Autocomplete corpóreo: mismo mecanismo que neón, contra los briefs corpóreos (precarga la cache).
-  if (document.querySelector('[data-pm-corp-ac]')) ensureOcCorpBriefs();
+  ensureOcCorpBriefs();   // neón y corpóreo buscan en los briefs (se re-bajan si tienen más de 1 min)
   document.querySelectorAll('[data-pm-corp-ac]').forEach(el => {
     const i = parseInt(el.dataset.pmCorpAc, 10);
     el.oninput = () => pmCorpAutocomplete(i);
@@ -18864,6 +18929,12 @@ function renderBriefDrawer() {
             </div>
           </div>` : ''}
           ${esCorpBrief ? `
+          <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-2) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Medidas generales</div>
+          <div style="font-size:11px;color:var(--fg-mute);margin-bottom:6px">La medida total del cartel: es la que va en el presupuesto al cliente. El detalle de cada sección va recién en la orden de compra.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:var(--s-2)">
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Ancho total (cm)</label><input type="number" step="1" min="0" data-corp-bf="mg_ancho" value="${escapeHtml(String(corpCj.mg_ancho_cm || ''))}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"></div>
+            <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Alto total (cm)</label><input type="number" step="1" min="0" data-corp-bf="mg_alto" value="${escapeHtml(String(corpCj.mg_alto_cm || ''))}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)"></div>
+          </div>
           <div style="font-size:12px;font-weight:600;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:.08em;margin:var(--s-2) 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">Secciones / tramos</div>
           <div style="font-size:11px;color:var(--fg-mute);margin-bottom:6px">Cargá cada tramo del cartel (ancho, alto, piezas, luz y material). <b>Piezas</b> = cada parte que se fabrica por separado (cada letra, cada parte del logo, el punto de la i): define la complejidad y el precio por m². El precio suma todas las secciones; el render usa la foto del cartel completo.</div>
           <div id="corp-secciones">${corpSecs.map(s => corpSeccionRowHtml(s, corpSecs.length > 1)).join('')}</div>
@@ -18883,7 +18954,7 @@ function renderBriefDrawer() {
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Acabado</label>${corpAc('esp_acabado', corpCj.esp_acabado||'translucida','Translúcida','Opaca')}</div>
             <div><label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Color</label>${corpColorSel('esp_color', corpCj.esp_color)}</div>
           </div>
-          <div id="corp-price-box">${corpPriceBoxHtml(corpPr)}</div>
+          <div id="corp-price-box">${corpPriceBoxHtml(corpPr, corpMedidasGenerales(corpCj))}</div>
           <div style="font-size:11px;color:var(--fg-mute);margin-top:6px">💡 Guardá para recalcular el precio y dejar la config lista para el render.</div>
           ` : `
           <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Tipo</label>
@@ -19049,6 +19120,9 @@ function calcCorporeaTotal(secciones) {
     };
     // Índice de complejidad: se persiste por sección (historial para recalibrar la escala).
     if (r.modelo === 'complejidad') Object.assign(out, { piezas: r.piezas, densidad: +r.densidad.toFixed(2), nivel: r.nivel, pm2: r.pm2 });
+    // Nombre de la parte del cartel que representa la sección (ej. "Logo", "Letras"): va en la OC.
+    const nom = String(s.nombre || '').trim();
+    if (nom) out.nombre = nom;
     return out;
   });
   const precio = secs.reduce((a, s) => a + s.precio, 0);
@@ -19071,6 +19145,7 @@ function corpSeccionesFromCj(cj, data) {
       con_luz: (s.con_luz === false || String(s.con_luz) === '0') ? '0' : '1',
       frente_material: s.frente_material === 'acrilico' ? 'acrilico' : 'impreso',
       piezas: s.piezas || '',
+      nombre: s.nombre || '',
     }));
   }
   const ancho = (data && data.ancho_cm) || cj.ancho_cm || '';
@@ -19083,7 +19158,7 @@ function readCorpSeccionesDom() {
   const rows = [];
   document.querySelectorAll('#corp-secciones [data-corp-sec-row]').forEach(row => {
     const g = (f) => { const el = row.querySelector(`[data-sec-field="${f}"]`); return el ? el.value : ''; };
-    rows.push({ ancho: g('ancho'), alto: g('alto'), piezas: g('piezas'), con_luz: g('con_luz') || '1', frente_material: g('frente_material') || 'impreso' });
+    rows.push({ nombre: g('nombre').trim(), ancho: g('ancho'), alto: g('alto'), piezas: g('piezas'), con_luz: g('con_luz') || '1', frente_material: g('frente_material') || 'impreso' });
   });
   return rows;
 }
@@ -19100,7 +19175,10 @@ function corpSeccionRowHtml(sec, removable) {
   const pz = (sec.piezas != null && +sec.piezas > 0) ? +sec.piezas : '';
   // Piezas vacío = se cotiza con la fórmula vieja → borde ámbar para que no se olvide.
   const pzS = inS + (pz === '' ? ';border-color:#f5b14c' : '');
-  return `<div data-corp-sec-row style="display:grid;grid-template-columns:1fr 1fr 0.9fr 1.1fr 1.1fr auto;gap:6px;align-items:end;margin-bottom:6px">
+  // Nombre de la parte del cartel (ej. "Logo", "Letras Tamone"): reemplaza "Sección 1/2/3" y va en la OC.
+  // Ocupa su propia línea arriba de la fila (grid-column 1 / -1) para no apretar los campos de medida.
+  return `<div data-corp-sec-row style="display:grid;grid-template-columns:1fr 1fr 0.9fr 1.1fr 1.1fr auto;gap:6px;align-items:end;margin-bottom:10px;padding-top:6px;border-top:1px dashed var(--border)">
+    <div style="grid-column:1 / -1"><label style="${lb}">Nombre de la parte (sale en la orden de compra)</label><input type="text" data-sec-field="nombre" value="${escapeHtml(sec.nombre || '')}" placeholder="ej. Logo, Letras, Isotipo" maxlength="40" style="${inS}"></div>
     <div><label style="${lb}">Ancho (cm)</label><input type="number" step="1" data-sec-field="ancho" value="${av}" style="${inS}"></div>
     <div><label style="${lb}">Alto (cm)</label><input type="number" step="1" data-sec-field="alto" value="${hv}" style="${inS}"></div>
     <div title="Cantidad de piezas que se fabrican por separado: cada letra, cada parte del logo, el punto de la i. Define la complejidad (piezas por m²) y con eso el precio por m²."><label style="${lb}">Piezas</label><input type="number" step="1" min="0" data-sec-field="piezas" value="${pz}" placeholder="ej. 12" style="${pzS}"></div>
@@ -19122,8 +19200,19 @@ function corporeaCaso(f) {
   if (!fT && !lT && eT) return 'D';
   return 'E';
 }
+// Nombre visible de una sección de corpóreo: el que le puso el vendedor o "Sección N" si no tiene.
+function corpSecNombre(s, i) {
+  return String((s && s.nombre) || '').trim() || ('Sección ' + (i + 1));
+}
+// Medidas generales del cartel (corporea_json.mg_ancho_cm / mg_alto_cm): las que van en el presupuesto.
+// Devuelve {ancho, alto} si están las dos, o null.
+function corpMedidasGenerales(cj) {
+  const a = Number(cj && cj.mg_ancho_cm) || 0, h = Number(cj && cj.mg_alto_cm) || 0;
+  return (a > 0 && h > 0) ? { ancho: a, alto: h } : null;
+}
 // Contenido de la cajita de precio del drawer corpóreo (reusable para el live-update).
-function corpPriceBoxHtml(r) {
+// mg = medidas generales cargadas ({ancho, alto} o null): con varias secciones y sin ellas, avisa.
+function corpPriceBoxHtml(r, mg) {
   r = r || {};
   const secs = Array.isArray(r.secciones) ? r.secciones : null;
   const multi = secs && secs.length > 1;
@@ -19135,18 +19224,22 @@ function corpPriceBoxHtml(r) {
     ? `<b style="color:var(--fg)">${escapeHtml(s.nivel || '')}</b> · ${s.piezas} pieza${s.piezas === 1 ? '' : 's'} · ${fmtDens(s.densidad)} pz/m² · ${fmtMoney(s.pm2 || 0)}/m²`
     : '<span style="color:#f5b14c">sin piezas → fórmula vieja</span>';
   const breakdown = multi
-    ? `<div style="font-size:10px;color:var(--fg-mute);margin-top:5px;line-height:1.5">${secs.map((s, i) => `Sección ${i + 1}: ${s.ancho_cm}×${s.alto_cm} cm${s.con_luz ? '' : ' · sin luz'}${s.frente_material === 'acrilico' ? ' · acrílico' : ''} — ${complejidadTxt(s)} — <b style="color:var(--fg)">${fmtMoney(s.precio)}</b>`).join('<br>')}</div>`
+    ? `<div style="font-size:10px;color:var(--fg-mute);margin-top:5px;line-height:1.5">${secs.map((s, i) => `${escapeHtml(corpSecNombre(s, i))}: ${s.ancho_cm}×${s.alto_cm} cm${s.con_luz ? '' : ' · sin luz'}${s.frente_material === 'acrilico' ? ' · acrílico' : ''} — ${complejidadTxt(s)} — <b style="color:var(--fg)">${fmtMoney(s.precio)}</b>`).join('<br>')}</div>`
     : (secs && secs[0] ? `<div style="font-size:11px;color:var(--fg-subtle);margin-top:5px">Complejidad: ${complejidadTxt(secs[0])}</div>` : '');
   // Aviso si alguna sección con medida no tiene piezas (se cotiza con la fórmula vieja).
   const avisoPiezas = (secs && secs.length && r.sinPiezas)
     ? `<div style="font-size:11px;color:#f5b14c;margin-top:6px">⚠ Cargá la cantidad de piezas${multi ? ' en cada sección' : ''} para cotizar con el índice de complejidad.</div>`
+    : '';
+  // Con varias secciones, el presupuesto al cliente lleva las MEDIDAS GENERALES (no el detalle por sección).
+  const avisoMG = (multi && !mg)
+    ? `<div style="font-size:11px;color:#f5b14c;margin-top:4px">⚠ Cargá las medidas generales: son las que van en el presupuesto (sin ellas se manda el detalle de cada sección).</div>`
     : '';
   const adminExtra = isAdmin()
     ? (multi ? ` · ${secs.length} secciones`
       : (secs && secs[0] ? ` · costo ${fmtMoney(r.costo || 0)} · ×${secs[0].margen}`
         : (r.costo != null && r.margen != null ? ` · costo ${fmtMoney(r.costo)} · ×${r.margen}` : '')))
     : '';
-  return `<div style="padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final${multi ? ` (${secs.length} secciones)` : ''}</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${m2.toLocaleString('es-AR', { maximumFractionDigits: 2 })} m²${adminExtra}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(precio * 0.03))}</div></div>${breakdown}${avisoPiezas}</div>`;
+  return `<div style="padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final${multi ? ` (${secs.length} secciones)` : ''}</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${m2.toLocaleString('es-AR', { maximumFractionDigits: 2 })} m²${adminExtra}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(precio * 0.03))}</div></div>${breakdown}${avisoPiezas}${avisoMG}</div>`;
 }
 // Etiquetas de acabado por cara (la espalda va en femenino). Fuente única para el render inicial
 // (corpAc) y para el refresh en vivo (refreshCorpAcabados).
@@ -19179,11 +19272,12 @@ function refreshCorpAcabados() {
 function updateCorpDrawerPrice() {
   const box = document.getElementById('corp-price-box');
   if (!box) return;
-  box.innerHTML = corpPriceBoxHtml(calcCorporeaTotal(readCorpSeccionesDom()));
+  const v = (k) => { const el = document.querySelector(`[data-corp-bf="${k}"]`); return el ? el.value : ''; };
+  box.innerHTML = corpPriceBoxHtml(calcCorporeaTotal(readCorpSeccionesDom()), corpMedidasGenerales({ mg_ancho_cm: v('mg_ancho'), mg_alto_cm: v('mg_alto') }));
 }
 document.addEventListener('input', (ev) => {
   const t = ev.target;
-  if (t && t.matches && t.matches('[data-bf="ancho_cm"],[data-bf="alto_cm"],[data-sec-field="ancho"],[data-sec-field="alto"],[data-sec-field="piezas"]') && document.getElementById('corp-price-box')) {
+  if (t && t.matches && t.matches('[data-bf="ancho_cm"],[data-bf="alto_cm"],[data-sec-field="ancho"],[data-sec-field="alto"],[data-sec-field="piezas"],[data-sec-field="nombre"],[data-corp-bf="mg_ancho"],[data-corp-bf="mg_alto"]') && document.getElementById('corp-price-box')) {
     if (t.matches('[data-sec-field="piezas"]')) t.style.borderColor = (+t.value > 0) ? 'var(--border)' : '#f5b14c';
     updateCorpDrawerPrice();
   }
@@ -19278,15 +19372,26 @@ function corpPresupuestoFields(brief, cj) {
   const secsAll = Array.isArray(cj.secciones) ? cj.secciones.filter(s => (Number(s.ancho_cm) || 0) > 0 && (Number(s.alto_cm) || 0) > 0) : null;
   const secs = (secsAll && secsAll.length) ? secsAll : null;   // defensivo: ignorar tramos 0x0 (datos viejos)
   const multi = secs && secs.length > 1;
-  // Medidas: con varias secciones, resumen de UNA sola línea (las variables de plantilla de Meta
-  // NO admiten saltos de línea). Con una sola sección / brief viejo, el ancho x alto de siempre.
-  const med = multi
-    ? secs.map((s, i) => `Sección ${i + 1}: ${s.ancho_cm}x${s.alto_cm} cm${(s.con_luz === false || String(s.con_luz) === '0') ? ' sin luz' : ''}${s.frente_material === 'acrilico' ? ' acrílico' : ''}`).join(' · ')
-    : ((cj.ancho_cm && cj.alto_cm) ? `${cj.ancho_cm}x${cj.alto_cm} cm` : (brief.medidas_libre || ''));
-  // Umbral de bastidor (>1 m): la medida más grande ENTRE TODAS las secciones.
-  const maxDim = secs
-    ? Math.max(0, ...secs.flatMap(s => [Number(s.ancho_cm) || 0, Number(s.alto_cm) || 0]))
-    : Math.max(Number(cj.ancho_cm) || 0, Number(cj.alto_cm) || 0);
+  const mg = corpMedidasGenerales(cj);
+  // Detalle por sección con su nombre ("Logo: 80x40 cm"): NO va en el presupuesto (queda engorroso,
+  // pedido de Gaspar oct-2026); va en la ORDEN DE COMPRA, que lleva el detalle final.
+  const detalleSecciones = secs
+    ? secs.map((s, i) => `${corpSecNombre(s, i)}: ${s.ancho_cm}x${s.alto_cm} cm${(s.con_luz === false || String(s.con_luz) === '0') ? ' sin luz' : ''}${s.frente_material === 'acrilico' ? ' acrílico' : ''}`)
+    : [];
+  // Medidas para el cliente: las MEDIDAS GENERALES si están cargadas. Sin ellas: con varias secciones,
+  // el detalle en UNA sola línea (las variables de plantilla de Meta NO admiten saltos de línea);
+  // con una sola sección / brief viejo, el ancho x alto de siempre.
+  const med = mg
+    ? `${mg.ancho}x${mg.alto} cm`
+    : multi
+      ? detalleSecciones.join(' · ')
+      : ((cj.ancho_cm && cj.alto_cm) ? `${cj.ancho_cm}x${cj.alto_cm} cm` : (brief.medidas_libre || ''));
+  // Umbral de bastidor (>1 m): las medidas generales, o la medida más grande ENTRE TODAS las secciones.
+  const maxDim = mg
+    ? Math.max(mg.ancho, mg.alto)
+    : secs
+      ? Math.max(0, ...secs.flatMap(s => [Number(s.ancho_cm) || 0, Number(s.alto_cm) || 0]))
+      : Math.max(Number(cj.ancho_cm) || 0, Number(cj.alto_cm) || 0);
   const precio = brief.precio_final || cj.precio || 0;
 
   // Frente: material + color/diseño + acabado.
@@ -19310,6 +19415,9 @@ function corpPresupuestoFields(brief, cj) {
   return {
     nombre: brief.cliente_nombre || '',
     medidas: med,
+    // Para la OC: el detalle por sección (array de líneas) solo si el cartel tiene más de una sección
+    // o si la única tiene nombre propio (con una sola sin nombre, las medidas ya lo dicen todo).
+    detalleSecciones: (multi || (secs && secs.length === 1 && String(secs[0].nombre || '').trim())) ? detalleSecciones : [],
     frente,
     laterales,
     fondo,
@@ -19717,7 +19825,8 @@ function renderCorpPopup() {
   const secs = (secsAll && secsAll.length) ? secsAll : null;   // defensivo: ignorar tramos 0x0
   const multi = secs && secs.length > 1;
   const s0 = secs && secs.length === 1 ? secs[0] : null;   // sección única (para mostrar su complejidad)
-  const medHdr = multi ? `${secs.length} secciones` : `${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm`;
+  const _mgP = corpMedidasGenerales(cj);
+  const medHdr = multi ? ((_mgP ? `${_mgP.ancho}×${_mgP.alto} cm · ` : '') + `${secs.length} secciones`) : `${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm`;
   return `
     <div data-corp-popup-bg style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:flex;align-items:center;justify-content:center;padding:var(--s-4)">
       <div style="background:var(--bg, #0A0A0F);border:1px solid var(--accent-cyan);border-radius:var(--r-md);max-width:560px;width:100%;max-height:90vh;overflow-y:auto;padding:var(--s-4)">
@@ -19738,7 +19847,7 @@ function renderCorpPopup() {
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent-cyan);margin-bottom:6px">🔒 Desglose de costos · solo admin</div>
           <table style="width:100%;font-family:ui-monospace,monospace;font-size:12px;color:var(--fg-subtle)">
             ${multi
-              ? secs.map((s, i) => `<tr><td>Sección ${i + 1} · ${s.ancho_cm}×${s.alto_cm} (${s.frente_material === 'acrilico' ? 'acríl.' : 'impr.'}, ${s.con_luz ? 'c/luz' : 's/luz'})${s.piezas ? ` · ${s.piezas} pz` : ''}</td><td style="text-align:right;color:var(--fg)">${(Number(s.m2) || 0).toFixed(2)} m² · ${s.piezas ? `${escapeHtml(s.nivel || '')} ${fmtMoney(s.pm2 || 0)}/m²` : `×${s.margen}`} = <b>${fmtMoney(s.precio)}</b></td></tr>`).join('')
+              ? secs.map((s, i) => `<tr><td>${escapeHtml(corpSecNombre(s, i))} · ${s.ancho_cm}×${s.alto_cm} (${s.frente_material === 'acrilico' ? 'acríl.' : 'impr.'}, ${s.con_luz ? 'c/luz' : 's/luz'})${s.piezas ? ` · ${s.piezas} pz` : ''}</td><td style="text-align:right;color:var(--fg)">${(Number(s.m2) || 0).toFixed(2)} m² · ${s.piezas ? `${escapeHtml(s.nivel || '')} ${fmtMoney(s.pm2 || 0)}/m²` : `×${s.margen}`} = <b>${fmtMoney(s.precio)}</b></td></tr>`).join('')
                 + `<tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Superficie total</td><td style="text-align:right;padding-top:5px;color:var(--fg)"><b>${m2 || '?'} m²</b></td></tr><tr><td>Costo base total</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo || 0)}</td></tr>`
               : `<tr><td>Superficie</td><td style="text-align:right;color:var(--fg)">${cj.ancho_cm || '?'}×${cj.alto_cm || '?'} cm = <b>${m2 || '?'} m²</b></td></tr>
             <tr><td>Costo/m² (${mat}, ${luz})</td><td style="text-align:right;color:var(--fg)">${fmtMoney(cj.costo_m2 || 0)}</td></tr>
@@ -19897,6 +20006,9 @@ document.addEventListener('input', (ev) => {
   if (!t || !t.id) return;
   // Editar el TEXTO del corpóreo → persistir en STATE para que un re-render (poll) no borre lo escrito.
   if (t.id === 'corp-popup-text') { STATE.corpPopupText = t.value; return; }
+  // Lo mismo para el popup de NEÓN (texto y precio): sin esto un re-render lo volvía al de lista.
+  if (t.id === 'brief-cot-popup-text') { STATE.briefCotPopupText = t.value; return; }
+  if (t.id === 'brief-cot-popup-precio') STATE.briefCotPopupPrecio = t.value;
   // Ajustar el campo "Precio final" → sincroniza el importe en el textarea (y persiste si es corpóreo).
   let taId = null;
   if (t.id === 'brief-cot-popup-precio') taId = 'brief-cot-popup-text';
@@ -19904,7 +20016,11 @@ document.addEventListener('input', (ev) => {
   else return;
   const ta = document.getElementById(taId);
   const n = _leerPrecioManual(t.id);
-  if (ta && n) { ta.value = _patchPrecioEnTexto(ta.value, n); if (t.id === 'corp-popup-precio') STATE.corpPopupText = ta.value; }
+  if (ta && n) {
+    ta.value = _patchPrecioEnTexto(ta.value, n);
+    if (t.id === 'corp-popup-precio') STATE.corpPopupText = ta.value;
+    else STATE.briefCotPopupText = ta.value;
+  }
 });
 document.addEventListener('click', (ev) => {
   const t = ev.target;
@@ -21098,6 +21214,10 @@ function readBriefDrawerForm() {
     // descartaba → con_luz volvía a false → los acabados quedaban trabados en opaco sin poder editarse.
     const anyLuz = secsIn.some(s => String(s.con_luz) !== '0');
     const sinLuz = !anyLuz;
+    // MEDIDAS GENERALES (oct-2026): si están, son LA medida del cartel → top-level ancho/alto (presupuesto,
+    // render, card, Sheet, proforma). Sin ellas, como siempre: la 1ª sección con medida.
+    const mg = corpMedidasGenerales({ mg_ancho_cm: cf.mg_ancho, mg_alto_cm: cf.mg_alto });
+    const topA = mg ? mg.ancho : s1.ancho_cm, topH = mg ? mg.alto : s1.alto_cm;
     out.corporea_json = JSON.stringify({
       // Campos single top-level = SECCIÓN 1 / totales -> retrocompat de todos los lectores viejos
       // (popup, presupuesto, Sheet) y del prompt de render del worker (corporeaContexto lee estos).
@@ -21108,7 +21228,8 @@ function readBriefDrawerForm() {
       frente_acabado: sinLuz ? 'opaco' : (cf.frente_acabado || 'translucido'), frente_color: cf.frente_color,
       lat_acabado: sinLuz ? 'opaco' : (cf.lat_acabado || 'translucido'), lat_color: cf.lat_color,
       esp_acabado: sinLuz ? 'opaca' : (cf.esp_acabado || 'translucida'), esp_color: cf.esp_color,
-      ancho_cm: s1.ancho_cm, alto_cm: s1.alto_cm, m2: agg.m2,
+      ancho_cm: topA, alto_cm: topH, m2: agg.m2,
+      mg_ancho_cm: mg ? mg.ancho : 0, mg_alto_cm: mg ? mg.alto : 0,
       costo_m2: s1.costo_m2, margen: s1.margen, costo: agg.costo, precio: agg.precio,
       comision_joaco: agg.comision_joaco,
       // Índice de complejidad (oct-2026): piezas totales + qué fórmula se usó. 'mixto' = alguna
@@ -21123,7 +21244,7 @@ function readBriefDrawerForm() {
     // la auto-transición a 'listo' (exige ancho/alto>0) y la card. Si NINGUNA sección tiene medida,
     // NO tocamos ancho_cm/alto_cm: quedan undefined -> el PATCH no los manda -> el backend conserva
     // el valor previo en vez de pisarlo con 0.
-    if (s1.ancho_cm > 0 && s1.alto_cm > 0) { out.ancho_cm = s1.ancho_cm; out.alto_cm = s1.alto_cm; }
+    if (topA > 0 && topH > 0) { out.ancho_cm = topA; out.alto_cm = topH; }
   }
   return out;
 }
@@ -21175,11 +21296,16 @@ function openBriefCotizadorPopup() {
     extraCarteles: []
   };
   STATE.briefCotPopupOpen = true;
+  // Lo que el vendedor edite en el popup (texto y precio) se guarda acá y sobrevive a los re-render.
+  STATE.briefCotPopupText = null;
+  STATE.briefCotPopupPrecio = null;
   render();
 }
 
 function closeBriefCotizadorPopup() {
   STATE.briefCotPopupOpen = false;
+  STATE.briefCotPopupText = null;
+  STATE.briefCotPopupPrecio = null;
   render();
 }
 
@@ -21265,7 +21391,11 @@ function renderBriefCotizadorPopup() {
   try { r     = useNueva ? calcCotizadorNuevo(STATE.cotizadorForm) : calcCotizador(STATE.cotizadorForm); } catch(e) {}
   try { rOtra = useNueva ? calcCotizador(STATE.cotizadorForm)       : calcCotizadorNuevo(STATE.cotizadorForm); } catch(e) {}
   const labelOtra = useNueva ? 'fórmula vieja' : 'fórmula nueva';
-  const texto = (function(){ try { return buildPresupuestoTexto() || ''; } catch(e) { return ''; } })();
+  // Si el vendedor ya editó el texto o el precio, se respeta lo suyo: el popup se re-renderiza solo
+  // (ej. el aviso "Sin cotizar" cada 75 s) y antes volvía al texto/precio de lista sin avisar → se
+  // mandaba el precio de lista aunque lo hubiera cambiado (reporte de Gaspar, oct-2026).
+  const texto = (STATE.briefCotPopupText != null) ? STATE.briefCotPopupText
+    : (function(){ try { return buildPresupuestoTexto() || ''; } catch(e) { return ''; } })();
   const f = STATE.cotizadorForm;
   return `
     <div id="brief-cot-popup-backdrop"
@@ -21287,7 +21417,7 @@ function renderBriefCotizadorPopup() {
             <div><span style="color:var(--fg-subtle);font-size:11px">m²</span><br><b>${r.m2.toFixed(2)}</b></div>
             ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco</span><br><b>${fmtMoney(r.comision)}</b></div>` : '<div></div>'}
           `}
-          <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente <span style="color:var(--accent-cyan);text-transform:none">· editable (o cambialo en el texto)</span></span><br><span style="color:var(--accent-cyan);font-size:16px;font-weight:600">$</span><input id="brief-cot-popup-precio" type="text" inputmode="numeric" value="${Math.round(r.transFinal)}" title="Ajustá el precio a mano (redondear/subir/bajar). Se manda ESTE valor: al cliente, en la plantilla y en el Sheet." style="background:var(--ink-100);border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:3px 6px;color:var(--accent-cyan);font-size:16px;font-weight:600;font-family:inherit;width:130px"></div>
+          <div><span style="color:var(--fg-subtle);font-size:11px">Acrílico transparente <span style="color:var(--accent-cyan);text-transform:none">· editable (o cambialo en el texto)</span></span><br><span style="color:var(--accent-cyan);font-size:16px;font-weight:600">$</span><input id="brief-cot-popup-precio" type="text" inputmode="numeric" value="${escapeHtml(STATE.briefCotPopupPrecio != null ? STATE.briefCotPopupPrecio : String(Math.round(r.transFinal)))}" title="Ajustá el precio a mano (redondear/subir/bajar). Se manda ESTE valor: al cliente, en la plantilla y en el Sheet." style="background:var(--ink-100);border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:3px 6px;color:var(--accent-cyan);font-size:16px;font-weight:600;font-family:inherit;width:130px"></div>
           ${OFRECER_BASE_NEGRA ? `<div><span style="color:var(--fg-subtle);font-size:11px">Acrílico negro</span><br><b style="color:var(--accent-cyan);font-size:16px">${fmtMoney(r.negroFinal)}</b></div>` : ''}
         </div>
         ${rOtra ? `
