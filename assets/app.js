@@ -245,9 +245,14 @@ function panelSueldoHtml(vendedor) {
     // Multiplicador de comisión por pedido. Gesto de 1er mes (ej. Agus): media comisión en los
     // pedidos HASTA cierta fecha (esas ventas las hizo el equipo), salvo los carteles que cerró
     // ella misma (comisionCompletaCarteles) → comisión entera. Default = 1 (sin ajuste).
+    // Listas de carteles por nombre: sin distinguir mayúsculas ni tildes ("corpóreo" = "corporeo").
+    const _nomCartel = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+    const enLista = (lista, cartel) => (lista || []).some(x => _nomCartel(x) === _nomCartel(cartel));
     const comMult = (p) => {
       if (!sec || !sec.mediaComisionHasta) return 1;
-      if ((sec.comisionCompletaCarteles || []).indexOf(p.cartel) !== -1) return 1;
+      if (enLista(sec.comisionCompletaCarteles, p.cartel)) return 1;
+      // Venta del 1er mes que se pagó después del corte (fecha del pedido posterior): ½ igual.
+      if (enLista(sec.mediaComisionCarteles, p.cartel)) return 0.5;
       // OJO: p.fecha es un objeto Date (parseDate), NO un string → armar la clave YYYY-MM-DD local.
       if (!(p.fecha instanceof Date) || isNaN(p.fecha.getTime())) return 1;
       const fk = `${p.fecha.getFullYear()}-${String(p.fecha.getMonth() + 1).padStart(2, '0')}-${String(p.fecha.getDate()).padStart(2, '0')}`;
@@ -300,7 +305,7 @@ function panelSueldoHtml(vendedor) {
     const filasHtml = filas.map(f => {
       const ajuste = f.mult < 1
         ? ' · <span style="color:#f5b14c">½ 1er mes</span>'
-        : (completas.indexOf(f.p.cartel) !== -1 ? ' · <span style="color:#25d366">completa ✓</span>' : '');
+        : (enLista(completas, f.p.cartel) ? ' · <span style="color:#25d366">completa ✓</span>' : '');
       return `<div data-com-fila style="${filaSt}">
           <div style="min-width:0">
             <div style="color:var(--fg);font-size:13px;overflow-wrap:anywhere"><button type="button" class="com-ped-link" data-com-ped="${escapeHtml(String(f.p.idx))}" title="Ver el detalle del pedido" style="background:none;border:0;padding:0;margin:0;font:inherit;color:var(--fg);cursor:pointer;text-align:left;overflow-wrap:anywhere">${f.p.esCorporeo ? '🧊 ' : '🔷 '}<span style="color:var(--accent-cyan,#8FD4DE);text-decoration:underline;text-underline-offset:2px">${escapeHtml(f.p.cartel || '—')}</span></button></div>
@@ -1217,7 +1222,10 @@ const COMERCIALES_SECUNDARIOS = {
               // 1er mes (arranque): media comisión en los pedidos hasta el 03/10 (esas ventas las
               // hizo el equipo), salvo "Primero lo bueno" que cerró ella (comisión completa). Lo que
               // venda del 04/10 en adelante = comisión completa automáticamente.
-              mediaComisionHasta: '2026-10-03', comisionCompletaCarteles: ['Primero lo bueno'] },
+              // mediaComisionCarteles: ventas del 1er mes que el cliente PAGÓ después del corte (el
+              // pedido quedó con fecha posterior) → media comisión igual (Gaspar, 08/10).
+              mediaComisionHasta: '2026-10-03', comisionCompletaCarteles: ['Primero lo bueno'],
+              mediaComisionCarteles: ['OMA corpóreo ochava', 'OMA pastilla'] },
 };
 function isSecundario(s) { return Object.prototype.hasOwnProperty.call(COMERCIALES_SECUNDARIOS, _userKey(s)); }
 function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
