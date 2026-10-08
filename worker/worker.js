@@ -38,6 +38,7 @@
 
 const ALLOWED_ORIGINS = '*';
 const SESSION_DAYS = 30;
+const LOGISTICA_SESSION_DAYS = 7; // usuario externo (Siempre a Tiempo): sesión más corta
 const WA_VERIFY_TOKEN = 'neon-infinito-webhook-2026';
 
 function cors(headers = {}) {
@@ -4436,7 +4437,9 @@ Si te preguntan cuál les conviene o para qué sirve cada uno, explicáselo con 
 
 DINÁMICA SEMANAL (ubicate en el tiempo): el corte va por tandas SEMANALES — los pedidos entran toda la semana, se cortan el fin de semana, y el COBRO se hace el LUNES. Usá la fecha/hora de arriba para saber en qué parte de la semana estás. El LUNES es día de cobros: mucha gente que escribe ese día viene por su PAGO, no por un pedido nuevo. Leé el contexto antes de empujar un pedido.
 
-CORTE EN PROCESO (importante): si arriba ves una línea [CORTE EN PROCESO (interno): ...], el cliente YA tiene un corte de esta semana TOMADO y en producción — NO lo trates como pedido nuevo, NO le pidas de nuevo medida/nombre/foto de eso. Seguí esa directiva: si pregunta por el estado/cuándo/cómo lo recibe, respondé (ya cortado, se despacha el lunes, envío 24-72hs o retiro en Colegiales); tomá un pedido nuevo SOLO si claramente quiere sumar algo DISTINTO.
+CORTE EN PROCESO (importante): si arriba ves una línea [CORTE EN PROCESO (interno): ...], el cliente YA tiene un corte de esta semana TOMADO y en producción — NO lo trates como pedido nuevo, NO le pidas de nuevo medida/nombre/foto de eso. Seguí esa directiva: si pregunta por el estado/cuándo/cómo lo recibe, respondé (ya cortado; si va por envío, el lunes lo contacta Siempre a Tiempo, la logística, para coordinar el envío y pasarle el costo, que se paga por adelantado, y el martes se despacha, envío 24-72hs; o retiro en el taller de Colegiales); tomá un pedido nuevo SOLO si claramente quiere sumar algo DISTINTO.
+
+CORTE DESPACHADO / RETIRADO: si arriba ves una línea [CORTE DESPACHADO el dd/mm ...], su corte ya salió ese día con Siempre a Tiempo: si pregunta cuándo le llega, decile que salió ese día y que el envío tarda 24-72hs. Si pregunta por el seguimiento, un problema con la entrega o un reclamo → frenar=true. Si ves [CORTE RETIRADO el dd/mm ...], ya lo retiró del taller ese día.
 
 COBRO / PAGO PENDIENTE (importante): si arriba ves una línea [COBRO PENDIENTE (interno): ...], ese cliente YA tiene un corte de esta semana SIN pagar y estamos esperando su pago. En ese caso NO le insistas con un pedido nuevo, NO le pidas medida/nombre/foto: el foco es cerrar el pago. Manejalo así, y NO frenes por esto:
 - Si dice que ya pagó / transfirió / "ahí va" / "ahí te mando": agradecé cálido y decile que quedamos a la espera del comprobante (o que si ya lo mandó, lo estamos viendo). es_corte=false.
@@ -4662,6 +4665,43 @@ async function corteAutoDetalle(env, phone, opts = {}) {
   if (!ok) { try { await env.DB.prepare("UPDATE corte_detalle_sent SET sent_at=NULL WHERE phone=? AND sent_at=?").bind(phone, now).run(); } catch (_) {} }
   return ok;
 }
+// 'parcial' era un callejón sin salida: un segundo comprobante (el resto) nunca se procesaba. Ahora, si un cliente en
+// 'parcial' manda una imagen/PDF NUEVA (no está en corte_pago_check) después de pasar a parcial, se OCRea UNA vez, se
+// registra en corte_pago_check y se AVISA a Gaspar. NO cambia estado_pago ni le manda nada al cliente (el pago lo
+// cierra Gaspar desde el tablero: "Marcar pagado"). Referencia "después del parcial" ≈ MIN(updated_at) de esas piezas
+// (la transición a parcial las estampa a todas; después solo puede crecer) MENOS la ventana del vigía (6 h): el vigía
+// OCRea un solo comprobante por corrida (el más nuevo), así que si el cliente mandó 2 transferencias juntas la otra quedó
+// ANTES de la transición sin revisar (corte_pago_check ya excluye la que se analizó). Piso de 7 días. Tope de OCR por corrida.
+// Los teléfonos con un cobro EN CURSO ('cobrando', otra semana) quedan solo para el vigía principal: si no, este repaso se
+// quedaba con el comprobante del cobro nuevo (lo registraba en corte_pago_check) y ese cobro nunca se marcaba pagado.
+async function corteVigiaParcial(env) {
+  let rs = [];
+  try { rs = (await env.DB.prepare("SELECT telefono, MIN(updated_at) AS ref, COALESCE(SUM(precio),0) AS total, MAX(cliente_nombre) AS nombre FROM corte_pedidos WHERE estado_pago='parcial' AND telefono IS NOT NULL AND telefono!='' AND telefono NOT IN (SELECT telefono FROM corte_pedidos WHERE estado_pago='cobrando' AND telefono IS NOT NULL AND telefono!='') GROUP BY telefono").all()).results || []; } catch (_) { return; }
+  if (!rs.length) return;
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pago_check (wamid TEXT PRIMARY KEY, phone TEXT, monto REAL, es_comprobante INTEGER, checked_at TEXT)").run(); } catch (_) {}
+  const piso = isoHace(7 * 86400000);
+  let ocrs = 0;
+  for (const r of rs) {
+    if (ocrs >= 10) break;
+    const tRef = Date.parse(r.ref || '');
+    const refMenos = isNaN(tRef) ? '' : new Date(tRef - 6 * 3600 * 1000).toISOString();
+    const desde = (refMenos && refMenos > piso) ? refMenos : piso;
+    let img = null;
+    try { img = await env.DB.prepare("SELECT wamid, media_url AS r2Key, msg_type AS msgType FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type IN ('image','document') AND media_url IS NOT NULL AND media_url!='' AND ts > ? AND wamid NOT IN (SELECT wamid FROM corte_pago_check) ORDER BY ts DESC LIMIT 1").bind(r.telefono, desde).first(); } catch (_) {}
+    if (!img || !img.r2Key) continue;
+    ocrs++;
+    const proof = await analyzePaymentProof(env, img.r2Key, img.msgType === 'document' ? 'application/pdf' : '', { phone: r.telefono, by: 'pago_corte' });
+    if (!proof) continue; // fallo transitorio del OCR → no se quema el wamid, se reintenta
+    const es = !!proof.es_comprobante;
+    const monto = +proof.monto || 0;
+    let ins = null;
+    try { ins = await env.DB.prepare("INSERT OR IGNORE INTO corte_pago_check (wamid, phone, monto, es_comprobante, checked_at) VALUES (?,?,?,?,?)").bind(img.wamid, r.telefono, monto, es ? 1 : 0, new Date().toISOString()).run(); } catch (_) {}
+    if (!ins || !ins.meta || !ins.meta.changes) continue; // otra corrida ya lo registró → no avisar dos veces
+    if (!es || !(monto > 0)) continue;
+    const quien = r.nombre ? (r.nombre + ' (' + r.telefono + ')') : r.telefono;
+    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó otro comprobante por $' + monto.toLocaleString('es-AR') + '; estaba en pago parcial (total $' + Number(r.total).toLocaleString('es-AR') + '). Si completa, marcalo pagado desde el tablero.'); } catch (_) {}
+  }
+}
 // Vigía de pagos AUTÓNOMO: corre en el cron aunque el bot conversacional del corte esté APAGADO.
 // Solo procesa comprobantes de clientes en cobranza (marca pagado/parcial + confirma + avisa a Gaspar);
 // NO charla ni toma pedidos. Ideal para el día de cobro con el bot off. Kill-switch kv corte_vigia_on (default ON).
@@ -4687,13 +4727,17 @@ async function processCorteVigiaAuto(env) {
       if (paid) continue; // pagó → no hace falta el desglose
       try { await corteAutoDetalle(env, ph); } catch (_) {} // contestó pidiendo el detalle → se lo mandamos
     }
+    // Clientes en 'parcial' que mandan OTRO comprobante: solo aviso a Gaspar (no cambia el estado de pago).
+    try { await corteVigiaParcial(env); } catch (_) {}
     // Reintento de marcados a la planilla que fallaron por algo transitorio (token/5xx). Idempotente.
     try {
       const pend = (await env.DB.prepare("SELECT phone, cliente, total, caja, created_at FROM corte_sheet_pending").all()).results || [];
       for (const p of pend) {
         if (Date.now() - new Date(p.created_at).getTime() > 2 * 86400000) { try { await env.DB.prepare("DELETE FROM corte_sheet_pending WHERE phone=?").bind(p.phone).run(); } catch (_) {} continue; } // >2 días → se abandona
         try {
-          const sr = await corteMarcarPagadoSheet(env, p.cliente, Number(p.total) || 0, p.caja || '');
+          // Los pendientes del pago manual tienen clave '<tel|clave>|<fecha de la hoja>': se reintenta sobre ESA semana.
+          const pk = String(p.phone || ''), fRet = pk.includes('|') ? pk.slice(pk.lastIndexOf('|') + 1) : '';
+          const sr = await corteMarcarPagadoSheet(env, p.cliente, Number(p.total) || 0, p.caja || '', fRet);
           if (sr.ok || /sin filas pendientes/i.test(String(sr.error || ''))) { try { await env.DB.prepare("DELETE FROM corte_sheet_pending WHERE phone=?").bind(p.phone).run(); } catch (_) {} }
         } catch (_) {}
       }
@@ -4803,8 +4847,11 @@ function corteCajaFromProof(proof) {
 // que la suma de precios (col J) coincida con el total esperado (±500) para no marcar filas equivocadas.
 // Si `caja` viene (Melina/Gaspar/Favio/Bruno), también la escribe en la col R (Caja) de esas mismas filas;
 // si viene '' NO toca la col R (regla: sin caja visible, no se pone nada). Match del cliente por col C
-// (case-insensitive, espacios colapsados). Devuelve {ok,marcadas,caja} o {error}.
-async function corteMarcarPagadoSheet(env, cliente, totalEsperado, caja) {
+// (case-insensitive, espacios colapsados). `fecha` (opcional, d/m/yyyy de la hoja): si viene y el cliente tiene filas
+// pendientes de ESA fecha, solo se considera esa semana (el pago manual sabe qué semana se pagó; sin esto, dos semanas con
+// el mismo total marcaban la primera de la hoja). Si esa fecha no aparece, se busca como siempre (por total).
+// Devuelve {ok,marcadas,caja} o {error}.
+async function corteMarcarPagadoSheet(env, cliente, totalEsperado, caja, fecha) {
   if (!cliente || !(totalEsperado > 0)) return { error: 'faltan datos' };
   const token = await sheetsAccessToken(env);
   if (!token) return { error: 'sin token sheets' };
@@ -4833,11 +4880,18 @@ async function corteMarcarPagadoSheet(env, cliente, totalEsperado, caja) {
     byFecha[f].idx.push(i + 1);                        // fila 1-based (header = fila 1)
   }
   if (!Object.keys(byFecha).length) return { error: 'sin filas pendientes que matcheen' };
+  let fechas = Object.keys(byFecha);
+  if (fecha) {
+    const fv = corteFechaValida(fecha);
+    const sola = fechas.filter(f => f === String(fecha).trim() || (fv && (corteFechaValida(f) || {}).txt === fv.txt));
+    if (sola.length) fechas = sola;
+  }
   let best = null;
-  for (const f of Object.keys(byFecha)) { const g = byFecha[f]; const diff = Math.abs(g.total - totalEsperado); if (diff <= 500 && (!best || diff < best.diff)) best = { fecha: f, total: g.total, idx: g.idx, diff }; }
+  for (const f of fechas) { const g = byFecha[f]; const diff = Math.abs(g.total - totalEsperado); if (diff <= 500 && (!best || diff < best.diff)) best = { fecha: f, total: g.total, idx: g.idx, diff }; }
   if (!best) return { error: `ninguna tanda del cliente coincide con el total (esperado $${totalEsperado})` };
   const rowIdx = best.idx;
-  const cajaOk = ['Melina', 'Gaspar', 'Favio', 'Bruno'].includes(caja) ? caja : '';
+  // 'Efectivo' = pago manual en efectivo (POST /admin/corte/pago-manual). Cualquier otra cosa → la col R queda vacía.
+  const cajaOk = ['Melina', 'Gaspar', 'Favio', 'Bruno', 'Efectivo'].includes(caja) ? caja : '';
   const data = [];
   rowIdx.forEach(ri => { data.push({ range: `Venta_Insumos!I${ri}`, values: [['pagado']] }); if (cajaOk) data.push({ range: `Venta_Insumos!R${ri}`, values: [[cajaOk]] }); });
   try {
@@ -5108,10 +5162,14 @@ function corteEntregaCambiosTxt(cambios) {
 // cambia a mano. notify → avisa a Gaspar si cambió algo (sobre todo si ya estaba embalado).
 async function corteSyncEntrega(env, { soloTandaId = 0, notify = false } = {}) {
   await ensureCorteHojaSchema(env);
+  // entrega_manual=1 (el admin la cambió a mano): la planilla ya no la pisa. "Retiró" NO la pone: el estado 'entregado' ya
+  // la deja afuera, y si se deshace la pieza tiene que volver a seguir la planilla. Si el esquema nuevo no está, la columna
+  // no existe y no hay piezas manuales → sin filtro.
+  const manualOk = await ensureCorteDespachoSchema(env);
   let rows = [];
   // Solo la tanda EN CURSO (piezas de los últimos 8 días): las anteriores ya salieron aunque sigan "embalado" (nadie
   // las marca despachadas) y tocarlas mandaría avisos falsos de "avisale a Neyen".
-  try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, hoja_cliente, hoja_fecha, entrega, estado FROM corte_pedidos WHERE IFNULL(producto,'')!='NEON' AND hoja_fecha IS NOT NULL AND hoja_fecha!='' AND estado NOT IN ('despachado','entregado') AND " + (soloTandaId ? "tanda_id=?" : "created_at > ?")).bind(soloTandaId ? soloTandaId : new Date(Date.now() - 8 * 86400000).toISOString()).all()).results || []; } catch (_) {}
+  try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, hoja_cliente, hoja_fecha, entrega, estado FROM corte_pedidos WHERE IFNULL(producto,'')!='NEON' AND hoja_fecha IS NOT NULL AND hoja_fecha!='' AND estado NOT IN ('despachado','entregado')" + (manualOk ? " AND IFNULL(entrega_manual,0)=0" : "") + " AND " + (soloTandaId ? "tanda_id=?" : "created_at > ?")).bind(soloTandaId ? soloTandaId : new Date(Date.now() - 8 * 86400000).toISOString()).all()).results || []; } catch (_) {}
   if (!rows.length) return { ok: true, cambios: [], revisadas: 0 };
   const ent = await corteEntregaHoja(env);
   if (!ent.ok) return { error: ent.error };
@@ -5124,7 +5182,14 @@ async function corteSyncEntrega(env, { soloTandaId = 0, notify = false } = {}) {
     g.ids.push(p.id); if (p.estado === 'embalado') g.ya_embalado = true;
   }
   for (const g of Object.values(grupos)) {
-    try { await env.DB.prepare("UPDATE corte_pedidos SET entrega=?, updated_at=? WHERE id IN (" + g.ids.map(() => '?').join(',') + ")").bind(g.a, nowIso, ...g.ids).run(); cambios.push({ tanda: g.tanda, cliente: g.cliente, de: g.de, a: g.a, piezas: g.ids.length, ya_embalado: g.ya_embalado }); } catch (_) {}
+    // Las condiciones del SELECT se repiten en el UPDATE: entre la lectura y acá pasan segundos (lectura de la planilla) y
+    // en ese rato el admin pudo fijar la entrega a mano, Neyen marcar "Retiró" o logística despachar. Solo se informa lo
+    // que de verdad cambió.
+    try {
+      const u = await env.DB.prepare("UPDATE corte_pedidos SET entrega=?, updated_at=? WHERE id IN (" + g.ids.map(() => '?').join(',') + ") AND estado NOT IN ('despachado','entregado')" + (manualOk ? " AND IFNULL(entrega_manual,0)=0" : "")).bind(g.a, nowIso, ...g.ids).run();
+      const ch = (u && u.meta && u.meta.changes) || 0;
+      if (ch) cambios.push({ tanda: g.tanda, cliente: g.cliente, de: g.de, a: g.a, piezas: ch, ya_embalado: g.ya_embalado });
+    } catch (_) {}
   }
   if (notify && cambios.length) { try { await precotizNotifyGaspar(env, corteEntregaCambiosTxt(cambios)); } catch (_) {} }
   return { ok: true, cambios, revisadas: rows.length };
@@ -5181,53 +5246,362 @@ function corteEstimarPaquete(items) {
   kg += 0.4 + (largo * ancho / 10000) * 0.6;
   return { largo: Math.round(largo), ancho: Math.round(ancho), alto: Math.round(alto), peso: Math.round(kg * 10) / 10, bultos: 1, piezas, cable, fuentes, pieza_mas_larga: Math.round(L) };
 }
-// Paquetes de una tanda para logística: SOLO envío (y los "sin definir", aparte, para que nada se caiga). Sin precios.
-async function logisticaPaquetes(env, tandaIdPedida) {
+// ===== DESPACHO DEL CORTE (oct-2026): circuito cerrado lunes contactar / martes cargar =====
+// Decisiones de Gaspar: NUNCA se despacha con deuda (en NINGUNA tanda del cliente); el lunes logística (Siempre a Tiempo)
+// contacta a todos (también a los impagos) y cobra el envío desde SU WhatsApp; el martes carga al camión SOLO lo que tiene
+// pedido pagado + envío pagado. Cargar = las piezas pasan a 'despachado' (antes nadie lo hacía: las tandas viejas quedaban
+// 'embalado'). Columnas/tablas nuevas (migrations/045_corte_despacho.sql; acá también en caliente, idempotente):
+//  · corte_pedidos: despachado_at, entregado_at, entregado_por, entrega_manual, pago_metodo, pago_manual_por, pago_manual_at, pago_nota
+//  · corte_paquetes: numero (N° estable de la semana, único por tanda), contacto_estado ('' | escrito | no_contesta | listo),
+//    contacto_at, intentos, envio_pagado(+_at/_por), despachado_at, aviso_at (freno de "Avisar a Neon"), aviso_nc_at (aviso único "no contesta ×3")
+//  · logistica_log: historial de acciones de logística (no se pisa).
+let _corteDespSchemaOk = false;
+async function ensureCorteDespachoSchema(env) {
+  if (_corteDespSchemaOk) return true;
   await ensureCortePaquetesSchema(env);
-  let tandas = [];
-  try { tandas = (await env.DB.prepare("SELECT id, fecha_corte FROM corte_tandas WHERE fecha_corte IS NOT NULL AND fecha_corte!='' ORDER BY id DESC LIMIT 8").all()).results || []; } catch (_) {}
-  const tanda = tandas.find(t => t.id === tandaIdPedida) || tandas[0] || null;
-  const base = { ok: true, tandas: tandas.map(t => ({ id: t.id, fecha: t.fecha_corte })), tanda: tanda ? { id: tanda.id, fecha: tanda.fecha_corte } : null, paquetes: [], retiran: 0 };
-  if (!tanda) return base;
-  let rows = [];
-  try { rows = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, producto, estado, estado_pago, entrega FROM corte_pedidos WHERE tanda_id=? AND IFNULL(producto,'')!='NEON' AND lower(cliente_nombre)!='neon' ORDER BY cliente_nombre, id").bind(tanda.id).all()).results || []; } catch (_) {}
-  let marcas = {};
-  try { ((await env.DB.prepare("SELECT * FROM corte_paquetes WHERE tanda_id=?").bind(tanda.id).all()).results || []).forEach(m => { marcas[m.cliente_key] = m; }); } catch (_) {}
-  const ltv = await corteLtv(env);
-  const ltvRows = ltv.ok ? ltv.rows : [];
+  for (const c of ['despachado_at TEXT', 'entregado_at TEXT', 'entregado_por TEXT', 'entrega_manual INTEGER DEFAULT 0', 'pago_metodo TEXT', 'pago_manual_por TEXT', 'pago_manual_at TEXT', 'pago_nota TEXT']) {
+    try { await env.DB.prepare('ALTER TABLE corte_pedidos ADD COLUMN ' + c).run(); } catch (_) {} // tira si ya existe
+  }
+  for (const c of ['numero INTEGER', 'contacto_estado TEXT', 'contacto_at TEXT', 'intentos INTEGER DEFAULT 0', 'envio_pagado INTEGER DEFAULT 0', 'envio_pagado_at TEXT', 'envio_pagado_por TEXT', 'despachado_at TEXT', 'aviso_at TEXT', 'aviso_nc_at TEXT']) {
+    try { await env.DB.prepare('ALTER TABLE corte_paquetes ADD COLUMN ' + c).run(); } catch (_) {}
+  }
+  try { await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS uq_corte_paquetes_numero ON corte_paquetes(tanda_id, numero) WHERE numero IS NOT NULL').run(); } catch (_) {}
+  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS logistica_log (id INTEGER PRIMARY KEY AUTOINCREMENT, tanda_id INTEGER, cliente_key TEXT, ts TEXT, accion TEXT, nota TEXT, operador TEXT, usuario TEXT)').run(); } catch (_) {}
+  try { await env.DB.prepare('ALTER TABLE logistica_log ADD COLUMN usuario TEXT').run(); } catch (_) {} // tablas creadas antes de la columna
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_logistica_log_paq ON logistica_log(tanda_id, cliente_key)').run(); } catch (_) {}
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_corte_pedidos_pago ON corte_pedidos(estado_pago)').run(); } catch (_) {}
+  // Memoizar SOLO si todo existe de verdad (un ALTER que falló por un corte transitorio no deja el isolate sin la feature).
+  try {
+    await env.DB.prepare('SELECT despachado_at, entregado_at, entregado_por, entrega_manual, pago_metodo, pago_manual_por, pago_manual_at, pago_nota FROM corte_pedidos LIMIT 0').all();
+    await env.DB.prepare('SELECT numero, contacto_estado, contacto_at, intentos, envio_pagado, envio_pagado_at, envio_pagado_por, despachado_at, aviso_at, aviso_nc_at FROM corte_paquetes LIMIT 0').all();
+    await env.DB.prepare('SELECT id, tanda_id, cliente_key, ts, accion, nota, operador, usuario FROM logistica_log LIMIT 0').all();
+    _corteDespSchemaOk = true;
+  } catch (_) {}
+  return _corteDespSchemaOk;
+}
+// DEUDA (regla única para logística, retiro y pago manual): pieza de alumno (no neón), con precio > 0, sin pagar
+// (pendiente/cobrando/parcial) y ya producida (las 'pedido'/'matriz_lista' de la semana que viene todavía no se cobraron:
+// no pueden frenar un despacho). Las piezas en $0 NO son deuda. Cuenta CUALQUIER tanda del mismo cliente.
+// PAGABLE (pago manual, spec 5): lo mismo SIN el filtro de etapa → el admin también puede marcar pagado un adelanto de
+// piezas que todavía no se cortaron (el diálogo las muestra por semana y se destildan las que no).
+const CORTE_PAGABLE_SQL = "IFNULL(producto,'TRANS')!='NEON' AND lower(IFNULL(cliente_nombre,''))!='neon' AND precio>0 AND estado_pago IN ('pendiente','cobrando','parcial')";
+const CORTE_DEUDA_SQL = CORTE_PAGABLE_SQL + " AND IFNULL(estado,'pedido') NOT IN ('pedido','matriz_lista')";
+// Claves de cliente (corteClaveCliente: teléfono, o 'n:'+nombre si no tiene) con deuda. Además, cada deuda CON teléfono
+// suma 't:'+nombre normalizado: el mismo cliente puede tener una tanda cargada sin teléfono (LTV caído o todavía no estaba)
+// y otra con teléfono, y la deuda de una tiene que frenar a la otra (ver corteTieneDeuda). null = no se pudo leer (el que
+// llama lo trata como deuda: nunca despachar a ciegas).
+async function corteDeudaKeys(env) {
+  try {
+    const s = new Set();
+    ((await env.DB.prepare('SELECT DISTINCT telefono, cliente_nombre FROM corte_pedidos WHERE ' + CORTE_DEUDA_SQL).all()).results || []).forEach(r => {
+      s.add(corteClaveCliente(r));
+      const nn = corteNormNombre(r.cliente_nombre);
+      if (r.telefono && nn) s.add('t:' + nn);
+    });
+    return s;
+  }
+  catch (_) { return null; }
+}
+// ¿El cliente (clave + nombre/s) tiene deuda? Por su clave y también por la otra clave posible del mismo nombre: con
+// teléfono, la deuda cargada SIN teléfono a su nombre ('n:'); sin teléfono, la de su nombre CON teléfono ('t:'). Un
+// homónimo puede frenar de más (lado seguro: nunca despachar con deuda). deuda null (no se pudo leer) = deuda.
+function corteTieneDeuda(deuda, key, nombres) {
+  if (!deuda) return true;
+  if (deuda.has(key)) return true;
+  const pre = String(key || '').startsWith('n:') ? 't:' : 'n:';
+  return (Array.isArray(nombres) ? nombres : [nombres]).some(n => { const nn = corteNormNombre(n); return !!nn && deuda.has(pre + nn); });
+}
+// Un cliente en un body {telefono?, nombre?}: por teléfono si viene; si no, por nombre normalizado y SIN teléfono (misma
+// clave que corteClaveCliente). El nombre se filtra en JS (corteNormNombre no existe en SQL).
+function corteClienteSel(body) {
+  const tel = String((body && body.telefono) || '').replace(/\D/g, '');
+  if (tel) return { tel, key: tel, where: 'telefono=?', binds: [tel], match: () => true };
+  const norm = corteNormNombre(body && body.nombre);
+  if (!norm) return null;
+  return { tel: '', key: 'n:' + norm, where: "(telefono IS NULL OR telefono='')", binds: [], match: p => corteNormNombre(p.cliente_nombre) === norm };
+}
+// Fechas AR: 'YYYY-MM-DD' (para "mismo día") y 'dd/mm' de un ISO.
+function corteArYmd(iso) { const t = Date.parse(iso || ''); return isNaN(t) ? '' : new Date(t - 3 * 3600 * 1000).toISOString().slice(0, 10); }
+function corteDdMm(iso) { const t = Date.parse(iso || ''); if (isNaN(t)) return ''; const d = new Date(t - 3 * 3600 * 1000); return String(d.getUTCDate()).padStart(2, '0') + '/' + String(d.getUTCMonth() + 1).padStart(2, '0'); }
+// Martes de despacho de una tanda: el primer martes desde la fecha de corte (fecha_corte es el lunes → el día siguiente;
+// las tandas viejas con fecha domingo → +2). Devuelve la Date a las 12:00 UTC del día, o null si la fecha no es válida.
+function corteMartesDate(fechaCorte) { const f = corteFechaValida(fechaCorte); if (!f) return null; return new Date(f.date.getTime() + ((2 - f.date.getUTCDay() + 7) % 7) * 86400000); }
+function corteMartesTxt(fechaCorte) { const d = corteMartesDate(fechaCorte); return d ? String(d.getUTCDate()).padStart(2, '0') + '/' + String(d.getUTCMonth() + 1).padStart(2, '0') : ''; }
+function cortePad2(n) { return n == null ? '--' : String(n).padStart(2, '0'); }
+// Direcciones de LTV con caché en memoria del isolate (3 min): la logística pollea cada 90 s por pestaña y antes cada
+// pedido iba a Google Sheets. Si Sheets falla, se usa el último resultado bueno; el error sale genérico (nunca el texto
+// crudo de Google al usuario externo). Solo datos planos en globalThis (nunca promesas: no se comparten entre requests).
+async function corteLtvCached(env) {
+  const c = globalThis.__corteLtvCache;
+  if (c && c.rows && Date.now() - c.at < 3 * 60 * 1000) return { ok: true, rows: c.rows };
+  let r = null;
+  try { r = await corteLtv(env); } catch (_) {}
+  if (r && r.ok) { globalThis.__corteLtvCache = { at: Date.now(), rows: r.rows }; return { ok: true, rows: r.rows }; }
+  if (c && c.rows) return { ok: true, rows: c.rows, stale: true, error: 'No se pudo actualizar la planilla de direcciones: se muestran las últimas que se leyeron.' };
+  return { ok: false, error: 'No se pudo leer la planilla de direcciones. Probá de nuevo en un rato.' };
+}
+// N° de paquete ESTABLE por tanda (logística + etiquetas). La 1ª vez se numera a TODOS los clientes de la tanda (envío,
+// retira y sin definir, más los que llegan por arrastre) en orden alfabético; los que aparecen después reciben MAX+1.
+// Nunca se renumera. Idempotente (INSERT de la fila + UPDATE numero WHERE numero IS NULL, en un batch); si otra request
+// numeró a la vez, el índice único (tanda_id, numero) hace fallar el batch entero y se reintenta releyendo. → {key: numero}
+async function corteNumerarPaquetes(env, tandaId, clientes) {
+  const vistos = new Set(); const lista = clientes.filter(c => c && c.key && !vistos.has(c.key) && vistos.add(c.key));
+  let nums = {};
+  for (let intento = 0; intento < 4; intento++) {
+    nums = {};
+    let max = 0;
+    const rows = (await env.DB.prepare('SELECT cliente_key, numero FROM corte_paquetes WHERE tanda_id=?').bind(tandaId).all()).results || [];
+    rows.forEach(r => { if (r.numero != null) { nums[r.cliente_key] = r.numero; if (r.numero > max) max = r.numero; } });
+    const faltan = lista.filter(c => nums[c.key] == null).sort((a, b) => String(a.nombre || '').localeCompare(String(b.nombre || ''), 'es', { sensitivity: 'base' }) || String(a.key).localeCompare(String(b.key)));
+    if (!faltan.length || intento === 3) return nums;
+    const stmts = [];
+    faltan.forEach((c, i) => {
+      stmts.push(env.DB.prepare('INSERT INTO corte_paquetes (tanda_id, cliente_key) VALUES (?, ?) ON CONFLICT(tanda_id, cliente_key) DO NOTHING').bind(tandaId, c.key));
+      stmts.push(env.DB.prepare('UPDATE corte_paquetes SET numero=? WHERE tanda_id=? AND cliente_key=? AND numero IS NULL').bind(max + 1 + i, tandaId, c.key));
+    });
+    try { await env.DB.batch(stmts); } catch (_) {} // choque con otra request → la vuelta siguiente relee
+  }
+  return nums;
+}
+// Tandas que ve cada rol en logística (orden id DESC; fecha_corte es texto d/m/yyyy, no se ordena): logística solo las 2
+// más recientes con fecha de corte (privacidad: con el arrastre no necesita más); admin 8.
+async function logisticaTandas(env, rol) {
+  return (await env.DB.prepare("SELECT id, fecha_corte FROM corte_tandas WHERE fecha_corte IS NOT NULL AND fecha_corte!='' ORDER BY id DESC LIMIT ?").bind(rol === 'logistica' ? 2 : 8).all()).results || [];
+}
+// Arma TODOS los clientes de una tanda (logística + etiquetas). Por cliente (clave corteClaveCliente):
+//  · logi: el paquete de logística (piezas entrega='envio' + las 'sin definir'; las 'retira' van por el circuito de retiro).
+//  · ret: las piezas que retira en el taller.
+// ARRASTRE (solo en la tanda más reciente): se suman las piezas de ENVÍO de tandas anteriores (fecha_corte >= kv
+// logistica_arrastre_desde, default 5/10/2026) que siguen 'cortado'/'embalado' (quedaron en el taller), más las que se
+// despacharon desde esta semana (para verlas cargadas). Tira si la base falla (el endpoint responde 500; nunca una lista
+// vacía engañosa). opts: { esUltima, conDirecciones, soloKey }.
+async function logisticaArmar(env, tanda, opts = {}) {
+  if (!(await ensureCorteDespachoSchema(env))) throw new Error('schema');
+  const COLS = 'id, tanda_id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, producto, estado, estado_pago, entrega, precio, despachado_at, entregado_at';
+  const NO_NEON = "IFNULL(producto,'')!='NEON' AND lower(IFNULL(cliente_nombre,''))!='neon'";
+  const rows = (await env.DB.prepare(`SELECT ${COLS} FROM corte_pedidos WHERE tanda_id=? AND ${NO_NEON} ORDER BY cliente_nombre, id`).bind(tanda.id).all()).results || [];
+  const origen = {}; // tanda_id anterior → fecha_corte (de dónde viene el arrastre)
+  if (opts.esUltima) {
+    const desde = corteFechaValida(await kvGet(env, 'logistica_arrastre_desde', '5/10/2026'));
+    if (desde) {
+      ((await env.DB.prepare("SELECT id, fecha_corte FROM corte_tandas WHERE id<? AND fecha_corte IS NOT NULL AND fecha_corte!='' ORDER BY id DESC LIMIT 30").bind(tanda.id).all()).results || [])
+        .forEach(t => { const f = corteFechaValida(t.fecha_corte); if (f && f.date >= desde.date) origen[t.id] = f.txt; });
+    }
+    const oIds = Object.keys(origen).map(Number);
+    if (oIds.length) {
+      const ar = (await env.DB.prepare(`SELECT ${COLS} FROM corte_pedidos WHERE tanda_id IN (${oIds.map(() => '?').join(',')}) AND entrega='envio' AND ${NO_NEON} AND (estado IN ('cortado','embalado') OR (estado='despachado' AND despachado_at IN (SELECT despachado_at FROM corte_paquetes WHERE tanda_id=? AND despachado_at IS NOT NULL)))`).bind(...oIds, tanda.id).all()).results || [];
+      ar.forEach(p => { p._arrastre = origen[p.tanda_id]; rows.push(p); });
+    }
+  }
+  const tIds = [tanda.id, ...Object.keys(origen).map(Number)];
+  const phT = tIds.map(() => '?').join(',');
+  const marcas = {}; // tanda_id → cliente_key → fila de corte_paquetes
+  ((await env.DB.prepare(`SELECT * FROM corte_paquetes WHERE tanda_id IN (${phT})`).bind(...tIds).all()).results || []).forEach(m => { (marcas[m.tanda_id] = marcas[m.tanda_id] || {})[m.cliente_key] = m; });
+  const logs = {}; // 'tanda|key' → últimas acciones (más nueva primero)
+  try {
+    ((await env.DB.prepare(`SELECT tanda_id, cliente_key, ts, accion, nota, operador FROM logistica_log WHERE tanda_id IN (${phT}) AND cliente_key!='' ORDER BY id DESC LIMIT 3000`).bind(...tIds).all()).results || []).forEach(l => {
+      const a = (logs[l.tanda_id + '|' + l.cliente_key] = logs[l.tanda_id + '|' + l.cliente_key] || []);
+      if (a.length < 5) a.push({ ts: l.ts, accion: l.accion, nota: l.nota || '', operador: l.operador || '' });
+    });
+  } catch (_) {}
+  const deuda = await corteDeudaKeys(env);
+  // Sin la deuda no se arma la lista (500 y el front conserva la anterior): antes salían TODOS como "Pedido impago" y el
+  // botón de WhatsApp le decía "nos figura pendiente de pago" a clientes que ya pagaron. Despachar tampoco se puede.
+  if (deuda === null) throw new Error('deuda');
+  let ltvRows = null, ltvError = '';
+  if (opts.conDirecciones) { const l = await corteLtvCached(env); if (l.ok) { ltvRows = l.rows; ltvError = l.stale ? l.error : ''; } else ltvError = l.error; }
   const grupos = {};
   for (const p of rows) { const k = corteClaveCliente(p); (grupos[k] = grupos[k] || []).push(p); }
-  const paquetes = [];
+  const nombreDe = items => (items.find(p => !p._arrastre) || items[0]).cliente_nombre;
+  const nums = await corteNumerarPaquetes(env, tanda.id, Object.entries(grupos).map(([key, items]) => ({ key, nombre: nombreDe(items) })));
+  const medido = m => !!(m && m.largo > 0 && m.ancho > 0 && m.alto > 0);
+  const clientes = [];
   let retiran = 0;
   for (const [k, items] of Object.entries(grupos)) {
-    const ents = [...new Set(items.map(p => p.entrega || ''))];
-    const entrega = ents.includes('envio') ? 'envio' : (ents.includes('retira') ? 'retira' : '');
-    if (entrega === 'retira') { retiran++; continue; } // retira por el taller: no es para logística
-    const c = items[0];
-    // Datos de envío: LTV (col E "Datos envio") por teléfono; si no, por nombre exacto.
-    const t10 = String(c.telefono || '').slice(-10);
-    const l = (t10 && ltvRows.find(x => x.tel && x.tel.slice(-10) === t10)) || ltvRows.find(x => x.norm === corteNormNombre(c.cliente_nombre)) || null;
-    const datos = l ? l.datos : '';
-    const est = corteEstimarPaquete(items);
-    const mk = marcas[k] || {};
-    const medido = mk.largo > 0 && mk.ancho > 0 && mk.alto > 0;
-    const pagos = new Set(items.map(p => p.estado_pago || 'pendiente'));
-    const pago = pagos.has('parcial') ? 'parcial' : ([...pagos].every(x => x === 'pagado') ? 'pagado' : 'pendiente');
-    const estados = new Set(items.map(p => p.estado));
-    paquetes.push({
-      key: k, cliente: c.cliente_nombre, telefono: c.telefono || '', datos_envio: datos, falta_direccion: !String(datos).replace(/\s+/g, '').length,
-      entrega: entrega || 'sin definir', entrega_mixta: ents.length > 1,
-      piezas: items.filter(p => corteMedidaPieza(p)).map(p => ({ diseno: p.diseno_nombre, medida: p.medida_declarada || (p.ancho_real ? p.ancho_real + 'x' + p.alto_real : ''), cantidad: Math.max(1, parseInt(p.cantidad, 10) || 1) })),
-      insumos: items.filter(p => !corteMedidaPieza(p)).map(p => ({ nombre: p.diseno_nombre || p.producto, cantidad: Math.max(1, parseInt(p.cantidad, 10) || 1) })),
-      estado: [...estados].every(e => e === 'embalado') ? 'embalado' : (estados.has('embalado') ? 'parcial' : 'para embalar'),
-      pago,
-      paquete: medido ? { largo: mk.largo, ancho: mk.ancho, alto: mk.alto, peso: mk.peso || null, bultos: mk.bultos || 1, fuente: 'medido', medido_at: mk.medido_at } : { ...est, fuente: 'estimado' },
+    if (opts.soloKey && k !== opts.soloKey) continue;
+    const c = items.find(p => !p._arrastre) || items[0];
+    const ret = items.filter(p => p.entrega === 'retira');
+    const sd = items.filter(p => p.entrega !== 'envio' && p.entrega !== 'retira');
+    const logi = items.filter(p => p.entrega !== 'retira');
+    const mkCur = (marcas[tanda.id] || {})[k] || {};
+    const cli = { key: k, numero: nums[k] != null ? nums[k] : null, nombre: c.cliente_nombre, telefono: c.telefono || '', items, ret, mkCur, logi: null };
+    clientes.push(cli);
+    if (!logi.length) { if (ret.length) retiran++; continue; } // retira en el taller: no es para logística
+    const entrega = sd.length ? 'sin definir' : 'envio';
+    const pend = logi.filter(p => p.estado === 'cortado' || p.estado === 'embalado'); // lo que se puede cargar
+    const desp = logi.filter(p => p.estado === 'despachado');
+    const vivos = logi.filter(p => p.estado !== 'entregado');
+    // Marcas de la semana de ORIGEN (arrastre): si TODO lo pendiente viene de antes y esta semana el paquete todavía no se
+    // tocó, vale el "envío pagado" de allá (ya lo pagó; quedó en el taller por otra cosa) y sus medidas (Neyen las guarda
+    // en la tanda de las piezas). Con piezas nuevas de esta semana el paquete es otro: no se hereda nada. Tampoco se hereda
+    // de un paquete de origen que YA SALIÓ (cargado / despachado_at): ese envío pagado y esa caja fueron del primer viaje;
+    // una pieza que quedó y se cortó después es un segundo envío que hay que cobrar.
+    const origenes = [...new Set(logi.filter(p => p._arrastre).map(p => p.tanda_id))].sort((a, b) => b - a);
+    const mkPrev = origenes.map(t => (marcas[t] || {})[k]).filter(m => m && !m.despachado_at && !(+m.cargado));
+    const soloArrastre = pend.length > 0 && pend.every(p => p._arrastre);
+    const virgen = !mkCur.contacto_estado && !(+mkCur.envio_pagado) && !(+mkCur.intentos);
+    const her = (soloArrastre && virgen) ? (mkPrev.find(m => +m.envio_pagado) || null) : null;
+    const mkMed = medido(mkCur) ? mkCur : (soloArrastre ? (mkPrev.find(medido) || null) : null);
+    const envioPagado = her ? true : !!(+mkCur.envio_pagado);
+    const contactoEstado = her ? 'listo' : (mkCur.contacto_estado || '');
+    const pedidoPagado = !corteTieneDeuda(deuda, k, [...new Set(items.map(p => p.cliente_nombre))]);
+    const despachado = !pend.length && desp.length > 0;
+    const ests = new Set(pend.map(p => p.estado));
+    const estado = despachado ? 'despachado' : ((pend.length && [...ests].every(e => e === 'embalado')) ? 'embalado' : (ests.has('embalado') ? 'parcial' : 'para embalar'));
+    let bloqueo = null;
+    if (!despachado) { if (!pedidoPagado) bloqueo = 'Pedido impago'; else if (entrega === 'sin definir') bloqueo = 'Entrega sin definir'; else if (!envioPagado) bloqueo = 'Falta pagar el envío'; }
+    const arrP = pend.filter(p => p._arrastre).sort((a, b) => a.tanda_id - b.tanda_id);
+    // Pago de las piezas del paquete (sin montos): las de $0 no cuentan (nunca se cobran y trababan el paquete para siempre).
+    const pagos = new Set(logi.filter(p => Number(p.precio) > 0).map(p => p.estado_pago || 'pendiente'));
+    const pago = pagos.has('parcial') ? 'parcial' : ([...pagos].every(x => x === 'pagado' || x === 'interno') ? 'pagado' : 'pendiente');
+    let datos = '', faltaDir = false;
+    if (ltvRows) { // sin LTV (error) no se marca "falta dirección" en todos: el front muestra ltv_error
+      const t10 = String(c.telefono || '').slice(-10);
+      const l = (t10 && ltvRows.find(x => x.tel && x.tel.slice(-10) === t10)) || ltvRows.find(x => x.norm === corteNormNombre(c.cliente_nombre)) || null;
+      datos = l ? l.datos : '';
+      faltaDir = !String(datos).replace(/\s+/g, '').length;
+    }
+    // Lo que va físicamente en la caja: cortado/embalado/despachado (una 'matriz_lista' de la semana que viene no).
+    const fisicas = logi.filter(p => p.estado === 'cortado' || p.estado === 'embalado' || p.estado === 'despachado');
+    const lista = fisicas.length ? fisicas : (vivos.length ? vivos : logi);
+    const est = corteEstimarPaquete(pend.length ? pend : lista);
+    const pq = {
+      key: k, numero: cli.numero, cliente: c.cliente_nombre, telefono: c.telefono || '', datos_envio: datos, falta_direccion: faltaDir,
+      entrega, entrega_mixta: new Set(items.map(p => p.entrega || '')).size > 1,
+      piezas: lista.filter(p => corteMedidaPieza(p)).map(p => ({ diseno: p.diseno_nombre, medida: p.medida_declarada || (p.ancho_real ? p.ancho_real + 'x' + p.alto_real : ''), cantidad: Math.max(1, parseInt(p.cantidad, 10) || 1) })),
+      insumos: lista.filter(p => !corteMedidaPieza(p)).map(p => ({ nombre: p.diseno_nombre || p.producto, cantidad: Math.max(1, parseInt(p.cantidad, 10) || 1) })),
+      estado, pago,
+      paquete: mkMed ? { largo: mkMed.largo, ancho: mkMed.ancho, alto: mkMed.alto, peso: mkMed.peso || null, bultos: mkMed.bultos || 1, fuente: 'medido', medido_at: mkMed.medido_at } : { ...est, fuente: 'estimado' },
       pieza_mas_larga: est.pieza_mas_larga,
-      contactado: !!mk.contactado, contactado_at: mk.contactado_at || '', cargado: !!mk.cargado, cargado_at: mk.cargado_at || '', nota: mk.nota || '', nota_at: mk.nota_at || '',
-    });
+      contactado: !!(+mkCur.contactado) || contactoEstado === 'listo' || envioPagado, contactado_at: mkCur.contactado_at || '',
+      cargado: despachado || (!!(+mkCur.cargado) && !pend.length), cargado_at: mkCur.cargado_at || '',
+      nota: mkCur.nota || '', nota_at: mkCur.nota_at || '',
+      contacto_estado: contactoEstado, contacto_at: (her ? her.contacto_at : mkCur.contacto_at) || null, intentos: +mkCur.intentos || 0,
+      envio_pagado: envioPagado, envio_pagado_at: (her ? her.envio_pagado_at : mkCur.envio_pagado_at) || null,
+      pedido_pagado: pedidoPagado,
+      listo: pedidoPagado && envioPagado && entrega === 'envio' && pend.length > 0,
+      bloqueo,
+      arrastre: arrP.length ? arrP[0]._arrastre : null,
+      despachado, despachado_at: despachado ? (mkCur.despachado_at || desp.map(p => p.despachado_at).filter(Boolean).sort().pop() || null) : null,
+      ids: pend.map(p => p.id),
+      historial: [tanda.id, ...origenes].flatMap(t => logs[t + '|' + k] || []).sort((a, b) => String(b.ts).localeCompare(String(a.ts))).slice(0, 5),
+    };
+    // Datos internos para los endpoints (no viajan en el JSON: no enumerable).
+    Object.defineProperty(pq, '_int', { value: { mkCur, her, pend }, enumerable: false });
+    cli.logi = pq;
   }
-  paquetes.sort((a, b) => (a.entrega === 'sin definir') - (b.entrega === 'sin definir') || String(a.cliente).localeCompare(String(b.cliente), 'es'));
-  return { ...base, paquetes, retiran, ltv_error: ltv.ok ? '' : ltv.error };
+  return { clientes, retiran, ltv_error: ltvError };
+}
+// Paquetes de una tanda para logística (contrato GET /admin/logistica/paquetes). Sin precios. Orden por N°.
+async function logisticaPaquetes(env, tandaIdPedida, opts = {}) {
+  const tandas = await logisticaTandas(env, opts.rol);
+  const tanda = tandas.find(t => t.id === tandaIdPedida) || tandas[0] || null;
+  const base = { ok: true, tandas: tandas.map(t => ({ id: t.id, fecha: t.fecha_corte })), tanda: tanda ? { id: tanda.id, fecha: tanda.fecha_corte, martes: corteMartesTxt(tanda.fecha_corte) } : null, paquetes: [], retiran: 0, ltv_error: '' };
+  if (!tanda) return base;
+  const a = await logisticaArmar(env, tanda, { esUltima: tanda.id === tandas[0].id, conDirecciones: !opts.sinDirecciones, soloKey: opts.soloKey });
+  const paquetes = a.clientes.filter(c => c.logi).map(c => c.logi).sort((x, y) => (x.numero == null ? 1e9 : x.numero) - (y.numero == null ? 1e9 : y.numero));
+  return { ...base, paquetes, retiran: a.retiran, ltv_error: a.ltv_error };
+}
+// Paquete de UNA clave en una tanda PERMITIDA para el rol, recalculado en el server con la misma regla que la lista.
+// → { tanda, tandas, paquete } o { status, body } (403 tanda no permitida / 404 no existe o es de retiro).
+async function logisticaPaqueteDe(env, rol, tandaId, key, conDirecciones) {
+  const tandas = await logisticaTandas(env, rol);
+  const tanda = tandas.find(t => t.id === tandaId);
+  if (!tanda) return { status: 403, body: { error: 'tanda', motivo: 'Esa semana ya no se puede modificar' } };
+  const a = await logisticaArmar(env, tanda, { esUltima: tanda.id === tandas[0].id, conDirecciones, soloKey: key });
+  const c = a.clientes.find(x => x.key === key);
+  if (!c || !c.logi) return { status: 404, body: { error: 'no_existe', motivo: 'Ese paquete no está en la semana' } };
+  return { tanda, tandas, paquete: c.logi };
+}
+// Nombre de quien opera la pantalla de logística (lo tipea una vez por dispositivo); si no viene, el usuario de la sesión.
+function logiOperador(body, session) { const o = String((body && body.operador) || '').replace(/\s+/g, ' ').trim().slice(0, 40); return o || String((session && session.user) || ''); }
+// Auditoría: el nombre tipeado (operador) lo puede poner cualquiera ("Gaspar" desde la cuenta de logística), así que las
+// columnas *_por guardan SIEMPRE el usuario de la sesión, más el nombre tipeado si es otro ("logistica · Juan").
+function logiQuien(session, operador) {
+  const u = String((session && session.user) || '').trim(), o = String(operador || '').trim();
+  if (!o || o.toLowerCase() === u.toLowerCase()) return u || o;
+  return (u ? u + ' · ' + o : o).slice(0, 80);
+}
+// Historial: `operador` = el nombre tipeado (lo que muestra el front); `usuario` = el de la sesión (no se puede tipear).
+// cond {sql, binds} (opcional): la fila solo se inserta si se cumple (INSERT ... SELECT ... WHERE, dentro del mismo batch).
+function logiLogStmt(env, tandaId, key, accion, nota, operador, usuario, cond) {
+  const vals = [tandaId, key, new Date().toISOString(), accion, String(nota || '').slice(0, 300), String(operador || '').slice(0, 40), String(usuario || '').slice(0, 40)];
+  if (cond) return env.DB.prepare('INSERT INTO logistica_log (tanda_id, cliente_key, ts, accion, nota, operador, usuario) SELECT ?, ?, ?, ?, ?, ?, ? WHERE ' + cond.sql).bind(...vals, ...cond.binds);
+  return env.DB.prepare('INSERT INTO logistica_log (tanda_id, cliente_key, ts, accion, nota, operador, usuario) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(...vals);
+}
+// "Envío pagado" heredado de la semana de origen (arrastre): antes de cualquier acción se fija en ESTA semana, así la
+// acción (ej. tocar WhatsApp) no lo borra al dejar de ser una fila "virgen".
+function logiFijarHerenciaStmt(env, tandaId, key, her) {
+  const nowIso = new Date().toISOString();
+  return env.DB.prepare("UPDATE corte_paquetes SET envio_pagado=1, envio_pagado_at=?, envio_pagado_por=?, contacto_estado='listo', contacto_at=COALESCE(contacto_at, ?) WHERE tanda_id=? AND cliente_key=? AND IFNULL(envio_pagado,0)=0 AND IFNULL(contacto_estado,'')=''")
+    .bind(her.envio_pagado_at || nowIso, her.envio_pagado_por || '', her.contacto_at || nowIso, tandaId, key);
+}
+// Contexto operativo del corte para el bot y el copiloto: piezas EN PROCESO (sin despachadas/entregadas), total de cobro
+// SOLO de lo que está en cobro (cobrando/parcial) y sin neón, y el último despacho / retiro de los últimos 21 días.
+async function corteCtxEstado(env, phone) {
+  const out = { n: 0, total: 0, enCobro: 0, despachado_at: '', entregado_at: '' };
+  try {
+    const a = await env.DB.prepare("SELECT SUM(CASE WHEN estado IN ('matriz_lista','cortado','embalado') THEN 1 ELSE 0 END) AS n, COALESCE(SUM(CASE WHEN estado_pago IN ('cobrando','parcial') AND precio>0 THEN precio ELSE 0 END),0) AS total, MAX(CASE WHEN estado_pago IN ('cobrando','parcial') THEN 1 ELSE 0 END) AS enCobro FROM corte_pedidos WHERE telefono=? AND IFNULL(producto,'TRANS')!='NEON' AND (estado IN ('matriz_lista','cortado','embalado') OR estado_pago IN ('cobrando','parcial'))").bind(phone).first();
+    if (a) { out.n = Number(a.n) || 0; out.total = Number(a.total) || 0; out.enCobro = Number(a.enCobro) || 0; }
+  } catch (_) {}
+  try {
+    if (await ensureCorteDespachoSchema(env)) {
+      const d = isoHace(21 * 86400000);
+      const b = await env.DB.prepare("SELECT MAX(CASE WHEN estado='despachado' THEN despachado_at END) AS d, MAX(CASE WHEN estado='entregado' THEN entregado_at END) AS e FROM corte_pedidos WHERE telefono=? AND IFNULL(producto,'TRANS')!='NEON' AND ((estado='despachado' AND despachado_at > ?) OR (estado='entregado' AND entregado_at > ?))").bind(phone, d, d).first();
+      if (b) { out.despachado_at = b.d || ''; out.entregado_at = b.e || ''; }
+    }
+  } catch (_) {}
+  return out;
+}
+// Líneas internas de despacho / retiro reciente (solo fechas del sistema; nunca texto libre de logística en un prompt).
+function corteCtxSalidas(act) {
+  let s = '';
+  if (act.despachado_at) s += '[CORTE DESPACHADO el ' + corteDdMm(act.despachado_at) + ' con Siempre a Tiempo (interno): su corte ya salió ese día por envío (llega en 24-72hs).]\n\n';
+  if (act.entregado_at) s += '[CORTE RETIRADO el ' + corteDdMm(act.entregado_at) + ' (interno): ya retiró su corte del taller ese día.]\n\n';
+  return s;
+}
+// Al asignar teléfono a un cliente que estaba como 'n:'+nombre, sus marcas de corte_paquetes (N° de paquete, medidas,
+// contacto, envío pagado, nota) y su historial pasan a la clave teléfono. Si la fila destino ya existe, se completa lo que
+// tenga vacío y se borra la vieja (primero el DELETE: el N° no choca con el índice único). Devuelve cuántas migró.
+async function corteMigrarPaquetesTel(env, nombre, tel, tandaId) {
+  if (!(await ensureCorteDespachoSchema(env))) return 0;
+  const oldKey = 'n:' + corteNormNombre(nombre);
+  if (oldKey === 'n:' || !tel) return 0;
+  const viejas = (await env.DB.prepare('SELECT * FROM corte_paquetes WHERE cliente_key=?' + (tandaId ? ' AND tanda_id=?' : '')).bind(oldKey, ...(tandaId ? [tandaId] : [])).all()).results || [];
+  const vacio = x => x == null || x === '';
+  const MED = ['largo', 'ancho', 'alto', 'peso', 'bultos', 'medido_por', 'medido_at'];
+  const TXT = ['numero', 'contactado_at', 'contactado_por', 'cargado_at', 'cargado_por', 'nota', 'nota_at', 'nota_por', 'contacto_estado', 'contacto_at', 'envio_pagado_at', 'envio_pagado_por', 'despachado_at', 'aviso_at', 'aviso_nc_at'];
+  const NUM = ['contactado', 'cargado', 'envio_pagado', 'intentos'];
+  let n = 0;
+  for (const v of viejas) {
+    // Si en esa tanda quedan piezas SIN teléfono con el mismo nombre normalizado (otra grafía), la clave vieja sigue viva.
+    const resto = (await env.DB.prepare("SELECT cliente_nombre FROM corte_pedidos WHERE tanda_id=? AND (telefono IS NULL OR telefono='') AND IFNULL(producto,'')!='NEON'").bind(v.tanda_id).all()).results || [];
+    if (resto.some(p => 'n:' + corteNormNombre(p.cliente_nombre) === oldKey)) continue;
+    // 2 vueltas: si entre el SELECT de dest y el batch otra request numeró la clave teléfono, el rename choca con la PK, el
+    // batch entero falla y se reintenta releyendo dest.
+    for (let intento = 0; intento < 2; intento++) {
+      const dest = await env.DB.prepare('SELECT * FROM corte_paquetes WHERE tanda_id=? AND cliente_key=?').bind(v.tanda_id, tel).first();
+      // dest "solo numeración": la creó un GET de logística/etiquetas que cayó entre el UPDATE del teléfono y esta migración
+      // (le dio MAX+1, sin ninguna marca). Se borra y la fila vieja pasa entera a la clave teléfono: conserva el N° impreso.
+      const stub = dest && v.numero != null && MED.every(col => vacio(dest[col])) && TXT.every(col => col === 'numero' || vacio(dest[col])) && NUM.every(col => !(+dest[col] || 0));
+      const stmts = [];
+      if (!dest || stub) {
+        if (stub) stmts.push(env.DB.prepare('DELETE FROM corte_paquetes WHERE tanda_id=? AND cliente_key=?').bind(v.tanda_id, tel));
+        stmts.push(env.DB.prepare('UPDATE corte_paquetes SET cliente_key=? WHERE tanda_id=? AND cliente_key=?').bind(tel, v.tanda_id, oldKey));
+      } else {
+        const m = {};
+        if (!(dest.largo > 0) && v.largo > 0) MED.forEach(col => { m[col] = v[col]; });
+        TXT.forEach(col => { if (vacio(dest[col]) && !vacio(v[col])) m[col] = v[col]; });
+        NUM.forEach(col => { if ((+v[col] || 0) > (+dest[col] || 0)) m[col] = v[col]; });
+        stmts.push(env.DB.prepare('DELETE FROM corte_paquetes WHERE tanda_id=? AND cliente_key=?').bind(v.tanda_id, oldKey));
+        const cols = Object.keys(m);
+        if (cols.length) stmts.push(env.DB.prepare('UPDATE corte_paquetes SET ' + cols.map(col => col + '=?').join(', ') + ' WHERE tanda_id=? AND cliente_key=?').bind(...cols.map(col => m[col]), v.tanda_id, tel));
+      }
+      stmts.push(env.DB.prepare('UPDATE logistica_log SET cliente_key=? WHERE tanda_id=? AND cliente_key=?').bind(tel, v.tanda_id, oldKey));
+      try { await env.DB.batch(stmts); n++; break; } catch (_) {}
+    }
+  }
+  return n;
 }
 // ===== Piezas de NEÓN PROPIO en el corte (matriz a diseñar de Neon Infinito) =====
 // Cada cartel de neón que carga un vendedor (POST /admin/pedidos) nace solo como una pieza
@@ -5491,11 +5865,12 @@ async function processCortePilot(env) {
       try {
         // ¿El cliente YA tiene un corte de esta semana tomado/en proceso? (ya relevado/cortado/embalado, o con
         // cobro en curso). Si sí, el bot NO lo trata como pedido nuevo ni le pide de nuevo los datos del diseño.
-        const act = await env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(precio),0) AS total, MAX(CASE WHEN estado_pago IN ('cobrando','parcial') THEN 1 ELSE 0 END) AS enCobro FROM corte_pedidos WHERE telefono=? AND (estado IN ('matriz_lista','cortado','embalado') OR estado_pago IN ('cobrando','parcial'))").bind(phone).first();
-        if (act && act.n) {
-          if (act.enCobro) cobroCtx = '[COBRO PENDIENTE (interno): a este cliente YA le mandamos el cobro de su corte de esta semana, total $' + Number(act.total).toLocaleString('es-AR') + ', y estamos esperando el pago/comprobante. NO le insistas con un pedido nuevo ni le pidas medida/nombre/foto: el foco es el pago. Seguí la sección COBRO / PAGO PENDIENTE del playbook.]\n\n';
-          else cobroCtx = '[CORTE EN PROCESO (interno): este cliente YA tiene un corte de esta semana TOMADO y en producción (' + act.n + ' diseño(s), ya cortado). Su pedido YA está — NO le pidas medida/nombre/foto de eso ni lo trates como pedido nuevo. Si pregunta por el estado / cuándo está / cómo lo recibe: su corte ya está cortado y se despacha el LUNES (envío 24-72hs a todo el país, o retiro en el taller de Colegiales). Si menciona un pago o manda un comprobante, decile que lo estás viendo. Tomá un pedido NUEVO SOLO si CLARAMENTE quiere sumar algo DISTINTO a lo ya pedido.]\n\n';
-        }
+        // Estado real (oct-2026): sin las piezas ya despachadas/entregadas, total solo de lo que está en cobro y sin neón,
+        // más el último despacho/retiro de los últimos 21 días (corteCtxEstado).
+        const act = await corteCtxEstado(env, phone);
+        if (act.enCobro) cobroCtx = '[COBRO PENDIENTE (interno): a este cliente YA le mandamos el cobro de su corte de esta semana, total $' + Number(act.total).toLocaleString('es-AR') + ', y estamos esperando el pago/comprobante. NO le insistas con un pedido nuevo ni le pidas medida/nombre/foto: el foco es el pago. Seguí la sección COBRO / PAGO PENDIENTE del playbook.]\n\n';
+        else if (act.n) cobroCtx = '[CORTE EN PROCESO (interno): este cliente YA tiene un corte de esta semana TOMADO y en producción (' + act.n + ' diseño(s), ya cortado). Su pedido YA está — NO le pidas medida/nombre/foto de eso ni lo trates como pedido nuevo. Si pregunta por el estado / cuándo está / cómo lo recibe: su corte ya está cortado; si va por envío, el lunes lo contacta Siempre a Tiempo (la logística) para coordinar el envío y pasarle el costo, que se paga por adelantado, y el martes se despacha (envío 24-72hs a todo el país); si retira, lo retira en el taller de Colegiales. Si menciona un pago o manda un comprobante, decile que lo estás viendo. Tomá un pedido NUEVO SOLO si CLARAMENTE quiere sumar algo DISTINTO a lo ya pedido.]\n\n';
+        cobroCtx += corteCtxSalidas(act);
       } catch (_) {}
       const out = await corteLlm(env, cobroCtx + infoCliente + ctx.fullText, imgs, undefined, { phone });
       if (!out.ok) continue;
@@ -11771,11 +12146,11 @@ async function suggestReply(env, phone, opts = {}) {
     // Contexto operativo del alumno (cobro pendiente / corte en proceso), mismo criterio que el bot de corte.
     let estadoCtx = '';
     try {
-      const act = await env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(precio),0) AS total, MAX(CASE WHEN estado_pago IN ('cobrando','parcial') THEN 1 ELSE 0 END) AS enCobro FROM corte_pedidos WHERE telefono=? AND (estado IN ('matriz_lista','cortado','embalado') OR estado_pago IN ('cobrando','parcial'))").bind(phone).first();
-      if (act && act.n) {
-        if (act.enCobro) estadoCtx = '[COBRO PENDIENTE (interno): a este alumno YA le mandamos el cobro de su corte de esta semana, total $' + Number(act.total).toLocaleString('es-AR') + ', y esperamos el pago/comprobante. El foco es el pago, no un pedido nuevo.]\n\n';
-        else estadoCtx = '[CORTE EN PROCESO (interno): este alumno YA tiene un corte de esta semana tomado y en producción (' + act.n + ' diseño(s)). Su pedido YA está; si pregunta por el estado / cuándo lo recibe: se despacha el LUNES (envío 24-72hs o retiro en el taller de Colegiales).]\n\n';
-      }
+      // Mismo estado real que el bot (corteCtxEstado): sin despachadas/entregadas, total solo en cobro, + despacho/retiro reciente.
+      const act = await corteCtxEstado(env, phone);
+      if (act.enCobro) estadoCtx = '[COBRO PENDIENTE (interno): a este alumno YA le mandamos el cobro de su corte de esta semana, total $' + Number(act.total).toLocaleString('es-AR') + ', y esperamos el pago/comprobante. El foco es el pago, no un pedido nuevo.]\n\n';
+      else if (act.n) estadoCtx = '[CORTE EN PROCESO (interno): este alumno YA tiene un corte de esta semana tomado y en producción (' + act.n + ' diseño(s)). Su pedido YA está; si pregunta por el estado / cuándo lo recibe: si va por envío, el lunes lo contacta Siempre a Tiempo (la logística) para coordinar el envío y pasarle el costo, que se paga por adelantado, y el martes se despacha (envío 24-72hs); si retira, lo retira en el taller de Colegiales.]\n\n';
+      estadoCtx += corteCtxSalidas(act);
     } catch (_) {}
     userContent = estadoCtx + ctx.fullText + '\n\nSugerí el PRÓXIMO mensaje para mandarle al alumno ahora. Devolvé SOLO el JSON.';
     system = [
@@ -13363,6 +13738,15 @@ const handler = {
       ).bind(...lookupIds).first();
 
       const isAdminUser = userSlug === 'gaspar' || (panelUser && panelUser.rol === 'admin');
+      // Freno de fuerza bruta (oct-2026, pensado para el usuario externo de logística): 8 intentos SEGUIDOS para ese usuario
+      // → 15 min bloqueado (contados desde el 8°); se resetea al acertar, y si pasan 15 min sin intentos el contador vuelve a
+      // empezar (antes, vencido el bloqueo, un solo error volvía a bloquear otros 15 min). El intento se RESERVA de forma
+      // atómica ANTES de comparar la contraseña (un solo statement): requests en paralelo ya no pasan todas con el mismo
+      // contador. Clave por el id real del usuario (los alias comparten contador; coincide con el borrado al cambiar la
+      // contraseña de logística). Solo usuarios con contraseña propia (hash): el login legacy sin contraseña no cambia y al
+      // admin no se lo bloquea (nadie puede dejar a Gaspar afuera tirando contraseñas).
+      const failKey = 'login_fail:' + String((panelUser && panelUser.id) || userSlug).trim();
+      const conFreno = !!(panelUser && panelUser.password_hash && !isAdminUser);
 
       if (isAdminUser) {
         // Gaspar: contraseña en env.ADMIN_PASSWORD.
@@ -13375,11 +13759,23 @@ const handler = {
       } else if (panelUser && panelUser.password_hash) {
         // Comercial / diseñador con password: validar hash SHA-256.
         if (!password) return json({ error: 'missing fields' }, 400);
+        if (conFreno) {
+          // v = {n, at}: n = intentos de la racha, at = último intento contado. Vencida la ventana → racha nueva (n=1). Con
+          // n>=8 ya no se cuenta ni se corre `at` (el bloqueo dura 15 min desde el 8°): n=9 = bloqueado.
+          const ahora = new Date().toISOString();
+          let nInt = 0;
+          try {
+            const rf = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, json_object('n', 1, 'at', ?), ?) ON CONFLICT(k) DO UPDATE SET v = CASE WHEN json_valid(kv_cache.v) = 0 OR IFNULL(json_extract(kv_cache.v, '$.at'), '') < ? THEN json_object('n', 1, 'at', ?) WHEN IFNULL(json_extract(kv_cache.v, '$.n'), 0) >= 8 THEN json_object('n', 9, 'at', json_extract(kv_cache.v, '$.at')) ELSE json_object('n', IFNULL(json_extract(kv_cache.v, '$.n'), 0) + 1, 'at', ?) END, updated_at = excluded.updated_at RETURNING v").bind(failKey, ahora, ahora, isoHace(15 * 60 * 1000), ahora, ahora).first();
+            const f = rf ? JSON.parse(rf.v) : null; nInt = (f && +f.n) || 0;
+          } catch (_) {} // si el freno falla, no deja a nadie afuera (como antes)
+          if (nInt > 8) return json({ error: 'Demasiados intentos. Probá de nuevo en 15 minutos.' }, 429);
+        }
         const inputHash = await sha256hex(password);
         if (inputHash !== panelUser.password_hash) {
           await new Promise(r => setTimeout(r, 250));
           return unauthorized('credenciales inválidas');
         }
+        if (conFreno) { try { await env.DB.prepare('DELETE FROM kv_cache WHERE k = ?').bind(failKey).run(); } catch (_) {} }
       } else if (panelUser) {
         // Usuario existe pero sin password configurada → entra sin password (legacy).
       } else {
@@ -13389,7 +13785,9 @@ const handler = {
       }
       const token = randomToken();
       const now = new Date();
-      const expires = new Date(now.getTime() + SESSION_DAYS * 86400000);
+      // Usuario externo de logística: sesión de 7 días (el resto, 30).
+      const sesDias = ((panelUser && panelUser.rol === 'logistica') || esUsuarioLogistica(user)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS;
+      const expires = new Date(now.getTime() + sesDias * 86400000);
       await env.DB.prepare(
         'INSERT INTO sessions (token, user, expires_at, created_at) VALUES (?, ?, ?, ?)'
       ).bind(token, user, expires.toISOString(), now.toISOString()).run();
@@ -13425,15 +13823,15 @@ const handler = {
       if (!target) return json({ error: 'missing user' }, 400);
       const tslug = target.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
       // El destino debe existir y estar activo (o ser el propio admin).
-      let okTarget = tslug === 'gaspar';
+      let okTarget = tslug === 'gaspar', tRol = '';
       if (!okTarget) {
         const ids = userLookupIds(tslug); const ph = ids.map(() => '?').join(',');
-        try { okTarget = !!(await env.DB.prepare(`SELECT 1 AS x FROM users_panel WHERE id IN (${ph}) AND activo = 1 LIMIT 1`).bind(...ids).first()); } catch (_) {}
+        try { const tr = await env.DB.prepare(`SELECT rol FROM users_panel WHERE id IN (${ph}) AND activo = 1 LIMIT 1`).bind(...ids).first(); okTarget = !!tr; tRol = (tr && tr.rol) || ''; } catch (_) {}
       }
       if (!okTarget) return json({ error: 'usuario desconocido' }, 404);
       const token = randomToken();
       const now = new Date();
-      const expires = new Date(now.getTime() + SESSION_DAYS * 86400000);
+      const expires = new Date(now.getTime() + ((tRol === 'logistica' || esUsuarioLogistica(target)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS) * 86400000);
       await env.DB.prepare('INSERT INTO sessions (token, user, expires_at, created_at) VALUES (?, ?, ?, ?)').bind(token, target, expires.toISOString(), now.toISOString()).run();
       return json({ token, user: target, expiresAt: expires.toISOString() });
     }
@@ -19098,7 +19496,10 @@ const handler = {
         // "teléfono por nombre de pila").
         const recordado = corteTokens(nombre).length >= 2;
         if (recordado) { try { await env.DB.prepare("INSERT INTO corte_tel_override (nombre_norm, nombre, telefono, created_by, created_at) VALUES (?,?,?,?,?) ON CONFLICT(nombre_norm) DO UPDATE SET telefono=excluded.telefono, nombre=excluded.nombre, created_by=excluded.created_by, created_at=excluded.created_at").bind(corteNormNombre(nombre), nombre, tel, String(session.user || ''), nowIso).run(); } catch (_) {} }
-        return json({ ok: true, telefono: tel, piezas: n, forzado: !!otro, recordado });
+        // La clave del paquete cambia de 'n:'+nombre a teléfono: se migran N° de paquete, medidas, contacto y historial.
+        let paquetesMigrados = 0;
+        try { paquetesMigrados = await corteMigrarPaquetesTel(env, nombre, tel, tandaId); } catch (_) {} // idempotente (también levanta asignaciones previas)
+        return json({ ok: true, telefono: tel, piezas: n, forzado: !!otro, recordado, paquetes_migrados: paquetesMigrados });
       }
       // POST /admin/corte/sync-entrega {tanda_id?} → trae la entrega (retira/envío) de la planilla de cortes ahora. Admin.
       if (request.method === 'POST' && path === '/admin/corte/sync-entrega') {
@@ -19133,6 +19534,8 @@ const handler = {
         // sean: antes era "las últimas 500 por updated_at" y una matriz vieja sin hacer se caía de la cola
         // de Emma cuando la tabla crecía. El resto, solo lo movido en los últimos 180 días (historial/semanas).
         // + datos del cartel del CRM para las piezas de neón propio (productor, fecha, estado del pedido).
+        // Columnas del despacho (despachado_at, entregado_at, pago_metodo...) antes del SELECT c.* → el tablero las recibe.
+        const _despOk = await ensureCorteDespachoSchema(env);
         try {
           await ensureCorteNeonSchema(env);
           const desde = new Date(Date.now() - 180 * 86400000).toISOString();
@@ -19147,37 +19550,180 @@ const handler = {
         }
         // Medidas reales de los paquetes (las carga Neyen al embalar; las ve logística) de las tandas recientes.
         let paquetes = [];
-        try { await ensureCortePaquetesSchema(env); paquetes = (await env.DB.prepare("SELECT tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_at, contactado, cargado FROM corte_paquetes WHERE tanda_id IN (SELECT id FROM corte_tandas ORDER BY id DESC LIMIT 4)").all()).results || []; } catch (_) {}
+        // + la línea de logística de la tarjeta de Neyen (N°, contacto, envío pagado, cargado/despachado).
+        try { await ensureCortePaquetesSchema(env); paquetes = (await env.DB.prepare("SELECT tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_at, contactado, cargado" + (_despOk ? ", numero, contacto_estado, contacto_at, envio_pagado, despachado_at" : "") + " FROM corte_paquetes WHERE tanda_id IN (SELECT id FROM corte_tandas ORDER BY id DESC LIMIT 4)").all()).results || []; } catch (_) {}
         return json({ ok: true, pedidos: rows, paquetes, role: _cpRole, user: String(session.user || '').toLowerCase() });
       }
       // ===== LOGÍSTICA =====
-      // GET /admin/logistica/paquetes?tanda_id= → paquetes de ENVÍO de la tanda (default: la última cargada). Logística + admin.
+      // Errores con el contrato del circuito de despacho: {error:'<codigo>', motivo?:'<texto para mostrar>'}.
+      const _logiErrDb = () => json({ error: 'db', motivo: 'No se pudo leer la base. Probá de nuevo en un momento.' }, 500);
+      // GET /admin/logistica/paquetes?tanda_id= → paquetes de ENVÍO (+ sin definir) de la tanda, con N° estable, contacto,
+      // envío pagado, pedido pagado, listo/bloqueo, arrastre e historial (logisticaArmar). Logística ve 2 tandas; admin 8.
       if (request.method === 'GET' && path === '/admin/logistica/paquetes') {
         const _r = await getSessionRole(env, session.user);
         if (!['logistica', 'admin'].includes(_r)) return json({ error: 'forbidden' }, 403);
-        return json(await logisticaPaquetes(env, parseInt(url.searchParams.get('tanda_id'), 10) || 0));
+        try { return json(await logisticaPaquetes(env, parseInt(url.searchParams.get('tanda_id'), 10) || 0, { rol: _r })); }
+        catch (_) { return _logiErrDb(); }
       }
-      // POST /admin/logistica/marcar {tanda_id, key, contactado?, cargado?, nota?} → avance de logística por paquete.
+      // POST /admin/logistica/contacto {tanda_id, key, accion, nota?, operador?} → estado de contacto del lunes.
+      //  escrito (al tocar WhatsApp) · no_contesta (+1 intento; al 3° avisa a Gaspar, 1 vez) · envio_pagado · deshacer_envio ·
+      //  avisar (manda a Gaspar "Logística · N° 07 Nombre: <nota>", máx 1 cada 5 min por paquete). Toda acción queda en
+      //  logistica_log. → {ok, paquete}
+      if (request.method === 'POST' && path === '/admin/logistica/contacto') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['logistica', 'admin'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const tandaId = parseInt(body.tanda_id, 10) || 0, key = String(body.key || '').slice(0, 80);
+        const accion = String(body.accion || '');
+        if (!tandaId || !key) return json({ error: 'faltan_datos', motivo: 'Faltan datos del paquete' }, 400);
+        if (!['escrito', 'no_contesta', 'envio_pagado', 'deshacer_envio', 'avisar'].includes(accion)) return json({ error: 'accion', motivo: 'Acción desconocida' }, 400);
+        const nota = String(body.nota || '').replace(/\s+/g, ' ').trim();
+        if (accion === 'avisar' && !nota) return json({ error: 'nota', motivo: 'Escribí en la nota qué querés avisar' }, 400);
+        if (accion === 'avisar' && nota.length > 300) return json({ error: 'nota', motivo: 'El aviso puede tener hasta 300 letras' }, 400);
+        const operador = logiOperador(body, session), usuario = String(session.user || ''), quienPor = logiQuien(session, operador);
+        let pq;
+        try { pq = await logisticaPaqueteDe(env, _r, tandaId, key, false); } catch (_) { return _logiErrDb(); }
+        if (pq.status) return json(pq.body, pq.status);
+        const P = pq.paquete, I = P._int;
+        const nowIso = new Date().toISOString();
+        const pre = [env.DB.prepare('INSERT INTO corte_paquetes (tanda_id, cliente_key) VALUES (?, ?) ON CONFLICT(tanda_id, cliente_key) DO NOTHING').bind(tandaId, key)];
+        if (I.her) pre.push(logiFijarHerenciaStmt(env, tandaId, key, I.her));
+        if (accion === 'avisar') {
+          try { await env.DB.batch(pre); } catch (_) { return _logiErrDb(); }
+          // Tope GLOBAL (todas las semanas y paquetes): máx 20 avisos por hora a Gaspar. El freno por paquete solo no alcanza
+          // (con 40 paquetes por semana y 2 semanas visibles se podían mandar ~80 WhatsApp cada 5 min). Ventana fija desde el
+          // primer aviso, contador atómico en kv_cache. Si el contador falla, sigue valiendo el freno por paquete.
+          let cuenta = null;
+          try { cuenta = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('logistica_avisos', '1', ?) ON CONFLICT(k) DO UPDATE SET v = CASE WHEN kv_cache.updated_at < ? THEN '1' ELSE CAST(CAST(kv_cache.v AS INTEGER) + 1 AS TEXT) END, updated_at = CASE WHEN kv_cache.updated_at < ? THEN excluded.updated_at ELSE kv_cache.updated_at END RETURNING v").bind(nowIso, isoHace(3600 * 1000), isoHace(3600 * 1000)).first(); } catch (_) {}
+          if (cuenta && (parseInt(cuenta.v, 10) || 0) > 20) return json({ error: 'espera', motivo: 'Se mandaron muchos avisos en la última hora. Si es urgente, llamá a Neon.' }, 429);
+          // Freno atómico: 1 aviso por paquete cada 5 min (doble toque, o insistir).
+          let claim = null;
+          try { claim = await env.DB.prepare('UPDATE corte_paquetes SET aviso_at=? WHERE tanda_id=? AND cliente_key=? AND (aviso_at IS NULL OR aviso_at < ?) RETURNING aviso_at').bind(nowIso, tandaId, key, isoHace(5 * 60 * 1000)).first(); } catch (_) {}
+          if (!claim) return json({ error: 'espera', motivo: 'Ya avisaste hace un momento' }, 429);
+          try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ': ' + nota + (operador ? ' (' + operador + ')' : '')); } catch (_) {}
+          try { await logiLogStmt(env, tandaId, key, 'avisar', nota, operador, usuario).run(); } catch (_) {}
+        } else {
+          const st = [...pre];
+          if (accion === 'escrito') st.push(env.DB.prepare("UPDATE corte_paquetes SET contacto_estado=CASE WHEN IFNULL(envio_pagado,0)=1 THEN 'listo' ELSE 'escrito' END, contacto_at=? WHERE tanda_id=? AND cliente_key=?").bind(nowIso, tandaId, key));
+          else if (accion === 'no_contesta') st.push(env.DB.prepare("UPDATE corte_paquetes SET intentos=IFNULL(intentos,0)+1, contacto_estado=CASE WHEN IFNULL(envio_pagado,0)=1 THEN 'listo' ELSE 'no_contesta' END, contacto_at=? WHERE tanda_id=? AND cliente_key=?").bind(nowIso, tandaId, key));
+          else if (accion === 'envio_pagado') st.push(env.DB.prepare("UPDATE corte_paquetes SET envio_pagado=1, envio_pagado_at=?, envio_pagado_por=?, contacto_estado='listo', contacto_at=?, contactado=1, contactado_at=?, contactado_por=? WHERE tanda_id=? AND cliente_key=?").bind(nowIso, quienPor, nowIso, nowIso, quienPor, tandaId, key));
+          else if (accion === 'deshacer_envio') st.push(env.DB.prepare("UPDATE corte_paquetes SET envio_pagado=0, envio_pagado_at=NULL, envio_pagado_por=NULL, contacto_estado='escrito', contactado=0, contactado_at=NULL WHERE tanda_id=? AND cliente_key=?").bind(tandaId, key));
+          st.push(logiLogStmt(env, tandaId, key, accion, nota, operador, usuario));
+          try { await env.DB.batch(st); } catch (_) { return _logiErrDb(); }
+          if (accion === 'no_contesta') {
+            // 3 intentos sin respuesta → aviso a Gaspar, UNA sola vez por paquete (reserva atómica en aviso_nc_at).
+            let nc = null;
+            try { nc = await env.DB.prepare('UPDATE corte_paquetes SET aviso_nc_at=? WHERE tanda_id=? AND cliente_key=? AND aviso_nc_at IS NULL AND IFNULL(intentos,0)>=3 RETURNING intentos').bind(nowIso, tandaId, key).first(); } catch (_) {}
+            if (nc) { try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ' no contesta (' + nc.intentos + ' intentos). Tel ' + (P.telefono || 'sin teléfono') + '.'); } catch (_) {} }
+          }
+        }
+        let fin;
+        try { fin = await logisticaPaqueteDe(env, _r, tandaId, key, true); } catch (_) { return json({ ok: true }); }
+        return fin.status ? json({ ok: true }) : json({ ok: true, paquete: fin.paquete });
+      }
+      // POST /admin/logistica/marcar {tanda_id, key, cargado?, nota?, contactado? (compat), operador?}
+      //  · cargado=true (martes, "cargado en el camión"): se recalcula el paquete EN EL SERVER (misma regla que la lista) y
+      //    si falta algo → 409 {error:'no_despachar', motivo:'Pedido impago'|'Entrega sin definir'|'Falta pagar el envío'}.
+      //    Sin override, ni para admin (para eso está "Marcar pagado"). OK → las piezas pendientes del paquete (incluye
+      //    arrastre) pasan a 'despachado' con despachado_at. Si alguna estaba 'cortado' (sin embalar) → aviso a Gaspar.
+      //  · cargado=false → vuelven a 'embalado' SOLO las piezas de ESE despacho (mismo despachado_at). Solo el mismo día AR
+      //    (o admin): si no, 409 'Ya no se puede deshacer'.
+      //  · nota: autosave del front (se pisa; no va al historial). → {ok, paquete}
       if (request.method === 'POST' && path === '/admin/logistica/marcar') {
         const _r = await getSessionRole(env, session.user);
         if (!['logistica', 'admin'].includes(_r)) return json({ error: 'forbidden' }, 403);
         let body; try { body = await request.json(); } catch { body = {}; }
         const tandaId = parseInt(body.tanda_id, 10) || 0, key = String(body.key || '').slice(0, 80);
-        if (!tandaId || !key) return json({ error: 'faltan datos' }, 400);
-        await ensureCortePaquetesSchema(env);
-        // Solo paquetes que existen en esa tanda (no se pueden crear marcas sueltas).
-        let existe = false;
-        try { const rr = (await env.DB.prepare("SELECT telefono, cliente_nombre FROM corte_pedidos WHERE tanda_id=? AND IFNULL(producto,'')!='NEON'").bind(tandaId).all()).results || []; existe = rr.some(p => corteClaveCliente(p) === key); } catch (_) {}
-        if (!existe) return json({ error: 'ese paquete no está en la tanda' }, 404);
-        const nowIso = new Date().toISOString(), quien = String(session.user || '');
-        try { await env.DB.prepare("INSERT INTO corte_paquetes (tanda_id, cliente_key) VALUES (?, ?) ON CONFLICT(tanda_id, cliente_key) DO NOTHING").bind(tandaId, key).run(); } catch (_) {}
+        if (!tandaId || !key) return json({ error: 'faltan_datos', motivo: 'Faltan datos del paquete' }, 400);
+        const hayCargado = typeof body.cargado === 'boolean', hayNota = typeof body.nota === 'string', hayContactado = typeof body.contactado === 'boolean';
+        if (!hayCargado && !hayNota && !hayContactado) return json({ error: 'nada', motivo: 'Nada para guardar' }, 400);
+        let pq;
+        try { pq = await logisticaPaqueteDe(env, _r, tandaId, key, false); } catch (_) { return _logiErrDb(); }
+        if (pq.status) return json(pq.body, pq.status);
+        const P = pq.paquete, I = P._int;
+        const nowIso = new Date().toISOString(), quien = logiOperador(body, session), usuario = String(session.user || ''), quienPor = logiQuien(session, quien);
+        const insRow = env.DB.prepare('INSERT INTO corte_paquetes (tanda_id, cliente_key) VALUES (?, ?) ON CONFLICT(tanda_id, cliente_key) DO NOTHING').bind(tandaId, key);
+        if (body.cargado === true && !P.despachado) {
+          if (P.bloqueo) return json({ error: 'no_despachar', motivo: P.bloqueo }, 409);
+          if (!P.ids.length) return json({ error: 'no_despachar', motivo: 'No hay piezas para cargar' }, 409);
+          if (!P.listo) return json({ error: 'no_despachar', motivo: 'Falta pagar el envío' }, 409); // defensivo (listo = sin bloqueo + piezas)
+          const sinEmbalar = I.pend.filter(p => p.estado === 'cortado');
+          const ph = P.ids.map(() => '?').join(',');
+          const st = [insRow];
+          if (I.her) st.push(logiFijarHerenciaStmt(env, tandaId, key, I.her));
+          const iUpd = st.length;
+          st.push(env.DB.prepare(`UPDATE corte_pedidos SET estado='despachado', despachado_at=?, updated_at=? WHERE id IN (${ph}) AND estado IN ('cortado','embalado') AND entrega='envio' AND IFNULL(producto,'')!='NEON'`).bind(nowIso, nowIso, ...P.ids));
+          // La marca del paquete y el log solo si ESTE request despachó algo (despachado_at = su nowIso, en el mismo batch):
+          // dos dispositivos cargando a la vez leían los dos "sin despachar" y el segundo pisaba despachado_at con otra hora
+          // (el "Deshacer" ya no encontraba las piezas y el arrastre desaparecía de la lista).
+          const hizo = { sql: `EXISTS (SELECT 1 FROM corte_pedidos WHERE id IN (${ph}) AND despachado_at=?)`, binds: [...P.ids, nowIso] };
+          st.push(env.DB.prepare(`UPDATE corte_paquetes SET cargado=1, cargado_at=?, cargado_por=?, despachado_at=? WHERE tanda_id=? AND cliente_key=? AND ${hizo.sql}`).bind(nowIso, quienPor, nowIso, tandaId, key, ...hizo.binds));
+          st.push(logiLogStmt(env, tandaId, key, 'cargado', '', quien, usuario, hizo));
+          let res;
+          try { res = await env.DB.batch(st); } catch (_) { return _logiErrDb(); }
+          const despachadas = (res && res[iUpd] && res[iUpd].meta && res[iUpd].meta.changes) || 0;
+          if (sinEmbalar.length && despachadas) { try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ' se cargó con ' + sinEmbalar.length + ' pieza(s) sin marcar embaladas (' + sinEmbalar.map(p => p.diseno_nombre || p.producto || 'pieza').join(', ').slice(0, 200) + '). Avisale a Neyen.'); } catch (_) {} }
+        } else if (body.cargado === false) {
+          const dAt = I.mkCur.despachado_at || '';
+          if (dAt) {
+            if (_r !== 'admin' && corteArYmd(dAt) !== corteArYmd(nowIso)) return json({ error: 'no_despachar', motivo: 'Ya no se puede deshacer' }, 409);
+            // Las piezas de ESE despacho de este cliente (incluye las de arrastre, que ya no figuran en la lista).
+            let ids = [];
+            try { ids = ((await env.DB.prepare("SELECT id, telefono, cliente_nombre FROM corte_pedidos WHERE despachado_at=? AND estado='despachado'").bind(dAt).all()).results || []).filter(p => corteClaveCliente(p) === key).map(p => p.id); } catch (_) { return _logiErrDb(); }
+            const st = [];
+            if (ids.length) st.push(env.DB.prepare(`UPDATE corte_pedidos SET estado='embalado', despachado_at=NULL, updated_at=? WHERE id IN (${ids.map(() => '?').join(',')}) AND estado='despachado' AND despachado_at=?`).bind(nowIso, ...ids, dAt));
+            st.push(env.DB.prepare('UPDATE corte_paquetes SET cargado=0, cargado_at=NULL, cargado_por=?, despachado_at=NULL WHERE tanda_id=? AND cliente_key=?').bind(quienPor, tandaId, key));
+            st.push(logiLogStmt(env, tandaId, key, 'descargado', '', quien, usuario));
+            try { await env.DB.batch(st); } catch (_) { return _logiErrDb(); }
+          } else if (P.despachado) {
+            // Salió por otro lado (backfill, admin a mano, o se cargó desde la otra semana): desde acá no se deshace.
+            return json({ error: 'no_despachar', motivo: 'Ya no se puede deshacer' }, 409);
+          } else {
+            // Marca vieja sin despacho (antes del circuito nuevo): solo se limpia la marca.
+            try { await env.DB.batch([insRow, env.DB.prepare('UPDATE corte_paquetes SET cargado=0, cargado_at=NULL, cargado_por=? WHERE tanda_id=? AND cliente_key=?').bind(quienPor, tandaId, key)]); } catch (_) { return _logiErrDb(); }
+          }
+        }
         const sets = [], binds = [];
-        if (typeof body.contactado === 'boolean') { sets.push('contactado=?, contactado_at=?, contactado_por=?'); binds.push(body.contactado ? 1 : 0, body.contactado ? nowIso : null, quien); }
-        if (typeof body.cargado === 'boolean') { sets.push('cargado=?, cargado_at=?, cargado_por=?'); binds.push(body.cargado ? 1 : 0, body.cargado ? nowIso : null, quien); }
-        if (typeof body.nota === 'string') { sets.push('nota=?, nota_at=?, nota_por=?'); binds.push(body.nota.slice(0, 1000), nowIso, quien); }
-        if (!sets.length) return json({ error: 'nada para guardar' }, 400);
-        try { await env.DB.prepare("UPDATE corte_paquetes SET " + sets.join(', ') + " WHERE tanda_id=? AND cliente_key=?").bind(...binds, tandaId, key).run(); } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
-        return json({ ok: true });
+        if (hayContactado) { sets.push('contactado=?, contactado_at=?, contactado_por=?'); binds.push(body.contactado ? 1 : 0, body.contactado ? nowIso : null, quienPor); }
+        if (hayNota) { sets.push('nota=?, nota_at=?, nota_por=?'); binds.push(body.nota.slice(0, 1000), nowIso, quienPor); }
+        if (sets.length) {
+          try { await env.DB.batch([insRow, env.DB.prepare('UPDATE corte_paquetes SET ' + sets.join(', ') + ' WHERE tanda_id=? AND cliente_key=?').bind(...binds, tandaId, key)]); } catch (_) { return _logiErrDb(); }
+        }
+        let fin;
+        try { fin = await logisticaPaqueteDe(env, _r, tandaId, key, true); } catch (_) { return json({ ok: true }); }
+        return fin.status ? json({ ok: true }) : json({ ok: true, paquete: fin.paquete });
+      }
+      // POST /admin/logistica/resumen {tanda_id, tipo:'martes', operador?} → "Terminé de cargar": aviso a Gaspar con lo que
+      // se cargó y lo que quedó en el taller (con el motivo). Máx 1 cada 10 min por tanda. → {ok, texto}
+      if (request.method === 'POST' && path === '/admin/logistica/resumen') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['logistica', 'admin'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const tandaId = parseInt(body.tanda_id, 10) || 0;
+        if (!tandaId) return json({ error: 'faltan_datos', motivo: 'Falta la semana' }, 400);
+        if (String(body.tipo || 'martes') !== 'martes') return json({ error: 'tipo', motivo: 'Tipo de resumen desconocido' }, 400);
+        let tandas;
+        try { tandas = await logisticaTandas(env, _r); } catch (_) { return _logiErrDb(); }
+        const tanda = tandas.find(t => t.id === tandaId);
+        if (!tanda) return json({ error: 'tanda', motivo: 'Esa semana ya no se puede modificar' }, 403);
+        const kRes = 'logistica_resumen:' + tandaId, nowIso = new Date().toISOString();
+        let claim = null;
+        try { claim = await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at WHERE kv_cache.updated_at < ? RETURNING k').bind(kRes, nowIso, nowIso, isoHace(10 * 60 * 1000)).first(); } catch (_) {}
+        if (!claim) return json({ error: 'espera', motivo: 'Ya mandaste el resumen hace un momento' }, 429);
+        let a;
+        try { a = await logisticaArmar(env, tanda, { esUltima: tanda.id === tandas[0].id, conDirecciones: false }); }
+        catch (_) { try { await env.DB.prepare("UPDATE kv_cache SET updated_at='1970-01-01T00:00:00.000Z' WHERE k=? AND v=?").bind(kRes, nowIso).run(); } catch (_) {} return _logiErrDb(); }
+        const paqs = a.clientes.filter(c => c.logi).map(c => c.logi).sort((x, y) => (x.numero || 0) - (y.numero || 0));
+        const cargados = paqs.filter(p => p.despachado);
+        const quedan = paqs.filter(p => !p.despachado && p.ids.length);
+        const operador = logiOperador(body, session);
+        let texto = 'Logística · Camión martes ' + corteMartesTxt(tanda.fecha_corte) + ': cargados ' + cargados.length
+          + (quedan.length ? ' · quedan en el taller: ' + quedan.map(p => cortePad2(p.numero) + ' ' + String(p.cliente || '').trim() + ' (' + (p.bloqueo || 'no se cargó') + ')').join(', ') : ' · no quedó nada en el taller');
+        if (texto.length > 1400) texto = texto.slice(0, 1390) + '…';
+        if (operador) texto += ' · ' + operador;
+        try { await precotizNotifyGaspar(env, texto); } catch (_) {}
+        try { await logiLogStmt(env, tandaId, '', 'resumen', texto, operador, String(session.user || '')).run(); } catch (_) {}
+        return json({ ok: true, texto });
       }
       // POST /admin/logistica/password {password} → SOLO admin: crea/actualiza el usuario "logistica" con esa contraseña
       // (hash) y lo activa. Mientras no tenga contraseña queda INACTIVO (un usuario activo sin hash entra sin contraseña).
@@ -19190,7 +19736,12 @@ const handler = {
         const hash = await sha256hex(pw);
         try {
           await env.DB.prepare("INSERT INTO users_panel (id, nombre, rol, activo, password_hash, created_at) VALUES ('logistica', 'Logística', 'logistica', 1, ?, ?) ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash, rol='logistica', activo=1").bind(hash, new Date().toISOString()).run();
-          await env.DB.prepare("DELETE FROM sessions WHERE lower(user) IN ('logistica', 'logística')").run();
+          // Sesiones de logística: el nombre se compara normalizado EN JS (el lower() de SQLite solo baja ASCII: una sesión
+          // creada como "LOGÍSTICA" sobrevivía al cambio de contraseña). Solo las vigentes (las vencidas no sirven igual).
+          const ses = (await env.DB.prepare('SELECT token, user FROM sessions WHERE expires_at > ?').bind(new Date().toISOString()).all()).results || [];
+          const del = ses.filter(s => esUsuarioLogistica(s.user)).map(s => s.token);
+          if (del.length) await env.DB.batch(del.map(t => env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(t)));
+          try { await env.DB.prepare("DELETE FROM kv_cache WHERE k = 'login_fail:logistica'").run(); } catch (_) {}
         } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         return json({ ok: true, usuario: 'logistica' });
       }
@@ -19213,6 +19764,226 @@ const handler = {
         } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         return json({ ok: true });
       }
+      // POST /admin/corte/pago-manual (SOLO admin) {telefono? | nombre?, tanda_ids?, metodo:'efectivo'|'transferencia'|'otro',
+      // nota?, dry_run?} → marca PAGADO a mano lo que el cliente debe (CORTE_PAGABLE_SQL: no neón, precio>0, sin pagar; en
+      // cualquier etapa, así también entra un adelanto), de todas sus tandas o de las que vengan. Condicional por id (lo que el vigía ya marcó no se toca), con
+      // updated_at (el tablero lo ve). Quema en corte_pago_check los comprobantes entrantes de 72 h (el vigía no los rearma).
+      // Planilla: una llamada por fecha de la hoja (caja 'Efectivo' si fue efectivo; si no, vacía), si corte_sheet_pago_on.
+      // NO le manda nada al cliente. dry_run → solo devuelve lo que marcaría.
+      if (request.method === 'POST' && path === '/admin/corte/pago-manual') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const metodo = String(body.metodo || '').toLowerCase().trim();
+        if (!['efectivo', 'transferencia', 'otro'].includes(metodo)) return json({ error: 'metodo', motivo: 'Elegí cómo pagó: efectivo, transferencia u otro' }, 400);
+        const sel = corteClienteSel(body);
+        if (!sel) return json({ error: 'cliente', motivo: 'Falta el teléfono o el nombre del cliente' }, 400);
+        if (!(await ensureCorteDespachoSchema(env))) return json({ error: 'db', motivo: 'No se pudo preparar la base. Probá de nuevo.' }, 500);
+        try { await ensureCorteHojaSchema(env); } catch (_) {}
+        const tandaIds = [...new Set((Array.isArray(body.tanda_ids) ? body.tanda_ids : []).map(x => parseInt(x, 10)).filter(Boolean))].slice(0, 50);
+        const nota = String(body.nota || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        const dry = body.dry_run === true;
+        let rows;
+        try {
+          rows = ((await env.DB.prepare('SELECT id, tanda_id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, producto, precio FROM corte_pedidos WHERE ' + sel.where + ' AND ' + CORTE_PAGABLE_SQL + (tandaIds.length ? ' AND tanda_id IN (' + tandaIds.map(() => '?').join(',') + ')' : '') + ' ORDER BY tanda_id, id').bind(...sel.binds, ...tandaIds).all()).results || []).filter(sel.match);
+        } catch (e) { return json({ error: 'db', motivo: 'No se pudo leer la base. Probá de nuevo.' }, 500); }
+        const fechaT = {};
+        const tIds = [...new Set(rows.map(r => r.tanda_id).filter(Boolean))];
+        if (tIds.length) { try { ((await env.DB.prepare('SELECT id, fecha_corte FROM corte_tandas WHERE id IN (' + tIds.map(() => '?').join(',') + ')').bind(...tIds).all()).results || []).forEach(t => { fechaT[t.id] = t.fecha_corte || ''; }); } catch (_) {} }
+        const pieza = r => ({ id: r.id, tanda_id: r.tanda_id, fecha: r.hoja_fecha || fechaT[r.tanda_id] || '', diseno: r.diseno_nombre || r.producto || '', precio: Number(r.precio) || 0 });
+        const totalDe = arr => Math.round(arr.reduce((s, r) => s + (Number(r.precio) || 0), 0));
+        if (dry) return json({ ok: true, dry_run: true, piezas: rows.map(pieza), total: totalDe(rows), planilla: [] });
+        if (!rows.length) return json({ error: 'nada', motivo: 'No tiene nada pendiente de pago' }, 409);
+        const nowIso = new Date().toISOString(), quien = String(session.user || '');
+        const ids = rows.map(r => r.id), ph = ids.map(() => '?').join(',');
+        let hechas = [];
+        try {
+          await env.DB.prepare(`UPDATE corte_pedidos SET estado_pago='pagado', pago_metodo=?, pago_manual_por=?, pago_manual_at=?, pago_nota=?, updated_at=? WHERE id IN (${ph}) AND estado_pago IN ('pendiente','cobrando','parcial')`).bind(metodo, quien, nowIso, nota, nowIso, ...ids).run();
+          const okIds = new Set(((await env.DB.prepare(`SELECT id FROM corte_pedidos WHERE id IN (${ph}) AND estado_pago='pagado' AND pago_manual_at=?`).bind(...ids, nowIso).all()).results || []).map(r => r.id));
+          hechas = rows.filter(r => okIds.has(r.id));
+        } catch (e) { return json({ error: 'db', motivo: 'No se pudo marcar el pago. Probá de nuevo.' }, 500); }
+        if (!hechas.length) return json({ error: 'nada', motivo: 'Ya estaba pagado' }, 409);
+        // Comprobantes recientes del teléfono → vistos (el vigía no los toma como pago de un cobro futuro). Si al teléfono le
+        // queda OTRO cobro en curso (otra semana en 'cobrando': el admin destildó esa semana), los que llegaron DESPUÉS de ese
+        // cobro no se queman: pueden ser el pago de esa semana y el vigía tiene que verlos. Referencia ≈
+        // MIN(updated_at) de esas piezas (el cobro las estampa; después solo crece → en la duda se quema, como antes).
+        if (sel.tel) {
+          try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS corte_pago_check (wamid TEXT PRIMARY KEY, phone TEXT, monto REAL, es_comprobante INTEGER, checked_at TEXT)').run(); } catch (_) {}
+          try {
+            let hasta = '';
+            try { const q = await env.DB.prepare("SELECT MIN(updated_at) AS ref FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(sel.tel).first(); hasta = (q && q.ref) || ''; } catch (_) {}
+            const ims = (await env.DB.prepare("SELECT wamid FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type IN ('image','document') AND wamid IS NOT NULL AND wamid!='' AND ts > ?" + (hasta ? ' AND ts < ?' : '')).bind(sel.tel, isoHace(72 * 3600 * 1000), ...(hasta ? [hasta] : [])).all()).results || [];
+            if (ims.length) await env.DB.batch(ims.map(m => env.DB.prepare('INSERT OR IGNORE INTO corte_pago_check (wamid, phone, monto, es_comprobante, checked_at) VALUES (?, ?, NULL, 0, ?)').bind(m.wamid, sel.tel, nowIso)));
+          } catch (_) {}
+        }
+        // Planilla (Venta_Insumos): una vez por FECHA de la hoja, con el nombre TAL CUAL en la hoja (hoja_cliente). Un error
+        // transitorio (token/HTTP) va a la cola de reintentos del vigía (clave por cliente+fecha: no se pisan entre sí).
+        const planilla = [];
+        if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') {
+          const caja = metodo === 'efectivo' ? 'Efectivo' : '';
+          const grupos = {};
+          for (const r of hechas) {
+            const f = r.hoja_fecha || fechaT[r.tanda_id] || '(sin fecha)';
+            const g = (grupos[f] = grupos[f] || { fecha: f, total: 0, nombres: {} });
+            g.total += Number(r.precio) || 0;
+            const nm = String(r.hoja_cliente || r.cliente_nombre || '').trim();
+            if (nm) g.nombres[nm] = (g.nombres[nm] || 0) + 1;
+          }
+          for (const g of Object.values(grupos)) {
+            const cliente = (Object.entries(g.nombres).sort((a, b) => b[1] - a[1])[0] || [''])[0];
+            const tot = Math.round(g.total);
+            let sr = null;
+            try { sr = await corteMarcarPagadoSheet(env, cliente, tot, caja, g.fecha === '(sin fecha)' ? '' : g.fecha); } catch (e) { sr = { error: 'error de planilla', _exc: true }; }
+            if (sr && sr.ok) planilla.push({ fecha: g.fecha, ok: true });
+            else {
+              const err = String((sr && sr.error) || 'error de planilla');
+              planilla.push({ fecha: g.fecha, ok: false, error: err });
+              if ((sr && sr._exc) || /token|HTTP/i.test(err)) await corteSheetPendingAdd(env, (sel.tel || sel.key) + '|' + g.fecha, cliente, tot, caja);
+            }
+          }
+        }
+        return json({ ok: true, dry_run: false, piezas: hechas.map(pieza), total: totalDe(hechas), planilla });
+      }
+      // POST /admin/corte/retiro (admin|produccion) {telefono? | nombre?, ids?, deshacer?} → "Retiró" en el taller: las piezas
+      // del cliente con entrega='retira' en 'cortado'/'embalado' (de cualquier tanda; o solo esos ids) pasan a 'entregado'.
+      // Con deuda (regla única) → 409 impago (decisión: primero "Marcar pagado"). Deshacer: vuelven a 'embalado' las del
+      // último retiro (mismo entregado_at); producción solo el mismo día AR, admin siempre.
+      if (request.method === 'POST' && path === '/admin/corte/retiro') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['admin', 'produccion'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const sel = corteClienteSel(body);
+        if (!sel) return json({ error: 'cliente', motivo: 'Falta el teléfono o el nombre del cliente' }, 400);
+        if (!(await ensureCorteDespachoSchema(env))) return json({ error: 'db', motivo: 'No se pudo preparar la base. Probá de nuevo.' }, 500);
+        const idsF = [...new Set((Array.isArray(body.ids) ? body.ids : []).map(x => parseInt(x, 10)).filter(Boolean))].slice(0, 300);
+        const fIds = idsF.length ? ' AND id IN (' + idsF.map(() => '?').join(',') + ')' : '';
+        const nowIso = new Date().toISOString(), quien = String(session.user || '');
+        if (body.deshacer === true) {
+          let rows;
+          try { rows = ((await env.DB.prepare("SELECT id, telefono, cliente_nombre, entregado_at FROM corte_pedidos WHERE " + sel.where + " AND estado='entregado' AND entregado_at IS NOT NULL AND IFNULL(producto,'')!='NEON'" + fIds).bind(...sel.binds, ...idsF).all()).results || []).filter(sel.match); }
+          catch (_) { return json({ error: 'db', motivo: 'No se pudo leer la base. Probá de nuevo.' }, 500); }
+          if (!rows.length) return json({ error: 'nada', motivo: 'No hay nada para deshacer' }, 409);
+          const ultimo = rows.map(r => r.entregado_at).sort().pop();
+          if (_r !== 'admin' && corteArYmd(ultimo) !== corteArYmd(nowIso)) return json({ error: 'no_deshacer', motivo: 'Ya no se puede deshacer' }, 409);
+          const ids = rows.filter(r => r.entregado_at === ultimo).map(r => r.id);
+          let n = 0;
+          try { const u = await env.DB.prepare(`UPDATE corte_pedidos SET estado='embalado', entregado_at=NULL, entregado_por=NULL, updated_at=? WHERE id IN (${ids.map(() => '?').join(',')}) AND estado='entregado' AND entregado_at=?`).bind(nowIso, ...ids, ultimo).run(); n = (u.meta && u.meta.changes) || 0; }
+          catch (_) { return json({ error: 'db', motivo: 'No se pudo deshacer. Probá de nuevo.' }, 500); }
+          return json({ ok: true, piezas: n });
+        }
+        let rows;
+        try { rows = ((await env.DB.prepare("SELECT id, telefono, cliente_nombre FROM corte_pedidos WHERE " + sel.where + " AND entrega='retira' AND estado IN ('cortado','embalado') AND IFNULL(producto,'')!='NEON' AND lower(IFNULL(cliente_nombre,''))!='neon'" + fIds).bind(...sel.binds, ...idsF).all()).results || []).filter(sel.match); }
+        catch (_) { return json({ error: 'db', motivo: 'No se pudo leer la base. Probá de nuevo.' }, 500); }
+        if (!rows.length) return json({ error: 'nada', motivo: 'No hay piezas para entregar' }, 409);
+        const deuda = await corteDeudaKeys(env);
+        if (corteTieneDeuda(deuda, sel.key, [body.nombre, ...rows.map(r => r.cliente_nombre)])) return json({ error: 'impago', motivo: 'Falta el pago: avisale a Gaspar' }, 409);
+        const ids = rows.map(r => r.id);
+        let n = 0;
+        // Sin entrega_manual: 'entregado' ya queda fuera de la sync con la planilla, y así el "Deshacer" no deja la pieza
+        // trabada en 'retira' para siempre (la marca no se podía restaurar: no se sabe si ya estaba puesta por el admin).
+        try { const u = await env.DB.prepare(`UPDATE corte_pedidos SET estado='entregado', entregado_at=?, entregado_por=?, updated_at=? WHERE id IN (${ids.map(() => '?').join(',')}) AND estado IN ('cortado','embalado') AND entrega='retira'`).bind(nowIso, quien, nowIso, ...ids).run(); n = (u.meta && u.meta.changes) || 0; }
+        catch (_) { return json({ error: 'db', motivo: 'No se pudo marcar el retiro. Probá de nuevo.' }, 500); }
+        return json({ ok: true, piezas: n });
+      }
+      // GET /admin/corte/etiquetas?tanda_id= (admin|produccion; sin tanda_id = la más reciente con fecha de corte) → una
+      // entrada por cliente (y otra si además retira piezas en el taller), con el N° estable de la semana (los asigna si
+      // falta), dirección de LTV, cantidades y bultos. Incluye el arrastre de envío. Sin montos. Orden por N°.
+      if (request.method === 'GET' && path === '/admin/corte/etiquetas') {
+        const _r = await getSessionRole(env, session.user);
+        if (!['admin', 'produccion'].includes(_r)) return json({ error: 'forbidden' }, 403);
+        let ultima = null, tanda = null;
+        try {
+          ultima = await env.DB.prepare("SELECT id, fecha_corte FROM corte_tandas WHERE fecha_corte IS NOT NULL AND fecha_corte!='' ORDER BY id DESC LIMIT 1").first();
+          const pedida = parseInt(url.searchParams.get('tanda_id'), 10) || 0;
+          tanda = pedida ? await env.DB.prepare("SELECT id, fecha_corte FROM corte_tandas WHERE id=? AND fecha_corte IS NOT NULL AND fecha_corte!=''").bind(pedida).first() : ultima;
+        } catch (_) { return json({ error: 'db', motivo: 'No se pudo leer la base. Probá de nuevo.' }, 500); }
+        if (!tanda) return json({ error: 'tanda', motivo: 'No hay una semana de corte cargada' }, 404);
+        let a;
+        try { a = await logisticaArmar(env, tanda, { esUltima: !!(ultima && ultima.id === tanda.id), conDirecciones: true }); }
+        catch (_) { return json({ error: 'db', motivo: 'No se pudo leer la base. Probá de nuevo.' }, 500); }
+        const cant = arr => arr.reduce((s, x) => s + (Math.max(1, parseInt(x.cantidad, 10) || 1)), 0);
+        const etiquetas = [];
+        for (const c of a.clientes) {
+          if (c.logi) etiquetas.push({ numero: c.numero, key: c.key, cliente: c.nombre, telefono: c.telefono, entrega: c.logi.entrega, direccion: c.logi.datos_envio || '', piezas: cant(c.logi.piezas), insumos: cant(c.logi.insumos), bultos: Math.max(1, parseInt(c.logi.paquete && c.logi.paquete.bultos, 10) || 1), arrastre: c.logi.arrastre });
+          if (c.ret.length) {
+            const rv = c.ret.filter(p => p.estado === 'cortado' || p.estado === 'embalado'); // lo que está en el taller
+            const lr = rv.length ? rv : c.ret;
+            etiquetas.push({ numero: c.numero, key: c.key, cliente: c.nombre, telefono: c.telefono, entrega: 'retira', direccion: '', piezas: cant(lr.filter(p => corteMedidaPieza(p))), insumos: cant(lr.filter(p => !corteMedidaPieza(p))), bultos: c.logi ? 1 : Math.max(1, parseInt(c.mkCur.bultos, 10) || 1), arrastre: null });
+          }
+        }
+        etiquetas.sort((x, y) => ((x.numero == null ? 1e9 : x.numero) - (y.numero == null ? 1e9 : y.numero)) || ((x.entrega === 'retira') - (y.entrega === 'retira')));
+        return json({ ok: true, tanda: { id: tanda.id, fecha: tanda.fecha_corte, martes: corteMartesTxt(tanda.fecha_corte) }, ltv_error: a.ltv_error, etiquetas });
+      }
+      // POST /admin/corte/backfill-despacho (SOLO admin) {tanda_ids, excluir?: [teléfonos | claves 'n:...' | nombres],
+      // dry_run? (default TRUE)} → las piezas viejas que ya salieron pero quedaron 'embalado' (nadie las marcaba): no neón,
+      // 'embalado' y PAGADAS (pagado/interno) o en $0 (no son deuda, nunca se cobran: si quedaban 'embalado' volvían como
+      // paquete fantasma por arrastre). Envío → 'despachado'; retira → 'entregado'; sin definir → no se tocan. Fecha =
+      // martes de esa semana a las 12:00 AR. NO toca updated_at (si no, 180 días de historia vuelven al tablero).
+      // El dry_run trae además `impagas`: la deuda (regla única) de esas semanas y anteriores, por cliente, para limpiarla
+      // con "Marcar pagado" ANTES de prender la logística (si no, esos clientes figuran "Pedido impago" y no se cargan).
+      if (request.method === 'POST' && path === '/admin/corte/backfill-despacho') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const tandaIds = [...new Set((Array.isArray(body.tanda_ids) ? body.tanda_ids : []).map(x => parseInt(x, 10)).filter(Boolean))].slice(0, 60);
+        if (!tandaIds.length) return json({ error: 'faltan_datos', motivo: 'Pasá tanda_ids' }, 400);
+        const dry = body.dry_run !== false;
+        if (!(await ensureCorteDespachoSchema(env))) return json({ error: 'db', motivo: 'No se pudo preparar la base. Probá de nuevo.' }, 500);
+        const exKeys = new Set(), exNombres = new Set();
+        for (const s of (Array.isArray(body.excluir) ? body.excluir : [])) {
+          const t = String(s || '').trim(); if (!t) continue;
+          exKeys.add(t);
+          const dig = t.replace(/\D/g, ''); if (dig.length >= 8 && dig.length === t.replace(/[\s+\-()]/g, '').length) exKeys.add(dig);
+          const nn = corteNormNombre(t.startsWith('n:') ? t.slice(2) : t); if (nn && !/^\d+$/.test(nn)) exNombres.add(nn);
+        }
+        const ph = tandaIds.map(() => '?').join(',');
+        let tandas, rows;
+        try {
+          tandas = (await env.DB.prepare(`SELECT id, fecha_corte FROM corte_tandas WHERE id IN (${ph})`).bind(...tandaIds).all()).results || [];
+          rows = (await env.DB.prepare(`SELECT id, tanda_id, telefono, cliente_nombre, entrega FROM corte_pedidos WHERE tanda_id IN (${ph}) AND estado='embalado' AND (estado_pago IN ('pagado','interno') OR IFNULL(precio,0)<=0) AND IFNULL(producto,'')!='NEON' AND lower(IFNULL(cliente_nombre,''))!='neon' ORDER BY tanda_id, cliente_nombre, id`).bind(...tandaIds).all()).results || [];
+        } catch (_) { return json({ error: 'db', motivo: 'No se pudo leer la base. Probá de nuevo.' }, 500); }
+        const nowIso = new Date().toISOString();
+        const tInfo = {};
+        tandas.forEach(t => { const d = corteMartesDate(t.fecha_corte); tInfo[t.id] = { fecha: t.fecha_corte || '', ts: d ? new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 15)).toISOString() : nowIso }; });
+        const grupos = {};
+        for (const p of rows) {
+          const k = corteClaveCliente(p);
+          if (exKeys.has(k) || (p.telefono && exKeys.has(String(p.telefono))) || exNombres.has(corteNormNombre(p.cliente_nombre))) continue;
+          const gk = p.tanda_id + '|' + k + '|' + (p.entrega || '');
+          const nuevo = p.entrega === 'envio' ? 'despachado' : (p.entrega === 'retira' ? 'entregado' : null);
+          (grupos[gk] = grupos[gk] || { tanda_id: p.tanda_id, fecha: (tInfo[p.tanda_id] || {}).fecha || '', cliente: p.cliente_nombre, telefono: p.telefono || '', entrega: p.entrega || 'sin definir', ids: [], nuevo_estado: nuevo }).ids.push(p.id);
+        }
+        const detalle = Object.values(grupos);
+        const piezas = detalle.filter(g => g.nuevo_estado).reduce((s, g) => s + g.ids.length, 0);
+        if (!dry) {
+          const stmts = detalle.filter(g => g.nuevo_estado).map(g => {
+            const ts = (tInfo[g.tanda_id] || {}).ts || nowIso, phI = g.ids.map(() => '?').join(',');
+            return g.nuevo_estado === 'despachado'
+              ? env.DB.prepare(`UPDATE corte_pedidos SET estado='despachado', despachado_at=? WHERE id IN (${phI}) AND estado='embalado' AND (estado_pago IN ('pagado','interno') OR IFNULL(precio,0)<=0)`).bind(ts, ...g.ids)
+              : env.DB.prepare(`UPDATE corte_pedidos SET estado='entregado', entregado_at=?, entregado_por='backfill' WHERE id IN (${phI}) AND estado='embalado' AND (estado_pago IN ('pagado','interno') OR IFNULL(precio,0)<=0)`).bind(ts, ...g.ids);
+          });
+          try { for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50)); }
+          catch (e) { return json({ error: 'db', motivo: 'Falló a mitad del backfill (lo hecho queda hecho; se puede volver a correr).', detalle }, 500); }
+        }
+        // Deuda vieja (solo en el dry_run): cualquier pieza que cuente como deuda en esas semanas o anteriores, por cliente.
+        let impagas = [];
+        if (dry) {
+          try {
+            const maxT = Math.max(...tandaIds);
+            const dr = (await env.DB.prepare('SELECT tanda_id, telefono, cliente_nombre, estado_pago, COUNT(*) AS n, COALESCE(SUM(precio),0) AS total FROM corte_pedidos WHERE ' + CORTE_DEUDA_SQL + ' AND (tanda_id IS NULL OR tanda_id <= ?) GROUP BY tanda_id, telefono, cliente_nombre, estado_pago ORDER BY tanda_id, cliente_nombre').bind(maxT).all()).results || [];
+            const fT = {};
+            const dIds = [...new Set(dr.map(r => r.tanda_id).filter(Boolean))];
+            if (dIds.length) ((await env.DB.prepare('SELECT id, fecha_corte FROM corte_tandas WHERE id IN (' + dIds.map(() => '?').join(',') + ')').bind(...dIds).all()).results || []).forEach(t => { fT[t.id] = t.fecha_corte || ''; });
+            const porCli = {};
+            for (const r of dr) {
+              const k = corteClaveCliente(r);
+              const c = (porCli[k] = porCli[k] || { key: k, cliente: r.cliente_nombre, telefono: r.telefono || '', piezas: 0, total: 0, tandas: [] });
+              c.piezas += Number(r.n) || 0; c.total += Math.round(Number(r.total) || 0);
+              c.tandas.push({ tanda_id: r.tanda_id, fecha: fT[r.tanda_id] || '', estado_pago: r.estado_pago, piezas: Number(r.n) || 0, total: Math.round(Number(r.total) || 0) });
+            }
+            impagas = Object.values(porCli);
+          } catch (_) { impagas = null; } // null = no se pudo leer (distinto de "no hay")
+        }
+        return json({ ok: true, dry_run: dry, detalle, piezas, ...(dry ? { impagas } : {}) });
+      }
       // POST /admin/corte/pedido → colas operativas: transición de estado + carga de datos, por rol.
       // body { id, action, ... }. action: 'medidas' (Emma: ancho_real/alto_real/matriz → matriz_lista + precio),
       // 'cortado' (Aníbal/produccion), 'embalado' (Neyen/produccion: entrega retira/envio), 'estado' (admin libre).
@@ -19224,6 +19995,13 @@ const handler = {
         const action = String(body.action || '');
         const nowIso = new Date().toISOString();
         const _slug = String(session.user || '').toLowerCase();
+        // Fechas del despacho coherentes con el estado (las leen el copiloto y el deshacer de logística): al entrar a
+        // despachado/entregado se estampan (si no tenían); al volver a un estado anterior se limpian.
+        const _desp = await ensureCorteDespachoSchema(env);
+        const _despSet = (est) => _desp ? { sql: ", despachado_at = CASE WHEN ?='despachado' THEN COALESCE(despachado_at, ?) WHEN ?='entregado' THEN despachado_at ELSE NULL END, entregado_at = CASE WHEN ?='entregado' THEN COALESCE(entregado_at, ?) ELSE NULL END", binds: [est, nowIso, est, est, nowIso] } : { sql: '', binds: [] };
+        // Producción (Neyen/Aníbal) NO puede hacer retroceder piezas que ya salieron (una pantalla vieja o el Deshacer de
+        // Neyen devolvían a 'cortado' piezas despachadas). El admin sí.
+        const _noSalidas = _role !== 'admin' ? " AND estado NOT IN ('despachado','entregado')" : '';
         // Acciones MASIVAS (sin id puntual): Aníbal corta toda la tanda; Neyen embala el paquete de un cliente.
         if (action === 'cortado_bulk') {
           if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
@@ -19255,10 +20033,21 @@ const handler = {
             const _dis = `disenado_at = CASE WHEN estado='pedido' AND ?<>'pedido' THEN COALESCE(disenado_at, ?) ELSE disenado_at END`;
             // Embalar: solo piezas 'cortado' (no hace retroceder despachadas/entregadas) y sin tocar la entrega (ver embalado_bulk).
             if (est === 'embalado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='embalado', updated_at=? WHERE id IN (${ph}) AND estado='cortado'`).bind(est, nowIso, nowIso, ...ids).run();
-            else if (est === 'cortado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='cortado', productor=?, updated_at=? WHERE id IN (${ph})`).bind(est, nowIso, _slug, nowIso, ...ids).run();
-            else rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado=?, updated_at=? WHERE id IN (${ph})`).bind(est, nowIso, est, nowIso, ...ids).run();
+            else if (est === 'cortado') { const d = _despSet('cortado'); rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='cortado', productor=?, updated_at=?${d.sql} WHERE id IN (${ph})${_noSalidas}`).bind(est, nowIso, _slug, nowIso, ...d.binds, ...ids).run(); }
+            else { const d = _despSet(est); rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado=?, updated_at=?${d.sql} WHERE id IN (${ph})`).bind(est, nowIso, est, nowIso, ...d.binds, ...ids).run(); }
             return json({ ok: true, action, estado: est, n: (rr.meta && rr.meta.changes) || 0 });
           } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        }
+        // Entrega a mano (SOLO admin) {ids, entrega:'envio'|'retira'} → entrega_manual=1: la sincronización con la planilla ya
+        // no la pisa. Sirve para destrabar un 'sin definir' sin esperar a la planilla. No toca despachadas/entregadas ni neón.
+        if (action === 'entrega') {
+          if (_role !== 'admin') return json({ error: 'solo admin' }, 403);
+          const ids = (Array.isArray(body.ids) ? body.ids : (body.id ? [body.id] : [])).map(x => parseInt(x, 10)).filter(Boolean).slice(0, 300);
+          const ent = String(body.entrega || '');
+          if (!ids.length) return json({ error: 'sin ids' }, 400);
+          if (!['envio', 'retira'].includes(ent)) return json({ error: 'entrega inválida (envio o retira)' }, 400);
+          if (!_desp) return json({ error: 'no se pudo preparar la base' }, 500);
+          try { const rr = await env.DB.prepare(`UPDATE corte_pedidos SET entrega=?, entrega_manual=1, updated_at=? WHERE id IN (${ids.map(() => '?').join(',')}) AND estado NOT IN ('despachado','entregado') AND IFNULL(producto,'')!='NEON'`).bind(ent, nowIso, ...ids).run(); return json({ ok: true, action, entrega: ent, n: (rr.meta && rr.meta.changes) || 0 }); } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         }
         // Acciones sobre un pedido puntual (requieren id).
         const id = parseInt(body.id, 10);
@@ -19288,20 +20077,25 @@ const handler = {
           }
           if (action === 'cortado') {
             if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
-            await env.DB.prepare("UPDATE corte_pedidos SET estado='cortado', productor=?, updated_at=? WHERE id=?").bind(_slug, nowIso, id).run();
+            const d = _despSet('cortado');
+            const u = await env.DB.prepare(`UPDATE corte_pedidos SET estado='cortado', productor=?, updated_at=?${d.sql} WHERE id=?${_noSalidas}`).bind(_slug, nowIso, ...d.binds, id).run();
+            if (!((u.meta && u.meta.changes) || 0)) return json({ error: 'esa pieza ya salió (despachada o entregada): no se puede volver atrás' }, 409);
             return json({ ok: true, id, estado: 'cortado' });
           }
           if (action === 'embalado') {
             if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
             // No toca la entrega (sale solo de la planilla de cortes; ver embalado_bulk).
-            await env.DB.prepare("UPDATE corte_pedidos SET estado='embalado', updated_at=? WHERE id=?").bind(nowIso, id).run();
+            const d = _despSet('embalado');
+            const u = await env.DB.prepare(`UPDATE corte_pedidos SET estado='embalado', updated_at=?${d.sql} WHERE id=?${_noSalidas}`).bind(nowIso, ...d.binds, id).run();
+            if (!((u.meta && u.meta.changes) || 0)) return json({ error: 'esa pieza ya salió (despachada o entregada): no se puede volver atrás' }, 409);
             return json({ ok: true, id, estado: 'embalado', entrega: ped.entrega || '' });
           }
           if (action === 'estado') {
             if (_role !== 'admin') return json({ error: 'solo admin' }, 403);
             const est = String(body.estado || '');
             if (!['pedido', 'matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(est)) return json({ error: 'estado inválido' }, 400);
-            await env.DB.prepare("UPDATE corte_pedidos SET disenado_at = CASE WHEN estado='pedido' AND ?<>'pedido' THEN COALESCE(disenado_at, ?) ELSE disenado_at END, estado=?, updated_at=? WHERE id=?").bind(est, nowIso, est, nowIso, id).run();
+            const d = _despSet(est);
+            await env.DB.prepare(`UPDATE corte_pedidos SET disenado_at = CASE WHEN estado='pedido' AND ?<>'pedido' THEN COALESCE(disenado_at, ?) ELSE disenado_at END, estado=?, updated_at=?${d.sql} WHERE id=?`).bind(est, nowIso, est, nowIso, ...d.binds, id).run();
             return json({ ok: true, id, estado: est });
           }
         } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
@@ -19314,7 +20108,7 @@ const handler = {
         let rows = [];
         // Las piezas de NEÓN PROPIO (producto='NEON') NO se cobran: sin este filtro aparecían como "clientes"
         // sin teléfono en "Cobrar la semana" (pasaba con las 15 filas 'neon' cargadas a mano el 28-sep).
-        try { rows = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE precio > 0 AND estado_pago='pendiente' AND estado IN ('cortado','embalado') AND IFNULL(producto,'TRANS')!='NEON' ORDER BY telefono, id").all()).results || []; } catch (_) {}
+        try { rows = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE precio > 0 AND estado_pago='pendiente' AND estado IN ('cortado','embalado','despachado','entregado') AND IFNULL(producto,'TRANS')!='NEON' ORDER BY telefono, id").all()).results || []; } catch (_) {}
         const grupos = {};
         for (const p of rows) {
           const k = p.telefono || ('id' + p.id);
@@ -19378,7 +20172,7 @@ const handler = {
           // llegaba justo en ese hueco, el vigía no encontraba qué marcar y el pago se perdía.
           const estados = recobrarSet.has(tel) ? "('pendiente','cobrando')" : "('pendiente')";
           let rows = [];
-          try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio, estado_pago FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago IN " + estados + " AND estado IN ('cortado','embalado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
+          try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio, estado_pago FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago IN " + estados + " AND estado IN ('cortado','embalado','despachado','entregado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
           if (!rows.length) { await soltarLock(); res.push({ tel, ok: false, error: recobrarSet.has(tel) ? 'nada para cobrar' : 'nada pendiente (si ya se le cobró, usá re-envío)' }); continue; }
           // Se controlan TODOS los nombres del cobro (si un teléfono tiene piezas de dos clientes, eso mismo es un conflicto)
           // contra todos los dueños conocidos del número (LTV + asignaciones + otros clientes del corte). Si LTV no se pudo
@@ -19487,7 +20281,7 @@ const handler = {
         let body; try { body = await request.json(); } catch { body = {}; }
         let tels = Array.isArray(body.telefonos) ? body.telefonos.map(t => String(t).replace(/\D/g, '')).filter(Boolean) : [];
         if (!tels.length) {
-          try { tels = ((await env.DB.prepare("SELECT DISTINCT telefono FROM corte_pedidos WHERE telefono!='' AND estado IN ('cortado','embalado')").all()).results || []).map(r => r.telefono); } catch (_) { tels = []; }
+          try { tels = ((await env.DB.prepare("SELECT DISTINCT telefono FROM corte_pedidos WHERE telefono!='' AND estado IN ('cortado','embalado','despachado','entregado')").all()).results || []).map(r => r.telefono); } catch (_) { tels = []; }
         }
         tels = [...new Set(tels)];
         if (!tels.length) return json({ error: 'sin telefonos' }, 400);
