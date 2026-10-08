@@ -377,6 +377,191 @@ function refreshPanelSueldo() {
   if (tmp.firstElementChild) { el.replaceWith(tmp.firstElementChild); bindPanelSueldo(); }
 }
 
+// ===== REGULADOR DE CONSULTAS (oct-2026, pedido de Gaspar) =====
+// Facu y Agus eligen cuántas consultas (leads del reparto) quieren por día: la de MAÑANA siempre y la
+// de HOY solo antes de las 12:00 AR (lo valida el worker en /admin/reparto/cuota). Es un TOPE: lo que no
+// toman sigue al otro vendedor o a Joaco. Cada botón GUARDA AL TOQUE (no hay borrador que un render()
+// global —ej. el aviso "Sin cotizar" cada 75 s— pueda pisar) y se repinta SOLO este bloque.
+function panelConsultasHtml() {
+  const st = STATE.consultas || {};
+  // Datos de OTRO usuario (cambió de usuario en la misma pestaña) → se muestran como "Cargando…".
+  const d = (st.user && st.user !== STATE.user) ? null : st.data;
+  const slug = _userKey(STATE.user);
+  const otro = slug === 'facundo' ? 'Agus' : 'Facu';
+  const head = `<div class="card-h"><h3>📥 Mis consultas</h3><span class="muted" style="font-size:12px">elegí cuántas querés recibir</span></div>`;
+  if (!d) {
+    return `<div id="panel-consultas" class="card" style="margin-bottom:var(--s-4)">${head}<div class="muted" style="font-size:12px">${st.error ? '⚠ ' + escapeHtml(st.error) : 'Cargando…'}</div></div>`;
+  }
+  const fd = (s) => String(s || '').slice(8, 10) + '/' + String(s || '').slice(5, 7);
+  const pasos = []; for (let n = 0; n <= (d.max || 30); n += 5) pasos.push(n);
+  const origen = (o) => o === 'admin' ? 'fijada por Gaspar' : o === 'vendedor' ? 'elegida por vos' : 'la de siempre';
+  const chips = (dia, x) => pasos.map(n => `<button type="button" class="ps-chip ${n === x.cuota ? 'active' : ''}" data-cuota-dia="${dia}" data-cuota-n="${n}" ${st.saving ? 'disabled style="opacity:.5;cursor:wait"' : ''} title="${n === 0 ? 'No recibir consultas nuevas' : n + ' consultas'}">${n}</button>`).join('');
+  const bloque = (dia, titulo, x) => {
+    let nota = '';
+    if (x.pausado) nota = 'Gaspar te pausó el reparto ese día.';
+    else if (!x.editable) nota = x.origen === 'admin' ? 'La fijó Gaspar: si la querés cambiar, hablalo con él.' : 'Se cierra a las 12. Podés elegir la de mañana.';
+    const resumen = dia === 'hoy'
+      ? `Te tocaron <b>${x.asignados}</b> de <b>${x.cuota}</b> <span class="muted">(${origen(x.origen)})</span>`
+      : `<b>${x.cuota}</b> consultas <span class="muted">(${origen(x.origen)})</span>`;
+    return `<div style="margin-bottom:var(--s-3)">
+        <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">${titulo} · ${fd(x.fecha)}</div>
+        <div style="font-size:14px;margin-bottom:6px">${resumen}</div>
+        ${(x.editable && !x.pausado) ? `<div style="display:flex;flex-direction:row;flex-wrap:wrap;gap:6px">${chips(dia, x)}</div>` : ''}
+        ${nota ? `<div style="font-size:12px;color:#f5b14c;margin-top:4px">${nota}</div>` : ''}
+      </div>`;
+  };
+  return `<div id="panel-consultas" class="card" style="margin-bottom:var(--s-4)">
+      ${head}
+      ${bloque('hoy', 'Hoy', d.hoy)}
+      ${bloque('manana', 'Mañana', d.manana)}
+      <div class="muted" style="font-size:11px;line-height:1.5">Es un tope: los días flojos puede que no llegues. La de mañana la podés cambiar cuando quieras; la de hoy, hasta las 12. Lo que no tomes le llega a ${otro} o a Joaco, no se pierde ninguna consulta.</div>
+    </div>`;
+}
+function refreshPanelConsultas() {
+  const el = document.getElementById('panel-consultas');
+  if (!el) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = panelConsultasHtml().trim();
+  if (tmp.firstElementChild) el.replaceWith(tmp.firstElementChild);
+}
+async function fetchConsultasMias() {
+  if (!STATE.token || !isSecundario(STATE.user)) return;
+  const st = STATE.consultas = STATE.consultas || {};
+  if (st.loading) return;
+  const user = STATE.user;
+  st.loading = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/reparto/cuota', { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    if (STATE.user !== user) return;            // cambió de usuario mientras cargaba
+    if (r.ok && j.ok) { st.data = j; st.error = ''; st.at = Date.now(); st.user = user; }
+    else st.error = j.error || ('No se pudo cargar (' + r.status + ')');
+  } catch (_) { st.error = 'Sin conexión, reintentá en un rato'; }
+  finally { st.loading = false; refreshPanelConsultas(); }
+}
+// Se llama en cada bind del dashboard: carga si no hay datos, si cambió el usuario o si tienen +1 min
+// (así "te tocaron X" se mantiene al día sin un timer propio).
+function bindPanelConsultas() {
+  if (!document.getElementById('panel-consultas')) return;
+  if (STATE.consultas && STATE.consultas.user && STATE.consultas.user !== STATE.user) STATE.consultas = {};
+  const st = STATE.consultas || {};
+  if (!st.data || Date.now() - (st.at || 0) > 60000) fetchConsultasMias();
+}
+document.addEventListener('click', async (ev) => {
+  const b = ev.target.closest && ev.target.closest('[data-cuota-dia]');
+  if (!b || b.disabled) return;
+  const st = STATE.consultas = STATE.consultas || {};
+  if (st.saving) return;
+  const dia = b.dataset.cuotaDia, n = parseInt(b.dataset.cuotaN, 10);
+  const x = st.data && st.data[dia];
+  if (x && x.cuota === n) return;               // ya es esa
+  st.saving = true; refreshPanelConsultas();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/reparto/cuota', {
+      method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      // fecha = la que se ve en pantalla: si pasó la medianoche, el server no guarda en el día equivocado.
+      body: JSON.stringify({ dia, cuota: n, fecha: x ? x.fecha : '' }),
+    });
+    const j = await r.json().catch(() => ({}));
+    st.saving = false;
+    if (!r.ok || !j.ok) {
+      if (j && j.hoy && j.manana) { st.data = { ok: true, ...j }; st.at = Date.now(); }   // 409 con el estado fresco
+      refreshPanelConsultas();
+      await showAlert(j.error || 'No se pudo guardar, probá de nuevo.', { title: 'Mis consultas', variant: 'warn' });
+      fetchConsultasMias();
+      return;
+    }
+    st.data = j; st.at = Date.now();
+    refreshPanelConsultas();
+    toast(`✓ ${dia === 'hoy' ? 'Hoy' : 'Mañana'}: ${n === 0 ? 'sin consultas nuevas' : n + ' consultas'}`);
+  } catch (_) {
+    st.saving = false; refreshPanelConsultas();
+    toast('⚠ Sin conexión: no se guardó');
+  }
+});
+
+// Card de Admin "Consultas por vendedor": Gaspar ve lo que eligió cada uno (hoy/mañana, cuántas le
+// tocaron) y puede fijarla sin el corte de las 12 (queda bloqueada para el vendedor ese día) o liberarla.
+// Mismo patrón que loadCosts: estado de módulo y pinta SOLO #reparto-panel (sin render() global).
+let repartoState = { data: null, loading: false, error: '', at: 0 };
+async function loadRepartoPanel() {
+  if (!isAdmin() || repartoState.loading) return;
+  repartoState.loading = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/reparto/cuota', { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    if (!isAdmin()) return;                       // cambió de usuario mientras cargaba
+    if (r.ok && j.ok) { repartoState.data = j.secundarios || []; repartoState.error = ''; repartoState.at = Date.now(); }
+    else repartoState.error = j.error || ('HTTP ' + r.status);
+  } catch (_) { repartoState.error = 'sin conexión'; }
+  finally { repartoState.loading = false; renderRepartoPanel(); }
+}
+// Se llama en cada bindAdmin: pinta lo que hay y recarga si tiene +1 min o si ya cambió el día AR
+// (sino los contadores quedaban congelados y "mañana" podía apuntar a otro día después de medianoche).
+function bindRepartoPanel() {
+  const hoyAR = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+  const d0 = (repartoState.data && repartoState.data[0]) || null;
+  if (repartoState.data) renderRepartoPanel();
+  if (!repartoState.data || Date.now() - (repartoState.at || 0) > 60000 || (d0 && d0.hoy && d0.hoy.fecha !== hoyAR)) loadRepartoPanel();
+}
+function renderRepartoPanel() {
+  const el = document.getElementById('reparto-panel');
+  if (!el) return;
+  if (repartoState.error && !repartoState.data) { el.innerHTML = `<div class="muted" style="font-size:12px">⚠ ${escapeHtml(repartoState.error)}</div>`; return; }
+  if (!repartoState.data) { el.innerHTML = '<div class="loading"><div class="spinner"></div></div>'; return; }
+  const fd = (s) => String(s || '').slice(8, 10) + '/' + String(s || '').slice(5, 7);
+  const origen = (o, nom) => o === 'admin' ? 'fijada por vos' : o === 'vendedor' ? `elegida por ${nom}` : 'la de siempre';
+  const sel = (s, dia) => {
+    const x = s[dia];
+    const opts = []; for (let n = 0; n <= Math.max(40, s.max || 30); n += 5) opts.push(n);
+    if (!opts.includes(x.cuota)) { opts.push(x.cuota); opts.sort((a, b) => a - b); }
+    return `<select data-reparto-slug="${s.slug}" data-reparto-dia="${dia}" style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:4px 6px;color:var(--fg)">${opts.map(n => `<option value="${n}" ${n === x.cuota ? 'selected' : ''}>${n}</option>`).join('')}</select>`
+      + (x.origen === 'admin'
+        ? ` <button class="btn btn-ghost" data-reparto-reset="${s.slug}|${dia}" style="padding:1px 8px;font-size:11px" title="Que vuelva a decidir ${escapeHtml(s.nombre)}">liberar</button>`
+        : ` <button class="btn btn-ghost" data-reparto-fijar="${s.slug}|${dia}" style="padding:1px 8px;font-size:11px" title="Dejar fija esta cantidad (${escapeHtml(s.nombre)} no la puede cambiar ese día)">fijar</button>`);
+  };
+  const celda = (s, dia) => {
+    const x = s[dia];
+    const tope = dia === 'hoy' ? `<b>${x.asignados}</b> / ${x.cuota}` : `<b>${x.cuota}</b>`;
+    return `<td style="padding:8px 6px;vertical-align:top"><div>${tope}${x.pausado ? ' <span class="pill" style="font-size:10px">pausado</span>' : ''}</div><div class="muted" style="font-size:11px;margin:2px 0 4px">${origen(x.origen, s.nombre)}</div>${sel(s, dia)}</td>`;
+  };
+  const d0 = repartoState.data[0] || {};
+  el.innerHTML = `${repartoState.error ? `<div class="muted" style="font-size:12px;margin-bottom:6px">⚠ ${escapeHtml(repartoState.error)}</div>` : ''}<table style="width:100%;font-size:13px;border-collapse:collapse">
+      <thead><tr style="text-align:left;color:var(--fg-subtle);font-size:11px;text-transform:uppercase;letter-spacing:.05em">
+        <th style="padding:4px 6px">Vendedor</th><th style="padding:4px 6px">Hoy ${d0.hoy ? fd(d0.hoy.fecha) : ''} (recibidas / tope)</th><th style="padding:4px 6px">Mañana ${d0.manana ? fd(d0.manana.fecha) : ''}</th>
+      </tr></thead>
+      <tbody>${repartoState.data.map(s => `<tr style="border-top:1px solid var(--border)"><td style="padding:8px 6px;vertical-align:top"><b>${escapeHtml(s.nombre)}</b><div class="muted" style="font-size:11px">por defecto ${s.cuota_default}</div></td>${celda(s, 'hoy')}${celda(s, 'manana')}</tr>`).join('')}
+        <tr style="border-top:1px solid var(--border)"><td style="padding:8px 6px"><b>Joaco</b></td><td colspan="2" class="muted" style="padding:8px 6px;font-size:12px">Sin tope: recibe todo lo que no toman Facu y Agus.</td></tr>
+      </tbody></table>
+    <div class="muted" style="font-size:11px;margin-top:6px">Es un tope: con días flojos puede que no lleguen. Si la fijás vos, ellos no la pueden cambiar ese día (tocá "liberar" para que vuelvan a decidir).</div>`;
+  // Cada acción manda la FECHA que se ve en pantalla (el server rechaza si ya cambió el día).
+  const fechaDe = (slug, dia) => { const s0 = (repartoState.data || []).find(r => r.slug === slug); return (s0 && s0[dia] && s0[dia].fecha) || ''; };
+  const cuotaDe = (slug, dia) => { const s0 = (repartoState.data || []).find(r => r.slug === slug); return s0 && s0[dia] ? s0[dia].cuota : 0; };
+  el.querySelectorAll('[data-reparto-dia]').forEach(s => s.onchange = () => postRepartoAdmin({ slug: s.dataset.repartoSlug, dia: s.dataset.repartoDia, cuota: parseInt(s.value, 10), fecha: fechaDe(s.dataset.repartoSlug, s.dataset.repartoDia) }));
+  el.querySelectorAll('[data-reparto-reset]').forEach(b => b.onclick = () => { const [slug, dia] = b.dataset.repartoReset.split('|'); postRepartoAdmin({ slug, dia, reset: true, fecha: fechaDe(slug, dia) }); });
+  el.querySelectorAll('[data-reparto-fijar]').forEach(b => b.onclick = () => { const [slug, dia] = b.dataset.repartoFijar.split('|'); postRepartoAdmin({ slug, dia, cuota: cuotaDe(slug, dia), fecha: fechaDe(slug, dia) }); });
+}
+async function postRepartoAdmin(body) {
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/reparto/cuota', {
+      method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      if (j && Array.isArray(j.secundarios)) { repartoState.data = j.secundarios; repartoState.at = Date.now(); renderRepartoPanel(); }   // 409 con el estado fresco
+      await showAlert(j.error || 'No se pudo guardar.', { title: 'Consultas por vendedor', variant: 'warn' });
+      if (!(j && Array.isArray(j.secundarios))) loadRepartoPanel();
+      return;
+    }
+    repartoState.data = j.secundarios || repartoState.data; repartoState.error = ''; repartoState.at = Date.now();
+    renderRepartoPanel();
+    toast(body.reset ? '✓ Liberada' : '✓ Guardado');
+  } catch (_) {
+    renderRepartoPanel();   // el select vuelve al valor que de verdad está guardado
+    toast('⚠ Sin conexión: no se guardó');
+  }
+}
+
 async function loadCotizadorParams() {
   if (!CONFIG.trackerUrl) return;
   // Cache optimista de COGS desde localStorage (instantáneo mientras llega el fresco).
@@ -1347,6 +1532,8 @@ function afterUserSwitch() {
   STATE.loaded = false; STATE.pedidos = [];
   chatState.contactsLoaded = false; chatState.contacts = [];
   STATE.ocPend = null;   // las OC sin pagar son por vendedor: no mostrarle al nuevo usuario la lista del anterior
+  STATE.consultas = {};  // regulador de consultas: son del vendedor anterior
+  repartoState = { data: null, loading: false, error: '', at: 0 };
   render();
   try { fetchOcUrgenteStatus(); } catch (_) {}
   loadAll().catch(() => {});
@@ -1375,6 +1562,8 @@ async function logout() {
       });
     } catch(e) {}
   }
+  STATE.consultas = {};
+  repartoState = { data: null, loading: false, error: '', at: 0 };
   saveToken(null);
   saveAdminToken(null);
   teardownPollWorker();
@@ -4992,13 +5181,13 @@ function renderPrecotiz() {
       <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px;display:flex;flex-direction:column;gap:8px">
         ${(P.secundarios && P.secundarios.length ? P.secundarios : [{ slug: 'facundo', nombre: 'Facu', cuota: P.nadia_cuota, hoy: P.nadia_hoy }]).map(sv => `
           <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-            <label style="display:flex;align-items:center;gap:8px">👤 Reparto a ${escapeHtml(sv.nombre)} — leads por día:
+            <label style="display:flex;align-items:center;gap:8px">👤 Reparto a ${escapeHtml(sv.nombre)} — leads por día (por defecto):
               <input type="number" min="0" step="1" data-sec-cuota="${sv.slug}" value="${sv.cuota != null ? sv.cuota : 0}" style="width:64px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:5px 8px;color:var(--fg);font-size:13px">
             </label>
-            <span class="muted" style="font-size:12px">hoy le tocaron ${sv.hoy || 0}/${sv.cuota || 0}</span>
+            <span class="muted" style="font-size:12px">hoy le tocaron ${sv.hoy || 0}/${sv.cuota_hoy != null ? sv.cuota_hoy : (sv.cuota || 0)}${sv.origen_hoy && sv.origen_hoy !== 'default' ? (sv.origen_hoy === 'admin' ? ' (fijada por vos)' : ' (la eligió ' + escapeHtml(sv.nombre) + ')') : ''}</span>
           </div>`).join('')}
       </div>
-      <div class="muted" style="font-size:11px;margin-top:6px">Cada lead NUEVO de carteles que entra se reparte al azar entre los vendedores (hasta su tope diario cada uno); el resto queda para Joaco. En 0, ese vendedor no recibe nada automático — le asignás a mano en cada chat.</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">Cada lead NUEVO de carteles que entra se reparte al azar entre los vendedores (hasta su tope diario cada uno); el resto queda para Joaco. Este número es el tope POR DEFECTO: vale los días que Facu/Agus no eligen el suyo en "Mis consultas". Para cortar a alguien hoy o mañana, fijalo en 0 en Admin → Consultas por vendedor.</div>
     </div>
     ${(P.leads && P.leads.length) ? leadsHtml : '<div class="muted" style="font-size:13px">Todavía no entró ningún lead al piloto.</div>'}
   `;
@@ -5642,6 +5831,7 @@ function renderDashboard() {
         <h1>Dashboard</h1>
       </div>
     </div>
+    ${panelConsultasHtml()}
     ${panelSueldoHtml(_userKey(STATE.user))}
   `;
   }
@@ -10264,6 +10454,8 @@ function bindAdmin() {
   loadImprovements();
   // Panel de costos del sitio (gasto mensual IA/infra/servicios).
   loadCosts();
+  // Regulador de consultas: lo que eligió cada vendedor secundario (con override).
+  bindRepartoPanel();
 
   const saveBtn = document.querySelector('[data-cot-save]');
   if (saveBtn) saveBtn.onclick = async () => {
@@ -10378,6 +10570,14 @@ function renderAdmin() {
           </details>`
         }
       ` : ''}
+    </div>
+
+    <div class="card" style="margin-bottom:var(--s-4)">
+      <div class="card-h">
+        <h3>Consultas por vendedor</h3>
+        <span class="muted" style="font-size:12px">cuántas eligió cada uno · podés fijarla vos</span>
+      </div>
+      <div id="reparto-panel"><div class="loading"><div class="spinner"></div></div></div>
     </div>
 
     ${renderAdminCotizador()}
@@ -10691,6 +10891,7 @@ function bindCommon() {
   document.querySelectorAll('[data-period-m]').forEach(b => b.onclick = () => toggleDashMonth(b.dataset.periodM));
   // Panel "Tu sueldo": toggle del desglose + link de cada pedido a su ficha.
   bindPanelSueldo();
+  bindPanelConsultas();   // regulador de consultas (no-op si el panel no está en pantalla)
   document.querySelectorAll('[data-chart-nav]').forEach(b => b.onclick = () => {
     const dir = b.dataset.chartNav === 'next' ? 1 : -1;
     STATE.dashChartIdx = (STATE.dashChartIdx + dir + DASH_CHARTS.length) % DASH_CHARTS.length;

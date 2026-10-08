@@ -2419,10 +2419,51 @@ async function precotizNotifyGaspar(env, msg) {
 // CONFIG.defaultUsers (front) + 1 en el registro espejo del front. VENDEDORES_SECUNDARIOS (más abajo,
 // usado por todo el scoping de chats/cache) se DERIVA de este array. canonWorker/AVISO_WORKERS (tracking)
 // y PEDIDO_VEND_MAP (hoja contable) se sincronizan aparte por tener namespaces propios.
+// maxCuota = tope del REGULADOR de consultas (lo que cada uno puede elegir por día). Con las
+// probabilidades actuales, en un día pico Facu llega a ~30 y Agus a ~22: pedir más no se cumpliría.
 const COMERCIALES_SECUNDARIOS = [
-  { slug: 'facundo',  nombre: 'Facu', cuotaKv: 'nadia_cuota_diaria',    probKv: 'facundo_reparto_prob', phoneKv: 'nadia_phone',    defProb: 0.25 },
-  { slug: 'agustina', nombre: 'Agus', cuotaKv: 'agustina_cuota_diaria', probKv: 'agustina_reparto_prob', phoneKv: 'agustina_phone', defProb: 0.30 },
+  { slug: 'facundo',  nombre: 'Facu', cuotaKv: 'nadia_cuota_diaria',    probKv: 'facundo_reparto_prob', phoneKv: 'nadia_phone',    defProb: 0.25, maxCuota: 30 },
+  { slug: 'agustina', nombre: 'Agus', cuotaKv: 'agustina_cuota_diaria', probKv: 'agustina_reparto_prob', phoneKv: 'agustina_phone', defProb: 0.30, maxCuota: 25 },
 ];
+
+// ===== REGULADOR DE CONSULTAS (oct-2026, pedido de Gaspar) =====
+// Facu y Agus eligen cuántas consultas (leads del reparto) quieren por día: la de MAÑANA en cualquier
+// momento y la de HOY solo antes de las 12:00 AR. Es un TOPE (no cambia la probabilidad del reparto):
+// lo que no toman sigue al otro secundario o a Joaco, como siempre. Gaspar puede fijarla para cualquiera
+// (queda bloqueada para el vendedor ese día). Sin elección → la cuota por defecto (c.cuotaKv).
+// kv 'cuota_dia:<slug>:<YYYY-MM-DD>' = número; kv 'cuota_dia_meta:<slug>:<fecha>' = {by, at, lock}.
+function fechasAR() {
+  const ar = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  return { hoy: ar.toISOString().slice(0, 10), manana: new Date(ar.getTime() + 86400000).toISOString().slice(0, 10), hAR: ar.getUTCHours() };
+}
+// Cuota efectiva de un secundario para una fecha AR → {cuota, origen: 'vendedor'|'admin'|'default', meta}.
+async function cuotaDelDia(env, c, fecha) {
+  const v = await kvGet(env, 'cuota_dia:' + c.slug + ':' + fecha, null);
+  const nv = (v !== null && v !== '') ? parseInt(v, 10) : NaN;
+  if (Number.isFinite(nv)) {   // un valor ilegible en kv se ignora (sigue la por defecto) en vez de cortar el reparto
+    let meta = {}; try { meta = JSON.parse(await kvGet(env, 'cuota_dia_meta:' + c.slug + ':' + fecha, '{}')) || {}; } catch (_) {}
+    return { cuota: Math.max(0, nv), origen: meta.lock ? 'admin' : 'vendedor', meta };
+  }
+  return { cuota: Math.max(0, parseInt(await kvGet(env, c.cuotaKv, '0'), 10) || 0), origen: 'default', meta: {} };
+}
+// Leads del reparto automático asignados HOY (día AR) a un secundario. Los chats que se trajo a mano
+// ("Traer de Joaco", chat_assign_log via='import') no cuentan.
+async function contarAsignadosHoy(env, slug) {
+  const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z') AND NOT EXISTS (SELECT 1 FROM chat_assign_log l WHERE l.phone = wa_chats_summary.phone AND l.via = 'import' AND l.ts = wa_chats_summary.assigned_at)").bind(slug).first();
+  return (r && r.n) || 0;
+}
+// Estado del regulador de un secundario (lo que ven el vendedor y Gaspar).
+async function estadoCuotaVendedor(env, c) {
+  const f = fechasAR();
+  const pausa = await kvGet(env, 'reparto_pausa_' + c.slug, '');
+  const [hoy, man, asignados] = await Promise.all([cuotaDelDia(env, c, f.hoy), cuotaDelDia(env, c, f.manana), contarAsignadosHoy(env, c.slug)]);
+  const def = Math.max(0, parseInt(await kvGet(env, c.cuotaKv, '0'), 10) || 0);
+  return {
+    slug: c.slug, nombre: c.nombre, cuota_default: def, max: c.maxCuota || 30, corte: '12:00',
+    hoy: { fecha: f.hoy, cuota: hoy.cuota, origen: hoy.origen, asignados, pausado: !!(pausa && f.hoy <= pausa), editable: f.hAR < 12 && hoy.origen !== 'admin' },
+    manana: { fecha: f.manana, cuota: man.cuota, origen: man.origen, pausado: !!(pausa && f.manana <= pausa), editable: man.origen !== 'admin' },
+  };
+}
 // Nombre para el saludo del bot/auto-reply según a quién quedó asignado el chat (default Joaco).
 function saludoVendedor(assignedTo) {
   const a = String(assignedTo || '').toLowerCase();
@@ -2470,14 +2511,14 @@ async function maybeRepartirANadia(env, phone) {
       // cuota → el vendedor vuelve a recibir solo al día siguiente. Para frenar varios días, poner la última.
       const pausaHasta = await kvGet(env, 'reparto_pausa_' + c.slug, '');
       if (pausaHasta && hoyAR <= pausaHasta) continue;
-      const cuota = parseInt(await kvGet(env, c.cuotaKv, '0'), 10) || 0;
-      if (cuota <= 0) continue;                                        // ese vendedor no recibe reparto automático
+      // Cuota del día: la que eligió el vendedor (o fijó Gaspar) en el regulador; si no, la por defecto.
+      const cuota = (await cuotaDelDia(env, c, hoyAR)).cuota;
+      if (cuota <= 0) continue;                                        // ese vendedor no recibe reparto automático (hoy)
       // No asignar a un vendedor dado de baja (activo=0) aunque su cuota haya quedado >0 por olvido.
       try { const _av = await env.DB.prepare("SELECT activo FROM users_panel WHERE id = ?").bind(c.slug).first(); if (_av && _av.activo === 0) continue; } catch (_) {}
       // Los chats que la vendedora se TRAJO a mano ("Traer de Joaco", chat_assign_log via='import') no cuentan:
       // la cuota es del reparto automático (si no, traerse contactos le cortaba los leads nuevos del día).
-      const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z') AND NOT EXISTS (SELECT 1 FROM chat_assign_log l WHERE l.phone = wa_chats_summary.phone AND l.via = 'import' AND l.ts = wa_chats_summary.assigned_at)").bind(c.slug).first();
-      if (((r && r.n) || 0) >= cuota) continue;                        // ya llegó a SU cuota del día
+      if ((await contarAsignadosHoy(env, c.slug)) >= cuota) continue;   // ya llegó a SU cuota del día
       const prob = parseFloat(await kvGet(env, c.probKv, String(c.defProb))) || c.defProb;
       // Sorteo determinístico por teléfono PERO independiente por vendedor (mezclamos el slug al hash),
       // así el mismo lead puede tocarle a uno u otro con probabilidades independientes.
@@ -14138,6 +14179,89 @@ const handler = {
         return json({ error: 'método no soportado' }, 405);
       }
 
+      // ----- Regulador de consultas (Facu/Agus eligen cuántos leads quieren por día) -----
+      // GET: el vendedor secundario recibe SOLO lo suyo; Gaspar recibe {secundarios:[...]}.
+      // POST {dia:'hoy'|'manana', cuota} (vendedor: mañana siempre, hoy solo antes de las 12:00 AR, 0..max).
+      // POST admin {slug, dia, cuota} fija sin corte y bloquea ese día para el vendedor; {slug, dia, reset:true}
+      // vuelve a la cuota por defecto. Joaco y el resto → 403 (Joaco sigue como viene).
+      if (path === '/admin/reparto/cuota') {
+        const role = await getSessionRole(env, session.user);
+        const me = String(session.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+        const esAdm = role === 'admin';
+        let miSec = null;
+        if (!esAdm && role === 'comercial' && VENDEDORES_SECUNDARIOS.includes(me)) {
+          // La sesión dura 30 días: confirmar que siga activo como comercial (mismo criterio que chat-import).
+          let u = null;
+          try { u = await env.DB.prepare("SELECT 1 AS ok FROM users_panel WHERE id = ? AND activo = 1 AND rol = 'comercial'").bind(me).first(); }
+          catch (_) { return json({ error: 'base ocupada, probá en un ratito' }, 503); }
+          if (u) miSec = COMERCIALES_SECUNDARIOS.find(c => c.slug === me) || null;
+        }
+        if (!esAdm && !miSec) return json({ error: 'solo para Facu, Agus y Gaspar' }, 403);
+        if (request.method === 'GET') {
+          if (esAdm) return json({ ok: true, secundarios: await Promise.all(COMERCIALES_SECUNDARIOS.map(c => estadoCuotaVendedor(env, c))) });
+          return json({ ok: true, ...(await estadoCuotaVendedor(env, miSec)) });
+        }
+        if (request.method === 'POST') {
+          let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          const c = esAdm ? COMERCIALES_SECUNDARIOS.find(x => x.slug === String(body?.slug || '').toLowerCase()) : miSec;
+          if (!c) return json({ error: 'vendedor inválido' }, 400);
+          const f = fechasAR();
+          const dia = String(body?.dia || '');
+          const fecha = dia === 'hoy' ? f.hoy : dia === 'manana' ? f.manana : '';
+          if (!fecha) return json({ error: "dia tiene que ser 'hoy' o 'manana'" }, 400);
+          // El front manda además la FECHA que tiene en pantalla: si pasó la medianoche desde que la cargó,
+          // 'mañana' ya es otro día → no guardamos y le devolvemos el estado fresco para que elija de nuevo.
+          const fCli = String(body?.fecha || '');
+          if (fCli && fCli !== fecha) {
+            const fresco = esAdm ? { secundarios: await Promise.all(COMERCIALES_SECUNDARIOS.map(x => estadoCuotaVendedor(env, x))) } : await estadoCuotaVendedor(env, c);
+            return json({ error: 'Cambió el día desde que abriste la pantalla: te recargué los datos, elegí de nuevo.', ...fresco }, 409);
+          }
+          const kCuota = 'cuota_dia:' + c.slug + ':' + fecha, kMeta = 'cuota_dia_meta:' + c.slug + ':' + fecha;
+          const actual = await cuotaDelDia(env, c, fecha);
+          if (esAdm && body?.reset) {
+            try { await env.DB.prepare('DELETE FROM kv_cache WHERE k IN (?, ?)').bind(kCuota, kMeta).run(); }
+            catch (_) { return json({ error: 'no se pudo guardar, probá de nuevo' }, 503); }
+            return json({ ok: true, secundarios: await Promise.all(COMERCIALES_SECUNDARIOS.map(x => estadoCuotaVendedor(env, x))) });
+          }
+          // Solo enteros (número o string de dígitos): Number(null/''/false) daría 0 y cortaría el reparto.
+          const raw = body?.cuota;
+          const n = (typeof raw === 'number' || (typeof raw === 'string' && /^\d+$/.test(raw.trim()))) ? Number(raw) : NaN;
+          const max = esAdm ? 100 : (c.maxCuota || 30);
+          if (!Number.isInteger(n) || n < 0 || n > max) return json({ error: `la cantidad tiene que ser un número entre 0 y ${max}` }, 400);
+          if (!esAdm) {
+            if (dia === 'hoy' && f.hAR >= 12) return json({ error: 'Después de las 12 la cantidad de hoy ya no se cambia. Podés elegir la de mañana.' }, 409);
+            if (actual.origen === 'admin') return json({ error: 'Gaspar fijó tu cantidad para ese día. Hablalo con él si la querés cambiar.' }, 409);
+          }
+          const cambio = actual.cuota !== n || (esAdm ? actual.origen !== 'admin' : actual.origen === 'default');
+          if (cambio) {
+            // Cuota y meta en UN batch (transaccional en D1) y sin tragar errores: si falla, 503 y no se avisa.
+            const nowIso = new Date().toISOString();
+            const up = "INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at";
+            try {
+              await env.DB.batch([
+                env.DB.prepare(up).bind(kCuota, String(n), nowIso),
+                env.DB.prepare(up).bind(kMeta, JSON.stringify({ by: String(session.user || ''), at: nowIso, lock: esAdm ? 1 : 0 }), nowIso),
+              ]);
+            } catch (_) { return json({ error: 'no se pudo guardar, probá de nuevo' }, 503); }
+            // Aviso a Gaspar cuando el VENDEDOR cambia su cantidad (no cuando la cambia él): 1 cada 30 min
+            // por vendedor y día (salvo si la pone en 0: eso se avisa siempre), texto libre en segundo plano
+            // (si la ventana de 24 h de Gaspar está cerrada no llega; la card de Admin lo muestra igual).
+            if (!esAdm && actual.cuota !== n) {
+              const kAv = 'cuota_aviso:' + c.slug + ':' + fecha;
+              const ult = parseInt(await kvGet(env, kAv, '0'), 10) || 0;
+              if (n === 0 || Date.now() - ult > 30 * 60 * 1000) {
+                await kvSet(env, kAv, String(Date.now()));
+                const fd = fecha.slice(8, 10) + '/' + fecha.slice(5, 7);
+                ctx.waitUntil(precotizNotifyGaspar(env, `${c.nombre} eligió ${n} consulta${n === 1 ? '' : 's'} para ${dia === 'hoy' ? 'hoy' : 'mañana'} (${fd}). Antes: ${actual.cuota}.`).catch(() => {}));
+              }
+            }
+          }
+          if (esAdm) return json({ ok: true, secundarios: await Promise.all(COMERCIALES_SECUNDARIOS.map(x => estadoCuotaVendedor(env, x))) });
+          return json({ ok: true, ...(await estadoCuotaVendedor(env, c)) });
+        }
+        return json({ error: 'método no soportado' }, 405);
+      }
+
       // ----- Piloto de pre cotización (solo Gaspar): estado, control, dry-run, aprobar -----
       if (path.startsWith('/admin/precotiz')) {
         // Frenar/reanudar el bot en un chat (freeze/frozen) lo puede usar cualquier usuario del
@@ -14172,7 +14296,9 @@ const handler = {
             let hoy = 0;
             try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z') AND NOT EXISTS (SELECT 1 FROM chat_assign_log l WHERE l.phone = wa_chats_summary.phone AND l.via = 'import' AND l.ts = wa_chats_summary.assigned_at)").bind(c.slug).first(); hoy = (nr && nr.n) || 0; } catch (_) {}   // sin los traídos a mano
             const ph = await kvGet(env, c.phoneKv, '');
-            secundarios.push({ slug: c.slug, nombre: c.nombre, cuota: cu, hoy, phone: ph });
+            // cuota = la POR DEFECTO (alimenta el input); cuota_hoy = la que de verdad corta hoy (regulador).
+            const ef = await cuotaDelDia(env, c, fechasAR().hoy);
+            secundarios.push({ slug: c.slug, nombre: c.nombre, cuota: cu, cuota_hoy: ef.cuota, origen_hoy: ef.origen, hoy, phone: ph });
           }
           const _facu = secundarios.find(x => x.slug === 'facundo') || { cuota: 0, hoy: 0, phone: '' };
           return json({ ok: true, on, modo, cap, sample, count: leads.length, leads, frozen, secundarios, nadia_cuota: _facu.cuota, nadia_hoy: _facu.hoy, nadia_phone: _facu.phone });
