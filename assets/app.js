@@ -9397,9 +9397,13 @@ function pfNuevo() {
 }
 function pfItemNuevo(tipo) {
   const t = PF_TIPOS[tipo] || PF_TIPOS.otro;
-  return { uid: pfUid(), tipo: PF_TIPOS[tipo] ? tipo : 'otro', titulo: t.titulo, chip: t.chip, detalle: t.detalle, cantidad: 1, precio: 0, img: '', renders: [], briefId: null };
+  return { uid: pfUid(), tipo: PF_TIPOS[tipo] ? tipo : 'otro', titulo: t.titulo, chip: t.chip, detalle: t.detalle, cantidad: 1, precio: 0, precioAntes: 0, img: '', renders: [], briefId: null };
 }
 function pfPesos(n) { return '$ ' + String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+// Precio "antes" (opcional, por unidad): si es MAYOR al precio, el PDF lo muestra tachado con el % de descuento.
+// Si el precio subió (o no hay antes), no se muestra nada: nunca se tacha un precio más bajo que el nuevo.
+function pfConDto(it) { const pa = Number(it.precioAntes) || 0, pu = Number(it.precio) || 0; return pu > 0 && pa > pu; }
+function pfAhorro(d) { return (d.items || []).reduce((a, it) => a + (pfConDto(it) ? (Number(it.cantidad) || 0) * ((Number(it.precioAntes) || 0) - (Number(it.precio) || 0)) : 0), 0); }
 // Pesos enteros: "6.990.000" / "6990000" / "$ 6.990.000,50" → 6990000 (lo que va después de la coma, centavos, se ignora).
 function pfNum(v) { const d = String(v == null ? '' : v).split(',')[0].replace(/[^\d]/g, ''); return d ? parseInt(d, 10) : 0; }
 function pfTotal(d) { return (d.items || []).reduce((a, it) => a + (Number(it.cantidad) || 0) * (Number(it.precio) || 0), 0); }
@@ -9584,13 +9588,16 @@ function pfHtmlDoc(d, numero) {
   const intro = String(d.intro || '').trim() || `Te compartimos la propuesta para ${cliente || 'tu proyecto'}, con el detalle de cada trabajo, sus medidas, terminaciones e importes.`;
   const filas = (d.items || []).map((it, i) => {
     const lines = String(it.detalle || '').split('\n').map(x => x.trim()).filter(Boolean);
+    const cant = Number(it.cantidad) || 0, pu = Number(it.precio) || 0, pa = Number(it.precioAntes) || 0;
+    const dto = pfConDto(it), pct = dto ? Math.round((1 - pu / pa) * 100) : 0;
     return `<tr>
       <td class="c"><div class="it-n">${String(i + 1).padStart(2, '0')}</div></td>
       <td><div class="it-title">${escapeHtml(it.titulo || '')}${it.chip ? `<span class="chip">${escapeHtml(it.chip)}</span>` : ''}</div>${lines.length ? `<ul class="specs">${lines.map(l => `<li>${pfNbspMedidas(pfMd(l))}</li>`).join('')}</ul>` : ''}</td>
-      <td class="c">${Number(it.cantidad) || 0}</td>
-      <td class="r price">${pfPesos((Number(it.cantidad) || 0) * (Number(it.precio) || 0))}</td>
+      <td class="c">${cant}</td>
+      <td class="r">${dto ? `<div class="antes">${pfPesos(cant * pa)}</div>` : ''}<div class="price">${pfPesos(cant * pu)}</div>${cant > 1 ? `<div class="cu">${dto ? `<span class="antes-cu">${pfPesos(pa)}</span> ` : ''}${pfPesos(pu)} c/u</div>` : ''}${dto && pct > 0 ? `<div class="dto">−${pct}%</div>` : ''}</td>
     </tr>`;
   }).join('');
+  const ahorro = pfAhorro(d);
   const conds = String(d.condiciones || '').split('\n').map(x => x.trim()).filter(Boolean);
   const venc = pfValidoHasta(d);
   if ((parseInt(d.validez, 10) || 0) > 0 && venc) conds.push(`**Validez:** ${parseInt(d.validez, 10)} días (hasta el ${venc}).`);
@@ -9635,6 +9642,11 @@ table.items tbody td { padding: 3.1mm 3mm; border-bottom: .3mm solid #e4e4ea; ve
 .specs { margin: 0; padding-left: 3.8mm; color: #3c3c46; line-height: 1.45; }
 .specs li { margin-bottom: .6mm; text-wrap: pretty; } .specs b { color: #15151b; }
 .price { font-weight: 800; font-size: 10.5pt; }
+.antes { font-size: 8.8pt; color: #8a8a96; text-decoration: line-through; text-decoration-color: #FF1830; text-decoration-thickness: .35mm; margin-bottom: .6mm; }
+.cu { font-size: 7.8pt; color: #75757f; margin-top: .7mm; }
+.antes-cu { color: #8a8a96; text-decoration: line-through; text-decoration-color: #FF1830; text-decoration-thickness: .3mm; }
+.dto { display: inline-block; margin-top: 1.2mm; font-family: 'JetBrains Mono', monospace; font-size: 7pt; font-weight: 500; letter-spacing: .06em; color: #fff; background: #FF1830; border-radius: 1mm; padding: .5mm 1.6mm; }
+.total-box .ahorro { font-family: 'JetBrains Mono', monospace; font-size: 7.8pt; color: #9a9aa8; margin-top: 1.2mm; } .total-box .ahorro b { color: #2AD8FF; font-weight: 500; }
 .totales { display: flex; justify-content: space-between; align-items: stretch; gap: 6mm; margin-top: 4mm; break-inside: avoid; }
 .letras { flex: 1; align-self: center; font-size: 8.8pt; color: #55555f; line-height: 1.5; text-wrap: pretty; } .letras b { color: #15151b; font-weight: 600; }
 .total-box { background: #0b0b10; color: #fff; padding: 4mm 6mm; border-radius: 2.5mm; min-width: 78mm; position: relative; overflow: hidden; }
@@ -9678,7 +9690,7 @@ figcaption .n { font-family: 'Archivo Black', 'Archivo', sans-serif; color: #FF1
       <table class="items"><thead><tr><th class="c" style="width:12mm">Ítem</th><th>Detalle</th><th class="c" style="width:14mm">Cant.</th><th class="r" style="width:32mm">Importe</th></tr></thead><tbody>${filas}</tbody></table>
       <div class="totales">
         <div class="letras">Son pesos <b>${escapeHtml(pfEnLetras(total))}</b> con 00/100, más IVA.</div>
-        <div class="total-box"><div class="lbl">Total del proyecto</div><div class="amt">${pfPesos(total)}<span class="iva">+ IVA</span></div></div>
+        <div class="total-box"><div class="lbl">Total del proyecto</div><div class="amt">${pfPesos(total)}<span class="iva">+ IVA</span></div>${ahorro > 0 ? `<div class="ahorro">Descuento aplicado <b>${pfPesos(ahorro)}</b></div>` : ''}</div>
       </div>
       <div class="cierre1">${conds.length ? `<div class="cond"><div class="label">Condiciones</div><div class="cond-grid">${conds.map(c => `<div class="cond-item">${pfMd(c)}</div>`).join('')}</div></div>` : ''}
       ${ftr}</div>
@@ -9713,6 +9725,20 @@ figcaption .n { font-family: 'Archivo Black', 'Archivo', sans-serif; color: #FF1
           }
         }
       });
+      // Hoja 1 apenas pasada (hasta 20 % más): se achica un poco (zoom, mínimo 82 %) para que entre entera
+      // en vez de dejar las condiciones o el pie solos en otra hoja. Alto útil A4 = 297 − 11 − 12 mm (@page).
+      // El encabezado NO se achica (queda igual al de la hoja 2): el zoom va al resto de la hoja.
+      try {
+        var s1 = document.querySelector('.sec'), util = (297 - 11 - 12) * 96 / 25.4, z = 1;
+        var hd = s1 && s1.querySelector('.hdr');
+        var resto = s1 ? Array.prototype.filter.call(s1.children, function(c){ return c !== hd; }) : [];
+        for (var k = 0; s1 && k < 4; k++) {
+          var h = s1.getBoundingClientRect().height, hh = hd ? hd.getBoundingClientRect().height : 0;
+          if (h <= util || (z === 1 && h > util * 1.2) || z <= 0.82) break;
+          z = Math.max(0.82, z * (util - hh) / (h - hh) * 0.99);
+          resto.forEach(function(c){ c.style.zoom = String(z); });
+        }
+      } catch (e) {}
       setTimeout(function(){ window.print(); }, 250);
     }
     var imgs = Array.prototype.slice.call(document.images);
@@ -9759,6 +9785,7 @@ function renderProformaModal() {
         <div style="width:110px"><label style="${lbl}">Etiqueta</label><input data-pfi="chip" value="${escapeHtml(it.chip || '')}" placeholder="Exterior" style="${inp}"></div>
         <div style="width:62px"><label style="${lbl}">Cant.</label><input data-pfi="cantidad" inputmode="numeric" value="${Number(it.cantidad) || 0}" style="${inp}"></div>
         <div style="width:130px"><label style="${lbl}">Precio unit.</label><input data-pfi="precio" inputmode="numeric" value="${(Number(it.precio) || 0) ? String(Math.round(it.precio)).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : ''}" placeholder="0" style="${inp}"></div>
+        <div style="width:120px"><label style="${lbl}" title="Precio unitario anterior: si es más alto que el precio, el PDF lo muestra tachado con el % de descuento">Antes (tachado)</label><input data-pfi="precioAntes" inputmode="numeric" value="${(Number(it.precioAntes) || 0) ? String(Math.round(it.precioAntes)).replace(/\B(?=(\d{3})+(?!\d))/g, '.') : ''}" placeholder="opcional" style="${inp}"></div>
         <div style="display:flex;gap:4px">
           <button type="button" class="btn btn-ghost btn-icon" data-pf-act="subir" data-uid="${it.uid}" title="Subir" ${i === 0 ? 'disabled' : ''}>↑</button>
           <button type="button" class="btn btn-ghost btn-icon" data-pf-act="bajar" data-uid="${it.uid}" title="Bajar" ${i === d.items.length - 1 ? 'disabled' : ''}>↓</button>
@@ -9841,13 +9868,26 @@ function bindProformaModal() {
     if (el.hasAttribute('data-pfi')) { const box = el.closest('[data-pf-item]'); return box ? `[data-pf-item="${box.getAttribute('data-pf-item')}"] [data-pfi="${el.getAttribute('data-pfi')}"]` : null; }
     return null;
   };
-  bk.addEventListener('focusin', (e) => { const sel = selDe(e.target); pf._focus = sel ? { sel } : null; });
+  // focusin del MISMO campo (el que dispara el el.focus() de la restauración de abajo) no pisa el cursor guardado.
+  bk.addEventListener('focusin', (e) => { const sel = selDe(e.target); pf._focus = sel ? (pf._focus && pf._focus.sel === sel ? pf._focus : { sel }) : null; });
   // El cursor se guarda en cada tecla/clic/cambio (si un render borra el campo, Chrome no avisa con focusout).
-  const guardarCursor = (e) => { if (pf._focus && selDe(e.target) === pf._focus.sel) { try { pf._focus.a = e.target.selectionStart; pf._focus.b = e.target.selectionEnd; } catch (_) {} } };
+  // También cuántos dígitos tenía a la izquierda: los montos vuelven del render con puntos de miles ("1234" → "1.234").
+  const digitos = (s) => (String(s).match(/\d/g) || []).length;
+  const guardarCursor = (e) => { if (pf._focus && selDe(e.target) === pf._focus.sel) { try { const v = e.target.value, a = e.target.selectionStart, b = e.target.selectionEnd; Object.assign(pf._focus, { a, b, v, da: digitos(v.slice(0, a)), db: digitos(v.slice(0, b)) }); } catch (_) {} } };
   ['keyup', 'mouseup', 'input', 'focusout'].forEach(ev => bk.addEventListener(ev, guardarCursor));
   if (pf._focus && (!document.activeElement || document.activeElement === document.body)) {
-    const el = bk.querySelector(pf._focus.sel);
-    if (el) { try { el.focus({ preventScroll: true }); if (pf._focus.a != null) el.setSelectionRange(pf._focus.a, pf._focus.b); } catch (_) {} }
+    const f = pf._focus, el = bk.querySelector(f.sel);
+    // Posición en el valor nuevo que deja n dígitos a la izquierda.
+    const posDig = (s, n) => { if (n <= 0) return 0; let c = 0; for (let i = 0; i < s.length; i++) { if (/\d/.test(s[i]) && ++c === n) return i + 1; } return s.length; };
+    if (el) {
+      try {
+        el.focus({ preventScroll: true }); pf._focus = f;
+        if (f.a != null) {
+          if (el.value === f.v) el.setSelectionRange(f.a, f.b);
+          else el.setSelectionRange(posDig(el.value, f.da), posDig(el.value, f.db));
+        }
+      } catch (_) {}
+    }
   }
   let qTimer = null;
   bk.oninput = (e) => {
@@ -9862,7 +9902,7 @@ function bindProformaModal() {
       const it = itemDe(el); if (!it) return;
       const k = el.getAttribute('data-pfi');
       if (k === 'tipo') return; // lo maneja onchange (necesita el tipo ANTERIOR para reemplazar el texto de ejemplo)
-      if (k === 'cantidad' || k === 'precio') { it[k] = pfNum(el.value); pintarTotal(); }
+      if (k === 'cantidad' || k === 'precio' || k === 'precioAntes') { it[k] = pfNum(el.value); pintarTotal(); }
       else it[k] = el.value;
     }
   };
