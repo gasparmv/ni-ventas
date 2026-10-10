@@ -40,6 +40,10 @@ function doPost(e) {
     if (data.action === 'set_ad_bulk') {
       return setAdBulk(data);
     }
+    // Vendedor de pedidos de neón → 2026 v4 › Pedidos_Directo col C (ver directoVendedor, 10-oct).
+    if (data.action === 'directo_vendedor') {
+      return directoVendedor(data);
+    }
 
     const ss = SpreadsheetApp.openById(SHEET_ID);
 
@@ -335,6 +339,8 @@ function doGet(e) {
   // GET ?action=pedido_ping → verificar (sin escribir) que esta versión nueva
   // del Apps Script (con el espejo de pedidos) está deployada.
   if (action === 'pedido_ping') return jsonOut({ ok: true, pong: true });
+  // El CRM pregunta esto ANTES de usar directo_vendedor (una acción POST desconocida agrega un presupuesto).
+  if (action === 'directo_ping') return jsonOut({ ok: true, directo: true });
   // GET ?action=rows&sheet=2026 → devuelve las filas crudas (sin coerción de tipo
   // que hace gviz, que rompe los teléfonos con "+" o espacios).
   if (action === 'rows') {
@@ -359,4 +365,48 @@ function doGet(e) {
   }
   return ContentService.createTextOutput(JSON.stringify({ status: 'ok', info: 'NI Cotizador Writer. POST to add rows. GET ?action=rows&sheet=NAME to fetch.' }))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ── VENDEDOR de los pedidos de NEÓN → 2026 v4 › Pedidos_Directo, col C (10-oct) ──────────
+// Pedidos_Directo trae cada columna de la hoja "2026" de Ventas por IMPORTRANGE, salvo la C
+// (VENDEDOR), que es un valor común (de ahí salen las comisiones). El CRM manda los vendedores
+// y esto los escribe SOLO si la celda está vacía o todavía tiene lo que había puesto el CRM
+// (prev): nunca pisa lo que cargaste a mano. Antes de escribir verifica N° + nombre del pedido.
+function directoVendedor(data) {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sh = SpreadsheetApp.openById('1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE').getSheetByName('Pedidos_Directo');
+    if (!sh) return jsonOut({ error: 'hoja Pedidos_Directo no encontrada' });
+    // Fila donde arranca el IMPORTRANGE de "2026!b2:b" (col A) → corrimiento entre las dos hojas.
+    var fa = sh.getRange(1, 1, 300, 1).getFormulas(), base = 0;
+    for (var i = 0; i < fa.length; i++) { if (/2026!b2:b/i.test(fa[i][0])) { base = i + 1; break; } }
+    if (!base) return jsonOut({ error: 'no encontré el IMPORTRANGE de 2026!B2:B en la columna A' });
+    var off = base - 2, last = sh.getLastRow();
+    var vals = sh.getRange(1, 1, last, 4).getValues();   // A..D: ID, Fecha, VENDEDOR, Nombre
+    var nz = function (s) { return String(s == null ? '' : s).normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase(); };
+    var coincide = function (r, it) { return r >= base && r <= last && nz(vals[r - 1][0]) === nz(it.numero) && nz(vals[r - 1][3]) === nz(it.cartel); };
+    var items = data.items || [], out = [];
+    for (var k = 0; k < items.length; k++) {
+      var it = items[k], r = (parseInt(it.row, 10) || 0) + off;
+      if (!coincide(r, it)) {   // la fila que tiene el CRM quedó vieja: buscar por N° + nombre (solo si hay UNA)
+        var hits = [];
+        for (var j = base; j <= last; j++) { if (coincide(j, it)) hits.push(j); }
+        if (hits.length !== 1) { out.push({ id: it.id, error: hits.length ? 'hay ' + hits.length + ' filas con ese N° y nombre' : 'no está en Pedidos_Directo' }); continue; }
+        r = hits[0];
+      }
+      var cur = nz(vals[r - 1][2]), vend = nz(it.vendedor), prev = nz(it.prev);
+      if (!vend) { out.push({ id: it.id, error: 'sin vendedor' }); continue; }
+      if (cur === vend) { out.push({ id: it.id, ok: true, row: r, igual: true }); continue; }
+      if (cur && cur !== prev) { out.push({ id: it.id, ok: true, row: r, manual: cur }); continue; }
+      sh.getRange(r, 3).setValue(vend);
+      vals[r - 1][2] = vend;
+      out.push({ id: it.id, ok: true, row: r, escrito: vend });
+    }
+    return jsonOut({ ok: true, base: base, items: out });
+  } catch (err) {
+    return jsonOut({ error: err.message });
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
 }

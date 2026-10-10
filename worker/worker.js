@@ -1172,6 +1172,92 @@ async function pushPedidoCorporeoToV4(env, row) {
     return { error: (j && j.error) ? String(j.error) : 'el Apps Script no devolvió row' };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
+// ===== Vendedor de los pedidos de NEÓN → 2026 v4 › Pedidos_Directo, col C (VENDEDOR) =====
+// Pedido de Gaspar (10/10): "que los pedidos de neón se carguen con vendedor también, igual que en
+// corpóreos, de septiembre en adelante". Pedidos_Directo trae cada columna de la hoja "2026" de Ventas
+// por IMPORTRANGE salvo la C (VENDEDOR), que es un valor común y de ahí salen las COMISIONES (col W →
+// PnL/COGS): por eso NO se convierte en fórmula (un #REF! las dejaría en 0 sin aviso). El Apps Script
+// (acción directo_vendedor) escribe C SOLO si está vacía o todavía tiene lo que había puesto el CRM
+// (prev): nunca pisa lo que Gaspar cargó a mano; verifica N° + nombre antes de escribir.
+// Vendedor = quien VENDIÓ (comercial_id; si falta, quien lo cargó). kv 'pedido_vend:<id>' = último
+// vendedor aplicado ('!'+vendedor si el Apps Script no lo pudo ubicar). Solo desde VEND_NEON_DESDE.
+const VEND_NEON_DESDE = '2026-09-01';
+function pedidoVendedorNeon(row) {
+  const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+  const k = norm(row.comercial_id) || norm(row.cargado_por);
+  return k ? (PEDIDO_VEND_MAP[k] || k) : '';
+}
+// ¿El Apps Script vivo ya tiene directo_vendedor? Se pregunta por GET (?action=directo_ping): una acción
+// POST que no conoce cae en el alta de PRESUPUESTOS del cotizador y le agrega una fila basura. El sí vale
+// 6 h; el no se vuelve a preguntar cada 15 min (se prende solo cuando Gaspar redeploya el Apps Script).
+async function directoVendDisponible(env) {
+  if (!env.APPS_SCRIPT_URL) return false;
+  const now = Date.now();
+  let st = null; try { st = JSON.parse((await kvGet(env, 'directo_vend_ping', null)) || 'null'); } catch (_) {}
+  if (st && now - (Number(st.at) || 0) < (st.ok ? 6 * 3600e3 : 15 * 60e3)) return !!st.ok;
+  let ok = false;
+  try {
+    const u = env.APPS_SCRIPT_URL + (env.APPS_SCRIPT_URL.indexOf('?') >= 0 ? '&' : '?') + 'action=directo_ping';
+    const r = await fetch(u, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
+    const j = await r.json().catch(() => null);
+    ok = !!(j && j.ok && j.directo === true);
+  } catch (_) {}
+  await kvSet(env, 'directo_vend_ping', JSON.stringify({ ok, at: now }));
+  return ok;
+}
+// items: [{id, row (fila en "2026"), numero, cartel, vend, prev}] → un solo POST al Apps Script.
+async function enviarVendedoresNeon(env, items) {
+  if (!items.length) return { sent: 0 };
+  if (!(await directoVendDisponible(env))) return { skipped: 'el Apps Script todavía no tiene directo_vendedor' };
+  const j = await appsScriptPost(env, { action: 'directo_vendedor', items: items.map(x => ({ id: x.id, row: x.row, numero: x.numero, cartel: x.cartel, vendedor: x.vend, prev: x.prev || '' })) });
+  if (!(j && j.ok && Array.isArray(j.items))) {
+    // Respondió pero sin items → no es la acción nueva (¿redeploy de una versión vieja?): frenar hasta el próximo ping.
+    if (j && j.ok) await kvSet(env, 'directo_vend_ping', JSON.stringify({ ok: false, at: Date.now() }));
+    return { error: (j && j.error) || 'respuesta inesperada del Apps Script' };
+  }
+  const porId = {}; for (const r of j.items) porId[r.id] = r;
+  const res = { sent: items.length, escritos: 0, iguales: 0, manuales: [], errores: [] };
+  for (const x of items) {
+    const r = porId[x.id];
+    if (r && r.ok) {
+      await kvSet(env, 'pedido_vend:' + x.id, x.vend);
+      if (r.escrito) res.escritos++; else if (r.igual) res.iguales++; else if (r.manual) res.manuales.push({ id: x.id, cartel: x.cartel, crm: x.vend, planilla: r.manual });
+    } else {
+      // No se ubicó la fila (o ambigua): no reintentar en cada barrido; se reintenta si el pedido se re-espeja.
+      await kvSet(env, 'pedido_vend:' + x.id, '!' + x.vend);
+      res.errores.push({ id: x.id, cartel: x.cartel, error: (r && r.error) || 'sin respuesta' });
+    }
+  }
+  return res;
+}
+// Tras un push exitoso de un pedido de neón (sheetRow = fila REAL que devolvió el upsert).
+async function syncVendedorNeon(env, row, sheetRow) {
+  if (!sheetRow || sheetRow < 2 || String(row.fecha || '') < VEND_NEON_DESDE) return { skipped: true };
+  const vend = pedidoVendedorNeon(row);
+  if (!vend) return { skipped: true };
+  const kv = await kvGet(env, 'pedido_vend:' + row.id, null);
+  if (kv === vend) return { skipped: true };
+  const prev = kv && kv.charAt(0) !== '!' ? kv : '';
+  return enviarVendedoresNeon(env, [{ id: row.id, row: sheetRow, numero: row.numero, cartel: row.cartel, vend, prev }]);
+}
+// Barrido (cada ~15 min + a mano): pedidos de neón desde septiembre que todavía no pasaron (incluye el
+// relleno inicial y los que fallaron por un Apps Script colgado). Lotes de 60.
+async function barrerVendedoresNeon(env) {
+  if (!env.APPS_SCRIPT_URL) return { skipped: 'no url' };
+  try {
+    const rs = await env.DB.prepare(
+      "SELECT p.id, p.numero, p.cartel, p.sheet_row, p.comercial_id, p.cargado_por FROM pedidos p LEFT JOIN kv_cache k ON k.k = 'pedido_vend:' || p.id " +
+      "WHERE p.es_corporeo = 0 AND p.fecha >= ? AND p.sheet_row > 1 AND p.mirror_dirty = 0 AND k.k IS NULL ORDER BY p.id LIMIT 60"
+    ).bind(VEND_NEON_DESDE).all();
+    const items = [];
+    for (const p of (rs.results || [])) {
+      const vend = pedidoVendedorNeon(p);
+      if (vend) items.push({ id: p.id, row: p.sheet_row, numero: p.numero, cartel: p.cartel, vend, prev: '' });
+      else await kvSet(env, 'pedido_vend:' + p.id, '!');   // sin vendedor en el CRM: que no tape el lote
+    }
+    return await enviarVendedoresNeon(env, items);
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
 // Cron: replica al Excel los pedidos marcados mirror_dirty=1 (creados/editados en
 // el CRM). GATEADO por el flag kv 'pedidos_mirror_on' (se prende DESPUÉS de
 // deployar el Apps Script, para no pushear contra el viejo). El clear es condicional
@@ -1212,6 +1298,8 @@ async function processPedidosMirror(env) {
         // Apagar dirty SOLO si no se re-editó desde el claim; si se editó, queda dirty=1 para
         // re-espejar la edición (el upsert por id la actualiza en su MISMA fila, sin duplicar).
         await env.DB.prepare('UPDATE pedidos SET mirror_dirty = 0 WHERE id = ? AND updated_at = ?').bind(row.id, row.updated_at).run();
+        // Neón: el vendedor va a la col V (VENDEDOR) de la hoja 2026 (fila REAL que devolvió el upsert).
+        if (!row.es_corporeo) { try { await syncVendedorNeon(env, row, res.row); } catch (_) {} }
         pushed++;
       } else {
         // Red de seguridad: tras 5 intentos deja de reintentar (dirty=0) y guarda el
@@ -18993,6 +19081,13 @@ const handler = {
       // POST /admin/pedidos/backfill-source → guarda el ad_id EXACTO (source_id/source_campaign) en
       // los pedidos ya trazados que no lo tienen. SEGURO: no cambia labels ni toca los marcados a
       // mano como orgánicos. Batched en un solo request. Solo Gaspar. Idempotente.
+      // POST /admin/pedidos/vendedor-sync → corre YA el barrido del vendedor de los pedidos de neón al 2026 v4
+      // (Pedidos_Directo col C) y devuelve el detalle (escritos / iguales / cargados a mano / errores). Solo Gaspar.
+      if (request.method === 'POST' && path === '/admin/pedidos/vendedor-sync') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        return json({ ok: true, ...(await barrerVendedoresNeon(env)) });
+      }
+
       if (request.method === 'POST' && path === '/admin/pedidos/backfill-source') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         await ensurePedidosSchema(env);
@@ -21118,6 +21213,8 @@ const handler = {
       try { await traceUntaggedPedidos(env); } catch (_) {}
       // Red de seguridad de la matriz de Emma: carteles de neón del CRM sin pieza de corte → se crea.
       try { await ensureCortePiezasNeonPendientes(env); } catch (_) {}
+      // Vendedor de los pedidos de neón → 2026 v4 (Pedidos_Directo col C): relleno + reintentos.
+      try { await barrerVendedoresNeon(env); } catch (_) {}
     })());
     // 1×/hora: sincronizar la columna Ad al Excel desde D1 (match por nombre, drift-proof, solo huecos).
     if (new Date().getUTCMinutes() < 5) ctx.waitUntil(syncAdColumnToExcel(env));
