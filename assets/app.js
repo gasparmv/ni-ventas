@@ -1542,6 +1542,7 @@ function afterUserSwitch() {
   STATE.ocPend = null;   // las OC sin pagar son por vendedor: no mostrarle al nuevo usuario la lista del anterior
   STATE.consultas = {};  // regulador de consultas: son del vendedor anterior
   repartoState = { data: null, loading: false, error: '', at: 0 };
+  chatState.vigilados = null;  // 🔔 clientes vigilados: solo los ve el admin
   render();
   try { fetchOcUrgenteStatus(); } catch (_) {}
   loadAll().catch(() => {});
@@ -1572,6 +1573,7 @@ async function logout() {
   }
   STATE.consultas = {};
   repartoState = { data: null, loading: false, error: '', at: 0 };
+  chatState.vigilados = null;
   saveToken(null);
   saveAdminToken(null);
   teardownPollWorker();
@@ -15246,6 +15248,11 @@ function renderChatConversation() {
           // _enPriv incluye los pin_privado de Bruno (aparecen en la privada sin salir de su bandeja).
           return `<button class="btn-label-toggle${_enPriv ? ' has-note' : ''}" id="btn-privado-toggle" title="${_enPriv ? 'Sacar de tu bandeja Privada (lo vuelve a ver el equipo)' : 'Mover a tu bandeja PRIVADA — solo lo ves vos'}" style="font-size:15px;line-height:1">${_enPriv ? '🔒✓' : '🔒'}</button>`;
         })() : ''}
+        ${getUserRole() === 'admin' ? (() => {
+          const _vig = !!(chatState.vigilados && chatState.vigilados.has(phone));
+          // 🔔 Cliente vigilado (solo Gaspar): cada mensaje que manda este cliente le llega a su WhatsApp personal.
+          return `<button class="btn-label-toggle${_vig ? ' has-note' : ''}" id="btn-vigilar-toggle" title="${_vig ? 'Dejar de reenviarte los mensajes de este cliente' : 'Reenviarte a tu WhatsApp personal cada mensaje de este cliente'}" style="font-size:15px;line-height:1">${_vig ? '🔔✓' : '🔔'}</button>`;
+        })() : ''}
         <button class="btn-label-toggle ${getContactNote(phone) ? 'has-note' : ''}" id="btn-note" title="${getContactNote(phone) ? 'Editar nota' : 'Agregar nota'}">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
         </button>
@@ -17109,6 +17116,11 @@ function bindChatConversation() {
   if (nadiaBtn) nadiaBtn.onclick = () => handleToggleNadia();
   const privadoBtn = document.getElementById('btn-privado-toggle');
   if (privadoBtn) privadoBtn.onclick = () => handleTogglePrivado();
+  const vigilarBtn = document.getElementById('btn-vigilar-toggle');
+  if (vigilarBtn) {
+    vigilarBtn.onclick = () => handleToggleVigilar();
+    if (chatState.vigilados == null) loadVigilados();
+  }
   // Scroll-to-bottom FAB
   if (msgEl && scrollBtn) {
     msgEl.addEventListener('scroll', () => {
@@ -17225,6 +17237,59 @@ async function handleToggleNadia() {
     loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
   } catch (e) {
     await showAlert('No se pudo asignar: ' + (e.message || e), { title: 'Error', variant: 'warn' });
+  }
+}
+
+// 🔔 Clientes vigilados (solo admin): se cargan una vez y se pintan en el botón del chat abierto.
+let _vigiladosLoading = false, _vigiladosIntento = 0;
+async function loadVigilados() {
+  // Si falla, no reintentar en cada render (el chat re-renderiza seguido): 1 intento por minuto.
+  if (_vigiladosLoading || getUserRole() !== 'admin' || Date.now() - _vigiladosIntento < 60000) return;
+  _vigiladosLoading = true; _vigiladosIntento = Date.now();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/vigilar', { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j.ok) {
+      chatState.vigilados = new Set((j.vigilados || []).map(v => v.phone));
+      pintarBotonVigilar();
+    }
+  } catch (_) {} finally { _vigiladosLoading = false; }
+}
+function pintarBotonVigilar() {
+  const b = document.getElementById('btn-vigilar-toggle');
+  if (!b) return;
+  const on = !!(chatState.vigilados && chatState.vigilados.has(chatState.selectedPhone));
+  b.classList.toggle('has-note', on);
+  b.textContent = on ? '🔔✓' : '🔔';
+  b.title = on ? 'Dejar de reenviarte los mensajes de este cliente' : 'Reenviarte a tu WhatsApp personal cada mensaje de este cliente';
+}
+async function handleToggleVigilar() {
+  const phone = chatState.selectedPhone;
+  if (!phone || getUserRole() !== 'admin') return;
+  const c = (chatState.contacts || []).find(x => x.phone === phone);
+  const nombre = (c && c.contact_name) || formatPhoneDisplay(phone);
+  const on = !!(chatState.vigilados && chatState.vigilados.has(phone));
+  const ok = await showConfirm(
+    on
+      ? `Dejar de reenviarte los mensajes de "${nombre}".`
+      : `Cada vez que "${nombre}" escriba, te llega el mensaje a tu WhatsApp personal (fotos y archivos incluidos).\n\nLo apagás tocando 🔔 de nuevo.`,
+    { title: on ? 'Dejar de vigilar' : 'Vigilar cliente', confirmLabel: on ? 'Apagar' : '🔔 Prender', cancelLabel: 'Cancelar' }
+  ).catch(() => false);
+  if (!ok) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/vigilar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ phone, on: !on, nombre: (c && c.contact_name) || '' })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    if (!chatState.vigilados) chatState.vigilados = new Set();
+    if (on) chatState.vigilados.delete(phone); else chatState.vigilados.add(phone);
+    pintarBotonVigilar();
+    toast(on ? 'Listo, ya no te reenvío sus mensajes' : '🔔 Te van a llegar sus mensajes a tu WhatsApp');
+  } catch (e) {
+    await showAlert('No se pudo cambiar: ' + (e.message || e), { title: 'Error', variant: 'warn' });
   }
 }
 

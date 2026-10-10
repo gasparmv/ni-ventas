@@ -2413,6 +2413,71 @@ async function precotizNotifyGaspar(env, msg) {
   try { await waSendText(env, PRECOTIZ_GASPAR_PHONE, msg); } catch (_) {}
 }
 
+// ===== Clientes VIGILADOS: cada mensaje que mandan le llega a Gaspar a su WhatsApp personal =====
+// Pedido de Gaspar (09/10, cliente "Viviendo" / El Norte): "cada vez que responda mandame el mensaje
+// a mi número personal para estar bien pendiente". kv 'vigilar:<phone>' = JSON {nombre, desde, by};
+// se prende/apaga con el botón 🔔 del chat (admin) → /admin/vigilar. Con la ventana de 24 h de Gaspar
+// abierta (él le escribió al número del negocio hace < 23 h): fotos y archivos se reenvían tal cual
+// con el aviso de pie, y texto/audio (con su transcripción) van como texto. Con la ventana cerrada el
+// texto libre "sale" pero Meta lo rebota en diferido (131047), así que va DIRECTO a la plantilla de
+// utilidad 'aviso_cliente_vigilado' ({{1}} cliente, {{2}} mensaje). Idempotente por wamid: el claim
+// en kv_cache es atómico (Meta reintenta el webhook) y se suelta si no salió nada.
+const VIGILAR_DESTINO = '5491155604999';   // número personal de Gaspar
+async function avisarClienteVigilado(env, m) {
+  const phone = String(m.phone || '');
+  if (!phone || phone === VIGILAR_DESTINO || !env.DB) return;
+  let ck = null;
+  try {
+    const raw = await kvGet(env, 'vigilar:' + phone, null);
+    if (!raw) return;
+    let cfg = {}; try { cfg = JSON.parse(raw) || {}; } catch (_) {}
+    if (m.wamid) {
+      ck = 'vigilar_av:' + m.wamid;
+      const claim = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?) ON CONFLICT(k) DO NOTHING").bind(ck, new Date().toISOString()).run();
+      if (!claim?.meta?.changes) return;   // ya avisado (reintento de Meta)
+    }
+    const nombre = String(cfg.nombre || m.senderName || phone).trim();
+    const quien = `${nombre} (…${phone.slice(-4)})`;
+    const etiqueta = { image: '📷 Foto', video: '🎥 Video', audio: '🎤 Audio', document: '📎 Archivo', sticker: 'Sticker', location: '📍 Ubicación', contacts: '👤 Contacto' }[m.msgType] || '';
+    const texto = String(m.body || '').trim();
+    const head = `🔔 ${quien} te escribió:`;
+    let ventana = false;
+    try {
+      const since = new Date(Date.now() - 23 * 60 * 60 * 1000).toISOString();
+      ventana = !!(await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1").bind(VIGILAR_DESTINO, since).first());
+    } catch (_) {}
+    let res = null;
+    if (ventana) {
+      // Foto o archivo: se reenvía el archivo con el aviso de pie (sin la descripción de la IA, que sobra).
+      if ((m.msgType === 'image' || m.msgType === 'document') && m.r2Key && env.MEDIA) {
+        try {
+          const obj = await env.MEDIA.get(m.r2Key);
+          if (obj) {
+            const buf = await obj.arrayBuffer();
+            const mime = obj.httpMetadata?.contentType || (m.msgType === 'image' ? 'image/jpeg' : 'application/pdf');
+            const fileName = (String(m.r2Key).split('/').pop() || (m.msgType === 'image' ? 'foto.jpg' : 'archivo'));
+            const mediaId = await uploadMediaToMeta(env, buf, mime, fileName);
+            const pie = texto.replace(/(?:^|\s*\|\s*)\[imagen\][\s\S]*$/, '').trim();
+            const cap = (head + (pie ? '\n' + pie : '')).slice(0, 1000);
+            if (mediaId) res = m.msgType === 'image' ? await waSendImage(env, VIGILAR_DESTINO, mediaId, cap) : await waSendDocument(env, VIGILAR_DESTINO, mediaId, fileName, cap);
+          }
+        } catch (_) {}
+      }
+      if (!res || !res.ok) {
+        const cuerpo = texto || (etiqueta ? '[' + etiqueta + ']' : '[mensaje]');
+        res = await waSendText(env, VIGILAR_DESTINO, (head + '\n' + cuerpo).slice(0, 4000));
+      }
+    }
+    if (!res || !res.ok) {
+      const linea = ((etiqueta && m.msgType !== 'audio' ? etiqueta + ' ' : '') + (texto || (etiqueta ? '' : 'mensaje'))).replace(/\s+/g, ' ').trim().slice(0, 900) || 'mensaje';
+      try { res = await waSendTemplate(env, VIGILAR_DESTINO, 'aviso_cliente_vigilado', 'es_AR', [quien, linea]); } catch (_) {}
+    }
+    if ((!res || !res.ok) && ck) { try { await env.DB.prepare("DELETE FROM kv_cache WHERE k = ?").bind(ck).run(); } catch (_) {} }
+  } catch (_) {
+    if (ck) { try { await env.DB.prepare("DELETE FROM kv_cache WHERE k = ?").bind(ck).run(); } catch (_) {} }
+  }
+}
+
 // ===== Registro único de vendedores comerciales SECUNDARIOS (molde Facu) =====
 // Fuente de verdad para sumar un comercial nuevo. Cada entrada: slug (=assigned_to / comercial_id),
 // nombre para el saludo al cliente, y las kv de su reparto (cuota diaria / probabilidad / teléfono de
@@ -13408,6 +13473,12 @@ const handler = {
                 if (direction === 'inbound') {
                   try { await maybeSendMinicursoGift(env, phone, msgBody, ts); } catch (_) {}
                 }
+                // ===== Cliente vigilado por Gaspar (botón 🔔): cada mensaje le llega a su personal =====
+                // Las reacciones (👍) no cuentan como respuesta. En segundo plano para no frenar el webhook.
+                if (direction === 'inbound' && msgType !== 'status' && msgType !== 'reaction') {
+                  const _cv = avisarClienteVigilado(env, { wamid, phone, senderName, msgType, body: msgBody, r2Key, ts });
+                  if (typeof ctx !== 'undefined' && ctx && ctx.waitUntil) ctx.waitUntil(_cv); else await _cv;
+                }
                 // ===== Lanzamiento junio: capturar comprobantes de pago =====
                 // En la ventana (11-15/06), todo inbound con imagen/PDF se OCRea,
                 // se clasifica, se etiqueta y se respalda en D1 (NO se responde nada).
@@ -14573,6 +14644,35 @@ const handler = {
             } catch (e) { if (!/UNIQUE/i.test(String(e && e.message))) return json({ error: String((e && e.message) || e) }, 500); }
           }
           return json({ error: 'no se pudo numerar la proforma, probá de nuevo' }, 500);
+        }
+        return json({ error: 'método no soportado' }, 405);
+      }
+
+      // ----- Clientes vigilados (botón 🔔 del chat, solo admin) -----
+      // GET → {ok, vigilados:[{phone, nombre, desde, by}]}. POST {phone, on, nombre?}: on=true prende el
+      // reenvío de cada mensaje del cliente al WhatsApp personal de Gaspar (avisarClienteVigilado), on=false lo apaga.
+      if (path === '/admin/vigilar') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'solo admin' }, 403);
+        if (request.method === 'GET') {
+          const rs = await env.DB.prepare("SELECT k, v FROM kv_cache WHERE k LIKE 'vigilar:%'").all();
+          const vigilados = (rs.results || []).map(r => { let c = {}; try { c = JSON.parse(r.v) || {}; } catch (_) {} return { phone: String(r.k).slice(8), nombre: c.nombre || '', desde: c.desde || '', by: c.by || '' }; });
+          return json({ ok: true, vigilados });
+        }
+        if (request.method === 'POST') {
+          const body = await request.json().catch(() => ({}));
+          const phone = String(body.phone || '').replace(/\D/g, '');
+          if (phone.length < 8 || phone.length > 15) return json({ error: 'teléfono inválido' }, 400);
+          if (phone === VIGILAR_DESTINO) return json({ error: 'ese es tu número personal' }, 400);
+          if (!body.on) {
+            await env.DB.prepare("DELETE FROM kv_cache WHERE k = ?").bind('vigilar:' + phone).run();
+            return json({ ok: true, on: false });
+          }
+          let nombre = String(body.nombre || '').trim().slice(0, 80);
+          if (!nombre) {
+            try { const r = await env.DB.prepare("SELECT sender_name FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND sender_name IS NOT NULL AND sender_name != '' ORDER BY ts DESC LIMIT 1").bind(phone).first(); nombre = String(r?.sender_name || '').trim().slice(0, 80); } catch (_) {}
+          }
+          await kvSet(env, 'vigilar:' + phone, JSON.stringify({ nombre: nombre || phone, desde: new Date().toISOString(), by: String(session.user || '') }));
+          return json({ ok: true, on: true, nombre: nombre || phone });
         }
         return json({ error: 'método no soportado' }, 405);
       }
