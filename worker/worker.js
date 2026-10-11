@@ -20041,7 +20041,7 @@ const handler = {
         const insRow = env.DB.prepare('INSERT INTO corte_paquetes (tanda_id, cliente_key) VALUES (?, ?) ON CONFLICT(tanda_id, cliente_key) DO NOTHING').bind(tandaId, key);
         if (body.cargado === true && !P.despachado) {
           if (P.bloqueo) return json({ error: 'no_despachar', motivo: P.bloqueo }, 409);
-          if (!P.ids.length) return json({ error: 'no_despachar', motivo: 'No hay piezas para cargar' }, 409);
+          if (!P.ids.length) return json({ error: 'no_despachar', motivo: 'No hay piezas para enviar' }, 409);
           if (!P.listo) return json({ error: 'no_despachar', motivo: 'Falta pagar el envío' }, 409); // defensivo (listo = sin bloqueo + piezas)
           const sinEmbalar = I.pend.filter(p => p.estado === 'cortado');
           const ph = P.ids.map(() => '?').join(',');
@@ -20058,7 +20058,7 @@ const handler = {
           let res;
           try { res = await env.DB.batch(st); } catch (_) { return _logiErrDb(); }
           const despachadas = (res && res[iUpd] && res[iUpd].meta && res[iUpd].meta.changes) || 0;
-          if (sinEmbalar.length && despachadas) { try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ' se cargó con ' + sinEmbalar.length + ' pieza(s) sin marcar embaladas (' + sinEmbalar.map(p => p.diseno_nombre || p.producto || 'pieza').join(', ').slice(0, 200) + '). Avisale a Neyen.'); } catch (_) {} }
+          if (sinEmbalar.length && despachadas) { try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ' se envió con ' + sinEmbalar.length + ' pieza(s) sin marcar embaladas (' + sinEmbalar.map(p => p.diseno_nombre || p.producto || 'pieza').join(', ').slice(0, 200) + '). Avisale a Neyen.'); } catch (_) {} }
         } else if (body.cargado === false) {
           const dAt = I.mkCur.despachado_at || '';
           if (dAt) {
@@ -20113,8 +20113,8 @@ const handler = {
         const cargados = paqs.filter(p => p.despachado);
         const quedan = paqs.filter(p => !p.despachado && p.ids.length);
         const operador = logiOperador(body, session);
-        let texto = 'Logística · Camión martes ' + corteMartesTxt(tanda.fecha_corte) + ': cargados ' + cargados.length
-          + (quedan.length ? ' · quedan en el taller: ' + quedan.map(p => cortePad2(p.numero) + ' ' + String(p.cliente || '').trim() + ' (' + (p.bloqueo || 'no se cargó') + ')').join(', ') : ' · no quedó nada en el taller');
+        let texto = 'Logística · Envío del martes ' + corteMartesTxt(tanda.fecha_corte) + ': enviados ' + cargados.length
+          + (quedan.length ? ' · quedan en el taller: ' + quedan.map(p => cortePad2(p.numero) + ' ' + String(p.cliente || '').trim() + ' (' + (p.bloqueo || 'no se envió') + ')').join(', ') : ' · no quedó nada en el taller');
         if (texto.length > 1400) texto = texto.slice(0, 1390) + '…';
         if (operador) texto += ' · ' + operador;
         try { await precotizNotifyGaspar(env, texto); } catch (_) {}

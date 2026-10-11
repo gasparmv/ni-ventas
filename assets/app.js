@@ -4474,7 +4474,7 @@ function corteEtiquetaAttrs(g, key) {
   const t = Math.max(0, ...(g.items || []).map(p => +p.tanda_id || 0));
   return `data-corte-etiqueta-k="${escapeHtml(key)}" data-corte-etiqueta-t="${corteGrupoEnvioPend(g) ? '' : t}" data-corte-etiqueta-t2="${t}"`;
 }
-// Línea chica en la tarjeta de envío de Neyen: "Logística: escrito 9:04 · envío pagado · cargado".
+// Línea chica en la tarjeta de envío de Neyen: "Logística: escrito 9:04 · envío pagado · enviado".
 function corteLogiLineaHtml(row) {
   if (!row) return '';
   const ce = row.contacto_estado || '', partes = [];
@@ -4482,7 +4482,7 @@ function corteLogiLineaHtml(row) {
   else if (ce === 'no_contesta') partes.push('no contesta');
   else if (!row.envio_pagado) partes.push('sin escribir');
   if (row.envio_pagado) partes.push('envío pagado');
-  if (row.cargado || row.despachado_at) partes.push('cargado');
+  if (row.cargado || row.despachado_at) partes.push('enviado');
   return `<div style="font-size:12px;color:var(--fg-mute);margin-top:8px">Logística: ${escapeHtml(partes.join(' · '))}</div>`;
 }
 // ===== Etiquetas de paquetes (térmica 100×150 mm, solo negro · A4 apaisada de respaldo, 2 por hoja) =====
@@ -4673,7 +4673,7 @@ async function cortePaqGuardar(key, tandaId, btn) {
 // chequear pedido y envío pagados → 409 con el motivo). Contrato: GET /admin/logistica/paquetes y
 // POST /admin/logistica/{contacto, marcar, resumen}. Logística NO ve montos.
 const LOGI_OP_KEY = 'niventas.logiOperador', LOGI_MODO_KEY = 'niventas.logiModo';
-const LOGI_ACC_TXT = { escrito: 'Escribió por WhatsApp', no_contesta: 'No contesta', envio_pagado: 'Envío pagado', deshacer_envio: 'Deshizo envío pagado', avisar: 'Aviso a Neon', nota: 'Nota', cargado: 'Cargado en el camión', descargado: 'Sacado de cargados', resumen: 'Terminó de cargar' };
+const LOGI_ACC_TXT = { escrito: 'Escribió por WhatsApp', no_contesta: 'No contesta', envio_pagado: 'Envío pagado', deshacer_envio: 'Deshizo envío pagado', avisar: 'Aviso a Neon', nota: 'Nota', cargado: 'Enviado', descargado: 'Sacado de enviados', resumen: 'Terminó de enviar' };
 function logiLsGet(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
 function logiLsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (_) {} }
 // Operador: se pide una vez por dispositivo (localStorage; si el navegador no deja, queda en memoria). El admin no lo necesita.
@@ -4779,7 +4779,7 @@ function logiHaceTxt() { const a = STATE.logiLoadedAt; if (!a) return ''; const 
 function logiSig(L) { if (!L || L.error) return ''; try { return JSON.stringify([L.tanda, L.tandas, L.retiran, L.ltv_error, L.paquetes]); } catch (_) { return String(Date.now()); } }
 function logiTipeando() { const ae = document.activeElement; return !!(ae && ae.matches && ae.matches('[data-logi-nota], #logi-caja, #logi-op')); }
 function logiErrTxt(j, status) {
-  const cod = { espera: 'Ya avisaste hace un momento', no_despachar: 'No se puede cargar', impago: 'Falta el pago: avisale a Gaspar', red: 'Error de red' };
+  const cod = { espera: 'Ya avisaste hace un momento', no_despachar: 'No se puede enviar', impago: 'Falta el pago: avisale a Gaspar', red: 'Error de red' };
   return (j && j.motivo) || (j && cod[j.error]) || (j && j.error) || (status ? 'No se pudo guardar (' + status + ')' : 'Error de red');
 }
 // Re-render que conserva el scroll y el foco/cursor (nota, N° de caja). Lo desplegado y los borradores viven en STATE.
@@ -4954,17 +4954,17 @@ function logiMartesHtml(paq) {
     </div>`;
   return `
     <div style="margin:0 0 12px">
-      <div style="font-size:22px;font-weight:900;margin-bottom:6px">Cargados ${nCarg} de ${para.length}</div>
+      <div style="font-size:22px;font-weight:900;margin-bottom:6px">Enviados ${nCarg} de ${para.length}</div>
       <div style="height:12px;border-radius:9px;background:var(--border);overflow:hidden"><div style="height:100%;width:${pct}%;background:#22c55e"></div></div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
       <input id="logi-caja" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="N° de caja" value="${escapeHtml(caja)}" style="flex:1;min-width:0;max-width:240px;background:var(--ink-100);border:1px solid var(--border);border-radius:10px;padding:12px 14px;color:var(--fg);font-size:18px;font-weight:700">
       <button class="btn btn-ghost" data-logi-caja-x style="padding:12px 14px;font-size:14px${caja ? '' : ';visibility:hidden'}">Ver todas</button>
     </div>
-    <h2 style="font-size:15px;margin:0 0 8px">Para cargar <span style="color:var(--fg-mute);font-weight:400">${para.length}</span></h2>
+    <h2 style="font-size:15px;margin:0 0 8px">Para enviar <span style="color:var(--fg-mute);font-weight:400">${para.length}</span></h2>
     ${para.length ? `<div style="display:flex;flex-direction:column;gap:8px">${para.map(fila).join('')}</div>` : '<div style="padding:18px;color:var(--fg-mute);border:1px dashed var(--border);border-radius:12px;text-align:center">Todavía no hay paquetes listos (necesitan el pedido y el envío pagados)</div>'}
     ${quedan.length ? `<h2 style="font-size:15px;margin:22px 0 8px">Quedan en el taller <span style="color:var(--fg-mute);font-weight:400">${quedan.length}</span></h2><div class="logi-lista">${quedan.map(filaQueda).join('')}</div>` : ''}
-    <button class="btn btn-cyan" data-logi-fin style="width:100%;justify-content:center;margin-top:22px;padding:16px;font-size:17px;font-weight:800">Terminé de cargar</button>`;
+    <button class="btn btn-cyan" data-logi-fin style="width:100%;justify-content:center;margin-top:22px;padding:16px;font-size:17px;font-weight:800">Terminé de enviar</button>`;
 }
 function renderLogistica() {
   const L = STATE.logi;
@@ -5020,7 +5020,7 @@ function renderLogistica() {
       <button class="btn btn-ghost" data-logi-print style="font-size:13px;padding:7px 12px">Imprimir</button>
       ${isAdmin() ? `<button class="btn btn-ghost" data-logi-password style="font-size:13px;padding:7px 12px" title="Crear o cambiar la contraseña del usuario 'logistica'">Contraseña de logística</button>` : ''}
     </div>
-    <div style="display:flex;border:1px solid var(--border);border-radius:12px;overflow:hidden;margin:12px 0 14px">${sw('lunes', 'Lunes · Contactar')}${sw('martes', 'Martes · Cargar camión')}</div>
+    <div style="display:flex;border:1px solid var(--border);border-radius:12px;overflow:hidden;margin:12px 0 14px">${sw('lunes', 'Lunes · Contactar')}${sw('martes', 'Martes · Enviar')}</div>
     ${L.ltv_error ? `<div style="color:#f59e0b;font-size:13px;margin-bottom:10px">${escapeHtml(L.ltv_error)}</div>` : ''}
     ${!t ? '<div style="padding:22px;color:var(--fg-mute);border:1px dashed var(--border);border-radius:12px;text-align:center">Todavía no hay ninguna semana cargada.</div>' : (modo === 'martes' ? logiMartesHtml(paq) : logiLunesHtml(paq))}
   </div>`;
@@ -5183,8 +5183,8 @@ async function logiMarcarCargado(key, cargado) {
   if (j && j.ok) {
     if (j.paquete) logiAplicarPaquete(j.paquete);
     logiRender();
-    if (cargado) niToast(etiqueta + ' cargado', { undo: () => logiMarcarCargado(key, false), ms: 5000 });
-    else niToast(etiqueta + ': se sacó de cargados');
+    if (cargado) niToast(etiqueta + ' enviado', { undo: () => logiMarcarCargado(key, false), ms: 5000 });
+    else niToast(etiqueta + ': se sacó de enviados');
     return;
   }
   const q = logiPaq(key); if (q) Object.assign(q, antes);
@@ -5196,12 +5196,12 @@ async function logiToggleCargado(key) {
   const p = logiPaq(key); if (!p) return;
   if (!logiCargado(p)) return logiMarcarCargado(key, true);
   const etiqueta = logiN(p.numero) + ' ' + (logiNombre(p.cliente) || 'Cliente');
-  if (!await showConfirm(`Sacar ${etiqueta} de los cargados?`, { title: 'Deshacer carga', confirmLabel: 'Sí, sacar', cancelLabel: 'No' }).catch(() => false)) return;
+  if (!await showConfirm(`Sacar ${etiqueta} de los enviados?`, { title: 'Deshacer envío', confirmLabel: 'Sí, sacar', cancelLabel: 'No' }).catch(() => false)) return;
   return logiMarcarCargado(key, false);
 }
 async function logiResumen(btn) {
   const L = STATE.logi; if (!L || !L.tanda) return;
-  if (!await showConfirm('Le avisamos a Neon cuántos paquetes se cargaron y cuáles quedan en el taller.', { title: 'Terminé de cargar', confirmLabel: 'Avisar', cancelLabel: 'Todavía no' }).catch(() => false)) return;
+  if (!await showConfirm('Le avisamos a Neon cuántos paquetes se enviaron y cuáles quedan en el taller.', { title: 'Terminé de enviar', confirmLabel: 'Avisar', cancelLabel: 'Todavía no' }).catch(() => false)) return;
   if (btn) btn.disabled = true;
   const op = logiOperador();
   const { status, j } = await logiPost('/admin/logistica/resumen', { tanda_id: L.tanda.id, tipo: 'martes', ...(op ? { operador: op } : {}) });
@@ -5234,12 +5234,12 @@ function logiImprimir() {
   let cuerpo;
   if (modo === 'martes') {
     const para = paq.filter(p => p.entrega === 'envio' && (p.listo || logiCargado(p))), quedan = paq.filter(p => !para.includes(p));
-    cuerpo = `<h2>Para cargar (${para.length})</h2><table><thead><tr><th>N°</th><th>Cliente</th><th>Destino</th><th>Paquete</th><th>Cargado</th></tr></thead><tbody>${para.map(p => fila([`<b>${esc(logiN(p.numero))}</b>`, esc(logiNombre(p.cliente)), esc(logiDestino(p)), esc(p.paquete ? logiPaqTxt(p.paquete) : ''), logiCargado(p) ? '✓' : '☐'])).join('')}</tbody></table>`
+    cuerpo = `<h2>Para enviar (${para.length})</h2><table><thead><tr><th>N°</th><th>Cliente</th><th>Destino</th><th>Paquete</th><th>Enviado</th></tr></thead><tbody>${para.map(p => fila([`<b>${esc(logiN(p.numero))}</b>`, esc(logiNombre(p.cliente)), esc(logiDestino(p)), esc(p.paquete ? logiPaqTxt(p.paquete) : ''), logiCargado(p) ? '✓' : '☐'])).join('')}</tbody></table>`
       + (quedan.length ? `<h2>Quedan en el taller (${quedan.length})</h2><table><thead><tr><th>N°</th><th>Cliente</th><th>Motivo</th></tr></thead><tbody>${quedan.map(p => fila([`<b>${esc(logiN(p.numero))}</b>`, esc(logiNombre(p.cliente)), `<b>${esc(logiMotivo(p))}</b>`])).join('')}</tbody></table>` : '');
   } else {
     cuerpo = `<table><thead><tr><th>N°</th><th>Cliente</th><th>Teléfono</th><th>Destino</th><th>Estado</th></tr></thead><tbody>${paq.map(p => fila([`<b>${esc(logiN(p.numero))}</b>`, esc(logiNombre(p.cliente)), (p.telefono ? esc(corteFmtTel(p.telefono)) : ''), p.falta_direccion ? '<b>FALTA DIRECCIÓN</b>' : (logiDirNoDisponible(p) ? 'Dirección no disponible' : esc(logiDestino(p))), esc(logiEstadoTxt(p)) + (p.pedido_pagado === false ? ' · <b>Pedido impago</b>' : '') + (p.entrega !== 'envio' ? ' · <b>Preguntar si retira o envío</b>' : '')])).join('')}</tbody></table>`;
   }
-  const titulo = `Envíos · semana del lunes ${logiFechaCorteDDMM(L.tanda.fecha)} · ${modo === 'martes' ? 'Cargar camión' : 'Contactar'}`;
+  const titulo = `Envíos · semana del lunes ${logiFechaCorteDDMM(L.tanda.fecha)} · ${modo === 'martes' ? 'Enviar' : 'Contactar'}`;
   const w = window.open('', '_blank'); if (!w) { niToast('Permití las ventanas emergentes para imprimir', { error: true }); return; }
   w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(titulo)}</title><style>body{font:13px/1.35 Arial,Helvetica,sans-serif;margin:18px;color:#000}h1{font-size:17px}h2{font-size:15px;margin:16px 0 6px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #000;padding:6px;vertical-align:top;text-align:left}td:first-child{font-size:16px;text-align:center;width:44px}tr{break-inside:avoid}</style></head><body><h1>${esc(titulo)}</h1>${cuerpo}<script>window.onload=()=>window.print()<\/script></body></html>`);
   w.document.close();
