@@ -8276,6 +8276,7 @@ function pmCorpPickBrief(i, k) {
   c.bastidor = /bastidor/i.test(f.descripcion || '') ? 'si' : 'no';
   const box = document.getElementById('pm-corp-ac-' + i); if (box) box.style.display = 'none';
   render();
+  pmBriefFotos(i, b); // sugiere las fotos del brief aunque el pedido no tenga chat del cliente
   toast('Traído del brief: ' + (b.cliente_nombre || ''));
 }
 function pmCartelAutocomplete(i) {
@@ -8315,6 +8316,7 @@ function pmPickCotizacion(i, k) {
     if (p.telefono && !String(mm.telefono || '').trim()) mm.telefono = String(p.telefono).replace(/\D/g, '');
     render();
     pmTraceAd();
+    pmBriefFotos(i, p._brief); // sugiere las fotos del brief aunque el pedido no tenga chat del cliente
     toast('Prellenado desde el brief "' + p.nombre + '" — revisá los datos');
     return;
   }
@@ -8516,8 +8518,43 @@ function bindPmFotoSlots(root) {
 // cada uno tiene su diseño. Primero los renders cuyo brief se llama como el cartel; las imágenes que ya
 // eligió otro cartel van al final marcadas. SUGERIDA solo cuando hay match por nombre o un solo cartel de
 // neón (si no, marcar la primera era sugerirle a "Soho shine" el render de "Parking").
+// Fotos del BRIEF elegido en el cartel (caso Gaspar 11-oct: pedido cargado a mano con brief pero SIN
+// chat del cliente —lo mandó desde su WhatsApp personal— → las sugerencias por teléfono no traían
+// nada). Al instante usa lo que ya trae el listado de briefs (primer render + primera foto del cliente)
+// y después baja el detalle con TODAS sus imágenes: renders (el último primero), bocetos, y al final
+// las fotos que mandó el cliente. Quedan en el cartel (c._briefFotos) y se sugieren antes que las del chat.
+function pmBriefFotoEntry(b, key, tipo) {
+  return { key, tipo_brief: tipo, brief_id: b.id, brief_diseno: b.diseno || '', brief_cliente: b.cliente_nombre || '' };
+}
+async function pmBriefFotos(i, b) {
+  const m = STATE.pedidoModal, c = m && m.carteles[i];
+  if (!c || !b || !b.id) return;
+  const tok = (c._briefTok || 0) + 1; c._briefTok = tok;
+  const rapidas = [];
+  if (b.first_render_key) rapidas.push(pmBriefFotoEntry(b, b.first_render_key, 'render'));
+  if (b.first_chat_key) rapidas.push(pmBriefFotoEntry(b, b.first_chat_key, 'chat'));
+  c._briefFotos = rapidas;
+  if (!c.foto_key && c.foto_estado !== 'subiendo') pmFotoRepintar(m, c);
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/briefs/' + b.id, { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || c._briefTok !== tok || !pmModalVivo(m)) return; // eligió otro brief o cerró el modal
+    const imgs = (Array.isArray(j.imagenes) ? j.imagenes : []).filter(x => x && x.r2_key);
+    const deTipo = t => imgs.filter(x => t(x.tipo)).reverse(); // el detalle viene del más viejo al más nuevo
+    const todas = [
+      ...deTipo(t => t === 'render' || t === 'render-ia').map(x => pmBriefFotoEntry(b, x.r2_key, 'render')),
+      ...deTipo(t => t !== 'chat' && t !== 'render' && t !== 'render-ia').map(x => pmBriefFotoEntry(b, x.r2_key, 'boceto')),
+      ...deTipo(t => t === 'chat').map(x => pmBriefFotoEntry(b, x.r2_key, 'chat')),
+    ];
+    if (todas.length) c._briefFotos = todas;
+    if (!c.foto_key && c.foto_estado !== 'subiendo') pmFotoRepintar(m, c);
+  } catch (_) {}
+}
 function pmSugerenciasParaCartel(m, c) {
-  const base = ((m && m._fotoSug) || []);
+  // Primero las fotos del brief elegido en ESTE cartel; después lo del chat (sin repetir).
+  const propias = ((c && c._briefFotos) || []).map(f => ({ ...f, _propia: true }));
+  const propKeys = new Set(propias.map(f => f.key));
+  const base = [...propias, ...((m && m._fotoSug) || []).filter(f => !propKeys.has(f.key))];
   const otros = ((m && m.carteles) || []).filter(o => o !== c); // neón y corpóreo: todos llevan foto del diseño
   const nc = normName(String(c.cartel || ''));
   const nombres = f => [f.brief_diseno, f.brief_cliente].map(n => normName(String(n || ''))).filter(Boolean);
@@ -8526,6 +8563,7 @@ function pmSugerenciasParaCartel(m, c) {
   // "Cono helado", su render no es candidato para "Helado"); 2 = sin relación.
   const exactoDeOtro = x => otros.some(o => normName(String(o.cartel || '')) === x);
   const puntaje = f => {
+    if (f._propia) return -1; // del brief que se eligió para este cartel
     if (!nc) return 2;
     const ns = nombres(f);
     if (ns.some(x => x === nc)) return 0;
@@ -8535,11 +8573,17 @@ function pmSugerenciasParaCartel(m, c) {
   // Elegidas por OTRO cartel de neón (un corpóreo no usa foto: no "ocupa" ninguna).
   const usadas = new Set(otros.filter(o => o.foto_key && o._fotoFrom).map(o => o._fotoFrom));
   const lista = base.map((f, k) => ({ ...f, _k: k, _p: puntaje(f), _usada: usadas.has(f.key) }))
-    .sort((a, b) => (a._p + (a._usada ? 3 : 0)) - (b._p + (b._usada ? 3 : 0)) || a._k - b._k).slice(0, 6);
-  let sugIdx = lista.findIndex(f => f._p === 0 && !f._usada);
+    .sort((a, b) => (a._p + (a._usada ? 3 : 0)) - (b._p + (b._usada ? 3 : 0)) || a._k - b._k).slice(0, propias.length ? 8 : 6);
+  let sugIdx = lista.findIndex(f => f._propia && f.tipo_brief !== 'chat' && !f._usada); // el último render del brief
+  if (sugIdx < 0) sugIdx = lista.findIndex(f => f._p === 0 && !f._usada);
   if (sugIdx < 0) sugIdx = lista.findIndex(f => f._p === 1 && !f._usada);
-  if (sugIdx < 0 && !otros.length && lista.length && !lista[0]._usada) sugIdx = 0; // un solo cartel: lo último que vio
+  if (sugIdx < 0 && !otros.length && lista.length && !lista[0]._usada && !(lista[0]._propia && lista[0].tipo_brief === 'chat')) sugIdx = 0; // un solo cartel: lo último que vio (nunca la foto de referencia del cliente)
   return { lista, sugIdx };
+}
+function pmSugTitulo(f) {
+  const nom = f.brief_diseno || f.brief_cliente;
+  if (f._propia) return (f.tipo_brief === 'chat' ? 'Foto que mandó el cliente' : f.tipo_brief === 'boceto' ? 'Boceto' : 'Render') + ' del brief «' + (f.brief_cliente || nom || '') + '» — usar como diseño aprobado';
+  return nom ? 'Render de «' + nom + '» — usar como diseño aprobado' : 'Usar esta como diseño aprobado';
 }
 // Primer cartel de neón sin foto (destino del Ctrl+V con el modal abierto).
 function pmCartelSinFoto() {
@@ -8562,8 +8606,10 @@ function pmFotoSlotHtml(c, i) {
       </div>`;
   } else {
     const { lista: sug, sugIdx } = pmSugerenciasParaCartel(m, c);
-    const sugHtml = sug.length ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(lo último que se le mandó al cliente — tocá la que aprobó)</span></div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${sug.map((f, k) => `<button type="button" data-pm-foto-sug="${i}|${escapeHtml(f.key)}" title="${escapeHtml(f.brief_diseno || f.brief_cliente ? 'Render de «' + (f.brief_diseno || f.brief_cliente) + '» — usar como diseño aprobado' : 'Usar esta como diseño aprobado')}" style="position:relative;border:1px solid ${k === sugIdx ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" onerror="this.parentNode.style.display='none'" style="display:block;height:64px;width:64px;object-fit:cover">${k === sugIdx ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}${f._usada ? '<span style="position:absolute;left:0;right:0;top:0;background:rgba(0,0,0,.6);color:#fff;font-size:9px;padding:1px 0">otro cartel</span>' : ''}</button>`).join('')}</div>` : '';
+    const prop = sug.find(f => f._propia);
+    const sugDe = prop ? `fotos del brief «${escapeHtml(prop.brief_cliente || prop.brief_diseno || '')}»${sug.some(f => !f._propia) ? ' y lo último que se le mandó al cliente' : ''}` : 'lo último que se le mandó al cliente';
+    const sugHtml = sug.length ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(${sugDe} — tocá la que aprobó)</span></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${sug.map((f, k) => `<button type="button" data-pm-foto-sug="${i}|${escapeHtml(f.key)}" title="${escapeHtml(pmSugTitulo(f))}" style="position:relative;border:1px solid ${k === sugIdx ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" onerror="this.parentNode.style.display='none'" style="display:block;height:64px;width:64px;object-fit:cover">${k === sugIdx ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}${f._usada ? '<span style="position:absolute;left:0;right:0;top:0;background:rgba(0,0,0,.6);color:#fff;font-size:9px;padding:1px 0">otro cartel</span>' : ''}</button>`).join('')}</div>` : '';
     inner = `${sugHtml}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         ${fileBtn('📷 Subir foto')}
