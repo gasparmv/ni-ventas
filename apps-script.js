@@ -6,8 +6,9 @@
  * orden, y no pisa filas de otra orden. Retrocompatible: las filas viejas sin id se
  * matchean por numero+nombre la 1ª vez y quedan estampadas.
  *   Columna id_sync:  NEÓN "2026" = col AB (28)   ·   CORPÓREO "Pedidos_Corporeo" = col AO (41)
- * v4 (11-oct): Pedidos_Corporeo sumó la col Z "Caja" → estado/cobro pasan a AA:AB y el id_sync a AO.
- *   + acción directo_vendedor: vendedor de los pedidos de neón en el 2026 v4 › Pedidos_Directo col C.
+ * v4 (11-oct): Pedidos_Corporeo sumó la col Z "Caja" → estado pago / COBRO 1 pasan a AA:AB y el
+ *   id_sync a AO. + acción directo_vendedor: vendedor de los pedidos de neón en el 2026 v4
+ *   (Pedidos_Directo, col C), sin pisar nunca lo cargado a mano.
  *   ⚠️ NO borres ni muevas esas columnas: son la clave del sync (si se pierden, degrada a
  *      matchear por numero+nombre, menos robusto).
  */
@@ -71,27 +72,20 @@ function findById_(sheet, idCol, pid) {
   return 0;
 }
 // Estampa el pedido.id en la fila (la "adopta") + pone el header id_sync si falta.
-// setNumberFormat('0'): la columna auxiliar puede heredar formato % de la columna de al
-// lado (Ganancia%) → sin esto, 917 se MOSTRARÍA como "91700%" (el valor real igual es 917).
 function stampId_(sheet, row, idCol, pid) {
   if (!pid || !(row > 1)) return;
   ensureCols_(sheet, idCol);
   var cell = sheet.getRange(row, idCol);
-  cell.setNumberFormat('0');
+  cell.setNumberFormat('0');   // sin esto, 917 se ve "91700%" (hereda el % de la columna de al lado)
   cell.setValue(pid);
-  var hcell = sheet.getRange(1, idCol);
-  var h = hcell.getValue();
-  if (h === '' || h == null) { hcell.setNumberFormat('@'); hcell.setValue('id_sync'); }
+  var h = sheet.getRange(1, idCol).getValue();
+  if (h === '' || h == null) sheet.getRange(1, idCol).setValue('id_sync');
 }
-// La hoja puede tener menos columnas que la auxiliar (AB=28 / AN=40) → getRange tiraría error.
-// Crea las columnas vacías que falten al final y les pone formato numérico plano (las nuevas
-// heredan el formato de la última columna, que puede ser %). No afecta datos a la izquierda.
+// La hoja puede tener menos columnas que la auxiliar (AB=28 / AO=41) → getRange tiraría error.
+// Crea las columnas vacías que falten al final (no afecta datos ni fórmulas a la izquierda).
 function ensureCols_(sheet, n) {
   var mc = sheet.getMaxColumns();
-  if (mc < n) {
-    sheet.insertColumnsAfter(mc, n - mc);
-    sheet.getRange(1, mc + 1, sheet.getMaxRows(), n - mc).setNumberFormat('0');
-  }
+  if (mc < n) sheet.insertColumnsAfter(mc, n - mc);
 }
 
 // Re-ubica por nombre (col keyCol) cerca del hint viejo, ignorando acentos/espacios.
@@ -171,8 +165,8 @@ function pedidoUpsert(data) {
   }
 }
 
-// Upsert CORPÓREO (hoja Pedidos_Corporeo). Escribe SOLO A:O (15) y Z:AA (2); nunca toca
-// costos P:X / Caja Y / cobros AB:AE / resumen AG:AL. Mismo orden idempotente por id.
+// Upsert CORPÓREO (hoja Pedidos_Corporeo). Escribe SOLO A:O (15) y AA:AB (2: estado pago, COBRO 1);
+// nunca toca costos P:Y / Caja Z / cobros AC:AF / resumen AH:AM. Mismo orden idempotente por id.
 function corporeoUpsert(data) {
   try {
     var CORP_ID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE';
@@ -195,7 +189,7 @@ function corporeoUpsert(data) {
       target = (last < 1 ? 1 : last) + 1;
     }
     sheet.getRange(target, 1, 1, 15).setValues([ao]);   // A:O
-    sheet.getRange(target, 27, 1, 2).setValues([zaa]);  // AA:AB (estado pago, COBRO 1); Z = Caja, la cargás vos
+    sheet.getRange(target, 27, 1, 2).setValues([zaa]);  // AA:AB (Z = Caja, la cargás vos)
     stampId_(sheet, target, CORP_ID_COL, pid);
     return jsonOut({ ok: true, row: target });
   } catch (err) {
@@ -205,7 +199,7 @@ function corporeoUpsert(data) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LIMPIEZA DE DUPLICADOS — corré la función UNA VEZ desde el editor (botón ▶).
-// Duplicada = TODAS las columnas del CRM idénticas a otra (corpóreo A:O+Z:AA / neón A:N+P:U).
+// Duplicada = TODAS las columnas del CRM idénticas a otra (corpóreo A:O+AA:AB / neón A:N+P:U).
 // Conserva la fila con MÁS celdas llenas (la de tus costos), borra el resto. Nunca toca
 // filas manuales ni piezas distintas.
 // ─────────────────────────────────────────────────────────────────────────────
