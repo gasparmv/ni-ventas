@@ -6471,7 +6471,9 @@ async function avisarPausaBroadcast(env, kind, f) {
     if (row && row.v === String(f.cls) && (Date.now() - (Date.parse(row.updated_at) || 0)) < 12 * 3600 * 1000) return;
     await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at').bind(k, String(f.cls), new Date().toISOString()).run();
     const hastaAR = new Date(Date.parse(f.nextAt) - 3 * 3600 * 1000).toISOString().slice(11, 16);
-    await waSendText(env, env.ADMIN_NOTIFY_PHONE, `⏸ El broadcast ${kind} quedó en PAUSA hasta las ${hastaAR} (hora AR) por fallas al enviar.\nMotivo: ${describeSendFailure({ code: null, error: f.detail })}\nSe reanuda solo. Para reanudar antes (ya arreglada la causa): POST /admin/envios-reintentos {kind:"${kind}", reanudar:true}.`);
+    // Por plantilla (aviso_lanzamiento) con texto de respaldo: Gaspar casi nunca le escribe al número del
+    // negocio → su ventana de 24h suele estar cerrada y un texto libre no le llegaba. Va en 1 línea, ≤300.
+    await avisoLanzamientoSend(env, env.ADMIN_NOTIFY_PHONE, `⏸ El broadcast ${kind} quedó en PAUSA hasta las ${hastaAR} (hora AR) por fallas al enviar. Motivo: ${describeSendFailure({ code: null, error: f.detail })}. Se reanuda solo; para reanudar antes: POST /admin/envios-reintentos {kind:"${kind}", reanudar:true}`);
   } catch (_) {}
 }
 // Procesa los broadcasts custom: manda la plantilla guardada de cada broadcast
@@ -9797,8 +9799,13 @@ async function seminarioOnInbound(env, phone) {
     const got = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind = 'seminario' AND status = 'sent' LIMIT 1").bind(phone).first();
     if (!got) return;
     const nowIso = new Date().toISOString();
+    // Mismo freno que eventoRecordatorioOnInbound: si está respondiendo a un broadcast con IA activo (ej.
+    // "último cupo" de cursos), lo revela ESE flujo (a 'cursos' si dice que sí); sin esto el seminario lo
+    // pasaba antes a 'privado' y Abril nunca lo veía.
+    let enBroadcast = false;
+    try { enBroadcast = !!(await env.DB.prepare("SELECT 1 FROM wa_broadcast_events e JOIN wa_broadcasts b ON b.id = e.broadcast_id WHERE e.phone = ? AND b.reply_ai = 1 AND b.status = 'running' AND (e.sentiment IS NULL OR e.sentiment != 'positiva') LIMIT 1").bind(phone).first()); } catch (_) {}
     // Revela a 'privado' SOLO si estaba oculto (no pisa un chat movido a mano a otra bandeja).
-    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'privado', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'privado', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(phone, nowIso).run();
+    if (!enBroadcast) await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'privado', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'privado', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(phone, nowIso).run();
     // Etiqueta 'seminario' a todo el que responde (aunque ya no esté oculto).
     const lid = await ensureLabelId(env, SEMINARIO_LABEL_NAME, SEMINARIO_LABEL_COLOR);
     if (lid) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, lid, nowIso).run();
@@ -11981,6 +11988,17 @@ async function processPaymentProof(env, m) {
 // Gaspar/Bruno casi siempre están FUERA de la ventana 24h) con fallback a texto libre.
 async function avisoLanzamientoSend(env, ph, texto) {
   const t = String(texto || '').replace(/\s+/g, ' ').trim().slice(0, 300);  // 1 línea (Meta rechaza \n / 4+ espacios en params)
+  // Ventana de 24h abierta (escribió al número del negocio hace <23h) → texto libre primero: llega seguro
+  // y no choca con el tope de plantillas de marketing por usuario de Meta (131049: a Bruno se le perdían
+  // los avisos de pago del lanzamiento). Con la ventana cerrada, plantilla como antes.
+  try {
+    const desde = new Date(Date.now() - 23 * 3600 * 1000).toISOString();
+    const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1").bind(String(ph || '').replace(/\D/g, ''), desde).first();
+    if (inb) {
+      const r0 = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + String(texto || '').trim().slice(0, 1500));
+      if (r0 && r0.ok) return r0;
+    }
+  } catch (_) {}
   let r = null;
   try { r = await waSendTemplate(env, ph, 'aviso_lanzamiento', 'es_AR', [t]); } catch (_) {}
   if (!r || !r.ok) { try { r = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + t); } catch (_) {} }
