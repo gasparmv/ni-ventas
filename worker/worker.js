@@ -11677,11 +11677,11 @@ async function analyzeImage(env, r2Key) {
 // a su WhatsApp personal eran solo para la noche del 11/06. Este interruptor
 // apaga las tres piezas (OCR, reenvío en vivo y backfill). Para reactivar todo,
 // poner PAGO_CAPTURA_ACTIVA = true.
-const PAGO_CAPTURA_ACTIVA = true;   // re-apuntado 10/09/2026 para el lanzamiento de septiembre
-// Ventana del lanzamiento: desde 18:00 AR del 10/09 hasta fin del 15/09 AR (~5 días). Para cortar
+const PAGO_CAPTURA_ACTIVA = true;   // re-apuntado 08/10/2026 para el lanzamiento de octubre
+// Ventana del lanzamiento: desde 18:00 AR del 08/10 hasta fin del 13/10 AR (~5 días). Para cortar
 // antes cuando cierre el lanzamiento: poner PAGO_CAPTURA_ACTIVA = false. AR = UTC-3.
-const PAGO_LANZAMIENTO_START_UTC = '2026-09-10T21:00:00.000Z';
-const PAGO_LANZAMIENTO_END_UTC   = '2026-09-16T03:00:00.000Z';
+const PAGO_LANZAMIENTO_START_UTC = '2026-10-08T21:00:00.000Z';
+const PAGO_LANZAMIENTO_END_UTC   = '2026-10-14T03:00:00.000Z';
 const PAGO_SENA_MIN = 30000;   // banda de la seña del acceso (~40.000 ARS)
 const PAGO_SENA_MAX = 50000;
 function isPagoLanzamientoWindow(tsIso) {
@@ -11884,6 +11884,8 @@ async function processPaymentProof(env, m) {
     if (lid) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(m.phone, lid, new Date().toISOString()).run(); } catch (_) {} }
     // Aviso a Gaspar + Bruno por cada pago (+ el inicial "ya arrancaron" una sola vez).
     try { await avisoPagoLanzamiento(env, { nombre: m.senderName, phone: m.phone, monto, esSena: clasificacion === 'sena' }); } catch (_) {}
+    // Revelar el chat a la bandeja de Abril (cursos) para que atienda al que pagó.
+    try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('oculto','general','')").bind(m.phone, new Date().toISOString()).run(); } catch (_) {}
   }
 }
 
