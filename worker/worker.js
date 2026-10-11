@@ -6461,20 +6461,42 @@ async function ensureBroadcastsSchema(env) {
   } catch (_) {}
 }
 
+// Aviso a Gaspar cuando un broadcast queda en pausa por fallas: 1 por motivo cada 12h (las pausas por
+// cuenta se repiten cada ≤2h mientras dure el problema; no por mensaje ni por cada pausa).
+async function avisarPausaBroadcast(env, kind, f) {
+  if (!env.ADMIN_NOTIFY_PHONE || !f || !f.nextAt) return;
+  const k = 'bc_pausa_aviso:' + kind;
+  try {
+    const row = await env.DB.prepare('SELECT v, updated_at FROM kv_cache WHERE k = ?').bind(k).first();
+    if (row && row.v === String(f.cls) && (Date.now() - (Date.parse(row.updated_at) || 0)) < 12 * 3600 * 1000) return;
+    await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at').bind(k, String(f.cls), new Date().toISOString()).run();
+    const hastaAR = new Date(Date.parse(f.nextAt) - 3 * 3600 * 1000).toISOString().slice(11, 16);
+    await waSendText(env, env.ADMIN_NOTIFY_PHONE, `⏸ El broadcast ${kind} quedó en PAUSA hasta las ${hastaAR} (hora AR) por fallas al enviar.\nMotivo: ${describeSendFailure({ code: null, error: f.detail })}\nSe reanuda solo. Para reanudar antes (ya arreglada la causa): POST /admin/envios-reintentos {kind:"${kind}", reanudar:true}.`);
+  } catch (_) {}
+}
 // Procesa los broadcasts custom: manda la plantilla guardada de cada broadcast
 // 'running' a sus targets encolados que ya vencieron. 6 por tick (goteo via
-// due_at). Revert-on-fail (vuelve a 'queued') y respeta unreachable + billing.
+// due_at). Reintentos acotados por broadcast y respeta unreachable + billing.
 async function processCustomBroadcasts(env) {
   if (await isWaBillingBlocked(env)) return;
   try {
     const nowIso = new Date().toISOString();
     const floorIso = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
     const rs = await env.DB.prepare(
-      "SELECT a.phone AS phone, a.sender_name AS sender_name, a.kind AS kind, b.template AS template, b.lang AS lang, b.param_mode AS param_mode, b.body_preview AS body_preview FROM wa_autoreply_log a JOIN wa_broadcasts b ON ('bc_' || b.id) = a.kind WHERE a.status = 'queued' AND a.due_at <= ? AND a.due_at >= ? AND b.status = 'running' ORDER BY a.due_at ASC LIMIT 6"
+      "SELECT a.phone AS phone, a.sender_name AS sender_name, a.kind AS kind, b.template AS template, b.lang AS lang, b.param_mode AS param_mode, b.body_preview AS body_preview, b.reveal_inbox AS reveal_inbox FROM wa_autoreply_log a JOIN wa_broadcasts b ON ('bc_' || b.id) = a.kind WHERE a.status = 'queued' AND a.due_at <= ? AND a.due_at >= ? AND b.status = 'running' AND NOT EXISTS (SELECT 1 FROM template_status_cache t WHERE t.name = b.template AND upper(t.status) <> 'APPROVED') ORDER BY a.due_at ASC LIMIT 6"
     ).bind(nowIso, floorIso).all();
     if (!rs.results?.length) return;
+    // Reintentos ACOTADOS por broadcast (mismo mecanismo que comunidad/minisupernova, oct-2026): antes
+    // una falla volvía a 'queued' con el mismo due_at → se reintentaba cada minuto hasta 72h y las 6
+    // primeras fallidas trababan la cola.
+    // (La consulta ya deja afuera los broadcasts cuya plantilla no está APPROVED en template_status_cache:
+    // esperan sin contarlo como falla y sin ocupar los lugares del tick.)
+    const estados = {}, pausados = new Set();
     for (const row of rs.results) {
       const phone = row.phone, kind = row.kind;
+      if (pausados.has(kind)) continue;
+      const st = estados[kind] || (estados[kind] = await campaignState(env, kind));
+      if (campaignPaused(st)) { pausados.add(kind); continue; }
       let claim;
       try { claim = await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sending' WHERE phone = ? AND kind = ? AND status = 'queued'").bind(phone, kind).run(); } catch (_) { continue; }
       if (!claim?.meta?.changes) continue;
@@ -6482,14 +6504,35 @@ async function processCustomBroadcasts(env) {
         try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped', sent_at = ? WHERE phone = ? AND kind = ?").bind(new Date().toISOString(), phone, kind).run(); } catch (_) {}
         continue;
       }
+      // Broadcast que revela a una bandeja (ej. 'cursos'): el que nunca escribió no tiene fila en la lista de
+      // chats y el trigger la crearía en 'general' (bandeja de Joaco, al alcance del bot de carteles y del
+      // reparto) → se crea ANTES de mandar, oculta. Si ya tenía chat, no se toca.
+      if (row.reveal_inbox) {
+        try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO NOTHING").bind(phone, new Date().toISOString()).run(); } catch (_) {}
+      }
       const primerNombre = capitalizeName((row.sender_name || '').split(/\s+/)[0]) || 'amigo/a';
       const params = (row.param_mode === 'none') ? [] : [primerNombre];
       const tpl = await waSendTemplate(env, phone, row.template, row.lang || 'es', params);
       if (!tpl?.ok) {
-        // Falla tipica: plantilla no aprobada aun o ventana → volver a 'queued'.
-        try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued' WHERE phone = ? AND kind = ?").bind(phone, kind).run(); } catch (_) {}
+        // Falla (plantilla no aprobada/pausada, sin saldo, límite, número muerto): reintento con espera
+        // creciente, pausa del broadcast si es un problema de cuenta/plantilla, o 'failed' definitivo.
+        const st = estados[kind];
+        const f = await campaignSendFail(env, st, { phone, res: tpl, logKind: kind });
+        try {
+          if (f.action === 'failed') await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'failed' WHERE phone = ? AND kind = ?").bind(phone, kind).run();
+          else await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'queued', due_at = ? WHERE phone = ? AND kind = ?").bind(f.nextAt, phone, kind).run();
+        } catch (_) {}
+        if (f.action === 'pause') {
+          pausados.add(kind);
+          // Correr TODA su cola lo que dura la pausa, manteniendo el espaciado del goteo (si no, sus filas
+          // vencidas ocupan los 6 lugares del tick y traban a otro broadcast). "Reanudar" la vuelve a correr.
+          const delta = Math.max(0, Math.round((Date.parse(f.nextAt) - Date.now()) / 1000));
+          try { await env.DB.prepare("UPDATE wa_autoreply_log SET due_at = strftime('%Y-%m-%dT%H:%M:%fZ', due_at, '+' || ? || ' seconds') WHERE kind = ? AND status = 'queued' AND due_at >= ?").bind(delta, kind, floorIso).run(); } catch (_) {}
+          await avisarPausaBroadcast(env, kind, f);
+        }
         continue;
       }
+      await campaignSendOk(env, estados[kind], phone);
       const ts = new Date().toISOString();
       const wamid = tpl.id || '';
       try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = ?").bind(ts, phone, kind).run(); } catch (_) {}
@@ -6538,10 +6581,26 @@ async function analyzeBroadcastReply(env, texto, phone) {
 async function maybeBranchBroadcastReply(env, phone) {
   if (!phone) return;
   try {
+    // Solo si el broadcast le llegó en las últimas 72h: alguien que recibió uno hace semanas y escribe
+    // hoy por otro tema NO es una respuesta a ese broadcast (sin esto le llegaba el checkout viejo).
+    const desde72 = new Date(Date.now() - 72 * 3600 * 1000).toISOString();
     const row = await env.DB.prepare(
-      "SELECT b.id AS bid FROM wa_autoreply_log a JOIN wa_broadcasts b ON ('bc_' || b.id) = a.kind WHERE a.phone = ? AND a.status = 'sent' AND b.reply_ai = 1 AND b.status = 'running' ORDER BY a.sent_at DESC LIMIT 1"
-    ).bind(phone).first();
-    if (!row?.bid) return;
+      "SELECT b.id AS bid FROM wa_autoreply_log a JOIN wa_broadcasts b ON ('bc_' || b.id) = a.kind WHERE a.phone = ? AND a.status = 'sent' AND a.sent_at >= ? AND b.reply_ai = 1 AND b.status = 'running' ORDER BY a.sent_at DESC LIMIT 1"
+    ).bind(phone, desde72).first();
+    if (!row?.bid) {
+      // Respondió DESPUÉS de las 72h a un broadcast (de los últimos 14 días) que revela a una bandeja y al
+      // que nunca había contestado: no se le manda nada automático, pero se muestra el chat a esa bandeja
+      // si sigue oculto (el envío crea oculta la fila de los que no tenían chat → si no, quedaba invisible
+      // para siempre). Los que ya contestaron "no" (tienen evento) siguen ocultos, como se decidió.
+      try {
+        const desde14 = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
+        const old = await env.DB.prepare(
+          "SELECT b.reveal_inbox AS ri FROM wa_autoreply_log a JOIN wa_broadcasts b ON ('bc_' || b.id) = a.kind WHERE a.phone = ? AND a.status = 'sent' AND a.sent_at >= ? AND COALESCE(b.reveal_inbox, '') != '' AND NOT EXISTS (SELECT 1 FROM wa_broadcast_events e WHERE e.broadcast_id = b.id AND e.phone = a.phone) ORDER BY a.sent_at DESC LIMIT 1"
+        ).bind(phone, desde14).first();
+        if (old && old.ri) await env.DB.prepare("UPDATE wa_chats_summary SET inbox = ?, updated_at = ? WHERE phone = ? AND inbox = 'oculto'").bind(old.ri, new Date().toISOString(), phone).run();
+      } catch (_) {}
+      return;
+    }
     // No ramificar la respuesta-IA del broadcast si el bot de precotización ya está
     // trabajando o completó a este lead: lo maneja el bot (o Joaco en "Para cotizar"),
     // no el reflote pidiéndole otra vez la foto y las medidas que ya dio.
@@ -6572,24 +6631,48 @@ async function processBroadcastReplies(env) {
       let claim;
       try { claim = await env.DB.prepare("UPDATE wa_broadcast_events SET sentiment = 'analizando' WHERE broadcast_id = ? AND phone = ? AND sentiment IS NULL").bind(row.bid, row.phone).run(); } catch (_) { continue; }
       if (!claim?.meta?.changes) continue;
-      let texto = '';
+      // Desde CUÁNDO leer: desde que le llegó el broadcast. Antes era desde replied_at (la hora en que se
+      // procesó el webhook), que queda DESPUÉS del mensaje con el que respondió → se analizaba texto vacío:
+      // en sep, 240 de las 248 "no positivas" eran respuestas como "si me encantaría" que nunca recibieron
+      // el link y quedaron ocultas.
+      let desde = row.replied_at;
+      try { const s = await env.DB.prepare("SELECT sent_at FROM wa_autoreply_log WHERE phone = ? AND kind = ?").bind(row.phone, 'bc_' + row.bid).first(); if (s && s.sent_at) desde = s.sent_at; } catch (_) {}
+      let msgs = [];
       try {
-        const m = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'reaction' AND ts >= ? AND body != '' ORDER BY ts ASC LIMIT 20").bind(row.phone, row.replied_at).all();
-        texto = (m.results || []).map(x => x.body).join('\n');
+        const m = await env.DB.prepare("SELECT msg_type, body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('reaction','status') AND ts >= ? ORDER BY ts ASC LIMIT 20").bind(row.phone, desde).all();
+        msgs = m.results || [];
       } catch (_) {}
-      const sentiment = await analyzeBroadcastReply(env, texto, row.phone);
-      // Rama positiva: si el broadcast tiene reveal_inbox, des-ocultar el chat a esa bandeja
+      // De una foto vale solo lo que escribió (caption): la descripción automática "[imagen] …" no es su
+      // respuesta y el clasificador la tomaba como neutral → positiva → le mandaba el checkout.
+      const texto = msgs.map(x => String(x.body || '').replace(/(^|\s\|\s)\[imagen\][\s\S]*$/, '').trim()).filter(Boolean).join('\n');
+      // Respondió pero sin nada legible (solo foto/sticker o un audio cuya transcripción falló —se
+      // transcribe ANTES de guardar el mensaje, así que no tiene sentido esperarla): 'sin_texto' → NO se
+      // manda el checkout automático (podría ser un "no" en audio) pero se revela para que lo vea Abril.
+      const sentiment = (!texto && msgs.length) ? 'sin_texto' : await analyzeBroadcastReply(env, texto, row.phone);
+      // Rama positiva (y sin_texto): si el broadcast tiene reveal_inbox, des-ocultar el chat a esa bandeja
       // (ej. 'cursos' = Abril) para que cierren el pago. La rama negativa NO revela (queda oculto).
-      if (sentiment === 'positiva' && row.reveal_inbox) {
+      if ((sentiment === 'positiva' || sentiment === 'sin_texto') && row.reveal_inbox) {
         try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at WHERE wa_chats_summary.inbox = 'oculto'").bind(row.phone, row.reveal_inbox, new Date().toISOString()).run(); } catch (_) {}
       }
-      const msg = (sentiment === 'positiva') ? row.pos : row.neg;
+      const msg = (sentiment === 'positiva') ? row.pos : (sentiment === 'no_positiva' ? row.neg : '');
       // El pos/neg puede traer VARIOS mensajes separados por '\n||\n' -> se mandan por separado.
       if (msg && String(msg).trim()) {
         for (const part of String(msg).split('\n||\n')) {
           const p = part.trim();
           if (!p) continue;
-          try { await waSendText(env, row.phone, p); } catch (_) {}
+          try {
+            const r = await waSendText(env, row.phone, p);
+            // Guardarlo en el chat: antes Abril veía "Mensaje enviado (sin texto registrado)" y no sabía
+            // qué link ni qué monto le había mandado el bot.
+            if (r && r.ok && r.id) {
+              await env.DB.prepare(
+                `INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated)
+                 VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)
+                 ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'text', automated = 1
+                   WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
+              ).bind(new Date().toISOString(), r.id, row.phone, p).run();
+            }
+          } catch (_) {}
           await new Promise(rs => setTimeout(rs, 800));
         }
       }
@@ -11584,6 +11667,11 @@ async function processTemplateStatusUpdate(env, value) {
   const lang = value?.message_template_language || '';
   const event = value?.event || ''; // APPROVED, REJECTED, PAUSED, etc.
   const reason = value?.reason || '';
+  // Reflejar el estado al instante en el caché (los broadcasts esperan a que su plantilla esté APPROVED
+  // ahí; si no, dependía del polling horario y arrancaban hasta ~1h tarde).
+  if (name && ['APPROVED', 'REJECTED', 'PAUSED', 'DISABLED', 'PENDING'].includes(String(event).toUpperCase())) {
+    try { await env.DB.prepare('INSERT INTO template_status_cache (name, status, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at').bind(name, String(event).toUpperCase(), new Date().toISOString()).run(); } catch (_) {}
+  }
   if (!env.ADMIN_NOTIFY_PHONE || !name || !event) return;
   let icon = '📋';
   if (event === 'APPROVED') icon = '✅';
@@ -11910,6 +11998,15 @@ function esCampanaMasiva(name) {
   if (/^(minisupernova|minicurso|lanzamiento|cupo_comunidad|seminario|sorteo|comunidad|pack_emprendedor|reporte_)/.test(n)) return true;
   if (n === 'aviso_lanzamiento' || n === 'aviso_arranque_equipo') return true;
   return false;
+}
+// ¿El envío que falló fue de un broadcast del panel? = a ese teléfono le salió una fila 'bc_<id>' en las
+// 24h anteriores (los broadcasts guardan el texto en vez del marcador [plantilla: x]).
+async function esEnvioDeBroadcast(env, phone, tsIso) {
+  try {
+    const desde = new Date((Date.parse(tsIso) || Date.now()) - 24 * 3600 * 1000).toISOString();
+    const r = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind LIKE 'bc!_%' ESCAPE '!' AND sent_at >= ? LIMIT 1").bind(String(phone || ''), desde).first();
+    return !!r;
+  } catch (_) { return false; }
 }
 async function notifyTplFail(env, { name, phone, reason } = {}) {
   try {
@@ -13768,10 +13865,12 @@ const handler = {
                   // Leer status previo antes de actualizar — para no notificar dos veces el mismo failed
                   let prevStatus = null;
                   let prevBody = '';
+                  let prevCampana = false; // plantilla de una campaña automática (broadcast, etc.)
                   try {
-                    const row = await env.DB.prepare('SELECT status, body FROM wa_messages WHERE wamid = ?').bind(wamid).first();
+                    const row = await env.DB.prepare('SELECT status, body, msg_type, automated FROM wa_messages WHERE wamid = ?').bind(wamid).first();
                     prevStatus = row?.status || null;
                     prevBody = row?.body || '';
+                    prevCampana = row?.msg_type === 'template' && Number(row?.automated) === 1;
                   } catch (_) {}
                   // Intentar actualizar status de un mensaje saliente existente
                   const updated = await env.DB.prepare(
@@ -13823,8 +13922,10 @@ const handler = {
                         // Plantilla de venta/seguimiento (Bruno/Joaco) falló → aviso CONFIABLE a Bruno + Gaspar
                         // (plantilla + fallback), deduplicado, con tope por hora. Pedido de Bruno (3-sep).
                         try { await notifyTplFail(env, { name: _tpl, phone, reason: describeSendFailure({ code: errCode, error: errMsg }) }); } catch (_) {}
-                      } else if (env.ADMIN_NOTIFY_PHONE) {
-                        // Texto libre o plantilla de campaña masiva → aviso a Gaspar por texto (como antes).
+                      } else if (env.ADMIN_NOTIFY_PHONE && !(prevCampana && await esEnvioDeBroadcast(env, phone, ts))) {
+                        // Texto libre o plantilla 1 a 1 → aviso a Gaspar por texto (como antes). Solo las de
+                        // un BROADCAST del panel (guardan el texto, no el marcador) ya no avisan una por una:
+                        // rebotan a montones y solo hacían ruido. Las de venta (lead B2B, revendedores) siguen.
                         const preview = prevBody ? prevBody.slice(0, 100) + (prevBody.length > 100 ? '…' : '') : '';
                         const summary = `⚠ Falló envío WA a ${phone}\nError: ${errMsg}` + (preview ? `\nMensaje: "${preview}"` : '');
                         try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
@@ -15764,11 +15865,24 @@ const handler = {
       if (path === '/admin/envios-reintentos') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         const KINDS = ['comunidad_promo', 'lanzamiento_opener', 'minisupernova', 'pp-followup-tpl'];
+        await ensureSendRetryTable(env);
+        // + los broadcasts del panel ('bc_<id>') que tengan reintentos o pausa registrados.
+        try { for (const r of ((await env.DB.prepare("SELECT DISTINCT kind FROM wa_send_retry WHERE kind LIKE 'bc!_%' ESCAPE '!'").all()).results || [])) if (!KINDS.includes(r.kind)) KINDS.push(r.kind); } catch (_) {}
+        try { for (const r of ((await env.DB.prepare("SELECT substr(k, 11) AS kind FROM kv_cache WHERE k LIKE 'cmpgn!_brk:bc!_%' ESCAPE '!'").all()).results || [])) if (r.kind && !KINDS.includes(r.kind)) KINDS.push(r.kind); } catch (_) {}
         if (request.method === 'POST') {
           let body = {}; try { body = await request.json(); } catch (_) {}
-          if (body.reanudar && KINDS.includes(body.kind)) { try { await env.DB.prepare('DELETE FROM kv_cache WHERE k = ?').bind('cmpgn_brk:' + body.kind).run(); } catch (_) {} }
+          if (body.reanudar && (KINDS.includes(body.kind) || /^bc_\d+$/.test(String(body.kind || '')))) {
+            // Broadcast: al pausar se corrió su cola lo que duraba la pausa → volverla a correr lo que falta.
+            if (/^bc_\d+$/.test(body.kind)) {
+              try {
+                const st = await campaignState(env, body.kind);
+                const resta = st.until ? Math.round((st.until - Date.now()) / 1000) : 0;
+                if (resta > 0) await env.DB.prepare("UPDATE wa_autoreply_log SET due_at = strftime('%Y-%m-%dT%H:%M:%fZ', due_at, '-' || ? || ' seconds') WHERE kind = ? AND status = 'queued'").bind(resta, body.kind).run();
+              } catch (_) {}
+            }
+            try { await env.DB.prepare('DELETE FROM kv_cache WHERE k = ?').bind('cmpgn_brk:' + body.kind).run(); } catch (_) {}
+          }
         }
-        await ensureSendRetryTable(env);
         const nowIso = new Date().toISOString();
         const flujos = {};
         for (const k of KINDS) {
