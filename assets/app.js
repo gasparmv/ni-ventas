@@ -2613,6 +2613,14 @@ function setView(v) {
   // Volver a Corte con datos ya cargados: se muestran al toque y se refrescan en segundo plano.
   if (entraACorte && STATE.cortePedidos !== undefined) corteCargar(true);
 }
+// Campos de fecha: tocar en cualquier parte del campo abre el calendario (antes había que tipear
+// dd/mm/aaaa o apuntarle al iconito; pedido Gaspar 11-oct, ticket de corpóreos). Se puede seguir
+// tipeando igual. Vale para todos los <input type="date"> del CRM.
+document.addEventListener('click', (ev) => {
+  const el = ev.target;
+  if (!el || el.tagName !== 'INPUT' || el.type !== 'date' || el.disabled || el.readOnly) return;
+  try { if (typeof el.showPicker === 'function') el.showPicker(); } catch (_) {}
+});
 window.addEventListener('hashchange', () => {
   let h = location.hash.replace('#','') || 'dashboard';
   if (isCursosOnly()) h = 'chat';
@@ -8526,29 +8534,59 @@ function bindPmFotoSlots(root) {
 function pmBriefFotoEntry(b, key, tipo) {
   return { key, tipo_brief: tipo, brief_id: b.id, brief_diseno: b.diseno || '', brief_cliente: b.cliente_nombre || '' };
 }
-async function pmBriefFotos(i, b) {
-  const m = STATE.pedidoModal, c = m && m.carteles[i];
-  if (!c || !b || !b.id) return;
-  const tok = (c._briefTok || 0) + 1; c._briefTok = tok;
-  const rapidas = [];
-  if (b.first_render_key) rapidas.push(pmBriefFotoEntry(b, b.first_render_key, 'render'));
-  if (b.first_chat_key) rapidas.push(pmBriefFotoEntry(b, b.first_chat_key, 'chat'));
-  c._briefFotos = rapidas;
-  if (!c.foto_key && c.foto_estado !== 'subiendo') pmFotoRepintar(m, c);
+// Lo que ya trae el listado de briefs (primer render + primera foto del cliente): para mostrar al toque.
+function briefFotosRapidas(b) {
+  const out = [];
+  if (b && b.first_render_key) out.push(pmBriefFotoEntry(b, b.first_render_key, 'render'));
+  if (b && b.first_chat_key) out.push(pmBriefFotoEntry(b, b.first_chat_key, 'chat'));
+  return out;
+}
+// TODAS las imágenes del brief, ordenadas para sugerir el diseño final: renders (el último primero),
+// bocetos, y al final las fotos que mandó el cliente. null si no se pudo bajar el detalle.
+async function briefFotosDetalle(b) {
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/briefs/' + b.id, { headers: authHeaders() });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok || c._briefTok !== tok || !pmModalVivo(m)) return; // eligió otro brief o cerró el modal
+    if (!r.ok) return null;
     const imgs = (Array.isArray(j.imagenes) ? j.imagenes : []).filter(x => x && x.r2_key);
     const deTipo = t => imgs.filter(x => t(x.tipo)).reverse(); // el detalle viene del más viejo al más nuevo
-    const todas = [
+    return [
       ...deTipo(t => t === 'render' || t === 'render-ia').map(x => pmBriefFotoEntry(b, x.r2_key, 'render')),
       ...deTipo(t => t !== 'chat' && t !== 'render' && t !== 'render-ia').map(x => pmBriefFotoEntry(b, x.r2_key, 'boceto')),
       ...deTipo(t => t === 'chat').map(x => pmBriefFotoEntry(b, x.r2_key, 'chat')),
     ];
-    if (todas.length) c._briefFotos = todas;
-    if (!c.foto_key && c.foto_estado !== 'subiendo') pmFotoRepintar(m, c);
-  } catch (_) {}
+  } catch (_) { return null; }
+}
+async function pmBriefFotos(i, b) {
+  const m = STATE.pedidoModal, c = m && m.carteles[i];
+  if (!c || !b || !b.id) return;
+  const tok = (c._briefTok || 0) + 1; c._briefTok = tok;
+  c._briefFotos = briefFotosRapidas(b);
+  if (!c.foto_key && c.foto_estado !== 'subiendo') pmFotoRepintar(m, c);
+  const todas = await briefFotosDetalle(b);
+  if (!todas || c._briefTok !== tok || !pmModalVivo(m)) return; // falló, eligió otro brief o cerró el modal
+  if (todas.length) c._briefFotos = todas;
+  if (!c.foto_key && c.foto_estado !== 'subiendo') pmFotoRepintar(m, c);
+}
+// Brief de un pedido YA GUARDADO (el pedido no guarda qué brief se usó): por el nombre del cartel,
+// solo coincidencia EXACTA (normalizada) con el cliente o el diseño de un brief del mismo tipo
+// (corpóreo/neón). Si hay varios: el del mismo teléfono; si no, el más nuevo.
+async function briefDePedido(p) {
+  const nc = normName(String((p && p.cartel) || ''));
+  if (nc.length < 2) return null;
+  try { await ensureOcCorpBriefs(); } catch (_) {}
+  const lista = esCorpPedido(p) ? (STATE._ocCorpBriefs || []) : (STATE._ocNeonBriefs || []);
+  const cands = lista.filter(b => b && b.id && (normName(b.cliente_nombre) === nc || normName(b.diseno) === nc));
+  if (!cands.length) return null;
+  const tel = String(p.telefono || '').replace(/\D/g, '');
+  const mismoTel = tel.length >= 8 ? cands.filter(b => String(b.cliente_wa_id || '').replace(/\D/g, '').slice(-8) === tel.slice(-8)) : [];
+  return (mismoTel.length ? mismoTel : cands).reduce((a, b) => (Number(b.id) > Number(a.id) ? b : a));
+}
+// Encabezado de las sugerencias (modal y drawer): de dónde salen las fotos.
+function sugEncabezado(sug) {
+  const prop = sug.find(f => f._propia);
+  const de = prop ? `fotos del brief «${escapeHtml(prop.brief_cliente || prop.brief_diseno || '')}»${sug.some(f => !f._propia) ? ' y lo último que se le mandó al cliente' : ''}` : 'lo último que se le mandó al cliente';
+  return `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(${de} — tocá la que aprobó)</span></div>`;
 }
 function pmSugerenciasParaCartel(m, c) {
   // Primero las fotos del brief elegido en ESTE cartel; después lo del chat (sin repetir).
@@ -8606,9 +8644,7 @@ function pmFotoSlotHtml(c, i) {
       </div>`;
   } else {
     const { lista: sug, sugIdx } = pmSugerenciasParaCartel(m, c);
-    const prop = sug.find(f => f._propia);
-    const sugDe = prop ? `fotos del brief «${escapeHtml(prop.brief_cliente || prop.brief_diseno || '')}»${sug.some(f => !f._propia) ? ' y lo último que se le mandó al cliente' : ''}` : 'lo último que se le mandó al cliente';
-    const sugHtml = sug.length ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(${sugDe} — tocá la que aprobó)</span></div>
+    const sugHtml = sug.length ? `${sugEncabezado(sug)}
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${sug.map((f, k) => `<button type="button" data-pm-foto-sug="${i}|${escapeHtml(f.key)}" title="${escapeHtml(pmSugTitulo(f))}" style="position:relative;border:1px solid ${k === sugIdx ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" onerror="this.parentNode.style.display='none'" style="display:block;height:64px;width:64px;object-fit:cover">${k === sugIdx ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}${f._usada ? '<span style="position:absolute;left:0;right:0;top:0;background:rgba(0,0,0,.6);color:#fff;font-size:9px;padding:1px 0">otro cartel</span>' : ''}</button>`).join('')}</div>` : '';
     inner = `${sugHtml}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -10544,22 +10580,28 @@ async function pedDisenoCargarSugerencias(p) {
   const crudo = String(p.telefono || '').trim();
   const esUsuarioIg = p.plataforma === 'IG' && /^@|[a-z_.]/i.test(crudo);
   const contacto = esUsuarioIg ? crudo : crudo.replace(/\D/g, '');
-  if (esUsuarioIg ? contacto.replace(/^@/, '').length < 2 : contacto.length < 8) return;
+  const hayContacto = esUsuarioIg ? contacto.replace(/^@/, '').length >= 2 : contacto.length >= 8;
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/diseno-sugerencias?phone=' + encodeURIComponent(contacto), { headers: authHeaders() });
-    const j = await r.json();
+    // En paralelo: lo del chat del cliente (si hay contacto) + las fotos del brief del cartel, que salen
+    // aunque no haya chat (pedido cargado a mano desde el WhatsApp personal de Gaspar, caso 11-oct).
+    const [j, brief] = await Promise.all([
+      hayContacto ? fetch(CONFIG.trackerUrl + '/admin/pedidos/diseno-sugerencias?phone=' + encodeURIComponent(contacto), { headers: authHeaders() }).then(r => r.json()).catch(() => ({})) : Promise.resolve({}),
+      briefDePedido(p).catch(() => null),
+    ]);
+    const briefFotos = brief ? ((await briefFotosDetalle(brief)) || briefFotosRapidas(brief)) : [];
     const sec = pedDisenoSeccion(p.idx); if (!sec) return; // el drawer ya muestra otro pedido
     const box = sec.querySelector('#ped-diseno-sug'); if (!box) return;
-    if (!((j && j.fotos) || []).length) return;
+    if (!((j && j.fotos) || []).length && !briefFotos.length) return;
     // Mismo criterio que el modal: con varios carteles de neón en el pedido, cada uno sugiere el render de
     // SU brief (si no, todos marcaban como SUGERIDA lo último que se le mandó, que puede ser del otro cartel).
     const herm = pedidoHermanos(p); // neón y corpóreo del mismo pedido: cada uno sugiere el render de su brief
     const cs = herm.map(x => ({ cartel: x.cartel, es_corporeo: esCorpPedido(x) ? 1 : 0, foto_key: '', _fotoFrom: '' }));
     const yo = cs[herm.findIndex(x => x.idx === p.idx)] || { cartel: p.cartel, es_corporeo: esCorpPedido(p) ? 1 : 0 };
-    const { lista: fotos, sugIdx } = pmSugerenciasParaCartel({ _fotoSug: j.fotos, carteles: cs.length ? cs : [yo] }, yo);
+    yo._briefFotos = briefFotos;
+    const { lista: fotos, sugIdx } = pmSugerenciasParaCartel({ _fotoSug: (j && j.fotos) || [], carteles: cs.length ? cs : [yo] }, yo);
     if (!fotos.length) return;
-    box.innerHTML = `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguna de estas? <span style="opacity:.7">(lo último que se le mandó al cliente — tocá la que aprobó)</span></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">${fotos.map((f, k) => `<button type="button" data-ped-sug="${escapeHtml(f.key)}" title="${escapeHtml(f.brief_diseno || f.brief_cliente ? 'Render de «' + (f.brief_diseno || f.brief_cliente) + '» — usar como diseño aprobado' : 'Usar esta como diseño aprobado')}" style="position:relative;border:1px solid ${k === sugIdx ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" onerror="this.parentNode.style.display='none'" style="display:block;height:64px;width:64px;object-fit:cover">${k === sugIdx ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}</button>`).join('')}</div>`;
+    box.innerHTML = `${sugEncabezado(fotos)}
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${fotos.map((f, k) => `<button type="button" data-ped-sug="${escapeHtml(f.key)}" title="${escapeHtml(pmSugTitulo(f))}" style="position:relative;border:1px solid ${k === sugIdx ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)'};border-radius:6px;padding:0;background:#fff;cursor:pointer;overflow:hidden"><img src="${escapeHtml(disenoThumb(f.key, 240))}" loading="lazy" onerror="this.parentNode.style.display='none'" style="display:block;height:64px;width:64px;object-fit:cover">${k === sugIdx ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.85);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0">SUGERIDA</span>' : ''}</button>`).join('')}</div>`;
     box.querySelectorAll('[data-ped-sug]').forEach(b => b.onclick = () => pedDisenoUsarSugerida(p.idx, b.dataset.pedSug));
   } catch (_) {}
 }
