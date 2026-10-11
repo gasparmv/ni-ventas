@@ -1143,7 +1143,8 @@ async function pushPedidoToVentas(env, row) {
 const PEDIDO_VEND_MAP = { joaco: 'joaquin', joaquin: 'joaquin', facundo: 'facundo', agustina: 'agustina', gaspar: 'gaspar', bruno: 'gaspar', nadia: 'facundo', abril: 'abril' };
 async function pushPedidoCorporeoToV4(env, row) {
   if (!env.APPS_SCRIPT_URL) return { error: 'no APPS_SCRIPT_URL' };
-  const vk = String(row.cargado_por || row.comercial_id || '').toLowerCase().trim();
+  // Sin tildes: "Joaquín" quedaba "joaquín" y la COMISION (X) de la hoja buscaba "joaquín_CORP" en COGS → $0.
+  const vk = String(row.cargado_por || row.comercial_id || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
   const vend = PEDIDO_VEND_MAP[vk] || vk;
   const row_ao = [
     row.numero ?? '',                // A ID (= N° de pedido)
