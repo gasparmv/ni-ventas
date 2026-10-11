@@ -1,182 +1,261 @@
 /**
  * Google Apps Script — Cotizador Writer
- *
- * Deploy como Web App:
- *   1. Abrí https://script.google.com y creá un proyecto nuevo
- *   2. Pegá este código
- *   3. Cambiá SHEET_ID por el ID del spreadsheet del cotizador
- *   4. Deploy > New deployment > Web app
- *      - Execute as: Me
- *      - Who has access: Anyone
- *   5. Copiá la URL del deployment y pegala en CONFIG.appsScriptUrl en app.js
+ * v3 (24-sep): IDENTIDAD ESTABLE. Cada fila lleva el pedido.id de la D1 en una columna
+ * auxiliar (id_sync). El upsert matchea POR ESE ID primero → sobrevive al rename del
+ * cartel/diseño (no huérfana la fila con tus costos), distingue piezas idénticas de una
+ * orden, y no pisa filas de otra orden. Retrocompatible: las filas viejas sin id se
+ * matchean por numero+nombre la 1ª vez y quedan estampadas.
+ *   Columna id_sync:  NEÓN "2026" = col AB (28)   ·   CORPÓREO "Pedidos_Corporeo" = col AO (41)
+ * v4 (11-oct): Pedidos_Corporeo sumó la col Z "Caja" → estado/cobro pasan a AA:AB y el id_sync a AO.
+ *   + acción directo_vendedor: vendedor de los pedidos de neón en el 2026 v4 › Pedidos_Directo col C.
+ *   ⚠️ NO borres ni muevas esas columnas: son la clave del sync (si se pierden, degrada a
+ *      matchear por numero+nombre, menos robusto).
  */
-
 const SHEET_ID = '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ';
-
 const SHEET_NAME = '2026';
-
-// Spreadsheet 2026 v4 — de ahí leemos la hoja COGS para el cotizador nuevo.
-// (Es OTRO spreadsheet, distinto del SHEET_ID de presupuestos de arriba.)
-// TAMBIÉN es donde vive la hoja "Pedidos_Corporeo" (espejo de pedidos corpóreos).
 const COGS_SHEET_ID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE';
+const NEON_ID_COL = 28;   // col AB = id_sync (Excel de Ventas, hoja 2026)
+const CORP_ID_COL = 41;   // col AO = id_sync (Pedidos_Corporeo; era AN antes de la col Z "Caja")
 
 function doPost(e) {
   try {
-    // Soporta tanto JSON body directo como form field "data"
     const raw = (e.parameter && e.parameter.data) ? e.parameter.data : e.postData.contents;
     const data = JSON.parse(raw);
-
-    // ===== Acciones de PEDIDOS (espejo del CRM → Excel de Ventas) =====
-    // Si no hay `action`, sigue el flujo histórico del cotizador (más abajo).
-    if (data.action === 'pedido_ping') {
-      return jsonOut({ ok: true, pong: true });
-    }
-    if (data.action === 'pedido_upsert') {
-      return pedidoUpsert(data);
-    }
-    if (data.action === 'corporeo_upsert') {
-      return corporeoUpsert(data);
-    }
-    if (data.action === 'set_ad_bulk') {
-      return setAdBulk(data);
-    }
-    // Vendedor de pedidos de neón → 2026 v4 › Pedidos_Directo col C (ver directoVendedor, 10-oct).
-    if (data.action === 'directo_vendedor') {
-      return directoVendedor(data);
-    }
+    if (data.action === 'pedido_ping') return jsonOut({ ok: true, pong: true });
+    if (data.action === 'pedido_upsert') return pedidoUpsert(data);
+    if (data.action === 'corporeo_upsert') return corporeoUpsert(data);
+    if (data.action === 'corporeo_dedupe') return jsonOut({ ok: true, deleted: corporeoDedupeRun() });
+    if (data.action === 'neon_dedupe') return jsonOut({ ok: true, deleted: neonDedupeRun() });
+    if (data.action === 'set_ad_bulk') return setAdBulk(data);
+    if (data.action === 'directo_vendedor') return directoVendedor(data);
 
     const ss = SpreadsheetApp.openById(SHEET_ID);
-
     let sheet = ss.getSheetByName(SHEET_NAME);
-    if (!sheet) {
-      return ContentService.createTextOutput(JSON.stringify({ error: 'Hoja "' + SHEET_NAME + '" no encontrada' }))
-        .setMimeType(ContentService.MimeType.JSON);
-    }
+    if (!sheet) return ContentService.createTextOutput(JSON.stringify({ error: 'Hoja "' + SHEET_NAME + '" no encontrada' })).setMimeType(ContentService.MimeType.JSON);
 
-    // Formato fecha: d/M/yyyy HH:mm (hora local Argentina, AR-Buenos_Aires).
-    // Importante: incluir año + hora para poder ordenar dentro de un mismo día y no perder
-    // referencia al cambiar de año. parseDate() en app.js consume este formato.
     const fecha = Utilities.formatDate(new Date(), 'America/Argentina/Buenos_Aires', 'd/M/yyyy HH:mm');
-
-    // Columnas: A=Fecha, B=m2, C=diseño, D=alto, E=ancho, F=neon, G=tipo,
-    //           H=transparente, I=negro, J=descuento, K=recargo, L=reventa,
-    //           M=vacía, N=vacía, O=5% joaco, P=teléfono/contacto, Q=canal,
-    //           R=tramos (NUEVO), S=CF (NUEVO), T=margen (NUEVO),
-    //           U=precio_nuevo (NUEVO), V=precio_viejo (NUEVO), W=densidad (NUEVO)
-    // R..W son las columnas de TRANSICIÓN: durante el cambio al cotizador nuevo
-    // (spec COGS + margen variable) grabamos AMBOS precios para validar la
-    // fórmula nueva contra los presupuestos históricos. Una vez confirmado que
-    // la fórmula nueva está bien calibrada, se pueden ignorar/limpiar.
     const row = [
-      fecha,
-      data.m2 || 0,
-      data.cliente || '',
-      data.alto || 0,
-      data.ancho || 0,
-      data.neon || 0,
-      data.tipo || 'INT',
-      data.trans || 0,
-      data.negro || 0,
-      data.descuento || 0,
-      data.recargo || 0,
-      data.reventa || 0,
-      '', // M vacía
-      '', // N vacía
-      data.comision || 0,  // O = 5% Joaco
-      data.telefono || '', // P = Teléfono o usuario IG (lo que corresponda según canal)
-      data.canal || '',    // Q = Canal: "WPP" o "IG"
-      data.tramos || 0,    // R = Tramos (cortes/subtrazos del vector)
-      Math.round(data.cf || 0),                    // S = Costo Fijo (fórmula nueva)
-      data.margen ? +(data.margen).toFixed(4) : 0, // T = Margen objetivo (0..1)
-      data.precio_nuevo || 0,                      // U = Precio según fórmula nueva
-      data.precio_viejo || 0,                      // V = Precio según fórmula vieja
-      data.densidad ? +(data.densidad).toFixed(3) : 0 // W = Densidad (tramos/mt)
+      fecha, data.m2 || 0, data.cliente || '', data.alto || 0, data.ancho || 0, data.neon || 0,
+      data.tipo || 'INT', data.trans || 0, data.negro || 0, data.descuento || 0, data.recargo || 0,
+      data.reventa || 0, '', '', data.comision || 0, data.telefono || '', data.canal || '',
+      data.tramos || 0, Math.round(data.cf || 0), data.margen ? +(data.margen).toFixed(4) : 0,
+      data.precio_nuevo || 0, data.precio_viejo || 0, data.densidad ? +(data.densidad).toFixed(3) : 0
     ];
-
-    // Insertar después de la última fila con datos en columna C
     var colC = sheet.getRange('C:C').getValues();
     var lastDataRow = 0;
-    for (var i = colC.length - 1; i >= 0; i--) {
-      if (colC[i][0] !== '' && colC[i][0] !== null) {
-        lastDataRow = i + 1;
-        break;
-      }
-    }
+    for (var i = colC.length - 1; i >= 0; i--) { if (colC[i][0] !== '' && colC[i][0] !== null) { lastDataRow = i + 1; break; } }
     var insertRow = lastDataRow + 1;
     sheet.getRange(insertRow, 1, 1, row.length).setValues([row]);
-
-    return ContentService.createTextOutput(JSON.stringify({ ok: true, sheet: SHEET_NAME, row: insertRow }))
-      .setMimeType(ContentService.MimeType.JSON);
-
+    return ContentService.createTextOutput(JSON.stringify({ ok: true, sheet: SHEET_NAME, row: insertRow })).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ error: err.message }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({ error: err.message })).setMimeType(ContentService.MimeType.JSON);
   }
 }
 
-// Upsert de un pedido en el Excel de VENTAS (hoja 2026). El CRM (D1) es la fuente
-// de verdad; esto es el espejo. data.row = array de 21 valores (cols A..U). Con
-// data.sheet_row actualiza esa fila SIN tocar O (15 = Productor, que cargás vos en
-// el Excel); sin sheet_row, agrega una fila nueva y devuelve su número.
+// Clave de MATCH de nombre: NFC (une acentos), colapsa espacios, RESPETA mayusculas (para
+// no fusionar "LOOP" con "Loop", que son carteles distintos del mismo pedido).
+function _mk(s) { return String(s == null ? '' : s).normalize('NFC').replace(/\s+/g, ' ').trim(); }
+
+// ── IDENTIDAD ESTABLE ────────────────────────────────────────────────────────
+// Busca la fila por el pedido.id de la D1 en la columna id_sync. Es la clave más robusta:
+// no cambia aunque se renombre el cartel, y es única por pieza. Devuelve la fila o 0.
+function findById_(sheet, idCol, pid) {
+  if (!pid) return 0;
+  var last = sheet.getLastRow();
+  if (last < 1) return 0;
+  var vals = sheet.getRange(1, idCol, last, 1).getValues();
+  var want = String(pid).trim();
+  for (var r = 0; r < last; r++) {
+    if (String(vals[r][0] == null ? '' : vals[r][0]).trim() === want) return r + 1;
+  }
+  return 0;
+}
+// Estampa el pedido.id en la fila (la "adopta") + pone el header id_sync si falta.
+// setNumberFormat('0'): la columna auxiliar puede heredar formato % de la columna de al
+// lado (Ganancia%) → sin esto, 917 se MOSTRARÍA como "91700%" (el valor real igual es 917).
+function stampId_(sheet, row, idCol, pid) {
+  if (!pid || !(row > 1)) return;
+  ensureCols_(sheet, idCol);
+  var cell = sheet.getRange(row, idCol);
+  cell.setNumberFormat('0');
+  cell.setValue(pid);
+  var hcell = sheet.getRange(1, idCol);
+  var h = hcell.getValue();
+  if (h === '' || h == null) { hcell.setNumberFormat('@'); hcell.setValue('id_sync'); }
+}
+// La hoja puede tener menos columnas que la auxiliar (AB=28 / AN=40) → getRange tiraría error.
+// Crea las columnas vacías que falten al final y les pone formato numérico plano (las nuevas
+// heredan el formato de la última columna, que puede ser %). No afecta datos a la izquierda.
+function ensureCols_(sheet, n) {
+  var mc = sheet.getMaxColumns();
+  if (mc < n) {
+    sheet.insertColumnsAfter(mc, n - mc);
+    sheet.getRange(1, mc + 1, sheet.getMaxRows(), n - mc).setNumberFormat('0');
+  }
+}
+
+// Re-ubica por nombre (col keyCol) cerca del hint viejo, ignorando acentos/espacios.
+// id-aware: saltea filas cuyo id_sync sea de OTRO pedido. Devuelve fila corregida o 0.
+function relocateRow(sheet, sheetRow, keyCol, keyVal, idCol, pid) {
+  var want = _mk(keyVal);
+  if (!(sheetRow > 1) || want === '') return 0;
+  var lastRow = sheet.getLastRow();
+  var wantPid = pid ? String(pid).trim() : '';
+  var wide = Math.max(keyCol, idCol || 0);
+  var grid = sheet.getRange(1, 1, lastRow, wide).getValues();
+  var best = 0, bestDist = 1e9;
+  for (var r = 1; r <= lastRow; r++) {
+    if (_mk(grid[r - 1][keyCol - 1]) !== want) continue;
+    if (idCol) {
+      var rid = String(grid[r - 1][idCol - 1] == null ? '' : grid[r - 1][idCol - 1]).trim();
+      if (rid && wantPid && rid !== wantPid) continue; // fila de otro pedido
+    }
+    var dist = Math.abs(r - sheetRow);
+    if (dist < bestDist) { bestDist = dist; best = r; }
+  }
+  return best > 1 ? best : 0;
+}
+
+// Busca por numero + nombre en TODA la hoja, id-aware (saltea filas de otro pedido).
+// numCol/nameCol/idCol son 1-based. Devuelve la fila más arriba que coincide, o 0.
+function findByContent_(sheet, numero, name, numCol, nameCol, idCol, pid) {
+  var last = sheet.getLastRow();
+  if (last < 1) return 0;
+  var wantName = _mk(name);
+  if (!wantName) return 0;
+  var wantNum = _toNum(numero);
+  var wantPid = pid ? String(pid).trim() : '';
+  var wide = Math.max(numCol, nameCol, idCol);
+  var grid = sheet.getRange(1, 1, last, wide).getValues();
+  for (var r = 0; r < last; r++) {
+    if (_mk(grid[r][nameCol - 1]) !== wantName) continue;
+    var a = grid[r][numCol - 1];
+    var an = (a instanceof Date) ? NaN : _toNum(a);
+    if (wantNum && an !== wantNum) continue;
+    var rid = String(grid[r][idCol - 1] == null ? '' : grid[r][idCol - 1]).trim();
+    if (rid && wantPid && rid !== wantPid) continue; // fila de OTRO pedido (otra pieza) → no fusionar
+    return r + 1;
+  }
+  return 0;
+}
+
+// Upsert NEÓN (hoja 2026). Escribe A:N y P:U (salta O=Productor). Orden de resolución:
+// (1) id estable  (2) numero+cartel id-aware  (3) hint re-ubicado por cartel  (4) append. Estampa el id.
 function pedidoUpsert(data) {
   try {
     var VENTAS_ID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
     var ss = SpreadsheetApp.openById(VENTAS_ID);
     var sheet = ss.getSheetByName('2026');
     if (!sheet) return jsonOut({ error: 'hoja 2026 de Ventas no encontrada' });
+    ensureCols_(sheet, NEON_ID_COL);
     var row = data.row || [];
     while (row.length < 21) row.push('');
-    var sheetRow = parseInt(data.sheet_row, 10) || 0;
-    if (sheetRow && sheetRow > 1) {
-      // UPDATE: escribir A..N (1..14) y P..U (16..21), SALTANDO O (15 = Productor).
-      sheet.getRange(sheetRow, 1, 1, 14).setValues([row.slice(0, 14)]);
-      sheet.getRange(sheetRow, 16, 1, 6).setValues([row.slice(15, 21)]);
-      return jsonOut({ ok: true, row: sheetRow });
+    var pid = data.pedido_id || 0;
+    var hint = parseInt(data.sheet_row, 10) || 0;
+    var target = 0;
+    if (pid) target = findById_(sheet, NEON_ID_COL, pid);                                  // 1) id estable
+    if (!(target > 1)) target = findByContent_(sheet, row[1], row[2], 2, 3, NEON_ID_COL, pid); // 2) numero(B)+cartel(C)
+    if (!(target > 1) && hint > 1) target = relocateRow(sheet, hint, 3, row[2], NEON_ID_COL, pid); // 3) hint por cartel
+    if (!(target > 1)) {                                                                    // 4) append
+      var colC = sheet.getRange('C:C').getValues();
+      var last = 0;
+      for (var i = colC.length - 1; i >= 0; i--) { if (colC[i][0] !== '' && colC[i][0] !== null) { last = i + 1; break; } }
+      target = last + 1;
     }
-    // APPEND: después de la última fila con datos en la col C (cartel).
-    var colC = sheet.getRange('C:C').getValues();
-    var last = 0;
-    for (var i = colC.length - 1; i >= 0; i--) { if (colC[i][0] !== '' && colC[i][0] !== null) { last = i + 1; break; } }
-    var insertRow = last + 1;
-    sheet.getRange(insertRow, 1, 1, 21).setValues([row.slice(0, 21)]);
-    return jsonOut({ ok: true, row: insertRow });
+    sheet.getRange(target, 1, 1, 14).setValues([row.slice(0, 14)]);
+    sheet.getRange(target, 16, 1, 6).setValues([row.slice(15, 21)]);
+    stampId_(sheet, target, NEON_ID_COL, pid);
+    return jsonOut({ ok: true, row: target });
   } catch (err) {
     return jsonOut({ error: err.message });
   }
 }
 
-// Upsert de un pedido CORPÓREO en el Sheet 2026 v4 (hoja "Pedidos_Corporeo"). data.row =
-// array de 21 valores (cols A..U del v4). Con data.sheet_row actualiza esa fila; sin él,
-// agrega una fila nueva y devuelve su número. Acá se escriben las 21 columnas (la col O del
-// v4 es "Precio venta", NO "Productor" como en el Excel viejo, así que no se saltea ninguna).
+// Upsert CORPÓREO (hoja Pedidos_Corporeo). Escribe SOLO A:O (15) y Z:AA (2); nunca toca
+// costos P:X / Caja Y / cobros AB:AE / resumen AG:AL. Mismo orden idempotente por id.
 function corporeoUpsert(data) {
   try {
     var CORP_ID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE';
     var ss = SpreadsheetApp.openById(CORP_ID);
     var sheet = ss.getSheetByName('Pedidos_Corporeo');
     if (!sheet) return jsonOut({ error: 'hoja Pedidos_Corporeo no encontrada' });
-    var row = data.row || [];
-    while (row.length < 21) row.push('');
-    var sheetRow = parseInt(data.sheet_row, 10) || 0;
-    if (sheetRow && sheetRow > 1) {
-      sheet.getRange(sheetRow, 1, 1, 21).setValues([row.slice(0, 21)]);
-      return jsonOut({ ok: true, row: sheetRow });
+    ensureCols_(sheet, CORP_ID_COL);
+    var ao = data.row_ao || []; while (ao.length < 15) ao.push(''); ao = ao.slice(0, 15);
+    var zaa = data.row_zaa || []; while (zaa.length < 2) zaa.push(''); zaa = zaa.slice(0, 2);
+    var pid = data.pedido_id || 0;
+    var hint = parseInt(data.sheet_row, 10) || 0;
+    var target = 0;
+    if (pid) target = findById_(sheet, CORP_ID_COL, pid);                                   // 1) id estable
+    if (!(target > 1)) target = findByContent_(sheet, ao[0], ao[4], 1, 5, CORP_ID_COL, pid); // 2) numero(A)+Diseño(E)
+    if (!(target > 1) && hint > 1) target = relocateRow(sheet, hint, 5, ao[4], CORP_ID_COL, pid); // 3) hint por Diseño
+    if (!(target > 1)) {                                                                     // 4) append
+      var colB = sheet.getRange('B:B').getValues();
+      var last = 0;
+      for (var i = colB.length - 1; i >= 0; i--) { if (colB[i][0] !== '' && colB[i][0] !== null) { last = i + 1; break; } }
+      target = (last < 1 ? 1 : last) + 1;
     }
-    // APPEND: después de la última fila con datos en la col B (N° pedido).
-    var colB = sheet.getRange('B:B').getValues();
-    var last = 0;
-    for (var i = colB.length - 1; i >= 0; i--) { if (colB[i][0] !== '' && colB[i][0] !== null) { last = i + 1; break; } }
-    var insertRow = (last < 1 ? 1 : last) + 1;
-    sheet.getRange(insertRow, 1, 1, 21).setValues([row.slice(0, 21)]);
-    return jsonOut({ ok: true, row: insertRow });
+    sheet.getRange(target, 1, 1, 15).setValues([ao]);   // A:O
+    sheet.getRange(target, 27, 1, 2).setValues([zaa]);  // AA:AB (estado pago, COBRO 1); Z = Caja, la cargás vos
+    stampId_(sheet, target, CORP_ID_COL, pid);
+    return jsonOut({ ok: true, row: target });
   } catch (err) {
     return jsonOut({ error: err.message });
   }
 }
 
-// Escribe valores por fila en UNA columna de la hoja 2026 de Ventas (default U=21).
-// No toca ninguna otra columna. data.items = [{ row: <nro de fila>, ad: <texto> }, ...].
-// data.col opcional: 21 = U (Ad); 22 = V (Ad ID de Meta); etc.
+// ─────────────────────────────────────────────────────────────────────────────
+// LIMPIEZA DE DUPLICADOS — corré la función UNA VEZ desde el editor (botón ▶).
+// Duplicada = TODAS las columnas del CRM idénticas a otra (corpóreo A:O+Z:AA / neón A:N+P:U).
+// Conserva la fila con MÁS celdas llenas (la de tus costos), borra el resto. Nunca toca
+// filas manuales ni piezas distintas.
+// ─────────────────────────────────────────────────────────────────────────────
+function corporeoDedupeRun() {
+  var CORP_ID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE';
+  var sheet = SpreadsheetApp.openById(CORP_ID).getSheetByName('Pedidos_Corporeo');
+  var n = _dedupeSheet_(sheet, [[1, 15], [27, 28]], 2);
+  Logger.log('Corpóreo: borradas ' + n + ' filas duplicadas');
+  return n;
+}
+function neonDedupeRun() {
+  var VENTAS_ID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
+  var sheet = SpreadsheetApp.openById(VENTAS_ID).getSheetByName('2026');
+  var n = _dedupeSheet_(sheet, [[1, 14], [16, 21]], 2);
+  Logger.log('Neón: borradas ' + n + ' filas duplicadas');
+  return n;
+}
+function _cellKey_(v) { if (v instanceof Date) return 'D' + v.getTime(); return String(v == null ? '' : v).normalize('NFC').trim(); }
+function _dedupeSheet_(sheet, ranges, startRow) {
+  var last = sheet.getLastRow(), lastCol = sheet.getLastColumn();
+  if (last < startRow) return 0;
+  var full = sheet.getRange(startRow, 1, last - startRow + 1, lastCol).getValues();
+  function keyOf(rowArr) {
+    var parts = [];
+    for (var g = 0; g < ranges.length; g++) {
+      for (var c = ranges[g][0]; c <= ranges[g][1]; c++) parts.push(_cellKey_(rowArr[c - 1]));
+      parts.push('\u0002');
+    }
+    return parts.join('\u0001');
+  }
+  function fillCount(rowArr) { var n = 0; for (var c = 0; c < rowArr.length; c++) { if (String(rowArr[c] == null ? '' : rowArr[c]).trim() !== '') n++; } return n; }
+  var groups = {};
+  for (var i = 0; i < full.length; i++) {
+    var k = keyOf(full[i]);
+    if (k.replace(/[\u0001\u0002]/g, '').trim() === '') continue;
+    (groups[k] = groups[k] || []).push(startRow + i);
+  }
+  var toDelete = [];
+  for (var key in groups) {
+    var g = groups[key];
+    if (g.length < 2) continue;
+    var keep = g[0], keepFill = fillCount(full[keep - startRow]);
+    for (var j = 1; j < g.length; j++) { var f = fillCount(full[g[j] - startRow]); if (f > keepFill) { keepFill = f; keep = g[j]; } }
+    for (var j2 = 0; j2 < g.length; j2++) { if (g[j2] !== keep) toDelete.push(g[j2]); }
+  }
+  toDelete.sort(function (a, b) { return a - b; });
+  for (var d = toDelete.length - 1; d >= 0; d--) sheet.deleteRow(toDelete[d]);
+  return toDelete.length;
+}
+
 function setAdBulk(data) {
   try {
     var VENTAS_ID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
@@ -184,7 +263,7 @@ function setAdBulk(data) {
     var sheet = ss.getSheetByName('2026');
     if (!sheet) return jsonOut({ error: 'hoja 2026 de Ventas no encontrada' });
     var items = data.items || [];
-    var col = parseInt(data.col, 10) || 21; // 21 = U (Ad); 22 = V (Ad ID de Meta)
+    var col = parseInt(data.col, 10) || 21;
     var written = 0;
     for (var i = 0; i < items.length; i++) {
       var sr = parseInt(items[i].row, 10) || 0;
@@ -196,13 +275,6 @@ function setAdBulk(data) {
   }
 }
 
-// Lee la hoja COGS del 2026 v4 y devuelve los costos del MES ACTUAL.
-// - La columna del mes se detecta leyendo la fila 1: busca la celda cuyo número
-//   == mes actual (zona AR). Así no importa en qué letra esté.
-// - Los valores se buscan por NOMBRE de fila (col A "id" o col B "Nombre"),
-//   no por número de fila → si insertás filas en el Excel no se rompe.
-// - Override para testear: ?action=cogs&mes=6  ·  diagnóstico: ?action=cogs&debug=1
-// Helpers para getCogs (lectura de sueldos fijos de la hoja COGS).
 function _norm(s) { return String(s == null ? '' : s).trim().toLowerCase(); }
 function _toNum(v) {
   if (typeof v === 'number') return Math.round(v);
@@ -220,16 +292,11 @@ function getCogs(e) {
       if (allSheets[s].getName().toLowerCase().indexOf('cogs') !== -1) { sheet = allSheets[s]; break; }
     }
     if (!sheet) return jsonOut({ error: 'no encontré una hoja con "COGS" en el nombre' });
-
     var lastRow = sheet.getLastRow();
     var lastCol = sheet.getLastColumn();
     var values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
-
     var mes = parseInt((e && e.parameter && e.parameter.mes) || '', 10);
-    if (!mes || mes < 1 || mes > 12) {
-      mes = parseInt(Utilities.formatDate(new Date(), 'America/Argentina/Buenos_Aires', 'M'), 10);
-    }
-
+    if (!mes || mes < 1 || mes > 12) mes = parseInt(Utilities.formatDate(new Date(), 'America/Argentina/Buenos_Aires', 'M'), 10);
     var header = values[0] || [];
     var monthCol = -1;
     for (var c = 0; c < header.length; c++) {
@@ -238,7 +305,6 @@ function getCogs(e) {
       if (n === mes) { monthCol = c; break; }
     }
     if (monthCol === -1) return jsonOut({ error: 'no encontré la columna del mes ' + mes, header: header });
-
     function findVal(labels) {
       for (var r = 1; r < values.length; r++) {
         var idA = String(values[r][0] || '').trim().toLowerCase();
@@ -251,9 +317,6 @@ function getCogs(e) {
       return null;
     }
     function pct(v) { v = Number(v) || 0; return v > 1 ? v / 100 : v; }
-
-    // Sueldo fijo de Joaquín por mes: busca la fila "sueldos joaqu..." y lee la
-    // celda del mes detectando el header de meses más cercano hacia arriba.
     function findRowByLabel(needle) {
       needle = _norm(needle);
       for (var r = 0; r < values.length; r++) {
@@ -276,7 +339,6 @@ function getCogs(e) {
       }
       return null;
     }
-
     var joaquinFijoByMonth = null, joaquinFijoRow = -1;
     var jrow = findRowByLabel('sueldos joaqu');
     if (jrow >= 0) {
@@ -298,27 +360,18 @@ function getCogs(e) {
         }
       }
     }
-
     if (e && e.parameter && e.parameter.debug) {
       var preview = [];
-      for (var r3 = 0; r3 < Math.min(values.length, 55); r3++) {
-        preview.push([values[r3][0], values[r3][1], values[r3][2], values[r3][monthCol]]);
-      }
-      return jsonOut({
-        ok: true, mes: mes, monthColIndex: monthCol, header: header,
-        joaquinFijoRow: joaquinFijoRow, joaquin_fijo_by_month: joaquinFijoByMonth, preview: preview
-      });
+      for (var r3 = 0; r3 < Math.min(values.length, 55); r3++) preview.push([values[r3][0], values[r3][1], values[r3][2], values[r3][monthCol]]);
+      return jsonOut({ ok: true, mes: mes, monthColIndex: monthCol, header: header, joaquinFijoRow: joaquinFijoRow, joaquin_fijo_by_month: joaquinFijoByMonth, preview: preview });
     }
-
     var cogs = {
-      costo_acrilico_trans:   Number(findVal(['Trans', 'Coste Acrilico Trans'])) || 0,
-      costo_acrilico_negro:   Number(findVal(['Negro', 'Coste Acrilico Negro'])) || 0,
+      costo_acrilico_trans: Number(findVal(['Trans', 'Coste Acrilico Trans'])) || 0,
+      costo_acrilico_negro: Number(findVal(['Negro', 'Coste Acrilico Negro'])) || 0,
       venta_trans_imaginario: Number(findVal(['TRANS_V', 'Venta Acrilico Trans'])) || 0,
-      anibal:    pct(findVal(['ANIBAL', 'Anibal'])),
-      emma:      pct(findVal(['EMMA', 'Emma'])),
+      anibal: pct(findVal(['ANIBAL', 'Anibal'])), emma: pct(findVal(['EMMA', 'Emma'])),
       costo_neon_mt: Number(findVal(['Neon', 'Metro de neon'])) || 0,
-      mano_obra: pct(findVal(['MO', 'Mano de Obra'])),
-      joaquin:   pct(findVal(['JOAQUIN', 'Joaquin'])),
+      mano_obra: pct(findVal(['MO', 'Mano de Obra'])), joaquin: pct(findVal(['JOAQUIN', 'Joaquin'])),
       joaquin_fijo_by_month: joaquinFijoByMonth,
       joaquin_fijo: (joaquinFijoByMonth && joaquinFijoByMonth[mes]) || 0
     };
@@ -334,37 +387,25 @@ function jsonOut(obj) {
 
 function doGet(e) {
   const action = e && e.parameter && e.parameter.action;
-  // GET ?action=cogs → costos del mes actual para el cotizador nuevo.
   if (action === 'cogs') return getCogs(e);
-  // GET ?action=pedido_ping → verificar (sin escribir) que esta versión nueva
-  // del Apps Script (con el espejo de pedidos) está deployada.
   if (action === 'pedido_ping') return jsonOut({ ok: true, pong: true });
-  // El CRM pregunta esto ANTES de usar directo_vendedor (una acción POST desconocida agrega un presupuesto).
   if (action === 'directo_ping') return jsonOut({ ok: true, directo: true });
-  // GET ?action=rows&sheet=2026 → devuelve las filas crudas (sin coerción de tipo
-  // que hace gviz, que rompe los teléfonos con "+" o espacios).
   if (action === 'rows') {
     try {
       const sheetName = (e.parameter.sheet || SHEET_NAME);
       const ss = SpreadsheetApp.openById(SHEET_ID);
       const sheet = ss.getSheetByName(sheetName);
-      if (!sheet) {
-        return ContentService.createTextOutput(JSON.stringify({ error: 'sheet not found: ' + sheetName }))
-          .setMimeType(ContentService.MimeType.JSON);
-      }
-      // Leer hasta col Z y convertir a string para preservar formato exacto
+      if (!sheet) return ContentService.createTextOutput(JSON.stringify({ error: 'sheet not found: ' + sheetName })).setMimeType(ContentService.MimeType.JSON);
       const lastRow = sheet.getLastRow();
       if (lastRow < 1) return ContentService.createTextOutput(JSON.stringify({ ok: true, rows: [] })).setMimeType(ContentService.MimeType.JSON);
       const range = sheet.getRange(1, 1, lastRow, 26);
-      const display = range.getDisplayValues(); // valores tal como se ven en el sheet (preserva formato)
-      return ContentService.createTextOutput(JSON.stringify({ ok: true, rows: display, sheet: sheetName }))
-        .setMimeType(ContentService.MimeType.JSON);
+      const display = range.getDisplayValues();
+      return ContentService.createTextOutput(JSON.stringify({ ok: true, rows: display, sheet: sheetName })).setMimeType(ContentService.MimeType.JSON);
     } catch (err) {
       return ContentService.createTextOutput(JSON.stringify({ error: err.message })).setMimeType(ContentService.MimeType.JSON);
     }
   }
-  return ContentService.createTextOutput(JSON.stringify({ status: 'ok', info: 'NI Cotizador Writer. POST to add rows. GET ?action=rows&sheet=NAME to fetch.' }))
-    .setMimeType(ContentService.MimeType.JSON);
+  return ContentService.createTextOutput(JSON.stringify({ status: 'ok', info: 'NI Cotizador Writer.' })).setMimeType(ContentService.MimeType.JSON);
 }
 
 // ── VENDEDOR de los pedidos de NEÓN → 2026 v4 › Pedidos_Directo, col C (10-oct) ──────────

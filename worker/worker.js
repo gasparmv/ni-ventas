@@ -1179,12 +1179,14 @@ async function pushPedidoCorporeoToV4(env, row) {
 // PnL/COGS): por eso NO se convierte en fórmula (un #REF! las dejaría en 0 sin aviso). El Apps Script
 // (acción directo_vendedor) escribe C SOLO si está vacía o todavía tiene lo que había puesto el CRM
 // (prev): nunca pisa lo que Gaspar cargó a mano; verifica N° + nombre antes de escribir.
-// Vendedor = quien VENDIÓ (comercial_id; si falta, quien lo cargó). kv 'pedido_vend:<id>' = último
-// vendedor aplicado ('!'+vendedor si el Apps Script no lo pudo ubicar). Solo desde VEND_NEON_DESDE.
+// Vendedor = quien lo CARGÓ (cargado_por; si falta, comercial_id), IGUAL que en corpóreos (Gaspar 11/10:
+// "lo que importa es quien lo cargó"; si Gaspar carga sin querer uno de otro vendedor, se corrige el
+// cargado_por del pedido). kv 'pedido_vend:<id>' = último vendedor aplicado ('!'+vendedor si el Apps
+// Script no lo pudo ubicar). Solo desde VEND_NEON_DESDE.
 const VEND_NEON_DESDE = '2026-09-01';
 function pedidoVendedorNeon(row) {
   const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
-  const k = norm(row.comercial_id) || norm(row.cargado_por);
+  const k = norm(row.cargado_por) || norm(row.comercial_id);
   return k ? (PEDIDO_VEND_MAP[k] || k) : '';
 }
 // ¿El Apps Script vivo ya tiene directo_vendedor? Se pregunta por GET (?action=directo_ping): una acción
@@ -19083,8 +19085,22 @@ const handler = {
       // mano como orgánicos. Batched en un solo request. Solo Gaspar. Idempotente.
       // POST /admin/pedidos/vendedor-sync → corre YA el barrido del vendedor de los pedidos de neón al 2026 v4
       // (Pedidos_Directo col C) y devuelve el detalle (escritos / iguales / cargados a mano / errores). Solo Gaspar.
+      // Con {forzar:[{id, prev}]} corrige celdas que ya tienen un vendedor (decisión de Gaspar): manda el
+      // vendedor del CRM con prev = lo que hoy dice la planilla, así el Apps Script lo reemplaza.
       if (request.method === 'POST' && path === '/admin/pedidos/vendedor-sync') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const body = await request.json().catch(() => ({}));
+        const forzar = Array.isArray(body.forzar) ? body.forzar.slice(0, 50) : [];
+        if (forzar.length) {
+          const items = [], skip = [];
+          for (const f of forzar) {
+            const p = await env.DB.prepare('SELECT id, numero, cartel, fecha, sheet_row, es_corporeo, comercial_id, cargado_por FROM pedidos WHERE id = ?').bind(parseInt(f.id, 10) || 0).first();
+            const vend = p ? pedidoVendedorNeon(p) : '';
+            if (!p || p.es_corporeo || !(p.sheet_row > 1) || String(p.fecha || '') < VEND_NEON_DESDE || !vend) { skip.push(f.id); continue; }
+            items.push({ id: p.id, row: p.sheet_row, numero: p.numero, cartel: p.cartel, vend, prev: String(f.prev || '').toLowerCase().trim() });
+          }
+          return json({ ok: true, forzados: await enviarVendedoresNeon(env, items), skip });
+        }
         return json({ ok: true, ...(await barrerVendedoresNeon(env)) });
       }
 
