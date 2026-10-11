@@ -2,8 +2,13 @@
 //
 // Endpoints públicos:
 //   POST /event              { user, action, itemId, itemKind, undo? }   → 204
-//   GET  /report?user=&from=&to=                                         → { rows }
 //   GET  /health
+//
+// Con sesión (Bearer, nunca el usuario externo de logística — ver sesionInterna):
+//   GET  /report?user=&from=&to=                                         → { rows } (admin/comercial/diseño)
+//   GET  /cotizador/params · /cotizador/cogs                             → (admin/comercial/diseño)
+//   GET|POST|DELETE /done                                                → solo las marcas del dueño de la sesión
+//   GET  /debug/wa-quality                                               → solo admin
 //
 // Webhook WhatsApp:
 //   GET  /webhook             verificación de Meta (hub.verify_token)
@@ -12208,6 +12213,25 @@ async function getSessionRole(env, userName) {
   } catch (e) { return 'comercial'; }
 }
 
+// Rutas fuera de /admin/ que antes eran públicas (/cotizador/*, /report, /done, /debug/wa-quality): exigen
+// sesión válida y NUNCA dejan pasar al usuario externo de logística. Con `roles`, además, solo esos roles.
+// Devuelve { session, role } o { error } con la Response lista para devolver.
+async function sesionInterna(env, request, roles) {
+  const session = await getSession(env, request);
+  if (!session) return { error: unauthorized() };
+  const role = esUsuarioLogistica(session.user) ? 'logistica' : await getSessionRole(env, session.user);
+  if (role === 'logistica' || (roles && !roles.includes(role))) return { error: json({ error: 'forbidden' }, 403) };
+  return { session, role };
+}
+// Quiénes usan el cotizador (COGS/params) y la vista Actividad: Gaspar, vendedores y diseño.
+// Cursos (Abril), producción (Aníbal/Neyen) y logística no lo necesitan.
+const ROLES_COTIZADOR = ['admin', 'comercial', 'disenador'];
+// ¿El `user` que manda el front es el dueño de la sesión? Tolera tildes/mayúsculas y los alias (Joaquín↔joaco).
+function esMismoUsuario(sessionUser, user) {
+  const slug = (s) => String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  return userLookupIds(slug(user)).includes(slug(sessionUser));
+}
+
 // Cláusula SQL de filtrado de bandeja según rol (para la lista de chats).
 //   admin     → sin filtro (ve todo)
 //   cursos    → solo bandeja 'cursos'
@@ -13976,6 +14000,16 @@ const handler = {
     }
 
     // ----- Done marks (persistente, reemplaza localStorage) -----
+    // Cada uno lee/escribe SOLO sus marcas: sesión válida (no logística) y `user` = dueño de la sesión.
+    if (path === '/done' && ['GET', 'POST', 'DELETE'].includes(request.method)) {
+      const si = await sesionInterna(env, request);
+      if (si.error) return si.error;
+      let doneUser = url.searchParams.get('user');
+      if (request.method !== 'GET') {
+        try { doneUser = ((await request.clone().json()) || {}).user; } catch { return json({ error: 'invalid json' }, 400); }
+      }
+      if (doneUser && !esMismoUsuario(si.session.user, doneUser)) return json({ error: 'forbidden' }, 403);
+    }
     if (request.method === 'GET' && path === '/done') {
       const user = url.searchParams.get('user');
       if (!user) return json({ error: 'missing user' }, 400);
@@ -14119,15 +14153,19 @@ const handler = {
       return json({ token, user: target, expiresAt: expires.toISOString() });
     }
 
-    // ----- Reportes (público para tracking básico) -----
+    // ----- Reportes (vista Actividad del front; antes público) -----
     if (request.method === 'GET' && path === '/report') {
+      const si = await sesionInterna(env, request, ROLES_COTIZADOR);
+      if (si.error) return si.error;
       return reportHandler(env, url, false);
     }
 
     // DEBUG temporal — probar rutas de calidad/estado del número en 360dialog
     // (quality_rating + messaging_limit_tier). Los paths estándar dan "Not found",
-    // acá probamos varias para encontrar la correcta del WABA nuevo.
+    // acá probamos varias para encontrar la correcta del WABA nuevo. Solo admin.
     if (request.method === 'GET' && path === '/debug/wa-quality') {
+      const si = await sesionInterna(env, request, ['admin']);
+      if (si.error) return si.error;
       const wa = getWaClient(env);
       const out = { provider: wa.provider, base: wa.base || null, phone_id_env: env.WA_PHONE_NUMBER_ID || null, waba_id_env: env.WA_BUSINESS_ACCOUNT_ID || null };
       const tryPath = async (label, u) => {
@@ -14224,8 +14262,10 @@ const handler = {
       return json(out);
     }
 
-    // ----- Cotizador params (público lectura) -----
+    // ----- Cotizador params (lectura para quien cotiza; antes público) -----
     if (request.method === 'GET' && path === '/cotizador/params') {
+      const si = await sesionInterna(env, request, ROLES_COTIZADOR);
+      if (si.error) return si.error;
       const rs = await env.DB.prepare('SELECT key, value FROM cotizador_params').all();
       const params = {};
       for (const r of (rs.results || [])) params[r.key] = r.value;
@@ -14237,10 +14277,20 @@ const handler = {
     // el worker hace de proxy server-to-server. Devuelve los costos reales del
     // mes actual leídos de la hoja COGS, para que el cotizador nuevo cotice con
     // datos vivos. Cache D1 (TTL 20 min) salvo ?fresh=1 que fuerza relectura.
+    // Antes era público: ahora solo quien cotiza (sesión válida, nunca logística). El sueldo fijo de
+    // Joaco (joaquin_fijo*) lo ven solo el admin y Joaco (su panel "Tu sueldo"); ?fresh=1 solo el admin.
     if (request.method === 'GET' && path === '/cotizador/cogs') {
+      const si = await sesionInterna(env, request, ROLES_COTIZADOR);
+      if (si.error) return si.error;
+      const veSueldoJoaco = si.role === 'admin' || canonWorker(si.session.user) === 'joaco';
+      const sinSueldo = (d) => {
+        if (veSueldoJoaco || !d || !d.cogs) return d;
+        const { joaquin_fijo_by_month, joaquin_fijo, ...cogs } = d.cogs;
+        return { ...d, cogs };
+      };
       const scriptUrl = env.APPS_SCRIPT_URL;
       if (!scriptUrl) return json({ error: 'APPS_SCRIPT_URL no configurada en el worker' }, 500);
-      const fresh = url.searchParams.get('fresh') === '1';
+      const fresh = url.searchParams.get('fresh') === '1' && si.role === 'admin';
       const TTL_MS = 20 * 60 * 1000;
       // 1) Cache en kv_cache (key 'cogs_excel').
       if (!fresh) {
@@ -14251,7 +14301,7 @@ const handler = {
           if (cached && cached.v && cached.updated_at) {
             const age = Date.now() - Date.parse(cached.updated_at);
             if (age >= 0 && age < TTL_MS) {
-              return json({ ...JSON.parse(cached.v), cached: true, age_ms: age });
+              return json(sinSueldo({ ...JSON.parse(cached.v), cached: true, age_ms: age }));
             }
           }
         } catch (_) { /* cache miss o JSON inválido → seguimos al fetch */ }
@@ -14265,7 +14315,7 @@ const handler = {
         // Si falla la red, devolvemos el cache aunque esté vencido.
         try {
           const stale = await env.DB.prepare("SELECT v FROM kv_cache WHERE k = 'cogs_excel'").first();
-          if (stale && stale.v) return json({ ...JSON.parse(stale.v), cached: true, stale: true });
+          if (stale && stale.v) return json(sinSueldo({ ...JSON.parse(stale.v), cached: true, stale: true }));
         } catch (_) {}
         return json({ error: 'no pude leer COGS del Apps Script: ' + (e.message || e) }, 502);
       }
@@ -14277,7 +14327,7 @@ const handler = {
           ).bind(JSON.stringify(data), new Date().toISOString()).run();
         } catch (_) { /* si falla el cache no es fatal */ }
       }
-      return json(data);
+      return json(sinSueldo(data));
     }
 
     // ----- Portal Revendedores (publico, cuentas propias, aislado del CRM) -----

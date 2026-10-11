@@ -562,15 +562,28 @@ async function postRepartoAdmin(body) {
   }
 }
 
+// ¿Este usuario cotiza? (Gaspar, vendedores y diseño). Abril, producción y logística NO: el worker les
+// niega /cotizador/* y acá no se pide ni se guarda en el navegador nada de costos ni sueldos.
+function usaCotizador() {
+  return !!STATE.token && tokenBelongsTo(STATE.user) && !isCursosOnly() && !isProduccionOnly() && !isLogisticaOnly();
+}
+// Borra los COGS/params del navegador (costos internos): al cerrar sesión o si el usuario no cotiza.
+function olvidarCotizadorCache() {
+  STATE.cotizadorCogs = null;
+  STATE.cotizadorParams = null;
+  try { localStorage.removeItem('niventas.cogs'); } catch (_) {}
+}
+
 async function loadCotizadorParams() {
   if (!CONFIG.trackerUrl) return;
+  if (!usaCotizador()) { olvidarCotizadorCache(); return; }
   // Cache optimista de COGS desde localStorage (instantáneo mientras llega el fresco).
   try {
     const cached = JSON.parse(localStorage.getItem('niventas.cogs') || 'null');
     if (cached && cached.derived) STATE.cotizadorCogs = cached;
   } catch (_) {}
   try {
-    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/cotizador/params');
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/cotizador/params', { headers: authHeaders() });
     if (r.ok) {
       const j = await r.json();
       if (j.params && Object.keys(j.params).length) STATE.cotizadorParams = j.params;
@@ -584,12 +597,13 @@ async function loadCotizadorParams() {
 // transforma en los 3 params nv_* de la fórmula nueva. Cachea en localStorage.
 // opts.fresh = true bypassa el cache del worker (botón "Refrescar COGS").
 async function loadCogsFromExcel(opts) {
-  if (!CONFIG.trackerUrl) return null;
+  if (!CONFIG.trackerUrl || !usaCotizador()) return null;
   const fresh = !!(opts && opts.fresh);
   try {
-    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/cotizador/cogs' + (fresh ? '?fresh=1' : ''));
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/cotizador/cogs' + (fresh ? '?fresh=1' : ''), { headers: authHeaders() });
     if (!r.ok) return null;
     const j = await r.json();
+    if (!usaCotizador()) return null;   // cambió de usuario mientras llegaba: no dejarle los costos al nuevo
     if (!j || !j.ok || !j.cogs) { STATE.cotizadorCogsError = (j && j.error) || 'sin datos'; return null; }
     const c = j.cogs;
     // Derivar los params de la fórmula nueva a partir de los costos crudos:
@@ -1545,6 +1559,7 @@ function afterUserSwitch() {
   chatState.vigilados = null;  // 🔔 clientes vigilados: solo los ve el admin
   render();
   try { fetchOcUrgenteStatus(); } catch (_) {}
+  loadCotizadorParams();   // /cotizador/* pide sesión: recién ahora hay token (y si el nuevo no cotiza, borra el cache)
   loadAll().catch(() => {});
   if (canAccessChat()) { ensureNotificationPermission(); initPollWorker(); loadChatContacts().then(() => updateUnreadBadge()); }
 }
@@ -1576,6 +1591,7 @@ async function logout() {
   chatState.vigilados = null;
   saveToken(null);
   saveAdminToken(null);
+  olvidarCotizadorCache();   // costos internos fuera del navegador al cerrar sesión
   teardownPollWorker();
   // Cerrar sesión = volver al formulario de login (para todos).
   STATE.user = null; saveUser();
@@ -1653,7 +1669,7 @@ async function loadDone() {
   // Luego intentar cargar desde el Worker (fuente de verdad)
   if (!CONFIG.trackerUrl || !STATE.user) return;
   try {
-    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/done?user=' + encodeURIComponent(STATE.user));
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/done?user=' + encodeURIComponent(STATE.user), { headers: authHeaders() });
     if (!r.ok) return;
     const j = await r.json();
     if (j.marks && typeof j.marks === 'object') {
@@ -1676,7 +1692,7 @@ async function syncDoneToWorker() {
     try {
       await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/done', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ user: STATE.user, itemId })
       });
     } catch(e) { break; } // si falla, parar
@@ -1706,7 +1722,7 @@ function toggleDone(id) {
   if (CONFIG.trackerUrl && STATE.user) {
     const opts = {
       method: wasDone ? 'DELETE' : 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ user: STATE.user, itemId: id })
     };
     fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/done', opts).catch(() => {});
@@ -11224,7 +11240,7 @@ async function loadActivity() {
       const from = new Date(); from.setDate(from.getDate() - days);
       params.set('from', from.toISOString());
     }
-    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/report?' + params.toString());
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/report?' + params.toString(), { headers: authHeaders() });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
     STATE.activity = { rows: j.rows || [], loading: false, error: null };
