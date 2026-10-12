@@ -13794,14 +13794,28 @@ async function synthesizeCorteKnowledge(env, opts = {}) {
     const ti = j.usage?.input_tokens || 0, to = j.usage?.output_tokens || 0, tcr = j.usage?.cache_read_input_tokens || 0, tcw = j.usage?.cache_creation_input_tokens || 0;
     const cost = anthropicCostUsd(model, j.usage);
     try { await env.DB.prepare("INSERT INTO copilot_usage (phone, kind, model, tokens_in, tokens_out, cache_read, cache_creation, cost_usd, created_by, created_at) VALUES (NULL,'synthesis',?,?,?,?,?,?,?,?)").bind(model, ti, to, tcr, tcw, cost, opts.createdBy || 'cron', new Date().toISOString()).run(); } catch (_) {}
-    const batchId = 'cor_' + Date.now(); const now = new Date().toISOString(); let saved = 0;
+    const batchId = 'cor_' + Date.now(); const now = new Date().toISOString(); let saved = 0, repetidas = 0;
+    // Anti-repetición (12-oct): la IA re-proponía lo que ya está en el conocimiento y lo que ya estaba pendiente (10
+    // pendientes, casi todas duplicadas). Se descarta si se parece mucho a una línea del KB o a otra pendiente.
+    let kbLineas = [], pendientes = [];
+    try { kbLineas = String(await kvGet(env, 'corte_knowledge', '') || '').split('\n').filter(l => l.trim()); } catch (_) {}
+    try { pendientes = ((await env.DB.prepare("SELECT title, proposed_content FROM framework_improvements WHERE vertical='corte' AND status='pending'").all()).results || []).map(x => String(x.proposed_content || '') + ' ' + String(x.title || '')); } catch (_) {}
     for (const imp of improvements) {
       const content = String(imp?.proposed_content || '').trim(); const title = String(imp?.title || '').trim();
       if (!content || !title) continue;
-      try { await env.DB.prepare("INSERT INTO framework_improvements (status, vertical, title, rationale, evidence, target_heading, operation, proposed_content, confidence, based_on_version, source_model, batch_id, created_at) VALUES ('pending','corte',?,?,?,'(corte_knowledge)','append',?,?,NULL,?,?,?)").bind(title.slice(0, 200), String(imp?.rationale || '').slice(0, 2000), String(imp?.evidence || '').slice(0, 2000), content.slice(0, 4000), (typeof imp?.confidence === 'number' ? imp.confidence : null), model, batchId, now).run(); saved++; } catch (_) {}
+      if (kbLineas.some(l => corteKbParecido(content, l)) || pendientes.some(x => corteKbParecido(content, x))) { repetidas++; continue; }
+      try { await env.DB.prepare("INSERT INTO framework_improvements (status, vertical, title, rationale, evidence, target_heading, operation, proposed_content, confidence, based_on_version, source_model, batch_id, created_at) VALUES ('pending','corte',?,?,?,'(corte_knowledge)','append',?,?,NULL,?,?,?)").bind(title.slice(0, 200), String(imp?.rationale || '').slice(0, 2000), String(imp?.evidence || '').slice(0, 2000), content.slice(0, 4000), (typeof imp?.confidence === 'number' ? imp.confidence : null), model, batchId, now).run(); saved++; pendientes.push(content + ' ' + title); } catch (_) {}
     }
-    return { ok: true, generated: saved, batch_id: batchId, cost_usd: cost, evidence_counts: { edits: edits.length, discards: discards.length, preguntas: preguntas.length }, new_feedback: newSince };
+    return { ok: true, generated: saved, repetidas, batch_id: batchId, cost_usd: cost, evidence_counts: { edits: edits.length, discards: discards.length, preguntas: preguntas.length }, new_feedback: newSince };
   } catch (e) { return { ok: false, error: 'corte synthesis: ' + String((e && e.message) || e) }; }
+}
+// ¿Dos reglas del conocimiento del corte dicen lo mismo? Palabras de 4+ letras sin tildes; parecidas si comparten al menos
+// la mitad (Jaccard ≥ 0,5) o una contiene a la otra. Para no re-proponer ni re-sumar lo que ya está.
+function corteKbPalabras(s) { return new Set(String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9ñ\s]/g, ' ').split(/\s+/).filter(w => w.length >= 4)); }
+function corteKbParecido(a, b) {
+  const A = corteKbPalabras(a), B = corteKbPalabras(b); if (!A.size || !B.size) return false;
+  let inter = 0; A.forEach(w => { if (B.has(w)) inter++; });
+  return inter / (A.size + B.size - inter) >= 0.5 || inter >= Math.min(A.size, B.size) * 0.85;
 }
 // Wrapper del cron para la síntesis (Fase 2C): se chequea 1 vez/día pero corre solo si pasaron
 // ~7 días desde la última síntesis que EFECTIVAMENTE gastó (copilot_usage). Mantiene la cadencia
@@ -15613,7 +15627,12 @@ const handler = {
           if (!line) return json({ error: 'la propuesta está vacía' }, 400);
           let kb = ''; try { kb = String(await kvGet(env, 'corte_knowledge', '') || ''); } catch (_) {}
           const norm = s => String(s || '').replace(/^[-•\s]+/, '').trim().toLowerCase();
-          if (kb.split('\n').some(l => norm(l) === norm(line))) return json({ error: 'esa línea ya está en el conocimiento' }, 409);
+          // Ya está (igual o casi igual): se da por resuelta y sale de la lista (antes respondía 409 y la propuesta quedaba
+          // trabada: el botón "no hacía nada").
+          if (kb.split('\n').some(l => norm(l) === norm(line) || corteKbParecido(l, line))) {
+            await env.DB.prepare(`UPDATE framework_improvements SET status='approved', reviewed_by=?, reviewed_at=?, review_note=? WHERE id = ?`).bind(session.user, new Date().toISOString(), 'ya estaba en el conocimiento', id).run();
+            return json({ ok: true, corte: true, ya_estaba: true });
+          }
           try { await kvSet(env, 'corte_knowledge', (kb ? kb + '\n' : '') + '- ' + line.replace(/^[-•\s]+/, '')); } catch (_) {}
           await env.DB.prepare(`UPDATE framework_improvements SET status='approved', reviewed_by=?, reviewed_at=? WHERE id = ?`).bind(session.user, new Date().toISOString(), id).run();
           return json({ ok: true, corte: true });

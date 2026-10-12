@@ -6135,7 +6135,7 @@ async function corteCargar(silent) {
     STATE.cortePaquetes = (res[0] && res[0].paquetes) || STATE.cortePaquetes || [];
     STATE.corteTanda = (res[1] && res[1].ok) ? res[1] : null;
     STATE.corteAlumnos = admin ? ((res[2] && res[2].alumnos) || []) : [];
-    STATE.cortePropuestas = admin ? ((res[3] && res[3].propuestas) || []) : [];
+    STATE.cortePropuestas = admin ? ((res[3] && res[3].propuestas) || []).filter(p => !(STATE._cortePropHechas || {})[p.id]) : [];
     STATE.corteSinTel = admin ? ((res[4] && res[4].sin_telefono) || []) : [];
   }
   STATE._corteLoadedAt = Date.now();
@@ -6322,20 +6322,29 @@ async function bindCorte() {
   const aprender = document.querySelector('[data-corte-aprender]');
   if (aprender) aprender.onclick = async () => {
     aprender.disabled = true; aprender.textContent = 'Buscando…';
-    try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/aprender', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: '{}' }).then(x => x.json()); if (r && r.skipped) toast(r.reason || 'sin material nuevo'); else if (r && r.ok) toast((r.generated || 0) + ' propuesta(s)'); else toast((r && r.error) || 'no se pudo'); } catch (_) { toast('Error de red'); }
-    try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/preguntas', { headers: authHeaders() }).then(x => x.json()); STATE.cortePropuestas = (r && r.propuestas) || []; } catch (_) {}
+    try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/aprender', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: '{}' }).then(x => x.json()); if (r && r.skipped) niToast(r.reason || 'sin material nuevo'); else if (r && r.ok) niToast((r.generated || 0) + ' propuesta(s)'); else niToast((r && r.error) || 'no se pudo'); } catch (_) { niToast('Error de red'); }
+    try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/preguntas', { headers: authHeaders() }).then(x => x.json()); STATE.cortePropuestas = ((r && r.propuestas) || []).filter(p => !(STATE._cortePropHechas || {})[p.id]); } catch (_) {}
     render();
   };
-  document.querySelectorAll('[data-corte-prop-ok]').forEach(b => { b.onclick = async () => {
-    const id = parseInt(b.getAttribute('data-corte-prop-ok'), 10); b.disabled = true;
-    try { const r = await fetch(CONFIG.trackerUrl + '/admin/framework/improvements/approve', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }).then(x => x.json()); if (r && r.ok) { STATE.cortePropuestas = (STATE.cortePropuestas || []).filter(p => p.id !== id); toast('Sumado al conocimiento ✓'); } else toast((r && r.error) || 'no se pudo'); } catch (_) { toast('Error de red'); }
+  // Sumar / Descartar: el botón muestra que está trabajando, el aviso sale con niToast (el toast común se perdía con el
+  // render) y la propuesta sale de la lista solo si el server lo confirmó. Las ya resueltas se recuerdan en
+  // STATE._cortePropHechas para que un refresco que salió antes no las vuelva a traer.
+  const propAccion = async (b, id, ruta, ok) => {
+    b.disabled = true; b.textContent = 'Guardando…';
+    let r = null, status = 0;
+    try { const res = await fetch(CONFIG.trackerUrl + ruta, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); status = res.status; r = await res.json().catch(() => null); } catch (_) {}
+    // 404 al descartar = ya estaba revisada: también sale de la lista.
+    const listo = !!(r && r.ok) || (ruta.endsWith('/reject') && status === 404);
+    if (listo) {
+      STATE._cortePropHechas = STATE._cortePropHechas || {}; STATE._cortePropHechas[id] = 1;
+      STATE.cortePropuestas = (STATE.cortePropuestas || []).filter(p => p.id !== id);
+    }
     render();
-  }; });
-  document.querySelectorAll('[data-corte-prop-no]').forEach(b => { b.onclick = async () => {
-    const id = parseInt(b.getAttribute('data-corte-prop-no'), 10); b.disabled = true;
-    try { await fetch(CONFIG.trackerUrl + '/admin/framework/improvements/reject', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }).then(x => x.json()); } catch (_) {}
-    STATE.cortePropuestas = (STATE.cortePropuestas || []).filter(p => p.id !== id); render();
-  }; });
+    if (listo) niToast(r && r.ya_estaba ? 'Eso ya estaba en el conocimiento: la saqué de la lista' : ok);
+    else niToast((r && r.error) || (status ? 'No se pudo (' + status + ')' : 'Error de red'), { error: true });
+  };
+  document.querySelectorAll('[data-corte-prop-ok]').forEach(b => { b.onclick = () => propAccion(b, parseInt(b.getAttribute('data-corte-prop-ok'), 10), '/admin/framework/improvements/approve', 'Sumado al conocimiento ✓'); });
+  document.querySelectorAll('[data-corte-prop-no]').forEach(b => { b.onclick = () => propAccion(b, parseInt(b.getAttribute('data-corte-prop-no'), 10), '/admin/framework/improvements/reject', 'Descartada'); });
   // Cobranza de la semana (admin)
   const cobrarAbrir = document.querySelector('[data-corte-cobrar-abrir]');
   if (cobrarAbrir) cobrarAbrir.onclick = async () => {
