@@ -20930,7 +20930,7 @@ const handler = {
         // Medidas reales de los paquetes (las carga Neyen al embalar; las ve logística) de las tandas recientes.
         let paquetes = [];
         // + la línea de logística de la tarjeta de Neyen (N°, contacto, envío pagado, cargado/despachado).
-        try { await ensureCortePaquetesSchema(env); paquetes = (await env.DB.prepare("SELECT tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_at, contactado, cargado" + (_despOk ? ", numero, contacto_estado, contacto_at, envio_pagado, despachado_at" : "") + " FROM corte_paquetes WHERE tanda_id IN (SELECT id FROM corte_tandas ORDER BY id DESC LIMIT 4)").all()).results || []; } catch (_) {}
+        try { await ensureCortePaquetesSchema(env); paquetes = (await env.DB.prepare("SELECT tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_at, contactado, cargado" + (_despOk ? ", numero, contacto_estado, contacto_at, envio_pagado, despachado_at" : "") + ((_despOk && await ensureLogiTablaSchema(env).catch(() => false)) ? ", transporte, transporte_conf" : "") + " FROM corte_paquetes WHERE tanda_id IN (SELECT id FROM corte_tandas ORDER BY id DESC LIMIT 4)").all()).results || []; } catch (_) {}
         return json({ ok: true, pedidos: rows, paquetes, role: _cpRole, user: String(session.user || '').toLowerCase() });
       }
       // ===== LOGÍSTICA =====

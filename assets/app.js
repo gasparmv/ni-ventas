@@ -4056,7 +4056,7 @@ function corteHybridBoard(pedidos) {
           <span style="width:42px;height:6px;border-radius:9px;background:var(--border);overflow:hidden;display:inline-block"><span style="display:block;height:100%;width:${frac}%;background:${sm.c}"></span></span>
           ${corteChip(corteEstadoTxt(g.stage, g.items) + (g.mixed ? ' +' : ''), sm.c)}
         </span>
-        ${corteChip(pm.l, pm.c)}${g.debeOtra ? corteChip('Debe otra semana', '#f87171') : ''}
+        ${corteChip(pm.l, pm.c)}${g.debeOtra ? corteChip('Debe otra semana', '#f87171') : ''}${corteLogiChip(g)}
       </div>`;
     const compKey = (g.items.find(p => p.comprobante_key && (p.estado_pago === 'pagado' || p.estado_pago === 'parcial')) || {}).comprobante_key || '';
     const compHtml = compKey ? (!/\.(jpe?g|png|webp|gif)($|\?)/i.test(compKey)
@@ -4481,6 +4481,26 @@ function corteLogiPaquete(g) {
 function corteEtiquetaAttrs(g, key) {
   const t = Math.max(0, ...(g.items || []).map(p => +p.tanda_id || 0));
   return `data-corte-etiqueta-k="${escapeHtml(key)}" data-corte-etiqueta-t="${corteGrupoEnvioPend(g) ? '' : t}" data-corte-etiqueta-t2="${t}"`;
+}
+// Estado de logística de un cliente para el tablero de Corte (mismo criterio que la columna Estado de la tabla de envíos):
+//  · envío: Sin contactar / Contactado (· transporte) / Enviado dd/mm (· transporte) — de corte_paquetes + las piezas.
+//  · retira: Retira en el taller / Retiró dd/mm.   · sin entrega definida: aviso en ámbar.
+function corteLogiChip(g) {
+  const items = (g.items || []).filter(p => p.producto !== 'NEON');
+  if (!items.length) return '';
+  const env = items.filter(p => p.entrega === 'envio'), ret = items.filter(p => p.entrega === 'retira');
+  const maxF = (arr, k) => arr.map(p => p[k]).filter(Boolean).sort().pop() || '';
+  if (!env.length && ret.length) {
+    if (ret.every(p => p.estado === 'entregado')) { const f = corteFechaCorta(maxF(ret, 'entregado_at')); return corteChip('Retiró' + (f ? ' ' + f : ''), '#22c55e'); }
+    return corteChip('Retira en el taller', '#94a3b8');
+  }
+  if (!env.length) return corteChip('Entrega sin definir', '#f59e0b');
+  const row = corteLogiPaquete(g);
+  const tr = row && +row.transporte_conf && row.transporte ? String(row.transporte) : '';
+  if (env.every(p => p.estado === 'despachado' || p.estado === 'entregado')) { const f = corteFechaCorta(maxF(env, 'despachado_at')); return corteChip('Enviado' + (f ? ' ' + f : '') + (tr ? ' · ' + tr : ''), '#22c55e'); }
+  const ce = row ? String(row.contacto_estado || '') : '';
+  if (ce === 'escrito' || ce === 'confirmado' || ce === 'listo' || (row && +row.envio_pagado)) return corteChip('Contactado' + (tr ? ' · ' + tr : ''), '#38bdf8');
+  return corteChip('Sin contactar', '#94a3b8');
 }
 // Línea chica en la tarjeta de envío de Neyen: "Logística: escrito 9:04 · envío pagado · enviado".
 function corteLogiLineaHtml(row) {
