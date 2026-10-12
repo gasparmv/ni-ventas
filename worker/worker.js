@@ -13054,6 +13054,14 @@ async function logWaEvent(env, { to, kind, ref, ok, messageId, error }) {
   } catch (_) { /* tabla puede no existir aun en primera deploy */ }
 }
 
+// El admin puede entrar tipeando "gaspar"/"GASPAR" y el login guardaba lo tipeado, pero los controles "solo Gaspar"
+// comparan exacto con 'Gaspar' → esas sesiones daban 403 (Funnel de Ads, costos, etc.). Se canoniza al leer la
+// sesión (arregla las viejas) y al crearla.
+function canonSessionUser(u) {
+  const s = String(u || '');
+  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim() === 'gaspar' ? 'Gaspar' : s;
+}
+
 async function getSession(env, request) {
   const auth = request.headers.get('Authorization') || '';
   const m = auth.match(/^Bearer\s+(.+)$/i);
@@ -13064,7 +13072,7 @@ async function getSession(env, request) {
   ).bind(token).first();
   if (!row) return null;
   if (new Date(row.expires_at) < new Date()) return null;
-  return { token, user: row.user };
+  return { token, user: canonSessionUser(row.user) };
 }
 
 // Mapea el slug del usuario (del nombre que manda el front) a los posibles ids
@@ -14984,10 +14992,11 @@ const handler = {
       // Usuario externo de logística: sesión de 7 días (el resto, 30).
       const sesDias = ((panelUser && panelUser.rol === 'logistica') || esUsuarioLogistica(user)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS;
       const expires = new Date(now.getTime() + sesDias * 86400000);
+      const userSes = canonSessionUser(user);
       await env.DB.prepare(
         'INSERT INTO sessions (token, user, expires_at, created_at) VALUES (?, ?, ?, ?)'
-      ).bind(token, user, expires.toISOString(), now.toISOString()).run();
-      return json({ token, user, expiresAt: expires.toISOString() });
+      ).bind(token, userSes, expires.toISOString(), now.toISOString()).run();
+      return json({ token, user: userSes, expiresAt: expires.toISOString() });
     }
 
     if (request.method === 'POST' && path === '/auth/logout') {
@@ -15028,8 +15037,9 @@ const handler = {
       const token = randomToken();
       const now = new Date();
       const expires = new Date(now.getTime() + ((tRol === 'logistica' || esUsuarioLogistica(target)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS) * 86400000);
-      await env.DB.prepare('INSERT INTO sessions (token, user, expires_at, created_at) VALUES (?, ?, ?, ?)').bind(token, target, expires.toISOString(), now.toISOString()).run();
-      return json({ token, user: target, expiresAt: expires.toISOString() });
+      const targetSes = canonSessionUser(target);
+      await env.DB.prepare('INSERT INTO sessions (token, user, expires_at, created_at) VALUES (?, ?, ?, ?)').bind(token, targetSes, expires.toISOString(), now.toISOString()).run();
+      return json({ token, user: targetSes, expiresAt: expires.toISOString() });
     }
 
     // ----- Reportes (vista Actividad del front; antes público) -----
