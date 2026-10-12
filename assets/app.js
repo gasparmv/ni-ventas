@@ -2106,7 +2106,11 @@ function setHistSheetCache(name, rows) {
 }
 
 async function loadAll(opts) {
-  if (isLogisticaUser(STATE.user)) return; // logística no carga ventas/presupuestos/cotizador (ni le llegan al navegador)
+  // Logística no carga ventas/presupuestos/cotizador (ni le llegan al navegador), pero SÍ hay que dibujar su vista (trae
+  // su propia data): antes el primer render llegaba de rebote por loadCotizadorParams, y desde que logística no pide el
+  // cotizador (11-oct) la pantalla quedaba trabada en el spinner. Los refrescos silenciosos no re-dibujan (cerrarían lo
+  // desplegado o la nota a medio escribir; la vista de logística se refresca sola).
+  if (isLogisticaUser(STATE.user)) { if (!(opts && opts.silent)) render(); return; }
   const silent = !!(opts && opts.silent);
   // Stale-while-revalidate: si tenemos caché y no se pidió refresh forzado,
   // mostramos data al toque y refrescamos en background.
