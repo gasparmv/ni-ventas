@@ -2760,7 +2760,9 @@ async function precotizLog(env, phone, resultado, extra = {}) {
 const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (carteles de neón LED, Argentina). Manejás SOLO la PRE COTIZACIÓN de un lead: la etapa de relevamiento donde hay que juntar los datos para poder cotizar un cartel:
 1) una FOTO o imagen de referencia del diseño (OBLIGATORIO),
 2) las MEDIDAS aproximadas (alto y ancho) (OBLIGATORIO),
-3) si es para INTERIOR o EXTERIOR (DESEABLE, NO obligatorio).
+3) si es para INTERIOR o EXTERIOR (DESEABLE, NO obligatorio),
+4) PARA CUÁNDO lo necesita (DESEABLE, NO obligatorio).
+PARA CUÁNDO: preguntalo UNA sola vez, idealmente en el mismo mensaje en que pedís los otros datos que falten. Si lo dice ("para el 20", "para la inauguración", "sin apuro"), poné fecha con lo que dijo; si no sabe, no tiene fecha definida o ya se lo preguntaste y no contestó, poné fecha="no_sabe" y NO insistas. NUNCA prometas ni confirmes que llega para esa fecha (el plazo lo confirma el equipo con el presupuesto).
 Lo estrictamente necesario es la FOTO y las MEDIDAS. El interior/exterior es un plus: pedilo UNA sola vez. Si el cliente dice que no sabe / no está seguro / no lo tiene definido, O si ya se lo preguntaste y en su respuesta no te lo dio (te habló de otra cosa), NO insistas más — poné intext_no_sabe=true y damos por cerrada la pre cotización con la foto y las medidas (el equipo define el interior/exterior después). NUNCA machaques con el interior/exterior.
 
 EXTERIOR — ¿QUEDA CUBIERTO? Si el cliente dice que el cartel es para EXTERIOR (es_exterior=true), antes de cerrar preguntale UNA sola vez dónde lo piensa colocar y si tiene algún techo, sobretecho o marquesina que lo cubra (ej: "te consulto, donde lo pensas colocar? hay algun techo o marquesina que lo cubra?"). Esta pregunta se SUMA a lo que falte: si todavía faltan la foto o las medidas, pedilas en el MISMO turno (nunca dejes de pedirlas por preguntar lo del techo). No lo preguntes si ya lo dijo en la charla, y si alguien del equipo ya le preguntó lo del techo o ya le recomendó el corpóreo, no lo repitas. Según lo que conteste:
@@ -2794,6 +2796,7 @@ FORMATO PARA PEDIR LOS DATOS QUE FALTAN: un mensaje con la lista (cada dato en s
 - una foto o referencia del diseño
 - las medidas aprox (alto y ancho)
 - si es para interior o exterior
+- para cuando lo necesitas
 [3] tenes esa info para pasarme?
 La lista [2] es UN SOLO mensaje aunque tenga varios renglones (los renglones van separados por saltos de linea simples dentro del mismo mensaje). Si el cliente YA dio algún dato, sacalo de la lista y pedí solo lo que falta; si falta uno solo, pedilo en una frase corta sin lista. Igual, cerrá siempre con una pregunta.
 
@@ -2832,10 +2835,10 @@ FRENO DE MANO — poné frenar=true y mensajes=[] si:
 
 REGLA DE ORO — NO respondas por responder. Si NO sabés qué contestar con certeza, o el cliente pide algo que NO podés darle ni hacer (mandar fotos de ejemplos/catálogo, un dato que no tenés, algo fuera del relevamiento simple), NO improvises NI prometas algo que no vas a cumplir: poné frenar=true (que lo maneje Joaco). Prometer y no cumplir es MUCHO peor que frenar y escalar a una persona.
 
-Cuando ya tenés lo necesario, mensajes=[] (el humano sigue desde acá). "Lo necesario" = FOTO + MEDIDAS, más el interior/exterior SOLO si el cliente lo dio o dijo que no sabe, y si es EXTERIOR además saber si queda cubierto (techo="si", "no" o "no_sabe"). O sea: si tenés foto + medidas + (tiene_intext=true O intext_no_sabe=true) y, cuando es exterior, techo distinto de "" → mensajes=[]. ÚNICA excepción: si en este turno te contestó que NO está cubierto, mandá el mensaje recomendando el corpóreo iluminado (sugerir_corporeo=true) aunque ya esté todo. Nunca prometas el render/precio: eso lo hace una persona después.
+Cuando ya tenés lo necesario, mensajes=[] (el humano sigue desde acá). "Lo necesario" = FOTO + MEDIDAS, más el interior/exterior SOLO si el cliente lo dio o dijo que no sabe, si es EXTERIOR además saber si queda cubierto (techo="si", "no" o "no_sabe"), y haber preguntado UNA vez para cuándo lo necesita (fecha con lo que dijo o "no_sabe"). O sea: si tenés foto + medidas + (tiene_intext=true O intext_no_sabe=true), fecha distinto de "" y, cuando es exterior, techo distinto de "" → mensajes=[]. ÚNICA excepción: si en este turno te contestó que NO está cubierto, mandá el mensaje recomendando el corpóreo iluminado (sugerir_corporeo=true) aunque ya esté todo. Nunca prometas el render/precio: eso lo hace una persona después.
 
 Devolvé SOLO un JSON, sin nada alrededor:
-{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"es_exterior":bool,"techo":"si|no|no_sabe|","sugerir_corporeo":bool,"enviar_tipografias":bool,"mensajes":["..."]}`;
+{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"es_exterior":bool,"techo":"si|no|no_sabe|","sugerir_corporeo":bool,"fecha":"lo que dijo|no_sabe|","enviar_tipografias":bool,"mensajes":["..."]}`;
 
 // Detecta el tipo de imagen por los MAGIC BYTES, no por el content-type guardado. El CDN de
 // Meta (IG) a veces sirve un PNG con content-type image/jpeg, y así queda en R2. Si a Claude
@@ -2949,11 +2952,46 @@ async function precotizLlm(env, fullText, fwText, imageBlocks, meta) {
 }
 
 // Manda (auto) o deja en borrador (draft) los mensajitos que generó la IA.
-// Regla de exterior (Joaco, 12-oct): si es exterior y todavía no se sabe si queda cubierto, el bot
-// pregunta (una vez) antes de cerrar la precotización. Solo frena el cierre si la IA efectivamente
-// está preguntando algo (hay mensajes): si no preguntó, se cierra igual para no dejar el lead colgado.
-function precotizFaltaTecho(res, msgs) {
-  return !!(res && res.es_exterior && !res.techo && !res.intext_no_sabe && msgs && msgs.length);
+// Preguntas que se hacen UNA vez antes de cerrar la precotización (aunque ya estén foto+medidas):
+// el techo si es exterior (regla de Joaco, 12-oct) y para cuándo lo necesita (Gaspar, 12-oct).
+// Solo frena el cierre si los mensajes de la IA efectivamente preguntan eso: si no preguntó (o
+// manda otra cosa), se cierra igual para no dejar el lead colgado. Red de seguridad: 3 h sin
+// respuesta → pasa a "Para cotizar" igual (PRECOTIZ_TECHO_TIMEOUT_MS).
+function precotizFaltaPregunta(res, msgs) {
+  if (!res || !msgs || !msgs.length) return false;
+  const t = _normTxt(msgs.join(' '));
+  const pideTecho = !!(res.es_exterior && !res.techo && !res.intext_no_sabe) && /techo|marquesina|alero|cubr/.test(t);
+  const pideFecha = !res.fecha && /para cuando|fecha|lo necesit/.test(t);
+  return pideTecho || pideFecha;
+}
+
+// Candado de medidas (Gaspar, 12-oct): el bot NUNCA propone medidas (tampoco en corpóreo). Si un
+// mensaje del bot trae una medida —"NxM", "N por M" o un número con cm/m/metros— que el CLIENTE no
+// escribió en la charla, devuelve ese fragmento (no se manda y se escala a una persona). Las
+// medidas que repite del cliente pasan. "mm" no cuenta (son datos de producto, ej. bastidor 20x20 mm).
+function precotizMedidaInventada(msgs, fullText) {
+  const cli = new Set();
+  for (const line of String(fullText || '').split('\n')) {
+    const m = line.match(/^\S+ CLIENTE: (.*)$/);
+    if (!m) continue;
+    for (const n of m[1].matchAll(/\d+(?:[.,]\d+)?/g)) {
+      const v = parseFloat(n[0].replace(',', '.'));
+      if (isFinite(v)) { cli.add(Math.round(v)); cli.add(Math.round(v * 100)); }
+    }
+  }
+  const dijo = (v, enMetros) => cli.has(Math.round(v)) || (enMetros && cli.has(Math.round(v * 100)));
+  for (const raw of msgs || []) {
+    const t = String(raw).toLowerCase();
+    for (const p of t.matchAll(/(\d+(?:[.,]\d+)?)\s*(?:x|por)\s*(\d+(?:[.,]\d+)?)\s*(mm|cm|mts?|metros?|m)?\b/g)) {
+      if (p[3] === 'mm') continue;
+      const enM = /^m(ts?|etros?)?$/.test(p[3] || '');
+      if (!dijo(parseFloat(p[1].replace(',', '.')), enM) || !dijo(parseFloat(p[2].replace(',', '.')), enM)) return p[0];
+    }
+    for (const p of t.matchAll(/(\d+(?:[.,]\d+)?)\s*(cm|centimetros|centímetros|mts?|metros?|m)\b/g)) {
+      if (!dijo(parseFloat(p[1].replace(',', '.')), !/^c/.test(p[2]))) return p[0];
+    }
+  }
+  return '';
 }
 
 async function precotizEmitir(env, phone, nombre, msgs, modo, nowIso) {
@@ -3198,7 +3236,9 @@ async function processPrecotizPilot(env) {
     const res = out.data;
 
     const tF = res.tiene_foto ? 1 : 0; // la IA VE la imagen y decide si es la foto del diseño
-    const tM = res.tiene_medidas ? 1 : 0, tI = res.tiene_intext ? 1 : 0;
+    // tiene_intext=1 también si dijo que no sabe: el dato quedó resuelto (así el nudge no se lo vuelve a
+    // pedir y la red de seguridad de 3 h lo cierra si queda esperando el techo o la fecha).
+    const tM = res.tiene_medidas ? 1 : 0, tI = (res.tiene_intext || res.intext_no_sabe) ? 1 : 0;
 
     if (res.frenar || res.es_carteles === false) {
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo=?, tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(String(res.motivo_freno || (res.es_carteles === false ? 'no es carteles' : 'fuera de guion')).slice(0, 200), tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
@@ -3207,10 +3247,19 @@ async function processPrecotizPilot(env) {
       continue;
     }
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
+    // Candado de medidas: si el bot iba a mandar una medida que el cliente no dijo, no sale nada y
+    // pasa a una persona (freno de mano), igual que cualquier otro freno.
+    const _medida = precotizMedidaInventada(msgs, ctx.fullText);
+    if (_medida) {
+      try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo=?, tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(('el bot iba a proponer una medida: ' + _medida).slice(0, 200), tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
+      await precotizTag(env, lead.phone, false);
+      await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${lead.nombre || lead.phone}\nmotivo: el bot iba a proponer una medida ("${_medida}") y el candado lo freno\nentra a verlo vos`);
+      continue;
+    }
     // Exterior sin techo (lo recomendó el bot o ya lo había hablado un humano): etiqueta 🔠 Corpóreo para
     // que el vendedor lo cotice como corpóreo.
     if (res.sugerir_corporeo || res.techo === 'no') await corporeoTag(env, lead.phone, true);
-    if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaTecho(res, msgs)) { // ya tiene lo necesario (foto+medidas; el int/ext lo dio o dijo que no sabe; si es exterior, ya se sabe si está cubierto) → handoff a Joaco
+    if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaPregunta(res, msgs)) { // ya tiene lo necesario (foto+medidas; el int/ext lo dio o dijo que no sabe; ya se preguntó la fecha y, si es exterior, el techo) → handoff a Joaco
       // Si en este turno recomendó el corpóreo (contestó que no tiene techo), ese mensaje sale antes de
       // cerrar: al completar no se envía nada más y la recomendación se perdía.
       if (res.sugerir_corporeo && msgs.length && modo === 'auto') await precotizEmitir(env, lead.phone, lead.nombre, msgs, 'auto', nowIso);
@@ -3359,7 +3408,7 @@ async function processPrecotizPilot(env) {
     }
 
     const tF = res.tiene_foto ? 1 : 0;
-    const tM = res.tiene_medidas ? 1 : 0, tI = res.tiene_intext ? 1 : 0;
+    const tM = res.tiene_medidas ? 1 : 0, tI = (res.tiene_intext || res.intext_no_sabe) ? 1 : 0; // no_sabe = resuelto (ver arriba)
     let _ins;
     try {
       _ins = await env.DB.prepare("INSERT OR IGNORE INTO precotiz_pilot (phone, estado, tiene_foto, tiene_medidas, tiene_intext, nombre, last_inbound_ts, last_processed_ts, created_at, updated_at) VALUES (?, 'activo', ?, ?, ?, '', ?, ?, ?, ?)").bind(phone, tF, tM, tI, c.last_ts, c.last_ts, nowIso, nowIso).run();
@@ -3377,8 +3426,15 @@ async function processPrecotizPilot(env) {
     await precotizTag(env, phone, true); // etiqueta VISIBLE (no oculta) — Joaco+Gaspar monitorean
 
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
+    const _medida = precotizMedidaInventada(msgs, ctx.fullText); // candado de medidas (ver helper)
+    if (_medida) {
+      try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo=?, updated_at=? WHERE phone=?").bind(('el bot iba a proponer una medida: ' + _medida).slice(0, 200), nowIso, phone).run(); } catch (_) {}
+      await precotizTag(env, phone, false);
+      await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${phone}\nmotivo: el bot iba a proponer una medida ("${_medida}") y el candado lo freno\nentra a verlo vos`);
+      continue;
+    }
     if (res.sugerir_corporeo || res.techo === 'no') await corporeoTag(env, phone, true); // exterior sin techo → 🔠 Corpóreo
-    if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaTecho(res, msgs)) { // ya tiene lo necesario (foto+medidas; si es exterior, ya se sabe si está cubierto) → completo
+    if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaPregunta(res, msgs)) { // ya tiene lo necesario (foto+medidas; ya se preguntó la fecha y, si es exterior, el techo) → completo
       if (res.sugerir_corporeo && msgs.length && modo === 'auto') await precotizEmitir(env, phone, '', msgs, 'auto', nowIso);
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', completed_at=?, updated_at=? WHERE phone=?").bind(nowIso, nowIso, phone).run(); } catch (_) {}
       await precotizTag(env, phone, false);
@@ -9830,10 +9886,11 @@ async function maybeGuiaReveal(env) {
 // kind='corporeo_ask'). Gate kv corporeo_ask_on (default ON).
 async function corporeoAskOn(env) { return (await kvGet(env, 'corporeo_ask_on', '1')) === '1'; }
 const CORPOREO_ASK_MSGS = [
-  'Buenísimo, para pasarte el precio necesito 3 cosas',
+  'Buenísimo, para pasarte el precio necesito 4 cosas',
   'Una foto o referencia de lo que querés (diseño, logo o texto)',
   'Las medidas: ancho y alto en cm',
-  'Y si es para interior o exterior'
+  'Si es para interior o exterior',
+  'Y para cuándo lo necesitás'
 ];
 async function corporeoAskOnInbound(env, phone, msgBody) {
   if (!phone || !(await corporeoAskOn(env))) return;
