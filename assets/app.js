@@ -564,6 +564,128 @@ async function postRepartoAdmin(body) {
   }
 }
 
+// Card de Admin "Avisos internos" (plan de fondo, Etapa 1): lo que el CRM le avisó al equipo (o, en modo prueba,
+// lo que HABRÍA avisado), con KPIs de 24 h, el modo (off / prueba / encendido), las plantillas que usa y la lista
+// con "Lo vi" y "Reenviar". Mismo patrón que el panel de reparto: estado de módulo y pinta SOLO #avisos-panel.
+// Tolera un worker sin la Etapa 1 (404 → "todavía no está").
+// `at` se marca también con error (cada render() de Admin volvía a pedir mientras el worker diera error) y con 404
+// (worker sin la Etapa 1) deja de preguntar hasta el ↻ manual, igual que el banner.
+let avisosState = { data: null, loading: false, error: '', at: 0, busy: false, off: false };
+async function loadAvisosPanel(forzar) {
+  if (!isAdmin() || avisosState.loading) return;
+  if (forzar) avisosState.off = false;
+  avisosState.loading = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/avisos', { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    if (!isAdmin()) return;
+    if (r.ok && j.ok) { avisosState.data = j; avisosState.error = ''; avisosState.off = false; }
+    else {
+      avisosState.error = r.status === 404 ? 'El worker todavía no tiene los avisos internos (falta deployar la Etapa 1).' : (j.error || ('HTTP ' + r.status));
+      if (r.status === 404) avisosState.off = true;
+    }
+  } catch (_) { avisosState.error = 'sin conexión'; }
+  finally { avisosState.at = Date.now(); avisosState.loading = false; renderAvisosPanel(); }
+}
+function bindAvisosPanel() {
+  if (avisosState.data || avisosState.error) renderAvisosPanel();
+  if (!avisosState.off && Date.now() - (avisosState.at || 0) > 60000) loadAvisosPanel();
+}
+const AVISO_ESTADO_TXT = { dry: 'prueba', pendiente: 'mandando', enviando: 'mandando', enviado: 'enviado', entregado: 'entregado', leido: 'leído', fallido: 'falló', reintentando: 'reintentando', perdido: 'no salió', sin_confirmar: 'sin confirmar', digest: 'va al resumen', cola: 'en cola (noche)', tope: 'tope por hora', pausado: 'pausado', agrupado: 'en un resumen', descartado: 'descartado' };
+const AVISO_ESTADO_COLOR = { entregado: '#22c55e', leido: '#22c55e', enviado: '#38bdf8', fallido: '#ef4444', perdido: '#ef4444', reintentando: '#f59e0b', sin_confirmar: '#f59e0b', cola: '#a78bfa', tope: '#f59e0b', pausado: '#f59e0b' };
+function renderAvisosPanel() {
+  const el = document.getElementById('avisos-panel');
+  if (!el) return;
+  if (avisosState.error && !avisosState.data) {
+    el.innerHTML = `<div class="muted" style="font-size:12px">⚠ ${escapeHtml(avisosState.error)} <button class="btn btn-ghost" data-av-reload style="padding:1px 8px;font-size:11px;margin-left:6px" ${avisosState.loading ? 'disabled' : ''}>↻</button></div>`;
+    const b = el.querySelector('[data-av-reload]'); if (b) b.onclick = () => loadAvisosPanel(true);
+    return;
+  }
+  if (!avisosState.data) { el.innerHTML = '<div class="loading"><div class="spinner"></div></div>'; return; }
+  const d = avisosState.data, cfg = d.config || {};
+  const sum = (fn) => (d.kpis || []).filter(fn).reduce((a, k) => a + (k.n || 0), 0);
+  const total = sum(() => true), p1 = sum(k => k.prioridad === 'P1');
+  const llegaron = sum(k => k.status === 'entregado' || k.status === 'leido');
+  const fallas = sum(k => k.status === 'fallido' || k.status === 'perdido');
+  const esperando = sum(k => ['digest', 'cola', 'tope', 'pausado'].includes(k.status));
+  const prueba = sum(k => k.status === 'dry');
+  const kpi = (lbl, v, cls) => `<div class="kpi ${cls || ''}"><div class="kpi-label">${lbl}</div><div class="kpi-value">${v}</div></div>`;
+  const modoTxt = { off: 'Apagado (sale lo de siempre, sin registrar)', dry: 'Prueba (sale lo de siempre y se registra qué haría)', on: 'Encendido' }[d.modo] || d.modo;
+  const tpls = (d.plantillas || []).map(t => {
+    const usable = (d.plantillas_usables || []).includes(t.name);
+    return `<span class="pill" style="font-size:10.5px;margin:0 4px 4px 0;${usable ? 'border-color:#22c55e' : ''}" title="${escapeHtml(t.status + (t.category ? ' · ' + t.category : ' · sin categoría'))}">${usable ? '✓ ' : ''}${escapeHtml(t.name)} <span class="muted">${escapeHtml(String(t.status || '').toLowerCase())}${t.category ? ' · ' + escapeHtml(String(t.category).toLowerCase()) : ''}</span></span>`;
+  }).join('');
+  const st = d.stats || null;
+  const filas = st && st.fecha ? `D1 hoy: ${Number(st.filas || 0).toLocaleString('es-AR')} filas leídas en ${st.corridas || 0} corridas (máx ${Number(st.max || 0).toLocaleString('es-AR')})${st.fuera ? ` + ${Number(st.fuera).toLocaleString('es-AR')} desde el webhook y los envíos` : ''}` : '';
+  // Prioridades pisadas por tipo (kv aviso_tipo:<tipo>) e invariantes del plan (tienen que dar 0).
+  const tiposTxt = Object.entries(d.tipos || {}).map(([t, p]) => t + '=' + p).join(', ');
+  const inv = d.invariantes || {};
+  const invMal = (Number(inv.mas_de_2) || 0) + (Number(inv.dest_externo) || 0);
+  const hora = (iso) => { try { return new Date(iso).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } };
+  const rows = (d.items || []).slice(0, 80).map(a => {
+    const col = AVISO_ESTADO_COLOR[a.status] || 'var(--fg-subtle)';
+    const ruta = a.via && a.via !== 'legacy' ? a.via : (a.decision || '');
+    const verLegacy = a.via === 'legacy' ? `<div class="muted" style="font-size:10.5px">hoy: ${escapeHtml(a.decision || '')}</div>` : '';
+    return `<tr style="border-top:1px solid var(--border);vertical-align:top">
+      <td style="padding:6px 4px;white-space:nowrap;font-size:11.5px">${escapeHtml(hora(a.created_at))}</td>
+      <td style="padding:6px 4px;font-size:12px"><b>${escapeHtml(a.dest_slug || '—')}</b><div class="muted" style="font-size:10.5px">${escapeHtml(a.tipo || '')}</div></td>
+      <td style="padding:6px 4px;font-size:12px;font-weight:700;color:${a.prioridad === 'P1' ? '#ef4444' : a.prioridad === 'P3' ? 'var(--fg-subtle)' : 'var(--fg)'}">${escapeHtml(a.prioridad)}</td>
+      <td style="padding:6px 4px;font-size:12px;max-width:340px;overflow-wrap:anywhere">${escapeHtml(String(a.texto || '').slice(0, 220))}${String(a.texto || '').length > 220 ? '…' : ''}</td>
+      <td style="padding:6px 4px;font-size:11.5px"><span style="color:${col};font-weight:700">${escapeHtml(AVISO_ESTADO_TXT[a.status] || a.status)}</span><div class="muted" style="font-size:10.5px">${escapeHtml(a.via === 'legacy' ? 'envío de hoy' : ruta)}${a.error_code ? ' · ' + escapeHtml(a.error_code) : ''}</div>${verLegacy}</td>
+      <td style="padding:6px 4px;white-space:nowrap">
+        ${a.prioridad === 'P1' && !a.visto_at && a.status !== 'dry' ? `<button class="btn btn-ghost" data-av-panel-visto="${a.id}" style="padding:1px 8px;font-size:11px">Lo vi</button>` : (a.visto_at ? `<span class="muted" style="font-size:10.5px">visto</span>` : '')}
+        ${!['dry', 'enviando', 'pendiente', 'reintentando'].includes(a.status) ? `<button class="btn btn-ghost" data-av-panel-reenviar="${a.id}" style="padding:1px 8px;font-size:11px" ${avisosState.busy ? 'disabled' : ''}>Reenviar</button>` : ''}
+      </td></tr>`;
+  }).join('');
+  el.innerHTML = `${avisosState.error ? `<div class="muted" style="font-size:12px;margin-bottom:6px">⚠ ${escapeHtml(avisosState.error)}</div>` : ''}
+    <div class="kpi-grid" style="margin-bottom:var(--s-3)">
+      ${kpi('Avisos 24 h', total, 'cyan')}${kpi('Urgentes (P1)', p1)}${kpi('Llegaron', llegaron)}${kpi('Fallaron / no salieron', fallas)}${kpi('Esperando (resumen, cola, tope)', esperando)}${d.modo === 'dry' ? kpi('Solo registrados (prueba)', prueba) : ''}
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;font-size:13px">
+      <label>Modo <select data-av-modo style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:4px 6px;color:var(--fg)">
+        ${['off', 'dry', 'on'].map(m => `<option value="${m}" ${m === d.modo ? 'selected' : ''}>${{ off: 'Apagado', dry: 'Prueba', on: 'Encendido' }[m]}</option>`).join('')}
+      </select></label>
+      <label title="Si está apagado, lo que iba para un vendedor (o Abril, diseño, producción) le llega a Gaspar, como siempre"><input type="checkbox" data-av-vend ${cfg.vendedoresOn ? 'checked' : ''}> Avisar a los vendedores en su WhatsApp</label>
+      <button class="btn btn-ghost" data-av-test style="padding:2px 10px;font-size:12px" ${avisosState.busy ? 'disabled' : ''} title="Te manda un aviso de prueba por el camino nuevo (aunque el modo sea Prueba)">Probar (a mí)</button>
+      <button class="btn btn-ghost" data-av-sync style="padding:2px 10px;font-size:12px" ${avisosState.busy ? 'disabled' : ''} title="Lee ya el estado y la categoría de las plantillas en 360dialog">Actualizar plantillas</button>
+      <button class="btn btn-ghost" data-av-reload style="padding:2px 10px;font-size:12px">↻</button>
+    </div>
+    <div class="muted" style="font-size:11.5px;margin-bottom:6px">${escapeHtml(modoTxt)} · silencio de vendedores ${cfg.silDesde}-${cfg.silHasta} h (salvo plata confirmada) · resúmenes ${escapeHtml((cfg.resumenHoras || []).join(', '))} h · tope ${cfg.topeHora}/h (P1 ${cfg.topeP1}/h, global ${cfg.topeGlobal}/h)${filas ? ' · ' + escapeHtml(filas) : ''}</div>
+    ${invMal ? `<div style="font-size:12px;color:#ef4444;margin-bottom:6px">⚠ Invariantes rotas: ${Number(inv.mas_de_2) || 0} avisos con más de 2 intentos, ${Number(inv.dest_externo) || 0} a un número que no es del equipo. Revisar antes de seguir.</div>` : ''}
+    ${tiposTxt ? `<div class="muted" style="font-size:11.5px;margin-bottom:6px">Prioridad cambiada por tipo: ${escapeHtml(tiposTxt)}</div>` : ''}
+    <div style="margin-bottom:8px"><span class="muted" style="font-size:11px">Plantillas (✓ = la usa cuando la ventana de 24 h está cerrada):</span><div style="margin-top:4px">${tpls || '<span class="muted" style="font-size:11px">sin datos</span>'}</div></div>
+    ${rows ? `<div style="max-height:420px;overflow:auto"><table style="width:100%;border-collapse:collapse">
+      <thead><tr style="text-align:left;color:var(--fg-subtle);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em"><th style="padding:4px">Cuándo</th><th style="padding:4px">Para</th><th style="padding:4px">P</th><th style="padding:4px">Aviso</th><th style="padding:4px">Estado</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : '<div class="muted" style="font-size:12px">Sin avisos en las últimas 24 h.</div>'}`;
+  const sel = el.querySelector('[data-av-modo]');
+  if (sel) sel.onchange = async () => {
+    const m = sel.value;
+    if (m === 'on' && !(await showConfirm('Con los avisos encendidos, el CRM elige por dónde le llega cada aviso al equipo (texto o plantilla, resumen, cola de noche) en vez del envío de siempre. ¿Prender?', { title: 'Avisos internos', confirmLabel: 'Prender', variant: 'warn' }))) { renderAvisosPanel(); return; }
+    postAvisos('/admin/avisos/config', { modo: m }, '✓ Modo: ' + ({ off: 'apagado', dry: 'prueba', on: 'encendido' }[m]));
+  };
+  const vend = el.querySelector('[data-av-vend]');
+  if (vend) vend.onchange = () => postAvisos('/admin/avisos/config', { vendedores_on: !!vend.checked }, vend.checked ? '✓ Los vendedores reciben sus avisos' : '✓ Todo le llega a Gaspar');
+  const bt = el.querySelector('[data-av-test]'); if (bt) bt.onclick = () => postAvisos('/admin/avisos/test', { para: 'gaspar', prioridad: 'P2' }, null);
+  const bs = el.querySelector('[data-av-sync]'); if (bs) bs.onclick = () => postAvisos('/admin/avisos/config', { sync_tpl: true }, '✓ Plantillas actualizadas');
+  const br = el.querySelector('[data-av-reload]'); if (br) br.onclick = () => loadAvisosPanel(true);
+  el.querySelectorAll('[data-av-panel-visto]').forEach(b => b.onclick = () => postAvisos('/admin/avisos/visto', { ids: [parseInt(b.dataset.avPanelVisto, 10)] }, '✓ Marcado'));
+  el.querySelectorAll('[data-av-panel-reenviar]').forEach(b => b.onclick = () => postAvisos('/admin/avisos/reenviar', { id: parseInt(b.dataset.avPanelReenviar, 10) }, null));
+}
+async function postAvisos(ruta, body, okMsg) {
+  if (avisosState.busy) return;
+  avisosState.busy = true; renderAvisosPanel();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + ruta, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.ok === false) {
+      await showAlert((j && (j.error || (j.res && j.res.error))) || ('No se pudo (HTTP ' + r.status + ')'), { title: 'Avisos internos', variant: 'warn' });
+    } else if (okMsg) toast(okMsg);
+    else if (ruta.endsWith('/test')) toast(j.ok ? '✓ Prueba enviada (' + (((j.res || {}).filas || [])[0] || {}).via + ')' : '⚠ La prueba no salió');
+    else if (ruta.endsWith('/reenviar')) toast('✓ Reenviado (' + (j.via || '') + ')');
+  } catch (_) { toast('⚠ Sin conexión'); }
+  finally { avisosState.busy = false; avisosState.at = 0; loadAvisosPanel(); }
+}
+
 // ¿Este usuario cotiza? (Gaspar, vendedores y diseño). Abril, producción y logística NO: el worker les
 // niega /cotizador/* y acá no se pide ni se guarda en el navegador nada de costos ni sueldos.
 function usaCotizador() {
@@ -2974,6 +3096,7 @@ function render() {
   if (_ocpTop) { const nl = document.querySelector('[data-ocp-list]'); if (nl) nl.scrollTop = _ocpTop; }
   try { startSinCotizarWatch(); } catch (_) {}
   try { startOcUrgenteWatch(); } catch (_) {}
+  try { initAvisosInternos(); } catch (_) {}   // banner de avisos urgentes sin ver (Etapa 1)
   // El Chat WA carga su data del worker (no de Sheets), así que se renderiza
   // SIEMPRE — aunque Sheets siga cargando o haya fallado. Antes el gate de abajo
   // (!STATE.loaded) tapaba el chat con "Conectando con Google Sheets…" y, si el
@@ -3684,6 +3807,104 @@ function renderOcUrgenteModal() {
       </div>
     </div>`;
 }
+// ===== Avisos internos: banner de urgentes sin ver (plan de fondo, Etapa 1) =====
+// A cada uno del equipo (no logística) le muestra los avisos P1 que le llegaron por WhatsApp y todavía no marcó
+// "Lo vi" (últimas 48 h). Cada 5 min, respetando el backoff de polling. Vive FUERA de #app (un div propio en el
+// body) para que los render() globales no lo borren ni lo repinten. Si el worker no tiene la Etapa 1 (404) deja
+// de preguntar. Con los avisos en modo prueba o apagados el endpoint devuelve vacío: no se ve nada.
+// min: achicado a una pastilla (después de "Ver chat →" o con "—"), así no tapa la barra de escritura del chat que
+// fueron a atender; se vuelve a abrir solo si llega un P1 nuevo. z-index 250: por DEBAJO de los modales (.modal-bg 300)
+// y de los popups de sin cotizar / OC, que tienen sus propios botones.
+let _avisosP1 = { items: [], off: false, user: null, busy: false, min: false, ids: new Set() };
+function initAvisosInternos() {
+  if (!STATE.token || isLogisticaOnly()) { if (_avisosP1.items.length) { _avisosP1.items = []; pintarBannerAvisos(); } return; }
+  if (_avisosP1.user !== STATE.user) { _avisosP1.user = STATE.user; _avisosP1.items = []; _avisosP1.ids = new Set(); _avisosP1.min = false; pintarBannerAvisos(); if (window._avisosWatch) fetchAvisosMios(); }
+  if (window._avisosWatch) return;
+  window._avisosWatch = true;
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t || !t.closest || !t.closest('#avisos-p1-banner')) return;
+    const visto = t.closest('[data-av-visto]');
+    if (visto) { marcarAvisosVistos(visto.getAttribute('data-av-visto') === 'todos' ? _avisosP1.items.map(a => a.id) : [parseInt(visto.getAttribute('data-av-visto'), 10)]); return; }
+    if (t.closest('[data-av-min]')) { _avisosP1.min = true; pintarBannerAvisos(); return; }
+    if (t.closest('[data-av-expandir]')) { _avisosP1.min = false; pintarBannerAvisos(); return; }
+    const ver = t.closest('[data-av-ver]');
+    if (ver) {
+      const ph = ver.getAttribute('data-av-ver') || '';
+      if (!ph) return;
+      _avisosP1.min = true;   // se achica: el chat que van a atender queda libre (el aviso sigue pendiente hasta "Lo vi")
+      pintarBannerAvisos();
+      STATE.view = 'chat';
+      chatState.channel = /^\d{8,15}$/.test(ph) ? 'wa' : chatState.channel;
+      chatState.selectedPhone = ph;
+      if (typeof enterMobileChatConversation === 'function') enterMobileChatConversation();
+      try { selectChatContact(ph); } catch (_) {}
+      location.hash = 'chat';
+      render();
+    }
+  });
+  fetchAvisosMios();
+  setInterval(() => { if (!pollBackoffActive()) fetchAvisosMios(); }, 5 * 60000);
+}
+async function fetchAvisosMios() {
+  if (_avisosP1.off || !STATE.token || !CONFIG.trackerUrl || isLogisticaOnly()) return;
+  const user = STATE.user;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/avisos/mios?pend=1', { headers: authHeaders() });
+    if (STATE.user !== user) return;   // cambió de usuario mientras volvía la respuesta
+    if (r.status === 404) { _avisosP1.off = true; _avisosP1.items = []; pintarBannerAvisos(); return; }
+    if (!r.ok) return;
+    const j = await r.json().catch(() => ({}));
+    _avisosP1.items = (j && j.ok && Array.isArray(j.items)) ? j.items : [];
+    // Un P1 que no estaba antes vuelve a abrir el banner aunque lo hayan achicado.
+    if (_avisosP1.items.some(a => !_avisosP1.ids.has(a.id))) _avisosP1.min = false;
+    _avisosP1.ids = new Set(_avisosP1.items.map(a => a.id));
+    pintarBannerAvisos();
+  } catch (_) {}
+}
+async function marcarAvisosVistos(ids) {
+  ids = (ids || []).filter(x => x > 0);
+  if (!ids.length || _avisosP1.busy) return;
+  _avisosP1.busy = true;
+  _avisosP1.items = _avisosP1.items.filter(a => !ids.includes(a.id));   // optimista: se saca ya del banner
+  pintarBannerAvisos();
+  try { await fetch(CONFIG.trackerUrl + '/admin/avisos/visto', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) }); }
+  catch (_) { toast('⚠ Sin conexión: no se marcó'); }
+  finally { _avisosP1.busy = false; }
+}
+function pintarBannerAvisos() {
+  let el = document.getElementById('avisos-p1-banner');
+  const items = _avisosP1.off ? [] : (_avisosP1.items || []);
+  if (!items.length) { if (el) el.remove(); return; }
+  if (!el) { el = document.createElement('div'); el.id = 'avisos-p1-banner'; document.body.appendChild(el); }
+  if (_avisosP1.min) {
+    // Pastilla chica abajo a la derecha, por ENCIMA de la barra de escritura del chat (no la tapa).
+    el.style.cssText = 'position:fixed;right:12px;bottom:84px;z-index:250;background:var(--bg);border:1px solid #ef4444;border-radius:999px;box-shadow:0 6px 18px rgba(0,0,0,.4);padding:0;color:var(--fg)';
+    el.innerHTML = `<button class="btn btn-ghost btn-sm" data-av-expandir style="padding:5px 12px;color:#ef4444;font-weight:700;border:0" title="Ver los avisos urgentes">🔴 ${items.length} urgente${items.length === 1 ? '' : 's'}</button>`;
+    return;
+  }
+  el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:250;width:min(560px,calc(100vw - 32px));max-height:45vh;overflow:auto;background:var(--bg);border:1px solid #ef4444;border-radius:var(--r-md);box-shadow:0 10px 30px rgba(0,0,0,.45);padding:10px 12px;color:var(--fg)';
+  const hora = (iso) => { try { return new Date(iso).toLocaleString('es-AR', { hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } };
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
+      <b style="color:#ef4444;font-size:13.5px">🔴 ${items.length === 1 ? '1 aviso urgente sin ver' : items.length + ' avisos urgentes sin ver'}</b>
+      <span style="display:flex;gap:6px;align-items:center">
+        ${items.length > 1 ? '<button class="btn btn-ghost btn-sm" data-av-visto="todos" style="padding:2px 10px">Vi todos</button>' : ''}
+        <button class="btn btn-ghost btn-sm" data-av-min style="padding:2px 10px" title="Achicar (sigue pendiente hasta que toques Lo vi)">—</button>
+      </span>
+    </div>
+    ${items.slice(0, 6).map(a => `
+      <div style="border-top:1px solid var(--border);padding:6px 0;font-size:12.5px;line-height:1.4">
+        <div style="overflow-wrap:anywhere">${escapeHtml(String(a.texto || '').slice(0, 280))}${String(a.texto || '').length > 280 ? '…' : ''}</div>
+        <div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap">
+          <span class="muted" style="font-size:11px">${escapeHtml(hora(a.created_at))}${a.dest_slug && a.dest_slug !== 'gaspar' && isAdmin() ? ' · para ' + escapeHtml(a.dest_slug) : ''}</span>
+          ${a.ref_phone ? `<button class="btn btn-cyan btn-sm" data-av-ver="${escapeHtml(a.ref_phone)}" style="padding:2px 10px">Ver chat →</button>` : ''}
+          <button class="btn btn-ghost btn-sm" data-av-visto="${a.id}" style="padding:2px 10px">Lo vi</button>
+        </div>
+      </div>`).join('')}
+    ${items.length > 6 ? `<div class="muted" style="font-size:11px;padding-top:4px">…y ${items.length - 6} más</div>` : ''}`;
+}
+
 // ===== Vista "Servicio de corte" (vertical B2B/alumnos) — Etapa 1 (solo lectura) =====
 const CORTE_ESTADOS = [
   ['pedido', '📥 Pedido'], ['matriz_lista', '✏️ Matriz'], ['cortado', '🪚 Cortado'],
@@ -12333,6 +12554,8 @@ function bindAdmin() {
   loadCosts();
   // Regulador de consultas: lo que eligió cada vendedor secundario (con override).
   bindRepartoPanel();
+  // Avisos internos (Etapa 1): KPIs, modo y lista de lo que se le avisó al equipo.
+  bindAvisosPanel();
 
   const saveBtn = document.querySelector('[data-cot-save]');
   if (saveBtn) saveBtn.onclick = async () => {
@@ -12455,6 +12678,14 @@ function renderAdmin() {
         <span class="muted" style="font-size:12px">cuántas eligió cada uno · podés fijarla vos</span>
       </div>
       <div id="reparto-panel"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:var(--s-4)">
+      <div class="card-h">
+        <h3>Avisos internos</h3>
+        <span class="muted" style="font-size:12px">lo que el CRM le avisa al equipo · últimas 24 h</span>
+      </div>
+      <div id="avisos-panel"><div class="loading"><div class="spinner"></div></div></div>
     </div>
 
     ${renderAdminCotizador()}

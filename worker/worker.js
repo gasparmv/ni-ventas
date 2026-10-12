@@ -1657,7 +1657,10 @@ async function fetchJunioLeads(env) {
   return { total: leads.length, leads };
 }
 
-async function waSend(env, payload) {
+// opts.esAviso = el envío ES un aviso interno (avisoInterno o el envío de hoy que envuelve). Corta el
+// único camino por el que un envío puede generar OTRO aviso adentro de waSend (el rechazo por pago):
+// con esAviso solo se registra el episodio, nunca se avisa (anti-loop, plan de fondo §8).
+async function waSend(env, payload, opts = {}) {
   // Kill-switch GLOBAL de envíos (kv wa_send_paused). Se prende cuando Meta restringe la cuenta,
   // para NO seguir intentando mandar (empeora la restricción y hace ruido). Frena TODO el envío
   // saliente (automático y manual). Se apaga con POST /admin/wa/pause {on:false} cuando la cuenta
@@ -1702,8 +1705,16 @@ async function waSend(env, payload) {
     // puede seguir saliendo (26/27-sep: 0 plantillas, pero sí cientos de textos).
     if (isBillingBlockError(errCodeAny, errText)) {
       try {
-        if ((await noteWaPayReject(env, errText)) && env.ADMIN_NOTIFY_PHONE) {
-          await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp rechaza envíos por un problema de PAGO.\nError: ' + errText + '\nLas plantillas se pagan con el SALDO de 360dialog: cargá fondos en hub.360dialog.com → Funds (si el saldo está bien, fijate que la licencia del número esté paga en Invoices).\nLas campañas automáticas quedan en pausa sin quemar contactos y se reanudan solas cuando vuelva a salir una plantilla.');
+        if (opts && opts.esAviso) {
+          // El rechazo le tocó a un AVISO: se registra el rebote sin gastar el turno de aviso de las 12 h. Nunca se
+          // avisa desde acá (un aviso que rebota no puede generar otro aviso): si ese rebote tocaba avisar, lo manda
+          // el cron a los 5 min (avisoBloqueoPagoCron), con el mismo texto y al mismo destino que hoy.
+          await noteWaPayReject(env, errText, { soloRegistrar: true });
+        } else {
+          // La compuerta de 12 h (noteWaPayReject) va ANTES de avisoInterno y la clave sale del episodio ya guardado
+          // en kv + el turno de 12 h: el mismo turno nunca genera dos filas ni dos avisos, y el recordatorio sí sale.
+          const ep = await noteWaPayReject(env, errText);
+          if (ep.notify) await avisoBloqueoPago(env, WA_PAY_REJECT_KEY, ep.since, ep.turno, errText);
         }
       } catch (_) {}
     }
@@ -1726,8 +1737,13 @@ async function waSend(env, payload) {
   }
   const id = data?.messages?.[0]?.id || null;
   // Una plantilla salió OK → si había un rechazo por pago registrado, se cierra el episodio y se avisa.
+  // Si la plantilla que salió ERA un aviso (esAviso), el envío no avisa (un aviso nunca genera otro aviso, regla
+  // anti-loop del plan de fondo): cierra el episodio y deja el "volvió" para el cron (waPayRejectCerrarPorAviso).
   if (payload?.type === 'template') {
-    try { if (await clearWaPayReject(env) && env.ADMIN_NOTIFY_PHONE) await waSendText(env, env.ADMIN_NOTIFY_PHONE, 'WhatsApp volvió a mandar plantillas — las campañas automáticas se reanudan solas'); } catch (_) {}
+    if (opts && opts.esAviso) { await waPayRejectCerrarPorAviso(env); }
+    else {
+      try { if (await clearWaPayReject(env)) await avisoPagoVolvio(env); } catch (_) {}
+    }
   }
   return { ok: true, id, raw: data, provider: wa.provider };
 }
@@ -2488,8 +2504,19 @@ async function precotizSendIg(env, igId, body) {
   return r;
 }
 
-async function precotizNotifyGaspar(env, msg) {
-  try { await waSendText(env, PRECOTIZ_GASPAR_PHONE, msg); } catch (_) {}
+// Envoltorio de avisoInterno (plan de fondo, Etapa 1): sus ~21 llamadores quedan registrados desde el
+// primer deploy. En off/dry sale EXACTO lo de hoy (texto libre a Gaspar, ahora con esAviso); en 'on' la
+// vía la elige avisoInterno (texto si la ventana está abierta, plantilla UTILITY si no, resumen si es P3).
+// opts: { tipo, prioridad, para, clave, refPhone, plata } — por defecto P2 a gaspar, tipo 'legacy'.
+async function precotizNotifyGaspar(env, msg, opts = {}) {
+  try {
+    return await avisoInterno(env, {
+      para: opts.para || 'gaspar', tipo: opts.tipo || 'legacy', prioridad: opts.prioridad || 'P2', texto: msg,
+      clave: opts.clave || null, refPhone: opts.refPhone || '', plata: !!opts.plata,
+      legacy: () => waSendText(env, PRECOTIZ_GASPAR_PHONE, msg, { esAviso: true }),
+      legacyDest: PRECOTIZ_GASPAR_PHONE,
+    });
+  } catch (_) { return null; }
 }
 
 // ===== Clientes VIGILADOS: cada mensaje que mandan le llega a Gaspar a su WhatsApp personal =====
@@ -3081,7 +3108,7 @@ async function precotizEmitir(env, phone, nombre, msgs, modo, nowIso) {
   }
   // draft: guardar para que Gaspar apruebe desde el CRM; NO enviar.
   try { await env.DB.prepare('UPDATE precotiz_pilot SET pending_draft = ?, draft_ts = ?, updated_at = ? WHERE phone = ?').bind(JSON.stringify(msgs), nowIso, nowIso, phone).run(); } catch (_) {}
-  await precotizNotifyGaspar(env, `hay un borrador para aprobar en la pre cotizacion de ${nombre || phone}\nentra al crm a revisarlo`);
+  await precotizNotifyGaspar(env, `hay un borrador para aprobar en la pre cotizacion de ${nombre || phone}\nentra al crm a revisarlo`, { tipo: 'precotiz_borrador', prioridad: 'P2', refPhone: phone });
   return { sent: false };
 }
 
@@ -3314,7 +3341,14 @@ async function processPrecotizPilot(env) {
     if (res.frenar || res.es_carteles === false) {
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo=?, tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(String(res.motivo_freno || (res.es_carteles === false ? 'no es carteles' : 'fuera de guion')).slice(0, 200), tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
       await precotizTag(env, lead.phone, false);
-      await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${lead.nombre || lead.phone}\nmotivo: ${res.motivo_freno || 'revisar'}\nentra a verlo vos`);
+      // Freno del bot: al dueño del chat y a Gaspar. P1 solo si el motivo es de plata o posventa (pago,
+      // reclamo, garantía): lo demás (fuera de guion, no es carteles) puede esperar al rato.
+      {
+        const _motF = String(res.motivo_freno || '');
+        const _p1F = /pos ?venta|reclam|pag[oóu]|garant/i.test(_motF);
+        await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${lead.nombre || lead.phone}\nmotivo: ${res.motivo_freno || 'revisar'}\nentra a verlo vos`,
+          { tipo: 'freno_bot', prioridad: _p1F ? 'P1' : 'P2', para: [{ duenio: lead.phone }, 'gaspar'], clave: 'freno:' + lead.phone + ':' + lastInTs, refPhone: lead.phone });
+      }
       continue;
     }
     let msgs = precotizMsgs(res);
@@ -3647,13 +3681,14 @@ async function processPrecotizNudges(env) {
   }
 }
 
-async function waSendText(env, to, body) {
+// opts se pasa tal cual a waSend ({esAviso:true} en todo envío que sea un aviso interno).
+async function waSendText(env, to, body, opts = {}) {
   const num = normalizeArPhone(to);
   if (!num) return { ok: false, status: 400, error: 'numero invalido' };
-  return waSend(env, { messaging_product: 'whatsapp', to: num, type: 'text', text: { body: String(body || '') } });
+  return waSend(env, { messaging_product: 'whatsapp', to: num, type: 'text', text: { body: String(body || '') } }, opts);
 }
 
-async function waSendTemplate(env, to, name, lang = 'es', params = [], headerMediaId = null) {
+async function waSendTemplate(env, to, name, lang = 'es', params = [], headerMediaId = null, opts = {}) {
   const num = normalizeArPhone(to);
   if (!num) return { ok: false, status: 400, error: 'numero invalido' };
   const components = [];
@@ -3667,7 +3702,7 @@ async function waSendTemplate(env, to, name, lang = 'es', params = [], headerMed
     to: num,
     type: 'template',
     template: { name, language: { code: lang }, components }
-  });
+  }, opts);
 }
 
 // ===== API de Conversiones de Meta (CAPI) =====
@@ -3728,7 +3763,7 @@ async function maybeCapiReadyNotice(env) {
     const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_leads WHERE capi_qualified_at IS NOT NULL").first();
     const n = (r && r.n) || 0;
     if (n < CAPI_READY_THRESHOLD) return;
-    await precotizNotifyGaspar(env, `che, ya se juntaron ${n} leads B2B que respondieron (evento QualifiedLead en el dataset de Meta). Es buen momento para cambiar la campaña de carteles a "Clientes potenciales de conversion" optimizando por QualifiedLead. Avisame y te guio con el cambio.`);
+    await precotizNotifyGaspar(env, `che, ya se juntaron ${n} leads B2B que respondieron (evento QualifiedLead en el dataset de Meta). Es buen momento para cambiar la campaña de carteles a "Clientes potenciales de conversion" optimizando por QualifiedLead. Avisame y te guio con el cambio.`, { tipo: 'capi_listo', prioridad: 'P2' });
     await kvSet(env, 'capi_ready_notified', '1');
   } catch (_) {}
 }
@@ -3898,13 +3933,24 @@ async function maybeReporteDiario(env) {
     const params10 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
     const texto = formatReporteDiario(d);
     let anyOk = false;
+    const E = { esAviso: true };
     for (const ph of REPORTE_DIARIO_PHONES) {
-      let r = null;
-      try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas4', 'es_AR', params11); } catch (_) {}
-      if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas3', 'es_AR', params11); } catch (_) {} }
-      if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas', 'es_AR', params10); } catch (_) {} }
-      if (!r || !r.ok) { try { r = await waSendText(env, ph, texto); } catch (_) {} } // fallback: texto libre (solo llega si la ventana de 24h está abierta)
-      if (r && r.ok) anyOk = true;
+      // Lo de hoy (legacy): la cadena v4 → v3 → base → texto, igual para los dos.
+      const legacy = async () => {
+        let r = null;
+        try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas4', 'es_AR', params11, null, E); } catch (_) {}
+        if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas3', 'es_AR', params11, null, E); } catch (_) {} }
+        if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'reporte_diario_ventas', 'es_AR', params10, null, E); } catch (_) {} }
+        if (!r || !r.ok) { try { r = await waSendText(env, ph, texto, E); } catch (_) {} } // fallback: texto libre (solo llega si la ventana de 24h está abierta)
+        return r;
+      };
+      // [Etapa 1] Registrado como aviso 'reporte'. En 'on', a Bruno primero la v3 (UTILITY): la v4 es MARKETING y a
+      // él le rebota por el tope por usuario (131049). Decisión 13 de Gaspar: la v3 dice "Nadia" pero llega.
+      const v4 = { name: 'reporte_diario_ventas4', params: params11 }, v3 = { name: 'reporte_diario_ventas3', params: params11 }, v1 = { name: 'reporte_diario_ventas', params: params10 };
+      // sinCola: este cron ya reintenta cada 5 min de las 21 hasta que salga; si además la cola lo mandara al
+      // reanudarse los envíos (o el flush cuando Bruno escribe), llegaría dos veces.
+      const res = await avisoInterno(env, { para: ph, tipo: 'reporte', prioridad: 'P2', texto, tpl: ph === '5491155604996' ? [v3, v4, v1] : [v4, v3, v1], legacy, legacyDest: ph, sinCola: true });
+      if (res && res.ok) anyOk = true;
     }
     // Solo marcamos el día como enviado si AL MENOS UNO se entregó — así el reporte no
     // se pierde cuando la plantilla aún no está aprobada / la ventana está cerrada (reintenta).
@@ -4282,7 +4328,7 @@ async function maybeListaAgus(env, opts = {}) {
     await kvSet(env, K.last, JSON.stringify(res));
     if (completo) await kvSet(env, K.sent, fechaAR);
     else if (!force && tries >= 3) {
-      try { await precotizNotifyGaspar(env, `⚠️ La lista "para llamar" de Agus de hoy no salió completa (${next}/${grupos.length} partes tras 3 intentos). Se puede reintentar con POST /admin/lista-agus-test {"send":true}.`); } catch (_) {}
+      try { await precotizNotifyGaspar(env, `⚠️ La lista "para llamar" de Agus de hoy no salió completa (${next}/${grupos.length} partes tras 3 intentos). Se puede reintentar con POST /admin/lista-agus-test {"send":true}.`, { tipo: 'lista_fallida', prioridad: 'P2' }); } catch (_) {}
     }
     return res;
   } catch (e) { return { error: String((e && e.message) || e) }; }
@@ -4451,7 +4497,7 @@ async function maybeListaOC(env, opts = {}) {
       }
       Object.assign(res, { ok: completo, via, tramos: grupos.length, tramos_enviados: next, intento: tries });
       if (completo) await kvSet(env, K.sent, fechaAR);
-      else if (!force && tries >= 3) { try { await precotizNotifyGaspar(env, `⚠️ La lista de OC sin pagar de ${v.nombre} de hoy no salió (${next}/${grupos.length} partes tras 3 intentos). Reintentar: POST /admin/lista-oc-test {"send":true,"vendedor":"${v.slug}"}.`); } catch (_) {} }
+      else if (!force && tries >= 3) { try { await precotizNotifyGaspar(env, `⚠️ La lista de OC sin pagar de ${v.nombre} de hoy no salió (${next}/${grupos.length} partes tras 3 intentos). Reintentar: POST /admin/lista-oc-test {"send":true,"vendedor":"${v.slug}"}.`, { tipo: 'lista_fallida', prioridad: 'P2' }); } catch (_) {} }
     }
     await kvSet(env, 'lista_oc_last', JSON.stringify(out));
     return out;
@@ -4939,7 +4985,7 @@ async function corteVigiaPago(env, phone, opts = {}) {
     try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) {}
     const ch = await transicion('pagado');
     if (ch === 0) return await ch0(); // no confirmar ni avisar dos veces (o reintentar si el pago quedó sin marcar)
-    if (ch < 0) { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó comprobante por $' + monto.toLocaleString('es-AR') + ' pero falló marcarlo PAGADO en la base. Revisalo a mano.'); } catch (_) {} return true; }
+    if (ch < 0) { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó comprobante por $' + monto.toLocaleString('es-AR') + ' pero falló marcarlo PAGADO en la base. Revisalo a mano.', { tipo: 'corte_pago', prioridad: 'P1', refPhone: phone, plata: true }); } catch (_) {} return true; }
     try { await corteSend(env, phone, 'recibido, gracias! tu corte queda confirmado'); } catch (_) {}
     // DETALLE AUNQUE HAYA PAGADO DIRECTO: si el cobro le llegó por plantilla (solo el total) y contestó directo con el
     // comprobante, nunca recibió el desglose (corteAutoDetalle solo actúa sobre 'cobrando') → va ahora como recibo.
@@ -4969,11 +5015,11 @@ async function corteVigiaPago(env, phone, opts = {}) {
         else { sheetMsg = ' · planilla NO marcada (' + sr.error + ')'; if (/token|HTTP/i.test(String(sr.error))) await corteSheetPendingAdd(env, phone, cobr.nombre, total, caja); }
       } catch (e) { sheetMsg = ' · planilla error'; await corteSheetPendingAdd(env, phone, cobr.nombre, total, corteCajaFromProof(proof)); }
     }
-    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' pagó $' + monto.toLocaleString('es-AR') + ' (total $' + total.toLocaleString('es-AR') + '). Lo marqué PAGADO.' + sheetMsg); } catch (_) {}
+    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' pagó $' + monto.toLocaleString('es-AR') + ' (total $' + total.toLocaleString('es-AR') + '). Lo marqué PAGADO.' + sheetMsg, { tipo: 'corte_pago_ok', prioridad: 'P2', refPhone: phone }); } catch (_) {}
   } else {
     const ch = await transicion('parcial');
     if (ch === 0) return await ch0(); // otra ejecución ya lo procesó (o reintentar)
-    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó un comprobante por $' + monto.toLocaleString('es-AR') + ' pero el total es $' + total.toLocaleString('es-AR') + '. Revisalo (¿parcial o error?).' + (ch < 0 ? ' (ojo: falló marcarlo en la base)' : '')); } catch (_) {}
+    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó un comprobante por $' + monto.toLocaleString('es-AR') + ' pero el total es $' + total.toLocaleString('es-AR') + '. Revisalo (¿parcial o error?).' + (ch < 0 ? ' (ojo: falló marcarlo en la base)' : ''), { tipo: 'corte_pago', prioridad: 'P1', refPhone: phone, plata: true }); } catch (_) {}
   }
   return true;
 }
@@ -5044,7 +5090,7 @@ async function corteVigiaParcial(env) {
     if (!ins || !ins.meta || !ins.meta.changes) continue; // otra corrida ya lo registró → no avisar dos veces
     if (!es || !(monto > 0)) continue;
     const quien = r.nombre ? (r.nombre + ' (' + r.telefono + ')') : r.telefono;
-    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó otro comprobante por $' + monto.toLocaleString('es-AR') + '; estaba en pago parcial (total $' + Number(r.total).toLocaleString('es-AR') + '). Si completa, marcalo pagado desde el tablero.'); } catch (_) {}
+    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó otro comprobante por $' + monto.toLocaleString('es-AR') + '; estaba en pago parcial (total $' + Number(r.total).toLocaleString('es-AR') + '). Si completa, marcalo pagado desde el tablero.', { tipo: 'corte_pago', prioridad: 'P1', refPhone: r.telefono, plata: true }); } catch (_) {}
   }
 }
 // Vigía de pagos AUTÓNOMO: corre en el cron aunque el bot conversacional del corte esté APAGADO.
@@ -5493,7 +5539,7 @@ async function corteCargarTanda(env, { fecha, dryRun = true, incluirSospechosas 
     try {
       const sinTxt = sinTel.length ? '\n⚠ SIN TELÉFONO (no se les puede cobrar hasta asignarlo): ' + sinTel.map(s => s.nombre).join(', ') : '';
       const sosTxt = reporte.posibles_duplicados.length ? '\n⚠ ' + reporte.posibles_duplicados.length + ' posible(s) duplicado(s) NO cargado(s): ' + reporte.posibles_duplicados.map(p => p.cliente + ' ' + (p.diseno || p.producto)).join(', ') : '';
-      await precotizNotifyGaspar(env, `Corte: tanda ${f.txt} cargada — ${aInsertar.length} piezas nuevas ($${Math.round(reporte.total_nuevas).toLocaleString('es-AR')}), ${yaCargadas.length} ya estaban.` + sinTxt + sosTxt + (avisos.length ? '\n' + avisos.join('\n') : ''));
+      await precotizNotifyGaspar(env, `Corte: tanda ${f.txt} cargada — ${aInsertar.length} piezas nuevas ($${Math.round(reporte.total_nuevas).toLocaleString('es-AR')}), ${yaCargadas.length} ya estaban.` + sinTxt + sosTxt + (avisos.length ? '\n' + avisos.join('\n') : ''), { tipo: 'corte_tanda', prioridad: 'P3' });
     } catch (_) {}
     return reporte;
   } finally {
@@ -5537,7 +5583,7 @@ async function corteSyncEntrega(env, { soloTandaId = 0, notify = false } = {}) {
       if (ch) cambios.push({ tanda: g.tanda, cliente: g.cliente, de: g.de, a: g.a, piezas: ch, ya_embalado: g.ya_embalado });
     } catch (_) {}
   }
-  if (notify && cambios.length) { try { await precotizNotifyGaspar(env, corteEntregaCambiosTxt(cambios)); } catch (_) {} }
+  if (notify && cambios.length) { try { await precotizNotifyGaspar(env, corteEntregaCambiosTxt(cambios), { tipo: 'corte_entrega', prioridad: 'P3' }); } catch (_) {} }
   return { ok: true, cambios, revisadas: rows.length };
 }
 // Cron: cada 60 min (8 a 21 hs AR) sincroniza la entrega y avisa a Gaspar si cambió algo.
@@ -5931,7 +5977,7 @@ function logiContactoStmt(env, accion, tandaId, key, nowIso, quienPor) {
 async function logiAvisoNoContesta(env, P, tandaId, key, nowIso) {
   let nc = null;
   try { nc = await env.DB.prepare('UPDATE corte_paquetes SET aviso_nc_at=? WHERE tanda_id=? AND cliente_key=? AND aviso_nc_at IS NULL AND IFNULL(intentos,0)>=3 RETURNING intentos').bind(nowIso, tandaId, key).first(); } catch (_) {}
-  if (nc) { try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ' no contesta (' + nc.intentos + ' intentos). Tel ' + (P.telefono || 'sin teléfono') + '.'); } catch (_) {} }
+  if (nc) { try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ' no contesta (' + nc.intentos + ' intentos). Tel ' + (P.telefono || 'sin teléfono') + '.', { tipo: 'logistica', prioridad: 'P2' }); } catch (_) {} }
 }
 // Despacho ("cargado en el camión" / columna "Enviado") y su deshacer: UNA regla para /marcar y /celda.
 //  · cargado=true: con el paquete recalculado en el server (P, de logisticaPaqueteDe); si falta algo → 409
@@ -5966,7 +6012,7 @@ async function logiDespacho(env, rol, tandaId, key, P, cargado, quien, usuario, 
     let res;
     try { res = await env.DB.batch(st); } catch (_) { return { status: 500, body: LOGI_ERR_DB }; }
     const despachadas = (res && res[iUpd] && res[iUpd].meta && res[iUpd].meta.changes) || 0;
-    if (sinEmbalar.length && despachadas) { try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ' se envió con ' + sinEmbalar.length + ' pieza(s) sin marcar embaladas (' + sinEmbalar.map(p => p.diseno_nombre || p.producto || 'pieza').join(', ').slice(0, 200) + '). Avisale a Neyen.'); } catch (_) {} }
+    if (sinEmbalar.length && despachadas) { try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ' se envió con ' + sinEmbalar.length + ' pieza(s) sin marcar embaladas (' + sinEmbalar.map(p => p.diseno_nombre || p.producto || 'pieza').join(', ').slice(0, 200) + '). Avisale a Neyen.', { tipo: 'logistica', prioridad: 'P2', para: [{ slug: 'neyen', prioridad: 'P2' }, { slug: 'gaspar', prioridad: 'P3' }] }); } catch (_) {} }
     return null;
   }
   if (cargado === false) {
@@ -7009,7 +7055,7 @@ async function processCortePilot(env) {
       if (res.derivar_ventas) {
         try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox='general', updated_at=? WHERE phone=? AND inbox != 'privado'").bind(nowIso, phone).run(); } catch (_) {}
         if (!(conv && conv.estado === 'derivado_ventas')) {
-          try { const al = await env.DB.prepare("SELECT nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first(); const quien = (al && al.nombre) ? (al.nombre + ' (' + phone + ')') : phone; await precotizNotifyGaspar(env, 'Servicio de corte: ' + quien + ' pidió un CARTEL completo (no un corte). Lo mandé a ventas (bandeja general) para que lo tome Joaco.'); } catch (_) {}
+          try { const al = await env.DB.prepare("SELECT nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first(); const quien = (al && al.nombre) ? (al.nombre + ' (' + phone + ')') : phone; await precotizNotifyGaspar(env, 'Servicio de corte: ' + quien + ' pidió un CARTEL completo (no un corte). Lo mandé a ventas (bandeja general) para que lo tome Joaco.', { tipo: 'corte_a_ventas', prioridad: 'P2', refPhone: phone }); } catch (_) {}
         }
         try { await env.DB.prepare("UPDATE corte_conversaciones SET estado='derivado_ventas', updated_at=? WHERE phone=?").bind(nowIso, phone).run(); } catch (_) {}
         continue;
@@ -7057,7 +7103,7 @@ async function processCortePilot(env) {
           try {
             const al = await env.DB.prepare("SELECT nombre FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first();
             const quien = (al && al.nombre) ? (al.nombre + ' (' + phone + ')') : phone;
-            await precotizNotifyGaspar(env, 'Servicio de corte: un alumno necesita que lo atiendas vos.\n' + quien + (ultimoTxt ? ('\nDijo: "' + ultimoTxt + '"') : '') + (mot ? ('\nMotivo: ' + mot) : '') + '\nlo tenes en tu bandeja de corte');
+            await precotizNotifyGaspar(env, 'Servicio de corte: un alumno necesita que lo atiendas vos.\n' + quien + (ultimoTxt ? ('\nDijo: "' + ultimoTxt + '"') : '') + (mot ? ('\nMotivo: ' + mot) : '') + '\nlo tenes en tu bandeja de corte', { tipo: 'corte_freno', prioridad: 'P1', refPhone: phone });
           } catch (_) {}
           try { await precotizMarcarNoLeido(env, phone); } catch (_) {}
         }
@@ -7437,7 +7483,7 @@ async function avisarPausaBroadcast(env, kind, f) {
     const hastaAR = new Date(Date.parse(f.nextAt) - 3 * 3600 * 1000).toISOString().slice(11, 16);
     // Por plantilla (aviso_lanzamiento) con texto de respaldo: Gaspar casi nunca le escribe al número del
     // negocio → su ventana de 24h suele estar cerrada y un texto libre no le llegaba. Va en 1 línea, ≤300.
-    await avisoLanzamientoSend(env, env.ADMIN_NOTIFY_PHONE, `⏸ El broadcast ${kind} quedó en PAUSA hasta las ${hastaAR} (hora AR) por fallas al enviar. Motivo: ${describeSendFailure({ code: null, error: f.detail })}. Se reanuda solo; para reanudar antes: POST /admin/envios-reintentos {kind:"${kind}", reanudar:true}`);
+    await avisoLanzamientoSend(env, env.ADMIN_NOTIFY_PHONE, `⏸ El broadcast ${kind} quedó en PAUSA hasta las ${hastaAR} (hora AR) por fallas al enviar. Motivo: ${describeSendFailure({ code: null, error: f.detail })}. Se reanuda solo; para reanudar antes: POST /admin/envios-reintentos {kind:"${kind}", reanudar:true}`, { tipo: 'broadcast_pausa', prioridad: 'P2' });
   } catch (_) {}
 }
 // Procesa los broadcasts custom: manda la plantilla guardada de cada broadcast
@@ -11130,7 +11176,7 @@ async function processLaunchGuard(env) {
       msg += '\n\nSi es esperado, ignoralo. Si no, revisá landing/ads. Freno: kv lanzamiento_landing_on=0.';
     }
     const to = env.ADMIN_NOTIFY_PHONE || '5491155604999';
-    try { await waSendText(env, to, msg); await kvSet(env, 'launch_guard_last_alert', String(nowMs)); } catch (_) {}
+    try { await avisoAdmin(env, msg, { tipo: 'guardia_lanzamiento', prioridad: 'P1', to }); await kvSet(env, 'launch_guard_last_alert', String(nowMs)); } catch (_) {}
   } catch (_) {}
 }
 
@@ -12055,7 +12101,9 @@ async function centinelaAvisosAlMomento(env, desdeIso) {
       if (rs.length) L.push(`🛑 Frené ${rs.length} intento${rs.length === 1 ? '' : 's'} de esconder leads de carteles activos (envío/flujo de cursos), siguen en su bandeja: ` + rs.slice(0, 8).map(nom).join(', ') + (rs.length > 8 ? '…' : ''));
     } catch (_) {}
     if (!L.length) return;
-    await waSendText(env, env.ADMIN_NOTIFY_PHONE || '5491155604999', '🛡️ Ruteo de chats\n' + L.join('\n'));
+    // [Etapa 1] Por avisoAdmin (legacy = el mismo texto de siempre). Decisión 1 de §6: el ruteo al momento va al
+    // resumen (P3) cuando los avisos se prendan.
+    await avisoAdmin(env, '🛡️ Ruteo de chats\n' + L.join('\n'), { tipo: 'ruteo', prioridad: 'P3', to: env.ADMIN_NOTIFY_PHONE || '5491155604999' });
   } catch (_) {}
 }
 
@@ -12228,7 +12276,7 @@ async function processReventaLead(env, body) {
     try {
       const st = await env.DB.prepare("SELECT notif_sent FROM reventa_leads WHERE lead_id = ?").bind(leadId).first();
       if (!st?.notif_sent) {
-        await precotizNotifyGaspar(env, `nuevo revendedor cualificado\n${nombreRaw || nombre || 's/nombre'} - ${phone}\nya le mandé la apertura, quedó en la bandeja general con etiqueta revendedor`);
+        await precotizNotifyGaspar(env, `nuevo revendedor cualificado\n${nombreRaw || nombre || 's/nombre'} - ${phone}\nya le mandé la apertura, quedó en la bandeja general con etiqueta revendedor`, { tipo: 'revendedor', prioridad: 'P2', clave: 'reventa:' + leadId, refPhone: phone });
         await env.DB.prepare("UPDATE reventa_leads SET notif_sent = 1 WHERE lead_id = ?").bind(leadId).run();
       }
     } catch (_) {}
@@ -12951,7 +12999,7 @@ async function escalarSinCotizarViejos(env) {
   const lines = viejos.slice(0, 25).map(v => `- ${(v.name && v.name.trim()) ? v.name.trim() : ('+' + v.phone)}${v.canal === 'ig' ? ' (IG)' : ''}`);
   const extra = viejos.length > 25 ? `\n...y ${viejos.length - 25} mas` : '';
   const msg = `⚠️ ${viejos.length} pedido${viejos.length > 1 ? 's' : ''} sin cotizar hace +10 dias\nJoaco no les paso presupuesto, los saque de la lista activa (ya estan frios):\n${lines.join('\n')}${extra}`;
-  try { await precotizNotifyGaspar(env, msg); } catch (_) {}
+  try { await precotizNotifyGaspar(env, msg, { tipo: 'sin_cotizar', prioridad: 'P2' }); } catch (_) {}
   return { escalados: viejos.length };
 }
 
@@ -13509,15 +13557,27 @@ async function processCoexistenceHistory(env, data) {
 // Meta dispara este evento cuando un template cambia de status (PENDING → APPROVED|
 // REJECTED|PAUSED|DISABLED). Reemplaza al polling cada 5 min de monitorTemplateStatus
 // si el field está suscrito en el hub de 360dialog.
+// [Etapa 1] También procesa el field 'template_category_update' (Meta recategoriza una plantilla: trae
+// new_category y no trae event): guarda la categoría en el caché (la cadena de los avisos solo usa UTILITY) y, si
+// es una plantilla de los avisos, avisoTplCategoriaCheck le avisa a Gaspar.
 async function processTemplateStatusUpdate(env, value) {
   const name = value?.message_template_name || '';
   const lang = value?.message_template_language || '';
   const event = value?.event || ''; // APPROVED, REJECTED, PAUSED, etc.
   const reason = value?.reason || '';
+  const newCat = String(value?.new_category || value?.category || '').toUpperCase();
   // Reflejar el estado al instante en el caché (los broadcasts esperan a que su plantilla esté APPROVED
   // ahí; si no, dependía del polling horario y arrancaban hasta ~1h tarde).
   if (name && ['APPROVED', 'REJECTED', 'PAUSED', 'DISABLED', 'PENDING'].includes(String(event).toUpperCase())) {
     try { await env.DB.prepare('INSERT INTO template_status_cache (name, status, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at').bind(name, String(event).toUpperCase(), new Date().toISOString()).run(); } catch (_) {}
+  }
+  if (name && newCat && (await ensureTplCategoryCol(env))) {
+    try { await env.DB.prepare('UPDATE template_status_cache SET category = ?, updated_at = ? WHERE name = ?').bind(newCat, new Date().toISOString(), name).run(); } catch (_) {}
+  }
+  if (name && (event || newCat)) {
+    let st = String(event).toUpperCase(), cat = newCat;
+    try { const c = await env.DB.prepare("SELECT status, COALESCE(category, '') AS category FROM template_status_cache WHERE name = ?").bind(name).first(); if (c) { st = st || c.status; cat = cat || String(c.category || '').toUpperCase(); } } catch (_) {}
+    await avisoTplCategoriaCheck(env, name, st, cat);
   }
   if (!env.ADMIN_NOTIFY_PHONE || !name || !event) return;
   let icon = '📋';
@@ -13525,7 +13585,7 @@ async function processTemplateStatusUpdate(env, value) {
   else if (event === 'REJECTED' || event === 'DISABLED') icon = '❌';
   else if (event === 'PAUSED' || event === 'FLAGGED') icon = '⚠️';
   const text = `${icon} Plantilla "${name}" (${lang}): ${event}${reason ? `\nMotivo: ${reason}` : ''}`;
-  try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, text); } catch (_) {}
+  try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, text, { esAviso: true }); } catch (_) {}
 }
 
 // ===== Coexistence state sync (event: 'smb_app_state_sync' de 360dialog) =====
@@ -13839,16 +13899,1018 @@ async function processPaymentProof(env, m) {
     const color = '#22c55e';  // pago lanzamiento = verde
     const lid = await ensureLabelId(env, labelName, color);
     if (lid) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(m.phone, lid, new Date().toISOString()).run(); } catch (_) {} }
-    // Aviso a Gaspar + Bruno por cada pago (+ el inicial "ya arrancaron" una sola vez).
-    try { await avisoPagoLanzamiento(env, { nombre: m.senderName, phone: m.phone, monto, esSena: clasificacion === 'sena' }); } catch (_) {}
-    // Revelar el chat a la bandeja de Abril (cursos) para que atienda al que pagó.
+    // Revelar el chat a la bandeja de Abril (cursos) para que atienda al que pagó. Va ANTES del aviso
+    // (antes iba después): así el dueño del chat que resuelve avisoInterno ya es Abril y no el de 'general'.
     try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at WHERE wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('oculto','general','')").bind(m.phone, new Date().toISOString()).run(); } catch (_) {}
+    // Aviso a Gaspar + Bruno por cada pago (+ el inicial "ya arrancaron" una sola vez).
+    try { await avisoPagoLanzamiento(env, { nombre: m.senderName, phone: m.phone, monto, esSena: clasificacion === 'sena', wamid: m.wamid }); } catch (_) {}
   }
+}
+
+// ===================== AVISOS INTERNOS (plan de fondo, Etapa 1 — oct-2026) =====================
+// Un solo camino para avisarle algo a alguien del equipo: avisoInterno. Hasta ahora cada flujo mandaba su
+// propio texto libre a Gaspar (precotizNotifyGaspar, avisoLanzamientoSend, ADMIN_NOTIFY_PHONE…) sin dejar
+// rastro: con la ventana de 24 h cerrada el texto rebotaba (131047) y nadie se enteraba. avisoInterno registra
+// cada aviso en avisos_internos (mig 051), elige la vía (texto si la ventana está abierta, plantilla UTILITY si
+// no, resumen para lo que puede esperar, cola en el silencio nocturno de los vendedores, tope por hora) y sigue
+// la entrega con los statuses del webhook.
+// Kill-switch kv aviso_interno_modo = off | dry | on (sin la fila: off, así un deploy sin migración no prende nada):
+//   off → no registra nada; corre el envío de hoy (legacy) tal cual.
+//   dry → corre el legacy PRIMERO y después registra qué habría hecho lo nuevo (decision) + el wamid del legacy
+//         (su status de Meta dice si lo de hoy llegó, para comparar).
+//   on  → lo nuevo elige la vía y manda; el legacy queda de red solo si lo nuevo revienta antes de mandar nada.
+// Anti-loop: un aviso nunca genera otro aviso (todo sale con waSend {esAviso:true}); los statuses de los internos
+// nunca pasan por la rama de clientes; el reintento es UNO, por plantilla, con reclamo atómico por fila.
+
+// Normaliza un kill-switch a 'off' | 'dry' | 'on'. Acepta los alias viejos de la casa ('0', '1', 'live').
+function kvModo(v, def = 'off') {
+  const s = String(v == null ? '' : v).trim().toLowerCase();
+  if (s === 'on' || s === '1' || s === 'live' || s === 'true') return 'on';
+  if (s === 'dry') return 'dry';
+  if (s === 'off' || s === '0' || s === 'false') return 'off';
+  return def;
+}
+// Varios kv en UNA query por PK, con caché por isolate (ttl ms). Las claves que no existen quedan null y también
+// se cachean (si no, cada aviso volvería a preguntar). Si la D1 falla devuelve lo que haya en caché (o null).
+const _kvManyCache = new Map();
+async function kvMany(env, keys, ttl = 60000) {
+  const now = Date.now(), out = {}, faltan = [];
+  for (const k of keys) { const c = _kvManyCache.get(k); if (c && now - c.at < ttl) out[k] = c.v; else faltan.push(k); }
+  if (faltan.length) {
+    try {
+      const rs = await env.DB.prepare('SELECT k, v FROM kv_cache WHERE k IN (' + faltan.map(() => '?').join(',') + ')').bind(...faltan).all();
+      const got = new Map((rs.results || []).map(r => [r.k, r.v]));
+      for (const k of faltan) { const v = got.has(k) ? got.get(k) : null; _kvManyCache.set(k, { v, at: now }); out[k] = v; }
+    } catch (_) { for (const k of faltan) { const c = _kvManyCache.get(k); out[k] = c ? c.v : null; } }
+  }
+  return out;
+}
+function kvManyOlvidar(keys) { for (const k of keys) _kvManyCache.delete(k); }
+
+// Perillas de los avisos (todas en kv, se cambian sin deploy desde Admin → Avisos internos).
+const AVISO_KV = ['aviso_interno_modo', 'aviso_interno_vendedores_on', 'aviso_interno_tope_hora', 'aviso_interno_tope_p1_hora',
+  'aviso_interno_tope_global_hora', 'aviso_interno_tpl_chain', 'aviso_interno_gaspar_marketing_ok', 'aviso_interno_retry_on',
+  'aviso_interno_flush_on', 'aviso_interno_silencio', 'aviso_interno_tope_filas_corrida', 'aviso_interno_tope_filas_dia',
+  'resumen_horas', 'wa_send_paused'];
+const AVISO_TPL_CHAIN_DEF = ['aviso_interno_crm', 'recordatorio_agenda'];
+const AVISO_PRIOS = ['P1', 'P2', 'P3'];
+// Tipos que no cuentan para el tope por hora (son pocos, programados, y si se frenan se pierde la info del día).
+const AVISO_TIPOS_SIN_TOPE = ['resumen', 'reporte', 'test'];
+async function avisoCfg(env) {
+  const kv = await kvMany(env, AVISO_KV);
+  const int = (k, d) => { const n = parseInt(kv[k], 10); return Number.isFinite(n) && n >= 0 ? n : d; };
+  let chain = AVISO_TPL_CHAIN_DEF;
+  try { const c = JSON.parse(kv.aviso_interno_tpl_chain || 'null'); if (Array.isArray(c) && c.length) chain = c.map(String).filter(Boolean); } catch (_) {}
+  const sil = String(kv.aviso_interno_silencio || '22-8').split('-').map(x => parseInt(x, 10));
+  const horas = String(kv.resumen_horas || '10,14,18').split(',').map(x => parseInt(x, 10)).filter(h => h >= 0 && h <= 23);
+  const si = (k, d) => (kv[k] == null ? d : kv[k]) === '1';
+  return {
+    modo: kvModo(kv.aviso_interno_modo, 'off'),
+    vendedoresOn: si('aviso_interno_vendedores_on', '0'),
+    topeHora: int('aviso_interno_tope_hora', 12), topeP1: int('aviso_interno_tope_p1_hora', 30), topeGlobal: int('aviso_interno_tope_global_hora', 80),
+    chain, gasparMkt: si('aviso_interno_gaspar_marketing_ok', '1'),
+    retryOn: si('aviso_interno_retry_on', '1'), flushOn: si('aviso_interno_flush_on', '1'),
+    silDesde: Number.isFinite(sil[0]) ? sil[0] : 22, silHasta: Number.isFinite(sil[1]) ? sil[1] : 8,
+    resumenHoras: horas.length ? horas : [10, 14, 18],
+    topeFilasCorrida: int('aviso_interno_tope_filas_corrida', 20000), topeFilasDia: int('aviso_interno_tope_filas_dia', 200000),
+    pausado: kv.wa_send_paused === '1',
+  };
+}
+function avisoHoraAR() { return new Date(Date.now() - 3 * 3600e3).getUTCHours(); }
+function avisoFechaAR() { return new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10); }
+// ¿Es horario de silencio de los vendedores? ('22-8' cruza la medianoche; '13-15' no).
+function avisoEnSilencio(cfg) {
+  const h = avisoHoraAR(), a = cfg.silDesde, b = cfg.silHasta;
+  if (a === b) return false;
+  return a > b ? (h >= a || h < b) : (h >= a && h < b);
+}
+function _avHoraTxt(iso) { const d = new Date((Date.parse(iso) || Date.now()) - 3 * 3600e3); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); }
+// Parámetro de plantilla: Meta rechaza saltos de línea y 4+ espacios seguidos → una sola línea, recortada.
+function unaLinea(s, max = 900) { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > max ? t.slice(0, max - 1) + '…' : t; }
+// Prioridad por TIPO sin deploy (§3.7): kv aviso_tipo:<tipo> = 'P1' | 'P2' | 'P3' (vacío = la del código). Reemplaza
+// la prioridad por defecto del aviso y la de los destinatarios que la heredaban; las copias con prioridad propia
+// distinta (p. ej. la P3 a Gaspar de una falla) quedan como están. Así Gaspar mueve un tipo al resumen (P3) o lo
+// sube a urgente sin tocar código. kvMany cachea 60 s (también el "no existe"): 0 queries en el caso normal.
+const AVISO_TIPO_RE = /^[a-z0-9_]{1,40}$/;
+// Tipos cuya prioridad no se pisa: el reporte (sinCola: su cron reintenta hasta que sale; como P3 iría al resumen
+// sin salir, el cron lo volvería a pedir en cada tick de las 21 y el resumen de las 10 lo traería repetido), la
+// prueba manual y el propio resumen.
+const AVISO_TIPOS_PRIO_FIJA = ['reporte', 'test', 'resumen'];
+async function avisoAplicarTipo(env, o) {
+  try {
+    if (o.sinCola || o.forzarOn || AVISO_TIPOS_PRIO_FIJA.includes(String(o.tipo || ''))) return o;
+    const tipo = String(o.tipo || 'legacy');
+    if (!AVISO_TIPO_RE.test(tipo)) return o;
+    const k = 'aviso_tipo:' + tipo;
+    const v = String((await kvMany(env, [k]))[k] || '').trim().toUpperCase();
+    if (!AVISO_PRIOS.includes(v)) return o;
+    const def = AVISO_PRIOS.includes(o.prioridad) ? o.prioridad : 'P2';
+    const mapa = (it) => (it && typeof it === 'object' && it.prioridad === def) ? { ...it, prioridad: v } : it;
+    return { ...o, prioridad: v, para: Array.isArray(o.para) ? o.para.map(mapa) : mapa(o.para) };
+  } catch (_) { return o; }
+}
+
+// Medidor de filas leídas por corrida (freno de costo de D1, objeción [ALTA] del plan): cada query de los crons
+// nuevos pasa por avQ con el medidor, que suma meta.rows_read. .all() siempre (también para RETURNING): .first()
+// no trae meta.
+function d1Medidor() { const m = { filas: 0, escritas: 0, add(r) { try { m.filas += Number((r && r.meta && r.meta.rows_read) || 0); m.escritas += Number((r && r.meta && r.meta.rows_written) || 0); } catch (_) {} } }; return m; }
+async function avQ(env, sql, binds = [], med = null) {
+  const r = await env.DB.prepare(sql).bind(...binds).all();
+  if (med) med.add(r);
+  return r.results || [];
+}
+
+// ----- Identidad (§3.2): las personas son agenda_phones.usuario -----
+// gaspar, bruno, joaquin, facundo, agustina, abril, disenador, neyen, anibal. Es el mismo identificador para buscar
+// el teléfono y para saber de quién es un chat, así que no hace falta mapa de alias (pedidos.comercial_id='joaco'
+// es otro espacio de nombres y no se toca).
+const INTERNOS_FIJOS = ['5491155604999', '5491155604996', '5491137593269'];   // Gaspar, Bruno, Joaco: la guardia de siempre
+const AVISO_SLUGS_FIJOS = { gaspar: '5491155604999', bruno: '5491155604996', joaquin: '5491137593269' };
+// Gaspar y Bruno reciben a toda hora. El resto (vendedores, Abril, diseño, producción) respeta
+// aviso_interno_vendedores_on y el silencio nocturno (decisión de Gaspar 12-oct: 22 a 8 salvo plata confirmada).
+const AVISO_SIN_SILENCIO = ['gaspar', 'bruno'];
+function _avDig(p) { return String(p || '').replace(/\D/g, ''); }
+// Dueño de un chat (slug de agenda_phones): cursos → Abril; corte/privado/precotiz/oculto → Gaspar; asignado a un
+// vendedor secundario (Facu/Agus) → ese; el resto (general sin asignar o de Joaco) → joaquin. El motor de "sin
+// responder" (Etapa 2) excluye 'oculto' en su propia consulta, así que acá puede caer en Gaspar sin molestar.
+function duenoDeChat(inbox, asg) {
+  const ib = String(inbox || ''), a = String(asg || '').toLowerCase();
+  if (ib === 'cursos') return 'abril';
+  if (ib === 'corte' || ib === 'privado' || ib === 'precotiz' || ib === 'oculto') return 'gaspar';
+  if (a && VENDEDORES_SECUNDARIOS.includes(a)) return a;
+  return 'joaquin';
+}
+async function duenoDeChatPhone(env, phone, med = null) {
+  const ph = _avDig(phone);
+  let r = null;
+  try { r = (await avQ(env, 'SELECT inbox, assigned_to FROM wa_chats_summary WHERE phone = ?', [ph], med))[0] || null; } catch (_) {}
+  const inbox = (r && r.inbox) || '', asg = (r && r.assigned_to) || '';
+  return { slug: duenoDeChat(inbox, asg), inbox, asg };
+}
+// Teléfonos del equipo: wa_internal_phones ∪ agenda_phones ∪ ADMIN_NOTIFY_PHONE ∪ los 3 fijos. Caché 10 min por
+// isolate. Si la query falla: solo los fijos y ok:false (fail-closed: el que llama decide no avisar fallas de
+// clientes en ese lote antes que tratar a un interno como cliente). No se memoiza el fallo.
+let _internosCache = null;
+async function internosSet(env) {
+  if (_internosCache && Date.now() - _internosCache.at < 10 * 60 * 1000) return _internosCache;
+  const set = new Set(INTERNOS_FIJOS);
+  const bySlug = new Map(Object.entries(AVISO_SLUGS_FIJOS));
+  const slugByPhone = new Map(Object.entries(AVISO_SLUGS_FIJOS).map(([s, p]) => [p, s]));
+  try {
+    const rs = await env.DB.prepare("SELECT usuario AS slug, phone FROM agenda_phones UNION ALL SELECT '' AS slug, phone FROM wa_internal_phones").all();
+    for (const r of (rs.results || [])) {
+      const p = _avDig(r.phone); if (!p) continue;
+      set.add(p);
+      const sl = String(r.slug || '').toLowerCase();
+      if (sl) { bySlug.set(sl, p); if (!slugByPhone.has(p) || !AVISO_SLUGS_FIJOS[slugByPhone.get(p)]) slugByPhone.set(p, sl); }
+    }
+    const adm = _avDig(env.ADMIN_NOTIFY_PHONE); if (adm) set.add(adm);
+    _internosCache = { set, bySlug, slugByPhone, ok: true, at: Date.now() };
+    return _internosCache;
+  } catch (_) {
+    // Con una lista anterior en caché (vencida) se usa esa, que es mejor que solo los fijos (p. ej. para que el poll
+    // de notificaciones no le muestre a un vendedor el chat de Agus); ok sigue en false (fail-closed donde importa).
+    if (_internosCache) return { ..._internosCache, ok: false };
+    return { set, bySlug, slugByPhone, ok: false, at: Date.now() };
+  }
+}
+async function esTelefonoInterno(env, phone) {
+  const d = _avDig(phone);
+  try { return (await internosSet(env)).set.has(d); } catch (_) { return INTERNOS_FIJOS.includes(d); }
+}
+// Usuario de la sesión del CRM → slug. 'Gaspar' es usuario compartido con Bruno: los avisos "al autor" de algo que
+// mandó 'gaspar' van a los dos (avisoResolverPara).
+function avisoAutorSlug(sessionUser) {
+  const s = String(sessionUser || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (!s) return '';
+  if (s === 'joaco' || s === 'joaquin') return 'joaquin';
+  if (s === 'cursos' || s === 'abril') return 'abril';
+  if (s === 'emma' || s === 'disenador') return 'disenador';
+  if (s === 'nadia' || s === 'facu' || s === 'facundo') return 'facundo';   // Facu reemplazó a Nadia (mismo usuario)
+  if (s === 'agus' || s === 'agustina') return 'agustina';
+  return ['gaspar', 'bruno', 'neyen', 'anibal'].includes(s) ? s : '';
+}
+// ¿La ventana de 24 h del interno está abierta? (le escribió al número del negocio hace < 23 h; idx phone+ts).
+async function ventanaAbiertaInterno(env, phone, med = null) {
+  const desde = new Date(Date.now() - 23 * 3600 * 1000).toISOString();
+  const r = await avQ(env, "SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status', 'reaction') AND ts > ? LIMIT 1", [_avDig(phone), desde], med);
+  return r.length > 0;
+}
+
+// ----- Esquema (mig 051). Patrón de la casa (045): la migración se aplica ANTES del deploy y esto solo crea
+// tablas y columnas si faltan (ALTER en try/catch) y verifica antes de memoizar. Los índices los crea la
+// migración (nunca acá): si faltan se loguea, no se crean en caliente.
+let _avisosSchemaOk = false, _tplCatColOk = false;
+async function ensureAvisosSchema(env) {
+  if (_avisosSchemaOk) return true;
+  try {
+    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS avisos_internos (id INTEGER PRIMARY KEY AUTOINCREMENT, clave TEXT UNIQUE, dest TEXT NOT NULL, dest_slug TEXT NOT NULL DEFAULT '', tipo TEXT NOT NULL,
+      prioridad TEXT NOT NULL DEFAULT 'P2' CHECK (prioridad IN ('P1','P2','P3')), texto TEXT NOT NULL, ref_phone TEXT NOT NULL DEFAULT '', media_keys TEXT NOT NULL DEFAULT '',
+      via TEXT NOT NULL DEFAULT '', decision TEXT NOT NULL DEFAULT '', wamid TEXT, wamid_prev TEXT, status TEXT NOT NULL DEFAULT 'pendiente', error_code TEXT NOT NULL DEFAULT '',
+      intentos INTEGER NOT NULL DEFAULT 0, digest_id INTEGER, created_at TEXT NOT NULL, sent_at TEXT, delivered_at TEXT, read_at TEXT, flushed_at TEXT, visto_at TEXT, visto_por TEXT, updated_at TEXT NOT NULL)`).run();
+  } catch (_) {}
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS wa_send_author (wamid TEXT PRIMARY KEY, autor TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL)").run(); } catch (_) {}
+  await ensureTplCategoryCol(env);
+  try {
+    await env.DB.prepare('SELECT id, clave, dest, dest_slug, tipo, prioridad, texto, ref_phone, media_keys, via, decision, wamid, wamid_prev, status, error_code, intentos, digest_id, created_at, sent_at, delivered_at, read_at, flushed_at, visto_at, visto_por, updated_at FROM avisos_internos LIMIT 0').all();
+    await env.DB.prepare('SELECT wamid, autor, phone, ts FROM wa_send_author LIMIT 0').all();
+    _avisosSchemaOk = true;
+  } catch (_) {}
+  if (_avisosSchemaOk) {
+    try {
+      const ix = await env.DB.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN ('idx_avisos_wamid', 'idx_avisos_dest_created', 'idx_avisos_status_created', 'idx_avisos_created', 'idx_wa_send_author_ts')").first();
+      if (!ix || ix.n < 5) console.warn('avisos_internos: faltan índices de la migración 051 (' + (ix ? ix.n : 0) + '/5) — aplicarla');
+    } catch (_) {}
+  }
+  return _avisosSchemaOk;
+}
+// template_status_cache.category (mig 051): la cadena de plantillas de los avisos solo usa las UTILITY. La tabla la
+// crea monitorTemplateStatus; si todavía no existe, se reintenta en la próxima llamada.
+async function ensureTplCategoryCol(env) {
+  if (_tplCatColOk) return true;
+  // Primero se mira si ya está (lo normal después de la migración): así no se tira un ALTER fallido por isolate.
+  try { await env.DB.prepare('SELECT category FROM template_status_cache LIMIT 0').all(); _tplCatColOk = true; return true; } catch (_) {}
+  try { await env.DB.prepare("ALTER TABLE template_status_cache ADD COLUMN category TEXT NOT NULL DEFAULT ''").run(); } catch (_) {}
+  try { await env.DB.prepare('SELECT category FROM template_status_cache LIMIT 0').all(); _tplCatColOk = true; } catch (_) {}
+  return _tplCatColOk;
+}
+
+// ----- Elección de plantilla (ventana cerrada) -----
+// Candidatas en orden: las de aviso_interno_tpl_chain que estén APPROVED y sean UTILITY (las UTILITY no tienen el
+// tope por usuario de las MARKETING, 131049, que hoy le hace rebotar los avisos a Bruno). recordatorio_agenda se
+// acepta con categoría VACÍA solo mientras monitorTemplateStatus no la complete: se creó con allow_category_change
+// y si Meta la pasó a MARKETING queda afuera apenas la columna se llene. Para Gaspar, aviso_lanzamiento (MARKETING)
+// como último recurso si aviso_interno_gaspar_marketing_ok='1'. 360dialog devuelve status en minúsculas → upper().
+// Devuelve [{name, max}] (max = largo del parámetro: aviso_lanzamiento admite 300).
+async function elegirPlantillaAviso(env, cfg, slug, med = null) {
+  const names = [...new Set([...cfg.chain, 'aviso_lanzamiento'])];
+  const ph = names.map(() => '?').join(',');
+  let rows = [];
+  try { rows = await avQ(env, `SELECT name, upper(status) AS status, upper(COALESCE(category, '')) AS category FROM template_status_cache WHERE name IN (${ph})`, names, med); }
+  catch (_) { try { rows = await avQ(env, `SELECT name, upper(status) AS status, '' AS category FROM template_status_cache WHERE name IN (${ph})`, names, med); } catch (_) {} }
+  const by = new Map(rows.map(r => [r.name, r]));
+  // ¿La columna ya está poblada? (alguna de estas plantillas tiene categoría): desde ahí la excepción de la categoría
+  // vacía de recordatorio_agenda deja de valer (objeción [BAJA] del plan): vacía = no sabemos = no se usa.
+  const poblada = rows.some(r => r.category);
+  const out = [];
+  for (const n of cfg.chain) {
+    const r = by.get(n);
+    if (!r || r.status !== 'APPROVED') continue;
+    if (r.category === 'UTILITY' || (n === 'recordatorio_agenda' && r.category === '' && !poblada)) out.push({ name: n, max: 900 });
+  }
+  if (slug === 'gaspar' && cfg.gasparMkt) { const r = by.get('aviso_lanzamiento'); if (r && r.status === 'APPROVED' && !out.some(x => x.name === 'aviso_lanzamiento')) out.push({ name: 'aviso_lanzamiento', max: 300 }); }
+  return out;
+}
+
+// ----- Destinatarios -----
+// `para`: un slug, un teléfono interno, {duenio: phone}, {autor: wamid, phone}, {slug}, cada uno con `prioridad`
+// opcional, o un array de esas formas. Solo resuelve a teléfonos de internosSet: un cliente nunca recibe un aviso.
+// Mismo teléfono dos veces → queda la prioridad más urgente. Sin dueño → gaspar.
+//  - {autor}: el que mandó ese wamid desde el CRM (wa_send_author). 'gaspar' = usuario compartido → gaspar + bruno.
+//    Sin autor (envío automático: FUP, bot) → al RESUMEN del dueño del chat (P3), no como push (objeción [MEDIA]).
+//  - Mientras aviso_interno_vendedores_on no esté en '1', lo que iba a un vendedor/Abril/diseño/producción le llega
+//    a Gaspar (como hoy, que todo le llega a él). Con o.sinRedireccion (prueba manual) no se redirige.
+async function avisoResolverPara(env, para, prioDef, cfg, o = {}, med = null) {
+  const I = await internosSet(env);
+  const items = Array.isArray(para) ? para : [para];
+  const out = new Map();
+  const add = (slug, prio, phoneDirecto) => {
+    slug = String(slug || '').toLowerCase();
+    let phone = phoneDirecto || I.bySlug.get(slug) || '';
+    if (!phone || !I.set.has(phone)) return;
+    if (slug && !AVISO_SIN_SILENCIO.includes(slug) && !cfg.vendedoresOn && !o.sinRedireccion) { slug = 'gaspar'; phone = I.bySlug.get('gaspar') || AVISO_SLUGS_FIJOS.gaspar; }
+    const p = AVISO_PRIOS.includes(prio) ? prio : 'P2';
+    const prev = out.get(phone);
+    if (!prev || p < prev.prioridad) out.set(phone, { phone, slug, prioridad: p });   // 'P1' < 'P2' < 'P3'
+  };
+  for (const it of items) {
+    if (it == null || it === '') continue;
+    const prio = (typeof it === 'object' && it.prioridad) || prioDef;
+    if (typeof it === 'string') {
+      const d = _avDig(it);
+      if (/^[\d\s+()-]+$/.test(it) && d.length >= 10) add(I.slugByPhone.get(d) || '', prio, d);
+      else add(it, prio);
+      continue;
+    }
+    if (it.slug) { add(it.slug, prio); continue; }
+    if (it.duenio) { const d = await duenoDeChatPhone(env, it.duenio, med); add(d.slug || 'gaspar', prio); continue; }
+    if (Object.prototype.hasOwnProperty.call(it, 'autor')) {
+      let autor = '';
+      if (it.autor) { try { autor = ((await avQ(env, 'SELECT autor FROM wa_send_author WHERE wamid = ?', [String(it.autor)], med))[0] || {}).autor || ''; } catch (_) {} }
+      if (autor === 'gaspar') { add('gaspar', prio); add('bruno', prio); }
+      else if (autor && I.bySlug.has(autor)) add(autor, prio);
+      else if (it.phone) { const d = await duenoDeChatPhone(env, it.phone, med); add(d.slug || 'gaspar', 'P3'); }
+      else add('gaspar', 'P3');
+    }
+  }
+  return [...out.values()];
+}
+
+// ----- Decisión de la vía (§3.7), en este orden -----
+// 1) P3 → resumen. 2) vendedor en horario de silencio → cola hasta las 8 (también P1, salvo plata confirmada:
+// o.plata). 3) tope por hora: P1 (aviso_interno_tope_p1_hora), P2 (aviso_interno_tope_hora) y global → 'tope'
+// (sale agrupado: P1 cada 5 min, P2 cada 15). 4) envíos pausados (wa_send_paused) → 'pausado'. Devuelve null si
+// hay que mandar ya (la vía de envío la elige avisoEnviar / avisoDecisionRuta).
+const AVISO_DECISION_ENVIO_SQL = "(decision = 'texto' OR decision LIKE 'plantilla:%' OR decision LIKE 'tpl:%')";
+async function avisoDecidirPrevio(env, cfg, t, o, med = null) {
+  const d = await _avDecidirPrevio(env, cfg, t, o, med);
+  // o.sinCola (el reporte diario): el que llama ya reintenta solo; si además quedara esperando (resumen, cola, tope o
+  // pausado), lo mandaría también el resumen, la cola o el flush y saldría DOS veces (o una por tick). Queda
+  // 'descartado' (se ve en el panel con la decisión).
+  if (d && o.sinCola) return { decision: d.decision, status: 'descartado' };
+  return d;
+}
+async function _avDecidirPrevio(env, cfg, t, o, med) {
+  if (t.prioridad === 'P3') return { decision: 'resumen', status: 'digest' };
+  if (!AVISO_SIN_SILENCIO.includes(t.slug) && avisoEnSilencio(cfg) && !(t.prioridad === 'P1' && o.plata)) return { decision: 'cola', status: 'cola' };
+  if (!AVISO_TIPOS_SIN_TOPE.includes(o.tipo)) {
+    const desde = new Date(Date.now() - 3600e3).toISOString();
+    const r = (await avQ(env, `SELECT COUNT(*) AS n, SUM(CASE WHEN prioridad = 'P1' THEN 1 ELSE 0 END) AS p1 FROM avisos_internos WHERE dest = ? AND created_at >= ? AND ${AVISO_DECISION_ENVIO_SQL}`, [t.phone, desde], med))[0] || {};
+    const n = r.n || 0, p1 = r.p1 || 0;
+    if (t.prioridad === 'P1' ? p1 >= cfg.topeP1 : (n - p1) >= cfg.topeHora) return { decision: 'tope', status: 'tope' };
+    const g = (await avQ(env, `SELECT COUNT(*) AS n FROM avisos_internos WHERE created_at >= ? AND ${AVISO_DECISION_ENVIO_SQL}`, [desde], med))[0] || {};
+    if ((g.n || 0) >= cfg.topeGlobal) return { decision: 'tope', status: 'tope' };
+  }
+  if (cfg.pausado) return { decision: 'pausado', status: 'pausado' };
+  return null;
+}
+// Qué vía usaría avisoEnviar, SIN mandar (para el registro en dry).
+async function avisoDecisionRuta(env, cfg, t, o, med = null) {
+  if (o.tpls && o.tpls.length) return 'tpl:' + o.tpls[0].name;
+  if (await ventanaAbiertaInterno(env, t.phone, med)) return 'texto';
+  const c = await elegirPlantillaAviso(env, cfg, t.slug, med);
+  return c.length ? 'plantilla:' + c[0].name : 'perdido';
+}
+
+// Fotos de un aviso (R2) al interno, con la ventana abierta. Devuelve cuántas salieron.
+async function avisoEnviarMedia(env, phone, keys, caption) {
+  let n = 0;
+  if (!env.MEDIA) return 0;
+  for (let i = 0; i < keys.length && i < 10; i++) {
+    try {
+      const obj = await env.MEDIA.get(keys[i]);
+      if (!obj) continue;
+      const buf = await obj.arrayBuffer();
+      const mime = (obj.httpMetadata && obj.httpMetadata.contentType) || 'image/jpeg';
+      const mediaId = await uploadMediaToMeta(env, buf, mime, String(keys[i]).split('/').pop() || 'foto.jpg');
+      if (!mediaId) continue;
+      const r = await waSendImage(env, phone, mediaId, i === 0 && caption ? String(caption).slice(0, 1000) : undefined, { esAviso: true });
+      if (r && r.ok) n++;
+    } catch (_) {}
+  }
+  return n;
+}
+// Manda UN aviso (no mira silencio ni tope: eso lo decide el que llama). Orden: las plantillas explícitas del
+// aviso (o.tpls, p. ej. el reporte diario) → ventana abierta: texto (+ fotos; con '🔴 Urgente' si es P1) → la
+// cadena de plantillas UTILITY con el texto en una línea. Un rechazo síncrono pasa a la siguiente opción.
+// Devuelve { ok, via, wamid, code, error, fotos }.
+async function avisoEnviar(env, cfg, t, o, med = null) {
+  const E = { esAviso: true };
+  let last = null;
+  for (const tp of (o.tpls || [])) {
+    let r = null;
+    try { r = await waSendTemplate(env, t.phone, tp.name, tp.lang || 'es_AR', tp.params || [], null, E); } catch (_) {}
+    if (r && r.ok) return { ok: true, via: 'tpl:' + tp.name, wamid: r.id || null, fotos: 0 };
+    if (r && r.error === 'wa_send_paused') return { ok: false, via: 'pausado', code: '', error: r.error };
+    last = r;
+  }
+  let ventana = false;
+  try { ventana = await ventanaAbiertaInterno(env, t.phone, med); } catch (_) {}
+  if (ventana) {
+    const txt = String(o.texto || '');
+    const pre = (t.prioridad === 'P1' && !/^\s*🔴/.test(txt)) ? '🔴 Urgente\n' : '';
+    let r = null;
+    try { r = await waSendText(env, t.phone, (pre + txt).slice(0, 4000), E); } catch (_) {}
+    if (r && r.ok) {
+      const fotos = (o.mediaKeys && o.mediaKeys.length) ? await avisoEnviarMedia(env, t.phone, o.mediaKeys, o.mediaCaption) : 0;
+      return { ok: true, via: 'texto', wamid: r.id || null, fotos };
+    }
+    if (r && r.error === 'wa_send_paused') return { ok: false, via: 'pausado', code: '', error: r.error };
+    last = r;
+  }
+  for (const tp of await elegirPlantillaAviso(env, cfg, t.slug, med)) {
+    let r = null;
+    try { r = await waSendTemplate(env, t.phone, tp.name, 'es_AR', [unaLinea(o.texto, tp.max)], null, E); } catch (_) {}
+    if (r && r.ok) return { ok: true, via: 'plantilla:' + tp.name, wamid: r.id || null, fotos: 0 };
+    if (r && r.error === 'wa_send_paused') return { ok: false, via: 'pausado', code: '', error: r.error };
+    last = r;
+  }
+  return { ok: false, via: 'perdido', code: String((last && last.code) || ''), error: (last && last.error) || 'sin vía disponible' };
+}
+
+// ----- avisoInterno: la ÚNICA función para avisarle algo a alguien del equipo -----
+// o = { para, tipo, prioridad='P2', texto, clave=null, refPhone='', mediaKeys=[], mediaCaption='', tpl=null,
+//       legacy=null, legacyDest='', plata=false, forzarOn=false, sinRedireccion=false }
+//  · clave: dedup '<tipo>:<id natural>' → se le agrega ':'+slug por destinatario (UNIQUE en la tabla).
+//  · legacy: () => Promise<resultado de waSend> — el envío de HOY. Puede devolver { ok, id, porDest:{phone:r} }
+//    si manda a varios. legacyDest: a quién manda el legacy (para pegar su wamid a la fila correcta en dry).
+//  · tpl: plantilla(s) explícitas {name, lang, params} que se prueban primero en 'on' (reporte diario).
+//  · plata: plata confirmada → un P1 a un vendedor sale aunque sea de noche.
+//  · forzarOn: prueba manual (/admin/avisos/test): camino 'on' aunque el modo sea off/dry.
+//  · sinCola: el que llama reintenta por su cuenta (reporte diario) → si no sale, la fila queda 'descartado' y
+//    nunca la levantan la cola, el flush ni el resumen (si no, saldría dos veces).
+// La prioridad se puede pisar por tipo sin deploy (kv aviso_tipo:<tipo>, avisoAplicarTipo).
+// Nunca tira: devuelve { ok, modo, legacy, filas, fotos }.
+async function avisoInterno(env, o = {}) {
+  let cfg = null;
+  try { cfg = await avisoCfg(env); } catch (_) {}
+  const modo = o.forzarOn ? 'on' : ((cfg && cfg.modo) || 'off');
+  if (modo !== 'on') {
+    // off/dry: el envío de hoy va PRIMERO y no depende de nada nuevo (ni de la tabla ni del kv): si lo nuevo
+    // falla, lo de hoy ya salió igual.
+    let lr = null;
+    if (typeof o.legacy === 'function') { try { lr = await o.legacy(); } catch (_) {} }
+    if (modo === 'dry' && cfg) {
+      const med = d1Medidor();
+      try { await avisoRegistrarDry(env, cfg, await avisoAplicarTipo(env, o), lr, med); } catch (_) {}
+      await avisoMedirFuera(env, med);
+    }
+    return { ok: !!(lr && lr.ok), modo, legacy: lr, filas: [] };
+  }
+  const estado = { mandado: false };
+  const med = d1Medidor();
+  try {
+    return await avisoInternoOn(env, cfg || (await avisoCfg(env)), o.forzarOn ? o : await avisoAplicarTipo(env, o), estado, med);
+  } catch (e) {
+    // Lo nuevo reventó (tabla sin migrar, D1 caída, sin destino interno): si todavía no salió nada, el envío de
+    // hoy como red. Si algo ya salió, no se repite.
+    if (!estado.mandado && typeof o.legacy === 'function') {
+      let lr = null; try { lr = await o.legacy(); } catch (_) {}
+      return { ok: !!(lr && lr.ok), modo, legacy: lr, filas: [], error: String((e && e.message) || e) };
+    }
+    return { ok: estado.mandado, modo, legacy: null, filas: [], error: String((e && e.message) || e) };
+  } finally { await avisoMedirFuera(env, med); }
+}
+function _avTpls(o) { return o.tpl ? (Array.isArray(o.tpl) ? o.tpl : [o.tpl]).filter(t => t && t.name) : []; }
+async function avisoInternoOn(env, cfg, o, estado, med = null) {
+  if (!(await ensureAvisosSchema(env))) throw new Error('avisos_internos sin esquema');
+  const prio = AVISO_PRIOS.includes(o.prioridad) ? o.prioridad : 'P2';
+  const dests = await avisoResolverPara(env, o.para == null ? 'gaspar' : o.para, prio, cfg, o, med);
+  if (!dests.length) throw new Error('sin destino interno');
+  const oo = { ...o, tpls: _avTpls(o), mediaKeys: Array.isArray(o.mediaKeys) ? o.mediaKeys : [] };
+  const texto = String(o.texto || '').slice(0, 4000);
+  const res = { ok: false, modo: 'on', legacy: null, filas: [], fotos: 0 };
+  for (const t of dests) {
+    const now = new Date().toISOString();
+    const clave = o.clave ? String(o.clave) + ':' + (t.slug || t.phone) : null;
+    // El INSERT con la clave reclama el aviso: dos llamadas simultáneas con la misma clave → solo una sigue.
+    const ins = await avQ(env, "INSERT INTO avisos_internos (clave, dest, dest_slug, tipo, prioridad, texto, ref_phone, media_keys, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?) ON CONFLICT(clave) DO NOTHING RETURNING id",
+      [clave, t.phone, t.slug, String(o.tipo || 'legacy'), t.prioridad, texto, _avDig(o.refPhone), oo.mediaKeys.length ? JSON.stringify(oo.mediaKeys) : '', now, now], med);
+    const id = ins[0] && ins[0].id;
+    if (!id) { res.filas.push({ slug: t.slug, dup: true }); continue; }   // ya avisado (misma clave)
+    const d = o.forzarOn ? null : await avisoDecidirPrevio(env, cfg, t, oo, med);
+    if (d) {
+      await avQ(env, 'UPDATE avisos_internos SET status = ?, decision = ?, updated_at = ? WHERE id = ?', [d.status, d.decision, now, id], med);
+      res.filas.push({ id, slug: t.slug, decision: d.decision });
+      continue;
+    }
+    const s = await avisoEnviar(env, cfg, t, { ...oo, texto }, med);
+    if (s.ok) { estado.mandado = true; res.ok = true; res.fotos += s.fotos || 0; }
+    const st = s.ok ? 'enviado' : (o.sinCola ? 'descartado' : (s.via === 'pausado' ? 'pausado' : 'perdido'));
+    await avQ(env, 'UPDATE avisos_internos SET via = ?, decision = ?, wamid = ?, status = ?, error_code = ?, intentos = 1, sent_at = ?, updated_at = ? WHERE id = ?',
+      [s.ok ? s.via : '', s.via, s.wamid || null, st, s.ok ? '' : String(s.code || s.error || '').slice(0, 120), s.ok ? now : null, now, id], med);
+    res.filas.push({ id, slug: t.slug, via: s.via, ok: s.ok });
+  }
+  return res;
+}
+// dry: registra qué habría hecho lo nuevo (decision) y pega el wamid del envío de hoy a la fila de su destinatario
+// (o a la primera, si no se sabe), así el status de Meta mide si lo de hoy llegó. Lo que el legacy mandó a alguien
+// que lo nuevo no tiene (p. ej. hoy a Gaspar, mañana a Abril) queda en una fila aparte 'solo_legacy'.
+async function avisoRegistrarDry(env, cfg, o, lr, med = null) {
+  if (!(await ensureAvisosSchema(env))) return;
+  const prio = AVISO_PRIOS.includes(o.prioridad) ? o.prioridad : 'P2';
+  let dests = [];
+  try { dests = await avisoResolverPara(env, o.para == null ? 'gaspar' : o.para, prio, cfg, o, med); } catch (_) {}
+  const oo = { ...o, tpls: _avTpls(o) };
+  const texto = String(o.texto || '').slice(0, 4000);
+  const mk = Array.isArray(o.mediaKeys) && o.mediaKeys.length ? JSON.stringify(o.mediaKeys) : '';
+  // Resultado del legacy por destinatario.
+  const porDest = new Map();
+  if (lr && lr.porDest) { for (const [p, r] of Object.entries(lr.porDest)) porDest.set(_avDig(p), r); }
+  else if (lr && _avDig(o.legacyDest)) porDest.set(_avDig(o.legacyDest), lr);
+  else if (lr && dests[0]) porDest.set(dests[0].phone, lr);
+  const ins = async (t, decision, r) => {
+    const now = new Date().toISOString();
+    const clave = o.clave ? String(o.clave) + ':' + (decision === 'solo_legacy' ? 'legacy:' + t.phone : (t.slug || t.phone)) : null;
+    const status = r ? (r.ok ? 'enviado' : 'fallido') : 'dry';
+    await avQ(env, "INSERT INTO avisos_internos (clave, dest, dest_slug, tipo, prioridad, texto, ref_phone, media_keys, via, decision, wamid, status, error_code, intentos, sent_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(clave) DO NOTHING",
+      [clave, t.phone, t.slug || '', String(o.tipo || 'legacy'), t.prioridad || prio, texto, _avDig(o.refPhone), mk, r ? 'legacy' : '', decision, (r && r.ok && r.id) || null, status,
+       r && !r.ok ? String(r.code || r.error || '').slice(0, 120) : '', r ? 1 : 0, r && r.ok ? now : null, now, now], med);
+  };
+  for (const t of dests) {
+    let decision = 'perdido';
+    try { const d = await avisoDecidirPrevio(env, cfg, t, oo, med); decision = d ? d.decision : await avisoDecisionRuta(env, cfg, t, oo, med); } catch (_) {}
+    const r = porDest.get(t.phone) || null;
+    porDest.delete(t.phone);
+    await ins(t, decision, r);
+  }
+  if (porDest.size) {
+    const I = await internosSet(env);
+    for (const [p, r] of porDest) { if (r) await ins({ phone: p, slug: I.slugByPhone.get(p) || '', prioridad: prio }, 'solo_legacy', r); }
+  }
+}
+
+// ----- Statuses de los envíos al equipo (los llama el webhook SOLO para destinatarios internos) -----
+// Nunca llama a avisoInterno. sent/delivered/read avanzan el estado (nunca retroceden). failed: un aviso que salió
+// como TEXTO (ventana que se cerró, 131047) se reintenta UNA vez por plantilla, con reclamo atómico por fila
+// (intentos < 2 … RETURNING): Meta reentrega el webhook y no puede salir dos veces. Si el wamid no es de un aviso
+// (listas, reporte, vigilado…) y es la primera vez que falla, queda como 'falla_interna' P3 para el resumen de
+// Gaspar (antes, con la guardia de 3 números, esas fallas no se veían en ningún lado).
+async function avisoInternoStatus(env, s = {}) {
+  const med = d1Medidor();
+  try { await _avisoInternoStatus(env, s, med); } finally { await avisoMedirFuera(env, med); }
+}
+async function _avisoInternoStatus(env, s, med) {
+  let cfg = null;
+  try { cfg = await avisoCfg(env); } catch (_) { return; }
+  if (!cfg || cfg.modo === 'off' || !s.wamid) return;
+  if (!(await ensureAvisosSchema(env))) return;
+  const now = new Date().toISOString();
+  const rows = await avQ(env, 'SELECT id, status, via, intentos, dest, dest_slug, texto FROM avisos_internos WHERE wamid = ?', [String(s.wamid)], med);
+  if (!rows.length) {
+    if (s.status !== 'failed' || !s.primeraVez) return;
+    const I = await internosSet(env);
+    const quien = I.slugByPhone.get(_avDig(s.phone)) || s.phone;
+    const txt = 'Falló un envío a ' + quien + ': ' + (s.errMsg || 'sin detalle') + (s.prevBody ? ' · "' + unaLinea(s.prevBody, 100) + '"' : '');
+    // wamid_prev (no wamid): así los statuses que lleguen después de ese mensaje no la confunden con un aviso.
+    await avQ(env, "INSERT INTO avisos_internos (clave, dest, dest_slug, tipo, prioridad, texto, ref_phone, decision, status, error_code, wamid_prev, created_at, updated_at) VALUES (?, ?, 'gaspar', 'falla_interna', 'P3', ?, ?, 'resumen', ?, ?, ?, ?, ?) ON CONFLICT(clave) DO NOTHING",
+      ['falla_interna:' + s.wamid, I.bySlug.get('gaspar') || AVISO_SLUGS_FIJOS.gaspar, txt, _avDig(s.phone), cfg.modo === 'on' ? 'digest' : 'dry', String(s.errCode || ''), String(s.wamid), now, now], med);
+    return;
+  }
+  const ids = rows.map(r => r.id), ph = ids.map(() => '?').join(',');
+  if (s.status === 'sent') {
+    await avQ(env, `UPDATE avisos_internos SET status = CASE WHEN status IN ('sin_confirmar', 'pendiente') THEN 'enviado' ELSE status END, sent_at = COALESCE(sent_at, ?), updated_at = ? WHERE id IN (${ph})`, [now, now, ...ids], med);
+  } else if (s.status === 'delivered') {
+    await avQ(env, `UPDATE avisos_internos SET status = CASE WHEN status IN ('enviado', 'sin_confirmar', 'pendiente', 'reintentando') THEN 'entregado' ELSE status END, delivered_at = COALESCE(delivered_at, ?), updated_at = ? WHERE id IN (${ph})`, [now, now, ...ids], med);
+  } else if (s.status === 'read') {
+    await avQ(env, `UPDATE avisos_internos SET status = CASE WHEN status IN ('enviado', 'entregado', 'sin_confirmar', 'pendiente', 'reintentando') THEN 'leido' ELSE status END, delivered_at = COALESCE(delivered_at, ?), read_at = COALESCE(read_at, ?), updated_at = ? WHERE id IN (${ph})`, [now, now, now, ...ids], med);
+  } else if (s.status === 'failed') {
+    // Solo pasan a 'fallido' los estados "quietos". Los que están EN VUELO ('enviando': lo reclamó el flush o la cola;
+    // 'reintentando': lo está mandando otra invocación) no se tocan: un 'failed' reentregado los devolvería a
+    // 'fallido' y el flush o este mismo reintento los volverían a reclamar → el mismo aviso saldría dos veces.
+    // 'perdido' tampoco (ya se sabe que no salió) ni lo entregado/leído (el 'failed' tardío no lo deshace).
+    await avQ(env, `UPDATE avisos_internos SET status = 'fallido', error_code = ?, updated_at = ? WHERE id IN (${ph}) AND status IN ('pendiente', 'enviado', 'sin_confirmar', 'fallido')`, [String(s.errCode || s.errMsg || '').slice(0, 120), now, ...ids], med);
+    // La falla_interna espuria (el status llegó antes de que se guardara el wamid del aviso) se descarta.
+    try { await avQ(env, "UPDATE avisos_internos SET status = 'descartado', updated_at = ? WHERE clave = ?", [now, 'falla_interna:' + s.wamid], med); } catch (_) {}
+    if (cfg.modo !== 'on' || !cfg.retryOn) return;
+    for (const r of rows) {
+      if (r.via !== 'texto') continue;   // solo el texto que rebotó por ventana; agrupados/flush/plantillas no se reintentan
+      const c = await avQ(env, "UPDATE avisos_internos SET status = 'reintentando', intentos = intentos + 1, updated_at = ? WHERE id = ? AND intentos < 2 AND via = 'texto' AND status = 'fallido' RETURNING id", [now, r.id], med);
+      if (!c.length) continue;   // ya reintentado (webhook reentregado) o agotado
+      let ok = null, lastErr = '', pausa = false;
+      for (const tp of await elegirPlantillaAviso(env, cfg, r.dest_slug, med)) {
+        let x = null;
+        try { x = await waSendTemplate(env, r.dest, tp.name, 'es_AR', [unaLinea(r.texto, tp.max)], null, { esAviso: true }); } catch (_) {}
+        if (x && x.ok) { ok = { via: 'plantilla:' + tp.name, id: x.id || null }; break; }
+        if (x && x.error === 'wa_send_paused') { pausa = true; break; }   // frenan todos los envíos: no tiene sentido probar la siguiente
+        lastErr = String((x && (x.code || x.error)) || '');
+      }
+      if (ok) await avQ(env, 'UPDATE avisos_internos SET wamid_prev = wamid, wamid = ?, via = ?, status = ?, sent_at = ?, updated_at = ? WHERE id = ?', [ok.id, ok.via, 'enviado', now, now, r.id], med);
+      // Envíos pausados (wa_send_paused): 'pausado', así lo manda la cola apenas se reanudan ("Avisos que estaban en pausa").
+      else if (pausa) await avQ(env, "UPDATE avisos_internos SET status = 'pausado', error_code = 'wa_send_paused', updated_at = ? WHERE id = ?", [now, r.id], med);
+      else await avQ(env, "UPDATE avisos_internos SET status = 'perdido', error_code = ?, updated_at = ? WHERE id = ?", [lastErr.slice(0, 120) || 'reintento sin plantilla', now, r.id], med);
+    }
+  }
+}
+
+// ----- Reconciliador (cron */5) -----
+// Cubre la carrera en que el status de Meta llega ANTES de que se guarde el wamid del aviso (el webhook no encuentra
+// la fila): mira el status que el webhook dejó en wa_messages (por wamid, índice único) en UNA consulta. También
+// pasa a 'sin_confirmar' los 'pendiente' viejos (el worker se cortó entre el INSERT y el envío) y los 'enviando' o
+// 'reintentando' que un cron, un flush o el reintento del webhook reclamó y no terminó (no se reenvían solos: si
+// salieron, saldrían dos veces; quedan en el panel con "Reenviar", que no toma lo que está en vuelo).
+async function avisoInternoReconciliar(env, med = null) {
+  const now = new Date().toISOString();
+  const hace = (min) => new Date(Date.now() - min * 60000).toISOString();
+  await avQ(env, "UPDATE avisos_internos SET status = 'sin_confirmar', updated_at = ? WHERE status = 'pendiente' AND created_at >= ? AND created_at < ?", [now, hace(48 * 60), hace(15)], med);
+  await avQ(env, "UPDATE avisos_internos SET status = 'sin_confirmar', updated_at = ? WHERE status IN ('enviando', 'reintentando') AND created_at >= ? AND updated_at < ?", [now, hace(72 * 60), hace(15)], med);
+  // La cola, el tope y los pausados solo se levantan dentro de las 24 h (processAvisosCola): lo que quedó afuera pasa a
+  // 'perdido' para que el panel diga la verdad (se puede reenviar a mano). Ventana de 24-72 h: por índice.
+  await avQ(env, "UPDATE avisos_internos SET status = 'perdido', error_code = 'vencido en cola', updated_at = ? WHERE status IN ('cola', 'tope', 'pausado') AND created_at >= ? AND created_at < ?", [now, hace(72 * 60), hace(24 * 60)], med);
+  const rs = await avQ(env,
+    `SELECT a.id, a.wamid, m.status AS st FROM avisos_internos a JOIN wa_messages m ON m.wamid = a.wamid
+     WHERE a.status IN ('enviado', 'sin_confirmar') AND a.created_at >= ? AND a.created_at < ? AND a.wamid IS NOT NULL
+       AND m.status IN ('delivered', 'read', 'failed') LIMIT 100`, [hace(6 * 60), hace(5)], med);
+  for (const r of rs) {
+    const nuevo = r.st === 'read' ? 'leido' : r.st === 'delivered' ? 'entregado' : 'fallido';
+    const col = r.st === 'read' ? ', read_at = COALESCE(read_at, ?), delivered_at = COALESCE(delivered_at, ?)' : r.st === 'delivered' ? ', delivered_at = COALESCE(delivered_at, ?)' : '';
+    const extra = r.st === 'read' ? [now, now] : r.st === 'delivered' ? [now] : [];
+    await avQ(env, `UPDATE avisos_internos SET status = ?${col}, updated_at = ? WHERE id = ? AND status IN ('enviado', 'sin_confirmar')`, [nuevo, ...extra, now, r.id], med);
+    // Si falló y el status había llegado antes que el wamid, el webhook lo anotó como 'falla_interna' (no era un
+    // aviso todavía): ya está en su fila, se descarta el duplicado (por clave, índice único).
+    if (r.st === 'failed') await avQ(env, "UPDATE avisos_internos SET status = 'descartado', updated_at = ? WHERE clave = ? AND status IN ('digest', 'dry')", [now, 'falla_interna:' + r.wamid], med);
+  }
+}
+
+// ----- Envío agrupado (cola de silencio, excedente del tope, pausados) -----
+// Un solo mensaje por persona con todo lo reclamado. via 'grupo:<vía>' → el reintento por plantilla no lo toma
+// (si no, cada fila del grupo mandaría su propia plantilla).
+async function avisoEnviarAgrupado(env, cfg, dest, slug, rows, titulo, med = null) {
+  if (!rows.length) return;
+  const now = new Date().toISOString();
+  const prio = rows.reduce((p, r) => (r.prioridad < p ? r.prioridad : p), 'P3');
+  const texto = rows.length === 1 ? rows[0].texto
+    : (titulo + ' (' + rows.length + '):\n' + rows.map(r => '• ' + _avHoraTxt(r.created_at) + ' ' + unaLinea(r.texto, 350)).join('\n'));
+  const s = await avisoEnviar(env, cfg, { phone: dest, slug, prioridad: prio }, { texto: texto.slice(0, 4000), tipo: 'agrupado' }, med);
+  const ids = rows.map(r => r.id), ph = ids.map(() => '?').join(',');
+  // intentos = intentos AUTOMÁTICOS por fila (el envío y el único reintento): el agrupado es el primer envío de lo que
+  // esperaba (cola, tope, pausado) → max(intentos, 1), nunca suma de más (la invariante "más de 2" es la del loop).
+  if (s.ok) await avQ(env, `UPDATE avisos_internos SET status = 'enviado', via = ?, wamid = ?, intentos = max(intentos, 1), sent_at = COALESCE(sent_at, ?), updated_at = ? WHERE id IN (${ph})`, ['grupo:' + s.via, s.wamid || null, now, now, ...ids], med);
+  else await avQ(env, `UPDATE avisos_internos SET status = ?, error_code = ?, updated_at = ? WHERE id IN (${ph})`, [s.via === 'pausado' ? 'pausado' : 'perdido', String(s.code || s.error || '').slice(0, 120), now, ...ids], med);
+}
+function _avAgruparPorDest(rows) {
+  const m = new Map();
+  for (const r of rows) { if (!m.has(r.dest)) m.set(r.dest, { slug: r.dest_slug || '', rows: [] }); m.get(r.dest).rows.push(r); }
+  return m;
+}
+// Cron */5: libera la cola del silencio (fuera del horario de silencio), el excedente del tope (P1 cada 5 min, P2
+// cada 15 min; ninguno pasa al día siguiente) y lo que quedó pausado por wa_send_paused cuando se reanuda. Cada
+// grupo se RECLAMA con un UPDATE … RETURNING antes de mandar: el flush del webhook y el cron no pueden tomar las
+// mismas filas.
+async function processAvisosCola(env, cfg, t = {}, med = null) {
+  if (!cfg || cfg.modo !== 'on') return;
+  const now = new Date().toISOString(), desde = new Date(Date.now() - 24 * 3600e3).toISOString();
+  const minute = Number.isFinite(t.minute) ? t.minute : new Date().getUTCMinutes();
+  const lotes = [];
+  // En el silencio nocturno, el excedente del tope que no es urgente de un vendedor (quedó en 'tope' antes de las
+  // 22) no sale de noche: pasa a la cola de la mañana. Gaspar y Bruno reciben a toda hora.
+  if (avisoEnSilencio(cfg)) {
+    await avQ(env, `UPDATE avisos_internos SET status = 'cola', updated_at = ? WHERE status = 'tope' AND created_at >= ? AND prioridad != 'P1' AND dest_slug NOT IN (${AVISO_SIN_SILENCIO.map(() => '?').join(',')})`, [now, desde, ...AVISO_SIN_SILENCIO], med);
+  } else lotes.push(["status = 'cola'", 'Avisos de anoche']);
+  lotes.push([minute % 15 < 5 ? "status = 'tope'" : "status = 'tope' AND prioridad = 'P1'", 'Avisos agrupados']);
+  if (!cfg.pausado) lotes.push(["status = 'pausado'", 'Avisos que estaban en pausa']);
+  for (const [cond, titulo] of lotes) {
+    const rows = await avQ(env, `UPDATE avisos_internos SET status = 'enviando', updated_at = ? WHERE id IN (SELECT id FROM avisos_internos WHERE ${cond} AND created_at >= ? ORDER BY id LIMIT 60) AND ${cond} RETURNING id, dest, dest_slug, prioridad, texto, created_at`, [now, desde], med);
+    for (const [dest, g] of _avAgruparPorDest(rows)) {
+      try { await avisoEnviarAgrupado(env, cfg, dest, g.slug, g.rows.sort((a, b) => a.id - b.id), titulo, med); }
+      catch (_) { try { await avQ(env, `UPDATE avisos_internos SET status = 'perdido', updated_at = ? WHERE id IN (${g.rows.map(() => '?').join(',')}) AND status = 'enviando'`, [now, ...g.rows.map(r => r.id)], med); } catch (_) {} }
+    }
+  }
+}
+// Webhook de entrada: un interno le escribió al número del negocio → su ventana de 24 h está abierta. Se le manda
+// en UN texto lo que no le llegó en las últimas 24 h (cola, tope, perdido, fallido, pausado) y las fotos de los
+// avisos que salieron por plantilla (que no pueden llevar foto). Solo en 'on' y con aviso_interno_flush_on='1'.
+async function avisoInternoFlush(env, phone) {
+  const med = d1Medidor();
+  try {
+    const cfg = await avisoCfg(env);
+    if (cfg.modo !== 'on' || !cfg.flushOn) return;
+    if (!(await ensureAvisosSchema(env))) return;
+    const dest = _avDig(phone);
+    const now = new Date().toISOString(), desde = new Date(Date.now() - 24 * 3600e3).toISOString();
+    // via != 'legacy': las fallas del envío de siempre registradas en modo prueba no se reenvían al prender.
+    const rows = await avQ(env, "UPDATE avisos_internos SET status = 'enviando', updated_at = ? WHERE dest = ? AND created_at >= ? AND flushed_at IS NULL AND status IN ('cola', 'tope', 'perdido', 'fallido', 'pausado') AND via != 'legacy' RETURNING id, prioridad, texto, created_at", [now, dest, desde], med);
+    if (rows.length) {
+      rows.sort((a, b) => a.id - b.id);
+      const texto = rows.length === 1 ? rows[0].texto : 'Avisos que no te llegaron (' + rows.length + '):\n' + rows.map(r => '• ' + _avHoraTxt(r.created_at) + ' ' + unaLinea(r.texto, 350)).join('\n');
+      let r = null;
+      try { r = await waSendText(env, dest, texto.slice(0, 4000), { esAviso: true }); } catch (_) {}
+      const ids = rows.map(x => x.id), ph = ids.map(() => '?').join(',');
+      // El flush NO suma a intentos (contador del envío automático y su único reintento): queda marcado por
+      // flushed_at y via 'flush'. Si sumara, un aviso que rebotó, se reintentó y después salió por acá daría 3 y
+      // la invariante "más de 2 intentos" (la del loop) saltaría sin que haya ningún loop.
+      if (r && r.ok) await avQ(env, `UPDATE avisos_internos SET status = 'enviado', via = 'flush', wamid = ?, flushed_at = ?, sent_at = COALESCE(sent_at, ?), updated_at = ? WHERE id IN (${ph})`, [r.id || null, now, now, now, ...ids], med);
+      // Envíos pausados (wa_send_paused): todo a 'pausado' SIN marcar flushed_at, así lo manda la cola apenas se
+      // reanudan (lote "Avisos que estaban en pausa"). Antes quedaba 'perdido' y solo salía si la persona volvía a escribir.
+      else if (r && r.error === 'wa_send_paused') await avQ(env, `UPDATE avisos_internos SET status = 'pausado', updated_at = ? WHERE id IN (${ph})`, [now, ...ids], med);
+      else await avQ(env, `UPDATE avisos_internos SET status = 'perdido', updated_at = ? WHERE id IN (${ph})`, [now, ...ids], med);
+    }
+    // Fotos pendientes: avisos con media que salieron por plantilla. Reclamo por flushed_at (una sola vez).
+    const conFotos = await avQ(env, "UPDATE avisos_internos SET flushed_at = ?, updated_at = ? WHERE dest = ? AND created_at >= ? AND flushed_at IS NULL AND media_keys != '' AND via LIKE 'plantilla:%' RETURNING id, texto, media_keys", [now, now, dest, desde], med);
+    for (const a of conFotos) {
+      let keys = []; try { keys = JSON.parse(a.media_keys) || []; } catch (_) {}
+      if (keys.length) await avisoEnviarMedia(env, dest, keys, unaLinea(a.texto, 200));
+    }
+  } catch (_) {}
+  finally { await avisoMedirFuera(env, med); }
+}
+
+// ----- Resumen programado (§2.5: uno solo, con secciones) -----
+// Corre en el cron */5 entre :05 y :20 de cada hora de resumen_horas (10, 14, 18 AR), de lunes a sábado; el dedup
+// es la clave 'resumen:<fecha>:<hora>:<slug>', así un tick que falla lo levanta el siguiente (objeción [MEDIA]).
+// Un mensaje por persona por horario, como P2 'resumen' (sin tope). Secciones: los avisos P3 de esa persona
+// (reclamados con UPDATE … RETURNING) + las que sumen otras etapas en RESUMEN_SECCIONES.
+// Gancho para la Etapa 2: RESUMEN_SECCIONES.push({ nombre, slugs: async (env, slot) => [slug…],
+// texto: async (env, slug, slot) => '' }) — p. ej. sinRespSeccionResumen ("sin responder").
+const RESUMEN_SECCIONES = [];
+async function processResumenes(env, cfg, t = {}, med = null) {
+  if (!cfg || cfg.modo !== 'on') return;
+  const hAR = Number.isFinite(t.hAR) ? t.hAR : avisoHoraAR();
+  const dowAR = Number.isFinite(t.dowAR) ? t.dowAR : new Date(Date.now() - 3 * 3600e3).getUTCDay();
+  const minute = Number.isFinite(t.minute) ? t.minute : new Date().getUTCMinutes();
+  if (dowAR === 0 || !cfg.resumenHoras.includes(hAR) || minute < 5 || minute > 20) return;
+  const fecha = avisoFechaAR(), slot = { fecha, hora: hAR };
+  const now = new Date().toISOString(), desde = new Date(Date.now() - 3 * 24 * 3600e3).toISOString();
+  const I = await internosSet(env);
+  const dests = new Map();
+  for (const r of await avQ(env, "SELECT dest, MAX(dest_slug) AS slug FROM avisos_internos WHERE status = 'digest' AND created_at >= ? GROUP BY dest", [desde], med)) dests.set(r.dest, r.slug || '');
+  for (const sec of RESUMEN_SECCIONES) {
+    try { for (const sl of (await sec.slugs(env, slot)) || []) { const p = I.bySlug.get(sl); if (p && !dests.has(p)) dests.set(p, sl); } } catch (_) {}
+  }
+  for (const [dest, slug] of dests) {
+    try {
+      const clave = 'resumen:' + fecha + ':' + hAR + ':' + (slug || dest);
+      if ((await avQ(env, 'SELECT 1 AS x FROM avisos_internos WHERE clave = ?', [clave], med)).length) continue;   // ya salió este horario
+      const items = await avQ(env, "UPDATE avisos_internos SET status = 'agrupado', updated_at = ? WHERE dest = ? AND status = 'digest' AND created_at >= ? RETURNING id, tipo, texto, created_at", [now, dest, desde], med);
+      items.sort((a, b) => a.id - b.id);
+      const partes = [];
+      if (items.length) partes.push('Avisos (' + items.length + '):\n' + items.slice(0, 25).map(x => '• ' + _avHoraTxt(x.created_at) + ' ' + unaLinea(x.texto, 250)).join('\n') + (items.length > 25 ? '\n…y ' + (items.length - 25) + ' más (Admin → Avisos internos)' : ''));
+      for (const sec of RESUMEN_SECCIONES) { try { const tx = await sec.texto(env, slug, slot); if (tx) partes.push(String(tx)); } catch (_) {} }
+      if (!partes.length) continue;
+      const texto = ('📋 Resumen de las ' + hAR + ' h\n\n' + partes.join('\n\n')).slice(0, 4000);
+      const ins = await avQ(env, "INSERT INTO avisos_internos (clave, dest, dest_slug, tipo, prioridad, texto, status, created_at, updated_at) VALUES (?, ?, ?, 'resumen', 'P2', ?, 'pendiente', ?, ?) ON CONFLICT(clave) DO NOTHING RETURNING id", [clave, dest, slug, texto, now, now], med);
+      const rid = ins[0] && ins[0].id;
+      const ids = items.map(x => x.id), ph = ids.map(() => '?').join(',');
+      if (!rid) {   // otro tick lo mandó justo: los P3 vuelven a esperar al próximo horario
+        if (ids.length) await avQ(env, `UPDATE avisos_internos SET status = 'digest', updated_at = ? WHERE id IN (${ph})`, [now, ...ids], med);
+        continue;
+      }
+      const s = await avisoEnviar(env, cfg, { phone: dest, slug, prioridad: 'P2' }, { texto, tipo: 'resumen' }, med);
+      await avQ(env, 'UPDATE avisos_internos SET via = ?, decision = ?, wamid = ?, status = ?, error_code = ?, intentos = 1, sent_at = ?, updated_at = ? WHERE id = ?',
+        [s.ok ? s.via : '', s.via, s.wamid || null, s.ok ? 'enviado' : (s.via === 'pausado' ? 'pausado' : 'perdido'), s.ok ? '' : String(s.code || s.error || '').slice(0, 120), s.ok ? now : null, now, rid], med);
+      if (ids.length) await avQ(env, `UPDATE avisos_internos SET digest_id = ?, updated_at = ? WHERE id IN (${ph})`, [rid, now, ...ids], med);
+    } catch (_) {}
+  }
+}
+
+// ----- Autor de los envíos manuales del CRM -----
+// wamid → slug de quien lo mandó (wa_send_author, mig 051). No se usa wa_messages.sender_name: en las plantillas
+// guarda al vendedor COMERCIAL ('joaco' por defecto, resolveComercial) y la fila fantasma de status le puede ganar
+// al INSERT por wamid. Si falla no importa: el aviso de esa falla va al resumen del dueño en vez de al autor.
+// Los endpoints la llaman DESPUÉS de su INSERT en wa_messages y con ctx.waitUntil: esperarla antes le sumaba un viaje
+// a la D1 a la carrera con la fila fantasma de status, también con los avisos en off.
+async function registrarAutorEnvio(env, wamid, sessionUser, phone) {
+  if (!wamid) return;
+  const autor = avisoAutorSlug(sessionUser) || String(sessionUser || '').trim().toLowerCase().slice(0, 40);
+  if (!autor) return;
+  try { await env.DB.prepare('INSERT OR IGNORE INTO wa_send_author (wamid, autor, phone, ts) VALUES (?, ?, ?, ?)').bind(String(wamid), autor, _avDig(phone), new Date().toISOString()).run(); } catch (_) {}
+}
+
+// ----- Purga diaria (cron, 5 AR): avisos de +90 días y autores de +14 (los dos por índice de fecha) -----
+async function purgarAvisos(env, med = null) {
+  await avQ(env, 'DELETE FROM avisos_internos WHERE created_at < ?', [new Date(Date.now() - 90 * 24 * 3600e3).toISOString()], med);
+  await avQ(env, 'DELETE FROM wa_send_author WHERE ts < ?', [new Date(Date.now() - 14 * 24 * 3600e3).toISOString()], med);
+  // Contadores diarios de filas leídas fuera del cron (avisoMedirFuera) de +7 días: rango por PK de kv_cache, sin LIKE.
+  const corte = new Date(Date.now() - 3 * 3600e3 - 7 * 24 * 3600e3).toISOString().slice(0, 10);
+  await avQ(env, 'DELETE FROM kv_cache WHERE k >= ? AND k < ?', [AVISO_FILAS_FUERA_KV, AVISO_FILAS_FUERA_KV + corte], med);
+}
+
+// ----- Filas leídas FUERA del cron (objeción [ALTA] del plan + revisión) -----
+// Lo que leen los avisos desde el webhook y los envíos (registro en dry, avisoInterno en 'on', statuses de internos,
+// flush) no pasa por processAvisosTick: sin esto el freno de costo no veía una regresión ahí. Se acumula por isolate
+// y se vuelca a kv avisos_filas_fuera:<fecha AR> cada 10 min o cada 2.000 filas (una escritura, suma en SQL). Lo que
+// no se volcó cuando el isolate muere se pierde: es un contador aproximado, alcanza para ver una regresión de miles.
+const AVISO_FILAS_FUERA_KV = 'avisos_filas_fuera:';
+let _avFuera = { filas: 0, at: Date.now() };
+async function avisoMedirFuera(env, med) {
+  try {
+    _avFuera.filas += (med && med.filas) || 0;
+    if (_avFuera.filas < 2000 && Date.now() - _avFuera.at < 10 * 60000) return;
+    const n = _avFuera.filas;
+    _avFuera = { filas: 0, at: Date.now() };
+    if (!n) return;
+    await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = CAST(COALESCE(CAST(kv_cache.v AS INTEGER), 0) + CAST(excluded.v AS INTEGER) AS TEXT), updated_at = excluded.updated_at')
+      .bind(AVISO_FILAS_FUERA_KV + avisoFechaAR(), String(n), new Date().toISOString()).run();
+  } catch (_) {}
+}
+
+// ----- Freno de costo de D1 (objeción [ALTA] del plan) -----
+// Suma las filas leídas de cada corrida en kv avisos_stats (por día AR). Si una corrida pasa
+// aviso_interno_tope_filas_corrida (20k) o el día pasa aviso_interno_tope_filas_dia (200k), apaga los avisos
+// (aviso_interno_modo='off': todo vuelve al envío de hoy) y le avisa a Gaspar UNA vez por día.
+async function avisosFrenoCosto(env, cfg, med, job) {
+  try {
+    const fecha = avisoFechaAR(), now = new Date().toISOString();
+    let st = {}; try { st = JSON.parse(await kvGet(env, 'avisos_stats', '{}')) || {}; } catch (_) {}
+    if (st.fecha !== fecha) st = { fecha, filas: 0, escritas: 0, corridas: 0, max: 0 };
+    st.filas += med.filas; st.escritas = (st.escritas || 0) + med.escritas; st.corridas++; st.max = Math.max(st.max || 0, med.filas);
+    st.ultima = { at: now, job, filas: med.filas, escritas: med.escritas };
+    // + lo que leyeron hoy fuera del cron (webhook, envíos; avisoMedirFuera): el tope del día es sobre el total.
+    let fuera = 0;
+    try { const r = await env.DB.prepare('SELECT v FROM kv_cache WHERE k = ?').bind(AVISO_FILAS_FUERA_KV + fecha).all(); med.add(r); fuera = parseInt(((r.results || [])[0] || {}).v, 10) || 0; } catch (_) {}
+    st.fuera = fuera;
+    await kvSet(env, 'avisos_stats', JSON.stringify(st));
+    const total = st.filas + fuera;
+    const motivo = med.filas > cfg.topeFilasCorrida ? `una corrida de ${job} leyó ${med.filas} filas (tope ${cfg.topeFilasCorrida})`
+      : (total > cfg.topeFilasDia ? `hoy los avisos ya leyeron ${total} filas (cron ${st.filas} + webhook y envíos ${fuera}; tope ${cfg.topeFilasDia})` : '');
+    if (!motivo) return;
+    await kvSet(env, 'aviso_interno_modo', 'off');
+    kvManyOlvidar(['aviso_interno_modo']);
+    const claim = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?) ON CONFLICT(k) DO NOTHING").bind('avisos_freno:' + fecha, now).run();
+    if (!claim || !claim.meta || !claim.meta.changes) return;
+    const txt = '🔴 Avisos internos APAGADOS solos por el freno de costo de la D1: ' + motivo + '. Todo volvió al envío de siempre. Revisalo antes de prenderlos de nuevo (Admin → Avisos internos).';
+    // El modo ya quedó en off → avisoInterno corre el legacy (plantilla con respaldo de texto, como los avisos de hoy).
+    await avisoInterno(env, { para: 'gaspar', tipo: 'freno_costo', prioridad: 'P1', texto: txt, legacy: () => avisoLanzamientoSendLegacy(env, AVISO_SLUGS_FIJOS.gaspar, txt), legacyDest: AVISO_SLUGS_FIJOS.gaspar });
+  } catch (_) {}
+}
+// Tick de los avisos (cron */5): reconciliador siempre que el modo no sea off; cola y resúmenes solo en 'on'; purga a
+// las 5 AR. Corre todo en serie dentro de UNA medición (así el freno ve el costo real de la corrida) en vez de tres
+// waitUntil sueltos.
+async function processAvisosTick(env, t = {}) {
+  const med = d1Medidor();
+  // La purga corre en cualquier modo: wa_send_author se llena con cada envío manual aunque los avisos estén en off.
+  if (t.hAR === 5 && Number.isFinite(t.minute) && t.minute < 5) { try { await purgarAvisos(env, med); } catch (_) {} }
+  // El aviso de bloqueo por pago que un envío no mandó porque el que rebotó era un aviso, y su "volvió": en cualquier
+  // modo (en off/dry es el mismo mensaje de hoy, a lo sumo 5 min después). 3 lecturas por PK.
+  try { await avisoBloqueoPagoCron(env, med); } catch (_) {}
+  let cfg = null;
+  try { cfg = await avisoCfg(env); } catch (_) { return; }
+  if (!cfg || cfg.modo === 'off') return;
+  if (!(await ensureAvisosSchema(env))) return;
+  try { await avisoInternoReconciliar(env, med); } catch (_) {}
+  if (cfg.modo === 'on') {
+    try { await processAvisosCola(env, cfg, t, med); } catch (_) {}
+    try { await processResumenes(env, cfg, t, med); } catch (_) {}
+  }
+  await avisosFrenoCosto(env, cfg, med, 'avisos');
+}
+
+// ----- Plantillas internas: categoría y estado -----
+// Si una plantilla que usan los avisos queda en otra categoría que UTILITY (Meta recategoriza) o en PAUSED/DISABLED/
+// REJECTED, la cadena la saltea sola; esto le avisa a Gaspar (P1, una vez por categoría+estado).
+const AVISO_TPL_INTERNAS_EXTRA = ['reporte_diario_ventas3', 'reporte_seguir2', 'aviso_cliente_vigilado'];
+async function avisoTplCategoriaCheck(env, name, status, category) {
+  try {
+    const cfg = await avisoCfg(env);
+    if (!new Set([...cfg.chain, ...AVISO_TPL_INTERNAS_EXTRA]).has(name)) return;
+    const st = String(status || '').toUpperCase(), cat = String(category || '').toUpperCase();
+    if (!(['PAUSED', 'DISABLED', 'REJECTED'].includes(st) || (cat && cat !== 'UTILITY'))) return;
+    // Clave con la fecha AR: dedup de los eventos repetidos del mismo cambio (webhook + monitor horario), pero si la
+    // plantilla vuelve a quedar PAUSED otro día (después de reaprobada) se avisa de nuevo.
+    await avisoInterno(env, { para: 'gaspar', tipo: 'plantilla_interna', prioridad: 'P1', clave: 'tplcat:' + name + ':' + cat + st + ':' + avisoFechaAR(),
+      texto: `⚠️ La plantilla interna "${name}" quedó ${st || '?'}${cat ? ' · ' + cat : ''}: los avisos ya no la usan (saltan a la siguiente de la cadena). Revisala en 360dialog.` });
+  } catch (_) {}
+}
+
+// Envíos directos a ADMIN_NOTIFY / al personal de Gaspar que no tenían envoltorio (guardia del lanzamiento, ticket
+// de corpóreo, follow-ups de presupuesto fallidos). opts: { tipo, prioridad, to (destino de hoy; por defecto
+// ADMIN_NOTIFY_PHONE), mediaKeys, mediaCaption, legacy (si el envío de hoy es más que un texto), clave, refPhone }.
+async function avisoAdmin(env, texto, opts = {}) {
+  const to = opts.to !== undefined ? opts.to : env.ADMIN_NOTIFY_PHONE;
+  const legacy = opts.legacy || (to ? () => waSendText(env, to, texto, { esAviso: true }) : null);
+  return avisoInterno(env, {
+    para: opts.para || 'gaspar', tipo: opts.tipo || 'admin', prioridad: opts.prioridad || 'P2', texto,
+    clave: opts.clave || null, refPhone: opts.refPhone || '', mediaKeys: opts.mediaKeys || [], mediaCaption: opts.mediaCaption || '',
+    legacy, legacyDest: to || '',
+  });
+}
+// Prioridad de una falla de envío a un cliente: P1 solo si hay plata en juego (etiqueta POR PAGAR = OC sin pagar);
+// si no, P2 (objeción [MEDIA]: el presupuesto de P1 no se puede ir en fallas de FUP que pueden esperar).
+async function avisoPrioFalla(env, phone) {
+  try { return (await hasPorPagarLabel(env, phone)) ? 'P1' : 'P2'; } catch (_) { return 'P2'; }
+}
+
+// ----- Endpoints /admin/avisos* (los llama el handler de /admin/ con la sesión ya validada) -----
+// GET  /admin/avisos              → (admin) KPIs del período (?horas=24), config, plantillas, freno de costo y los últimos avisos.
+// GET  /admin/avisos/mios?pend=1  → (cualquiera del equipo) sus P1 sin "Lo vi" de las últimas 48 h (banner del front).
+//                                   Sin pend: todos los suyos de 48 h. Vacío salvo aviso_interno_modo='on'.
+// POST /admin/avisos/visto        → {ids:[…]} "Lo vi" (lo suyo; admin, cualquiera).
+// POST /admin/avisos/config       → (admin) perillas en kv: modo, vendedores_on, topes, cadena, silencio, resumen_horas,
+//                                   retry_on, flush_on, gaspar_marketing_ok, topes de filas; sync_tpl:true = pasada de
+//                                   monitorTemplateStatus ya (completa la categoría de las plantillas apenas se deploya).
+// POST /admin/avisos/test         → (admin) {para, texto, prioridad} manda una prueba por el camino 'on' aunque el modo
+//                                   sea off/dry (ventana cerrada → plantilla; abierta → texto).
+// POST /admin/avisos/reenviar     → (admin) {id} vuelve a mandar ese aviso por la vía que corresponda ahora.
+// Devuelve null si el path no es de acá.
+async function avisosRoute(env, request, url, path, session, esAdmin) {
+  if (path !== '/admin/avisos' && !path.startsWith('/admin/avisos/')) return null;
+  if (!(await ensureAvisosSchema(env))) return json({ error: 'avisos_internos sin esquema (falta la migración 051)' }, 503);
+  const now = new Date().toISOString();
+  const I = await internosSet(env);
+  const misDests = () => { const sl = avisoAutorSlug(session.user); return (sl === 'gaspar' ? ['gaspar', 'bruno'] : [sl]).map(s => I.bySlug.get(s)).filter(Boolean); };
+
+  if (request.method === 'GET' && path === '/admin/avisos/mios') {
+    const cfg = await avisoCfg(env);
+    const dests = misDests();
+    if (cfg.modo !== 'on' || !dests.length) return json({ ok: true, modo: cfg.modo, items: [] });
+    const pend = url.searchParams.get('pend') === '1';
+    const desde = new Date(Date.now() - 48 * 3600e3).toISOString();
+    const items = await avQ(env, `SELECT id, tipo, prioridad, texto, ref_phone, dest_slug, status, created_at, visto_at FROM avisos_internos
+      WHERE dest IN (${dests.map(() => '?').join(',')}) AND created_at >= ? AND status NOT IN ('dry', 'descartado')${pend ? " AND prioridad = 'P1' AND visto_at IS NULL AND tipo != 'resumen'" : ''}
+      ORDER BY id DESC LIMIT ${pend ? 20 : 60}`, [...dests, desde]);
+    return json({ ok: true, modo: cfg.modo, items });
+  }
+  if (request.method === 'POST' && path === '/admin/avisos/visto') {
+    let b = {}; try { b = await request.json(); } catch (_) {}
+    const ids = (Array.isArray(b.ids) ? b.ids : [b.id]).map(x => parseInt(x, 10)).filter(x => x > 0).slice(0, 100);
+    if (!ids.length) return json({ error: 'faltan ids' }, 400);
+    const binds = [now, String(session.user || '').slice(0, 40), now, ...ids];
+    let extra = '';
+    if (!esAdmin) { const d = misDests(); if (!d.length) return json({ error: 'forbidden' }, 403); extra = ` AND dest IN (${d.map(() => '?').join(',')})`; binds.push(...d); }
+    const r = await env.DB.prepare(`UPDATE avisos_internos SET visto_at = ?, visto_por = ?, updated_at = ? WHERE id IN (${ids.map(() => '?').join(',')}) AND visto_at IS NULL${extra}`).bind(...binds).run();
+    return json({ ok: true, marcados: (r && r.meta && r.meta.changes) || 0 });
+  }
+
+  if (!esAdmin) return json({ error: 'forbidden: admin only' }, 403);
+
+  if (request.method === 'GET' && path === '/admin/avisos') {
+    const cfg = await avisoCfg(env);
+    const horas = Math.max(1, Math.min(24 * 14, parseInt(url.searchParams.get('horas') || '24', 10) || 24));
+    const desde = new Date(Date.now() - horas * 3600e3).toISOString();
+    const kpis = await avQ(env, 'SELECT prioridad, status, COUNT(*) AS n FROM avisos_internos WHERE created_at >= ? GROUP BY prioridad, status', [desde]);
+    const porTipo = await avQ(env, 'SELECT tipo, dest_slug, decision, status, COUNT(*) AS n FROM avisos_internos WHERE created_at >= ? GROUP BY tipo, dest_slug, decision, status ORDER BY n DESC LIMIT 200', [desde]);
+    const items = await avQ(env, `SELECT id, clave, dest_slug, tipo, prioridad, texto, ref_phone, via, decision, status, error_code, intentos, created_at, sent_at, delivered_at, read_at, visto_at, visto_por
+      FROM avisos_internos WHERE created_at >= ? ORDER BY created_at DESC LIMIT 150`, [desde]);   // ORDER BY created_at (no id): usa idx_avisos_created; con id el planner recorre la tabla entera
+    const tplNames = [...new Set([...cfg.chain, 'aviso_lanzamiento', ...AVISO_TPL_INTERNAS_EXTRA])];
+    let plantillas = [];
+    try { plantillas = await avQ(env, `SELECT name, status, COALESCE(category, '') AS category, updated_at FROM template_status_cache WHERE name IN (${tplNames.map(() => '?').join(',')})`, tplNames); }
+    catch (_) { try { plantillas = await avQ(env, `SELECT name, status, '' AS category, updated_at FROM template_status_cache WHERE name IN (${tplNames.map(() => '?').join(',')})`, tplNames); } catch (_) {} }
+    let stats = null; try { stats = JSON.parse(await kvGet(env, 'avisos_stats', 'null')); } catch (_) {}
+    const usables = (await elegirPlantillaAviso(env, cfg, 'gaspar')).map(t => t.name);
+    // Prioridades pisadas por tipo (kv aviso_tipo:<tipo>): rango por PK de kv_cache, sin LIKE.
+    let tipos = {};
+    try { for (const r of await avQ(env, "SELECT k, v FROM kv_cache WHERE k >= 'aviso_tipo:' AND k < 'aviso_tipo;'")) { if (r.v) tipos[String(r.k).slice(11)] = r.v; } } catch (_) {}
+    // Invariantes de la verificación diaria del plan (tienen que dar 0): más de 2 intentos y destino que no es del
+    // equipo (wa_internal_phones ∪ agenda_phones). Por rango de fecha (idx_avisos_created). intentos cuenta solo los
+    // envíos AUTOMÁTICOS de la fila (el envío y su único reintento): el flush y el reenvío manual no suman, así que
+    // "más de 2" es siempre un loop de verdad.
+    let invariantes = null;
+    try {
+      invariantes = (await avQ(env, `SELECT SUM(CASE WHEN intentos > 2 THEN 1 ELSE 0 END) AS mas_de_2,
+        SUM(CASE WHEN dest NOT IN (SELECT phone FROM agenda_phones UNION SELECT phone FROM wa_internal_phones) THEN 1 ELSE 0 END) AS dest_externo
+        FROM avisos_internos WHERE created_at >= ?`, [desde]))[0] || null;
+    } catch (_) {}
+    return json({ ok: true, modo: cfg.modo, horas, config: cfg, kpis, por_tipo: porTipo, items, plantillas, plantillas_usables: usables, stats, tipos, invariantes });
+  }
+  if (request.method === 'POST' && path === '/admin/avisos/config') {
+    let b = {}; try { b = await request.json(); } catch (_) {}
+    const set = [];
+    if (b.modo != null) { const m = String(b.modo); if (!['off', 'dry', 'on'].includes(m)) return json({ error: 'modo: off | dry | on' }, 400); set.push(['aviso_interno_modo', m]); }
+    for (const [k, kvk] of [['vendedores_on', 'aviso_interno_vendedores_on'], ['gaspar_marketing_ok', 'aviso_interno_gaspar_marketing_ok'], ['retry_on', 'aviso_interno_retry_on'], ['flush_on', 'aviso_interno_flush_on']]) {
+      if (typeof b[k] === 'boolean') set.push([kvk, b[k] ? '1' : '0']);
+    }
+    for (const [k, kvk, max] of [['tope_hora', 'aviso_interno_tope_hora', 500], ['tope_p1_hora', 'aviso_interno_tope_p1_hora', 500], ['tope_global_hora', 'aviso_interno_tope_global_hora', 5000],
+      ['tope_filas_corrida', 'aviso_interno_tope_filas_corrida', 10000000], ['tope_filas_dia', 'aviso_interno_tope_filas_dia', 100000000]]) {
+      if (b[k] == null) continue;
+      const n = parseInt(b[k], 10);
+      if (!(n >= 0 && n <= max)) return json({ error: k + ': número entre 0 y ' + max }, 400);
+      set.push([kvk, String(n)]);
+    }
+    if (b.tpl_chain != null) {
+      const arr = (Array.isArray(b.tpl_chain) ? b.tpl_chain : String(b.tpl_chain).split(',')).map(x => String(x).trim()).filter(Boolean);
+      if (!arr.length || arr.length > 6 || !arr.every(x => /^[a-z0-9_]{1,80}$/.test(x))) return json({ error: 'tpl_chain: lista de nombres de plantilla (a-z, 0-9, _)' }, 400);
+      set.push(['aviso_interno_tpl_chain', JSON.stringify(arr)]);
+    }
+    if (b.silencio != null) {
+      const m = String(b.silencio).trim().match(/^(\d{1,2})-(\d{1,2})$/);
+      if (!m || +m[1] > 23 || +m[2] > 23) return json({ error: 'silencio: "desde-hasta" en horas AR, p. ej. 22-8' }, 400);
+      set.push(['aviso_interno_silencio', (+m[1]) + '-' + (+m[2])]);
+    }
+    if (b.resumen_horas != null) {
+      const hs = [...new Set(String(b.resumen_horas).split(',').map(x => parseInt(x, 10)).filter(h => h >= 0 && h <= 23))].sort((x, y) => x - y);
+      if (!hs.length) return json({ error: 'resumen_horas: horas AR separadas por coma, p. ej. 10,14,18' }, 400);
+      set.push(['resumen_horas', hs.join(',')]);
+    }
+    // tipos: { <tipo>: 'P1' | 'P2' | 'P3' | '' } → kv aviso_tipo:<tipo> ('' vuelve a la prioridad del código).
+    if (b.tipos != null) {
+      if (typeof b.tipos !== 'object' || Array.isArray(b.tipos)) return json({ error: 'tipos: {tipo: "P1"|"P2"|"P3"|""}' }, 400);
+      for (const [tp, pr] of Object.entries(b.tipos).slice(0, 40)) {
+        const p = String(pr || '').toUpperCase();
+        if (!AVISO_TIPO_RE.test(tp) || (p && !AVISO_PRIOS.includes(p))) return json({ error: 'tipos: ' + tp + ' → P1, P2, P3 o vacío' }, 400);
+        if (p && AVISO_TIPOS_PRIO_FIJA.includes(tp)) return json({ error: 'tipos: la prioridad de "' + tp + '" no se puede cambiar' }, 400);
+        set.push(['aviso_tipo:' + tp, p]);
+      }
+    }
+    for (const [k, v] of set) await kvSet(env, k, v);
+    kvManyOlvidar(AVISO_KV);
+    kvManyOlvidar(set.map(x => x[0]).filter(k => k.startsWith('aviso_tipo:')));
+    let sync = false;
+    if (b.sync_tpl) { try { await monitorTemplateStatus(env); sync = true; } catch (_) {} }
+    return json({ ok: true, cambiados: set.map(x => x[0]), sync, config: await avisoCfg(env) });
+  }
+  if (request.method === 'POST' && path === '/admin/avisos/test') {
+    let b = {}; try { b = await request.json(); } catch (_) {}
+    const para = String(b.para || 'gaspar').trim();
+    const prio = AVISO_PRIOS.includes(b.prioridad) ? b.prioridad : 'P2';
+    const texto = String(b.texto || ('Prueba de avisos internos del CRM · ' + _avHoraTxt(now) + ' h')).slice(0, 1500);
+    const res = await avisoInterno(env, { para, tipo: 'test', prioridad: prio, texto, forzarOn: true, sinRedireccion: true });
+    return json({ ok: !!(res && res.ok), res });
+  }
+  if (request.method === 'POST' && path === '/admin/avisos/reenviar') {
+    let b = {}; try { b = await request.json(); } catch (_) {}
+    const id = parseInt(b.id, 10);
+    if (!(id > 0)) return json({ error: 'falta id' }, 400);
+    // Reclamo atómico: si el cron, un flush o el reintento del webhook lo están mandando ('enviando', 'reintentando',
+    // 'pendiente'), no se pisa (si se cortó a mitad, el reconciliador lo pasa a 'sin_confirmar' a los 15 min).
+    const rows = await avQ(env, "UPDATE avisos_internos SET status = 'enviando', updated_at = ? WHERE id = ? AND status NOT IN ('enviando', 'pendiente', 'reintentando') RETURNING id, dest, dest_slug, prioridad, texto, media_keys", [now, id]);
+    if (!rows.length) return json({ error: 'no existe o se está mandando ahora' }, 409);
+    const a = rows[0];
+    let keys = []; try { keys = a.media_keys ? (JSON.parse(a.media_keys) || []) : []; } catch (_) {}
+    const s = await avisoEnviar(env, await avisoCfg(env), { phone: a.dest, slug: a.dest_slug, prioridad: a.prioridad }, { texto: a.texto, mediaKeys: keys, tipo: 'reenvio' });
+    // El reenvío manual no suma a intentos (es el contador del envío automático y su reintento; ver el flush): queda
+    // marcado por via 'reenvio:…' y wamid_prev.
+    if (s.ok) await avQ(env, "UPDATE avisos_internos SET status = 'enviado', via = ?, wamid_prev = wamid, wamid = ?, sent_at = ?, error_code = '', updated_at = ? WHERE id = ?", ['reenvio:' + s.via, s.wamid || null, now, now, id]);
+    else await avQ(env, 'UPDATE avisos_internos SET status = ?, error_code = ?, updated_at = ? WHERE id = ?', [s.via === 'pausado' ? 'pausado' : 'perdido', String(s.code || s.error || '').slice(0, 120), now, id]);
+    return json({ ok: !!s.ok, via: s.via, error: s.ok ? undefined : (s.error || 'no salió') });
+  }
+  return json({ error: 'not found' }, 404);
 }
 
 // Manda un aviso del lanzamiento a un número interno: plantilla aviso_lanzamiento (porque
 // Gaspar/Bruno casi siempre están FUERA de la ventana 24h) con fallback a texto libre.
-async function avisoLanzamientoSend(env, ph, texto) {
+// [Etapa 1] Es el envío "de hoy" (legacy) que envuelve avisoLanzamientoSend. Todo sale con esAviso.
+async function avisoLanzamientoSendLegacy(env, ph, texto) {
+  const E = { esAviso: true };
   const t = String(texto || '').replace(/\s+/g, ' ').trim().slice(0, 300);  // 1 línea (Meta rechaza \n / 4+ espacios en params)
   // Ventana de 24h abierta (escribió al número del negocio hace <23h) → texto libre primero: llega seguro
   // y no choca con el tope de plantillas de marketing por usuario de Meta (131049: a Bruno se le perdían
@@ -13857,7 +14919,7 @@ async function avisoLanzamientoSend(env, ph, texto) {
     const desde = new Date(Date.now() - 23 * 3600 * 1000).toISOString();
     const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status', 'reaction') AND ts > ? LIMIT 1").bind(String(ph || '').replace(/\D/g, ''), desde).first();
     if (inb) {
-      const r0 = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + String(texto || '').trim().slice(0, 1500));
+      const r0 = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + String(texto || '').trim().slice(0, 1500), E);
       if (r0 && r0.ok) return r0;
     }
   } catch (_) {}
@@ -13868,12 +14930,23 @@ async function avisoLanzamientoSend(env, ph, texto) {
   const tLargo = String(texto || '').replace(/\s+/g, ' ').trim().slice(0, 800);
   try {
     const ok = await env.DB.prepare("SELECT 1 AS x FROM template_status_cache WHERE name = 'aviso_interno_crm' AND upper(status) = 'APPROVED'").first();
-    if (ok) r = await waSendTemplate(env, ph, 'aviso_interno_crm', 'es_AR', [tLargo]);
-    else if (String(ph || '').replace(/\D/g, '') === '5491155604996') r = await waSendTemplate(env, ph, 'recordatorio_agenda', 'es_AR', [tLargo]);
+    if (ok) r = await waSendTemplate(env, ph, 'aviso_interno_crm', 'es_AR', [tLargo], null, E);
+    else if (String(ph || '').replace(/\D/g, '') === '5491155604996') r = await waSendTemplate(env, ph, 'recordatorio_agenda', 'es_AR', [tLargo], null, E);
   } catch (_) {}
-  if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'aviso_lanzamiento', 'es_AR', [t]); } catch (_) {} }
-  if (!r || !r.ok) { try { r = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + t); } catch (_) {} }
+  if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'aviso_lanzamiento', 'es_AR', [t], null, E); } catch (_) {} }
+  if (!r || !r.ok) { try { r = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + t, E); } catch (_) {} }
   return r;
+}
+// Envoltorio de avisoInterno: en off/dry corre avisoLanzamientoSendLegacy tal cual y devuelve SU resultado (los
+// llamadores miran r.ok); en 'on' la vía la elige avisoInterno. opts: { tipo, prioridad, clave, refPhone, para }.
+async function avisoLanzamientoSend(env, ph, texto, opts = {}) {
+  const dest = String(ph || '').replace(/\D/g, '');
+  const res = await avisoInterno(env, {
+    para: opts.para || dest, tipo: opts.tipo || 'lanzamiento', prioridad: opts.prioridad || 'P2', texto,
+    clave: opts.clave || null, refPhone: opts.refPhone || '', plata: !!opts.plata,
+    legacy: () => avisoLanzamientoSendLegacy(env, ph, texto), legacyDest: dest,
+  });
+  return res && res.modo !== 'on' ? res.legacy : res;
 }
 
 // ===== Aviso de PLANTILLA FALLIDA (a Bruno + Gaspar) — pedido Bruno 3-sep =====
@@ -13897,7 +14970,10 @@ async function esEnvioDeBroadcast(env, phone, tsIso) {
     return !!r;
   } catch (_) { return false; }
 }
-async function notifyTplFail(env, { name, phone, reason } = {}) {
+// [Etapa 1] wamid = el envío que falló (para avisarle a su AUTOR, wa_send_author). soloLegacy = el "cliente" es en
+// realidad alguien del equipo fuera de la guardia vieja (solo pasa en off/dry): sale lo de hoy, sin registrar
+// (esa falla ya la registra avisoInternoStatus como falla_interna).
+async function notifyTplFail(env, { name, phone, reason, wamid, soloLegacy } = {}) {
   try {
     const ph = String(phone || '').replace(/\D/g, '');
     if (!ph || !name) return;
@@ -13914,9 +14990,25 @@ async function notifyTplFail(env, { name, phone, reason } = {}) {
     try { await env.DB.prepare("INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?)").bind(dk, nowIso).run(); } catch (_) {}
     try { await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?) ON CONFLICT(k) DO UPDATE SET v = CAST(kv_cache.v AS INTEGER) + 1, updated_at = excluded.updated_at").bind(hourKey, nowIso).run(); } catch (_) {}
     const texto = 'Falló una plantilla a +' + ph + ': ' + (reason || 'no se pudo enviar') + '. Fijate de escribirle a mano.';
-    for (const dest of ['5491155604996', '5491155604999']) {   // Bruno + Gaspar
-      try { await avisoLanzamientoSend(env, dest, texto); } catch (_) {}
-    }
+    // Lo de hoy: a Bruno + Gaspar con avisoLanzamientoSendLegacy (plantilla con texto de respaldo).
+    const legacy = async () => {
+      const porDest = {};
+      for (const dest of ['5491155604996', '5491155604999']) {   // Bruno + Gaspar
+        let r = null; try { r = await avisoLanzamientoSendLegacy(env, dest, texto); } catch (_) {}
+        porDest[dest] = r;
+      }
+      return { ok: Object.values(porDest).some(x => x && x.ok), porDest };
+    };
+    if (soloLegacy) { await legacy(); return; }
+    // Etapa 1: al AUTOR de la plantilla (si fue un envío automático, al resumen del dueño del chat), Bruno P2 y
+    // copia P3 a Gaspar. P2, o P1 si el chat tiene plata en juego (objeción [MEDIA]).
+    // try propio: si esto tirara, el envío de hoy (legacy) igual tiene que salir.
+    let prio = 'P2';
+    try { if ((await avisoCfg(env)).modo !== 'off') prio = await avisoPrioFalla(env, ph); } catch (_) {}
+    await avisoInterno(env, {
+      para: [{ autor: wamid || '', phone: ph, prioridad: prio }, { slug: 'bruno', prioridad: 'P2' }, { slug: 'gaspar', prioridad: 'P3' }],
+      tipo: 'falla_plantilla', prioridad: prio, texto, clave: 'tplfail:' + name + ':' + ph + ':' + fecha, refPhone: ph, legacy,
+    });
   } catch (_) {}
 }
 
@@ -13941,19 +15033,45 @@ async function ensurePinPrivadoCol(env) {
 // Por cada pago del lanzamiento detectado: (1) el aviso inicial "ya arrancaron" una sola vez
 // (marca kv SOLO si salió OK, así no se pierde si la plantilla aún no está aprobada), (2) el
 // aviso del pago con nombre + teléfono + importe + si es seña. A Gaspar y Bruno.
-async function avisoPagoLanzamiento(env, { nombre, phone, monto, esSena }) {
+// [Etapa 1] Los dos pasan por avisoInterno con lo de hoy como legacy. En 'on': el inicial se deduplica con la
+// clave 'pago_inicial:<inicio de la ventana>' (en la Etapa 4 pasa a cfg.desde) y el pago va al dueño del chat
+// (Abril en cursos) P1 + Bruno P2 + Gaspar P2, decisión de Gaspar del 12-oct. Es plata confirmada (OCR): el P1
+// sale aunque sea de noche. wamid = el del comprobante (clave 'pago_ocr:'+wamid).
+async function avisoPagoLanzamiento(env, { nombre, phone, monto, esSena, wamid }) {
   const fmt = (n) => '$' + String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
   const who = (nombre && String(nombre).trim()) || phone;
   try {
+    // La marca de siempre (kv lanzamiento_aviso_inicial, se borra a mano en cada lanzamiento) manda en los tres
+    // modos: si ya está, no hay aviso inicial ni fila (en 'on' tampoco: si no, al prender los avisos a mitad de un
+    // lanzamiento el "ya arrancaron" saldría de nuevo, porque la clave por ventana es nueva).
     const seen = await env.DB.prepare("SELECT 1 FROM kv_cache WHERE k = 'lanzamiento_aviso_inicial'").first();
     if (!seen) {
-      let anyOk = false;
-      for (const p of REPORTE_DIARIO_PHONES) { const r = await avisoLanzamientoSend(env, p, 'Ya arrancaron a entrar pagos! 🎉'); if (r && r.ok) anyOk = true; }
-      if (anyOk) { try { await env.DB.prepare("INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES ('lanzamiento_aviso_inicial','1',?)").bind(new Date().toISOString()).run(); } catch (_) {} }
+      const ini = 'Ya arrancaron a entrar pagos! 🎉';
+      const marcar = async () => { try { await env.DB.prepare("INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES ('lanzamiento_aviso_inicial','1',?)").bind(new Date().toISOString()).run(); } catch (_) {} };
+      const legacyIni = async () => {
+        let anyOk = false; const porDest = {};
+        for (const p of REPORTE_DIARIO_PHONES) { const r = await avisoLanzamientoSendLegacy(env, p, ini); porDest[p] = r; if (r && r.ok) anyOk = true; }
+        if (anyOk) await marcar();
+        return { ok: anyOk, porDest };
+      };
+      const r = await avisoInterno(env, { para: ['gaspar', 'bruno'], tipo: 'pago_inicial', prioridad: 'P2', texto: ini, clave: 'pago_inicial:' + PAGO_LANZAMIENTO_START_UTC, plata: true, legacy: legacyIni });
+      // En 'on' la clave ya deduplica (y lo que no salió lo levantan el flush o el panel): se marca igual, así el
+      // camino viejo nunca lo repite si se vuelve a off/dry.
+      if (r && r.modo === 'on' && !r.error) await marcar();
     }
   } catch (_) {}
   const detalle = 'Nuevo pago 💰 ' + String(who).slice(0, 40) + ' · ' + phone + (monto > 0 ? (' · ' + fmt(monto)) : '') + (esSena ? ' (seña ~40k)' : '');
-  for (const p of REPORTE_DIARIO_PHONES) { try { await avisoLanzamientoSend(env, p, detalle); } catch (_) {} }
+  try {
+    const legacy = async () => {
+      const porDest = {};
+      for (const p of REPORTE_DIARIO_PHONES) { let r = null; try { r = await avisoLanzamientoSendLegacy(env, p, detalle); } catch (_) {} porDest[p] = r; }
+      return { ok: Object.values(porDest).some(x => x && x.ok), porDest };
+    };
+    await avisoInterno(env, {
+      para: [{ duenio: phone, prioridad: 'P1' }, { slug: 'bruno', prioridad: 'P2' }, { slug: 'gaspar', prioridad: 'P2' }],
+      tipo: 'pago_ocr', prioridad: 'P1', texto: detalle, clave: wamid ? 'pago_ocr:' + wamid : null, refPhone: phone, plata: true, legacy,
+    });
+  } catch (_) {}
 }
 
 // ===== Transcripción de audio con Gemini (transcribe MUCHO mejor el español
@@ -14130,6 +15248,10 @@ function inboxClauseForRole(role) {
 // Gaspar) NO la tocan ni comercial ni cursos; admin ve/toca todo. La usan messages/send/send-media.
 async function inboxAccessOk(env, role, phone, sessionUser) {
   if (role === 'admin') return true;
+  // Los chats del EQUIPO con el número del negocio (avisos internos, listas, reportes) son solo de admin: si no,
+  // Abril veía en 'cursos' los avisos de Bruno y Joaco en 'general' los de Agus (plan de fondo §8). internosSet
+  // sale de caché (10 min).
+  if (phone && (await esTelefonoInterno(env, phone))) return false;
   if (phone) {
     try {
       const r = await env.DB.prepare('SELECT inbox, assigned_to FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
@@ -14766,7 +15888,7 @@ async function maybeWeeklySynthesis(env) {
     // Aprendizaje del CORTE: misma cadencia semanal, sobre corte_knowledge (correcciones del copiloto + preguntas).
     try {
       const rc = await synthesizeCorteKnowledge(env, { createdBy: 'cron' });
-      if (rc && !rc.skipped && rc.generated) { try { await precotizNotifyGaspar(env, 'Corte: aprendí de las correcciones y tengo ' + rc.generated + ' mejora(s) para la base de conocimiento del corte. Revisalas y aprobá en el board (sección Aprendizaje).'); } catch (_) {} }
+      if (rc && !rc.skipped && rc.generated) { try { await precotizNotifyGaspar(env, 'Corte: aprendí de las correcciones y tengo ' + rc.generated + ' mejora(s) para la base de conocimiento del corte. Revisalas y aprobá en el board (sección Aprendizaje).', { tipo: 'corte_aprendizaje', prioridad: 'P3' }); } catch (_) {} }
     } catch (_) {}
   } catch (e) {
     try { await env.DB.prepare("INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)").bind(new Date().toISOString(), 'SYNTH ERR: ' + ((e && e.message) || String(e))).run(); } catch (_) {}
@@ -14935,36 +16057,60 @@ function isBillingBlockError(code, msg) {
   return m.includes('eligibility') || m.includes('lack of payment') || (m.includes('payment') && m.includes('issue'));
 }
 
-async function setWaBillingBlock(env, errMsg) {
+// Registro de un episodio de rechazo por pago en kv: wa_billing_block (asíncrono, 131042 en el status: además
+// frena los envíos automáticos 3 h) o wa_pay_reject (síncrono, ver waSend: solo constancia). Los dos con la misma
+// regla de aviso. Devuelve { notify, since, turno, count }:
+//  · notify: corresponde avisar (compuerta de 12 h) Y el episodio quedó guardado. Sin el episodio guardado no hay
+//    dedup (la clave saldría de un since nuevo en cada rebote: la cadena aviso → rebote → aviso con la D1
+//    sobrecargada). Mejor no avisar: si el rebote quedó anotado, lo avisa el cron (avisoBloqueoPagoCron).
+//  · turno: el turno de 12 h dentro del episodio. La clave del aviso es 'wa_bloqueo:'+since+':'+turno: con la clave
+//    por episodio sola, en 'on' el recordatorio de las 12 h chocaba con la fila del primer aviso y no salía (y un
+//    bloqueo nuevo que heredaba un episodio sin cerrar tampoco). Dos rebotes simultáneos del mismo turno siguen
+//    dando una sola fila.
+//  · opts.soloRegistrar: el envío que rebotó era un AVISO → se anota el rebote (updated_at) sin gastar el turno y
+//    nunca devuelve notify: un aviso no genera otro aviso. Si ese rebote tocaba avisar (pasaron +12 h del último
+//    aviso), lo manda el cron a los 5 min, así en off/dry Gaspar recibe el mismo mensaje que hoy, apenas después.
+// Si falla la LECTURA no se sabe si había episodio: se registra igual (el breaker de wa_billing_block tiene que
+// quedar armado) con un UPSERT que no pisa since ni last_notify_at del que hubiera, y no se avisa.
+async function waEpisodioPago(env, key, errMsg, opts = {}) {
   const now = Date.now();
+  const err = String(errMsg || '').slice(0, 300);
+  let row = null, leido = false;
+  try { row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k=?').bind(key).first(); leido = true; } catch (_) {}
+  if (!leido) {
+    const nuevo = { since: now, updated_at: now, count: 1, last_error: err, last_notify_at: 0 };
+    try {
+      await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = json_set(kv_cache.v, '$.updated_at', ?, '$.last_error', ?, '$.count', COALESCE(json_extract(kv_cache.v, '$.count'), 0) + 1), updated_at = excluded.updated_at")
+        .bind(key, JSON.stringify(nuevo), new Date().toISOString(), now, err).run();
+    } catch (_) {}
+    return { notify: false, since: null, turno: 0, count: 0 };
+  }
   let prev = null;
-  try { const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k=?').bind(WA_BILLING_BLOCK_KEY).first(); if (row) prev = JSON.parse(row.v); } catch (_) {}
+  try { if (row) prev = JSON.parse(row.v); } catch (_) {}   // JSON roto = sin episodio (se reescribe entero)
   const lastNotify = (prev && prev.last_notify_at) || 0;
-  const shouldNotify = (now - lastNotify) > WA_BILLING_NOTIFY_MS;
-  const obj = {
-    since: (prev && prev.since) || now,
-    updated_at: now,
-    count: ((prev && prev.count) || 0) + 1,
-    last_error: String(errMsg || '').slice(0, 300),
-    last_notify_at: shouldNotify ? now : lastNotify
-  };
-  try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at').bind(WA_BILLING_BLOCK_KEY, JSON.stringify(obj), new Date().toISOString()).run(); } catch (_) {}
-  return { shouldNotify, count: obj.count };
+  const since = (prev && prev.since) || now;
+  const shouldNotify = !opts.soloRegistrar && (now - lastNotify) > WA_BILLING_NOTIFY_MS;
+  const obj = { since, updated_at: now, count: ((prev && prev.count) || 0) + 1, last_error: err, last_notify_at: shouldNotify ? now : lastNotify };
+  let guardado = false;
+  try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at').bind(key, JSON.stringify(obj), new Date().toISOString()).run(); guardado = true; } catch (_) {}
+  return { notify: shouldNotify && guardado, since, turno: Math.floor((now - since) / WA_BILLING_NOTIFY_MS), count: obj.count };
+}
+// opts.soloRegistrar: el status 'failed' era de un envío al EQUIPO (un aviso, una lista, el reporte): ver waEpisodioPago.
+async function setWaBillingBlock(env, errMsg, opts = {}) {
+  const ep = await waEpisodioPago(env, WA_BILLING_BLOCK_KEY, errMsg, opts);
+  return { shouldNotify: ep.notify, count: ep.count, since: ep.since, turno: ep.turno };
 }
 
 // Registro del rechazo por pago SÍNCRONO (ver waSend). Separado de wa_billing_block a propósito: no
 // frena nada, solo deja constancia (GET /admin/envios-reintentos) y dedup del aviso (1 cada 12h).
-// Devuelve true si corresponde avisar. Lo cierra la próxima plantilla que salga OK (clearWaPayReject).
+// Lo cierra la próxima plantilla que salga OK (clearWaPayReject; si la que sale es un aviso, waPayRejectCerrarPorAviso).
 const WA_PAY_REJECT_KEY = 'wa_pay_reject';
-async function noteWaPayReject(env, errMsg) {
-  const now = Date.now();
-  let prev = null;
-  try { const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k=?').bind(WA_PAY_REJECT_KEY).first(); if (row) prev = JSON.parse(row.v); } catch (_) {}
-  const lastNotify = (prev && prev.last_notify_at) || 0;
-  const shouldNotify = (now - lastNotify) > WA_BILLING_NOTIFY_MS;
-  const obj = { since: (prev && prev.since) || now, updated_at: now, count: ((prev && prev.count) || 0) + 1, last_error: String(errMsg || '').slice(0, 300), last_notify_at: shouldNotify ? now : lastNotify };
-  try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at').bind(WA_PAY_REJECT_KEY, JSON.stringify(obj), new Date().toISOString()).run(); } catch (_) {}
-  return shouldNotify;
+// Marca "volvió" pendiente: el episodio lo cerró una plantilla que ERA un aviso, así que el "volvió" lo manda el cron.
+const WA_PAY_REJECT_VOLVIO_KEY = 'wa_pay_reject_volvio';
+// Devuelve { notify, since, turno } (ver waEpisodioPago). Con soloRegistrar (el envío que rebotó era un aviso) se
+// anota el rebote sin gastar el turno de aviso y nunca devuelve notify.
+async function noteWaPayReject(env, errMsg, opts = {}) {
+  return waEpisodioPago(env, WA_PAY_REJECT_KEY, errMsg, opts);
 }
 async function clearWaPayReject(env) {
   try {
@@ -14973,6 +16119,78 @@ async function clearWaPayReject(env) {
     await env.DB.prepare('DELETE FROM kv_cache WHERE k=?').bind(WA_PAY_REJECT_KEY).run();
     return true;
   } catch (_) { return false; }
+}
+// Una plantilla que ERA un aviso salió OK: el envío no puede mandar el "volvió" (un aviso no genera otro aviso), pero
+// el episodio sí se cierra, como hoy, y el "volvió" lo manda el cron (marca wa_pay_reject_volvio). Así un bloqueo
+// nuevo no hereda un episodio viejo sin cerrar. Si al episodio le falta su aviso de "bloqueado" (el rebote que
+// tocaba avisar fue de un aviso y el cron todavía no pasó), queda abierto: el cron manda primero ese y el próximo
+// envío OK lo cierra con su "volvió", el mismo par de mensajes que hoy. 1 lectura por PK por plantilla de aviso.
+async function waPayRejectCerrarPorAviso(env) {
+  try {
+    const row = await env.DB.prepare('SELECT v FROM kv_cache WHERE k=?').bind(WA_PAY_REJECT_KEY).first();
+    if (!row) return;
+    let ep = null; try { ep = JSON.parse(row.v); } catch (_) {}
+    if (ep && waEpisodioAvisoPendiente(ep, Date.now())) return;
+    const avisado = !!(ep && (Number(ep.last_notify_at) || 0) >= (Number(ep.since) || 0) && Number(ep.last_notify_at) > 0);
+    const del = await env.DB.prepare('DELETE FROM kv_cache WHERE k = ? AND v = ?').bind(WA_PAY_REJECT_KEY, row.v).run();
+    // Solo si de ese episodio se avisó el "bloqueado" (si no, un "volvió" suelto no le dice nada a nadie).
+    if (avisado && del && del.meta && del.meta.changes) {
+      await env.DB.prepare('INSERT OR IGNORE INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?)').bind(WA_PAY_REJECT_VOLVIO_KEY, String(Date.now()), new Date().toISOString()).run();
+    }
+  } catch (_) {}
+}
+// ¿El episodio tiene un rebote que tocaba avisar y no se avisó? (rebote de un aviso, soloRegistrar, a +12 h del
+// último aviso). Mismo criterio que la compuerta de 12 h de un envío normal: no agrega recordatorios que hoy no salen.
+function waEpisodioAvisoPendiente(ep, now) {
+  const last = Number(ep && ep.last_notify_at) || 0, upd = Number(ep && ep.updated_at) || 0;
+  return (upd - last) > WA_BILLING_NOTIFY_MS && (now - last) > WA_BILLING_NOTIFY_MS && (now - upd) < 24 * 3600e3;
+}
+// Textos de siempre del aviso de bloqueo por pago (el envío que rebota y el cron mandan exactamente lo mismo).
+function waPagoTxt(key, errText) {
+  if (key === WA_BILLING_BLOCK_KEY) return '🔴 WhatsApp BLOQUEADO por pago — Meta error 131042 (problema de pago de la cuenta de WhatsApp Business).\nLas plantillas se pagan con el SALDO de 360dialog: revisá fondos y licencia en hub.360dialog.com (Funds / Invoices). Si ahí está todo bien, escribile al soporte de 360dialog (ellos manejan la línea de crédito con Meta).\nPausé los envíos automáticos para no quemar contactos — se reanudan solos cuando vuelva a andar.';
+  return '🔴 WhatsApp rechaza envíos por un problema de PAGO.\nError: ' + errText + '\nLas plantillas se pagan con el SALDO de 360dialog: cargá fondos en hub.360dialog.com → Funds (si el saldo está bien, fijate que la licencia del número esté paga en Invoices).\nLas campañas automáticas quedan en pausa sin quemar contactos y se reanudan solas cuando vuelva a salir una plantilla.';
+}
+async function avisoBloqueoPago(env, key, since, turno, errText) {
+  const txt = waPagoTxt(key, errText);
+  return avisoInterno(env, {
+    para: ['gaspar', 'bruno'], tipo: 'wa_bloqueo_pago', prioridad: 'P1', texto: txt, clave: 'wa_bloqueo:' + since + ':' + turno,
+    legacy: env.ADMIN_NOTIFY_PHONE ? () => waSendText(env, env.ADMIN_NOTIFY_PHONE, txt, { esAviso: true }) : null,
+    legacyDest: env.ADMIN_NOTIFY_PHONE,
+  });
+}
+async function avisoPagoVolvio(env) {
+  const txt = 'WhatsApp volvió a mandar plantillas — las campañas automáticas se reanudan solas';
+  return avisoInterno(env, {
+    para: ['gaspar', 'bruno'], tipo: 'wa_bloqueo_pago_ok', prioridad: 'P2', texto: txt,
+    legacy: env.ADMIN_NOTIFY_PHONE ? () => waSendText(env, env.ADMIN_NOTIFY_PHONE, txt, { esAviso: true }) : null,
+    legacyDest: env.ADMIN_NOTIFY_PHONE,
+  });
+}
+// Cron */5 (processAvisosTick, en CUALQUIER modo): manda el aviso de bloqueo que el envío no pudo mandar porque el
+// que rebotó era un aviso (soloRegistrar), y el "volvió" de un episodio que cerró una plantilla de aviso. Así
+// ningún aviso genera otro (lo genera el cron) y off/dry quedan como hoy, con hasta 5 min de demora. El turno se
+// reclama con un UPDATE condicional sobre el valor leído (compare-and-swap): dos ticks no avisan dos veces y, si la
+// D1 no guarda el turno, no se avisa. 3 lecturas por PK por tick.
+async function avisoBloqueoPagoCron(env, med = null) {
+  const rows = await avQ(env, 'SELECT k, v FROM kv_cache WHERE k IN (?, ?, ?)', [WA_PAY_REJECT_KEY, WA_BILLING_BLOCK_KEY, WA_PAY_REJECT_VOLVIO_KEY], med);
+  const now = Date.now();
+  for (const r of rows) {
+    try {
+      if (r.k === WA_PAY_REJECT_VOLVIO_KEY) {
+        const del = await env.DB.prepare('DELETE FROM kv_cache WHERE k = ? AND v = ?').bind(r.k, r.v).run();
+        if (med) med.add(del);
+        if (del && del.meta && del.meta.changes) await avisoPagoVolvio(env);
+        continue;
+      }
+      let ep = null; try { ep = JSON.parse(r.v); } catch (_) {}
+      if (!ep || !waEpisodioAvisoPendiente(ep, now)) continue;
+      const cas = await env.DB.prepare('UPDATE kv_cache SET v = ?, updated_at = ? WHERE k = ? AND v = ?').bind(JSON.stringify({ ...ep, last_notify_at: now }), new Date().toISOString(), r.k, r.v).run();
+      if (med) med.add(cas);
+      if (!cas || !cas.meta || !cas.meta.changes) continue;
+      const since = Number(ep.since) || now;
+      await avisoBloqueoPago(env, r.k, since, Math.floor((now - since) / WA_BILLING_NOTIFY_MS), ep.last_error || '');
+    } catch (_) {}
+  }
 }
 
 async function clearWaBillingBlock(env) {
@@ -15111,7 +16329,8 @@ async function processPendingTemplateSends(env) {
       if (rt.ok) {
         await registrarPlantillaAdhocEnChat(env, { phone: row.phone, wamid: rt.id || '', texto: row.body_preview, senderSlug });
         try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='sent', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
-        if (env.ADMIN_NOTIFY_PHONE) { try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, `✅ Plantilla aprobada y enviada a ${row.phone}:\n"${(row.body_preview || '').slice(0, 120)}"`); } catch (_) {} }
+        // [Etapa 1] avisoAdmin (legacy = el texto de siempre). Decisión 1 de §6: va al resumen (P3) con los avisos prendidos.
+        if (env.ADMIN_NOTIFY_PHONE) { try { await avisoAdmin(env, `✅ Plantilla aprobada y enviada a ${row.phone}:\n"${(row.body_preview || '').slice(0, 120)}"`, { tipo: 'plantilla_enviada', prioridad: 'P3', refPhone: row.phone }); } catch (_) {} }
         await new Promise(rs => setTimeout(rs, 400));
       }
       // si el envío falla, queda 'pending' y reintenta el próximo tick
@@ -15190,7 +16409,8 @@ async function maybeAdhocCleanup(env) {
     if ((await kvGet(env, 'adhoc_cleanup_last', '')) === fechaAR) return;
     await kvSet(env, 'adhoc_cleanup_last', fechaAR);   // marcar ANTES para no repetir aunque tarde/falle
     const res = await adhocCleanup(env, {});
-    if (res && res.deleted) { try { await waSendText(env, '5491155604999', `🧹 Limpieza plantillas ad-hoc: borré ${res.deleted} viejas, quedan ${res.remaining_adhoc}.`); } catch (_) {} }
+    // [Etapa 1] avisoAdmin (legacy = el texto de siempre al personal de Gaspar). Decisión 1 de §6: al resumen (P3).
+    if (res && res.deleted) { try { await avisoAdmin(env, `🧹 Limpieza plantillas ad-hoc: borré ${res.deleted} viejas, quedan ${res.remaining_adhoc}.`, { tipo: 'adhoc_limpieza', prioridad: 'P3', to: '5491155604999' }); } catch (_) {} }
   } catch (_) {}
 }
 
@@ -15394,7 +16614,9 @@ const handler = {
               // Field 'message_template_status_update' = cambio de status de una
               // plantilla (APPROVED/REJECTED/PAUSED/DISABLED). Notificamos al admin
               // y dejamos de pollear monitorTemplateStatus.
-              if (change?.field === 'message_template_status_update') {
+              // 'template_category_update' = Meta recategorizó una plantilla (p. ej. UTILITY → MARKETING): se guarda
+              // la categoría (los avisos internos solo usan UTILITY) sin avisarle al admin por cada una.
+              if (change?.field === 'message_template_status_update' || change?.field === 'template_category_update') {
                 await processTemplateStatusUpdate(env, change.value || {});
                 continue;
               }
@@ -15611,6 +16833,17 @@ const handler = {
                   const _cv = avisarClienteVigilado(env, { wamid, phone, senderName, msgType, body: msgBody, r2Key, ts });
                   if (typeof ctx !== 'undefined' && ctx && ctx.waitUntil) ctx.waitUntil(_cv); else await _cv;
                 }
+                // ===== Avisos internos (Etapa 1): alguien del equipo le escribió al número del negocio =====
+                // Su ventana de 24 h se acaba de abrir → se le manda en un texto lo que no le llegó (cola nocturna, tope,
+                // perdidos, fallidos). En segundo plano; no hace nada salvo aviso_interno_modo='on' (adentro).
+                if (direction === 'inbound' && msgType !== 'status' && msgType !== 'reaction') {
+                  try {
+                    if (await esTelefonoInterno(env, phone)) {
+                      const _fl = avisoInternoFlush(env, phone);
+                      if (typeof ctx !== 'undefined' && ctx && ctx.waitUntil) ctx.waitUntil(_fl); else await _fl;
+                    }
+                  } catch (_) {}
+                }
                 // ===== Lanzamiento junio: capturar comprobantes de pago =====
                 // En la ventana (11-15/06), todo inbound con imagen/PDF se OCRea,
                 // se clasifica, se etiqueta y se respalda en D1 (NO se responde nada).
@@ -15797,6 +17030,15 @@ const handler = {
               }
 
               // Status updates (sent, delivered, read) para mensajes salientes
+              // [Etapa 1] Internos (el equipo): una sola lectura por lote, de caché (internosSet, 10 min). El modo de
+              // los avisos (kv cacheado 60 s) solo se pide si en el lote hay un 'failed', que es lo único que lo usa:
+              // pedirlo en cada lote de sent/delivered/read (~5 mil statuses por día) refrescaba la caché a cada
+              // minuto y era la mayor parte de lo que leían los avisos en la D1, también en off.
+              let _int = null, _avModo = 'off';
+              if ((value?.statuses || []).length) {
+                try { _int = await internosSet(env); } catch (_) {}
+                if (value.statuses.some(s => s && s.status === 'failed')) { try { _avModo = (await avisoCfg(env)).modo; } catch (_) {} }
+              }
               for (const st of (value?.statuses || [])) {
                 const wamid = st.id || '';
                 const status = st.status || ''; // sent | delivered | read | failed
@@ -15835,44 +17077,87 @@ const handler = {
                   }
                   // Si un envío vuelve a salir OK y había bloqueo de pago activo,
                   // levantarlo (se reanudan los flujos automáticos) y avisar.
+                  // (Vale para CUALQUIER destinatario, también internos: el corte de internos va más abajo.)
                   if (status === 'sent' || status === 'delivered') {
-                    try { if (await clearWaBillingBlock(env) && env.ADMIN_NOTIFY_PHONE) await waSendText(env, env.ADMIN_NOTIFY_PHONE, 'WhatsApp volvió a andar — reanudo los envíos automáticos'); } catch (_) {}
+                    try {
+                      if (await clearWaBillingBlock(env)) {
+                        const _txt = 'WhatsApp volvió a andar — reanudo los envíos automáticos';
+                        await avisoInterno(env, {
+                          para: ['gaspar', 'bruno'], tipo: 'wa_bloqueo_pago_ok', prioridad: 'P2', texto: _txt,
+                          legacy: env.ADMIN_NOTIFY_PHONE ? () => waSendText(env, env.ADMIN_NOTIFY_PHONE, _txt, { esAviso: true }) : null,
+                          legacyDest: env.ADMIN_NOTIFY_PHONE,
+                        });
+                      }
+                    } catch (_) {}
                   }
+                  const errs = Array.isArray(st.errors) ? st.errors : [];
+                  const errCode = errs.length ? errs[0].code : null;
+                  // Evitar el duplicado feo "X: X" cuando title === message.
+                  const errMsg = errs.length
+                    ? (errs[0].title || 'error') + (errs[0].message && errs[0].message !== errs[0].title ? ': ' + errs[0].message : '')
+                    : 'sin detalle';
+                  // ¿El destinatario es del equipo? GUARDIA anti-loop: si el envío que falló era un aviso a un interno
+                  // (su ventana de 24h cerrada → rebota 131047), NO se genera otro aviso de cliente, porque ese también
+                  // fallaría → recursión infinita (bug histórico que saturó la D1). Se compara por dígitos.
+                  // En off/dry la rama de clientes usa la guardia de SIEMPRE (los 3 números fijos), así hacia afuera todo
+                  // sigue igual (hoy una falla a Agus/Facu/Abril le llega a Gaspar como "Falló envío WA"); en 'on', todo
+                  // internosSet, y si esa lectura falló (fail-closed) en este lote no se avisan fallas de clientes.
+                  const _dig = String(phone).replace(/\D/g, '');
+                  const _esInterno = _int ? _int.set.has(_dig) : INTERNOS_FIJOS.includes(_dig);
+                  const _guardia = _avModo === 'on' ? (_esInterno || !_int || !_int.ok) : INTERNOS_FIJOS.includes(_dig);
                   // Notificar al admin si el envío FALLA (primera vez que llega como failed)
                   if (status === 'failed' && prevStatus !== 'failed') {
-                    const errs = Array.isArray(st.errors) ? st.errors : [];
-                    const errCode = errs.length ? errs[0].code : null;
-                    // Evitar el duplicado feo "X: X" cuando title === message.
-                    const errMsg = errs.length
-                      ? (errs[0].title || 'error') + (errs[0].message && errs[0].message !== errs[0].title ? ': ' + errs[0].message : '')
-                      : 'sin detalle';
                     if (isBillingBlockError(errCode, errMsg)) {
-                      // Bloqueo de cuenta por pago: pausar envíos automáticos + avisar 1 vez por episodio.
-                      const { shouldNotify } = await setWaBillingBlock(env, errMsg);
-                      if (shouldNotify && env.ADMIN_NOTIFY_PHONE) {
-                        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, '🔴 WhatsApp BLOQUEADO por pago — Meta error 131042 (problema de pago de la cuenta de WhatsApp Business).\nLas plantillas se pagan con el SALDO de 360dialog: revisá fondos y licencia en hub.360dialog.com (Funds / Invoices). Si ahí está todo bien, escribile al soporte de 360dialog (ellos manejan la línea de crédito con Meta).\nPausé los envíos automáticos para no quemar contactos — se reanudan solos cuando vuelva a andar.'); } catch (_) {}
+                      // Bloqueo de cuenta por pago: pausar envíos automáticos + avisar 1 vez por turno de 12 h. El
+                      // bloqueo se registra para CUALQUIER destinatario (también internos: el breaker se arma igual).
+                      // Si el que rebotó era un envío al equipo (un aviso, una lista, el reporte), soloRegistrar: el
+                      // status de un aviso no puede generar otro aviso (si el aviso de bloqueo también rebota, sería
+                      // la cadena aviso → rebote → aviso). Ese rebote lo avisa el cron (avisoBloqueoPagoCron) a los
+                      // 5 min, mismo texto y destino que hoy. Sin el episodio guardado tampoco se avisa (waEpisodioPago).
+                      const { shouldNotify, since, turno } = await setWaBillingBlock(env, errMsg, { soloRegistrar: _esInterno });
+                      if (shouldNotify) {
+                        try { await avisoBloqueoPago(env, WA_BILLING_BLOCK_KEY, since, turno, errMsg); } catch (_) {}
                       }
-                    } else if (!['5491155604999', '5491155604996', '5491137593269'].includes(String(phone).replace(/\D/g, ''))) {
-                      // Fallo puntual hacia un CLIENTE (no interno, no billing).
-                      // GUARDIA números internos (Gaspar/hermano/Joaco): si el envío que falló era un
-                      // aviso a un interno (su ventana de 24h cerrada → rebota 131047), NO generamos
-                      // otro aviso, porque ese también fallaría → recursión infinita (bug histórico que
-                      // saturó la D1). Se compara por dígitos. Los fallos hacia CLIENTES sí se avisan.
+                    } else if (!_guardia) {
+                      // Fallo puntual hacia un CLIENTE (no interno, no billing). Los fallos hacia CLIENTES sí se avisan.
                       const _m = prevBody && prevBody.match(/\[plantilla:\s*([^\]\s]+)/);
                       const _tpl = _m ? _m[1] : null;
                       if (_tpl && !esCampanaMasiva(_tpl)) {
                         // Plantilla de venta/seguimiento (Bruno/Joaco) falló → aviso CONFIABLE a Bruno + Gaspar
                         // (plantilla + fallback), deduplicado, con tope por hora. Pedido de Bruno (3-sep).
-                        try { await notifyTplFail(env, { name: _tpl, phone, reason: describeSendFailure({ code: errCode, error: errMsg }) }); } catch (_) {}
+                        // [Etapa 1] + wamid → en 'on' le llega al autor (wa_send_author).
+                        try { await notifyTplFail(env, { name: _tpl, phone, reason: describeSendFailure({ code: errCode, error: errMsg }), wamid, soloLegacy: _esInterno }); } catch (_) {}
                       } else if (env.ADMIN_NOTIFY_PHONE && !(prevCampana && await esEnvioDeBroadcast(env, phone, ts))) {
                         // Texto libre o plantilla 1 a 1 → aviso a Gaspar por texto (como antes). Solo las de
                         // un BROADCAST del panel (guardan el texto, no el marcador) ya no avisan una por una:
                         // rebotan a montones y solo hacían ruido. Las de venta (lead B2B, revendedores) siguen.
                         const preview = prevBody ? prevBody.slice(0, 100) + (prevBody.length > 100 ? '…' : '') : '';
                         const summary = `⚠ Falló envío WA a ${phone}\nError: ${errMsg}` + (preview ? `\nMensaje: "${preview}"` : '');
-                        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
+                        if (_esInterno) {
+                          // Alguien del equipo fuera de la guardia vieja (solo en off/dry): lo de hoy, sin registrar
+                          // como falla de cliente (la registra avisoInternoStatus como falla_interna).
+                          try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary, { esAviso: true }); } catch (_) {}
+                        } else {
+                          // [Etapa 1] Al AUTOR del envío (wa_send_author; sin autor = envío automático → resumen del
+                          // dueño del chat) + copia P3 a Gaspar. P2, o P1 si el chat tiene plata en juego.
+                          try {
+                            const _prio = _avModo === 'off' ? 'P2' : await avisoPrioFalla(env, phone);
+                            await avisoInterno(env, {
+                              para: [{ autor: wamid, phone, prioridad: _prio }, { slug: 'gaspar', prioridad: 'P3' }],
+                              tipo: 'falla_envio', prioridad: _prio, texto: summary, clave: 'falla:' + wamid, refPhone: phone,
+                              legacy: () => waSendText(env, env.ADMIN_NOTIFY_PHONE, summary, { esAviso: true }),
+                              legacyDest: env.ADMIN_NOTIFY_PHONE,
+                            });
+                          } catch (_) {}
+                        }
                       }
                     }
+                  }
+                  // [Etapa 1] Status de un envío al EQUIPO → seguimiento del aviso (entregado / leído / falló + 1
+                  // reintento por plantilla). Va DESPUÉS de lo del bloqueo por pago (que vale para todos) y nunca llama
+                  // a avisoInterno ni pasa por la rama de clientes.
+                  if (_esInterno) {
+                    try { await avisoInternoStatus(env, { wamid, status, phone, errCode, errMsg, prevBody, primeraVez: prevStatus !== status }); } catch (_) {}
                   }
                 } catch (_) {}
               }
@@ -16670,42 +17955,54 @@ const handler = {
         const fecha = now.slice(8, 10) + '/' + now.slice(5, 7) + '/' + now.slice(0, 4);
         const to = '5491155604999'; // número personal de Gaspar (pedido explícito)
         const txt = `🎫 TICKET DE PRODUCCIÓN CORPÓREO #${numero}\n${fecha}${cliente ? ' · ' + cliente : ''} · cargó ${session.user}\n\n${detalle}`;
-        let sent = false;
-        try { const r = await waSendText(env, to, txt); sent = !!(r && r.ok); } catch (_) {}
-        // Fotos del ticket (base64 desde el front, ya downscaleadas): subir cada una a WhatsApp
-        // y mandarla a Gaspar. Caption en la 1ª. Tope 10 por las dudas. Además se GUARDAN en R2
-        // (corporeo-ticket/<rowId>/<i>.jpg) para poder reenviar el ticket completo si el 1er
-        // envío falla por la ventana de 24h de WhatsApp.
-        let photos_sent = 0;
-        const photoKeys = [];
+        // Fotos del ticket (base64 desde el front, ya downscaleadas): se decodifican y se GUARDAN en R2
+        // (corporeo-ticket/<rowId>/<i>.jpg) ANTES de mandar nada, para poder reenviar el ticket completo si el 1er
+        // envío falla por la ventana de 24h de WhatsApp y para que el aviso interno (Etapa 1) las tenga como
+        // mediaKeys. Hacia Gaspar sale lo mismo y en el mismo orden que antes: el texto y después las fotos (caption
+        // en la 1ª, tope 10).
+        const photoKeys = [], fotos = [];
         const photos = Array.isArray(tb.photos) ? tb.photos.slice(0, 10) : [];
-        if (photos.length) {
-          const _waT = getWaClient(env);
-          for (let pi = 0; pi < photos.length; pi++) {
-            try {
-              const b64 = String((photos[pi] && photos[pi].data) || '').trim();
-              if (!b64) continue;
-              const mime = String((photos[pi] && photos[pi].mime) || 'image/jpeg');
-              const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-              // Persistir en R2 (si tenemos la fila) antes de mandarla.
-              if (rowId != null && env.MEDIA) {
-                try { const key = `corporeo-ticket/${rowId}/${pi}.jpg`; await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: mime } }); photoKeys.push(key); } catch (_) {}
-              }
-              const fd = new FormData();
-              fd.append('messaging_product', 'whatsapp');
-              fd.append('file', new Blob([bytes.buffer], { type: mime }), 'ticket.jpg');
-              fd.append('type', mime);
-              const upR = await fetch(_waT.mediaUploadUrl(), { method: 'POST', headers: _waT.headers, body: fd });
-              const upJ = await upR.json().catch(() => ({}));
-              if (upR.ok && upJ.id) {
-                const cap = pi === 0 ? `🎫 Fotos ticket #${numero}${cliente ? ' · ' + cliente : ''}` : undefined;
-                const sr = await waSendImage(env, to, upJ.id, cap);
-                if (sr && sr.ok) photos_sent++;
-              }
-            } catch (_) {}
-          }
-          if (rowId != null && photoKeys.length) { try { await env.DB.prepare('UPDATE corporeo_tickets SET photo_keys=? WHERE id=?').bind(JSON.stringify(photoKeys), rowId).run(); } catch (_) {} }
+        for (let pi = 0; pi < photos.length; pi++) {
+          try {
+            const b64 = String((photos[pi] && photos[pi].data) || '').trim();
+            if (!b64) continue;
+            const mime = String((photos[pi] && photos[pi].mime) || 'image/jpeg');
+            const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+            if (rowId != null && env.MEDIA) {
+              try { const key = `corporeo-ticket/${rowId}/${pi}.jpg`; await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: mime } }); photoKeys.push(key); } catch (_) {}
+            }
+            fotos.push({ bytes, mime });
+          } catch (_) {}
         }
+        if (rowId != null && photoKeys.length) { try { await env.DB.prepare('UPDATE corporeo_tickets SET photo_keys=? WHERE id=?').bind(JSON.stringify(photoKeys), rowId).run(); } catch (_) {} }
+        const capFotos = `🎫 Fotos ticket #${numero}${cliente ? ' · ' + cliente : ''}`;
+        let photos_sent = 0;
+        // Lo de hoy (legacy): texto a Gaspar y cada foto subida a WhatsApp desde los bytes.
+        const legacy = async () => {
+          let r = null;
+          try { r = await waSendText(env, to, txt, { esAviso: true }); } catch (_) {}
+          if (fotos.length) {
+            const _waT = getWaClient(env);
+            for (let pi = 0; pi < fotos.length; pi++) {
+              try {
+                const fd = new FormData();
+                fd.append('messaging_product', 'whatsapp');
+                fd.append('file', new Blob([fotos[pi].bytes.buffer], { type: fotos[pi].mime }), 'ticket.jpg');
+                fd.append('type', fotos[pi].mime);
+                const upR = await fetch(_waT.mediaUploadUrl(), { method: 'POST', headers: _waT.headers, body: fd });
+                const upJ = await upR.json().catch(() => ({}));
+                if (upR.ok && upJ.id) {
+                  const sr = await waSendImage(env, to, upJ.id, pi === 0 ? capFotos : undefined, { esAviso: true });
+                  if (sr && sr.ok) photos_sent++;
+                }
+              } catch (_) {}
+            }
+          }
+          return r;
+        };
+        const av = await avisoAdmin(env, txt, { tipo: 'ticket_corporeo', prioridad: 'P1', to, mediaKeys: photoKeys, mediaCaption: capFotos, legacy });
+        const sent = !!(av && av.ok);
+        if (av && av.modo === 'on') photos_sent = av.fotos || 0;
         return json({ ok: true, numero, sent, photos_sent });
       }
 
@@ -16728,28 +18025,38 @@ const handler = {
         const to = '5491155604999';
         const txt = `🎫 TICKET DE PRODUCCIÓN CORPÓREO #${tk.numero} (reenvío)\n${fecha}${tk.cliente ? ' · ' + tk.cliente : ''}${tk.created_by ? ' · cargó ' + tk.created_by : ''}\n\n${tk.detalle}`;
         let sent = false, err = '';
-        try { const r = await waSendText(env, to, txt); sent = !!(r && r.ok); if (!sent) err = JSON.stringify(r || {}).slice(0, 300); } catch (e) { err = String((e && e.message) || e); }
         let photos_sent = 0, keys = [];
         try { if (tk.photo_keys) keys = JSON.parse(tk.photo_keys) || []; } catch (_) {}
-        if (Array.isArray(keys) && keys.length && env.MEDIA) {
-          const _waT = getWaClient(env);
-          for (let pi = 0; pi < keys.length && pi < 10; pi++) {
-            try {
-              const obj = await env.MEDIA.get(keys[pi]);
-              if (!obj) continue;
-              const ab = await obj.arrayBuffer();
-              const mime = (obj.httpMetadata && obj.httpMetadata.contentType) || 'image/jpeg';
-              const fd = new FormData();
-              fd.append('messaging_product', 'whatsapp');
-              fd.append('file', new Blob([ab], { type: mime }), 'ticket.jpg');
-              fd.append('type', mime);
-              const upR = await fetch(_waT.mediaUploadUrl(), { method: 'POST', headers: _waT.headers, body: fd });
-              const upJ = await upR.json().catch(() => ({}));
-              if (upR.ok && upJ.id) { const cap = pi === 0 ? `🎫 Fotos ticket #${tk.numero}${tk.cliente ? ' · ' + tk.cliente : ''}` : undefined; const sr = await waSendImage(env, to, upJ.id, cap); if (sr && sr.ok) photos_sent++; }
-            } catch (_) {}
+        if (!Array.isArray(keys)) keys = [];
+        const capFotos = `🎫 Fotos ticket #${tk.numero}${tk.cliente ? ' · ' + tk.cliente : ''}`;
+        // Lo de hoy (legacy): texto + las fotos guardadas en R2. [Etapa 1] pasa por avisoAdmin (P1, con las fotos como mediaKeys).
+        const legacy = async () => {
+          let r = null;
+          try { r = await waSendText(env, to, txt, { esAviso: true }); if (!(r && r.ok)) err = JSON.stringify(r || {}).slice(0, 300); } catch (e) { err = String((e && e.message) || e); }
+          if (keys.length && env.MEDIA) {
+            const _waT = getWaClient(env);
+            for (let pi = 0; pi < keys.length && pi < 10; pi++) {
+              try {
+                const obj = await env.MEDIA.get(keys[pi]);
+                if (!obj) continue;
+                const ab = await obj.arrayBuffer();
+                const mime = (obj.httpMetadata && obj.httpMetadata.contentType) || 'image/jpeg';
+                const fd = new FormData();
+                fd.append('messaging_product', 'whatsapp');
+                fd.append('file', new Blob([ab], { type: mime }), 'ticket.jpg');
+                fd.append('type', mime);
+                const upR = await fetch(_waT.mediaUploadUrl(), { method: 'POST', headers: _waT.headers, body: fd });
+                const upJ = await upR.json().catch(() => ({}));
+                if (upR.ok && upJ.id) { const sr = await waSendImage(env, to, upJ.id, pi === 0 ? capFotos : undefined, { esAviso: true }); if (sr && sr.ok) photos_sent++; }
+              } catch (_) {}
+            }
           }
-        }
-        return json({ ok: true, sent, numero: tk.numero, photos_sent, photos_stored: (Array.isArray(keys) ? keys.length : 0), error: err || undefined });
+          return r;
+        };
+        const av = await avisoAdmin(env, txt, { tipo: 'ticket_corporeo', prioridad: 'P1', to, mediaKeys: keys.slice(0, 10), mediaCaption: capFotos, legacy });
+        sent = !!(av && av.ok);
+        if (av && av.modo === 'on') { photos_sent = av.fotos || 0; if (!sent) err = String(av.error || 'no salió (ver Admin → Avisos internos)'); }
+        return json({ ok: true, sent, numero: tk.numero, photos_sent, photos_stored: keys.length, error: err || undefined });
       }
 
       // GET /admin/corporeo/tickets → ids de pedidos que YA tienen ticket (para pintar el botón
@@ -16938,7 +18245,9 @@ const handler = {
               if (n === 0 || Date.now() - ult > 30 * 60 * 1000) {
                 await kvSet(env, kAv, String(Date.now()));
                 const fd = fecha.slice(8, 10) + '/' + fecha.slice(5, 7);
-                ctx.waitUntil(precotizNotifyGaspar(env, `${c.nombre} eligió ${n} consulta${n === 1 ? '' : 's'} para ${dia === 'hoy' ? 'hoy' : 'mañana'} (${fd}). Antes: ${actual.cuota}.`).catch(() => {}));
+                ctx.waitUntil(precotizNotifyGaspar(env, `${c.nombre} eligió ${n} consulta${n === 1 ? '' : 's'} para ${dia === 'hoy' ? 'hoy' : 'mañana'} (${fd}). Antes: ${actual.cuota}.`,
+                  // Decisión 1 de §6: las cuotas van al resumen (P3), salvo cuando eligen 0 (P2: alguien deja de recibir).
+                  { tipo: 'cuotas', prioridad: n === 0 ? 'P2' : 'P3' }).catch(() => {}));
               }
             }
           }
@@ -17545,6 +18854,10 @@ const handler = {
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, _autor, 'text', String(text), '', reply_to || '', 'sent').run();
         } catch (_) {}
+        // Autor real del envío (avisos internos: si después falla, le llega a quien lo mandó). DESPUÉS del INSERT y en
+        // segundo plano: antes del INSERT agrandaba la carrera con la fila fantasma de status (el chat mostraba "sin
+        // texto registrado"); el autor solo se usa cuando llega un 'failed', segundos después. Nunca tira.
+        ctx.waitUntil(registrarAutorEnvio(env, r.id, session.user, num || String(to).replace(/\D/g, '')));
         // Auto-etiquetar ALUMNO (id 26): si Abril manda el mensaje de ALTA al programa (el de
         // "LEE BIEN A CONCIENCIA..." o el link a la plataforma alinfinito.app.clientclub.net),
         // el contacto ya compró el curso -> con la etiqueta se le cortan los automáticos de
@@ -17598,6 +18911,8 @@ const handler = {
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, senderSlug, sentWithImg ? 'image' : 'template', previewBody, sentWithImg ? header_image_key : '', '', 'sent').run();
         } catch (_) {}
+        // Autor real (avisos internos): después del INSERT y en segundo plano (ver /admin/wa/send).
+        ctx.waitUntil(registrarAutorEnvio(env, r.id, session.user, num || String(to).replace(/\D/g, '')));
         // "El que trabaja el lead se queda con él" (Gaspar 4-sep): el presupuesto/plantilla que manda
         // un vendedor comercial le asigna el chat a él (caso Bre: lo cotizó Joaco, quedaba en Facu).
         try { await reasignarAlQueTrabaja(env, num || String(to).replace(/\D/g, ''), session.user); } catch (_) {}
@@ -17653,10 +18968,19 @@ const handler = {
            LIMIT 50`
         ).bind(like).all();
 
+        // Chats del equipo: solo admin (mismo criterio que la lista de chats y inboxAccessOk).
+        let _contacts = contactsQ.results || [], _messages = messagesQ.results || [];
+        if (_srole !== 'admin') {
+          try {
+            const _I = await internosSet(env);
+            const _fuera = (p) => _I.set.has(String(p || '').replace(/\D/g, ''));
+            _contacts = _contacts.filter(c => !_fuera(c.phone)); _messages = _messages.filter(m => !_fuera(m.phone));
+          } catch (_) {}
+        }
         return json({
           q,
-          contacts: contactsQ.results || [],
-          messages: messagesQ.results || []
+          contacts: _contacts,
+          messages: _messages
         });
       }
 
@@ -17865,6 +19189,13 @@ const handler = {
         const preview = formatReporteDiario(d);
         if (body && body.send) { for (const ph of REPORTE_DIARIO_PHONES) { try { await waSendText(env, ph, preview); } catch (_) {} } }
         return json({ ok: true, data: d, preview, sent: !!(body && body.send) });
+      }
+
+      // ===== Avisos internos (plan de fondo, Etapa 1): /admin/avisos* → avisosRoute (ahí está el detalle) =====
+      // /mios y /visto son para cualquiera del equipo (banner de P1 sin ver); el resto, solo admin.
+      {
+        const _avResp = await avisosRoute(env, request, url, path, session, isAdminSession);
+        if (_avResp) return _avResp;
       }
 
       // POST /admin/envios-pausa → freno GLOBAL de envíos de WhatsApp (kv wa_send_paused).
@@ -18560,6 +19891,12 @@ const handler = {
             }
           }
         }
+        // Los chats del EQUIPO con el número del negocio (avisos internos, listas, reportes) no se le muestran a nadie
+        // que no sea admin: cada aviso sube ese chat al tope de una bandeja operativa (Bruno en 'cursos', Agus y
+        // Joaco en 'general'). Filtro en memoria contra internosSet (caché 10 min): no le suma filas leídas a la query.
+        if (role !== 'admin' && chats && chats.length) {
+          try { const _I = await internosSet(env); chats = chats.filter(c => !_I.set.has(String(c.phone || '').replace(/\D/g, ''))); } catch (_) {}
+        }
         const response = json({ chats });
         response.headers.set('Cache-Control', 'public, max-age=5');
         ctx.waitUntil(cache.put(cacheKey, response.clone()));
@@ -18994,7 +20331,16 @@ const handler = {
                 FROM wa_messages p WHERE p.wamid = wa_messages.context_id AND p.phone = wa_messages.phone AND wa_messages.context_id != '' LIMIT 1) AS quoted_meta
            FROM wa_messages WHERE ${where} ORDER BY ts DESC LIMIT ?`
         ).bind(...params, limit).all();
-        return json({ messages: rs.results || [] });
+        let _msgs = rs.results || [];
+        // Consulta global de alguien que no es admin: afuera los chats del EQUIPO con el número del negocio (avisos,
+        // listas, reportes; mismo criterio que la lista de chats, la búsqueda e inboxAccessOk). Si no, el poll de
+        // notificaciones (poll-worker.js, cada 5 s) le hacía sonar y le mostraba a Joaco lo que Agus le escribe al número
+        // del negocio (su chat está en 'general' sin asignar) y a Abril lo de Bruno ('cursos'). En memoria contra
+        // internosSet (caché 10 min): la query sigue por idx_wa_messages_ts, sin filas leídas de más.
+        if (!phone && _role !== 'admin' && _msgs.length) {
+          try { const _I = await internosSet(env); _msgs = _msgs.filter(m => !_I.set.has(String(m.phone || '').replace(/\D/g, ''))); } catch (_) {}
+        }
+        return json({ messages: _msgs });
       }
 
       // Read cursors: qué conversaciones fueron leídas y cuándo
@@ -19600,6 +20946,8 @@ const handler = {
         const r = await waSend(env, payload);
         await logWaEvent(env, { to: num, kind: type, ref: '', ok: r.ok, messageId: r.id, error: r.error });
         if (!r.ok) return json({ error: r.error }, r.status || 500);
+        // Autor real (avisos internos), en segundo plano: no demora el guardado (acá es UPSERT, la fila fantasma no le gana).
+        ctx.waitUntil(registrarAutorEnvio(env, r.id, session.user, num));
         // 4. Save in wa_messages
         let body = caption || '';
         if (type === 'image') body = body || '[imagen]';
@@ -19926,6 +21274,7 @@ const handler = {
               'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', 'text', qr.body, '', '', 'sent').run();
           } catch (_) {}
+          ctx.waitUntil(registrarAutorEnvio(env, r.id, session.user, num));   // autor real (avisos internos), después del INSERT
           return json({ ok: true, type: 'text', id: r.id });
         }
         // Con imagen: descargar de R2 → upload a Meta → send con caption.
@@ -19956,6 +21305,7 @@ const handler = {
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', 'image', qr.body || '[imagen]', qr.media_r2_key, '', 'sent').run();
         } catch (_) {}
+        ctx.waitUntil(registrarAutorEnvio(env, r.id, session.user, num));   // autor real (avisos internos), después del INSERT
         return json({ ok: true, type: 'image', id: r.id });
       }
 
@@ -22028,7 +23378,7 @@ const handler = {
           let claim = null;
           try { claim = await env.DB.prepare('UPDATE corte_paquetes SET aviso_at=? WHERE tanda_id=? AND cliente_key=? AND (aviso_at IS NULL OR aviso_at < ?) RETURNING aviso_at').bind(nowIso, tandaId, key, isoHace(5 * 60 * 1000)).first(); } catch (_) {}
           if (!claim) return json({ error: 'espera', motivo: 'Ya avisaste hace un momento' }, 429);
-          try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ': ' + nota + (operador ? ' (' + operador + ')' : '')); } catch (_) {}
+          try { await precotizNotifyGaspar(env, 'Logística · N° ' + cortePad2(P.numero) + ' ' + String(P.cliente || '').trim() + ': ' + nota + (operador ? ' (' + operador + ')' : ''), { tipo: 'logistica', prioridad: 'P2' }); } catch (_) {}
           try { await logiLogStmt(env, tandaId, key, 'avisar', nota, operador, usuario).run(); } catch (_) {}
         } else {
           const st = [...pre, logiContactoStmt(env, accion, tandaId, key, nowIso, quienPor)];
@@ -22191,7 +23541,7 @@ const handler = {
           + (quedan.length ? ' · quedan en el taller: ' + quedan.map(p => cortePad2(p.numero) + ' ' + String(p.cliente || '').trim() + ' (' + (p.bloqueo || 'no se envió') + ')').join(', ') : ' · no quedó nada en el taller');
         if (texto.length > 1400) texto = texto.slice(0, 1390) + '…';
         if (operador) texto += ' · ' + operador;
-        try { await precotizNotifyGaspar(env, texto); } catch (_) {}
+        try { await precotizNotifyGaspar(env, texto, { tipo: 'logistica', prioridad: 'P2' }); } catch (_) {}
         try { await logiLogStmt(env, tandaId, '', 'resumen', texto, operador, String(session.user || '')).run(); } catch (_) {}
         return json({ ok: true, texto });
       }
@@ -23595,6 +24945,10 @@ const handler = {
     // Alarma "sin cotizar": cada 5 min DESTILDA a los que Joaco ya cotizó (dinámico,
     // barato); a :00 y :30 (8-22 AR) además ESCANEA y etiqueta los nuevos con +20hs.
     if (minute % 5 === 0) ctx.waitUntil(syncSinCotizar(env, { addPass: (minute % 30 === 0 && hAR >= 8 && hAR <= 22) }));
+    // Avisos internos (Etapa 1): reconciliador de entregas + cola de silencio / tope / pausados + resúmenes de
+    // resumen_horas (ventana :05-:20, lun-sáb) + purga diaria a las 5 AR. Solo en el cron */5 (nunca en el */1) y
+    // en serie dentro de una medición de filas leídas (freno de costo). No hace nada con aviso_interno_modo='off'.
+    ctx.waitUntil(processAvisosTick(env, { hAR, dowAR, minute }));
     // Escalación + limpieza de los "sin cotizar" con +10 días: 1 vez/día (10 AM AR),
     // avisa a Gaspar y los saca de la lista activa de Joaco. Lock diario adentro.
     if (hAR === 10 && minute === 0) ctx.waitUntil(escalarSinCotizarViejos(env));
@@ -23675,23 +25029,37 @@ async function monitorTemplateStatus(env) {
       templates.push(...batch);
       if (batch.length < 100) break;
     }
+    // [Etapa 1] También se guarda la CATEGORÍA (mig 051): la cadena de los avisos internos solo usa UTILITY. Se
+    // compara status Y categoría, así la primera pasada después del deploy completa la categoría de todas (las
+    // filas viejas la tienen vacía) y un cambio de categoría sin cambio de status ya no pasa desapercibido.
+    const conCat = await ensureTplCategoryCol(env);
     for (const t of templates) {
       const name = t.name;
       const status = String(t.status || '').toUpperCase();   // 360dialog devuelve 'approved' en minúsculas; normalizamos
+      const category = String(t.category || '').toUpperCase();
       if (!name || !status) continue;
-      const cached = await env.DB.prepare('SELECT status FROM template_status_cache WHERE name = ?').bind(name).first();
+      const cached = await env.DB.prepare(conCat ? "SELECT status, COALESCE(category, '') AS category FROM template_status_cache WHERE name = ?" : 'SELECT status FROM template_status_cache WHERE name = ?').bind(name).first();
       const prevStatus = cached?.status || null;
-      if (prevStatus === status) continue; // sin cambio
-      await env.DB.prepare(
-        'INSERT INTO template_status_cache (name, status, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at'
-      ).bind(name, status, new Date().toISOString()).run();
+      const prevCat = conCat ? String(cached?.category || '') : category;
+      if (prevStatus === status && prevCat === category) continue; // sin cambio
+      if (conCat) {
+        await env.DB.prepare(
+          'INSERT INTO template_status_cache (name, status, category, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET status = excluded.status, category = excluded.category, updated_at = excluded.updated_at'
+        ).bind(name, status, category, new Date().toISOString()).run();
+      } else {
+        await env.DB.prepare(
+          'INSERT INTO template_status_cache (name, status, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at'
+        ).bind(name, status, new Date().toISOString()).run();
+      }
       // Solo notifica si pasó de PENDING a algo decidido (no en la primera carga del cache).
       const becameDecided = prevStatus === 'PENDING' && (status === 'APPROVED' || status === 'REJECTED');
       if (becameDecided) {
         const emoji = status === 'APPROVED' ? '✅' : '❌';
         const msg = `${emoji} Template "${name}" ahora está ${status}.`;
-        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, msg); } catch (_) {}
+        try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, msg, { esAviso: true }); } catch (_) {}
       }
+      // Plantilla de los avisos internos que quedó en otra categoría o pausada/rechazada → P1 a Gaspar.
+      await avisoTplCategoriaCheck(env, name, status, category);
     }
   } catch (e) {
     await logWaEvent(env, { to: '', kind: 'template-monitor', ref: '', ok: false, error: e.message });
@@ -23994,7 +25362,7 @@ async function getPromoMediaId(env, r2Key) {
   } catch (_) { return null; }
 }
 
-async function waSendImage(env, to, mediaId, caption) {
+async function waSendImage(env, to, mediaId, caption, opts = {}) {
   const num = normalizeArPhone(to);
   if (!num) return { ok: false, status: 400, error: 'numero invalido' };
   return waSend(env, {
@@ -24002,10 +25370,10 @@ async function waSendImage(env, to, mediaId, caption) {
     to: num,
     type: 'image',
     image: { id: mediaId, caption: caption || undefined }
-  });
+  }, opts);
 }
 
-async function waSendDocument(env, to, mediaId, filename, caption) {
+async function waSendDocument(env, to, mediaId, filename, caption, opts = {}) {
   const num = normalizeArPhone(to);
   if (!num) return { ok: false, status: 400, error: 'numero invalido' };
   return waSend(env, {
@@ -24013,7 +25381,7 @@ async function waSendDocument(env, to, mediaId, filename, caption) {
     to: num,
     type: 'document',
     document: { id: mediaId, filename: filename || undefined, caption: caption || undefined }
-  });
+  }, opts);
 }
 
 async function waSendVideo(env, to, mediaId, caption) {
@@ -24289,7 +25657,7 @@ async function processPresupuestoFollowups(env, opts = {}) {
     const lines = failures.slice(0, 10).map(f => `• ${f.name || f.phone} (${f.phone}): ${f.error}`).join('\n');
     const more = failures.length > 10 ? `\n…y ${failures.length - 10} más` : '';
     const summary = `⚠ Follow-ups de presupuesto que no salieron (${failures.length}):\n${lines}${more}\n\n(El motivo real va al lado de cada uno. Los transitorios se reintentan solos; estos ya agotaron los reintentos o son permanentes.)`;
-    try { await waSendText(env, env.ADMIN_NOTIFY_PHONE, summary); } catch (_) {}
+    try { await avisoAdmin(env, summary, { tipo: 'fup_fallido', prioridad: 'P2' }); } catch (_) {}
   }
 
   if (sent > 0 || failures.length > 0) {
