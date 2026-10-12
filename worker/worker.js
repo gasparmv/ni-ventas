@@ -2952,6 +2952,14 @@ async function precotizLlm(env, fullText, fwText, imageBlocks, meta) {
 }
 
 // Manda (auto) o deja en borrador (draft) los mensajitos que generó la IA.
+// Mensajes del bot: máximo 4 (estilo humano). Si la IA manda más (ej. responde varias dudas + la
+// lista de datos), los que sobran se juntan en el 4º en vez de cortarse: antes se perdían justo la
+// lista y la pregunta final.
+function precotizMsgs(res) {
+  const all = (res && Array.isArray(res.mensajes)) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()) : [];
+  return all.length <= 4 ? all : [...all.slice(0, 3), all.slice(3).join('\n')];
+}
+
 // Preguntas que se hacen UNA vez antes de cerrar la precotización (aunque ya estén foto+medidas):
 // el techo si es exterior (regla de Joaco, 12-oct) y para cuándo lo necesita (Gaspar, 12-oct).
 // Solo frena el cierre si los mensajes de la IA efectivamente preguntan eso: si no preguntó (o
@@ -3246,7 +3254,7 @@ async function processPrecotizPilot(env) {
       await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${lead.nombre || lead.phone}\nmotivo: ${res.motivo_freno || 'revisar'}\nentra a verlo vos`);
       continue;
     }
-    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
+    const msgs = precotizMsgs(res);
     // Candado de medidas: si el bot iba a mandar una medida que el cliente no dijo, no sale nada y
     // pasa a una persona (freno de mano), igual que cualquier otro freno.
     const _medida = precotizMedidaInventada(msgs, ctx.fullText);
@@ -3425,7 +3433,7 @@ async function processPrecotizPilot(env) {
     try { await maybeRepartirANadia(env, phone); } catch (_) {}
     await precotizTag(env, phone, true); // etiqueta VISIBLE (no oculta) — Joaco+Gaspar monitorean
 
-    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
+    const msgs = precotizMsgs(res);
     const _medida = precotizMedidaInventada(msgs, ctx.fullText); // candado de medidas (ver helper)
     if (_medida) {
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo=?, updated_at=? WHERE phone=?").bind(('el bot iba a proponer una medida: ' + _medida).slice(0, 200), nowIso, phone).run(); } catch (_) {}
@@ -16015,7 +16023,7 @@ const handler = {
           }
           const fw = await getActiveFramework(env);
           const out = await precotizLlm(env, fullText, fw?.content || '', imgs, { phone: num || 'prueba', by: 'dry-run' });
-          const _msgs = (out.data && Array.isArray(out.data.mensajes)) ? out.data.mensajes.filter(m => typeof m === 'string' && m.trim()) : [];
+          const _msgs = precotizMsgs(out.data);
           return json({ ok: out.ok, phone: num || null, result: out.data || null, candado: out.data ? (precotizMedidaInventada(_msgs, fullText) || null) : null, espera_pregunta: out.data ? precotizFaltaPregunta(out.data, _msgs) : null, error: out.error || null, status: out.status || null, raw: out.raw || null });
         }
 
