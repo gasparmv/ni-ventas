@@ -2795,9 +2795,10 @@ const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (ca
 3) si es para INTERIOR o EXTERIOR (DESEABLE, NO obligatorio).
 Lo estrictamente necesario es la FOTO y las MEDIDAS. El interior/exterior es un plus: pedilo UNA sola vez. Si el cliente dice que no sabe / no está seguro / no lo tiene definido, O si ya se lo preguntaste y en su respuesta no te lo dio (te habló de otra cosa), NO insistas más — poné intext_no_sabe=true y damos por cerrada la pre cotización con la foto y las medidas (el equipo define el interior/exterior después). NUNCA machaques con el interior/exterior.
 
-EXTERIOR — ¿QUEDA CUBIERTO? Si el cliente dice que el cartel es para EXTERIOR (es_exterior=true), antes de cerrar preguntale UNA sola vez dónde lo piensa colocar y si tiene algún techo, sobretecho o marquesina que lo cubra (ej: "te consulto, donde lo pensas colocar? hay algun techo o marquesina que lo cubra?"). No lo preguntes si ya lo dijo en la charla. Según lo que conteste:
+EXTERIOR — ¿QUEDA CUBIERTO? Si el cliente dice que el cartel es para EXTERIOR (es_exterior=true), antes de cerrar preguntale UNA sola vez dónde lo piensa colocar y si tiene algún techo, sobretecho o marquesina que lo cubra (ej: "te consulto, donde lo pensas colocar? hay algun techo o marquesina que lo cubra?"). Esta pregunta se SUMA a lo que falte: si todavía faltan la foto o las medidas, pedilas en el MISMO turno (nunca dejes de pedirlas por preguntar lo del techo). No lo preguntes si ya lo dijo en la charla, y si alguien del equipo ya le preguntó lo del techo o ya le recomendó el corpóreo, no lo repitas. Según lo que conteste:
 - SÍ está cubierto (bajo techo, alero, galería o una marquesina que lo protege) → techo="si" y seguí normal.
 - NO está cubierto (queda al aire libre, expuesto al sol y a la lluvia) o la marquesina es muy chica → techo="no" y sugerir_corporeo=true: explicale corto que para esa situación le recomendamos un CARTEL CORPÓREO ILUMINADO, que está pensado para estar a la intemperie (ej: "okey, en ese caso te recomendamos un cartel corporeo iluminado, que esta pensado para estar al aire libre"). Decíselo UNA sola vez y seguí pidiendo lo que falte (la foto y las medidas sirven igual para cotizarlo).
+- Si mandó una FOTO DEL LUGAR y se ve CLARAMENTE que no hay nada que lo cubra, tomalo como techo="no"; si en la foto no se ve claro, preguntalo.
 - No sabe, no lo tiene definido, o ya se lo preguntaste y no te contestó → techo="no_sabe" y NO insistas.
 - Si es interior, o todavía no sabés si es exterior → es_exterior=false o techo="".
 VOCABULARIO: decí "corpóreo iluminado" o "cartel corpóreo con luz". NUNCA digas "retroiluminado" para hablar del corpóreo en general: retroiluminado es SOLO cuando la luz sale por detrás de la letra.
@@ -3238,8 +3239,9 @@ async function processPrecotizPilot(env) {
       continue;
     }
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
-    // Exterior sin techo → el bot recomendó corpóreo: etiqueta 🔠 Corpóreo para que el vendedor lo cotice así.
-    if (res.sugerir_corporeo) await corporeoTag(env, lead.phone, true);
+    // Exterior sin techo (lo recomendó el bot o ya lo había hablado un humano): etiqueta 🔠 Corpóreo para
+    // que el vendedor lo cotice como corpóreo.
+    if (res.sugerir_corporeo || res.techo === 'no') await corporeoTag(env, lead.phone, true);
     if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaTecho(res, msgs)) { // ya tiene lo necesario (foto+medidas; el int/ext lo dio o dijo que no sabe; si es exterior, ya se sabe si está cubierto) → handoff a Joaco
       // Si en este turno recomendó el corpóreo (contestó que no tiene techo), ese mensaje sale antes de
       // cerrar: al completar no se envía nada más y la recomendación se perdía.
@@ -3407,7 +3409,7 @@ async function processPrecotizPilot(env) {
     await precotizTag(env, phone, true); // etiqueta VISIBLE (no oculta) — Joaco+Gaspar monitorean
 
     const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
-    if (res.sugerir_corporeo) await corporeoTag(env, phone, true); // exterior sin techo → 🔠 Corpóreo
+    if (res.sugerir_corporeo || res.techo === 'no') await corporeoTag(env, phone, true); // exterior sin techo → 🔠 Corpóreo
     if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaTecho(res, msgs)) { // ya tiene lo necesario (foto+medidas; si es exterior, ya se sabe si está cubierto) → completo
       if (res.sugerir_corporeo && msgs.length && modo === 'auto') await precotizEmitir(env, phone, '', msgs, 'auto', nowIso);
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', completed_at=?, updated_at=? WHERE phone=?").bind(nowIso, nowIso, phone).run(); } catch (_) {}
