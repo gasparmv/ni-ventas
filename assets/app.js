@@ -2997,6 +2997,7 @@ function render() {
   // Toggle main--chat class for full-height layout
   const mainEl = document.getElementById('main');
   if (mainEl) mainEl.classList.toggle('main--chat', STATE.view === 'chat');
+  if (mainEl) mainEl.classList.toggle('main--logi', STATE.view === 'logistica'); // logística: tabla a todo el ancho
   // Lock entire app shell height when chat is active
   const appEl = mainEl && mainEl.closest('.app');
   if (appEl) {
@@ -4438,17 +4439,20 @@ function cortePaqInfo(g) {
   // tiene las 3 medidas (si no, Neyen veía "medido ✓" con los campos vacíos).
   const row = (STATE.cortePaquetes || []).find(x => x.tanda_id === tandaId && x.cliente_key === key) || null;
   const saved = row && Number(row.largo) > 0 && Number(row.ancho) > 0 && Number(row.alto) > 0 ? row : null;
-  return { tandaId, key, saved, est: corteEstimarPaqueteFront(g.items) };
+  return { tandaId, key, row, saved, est: corteEstimarPaqueteFront(g.items) };
 }
 function cortePaqMedidasHtml(g) {
-  const { tandaId, key, saved, est } = cortePaqInfo(g);
+  const { tandaId, key, row, saved, est } = cortePaqInfo(g);
   if (!tandaId) return '';
+  // Sin medidas, los bultos pueden venir de la tabla de logística (misma columna): se precargan esos y no 1 (si no,
+  // al guardar las medidas Neyen pisaba con 1 los bultos que cargó logística).
+  const bultosPrev = row && parseInt(row.bultos, 10) > 0 ? parseInt(row.bultos, 10) : 1;
   const d = (STATE.cortePaqDraft || {})[key] || {};
   const val = (f, def) => escapeHtml(String(d[f] != null ? d[f] : (saved && saved[f] != null ? saved[f] : (def != null ? def : ''))));
   const inp = (f, ph, w, def) => `<input data-paq-f="${f}" data-paq-k="${escapeHtml(key)}" value="${val(f, def)}" placeholder="${ph}" inputmode="decimal" style="width:${w}px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:4px 6px;color:var(--fg);font-size:12px">`;
   return `<div style="margin-top:8px;padding:8px 10px;border:1px dashed var(--border);border-radius:8px;font-size:12px">
     <div style="color:var(--fg-mute);margin-bottom:6px">📏 Paquete para logística ${saved ? '<b style="color:#22c55e">· medido ✓</b>' : `· estimado ≈ ${est.largo}×${est.ancho}×${est.alto} cm · ${_fmtKg(est.peso)} kg — medilo al embalar`}</div>
-    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${inp('largo', 'largo', 58)}×${inp('ancho', 'ancho', 58)}×${inp('alto', 'alto', 52)} cm ${inp('peso', 'kg', 52)} kg ${inp('bultos', '1', 40, saved ? null : 1)} bulto(s)
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${inp('largo', 'largo', 58)}×${inp('ancho', 'ancho', 58)}×${inp('alto', 'alto', 52)} cm ${inp('peso', 'kg', 52)} kg ${inp('bultos', '1', 40, saved ? null : bultosPrev)} bulto(s)
       <button class="btn ghost" data-paq-ok="${escapeHtml(key)}" data-paq-t="${tandaId}" style="font-size:11px;padding:4px 10px">Guardar medidas</button></div>
   </div>`;
 }
@@ -4484,6 +4488,7 @@ function corteLogiLineaHtml(row) {
   const ce = row.contacto_estado || '', partes = [];
   if (ce === 'escrito' || (ce === 'listo' && !row.envio_pagado)) partes.push(('escrito ' + (row.contacto_at ? logiHora(row.contacto_at) : '')).trim());
   else if (ce === 'no_contesta') partes.push('no contesta');
+  else if (ce === 'confirmado') partes.push('confirmado'); // estado nuevo de la tabla de logística
   else if (!row.envio_pagado) partes.push('sin escribir');
   if (row.envio_pagado) partes.push('envío pagado');
   if (row.cargado || row.despachado_at) partes.push('enviado');
@@ -4670,28 +4675,54 @@ async function cortePaqGuardar(key, tandaId, btn) {
     } else { niToast((r && (r.motivo || r.error)) || 'No se pudo guardar', { error: true }); if (btn) btn.disabled = false; }
   } catch (_) { toast('Error de red'); if (btn) btn.disabled = false; }
 }
-// ===== LOGÍSTICA v1: pantalla SIMPLE de 2 modos (decisión de Gaspar: rápida, pocos botones grandes con texto) =====
-// Lunes · Contactar: una fila por paquete. [WhatsApp] abre el chat con el mensaje armado según el caso (en la compu
-// siempre en la MISMA pestaña 'wa_logistica') y marca "escrito"; [Más] despliega dirección, No contesta / Envío pagado,
-// nota con autoguardado, Avisar a Neon e historial. Martes · Cargar camión: tocar la fila = cargado (el server vuelve a
-// chequear pedido y envío pagados → 409 con el motivo). Contrato: GET /admin/logistica/paquetes y
-// POST /admin/logistica/{contacto, marcar, resumen}. Logística NO ve montos.
-const LOGI_OP_KEY = 'niventas.logiOperador', LOGI_MODO_KEY = 'niventas.logiModo';
+// ===== LOGÍSTICA v2: TABLA tipo planilla (Siempre a Tiempo trabaja en la compu, con Excel) =====
+// Una sola pantalla: filtros con contador + buscador + tabla con encabezado fijo y las 2 primeras columnas fijas. Se edita
+// como en Excel: click (o escribir con la celda elegida) = editar; Enter guarda y baja, Tab a la derecha (Shift+Tab a la
+// izquierda), Esc cancela, flechas mueven. Cada celda se guarda sola (POST /admin/logistica/celda, de a uno por fila así las
+// respuestas llegan en orden); si falla queda en rojo y se reintenta al volver a editarla. Selects y casillas guardan al
+// cambiar. "Enviado" lo vuelve a chequear el server (409 con el motivo: nunca sale con deuda ni sin el envío pagado).
+// Contrato: GET /admin/logistica/paquetes y POST /admin/logistica/{celda, contacto (solo 'avisar'), resumen}.
+// Logística NO ve montos del pedido (sí el costo del envío, que es suyo).
+const LOGI_OP_KEY = 'niventas.logiOperador';
 const LOGI_ACC_TXT = { escrito: 'Escribió por WhatsApp', no_contesta: 'No contesta', envio_pagado: 'Envío pagado', deshacer_envio: 'Deshizo envío pagado', avisar: 'Aviso a Neon', nota: 'Nota', cargado: 'Enviado', descargado: 'Sacado de enviados', resumen: 'Terminó de enviar' };
+const LOGI_TRANSPORTES = ['Correo Argentino', 'OCA', 'Buspack', 'Flecha Cargo', 'Integral Pack', 'Via Cargo']; // Andreani no (no se trabaja con ellos)
+const LOGI_CONTACTO = [['', 'Sin escribir'], ['escrito', 'Escrito'], ['no_contesta', 'No contesta'], ['confirmado', 'Confirmado']];
+const LOGI_PROVINCIAS = ['Buenos Aires', 'CABA', 'Catamarca', 'Chaco', 'Chubut', 'Córdoba', 'Corrientes', 'Entre Ríos', 'Formosa', 'Jujuy', 'La Pampa', 'La Rioja', 'Mendoza', 'Misiones', 'Neuquén', 'Río Negro', 'Salta', 'San Juan', 'San Luis', 'Santa Cruz', 'Santa Fe', 'Santiago del Estero', 'Tierra del Fuego', 'Tucumán'];
+const LOGI_PROV_ALIAS = { 'capital federal': 'CABA', 'capital': 'CABA', 'cap fed': 'CABA', 'ciudad autonoma de buenos aires': 'CABA', 'ciudad de buenos aires': 'CABA', 'bs as': 'Buenos Aires', 'bsas': 'Buenos Aires', 'pba': 'Buenos Aires', 'provincia de buenos aires': 'Buenos Aires', 'pcia de buenos aires': 'Buenos Aires', 'pcia bs as': 'Buenos Aires', 'prov bs as': 'Buenos Aires', 'tdf': 'Tierra del Fuego', 'sgo del estero': 'Santiago del Estero', 'stgo del estero': 'Santiago del Estero' };
+const LOGI_DIR = ['recibe', 'dni', 'calle', 'localidad', 'provincia', 'cp', 'tel_alt', 'obs'];
+const LOGI_IMPRESCINDIBLES = ['calle', 'localidad', 'provincia', 'cp'];
+// Columnas en el orden de la tabla (y del Excel). ed: 'txt' (se escribe) | 'sel' | 'chk'. stk: columna fija (N° mide 46 px:
+// app.css corre la 2da fija a left:46px). nom: cómo se nombra el campo en los avisos.
+const LOGI_COLS = [
+  { id: 'num', tit: 'N°', w: 46, g: 'cli', stk: 'stk1' },
+  { id: 'cliente', tit: 'Cliente', w: 186, g: 'cli', stk: 'stk2' },
+  { id: 'pedido', tit: 'Pedido', w: 86, g: 'cli', ayuda: 'Si el cliente pagó el pedido de corte. Con deuda no se puede enviar' },
+  { id: 'recibe', tit: 'Recibe', w: 150, g: 'dir', ed: 'txt', max: 120, nom: 'quién recibe' },
+  { id: 'dni', tit: 'DNI', w: 96, g: 'dir', ed: 'txt', max: 14, num: true, nom: 'el DNI' },
+  { id: 'calle', tit: 'Calle y número', w: 236, g: 'dir', ed: 'txt', max: 120, nom: 'la calle' },
+  { id: 'localidad', tit: 'Localidad', w: 140, g: 'dir', ed: 'txt', max: 120, nom: 'la localidad' },
+  { id: 'provincia', tit: 'Provincia', w: 126, g: 'dir', ed: 'txt', max: 60, list: 'logi-provincias', nom: 'la provincia' },
+  { id: 'cp', tit: 'CP', w: 72, g: 'dir', ed: 'txt', max: 10, nom: 'el CP' },
+  { id: 'bultos', tit: 'Bultos', w: 62, g: 'paq', ed: 'txt', max: 2, num: true, nom: 'los bultos' },
+  { id: 'medidas', tit: 'Medidas cm', w: 124, g: 'paq', ayuda: 'Largo × ancho × alto. "est." = estimado: Neyen lo mide al embalar' },
+  { id: 'peso', tit: 'Peso kg', w: 84, g: 'paq', ayuda: '"est." = estimado: Neyen lo pesa al embalar' },
+  { id: 'contacto_estado', tit: 'Contacto', w: 130, g: 'env', ed: 'sel', nom: 'el contacto' },
+  { id: 'transporte', tit: 'Transporte', w: 160, g: 'env', ed: 'sel', nom: 'el transporte', ayuda: 'En gris: sugerido (el de la última vez con este cliente). Confirmalo o elegí otro' },
+  { id: 'envio_costo', tit: 'Costo $', w: 96, g: 'env', ed: 'txt', max: 14, num: true, nom: 'el costo' },
+  { id: 'envio_pagado', tit: 'Envío pagado', w: 78, g: 'env', ed: 'chk', nom: 'envío pagado', ayuda: 'Marcalo cuando el cliente te pague el envío' },
+  { id: 'seguimiento', tit: 'Guía / seguimiento', w: 156, g: 'env', ed: 'txt', max: 80, nom: 'la guía' },
+  { id: 'enviado', tit: 'Enviado', w: 72, g: 'env', ed: 'chk', nom: 'enviado', ayuda: 'Marcalo cuando lo subas al transporte. Con deuda o sin el envío pagado no deja' },
+  { id: 'nota', tit: 'Nota', w: 230, g: 'env', ed: 'txt', max: 300, nom: 'la nota' },
+];
+const LOGI_COL = Object.fromEntries(LOGI_COLS.map(c => [c.id, c]));
+const LOGI_ANCHO = LOGI_COLS.reduce((s, c) => s + c.w, 0);
+const LOGI_GRUPOS = [['cli', 'Cliente'], ['dir', 'Dirección'], ['paq', 'Paquete'], ['env', 'Envío']];
+const LOGI_WA_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M12 2.2a9.8 9.8 0 0 0-8.4 14.9L2.2 21.8l4.8-1.3A9.8 9.8 0 1 0 12 2.2zm0 1.8a8 8 0 1 1-4.2 14.8l-.3-.2-2.8.8.8-2.7-.2-.3A8 8 0 0 1 12 4zM8.9 7.3c-.2 0-.5 0-.7.3-.3.3-.9.9-.9 2.2s.9 2.5 1 2.7c.1.2 1.8 2.9 4.5 3.9 2.2.9 2.7.7 3.2.7.5-.1 1.5-.6 1.7-1.2.2-.6.2-1.1.2-1.2-.1-.1-.2-.2-.5-.3l-1.7-.8c-.2-.1-.4-.1-.6.1l-.8 1c-.1.2-.3.2-.5.1-.3-.1-1.1-.4-2-1.3-.8-.7-1.3-1.5-1.4-1.8-.2-.3 0-.4.1-.5l.4-.5.3-.4v-.4l-.8-1.9c-.2-.5-.4-.5-.6-.5h-.5z"/></svg>';
+const LOGI_DOC_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" d="M4 1.5h5.5l3 3v10H4zM9.5 1.5v3h3M6 8h4.5M6 10.5h4.5"/></svg>';
 function logiLsGet(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
 function logiLsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (_) {} }
 // Operador: se pide una vez por dispositivo (localStorage; si el navegador no deja, queda en memoria). El admin no lo necesita.
 function logiOperador() { return logiLsGet(LOGI_OP_KEY) || STATE._logiOpMem || (isAdmin() ? 'Gaspar' : ''); }
-function logiHoyAR() { return new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10); }
-// Modo: martes (AR) → Cargar camión; cualquier otro día → Contactar. El cambio manual dura solo ese día.
-function logiModo() {
-  const hoy = logiHoyAR();
-  let o = null; try { o = JSON.parse(logiLsGet(LOGI_MODO_KEY) || 'null'); } catch (_) {}
-  if (!o || o.d !== hoy) o = STATE._logiModoMem || null;
-  if (o && o.d === hoy && (o.m === 'lunes' || o.m === 'martes')) return o.m;
-  return new Date(Date.now() - 3 * 3600e3).getUTCDay() === 2 ? 'martes' : 'lunes';
-}
-function logiSetModo(m) { const o = { d: logiHoyAR(), m }; STATE._logiModoMem = o; logiLsSet(LOGI_MODO_KEY, JSON.stringify(o)); }
 // "IvanPita" → "Ivan Pita"; "ivan pita" → "Ivan Pita".
 function logiNombre(s) {
   return String(s || '').replace(/([a-záéíóúñü])([A-ZÁÉÍÓÚÑÜ])/g, '$1 $2').replace(/\s+/g, ' ').trim().toLowerCase()
@@ -4709,6 +4740,8 @@ function logiHora(iso) {
   const h = d.toLocaleTimeString('es-AR', { ...tz, hour: 'numeric', minute: '2-digit', hourCycle: 'h23' });
   return d.toLocaleDateString('es-AR', tz) === new Date().toLocaleDateString('es-AR', tz) ? h : d.toLocaleDateString('es-AR', { ...tz, day: 'numeric', month: 'numeric' }) + ' ' + h;
 }
+// Minúsculas, sin tildes ni puntos, espacios simples (buscador, provincias, transportes).
+function logiNorm(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\./g, '').replace(/\s+/g, ' ').trim(); }
 // Tira de números sin etiqueta: es teléfono si tiene 10 dígitos o más (celular argentino con característica) y no viene
 // después de "Calle", "Ruta", "km", "N°", "CP"… Por cantidad de caracteres "Av Colón 1234 - 5000" (altura + CP) se
 // borraba entero y un celular pegado de 10 dígitos quedaba.
@@ -4727,28 +4760,86 @@ function logiDirPartes(txt) {
 const LOGI_RE_NOMBRE = /^(nombre|recibe|a nombre|destinatario)\b/i;
 // Dirección en una línea para el mensaje (sin la línea "Nombre: ..." de quien recibe; máx ~200 caracteres).
 function logiDirLinea(txt) { const ps = logiDirPartes(txt), sinNom = ps.filter(s => !LOGI_RE_NOMBRE.test(s)); const s = (sinNom.length ? sinNom : ps).join(', '); return s.length > 200 ? s.slice(0, 197).replace(/[\s,]+\S*$/, '') + '…' : s; }
-function logiDestino(p) { const ps = logiDirPartes(p && p.datos_envio); return ps.find(s => !LOGI_RE_NOMBRE.test(s)) || ps[0] || ''; }
+// Con 'sin_procesar' el server deja TODO el texto crudo en "calle" (y el resto vacío). Sigue sin separar mientras logística
+// no reemplace esa calle, aunque haya corregido otro campo (ej. solo el CP): si no, el mensaje le pedía al cliente la
+// localidad, la provincia y el DNI que su texto ya traía, y la fila contaba como "Falta dirección".
+function logiCalleCruda(p) {
+  const f = String(p.dir_fuente || p.datos_envio || '').replace(/\s+/g, ' ').trim().slice(0, 200).trim();
+  return !!f && String(logiValor(p, 'calle') || '').replace(/\s+/g, ' ').trim() === f;
+}
+function logiSinSeparar(p) { return !!p && p.dir_estado === 'sin_procesar' && (!p.dir_editada || logiCalleCruda(p)); }
+// ¿La dirección vino desglosada por el server (IA + correcciones)?
+function logiDirSeparada(p) { return !!(p && p.dir && typeof p.dir === 'object') && !logiSinSeparar(p); }
+// Dirección para el mensaje: la desglosada (con lo que corrigió logística); si no está separada, la línea limpia del texto.
+function logiDirTexto(p) {
+  if (logiDirSeparada(p)) {
+    const v = c => String(logiValor(p, c) || '').trim();
+    const prov = logiNorm(v('provincia')) === logiNorm(v('localidad')) ? '' : v('provincia'); // "CABA, CABA" → una vez
+    const s = [v('calle'), v('localidad'), prov, v('cp') ? 'CP ' + v('cp') : ''].filter(Boolean).join(', ');
+    if (s) return s.length > 200 ? s.slice(0, 197).replace(/[\s,]+\S*$/, '') + '…' : s;
+  }
+  if (p.falta_direccion && !p.dir_editada) return '';
+  let linea = logiDirLinea(p.dir_fuente || p.datos_envio);
+  if (!linea) return '';
+  // Sin separar pero con algo corregido a mano (ej. el CP): el CP corregido reemplaza al "CP xxxx" del texto y se suma lo
+  // que el texto del cliente no trae.
+  const cpEd = String(logiValor(p, 'cp') || '').trim();
+  if (cpEd) linea = linea.replace(/\b(?:c\.?\s*p\.?|c[oó]digo postal)\s*[:.\-]?\s*[a-z]?\d{4}[a-z]{0,3}\b/i, 'CP ' + cpEd);
+  const n = logiNorm(linea);
+  const extra = [['localidad', ''], ['provincia', ''], ['cp', 'CP ']].map(([c, pre]) => { const v = String(logiValor(p, c) || '').trim(); return v && !n.includes(logiNorm(v)) ? pre + v : ''; }).filter(Boolean);
+  return [linea].concat(extra).join(', ');
+}
+// Lo que falta para poder mandarlo (para el mensaje): imprescindibles vacíos + nombre/DNI de quien recibe.
+function logiFaltanMsg(p) {
+  if (!logiDirSeparada(p)) return [];
+  const v = c => String(logiValor(p, c) || '').trim();
+  const nom = { calle: 'la calle y el número', localidad: 'la localidad', provincia: 'la provincia', cp: 'el código postal' };
+  const f = LOGI_IMPRESCINDIBLES.filter(c => !v(c)).map(c => nom[c]);
+  if (!v('recibe') && !v('dni')) f.push('los datos de quien recibe (nombre y DNI)'); else if (!v('recibe')) f.push('el nombre de quien recibe'); else if (!v('dni')) f.push('el DNI de quien recibe');
+  return f;
+}
+function logiListaY(a) { return a.length > 1 ? a.slice(0, -1).join(', ') + ' y ' + a[a.length - 1] : (a[0] || ''); }
+// "El envío por OCA sale $12.500 y se abona antes del despacho." (solo si ya está cotizado).
+function logiCostoFrase(p) {
+  const c = parseInt(logiValor(p, 'envio_costo'), 10); if (!(c > 0)) return '';
+  const tr = logiSugerido(p) ? '' : String(logiValor(p, 'transporte') || '').trim();
+  return `El envío${tr ? ' por ' + tr : ''} sale $${c.toLocaleString('es-AR')} y se abona antes del despacho.`;
+}
 // Mensaje armado (lo manda logística desde SU WhatsApp). Natural, sin emojis, sin signos de apertura.
 function logiMensaje(p) {
   const n = logiPrimerNombre(p.cliente);
-  const hola = `Hola${n ? ' ' + n : ''}, como estás? Te escribo de Siempre a Tiempo, la logística de Neon Infinito.`;
-  const dir = p.falta_direccion ? '' : logiDirLinea(p.datos_envio);
+  const saludo = `Hola${n ? ' ' + n : ''}, como estás?`;
+  // Ya tiene guía: se le pasa el seguimiento.
+  const seg = String(logiValor(p, 'seguimiento') || '').trim();
+  if (seg && p.pedido_pagado !== false) {
+    const tr = String(logiValor(p, 'transporte') || '').trim();
+    return `${saludo} Te escribo de Siempre a Tiempo. Tu pedido de Neon Infinito salió${tr ? ' por ' + tr : ''}. El número de seguimiento es ${seg}.`;
+  }
+  const hola = `${saludo} Te escribo de Siempre a Tiempo, la logística de Neon Infinito.`;
+  const dir = logiDirTexto(p);
   // No se pudo leer la planilla de direcciones (ltv_error) y este paquete vino sin dirección: NO se sabe si falta, así que
   // no se le pide (antes se le pedía la dirección completa a todos, también a los que ya la habían dado). Va sin esa parte.
   const dirDesconocida = !dir && !p.falta_direccion && logiDirNoDisponible(p);
   const pedirDir = 'Para mandarlo necesitamos la dirección completa: calle y número, localidad, provincia y código postal, y nombre y DNI de quien recibe.';
+  const faltan = dir ? logiFaltanMsg(p) : [];
+  const pedirFalta = faltan.length ? `Para mandarlo nos falta ${logiListaY(faltan)}.` : '';
   const lineaDir = frase => dir ? frase : (dirDesconocida ? '' : pedirDir);
+  const pagado = !!logiValor(p, 'envio_pagado');
+  const costo = pagado ? '' : logiCostoFrase(p);
   const armar = partes => partes.filter(Boolean).join('\n');
   // Impago: el lunes logística puede escribir ANTES de que Neon mande el cobro (o a alguien al que no le llegó): el cliente
   // todavía no sabe el monto y logística no lo ve. Por eso se aclara que el detalle se lo pasa Neon Infinito.
-  if (p.pedido_pagado === false) return armar([hola, 'Ya tenemos tu pedido de corte, pero todavía nos figura pendiente de pago. Si no te llegó el detalle, te lo pasa Neon Infinito. Apenas esté abonado coordinamos el envío.', lineaDir(`La dirección que tenemos es: ${dir}. Está bien?`)]);
-  if (p.entrega !== 'envio') return armar([hola, 'Ya tenemos tu pedido de corte. Lo pasás a retirar por el taller o preferís que te lo enviemos? Si es por envío, sale el martes.', lineaDir(`La dirección que tenemos es: ${dir}. Está bien así?`), 'El costo del envío se abona antes del despacho.']);
-  if (!dir) return armar([hola, 'Ya tenemos tu pedido de corte para despacharlo el martes.' + (dirDesconocida ? '' : ' ' + pedirDir), (dirDesconocida ? 'Te' : 'También te') + ' pasamos el costo del envío, que se abona antes del despacho.']);
-  return armar([hola, `Ya tenemos tu pedido de corte para despacharlo el martes. La dirección que tenemos es: ${dir}. Está bien así?`, 'Te pasamos el costo del envío, que se abona antes del despacho.']);
+  if (p.pedido_pagado === false) return armar([hola, 'Ya tenemos tu pedido de corte, pero todavía nos figura pendiente de pago. Si no te llegó el detalle, te lo pasa Neon Infinito. Apenas esté abonado coordinamos el envío.', lineaDir(`La dirección que tenemos es: ${dir}. Está bien?`), pedirFalta]);
+  if (p.entrega !== 'envio') return armar([hola, 'Ya tenemos tu pedido de corte. Lo pasás a retirar por el taller o preferís que te lo enviemos? Si es por envío, sale el martes.', lineaDir(`La dirección que tenemos es: ${dir}. Está bien así?`), pedirFalta, costo || 'El costo del envío se abona antes del despacho.']);
+  if (!dir) return armar([hola, 'Ya tenemos tu pedido de corte para despacharlo el martes.' + (dirDesconocida ? '' : ' ' + pedirDir), pagado ? '' : (costo || ((dirDesconocida ? 'Te' : 'También te') + ' pasamos el costo del envío, que se abona antes del despacho.'))]);
+  return armar([hola, `Ya tenemos tu pedido de corte para despacharlo el martes. La dirección que tenemos es: ${dir}. Está bien así?`, pedirFalta, pagado ? '' : (costo || 'Te pasamos el costo del envío, que se abona antes del despacho.')]);
 }
 // Sin dirección porque no se pudo leer la planilla (no porque el cliente no la haya dado): el server manda ltv_error y el
-// paquete sin datos_envio ni falta_direccion.
-function logiDirNoDisponible(p) { return !!(STATE.logi && STATE.logi.ltv_error) && !p.falta_direccion && !String(p.datos_envio || '').trim(); }
+// paquete sin texto, sin falta_direccion y sin nada desglosado ni corregido.
+function logiDirNoDisponible(p) {
+  return !!(STATE.logi && STATE.logi.ltv_error) && !p.falta_direccion && !p.dir_editada && !String(p.datos_envio || p.dir_fuente || '').trim()
+    && !LOGI_DIR.some(c => p.dir && String(p.dir[c] == null ? '' : p.dir[c]).trim());
+}
 // Toast que sobrevive a render() (vive en <body>, no dentro de #app, que render() recrea) y admite "Deshacer".
 function niToast(msg, opts) {
   opts = opts || {};
@@ -4765,44 +4856,712 @@ function niToast(msg, opts) {
 }
 function logiPaq(key) { const L = STATE.logi; return L && Array.isArray(L.paquetes) ? (L.paquetes.find(x => x.key === key) || null) : null; }
 function logiCargado(p) { return !!(p && (p.cargado || p.despachado)); }
-// Grupo del modo lunes: Por hacer (sin escribir o no contesta) · Esperando (escrito, sin pagar envío) · Listos (envío pagado).
-function logiGrupo(p) { if (p.despachado || p.envio_pagado) return 'listos'; if (p.contacto_estado === 'escrito') return 'esperando'; return 'hacer'; }
-function logiEstadoTxt(p) {
-  if (p.despachado) return 'Despachado ✓';
-  if (p.envio_pagado) return 'Envío pagado ✓';
-  if (p.contacto_estado === 'no_contesta') return 'No contesta ×' + (p.intentos || 1);
-  if (p.contacto_estado === 'escrito') return ('Escrito ' + logiHora(p.contacto_at)).trim();
-  return 'Sin escribir';
-}
-function logiEstadoChip(p) {
-  const c = (p.despachado || p.envio_pagado) ? '#22c55e' : (p.contacto_estado === 'no_contesta' ? '#f59e0b' : (p.contacto_estado === 'escrito' ? '#38bdf8' : '#94a3b8'));
-  return corteChip(logiEstadoTxt(p), c);
-}
 function logiMotivo(p) { return p.bloqueo || (p.entrega !== 'envio' ? 'Entrega sin definir' : (p.pedido_pagado === false ? 'Pedido impago' : (!p.envio_pagado ? 'Falta pagar el envío' : 'Revisar con Neon'))); }
 function logiHaceTxt() { const a = STATE.logiLoadedAt; if (!a) return ''; const m = Math.floor((Date.now() - a) / 60000); return 'actualizado ' + (m < 1 ? 'recién' : 'hace ' + m + ' min'); }
-function logiSig(L) { if (!L || L.error) return ''; try { return JSON.stringify([L.tanda, L.tandas, L.retiran, L.ltv_error, L.paquetes]); } catch (_) { return String(Date.now()); } }
-function logiTipeando() { const ae = document.activeElement; return !!(ae && ae.matches && ae.matches('[data-logi-nota], #logi-caja, #logi-op')); }
+function logiSig(L) { if (!L || L.error) return ''; try { return JSON.stringify([L.tanda, L.tandas, L.retiran, L.ltv_error, L.transportes, L.paquetes]); } catch (_) { return String(Date.now()); } }
 function logiErrTxt(j, status) {
   const cod = { espera: 'Ya avisaste hace un momento', no_despachar: 'No se puede enviar', impago: 'Falta el pago: avisale a Gaspar', red: 'Error de red' };
   return (j && j.motivo) || (j && cod[j.error]) || (j && j.error) || (status ? 'No se pudo guardar (' + status + ')' : 'Error de red');
 }
-// Re-render que conserva el scroll y el foco/cursor (nota, N° de caja). Lo desplegado y los borradores viven en STATE.
+// --- Valores de celda ---
+// STATE._logiCel['key|campo'] = {st:'saving'|'error', val, msg?, status?}: lo que se está guardando o lo que no se pudo
+// guardar. Lo que se ve = eso si existe; si no, lo que dijo el server. Así una respuesta de otra celda de la misma fila
+// nunca pisa lo que se escribió y todavía no volvió.
+function logiCel(key, col) { return (STATE._logiCel || {})[key + '|' + col] || null; }
+function logiValorServidor(p, col) {
+  if (LOGI_DIR.includes(col)) {
+    if (p.dir && typeof p.dir === 'object') return String(p.dir[col] == null ? '' : p.dir[col]);
+    return col === 'calle' && !p.falta_direccion ? String(p.dir_fuente || p.datos_envio || '').replace(/\s+/g, ' ').trim() : ''; // server sin dirección desglosada
+  }
+  switch (col) {
+    case 'bultos': return Math.max(1, parseInt((p.paquete && p.paquete.bultos) || p.bultos, 10) || 1);
+    case 'contacto_estado': return p.contacto_estado === 'listo' ? 'confirmado' : String(p.contacto_estado || ''); // 'listo' (viejo: envío pagado) = confirmado
+    case 'transporte': return p.transporte_sugerido ? '' : String(p.transporte || ''); // el sugerido no está confirmado
+    case 'envio_costo': return (p.envio_costo == null || p.envio_costo === '') ? '' : (parseInt(p.envio_costo, 10) || 0);
+    case 'envio_pagado': return !!p.envio_pagado;
+    case 'enviado': return logiCargado(p);
+    case 'seguimiento': return String(p.seguimiento || '');
+    case 'nota': return String(p.nota || '');
+  }
+  return '';
+}
+function logiValor(p, col) {
+  const st = logiCel(p.key, col);
+  if (st) return st.val;
+  if (col === 'transporte') return String(p.transporte || ''); // confirmado o sugerido
+  return logiValorServidor(p, col);
+}
+function logiSugerido(p) { return !logiCel(p.key, 'transporte') && !!p.transporte_sugerido && !!p.transporte; }
+function logiEnv(p) { return !!logiValor(p, 'enviado'); }
+// Imprescindibles vacíos (fondo rojizo). Sin dirección desglosada del server: solo si falta la dirección entera.
+function logiFaltan(p) {
+  if (!p.dir || typeof p.dir !== 'object') return p.falta_direccion ? LOGI_IMPRESCINDIBLES.slice() : [];
+  if (logiDirNoDisponible(p)) return [];
+  // Sin separar (la IA no lo procesó todavía): el cliente SÍ dio la dirección, está entera en "calle". No es "falta".
+  if (logiSinSeparar(p) && logiCalleCruda(p)) return [];
+  return LOGI_IMPRESCINDIBLES.filter(c => !String(logiValor(p, c) || '').trim());
+}
+// Lo que viene del server (sin respuesta con paquete): se aplica a mano para que no vuelva el valor viejo.
+function logiSetLocal(p, col, v) {
+  if (LOGI_DIR.includes(col)) { p.dir = Object.assign({}, p.dir || {}, { [col]: v }); p.dir_editada = true; }
+  else if (col === 'bultos') p.paquete = Object.assign({}, p.paquete || {}, { bultos: v });
+  else if (col === 'transporte') { p.transporte = v; p.transporte_sugerido = false; }
+  else if (col === 'envio_costo') p.envio_costo = v === '' ? null : v;
+  else if (col === 'envio_pagado') p.envio_pagado = !!v;
+  else if (col === 'enviado') { p.cargado = !!v; if (!v) p.despachado = false; }
+  else p[col] = v;
+}
+function logiProvincia(s) {
+  const n = logiNorm(s).replace(/,/g, ' ').replace(/\s+/g, ' ').trim(); if (!n) return '';
+  if (LOGI_PROV_ALIAS[n]) return LOGI_PROV_ALIAS[n];
+  const ex = LOGI_PROVINCIAS.find(x => logiNorm(x) === n); if (ex) return ex;
+  if (n.length >= 3) { const pre = LOGI_PROVINCIAS.filter(x => logiNorm(x).startsWith(n)); if (pre.length === 1) return pre[0]; }
+  return String(s).trim();
+}
+// Lista del select de Transporte: la que manda el server (los de base + los que agregó logística a mano); si no vino, los
+// de base.
+function logiTransportes() {
+  const L = STATE.logi, t = L && Array.isArray(L.transportes) ? L.transportes.filter(x => typeof x === 'string' && x.trim()) : [];
+  return t.length ? t : LOGI_TRANSPORTES;
+}
+function logiTransporteNorm(s) {
+  const n = logiNorm(s).replace(/\s+/g, ''); if (!n) return '';
+  const lista = logiTransportes();
+  const ex = lista.find(x => logiNorm(x).replace(/\s+/g, '') === n); if (ex) return ex;
+  // Prefijo único ("integ" → "Integral Pack"): solo contra los de base; los agregados a mano solo por coincidencia exacta.
+  if (n.length >= 3) { const pre = LOGI_TRANSPORTES.filter(x => logiNorm(x).replace(/\s+/g, '').startsWith(n)); if (pre.length === 1) return pre[0]; }
+  return String(s).replace(/\s+/g, ' ').trim();
+}
+// Un transporte nuevo que se guardó bien entra en la lista para todas las filas (sin esperar al próximo refresco): se suma
+// a STATE.logi.transportes, a los select de la tabla (antes de "Agregar otro") y a las sugerencias del editor.
+function logiTransporteSumar(v) {
+  const L = STATE.logi, s = String(v || '').trim(); if (!L || !s) return;
+  const n = logiNorm(s).replace(/\s+/g, '');
+  if (logiTransportes().some(x => logiNorm(x).replace(/\s+/g, '') === n)) return;
+  L.transportes = logiTransportes().concat([s]);
+  document.querySelectorAll('.logi-t td[data-c="transporte"] select').forEach(sel => {
+    if ([...sel.options].some(o => o.value === s)) return;
+    const o = document.createElement('option'); o.value = s; o.textContent = s;
+    sel.insertBefore(o, sel.querySelector('option[value="__otro"]'));
+  });
+  const dl = document.getElementById('logi-transportes');
+  if (dl) { const o = document.createElement('option'); o.value = s; dl.appendChild(o); }
+}
+// "CP", "C.P.", "CPA", "Código postal" al principio (con ":" o "-"). "CP A4400ABC" (CPA de Salta) no pierde la A.
+const LOGI_RE_CP_ROTULO = /^\s*(?:c\.?\s*p\.?\s*a(?![a-z0-9])\.?|c\.?\s*p\.?(?=[\s:.\-]|\d|$)|c[oó]d(?:igo)?\.?\s*postal)\s*[:.\-]?\s*/i;
+// Texto tipeado → valor para el server (o {ok:false, msg} si no sirve).
+function logiNormalizar(col, raw) {
+  const s = String(raw == null ? '' : raw).replace(/\s+/g, ' ').trim();
+  const mal = msg => ({ ok: false, msg });
+  if (col === 'dni') { const d = s.replace(/\D/g, ''); if (s && !d) return mal('El DNI va solo con números'); if (d.length > 11) return mal('El DNI tiene hasta 11 números'); return { ok: true, valor: d }; }
+  // CP: sin el rótulo ("CP 1636", "C.P.: X5000ABC", "Código postal 1636"), que si no quedaba pegado al código (CP1636).
+  if (col === 'cp') { const v = s.replace(LOGI_RE_CP_ROTULO, '').toUpperCase().replace(/[^A-Z0-9]/g, ''); return v.length > 10 ? mal('El CP tiene hasta 10 caracteres') : { ok: true, valor: v }; }
+  if (col === 'provincia') { const v = logiProvincia(s); return v.length > 120 ? mal('Hasta 120 letras') : { ok: true, valor: v }; }
+  if (col === 'transporte') { const v = logiTransporteNorm(s); return v.length > 40 ? mal('El transporte puede tener hasta 40 letras') : { ok: true, valor: v }; }
+  if (col === 'envio_costo') {
+    if (!s) return { ok: true, valor: '' };
+    // "$ 12.500", "12500", "12.500,50" → 12500 (el punto de miles se ignora; los centavos se descartan).
+    const t = s.replace(/[^\d.,]/g, '').split(',')[0].replace(/\.(\d{1,2})$/, ''), d = t.replace(/\D/g, '');
+    if (!d) return mal('El costo va en números (ej: 12500)');
+    const n = parseInt(d, 10); return n > 10000000 ? mal('El costo es demasiado alto') : { ok: true, valor: n };
+  }
+  if (col === 'bultos') {
+    if (!s) return { ok: true, valor: 1 };
+    const n = parseInt(s, 10); return (/^\d+$/.test(s) && n >= 1 && n <= 20) ? { ok: true, valor: n } : mal('Bultos: un número del 1 al 20');
+  }
+  if (col === 'nota') return s.length > 300 ? mal('La nota puede tener hasta 300 letras') : { ok: true, valor: s };
+  if (col === 'seguimiento') return s.length > 80 ? mal('La guía puede tener hasta 80 caracteres') : { ok: true, valor: s };
+  return s.length > 120 ? mal('Hasta 120 letras') : { ok: true, valor: s };
+}
+const logiIgual = (a, b) => String(a == null ? '' : a) === String(b == null ? '' : b);
+// Texto de una celda (copiar, Excel, imprimir).
+function logiTextoCelda(p, col) {
+  const v = logiValor(p, col), pq = p.paquete || null, est = pq && pq.fuente === 'estimado' ? ' est.' : '';
+  switch (col) {
+    case 'num': return logiN(p.numero);
+    case 'cliente': return logiNombre(p.cliente) || 'Cliente';
+    case 'pedido': return (p.pedido_pagado === false ? 'Impago' : 'Pagado') + (p.entrega !== 'envio' ? ' · sin definir' : '');
+    case 'medidas': return pq && pq.largo ? `${pq.largo} x ${pq.ancho} x ${pq.alto}${est}` : '';
+    case 'peso': return pq && pq.peso ? _fmtKg(pq.peso) + est : '';
+    case 'contacto_estado': { const o = LOGI_CONTACTO.find(x => x[0] === v); return o ? o[1] : String(v || ''); }
+    case 'transporte': return v ? v + (logiSugerido(p) ? ' (sugerido)' : '') : '';
+    case 'envio_costo': return v === '' || v == null ? '' : String(v);
+    case 'envio_pagado': case 'enviado': return v ? 'Sí' : 'No';
+  }
+  return String(v == null ? '' : v);
+}
+// --- Filtros, buscador y totales ---
+const LOGI_FILTROS = [
+  ['todos', 'Todos', () => true],
+  ['falta_dir', 'Falta dirección', p => !logiEnv(p) && logiFaltan(p).length > 0],
+  ['impago', 'Pedido impago', p => !logiEnv(p) && p.pedido_pagado === false],
+  ['sin_transporte', 'Sin transporte', p => !logiEnv(p) && (!logiValor(p, 'transporte') || logiSugerido(p))],
+  ['sin_cotizar', 'Sin cotizar', p => !logiEnv(p) && logiValor(p, 'envio_costo') === ''],
+  ['envio_sin_pagar', 'Envío sin pagar', p => !logiEnv(p) && !logiValor(p, 'envio_pagado')],
+  ['listos', 'Listos para enviar', p => !logiEnv(p) && !!p.listo],
+  ['enviados', 'Enviados', p => logiEnv(p)],
+];
+const LOGI_FILTRO = Object.fromEntries(LOGI_FILTROS.map(f => [f[0], f[2]]));
+function logiFiltroAct() { return LOGI_FILTRO[STATE.logiFiltro] ? STATE.logiFiltro : 'todos'; }
+function logiPaquetes() {
+  const L = STATE.logi;
+  return (L && Array.isArray(L.paquetes) ? L.paquetes : []).filter(p => p && p.key).slice()
+    .sort((a, b) => (parseInt(a.numero, 10) || 999) - (parseInt(b.numero, 10) || 999) || String(a.cliente || '').localeCompare(String(b.cliente || ''), 'es'));
+}
+// "7" o "07" → el N° 7; 4+ dígitos → teléfono / DNI / CP; texto → nombre, quien recibe, dirección, transporte, guía.
+function logiBusca(p, q) {
+  if (!q) return true;
+  if (/^\d{1,3}$/.test(q)) return (parseInt(p.numero, 10) || -1) === parseInt(q, 10);
+  const dig = q.replace(/\D/g, '');
+  if (dig.length >= 4 && /^[\d\s+()-]+$/.test(q)) return [p.telefono, logiValor(p, 'dni'), logiValor(p, 'cp'), logiValor(p, 'tel_alt')].some(x => String(x || '').replace(/\D/g, '').includes(dig));
+  const hay = logiNorm([logiNombre(p.cliente), p.cliente, logiValor(p, 'recibe'), logiValor(p, 'calle'), logiValor(p, 'localidad'), logiValor(p, 'provincia'), logiValor(p, 'cp'), logiValor(p, 'transporte'), logiValor(p, 'seguimiento')].join(' | '));
+  return q.split(' ').every(w => hay.includes(w));
+}
+// Las filas que se tocaron con un filtro puesto siguen a la vista hasta cambiar de filtro / búsqueda / semana (si no, la
+// fila desaparecería debajo del cursor al confirmar el transporte en "Sin transporte").
+function logiVisibles(paq) {
+  const f = LOGI_FILTRO[logiFiltroAct()], q = logiNorm(STATE.logiQ), keep = STATE._logiKeep || {};
+  return paq.filter(p => logiBusca(p, q) && (f(p) || !!keep[p.key]));
+}
+function logiChipsHtml(paq) {
+  const act = logiFiltroAct();
+  return LOGI_FILTROS.map(([id, lab, f]) => { const n = paq.filter(f).length; return `<button type="button" class="logi-chip${id === act ? ' on' : ''}${!n && id !== 'todos' ? ' cero' : ''}" data-logi-filtro="${id}">${lab}<b>${n}</b></button>`; }).join('');
+}
+function logiTotalesTxt(paq) {
+  const pl = (n, s, p) => n + ' ' + (n === 1 ? s : p), ret = parseInt((STATE.logi || {}).retiran, 10) || 0;
+  const env = paq.filter(logiEnv).length, listos = paq.filter(p => !logiEnv(p) && p.listo).length, vis = logiVisibles(paq).length;
+  return [pl(paq.length, 'envío', 'envíos'), pl(ret, 'retira en el taller', 'retiran en el taller'), pl(listos, 'listo para enviar', 'listos para enviar'), pl(env, 'enviado', 'enviados')].join(' · ') + (vis !== paq.length ? ' · mostrando ' + vis : '');
+}
+// --- Tabla ---
+function logiFilaCls(p) {
+  if (logiEnv(p)) return 'r-enviado';
+  if (p.pedido_pagado === false) return 'r-impago';
+  if (p.entrega !== 'envio') return 'r-sindef';
+  if (p.listo) return 'r-listo';
+  return '';
+}
+function logiTd(p, c) {
+  const st = logiCel(p.key, c.id), cls = ['c-' + c.id];
+  let inner = '', title = '';
+  if (c.stk) cls.push(c.stk);
+  if (c.ed) cls.push('ed');
+  if (STATE.logiSel && STATE.logiSel.key === p.key && STATE.logiSel.col === c.id) cls.push('sel');
+  const txt = () => { const v = String(logiValor(p, c.id) == null ? '' : logiValor(p, c.id)); if (v.length > 14) title = v; return escapeHtml(v); };
+  switch (c.id) {
+    case 'num':
+      inner = `<b>${escapeHtml(logiN(p.numero))}</b>`;
+      if (p.arrastre) title = 'Viene de la semana del ' + logiFechaCorteDDMM(p.arrastre);
+      break;
+    case 'cliente': {
+      const tel = String(p.telefono || '').replace(/\D/g, ''), nom = logiNombre(p.cliente) || 'Cliente';
+      const arr = p.arrastre ? logiFechaCorteDDMM(p.arrastre) : '';
+      title = nom + (tel ? ' · ' + corteFmtTel(tel) : '') + (arr ? ' · viene de la semana del ' + arr : '');
+      inner = `<div class="logi-cli"><div class="nt"><div class="n">${escapeHtml(nom)}</div><div class="t">${tel ? escapeHtml(corteFmtTel(tel)) : '<span class="logi-rojo">sin teléfono</span>'}${arr ? ' · de la sem. ' + escapeHtml(arr) : ''}</div></div>`
+        + `<button type="button" class="logi-wa" data-logi-wa${tel ? '' : ' disabled'} title="${tel ? 'Abrir WhatsApp con el mensaje armado' : 'Sin teléfono: consultá con Neon'}" aria-label="WhatsApp">${LOGI_WA_SVG}</button></div>`;
+      break;
+    }
+    case 'pedido':
+      inner = `<div class="logi-ped">${p.pedido_pagado === false ? '<span class="logi-pill r" title="Tiene un pedido sin pagar (en esta u otra semana): no se puede enviar">Impago</span>' : '<span class="logi-pill v">Pagado</span>'}${p.entrega !== 'envio' ? '<span class="logi-pill a" title="Preguntale si lo retira en el taller o va por envío">Sin definir</span>' : ''}</div>`;
+      break;
+    case 'calle': {
+      const v = String(logiValor(p, 'calle') || '');
+      const vacio = logiDirNoDisponible(p) ? '<span class="logi-mute">no se pudo leer</span>' : ((p.falta_direccion && !p.dir_editada) ? '<span class="logi-mute">falta la dirección</span>' : '');
+      if (v.length > 24) title = v;
+      inner = `<div class="logi-calle"><span class="tx">${v ? escapeHtml(v) : vacio}</span>`
+        + ((logiSinSeparar(p) && !logiDirNoDisponible(p)) ? '<span class="logi-tag a" title="Todavía no se separó en partes (se reintenta sola). Podés completarla a mano">sin procesar</span>' : '')
+        + (p.dir_editada ? '<span class="logi-tag c" title="Corregida por logística (la planilla no se toca)">corregida</span>' : '')
+        + `<button type="button" class="logi-ico" data-logi-pop title="Ver el texto original de la planilla" aria-label="Ver el texto original">${LOGI_DOC_SVG}</button></div>`;
+      break;
+    }
+    case 'bultos': inner = escapeHtml(String(logiValor(p, 'bultos'))); break;
+    case 'medidas': {
+      const pq = p.paquete || null;
+      if (pq && pq.largo) inner = escapeHtml(`${pq.largo}×${pq.ancho}×${pq.alto}`) + (pq.fuente === 'estimado' ? ' <span class="est">est.</span>' : '');
+      title = pq ? (pq.fuente === 'medido' ? 'Medido por Neyen' : 'Estimado: Neyen lo mide al embalar') : '';
+      break;
+    }
+    case 'peso': {
+      const pq = p.paquete || null;
+      if (pq && pq.peso) inner = escapeHtml(_fmtKg(pq.peso)) + (pq.fuente === 'estimado' ? ' <span class="est">est.</span>' : '');
+      break;
+    }
+    case 'contacto_estado': {
+      const v = String(logiValor(p, 'contacto_estado') || ''), n = parseInt(p.intentos, 10) || 0;
+      inner = `<select class="logi-sel ce-${v || 'sin'}" aria-label="Contacto">${LOGI_CONTACTO.map(([val, lab]) => `<option value="${val}"${val === v ? ' selected' : ''}>${val === 'no_contesta' && n > 1 ? 'No contesta ×' + n : lab}</option>`).join('')}</select>`;
+      if (p.contacto_at) title = 'Último cambio ' + logiHora(p.contacto_at);
+      break;
+    }
+    case 'transporte': {
+      const v = String(logiValor(p, 'transporte') || ''), sug = logiSugerido(p);
+      const lista = logiTransportes().slice(); if (v && !lista.includes(v)) lista.push(v);
+      inner = `<div class="logi-tr"><select class="logi-sel" aria-label="Transporte"><option value=""${!v ? ' selected' : ''}>—</option>`
+        + (sug ? `<option value="__sug" selected>${escapeHtml(v)} · sugerido</option>` : '')
+        + lista.map(x => `<option value="${escapeHtml(x)}"${!sug && x === v ? ' selected' : ''}>${escapeHtml(x)}</option>`).join('')
+        + `<option value="__otro">＋ Agregar otro…</option></select>${sug ? `<button type="button" class="logi-ok" data-logi-sug-ok title="Confirmar ${escapeHtml(v)}" aria-label="Confirmar el transporte sugerido">✓</button>` : ''}</div>`;
+      if (sug) { cls.push('sug'); title = 'Sugerido: es el que se usó la última vez con este cliente. Confirmalo con ✓ o elegí otro'; }
+      break;
+    }
+    case 'envio_costo': { const v = logiValor(p, 'envio_costo'); inner = (v === '' || v == null) ? '' : '$ ' + (parseInt(v, 10) || 0).toLocaleString('es-AR'); break; }
+    case 'envio_pagado': {
+      const v = !!logiValor(p, 'envio_pagado'), dis = !!p.despachado;
+      inner = `<input type="checkbox" class="logi-chk" aria-label="Envío pagado"${v ? ' checked' : ''}${dis ? ' disabled' : ''}>`;
+      title = dis ? 'Ya salió' : (v ? ('Envío pagado ' + (p.envio_pagado_at ? logiHora(p.envio_pagado_at) : '')).trim() : 'Marcalo cuando el cliente te pague el envío');
+      break;
+    }
+    case 'enviado': {
+      const v = logiEnv(p), bloq = !v && !p.listo;
+      inner = `<input type="checkbox" class="logi-chk${bloq ? ' bloq' : ''}" aria-label="Enviado"${v ? ' checked' : ''}>`;
+      title = v ? ('Enviado ' + (p.despachado_at ? logiHora(p.despachado_at) : '')).trim() : (p.listo ? 'Marcalo cuando lo subas al transporte' : 'Todavía no se puede enviar: ' + logiMotivo(p));
+      break;
+    }
+    default: inner = txt(); // recibe, dni, localidad, provincia, cp, seguimiento, nota
+  }
+  if (LOGI_IMPRESCINDIBLES.includes(c.id) && !logiEnv(p) && logiFaltan(p).includes(c.id)) cls.push('falta');
+  if (st && st.st === 'saving') cls.push('guardando');
+  if (st && st.st === 'error') { cls.push('err'); title = 'No se guardó' + (st.msg ? ': ' + String(st.msg).replace(/[.\s]+$/, '') : '') + '. Volvé a editarla para reintentar'; }
+  return `<td class="${cls.join(' ')}" data-c="${c.id}"${title ? ` title="${escapeHtml(title)}"` : ''}>${inner}</td>`;
+}
+function logiFilasHtml(paq) {
+  const vis = logiVisibles(paq);
+  if (!vis.length) return `<tr class="logi-vacio"><td colspan="${LOGI_COLS.length}">${paq.length ? (String(STATE.logiQ || '').trim() ? 'Nada coincide con la búsqueda' : 'Nada en este filtro') : 'No hay paquetes para envío esta semana'}</td></tr>`;
+  return vis.map(p => `<tr data-k="${escapeHtml(p.key)}" class="${logiFilaCls(p)}">${LOGI_COLS.map(c => logiTd(p, c)).join('')}</tr>`).join('');
+}
+function logiTablaHtml(paq) {
+  const cols = `<colgroup>${LOGI_COLS.map(c => `<col style="width:${c.w}px">`).join('')}</colgroup>`;
+  // El grupo Cliente se parte: la parte fija (N° + Cliente) acompaña a las columnas fijas al scrollear de costado.
+  const g = LOGI_GRUPOS.map(([id, lab]) => id === 'cli'
+    ? `<th class="stk1 g-cli" colspan="2">${lab}</th><th class="g-cli"></th>`
+    : `<th class="g-${id}" colspan="${LOGI_COLS.filter(c => c.g === id).length}">${lab}</th>`).join('');
+  const h = LOGI_COLS.map(c => `<th class="${[c.stk || '', 'c-' + c.id].join(' ').trim()}"${c.ayuda ? ` title="${escapeHtml(c.ayuda)}"` : ''}>${escapeHtml(c.tit)}</th>`).join('');
+  return `<table class="logi-t" style="width:${LOGI_ANCHO}px">${cols}<thead><tr class="g">${g}</tr><tr class="h">${h}</tr></thead><tbody data-logi-tbody>${logiFilasHtml(paq)}</tbody></table>`;
+}
+function logiTrDe(key) { return document.querySelector(`.logi-t tbody tr[data-k="${CSS.escape(key)}"]`); }
+function logiTdDe(key, col) { const tr = logiTrDe(key); return tr ? tr.querySelector(`td[data-c="${col}"]`) : null; }
+// Redibuja SOLO las celdas de una fila que cambiaron (no toca la que se está editando ni el resto de la tabla).
+function logiPatchFila(key) {
+  const tr = logiTrDe(key), p = logiPaq(key); if (!tr || !p) return;
+  const cls = logiFilaCls(p); if (tr.className !== cls) tr.className = cls;
+  const ed = STATE._logiEd, tpl = document.createElement('template');
+  tpl.innerHTML = '<table><tbody><tr>' + LOGI_COLS.map(c => logiTd(p, c)).join('') + '</tr></tbody></table>';
+  const nuevos = tpl.content.querySelectorAll('td'), viejos = tr.children;
+  LOGI_COLS.forEach((c, i) => {
+    const td = viejos[i], nd = nuevos[i]; if (!td || !nd) return;
+    if (ed && ed.key === key && ed.col === c.id) { // en edición: solo las marcas de estado
+      ['falta', 'err', 'guardando', 'sel'].forEach(x => td.classList.toggle(x, nd.classList.contains(x)));
+      return;
+    }
+    let vivo = td;
+    if (td.outerHTML !== nd.outerHTML) {
+      const foco = td.contains(document.activeElement);
+      td.replaceWith(nd); vivo = nd;
+      if (foco) logiFocoGrilla();
+    }
+    // Lo que el navegador no refleja en el HTML: casilla tildada y opción elegida (p. ej. al revertir un error).
+    const cb = vivo.querySelector('input[type=checkbox]'); if (cb) cb.checked = !!nd.querySelector('input[type=checkbox][checked]');
+    const sl = vivo.querySelector('select'); if (sl) { const o = nd.querySelector('option[selected]'); sl.value = o ? o.value : ''; }
+  });
+}
+function logiContadores() {
+  const paq = logiPaquetes();
+  const ch = document.querySelector('[data-logi-chips]'); if (ch) ch.innerHTML = logiChipsHtml(paq);
+  const to = document.querySelector('[data-logi-tot]'); if (to) to.textContent = logiTotalesTxt(paq);
+}
+// Filtro / búsqueda: redibuja solo el cuerpo de la tabla (el buscador no pierde el foco).
+function logiPintarCuerpo(arriba) {
+  const tb = document.querySelector('[data-logi-tbody]'); if (!tb || !STATE.logi) return;
+  if (STATE._logiEd) logiEdCerrar(true);
+  logiPopCerrar();
+  tb.innerHTML = logiFilasHtml(logiPaquetes());
+  logiContadores();
+  if (arriba) { const sc = document.querySelector('.logi-scroll'); if (sc) sc.scrollTop = 0; }
+}
+function logiFocoGrilla() { const sc = document.querySelector('.logi-scroll'); if (sc && document.activeElement !== sc) { try { sc.focus({ preventScroll: true }); } catch (_) {} } }
+function logiSeleccionar(key, col, o) {
+  const prev = document.querySelector('.logi-t td.sel'); if (prev) prev.classList.remove('sel');
+  STATE.logiSel = { key, col };
+  const td = logiTdDe(key, col); if (td) { td.classList.add('sel'); if (o && o.scroll) logiScrollA(td); }
+}
+// Lleva la celda a la vista teniendo en cuenta el encabezado y las 2 columnas fijas.
+function logiScrollA(td) {
+  const sc = document.querySelector('.logi-scroll'); if (!sc || !td) return;
+  const r = td.getBoundingClientRect(), s = sc.getBoundingClientRect(), th = sc.querySelector('thead');
+  const arriba = s.top + (th ? th.offsetHeight : 0), abajo = s.top + sc.clientHeight;
+  if (r.top < arriba) sc.scrollTop -= (arriba - r.top); else if (r.bottom > abajo) sc.scrollTop += (r.bottom - abajo);
+  if (!td.classList.contains('stk1') && !td.classList.contains('stk2')) {
+    const izq = s.left + LOGI_COLS[0].w + LOGI_COLS[1].w, der = s.left + sc.clientWidth;
+    if (r.left < izq) sc.scrollLeft -= (izq - r.left); else if (r.right > der) sc.scrollLeft += (r.right - der);
+  }
+}
+function logiMover(dr, dc) {
+  const rows = [...document.querySelectorAll('.logi-t tbody tr[data-k]')].map(tr => tr.getAttribute('data-k'));
+  if (!rows.length) return;
+  const cols = LOGI_COLS.map(c => c.id), s = STATE.logiSel;
+  let r = s ? rows.indexOf(s.key) : -1, c = s ? cols.indexOf(s.col) : -1;
+  if (r < 0) { r = 0; c = Math.max(0, c); } else { r = Math.max(0, Math.min(rows.length - 1, r + dr)); c = Math.max(0, Math.min(cols.length - 1, c + dc)); }
+  logiSeleccionar(rows[r], cols[c], { scroll: true });
+  logiFocoGrilla();
+}
+// La tabla ocupa el alto que queda en la pantalla (encabezado fijo dentro de su propio scroll, como en Excel).
+function logiAjustarAlto() {
+  const sc = document.querySelector('.logi-scroll'); if (!sc) return;
+  const top = sc.getBoundingClientRect().top + (window.scrollY || 0);
+  const abajo = (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) ? 120 : 64;
+  sc.style.maxHeight = Math.max(300, Math.round(window.innerHeight - top - abajo)) + 'px';
+}
+// --- Edición (input dentro de la celda) ---
+// STATE._logiEd = {key, col, modo:'edit'|'type', el, tid, pegar, otro}. 'type' = empezó tipeando (como el "modo Introducir" de Excel:
+// las flechas guardan y mueven); 'edit' = click / F2 (las flechas mueven el cursor dentro del texto).
+function logiTextoEditar(p, col) { const v = logiValor(p, col); return col === 'transporte' && logiSugerido(p) ? '' : String(v == null ? '' : v); }
+function logiEdAbrir(key, col, o) {
+  o = o || {};
+  const p = logiPaq(key), c = LOGI_COL[col]; if (!p || !c || !STATE.logi || !STATE.logi.tanda) return;
+  if (STATE._logiEd && !logiEdCerrar(true)) return;
+  const td = logiTdDe(key, col); if (!td) return;
+  logiSeleccionar(key, col, { scroll: true });
+  const inp = document.createElement('input');
+  inp.type = 'text'; inp.className = 'logi-ed'; inp.autocomplete = 'off'; inp.spellcheck = false;
+  // Los que se limpian al guardar (DNI, CP, costo, bultos) no se cortan al tipear/pegar: "DNI: 30.123.456" cortado en 14
+  // quedaba 3012345 (un DNI equivocado sin aviso). logiNormalizar valida el largo DESPUÉS de limpiar y avisa.
+  inp.maxLength = col === 'transporte' ? 40 : ((c.num || col === 'cp') ? 120 : (c.max || 120));
+  inp.value = o.texto != null ? o.texto : logiTextoEditar(p, col);
+  const lista = col === 'transporte' ? 'logi-transportes' : c.list; if (lista) inp.setAttribute('list', lista);
+  if (c.num) inp.inputMode = 'numeric';
+  td.appendChild(inp);
+  // otro=true: editor de "Agregar otro" transporte (vacío = cancelar, no borra el transporte que ya tenía).
+  STATE._logiEd = { key, col, modo: o.modo || 'edit', el: inp, tid: STATE.logi.tanda.id, pegar: !!o.pegar, otro: !!o.otro };
+  // Pegar varias líneas: el input las juntaría sin espacio → van con comas. pegar=true (Ctrl+V sobre la celda elegida, sin
+  // editar): lo pegado se guarda directo, como en Excel.
+  inp.addEventListener('paste', e => {
+    const ed = STATE._logiEd; if (!ed || ed.el !== inp) return;
+    const t = String((e.clipboardData && e.clipboardData.getData('text/plain')) || '');
+    if (!ed.pegar && !/[\r\n\t]/.test(t)) return;
+    e.preventDefault();
+    const limpio = logiPegadoLimpio(t);
+    try { inp.setRangeText(limpio, inp.selectionStart, inp.selectionEnd, 'end'); } catch (_) { inp.value += limpio; }
+    if (ed.pegar && limpio && logiEdCerrar(true)) logiFocoGrilla();
+  });
+  // Al salir de la celda se guarda. Si se va a otra pestaña / ventana (p. ej. a copiar algo de WhatsApp) sigue editando.
+  // Si un render() de afuera se lo lleva (blur al sacarlo del DOM), no se guarda: bindLogistica lo vuelve a abrir.
+  inp.addEventListener('blur', () => { if (STATE._logiEd && STATE._logiEd.el === inp && inp.isConnected && document.hasFocus()) logiEdCerrar(true, true); });
+  try { inp.focus({ preventScroll: true }); const n = inp.value.length; inp.setSelectionRange(n, n); } catch (_) {}
+}
+// Cierra el editor. guardar=true valida y guarda; si el valor no sirve: con Enter/Tab sigue editando (devuelve false), al
+// salir de la celda se descarta con aviso. No mueve el foco (lo decide quien llama).
+function logiEdCerrar(guardar, desdeBlur) {
+  const ed = STATE._logiEd; if (!ed) return true;
+  const raw = ed.el.value;
+  if ((ed.pegar || ed.otro) && !String(raw).trim()) guardar = false; // Ctrl+V sin nada pegado / "Agregar otro" sin escribir: no borra la celda
+  if (guardar) {
+    const n = logiNormalizar(ed.col, raw);
+    if (!n.ok) {
+      if (!desdeBlur && document.body.contains(ed.el)) { niToast(n.msg, { error: true }); try { ed.el.focus({ preventScroll: true }); ed.el.select(); } catch (_) {} return false; }
+      niToast(n.msg + '. No se guardó', { error: true }); guardar = false;
+    }
+  }
+  STATE._logiEd = null;
+  try { ed.el.remove(); } catch (_) {}
+  const misma = !!(STATE.logi && STATE.logi.tanda && STATE.logi.tanda.id === ed.tid);
+  if (guardar && misma) logiCommit(ed.key, ed.col, raw); else logiPatchFila(ed.key);
+  if (STATE._logiDirty) setTimeout(() => { if (!logiOcupado()) logiRender(); }, 250); // después del click que lo cerró
+  return true;
+}
+// Un render() de afuera (otra parte de la app) se llevó el editor: se vuelve a abrir con lo que estaba escrito.
+function logiEdRestaurar() {
+  const ed = STATE._logiEd; if (!ed || document.body.contains(ed.el)) return;
+  STATE._logiEd = null;
+  const misma = !!(STATE.logi && STATE.logi.tanda && STATE.logi.tanda.id === ed.tid);
+  if (!misma) return;
+  if (!logiTdDe(ed.key, ed.col)) { // la fila ya no está a la vista: se guarda (vacío desde pegar / "Agregar otro" = nada)
+    if (!((ed.pegar || ed.otro) && !String(ed.el.value).trim())) logiCommit(ed.key, ed.col, ed.el.value);
+    return;
+  }
+  const a = ed.el.selectionStart, b = ed.el.selectionEnd;
+  logiEdAbrir(ed.key, ed.col, { modo: ed.modo, texto: ed.el.value, otro: ed.otro });
+  try { if (STATE._logiEd) STATE._logiEd.el.setSelectionRange(a, b); } catch (_) {}
+}
+// Guarda solo si cambió (contra lo que se está guardando o, si no hay nada en vuelo, contra lo del server). Un valor que
+// había quedado en rojo se manda de nuevo (reintento) salvo que haya vuelto a lo que ya tiene el server.
+function logiCommit(key, col, raw) {
+  const p = logiPaq(key); if (!p) return;
+  const n = logiNormalizar(col, raw); if (!n.ok) { niToast(n.msg, { error: true }); logiPatchFila(key); return; }
+  const ck = key + '|' + col, st = logiCel(key, col);
+  const ref = st && st.st === 'saving' ? st.val : logiValorServidor(p, col);
+  if (logiIgual(n.valor, ref)) {
+    if (st && st.st === 'error') delete STATE._logiCel[ck];
+    logiPatchFila(key); logiContadores();
+    return;
+  }
+  logiCeldaGuardar(key, col, n.valor);
+}
+// POST /admin/logistica/celda {tanda_id, key, campo, valor, operador}. De a uno por fila (cola por semana+clave): la
+// respuesta de cada uno trae el paquete entero y así nunca llega una vieja después de una nueva. → j (ok) | null.
+function logiCeldaGuardar(key, campo, valor) {
+  const L = STATE.logi, p = logiPaq(key); if (!L || !L.tanda || !p) return Promise.resolve(null);
+  const tid = L.tanda.id, ck = key + '|' + campo, c = LOGI_COL[campo] || {};
+  const etiqueta = logiN(p.numero) + ' ' + (logiNombre(p.cliente) || 'Cliente');
+  STATE._logiCel = STATE._logiCel || {}; STATE._logiSeq = STATE._logiSeq || {}; STATE._logiFilaQ = STATE._logiFilaQ || {};
+  const seq = STATE._logiSeq[ck] = (STATE._logiSeq[ck] || 0) + 1;
+  STATE._logiCel[ck] = { st: 'saving', val: valor };
+  STATE._logiKeep = STATE._logiKeep || {}; if (logiTrDe(key)) STATE._logiKeep[key] = 1;
+  logiPatchFila(key); logiContadores();
+  const qk = tid + '|' + key, op = logiOperador();
+  const enviar = () => logiPost('/admin/logistica/celda', { tanda_id: tid, key, campo, valor, ...(op ? { operador: op } : {}) });
+  const prom = (STATE._logiFilaQ[qk] || Promise.resolve()).then(enviar, enviar);
+  STATE._logiFilaQ[qk] = prom;
+  return prom.then(({ status, j }) => {
+    if (STATE._logiFilaQ[qk] === prom) delete STATE._logiFilaQ[qk];
+    const misma = !!(STATE.logi && STATE.logi.tanda && STATE.logi.tanda.id === tid);
+    const ok = !!(j && j.ok);
+    // Se cambió de semana mientras tanto: no se toca la otra (la clave del paquete se repite entre semanas).
+    if (!misma) { if (!ok) niToast(`No se guardó ${c.nom || campo} de ${etiqueta}. Volvé a esa semana y cargalo de nuevo`, { error: true, ms: 6000 }); return ok ? j : null; }
+    const ultimo = STATE._logiSeq[ck] === seq, q = logiPaq(key);
+    if (ok) {
+      if (q) { logiSetLocal(q, campo, valor); if (j.paquete && j.paquete.key === key) Object.assign(q, j.paquete); }
+      if (campo === 'transporte') logiTransporteSumar(q && q.transporte && !q.transporte_sugerido ? q.transporte : valor); // uno nuevo: a la lista de todos
+      if (ultimo) delete STATE._logiCel[ck];
+      logiPatchFila(key); logiContadores();
+      return j;
+    }
+    // Error: un texto queda en rojo (se reintenta al volver a editarlo); select y casilla vuelven a como estaban.
+    const msg = logiErrTxt(j, status);
+    if (ultimo) { if (c.ed === 'txt') STATE._logiCel[ck] = { st: 'error', val: valor, msg, status }; else delete STATE._logiCel[ck]; }
+    logiPatchFila(key); logiContadores();
+    niToast(campo === 'enviado' ? etiqueta + ': ' + msg : `No se guardó ${c.nom || campo} de ${etiqueta}: ${msg}`, { error: true, ms: 5000 });
+    if (status === 404 || status === 409 || (status === 403 && j && j.error === 'tanda')) logisticaCargar({}); // 403 tanda: la semana ya no está entre las permitidas
+    return null;
+  });
+}
+// "Enviado": tildar lo chequea el server (409 → vuelve y avisa el motivo). Destildar pide confirmación.
+async function logiEnviado(key, v, cb) {
+  const p = logiPaq(key); if (!p) return;
+  const etiqueta = logiN(p.numero) + ' ' + (logiNombre(p.cliente) || 'Cliente');
+  if (!v) {
+    if (cb) cb.checked = true;
+    if (!await showConfirm(`Sacar ${etiqueta} de los enviados?`, { title: 'Deshacer envío', confirmLabel: 'Sí, sacar', cancelLabel: 'No' }).catch(() => false)) { logiFocoGrilla(); return; }
+  }
+  logiFocoGrilla();
+  const j = await logiCeldaGuardar(key, 'enviado', v);
+  if (!j) return;
+  if (v) niToast(etiqueta + ' enviado', { undo: () => logiCeldaGuardar(key, 'enviado', false), ms: 5000 });
+  else niToast(etiqueta + ': se sacó de enviados');
+}
+// --- Teclado y mouse de la tabla ---
+function logiAbrirSelect(td) {
+  const s = td && td.querySelector('select'); if (!s) return;
+  STATE._logiSelFocusAt = Date.now();
+  try { s.focus({ preventScroll: true }); if (typeof s.showPicker === 'function') s.showPicker(); } catch (_) {}
+}
+function logiKey(e) {
+  if (e.isComposing || e.keyCode === 229) return;
+  const ed = STATE._logiEd, t = e.target, k = e.key;
+  const mov = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[k];
+  if (ed && t === ed.el) {
+    if (k === 'Enter') { e.preventDefault(); if (logiEdCerrar(true)) logiMover(e.shiftKey ? -1 : 1, 0); }
+    else if (k === 'Tab') { e.preventDefault(); if (logiEdCerrar(true)) logiMover(0, e.shiftKey ? -1 : 1); }
+    else if (k === 'Escape') { e.preventDefault(); e.stopPropagation(); logiEdCerrar(false); logiFocoGrilla(); }
+    else if (ed.modo === 'type' && mov && !e.shiftKey) { e.preventDefault(); if (logiEdCerrar(true)) logiMover(mov[0], mov[1]); }
+    return;
+  }
+  if (k === 'Escape' && document.getElementById('logi-pop')) { e.preventDefault(); e.stopPropagation(); logiPopCerrar(true); logiFocoGrilla(); return; }
+  if (t !== e.currentTarget) {
+    // Foco en un control de la celda (select / casilla / botón).
+    if (!(t.closest && t.closest('.logi-t td'))) return;
+    if (t.tagName === 'SELECT' && (e.altKey || k === ' ' || k === 'F4')) return; // abre la lista (nativo)
+    if (mov && !e.altKey) { e.preventDefault(); logiMover(mov[0], mov[1]); return; } // sin cambiar la opción con las flechas
+    if (k === 'Tab') { e.preventDefault(); logiMover(0, e.shiftKey ? -1 : 1); return; }
+    if (k === 'Enter' && t.tagName !== 'BUTTON') { e.preventDefault(); logiMover(e.shiftKey ? -1 : 1, 0); return; }
+    if (k === 'Escape') { e.preventDefault(); logiFocoGrilla(); }
+    return;
+  }
+  if (mov) { e.preventDefault(); logiMover(mov[0], mov[1]); return; }
+  if (k === 'Tab') { e.preventDefault(); logiMover(0, e.shiftKey ? -1 : 1); return; }
+  if (k === 'Enter') { e.preventDefault(); logiMover(e.shiftKey ? -1 : 1, 0); return; }
+  const s = STATE.logiSel; if (!s || !logiTdDe(s.key, s.col)) return;
+  const c = LOGI_COL[s.col], td = logiTdDe(s.key, s.col);
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && k.toLowerCase() === 'c') { const p = logiPaq(s.key); if (p) { e.preventDefault(); logiCopiar(logiTextoCelda(p, s.col), 'Copiado'); } return; }
+  // Ctrl+V: se abre el editor vacío ANTES de que el navegador pegue (sin preventDefault): lo pegado cae en el input y se guarda.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && k.toLowerCase() === 'v') { if (c.ed === 'txt' || s.col === 'transporte') logiEdAbrir(s.key, s.col, { modo: 'type', texto: '', pegar: true }); return; }
+  const altGr = !!(e.getModifierState && e.getModifierState('AltGraph'));
+  if ((e.ctrlKey || e.metaKey || e.altKey) && !altGr) return;
+  if (k === 'F2') { e.preventDefault(); if (c.ed === 'txt') logiEdAbrir(s.key, s.col, { modo: 'edit' }); else if (c.ed === 'sel') logiAbrirSelect(td); return; }
+  if (k === 'Delete' || k === 'Backspace') { if (c.ed === 'txt') { e.preventDefault(); logiEdAbrir(s.key, s.col, { modo: 'type', texto: '' }); } return; }
+  if (k === ' ') {
+    e.preventDefault();
+    if (c.ed === 'chk') { const cb = td.querySelector('input[type=checkbox]'); if (cb && !cb.disabled) cb.click(); }
+    else if (c.ed === 'sel') logiAbrirSelect(td);
+    else if (c.ed === 'txt') logiEdAbrir(s.key, s.col, { modo: 'type', texto: '' });
+    return;
+  }
+  if (k.length === 1) {
+    // Escribir con la celda elegida empieza a editar (en Transporte, con sugerencias de la lista).
+    if (c.ed === 'txt' || s.col === 'transporte') { e.preventDefault(); logiEdAbrir(s.key, s.col, { modo: 'type', texto: k }); }
+  }
+}
+function logiMouseDown(e) {
+  if (e.button !== 0) return;
+  const ed = STATE._logiEd;
+  if (ed && (e.target === ed.el || ed.el.contains(e.target))) return; // click dentro del editor: mueve el cursor
+  const td = e.target.closest && e.target.closest('.logi-t td[data-c]'), tr = td && td.parentElement, key = tr && tr.getAttribute('data-k');
+  if (!key) return;
+  const col = td.getAttribute('data-c'), c = LOGI_COL[col] || {};
+  const ctl = e.target.closest('select, input, button');
+  if (ed && !logiEdCerrar(true)) { e.preventDefault(); return; } // valor que no sirve: sigue editando
+  if (ctl && ctl.tagName !== 'BUTTON') { // select / casilla: comportamiento nativo
+    logiSeleccionar(key, col);
+    if (ctl.tagName === 'SELECT') STATE._logiSelFocusAt = Date.now();
+    return;
+  }
+  e.preventDefault(); // sin selección de texto; el foco queda en la tabla
+  if (ctl) { logiSeleccionar(key, col); logiFocoGrilla(); return; } // botones de la celda: los atiende el click
+  if (c.ed === 'txt') logiEdAbrir(key, col, { modo: 'edit' });
+  else { logiSeleccionar(key, col); logiFocoGrilla(); }
+}
+function logiClick(e) {
+  const b = e.target.closest && e.target.closest('button'); if (!b) return;
+  const tr = b.closest('tr[data-k]'); if (!tr) return;
+  const key = tr.getAttribute('data-k');
+  if (b.hasAttribute('data-logi-wa')) logiWhatsApp(key);
+  else if (b.hasAttribute('data-logi-pop')) { if (STATE.logiPop === key) logiPopCerrar(true); else logiPopAbrir(key); }
+  else if (b.hasAttribute('data-logi-sug-ok')) { const p = logiPaq(key); if (p && p.transporte) logiCeldaGuardar(key, 'transporte', String(p.transporte)); }
+}
+function logiChange(e) {
+  const el = e.target, td = el.closest && el.closest('td[data-c]'), tr = td && td.parentElement, key = tr && tr.getAttribute('data-k');
+  if (!key) return;
+  const col = td.getAttribute('data-c'), p = logiPaq(key); if (!p) return;
+  if (el.tagName === 'SELECT') {
+    const v = el.value;
+    if (col === 'transporte' && v === '__sug') return;
+    if (col === 'transporte' && v === '__otro') { // nombre a mano (con sugerencias)
+      el.value = logiSugerido(p) ? '__sug' : String(logiValor(p, 'transporte') || '');
+      logiEdAbrir(key, 'transporte', { modo: 'edit', texto: '', otro: true });
+      return;
+    }
+    logiFocoGrilla();
+    logiCommit(key, col, v);
+  } else if (el.type === 'checkbox') {
+    if (col === 'enviado') { logiEnviado(key, el.checked, el); return; }
+    logiFocoGrilla();
+    logiCeldaGuardar(key, col, el.checked);
+  }
+}
+// Texto pegado → una línea (dirección copiada de WhatsApp / la planilla: los renglones van con comas).
+function logiPegadoLimpio(t) { return String(t || '').replace(/\t/g, ' ').replace(/\s*\r?\n\s*/g, ', ').replace(/^[,\s]+|[,\s]+$/g, ''); }
+// Respaldo: un paste que llega a la tabla con una celda elegida (sin editar) pega el texto en esa celda y lo guarda.
+function logiPaste(e) {
+  if (STATE._logiEd) return;
+  const s = STATE.logiSel, c = s && LOGI_COL[s.col]; if (!c || c.ed !== 'txt' || !logiTdDe(s.key, s.col)) return;
+  const txt = logiPegadoLimpio(e.clipboardData && e.clipboardData.getData('text/plain'));
+  if (!txt) return;
+  e.preventDefault();
+  logiCommit(s.key, s.col, txt);
+}
+// --- Texto original de la dirección (popover) ---
+function logiAccTxt(h) {
+  const a = String(h.accion || ''), nota = String(h.nota || '').slice(0, 140), si = /^(1|true|si|sí)$/i.test(nota);
+  if (a.startsWith('celda:')) {
+    const campo = a.slice(6), c = LOGI_COL[campo];
+    if (campo === 'enviado') return si ? 'Enviado' : 'Sacado de enviados';
+    if (campo === 'envio_pagado') return si ? 'Envío pagado' : 'Deshizo envío pagado';
+    if (campo === 'contacto_estado') { const o = LOGI_CONTACTO.find(x => x[0] === nota); return 'Contacto: ' + (o ? o[1] : (nota || 'Sin escribir')); }
+    return (c ? c.tit : campo) + ': ' + (nota ? '"' + nota + '"' : 'vacío');
+  }
+  return (LOGI_ACC_TXT[a] || a) + (nota ? ' · "' + nota + '"' : '');
+}
+function logiPopHtml(p) {
+  const fuente = String(p.dir_fuente != null ? p.dir_fuente : (p.datos_envio || '')).trim();
+  const otros = [['Otro teléfono', logiValor(p, 'tel_alt')], ['Aclaración', logiValor(p, 'obs')]].filter(x => String(x[1] || '').trim());
+  const nPz = (p.piezas || []).reduce((s, x) => s + (parseInt(x.cantidad, 10) || 1), 0), nIns = (p.insumos || []).reduce((s, x) => s + (parseInt(x.cantidad, 10) || 1), 0);
+  const hist = (p.historial || []).slice(0, 5);
+  return `<div class="logi-pop-h"><b>${escapeHtml(logiN(p.numero) + ' · ' + (logiNombre(p.cliente) || 'Cliente'))}</b>${p.dir_editada ? '<span class="logi-tag c">corregida</span>' : ''}<button type="button" class="logi-x" data-logi-pop-x aria-label="Cerrar">×</button></div>
+    <div class="tit">Texto original de la planilla</div>
+    ${fuente ? `<pre>${escapeHtml(fuente)}</pre>` : `<div class="logi-mute">${logiDirNoDisponible(p) ? 'No se pudo leer la planilla. Tocá Actualizar en un rato.' : 'El cliente no cargó datos de envío en la planilla.'}</div>`}
+    ${p.dir_editada ? `<div class="logi-mute" style="margin-top:6px">Logística corrigió esta dirección${p.dir_editada_por ? ' (' + escapeHtml(p.dir_editada_por) + (p.dir_editada_at ? ', ' + escapeHtml(logiHora(p.dir_editada_at)) : '') + ')' : ''}: vale también para las próximas semanas. La planilla no se toca.</div>` : ''}
+    ${logiSinSeparar(p) && !logiDirNoDisponible(p) ?'<div class="logi-mute" style="margin-top:6px">Todavía no se pudo separar en partes. Se reintenta sola; si querés, completala a mano en la tabla.</div>' : ''}
+    ${otros.map(([l, v]) => `<div style="margin-top:6px"><span class="logi-mute">${l}:</span> ${escapeHtml(v)}</div>`).join('')}
+    <div class="tit">Paquete</div>
+    <div>${nPz} pieza${nPz === 1 ? '' : 's'}${nIns ? ' · ' + nIns + ' insumo' + (nIns === 1 ? '' : 's') : ''}${p.paquete ? ' · ' + escapeHtml(logiPaqTxt(p.paquete)) + (p.paquete.fuente === 'medido' ? ' (medido)' : ' (estimado)') : ''}${p.arrastre ? ' · viene de la semana del ' + escapeHtml(logiFechaCorteDDMM(p.arrastre)) : ''}</div>
+    ${hist.length ? `<div class="tit">Historial</div>${hist.map(h => `<div class="logi-h">${escapeHtml(logiHora(h.ts))} · ${escapeHtml(logiAccTxt(h))}${h.operador ? ' · ' + escapeHtml(h.operador) : ''}</div>`).join('')}` : ''}
+    <div class="acc">${fuente ? '<button type="button" class="btn btn-ghost" data-logi-pop-copiar>Copiar texto</button>' : ''}<button type="button" class="btn btn-ghost" data-logi-pop-avisar title="Le manda a Neon lo que escribiste en la columna Nota">Avisar a Neon</button></div>`;
+}
+function logiPopAbrir(key) {
+  const p = logiPaq(key), wrap = document.querySelector('.logi-wrap'); if (!p || !wrap) return;
+  logiPopCerrar();
+  const el = document.createElement('div');
+  el.id = 'logi-pop'; el.className = 'logi-pop'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Texto original de la dirección');
+  el.dataset.k = key; el.innerHTML = logiPopHtml(p);
+  wrap.appendChild(el);
+  STATE.logiPop = key;
+  el.onclick = e => {
+    const b = e.target.closest && e.target.closest('button'); if (!b) return;
+    const q = logiPaq(key);
+    if (b.hasAttribute('data-logi-pop-x')) { logiPopCerrar(true); logiFocoGrilla(); }
+    else if (b.hasAttribute('data-logi-pop-copiar') && q) logiCopiar(String(q.dir_fuente != null ? q.dir_fuente : (q.datos_envio || '')).trim(), 'Texto copiado');
+    else if (b.hasAttribute('data-logi-pop-avisar')) logiAvisar(key, b);
+  };
+  logiPopUbicar();
+}
+function logiPopUbicar() {
+  const el = document.getElementById('logi-pop'); if (!el) return;
+  const td = logiTdDe(el.dataset.k, 'calle'), a = td ? (td.querySelector('[data-logi-pop]') || td) : null;
+  const w = el.offsetWidth, h = el.offsetHeight;
+  if (!a) { el.style.left = Math.max(12, (window.innerWidth - w) / 2) + 'px'; el.style.top = Math.max(12, (window.innerHeight - h) / 2) + 'px'; return; }
+  const r = a.getBoundingClientRect();
+  let left = Math.max(12, Math.min(r.right - w, window.innerWidth - w - 12)), top = r.bottom + 6;
+  if (top + h > window.innerHeight - 12) top = Math.max(12, r.top - h - 6);
+  el.style.left = left + 'px'; el.style.top = top + 'px';
+}
+// tras=true: si quedó un refresco pendiente mientras estaba abierto, se aplica.
+function logiPopCerrar(tras) {
+  const el = document.getElementById('logi-pop'); if (el) el.remove();
+  STATE.logiPop = null;
+  if (tras && STATE._logiDirty) setTimeout(() => { if (!logiOcupado()) logiRender(); }, 250);
+}
+async function logiAvisar(key, btn) {
+  const L = STATE.logi, p = logiPaq(key); if (!L || !L.tanda || !p) return;
+  const txt = String(logiValor(p, 'nota') || '').trim();
+  if (!txt) { niToast('Escribí en la columna Nota qué pasó y después tocá Avisar a Neon', { error: true }); return; }
+  if (btn) btn.disabled = true;
+  const tid = L.tanda.id, op = logiOperador();
+  const { status, j } = await logiPost('/admin/logistica/contacto', { tanda_id: tid, key, accion: 'avisar', nota: txt.slice(0, 300), ...(op ? { operador: op } : {}) });
+  if (btn && document.body.contains(btn)) btn.disabled = false;
+  if (j && j.ok) {
+    if (j.paquete && STATE.logi && STATE.logi.tanda && STATE.logi.tanda.id === tid) {
+      const q = logiPaq(key); if (q) Object.assign(q, j.paquete);
+      logiPatchFila(key);
+      const pop = document.getElementById('logi-pop'); if (pop && pop.dataset.k === key && q) { pop.innerHTML = logiPopHtml(q); logiPopUbicar(); }
+    }
+    niToast('Listo, le avisamos a Neon');
+  } else niToast(logiErrTxt(j, status), { error: true });
+}
+// --- Refresco ---
+// Ocupado = editando una celda, con el texto original abierto o eligiendo en un select (hace menos de 20 s): el refresco
+// de fondo NO re-dibuja; queda pendiente (_logiDirty) y se aplica apenas se libera.
+function logiOcupado() {
+  const ed = STATE._logiEd;
+  if (ed && ed.el && document.body.contains(ed.el)) return true;
+  if (document.getElementById('logi-pop')) return true;
+  const ae = document.activeElement;
+  return !!(ae && ae.tagName === 'SELECT' && ae.closest && ae.closest('.logi-t') && Date.now() - (STATE._logiSelFocusAt || 0) < 20000);
+}
+// Re-render completo que conserva el scroll de la tabla y de la página, la celda elegida (STATE.logiSel), filtros y el
+// foco (tabla o buscador). Si está ocupado, se pospone.
 function logiRender() {
   if (STATE.view !== 'logistica') return;
-  const y = window.scrollY || 0;
+  if (logiOcupado()) { STATE._logiDirty = true; return; }
+  STATE._logiDirty = false;
+  const y = window.scrollY || 0, sc = document.querySelector('.logi-scroll'), pos = sc ? { t: sc.scrollTop, l: sc.scrollLeft } : null;
   const ae = document.activeElement; let foco = null;
-  if (ae && ae.matches) {
-    if (ae.matches('[data-logi-nota]')) foco = { sel: `[data-logi-nota="${CSS.escape(ae.getAttribute('data-logi-nota'))}"]` };
-    else if (ae.id === 'logi-caja' || ae.id === 'logi-op') foco = { sel: '#' + ae.id };
-    if (foco) { foco.s = ae.selectionStart; foco.e = ae.selectionEnd; foco.st = ae.scrollTop; }
-  }
+  if (ae && (ae.id === 'logi-q' || ae.id === 'logi-op')) foco = { sel: '#' + ae.id, s: ae.selectionStart, e: ae.selectionEnd };
+  else if (ae && sc && (ae === sc || sc.contains(ae))) foco = { grilla: true };
   render();
-  if (foco) { const n = document.querySelector(foco.sel); if (n) { try { n.focus({ preventScroll: true }); n.setSelectionRange(foco.s, foco.e); n.scrollTop = foco.st || 0; } catch (_) {} } }
+  const sc2 = document.querySelector('.logi-scroll'); if (sc2 && pos) { sc2.scrollTop = pos.t; sc2.scrollLeft = pos.l; }
+  if (foco && foco.grilla) logiFocoGrilla();
+  else if (foco) { const n = document.querySelector(foco.sel); if (n) { try { n.focus({ preventScroll: true }); n.setSelectionRange(foco.s, foco.e); } catch (_) {} } }
   if (Math.abs((window.scrollY || 0) - y) > 2) window.scrollTo(0, y);
 }
 // silent=true: refresco de fondo (cada 90 s). No corre si hay un POST en vuelo ("marcando") y descarta su respuesta si
 // mientras tanto se marcó algo (si no, revertiría lo optimista). Contador de generación: cambiar de semana invalida
-// cualquier respuesta vieja en vuelo. Si está tipeando, no re-dibuja: queda pendiente para el próximo tick.
+// cualquier respuesta vieja en vuelo. Si está ocupado (editando), no re-dibuja: queda pendiente.
 async function logisticaCargar(opts) {
   opts = opts || {};
   const silent = !!opts.silent;
@@ -4818,8 +5577,7 @@ async function logisticaCargar(opts) {
   if (!silent) STATE._logiPendiente = false;
   if (silent && ((STATE._logiMarcando || 0) > 0 || (STATE._logiMutAt || 0) >= t0)) return;
   // Carga completa (p. ej. la que sigue a un 409) armada ANTES de que otro POST terminara: aplicarla pisaría lo que ese
-  // POST ya confirmó (el paquete volvería a figurar sin cargar). Se descarta y se pide de nuevo: ya mismo si no queda
-  // nada en vuelo, o cuando termine el último POST (logiPost).
+  // POST ya confirmó. Se descarta y se pide de nuevo: ya mismo si no queda nada en vuelo, o cuando termine el último POST.
   if (!silent && r && r.ok && STATE.logi && !STATE.logi.error && ((STATE._logiMarcando || 0) > 0 || (STATE._logiMutAt || 0) >= t0)) {
     if ((STATE._logiMarcando || 0) > 0) STATE._logiRecargar = true; else logisticaCargar({});
     return;
@@ -4836,16 +5594,14 @@ async function logisticaCargar(opts) {
     STATE.logi = { error: (r && (r.motivo || r.error)) || 'Error de red' };
   }
   if (STATE.view !== 'logistica') return;
-  if (silent && logiTipeando()) { STATE._logiDirty = true; return; }
-  STATE._logiDirty = false;
   logiRender();
 }
 function logiResetEstado() {
-  STATE.logi = undefined; STATE.logiTanda = null; STATE.logiQ = ''; STATE.logiFiltro = 'todos'; STATE.logiCaja = '';
-  STATE.logiNotaDraft = {}; STATE.logiOpen = {}; STATE.logiLoadedAt = 0; STATE._logiOpMem = ''; STATE._logiOpDraft = '';
-  STATE._logiGen = (STATE._logiGen || 0) + 1; STATE._logiPendiente = false; STATE._logiDirty = false; STATE._logiCargando = {};
-  STATE._logiAcc = {}; STATE._logiNotaErr = {}; STATE._logiNotaProm = {}; STATE._logiRecargar = false;
-  if (STATE._logiNotaT) { Object.values(STATE._logiNotaT).forEach(t => clearTimeout(t)); STATE._logiNotaT = {}; }
+  STATE.logi = undefined; STATE.logiTanda = null; STATE.logiQ = ''; STATE.logiFiltro = 'todos';
+  STATE.logiSel = null; STATE._logiEd = null; STATE._logiCel = {}; STATE._logiSeq = {}; STATE._logiFilaQ = {}; STATE._logiKeep = {}; STATE.logiPop = null; STATE._logiScroll = null;
+  STATE.logiLoadedAt = 0; STATE._logiOpMem = ''; STATE._logiOpDraft = '';
+  STATE._logiGen = (STATE._logiGen || 0) + 1; STATE._logiPendiente = false; STATE._logiDirty = false; STATE._logiRecargar = false;
+  const pop = document.getElementById('logi-pop'); if (pop) pop.remove();
 }
 function logiOperadorHtml() {
   return `<div style="padding:var(--s-4);max-width:460px;margin:32px auto 0">
@@ -4857,176 +5613,41 @@ function logiOperadorHtml() {
     </div>
   </div>`;
 }
-// Texto de estado de la nota (también al re-dibujar: un borrador que no se pudo guardar sigue diciendo "Sin guardar" en
-// rojo, no "Guardada" con la hora vieja).
-function logiNotaStInfo(p) {
-  const key = p.key, d = (STATE.logiNotaDraft || {})[key];
-  if ((STATE._logiNotaProm || {})[key]) return { txt: 'Guardando…' };
-  if ((STATE._logiNotaT || {})[key]) return { txt: 'Escribiendo…' };
-  if (d != null && String(d) !== String(p.nota || '')) return { txt: 'Sin guardar', err: true };
-  return { txt: p.nota_at ? 'Guardada ' + logiHora(p.nota_at) : 'Se guarda sola' };
-}
-function logiDesplegableHtml(p) {
-  const k = escapeHtml(p.key);
-  const enVuelo = (STATE._logiAcc || {})[p.key] ? ' disabled' : '';
-  const nst = logiNotaStInfo(p);
-  const nota = (STATE.logiNotaDraft && STATE.logiNotaDraft[p.key] != null) ? STATE.logiNotaDraft[p.key] : (p.nota || '');
-  const nPz = (p.piezas || []).reduce((s, x) => s + (parseInt(x.cantidad, 10) || 1), 0), nIns = (p.insumos || []).reduce((s, x) => s + (parseInt(x.cantidad, 10) || 1), 0);
-  const pq = p.paquete ? logiPaqTxt(p.paquete) + (p.paquete.fuente === 'medido' ? ' (medido)' : ' (estimado)') : '';
-  const hist = (p.historial || []).slice(0, 5);
-  const tit = t => `<div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:4px">${t}</div>`;
-  return `<div class="logi-mas">
-    <div>${tit('Dirección')}${p.falta_direccion ? '<div style="color:#ef4444;font-weight:700">Falta la dirección: pedísela al cliente</div>'
-      : logiDirNoDisponible(p) ? '<div style="color:var(--fg-mute)">No se pudo leer la dirección. Tocá Actualizar en un rato.</div>'
-      : `<div style="display:flex;gap:10px;align-items:flex-start"><div style="flex:1;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px">${escapeHtml(p.datos_envio || '')}</div><button class="btn btn-ghost" data-logi-copiar="${k}" style="flex:0 0 auto">Copiar</button></div>`}</div>
-    <div style="font-size:13px;color:var(--fg-mute)">Paquete: ${escapeHtml(pq)} · ${nPz} pieza${nPz === 1 ? '' : 's'}${nIns ? ' · ' + nIns + ' insumo' + (nIns === 1 ? '' : 's') : ''}${p.arrastre ? ' · viene de la semana del ' + escapeHtml(logiFechaCorteDDMM(p.arrastre)) : ''}</div>
-    ${p.despachado ? '' : `<div style="display:flex;gap:10px;flex-wrap:wrap">
-      <button class="btn logi-big" data-logi-acc="no_contesta" data-k="${k}"${enVuelo}>No contesta</button>
-      ${p.envio_pagado ? `<button class="btn btn-ghost logi-big" data-logi-acc="deshacer_envio" data-k="${k}"${enVuelo}>Deshacer envío pagado</button>` : `<button class="btn logi-big" data-logi-acc="envio_pagado" data-k="${k}"${enVuelo} style="background:#16a34a;border-color:#16a34a;color:#fff">Envío pagado</button>`}
-    </div>`}
-    <div>
-      <textarea data-logi-nota="${k}" rows="2" maxlength="300" placeholder="Nota: cambia la dirección, horario, lo que haga falta" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:9px 11px;color:var(--fg);font:inherit;font-size:14px;resize:vertical">${escapeHtml(nota)}</textarea>
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap">
-        <span data-logi-nota-st="${k}" style="font-size:12px;color:${nst.err ? '#ef4444' : 'var(--fg-mute)'}">${escapeHtml(nst.txt)}</span>
-        <button class="btn btn-ghost logi-big" data-logi-avisar="${k}">Avisar a Neon</button>
-      </div>
-    </div>
-    ${hist.length ? `<div style="font-size:12px;color:var(--fg-mute);line-height:1.6">${tit('Historial')}${hist.map(h => `<div>${escapeHtml(logiHora(h.ts))} · ${escapeHtml(LOGI_ACC_TXT[h.accion] || h.accion || '')}${h.operador ? ' · ' + escapeHtml(h.operador) : ''}${h.nota ? ' · "' + escapeHtml(String(h.nota).slice(0, 140)) + '"' : ''}</div>`).join('')}</div>` : ''}
-  </div>`;
-}
-function logiLunesHtml(paq) {
-  const f = ['hacer', 'esperando', 'listos', 'todos'].includes(STATE.logiFiltro) ? STATE.logiFiltro : 'todos';
-  const cnt = { hacer: 0, esperando: 0, listos: 0, todos: paq.length };
-  paq.forEach(p => { cnt[logiGrupo(p)]++; });
-  const listosMartes = paq.filter(p => p.listo || logiCargado(p)).length;
-  const pct = paq.length ? Math.min(100, Math.round(listosMartes / paq.length * 100)) : 0;
-  // Orden: sin dirección / entrega sin definir → por hacer → esperando → listos (atenuados al final).
-  const rank = p => { const g = logiGrupo(p); if (g === 'listos') return 3; if (p.entrega !== 'envio' || p.falta_direccion) return 0; return g === 'hacer' ? 1 : 2; };
-  const lista = paq.filter(p => f === 'todos' || logiGrupo(p) === f)
-    .sort((a, b) => rank(a) - rank(b) || (a.numero || 999) - (b.numero || 999) || String(a.cliente || '').localeCompare(String(b.cliente || ''), 'es'));
-  const chip = (k, lab) => `<button class="btn ${f === k ? 'btn-cyan' : 'btn-ghost'}" data-logi-filtro="${k}" style="padding:9px 14px;font-size:14px">${lab} <b>${cnt[k]}</b></button>`;
-  const fila = p => {
-    const open = !!(STATE.logiOpen && STATE.logiOpen[p.key]);
-    const tel = String(p.telefono || '').replace(/\D/g, ''), k = escapeHtml(p.key);
-    const dest = p.falta_direccion ? corteChip('Falta dirección', '#ef4444') : (logiDirNoDisponible(p) ? corteChip('Dirección no disponible', '#94a3b8') : `<span class="d">${escapeHtml(logiDestino(p) || p.datos_envio || '')}</span>`);
-    const chips = (p.entrega !== 'envio' ? ' ' + corteChip('Preguntar si retira o envío', '#ef4444') : '') + (p.pedido_pagado === false ? ' ' + corteChip('Pedido impago', '#ef4444') : '');
-    return `<div class="logi-fila${logiGrupo(p) === 'listos' ? ' logi-atenuada' : ''}" data-k="${k}">
-      <div class="logi-num">${logiN(p.numero)}</div>
-      <div class="logi-info">
-        <div class="logi-nom">${escapeHtml(logiNombre(p.cliente) || 'Cliente')}</div>
-        <div class="logi-tel">${tel ? escapeHtml(corteFmtTel(tel)) : '<span style="color:#ef4444">Sin teléfono: consultá con Neon</span>'}</div>
-        <div class="logi-dest">${dest}${chips}</div>
-      </div>
-      <div class="logi-acc">
-        ${logiEstadoChip(p)}
-        <div class="logi-btns">
-          <button class="btn" data-logi-wa="${k}"${tel ? '' : ' disabled'} style="background:#25D366;border-color:#25D366;color:#062b14;font-weight:800${tel ? '' : ';opacity:.35;cursor:not-allowed'}">WhatsApp</button>
-          <button class="btn btn-ghost" data-logi-mas="${k}">${open ? 'Menos ▴' : 'Más ▾'}</button>
-        </div>
-      </div>
-    </div>${open ? logiDesplegableHtml(p) : ''}`;
-  };
-  return `
-    <div style="margin:0 0 12px">
-      <div style="font-size:17px;font-weight:800;margin-bottom:6px">Listos para el martes: ${listosMartes} de ${paq.length}</div>
-      <div style="height:10px;border-radius:9px;background:var(--border);overflow:hidden"><div style="height:100%;width:${pct}%;background:#22c55e"></div></div>
-      ${STATE.logi.retiran ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:5px">${STATE.logi.retiran} retiran en el taller (no figuran acá)</div>` : ''}
-    </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">${chip('hacer', 'Por hacer')}${chip('esperando', 'Esperando')}${chip('listos', 'Listos')}${chip('todos', 'Todos')}</div>
-    ${lista.length ? `<div class="logi-lista">${lista.map(fila).join('')}</div>` : `<div style="padding:22px;color:var(--fg-mute);border:1px dashed var(--border);border-radius:12px;text-align:center">${paq.length ? 'Nada en este filtro' : 'No hay paquetes para envío esta semana'}</div>`}`;
-}
-function logiMartesHtml(paq) {
-  const caja = String(STATE.logiCaja || '').replace(/\D/g, '');
-  const byNum = (a, b) => (a.numero || 999) - (b.numero || 999) || String(a.cliente || '').localeCompare(String(b.cliente || ''), 'es');
-  const para = paq.filter(p => p.entrega === 'envio' && (p.listo || logiCargado(p))).sort((a, b) => (logiCargado(a) - logiCargado(b)) || byNum(a, b));
-  const quedan = paq.filter(p => !para.includes(p)).sort(byNum);
-  const nCarg = para.filter(logiCargado).length;
-  const pct = para.length ? Math.min(100, Math.round(nCarg / para.length * 100)) : 0;
-  const oc = p => (caja && parseInt(caja, 10) !== (parseInt(p.numero, 10) || -1)) ? ' logi-oculto' : '';
-  const tam = pq => pq ? `${pq.largo}×${pq.ancho}×${pq.alto} cm${pq.peso ? ' · ' + _fmtKg(pq.peso) + ' kg' : ''} (${pq.fuente === 'medido' ? 'medido' : 'est.'})` : '';
-  const fila = p => {
-    const c = logiCargado(p), b = (p.paquete && parseInt(p.paquete.bultos, 10)) || 1;
-    return `<button type="button" class="logi-carga${c ? ' logi-atenuada' : ''}${oc(p)}" data-logi-cargar="${escapeHtml(p.key)}" data-logi-num="${parseInt(p.numero, 10) || ''}">
-      <span class="logi-check${c ? ' on' : ''}">${c ? '✓' : ''}</span>
-      <span class="logi-num-big">${logiN(p.numero)}</span>
-      <span class="logi-info"><span class="logi-nom" style="display:block">${escapeHtml(logiNombre(p.cliente) || 'Cliente')}</span><span class="logi-dest">${p.falta_direccion ? corteChip('Falta dirección', '#ef4444') : (logiDirNoDisponible(p) ? corteChip('Dirección no disponible', '#94a3b8') : `<span class="d">${escapeHtml(logiDestino(p) || '')}</span>`)}</span><span style="display:block;font-size:13px;color:var(--fg-mute);margin-top:2px">${escapeHtml(tam(p.paquete))}${b > 1 ? ` · <b style="color:#f59e0b">${b} bultos</b>` : ''}${p.arrastre ? ' · de la semana del ' + escapeHtml(logiFechaCorteDDMM(p.arrastre)) : ''}</span></span>
-    </button>`;
-  };
-  const filaQueda = p => `<div class="logi-fila${oc(p)}" data-logi-num="${parseInt(p.numero, 10) || ''}">
-      <div class="logi-num">${logiN(p.numero)}</div>
-      <div class="logi-info"><div class="logi-nom">${escapeHtml(logiNombre(p.cliente) || 'Cliente')}</div><div style="color:#ef4444;font-weight:700;font-size:14px">${escapeHtml(logiMotivo(p))}</div></div>
-    </div>`;
-  return `
-    <div style="margin:0 0 12px">
-      <div style="font-size:22px;font-weight:900;margin-bottom:6px">Enviados ${nCarg} de ${para.length}</div>
-      <div style="height:12px;border-radius:9px;background:var(--border);overflow:hidden"><div style="height:100%;width:${pct}%;background:#22c55e"></div></div>
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
-      <input id="logi-caja" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="N° de caja" value="${escapeHtml(caja)}" style="flex:1;min-width:0;max-width:240px;background:var(--ink-100);border:1px solid var(--border);border-radius:10px;padding:12px 14px;color:var(--fg);font-size:18px;font-weight:700">
-      <button class="btn btn-ghost" data-logi-caja-x style="padding:12px 14px;font-size:14px${caja ? '' : ';visibility:hidden'}">Ver todas</button>
-    </div>
-    <h2 style="font-size:15px;margin:0 0 8px">Para enviar <span style="color:var(--fg-mute);font-weight:400">${para.length}</span></h2>
-    ${para.length ? `<div style="display:flex;flex-direction:column;gap:8px">${para.map(fila).join('')}</div>` : '<div style="padding:18px;color:var(--fg-mute);border:1px dashed var(--border);border-radius:12px;text-align:center">Todavía no hay paquetes listos (necesitan el pedido y el envío pagados)</div>'}
-    ${quedan.length ? `<h2 style="font-size:15px;margin:22px 0 8px">Quedan en el taller <span style="color:var(--fg-mute);font-weight:400">${quedan.length}</span></h2><div class="logi-lista">${quedan.map(filaQueda).join('')}</div>` : ''}
-    <button class="btn btn-cyan" data-logi-fin style="width:100%;justify-content:center;margin-top:22px;padding:16px;font-size:17px;font-weight:800">Terminé de enviar</button>`;
-}
 function renderLogistica() {
   const L = STATE.logi;
   if (!L) return `<div style="padding:24px;color:var(--fg-mute)">Cargando envíos…</div>`;
   if (L.error) return `<div style="padding:24px"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(L.error)}</div><button class="btn" data-logi-refresh>Reintentar</button></div>`;
   if (!logiOperador()) return logiOperadorHtml();
-  const t = L.tanda, tandas = L.tandas || [], modo = logiModo();
+  const t = L.tanda, tandas = L.tandas || [];
   const idx = t ? tandas.findIndex(x => x.id === t.id) : -1;
   const prev = idx >= 0 && idx < tandas.length - 1 ? tandas[idx + 1] : null, next = idx > 0 ? tandas[idx - 1] : null;
-  const paq = (L.paquetes || []).filter(p => p && p.key);
+  const paq = logiPaquetes();
   const fD = t ? logiFechaCorteDate(t.fecha) : null;
   const martes = t ? (t.martes || (fD ? logiDDMM(new Date(fD.getFullYear(), fD.getMonth(), fD.getDate() + 1)) : '')) : '';
-  const navBtn = (tt, lab, dir) => `<button data-logi-tanda="${tt ? tt.id : ''}"${tt ? '' : ' disabled'} title="${dir}" aria-label="${dir}" style="border:1px solid var(--border);background:var(--ink-100);color:var(--fg);width:40px;height:40px;border-radius:10px;cursor:${tt ? 'pointer' : 'default'};opacity:${tt ? 1 : .35};font-size:19px">${lab}</button>`;
-  const sw = (m, lab) => `<button data-logi-modo="${m}" style="flex:1;min-width:0;padding:15px 8px;font-size:16px;font-weight:800;border:0;cursor:pointer;background:${modo === m ? 'var(--neon-cyan,#8FD4DE)' : 'var(--ink-100)'};color:${modo === m ? 'var(--ink-050,#05050a)' : 'var(--fg)'}">${lab}</button>`;
-  return `<div style="padding:var(--s-4);max-width:980px">
-    <style>
-      .logi-lista{border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--ink-100)}
-      .logi-fila{display:flex;align-items:center;gap:12px;padding:12px;border-top:1px solid var(--border)}
-      .logi-lista>.logi-fila:first-child{border-top:0}
-      .logi-atenuada{opacity:.5}
-      .logi-oculto{display:none!important}
-      .logi-num{font-size:28px;font-weight:900;min-width:48px;text-align:center;font-variant-numeric:tabular-nums;flex:0 0 auto}
-      .logi-info{flex:1;min-width:0;text-align:left}
-      .logi-nom{font-weight:800;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .logi-tel{font-size:12px;color:var(--fg-mute)}
-      .logi-dest{font-size:13px;margin-top:3px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;min-width:0}
-      .logi-dest .d{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;min-width:0}
-      .logi-acc{display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex:0 0 auto}
-      .logi-btns{display:flex;gap:8px}
-      .logi-btns .btn{padding:11px 15px;font-size:15px;white-space:nowrap}
-      .logi-mas{padding:12px 14px 16px 72px;background:rgba(0,0,0,.18);border-top:1px dashed var(--border);display:flex;flex-direction:column;gap:12px}
-      .logi-big{padding:12px 18px;font-size:15px;font-weight:700;justify-content:center}
-      .logi-carga{display:flex;align-items:center;gap:14px;width:100%;padding:14px;border:1px solid var(--border);border-radius:12px;background:var(--ink-100);color:var(--fg);cursor:pointer;font:inherit;text-align:left}
-      .logi-check{width:40px;height:40px;flex:0 0 auto;border:3px solid var(--fg-mute);border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:900}
-      .logi-check.on{border-color:#22c55e;background:#22c55e;color:#04140a}
-      .logi-num-big{font-size:40px;font-weight:900;min-width:64px;text-align:center;font-variant-numeric:tabular-nums;flex:0 0 auto}
-      @media(max-width:640px){
-        .logi-fila{flex-wrap:wrap}
-        .logi-acc{flex-basis:100%;flex-direction:row;justify-content:space-between;align-items:center}
-        .logi-mas{padding-left:14px}
-        .logi-num-big{font-size:32px;min-width:50px}
-      }
-    </style>
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <h1 style="margin:0;font-size:18px;line-height:1.3;flex:1;min-width:220px">${t ? `Envíos · semana del lunes ${escapeHtml(logiDDMM(fD) || t.fecha)} · sale el martes ${escapeHtml(martes)}` : 'Envíos'}</h1>
-      ${t && tandas.length > 1 ? `<div style="display:flex;gap:6px">${navBtn(prev, '‹', 'Semana anterior')}${navBtn(next, '›', 'Semana siguiente')}</div>` : ''}
+  const nEnv = paq.filter(logiEnv).length;
+  const navBtn = (tt, lab, dir) => `<button type="button" data-logi-tanda="${tt ? tt.id : ''}"${tt ? '' : ' disabled'} title="${dir}" aria-label="${dir}">${lab}</button>`;
+  return `<div class="logi-wrap">
+    <div class="logi-head">
+      <h1>${t ? `Envíos · semana del lunes ${escapeHtml(logiDDMM(fD) || t.fecha)} · sale el martes ${escapeHtml(martes)}` : 'Envíos'}</h1>
+      ${t && tandas.length > 1 ? `<div class="logi-nav">${navBtn(prev, '‹', 'Semana anterior')}${navBtn(next, '›', 'Semana siguiente')}</div>` : ''}
     </div>
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;font-size:12px;color:var(--fg-mute)">
+    <div class="logi-bar">
       <span data-logi-upd>${escapeHtml(logiHaceTxt())}</span>
-      <span>· Usando: <b>${escapeHtml(logiOperador())}</b> <button data-logi-op-cambiar style="background:none;border:0;color:var(--accent-cyan,#8FD4DE);cursor:pointer;font-size:12px;padding:0;text-decoration:underline">cambiar</button></span>
+      <span>· Usando: <b>${escapeHtml(logiOperador())}</b> <button type="button" class="logi-link" data-logi-op-cambiar>cambiar</button></span>
       <span style="flex:1"></span>
-      <button class="btn btn-ghost" data-logi-refresh style="font-size:13px;padding:7px 12px">Actualizar</button>
-      <button class="btn btn-ghost" data-logi-print style="font-size:13px;padding:7px 12px">Imprimir</button>
-      ${isAdmin() ? `<button class="btn btn-ghost" data-logi-password style="font-size:13px;padding:7px 12px" title="Crear o cambiar la contraseña del usuario 'logistica'">Contraseña de logística</button>` : ''}
+      <button class="btn btn-ghost" data-logi-refresh>Actualizar</button>
+      ${t ? `<button class="btn btn-ghost" data-logi-excel title="Baja la tabla (con el filtro de ahora) para abrirla en Excel">Descargar Excel</button><button class="btn btn-ghost" data-logi-print title="La tabla en hoja A4 apaisada (con el filtro de ahora)">Imprimir</button>` : ''}
+      ${t && nEnv ? `<button class="btn btn-ghost" data-logi-fin title="Le avisa a Neon cuántos salieron y cuáles quedan en el taller">Terminé de enviar</button>` : ''}
+      ${isAdmin() ? `<button class="btn btn-ghost" data-logi-password title="Crear o cambiar la contraseña del usuario 'logistica'">Contraseña de logística</button>` : ''}
     </div>
-    <div style="display:flex;border:1px solid var(--border);border-radius:12px;overflow:hidden;margin:12px 0 14px">${sw('lunes', 'Lunes · Contactar')}${sw('martes', 'Martes · Enviar')}</div>
-    ${L.ltv_error ? `<div style="color:#f59e0b;font-size:13px;margin-bottom:10px">${escapeHtml(L.ltv_error)}</div>` : ''}
-    ${!t ? '<div style="padding:22px;color:var(--fg-mute);border:1px dashed var(--border);border-radius:12px;text-align:center">Todavía no hay ninguna semana cargada.</div>' : (modo === 'martes' ? logiMartesHtml(paq) : logiLunesHtml(paq))}
+    ${L.ltv_error ? `<div class="logi-aviso">${escapeHtml(L.ltv_error)}</div>` : ''}
+    ${!t ? '<div class="logi-vacio-box">Todavía no hay ninguna semana cargada.</div>' : `
+    <div class="logi-filtros"><span class="logi-chips" data-logi-chips>${logiChipsHtml(paq)}</span><input id="logi-q" class="logi-q" type="search" autocomplete="off" spellcheck="false" placeholder="Buscar nombre, localidad, provincia o N°" value="${escapeHtml(STATE.logiQ || '')}"></div>
+    <div class="logi-tot" data-logi-tot>${escapeHtml(logiTotalesTxt(paq))}</div>
+    <div class="logi-scroll" tabindex="0" aria-label="Tabla de envíos de la semana">${logiTablaHtml(paq)}</div>
+    <div class="logi-ayuda">Click en una celda para escribir · Enter guarda y baja · Tab va a la derecha · Esc cancela · Todo se guarda solo</div>
+    <datalist id="logi-provincias">${LOGI_PROVINCIAS.map(x => `<option value="${escapeHtml(x)}"></option>`).join('')}</datalist>
+    <datalist id="logi-transportes">${logiTransportes().map(x => `<option value="${escapeHtml(x)}"></option>`).join('')}</datalist>`}
   </div>`;
 }
 // --- Acciones ---
@@ -5047,38 +5668,10 @@ async function logiPost(path, body) {
     }
   }
 }
-function logiAplicarPaquete(pq) { const p = pq && pq.key ? logiPaq(pq.key) : null; if (p) Object.assign(p, pq); }
-// POST /admin/logistica/contacto con cambio optimista (se revierte si falla).
-async function logiContacto(key, accion, extra) {
-  const L = STATE.logi, p = logiPaq(key); if (!L || !L.tanda || !p) return null;
-  // Candado por paquete mientras el POST está en vuelo (como _logiCargando): el render optimista recrea los botones
-  // habilitados, y un doble toque mandaba 2 'no_contesta' (el server suma un intento por request → el aviso de 3
-  // intentos a Gaspar salía antes de tiempo). logiDesplegableHtml dibuja los botones deshabilitados mientras tanto.
-  const lock = accion !== 'avisar';
-  STATE._logiAcc = STATE._logiAcc || {};
-  if (lock) { if (STATE._logiAcc[key]) return null; STATE._logiAcc[key] = accion; }
-  const antes = { ...p }, ahora = new Date().toISOString(), op = logiOperador();
-  let res;
-  try {
-    if (accion === 'escrito') Object.assign(p, { contacto_estado: 'escrito', contacto_at: ahora });
-    else if (accion === 'no_contesta') Object.assign(p, { contacto_estado: 'no_contesta', contacto_at: ahora, intentos: (parseInt(p.intentos, 10) || 0) + 1 });
-    else if (accion === 'envio_pagado') Object.assign(p, { envio_pagado: true, envio_pagado_at: ahora, contacto_estado: 'listo', listo: p.pedido_pagado !== false && p.entrega === 'envio' && !p.despachado, bloqueo: p.pedido_pagado === false ? 'Pedido impago' : (p.entrega !== 'envio' ? 'Entrega sin definir' : null) });
-    else if (accion === 'deshacer_envio') Object.assign(p, { envio_pagado: false, envio_pagado_at: null, contacto_estado: 'escrito', listo: false, bloqueo: p.pedido_pagado === false ? 'Pedido impago' : (p.entrega !== 'envio' ? 'Entrega sin definir' : 'Falta pagar el envío') });
-    if (accion !== 'avisar') { p.historial = [{ ts: ahora, accion, nota: (extra && extra.nota) || '', operador: op }].concat(p.historial || []).slice(0, 5); logiRender(); }
-    res = await logiPost('/admin/logistica/contacto', { tanda_id: L.tanda.id, key, accion, ...(extra || {}), ...(op ? { operador: op } : {}) });
-  } finally { if (lock && STATE._logiAcc[key] === accion) delete STATE._logiAcc[key]; }
-  const { status, j } = res;
-  // Si mientras tanto se cambió de semana, no se toca la otra (la clave del paquete se repite entre semanas).
-  const misma = !!(STATE.logi && STATE.logi.tanda && STATE.logi.tanda.id === L.tanda.id);
-  if (j && j.ok) { if (j.paquete && misma) logiAplicarPaquete(j.paquete); logiRender(); return j; }
-  if (accion !== 'avisar' && misma) { const q = logiPaq(key); if (q) Object.assign(q, antes); logiRender(); }
-  niToast(logiErrTxt(j, status), { error: true });
-  if (status === 404 || status === 409 || (status === 403 && j && j.error === 'tanda')) logisticaCargar({}); // 403 tanda: la semana ya no está entre las permitidas
-  return null;
-}
 function logiEsMovil() { const ua = navigator.userAgent || ''; return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(ua)); }
 // WhatsApp con el mensaje armado. Se abre DENTRO del click (si no, el navegador lo bloquea). En la compu va siempre a la
 // misma pestaña ('wa_logistica', WhatsApp Web) para no llenar el navegador de pestañas; en el celular, wa.me (la app).
+// Si estaba "Sin escribir" (o "No contesta") pasa solo a "Escrito".
 function logiWhatsApp(key) {
   const p = logiPaq(key); if (!p) return;
   const tel = String(p.telefono || '').replace(/\D/g, '');
@@ -5087,121 +5680,8 @@ function logiWhatsApp(key) {
   const w = movil ? window.open('https://wa.me/' + tel + '?text=' + txt, '_blank') : window.open('https://web.whatsapp.com/send?phone=' + tel + '&text=' + txt, 'wa_logistica');
   if (!w && !movil) { niToast('Permití las ventanas emergentes para abrir WhatsApp', { error: true }); return; }
   try { if (w && !movil) w.focus(); } catch (_) {}
-  if (!p.envio_pagado && !p.despachado && p.contacto_estado !== 'listo') logiContacto(key, 'escrito');
-}
-// Nota con guardado automático (1,5 s después de dejar de tipear; también al salir del campo). Sin re-dibujar: solo se
-// actualiza el textito de estado, así no se pierde el foco ni lo que se está escribiendo.
-function logiNotaEstado(key, txt, err) { const el = document.querySelector(`[data-logi-nota-st="${CSS.escape(key)}"]`); if (el) { el.textContent = txt; el.style.color = err ? '#ef4444' : 'var(--fg-mute)'; } }
-function logiNotaInput(key, val) {
-  STATE.logiNotaDraft = STATE.logiNotaDraft || {}; STATE.logiNotaDraft[key] = val;
-  STATE._logiNotaT = STATE._logiNotaT || {};
-  clearTimeout(STATE._logiNotaT[key]);
-  logiNotaEstado(key, 'Escribiendo…');
-  STATE._logiNotaT[key] = setTimeout(() => { delete STATE._logiNotaT[key]; logiNotaGuardar(key); }, 1500);
-}
-// Guarda ya lo pendiente: el timer que estaba corriendo o un borrador que no se pudo guardar antes (si falló el POST,
-// al salir del campo / cerrar el desplegable se reintenta; antes quedaba sin guardar sin que nadie se enterara).
-function logiNotaFlush(key) {
-  const t = STATE._logiNotaT && STATE._logiNotaT[key];
-  if (t) { clearTimeout(t); delete STATE._logiNotaT[key]; }
-  return (t || (STATE.logiNotaDraft || {})[key] != null) ? logiNotaGuardar(key) : Promise.resolve();
-}
-// Antes de cambiar de semana: se guarda lo pendiente EN LA SEMANA EN LA QUE SE ESCRIBIÓ (logiNotaGuardar toma la tanda
-// antes del primer await) y se descartan los borradores (la clave del paquete es el teléfono: se repite entre semanas).
-function logiNotasSalir() {
-  Object.keys(STATE.logiNotaDraft || {}).forEach(k => { logiNotaFlush(k); });
-  Object.values(STATE._logiNotaT || {}).forEach(t => clearTimeout(t));
-  STATE._logiNotaT = {}; STATE.logiNotaDraft = {}; STATE._logiNotaErr = {};
-}
-// ctx = {L, p, txt}: semana, paquete y texto tomados en el momento del pedido (no al ejecutarse), así lo que se escribió
-// en una semana nunca se graba en otra.
-async function logiNotaGuardar(key, ctx) {
-  STATE._logiNotaProm = STATE._logiNotaProm || {};
-  STATE._logiNotaErr = STATE._logiNotaErr || {};
-  if (!ctx) {
-    const L0 = STATE.logi, p0 = logiPaq(key); if (!L0 || !L0.tanda || !p0) return;
-    const d = (STATE.logiNotaDraft || {})[key]; if (d == null) return;
-    ctx = { L: L0, p: p0, txt: String(d) };
-  }
-  // Uno por paquete a la vez: si hay uno en vuelo, se espera y después se manda este (un texto más nuevo no queda
-  // pisado por el viejo; si es el mismo texto, no se vuelve a mandar).
-  if (STATE._logiNotaProm[key]) { const c = ctx; return STATE._logiNotaProm[key].then(() => logiNotaGuardar(key, c)); }
-  const { L, p, txt } = ctx;
-  const tid = L.tanda.id, etiqueta = logiN(p.numero) + ' ' + (logiNombre(p.cliente) || 'Cliente');
-  const enSemana = () => !!(STATE.logi && STATE.logi.tanda && STATE.logi.tanda.id === tid);
-  if (txt === String(p.nota || '')) {
-    if (enSemana() && (STATE.logiNotaDraft || {})[key] === txt) { delete STATE.logiNotaDraft[key]; delete STATE._logiNotaErr[key]; logiNotaEstado(key, p.nota_at ? 'Guardada ' + logiHora(p.nota_at) : 'Se guarda sola'); }
-    return;
-  }
-  if (enSemana()) logiNotaEstado(key, 'Guardando…');
-  const op = logiOperador();
-  const prom = logiPost('/admin/logistica/marcar', { tanda_id: tid, key, nota: txt, ...(op ? { operador: op } : {}) });
-  STATE._logiNotaProm[key] = prom;
-  let res;
-  try { res = await prom; } finally { if (STATE._logiNotaProm[key] === prom) delete STATE._logiNotaProm[key]; }
-  const { status, j } = res;
-  // Si mientras tanto se cambió de semana, la respuesta no se aplica a la otra (misma clave, otro paquete).
-  const misma = enSemana();
-  if (j && j.ok) {
-    if (!misma) return;
-    delete STATE._logiNotaErr[key];
-    const q = logiPaq(key);
-    if (q) { if (j.paquete) Object.assign(q, j.paquete); q.nota = txt; q.nota_at = q.nota_at || new Date().toISOString(); }
-    if ((STATE.logiNotaDraft || {})[key] === txt) delete STATE.logiNotaDraft[key];
-    logiNotaEstado(key, 'Guardada ' + logiHora(new Date().toISOString()));
-  } else if (!misma) {
-    niToast('No se guardó la nota de ' + etiqueta + '. Volvé a esa semana y escribila de nuevo', { error: true, ms: 6000 });
-  } else {
-    STATE._logiNotaErr[key] = status || 0;
-    logiNotaEstado(key, 'No se guardó: ' + logiErrTxt(j, status), true);
-  }
-}
-async function logiAvisar(key, btn) {
-  const p = logiPaq(key); if (!p) return;
-  const txt = String((STATE.logiNotaDraft && STATE.logiNotaDraft[key] != null) ? STATE.logiNotaDraft[key] : (p.nota || '')).trim();
-  if (!txt) {
-    niToast('Escribí en la nota qué pasó y después tocá Avisar a Neon', { error: true });
-    const t = document.querySelector(`[data-logi-nota="${CSS.escape(key)}"]`); if (t) t.focus();
-    return;
-  }
-  if (btn) btn.disabled = true;
-  await logiNotaFlush(key);
-  const r = await logiContacto(key, 'avisar', { nota: txt.slice(0, 300) });
-  const b = document.querySelector(`[data-logi-avisar="${CSS.escape(key)}"]`); if (b) b.disabled = false;
-  if (r) niToast('Listo, le avisamos a Neon');
-}
-// Martes: tocar la fila = cargar. Optimista; si el server dice que no (409: pedido impago, envío sin pagar…) se
-// revierte, se muestra el motivo en rojo DESPUÉS del render y se refresca la lista.
-async function logiMarcarCargado(key, cargado) {
-  const L = STATE.logi, p = logiPaq(key); if (!L || !L.tanda || !p) return;
-  STATE._logiCargando = STATE._logiCargando || {};
-  if (STATE._logiCargando[key]) return; // doble toque
-  STATE._logiCargando[key] = 1;
-  const etiqueta = logiN(p.numero) + ' ' + (logiNombre(p.cliente) || 'Cliente');
-  const antes = { cargado: p.cargado, cargado_at: p.cargado_at, despachado: p.despachado, despachado_at: p.despachado_at };
-  Object.assign(p, cargado ? { cargado: true, cargado_at: new Date().toISOString() } : { cargado: false, cargado_at: null, despachado: false, despachado_at: null });
-  logiRender();
-  const op = logiOperador();
-  const { status, j } = await logiPost('/admin/logistica/marcar', { tanda_id: L.tanda.id, key, cargado, ...(op ? { operador: op } : {}) });
-  delete STATE._logiCargando[key];
-  if (j && j.ok) {
-    if (j.paquete) logiAplicarPaquete(j.paquete);
-    logiRender();
-    if (cargado) niToast(etiqueta + ' enviado', { undo: () => logiMarcarCargado(key, false), ms: 5000 });
-    else niToast(etiqueta + ': se sacó de enviados');
-    return;
-  }
-  const q = logiPaq(key); if (q) Object.assign(q, antes);
-  logiRender();
-  niToast(logiErrTxt(j, status), { error: true, ms: 5000 });
-  if (status === 409 || status === 404 || (status === 403 && j && j.error === 'tanda')) logisticaCargar({});
-}
-async function logiToggleCargado(key) {
-  const p = logiPaq(key); if (!p) return;
-  if (!logiCargado(p)) return logiMarcarCargado(key, true);
-  const etiqueta = logiN(p.numero) + ' ' + (logiNombre(p.cliente) || 'Cliente');
-  if (!await showConfirm(`Sacar ${etiqueta} de los enviados?`, { title: 'Deshacer envío', confirmLabel: 'Sí, sacar', cancelLabel: 'No' }).catch(() => false)) return;
-  return logiMarcarCargado(key, false);
+  const ce = logiValor(p, 'contacto_estado');
+  if (!logiEnv(p) && !logiValor(p, 'envio_pagado') && (ce === '' || ce === 'no_contesta')) logiCeldaGuardar(key, 'contacto_estado', 'escrito');
 }
 async function logiResumen(btn) {
   const L = STATE.logi; if (!L || !L.tanda) return;
@@ -5212,41 +5692,88 @@ async function logiResumen(btn) {
   const b = document.querySelector('[data-logi-fin]'); if (b) b.disabled = false;
   if (j && j.ok) niToast('Listo, le avisamos a Neon'); else niToast(logiErrTxt(j, status), { error: true });
 }
-async function logiCopiar(txt) {
+async function logiCopiar(txt, okMsg) {
   let ok = false;
   try { await navigator.clipboard.writeText(txt); ok = true; } catch (_) {
     const ta = document.createElement('textarea'); ta.value = txt; ta.style.cssText = 'position:fixed;opacity:0;left:0;top:0'; document.body.appendChild(ta); ta.select();
     try { ok = document.execCommand('copy'); } catch (__) {}
     ta.remove();
   }
-  niToast(ok ? 'Dirección copiada' : 'No se pudo copiar', ok ? {} : { error: true });
+  niToast(ok ? (okMsg || 'Copiado') : 'No se pudo copiar', ok ? {} : { error: true });
 }
-// N° de caja (martes): filtra en el lugar, sin re-dibujar (no se cierra el teclado numérico del celular).
-function logiCajaFiltrar(val) {
-  const caja = String(val || '').replace(/\D/g, ''); STATE.logiCaja = caja;
-  const n = parseInt(caja, 10);
-  document.querySelectorAll('#main [data-logi-num]').forEach(el => { el.classList.toggle('logi-oculto', !!caja && (parseInt(el.getAttribute('data-logi-num'), 10) || -1) !== n); });
-  const x = document.querySelector('[data-logi-caja-x]'); if (x) x.style.visibility = caja ? '' : 'hidden';
+function logiFiltroTxt() {
+  const f = LOGI_FILTROS.find(x => x[0] === logiFiltroAct());
+  return (f && f[0] !== 'todos' ? ' · ' + f[1] : '') + (String(STATE.logiQ || '').trim() ? ' · búsqueda "' + String(STATE.logiQ).trim() + '"' : '');
 }
-// Imprimir: la lista del modo actual, simple (N° / nombre / destino / estado). Sin await antes del window.open.
+// Descargar Excel: CSV con BOM UTF-8 y ';' (Excel en español lo abre directo), las columnas de la tabla en el mismo orden
+// (el teléfono en su propia columna), respetando el filtro y la búsqueda. Sin montos del pedido; sí el costo del envío.
+function logiExcel() {
+  const L = STATE.logi; if (!L || !L.tanda) return;
+  const lista = logiVisibles(logiPaquetes());
+  const head = ['N°', 'Cliente', 'Teléfono'].concat(LOGI_COLS.slice(2).map(c => c.tit));
+  const fila = p => {
+    const tel = String(p.telefono || '').replace(/\D/g, '');
+    return [logiTextoCelda(p, 'num'), logiTextoCelda(p, 'cliente'), tel ? corteFmtTel(tel).replace(/^\+/, '') : ''].concat(LOGI_COLS.slice(2).map(c => logiTextoCelda(p, c.id)));
+  };
+  // Identificadores (N°, teléfono, DNI, CP, guía) que son solo dígitos van como ="..." (texto): si no, Excel los toma como
+  // número (una guía de 19 dígitos queda 3,8675E+18 con los últimos en 0; "05" queda 5).
+  const ids = new Set([0, 2].concat(['dni', 'cp', 'seguimiento'].map(id => 3 + LOGI_COLS.slice(2).findIndex(c => c.id === id))));
+  // Texto que empieza con = + - @ se anteponen ' (Excel no lo toma como fórmula).
+  const cel = (v, i) => { let s = String(v == null ? '' : v); if (ids.has(i) && /^\d+$/.test(s)) return '"=""' + s + '"""'; if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return /[";\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const csv = '﻿' + [head].concat(lista.map(fila)).map(r => r.map(cel).join(';')).join('\r\n') + '\r\n';
+  const fD = logiFechaCorteDate(L.tanda.fecha), dm = fD ? logiDDMM(fD).replace('/', '-') : String(L.tanda.id);
+  try {
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a'); a.href = url; a.download = 'envios-semana-' + dm + '.csv';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+    niToast('Bajando ' + lista.length + ' envío' + (lista.length === 1 ? '' : 's') + logiFiltroTxt());
+  } catch (_) { niToast('No se pudo armar el archivo', { error: true }); }
+}
+// Imprimir: la tabla (con el filtro de ahora) en A4 apaisado, sin botones, con la hora de impresión. La ventana se abre
+// antes de cualquier await y se le escribe el HTML (nunca una URL con el token).
 function logiImprimir() {
   const L = STATE.logi; if (!L || !L.tanda) return;
-  const esc = s => escapeHtml(String(s == null ? '' : s));
-  const modo = logiModo();
-  const paq = (L.paquetes || []).filter(p => p && p.key).sort((a, b) => (a.numero || 999) - (b.numero || 999));
-  const fila = (cols) => `<tr>${cols.map(c => `<td>${c}</td>`).join('')}</tr>`;
-  let cuerpo;
-  if (modo === 'martes') {
-    const para = paq.filter(p => p.entrega === 'envio' && (p.listo || logiCargado(p))), quedan = paq.filter(p => !para.includes(p));
-    cuerpo = `<h2>Para enviar (${para.length})</h2><table><thead><tr><th>N°</th><th>Cliente</th><th>Destino</th><th>Paquete</th><th>Enviado</th></tr></thead><tbody>${para.map(p => fila([`<b>${esc(logiN(p.numero))}</b>`, esc(logiNombre(p.cliente)), esc(logiDestino(p)), esc(p.paquete ? logiPaqTxt(p.paquete) : ''), logiCargado(p) ? '✓' : '☐'])).join('')}</tbody></table>`
-      + (quedan.length ? `<h2>Quedan en el taller (${quedan.length})</h2><table><thead><tr><th>N°</th><th>Cliente</th><th>Motivo</th></tr></thead><tbody>${quedan.map(p => fila([`<b>${esc(logiN(p.numero))}</b>`, esc(logiNombre(p.cliente)), `<b>${esc(logiMotivo(p))}</b>`])).join('')}</tbody></table>` : '');
-  } else {
-    cuerpo = `<table><thead><tr><th>N°</th><th>Cliente</th><th>Teléfono</th><th>Destino</th><th>Estado</th></tr></thead><tbody>${paq.map(p => fila([`<b>${esc(logiN(p.numero))}</b>`, esc(logiNombre(p.cliente)), (p.telefono ? esc(corteFmtTel(p.telefono)) : ''), p.falta_direccion ? '<b>FALTA DIRECCIÓN</b>' : (logiDirNoDisponible(p) ? 'Dirección no disponible' : esc(logiDestino(p))), esc(logiEstadoTxt(p)) + (p.pedido_pagado === false ? ' · <b>Pedido impago</b>' : '') + (p.entrega !== 'envio' ? ' · <b>Preguntar si retira o envío</b>' : '')])).join('')}</tbody></table>`;
-  }
-  const titulo = `Envíos · semana del lunes ${logiFechaCorteDDMM(L.tanda.fecha)} · ${modo === 'martes' ? 'Enviar' : 'Contactar'}`;
   const w = window.open('', '_blank'); if (!w) { niToast('Permití las ventanas emergentes para imprimir', { error: true }); return; }
-  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(titulo)}</title><style>body{font:13px/1.35 Arial,Helvetica,sans-serif;margin:18px;color:#000}h1{font-size:17px}h2{font-size:15px;margin:16px 0 6px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #000;padding:6px;vertical-align:top;text-align:left}td:first-child{font-size:16px;text-align:center;width:44px}tr{break-inside:avoid}</style></head><body><h1>${esc(titulo)}</h1>${cuerpo}<script>window.onload=()=>window.print()<\/script></body></html>`);
-  w.document.close();
+  const esc = s => escapeHtml(String(s == null ? '' : s));
+  const lista = logiVisibles(logiPaquetes());
+  const fD = logiFechaCorteDate(L.tanda.fecha);
+  const titulo = `Envíos · semana del lunes ${logiDDMM(fD) || L.tanda.fecha} · sale el martes ${L.tanda.martes || ''}`;
+  const ahora = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  // Anchos en % de la hoja (suman 100): con el ancho automático el N°, el DNI y el CP se partían en dos renglones.
+  const PW = { num: 2.6, cliente: 8.5, pedido: 4.4, recibe: 6.5, dni: 5.4, calle: 10.5, localidad: 6.5, provincia: 6, cp: 3.8, bultos: 3, medidas: 5.8, peso: 3.6, contacto_estado: 5.2, transporte: 5.6, envio_costo: 4.6, envio_pagado: 3.4, seguimiento: 5.6, enviado: 3.8, nota: 5.2 };
+  const cols = LOGI_COLS.map(c => `<col style="width:${PW[c.id] || 4}%">`).join('');
+  const grupos = LOGI_GRUPOS.map(([g, lab]) => `<th colspan="${LOGI_COLS.filter(c => c.g === g).length}">${lab}</th>`).join('');
+  const head = LOGI_COLS.map(c => `<th>${esc(c.tit)}</th>`).join('');
+  const fila = p => `<tr class="${logiFilaCls(p)}">${LOGI_COLS.map(c => {
+    if (c.id === 'cliente') { const tel = String(p.telefono || '').replace(/\D/g, ''); return `<td><b>${esc(logiTextoCelda(p, 'cliente'))}</b>${tel ? '<br><small>' + esc(corteFmtTel(tel)) + '</small>' : ''}</td>`; }
+    const v = logiTextoCelda(p, c.id);
+    if (c.ed === 'chk') return `<td class="c">${v === 'Sí' ? '✓' : ''}</td>`;
+    if (c.id === 'envio_costo') return `<td class="r">${v ? '$ ' + (parseInt(v, 10) || 0).toLocaleString('es-AR') : ''}</td>`;
+    const cls = [c.id === 'num' ? 'n' : (['dni', 'bultos'].includes(c.id) ? 'nw' : ''), LOGI_IMPRESCINDIBLES.includes(c.id) && logiFaltan(p).includes(c.id) ? 'falta' : ''].filter(Boolean).join(' ');
+    return `<td${cls ? ` class="${cls}"` : ''}>${esc(v)}</td>`;
+  }).join('')}</tr>`;
+  try {
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(titulo)}</title><style>
+@page{size:A4 landscape;margin:7mm}
+*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{font:7.6pt/1.25 Arial,Helvetica,sans-serif;margin:0;color:#000;background:#fff}
+h1{font-size:11pt;margin:0 0 1mm}.sub{font-size:8pt;margin:0 0 2.5mm}
+table{border-collapse:collapse;width:100%;table-layout:fixed}
+th,td{border:.2mm solid #555;padding:.8mm 1mm;vertical-align:top;text-align:left;overflow-wrap:anywhere}
+thead th{background:#e9e9e9;font-size:6.8pt;overflow-wrap:normal;overflow:hidden}
+td.nw{white-space:nowrap;overflow-wrap:normal}
+thead tr.g th{background:#d4d4d4;text-align:center;text-transform:uppercase;letter-spacing:.3px}
+td.n{font-size:10pt;font-weight:700;text-align:center;white-space:nowrap;overflow-wrap:normal}td.c{text-align:center;font-size:9pt}td.r{text-align:right;white-space:nowrap}
+td.falta{background:#ffe1e1}
+tr.r-impago td:first-child{border-left:1.2mm solid #d00}tr.r-listo td:first-child{border-left:1.2mm solid #0a0}tr.r-sindef td:first-child{border-left:1.2mm solid #d80}
+tr.r-enviado td{color:#777}
+tr{break-inside:avoid}thead{display:table-header-group}small{font-size:6.6pt;color:#333}
+</style></head><body><h1>${esc(titulo)}</h1><div class="sub">${esc(lista.length + ' envío' + (lista.length === 1 ? '' : 's') + logiFiltroTxt() + ' · impreso el ' + ahora)}</div>
+<table><colgroup>${cols}</colgroup><thead><tr class="g">${grupos}</tr><tr>${head}</tr></thead><tbody>${lista.length ? lista.map(fila).join('') : `<tr><td colspan="${LOGI_COLS.length}">Nada para imprimir</td></tr>`}</tbody></table>
+<script>window.onload=function(){window.print()}<\/script></body></html>`);
+    w.document.close();
+  } catch (_) {}
 }
 function logiPasswordModal() {
   return new Promise(resolve => {
@@ -5274,47 +5801,98 @@ async function logiPasswordUI() {
     toast(r && r.ok ? 'Listo: el usuario "logistica" ya puede entrar con esa contraseña' : ((r && r.error) || 'No se pudo guardar'));
   } catch (_) { toast('Error de red'); }
 }
-// Tick de 30 s: actualiza el "actualizado hace X", aplica un re-dibujo pendiente si ya no está tipeando y cada ~90 s
-// refresca de fondo (pausado mientras hay un POST en vuelo; solo con la vista abierta y la pestaña visible).
+// Tick de 30 s: actualiza el "actualizado hace X", reintenta las celdas que no se guardaron por la red, aplica un re-dibujo
+// pendiente si ya no está ocupado y cada ~90 s refresca de fondo (pausado mientras hay un POST en vuelo; solo con la vista
+// abierta y la pestaña visible).
 function logiTick() {
   if (STATE.view !== 'logistica' || document.visibilityState !== 'visible' || !STATE.token) return;
   const u = document.querySelector('[data-logi-upd]'); if (u) u.textContent = logiHaceTxt();
-  if (STATE._logiDirty && !logiTipeando()) { STATE._logiDirty = false; logiRender(); }
-  // Notas que no se guardaron por la red o el server (5xx): se reintentan solas (las 4xx, al salir del campo).
-  Object.keys(STATE._logiNotaErr || {}).forEach(k => {
-    const e = STATE._logiNotaErr[k];
-    if ((e === 0 || e >= 500) && !(STATE._logiNotaT || {})[k] && !(STATE._logiNotaProm || {})[k]) logiNotaGuardar(k);
+  const ed = STATE._logiEd;
+  Object.entries(STATE._logiCel || {}).forEach(([ck, st]) => {
+    if (!st || st.st !== 'error' || st.status !== 0) return;
+    const i = ck.lastIndexOf('|'), key = ck.slice(0, i), col = ck.slice(i + 1);
+    if (ed && ed.key === key && ed.col === col) return;
+    if (logiPaq(key)) logiCeldaGuardar(key, col, st.val);
   });
+  if (STATE._logiDirty && !logiOcupado()) logiRender();
   if (STATE.logi && Date.now() - (STATE.logiLoadedAt || 0) >= 85 * 1000) logisticaCargar({ silent: true });
+}
+// Listeners de documento (una sola vez): cerrar el texto original al tocar afuera / Esc, Ctrl+V con una celda elegida,
+// y reacomodar el alto de la tabla al cambiar el tamaño de la ventana.
+function logiBindGlobal() {
+  if (window._logiGlobal) return;
+  window._logiGlobal = true;
+  document.addEventListener('mousedown', e => {
+    if (STATE.view !== 'logistica') return;
+    const pop = document.getElementById('logi-pop');
+    if (pop && !pop.contains(e.target) && !(e.target.closest && e.target.closest('[data-logi-pop]'))) logiPopCerrar(true);
+  }, true);
+  document.addEventListener('keydown', e => {
+    if (STATE.view !== 'logistica' || e.key !== 'Escape' || !document.getElementById('logi-pop')) return;
+    e.preventDefault(); logiPopCerrar(true); logiFocoGrilla();
+  });
+  document.addEventListener('paste', e => {
+    const ae = document.activeElement;
+    if (STATE.view === 'logistica' && ae && ae.classList && ae.classList.contains('logi-scroll')) logiPaste(e);
+  });
+  window.addEventListener('resize', () => { if (STATE.view === 'logistica') { logiAjustarAlto(); logiPopUbicar(); } });
 }
 function bindLogistica() {
   if (!STATE.logi && !STATE._logiPendiente) logisticaCargar({});
   if (!window._logiTimer) window._logiTimer = setInterval(logiTick, 30 * 1000);
+  logiBindGlobal();
   const $$ = (sel, fn) => document.querySelectorAll(sel).forEach(fn);
   $$('[data-logi-refresh]', b => { b.onclick = () => { const err = !!(STATE.logi && STATE.logi.error); if (err) STATE.logi = undefined; logisticaCargar({}); if (err) render(); }; });
-  $$('[data-logi-tanda]', b => { b.onclick = () => { const id = parseInt(b.getAttribute('data-logi-tanda'), 10); if (!id) return; logiNotasSalir(); STATE.logiTanda = id; STATE.logi = undefined; STATE.logiOpen = {}; STATE.logiCaja = ''; logisticaCargar({}); render(); }; });
-  $$('[data-logi-modo]', b => { b.onclick = () => { logiSetModo(b.getAttribute('data-logi-modo')); STATE.logiCaja = ''; render(); window.scrollTo(0, 0); }; });
-  $$('[data-logi-filtro]', b => { b.onclick = () => { STATE.logiFiltro = b.getAttribute('data-logi-filtro'); logiRender(); }; });
-  const pb = document.querySelector('[data-logi-print]'); if (pb) pb.onclick = () => logiImprimir();
-  const pw = document.querySelector('[data-logi-password]'); if (pw) pw.onclick = () => logiPasswordUI();
+  $$('[data-logi-tanda]', b => { b.onclick = () => {
+    const id = parseInt(b.getAttribute('data-logi-tanda'), 10); if (!id) return;
+    if (STATE._logiEd) logiEdCerrar(true);
+    logiPopCerrar();
+    STATE.logiTanda = id; STATE.logi = undefined; STATE.logiSel = null; STATE._logiCel = {}; STATE._logiKeep = {}; STATE._logiScroll = null;
+    logisticaCargar({}); render();
+  }; });
+  $$('[data-logi-excel]', b => { b.onclick = () => logiExcel(); });
+  $$('[data-logi-print]', b => { b.onclick = () => logiImprimir(); });
+  $$('[data-logi-fin]', b => { b.onclick = () => logiResumen(b); });
+  $$('[data-logi-password]', b => { b.onclick = () => logiPasswordUI(); });
   // Operador (una vez por dispositivo).
   const opIn = document.getElementById('logi-op');
   const opOk = () => { const v = String((opIn && opIn.value) || '').trim().slice(0, 40); if (!v) { niToast('Escribí tu nombre', { error: true }); return; } logiLsSet(LOGI_OP_KEY, v); STATE._logiOpMem = v; STATE._logiOpDraft = ''; render(); };
   if (opIn) { opIn.oninput = () => { STATE._logiOpDraft = opIn.value; }; opIn.onkeydown = e => { if (e.key === 'Enter') opOk(); }; if (!STATE._logiOpDraft) { try { opIn.focus(); } catch (_) {} } }
   $$('[data-logi-op-ok]', b => { b.onclick = opOk; });
   $$('[data-logi-op-cambiar]', b => { b.onclick = () => { logiLsSet(LOGI_OP_KEY, null); STATE._logiOpMem = ''; render(); }; });
-  // Lunes.
-  $$('[data-logi-wa]', b => { b.onclick = () => logiWhatsApp(b.getAttribute('data-logi-wa')); });
-  $$('[data-logi-mas]', b => { b.onclick = () => { const k = b.getAttribute('data-logi-mas'); STATE.logiOpen = STATE.logiOpen || {}; STATE.logiOpen[k] = !STATE.logiOpen[k]; if (!STATE.logiOpen[k]) logiNotaFlush(k); logiRender(); }; });
-  $$('[data-logi-copiar]', b => { b.onclick = () => { const p = logiPaq(b.getAttribute('data-logi-copiar')); if (p) logiCopiar(String(p.datos_envio || '')); }; });
-  $$('[data-logi-acc]', b => { b.onclick = () => { b.disabled = true; logiContacto(b.getAttribute('data-k'), b.getAttribute('data-logi-acc')); }; });
-  $$('[data-logi-nota]', t => { const k = t.getAttribute('data-logi-nota'); t.oninput = () => logiNotaInput(k, t.value); t.onblur = () => { logiNotaFlush(k); }; });
-  $$('[data-logi-avisar]', b => { b.onclick = () => logiAvisar(b.getAttribute('data-logi-avisar'), b); });
-  // Martes.
-  $$('[data-logi-cargar]', b => { b.onclick = () => logiToggleCargado(b.getAttribute('data-logi-cargar')); });
-  const caja = document.getElementById('logi-caja'); if (caja) caja.oninput = () => logiCajaFiltrar(caja.value);
-  $$('[data-logi-caja-x]', b => { b.onclick = () => { const c = document.getElementById('logi-caja'); if (c) c.value = ''; logiCajaFiltrar(''); }; });
-  $$('[data-logi-fin]', b => { b.onclick = () => logiResumen(b); });
+  // Filtros y buscador (redibujan solo el cuerpo de la tabla).
+  const chips = document.querySelector('[data-logi-chips]');
+  if (chips) chips.onclick = e => { const b = e.target.closest && e.target.closest('[data-logi-filtro]'); if (!b) return; STATE.logiFiltro = b.getAttribute('data-logi-filtro'); STATE._logiKeep = {}; logiPintarCuerpo(true); };
+  const q = document.getElementById('logi-q');
+  if (q) {
+    q.oninput = () => { STATE.logiQ = q.value; STATE._logiKeep = {}; logiPintarCuerpo(true); };
+    q.onkeydown = e => {
+      if (e.key === 'Enter' || e.key === 'ArrowDown') { // a la tabla, en la primera fila
+        e.preventDefault();
+        const tr = document.querySelector('.logi-t tbody tr[data-k]');
+        if (tr) { logiSeleccionar(tr.getAttribute('data-k'), (STATE.logiSel && STATE.logiSel.col) || 'cliente', { scroll: true }); logiFocoGrilla(); }
+      } else if (e.key === 'Escape' && q.value) { e.preventDefault(); q.value = ''; q.oninput(); }
+    };
+  }
+  // Tabla.
+  const sc = document.querySelector('.logi-scroll');
+  if (sc) {
+    logiAjustarAlto();
+    // Un render() de otra parte de la app (polls del admin) arma la tabla de cero: vuelve a donde estaba (misma semana).
+    const ps = STATE._logiScroll, tid = STATE.logi && STATE.logi.tanda ? STATE.logi.tanda.id : null;
+    if (ps && tid && ps.tid === tid) { sc.scrollTop = ps.t; sc.scrollLeft = ps.l; }
+    sc.addEventListener('mousedown', logiMouseDown);
+    sc.addEventListener('keydown', logiKey);
+    sc.addEventListener('change', logiChange);
+    sc.addEventListener('click', logiClick);
+    sc.addEventListener('focusin', e => { if (e.target && e.target.tagName === 'SELECT') STATE._logiSelFocusAt = Date.now(); });
+    sc.addEventListener('scroll', () => {
+      STATE._logiScroll = { t: sc.scrollTop, l: sc.scrollLeft, tid: STATE.logi && STATE.logi.tanda ? STATE.logi.tanda.id : null };
+      if (document.getElementById('logi-pop')) logiPopCerrar(true);
+    }, { passive: true });
+  }
+  if (STATE._logiEd) logiEdRestaurar();
+  if (STATE.logiPop && !document.getElementById('logi-pop')) STATE.logiPop = null;
 }
 // ===== Herramientas del admin: cargar tanda desde la planilla, entrega desde la planilla, clientes SIN teléfono =====
 function corteLunesReciente() { const d = new Date(Date.now() - 3 * 3600 * 1000); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); }
