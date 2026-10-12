@@ -2765,7 +2765,7 @@ const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (ca
 PARA CUÁNDO: preguntalo UNA sola vez, idealmente en el mismo mensaje en que pedís los otros datos que falten. Si lo dice ("para el 20", "para la inauguración", "sin apuro"), poné fecha con lo que dijo; si no sabe, no tiene fecha definida o ya se lo preguntaste y no contestó, poné fecha="no_sabe" y NO insistas. NUNCA prometas ni confirmes que llega para esa fecha (el plazo lo confirma el equipo con el presupuesto).
 Lo estrictamente necesario es la FOTO y las MEDIDAS. El interior/exterior es un plus: pedilo UNA sola vez. Si el cliente dice que no sabe / no está seguro / no lo tiene definido, O si ya se lo preguntaste y en su respuesta no te lo dio (te habló de otra cosa), NO insistas más — poné intext_no_sabe=true y damos por cerrada la pre cotización con la foto y las medidas (el equipo define el interior/exterior después). NUNCA machaques con el interior/exterior.
 
-EXTERIOR — ¿QUEDA CUBIERTO? Si el cliente dice que el cartel es para EXTERIOR (es_exterior=true), antes de cerrar preguntale UNA sola vez dónde lo piensa colocar y si tiene algún techo, sobretecho o marquesina que lo cubra (ej: "te consulto, donde lo pensas colocar? hay algun techo o marquesina que lo cubra?"). Esta pregunta se SUMA a lo que falte: si todavía faltan la foto, las medidas o para cuándo lo necesita, pedilos en el MISMO turno (nunca dejes de pedirlos por preguntar lo del techo; si faltan el techo y la fecha, preguntá las dos cosas juntas). No lo preguntes si ya lo dijo en la charla, y si alguien del equipo ya le preguntó lo del techo o ya le recomendó el corpóreo, no lo repitas. Según lo que conteste:
+EXTERIOR — ¿QUEDA CUBIERTO? Si el cliente dice que el cartel es para EXTERIOR (es_exterior=true), antes de cerrar preguntale UNA sola vez dónde lo piensa colocar y si tiene algún techo, sobretecho o marquesina que lo cubra (ej: "te consulto, donde lo pensas colocar? hay algun techo o marquesina que lo cubra?"). Esta pregunta se SUMA a lo que falte: si todavía faltan la foto, las medidas o para cuándo lo necesita, pedilos en el MISMO turno (nunca dejes de pedirlos por preguntar lo del techo; si faltan el techo y la fecha, preguntá las dos cosas juntas). No lo preguntes si ya lo dijo en la charla, y si alguien del equipo ya le preguntó lo del techo o ya le recomendó el corpóreo, no lo repitas. Si el cliente YA PIDIÓ un corpóreo (o vino de un anuncio de corpóreo), NO le preguntes lo del techo (techo="no_aplica") y NO le mandes ni ofrezcas tipografías (enviar_tipografias=false). Según lo que conteste:
 - SÍ está cubierto (bajo techo, alero, galería o una marquesina que lo protege) → techo="si" y seguí normal.
 - NO está cubierto (queda al aire libre, expuesto al sol y a la lluvia) o la marquesina es muy chica → techo="no" y sugerir_corporeo=true: explicale corto que para esa situación le recomendamos un CARTEL CORPÓREO ILUMINADO, que está pensado para estar a la intemperie (ej: "okey, en ese caso te recomendamos un cartel corporeo iluminado, que esta pensado para estar al aire libre"). Decíselo UNA sola vez y seguí pidiendo lo que falte (la foto y las medidas sirven igual para cotizarlo).
 - Si mandó una FOTO DEL LUGAR y se ve CLARAMENTE que no hay nada que lo cubra, tomalo como techo="no"; si en la foto no se ve claro, preguntalo.
@@ -2838,7 +2838,7 @@ REGLA DE ORO — NO respondas por responder. Si NO sabés qué contestar con cer
 Cuando ya tenés lo necesario, mensajes=[] (el humano sigue desde acá). "Lo necesario" = FOTO + MEDIDAS, más el interior/exterior SOLO si el cliente lo dio o dijo que no sabe, si es EXTERIOR además saber si queda cubierto (techo="si", "no" o "no_sabe"), y haber preguntado UNA vez para cuándo lo necesita (fecha con lo que dijo o "no_sabe"). O sea: si tenés foto + medidas + (tiene_intext=true O intext_no_sabe=true), fecha distinto de "" y, cuando es exterior, techo distinto de "" → mensajes=[]. ÚNICA excepción: si en este turno te contestó que NO está cubierto, mandá el mensaje recomendando el corpóreo iluminado (sugerir_corporeo=true) aunque ya esté todo. Nunca prometas el render/precio: eso lo hace una persona después.
 
 Devolvé SOLO un JSON, sin nada alrededor:
-{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"es_exterior":bool,"techo":"si|no|no_sabe|","sugerir_corporeo":bool,"fecha":"lo que dijo|no_sabe|","enviar_tipografias":bool,"mensajes":["..."]}`;
+{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"es_exterior":bool,"techo":"si|no|no_sabe|no_aplica|","sugerir_corporeo":bool,"fecha":"lo que dijo|no_sabe|","enviar_tipografias":bool,"mensajes":["..."]}`;
 
 // Detecta el tipo de imagen por los MAGIC BYTES, no por el content-type guardado. El CDN de
 // Meta (IG) a veces sirve un PNG con content-type image/jpeg, y así queda en R2. Si a Claude
@@ -2958,6 +2958,30 @@ async function precotizLlm(env, fullText, fwText, imageBlocks, meta) {
 function precotizMsgs(res) {
   const all = (res && Array.isArray(res.mensajes)) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()) : [];
   return all.length <= 4 ? all : [...all.slice(0, 3), all.slice(3).join('\n')];
+}
+
+// ===== Leads de los ANUNCIOS de corpóreo en el bot (Gaspar, 12-oct) =====
+// Antes se excluían (atención a mano + auto-reply fijo). Ahora los releva el bot, con dos reglas:
+// sin la pregunta del techo (ya eligieron corpóreo, que es para exterior) y sin tipografías (el
+// catálogo es de neón). Kill-switch kv precotiz_corporeo_on (default ON): en '0' vuelve todo a como
+// era (exclusión + auto-reply fijo de corporeoAskOnInbound).
+async function precotizCorporeoOn(env) { return (await kvGet(env, 'precotiz_corporeo_on', '1')) === '1'; }
+const PRECOTIZ_CORP_NOTE = '## LEAD DE CORPÓREO\nEste cliente vino de un anuncio de CARTELES CORPÓREOS. Reglas: hablá de corpóreo, nunca de neón; NO preguntes lo del techo (el corpóreo ya está pensado para exterior: poné techo="no_aplica"); NO mandes ni ofrezcas tipografías (enviar_tipografias=false): si no tiene logo ni letra elegida, pedile el texto exacto y decile que el equipo le propone la letra con el render. Relevá foto o logo, medidas (aclarando si es el cartel, el espacio disponible o la altura de letra), interior o exterior, para cuándo lo necesita y, si se puede, una foto del frente o del lugar donde va. Para dudas del producto usá la PARTE C del playbook.\n\n';
+// ¿El lead vino de un anuncio de corpóreo? Por el header del contexto o por la última atribución.
+async function precotizEsCorporeo(env, phone, fullText) {
+  if (/VERTICAL DEFINIDA POR EL AD: CORPOREO/.test(String(fullText || ''))) return true;
+  if (!phone) return false;
+  try {
+    const a = await env.DB.prepare("SELECT source_id, headline, body FROM wa_ad_attributions WHERE phone = ? ORDER BY ts DESC LIMIT 1").bind(phone).first();
+    return !!(a && a.source_id && (await adVerticalForSource(env, a.source_id, a.headline, a.body)) === 'corporeo');
+  } catch (_) { return false; }
+}
+// Refuerzo en código de las 2 reglas (por si la IA no las cumple): nada de tipografías ni de techo.
+function precotizAjusteCorporeo(res) {
+  if (!res) return;
+  res.enviar_tipografias = false;
+  res.sugerir_corporeo = false;            // ya es corpóreo (la etiqueta la pone el enrolamiento)
+  if (!res.techo) res.techo = 'no_aplica'; // nunca queda esperando la pregunta del techo
 }
 
 // Preguntas que se hacen UNA vez antes de cerrar la precotización (aunque ya estén foto+medidas):
@@ -3239,9 +3263,11 @@ async function processPrecotizPilot(env) {
     if (!ctx) continue;
     const fw = await getActiveFramework(env);
     const imgs = await precotizImageBlocks(env, lead.phone);
-    const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs, { phone: lead.phone });
+    const esCorp = await precotizEsCorporeo(env, lead.phone, ctx.fullText); // lead de anuncio de corpóreo
+    const out = await precotizLlm(env, (esCorp ? PRECOTIZ_CORP_NOTE : '') + ctx.fullText, fw?.content || '', imgs, { phone: lead.phone });
     if (!out.ok) continue;
     const res = out.data;
+    if (esCorp) precotizAjusteCorporeo(res);
 
     const tF = res.tiene_foto ? 1 : 0; // la IA VE la imagen y decide si es la foto del diseño
     // tiene_intext=1 también si dijo que no sabe: el dato quedó resuelto (así el nudge no se lo vuelve a
@@ -3288,7 +3314,7 @@ async function processPrecotizPilot(env) {
     // usamos…" (en otro mensaje) disparaba el catálogo sin querer.
     const _reProm = /(te (las |los )?(paso|mando|muestro|envio|comparto)[^.]{0,40}tipograf)|(tipograf[^.]{0,40}te (las |los )?(paso|mando|muestro|envio|comparto))|(tipograf(ia|ias)?[^.]{0,25}que (trabajamos|usamos))/;
     const _promeTipos = msgs.some(m => _reProm.test(_normTxt(m)));
-    const wantTipos = !!res.enviar_tipografias || _promeTipos;
+    const wantTipos = !esCorp && (!!res.enviar_tipografias || _promeTipos); // corpóreo: nunca tipografías (Gaspar)
     try { await env.DB.prepare("UPDATE precotiz_pilot SET tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
     if (!msgs.length && !wantTipos) continue;
     if (modo === 'auto') {
@@ -3391,12 +3417,20 @@ async function processPrecotizPilot(env) {
     try { const rl = await env.DB.prepare("SELECT 1 AS x FROM contact_labels WHERE phone = ? AND label_id = 2289 LIMIT 1").bind(phone).first(); if (rl) continue; } catch (_) {}
     // Alumnos del servicio de CORTE (B2B): NO son leads de carteles → los maneja el bot de corte, no la precotización.
     try { const ca = await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono = ? LIMIT 1").bind(phone).first(); if (ca) continue; } catch (_) {}
-    // Excluir leads de CORPÓREO (ads Corporeas 1/2): producto nuevo que se atiende A MANO
-    // hasta tener un bot propio. El vertical se mapea por ad_id en wa_ad_verticals. Se los
-    // etiqueta "Corpóreo" para que Joaco/Gaspar los agarren; el bot de neón NO los toca.
+    // Leads de CORPÓREO (anuncios de corpóreo, vertical mapeado por ad/campaña): siempre llevan la
+    // etiqueta "🔠 Corpóreo". Desde 12-oct los releva el bot (sin techo ni tipografías, ver
+    // precotizAjusteCorporeo); con kv precotiz_corporeo_on='0' se excluyen como antes (a mano).
+    // Si ya recibió el auto-reply fijo de corpóreo, sigue a mano (no le mandamos otra apertura).
+    let _esCorpAd = false;
     try {
       const _adc = await env.DB.prepare("SELECT source_id, headline, body FROM wa_ad_attributions WHERE phone = ? ORDER BY ts DESC LIMIT 1").bind(phone).first();
-      if (_adc && _adc.source_id && (await adVerticalForSource(env, _adc.source_id, _adc.headline, _adc.body)) === 'corporeo') { await corporeoTag(env, phone, true); continue; }
+      if (_adc && _adc.source_id && (await adVerticalForSource(env, _adc.source_id, _adc.headline, _adc.body)) === 'corporeo') {
+        await corporeoTag(env, phone, true);
+        if (!(await precotizCorporeoOn(env))) continue;
+        const _yaAsk = await env.DB.prepare("SELECT 1 AS x FROM wa_autoreply_log WHERE phone = ? AND kind = 'corporeo_ask' LIMIT 1").bind(phone).first();
+        if (_yaAsk) continue;
+        _esCorpAd = true;
+      }
     } catch (_) {}
     let first;
     try { first = await env.DB.prepare("SELECT MIN(ts) AS t FROM wa_messages WHERE phone = ? AND direction='inbound' AND msg_type!='status'").bind(phone).first(); } catch (_) { continue; }
@@ -3407,9 +3441,11 @@ async function processPrecotizPilot(env) {
     if (!ctx) continue;
     const fw = await getActiveFramework(env);
     const imgs = await precotizImageBlocks(env, phone);
-    const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs, { phone });
+    const esCorp = _esCorpAd || await precotizEsCorporeo(env, phone, ctx.fullText); // lead de anuncio de corpóreo
+    const out = await precotizLlm(env, (esCorp ? PRECOTIZ_CORP_NOTE : '') + ctx.fullText, fw?.content || '', imgs, { phone });
     if (!out.ok) { await precotizLog(env, phone, 'error_ia', { motivo: out.error }); continue; } // la IA falló (429/refusal/etc.) — queda logueado para auditar
     const res = out.data;
+    if (res && esCorp) precotizAjusteCorporeo(res);
     if (!res || res.es_carteles === false || res.frenar) {                   // no entra al piloto
       await precotizLog(env, phone, 'rechazo', { motivo: (res && res.motivo_freno) || (res && res.es_carteles === false ? 'no es carteles' : 'sin datos'), es_carteles: res && res.es_carteles, frenar: res && res.frenar, tiene_foto: res && res.tiene_foto, tiene_medidas: res && res.tiene_medidas, tiene_intext: res && res.tiene_intext });
       continue;
@@ -10381,7 +10417,9 @@ async function maybeGuiaReveal(env) {
 // atiende A MANO hasta tener un bot propio; esto solo evita que queden sin respuesta y
 // ya arranca a juntar datos. UNA sola vez por contacto (dedup wa_autoreply_log
 // kind='corporeo_ask'). Gate kv corporeo_ask_on (default ON).
-async function corporeoAskOn(env) { return (await kvGet(env, 'corporeo_ask_on', '1')) === '1'; }
+// Si el bot de precotización ya atiende los corpóreos (kv precotiz_corporeo_on), este mensaje fijo
+// NO sale (si no, el cliente recibiría dos aperturas): queda solo como respaldo cuando está apagado.
+async function corporeoAskOn(env) { return (await kvGet(env, 'corporeo_ask_on', '1')) === '1' && !(await precotizCorporeoOn(env)); }
 const CORPOREO_ASK_MSGS = [
   'Buenísimo, para pasarte el precio necesito 4 cosas',
   'Una foto o referencia de lo que querés (diseño, logo o texto)',
@@ -16053,9 +16091,11 @@ const handler = {
             imgs = await precotizImageBlocks(env, num);
           }
           const fw = await getActiveFramework(env);
-          const out = await precotizLlm(env, fullText, fw?.content || '', imgs, { phone: num || 'prueba', by: 'dry-run' });
+          const esCorp = await precotizEsCorporeo(env, num, fullText);
+          const out = await precotizLlm(env, (esCorp ? PRECOTIZ_CORP_NOTE : '') + fullText, fw?.content || '', imgs, { phone: num || 'prueba', by: 'dry-run' });
+          if (out.data && esCorp) precotizAjusteCorporeo(out.data);
           const _msgs = precotizMsgs(out.data);
-          return json({ ok: out.ok, phone: num || null, result: out.data || null, candado: out.data ? (precotizMedidaInventada(_msgs, fullText) || null) : null, espera_pregunta: out.data ? precotizFaltaPregunta(out.data, _msgs) : null, error: out.error || null, status: out.status || null, raw: out.raw || null });
+          return json({ ok: out.ok, phone: num || null, es_corporeo: esCorp, result: out.data || null, candado: out.data ? (precotizMedidaInventada(_msgs, fullText) || null) : null, espera_pregunta: out.data ? precotizFaltaPregunta(out.data, _msgs) : null, error: out.error || null, status: out.status || null, raw: out.raw || null });
         }
 
         // POST /admin/precotiz/approve → { phone, mensajes? } envía los mensajitos (editados o del borrador)
