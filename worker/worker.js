@@ -2044,6 +2044,7 @@ async function removeUnreachable(env, phone) {
 const PRECOTIZ_CAP = 10;                       // tope de leads en el piloto
 const PRECOTIZ_DEBOUNCE_MS = 60 * 1000;        // esperar a que el cliente pare de escribir (manda foto + medidas en mensajes seguidos) antes de armar la respuesta
 const PRECOTIZ_HUMAN_GRACE_MS = 5 * 60 * 1000; // si un humano YA intervino en el chat, darle 5 min para seguir contestando antes de que el bot retome (evita pisar a Joaco si está tipeando)
+const PRECOTIZ_TECHO_TIMEOUT_MS = 3 * 60 * 60 * 1000; // regla de exterior: si el cliente no contesta lo del techo en 3 h, pasa igual a "Para cotizar"
 const PRECOTIZ_GASPAR_PHONE = '5491155604999'; // a quién avisar al completar
 
 // kv_cache como settings store (genérico, idempotente).
@@ -2794,6 +2795,14 @@ const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (ca
 3) si es para INTERIOR o EXTERIOR (DESEABLE, NO obligatorio).
 Lo estrictamente necesario es la FOTO y las MEDIDAS. El interior/exterior es un plus: pedilo UNA sola vez. Si el cliente dice que no sabe / no está seguro / no lo tiene definido, O si ya se lo preguntaste y en su respuesta no te lo dio (te habló de otra cosa), NO insistas más — poné intext_no_sabe=true y damos por cerrada la pre cotización con la foto y las medidas (el equipo define el interior/exterior después). NUNCA machaques con el interior/exterior.
 
+EXTERIOR — ¿QUEDA CUBIERTO? Si el cliente dice que el cartel es para EXTERIOR (es_exterior=true), antes de cerrar preguntale UNA sola vez dónde lo piensa colocar y si tiene algún techo, sobretecho o marquesina que lo cubra (ej: "te consulto, donde lo pensas colocar? hay algun techo o marquesina que lo cubra?"). No lo preguntes si ya lo dijo en la charla. Según lo que conteste:
+- SÍ está cubierto (bajo techo, alero, galería o una marquesina que lo protege) → techo="si" y seguí normal.
+- NO está cubierto (queda al aire libre, expuesto al sol y a la lluvia) o la marquesina es muy chica → techo="no" y sugerir_corporeo=true: explicale corto que para esa situación le recomendamos un CARTEL CORPÓREO ILUMINADO, que está pensado para estar a la intemperie (ej: "okey, en ese caso te recomendamos un cartel corporeo iluminado, que esta pensado para estar al aire libre"). Decíselo UNA sola vez y seguí pidiendo lo que falte (la foto y las medidas sirven igual para cotizarlo).
+- No sabe, no lo tiene definido, o ya se lo preguntaste y no te contestó → techo="no_sabe" y NO insistas.
+- Si es interior, o todavía no sabés si es exterior → es_exterior=false o techo="".
+VOCABULARIO: decí "corpóreo iluminado" o "cartel corpóreo con luz". NUNCA digas "retroiluminado" para hablar del corpóreo en general: retroiluminado es SOLO cuando la luz sale por detrás de la letra.
+QUÉ ES EL CORPÓREO: un cartel de letras o logo en 3D, macizo y con volumen (no es neón). Lo hacemos y es el que recomendamos para exterior sin techo. Si el cliente pregunta detalles del corpóreo (precio, materiales, cómo se ve, tiempos), no inventes: decile que se lo detallamos en el presupuesto y seguí relevando.
+
 Si te paso imágenes, MIRALAS bien. Una imagen cuenta como la foto del diseño (tiene_foto=true) SOLO si es un boceto, logo, foto o referencia del cartel/diseño que el cliente quiere. Si la imagen es un meme, una captura de otra app, un tweet, una promo, spam, o cualquier cosa que no tenga que ver con un cartel → tiene_foto=false (y si es spam o estafa, frenar=true y es_carteles=false).
 MUY IMPORTANTE sobre la ESTÉTICA de los diseños: los carteles de neón para bares, boliches, distribuidoras de bebidas, salones, kioscos, etc. MUCHAS veces tienen onda urbana/trap con dinero, fajos de billetes, botellas de alcohol, pasamontañas, diamantes, autos, joyas, caritas de emoji, etc. ESO ES UN DISEÑO DE CARTEL TOTALMENTE VÁLIDO — NO es spam, NO es estafa, NO es promo de casino/inversión. Si el cliente manda una imagen así pidiendo cotizar un cartel: tiene_foto=true, es_carteles=true, frenar=false. NUNCA descartes ni frenes por el CONTENIDO ARTÍSTICO de la imagen del diseño; el freno se decide SOLO por lo que ESCRIBE el cliente.
 
@@ -2825,7 +2834,7 @@ DATOS QUE NO IMPROVISÁS — el FAQ del playbook está pensado para la etapa de 
 - COLORES: no tenés una lista de colores ni sabés si un color/estilo puntual (rosa, celeste, verde agua, degradé, multicolor) se puede hacer. No enumeres colores ni confirmes/niegues uno; decí que el color se define junto con el diseño.
 - MEDIOS DE PAGO: para carteles lo único cierto es la seña del 50% por transferencia y el saldo al entregar. NO afirmes tarjeta, cuotas ni Mercado Pago (los medios de pago que figuran en la parte de CURSOS del playbook NO aplican a carteles).
 - TIEMPOS: solo el tiempo general de producción (~15-20 días). NUNCA prometas una fecha exacta de calendario ni que "llega para tal día".
-- OTROS PRODUCTOS: solo sabés con certeza que hacemos carteles de neón LED personalizados. Si preguntan por otra cartelería (chapa, luminosos comunes, gigantografías, tótems, corpóreas sin neón, etc.), no afirmes ni niegues que lo hacemos: decí que el equipo lo confirma.
+- OTROS PRODUCTOS: solo sabés con certeza que hacemos carteles de neón LED personalizados y carteles CORPÓREOS (letras o logo en 3D, ver la regla de EXTERIOR). Si preguntan por otra cartelería (chapa, luminosos comunes, gigantografías, tótems, etc.), no afirmes ni niegues que lo hacemos: decí que el equipo lo confirma.
 - MEDIDAS — REGLA CRÍTICA, PROHIBIDO ROMPERLA: tu ÚNICA tarea con la medida es RELEVAR la que el cliente YA tiene en mente. TERMINANTEMENTE PROHIBIDO ofrecer, sugerir, listar, tirar de ejemplo o recomendar medidas — aunque el cliente no tenga una definida, aunque te pida que le tires opciones, y AUNQUE EL PLAYBOOK DIGA "ofrecele las medidas comunes" (ese consejo es para el humano; VOS no ofrecés medidas nunca). NUNCA le des medidas de ejemplo ni "las más comunes de tu rubro" (nada de "2 metros x 1 metro", "1.50 x 80", "1 metro x 60", ni NINGÚN número de tamaño puesto por vos), NUNCA armes una lista de opciones de tamaño, NUNCA opines que una medida "queda imponente / es ideal para exterior / se ve mejor / bien visible". Tampoco tenés criterio técnico: NUNCA afirmes una medida mínima ("tendrías que tener al menos X"), ni digas que un diseño entra / no entra / no se puede en tal medida. Qué hacés en cada caso: (a) si el cliente te da una medida (aunque sea aproximada) → la tomás y listo; (b) si NO tiene medida definida, o te PIDE que le recomiendes un tamaño, o pregunta cuál le conviene → NO le des ningún número: decile que igual lo cotizamos con una medida de referencia y que después se ajusta sin drama (ej: "no te compliques con la medida exacta ahora, pasame la que tengas en mente aunque sea muy aproximada y lo cotizamos igual, después la afinamos tranqui"); (c) si pregunta si su diseño entra / se puede hacer en tal medida → decile que eso lo define el equipo al armar el presupuesto.
 
 PRESUPUESTO DEL CLIENTE — NUNCA le preguntes al cliente qué presupuesto tiene en mente ni cuánto quiere o puede gastar. En la pre cotización tu tarea es SOLO relevar los datos (foto, medidas, interior/exterior), NO negociar el precio ni sondear cuánto está dispuesto a pagar: preguntarlo tan temprano es prematuro y espanta. SOLO podés tocar el tema del presupuesto en DOS casos: (a) si ya es una negociación avanzada en la que el equipo YA le pasó un presupuesto, o (b) si el cliente vino pidiendo explícitamente algo BARATO / económico / lo más accesible. Fuera de esos dos casos, ni lo menciones. Y si el cliente no sabe qué medida quiere, NO le ofrezcas medidas para que elija ni "opciones en distintos precios" (ver la REGLA CRÍTICA de MEDIDAS de arriba): lo cotizamos con una medida aproximada y se ajusta después, sin preguntarle cuánto quiere gastar.
@@ -2854,10 +2863,10 @@ FRENO DE MANO — poné frenar=true y mensajes=[] si:
 
 REGLA DE ORO — NO respondas por responder. Si NO sabés qué contestar con certeza, o el cliente pide algo que NO podés darle ni hacer (mandar fotos de ejemplos/catálogo, un dato que no tenés, algo fuera del relevamiento simple), NO improvises NI prometas algo que no vas a cumplir: poné frenar=true (que lo maneje Joaco). Prometer y no cumplir es MUCHO peor que frenar y escalar a una persona.
 
-Cuando ya tenés lo necesario, mensajes=[] (el humano sigue desde acá). "Lo necesario" = FOTO + MEDIDAS, más el interior/exterior SOLO si el cliente lo dio o dijo que no sabe. O sea: si tenés foto + medidas + (tiene_intext=true O intext_no_sabe=true) → mensajes=[]. Nunca prometas el render/precio: eso lo hace una persona después.
+Cuando ya tenés lo necesario, mensajes=[] (el humano sigue desde acá). "Lo necesario" = FOTO + MEDIDAS, más el interior/exterior SOLO si el cliente lo dio o dijo que no sabe, y si es EXTERIOR además saber si queda cubierto (techo="si", "no" o "no_sabe"). O sea: si tenés foto + medidas + (tiene_intext=true O intext_no_sabe=true) y, cuando es exterior, techo distinto de "" → mensajes=[]. ÚNICA excepción: si en este turno te contestó que NO está cubierto, mandá el mensaje recomendando el corpóreo iluminado (sugerir_corporeo=true) aunque ya esté todo. Nunca prometas el render/precio: eso lo hace una persona después.
 
 Devolvé SOLO un JSON, sin nada alrededor:
-{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"enviar_tipografias":bool,"mensajes":["..."]}`;
+{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"es_exterior":bool,"techo":"si|no|no_sabe|","sugerir_corporeo":bool,"enviar_tipografias":bool,"mensajes":["..."]}`;
 
 // Detecta el tipo de imagen por los MAGIC BYTES, no por el content-type guardado. El CDN de
 // Meta (IG) a veces sirve un PNG con content-type image/jpeg, y así queda en R2. Si a Claude
@@ -2971,6 +2980,13 @@ async function precotizLlm(env, fullText, fwText, imageBlocks, meta) {
 }
 
 // Manda (auto) o deja en borrador (draft) los mensajitos que generó la IA.
+// Regla de exterior (Joaco, 12-oct): si es exterior y todavía no se sabe si queda cubierto, el bot
+// pregunta (una vez) antes de cerrar la precotización. Solo frena el cierre si la IA efectivamente
+// está preguntando algo (hay mensajes): si no preguntó, se cierra igual para no dejar el lead colgado.
+function precotizFaltaTecho(res, msgs) {
+  return !!(res && res.es_exterior && !res.techo && !res.intext_no_sabe && msgs && msgs.length);
+}
+
 async function precotizEmitir(env, phone, nombre, msgs, modo, nowIso) {
   // El bot se presenta como "Joaco" (hardcodeado en el prompt). Si el lead quedó asignado a Facu
   // (reparto), reemplazamos el nombre para que el saludo COINCIDA con la bandeja — pedido de Gaspar
@@ -3172,6 +3188,17 @@ async function processPrecotizPilot(env) {
         continue;
       }
     } catch (_) {}
+    // Red de seguridad de la regla de exterior: ya tiene foto + medidas + int/ext pero sigue "activo"
+    // porque el bot preguntó si queda cubierto (techo) y el cliente no contestó. A las 3 h de su último
+    // mensaje se lo pasamos igual al vendedor ("Para cotizar") para que no quede colgado para siempre.
+    if (lead.tiene_foto && lead.tiene_medidas && lead.tiene_intext && lead.last_processed_ts && lastInTs <= lead.last_processed_ts
+        && Date.now() - new Date(lastInTs).getTime() > PRECOTIZ_TECHO_TIMEOUT_MS) {
+      try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', completed_at=?, updated_at=? WHERE phone=? AND estado='activo'").bind(nowIso, nowIso, lead.phone).run(); } catch (_) {}
+      await precotizTag(env, lead.phone, false);
+      await paraCotizarTag(env, lead.phone, true);
+      await precotizMarcarNoLeido(env, lead.phone);
+      continue;
+    }
     // Modo 'draft' eliminado (29-jul): el bot siempre auto-envía. Si quedó un
     // pending_draft viejo de antes, lo ignoramos y re-procesamos en auto (así no
     // queda ningún lead colgado esperando aprobación). Si no hay nada nuevo desde
@@ -3210,7 +3237,13 @@ async function processPrecotizPilot(env) {
       await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${lead.nombre || lead.phone}\nmotivo: ${res.motivo_freno || 'revisar'}\nentra a verlo vos`);
       continue;
     }
-    if (tF && tM && (tI || res.intext_no_sabe)) { // ya tiene lo necesario (foto+medidas; el int/ext lo dio o dijo que no sabe) → handoff a Joaco
+    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
+    // Exterior sin techo → el bot recomendó corpóreo: etiqueta 🔠 Corpóreo para que el vendedor lo cotice así.
+    if (res.sugerir_corporeo) await corporeoTag(env, lead.phone, true);
+    if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaTecho(res, msgs)) { // ya tiene lo necesario (foto+medidas; el int/ext lo dio o dijo que no sabe; si es exterior, ya se sabe si está cubierto) → handoff a Joaco
+      // Si en este turno recomendó el corpóreo (contestó que no tiene techo), ese mensaje sale antes de
+      // cerrar: al completar no se envía nada más y la recomendación se perdía.
+      if (res.sugerir_corporeo && msgs.length && modo === 'auto') await precotizEmitir(env, lead.phone, lead.nombre, msgs, 'auto', nowIso);
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, completed_at=?, updated_at=? WHERE phone=?").bind(tF, tM, tI, lastInTs, nowIso, nowIso, lead.phone).run(); } catch (_) {}
       await precotizTag(env, lead.phone, false);
       await paraCotizarTag(env, lead.phone, true);   // entra a la bandeja "Para cotizar" de Joaco
@@ -3220,7 +3253,6 @@ async function processPrecotizPilot(env) {
       // quiere el aviso de FRENO DE MANO (ese sigue, más arriba).
       continue;
     }
-    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
     // Fallback anti-inconsistencia del AI: a veces escribe "te paso las tipografías" en el texto
     // pero NO pone el flag enviar_tipografias -> la imagen nunca sale. Si el mensaje PROMETE pasar
     // las tipografías (verbo de envío + "tipograf"), las mandamos igual (el dedup evita repetir).
@@ -3374,7 +3406,10 @@ async function processPrecotizPilot(env) {
     try { await maybeRepartirANadia(env, phone); } catch (_) {}
     await precotizTag(env, phone, true); // etiqueta VISIBLE (no oculta) — Joaco+Gaspar monitorean
 
-    if (tF && tM && (tI || res.intext_no_sabe)) { // ya tiene lo necesario (foto+medidas) → completo
+    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
+    if (res.sugerir_corporeo) await corporeoTag(env, phone, true); // exterior sin techo → 🔠 Corpóreo
+    if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaTecho(res, msgs)) { // ya tiene lo necesario (foto+medidas; si es exterior, ya se sabe si está cubierto) → completo
+      if (res.sugerir_corporeo && msgs.length && modo === 'auto') await precotizEmitir(env, phone, '', msgs, 'auto', nowIso);
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', completed_at=?, updated_at=? WHERE phone=?").bind(nowIso, nowIso, phone).run(); } catch (_) {}
       await precotizTag(env, phone, false);
       await paraCotizarTag(env, phone, true);   // entra a la bandeja "Para cotizar" de Joaco
@@ -3382,7 +3417,6 @@ async function processPrecotizPilot(env) {
       // Aviso de "terminó la precotización" DESACTIVADO (pedido Gaspar 7-sep): solo freno de mano.
       continue;
     }
-    const msgs = Array.isArray(res.mensajes) ? res.mensajes.filter(m => typeof m === 'string' && m.trim()).slice(0, 4) : [];
     if (!msgs.length) continue;
     if (modo === 'auto') {
       await precotizEmitir(env, phone, '', msgs, 'auto', nowIso);
