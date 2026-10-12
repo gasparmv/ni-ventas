@@ -4693,30 +4693,37 @@ const LOGI_DIR = ['recibe', 'dni', 'calle', 'localidad', 'provincia', 'cp', 'tel
 const LOGI_IMPRESCINDIBLES = ['calle', 'localidad', 'provincia', 'cp'];
 // Columnas en el orden de la tabla (y del Excel). ed: 'txt' (se escribe) | 'sel' | 'chk'. stk: columna fija (N° mide 46 px:
 // app.css corre la 2da fija a left:46px). nom: cómo se nombra el campo en los avisos.
+// Pedido de Gaspar (12-oct): solo estas columnas y en este orden. Sin N° (es el de las etiquetas de Neyen), sin
+// Pedido/Bultos/Guía/Nota como columna. "Impago" va como etiqueta debajo del nombre. La dirección es UNA columna (click =
+// formulario para corregir sus partes). Estado = Sin contactar / Contactado / Enviado.
 const LOGI_COLS = [
-  { id: 'num', tit: 'N°', w: 46, g: 'cli', stk: 'stk1' },
-  { id: 'cliente', tit: 'Cliente', w: 186, g: 'cli', stk: 'stk2' },
-  { id: 'pedido', tit: 'Pedido', w: 86, g: 'cli', ayuda: 'Si el cliente pagó el pedido de corte. Con deuda no se puede enviar' },
-  { id: 'recibe', tit: 'Recibe', w: 150, g: 'dir', ed: 'txt', max: 120, nom: 'quién recibe' },
-  { id: 'dni', tit: 'DNI', w: 96, g: 'dir', ed: 'txt', max: 14, num: true, nom: 'el DNI' },
-  { id: 'calle', tit: 'Calle y número', w: 236, g: 'dir', ed: 'txt', max: 120, nom: 'la calle' },
-  { id: 'localidad', tit: 'Localidad', w: 140, g: 'dir', ed: 'txt', max: 120, nom: 'la localidad' },
-  { id: 'provincia', tit: 'Provincia', w: 126, g: 'dir', ed: 'txt', max: 60, list: 'logi-provincias', nom: 'la provincia' },
-  { id: 'cp', tit: 'CP', w: 72, g: 'dir', ed: 'txt', max: 10, nom: 'el CP' },
-  { id: 'bultos', tit: 'Bultos', w: 62, g: 'paq', ed: 'txt', max: 2, num: true, nom: 'los bultos' },
-  { id: 'medidas', tit: 'Medidas cm', w: 124, g: 'paq', ayuda: 'Largo × ancho × alto. "est." = estimado: Neyen lo mide al embalar' },
-  { id: 'peso', tit: 'Peso kg', w: 84, g: 'paq', ayuda: '"est." = estimado: Neyen lo pesa al embalar' },
-  { id: 'contacto_estado', tit: 'Contacto', w: 130, g: 'env', ed: 'sel', nom: 'el contacto' },
-  { id: 'transporte', tit: 'Transporte', w: 160, g: 'env', ed: 'sel', nom: 'el transporte', ayuda: 'En gris: sugerido (el de la última vez con este cliente). Confirmalo o elegí otro' },
-  { id: 'envio_costo', tit: 'Costo $', w: 96, g: 'env', ed: 'txt', max: 14, num: true, nom: 'el costo' },
-  { id: 'envio_pagado', tit: 'Envío pagado', w: 78, g: 'env', ed: 'chk', nom: 'envío pagado', ayuda: 'Marcalo cuando el cliente te pague el envío' },
-  { id: 'seguimiento', tit: 'Guía / seguimiento', w: 156, g: 'env', ed: 'txt', max: 80, nom: 'la guía' },
-  { id: 'enviado', tit: 'Enviado', w: 72, g: 'env', ed: 'chk', nom: 'enviado', ayuda: 'Marcalo cuando lo subas al transporte. Con deuda o sin el envío pagado no deja' },
-  { id: 'nota', tit: 'Nota', w: 230, g: 'env', ed: 'txt', max: 300, nom: 'la nota' },
+  { id: 'cliente', tit: 'Cliente', w: 250, g: 'cli', stk: 'stk1' },
+  { id: 'medidas', tit: 'Medidas cm', w: 130, g: 'paq', ayuda: 'Largo × ancho × alto. "est." = estimado: Neyen lo mide al embalar' },
+  { id: 'peso', tit: 'Kg', w: 76, g: 'paq', ayuda: '"est." = estimado: Neyen lo pesa al embalar' },
+  { id: 'estado', tit: 'Estado', w: 150, g: 'env', ed: 'sel', nom: 'el estado', ayuda: 'Sin contactar → Contactado → Enviado. Con el pedido impago no se puede marcar Enviado' },
+  { id: 'transporte', tit: 'Transporte', w: 170, g: 'env', ed: 'sel', nom: 'el transporte', ayuda: 'En gris: sugerido (el de la última vez con este cliente). Confirmalo o elegí otro' },
+  { id: 'envio_costo', tit: 'Costo $', w: 104, g: 'env', ed: 'txt', max: 14, num: true, nom: 'el costo' },
+  { id: 'direccion', tit: 'Dirección', w: 460, g: 'dir', nom: 'la dirección', ayuda: 'Click para ver el texto original y corregir la dirección' },
 ];
-const LOGI_COL = Object.fromEntries(LOGI_COLS.map(c => [c.id, c]));
+// Campos que ya no son columna pero se siguen guardando (formulario de dirección, Estado y Enviado por detrás).
+const LOGI_CAMPOS_OCULTOS = [
+  { id: 'recibe', tit: 'Recibe', ed: 'txt', max: 120, nom: 'quién recibe' },
+  { id: 'dni', tit: 'DNI', ed: 'txt', max: 14, num: true, nom: 'el DNI' },
+  { id: 'calle', tit: 'Calle y número', ed: 'txt', max: 120, nom: 'la calle' },
+  { id: 'localidad', tit: 'Localidad', ed: 'txt', max: 120, nom: 'la localidad' },
+  { id: 'provincia', tit: 'Provincia', ed: 'txt', max: 60, list: 'logi-provincias', nom: 'la provincia' },
+  { id: 'cp', tit: 'CP', ed: 'txt', max: 10, nom: 'el CP' },
+  { id: 'bultos', tit: 'Bultos', ed: 'txt', max: 2, num: true, nom: 'los bultos' },
+  { id: 'contacto_estado', tit: 'Contacto', ed: 'sel', nom: 'el estado' },
+  { id: 'envio_pagado', tit: 'Envío pagado', ed: 'chk', nom: 'envío pagado' },
+  { id: 'seguimiento', tit: 'Guía / seguimiento', ed: 'txt', max: 80, nom: 'la guía' },
+  { id: 'enviado', tit: 'Enviado', ed: 'chk', nom: 'enviado' },
+  { id: 'nota', tit: 'Nota', ed: 'txt', max: 300, nom: 'la nota' },
+];
+const LOGI_COL = Object.fromEntries(LOGI_COLS.concat(LOGI_CAMPOS_OCULTOS).map(c => [c.id, c]));
 const LOGI_ANCHO = LOGI_COLS.reduce((s, c) => s + c.w, 0);
-const LOGI_GRUPOS = [['cli', 'Cliente'], ['dir', 'Dirección'], ['paq', 'Paquete'], ['env', 'Envío']];
+const LOGI_GRUPOS = [];
+const LOGI_ESTADOS = [['sin', 'Sin contactar'], ['contactado', 'Contactado'], ['enviado', 'Enviado']];
 const LOGI_WA_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M12 2.2a9.8 9.8 0 0 0-8.4 14.9L2.2 21.8l4.8-1.3A9.8 9.8 0 1 0 12 2.2zm0 1.8a8 8 0 1 1-4.2 14.8l-.3-.2-2.8.8.8-2.7-.2-.3A8 8 0 0 1 12 4zM8.9 7.3c-.2 0-.5 0-.7.3-.3.3-.9.9-.9 2.2s.9 2.5 1 2.7c.1.2 1.8 2.9 4.5 3.9 2.2.9 2.7.7 3.2.7.5-.1 1.5-.6 1.7-1.2.2-.6.2-1.1.2-1.2-.1-.1-.2-.2-.5-.3l-1.7-.8c-.2-.1-.4-.1-.6.1l-.8 1c-.1.2-.3.2-.5.1-.3-.1-1.1-.4-2-1.3-.8-.7-1.3-1.5-1.4-1.8-.2-.3 0-.4.1-.5l.4-.5.3-.4v-.4l-.8-1.9c-.2-.5-.4-.5-.6-.5h-.5z"/></svg>';
 const LOGI_DOC_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" d="M4 1.5h5.5l3 3v10H4zM9.5 1.5v3h3M6 8h4.5M6 10.5h4.5"/></svg>';
 function logiLsGet(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
@@ -4893,6 +4900,14 @@ function logiValor(p, col) {
 }
 function logiSugerido(p) { return !logiCel(p.key, 'transporte') && !!p.transporte_sugerido && !!p.transporte; }
 function logiEnv(p) { return !!logiValor(p, 'enviado'); }
+// Estado de la tabla (Sin contactar / Contactado / Enviado), armado con lo que guarda el server: enviado = despachado;
+// contactado = 'escrito' o 'confirmado' (lo pone solo el botón de WhatsApp); 'no_contesta' o vacío = sin contactar.
+function logiEstado(p) {
+  if (logiEnv(p)) return 'enviado';
+  const ce = String(logiValor(p, 'contacto_estado') || '');
+  return (ce === 'escrito' || ce === 'confirmado' || ce === 'listo') ? 'contactado' : 'sin';
+}
+function logiEstadoTxt(v) { const o = LOGI_ESTADOS.find(x => x[0] === v); return o ? o[1] : ''; }
 // Imprescindibles vacíos (fondo rojizo). Sin dirección desglosada del server: solo si falta la dirección entera.
 function logiFaltan(p) {
   if (!p.dir || typeof p.dir !== 'object') return p.falta_direccion ? LOGI_IMPRESCINDIBLES.slice() : [];
@@ -4984,6 +4999,8 @@ function logiTextoCelda(p, col) {
     case 'medidas': return pq && pq.largo ? `${pq.largo} x ${pq.ancho} x ${pq.alto}${est}` : '';
     case 'peso': return pq && pq.peso ? _fmtKg(pq.peso) + est : '';
     case 'contacto_estado': { const o = LOGI_CONTACTO.find(x => x[0] === v); return o ? o[1] : String(v || ''); }
+    case 'estado': return logiEstadoTxt(logiEstado(p));
+    case 'direccion': return logiDirTexto(p) || (logiDirNoDisponible(p) ? '' : 'Falta la dirección');
     case 'transporte': return v ? v + (logiSugerido(p) ? ' (sugerido)' : '') : '';
     case 'envio_costo': return v === '' || v == null ? '' : String(v);
     case 'envio_pagado': case 'enviado': return v ? 'Sí' : 'No';
@@ -4993,25 +5010,23 @@ function logiTextoCelda(p, col) {
 // --- Filtros, buscador y totales ---
 const LOGI_FILTROS = [
   ['todos', 'Todos', () => true],
+  ['sin_contactar', 'Sin contactar', p => logiEstado(p) === 'sin'],
+  ['contactados', 'Contactados', p => logiEstado(p) === 'contactado'],
+  ['enviados', 'Enviados', p => logiEstado(p) === 'enviado'],
   ['falta_dir', 'Falta dirección', p => !logiEnv(p) && logiFaltan(p).length > 0],
-  ['impago', 'Pedido impago', p => !logiEnv(p) && p.pedido_pagado === false],
-  ['sin_transporte', 'Sin transporte', p => !logiEnv(p) && (!logiValor(p, 'transporte') || logiSugerido(p))],
-  ['sin_cotizar', 'Sin cotizar', p => !logiEnv(p) && logiValor(p, 'envio_costo') === ''],
-  ['envio_sin_pagar', 'Envío sin pagar', p => !logiEnv(p) && !logiValor(p, 'envio_pagado')],
-  ['listos', 'Listos para enviar', p => !logiEnv(p) && !!p.listo],
-  ['enviados', 'Enviados', p => logiEnv(p)],
+  ['impago', 'Impagos', p => !logiEnv(p) && p.pedido_pagado === false],
 ];
 const LOGI_FILTRO = Object.fromEntries(LOGI_FILTROS.map(f => [f[0], f[2]]));
 function logiFiltroAct() { return LOGI_FILTRO[STATE.logiFiltro] ? STATE.logiFiltro : 'todos'; }
 function logiPaquetes() {
   const L = STATE.logi;
+  // Por nombre (el N° de paquete ya no se muestra en la tabla).
   return (L && Array.isArray(L.paquetes) ? L.paquetes : []).filter(p => p && p.key).slice()
-    .sort((a, b) => (parseInt(a.numero, 10) || 999) - (parseInt(b.numero, 10) || 999) || String(a.cliente || '').localeCompare(String(b.cliente || ''), 'es'));
+    .sort((a, b) => logiNombre(a.cliente).localeCompare(logiNombre(b.cliente), 'es', { sensitivity: 'base' }) || String(a.key).localeCompare(String(b.key)));
 }
-// "7" o "07" → el N° 7; 4+ dígitos → teléfono / DNI / CP; texto → nombre, quien recibe, dirección, transporte, guía.
+// 4+ dígitos → teléfono / DNI / CP; texto → nombre, quien recibe, dirección, transporte, guía.
 function logiBusca(p, q) {
   if (!q) return true;
-  if (/^\d{1,3}$/.test(q)) return (parseInt(p.numero, 10) || -1) === parseInt(q, 10);
   const dig = q.replace(/\D/g, '');
   if (dig.length >= 4 && /^[\d\s+()-]+$/.test(q)) return [p.telefono, logiValor(p, 'dni'), logiValor(p, 'cp'), logiValor(p, 'tel_alt')].some(x => String(x || '').replace(/\D/g, '').includes(dig));
   const hay = logiNorm([logiNombre(p.cliente), p.cliente, logiValor(p, 'recibe'), logiValor(p, 'calle'), logiValor(p, 'localidad'), logiValor(p, 'provincia'), logiValor(p, 'cp'), logiValor(p, 'transporte'), logiValor(p, 'seguimiento')].join(' | '));
@@ -5029,8 +5044,8 @@ function logiChipsHtml(paq) {
 }
 function logiTotalesTxt(paq) {
   const pl = (n, s, p) => n + ' ' + (n === 1 ? s : p), ret = parseInt((STATE.logi || {}).retiran, 10) || 0;
-  const env = paq.filter(logiEnv).length, listos = paq.filter(p => !logiEnv(p) && p.listo).length, vis = logiVisibles(paq).length;
-  return [pl(paq.length, 'envío', 'envíos'), pl(ret, 'retira en el taller', 'retiran en el taller'), pl(listos, 'listo para enviar', 'listos para enviar'), pl(env, 'enviado', 'enviados')].join(' · ') + (vis !== paq.length ? ' · mostrando ' + vis : '');
+  const env = paq.filter(logiEnv).length, cont = paq.filter(p => logiEstado(p) === 'contactado').length, vis = logiVisibles(paq).length;
+  return [pl(paq.length, 'envío', 'envíos'), pl(ret, 'retira en el taller', 'retiran en el taller'), pl(cont, 'contactado', 'contactados'), pl(env, 'enviado', 'enviados')].join(' · ') + (vis !== paq.length ? ' · mostrando ' + vis : '');
 }
 // --- Tabla ---
 function logiFilaCls(p) {
@@ -5055,8 +5070,11 @@ function logiTd(p, c) {
     case 'cliente': {
       const tel = String(p.telefono || '').replace(/\D/g, ''), nom = logiNombre(p.cliente) || 'Cliente';
       const arr = p.arrastre ? logiFechaCorteDDMM(p.arrastre) : '';
-      title = nom + (tel ? ' · ' + corteFmtTel(tel) : '') + (arr ? ' · viene de la semana del ' + arr : '');
-      inner = `<div class="logi-cli"><div class="nt"><div class="n">${escapeHtml(nom)}</div><div class="t">${tel ? escapeHtml(corteFmtTel(tel)) : '<span class="logi-rojo">sin teléfono</span>'}${arr ? ' · de la sem. ' + escapeHtml(arr) : ''}</div></div>`
+      title = nom + (tel ? ' · ' + corteFmtTel(tel) : '') + (arr ? ' · viene de la semana del ' + arr : '') + (p.pedido_pagado === false ? ' · pedido impago: no se puede enviar' : '');
+      // "Impago" / "Sin definir" ya no son columna: van como etiqueta al lado del nombre (para no enviarlo).
+      const chips = (p.pedido_pagado === false ? '<span class="logi-pill r" title="Tiene un pedido sin pagar (en esta u otra semana): no se puede enviar">Impago</span>' : '')
+        + (p.entrega !== 'envio' ? '<span class="logi-pill a" title="Preguntale si lo retira en el taller o va por envío">Sin definir</span>' : '');
+      inner = `<div class="logi-cli"><div class="nt"><div class="n">${escapeHtml(nom)}${chips ? ' ' + chips : ''}</div><div class="t">${tel ? escapeHtml(corteFmtTel(tel)) : '<span class="logi-rojo">sin teléfono</span>'}${arr ? ' · de la sem. ' + escapeHtml(arr) : ''}</div></div>`
         + `<button type="button" class="logi-wa" data-logi-wa${tel ? '' : ' disabled'} title="${tel ? 'Abrir WhatsApp con el mensaje armado' : 'Sin teléfono: consultá con Neon'}" aria-label="WhatsApp">${LOGI_WA_SVG}</button></div>`;
       break;
     }
@@ -5083,6 +5101,28 @@ function logiTd(p, c) {
     case 'peso': {
       const pq = p.paquete || null;
       if (pq && pq.peso) inner = escapeHtml(_fmtKg(pq.peso)) + (pq.fuente === 'estimado' ? ' <span class="est">est.</span>' : '');
+      break;
+    }
+    case 'estado': {
+      const v = logiEstado(p);
+      inner = `<select class="logi-sel est-${v}" aria-label="Estado">${LOGI_ESTADOS.map(([val, lab]) => `<option value="${val}"${val === v ? ' selected' : ''}>${lab}</option>`).join('')}</select>`;
+      title = v === 'enviado' ? ('Enviado ' + (p.despachado_at ? logiHora(p.despachado_at) : '')).trim()
+        : (p.pedido_pagado === false ? 'Pedido impago: todavía no se puede marcar Enviado' : (p.contacto_at ? 'Último cambio ' + logiHora(p.contacto_at) : ''));
+      if (['contacto_estado', 'envio_pagado', 'enviado'].some(x => { const s = logiCel(p.key, x); return s && s.st === 'saving'; })) cls.push('guardando');
+      break;
+    }
+    case 'direccion': {
+      const dir = logiDirTexto(p), faltan = logiEnv(p) ? [] : logiFaltan(p), recibe = String(logiValor(p, 'recibe') || '').trim();
+      const NOM = { calle: 'calle', localidad: 'localidad', provincia: 'provincia', cp: 'CP' };
+      const tx = dir ? escapeHtml(dir) : (logiDirNoDisponible(p) ? '<span class="logi-mute">no se pudo leer</span>' : '<span class="logi-rojo">falta la dirección</span>');
+      inner = `<div class="logi-calle"><span class="tx">${tx}${dir && recibe ? ` <span class="logi-mute">· recibe ${escapeHtml(recibe)}</span>` : ''}</span>`
+        + (dir && faltan.length ? `<span class="logi-tag a" title="Le falta para poder enviarlo">falta ${escapeHtml(faltan.map(f => NOM[f] || f).join(', '))}</span>` : '')
+        + (p.dir_editada ? '<span class="logi-tag c" title="Corregida por logística (la planilla no se toca)">corregida</span>' : '')
+        + `<button type="button" class="logi-ico" data-logi-pop title="Ver el texto original y corregir" aria-label="Ver y corregir la dirección">${LOGI_DOC_SVG}</button></div>`;
+      title = dir ? dir + (recibe ? ' · recibe ' + recibe : '') : '';
+      if (faltan.length) cls.push('falta');
+      if (LOGI_DIR.some(x => { const s = logiCel(p.key, x); return s && s.st === 'saving'; })) cls.push('guardando');
+      if (LOGI_DIR.some(x => { const s = logiCel(p.key, x); return s && s.st === 'error'; })) { cls.push('err'); title = 'Una parte de la dirección no se guardó. Abrila y volvé a guardar'; }
       break;
     }
     case 'contacto_estado': {
@@ -5128,12 +5168,9 @@ function logiFilasHtml(paq) {
 }
 function logiTablaHtml(paq) {
   const cols = `<colgroup>${LOGI_COLS.map(c => `<col style="width:${c.w}px">`).join('')}</colgroup>`;
-  // El grupo Cliente se parte: la parte fija (N° + Cliente) acompaña a las columnas fijas al scrollear de costado.
-  const g = LOGI_GRUPOS.map(([id, lab]) => id === 'cli'
-    ? `<th class="stk1 g-cli" colspan="2">${lab}</th><th class="g-cli"></th>`
-    : `<th class="g-${id}" colspan="${LOGI_COLS.filter(c => c.g === id).length}">${lab}</th>`).join('');
+  // Una sola fila de encabezado (con 7 columnas los grupos Cliente/Dirección/Paquete/Envío ya no suman).
   const h = LOGI_COLS.map(c => `<th class="${[c.stk || '', 'c-' + c.id].join(' ').trim()}"${c.ayuda ? ` title="${escapeHtml(c.ayuda)}"` : ''}>${escapeHtml(c.tit)}</th>`).join('');
-  return `<table class="logi-t" style="width:${LOGI_ANCHO}px">${cols}<thead><tr class="g">${g}</tr><tr class="h">${h}</tr></thead><tbody data-logi-tbody>${logiFilasHtml(paq)}</tbody></table>`;
+  return `<table class="logi-t sin-grupos" style="width:${LOGI_ANCHO}px">${cols}<thead><tr class="h">${h}</tr></thead><tbody data-logi-tbody>${logiFilasHtml(paq)}</tbody></table>`;
 }
 function logiTrDe(key) { return document.querySelector(`.logi-t tbody tr[data-k="${CSS.escape(key)}"]`); }
 function logiTdDe(key, col) { const tr = logiTrDe(key); return tr ? tr.querySelector(`td[data-c="${col}"]`) : null; }
@@ -5188,7 +5225,7 @@ function logiScrollA(td) {
   const arriba = s.top + (th ? th.offsetHeight : 0), abajo = s.top + sc.clientHeight;
   if (r.top < arriba) sc.scrollTop -= (arriba - r.top); else if (r.bottom > abajo) sc.scrollTop += (r.bottom - abajo);
   if (!td.classList.contains('stk1') && !td.classList.contains('stk2')) {
-    const izq = s.left + LOGI_COLS[0].w + LOGI_COLS[1].w, der = s.left + sc.clientWidth;
+    const izq = s.left + LOGI_COLS.filter(c => c.stk).reduce((n, c) => n + c.w, 0), der = s.left + sc.clientWidth;
     if (r.left < izq) sc.scrollLeft -= (izq - r.left); else if (r.right > der) sc.scrollLeft += (r.right - der);
   }
 }
@@ -5298,7 +5335,7 @@ function logiCommit(key, col, raw) {
 function logiCeldaGuardar(key, campo, valor) {
   const L = STATE.logi, p = logiPaq(key); if (!L || !L.tanda || !p) return Promise.resolve(null);
   const tid = L.tanda.id, ck = key + '|' + campo, c = LOGI_COL[campo] || {};
-  const etiqueta = logiN(p.numero) + ' ' + (logiNombre(p.cliente) || 'Cliente');
+  const etiqueta = logiNombre(p.cliente) || 'Cliente';
   STATE._logiCel = STATE._logiCel || {}; STATE._logiSeq = STATE._logiSeq || {}; STATE._logiFilaQ = STATE._logiFilaQ || {};
   const seq = STATE._logiSeq[ck] = (STATE._logiSeq[ck] || 0) + 1;
   STATE._logiCel[ck] = { st: 'saving', val: valor };
@@ -5332,9 +5369,32 @@ function logiCeldaGuardar(key, campo, valor) {
   });
 }
 // "Enviado": tildar lo chequea el server (409 → vuelve y avisa el motivo). Destildar pide confirmación.
+// Columna Estado: Sin contactar / Contactado guardan contacto_estado ('' / 'confirmado'); Enviado marca el envío como
+// cobrado (ya no hay columna "Envío pagado": si lo suben al transporte es porque se lo cobraron) y despacha (el server
+// vuelve a chequear: con el pedido impago responde 409 y la celda vuelve). Salir de Enviado pide confirmación.
+async function logiEstadoCambiar(key, v, o) {
+  o = o || {};
+  const p = logiPaq(key); if (!p) return;
+  const etiqueta = logiNombre(p.cliente) || 'Cliente', prev = logiEstado(p);
+  if (v === prev) { logiPatchFila(key); return; }
+  logiFocoGrilla();
+  if (v === 'enviado') {
+    if (p.pedido_pagado === false) { logiPatchFila(key); niToast(etiqueta + ': el pedido está impago, todavía no se puede enviar', { error: true, ms: 5000 }); return; }
+    if (p.entrega !== 'envio') { logiPatchFila(key); niToast(etiqueta + ': falta definir si retira o va por envío. Consultá con Neon', { error: true, ms: 5000 }); return; }
+    if (!logiValor(p, 'envio_pagado')) { const j1 = await logiCeldaGuardar(key, 'envio_pagado', true); if (!j1) return; }
+    const j = await logiCeldaGuardar(key, 'enviado', true);
+    if (j) niToast(etiqueta + ' enviado', { undo: () => logiEstadoCambiar(key, 'contactado', { sinConfirmar: true }), ms: 5000 });
+    return;
+  }
+  if (prev === 'enviado') {
+    if (!o.sinConfirmar && !await showConfirm(`Sacar a ${etiqueta} de los enviados?`, { title: 'Deshacer envío', confirmLabel: 'Sí, sacar', cancelLabel: 'No' }).catch(() => false)) { logiPatchFila(key); logiFocoGrilla(); return; }
+    const j = await logiCeldaGuardar(key, 'enviado', false); if (!j) return;
+  }
+  logiCeldaGuardar(key, 'contacto_estado', v === 'contactado' ? 'confirmado' : '');
+}
 async function logiEnviado(key, v, cb) {
   const p = logiPaq(key); if (!p) return;
-  const etiqueta = logiN(p.numero) + ' ' + (logiNombre(p.cliente) || 'Cliente');
+  const etiqueta = logiNombre(p.cliente) || 'Cliente';
   if (!v) {
     if (cb) cb.checked = true;
     if (!await showConfirm(`Sacar ${etiqueta} de los enviados?`, { title: 'Deshacer envío', confirmLabel: 'Sí, sacar', cancelLabel: 'No' }).catch(() => false)) { logiFocoGrilla(); return; }
@@ -5383,6 +5443,7 @@ function logiKey(e) {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && k.toLowerCase() === 'v') { if (c.ed === 'txt' || s.col === 'transporte') logiEdAbrir(s.key, s.col, { modo: 'type', texto: '', pegar: true }); return; }
   const altGr = !!(e.getModifierState && e.getModifierState('AltGraph'));
   if ((e.ctrlKey || e.metaKey || e.altKey) && !altGr) return;
+  if (s.col === 'direccion' && (k === 'F2' || k === ' ')) { e.preventDefault(); logiPopAbrir(s.key); return; }
   if (k === 'F2') { e.preventDefault(); if (c.ed === 'txt') logiEdAbrir(s.key, s.col, { modo: 'edit' }); else if (c.ed === 'sel') logiAbrirSelect(td); return; }
   if (k === 'Delete' || k === 'Backspace') { if (c.ed === 'txt') { e.preventDefault(); logiEdAbrir(s.key, s.col, { modo: 'type', texto: '' }); } return; }
   if (k === ' ') {
@@ -5413,6 +5474,7 @@ function logiMouseDown(e) {
   }
   e.preventDefault(); // sin selección de texto; el foco queda en la tabla
   if (ctl) { logiSeleccionar(key, col); logiFocoGrilla(); return; } // botones de la celda: los atiende el click
+  if (col === 'direccion') { logiSeleccionar(key, col); logiPopAbrir(key); return; } // formulario de la dirección
   if (c.ed === 'txt') logiEdAbrir(key, col, { modo: 'edit' });
   else { logiSeleccionar(key, col); logiFocoGrilla(); }
 }
@@ -5430,6 +5492,7 @@ function logiChange(e) {
   const col = td.getAttribute('data-c'), p = logiPaq(key); if (!p) return;
   if (el.tagName === 'SELECT') {
     const v = el.value;
+    if (col === 'estado') { logiEstadoCambiar(key, v); return; }
     if (col === 'transporte' && v === '__sug') return;
     if (col === 'transporte' && v === '__otro') { // nombre a mano (con sugerencias)
       el.value = logiSugerido(p) ? '__sug' : String(logiValor(p, 'transporte') || '');
@@ -5472,7 +5535,19 @@ function logiPopHtml(p) {
   const otros = [['Otro teléfono', logiValor(p, 'tel_alt')], ['Aclaración', logiValor(p, 'obs')]].filter(x => String(x[1] || '').trim());
   const nPz = (p.piezas || []).reduce((s, x) => s + (parseInt(x.cantidad, 10) || 1), 0), nIns = (p.insumos || []).reduce((s, x) => s + (parseInt(x.cantidad, 10) || 1), 0);
   const hist = (p.historial || []).slice(0, 5);
-  return `<div class="logi-pop-h"><b>${escapeHtml(logiN(p.numero) + ' · ' + (logiNombre(p.cliente) || 'Cliente'))}</b>${p.dir_editada ? '<span class="logi-tag c">corregida</span>' : ''}<button type="button" class="logi-x" data-logi-pop-x aria-label="Cerrar">×</button></div>
+  // Formulario: las partes de la dirección (lo que el transporte pide). Se guarda con "Guardar" o al cerrar.
+  const ro = !!logiEnv(p), faltan = logiFaltan(p);
+  const campo = (c, lab, extra, ancho) => `<label class="logi-f${ancho ? ' ancho' : ''}${faltan.includes(c) && !ro ? ' falta' : ''}"><span>${lab}</span><input data-logi-dir="${c}" value="${escapeHtml(String(logiValor(p, c) == null ? '' : logiValor(p, c)))}" maxlength="${c === 'dni' || c === 'cp' ? 40 : 120}" autocomplete="off" spellcheck="false"${extra || ''}${ro ? ' disabled' : ''}></label>`;
+  const form = `<div class="logi-form" data-logi-dirform>
+      ${campo('calle', 'Calle y número', '', true)}
+      ${campo('localidad', 'Localidad')}${campo('provincia', 'Provincia', ' list="logi-provincias"')}
+      ${campo('cp', 'CP', ' inputmode="text"')}${campo('recibe', 'Recibe')}
+      ${campo('dni', 'DNI', ' inputmode="numeric"')}
+    </div>`;
+  return `<div class="logi-pop-h"><b>${escapeHtml(logiNombre(p.cliente) || 'Cliente')}</b>${p.dir_editada ? '<span class="logi-tag c">corregida</span>' : ''}<button type="button" class="logi-x" data-logi-pop-x aria-label="Cerrar">×</button></div>
+    <div class="tit">Dirección de envío</div>
+    ${form}
+    ${ro ? '<div class="logi-mute" style="margin-top:6px">Ya se envió: la dirección no se puede cambiar.</div>' : `<div class="acc" style="margin-top:8px"><button type="button" class="btn btn-cyan" data-logi-dir-ok>Guardar</button><button type="button" class="btn btn-ghost" data-logi-dir-copiar title="Copia la dirección en una línea (para cargarla en el transporte)">Copiar dirección</button></div>`}
     <div class="tit">Texto original de la planilla</div>
     ${fuente ? `<pre>${escapeHtml(fuente)}</pre>` : `<div class="logi-mute">${logiDirNoDisponible(p) ? 'No se pudo leer la planilla. Tocá Actualizar en un rato.' : 'El cliente no cargó datos de envío en la planilla.'}</div>`}
     ${p.dir_editada ? `<div class="logi-mute" style="margin-top:6px">Logística corrigió esta dirección${p.dir_editada_por ? ' (' + escapeHtml(p.dir_editada_por) + (p.dir_editada_at ? ', ' + escapeHtml(logiHora(p.dir_editada_at)) : '') + ')' : ''}: vale también para las próximas semanas. La planilla no se toca.</div>` : ''}
@@ -5481,7 +5556,18 @@ function logiPopHtml(p) {
     <div class="tit">Paquete</div>
     <div>${nPz} pieza${nPz === 1 ? '' : 's'}${nIns ? ' · ' + nIns + ' insumo' + (nIns === 1 ? '' : 's') : ''}${p.paquete ? ' · ' + escapeHtml(logiPaqTxt(p.paquete)) + (p.paquete.fuente === 'medido' ? ' (medido)' : ' (estimado)') : ''}${p.arrastre ? ' · viene de la semana del ' + escapeHtml(logiFechaCorteDDMM(p.arrastre)) : ''}</div>
     ${hist.length ? `<div class="tit">Historial</div>${hist.map(h => `<div class="logi-h">${escapeHtml(logiHora(h.ts))} · ${escapeHtml(logiAccTxt(h))}${h.operador ? ' · ' + escapeHtml(h.operador) : ''}</div>`).join('')}` : ''}
-    <div class="acc">${fuente ? '<button type="button" class="btn btn-ghost" data-logi-pop-copiar>Copiar texto</button>' : ''}<button type="button" class="btn btn-ghost" data-logi-pop-avisar title="Le manda a Neon lo que escribiste en la columna Nota">Avisar a Neon</button></div>`;
+    ${fuente ? '<div class="acc"><button type="button" class="btn btn-ghost" data-logi-pop-copiar>Copiar texto original</button></div>' : ''}`;
+}
+// Guarda las partes de la dirección que cambiaron (cada una por la cola de la fila, con la misma validación que una celda).
+// cerrar=true: además cierra el formulario. Devuelve false si un valor no sirve (el formulario queda abierto).
+function logiDirFormGuardar(key, cerrar) {
+  const pop = document.getElementById('logi-pop'); if (!pop || pop.dataset.k !== key) return true;
+  const p = logiPaq(key); if (!p || logiEnv(p)) { if (cerrar) logiPopCerrar(true); return true; }
+  const ins = [...pop.querySelectorAll('[data-logi-dir]')];
+  for (const inp of ins) { const n = logiNormalizar(inp.getAttribute('data-logi-dir'), inp.value); if (!n.ok) { niToast(n.msg, { error: true }); try { inp.focus(); inp.select(); } catch (_) {} return false; } }
+  ins.forEach(inp => { const c = inp.getAttribute('data-logi-dir'); if (!logiIgual(String(inp.value).replace(/\s+/g, ' ').trim(), String(logiValor(p, c) == null ? '' : logiValor(p, c)))) logiCommit(key, c, inp.value); });
+  if (cerrar) { pop.dataset.guardado = '1'; logiPopCerrar(true); logiFocoGrilla(); }
+  return true;
 }
 function logiPopAbrir(key) {
   const p = logiPaq(key), wrap = document.querySelector('.logi-wrap'); if (!p || !wrap) return;
@@ -5495,14 +5581,23 @@ function logiPopAbrir(key) {
     const b = e.target.closest && e.target.closest('button'); if (!b) return;
     const q = logiPaq(key);
     if (b.hasAttribute('data-logi-pop-x')) { logiPopCerrar(true); logiFocoGrilla(); }
+    else if (b.hasAttribute('data-logi-dir-ok')) logiDirFormGuardar(key, true);
+    else if (b.hasAttribute('data-logi-dir-copiar') && q) {
+      // Lo que está escrito en el formulario (aunque todavía no se haya guardado), en una línea para el transporte.
+      const v = c => { const i = el.querySelector(`[data-logi-dir="${c}"]`); return i ? String(i.value).replace(/\s+/g, ' ').trim() : ''; };
+      const linea = [v('calle'), v('localidad'), v('provincia'), v('cp') ? 'CP ' + v('cp') : ''].filter(Boolean).join(', ') + (v('recibe') ? ' · recibe ' + v('recibe') : '') + (v('dni') ? ' · DNI ' + v('dni') : '');
+      logiCopiar(linea, 'Dirección copiada');
+    }
     else if (b.hasAttribute('data-logi-pop-copiar') && q) logiCopiar(String(q.dir_fuente != null ? q.dir_fuente : (q.datos_envio || '')).trim(), 'Texto copiado');
-    else if (b.hasAttribute('data-logi-pop-avisar')) logiAvisar(key, b);
   };
+  // Enter en un campo = Guardar (como en un formulario).
+  el.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches && e.target.matches('[data-logi-dir]')) { e.preventDefault(); logiDirFormGuardar(key, true); } });
   logiPopUbicar();
+  const f = el.querySelector('[data-logi-dir]:not([disabled])'); if (f) { try { f.focus({ preventScroll: true }); } catch (_) {} }
 }
 function logiPopUbicar() {
   const el = document.getElementById('logi-pop'); if (!el) return;
-  const td = logiTdDe(el.dataset.k, 'calle'), a = td ? (td.querySelector('[data-logi-pop]') || td) : null;
+  const td = logiTdDe(el.dataset.k, 'direccion'), a = td ? (td.querySelector('[data-logi-pop]') || td) : null;
   const w = el.offsetWidth, h = el.offsetHeight;
   if (!a) { el.style.left = Math.max(12, (window.innerWidth - w) / 2) + 'px'; el.style.top = Math.max(12, (window.innerHeight - h) / 2) + 'px'; return; }
   const r = a.getBoundingClientRect();
@@ -5512,7 +5607,10 @@ function logiPopUbicar() {
 }
 // tras=true: si quedó un refresco pendiente mientras estaba abierto, se aplica.
 function logiPopCerrar(tras) {
-  const el = document.getElementById('logi-pop'); if (el) el.remove();
+  const el = document.getElementById('logi-pop');
+  // Cerrar sin tocar "Guardar" (click afuera, Esc, ×) también guarda lo que se cambió, como al salir de una celda.
+  if (el && !el.dataset.guardado && el.querySelector('[data-logi-dirform]')) { el.dataset.guardado = '1'; try { logiDirFormGuardar(el.dataset.k, false); } catch (_) {} }
+  if (el) el.remove();
   STATE.logiPop = null;
   if (tras && STATE._logiDirty) setTimeout(() => { if (!logiOcupado()) logiRender(); }, 250);
 }
@@ -5642,7 +5740,7 @@ function renderLogistica() {
     </div>
     ${L.ltv_error ? `<div class="logi-aviso">${escapeHtml(L.ltv_error)}</div>` : ''}
     ${!t ? '<div class="logi-vacio-box">Todavía no hay ninguna semana cargada.</div>' : `
-    <div class="logi-filtros"><span class="logi-chips" data-logi-chips>${logiChipsHtml(paq)}</span><input id="logi-q" class="logi-q" type="search" autocomplete="off" spellcheck="false" placeholder="Buscar nombre, localidad, provincia o N°" value="${escapeHtml(STATE.logiQ || '')}"></div>
+    <div class="logi-filtros"><span class="logi-chips" data-logi-chips>${logiChipsHtml(paq)}</span><input id="logi-q" class="logi-q" type="search" autocomplete="off" spellcheck="false" placeholder="Buscar nombre, localidad o provincia" value="${escapeHtml(STATE.logiQ || '')}"></div>
     <div class="logi-tot" data-logi-tot>${escapeHtml(logiTotalesTxt(paq))}</div>
     <div class="logi-scroll" tabindex="0" aria-label="Tabla de envíos de la semana">${logiTablaHtml(paq)}</div>
     <div class="logi-ayuda">Click en una celda para escribir · Enter guarda y baja · Tab va a la derecha · Esc cancela · Todo se guarda solo</div>
@@ -5710,14 +5808,16 @@ function logiFiltroTxt() {
 function logiExcel() {
   const L = STATE.logi; if (!L || !L.tanda) return;
   const lista = logiVisibles(logiPaquetes());
-  const head = ['N°', 'Cliente', 'Teléfono'].concat(LOGI_COLS.slice(2).map(c => c.tit));
+  // Las columnas de la tabla (con el teléfono aparte) y, al final, la dirección desglosada para cargarla en el transporte.
+  const extra = ['recibe', 'dni', 'calle', 'localidad', 'provincia', 'cp'];
+  const head = ['Cliente', 'Teléfono'].concat(LOGI_COLS.slice(1).map(c => c.tit), extra.map(id => LOGI_COL[id].tit));
   const fila = p => {
     const tel = String(p.telefono || '').replace(/\D/g, '');
-    return [logiTextoCelda(p, 'num'), logiTextoCelda(p, 'cliente'), tel ? corteFmtTel(tel).replace(/^\+/, '') : ''].concat(LOGI_COLS.slice(2).map(c => logiTextoCelda(p, c.id)));
+    return [logiTextoCelda(p, 'cliente') + (p.pedido_pagado === false ? ' (impago)' : ''), tel ? corteFmtTel(tel).replace(/^\+/, '') : '']
+      .concat(LOGI_COLS.slice(1).map(c => logiTextoCelda(p, c.id)), extra.map(id => logiTextoCelda(p, id)));
   };
-  // Identificadores (N°, teléfono, DNI, CP, guía) que son solo dígitos van como ="..." (texto): si no, Excel los toma como
-  // número (una guía de 19 dígitos queda 3,8675E+18 con los últimos en 0; "05" queda 5).
-  const ids = new Set([0, 2].concat(['dni', 'cp', 'seguimiento'].map(id => 3 + LOGI_COLS.slice(2).findIndex(c => c.id === id))));
+  // Identificadores que son solo dígitos (teléfono, DNI, CP) van como ="..." (texto): si no, Excel los toma como número.
+  const ids = new Set([1].concat(['dni', 'cp'].map(id => head.indexOf(LOGI_COL[id].tit))));
   // Texto que empieza con = + - @ se anteponen ' (Excel no lo toma como fórmula).
   const cel = (v, i) => { let s = String(v == null ? '' : v); if (ids.has(i) && /^\d+$/.test(s)) return '"=""' + s + '"""'; if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return /[";\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
   const csv = '﻿' + [head].concat(lista.map(fila)).map(r => r.map(cel).join(';')).join('\r\n') + '\r\n';
@@ -5741,12 +5841,13 @@ function logiImprimir() {
   const titulo = `Envíos · semana del lunes ${logiDDMM(fD) || L.tanda.fecha} · sale el martes ${L.tanda.martes || ''}`;
   const ahora = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
   // Anchos en % de la hoja (suman 100): con el ancho automático el N°, el DNI y el CP se partían en dos renglones.
-  const PW = { num: 2.6, cliente: 8.5, pedido: 4.4, recibe: 6.5, dni: 5.4, calle: 10.5, localidad: 6.5, provincia: 6, cp: 3.8, bultos: 3, medidas: 5.8, peso: 3.6, contacto_estado: 5.2, transporte: 5.6, envio_costo: 4.6, envio_pagado: 3.4, seguimiento: 5.6, enviado: 3.8, nota: 5.2 };
-  const cols = LOGI_COLS.map(c => `<col style="width:${PW[c.id] || 4}%">`).join('');
-  const grupos = LOGI_GRUPOS.map(([g, lab]) => `<th colspan="${LOGI_COLS.filter(c => c.g === g).length}">${lab}</th>`).join('');
+  const PW = { cliente: 17, medidas: 9, peso: 5, estado: 9, transporte: 11, envio_costo: 7, direccion: 42 };
+  const cols = LOGI_COLS.map(c => `<col style="width:${PW[c.id] || 8}%">`).join('');
+  const grupos = '';
   const head = LOGI_COLS.map(c => `<th>${esc(c.tit)}</th>`).join('');
   const fila = p => `<tr class="${logiFilaCls(p)}">${LOGI_COLS.map(c => {
-    if (c.id === 'cliente') { const tel = String(p.telefono || '').replace(/\D/g, ''); return `<td><b>${esc(logiTextoCelda(p, 'cliente'))}</b>${tel ? '<br><small>' + esc(corteFmtTel(tel)) + '</small>' : ''}</td>`; }
+    if (c.id === 'cliente') { const tel = String(p.telefono || '').replace(/\D/g, ''); return `<td><b>${esc(logiTextoCelda(p, 'cliente'))}</b>${p.pedido_pagado === false ? ' <small>(impago)</small>' : ''}${tel ? '<br><small>' + esc(corteFmtTel(tel)) + '</small>' : ''}</td>`; }
+    if (c.id === 'direccion') { const r = String(logiValor(p, 'recibe') || '').trim(), d = String(logiValor(p, 'dni') || '').trim(); return `<td${!logiEnv(p) && logiFaltan(p).length ? ' class="falta"' : ''}>${esc(logiTextoCelda(p, 'direccion'))}${r || d ? '<br><small>' + esc([r ? 'Recibe ' + r : '', d ? 'DNI ' + d : ''].filter(Boolean).join(' · ')) + '</small>' : ''}</td>`; }
     const v = logiTextoCelda(p, c.id);
     if (c.ed === 'chk') return `<td class="c">${v === 'Sí' ? '✓' : ''}</td>`;
     if (c.id === 'envio_costo') return `<td class="r">${v ? '$ ' + (parseInt(v, 10) || 0).toLocaleString('es-AR') : ''}</td>`;
@@ -5770,7 +5871,7 @@ tr.r-impago td:first-child{border-left:1.2mm solid #d00}tr.r-listo td:first-chil
 tr.r-enviado td{color:#777}
 tr{break-inside:avoid}thead{display:table-header-group}small{font-size:6.6pt;color:#333}
 </style></head><body><h1>${esc(titulo)}</h1><div class="sub">${esc(lista.length + ' envío' + (lista.length === 1 ? '' : 's') + logiFiltroTxt() + ' · impreso el ' + ahora)}</div>
-<table><colgroup>${cols}</colgroup><thead><tr class="g">${grupos}</tr><tr>${head}</tr></thead><tbody>${lista.length ? lista.map(fila).join('') : `<tr><td colspan="${LOGI_COLS.length}">Nada para imprimir</td></tr>`}</tbody></table>
+<table><colgroup>${cols}</colgroup><thead>${grupos ? `<tr class="g">${grupos}</tr>` : ''}<tr>${head}</tr></thead><tbody>${lista.length ? lista.map(fila).join('') : `<tr><td colspan="${LOGI_COLS.length}">Nada para imprimir</td></tr>`}</tbody></table>
 <script>window.onload=function(){window.print()}<\/script></body></html>`);
     w.document.close();
   } catch (_) {}

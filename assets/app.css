@@ -4407,3 +4407,19 @@ textarea:focus-visible,
 .logi-pop .logi-h { font-size: 12px; color: var(--fg-muted); line-height: 1.6; }
 .logi-pop .acc { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .logi-pop .acc .btn { font-size: 12.5px; padding: 6px 11px; }
+
+/* Logística (12-oct): tabla de 7 columnas, sin la fila de grupos; Estado; formulario de dirección. */
+.logi-t.sin-grupos thead tr.h th { top: 0; height: 34px; }
+.logi-t select.est-sin { color: var(--fg-subtle); }
+.logi-t select.est-contactado { color: #38bdf8; }
+.logi-t select.est-enviado { color: #22c55e; }
+.logi-t td.c-direccion { cursor: pointer; }
+.logi-cli .n .logi-pill { margin-left: 4px; vertical-align: 1px; }
+.logi-pop .logi-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.logi-pop .logi-f { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.logi-pop .logi-f.ancho { grid-column: 1 / -1; }
+.logi-pop .logi-f > span { font-size: 11px; color: var(--fg-subtle); }
+.logi-pop .logi-f input { box-sizing: border-box; width: 100%; height: 32px; background: var(--ink-100); border: 1px solid var(--border); border-radius: 7px; color: var(--fg); font: inherit; font-size: 13px; padding: 0 9px; }
+.logi-pop .logi-f input:focus { outline: none; border-color: var(--neon-cyan); }
+.logi-pop .logi-f.falta input { border-color: #ef4444; background: color-mix(in srgb, #ef4444 10%, var(--ink-100)); }
+.logi-pop .logi-f input:disabled { opacity: .6; }
