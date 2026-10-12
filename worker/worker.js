@@ -12019,6 +12019,13 @@ async function processPaymentProof(env, m) {
   // Los comprobantes de CARTELES (contacto con "POR PAGAR") los maneja processCartelPagos
   // (saca "POR PAGAR" + pone "Cartel primer pago"). Acá SOLO procesamos los del lanzamiento.
   try { if (await hasPorPagarLabel(env, m.phone)) return; } catch (_) {}
+  // Clientes del servicio de CORTE (alumnos o pedidos de corte): sus comprobantes los maneja el vigía de corte
+  // (corteVigiaPago → corte_pago_check + caja). Antes se colaban como "Nuevo pago" del lanzamiento: el 12-oct
+  // 3 cobros de corte ($7.700 a $18.375) se avisaron a Gaspar y Bruno como pagos del curso.
+  try {
+    const corte = await env.DB.prepare("SELECT (EXISTS (SELECT 1 FROM corte_alumnos WHERE telefono = ?1) OR EXISTS (SELECT 1 FROM corte_pedidos WHERE telefono = ?1)) AS v").bind(m.phone).first();
+    if (corte && corte.v) return;
+  } catch (_) {}
   try {
     const res = await env.DB.prepare(
       "INSERT OR IGNORE INTO wa_pago_proof (wamid, phone, nombre, media_key, caption, ts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
