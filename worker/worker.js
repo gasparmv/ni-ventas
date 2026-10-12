@@ -3224,8 +3224,11 @@ async function processPrecotizPilot(env) {
     // Fallback anti-inconsistencia del AI: a veces escribe "te paso las tipografías" en el texto
     // pero NO pone el flag enviar_tipografias -> la imagen nunca sale. Si el mensaje PROMETE pasar
     // las tipografías (verbo de envío + "tipograf"), las mandamos igual (el dedup evita repetir).
-    const _tipoTxt = _normTxt(msgs.join(' '));
-    const _promeTipos = /tipograf/.test(_tipoTxt) && /(te paso|te mando|te muestro|te envio|te comparto|que trabajamos|que usamos)/.test(_tipoTxt);
+    // Proximidad POR MENSAJE: el verbo de envío y "tipograf" tienen que estar juntos en la misma
+    // frase. Antes se juntaban todos los mensajes, y "qué tipografía te gusta?" + "el acrílico que
+    // usamos…" (en otro mensaje) disparaba el catálogo sin querer.
+    const _reProm = /(te (las |los )?(paso|mando|muestro|envio|comparto)[^.]{0,40}tipograf)|(tipograf[^.]{0,40}te (las |los )?(paso|mando|muestro|envio|comparto))|(tipograf(ia|ias)?[^.]{0,25}que (trabajamos|usamos))/;
+    const _promeTipos = msgs.some(m => _reProm.test(_normTxt(m)));
     const wantTipos = !!res.enviar_tipografias || _promeTipos;
     try { await env.DB.prepare("UPDATE precotiz_pilot SET tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
     if (!msgs.length && !wantTipos) continue;
