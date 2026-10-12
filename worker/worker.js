@@ -2772,6 +2772,7 @@ EXTERIOR — ¿QUEDA CUBIERTO? Si el cliente dice que el cartel es para EXTERIOR
 - No sabe, no lo tiene definido, o ya se lo preguntaste y no te contestó → techo="no_sabe" y NO insistas.
 - Si es interior, o todavía no sabés si es exterior → es_exterior=false o techo="".
 VOCABULARIO: decí "corpóreo iluminado" o "cartel corpóreo con luz". NUNCA digas "retroiluminado" para hablar del corpóreo en general: retroiluminado es SOLO cuando la luz sale por detrás de la letra.
+PRODUCTO — en CADA respuesta marcá qué quiere el cliente (campo producto): "corporeo" si pide un corpóreo, letras 3D, con volumen o con relieve, si la foto de referencia es claramente un corpóreo (letras macizas con volumen, AUNQUE diga "neón"), si vino de un anuncio de corpóreo, o si aceptó la recomendación de corpóreo; "neon" si lo que quiere es neón (la línea de luz que dibuja el contorno) o lo pide claramente; "no_sabe" si todavía no está claro. Si vino de un anuncio de corpóreo pero dice claramente que quiere neón, poné "neon". Si marcás "corporeo", valen las reglas del corpóreo: sin la pregunta del techo y sin tipografías.
 QUÉ ES EL CORPÓREO: un cartel de letras o logo en 3D, macizo y con volumen (no es neón). Lo hacemos y es el que recomendamos para exterior sin techo. Si el cliente pregunta detalles del corpóreo (precio, materiales, cómo se ve, tiempos), no inventes: decile que se lo detallamos en el presupuesto y seguí relevando.
 
 Si te paso imágenes, MIRALAS bien. Una imagen cuenta como la foto del diseño (tiene_foto=true) SOLO si es un boceto, logo, foto o referencia del cartel/diseño que el cliente quiere. Si la imagen es un meme, una captura de otra app, un tweet, una promo, spam, o cualquier cosa que no tenga que ver con un cartel → tiene_foto=false (y si es spam o estafa, frenar=true y es_carteles=false).
@@ -2838,7 +2839,7 @@ REGLA DE ORO — NO respondas por responder. Si NO sabés qué contestar con cer
 Cuando ya tenés lo necesario, mensajes=[] (el humano sigue desde acá). "Lo necesario" = FOTO + MEDIDAS, más el interior/exterior SOLO si el cliente lo dio o dijo que no sabe, si es EXTERIOR además saber si queda cubierto (techo="si", "no" o "no_sabe"), y haber preguntado UNA vez para cuándo lo necesita (fecha con lo que dijo o "no_sabe"). O sea: si tenés foto + medidas + (tiene_intext=true O intext_no_sabe=true), fecha distinto de "" y, cuando es exterior, techo distinto de "" → mensajes=[]. ÚNICA excepción: si en este turno te contestó que NO está cubierto, mandá el mensaje recomendando el corpóreo iluminado (sugerir_corporeo=true) aunque ya esté todo. Nunca prometas el render/precio: eso lo hace una persona después.
 
 Devolvé SOLO un JSON, sin nada alrededor:
-{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"es_exterior":bool,"techo":"si|no|no_sabe|no_aplica|","sugerir_corporeo":bool,"fecha":"lo que dijo|no_sabe|","enviar_tipografias":bool,"mensajes":["..."]}`;
+{"es_carteles":bool,"frenar":bool,"motivo_freno":"string corto","tiene_foto":bool,"tiene_medidas":bool,"tiene_intext":bool,"intext_no_sabe":bool,"es_exterior":bool,"techo":"si|no|no_sabe|no_aplica|","sugerir_corporeo":bool,"fecha":"lo que dijo|no_sabe|","producto":"neon|corporeo|no_sabe","enviar_tipografias":bool,"mensajes":["..."]}`;
 
 // Detecta el tipo de imagen por los MAGIC BYTES, no por el content-type guardado. El CDN de
 // Meta (IG) a veces sirve un PNG con content-type image/jpeg, y así queda en R2. Si a Claude
@@ -2966,9 +2967,13 @@ function precotizMsgs(res) {
 // catálogo es de neón). Kill-switch kv precotiz_corporeo_on (default ON): en '0' vuelve todo a como
 // era (exclusión + auto-reply fijo de corporeoAskOnInbound).
 async function precotizCorporeoOn(env) { return (await kvGet(env, 'precotiz_corporeo_on', '1')) === '1'; }
-const PRECOTIZ_CORP_NOTE = '## LEAD DE CORPÓREO\nEste cliente vino de un anuncio de CARTELES CORPÓREOS. Reglas: hablá de corpóreo, nunca de neón; NO preguntes lo del techo (el corpóreo ya está pensado para exterior: poné techo="no_aplica"); NO mandes, ofrezcas ni prometas tipografías u opciones de letra (enviar_tipografias=false): si no tiene logo ni letra elegida, pedile el texto exacto y decile que el equipo le arma la propuesta de diseño en el render. Relevá foto o logo, medidas (aclarando si es el cartel, el espacio disponible o la altura de letra), interior o exterior, para cuándo lo necesita y, si se puede, una foto del frente o del lugar donde va. Para dudas del producto usá la PARTE C del playbook.\n\n';
-// ¿El lead vino de un anuncio de corpóreo? Por el header del contexto o por la última atribución.
-async function precotizEsCorporeo(env, phone, fullText) {
+const PRECOTIZ_CORP_NOTE = '## LEAD DE CORPÓREO\nEste cliente quiere un CARTEL CORPÓREO (vino de un anuncio de corpóreo o ya lo pidió en la charla). Reglas: hablá de corpóreo, nunca de neón; NO preguntes lo del techo (el corpóreo ya está pensado para exterior: poné techo="no_aplica"); NO mandes, ofrezcas ni prometas tipografías u opciones de letra (enviar_tipografias=false): si no tiene logo ni letra elegida, pedile el texto exacto y decile que el equipo le arma la propuesta de diseño en el render. Relevá foto o logo, medidas (aclarando si es el cartel, el espacio disponible o la altura de letra), interior o exterior, para cuándo lo necesita y, si se puede, una foto del frente o del lugar donde va. Para dudas del producto usá la PARTE C del playbook.\n\n';
+// ¿Es un lead de corpóreo? Primero lo que la IA ya detectó y quedó guardado (precotiz_pilot.producto:
+// si el cliente eligió neón explícitamente, pisa al anuncio); si no hay nada guardado, por el anuncio
+// (header del contexto o última atribución).
+async function precotizEsCorporeo(env, phone, fullText, guardado) {
+  if (guardado === 'corporeo') return true;
+  if (guardado === 'neon') return false;
   if (/VERTICAL DEFINIDA POR EL AD: CORPOREO/.test(String(fullText || ''))) return true;
   if (!phone) return false;
   try {
@@ -2980,8 +2985,21 @@ async function precotizEsCorporeo(env, phone, fullText) {
 function precotizAjusteCorporeo(res) {
   if (!res) return;
   res.enviar_tipografias = false;
-  res.sugerir_corporeo = false;            // ya es corpóreo (la etiqueta la pone el enrolamiento)
   if (!res.techo) res.techo = 'no_aplica'; // nunca queda esperando la pregunta del techo
+}
+// ¿Este turno corre en modo corpóreo? Lo que la IA marcó AHORA manda (si dice neón, el cliente lo
+// eligió); si no marcó nada claro, lo que ya se sabía (anuncio o guardado).
+function precotizCorpTurno(esCorp, res) {
+  if (res && res.producto === 'neon') return false;
+  return !!(esCorp || (res && res.producto === 'corporeo'));
+}
+// Guarda lo que la IA detectó que quiere el cliente (neón/corpóreo) para que en los turnos siguientes
+// corran las reglas fijas aunque no haya venido de un anuncio de corpóreo. Corpóreo → etiqueta 🔠.
+async function precotizGuardarProducto(env, phone, res, previo) {
+  const p = (res && (res.producto === 'corporeo' || res.producto === 'neon')) ? res.producto : '';
+  if (!p) return;
+  if (p !== (previo || '')) { try { await env.DB.prepare("UPDATE precotiz_pilot SET producto = ? WHERE phone = ?").bind(p, phone).run(); } catch (_) {} }
+  if (p === 'corporeo') await corporeoTag(env, phone, true);
 }
 
 // Preguntas que se hacen UNA vez antes de cerrar la precotización (aunque ya estén foto+medidas):
@@ -3263,11 +3281,12 @@ async function processPrecotizPilot(env) {
     if (!ctx) continue;
     const fw = await getActiveFramework(env);
     const imgs = await precotizImageBlocks(env, lead.phone);
-    const esCorp = await precotizEsCorporeo(env, lead.phone, ctx.fullText); // lead de anuncio de corpóreo
+    const esCorp = await precotizEsCorporeo(env, lead.phone, ctx.fullText, lead.producto); // anuncio de corpóreo o ya detectado
     const out = await precotizLlm(env, (esCorp ? PRECOTIZ_CORP_NOTE : '') + ctx.fullText, fw?.content || '', imgs, { phone: lead.phone });
     if (!out.ok) continue;
     const res = out.data;
-    if (esCorp) precotizAjusteCorporeo(res);
+    const esCorpTurno = precotizCorpTurno(esCorp, res); // lo que la IA marcó en este turno manda
+    if (esCorpTurno) precotizAjusteCorporeo(res);
 
     const tF = res.tiene_foto ? 1 : 0; // la IA VE la imagen y decide si es la foto del diseño
     // tiene_intext=1 también si dijo que no sabe: el dato quedó resuelto (así el nudge no se lo vuelve a
@@ -3293,6 +3312,7 @@ async function processPrecotizPilot(env) {
     // Exterior sin techo (lo recomendó el bot o ya lo había hablado un humano): etiqueta 🔠 Corpóreo para
     // que el vendedor lo cotice como corpóreo.
     if (res.sugerir_corporeo || res.techo === 'no') await corporeoTag(env, lead.phone, true);
+    await precotizGuardarProducto(env, lead.phone, res, lead.producto); // neón/corpóreo detectado por la IA
     if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaPregunta(res, msgs)) { // ya tiene lo necesario (foto+medidas; el int/ext lo dio o dijo que no sabe; ya se preguntó la fecha y, si es exterior, el techo) → handoff a Joaco
       // Si en este turno recomendó el corpóreo (contestó que no tiene techo), ese mensaje sale antes de
       // cerrar: al completar no se envía nada más y la recomendación se perdía.
@@ -3314,7 +3334,7 @@ async function processPrecotizPilot(env) {
     // usamos…" (en otro mensaje) disparaba el catálogo sin querer.
     const _reProm = /(te (las |los )?(paso|mando|muestro|envio|comparto)[^.]{0,40}tipograf)|(tipograf[^.]{0,40}te (las |los )?(paso|mando|muestro|envio|comparto))|(tipograf(ia|ias)?[^.]{0,25}que (trabajamos|usamos))/;
     const _promeTipos = msgs.some(m => _reProm.test(_normTxt(m)));
-    const wantTipos = !esCorp && (!!res.enviar_tipografias || _promeTipos); // corpóreo: nunca tipografías (Gaspar)
+    const wantTipos = !esCorpTurno && (!!res.enviar_tipografias || _promeTipos); // corpóreo: nunca tipografías (Gaspar)
     try { await env.DB.prepare("UPDATE precotiz_pilot SET tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
     if (!msgs.length && !wantTipos) continue;
     if (modo === 'auto') {
@@ -3445,7 +3465,8 @@ async function processPrecotizPilot(env) {
     const out = await precotizLlm(env, (esCorp ? PRECOTIZ_CORP_NOTE : '') + ctx.fullText, fw?.content || '', imgs, { phone });
     if (!out.ok) { await precotizLog(env, phone, 'error_ia', { motivo: out.error }); continue; } // la IA falló (429/refusal/etc.) — queda logueado para auditar
     const res = out.data;
-    if (res && esCorp) precotizAjusteCorporeo(res);
+    const esCorpTurno = precotizCorpTurno(esCorp, res);
+    if (res && esCorpTurno) precotizAjusteCorporeo(res);
     if (!res || res.es_carteles === false || res.frenar) {                   // no entra al piloto
       await precotizLog(env, phone, 'rechazo', { motivo: (res && res.motivo_freno) || (res && res.es_carteles === false ? 'no es carteles' : 'sin datos'), es_carteles: res && res.es_carteles, frenar: res && res.frenar, tiene_foto: res && res.tiene_foto, tiene_medidas: res && res.tiene_medidas, tiene_intext: res && res.tiene_intext });
       continue;
@@ -3478,6 +3499,7 @@ async function processPrecotizPilot(env) {
       continue;
     }
     if (res.sugerir_corporeo || res.techo === 'no') await corporeoTag(env, phone, true); // exterior sin techo → 🔠 Corpóreo
+    await precotizGuardarProducto(env, phone, res, ''); // neón/corpóreo detectado por la IA
     if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaPregunta(res, msgs)) { // ya tiene lo necesario (foto+medidas; ya se preguntó la fecha y, si es exterior, el techo) → completo
       if (res.sugerir_corporeo && msgs.length && modo === 'auto') await precotizEmitir(env, phone, '', msgs, 'auto', nowIso);
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', completed_at=?, updated_at=? WHERE phone=?").bind(nowIso, nowIso, phone).run(); } catch (_) {}
@@ -16091,11 +16113,14 @@ const handler = {
             imgs = await precotizImageBlocks(env, num);
           }
           const fw = await getActiveFramework(env);
-          const esCorp = await precotizEsCorporeo(env, num, fullText);
+          let _guardado = '';
+          if (num) { try { const _p = await env.DB.prepare("SELECT producto FROM precotiz_pilot WHERE phone = ?").bind(num).first(); _guardado = (_p && _p.producto) || ''; } catch (_) {} }
+          const esCorp = await precotizEsCorporeo(env, num, fullText, _guardado);
           const out = await precotizLlm(env, (esCorp ? PRECOTIZ_CORP_NOTE : '') + fullText, fw?.content || '', imgs, { phone: num || 'prueba', by: 'dry-run' });
-          if (out.data && esCorp) precotizAjusteCorporeo(out.data);
+          const esCorpTurno = precotizCorpTurno(esCorp, out.data);
+          if (out.data && esCorpTurno) precotizAjusteCorporeo(out.data);
           const _msgs = precotizMsgs(out.data);
-          return json({ ok: out.ok, phone: num || null, es_corporeo: esCorp, result: out.data || null, candado: out.data ? (precotizMedidaInventada(_msgs, fullText) || null) : null, espera_pregunta: out.data ? precotizFaltaPregunta(out.data, _msgs) : null, error: out.error || null, status: out.status || null, raw: out.raw || null });
+          return json({ ok: out.ok, phone: num || null, es_corporeo: esCorpTurno, result: out.data || null, candado: out.data ? (precotizMedidaInventada(_msgs, fullText) || null) : null, espera_pregunta: out.data ? precotizFaltaPregunta(out.data, _msgs) : null, error: out.error || null, status: out.status || null, raw: out.raw || null });
         }
 
         // POST /admin/precotiz/approve → { phone, mensajes? } envía los mensajitos (editados o del borrador)
