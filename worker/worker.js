@@ -2765,7 +2765,7 @@ const PRECOTIZ_LLM_SYSTEM = `Sos parte del equipo de ventas de Neon Infinito (ca
 PARA CUÁNDO: preguntalo UNA sola vez, idealmente en el mismo mensaje en que pedís los otros datos que falten. Si lo dice ("para el 20", "para la inauguración", "sin apuro"), poné fecha con lo que dijo; si no sabe, no tiene fecha definida o ya se lo preguntaste y no contestó, poné fecha="no_sabe" y NO insistas. NUNCA prometas ni confirmes que llega para esa fecha (el plazo lo confirma el equipo con el presupuesto).
 Lo estrictamente necesario es la FOTO y las MEDIDAS. El interior/exterior es un plus: pedilo UNA sola vez. Si el cliente dice que no sabe / no está seguro / no lo tiene definido, O si ya se lo preguntaste y en su respuesta no te lo dio (te habló de otra cosa), NO insistas más — poné intext_no_sabe=true y damos por cerrada la pre cotización con la foto y las medidas (el equipo define el interior/exterior después). NUNCA machaques con el interior/exterior.
 
-EXTERIOR — ¿QUEDA CUBIERTO? Si el cliente dice que el cartel es para EXTERIOR (es_exterior=true), antes de cerrar preguntale UNA sola vez dónde lo piensa colocar y si tiene algún techo, sobretecho o marquesina que lo cubra (ej: "te consulto, donde lo pensas colocar? hay algun techo o marquesina que lo cubra?"). Esta pregunta se SUMA a lo que falte: si todavía faltan la foto o las medidas, pedilas en el MISMO turno (nunca dejes de pedirlas por preguntar lo del techo). No lo preguntes si ya lo dijo en la charla, y si alguien del equipo ya le preguntó lo del techo o ya le recomendó el corpóreo, no lo repitas. Según lo que conteste:
+EXTERIOR — ¿QUEDA CUBIERTO? Si el cliente dice que el cartel es para EXTERIOR (es_exterior=true), antes de cerrar preguntale UNA sola vez dónde lo piensa colocar y si tiene algún techo, sobretecho o marquesina que lo cubra (ej: "te consulto, donde lo pensas colocar? hay algun techo o marquesina que lo cubra?"). Esta pregunta se SUMA a lo que falte: si todavía faltan la foto, las medidas o para cuándo lo necesita, pedilos en el MISMO turno (nunca dejes de pedirlos por preguntar lo del techo; si faltan el techo y la fecha, preguntá las dos cosas juntas). No lo preguntes si ya lo dijo en la charla, y si alguien del equipo ya le preguntó lo del techo o ya le recomendó el corpóreo, no lo repitas. Según lo que conteste:
 - SÍ está cubierto (bajo techo, alero, galería o una marquesina que lo protege) → techo="si" y seguí normal.
 - NO está cubierto (queda al aire libre, expuesto al sol y a la lluvia) o la marquesina es muy chica → techo="no" y sugerir_corporeo=true: explicale corto que para esa situación le recomendamos un CARTEL CORPÓREO ILUMINADO, que está pensado para estar a la intemperie (ej: "okey, en ese caso te recomendamos un cartel corporeo iluminado, que esta pensado para estar al aire libre"). Decíselo UNA sola vez y seguí pidiendo lo que falte (la foto y las medidas sirven igual para cotizarlo).
 - Si mandó una FOTO DEL LUGAR y se ve CLARAMENTE que no hay nada que lo cubra, tomalo como techo="no"; si en la foto no se ve claro, preguntalo.
@@ -2798,7 +2798,7 @@ FORMATO PARA PEDIR LOS DATOS QUE FALTAN: un mensaje con la lista (cada dato en s
 - si es para interior o exterior
 - para cuando lo necesitas
 [3] tenes esa info para pasarme?
-La lista [2] es UN SOLO mensaje aunque tenga varios renglones (los renglones van separados por saltos de linea simples dentro del mismo mensaje). Si el cliente YA dio algún dato, sacalo de la lista y pedí solo lo que falta; si falta uno solo, pedilo en una frase corta sin lista. Igual, cerrá siempre con una pregunta.
+La lista [2] es UN SOLO mensaje aunque tenga varios renglones (los renglones van separados por saltos de linea simples dentro del mismo mensaje). En el primer contacto la lista lleva SIEMPRE los 4 renglones, incluido "para cuando lo necesitas" (aunque el playbook muestre ejemplos viejos con 3). Si el cliente YA dio algún dato, sacalo de la lista y pedí solo lo que falta; si falta uno solo, pedilo en una frase corta sin lista. Igual, cerrá siempre con una pregunta.
 
 CONSULTAS DE PRODUCTO — si el cliente pregunta algo del producto (precio, si sirve para exterior, envíos, tiempos, cambios, logos, etc.), respondé con lo que dice el PLAYBOOK que te paso (tiene un FAQ con las respuestas REALES). NUNCA inventes datos, tecnicismos ni ratings que no estén en el playbook (por ejemplo NUNCA digas "IP65" ni specs que no te dieron). NUNCA digas ni des a entender que el exterior sale más caro que el interior, ni compares precios entre interior y exterior — el precio final lo arma una persona después. Si algo no lo sabés con certeza, decí que el equipo lo confirma. Después de responder la duda, seguí pidiendo el dato que te falta.
 
@@ -15531,13 +15531,24 @@ const handler = {
         if (request.method === 'POST' && path === '/admin/precotiz/dry-run') {
           let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
           const num = String(body?.phone || '').replace(/\D/g, '');
-          if (!num) return json({ error: 'missing phone' }, 400);
-          const ctx = await buildChatContext(env, num, 40);
-          if (!ctx) return json({ error: 'sin mensajes para ese phone' }, 404);
+          // { text } = conversación de PRUEBA (líneas "ts CLIENTE: ..." / "ts JOACO: ...") para testear el
+          // prompt sin un chat real. Nunca manda nada; también devuelve qué harían el candado de medidas
+          // y la espera de la pregunta de techo/fecha.
+          const testText = String(body?.text || '').trim();
+          if (!num && !testText) return json({ error: 'missing phone o text' }, 400);
+          let fullText, imgs = [];
+          if (testText) {
+            fullText = `## CONVERSACIÓN\nCliente: prueba\n${body.header ? String(body.header) + '\n' : 'ORIGEN: sin atribución registrada\n'}\n${testText}`;
+          } else {
+            const ctx = await buildChatContext(env, num, 40);
+            if (!ctx) return json({ error: 'sin mensajes para ese phone' }, 404);
+            fullText = ctx.fullText;
+            imgs = await precotizImageBlocks(env, num);
+          }
           const fw = await getActiveFramework(env);
-          const imgs = await precotizImageBlocks(env, num);
-          const out = await precotizLlm(env, ctx.fullText, fw?.content || '', imgs, { phone: num, by: 'dry-run' });
-          return json({ ok: out.ok, phone: num, result: out.data || null, error: out.error || null, status: out.status || null, raw: out.raw || null });
+          const out = await precotizLlm(env, fullText, fw?.content || '', imgs, { phone: num || 'prueba', by: 'dry-run' });
+          const _msgs = (out.data && Array.isArray(out.data.mensajes)) ? out.data.mensajes.filter(m => typeof m === 'string' && m.trim()) : [];
+          return json({ ok: out.ok, phone: num || null, result: out.data || null, candado: out.data ? (precotizMedidaInventada(_msgs, fullText) || null) : null, espera_pregunta: out.data ? precotizFaltaPregunta(out.data, _msgs) : null, error: out.error || null, status: out.status || null, raw: out.raw || null });
         }
 
         // POST /admin/precotiz/approve → { phone, mensajes? } envía los mensajitos (editados o del borrador)
