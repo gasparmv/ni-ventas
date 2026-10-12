@@ -9627,7 +9627,9 @@ async function corporeoAskOnInbound(env, phone, msgBody) {
 //    re-click del walink) → recién ahí lo REVELAMOS en la bandeja de Abril ('cursos'). Así
 //    no ensuciamos la bandeja con los que solo agarran el link y no vuelven a escribir.
 async function lanzamientoLandingOnInbound(env, phone, msgBody) {
-  if (!phone || !(await lanzamientoLandingOn(env))) return;
+  if (!phone) return;
+  // Con el flujo de ENVÍOS apagado igual se RUTEA: el interruptor apaga mensajes, nunca el ruteo.
+  if (!(await lanzamientoLandingOn(env))) { await rutearAnotadoLanzamiento(env, phone, msgBody); return; }
   try {
     const isWalink = _normTxt(msgBody).includes('registre al evento del 8 y 10');
     const row = await env.DB.prepare("SELECT stage FROM lanzamiento_landing WHERE phone = ?").bind(phone).first();
@@ -9645,6 +9647,66 @@ async function lanzamientoLandingOnInbound(env, phone, msgBody) {
     // Todavía no tiene el link: se lo mandamos si tocó el walink, o si es un lead ya
     // registrado (respuesta al opener del Camino 2).
     if (isWalink || row) await sendEventoGroupLink(env, phone);
+  } catch (_) {}
+}
+
+// Ruteo de los ANOTADOS al lanzamiento que escriben por su cuenta (11-oct). Todo chat nuevo nace en
+// 'general' (carteles) y, con el flujo del lanzamiento apagado, nada lo pasaba a 'cursos': la noche de
+// venta de octubre 5 asistentes (uno que YA había pagado con tarjeta) quedaron 2-3 días sin leer en la
+// bandeja de Joaco. Ahora: anotado en los últimos 45 días + chat en 'general' sin vendedor ni actividad de
+// carteles → 'cursos' (Abril). Si el texto habla de un cartel (y no de cursos) no se mueve: ~30% de los
+// anotados que escriben son leads de carteles. Y si lo movimos y después escribe por un cartel sin que
+// Abril lo haya atendido, vuelve a 'general'.
+const RE_TEXTO_CURSOS = /\bcursos?\b|\bclases?\b|comunidad|mastery|al infinito|inscrib|aprend|\bsena\b|alumn|taller|\bkit\b|insumo|supernova|capacitac|pague|transferi|abone|realice el pago|comprobante/;
+const RE_TEXTO_CARTELES = /cartel|letrero|neon personalizado|cotiz|presupuest|medida|logo|vidriera|corpore|\b\d+\s*(x|por)\s*\d+\b|\b\d+\s*cm\b|\bmetros?\b|\blocal\b|\bnegocio\b|\bexterior\b|\binterior\b|\bletras?\b/;
+async function rutearAnotadoLanzamiento(env, phone, msgBody) {
+  try {
+    const ph = String(phone || '').replace(/\D/g, '');
+    if (!ph) return;
+    const desde45 = new Date(Date.now() - 45 * 24 * 3600 * 1000).toISOString();
+    const lz = await env.DB.prepare("SELECT 1 AS x FROM lanzamiento_landing WHERE phone = ? AND registered_at >= ?").bind(ph, desde45).first();
+    if (!lz) return;
+    const t = _normTxt(msgBody);
+    const deCursos = RE_TEXTO_CURSOS.test(t);
+    const deCarteles = !deCursos && RE_TEXTO_CARTELES.test(t);
+    const s = await env.DB.prepare("SELECT inbox, COALESCE(assigned_to, '') AS asg FROM wa_chats_summary WHERE phone = ?").bind(ph).first();
+    if (!s) return;
+    const marca = 'ruteo_lz:' + ph;
+    const nowIso = new Date().toISOString();
+    if (s.inbox === 'cursos') {
+      // Vuelta a carteles: lo mandamos nosotros a Abril, ahora habla de un cartel y ningún humano le
+      // escribió desde que lo movimos → era un lead de carteles anotado al evento.
+      if (!deCarteles) return;
+      const mv = await env.DB.prepare('SELECT updated_at FROM kv_cache WHERE k = ?').bind(marca).first();
+      if (!mv) return;
+      const hum = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND COALESCE(automated, 0) = 0 AND msg_type != 'status' AND ts >= ? LIMIT 1").bind(ph, mv.updated_at).first();
+      if (hum) return;
+      await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'general', updated_at = ? WHERE phone = ? AND inbox = 'cursos'").bind(nowIso, ph).run();
+      await env.DB.prepare('DELETE FROM kv_cache WHERE k = ?').bind(marca).run();
+      return;
+    }
+    if (s.inbox !== 'general' || s.asg || deCarteles) return;
+    if (!deCursos) {
+      // Mensaje neutro ("Hola", una foto): se mueve solo si NADA del chat apunta a carteles: ni un mensaje suyo
+      // (de cualquier fecha) que hable de un cartel o sea el texto genérico de los anuncios ("quiero más
+      // información"), ni haber llegado por un anuncio que no sea de cursos. Simulado el 11/12-oct contra los
+      // anotados que hoy están en 'general': sin esto se llevaba "el número de la pizzería iría abajo" y
+      // "Hola cuánto me sale un cartel así" de hace meses.
+      const prev = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status', 'reaction') ORDER BY ts DESC LIMIT 40").bind(ph).all();
+      for (const m of (prev.results || [])) { const b = _normTxt(m.body); if (!RE_TEXTO_CURSOS.test(b) && (RE_TEXTO_CARTELES.test(b) || /quiero mas informacion/.test(b))) return; }
+      const ad = await env.DB.prepare("SELECT source_id, headline, body FROM wa_ad_attributions WHERE phone = ? ORDER BY ts DESC LIMIT 1").bind(ph).first();
+      if (ad && (await adVerticalForSource(env, ad.source_id, ad.headline, ad.body)) !== 'cursos') return;
+    }
+    // Vetos: cliente o alumno de corte, interno, revendedor, o chat de carteles activo (vendedor, humano
+    // que le escribió en 7 días, brief, precotización o etiquetas de venta).
+    const veto = await env.DB.prepare(
+      "SELECT (EXISTS (SELECT 1 FROM pedidos WHERE telefono = ?1) OR EXISTS (SELECT 1 FROM corte_alumnos WHERE telefono = ?1) " +
+      "OR EXISTS (SELECT 1 FROM wa_internal_phones WHERE phone = ?1) OR EXISTS (SELECT 1 FROM reventa_leads WHERE phone = ?1) " +
+      "OR EXISTS (SELECT 1 FROM wa_chats_summary c WHERE c.phone = ?1 AND (" + chatCartelesActivoSql('c.phone', 'c.assigned_to') + "))) AS v"
+    ).bind(ph).first();
+    if (veto && veto.v) return;
+    const up = await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos', updated_at = ? WHERE phone = ? AND inbox = 'general' AND COALESCE(assigned_to, '') = ''").bind(nowIso, ph).run();
+    if (up?.meta?.changes) await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at').bind(marca, deCursos ? 'texto' : 'anotado', nowIso).run();
   } catch (_) {}
 }
 
@@ -11998,14 +12060,23 @@ async function avisoLanzamientoSend(env, ph, texto) {
   // los avisos de pago del lanzamiento). Con la ventana cerrada, plantilla como antes.
   try {
     const desde = new Date(Date.now() - 23 * 3600 * 1000).toISOString();
-    const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts > ? LIMIT 1").bind(String(ph || '').replace(/\D/g, ''), desde).first();
+    const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status', 'reaction') AND ts > ? LIMIT 1").bind(String(ph || '').replace(/\D/g, ''), desde).first();
     if (inb) {
       const r0 = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + String(texto || '').trim().slice(0, 1500));
       if (r0 && r0.ok) return r0;
     }
   } catch (_) {}
   let r = null;
-  try { r = await waSendTemplate(env, ph, 'aviso_lanzamiento', 'es_AR', [t]); } catch (_) {}
+  // Ventana cerrada → plantilla de SERVICIO (UTILITY): no tiene el tope de marketing por usuario (131049).
+  // aviso_interno_crm cuando Meta la apruebe; mientras tanto, a Bruno (al que la MARKETING le rebota) el
+  // puente recordatorio_agenda (UTILITY ya aprobada, {{1}} libre). Si no, aviso_lanzamiento como antes.
+  const tLargo = String(texto || '').replace(/\s+/g, ' ').trim().slice(0, 800);
+  try {
+    const ok = await env.DB.prepare("SELECT 1 AS x FROM template_status_cache WHERE name = 'aviso_interno_crm' AND upper(status) = 'APPROVED'").first();
+    if (ok) r = await waSendTemplate(env, ph, 'aviso_interno_crm', 'es_AR', [tLargo]);
+    else if (String(ph || '').replace(/\D/g, '') === '5491155604996') r = await waSendTemplate(env, ph, 'recordatorio_agenda', 'es_AR', [tLargo]);
+  } catch (_) {}
+  if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'aviso_lanzamiento', 'es_AR', [t]); } catch (_) {} }
   if (!r || !r.ok) { try { r = await waSendText(env, ph, '🚀 Lanzamiento Neon\n' + t); } catch (_) {} }
   return r;
 }
@@ -12019,7 +12090,7 @@ async function avisoLanzamientoSend(env, ph, texto) {
 function esCampanaMasiva(name) {
   const n = String(name || '').toLowerCase();
   if (/^(minisupernova|minicurso|lanzamiento|cupo_comunidad|seminario|sorteo|comunidad|pack_emprendedor|reporte_)/.test(n)) return true;
-  if (n === 'aviso_lanzamiento' || n === 'aviso_arranque_equipo') return true;
+  if (n === 'aviso_lanzamiento' || n === 'aviso_arranque_equipo' || n === 'aviso_interno_crm') return true;
   return false;
 }
 // ¿El envío que falló fue de un broadcast del panel? = a ese teléfono le salió una fila 'bc_<id>' en las
