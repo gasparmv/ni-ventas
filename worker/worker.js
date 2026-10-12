@@ -878,10 +878,10 @@ function adLabelFromSource(sourceId, headline) {
   if (/regalo|clase|formaci|minicurso|comunidad|registr|apertura carrito/.test(h)) return ''; // cursos: no atribuir a carteles
   return 'Carteles B2C (b2c)'; // genérico (Chatea con nosotros / ¿Querés un cartel? / etc.)
 }
-// ===== Panel Funnel de Ads: config de campañas de carteles y clasificación por vertical =====
-// Las campañas de Meta de la cuenta "Lau - Neon" (882517310728279) mezclan carteles + cursos.
-// Estas son SOLO las de carteles, con su vertical. Las copias/optimizados son variantes A/B de la
-// misma campaña -> se agregan al mismo vertical. Confirmado 1×1 contra Meta (ad->campaign) ago 2026.
+// ===== Panel Funnel de Ads: campañas de carteles CONFIRMADAS a mano =====
+// Las campañas de Meta de la cuenta "Lau - Neon" (882517310728279) mezclan carteles + cursos. Estas
+// están confirmadas 1×1 contra Meta (ago 2026). Las NUEVAS no hace falta agregarlas acá: el funnel las
+// clasifica solo por su nombre de Meta (funnelClaseCampana) y Gaspar corrige desde el panel las dudosas.
 const CARTELES_CAMPAIGNS = {
   '120231380386180143': 'b2c',         // Carteles B2C
   '120235712854110143': 'retargeting', // Neon carteles - RETARGETING
@@ -889,11 +889,10 @@ const CARTELES_CAMPAIGNS = {
   '120239284677530143': 'b2b',         // Neon B2B FORM - Campana
   '120248248940760143': 'b2b',         // Neon B2B FORM - Campana - Copia
   '120248245464960143': 'b2b',         // Neon B2B FORM - Campana - Optimizado
-  '120239191828290143': 'b2b',         // Neon B2B (inactivo)
-  'corporeas': 'corporeas'             // sintético: gasto ad-level de los creativos de corpóreas
+  '120239191828290143': 'b2b'          // Neon B2B (inactivo)
 };
-// Vertical a partir del TEXTO de un ad (pedidos.ad o etiqueta): parsea el sufijo entre paréntesis.
-// Matchea (b2c)/(b2c*), (retargeting), (b2b)/(b2b*)/(b2b form)/(b2b(. '' si no es carteles-ad.
+// Vertical a partir del TEXTO de un ad (pedidos.ad): parsea el sufijo entre paréntesis. Solo para pedidos
+// viejos sin source_id. '' si no es un label de ad de carteles.
 function verticalOfAdText(txt) {
   const t = String(txt || '').toLowerCase();
   if (t.indexOf('(corporea') >= 0) return 'corporeas';
@@ -901,37 +900,6 @@ function verticalOfAdText(txt) {
   if (t.indexOf('(b2b') >= 0) return 'b2b';
   if (t.indexOf('(b2c') >= 0) return 'b2c';
   return '';
-}
-// Vertical de una atribución CTWA por su source_id (ad_id) + headline. Reusa adLabelFromSource
-// (que devuelve '' para ads de cursos) -> así los leads de cursos NO cuentan en el funnel de carteles.
-function verticalOfSource(sourceId, headline) {
-  return verticalOfAdText(adLabelFromSource(sourceId, headline));
-}
-// Vertical EXACTO de una atribución CTWA: source_id -> campaign_id (meta_ad_map) -> vertical.
-// Más preciso que verticalOfSource (que adivina por título/headline si el ad no está en la lista
-// fija de 19). campBySource = {source_id: campaign_id} cargado de meta_ad_map en buildAdsFunnel.
-function verticalFromSourceMapped(sourceId, headline, campBySource) {
-  const sid = String(sourceId || '');
-  if (!sid) return '';
-  if (CORPOREAS_ADS.indexOf(sid) >= 0) return 'corporeas';  // corpóreas vive en la campaña B2C -> override
-  const cid = campBySource && campBySource[sid];
-  // Membresía de campaña ESTRICTA: si la campaña es CONOCIDA, cuenta SOLO si es de carteles; si es de
-  // cursos/otra, devuelve '' (NO se filtra a b2c). Simétrico con el gasto (que también se restringe a
-  // CARTELES_CAMPAIGNS). El fallback por título/headline queda SOLO para ads sin campaña mapeada
-  // (borrados/nuevos), donde no hay mejor señal.
-  if (cid) return CARTELES_CAMPAIGNS[cid] || '';
-  return verticalOfSource(sid, headline);
-}
-// Vertical EXACTO de un pedido ya trazado, por su source_id/source_campaign guardados. Misma regla
-// de membresía estricta. Fallback al label (verticalOfAdText) solo para pedidos sin source_id.
-function verticalFromPedido(p, campBySource) {
-  const sid = String(p.source_id || '');
-  if (sid && CORPOREAS_ADS.indexOf(sid) >= 0) return 'corporeas';
-  const scamp = String(p.source_campaign || '').replace(/[^\d]/g, '');
-  if (scamp) return CARTELES_CAMPAIGNS[scamp] || '';       // campaña del formulario (conocida)
-  const cid = sid && campBySource ? campBySource[sid] : '';
-  if (cid) return CARTELES_CAMPAIGNS[cid] || '';            // campaña CTWA (conocida)
-  return verticalOfAdText(p.ad);                            // sin source_id -> label
 }
 // Traza el ad de UN pedido: encuentra el teléfono del cliente (el del pedido, o por nombre
 // en briefs) y su atribución real (CTWA source_id / formulario B2B / plantilla link-bio).
@@ -3660,10 +3628,10 @@ async function buildReporteDiario(env) {
     out.total = (r && r.total) || 0; out.cursos = (r && r.cursos) || 0; out.carteles = out.total - out.cursos;
   } catch (_) {}
   // 1b) De los "carteles", separar CORPÓREAS (letras 3D): leads con atribución a un ad de
-  //     corpóreas (CORPOREAS_ADS, creativos DENTRO de la campaña Carteles B2C). No son cursos
+  //     corpóreas (corporeasAdIds: lista fija + mapeo a mano + nombre de Meta). No son cursos
   //     (no tienen sus señales), así que son un subconjunto de carteles. cartelesNeon = resto.
   try {
-    const inList = CORPOREAS_ADS.map(a => `'${a}'`).join(',');
+    const inList = (await corporeasAdIds(env)).map(a => `'${String(a).replace(/[^\d]/g, '')}'`).join(',');
     const r = await env.DB.prepare(
       `SELECT COUNT(DISTINCT m.phone) AS n FROM wa_messages m
        WHERE m.direction='inbound' AND m.msg_type!='status' AND (m.channel IS NULL OR m.channel='wa')
@@ -8501,10 +8469,38 @@ async function syncMetaAdMap(env, opts = {}) {
 }
 
 // ===== Panel Funnel de Ads =====
-// Trae el GASTO por campaña/día desde Meta Ads (insights) y lo cachea en meta_ad_spend.
-// Necesita META_ADS_TOKEN con permiso ads_read. Guarda TODAS las campañas (el funnel filtra
-// las de carteles); granularidad diaria -> cualquier rango del panel se calcula desde acá.
-// Se corre por cron (diario, refresca ~10 días) y se puede forzar con POST /admin/ads/spend-sync.
+let _metaSpendSchemaOk = false;
+async function ensureMetaSpendSchema(env) {
+  if (_metaSpendSchemaOk) return;
+  await env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS meta_ad_spend (campaign_id TEXT, day TEXT, spend_usd REAL, impressions INTEGER, clicks INTEGER, updated_at TEXT, PRIMARY KEY(campaign_id, day))"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS meta_ad_spend_ad (ad_id TEXT, day TEXT, campaign_id TEXT, spend_usd REAL, impressions INTEGER, clicks INTEGER, updated_at TEXT, PRIMARY KEY(ad_id, day))"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_meta_ad_spend_ad_day ON meta_ad_spend_ad(day)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS meta_campaigns (campaign_id TEXT PRIMARY KEY, campaign_name TEXT, updated_at TEXT)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS meta_campaign_vertical (campaign_id TEXT PRIMARY KEY, vertical TEXT NOT NULL, by_user TEXT, updated_at TEXT)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS meta_ad_map (ad_id TEXT PRIMARY KEY, ad_name TEXT, ad_set_name TEXT, campaign_name TEXT, updated_at TEXT)")
+  ]);
+  try { await env.DB.prepare("ALTER TABLE meta_ad_map ADD COLUMN campaign_id TEXT").run(); } catch (_) {}
+  _metaSpendSchemaOk = true;
+}
+
+async function metaInsightsAll(url, maxPages = 60) {
+  const rows = []; let pages = 0, error = '';
+  while (url && pages < maxPages) {
+    let j;
+    try { j = await (await fetch(url)).json(); } catch (e) { error = String(e); break; }
+    if (j.error) { error = '(#' + (j.error.code || '?') + ') ' + (j.error.message || ''); break; }
+    for (const r of (j.data || [])) rows.push(r);
+    url = (j.paging && j.paging.next) || ''; pages++;
+  }
+  return { rows, pages, error };
+}
+
+// Trae de Meta Ads (insights) el GASTO por día a nivel CAMPAÑA (meta_ad_spend + nombre en meta_campaigns)
+// y a nivel ANUNCIO (meta_ad_spend_ad + nombres en meta_ad_map, que también usan el ruteo y la
+// trazabilidad). Guarda TODO: el funnel decide qué es carteles. El detalle por anuncio separa corpóreas
+// sin listas fijas y muestra cada creativo. Cron: 1×/día 10 días (Meta ajusta hasta ~72h) y 1×/hora los
+// últimos 2. Forzar con POST /admin/ads/spend-sync. Necesita META_ADS_TOKEN con ads_read.
 async function syncMetaAdSpend(env, opts = {}) {
   const token = env.META_ADS_TOKEN || env.META_PAGE_ACCESS_TOKEN || env.IG_ACCESS_TOKEN || '';
   if (!token) return { ok: false, error: 'no token' };
@@ -8512,240 +8508,452 @@ async function syncMetaAdSpend(env, opts = {}) {
   const today = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10); // día AR
   const until = String(opts.until || today).slice(0, 10);
   const since = String(opts.since || new Date(Date.now() - 3 * 3600 * 1000 - 95 * 24 * 3600 * 1000).toISOString().slice(0, 10)).slice(0, 10);
-  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS meta_ad_spend (campaign_id TEXT, day TEXT, spend_usd REAL, impressions INTEGER, clicks INTEGER, updated_at TEXT, PRIMARY KEY(campaign_id, day))").run(); } catch (_) {}
+  await ensureMetaSpendSchema(env);
   const tr = encodeURIComponent(JSON.stringify({ since, until }));
-  let url = `https://graph.facebook.com/v21.0/act_${acct}/insights?level=campaign&fields=campaign_id,spend,impressions,clicks&time_increment=1&time_range=${tr}&limit=500&access_token=${encodeURIComponent(token)}`;
-  let count = 0, pages = 0, error = '';
+  const base = `https://graph.facebook.com/v21.0/act_${acct}/insights?time_increment=1&time_range=${tr}&limit=500&access_token=${encodeURIComponent(token)}`;
   const now = new Date().toISOString();
-  try {
-    while (url && pages < 40) {
-      const r = await fetch(url);
-      const j = await r.json();
-      if (j.error) { error = '(#' + (j.error.code || '?') + ') ' + (j.error.message || ''); break; }
-      for (const row of (j.data || [])) {
-        const cid = String(row.campaign_id || ''); const day = String(row.date_start || '');
-        if (!cid || !day) continue;
-        try {
-          await env.DB.prepare("INSERT INTO meta_ad_spend (campaign_id, day, spend_usd, impressions, clicks, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(campaign_id, day) DO UPDATE SET spend_usd=excluded.spend_usd, impressions=excluded.impressions, clicks=excluded.clicks, updated_at=excluded.updated_at")
-            .bind(cid, day, parseFloat(row.spend || 0) || 0, parseInt(row.impressions || 0) || 0, parseInt(row.clicks || 0) || 0, now).run();
-          count++;
-        } catch (_) {}
-      }
-      url = (j.paging && j.paging.next) || '';
-      pages++;
+  const num = (v) => parseFloat(v || 0) || 0, ent = (v) => parseInt(v || 0, 10) || 0;
+
+  const c = await metaInsightsAll(base + '&level=campaign&fields=campaign_id,campaign_name,spend,impressions,clicks');
+  const stC = [], campNames = {};
+  for (const row of c.rows) {
+    const cid = String(row.campaign_id || ''), day = String(row.date_start || '');
+    if (!cid || !day) continue;
+    if (row.campaign_name) campNames[cid] = String(row.campaign_name);
+    stC.push(env.DB.prepare("INSERT INTO meta_ad_spend (campaign_id, day, spend_usd, impressions, clicks, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(campaign_id, day) DO UPDATE SET spend_usd=excluded.spend_usd, impressions=excluded.impressions, clicks=excluded.clicks, updated_at=excluded.updated_at")
+      .bind(cid, day, num(row.spend), ent(row.impressions), ent(row.clicks), now));
+  }
+  for (const cid in campNames) {
+    stC.push(env.DB.prepare("INSERT INTO meta_campaigns (campaign_id, campaign_name, updated_at) VALUES (?,?,?) ON CONFLICT(campaign_id) DO UPDATE SET campaign_name=excluded.campaign_name, updated_at=excluded.updated_at")
+      .bind(cid, campNames[cid], now));
+  }
+
+  const a = await metaInsightsAll(base + '&level=ad&fields=campaign_id,campaign_name,adset_name,ad_id,ad_name,spend,impressions,clicks');
+  const stA = [], adNames = {};
+  for (const row of a.rows) {
+    const aid = String(row.ad_id || ''), day = String(row.date_start || '');
+    if (!aid || !day) continue;
+    adNames[aid] = [String(row.ad_name || ''), String(row.adset_name || ''), String(row.campaign_name || ''), String(row.campaign_id || '')];
+    stA.push(env.DB.prepare("INSERT INTO meta_ad_spend_ad (ad_id, day, campaign_id, spend_usd, impressions, clicks, updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(ad_id, day) DO UPDATE SET campaign_id=excluded.campaign_id, spend_usd=excluded.spend_usd, impressions=excluded.impressions, clicks=excluded.clicks, updated_at=excluded.updated_at")
+      .bind(aid, day, String(row.campaign_id || ''), num(row.spend), ent(row.impressions), ent(row.clicks), now));
+  }
+  for (const aid in adNames) {
+    const [an, asn, cn, cid] = adNames[aid];
+    if (!an && !cn) continue;
+    stA.push(env.DB.prepare("INSERT INTO meta_ad_map (ad_id, ad_name, ad_set_name, campaign_name, campaign_id, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(ad_id) DO UPDATE SET ad_name=excluded.ad_name, ad_set_name=excluded.ad_set_name, campaign_name=excluded.campaign_name, campaign_id=excluded.campaign_id, updated_at=excluded.updated_at")
+      .bind(aid, an, asn, cn, cid, now));
+  }
+
+  let written = 0, writeErr = '';
+  for (const list of [stC, stA]) {
+    for (let i = 0; i < list.length; i += 50) {
+      const chunk = list.slice(i, i + 50);
+      try { await env.DB.batch(chunk); written += chunk.length; } catch (e) { writeErr = String((e && e.message) || e); }
     }
-  } catch (e) { error = String(e); }
-  // Gasto AD-level de los creativos de corpóreas (viven DENTRO de Carteles B2C): se suman por día y
-  // se guardan bajo campaign_id sintético 'corporeas' para poder restarlos de B2C en el panel.
-  try {
-    const filt = encodeURIComponent(JSON.stringify([{ field: 'ad.id', operator: 'IN', value: CORPOREAS_ADS }]));
-    let u2 = `https://graph.facebook.com/v21.0/act_${acct}/insights?level=ad&fields=spend,impressions,clicks&time_increment=1&time_range=${tr}&filtering=${filt}&limit=500&access_token=${encodeURIComponent(token)}`;
-    const byDay = {};
-    let p2 = 0;
-    while (u2 && p2 < 40) {
-      const r = await fetch(u2); const j = await r.json();
-      if (j.error) break;
-      for (const row of (j.data || [])) {
-        const day = String(row.date_start || ''); if (!day) continue;
-        if (!byDay[day]) byDay[day] = { s: 0, i: 0, c: 0 };
-        byDay[day].s += parseFloat(row.spend || 0) || 0; byDay[day].i += parseInt(row.impressions || 0) || 0; byDay[day].c += parseInt(row.clicks || 0) || 0;
-      }
-      u2 = (j.paging && j.paging.next) || ''; p2++;
-    }
-    for (const day of Object.keys(byDay)) {
-      try {
-        await env.DB.prepare("INSERT INTO meta_ad_spend (campaign_id, day, spend_usd, impressions, clicks, updated_at) VALUES ('corporeas',?,?,?,?,?) ON CONFLICT(campaign_id, day) DO UPDATE SET spend_usd=excluded.spend_usd, impressions=excluded.impressions, clicks=excluded.clicks, updated_at=excluded.updated_at")
-          .bind(day, byDay[day].s, byDay[day].i, byDay[day].c, now).run();
-        count++;
-      } catch (_) {}
-    }
-  } catch (_) {}
-  return { ok: !error, count, pages, error, since, until };
+  }
+  const error = c.error || a.error || writeErr;
+  return { ok: !error, since, until, campaign_rows: c.rows.length, ad_rows: a.rows.length, written, error };
 }
 
-// Arma el funnel de carteles por vertical (b2c / retargeting / b2b) para un rango [since, until].
-//   GASTO   -> meta_ad_spend (USD, sumado por vertical vía CARTELES_CAMPAIGNS)
-//   LEADS   -> wa_ad_attributions (CTWA WhatsApp): distinct teléfono, clasificado por último touch
-//              del período (regla multi-touch de Gaspar). Descarta ads de cursos.
-//   PRESUP  -> briefs enviados en el período, linkeados por teléfono -> vertical del lead (último
-//              touch histórico). Suma precio_final.
-//   VENTAS  -> pedidos con ad de carteles (sufijo de vertical), órdenes distintas (numero|fecha),
-//              ingresos = SUM(precio + precio_dimmer) REAL.
-//   MIX     -> todas las órdenes del período por origen (los 3 verticals + link bio / directo /
-//              frecuente / referido / revisar) para el gráfico "de dónde vienen las ventas".
-// CPL/CAC/ROAS convierten USD->ARS con `rate`. Todo en día calendario (fecha/enviado_at/ts ISO).
+// ad_ids de corpóreas: la lista fija (creativos de ago) + los mapeados a mano (wa_ad_verticals) + los que
+// Meta nombra "corpor…" (campaña/conjunto/anuncio en meta_ad_map). Un anuncio NUEVO de corpóreas se cuenta
+// solo, sin tocar código.
+async function corporeasAdIds(env) {
+  const ids = new Set(CORPOREAS_ADS);
+  try { for (const r of ((await env.DB.prepare("SELECT ad_id FROM wa_ad_verticals WHERE vertical='corporeo'").all()).results || [])) ids.add(String(r.ad_id)); } catch (_) {}
+  try {
+    for (const r of ((await env.DB.prepare("SELECT ad_id, ad_name, ad_set_name, campaign_name FROM meta_ad_map").all()).results || [])) {
+      if (/corpor/.test(_normTxt([r.campaign_name, r.ad_set_name, r.ad_name].join(' ')))) ids.add(String(r.ad_id));
+    }
+  } catch (_) {}
+  return [...ids];
+}
+
+// Señales de nombre para el GASTO (más estrictas que el ruteo, que manda a carteles todo lo dudoso): una
+// campaña de cursos contada como carteles hunde el ROAS, así que lo que no se identifica no se suma.
+const FUNNEL_RX_CARTELES = /cartel|neon|b2b|b2c|corpor|letras|whatsapp|wpp|cotiz/;
+const FUNNEL_RX_CURSOS = /captaci|replay|calentamiento|repe clase|evento/;
+// Cómo cuenta una campaña en el funnel: {clase: 'carteles'|'cursos'|'desconocida', via}. Prioridad: lo que
+// Gaspar marcó en el panel > confirmadas (CARTELES_CAMPAIGNS) > el mapeo a mano de sus anuncios que usa el
+// ruteo (wa_ad_verticals) > nombres de Meta: cursos fuerte en la campaña > señal de carteles en la campaña >
+// señal de cursos en la campaña o en sus conjuntos/anuncios. Sin señales = desconocida: no se cuenta y
+// queda en "Para revisar" para marcarla.
+function funnelClaseCampana(cid, ctx) {
+  const id = String(cid || '');
+  if (ctx.campMemo[id]) return ctx.campMemo[id];
+  let out;
+  if (ctx.campManual[id]) out = { clase: ctx.campManual[id], via: 'panel' };
+  else if (CARTELES_CAMPAIGNS[id]) out = { clase: 'carteles', via: 'confirmada' };
+  else if (ctx.campPorRuteo[id]) out = { clase: ctx.campPorRuteo[id], via: 'ruteo' };
+  else {
+    const n = _normTxt(ctx.campNames[id] || ''), resto = _normTxt(ctx.campTexto[id] || '');
+    if (n && RX_NOMBRE_CURSOS.test(n)) out = { clase: 'cursos', via: 'nombre' };
+    else if (n && FUNNEL_RX_CARTELES.test(n)) out = { clase: 'carteles', via: 'nombre' };
+    else if (FUNNEL_RX_CURSOS.test(n) || RX_NOMBRE_CURSOS.test(resto) || FUNNEL_RX_CURSOS.test(resto)) out = { clase: 'cursos', via: 'nombre' };
+    else out = { clase: 'desconocida', via: 'sin señales' };
+  }
+  ctx.campMemo[id] = out;
+  return out;
+}
+
+// Fila del funnel a la que va un anuncio: grupo = campaign_id (su campaña de carteles), 'corporeas' (los
+// creativos de corpóreas, estén en la campaña que estén), 'sin_campana' (anuncio sin datos de Meta que no
+// suena a cursos) o '' (no es carteles). Misma regla para gasto, leads, presupuestos y ventas.
+function funnelGrupoAd(adId, headline, ctx) {
+  const id = String(adId || '');
+  if (!id) return { grupo: '', cid: '' };
+  if (ctx.adMemo[id]) return ctx.adMemo[id];
+  const m = ctx.adMap[id], man = ctx.adManual[id];
+  const cid = (m && m.campaign_id) || '';
+  if (!cid && man !== 'cursos' && man !== 'corporeo' && CORPOREAS_ADS.indexOf(id) < 0) {
+    return { grupo: (man === 'carteles' || adLabelFromSource(id, headline)) ? 'sin_campana' : '', cid: '' };
+  }
+  let out;
+  if (man === 'cursos') out = { grupo: '', cid };
+  else if (man === 'corporeo' || CORPOREAS_ADS.indexOf(id) >= 0 || (m && /corpor/.test(_normTxt([m.campaign_name, m.ad_set_name, m.ad_name].join(' '))))) out = { grupo: 'corporeas', cid };
+  else if (man === 'carteles') out = { grupo: cid, cid };
+  else out = { grupo: funnelClaseCampana(cid, ctx).clase === 'carteles' ? cid : '', cid };
+  ctx.adMemo[id] = out;
+  return out;
+}
+
+function funnelVendedor(s) {
+  const t = _normTxt(s).trim();
+  if (t === 'joaco' || t === 'joaquin') return 'joaco';
+  if (t === 'facundo' || t === 'facu' || t === 'nadia') return 'facundo';
+  if (t === 'agustina' || t === 'agus') return 'agustina';
+  return t;
+}
+const FUNNEL_VENDEDOR_NOMBRE = { joaco: 'Joaco', facundo: 'Facu', agustina: 'Agus' };
+// Textos precargados de anuncios: si un cliente sin referencia de Meta arrancó con uno, se avisa en
+// "Para revisar" (es un hecho: escribió el texto del anuncio; Meta no mandó la referencia).
+const FUNNEL_TEXTOS_AD = ['quiero cotizar un cartel corporeo', 'quiero cotizar un diseno', 'quiero hacer un neon personalizado'];
+
+// Funnel de carteles por CAMPAÑA de Meta para [since, until] (días AR, inclusivo):
+//   GASTO   meta_ad_spend_ad (por anuncio; si un día no tiene detalle, meta_ad_spend de la campaña).
+//   LEADS   wa_ad_attributions: teléfonos distintos, último touch del período (anuncios reales: 'ad',
+//           'OPEN_THREAD' y posts de IG promocionados vía ig_ad_map; los posts orgánicos no cuentan) +
+//           formularios (wa_leads, pisan al CTWA).
+//   PRESUP  briefs enviados en el período, linkeados por teléfono al último anuncio de carteles (120 días).
+//   VENTAS  pedidos: por source_id (anuncio exacto, cualquier producto) o source_campaign (formulario); sin
+//           eso, el label viejo. Órdenes distintas = numero|fecha|teléfono; ingresos = precio + dimmer.
+//   VENDEDORES  dueño ACTUAL del chat del lead (Joaco = sin asignar en general), comercial del presupuesto,
+//           vendedor de la OC y comercial del pedido.
+//   REVISAR  campañas y cómo cuentan (para corregir) + ventas sin trazar con el motivo.
 async function buildAdsFunnel(env, opts = {}) {
-  try { await ensurePedidosSchema(env); } catch (_) {} // garantiza columnas source_id/source_campaign
+  try { await ensurePedidosSchema(env); } catch (_) {}
+  try { await ensureMetaSpendSchema(env); } catch (_) {}
   const since = String(opts.since || '').slice(0, 10);
-  const until = String(opts.until || '').slice(0, 10); // inclusivo
+  const until = String(opts.until || '').slice(0, 10);
   const rate = Number(opts.rate) || 1400;
-  const untilEx = new Date(new Date(until + 'T00:00:00Z').getTime() + 24 * 3600 * 1000).toISOString().slice(0, 10);
-  const sinceWide = new Date(new Date(since + 'T00:00:00Z').getTime() - 120 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-  // Límites de DÍA AR (UTC-3) para los timestamps guardados en UTC (ts / enviado_at / received_at): el
-  // día AR arranca a las 03:00Z. pedidos.fecha y meta_ad_spend.day YA son fecha AR -> se comparan con
-  // since/until directo. Sin esto, leads/presup se agrupaban por día UTC y no cerraban con gasto/ventas.
-  const sinceUTC = since + 'T03:00:00Z';
-  const untilExUTC = untilEx + 'T03:00:00Z';
-  const sinceWideUTC = sinceWide + 'T03:00:00Z';
-  const VS = ['b2c', 'retargeting', 'b2b', 'corporeas'];
-  const agg = {}; VS.forEach(v => agg[v] = { vertical: v, gasto_usd: 0, leads: 0, presup: 0, presup_monto: 0, ventas: 0, ingresos: 0 });
-  const norm = p => String(p || '').replace(/[^\d]/g, '');
+  const DAY = 24 * 3600 * 1000;
+  const untilEx = new Date(new Date(until + 'T00:00:00Z').getTime() + DAY).toISOString().slice(0, 10);
+  const sinceWide = new Date(new Date(since + 'T00:00:00Z').getTime() - 120 * DAY).toISOString().slice(0, 10);
+  // Día AR (UTC-3): los ts en UTC del día AR D van de D 03:00Z a D+1 03:00Z. pedidos.fecha y los day de
+  // Meta YA son fecha AR.
+  const sinceUTC = since + 'T03:00:00Z', untilExUTC = untilEx + 'T03:00:00Z', sinceWideUTC = sinceWide + 'T03:00:00Z';
+  const hoyAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+  const hace45 = new Date(Date.now() - 3 * 3600 * 1000 - 45 * DAY).toISOString().slice(0, 10);
+  const ayerAR = new Date(Date.now() - 3 * 3600 * 1000 - DAY).toISOString().slice(0, 10);
+  const norm = (p) => String(p || '').replace(/[^\d]/g, '');
   const warnings = [];
-  const warn = (sec, e) => { warnings.push(sec + ': ' + String((e && e.message) || e || 'error')); }; // falla parcial visible, no silenciosa
+  const q = async (sec, sql, ...binds) => {
+    try { return (await env.DB.prepare(sql).bind(...binds).all()).results || []; }
+    catch (e) { warnings.push(sec + ': ' + String((e && e.message) || e)); return []; }
+  };
+  const ATTR_SQL = "SELECT a.phone, CASE WHEN a.source_type='ig_post' THEN g.ad_id ELSE a.source_id END AS sid, a.headline, a.ts FROM wa_ad_attributions a LEFT JOIN ig_ad_map g ON a.source_type='ig_post' AND g.media_id=a.source_id WHERE COALESCE(a.source_id,'')!='' AND COALESCE(a.source_type,'') NOT IN ('ig_reel','story_mention','share')";
 
-  // Mapa source_id (ad_id) -> campaign_id desde meta_ad_map: clasificar leads/ventas por CAMPAÑA
-  // EXACTA (no por el texto del título). Los ads que aún no están en el mapa caen al fallback.
-  const campBySource = {};
-  try {
-    const rs = await env.DB.prepare("SELECT ad_id, campaign_id FROM meta_ad_map WHERE COALESCE(campaign_id,'')!=''").all();
-    for (const r of (rs.results || [])) campBySource[String(r.ad_id)] = String(r.campaign_id);
-  } catch (e) { warn('mapa', e); }
+  const [adMapR, campR, campManR, adManR, internosR, spendAdR, spendCampR, lastCampR, lastAdR, leadAttR, presAttR, formsR, briefsR, pedidosR, ocR, ownersR] = await Promise.all([
+    q('mapa', "SELECT ad_id, ad_name, ad_set_name, campaign_name, campaign_id FROM meta_ad_map"),
+    q('campañas', "SELECT campaign_id, campaign_name FROM meta_campaigns"),
+    q('campañas_panel', "SELECT campaign_id, vertical FROM meta_campaign_vertical"),
+    q('ads_ruteo', "SELECT ad_id, vertical FROM wa_ad_verticals"),
+    q('internos', "SELECT phone, name FROM wa_internal_phones"),
+    q('gasto_ad', "SELECT ad_id, campaign_id, day, spend_usd, updated_at FROM meta_ad_spend_ad WHERE day>=? AND day<=? AND spend_usd>0", since, until),
+    q('gasto', "SELECT campaign_id, day, spend_usd, updated_at FROM meta_ad_spend WHERE day>=? AND day<=? AND spend_usd>0 AND campaign_id!='corporeas'", since, until),
+    q('gasto_ultimo', "SELECT campaign_id, MAX(day) d FROM meta_ad_spend WHERE day>=? AND spend_usd>0 AND campaign_id!='corporeas' GROUP BY campaign_id", hace45),
+    q('gasto_ultimo_ad', "SELECT ad_id, MAX(day) d FROM meta_ad_spend_ad WHERE day>=? AND spend_usd>0 GROUP BY ad_id", hace45),
+    q('leads', ATTR_SQL + " AND a.ts>=? AND a.ts<? ORDER BY a.phone, a.ts DESC", sinceUTC, untilExUTC),
+    q('presup_link', ATTR_SQL + " AND a.ts>=? AND a.ts<? AND a.phone IN (SELECT cliente_wa_id FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<? UNION SELECT phone FROM oc_enviadas WHERE ts_out>=? AND ts_out<?) ORDER BY a.phone, a.ts DESC", sinceWideUTC, untilExUTC, sinceUTC, untilExUTC, sinceUTC, untilExUTC),
+    q('formularios', "SELECT phone, campaign_id, ad_id, received_at FROM wa_leads WHERE COALESCE(phone,'')!='' AND received_at>=? AND received_at<? ORDER BY received_at DESC", sinceWideUTC, untilExUTC),
+    q('presup', "SELECT cliente_wa_id, comercial_id, COALESCE(precio_final,0) pf FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<?", sinceUTC, untilExUTC),
+    q('ventas', "SELECT id, ad, cartel, numero, fecha, telefono, source_id, source_campaign, comercial_id, COALESCE(es_corporeo,0) es_corporeo, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE fecha>=? AND fecha<?", since, untilEx),
+    q('oc', "SELECT phone, vendedor FROM oc_enviadas WHERE ts_out>=? AND ts_out<?", sinceUTC, untilExUTC),
+    q('duenos', "SELECT phone, COALESCE(assigned_to,'') asg, COALESCE(inbox,'') inbox FROM wa_chats_summary WHERE phone IN (SELECT phone FROM wa_ad_attributions WHERE ts>=? AND ts<? AND COALESCE(source_id,'')!='')", sinceUTC, untilExUTC)
+  ]);
 
-  // ---- GASTO (meta_ad_spend, USD) por vertical ----
+  // ---- catálogo de anuncios/campañas ----
+  const ctx = { adMap: {}, campNames: {}, campTexto: {}, campManual: {}, campPorRuteo: {}, adManual: {}, adMemo: {}, campMemo: {} };
+  for (const r of adMapR) {
+    const id = String(r.ad_id), cid = String(r.campaign_id || '');
+    ctx.adMap[id] = { ad_name: r.ad_name || '', ad_set_name: r.ad_set_name || '', campaign_name: r.campaign_name || '', campaign_id: cid };
+    if (cid && r.campaign_name) ctx.campNames[cid] = r.campaign_name;
+    if (cid) ctx.campTexto[cid] = (ctx.campTexto[cid] || '') + ' ' + (r.ad_set_name || '') + ' ' + (r.ad_name || '');
+  }
+  for (const r of campR) if (r.campaign_name) ctx.campNames[String(r.campaign_id)] = r.campaign_name;
+  for (const r of campManR) if (r.vertical === 'carteles' || r.vertical === 'cursos') ctx.campManual[String(r.campaign_id)] = r.vertical;
+  const porRuteo = {};
+  for (const r of adManR) {
+    const id = String(r.ad_id); ctx.adManual[id] = r.vertical;
+    const cid = ctx.adMap[id] && ctx.adMap[id].campaign_id; if (!cid) continue;
+    (porRuteo[cid] = porRuteo[cid] || new Set()).add(r.vertical === 'cursos' ? 'cursos' : 'carteles');
+  }
+  for (const cid in porRuteo) if (porRuteo[cid].size === 1) ctx.campPorRuteo[cid] = [...porRuteo[cid]][0];
+  const internos = {};
+  for (const r of internosR) { const p = norm(r.phone); if (p) internos[p] = r.name || 'equipo'; }
+  // Label viejo de un pedido (sin source_id) -> campaña: solo si el texto es EXACTO de AD_LABELS y todos sus
+  // anuncios conocidos están en la misma campaña. El label genérico ("Carteles B2C (b2c)") no es inequívoco.
+  const labelCamp = {};
+  for (const aid in AD_LABELS) {
+    const cid = ctx.adMap[aid] && ctx.adMap[aid].campaign_id; if (!cid) continue;
+    const k = _normTxt(AD_LABELS[aid]).trim();
+    labelCamp[k] = (labelCamp[k] === undefined || labelCamp[k] === cid) ? cid : null;
+  }
+
+  // ---- acumuladores ----
+  const R = {};
+  const rowOf = (g) => R[g] || (R[g] = { key: g, gasto_usd: 0, leads: 0, presup: new Set(), presup_monto: 0, ventas: new Set(), ingresos: 0, ads: {}, sin_detalle: false, form: false });
+  const adOf = (row, id) => row.ads[id] || (row.ads[id] = { ad_id: id, gasto_usd: 0, leads: 0, presup: new Set(), ventas: new Set(), ingresos: 0 });
+  const camps = {}; // campaña -> actividad del período (para "Para revisar")
+  const campOf = (cid) => camps[cid] || (camps[cid] = { campaign_id: cid, gasto_usd: 0, leads: 0 });
+  const ultimoCamp = {}, ultimoAd = {};
+  for (const r of lastCampR) ultimoCamp[String(r.campaign_id)] = r.d;
+  for (const r of lastAdR) ultimoAd[String(r.ad_id)] = r.d;
+
+  // ---- GASTO ----
   let spendUpdated = '';
-  try {
-    const rs = await env.DB.prepare("SELECT campaign_id, SUM(spend_usd) g, MAX(updated_at) u FROM meta_ad_spend WHERE day>=? AND day<=? GROUP BY campaign_id").bind(since, until).all();
-    for (const r of (rs.results || [])) {
-      const v = CARTELES_CAMPAIGNS[String(r.campaign_id)];
-      if (v && agg[v]) agg[v].gasto_usd += (r.g || 0);
-      if (r.u && r.u > spendUpdated) spendUpdated = r.u;
-    }
-  } catch (e) { warn('gasto', e); }
-  // Los ads de corpóreas viven DENTRO de la campaña Carteles B2C -> su gasto ya está sumado en b2c.
-  // Se lo restamos a b2c (para que b2c quede "solo neon") y queda en la fila corpóreas aparte.
-  agg.b2c.gasto_usd = Math.max(0, agg.b2c.gasto_usd - agg.corporeas.gasto_usd);
+  const conDetalle = new Set();
+  for (const r of spendAdR) {
+    const s = r.spend_usd || 0, aid = String(r.ad_id), cid = String(r.campaign_id || '');
+    conDetalle.add(cid + '|' + r.day);
+    if (r.updated_at > spendUpdated) spendUpdated = r.updated_at;
+    if (cid) campOf(cid).gasto_usd += s;
+    if (!ctx.adMap[aid] && cid) ctx.adMap[aid] = { ad_name: '', ad_set_name: '', campaign_name: ctx.campNames[cid] || '', campaign_id: cid };
+    const g = funnelGrupoAd(aid, '', ctx);
+    if (!g.grupo) continue;
+    const row = rowOf(g.grupo); row.gasto_usd += s; adOf(row, aid).gasto_usd += s;
+  }
+  for (const r of spendCampR) {
+    const cid = String(r.campaign_id);
+    if (r.updated_at > spendUpdated) spendUpdated = r.updated_at;
+    if (conDetalle.has(cid + '|' + r.day)) continue;
+    const s = r.spend_usd || 0;
+    campOf(cid).gasto_usd += s;
+    if (funnelClaseCampana(cid, ctx).clase !== 'carteles') continue;
+    const row = rowOf(cid); row.gasto_usd += s; row.sin_detalle = true;
+  }
 
-  // ---- LEADS: UN vertical por teléfono (dedup entre verticales) ----
-  // phoneVert = último touch en ventana ancha (para linkear presupuestos). leadVert = vertical del
-  // lead DENTRO del período, una sola entrada por teléfono. B2B entra por CTWA (ad B2B) Y por el
-  // FORMULARIO (wa_leads); el form pisa. Todo en día AR (ts en UTC -> límites a 03:00Z).
-  const phoneVert = {};
-  const leadVert = {};
-  try {
-    const rs = await env.DB.prepare("SELECT phone, source_id, headline, ts FROM wa_ad_attributions WHERE COALESCE(source_id,'')!='' AND ts>=? AND ts<? ORDER BY phone, ts DESC").bind(sinceWideUTC, untilExUTC).all();
-    const rows = rs.results || [];
-    for (const r of rows) { const p = norm(r.phone); if (phoneVert[p] === undefined) { const v = verticalFromSourceMapped(r.source_id, r.headline, campBySource); if (v) phoneVert[p] = v; } }
-    const seen = new Set();
-    for (const r of rows) {
-      if (r.ts < sinceUTC) continue; // solo touches del período (día AR)
-      const p = norm(r.phone); if (seen.has(p)) continue; seen.add(p);
-      const v = verticalFromSourceMapped(r.source_id, r.headline, campBySource);
-      if (v) leadVert[p] = v; // último touch del período
-    }
-  } catch (e) { warn('leads', e); }
-  // Formulario B2B: pisa a b2b en phoneVert (para presup) y, si es del período, en leadVert (lead).
-  try {
-    const rs = await env.DB.prepare("SELECT phone, campaign_id, received_at FROM wa_leads WHERE COALESCE(phone,'')!='' AND received_at>=? AND received_at<? ORDER BY received_at DESC").bind(sinceWideUTC, untilExUTC).all();
-    for (const r of (rs.results || [])) {
-      if (CARTELES_CAMPAIGNS[norm(r.campaign_id)] !== 'b2b') continue; // solo B2B de carteles
-      const p = norm(r.phone);
-      phoneVert[p] = 'b2b';
-      if (r.received_at >= sinceUTC) leadVert[p] = 'b2b'; // submission del período -> b2b (pisa CTWA)
-    }
-  } catch (e) { warn('leads_b2b', e); }
-  for (const p in leadVert) { const v = leadVert[p]; if (agg[v]) agg[v].leads++; } // 1 teléfono -> 1 vertical
+  // ---- LEADS: un grupo por teléfono (último touch del período) ----
+  const leadGrupo = {}, leadAd = {};
+  const vistos = new Set();
+  for (const r of leadAttR) {
+    const p = norm(r.phone); if (!p || internos[p] || vistos.has(p) || !r.sid) continue;
+    vistos.add(p);
+    const g = funnelGrupoAd(r.sid, r.headline, ctx);
+    if (g.cid) campOf(g.cid).leads++;
+    if (g.grupo) { leadGrupo[p] = g.grupo; leadAd[p] = String(r.sid); }
+  }
+  // ---- presupuestos/OC: último anuncio de carteles del teléfono (ventana de 120 días) ----
+  const phoneGrupo = {}, phoneAd = {};
+  for (const r of presAttR) {
+    const p = norm(r.phone); if (!p || phoneGrupo[p] !== undefined || !r.sid) continue;
+    const g = funnelGrupoAd(r.sid, r.headline, ctx);
+    if (g.grupo) { phoneGrupo[p] = g.grupo; phoneAd[p] = String(r.sid); }
+  }
+  // Formularios de carteles: pisan al CTWA (el lead del período y el link del presupuesto).
+  for (const r of formsR) {
+    const cid = norm(r.campaign_id), p = norm(r.phone);
+    if (!cid || !p || internos[p] || funnelClaseCampana(cid, ctx).clase !== 'carteles') continue;
+    rowOf(cid).form = true;
+    phoneGrupo[p] = cid; phoneAd[p] = norm(r.ad_id);
+    if (r.received_at >= sinceUTC) { leadGrupo[p] = cid; leadAd[p] = norm(r.ad_id); campOf(cid).leads++; }
+  }
+  for (const p in leadGrupo) { const row = rowOf(leadGrupo[p]); row.leads++; if (leadAd[p]) adOf(row, leadAd[p]).leads++; }
 
-  // ---- PRESUPUESTOS (briefs enviados) — presup = teléfonos DISTINTOS con presupuesto (dedup, misma
-  // unidad que leads, para que L→P sea una tasa real). Se expone la cobertura: sin teléfono (pipeline
-  // IG) y sin atribuir (no matchean ningún ad) — antes se dropeaban en silencio. Día AR. ----
-  let presupTotal = 0, presupMontoTotal = 0, presupSinTel = 0, presupSinAtrib = 0;
-  try {
-    const rs = await env.DB.prepare("SELECT cliente_wa_id, COALESCE(precio_final,0) pf FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<?").bind(sinceUTC, untilExUTC).all();
-    const pp = {}; VS.forEach(v => pp[v] = new Set());
-    for (const r of (rs.results || [])) {
-      presupTotal++; presupMontoTotal += (r.pf || 0);
-      const ph = norm(r.cliente_wa_id);
-      if (!ph) { presupSinTel++; continue; }
-      const v = phoneVert[ph];
-      if (v && agg[v]) { pp[v].add(ph); agg[v].presup_monto += (r.pf || 0); }
-      else presupSinAtrib++;
-    }
-    VS.forEach(v => agg[v].presup = pp[v].size); // presup = leads distintos que recibieron presupuesto
-  } catch (e) { warn('presup', e); }
+  // ---- vendedores ----
+  const V = {};
+  const vOf = (s) => V[s] || (V[s] = { slug: s, leads: 0, leadsPorGrupo: {}, presup_pauta: new Set(), presup_total: new Set(), oc_pauta: new Set(), oc_total: new Set(), ventas_pauta: new Set(), ventas_total: new Set(), ingresos_pauta: 0, ingresos_total: 0 });
+  const duenos = {};
+  for (const r of ownersR) {
+    const asg = funnelVendedor(r.asg), inbox = String(r.inbox || '');
+    duenos[norm(r.phone)] = asg ? asg : (BANDEJAS_NO_COMERCIALES.indexOf(inbox) >= 0 ? '' : 'joaco');
+  }
+  let otrosLeads = 0;
+  for (const p in leadGrupo) {
+    const d = duenos[p];
+    if (!d) { otrosLeads++; continue; }
+    const v = vOf(d); v.leads++; v.leadsPorGrupo[leadGrupo[p]] = (v.leadsPorGrupo[leadGrupo[p]] || 0) + 1;
+  }
 
-  // ---- VENTAS + INGRESOS + MIX + CONTEXTO (pedidos del período, día AR = fecha) ----
-  // Orden distinta = numero+fecha+TELÉFONO (el numero se carga a mano y puede colisionar entre clientes
-  // el mismo día). Ingresos se suman por FILA (varios carteles por orden); ventas/mix/contexto una vez
-  // por orden. CONTEXTO = todas las órdenes del período por categoría (ad / orgánica / sin trazar / corpóreo)
-  // -> deja explícito "N de ad de M totales", no solo las de ad.
-  const mix = { corporeas: 0, b2c: 0, retargeting: 0, b2b: 0, linkbio: 0, directo: 0, frecuente: 0, referido: 0, revisar: 0 };
-  const ctx = { ad: { ord: 0, ing: 0 }, organico: { ord: 0, ing: 0 }, sintrazar: { ord: 0, ing: 0 }, corporeo: { ord: 0, ing: 0 } };
-  try {
-    const rs = await env.DB.prepare("SELECT ad, cartel, numero, fecha, telefono, source_id, source_campaign, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE fecha>=? AND fecha<?").bind(since, untilEx).all();
-    const ordVenta = {}; VS.forEach(v => ordVenta[v] = new Set());
-    const ordSeen = new Set();
-    for (const r of (rs.results || [])) {
-      const k = String(r.numero) + '|' + String(r.fecha) + '|' + norm(r.telefono);
-      const monto = r.monto || 0;
-      const esCorporeo = /orpore/i.test(String(r.cartel || '')) || verticalOfAdText(r.ad) === 'corporeas';
-      let v = verticalFromPedido(r, campBySource);
-      if (esCorporeo && v !== 'corporeas') v = ''; // corpóreo que no vino del ad de corpóreas -> orgánico
-      const t = String(r.ad || '').toLowerCase();
-      const esCorpOrg = esCorporeo && v !== 'corporeas';
-      let cat, mixKey = '';
-      if (esCorpOrg) cat = 'corporeo';
-      else if (v) { cat = 'ad'; mixKey = v; }
-      else if (t.indexOf('link bio') >= 0) { cat = 'organico'; mixKey = 'linkbio'; }
-      else if (t.indexOf('frecuente') >= 0) { cat = 'organico'; mixKey = 'frecuente'; }
-      else if (t.indexOf('referido') >= 0) { cat = 'organico'; mixKey = 'referido'; }
-      else if (t.indexOf('directo') >= 0) { cat = 'organico'; mixKey = 'directo'; }
-      else { cat = 'sintrazar'; mixKey = 'revisar'; }
-      if (v && agg[v]) { // VENTAS: ingresos por fila, orden distinta una vez
-        agg[v].ingresos += monto;
-        if (!ordVenta[v].has(k)) { ordVenta[v].add(k); agg[v].ventas++; }
+  // ---- PRESUPUESTOS (teléfonos distintos con presupuesto, misma unidad que leads) ----
+  let presupTotal = 0, presupMontoTotal = 0, presupSinTel = 0, presupInterno = 0;
+  const sinAtrib = new Set();
+  for (const r of briefsR) {
+    presupTotal++; presupMontoTotal += (r.pf || 0);
+    const ph = norm(r.cliente_wa_id);
+    if (!ph) { presupSinTel++; continue; }
+    if (internos[ph]) { presupInterno++; continue; }
+    const vend = funnelVendedor(r.comercial_id), g = phoneGrupo[ph];
+    if (vend) vOf(vend).presup_total.add(ph);
+    if (g) {
+      const row = rowOf(g); row.presup.add(ph); row.presup_monto += (r.pf || 0);
+      if (phoneAd[ph]) adOf(row, phoneAd[ph]).presup.add(ph);
+      if (vend) vOf(vend).presup_pauta.add(ph);
+    } else sinAtrib.add(ph);
+  }
+  for (const r of ocR) {
+    const ph = norm(r.phone), vend = funnelVendedor(r.vendedor);
+    if (!ph || internos[ph] || !vend) continue;
+    vOf(vend).oc_total.add(ph);
+    if (phoneGrupo[ph]) vOf(vend).oc_pauta.add(ph);
+  }
+
+  // ---- VENTAS ----
+  const ORG = { linkbio: 'Link bio IG', directo: 'Directo', frecuente: 'Frecuente', referido: 'Referido' };
+  const mixN = {}, mixIng = {};
+  const ctxCat = { ad: { o: 0, i: 0 }, organico: { o: 0, i: 0 }, sintrazar: { o: 0, i: 0 } };
+  const ordSeen = new Set(), ordCorp = new Set();
+  const revisarVentas = {};
+  for (const r of pedidosR) {
+    const tel = norm(r.telefono);
+    const k = String(r.numero) + '|' + String(r.fecha) + '|' + (tel || String(r.telefono || '') || ('id' + r.id));
+    const monto = r.monto || 0;
+    const esCorp = r.es_corporeo == 1 || /corpor/.test(_normTxt(r.cartel)) || verticalOfAdText(r.ad) === 'corporeas';
+    const interno = tel && internos[tel] ? internos[tel] : '';
+    const sid = String(r.source_id || ''), scamp = norm(r.source_campaign);
+    let grupo = '', adId = '';
+    if (!interno) {
+      if (sid) { grupo = funnelGrupoAd(sid, '', ctx).grupo; adId = sid; }
+      else if (scamp) grupo = funnelClaseCampana(scamp, ctx).clase === 'carteles' ? scamp : '';
+      else {
+        // Label viejo sin source_id: un corpóreo con label de neón NO se le da a la pauta de neón
+        // (antes del fix de trazabilidad el label genérico decía "(b2c)" aunque fuera corpóreo).
+        const vt = verticalOfAdText(r.ad);
+        if (vt === 'corporeas') grupo = 'corporeas';
+        else if (vt && !esCorp) {
+          const lc = labelCamp[_normTxt(r.ad).trim()];
+          grupo = lc && funnelClaseCampana(lc, ctx).clase === 'carteles' ? lc : 'sin_campana';
+        }
       }
-      ctx[cat].ing += monto; // CONTEXTO: ingresos por fila (por categoría)
-      if (!ordSeen.has(k)) { // MIX + CONTEXTO órdenes: una vez por orden
-        ordSeen.add(k);
-        ctx[cat].ord++;
-        if (mixKey && mix[mixKey] !== undefined) mix[mixKey]++;
-      }
     }
-  } catch (e) { warn('ventas', e); }
+    const t = String(r.ad || '').toLowerCase();
+    let cat, mk;
+    if (grupo) { cat = 'ad'; mk = grupo; }
+    else if (t.indexOf('link bio') >= 0) { cat = 'organico'; mk = 'linkbio'; }
+    else if (t.indexOf('frecuente') >= 0) { cat = 'organico'; mk = 'frecuente'; }
+    else if (t.indexOf('referido') >= 0) { cat = 'organico'; mk = 'referido'; }
+    else if (t.indexOf('directo') >= 0) { cat = 'organico'; mk = 'directo'; }
+    else { cat = 'sintrazar'; mk = 'revisar'; }
+    const vend = funnelVendedor(r.comercial_id);
+    if (grupo) {
+      const row = rowOf(grupo); row.ingresos += monto; row.ventas.add(k);
+      if (adId) { const a = adOf(row, adId); a.ingresos += monto; a.ventas.add(k); }
+      if (vend) { vOf(vend).ventas_pauta.add(k); vOf(vend).ingresos_pauta += monto; }
+    }
+    if (vend) { vOf(vend).ventas_total.add(k); vOf(vend).ingresos_total += monto; }
+    ctxCat[cat].i += monto; mixIng[mk] = (mixIng[mk] || 0) + monto;
+    if (esCorp) ordCorp.add(k);
+    if (!ordSeen.has(k)) { ordSeen.add(k); ctxCat[cat].o++; mixN[mk] = (mixN[mk] || 0) + 1; }
+    if (cat === 'sintrazar' || interno) {
+      const x = revisarVentas[k] || (revisarVentas[k] = { fecha: r.fecha, numero: r.numero, carteles: [], telefono: String(r.telefono || ''), tel, vendedor: FUNNEL_VENDEDOR_NOMBRE[vend] || vend || '', monto: 0, ad: String(r.ad || ''), interno, sid });
+      x.carteles.push(String(r.cartel || '')); x.monto += monto;
+    }
+  }
 
-  // ---- métricas derivadas ----
-  const rows = VS.map(v => {
-    const a = agg[v];
-    const gastoA = a.gasto_usd * rate;
+  // ---- "Para revisar": por qué no se trazó cada venta ----
+  const revTels = [...new Set(Object.values(revisarVentas).map(x => x.tel).filter(t => t && !internos[t]))].slice(0, 60);
+  const revInfo = {};
+  if (revTels.length) {
+    for (const r of await q('revisar', "SELECT j.value AS phone, (SELECT COUNT(*) FROM wa_ad_attributions a WHERE a.phone=j.value AND COALESCE(a.source_id,'')!='') AS toques, (SELECT substr(w.body,1,120) FROM wa_messages w WHERE w.phone=j.value AND w.direction='inbound' AND w.msg_type!='status' ORDER BY w.ts LIMIT 1) AS primer FROM json_each(?) j", JSON.stringify(revTels))) {
+      revInfo[String(r.phone)] = r;
+    }
+  }
+  const revisar_ventas = Object.values(revisarVentas).map(x => {
+    const info = revInfo[x.tel] || {};
+    const primer = String(info.primer || '').replace(/\s+/g, ' ').trim();
+    let motivo;
+    if (x.interno) motivo = 'Cargado con el teléfono de ' + x.interno + ' (interno): poné el del cliente.';
+    else if (!x.tel) motivo = 'Sin teléfono del cliente: no se puede trazar.';
+    else if (x.sid) motivo = 'El anuncio que tiene cargado no es de carteles.';
+    else if (info.toques > 0) motivo = 'Vino de un anuncio que no es de carteles (cursos).';
+    else if (FUNNEL_TEXTOS_AD.some(tx => _normTxt(primer).indexOf(tx) >= 0)) motivo = 'Escribió con el texto de un anuncio, pero Meta no mandó la referencia.';
+    else motivo = 'El chat no tiene referencia de anuncio: si es directo, referido o frecuente, marcalo en el pedido.';
+    return { fecha: x.fecha, numero: x.numero, cartel: x.carteles.join(' + '), telefono: x.telefono, vendedor: x.vendedor, monto: Math.round(x.monto), ad: x.ad, motivo, primer: primer.slice(0, 90) };
+  }).sort((a, b) => b.monto - a.monto);
+
+  // ---- filas por campaña ----
+  const nombreGrupo = (g) => g === 'corporeas' ? 'Corpóreas (letras 3D)' : g === 'sin_campana' ? 'Anuncios sin campaña identificada' : (ctx.campNames[g] || ('Campaña ' + g));
+  const met = (gUsd, leads, presup, ventas, ing) => {
+    const gA = gUsd * rate;
     return {
-      vertical: v,
-      gasto_usd: Math.round(a.gasto_usd * 100) / 100,
-      gasto_ars: Math.round(gastoA),
-      leads: a.leads,
-      cpl: a.leads ? Math.round(gastoA / a.leads) : null,
-      presup: a.presup,
-      presup_monto: Math.round(a.presup_monto),
-      lp: a.leads ? a.presup / a.leads : null,
-      ventas: a.ventas,
-      pv: a.presup ? a.ventas / a.presup : null,
-      cac: a.ventas ? Math.round(gastoA / a.ventas) : null,
-      ingresos: Math.round(a.ingresos),
-      roas: gastoA ? a.ingresos / gastoA : null
+      gasto_usd: Math.round(gUsd * 100) / 100, gasto_ars: Math.round(gA), leads,
+      cpl: leads ? Math.round(gA / leads) : null, presup, lp: leads ? presup / leads : null, ventas,
+      pv: presup ? ventas / presup : null, cac: ventas ? Math.round(gA / ventas) : null,
+      ingresos: Math.round(ing), roas: gA ? ing / gA : null
     };
-  });
-  const T = rows.reduce((o, r) => ({ gasto_usd: o.gasto_usd + r.gasto_usd, gasto_ars: o.gasto_ars + r.gasto_ars, leads: o.leads + r.leads, presup: o.presup + r.presup, presup_monto: o.presup_monto + r.presup_monto, ventas: o.ventas + r.ventas, ingresos: o.ingresos + r.ingresos }), { gasto_usd: 0, gasto_ars: 0, leads: 0, presup: 0, presup_monto: 0, ventas: 0, ingresos: 0 });
-  const total = Object.assign({}, T, {
-    gasto_usd: Math.round(T.gasto_usd * 100) / 100,
-    cpl: T.leads ? Math.round(T.gasto_ars / T.leads) : null,
-    lp: T.leads ? T.presup / T.leads : null,
-    pv: T.presup ? T.ventas / T.presup : null,
-    cac: T.ventas ? Math.round(T.gasto_ars / T.ventas) : null,
-    roas: T.gasto_ars ? T.ingresos / T.gasto_ars : null
-  });
+  };
+  const rows = Object.values(R).filter(r => r.gasto_usd > 0 || r.leads || r.presup.size || r.ventas.size).map(r => {
+    const esCampana = r.key !== 'corporeas' && r.key !== 'sin_campana';
+    let ultimo = esCampana ? (ultimoCamp[r.key] || '') : '';
+    const ads = Object.values(r.ads).filter(a => a.gasto_usd > 0 || a.leads || a.presup.size || a.ventas.size).map(a => {
+      const m = ctx.adMap[a.ad_id] || {};
+      const u = ultimoAd[a.ad_id] || '';
+      if (u > ultimo) ultimo = u;
+      return Object.assign({ ad_id: a.ad_id, nombre: m.ad_name || ('Anuncio ' + a.ad_id), conjunto: m.ad_set_name || '', campana: r.key === 'corporeas' ? (m.campaign_name || '') : '', activo: !!u && u >= ayerAR }, met(a.gasto_usd, a.leads, a.presup.size, a.ventas.size, a.ingresos));
+    }).sort((x, y) => (y.gasto_usd - x.gasto_usd) || (y.leads - x.leads));
+    const cc = esCampana ? funnelClaseCampana(r.key, ctx) : null;
+    return Object.assign({
+      key: r.key, nombre: nombreGrupo(r.key), tipo: r.key === 'corporeas' ? 'corporeas' : (r.form || CARTELES_CAMPAIGNS[r.key] === 'b2b') ? 'formulario' : 'whatsapp',
+      via: cc ? cc.via : '', activa: !!ultimo && ultimo >= ayerAR, ultimo_gasto: ultimo, sin_detalle: r.sin_detalle,
+      presup_monto: Math.round(r.presup_monto), ads
+    }, met(r.gasto_usd, r.leads, r.presup.size, r.ventas.size, r.ingresos));
+  }).sort((x, y) => (y.gasto_usd - x.gasto_usd) || (y.leads - x.leads));
+
+  const T = rows.reduce((o, r) => { o.g += r.gasto_usd; o.l += r.leads; o.p += r.presup; o.pm += r.presup_monto; o.v += r.ventas; o.i += r.ingresos; return o; }, { g: 0, l: 0, p: 0, pm: 0, v: 0, i: 0 });
+  const total = Object.assign(met(T.g, T.l, T.p, T.v, T.i), { presup_monto: Math.round(T.pm) });
+
+  // ---- vendedores: costo de sus leads = leads de cada campaña × CPL de esa campaña ----
+  const cplARS = {}; for (const r of rows) cplARS[r.key] = r.leads ? r.gasto_ars / r.leads : 0;
+  const vendedores = Object.values(V).filter(v => v.leads || v.presup_total.size || v.ventas_total.size).map(v => {
+    let costo = 0; for (const g in v.leadsPorGrupo) costo += v.leadsPorGrupo[g] * (cplARS[g] || 0);
+    const pp = v.presup_pauta.size, vp = v.ventas_pauta.size;
+    return {
+      slug: v.slug, nombre: FUNNEL_VENDEDOR_NOMBRE[v.slug] || (v.slug.charAt(0).toUpperCase() + v.slug.slice(1)),
+      leads: v.leads, costo_leads: Math.round(costo), presup_pauta: pp, presup_total: v.presup_total.size,
+      oc_pauta: v.oc_pauta.size, oc_total: v.oc_total.size, ventas_pauta: vp, ventas_total: v.ventas_total.size,
+      ingresos_pauta: Math.round(v.ingresos_pauta), ingresos_total: Math.round(v.ingresos_total),
+      lp: v.leads ? pp / v.leads : null, cierre: pp ? vp / pp : null, roas: costo ? v.ingresos_pauta / costo : null
+    };
+  }).sort((a, b) => (b.leads - a.leads) || (b.ventas_total - a.ventas_total));
+
+  // ---- mix de ventas ----
+  const mix = [];
+  for (const r of rows) if (mixN[r.key]) mix.push({ key: r.key, label: r.nombre, n: mixN[r.key], ingresos: Math.round(mixIng[r.key] || 0), pauta: true });
+  for (const k of Object.keys(ORG)) if (mixN[k]) mix.push({ key: k, label: ORG[k], n: mixN[k], ingresos: Math.round(mixIng[k] || 0), pauta: false });
+  if (mixN.revisar) mix.push({ key: 'revisar', label: 'Sin trazar', n: mixN.revisar, ingresos: Math.round(mixIng.revisar || 0), pauta: false });
+
+  // ---- campañas del período y cómo cuentan (para corregir desde el panel) ----
+  const revisar_campanas = Object.values(camps).filter(c => c.gasto_usd > 0 || c.leads).map(c => {
+    const cc = funnelClaseCampana(c.campaign_id, ctx);
+    return { campaign_id: c.campaign_id, nombre: ctx.campNames[c.campaign_id] || '', gasto_usd: Math.round(c.gasto_usd * 100) / 100, gasto_ars: Math.round(c.gasto_usd * rate), leads: c.leads, clase: cc.clase, via: cc.via };
+  }).sort((a, b) => (b.gasto_usd - a.gasto_usd) || (b.leads - a.leads));
+  const gastoExcluido = revisar_campanas.filter(c => c.clase !== 'carteles').reduce((s, c) => s + c.gasto_usd, 0);
+
+  const ventasTot = ctxCat.ad.o + ctxCat.organico.o + ctxCat.sintrazar.o;
   return {
-    ok: true, since, until, rate, rows, total, mix,
-    // CONTEXTO: total de órdenes del período por origen -> el panel puede mostrar "N de ad de M totales"
-    // en vez de dejar creer que "Ventas" es el total del mes (es solo lo atribuido a ads).
+    ok: true, since, until, rate, hoy: hoyAR, rows, total, vendedores, otros_leads: otrosLeads, mix,
     contexto: {
-      ad: { ordenes: ctx.ad.ord, ingresos: Math.round(ctx.ad.ing) },
-      organico: { ordenes: ctx.organico.ord, ingresos: Math.round(ctx.organico.ing) },
-      sintrazar: { ordenes: ctx.sintrazar.ord, ingresos: Math.round(ctx.sintrazar.ing) },
-      corporeo: { ordenes: ctx.corporeo.ord, ingresos: Math.round(ctx.corporeo.ing) }
+      ad: { ordenes: ctxCat.ad.o, ingresos: Math.round(ctxCat.ad.i) },
+      organico: { ordenes: ctxCat.organico.o, ingresos: Math.round(ctxCat.organico.i) },
+      sintrazar: { ordenes: ctxCat.sintrazar.o, ingresos: Math.round(ctxCat.sintrazar.i) },
+      total: { ordenes: ventasTot, ingresos: Math.round(ctxCat.ad.i + ctxCat.organico.i + ctxCat.sintrazar.i) },
+      corporeos: ordCorp.size
     },
     presup_enviados: presupTotal, presup_monto_enviados: Math.round(presupMontoTotal),
-    presup_sin_tel: presupSinTel, presup_sin_atrib: presupSinAtrib,
-    warnings, partial: warnings.length > 0,
-    spend_updated: spendUpdated
+    presup_sin_tel: presupSinTel, presup_sin_atrib: sinAtrib.size, presup_interno: presupInterno,
+    gasto_excluido_usd: Math.round(gastoExcluido * 100) / 100,
+    revisar: { campanas: revisar_campanas, ventas: revisar_ventas },
+    warnings, partial: warnings.length > 0, spend_updated: spendUpdated
   };
 }
 
@@ -19418,13 +19626,14 @@ const handler = {
         return json({ ok: true, done, with_source: withSource, iters });
       }
 
-      // GET /admin/ads/funnel?since=&until=&rate= → funnel de carteles por vertical (panel de control).
-      // Cruza el gasto de Meta (meta_ad_spend) con leads/presupuestos/ventas de D1. Solo Gaspar.
+      // GET /admin/ads/funnel?since=&until=&rate= → funnel de carteles por campaña de Meta (panel de control).
+      // Cruza el gasto de Meta con leads/presupuestos/ventas de D1, por campaña, anuncio y vendedor. Solo Gaspar.
       if (request.method === 'GET' && path === '/admin/ads/funnel') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         const today = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
-        const since = url.searchParams.get('since') || (today.slice(0, 7) + '-01');
-        const until = url.searchParams.get('until') || today;
+        const fecha = (v, def) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : def;
+        const since = fecha(url.searchParams.get('since'), today.slice(0, 7) + '-01');
+        const until = fecha(url.searchParams.get('until'), today);
         const rate = parseFloat(url.searchParams.get('rate') || '') || 1400;
         const data = await buildAdsFunnel(env, { since, until, rate });
         return json(data);
@@ -19436,6 +19645,20 @@ const handler = {
         let b = {}; try { b = await request.json(); } catch (_) {}
         const res = await syncMetaAdSpend(env, { since: b.since, until: b.until });
         return json(res, res.ok ? 200 : 502);
+      }
+
+      // POST /admin/ads/campaign-vertical {campaign_id, vertical:'carteles'|'cursos'|''} → cómo cuenta una campaña
+      // en el funnel (pisa la clasificación automática por nombre); '' vuelve a automático. Solo Gaspar.
+      if (request.method === 'POST' && path === '/admin/ads/campaign-vertical') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let b = {}; try { b = await request.json(); } catch (_) {}
+        const cid = String(b.campaign_id || '').replace(/[^\d]/g, '');
+        const v = String(b.vertical || '');
+        if (!cid || ['carteles', 'cursos', ''].indexOf(v) < 0) return json({ error: 'bad_request' }, 400);
+        await ensureMetaSpendSchema(env);
+        if (v) await env.DB.prepare("INSERT INTO meta_campaign_vertical (campaign_id, vertical, by_user, updated_at) VALUES (?,?,?,?) ON CONFLICT(campaign_id) DO UPDATE SET vertical=excluded.vertical, by_user=excluded.by_user, updated_at=excluded.updated_at").bind(cid, v, session.user, new Date().toISOString()).run();
+        else await env.DB.prepare("DELETE FROM meta_campaign_vertical WHERE campaign_id = ?").bind(cid).run();
+        return json({ ok: true, campaign_id: cid, vertical: v });
       }
 
       // GET /admin/pedidos/mirror-debug → testea el path POST worker→Apps Script con un
@@ -21551,9 +21774,13 @@ const handler = {
     // Sync del mapa de campañas de Meta para los leads de CTWA (WhatsApp): resuelve el ad_id de la
     // referral -> nombre de campaña/ad y backfillea wa_ad_attributions (venía siempre NULL). Diario.
     if (hour === 13) ctx.waitUntil(syncMetaAdMap(env));
-    // Sync diario del GASTO de Meta por campaña -> meta_ad_spend (panel Funnel de Ads). Refresca
-    // los últimos ~10 días (Meta ajusta el gasto hasta ~72h). No-op sin META_ADS_TOKEN.
-    if (hour === 13) ctx.waitUntil(syncMetaAdSpend(env, { since: new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString().slice(0, 10) }));
+    // GASTO de Meta por campaña y por anuncio (panel Funnel de Ads), una vez por hora (minuto 0): a las
+    // 10 AR refresca 10 días (Meta ajusta el gasto hasta ~72h); el resto de las horas, los últimos 2 días
+    // (así el mes en curso incluye el gasto de hoy). No-op sin META_ADS_TOKEN.
+    if (new Date(event.scheduledTime).getUTCMinutes() < 5) {
+      const dias = hour === 13 ? 10 : 1;
+      ctx.waitUntil(syncMetaAdSpend(env, { since: new Date(Date.now() - 3 * 3600 * 1000 - dias * 24 * 3600 * 1000).toISOString().slice(0, 10) }));
+    }
     // Follow-up automático de presupuestos del cotizador: solo horario hábil AR (8-20).
     // Usa hAR (calculado más arriba en este mismo handler) para consistencia
     // con processCursosFollowup/processMinicursoFollowup.

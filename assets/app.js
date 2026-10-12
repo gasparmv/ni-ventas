@@ -14437,34 +14437,28 @@ window.approveImprovement = approveImprovement;
 window.rejectImprovement = rejectImprovement;
 
 // ===== Panel Funnel de Ads (admin) =====
-// Gasto (Meta) -> leads -> presupuestos -> ventas, campaña por campaña (por vertical de carteles).
-// Consume GET /admin/ads/funnel. Data dura: gasto real de Meta + ventas trazadas 1x1.
-let funnelState = { period: '', rate: 1400, data: null, loading: false }; // period se setea al mes en curso al renderizar
+// Gasto (Meta) -> leads -> presupuestos -> ventas, por CAMPAÑA de Meta (con detalle por anuncio) y por
+// vendedor. Consume GET /admin/ads/funnel. Las campañas nuevas se clasifican solas por su nombre y se
+// corrigen desde "Para revisar" (POST /admin/ads/campaign-vertical).
+let funnelState = { period: '', rate: 1400, data: null, dataKey: '', loadedAt: 0, loading: false, seq: 0, open: {}, syncing: false };
 
-const FA_VLABEL = {
-  b2c:        { name: 'Carteles B2C',              tag: 'CTWA · B2C' },
-  retargeting:{ name: 'Neon carteles RETARGETING', tag: 'CTWA · retargeting' },
-  b2b:        { name: 'Neon B2B FORM',             tag: 'Lead Ads · B2B' },
-  corporeas:  { name: 'Corpóreas (letras 3D)',     tag: 'Ad dentro de Carteles B2C' }
-};
-const FA_MIX = [
-  ['b2c', 'Carteles B2C', '#8B2FD6'], ['retargeting', 'Retargeting', '#B84DFF'], ['b2b', 'B2B Formulario', '#6E2FB0'],
-  ['corporeas', 'Corpóreas', '#D6409F'],
-  ['linkbio', 'Link bio IG', '#2E9BD6'], ['directo', 'Directo', '#7A7291'], ['frecuente', 'Frecuente', '#12A163'],
-  ['referido', 'Referido', '#33CF88'], ['revisar', 'Sin trazar / revisar', '#B67916']
-];
+const FA_ORG_COLOR = { linkbio: '#2E9BD6', directo: '#7A7291', frecuente: '#12A163', referido: '#33CF88', revisar: '#B67916' };
+const FA_PAUTA_COLORS = ['#8B2FD6', '#B84DFF', '#6E2FB0', '#D6409F', '#9D5CE0', '#5B2A91', '#C77DFF'];
 const FA_TIPS = {
-  gasto: ['Gasto', 'Lo invertido en esa campaña en el período (convertido a pesos con el tipo de cambio de arriba).', 'Meta Ads API, por campaña de carteles', ''],
-  leads: ['Leads', 'Personas distintas que escribieron por WhatsApp viniendo de un aviso de esa campaña (click-to-WhatsApp). Se descartan los leads de cursos.', 'wa_ad_attributions · último touch por persona', ''],
+  gasto: ['Gasto', 'Lo invertido en el período (convertido a pesos con el tipo de cambio de arriba). Las campañas de cursos no cuentan.', 'Meta Ads, por anuncio y por día', ''],
+  leads: ['Leads', 'Personas distintas que escribieron por WhatsApp o Instagram desde un anuncio de carteles en el período (último anuncio que tocaron). Los posts orgánicos de Instagram no cuentan.', 'Referencia de Meta en el chat', ''],
   cpl: ['CPL (costo por lead)', 'Gasto ÷ Leads reales del CRM. Lo que te cuesta traer a alguien que escribe.', 'Meta ÷ CRM', '🟢 < $2.500 · 🔴 > $4.000'],
-  presup: ['Presupuestos', 'Leads de esa campaña a los que se les envió presupuesto (linkeado por teléfono).', 'briefs enviados · precio_final', ''],
+  presup: ['Presupuestos', 'Clientes de esa campaña a los que se les mandó presupuesto en el período (por teléfono, contra el último anuncio de carteles que tocaron en 120 días).', 'Presupuestos enviados del CRM', ''],
   lp: ['L→P (lead a presupuesto)', 'Qué % de los leads llegó a recibir presupuesto. Bajo = se pierden en la conversación.', 'Presup ÷ Leads', '🟢 > 40%'],
-  ventas: ['Ventas', 'Pedidos atribuidos a esa campaña con data dura (source_id de Meta / formulario). Órdenes con nombre distinto.', 'pedidos.ad', ''],
-  pv: ['Cierre (P→V)', 'Qué % de los presupuestos terminó en venta. Tu tasa de cierre real por campaña.', 'Ventas ÷ Presup', '🟢 > 6%'],
-  cac: ['CAC (costo por cliente)', 'Lo que te sale cada venta. Gasto ÷ Ventas. Compará contra tu margen por cartel.', 'Meta ÷ pedidos', '🟢 < $100k'],
-  roas: ['ROAS', 'Retorno: cuántos pesos facturás por cada peso de pauta. Ingresos reales ÷ Gasto.', 'CRM (precio real) ÷ Meta', '🟢 > 4×'],
-  funnel: ['Embudo del período', 'Cómo se achica: del gasto salen leads, de los leads presupuestos, y de esos las ventas. Los % entre pasos muestran dónde se cae la gente.', 'Meta + CRM', ''],
-  mix: ['Origen de las ventas', 'Cada venta del período trazada a de dónde vino el cliente. Violeta = pauta (ad). El resto es orgánico o a confirmar.', 'pedidos.ad (trazabilidad con data dura)', '']
+  ventas: ['Ventas', 'Órdenes del período con el anuncio exacto que trajo al cliente (dato de Meta guardado en el pedido).', 'Pedidos del CRM', ''],
+  pv: ['Cierre (P→V)', 'Qué % de los presupuestos terminó en venta.', 'Ventas ÷ Presup', '🟢 > 6%'],
+  cac: ['CAC (costo por cliente)', 'Lo que te sale cada venta: Gasto ÷ Ventas. Compará contra tu margen por cartel.', 'Meta ÷ pedidos', '🟢 < $100k'],
+  roas: ['ROAS', 'Cuántos pesos facturás por cada peso de pauta: Ingresos ÷ Gasto.', 'CRM (precio real) ÷ Meta', '🟢 > 4×'],
+  funnel: ['Embudo del período', 'Cómo se achica: del gasto salen leads, de los leads presupuestos y de esos las ventas. Los % entre pasos muestran dónde se cae la gente.', 'Meta + CRM', ''],
+  mix: ['Origen de las ventas', 'Cada venta del período con su origen. Violeta = pauta (por campaña). El resto es orgánico o sin trazar (ver "Para revisar").', 'Pedidos del CRM', ''],
+  vend: ['Por vendedor', 'Leads = chats de anuncios del período según quién los tiene HOY (Joaco = bandeja general sin asignar). Presupuestos, OC y ventas = quién los hizo. "Pauta" = clientes que vinieron de un anuncio; "Total" suma los orgánicos.', 'Chats, presupuestos, OC y pedidos del CRM', ''],
+  costo: ['Costo de sus leads', 'Leads de cada campaña que tiene el vendedor × el CPL de esa campaña. Con el ROAS ves quién le saca más jugo a la pauta.', 'Meta ÷ CRM', ''],
+  vroas: ['ROAS del vendedor', 'Ingresos de sus ventas de pauta ÷ costo de sus leads.', 'CRM ÷ Meta', '🟢 > 4×']
 };
 
 function faToday() {
@@ -14484,32 +14478,35 @@ function faMonths() {
   return out;
 }
 function faIsCurrentMonth(p) { return p === faToday().slice(0, 7); }
-// p = 'YYYY-MM'. Devuelve [primer día, último día del mes] — el mes EN CURSO se capa a hoy
-// (antes 'agosto' se comía septiembre porque usaba faToday() como fin fijo).
+// p = 'YYYY-MM' -> [primer día, último día]; el mes EN CURSO se capa a hoy.
 function faRange(p) {
   if (!/^\d{4}-\d{2}$/.test(p)) { const ms = faMonths(); p = ms[ms.length - 1].key; }
   const y = parseInt(p.slice(0, 4), 10), m = parseInt(p.slice(5, 7), 10);
   const first = p + '-01';
-  const lastDay = new Date(y, m, 0).getDate();
-  const last = p + '-' + String(lastDay).padStart(2, '0');
+  const last = p + '-' + String(new Date(y, m, 0).getDate()).padStart(2, '0');
   const today = faToday();
   return [first, last < today ? last : today];
 }
 function faMoney(n) { return '$' + Math.round(n || 0).toLocaleString('es-AR'); }
 function faUsd(n) { return 'US$' + (Math.round((n || 0) * 100) / 100).toLocaleString('es-AR'); }
 function faPct(n) { return (n == null) ? '—' : (n * 100).toFixed(1).replace('.', ',') + '%'; }
+function faX(n) { return n == null ? '—' : n.toFixed(1).replace('.', ',') + '×'; }
+function faFecha(d) { return d ? d.slice(8, 10) + '/' + d.slice(5, 7) : ''; }
 function faSem(v, g, b, inv) { if (v == null) return ''; if (inv) return v <= g ? 'good' : (v <= b ? 'warn' : 'bad'); return v >= g ? 'good' : (v >= b ? 'warn' : 'bad'); }
+function faPill(cls, txt) { return cls ? '<span class="fa-pill ' + cls + ' mono">' + txt + '</span>' : '<span class="mono">' + txt + '</span>'; }
+function faTipBtn(k) { return '<button class="fa-i" data-fa-tip="' + k + '">i</button>'; }
 
 function renderFunnelAds() {
   const st = funnelState;
   if (!/^\d{4}-\d{2}$/.test(st.period)) { const ms = faMonths(); st.period = ms[ms.length - 1].key; } // default: mes en curso
   const pBtn = (p, lbl) => `<button data-fa-p="${p}" aria-pressed="${st.period === p}">${lbl}</button>`;
+  const th = (lbl, tip) => '<th><span class="ih">' + lbl + (tip ? ' ' + faTipBtn(tip) : '') + '</span></th>';
   return `
   <style>
   .fa-wrap{--fa-bg:transparent;--fa-surf:var(--surface,#fff);--fa-surf2:#F5F1FB;--fa-bd:#E7E1F1;--fa-tx:#1B1622;--fa-mut:#6E6684;--fa-fnt:#948CA6;--fa-acc:#8B2FD6;--fa-good:#12A163;--fa-gs:rgba(18,161,99,.13);--fa-warn:#B67916;--fa-ws:rgba(182,121,22,.14);--fa-bad:#D23A3F;--fa-bs:rgba(210,58,63,.13);--fa-sh:0 1px 2px rgba(30,20,50,.05),0 8px 24px -12px rgba(60,30,110,.14)}
   @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .fa-wrap{--fa-surf:#1B1726;--fa-surf2:#231D33;--fa-bd:#322A44;--fa-tx:#ECE7F6;--fa-mut:#9A92AD;--fa-fnt:#7A7291;--fa-acc:#C77DFF;--fa-good:#33CF88;--fa-gs:rgba(51,207,136,.15);--fa-warn:#E4B052;--fa-ws:rgba(228,176,82,.16);--fa-bad:#F15A5F;--fa-bs:rgba(241,90,95,.16);--fa-sh:0 1px 2px rgba(0,0,0,.3),0 12px 30px -14px rgba(0,0,0,.6)}}
   :root[data-theme="dark"] .fa-wrap{--fa-surf:#1B1726;--fa-surf2:#231D33;--fa-bd:#322A44;--fa-tx:#ECE7F6;--fa-mut:#9A92AD;--fa-fnt:#7A7291;--fa-acc:#C77DFF;--fa-good:#33CF88;--fa-gs:rgba(51,207,136,.15);--fa-warn:#E4B052;--fa-ws:rgba(228,176,82,.16);--fa-bad:#F15A5F;--fa-bs:rgba(241,90,95,.16);--fa-sh:0 1px 2px rgba(0,0,0,.3),0 12px 30px -14px rgba(0,0,0,.6)}
-  .fa-wrap{color:var(--fa-tx);max-width:1120px;margin:0 auto;padding:4px 2px 40px}
+  .fa-wrap{color:var(--fa-tx);max-width:1180px;margin:0 auto;padding:4px 2px 40px}
   .fa-wrap .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,"SF Mono",Menlo,monospace}
   .fa-head{display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px 20px;margin-bottom:16px}
   .fa-head h1{margin:0;font-size:23px;font-weight:800;letter-spacing:-.02em;display:flex;align-items:center;gap:9px}
@@ -14520,14 +14517,17 @@ function renderFunnelAds() {
   .fa-seg button[aria-pressed="true"]{background:var(--fa-surf);color:var(--fa-tx);box-shadow:0 1px 3px rgba(0,0,0,.12)}
   .fa-rate{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fa-mut)}
   .fa-rate input{width:74px;padding:5px 8px;border:1px solid var(--fa-bd);border-radius:8px;background:var(--fa-surf);color:var(--fa-tx);font:inherit;font-size:13px}
+  .fa-btn{border:1px solid var(--fa-bd);background:var(--fa-surf);color:var(--fa-tx);font:inherit;font-size:12px;font-weight:600;padding:5px 10px;border-radius:8px;cursor:pointer;white-space:nowrap}
+  .fa-btn:hover{border-color:var(--fa-acc);color:var(--fa-acc)} .fa-btn[disabled]{opacity:.55;cursor:default}
+  .fa-btn.pri{background:var(--fa-acc);border-color:var(--fa-acc);color:#fff}
   .fa-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:11px;margin-bottom:15px}
   .fa-tile{background:var(--fa-surf);border:1px solid var(--fa-bd);border-radius:14px;padding:13px 14px;box-shadow:var(--fa-sh)}
   .fa-tile .lab{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--fa-mut);font-weight:600;margin-bottom:7px}
   .fa-tile .val{font-size:24px;font-weight:800;letter-spacing:-.02em}
   .fa-tile .val small{font-size:13px;font-weight:600;color:var(--fa-mut)}
   .fa-tile .foot{margin-top:5px;font-size:12px;color:var(--fa-fnt);display:flex;align-items:center;gap:6px}
-  .fa-dot{width:8px;height:8px;border-radius:50%;flex:none}
-  .fa-dot.good{background:var(--fa-good)} .fa-dot.warn{background:var(--fa-warn)} .fa-dot.bad{background:var(--fa-bad)}
+  .fa-dot{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block}
+  .fa-dot.good{background:var(--fa-good)} .fa-dot.warn{background:var(--fa-warn)} .fa-dot.bad{background:var(--fa-bad)} .fa-dot.off{background:var(--fa-fnt)}
   .fa-i{width:15px;height:15px;border-radius:50%;border:1px solid var(--fa-bd);color:var(--fa-fnt);font-size:10px;font-weight:700;line-height:13px;text-align:center;cursor:pointer;background:transparent;padding:0;flex:none}
   .fa-i:hover{color:var(--fa-acc);border-color:var(--fa-acc)}
   .fa-card{background:var(--fa-surf);border:1px solid var(--fa-bd);border-radius:16px;box-shadow:var(--fa-sh);margin-bottom:15px}
@@ -14539,30 +14539,43 @@ function renderFunnelAds() {
   .fa-conv{display:flex;flex-direction:column;justify-content:center;align-items:center;color:var(--fa-fnt);font-size:12px;font-weight:700;min-width:50px}
   .fa-conv .aw{font-size:16px;color:var(--fa-acc)}
   .fa-tblw{overflow-x:auto;padding:6px 6px 12px}
-  .fa-tbl{border-collapse:collapse;width:100%;min-width:820px}
-  .fa-tbl th,.fa-tbl td{padding:10px 11px;text-align:right;font-size:13.5px;white-space:nowrap}
+  .fa-tbl{border-collapse:collapse;width:100%;min-width:860px}
+  .fa-tbl th,.fa-tbl td{padding:9px 10px;text-align:right;font-size:13.5px;white-space:nowrap}
   .fa-tbl th{color:var(--fa-mut);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--fa-bd)}
   .fa-tbl th:first-child,.fa-tbl td:first-child{text-align:left}
   .fa-tbl th .ih{display:inline-flex;align-items:center;gap:4px}
   .fa-tbl tbody tr{border-bottom:1px solid var(--fa-bd)} .fa-tbl tbody tr:last-child{border-bottom:0}
-  .fa-tbl td.camp{font-weight:700} .fa-tbl td.camp .tag{display:block;font-size:11px;font-weight:600;color:var(--fa-fnt);text-transform:uppercase;letter-spacing:.04em}
+  .fa-tbl td.camp{font-weight:700;white-space:normal;min-width:220px;max-width:330px}
+  .fa-tbl td.camp .tag{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;font-size:11px;font-weight:600;color:var(--fa-fnt);text-transform:uppercase;letter-spacing:.04em;margin-top:2px}
+  .fa-tbl tr.fa-row{cursor:pointer} .fa-tbl tr.fa-row:hover{background:var(--fa-surf2)}
+  .fa-tbl .chev{display:inline-block;width:14px;color:var(--fa-acc);font-size:11px}
+  .fa-tbl tr.fa-ad td{font-size:12.5px;background:var(--fa-surf2)} .fa-tbl tr.fa-ad td.camp{font-weight:600;padding-left:30px}
+  .fa-tbl tr.fa-ad td.camp .tag{text-transform:none;letter-spacing:0;font-weight:500}
+  .fa-chip{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:999px;font-size:10.5px;font-weight:700;text-transform:none;letter-spacing:0;background:var(--fa-surf2);color:var(--fa-mut);border:1px solid var(--fa-bd)}
+  .fa-chip.auto{color:var(--fa-warn);border-color:var(--fa-warn);background:var(--fa-ws)}
   .fa-pill{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:999px;font-size:12.5px;font-weight:700}
   .fa-pill.good{background:var(--fa-gs);color:var(--fa-good)} .fa-pill.warn{background:var(--fa-ws);color:var(--fa-warn)} .fa-pill.bad{background:var(--fa-bs);color:var(--fa-bad)}
   .fa-tbl tr.tot{border-top:2px solid var(--fa-bd);font-weight:800;background:var(--fa-surf2)} .fa-tbl tr.tot td:first-child{color:var(--fa-acc)}
   .fa-mix{padding:15px 17px} .fa-mixbar{display:flex;height:32px;border-radius:9px;overflow:hidden;border:1px solid var(--fa-bd)}
   .fa-mixbar span{display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#fff;min-width:2px}
-  .fa-mixleg{display:flex;flex-wrap:wrap;gap:9px 15px;margin-top:11px} .fa-mixleg .li{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--fa-mut)} .fa-mixleg .sw{width:11px;height:11px;border-radius:3px}
+  .fa-mixleg{display:flex;flex-wrap:wrap;gap:9px 15px;margin-top:11px} .fa-mixleg .li{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--fa-mut)} .fa-mixleg .sw{width:11px;height:11px;border-radius:3px;flex:none}
+  .fa-rev{padding:8px 17px 15px}
+  .fa-rev h3{font-size:12.5px;margin:12px 0 6px;color:var(--fa-mut);text-transform:uppercase;letter-spacing:.05em}
+  .fa-rev .it{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--fa-bd);font-size:13px}
+  .fa-rev .it:last-child{border-bottom:0}
+  .fa-rev .it .q{flex:1;min-width:240px} .fa-rev .it .q b{font-weight:700} .fa-rev .it .q small{display:block;color:var(--fa-mut);font-size:12px;margin-top:2px;white-space:normal}
+  .fa-rev .acts{display:flex;gap:6px;flex-wrap:wrap}
   .fa-legend{display:flex;flex-wrap:wrap;gap:8px 16px;padding:13px 17px;font-size:12px;color:var(--fa-mut);align-items:center}
   .fa-legend .g{display:flex;align-items:center;gap:6px}
   .fa-note{color:var(--fa-fnt);font-size:12px;margin-top:12px;line-height:1.6}
   .fa-pop{position:fixed;z-index:60;max-width:290px;background:var(--fa-surf);border:1px solid var(--fa-bd);border-radius:12px;padding:12px 14px;box-shadow:0 10px 40px -8px rgba(0,0,0,.4);font-size:12.5px;line-height:1.5;display:none;color:var(--fa-tx)}
   .fa-pop.on{display:block} .fa-pop .src{color:var(--fa-mut);margin-top:6px;display:block} .fa-pop .th{color:var(--fa-acc);margin-top:6px;display:block;font-weight:600}
   </style>
-  <div class="fa-wrap">
+  <div class="fa-wrap" id="fa-wrap">
     <div class="fa-head">
       <div>
         <h1><span class="di">◆</span> Funnel de Ads</h1>
-        <span class="sub">Gasto → leads → presupuestos → ventas, campaña por campaña</span>
+        <span class="sub">Gasto → leads → presupuestos → ventas, por campaña, anuncio y vendedor</span>
       </div>
       <div class="fa-ctrls">
         <div class="fa-seg" id="fa-period">${faMonths().map(mo => pBtn(mo.key, mo.label)).join('')}</div>
@@ -14571,35 +14584,39 @@ function renderFunnelAds() {
     </div>
     <div class="fa-kpis" id="fa-kpis"></div>
     <div class="fa-card">
-      <h2>Embudo del período <button class="fa-i" data-fa-tip="funnel">i</button></h2>
+      <h2>Embudo del período ${faTipBtn('funnel')}</h2>
       <div class="cap" id="fa-funnelcap"></div>
       <div class="fa-funnel" id="fa-funnel"></div>
     </div>
     <div class="fa-card">
       <h2>Rendimiento por campaña</h2>
-      <div class="cap">Una fila por vertical de carteles. Los semáforos usan umbrales de tu economía. Tocá la <b>i</b> de cada columna para ver qué es y de dónde sale.</div>
+      <div class="cap">Una fila por campaña de Meta (las corpóreas van aparte). Tocá una campaña para ver sus anuncios. Las campañas nuevas entran solas.</div>
       <div class="fa-tblw">
         <table class="fa-tbl">
-          <thead><tr>
-            <th>Campaña</th>
-            <th><span class="ih">Gasto <button class="fa-i" data-fa-tip="gasto">i</button></span></th>
-            <th><span class="ih">Leads <button class="fa-i" data-fa-tip="leads">i</button></span></th>
-            <th><span class="ih">CPL <button class="fa-i" data-fa-tip="cpl">i</button></span></th>
-            <th><span class="ih">Presup. <button class="fa-i" data-fa-tip="presup">i</button></span></th>
-            <th><span class="ih">L→P <button class="fa-i" data-fa-tip="lp">i</button></span></th>
-            <th><span class="ih">Ventas <button class="fa-i" data-fa-tip="ventas">i</button></span></th>
-            <th><span class="ih">Cierre <button class="fa-i" data-fa-tip="pv">i</button></span></th>
-            <th><span class="ih">CAC <button class="fa-i" data-fa-tip="cac">i</button></span></th>
-            <th><span class="ih">ROAS <button class="fa-i" data-fa-tip="roas">i</button></span></th>
-          </tr></thead>
+          <thead><tr>${th('Campaña')}${th('Gasto', 'gasto')}${th('Leads', 'leads')}${th('CPL', 'cpl')}${th('Presup.', 'presup')}${th('L→P', 'lp')}${th('Ventas', 'ventas')}${th('Cierre', 'pv')}${th('CAC', 'cac')}${th('ROAS', 'roas')}</tr></thead>
           <tbody id="fa-tbody"></tbody>
         </table>
       </div>
     </div>
     <div class="fa-card">
-      <h2>De dónde vienen tus ventas <button class="fa-i" data-fa-tip="mix">i</button></h2>
-      <div class="cap" id="fa-mixcap">Trazabilidad real de las ventas del período, cada una a su origen con data dura.</div>
+      <h2>Por vendedor ${faTipBtn('vend')}</h2>
+      <div class="cap" id="fa-vendcap">Qué hace cada uno con los leads de pauta.</div>
+      <div class="fa-tblw">
+        <table class="fa-tbl">
+          <thead><tr>${th('Vendedor')}${th('Leads', 'leads')}${th('Costo leads', 'costo')}${th('Presup.', 'presup')}${th('L→P', 'lp')}${th('OC')}${th('Ventas', 'ventas')}${th('Cierre', 'pv')}${th('Ingresos')}${th('ROAS', 'vroas')}${th('Total ventas')}${th('Total ingresos')}</tr></thead>
+          <tbody id="fa-vbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="fa-card">
+      <h2>De dónde vienen tus ventas ${faTipBtn('mix')}</h2>
+      <div class="cap" id="fa-mixcap">Cada venta del período con su origen.</div>
       <div class="fa-mix"><div class="fa-mixbar" id="fa-mixbar"></div><div class="fa-mixleg" id="fa-mixleg"></div></div>
+    </div>
+    <div class="fa-card">
+      <h2>Para revisar</h2>
+      <div class="cap">Lo que el funnel no puede trazar solo. Corregilo acá o en el pedido.</div>
+      <div class="fa-rev" id="fa-rev"></div>
     </div>
     <div class="fa-card"><div class="fa-legend">
       <span style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fa-fnt);font-weight:600">Semáforo</span>
@@ -14607,48 +14624,65 @@ function renderFunnelAds() {
       <span class="g"><span class="fa-dot warn"></span> mirar</span>
       <span class="g"><span class="fa-dot bad"></span> corregir / no escalar</span>
       <span style="margin-left:auto;color:var(--fa-fnt)" id="fa-spendfoot"></span>
+      <button class="fa-btn" data-fa-sync>↻ Traer gasto de Meta</button>
     </div></div>
     <p class="fa-note" id="fa-note"></p>
   </div>
   <div class="fa-pop" id="fa-pop"></div>`;
 }
 
-async function loadFunnelAds() {
+async function loadFunnelAds(force) {
   const st = funnelState;
   const [since, until] = faRange(st.period);
+  const key = since + '|' + until + '|' + st.rate;
+  if (!force && st.data && st.dataKey === key && Date.now() - st.loadedAt < 120000) { renderFaAll(); return; }
+  const my = ++st.seq;
   st.loading = true;
   const kp = document.getElementById('fa-kpis');
   if (kp) kp.innerHTML = '<div class="fa-tile"><div class="loading"><div class="spinner"></div></div></div>';
-  try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/ads/funnel?since=' + since + '&until=' + until + '&rate=' + st.rate, { headers: { ...authHeaders() } });
-    const j = await r.json();
-    if (j && j.ok) { st.data = j; renderFaAll(); }
-    else if (kp) kp.innerHTML = '<div class="muted" style="font-size:12px">no se pudo cargar el funnel</div>';
-  } catch (_) { if (kp) kp.innerHTML = '<div class="muted" style="font-size:12px">no se pudo cargar el funnel</div>'; }
-  st.loading = false;
+  let err = '';
+  for (let intento = 0; intento < 2; intento++) {
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/ads/funnel?since=' + since + '&until=' + until + '&rate=' + st.rate, { headers: { ...authHeaders() } });
+      const j = await r.json().catch(() => null);
+      if (my !== st.seq) return; // llegó tarde: ya se pidió otro mes
+      if (r.ok && j && j.ok) { st.data = j; st.dataKey = key; st.loadedAt = Date.now(); st.loading = false; renderFaAll(); return; }
+      err = (j && j.error) ? String(j.error) : ('HTTP ' + r.status);
+      if (r.status === 401 || r.status === 403) break;
+    } catch (_) {
+      if (my !== st.seq) return;
+      err = 'sin conexión';
+    }
+    if (intento === 0) await new Promise(res => setTimeout(res, 1500));
+    if (my !== st.seq) return;
+  }
+  st.loading = false; st.data = null; st.dataKey = '';
+  ['fa-funnel', 'fa-tbody', 'fa-vbody', 'fa-mixbar', 'fa-mixleg', 'fa-rev', 'fa-note', 'fa-funnelcap'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+  if (kp) kp.innerHTML = '<div class="fa-tile" style="grid-column:1/-1"><div class="foot" style="font-size:13px;color:var(--fa-bad)">No se pudo cargar el funnel (' + escapeHtml(err) + ').&nbsp;<button class="fa-btn" data-fa-retry>Reintentar</button></div></div>';
 }
 
 function renderFaAll() {
   const d = funnelState.data; if (!d) return;
-  renderFaKpis(d); renderFaFunnel(d); renderFaTable(d); renderFaMix(d);
+  renderFaKpis(d); renderFaFunnel(d); renderFaTable(d); renderFaVend(d); renderFaMix(d); renderFaRev(d);
   const _mo = faMonths().find(x => x.key === funnelState.period);
   const pl = (_mo ? _mo.label : funnelState.period) + (faIsCurrentMonth(funnelState.period) ? ' (en curso)' : '');
   const fc = document.getElementById('fa-funnelcap'); if (fc) fc.textContent = 'Carteles · ' + pl + ' · ' + d.since + ' → ' + d.until;
   const sf = document.getElementById('fa-spendfoot');
-  if (sf) sf.textContent = 'Gasto Meta act. ' + (d.spend_updated ? d.spend_updated.slice(0, 10) : '—') + ' · US$→ARS $' + Number(d.rate).toLocaleString('es-AR');
+  if (sf) {
+    let u = '—';
+    if (d.spend_updated) { const t = new Date(d.spend_updated); u = isNaN(t) ? d.spend_updated.slice(0, 10) : t.toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+    sf.textContent = 'Gasto Meta act. ' + u + ' · US$→ARS $' + Number(d.rate).toLocaleString('es-AR');
+  }
   const nt = document.getElementById('fa-note');
   if (nt) {
-    const c = d.contexto || {}; const ad = c.ad || {}, org = c.organico || {}, st = c.sintrazar || {}, cor = c.corporeo || {};
-    const totOrd = (ad.ordenes || 0) + (org.ordenes || 0) + (st.ordenes || 0);
-    const totIng = (ad.ingresos || 0) + (org.ingresos || 0) + (st.ingresos || 0);
-    let h = '<b>Ventas del período (carteles):</b> <b style="color:var(--fa-acc)">' + (ad.ordenes || 0) + ' de ad</b> · ' +
-      (org.ordenes || 0) + ' orgánicas (link bio/directo/frecuente) · ' + (st.ordenes || 0) + ' sin trazar' +
-      (cor.ordenes ? ' · <b>' + cor.ordenes + ' corpóreo</b> (fila aparte)' : '') +
-      ' — total ' + totOrd + ' órdenes / ' + faMoney(totIng) + '. <b>El funnel cuenta SOLO las de ad</b> (para que el ROAS sea real; el resto es orgánico o sin trazar).';
-    const sinAtr = (d.presup_sin_tel || 0) + (d.presup_sin_atrib || 0);
-    if (sinAtr) h += '<br>Presupuestos: ' + (d.presup_enviados || 0) + ' enviados en el mes, ' + sinAtr + ' sin atribuir a un ad (no entran al L→P por vertical).';
-    h += '<br><span style="color:var(--fa-fnt)">Gasto = Meta (real). Leads/ventas clasificados por campaña exacta (membresía). Días en hora Argentina. Instagram todavía no incluido.</span>';
-    if (d.partial && (d.warnings || []).length) h = '<span style="color:var(--fa-bad);font-weight:600">⚠ Datos parciales — falló: ' + d.warnings.join('; ') + '</span><br>' + h;
+    const c = d.contexto || {}; const ad = c.ad || {}, org = c.organico || {}, sz = c.sintrazar || {}, tot = c.total || {};
+    let h = '<b>Ventas del período:</b> ' + (tot.ordenes || 0) + ' órdenes / ' + faMoney(tot.ingresos) + ' → <b style="color:var(--fa-acc)">' + (ad.ordenes || 0) + ' de pauta (' + faMoney(ad.ingresos) + ')</b> · ' +
+      (org.ordenes || 0) + ' orgánicas · ' + (sz.ordenes || 0) + ' sin trazar' + (c.corporeos ? ' · ' + c.corporeos + ' son corpóreos' : '') +
+      '. El funnel cuenta SOLO las de pauta (para que el ROAS sea real).';
+    if (d.presup_enviados) h += '<br>Presupuestos: ' + d.presup_enviados + ' enviados en el período; ' + (d.presup_sin_atrib || 0) + ' clientes con presupuesto no vinieron de un anuncio' + (d.presup_sin_tel ? ' y ' + d.presup_sin_tel + ' no tienen teléfono' : '') + ' (no entran al L→P).';
+    if (d.gasto_excluido_usd) h += '<br>Gasto de campañas que no son de carteles (cursos), fuera del funnel: ' + faUsd(d.gasto_excluido_usd) + '.';
+    h += '<br><span style="color:var(--fa-fnt)">Gasto = Meta (real), por anuncio. Leads de WhatsApp e Instagram (anuncios; los posts orgánicos no cuentan). Días en hora Argentina.</span>';
+    if (d.partial && (d.warnings || []).length) h = '<span style="color:var(--fa-bad);font-weight:600">⚠ Datos parciales — falló: ' + escapeHtml(d.warnings.join('; ')) + '</span><br>' + h;
     nt.innerHTML = h;
   }
   faBindTips();
@@ -14658,16 +14692,16 @@ function renderFaKpis(d) {
   const t = d.total;
   const K = [
     ['Gasto', faMoney(t.gasto_ars), '<small> ARS</small>', '', faUsd(t.gasto_usd), 'gasto'],
-    ['Leads', (t.leads || 0).toLocaleString('es-AR'), '', faSem(t.cpl, 2500, 4000, true), 'CPL ' + faMoney(t.cpl), 'leads'],
-    ['CPL', t.cpl == null ? '—' : faMoney(t.cpl), '', faSem(t.cpl, 2500, 4000, true), 'Meta ref. ~US$0,5', 'cpl'],
+    ['Leads', (t.leads || 0).toLocaleString('es-AR'), '', faSem(t.cpl, 2500, 4000, true), 'CPL ' + (t.cpl == null ? '—' : faMoney(t.cpl)), 'leads'],
+    ['CPL', t.cpl == null ? '—' : faMoney(t.cpl), '', faSem(t.cpl, 2500, 4000, true), '', 'cpl'],
     ['Ventas', (t.ventas || 0), '', faSem(t.roas, 4, 2.5), (t.presup || 0) + ' presup.', 'ventas'],
     ['CAC', t.cac == null ? '—' : faMoney(t.cac), '', faSem(t.cac, 100000, 180000, true), '', 'cac'],
-    ['ROAS', t.roas == null ? '—' : (t.roas.toFixed(1).replace('.', ',') + '×'), '', faSem(t.roas, 4, 2.5), faMoney(t.ingresos) + ' fact.', 'roas']
+    ['ROAS', faX(t.roas), '', faSem(t.roas, 4, 2.5), faMoney(t.ingresos) + ' fact.', 'roas']
   ];
   const el = document.getElementById('fa-kpis'); if (!el) return;
   el.innerHTML = K.map(k => {
     const dot = k[3] ? '<span class="fa-dot ' + k[3] + '"></span>' : '';
-    return '<div class="fa-tile"><div class="lab">' + k[0] + ' <button class="fa-i" data-fa-tip="' + k[5] + '">i</button></div>' +
+    return '<div class="fa-tile"><div class="lab">' + k[0] + ' ' + faTipBtn(k[5]) + '</div>' +
       '<div class="val mono">' + k[1] + k[2] + '</div><div class="foot">' + dot + '<span>' + (k[4] || '') + '</span></div></div>';
   }).join('');
 }
@@ -14680,50 +14714,120 @@ function renderFaFunnel(d) {
   steps.forEach((s, i) => {
     html += '<div class="fa-step"><div class="k">' + s[0] + '</div><div class="n mono">' + s[1] + '</div></div>';
     if (i === 0) html += '<div class="fa-conv"><span class="aw">→</span></div>';
-    else if (i < steps.length && convs[i]) html += '<div class="fa-conv"><span class="aw">→</span>' + convs[i] + '</div>';
+    else if (i < steps.length - 1) html += '<div class="fa-conv"><span class="aw">→</span>' + convs[i] + '</div>';
   });
   const el = document.getElementById('fa-funnel'); if (el) el.innerHTML = html;
 }
 
+function faMetricCells(r) {
+  return '<td class="mono">' + faMoney(r.gasto_ars) + '</td>' +
+    '<td class="mono">' + (r.leads || 0) + '</td>' +
+    '<td>' + faPill(faSem(r.cpl, 2500, 4000, true), r.cpl == null ? '—' : faMoney(r.cpl)) + '</td>' +
+    '<td class="mono">' + (r.presup || 0) + '</td>' +
+    '<td>' + faPill(faSem(r.lp, .40, .25), faPct(r.lp)) + '</td>' +
+    '<td class="mono">' + (r.ventas || 0) + '</td>' +
+    '<td>' + faPill(faSem(r.pv, .06, .04), faPct(r.pv)) + '</td>' +
+    '<td>' + faPill(faSem(r.cac, 100000, 180000, true), r.cac == null ? '—' : faMoney(r.cac)) + '</td>' +
+    '<td>' + faPill(faSem(r.roas, 4, 2.5), faX(r.roas)) + '</td>';
+}
+
 function renderFaTable(d) {
   const tb = document.getElementById('fa-tbody'); if (!tb) return;
+  const open = funnelState.open;
   let html = '';
-  d.rows.forEach(r => {
-    const L = FA_VLABEL[r.vertical] || { name: r.vertical, tag: '' };
-    const cpl = faSem(r.cpl, 2500, 4000, true), lp = faSem(r.lp, .40, .25), pv = faSem(r.pv, .06, .04), cac = faSem(r.cac, 100000, 180000, true), roas = faSem(r.roas, 4, 2.5);
-    const pill = (cls, txt) => cls ? '<span class="fa-pill ' + cls + ' mono">' + txt + '</span>' : '<span class="mono">' + txt + '</span>';
-    html += '<tr>' +
-      '<td class="camp">' + L.name + '<span class="tag">' + L.tag + '</span></td>' +
-      '<td class="mono">' + faMoney(r.gasto_ars) + '</td>' +
-      '<td class="mono">' + (r.leads || 0) + '</td>' +
-      '<td>' + pill(cpl, r.cpl == null ? '—' : faMoney(r.cpl)) + '</td>' +
-      '<td class="mono">' + (r.presup || 0) + '</td>' +
-      '<td>' + pill(lp, faPct(r.lp)) + '</td>' +
-      '<td class="mono">' + (r.ventas || 0) + '</td>' +
-      '<td>' + pill(pv, faPct(r.pv)) + '</td>' +
-      '<td>' + pill(cac, r.cac == null ? '—' : faMoney(r.cac)) + '</td>' +
-      '<td>' + pill(roas, r.roas == null ? '—' : (r.roas.toFixed(1).replace('.', ',') + '×')) + '</td>' +
-      '</tr>';
+  (d.rows || []).forEach(r => {
+    const tipo = r.tipo === 'corporeas' ? 'Corpóreas · todas las campañas' : r.tipo === 'formulario' ? 'Formulario' : 'WhatsApp / IG';
+    const estado = r.key === 'sin_campana' ? '' : r.activa ? '<span class="fa-chip"><span class="fa-dot good"></span>activa</span>'
+      : (r.ultimo_gasto ? '<span class="fa-chip"><span class="fa-dot off"></span>sin gasto desde ' + faFecha(r.ultimo_gasto) + '</span>' : '');
+    const auto = r.via === 'nombre' ? '<span class="fa-chip auto" title="Clasificada sola por el nombre. Confirmala en Para revisar.">nueva · automática</span>' : '';
+    const sd = r.sin_detalle ? '<span class="fa-chip" title="Algún día sin detalle por anuncio: el gasto va a la campaña.">sin detalle</span>' : '';
+    const hasAds = (r.ads || []).length > 0;
+    const k = escapeHtml(r.key);
+    html += '<tr class="fa-row" data-fa-row="' + k + '"><td class="camp"><span class="chev">' + (hasAds ? (open[r.key] ? '▾' : '▸') : '') + '</span>' + escapeHtml(r.nombre) +
+      '<span class="tag">' + tipo + ' ' + estado + ' ' + auto + ' ' + sd + '</span></td>' + faMetricCells(r) + '</tr>';
+    if (open[r.key]) {
+      (r.ads || []).forEach(a => {
+        const sub = [a.conjunto, a.campana].filter(Boolean).map(escapeHtml).join(' · ');
+        html += '<tr class="fa-ad" title="Anuncio ' + escapeHtml(a.ad_id) + '"><td class="camp">' + (a.activo ? '<span class="fa-dot good" title="activo"></span> ' : '<span class="fa-dot off" title="sin gasto ayer/hoy"></span> ') + escapeHtml(a.nombre) +
+          (sub ? '<span class="tag">' + sub + '</span>' : '') + '</td>' + faMetricCells(a) + '</tr>';
+      });
+    }
   });
+  if (!(d.rows || []).length) html = '<tr><td colspan="10" style="text-align:center;color:var(--fa-mut);padding:18px">Sin gasto ni leads de pauta en el período.</td></tr>';
   const t = d.total;
   html += '<tr class="tot"><td>TOTAL</td>' +
     '<td class="mono">' + faMoney(t.gasto_ars) + '</td><td class="mono">' + (t.leads || 0) + '</td>' +
     '<td class="mono">' + (t.cpl == null ? '—' : faMoney(t.cpl)) + '</td><td class="mono">' + (t.presup || 0) + '</td>' +
     '<td class="mono">' + faPct(t.lp) + '</td><td class="mono">' + (t.ventas || 0) + '</td>' +
     '<td class="mono">' + faPct(t.pv) + '</td><td class="mono">' + (t.cac == null ? '—' : faMoney(t.cac)) + '</td>' +
-    '<td class="mono">' + (t.roas == null ? '—' : (t.roas.toFixed(1).replace('.', ',') + '×')) + '</td></tr>';
+    '<td class="mono">' + faX(t.roas) + '</td></tr>';
   tb.innerHTML = html;
 }
 
+function renderFaVend(d) {
+  const tb = document.getElementById('fa-vbody'); if (!tb) return;
+  const vs = d.vendedores || [];
+  let html = vs.map(v => '<tr><td class="camp">' + escapeHtml(v.nombre) + '</td>' +
+    '<td class="mono">' + (v.leads || 0) + '</td>' +
+    '<td class="mono">' + faMoney(v.costo_leads) + '</td>' +
+    '<td class="mono">' + (v.presup_pauta || 0) + '</td>' +
+    '<td>' + faPill(faSem(v.lp, .40, .25), faPct(v.lp)) + '</td>' +
+    '<td class="mono">' + (v.oc_pauta || 0) + '</td>' +
+    '<td class="mono">' + (v.ventas_pauta || 0) + '</td>' +
+    '<td>' + faPill(faSem(v.cierre, .06, .04), faPct(v.cierre)) + '</td>' +
+    '<td class="mono">' + faMoney(v.ingresos_pauta) + '</td>' +
+    '<td>' + faPill(faSem(v.roas, 4, 2.5), faX(v.roas)) + '</td>' +
+    '<td class="mono">' + (v.ventas_total || 0) + '</td>' +
+    '<td class="mono">' + faMoney(v.ingresos_total) + '</td></tr>').join('');
+  if (!vs.length) html = '<tr><td colspan="12" style="text-align:center;color:var(--fa-mut);padding:18px">Sin datos de vendedores en el período.</td></tr>';
+  tb.innerHTML = html;
+  const cap = document.getElementById('fa-vendcap');
+  if (cap) cap.textContent = 'Leads, presupuestos, OC, ventas e ingresos de pauta; a la derecha, el total del vendedor (pauta + orgánico).' + (d.otros_leads ? ' ' + d.otros_leads + ' leads de pauta están hoy en otras bandejas (cursos/oculto) y no cuentan para nadie.' : '');
+}
+
 function renderFaMix(d) {
-  const m = d.mix || {};
-  const items = FA_MIX.map(x => [x[1], m[x[0]] || 0, x[2]]).filter(x => x[1] > 0);
+  let pi = 0;
+  const items = (d.mix || []).map(x => [x.label, x.n, x.pauta ? FA_PAUTA_COLORS[(pi++) % FA_PAUTA_COLORS.length] : (FA_ORG_COLOR[x.key] || '#7A7291'), x.ingresos]);
   const tot = items.reduce((a, x) => a + x[1], 0) || 1;
   const bar = document.getElementById('fa-mixbar'), leg = document.getElementById('fa-mixleg');
-  if (bar) bar.innerHTML = items.map(x => { const w = x[1] / tot * 100; return '<span style="background:' + x[2] + ';flex:' + x[1] + ' 0 0" title="' + x[0] + ': ' + x[1] + '">' + (w > 7 ? x[1] : '') + '</span>'; }).join('');
-  if (leg) leg.innerHTML = items.map(x => '<span class="li"><span class="sw" style="background:' + x[2] + '"></span>' + x[0] + ' · <b>' + x[1] + '</b></span>').join('');
+  if (bar) bar.innerHTML = items.map(x => { const w = x[1] / tot * 100; return '<span style="background:' + x[2] + ';flex:' + x[1] + ' 0 0" title="' + escapeHtml(x[0]) + ': ' + x[1] + ' · ' + faMoney(x[3]) + '">' + (w > 7 ? x[1] : '') + '</span>'; }).join('');
+  if (leg) leg.innerHTML = items.map(x => '<span class="li"><span class="sw" style="background:' + x[2] + '"></span>' + escapeHtml(x[0]) + ' · <b>' + x[1] + '</b> <span style="color:var(--fa-fnt)">' + faMoney(x[3]) + '</span></span>').join('');
   const cap = document.getElementById('fa-mixcap');
-  if (cap) cap.textContent = 'Trazabilidad real de las ' + tot + ' ventas del período, cada una a su origen con data dura.';
+  if (cap) cap.textContent = 'Las ' + (items.length ? tot : 0) + ' ventas del período, cada una con su origen.';
+}
+
+function renderFaRev(d) {
+  const el = document.getElementById('fa-rev'); if (!el) return;
+  const rv = d.revisar || {};
+  const VIA = { panel: 'marcada por vos', confirmada: 'confirmada', ruteo: 'según el ruteo', nombre: 'automática por el nombre', 'sin señales': 'no se pudo identificar' };
+  let h = '';
+  const camps = rv.campanas || [];
+  if (camps.length) {
+    h += '<h3>Campañas del período y cómo cuentan</h3>';
+    camps.forEach(c => {
+      const id = escapeHtml(c.campaign_id);
+      const cuenta = c.clase === 'carteles' ? '<b style="color:var(--fa-good)">Carteles</b>' : c.clase === 'cursos' ? '<b style="color:var(--fa-mut)">Cursos (no cuenta)</b>' : '<b style="color:var(--fa-warn)">Sin clasificar (no cuenta)</b>';
+      const chip = '<span class="fa-chip' + (c.via === 'nombre' || c.via === 'sin señales' ? ' auto' : '') + '">' + (VIA[c.via] || escapeHtml(c.via)) + '</span>';
+      let acts = '';
+      if (c.clase === 'carteles' && c.via !== 'panel' && c.via !== 'confirmada') acts += '<button class="fa-btn pri" data-fa-cv="' + id + '" data-fa-v="carteles">✓ Es de carteles</button>';
+      if (c.clase !== 'cursos') acts += '<button class="fa-btn" data-fa-cv="' + id + '" data-fa-v="cursos">Es de cursos</button>';
+      if (c.clase !== 'carteles') acts += '<button class="fa-btn" data-fa-cv="' + id + '" data-fa-v="carteles">Es de carteles</button>';
+      if (c.via === 'panel') acts += '<button class="fa-btn" data-fa-cv="' + id + '" data-fa-v="">Volver a automático</button>';
+      h += '<div class="it"><div class="q"><b>' + escapeHtml(c.nombre || ('Campaña ' + c.campaign_id)) + '</b> ' + chip +
+        '<small>' + faMoney(c.gasto_ars) + ' de gasto · ' + (c.leads || 0) + ' leads de todos sus anuncios · cuenta como ' + cuenta + '</small></div><div class="acts">' + acts + '</div></div>';
+    });
+  }
+  const vs = rv.ventas || [];
+  if (vs.length) {
+    const sum = vs.reduce((a, v) => a + (v.monto || 0), 0);
+    h += '<h3>Ventas sin trazar o mal cargadas · ' + vs.length + ' · ' + faMoney(sum) + '</h3>';
+    vs.forEach(v => {
+      h += '<div class="it"><div class="q"><b>' + escapeHtml(v.cartel || '(sin nombre)') + '</b> · ' + faMoney(v.monto) + ' · ' + escapeHtml(faFecha(v.fecha)) + (v.numero ? ' · #' + escapeHtml(v.numero) : '') + (v.vendedor ? ' · ' + escapeHtml(v.vendedor) : '') +
+        '<small>' + escapeHtml(v.motivo) + (v.primer ? ' Primer mensaje: «' + escapeHtml(v.primer) + '»' : '') + (v.telefono ? ' · Tel: ' + escapeHtml(v.telefono) : '') + '</small></div></div>';
+    });
+  }
+  if (!h) h = '<div style="color:var(--fa-mut);font-size:13px;padding:8px 0">Nada para revisar en el período.</div>';
+  el.innerHTML = h;
 }
 
 // tooltips del panel (popover reusable)
@@ -14749,16 +14853,52 @@ function faBindTips() {
   if (!funnelState._popDoc) { funnelState._popDoc = true; document.addEventListener('click', (e) => { if (!e.target.closest('.fa-i') && !e.target.closest('.fa-pop')) hide(); }); }
 }
 
+async function faMarcarCampana(btn) {
+  const cid = btn.getAttribute('data-fa-cv'), v = btn.getAttribute('data-fa-v');
+  btn.disabled = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/ads/campaign-vertical', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ campaign_id: cid, vertical: v }) });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    toast(v ? 'Listo: la campaña cuenta como ' + v : 'Listo: vuelve a la clasificación automática');
+    loadFunnelAds(true);
+  } catch (e) { btn.disabled = false; toast('No se pudo guardar: ' + e.message); }
+}
+
+async function faTraerGasto(btn) {
+  const st = funnelState; if (st.syncing) return;
+  const [since, until] = faRange(st.period);
+  st.syncing = true; btn.disabled = true; btn.textContent = 'Trayendo gasto…';
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/ads/spend-sync', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ since, until }) });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    toast('Gasto de Meta actualizado');
+    loadFunnelAds(true);
+  } catch (e) { toast('Meta no respondió: ' + e.message); }
+  st.syncing = false; btn.disabled = false; btn.textContent = '↻ Traer gasto de Meta';
+}
+
 function bindFunnelAds() {
+  const st = funnelState;
   const seg = document.getElementById('fa-period');
   if (seg) seg.addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
-    funnelState.period = b.getAttribute('data-fa-p');
+    st.period = b.getAttribute('data-fa-p'); st.open = {};
     seg.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
     loadFunnelAds();
   });
   const rate = document.getElementById('fa-rate');
-  if (rate) rate.addEventListener('change', () => { const v = parseFloat(rate.value) || 1400; funnelState.rate = v; loadFunnelAds(); });
+  if (rate) rate.addEventListener('change', () => { st.rate = parseFloat(rate.value) || 1400; loadFunnelAds(); });
+  const wrap = document.getElementById('fa-wrap');
+  if (wrap) wrap.addEventListener('click', (e) => {
+    if (e.target.closest('.fa-i')) return;
+    const cv = e.target.closest('[data-fa-cv]'); if (cv) { faMarcarCampana(cv); return; }
+    const sy = e.target.closest('[data-fa-sync]'); if (sy) { faTraerGasto(sy); return; }
+    if (e.target.closest('[data-fa-retry]')) { loadFunnelAds(true); return; }
+    const row = e.target.closest('tr[data-fa-row]');
+    if (row && st.data) { const k = row.getAttribute('data-fa-row'); st.open[k] = !st.open[k]; renderFaTable(st.data); }
+  });
   loadFunnelAds();
 }
 window.renderFunnelAds = renderFunnelAds;
