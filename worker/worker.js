@@ -5186,6 +5186,7 @@ function corteMismaPersona(a, b) {
 let _corteHojaSchemaOk = false;
 async function ensureCorteHojaSchema(env) {
   if (_corteHojaSchemaOk) return;
+  try { await env.DB.prepare('SELECT hoja_cliente, hoja_fila, hoja_fecha FROM corte_pedidos LIMIT 0').all(); _corteHojaSchemaOk = true; return; } catch (_) {} // ya existen → sin ALTER
   for (const c of ['hoja_cliente TEXT', 'hoja_fila INTEGER', 'hoja_fecha TEXT']) { try { await env.DB.prepare('ALTER TABLE corte_pedidos ADD COLUMN ' + c).run(); } catch (_) {} }
   _corteHojaSchemaOk = true;
 }
@@ -5490,6 +5491,17 @@ function corteEstimarPaquete(items) {
 let _corteDespSchemaOk = false;
 async function ensureCorteDespachoSchema(env) {
   if (_corteDespSchemaOk) return true;
+  // Camino rápido (12-oct): si todo ya existe, UNA sola ida a la base. Antes cada isolate nuevo (pasa seguido) corría ~25
+  // ALTER/CREATE en fila que fallaban por "ya existe": 5-10 s de espera en cada carga de logística/etiquetas.
+  try {
+    const rs = await env.DB.batch([
+      env.DB.prepare('SELECT despachado_at, entregado_at, entregado_por, entrega_manual, pago_metodo, pago_manual_por, pago_manual_at, pago_nota FROM corte_pedidos LIMIT 0'),
+      env.DB.prepare('SELECT numero, contacto_estado, contacto_at, intentos, envio_pagado, envio_pagado_at, envio_pagado_por, despachado_at, aviso_at, aviso_nc_at FROM corte_paquetes LIMIT 0'),
+      env.DB.prepare('SELECT id, tanda_id, cliente_key, ts, accion, nota, operador, usuario FROM logistica_log LIMIT 0'),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name IN ('uq_corte_paquetes_numero','idx_logistica_log_paq','idx_corte_pedidos_pago')"),
+    ]);
+    if (((rs[3] && rs[3].results && rs[3].results[0]) || {}).n === 3) { _corteDespSchemaOk = true; return true; }
+  } catch (_) {} // falta algo → camino lento de abajo (crea lo que falte)
   await ensureCortePaquetesSchema(env);
   for (const c of ['despachado_at TEXT', 'entregado_at TEXT', 'entregado_por TEXT', 'entrega_manual INTEGER DEFAULT 0', 'pago_metodo TEXT', 'pago_manual_por TEXT', 'pago_manual_at TEXT', 'pago_nota TEXT']) {
     try { await env.DB.prepare('ALTER TABLE corte_pedidos ADD COLUMN ' + c).run(); } catch (_) {} // tira si ya existe
@@ -5931,6 +5943,15 @@ let _logiTablaSchemaOk = false;
 async function ensureLogiTablaSchema(env) {
   if (_logiTablaSchemaOk) return true;
   if (!(await ensureCorteDespachoSchema(env))) return false;
+  // Camino rápido: si ya existe todo, una sola ida a la base (ver ensureCorteDespachoSchema).
+  try {
+    const rs = await env.DB.batch([
+      env.DB.prepare('SELECT transporte, transporte_conf, envio_costo, seguimiento FROM corte_paquetes LIMIT 0'),
+      env.DB.prepare('SELECT cliente_key, texto_fuente, texto_hash, ia_json, ia_at, edit_json, edit_por, edit_at, edit_hash FROM corte_direcciones LIMIT 0'),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name='idx_corte_paquetes_cliente'"),
+    ]);
+    if (((rs[2] && rs[2].results && rs[2].results[0]) || {}).n === 1) { _logiTablaSchemaOk = true; return true; }
+  } catch (_) {}
   for (const c of ['transporte TEXT', 'transporte_conf INTEGER DEFAULT 0', 'envio_costo INTEGER', 'seguimiento TEXT']) {
     try { await env.DB.prepare('ALTER TABLE corte_paquetes ADD COLUMN ' + c).run(); } catch (_) {} // tira si ya existe
   }
