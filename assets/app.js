@@ -15526,7 +15526,7 @@ function rdVendedorHtml(v, mes) {
     <div class="rd-grid2">
       <div class="rd-card"><h2>Tu embudo del mes</h2><div class="cap">De las consultas que te llegaron, cuántas recibieron presupuesto, orden de compra y cuántas compraron.</div>
         <div class="rd-funnel">${step('Consultas', a.consultas)}${conv(a.conv_presup)}${step('Presupuestos', a.presup_clientes)}${conv(a.conv_oc)}${step('Órdenes de compra', a.oc)}${conv(a.presup_clientes ? a.pedidos / a.presup_clientes : null)}${step('Ventas', a.pedidos)}</div>
-        <div class="rd-leg"><span>Presupuestos mandados: <b>${a.presupuestos}</b> (${a.presup_neon} neón · ${a.presup_corp} corpóreo)</span><span>Mes pasado: ${p.consultas} consultas · ${p.presup_clientes} con presupuesto · ${p.pedidos} ventas</span></div>
+        <div class="rd-leg"><span>Consultas: <b>${a.consultas_wa || 0}</b> por WhatsApp · <b>${a.consultas_ig || 0}</b> por Instagram</span><span>Presupuestos mandados: <b>${a.presupuestos}</b> (${a.presup_neon} neón · ${a.presup_corp} corpóreo)</span><span>Mes pasado: ${p.consultas} consultas · ${p.presup_clientes} con presupuesto · ${p.pedidos} ventas</span></div>
       </div>
       <div class="rd-card"><h2>Tiempo de respuesta</h2><div class="cap">Desde que el bot te pasa el lead con todos los datos ("Para cotizar") hasta que le escribís. En horas hábiles (lunes a sábado de 9 a 21).</div>
         <div class="rd-kpis" style="margin:0">
@@ -15582,7 +15582,7 @@ function rdCompararHtml(d) {
         <span>Neones</span><span class="mono">${a.neones} · ${a.ticket_neon != null ? rdCorto(a.ticket_neon) : '—'} c/u</span>
         <span>Corpóreos</span><span class="mono">${a.corporeos} · ${a.ticket_corp != null ? rdCorto(a.ticket_corp) : '—'} c/u</span>
         <span>Pedidos</span><span class="mono">${a.pedidos}</span>
-        <span>Consultas recibidas</span><span class="mono">${a.consultas}</span>
+        <span>Consultas recibidas</span><span class="mono">${a.consultas} <span class="rd-ref">(${a.consultas_ig || 0} IG)</span></span>
         <span>Consulta → venta</span><span class="mono">${a.consultas ? rdPct(a.pedidos / a.consultas) : '—'}</span>
         <span>Respuesta (lo normal)</span><span class="mono">${rdHoras(a.resp_mediana_h)}</span>
         <span>Para cotizar sin responder</span><span class="mono">${(v.ahora.para_cotizar || []).length}</span>
@@ -15592,7 +15592,7 @@ function rdCompararHtml(d) {
   const leg = `<div class="rd-leg">${vs.map(v => `<span><span class="rd-sw" style="background:${rdColor(v.slug)}"></span>${escapeHtml(v.nombre)}</span>`).join('')}</div>`;
   const fila = (lab, f) => `<tr><td>${lab}</td>${vs.map(v => `<td class="mono">${f(v)}</td>`).join('')}</tr>`;
   return `
-    <div class="rd-note">Los montos de Facu y Agus van sin el 5% que les suma el cotizador, para comparar parejo. La meta se mide contra lo que facturó cada uno de verdad. Las consultas se le cuentan al que la recibió; los presupuestos y las OC al que los mandó; la venta al que la cerró.</div>
+    <div class="rd-note">Los montos de Facu y Agus van sin el 5% que les suma el cotizador, para comparar parejo. La meta se mide contra lo que facturó cada uno de verdad. Las consultas (WhatsApp + Instagram, sin lo de cursos) se le cuentan al que la recibió; los presupuestos y las OC al que los mandó; la venta al que la cerró.</div>
     <div class="rd-vcards">${cards}</div>
     <div class="rd-grid2">
       <div class="rd-card"><h2>Conversión por etapa</h2><div class="cap">Qué % pasa de un paso al siguiente. Compará % y no totales: Facu y Agus reciben menos consultas por el regulador.</div>
@@ -15608,6 +15608,7 @@ function rdCompararHtml(d) {
     <div class="rd-card" style="margin-top:14px"><h2>Detalle</h2><div class="rd-tblw"><table class="rd-tbl">
       <thead><tr><th></th>${vs.map(v => `<th>${escapeHtml(v.nombre)}</th>`).join('')}</tr></thead><tbody>
       ${fila('Consultas recibidas', v => v.actual.consultas)}
+      ${fila('· por WhatsApp / Instagram', v => (v.actual.consultas_wa || 0) + ' / ' + (v.actual.consultas_ig || 0))}
       ${fila('Presupuestos mandados', v => `${v.actual.presupuestos} <span class="rd-ref">(${v.actual.presup_clientes} clientes)</span>`)}
       ${fila('· de corpóreo', v => v.actual.presup_corp)}
       ${fila('Órdenes de compra', v => v.actual.oc)}

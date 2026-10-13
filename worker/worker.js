@@ -9333,10 +9333,11 @@ async function kpiMesVendedores(env, mes) {
   const since = mes + '-01', untilEx = kpiMesMas(mes, 1) + '-01';
   const sinceUTC = since + 'T03:00:00Z', untilExUTC = untilEx + 'T03:00:00Z';
   const q = async (sql, ...b) => { try { return (await env.DB.prepare(sql).bind(...b).all()).results || []; } catch (_) { return []; } };
-  const [consR, presR, ocR, venR, respR] = await Promise.all([
-    // Consultas nuevas: primer mensaje de su vida en el mes, de carteles (sin cursos/oculto/privado/corte,
-    // internos, revendedores ni registros de cursos). primero = 1er cambio de dueño registrado.
-    q(`WITH fi AS (SELECT phone FROM wa_messages WHERE direction = 'inbound' AND msg_type != 'status' AND (channel IS NULL OR channel = 'wa') AND ts >= ? AND ts < ? GROUP BY phone)
+  // Consultas nuevas: primer mensaje de su vida en el mes, de carteles (sin cursos/oculto/privado/corte,
+  // internos, revendedores ni registros de cursos). primero = 1er cambio de dueño registrado. Instagram va
+  // aparte y sin lo de cursos: la mayoría de los chats nuevos de IG son el botón "Quiero el regalo" del embudo
+  // de cursos (sep: ~1.200 de ~1.580) o preguntan por cursos/clases.
+  const consSql = (ig) => `WITH fi AS (SELECT phone FROM wa_messages WHERE direction = 'inbound' AND msg_type != 'status' AND ${ig ? "channel = 'ig'" : "(channel IS NULL OR channel = 'wa')"} AND ts >= ? AND ts < ? GROUP BY phone)
        SELECT fi.phone, COALESCE(s.assigned_to, '') asg, COALESCE(s.inbox, '') inbox,
               (SELECT l.via || '|' || IFNULL(l.from_asg, '') || '|' || IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = fi.phone AND l.via NOT LIKE 'auto_%' ORDER BY l.ts ASC LIMIT 1) primero
          FROM fi LEFT JOIN wa_chats_summary s ON s.phone = fi.phone
@@ -9345,10 +9346,14 @@ async function kpiMesVendedores(env, mes) {
           AND fi.phone NOT IN (SELECT phone FROM reventa_leads)
           AND fi.phone NOT IN (SELECT phone FROM lanzamiento_landing)
           AND fi.phone NOT IN (SELECT phone FROM minicurso_landing)
-          AND fi.phone NOT IN (SELECT a.phone FROM wa_ad_attributions a JOIN wa_ad_verticals v ON v.ad_id = a.source_id WHERE v.vertical = 'cursos')`, sinceUTC, untilExUTC, sinceUTC),
+          AND fi.phone NOT IN (SELECT a.phone FROM wa_ad_attributions a JOIN wa_ad_verticals v ON v.ad_id = a.source_id WHERE v.vertical = 'cursos')` +
+    (ig ? " AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'inbound' AND (m.body LIKE '%Quiero el regalo%' OR lower(m.body) LIKE '%curso%' OR lower(m.body) LIKE '%clase%' OR lower(m.body) LIKE '%aprender%' OR lower(m.body) LIKE '%inscrib%'))" : '');
+  const [consR, consIgR, presR, ocR, venR, respR] = await Promise.all([
+    q(consSql(false), sinceUTC, untilExUTC, sinceUTC),
+    q(consSql(true), sinceUTC, untilExUTC, sinceUTC),
     // Quién lo mandó: enviado_por (desde el 12-oct); antes, el sender_name del mensaje del presupuesto (la imagen
     // "Te comparto el presupuesto" guarda al vendedor logueado), y si no, comercial_id (se mueve con el lead).
-    q(`SELECT b.cliente_wa_id ph, IFNULL(b.comercial_id, '') com, IFNULL(b.enviado_por, '') por, IFNULL(b.tipo, '') tipo,
+    q(`SELECT b.id, b.cliente_wa_id ph, IFNULL(b.comercial_id, '') com, IFNULL(b.enviado_por, '') por, IFNULL(b.tipo, '') tipo,
               (SELECT m.sender_name FROM wa_messages m WHERE m.phone = b.cliente_wa_id AND m.direction = 'outbound' AND IFNULL(m.sender_name, '') != ''
                   AND m.ts >= strftime('%Y-%m-%dT%H:%M:%S', b.enviado_at, '-20 minutes') AND m.ts <= strftime('%Y-%m-%dT%H:%M:%S', b.enviado_at, '+20 minutes') ORDER BY m.ts DESC LIMIT 1) msg_por
          FROM briefs b WHERE b.estado = 'enviado' AND b.enviado_at >= ? AND b.enviado_at < ?`, sinceUTC, untilExUTC),
@@ -9361,18 +9366,21 @@ async function kpiMesVendedores(env, mes) {
         WHERE p.completed_at >= ? AND p.completed_at < ? AND COALESCE(s.inbox, '') NOT IN ('cursos', 'oculto', 'privado', 'corte')`, sinceUTC, untilExUTC),
   ]);
   const out = {};
-  for (const v of KPI_VENDEDORES) out[v.slug] = { consultas: 0, presupuestos: 0, presup_neon: 0, presup_corp: 0, presup_clientes: 0, oc: 0, pedidos: 0, neones: 0, corporeos: 0, monto_neon: 0, monto_corp: 0, resp_n: 0, resp_2h: 0, sin_resp: 0, _resp: [], _cli: new Set(), _ped: new Set() };
-  for (const r of consR) {
-    if (KPI_BANDEJAS_FUERA.includes(r.inbox)) continue;
-    let rec;
-    if (r.primero) { const [via, fr, to] = String(r.primero).split('|'); rec = via === 'reparto' ? to : (fr || 'joaco'); }
-    else rec = r.asg || 'joaco';
-    const o = out[funnelVendedor(rec)]; if (o) o.consultas++;
-  }
+  for (const v of KPI_VENDEDORES) out[v.slug] = { consultas: 0, consultas_wa: 0, consultas_ig: 0, presupuestos: 0, presup_neon: 0, presup_corp: 0, presup_clientes: 0, oc: 0, pedidos: 0, neones: 0, corporeos: 0, monto_neon: 0, monto_corp: 0, resp_n: 0, resp_2h: 0, sin_resp: 0, _resp: [], _cli: new Set(), _ped: new Set() };
+  const contar = (rows, campo) => {
+    for (const r of rows) {
+      if (KPI_BANDEJAS_FUERA.includes(r.inbox)) continue;
+      let rec;
+      if (r.primero) { const [via, fr, to] = String(r.primero).split('|'); rec = via === 'reparto' ? to : (fr || 'joaco'); }
+      else rec = r.asg || 'joaco';
+      const o = out[funnelVendedor(rec)]; if (o) { o[campo]++; o.consultas++; }
+    }
+  };
+  contar(consR, 'consultas_wa'); contar(consIgR, 'consultas_ig');
   for (const r of presR) {
     const o = out[adhocSenderSlug(r.por) || adhocSenderSlug(r.msg_por) || funnelVendedor(r.com) || 'joaco']; if (!o) continue;
     o.presupuestos++; if (r.tipo === 'corporea') o.presup_corp++; else o.presup_neon++;
-    if (r.ph) o._cli.add(r.ph);
+    o._cli.add(r.ph || ("brief:" + r.id)); // IG: el brief no guarda el teléfono → cada uno cuenta como un cliente
   }
   for (const r of ocR) { const o = out[funnelVendedor(r.vendedor) || 'joaco']; if (o) o.oc++; }
   for (const r of venR) {
@@ -9461,7 +9469,7 @@ async function kpiMeta(env, slug, mes) {
 // Mes cerrado → se guarda 12 h en kv_cache (no cambia); el mes en curso se calcula siempre.
 async function kpiMesCacheado(env, mes) {
   if (mes >= kpiMesAR()) return kpiMesVendedores(env, mes);
-  const k = 'kpi_mes:v2:' + mes; // subir la versión si cambia el cálculo (invalida los meses guardados)
+  const k = 'kpi_mes:v3:' + mes; // subir la versión si cambia el cálculo (invalida los meses guardados)
   try {
     const r = await env.DB.prepare('SELECT v, updated_at FROM kv_cache WHERE k = ?').bind(k).first();
     if (r && Date.now() - Date.parse(r.updated_at) < 12 * 3600e3) return JSON.parse(r.v);
