@@ -2072,6 +2072,7 @@ function mapPedidoFromD1(row) {
     comercial_id: row.comercial_id || 'joaco',
     origen: row.origen || '',
     cargadoPor: row.cargado_por || '',
+    asistidoPor: row.asistido_por || '', // venta que cerró el equipo (no suma en el panel de rendimiento)
     mirrorError: row.mirror_error || '',
     // Corpóreos (letras 3D): flag + specs de producción propios.
     esCorporeo: row.es_corporeo || 0,
@@ -11594,6 +11595,7 @@ function openDrawerPedido(idx) {
             <div style="flex:1"><label style="${lblD}">Pagado</label><input id="ped-edit-pagado" type="number" value="${p.pagado||''}" style="${inpD}"></div>
           </div>
           <div><label style="${lblD}">Productor</label><input id="ped-edit-productor" value="${escapeHtml(p.productor||'')}" placeholder="quién lo produce (lo cargás vos)" style="${inpD}"></div>
+          ${isAdmin() ? `<div><label style="${lblD}">¿La cerró el equipo? (no suma en el panel de rendimiento del vendedor)</label><select id="ped-edit-asistido" style="${inpD}">${[['', 'No, la cerró el vendedor'], ['bruno', 'Sí, la cerró Bruno'], ['equipo', 'Sí, la cerró el equipo']].map(([k, l]) => `<option value="${k}" ${(p.asistidoPor || '') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
         </div>
       </div>
       <div class="drawer-section">
@@ -11779,7 +11781,8 @@ async function savePedidoEdit(idx) {
     estado_pedido: document.getElementById('ped-edit-estadopedido')?.value,
     estado_pago:   document.getElementById('ped-edit-estadopago')?.value,
     pagado:        document.getElementById('ped-edit-pagado')?.value,
-    productor:     document.getElementById('ped-edit-productor')?.value
+    productor:     document.getElementById('ped-edit-productor')?.value,
+    asistido_por:  isAdmin() ? document.getElementById('ped-edit-asistido')?.value : undefined
   };
   const btn = document.getElementById('ped-edit-save');
   if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
@@ -15369,11 +15372,12 @@ function rdProyeccion(valor, mes) {
   if (!faIsCurrentMonth(mes)) return null;
   const dia = parseInt(faToday().slice(8, 10), 10), y = +mes.slice(0, 4), m = +mes.slice(5, 7);
   const dias = new Date(y, m, 0).getDate();
-  return dia ? valor / dia * dias : null;
+  return dia >= 5 ? valor / dia * dias : null; // los primeros días la proyección es puro ruido
 }
 // Comparación con el mes anterior: en el mes en curso solo se muestra la referencia (comparar 12 días contra 30 engaña).
 function rdVsAnt(cur, ant, mes, fmt) {
   const f = fmt || (x => String(x));
+  if (cur == null || ant == null) return '<span class="rd-ref">mes pasado: —</span>';
   if (faIsCurrentMonth(mes) || !ant) return `<span class="rd-ref">mes pasado: ${f(ant || 0)}</span>`;
   const d = (cur - ant) / ant;
   return `<span class="rd-delta ${d >= 0 ? 'up' : 'down'}">${d >= 0 ? '▲' : '▼'} ${Math.abs(Math.round(d * 100))}%</span> <span class="rd-ref">vs ${f(ant)}</span>`;
@@ -15492,9 +15496,25 @@ function rdPintar(d, vend) {
   bindRendimientoBody();
 }
 
+// --- Tasas por COHORTE (auditoría 13-oct): de las consultas que entraron en el mes, cuántas llegaron a cada paso,
+// contando solo las que ya tuvieron el plazo (2 semanas para el presupuesto, 30 días para la compra). Si el mes
+// todavía no maduró (menos de RD_MIN_MADURAS), se muestra la del mes anterior y se avisa de qué mes es.
+const RD_MIN_MADURAS = 10;
+function rdMesMas(mes, n) { let y = +mes.slice(0, 4), m = +mes.slice(5, 7) + n; while (m < 1) { m += 12; y--; } while (m > 12) { m -= 12; y++; } return y + '-' + String(m).padStart(2, '0'); }
+function rdMesNombre(mes) { const m = +String(mes).slice(5, 7); return String(FA_MES[m - 1] || mes).toLowerCase(); }
+function rdTasa(a, p, num, den, mes) {
+  if ((a[den] || 0) >= RD_MIN_MADURAS) return { v: (a[num] || 0) / a[den], n: a[den], de: rdMesNombre(mes), propio: true };
+  if (p && (p[den] || 0) >= RD_MIN_MADURAS) return { v: (p[num] || 0) / p[den], n: p[den], de: rdMesNombre(rdMesMas(mes, -1)), propio: false };
+  return { v: null, n: 0, de: '', propio: false };
+}
+function rdTasaTxt(t, unidad) {
+  if (t.v == null) return '<span class="rd-ref">todavía sin datos (hacen falta 2 semanas o 30 días de plazo)</span>';
+  return `<b class="mono">${rdPct(t.v)}</b> <span class="rd-ref">(${t.n} ${unidad}${t.propio ? '' : ', de ' + t.de + ': este mes todavía no maduró'})</span>`;
+}
+
 // --- Panel de UN vendedor (lo que ve él; Gaspar lo ve igual desde la pestaña del vendedor) ---
 function rdVendedorHtml(v, mes) {
-  const a = v.actual, p = v.anterior, h = v.ahora;
+  const a = v.actual, p = v.anterior, h = v.ahora, ap = a.aparte || {};
   const fact = a.facturado, meta = v.meta || 0;
   const proy = rdProyeccion(fact, mes);
   const pct = meta ? Math.min(100, fact / meta * 100) : 0;
@@ -15505,48 +15525,72 @@ function rdVendedorHtml(v, mes) {
       <div class="foot">${fact >= meta ? 'Meta cumplida 🎉' : 'Te faltan ' + fmtMoney(meta - fact)}${proy != null ? ' · a este ritmo cerrás el mes en ' + fmtMoney(proy) : ''}${diaPct != null ? ' · la rayita marca en qué día del mes estamos' : ''}</div>`
     : `<div class="row"><span class="big mono">${fmtMoney(fact)}</span><span class="rd-ref">facturado en el mes</span></div>
       <div class="foot">${proy != null ? 'A este ritmo cerrás el mes en ' + fmtMoney(proy) + ' · ' : ''}Todavía no hay una meta cargada para este mes.</div>`;
-  const tile = (lab, val, foot, sw) => `<div class="rd-tile"><div class="lab">${sw ? `<span class="rd-sw" style="background:${sw}"></span>` : ''}${lab}</div><div class="val mono">${val}</div><div class="foot">${foot}</div></div>`;
+  const tile = (lab, val, foot, sw, tip) => `<div class="rd-tile"${tip ? ` title="${escapeHtml(tip)}"` : ''}><div class="lab">${sw ? `<span class="rd-sw" style="background:${sw}"></span>` : ''}${lab}</div><div class="val mono">${val}</div><div class="foot">${foot}</div></div>`;
   const step = (k, n) => `<div class="rd-step"><div class="k">${k}</div><div class="n mono">${n}</div></div>`;
-  const conv = (x) => `<div class="rd-conv"><b>${rdPct(x)}</b>→</div>`;
+  const flecha = '<div class="rd-conv"><b>→</b></div>';
   const chatBtn = (ph) => `<button class="rd-btn" data-rd-chat="${escapeHtml(ph)}">Ver chat →</button>`;
   const RD_MAX = 10, mas = (arr) => arr.length > RD_MAX ? `<div class="rd-empty">y ${arr.length - RD_MAX} más</div>` : '';
-  const pc = (h.para_cotizar || []).slice(0, RD_MAX).map(x => `<div class="rd-it"><div class="q"><b>${escapeHtml(x.name || ('+' + x.phone))}</b> ${x.producto === 'corporeo' ? '<span class="rd-pill">corpóreo</span>' : ''}<small>Pasó todos los datos hace ${rdEspera(x.horas)}${x.horas < 12 ? ' hábiles' : ''} y todavía no le escribió nadie</small></div>${x.horas >= 3 ? '<span class="rd-pill bad">urgente</span>' : ''}${chatBtn(x.phone)}</div>`).join('');
-  const oc = (h.oc_abiertas || []).slice(0, RD_MAX).map(x => `<div class="rd-it"><div class="q"><b>${escapeHtml(x.name || ('+' + x.phone))}</b> <span class="rd-ref">${escapeHtml(x.cartel || '')} ${escapeHtml(x.importe || '')}</span><small>${escapeHtml(x.estado || '')}${x.dias != null ? ' · hace ' + x.dias + ' día' + (x.dias === 1 ? '' : 's') : ''}</small></div>${x.urgente ? '<span class="rd-pill bad">te escribió</span>' : ''}${chatBtn(x.phone)}</div>`).join('');
+  const pcL = h.para_cotizar || [];
+  const pc = pcL.slice(0, RD_MAX).map(x => `<div class="rd-it"><div class="q"><b>${escapeHtml(x.name || ('+' + x.phone))}</b> ${x.producto === 'corporeo' ? '<span class="rd-pill">corpóreo</span>' : ''} ${x.listo ? '<span class="rd-pill warn">presupuesto armado sin mandar</span>' : ''}<small>Pasó todos los datos hace ${rdEspera(x.horas)}${x.horas < 12 ? ' hábiles' : ''} y todavía no le escribió nadie</small></div>${x.horas >= 3 ? '<span class="rd-pill bad">urgente</span>' : ''}${chatBtn(x.phone)}</div>`).join('');
+  const ocL = h.oc_abiertas;
+  const oc = (ocL || []).slice(0, RD_MAX).map(x => `<div class="rd-it"><div class="q"><b>${escapeHtml(x.name || ('+' + x.phone))}</b> <span class="rd-ref">${escapeHtml(x.cartel || '')} ${STATE.privacy ? '$•••' : escapeHtml(x.importe || '')}</span><small>${escapeHtml(x.estado || '')}${x.dias != null ? ' · hace ' + x.dias + ' día' + (x.dias === 1 ? '' : 's') : ''}</small></div>${x.urgente ? '<span class="rd-pill bad">te escribió</span>' : ''}${chatBtn(x.phone)}</div>`).join('');
+  const reL = h.revisar_estado || [];
+  const re = reL.slice(0, RD_MAX).map(x => `<div class="rd-it"><div class="q"><b>#${escapeHtml(String(x.numero || ''))} ${escapeHtml(x.cartel || '')}</b><small>Figura "${escapeHtml(x.est || '')}" desde hace ${x.dias} días (venta del ${escapeHtml(String(x.fecha || '').slice(8, 10) + '/' + String(x.fecha || '').slice(5, 7))})</small></div><button class="rd-btn" data-rd-ped="${escapeHtml(String(x.id))}">Abrir pedido →</button></div>`).join('');
+  const tP = rdTasa(a, p, 'coh_presup14', 'coh_m14', mes), tC = rdTasa(a, p, 'coh_compra30', 'coh_m30', mes);
+  const tV = rdTasa(a, p, 'coh_venta30', 'coh_m30p', mes), tO = rdTasa(a, p, 'coh_oc30', 'coh_m30p', mes);
+  const ticketVs = (c, q) => (c != null && q != null) ? rdVsAnt(Math.round(c), Math.round(q), mes, rdCorto) : '<span class="rd-ref">mes pasado: —</span>';
+  const apRows = [
+    (a.consultas_ig || ap.presup_ig) ? `<div class="rd-it"><div class="q"><b>Instagram</b><small>${a.consultas_ig || 0} consultas y ${ap.presup_ig || 0} presupuestos por Instagram. Van aparte porque todavía no se pueden medir limpio por vendedor.</small></div></div>` : '',
+    ap.ventas_asistidas_n ? `<div class="rd-it"><div class="q"><b>Ventas que cerró el equipo</b><small>${ap.ventas_asistidas_n} cartel${ap.ventas_asistidas_n === 1 ? '' : 'es'} · ${rdCorto(ap.ventas_asistidas_monto)}. Las cerró Bruno o el equipo: no suman en tus números.</small></div></div>` : '',
+    ap.traidas_ventas_n || ap.traidas_presup ? `<div class="rd-it"><div class="q"><b>Chats que te trajiste de Joaco</b><small>${ap.traidas_presup || 0} presupuestos y ${ap.traidas_ventas_n || 0} ventas (${rdCorto(ap.traidas_ventas_monto || 0)}) salieron de ahí. La venta es tuya; la consulta se le cuenta a Joaco.</small></div></div>` : '',
+    ap.presup_sin_evidencia ? `<div class="rd-it"><div class="q"><b>Presupuestos sin envío registrado</b><small>${ap.presup_sin_evidencia} marcados como enviados sin ningún mensaje de presupuesto en el chat: no cuentan.</small></div></div>` : '',
+  ].join('');
   const sem = v.semanas || [];
   return `
     <div class="rd-card rd-meta"><h2>Meta del mes</h2>${metaHtml}</div>
     <div class="rd-kpis">
       ${tile('Neones vendidos', a.neones, rdVsAnt(a.neones, p.neones, mes), RD_NEON)}
       ${tile('Corpóreos vendidos', a.corporeos, rdVsAnt(a.corporeos, p.corporeos, mes), RD_CORP)}
-      ${tile('Ticket promedio neón', a.ticket_neon != null ? rdCorto(a.ticket_neon) : '—', rdVsAnt(Math.round(a.ticket_neon || 0), Math.round(p.ticket_neon || 0), mes, rdCorto), RD_NEON)}
-      ${tile('Ticket promedio corpóreo', a.ticket_corp != null ? rdCorto(a.ticket_corp) : '—', rdVsAnt(Math.round(a.ticket_corp || 0), Math.round(p.ticket_corp || 0), mes, rdCorto), RD_CORP)}
-      ${tile('Pedidos', a.pedidos, rdVsAnt(a.pedidos, p.pedidos, mes))}
+      ${tile('Ticket promedio neón', a.ticket_neon != null ? rdCorto(a.ticket_neon) : '—', ticketVs(a.ticket_neon, p.ticket_neon), RD_NEON)}
+      ${tile('Ticket promedio corpóreo', a.ticket_corp != null ? rdCorto(a.ticket_corp) : '—', ticketVs(a.ticket_corp, p.ticket_corp), RD_CORP)}
+      ${tile('Ventas', a.pedidos, rdVsAnt(a.pedidos, p.pedidos, mes), '', 'Clientes que te compraron en el mes')}
       ${tile('Facturado', rdCorto(fact), rdVsAnt(fact, p.facturado, mes, rdCorto))}
     </div>
     <div class="rd-grid2">
-      <div class="rd-card"><h2>Tu embudo del mes</h2><div class="cap">De las consultas que te llegaron, cuántas recibieron presupuesto, orden de compra y cuántas compraron.</div>
-        <div class="rd-funnel">${step('Consultas', a.consultas)}${conv(a.conv_presup)}${step('Presupuestos', a.presup_clientes)}${conv(a.conv_oc)}${step('Órdenes de compra', a.oc)}${conv(a.presup_clientes ? a.pedidos / a.presup_clientes : null)}${step('Ventas', a.pedidos)}</div>
-        <div class="rd-leg"><span>Consultas: <b>${a.consultas_wa || 0}</b> por WhatsApp · <b>${a.consultas_ig || 0}</b> por Instagram</span><span>Presupuestos mandados: <b>${a.presupuestos}</b> (${a.presup_neon} neón · ${a.presup_corp} corpóreo)</span><span>Mes pasado: ${p.consultas} consultas · ${p.presup_clientes} con presupuesto · ${p.pedidos} ventas</span></div>
+      <div class="rd-card"><h2>Tu mes</h2><div class="cap">Lo que hiciste en el mes: consultas de WhatsApp que te llegaron, clientes a los que les mandaste presupuesto, órdenes de compra y ventas.</div>
+        <div class="rd-funnel">${step('Consultas', a.consultas)}${flecha}${step('Presupuestos', a.presup_clientes)}${flecha}${step('Órdenes de compra', a.oc)}${flecha}${step('Ventas', a.pedidos)}</div>
+        <div class="rd-leg"><span>Presupuestos mandados: <b>${a.presupuestos}</b> (${a.presup_neon} neón · ${a.presup_corp} corpóreo)</span><span>Mes pasado: ${p.consultas} consultas · ${p.presup_clientes} con presupuesto · ${p.pedidos} ventas</span></div>
       </div>
-      <div class="rd-card"><h2>Tiempo de respuesta</h2><div class="cap">Desde que el bot te pasa el lead con todos los datos ("Para cotizar") hasta que le escribís. En horas hábiles (lunes a sábado de 9 a 21).</div>
-        <div class="rd-kpis" style="margin:0">
-          ${tile('Lo normal', rdHoras(a.resp_mediana_h), '<span class="rd-ref">la mitad la respondés en menos de esto</span>')}
-          ${tile('En menos de 2 h', a.resp_n ? Math.round(a.resp_2h / a.resp_n * 100) + '%' : '—', `<span class="rd-ref">${a.resp_2h} de ${a.resp_n}</span>`)}
-          ${tile('Sin responder', a.sin_resp, '<span class="rd-ref">pasaron más de 3 h hábiles</span>')}
+      <div class="rd-card"><h2>Cómo convierten tus consultas</h2><div class="cap">Seguimos a cada consulta desde que entra, aunque se cierre al mes siguiente. Cuenta solo las que ya tuvieron el plazo.</div>
+        <div class="rd-list">
+          <div class="rd-it"><div class="q">Reciben presupuesto en 2 semanas</div>${rdTasaTxt(tP, 'consultas')}</div>
+          <div class="rd-it"><div class="q">Compran en 30 días</div>${rdTasaTxt(tC, 'consultas')}</div>
+          <div class="rd-it"><div class="q">De las que recibieron presupuesto, piden OC</div>${rdTasaTxt(tO, 'presupuestadas')}</div>
+          <div class="rd-it"><div class="q">De las que recibieron presupuesto, compran</div>${rdTasaTxt(tV, 'presupuestadas')}</div>
         </div>
       </div>
     </div>
-    <div class="rd-card" style="margin-top:14px"><h2>Facturado por semana</h2><div class="cap">Últimas 9 semanas (lunes a domingo).</div>
+    <div class="rd-card" style="margin-top:14px"><h2>Tiempo de respuesta</h2><div class="cap">Desde que el bot te pasa el lead con todos los datos ("Para cotizar") hasta que le escribís, en horas hábiles (lunes a sábado de 9 a 21, sin feriados). Solo cuenta los leads que pasaron por el bot.</div>
+      <div class="rd-kpis" style="margin:0">
+        ${tile('Lo normal', (a.resp_censurada ? 'más de ' : '') + rdHoras(a.resp_mediana_h), '<span class="rd-ref">contando los que no respondiste</span>')}
+        ${tile('Respondés en menos de 2 h', a.resp_2h_pct != null ? rdPct(a.resp_2h_pct) : '—', `<span class="rd-ref">${a.resp_2h} de ${a.resp_total}</span>`)}
+        ${tile('Sin responder', a.sin_resp, '<span class="rd-ref">más de 3 h hábiles sin un mensaje</span>')}
+        ${tile('Hasta el presupuesto', rdHoras(a.presup_mediana_h), `<span class="rd-ref">${a.presup_4h_pct != null ? rdPct(a.presup_4h_pct) + ' en menos de 4 h' : 'lo normal hasta mandarlo'}</span>`)}
+      </div>
+    </div>
+    <div class="rd-card"><h2>Facturado por semana</h2><div class="cap">9 semanas (lunes a domingo).</div>
       <div class="rd-chart">${rdSvgSemanas(sem)}</div>
       <div class="rd-leg"><span><span class="rd-sw" style="background:${RD_NEON}"></span>Neón</span><span><span class="rd-sw" style="background:${RD_CORP}"></span>Corpóreo</span></div>
     </div>
     <div class="rd-grid2" style="margin-top:14px">
-      <div class="rd-card"><h2>Para hacer hoy: leads para cotizar sin respuesta</h2><div class="cap">${(h.para_cotizar || []).length} en los últimos 7 días. El bot ya juntó los datos. Cuanto antes les escribas, más chances de venta.</div>
-        <div class="rd-list">${pc ? pc + mas(h.para_cotizar) : '<div class="rd-empty">Nada pendiente. Bien ahí.</div>'}</div></div>
+      <div class="rd-card"><h2>Para hacer hoy: leads para cotizar sin respuesta</h2><div class="cap">${pcL.length} en los últimos 7 días. El bot ya juntó los datos. Cuanto antes les escribas, más chances de venta.</div>
+        <div class="rd-list">${pc ? pc + mas(pcL) : '<div class="rd-empty">Nada pendiente. Bien ahí.</div>'}</div></div>
       <div class="rd-card"><h2>Órdenes de compra sin pagar</h2><div class="cap">Clientes con la OC mandada que todavía no pagaron.</div>
-        <div class="rd-list">${oc ? oc + mas(h.oc_abiertas) : '<div class="rd-empty">No tenés OC pendientes.</div>'}</div>
-        <div class="rd-leg"><span>En producción: <b>${h.en_produccion}</b> pedidos</span><span>Para enviar: <b>${h.para_enviar}</b></span></div></div>
-    </div>`;
+        <div class="rd-list">${ocL == null ? '<div class="rd-empty">No se pudo cargar esta lista. Recargá en un rato.</div>' : (oc ? oc + mas(ocL) : '<div class="rd-empty">No tenés OC pendientes.</div>')}</div></div>
+    </div>
+    ${reL.length ? `<div class="rd-card" style="margin-top:14px"><h2>Actualizá el estado de ${reL.length} pedido${reL.length === 1 ? '' : 's'}</h2><div class="cap">Siguen "En producción" o "Para enviar" hace más de lo normal (neón 3 semanas, corpóreo 5, para enviar 10 días). Si ya se entregaron, marcalos.</div>
+      <div class="rd-list">${re}${mas(reL)}</div></div>` : ''}
+    ${apRows ? `<div class="rd-card" style="margin-top:14px"><h2>Aparte (no suma en tus números)</h2><div class="rd-list">${apRows}</div></div>` : ''}`;
 }
 // Barras apiladas neón/corpóreo por semana.
 function rdSvgSemanas(sem) {
@@ -15569,57 +15613,81 @@ function rdSvgSemanas(sem) {
 // --- Comparación de los 3 (solo Gaspar) ---
 function rdCompararHtml(d) {
   const vs = d.vendedores || [];
-  const mes = d.mes;
+  const mes = d.mes, g = d.global || {};
+  const tasa = (v, num, den) => rdTasa(v.actual, v.anterior, num, den, mes);
+  const pctT = (t) => t.v == null ? '—' : rdPct(t.v) + (t.propio ? '' : ' (' + t.de + ')');
   const cards = vs.map(v => {
-    const a = v.actual, meta = v.meta || 0, crudo = v.facturado_crudo || 0;
+    const a = v.actual, meta = v.meta || 0, crudo = a.facturado_crudo || 0;
     const pct = meta ? Math.min(100, crudo / meta * 100) : 0;
+    const sin5 = v.slug === 'facundo' ? ' (sin el 5%)' : (v.slug === 'agustina' ? ' (sin el 5% del neón)' : '');
     return `<div class="rd-card rd-vcard" style="--c:${rdColor(v.slug)}">
       <h3><span class="rd-sw" style="background:${rdColor(v.slug)}"></span>${escapeHtml(v.nombre)}</h3>
-      <div class="fact mono">${fmtMoney(a.facturado)}</div><div class="rd-ref" style="font-size:12px">facturado${(v.slug !== 'joaco') ? ' (sin el 5%)' : ''} · ${rdVsAnt(a.facturado, v.anterior.facturado, mes, rdCorto)}</div>
+      <div class="fact mono">${fmtMoney(a.facturado)}</div><div class="rd-ref" style="font-size:12px">facturado${sin5} · ${rdVsAnt(a.facturado, v.anterior.facturado, mes, rdCorto)}</div>
       ${meta ? `<div class="rd-bar"><span style="width:${pct.toFixed(1)}%"></span></div><div class="rd-ref" style="font-size:12px">Meta: ${fmtMoney(crudo)} de ${fmtMoney(meta)} (${Math.round(crudo / meta * 100)}%)</div>` : '<div class="rd-ref" style="font-size:12px;margin-top:6px">Sin meta cargada</div>'}
       <div class="rd-metaedit">Meta del mes <input id="rd-meta-${v.slug}" inputmode="numeric" value="${meta ? meta.toLocaleString('es-AR') : ''}" placeholder="$ monto"><button class="rd-btn" data-rd-meta="${v.slug}">Guardar</button></div>
       <div class="rd-mini">
         <span>Neones</span><span class="mono">${a.neones} · ${a.ticket_neon != null ? rdCorto(a.ticket_neon) : '—'} c/u</span>
         <span>Corpóreos</span><span class="mono">${a.corporeos} · ${a.ticket_corp != null ? rdCorto(a.ticket_corp) : '—'} c/u</span>
-        <span>Pedidos</span><span class="mono">${a.pedidos}</span>
-        <span>Consultas recibidas</span><span class="mono">${a.consultas} <span class="rd-ref">(${a.consultas_ig || 0} IG)</span></span>
-        <span>Consulta → venta</span><span class="mono">${a.consultas ? rdPct(a.pedidos / a.consultas) : '—'}</span>
-        <span>Respuesta (lo normal)</span><span class="mono">${rdHoras(a.resp_mediana_h)}</span>
+        <span>Ventas (clientes)</span><span class="mono">${a.pedidos}</span>
+        <span>Consultas WhatsApp</span><span class="mono">${a.consultas} <span class="rd-ref">(+${a.consultas_ig || 0} IG aparte)</span></span>
+        <span>Consulta → presupuesto</span><span class="mono">${pctT(tasa(v, 'coh_presup14', 'coh_m14'))}</span>
+        <span>Consulta → venta</span><span class="mono">${pctT(tasa(v, 'coh_compra30', 'coh_m30'))}</span>
+        <span>1ª respuesta (lo normal)</span><span class="mono">${(a.resp_censurada ? 'más de ' : '') + rdHoras(a.resp_mediana_h)}</span>
+        <span>Hasta el presupuesto</span><span class="mono">${rdHoras(a.presup_mediana_h)}</span>
         <span>Para cotizar sin responder</span><span class="mono">${(v.ahora.para_cotizar || []).length}</span>
-        <span>OC sin pagar</span><span class="mono">${(v.ahora.oc_abiertas || []).length}</span>
+        <span>OC sin pagar</span><span class="mono">${v.ahora.oc_abiertas == null ? '—' : v.ahora.oc_abiertas.length}</span>
       </div></div>`;
   }).join('');
   const leg = `<div class="rd-leg">${vs.map(v => `<span><span class="rd-sw" style="background:${rdColor(v.slug)}"></span>${escapeHtml(v.nombre)}</span>`).join('')}</div>`;
   const fila = (lab, f) => `<tr><td>${lab}</td>${vs.map(v => `<td class="mono">${f(v)}</td>`).join('')}</tr>`;
+  const tp = vs.map(v => tasa(v, 'coh_presup14', 'coh_m14')), to = vs.map(v => tasa(v, 'coh_oc30', 'coh_m30p')), tv = vs.map(v => tasa(v, 'coh_venta30', 'coh_m30p'));
+  const deDe = (arr) => { const s = [...new Set(arr.filter(x => x.v != null).map(x => x.de))]; return s.length ? ' (' + s.join('/') + ')' : ''; };
+  const ap = (v) => v.actual.aparte || {};
+  const montoN = (n, m) => n ? `${n} · ${rdCorto(m)}` : '0';
   return `
-    <div class="rd-note">Los montos de Facu y Agus van sin el 5% que les suma el cotizador, para comparar parejo. La meta se mide contra lo que facturó cada uno de verdad. Las consultas (WhatsApp + Instagram, sin lo de cursos) se le cuentan al que la recibió; los presupuestos y las OC al que los mandó; la venta al que la cerró.</div>
+    <div class="rd-note">Cómo se cuenta: las consultas son las de WhatsApp (Instagram va aparte) y se le cuentan al que las recibió; los presupuestos y las OC al que los mandó; la venta al que la cerró. Las tasas siguen a cada consulta desde que entra (cohorte) y cuentan solo las que ya tuvieron el plazo. Los montos de Facu y Agus van sin el 5% que les suma el cotizador; la meta se mide contra lo que facturó cada uno de verdad. Lo que no se puede medir limpio no suma: está abajo en "Qué no se cuenta".</div>
     <div class="rd-vcards">${cards}</div>
     <div class="rd-grid2">
-      <div class="rd-card"><h2>Conversión por etapa</h2><div class="cap">Qué % pasa de un paso al siguiente. Compará % y no totales: Facu y Agus reciben menos consultas por el regulador.</div>
-        <div class="rd-chart">${rdSvgAgrupadas(['Consulta → presupuesto', 'Presupuesto → OC', 'Presupuesto → venta'], vs.map(v => ({ color: rdColor(v.slug), vals: [v.actual.conv_presup, v.actual.conv_oc, v.actual.conv_venta] })))}</div>${leg}</div>
-      <div class="rd-card"><h2>Facturado por semana</h2><div class="cap">Últimas 9 semanas, neón + corpóreo.</div>
+      <div class="rd-card"><h2>Conversión por etapa</h2><div class="cap">De cada 100 consultas o presupuestos, cuántos pasan al paso siguiente. Si el mes todavía no maduró, se usa el anterior (entre paréntesis).</div>
+        <div class="rd-chart">${rdSvgAgrupadas(['Consulta → presupuesto' + deDe(tp), 'Presupuesto → OC' + deDe(to), 'Presupuesto → venta' + deDe(tv)], vs.map((v, i) => ({ color: rdColor(v.slug), vals: [tp[i].v, to[i].v, tv[i].v] })))}</div>${leg}</div>
+      <div class="rd-card"><h2>Facturado por semana</h2><div class="cap">9 semanas, neón + corpóreo, sin lo que cerró el equipo.</div>
         <div class="rd-chart">${rdSvgLineas(vs.map(v => ({ color: rdColor(v.slug), vals: (v.semanas || []).map(s => s.neon + s.corp) })), ((vs[0] && vs[0].semanas) || []).map(s => s.desde.slice(8, 10) + '/' + s.desde.slice(5, 7)))}</div>${leg}</div>
-      <div class="rd-card"><h2>Respuesta después del bot</h2><div class="cap">Lo normal (mediana) en horas hábiles desde "Para cotizar" hasta el primer mensaje. La línea marca la meta de 2 h.</div>
-        <div class="rd-chart">${rdSvgHorizontales(vs.map(v => ({ label: v.nombre, color: rdColor(v.slug), v: v.actual.resp_mediana_h, txt: rdHoras(v.actual.resp_mediana_h) + (v.actual.sin_resp ? ' · ' + v.actual.sin_resp + ' sin responder' : '') })), 2)}</div></div>
+      <div class="rd-card"><h2>Respuesta después del bot</h2><div class="cap">Lo normal (mediana) en horas hábiles desde "Para cotizar" hasta el primer mensaje, contando a los que nunca se respondieron. La línea marca la meta de 2 h.</div>
+        <div class="rd-chart">${rdSvgHorizontales(vs.map(v => ({ label: v.nombre, color: rdColor(v.slug), v: v.actual.resp_mediana_h, txt: (v.actual.resp_censurada ? 'más de ' : '') + rdHoras(v.actual.resp_mediana_h) + ' · presup. ' + rdHoras(v.actual.presup_mediana_h) })), 2)}</div></div>
       <div class="rd-card"><h2>Mix neón / corpóreo</h2><div class="cap">Carteles vendidos en el mes y ticket promedio de cada uno.</div>
         <div class="rd-chart">${rdSvgMix(vs)}</div>
         <div class="rd-leg"><span><span class="rd-sw" style="background:${RD_NEON}"></span>Neón</span><span><span class="rd-sw" style="background:${RD_CORP}"></span>Corpóreo</span></div></div>
     </div>
     <div class="rd-card" style="margin-top:14px"><h2>Detalle</h2><div class="rd-tblw"><table class="rd-tbl">
       <thead><tr><th></th>${vs.map(v => `<th>${escapeHtml(v.nombre)}</th>`).join('')}</tr></thead><tbody>
-      ${fila('Consultas recibidas', v => v.actual.consultas)}
-      ${fila('· por WhatsApp / Instagram', v => (v.actual.consultas_wa || 0) + ' / ' + (v.actual.consultas_ig || 0))}
+      ${fila('Consultas WhatsApp', v => v.actual.consultas)}
       ${fila('Presupuestos mandados', v => `${v.actual.presupuestos} <span class="rd-ref">(${v.actual.presup_clientes} clientes)</span>`)}
       ${fila('· de corpóreo', v => v.actual.presup_corp)}
-      ${fila('Órdenes de compra', v => v.actual.oc)}
-      ${fila('Pedidos', v => v.actual.pedidos)}
+      ${fila('Órdenes de compra (clientes)', v => v.actual.oc)}
+      ${fila('Ventas (clientes)', v => v.actual.pedidos)}
       ${fila('Neones / corpóreos', v => v.actual.neones + ' / ' + v.actual.corporeos)}
       ${fila('Facturado neón', v => fmtMoney(v.actual.monto_neon))}
       ${fila('Facturado corpóreo', v => fmtMoney(v.actual.monto_corp))}
-      ${fila('Ticket por pedido', v => v.actual.ticket_pedido != null ? fmtMoney(v.actual.ticket_pedido) : '—')}
-      ${fila('Respuesta en menos de 2 h', v => v.actual.resp_n ? Math.round(v.actual.resp_2h / v.actual.resp_n * 100) + '%' : '—')}
-      ${fila('En producción / para enviar', v => v.ahora.en_produccion + ' / ' + v.ahora.para_enviar)}
-      </tbody></table></div></div>`;
+      ${fila('Ticket por cliente', v => v.actual.ticket_cliente != null ? fmtMoney(v.actual.ticket_cliente) : '—')}
+      ${fila('Respondidas en menos de 2 h', v => v.actual.resp_2h_pct != null ? `${rdPct(v.actual.resp_2h_pct)} <span class="rd-ref">(${v.actual.resp_2h} de ${v.actual.resp_total})</span>` : '—')}
+      ${fila('Presupuesto en menos de 4 h', v => v.actual.presup_4h_pct != null ? rdPct(v.actual.presup_4h_pct) : '—')}
+      ${fila('· de eso, recompras (clientes que ya habían escrito antes)', v => montoN(ap(v).recompra_n, ap(v).recompra_monto))}
+      </tbody></table></div></div>
+    <div class="rd-card"><h2>Qué no se cuenta (y por qué)</h2><div class="cap">Lo que no se puede atribuir o medir limpio queda afuera de los números de arriba para no ensuciar la comparación.</div><div class="rd-tblw"><table class="rd-tbl">
+      <thead><tr><th></th>${vs.map(v => `<th>${escapeHtml(v.nombre)}</th>`).join('')}</tr></thead><tbody>
+      ${fila('Consultas por Instagram (30% de ruido, sin trazabilidad por vendedor)', v => v.actual.consultas_ig || 0)}
+      ${fila('Presupuestos por Instagram', v => ap(v).presup_ig || 0)}
+      ${fila('Presupuestos marcados como enviados sin mensaje en el chat', v => ap(v).presup_sin_evidencia || 0)}
+      ${fila('OC reenviadas (cuentan en el mes de la primera)', v => ap(v).oc_reenvios || 0)}
+      ${fila('OC mandadas por Bruno/Gaspar', v => ap(v).oc_admin || 0)}
+      ${fila('OC de ventas que cerró el equipo', v => ap(v).oc_asistidas || 0)}
+      ${fila('Ventas que cerró el equipo (carteles · $)', v => montoN(ap(v).ventas_asistidas_n, ap(v).ventas_asistidas_monto))}
+      ${fila('Ventas que cargó Gaspar para sí (carteles · $)', v => montoN(ap(v).ventas_admin_n, ap(v).ventas_admin_monto))}
+      ${fila('Filas de venta sin precio', v => ap(v).sin_precio_n || 0)}
+      ${fila('Chats traídos de Joaco: presupuestos / ventas', v => v.slug === 'agustina' ? `${ap(v).traidas_presup || 0} / ${montoN(ap(v).traidas_ventas_n, ap(v).traidas_ventas_monto)}` : '—')}
+      </tbody></table></div>
+      ${(g.presup_admin || g.ventas_otros_n) ? `<div class="rd-leg">${g.presup_admin ? `<span>Presupuestos mandados por un admin: <b>${g.presup_admin}</b></span>` : ''}${g.ventas_otros_n ? `<span>Ventas a nombre de alguien que no es vendedor: <b>${montoN(g.ventas_otros_n, g.ventas_otros_monto)}</b></span>` : ''}</div>` : ''}
+      <div class="rd-leg"><span>Las ventas "del equipo" se marcan desde la ficha del pedido (solo vos).</span></div></div>`;
 }
 function rdSvgAgrupadas(cats, series) {
   const W = 440, H = 230, L = 38, B = 40, T = 18, gw = (W - L) / cats.length, n = series.length, bw = Math.min(34, gw * 0.7 / n);
@@ -15697,6 +15765,10 @@ function bindRendimientoBody() {
     try { selectChatContact(phone); } catch (_) {}
     location.hash = 'chat';
     render();
+  });
+  document.querySelectorAll('[data-rd-ped]').forEach(b => b.onclick = () => {
+    const id = parseInt(b.dataset.rdPed, 10);
+    if (STATE.pedidos.some(x => x.idx === id)) openDrawerPedido(id); else toast('No encontré ese pedido en tu lista');
   });
   document.querySelectorAll('[data-rd-meta]').forEach(b => b.onclick = async () => {
     const slug = b.dataset.rdMeta;
