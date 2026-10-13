@@ -9289,6 +9289,208 @@ const FUNNEL_VENDEDOR_NOMBRE = { joaco: 'Joaco', facundo: 'Facu', agustina: 'Agu
 // "Para revisar" (es un hecho: escribió el texto del anuncio; Meta no mandó la referencia).
 const FUNNEL_TEXTOS_AD = ['quiero cotizar un cartel corporeo', 'quiero cotizar un diseno', 'quiero hacer un neon personalizado'];
 
+// ===== Panel de rendimiento por vendedor (Gaspar 12-oct) =====
+// Cada vendedor ve SU panel (contra sí mismo: mes anterior, su meta); la comparación entre ellos la ve SOLO
+// Gaspar. KPIs que pidió: cantidad de neones y de corpóreos, ticket promedio de cada uno y la meta de plata.
+// Atribución: la CONSULTA es del que la recibió (1er dueño: a quién la repartió el sistema; si no, Joaco),
+// el PRESUPUESTO del que lo mandó (briefs.enviado_por desde el 12-oct; antes comercial_id), la OC del que la
+// mandó y la VENTA del que la cerró (pedidos.comercial_id). Nunca comisiones ni sueldos.
+const KPI_VENDEDORES = [{ slug: 'joaco', nombre: 'Joaco' }, { slug: 'facundo', nombre: 'Facu' }, { slug: 'agustina', nombre: 'Agus' }];
+// +5% oculto del cotizador (Facu: neón y corpóreo; Agus: solo neón). En la comparación se saca para medir
+// parejo (aproximado: solo aplica a lo que cotizó el vendedor logueado).
+const KPI_MARKUP = { facundo: { neon: 1.05, corp: 1.05 }, agustina: { neon: 1.05, corp: 1 } };
+const KPI_BANDEJAS_FUERA = ['cursos', 'oculto', 'privado', 'corte'];
+function kpiMesAR() { return new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 7); }
+function kpiMesMas(mes, n) {
+  let y = +mes.slice(0, 4), m = +mes.slice(5, 7) + n;
+  while (m < 1) { m += 12; y--; } while (m > 12) { m -= 12; y++; }
+  return y + '-' + String(m).padStart(2, '0');
+}
+// Horas HÁBILES (lun a sáb, 9 a 21 AR) entre dos instantes: lo que entra a la noche no suma la noche.
+function kpiHorasHabiles(aIso, bIso) {
+  const H = 36e5, a = Date.parse(aIso), b = Date.parse(bIso);
+  if (!(a < b)) return 0;
+  let ms = 0, t = a;
+  while (t < b) {
+    const ar = new Date(t - 3 * H);
+    const d0 = Date.UTC(ar.getUTCFullYear(), ar.getUTCMonth(), ar.getUTCDate()) + 3 * H; // 00:00 AR
+    if (ar.getUTCDay() !== 0) { const s = Math.max(t, d0 + 9 * H), e = Math.min(b, d0 + 21 * H); if (e > s) ms += e - s; }
+    t = d0 + 24 * H;
+  }
+  return ms / H;
+}
+function kpiMediana(arr) {
+  if (!arr.length) return null;
+  const s = [...arr].sort((x, y) => x - y), k = Math.floor(s.length / 2);
+  return s.length % 2 ? s[k] : (s[k - 1] + s[k]) / 2;
+}
+// Clave de un pedido (las filas de un mismo pedido = un cartel cada una; mismo criterio que pedidoHermanos).
+function kpiClavePedido(r) { return [r.numero, r.fecha, funnelVendedor(r.com) || 'joaco', (r.origen === 'crm' && r.tel) ? r.tel : ''].join('|'); }
+function kpiEsCorp(r) { return Number(r.ec) === 1 || /corpor/.test(_normTxt(r.cartel)); }
+
+// Números de UN mes para los 3 vendedores (crudos: sin sacar el +5%).
+async function kpiMesVendedores(env, mes) {
+  const since = mes + '-01', untilEx = kpiMesMas(mes, 1) + '-01';
+  const sinceUTC = since + 'T03:00:00Z', untilExUTC = untilEx + 'T03:00:00Z';
+  const q = async (sql, ...b) => { try { return (await env.DB.prepare(sql).bind(...b).all()).results || []; } catch (_) { return []; } };
+  const [consR, presR, ocR, venR, respR] = await Promise.all([
+    // Consultas nuevas: primer mensaje de su vida en el mes, de carteles (sin cursos/oculto/privado/corte,
+    // internos, revendedores ni registros de cursos). primero = 1er cambio de dueño registrado.
+    q(`WITH fi AS (SELECT phone FROM wa_messages WHERE direction = 'inbound' AND msg_type != 'status' AND (channel IS NULL OR channel = 'wa') AND ts >= ? AND ts < ? GROUP BY phone)
+       SELECT fi.phone, COALESCE(s.assigned_to, '') asg, COALESCE(s.inbox, '') inbox,
+              (SELECT l.via || '|' || IFNULL(l.from_asg, '') || '|' || IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = fi.phone AND l.via NOT LIKE 'auto_%' ORDER BY l.ts ASC LIMIT 1) primero
+         FROM fi LEFT JOIN wa_chats_summary s ON s.phone = fi.phone
+        WHERE NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'inbound' AND m.ts < ?)
+          AND fi.phone NOT IN (SELECT phone FROM wa_internal_phones)
+          AND fi.phone NOT IN (SELECT phone FROM reventa_leads)
+          AND fi.phone NOT IN (SELECT phone FROM lanzamiento_landing)
+          AND fi.phone NOT IN (SELECT phone FROM minicurso_landing)
+          AND fi.phone NOT IN (SELECT a.phone FROM wa_ad_attributions a JOIN wa_ad_verticals v ON v.ad_id = a.source_id WHERE v.vertical = 'cursos')`, sinceUTC, untilExUTC, sinceUTC),
+    q("SELECT cliente_wa_id ph, IFNULL(comercial_id, '') com, IFNULL(enviado_por, '') por, IFNULL(tipo, '') tipo FROM briefs WHERE estado = 'enviado' AND enviado_at >= ? AND enviado_at < ?", sinceUTC, untilExUTC),
+    q("SELECT DISTINCT phone, IFNULL(vendedor, '') vendedor FROM oc_enviadas WHERE ts_out >= ? AND ts_out < ?", sinceUTC, untilExUTC),
+    q("SELECT numero, fecha, IFNULL(comercial_id, 'joaco') com, IFNULL(origen, '') origen, IFNULL(telefono, '') tel, COALESCE(es_corporeo, 0) ec, IFNULL(cartel, '') cartel, COALESCE(cantidad, 1) cant, COALESCE(precio, 0) + COALESCE(precio_dimmer, 0) monto FROM pedidos WHERE fecha >= ? AND fecha < ?", since, untilEx),
+    // Respuesta humana después del bot: desde que el lead pasó a "Para cotizar" hasta el 1er mensaje de una persona.
+    q(`SELECT p.phone, p.completed_at c, COALESCE(s.assigned_to, '') asg,
+              (SELECT MIN(m.ts) FROM wa_messages m WHERE m.phone = p.phone AND m.direction = 'outbound' AND m.automated = 0 AND m.msg_type != 'status' AND m.ts >= p.completed_at) resp
+         FROM precotiz_pilot p LEFT JOIN wa_chats_summary s ON s.phone = p.phone
+        WHERE p.completed_at >= ? AND p.completed_at < ? AND COALESCE(s.inbox, '') NOT IN ('cursos', 'oculto', 'privado', 'corte')`, sinceUTC, untilExUTC),
+  ]);
+  const out = {};
+  for (const v of KPI_VENDEDORES) out[v.slug] = { consultas: 0, presupuestos: 0, presup_neon: 0, presup_corp: 0, presup_clientes: 0, oc: 0, pedidos: 0, neones: 0, corporeos: 0, monto_neon: 0, monto_corp: 0, resp_n: 0, resp_2h: 0, sin_resp: 0, _resp: [], _cli: new Set(), _ped: new Set() };
+  for (const r of consR) {
+    if (KPI_BANDEJAS_FUERA.includes(r.inbox)) continue;
+    let rec;
+    if (r.primero) { const [via, fr, to] = String(r.primero).split('|'); rec = via === 'reparto' ? to : (fr || 'joaco'); }
+    else rec = r.asg || 'joaco';
+    const o = out[funnelVendedor(rec)]; if (o) o.consultas++;
+  }
+  for (const r of presR) {
+    const o = out[adhocSenderSlug(r.por) || funnelVendedor(r.com) || 'joaco']; if (!o) continue;
+    o.presupuestos++; if (r.tipo === 'corporea') o.presup_corp++; else o.presup_neon++;
+    if (r.ph) o._cli.add(r.ph);
+  }
+  for (const r of ocR) { const o = out[funnelVendedor(r.vendedor) || 'joaco']; if (o) o.oc++; }
+  for (const r of venR) {
+    const o = out[funnelVendedor(r.com) || 'joaco']; if (!o) continue;
+    o._ped.add(kpiClavePedido(r));
+    const n = Number(r.cant) > 0 ? Number(r.cant) : 1, monto = Number(r.monto) || 0;
+    if (kpiEsCorp(r)) { o.corporeos += n; o.monto_corp += monto; } else { o.neones += n; o.monto_neon += monto; }
+  }
+  const ahora = new Date().toISOString();
+  for (const r of respR) {
+    const o = out[funnelVendedor(r.asg || 'joaco')]; if (!o) continue;
+    if (r.resp) { const h = kpiHorasHabiles(r.c, r.resp); o.resp_n++; o._resp.push(h); if (h <= 2) o.resp_2h++; }
+    else if (kpiHorasHabiles(r.c, ahora) > 3) o.sin_resp++;
+  }
+  for (const k in out) {
+    const o = out[k];
+    o.presup_clientes = o._cli.size; o.pedidos = o._ped.size;
+    o.resp_mediana_h = kpiMediana(o._resp);
+    delete o._cli; delete o._ped; delete o._resp;
+  }
+  return out;
+}
+// Derivados (ticket promedio, conversiones, montos sin el +5% si norm).
+function kpiDerivar(o, slug, norm) {
+  const mk = (norm && KPI_MARKUP[slug]) || { neon: 1, corp: 1 };
+  const mn = o.monto_neon / mk.neon, mc = o.monto_corp / mk.corp, tot = mn + mc;
+  const div = (a, b) => b ? a / b : null;
+  return {
+    ...o, monto_neon: Math.round(mn), monto_corp: Math.round(mc), facturado: Math.round(tot),
+    ticket_neon: div(mn, o.neones), ticket_corp: div(mc, o.corporeos), ticket_pedido: div(tot, o.pedidos),
+    conv_presup: div(o.presup_clientes, o.consultas), conv_oc: div(o.oc, o.presup_clientes), conv_venta: div(o.pedidos, o.presup_clientes),
+  };
+}
+// Lo de "ahora" (no depende del mes): pedidos en producción / para enviar, OC sin pagar y leads de
+// "Para cotizar" sin respuesta de una persona. Con detalle (nombres/teléfonos) solo para el vendedor dueño.
+async function kpiSnapshot(env) {
+  const q = async (sql, ...b) => { try { return (await env.DB.prepare(sql).bind(...b).all()).results || []; } catch (_) { return []; } };
+  const desde7 = new Date(Date.now() - 7 * 864e5).toISOString();
+  const [prodR, pcR, ocAb] = await Promise.all([
+    q("SELECT numero, fecha, IFNULL(comercial_id, 'joaco') com, IFNULL(origen, '') origen, IFNULL(telefono, '') tel, IFNULL(estado_pedido, '') est FROM pedidos WHERE IFNULL(estado_pedido, '') != '' AND fecha >= date('now', '-120 days')"),
+    q(`SELECT p.phone, p.completed_at c, IFNULL(p.producto, '') producto, COALESCE(s.assigned_to, '') asg,
+              COALESCE((SELECT name FROM wa_contacts w WHERE w.phone = p.phone), s.contact_name, '') name
+         FROM precotiz_pilot p LEFT JOIN wa_chats_summary s ON s.phone = p.phone
+        WHERE p.estado = 'completo' AND p.completed_at >= ? AND COALESCE(s.inbox, '') NOT IN ('cursos', 'oculto', 'privado', 'corte')
+          AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = p.phone AND m.direction = 'outbound' AND m.automated = 0 AND m.msg_type != 'status' AND m.ts >= p.completed_at)
+        ORDER BY p.completed_at ASC`, desde7),
+    buildOcAbiertas(env).catch(() => null),
+  ]);
+  const out = {};
+  for (const v of KPI_VENDEDORES) out[v.slug] = { en_produccion: 0, para_enviar: 0, oc_abiertas: [], para_cotizar: [], _p: new Set(), _e: new Set() };
+  for (const r of prodR) {
+    const o = out[funnelVendedor(r.com) || 'joaco']; if (!o) continue;
+    const e = _normTxt(r.est);
+    if (e.startsWith('en produccion')) o._p.add(kpiClavePedido(r)); else if (e.startsWith('para enviar')) o._e.add(kpiClavePedido(r));
+  }
+  const ahora = new Date().toISOString();
+  for (const r of pcR) {
+    const o = out[funnelVendedor(r.asg || 'joaco')]; if (!o) continue;
+    o.para_cotizar.push({ phone: r.phone, name: r.name || '', producto: r.producto || '', desde: r.c, horas: Math.round(kpiHorasHabiles(r.c, ahora) * 10) / 10 });
+  }
+  if (ocAb && ocAb.porVend) for (const k in out) out[k].oc_abiertas = (ocAb.porVend[k] || []).map(x => ({ phone: x.phone, name: x.name, cartel: x.cartel, importe: x.importe, dias: x.dias, estado: x.estado, urgente: !!x.urgente }));
+  for (const k in out) { out[k].en_produccion = out[k]._p.size; out[k].para_enviar = out[k]._e.size; delete out[k]._p; delete out[k]._e; }
+  return out;
+}
+// Facturado por semana (lunes a domingo) de las últimas 9 semanas, por vendedor.
+async function kpiSemanas(env) {
+  const hoy = new Date(Date.now() - 3 * 3600e3);
+  const dow = (hoy.getUTCDay() + 6) % 7; // 0 = lunes
+  const lunes = new Date(Date.UTC(hoy.getUTCFullYear(), hoy.getUTCMonth(), hoy.getUTCDate()) - (dow + 7 * 8) * 864e5);
+  const desde = lunes.toISOString().slice(0, 10);
+  let rows = [];
+  try { rows = (await env.DB.prepare("SELECT fecha, IFNULL(comercial_id, 'joaco') com, COALESCE(es_corporeo, 0) ec, IFNULL(cartel, '') cartel, COALESCE(precio, 0) + COALESCE(precio_dimmer, 0) monto FROM pedidos WHERE fecha >= ?").bind(desde).all()).results || []; } catch (_) {}
+  const semanas = [];
+  for (let i = 0; i < 9; i++) semanas.push({ desde: new Date(lunes.getTime() + i * 7 * 864e5).toISOString().slice(0, 10), por: Object.fromEntries(KPI_VENDEDORES.map(v => [v.slug, { neon: 0, corp: 0 }])) });
+  for (const r of rows) {
+    const i = Math.floor((Date.parse(String(r.fecha).slice(0, 10) + 'T00:00:00Z') - lunes.getTime()) / (7 * 864e5));
+    const s = semanas[i]; const o = s && s.por[funnelVendedor(r.com) || 'joaco']; if (!o) continue;
+    if (kpiEsCorp(r)) o.corp += Number(r.monto) || 0; else o.neon += Number(r.monto) || 0;
+  }
+  return semanas;
+}
+async function kpiMeta(env, slug, mes) {
+  const v = (await kvGet(env, `meta_plata:${slug}:${mes}`, '')) || (await kvGet(env, `meta_plata:${slug}`, ''));
+  return parseInt(v, 10) || 0;
+}
+// Mes cerrado → se guarda 12 h en kv_cache (no cambia); el mes en curso se calcula siempre.
+async function kpiMesCacheado(env, mes) {
+  if (mes >= kpiMesAR()) return kpiMesVendedores(env, mes);
+  const k = 'kpi_mes:' + mes;
+  try {
+    const r = await env.DB.prepare('SELECT v, updated_at FROM kv_cache WHERE k = ?').bind(k).first();
+    if (r && Date.now() - Date.parse(r.updated_at) < 12 * 3600e3) return JSON.parse(r.v);
+  } catch (_) {}
+  const d = await kpiMesVendedores(env, mes);
+  await kvSet(env, k, JSON.stringify(d));
+  return d;
+}
+// slug = un vendedor (su panel, montos crudos) | '' = comparación de los 3 (solo Gaspar, montos sin el +5%).
+async function buildKpisVendedor(env, { mes, slug }) {
+  const ant = kpiMesMas(mes, -1);
+  const [act, prev, snap, semanas] = await Promise.all([kpiMesCacheado(env, mes), kpiMesCacheado(env, ant), kpiSnapshot(env), kpiSemanas(env)]);
+  const uno = async (v, norm) => {
+    const mk = (norm && KPI_MARKUP[v.slug]) || { neon: 1, corp: 1 };
+    return {
+      slug: v.slug, nombre: v.nombre,
+      actual: kpiDerivar(act[v.slug], v.slug, norm), anterior: kpiDerivar(prev[v.slug], v.slug, norm),
+      meta: await kpiMeta(env, v.slug, mes),
+      semanas: semanas.map(s => ({ desde: s.desde, neon: Math.round(s.por[v.slug].neon / mk.neon), corp: Math.round(s.por[v.slug].corp / mk.corp) })),
+      ahora: snap[v.slug],
+    };
+  };
+  if (slug) {
+    const v = KPI_VENDEDORES.find(x => x.slug === slug);
+    return { mes, anterior: ant, vendedor: await uno(v, false) };
+  }
+  const vendedores = await Promise.all(KPI_VENDEDORES.map(async v => {
+    const n = await uno(v, true);
+    n.facturado_crudo = Math.round(act[v.slug].monto_neon + act[v.slug].monto_corp); // la meta se mide contra lo crudo
+    return n;
+  }));
+  return { mes, anterior: ant, normalizado: true, vendedores };
+}
+
 // Funnel de carteles por CAMPAÑA de Meta para [since, until] (días AR, inclusivo):
 //   GASTO   meta_ad_spend_ad (por anuncio; si un día no tiene detalle, meta_ad_spend de la campaña).
 //   LEADS   wa_ad_attributions: teléfonos distintos, último touch del período (anuncios reales: 'ad',
@@ -20357,6 +20559,33 @@ const handler = {
         const rate = parseFloat(url.searchParams.get('rate') || '') || 1400;
         const data = await buildAdsFunnel(env, { since, until, rate });
         return json(data);
+      }
+
+      // GET /admin/kpis-vendedor?mes=YYYY-MM[&vendedor=slug] → panel de rendimiento. Un vendedor (Joaco/Facu/Agus)
+      // recibe SOLO lo suyo (el filtro es acá, no en el front). Gaspar: sin vendedor = comparación de los 3 (montos
+      // sin el +5% oculto); con vendedor = el panel de ese vendedor tal cual lo ve él. Nunca comisiones ni sueldos.
+      if (request.method === 'GET' && path === '/admin/kpis-vendedor') {
+        const esGaspar = sessionUserKey === 'gaspar';
+        let slug = '';
+        if (!esGaspar) { slug = adhocSenderSlug(session.user); if (!slug) return json({ error: 'forbidden' }, 403); }
+        else { const v = funnelVendedor(url.searchParams.get('vendedor') || ''); if (KPI_VENDEDORES.some(x => x.slug === v)) slug = v; }
+        const m = String(url.searchParams.get('mes') || '');
+        const mes = /^\d{4}-(0[1-9]|1[0-2])$/.test(m) && m <= kpiMesAR() ? m : kpiMesAR();
+        const data = await buildKpisVendedor(env, { mes, slug });
+        return json({ ok: true, ...data });
+      }
+      // POST /admin/kpis-vendedor/meta {slug, mes, monto} → meta de plata del mes (solo Gaspar). Queda también como
+      // la meta por defecto de los meses siguientes hasta que la cambie.
+      if (request.method === 'POST' && path === '/admin/kpis-vendedor/meta') {
+        if (sessionUserKey !== 'gaspar') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const slug = funnelVendedor(body?.slug || '');
+        if (!KPI_VENDEDORES.some(x => x.slug === slug)) return json({ error: 'vendedor inválido' }, 400);
+        const mes = /^\d{4}-(0[1-9]|1[0-2])$/.test(String(body?.mes || '')) ? String(body.mes) : kpiMesAR();
+        const monto = Math.max(0, Math.round(Number(body?.monto) || 0));
+        await kvSet(env, `meta_plata:${slug}:${mes}`, String(monto));
+        if (mes >= kpiMesAR()) await kvSet(env, `meta_plata:${slug}`, String(monto));
+        return json({ ok: true, slug, mes, monto });
       }
 
       // POST /admin/ads/spend-sync {since,until} → trae el gasto de Meta Ads a meta_ad_spend. Solo Gaspar.
