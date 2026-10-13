@@ -712,6 +712,15 @@ async function resolveComercial(env, { bodyComercial, sessionUser, phone } = {})
 // queda con el vendedor equivocado (ej: el reparto lo asignó a Facu pero lo cotizó Joaco). Admin
 // (Gaspar/Bruno) y cursos (Abril) NO reasignan (ayudan pero no se apropian). Joaco (principal) =
 // assigned_to ''; Facu (secundario) = 'facundo'. No pisa bandejas especiales (cursos/oculto/etc.).
+// Historial de dueños de un chat (panel de rendimiento, 12-oct): cada cambio de vendedor queda en
+// chat_assign_log para saber quién RECIBIÓ cada consulta aunque después se la lleve otro. via:
+// 'reparto' (automático), 'trabaja' (el vendedor que le escribe se lo queda), 'manual' (Gaspar),
+// 'import' (Traer de Joaco), 'auto_cursos'/'auto_corte' (trigger). from/to = assigned_to crudo
+// ('' = sin dueño → bandeja de Joaco). El cupo y el reporte filtran SOLO via='import' → sumar
+// estas filas no cambia ninguna cuenta.
+async function logAsignacion(env, phone, fromAsg, toAsg, via, byUser, ts) {
+  try { await env.DB.prepare("INSERT INTO chat_assign_log (phone, from_asg, to_asg, via, by_user, ts) VALUES (?, ?, ?, ?, ?, ?)").bind(String(phone || ''), String(fromAsg || ''), String(toAsg || ''), via, String(byUser || ''), ts || new Date().toISOString()).run(); } catch (_) {}
+}
 async function reasignarAlQueTrabaja(env, phone, sessionUser) {
   try {
     const slug = String(sessionUser || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
@@ -726,7 +735,9 @@ async function reasignarAlQueTrabaja(env, phone, sessionUser) {
     if (!cur) return;
     if (String(cur.assigned_to || '') === nuevoAsg) return; // ya está bien asignado
     if (['cursos', 'oculto', 'privado', 'corte', 'precotiz'].includes(String(cur.inbox || ''))) return; // no son del reparto comercial
-    await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = ?, assigned_at = ? WHERE phone = ?").bind(nuevoAsg, new Date().toISOString(), ph).run();
+    const _ts = new Date().toISOString();
+    await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = ?, assigned_at = ? WHERE phone = ?").bind(nuevoAsg, _ts, ph).run();
+    await logAsignacion(env, ph, cur.assigned_to, nuevoAsg, 'trabaja', sessionUser, _ts);
     try { await env.DB.prepare("UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?").bind(vendedor, ph).run(); } catch (_) {}
   } catch (_) {}
 }
@@ -2655,7 +2666,9 @@ async function maybeRepartirANadia(env, phone) {
       // así el mismo lead puede tocarle a uno u otro con probabilidades independientes.
       let _hv = _h; for (let _i = 0; _i < c.slug.length; _i++) _hv = (_hv * 31 + c.slug.charCodeAt(_i)) >>> 0;
       if ((_hv % 100) >= Math.round(prob * 100)) continue;             // a este lead no le toca este vendedor
-      await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = ?, assigned_at = ? WHERE phone = ?").bind(c.slug, new Date().toISOString(), phone).run();
+      const _ts = new Date().toISOString();
+      await env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = ?, assigned_at = ? WHERE phone = ?").bind(c.slug, _ts, phone).run();
+      await logAsignacion(env, phone, '', c.slug, 'reparto', 'sistema', _ts);
       try { await env.DB.prepare("UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?").bind(c.slug, phone).run(); } catch (_) {} // el brief/comisión sigue al lead
       const notif = await kvGet(env, c.phoneKv, '');
       if (notif) { try { await waSendText(env, notif, 'Tenés un lead nuevo de carteles para atender en el CRM 🙌'); } catch (_) {} }
@@ -3793,8 +3806,30 @@ async function buildReporteDiario(env) {
     ).all();
     for (const r of (rs.results || [])) {
       if (VENDEDORES_SECUNDARIOS.includes(r.assigned_to)) out.chatsNadia += (r.n || 0);
-      else if (r.assigned_to === 'joaco' || r.assigned_to === 'joaquin') out.chatsJoaco += (r.n || 0);
     }
+  } catch (_) {}
+  // 4b) Chats de Joaco hoy. Joaco = assigned_to '' (bandeja general), así que la query de arriba no lo
+  //     contaba nunca (salía siempre 0). Cuenta: consultas NUEVAS de hoy (primer mensaje de su vida hoy)
+  //     que quedaron con él (no repartidas, no cursos/oculto/privado/corte, no internos ni revendedores)
+  //     + chats que pasaron a él hoy ("el que trabaja se queda" o asignación manual → assigned_at hoy).
+  try {
+    const r = await env.DB.prepare(
+      `WITH fi AS (
+         SELECT phone FROM wa_messages
+         WHERE direction='inbound' AND msg_type!='status' AND (channel IS NULL OR channel='wa')
+           AND ts >= ${REPORTE_DIA_DESDE} AND ts < ${REPORTE_DIA_HASTA}
+         GROUP BY phone
+       )
+       SELECT COUNT(*) AS n FROM wa_chats_summary s
+       WHERE IFNULL(s.assigned_to, '') IN ('', 'joaco', 'joaquin')
+         AND IFNULL(s.inbox, '') NOT IN ('cursos', 'oculto', 'privado', 'corte')
+         AND s.phone NOT IN (SELECT phone FROM wa_internal_phones)
+         AND s.phone NOT IN (SELECT phone FROM reventa_leads)
+         AND ((s.assigned_at >= ${REPORTE_DIA_DESDE} AND s.assigned_at < ${REPORTE_DIA_HASTA})
+              OR (s.phone IN (SELECT phone FROM fi)
+                  AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = s.phone AND m.direction = 'inbound' AND m.ts < ${REPORTE_DIA_DESDE})))`
+    ).first();
+    out.chatsJoaco = (r && r.n) || 0;
   } catch (_) {}
   // 5) Órdenes de compra enviadas hoy (snapshot oc_enviadas, ya deduplicado por wamid).
   try {
@@ -4567,7 +4602,7 @@ async function processOrdenesCompra(env) {
     let nuevas = [];
     try {
       nuevas = (await env.DB.prepare(
-        "SELECT wamid, phone, body, ts FROM wa_messages" +
+        "SELECT wamid, phone, body, ts, sender_name FROM wa_messages" +
         " WHERE direction='outbound' AND msg_type!='status'" +
         "   AND ts >= datetime('now','-6 hours')" +
         "   AND body LIKE '%Orden de compra:%'" +
@@ -4578,8 +4613,10 @@ async function processOrdenesCompra(env) {
     for (const row of nuevas) {
       const oc = parseOC(row.body, row.phone);
       if (!oc || !oc.phone) continue;
-      let vendedor = 'joaco';
-      try { vendedor = await resolveComercial(env, { phone: oc.phone }); } catch (_) {}
+      // Vendedor = quien MANDÓ la OC si salió del CRM (sender_name = slug, ver /admin/wa/send); si no
+      // (celular / admin), el dueño del chat como antes.
+      let vendedor = adhocSenderSlug(row.sender_name);
+      if (!vendedor) { vendedor = 'joaco'; try { vendedor = await resolveComercial(env, { phone: oc.phone }); } catch (_) {} }
       try {
         await env.DB.prepare(
           "INSERT OR IGNORE INTO oc_enviadas (wamid, phone, cartel, importe, canal, vendedor, ts_out, notified, created_at) VALUES (?,?,?,?,?,?,?,0,?)"
@@ -14100,6 +14137,12 @@ function adhocSenderSlug(user) {
   if (k === 'joaquin' || k === 'joaco') return 'joaco';
   return VENDEDORES_SECUNDARIOS.includes(k) ? k : '';
 }
+// Autor de una acción para el panel de rendimiento: slug del vendedor (joaco/facundo/agustina) o, si
+// no es vendedor, el usuario en minúscula (gaspar, abril…). A diferencia de resolveComercial, NO cae
+// al dueño del chat: registra quién lo hizo de verdad.
+function autorSlug(user) {
+  return adhocSenderSlug(user) || String(user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+}
 
 // Registra en el chat una plantilla ad-hoc ya enviada (reuso inmediato o envío del cron cuando Meta
 // la aprueba). La escribió una persona → automated=0 (sin badge "automático"; el bot de precotización
@@ -16578,10 +16621,14 @@ const handler = {
         const r = await waSend(env, payload);
         await logWaEvent(env, { to, kind: 'text', ref: reply_to || '', ok: r.ok, messageId: r.id, error: r.error });
         if (!r.ok) return json({ error: r.error, raw: r.raw }, r.status || 500);
+        // sender_name = quién lo escribió (panel de rendimiento): slug del vendedor (joaco/facundo/
+        // agustina) o el usuario en minúscula (gaspar, abril…). En salientes no se muestra ni toca el
+        // nombre del contacto (el trigger de la lista solo lee sender_name de los inbound).
+        const _autor = autorSlug(session.user);
         try {
           await env.DB.prepare(
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-          ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, '', 'text', String(text), '', reply_to || '', 'sent').run();
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num || to, _autor, 'text', String(text), '', reply_to || '', 'sent').run();
         } catch (_) {}
         // Auto-etiquetar ALUMNO (id 26): si Abril manda el mensaje de ALTA al programa (el de
         // "LEE BIEN A CONCIENCIA..." o el link a la plataforma alinfinito.app.clientclub.net),
@@ -18332,10 +18379,12 @@ const handler = {
         const validos = ['', 'joaco', ...VENDEDORES_SECUNDARIOS];
         if (!validos.includes(to)) return json({ error: 'assigned_to inválido' }, 400);
         const now = new Date().toISOString();
+        let _prevAsg = ''; try { const _p = await env.DB.prepare("SELECT assigned_to FROM wa_chats_summary WHERE phone = ?").bind(phone).first(); _prevAsg = String((_p && _p.assigned_to) || ''); } catch (_) {}
         await env.DB.prepare(
           `INSERT INTO wa_chats_summary (phone, assigned_to, assigned_at, updated_at) VALUES (?, ?, ?, ?)
            ON CONFLICT(phone) DO UPDATE SET assigned_to = excluded.assigned_to, assigned_at = excluded.assigned_at`
         ).bind(phone, to, to ? now : '', now).run();
+        if (_prevAsg !== to) await logAsignacion(env, phone, _prevAsg, to, 'manual', session.user, now);
         // El brief/comisión sigue al lead: al reasignar, movemos el comercial_id de los briefs de
         // este chat al vendedor asignado (secundario -> él; sin asignar / Joaco -> 'joaco').
         try { const _bc = VENDEDORES_SECUNDARIOS.includes(to) ? to : 'joaco'; await env.DB.prepare("UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?").bind(_bc, phone).run(); } catch (_) {}
@@ -20532,6 +20581,8 @@ const handler = {
         await env.DB.prepare(
           'UPDATE briefs SET estado = ?, enviado_at = ?, updated_at = ?, sheet_row = COALESCE(?, sheet_row), precio_final = COALESCE(?, precio_final) WHERE id = ?'
         ).bind('enviado', now, now, body.sheet_row ?? null, body.precio_final ?? null, id).run();
+        // Quién lo mandó (mig. 048; aparte para que el envío no falle si la columna no está).
+        try { await env.DB.prepare('UPDATE briefs SET enviado_por = ? WHERE id = ?').bind(autorSlug(session.user), id).run(); } catch (_) {}
         const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(id).first();
         return json({ brief });
       }
