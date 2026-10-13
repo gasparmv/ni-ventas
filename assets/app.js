@@ -5480,6 +5480,7 @@ function logiCeldaGuardar(key, campo, valor) {
     }
     // Error: un texto queda en rojo (se reintenta al volver a editarlo); select y casilla vuelven a como estaban.
     const msg = logiErrTxt(j, status);
+    if (!status) logiVigia('error', 'guardar:' + campo, etiqueta, { key }); // sin respuesta del server (las otras las registra él)
     if (ultimo) { if (c.ed === 'txt') STATE._logiCel[ck] = { st: 'error', val: valor, msg, status }; else delete STATE._logiCel[ck]; }
     logiPatchFila(key); logiContadores();
     niToast(campo === 'enviado' ? etiqueta + ': ' + msg : `No se guardó ${c.nom || campo} de ${etiqueta}: ${msg}`, { error: true, ms: 5000 });
@@ -5498,8 +5499,8 @@ async function logiEstadoCambiar(key, v, o) {
   if (v === prev) { logiPatchFila(key); return; }
   logiFocoGrilla();
   if (v === 'enviado') {
-    if (p.pedido_pagado === false) { logiPatchFila(key); niToast(etiqueta + ': el pedido está impago, todavía no se puede enviar', { error: true, ms: 5000 }); return; }
-    if (p.entrega !== 'envio') { logiPatchFila(key); niToast(etiqueta + ': falta definir si retira o va por envío. Consultá con Neon', { error: true, ms: 5000 }); return; }
+    if (p.pedido_pagado === false) { logiPatchFila(key); logiVigia('uso', 'freno:impago', etiqueta, { key }); niToast(etiqueta + ': el pedido está impago, todavía no se puede enviar', { error: true, ms: 5000 }); return; }
+    if (p.entrega !== 'envio') { logiPatchFila(key); logiVigia('uso', 'freno:sin_definir', etiqueta, { key }); niToast(etiqueta + ': falta definir si retira o va por envío. Consultá con Neon', { error: true, ms: 5000 }); return; }
     if (!logiValor(p, 'envio_pagado')) { const j1 = await logiCeldaGuardar(key, 'envio_pagado', true); if (!j1) return; }
     const j = await logiCeldaGuardar(key, 'enviado', true);
     if (j) niToast(etiqueta + ' enviado', { undo: () => logiEstadoCambiar(key, 'contactado', { sinConfirmar: true }), ms: 5000 });
@@ -5797,9 +5798,13 @@ async function logisticaCargar(opts) {
   if (!silent) STATE._logiPendiente = true;
   STATE._logiInflight = (STATE._logiInflight || 0) + 1;
   const t0 = Date.now();
-  let r = null;
-  try { r = await fetch(CONFIG.trackerUrl + '/admin/logistica/paquetes' + (STATE.logiTanda ? '?tanda_id=' + encodeURIComponent(STATE.logiTanda) : ''), { headers: authHeaders() }).then(x => x.json()); } catch (_) { r = null; }
+  let r = null, st = 0;
+  try { const x = await fetch(CONFIG.trackerUrl + '/admin/logistica/paquetes' + (STATE.logiTanda ? '?tanda_id=' + encodeURIComponent(STATE.logiTanda) : ''), { headers: authHeaders() }); st = x.status; r = await x.json().catch(() => null); } catch (_) { r = null; }
   STATE._logiInflight = Math.max(0, (STATE._logiInflight || 1) - 1);
+  // Vigía: la primera carga de la página (con su tiempo) y la que no tuvo respuesta del server (las que respondió mal ya
+  // las registra el server). Las de fondo sin red (compu dormida, wifi) no cuentan.
+  if (r && r.ok) { if (!STATE._logiVigAbrio) { STATE._logiVigAbrio = true; logiVigia('uso', 'abrir', '', { ms: Date.now() - t0 }); } }
+  else if (!silent && !st) logiVigia('error', 'cargar', 'sin conexión o el servidor no respondió', { ms: Date.now() - t0 });
   if (gen !== STATE._logiGen) return;
   if (!silent) STATE._logiPendiente = false;
   if (silent && ((STATE._logiMarcando || 0) > 0 || (STATE._logiMutAt || 0) >= t0)) return;
@@ -5895,6 +5900,31 @@ async function logiPost(path, body) {
     }
   }
 }
+// Vigía de logística (le avisa a Gaspar si algo no anda): lo que el server no ve se le manda en tandas a
+// POST /admin/logistica/vigia. tipo 'error' (página, sin conexión, ventana bloqueada) o 'uso' (WhatsApp, Copiar, Excel,
+// Imprimir, semana, Enviado frenado, 'abrir' con el tiempo de carga). Nunca traba ni muestra nada: si falla, se pierde.
+function logiVigia(tipo, accion, detalle, extra) {
+  try {
+    if (!STATE.token) return;
+    const ev = { tipo, accion: String(accion || '').slice(0, 60), detalle: String(detalle == null ? '' : detalle).slice(0, 300), ...(extra || {}) };
+    const firma = tipo + '|' + ev.accion + '|' + ev.detalle, ahora = Date.now();
+    const F = STATE._logiVigFirmas = STATE._logiVigFirmas || {};
+    if (ahora - (F[firma] || 0) < 5000) return; // el mismo evento repetido al toque (doble click, error en cadena)
+    F[firma] = ahora;
+    STATE._logiVigN = (STATE._logiVigN || 0) + 1; if (STATE._logiVigN > 300) return; // tope por carga de la página
+    (STATE._logiVigCola = STATE._logiVigCola || []).push(ev);
+    clearTimeout(STATE._logiVigT); STATE._logiVigT = setTimeout(logiVigiaFlush, tipo === 'error' ? 500 : 5000);
+  } catch (_) {}
+}
+function logiVigiaFlush() {
+  try {
+    const cola = STATE._logiVigCola || []; if (!cola.length || !STATE.token) return;
+    STATE._logiVigCola = cola.slice(25);
+    const op = logiOperador();
+    fetch(CONFIG.trackerUrl + '/admin/logistica/vigia', { method: 'POST', keepalive: true, headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ eventos: cola.slice(0, 25), ...(op ? { operador: op } : {}) }) }).catch(() => {});
+    if (STATE._logiVigCola.length) { clearTimeout(STATE._logiVigT); STATE._logiVigT = setTimeout(logiVigiaFlush, 1000); }
+  } catch (_) {}
+}
 function logiEsMovil() { const ua = navigator.userAgent || ''; return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(ua)); }
 // WhatsApp con el mensaje armado. Se abre DENTRO del click (si no, el navegador lo bloquea). En la compu va siempre a la
 // misma pestaña ('wa_logistica', WhatsApp Web) para no llenar el navegador de pestañas; en el celular, wa.me (la app).
@@ -5905,7 +5935,8 @@ function logiWhatsApp(key) {
   if (!tel) { niToast('Este cliente no tiene teléfono: consultá con Neon', { error: true }); return; }
   const txt = encodeURIComponent(logiMensaje(p)), movil = logiEsMovil();
   const w = movil ? window.open('https://wa.me/' + tel + '?text=' + txt, '_blank') : window.open('https://web.whatsapp.com/send?phone=' + tel + '&text=' + txt, 'wa_logistica');
-  if (!w && !movil) { niToast('Permití las ventanas emergentes para abrir WhatsApp', { error: true }); return; }
+  if (!w && !movil) { logiVigia('error', 'whatsapp_bloqueado', logiNombre(p.cliente) || '', { key }); niToast('Permití las ventanas emergentes para abrir WhatsApp', { error: true }); return; }
+  logiVigia('uso', 'whatsapp', logiNombre(p.cliente) || '', { key });
   try { if (w && !movil) w.focus(); } catch (_) {}
   const ce = logiValor(p, 'contacto_estado');
   if (!logiEnv(p) && !logiValor(p, 'envio_pagado') && (ce === '' || ce === 'no_contesta')) logiCeldaGuardar(key, 'contacto_estado', 'escrito');
@@ -5926,6 +5957,7 @@ async function logiCopiar(txt, okMsg) {
     try { ok = document.execCommand('copy'); } catch (__) {}
     ta.remove();
   }
+  logiVigia(ok ? 'uso' : 'error', ok ? (okMsg === 'Dirección copiada' ? 'copiar_dir' : (okMsg === 'Texto copiado' ? 'copiar_texto' : 'copiar_celda')) : 'copiar', '');
   niToast(ok ? (okMsg || 'Copiado') : 'No se pudo copiar', ok ? {} : { error: true });
 }
 function logiFiltroTxt() {
@@ -5957,13 +5989,14 @@ function logiExcel() {
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
     niToast('Bajando ' + lista.length + ' envío' + (lista.length === 1 ? '' : 's') + logiFiltroTxt());
-  } catch (_) { niToast('No se pudo armar el archivo', { error: true }); }
+    logiVigia('uso', 'excel', lista.length + ' envíos' + logiFiltroTxt());
+  } catch (e) { logiVigia('error', 'excel', 'no se pudo armar el archivo: ' + String((e && e.message) || e)); niToast('No se pudo armar el archivo', { error: true }); }
 }
 // Imprimir: la tabla (con el filtro de ahora) en A4 apaisado, sin botones, con la hora de impresión. La ventana se abre
 // antes de cualquier await y se le escribe el HTML (nunca una URL con el token).
 function logiImprimir() {
   const L = STATE.logi; if (!L || !L.tanda) return;
-  const w = window.open('', '_blank'); if (!w) { niToast('Permití las ventanas emergentes para imprimir', { error: true }); return; }
+  const w = window.open('', '_blank'); if (!w) { logiVigia('error', 'imprimir_bloqueado', ''); niToast('Permití las ventanas emergentes para imprimir', { error: true }); return; }
   const esc = s => escapeHtml(String(s == null ? '' : s));
   const lista = logiVisibles(logiPaquetes());
   const fD = logiFechaCorteDate(L.tanda.fecha);
@@ -6003,7 +6036,8 @@ tr{break-inside:avoid}thead{display:table-header-group}small{font-size:6.6pt;col
 <table><colgroup>${cols}</colgroup><thead>${grupos ? `<tr class="g">${grupos}</tr>` : ''}<tr>${head}</tr></thead><tbody>${lista.length ? lista.map(fila).join('') : `<tr><td colspan="${LOGI_COLS.length}">Nada para imprimir</td></tr>`}</tbody></table>
 <script>window.onload=function(){window.print()}<\/script></body></html>`);
     w.document.close();
-  } catch (_) {}
+    logiVigia('uso', 'imprimir', lista.length + ' envíos' + logiFiltroTxt());
+  } catch (e) { logiVigia('error', 'imprimir', String((e && e.message) || e)); }
 }
 function logiPasswordModal() {
   return new Promise(resolve => {
@@ -6066,6 +6100,21 @@ function logiBindGlobal() {
     if (STATE.view === 'logistica' && ae && ae.classList && ae.classList.contains('logi-scroll')) logiPaste(e);
   });
   window.addEventListener('resize', () => { if (STATE.view === 'logistica') { logiAjustarAlto(); logiPopUbicar(); } });
+  // Vigía: los errores de la página mientras se usa la pantalla de logística. Afuera: los de extensiones del navegador, el
+  // "ResizeObserver loop" (inofensivo) y los cortes de red (los de la lista y los guardados ya se registran aparte).
+  window.addEventListener('error', e => {
+    if (STATE.view !== 'logistica') return;
+    const msg = String((e && e.message) || ''), src = String((e && e.filename) || '');
+    if (!msg || /ResizeObserver loop|^Script error\.?$/i.test(msg) || (src && !src.startsWith(location.origin))) return;
+    logiVigia('error', 'js', msg + (src ? ' (' + src.split('/').pop().split('?')[0] + ':' + (e.lineno || '?') + ')' : ''));
+  });
+  window.addEventListener('unhandledrejection', e => {
+    if (STATE.view !== 'logistica') return;
+    const r = e && e.reason, msg = String((r && (r.message || r)) || '');
+    if (!msg || /ResizeObserver loop|AbortError|Failed to fetch|NetworkError|Load failed/i.test(msg)) return;
+    logiVigia('error', 'js', 'promesa: ' + msg.slice(0, 200));
+  });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') logiVigiaFlush(); });
 }
 function bindLogistica() {
   if (!STATE.logi && !STATE._logiPendiente) logisticaCargar({});
@@ -6078,6 +6127,7 @@ function bindLogistica() {
     if (STATE._logiEd) logiEdCerrar(true);
     logiPopCerrar();
     STATE.logiTanda = id; STATE.logi = undefined; STATE.logiSel = null; STATE._logiCel = {}; STATE._logiKeep = {}; STATE._logiScroll = null; STATE.logiOpen = {}; STATE._logiOtroKey = null;
+    logiVigia('uso', 'semana', String(id));
     logisticaCargar({}); render();
   }; });
   $$('[data-logi-excel]', b => { b.onclick = () => logiExcel(); });

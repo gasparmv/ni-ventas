@@ -6128,6 +6128,292 @@ async function logiTransportesLista(env) {
   }
   return out.concat(extra.sort((a, b) => a.localeCompare(b, 'es', { sensitivity: 'base' })));
 }
+// ===== VIGÍA DE LOGÍSTICA (13-oct-2026, migrations/050_logistica_vigia.sql) =====
+// Pedido de Gaspar: que algo mire la pantalla de logística mientras Siempre a Tiempo la usa y le avise por WhatsApp si
+// algo no anda. Tabla logistica_vigia, un renglón por evento:
+//  · origen 'server' (handler.fetch → logiVigiaFin): cada POST a /admin/logistica/* con su tiempo, y los GET que fallan o
+//    tardan más de LOGI_VIGIA_LENTO_MS.
+//  · origen 'front' (POST /admin/logistica/vigia): lo que el server no ve. Errores de la página (JS, sin conexión, WhatsApp
+//    o Imprimir bloqueados por el navegador) y el uso de lo que no pasa por el server (WhatsApp, Copiar, Excel, Imprimir,
+//    cambio de semana, "Enviado" frenado en la pantalla por impago), más 'abrir' con el tiempo de carga.
+// tipo: ok | bloqueo (409, el freno de impago: esperable) | error | lento | uso. avisado=1: ya se le avisó a Gaspar.
+// processLogiVigia (cron */5, 7-22 AR) avisa por WhatsApp: errores y cargas lentas, datos raros de la semana (envío pagado
+// sin enviar, enviado con el pedido impago), la PRIMERA vez que anda cada función y un resumen a las 13 y a las 19 AR si
+// hubo movimiento. Kill-switch kv 'logistica_vigia_on' (def '1'). GET /admin/logistica/vigia (admin) lo muestra.
+let _logiVigiaSchemaOk = false;
+const LOGI_VIGIA_COLS = 'id, ts, usuario, operador, origen, tipo, accion, cliente_key, status, ms, detalle, avisado';
+async function ensureLogiVigiaSchema(env) {
+  if (_logiVigiaSchemaOk) return true;
+  try { await env.DB.prepare(`SELECT ${LOGI_VIGIA_COLS} FROM logistica_vigia LIMIT 0`).all(); _logiVigiaSchemaOk = true; return true; } catch (_) {}
+  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS logistica_vigia (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, usuario TEXT, operador TEXT, origen TEXT, tipo TEXT, accion TEXT, cliente_key TEXT, status INTEGER, ms INTEGER, detalle TEXT, avisado INTEGER DEFAULT 0)').run(); } catch (_) {}
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_logistica_vigia_ts ON logistica_vigia(ts)').run(); } catch (_) {}
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_logistica_vigia_aviso ON logistica_vigia(avisado, tipo)').run(); } catch (_) {}
+  try { await env.DB.prepare(`SELECT ${LOGI_VIGIA_COLS} FROM logistica_vigia LIMIT 0`).all(); _logiVigiaSchemaOk = true; } catch (_) {}
+  return _logiVigiaSchemaOk;
+}
+const LOGI_VIGIA_LENTO_MS = 8000;
+function logiVigiaStmt(env, e) {
+  const num = v => (v == null || v === '' || !isFinite(+v)) ? null : Math.max(0, Math.round(+v));
+  return env.DB.prepare('INSERT INTO logistica_vigia (ts, usuario, operador, origen, tipo, accion, cliente_key, status, ms, detalle, avisado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)')
+    .bind(new Date().toISOString(), String(e.usuario || '').slice(0, 40), String(e.operador || '').replace(/\s+/g, ' ').trim().slice(0, 40), e.origen === 'front' ? 'front' : 'server',
+      String(e.tipo || 'ok').slice(0, 12), String(e.accion || '').slice(0, 60), String(e.cliente_key || '').slice(0, 80), num(e.status), num(e.ms),
+      String(e.detalle == null ? '' : e.detalle).replace(/\s+/g, ' ').trim().slice(0, 300));
+}
+// handler.fetch: si es un pedido de la pantalla de logística, lo necesario para registrarlo al terminar (o null). Del POST
+// se guarda una copia del cuerpo para leer campo / key / operador (la de /password no: lleva la contraseña).
+function logiVigiaInicio(request) {
+  try {
+    if (request.method !== 'GET' && request.method !== 'POST') return null;
+    const path = new URL(request.url).pathname;
+    if (!path.startsWith('/admin/logistica/') || path === '/admin/logistica/vigia') return null; // los avisos de la pantalla se guardan solos
+    return { t0: Date.now(), path, method: request.method, copia: request.method === 'POST' && path !== '/admin/logistica/password' ? request.clone() : null };
+  } catch (_) { return null; }
+}
+// Registro en logistica_vigia sin demorar la respuesta (waitUntil): todos los POST; los GET solo si fallan o tardan. Del
+// cuerpo, solo campo / key / accion / operador; el valor tipeado, solo si no se guardó (para ver qué se intentó).
+function logiVigiaFin(lv, request, res, err, env, ctx) {
+  try {
+    const ms = Date.now() - lv.t0, status = res ? res.status : 500;
+    const soltar = () => { try { if (lv.copia && lv.copia.body) lv.copia.body.cancel().catch(() => {}); } catch (_) {} };
+    if (status === 401 || (lv.method === 'GET' && status < 400 && !err && ms < LOGI_VIGIA_LENTO_MS)) { soltar(); return; }
+    const resCopia = status >= 400 && res ? res.clone() : null;
+    ctx.waitUntil((async () => {
+      let body = {};
+      if (lv.copia) { try { body = (await lv.copia.json()) || {}; } catch (_) {} }
+      if (!(await ensureLogiVigiaSchema(env))) return;
+      let rj = {}; if (resCopia) { try { rj = (await resCopia.json()) || {}; } catch (_) {} }
+      let usuario = ''; try { const s = await getSession(env, request); usuario = (s && s.user) || ''; } catch (_) {}
+      const accion = lv.path.replace('/admin/logistica/', '') + (body.campo ? ':' + body.campo : '') + (body.accion ? ':' + body.accion : '');
+      const tipo = (err || (status >= 400 && status !== 409)) ? 'error' : (status === 409 ? 'bloqueo' : (ms >= LOGI_VIGIA_LENTO_MS ? 'lento' : 'ok'));
+      const detalle = tipo === 'error' || tipo === 'bloqueo'
+        ? [rj.motivo || rj.message || rj.error || (err ? String((err && err.message) || err) : ''), body.valor != null && body.valor !== '' ? 'valor: ' + String(body.valor).slice(0, 60) : ''].filter(Boolean).join(' · ')
+        : '';
+      await logiVigiaStmt(env, { usuario, operador: body.operador, origen: 'server', tipo, accion, cliente_key: body.key, status, ms, detalle }).run();
+    })().catch(() => {}));
+  } catch (_) {}
+}
+// WhatsApp del vigía a Gaspar: con la ventana de 24 h abierta, texto libre; si no, la plantilla interna aviso_interno_crm
+// (UTILITY, {{1}} en una sola línea) y, como último recurso, texto libre igual. → true si salió.
+async function logiVigiaEnviar(env, texto) {
+  const ph = String(env.ADMIN_NOTIFY_PHONE || '5491155604999').replace(/\D/g, '');
+  const t = String(texto || '').trim();
+  let r = null;
+  try {
+    const desde = new Date(Date.now() - 23 * 3600 * 1000).toISOString();
+    const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status', 'reaction') AND ts > ? LIMIT 1").bind(ph, desde).first();
+    if (inb) r = await waSendText(env, ph, t.slice(0, 3500));
+  } catch (_) {}
+  if (!r || !r.ok) { try { r = await waSendTemplate(env, ph, 'aviso_interno_crm', 'es_AR', [t.replace(/\s*\n+\s*/g, ' · ').replace(/\s+/g, ' ').slice(0, 800)]); } catch (_) {} }
+  if (!r || !r.ok) { try { r = await waSendText(env, ph, t.slice(0, 3500)); } catch (_) {} }
+  return !!(r && r.ok);
+}
+// Funciones de la pantalla que el vigía reporta la primera vez que andan (en el orden en que se suelen usar).
+const LOGI_VIGIA_FUNCIONES = [
+  ['abrir', 'abrir la pantalla'], ['contactado', 'pasar a Contactado'], ['whatsapp', 'el botón de WhatsApp'],
+  ['direccion', 'corregir la dirección'], ['transporte', 'elegir el transporte'], ['transporte_nuevo', 'un transporte propio'],
+  ['costo', 'cargar el costo'], ['enviado', 'pasar a Enviado'], ['freno_impago', 'el freno de impago'], ['copiar', 'copiar la dirección'],
+  ['excel', 'Descargar Excel'], ['imprimir', 'Imprimir'], ['semana', 'cambiar de semana'],
+];
+const LOGI_VIGIA_CAMPOS = { contacto_estado: 'el estado', enviado: 'Enviado', envio_pagado: 'el envío pagado', transporte: 'el transporte', envio_costo: 'el costo', seguimiento: 'el seguimiento', bultos: 'los bultos', nota: 'la nota', recibe: 'quién recibe', dni: 'el DNI', calle: 'la calle', localidad: 'la localidad', provincia: 'la provincia', cp: 'el CP', tel_alt: 'el otro teléfono', obs: 'las observaciones' };
+// Evento → función de la lista (o null). src 'log': una acción guardada (logistica_log); 'vig': un evento del vigía (uso / bloqueo).
+function logiVigiaFuncion(src, accion, nota) {
+  const a = String(accion || ''), n = String(nota == null ? '' : nota);
+  if (src === 'log') {
+    if (a === 'celda:contacto_estado') return n === 'confirmado' || n === 'escrito' ? 'contactado' : null;
+    if (a === 'celda:enviado') return n === 'sí' ? 'enviado' : null;
+    if (a === 'celda:transporte') return n ? (LOGI_TRANSPORTES.some(x => logiNormTxt(x) === logiNormTxt(n)) ? 'transporte' : 'transporte_nuevo') : null;
+    if (a === 'celda:envio_costo') return n ? 'costo' : null;
+    if (LOGI_DIR_CAMPOS.some(c => a === 'celda:' + c)) return 'direccion';
+    return null;
+  }
+  if (['abrir', 'whatsapp', 'excel', 'imprimir', 'semana'].includes(a)) return a;
+  if (a.startsWith('copiar')) return 'copiar';
+  if (a === 'freno:impago' || a === 'celda:enviado') return 'freno_impago';
+  return null;
+}
+function logiVigiaNombre(s) { return String(s || '').replace(/([a-záéíóúñü])([A-ZÁÉÍÓÚÑÜ])/g, '$1 $2').replace(/\s+/g, ' ').trim(); }
+function logiVigiaSeg(ms) { return String(Math.round((+ms || 0) / 100) / 10).replace('.', ','); }
+// La semana que ve logística (la más nueva, sin direcciones: sin LTV ni IA, solo la base). null si falla.
+async function logiVigiaSemana(env) {
+  try { return await logisticaPaquetes(env, 0, { rol: 'logistica', sinDirecciones: true }); } catch (_) { return null; }
+}
+function logiVigiaNombres(sem) { const m = {}; ((sem && sem.paquetes) || []).forEach(p => { m[p.key] = logiVigiaNombre(p.cliente) || p.key; }); return m; }
+// Movimiento entre `desde` y `hasta` (ISO; hasta opcional): las acciones guardadas (logistica_log) y los eventos del vigía.
+async function logiVigiaMovimiento(env, desde, hasta) {
+  const h = hasta || '9999';
+  let log = [], vig = [];
+  try { log = (await env.DB.prepare('SELECT id, tanda_id, cliente_key, ts, accion, nota, operador, usuario FROM logistica_log WHERE ts >= ? AND ts < ? ORDER BY id LIMIT 3000').bind(desde, h).all()).results || []; } catch (_) {}
+  try { vig = (await env.DB.prepare(`SELECT ${LOGI_VIGIA_COLS} FROM logistica_vigia WHERE ts >= ? AND ts < ? ORDER BY id LIMIT 5000`).bind(desde, h).all()).results || []; } catch (_) {}
+  return { log, vig };
+}
+// Datos raros de la semana (lo que la pantalla no debería dejar): el envío pagado sin figurar Enviado (más de 10 min, para no
+// agarrar el instante entre las dos marcas de "Enviado") y Enviado con el pedido impago.
+function logiVigiaRaros(sem) {
+  const out = [];
+  if (!sem || !sem.tanda) return out;
+  const ahora = Date.now();
+  for (const p of sem.paquetes || []) {
+    const nom = logiVigiaNombre(p.cliente) || p.key;
+    if (p.envio_pagado && !p.despachado && (!p.envio_pagado_at || ahora - new Date(p.envio_pagado_at).getTime() > 10 * 60 * 1000))
+      out.push({ k: 'envpag:' + sem.tanda.id + ':' + p.key, txt: '⚠️ ' + nom + ' quedó con el envío pagado pero no figura Enviado' });
+    if (p.despachado && p.pedido_pagado === false)
+      out.push({ k: 'impago:' + sem.tanda.id + ':' + p.key, txt: '🚨 ' + nom + ' figura Enviado con el pedido impago' });
+  }
+  return out;
+}
+// Una línea del aviso por cada error o carga lenta.
+function logiVigiaLineaError(r, nombres) {
+  const a = String(r.accion || ''), quien = r.cliente_key ? (nombres[r.cliente_key] || '…' + String(r.cliente_key).slice(-4)) : '';
+  const cola = ' · ' + [r.operador || r.usuario || '', _arHHMM(r.ts)].filter(Boolean).join(' ');
+  const campo = c => LOGI_VIGIA_CAMPOS[c] || c;
+  if (r.tipo === 'lento') return '🐢 ' + (a === 'paquetes' ? 'La lista tardó ' : 'Guardar ' + campo(a.split(':')[1] || a) + (quien ? ' de ' + quien : '') + ' tardó ') + logiVigiaSeg(r.ms) + ' s' + cola;
+  if (r.origen === 'front') {
+    if (a === 'js') return '⚠️ Error en la pantalla: ' + (r.detalle || '') + cola;
+    if (a === 'cargar') return '⚠️ No cargó la lista: ' + (r.detalle || 'sin conexión') + cola;
+    if (a.startsWith('guardar:')) return '⚠️ No se guardó ' + campo(a.slice(8)) + (quien ? ' de ' + quien : '') + ': sin conexión' + cola;
+    if (a === 'whatsapp_bloqueado') return '⚠️ El navegador bloqueó WhatsApp: en esa compu hay que permitir las ventanas emergentes' + cola;
+    if (a === 'imprimir_bloqueado') return '⚠️ El navegador bloqueó Imprimir: en esa compu hay que permitir las ventanas emergentes' + cola;
+    if (a === 'copiar') return '⚠️ No se pudo copiar al portapapeles' + cola;
+    return '⚠️ ' + a + (r.detalle ? ': ' + r.detalle : '') + cola;
+  }
+  if (a.startsWith('celda:')) return '⚠️ No se guardó ' + campo(a.slice(6)) + (quien ? ' de ' + quien : '') + ' (error ' + (r.status || '?') + (r.detalle ? ': ' + r.detalle : '') + ')' + cola;
+  if (a === 'paquetes') return '⚠️ La lista no cargó (error ' + (r.status || '?') + (r.detalle ? ': ' + r.detalle : '') + ')' + cola;
+  return '⚠️ Error ' + (r.status || '') + ' en ' + a + (quien ? ' de ' + quien : '') + (r.detalle ? ': ' + r.detalle : '') + cola;
+}
+// La PRIMERA vez que anda cada función usada por logística (no admin), entre los eventos de `mov` (ya filtrados por fecha).
+function logiVigiaPrimeras(mov, hechas, nombres) {
+  const visto = new Set(Object.keys(hechas || {})), ev = [];
+  for (const r of mov.log) if (esUsuarioLogistica(r.usuario)) { const f = logiVigiaFuncion('log', r.accion, r.nota); if (f) ev.push({ f, ts: r.ts, key: r.cliente_key, nota: r.nota }); }
+  for (const r of mov.vig) if (esUsuarioLogistica(r.usuario) && (r.tipo === 'uso' || r.tipo === 'bloqueo')) { const f = logiVigiaFuncion('vig', r.accion, ''); if (f) ev.push({ f, ts: r.ts, key: r.cliente_key, nota: '', op: r.operador }); }
+  ev.sort((x, y) => String(x.ts).localeCompare(String(y.ts)));
+  const nuevas = [];
+  for (const e of ev) {
+    if (visto.has(e.f)) continue;
+    visto.add(e.f);
+    const def = LOGI_VIGIA_FUNCIONES.find(x => x[0] === e.f);
+    const datos = [(e.f === 'transporte' || e.f === 'transporte_nuevo') ? String(e.nota || '') : '', e.key ? (nombres[e.key] || '') : '', e.f === 'abrir' ? (e.op || '') : ''].filter(Boolean).join(', ');
+    nuevas.push({ f: e.f, ts: e.ts, txt: (def ? def[1] : e.f) + (datos ? ' (' + datos + ')' : '') });
+  }
+  return nuevas;
+}
+// Resumen del día: qué se usó, cómo va la semana y qué revisar. null si logística no tocó nada.
+function logiVigiaResumen(mov, sem, titulo) {
+  const log = mov.log.filter(r => esUsuarioLogistica(r.usuario)), vig = mov.vig.filter(r => esUsuarioLogistica(r.usuario));
+  if (!log.length && !vig.length) return null;
+  const ops = {};
+  for (const r of [...log, ...vig]) { const o = String(r.operador || '').trim() || 'sin nombre', t = String(r.ts), x = ops[o] = ops[o] || { a: t, b: t }; if (t < x.a) x.a = t; if (t > x.b) x.b = t; }
+  const quienes = Object.entries(ops).map(([o, x]) => o + ' (' + _arHHMM(x.a) + (_arHHMM(x.a) !== _arHHMM(x.b) ? ' a ' + _arHHMM(x.b) : '') + ')').join(', ');
+  const clientes = pred => new Set(log.filter(pred).map(r => r.cliente_key)).size;
+  const contactados = clientes(r => r.accion === 'celda:contacto_estado' && (r.nota === 'confirmado' || r.nota === 'escrito'));
+  const enviados = clientes(r => r.accion === 'celda:enviado' && r.nota === 'sí');
+  const atras = log.filter(r => r.accion === 'celda:enviado' && r.nota === 'no').length;
+  const trs = log.filter(r => r.accion === 'celda:transporte' && r.nota), trVals = [...new Set(trs.map(r => String(r.nota)))];
+  const costos = clientes(r => r.accion === 'celda:envio_costo' && r.nota);
+  const dirs = log.filter(r => LOGI_DIR_CAMPOS.some(c => r.accion === 'celda:' + c));
+  const uso = pred => vig.filter(r => r.tipo === 'uso' && pred(String(r.accion || ''))).length;
+  const frenos = vig.filter(r => (r.tipo === 'uso' && r.accion === 'freno:impago') || (r.tipo === 'bloqueo' && r.accion === 'celda:enviado')).length;
+  const errores = vig.filter(r => r.tipo === 'error').length, lentos = vig.filter(r => r.tipo === 'lento').length;
+  const cargas = vig.filter(r => r.tipo === 'uso' && r.accion === 'abrir' && r.ms != null).map(r => +r.ms);
+  const l = ['🛰️ Vigía de logística · ' + titulo];
+  l.push('Usaron el panel: ' + quienes);
+  l.push('Contactados: ' + contactados + ' · Enviados: ' + enviados + (atras ? ' · Volvieron atrás: ' + atras : ''));
+  l.push('Transporte: ' + trs.length + (trVals.length ? ' (' + trVals.slice(0, 4).join(', ') + ')' : '') + ' · Costo: ' + costos + ' · Dirección: ' + dirs.length + (dirs.length ? ' datos en ' + new Set(dirs.map(r => r.cliente_key)).size + ' clientes' : ''));
+  l.push('WhatsApp: ' + uso(a => a === 'whatsapp') + ' · Copiar: ' + uso(a => a.startsWith('copiar')) + ' · Excel: ' + uso(a => a === 'excel') + ' · Imprimir: ' + uso(a => a === 'imprimir'));
+  if (frenos) l.push('Frenados por impago: ' + frenos);
+  l.push('Errores: ' + (errores || 'ninguno') + (lentos ? ' · Cargas lentas: ' + lentos : '') + (cargas.length ? ' · La lista abre en ' + logiVigiaSeg(cargas.reduce((s, x) => s + x, 0) / cargas.length) + ' s' : ''));
+  if (sem && sem.tanda) {
+    let sin = 0, con = 0, env = 0, imp = 0; const sinCosto = [], sinTr = [];
+    for (const p of sem.paquetes || []) {
+      const nom = logiVigiaNombre(p.cliente) || p.key;
+      if (p.despachado) { env++; if (p.envio_costo == null || p.envio_costo === '') sinCosto.push(nom); if (!p.transporte || p.transporte_sugerido) sinTr.push(nom); }
+      else if (['escrito', 'confirmado', 'listo'].includes(String(p.contacto_estado || ''))) con++;
+      else sin++;
+      if (p.pedido_pagado === false && !p.despachado) imp++;
+    }
+    const total = (sem.paquetes || []).length, sem_ = String(sem.tanda.fecha || '').split('/').slice(0, 2).join('/');
+    l.push('Semana ' + sem_ + ': ' + sin + ' sin contactar · ' + con + ' contactados · ' + env + ' enviados (de ' + total + ')' + (imp ? ' · ' + imp + ' impagos' : ''));
+    const rev = [];
+    if (sinTr.length) rev.push('enviados sin transporte: ' + sinTr.slice(0, 5).join(', ') + (sinTr.length > 5 ? '…' : ''));
+    if (sinCosto.length) rev.push('enviados sin costo: ' + sinCosto.slice(0, 5).join(', ') + (sinCosto.length > 5 ? '…' : ''));
+    if (rev.length) l.push('Para revisar: ' + rev.join(' · '));
+  }
+  return l.join('\n');
+}
+// Cron */5. Avisa al momento (errores, cargas lentas, datos raros, primera vez de cada función) con un respiro entre avisos
+// (5 min si hay algo malo, 15 si son solo buenas noticias) y manda los resúmenes de las 13 y las 19 AR.
+async function processLogiVigia(env) {
+  try {
+    if ((await kvGet(env, 'logistica_vigia_on', '1')) !== '1') return;
+    if (!(await ensureLogiVigiaSchema(env))) return;
+    const ahora = Date.now(), nowIso = new Date(ahora).toISOString(), ar = new Date(ahora - 3 * 3600 * 1000);
+    const hAR = ar.getUTCHours(), fechaAR = ar.toISOString().slice(0, 10), hoy = fechaAR + 'T03:00:00.000Z';
+    await kvSet(env, 'logistica_vigia_last_run', nowIso);
+    let desde = await kvGet(env, 'logistica_vigia_desde', '');
+    if (!desde) { desde = nowIso; await kvSet(env, 'logistica_vigia_desde', desde); } // lo de antes de prenderlo no cuenta como "primera vez"
+    if (hAR < 7 || hAR >= 23) return;
+    const mov = await logiVigiaMovimiento(env, hoy);
+    const pend = (await env.DB.prepare(`SELECT ${LOGI_VIGIA_COLS} FROM logistica_vigia WHERE avisado=0 AND tipo IN ('error','lento') ORDER BY id LIMIT 60`).all()).results || [];
+    // La semana (consulta más pesada): si hubo movimiento nuevo, si hay errores, para un resumen o, si no, 1 vez por hora.
+    const firma = (mov.log.length ? mov.log[mov.log.length - 1].id : 0) + '|' + (mov.vig.length ? mov.vig[mov.vig.length - 1].id : 0);
+    const resDue = [[13, 'logistica_vigia_res13'], [19, 'logistica_vigia_res19']].filter(([h]) => hAR >= h && hAR < h + 3);
+    const resPend = [];
+    for (const [h, k] of resDue) if ((await kvGet(env, k, '')) !== fechaAR) resPend.push([h, k]);
+    const firmaVieja = await kvGet(env, 'logistica_vigia_firma', ''), semAt = parseInt(await kvGet(env, 'logistica_vigia_sem_at', '0'), 10) || 0;
+    let sem = null;
+    if (firma !== firmaVieja || pend.length || resPend.length || ahora - semAt > 60 * 60 * 1000) {
+      sem = await logiVigiaSemana(env);
+      await kvSet(env, 'logistica_vigia_firma', firma); await kvSet(env, 'logistica_vigia_sem_at', String(ahora));
+    }
+    const nombres = logiVigiaNombres(sem);
+    // Aviso al momento.
+    let raros = [], rarosVistos = {};
+    if (sem) {
+      try { rarosVistos = JSON.parse(await kvGet(env, 'logistica_vigia_raros', '{}')) || {}; } catch (_) {}
+      raros = logiVigiaRaros(sem).filter(x => !rarosVistos[x.k]);
+    }
+    let hechas = {}; try { hechas = JSON.parse(await kvGet(env, 'logistica_vigia_funciones', '{}')) || {}; } catch (_) {}
+    const movDesde = { log: mov.log.filter(r => r.ts >= desde), vig: mov.vig.filter(r => r.ts >= desde) };
+    const primeras = logiVigiaPrimeras(movDesde, hechas, nombres);
+    const ult = parseInt(await kvGet(env, 'logistica_vigia_ult_aviso', '0'), 10) || 0;
+    const malo = pend.length + raros.length;
+    if ((malo && ahora - ult >= 4 * 60 * 1000) || (primeras.length && ahora - ult >= 14 * 60 * 1000)) {
+      const l = ['🛰️ Vigía de logística'];
+      const lineasMalas = [...raros.map(x => x.txt), ...pend.map(r => logiVigiaLineaError(r, nombres))];
+      lineasMalas.slice(0, 8).forEach(x => l.push(x));
+      if (lineasMalas.length > 8) l.push('… y ' + (lineasMalas.length - 8) + ' más');
+      if (primeras.length) l.push('✅ Anduvo bien la primera vez: ' + primeras.map(p => p.txt + ' ' + _arHHMM(p.ts)).join(' · '));
+      if (await logiVigiaEnviar(env, l.join('\n'))) {
+        await kvSet(env, 'logistica_vigia_ult_aviso', String(ahora));
+        if (pend.length) { try { await env.DB.prepare(`UPDATE logistica_vigia SET avisado=1 WHERE id IN (${pend.map(() => '?').join(',')})`).bind(...pend.map(r => r.id)).run(); } catch (_) {} }
+        if (raros.length) { raros.forEach(x => { rarosVistos[x.k] = nowIso; }); const ks = Object.keys(rarosVistos).sort((a, b) => String(rarosVistos[b]).localeCompare(String(rarosVistos[a]))).slice(0, 300); const m = {}; ks.forEach(k => { m[k] = rarosVistos[k]; }); await kvSet(env, 'logistica_vigia_raros', JSON.stringify(m)); }
+        if (primeras.length) { primeras.forEach(p => { hechas[p.f] = p.ts; }); await kvSet(env, 'logistica_vigia_funciones', JSON.stringify(hechas)); }
+      }
+    }
+    // Resúmenes de las 13 y las 19 (solo si logística usó la pantalla hoy).
+    for (const [h, k] of resPend) {
+      const txt = logiVigiaResumen(mov, sem, h === 13 ? 'resumen del mediodía' : 'resumen del día');
+      if (!txt) { await kvSet(env, k, fechaAR); continue; }
+      if (await logiVigiaEnviar(env, txt)) await kvSet(env, k, fechaAR);
+    }
+  } catch (e) { try { console.log('processLogiVigia: ' + String((e && e.message) || e)); } catch (_) {} }
+}
+// GET /admin/logistica/vigia: cómo está el vigía y lo que mandaría ahora (sin mandar nada).
+async function logiVigiaEstado(env, fecha) {
+  const f = /^\d{4}-\d{2}-\d{2}$/.test(String(fecha || '')) ? fecha : new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+  const d0 = f + 'T03:00:00.000Z', d1 = new Date(new Date(d0).getTime() + 24 * 3600 * 1000).toISOString();
+  const ok = await ensureLogiVigiaSchema(env);
+  const mov = ok ? await logiVigiaMovimiento(env, d0, d1) : { log: [], vig: [] };
+  const sem = await logiVigiaSemana(env), nombres = logiVigiaNombres(sem);
+  let hechas = {}; try { hechas = JSON.parse(await kvGet(env, 'logistica_vigia_funciones', '{}')) || {}; } catch (_) {}
+  let pend = []; try { pend = (await env.DB.prepare(`SELECT ${LOGI_VIGIA_COLS} FROM logistica_vigia WHERE avisado=0 AND tipo IN ('error','lento') ORDER BY id LIMIT 60`).all()).results || []; } catch (_) {}
+  return {
+    ok: true, fecha: f, on: (await kvGet(env, 'logistica_vigia_on', '1')) === '1',
+    desde: await kvGet(env, 'logistica_vigia_desde', ''), last_run: await kvGet(env, 'logistica_vigia_last_run', ''), ult_aviso: await kvGet(env, 'logistica_vigia_ult_aviso', ''),
+    funciones: hechas, faltan: LOGI_VIGIA_FUNCIONES.filter(x => !hechas[x[0]]).map(x => x[1]),
+    pendientes: pend.map(r => logiVigiaLineaError(r, nombres)), raros: logiVigiaRaros(sem).map(x => x.txt),
+    resumen: logiVigiaResumen(mov, sem, 'resumen (vista previa)'), eventos: mov.vig.slice(-300).reverse(),
+  };
+}
 // Dirección desglosada saneada (salida de la IA): 8 campos texto, sin inventar formatos.
 function logiDirLimpiar(o) {
   const out = {};
@@ -14823,10 +15109,16 @@ const handler = {
     // "Failed to fetch" (rompía el login y disparaba la cascada de reintentos que
     // saturaba más a D1). Referenciamos handler._fetch explícito (no `this`) para
     // no depender de cómo el runtime bindea el método.
+    // Vigía de logística: los pedidos de /admin/logistica/* se registran al terminar (tiempo, errores; logiVigiaFin).
+    const lv = logiVigiaInicio(request);
     try {
-      return await handler._fetch(request, env, ctx);
+      const res = await handler._fetch(request, env, ctx);
+      if (lv) logiVigiaFin(lv, request, res, null, env, ctx);
+      return res;
     } catch (e) {
-      return fetchErrorResponse(e);
+      const res = fetchErrorResponse(e);
+      if (lv) logiVigiaFin(lv, request, res, e, env, ctx);
+      return res;
     }
   },
   async _fetch(request, env, ctx) {
@@ -21781,6 +22073,28 @@ const handler = {
         try { await logiLogStmt(env, tandaId, '', 'resumen', texto, operador, String(session.user || '')).run(); } catch (_) {}
         return json({ ok: true, texto });
       }
+      // Vigía de logística (processLogiVigia).
+      //  POST {eventos:[{tipo:'error'|'uso', accion, detalle?, key?, ms?}], operador?} → lo que pasa en la pantalla y el server
+      //    no ve (errores de la página, sin conexión, WhatsApp / Copiar / Excel / Imprimir, "Enviado" frenado por impago).
+      //  GET ?fecha=AAAA-MM-DD (solo admin) → estado del vigía, eventos del día y lo que avisaría ahora (sin mandar nada).
+      if (path === '/admin/logistica/vigia') {
+        const _r = await getSessionRole(env, session.user);
+        if (request.method === 'POST') {
+          if (!['logistica', 'admin'].includes(_r)) return json({ error: 'forbidden' }, 403);
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const evs = (Array.isArray(body.eventos) ? body.eventos : []).slice(0, 25).filter(e => e && (e.tipo === 'error' || e.tipo === 'uso') && e.accion);
+          if (!evs.length) return json({ ok: true, n: 0 });
+          if (!(await ensureLogiVigiaSchema(env))) return json({ error: 'db' }, 500);
+          const usuario = String(session.user || ''), operador = String(body.operador || '');
+          try { await env.DB.batch(evs.map(e => logiVigiaStmt(env, { usuario, operador, origen: 'front', tipo: e.tipo, accion: e.accion, cliente_key: e.key, ms: e.ms, detalle: e.detalle }))); }
+          catch (_) { return json({ error: 'db' }, 500); }
+          return json({ ok: true, n: evs.length });
+        }
+        if (request.method === 'GET') {
+          if (_r !== 'admin') return json({ error: 'forbidden' }, 403);
+          try { return json(await logiVigiaEstado(env, url.searchParams.get('fecha'))); } catch (_) { return _logiErrDb(); }
+        }
+      }
       // POST /admin/logistica/password {password} → SOLO admin: crea/actualiza el usuario "logistica" con esa contraseña
       // (hash) y lo activa. Mientras no tenga contraseña queda INACTIVO (un usuario activo sin hash entra sin contraseña).
       // Cambiarla cierra las sesiones abiertas de logística.
@@ -23125,6 +23439,9 @@ const handler = {
     // Aviso de arranque del equipo (a Gaspar): ping en tiempo real cuando cada uno arranca a
     // trabajar + resumen a las 9 AR de quién arrancó y quién no. Dedup por día adentro. Corre cada */5.
     ctx.waitUntil(maybeAvisoArranque(env));
+    // Vigía de logística: avisa a Gaspar si la pantalla de logística falla o queda un dato raro, la primera vez que anda
+    // cada función y un resumen a las 13 y las 19 AR (kv 'logistica_vigia_on'; 7-22 AR adentro).
+    ctx.waitUntil(processLogiVigia(env));
     // Recordatorios de la Agenda del equipo (reuniones/tareas). Gate kv 'agenda_recordatorios_on'
     // (default OFF hasta aprobar la plantilla). Dedup por (evento, ocurrencia, usuario, tipo) adentro.
     ctx.waitUntil(maybeAgendaRecordatorios(env));
