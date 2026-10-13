@@ -16670,6 +16670,21 @@ const handler = {
         return json({ ok: true, tickets: rows });
       }
 
+      // GET /admin/corporeo/tickets/all → lista COMPLETA de tickets de producción (panel "Ver tickets").
+      // Trae lo necesario para listar + abrir cada uno (sin el JSON `data` de campos, que se re-pide al ver).
+      if (request.method === 'GET' && path === '/admin/corporeo/tickets/all') {
+        let rows = [];
+        try {
+          const r = await env.DB.prepare('SELECT id, numero, cliente, pedido_id, detalle, created_by, created_at, photo_keys FROM corporeo_tickets ORDER BY numero DESC, id DESC').all();
+          rows = (r && r.results) ? r.results : [];
+        } catch (_) { rows = []; }
+        const tickets = rows.map(t => {
+          let fotos = 0; try { const k = t.photo_keys ? JSON.parse(t.photo_keys) : []; fotos = Array.isArray(k) ? k.length : 0; } catch (_) {}
+          return { id: t.id, numero: t.numero, cliente: t.cliente, pedido_id: t.pedido_id, detalle: t.detalle, created_by: t.created_by, created_at: t.created_at, fotos };
+        });
+        return json({ ok: true, tickets });
+      }
+
       // GET /admin/corporeo/ticket?pedido_id=N → el último ticket de ese pedido (para "Ver ticket").
       if (request.method === 'GET' && path === '/admin/corporeo/ticket') {
         const pid = parseInt(url.searchParams.get('pedido_id'), 10) || 0;

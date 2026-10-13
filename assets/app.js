@@ -8782,6 +8782,7 @@ function bindPedidos() {
   if (traceBtn) traceBtn.onclick = trazarAdsFaltantes;
   bindPedidoModal();
   bindTicketCorporeoModal();
+  bindTicketsList();
 }
 // Dispara el backfill de ads en el worker (histórico completo de pedidos sin atribuir) y refresca.
 async function trazarAdsFaltantes() {
@@ -8807,7 +8808,7 @@ function renderPedidos() {
   return `
     <div class="page-head">
       <div><div class="eyebrow" id="pedidos-total-count">${STATE.pedidos.length} totales</div><h1>Pedidos</h1></div>
-      <div class="actions">${canCotizar() ? '<button class="btn btn-cyan" id="pedido-nuevo">＋ Cargar pedido</button>' : ''}${isAdmin() ? '<button class="btn btn-ghost" id="pedido-trace-ads" title="Traza el ad de los pedidos sin atribuir (histórico completo): WPP por teléfono, IG por IGSID vía la OC del chat">⛓ Trazar ads faltantes</button>' : ''}<button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
+      <div class="actions">${canCotizar() ? '<button class="btn btn-cyan" id="pedido-nuevo">＋ Cargar pedido</button>' : ''}${isAdmin() ? '<button class="btn btn-ghost" id="pedido-trace-ads" title="Traza el ad de los pedidos sin atribuir (histórico completo): WPP por teléfono, IG por IGSID vía la OC del chat">⛓ Trazar ads faltantes</button>' : ''}${canCotizar() ? '<button class="btn btn-ghost" id="pedido-ver-tickets" title="Ver todos los tickets de producción de corpóreos">🎫 Ver tickets</button>' : ''}<button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
     </div>
     ${(() => {
       const fallos = STATE.pedidos.filter(p => p.mirrorError);
@@ -8827,6 +8828,7 @@ function renderPedidos() {
     </div>
     ${renderPedidoModal()}
     ${renderTicketCorporeoModal()}
+    ${renderTicketsListModal()}
   `;
 }
 function renderTablePedidos() {
@@ -23068,6 +23070,70 @@ async function loadCorpTickets(){
   STATE.corpTicketsLoading = false;
   if (STATE.view === 'pedidos' && document.getElementById('table-pedidos')) renderTablePedidos();
 }
+// ── Panel "Ver tickets": lista TODOS los tickets de producción (corpóreos) ──────────
+async function openTicketsList(){
+  if (!canCotizar()) return;
+  STATE.ticketsListOpen = true;
+  STATE.ticketsListLoading = true;
+  render();
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/tickets/all', { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    STATE.ticketsList = (j && j.tickets) ? j.tickets : [];
+  } catch (_) { STATE.ticketsList = []; }
+  STATE.ticketsListLoading = false;
+  render();
+}
+function renderTicketsListModal(){
+  if (!STATE.ticketsListOpen) return '';
+  const ts = STATE.ticketsList || [];
+  const fecha = ca => { ca = String(ca || ''); return ca.length >= 10 ? (ca.slice(8, 10) + '/' + ca.slice(5, 7) + '/' + ca.slice(0, 4)) : ''; };
+  const rows = ts.map(t => `
+    <tr data-tk-idx="${t.id}" style="cursor:pointer">
+      <td class="num" style="font-weight:700;color:var(--accent-cyan,#8FD4DE)">#${escapeHtml(String(t.numero || ''))}</td>
+      <td>${escapeHtml(t.cliente || '—')}</td>
+      <td class="num"><span class="muted" style="font-size:12px">${fecha(t.created_at)}</span></td>
+      <td><span class="muted" style="font-size:12px">${escapeHtml(t.created_by || '—')}</span></td>
+      <td class="num"><span class="muted" style="font-size:12px">${t.fotos ? ('📷 ' + t.fotos) : '—'}</span></td>
+      <td style="text-align:right"><button class="btn btn-ghost" data-tk-ver="${t.id}" style="font-size:12px;padding:4px 10px">Ver</button></td>
+    </tr>`).join('');
+  return `
+    <div id="tkl-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:270;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
+      <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:720px;width:100%;margin:auto;padding:var(--s-4)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
+          <h2 style="margin:0;font-size:16px">🎫 Tickets de producción${ts.length ? ` · ${ts.length}` : ''}</h2>
+          <button id="tkl-close" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
+        </div>
+        ${STATE.ticketsListLoading ? '<p class="muted" style="font-size:13px">Cargando…</p>' :
+          (!ts.length ? '<p class="muted" style="font-size:13px">Todavía no hay tickets de producción.</p>' : `
+          <table class="t"><thead><tr><th>#</th><th>Cliente</th><th>Fecha</th><th>Cargó</th><th>Fotos</th><th></th></tr></thead>
+          <tbody>${rows}</tbody></table>`)}
+      </div>
+    </div>`;
+}
+function bindTicketsList(){
+  const vb = document.getElementById('pedido-ver-tickets'); if (vb) vb.onclick = openTicketsList;
+  if (!STATE.ticketsListOpen) return;
+  const close = () => { STATE.ticketsListOpen = false; render(); };
+  const bk = document.getElementById('tkl-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'tkl-backdrop') close(); };
+  const c = document.getElementById('tkl-close'); if (c) c.onclick = close;
+  document.querySelectorAll('[data-tk-ver]').forEach(b => b.onclick = (e) => { e.stopPropagation(); verTicketFromList(parseInt(b.dataset.tkVer, 10)); });
+  document.querySelectorAll('tr[data-tk-idx]').forEach(tr => tr.onclick = () => verTicketFromList(parseInt(tr.dataset.tkIdx, 10)));
+}
+function verTicketFromList(ticketId){
+  const t = (STATE.ticketsList || []).find(x => x.id === ticketId);
+  if (!t) return;
+  STATE.ticketsListOpen = false;
+  // Tiene pedido vinculado → reusa el flujo completo (trae campos, Editar/Reenviar andan).
+  if (t.pedido_id && (STATE.pedidos || []).some(p => p.idx === t.pedido_id)) { openTicketFromPedido(t.pedido_id); return; }
+  // Tickets viejos sin pedido vinculado (o cuyo pedido no está en la lista) → vista read-only directa.
+  tcNuevaApertura();
+  STATE.ticketCorpPedidoId = t.pedido_id || null;
+  STATE.ticketCorpView = { numero: t.numero, cliente: t.cliente, detalle: t.detalle, created_by: t.created_by, created_at: t.created_at, fields: null, _ticketId: t.id };
+  STATE.ticketCorpMode = 'view';
+  STATE.ticketCorpModalOpen = true; STATE.ticketCorpSaving = false;
+  render();
+}
 // Downscale de una foto a JPEG (máx 1920px, calidad 0.82) para no exceder el límite de
 // WhatsApp (~5MB) ni mandar payloads gigantes. Devuelve { mime, data(base64 sin prefijo) }.
 function tcDownscale(file, cb){
@@ -23246,11 +23312,12 @@ async function confirmTicketCorporeo(){
 async function resendTicketCorporeo(){
   if (STATE.ticketCorpResending) return;
   const pid = STATE.ticketCorpPedidoId || null;
+  const tid = (STATE.ticketCorpView && STATE.ticketCorpView._ticketId) || null;
   const num = (STATE.ticketCorpView && STATE.ticketCorpView.numero) || '';
-  if (!pid) { toast('No puedo identificar el pedido del ticket'); return; }
+  if (!pid && !tid) { toast('No puedo identificar el ticket'); return; }
   STATE.ticketCorpResending = true; render();
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/ticket/resend', { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ pedido_id: pid }) });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corporeo/ticket/resend', { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(pid ? { pedido_id: pid } : { id: tid }) });
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
     STATE.ticketCorpResending = false; render();
