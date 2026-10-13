@@ -23088,26 +23088,45 @@ function renderTicketsListModal(){
   if (!STATE.ticketsListOpen) return '';
   const ts = STATE.ticketsList || [];
   const fecha = ca => { ca = String(ca || ''); return ca.length >= 10 ? (ca.slice(8, 10) + '/' + ca.slice(5, 7) + '/' + ca.slice(0, 4)) : ''; };
-  const rows = ts.map(t => `
-    <tr data-tk-idx="${t.id}" style="cursor:pointer">
-      <td class="num" style="font-weight:700;color:var(--accent-cyan,#8FD4DE)">#${escapeHtml(String(t.numero || ''))}</td>
-      <td>${escapeHtml(t.cliente || '—')}</td>
-      <td class="num"><span class="muted" style="font-size:12px">${fecha(t.created_at)}</span></td>
-      <td><span class="muted" style="font-size:12px">${escapeHtml(t.created_by || '—')}</span></td>
-      <td class="num"><span class="muted" style="font-size:12px">${t.fotos ? ('📷 ' + t.fotos) : '—'}</span></td>
-      <td style="text-align:right"><button class="btn btn-ghost" data-tk-ver="${t.id}" style="font-size:12px;padding:4px 10px">Ver</button></td>
-    </tr>`).join('');
+  const cyan = 'var(--accent-cyan,#8FD4DE)';
+  const cards = ts.map(t => `
+    <div class="tkl-card" data-tk-idx="${t.id}">
+      <div class="tkl-badge">#${escapeHtml(String(t.numero || ''))}</div>
+      <div class="tkl-main">
+        <div class="tkl-cliente">${escapeHtml(t.cliente || 'Sin cliente')}</div>
+        <div class="tkl-meta">
+          <span>🗓 ${fecha(t.created_at) || '—'}</span>
+          <span class="tkl-dot">·</span>
+          <span>👤 ${escapeHtml(t.created_by || '—')}</span>
+          ${t.fotos ? `<span class="tkl-fotos">📷 ${t.fotos}</span>` : ''}
+        </div>
+      </div>
+      <button class="btn btn-cyan tkl-ver" data-tk-ver="${t.id}">Ver →</button>
+    </div>`).join('');
   return `
-    <div id="tkl-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:270;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
-      <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:720px;width:100%;margin:auto;padding:var(--s-4)">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2);padding-bottom:var(--s-2);border-bottom:1px solid var(--border)">
-          <h2 style="margin:0;font-size:16px">🎫 Tickets de producción${ts.length ? ` · ${ts.length}` : ''}</h2>
+    <div id="tkl-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.74);z-index:270;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(5px)">
+      <style>
+        #tkl-card-wrap{display:flex;flex-direction:column;gap:9px;max-height:min(66vh,560px);overflow-y:auto;margin-top:8px;padding-right:3px}
+        .tkl-card{display:flex;align-items:center;gap:13px;padding:11px 13px;border:1px solid var(--border);border-radius:13px;background:var(--ink-100);cursor:pointer;transition:border-color .14s,transform .14s,box-shadow .14s}
+        .tkl-card:hover{border-color:${cyan};transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.38)}
+        .tkl-badge{flex:0 0 auto;min-width:50px;height:46px;padding:0 9px;border-radius:11px;background:rgba(143,212,222,.11);border:1px solid rgba(143,212,222,.34);color:${cyan};font-weight:800;font-size:15px;display:flex;align-items:center;justify-content:center;letter-spacing:.01em}
+        .tkl-main{flex:1;min-width:0}
+        .tkl-cliente{font-weight:700;font-size:14.5px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .tkl-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:12px;color:var(--fg-subtle);margin-top:4px}
+        .tkl-dot{opacity:.5}
+        .tkl-fotos{background:rgba(143,212,222,.12);color:${cyan};border-radius:999px;padding:1px 8px;font-weight:600;margin-left:2px}
+        .tkl-ver{flex:0 0 auto;font-size:12px;padding:6px 15px;white-space:nowrap}
+        #tkl-card-wrap::-webkit-scrollbar{width:8px}
+        #tkl-card-wrap::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+      </style>
+      <div style="background:var(--bg,#0A0A0F);border:1px solid ${cyan};border-radius:16px;box-shadow:0 16px 54px rgba(0,0,0,.65);max-width:600px;width:100%;margin:auto;padding:var(--s-4)">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:var(--s-3);border-bottom:1px solid var(--border)">
+          <h2 style="margin:0;font-size:17px;display:flex;align-items:center;gap:9px">🎫 Tickets de producción ${ts.length ? `<span style="font-size:12px;font-weight:700;color:${cyan};background:rgba(143,212,222,.12);border:1px solid rgba(143,212,222,.3);border-radius:999px;padding:2px 10px">${ts.length}</span>` : ''}</h2>
           <button id="tkl-close" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
         </div>
-        ${STATE.ticketsListLoading ? '<p class="muted" style="font-size:13px">Cargando…</p>' :
-          (!ts.length ? '<p class="muted" style="font-size:13px">Todavía no hay tickets de producción.</p>' : `
-          <table class="t"><thead><tr><th>#</th><th>Cliente</th><th>Fecha</th><th>Cargó</th><th>Fotos</th><th></th></tr></thead>
-          <tbody>${rows}</tbody></table>`)}
+        ${STATE.ticketsListLoading ? '<p class="muted" style="font-size:13px;padding:14px 2px">Cargando…</p>' :
+          (!ts.length ? '<p class="muted" style="font-size:13px;padding:16px 2px;text-align:center">Todavía no hay tickets de producción.</p>' :
+          `<div id="tkl-card-wrap">${cards}</div>`)}
       </div>
     </div>`;
 }
@@ -23118,7 +23137,7 @@ function bindTicketsList(){
   const bk = document.getElementById('tkl-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'tkl-backdrop') close(); };
   const c = document.getElementById('tkl-close'); if (c) c.onclick = close;
   document.querySelectorAll('[data-tk-ver]').forEach(b => b.onclick = (e) => { e.stopPropagation(); verTicketFromList(parseInt(b.dataset.tkVer, 10)); });
-  document.querySelectorAll('tr[data-tk-idx]').forEach(tr => tr.onclick = () => verTicketFromList(parseInt(tr.dataset.tkIdx, 10)));
+  document.querySelectorAll('[data-tk-idx]').forEach(el => el.onclick = () => verTicketFromList(parseInt(el.dataset.tkIdx, 10)));
 }
 function verTicketFromList(ticketId){
   const t = (STATE.ticketsList || []).find(x => x.id === ticketId);
