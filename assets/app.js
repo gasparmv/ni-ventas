@@ -5218,7 +5218,8 @@ function logiBoardNomHtml(p) {
 }
 function logiBoardMetaHtml(p) {
   const pq = p.paquete || null, est = !!(pq && pq.fuente === 'estimado');
-  const t = pq && pq.largo ? `${pq.largo}×${pq.ancho}×${pq.alto}${pq.peso ? ' · ' + _fmtKg(pq.peso) + ' kg' : ''}` : '';
+  const c = n => String(n).replace('.', ','); // 54.5 → 54,5
+  const t = pq && pq.largo ? `${c(pq.largo)}×${c(pq.ancho)}×${c(pq.alto)}${pq.peso ? ' · ' + _fmtKg(pq.peso) + ' kg' : ''}` : '';
   const tit = pq ? (est ? 'Estimado: Neyen lo mide y lo pesa al embalar' : 'Medido por Neyen') : '';
   return `<span class="lb-meta" data-lb-part="meta"${tit ? ` title="${tit}"` : ''}>${escapeHtml(t)}${t && est ? ' <span class="est">est.</span>' : ''}</span>`;
 }
@@ -5500,6 +5501,9 @@ async function logiEstadoCambiar(key, v, o) {
     if (!o.sinConfirmar && !await showConfirm(`Sacar a ${etiqueta} de los enviados?`, { title: 'Deshacer envío', confirmLabel: 'Sí, sacar', cancelLabel: 'No' }).catch(() => false)) { logiPatchFila(key); logiFocoGrilla(); return; }
     const j = await logiCeldaGuardar(key, 'enviado', false); if (!j) return;
   }
+  // "Envío pagado" ya no se ve: lo pone solo "Enviado". Si se vuelve atrás, se desmarca (si no, quedaba marcado sin que
+  // nadie lo viera).
+  const q = logiPaq(key); if (q && logiValor(q, 'envio_pagado')) logiCeldaGuardar(key, 'envio_pagado', false);
   logiCeldaGuardar(key, 'contacto_estado', v === 'contactado' ? 'confirmado' : '');
 }
 async function logiEnviado(key, v, cb) {
@@ -6113,6 +6117,9 @@ function bindLogistica() {
     };
     lst.onchange = e => {
       const el = e.target, key = keyDe(el), a = el.getAttribute && el.getAttribute('data-lb'); if (!key || !a) return;
+      // Ya se eligió: se suelta el foco. Si no, el redibujo saltea la etiqueta enfocada (no aparecía el campo de "Agregar
+      // otro" y un "Enviado" rechazado por impago no volvía atrás).
+      if (el.tagName === 'SELECT') { try { el.blur(); } catch (_) {} }
       if (a === 'estado') { logiEstadoCambiar(key, el.value); return; }
       if (a === 'transp') {
         if (el.value === '__sug') return;

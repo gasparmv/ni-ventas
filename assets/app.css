@@ -4431,7 +4431,6 @@ textarea:focus-visible,
 .lb-row { box-shadow: inset 3px 0 0 transparent; }
 .lb-row.r-impago { box-shadow: inset 3px 0 0 #ef4444; }
 .lb-row.r-sindef { box-shadow: inset 3px 0 0 #f59e0b; }
-.lb-row.r-listo { box-shadow: inset 3px 0 0 #22c55e; }
 .lb-row.r-enviado .lb-head { opacity: .62; }
 .lb-head { display: flex; align-items: center; gap: 10px; padding: 9px 12px; cursor: pointer; min-height: 46px; box-sizing: border-box; }
 .lb-head:hover { background: rgba(255,255,255,.025); }
