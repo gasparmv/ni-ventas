@@ -4974,7 +4974,7 @@ function logiTransporteSumar(v) {
   const n = logiNorm(s).replace(/\s+/g, '');
   if (logiTransportes().some(x => logiNorm(x).replace(/\s+/g, '') === n)) return;
   L.transportes = logiTransportes().concat([s]);
-  document.querySelectorAll('.logi-t td[data-c="transporte"] select').forEach(sel => {
+  document.querySelectorAll('[data-logi-list] select[data-lb="transp"]').forEach(sel => {
     if ([...sel.options].some(o => o.value === s)) return;
     const o = document.createElement('option'); o.value = s; o.textContent = s;
     sel.insertBefore(o, sel.querySelector('option[value="__otro"]'));
@@ -5029,7 +5029,7 @@ function logiTextoCelda(p, col) {
 }
 // --- Filtros, buscador y totales ---
 const LOGI_FILTROS = [
-  ['todos', 'Todos', () => true],
+  ['todos', 'Toda la semana', () => true],
   ['sin_contactar', 'Sin contactar', p => logiEstado(p) === 'sin'],
   ['contactados', 'Contactados', p => logiEstado(p) === 'contactado'],
   ['enviados', 'Enviados', p => logiEstado(p) === 'enviado'],
@@ -5060,7 +5060,8 @@ function logiVisibles(paq) {
 }
 function logiChipsHtml(paq) {
   const act = logiFiltroAct();
-  return LOGI_FILTROS.map(([id, lab, f]) => { const n = paq.filter(f).length; return `<button type="button" class="logi-chip${id === act ? ' on' : ''}${!n && id !== 'todos' ? ' cero' : ''}" data-logi-filtro="${id}">${lab}<b>${n}</b></button>`; }).join('');
+  // Mismo estilo que los botones del panel de Corte ("Toda la tanda · Por cobrar · Trabados").
+  return LOGI_FILTROS.map(([id, lab, f]) => { const n = paq.filter(f).length; return `<button type="button" class="btn ${id === act ? '' : 'ghost'}" data-logi-filtro="${id}" style="padding:6px 12px;font-size:12px${!n && id !== 'todos' && id !== act ? ';opacity:.55' : ''}">${lab} <span style="opacity:.65">${n}</span></button>`; }).join('');
 }
 function logiTotalesTxt(paq) {
   const pl = (n, s, p) => n + ' ' + (n === 1 ? s : p), ret = parseInt((STATE.logi || {}).retiran, 10) || 0;
@@ -5181,41 +5182,119 @@ function logiTd(p, c) {
   if (st && st.st === 'error') { cls.push('err'); title = 'No se guardó' + (st.msg ? ': ' + String(st.msg).replace(/[.\s]+$/, '') : '') + '. Volvé a editarla para reintentar'; }
   return `<td class="${cls.join(' ')}" data-c="${c.id}"${title ? ` title="${escapeHtml(title)}"` : ''}>${inner}</td>`;
 }
-function logiFilasHtml(paq) {
+// ===== Vista tipo tablero (pedido de Gaspar, 12-oct): el mismo formato que su panel de Corte =====
+// Un renglón por cliente: nombre + etiquetas (Impago / Sin definir / Falta dirección / de la semana anterior), medidas y
+// kg, Estado y Transporte como etiquetas que se eligen ahí mismo, Costo para escribir directo y WhatsApp. La flecha (o un
+// click en el renglón) abre la dirección para corregirla, con el texto original de la planilla. Sin montos del pedido.
+// Los guardados son los de siempre (logiCeldaGuardar / logiCommit / logiEstadoCambiar).
+function logiBoardFilasHtml(paq) {
   const vis = logiVisibles(paq);
-  if (!vis.length) return `<tr class="logi-vacio"><td colspan="${LOGI_COLS.length}">${paq.length ? (String(STATE.logiQ || '').trim() ? 'Nada coincide con la búsqueda' : 'Nada en este filtro') : 'No hay paquetes para envío esta semana'}</td></tr>`;
-  return vis.map(p => `<tr data-k="${escapeHtml(p.key)}" class="${logiFilaCls(p)}">${LOGI_COLS.map(c => logiTd(p, c)).join('')}</tr>`).join('');
+  if (!vis.length) return `<div class="lb-vacio">${paq.length ? (String(STATE.logiQ || '').trim() ? 'Nada coincide con la búsqueda' : 'Nada en este filtro') : 'No hay paquetes para envío esta semana'}</div>`;
+  return vis.map(logiBoardFilaHtml).join('');
 }
-function logiTablaHtml(paq) {
-  const cols = `<colgroup>${LOGI_COLS.map(c => `<col style="width:${c.w}px">`).join('')}</colgroup>`;
-  // Una sola fila de encabezado (con 7 columnas los grupos Cliente/Dirección/Paquete/Envío ya no suman).
-  const h = LOGI_COLS.map(c => `<th class="${[c.stk || '', 'c-' + c.id].join(' ').trim()}"${c.ayuda ? ` title="${escapeHtml(c.ayuda)}"` : ''}>${escapeHtml(c.tit)}</th>`).join('');
-  return `<table class="logi-t sin-grupos" style="width:${LOGI_ANCHO}px">${cols}<thead><tr class="h">${h}</tr></thead><tbody data-logi-tbody>${logiFilasHtml(paq)}</tbody></table>`;
+function logiBoardFilaHtml(p) {
+  const abierto = !!(STATE.logiOpen || {})[p.key];
+  const tel = String(p.telefono || '').replace(/\D/g, '');
+  const cls = ['lb-row', logiFilaCls(p), abierto ? 'abierto' : ''].filter(Boolean).join(' ');
+  return `<div class="${cls}" data-logi-row="${escapeHtml(p.key)}">`
+    + `<div class="lb-head" data-lb-head title="Click para ver o corregir la dirección">`
+    + `<span class="lb-tog" data-lb-part="tog" aria-hidden="true">▸</span>`
+    + logiBoardNomHtml(p) + logiBoardMetaHtml(p) + logiBoardEstadoHtml(p) + logiBoardTranspHtml(p) + logiBoardCostoHtml(p)
+    + `<span data-lb-part="wa"><button type="button" class="logi-wa" data-lb="wa"${tel ? '' : ' disabled'} title="${tel ? 'WhatsApp con el mensaje armado · ' + escapeHtml(corteFmtTel(tel)) : 'Sin teléfono: consultá con Neon'}" aria-label="WhatsApp">${LOGI_WA_SVG}</button></span>`
+    + `</div>`
+    + `<div data-lb-part="det">${abierto ? logiBoardDetalleHtml(p) : ''}</div>`
+    + `</div>`;
 }
-function logiTrDe(key) { return document.querySelector(`.logi-t tbody tr[data-k="${CSS.escape(key)}"]`); }
-function logiTdDe(key, col) { const tr = logiTrDe(key); return tr ? tr.querySelector(`td[data-c="${col}"]`) : null; }
-// Redibuja SOLO las celdas de una fila que cambiaron (no toca la que se está editando ni el resto de la tabla).
+function logiBoardNomHtml(p) {
+  const chips = [];
+  if (p.pedido_pagado === false) chips.push('<span class="logi-pill r" title="Tiene un pedido sin pagar (en esta u otra semana): no se puede enviar">Impago</span>');
+  if (p.entrega !== 'envio') chips.push('<span class="logi-pill a" title="Preguntale si lo retira en el taller o va por envío">Sin definir</span>');
+  if (!logiEnv(p)) {
+    const f = logiFaltan(p), NOM = { calle: 'calle', localidad: 'localidad', provincia: 'provincia', cp: 'CP' };
+    if (f.length) chips.push(`<span class="logi-pill a" title="Le falta para poder enviarlo: abrí el renglón y completala">${(p.falta_direccion && !p.dir_editada) || f.length >= 3 ? 'Falta dirección' : 'Falta ' + escapeHtml(f.map(x => NOM[x] || x).join(', '))}</span>`);
+  }
+  if (p.arrastre) chips.push(`<span class="logi-pill g" title="Quedó en el taller desde la semana del ${escapeHtml(logiFechaCorteDDMM(p.arrastre))}">de la sem. ${escapeHtml(logiFechaCorteDDMM(p.arrastre))}</span>`);
+  return `<span class="lb-nom" data-lb-part="nom"><span class="n">${escapeHtml(logiNombre(p.cliente) || 'Cliente')}</span>${chips.join('')}</span>`;
+}
+function logiBoardMetaHtml(p) {
+  const pq = p.paquete || null, est = !!(pq && pq.fuente === 'estimado');
+  const t = pq && pq.largo ? `${pq.largo}×${pq.ancho}×${pq.alto}${pq.peso ? ' · ' + _fmtKg(pq.peso) + ' kg' : ''}` : '';
+  const tit = pq ? (est ? 'Estimado: Neyen lo mide y lo pesa al embalar' : 'Medido por Neyen') : '';
+  return `<span class="lb-meta" data-lb-part="meta"${tit ? ` title="${tit}"` : ''}>${escapeHtml(t)}${t && est ? ' <span class="est">est.</span>' : ''}</span>`;
+}
+function logiBoardEstadoHtml(p) {
+  const v = logiEstado(p);
+  const saving = ['contacto_estado', 'envio_pagado', 'enviado'].some(x => { const s = logiCel(p.key, x); return s && s.st === 'saving'; });
+  const tit = v === 'enviado' ? ('Enviado ' + (p.despachado_at ? logiHora(p.despachado_at) : '')).trim()
+    : (p.pedido_pagado === false ? 'Pedido impago: todavía no se puede marcar Enviado' : (p.contacto_at ? 'Último cambio ' + logiHora(p.contacto_at) : 'Tocá para cambiar el estado'));
+  const fEnv = v === 'enviado' && p.despachado_at ? ' ' + corteFechaCorta(p.despachado_at) : '';
+  return `<span data-lb-part="estado"${saving ? ' class="guardando"' : ''}><select class="lb-sel est-${v}" data-lb="estado" aria-label="Estado" title="${escapeHtml(tit)}">`
+    + LOGI_ESTADOS.map(([val, lab]) => `<option value="${val}"${val === v ? ' selected' : ''}>${lab}${val === v ? escapeHtml(fEnv) : ''}</option>`).join('')
+    + `</select></span>`;
+}
+function logiBoardTranspHtml(p) {
+  // "＋ Agregar otro…": la etiqueta se convierte en un campo para escribir el nombre (queda en la lista para todos).
+  if (STATE._logiOtroKey === p.key) return `<span data-lb-part="transp"><input class="lb-otro" data-lb="otro" list="logi-transportes" maxlength="40" placeholder="Nombre del transporte" autocomplete="off" aria-label="Transporte nuevo"></span>`;
+  const st = logiCel(p.key, 'transporte'), v = String(logiValor(p, 'transporte') || ''), sug = logiSugerido(p);
+  const lista = logiTransportes().slice(); if (v && !lista.includes(v)) lista.push(v);
+  const cls = ['lb-sel', 'tr', sug ? 'sug' : '', !v ? 'vacio' : ''].filter(Boolean).join(' ');
+  const tit = sug ? 'Sugerido: es el de la última vez con este cliente. Confirmalo con ✓ o elegí otro' : (v ? 'Transporte' : 'Elegí el transporte');
+  return `<span data-lb-part="transp"${st && st.st === 'saving' ? ' class="guardando"' : ''}><select class="${cls}" data-lb="transp" aria-label="Transporte" title="${escapeHtml(tit)}">`
+    + `<option value=""${!v ? ' selected' : ''}>Transporte</option>`
+    + (sug ? `<option value="__sug" selected>${escapeHtml(v)} · sugerido</option>` : '')
+    + lista.map(x => `<option value="${escapeHtml(x)}"${!sug && x === v ? ' selected' : ''}>${escapeHtml(x)}</option>`).join('')
+    + `<option value="__otro">＋ Agregar otro…</option></select>`
+    + (sug ? `<button type="button" class="logi-ok" data-lb="sug-ok" title="Confirmar ${escapeHtml(v)}" aria-label="Confirmar el transporte sugerido">✓</button>` : '')
+    + `</span>`;
+}
+function logiBoardCostoHtml(p) {
+  const st = logiCel(p.key, 'envio_costo'), v = logiValor(p, 'envio_costo'), err = !!(st && st.st === 'error');
+  const txt = (v === '' || v == null) ? '' : '$ ' + (parseInt(v, 10) || 0).toLocaleString('es-AR');
+  const tit = err ? 'No se guardó' + (st.msg ? ': ' + String(st.msg).replace(/[.\s]+$/, '') : '') + '. Volvé a escribirlo' : 'Costo del envío: escribilo y Enter';
+  return `<span data-lb-part="costo"${st && st.st === 'saving' ? ' class="guardando"' : ''}><input class="lb-costo${err ? ' err' : ''}" data-lb="costo" inputmode="numeric" autocomplete="off" placeholder="Costo $" value="${escapeHtml(txt)}" title="${escapeHtml(tit)}" aria-label="Costo del envío"></span>`;
+}
+// Detalle (renglón abierto): la dirección para corregir + el texto original de la planilla, el paquete y el historial.
+function logiBoardDetalleHtml(p) {
+  const fuente = String(p.dir_fuente != null ? p.dir_fuente : (p.datos_envio || '')).trim();
+  const ro = logiEnv(p), faltan = logiFaltan(p), tel = String(p.telefono || '').replace(/\D/g, '');
+  const campo = (c, lab, extra, ancho) => `<label class="lb-f${ancho ? ' ancho' : ''}${faltan.includes(c) && !ro ? ' falta' : ''}"><span>${lab}</span><input data-logi-dir="${c}" value="${escapeHtml(String(logiValor(p, c) == null ? '' : logiValor(p, c)))}" maxlength="${c === 'dni' || c === 'cp' ? 40 : 120}" autocomplete="off" spellcheck="false"${extra || ''}${ro ? ' disabled' : ''}></label>`;
+  const otros = [['Otro teléfono', logiValor(p, 'tel_alt')], ['Aclaración', logiValor(p, 'obs')]].filter(x => String(x[1] || '').trim());
+  const nPz = (p.piezas || []).reduce((s, x) => s + (parseInt(x.cantidad, 10) || 1), 0), nIns = (p.insumos || []).reduce((s, x) => s + (parseInt(x.cantidad, 10) || 1), 0);
+  const hist = (p.historial || []).slice(0, 5);
+  return `<div class="lb-det">
+    <div class="lb-det-dir">
+      <div class="lb-tit">Dirección de envío${p.dir_editada ? ' <span class="logi-tag c">corregida</span>' : ''}</div>
+      <div class="lb-form" data-logi-dirform data-k="${escapeHtml(p.key)}">
+        ${campo('calle', 'Calle y número', '', true)}${campo('localidad', 'Localidad')}${campo('provincia', 'Provincia', ' list="logi-provincias"')}${campo('cp', 'CP')}${campo('recibe', 'Recibe')}${campo('dni', 'DNI', ' inputmode="numeric"')}
+      </div>
+      ${ro ? '<div class="logi-mute" style="margin-top:6px">Ya se envió: la dirección no se puede cambiar.</div>' : `<div class="lb-acc"><button type="button" class="btn btn-cyan" data-lb="dir-ok">Guardar dirección</button><button type="button" class="btn btn-ghost" data-lb="dir-copiar" title="La dirección en una línea, para cargarla en el sistema del transporte">Copiar dirección</button></div>`}
+    </div>
+    <div class="lb-det-info">
+      <div class="lb-tit">Texto original de la planilla</div>
+      ${fuente ? `<pre>${escapeHtml(fuente)}</pre><button type="button" class="btn btn-ghost lb-mini" data-lb="fuente-copiar">Copiar texto</button>` : `<div class="logi-mute">${logiDirNoDisponible(p) ? 'No se pudo leer la planilla. Tocá Actualizar en un rato.' : 'El cliente no cargó datos de envío en la planilla.'}</div>`}
+      ${otros.map(([l, v]) => `<div style="margin-top:6px"><span class="logi-mute">${l}:</span> ${escapeHtml(v)}</div>`).join('')}
+      <div class="lb-tit">Paquete</div>
+      <div>${nPz} pieza${nPz === 1 ? '' : 's'}${nIns ? ' · ' + nIns + ' insumo' + (nIns === 1 ? '' : 's') : ''}${p.paquete ? ' · ' + escapeHtml(logiPaqTxt(p.paquete)) + (p.paquete.fuente === 'medido' ? ' (medido)' : ' (estimado)') : ''}${p.arrastre ? ' · viene de la semana del ' + escapeHtml(logiFechaCorteDDMM(p.arrastre)) : ''}</div>
+      ${tel ? `<div class="lb-tit">Teléfono</div><div>${escapeHtml(corteFmtTel(tel))}</div>` : ''}
+      ${hist.length ? `<div class="lb-tit">Historial</div>${hist.map(h => `<div class="logi-h">${escapeHtml(logiHora(h.ts))} · ${escapeHtml(logiAccTxt(h))}${h.operador ? ' · ' + escapeHtml(h.operador) : ''}</div>`).join('')}` : ''}
+    </div>
+  </div>`;
+}
+function logiTrDe(key) { return document.querySelector(`[data-logi-list] [data-logi-row="${CSS.escape(key)}"]`); }
+function logiTdDe() { return null; } // (la tabla anterior; ya no hay celdas)
+// Redibuja un renglón parte por parte, sin tocar la parte que se está usando (el costo que se está escribiendo, un select
+// abierto) ni una dirección con cambios sin guardar.
 function logiPatchFila(key) {
-  const tr = logiTrDe(key), p = logiPaq(key); if (!tr || !p) return;
-  const cls = logiFilaCls(p); if (tr.className !== cls) tr.className = cls;
-  const ed = STATE._logiEd, tpl = document.createElement('template');
-  tpl.innerHTML = '<table><tbody><tr>' + LOGI_COLS.map(c => logiTd(p, c)).join('') + '</tr></tbody></table>';
-  const nuevos = tpl.content.querySelectorAll('td'), viejos = tr.children;
-  LOGI_COLS.forEach((c, i) => {
-    const td = viejos[i], nd = nuevos[i]; if (!td || !nd) return;
-    if (ed && ed.key === key && ed.col === c.id) { // en edición: solo las marcas de estado
-      ['falta', 'err', 'guardando', 'sel'].forEach(x => td.classList.toggle(x, nd.classList.contains(x)));
-      return;
-    }
-    let vivo = td;
-    if (td.outerHTML !== nd.outerHTML) {
-      const foco = td.contains(document.activeElement);
-      td.replaceWith(nd); vivo = nd;
-      if (foco) logiFocoGrilla();
-    }
-    // Lo que el navegador no refleja en el HTML: casilla tildada y opción elegida (p. ej. al revertir un error).
-    const cb = vivo.querySelector('input[type=checkbox]'); if (cb) cb.checked = !!nd.querySelector('input[type=checkbox][checked]');
-    const sl = vivo.querySelector('select'); if (sl) { const o = nd.querySelector('option[selected]'); sl.value = o ? o.value : ''; }
+  const row = logiTrDe(key), p = logiPaq(key); if (!row || !p) return;
+  const tpl = document.createElement('template'); tpl.innerHTML = logiBoardFilaHtml(p).trim();
+  const nuevo = tpl.content.firstElementChild; if (!nuevo) return;
+  if (row.className !== nuevo.className) row.className = nuevo.className;
+  const ae = document.activeElement;
+  nuevo.querySelectorAll('[data-lb-part]').forEach(np => {
+    const vp = row.querySelector(`[data-lb-part="${np.getAttribute('data-lb-part')}"]`); if (!vp) return;
+    if (ae && vp.contains(ae)) return;
+    const f = vp.querySelector('[data-logi-dirform]'); if (f && f.dataset.dirty === '1') return;
+    if (vp.outerHTML !== np.outerHTML) vp.replaceWith(np.cloneNode(true));
   });
 }
 function logiContadores() {
@@ -5223,14 +5302,25 @@ function logiContadores() {
   const ch = document.querySelector('[data-logi-chips]'); if (ch) ch.innerHTML = logiChipsHtml(paq);
   const to = document.querySelector('[data-logi-tot]'); if (to) to.textContent = logiTotalesTxt(paq);
 }
-// Filtro / búsqueda: redibuja solo el cuerpo de la tabla (el buscador no pierde el foco).
-function logiPintarCuerpo(arriba) {
-  const tb = document.querySelector('[data-logi-tbody]'); if (!tb || !STATE.logi) return;
-  if (STATE._logiEd) logiEdCerrar(true);
-  logiPopCerrar();
-  tb.innerHTML = logiFilasHtml(logiPaquetes());
+// Filtro / búsqueda: redibuja solo la lista (el buscador no pierde el foco). Antes guarda las direcciones a medio editar.
+function logiPintarCuerpo() {
+  const lst = document.querySelector('[data-logi-list]'); if (!lst || !STATE.logi) return;
+  document.querySelectorAll('[data-logi-dirform][data-dirty="1"]').forEach(f => logiDirFormGuardar(f.getAttribute('data-k'), false));
+  STATE._logiOtroKey = null;
+  lst.innerHTML = logiBoardFilasHtml(logiPaquetes());
   logiContadores();
-  if (arriba) { const sc = document.querySelector('.logi-scroll'); if (sc) sc.scrollTop = 0; }
+}
+// Abre / cierra el renglón (la dirección). Al cerrar, guarda lo que se haya cambiado.
+function logiBoardAbrir(key, abrir) {
+  STATE.logiOpen = STATE.logiOpen || {};
+  if (abrir) STATE.logiOpen[key] = 1;
+  else {
+    const f = document.querySelector(`[data-logi-dirform][data-k="${CSS.escape(key)}"]`);
+    if (f && f.dataset.dirty === '1' && !logiDirFormGuardar(key, false)) return; // un dato que no sirve: queda abierto
+    delete STATE.logiOpen[key];
+    const ae = document.activeElement, row = logiTrDe(key); if (ae && row && row.contains(ae)) { try { ae.blur(); } catch (_) {} }
+  }
+  logiPatchFila(key);
 }
 function logiFocoGrilla() { const sc = document.querySelector('.logi-scroll'); if (sc && document.activeElement !== sc) { try { sc.focus({ preventScroll: true }); } catch (_) {} } }
 function logiSeleccionar(key, col, o) {
@@ -5581,12 +5671,18 @@ function logiPopHtml(p) {
 // Guarda las partes de la dirección que cambiaron (cada una por la cola de la fila, con la misma validación que una celda).
 // cerrar=true: además cierra el formulario. Devuelve false si un valor no sirve (el formulario queda abierto).
 function logiDirFormGuardar(key, cerrar) {
-  const pop = document.getElementById('logi-pop'); if (!pop || pop.dataset.k !== key) return true;
-  const p = logiPaq(key); if (!p || logiEnv(p)) { if (cerrar) logiPopCerrar(true); return true; }
-  const ins = [...pop.querySelectorAll('[data-logi-dir]')];
-  for (const inp of ins) { const n = logiNormalizar(inp.getAttribute('data-logi-dir'), inp.value); if (!n.ok) { niToast(n.msg, { error: true }); try { inp.focus(); inp.select(); } catch (_) {} return false; } }
-  ins.forEach(inp => { const c = inp.getAttribute('data-logi-dir'); if (!logiIgual(String(inp.value).replace(/\s+/g, ' ').trim(), String(logiValor(p, c) == null ? '' : logiValor(p, c)))) logiCommit(key, c, inp.value); });
-  if (cerrar) { pop.dataset.guardado = '1'; logiPopCerrar(true); logiFocoGrilla(); }
+  const form = document.querySelector(`[data-logi-dirform][data-k="${CSS.escape(key)}"]`), p = logiPaq(key);
+  if (!form || !p || logiEnv(p)) { if (cerrar) logiBoardAbrir(key, false); return true; }
+  const ins = [...form.querySelectorAll('[data-logi-dir]')], cambios = [];
+  for (const inp of ins) {
+    const c = inp.getAttribute('data-logi-dir'), n = logiNormalizar(c, inp.value);
+    if (!n.ok) { niToast(n.msg, { error: true }); try { inp.focus(); inp.select(); } catch (_) {} return false; }
+    const st = logiCel(key, c), ref = st && st.st === 'saving' ? st.val : logiValorServidor(p, c);
+    if (!logiIgual(n.valor, ref)) cambios.push([c, n.valor]);
+  }
+  form.dataset.dirty = '';
+  if (cambios.length) Promise.all(cambios.map(([c, v]) => logiCeldaGuardar(key, c, v))).then(rs => { if (rs.every(Boolean)) niToast('Dirección guardada'); });
+  if (cerrar) logiBoardAbrir(key, false);
   return true;
 }
 function logiPopAbrir(key) {
@@ -5655,11 +5751,12 @@ async function logiAvisar(key, btn) {
 // Ocupado = editando una celda, con el texto original abierto o eligiendo en un select (hace menos de 20 s): el refresco
 // de fondo NO re-dibuja; queda pendiente (_logiDirty) y se aplica apenas se libera.
 function logiOcupado() {
-  const ed = STATE._logiEd;
-  if (ed && ed.el && document.body.contains(ed.el)) return true;
-  if (document.getElementById('logi-pop')) return true;
+  if (STATE._logiOtroKey) return true; // escribiendo un transporte nuevo
+  if (document.querySelector('[data-logi-dirform][data-dirty="1"]')) return true; // dirección con cambios sin guardar
   const ae = document.activeElement;
-  return !!(ae && ae.tagName === 'SELECT' && ae.closest && ae.closest('.logi-t') && Date.now() - (STATE._logiSelFocusAt || 0) < 20000);
+  if (!ae || !ae.closest || !ae.closest('[data-logi-list]')) return false;
+  if (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA') return true; // costo / dirección
+  return ae.tagName === 'SELECT' && Date.now() - (STATE._logiSelFocusAt || 0) < 20000; // eligiendo estado / transporte
 }
 // Re-render completo que conserva el scroll de la tabla y de la página, la celda elegida (STATE.logiSel), filtros y el
 // foco (tabla o buscador). Si está ocupado, se pospone.
@@ -5667,14 +5764,14 @@ function logiRender() {
   if (STATE.view !== 'logistica') return;
   if (logiOcupado()) { STATE._logiDirty = true; return; }
   STATE._logiDirty = false;
-  const y = window.scrollY || 0, sc = document.querySelector('.logi-scroll'), pos = sc ? { t: sc.scrollTop, l: sc.scrollLeft } : null;
+  // Conserva el scroll (de la página y del contenedor principal) y el foco del buscador; los renglones abiertos quedan
+  // abiertos (STATE.logiOpen).
+  const y = window.scrollY || 0, mn = document.getElementById('main'), my = mn ? mn.scrollTop : 0;
   const ae = document.activeElement; let foco = null;
   if (ae && (ae.id === 'logi-q' || ae.id === 'logi-op')) foco = { sel: '#' + ae.id, s: ae.selectionStart, e: ae.selectionEnd };
-  else if (ae && sc && (ae === sc || sc.contains(ae))) foco = { grilla: true };
   render();
-  const sc2 = document.querySelector('.logi-scroll'); if (sc2 && pos) { sc2.scrollTop = pos.t; sc2.scrollLeft = pos.l; }
-  if (foco && foco.grilla) logiFocoGrilla();
-  else if (foco) { const n = document.querySelector(foco.sel); if (n) { try { n.focus({ preventScroll: true }); n.setSelectionRange(foco.s, foco.e); } catch (_) {} } }
+  if (foco) { const n = document.querySelector(foco.sel); if (n) { try { n.focus({ preventScroll: true }); n.setSelectionRange(foco.s, foco.e); } catch (_) {} } }
+  const mn2 = document.getElementById('main'); if (mn2 && Math.abs(mn2.scrollTop - my) > 2) mn2.scrollTop = my;
   if (Math.abs((window.scrollY || 0) - y) > 2) window.scrollTo(0, y);
 }
 // silent=true: refresco de fondo (cada 90 s). No corre si hay un POST en vuelo ("marcando") y descarta su respuesta si
@@ -5716,7 +5813,7 @@ async function logisticaCargar(opts) {
 }
 function logiResetEstado() {
   STATE.logi = undefined; STATE.logiTanda = null; STATE.logiQ = ''; STATE.logiFiltro = 'todos';
-  STATE.logiSel = null; STATE._logiEd = null; STATE._logiCel = {}; STATE._logiSeq = {}; STATE._logiFilaQ = {}; STATE._logiKeep = {}; STATE.logiPop = null; STATE._logiScroll = null;
+  STATE.logiSel = null; STATE._logiEd = null; STATE.logiOpen = {}; STATE._logiOtroKey = null; STATE._logiCel = {}; STATE._logiSeq = {}; STATE._logiFilaQ = {}; STATE._logiKeep = {}; STATE.logiPop = null; STATE._logiScroll = null;
   STATE.logiLoadedAt = 0; STATE._logiOpMem = ''; STATE._logiOpDraft = '';
   STATE._logiGen = (STATE._logiGen || 0) + 1; STATE._logiPendiente = false; STATE._logiDirty = false; STATE._logiRecargar = false;
   const pop = document.getElementById('logi-pop'); if (pop) pop.remove();
@@ -5754,7 +5851,7 @@ function renderLogistica() {
       <span>· Usando: <b>${escapeHtml(logiOperador())}</b> <button type="button" class="logi-link" data-logi-op-cambiar>cambiar</button></span>
       <span style="flex:1"></span>
       <button class="btn btn-ghost" data-logi-refresh>Actualizar</button>
-      ${t ? `<button class="btn btn-ghost" data-logi-excel title="Baja la tabla (con el filtro de ahora) para abrirla en Excel">Descargar Excel</button><button class="btn btn-ghost" data-logi-print title="La tabla en hoja A4 apaisada (con el filtro de ahora)">Imprimir</button>` : ''}
+      ${t ? `<button class="btn btn-ghost" data-logi-excel title="Baja la lista (con el filtro de ahora) para abrirla en Excel">Descargar Excel</button><button class="btn btn-ghost" data-logi-print title="La lista en hoja A4 apaisada (con el filtro de ahora)">Imprimir</button>` : ''}
       ${t && nEnv ? `<button class="btn btn-ghost" data-logi-fin title="Le avisa a Neon cuántos salieron y cuáles quedan en el taller">Terminé de enviar</button>` : ''}
       ${isAdmin() ? `<button class="btn btn-ghost" data-logi-password title="Crear o cambiar la contraseña del usuario 'logistica'">Contraseña de logística</button>` : ''}
     </div>
@@ -5762,8 +5859,8 @@ function renderLogistica() {
     ${!t ? '<div class="logi-vacio-box">Todavía no hay ninguna semana cargada.</div>' : `
     <div class="logi-filtros"><span class="logi-chips" data-logi-chips>${logiChipsHtml(paq)}</span><input id="logi-q" class="logi-q" type="search" autocomplete="off" spellcheck="false" placeholder="Buscar nombre, localidad o provincia" value="${escapeHtml(STATE.logiQ || '')}"></div>
     <div class="logi-tot" data-logi-tot>${escapeHtml(logiTotalesTxt(paq))}</div>
-    <div class="logi-scroll" tabindex="0" aria-label="Tabla de envíos de la semana">${logiTablaHtml(paq)}</div>
-    <div class="logi-ayuda">Click en una celda para escribir · Enter guarda y baja · Tab va a la derecha · Esc cancela · Todo se guarda solo</div>
+    <div class="lb-list" data-logi-list aria-label="Envíos de la semana">${logiBoardFilasHtml(paq)}</div>
+    <div class="logi-ayuda">Estado y Transporte: tocá la etiqueta · Costo: escribilo y Enter · Click en el renglón para ver y corregir la dirección · Todo se guarda solo</div>
     <datalist id="logi-provincias">${LOGI_PROVINCIAS.map(x => `<option value="${escapeHtml(x)}"></option>`).join('')}</datalist>
     <datalist id="logi-transportes">${logiTransportes().map(x => `<option value="${escapeHtml(x)}"></option>`).join('')}</datalist>`}
   </div>`;
@@ -5968,7 +6065,7 @@ function bindLogistica() {
     const id = parseInt(b.getAttribute('data-logi-tanda'), 10); if (!id) return;
     if (STATE._logiEd) logiEdCerrar(true);
     logiPopCerrar();
-    STATE.logiTanda = id; STATE.logi = undefined; STATE.logiSel = null; STATE._logiCel = {}; STATE._logiKeep = {}; STATE._logiScroll = null;
+    STATE.logiTanda = id; STATE.logi = undefined; STATE.logiSel = null; STATE._logiCel = {}; STATE._logiKeep = {}; STATE._logiScroll = null; STATE.logiOpen = {}; STATE._logiOtroKey = null;
     logisticaCargar({}); render();
   }; });
   $$('[data-logi-excel]', b => { b.onclick = () => logiExcel(); });
@@ -5981,39 +6078,79 @@ function bindLogistica() {
   if (opIn) { opIn.oninput = () => { STATE._logiOpDraft = opIn.value; }; opIn.onkeydown = e => { if (e.key === 'Enter') opOk(); }; if (!STATE._logiOpDraft) { try { opIn.focus(); } catch (_) {} } }
   $$('[data-logi-op-ok]', b => { b.onclick = opOk; });
   $$('[data-logi-op-cambiar]', b => { b.onclick = () => { logiLsSet(LOGI_OP_KEY, null); STATE._logiOpMem = ''; render(); }; });
-  // Filtros y buscador (redibujan solo el cuerpo de la tabla).
+  // Filtros y buscador (redibujan solo la lista).
   const chips = document.querySelector('[data-logi-chips]');
-  if (chips) chips.onclick = e => { const b = e.target.closest && e.target.closest('[data-logi-filtro]'); if (!b) return; STATE.logiFiltro = b.getAttribute('data-logi-filtro'); STATE._logiKeep = {}; logiPintarCuerpo(true); };
+  if (chips) chips.onclick = e => { const b = e.target.closest && e.target.closest('[data-logi-filtro]'); if (!b) return; STATE.logiFiltro = b.getAttribute('data-logi-filtro'); STATE._logiKeep = {}; logiPintarCuerpo(); };
   const q = document.getElementById('logi-q');
   if (q) {
-    q.oninput = () => { STATE.logiQ = q.value; STATE._logiKeep = {}; logiPintarCuerpo(true); };
-    q.onkeydown = e => {
-      if (e.key === 'Enter' || e.key === 'ArrowDown') { // a la tabla, en la primera fila
-        e.preventDefault();
-        const tr = document.querySelector('.logi-t tbody tr[data-k]');
-        if (tr) { logiSeleccionar(tr.getAttribute('data-k'), (STATE.logiSel && STATE.logiSel.col) || 'cliente', { scroll: true }); logiFocoGrilla(); }
-      } else if (e.key === 'Escape' && q.value) { e.preventDefault(); q.value = ''; q.oninput(); }
+    q.oninput = () => { STATE.logiQ = q.value; STATE._logiKeep = {}; logiPintarCuerpo(); };
+    q.onkeydown = e => { if (e.key === 'Escape' && q.value) { e.preventDefault(); q.value = ''; q.oninput(); } };
+  }
+  // Lista (un renglón por cliente, como el panel de Corte). Todo delegado en el contenedor.
+  const lst = document.querySelector('[data-logi-list]');
+  if (lst) {
+    const keyDe = el => { const r = el && el.closest && el.closest('[data-logi-row]'); return r ? r.getAttribute('data-logi-row') : null; };
+    lst.onclick = e => {
+      const key = keyDe(e.target); if (!key) return;
+      const ctl = e.target.closest('[data-lb]');
+      if (ctl && ctl.tagName === 'BUTTON') {
+        const a = ctl.getAttribute('data-lb'), p = logiPaq(key);
+        if (a === 'wa') logiWhatsApp(key);
+        else if (a === 'sug-ok') { if (p && p.transporte) logiCeldaGuardar(key, 'transporte', String(p.transporte)); }
+        else if (a === 'dir-ok') logiDirFormGuardar(key, false);
+        else if (a === 'dir-copiar') {
+          // Lo que está escrito en el formulario (aunque no se haya guardado), en una línea para el transporte.
+          const f = document.querySelector(`[data-logi-dirform][data-k="${CSS.escape(key)}"]`);
+          const v = c => { const i = f && f.querySelector(`[data-logi-dir="${c}"]`); return i ? String(i.value).replace(/\s+/g, ' ').trim() : ''; };
+          logiCopiar([v('calle'), v('localidad'), v('provincia'), v('cp') ? 'CP ' + v('cp') : ''].filter(Boolean).join(', ') + (v('recibe') ? ' · recibe ' + v('recibe') : '') + (v('dni') ? ' · DNI ' + v('dni') : ''), 'Dirección copiada');
+        }
+        else if (a === 'fuente-copiar' && p) logiCopiar(String(p.dir_fuente != null ? p.dir_fuente : (p.datos_envio || '')).trim(), 'Texto copiado');
+        return;
+      }
+      // Click en el renglón (no en una etiqueta, el costo o el formulario) → abre / cierra la dirección.
+      if (e.target.closest('input, select, textarea, label, button, a, pre, [data-lb-part="det"]')) return;
+      if (e.target.closest('[data-lb-head]')) logiBoardAbrir(key, !(STATE.logiOpen || {})[key]);
     };
+    lst.onchange = e => {
+      const el = e.target, key = keyDe(el), a = el.getAttribute && el.getAttribute('data-lb'); if (!key || !a) return;
+      if (a === 'estado') { logiEstadoCambiar(key, el.value); return; }
+      if (a === 'transp') {
+        if (el.value === '__sug') return;
+        if (el.value === '__otro') { STATE._logiOtroKey = key; logiPatchFila(key); const i = lst.querySelector(`[data-logi-row="${CSS.escape(key)}"] [data-lb="otro"]`); if (i) { try { i.focus(); } catch (_) {} } return; }
+        logiCommit(key, 'transporte', el.value);
+      }
+    };
+    lst.addEventListener('focusin', e => {
+      const el = e.target, a = el.getAttribute && el.getAttribute('data-lb');
+      if (el.tagName === 'SELECT') STATE._logiSelFocusAt = Date.now();
+      if (a === 'costo') { // al entrar se ve el número pelado (sin "$" ni puntos) para escribir cómodo
+        const p = logiPaq(keyDe(el)), v = p ? logiValor(p, 'envio_costo') : '';
+        el.value = (v === '' || v == null) ? '' : String(parseInt(v, 10) || 0);
+        try { el.select(); } catch (_) {}
+      }
+    });
+    lst.addEventListener('focusout', e => {
+      const el = e.target, a = el.getAttribute && el.getAttribute('data-lb'), key = keyDe(el); if (!a || !key) return;
+      if (a === 'costo') {
+        if (el.dataset.cancel) { delete el.dataset.cancel; setTimeout(() => logiPatchFila(key), 0); return; }
+        const raw = el.value; setTimeout(() => logiCommit(key, 'envio_costo', raw), 0); // después de que el foco salió (si no, el patch lo saltea)
+      } else if (a === 'otro') {
+        const v = String(el.value || '').trim(); STATE._logiOtroKey = null;
+        setTimeout(() => { if (v) logiCommit(key, 'transporte', v); else logiPatchFila(key); }, 0);
+      }
+    });
+    lst.addEventListener('keydown', e => {
+      const el = e.target, a = el.getAttribute && el.getAttribute('data-lb');
+      if (a === 'costo' || a === 'otro') {
+        if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+        else if (e.key === 'Escape') { e.preventDefault(); if (a === 'costo') el.dataset.cancel = '1'; else el.value = ''; el.blur(); }
+        return;
+      }
+      if (el.matches && el.matches('[data-logi-dir]') && e.key === 'Enter') { e.preventDefault(); const key = keyDe(el); if (key) logiDirFormGuardar(key, false); }
+    });
+    // Dirección con cambios sin guardar: el refresco no la pisa (logiOcupado) y se guarda al cerrar el renglón.
+    lst.addEventListener('input', e => { const f = e.target.closest && e.target.closest('[data-logi-dirform]'); if (f) f.dataset.dirty = '1'; });
   }
-  // Tabla.
-  const sc = document.querySelector('.logi-scroll');
-  if (sc) {
-    logiAjustarAlto();
-    // Un render() de otra parte de la app (polls del admin) arma la tabla de cero: vuelve a donde estaba (misma semana).
-    const ps = STATE._logiScroll, tid = STATE.logi && STATE.logi.tanda ? STATE.logi.tanda.id : null;
-    if (ps && tid && ps.tid === tid) { sc.scrollTop = ps.t; sc.scrollLeft = ps.l; }
-    sc.addEventListener('mousedown', logiMouseDown);
-    sc.addEventListener('keydown', logiKey);
-    sc.addEventListener('change', logiChange);
-    sc.addEventListener('click', logiClick);
-    sc.addEventListener('focusin', e => { if (e.target && e.target.tagName === 'SELECT') STATE._logiSelFocusAt = Date.now(); });
-    sc.addEventListener('scroll', () => {
-      STATE._logiScroll = { t: sc.scrollTop, l: sc.scrollLeft, tid: STATE.logi && STATE.logi.tanda ? STATE.logi.tanda.id : null };
-      if (document.getElementById('logi-pop')) logiPopCerrar(true);
-    }, { passive: true });
-  }
-  if (STATE._logiEd) logiEdRestaurar();
-  if (STATE.logiPop && !document.getElementById('logi-pop')) STATE.logiPop = null;
 }
 // ===== Herramientas del admin: cargar tanda desde la planilla, entrega desde la planilla, clientes SIN teléfono =====
 function corteLunesReciente() { const d = new Date(Date.now() - 3 * 3600 * 1000); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); }

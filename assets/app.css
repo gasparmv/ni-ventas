@@ -4423,3 +4423,65 @@ textarea:focus-visible,
 .logi-pop .logi-f input:focus { outline: none; border-color: var(--neon-cyan); }
 .logi-pop .logi-f.falta input { border-color: #ef4444; background: color-mix(in srgb, #ef4444 10%, var(--ink-100)); }
 .logi-pop .logi-f input:disabled { opacity: .6; }
+
+/* Logística como tablero (12-oct): mismo formato que el panel de Corte — un renglón por cliente. */
+.lb-list { border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; background: var(--ink-100); }
+.lb-vacio { padding: 24px; text-align: center; color: var(--fg-mute); }
+.lb-row + .lb-row { border-top: 1px solid var(--border); }
+.lb-row { box-shadow: inset 3px 0 0 transparent; }
+.lb-row.r-impago { box-shadow: inset 3px 0 0 #ef4444; }
+.lb-row.r-sindef { box-shadow: inset 3px 0 0 #f59e0b; }
+.lb-row.r-listo { box-shadow: inset 3px 0 0 #22c55e; }
+.lb-row.r-enviado .lb-head { opacity: .62; }
+.lb-head { display: flex; align-items: center; gap: 10px; padding: 9px 12px; cursor: pointer; min-height: 46px; box-sizing: border-box; }
+.lb-head:hover { background: rgba(255,255,255,.025); }
+.lb-tog { color: var(--fg-subtle); font-size: 11px; flex: 0 0 auto; display: inline-block; transition: transform .12s; }
+.lb-row.abierto .lb-tog { transform: rotate(90deg); }
+.lb-nom { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; }
+.lb-nom .n { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.lb-nom .logi-pill { flex: 0 0 auto; }
+.logi-pill.g { color: var(--fg-muted); background: color-mix(in srgb, #94a3b8 16%, transparent); }
+.lb-meta { font-size: 11.5px; color: var(--fg-subtle); white-space: nowrap; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.lb-meta .est { font-size: 10.5px; color: var(--fg-faint); }
+.lb-head [data-lb-part="estado"], .lb-head [data-lb-part="transp"], .lb-head [data-lb-part="costo"], .lb-head [data-lb-part="wa"] { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
+.lb-head .guardando { opacity: .6; }
+/* Etiquetas que se eligen (Estado / Transporte): select con cara de chip, como los del panel de Corte. */
+select.lb-sel { -webkit-appearance: none; appearance: none; border: 0; border-radius: 7px; font: inherit; font-size: 11px; font-weight: 700; line-height: 18px; padding: 2px 20px 2px 8px; cursor: pointer; max-width: 190px; text-overflow: ellipsis;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 11px) 52%, calc(100% - 7px) 52%; background-size: 4px 4px, 4px 4px; background-repeat: no-repeat; }
+select.lb-sel:focus { outline: 1px solid var(--neon-cyan); outline-offset: 1px; }
+select.lb-sel option { background: var(--ink-200); color: var(--fg); font-weight: 600; font-style: normal; }
+select.lb-sel.est-sin { color: #94a3b8; background-color: color-mix(in srgb, #94a3b8 16%, transparent); }
+select.lb-sel.est-contactado { color: #38bdf8; background-color: color-mix(in srgb, #38bdf8 16%, transparent); }
+select.lb-sel.est-enviado { color: #22c55e; background-color: color-mix(in srgb, #22c55e 16%, transparent); }
+select.lb-sel.tr { color: var(--fg); background-color: color-mix(in srgb, #94a3b8 14%, transparent); }
+select.lb-sel.tr.sug, select.lb-sel.tr.vacio { color: var(--fg-subtle); font-style: italic; }
+.lb-otro { width: 150px; height: 24px; box-sizing: border-box; background: var(--ink-200); border: 1px solid var(--neon-cyan); border-radius: 7px; color: var(--fg); font: inherit; font-size: 12px; padding: 0 8px; }
+.lb-costo { width: 92px; height: 26px; box-sizing: border-box; text-align: right; background: transparent; border: 1px dashed var(--border); border-radius: 7px; color: var(--fg); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; padding: 0 8px; }
+.lb-costo::placeholder { color: var(--fg-faint); }
+.lb-costo:hover { border-color: var(--ink-400); }
+.lb-costo:focus { outline: none; border-style: solid; border-color: var(--neon-cyan); background: var(--ink-200); }
+.lb-costo.err { border-style: solid; border-color: #ef4444; background: color-mix(in srgb, #ef4444 14%, transparent); }
+/* Renglón abierto: dirección (formulario) + texto original / paquete / historial. */
+.lb-det { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 18px; background: rgba(0,0,0,.16); border-top: 1px solid var(--border); padding: 12px 14px 14px 32px; font-size: 13px; }
+.lb-tit { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--fg-subtle); margin: 10px 0 5px; }
+.lb-det-dir > .lb-tit:first-child, .lb-det-info > .lb-tit:first-child { margin-top: 0; }
+.lb-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.lb-f { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.lb-f.ancho { grid-column: 1 / -1; }
+.lb-f > span { font-size: 11px; color: var(--fg-subtle); }
+.lb-f input { box-sizing: border-box; width: 100%; height: 32px; background: var(--ink-100); border: 1px solid var(--border); border-radius: 7px; color: var(--fg); font: inherit; font-size: 13px; padding: 0 9px; }
+.lb-f input:focus { outline: none; border-color: var(--neon-cyan); }
+.lb-f.falta input { border-color: #ef4444; background: color-mix(in srgb, #ef4444 10%, var(--ink-100)); }
+.lb-f input:disabled { opacity: .6; }
+.lb-acc { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.lb-acc .btn { font-size: 12.5px; padding: 6px 12px; }
+.lb-det pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 12.5px; background: var(--ink-100); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.lb-mini { font-size: 11.5px !important; padding: 4px 10px !important; margin-top: 6px; }
+.lb-det .logi-h { font-size: 12px; color: var(--fg-muted); line-height: 1.6; }
+@media (max-width: 760px) {
+  .lb-head { flex-wrap: wrap; row-gap: 6px; }
+  .lb-nom { flex: 1 1 calc(100% - 60px); }
+  .lb-meta { order: 5; flex: 1 1 100%; padding-left: 21px; }
+  .lb-det { grid-template-columns: 1fr; padding-left: 14px; }
+}
