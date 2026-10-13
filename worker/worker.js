@@ -9346,7 +9346,12 @@ async function kpiMesVendedores(env, mes) {
           AND fi.phone NOT IN (SELECT phone FROM lanzamiento_landing)
           AND fi.phone NOT IN (SELECT phone FROM minicurso_landing)
           AND fi.phone NOT IN (SELECT a.phone FROM wa_ad_attributions a JOIN wa_ad_verticals v ON v.ad_id = a.source_id WHERE v.vertical = 'cursos')`, sinceUTC, untilExUTC, sinceUTC),
-    q("SELECT cliente_wa_id ph, IFNULL(comercial_id, '') com, IFNULL(enviado_por, '') por, IFNULL(tipo, '') tipo FROM briefs WHERE estado = 'enviado' AND enviado_at >= ? AND enviado_at < ?", sinceUTC, untilExUTC),
+    // Quién lo mandó: enviado_por (desde el 12-oct); antes, el sender_name del mensaje del presupuesto (la imagen
+    // "Te comparto el presupuesto" guarda al vendedor logueado), y si no, comercial_id (se mueve con el lead).
+    q(`SELECT b.cliente_wa_id ph, IFNULL(b.comercial_id, '') com, IFNULL(b.enviado_por, '') por, IFNULL(b.tipo, '') tipo,
+              (SELECT m.sender_name FROM wa_messages m WHERE m.phone = b.cliente_wa_id AND m.direction = 'outbound' AND IFNULL(m.sender_name, '') != ''
+                  AND m.ts >= strftime('%Y-%m-%dT%H:%M:%S', b.enviado_at, '-20 minutes') AND m.ts <= strftime('%Y-%m-%dT%H:%M:%S', b.enviado_at, '+20 minutes') ORDER BY m.ts DESC LIMIT 1) msg_por
+         FROM briefs b WHERE b.estado = 'enviado' AND b.enviado_at >= ? AND b.enviado_at < ?`, sinceUTC, untilExUTC),
     q("SELECT DISTINCT phone, IFNULL(vendedor, '') vendedor FROM oc_enviadas WHERE ts_out >= ? AND ts_out < ?", sinceUTC, untilExUTC),
     q("SELECT numero, fecha, IFNULL(comercial_id, 'joaco') com, IFNULL(origen, '') origen, IFNULL(telefono, '') tel, COALESCE(es_corporeo, 0) ec, IFNULL(cartel, '') cartel, COALESCE(cantidad, 1) cant, COALESCE(precio, 0) + COALESCE(precio_dimmer, 0) monto FROM pedidos WHERE fecha >= ? AND fecha < ?", since, untilEx),
     // Respuesta humana después del bot: desde que el lead pasó a "Para cotizar" hasta el 1er mensaje de una persona.
@@ -9365,7 +9370,7 @@ async function kpiMesVendedores(env, mes) {
     const o = out[funnelVendedor(rec)]; if (o) o.consultas++;
   }
   for (const r of presR) {
-    const o = out[adhocSenderSlug(r.por) || funnelVendedor(r.com) || 'joaco']; if (!o) continue;
+    const o = out[adhocSenderSlug(r.por) || adhocSenderSlug(r.msg_por) || funnelVendedor(r.com) || 'joaco']; if (!o) continue;
     o.presupuestos++; if (r.tipo === 'corporea') o.presup_corp++; else o.presup_neon++;
     if (r.ph) o._cli.add(r.ph);
   }
@@ -9407,7 +9412,7 @@ async function kpiSnapshot(env) {
   const q = async (sql, ...b) => { try { return (await env.DB.prepare(sql).bind(...b).all()).results || []; } catch (_) { return []; } };
   const desde7 = new Date(Date.now() - 7 * 864e5).toISOString();
   const [prodR, pcR, ocAb] = await Promise.all([
-    q("SELECT numero, fecha, IFNULL(comercial_id, 'joaco') com, IFNULL(origen, '') origen, IFNULL(telefono, '') tel, IFNULL(estado_pedido, '') est FROM pedidos WHERE IFNULL(estado_pedido, '') != '' AND fecha >= date('now', '-120 days')"),
+    q("SELECT numero, fecha, IFNULL(comercial_id, 'joaco') com, IFNULL(origen, '') origen, IFNULL(telefono, '') tel, IFNULL(estado_pedido, '') est FROM pedidos WHERE IFNULL(estado_pedido, '') != '' AND fecha >= date('now', '-3 hours', '-40 days')"), // más viejos con "En produccion" = nunca se actualizaron
     q(`SELECT p.phone, p.completed_at c, IFNULL(p.producto, '') producto, COALESCE(s.assigned_to, '') asg,
               COALESCE((SELECT name FROM wa_contacts w WHERE w.phone = p.phone), s.contact_name, '') name
          FROM precotiz_pilot p LEFT JOIN wa_chats_summary s ON s.phone = p.phone
@@ -9456,7 +9461,7 @@ async function kpiMeta(env, slug, mes) {
 // Mes cerrado → se guarda 12 h en kv_cache (no cambia); el mes en curso se calcula siempre.
 async function kpiMesCacheado(env, mes) {
   if (mes >= kpiMesAR()) return kpiMesVendedores(env, mes);
-  const k = 'kpi_mes:' + mes;
+  const k = 'kpi_mes:v2:' + mes; // subir la versión si cambia el cálculo (invalida los meses guardados)
   try {
     const r = await env.DB.prepare('SELECT v, updated_at FROM kv_cache WHERE k = ?').bind(k).first();
     if (r && Date.now() - Date.parse(r.updated_at) < 12 * 3600e3) return JSON.parse(r.v);
