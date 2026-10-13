@@ -16884,7 +16884,13 @@ const handler = {
         if (!r.ok) return json({ error: r.error, raw: r.raw }, r.status || 500);
         // Guardar en wa_messages para que aparezca en el chat
         try {
-          const previewBody = `[plantilla: ${name}]${Array.isArray(params) && params.length ? ' ' + params.join(', ') : ''}`;
+          // Valores unidos por ", " (legible; tplMarkerToText del front los separa). Si ALGUNO trae ", " adentro
+          // (el Frente de corpóreos: "frente full color, reproduciendo tu diseño, opaco") ese split corría los
+          // campos en el chat → en ese caso van como JSON (["…","…"]), que el front lee sin ambigüedad.
+          const _tplVals = Array.isArray(params) ? params.map(p => String(p)) : [];
+          const previewBody = `[plantilla: ${name}]` + (_tplVals.length
+            ? ' ' + (_tplVals.some(v => v.includes(', ')) ? JSON.stringify(_tplVals) : _tplVals.join(', '))
+            : '');
           // Trazabilidad: marcamos el vendedor que la envió (presupuesto por plantilla / ventana cerrada).
           const senderSlug = await resolveComercial(env, { sessionUser: session.user, phone: num || String(to).replace(/\D/g, '') });
           // Si la plantilla se mandó CON el render en el header (header_image_key resuelto a un

@@ -13024,7 +13024,7 @@ function tplMarkerToText(body, phone) {
   const tpl = (chatState.templates || []).find(t => t.name === mk[1]);
   if (!tpl) return '📋 Plantilla enviada';
   const text = tplBodyText(tpl);
-  const stored = (mk[2] || '').trim() ? mk[2].trim().split(', ') : [];
+  const stored = tplMarkerParams(mk[1], mk[2], text);
   if (stored.length) {
     // Reemplazo posicional: {{1}}→stored[0], {{2}}→stored[1], … (los valores reales enviados).
     return text.replace(/\{\{\s*(\d+)\s*\}\}/g, (m, n) => {
@@ -13036,6 +13036,40 @@ function tplMarkerToText(body, phone) {
   const c = (chatState.contacts || []).find(x => x.phone === phone);
   const fn = ((c && c.name) || '').trim().split(/\s+/)[0] || 'amigo/a';
   return text.replace(/\{\{\s*\d+\s*\}\}/g, fn);
+}
+// Valores guardados en el marcador de plantilla. Formato nuevo (si algún valor trae ", "): JSON ["…","…"].
+// Formato viejo: unidos por ", " → un valor con coma adentro corría todos los campos siguientes (el
+// presupuesto corpóreo mostraba la iluminación en "Precio"). Los corpóreos viejos se reagrupan por sus anclas.
+function tplMarkerParams(name, raw, text) {
+  raw = String(raw || '').trim();
+  if (!raw) return [];
+  if (raw[0] === '[') {
+    try { const a = JSON.parse(raw); if (Array.isArray(a)) return a.map(v => String(v)); } catch (_) {}
+  }
+  const parts = raw.split(', ');
+  const nVars = Math.max(0, ...(String(text || '').match(/\{\{\s*\d+\s*\}\}/g) || []).map(m => parseInt(m.replace(/\D/g, ''), 10)));
+  if (nVars && parts.length > nVars && /^presupuesto_corporea/.test(name)) return corpParamsReagrupar(parts) || parts;
+  return parts;
+}
+// Presupuesto corpóreo en el formato viejo: [trabajo, medidas, frente, laterales, fondo, iluminación, precio
+// (, descripción)] unidos por ", ". Frente, laterales y descripción pueden traer comas; la iluminación
+// ("con luz LED" / "sin iluminación"), el precio ("$…") y el fondo no → son las anclas. null si no encaja.
+function corpParamsReagrupar(parts) {
+  const iIlu = parts.findIndex((p, i) => i >= 4 && /^(con luz LED|sin iluminación)$/.test(p));
+  if (iIlu < 0 || !/^\$/.test(parts[iIlu + 1] || '')) return null;
+  const iMed = Math.max(1, parts.findIndex((p, i) => i >= 1 && i < iIlu && /\d\s*x\s*\d|^a confirmar$/i.test(p)));
+  // El frente siempre termina en ", opaco" o ", translúcido (el frente ilumina)" (corpPresupuestoFields).
+  let kF = -1;
+  for (let i = iMed + 1; i <= iIlu - 3; i++) {
+    if (parts[i] === 'opaco' || parts[i].startsWith('translúcido (el frente ilumina)')) { kF = i; break; }
+  }
+  if (kF < 0) return null;
+  const out = [
+    parts.slice(0, iMed).join(', '), parts[iMed], parts.slice(iMed + 1, kF + 1).join(', '),
+    parts.slice(kF + 1, iIlu - 1).join(', '), parts[iIlu - 1], parts[iIlu], parts[iIlu + 1],
+  ];
+  if (parts.length > iIlu + 2) out.push(parts.slice(iIlu + 2).join(', '));
+  return out;
 }
 // Vertical de una plantilla según su nombre (cursos_* / sorteo / clase → cursos).
 function templateVertical(name) {
@@ -16489,6 +16523,10 @@ function renderContactItem(c) {
   else if (preview.startsWith('[mensaje no disponible]')) preview = '⚠ Mensaje no disponible';
   else if (preview.startsWith('[tipo de mensaje no soportado')) preview = '⚠ Mensaje no compatible';
   else if (preview.startsWith('[no soportado')) preview = '⚠ No soportado';
+  else if (preview.startsWith('[plantilla:')) {   // el texto real, no el marcador (si las plantillas ya cargaron)
+    const t = tplMarkerToText(preview, c.phone);
+    if (t !== '📋 Plantilla enviada') preview = t;
+  }
   else if (c.lastType === 'unsupported') preview = '⚠ No compatible';
   else if (c.lastType === 'sticker') preview = '🏷 Sticker';
   else if (c.lastType === 'video') preview = '🎥 Video';
