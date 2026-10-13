@@ -2949,7 +2949,12 @@ function render() {
   // Nadia (2da vendedora): set reducido por ahora. Views permitidas: dashboard (solo
   // su panel "Tu sueldo"), pedidos, presupuestos, cotizacion, chat. Si cae en otra
   // (seguimientos/actividad/etc. por hash directo), al dashboard.
-  if (isSecundario(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas'].includes(STATE.view)) {
+  if (isSecundario(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas','rendimiento'].includes(STATE.view)) {
+    STATE.view = 'dashboard';
+    if (location.hash !== '#dashboard') location.hash = 'dashboard';
+  }
+  // Rendimiento: Gaspar (comparación) y los vendedores (cada uno el suyo).
+  if (STATE.view === 'rendimiento' && !rdPuedeVer()) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
@@ -2990,6 +2995,7 @@ function render() {
     else if (v === 'insights')     document.getElementById('main').innerHTML = renderInsights();
     else if (v === 'automatizaciones') document.getElementById('main').innerHTML = renderAutomatizaciones();
     else if (v === 'funnel-ads')   document.getElementById('main').innerHTML = renderFunnelAds();
+    else if (v === 'rendimiento')  document.getElementById('main').innerHTML = renderRendimiento();
     else if (v === 'agenda')       document.getElementById('main').innerHTML = renderAgenda();
     else if (v === 'admin')        document.getElementById('main').innerHTML = renderAdmin();
     else                        document.getElementById('main').innerHTML = renderDashboard();
@@ -3023,6 +3029,7 @@ function render() {
   if (STATE.view === 'insights') bindInsights();
   if (STATE.view === 'automatizaciones') bindAutomatizaciones();
   if (STATE.view === 'funnel-ads') bindFunnelAds();
+  if (STATE.view === 'rendimiento') bindRendimiento();
   if (STATE.view === 'agenda') bindAgenda();
   if (STATE.view === 'admin') bindAdmin();
   // Sincronizar classes mobile del chat (chat-mobile-list / chat-mobile-conv)
@@ -6735,6 +6742,7 @@ function renderShell() {
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
         ${isAdmin() ? `<button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>` : ''}
         ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isSecundario(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
+        ${rdPuedeVer() ? `<button class="nav-item ${v==='rendimiento'?'active':''}" data-view="rendimiento"><span class="icon">↗</span> ${isAdmin() ? 'Rendimiento' : 'Mi rendimiento'}</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='logistica'?'active':''}" data-view="logistica"><span class="icon">📦</span> Logística</button>` : ''}
         ${!isSecundario(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
@@ -7517,8 +7525,19 @@ function renderDashboard() {
   // contar unidades infla el ticket promedio.
   const totalUnidades = cur.reduce((a,p) => a + (Number(p.cantidad) || 1), 0);
   const aov = totalUnidades ? totalMes / totalUnidades : 0;
-  // Cobrado = total - restante (si restante=0, el cartel está saldado)
-  const cobrado = cur.reduce((a,p)=>a + (p.precio + p.precioDimmer - p.restante), 0);
+  // Cobrado = total - restante (si restante=0, el cartel está saldado). En los pedidos cargados por el CRM el
+  // restante es el saldo del PEDIDO copiado en cada cartel (fila): se descuenta UNA vez por pedido (mismo grupo
+  // que pedidoHermanos). Las filas del Excel traen su restante por fila, como antes.
+  const _restCrm = new Map();
+  let _restante = 0;
+  for (const p of cur) {
+    if (p.origen === 'crm') {
+      const k = [p.numero, +p.fecha, p.comercial_id || 'joaco', p.telefono || ''].join('|');
+      if (!_restCrm.has(k)) _restCrm.set(k, Number(p.restante) || 0);
+    } else _restante += Number(p.restante) || 0;
+  }
+  for (const n of _restCrm.values()) _restante += n;
+  const cobrado = totalMes - _restante;
   const pctCobrado = totalMes ? Math.round(cobrado/totalMes*100) : 0;
   const sgts = getSeguimientosWeek();
   const pptosAbiertos = sgts.filter(s=>s.kind==='presupuesto');
@@ -15287,6 +15306,378 @@ async function rejectImprovement(id, btn) {
 window.generateImprovements = generateImprovements;
 window.approveImprovement = approveImprovement;
 window.rejectImprovement = rejectImprovement;
+
+// ===== Panel de rendimiento por vendedor =====
+// Cada vendedor (Joaco/Facu/Agus) ve SU panel contra sí mismo: meta de plata del mes, neones y corpóreos con su
+// ticket promedio, embudo, tiempo de respuesta y "para hacer hoy". Gaspar ve la comparación de los 3 (montos de
+// Facu/Agus sin el 5% del cotizador) y puede abrir el panel de cada uno. El servidor filtra: un vendedor nunca
+// recibe datos de otro. Consume GET /admin/kpis-vendedor y POST /admin/kpis-vendedor/meta. Sin comisiones.
+let rendState = { mes: '', tab: 'comparar', cache: {}, seq: 0 };
+const RD_VEND = [{ slug: 'joaco', nombre: 'Joaco', color: '#2E9BD6' }, { slug: 'facundo', nombre: 'Facu', color: '#8B2FD6' }, { slug: 'agustina', nombre: 'Agus', color: '#D6409F' }];
+const RD_NEON = '#B84DFF', RD_CORP = '#E4A33A';
+function rdSlugUsuario() { if (isJoaquinUser(STATE.user)) return 'joaco'; if (isFacundoUser(STATE.user)) return 'facundo'; if (isAgustinaUser(STATE.user)) return 'agustina'; return ''; }
+function rdPuedeVer() { return isAdmin() || !!rdSlugUsuario(); }
+function rdColor(slug) { const v = RD_VEND.find(x => x.slug === slug); return v ? v.color : '#888'; }
+function rdPct(x) { return x == null ? '—' : Math.round(x * 100) + '%'; }
+function rdHoras(h) { if (h == null) return '—'; return h < 1 ? Math.max(1, Math.round(h * 60)) + ' min' : h.toFixed(1).replace('.', ',') + ' h'; }
+// Espera en tiempo hábil, legible: minutos, horas o días hábiles (1 día hábil = 12 h, de 9 a 21).
+function rdEspera(h) { if (h == null) return '—'; if (h < 12) return rdHoras(h); const d = Math.floor(h / 12); return d + (d === 1 ? ' día hábil' : ' días hábiles'); }
+function rdCorto(n) {
+  if (STATE.privacy) return '$•••';
+  const a = Math.abs(n || 0);
+  if (a >= 1e6) return '$' + (n / 1e6).toFixed(a >= 1e7 ? 0 : 1).replace('.', ',') + 'M';
+  if (a >= 1e3) return '$' + Math.round(n / 1e3) + 'k';
+  return '$' + Math.round(n || 0);
+}
+function rdMesLabel(mes) { const m = faMonths().find(x => x.key === mes); return m ? m.label : mes; }
+// Proyección a fin de mes del mes en curso (ritmo de los días que pasaron).
+function rdProyeccion(valor, mes) {
+  if (!faIsCurrentMonth(mes)) return null;
+  const dia = parseInt(faToday().slice(8, 10), 10), y = +mes.slice(0, 4), m = +mes.slice(5, 7);
+  const dias = new Date(y, m, 0).getDate();
+  return dia ? valor / dia * dias : null;
+}
+// Comparación con el mes anterior: en el mes en curso solo se muestra la referencia (comparar 12 días contra 30 engaña).
+function rdVsAnt(cur, ant, mes, fmt) {
+  const f = fmt || (x => String(x));
+  if (faIsCurrentMonth(mes) || !ant) return `<span class="rd-ref">mes pasado: ${f(ant || 0)}</span>`;
+  const d = (cur - ant) / ant;
+  return `<span class="rd-delta ${d >= 0 ? 'up' : 'down'}">${d >= 0 ? '▲' : '▼'} ${Math.abs(Math.round(d * 100))}%</span> <span class="rd-ref">vs ${f(ant)}</span>`;
+}
+
+function renderRendimiento() {
+  const st = rendState;
+  if (!/^\d{4}-\d{2}$/.test(st.mes)) { const ms = faMonths(); st.mes = ms[ms.length - 1].key; }
+  if (!isAdmin()) st.tab = rdSlugUsuario();
+  else if (!['comparar', 'joaco', 'facundo', 'agustina'].includes(st.tab)) st.tab = 'comparar';
+  const mesBtns = faMonths().map(m => `<button data-rd-mes="${m.key}" aria-pressed="${st.mes === m.key}">${m.label}</button>`).join('');
+  const tabs = isAdmin() ? `<div class="rd-seg">${[['comparar', 'Comparar']].concat(RD_VEND.map(v => [v.slug, v.nombre])).map(([k, l]) => `<button data-rd-tab="${k}" aria-pressed="${st.tab === k}">${l}</button>`).join('')}</div>` : '';
+  return `
+  <style>
+  .rd-wrap{--rd-surf:var(--surface,#fff);--rd-surf2:#F5F1FB;--rd-bd:#E7E1F1;--rd-tx:#1B1622;--rd-mut:#6E6684;--rd-fnt:#948CA6;--rd-acc:#8B2FD6;--rd-good:#12A163;--rd-warn:#B67916;--rd-bad:#D23A3F;--rd-sh:0 1px 2px rgba(30,20,50,.05),0 8px 24px -12px rgba(60,30,110,.14)}
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .rd-wrap{--rd-surf:#1B1726;--rd-surf2:#231D33;--rd-bd:#322A44;--rd-tx:#ECE7F6;--rd-mut:#9A92AD;--rd-fnt:#7A7291;--rd-acc:#C77DFF;--rd-good:#33CF88;--rd-warn:#E4B052;--rd-bad:#F15A5F;--rd-sh:0 1px 2px rgba(0,0,0,.3),0 12px 30px -14px rgba(0,0,0,.6)}}
+  :root[data-theme="dark"] .rd-wrap{--rd-surf:#1B1726;--rd-surf2:#231D33;--rd-bd:#322A44;--rd-tx:#ECE7F6;--rd-mut:#9A92AD;--rd-fnt:#7A7291;--rd-acc:#C77DFF;--rd-good:#33CF88;--rd-warn:#E4B052;--rd-bad:#F15A5F;--rd-sh:0 1px 2px rgba(0,0,0,.3),0 12px 30px -14px rgba(0,0,0,.6)}
+  .rd-wrap{color:var(--rd-tx);max-width:1180px;margin:0 auto;padding:4px 2px 40px}
+  .rd-wrap .mono{font-variant-numeric:tabular-nums}
+  .rd-head{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px 18px;margin-bottom:16px}
+  .rd-head h1{margin:0;font-size:23px;font-weight:800;letter-spacing:-.02em}
+  .rd-head .sub{color:var(--rd-mut);font-size:13px}
+  .rd-ctrls{display:flex;flex-wrap:wrap;gap:10px;margin-left:auto}
+  .rd-seg{display:inline-flex;flex-wrap:wrap;background:var(--rd-surf2);border:1px solid var(--rd-bd);border-radius:10px;padding:3px}
+  .rd-seg button{border:0;background:transparent;color:var(--rd-mut);font:inherit;font-size:13px;font-weight:600;padding:6px 12px;border-radius:7px;cursor:pointer}
+  .rd-seg button[aria-pressed="true"]{background:var(--rd-surf);color:var(--rd-tx);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+  .rd-card{background:var(--rd-surf);border:1px solid var(--rd-bd);border-radius:16px;box-shadow:var(--rd-sh);margin-bottom:14px;padding:15px 17px}
+  .rd-card h2{margin:0 0 4px;font-size:14px;font-weight:700}
+  .rd-card .cap{color:var(--rd-mut);font-size:12.5px;margin-bottom:10px}
+  .rd-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:11px;margin-bottom:14px}
+  .rd-tile{background:var(--rd-surf);border:1px solid var(--rd-bd);border-radius:14px;padding:13px 14px;box-shadow:var(--rd-sh)}
+  .rd-tile .lab{font-size:12px;color:var(--rd-mut);font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:6px}
+  .rd-tile .val{font-size:24px;font-weight:800;letter-spacing:-.02em}
+  .rd-tile .val small{font-size:13px;font-weight:600;color:var(--rd-mut)}
+  .rd-tile .foot{margin-top:5px;font-size:12px}
+  .rd-ref{color:var(--rd-fnt)} .rd-delta{font-weight:700} .rd-delta.up{color:var(--rd-good)} .rd-delta.down{color:var(--rd-bad)}
+  .rd-sw{width:10px;height:10px;border-radius:3px;display:inline-block;flex:none}
+  .rd-meta .row{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px}
+  .rd-meta .big{font-size:28px;font-weight:800;letter-spacing:-.02em}
+  .rd-bar{height:14px;border-radius:999px;background:var(--rd-surf2);border:1px solid var(--rd-bd);overflow:hidden;margin:10px 0 6px;position:relative}
+  .rd-bar span{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--rd-acc),#D6409F)}
+  .rd-bar i{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--rd-tx);opacity:.45}
+  .rd-meta .foot{font-size:12.5px;color:var(--rd-mut)}
+  .rd-grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+  .rd-grid2>.rd-card{margin-bottom:0}
+  .rd-funnel{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px}
+  .rd-step{flex:1;min-width:92px;background:var(--rd-surf2);border:1px solid var(--rd-bd);border-radius:12px;padding:10px 11px}
+  .rd-step .n{font-size:21px;font-weight:800} .rd-step .k{font-size:11px;color:var(--rd-mut);font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+  .rd-conv{display:flex;flex-direction:column;justify-content:center;align-items:center;color:var(--rd-fnt);font-size:12px;font-weight:700;min-width:38px}
+  .rd-conv b{color:var(--rd-acc);font-size:15px}
+  .rd-list{display:flex;flex-direction:column}
+  .rd-it{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--rd-bd);font-size:13px}
+  .rd-it:last-child{border-bottom:0} .rd-it .q{flex:1;min-width:0} .rd-it .q b{font-weight:700} .rd-it .q small{display:block;color:var(--rd-mut);font-size:12px;white-space:normal}
+  .rd-btn{border:1px solid var(--rd-bd);background:var(--rd-surf);color:var(--rd-tx);font:inherit;font-size:12px;font-weight:600;padding:5px 10px;border-radius:8px;cursor:pointer;white-space:nowrap}
+  .rd-btn:hover{border-color:var(--rd-acc);color:var(--rd-acc)} .rd-btn.pri{background:var(--rd-acc);border-color:var(--rd-acc);color:#fff}
+  .rd-pill{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:700;background:var(--rd-surf2);color:var(--rd-mut);border:1px solid var(--rd-bd)}
+  .rd-pill.bad{color:var(--rd-bad);border-color:var(--rd-bad)} .rd-pill.warn{color:var(--rd-warn);border-color:var(--rd-warn)}
+  .rd-empty{color:var(--rd-fnt);font-size:13px;padding:6px 0}
+  .rd-vcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-bottom:14px}
+  .rd-vcard{border-top:4px solid var(--c)}
+  .rd-vcard h3{margin:0 0 8px;font-size:16px;font-weight:800;display:flex;align-items:center;gap:8px}
+  .rd-vcard .fact{font-size:26px;font-weight:800;letter-spacing:-.02em}
+  .rd-mini{display:grid;grid-template-columns:1fr auto;gap:5px 10px;font-size:13px;margin-top:10px}
+  .rd-mini span:nth-child(odd){color:var(--rd-mut)} .rd-mini span:nth-child(even){font-weight:700;text-align:right}
+  .rd-metaedit{display:flex;gap:6px;align-items:center;margin-top:6px;font-size:12px;color:var(--rd-mut)}
+  .rd-metaedit input{width:120px;padding:4px 7px;border:1px solid var(--rd-bd);border-radius:7px;background:var(--rd-surf);color:var(--rd-tx);font:inherit;font-size:12.5px}
+  .rd-chart svg{width:100%;height:auto;display:block}
+  .rd-chart text{fill:var(--rd-mut);font-size:12.5px;font-family:inherit}
+  .rd-chart .gl{stroke:var(--rd-bd);stroke-width:1}
+  .rd-leg{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--rd-mut);margin-top:8px}
+  .rd-leg span{display:inline-flex;align-items:center;gap:5px}
+  .rd-tblw{overflow-x:auto}
+  .rd-tbl{border-collapse:collapse;width:100%;min-width:560px;font-size:13px}
+  .rd-tbl th,.rd-tbl td{padding:8px 9px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--rd-bd)}
+  .rd-tbl th{color:var(--rd-mut);font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;font-weight:600}
+  .rd-tbl th:first-child,.rd-tbl td:first-child{text-align:left}
+  .rd-note{font-size:12px;color:var(--rd-fnt);margin:-4px 0 12px}
+  </style>
+  <div class="rd-wrap">
+    <div class="rd-head">
+      <div><h1>${isAdmin() ? 'Rendimiento del equipo' : 'Mi rendimiento'}</h1><div class="sub" id="rd-sub">${escapeHtml(rdMesLabel(st.mes))}${faIsCurrentMonth(st.mes) ? ' (en curso)' : ''}</div></div>
+      <div class="rd-ctrls">${tabs}<div class="rd-seg">${mesBtns}</div></div>
+    </div>
+    <div id="rd-body"><div class="rd-card"><div class="loading"><div class="spinner"></div></div></div></div>
+  </div>`;
+}
+
+async function loadRendimiento(force) {
+  const st = rendState;
+  const vend = isAdmin() ? (st.tab === 'comparar' ? '' : st.tab) : rdSlugUsuario();
+  const key = st.mes + '|' + vend;
+  const c = st.cache[key];
+  if (!force && c && Date.now() - c.at < 120000) { rdPintar(c.data, vend); return; }
+  const my = ++st.seq;
+  const body = document.getElementById('rd-body');
+  if (body && !c) body.innerHTML = '<div class="rd-card"><div class="loading"><div class="spinner"></div></div></div>';
+  let err = '';
+  for (let intento = 0; intento < 2; intento++) {
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/kpis-vendedor?mes=' + st.mes + (vend ? '&vendedor=' + vend : ''), { headers: { ...authHeaders() } });
+      const j = await r.json().catch(() => null);
+      if (my !== st.seq) return;
+      if (r.ok && j && j.ok) { st.cache[key] = { at: Date.now(), data: j }; rdPintar(j, vend); return; }
+      err = (j && j.error) ? String(j.error) : ('HTTP ' + r.status);
+      if (r.status === 401 || r.status === 403) break;
+    } catch (_) { if (my !== st.seq) return; err = 'sin conexión'; }
+    if (intento === 0) await new Promise(res => setTimeout(res, 1500));
+    if (my !== st.seq) return;
+  }
+  if (body) body.innerHTML = `<div class="rd-card"><div class="rd-empty" style="color:var(--rd-bad)">No se pudo cargar el panel (${escapeHtml(err)}). <button class="rd-btn" data-rd-retry>Reintentar</button></div></div>`;
+  const rb = document.querySelector('[data-rd-retry]'); if (rb) rb.onclick = () => loadRendimiento(true);
+}
+function rdPintar(d, vend) {
+  const body = document.getElementById('rd-body'); if (!body) return;
+  body.innerHTML = (!vend && d.vendedores) ? rdCompararHtml(d) : (d.vendedor ? rdVendedorHtml(d.vendedor, d.mes) : '<div class="rd-card rd-empty">Sin datos.</div>');
+  bindRendimientoBody();
+}
+
+// --- Panel de UN vendedor (lo que ve él; Gaspar lo ve igual desde la pestaña del vendedor) ---
+function rdVendedorHtml(v, mes) {
+  const a = v.actual, p = v.anterior, h = v.ahora;
+  const fact = a.facturado, meta = v.meta || 0;
+  const proy = rdProyeccion(fact, mes);
+  const pct = meta ? Math.min(100, fact / meta * 100) : 0;
+  const diaPct = faIsCurrentMonth(mes) ? (parseInt(faToday().slice(8, 10), 10) / new Date(+mes.slice(0, 4), +mes.slice(5, 7), 0).getDate() * 100) : null;
+  const metaHtml = meta ? `
+      <div class="row"><span class="big mono">${fmtMoney(fact)}</span><span class="rd-ref">de ${fmtMoney(meta)} · ${Math.round(fact / meta * 100)}%</span></div>
+      <div class="rd-bar"><span style="width:${pct.toFixed(1)}%"></span>${diaPct != null ? `<i style="left:${diaPct.toFixed(1)}%" title="Día del mes"></i>` : ''}</div>
+      <div class="foot">${fact >= meta ? 'Meta cumplida 🎉' : 'Te faltan ' + fmtMoney(meta - fact)}${proy != null ? ' · a este ritmo cerrás el mes en ' + fmtMoney(proy) : ''}${diaPct != null ? ' · la rayita marca en qué día del mes estamos' : ''}</div>`
+    : `<div class="row"><span class="big mono">${fmtMoney(fact)}</span><span class="rd-ref">facturado en el mes</span></div>
+      <div class="foot">${proy != null ? 'A este ritmo cerrás el mes en ' + fmtMoney(proy) + ' · ' : ''}Todavía no hay una meta cargada para este mes.</div>`;
+  const tile = (lab, val, foot, sw) => `<div class="rd-tile"><div class="lab">${sw ? `<span class="rd-sw" style="background:${sw}"></span>` : ''}${lab}</div><div class="val mono">${val}</div><div class="foot">${foot}</div></div>`;
+  const step = (k, n) => `<div class="rd-step"><div class="k">${k}</div><div class="n mono">${n}</div></div>`;
+  const conv = (x) => `<div class="rd-conv"><b>${rdPct(x)}</b>→</div>`;
+  const chatBtn = (ph) => `<button class="rd-btn" data-rd-chat="${escapeHtml(ph)}">Ver chat →</button>`;
+  const RD_MAX = 10, mas = (arr) => arr.length > RD_MAX ? `<div class="rd-empty">y ${arr.length - RD_MAX} más</div>` : '';
+  const pc = (h.para_cotizar || []).slice(0, RD_MAX).map(x => `<div class="rd-it"><div class="q"><b>${escapeHtml(x.name || ('+' + x.phone))}</b> ${x.producto === 'corporeo' ? '<span class="rd-pill">corpóreo</span>' : ''}<small>Pasó todos los datos hace ${rdEspera(x.horas)}${x.horas < 12 ? ' hábiles' : ''} y todavía no le escribió nadie</small></div>${x.horas >= 3 ? '<span class="rd-pill bad">urgente</span>' : ''}${chatBtn(x.phone)}</div>`).join('');
+  const oc = (h.oc_abiertas || []).slice(0, RD_MAX).map(x => `<div class="rd-it"><div class="q"><b>${escapeHtml(x.name || ('+' + x.phone))}</b> <span class="rd-ref">${escapeHtml(x.cartel || '')} ${escapeHtml(x.importe || '')}</span><small>${escapeHtml(x.estado || '')}${x.dias != null ? ' · hace ' + x.dias + ' día' + (x.dias === 1 ? '' : 's') : ''}</small></div>${x.urgente ? '<span class="rd-pill bad">te escribió</span>' : ''}${chatBtn(x.phone)}</div>`).join('');
+  const sem = v.semanas || [];
+  return `
+    <div class="rd-card rd-meta"><h2>Meta del mes</h2>${metaHtml}</div>
+    <div class="rd-kpis">
+      ${tile('Neones vendidos', a.neones, rdVsAnt(a.neones, p.neones, mes), RD_NEON)}
+      ${tile('Corpóreos vendidos', a.corporeos, rdVsAnt(a.corporeos, p.corporeos, mes), RD_CORP)}
+      ${tile('Ticket promedio neón', a.ticket_neon != null ? rdCorto(a.ticket_neon) : '—', rdVsAnt(Math.round(a.ticket_neon || 0), Math.round(p.ticket_neon || 0), mes, rdCorto), RD_NEON)}
+      ${tile('Ticket promedio corpóreo', a.ticket_corp != null ? rdCorto(a.ticket_corp) : '—', rdVsAnt(Math.round(a.ticket_corp || 0), Math.round(p.ticket_corp || 0), mes, rdCorto), RD_CORP)}
+      ${tile('Pedidos', a.pedidos, rdVsAnt(a.pedidos, p.pedidos, mes))}
+      ${tile('Facturado', rdCorto(fact), rdVsAnt(fact, p.facturado, mes, rdCorto))}
+    </div>
+    <div class="rd-grid2">
+      <div class="rd-card"><h2>Tu embudo del mes</h2><div class="cap">De las consultas que te llegaron, cuántas recibieron presupuesto, orden de compra y cuántas compraron.</div>
+        <div class="rd-funnel">${step('Consultas', a.consultas)}${conv(a.conv_presup)}${step('Presupuestos', a.presup_clientes)}${conv(a.conv_oc)}${step('Órdenes de compra', a.oc)}${conv(a.presup_clientes ? a.pedidos / a.presup_clientes : null)}${step('Ventas', a.pedidos)}</div>
+        <div class="rd-leg"><span>Presupuestos mandados: <b>${a.presupuestos}</b> (${a.presup_neon} neón · ${a.presup_corp} corpóreo)</span><span>Mes pasado: ${p.consultas} consultas · ${p.presup_clientes} con presupuesto · ${p.pedidos} ventas</span></div>
+      </div>
+      <div class="rd-card"><h2>Tiempo de respuesta</h2><div class="cap">Desde que el bot te pasa el lead con todos los datos ("Para cotizar") hasta que le escribís. En horas hábiles (lunes a sábado de 9 a 21).</div>
+        <div class="rd-kpis" style="margin:0">
+          ${tile('Lo normal', rdHoras(a.resp_mediana_h), '<span class="rd-ref">la mitad la respondés en menos de esto</span>')}
+          ${tile('En menos de 2 h', a.resp_n ? Math.round(a.resp_2h / a.resp_n * 100) + '%' : '—', `<span class="rd-ref">${a.resp_2h} de ${a.resp_n}</span>`)}
+          ${tile('Sin responder', a.sin_resp, '<span class="rd-ref">pasaron más de 3 h hábiles</span>')}
+        </div>
+      </div>
+    </div>
+    <div class="rd-card" style="margin-top:14px"><h2>Facturado por semana</h2><div class="cap">Últimas 9 semanas (lunes a domingo).</div>
+      <div class="rd-chart">${rdSvgSemanas(sem)}</div>
+      <div class="rd-leg"><span><span class="rd-sw" style="background:${RD_NEON}"></span>Neón</span><span><span class="rd-sw" style="background:${RD_CORP}"></span>Corpóreo</span></div>
+    </div>
+    <div class="rd-grid2" style="margin-top:14px">
+      <div class="rd-card"><h2>Para hacer hoy: leads para cotizar sin respuesta</h2><div class="cap">${(h.para_cotizar || []).length} en los últimos 7 días. El bot ya juntó los datos. Cuanto antes les escribas, más chances de venta.</div>
+        <div class="rd-list">${pc ? pc + mas(h.para_cotizar) : '<div class="rd-empty">Nada pendiente. Bien ahí.</div>'}</div></div>
+      <div class="rd-card"><h2>Órdenes de compra sin pagar</h2><div class="cap">Clientes con la OC mandada que todavía no pagaron.</div>
+        <div class="rd-list">${oc ? oc + mas(h.oc_abiertas) : '<div class="rd-empty">No tenés OC pendientes.</div>'}</div>
+        <div class="rd-leg"><span>En producción: <b>${h.en_produccion}</b> pedidos</span><span>Para enviar: <b>${h.para_enviar}</b></span></div></div>
+    </div>`;
+}
+// Barras apiladas neón/corpóreo por semana.
+function rdSvgSemanas(sem) {
+  if (!sem.length) return '<div class="rd-empty">Sin datos.</div>';
+  const W = 640, H = 200, L = 46, B = 24, T = 10, n = sem.length, bw = (W - L - 8) / n;
+  const max = Math.max(1, ...sem.map(s => s.neon + s.corp));
+  const y = v => T + (H - T - B) * (1 - v / max);
+  let g = '';
+  for (const f of [0, .5, 1]) g += `<line class="gl" x1="${L}" x2="${W}" y1="${y(max * f)}" y2="${y(max * f)}"/><text x="${L - 6}" y="${y(max * f) + 4}" text-anchor="end">${rdCorto(max * f)}</text>`;
+  sem.forEach((s, i) => {
+    const x = L + 4 + i * bw, w = bw * 0.62;
+    const yN = y(s.neon), yT = y(s.neon + s.corp);
+    g += `<rect x="${x}" y="${yN}" width="${w}" height="${Math.max(0, H - B - yN)}" rx="3" fill="${RD_NEON}"><title>Neón ${rdCorto(s.neon)}</title></rect>`;
+    if (s.corp) g += `<rect x="${x}" y="${yT}" width="${w}" height="${Math.max(0, yN - yT)}" rx="3" fill="${RD_CORP}"><title>Corpóreo ${rdCorto(s.corp)}</title></rect>`;
+    g += `<text x="${x + w / 2}" y="${H - 7}" text-anchor="middle">${s.desde.slice(8, 10)}/${s.desde.slice(5, 7)}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Facturado por semana">${g}</svg>`;
+}
+
+// --- Comparación de los 3 (solo Gaspar) ---
+function rdCompararHtml(d) {
+  const vs = d.vendedores || [];
+  const mes = d.mes;
+  const cards = vs.map(v => {
+    const a = v.actual, meta = v.meta || 0, crudo = v.facturado_crudo || 0;
+    const pct = meta ? Math.min(100, crudo / meta * 100) : 0;
+    return `<div class="rd-card rd-vcard" style="--c:${rdColor(v.slug)}">
+      <h3><span class="rd-sw" style="background:${rdColor(v.slug)}"></span>${escapeHtml(v.nombre)}</h3>
+      <div class="fact mono">${fmtMoney(a.facturado)}</div><div class="rd-ref" style="font-size:12px">facturado${(v.slug !== 'joaco') ? ' (sin el 5%)' : ''} · ${rdVsAnt(a.facturado, v.anterior.facturado, mes, rdCorto)}</div>
+      ${meta ? `<div class="rd-bar"><span style="width:${pct.toFixed(1)}%"></span></div><div class="rd-ref" style="font-size:12px">Meta: ${fmtMoney(crudo)} de ${fmtMoney(meta)} (${Math.round(crudo / meta * 100)}%)</div>` : '<div class="rd-ref" style="font-size:12px;margin-top:6px">Sin meta cargada</div>'}
+      <div class="rd-metaedit">Meta del mes <input id="rd-meta-${v.slug}" inputmode="numeric" value="${meta ? meta.toLocaleString('es-AR') : ''}" placeholder="$ monto"><button class="rd-btn" data-rd-meta="${v.slug}">Guardar</button></div>
+      <div class="rd-mini">
+        <span>Neones</span><span class="mono">${a.neones} · ${a.ticket_neon != null ? rdCorto(a.ticket_neon) : '—'} c/u</span>
+        <span>Corpóreos</span><span class="mono">${a.corporeos} · ${a.ticket_corp != null ? rdCorto(a.ticket_corp) : '—'} c/u</span>
+        <span>Pedidos</span><span class="mono">${a.pedidos}</span>
+        <span>Consultas recibidas</span><span class="mono">${a.consultas}</span>
+        <span>Consulta → venta</span><span class="mono">${a.consultas ? rdPct(a.pedidos / a.consultas) : '—'}</span>
+        <span>Respuesta (lo normal)</span><span class="mono">${rdHoras(a.resp_mediana_h)}</span>
+        <span>Para cotizar sin responder</span><span class="mono">${(v.ahora.para_cotizar || []).length}</span>
+        <span>OC sin pagar</span><span class="mono">${(v.ahora.oc_abiertas || []).length}</span>
+      </div></div>`;
+  }).join('');
+  const leg = `<div class="rd-leg">${vs.map(v => `<span><span class="rd-sw" style="background:${rdColor(v.slug)}"></span>${escapeHtml(v.nombre)}</span>`).join('')}</div>`;
+  const fila = (lab, f) => `<tr><td>${lab}</td>${vs.map(v => `<td class="mono">${f(v)}</td>`).join('')}</tr>`;
+  return `
+    <div class="rd-note">Los montos de Facu y Agus van sin el 5% que les suma el cotizador, para comparar parejo. La meta se mide contra lo que facturó cada uno de verdad. Las consultas se le cuentan al que la recibió; los presupuestos y las OC al que los mandó; la venta al que la cerró.</div>
+    <div class="rd-vcards">${cards}</div>
+    <div class="rd-grid2">
+      <div class="rd-card"><h2>Conversión por etapa</h2><div class="cap">Qué % pasa de un paso al siguiente. Compará % y no totales: Facu y Agus reciben menos consultas por el regulador.</div>
+        <div class="rd-chart">${rdSvgAgrupadas(['Consulta → presupuesto', 'Presupuesto → OC', 'Presupuesto → venta'], vs.map(v => ({ color: rdColor(v.slug), vals: [v.actual.conv_presup, v.actual.conv_oc, v.actual.conv_venta] })))}</div>${leg}</div>
+      <div class="rd-card"><h2>Facturado por semana</h2><div class="cap">Últimas 9 semanas, neón + corpóreo.</div>
+        <div class="rd-chart">${rdSvgLineas(vs.map(v => ({ color: rdColor(v.slug), vals: (v.semanas || []).map(s => s.neon + s.corp) })), ((vs[0] && vs[0].semanas) || []).map(s => s.desde.slice(8, 10) + '/' + s.desde.slice(5, 7)))}</div>${leg}</div>
+      <div class="rd-card"><h2>Respuesta después del bot</h2><div class="cap">Lo normal (mediana) en horas hábiles desde "Para cotizar" hasta el primer mensaje. La línea marca la meta de 2 h.</div>
+        <div class="rd-chart">${rdSvgHorizontales(vs.map(v => ({ label: v.nombre, color: rdColor(v.slug), v: v.actual.resp_mediana_h, txt: rdHoras(v.actual.resp_mediana_h) + (v.actual.sin_resp ? ' · ' + v.actual.sin_resp + ' sin responder' : '') })), 2)}</div></div>
+      <div class="rd-card"><h2>Mix neón / corpóreo</h2><div class="cap">Carteles vendidos en el mes y ticket promedio de cada uno.</div>
+        <div class="rd-chart">${rdSvgMix(vs)}</div>
+        <div class="rd-leg"><span><span class="rd-sw" style="background:${RD_NEON}"></span>Neón</span><span><span class="rd-sw" style="background:${RD_CORP}"></span>Corpóreo</span></div></div>
+    </div>
+    <div class="rd-card" style="margin-top:14px"><h2>Detalle</h2><div class="rd-tblw"><table class="rd-tbl">
+      <thead><tr><th></th>${vs.map(v => `<th>${escapeHtml(v.nombre)}</th>`).join('')}</tr></thead><tbody>
+      ${fila('Consultas recibidas', v => v.actual.consultas)}
+      ${fila('Presupuestos mandados', v => `${v.actual.presupuestos} <span class="rd-ref">(${v.actual.presup_clientes} clientes)</span>`)}
+      ${fila('· de corpóreo', v => v.actual.presup_corp)}
+      ${fila('Órdenes de compra', v => v.actual.oc)}
+      ${fila('Pedidos', v => v.actual.pedidos)}
+      ${fila('Neones / corpóreos', v => v.actual.neones + ' / ' + v.actual.corporeos)}
+      ${fila('Facturado neón', v => fmtMoney(v.actual.monto_neon))}
+      ${fila('Facturado corpóreo', v => fmtMoney(v.actual.monto_corp))}
+      ${fila('Ticket por pedido', v => v.actual.ticket_pedido != null ? fmtMoney(v.actual.ticket_pedido) : '—')}
+      ${fila('Respuesta en menos de 2 h', v => v.actual.resp_n ? Math.round(v.actual.resp_2h / v.actual.resp_n * 100) + '%' : '—')}
+      ${fila('En producción / para enviar', v => v.ahora.en_produccion + ' / ' + v.ahora.para_enviar)}
+      </tbody></table></div></div>`;
+}
+function rdSvgAgrupadas(cats, series) {
+  const W = 440, H = 230, L = 38, B = 40, T = 18, gw = (W - L) / cats.length, n = series.length, bw = Math.min(34, gw * 0.7 / n);
+  const max = Math.max(0.1, ...series.flatMap(s => s.vals.map(v => v || 0))) * 1.12;
+  const y = v => T + (H - T - B) * (1 - v / max);
+  let g = '';
+  for (const f of [0, .5, 1]) g += `<line class="gl" x1="${L}" x2="${W}" y1="${y(max * f)}" y2="${y(max * f)}"/><text x="${L - 5}" y="${y(max * f) + 4}" text-anchor="end">${Math.round(max * f * 100)}%</text>`;
+  cats.forEach((c, i) => {
+    const x0 = L + i * gw + (gw - bw * n) / 2;
+    series.forEach((s, k) => {
+      const v = s.vals[i]; const x = x0 + k * bw;
+      if (v == null) { g += `<text x="${x + bw / 2}" y="${H - B - 4}" text-anchor="middle">—</text>`; return; }
+      g += `<rect x="${x + 2}" y="${y(v)}" width="${bw - 4}" height="${Math.max(0, H - B - y(v))}" rx="3" fill="${s.color}"/><text x="${x + bw / 2}" y="${y(v) - 4}" text-anchor="middle">${Math.round(v * 100)}%</text>`;
+    });
+    const [c1, c2] = String(c).split(" → "); g += `<text x="${L + i * gw + gw / 2}" y="${H - 22}" text-anchor="middle">${escapeHtml(c1)} →</text><text x="${L + i * gw + gw / 2}" y="${H - 6}" text-anchor="middle">${escapeHtml(c2 || "")}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Conversión por etapa">${g}</svg>`;
+}
+function rdSvgLineas(series, labels) {
+  if (!labels.length) return '<div class="rd-empty">Sin datos.</div>';
+  const W = 440, H = 220, L = 50, B = 26, T = 12, n = labels.length, dx = (W - L - 16) / Math.max(1, n - 1);
+  const max = Math.max(1, ...series.flatMap(s => s.vals));
+  const y = v => T + (H - T - B) * (1 - v / max), x = i => L + 8 + i * dx;
+  let g = '';
+  for (const f of [0, .5, 1]) g += `<line class="gl" x1="${L}" x2="${W}" y1="${y(max * f)}" y2="${y(max * f)}"/><text x="${L - 6}" y="${y(max * f) + 4}" text-anchor="end">${rdCorto(max * f)}</text>`;
+  labels.forEach((l, i) => { if (i % 2 === 0 || i === n - 1) g += `<text x="${x(i)}" y="${H - 7}" text-anchor="middle">${l}</text>`; });
+  for (const s of series) {
+    g += `<polyline fill="none" stroke="${s.color}" stroke-width="2.5" stroke-linejoin="round" points="${s.vals.map((v, i) => x(i) + ',' + y(v)).join(' ')}"/>`;
+    s.vals.forEach((v, i) => { g += `<circle cx="${x(i)}" cy="${y(v)}" r="3.2" fill="${s.color}"><title>${labels[i]}: ${rdCorto(v)}</title></circle>`; });
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Facturado por semana">${g}</svg>`;
+}
+function rdSvgHorizontales(rows, ref) {
+  const W = 440, rowH = 36, L = 50, R = 175, H = rows.length * rowH + 24;
+  const max = Math.max(ref * 1.5, ...rows.map(r => r.v || 0)) * 1.05;
+  const x = v => L + (W - L - R) * (v / max);
+  let g = '';
+  rows.forEach((r, i) => {
+    const yy = 8 + i * rowH;
+    g += `<text x="${L - 8}" y="${yy + 17}" text-anchor="end">${escapeHtml(r.label)}</text>`;
+    if (r.v != null) g += `<rect x="${L}" y="${yy + 4}" width="${Math.max(2, x(r.v) - L)}" height="18" rx="4" fill="${r.color}"/>`;
+    g += `<text x="${(r.v != null ? x(r.v) : L) + 8}" y="${yy + 17}">${escapeHtml(r.txt)}</text>`;
+  });
+  g += `<line x1="${x(ref)}" x2="${x(ref)}" y1="2" y2="${H - 16}" stroke="var(--rd-good)" stroke-width="2" stroke-dasharray="4 3"/><text x="${x(ref)}" y="${H - 3}" text-anchor="middle">meta ${ref} h</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Tiempo de respuesta">${g}</svg>`;
+}
+function rdSvgMix(vs) {
+  const W = 440, rowH = 42, L = 50, R = 8, H = vs.length * rowH + 8;
+  const max = Math.max(1, ...vs.map(v => v.actual.neones + v.actual.corporeos));
+  const sc = (W - L - R) / max;
+  let g = '';
+  vs.forEach((v, i) => {
+    const a = v.actual, yy = 6 + i * rowH, wn = a.neones * sc, wc = a.corporeos * sc;
+    g += `<text x="${L - 8}" y="${yy + 19}" text-anchor="end">${escapeHtml(v.nombre)}</text>`;
+    if (wn) g += `<rect x="${L}" y="${yy + 5}" width="${wn}" height="22" rx="4" fill="${RD_NEON}"><title>${a.neones} neones · ${rdCorto(a.ticket_neon || 0)} c/u</title></rect>`;
+    if (wc) g += `<rect x="${L + wn}" y="${yy + 5}" width="${wc}" height="22" rx="4" fill="${RD_CORP}"><title>${a.corporeos} corpóreos · ${rdCorto(a.ticket_corp || 0)} c/u</title></rect>`;
+    if (wn > 70) g += `<text x="${L + 7}" y="${yy + 20}" style="fill:#fff;font-weight:700">${a.neones} · ${rdCorto(a.ticket_neon || 0)}</text>`;
+    if (wc > 70) g += `<text x="${L + wn + 7}" y="${yy + 20}" style="fill:#fff;font-weight:700">${a.corporeos} · ${rdCorto(a.ticket_corp || 0)}</text>`;
+    if (!wn && !wc) g += `<text x="${L}" y="${yy + 20}">sin ventas</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Mix neón y corpóreo">${g}</svg>`;
+}
+
+function bindRendimiento() {
+  document.querySelectorAll('[data-rd-mes]').forEach(b => b.onclick = () => { rendState.mes = b.dataset.rdMes; render(); });
+  document.querySelectorAll('[data-rd-tab]').forEach(b => b.onclick = () => { rendState.tab = b.dataset.rdTab; render(); });
+  loadRendimiento(false);
+}
+function bindRendimientoBody() {
+  document.querySelectorAll('[data-rd-chat]').forEach(b => b.onclick = () => {
+    const phone = b.dataset.rdChat;
+    STATE.view = 'chat';
+    chatState.selectedPhone = phone;
+    if (typeof enterMobileChatConversation === 'function') enterMobileChatConversation();
+    try { selectChatContact(phone); } catch (_) {}
+    location.hash = 'chat';
+    render();
+  });
+  document.querySelectorAll('[data-rd-meta]').forEach(b => b.onclick = async () => {
+    const slug = b.dataset.rdMeta;
+    const inp = document.getElementById('rd-meta-' + slug);
+    const monto = parseInt(String(inp && inp.value || '').replace(/\D/g, ''), 10) || 0;
+    b.disabled = true;
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/kpis-vendedor/meta', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ slug, mes: rendState.mes, monto }) });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+      toast('Meta guardada');
+      rendState.cache = {};
+      loadRendimiento(true);
+    } catch (e) { toast('No se pudo guardar la meta: ' + (e.message || e)); b.disabled = false; }
+  });
+}
 
 // ===== Panel Funnel de Ads (admin) =====
 // Gasto (Meta) -> leads -> presupuestos -> ventas, por CAMPAÑA de Meta (con detalle por anuncio) y por
