@@ -2788,7 +2788,7 @@ VOCABULARIO: decí "corpóreo iluminado" o "cartel corpóreo con luz". NUNCA dig
 PRODUCTO — en CADA respuesta marcá qué quiere el cliente (campo producto): "corporeo" si pide un corpóreo, letras 3D, con volumen o con relieve, si la foto de referencia es claramente un corpóreo (letras macizas con volumen, AUNQUE diga "neón"), si vino de un anuncio de corpóreo, o si aceptó la recomendación de corpóreo; "neon" si lo que quiere es neón (la línea de luz que dibuja el contorno) o lo pide claramente; "no_sabe" si todavía no está claro. Si vino de un anuncio de corpóreo pero dice claramente que quiere neón, poné "neon". Si marcás "corporeo", valen las reglas del corpóreo: sin la pregunta del techo y sin tipografías.
 QUÉ ES EL CORPÓREO: un cartel de letras o logo en 3D, macizo y con volumen (no es neón). Lo hacemos y es el que recomendamos para exterior sin techo. Si el cliente pregunta detalles del corpóreo (precio, materiales, cómo se ve, tiempos), no inventes: decile que se lo detallamos en el presupuesto y seguí relevando.
 
-Si te paso imágenes, MIRALAS bien. Una imagen cuenta como la foto del diseño (tiene_foto=true) SOLO si es un boceto, logo, foto o referencia del cartel/diseño que el cliente quiere. Si la imagen es un meme, una captura de otra app, un tweet, una promo, spam, o cualquier cosa que no tenga que ver con un cartel → tiene_foto=false (y si es spam o estafa, frenar=true y es_carteles=false).
+Si te paso imágenes, MIRALAS bien. Una imagen cuenta como la foto del diseño (tiene_foto=true) SOLO si es un boceto, logo, foto o referencia del cartel/diseño que el cliente quiere (en carteles de LETRAS también cuenta el texto + la tipografía elegida, sin imagen: ver DISEÑO Y TIPOGRAFÍAS). Si la imagen es un meme, una captura de otra app, un tweet, una promo, spam, o cualquier cosa que no tenga que ver con un cartel → tiene_foto=false (y si es spam o estafa, frenar=true y es_carteles=false).
 MUY IMPORTANTE sobre la ESTÉTICA de los diseños: los carteles de neón para bares, boliches, distribuidoras de bebidas, salones, kioscos, etc. MUCHAS veces tienen onda urbana/trap con dinero, fajos de billetes, botellas de alcohol, pasamontañas, diamantes, autos, joyas, caritas de emoji, etc. ESO ES UN DISEÑO DE CARTEL TOTALMENTE VÁLIDO — NO es spam, NO es estafa, NO es promo de casino/inversión. Si el cliente manda una imagen así pidiendo cotizar un cartel: tiene_foto=true, es_carteles=true, frenar=false. NUNCA descartes ni frenes por el CONTENIDO ARTÍSTICO de la imagen del diseño; el freno se decide SOLO por lo que ESCRIBE el cliente.
 
 Te paso la conversación de WhatsApp (CLIENTE = el lead, JOACO = nosotros/el bot). Mirá qué de los 3 datos ya dio el cliente y, si corresponde, escribí el/los próximos mensajes para pedir SOLO lo que falta.
@@ -2826,6 +2826,8 @@ DATOS QUE NO IMPROVISÁS — el FAQ del playbook está pensado para la etapa de 
 PRESUPUESTO DEL CLIENTE — NUNCA le preguntes al cliente qué presupuesto tiene en mente ni cuánto quiere o puede gastar. En la pre cotización tu tarea es SOLO relevar los datos (foto, medidas, interior/exterior), NO negociar el precio ni sondear cuánto está dispuesto a pagar: preguntarlo tan temprano es prematuro y espanta. SOLO podés tocar el tema del presupuesto en DOS casos: (a) si ya es una negociación avanzada en la que el equipo YA le pasó un presupuesto, o (b) si el cliente vino pidiendo explícitamente algo BARATO / económico / lo más accesible. Fuera de esos dos casos, ni lo menciones. Y si el cliente no sabe qué medida quiere, NO le ofrezcas medidas para que elija ni "opciones en distintos precios" (ver la REGLA CRÍTICA de MEDIDAS de arriba): lo cotizamos con una medida aproximada y se ajusta después, sin preguntarle cuánto quiere gastar.
 
 DISEÑO Y TIPOGRAFÍAS — las tipografías son SOLO para carteles hechos con LETRAS (un texto: el nombre del local, una palabra o una frase). Ofrecé y mandá las tipografías ÚNICAMENTE cuando se cumplen las DOS condiciones a la vez: (a) el cliente quiere un cartel de LETRAS/texto — NO un logo, dibujo, isotipo, personaje ni una imagen; y (b) el cliente NO tiene definida la tipografía o el estilo de letra (no sabe qué letra usar, o pide que le muestres opciones). En ese caso NO le exijas la "foto del diseño" (no la tiene): poné enviar_tipografias=true y avisale en texto natural que se las pasás para que elija (ej: "dale, te paso las tipografias que trabajamos y elegí la que más te guste"). El sistema adjunta las imágenes automáticamente. Después seguí pidiendo lo que falte (sobre todo las medidas). Mandá las tipografías UNA sola vez: si en la charla ya se las pasaste, NO pongas enviar_tipografias de nuevo.
+PRIMERO INTERIOR O EXTERIOR, DESPUÉS TIPOGRAFÍAS: no mandes ni prometas las tipografías hasta saber dónde va el cartel. Si todavía no te dijo si es interior o exterior, preguntá eso primero (enviar_tipografias=false) y las tipografías van en el turno siguiente. Si es EXTERIOR, recién cuando sepas que queda cubierto (techo="si"); si queda expuesto va el corpóreo iluminado y las tipografías NO van. Si es interior o el cliente no sabe dónde va, mandalas normal.
+TEXTO + TIPOGRAFÍA = DISEÑO: en un cartel de LETRAS, cuando el cliente ya te dio el TEXTO exacto y eligió la tipografía (de las que le mandaste o nombrándola, ej: "Gotham ultra"), o te dijo que la elijas vos / que el equipo le proponga la letra, eso YA ES el diseño: tiene_foto=true y NO le pidas foto, boceto ni referencia.
 NO mandes tipografías si el cliente quiere un LOGO / dibujo / imagen / isotipo (ahí lo que necesitás es la imagen del logo, NO una tipografía), o si el cliente YA te dijo o mostró qué tipografía o estilo de letra quiere. Si no te queda claro si es un cartel de letras o un logo, preguntáselo ANTES de mandar nada.
 IMPORTANTE: VOS NO PODÉS ADJUNTAR NADA ESCRIBIÉNDOLO. La ÚNICA forma de mandar las tipografías (o cualquier imagen) es con enviar_tipografias=true. NUNCA escribas dentro de un mensaje una "acción" o instrucción entre corchetes tipo "[ACCION: mandar imagen con las tipografias]", "[mando las fotos]" o "[adjunto imagen]": ese texto le llega TAL CUAL al cliente y queda pésimo. Si querés mandar tipografías usá el campo; si no corresponde mandar una imagen, no la prometas.
 
@@ -2980,7 +2982,7 @@ function precotizMsgs(res) {
 // catálogo es de neón). Kill-switch kv precotiz_corporeo_on (default ON): en '0' vuelve todo a como
 // era (exclusión + auto-reply fijo de corporeoAskOnInbound).
 async function precotizCorporeoOn(env) { return (await kvGet(env, 'precotiz_corporeo_on', '1')) === '1'; }
-const PRECOTIZ_CORP_NOTE = '## LEAD DE CORPÓREO\nEste cliente quiere un CARTEL CORPÓREO (vino de un anuncio de corpóreo o ya lo pidió en la charla). Reglas: hablá de corpóreo, nunca de neón; NO preguntes lo del techo (el corpóreo ya está pensado para exterior: poné techo="no_aplica"); NO mandes, ofrezcas ni prometas tipografías u opciones de letra (enviar_tipografias=false): si no tiene logo ni letra elegida, pedile el texto exacto y decile que el equipo le arma la propuesta de diseño en el render. Relevá foto o logo, medidas (aclarando si es el cartel, el espacio disponible o la altura de letra), interior o exterior, para cuándo lo necesita y, si se puede, una foto del frente o del lugar donde va. Para dudas del producto usá la PARTE C del playbook.\n\n';
+const PRECOTIZ_CORP_NOTE = '## LEAD DE CORPÓREO\nEste cliente quiere un CARTEL CORPÓREO (vino de un anuncio de corpóreo o ya lo pidió en la charla). Reglas: hablá de corpóreo, nunca de neón; NO preguntes lo del techo (el corpóreo ya está pensado para exterior: poné techo="no_aplica"); NO mandes, ofrezcas ni prometas tipografías u opciones de letra (enviar_tipografias=false): si no tiene logo ni letra elegida, pedile el texto exacto y decile que el equipo le arma la propuesta de diseño en el render. Si no tiene logo, con el TEXTO exacto alcanza como diseño (tiene_foto=true): no le pidas foto ni referencia aparte. Relevá foto o logo, medidas (aclarando si es el cartel, el espacio disponible o la altura de letra), interior o exterior, para cuándo lo necesita y, si se puede, una foto del frente o del lugar donde va. Para dudas del producto usá la PARTE C del playbook.\n\n';
 // ¿Es un lead de corpóreo? Primero lo que la IA ya detectó y quedó guardado (precotiz_pilot.producto:
 // si el cliente eligió neón explícitamente, pisa al anuncio); si no hay nada guardado, por el anuncio
 // (header del contexto o última atribución).
@@ -3312,7 +3314,7 @@ async function processPrecotizPilot(env) {
       await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${lead.nombre || lead.phone}\nmotivo: ${res.motivo_freno || 'revisar'}\nentra a verlo vos`);
       continue;
     }
-    const msgs = precotizMsgs(res);
+    let msgs = precotizMsgs(res);
     // Candado de medidas: si el bot iba a mandar una medida que el cliente no dijo, no sale nada y
     // pasa a una persona (freno de mano), igual que cualquier otro freno.
     const _medida = precotizMedidaInventada(msgs, ctx.fullText);
@@ -3347,7 +3349,17 @@ async function processPrecotizPilot(env) {
     // usamos…" (en otro mensaje) disparaba el catálogo sin querer.
     const _reProm = /(te (las |los )?(paso|mando|muestro|envio|comparto)[^.]{0,40}tipograf)|(tipograf[^.]{0,40}te (las |los )?(paso|mando|muestro|envio|comparto))|(tipograf(ia|ias)?[^.]{0,25}que (trabajamos|usamos))/;
     const _promeTipos = msgs.some(m => _reProm.test(_normTxt(m)));
-    const wantTipos = !esCorpTurno && (!!res.enviar_tipografias || _promeTipos); // corpóreo: nunca tipografías (Gaspar)
+    let wantTipos = !esCorpTurno && (!!res.enviar_tipografias || _promeTipos); // corpóreo: nunca tipografías (Gaspar)
+    // Primero interior/exterior, después tipografías (Gaspar 13-oct): si todavía no se sabe dónde va, o es
+    // exterior y no está confirmado que quede cubierto, no salen (si va expuesto se recomienda corpóreo y
+    // sobraban). Se sacan los mensajes que las prometen y, si no quedó la pregunta que falta, se agrega.
+    if (wantTipos && (!tI || (res.es_exterior && !res.intext_no_sabe && !['si', 'no_sabe'].includes(res.techo)))) {
+      wantTipos = false;
+      msgs = msgs.filter(m => !_reProm.test(_normTxt(m)));
+      const _t = _normTxt(msgs.join(' '));
+      if (!tI && !/interior|exterior/.test(_t)) msgs.push('Es para interior o exterior?');
+      else if (tI && !res.techo && !/techo|marquesina|alero|cubr/.test(_t)) msgs.push('Te consulto, donde lo pensas colocar? hay algun techo o marquesina que lo cubra?');
+    }
     try { await env.DB.prepare("UPDATE precotiz_pilot SET tiene_foto=?, tiene_medidas=?, tiene_intext=?, last_processed_ts=?, updated_at=? WHERE phone=?").bind(tF, tM, tI, lastInTs, nowIso, lead.phone).run(); } catch (_) {}
     if (!msgs.length && !wantTipos) continue;
     if (modo === 'auto') {
