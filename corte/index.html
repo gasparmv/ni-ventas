@@ -90,6 +90,7 @@
   .foto .est { display: block; font-weight: 400; font-size: 13px; color: var(--subtle); margin-top: 2px; }
   .foto.subiendo .est { color: var(--cyan); }
   .foto.lista { border-style: solid; border-color: rgba(61,220,151,.5); }
+  .foto.arrastrando { border-style: solid; border-color: var(--cyan); background: rgba(143,212,222,.1); }
   .foto.lista .est { color: var(--ok); }
   .foto.error { border-color: var(--err); }
   .foto.error .est { color: var(--err); }
@@ -292,6 +293,7 @@
   var API = 'https://ni-ventas-tracker.neoninfinito.workers.dev';
   var PROVINCIAS = ['Buenos Aires', 'CABA', 'Catamarca', 'Chaco', 'Chubut', 'Córdoba', 'Corrientes', 'Entre Ríos', 'Formosa', 'Jujuy', 'La Pampa', 'La Rioja', 'Mendoza', 'Misiones', 'Neuquén', 'Río Negro', 'Salta', 'San Juan', 'San Luis', 'Santa Cruz', 'Santa Fe', 'Santiago del Estero', 'Tierra del Fuego', 'Tucumán'];
   var t0 = Date.now();
+  var ES_PC = !!(window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches);
   var cfg = { precio_m2: 175000, insumos: [], plazo: null, whatsapp: '5491133708544' };
   var S = { disenos: [], insumos: {}, cliente: null, telChequeado: '', enviando: false, seq: 0 };
   var $ = function (id) { return document.getElementById(id); };
@@ -405,11 +407,11 @@
   function disenoHtml(d, i) {
     var area = num(d.ancho) / 100 * num(d.alto) / 100, cant = Math.max(1, parseInt(d.cantidad, 10) || 1), est = area * cfg.precio_m2 * cant;
     var thumb = d.previa ? '<span class="thumb" style="background-image:url(\'' + d.previa + '\')"></span>' : (d.key && /\.pdf$/i.test(d.key) ? '<span class="thumb">PDF</span>' : '<span class="thumb vacio">+</span>');
-    var estTxt = { subiendo: 'Subiendo…', lista: 'Lista. Tocá para cambiarla.', error: d.error || 'No se pudo subir. Tocá para intentar de nuevo.' }[d.estado] || 'JPG, PNG o PDF.';
+    var estTxt = { subiendo: 'Subiendo…', lista: ES_PC ? 'Lista. Hacé clic o pegá otra para cambiarla.' : 'Lista. Tocá para cambiarla.', error: d.error || 'No se pudo subir. Tocá para intentar de nuevo.' }[d.estado] || (ES_PC ? 'JPG, PNG o PDF. También podés arrastrarla acá.' : 'JPG, PNG o PDF.');
     var grande = Math.max(num(d.ancho), num(d.alto)) > 120;
     return '<div class="diseno" data-d="' + d.id + '">'
       + '<div class="cab"><b>Diseño ' + (i + 1) + '</b>' + (S.disenos.length > 1 ? '<button type="button" class="quitar" data-quitar="' + d.id + '">Quitar</button>' : '') + '</div>'
-      + '<button type="button" class="foto ' + (d.estado || '') + '" data-foto="' + d.id + '" aria-label="Foto o captura del diseño ' + (i + 1) + '">' + thumb + '<span>' + (d.key || d.estado === 'subiendo' ? esc(d.nombreArchivo || 'Foto del diseño') : 'Tocá para subir la foto del diseño') + '<span class="est">' + esc(estTxt) + '</span></span></button>'
+      + '<button type="button" class="foto ' + (d.estado || '') + '" data-foto="' + d.id + '" aria-label="Foto o captura del diseño ' + (i + 1) + '">' + thumb + '<span>' + (d.key || d.estado === 'subiendo' ? esc(d.nombreArchivo || 'Foto del diseño') : (ES_PC ? 'Hacé clic o pegá la imagen con Ctrl+V' : 'Tocá para subir la foto del diseño')) + '<span class="est">' + esc(estTxt) + '</span></span></button>'
       + '<input type="file" accept="image/*,application/pdf" data-file="' + d.id + '" hidden>'
       + '<label class="campo">Nombre del diseño<input type="text" data-k="nombre" value="' + esc(d.nombre) + '" placeholder="Ej: logo de la cafetería" maxlength="60"></label>'
       + '<div class="fila3">'
@@ -452,6 +454,53 @@
     if (d && file) subirFoto(d, file);
   });
 
+  // ---------- Pegar (Ctrl+V) o arrastrar una imagen desde la compu ----------
+  // Va al diseño donde está parada la persona; si no, al primero sin foto; si todos tienen, a uno nuevo.
+  function destinoFoto(target) {
+    var c = target && target.closest && target.closest('[data-d]');
+    var d = c ? S.disenos.find(function (x) { return String(x.id) === c.getAttribute('data-d'); }) : null;
+    if (!d && S.ultimoDiseno) { var u = S.disenos.find(function (x) { return String(x.id) === S.ultimoDiseno; }); if (u && !u.key && u.estado !== 'subiendo') d = u; }
+    if (!d) d = S.disenos.find(function (x) { return !x.key && x.estado !== 'subiendo'; });
+    if (!d) { d = nuevoDiseno(); S.disenos.push(d); pintarDisenos(); }
+    return d;
+  }
+  function recibirArchivo(file, target) {
+    if (!file || !(/^image\//.test(file.type) || file.type === 'application/pdf')) return false;
+    if (!file.name || /^image\.\w+$/i.test(file.name)) { try { file = new File([file], 'Imagen pegada.' + ((file.type.split('/')[1] || 'png').replace('jpeg', 'jpg')), { type: file.type }); } catch (_) {} }
+    var d = destinoFoto(target);
+    subirFoto(d, file);
+    var card = document.querySelector('[data-d="' + d.id + '"]'); if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return true;
+  }
+  $('disenos').addEventListener('focusin', function (e) { var c = e.target.closest('[data-d]'); if (c) S.ultimoDiseno = c.getAttribute('data-d'); });
+  $('disenos').addEventListener('pointerdown', function (e) { var c = e.target.closest('[data-d]'); if (c) S.ultimoDiseno = c.getAttribute('data-d'); });
+  document.addEventListener('paste', function (e) {
+    if ($('f').hidden) return;
+    var items = (e.clipboardData && e.clipboardData.items) || [], file = null;
+    for (var i = 0; i < items.length; i++) { if (items[i].kind === 'file' && /^image\//.test(items[i].type)) { file = items[i].getAsFile(); break; } }
+    if (!file) return; // si es texto, se pega normal
+    e.preventDefault();
+    recibirArchivo(file, e.target);
+  });
+  var hayArchivos = function (e) { var t = e.dataTransfer && e.dataTransfer.types; return !!t && Array.prototype.indexOf.call(t, 'Files') !== -1; };
+  document.addEventListener('dragover', function (e) {
+    if (!hayArchivos(e) || $('f').hidden) return;
+    e.preventDefault(); // si no, el navegador abre la imagen y se pierde lo cargado
+    var z = e.target.closest && e.target.closest('[data-foto]');
+    document.querySelectorAll('.foto.arrastrando').forEach(function (x) { if (x !== z) x.classList.remove('arrastrando'); });
+    if (z) z.classList.add('arrastrando');
+  });
+  document.addEventListener('dragleave', function (e) { var z = e.target.closest && e.target.closest('[data-foto]'); if (z && !z.contains(e.relatedTarget)) z.classList.remove('arrastrando'); });
+  document.addEventListener('drop', function (e) {
+    if (!hayArchivos(e) || $('f').hidden) return;
+    e.preventDefault();
+    document.querySelectorAll('.foto.arrastrando').forEach(function (x) { x.classList.remove('arrastrando'); });
+    var z = e.target.closest && e.target.closest('[data-foto]'), file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!file) return;
+    if (z) { var d = S.disenos.find(function (x) { return String(x.id) === z.getAttribute('data-foto'); }); if (d && (/^image\//.test(file.type) || file.type === 'application/pdf')) { subirFoto(d, file); return; } }
+    recibirArchivo(file, e.target);
+  });
+
   // Achica la foto a JPEG ≤2000 px (las del celu pesan varios MB). Fondo blanco por si es un PNG transparente.
   function achicar(file) {
     return new Promise(function (resolve) {
@@ -475,7 +524,7 @@
     d.estado = 'subiendo'; d.error = ''; d.key = ''; d.nombreArchivo = file.name || 'Foto del diseño';
     if (d.previa) { try { URL.revokeObjectURL(d.previa); } catch (_) {} }
     d.previa = /^image\//.test(file.type) && !/heic|heif/i.test(file.type) ? URL.createObjectURL(file) : '';
-    if (!d.nombre) d.nombre = String(file.name || '').replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[_-]+/g, ' ').replace(/^(img|image|dsc|whatsapp image|screenshot|captura de pantalla)\b.*$/i, '').trim().slice(0, 60);
+    if (!d.nombre) d.nombre = String(file.name || '').replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[_-]+/g, ' ').replace(/^(img|image|imagen pegada|dsc|whatsapp image|screenshot|captura de pantalla)\b.*$/i, '').trim().slice(0, 60);
     pintarDisenos();
     var mio = d.id;
     achicar(file).then(function (blob) {
