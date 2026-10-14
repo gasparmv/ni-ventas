@@ -333,14 +333,14 @@
       datos: ['Rollo de 50 m', 'Pre estañado: facilita la soldadura', 'Transparente, con los hilos plateados', 'Para las conexiones internas del cartel'],
     },
     cable_035: {
-      tag: '', fotos: ['cable-035-rollo', 'cable-035-punta'],
+      tag: '', fotos: ['cable-blanco-rollo', 'cable-negro-rollo', 'cable-blanco-punta', 'cable-negro-punta'], mini: 'cable-colores',
       texto: ['Una opción más económica que sirve tanto para las conexiones internas como para el cable de salida, del cartel a la fuente de 12 V.', 'Nosotros lo usamos como cable de salida en todos los carteles chicos, de hasta unos 8 m de neón.'],
-      datos: ['Rollo de 100 m', 'Blanco o negro', 'Conexiones internas o salida a la fuente', 'Salida para carteles de hasta 8 m de neón aprox.'],
+      datos: ['Rollo de 100 m', 'Viene en blanco o en negro', 'Conexiones internas o salida a la fuente', 'Salida para carteles de hasta 8 m de neón aprox.'],
     },
     cable_05: {
-      tag: '', fotos: ['cable-05-rollo', 'cable-05-punta'],
+      tag: '', fotos: ['cable-negro-rollo', 'cable-blanco-rollo', 'cable-negro-punta', 'cable-blanco-punta'], mini: 'cable-colores',
       texto: ['Es el cable de salida que usamos en los carteles más grandes, de más de 8 m de neón aprox.', 'No lo recomendamos para las conexiones internas: es muy grueso para maniobrar.'],
-      datos: ['Rollo de 100 m', 'Blanco o negro', 'Salida a la fuente en carteles grandes', 'No es para conexiones internas'],
+      datos: ['Rollo de 100 m', 'Viene en blanco o en negro', 'Salida a la fuente en carteles grandes', 'No es para conexiones internas'],
     },
     nitto_4a: {
       tag: 'La mejor del mercado', fotos: ['nitto-4a-etiqueta', 'nitto-4a-frente'],
@@ -390,7 +390,7 @@
     $('insumos').innerHTML = list.map(function (x) {
       var colores = x.colores ? '<select data-ins-color="' + esc(x.codigo) + '" aria-label="Color">' + x.colores.map(function (c) { return '<option value="' + esc(c) + '">' + esc(c.charAt(0).toUpperCase() + c.slice(1)) + '</option>'; }).join('') + '</select>' : '';
       var fi = FICHAS[x.codigo];
-      var mini = fi ? '<button type="button" class="ins-mini" data-ficha="' + esc(x.codigo) + '" aria-label="Ver ficha: ' + esc(x.nombre) + '"><img src="insumos/' + fi.fotos[0] + '-mini.jpg" alt="" loading="lazy" width="56" height="56"></button>' : '<span></span>';
+      var mini = fi ? '<button type="button" class="ins-mini" data-ficha="' + esc(x.codigo) + '" aria-label="Ver ficha: ' + esc(x.nombre) + '"><img src="insumos/' + (fi.mini || fi.fotos[0]) + '-mini.jpg" alt="" loading="lazy" width="56" height="56"></button>' : '<span></span>';
       return '<div class="insumo">' + mini + '<div><b>' + esc(x.nombre) + '</b>' + (x.detalle ? '<div class="det">' + esc(x.detalle) + '</div>' : '') + '<div class="precio">' + pesos(x.precio) + ' c/u' + (x.escala || []).slice().reverse().map(function (e) { return ' · ' + pesos(e[1]) + ' desde ' + e[0]; }).join('') + '</div>' + colores + (fi ? '<div><button type="button" class="ver-ficha" data-ficha="' + esc(x.codigo) + '">Ver ficha</button></div>' : '') + '</div>'
         + '<div class="stepper"><button type="button" data-ins="' + esc(x.codigo) + '" data-d="-1" aria-label="Uno menos">−</button><output data-ins-n="' + esc(x.codigo) + '">0</output><button type="button" data-ins="' + esc(x.codigo) + '" data-d="1" aria-label="Uno más">+</button></div></div>';
     }).join('');
