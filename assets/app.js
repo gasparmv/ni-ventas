@@ -22114,6 +22114,10 @@ function calcCorporea(f) {
 // el m² de CADA sección) y se SUMA. El render sigue usando la foto del cartel completo
 // (las secciones son solo para el cálculo). Un corpóreo viejo (sin 'secciones' en
 // corporea_json) se trata como UNA sección derivada de sus campos single → retrocompat.
+// Comisión de Joaco en corpóreos (3,5%, Gaspar 14-oct): mismo parámetro que el panel "Tu sueldo". Es solo informativa
+// (no entra en el precio: se resta como costo en el desglose de ganancia del admin).
+function corpComisionPct() { const p = (typeof getCotizadorParams === 'function') ? getCotizadorParams() : {}; return (+p.comision_corp_pct) || 0.035; }
+function corpComisionLbl() { return String(+(corpComisionPct() * 100).toFixed(1)).replace('.', ',') + '%'; }
 function calcCorporeaTotal(secciones) {
   // Descartar tramos SIN medida real (ancho/alto vacío o 0): no ensucian el total, ni la
   // persistencia (corporea_json.secciones), ni el presupuesto del cliente (evita "0x0 cm").
@@ -22138,7 +22142,7 @@ function calcCorporeaTotal(secciones) {
   const piezas = secs.reduce((a, s) => a + (s.piezas || 0), 0);
   // sinPiezas: alguna sección se cotizó con la fórmula vieja porque no tiene piezas cargadas.
   const sinPiezas = secs.some(s => !s.piezas);
-  return { secciones: secs, precio, m2, costo, piezas, sinPiezas, comision_joaco: Math.round(precio * 0.03) };
+  return { secciones: secs, precio, m2, costo, piezas, sinPiezas, comision_joaco: Math.round(precio * corpComisionPct()) };
 }
 // Deriva el array de secciones (para el drawer) desde corporea_json. Si no hay
 // 'secciones' (brief viejo / 1 tramo), arma UNA sección desde los campos single.
@@ -22246,7 +22250,7 @@ function corpPriceBoxHtml(r, mg) {
       : (secs && secs[0] ? ` · costo ${fmtMoney(r.costo || 0)} · ×${secs[0].margen}`
         : (r.costo != null && r.margen != null ? ` · costo ${fmtMoney(r.costo)} · ×${r.margen}` : '')))
     : '';
-  return `<div style="padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final${multi ? ` (${secs.length} secciones)` : ''}</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${m2.toLocaleString('es-AR', { maximumFractionDigits: 2 })} m²${adminExtra}<br>Comisión Joaco 3%: ${fmtMoney(Math.round(precio * 0.03))}</div></div>${breakdown}${avisoPiezas}${avisoMG}</div>`;
+  return `<div style="padding:var(--s-2) var(--s-3);background:rgba(143,212,222,.06);border-radius:var(--r-sm)"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:11px;color:var(--fg-subtle)">Precio final${multi ? ` (${secs.length} secciones)` : ''}</div><div style="font-size:20px;font-weight:600;color:var(--accent-cyan)">${fmtMoney(precio)}</div></div><div style="text-align:right;font-size:11px;color:var(--fg-subtle)">${m2.toLocaleString('es-AR', { maximumFractionDigits: 2 })} m²${adminExtra}<br>Comisión Joaco ${corpComisionLbl()}: ${fmtMoney(Math.round(precio * corpComisionPct()))}</div></div>${breakdown}${avisoPiezas}${avisoMG}</div>`;
 }
 // Etiquetas de acabado por cara (la espalda va en femenino). Fuente única para el render inicial
 // (corpAc) y para el refresh en vivo (refreshCorpAcabados).
@@ -22845,7 +22849,7 @@ function renderCorpPopup() {
           <b>${escapeHtml(brief.cliente_nombre || 'Sin título')}</b> · ${medHdr}${m2 ? ' · ' + m2 + ' m²' : ''} · corpórea${multi ? '' : ` · caso ${caso} · ${luz} · frente ${mat}`}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:ui-monospace,monospace;font-size:14px;margin-bottom:var(--s-3);background:rgba(143,212,222,.04);padding:var(--s-3);border-radius:var(--r-sm)">
-          ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco 3%</span><br><b>${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</b></div>` : '<div></div>'}
+          ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Comisión Joaco ${corpComisionLbl()}</span><br><b>${fmtMoney(Math.round((brief.precio_final || 0) * corpComisionPct()))}</b></div>` : '<div></div>'}
           ${isAdmin() ? `<div><span style="color:var(--fg-subtle);font-size:11px">Costo · margen</span><br><b>${fmtMoney(cj.costo || 0)}${multi ? ` · ${secs.length} secc.` : ` · ×${cj.margen || ''}`}</b></div>` : '<div></div>'}
           <div style="grid-column:1 / -1"><span style="color:var(--fg-subtle);font-size:11px">Precio final <span style="color:var(--accent-cyan);text-transform:none">· editable (o cambialo en el texto)</span></span><br><span style="color:var(--accent-cyan);font-size:18px;font-weight:600">$</span><input id="corp-popup-precio" type="text" inputmode="numeric" value="${Math.round(brief.precio_final || 0)}" title="Ajustá el precio a mano (redondear/subir/bajar). Se manda ESTE valor: al cliente, en la plantilla y en el Sheet." style="background:var(--ink-100);border:1px solid var(--accent-cyan);border-radius:var(--r-sm);padding:3px 6px;color:var(--accent-cyan);font-size:18px;font-weight:600;font-family:inherit;width:150px"></div>
         </div>
@@ -22863,8 +22867,8 @@ function renderCorpPopup() {
               ? `<tr><td>Complejidad (${s0.piezas} piezas · ${(+s0.densidad || 0).toLocaleString('es-AR', { maximumFractionDigits: 1 })} pz/m²)</td><td style="text-align:right;color:var(--fg)">${escapeHtml(s0.nivel || '')} · ${fmtMoney(s0.pm2 || 0)}/m² (×${s0.margen} s/costo)</td></tr>`
               : `<tr><td>Margen por superficie</td><td style="text-align:right;color:var(--fg)">×${cj.margen || '?'}</td></tr>`}`}
             <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px">Precio final ${multi ? '(suma de secciones)' : ((s0 && s0.piezas) ? '(m² × $/m²)' : '(costo × margen)')}</td><td style="text-align:right;padding-top:5px"><b style="color:var(--accent-cyan)">${fmtMoney(brief.precio_final || 0)}</b></td></tr>
-            <tr><td>Comisión Joaco (3% — es costo)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(Math.round((brief.precio_final || 0) * 0.03))}</td></tr>
-            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Ganancia neta</b> (precio − costo − comisión)</td><td style="text-align:right;padding-top:5px;color:#4ade80"><b>${fmtMoney((brief.precio_final || 0) - (cj.costo || 0) - Math.round((brief.precio_final || 0) * 0.03))}</b></td></tr>
+            <tr><td>Comisión Joaco (${corpComisionLbl()} — es costo)</td><td style="text-align:right;color:var(--fg)">${fmtMoney(Math.round((brief.precio_final || 0) * corpComisionPct()))}</td></tr>
+            <tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Ganancia neta</b> (precio − costo − comisión)</td><td style="text-align:right;padding-top:5px;color:#4ade80"><b>${fmtMoney((brief.precio_final || 0) - (cj.costo || 0) - Math.round((brief.precio_final || 0) * corpComisionPct()))}</b></td></tr>
           </table>
           <div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Índice de complejidad (con piezas): $/m² de ${fmtMoney(getCotizadorParams().corp_pm2_min || 800000)} (≤${getCotizadorParams().corp_dens_simple || 4} pz/m²) a ${fmtMoney(getCotizadorParams().corp_pm2_max || 1300000)} (≥${getCotizadorParams().corp_dens_compleja || 40} pz/m²), con luz + impreso; acrílico ×1,16 · sin luz ×0,62. Sin piezas (fórmula vieja): margen ≤2 m² ×2 · 2–5 m² ×1.75 · +5 m² ×1.5 · costo/m²: impreso 450k / acrílico 520k (con luz), 280k / 330k (sin luz)</div>
         </div>
@@ -22980,7 +22984,7 @@ async function enviarCorporeaPresupuesto(briefId, textOverride, precioOverride) 
             trans: brief.precio_final || 0, negro: 0, reventa: 0,
             descuento: 0, recargo: 0,
             telefono: tel, canal: 'WPP',
-            comision: Math.round((brief.precio_final || 0) * 0.03),
+            comision: Math.round((brief.precio_final || 0) * corpComisionPct()),
             cf: cj.costo || 0, margen: cj.margen || 0, densidad: 0,
             precio_nuevo: brief.precio_final || 0, precio_viejo: brief.precio_final || 0
           })
