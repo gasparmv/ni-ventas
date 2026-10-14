@@ -5620,7 +5620,7 @@ async function corteCargarTanda(env, { fecha, dryRun = true, incluirSospechosas 
 // Kill-switch: kv 'corte_landing_on' (def '1'; en '0' la página dice que los pedidos van por WhatsApp).
 const CORTE_LANDING_PREFIX = 'corte/landing/';
 const CORTE_LANDING_INSUMOS = [ // código = el de la col I de la planilla; precio por defecto (kv corte_insumos_precios lo pisa)
-  { codigo: 'cable_025', nombre: 'Cable 0,25 mm transparente', detalle: 'Rollo de 50 m. Plateado y fino: el que recomendamos para las conexiones internas.', precio: 54000 },
+  { codigo: 'cable_025', nombre: 'Cable 0,25 mm estañado transparente', detalle: 'Rollo de 50 m. Pre estañado para facilitar la soldadura. Plateado y fino: el que recomendamos para las conexiones internas.', precio: 54000 },
   { codigo: 'cable_035', nombre: 'Cable 0,35 mm', detalle: 'Rollo de 100 m, blanco o negro. Más económico: para conexiones internas y la salida a la fuente.', precio: 46000, colores: ['blanco', 'negro'] },
   { codigo: 'cable_05', nombre: 'Cable 0,5 mm', detalle: 'Rollo de 100 m, blanco o negro. Para la salida de carteles grandes.', precio: 43000, colores: ['blanco', 'negro'] },
   { codigo: 'nitto_4a', nombre: 'Fuente Nitto 4A', detalle: '12 V · 4 A. Alimenta hasta 14 m de neón.', precio: 8500, escala: [[20, 7500], [5, 8000]] }, // por cantidad (Gaspar, 14-oct)
