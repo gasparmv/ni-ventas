@@ -9204,6 +9204,7 @@ function pedidoModalTotal() {
 function openCargarPedidoModal() {
   if (!canCotizar()) return;
   STATE.pedidoModal = { numero: suggestProximoNumero(), plataforma:'WPP', telefono:'', estadoPago:'1er pago', pagado:'', ad:'', sourceId:'', carteles:[nuevoCartelPedido()] };
+  STATE._pmBriefsTel = {};
   STATE.pedidoModalOpen = true;
   STATE.pedidoModalSaving = false;
   render();
@@ -9297,16 +9298,74 @@ function applyBriefToCartel(c, brief) {
   if (!String(c.precio || '').trim() && Number(brief.precio_final)) { c.precio = Number(brief.precio_final);  changed = true; }
   return changed;
 }
-// Recorre los carteles del modal y completa cada uno con su brief (matcheado por nombre).
+// Briefs de NEÓN del cliente por teléfono: para cuando el nombre del cartel en el pedido no es igual al del
+// brief (ej. "FM orsai" vs "Orsai FM"). Cache por teléfono mientras dura la carga.
+async function fetchBriefsByPhone(tel) {
+  const d = String(tel || '').replace(/\D/g, '');
+  if (d.length < 8 || !CONFIG.trackerUrl || !STATE.token) return [];
+  STATE._pmBriefsTel = STATE._pmBriefsTel || {};
+  if (STATE._pmBriefsTel[d]) return STATE._pmBriefsTel[d];
+  try {
+    const r = await fetch(`${CONFIG.trackerUrl}/admin/briefs?phone=${encodeURIComponent(d)}&limit=30`, { headers: { Authorization: `Bearer ${STATE.token}` } });
+    if (!r.ok) return [];
+    const list = ((await r.json()).briefs || []).filter(b => String(b.tipo) !== 'corporea');
+    STATE._pmBriefsTel[d] = list;
+    return list;
+  } catch (_) { return []; }
+}
+// Brief de un cartel: 1) por nombre exacto; 2) entre los briefs de neón del MISMO CLIENTE, el de nombre
+// parecido o, si no, el único con la misma medida (±3 cm). Si no hay uno claro no adivina: los tramos son
+// obligatorios y el vendedor los cuenta (un cliente con dos diseños no puede llevarse los tramos del otro).
+async function pmBriefDeCartel(c, tel) {
+  const conTramos = b => b && (Number(b.tramos) || Number(b.ia_tramos));
+  const porNombre = await fetchBriefByName(c.cartel);
+  if (conTramos(porNombre)) return porNombre;
+  const lista = (await fetchBriefsByPhone(tel)).filter(conTramos);
+  const nc = normName(c.cartel);
+  const noms = b => [normName(b.cliente_nombre), normName(b.diseno)].filter(x => x.length >= 3);
+  let b = nc.length >= 3 ? lista.find(x => noms(x).some(n => n === nc || (nc.length >= 4 && n.length >= 4 && (n.includes(nc) || nc.includes(n))))) : null;
+  if (!b) {
+    const a = Number(c.alto), w = Number(c.ancho);
+    const igual = x => a > 0 && w > 0 && Math.min(
+      Math.max(Math.abs(a - Number(x.alto_cm)), Math.abs(w - Number(x.ancho_cm))),
+      Math.max(Math.abs(a - Number(x.ancho_cm)), Math.abs(w - Number(x.alto_cm)))) <= 3;
+    const misma = lista.filter(igual);
+    if (misma.length === 1) b = misma[0];
+  }
+  return b || porNombre;
+}
+// Recorre los carteles de neón del modal y completa cada uno con su brief (por nombre o por el teléfono).
 async function fillPedidoModalFromBriefs() {
   const m = STATE.pedidoModal; if (!m) return false;
-  const briefs = await Promise.all((m.carteles || []).map(c =>
-    (String(c.cmNeon || '').trim() && String(c.tramos || '').trim()) ? Promise.resolve(null) : fetchBriefByName(c.cartel)
-  ));
-  if (!STATE.pedidoModalOpen) return false;
+  const tel = m.plataforma === 'WPP' ? m.telefono : '';
+  const falta = c => !c.es_corporeo && String(c.cartel || '').trim() && !(String(c.cmNeon || '').trim() && Number(c.tramos) >= 1);
+  const briefs = await Promise.all((m.carteles || []).map(c => falta(c) ? pmBriefDeCartel(c, tel) : Promise.resolve(null)));
+  if (!STATE.pedidoModalOpen || STATE.pedidoModal !== m) return false;
   let changed = false;
   (m.carteles || []).forEach((c, i) => { if (briefs[i] && applyBriefToCartel(c, briefs[i])) changed = true; });
   return changed;
+}
+// Autocompletado sin re-render (no le saca el foco a lo que el vendedor está tipeando): busca el brief de
+// los carteles a los que les faltan tramos / cm de neón y escribe directo en los inputs vacíos.
+let _pmAutoBriefSeq = 0;
+function pmAutoBrief() {
+  if (!STATE.pedidoModalOpen || !STATE.pedidoModal) return;
+  readPedidoModalDOM();
+  const seq = ++_pmAutoBriefSeq;
+  fillPedidoModalFromBriefs().then(changed => {
+    if (!changed || seq !== _pmAutoBriefSeq || !STATE.pedidoModalOpen) return;
+    const campos = [['cmNeon', 'cmNeon'], ['tramos', 'tramos'], ['alto', 'alto'], ['ancho', 'ancho'], ['precio', 'precio']];
+    let n = 0;
+    (STATE.pedidoModal.carteles || []).forEach((c, i) => campos.forEach(([k, id]) => {
+      const el = document.getElementById(`pm-${id}-${i}`);
+      if (el && el !== document.activeElement && !String(el.value || '').trim() && String(c[k] ?? '').trim()) { el.value = c[k]; n++; }
+    }));
+    if (n) {
+      pmRecalc();
+      if (STATE.pedidoModal && STATE.pedidoModal._validated) pmApplyMarks(pmValidate());
+      toast('Tramos y cm de neón traídos del brief, revisalos');
+    }
+  }).catch(() => {});
 }
 // Abre el modal de cargar pedido pre-llenado desde una OC del chat (botón en el bubble).
 function cargarPedidoDesdeOC(wamid) {
@@ -9323,6 +9382,7 @@ function cargarPedidoDesdeOC(wamid) {
   // IGSID numérico del cliente (m.phone en IG) → sirve para trazar el ad de IG (wa_ad_attributions
   // guarda la atribución de IG con phone=IGSID). El @usuario del campo NO sirve para eso.
   STATE.pedidoModal._igsid = channel === 'ig' ? String(m.phone || '') : '';
+  STATE._pmBriefsTel = {};
   STATE.pedidoModalSaving = false;
   STATE.pedidoModalOpen = true;
   // El modal de pedido SOLO se dibuja/bindea en la vista Pedidos → navegamos ahí y lo abrimos.
@@ -9330,10 +9390,8 @@ function cargarPedidoDesdeOC(wamid) {
   if (location.hash !== '#pedidos') location.hash = 'pedidos';
   render();
   setTimeout(() => { try { pmTraceAd(); } catch (_) {} }, 250);
-  // Async: traer cm de neón / tramos del brief (matcheado por nombre del cartel) y rellenar.
-  fillPedidoModalFromBriefs().then(changed => {
-    if (changed && STATE.pedidoModalOpen) { render(); toast('Cm de neón y tramos traídos del brief'); }
-  }).catch(() => {});
+  // Async: traer cm de neón / tramos del brief (por nombre del cartel o por el teléfono) y rellenar.
+  pmAutoBrief();
 }
 function cancelCargarPedido() { pmFotoLiberarTodo(STATE.pedidoModal); STATE.pedidoModalOpen = false; render(); }
 // Vuelca el DOM a STATE para que los valores sobrevivan a un re-render (agregar/quitar cartel, cambiar plataforma).
@@ -9923,7 +9981,7 @@ function renderPedidoCartelBlock(c, i, n) {
         <div style="flex:1"><label style="${lbl}">Alto cm *</label><input id="pm-alto-${i}" type="number" value="${escapeHtml(String(c.alto||''))}" style="${inp}"></div>
         <div style="flex:1"><label style="${lbl}">Ancho cm *</label><input id="pm-ancho-${i}" type="number" value="${escapeHtml(String(c.ancho||''))}" style="${inp}"></div>
         <div style="flex:1"><label style="${lbl}">CM neón *</label><input id="pm-cmNeon-${i}" type="number" value="${escapeHtml(String(c.cmNeon||''))}" style="${inp}"></div>
-        <div style="flex:1"><label style="${lbl}">Tramos</label><input id="pm-tramos-${i}" type="number" value="${escapeHtml(String(c.tramos||''))}" style="${inp}"></div>
+        <div style="flex:1"><label style="${lbl}" title="Cortes o trazos sueltos del neón. Se completa solo desde el brief del cliente; si no aparece, contalos en el diseño.">Tramos *</label><input id="pm-tramos-${i}" type="number" min="1" step="1" value="${escapeHtml(String(c.tramos||''))}" style="${inp}"></div>
         <div style="flex:1"><label style="${lbl}">Base *</label><select id="pm-base-${i}" style="${inp}">${baseOpts}</select></div>
       </div>
       <div style="margin-bottom:6px">
@@ -10010,7 +10068,8 @@ function bindPedidoModal() {
   document.querySelectorAll('[data-pm-ac]').forEach(el => {
     const i = parseInt(el.dataset.pmAc, 10);
     el.oninput = () => pmCartelAutocomplete(i);
-    el.onblur = () => setTimeout(() => { const box = document.getElementById('pm-ac-' + i); if (box) box.style.display = 'none'; }, 150);
+    // Al salir del nombre, si el vendedor no eligió de la lista: traer tramos / cm de neón del brief igual.
+    el.onblur = () => setTimeout(() => { const box = document.getElementById('pm-ac-' + i); if (box) box.style.display = 'none'; pmAutoBrief(); }, 150);
   });
   // Autocomplete corpóreo: mismo mecanismo que neón, contra los briefs corpóreos (precarga la cache).
   ensureOcCorpBriefs();   // neón y corpóreo buscan en los briefs (se re-bajan si tienen más de 1 min)
@@ -10041,6 +10100,8 @@ function bindPedidoModal() {
   bindPmFotoSlots(document.getElementById('pm-backdrop'));
   // Sugerencias de foto: al tener el contacto del cliente (OC del chat ya lo trae; carga manual, al salir del teléfono).
   if (tel) tel.addEventListener('blur', () => { readPedidoModalDOM(); pmCargarSugerencias(); });
+  // Con el teléfono también se encuentran los briefs del cliente aunque el nombre del cartel no sea igual.
+  if (tel) tel.addEventListener('blur', pmAutoBrief);
   if (STATE.pedidoModal && !STATE.pedidoModal._fotoSugDe) setTimeout(pmCargarSugerencias, 0);
   // Si el usuario edita el campo Ad a mano (ej. corrige el auto-trazado a "Frecuente"/"Directo"),
   // invalidamos el ad_id capturado: sin esto el pedido se guardaría con el texto manual PERO con el
@@ -10081,6 +10142,11 @@ function pmValidate() {
     if (!(Number(c.alto) > 0))           invalid.push({ id:`pm-alto-${i}`, msg:`Cartel ${nro}: falta el alto` });
     if (!(Number(c.ancho) > 0))          invalid.push({ id:`pm-ancho-${i}`, msg:`Cartel ${nro}: falta el ancho` });
     if (!(Number(c.cmNeon) > 0))         invalid.push({ id:`pm-cmNeon-${i}`, msg:`Cartel ${nro}: faltan los cm de neón` });
+    // Menos neón que el lado más largo del cartel no pasa nunca (en 3.200 briefs el mínimo es 2,4 veces):
+    // es un error de tipeo, ej. CarDents 120 cm en vez de 1200, o "1" en vez de 700.
+    else if (Number(c.cmNeon) < Math.max(Number(c.alto) || 0, Number(c.ancho) || 0)) invalid.push({ id:`pm-cmNeon-${i}`, msg:`Cartel ${nro}: ${c.cmNeon} cm de neón no alcanza ni para el ancho del cartel, revisalo (¿son ${Number(c.cmNeon) * 10}?)` });
+    // Tramos: obligatorios (la mano de obra del productor se calcula con ellos). Se traen solos del brief.
+    if (!(Number(c.tramos) >= 1))        invalid.push({ id:`pm-tramos-${i}`, msg:`Cartel ${nro}: faltan los tramos (contalos en el diseño si no los trajo del brief)` });
     if (!String(c.base||'').trim())      invalid.push({ id:`pm-base-${i}`, msg:`Cartel ${nro}: falta la base` });
     if (!(Number(c.precio) > 0))         invalid.push({ id:`pm-precio-${i}`, msg:`Cartel ${nro}: falta el precio` });
     if (c.dimer && c.dimer !== 'NO' && !(Number(c.precioDimmer) > 0)) invalid.push({ id:`pm-precioDimmer-${i}`, msg:`Cartel ${nro}: falta el precio del dimmer` });
@@ -10119,6 +10185,15 @@ async function confirmCargarPedido() {
     return;
   }
   pmClearMarks();
+  // Valores raros pero posibles (no bloquean): se confirman antes de guardar. En 3.200 briefs nunca hubo
+  // menos de 8 cm de neón por tramo ni más de 18 veces el lado más largo del cartel.
+  const raros = (m.carteles||[]).filter(c => !c.es_corporeo && String(c.cartel||'').trim()).map(c => {
+    const cm = Number(c.cmNeon), t = Number(c.tramos), lado = Math.max(Number(c.alto) || 0, Number(c.ancho) || 0);
+    if (cm > 0 && t >= 1 && cm / t < 7) return `${c.cartel}: ${cm} cm de neón para ${t} tramos (menos de 7 cm por tramo)`;
+    if (cm > 0 && lado > 0 && cm > 40 * lado) return `${c.cartel}: ${cm} cm de neón para un cartel de ${lado} cm`;
+    return '';
+  }).filter(Boolean);
+  if (raros.length && !(await showConfirm('Estos datos parecen un error de tipeo:\n\n' + raros.join('\n') + '\n\n¿Están bien así?', { title: 'Revisá antes de guardar', variant: 'warn', confirmLabel: 'Sí, están bien', cancelLabel: 'Corregir' }))) return;
   const carteles = (m.carteles||[]).filter(c => String(c.cartel||'').trim());
   STATE.pedidoModalSaving = true; render();
   try {
@@ -11839,6 +11914,7 @@ function openDrawerPedido(idx) {
             <div style="flex:1"><label style="${lblD}">Alto cm</label><input id="ped-edit-alto" type="number" value="${p.alto||''}" style="${inpD}"></div>
             <div style="flex:1"><label style="${lblD}">Ancho cm</label><input id="ped-edit-ancho" type="number" value="${p.ancho||''}" style="${inpD}"></div>
             <div style="flex:1"><label style="${lblD}">CM neón</label><input id="ped-edit-cmneon" type="number" value="${p.cmNeon||''}" style="${inpD}"></div>
+            <div style="flex:1"><label style="${lblD}" title="Cortes o trazos sueltos del neón (la mano de obra se calcula con ellos)">Tramos</label><input id="ped-edit-tramos" type="number" min="1" step="1" value="${Number(p.tramos) > 0 ? p.tramos : ''}" placeholder="falta" style="${inpD}${Number(p.tramos) > 0 ? '' : ';border-color:#FFB020'}"></div>
           </div>
           <div style="display:flex;gap:8px">
             <div style="flex:2"><label style="${lblD}">Colores</label><input id="ped-edit-colores" value="${escapeHtml(p.colores||'')}" style="${inpD}"></div>
@@ -12043,6 +12119,7 @@ async function savePedidoEdit(idx) {
     alto:          document.getElementById('ped-edit-alto')?.value,
     ancho:         document.getElementById('ped-edit-ancho')?.value,
     cm_neon:       document.getElementById('ped-edit-cmneon')?.value,
+    tramos:        document.getElementById('ped-edit-tramos')?.value,
     colores:       document.getElementById('ped-edit-colores')?.value,
     cantidad:      document.getElementById('ped-edit-cantidad')?.value,
     producto:      document.getElementById('ped-edit-producto')?.value,

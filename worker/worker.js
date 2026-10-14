@@ -692,6 +692,47 @@ async function ensurePedidosSchema(env) {
   // → todo el histórico y lo no atribuido queda de Joaco, su número no se mueve.
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedidos_comercial ON pedidos(comercial_id)').run(); } catch (_) {}
 }
+// Nombre de diseño "aplastado" para comparar pedido ↔ brief: minúsculas, sin espacios ni puntuación
+// (. , - '). sqlNombreAplastado hace lo mismo en SQL (lower() de SQLite solo baja ASCII: alcanza).
+function nombreAplastado(s) { return String(s || '').trim().toLowerCase().replace(/[ .,\-']/g, ''); }
+function sqlNombreAplastado(col) { return `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(lower(trim(${col})),' ',''),'.',''),',',''),'-',''),'''','')`; }
+// Tramos / cm de neón de un cartel desde su BRIEF de presupuesto (la única fuente de los tramos), para los
+// carteles de neón que llegan al alta sin esos datos (front viejo en caché, carga a mano). El modal ya los
+// exige: esto es la red de seguridad. Criterio validado contra los pedidos que ya tenían tramos (98% exacto):
+// mismo cliente y mismo diseño por nombre; si el nombre no coincide, el ÚNICO brief del cliente con la misma
+// medida (±3 cm). Sin un brief claro no inventa nada (un cliente con dos diseños no se lleva los tramos del otro).
+async function briefNeonDeCartel(env, telefono, c) {
+  const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '');
+  const nc = norm(c.cartel);
+  const tel = String(telefono || '').replace(/\D/g, '');
+  const desde = new Date(Date.now() - 150 * 864e5).toISOString();
+  const cols = 'id, cliente_nombre, diseno, alto_cm, ancho_cm, tramos, ia_tramos, neon_mt, ia_neon_mt';
+  const conTramos = b => b && ((+b.tramos > 0) || (+b.ia_tramos > 0));
+  let b = null;
+  try {
+    const rows = tel.length >= 8
+      ? ((await env.DB.prepare(`SELECT ${cols} FROM briefs WHERE cliente_wa_id = ? AND IFNULL(tipo,'') <> 'corporea' AND created_at >= ? ORDER BY updated_at DESC LIMIT 30`).bind(tel, desde).all()).results || []).filter(conTramos)
+      : [];
+    const noms = x => [norm(x.cliente_nombre), norm(x.diseno)].filter(n => n.length >= 3);
+    if (nc.length >= 3) b = rows.find(x => noms(x).includes(nc)) || (nc.length >= 4 ? rows.find(x => noms(x).some(n => n.length >= 4 && (n.includes(nc) || nc.includes(n)))) : null);
+    if (!b) {
+      const a = +c.alto, w = +c.ancho;
+      const misma = rows.filter(x => a > 0 && w > 0 && Math.min(
+        Math.max(Math.abs(a - +x.alto_cm), Math.abs(w - +x.ancho_cm)),
+        Math.max(Math.abs(a - +x.ancho_cm), Math.abs(w - +x.alto_cm))) <= 3);
+      if (misma.length === 1) b = misma[0];
+    }
+    const q = nombreAplastado(c.cartel);
+    if (!b && q.length >= 3) {
+      // Sin teléfono (IG) o brief sin cliente_wa_id: por nombre (mismo criterio que /admin/briefs?nombre=).
+      const r = await env.DB.prepare(`SELECT ${cols} FROM briefs WHERE (${sqlNombreAplastado('cliente_nombre')} = ? OR ${sqlNombreAplastado("IFNULL(diseno,'')")} = ?) AND IFNULL(tipo,'') <> 'corporea' AND created_at >= ? ORDER BY updated_at DESC LIMIT 1`).bind(q, q, desde).first();
+      if (conTramos(r)) b = r;
+    }
+  } catch (_) { return null; }
+  if (!b) return null;
+  const mt = +b.neon_mt > 0 ? +b.neon_mt : (+b.ia_neon_mt > 0 ? +b.ia_neon_mt : 0);
+  return { brief_id: b.id, tramos: +b.tramos > 0 ? Math.round(+b.tramos) : Math.round(+b.ia_tramos), cm_neon: mt > 0 ? Math.round(mt * 100) : null };
+}
 // Resuelve a qué vendedor (comercial) se atribuye una venta/brief. Reglas, en orden:
 //  (1) el usuario logueado si es un vendedor comercial conocido (cada vendedor carga lo suyo);
 //  (2) si no (admin/proceso), el vendedor asignado al chat de ese teléfono (assigned_to);
@@ -22331,6 +22372,17 @@ const handler = {
         const cargadoPor = (sessionUserKey === 'gaspar' && ['joaco', 'facundo', 'agustina'].includes(_vendElegido))
           ? ({ joaco: 'Joaquín', facundo: 'Facundo', agustina: 'Agustina' })[_vendElegido]
           : String(session.user || '');
+        // Tramos / cm de neón que falten (o vengan en 0/negativos) en un cartel de neón: se completan desde su
+        // brief. Best-effort: si no hay brief claro el pedido se carga igual (nunca se frena una venta acá).
+        for (const c of carteles) {
+          if (c.es_corporeo === 1 || c.es_corporeo === true || c.es_corporeo === '1') continue;
+          if (!(Number(c.tramos) >= 1)) c.tramos = null;
+          if (c.tramos != null && Number(c.cm_neon) > 0) continue;
+          const fb = await briefNeonDeCartel(env, plataforma === 'WPP' ? telefono : '', c);
+          if (!fb) continue;
+          if (c.tramos == null && fb.tramos >= 1) c.tramos = fb.tramos;
+          if (!(Number(c.cm_neon) > 0) && fb.cm_neon) c.cm_neon = fb.cm_neon;
+        }
         // Piezas de NEÓN PROPIO para el corte: cada cartel de neón nace también como pieza 'NEON' en
         // corte_pedidos (matriz a diseñar por Emma), con la foto del diseño final y su medida.
         try { await ensureCorteNeonSchema(env); } catch (_) {}
@@ -22459,6 +22511,8 @@ const handler = {
         if ('alto' in body)           { cSets.push('alto = ?');           cArgs.push(_numOrNull(body.alto)); }
         if ('ancho' in body)          { cSets.push('ancho = ?');          cArgs.push(_numOrNull(body.ancho)); }
         if ('cm_neon' in body)        { cSets.push('cm_neon = ?');        cArgs.push(_numOrNull(body.cm_neon)); }
+        // Tramos (para la mano de obra): solo enteros positivos; vacío/0/negativo → NULL (ej. el -39 del #952).
+        if ('tramos' in body)         { const t = _numOrNull(body.tramos); cSets.push('tramos = ?'); cArgs.push(t != null && t >= 1 ? Math.round(t) : null); }
         if ('cantidad' in body)       { cSets.push('cantidad = ?');       cArgs.push(_numOrNull(body.cantidad)); }
         if ('colores' in body)        { cSets.push('colores = ?');        cArgs.push(String(body.colores || '').trim()); }
         if ('producto' in body)       { cSets.push('producto = ?');       cArgs.push(String(body.producto || '').trim()); }
@@ -22746,13 +22800,18 @@ const handler = {
         // dígitos (== wa_id del chat), pero por las dudas comparamos también contra la versión
         // normalizada por si algún brief viejo quedó con '+' o espacios.
         const phoneQ = (url.searchParams.get('phone') || '').replace(/\D/g, '');
-        if (phoneQ) { where.push("REPLACE(REPLACE(REPLACE(b.cliente_wa_id,'+',''),' ',''),'-','') = ?"); args.push(phoneQ); }
+        // wa_id completo (54…) → igualdad. Tipeado corto en "Cargar pedido" (ej. 1164791648, sin el 549) → por
+        // los últimos 8 dígitos (mismo criterio que la conciliación de pagos por teléfono).
+        if (phoneQ && (phoneQ.startsWith('54') || phoneQ.length < 8)) { where.push("REPLACE(REPLACE(REPLACE(b.cliente_wa_id,'+',''),' ',''),'-','') = ?"); args.push(phoneQ); }
+        else if (phoneQ) { where.push("substr(REPLACE(REPLACE(REPLACE(b.cliente_wa_id,'+',''),' ',''),'-',''), -8) = ?"); args.push(phoneQ.slice(-8)); }
         // Filtro por NOMBRE del diseño/cartel: lo usa "Cargar pedido" para matchear el brief
         // cuando NO hay teléfono WA (pedidos por Instagram) o el brief quedó sin cliente_wa_id.
         // Match EXACTO normalizado (lower/trim) contra cliente_nombre o diseno para no traer
         // falsos positivos por substring (ej. "chicle" no debe matchear "La bichicleta").
-        const nombreQ = (url.searchParams.get('nombre') || '').trim().toLowerCase();
-        if (nombreQ) { where.push("(lower(trim(b.cliente_nombre)) = ? OR lower(trim(COALESCE(b.diseno,''))) = ?)"); args.push(nombreQ, nombreQ); }
+        // Sin espacios ni puntuación: "CREO en Jose C. Paz" (pedido) = "Creo en Jose C Paz" (brief). Sigue siendo
+        // igualdad, no substring.
+        const nombreQ = nombreAplastado(url.searchParams.get('nombre'));
+        if (nombreQ) { where.push(`(${sqlNombreAplastado('b.cliente_nombre')} = ? OR ${sqlNombreAplastado("COALESCE(b.diseno,'')")} = ?)`); args.push(nombreQ, nombreQ); }
         const sql = `
           SELECT b.*,
                  (SELECT r2_key FROM brief_imagenes WHERE brief_id = b.id AND tipo = 'chat'   ORDER BY orden, id LIMIT 1) AS first_chat_key,
