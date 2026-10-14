@@ -607,7 +607,12 @@
   }
   $('tel').addEventListener('blur', chequearCliente);
   $('nombre').addEventListener('input', function () { S.nombreAuto = false; }); // lo escribió a mano: no se pisa
-  $('tel').addEventListener('input', function () { $('tel').classList.remove('invalido'); S.telMal = ''; telEco(''); clearTimeout(S.telT); S.telT = setTimeout(chequearCliente, 900); });
+  $('tel').addEventListener('input', function () {
+    clearTimeout(S.telT);
+    if (S.telChequeado && telLimpio() === S.telChequeado) return; // mismos dígitos (borró y volvió a poner un espacio): queda lo que ya se mostró
+    $('tel').classList.remove('invalido'); S.telMal = ''; telEco('');
+    S.telT = setTimeout(chequearCliente, 900);
+  });
   document.querySelectorAll('input[name=entrega]').forEach(function (r) { r.addEventListener('change', pintarCliente); });
   $('dir-cambio').addEventListener('change', pintarCliente);
   $('provincia').innerHTML += PROVINCIAS.map(function (p) { return '<option>' + esc(p) + '</option>'; }).join('');
