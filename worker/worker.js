@@ -5526,14 +5526,26 @@ async function corteCargarTanda(env, { fecha, dryRun = true, incluirSospechosas 
     const tanda = td.tanda;
     if (td.aviso) avisos.push(td.aviso);
     // Lo ya cargado DE ESA FECHA (hoja_fecha; las piezas viejas sin hoja_fecha cuentan si la tanda es de esa fecha).
+    // Las piezas de la landing (origen 'landing') cuentan cuando ya tienen su fila en la planilla (hoja_fila), tengan o no
+    // la tanda puesta; las que todavía no la tienen no están en la hoja, así que no se comparan (si no, quedarían como
+    // "sobrantes" y marcarían como dudosas las filas de ese cliente).
     const yaRows = {};
-    if (tanda) {
-      try {
-        ((await env.DB.prepare("SELECT id, cliente_nombre, hoja_cliente, producto, diseno_nombre, cantidad, precio, estado_pago FROM corte_pedidos WHERE tanda_id=? AND IFNULL(producto,'')!='NEON' AND (hoja_fecha=? OR (hoja_fecha IS NULL AND ?=?))").bind(tanda.id, f.txt, tanda.fecha_corte || '', f.txt).all()).results || []).forEach(r => {
-          const k = corteClavePieza(r.hoja_cliente || r.cliente_nombre, r.producto, r.diseno_nombre, r.cantidad); (yaRows[k] = yaRows[k] || []).push(r);
-        });
-      } catch (_) {}
-    }
+    let webClientes = new Set();
+    try {
+      await ensureCorteNeonSchema(env);
+      const _web = "(origen='landing' AND hoja_fecha=? AND hoja_fila IS NOT NULL AND estado NOT IN ('prueba','cancelado'))";
+      const _rows = tanda
+        ? (await env.DB.prepare(`SELECT id, cliente_nombre, hoja_cliente, producto, diseno_nombre, cantidad, precio, estado_pago FROM corte_pedidos WHERE IFNULL(producto,'')!='NEON' AND ((tanda_id=? AND (hoja_fecha=? OR (hoja_fecha IS NULL AND ?=?)) AND NOT (IFNULL(origen,'')='landing' AND hoja_fila IS NULL)) OR ${_web})`).bind(tanda.id, f.txt, tanda.fecha_corte || '', f.txt, f.txt).all()).results || []
+        : (await env.DB.prepare(`SELECT id, cliente_nombre, hoja_cliente, producto, diseno_nombre, cantidad, precio, estado_pago FROM corte_pedidos WHERE IFNULL(producto,'')!='NEON' AND ${_web}`).bind(f.txt).all()).results || [];
+      const vistos = new Set();
+      _rows.forEach(r => {
+        if (vistos.has(r.id)) return; vistos.add(r.id);
+        const k = corteClavePieza(r.hoja_cliente || r.cliente_nombre, r.producto, r.diseno_nombre, r.cantidad); (yaRows[k] = yaRows[k] || []).push(r);
+      });
+      // Clientes que pidieron por la web para esta fecha: una fila de DISEÑO suya que aparece en la hoja sin pieza web
+      // es casi seguro la misma tipeada a mano → no entra sola (queda como posible duplicado para confirmar).
+      webClientes = new Set(((await env.DB.prepare("SELECT DISTINCT hoja_cliente FROM corte_pedidos WHERE origen='landing' AND hoja_fecha=? AND estado NOT IN ('prueba','cancelado')").bind(f.txt).all()).results || []).map(r => corteNormNombre(r.hoja_cliente)).filter(Boolean));
+    } catch (_) {}
     const nuevas = [], yaCargadas = [];
     for (const x of alumnos) { const k = corteClavePieza(x.cliente, x.producto, x.diseno || x.producto, x.cantidad); if (yaRows[k] && yaRows[k].length) { yaRows[k].shift(); yaCargadas.push(x); } else nuevas.push(x); }
     const sobrantes = Object.values(yaRows).flat();
@@ -5542,7 +5554,10 @@ async function corteCargarTanda(env, { fecha, dryRun = true, incluirSospechosas 
     for (const x of nuevas) {
       const kx = corteClavePieza(x.cliente, x.producto, x.diseno || x.producto, x.cantidad);
       const s = sobrantes.find(s => corteMismaPersona(s.hoja_cliente || s.cliente_nombre, x.cliente) || _corteClaveSufijo(corteClavePieza(s.hoja_cliente || s.cliente_nombre, s.producto, s.diseno_nombre, s.cantidad)) === _corteClaveSufijo(kx));
-      if (s) sospechosas.push({ ...x, parecida_a: { id: s.id, cliente: s.cliente_nombre, diseno: s.diseno_nombre, cantidad: s.cantidad, precio: s.precio, estado_pago: s.estado_pago } }); else limpias.push(x);
+      const esAcril = /^(TRANS|NEGRO)$/i.test(x.producto || 'TRANS');
+      if (s) sospechosas.push({ ...x, parecida_a: { id: s.id, cliente: s.cliente_nombre, diseno: s.diseno_nombre, cantidad: s.cantidad, precio: s.precio, estado_pago: s.estado_pago } });
+      else if (esAcril && webClientes.has(corteNormNombre(x.cliente))) sospechosas.push({ ...x, parecida_a: { id: 0, cliente: x.cliente, diseno: 'pidió por la web esta semana: ¿esta fila es uno de esos diseños tipeado a mano?', cantidad: 0, precio: 0, estado_pago: 'web' } });
+      else limpias.push(x);
     }
     const aInsertar = incluirSospechosas ? nuevas : limpias;
     // Teléfono + entrega por cliente.
@@ -5586,6 +5601,512 @@ async function corteCargarTanda(env, { fecha, dryRun = true, incluirSospechosas 
   } finally {
     if (lockId) { try { await env.DB.prepare("DELETE FROM kv_cache WHERE k='corte_carga_lock' AND v=?").bind(lockId).run(); } catch (_) {} }
   }
+}
+// ===== PEDIDOS DE CORTE POR LA WEB (landing neoninfinitosoftware.com/corte/, 14-oct-2026, migrations/052) =====
+// Gaspar: "automatizar la carga de nuevos pedidos para no tener que intervenir yo". Hasta acá el pedido le llegaba al
+// WhatsApp personal, lo reenviaba al grupo y Emma lo tipeaba en "Servicio de cortes pedidos 2" (Venta_Insumos la copia
+// con IMPORTRANGE). Ahora el alumno lo carga en la landing y cada línea nace como pieza del CRM (origen 'landing'):
+//  · SIN tanda hasta la carga: hoja_fecha = el lunes de su tanda, hoja_cliente = el nombre con que va a la planilla.
+//    (Crear la tanda de la semana que viene a mitad de semana cambiaría la semana por defecto de logística y del tablero.)
+//  · diseño → 'pedido' con su foto: Emma lo ve en su línea de relevamiento. Cuando carga la medida final, el cron
+//    escribe la fila en la planilla de Emma y Venta_Insumos la copia sola, como siempre.
+//  · insumo (cable, fuentes) → 'pedido' con su precio (Emma no lo ve): la fila se escribe al cierre.
+//  · cliente nuevo → corte_alumnos al toque; LTV_Alumnos y la pestaña Clientes cuando se escribe su primera fila.
+//  · la carga de la tanda (corteCargarTandaCompleta) le pone la tanda a las piezas web de ese lunes, pasa a 'cortado' las
+//    que ya tienen matriz y los insumos, y respeta la entrega que eligió el cliente. Corre sola sáb 21 h, dom 21 h y lun
+//    7:30 (kv corte_autocarga_on) además del botón "Cargar tanda".
+//  · plazo: cierre oficial viernes 20 h, entra hasta el sábado 12 h; después va a la tanda siguiente. Sábado 12 h →
+//    resumen a Gaspar. Al momento solo se avisa un cliente nuevo.
+// Kill-switch: kv 'corte_landing_on' (def '1'; en '0' la página dice que los pedidos van por WhatsApp).
+const CORTE_LANDING_PREFIX = 'corte/landing/';
+const CORTE_LANDING_INSUMOS = [ // código = el de la col I de la planilla; precio por defecto (kv corte_insumos_precios lo pisa)
+  { codigo: 'cable_025', nombre: 'Cable estañado 0,25 mm transparente', detalle: 'Rollo de 50 m. Más fino y prolijo, para las conexiones internas.', precio: 47000 },
+  { codigo: 'cable_035', nombre: 'Cable 0,35 mm', detalle: 'Rollo de 100 m, blanco o negro. Para la salida a la fuente.', precio: 39500, colores: ['blanco', 'negro'] },
+  { codigo: 'cable_05', nombre: 'Cable 0,5 mm', detalle: 'Rollo de 100 m, blanco o negro. Para la salida a la fuente y carteles grandes.', precio: 43000, colores: ['blanco', 'negro'] },
+  { codigo: 'nitto_4a', nombre: 'Fuente Nitto 4A', detalle: '', precio: 8500 },
+];
+const CORTE_LANDING_COLS = 'id, created_at, telefono, nombre, nombre_hoja, nuevo, entrega, datos_json, insumos_json, n_disenos, estimado, hoja_fecha, plazo_estado, huella, ip_hash, piezas_ids, cliente_hoja, cierre_at, prueba';
+let _corteLandingSchemaOk = false;
+async function ensureCorteLandingSchema(env) {
+  if (_corteLandingSchemaOk) return true;
+  try { await env.DB.prepare(`SELECT ${CORTE_LANDING_COLS} FROM corte_landing_envios LIMIT 0`).all(); }
+  catch (_) {
+    try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS corte_landing_envios (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, telefono TEXT, nombre TEXT, nombre_hoja TEXT, nuevo INTEGER DEFAULT 0, entrega TEXT, datos_json TEXT, insumos_json TEXT, n_disenos INTEGER, estimado INTEGER, hoja_fecha TEXT, plazo_estado TEXT, huella TEXT, ip_hash TEXT, piezas_ids TEXT, cliente_hoja TEXT, cierre_at TEXT, prueba INTEGER DEFAULT 0)').run(); } catch (_) {}
+    try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_corte_landing_fecha ON corte_landing_envios(hoja_fecha)').run(); } catch (_) {}
+    try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_corte_landing_tel ON corte_landing_envios(telefono, created_at)').run(); } catch (_) {}
+  }
+  await ensureCorteNeonSchema(env); // origen
+  await ensureCorteHojaSchema(env); // hoja_cliente, hoja_fila, hoja_fecha
+  try { await ensureCorteDespachoSchema(env); } catch (_) {} // entrega_manual
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_corte_pedidos_origen ON corte_pedidos(origen, hoja_fecha)').run(); } catch (_) {}
+  try {
+    await env.DB.prepare(`SELECT ${CORTE_LANDING_COLS} FROM corte_landing_envios LIMIT 0`).all();
+    await env.DB.prepare('SELECT origen, hoja_cliente, hoja_fila, hoja_fecha, entrega_manual FROM corte_pedidos LIMIT 0').all();
+    _corteLandingSchemaOk = true;
+  } catch (_) {}
+  return _corteLandingSchemaOk;
+}
+function corteLandingDDMM(d) { return String(d.getUTCDate()).padStart(2, '0') + '/' + String(d.getUTCMonth() + 1).padStart(2, '0'); }
+// Plazo en hora AR. → { lunes:'19/10/2026' (la fecha de la tanda, como en la planilla), lunesCorto:'19/10',
+//   viernesCorto:'16/10', estado:'abierto' (antes del viernes 20 h) | 'margen' (hasta el sábado 12 h), cierreMs }.
+function corteLandingPlazo(nowMs) {
+  const ar = new Date((nowMs || Date.now()) - 3 * 3600 * 1000);
+  let sab = Date.UTC(ar.getUTCFullYear(), ar.getUTCMonth(), ar.getUTCDate() + ((6 - ar.getUTCDay() + 7) % 7), 12); // sábado 12 h (reloj AR)
+  if (ar.getTime() >= sab) sab += 7 * 86400000;
+  const lun = new Date(sab + 36 * 3600000), vie = new Date(sab - 86400000);
+  return {
+    lunes: lun.getUTCDate() + '/' + (lun.getUTCMonth() + 1) + '/' + lun.getUTCFullYear(),
+    lunesCorto: corteLandingDDMM(lun), viernesCorto: corteLandingDDMM(vie),
+    estado: ar.getTime() < sab - 16 * 3600000 ? 'abierto' : 'margen',
+    cierreMs: sab + 3 * 3600000,
+  };
+}
+// Sábado 12 h AR (ms reales) de la tanda del lunes `fecha` ('D/M/AAAA'). 0 si la fecha no es válida.
+function corteLandingCierreDe(fecha) { const f = corteFechaValida(fecha); return f ? Date.UTC(f.date.getUTCFullYear(), f.date.getUTCMonth(), f.date.getUTCDate(), 3) - 36 * 3600000 : 0; }
+// 'dd/mm/aaaa' o 'd/m/aaaa' → 'd/m/aaaa' (para comparar fechas de la planilla sin depender del formato de la celda).
+function corteFechaNorm(s) { const m = String(s || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); return m ? (+m[1]) + '/' + (+m[2]) + '/' + m[3] : ''; }
+async function corteLandingPrecios(env) {
+  const m2 = parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000;
+  let ov = {}; try { ov = JSON.parse(await kvGet(env, 'corte_insumos_precios', '{}')) || {}; } catch (_) {}
+  const insOn = (await kvGet(env, 'corte_landing_insumos_on', '1')) === '1';
+  return { m2, insumos: insOn ? CORTE_LANDING_INSUMOS.map(x => ({ ...x, precio: parseInt(ov[x.codigo], 10) > 0 ? parseInt(ov[x.codigo], 10) : x.precio })) : [] };
+}
+function corteLandingTxt(s, max) { return String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); }
+function corteLandingNombrePropio(s) { return corteLandingTxt(s, 60).toLowerCase().replace(/(^|[\s'-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase()); }
+function corteLandingCm(v) { const n = parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) && n > 0 ? Math.round(n * 10) / 10 : 0; }
+function corteLandingPesos(n) { return '$' + Math.round(n || 0).toLocaleString('es-AR'); }
+// Tope por IP y por hora (contadores en kv_cache; la limpieza los borra al otro día).
+async function corteLandingLimite(env, request, tipo, max) {
+  const ip = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'x';
+  const h = (await sha256hex('corte-landing|' + ip)).slice(0, 16);
+  const k = 'corte_rl:' + tipo + ':' + h + ':' + new Date().toISOString().slice(0, 13);
+  try {
+    const r = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?) ON CONFLICT(k) DO UPDATE SET v = CAST(CAST(kv_cache.v AS INTEGER) + 1 AS TEXT), updated_at = excluded.updated_at RETURNING v").bind(k, new Date().toISOString()).first();
+    return { ok: (parseInt(r && r.v, 10) || 0) <= max, ipHash: h };
+  } catch (_) { return { ok: true, ipHash: h }; } // si la base falla no se frena: el pedido igual tiene sus validaciones
+}
+let _corteLandingLtvMemo = { at: 0, val: null };
+async function corteLandingLtv(env) {
+  if (_corteLandingLtvMemo.val && Date.now() - _corteLandingLtvMemo.at < 5 * 60 * 1000) return _corteLandingLtvMemo.val;
+  const l = await corteLtv(env);
+  if (l && l.ok) _corteLandingLtvMemo = { at: Date.now(), val: l };
+  return l;
+}
+// ¿Es cliente del corte? Por teléfono: piezas anteriores (el nombre tal cual figura en la planilla), corte_alumnos y LTV
+// fresca. → { conocido, nombreHoja, nombre, datos, tieneDireccion, alumnoId }. Al navegador solo le llega
+// conocido / tieneDireccion (nunca el nombre ni la dirección).
+async function corteLandingCliente(env, tel) {
+  const out = { conocido: false, nombreHoja: '', nombre: '', datos: '', tieneDireccion: false, alumnoId: null };
+  if (!tel) return out;
+  try { const p = await env.DB.prepare("SELECT hoja_cliente, cliente_nombre FROM corte_pedidos WHERE telefono=? AND IFNULL(producto,'')!='NEON' AND IFNULL(hoja_cliente,'')!='' AND estado!='prueba' ORDER BY id DESC LIMIT 1").bind(tel).first(); if (p) { out.conocido = true; out.nombreHoja = p.hoja_cliente; out.nombre = p.cliente_nombre || p.hoja_cliente; } } catch (_) {}
+  try { const a = await env.DB.prepare("SELECT id, nombre, datos_envio FROM corte_alumnos WHERE telefono=? ORDER BY id DESC LIMIT 1").bind(tel).first(); if (a) { out.conocido = true; out.alumnoId = a.id; if (!out.nombre) out.nombre = a.nombre || ''; out.datos = a.datos_envio || ''; } } catch (_) {}
+  try { const l = await corteLandingLtv(env); if (l && l.ok) { const x = l.rows.find(r => r.tel === tel); if (x) { out.conocido = true; if (!out.nombreHoja) out.nombreHoja = x.nombre; if (!out.nombre) out.nombre = x.nombre; if (x.datos) out.datos = x.datos; } } } catch (_) {}
+  if (!out.nombreHoja) out.nombreHoja = out.nombre;
+  const d = String(out.datos || '').trim();
+  out.tieneDireccion = d.length >= 12 && !/^retira\b/i.test(d);
+  return out;
+}
+// Datos de envío en una línea (LTV col E / corte_alumnos.datos_envio): "retira" o "Recibe, DNI, calle, localidad, provincia, CP".
+function corteLandingDatosTxt(nombre, d, entrega) {
+  d = d || {};
+  if (entrega !== 'envio' || !d.calle) return 'retira';
+  return [d.recibe || nombre, d.dni ? 'DNI ' + d.dni : '', d.calle, d.localidad, d.provincia, d.cp ? 'CP ' + d.cp : ''].filter(Boolean).join(', ');
+}
+// --- Planillas (Sheets API con la cuenta de servicio, la misma que ya marca "pagado") ---
+const SHEETS_API_BASE = 'https://sheets.googleapis.com/v4/spreadsheets/';
+async function corteSheetsReq(token, method, url, body) {
+  const r = await fetch(url, { method, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+  return j;
+}
+async function corteHojaLeer(token, sheetId, range) { return (await corteSheetsReq(token, 'GET', SHEETS_API_BASE + sheetId + '/values/' + encodeURIComponent(range))).values || []; }
+async function corteHojaEscribir(token, sheetId, modo, data) { return corteSheetsReq(token, 'POST', SHEETS_API_BASE + sheetId + '/values:batchUpdate', { valueInputOption: modo, data }); }
+// Última fila con algo en `col` (las de abajo traen fórmulas precargadas en OTRAS columnas, por eso no sirve "append").
+function corteHojaUltima(values, col) { let u = 1; values.forEach((r, i) => { if (String((r || [])[col] || '').trim()) u = i + 1; }); return u; }
+// Planilla de Emma ("Servicio de cortes pedidos 2"): sheet1 (gid 1185472079) tiene validaciones ESTRICTAS: la col B solo
+// acepta nombres de la pestaña Clientes (=Clientes!B:B) y la D, cantidades de 1 a 10.
+const CORTE_PEDIDOS_SHEET1_GID = 1185472079;
+// Fecha 'd/m/aaaa' → número de serie de Sheets (días desde el 30/12/1899): se escribe RAW con formato d/m/yyyy, igual que
+// las filas de Emma (así Venta_Insumos la muestra igual y le saca el mes para el precio). 0 si no es válida.
+function corteHojaSerial(fecha) { const f = corteFechaValida(corteFechaNorm(fecha)); return f ? Math.round((Date.UTC(f.date.getUTCFullYear(), f.date.getUTCMonth(), f.date.getUTCDate()) - Date.UTC(1899, 11, 30)) / 86400000) : 0; }
+// Nombre del cliente TAL CUAL figura en la pestaña Clientes (lo exige la validación de la col B). Si no figura, lo suma
+// (B nombre, C "retira" o la dirección) y devuelve el nombre propuesto. `memo` = { cli } por pasada del cron.
+async function corteLandingNombreClientes(token, nombre, datosTxt, memo) {
+  const k = corteNormNombre(nombre); if (!k) throw new Error('cliente sin nombre');
+  if (!memo.cli) memo.cli = await corteHojaLeer(token, CORTE_PEDIDOS_SHEET_ID, 'Clientes!A1:C');
+  const hit = memo.cli.find((r, i) => i > 0 && corteNormNombre((r || [])[1]) === k);
+  if (hit) return String(hit[1]);
+  const fila = corteHojaUltima(memo.cli, 1) + 1;
+  await corteHojaEscribir(token, CORTE_PEDIDOS_SHEET_ID, 'RAW', [{ range: `Clientes!B${fila}:C${fila}`, values: [[nombre, datosTxt || 'retira']] }]);
+  memo.cli[fila - 1] = ['', nombre, datosTxt || 'retira'];
+  return nombre;
+}
+// Una fila en sheet1 como la tipea Emma: B cliente, C diseño, D cantidad, F fecha, G ancho, H alto, I producto, J
+// aclaración. La col E (RETIRA) tiene la fórmula precargada: no se toca. Antes mira las últimas filas: si Emma ya lo tipeó a
+// mano (misma fecha, cliente y diseño) y esa fila no es de otra pieza, la vincula en vez de duplicarla (solo diseños: los
+// insumos web no los ve nadie para tipearlos). `ocupadas`: filas ya vinculadas a piezas. → { fila, vinculada }. Tira si
+// algo no cuadra (el cron reintenta en la próxima pasada).
+async function corteHojaFilaPieza(token, x, ocupadas) {
+  const v = await corteHojaLeer(token, CORTE_PEDIDOS_SHEET_ID, 'sheet1!A1:J');
+  const nC = corteNormNombre(x.cliente), nD = corteNormNombre(x.diseno), fx = corteFechaNorm(x.fecha), serial = corteHojaSerial(x.fecha);
+  if (!serial) throw new Error('fecha inválida: ' + x.fecha);
+  if (x.producto === 'TRANS') {
+    for (let i = v.length - 1; i >= Math.max(1, v.length - 800); i--) {
+      const r = v[i] || [];
+      if (ocupadas.has(i + 1) || corteFechaNorm(r[5]) !== fx || corteNormNombre(r[1]) !== nC || corteNormNombre(r[2]) !== nD) continue;
+      return { fila: i + 1, vinculada: true };
+    }
+  }
+  const fila = corteHojaUltima(v.map(r => [(r || [])[1] || (r || [])[2] || '']), 0) + 1;
+  // Última mirada justo antes de escribir (por si Emma está tipeando en esa misma fila).
+  const ya = await corteHojaLeer(token, CORTE_PEDIDOS_SHEET_ID, `sheet1!B${fila}:C${fila}`);
+  if (ya.length && (ya[0] || []).some(c => String(c || '').trim())) throw new Error('la fila ' + fila + ' se ocupó recién');
+  // Formato de fecha de la col F (las filas vacías no lo traen) y después los valores, todo RAW (sin interpretar nada).
+  await corteSheetsReq(token, 'POST', SHEETS_API_BASE + CORTE_PEDIDOS_SHEET_ID + ':batchUpdate', { requests: [{ repeatCell: { range: { sheetId: CORTE_PEDIDOS_SHEET1_GID, startRowIndex: fila - 1, endRowIndex: fila, startColumnIndex: 5, endColumnIndex: 6 }, cell: { userEnteredFormat: { numberFormat: { type: 'DATE', pattern: 'd/m/yyyy' } } }, fields: 'userEnteredFormat.numberFormat' } }] });
+  await corteHojaEscribir(token, CORTE_PEDIDOS_SHEET_ID, 'RAW', [
+    { range: `sheet1!B${fila}:D${fila}`, values: [[x.cliente, x.diseno, Math.max(1, Math.min(10, x.cantidad))]] },
+    { range: `sheet1!F${fila}:J${fila}`, values: [[serial, x.ancho || '', x.alto || '', x.producto, x.aclaracion || '']] },
+  ]);
+  const chk = ((await corteHojaLeer(token, CORTE_PEDIDOS_SHEET_ID, `sheet1!B${fila}:F${fila}`))[0]) || [];
+  if (corteNormNombre(chk[0]) !== nC || corteFechaNorm(chk[4]) !== fx) throw new Error('la fila ' + fila + ' no quedó como se esperaba (' + JSON.stringify(chk).slice(0, 120) + ')');
+  return { fila, vinculada: false };
+}
+// Cliente nuevo de la web → LTV_Alumnos (B nombre, E datos de envío, F teléfono) en la primera fila libre (las de abajo
+// traen las fórmulas de C y D precargadas). Si ese teléfono ya figura, no lo repite.
+async function corteLandingClienteLtv(token, e) {
+  const datos = (() => { try { return JSON.parse(e.datos_json || '{}') || {}; } catch (_) { return {}; } })();
+  const txt = corteLandingDatosTxt(e.nombre_hoja, datos.nuevo || {}, e.entrega);
+  const ltv = await corteHojaLeer(token, CORTE_SHEET_ID, 'LTV_Alumnos!A1:F');
+  if (ltv.some((r, i) => i > 0 && corteTel((r || [])[5]) === e.telefono)) return;
+  const fila = corteHojaUltima(ltv, 1) + 1;
+  await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', [{ range: `LTV_Alumnos!B${fila}`, values: [[e.nombre_hoja]] }, { range: `LTV_Alumnos!E${fila}:F${fila}`, values: [[txt, '54 9 ' + String(e.telefono).slice(3)]] }]);
+}
+// Cron: (1) filas de la planilla para las piezas web listas (diseños medidos por Emma; insumos al cierre), con el
+// cliente nuevo antes; (2) resumen del cierre a Gaspar; (3) carga automática de la tanda. Candado de 4 min.
+async function corteLandingCron(env) {
+  try {
+    if (!(await ensureCorteLandingSchema(env))) return;
+    const ahora = Date.now();
+    const lockId = String(ahora) + Math.random().toString(36).slice(2);
+    let lk = null;
+    try { lk = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('corte_landing_lock', ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at WHERE kv_cache.updated_at < ? RETURNING k").bind(lockId, new Date(ahora).toISOString(), new Date(ahora - 4 * 60000).toISOString()).first(); } catch (_) {}
+    if (!lk) return;
+    try {
+      await corteLandingEscribirPendientes(env, ahora);
+      await corteLandingResumenes(env, ahora);
+      await corteAutoCarga(env, ahora);
+      if (new Date(ahora - 3 * 3600000).getUTCHours() === 4 && new Date(ahora).getUTCMinutes() < 5) { // 4 AR: contadores viejos
+        try { await env.DB.prepare("DELETE FROM kv_cache WHERE k LIKE 'corte_rl:%' AND updated_at < ?").bind(new Date(ahora - 86400000).toISOString()).run(); } catch (_) {}
+      }
+    } finally { try { await env.DB.prepare("DELETE FROM kv_cache WHERE k='corte_landing_lock' AND v=?").bind(lockId).run(); } catch (_) {} }
+  } catch (e) { try { console.log('corteLandingCron: ' + String((e && e.message) || e)); } catch (_) {} }
+}
+async function corteLandingEscribirPendientes(env, ahora) {
+  if ((await kvGet(env, 'corte_hoja_auto_on', '1')) !== '1') return;
+  const cand = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, cantidad, ancho_real, alto_real, producto, estado FROM corte_pedidos WHERE origen='landing' AND hoja_fila IS NULL AND IFNULL(hoja_fecha,'')!='' AND estado NOT IN ('prueba','cancelado') ORDER BY id LIMIT 60").all()).results || [];
+  // Diseño: cuando Emma ya cargó la medida final. Insumo: al cierre de su tanda (sábado 12 h).
+  const listas = cand.filter(p => p.producto === 'TRANS' ? (p.estado !== 'pedido' && +p.ancho_real > 0 && +p.alto_real > 0) : ahora >= corteLandingCierreDe(p.hoja_fecha)).slice(0, 15);
+  if (!listas.length) return;
+  const token = await sheetsAccessToken(env);
+  if (!token) return;
+  // Clientes nuevos de estas piezas: primero a LTV (así la carga y logística los reconocen).
+  for (const tel of new Set(listas.map(p => p.telefono).filter(Boolean))) {
+    const e = await env.DB.prepare(`SELECT ${CORTE_LANDING_COLS} FROM corte_landing_envios WHERE telefono=? AND nuevo=1 AND prueba=0 AND IFNULL(cliente_hoja,'')='' ORDER BY id LIMIT 1`).bind(tel).first();
+    if (!e) continue;
+    try { await corteLandingClienteLtv(token, e); await env.DB.prepare("UPDATE corte_landing_envios SET cliente_hoja='escrito' WHERE telefono=? AND nuevo=1").bind(tel).run(); }
+    catch (err) { await corteLandingError(env, 'cliente nuevo ' + e.nombre_hoja + ' en LTV: ' + String((err && err.message) || err)); }
+  }
+  const fechas = [...new Set(listas.map(p => p.hoja_fecha))];
+  const ocupadas = new Set();
+  for (const f of fechas) { try { ((await env.DB.prepare("SELECT hoja_fila FROM corte_pedidos WHERE hoja_fecha=? AND hoja_fila IS NOT NULL").bind(f).all()).results || []).forEach(r => ocupadas.add(+r.hoja_fila)); } catch (_) {} }
+  const memo = {}, nombres = {};
+  let ok = 0;
+  for (const p of listas) {
+    try {
+      // Nombre exacto de la pestaña Clientes (si no está, se suma con sus datos de envío).
+      const tel = p.telefono || '';
+      if (!nombres[tel + '|' + p.hoja_cliente]) {
+        const c = tel ? await corteLandingCliente(env, tel) : { datos: '' };
+        let datos = /^retira\b/i.test(String(c.datos || '').trim()) || !String(c.datos || '').trim() ? 'retira' : String(c.datos).replace(/\s+/g, ' ').trim().slice(0, 300);
+        const e = tel ? await env.DB.prepare(`SELECT ${CORTE_LANDING_COLS} FROM corte_landing_envios WHERE telefono=? AND prueba=0 ORDER BY id DESC LIMIT 1`).bind(tel).first() : null;
+        if (e && +e.nuevo === 1) { try { const d = JSON.parse(e.datos_json || '{}') || {}; datos = corteLandingDatosTxt(e.nombre_hoja, d.nuevo || {}, e.entrega); } catch (_) {} }
+        nombres[tel + '|' + p.hoja_cliente] = await corteLandingNombreClientes(token, p.hoja_cliente || p.cliente_nombre, datos, memo);
+      }
+      const cliente = nombres[tel + '|' + p.hoja_cliente];
+      const r = await corteHojaFilaPieza(token, {
+        cliente, diseno: p.diseno_nombre || p.producto, cantidad: Math.max(1, parseInt(p.cantidad, 10) || 1),
+        fecha: p.hoja_fecha, ancho: p.producto === 'TRANS' ? +p.ancho_real : '', alto: p.producto === 'TRANS' ? +p.alto_real : '', producto: p.producto, aclaracion: p.aclaraciones || '',
+      }, ocupadas);
+      ocupadas.add(r.fila);
+      await env.DB.prepare("UPDATE corte_pedidos SET hoja_fila=?, hoja_cliente=?, updated_at=? WHERE id=? AND hoja_fila IS NULL").bind(r.fila, cliente, new Date().toISOString(), p.id).run();
+      ok++;
+    } catch (err) { await corteLandingError(env, 'pieza ' + p.id + ' (' + (p.hoja_cliente || p.cliente_nombre) + ' · ' + (p.diseno_nombre || p.producto) + '): ' + String((err && err.message) || err)); }
+  }
+  if (ok) { try { await kvSet(env, 'corte_landing_err_n', '0'); } catch (_) {} }
+}
+// Un error de escritura en la planilla: se guarda; al 3° seguido se avisa a Gaspar (1 vez cada 6 h).
+async function corteLandingError(env, txt) {
+  try { console.log('corteLanding: ' + txt); } catch (_) {}
+  try {
+    const n = (parseInt(await kvGet(env, 'corte_landing_err_n', '0'), 10) || 0) + 1;
+    await kvSet(env, 'corte_landing_err_n', String(n)); await kvSet(env, 'corte_landing_err_ult', txt.slice(0, 500));
+    const ult = parseInt(await kvGet(env, 'corte_landing_err_aviso', '0'), 10) || 0;
+    if (n >= 3 && Date.now() - ult > 6 * 3600000) {
+      await kvSet(env, 'corte_landing_err_aviso', String(Date.now()));
+      await precotizNotifyGaspar(env, 'Corte (pedidos web): no puedo escribir en la planilla de Emma. Lo sigo intentando cada 5 min.\nÚltimo error: ' + txt.slice(0, 300), { tipo: 'corte_landing_error', prioridad: 'P2' });
+    }
+  } catch (_) {}
+}
+// Resumen del cierre (sábado 12 h): lo que entró por la web para esa tanda, con lo que necesita una mirada.
+async function corteLandingResumenes(env, ahora) {
+  const pend = (await env.DB.prepare("SELECT DISTINCT hoja_fecha FROM corte_landing_envios WHERE prueba=0 AND IFNULL(cierre_at,'')='' AND IFNULL(hoja_fecha,'')!='' LIMIT 10").all()).results || [];
+  for (const { hoja_fecha: f } of pend) {
+    const cierre = corteLandingCierreDe(f);
+    if (!cierre || ahora < cierre) continue;
+    const envs = (await env.DB.prepare(`SELECT ${CORTE_LANDING_COLS} FROM corte_landing_envios WHERE prueba=0 AND hoja_fecha=? ORDER BY id`).bind(f).all()).results || [];
+    const piezas = (await env.DB.prepare("SELECT producto, estado, diseno_nombre, cantidad FROM corte_pedidos WHERE origen='landing' AND hoja_fecha=? AND estado NOT IN ('prueba','cancelado')").bind(f).all()).results || [];
+    const dis = piezas.filter(p => p.producto === 'TRANS'), sinMedir = dis.filter(p => p.estado === 'pedido').length;
+    const ins = piezas.filter(p => p.producto !== 'TRANS');
+    const clientes = new Set(envs.map(e => e.telefono)).size;
+    const est = envs.reduce((s, e) => s + (parseInt(e.estimado, 10) || 0), 0);
+    const nuevos = envs.filter(e => +e.nuevo === 1);
+    const dirDe = e => { try { return (JSON.parse(e.datos_json || '{}') || {}).dir || null; } catch (_) { return null; } };
+    const dirNuevas = envs.filter(e => { const d = dirDe(e); return !!(d && d.calle); });
+    const lunes = f.split('/').slice(0, 2).map(x => x.padStart(2, '0')).join('/');
+    const l = ['Corte · pedidos web para el lunes ' + lunes + ' (cerró hoy a las 12)'];
+    l.push(dis.length + ' diseño' + (dis.length === 1 ? '' : 's') + ' de ' + clientes + ' cliente' + (clientes === 1 ? '' : 's') + ' · estimado ' + corteLandingPesos(est));
+    if (ins.length) l.push('Insumos: ' + ins.map(p => (parseInt(p.cantidad, 10) || 1) + ' × ' + (p.diseno_nombre || p.producto)).join(', '));
+    l.push(sinMedir ? 'Emma: ' + (dis.length - sinMedir) + ' medidos, ' + sinMedir + ' por medir' : 'Emma ya midió todo');
+    if (nuevos.length) l.push('Clientes nuevos: ' + nuevos.map(e => e.nombre_hoja + ' (…' + String(e.telefono).slice(-4) + ')').join(', '));
+    if (dirNuevas.length) l.push('Envío a una dirección nueva (pasásela a logística): ' + dirNuevas.map(e => { const d = dirDe(e) || {}; return e.nombre_hoja + ': ' + [d.calle, d.localidad, d.provincia, d.cp ? 'CP ' + d.cp : ''].filter(Boolean).join(', '); }).join(' · '));
+    // Se marca aunque el envío falle: es un resumen, no se reintenta cada 5 minutos.
+    try { await precotizNotifyGaspar(env, l.join('\n'), { tipo: 'corte_landing_resumen', prioridad: 'P2', clave: 'corte_landing_resumen:' + f }); } catch (_) {}
+    await env.DB.prepare("UPDATE corte_landing_envios SET cierre_at=? WHERE hoja_fecha=? AND IFNULL(cierre_at,'')=''").bind(new Date().toISOString(), f).run();
+  }
+}
+// Le pone la tanda a las piezas web del lunes `fecha` (crea la tanda si hace falta), pasa a 'cortado' los diseños con
+// matriz y los insumos, y aplica la entrega que eligió cada cliente a TODAS sus piezas de esa tanda (también a las que
+// entran desde la planilla), con entrega_manual=1 para que la sincronización con la planilla no la pise.
+async function corteLandingAsignarTanda(env, fecha) {
+  if (!(await ensureCorteLandingSchema(env))) return { error: 'schema' };
+  const f = corteFechaValida(fecha); if (!f) return { error: 'fecha' };
+  const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM corte_pedidos WHERE origen='landing' AND hoja_fecha=? AND estado NOT IN ('prueba','cancelado')").bind(f.txt).first();
+  if (!n || !n.n) return { ok: true, asignadas: 0 };
+  const td = await corteTandaDeFecha(env, f, false);
+  if (!td.tanda) return { error: 'no pude crear/encontrar la tanda' };
+  const tid = td.tanda.id, nowIso = new Date().toISOString();
+  const a = await env.DB.prepare("UPDATE corte_pedidos SET tanda_id=?, updated_at=? WHERE origen='landing' AND hoja_fecha=? AND tanda_id IS NULL AND estado NOT IN ('prueba','cancelado')").bind(tid, nowIso, f.txt).run();
+  const c = await env.DB.prepare("UPDATE corte_pedidos SET estado='cortado', updated_at=? WHERE origen='landing' AND hoja_fecha=? AND tanda_id=? AND ((producto='TRANS' AND estado='matriz_lista') OR (producto!='TRANS' AND estado='pedido'))").bind(nowIso, f.txt, tid).run();
+  const envs = (await env.DB.prepare("SELECT telefono, entrega FROM corte_landing_envios WHERE prueba=0 AND hoja_fecha=? ORDER BY id").bind(f.txt).all()).results || [];
+  const ent = {}; envs.forEach(e => { if (e.telefono && (e.entrega === 'envio' || e.entrega === 'retira')) ent[e.telefono] = e.entrega; }); // el último envío manda
+  for (const [tel, en] of Object.entries(ent)) {
+    try { await env.DB.prepare("UPDATE corte_pedidos SET entrega=?, entrega_manual=1, updated_at=? WHERE tanda_id=? AND telefono=? AND estado NOT IN ('despachado','entregado') AND IFNULL(producto,'')!='NEON'").bind(en, nowIso, tid, tel).run(); } catch (_) {}
+  }
+  const sm = await env.DB.prepare("SELECT COUNT(*) AS n FROM corte_pedidos WHERE origen='landing' AND hoja_fecha=? AND tanda_id=? AND producto='TRANS' AND estado='pedido'").bind(f.txt, tid).first();
+  return { ok: true, tanda_id: tid, asignadas: (a.meta && a.meta.changes) || 0, a_cortado: (c.meta && c.meta.changes) || 0, sin_medir: (sm && sm.n) || 0 };
+}
+// La carga de la tanda completa (botón "Cargar tanda" y carga automática): primero las piezas web (para que la carga de
+// la planilla las reconozca), después la planilla y la entrega.
+async function corteCargarTandaCompleta(env, { fecha, dryRun = true, incluirSospechosas = false }) {
+  let web = null;
+  if (!dryRun) { try { web = await corteLandingAsignarTanda(env, fecha); } catch (e) { web = { error: String((e && e.message) || e) }; } }
+  const r = await corteCargarTanda(env, { fecha, dryRun, incluirSospechosas });
+  // Otra pasada después de la planilla: la entrega que eligió el cliente en la web vale también para lo que entró recién
+  // desde la hoja (p. ej. un insumo que le tipearon a mano). Es idempotente.
+  if (!dryRun && web && web.ok && web.tanda_id) { try { await corteLandingAsignarTanda(env, fecha); } catch (_) {} }
+  if (web) r.web = web;
+  if (r.ok && !dryRun && r.tanda_id) { try { r.sync_entrega = await corteSyncEntrega(env, { soloTandaId: r.tanda_id, notify: true }); } catch (_) {} }
+  return r;
+}
+// Carga automática: sábado 21 h, domingo 21 h y lunes 7:30 (AR), la tanda del lunes. Idempotente (la carga solo suma lo
+// nuevo); cada franja corre una sola vez. Avisa solo si entró algo o hay diseños web sin medir.
+async function corteAutoCarga(env, ahora) {
+  if ((await kvGet(env, 'corte_autocarga_on', '1')) !== '1') return;
+  const ar = new Date(ahora - 3 * 3600000), dow = ar.getUTCDay(), hh = ar.getUTCHours(), mm = ar.getUTCMinutes();
+  let franja = '';
+  if ((dow === 6 || dow === 0) && hh === 21) franja = dow === 6 ? 'sab' : 'dom';
+  else if (dow === 1 && ((hh === 7 && mm >= 30) || (hh === 8 && mm < 30))) franja = 'lun';
+  if (!franja) return;
+  const dias = dow === 6 ? 2 : (dow === 0 ? 1 : 0);
+  const lun = new Date(Date.UTC(ar.getUTCFullYear(), ar.getUTCMonth(), ar.getUTCDate() + dias));
+  const fecha = lun.getUTCDate() + '/' + (lun.getUTCMonth() + 1) + '/' + lun.getUTCFullYear();
+  const clave = fecha + '|' + franja;
+  if ((await kvGet(env, 'corte_autocarga_ult', '')) === clave) return;
+  await kvSet(env, 'corte_autocarga_ult', clave);
+  const r = await corteCargarTandaCompleta(env, { fecha, dryRun: false });
+  try { await kvSet(env, 'corte_autocarga_res', JSON.stringify({ clave, at: new Date().toISOString(), nuevas: r.nuevas || 0, error: r.error || '', web: r.web || null }).slice(0, 2000)); } catch (_) {}
+  // corteCargarTanda ya avisa lo que cargó desde la planilla; acá, lo de la web.
+  const w = r.web || {};
+  if (w.asignadas || w.sin_medir) {
+    const t = 'Corte · tanda ' + fecha + ' (carga automática): ' + (w.asignadas ? w.asignadas + ' pieza' + (w.asignadas === 1 ? '' : 's') + ' web sumada' + (w.asignadas === 1 ? '' : 's') + (w.a_cortado ? ', ' + w.a_cortado + ' lista' + (w.a_cortado === 1 ? '' : 's') + ' para Neyen' : '') : 'sin piezas web nuevas') + (w.sin_medir ? '\n⚠ ' + w.sin_medir + ' diseño' + (w.sin_medir === 1 ? '' : 's') + ' web todavía sin medir (Emma)' : '');
+    try { await precotizNotifyGaspar(env, t, { tipo: 'corte_tanda', prioridad: 'P3', clave: 'corte_autocarga:' + clave }); } catch (_) {}
+  }
+  if (r.error && !/no hay|sin piezas/i.test(r.error)) { try { await precotizNotifyGaspar(env, 'Corte · la carga automática de la tanda ' + fecha + ' falló: ' + r.error, { tipo: 'corte_tanda', prioridad: 'P2', clave: 'corte_autocarga_err:' + clave }); } catch (_) {} }
+}
+// ---- Endpoints públicos de la landing (sin sesión; antes del muro de /admin/) ----
+//  GET  /corte/landing/config  → plazo, precios, insumos y video.
+//  POST /corte/landing/cliente {telefono} → { conocido, tiene_direccion } (nada más: ni nombre ni dirección).
+//  POST /corte/landing/foto    (el archivo en el cuerpo; image/* o PDF; máx 15 MB) → { key }.
+//  POST /corte/landing/pedido  → crea el pedido (ver corteLandingPedido).
+async function corteLandingRoute(request, env, ctx, url, path) {
+  if (!env.DB) return json({ error: 'db' }, 500);
+  const on = (await kvGet(env, 'corte_landing_on', '1')) === '1';
+  if (request.method === 'GET' && path === '/corte/landing/config') {
+    const pl = corteLandingPlazo(), pr = await corteLandingPrecios(env);
+    return json({
+      ok: true, on, plazo: { lunes: pl.lunesCorto, viernes: pl.viernesCorto, estado: pl.estado },
+      precio_m2: pr.m2, insumos: pr.insumos.map(x => ({ codigo: x.codigo, nombre: x.nombre, detalle: x.detalle, precio: x.precio, colores: x.colores || null })),
+      video: await kvGet(env, 'corte_landing_video', ''), whatsapp: '5491133708544',
+    });
+  }
+  if (request.method !== 'POST') return json({ error: 'not_found' }, 404);
+  if (!on) return json({ error: 'cerrado', motivo: 'Por ahora los pedidos se toman por WhatsApp.' }, 503);
+  if (path === '/corte/landing/cliente') {
+    const rl = await corteLandingLimite(env, request, 'cli', 40);
+    if (!rl.ok) return json({ error: 'limite', motivo: 'Demasiados intentos. Probá de nuevo en un rato.' }, 429);
+    let body; try { body = await request.json(); } catch { body = {}; }
+    const tel = corteTel(body.telefono);
+    if (!tel) return json({ error: 'telefono', motivo: 'Revisá el número: código de área y número, sin el 0 ni el 15.' }, 400);
+    const c = await corteLandingCliente(env, tel);
+    return json({ ok: true, conocido: c.conocido, tiene_direccion: c.tieneDireccion });
+  }
+  if (path === '/corte/landing/foto') {
+    const rl = await corteLandingLimite(env, request, 'foto', 80);
+    if (!rl.ok) return json({ error: 'limite', motivo: 'Demasiadas fotos seguidas. Probá de nuevo en un rato.' }, 429);
+    if (!env.MEDIA) return json({ error: 'r2' }, 500);
+    const ct = String(request.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+    const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/heic': 'heic', 'image/heif': 'heif', 'application/pdf': 'pdf' }[ct];
+    if (!ext) return json({ error: 'tipo', motivo: 'Subí una imagen (JPG o PNG) o un PDF.' }, 415);
+    const max = 15 * 1024 * 1024;
+    if ((parseInt(request.headers.get('Content-Length') || '0', 10) || 0) > max) return json({ error: 'grande', motivo: 'El archivo pesa más de 15 MB.' }, 413);
+    const buf = await request.arrayBuffer();
+    if (!buf.byteLength) return json({ error: 'vacio', motivo: 'El archivo llegó vacío.' }, 400);
+    if (buf.byteLength > max) return json({ error: 'grande', motivo: 'El archivo pesa más de 15 MB.' }, 413);
+    const b = new Uint8Array(buf.slice(0, 12)), asc = String.fromCharCode(...b);
+    const firmaOk = ext === 'jpg' ? (b[0] === 0xFF && b[1] === 0xD8) : ext === 'png' ? (b[0] === 0x89 && asc.slice(1, 4) === 'PNG') : ext === 'pdf' ? asc.startsWith('%PDF') : ext === 'webp' ? (asc.startsWith('RIFF') && asc.slice(8, 12) === 'WEBP') : asc.slice(4, 8) === 'ftyp';
+    if (!firmaOk) return json({ error: 'tipo', motivo: 'El archivo no parece una imagen o un PDF.' }, 415);
+    const key = CORTE_LANDING_PREFIX + new Date().toISOString().slice(0, 7) + '/' + crypto.randomUUID() + '.' + ext;
+    try { await env.MEDIA.put(key, buf, { httpMetadata: { contentType: ct } }); } catch (_) { return json({ error: 'r2', motivo: 'No se pudo guardar el archivo. Probá de nuevo.' }, 500); }
+    return json({ ok: true, key });
+  }
+  if (path === '/corte/landing/pedido') {
+    const rl = await corteLandingLimite(env, request, 'ped', 12);
+    if (!rl.ok) return json({ error: 'limite', motivo: 'Demasiados pedidos seguidos. Si necesitás ayuda, escribinos por WhatsApp.' }, 429);
+    let body; try { body = await request.json(); } catch { body = {}; }
+    // Modo prueba: solo con la sesión de Gaspar (las piezas quedan en estado 'prueba', fuera de todas las colas).
+    let prueba = false;
+    if (url.searchParams.get('prueba') === '1') {
+      const s = await getSession(env, request);
+      if (!s || (await getSessionRole(env, s.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+      prueba = true;
+    }
+    return json(...(await corteLandingPedido(env, body, { prueba, ipHash: rl.ipHash })));
+  }
+  return json({ error: 'not_found' }, 404);
+}
+// Crea el pedido de la landing. → [cuerpo, status] para json().
+async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {}) {
+  if (!(await ensureCorteLandingSchema(env))) return [{ error: 'db', motivo: 'No pudimos guardar el pedido. Probá de nuevo en un momento.' }, 500];
+  const err = (motivo, campo) => [{ error: 'datos', motivo, campo: campo || '' }, 400];
+  if (String(body.hp || '').trim() || (+body.ms > 0 && +body.ms < 6000)) return [{ ok: true, lunes: corteLandingPlazo().lunesCorto, disenos: 0 }, 200]; // bot: se le dice que sí y no se guarda
+  const tel = corteTel(body.telefono);
+  if (!tel) return err('Revisá tu WhatsApp: código de área y número, sin el 0 ni el 15.', 'telefono');
+  const nombre = corteLandingNombrePropio(body.nombre);
+  if (nombre.length < 3) return err('Escribí tu nombre y apellido.', 'nombre');
+  const entrega = body.entrega === 'envio' ? 'envio' : (body.entrega === 'retira' ? 'retira' : '');
+  if (!entrega) return err('Elegí si lo retirás en el taller o va por envío.', 'entrega');
+  if (body.acepta !== true) return err('Confirmá que entendés cómo se calcula el precio final.', 'acepta');
+  const pr = await corteLandingPrecios(env);
+  // Diseños.
+  const dIn = Array.isArray(body.disenos) ? body.disenos : [];
+  if (dIn.length > 25) return err('Son muchos diseños para un solo pedido: mandalos en dos.');
+  const disenos = [];
+  for (let i = 0; i < dIn.length; i++) {
+    const d = dIn[i] || {}, n = i + 1;
+    const foto = String(d.foto_key || '');
+    if (!foto.startsWith(CORTE_LANDING_PREFIX) || foto.includes('..') || foto.length > 120) return err('Falta la foto del diseño ' + n + '.', 'diseno' + n);
+    const dn = corteLandingTxt(d.nombre, 60);
+    if (!dn) return err('Ponele un nombre al diseño ' + n + '.', 'diseno' + n);
+    const an = corteLandingCm(d.ancho), al = corteLandingCm(d.alto);
+    if (!(an >= 1 && an <= 400 && al >= 1 && al <= 400)) return err('Revisá la medida del diseño ' + n + ' (ancho y alto en centímetros).', 'diseno' + n);
+    const cant = Math.max(1, Math.min(10, parseInt(d.cantidad, 10) || 1)); // la planilla de Emma acepta 1 a 10
+    disenos.push({ foto, nombre: dn, ancho: an, alto: al, cantidad: cant, aclaraciones: corteLandingTxt(d.aclaraciones, 300) });
+  }
+  // Insumos.
+  const iIn = Array.isArray(body.insumos) ? body.insumos : [];
+  const insumos = [];
+  for (const it of iIn.slice(0, 10)) {
+    const def = pr.insumos.find(x => x.codigo === String((it || {}).codigo || ''));
+    const cant = Math.max(0, Math.min(10, parseInt((it || {}).cantidad, 10) || 0));
+    if (!def || !cant) continue;
+    const color = def.colores ? (def.colores.includes(String(it.color || '')) ? String(it.color) : def.colores[0]) : '';
+    insumos.push({ codigo: def.codigo, cantidad: cant, color, precio: def.precio, nombre: def.nombre + (color ? ' ' + color : '') });
+  }
+  if (!disenos.length && !insumos.length) return err('Sumá al menos un diseño.', 'disenos');
+  // Las fotos tienen que existir (subidas por la propia landing).
+  for (const d of disenos) { let h = null; try { h = await env.MEDIA.head(d.foto); } catch (_) {} if (!h) return err('Una de las fotos no se subió bien. Volvé a elegirla.'); }
+  // Cliente.
+  const cli = await corteLandingCliente(env, tel);
+  const limpio = o => { const x = {}; ['dni', 'calle', 'localidad', 'provincia', 'cp', 'recibe'].forEach(k => { const v = corteLandingTxt((o || {})[k], k === 'calle' ? 120 : 60); if (v) x[k] = v; }); if (x.dni) x.dni = x.dni.replace(/\D/g, ''); if (x.cp) x.cp = x.cp.toUpperCase(); return x; };
+  let nuevo = null, dir = null;
+  if (!cli.conocido) {
+    nuevo = limpio(body.nuevo);
+    if (!/^\d{7,9}$/.test(nuevo.dni || '')) return err('Tu DNI (solo números) para registrarte como cliente.', 'dni');
+    if (entrega === 'envio' && !(nuevo.calle && nuevo.localidad && nuevo.provincia && nuevo.cp)) return err('Completá la dirección de envío: calle y número, localidad, provincia y código postal.', 'direccion');
+  } else if (entrega === 'envio') {
+    const d = limpio(body.dir);
+    if (d.calle) { if (!(d.localidad && d.provincia && d.cp)) return err('Completá la dirección nueva: calle y número, localidad, provincia y código postal.', 'direccion'); dir = d; }
+    else if (!cli.tieneDireccion) return err('No tenemos tu dirección de envío: completala abajo.', 'direccion');
+  }
+  const pl = corteLandingPlazo();
+  const nombreHoja = cli.conocido ? (cli.nombreHoja || nombre) : nombre;
+  const estimado = Math.round(disenos.reduce((s, d) => s + (d.ancho / 100) * (d.alto / 100) * pr.m2 * d.cantidad, 0) + insumos.reduce((s, x) => s + x.precio * x.cantidad, 0));
+  // Doble envío (doble toque, red lenta): mismo pedido del mismo teléfono en los últimos 30 min → se devuelve el anterior.
+  const huella = (await sha256hex(JSON.stringify([tel, entrega, disenos.map(d => [d.foto, d.nombre, d.ancho, d.alto, d.cantidad]), insumos.map(x => [x.codigo, x.cantidad, x.color])]))).slice(0, 32);
+  try {
+    const prev = await env.DB.prepare("SELECT id, n_disenos, hoja_fecha FROM corte_landing_envios WHERE telefono=? AND huella=? AND created_at > ? ORDER BY id DESC LIMIT 1").bind(tel, huella, new Date(Date.now() - 30 * 60000).toISOString()).first();
+    if (prev) return [{ ok: true, id: prev.id, repetido: true, lunes: pl.lunesCorto, estado: pl.estado, disenos: prev.n_disenos, insumos: insumos.length, estimado }, 200];
+  } catch (_) {}
+  const nowIso = new Date().toISOString();
+  const datosJson = JSON.stringify({ nuevo: nuevo || undefined, dir: dir || undefined });
+  let envioId = null;
+  try {
+    const r = await env.DB.prepare("INSERT INTO corte_landing_envios (created_at, telefono, nombre, nombre_hoja, nuevo, entrega, datos_json, insumos_json, n_disenos, estimado, hoja_fecha, plazo_estado, huella, ip_hash, prueba) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+      .bind(nowIso, tel, nombre, nombreHoja, cli.conocido ? 0 : 1, entrega, datosJson, JSON.stringify(insumos), disenos.length, estimado, pl.lunes, pl.estado, huella, ipHash, prueba ? 1 : 0).first();
+    envioId = r && r.id;
+  } catch (e) { return [{ error: 'db', motivo: 'No pudimos guardar el pedido. Probá de nuevo en un momento.' }, 500]; }
+  // Ficha del cliente nuevo (las planillas, cuando se escribe su primera fila).
+  let alumnoId = cli.alumnoId;
+  if (!cli.conocido && !prueba) {
+    try {
+      const datos = corteLandingDatosTxt(nombre, nuevo, entrega);
+      const a = await env.DB.prepare("INSERT INTO corte_alumnos (nombre, telefono, datos_envio, direccion, provincia, cp, dni, origen, activo, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'landing', 1, ?, ?) RETURNING id")
+        .bind(nombre, tel, datos, nuevo.calle ? nuevo.calle + (nuevo.localidad ? ', ' + nuevo.localidad : '') : '', nuevo.provincia || '', nuevo.cp || '', nuevo.dni || '', nowIso, nowIso).first();
+      alumnoId = a && a.id;
+    } catch (_) {}
+    if (corteTokens(nombre).length >= 2) { try { await env.DB.prepare("INSERT INTO corte_tel_override (nombre_norm, nombre, telefono, created_by, created_at) VALUES (?, ?, ?, 'landing', ?) ON CONFLICT(nombre_norm) DO NOTHING").bind(corteNormNombre(nombre), nombre, tel, nowIso).run(); } catch (_) {} }
+  }
+  // Piezas: diseños 'pedido' (Emma), insumos 'pedido' con precio (Emma no los ve). Sin tanda hasta la carga.
+  const estado = prueba ? 'prueba' : 'pedido';
+  const ins = (vals) => env.DB.prepare("INSERT INTO corte_pedidos (alumno_id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, precio, estado, estado_pago, entrega, entrega_manual, origen, tanda_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, 1, 'landing', NULL, ?, ?) RETURNING id").bind(...vals);
+  const stmts = [
+    ...disenos.map(d => ins([alumnoId || null, tel, nombreHoja, nombreHoja, pl.lunes, d.nombre, d.aclaraciones, d.foto, `ancho ${String(d.ancho).replace('.', ',')} × alto ${String(d.alto).replace('.', ',')} cm`, d.cantidad, 'TRANS', null, estado, entrega, nowIso, nowIso])),
+    ...insumos.map(x => ins([alumnoId || null, tel, nombreHoja, nombreHoja, pl.lunes, x.nombre, x.color, null, '', x.cantidad, x.codigo, x.precio * x.cantidad, estado, entrega, nowIso, nowIso])),
+  ];
+  let ids = [];
+  try { ids = (await env.DB.batch(stmts)).map(r => r.results && r.results[0] && r.results[0].id).filter(Boolean); }
+  catch (e) {
+    try { await env.DB.prepare("DELETE FROM corte_landing_envios WHERE id=?").bind(envioId).run(); } catch (_) {}
+    return [{ error: 'db', motivo: 'No pudimos guardar el pedido. Probá de nuevo en un momento.' }, 500];
+  }
+  try { await env.DB.prepare("UPDATE corte_landing_envios SET piezas_ids=? WHERE id=?").bind(ids.join(','), envioId).run(); } catch (_) {}
+  // Aviso al momento: solo el cliente nuevo (lo demás va en el resumen del sábado).
+  if (!cli.conocido && !prueba) {
+    const t = 'Corte · cliente nuevo por la web: ' + nombre + ' (…' + tel.slice(-4) + ')\n' + (disenos.length ? disenos.length + ' diseño' + (disenos.length === 1 ? '' : 's') : '') + (insumos.length ? (disenos.length ? ' + ' : '') + insumos.length + ' insumo' + (insumos.length === 1 ? '' : 's') : '') + ' · ' + (entrega === 'envio' ? 'envío a ' + [nuevo.localidad, nuevo.provincia].filter(Boolean).join(', ') : 'retira') + ' · tanda del lunes ' + pl.lunesCorto + '\nLo sumo solo a LTV y a Clientes cuando Emma mida su primer diseño.';
+    try { await precotizNotifyGaspar(env, t, { tipo: 'corte_landing_nuevo', prioridad: 'P2', clave: 'corte_landing_nuevo:' + envioId, refPhone: tel }); } catch (_) {}
+  }
+  return [{ ok: true, id: envioId, lunes: pl.lunesCorto, estado: pl.estado, disenos: disenos.length, insumos: insumos.length, estimado }, 200];
 }
 function corteEntregaCambiosTxt(cambios) {
   return 'Corte: actualicé la entrega desde la planilla de cortes:\n' + cambios.map(c => `· ${c.cliente} (${c.tanda}): ${c.de} → ${c.a}${c.ya_embalado ? ' ⚠ YA ESTABA EMBALADO, avisale a Neyen' : ''}`).join('\n');
@@ -17743,6 +18264,9 @@ const handler = {
       return new Response(html, { status: 200, headers: { ...cors(), 'Content-Type': 'text/html; charset=utf-8' } });
     }
 
+    // Pedidos de corte por la web (landing pública neoninfinitosoftware.com/corte/): sin sesión, con sus propios topes.
+    if (path.startsWith('/corte/landing/')) return await corteLandingRoute(request, env, ctx, url, path);
+
     if (path.startsWith('/admin/')) {
       // Allow token via query param for resources loaded by <img>, <audio>, etc.
       let session = await getSession(env, request);
@@ -21981,7 +22505,7 @@ const handler = {
         // apertura del día (antes era 24h y se vencía cada noche). promo/ puede
         // re-subirse con la misma key → cache corto de 24h.
         // pedidos/ (foto del diseño final): key única por subida, nunca se pisa → también inmutable.
-        const immutableMedia = key.startsWith('wa/') || key.startsWith('briefs/') || key.startsWith('ig/') || key.startsWith('pedidos/');
+        const immutableMedia = key.startsWith('wa/') || key.startsWith('briefs/') || key.startsWith('ig/') || key.startsWith('pedidos/') || key.startsWith('corte/landing/');
         const cacheCtl = immutableMedia ? 'public, max-age=31536000, immutable' : 'public, max-age=86400';
         const ctype = obj.httpMetadata?.contentType || 'application/octet-stream';
         // Compresión al vuelo para el panel de cotización (?w=<ancho>): las capturas y
@@ -23286,8 +23810,8 @@ const handler = {
       if (request.method === 'POST' && path === '/admin/corte/cargar-tanda') {
         if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
         let body; try { body = await request.json(); } catch { body = {}; }
-        const r = await corteCargarTanda(env, { fecha: body.fecha, dryRun: body.dry_run !== false, incluirSospechosas: body.incluir_sospechosas === true });
-        if (r.ok && body.dry_run === false && r.tanda_id) { try { r.sync_entrega = await corteSyncEntrega(env, { soloTandaId: r.tanda_id, notify: true }); } catch (_) {} }
+        // Carga completa: primero las piezas de la landing de ese lunes, después la planilla y la entrega.
+        const r = await corteCargarTandaCompleta(env, { fecha: body.fecha, dryRun: body.dry_run !== false, incluirSospechosas: body.incluir_sospechosas === true });
         return json(r, r.error && !r.nuevas ? 400 : 200);
       }
       // GET /admin/corte/sin-telefono?tanda_id= → clientes de la tanda SIN teléfono (no se les puede cobrar) + sugerencias.
@@ -23375,7 +23899,7 @@ const handler = {
           rows = (await env.DB.prepare(
             `SELECT c.*, p.productor AS ped_productor, p.fecha AS ped_fecha, p.estado_pedido AS ped_estado
                FROM corte_pedidos c LEFT JOIN pedidos p ON p.id = c.pedido_id
-              WHERE c.estado IN ('pedido','matriz_lista','cortado') OR c.updated_at >= ?
+              WHERE (c.estado IN ('pedido','matriz_lista','cortado') OR c.updated_at >= ?) AND c.estado != 'prueba'
               ORDER BY c.updated_at DESC, c.id DESC LIMIT 3000`
           ).bind(desde).all()).results || [];
         } catch (_) {
@@ -23385,7 +23909,8 @@ const handler = {
         let paquetes = [];
         // + la línea de logística de la tarjeta de Neyen (N°, contacto, envío pagado, cargado/despachado).
         try { await ensureCortePaquetesSchema(env); paquetes = (await env.DB.prepare("SELECT tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_at, contactado, cargado" + (_despOk ? ", numero, contacto_estado, contacto_at, envio_pagado, despachado_at" : "") + ((_despOk && await ensureLogiTablaSchema(env).catch(() => false)) ? ", transporte, transporte_conf" : "") + " FROM corte_paquetes WHERE tanda_id IN (SELECT id FROM corte_tandas ORDER BY id DESC LIMIT 4)").all()).results || []; } catch (_) {}
-        return json({ ok: true, pedidos: rows, paquetes, role: _cpRole, user: String(session.user || '').toLowerCase() });
+        const precio_m2 = parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000;
+        return json({ ok: true, pedidos: rows, paquetes, precio_m2, role: _cpRole, user: String(session.user || '').toLowerCase() });
       }
       // ===== LOGÍSTICA =====
       // Errores con el contrato del circuito de despacho: {error:'<codigo>', motivo?:'<texto para mostrar>'}.
@@ -23973,7 +24498,8 @@ const handler = {
             // Neón PROPIO: sin precio (no se cobra, decisión de Gaspar) y entra a la tanda de la semana en
             // que Emma la diseña (no a la de cuando se cargó el pedido) → cuenta en el corte real.
             const esNeonPropio = String(ped.producto || '') === 'NEON';
-            const precio = esNeonPropio ? 0 : (ancho / 100) * (alto / 100) * 175000 * cant; // exacto, sin redondear
+            const _m2 = esNeonPropio ? 0 : (parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000); // el mismo de la landing
+            const precio = esNeonPropio ? 0 : (ancho / 100) * (alto / 100) * _m2 * cant; // exacto, sin redondear
             const matrizKey = String(body.matriz_key != null ? body.matriz_key : (ped.matriz_key || ''));
             const matrizUrl = String(body.matriz_drive_url != null ? body.matriz_drive_url : (ped.matriz_drive_url || ''));
             let tandaId = ped.tanda_id;
@@ -24973,6 +25499,9 @@ const handler = {
     // Vigía de logística: avisa a Gaspar si la pantalla de logística falla o queda un dato raro, la primera vez que anda
     // cada función y un resumen a las 13 y las 19 AR (kv 'logistica_vigia_on'; 7-22 AR adentro).
     ctx.waitUntil(processLogiVigia(env));
+    // Pedidos de corte por la web: filas de la planilla de Emma, resumen del cierre (sábado 12 h) y carga automática de la
+    // tanda (sáb 21 h, dom 21 h, lun 7:30). Kill-switches: corte_hoja_auto_on, corte_autocarga_on.
+    ctx.waitUntil(corteLandingCron(env));
     // Recordatorios de la Agenda del equipo (reuniones/tareas). Gate kv 'agenda_recordatorios_on'
     // (default OFF hasta aprobar la plantilla). Dedup por (evento, ocurrencia, usuario, tipo) adentro.
     ctx.waitUntil(maybeAgendaRecordatorios(env));

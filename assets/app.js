@@ -3918,6 +3918,8 @@ function corteRolInfo() {
   if (isDisenadorUser(STATE.user)) return { estado: 'pedido', titulo: 'Para diseñar / matriz', accion: 'medidas' };
   return null;
 }
+// Insumo (cable, fuentes, packs): todo lo que no es acrílico ni neón propio.
+function corteEsInsumo(p) { return !['TRANS', 'NEGRO', 'NEON'].includes(String((p && p.producto) || 'TRANS').toUpperCase()); }
 function cortePrecioPreview(ped) {
   const a = parseFloat(String((document.getElementById('corte-ancho') || {}).value || '').replace(',', '.')) || 0;
   const al = parseFloat(String((document.getElementById('corte-alto') || {}).value || '').replace(',', '.')) || 0;
@@ -3925,7 +3927,7 @@ function cortePrecioPreview(ped) {
   const el = document.getElementById('corte-precio-prev');
   if (!el) return;
   if (ped.producto === 'NEON') { el.textContent = ''; return; } // producción propia: sin precio
-  if (a > 0 && al > 0) { const precio = (a / 100) * (al / 100) * 175000 * cant; el.textContent = 'Precio: $' + precio.toLocaleString('es-AR') + (cant > 1 ? (' (' + cant + ' u.)') : ''); }
+  if (a > 0 && al > 0) { const precio = (a / 100) * (al / 100) * (STATE.cortePrecioM2 || 175000) * cant; el.textContent = 'Precio: $' + precio.toLocaleString('es-AR') + (cant > 1 ? (' (' + cant + ' u.)') : ''); }
   else el.textContent = '';
 }
 // Piezas de NEON (producción propia, nacen al cargar un pedido de cartel en el CRM): se muestran como
@@ -4362,7 +4364,8 @@ function renderCorte() {
   const sel = STATE.corteSelected ? pedidos.find(p => p.id === STATE.corteSelected) : null;
   // --- Vista CONFINADA (Emma / Aníbal / Neyen): solo su cola ---
   if (info) {
-    const cola = pedidos.filter(p => p.estado === info.estado && !corteNeonPedidoHecho(p));
+    // Los insumos pedidos por la web (cable, fuentes) esperan en 'pedido' hasta la carga de la tanda: no son para medir.
+    const cola = pedidos.filter(p => p.estado === info.estado && !corteNeonPedidoHecho(p) && !(info.estado === 'pedido' && corteEsInsumo(p)));
     const cargando = STATE.cortePedidos === undefined;
     const vacio = (txt) => cargando ? '' : `<div style="padding:26px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px">${txt} ✨</div>`;
     // NEYEN: agrupado por cliente (arma el paquete con todos los pedidos de una persona).
@@ -4518,7 +4521,9 @@ function renderCorte() {
     const rfoto = rp.foto_key ? `<a href="${escapeHtml(mediaUrl(rp.foto_key))}" target="_blank" rel="noopener" title="Abrir en grande"><img src="${mediaUrl(rp.foto_key)}" style="max-width:100%;max-height:${rNeon ? 440 : 320}px;border-radius:10px;border:1px solid var(--border)${rNeon ? ';background:#fff' : ''}" loading="lazy"></a>` : '<div style="padding:40px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:10px">sin foto del diseño</div>';
     // Neón propio: la medida del pedido viene pre-cargada ("ancho 60 × alto 40 cm"); Emma la confirma o corrige.
     // Lo que ella ya tipeó para ESTA pieza (borrador) gana sobre el pre-llenado y sobrevive a los refrescos.
-    const rMedTxt = rNeon ? String(rp.medida_declarada || '') : '';
+    // Pedido web: la medida que cargó el alumno también viene pre-cargada (Emma la confirma o la corrige).
+    const rWeb = rp.origen === 'landing';
+    const rMedTxt = (rNeon || rWeb) ? String(rp.medida_declarada || '') : '';
     const rMA = rMedTxt.match(/ancho\s*([\d]+(?:[.,]\d+)?)/i), rML = rMedTxt.match(/alto\s*([\d]+(?:[.,]\d+)?)/i);
     const rDraft = (STATE.corteRelevDraft && STATE.corteRelevDraft.id === rp.id) ? STATE.corteRelevDraft : null;
     const rAncho = rDraft ? rDraft.ancho : (rMA ? rMA[1].replace(',', '.') : '');
@@ -4532,6 +4537,7 @@ function renderCorte() {
         </div>
         <div style="background:var(--ink-100);border:1px solid ${rNeon ? '#ef4444' : 'var(--border)'};border-radius:12px;padding:16px">
           ${rNeon ? '<div style="display:inline-block;font-size:11px;font-weight:800;letter-spacing:.05em;color:#ef4444;background:rgba(239,68,68,.12);border-radius:7px;padding:3px 9px;margin-bottom:10px">🔴 NEON INFINITO · matriz a diseñar</div>' : ''}
+          ${rWeb ? `<div style="display:inline-block;font-size:11px;font-weight:800;letter-spacing:.05em;color:var(--accent-cyan,#8FD4DE);background:rgba(143,212,222,.12);border-radius:7px;padding:3px 9px;margin-bottom:10px" title="Al tocar 'Matriz lista' la fila se escribe sola en la planilla de cortes">🌐 PEDIDO WEB${rp.hoja_fecha ? ' · tanda del ' + escapeHtml(String(rp.hoja_fecha).split('/').slice(0, 2).join('/')) : ''} · no lo anotes en la planilla, se anota solo</div>` : ''}
           <div style="text-align:center;margin-bottom:14px">${rfoto}</div>
           <div style="font-size:16px;font-weight:700">${escapeHtml(rNeon ? (rp.pedido_numero ? 'Pedido #' + rp.pedido_numero : 'Neon Infinito') : (rp.cliente_nombre || 'cliente'))} — ${escapeHtml(rp.diseno_nombre || 'diseño')}</div>
           <div style="font-size:13px;color:var(--fg-mute);margin-top:2px">${rNeon ? 'Medida del pedido' : 'Pidió'}: ${escapeHtml(rp.medida_declarada || '—')} · Cantidad: ${rcant}${rp.aclaraciones ? ' · ' + escapeHtml(rp.aclaraciones) : ''}</div>
@@ -4567,7 +4573,9 @@ function renderCorte() {
   // Board = solo la tanda ACTUAL (max tanda_id) por defecto; toggle para ver todas (no se pierden los que
   // todavía deben de tandas anteriores).
   // El board del admin es de cobros de ALUMNOS → excluye la producción propia de neón (producto='NEON').
-  const pedidosAlum = pedidos.filter(p => p.producto !== 'NEON');
+  // Los pedidos web todavía sin tanda (hasta la carga del sábado/domingo) van en su propio panel, no como una semana más.
+  const pedidosWeb = pedidos.filter(p => p.origen === 'landing' && !p.tanda_id);
+  const pedidosAlum = pedidos.filter(p => p.producto !== 'NEON' && !(p.origen === 'landing' && !p.tanda_id));
   // Navegador de semanas (como un calendario): cada tanda es una semana. Slidear ‹ (más vieja) / › (más nueva).
   const tandaMap = {};
   pedidosAlum.forEach(p => { const t = +p.tanda_id || 0; const f = p.created_at || ''; if (!tandaMap[t]) tandaMap[t] = { id: t, fecha: f }; else if (f && (!tandaMap[t].fecha || f < tandaMap[t].fecha)) tandaMap[t].fecha = f; });
@@ -4595,6 +4603,7 @@ function renderCorte() {
       <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">Tu semana de un vistazo — una fila por cliente. Tocá un cliente para ver sus diseños; tocá un diseño para moverlo de etapa.</p>
       ${corteHerramientasHtml()}
       ${sel ? corteDetalleHtml(sel) : ''}
+      ${corteWebPanelHtml(pedidosWeb)}
       ${navWeek}
       ${corteHybridBoard(boardPedidos)}
       ${corteNeonAdminHtml(pedidos)}
@@ -6442,6 +6451,38 @@ function bindLogistica() {
 }
 // ===== Herramientas del admin: cargar tanda desde la planilla, entrega desde la planilla, clientes SIN teléfono =====
 function corteLunesReciente() { const d = new Date(Date.now() - 3 * 3600 * 1000); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); }
+// Pedidos que entraron por la landing (neoninfinitosoftware.com/corte/) y todavía no tienen tanda: entran solos con la
+// carga del sábado/domingo a la noche. Una fila por cliente y lunes: diseños (con foto), cuántos midió Emma, insumos y entrega.
+function corteWebPanelHtml(web) {
+  if (!web || !web.length) return '';
+  const grupos = {};
+  web.forEach(p => { const k = (p.hoja_fecha || '') + '|' + (p.telefono || p.cliente_nombre || ''); (grupos[k] = grupos[k] || { fecha: p.hoja_fecha || '', nombre: p.cliente_nombre || 'cliente', tel: p.telefono || '', entrega: p.entrega || '', llego: p.created_at || '', items: [] }).items.push(p); if (p.created_at && p.created_at < grupos[k].llego) grupos[k].llego = p.created_at; });
+  const lista = Object.values(grupos).sort((a, b) => String(a.llego).localeCompare(String(b.llego)));
+  const dis = web.filter(p => !corteEsInsumo(p)), med = dis.filter(p => p.estado !== 'pedido').length;
+  const lunes = f => String(f || '').split('/').slice(0, 2).map(x => x.padStart(2, '0')).join('/');
+  const hora = iso => { const d = new Date(iso); return isNaN(d.getTime()) ? '' : d.toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); };
+  const fila = g => {
+    const d = g.items.filter(p => !corteEsInsumo(p)), ins = g.items.filter(corteEsInsumo);
+    const m = d.filter(p => p.estado !== 'pedido').length;
+    const thumbs = d.map(p => `<a href="${escapeHtml(mediaUrl(p.foto_key))}" target="_blank" rel="noopener" title="${escapeHtml((p.diseno_nombre || 'diseño') + ' · ' + (p.medida_declarada || ''))}" style="display:inline-flex;flex-direction:column;align-items:center;gap:3px;width:74px;text-decoration:none;color:var(--fg-mute)">${p.foto_key ? `<img src="${escapeHtml(disenoThumb(p.foto_key, 160))}" loading="lazy" alt="" style="width:62px;height:62px;object-fit:cover;border-radius:7px;background:#fff;border:1px solid ${p.estado !== 'pedido' ? '#22c55e' : 'var(--border)'}">` : ''}<span style="font-size:10.5px;line-height:1.2;text-align:center;overflow-wrap:anywhere">${escapeHtml(p.diseno_nombre || 'diseño')}</span></a>`).join('');
+    return `<div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;padding:10px 0;border-top:1px solid var(--border)">
+      <div style="min-width:170px;flex:0 0 auto">
+        <div style="font-weight:700">${escapeHtml(g.nombre)}</div>
+        <div style="font-size:12px;color:var(--fg-mute);margin-top:2px">tanda del ${escapeHtml(lunes(g.fecha))} · ${g.entrega === 'envio' ? 'envío' : (g.entrega === 'retira' ? 'retira' : 'entrega sin definir')} · ${escapeHtml(hora(g.llego))}</div>
+        <div style="font-size:12px;margin-top:4px;color:${d.length && m === d.length ? '#22c55e' : 'var(--fg-subtle)'}">${d.length ? `Emma midió ${m} de ${d.length}` : 'solo insumos'}</div>
+        ${ins.length ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:2px">${ins.map(p => escapeHtml((parseInt(p.cantidad, 10) || 1) + ' × ' + (p.diseno_nombre || p.producto))).join('<br>')}</div>` : ''}
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0">${thumbs}</div>
+    </div>`;
+  };
+  return `<div style="background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin:0 0 16px">
+    <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+      <span style="font-size:15px;font-weight:800;color:var(--accent-cyan,#8FD4DE)">🌐 Pedidos web en camino</span>
+      <span style="font-size:12px;color:var(--fg-mute)">${lista.length} cliente${lista.length === 1 ? '' : 's'} · ${dis.length} diseño${dis.length === 1 ? '' : 's'} (${med} medido${med === 1 ? '' : 's'}) · entran solos a la tanda con la carga del sábado a la noche</span>
+    </div>
+    ${lista.map(fila).join('')}
+  </div>`;
+}
 function corteHerramientasHtml() {
   const st = STATE.corteSinTel || [];
   const inpSt = 'background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:5px 8px;color:var(--fg);font-size:12px';
@@ -6550,6 +6591,7 @@ async function corteCargar(silent) {
   } catch (_) { res = []; }
   if (silent) STATE._corteSilentLoading = false;
   if (gen !== STATE._corteGen) return; // llegó una carga más nueva (o cambió el usuario): descartar
+  if (res[0] && +res[0].precio_m2 > 0) STATE.cortePrecioM2 = +res[0].precio_m2; // el m² que cobra el server (vista previa de Emma)
   if (silent) {
     if (res[0] && Array.isArray(res[0].pedidos)) STATE.cortePedidos = res[0].pedidos;
     if (res[0] && Array.isArray(res[0].paquetes)) STATE.cortePaquetes = res[0].paquetes;
@@ -17314,7 +17356,8 @@ function mediaUrl(r2Key) {
   // wa/  → media bajado del webhook (imagen del cliente, audio, etc.)
   // promo/ → assets promocionales (foto de copa para follow-up de presupuesto)
   // pedidos/ → foto del diseño final de un cartel (la matriz que diseña Emma en el corte)
-  if (r2Key.startsWith('wa/') || r2Key.startsWith('promo/') || r2Key.startsWith('briefs/') || r2Key.startsWith('ig/') || r2Key.startsWith('precotiz/') || r2Key.startsWith('pedidos/')) {
+  // corte/landing/ → foto del diseño que subió el alumno en la landing de pedidos de corte
+  if (r2Key.startsWith('wa/') || r2Key.startsWith('promo/') || r2Key.startsWith('briefs/') || r2Key.startsWith('ig/') || r2Key.startsWith('precotiz/') || r2Key.startsWith('pedidos/') || r2Key.startsWith('corte/landing/')) {
     return CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(r2Key) + tkParam;
   }
   return r2Key;
