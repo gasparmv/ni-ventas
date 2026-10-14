@@ -10484,11 +10484,31 @@ async function processIgWebhook(env, body) {
             const pbTs = m.timestamp ? new Date(m.timestamp).toISOString() : new Date().toISOString();
             const pbTitle = String(pb.title || '').replace(/\s+/g, ' ').trim();
             let pbName = ''; try { pbName = await igResolveName(env, pbCust); } catch (_) {}
+            // "Quiero el regalo" (botón del embudo de CURSOS de ManyChat). Gaspar 14-oct: hasta que el lead no diga algo
+            // más, el chat queda OCULTO: no se ve (ni el admin), no notifica, no se reparte ni cuenta. Se oculta ANTES de
+            // guardar el toque (así no aparece ni un instante). No se toca si ya escribió algo, tiene dueño o actividad de
+            // carteles. Marca en wa_autoreply_log (kind 'ig_regalo_oculto'): al escribir se revela (ver más abajo).
+            const esRegalo = /quiero el regalo/i.test(pbTitle);
+            let regaloOcultado = false;
+            if (esRegalo) {
+              try {
+                const rh = await env.DB.prepare(
+                  `INSERT INTO wa_chats_summary (phone, inbox, channel, updated_at) VALUES (?1, 'oculto', 'ig', ?2)
+                   ON CONFLICT(phone) DO UPDATE SET inbox = 'oculto', updated_at = excluded.updated_at
+                   WHERE IFNULL(wa_chats_summary.inbox, '') IN ('', 'general') AND NOT (${chatCartelesActivoSql('wa_chats_summary.phone', 'wa_chats_summary.assigned_to')})
+                     AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = wa_chats_summary.phone AND m.direction = 'inbound' AND m.msg_type NOT IN ('status', 'reaction') AND IFNULL(m.body, '') NOT LIKE '👆%')`
+                ).bind(pbCust, pbTs).run();
+                regaloOcultado = !!(rh && rh.meta && rh.meta.changes);
+              } catch (_) {}
+            }
             try {
               await env.DB.prepare(
                 "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'inbound', ?, ?, 'text', ?, '', '', '', 'ig')"
               ).bind(pbTs, pbMid, pbCust, pbName || '', '👆 Tocó el botón: ' + (pbTitle || '(botón)')).run();
             } catch (_) {}
+            if (regaloOcultado) {
+              try { await env.DB.prepare("INSERT INTO wa_autoreply_log (phone, kind, sent_at, status) SELECT ?1, 'ig_regalo_oculto', ?2, 'oculto' WHERE NOT EXISTS (SELECT 1 FROM wa_autoreply_log WHERE phone = ?1 AND kind = 'ig_regalo_oculto')").bind(pbCust, pbTs).run(); } catch (_) {}
+            }
             try { await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone = ?").bind(pbCust).run(); } catch (_) {}
           }
           continue;
@@ -10601,6 +10621,15 @@ async function processIgWebhook(env, body) {
           if (adId) vert = await adVerticalForSource(env, adId, body, String(ref?.ref || ''), String(ref?.ad_title || ''));
           else vert = classifyAdVertical(body);
           const esCursos = vert === 'cursos';
+          // Chat oculto por "Quiero el regalo" (ver la rama del botón): al escribir algo se revela. Si lo que escribe es de
+          // cursos va a cursos (como siempre); si no, a la bandeja general. Se reparte/atribuye recién si confirma carteles.
+          let regalo = null;
+          try { regalo = await env.DB.prepare("SELECT IFNULL(s.inbox, '') inbox, IFNULL(l.status, '') status FROM wa_autoreply_log l JOIN wa_chats_summary s ON s.phone = l.phone WHERE l.phone = ? AND l.kind = 'ig_regalo_oculto' LIMIT 1").bind(custId).first(); } catch (_) {}
+          const regaloOculto = !!(regalo && regalo.inbox === 'oculto');
+          const confirmaCarteles = msgType === 'image' || msgType === 'video' || /cartel|ne[oó]n|presupuest|cotiz|precio|medida|logo|letra|\bcm\b|interior|exterior|corp[oó]re/i.test(String(body || ''));
+          // Queda anotado cuando confirma carteles: desde ahí se reparte como cualquier lead (un 2º "hola" no alcanza).
+          const regaloSinConfirmar = !!(regalo && regalo.status !== 'confirmado' && !confirmaCarteles);
+          if (regalo && confirmaCarteles && regalo.status !== 'confirmado') { try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'confirmado' WHERE phone = ? AND kind = 'ig_regalo_oculto'").bind(custId).run(); } catch (_) {} }
           // Canal IG; bandeja 'cursos' SOLO si es seguro (sin pisar asignación manual previa),
           // default 'general'. Mismo criterio que WhatsApp.
           try {
@@ -10608,6 +10637,7 @@ async function processIgWebhook(env, body) {
               await env.DB.prepare("UPDATE wa_chats_summary SET inbox='cursos' WHERE phone = ? AND (inbox IS NULL OR inbox IN ('general','oculto',''))").bind(custId).run();
             } else {
               await env.DB.prepare("UPDATE wa_chats_summary SET inbox='general' WHERE phone = ? AND (inbox IS NULL OR inbox = '')").bind(custId).run();
+              if (regaloOculto) await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'general', updated_at = ? WHERE phone = ? AND inbox = 'oculto'").bind(ts, custId).run();
             }
           } catch (_) {}
           // Reparto de leads de CARTELES de IG a los vendedores secundarios (misma cuota/prob que WhatsApp).
@@ -10615,7 +10645,8 @@ async function processIgWebhook(env, body) {
           // corpóreos o neones", igual que en WhatsApp); cursos queda afuera. Corpóreo además lleva la
           // etiqueta 🔠 como en WhatsApp. custId (IGSID) es la key wa_chats_summary.phone.
           if (vert === 'corporeo') { try { await corporeoTag(env, custId, true); } catch (_) {} }
-          if (vert === 'carteles' || vert === 'corporeo') { try { await maybeRepartirANadia(env, custId); } catch (_) {} }
+          // Los del regalo se reparten recién cuando confirman carteles (un "hola" no alcanza: vinieron por cursos).
+          if ((vert === 'carteles' || vert === 'corporeo') && !regaloSinConfirmar) { try { await maybeRepartirANadia(env, custId); } catch (_) {} }
           // Atribución de anuncio (igual que CTWA en WhatsApp): si el cliente vino de un anuncio
           // (referral con ad_id) o respondió al post de un aviso (ig_post), lo guardamos en
           // wa_ad_attributions -> el banner del chat aparece solo (mismo endpoint que WhatsApp).
@@ -13767,6 +13798,21 @@ async function processPaymentProof(env, m) {
   try {
     const corte = await env.DB.prepare("SELECT (EXISTS (SELECT 1 FROM corte_alumnos WHERE telefono = ?1) OR EXISTS (SELECT 1 FROM corte_pedidos WHERE telefono = ?1)) AS v").bind(m.phone).first();
     if (corte && corte.v) return;
+  } catch (_) {}
+  // Clientes de CARTELES sin "POR PAGAR" (pagan el 50% restante, o la seña sin OC): tampoco son del lanzamiento. Antes
+  // se avisaban a Gaspar y Bruno como "pago lanzamiento" y el chat se iba a cursos, sacándole el cliente al vendedor
+  // (oct: …8469 de Facu, …8787, …1070, …1296). Salvo que el cliente nombre el lanzamiento ("comunidad al infinito").
+  try {
+    if (!(await hasLaunchKeyPhrase(env, m.phone, m.caption))) {
+      const c = await env.DB.prepare(
+        `SELECT (EXISTS (SELECT 1 FROM oc_enviadas o WHERE o.phone = ?1 AND o.ts_out >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-120 days'))
+              OR EXISTS (SELECT 1 FROM pedidos p WHERE substr(replace(IFNULL(p.telefono, ''), ' ', ''), -10) = substr(?1, -10) AND p.fecha >= date('now', '-120 days'))
+              OR EXISTS (SELECT 1 FROM briefs b WHERE b.cliente_wa_id = ?1 AND b.estado = 'enviado' AND b.enviado_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-120 days'))
+              OR EXISTS (SELECT 1 FROM contact_labels cl JOIN labels l ON l.id = cl.label_id WHERE cl.phone = ?1 AND l.name IN ('Cartel primer pago', 'Cartel 2do pago', '📋 Para cotizar', '🔠 Corpóreo'))
+              OR EXISTS (SELECT 1 FROM wa_chats_summary s WHERE s.phone = ?1 AND COALESCE(s.assigned_to, '') IN ('facundo', 'agustina'))) AS v`
+      ).bind(m.phone).first();
+      if (c && c.v) return;
+    }
   } catch (_) {}
   try {
     const res = await env.DB.prepare(
@@ -20924,9 +20970,17 @@ const handler = {
         // se lo atribuía a Joaco.
         // Sin ig_id (pedido IG cargado a mano con @usuario): se resuelve el @usuario al IGSID.
         const igId = String(body.ig_id || '').replace(/\D/g, '') || (plataforma === 'IG' ? await igsidDeUsuario(env, telefono) : '');
-        const comercialId = await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: (plataforma === 'IG' && igId) ? igId : telefono });
-        // Usuario literal que cargó el pedido (para ver si lo cargó Facu/Joaco/Gaspar).
-        const cargadoPor = String(session.user || '');
+        // Lo que carga Gaspar (admin) es venta SUYA, sin comisión para nadie (Gaspar 14-oct: "si se cargan desde admin
+        // los cargué yo… no va la comisión a Joaquín, a mí tampoco porque soy el dueño"), salvo que elija un vendedor.
+        const _vendElegido = funnelVendedor(String(body.comercial_id || ''));
+        const comercialId = (sessionUserKey === 'gaspar' && !['joaco', 'facundo', 'agustina'].includes(_vendElegido))
+          ? 'gaspar'
+          : await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: (plataforma === 'IG' && igId) ? igId : telefono });
+        // Usuario literal que cargó el pedido (para ver si lo cargó Facu/Joaco/Gaspar). Si Gaspar la cargó a nombre de un
+        // vendedor, va el vendedor: la col C del Excel (comisiones) sale de cargado_por ("se corrige el cargado_por").
+        const cargadoPor = (sessionUserKey === 'gaspar' && ['joaco', 'facundo', 'agustina'].includes(_vendElegido))
+          ? ({ joaco: 'Joaquín', facundo: 'Facundo', agustina: 'Agustina' })[_vendElegido]
+          : String(session.user || '');
         // Piezas de NEÓN PROPIO para el corte: cada cartel de neón nace también como pieza 'NEON' en
         // corte_pedidos (matriz a diseñar por Emma), con la foto del diseño final y su medida.
         try { await ensureCorteNeonSchema(env); } catch (_) {}

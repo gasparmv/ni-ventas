@@ -64,6 +64,7 @@ const CONFIG = {
     // Multiplicadores
     reventa_mult: 0.8,        // reventa = trans × 0.8
     comision_pct: 0.05,       // 5% Joaco sobre trans
+    comision_corp_pct: 0.035, // 3,5% Joaco sobre CORPÓREOS (Gaspar 14-oct: "se lleva el 3,5, no el 5")
     nv_nadia_comision_pct: 0.04,  // 4% Nadia (histórico, ya no se usa)
     nv_facundo_comision_pct: 0.095,  // 9,5% Facundo (neutro perfecto: vende +5%, negocio queda igual que con Joaco)
     nv_agustina_comision_pct: 0.095,  // 9,5% Agustina (misma economía que Facu: ve 10%, vende +5% oculto)
@@ -216,7 +217,8 @@ function panelSueldoHtml(vendedor) {
   // Tasa propia para CORPÓREOS (ej. Agus: 10% neón / 7% corpóreo). Sin rateCorp → los corpóreos
   // van a la misma tasa que el resto (comportamiento viejo intacto para Joaco). Si cambió en el
   // tiempo (Facu: 7% hasta el 05/10, 10% desde el 06/10), rateCorpAntes rige hasta rateCorpAntesHasta.
-  const rateCorp = (sec && sec.rateCorp != null) ? sec.rateCorp : rate;
+  // Joaco: corpóreos al 3,5% (no a su 5% de neón). Antes caían a la tasa de neón por no tener una propia.
+  const rateCorp = (sec && sec.rateCorp != null) ? sec.rateCorp : (sec ? rate : ((+params.comision_corp_pct) || 0.035));
   const ratePct = +(rate * 100).toFixed(1);
   // Clave YYYY-MM-DD local del pedido (p.fecha es un Date de parseDate, NO un string). '' si no hay fecha.
   const fechaKey = (p) => (p.fecha instanceof Date && !isNaN(p.fecha.getTime()))
@@ -9119,6 +9121,7 @@ function readPedidoModalDOM() {
   const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
   ['numero','telefono','pagado','ad'].forEach(f => { const x = v('pm-'+f); if (x !== undefined) m[f] = x; });
   const ep = v('pm-estadopago'); if (ep !== undefined) m.estadoPago = ep;
+  const vd = v('pm-vendedor'); if (vd !== undefined) m.vendedor = vd;
   (m.carteles||[]).forEach((c,i) => {
     ['cartel','alto','ancho','cmNeon','tramos','cantidad','precio','precioDimmer','envio','aclaracion','base','dimer','tipo',
      'producto','frente','laterales','espalda','iluminacion','bastidor','colorBastidor','instalacion'].forEach(f => {
@@ -9755,6 +9758,7 @@ function renderPedidoModal() {
           <div style="flex:1"><label style="${lbl}">Restante (auto)</label><div style="${inp};opacity:.7;display:flex;align-items:center;min-height:36px"><span id="pm-restante">${fmtMoney(restante)}</span></div></div>
         </div>
         <div style="margin-bottom:var(--s-3)"><label style="${lbl}">De qué ad viene <span style="opacity:.6">(auto por teléfono en WPP · editable)</span></label><input id="pm-ad" value="${escapeHtml(m.ad||'')}" placeholder="se completa solo si vino de un ad" style="${inp}"></div>
+        ${isAdmin() ? `<div style="margin-bottom:var(--s-3)"><label style="${lbl}">¿De quién es la venta? <span style="opacity:.6">(lo que cargás vos es tuyo, sin comisión, salvo que elijas un vendedor)</span></label><select id="pm-vendedor" style="${inp}">${[['gaspar', 'Mía (Gaspar, sin comisión)'], ['joaco', 'Joaco'], ['facundo', 'Facu'], ['agustina', 'Agus']].map(([k, l]) => `<option value="${k}" ${(m.vendedor || 'gaspar') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
         <div style="display:flex;justify-content:space-between;align-items:center;padding-top:var(--s-2);border-top:1px solid var(--border)">
           <div style="font-size:13px;color:var(--fg-subtle)">Total: <b style="color:var(--fg)" id="pm-total">${fmtMoney(total)}</b></div>
           <div style="display:flex;gap:8px">
@@ -9908,6 +9912,8 @@ async function confirmCargarPedido() {
       // ad_id de Meta capturado por pmTraceAd (vacío si se cargó a mano o no vino de un ad). El worker
       // lo persiste en pedidos.source_id → el pedido nace trazado en el funnel.
       source_id: m.sourceId || '',
+      // De quién es la venta (solo admin): lo que carga Gaspar es suyo (sin comisión) salvo que elija un vendedor.
+      comercial_id: isAdmin() ? (m.vendedor || 'gaspar') : undefined,
       carteles: carteles.map(c => ({
         cartel: c.cartel, colores: c.colores, tipo: c.tipo, alto: c.alto, ancho: c.ancho, cm_neon: c.cmNeon,
         tramos: c.tramos, base: c.base, cantidad: c.cantidad, precio: c.precio, dimer: c.dimer, precio_dimmer: c.precioDimmer,
@@ -12545,6 +12551,7 @@ const COT_PARAM_GROUPS_LEGACY = [
   { title: 'Multiplicadores (viejos)', keys: [
     ['reventa_mult', 'Reventa × trans'],
     ['comision_pct', 'Comisión (decimal: 0.05 = 5%)'],
+    ['comision_corp_pct', 'Comisión Joaco corpóreos (decimal: 0.035 = 3,5%)'],
     ['descuento_mult', 'Descuento × trans'],
     ['descuento_min_m2', 'Descuento aplica si m² >'],
     ['recargo_5', 'Recargo (m² ≤ 5) ×'],
