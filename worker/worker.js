@@ -4968,7 +4968,8 @@ function corteReciboMsg(g) {
 }
 // VIGÍA DE PAGOS DEL CORTE: si el cliente tiene pedidos en estado_pago='cobrando' (ya se le mandó el cobro)
 // y mandó un comprobante (imagen/PDF), lo OCReamos y, si el monto cubre el total, marcamos PAGADO + avisamos
-// a Gaspar. Si es menor, lo dejamos en 'parcial' y avisamos para revisar. Devuelve true si tomó el turno (para
+// a Gaspar. Si es menor, lo dejamos en 'parcial', guardamos lo pagado (corte_pago_parcial) y avisamos; los comprobantes
+// siguientes SUMAN y, si completan el total, queda PAGADO (corteVigiaParcial). Devuelve true si tomó el turno (para
 // que NO corra el intake sobre un comprobante). Self-dedup: al pasar a pagado/parcial, deja de estar 'cobrando'.
 // Cola de reintento del marcado en la planilla: si la escritura a Sheets falla por algo TRANSITORIO
 // (token vencido, 5xx), guardamos el pendiente y processCorteVigiaAuto lo reintenta (corteMarcarPagadoSheet
@@ -4980,6 +4981,50 @@ function isoHace(ms) { return new Date(Date.now() - ms).toISOString(); }
 async function corteSheetPendingAdd(env, phone, cliente, total, caja) {
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_sheet_pending (phone TEXT PRIMARY KEY, cliente TEXT, total REAL, caja TEXT, created_at TEXT)").run(); } catch (_) {}
   try { await env.DB.prepare("INSERT INTO corte_sheet_pending (phone, cliente, total, caja, created_at) VALUES (?,?,?,?,?) ON CONFLICT(phone) DO UPDATE SET cliente=excluded.cliente, total=excluded.total, caja=excluded.caja").bind(phone, cliente || '', total, caja || '', new Date().toISOString()).run(); } catch (_) {}
+}
+// Lo que pasa cuando un cobro queda PAGADO (de una vez o completando cuotas): confirmación al cliente, el recibo con el
+// detalle si nunca lo recibió y la marca "pagado" en la planilla. Devuelve el texto de la planilla para el aviso a Gaspar.
+async function corteTrasPagado(env, phone, piezas, nombre, total, proof, msgCliente) {
+  try { await corteSend(env, phone, msgCliente); } catch (_) {}
+  // DETALLE AUNQUE HAYA PAGADO DIRECTO: si el cobro le llegó por plantilla (solo el total) y contestó directo con el
+  // comprobante, nunca recibió el desglose (corteAutoDetalle solo actúa sobre 'cobrando') → va ahora como recibo.
+  // Reserva atómica en corte_detalle_sent: si el cobro salió como TEXTO (ya era el desglose) o ya se lo mandamos, la
+  // marca está puesta y no se repite. Caso real 5-oct: Mari pagó con el comprobante y tuvo que pedir el detalle.
+  if (piezas.length) {
+    const nowD = new Date().toISOString();
+    let claimed = null;
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
+    try { claimed = await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET sent_at=excluded.sent_at WHERE corte_detalle_sent.sent_at IS NULL OR corte_detalle_sent.sent_at='' RETURNING phone").bind(phone, nowD, nowD).first(); } catch (_) {}
+    if (claimed) {
+      const gR = { cliente_nombre: piezas[0].cliente_nombre, piezas: piezas.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: piezas.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+      await new Promise(rs => setTimeout(rs, 800)); // que llegue después del "recibido"
+      let okd = false;
+      try { const r = await corteSend(env, phone, corteReciboMsg(gR)); okd = !!(r && r.ok); } catch (_) {}
+      if (!okd) { try { await env.DB.prepare("UPDATE corte_detalle_sent SET sent_at=NULL WHERE phone=? AND sent_at=?").bind(phone, nowD).run(); } catch (_) {} }
+    }
+  }
+  // Espejo al Excel 2026 v4: marca "pagado" en la col I de Venta_Insumos + la CAJA (cuenta que recibió) en
+  // la col R si el comprobante la muestra (gate kv corte_sheet_pago_on, default ON).
+  let sheetMsg = '';
+  if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') {
+    const caja = corteCajaFromProof(proof);
+    try {
+      const sr = await corteMarcarPagadoSheet(env, nombre, total, caja);
+      if (sr.ok) sheetMsg = ' · planilla: ' + sr.marcadas + ' fila(s) → pagado' + (sr.caja ? ' (caja ' + sr.caja + ')' : ' (sin caja visible)');
+      else { sheetMsg = ' · planilla NO marcada (' + sr.error + ')'; if (/token|HTTP/i.test(String(sr.error))) await corteSheetPendingAdd(env, phone, nombre, total, caja); }
+    } catch (e) { sheetMsg = ' · planilla error'; await corteSheetPendingAdd(env, phone, nombre, total, corteCajaFromProof(proof)); }
+  }
+  return sheetMsg;
+}
+// Pagos en cuotas: corte_pago_parcial lleva, por teléfono, lo que ya pagó un cobro que quedó 'parcial' (total del cobro,
+// suma pagada, montos y wamids contados, desde cuándo). La crea el vigía al pasar a 'parcial'; corteVigiaParcial le suma
+// los comprobantes siguientes. Caso real 13-oct: Emmanuel Juarez pagó $24.500 y al día siguiente $1.225 (= $25.725) y quedó
+// 'parcial' porque el segundo comprobante solo generaba un aviso.
+async function cortePagoParcialGuardar(env, phone, total, monto, wamid, nowIso) {
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pago_parcial (phone TEXT PRIMARY KEY, total REAL, pagado REAL, montos TEXT, wamids TEXT, desde TEXT, updated_at TEXT)").run();
+    await env.DB.prepare("INSERT INTO corte_pago_parcial (phone, total, pagado, montos, wamids, desde, updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(phone) DO UPDATE SET total=excluded.total, pagado=excluded.pagado, montos=excluded.montos, wamids=excluded.wamids, desde=excluded.desde, updated_at=excluded.updated_at").bind(phone, total, monto, JSON.stringify([monto]), JSON.stringify([wamid]), nowIso, nowIso).run();
+  } catch (_) {}
 }
 async function corteVigiaPago(env, phone, opts = {}) {
   if ((await kvGet(env, 'corte_vigia_on', '1')) !== '1') return false; // kill-switch: aplica a TODOS los callers (cron, bot y sweep manual)
@@ -5027,40 +5072,15 @@ async function corteVigiaPago(env, phone, opts = {}) {
     const ch = await transicion('pagado');
     if (ch === 0) return await ch0(); // no confirmar ni avisar dos veces (o reintentar si el pago quedó sin marcar)
     if (ch < 0) { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó comprobante por $' + monto.toLocaleString('es-AR') + ' pero falló marcarlo PAGADO en la base. Revisalo a mano.', { tipo: 'corte_pago', prioridad: 'P1', refPhone: phone, plata: true }); } catch (_) {} return true; }
-    try { await corteSend(env, phone, 'recibido, gracias! tu corte queda confirmado'); } catch (_) {}
-    // DETALLE AUNQUE HAYA PAGADO DIRECTO: si el cobro le llegó por plantilla (solo el total) y contestó directo con el
-    // comprobante, nunca recibió el desglose (corteAutoDetalle solo actúa sobre 'cobrando') → va ahora como recibo.
-    // Reserva atómica en corte_detalle_sent: si el cobro salió como TEXTO (ya era el desglose) o ya se lo mandamos, la
-    // marca está puesta y no se repite. Caso real 5-oct: Mari pagó con el comprobante y tuvo que pedir el detalle.
-    if (piezas.length) {
-      const nowD = new Date().toISOString();
-      let claimed = null;
-      try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
-      try { claimed = await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET sent_at=excluded.sent_at WHERE corte_detalle_sent.sent_at IS NULL OR corte_detalle_sent.sent_at='' RETURNING phone").bind(phone, nowD, nowD).first(); } catch (_) {}
-      if (claimed) {
-        const gR = { cliente_nombre: piezas[0].cliente_nombre, piezas: piezas.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: piezas.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
-        await new Promise(rs => setTimeout(rs, 800)); // que llegue después del "recibido"
-        let okd = false;
-        try { const r = await corteSend(env, phone, corteReciboMsg(gR)); okd = !!(r && r.ok); } catch (_) {}
-        if (!okd) { try { await env.DB.prepare("UPDATE corte_detalle_sent SET sent_at=NULL WHERE phone=? AND sent_at=?").bind(phone, nowD).run(); } catch (_) {} }
-      }
-    }
-    // Espejo al Excel 2026 v4: marca "pagado" en la col I de Venta_Insumos + la CAJA (cuenta que recibió) en
-    // la col R si el comprobante la muestra (gate kv corte_sheet_pago_on, default ON).
-    let sheetMsg = '';
-    if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') {
-      const caja = corteCajaFromProof(proof);
-      try {
-        const sr = await corteMarcarPagadoSheet(env, cobr.nombre, total, caja);
-        if (sr.ok) sheetMsg = ' · planilla: ' + sr.marcadas + ' fila(s) → pagado' + (sr.caja ? ' (caja ' + sr.caja + ')' : ' (sin caja visible)');
-        else { sheetMsg = ' · planilla NO marcada (' + sr.error + ')'; if (/token|HTTP/i.test(String(sr.error))) await corteSheetPendingAdd(env, phone, cobr.nombre, total, caja); }
-      } catch (e) { sheetMsg = ' · planilla error'; await corteSheetPendingAdd(env, phone, cobr.nombre, total, corteCajaFromProof(proof)); }
-    }
+    const sheetMsg = await corteTrasPagado(env, phone, piezas, cobr.nombre, total, proof, 'recibido, gracias! tu corte queda confirmado');
     try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' pagó $' + monto.toLocaleString('es-AR') + ' (total $' + total.toLocaleString('es-AR') + '). Lo marqué PAGADO.' + sheetMsg, { tipo: 'corte_pago_ok', prioridad: 'P2', refPhone: phone }); } catch (_) {}
   } else {
     const ch = await transicion('parcial');
     if (ch === 0) return await ch0(); // otra ejecución ya lo procesó (o reintentar)
-    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó un comprobante por $' + monto.toLocaleString('es-AR') + ' pero el total es $' + total.toLocaleString('es-AR') + '. Revisalo (¿parcial o error?).' + (ch < 0 ? ' (ojo: falló marcarlo en la base)' : ''), { tipo: 'corte_pago', prioridad: 'P1', refPhone: phone, plata: true }); } catch (_) {}
+    // Lo pagado queda anotado: si después manda otro comprobante con el resto, corteVigiaParcial lo suma y lo marca pagado.
+    if (ch > 0) await cortePagoParcialGuardar(env, phone, total, monto, img.wamid, nowIso);
+    const falta = Math.max(0, total - monto);
+    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó un comprobante por $' + monto.toLocaleString('es-AR') + ' pero el total es $' + total.toLocaleString('es-AR') + ' (faltan $' + falta.toLocaleString('es-AR') + '). Quedó en pago parcial: si manda otro comprobante con el resto, lo marco pagado solo. Revisalo por si fue un error de lectura.' + (ch < 0 ? ' (ojo: falló marcarlo en la base)' : ''), { tipo: 'corte_pago', prioridad: 'P1', refPhone: phone, plata: true }); } catch (_) {}
   }
   return true;
 }
@@ -5097,25 +5117,36 @@ async function corteAutoDetalle(env, phone, opts = {}) {
   if (!ok) { try { await env.DB.prepare("UPDATE corte_detalle_sent SET sent_at=NULL WHERE phone=? AND sent_at=?").bind(phone, now).run(); } catch (_) {} }
   return ok;
 }
-// 'parcial' era un callejón sin salida: un segundo comprobante (el resto) nunca se procesaba. Ahora, si un cliente en
-// 'parcial' manda una imagen/PDF NUEVA (no está en corte_pago_check) después de pasar a parcial, se OCRea UNA vez, se
-// registra en corte_pago_check y se AVISA a Gaspar. NO cambia estado_pago ni le manda nada al cliente (el pago lo
-// cierra Gaspar desde el tablero: "Marcar pagado"). Referencia "después del parcial" ≈ MIN(updated_at) de esas piezas
-// (la transición a parcial las estampa a todas; después solo puede crecer) MENOS la ventana del vigía (6 h): el vigía
-// OCRea un solo comprobante por corrida (el más nuevo), así que si el cliente mandó 2 transferencias juntas la otra quedó
-// ANTES de la transición sin revisar (corte_pago_check ya excluye la que se analizó). Piso de 7 días. Tope de OCR por corrida.
+// 'parcial' era un callejón sin salida: un segundo comprobante (el resto) nunca se procesaba, y después solo avisaba a
+// Gaspar. Ahora SUMA: si un cliente en 'parcial' manda una imagen/PDF NUEVA (no está en corte_pago_check), se OCRea UNA vez,
+// se registra en corte_pago_check y se suma a lo que ya pagó (corte_pago_parcial). Si con eso completa el total (≥99%), queda
+// PAGADO igual que un pago de una vez (confirmación, recibo si no tenía el detalle, planilla y aviso); si no, aviso con lo que
+// falta. NO suma (solo avisa) si el comprobante tiene el MISMO monto que uno ya contado (puede ser el mismo reenviado), si no
+// hay cuenta de ese parcial (anteriores al 14-oct o marcados a mano) o si el parcial mezcla semanas o cambió el total.
+// Referencia "después del parcial": cuándo pasó a parcial (corte_pago_parcial.desde; si no hay cuenta, ≈ MIN(updated_at) de
+// esas piezas) MENOS la ventana del vigía (6 h): el vigía OCRea un solo comprobante por corrida (el más nuevo), así que si el
+// cliente mandó 2 transferencias juntas la otra quedó ANTES de la transición sin revisar (corte_pago_check ya excluye la que
+// se analizó). Piso de 7 días. Tope de OCR por corrida.
 // Los teléfonos con un cobro EN CURSO ('cobrando', otra semana) quedan solo para el vigía principal: si no, este repaso se
 // quedaba con el comprobante del cobro nuevo (lo registraba en corte_pago_check) y ese cobro nunca se marcaba pagado.
 async function corteVigiaParcial(env) {
   let rs = [];
-  try { rs = (await env.DB.prepare("SELECT telefono, MIN(updated_at) AS ref, COALESCE(SUM(precio),0) AS total, MAX(cliente_nombre) AS nombre FROM corte_pedidos WHERE estado_pago='parcial' AND telefono IS NOT NULL AND telefono!='' AND telefono NOT IN (SELECT telefono FROM corte_pedidos WHERE estado_pago='cobrando' AND telefono IS NOT NULL AND telefono!='') GROUP BY telefono").all()).results || []; } catch (_) { return; }
+  try { rs = (await env.DB.prepare("SELECT telefono, MIN(updated_at) AS ref, COALESCE(SUM(precio),0) AS total, MAX(cliente_nombre) AS nombre, COUNT(DISTINCT IFNULL(tanda_id,0)) AS semanas FROM corte_pedidos WHERE estado_pago='parcial' AND telefono IS NOT NULL AND telefono!='' AND telefono NOT IN (SELECT telefono FROM corte_pedidos WHERE estado_pago='cobrando' AND telefono IS NOT NULL AND telefono!='') GROUP BY telefono").all()).results || []; } catch (_) { return; }
   if (!rs.length) return;
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pago_check (wamid TEXT PRIMARY KEY, phone TEXT, monto REAL, es_comprobante INTEGER, checked_at TEXT)").run(); } catch (_) {}
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pago_parcial (phone TEXT PRIMARY KEY, total REAL, pagado REAL, montos TEXT, wamids TEXT, desde TEXT, updated_at TEXT)").run(); } catch (_) {}
   const piso = isoHace(7 * 86400000);
+  const pesos = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR');
+  const lista = v => { try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } };
   let ocrs = 0;
   for (const r of rs) {
     if (ocrs >= 10) break;
-    const tRef = Date.parse(r.ref || '');
+    const total = Number(r.total) || 0;
+    let reg = null;
+    try { reg = await env.DB.prepare("SELECT total, pagado, montos, wamids, desde FROM corte_pago_parcial WHERE phone=?").bind(r.telefono).first(); } catch (_) {}
+    // La cuenta vale solo si es de ESTE parcial: una sola semana y el mismo total que cuando pasó a parcial.
+    const cuenta = (reg && Number(r.semanas) === 1 && Math.abs((Number(reg.total) || 0) - total) <= 1) ? reg : null;
+    const tRef = Date.parse((cuenta && cuenta.desde) || r.ref || '');
     const refMenos = isNaN(tRef) ? '' : new Date(tRef - 6 * 3600 * 1000).toISOString();
     const desde = (refMenos && refMenos > piso) ? refMenos : piso;
     let img = null;
@@ -5131,7 +5162,28 @@ async function corteVigiaParcial(env) {
     if (!ins || !ins.meta || !ins.meta.changes) continue; // otra corrida ya lo registró → no avisar dos veces
     if (!es || !(monto > 0)) continue;
     const quien = r.nombre ? (r.nombre + ' (' + r.telefono + ')') : r.telefono;
-    try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó otro comprobante por $' + monto.toLocaleString('es-AR') + '; estaba en pago parcial (total $' + Number(r.total).toLocaleString('es-AR') + '). Si completa, marcalo pagado desde el tablero.', { tipo: 'corte_pago', prioridad: 'P1', refPhone: r.telefono, plata: true }); } catch (_) {}
+    const avisar = async (txt, ok) => { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' ' + txt, ok ? { tipo: 'corte_pago_ok', prioridad: 'P2', refPhone: r.telefono } : { tipo: 'corte_pago', prioridad: 'P1', refPhone: r.telefono, plata: true }); } catch (_) {} };
+    if (!cuenta) { await avisar('mandó otro comprobante por ' + pesos(monto) + '; estaba en pago parcial (total ' + pesos(total) + '). No tengo anotado cuánto pagó antes: si completa, marcalo pagado desde el tablero.'); continue; }
+    const montos = lista(cuenta.montos);
+    if (montos.some(m => Math.abs((Number(m) || 0) - monto) <= 1)) { await avisar('mandó otro comprobante por ' + pesos(monto) + ', el mismo monto que uno que ya conté (¿lo reenvió?). No lo sumé: si es un pago nuevo, marcalo pagado desde el tablero.'); continue; }
+    const pagado = (Number(cuenta.pagado) || 0) + monto;
+    const nuevos = [...montos, monto];
+    const nowIso = new Date().toISOString();
+    let up = null;
+    try { up = await env.DB.prepare("UPDATE corte_pago_parcial SET pagado=?, montos=?, wamids=?, updated_at=? WHERE phone=? AND pagado=?").bind(pagado, JSON.stringify(nuevos), JSON.stringify([...lista(cuenta.wamids), img.wamid]), nowIso, r.telefono, cuenta.pagado).run(); } catch (_) {}
+    if (!up || !up.meta || !up.meta.changes) continue; // otra corrida tocó la cuenta en el medio
+    const suma = nuevos.map(pesos).join(' + ') + ' = ' + pesos(pagado);
+    if (pagado < total * 0.99) { await avisar('mandó otro comprobante por ' + pesos(monto) + ': lleva ' + suma + ' de ' + pesos(total) + ' (faltan ' + pesos(total - pagado) + ').'); continue; }
+    // Completó: mismas consecuencias que un pago de una vez. Piezas leídas ANTES de la transición (para el recibo).
+    let piezas = [];
+    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='parcial' AND precio>0").bind(r.telefono).all()).results || []; } catch (_) {}
+    let ch = -1;
+    try { const u = await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pagado', updated_at=? WHERE telefono=? AND estado_pago='parcial'").bind(nowIso, r.telefono).run(); ch = (u && u.meta && u.meta.changes) || 0; } catch (_) {}
+    if (ch < 0) { await avisar('completó el pago (' + suma + ', total ' + pesos(total) + ') pero no pude marcarlo PAGADO en la base: marcalo desde el tablero.'); continue; }
+    try { await env.DB.prepare("DELETE FROM corte_pago_parcial WHERE phone=?").bind(r.telefono).run(); } catch (_) {}
+    if (ch === 0) continue; // ya lo habían marcado a mano en el medio: no confirmar ni avisar de nuevo
+    const sheetMsg = await corteTrasPagado(env, r.telefono, piezas, r.nombre, total, proof, 'recibido, gracias! con esto queda completo el pago de tu corte');
+    await avisar('completó el pago con otra transferencia: ' + suma + ' (total ' + pesos(total) + '). Lo marqué PAGADO.' + sheetMsg, true);
   }
 }
 // Vigía de pagos AUTÓNOMO: corre en el cron aunque el bot conversacional del corte esté APAGADO.
@@ -5159,7 +5211,7 @@ async function processCorteVigiaAuto(env) {
       if (paid) continue; // pagó → no hace falta el desglose
       try { await corteAutoDetalle(env, ph); } catch (_) {} // contestó pidiendo el detalle → se lo mandamos
     }
-    // Clientes en 'parcial' que mandan OTRO comprobante: solo aviso a Gaspar (no cambia el estado de pago).
+    // Clientes en 'parcial' que mandan OTRO comprobante: se suma a lo que ya pagaron y, si completan, quedan PAGADOS.
     try { await corteVigiaParcial(env); } catch (_) {}
     // Reintento de marcados a la planilla que fallaron por algo transitorio (token/5xx). Idempotente.
     try {
@@ -24384,6 +24436,8 @@ const handler = {
             if (ims.length) await env.DB.batch(ims.map(m => env.DB.prepare('INSERT OR IGNORE INTO corte_pago_check (wamid, phone, monto, es_comprobante, checked_at) VALUES (?, ?, NULL, 0, ?)').bind(m.wamid, sel.tel, nowIso)));
           } catch (_) {}
         }
+        // La cuenta de pagos en cuotas (corte_pago_parcial) deja de servir si ya no le queda nada en 'parcial'.
+        if (sel.tel) { try { await env.DB.prepare("DELETE FROM corte_pago_parcial WHERE phone=? AND NOT EXISTS (SELECT 1 FROM corte_pedidos WHERE telefono=? AND estado_pago='parcial')").bind(sel.tel, sel.tel).run(); } catch (_) {} }
         // Planilla (Venta_Insumos): una vez por FECHA de la hoja, con el nombre TAL CUAL en la hoja (hoja_cliente). Un error
         // transitorio (token/HTTP) va a la cola de reintentos del vigía (clave por cliente+fecha: no se pisan entre sí).
         const planilla = [];
