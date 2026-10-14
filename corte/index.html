@@ -289,7 +289,7 @@
     $('n-entrega').textContent = list.length ? '4' : '3';
     $('insumos').innerHTML = list.map(function (x) {
       var colores = x.colores ? '<select data-ins-color="' + esc(x.codigo) + '" aria-label="Color">' + x.colores.map(function (c) { return '<option value="' + esc(c) + '">' + esc(c.charAt(0).toUpperCase() + c.slice(1)) + '</option>'; }).join('') + '</select>' : '';
-      return '<div class="insumo"><div><b>' + esc(x.nombre) + '</b>' + (x.detalle ? '<div class="det">' + esc(x.detalle) + '</div>' : '') + '<div class="precio">' + pesos(x.precio) + ' c/u</div>' + colores + '</div>'
+      return '<div class="insumo"><div><b>' + esc(x.nombre) + '</b>' + (x.detalle ? '<div class="det">' + esc(x.detalle) + '</div>' : '') + '<div class="precio">' + pesos(x.precio) + ' c/u' + (x.escala || []).slice().reverse().map(function (e) { return ' · ' + pesos(e[1]) + ' desde ' + e[0]; }).join('') + '</div>' + colores + '</div>'
         + '<div class="stepper"><button type="button" data-ins="' + esc(x.codigo) + '" data-d="-1" aria-label="Uno menos">−</button><output data-ins-n="' + esc(x.codigo) + '">0</output><button type="button" data-ins="' + esc(x.codigo) + '" data-d="1" aria-label="Uno más">+</button></div></div>';
     }).join('');
   }
@@ -400,15 +400,17 @@
   // ---------- Insumos ----------
   $('insumos').addEventListener('click', function (e) {
     var b = e.target.closest('[data-ins]'); if (!b) return;
-    var c = b.getAttribute('data-ins'), n = Math.max(0, Math.min(10, (S.insumos[c] || 0) + parseInt(b.getAttribute('data-d'), 10)));
+    var c = b.getAttribute('data-ins'), n = Math.max(0, Math.min(50, (S.insumos[c] || 0) + parseInt(b.getAttribute('data-d'), 10)));
     S.insumos[c] = n; var o = document.querySelector('[data-ins-n="' + c + '"]'); if (o) o.textContent = n; total();
   });
 
   // ---------- Total ----------
+  // Precio unitario de un insumo según la cantidad (escala [[desde, precio], ...] de mayor a menor).
+  function precioUnit(x, q) { var e = x.escala || []; for (var i = 0; i < e.length; i++) { if (q >= e[i][0]) return e[i][1]; } return x.precio; }
   function total() {
     var dis = 0, ins = 0, nD = 0;
     S.disenos.forEach(function (d) { var a = num(d.ancho) / 100 * num(d.alto) / 100; if (a > 0) { nD++; dis += a * cfg.precio_m2 * Math.max(1, parseInt(d.cantidad, 10) || 1); } });
-    (cfg.insumos || []).forEach(function (x) { ins += (S.insumos[x.codigo] || 0) * x.precio; });
+    (cfg.insumos || []).forEach(function (x) { var q = S.insumos[x.codigo] || 0; ins += q * precioUnit(x, q); });
     $('total').textContent = pesos(dis + ins);
     var partes = [];
     if (nD) partes.push(nD + ' diseño' + (nD === 1 ? '' : 's') + ' a ' + pesos(cfg.precio_m2) + ' el m²');

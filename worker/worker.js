@@ -5621,10 +5621,12 @@ async function corteCargarTanda(env, { fecha, dryRun = true, incluirSospechosas 
 const CORTE_LANDING_PREFIX = 'corte/landing/';
 const CORTE_LANDING_INSUMOS = [ // código = el de la col I de la planilla; precio por defecto (kv corte_insumos_precios lo pisa)
   { codigo: 'cable_025', nombre: 'Cable estañado 0,25 mm transparente', detalle: 'Rollo de 50 m. Más fino y prolijo, para las conexiones internas.', precio: 47000 },
-  { codigo: 'cable_035', nombre: 'Cable 0,35 mm', detalle: 'Rollo de 100 m, blanco o negro. Para la salida a la fuente.', precio: 39500, colores: ['blanco', 'negro'] },
+  { codigo: 'cable_035', nombre: 'Cable 0,35 mm', detalle: 'Rollo de 100 m, blanco o negro. Para la salida a la fuente.', precio: 46000, colores: ['blanco', 'negro'] },
   { codigo: 'cable_05', nombre: 'Cable 0,5 mm', detalle: 'Rollo de 100 m, blanco o negro. Para la salida a la fuente y carteles grandes.', precio: 43000, colores: ['blanco', 'negro'] },
-  { codigo: 'nitto_4a', nombre: 'Fuente Nitto 4A', detalle: '', precio: 8500 },
+  { codigo: 'nitto_4a', nombre: 'Fuente Nitto 4A', detalle: '', precio: 8500, escala: [[20, 7500], [5, 8000]] }, // por cantidad (Gaspar, 14-oct)
 ];
+// Precio unitario según la cantidad pedida (escala [[desde, precio], ...] de mayor a menor).
+function corteLandingPrecioUnit(def, cant) { for (const [desde, p] of (def.escala || [])) if (cant >= desde) return p; return def.precio; }
 const CORTE_LANDING_COLS = 'id, created_at, telefono, nombre, nombre_hoja, nuevo, entrega, datos_json, insumos_json, n_disenos, estimado, hoja_fecha, plazo_estado, huella, ip_hash, piezas_ids, cliente_hoja, cierre_at, prueba';
 let _corteLandingSchemaOk = false;
 async function ensureCorteLandingSchema(env) {
@@ -5806,7 +5808,7 @@ async function corteLandingCron(env) {
 }
 async function corteLandingEscribirPendientes(env, ahora) {
   if ((await kvGet(env, 'corte_hoja_auto_on', '1')) !== '1') return;
-  const cand = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, cantidad, ancho_real, alto_real, producto, estado FROM corte_pedidos WHERE origen='landing' AND hoja_fila IS NULL AND IFNULL(hoja_fecha,'')!='' AND estado NOT IN ('prueba','cancelado') ORDER BY id LIMIT 60").all()).results || [];
+  const cand = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, cantidad, ancho_real, alto_real, producto, estado, precio FROM corte_pedidos WHERE origen='landing' AND hoja_fila IS NULL AND IFNULL(hoja_fecha,'')!='' AND estado NOT IN ('prueba','cancelado') ORDER BY id LIMIT 60").all()).results || [];
   // Diseño: cuando Emma ya cargó la medida final. Insumo: al cierre de su tanda (sábado 12 h).
   const listas = cand.filter(p => p.producto === 'TRANS' ? (p.estado !== 'pedido' && +p.ancho_real > 0 && +p.alto_real > 0) : ahora >= corteLandingCierreDe(p.hoja_fecha)).slice(0, 15);
   if (!listas.length) return;
@@ -5841,6 +5843,14 @@ async function corteLandingEscribirPendientes(env, ahora) {
         fecha: p.hoja_fecha, ancho: p.producto === 'TRANS' ? +p.ancho_real : '', alto: p.producto === 'TRANS' ? +p.alto_real : '', producto: p.producto, aclaracion: p.aclaraciones || '',
       }, ocupadas);
       ocupadas.add(r.fila);
+      // Fila nueva (no una que Emma tipeó a mano): en Venta_Insumos, la misma fila (IMPORTRANGE de columnas enteras) queda
+      // "Pendiente de pago" (lo que busca la marca automática de pagado) y con el precio que se le cobra al cliente, como
+      // hace Gaspar a mano con los precios especiales (la fórmula de COGS no conoce la escala de las fuentes ni los
+      // precios nuevos). Si falla, la fila igual queda escrita: se avisa y no se reintenta (no se duplica nada).
+      if (!r.vinculada && +p.precio > 0) {
+        try { await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', [{ range: `Venta_Insumos!I${r.fila}:J${r.fila}`, values: [['Pendiente de pago', Math.round(+p.precio * 100) / 100]] }]); }
+        catch (err) { await corteLandingError(env, 'Venta_Insumos fila ' + r.fila + ' (pago/precio): ' + String((err && err.message) || err)); }
+      }
       await env.DB.prepare("UPDATE corte_pedidos SET hoja_fila=?, hoja_cliente=?, updated_at=? WHERE id=? AND hoja_fila IS NULL").bind(r.fila, cliente, new Date().toISOString(), p.id).run();
       ok++;
     } catch (err) { await corteLandingError(env, 'pieza ' + p.id + ' (' + (p.hoja_cliente || p.cliente_nombre) + ' · ' + (p.diseno_nombre || p.producto) + '): ' + String((err && err.message) || err)); }
@@ -5878,7 +5888,7 @@ async function corteLandingResumenes(env, ahora) {
     const lunes = f.split('/').slice(0, 2).map(x => x.padStart(2, '0')).join('/');
     const l = ['Corte · pedidos web para el lunes ' + lunes + ' (cerró hoy a las 12)'];
     l.push(dis.length + ' diseño' + (dis.length === 1 ? '' : 's') + ' de ' + clientes + ' cliente' + (clientes === 1 ? '' : 's') + ' · estimado ' + corteLandingPesos(est));
-    if (ins.length) l.push('Insumos: ' + ins.map(p => (parseInt(p.cantidad, 10) || 1) + ' × ' + (p.diseno_nombre || p.producto)).join(', '));
+    if (ins.length) { const tot = {}; ins.forEach(p => { const k = p.diseno_nombre || p.producto; tot[k] = (tot[k] || 0) + (parseInt(p.cantidad, 10) || 1); }); l.push('Insumos: ' + Object.entries(tot).map(([k, n]) => n + ' × ' + k).join(', ')); }
     l.push(sinMedir ? 'Emma: ' + (dis.length - sinMedir) + ' medidos, ' + sinMedir + ' por medir' : 'Emma ya midió todo');
     if (nuevos.length) l.push('Clientes nuevos: ' + nuevos.map(e => e.nombre_hoja + ' (…' + String(e.telefono).slice(-4) + ')').join(', '));
     if (dirNuevas.length) l.push('Envío a una dirección nueva (pasásela a logística): ' + dirNuevas.map(e => { const d = dirDe(e) || {}; return e.nombre_hoja + ': ' + [d.calle, d.localidad, d.provincia, d.cp ? 'CP ' + d.cp : ''].filter(Boolean).join(', '); }).join(' · '));
@@ -5958,7 +5968,7 @@ async function corteLandingRoute(request, env, ctx, url, path) {
     const pl = corteLandingPlazo(), pr = await corteLandingPrecios(env);
     return json({
       ok: true, on, plazo: { lunes: pl.lunesCorto, viernes: pl.viernesCorto, estado: pl.estado },
-      precio_m2: pr.m2, insumos: pr.insumos.map(x => ({ codigo: x.codigo, nombre: x.nombre, detalle: x.detalle, precio: x.precio, colores: x.colores || null })),
+      precio_m2: pr.m2, insumos: pr.insumos.map(x => ({ codigo: x.codigo, nombre: x.nombre, detalle: x.detalle, precio: x.precio, escala: x.escala || null, colores: x.colores || null })),
       video: await kvGet(env, 'corte_landing_video', ''), whatsapp: '5491133708544',
     });
   }
@@ -6042,10 +6052,10 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
   const insumos = [];
   for (const it of iIn.slice(0, 10)) {
     const def = pr.insumos.find(x => x.codigo === String((it || {}).codigo || ''));
-    const cant = Math.max(0, Math.min(10, parseInt((it || {}).cantidad, 10) || 0));
+    const cant = Math.max(0, Math.min(50, parseInt((it || {}).cantidad, 10) || 0));
     if (!def || !cant) continue;
     const color = def.colores ? (def.colores.includes(String(it.color || '')) ? String(it.color) : def.colores[0]) : '';
-    insumos.push({ codigo: def.codigo, cantidad: cant, color, precio: def.precio, nombre: def.nombre + (color ? ' ' + color : '') });
+    insumos.push({ codigo: def.codigo, cantidad: cant, color, precio: corteLandingPrecioUnit(def, cant), nombre: def.nombre + (color ? ' ' + color : '') });
   }
   if (!disenos.length && !insumos.length) return err('Sumá al menos un diseño.', 'disenos');
   // Las fotos tienen que existir (subidas por la propia landing).
@@ -6096,7 +6106,7 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
   const ins = (vals) => env.DB.prepare("INSERT INTO corte_pedidos (alumno_id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, precio, estado, estado_pago, entrega, entrega_manual, origen, tanda_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, 1, 'landing', NULL, ?, ?) RETURNING id").bind(...vals);
   const stmts = [
     ...disenos.map(d => ins([alumnoId || null, tel, nombreHoja, nombreHoja, pl.lunes, d.nombre, d.aclaraciones, d.foto, `ancho ${String(d.ancho).replace('.', ',')} × alto ${String(d.alto).replace('.', ',')} cm`, d.cantidad, 'TRANS', null, estado, entrega, nowIso, nowIso])),
-    ...insumos.map(x => ins([alumnoId || null, tel, nombreHoja, nombreHoja, pl.lunes, x.nombre, x.color, null, '', x.cantidad, x.codigo, x.precio * x.cantidad, estado, entrega, nowIso, nowIso])),
+    ...insumos.flatMap(x => { const partes = []; for (let q = x.cantidad; q > 0; q -= 10) partes.push(Math.min(10, q)); return partes.map(c => ins([alumnoId || null, tel, nombreHoja, nombreHoja, pl.lunes, x.nombre, x.color, null, '', c, x.codigo, x.precio * c, estado, entrega, nowIso, nowIso])); }),
   ];
   let ids = [];
   try { ids = (await env.DB.batch(stmts)).map(r => r.results && r.results[0] && r.results[0].id).filter(Boolean); }
