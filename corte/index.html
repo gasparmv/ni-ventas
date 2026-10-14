@@ -51,7 +51,11 @@
   .pasos li::before { content: counter(paso); display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: rgba(255,24,48,.15); color: var(--red-glow); font-weight: 800; font-size: 13px; margin-bottom: 6px; }
   .pasos b { display: block; font-size: 15px; }
   .pasos span { display: block; color: var(--subtle); font-size: 13.5px; margin-top: 2px; line-height: 1.4; }
-  @media (max-width: 420px) { .pasos { grid-template-columns: 1fr; } }
+  @media (max-width: 420px) {
+    .pasos { grid-template-columns: 1fr; gap: 8px; }
+    .pasos li { display: grid; grid-template-columns: 26px 1fr; column-gap: 10px; padding: 10px 12px; }
+    .pasos li::before { grid-row: span 2; margin: 1px 0 0; }
+  }
   form { margin-top: 26px; }
   .bloque { background: var(--card); border: 1px solid var(--border); border-radius: var(--r); padding: 18px 16px; margin: 0 0 14px; }
   .bloque > h2 { margin: 0 0 4px; font-size: 19px; font-weight: 800; display: flex; align-items: center; gap: 10px; }
