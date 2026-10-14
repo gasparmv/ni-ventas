@@ -5363,12 +5363,41 @@ const CORTE_PEDIDOS_SHEET_ID = '1wneNP7DJtaDnTdVnaOELuxU7-aEh4RJdWLKiRmt85to'; /
 function corteNormNombre(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, ''); }
 function corteTokens(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(t => t.length >= 3); }
 function cortePrecioHoja(raw) { return parseFloat(String(raw || '0').replace(/\$/g, '').replace(/\./g, '').replace(',', '.')) || 0; }
-// Teléfono de alumno: celular AR = EXACTAMENTE 13 dígitos (549 + área + número). Corrige el "9" duplicado típico de
-// LTV ("54 9 9 11..." → 14 díg, caso Ezequiel Carlos Sosa). Cualquier otro largo = inválido ('') → sin teléfono.
+// Teléfono de alumno: celular AR = EXACTAMENTE 13 dígitos (549 + código de área + número = 10 dígitos). Acepta cualquier
+// forma de escribirlo: +54 9 11…, 54 11…, 0054…, 011…, 11…, 9 11…, con paréntesis/guiones/puntos, el "9" duplicado de LTV
+// ("54 9 9 11…", caso Ezequiel Carlos Sosa) y el "15" de celular: después del código de área (011 15 2345-6789, 0351 15
+// 123-4567, 2966 15 12-3456) o solo (15 2345-6789 = CABA). Primero la regla de siempre (lo que ya daba 13 dígitos no cambia);
+// si no da, se prueban las formas con 15. Cualquier otro largo = inválido ('').
 function corteTel(raw) {
   let n = normalizeArPhone(raw) || '';
   if (n.length === 14 && n.startsWith('5499')) n = '549' + n.slice(4);
-  return n.length === 13 ? n : '';
+  if (n.length === 13) return n;
+  // Número nacional: sin 00 / 54 / 9 de celular / 0 de larga distancia adelante.
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  if (d.startsWith('54') && d.length >= 12) d = d.slice(2);
+  if (d.startsWith('9') && d.length >= 11) d = d.slice(1);
+  if (d.startsWith('0')) d = d.slice(1);
+  // "15" + 8 dígitos sin código de área = celular de CABA.
+  if (d.length === 10 && d.startsWith('15')) return '54911' + d.slice(2);
+  // "15" después del código de área (11 = 2 dígitos; el resto, 3 o 4): 12 dígitos → se saca el 15.
+  if (d.length === 12) {
+    for (const pos of (d.startsWith('11') ? [2] : [3, 4])) {
+      if (d.slice(pos, pos + 2) !== '15') continue;
+      const nac = d.slice(0, pos) + d.slice(pos + 2);
+      if (nac.length === 10 && /^[1-3]/.test(nac)) return '549' + nac;
+    }
+  }
+  return '';
+}
+// '5491123456789' → '+54 9 11 2345-6789', '5493511234567' → '+54 9 351 123-4567', '5492966123456' → '+54 9 2966 12-3456'
+// (para mostrarle al cliente a qué número le vamos a escribir, igual que lo muestra WhatsApp). Código de área: 11 = 2 dígitos;
+// los de 4 dígitos salen del patrón de libphonenumber para celulares AR (metadata 1.11.20); el resto, 3.
+const CORTE_AREA4_RE = /^(?:9(?:2(?:[23]02|6(?:[25]|4(?:64|[78]))|9(?:[02356]|4(?:[0268]|5[2-6])|72|8[23]))|3(?:3[28]|4(?:[04679]|3(?:5(?:4[0-25689]|[56])|[78])|5(?:4[46]|8)|8[2379])|5(?:[2467]|3[237]|8(?:[23]|4(?:[45]|60)|5(?:4[0-39]|5|64)))|7[1-578]|8(?:[2469]|3[278]|5(?:4(?:4|5[13-7]|6[89])|[56][46]|[78])|7[378]|8(?:6[3-6]|[78]))))|92(?:2[24-9]|3[1-59]|47)|93(?:4(?:36|5[56])|8(?:[38]5|76))[4-6])/;
+function corteTelFmt(t) {
+  const n = String(t || ''); if (n.length !== 13 || !n.startsWith('549')) return '';
+  const d = n.slice(3), a = d.startsWith('11') ? 2 : (CORTE_AREA4_RE.test('9' + d) ? 4 : 3);
+  return '+54 9 ' + d.slice(0, a) + ' ' + d.slice(a, 6) + '-' + d.slice(6);
 }
 // ¿Dos nombres son la MISMA persona? Nombre normalizado idéntico ("IvanPita" = "Ivan Pita"), o TODAS las palabras del
 // nombre con menos palabras (mínimo 2) están enteras en el otro ("Ariel Cardozo" ⊂ "Ariel Cardozo (gugu)"). Nunca por
@@ -5979,11 +6008,11 @@ async function corteLandingRoute(request, env, ctx, url, path) {
     if (!rl.ok) return json({ error: 'limite', motivo: 'Demasiados intentos. Probá de nuevo en un rato.' }, 429);
     let body; try { body = await request.json(); } catch { body = {}; }
     const tel = corteTel(body.telefono);
-    if (!tel) return json({ error: 'telefono', motivo: 'Revisá el número: código de área y número, sin el 0 ni el 15.' }, 400);
+    if (!tel) return json({ error: 'telefono', motivo: 'No reconocemos ese número. Escribilo con el código de área, por ejemplo 11 2345 6789 o 351 123 4567.' }, 400);
     const c = await corteLandingCliente(env, tel);
     // Con un teléfono registrado se devuelve el nombre para autocompletar (lo mismo que ve cualquiera que tenga ese número en
     // WhatsApp). Al revés (nombre → teléfono) NO: la página es pública y expondría los números de los clientes.
-    return json({ ok: true, conocido: c.conocido, tiene_direccion: c.tieneDireccion, nombre: c.conocido ? corteLandingNombreLindo(c.nombreHoja || c.nombre) : '' });
+    return json({ ok: true, conocido: c.conocido, tiene_direccion: c.tieneDireccion, nombre: c.conocido ? corteLandingNombreLindo(c.nombreHoja || c.nombre) : '', telefono: corteTelFmt(tel) });
   }
   if (path === '/corte/landing/foto') {
     const rl = await corteLandingLimite(env, request, 'foto', 80);
@@ -6025,7 +6054,7 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
   const err = (motivo, campo) => [{ error: 'datos', motivo, campo: campo || '' }, 400];
   if (String(body.hp || '').trim() || (+body.ms > 0 && +body.ms < 6000)) return [{ ok: true, lunes: corteLandingPlazo().lunesCorto, disenos: 0 }, 200]; // bot: se le dice que sí y no se guarda
   const tel = corteTel(body.telefono);
-  if (!tel) return err('Revisá tu WhatsApp: código de área y número, sin el 0 ni el 15.', 'telefono');
+  if (!tel) return err('No reconocemos ese número de WhatsApp. Escribilo con el código de área, por ejemplo 11 2345 6789 o 351 123 4567.', 'telefono');
   const nombre = corteLandingNombrePropio(body.nombre);
   if (nombre.length < 3) return err('Escribí tu nombre y apellido.', 'nombre');
   const entrega = body.entrega === 'envio' ? 'envio' : (body.entrega === 'retira' ? 'retira' : '');
@@ -6080,7 +6109,7 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
   const huella = (await sha256hex(JSON.stringify([tel, entrega, disenos.map(d => [d.foto, d.nombre, d.ancho, d.alto, d.cantidad]), insumos.map(x => [x.codigo, x.cantidad, x.color])]))).slice(0, 32);
   try {
     const prev = await env.DB.prepare("SELECT id, n_disenos, hoja_fecha FROM corte_landing_envios WHERE telefono=? AND huella=? AND created_at > ? ORDER BY id DESC LIMIT 1").bind(tel, huella, new Date(Date.now() - 30 * 60000).toISOString()).first();
-    if (prev) return [{ ok: true, id: prev.id, repetido: true, lunes: pl.lunesCorto, estado: pl.estado, disenos: prev.n_disenos, insumos: insumos.length, estimado }, 200];
+    if (prev) return [{ ok: true, id: prev.id, repetido: true, lunes: pl.lunesCorto, estado: pl.estado, disenos: prev.n_disenos, insumos: insumos.length, estimado, telefono: corteTelFmt(tel) }, 200];
   } catch (_) {}
   const nowIso = new Date().toISOString();
   const datosJson = JSON.stringify({ nuevo: nuevo || undefined, dir: dir || undefined });
@@ -6127,7 +6156,7 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
     const t = 'Corte · cliente nuevo por la web: ' + nombre + ' (…' + tel.slice(-4) + ')' + otroNumero + '\n' + (disenos.length ? disenos.length + ' diseño' + (disenos.length === 1 ? '' : 's') : '') + (insumos.length ? (disenos.length ? ' + ' : '') + insumos.length + ' insumo' + (insumos.length === 1 ? '' : 's') : '') + ' · ' + (entrega === 'envio' ? 'envío a ' + [nuevo.localidad, nuevo.provincia].filter(Boolean).join(', ') : 'retira') + ' · tanda del lunes ' + pl.lunesCorto + '\nLo sumo solo a LTV y a Clientes cuando Emma mida su primer diseño.';
     try { await precotizNotifyGaspar(env, t, { tipo: 'corte_landing_nuevo', prioridad: 'P2', clave: 'corte_landing_nuevo:' + envioId, refPhone: tel }); } catch (_) {}
   }
-  return [{ ok: true, id: envioId, lunes: pl.lunesCorto, estado: pl.estado, disenos: disenos.length, insumos: insumos.length, estimado }, 200];
+  return [{ ok: true, id: envioId, lunes: pl.lunesCorto, estado: pl.estado, disenos: disenos.length, insumos: insumos.length, estimado, telefono: corteTelFmt(tel) }, 200];
 }
 function corteEntregaCambiosTxt(cambios) {
   return 'Corte: actualicé la entrega desde la planilla de cortes:\n' + cambios.map(c => `· ${c.cliente} (${c.tanda}): ${c.de} → ${c.a}${c.ya_embalado ? ' ⚠ YA ESTABA EMBALADO, avisale a Neyen' : ''}`).join('\n');

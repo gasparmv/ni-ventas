@@ -70,6 +70,9 @@
   input::placeholder, textarea::placeholder { color: var(--faint); }
   input:focus, select:focus, textarea:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(143,212,222,.22); }
   .invalido { border-color: var(--err) !important; box-shadow: 0 0 0 3px rgba(255,90,106,.2) !important; }
+  .tel-eco { margin-top: 6px; font-size: 13px; color: var(--subtle); }
+  .tel-eco b { color: var(--fg); font-weight: 700; white-space: nowrap; }
+  .tel-eco.mal { color: var(--err); }
   .fila2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .fila3 { display: grid; grid-template-columns: 1fr 1fr 88px; gap: 10px; }
   @media (max-width: 380px) { .fila3 { grid-template-columns: 1fr 1fr; } .fila3 > :last-child { grid-column: 1 / -1; } }
@@ -192,12 +195,13 @@
         <span class="hint">El mismo con el que hablás con nosotros: ahí te llega el total el lunes.</span>
         <input type="tel" id="tel" inputmode="tel" autocomplete="tel" placeholder="Ej: 11 2345 6789" maxlength="24">
       </label>
+      <div id="tel-eco" class="tel-eco" aria-live="polite" hidden></div>
       <label class="campo">Nombre y apellido
         <input type="text" id="nombre" autocomplete="name" placeholder="Ej: Juana Pérez" maxlength="60">
       </label>
       <div id="cli-ok" class="aviso ok" hidden>Ya te tenemos registrado.</div>
       <div id="cli-nuevo" hidden>
-        <div class="aviso">Es tu primer pedido de corte. Completá tu DNI una sola vez para registrarte.</div>
+        <div class="aviso">No tenemos registrado este WhatsApp. Si ya nos compraste, revisá que sea el mismo número con el que nos escribís. Si es tu primer pedido, completá tu DNI una sola vez para registrarte.</div>
         <label class="campo">DNI
           <input type="text" id="dni" inputmode="numeric" autocomplete="off" placeholder="Solo números" maxlength="10">
         </label>
@@ -565,21 +569,30 @@
 
   // ---------- Cliente (por su WhatsApp) ----------
   function telLimpio() { return String($('tel').value || '').replace(/\D/g, ''); }
+  // Debajo del campo: a qué número le vamos a escribir (como lo entendió el sistema) o por qué no lo reconoce.
+  function telEco(txt, mal) {
+    var e = $('tel-eco');
+    if (!txt) { e.hidden = true; e.textContent = ''; return; }
+    e.className = 'tel-eco' + (mal ? ' mal' : '');
+    if (mal) e.textContent = txt; else e.innerHTML = 'Te vamos a escribir al <b>' + esc(txt) + '</b>';
+    e.hidden = false;
+  }
   function chequearCliente() {
     var t = telLimpio();
-    if (t.length < 10) { S.cliente = null; S.telChequeado = ''; if (S.nombreAuto) { $('nombre').value = ''; S.nombreAuto = false; } pintarCliente(); return; }
+    if (t.length < 10) { S.cliente = null; S.telChequeado = ''; S.telMal = ''; telEco(''); if (S.nombreAuto) { $('nombre').value = ''; S.nombreAuto = false; } pintarCliente(); return; }
     if (t === S.telChequeado) return;
     S.telChequeado = t;
     api('/corte/landing/cliente', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ telefono: $('tel').value }) }).then(function (j) {
       if (t !== S.telChequeado) return;
       if (j && j.ok) {
         S.cliente = { conocido: !!j.conocido, tieneDir: !!j.tiene_direccion }; $('tel').classList.remove('invalido');
+        S.telMal = ''; telEco(j.telefono || '');
         // WhatsApp registrado → el nombre se completa solo (si no lo escribió la persona a mano).
         var nom = $('nombre');
         if (j.conocido && j.nombre && (!String(nom.value).trim() || S.nombreAuto)) { nom.value = j.nombre; S.nombreAuto = true; nom.classList.remove('invalido'); }
         else if (!j.conocido && S.nombreAuto) { nom.value = ''; S.nombreAuto = false; }
       }
-      else { S.cliente = null; if (j && j.error === 'telefono') { $('tel').classList.add('invalido'); mostrarError(j.motivo); } }
+      else { S.cliente = null; if (j && j.error === 'telefono') { $('tel').classList.add('invalido'); S.telMal = j.motivo || 'No reconocemos ese número.'; telEco(S.telMal, true); } else telEco(''); }
       pintarCliente();
     }).catch(function () { S.cliente = null; pintarCliente(); });
   }
@@ -594,7 +607,7 @@
   }
   $('tel').addEventListener('blur', chequearCliente);
   $('nombre').addEventListener('input', function () { S.nombreAuto = false; }); // lo escribió a mano: no se pisa
-  $('tel').addEventListener('input', function () { $('tel').classList.remove('invalido'); clearTimeout(S.telT); S.telT = setTimeout(chequearCliente, 900); });
+  $('tel').addEventListener('input', function () { $('tel').classList.remove('invalido'); S.telMal = ''; telEco(''); clearTimeout(S.telT); S.telT = setTimeout(chequearCliente, 900); });
   document.querySelectorAll('input[name=entrega]').forEach(function (r) { r.addEventListener('change', pintarCliente); });
   $('dir-cambio').addEventListener('change', pintarCliente);
   $('provincia').innerHTML += PROVINCIAS.map(function (p) { return '<option>' + esc(p) + '</option>'; }).join('');
@@ -609,7 +622,8 @@
   }
   function validar() {
     var t = telLimpio();
-    if (t.length < 10 || t.length > 13) return ['Revisá tu WhatsApp: código de área y número, sin el 0 ni el 15.', $('tel')];
+    if (t.length < 10) return ['Escribí tu WhatsApp con el código de área, por ejemplo 11 2345 6789 o 351 123 4567.', $('tel')];
+    if (S.telMal) return [S.telMal, $('tel')];
     if (String($('nombre').value).trim().length < 3) return ['Escribí tu nombre y apellido.', $('nombre')];
     var nuevo = S.cliente && !S.cliente.conocido;
     if (nuevo && !/^\d{7,9}$/.test(String($('dni').value).replace(/\D/g, ''))) return ['Tu DNI (solo números) para registrarte.', $('dni')];
@@ -677,7 +691,7 @@
     $('listo-p1').textContent = 'Recibimos tu pedido para la tanda del lunes ' + (j.lunes || '') + ': ' + (nD ? nD + ' diseño' + (nD === 1 ? '' : 's') : '') + (nD && nI ? ' y ' : '') + (nI ? 'insumos' : '') + '.';
     $('listo-lista').innerHTML = body.disenos.map(function (d) { return '<li>' + esc(d.nombre) + ' · ' + esc(String(d.ancho).replace('.', ',')) + ' × ' + esc(String(d.alto).replace('.', ',')) + ' cm' + ((parseInt(d.cantidad, 10) || 1) > 1 ? ' · ' + parseInt(d.cantidad, 10) + ' unidades' : '') + '</li>'; }).join('')
       + body.insumos.map(function (x) { var def = (cfg.insumos || []).find(function (y) { return y.codigo === x.codigo; }); return '<li>' + x.cantidad + ' × ' + esc(def ? def.nombre : x.codigo) + (x.color ? ' ' + esc(x.color) : '') + '</li>'; }).join('');
-    $('listo-p2').textContent = (j.estado === 'margen' ? 'Llegó antes del sábado a las 12, así que entra en esta tanda. ' : '') + 'El lunes te escribimos por WhatsApp con el total final' + (j.estimado ? ' (estimado: ' + pesos(j.estimado) + ')' : '') + '.';
+    $('listo-p2').textContent = (j.estado === 'margen' ? 'Llegó antes del sábado a las 12, así que entra en esta tanda. ' : '') + 'El lunes te escribimos por WhatsApp' + (j.telefono ? ' al ' + j.telefono : '') + ' con el total final' + (j.estimado ? ' (estimado: ' + pesos(j.estimado) + ')' : '') + '.';
     $('f').hidden = true; $('listo').hidden = false;
     window.scrollTo({ top: $('listo').getBoundingClientRect().top + window.scrollY - 16, behavior: 'smooth' });
   }
