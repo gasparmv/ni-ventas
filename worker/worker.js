@@ -9595,7 +9595,7 @@ const FUNNEL_TEXTOS_AD = ['quiero cotizar un cartel corporeo', 'quiero cotizar u
 // ese plazo ("maduras"); mezclar el presupuesto de un cliente de agosto con las consultas de septiembre inflaba o
 // daba vuelta el ranking.
 const KPI_VENDEDORES = [{ slug: 'joaco', nombre: 'Joaco' }, { slug: 'facundo', nombre: 'Facu' }, { slug: 'agustina', nombre: 'Agus' }];
-const KPI_CACHE_V = 'v4'; // subir si cambia el cálculo (invalida los meses guardados)
+const KPI_CACHE_V = 'v5'; // subir si cambia el cálculo (invalida los meses guardados)
 const KPI_BANDEJAS_FUERA = ['cursos', 'oculto', 'privado', 'corte'];
 // +5% oculto del cotizador, desde cuándo existe (git): Facu neón 31-ago (3ddaa65), Facu corpóreo 06-oct 19:31 AR
 // (2a5eeeb), Agus neón 20-sep (f3111b7); Agus corpóreo nunca. Se descuenta solo si el último presupuesto antes de
@@ -9604,7 +9604,8 @@ const KPI_BANDEJAS_FUERA = ['cursos', 'oculto', 'privado', 'corte'];
 const KPI_MARKUP_DESDE = { facundo: { neon: '2026-08-31T12:57:00Z', corp: '2026-10-06T22:31:00Z' }, agustina: { neon: '2026-09-20T03:00:00Z' } };
 const KPI_LABEL_DESCARTADO = 10482667; // 🤮
 const KPI_FERIADOS_DEF = '2026-08-17,2026-10-12,2026-11-23,2026-12-08,2026-12-25'; // kv feriados_ar (fechas AR separadas por coma) lo reemplaza
-const KPI_PRESUP_SQL = "(body LIKE 'Te comparto el presupuesto%' OR body LIKE '[plantilla: presupuesto%' OR body LIKE 'Trabajo:%')";
+// Misma expresión que el índice parcial idx_wa_messages_presup(_ts) (mig. 050): tiene que ser idéntica para que se use.
+const KPI_PRESUP_SQL = "(substr(body, 1, 26) = 'Te comparto el presupuesto' OR substr(body, 1, 24) = '[plantilla: presupuesto_' OR substr(body, 1, 8) = 'Trabajo:')";
 function kpiMesAR() { return new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 7); }
 function kpiMesMas(mes, n) {
   let y = +mes.slice(0, 4), m = +mes.slice(5, 7) + n;
@@ -9613,6 +9614,11 @@ function kpiMesMas(mes, n) {
 }
 // Teléfono comparable: últimos 10 dígitos (hay pedidos y briefs grabados sin el 549); los IGSID (15+ dígitos) aparte.
 function kpiTel(p) { const d = String(p || '').replace(/\D/g, ''); if (!d) return ''; return d.length >= 15 ? 'ig:' + d : d.slice(-10); }
+// Cliente de un pedido: el teléfono, o el @usuario de IG (algunos pedidos lo guardan en vez del teléfono).
+function kpiTelPedido(raw) {
+  const s = String(raw || '').trim(), mh = s.match(/^@?([a-z0-9._]{1,30})$/i);
+  return (mh && (s.startsWith('@') || /[a-z]/i.test(mh[1]))) ? 'h:' + mh[1].toLowerCase() : kpiTel(s);
+}
 function kpiEsIg(p) { const s = String(p || '').trim(); return !s || s.startsWith('@') || s.replace(/\D/g, '').length >= 15; }
 async function kpiFeriados(env) {
   const v = await kvGet(env, 'feriados_ar', KPI_FERIADOS_DEF);
@@ -9653,7 +9659,7 @@ function kpiIndicePresup(rows) {
 // +5% del cotizador cuando corresponde (ver KPI_MARKUP_DESDE).
 function kpiFilaVenta(r, ctx) {
   const v = funnelVendedor(r.com) || 'joaco';
-  const tel = kpiTel(r.tel), corp = kpiEsCorp(r);
+  const tel = kpiTelPedido(r.tel), corp = kpiEsCorp(r);
   const precio = Number(r.precio) || 0, dimmer = Number(r.dimmer) || 0, monto = precio + dimmer;
   const n = Number(r.cant) > 0 ? Number(r.cant) : 1;
   const cargo = _normTxt(r.cargado_por).trim();
@@ -9668,10 +9674,12 @@ function kpiFilaVenta(r, ctx) {
     const ref = r.created_at || (r.fecha + 'T23:59:59Z');
     const lista = ctx.pres.porTel.get(tel) || [];
     let q = null; for (const m of lista) { if (m.ts <= ref) q = m; else break; }
-    const quien = q ? adhocSenderSlug(q.snd) : v, cuando = q ? q.ts : ref;
+    // Presupuesto sin firma (send-media no la guardaba): se asume el vendedor de la venta.
+    const quien = q ? (adhocSenderSlug(q.snd) || (q.snd ? '' : v)) : v, cuando = q ? q.ts : ref;
     if (quien === v && cuando >= desde) montoNorm = precio / 1.05 + dimmer;
   }
-  const clave = (r.origen === 'crm' && tel && !tel.startsWith('ig:') && !ctx.internos.has(tel)) ? v + '|' + tel : [r.numero, r.fecha, v, tel].join('|');
+  // Venta = cliente: en el CRM, por teléfono o @usuario; en lo del Excel (el teléfono suele estar solo en la 1ª fila), N°+fecha.
+  const clave = (r.origen === 'crm' && tel && !tel.startsWith('ig:') && !ctx.internos.has(tel)) ? v + '|' + tel : [r.numero, r.fecha, v].join('|');
   return { v, tel, corp, n, monto, montoNorm, bucket, clave };
 }
 
@@ -9699,15 +9707,24 @@ async function kpiMesVendedores(env, mes) {
        AND fi.phone NOT IN (SELECT phone FROM wa_internal_phones)
        AND fi.phone NOT IN (SELECT phone FROM reventa_leads)
        AND fi.phone NOT IN (SELECT phone FROM contact_labels WHERE label_id IN (2289, 10763812))
-       AND fi.phone NOT IN (SELECT phone FROM wa_autoreply_log WHERE kind IN ('guia_produccion', 'evento_link'))
+       AND NOT EXISTS (SELECT 1 FROM revendedores rv WHERE IFNULL(rv.whatsapp, '') != '' AND substr(replace(replace(rv.whatsapp, '+', ''), ' ', ''), -10) = substr(fi.phone, -10) AND rv.created_at < strftime('%Y-%m-%dT%H:%M:%SZ', fi.t0, '+7 days'))
+       -- Guía de producción / link del evento: fuera, salvo que haya llegado después (≥10 min) de una primera consulta de carteles.
+       AND NOT EXISTS (SELECT 1 FROM wa_autoreply_log l WHERE l.phone = fi.phone AND l.kind IN ('guia_produccion', 'evento_link')
+                       AND (IFNULL(l.sent_at, '') = '' OR l.sent_at < strftime('%Y-%m-%dT%H:%M:%SZ', fi.t0, '+10 minutes')
+                            OR NOT (EXISTS (SELECT 1 FROM wa_ad_attributions a JOIN wa_ad_verticals v ON v.ad_id = a.source_id WHERE a.phone = fi.phone AND v.vertical IN ('carteles', 'corporeo') AND a.ts <= strftime('%Y-%m-%dT%H:%M:%SZ', fi.t0, '+10 minutes'))
+                                    OR EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'inbound' AND m.ts >= fi.t0 AND m.ts < strftime('%Y-%m-%dT%H:%M:%SZ', fi.t0, '+2 days')
+                                               AND (lower(m.body) LIKE '%neon personalizado%' OR lower(m.body) LIKE '%cotiz%' OR lower(m.body) LIKE '%cartel%' OR lower(m.body) LIKE '%corp_reo%' OR lower(m.body) LIKE '%neon led%')))))
        AND fi.phone NOT IN (SELECT a.phone FROM wa_ad_attributions a JOIN wa_ad_verticals v ON v.ad_id = a.source_id WHERE v.vertical = 'cursos')
        AND NOT ((fi.phone IN (SELECT phone FROM lanzamiento_landing) OR fi.phone IN (SELECT phone FROM minicurso_landing))
                 AND NOT EXISTS (SELECT 1 FROM wa_ad_attributions a JOIN wa_ad_verticals v ON v.ad_id = a.source_id WHERE a.phone = fi.phone AND v.vertical IN ('carteles', 'corporeo'))
                 AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'inbound' AND m.ts >= fi.t0 AND m.ts < strftime('%Y-%m-%dT%H:%M:%SZ', fi.t0, '+2 days')
                                 AND (lower(m.body) LIKE '%neon personalizado%' OR lower(m.body) LIKE '%cotiz%' OR lower(m.body) LIKE '%cartel%' OR lower(m.body) LIKE '%corp_reo%' OR lower(m.body) LIKE '%neon led%')))
        AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'inbound' AND m.ts >= fi.t0 AND m.ts < strftime('%Y-%m-%dT%H:%M:%SZ', fi.t0, '+2 days')
-                       AND (m.body LIKE '%GUÍA DE PRODUCCI%' OR m.body LIKE 'Quiero GUÍA%' OR replace(lower(m.body), ' ', '') LIKE '%infocurso%' OR replace(lower(m.body), ' ', '') LIKE '%loscursos%' OR replace(lower(m.body), ' ', '') LIKE '%elcurso%' OR lower(m.body) LIKE '%seminario%' OR lower(m.body) LIKE '%insumos%')
-                       AND lower(m.body) NOT LIKE '%cartel%' AND lower(m.body) NOT LIKE '%neon%' AND lower(m.body) NOT LIKE '%cotiz%' AND lower(m.body) NOT LIKE '%presupuest%')`;
+                       AND (m.body LIKE '%GUÍA DE PRODUCCI%' OR m.body LIKE 'Quiero GUÍA%' OR replace(lower(m.body), ' ', '') LIKE '%infocurso%' OR replace(lower(m.body), ' ', '') LIKE '%loscursos%' OR replace(lower(m.body), ' ', '') LIKE '%elcurso%' OR lower(m.body) LIKE '%seminario%' OR lower(m.body) LIKE '%insumos%'
+                            OR lower(m.body) LIKE '%aprender%' OR lower(m.body) LIKE '%se aprende%' OR lower(m.body) LIKE '%dan curso%' OR lower(m.body) LIKE '%cursos para%'
+                            OR lower(m.body) LIKE '%venden los materiales%' OR lower(m.body) LIKE '%venden materiales%' OR lower(m.body) LIKE '%bases de acr%' OR lower(m.body) LIKE '%bases calad%')
+                       -- "cartelería" (insumos) y "no era cotización" no cuentan como hablar de un cartel.
+                       AND replace(lower(m.body), 'carteler', '') NOT LIKE '%cartel%' AND lower(m.body) NOT LIKE '%neon%' AND (lower(m.body) NOT LIKE '%cotiz%' OR lower(m.body) LIKE '%no era cotiz%') AND lower(m.body) NOT LIKE '%presupuest%')`;
   // Instagram (APARTE, no suma): sin el embudo de cursos ("Quiero el regalo", cursos, talleres), spam/proveedores,
   // autorespuestas de otros negocios ni chats sin intención (solo una mención de historia o el saludo de ManyChat).
   const consIgSql = `WITH fi AS (SELECT phone, MIN(ts) t0 FROM wa_messages WHERE direction = 'inbound' AND msg_type NOT IN ${NO_MSG} AND channel = 'ig' AND ts >= ? AND ts < ? GROUP BY phone)
@@ -9721,25 +9738,29 @@ async function kpiMesVendedores(env, mes) {
              OR lower(m.body) LIKE '%en vivo%' OR lower(m.body) LIKE '%grupo de wh%' OR lower(m.body) LIKE '% formaci%' OR lower(m.body) LIKE '%welcome to%'
              OR lower(m.body) LIKE '%te dejamos nuestro whatsapp%' OR lower(m.body) LIKE '%manufacturer%' OR lower(m.body) LIKE '%wechat%' OR lower(m.body) LIKE '%experiencia en ventas%'
              OR lower(m.body) LIKE '%tiras de led%' OR lower(m.body) LIKE '%tira led%' OR lower(m.body) LIKE '%bases de acr%' OR lower(m.body) LIKE '%bases calad%' OR lower(m.body) LIKE '%insumos%'
+             OR lower(m.body) LIKE '%gracias por escribinos%' OR lower(m.body) LIKE '% mi cv%' OR lower(m.body) LIKE '%curriculum%' OR lower(m.body) LIKE '%currículum%' OR lower(m.body) LIKE '%búsqueda laboral%'
+             OR lower(m.body) LIKE '%vacante%' OR lower(m.body) LIKE '%postular%' OR lower(m.body) LIKE '% puesto de%' OR lower(m.body) LIKE '%somos fabricantes%' OR lower(m.body) LIKE '%red de proveedores%'
+             OR lower(m.body) LIKE '%al gremio%' OR lower(m.body) LIKE '%revendedor%'
              OR (m.body NOT LIKE '% %' AND m.body NOT LIKE '%@%' AND lower(m.body) LIKE '%.com')))
        AND EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'inbound' AND m.msg_type NOT IN ${NO_MSG} AND m.ts < strftime('%Y-%m-%dT%H:%M:%SZ', fi.t0, '+7 days') AND (
              IFNULL(m.media_url, '') != '' OR (TRIM(IFNULL(m.body, '')) != '' AND m.body NOT LIKE '📢%' AND m.body NOT LIKE '📣%' AND m.body NOT LIKE '🔁%' AND m.body NOT LIKE '👆%'
              AND lower(m.body) NOT LIKE '%gracias por comunicarte%' AND lower(m.body) NOT LIKE '%gracias por escribirnos%' AND lower(m.body) NOT LIKE '%gracias por contact%'
-             AND lower(m.body) NOT LIKE '%gracias por ponerte en contacto%' AND lower(m.body) NOT LIKE '%recibimos tu mensaje%' AND lower(m.body) NOT LIKE '%horarios de atenci%')))
+             AND lower(m.body) NOT LIKE '%gracias por ponerte en contacto%' AND lower(m.body) NOT LIKE '%recibimos tu mensaje%' AND lower(m.body) NOT LIKE '%horarios de atenci%' AND lower(m.body) NOT LIKE '%gracias por escribinos%')))
        AND NOT (EXISTS (SELECT 1 FROM wa_messages w WHERE w.phone = fi.phone AND w.direction = 'outbound' AND w.ts < fi.t0 AND (w.body LIKE 'Buenas! Te mandamos mensajito%' OR w.body LIKE '🤖 Mensaje automático%'))
                 AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'inbound' AND m.ts < strftime('%Y-%m-%dT%H:%M:%SZ', fi.t0, '+7 days') AND (m.msg_type IN ('image', 'video')
                                 OR lower(m.body) LIKE '%cartel%' OR lower(m.body) LIKE '%neon%' OR lower(m.body) LIKE '%presupuest%' OR lower(m.body) LIKE '%cotiz%' OR lower(m.body) LIKE '%precio%'
-                                OR lower(m.body) LIKE '%medida%' OR lower(m.body) LIKE '%logo%' OR lower(m.body) LIKE '%letra%' OR lower(m.body) LIKE '%cuanto%' OR lower(m.body) LIKE '%cuánto%')))`;
-  const [consR, consIgR, briefR, logBriefR, presMsgR, ocR, ocPrimR, ocTelR, venR, pedPrimR, asistTelR, respR, logR, internosR, importR] = await Promise.all([
+                                OR lower(m.body) LIKE '%medida%' OR lower(m.body) LIKE '%logo%' OR lower(m.body) LIKE '%letra%' OR lower(m.body) LIKE '%cuanto%' OR lower(m.body) LIKE '%cuánto%'
+                                OR lower(m.body) LIKE '%interior%' OR lower(m.body) LIKE '%exterior%' OR lower(m.body) LIKE '% cm%')))`;
+  const [consR, consIgR, briefR, logBriefR, presMsgR, ocR, ocPrimR, ocTelR, venR, pedPrimR, asistTelR, respR, logR, internosR, importR, prevPedR] = await Promise.all([
     q(consWaSql, sinceUTC, untilExUTC, sinceUTC),
     q(consIgSql, sinceUTC, untilExUTC, sinceUTC),
     // Briefs con envío desde el mes (la fecha que vale es la del PRIMER envío real: enviado_at se pisa en cada
     // reenvío y "Verificar enviados" la pone en el momento del clic). Incluye los que volvieron a 'listo' (mandar
     // a modificar) y los enviados que nadie marcó pero figuran en wa_log.
-    q(`SELECT b.id, IFNULL(b.cliente_wa_id, '') ph, IFNULL(b.comercial_id, '') com, IFNULL(b.enviado_por, '') por, IFNULL(b.tipo, '') tipo, IFNULL(b.origen_lead, '') ol, IFNULL(b.created_at, '') created_at, IFNULL(b.enviado_at, '') enviado_at
-         FROM briefs b WHERE IFNULL(b.enviado_at, '') >= ? OR b.id IN (SELECT CAST(substr(ref, 7) AS INTEGER) FROM wa_log WHERE ref >= 'brief:' AND ref < 'brief;' AND ok = 1 AND ts >= ?)`, sinceUTC, sinceUTC),
+    q(`SELECT b.id, IFNULL(b.cliente_wa_id, '') ph, IFNULL(b.comercial_id, '') com, IFNULL(b.enviado_por, '') por, IFNULL(b.tipo, '') tipo, IFNULL(b.origen_lead, '') ol, IFNULL(b.created_at, '') created_at, IFNULL(b.enviado_at, '') enviado_at, IFNULL(b.cliente_nombre, '') nombre
+         FROM briefs b WHERE IFNULL(b.enviado_at, '') >= ? OR IFNULL(b.created_at, '') >= ? OR b.id IN (SELECT CAST(substr(ref, 7) AS INTEGER) FROM wa_log WHERE ref >= 'brief:' AND ref < 'brief;' AND ok = 1 AND ts >= ?) ORDER BY b.id`, sinceUTC, new Date(Date.parse(sinceUTC) - 7 * DAY).toISOString(), sinceUTC),
     q("SELECT ref, IFNULL(message_id, '') message_id, MIN(ts) ts FROM wa_log WHERE ref >= 'brief:' AND ref < 'brief;' AND ok = 1 AND ts >= ? GROUP BY ref, message_id", desdeMsgs),
-    q(`SELECT phone, ts, IFNULL(sender_name, '') snd, IFNULL(wamid, '') wamid FROM wa_messages WHERE direction = 'outbound' AND ts >= ? AND IFNULL(status, '') != 'failed' AND ${KPI_PRESUP_SQL} ORDER BY ts`, desdeMsgs),
+    q(`SELECT phone, ts, IFNULL(sender_name, '') snd, IFNULL(wamid, '') wamid, substr(body, 1, 160) body FROM wa_messages WHERE direction = 'outbound' AND ts >= ? AND IFNULL(status, '') != 'failed' AND ${KPI_PRESUP_SQL} ORDER BY ts`, desdeMsgs),
     // OC del mes. reenvio = la misma OC (mismo cartel) ya se le había mandado a ese cliente en los 60 días previos
     // al mes: cuenta en el mes de la primera. msnd = quién mandó el mensaje (desde el 12-oct); por = oc.enviado_por.
     q(`SELECT o.wamid, o.phone, IFNULL(o.vendedor, '') vendedor, o.ts_out, IFNULL(o.enviado_por, '') por, (SELECT m.sender_name FROM wa_messages m WHERE m.wamid = o.wamid) msnd,
@@ -9752,13 +9773,19 @@ async function kpiMesVendedores(env, mes) {
     q("SELECT DISTINCT IFNULL(telefono, '') tel FROM pedidos WHERE IFNULL(asistido_por, '') != ''"),
     // Respuesta después del bot: desde "Para cotizar" hasta el 1er mensaje de una persona (sin reacciones ni fallidos).
     q(`SELECT p.phone, p.completed_at c, IFNULL(p.producto, '') producto, COALESCE(s.assigned_to, '') asg, COALESCE(s.assigned_at, '') asg_at, COALESCE(s.inbox, '') inbox,
-              (SELECT m.ts FROM wa_messages m WHERE m.phone = p.phone AND m.direction = 'outbound' AND m.automated = 0 AND m.msg_type NOT IN ('status','reaction') AND IFNULL(m.status, '') != 'failed' AND m.ts >= p.completed_at ORDER BY m.ts ASC LIMIT 1) r1,
+              (SELECT m.ts FROM wa_messages m WHERE m.phone = p.phone AND m.direction = 'outbound' AND m.msg_type NOT IN ('status','reaction') AND IFNULL(m.status, '') != 'failed' AND m.ts >= p.completed_at
+                  -- humano: automated=0, o una plantilla ad-hoc escrita por un vendedor antes del 7-oct (ef0de07 las grababa como automáticas)
+                  AND (m.automated = 0 OR (m.msg_type = 'template' AND m.ts < '2026-10-07T20:36:00Z' AND m.body NOT LIKE '[plantilla:%' AND m.body NOT LIKE '📩%'
+                       AND lower(m.body) NOT LIKE '%vimos que te registraste%' AND lower(m.body) NOT LIKE '%abril de nuevo%' AND lower(m.body) NOT LIKE '%cambiamos nuestro n%'
+                       AND lower(m.body) NOT LIKE '%cambiamos de n%' AND lower(m.body) NOT LIKE '%por tu consulta del cartel%' AND lower(m.body) NOT LIKE '%nos llego tu formulario%'))
+                  ORDER BY m.ts ASC LIMIT 1) r1,
               EXISTS (SELECT 1 FROM contact_labels cl WHERE cl.phone = p.phone AND cl.label_id = ?) descartado
          FROM precotiz_pilot p LEFT JOIN wa_chats_summary s ON s.phone = p.phone
         WHERE p.completed_at >= ? AND p.completed_at < ?`, KPI_LABEL_DESCARTADO, sinceUTC, untilExUTC),
     q("SELECT phone, IFNULL(from_asg, '') fr, IFNULL(to_asg, '') to_, via, ts FROM chat_assign_log WHERE via NOT LIKE 'auto_%' AND phone IN (SELECT phone FROM precotiz_pilot WHERE completed_at >= ? AND completed_at < ?) ORDER BY ts", sinceUTC, untilExUTC),
     q("SELECT phone FROM wa_internal_phones"),
     q("SELECT phone, IFNULL(to_asg, '') to_, ts FROM chat_assign_log WHERE via = 'import' ORDER BY ts"),
+    q("SELECT IFNULL(telefono, '') tel, numero, fecha FROM pedidos WHERE COALESCE(precio, 0) > 0 AND IFNULL(telefono, '') != '' AND fecha < ?", untilEx),
   ]);
 
   const internos = new Set(internosR.map(r => kpiTel(r.phone)));
@@ -9772,7 +9799,7 @@ async function kpiMesVendedores(env, mes) {
     coh_n: 0, coh_m14: 0, coh_presup14: 0, coh_m30: 0, coh_m30p: 0, coh_oc30: 0, coh_venta30: 0, coh_compra30: 0,
     resp_n: 0, resp_2h: 0, sin_resp: 0, resp_pend: 0, resp_descartados: 0, presup_lead_n: 0, presup_lead_den: 0, presup_4h: 0,
     aparte: { presup_ig: 0, presup_sin_evidencia: 0, oc_reenvios: 0, oc_admin: 0, oc_asistidas: 0, ventas_asistidas_n: 0, ventas_asistidas_monto: 0, ventas_admin_n: 0, ventas_admin_monto: 0, sin_precio_n: 0, recompra_n: 0, recompra_monto: 0, traidas_n: 0, traidas_presup: 0, traidas_ventas_n: 0, traidas_ventas_monto: 0 },
-    _cli: new Set(), _oc: new Set(), _ped: new Set(), _resp: [], _respAll: [], _presH: [],
+    _cli: new Set(), _oc: new Set(), _ocRe: new Set(), _ocAd: new Set(), _ocAs: new Set(), _ped: new Set(), _resp: [], _respAll: [], _presH: [],
   });
   const out = {}; for (const v of KPI_VENDEDORES) out[v.slug] = blank();
   const global = { presup_admin: 0, ventas_otros_n: 0, ventas_otros_monto: 0 };
@@ -9802,6 +9829,10 @@ async function kpiMesVendedores(env, mes) {
   }
 
   // --- Presupuestos (brief = unidad; fecha = primer envío real; tiene que haber evidencia del envío) ---
+  // Evidencia, en orden: (1) el envío registrado del CRM (wa_log 'brief:ID'); (2) el primer mensaje de presupuesto al
+  // cliente entre que se creó el brief (−1 h) y su enviado_at (+20 min); (3) para los que se mandaron con "Copiar"
+  // sin marcar: el primer mensaje cuyo "Trabajo:" es el nombre del brief, hasta 7 días después de creado. Cada mensaje
+  // vale para UN solo brief (se reclama al usarlo).
   const logPorBrief = new Map(), msgReclamado = new Map();
   for (const r of logBriefR) {
     const id = parseInt(String(r.ref).slice(6), 10); if (!id) continue;
@@ -9812,40 +9843,48 @@ async function kpiMesVendedores(env, mes) {
   const presCohorte = new Map(); // tel → fechas de presupuesto (brief con evidencia o mensaje de presupuesto)
   const addPres = (tel, ts) => { if (!tel || !ts) return; if (!presCohorte.has(tel)) presCohorte.set(tel, []); presCohorte.get(tel).push(ts); };
   for (const [tel, lista] of pres.porTel) for (const m of lista) addPres(tel, m.ts);
+  const nombreDe = (s) => _normTxt(s).replace(/[^a-z0-9]/g, '');
+  const trabajoDe = (body) => { const mm = /Trabajo:\s*([^\n]+)/i.exec(String(body || '')); return mm ? nombreDe(mm[1]) : ''; };
+  const libre = (m, id) => { const otro = msgReclamado.get(m.wamid); return !otro || otro === id; };
+  const resueltos = [], pendientes = [];
   for (const b of briefR) {
     const tel = kpiTel(b.ph), ig = kpiEsIg(b.ph) || b.ol === 'ig';
-    const lg = logPorBrief.get(b.id);
-    let msg = lg && lg.wamid ? pres.porWamid.get(lg.wamid) : null;
-    if (!lg && !ig) {
-      // Sin registro de envío del CRM: vale el primer mensaje de presupuesto a ese cliente desde que se creó el brief
-      // (−1 h) hasta su enviado_at (+20 min), que no sea el envío de OTRO brief.
-      const desde = b.created_at ? new Date(Date.parse(b.created_at) - 3600e3).toISOString() : '';
-      const hasta = b.enviado_at ? new Date(Date.parse(b.enviado_at) + 20 * 60e3).toISOString() : '';
-      for (const m of (pres.porTel.get(tel) || [])) {
-        if (desde && m.ts < desde) continue;
-        if (!hasta || m.ts > hasta) break;
-        const otro = msgReclamado.get(m.wamid); if (otro && otro !== b.id) continue;
-        msg = m; break;
-      }
-    }
-    const f = lg ? lg.ts : (msg ? msg.ts : '');
     const porS = adhocSenderSlug(b.por);
     if (ig) {
-      const ff = f || b.enviado_at;
-      if (ff >= sinceUTC && ff < untilExUTC) { const o = out[porS || funnelVendedor(b.com) || 'joaco']; if (o) o.aparte.presup_ig++; }
+      const lg = logPorBrief.get(b.id), ff = (lg && lg.ts) || b.enviado_at;
+      if (ff && ff >= sinceUTC && ff < untilExUTC) { const o = out[porS || funnelVendedor(b.com) || 'joaco']; if (o) o.aparte.presup_ig++; }
       continue;
     }
-    if (!f) {
-      if (b.enviado_at >= sinceUTC && b.enviado_at < untilExUTC) { const o = out[porS || adhocSenderSlug(msg && msg.snd) || funnelVendedor(b.com) || 'joaco']; if (o) o.aparte.presup_sin_evidencia++; }
-      continue;
+    const lg = logPorBrief.get(b.id);
+    if (lg) { resueltos.push({ b, tel, f: lg.ts, msg: lg.wamid ? pres.porWamid.get(lg.wamid) : null }); continue; }
+    let msg = null;
+    if (b.enviado_at) {
+      const desde = b.created_at ? new Date(Date.parse(b.created_at) - 3600e3).toISOString() : '';
+      const hasta = new Date(Date.parse(b.enviado_at) + 20 * 60e3).toISOString();
+      for (const m of (pres.porTel.get(tel) || [])) { if (desde && m.ts < desde) continue; if (m.ts > hasta) break; if (libre(m, b.id)) { msg = m; break; } }
     }
+    if (msg) { msgReclamado.set(msg.wamid, b.id); resueltos.push({ b, tel, f: msg.ts, msg }); }
+    else pendientes.push({ b, tel });
+  }
+  for (const { b, tel } of pendientes) {
+    const nb = nombreDe(b.nombre);
+    let msg = null;
+    if (nb.length >= 3 && b.created_at) {
+      const desde = new Date(Date.parse(b.created_at) - 3600e3).toISOString(), hasta = new Date(Date.parse(b.created_at) + 7 * 864e5).toISOString();
+      for (const m of (pres.porTel.get(tel) || [])) { if (m.ts < desde) continue; if (m.ts > hasta) break; if (libre(m, b.id) && trabajoDe(m.body) === nb) { msg = m; break; } }
+    }
+    if (msg) { msgReclamado.set(msg.wamid, b.id); resueltos.push({ b, tel, f: msg.ts, msg }); continue; }
+    if (b.enviado_at && b.enviado_at >= sinceUTC && b.enviado_at < untilExUTC) { const o = out[adhocSenderSlug(b.por) || funnelVendedor(b.com) || 'joaco']; if (o) o.aparte.presup_sin_evidencia++; }
+  }
+  for (const { b, tel, f, msg } of resueltos) {
     addPres(tel, f);
     if (f < sinceUTC || f >= untilExUTC) continue;
-    // Quién lo mandó: si salió por el CRM, quien apretó Enviar (enviado_por, desde el 12-oct; si fue un admin, no
-    // se le suma a nadie); si no, el que firmó el mensaje del presupuesto; si no, el comercial del brief.
-    let v;
-    if (lg && b.por) v = porS || '__admin';
-    else v = adhocSenderSlug(msg && msg.snd) || porS || funnelVendedor(b.com) || 'joaco';
+    // Quién lo mandó: enviado_por solo si corresponde a ESE envío (enviado_at a ≤10 min del primer envío: enviado_at y
+    // enviado_por se pisan juntos en cada reenvío o "Verificar enviados"); si fue un admin, no se le suma a nadie. Si
+    // no, el que firmó el mensaje del primer envío; si no, el comercial del brief.
+    const porS = adhocSenderSlug(b.por);
+    const porVale = !!(b.por && b.enviado_at && Math.abs(Date.parse(b.enviado_at) - Date.parse(f)) <= 10 * 60e3);
+    const v = porVale ? (porS || '__admin') : (adhocSenderSlug(msg && msg.snd) || porS || funnelVendedor(b.com) || 'joaco');
     if (v === '__admin') { global.presup_admin++; continue; }
     const o = out[v]; if (!o) continue;
     o.presupuestos++; if (b.tipo === 'corporea') o.presup_corp++; else o.presup_neon++;
@@ -9853,22 +9892,20 @@ async function kpiMesVendedores(env, mes) {
     const imp = importes.get(tel); if (v === 'agustina' && imp && imp.to_ === 'agustina' && imp.ts < f) o.aparte.traidas_presup++;
   }
   for (const l of presCohorte.values()) l.sort();
-
   // --- Órdenes de compra (cliente distinto por vendedor; sin reenvíos, sin las del admin ni las de ventas del equipo) ---
   for (const r of ocR) {
     const o = out[funnelVendedor(r.vendedor) || 'joaco']; if (!o) continue;
-    if (r.reenvio) { o.aparte.oc_reenvios++; continue; }
-    const quien = String(r.por || r.msnd || '').trim();
-    if (quien && quien !== 'celular' && quien !== 'app_ig' && !adhocSenderSlug(quien)) { o.aparte.oc_admin++; continue; }
     const tel = kpiTel(r.phone);
-    if (asistTels.has(tel)) { o.aparte.oc_asistidas++; continue; }
+    if (r.reenvio) { o._ocRe.add(tel); continue; }
+    const quien = String(r.por || r.msnd || '').trim();
+    if (quien && quien !== 'celular' && quien !== 'app_ig' && !adhocSenderSlug(quien)) { o._ocAd.add(tel); continue; }
+    if (asistTels.has(tel)) { o._ocAs.add(tel); continue; }
     o._oc.add(tel);
   }
   const ocPrim = new Map(); for (const r of ocPrimR) { const t = kpiTel(r.phone); if (t && (!ocPrim.has(t) || r.t < ocPrim.get(t))) ocPrim.set(t, r.t); }
 
   // --- Ventas ---
   const ctxV = { internos, ocTels, pres };
-  const telsVenta = new Set();
   const filas = venR.map(r => { const x = kpiFilaVenta(r, ctxV); x.r = r; return x; });
   for (const x of filas) {
     const o = out[x.v];
@@ -9879,21 +9916,16 @@ async function kpiMesVendedores(env, mes) {
     o._ped.add(x.clave);
     if (x.corp) { o.corporeos += x.n; o.monto_corp += x.monto; o.monto_corp_norm += x.montoNorm; }
     else { o.neones += x.n; o.monto_neon += x.monto; o.monto_neon_norm += x.montoNorm; }
-    if (x.tel && !x.tel.startsWith('ig:')) telsVenta.add(x.tel);
     const imp = importes.get(x.tel);
     if (x.v === 'agustina' && imp && imp.to_ === 'agustina' && imp.ts < (x.r.created_at || x.r.fecha + 'T23:59:59Z')) { o.aparte.traidas_ventas_n += x.n; o.aparte.traidas_ventas_monto += x.monto; }
   }
-  // Recompras (info, no resta): ventas a clientes que ya habían escrito antes del mes. A Facu/Agus nunca les llegan
-  // (el reparto saltea clientes existentes), así que en los totales de Joaco pesan a su favor.
-  if (telsVenta.size) {
-    const lista = [...telsVenta].map(t => '549' + t);
-    const prev = new Set();
-    for (let i = 0; i < lista.length; i += 80) {
-      const lote = lista.slice(i, i + 80);
-      const rs = await q(`SELECT DISTINCT phone FROM wa_messages WHERE direction = 'inbound' AND ts < ? AND phone IN (${lote.map(() => '?').join(',')})`, sinceUTC, ...lote);
-      for (const r of rs) prev.add(kpiTel(r.phone));
-    }
-    for (const x of filas) { const o = out[x.v]; if (o && x.bucket === 'ok' && prev.has(x.tel)) { o.aparte.recompra_n += x.n; o.aparte.recompra_monto += x.monto; } }
+  // Recompras (info, no resta): ventas a clientes que ya habían COMPRADO antes (otro pedido, fecha anterior). A Facu/Agus
+  // casi nunca les llegan (el reparto saltea clientes existentes), así que en los totales de Joaco pesan a su favor.
+  const comprasPrev = new Map();
+  for (const r of prevPedR) { const t = kpiTelPedido(r.tel); if (!t) continue; if (!comprasPrev.has(t)) comprasPrev.set(t, []); comprasPrev.get(t).push(r); }
+  for (const x of filas) {
+    const o = out[x.v]; if (!o || x.bucket !== 'ok' || !x.tel) continue;
+    if ((comprasPrev.get(x.tel) || []).some(p => p.fecha < x.r.fecha && String(p.numero) !== String(x.r.numero))) { o.aparte.recompra_n += x.n; o.aparte.recompra_monto += x.monto; }
   }
   for (const [tel, imp] of importes) if (imp.to_ === 'agustina' && imp.ts >= sinceUTC && imp.ts < untilExUTC && tel) out.agustina.aparte.traidas_n++;
 
@@ -9906,9 +9938,10 @@ async function kpiMesVendedores(env, mes) {
     const desde = new Date(t0 - 10 * 60e3).toISOString();
     const p = lp.find(ts => ts >= desde);
     const presOk = !!(p && Date.parse(p) <= t0 + 14 * DAY);
-    const oc = ocPrim.get(c.tel), ocOk = !!(oc && oc >= c.t0 && Date.parse(oc) <= t0 + 30 * DAY);
+    const manchada = asistTels.has(c.tel); // venta que cerró el equipo: ni la OC ni la compra cuentan para la tasa
+    const oc = ocPrim.get(c.tel), ocOk = !manchada && !!(oc && oc >= c.t0 && Date.parse(oc) <= t0 + 30 * DAY);
     const dia0 = new Date(t0 - 3 * 3600e3).toISOString().slice(0, 10), dia30 = new Date(t0 - 3 * 3600e3 + 30 * DAY).toISOString().slice(0, 10);
-    const cp = compraPrim.get(c.tel), compraOk = !!(cp && cp >= dia0 && cp <= dia30);
+    const cp = compraPrim.get(c.tel), compraOk = !manchada && !!(cp && cp >= dia0 && cp <= dia30);
     o.coh_n++;
     if (edad >= 14 * DAY) { o.coh_m14++; if (presOk) o.coh_presup14++; }
     if (edad >= 30 * DAY) {
@@ -9921,11 +9954,13 @@ async function kpiMesVendedores(env, mes) {
   const logsPorTel = new Map(); for (const l of logR) { if (!logsPorTel.has(l.phone)) logsPorTel.set(l.phone, []); logsPorTel.get(l.phone).push(l); }
   for (const r of respR) {
     if (KPI_BANDEJAS_FUERA.includes(r.inbox)) continue;
+    if (kpiEsIg(r.phone)) continue; // Instagram aparte: el eco del bot entra como 'humano' y ensucia la demora
     const resp = r.r1 || null;
     const L = (logsPorTel.get(r.phone) || []).filter(x => x.ts > r.c);
-    const tR = new Date(Date.parse(resp || ahora) + 60e3).toISOString();
     let dueno, tAsig = r.c;
-    const previas = L.filter(x => x.ts <= tR);
+    // Solo cambios de dueño ANTERIORES a la respuesta: el 'trabaja' que dispara la propia respuesta (ms después) no
+    // le pasa la demora al que contestó con 0 h; la demora sigue siendo del que tenía el chat.
+    const previas = L.filter(x => x.ts < (resp || ahora));
     if (previas.length) { const ult = previas[previas.length - 1]; dueno = ult.to_ || 'joaco'; tAsig = ult.ts; }
     else if (L.length) dueno = L[0].fr || 'joaco';
     else {
@@ -9947,12 +9982,16 @@ async function kpiMesVendedores(env, mes) {
   for (const k in out) {
     const o = out[k];
     o.presup_clientes = o._cli.size; o.oc = o._oc.size; o.pedidos = o._ped.size;
+    // Aparte de OC en CLIENTES que no sumaron por ese motivo (no en mensajes).
+    o.aparte.oc_reenvios = [...o._ocRe].filter(t => !o._oc.has(t)).length;
+    o.aparte.oc_admin = [...o._ocAd].filter(t => !o._oc.has(t)).length;
+    o.aparte.oc_asistidas = o._ocAs.size;
     o.resp_mediana_h = kpiMediana(o._respAll);           // contando a los que nunca se respondieron (con lo que llevan)
     o.resp_mediana_respondidos_h = kpiMediana(o._resp);
     o.resp_censurada = (o.sin_resp * 2) >= (o.resp_n + o.sin_resp) && o.sin_resp > 0;
     o.presup_mediana_h = kpiMediana(o._presH);
     for (const c of ['monto_neon_norm', 'monto_corp_norm']) o[c] = Math.round(o[c]);
-    delete o._cli; delete o._oc; delete o._ped; delete o._resp; delete o._respAll; delete o._presH;
+    delete o._cli; delete o._oc; delete o._ocRe; delete o._ocAd; delete o._ocAs; delete o._ped; delete o._resp; delete o._respAll; delete o._presH;
   }
   return { v: out, g: global, calculado: ahora };
 }
@@ -9994,7 +10033,8 @@ async function kpiSnapshot(env) {
     const v = funnelVendedor(r.com) || 'joaco'; if (!out[v]) continue;
     const dias = Math.round((Date.parse(hoy + 'T00:00:00Z') - Date.parse(String(r.fecha).slice(0, 10) + 'T00:00:00Z')) / 864e5);
     const e = _normTxt(r.est), corp = kpiEsCorp(r);
-    const revisar = e.startsWith('en produc') ? dias > (corp ? 35 : 21) : dias > 10;
+    // Días desde la VENTA (no hay historial de estados): en producción, neón 3 semanas / corpóreo 5; para enviar, 10 días más.
+    const revisar = e.startsWith('en produc') ? dias > (corp ? 35 : 21) : dias > (corp ? 45 : 31);
     if (!revisar) continue;
     const k = [r.numero, r.fecha, v, r.tel].join('|');
     if (!grupos.has(k)) grupos.set(k, { v, id: r.id, numero: r.numero, fecha: r.fecha, dias, est: r.est, carteles: [] });
@@ -10024,7 +10064,7 @@ async function kpiSemanas(env, mes) {
   const desdeMsgs = new Date(lunes.getTime() - 75 * DAY).toISOString();
   const [rows, presMsgR, ocTelR, internosR] = await Promise.all([
     q("SELECT id, numero, fecha, IFNULL(comercial_id, 'joaco') com, IFNULL(origen, '') origen, IFNULL(telefono, '') tel, COALESCE(es_corporeo, 0) ec, IFNULL(cartel, '') cartel, COALESCE(cantidad, 1) cant, COALESCE(precio, 0) precio, COALESCE(precio_dimmer, 0) dimmer, IFNULL(cargado_por, '') cargado_por, IFNULL(asistido_por, '') asistido, IFNULL(created_at, '') created_at FROM pedidos WHERE fecha >= ? AND fecha < ?", desde, hastaEx),
-    q(`SELECT phone, ts, IFNULL(sender_name, '') snd, IFNULL(wamid, '') wamid FROM wa_messages WHERE direction = 'outbound' AND ts >= ? AND IFNULL(status, '') != 'failed' AND ${KPI_PRESUP_SQL} ORDER BY ts`, desdeMsgs),
+    q(`SELECT phone, ts, IFNULL(sender_name, '') snd, IFNULL(wamid, '') wamid, substr(body, 1, 160) body FROM wa_messages WHERE direction = 'outbound' AND ts >= ? AND IFNULL(status, '') != 'failed' AND ${KPI_PRESUP_SQL} ORDER BY ts`, desdeMsgs),
     q("SELECT DISTINCT phone FROM oc_enviadas"),
     q("SELECT phone FROM wa_internal_phones"),
   ]);
@@ -10039,6 +10079,13 @@ async function kpiSemanas(env, mes) {
     if (x.corp) { o.corp += x.monto; o.corp_norm += x.montoNorm; } else { o.neon += x.monto; o.neon_norm += x.montoNorm; }
   }
   return semanas;
+}
+async function kpiSemanasCacheado(env, mes) {
+  const k = `kpi_sem:${KPI_CACHE_V}:${mes}`;
+  try { const r = await env.DB.prepare('SELECT v, updated_at FROM kv_cache WHERE k = ?').bind(k).first(); if (r && Date.now() - Date.parse(r.updated_at) < 10 * 60e3) return JSON.parse(r.v); } catch (_) {}
+  const d = await kpiSemanas(env, mes);
+  await kvSet(env, k, JSON.stringify(d));
+  return d;
 }
 // Meta de plata vigente en ese mes: la última que Gaspar fijó para ese mes o uno anterior (nunca una posterior).
 async function kpiMeta(env, slug, mes) {
@@ -10062,7 +10109,7 @@ async function kpiMesCacheado(env, mes) {
 // slug = un vendedor (su panel, montos crudos) | '' = comparación de los 3 (solo Gaspar, montos sin el +5%).
 async function buildKpisVendedor(env, { mes, slug }) {
   const ant = kpiMesMas(mes, -1);
-  const [act, prev, snap, semanas] = await Promise.all([kpiMesCacheado(env, mes), kpiMesCacheado(env, ant), kpiSnapshot(env), kpiSemanas(env, mes)]);
+  const [act, prev, snap, semanas] = await Promise.all([kpiMesCacheado(env, mes), kpiMesCacheado(env, ant), kpiSnapshot(env), kpiSemanasCacheado(env, mes)]);
   const uno = async (v, norm) => ({
     slug: v.slug, nombre: v.nombre,
     actual: kpiDerivar(act.v[v.slug], norm), anterior: kpiDerivar(prev.v[v.slug], norm),
@@ -19537,7 +19584,7 @@ const handler = {
                media_url = excluded.media_url,
                context_id = excluded.context_id
              WHERE wa_messages.msg_type = 'status' OR wa_messages.media_url IS NULL OR wa_messages.media_url = ''`
-          ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', type, body, r2Key, replyTo || '', 'sent').run();
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num, autorSlug(session.user), type, body, r2Key, replyTo || '', 'sent').run(); // sender_name = quién lo mandó (panel de rendimiento)
         } catch (_) {}
         return json({ id: r.id, r2Key, type });
       }
@@ -19580,7 +19627,7 @@ const handler = {
           ).bind(num, since24).first();
           // render_key para la plantilla con foto: el del brief si lo hay; si no, la key R2
           // del blob que ACABAMOS de subir (el cotizador manda el render en memoria, sin brief).
-          if (!inb) { const rk = renderKey || (type === 'image' ? r2Key : ''); return json({ error: 'Re-engagement message', window_closed: true, has_render: !!rk, render_key: rk }, 409); }
+          if (!inb) { const rk = renderKey || ''; return json({ error: 'Re-engagement message', window_closed: true, has_render: !!rk, render_key: rk }, 409); }
         } catch (_) {}
 
         const CAPTION_MAX = 1024;
@@ -19732,7 +19779,7 @@ const handler = {
                 try {
                   await env.DB.prepare(
                     'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-                  ).bind(new Date().toISOString(), res.id || '', 'outbound', num, '', original.msg_type, original.body || '', original.media_url || '', '', 'sent').run();
+                  ).bind(new Date().toISOString(), res.id || '', 'outbound', num, autorSlug(session.user), original.msg_type, original.body || '', original.media_url || '', '', 'sent').run();
                 } catch (_) {}
               } else {
                 results.failed++;
@@ -20604,6 +20651,7 @@ const handler = {
         _pedWhere += ' ORDER BY pedidos.fecha DESC, pedidos.numero DESC, pedidos.id DESC';
         // + diseno_key / corte_estado / corte_id de la pieza de corte (foto del diseño final).
         const _pedRows = await pedidosConDiseno(env, _pedWhere, _pedArgs);
+        if (_pedRole === 'comercial') for (const _r of _pedRows) delete _r.asistido_por; // marca interna de Gaspar
         return json({ pedidos: _pedRows });
       }
 
@@ -21073,6 +21121,7 @@ const handler = {
           const _as = String(body.asistido_por || '').trim().toLowerCase();
           if (!['', 'bruno', 'equipo'].includes(_as)) return json({ error: 'asistido_por inválido' }, 400);
           await env.DB.prepare(`UPDATE pedidos SET asistido_por = ? WHERE ${_grp}`).bind(_as, ..._grpArgs).run();
+          try { await env.DB.prepare("DELETE FROM kv_cache WHERE k LIKE 'kpi_mes:%' OR k LIKE 'kpi_sem:%'").run(); } catch (_) {} // que se vea ya en el panel
           touched = true;
         }
 
