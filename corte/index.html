@@ -102,7 +102,30 @@
   .btn.pri { width: 100%; background: var(--red); color: #fff; font-size: 18px; min-height: 58px; box-shadow: 0 0 0 1px rgba(255,74,94,.6), 0 8px 28px rgba(255,24,48,.35); }
   .btn.pri:hover { background: #ff2f45; }
   .btn[disabled] { opacity: .55; cursor: wait; }
-  .insumo { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 12px 0; border-top: 1px solid var(--border); }
+  .insumo { display: grid; grid-template-columns: 56px 1fr auto; gap: 12px; align-items: center; padding: 12px 0; border-top: 1px solid var(--border); }
+  .ins-mini { width: 56px; height: 56px; padding: 0; border: 1px solid var(--border-strong); border-radius: 10px; overflow: hidden; background: #fff; cursor: pointer; align-self: start; }
+  .ins-mini img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ver-ficha { display: inline-block; background: none; border: 0; padding: 6px 0 0; color: var(--cyan); font: 700 13.5px var(--sans); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+  @media (max-width: 420px) { .insumo { grid-template-columns: 56px 1fr; } .insumo .stepper { grid-column: 2; justify-self: start; } }
+  dialog.ficha { width: min(520px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--card); color: var(--fg); overflow: auto; }
+  dialog.ficha::backdrop { background: rgba(0, 0, 0, .74); }
+  .ficha .foto-g { position: relative; background: #fff; }
+  .ficha .foto-g img { display: block; width: 100%; height: min(56vh, 520px); object-fit: cover; }
+  .ficha .cerrar { position: absolute; top: 10px; right: 10px; width: 42px; height: 42px; border-radius: 50%; border: 0; background: rgba(0, 0, 0, .62); color: #fff; font: 400 26px/1 var(--sans); cursor: pointer; }
+  .ficha .tiras { display: flex; gap: 8px; padding: 10px 16px 0; }
+  .ficha .tiras button { width: 56px; height: 56px; padding: 0; border: 2px solid transparent; border-radius: 10px; overflow: hidden; background: #fff; cursor: pointer; opacity: .7; }
+  .ficha .tiras button.on { border-color: var(--red); opacity: 1; }
+  .ficha .tiras img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ficha .cuerpo { padding: 14px 18px 18px; }
+  .ficha .tag { display: inline-block; margin: 0 0 4px; font-size: 11.5px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--red-glow); }
+  .ficha h3 { margin: 0; font-size: 22px; font-weight: 800; }
+  .ficha .precio-f { margin: 4px 0 8px; color: var(--muted); font-size: 15px; }
+  .ficha .precio-f b { color: var(--fg); }
+  .ficha .cuerpo p { color: var(--muted); margin: 8px 0; font-size: 15px; }
+  .ficha .cuerpo ul { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 14.5px; }
+  .ficha .cuerpo li { margin: 3px 0; }
+  .ficha .acciones { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; margin-top: 16px; }
+  .ficha .en-pedido { text-align: center; color: var(--ok); font-size: 14px; font-weight: 700; min-height: 20px; margin-top: 10px; }
   .insumo:first-of-type { border-top: 0; }
   .insumo b { font-size: 15px; }
   .insumo .det { color: var(--subtle); font-size: 13px; }
@@ -248,6 +271,19 @@
     </div>
   </section>
 </div>
+<dialog id="ficha" class="ficha" aria-labelledby="ficha-t">
+  <div class="foto-g"><img id="ficha-img" alt=""><button type="button" class="cerrar" id="ficha-cerrar" aria-label="Cerrar">×</button></div>
+  <div class="tiras" id="ficha-tiras"></div>
+  <div class="cuerpo">
+    <div class="tag" id="ficha-tag" hidden></div>
+    <h3 id="ficha-t"></h3>
+    <div class="precio-f" id="ficha-precio"></div>
+    <div id="ficha-texto"></div>
+    <ul id="ficha-datos"></ul>
+    <div class="acciones"><button type="button" class="btn sec" id="ficha-volver">Volver</button><button type="button" class="btn pri" id="ficha-sumar" style="font-size:16px;min-height:52px">Sumar al pedido</button></div>
+    <div class="en-pedido" id="ficha-en-pedido" aria-live="polite"></div>
+  </div>
+</dialog>
 <footer>Neon Infinito · Servicio de corte de bases acrílicas<br><a id="wa-pie" href="#" target="_blank" rel="noopener">Dudas? Escribinos por WhatsApp</a></footer>
 
 <script>
@@ -283,13 +319,73 @@
     else { box.innerHTML = '<video controls playsinline preload="metadata" src="' + esc(url) + '"></video>'; if (/vertical|reel|9x16/i.test(url)) box.classList.add('vertical'); }
     box.hidden = false;
   }
+  // ---------- Fichas de los insumos (textos de Gaspar, 14-oct; fotos en corte/insumos/) ----------
+  var FICHAS = {
+    cable_025: {
+      tag: 'El que recomendamos', fotos: ['cable-025-rollo', 'cable-025-punta'],
+      texto: ['Es el que usamos para las conexiones internas de los carteles. Es plateado y fino, y se camufla muy bien con el acrílico transparente: casi no se ve.', 'Es la opción más premium y la que recomendamos.'],
+      datos: ['Rollo de 50 m', 'Transparente, con los hilos plateados', 'Para las conexiones internas del cartel'],
+    },
+    cable_035: {
+      tag: '', fotos: ['cable-035-rollo', 'cable-035-punta'],
+      texto: ['Una opción más económica que sirve tanto para las conexiones internas como para el cable de salida, del cartel a la fuente de 12 V.', 'Nosotros lo usamos como cable de salida en todos los carteles chicos, de hasta unos 8 m de neón.'],
+      datos: ['Rollo de 100 m', 'Blanco o negro', 'Conexiones internas o salida a la fuente', 'Salida para carteles de hasta 8 m de neón aprox.'],
+    },
+    cable_05: {
+      tag: '', fotos: ['cable-05-rollo', 'cable-05-punta'],
+      texto: ['Es el cable de salida que usamos en los carteles más grandes, de más de 8 m de neón aprox.', 'No lo recomendamos para las conexiones internas: es muy grueso para maniobrar.'],
+      datos: ['Rollo de 100 m', 'Blanco o negro', 'Salida a la fuente en carteles grandes', 'No es para conexiones internas'],
+    },
+    nitto_4a: {
+      tag: 'La mejor del mercado', fotos: ['nitto-4a-etiqueta', 'nitto-4a-frente'],
+      texto: ['Para nosotros es literalmente la mejor fuente de 12 V del mercado. Gracias a estas fuentes dejamos de usar las metálicas de 12 V 10 A: alimentan hasta 14 m de neón para cartelería.', 'Son las mejores fuentes y no se consiguen en el mercado.'],
+      datos: ['Salida 12 V · 4 A · 48 W', 'Entrada 100-240 V', 'Alimenta hasta 14 m de neón', 'Modelo Nitto ESF240N80C'],
+    },
+  };
+  var fichaCod = '';
+  function abrirFicha(codigo) {
+    var x = (cfg.insumos || []).find(function (y) { return y.codigo === codigo; }), f = FICHAS[codigo];
+    if (!x || !f) return;
+    fichaCod = codigo;
+    $('ficha-t').textContent = x.nombre;
+    $('ficha-tag').hidden = !f.tag; $('ficha-tag').textContent = f.tag || '';
+    $('ficha-precio').innerHTML = '<b>' + pesos(x.precio) + '</b> c/u' + (x.escala || []).slice().reverse().map(function (e) { return ' · <b>' + pesos(e[1]) + '</b> c/u desde ' + e[0]; }).join('');
+    $('ficha-texto').innerHTML = f.texto.map(function (t) { return '<p>' + esc(t) + '</p>'; }).join('');
+    $('ficha-datos').innerHTML = f.datos.map(function (t) { return '<li>' + esc(t) + '</li>'; }).join('');
+    $('ficha-tiras').innerHTML = f.fotos.length > 1 ? f.fotos.map(function (n, i) { return '<button type="button" data-ficha-foto="' + i + '" aria-label="Foto ' + (i + 1) + '"><img src="insumos/' + n + '.jpg" alt="" loading="lazy"></button>'; }).join('') : '';
+    verFoto(0); pintarFichaCant();
+    var d = $('ficha'); if (typeof d.showModal === 'function') d.showModal(); else d.setAttribute('open', '');
+  }
+  function verFoto(i) {
+    var f = FICHAS[fichaCod]; if (!f || !f.fotos[i]) return;
+    $('ficha-img').src = 'insumos/' + f.fotos[i] + '.jpg';
+    $('ficha-img').alt = $('ficha-t').textContent + ', foto ' + (i + 1);
+    document.querySelectorAll('[data-ficha-foto]').forEach(function (b) { b.classList.toggle('on', +b.getAttribute('data-ficha-foto') === i); });
+  }
+  function pintarFichaCant() { var n = S.insumos[fichaCod] || 0; $('ficha-en-pedido').textContent = n ? 'En tu pedido: ' + n : ''; }
+  function cerrarFicha() { var d = $('ficha'); if (typeof d.close === 'function') d.close(); else d.removeAttribute('open'); }
+  $('ficha-cerrar').onclick = cerrarFicha;
+  $('ficha-volver').onclick = cerrarFicha;
+  $('ficha').addEventListener('click', function (e) {
+    if (e.target === $('ficha')) { cerrarFicha(); return; } // tocar afuera de la ficha
+    var b = e.target.closest('[data-ficha-foto]'); if (b) verFoto(+b.getAttribute('data-ficha-foto'));
+  });
+  $('ficha-sumar').onclick = function () {
+    var c = fichaCod; if (!c) return;
+    S.insumos[c] = Math.min(50, (S.insumos[c] || 0) + 1);
+    var o = document.querySelector('[data-ins-n="' + c + '"]'); if (o) o.textContent = S.insumos[c];
+    total(); pintarFichaCant();
+  };
+  $('insumos').addEventListener('click', function (e) { var f = e.target.closest('[data-ficha]'); if (f) abrirFicha(f.getAttribute('data-ficha')); });
   function pintarInsumos() {
     var list = cfg.insumos || [];
     $('ins-bloque').hidden = !list.length;
     $('n-entrega').textContent = list.length ? '4' : '3';
     $('insumos').innerHTML = list.map(function (x) {
       var colores = x.colores ? '<select data-ins-color="' + esc(x.codigo) + '" aria-label="Color">' + x.colores.map(function (c) { return '<option value="' + esc(c) + '">' + esc(c.charAt(0).toUpperCase() + c.slice(1)) + '</option>'; }).join('') + '</select>' : '';
-      return '<div class="insumo"><div><b>' + esc(x.nombre) + '</b>' + (x.detalle ? '<div class="det">' + esc(x.detalle) + '</div>' : '') + '<div class="precio">' + pesos(x.precio) + ' c/u' + (x.escala || []).slice().reverse().map(function (e) { return ' · ' + pesos(e[1]) + ' desde ' + e[0]; }).join('') + '</div>' + colores + '</div>'
+      var fi = FICHAS[x.codigo];
+      var mini = fi ? '<button type="button" class="ins-mini" data-ficha="' + esc(x.codigo) + '" aria-label="Ver ficha: ' + esc(x.nombre) + '"><img src="insumos/' + fi.fotos[0] + '-mini.jpg" alt="" loading="lazy" width="56" height="56"></button>' : '<span></span>';
+      return '<div class="insumo">' + mini + '<div><b>' + esc(x.nombre) + '</b>' + (x.detalle ? '<div class="det">' + esc(x.detalle) + '</div>' : '') + '<div class="precio">' + pesos(x.precio) + ' c/u' + (x.escala || []).slice().reverse().map(function (e) { return ' · ' + pesos(e[1]) + ' desde ' + e[0]; }).join('') + '</div>' + colores + (fi ? '<div><button type="button" class="ver-ficha" data-ficha="' + esc(x.codigo) + '">Ver ficha</button></div>' : '') + '</div>'
         + '<div class="stepper"><button type="button" data-ins="' + esc(x.codigo) + '" data-d="-1" aria-label="Uno menos">−</button><output data-ins-n="' + esc(x.codigo) + '">0</output><button type="button" data-ins="' + esc(x.codigo) + '" data-d="1" aria-label="Uno más">+</button></div></div>';
     }).join('');
   }
