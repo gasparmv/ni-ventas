@@ -4496,6 +4496,28 @@ function renderCorte() {
           ${kCol('✅ Diseñados', disenadosNeon.length, 'esta semana', colDisenados || kVacio('Todavía nada diseñado esta semana'))}
         </div>
       </div>`;
+    // TABLERO DE PEDIDOS WEB (alumnos que piden por la landing /corte/): lo que espera la matriz y lo que Emma ya diseñó
+    // esta semana. Tocar una pieza la trae a la línea de relevamiento (arriba). Al marcar "Matriz lista", la fila de su
+    // planilla se escribe sola.
+    const porDisenarWeb = colaEmma.filter(p => p.producto !== 'NEON');
+    const disenadosWeb = pedidos
+      .filter(p => p.origen === 'landing' && !corteEsInsumo(p) && ['matriz_lista', 'cortado', 'embalado', 'despachado', 'entregado'].indexOf(p.estado) !== -1 && p.disenado_at && String(p.disenado_at) >= _lunesAR)
+      .sort((a, b) => String(b.disenado_at).localeCompare(String(a.disenado_at)) || (b.id - a.id));
+    const wLunes = (p) => p.hoja_fecha ? String(p.hoja_fecha).split('/').slice(0, 2).map(x => x.padStart(2, '0')).join('/') : '';
+    const wMed = (p) => { const t = String(p.medida_declarada || ''), a = t.match(/ancho\s*([\d.,]+)/i), l = t.match(/alto\s*([\d.,]+)/i); return a && l ? 'pidió ' + a[1] + ' × ' + l[1] + ' cm' : (t || '—'); };
+    const wTitulo = (p) => `<b>${escapeHtml(p.cliente_nombre || 'cliente')}</b> · ${escapeHtml(p.diseno_nombre || 'diseño')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + escapeHtml(String(p.cantidad)) : ''}`;
+    const colPorDisenarWeb = porDisenarWeb.map(p => { const enPantalla = p.id === relevVisId; return `<div data-corte-relev-ir="${p.id}" role="button" tabindex="0" title="Traer a la línea de relevamiento" style="${kCard};cursor:pointer${enPantalla ? ';border-color:var(--accent-cyan,#8FD4DE)' : ''}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${wTitulo(p)}</div><div style="${kSub}">${escapeHtml(wMed(p))}${wLunes(p) ? ' · tanda del ' + wLunes(p) : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;color:var(--accent-cyan,#8FD4DE)">${enPantalla ? 'en pantalla' : 'Medir →'}</span></div>`; }).join('');
+    const colDisenadosWeb = disenadosWeb.slice(0, 20).map(p => { const paso = kPaso[p.estado] || ['✓ listo', '#22c55e']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${wTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}${p.hoja_fila ? ' · en la planilla' : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span></div>`; }).join('');
+    const webKanban = (porDisenarWeb.length || disenadosWeb.length) ? `
+      <div style="margin-top:22px">
+        <style>@media(max-width:900px){.corte-web-cols{grid-template-columns:1fr!important}}</style>
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span style="font-size:15px;font-weight:800;color:var(--accent-cyan,#8FD4DE)">🌐 Pedidos web — tablero</span><span style="color:var(--fg-mute);font-size:12px">${porDisenarWeb.length} por diseñar · ${disenadosWeb.length} diseñado${disenadosWeb.length === 1 ? '' : 's'} esta semana · al tocar "Matriz lista" se anotan solos en la planilla${cargando ? ' · cargando…' : ''}</span></div>
+        <div class="corte-web-cols" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start">
+          ${kCol('🎨 Por diseñar', porDisenarWeb.length, '', porDisenarWeb.length ? `${porDisenarWeb.some(p => p.foto_key) ? `<button type="button" class="btn" data-corte-disenos-pack="${porDisenarWeb.filter(p => p.foto_key).map(p => p.id).join(',')}" data-corte-disenos-tipo="web" title="Baja un ZIP con las fotos (cliente - diseño - medida) y un medidas.txt" style="width:100%;margin-bottom:8px;font-size:12.5px">⬇ Descargar diseños</button>` : ''}${colPorDisenarWeb}` : kVacio('Todo diseñado ✨'))}
+          ${kCol('✅ Diseñados', disenadosWeb.length, 'esta semana', colDisenadosWeb || kVacio('Todavía nada diseñado esta semana'))}
+        </div>
+      </div>` : `
+      <div style="margin-top:22px;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:15px;font-weight:800;color:var(--accent-cyan,#8FD4DE)">🌐 Pedidos web</span><span style="color:var(--fg-mute);font-size:12px">${cargando ? 'cargando…' : 'todavía no entró ninguno: cuando un alumno pida por la web, aparece acá con su foto'}</span></div>`;
     if (!colaEmma.length) {
       return `
         <div style="padding:var(--s-4);max-width:1040px">
@@ -4508,6 +4530,7 @@ function renderCorte() {
               <div style="color:var(--fg-mute);font-size:13px;margin-top:4px">No hay diseños esperando la matriz.</div>
             </div>`}
           </div>
+          ${webKanban}
           ${neonKanban}
           <div style="max-width:640px">${corteArchivoEmmaHtml()}</div>
         </div>`;
@@ -4555,6 +4578,7 @@ function renderCorte() {
           </div>
         </div>
        </div>
+        ${webKanban}
         ${neonKanban}
         <div style="max-width:640px">${corteArchivoEmmaHtml()}</div>
       </div>`;
@@ -6880,11 +6904,12 @@ async function corteSubirArchivo(inputId, endpoint, statusId, extraQuery, requir
 async function corteDisenosPack(btn) {
   if (!btn || btn.disabled) return;
   const ids = String(btn.getAttribute('data-corte-disenos-pack') || '').split(',').map(Number).filter(Boolean);
+  const tipo = btn.getAttribute('data-corte-disenos-tipo') || ''; // 'web' = pedidos de la landing (sin aviso por WhatsApp)
   if (!ids.length) { toast('No hay diseños para descargar'); return; }
   const txt0 = btn.textContent;
   btn.disabled = true; btn.textContent = 'Preparando el ZIP…';
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/disenos-pack', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/corte/disenos-pack', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(tipo ? { ids, tipo } : { ids }) });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
       toast(j.error || ('No se pudo armar el ZIP (HTTP ' + r.status + ')'));
@@ -6897,6 +6922,7 @@ async function corteDisenosPack(btn) {
     document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
     let info = null; try { info = JSON.parse(decodeURIComponent(r.headers.get('X-Medidas') || '')); } catch (_) {}
     const est = info && info.estado;
+    if (tipo === 'web') { toast('ZIP descargado ✓ (' + ((info && info.fotos) || ids.length) + ' diseño' + (((info && info.fotos) || ids.length) === 1 ? '' : 's') + ')'); return; }
     toast(est === 'plantilla' ? 'ZIP descargado ✓ · medidas enviadas por WhatsApp a Emma y Gaspar'
       : est === 'ya_avisado' ? 'ZIP descargado ✓ · las medidas ya se habían mandado hace un rato'
       : est === 'texto' ? 'ZIP descargado ✓ · medidas enviadas por WhatsApp a Emma y Gaspar'

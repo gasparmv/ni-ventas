@@ -420,12 +420,18 @@
   function telLimpio() { return String($('tel').value || '').replace(/\D/g, ''); }
   function chequearCliente() {
     var t = telLimpio();
-    if (t.length < 10) { S.cliente = null; S.telChequeado = ''; pintarCliente(); return; }
+    if (t.length < 10) { S.cliente = null; S.telChequeado = ''; if (S.nombreAuto) { $('nombre').value = ''; S.nombreAuto = false; } pintarCliente(); return; }
     if (t === S.telChequeado) return;
     S.telChequeado = t;
     api('/corte/landing/cliente', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ telefono: $('tel').value }) }).then(function (j) {
       if (t !== S.telChequeado) return;
-      if (j && j.ok) { S.cliente = { conocido: !!j.conocido, tieneDir: !!j.tiene_direccion }; $('tel').classList.remove('invalido'); }
+      if (j && j.ok) {
+        S.cliente = { conocido: !!j.conocido, tieneDir: !!j.tiene_direccion }; $('tel').classList.remove('invalido');
+        // WhatsApp registrado → el nombre se completa solo (si no lo escribió la persona a mano).
+        var nom = $('nombre');
+        if (j.conocido && j.nombre && (!String(nom.value).trim() || S.nombreAuto)) { nom.value = j.nombre; S.nombreAuto = true; nom.classList.remove('invalido'); }
+        else if (!j.conocido && S.nombreAuto) { nom.value = ''; S.nombreAuto = false; }
+      }
       else { S.cliente = null; if (j && j.error === 'telefono') { $('tel').classList.add('invalido'); mostrarError(j.motivo); } }
       pintarCliente();
     }).catch(function () { S.cliente = null; pintarCliente(); });
@@ -440,6 +446,7 @@
     $('dir').hidden = !(env && (!registrada || $('dir-cambio').checked));
   }
   $('tel').addEventListener('blur', chequearCliente);
+  $('nombre').addEventListener('input', function () { S.nombreAuto = false; }); // lo escribió a mano: no se pisa
   $('tel').addEventListener('input', function () { $('tel').classList.remove('invalido'); clearTimeout(S.telT); S.telT = setTimeout(chequearCliente, 900); });
   document.querySelectorAll('input[name=entrega]').forEach(function (r) { r.addEventListener('change', pintarCliente); });
   $('dir-cambio').addEventListener('change', pintarCliente);

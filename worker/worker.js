@@ -5673,6 +5673,8 @@ async function corteLandingPrecios(env) {
 }
 function corteLandingTxt(s, max) { return String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); }
 function corteLandingNombrePropio(s) { return corteLandingTxt(s, 60).toLowerCase().replace(/(^|[\s'-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase()); }
+// Nombre registrado para mostrar ("AgustinAcuña" → "Agustin Acuña", "tomas agustin rosas" → "Tomas Agustin Rosas").
+function corteLandingNombreLindo(s) { return corteLandingNombrePropio(String(s || '').replace(/([a-záéíóúñü])([A-ZÁÉÍÓÚÑÜ])/g, '$1 $2')); }
 function corteLandingCm(v) { const n = parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) && n > 0 ? Math.round(n * 10) / 10 : 0; }
 function corteLandingPesos(n) { return '$' + Math.round(n || 0).toLocaleString('es-AR'); }
 // Tope por IP y por hora (contadores en kv_cache; la limpieza los borra al otro día).
@@ -5969,7 +5971,9 @@ async function corteLandingRoute(request, env, ctx, url, path) {
     const tel = corteTel(body.telefono);
     if (!tel) return json({ error: 'telefono', motivo: 'Revisá el número: código de área y número, sin el 0 ni el 15.' }, 400);
     const c = await corteLandingCliente(env, tel);
-    return json({ ok: true, conocido: c.conocido, tiene_direccion: c.tieneDireccion });
+    // Con un teléfono registrado se devuelve el nombre para autocompletar (lo mismo que ve cualquiera que tenga ese número en
+    // WhatsApp). Al revés (nombre → teléfono) NO: la página es pública y expondría los números de los clientes.
+    return json({ ok: true, conocido: c.conocido, tiene_direccion: c.tieneDireccion, nombre: c.conocido ? corteLandingNombreLindo(c.nombreHoja || c.nombre) : '' });
   }
   if (path === '/corte/landing/foto') {
     const rl = await corteLandingLimite(env, request, 'foto', 80);
@@ -6103,7 +6107,14 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
   try { await env.DB.prepare("UPDATE corte_landing_envios SET piezas_ids=? WHERE id=?").bind(ids.join(','), envioId).run(); } catch (_) {}
   // Aviso al momento: solo el cliente nuevo (lo demás va en el resumen del sábado).
   if (!cli.conocido && !prueba) {
-    const t = 'Corte · cliente nuevo por la web: ' + nombre + ' (…' + tel.slice(-4) + ')\n' + (disenos.length ? disenos.length + ' diseño' + (disenos.length === 1 ? '' : 's') : '') + (insumos.length ? (disenos.length ? ' + ' : '') + insumos.length + ' insumo' + (insumos.length === 1 ? '' : 's') : '') + ' · ' + (entrega === 'envio' ? 'envío a ' + [nuevo.localidad, nuevo.provincia].filter(Boolean).join(', ') : 'retira') + ' · tanda del lunes ' + pl.lunesCorto + '\nLo sumo solo a LTV y a Clientes cuando Emma mida su primer diseño.';
+    // ¿Ya era cliente con otro número? (nombre igual a uno registrado). Solo para Gaspar: la página nunca muestra teléfonos.
+    let otroNumero = '';
+    try {
+      const l = await corteLandingLtv(env);
+      const m = l && l.ok ? l.rows.filter(r => r.tel && r.tel !== tel && corteMismaPersona(r.nombre, nombre)).slice(0, 2) : [];
+      if (m.length) otroNumero = '\nOjo: el nombre coincide con ' + m.map(r => r.nombre + ' (…' + r.tel.slice(-4) + ')').join(' y ') + ', registrado con otro número. Si cambió de número, avisame y lo unifico.';
+    } catch (_) {}
+    const t = 'Corte · cliente nuevo por la web: ' + nombre + ' (…' + tel.slice(-4) + ')' + otroNumero + '\n' + (disenos.length ? disenos.length + ' diseño' + (disenos.length === 1 ? '' : 's') : '') + (insumos.length ? (disenos.length ? ' + ' : '') + insumos.length + ' insumo' + (insumos.length === 1 ? '' : 's') : '') + ' · ' + (entrega === 'envio' ? 'envío a ' + [nuevo.localidad, nuevo.provincia].filter(Boolean).join(', ') : 'retira') + ' · tanda del lunes ' + pl.lunesCorto + '\nLo sumo solo a LTV y a Clientes cuando Emma mida su primer diseño.';
     try { await precotizNotifyGaspar(env, t, { tipo: 'corte_landing_nuevo', prioridad: 'P2', clave: 'corte_landing_nuevo:' + envioId, refPhone: tel }); } catch (_) {}
   }
   return [{ ok: true, id: envioId, lunes: pl.lunesCorto, estado: pl.estado, disenos: disenos.length, insumos: insumos.length, estimado }, 200];
@@ -24805,10 +24816,12 @@ const handler = {
         const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map(x => parseInt(x, 10)).filter(Boolean))].slice(0, 40);
         if (!ids.length) return json({ error: 'no hay diseños para descargar' }, 400);
         const ph = ids.map(() => '?').join(',');
-        // Solo piezas de neón que siguen POR DISEÑAR y tienen foto (lo mismo que ve Emma en la columna).
+        // Solo piezas que siguen POR DISEÑAR y tienen foto (lo mismo que ve Emma en la columna). tipo 'web': los pedidos de la
+        // landing de corte (acrílico de alumnos) — mismo ZIP, sin el aviso de medidas por WhatsApp (es de neón).
+        const esWeb = body.tipo === 'web';
         const rows = (await env.DB.prepare(
-          `SELECT id, pedido_numero, diseno_nombre, medida_declarada, cantidad, foto_key, created_at FROM corte_pedidos
-            WHERE id IN (${ph}) AND producto = 'NEON' AND estado = 'pedido' AND IFNULL(foto_key, '') <> ''
+          `SELECT id, pedido_numero, cliente_nombre, diseno_nombre, medida_declarada, cantidad, foto_key, created_at FROM corte_pedidos
+            WHERE id IN (${ph}) AND ${esWeb ? "producto != 'NEON'" : "producto = 'NEON'"} AND estado = 'pedido' AND IFNULL(foto_key, '') <> ''
             ORDER BY created_at, id`
         ).bind(...ids).all()).results || [];
         if (!rows.length) return json({ error: 'esos diseños ya no están por diseñar (se actualizó la lista)' }, 409);
@@ -24818,11 +24831,12 @@ const handler = {
         const cuandoAR = `${p2(ar.getUTCDate())}/${p2(ar.getUTCMonth() + 1)} ${p2(ar.getUTCHours())}:${p2(ar.getUTCMinutes())}`;
         const lineas = rows.map(r => {
           const m = corteMedidaNeon(r), cant = Math.max(1, parseInt(r.cantidad, 10) || 1);
+          if (esWeb) return `${String(r.cliente_nombre || 'cliente').trim()} · ${String(r.diseno_nombre || 'diseño').trim()} ${m.txt || 'sin medida'}${cant > 1 ? ' x' + cant : ''}`;
           return `${r.pedido_numero ? '#' + r.pedido_numero + ' ' : ''}${String(r.diseno_nombre || 'cartel').trim()} ${m.txt || 'sin medida'}${cant > 1 ? ' x' + cant : ''}`;
         });
         // --- Aviso por WhatsApp (en paralelo con el armado del ZIP) ---
         // sin_aviso (solo admin): bajar el ZIP sin mandar WhatsApp (pruebas / re-descargas de Gaspar).
-        const sinAviso = _r === 'admin' && body.sin_aviso === true;
+        const sinAviso = esWeb || (_r === 'admin' && body.sin_aviso === true);
         const avisar = (async () => {
           if (sinAviso) return { estado: 'sin_aviso' };
           const sig = rows.map(r => r.id).sort((a, b) => a - b).join(',');
@@ -24880,16 +24894,16 @@ const handler = {
           const extKey = (String(r.foto_key).match(/\.([a-z0-9]{2,5})$/i) || [])[1];
           const ext = (extKey || (ct.includes('png') ? 'png' : ct.includes('webp') ? 'webp' : 'jpg')).toLowerCase();
           const m = corteMedidaNeon(r), cant = Math.max(1, parseInt(r.cantidad, 10) || 1);
-          const base = san([r.pedido_numero ? String(r.pedido_numero) : '', r.diseno_nombre || 'cartel', m.ancho && m.alto ? `${m.ancho}x${m.alto}cm` : '', cant > 1 ? 'x' + cant : ''].filter(Boolean).join(' - ')) || ('pieza ' + r.id);
+          const base = san([esWeb ? (r.cliente_nombre || 'cliente') : (r.pedido_numero ? String(r.pedido_numero) : ''), r.diseno_nombre || (esWeb ? 'diseño' : 'cartel'), m.ancho && m.alto ? `${m.ancho}x${m.alto}cm` : '', cant > 1 ? 'x' + cant : ''].filter(Boolean).join(' - ')) || ('pieza ' + r.id);
           let nm = `${base}.${ext}`, k = 2;
           while (usados.has(nm.toLowerCase())) nm = `${base} (${k++}).${ext}`;
           usados.add(nm.toLowerCase());
           files.push({ name: nm, data });
         }
-        const txt = `Diseños de neón para hacer · ${cuandoAR}\r\n\r\n` + lineas.join('\r\n') + (faltan.length ? `\r\n\r\nSin foto en el servidor: ${faltan.map(r => (r.pedido_numero ? '#' + r.pedido_numero + ' ' : '') + (r.diseno_nombre || '')).join(', ')}` : '') + '\r\n';
+        const txt = `${esWeb ? 'Pedidos web de corte para diseñar' : 'Diseños de neón para hacer'} · ${cuandoAR}\r\n\r\n` + lineas.join('\r\n') + (faltan.length ? `\r\n\r\nSin foto en el servidor: ${faltan.map(r => (r.pedido_numero ? '#' + r.pedido_numero + ' ' : '') + (r.diseno_nombre || '')).join(', ')}` : '') + '\r\n';
         files.push({ name: 'medidas.txt', data: new TextEncoder().encode(txt) });
         const aviso = await avisar;
-        const fname = `disenos-neon-${ar.getUTCFullYear()}-${p2(ar.getUTCMonth() + 1)}-${p2(ar.getUTCDate())}.zip`;
+        const fname = `disenos-${esWeb ? 'web' : 'neon'}-${ar.getUTCFullYear()}-${p2(ar.getUTCMonth() + 1)}-${p2(ar.getUTCDate())}.zip`;
         return new Response(zipStore(files, nowD), { headers: cors({
           'Content-Type': 'application/zip',
           'Content-Disposition': 'attachment; filename="' + fname + '"',
