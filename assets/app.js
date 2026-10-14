@@ -23089,11 +23089,16 @@ function renderTicketsListModal(){
   const ts = STATE.ticketsList || [];
   const fecha = ca => { ca = String(ca || ''); return ca.length >= 10 ? (ca.slice(8, 10) + '/' + ca.slice(5, 7) + '/' + ca.slice(0, 4)) : ''; };
   const cyan = 'var(--accent-cyan,#8FD4DE)';
+  const token = STATE.token || '';
+  const thumb = key => key ? (CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(key) + '?token=' + encodeURIComponent(token) + '&w=110') : '';
   const cards = ts.map(t => `
     <div class="tkl-card" data-tk-idx="${t.id}">
-      <div class="tkl-badge">#${escapeHtml(String(t.numero || ''))}</div>
+      ${t.foto
+        ? `<img class="tkl-thumb" src="${thumb(t.foto)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'tkl-badge',textContent:'🎫'}))">`
+        : `<div class="tkl-badge">#${escapeHtml(String(t.numero || ''))}</div>`}
       <div class="tkl-main">
         <div class="tkl-cliente">${escapeHtml(t.cliente || 'Sin cliente')}</div>
+        ${(t.producto || t.medidas) ? `<div class="tkl-prod">${t.producto ? escapeHtml(t.producto) : ''}${t.producto && t.medidas ? ' · ' : ''}${t.medidas ? '📐 ' + escapeHtml(t.medidas) : ''}</div>` : ''}
         <div class="tkl-meta">
           <span>🗓 ${fecha(t.created_at) || '—'}</span>
           <span class="tkl-dot">·</span>
@@ -23109,9 +23114,11 @@ function renderTicketsListModal(){
         #tkl-card-wrap{display:flex;flex-direction:column;gap:9px;max-height:min(66vh,560px);overflow-y:auto;margin-top:8px;padding-right:3px}
         .tkl-card{display:flex;align-items:center;gap:13px;padding:11px 13px;border:1px solid var(--border);border-radius:13px;background:var(--ink-100);cursor:pointer;transition:border-color .14s,transform .14s,box-shadow .14s}
         .tkl-card:hover{border-color:${cyan};transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.38)}
-        .tkl-badge{flex:0 0 auto;min-width:50px;height:46px;padding:0 9px;border-radius:11px;background:rgba(143,212,222,.11);border:1px solid rgba(143,212,222,.34);color:${cyan};font-weight:800;font-size:15px;display:flex;align-items:center;justify-content:center;letter-spacing:.01em}
+        .tkl-thumb{flex:0 0 auto;width:54px;height:54px;object-fit:cover;border-radius:12px;border:1px solid var(--border);background:var(--ink-200,#15151c);display:block}
+        .tkl-badge{flex:0 0 auto;width:54px;height:54px;border-radius:12px;background:rgba(143,212,222,.11);border:1px solid rgba(143,212,222,.34);color:${cyan};font-weight:800;font-size:15px;display:flex;align-items:center;justify-content:center;letter-spacing:.01em}
         .tkl-main{flex:1;min-width:0}
         .tkl-cliente{font-weight:700;font-size:14.5px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .tkl-prod{font-size:12.5px;color:var(--fg);opacity:.82;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
         .tkl-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:12px;color:var(--fg-subtle);margin-top:4px}
         .tkl-dot{opacity:.5}
         .tkl-fotos{background:rgba(143,212,222,.12);color:${cyan};border-radius:999px;padding:1px 8px;font-weight:600;margin-left:2px}
