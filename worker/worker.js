@@ -5366,12 +5366,13 @@ function cortePrecioHoja(raw) { return parseFloat(String(raw || '0').replace(/\$
 // Teléfono de alumno: celular AR = EXACTAMENTE 13 dígitos (549 + código de área + número = 10 dígitos). Acepta cualquier
 // forma de escribirlo: +54 9 11…, 54 11…, 0054…, 011…, 11…, 9 11…, con paréntesis/guiones/puntos, el "9" duplicado de LTV
 // ("54 9 9 11…", caso Ezequiel Carlos Sosa) y el "15" de celular: después del código de área (011 15 2345-6789, 0351 15
-// 123-4567, 2966 15 12-3456) o solo (15 2345-6789 = CABA). Primero la regla de siempre (lo que ya daba 13 dígitos no cambia);
-// si no da, se prueban las formas con 15. Cualquier otro largo = inválido ('').
+// 123-4567, 2966 15 12-3456) o solo (15 2345-6789 = CABA). Primero la regla de siempre; si no da, se prueban las formas con 15.
+// Válido = 549 + 11 + 8 dígitos o 549 + código que empieza con 2 o 3 + 9 dígitos (no hay áreas con 4-9, 0800 ni "10…").
+function corteTelOk(n) { return /^549(?:11\d{8}|[23]\d{9})$/.test(n); }
 function corteTel(raw) {
   let n = normalizeArPhone(raw) || '';
   if (n.length === 14 && n.startsWith('5499')) n = '549' + n.slice(4);
-  if (n.length === 13) return n;
+  if (corteTelOk(n)) return n;
   // Número nacional: sin 00 / 54 / 9 de celular / 0 de larga distancia adelante.
   let d = String(raw || '').replace(/\D/g, '');
   if (d.startsWith('00')) d = d.slice(2);
@@ -5385,7 +5386,7 @@ function corteTel(raw) {
     for (const pos of (d.startsWith('11') ? [2] : [3, 4])) {
       if (d.slice(pos, pos + 2) !== '15') continue;
       const nac = d.slice(0, pos) + d.slice(pos + 2);
-      if (nac.length === 10 && /^[1-3]/.test(nac)) return '549' + nac;
+      if (corteTelOk('549' + nac)) return '549' + nac;
     }
   }
   return '';
