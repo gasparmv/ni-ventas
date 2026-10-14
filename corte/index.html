@@ -333,12 +333,12 @@
       datos: ['Rollo de 50 m', 'Pre estañado: facilita la soldadura', 'Transparente, con los hilos plateados', 'Para las conexiones internas del cartel'],
     },
     cable_035: {
-      tag: '', fotos: ['cable-blanco-rollo', 'cable-negro-rollo', 'cable-blanco-punta', 'cable-negro-punta'], mini: 'cable-colores',
+      tag: '', fotos: ['cable-blanco-rollo', 'cable-negro-rollo', 'cable-blanco-punta', 'cable-negro-punta'], porColor: { blanco: 'cable-blanco-rollo', negro: 'cable-negro-rollo' },
       texto: ['Una opción más económica que sirve tanto para las conexiones internas como para el cable de salida, del cartel a la fuente de 12 V.', 'Nosotros lo usamos como cable de salida en todos los carteles chicos, de hasta unos 8 m de neón.'],
       datos: ['Rollo de 100 m', 'Viene en blanco o en negro', 'Conexiones internas o salida a la fuente', 'Salida para carteles de hasta 8 m de neón aprox.'],
     },
     cable_05: {
-      tag: '', fotos: ['cable-negro-rollo', 'cable-blanco-rollo', 'cable-negro-punta', 'cable-blanco-punta'], mini: 'cable-colores',
+      tag: '', fotos: ['cable-negro-rollo', 'cable-blanco-rollo', 'cable-negro-punta', 'cable-blanco-punta'], porColor: { blanco: 'cable-blanco-rollo', negro: 'cable-negro-rollo' },
       texto: ['Es el cable de salida que usamos en los carteles más grandes, de más de 8 m de neón aprox.', 'No lo recomendamos para las conexiones internas: es muy grueso para maniobrar.'],
       datos: ['Rollo de 100 m', 'Viene en blanco o en negro', 'Salida a la fuente en carteles grandes', 'No es para conexiones internas'],
     },
@@ -349,6 +349,12 @@
     },
   };
   var fichaCod = '';
+  // Foto del insumo para el color elegido en la lista (cables: blanco o negro); sin colores, la primera de la ficha.
+  function fotoInsumo(codigo) {
+    var f = FICHAS[codigo]; if (!f) return '';
+    var sel = document.querySelector('[data-ins-color="' + codigo + '"]');
+    return (f.porColor && sel && f.porColor[sel.value]) || f.fotos[0];
+  }
   function abrirFicha(codigo) {
     var x = (cfg.insumos || []).find(function (y) { return y.codigo === codigo; }), f = FICHAS[codigo];
     if (!x || !f) return;
@@ -359,7 +365,7 @@
     $('ficha-texto').innerHTML = f.texto.map(function (t) { return '<p>' + esc(t) + '</p>'; }).join('');
     $('ficha-datos').innerHTML = f.datos.map(function (t) { return '<li>' + esc(t) + '</li>'; }).join('');
     $('ficha-tiras').innerHTML = f.fotos.length > 1 ? f.fotos.map(function (n, i) { return '<button type="button" data-ficha-foto="' + i + '" aria-label="Foto ' + (i + 1) + '"><img src="insumos/' + n + '.jpg" alt="" loading="lazy"></button>'; }).join('') : '';
-    verFoto(0); pintarFichaCant();
+    verFoto(Math.max(0, f.fotos.indexOf(fotoInsumo(codigo)))); pintarFichaCant();
     var d = $('ficha'); if (typeof d.showModal === 'function') d.showModal(); else d.setAttribute('open', '');
   }
   function verFoto(i) {
@@ -383,6 +389,10 @@
     total(); pintarFichaCant();
   };
   $('insumos').addEventListener('click', function (e) { var f = e.target.closest('[data-ficha]'); if (f) abrirFicha(f.getAttribute('data-ficha')); });
+  $('insumos').addEventListener('change', function (e) {
+    var cod = e.target.getAttribute('data-ins-color'); if (!cod) return;
+    var img = document.querySelector('.ins-mini[data-ficha="' + cod + '"] img'); if (img) img.src = 'insumos/' + fotoInsumo(cod) + '-mini.jpg';
+  });
   function pintarInsumos() {
     var list = cfg.insumos || [];
     $('ins-bloque').hidden = !list.length;
@@ -390,7 +400,7 @@
     $('insumos').innerHTML = list.map(function (x) {
       var colores = x.colores ? '<select data-ins-color="' + esc(x.codigo) + '" aria-label="Color">' + x.colores.map(function (c) { return '<option value="' + esc(c) + '">' + esc(c.charAt(0).toUpperCase() + c.slice(1)) + '</option>'; }).join('') + '</select>' : '';
       var fi = FICHAS[x.codigo];
-      var mini = fi ? '<button type="button" class="ins-mini" data-ficha="' + esc(x.codigo) + '" aria-label="Ver ficha: ' + esc(x.nombre) + '"><img src="insumos/' + (fi.mini || fi.fotos[0]) + '-mini.jpg" alt="" loading="lazy" width="56" height="56"></button>' : '<span></span>';
+      var mini = fi ? '<button type="button" class="ins-mini" data-ficha="' + esc(x.codigo) + '" aria-label="Ver ficha: ' + esc(x.nombre) + '"><img src="insumos/' + ((fi.porColor && x.colores && fi.porColor[x.colores[0]]) || fi.fotos[0]) + '-mini.jpg" alt="" loading="lazy" width="56" height="56"></button>' : '<span></span>';
       return '<div class="insumo">' + mini + '<div><b>' + esc(x.nombre) + '</b>' + (x.detalle ? '<div class="det">' + esc(x.detalle) + '</div>' : '') + '<div class="precio">' + pesos(x.precio) + ' c/u' + (x.escala || []).slice().reverse().map(function (e) { return ' · ' + pesos(e[1]) + ' desde ' + e[0]; }).join('') + '</div>' + colores + (fi ? '<div><button type="button" class="ver-ficha" data-ficha="' + esc(x.codigo) + '">Ver ficha</button></div>' : '') + '</div>'
         + '<div class="stepper"><button type="button" data-ins="' + esc(x.codigo) + '" data-d="-1" aria-label="Uno menos">−</button><output data-ins-n="' + esc(x.codigo) + '">0</output><button type="button" data-ins="' + esc(x.codigo) + '" data-d="1" aria-label="Uno más">+</button></div></div>';
     }).join('');
