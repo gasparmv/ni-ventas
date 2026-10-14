@@ -12680,6 +12680,95 @@ async function processCentinelaRuteo(env) {
   } catch (_) {}
 }
 
+// ===== ALARMA "SIN RESPONDER" (oct-2026) =====
+// Avisa cuando un lead de VENTA de carteles quedó con un mensaje SIN RESPONDER más de N horas.
+// Nació por el caso @_feerco/"Variopinto": un lead que Joaco YA había cotizado volvió caliente
+// ("quiero pagar... sino otro proveedor") y estuvo ~3 semanas sin que nadie contestara — estaba en
+// la bandeja de Joaco (inbox general sin asignar) con la etiqueta "Abandonado IA", y ninguna alarma
+// lo agarraba (el Centinela vigila RUTEO, no si lo respondieron). Manda un DIGEST por vendedor (a su
+// WhatsApp) + uno combinado a Gaspar. Solo leads YA COTIZADOS (presupuesto enviado) o con intención
+// de compra, para no hacer ruido. Kill-switch kv 'sin_responder_on' (def '1'); umbral de horas kv
+// 'sin_responder_horas' (def '3'); horario 9-21 AR lun-sáb; dedup 1 aviso por lead cada 3 h (o si
+// llega un mensaje nuevo). Self-throttle 15 min. Corre en el cron.
+async function processSinResponder(env) {
+  try {
+    if ((await kvGet(env, 'sin_responder_on', '1')) !== '1') return;
+    const nowMs = Date.now();
+    const prevRun = parseInt(await kvGet(env, 'sin_responder_last_run', '0'), 10) || 0;
+    if (nowMs - prevRun < 15 * 60 * 1000) return;
+    // Horario hábil AR (9-21, lun-sáb): no pingear de noche ni domingo.
+    const ar = new Date(nowMs - 3 * 3600 * 1000);
+    if (ar.getUTCHours() < 9 || ar.getUTCHours() >= 21 || ar.getUTCDay() === 0) return;
+    await kvSet(env, 'sin_responder_last_run', String(nowMs));
+    try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS sin_responder_avisos (phone TEXT PRIMARY KEY, last_ts TEXT, alerted_at TEXT)').run(); } catch (_) {}
+
+    const horas = Math.max(1, parseInt(await kvGet(env, 'sin_responder_horas', '3'), 10) || 3);
+    const cutOld = new Date(nowMs - horas * 3600 * 1000).toISOString();   // último inbound más viejo que esto
+    // Piso: la alarma agarra la ventana ACCIONABLE (def 48h). Más viejo ya está perdido (eso es
+    // limpieza aparte, no una alarma en vivo) y dumpear 10 días de backlog de golpe sería contraproducente.
+    const floorH = Math.max(horas + 1, parseInt(await kvGet(env, 'sin_responder_floor_horas', '48'), 10) || 48);
+    const cutFloor = new Date(nowMs - floorH * 3600 * 1000).toISOString();
+    let rows = [];
+    try {
+      rows = (await env.DB.prepare(
+        `SELECT s.phone, s.assigned_to, s.last_ts, s.last_body, s.contact_name
+           FROM wa_chats_summary s
+          WHERE s.inbox = 'general' AND s.last_direction = 'inbound'
+            AND s.last_ts <= ? AND s.last_ts >= ?
+            AND s.phone NOT IN (SELECT phone FROM wa_internal_phones)
+            AND ( s.phone IN (SELECT cliente_wa_id FROM briefs WHERE estado = 'enviado')
+               OR lower(s.last_body) LIKE '%pagar%' OR lower(s.last_body) LIKE '%comprar%'
+               OR lower(s.last_body) LIKE '%avanzar%' OR lower(s.last_body) LIKE '%coordinar%'
+               OR lower(s.last_body) LIKE '%seña%' OR lower(s.last_body) LIKE '%sena%'
+               OR lower(s.last_body) LIKE '%otro proveedor%' )
+          ORDER BY s.last_ts ASC LIMIT 30`
+      ).bind(cutOld, cutFloor).all()).results || [];
+    } catch (_) { rows = []; }
+
+    // Dedup: dejar solo los que no avisamos por el MISMO mensaje en las últimas 3 h.
+    const reAlertMs = 3 * 3600 * 1000;
+    const fresh = [];
+    for (const r of rows) {
+      let p = null;
+      try { p = await env.DB.prepare('SELECT last_ts, alerted_at FROM sin_responder_avisos WHERE phone = ?').bind(r.phone).first(); } catch (_) {}
+      if (p && p.last_ts === r.last_ts && p.alerted_at && (nowMs - new Date(p.alerted_at).getTime()) < reAlertMs) continue;
+      fresh.push(r);
+    }
+    if (!fresh.length) return;
+
+    const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+    const nombreVend = o => o === 'joaquin' ? 'Joaco' : (o.charAt(0).toUpperCase() + o.slice(1));
+    const line = r => {
+      const h = Math.max(1, Math.round((nowMs - new Date(r.last_ts).getTime()) / 3600000));
+      const nm = (r.contact_name && String(r.contact_name).trim()) || r.phone;
+      const b = String(r.last_body || '').replace(/\s+/g, ' ').trim().slice(0, 70);
+      return `· ${nm} (hace ${h}h)${b ? ': "' + b + '"' : ''}`;
+    };
+    const byOwner = {};
+    for (const r of fresh) { const o = (String(r.assigned_to || '').trim()) || 'joaquin'; (byOwner[o] = byOwner[o] || []).push(r); }
+
+    // Digest a cada vendedor dueño.
+    for (const o in byOwner) {
+      let ophone = '';
+      try { const op = await env.DB.prepare('SELECT phone FROM agenda_phones WHERE usuario = ?').bind(o).first(); ophone = op && op.phone; } catch (_) {}
+      if (!ophone || ophone === gaspar) continue;
+      const list = byOwner[o];
+      const sh = list.slice(0, 12); const ex = list.length - sh.length;
+      const msg = `⏰ Tenés ${list.length} lead${list.length > 1 ? 's' : ''} sin responder (ya cotizado o pidiendo avanzar):\n` + sh.map(line).join('\n') + (ex > 0 ? `\n· …y ${ex} más` : '') + `\n\nContestales o pasalos, no los dejes enfriar.`;
+      try { await waSendText(env, ophone, msg); } catch (_) {}
+    }
+    // Digest combinado a Gaspar.
+    const gMsg = `⏰ Leads sin responder (${fresh.length}):\n\n` + Object.keys(byOwner).map(o => { const L = byOwner[o]; const s = L.slice(0, 8); const e = L.length - s.length; return `*${nombreVend(o)}* (${L.length}):\n` + s.map(line).join('\n') + (e > 0 ? `\n· …y ${e} más` : ''); }).join('\n\n');
+    try { await waSendText(env, gaspar, gMsg); } catch (_) {}
+
+    // Marcar avisados.
+    const nowIso = new Date(nowMs).toISOString();
+    for (const r of fresh) {
+      try { await env.DB.prepare('INSERT INTO sin_responder_avisos (phone, last_ts, alerted_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET last_ts=excluded.last_ts, alerted_at=excluded.alerted_at').bind(r.phone, r.last_ts, nowIso).run(); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
 // Avisos del centinela que NO esperan al resumen del día (oct-2026, auditoría de ruteo). desdeIso =
 // desde la corrida anterior (máx. 3 h atrás) → cada evento se avisa una sola vez. Un solo WhatsApp a
 // Gaspar con: (a) anuncios NUEVOS sin mapear a mano y cómo los está ruteando el sistema (1 vez por ad),
@@ -25439,6 +25528,7 @@ const handler = {
     // se auto-apaga pasada la ventana, y si no hay pendientes no hace nada.
     ctx.waitUntil(processGasparResendBackfill(env));
     ctx.waitUntil(processCentinelaRuteo(env));   // centinela de ruteo: cura/avisa perdidos·duplicados·mal-segmentados (self-throttle 30min)
+    ctx.waitUntil(processSinResponder(env));     // alarma "sin responder": lead cotizado/con intención sin contestar +Nh → digest al vendedor + Gaspar (self-throttle 15min, gate sin_responder_on)
     // Piloto de pre cotización automática (carteles): capta leads del 20% y los
     // releva con freno de mano. Gateado internamente (kill-switch OFF por defecto
     // + horario 8-22 AR). Corre en cada tick para responder en ~1-2 min.
