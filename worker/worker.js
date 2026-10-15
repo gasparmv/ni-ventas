@@ -665,7 +665,12 @@ function parseCsv(csv) {
 
 // ===== Pedidos: migración del Excel de Ventas (hoja 2026) a D1 =====
 // D1 pasa a ser la fuente de verdad; el Excel queda como espejo (fase posterior).
+// Memo por isolate: el CREATE + ~30 ALTERs (que fallan en silencio si la columna ya existe) corrían en
+// CADA una de las 13 llamadas → ~30 queries a D1 por request de pedidos. Basta una vez por isolate (cada
+// deploy levanta isolates nuevos, así que una columna nueva igual se crea en el primer request).
+let _pedidosSchemaOk = false;
 async function ensurePedidosSchema(env) {
+  if (_pedidosSchemaOk) return;
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, numero INTEGER, fecha TEXT, cartel TEXT, colores TEXT, alto REAL, ancho REAL, cm_neon REAL, base TEXT, cantidad REAL, precio REAL, dimer TEXT, precio_dimmer REAL, envio TEXT, aclaracion TEXT, productor TEXT, plataforma TEXT, estado_pago TEXT, pagado REAL, restante REAL, estado_pedido TEXT, ad TEXT, telefono TEXT, tramos REAL, tipo TEXT, sheet_row INTEGER, origen TEXT NOT NULL DEFAULT 'backfill', mirror_dirty INTEGER NOT NULL DEFAULT 0, created_at TEXT, updated_at TEXT)`).run();
   // Columnas agregadas después de crear la tabla en prod: red de seguridad del espejo.
   // mirror_attempts = intentos fallidos; mirror_error = motivo del último fallo (ej.
@@ -679,7 +684,17 @@ async function ensurePedidosSchema(env) {
     'foto_diseno_key TEXT',
     // Venta que cerró el equipo (Bruno/Gaspar) aunque figure a nombre de un vendedor: no suma en su panel de
     // rendimiento (se muestra aparte). '' | 'bruno' | 'equipo'. Solo la edita Gaspar. Mig. 049.
-    "asistido_por TEXT DEFAULT ''"]) {
+    "asistido_por TEXT DEFAULT ''",
+    // PAGO (oct-2026, mig. 054): comprobante + caja OBLIGATORIOS al cargar desde el CRM. Nivel PEDIDO (se
+    // repiten en cada fila-cartel, igual que pagado/estado_pago). caja ∈ CAJAS_PEDIDO; 'Efectivo' ⇔
+    // pago_metodo='efectivo' (sin comprobante). comprobante_key = key R2 ('wa/…'/'ig/…' si salió del chat,
+    // 'pedidos/comprobante/…' si se subió). pagado = COBRO 1 (va a AB / R del Excel viejo); el 2do pago NO
+    // se suma a pagado: va a cobro2 (la planilla calcula COBRO 2 = total − COBRO 1 por fórmula).
+    'caja TEXT', 'pago_metodo TEXT', 'comprobante_key TEXT', 'comprobante_wamid TEXT',
+    'cobro2 REAL', 'caja2 TEXT', 'pago2_metodo TEXT', 'comprobante2_key TEXT', 'comprobante2_wamid TEXT', 'cobro2_at TEXT',
+    // Caja → col Z de Pedidos_Corporeo / Pedidos_Directo (syncCajaPedidos): último valor que el CRM escribió
+    // (para no pisar lo que Gaspar cargó a mano), error y reintentos acotados (el IMPORTRANGE de neón tarda).
+    'caja_sync TEXT', 'caja_sync_err TEXT', 'caja_sync_attempts INTEGER NOT NULL DEFAULT 0']) {
     try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
   }
   // source_id = ad_id EXACTO de Meta que trajo la venta (auditable, no un título adivinado).
@@ -691,6 +706,9 @@ async function ensurePedidosSchema(env) {
   // comercial_id: vendedor dueño de la venta (para la comisión por vendedor). DEFAULT 'joaco'
   // → todo el histórico y lo no atribuido queda de Joaco, su número no se mueve.
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedidos_comercial ON pedidos(comercial_id)').run(); } catch (_) {}
+  // Memo solo si las columnas nuevas existen de verdad: los ALTER se tragan cualquier error (también un timeout de
+  // D1), y con el memo puesto y una columna faltante cada alta de ese isolate fallaría.
+  try { await env.DB.prepare('SELECT caja, pago_metodo, comprobante_key, cobro2, caja2, comprobante2_key, cobro2_at, caja_sync, caja_sync_attempts FROM pedidos LIMIT 0').all(); _pedidosSchemaOk = true; } catch (_) {}
 }
 // Nombre de diseño "aplastado" para comparar pedido ↔ brief: minúsculas, sin espacios ni puntuación
 // (. , - '). sqlNombreAplastado hace lo mismo en SQL (lower() de SQLite solo baja ASCII: alcanza).
@@ -1161,11 +1179,12 @@ async function pushPedidoToVentas(env, row) {
 }
 // Empuja UNA fila de pedido CORPÓREO a la hoja "Pedidos_Corporeo" del Sheet 2026 v4 (layout
 // DEFINITIVO, 14-sep) vía el Apps Script (action=corporeo_upsert). El CRM administra SOLO dos
-// bloques de columnas; el resto (costos P–X, Caja Y, cobros/pendiente AB–AE, resumen VENTA
-// AG–AL) lo carga Gaspar a mano y NO se toca (ni al re-mirrorear cuando entra el 2º pago):
+// bloques de columnas; el resto (costos P–Y, MES/COBRO 2/PENDIENTE AC–AF, resumen VENTA AH–AM) lo carga
+// Gaspar a mano o son fórmulas y NO se toca (ni al re-mirrorear cuando entra el 2º pago). La Caja (Z) la
+// escribe syncCajaPedidos por la API de Sheets (no el Apps Script):
 //   Bloque 1 (A:O, 15): ID(=N°), Fecha, Vendedor, Producto, Diseño(=cartel), Alto, Ancho,
 //                       Frente, Laterales, Base(=espalda), Iluminación, Bastidor, Instalación, Precio venta, Envío
-//   Bloque 2 (Z:AA, 2): Estado pago, Pagado (COBRO 1)
+//   Bloque 2 (AA:AB, 2): Estado pago, Pagado (COBRO 1)   ← el Apps Script v4 los escribe en AA:AB
 // Ya NO se mandan m²/Color bastidor/Aclaración/Restante (no existen en el layout nuevo).
 // El neón sigue yendo al Excel viejo por pushPedidoToVentas; esto es SOLO para corpóreos.
 const PEDIDO_VEND_MAP = { joaco: 'joaquin', joaquin: 'joaquin', facundo: 'facundo', agustina: 'agustina', gaspar: 'gaspar', bruno: 'gaspar', nadia: 'facundo', abril: 'abril' };
@@ -1192,8 +1211,8 @@ async function pushPedidoCorporeoToV4(env, row) {
     row.envio || ''                  // O Envío
   ];
   const row_zaa = [
-    row.estado_pago || '',           // Z Estado pago
-    row.pagado ?? ''                 // AA Pagado (COBRO 1)
+    row.estado_pago || '',           // AA Estado pago
+    row.pagado ?? ''                 // AB Pagado (COBRO 1)
   ];
   try {
     const j = await appsScriptPost(env, { action: 'corporeo_upsert', pedido_id: row.id, sheet_row: row.sheet_row || 0, row_ao, row_zaa });
@@ -1289,6 +1308,136 @@ async function barrerVendedoresNeon(env) {
     return await enviarVendedoresNeon(env, items);
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
+// ===== Caja de la SEÑA → col Z ("Caja") de Pedidos_Corporeo / Pedidos_Directo (2026 v4) =====
+// Gaspar 15-oct: el vendedor carga la caja con el pedido (obligatoria) y va a la col Z, que tiene validación estricta
+// (Gaspar/Bruno/Favio/Efectivo/Melina). Se escribe DIRECTO con la API de Sheets (la misma SA que el corte), sin pasar
+// por el Apps Script → no hace falta redeployarlo. Reglas:
+//  · pedidos del CRM ya espejados (sheet_row > 1, mirror_dirty = 0) con caja y caja_sync ≠ caja;
+//  · la fila se ubica por identidad: corpóreo por id_sync (col AO = pedidos.id), con respaldo sheet_row + N° (A) +
+//    diseño (E); neón: sheet_row es la fila de la hoja "2026" del Excel viejo, que Pedidos_Directo trae por
+//    IMPORTRANGE desde A33 ("2026!b2:b" → fila v4 = sheet_row + 31, se lee de la fórmula), verificando N° (A) +
+//    nombre (D); si no coincide, la ÚNICA fila con ese N° + nombre. Sin fila (IMPORTRANGE atrasado) → se reintenta;
+//  · Z se escribe SOLO si está vacía o tiene lo que puso el CRM antes (caja_sync): lo que Gaspar cargó a mano no se
+//    pisa (queda caja_sync_err 'manual: X' y deja de intentar hasta que se corrija la caja en el CRM);
+//  · es la caja del 1er pago. La del 2do pago (caja2) no va a la planilla (decisión de Gaspar 15-oct).
+// Kill-switch: kv caja_sync_on = '0'.
+const CAJA_SYNC_MAX_ATT = 24;
+async function syncCajaPedidos(env, opts = {}) {
+  try { if ((await kvGet(env, 'caja_sync_on', '1')) === '0') return { skipped: 'caja_sync_on=0' }; } catch (_) {}
+  try { await ensurePedidosSchema(env); } catch (_) {}
+  const ids = Array.isArray(opts.ids) ? opts.ids.map(Number).filter(n => n > 0).slice(0, 40) : [];
+  let rows;
+  try {
+    rows = (await env.DB.prepare(
+      "SELECT id, numero, fecha, cartel, es_corporeo, sheet_row, caja, IFNULL(caja_sync,'') AS caja_sync FROM pedidos " +
+      "WHERE origen = 'crm' AND IFNULL(caja,'') <> '' AND IFNULL(caja_sync,'') <> caja AND mirror_dirty = 0 AND sheet_row > 1 " +
+      "AND IFNULL(caja_sync_attempts,0) < ?" + (ids.length ? ` AND id IN (${ids.map(() => '?').join(',')})` : '') + ' ORDER BY id LIMIT 40'
+    ).bind(CAJA_SYNC_MAX_ATT, ...ids).all()).results || [];
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+  if (!rows.length) return { checked: 0 };
+  const token = await sheetsAccessToken(env);
+  if (!token) return { error: 'sin token sheets' };
+  const H = { Authorization: 'Bearer ' + token };
+  const api = `https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}`;
+  const leer = async (ranges, render) => {
+    const u = api + '/values:batchGet?' + ranges.map(r => 'ranges=' + encodeURIComponent(r)).join('&') + (render ? '&valueRenderOption=' + render : '');
+    const r = await fetch(u, { headers: H, signal: AbortSignal.timeout(25000) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+    return (j.valueRanges || []).map(v => v.values || []);
+  };
+  const norm = (s) => String(s == null ? '' : s).normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
+  // Valores CRUDOS (UNFORMATTED_VALUE): con el formato de la planilla un N° 1000 se ve "1.000" y no matchearía.
+  const val = (col, fila) => ((col[fila - 1] || [])[0]);
+  const cel = (col, fila) => { const v = val(col, fila); return String(v == null ? '' : v).trim(); };
+  // Fecha de la planilla → 'AAAA-MM-DD' (serial de Sheets o texto d/m/aaaa). '' si no se entiende.
+  const fechaIso = (v) => {
+    if (typeof v === 'number' && v > 20000 && v < 80000) return new Date(Date.UTC(1899, 11, 30) + Math.round(v) * 86400000).toISOString().slice(0, 10);
+    const s = String(v == null ? '' : v).trim();
+    let m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(s);
+    if (m) { const y = Number(m[3]) < 100 ? 2000 + Number(m[3]) : Number(m[3]); return `${y}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`; }
+    m = /^(\d{4}-\d{2}-\d{2})/.exec(s); return m ? m[1] : '';
+  };
+  // La col "Caja" se ubica por su TÍTULO en la fila 2 (hoy Z en las dos hojas), como hace directo_mo con MO/PRODUCTOR:
+  // si Gaspar agrega una columna antes, no se escribe en la equivocada. Sin título "Caja" → error, no se escribe a ciegas.
+  const colLetra = (n) => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+  const colCaja = async (tab) => {
+    const [h] = await leer([tab + '!A2:BZ2']);
+    const i = ((h[0]) || []).findIndex(x => norm(x) === 'caja');
+    if (i < 0) throw new Error('no encuentro la columna "Caja" en la fila 2');
+    return colLetra(i + 1);
+  };
+  const plan = [];   // { p, tab, col, fila, z }
+  const sinFila = [], errores = [];
+  const corp = rows.filter(r => r.es_corporeo), neon = rows.filter(r => !r.es_corporeo);
+  // Cada hoja por separado: si una falla (fórmula cambiada, API caída) la otra igual se sincroniza. Los pedidos de la
+  // hoja que falló no gastan intentos (no es culpa de ellos).
+  if (corp.length) {
+    try {
+      const cc = await colCaja('Pedidos_Corporeo');
+      const [cA, cE, cZ, cAO] = await leer(['Pedidos_Corporeo!A1:A', 'Pedidos_Corporeo!E1:E', `Pedidos_Corporeo!${cc}1:${cc}`, 'Pedidos_Corporeo!AO1:AO'], 'UNFORMATTED_VALUE');
+      for (const p of corp) {
+        let fila = 0;
+        const porId = []; cAO.forEach((rw, i) => { if (String((rw || [])[0] == null ? '' : rw[0]).trim() === String(p.id)) porId.push(i + 1); });
+        if (porId.length === 1) fila = porId[0];
+        else if (!porId.length && norm(cel(cA, p.sheet_row)) === norm(p.numero) && norm(cel(cE, p.sheet_row)) === norm(p.cartel)) fila = p.sheet_row;
+        if (fila >= 3) plan.push({ p, tab: 'Pedidos_Corporeo', col: cc, fila, z: cel(cZ, fila) }); else sinFila.push(p);
+      }
+    } catch (e) { errores.push('Pedidos_Corporeo: ' + String((e && e.message) || e)); }
+  }
+  if (neon.length) {
+    try {
+      const [fA] = await leer(['Pedidos_Directo!A1:A200'], 'FORMULA');
+      let off = null;
+      fA.forEach((rw, i) => { const m = /IMPORTRANGE\([^)]*["']'?2026'?!\$?[a-z]+\$?(\d+)/i.exec(String((rw || [])[0] || '')); if (m && off == null) off = (i + 1) - Number(m[1]); });
+      if (off == null) throw new Error('no encuentro el IMPORTRANGE de la hoja 2026 en Pedidos_Directo!A');
+      const desde = off + 2;   // 1ª fila del bloque importado de "2026" (A33): lo de arriba es otra hoja (Diciembre)
+      const dc = await colCaja('Pedidos_Directo');
+      const [dA, dB, dD, dZ] = await leer(['Pedidos_Directo!A1:A', 'Pedidos_Directo!B1:B', 'Pedidos_Directo!D1:D', `Pedidos_Directo!${dc}1:${dc}`], 'UNFORMATTED_VALUE');
+      const ok = (f, p) => f >= desde && norm(cel(dA, f)) === norm(p.numero) && norm(cel(dD, f)) === norm(p.cartel);
+      for (const p of neon) {
+        const f0 = p.sheet_row + off;
+        let fila = 0;
+        if (f0 > dA.length) { sinFila.push(p); continue; }   // el IMPORTRANGE todavía no trajo esa fila: se reintenta
+        if (ok(f0, p)) fila = f0;
+        else {
+          // Respaldo (la hoja "2026" se corrió): la ÚNICA fila con ese N° + nombre + fecha.
+          const c = []; for (let f = desde; f <= dA.length; f++) { if (!ok(f, p)) continue; const fi = fechaIso(val(dB, f)); if (!fi || fi === String(p.fecha || '')) c.push(f); }
+          if (c.length === 1) fila = c[0];
+        }
+        if (fila) plan.push({ p, tab: 'Pedidos_Directo', col: dc, fila, z: cel(dZ, fila) }); else sinFila.push(p);
+      }
+    } catch (e) { errores.push('Pedidos_Directo: ' + String((e && e.message) || e)); }
+  }
+  const res = { checked: rows.length, escritos: 0, iguales: 0, manuales: [], sin_fila: sinFila.map(p => p.id) };
+  if (errores.length) res.error = errores.join(' · ');
+  const data = [], escribir = [], iguales = [];
+  for (const x of plan) {
+    const zc = cajaCanon(x.z);
+    if (zc === x.p.caja) iguales.push(x);
+    else if (!x.z || (x.p.caja_sync && zc === x.p.caja_sync)) { data.push({ range: `${x.tab}!${x.col}${x.fila}`, values: [[x.p.caja]] }); escribir.push(x); }
+    else res.manuales.push({ id: x.p.id, numero: x.p.numero, cartel: x.p.cartel, crm: x.p.caja, planilla: x.z });
+  }
+  if (data.length) {
+    try {
+      const r = await fetch(api + '/values:batchUpdate', { method: 'POST', headers: { ...H, 'Content-Type': 'application/json' }, body: JSON.stringify({ valueInputOption: 'RAW', data }), signal: AbortSignal.timeout(25000) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+    } catch (e) {
+      const err = String((e && e.message) || e).slice(0, 300);
+      for (const x of escribir) { try { await env.DB.prepare('UPDATE pedidos SET caja_sync_attempts = IFNULL(caja_sync_attempts,0) + 1, caja_sync_err = ? WHERE id = ?').bind(err, x.p.id).run(); } catch (_) {} }
+      escribir.length = 0; res.error = (res.error ? res.error + ' · ' : '') + err;
+    }
+  }
+  // Solo si la caja del CRM sigue siendo la que se escribió (si la cambiaron entremedio, el próximo barrido la corrige).
+  for (const x of escribir.concat(iguales)) {
+    try { await env.DB.prepare('UPDATE pedidos SET caja_sync = ?, caja_sync_err = NULL, caja_sync_attempts = 0 WHERE id = ? AND caja = ?').bind(x.p.caja, x.p.id, x.p.caja).run(); } catch (_) {}
+  }
+  res.escritos = escribir.length; res.iguales = iguales.length;
+  for (const m of res.manuales) { try { await env.DB.prepare('UPDATE pedidos SET caja_sync_err = ?, caja_sync_attempts = ? WHERE id = ?').bind('manual: ' + String(m.planilla).slice(0, 40), CAJA_SYNC_MAX_ATT, m.id).run(); } catch (_) {} }
+  for (const p of sinFila) { try { await env.DB.prepare("UPDATE pedidos SET caja_sync_attempts = IFNULL(caja_sync_attempts,0) + 1, caja_sync_err = 'fila no encontrada en la planilla' WHERE id = ?").bind(p.id).run(); } catch (_) {} }
+  return res;
+}
 // Cron: replica al Excel los pedidos marcados mirror_dirty=1 (creados/editados en
 // el CRM). GATEADO por el flag kv 'pedidos_mirror_on' (se prende DESPUÉS de
 // deployar el Apps Script, para no pushear contra el viejo). El clear es condicional
@@ -1341,6 +1490,9 @@ async function processPedidosMirror(env) {
         failed++;
       }
     }
+    // La caja de la seña a la col Z apenas el pedido tiene fila (si no, la levanta el barrido de 15 min).
+    const _conCaja = rows.filter(r => r.caja).map(r => r.id);
+    if (pushed && _conCaja.length) { try { await syncCajaPedidos(env, { ids: _conCaja }); } catch (_) {} }
     return { checked: rows.length, pushed, failed };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
@@ -5327,6 +5479,84 @@ function corteCajaFromProof(proof) {
   if (/\bgaspar\b/.test(t)) return 'Gaspar';
   if (String(proof.cuenta || '') === 'bna_bruno') return 'Bruno';
   return '';
+}
+// ===== Cajas de los PEDIDOS (carteles) =====
+// Lista EXACTA de la validación estricta de la col Z en Pedidos_Corporeo y Pedidos_Directo (verificada en la
+// planilla, oct-2026). Cualquier otro valor en Z rompe la validación → siempre pasar por cajaCanon().
+const CAJAS_PEDIDO = ['Melina', 'Gaspar', 'Favio', 'Bruno', 'Efectivo'];
+function cajaCanon(v) {
+  const w = String(v == null ? '' : v).normalize('NFC').trim().toLowerCase();
+  if (!w) return '';
+  return CAJAS_PEDIDO.find(c => c.toLowerCase() === w) || '';
+}
+// Caja sugerida para un comprobante de un PEDIDO. Parte de la regla del corte (nombre en titular_destino;
+// "si no se ve, no pongas ninguna") y suma los casos de las cuentas de cobro de carteles que el OCR no
+// nombra: la cuenta de la OC es la de Melina (TOGNOCCHI, Ualá, alias neoninfinito.ok) y el titular de las
+// cuentas puede salir como "Neon Infinito" (Ualá → Melina; Mercado Pago → Gaspar, alias neoninfinito.mp).
+// Ante la duda devuelve '' y el vendedor la elige a mano.
+function cajaDeComprobante(proof) {
+  if (!proof) return '';
+  const c = corteCajaFromProof(proof);
+  if (c) return c;
+  const t = String(proof.titular_destino || '').toLowerCase();
+  const b = String(proof.banco || '').toLowerCase();
+  if (/tognocchi/.test(t)) return 'Melina';
+  if (/neon\s*infinito/.test(t) || /neoninfinito/.test(t)) {
+    if (/ual[aá]/.test(b)) return 'Melina';
+    if (/mercado\s*pago|mercadopago/.test(b)) return 'Gaspar';
+  }
+  return '';
+}
+// Cache del OCR de comprobantes de pedidos (tabla pago_ocr, mig. 054). cacheId = wamid del mensaje del chat, o
+// 'key:<r2key>' si el archivo se subió a mano. Cada análisis es una llamada a Sonnet (analyzePaymentProof): se
+// hace UNA vez por archivo y queda guardado. NO se usa wa_pago_proof (es del lanzamiento: la leen el reenvío
+// a Gaspar y /admin/wa/resend-media).
+let _pagoOcrOk = false;
+async function ensurePagoOcr(env) {
+  if (_pagoOcrOk) return;
+  try {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS pago_ocr (wamid TEXT PRIMARY KEY, phone TEXT, media_key TEXT, es_comprobante INTEGER, monto REAL, titular TEXT, banco TEXT, cuenta TEXT, caja TEXT, raw TEXT, created_at TEXT)').run();
+    await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pago_ocr_phone ON pago_ocr (phone)').run();
+    _pagoOcrOk = true;
+  } catch (_) {}
+}
+function pagoOcrFila(r) {
+  if (!r) return null;
+  return { es_comprobante: r.es_comprobante == null ? null : !!r.es_comprobante, monto: r.monto == null ? null : Number(r.monto), titular: r.titular || '', banco: r.banco || '', caja: r.caja || '' };
+}
+// Devuelve {es_comprobante, monto, titular, banco, caja} (del cache o analizando ahora), o null si el OCR falló
+// por algo transitorio (en ese caso NO se cachea: se reintenta la próxima vez, como el vigía del corte).
+async function ocrComprobantePedido(env, { cacheId, phone, key, mimeHint, by }) {
+  if (!cacheId || !key) return null;
+  await ensurePagoOcr(env);
+  try { const c = await env.DB.prepare('SELECT * FROM pago_ocr WHERE wamid = ?').bind(cacheId).first(); if (c) return pagoOcrFila(c); } catch (_) {}
+  let proof = null;
+  try { proof = await analyzePaymentProof(env, key, mimeHint || '', { phone: phone || '', by: by || 'pedido_comprobante' }); } catch (_) { proof = null; }
+  // Respuesta ilegible del modelo: analyzePaymentProof devuelve un {es_comprobante:false} pelado (sin monto). No se
+  // cachea: si no, ese comprobante quedaría descartado para siempre. Una respuesta real trae siempre "monto".
+  if (!proof || !('monto' in proof)) return null;
+  const monto = Number(proof.monto);
+  const fila = {
+    es_comprobante: proof.es_comprobante ? 1 : 0,
+    monto: (Number.isFinite(monto) && monto > 0) ? Math.round(monto) : null,
+    titular: String(proof.titular_destino || '').slice(0, 120),
+    banco: String(proof.banco || '').slice(0, 80),
+    cuenta: String(proof.cuenta || '').slice(0, 40),
+    caja: proof.es_comprobante ? cajaDeComprobante(proof) : ''
+  };
+  try {
+    await env.DB.prepare('INSERT OR REPLACE INTO pago_ocr (wamid, phone, media_key, es_comprobante, monto, titular, banco, cuenta, caja, raw, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(cacheId, phone || '', key, fila.es_comprobante, fila.monto, fila.titular, fila.banco, fila.cuenta, fila.caja, JSON.stringify(proof).slice(0, 1500), new Date().toISOString()).run();
+  } catch (_) {}
+  return pagoOcrFila(fila);
+}
+// Key válida de comprobante de pedido: archivo del chat (wa/… o ig/… entrante, nunca lo que mandamos nosotros:
+// wa/out_ e ig/out_) o uno subido a mano (pedidos/comprobante/…).
+function esKeyComprobantePedido(k) {
+  k = String(k || '');
+  if (!k || k.length > 400 || k.indexOf('..') >= 0) return false;
+  if (/^(wa|ig)\/out_/.test(k)) return false;
+  return /^(wa|ig)\/[\w\-.]+$/.test(k) || /^pedidos\/comprobante\/\d{6}\/[\w\-.]+$/.test(k);
 }
 // Marca "pagado" en la col I (Pago) de Venta_Insumos para las filas PENDIENTES del cliente, verificando
 // que la suma de precios (col J) coincida con el total esperado (±500) para no marcar filas equivocadas.
@@ -23198,6 +23428,116 @@ const handler = {
         }
         return json({ ok: true, fotos: out });
       }
+      // ===== COMPROBANTE DE PAGO del pedido (oct-2026) =====
+      // PUT /admin/pedidos/comprobante[?ocr=1] (body = foto o PDF crudo, ≤12MB) → lo sube a R2 y devuelve {key,tipo}
+      // (con ocr=1 también es_comprobante, monto y caja sugerida). NO toca D1: se sube ANTES de crear el pedido
+      // o de registrar el 2do pago; la key viaja en ese POST.
+      if (request.method === 'PUT' && path === '/admin/pedidos/comprobante') {
+        if (!['admin', 'comercial'].includes(await getSessionRole(env, session.user))) return json({ error: 'forbidden' }, 403);
+        if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+        const _cl = parseInt(request.headers.get('content-length') || '0', 10) || 0;
+        if (_cl > 12 * 1024 * 1024) return json({ error: 'el archivo pesa más de 12MB' }, 413);
+        const buf = await request.arrayBuffer().catch(() => null);
+        if (!buf || buf.byteLength < 64) return json({ error: 'el archivo llegó vacío' }, 400);
+        if (buf.byteLength > 12 * 1024 * 1024) return json({ error: 'el archivo pesa más de 12MB' }, 413);
+        // El tipo sale de la FIRMA del archivo, no del header: una imagen con content-type equivocado hace que el
+        // OCR la rechace. HEIC (fotos crudas de iPhone) no lo lee el OCR → se pide una captura.
+        const _b = new Uint8Array(buf.slice(0, 16));
+        const _asc = (i, n) => String.fromCharCode(..._b.slice(i, i + n));
+        let ct = '', ext = '';
+        if (_b[0] === 0xFF && _b[1] === 0xD8 && _b[2] === 0xFF) { ct = 'image/jpeg'; ext = 'jpg'; }
+        else if (_b[0] === 0x89 && _asc(1, 3) === 'PNG') { ct = 'image/png'; ext = 'png'; }
+        else if (_asc(0, 4) === '%PDF') { ct = 'application/pdf'; ext = 'pdf'; }
+        else if (_asc(0, 4) === 'RIFF' && _asc(8, 4) === 'WEBP') { ct = 'image/webp'; ext = 'webp'; }
+        if (!ct) return json({ error: 'tiene que ser una foto (JPG/PNG/WEBP) o un PDF. Si es una foto del iPhone, mandá una captura de pantalla' }, 400);
+        const _ym = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 7).replace('-', '');
+        const key = `pedidos/comprobante/${_ym}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        try { await env.MEDIA.put(key, buf, { httpMetadata: { contentType: ct } }); }
+        catch (e) { return json({ error: 'no se pudo guardar el comprobante: ' + String((e && e.message) || e) }, 500); }
+        const out = { ok: true, key, tipo: ct === 'application/pdf' ? 'pdf' : 'image' };
+        if (url.searchParams.get('ocr') === '1') {
+          const o = await ocrComprobantePedido(env, { cacheId: 'key:' + key, phone: '', key, mimeHint: ct, by: 'pedido_comprobante' });
+          if (o) Object.assign(out, { es_comprobante: o.es_comprobante, monto: o.monto, caja: o.caja });
+        }
+        return json(out);
+      }
+      // GET /admin/pedidos/comprobante-sugerencias?phone=<tel|IGSID|@usuario>&ocr=1 → las últimas fotos/PDF que MANDÓ
+      // el cliente (posibles comprobantes, antes o después de la OC: no se filtra por la OC), con el OCR cacheado
+      // (monto + caja sugerida) y si ya se usaron como comprobante de otro pedido. Mismo control de bandeja que el
+      // chat. ocr=1 analiza hasta 3 archivos sin cache (cada uno = 1 llamada a Sonnet; después quedan guardados).
+      if (request.method === 'GET' && path === '/admin/pedidos/comprobante-sugerencias') {
+        const _sr = await getSessionRole(env, session.user);
+        if (!['admin', 'comercial'].includes(_sr)) return json({ error: 'forbidden' }, 403);
+        await ensurePedidosSchema(env);
+        const raw = String(url.searchParams.get('phone') || '').trim();
+        const dig = raw.replace(/\D/g, '');
+        let phone = '';
+        if (/^@|[a-z_.]/i.test(raw)) phone = await igsidDeUsuario(env, raw);
+        else if (dig.length >= 15) phone = dig;
+        else if (dig.length >= 8) phone = await telefonoDelChat(env, dig);
+        if (!phone || !(await inboxAccessOk(env, _sr, phone, session.user))) return json({ ok: true, phone: phone || '', oc_ts: null, items: [] });
+        let msgs = [];
+        try {
+          msgs = (await env.DB.prepare("SELECT wamid, ts, msg_type, body, media_url FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type IN ('image','document') AND (media_url LIKE 'wa/%' OR media_url LIKE 'ig/%') AND ts >= ? ORDER BY ts DESC LIMIT 12").bind(phone, isoHace(45 * 86400 * 1000)).all()).results || [];
+        } catch (_) {}
+        // Tipo según R2: solo imagen o PDF (audios, videos y docx no son comprobantes). Las que ya no están en R2 se omiten.
+        const cand = [];
+        await Promise.all(msgs.map(async (m, i) => {
+          if (!esKeyComprobantePedido(m.media_url)) return;
+          let ctt = '';
+          try { const h = await env.MEDIA.head(m.media_url); if (!h) return; ctt = String((h.httpMetadata && h.httpMetadata.contentType) || '').toLowerCase(); } catch (_) { return; }
+          let tipo = '';
+          if (/pdf/.test(ctt) || /\.pdf$/i.test(m.media_url)) tipo = 'pdf';
+          else if (/^image\//.test(ctt) || /\.(jpe?g|png|webp|gif)$/i.test(m.media_url)) tipo = 'image';
+          if (!tipo) return;
+          cand[i] = { key: m.media_url, wamid: m.wamid || '', ts: m.ts || '', tipo, nombre: m.msg_type === 'document' ? String(m.body || '').slice(0, 80) : '', mime: tipo === 'pdf' ? 'application/pdf' : (ctt || 'image/jpeg') };
+        }));
+        const items = cand.filter(Boolean).slice(0, 8);
+        await ensurePagoOcr(env);
+        const wids = items.map(x => x.wamid).filter(Boolean);
+        const cache = {}, ocHint = {};
+        if (wids.length) {
+          const ph = wids.map(() => '?').join(',');
+          try { for (const r of ((await env.DB.prepare(`SELECT * FROM pago_ocr WHERE wamid IN (${ph})`).bind(...wids).all()).results || [])) cache[r.wamid] = pagoOcrFila(r); } catch (_) {}
+          // El vigilador de la OC (processCartelPagos) ya marcó cuáles fueron comprobante: se analizan primero.
+          try { for (const r of ((await env.DB.prepare(`SELECT wamid, es_comprobante FROM oc_pago_check WHERE wamid IN (${ph})`).bind(...wids).all()).results || [])) ocHint[r.wamid] = r.es_comprobante; } catch (_) {}
+        }
+        if (url.searchParams.get('ocr') === '1') {
+          const pend = items.filter(x => x.wamid && !cache[x.wamid]).sort((a, b) => (ocHint[b.wamid] ? 1 : 0) - (ocHint[a.wamid] ? 1 : 0)).slice(0, 3);
+          await Promise.all(pend.map(async x => { const o = await ocrComprobantePedido(env, { cacheId: x.wamid, phone, key: x.key, mimeHint: x.mime, by: 'pedido_comprobante' }); if (o) cache[x.wamid] = o; }));
+        }
+        // ¿Ese archivo ya es comprobante (1er o 2do pago) de algún pedido? El front avisa para no usarlo dos veces.
+        const keys = items.map(x => x.key);
+        const usado = {};
+        if (keys.length) {
+          const pk = keys.map(() => '?').join(',');
+          try {
+            const rs = (await env.DB.prepare(`SELECT id, numero, cartel, comprobante_key, comprobante2_key FROM pedidos WHERE comprobante_key IN (${pk}) OR comprobante2_key IN (${pk})`).bind(...keys, ...keys).all()).results || [];
+            for (const r of rs) for (const k of [r.comprobante_key, r.comprobante2_key]) {
+              if (!k || !keys.includes(k)) continue;
+              const l = (usado[k] = usado[k] || []);
+              if (!l.some(u => u.numero === r.numero)) l.push({ id: r.id, numero: r.numero, cartel: r.cartel || '' });
+            }
+          } catch (_) {}
+        }
+        let ocTs = null;
+        try { const o = await env.DB.prepare('SELECT MAX(ts_out) AS t FROM oc_enviadas WHERE phone = ?').bind(phone).first(); ocTs = (o && o.t) || null; } catch (_) {}
+        const outItems = items.map(x => {
+          const o = cache[x.wamid] || null;
+          return {
+            key: x.key, wamid: x.wamid, ts: x.ts, tipo: x.tipo, nombre: x.nombre,
+            es_comprobante: o ? o.es_comprobante : (ocHint[x.wamid] ? true : null),
+            monto: o ? o.monto : null, caja: o ? o.caja : '', titular: o ? o.titular : '', banco: o ? o.banco : '',
+            usado_en: usado[x.key] || [], sugerido: false
+          };
+        });
+        // Sugerido: el comprobante confirmado por OCR más nuevo que no se usó en otro pedido (mejor si llegó después
+        // de la OC); si no hay ninguno confirmado, el más nuevo todavía sin analizar. Nunca uno que el OCR descartó.
+        const libres = outItems.filter(x => !x.usado_en.length && x.es_comprobante !== false);
+        const s = libres.find(x => x.es_comprobante === true && ocTs && x.ts >= ocTs) || libres.find(x => x.es_comprobante === true) || libres.find(x => x.es_comprobante == null);
+        if (s) s.sugerido = true;
+        return json({ ok: true, phone, oc_ts: ocTs, items: outItems });
+      }
       // POST /admin/pedidos/:id/diseno-foto {key} → asigna o cambia la foto del diseño final de un cartel ya
       // cargado (drawer: "la subo después", o pedidos viejos). Si el cartel no tiene pieza de corte, la crea.
       // Si Emma ya hizo la matriz (matriz_lista) vuelve a su cola para revisarla; si ya se cortó, se avisa.
@@ -23285,6 +23625,26 @@ const handler = {
         const restante = pagado != null ? Math.max(0, total - pagado) : total;
         const plataforma = body.plataforma === 'IG' ? 'IG' : 'WPP';
         const estadoPago = String(body.estado_pago || '1er pago');
+        // PAGO (oct-2026): comprobante + caja OBLIGATORIOS. Se exigen solo si el front es el nuevo (pago_v ≥ 2): un
+        // vendedor con la PWA vieja en caché no manda estos campos y no se le frena la venta (regla de la casa).
+        // Efectivo ⇔ caja 'Efectivo' y sin comprobante (el importe es `pagado`).
+        const pagoV = Number(body.pago_v) || 0;
+        let pagoMetodo = String(body.pago_metodo || '').toLowerCase() === 'efectivo' ? 'efectivo' : (body.pago_metodo ? 'transferencia' : '');
+        let caja = cajaCanon(body.caja);
+        if (pagoMetodo === 'efectivo') caja = 'Efectivo';
+        else if (caja === 'Efectivo') pagoMetodo = 'efectivo';
+        let compKey = (pagoMetodo !== 'efectivo' && esKeyComprobantePedido(body.comprobante_key)) ? String(body.comprobante_key) : '';
+        const compWamid = compKey ? String(body.comprobante_wamid || '').slice(0, 200) : '';
+        if (pagoV >= 2) {
+          if (!caja) return json({ error: 'Falta a qué caja pagó', campo: 'caja' }, 400);
+          if (!(pagado > 0)) return json({ error: 'Falta el importe pagado', campo: 'pagado' }, 400);
+          if (!pagoMetodo) pagoMetodo = 'transferencia';
+          if (pagoMetodo !== 'efectivo') {
+            if (!compKey) return json({ error: 'Falta el comprobante de pago', campo: 'comprobante' }, 400);
+            let _existe = null; try { _existe = env.MEDIA ? await env.MEDIA.head(compKey) : true; } catch (_) { _existe = true; }
+            if (!_existe) return json({ error: 'No encuentro ese comprobante: subilo de nuevo', campo: 'comprobante' }, 400);
+          }
+        }
         const ad = String(body.ad || '');
         // source_id = ad_id EXACTO de Meta que el modal capturó de la atribución (opcional). Se
         // guarda directo en el INSERT así el pedido nace trazado y el funnel lo clasifica al toque
@@ -23344,8 +23704,8 @@ const handler = {
           const esCorp = _esCorpC(c);
           const mirrorDirty = 1;
           return env.DB.prepare(
-          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, producto, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at, source_id, foto_diseno_key)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, producto, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at, source_id, foto_diseno_key, caja, pago_metodo, comprobante_key, comprobante_wamid)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
           num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
@@ -23357,7 +23717,9 @@ const handler = {
           String(c.iluminacion || '').trim(), String(c.bastidor || '').trim(), String(c.color_bastidor || '').trim(), String(c.instalacion || '').trim(),
           now, now, (sourceId || null),
           // Corpóreo: su foto del diseño queda en el pedido (key, o '' = "la subo después"). Neón: NULL (va a su pieza de corte).
-          esCorp ? (esKeyDisenoPedido(c.foto_key) ? String(c.foto_key) : '') : null
+          esCorp ? (esKeyDisenoPedido(c.foto_key) ? String(c.foto_key) : '') : null,
+          // Pago a nivel PEDIDO (se repite en cada cartel, como pagado/estado_pago). La caja va a la col Z (syncCajaPedidos).
+          caja || null, pagoMetodo || null, compKey || null, compWamid || null
         );
         });
         // Batch: cada INSERT de cartel de neón va seguido del INSERT de su pieza de corte, vinculada por
@@ -23439,6 +23801,29 @@ const handler = {
         const now = new Date().toISOString();
         let touched = false, precioChanged = false;
 
+        // 0) Caja / comprobante del 1er pago (corrección desde el drawer, o completar un pedido cargado con la PWA vieja).
+        //    Se validan ANTES de escribir nada (un 400 a mitad de camino dejaba el resto a medias) y sobre el estado
+        //    FINAL: transferencia ⇒ con comprobante (salvo admin, que corrige históricos); efectivo ⇒ sin comprobante.
+        //    No van al Apps Script (no marcan mirror_dirty ni updated_at): la caja la lleva syncCajaPedidos a la col Z.
+        const pSets = [], pArgs = [];
+        if ('caja' in body || 'comprobante_key' in body) {
+          const cur = (await env.DB.prepare("SELECT IFNULL(caja,'') AS caja, IFNULL(comprobante_key,'') AS ck FROM pedidos WHERE id = ?").bind(id).first()) || { caja: '', ck: '' };
+          const cj = ('caja' in body) ? cajaCanon(body.caja) : cajaCanon(cur.caja);
+          if (('caja' in body) && body.caja && !cj) return json({ error: 'caja inválida', campo: 'caja' }, 400);
+          let ck = ('comprobante_key' in body) ? (esKeyComprobantePedido(body.comprobante_key) ? String(body.comprobante_key) : '') : String(cur.ck || '');
+          if (('comprobante_key' in body) && body.comprobante_key && !ck) return json({ error: 'comprobante inválido', campo: 'comprobante' }, 400);
+          let cw = ('comprobante_key' in body) ? (ck ? String(body.comprobante_wamid || '').slice(0, 200) : '') : null;   // null = no tocar
+          if (cj === 'Efectivo') { ck = ''; cw = ''; }
+          else if (cj && !ck && _pr !== 'admin') return json({ error: 'Falta el comprobante de pago', campo: 'comprobante' }, 400);
+          if (ck && ck !== cur.ck) {
+            let _existe = null; try { _existe = env.MEDIA ? await env.MEDIA.head(ck) : true; } catch (_) { _existe = true; }
+            if (!_existe) return json({ error: 'No encuentro ese comprobante: subilo de nuevo', campo: 'comprobante' }, 400);
+          }
+          pSets.push('caja = ?', 'pago_metodo = ?', 'comprobante_key = ?', 'caja_sync_attempts = 0', 'caja_sync_err = NULL');
+          pArgs.push(cj || null, cj ? (cj === 'Efectivo' ? 'efectivo' : 'transferencia') : null, ck || null);
+          if (cw !== null || !ck) { pSets.push('comprobante_wamid = ?'); pArgs.push(cw || null); }
+        }
+
         // 1) Campos del CARTEL → UPDATE solo esta fila (por id).
         const cSets = [], cArgs = [];
         if ('cartel' in body)     { cSets.push('cartel = ?');     cArgs.push(String(body.cartel || '').trim()); }
@@ -23498,14 +23883,29 @@ const handler = {
         if ('estado_pago' in body)   { oSets.push('estado_pago = ?');   oArgs.push(String(body.estado_pago || '')); }
         if ('productor' in body)     { oSets.push('productor = ?');     oArgs.push(String(body.productor || '')); }
         const pagadoInBody = ('pagado' in body);
-        if (pagadoInBody || precioChanged) {
+        // Volver de '2do pago' a otro estado borra el 2do pago registrado (cobro2/caja2/comprobante2) y el saldo vuelve.
+        // El paso a '2do pago' lo hace POST /admin/pedidos/:id/segundo-pago (modal con comprobante/importe); el front nuevo
+        // no lo manda por acá, el viejo en caché sí (queda como antes: estado sin cobro2).
+        let pago2Revert = false;
+        if (('estado_pago' in body) && String(body.estado_pago || '') !== '2do pago') {
+          const _ep = await env.DB.prepare(`SELECT IFNULL(estado_pago,'') e, cobro2 FROM pedidos WHERE ${_grp} LIMIT 1`).bind(..._grpArgs).first();
+          pago2Revert = !!_ep && (_ep.e === '2do pago' || _ep.cobro2 != null);
+        }
+        if (pagadoInBody || precioChanged || pago2Revert) {
+          const cur = await env.DB.prepare(`SELECT pagado, cobro2 FROM pedidos WHERE ${_grp} LIMIT 1`).bind(..._grpArgs).first();
           let pagado;
           if (pagadoInBody) { pagado = (body.pagado === '' || body.pagado == null) ? null : Number(body.pagado); }
-          else { const cur = await env.DB.prepare(`SELECT pagado FROM pedidos WHERE ${_grp} LIMIT 1`).bind(..._grpArgs).first(); pagado = (cur && cur.pagado != null) ? Number(cur.pagado) : null; }
+          else { pagado = (cur && cur.pagado != null) ? Number(cur.pagado) : null; }
+          const cobro2 = pago2Revert ? 0 : ((cur && Number(cur.cobro2) > 0) ? Number(cur.cobro2) : 0);
           const tot = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
           const total = tot ? Number(tot.t) : 0;
-          const restante = pagado != null ? Math.max(0, total - pagado) : total;
+          const restante = Math.max(0, total - (pagado != null ? pagado : 0) - cobro2);
           oSets.push('pagado = ?', 'restante = ?'); oArgs.push(pagado, restante);
+          if (pago2Revert) oSets.push('cobro2 = NULL', 'caja2 = NULL', 'pago2_metodo = NULL', 'comprobante2_key = NULL', 'comprobante2_wamid = NULL', 'cobro2_at = NULL');
+        }
+        if (pSets.length) {
+          await env.DB.prepare(`UPDATE pedidos SET ${pSets.join(', ')} WHERE ${_grp}`).bind(...pArgs, ..._grpArgs).run();
+          touched = true;
         }
         let _estPrev = null;
         if ('estado_pedido' in body) { try { const _e = await env.DB.prepare(`SELECT IFNULL(estado_pedido, '') e FROM pedidos WHERE ${_grp} LIMIT 1`).bind(..._grpArgs).first(); _estPrev = _e ? _e.e : ''; } catch (_) {} }
@@ -23533,6 +23933,63 @@ const handler = {
         if (!touched) return json({ error: 'nada para actualizar' }, 400);
         const rs2 = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs) };
         return json({ ok: true, numero: ref.numero, pedidos: rs2.results || [] });
+      }
+
+      // POST /admin/pedidos/:id/segundo-pago → registra el 2do pago (el saldo) de TODO el pedido (mismo grupo que el PATCH).
+      // Body { pago_metodo:'transferencia'|'efectivo', caja, importe, comprobante_key, comprobante_wamid }.
+      // Transferencia exige comprobante; efectivo ⇒ caja 'Efectivo' + importe. No toca `pagado` (COBRO 1 en la planilla;
+      // COBRO 2 allá es fórmula = total − COBRO 1): el 2do pago queda en cobro2/caja2/comprobante2 y el estado pasa a
+      // '2do pago' (eso sí va al Excel). La col Z sigue con la caja de la SEÑA (decisión de Gaspar 15-oct): si el saldo
+      // entró a otra caja, se avisa en la respuesta y por WhatsApp a Gaspar para que lo vea en la conciliación.
+      if (request.method === 'POST' && /^\/admin\/pedidos\/\d+\/segundo-pago$/.test(path)) {
+        const _pr = await getSessionRole(env, session.user);
+        if (!['admin', 'comercial'].includes(_pr)) return json({ error: 'forbidden' }, 403);
+        await ensurePedidosSchema(env);
+        const id = parseInt(path.split('/')[3], 10);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const ref = await env.DB.prepare("SELECT numero, fecha, IFNULL(comercial_id,'joaco') AS com, origen, IFNULL(telefono,'') AS tel, IFNULL(cartel,'') AS cartel FROM pedidos WHERE id = ?").bind(id).first();
+        if (!ref) return json({ error: 'pedido no encontrado' }, 404);
+        if (_pr === 'comercial' && ref.com !== await resolveComercial(env, { sessionUser: session.user })) return json({ error: 'ese pedido es de otro vendedor' }, 403);
+        let metodo = String(body.pago_metodo || '').toLowerCase() === 'efectivo' ? 'efectivo' : 'transferencia';
+        let caja = cajaCanon(body.caja);
+        if (metodo === 'efectivo') caja = 'Efectivo';
+        else if (caja === 'Efectivo') metodo = 'efectivo';
+        if (!caja) return json({ error: 'Falta a qué caja pagó', campo: 'caja' }, 400);
+        const importe = Math.round(Number(body.importe) * 100) / 100;
+        if (!(importe > 0)) return json({ error: 'Falta el importe del 2do pago', campo: 'importe' }, 400);
+        const compKey = (metodo !== 'efectivo' && esKeyComprobantePedido(body.comprobante_key)) ? String(body.comprobante_key) : '';
+        if (metodo !== 'efectivo') {
+          if (!compKey) return json({ error: 'Falta el comprobante del 2do pago', campo: 'comprobante' }, 400);
+          let _existe = null; try { _existe = env.MEDIA ? await env.MEDIA.head(compKey) : true; } catch (_) { _existe = true; }
+          if (!_existe) return json({ error: 'No encuentro ese comprobante: subilo de nuevo', campo: 'comprobante' }, 400);
+        }
+        const compWamid = compKey ? (String(body.comprobante_wamid || '').slice(0, 200) || null) : null;
+        let _grp = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?";
+        const _grpArgs = [ref.numero, ref.fecha, ref.com];
+        if (ref.origen === 'crm' && ref.tel) { _grp += " AND origen = 'crm' AND IFNULL(telefono,'') = ?"; _grpArgs.push(ref.tel); }
+        const g = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t, MAX(pagado) AS pagado, MAX(IFNULL(caja,'')) AS caja, MAX(cobro2) AS cobro2 FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
+        const total = g ? Number(g.t) || 0 : 0;
+        const pagado1 = g && g.pagado != null ? Number(g.pagado) || 0 : 0;
+        const saldo = Math.max(0, total - pagado1);
+        const restante = Math.max(0, total - pagado1 - importe);
+        const now = new Date().toISOString();
+        await env.DB.prepare(`UPDATE pedidos SET estado_pago = '2do pago', cobro2 = ?, caja2 = ?, pago2_metodo = ?, comprobante2_key = ?, comprobante2_wamid = ?, cobro2_at = ?, restante = ?, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE ${_grp}`)
+          .bind(importe, caja, metodo, compKey || null, compWamid, now, restante, now, now, ..._grpArgs).run();
+        const fm = (n) => '$' + Math.round(n).toLocaleString('es-AR');
+        const avisos = [];
+        const caja1 = String((g && g.caja) || '');
+        if (g && g.cobro2 != null && Number(g.cobro2) !== importe) avisos.push(`Se reemplazó el 2do pago anterior (${fm(Number(g.cobro2))})`);
+        if (caja1 && caja1 !== caja) avisos.push(`La seña fue a ${caja1} y el saldo a ${caja}: en la planilla queda ${caja1}`);
+        if (!caja1) avisos.push('Este pedido no tiene cargada la caja de la seña');
+        if (importe < saldo - 1) avisos.push(`Queda debiendo ${fm(saldo - importe)}`);
+        else if (importe > saldo + 1) avisos.push(`Pagó ${fm(importe - saldo)} de más`);
+        if (caja1 && caja1 !== caja) {
+          const txt = `💳 2do pago con otra caja: #${ref.numero} ${String(ref.cartel || '').slice(0, 40)} · seña a ${caja1}, saldo ${fm(importe)} a ${caja} (cargó ${session.user}). En la planilla (col Z) queda ${caja1}.`;
+          ctx.waitUntil(avisoInterno(env, { para: 'gaspar', tipo: 'pago2_caja', prioridad: 'P3', clave: 'pago2_caja:' + id + ':' + caja + ':' + importe, texto: txt,
+            legacy: () => avisoLanzamientoSendLegacy(env, AVISO_SLUGS_FIJOS.gaspar, txt), legacyDest: AVISO_SLUGS_FIJOS.gaspar }).catch(() => {}));
+        }
+        const rs3 = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs) };
+        return json({ ok: true, numero: ref.numero, pedidos: rs3.results || [], avisos });
       }
 
       // POST /admin/pedidos/sync-productores → trae el productor del Excel a D1
@@ -23600,6 +24057,19 @@ const handler = {
       // POST /admin/pedidos/backfill-source → guarda el ad_id EXACTO (source_id/source_campaign) en
       // los pedidos ya trazados que no lo tienen. SEGURO: no cambia labels ni toca los marcados a
       // mano como orgánicos. Batched en un solo request. Solo Gaspar. Idempotente.
+      // POST /admin/pedidos/caja-sync[?id=N] → corre YA el pase de la caja de la seña a la col Z (Pedidos_Corporeo /
+      // Pedidos_Directo) y devuelve el detalle (escritos / iguales / cargados a mano / sin fila). Solo Gaspar.
+      // ?reintentar=1 vuelve a intentar los que quedaron sin fila o "manual" (resetea los intentos).
+      if (request.method === 'POST' && path === '/admin/pedidos/caja-sync') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        await ensurePedidosSchema(env);
+        const _id = parseInt(url.searchParams.get('id') || '0', 10);
+        if (url.searchParams.get('reintentar') === '1') {
+          await env.DB.prepare("UPDATE pedidos SET caja_sync_attempts = 0 WHERE origen = 'crm' AND IFNULL(caja,'') <> '' AND IFNULL(caja_sync,'') <> caja" + (_id > 0 ? ' AND id = ?' : '')).bind(...(_id > 0 ? [_id] : [])).run();
+        }
+        return json({ ok: true, ...(await syncCajaPedidos(env, _id > 0 ? { ids: [_id] } : {})) });
+      }
+
       // POST /admin/pedidos/vendedor-sync → corre YA el barrido del vendedor de los pedidos de neón al 2026 v4
       // (Pedidos_Directo col C) y devuelve el detalle (escritos / iguales / cargados a mano / errores). Solo Gaspar.
       // Con {forzar:[{id, prev}]} corrige celdas que ya tienen un vendedor (decisión de Gaspar): manda el
@@ -26109,6 +26579,8 @@ const handler = {
       try { await barrerVendedoresNeon(env); } catch (_) {}
       // Mano de obra y productor de los pedidos de neón nuevos → 2026 v4 (Pedidos_Directo, columnas MO y PRODUCTOR).
       try { await barrerMoDirecto(env); } catch (_) {}
+      // Caja de la seña → col Z de Pedidos_Corporeo / Pedidos_Directo (reintentos, IMPORTRANGE atrasado, cambios).
+      try { await syncCajaPedidos(env); } catch (_) {}
     })());
     // 1×/hora: sincronizar la columna Ad al Excel desde D1 (match por nombre, drift-proof, solo huecos).
     if (new Date().getUTCMinutes() < 5) ctx.waitUntil(syncAdColumnToExcel(env));
