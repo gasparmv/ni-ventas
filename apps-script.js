@@ -469,10 +469,12 @@ function directoMo(data) {
     for (var c = 0; c < head.length; c++) { var h = nz(head[c]); if (h === 'mo' && !colMo) colMo = c + 1; if (h === 'productor' && !colProd) colProd = c + 1; }
     if (!colMo || !colProd) return jsonOut({ error: 'no encontré las columnas "MO" y "PRODUCTOR" en la fila 2' });
     var off = base - 2, last = sh.getLastRow();
-    var vals = sh.getRange(1, 1, last, 4).getValues();   // A..D: ID, Fecha, VENDEDOR, Nombre
+    var vals = sh.getRange(1, 1, last, 8).getValues();   // A..H: ID, Fecha, VENDEDOR, Nombre, Cantidad, COLORES, ALTO, ANCHO
     var moR = sh.getRange(1, colMo, last, 1), moV = moR.getValues(), moF = moR.getFormulas();
     var prR = sh.getRange(1, colProd, last, 1), prV = prR.getValues(), prF = prR.getFormulas();
-    var coincide = function (r, it) { return r >= base && r <= last && nz(vals[r - 1][0]) === nz(it.numero) && nz(vals[r - 1][3]) === nz(it.cartel); };
+    // N° + nombre, y si vienen, cantidad (E), alto (G) y ancho (H): dos carteles 'gemelos' del mismo pedido no se cruzan.
+    var mismoNum = function (cel, v) { if (v === '' || v == null || cel === '' || cel == null) return true; var a = Number(cel), b = Number(v); return !isFinite(a) || !isFinite(b) || Math.abs(a - b) < 0.01; };
+    var coincide = function (r, it) { if (!(r >= base && r <= last)) return false; var f = vals[r - 1]; return nz(f[0]) === nz(it.numero) && nz(f[3]) === nz(it.cartel) && mismoNum(f[4], it.cantidad) && mismoNum(f[6], it.alto) && mismoNum(f[7], it.ancho); };
     var num = function (x) { var n = Number(String(x).replace(/[^0-9.\-]/g, '')); return isFinite(n) ? n : NaN; };
     var items = data.items || [], out = [];
     for (var k = 0; k < items.length; k++) {
@@ -484,15 +486,21 @@ function directoMo(data) {
         r = hits[0];
       }
       var res = { id: it.id, ok: true, row: r, mo: '-', prod: '-' };
-      // MO (número)
-      if (it.mo !== '' && it.mo != null) {
+      // MO (número). Vacío = el CRM ya no tiene mano de obra para ese cartel: se borra SOLO si la celda tiene lo que había puesto el CRM.
+      if ((it.mo === '' || it.mo == null) && it.prev_mo !== '' && it.prev_mo != null) {
+        var cM = moV[r - 1][0];
+        if (!moF[r - 1][0] && cM !== '' && Math.abs(num(cM) - Number(it.prev_mo)) < 1) { sh.getRange(r, colMo).setValue(''); moV[r - 1][0] = ''; res.mo = 'borrado'; }
+      } else if (it.mo !== '' && it.mo != null) {
         var curMo = moV[r - 1][0], fMo = moF[r - 1][0], nCur = num(curMo), nNew = Number(it.mo), nPrev = (it.prev_mo === '' || it.prev_mo == null) ? NaN : Number(it.prev_mo);
         if (!fMo && curMo !== '' && Math.abs(nCur - nNew) < 1) res.mo = 'igual';
         else if (curMo === '' || fMo || (isFinite(nPrev) && Math.abs(nCur - nPrev) < 1)) { sh.getRange(r, colMo).setValue(nNew); moV[r - 1][0] = nNew; moF[r - 1][0] = ''; res.mo = 'escrito'; }
         else { res.mo = 'manual'; res.mo_planilla = curMo; }
       }
-      // PRODUCTOR (texto)
-      if (it.productor) {
+      // PRODUCTOR (texto). Vacío = se sacó el productor en el CRM: se borra SOLO si la celda tiene el nombre que había puesto el CRM.
+      if (!it.productor && it.prev_prod) {
+        var cP = prV[r - 1][0];
+        if (!prF[r - 1][0] && nz(cP) === nz(it.prev_prod)) { sh.getRange(r, colProd).setValue(''); prV[r - 1][0] = ''; res.prod = 'borrado'; }
+      } else if (it.productor) {
         var curP = prV[r - 1][0], fP = prF[r - 1][0];
         if (!fP && nz(curP) === nz(it.productor)) res.prod = 'igual';
         else if (curP === '' || fP || (it.prev_prod && nz(curP) === nz(it.prev_prod))) { sh.getRange(r, colProd).setValue(it.productor); prV[r - 1][0] = it.productor; prF[r - 1][0] = ''; res.prod = 'escrito'; }

@@ -1682,6 +1682,7 @@ function corteResetEstado() {
   sfResetEstado();   // Sin Frontera: idem
 }
 function afterUserSwitch() {
+  STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = '';   // producción: nada del usuario anterior
   try { localStorage.removeItem(CACHE_KEY); } catch (_) {}
   corteResetEstado();
   STATE.loaded = false; STATE.pedidos = [];
@@ -1724,6 +1725,7 @@ async function logout() {
   STATE.consultas = {};
   repartoState = { data: null, loading: false, error: '', at: 0 };
   chatState.vigilados = null;
+  STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = '';
   saveToken(null);
   saveAdminToken(null);
   olvidarCotizadorCache();   // costos internos fuera del navegador al cerrar sesión
@@ -13819,7 +13821,7 @@ async function savePedidoEdit(idx) {
     estado_pago:   (() => { const v = document.getElementById('ped-edit-estadopago')?.value; if (v == null || v === p.estadoPago) return undefined; return (v === '2do pago') ? undefined : v; })(),
     pago2_revert:  (() => { const v = document.getElementById('ped-edit-estadopago')?.value; return (v != null && v !== '2do pago' && p.estadoPago === '2do pago' && (Number(p.cobro2) > 0 || p.comprobante2Key)) ? true : undefined; })(),
     pagado:        (() => { const v = document.getElementById('ped-edit-pagado')?.value; if (v == null) return undefined; const a = v === '' ? null : Number(v), b = (p.pagado === '' || p.pagado == null) ? null : Number(p.pagado); return a === b ? undefined : v; })(),
-    productor:     document.getElementById('ped-edit-productor')?.value,
+    productor:     (() => { const el = document.getElementById('ped-edit-productor'); return (el && el.value !== (p.productor || '')) ? el.value : undefined; })(),
     asistido_por:  (isAdmin() && document.getElementById('ped-edit-asistido') && document.getElementById('ped-edit-asistido').value !== (p.asistidoPor || '')) ? document.getElementById('ped-edit-asistido').value : undefined
   };
   const btn = document.getElementById('ped-edit-save');
@@ -22440,6 +22442,18 @@ async function prodFetch(path, opts) {
   if (!r.ok || !j || j.error) throw new Error((j && j.error) || ('HTTP ' + r.status));
   return j;
 }
+// Visor de una foto encima de todo (sin render(): no cierra el detalle ni toca la vista). Tocar o Escape cierra.
+function prodVerFoto(url) {
+  if (!url) return;
+  const bg = document.createElement('div');
+  bg.className = 'prod-visor';
+  bg.innerHTML = `<img src="${escapeHtml(url)}" alt=""><button aria-label="Cerrar">✕</button>`;
+  const cerrar = () => { bg.remove(); document.removeEventListener('keydown', esc); };
+  const esc = (e) => { if (e.key === 'Escape') cerrar(); };
+  bg.onclick = cerrar;
+  document.addEventListener('keydown', esc);
+  document.body.appendChild(bg);
+}
 // Reemplaza en una lista los carteles que vinieron actualizados del worker.
 function prodMerge(lista, nuevos) { const m = {}; (nuevos || []).forEach(c => { m[c.id] = c; }); return (lista || []).map(c => m[c.id] ? { ...c, ...m[c.id] } : c); }
 // Achica la foto (≤1920 px JPEG) como la del diseño y la sube a ese cartel.
@@ -22472,7 +22486,8 @@ function renderProdApp(embebido) {
     ? `<div class="page-head"><h1>Mis carteles</h1><div class="actions"><button class="btn btn-ghost" data-prod-refresh>↻ Actualizar</button></div></div>`
     : `<div class="prod-top"><img src="assets/logo.svg" alt="Neon Infinito" style="height:26px"><div style="flex:1"><div style="font-weight:700">Producción</div><div style="font-size:12px;color:var(--fg-mute)">${escapeHtml(nombre)}</div></div>
     <button class="btn btn-ghost" data-prod-refresh title="Actualizar" style="padding:6px 10px">↻</button><button class="btn btn-ghost" data-prod-salir style="padding:6px 10px">Salir</button></div>`;
-  if (!d) return `<div class="prod-app">${head}<div class="prod-body"><div class="muted" style="padding:30px;text-align:center">${st.err ? '⚠ ' + escapeHtml(st.err) + '<br><button class="btn btn-cyan" data-prod-refresh style="margin-top:10px">Reintentar</button>' : 'Cargando tus carteles…'}</div></div></div>`;
+  const toastDiv = embebido ? '' : '<div id="toast" class="toast"></div>';
+  if (!d) return `<div class="prod-app">${toastDiv}${head}<div class="prod-body"><div class="muted" style="padding:30px;text-align:center">${st.err ? '⚠ ' + escapeHtml(st.err) + '<br><button class="btn btn-cyan" data-prod-refresh style="margin-top:10px">Reintentar</button>' : 'Cargando tus carteles…'}</div></div></div>`;
   const cs = d.carteles || [];
   const hacer = cs.filter(c => c.prod_estado !== 'terminado' && !c.prod_pagado_at);
   const term = cs.filter(c => c.prod_estado === 'terminado' && !c.prod_pagado_at);
@@ -22480,7 +22495,7 @@ function renderProdApp(embebido) {
   const suma = arr => arr.reduce((s, c) => s + (Number(c.mo_monto) || 0), 0);
   const tabs = [['hacer', 'Para hacer', hacer.length], ['term', 'Terminados', term.length], ['pag', 'Cobrados', pag.length]];
   const lista = st.tab === 'term' ? term : st.tab === 'pag' ? pag : hacer;
-  return `<div class="prod-app">${head}
+  return `<div class="prod-app">${toastDiv}${head}
     <div class="prod-body">
       <div class="prod-resumen">
         <div><div class="k">Para hacer</div><div class="v">${hacer.length}</div></div>
@@ -22544,29 +22559,26 @@ function bindProdApp() {
 // Acciones de las tarjetas (las usa la pantalla del productor y la de Gaspar).
 function bindProdCards(root, admin) {
   const st = prodState();
-  const actualizar = (carteles) => {
-    if (admin) { const a = prodAdmState(); if (a.data) a.data.carteles = prodMerge(a.data.carteles, carteles); }
-    else if (st.data) st.data.carteles = prodMerge(st.data.carteles, carteles);
-    render();
-  };
-  root.querySelectorAll('[data-prod-zoom]').forEach(el => el.onclick = (ev) => { ev.stopPropagation(); try { openImgLightbox(el.dataset.prodZoom); } catch (_) { window.open(el.dataset.prodZoom, '_blank'); } });
+  const actualizar = (carteles) => { if (st.data) st.data.carteles = prodMerge(st.data.carteles, carteles); };
+  root.querySelectorAll('[data-prod-zoom]').forEach(el => el.onclick = (ev) => { ev.stopPropagation(); prodVerFoto(el.dataset.prodZoom); });
   root.querySelectorAll('[data-prod-foto-input]').forEach(inp => inp.onchange = async () => {
     const id = Number(inp.dataset.prodFotoInput), files = Array.from(inp.files || []);
     if (!files.length) return;
     st.busy[id] = true; render();
-    try { const j = await prodSubirFotos(id, files); if (j && j.carteles) { st.busy[id] = false; actualizar(j.carteles); } toast(files.length > 1 ? 'Fotos subidas' : 'Foto subida'); }
-    catch (e) { toast('No se pudo subir: ' + e.message); }
-    st.busy[id] = false; render();
+    let msg = '';
+    try { const j = await prodSubirFotos(id, files); if (j && j.carteles) actualizar(j.carteles); msg = files.length > 1 ? 'Fotos subidas' : 'Foto subida'; }
+    catch (e) { msg = 'No se pudo subir: ' + e.message; }
+    st.busy[id] = false; render(); toast(msg);
   });
   root.querySelectorAll('[data-prod-foto-borrar]').forEach(b => b.onclick = async (ev) => {
     ev.stopPropagation();
     if (!(await showConfirm('¿Sacar esta foto?', { title: 'Foto del cartel', confirmLabel: 'Sacar', cancelLabel: 'No' }))) return;
-    try { const j = await prodFetch('/admin/prod/foto/borrar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foto_id: Number(b.dataset.prodFotoBorrar) }) }); actualizar(j.carteles); }
+    try { const j = await prodFetch('/admin/prod/foto/borrar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foto_id: Number(b.dataset.prodFotoBorrar) }) }); actualizar(j.carteles); render(); }
     catch (e) { toast(e.message); }
   });
   root.querySelectorAll('[data-prod-estado]').forEach(b => b.onclick = async () => {
     const [idS, est] = b.dataset.prodEstado.split('|'); const id = Number(idS);
-    const lista = admin ? ((prodAdmState().data || {}).carteles || []) : ((st.data || {}).carteles || []);
+    const lista = (st.data || {}).carteles || [];
     const c = lista.find(x => x.id === id) || {};
     let forzar = false;
     if (est === 'terminado') {
@@ -22578,9 +22590,10 @@ function bindProdCards(root, admin) {
       } else if (!admin && !(await showConfirm(`¿Terminaste "${c.cartel || ''}"?`, { title: 'Cartel terminado', confirmLabel: 'Sí, terminado', cancelLabel: 'No' }))) return;
     }
     st.busy[id] = true; render();
-    try { const j = await prodFetch('/admin/prod/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_id: id, estado: est, forzar }) }); st.busy[id] = false; if (j.carteles) actualizar(j.carteles); }
-    catch (e) { toast(e.message); }
-    st.busy[id] = false; render();
+    let msg = '';
+    try { const j = await prodFetch('/admin/prod/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_id: id, estado: est, forzar }) }); if (j.carteles) actualizar(j.carteles); if (est === 'terminado') msg = '¡Listo! Cartel terminado'; }
+    catch (e) { msg = e.message; }
+    st.busy[id] = false; render(); if (msg) toast(msg);
   });
 }
 
@@ -22591,14 +22604,18 @@ function prodAdmState() { if (!STATE.prodAdm) STATE.prodAdm = { prods: null, car
 async function prodCargarProductores(forzar) {
   const a = prodAdmState();
   if (a.cargando || (a.prods && !forzar) || !isAdmin()) return;
+  if (!forzar && a.falloAt && Date.now() - a.falloAt < 60000) return;   // falló hace poco: no reintentar en cada repintado
   a.cargando = true;
-  try { a.prods = (await prodFetch('/admin/prod/productores')).productores || []; } catch (_) {}
+  let ok = false;
+  try { a.prods = (await prodFetch('/admin/prod/productores')).productores || []; ok = true; a.falloAt = 0; } catch (_) { a.falloAt = Date.now(); }
   a.cargando = false;
+  if (!ok) return;
   if (STATE.view === 'pedidos') {
     const tb = document.getElementById('prod-filtros');
     if (tb) { tb.innerHTML = prodFiltrosHtml(); tb.querySelectorAll('[data-pf]').forEach(el => { el.onchange = () => { pedidoFilter[el.dataset.pf] = el.value; renderTablePedidos(); }; }); }
     renderTablePedidos();
-    const ds = document.querySelector('[data-ped-prod-asignar]'); if (ds) openDrawerPedido(Number(ds.dataset.pedProdAsignar));
+    const ds = document.querySelector('[data-ped-prod-asignar]'), dr = document.getElementById('drawer');
+    if (ds && dr && dr.classList.contains('open')) openDrawerPedido(Number(ds.dataset.pedProdAsignar));
   }
   if (STATE.view === 'admin') prodCfgPintar();
 }
@@ -22675,7 +22692,7 @@ function prodCeldaPedido(p) {
   const sel = `<select class="prod-sel" data-ped-prod="${p.idx}" ${p.prodPagadoAt ? 'disabled title="Ya está pagado"' : ''}>${a.prods ? prodAdmOpts(p.productorId || '', true) : `<option>${escapeHtml(p.productorNombre || '—')}</option>`}</select>`;
   if (!p.productorId) return sel;
   const mo = p.moMonto != null ? fmtMoney(p.moMonto) : '';
-  const pago = p.prodPagadoAt ? ' · <span style="color:#2ECC71">pagado ✓</span>' : (est === 'terminado' ? ` · <button class="prod-pagar" data-ped-prod-pagar="${p.idx}">Pagar</button>` : '');
+  const pago = p.prodPagadoAt ? ' · <span style="color:#2ECC71">pagado ✓</span>' : (est === 'terminado' ? (p.moMonto != null ? ` · <button class="prod-pagar" data-ped-prod-pagar="${p.idx}">Pagar</button>` : ' · <span style="color:#FFB020" title="Faltan tramos o medidas para calcular la mano de obra">falta la mano de obra</span>') : '');
   return sel + `<div class="prod-celda-linea"><span style="color:${col}">${escapeHtml(PROD_ESTADO_LBL[est] || 'Asignado')}</span>${mo ? ' · ' + mo : ''}${pago}</div>`;
 }
 // Filtros de producción del toolbar (admin): productor y estado de producción.
@@ -22687,6 +22704,7 @@ function prodFiltrosHtml() {
         <select data-pf="prodEstado"><option value="">Producción: todas</option>${[['pendiente', 'Pendiente'], ['en_armado', 'En armado'], ['sin_pagar', 'Terminado sin pagar'], ['pagado', 'Pagado']].map(([k, l]) => `<option value="${k}" ${f.prodEstado === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
 }
 function prodFiltroPasa(p) {
+  if (!isAdmin()) return true;
   const f = pedidoFilter;
   if (!f.prod && !f.prodEstado) return true;
   if (p.esCorporeo) return false;
@@ -22706,13 +22724,14 @@ function prodResumenFiltro(lista) {
   if (!isAdmin() || (!pedidoFilter.prod && !pedidoFilter.prodEstado)) { el.innerHTML = ''; return; }
   const suma = arr => arr.reduce((s, p) => s + (Number(p.moMonto) || 0), 0);
   const debe = lista.filter(p => p.productorId && p.prodEstado === 'terminado' && !p.prodPagadoAt);
+  const debePagable = debe.filter(p => p.moMonto != null);
   const curso = lista.filter(p => p.productorId && p.prodEstado !== 'terminado' && !p.prodPagadoAt);
   const pag = lista.filter(p => p.prodPagadoAt);
   const unProd = pedidoFilter.prod && pedidoFilter.prod !== '__sin';
-  el.innerHTML = `<div class="prod-resumen-filtro">Terminados sin pagar: <b>${debe.length} · ${fmtMoney(suma(debe))}</b>${unProd && debe.length > 1 ? ` <button class="btn btn-cyan" data-ped-prod-pagar-todos style="padding:3px 10px;font-size:12px;margin-left:6px">Marcar los ${debe.length} como pagados</button>` : ''}
+  el.innerHTML = `<div class="prod-resumen-filtro">Terminados sin pagar: <b>${debe.length} · ${fmtMoney(suma(debe))}</b>${unProd && debePagable.length > 1 ? ` <button class="btn btn-cyan" data-ped-prod-pagar-todos style="padding:3px 10px;font-size:12px;margin-left:6px">Marcar los ${debePagable.length} como pagados</button>` : ''}${debe.length > debePagable.length ? ` <span style="color:#FFB020;font-size:12px">· ${debe.length - debePagable.length} sin mano de obra (faltan tramos o medidas)</span>` : ''}
     <span class="muted">· En curso: ${curso.length} · ${fmtMoney(suma(curso))} · Pagados: ${pag.length} · ${fmtMoney(suma(pag))}</span></div>`;
   const bt = el.querySelector('[data-ped-prod-pagar-todos]');
-  if (bt) bt.onclick = () => prodPagarPedidos(debe.map(p => p.idx), true);
+  if (bt) bt.onclick = () => prodPagarPedidos(debePagable.map(p => p.idx), true);
 }
 // Pasa a STATE.pedidos lo que devolvió el worker de producción (asignar / pagar).
 function prodAplicarAPedidos(carteles) {
@@ -22725,8 +22744,16 @@ function prodAplicarAPedidos(carteles) {
   }
 }
 async function prodAsignarPedido(idx, pid) {
+  const enviar = (forzar) => fetch(CONFIG.trackerUrl + '/admin/prod/asignar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: [idx], productor_id: pid, forzar: !!forzar }) });
   try {
-    const j = await prodFetch('/admin/prod/asignar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: [idx], productor_id: pid }) });
+    let r = await enviar(false), j = null; try { j = await r.json(); } catch (_) {}
+    if (r.status === 409 && j && j.confirmar) {
+      const c = (j.carteles || [])[0] || {}, x = STATE.pedidos.find(y => y.idx === idx) || {};
+      const ok = await showConfirm(`"${x.cartel || ''}" ya está ${c.estado === 'terminado' ? 'TERMINADO' : 'EN ARMADO'} por ${x.productorNombre || c.productor_id || 'otro productor'}. ¿${pid ? 'Pasárselo a ' + prodAdmNombre(pid) : 'Sacarle el productor'} igual? El estado y las fotos quedan como están.`, { title: 'Cambiar productor', confirmLabel: 'Sí, cambiar', cancelLabel: 'Cancelar', variant: 'warn' });
+      if (!ok) { if (STATE.view === 'pedidos') renderTablePedidos(); return; }
+      r = await enviar(true); j = null; try { j = await r.json(); } catch (_) {}
+    }
+    if (!r.ok || !j || j.error) throw new Error((j && j.error) || ('HTTP ' + r.status));
     prodAplicarAPedidos(j.carteles);
     if (j.saltados && j.saltados.length) toast('No se cambió: ' + j.saltados[0].motivo);
     else toast(pid ? 'Asignado a ' + prodAdmNombre(pid) : 'Productor sacado');
@@ -22742,7 +22769,8 @@ async function prodPagarPedidos(ids, si) {
   try {
     const j = await prodFetch('/admin/prod/pagar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: ids, pagado: !!si }) });
     prodAplicarAPedidos(j.carteles);
-    toast(si ? 'Pago de producción marcado' : 'Pago deshecho');
+    const _salt = (j.saltados || []).length;
+    toast(_salt ? `${j.cambiados || 0} marcado${(j.cambiados || 0) === 1 ? '' : 's'} · ${_salt} sin mano de obra (faltan tramos o medidas): no se pagaron` : (si ? 'Pago de producción marcado' : 'Pago deshecho'));
   } catch (e) { toast(e.message); }
   if (STATE.view === 'pedidos') renderTablePedidos();
 }
@@ -22776,12 +22804,13 @@ function bindProdDrawer(p) {
   if (s) s.onchange = async () => { await prodAsignarPedido(p.idx, s.value); openDrawerPedido(p.idx); };
   const pg = document.querySelector('[data-ped-prod-pagar-d]');
   if (pg) pg.onclick = async () => {
+    if (p.moMonto == null) { toast('Falta la mano de obra: completá tramos y medidas del cartel antes de pagarlo'); return; }
     if (p.prodEstado !== 'terminado' && !(await showConfirm('Este cartel todavía no está marcado como terminado. ¿Marcar la producción como pagada igual?', { title: 'Pago de producción', confirmLabel: 'Seguir', cancelLabel: 'Cancelar', variant: 'warn' }))) return;
     await prodPagarPedidos([p.idx], true); openDrawerPedido(p.idx);
   };
   const dp = document.querySelector('[data-ped-prod-despagar]');
   if (dp) dp.onclick = async () => { await prodPagarPedidos([p.idx], false); openDrawerPedido(p.idx); };
-  document.querySelectorAll('[data-ped-prod-zoom]').forEach(el => el.onclick = () => { try { openImgLightbox(el.dataset.pedProdZoom); } catch (_) {} });
+  document.querySelectorAll('[data-ped-prod-zoom]').forEach(el => el.onclick = () => prodVerFoto(el.dataset.pedProdZoom));
 }
 // Mano de obra en el front (misma fórmula que el worker: calcManoObra), para el desglose de costos del cotizador.
 function calcManoObraFront(precio, tramos, metros, ancho, alto, cant) {
@@ -27289,7 +27318,7 @@ function pedidosSignature() {
   // + foto del diseño / estado del corte: si la foto se sube desde otro dispositivo (o Emma avanza la
   // matriz), el poll tiene que redibujar la tabla (badge "SIN FOTO").
   // + caja / 2do pago / comprobantes: el chip de caja de la tabla tiene que reflejar un cobro cargado desde otro lado.
-  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}:${p.disenoKey || ''}:${p.corteEstado || ''}:${p.caja || ''}:${p.caja2 || ''}:${p.cobro2 || 0}:${p.comprobanteKey || ''}:${p.comprobante2Key || ''}`).join('|');
+  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}:${p.disenoKey || ''}:${p.corteEstado || ''}:${p.caja || ''}:${p.caja2 || ''}:${p.cobro2 || 0}:${p.comprobanteKey || ''}:${p.comprobante2Key || ''}:${p.productorId || ''}:${p.prodEstado || ''}:${p.prodPagadoAt || ''}:${p.moMonto == null ? '' : p.moMonto}:${(p.prodFotos || []).length}`).join('|');
 }
 function startPedidosPolling() {
   if (STATE.pedidosPollTimer) return;

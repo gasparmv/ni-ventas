@@ -4564,3 +4564,8 @@ select.lb-sel.sf-sel { max-width: 200px; }
 .prod-celda-linea{font-size:11px;margin-top:4px;color:var(--fg-mute);white-space:nowrap}
 .prod-pagar{background:rgba(46,204,113,.14);border:1px solid rgba(46,204,113,.45);color:#6ef0a0;border-radius:999px;padding:1px 8px;font-size:11px;cursor:pointer}
 .prod-resumen-filtro{font-size:13px;padding:8px 14px;border-bottom:1px solid var(--border);background:rgba(255,176,32,.05)}
+
+/* Visor de fotos de producción (encima de todo, no cierra el detalle) */
+.prod-visor{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;padding:16px;cursor:zoom-out}
+.prod-visor img{max-width:100%;max-height:100%;border-radius:8px;object-fit:contain}
+.prod-visor button{position:absolute;top:12px;right:14px;width:36px;height:36px;border-radius:50%;border:none;background:rgba(255,255,255,.15);color:#fff;font-size:16px;cursor:pointer}
