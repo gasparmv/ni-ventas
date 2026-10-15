@@ -2151,6 +2151,7 @@ async function agendaRoute(env, request, url, path) {
   const session = await getSession(env, request);
   if (!session) return unauthorized();
   if (esUsuarioLogistica(session.user)) return json({ error: 'forbidden' }, 403); // usuario externo: no ve la agenda interna
+  if (await productorDeSesion(env, session.user)) return json({ error: 'forbidden' }, 403); // productores: solo sus carteles
   await ensureAgendaSchema(env);
   const me = _agSlug(session.user);
   const esAdmin = (await getSessionRole(env, session.user)) === 'admin';
@@ -15965,8 +15966,8 @@ async function getSessionRole(env, userName) {
 async function sesionInterna(env, request, roles) {
   const session = await getSession(env, request);
   if (!session) return { error: unauthorized() };
-  const role = esUsuarioLogistica(session.user) ? 'logistica' : await getSessionRole(env, session.user);
-  if (role === 'logistica' || (roles && !roles.includes(role))) return { error: json({ error: 'forbidden' }, 403) };
+  const role = esUsuarioLogistica(session.user) ? 'logistica' : ((await productorDeSesion(env, session.user)) ? 'productor' : await getSessionRole(env, session.user));
+  if (role === 'logistica' || role === 'productor' || (roles && !roles.includes(role))) return { error: json({ error: 'forbidden' }, 403) };
   return { session, role };
 }
 // Quiénes usan el cotizador (COGS/params) y la vista Actividad: Gaspar, vendedores y diseño.
@@ -17168,6 +17169,213 @@ async function maybeAdhocCleanup(env) {
   } catch (_) {}
 }
 
+// ===== Producción de NEÓN: productores, estados por cartel y mano de obra por tiempo (15-oct-2026) =====
+// Gaspar (15-oct): cada productor tiene su usuario y ve SOLO sus carteles asignados, sin el precio de venta: lo que
+// le corresponde, color, foto del diseño y aclaraciones; pone el estado de cada uno y al terminarlo sube sí o sí una
+// foto de cada cartel. Gaspar asigna los carteles desde Pedidos / Producción y marca qué trabajos ya les pagó.
+// Mano de obra desde kv 'mo_desde' (regla tiempo_v1): % del precio + $ por minuto de armado según los tiempos de
+// Bruno (42 min fijos + 2,41 por tramo + 4,44 por metro + 14,3 por m²), × cantidad, con tope % del precio. Calibrada
+// para no pagar más que el 12% de antes (memoria mano-obra-por-tiempo). Los pedidos anteriores: % del mes (pct_mes).
+// Params editables en Admin (cotizador_params mo_*). El monto queda guardado en el pedido y se congela al pagarlo.
+const MO_DEFAULTS = { mo_pct_precio: 0.058, mo_valor_min: 125, mo_min_fijo: 42, mo_min_tramo: 2.41, mo_min_metro: 4.44, mo_min_m2: 14.3, mo_tope_pct: 0.18 };
+const MO_DESDE_DEFAULT = '2026-10-15';
+const PROD_ESTADOS = ['pendiente', 'en_armado', 'terminado'];
+async function moConfig(env) {
+  const p = { ...MO_DEFAULTS, desde: MO_DESDE_DEFAULT };
+  try {
+    const rs = await env.DB.prepare("SELECT key, value FROM cotizador_params WHERE key IN ('mo_pct_precio','mo_valor_min','mo_min_fijo','mo_min_tramo','mo_min_metro','mo_min_m2','mo_tope_pct')").all();
+    for (const r of (rs.results || [])) { const n = Number(r.value); if (isFinite(n) && n >= 0) p[r.key] = n; }
+  } catch (_) {}
+  try { const d = await kvGet(env, 'mo_desde', null); if (d && /^\d{4}-\d{2}-\d{2}$/.test(String(d))) p.desde = String(d); } catch (_) {}
+  return p;
+}
+// % de mano de obra que se usaba por mes (COGS): 13,5% hasta septiembre de 2026, 12% desde octubre.
+function moPctMes(fecha) { return String(fecha || '') < '2026-10-01' ? 0.135 : 0.12; }
+// Mano de obra de UNA fila de pedido (un cartel × cantidad). null si faltan datos para calcularla.
+function calcManoObra(row, P) {
+  const precio = +row.precio || 0;
+  if (!(precio > 0)) return null;
+  if (String(row.fecha || '') < P.desde) {
+    const pct = moPctMes(row.fecha);
+    return { monto: Math.round(pct * precio), regla: 'pct_mes', detalle: { pct } };
+  }
+  const cant = +row.cantidad > 0 ? +row.cantidad : 1;
+  const t = +row.tramos || 0, m = (+row.cm_neon || 0) / 100, a = ((+row.alto || 0) * (+row.ancho || 0)) / 10000;
+  if (!(t >= 1) || !(m > 0) || !(a > 0)) return null;
+  const min = P.mo_min_fijo + P.mo_min_tramo * t + P.mo_min_metro * m + P.mo_min_m2 * a;
+  const bruto = P.mo_pct_precio * precio + P.mo_valor_min * cant * min;
+  const tope = P.mo_tope_pct * precio;
+  const monto = Math.round(Math.min(bruto, tope));
+  return { monto, regla: 'tiempo_v1', detalle: { min: Math.round(min), cant, pct: P.mo_pct_precio, valor_min: P.mo_valor_min, tope_pct: P.mo_tope_pct, en_tope: bruto > tope } };
+}
+// Recalcula y guarda la mano de obra de esos pedidos de neón (nunca la de un trabajo ya pagado al productor).
+async function moActualizar(env, ids) {
+  ids = (ids || []).map(Number).filter(n => n > 0);
+  if (!ids.length) return 0;
+  await ensureProdSchema(env);
+  const P = await moConfig(env);
+  const rows = (await env.DB.prepare(`SELECT id, fecha, precio, cantidad, tramos, cm_neon, alto, ancho, es_corporeo, prod_pagado_at, mo_monto FROM pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
+  const now = new Date().toISOString(), stmts = [];
+  for (const r of rows) {
+    if (+r.es_corporeo || r.prod_pagado_at) continue;
+    const mo = calcManoObra(r, P);
+    if (!mo) { if (r.mo_monto != null) stmts.push(env.DB.prepare("UPDATE pedidos SET mo_monto = NULL, mo_regla = '', mo_detalle = NULL, mo_at = ? WHERE id = ?").bind(now, r.id)); continue; }
+    if (r.mo_monto != null && Math.round(+r.mo_monto) === mo.monto) continue;
+    stmts.push(env.DB.prepare('UPDATE pedidos SET mo_monto = ?, mo_regla = ?, mo_detalle = ?, mo_at = ? WHERE id = ?').bind(mo.monto, mo.regla, JSON.stringify(mo.detalle), now, r.id));
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  return stmts.length;
+}
+let _prodSchemaOk = false;
+async function ensureProdSchema(env) {
+  if (_prodSchemaOk) return true;
+  let tiene = false;
+  try { tiene = !!(await env.DB.prepare("SELECT 1 AS x FROM pragma_table_info('pedidos') WHERE name = 'mo_at'").first()); } catch (_) {}
+  if (!tiene) {
+    for (const col of ["productor_id TEXT DEFAULT ''", "prod_estado TEXT DEFAULT ''", 'prod_estado_at TEXT', 'prod_asignado_at TEXT', 'prod_terminado_at TEXT', 'prod_pagado_at TEXT', "prod_pagado_por TEXT DEFAULT ''", 'mo_monto REAL', "mo_regla TEXT DEFAULT ''", 'mo_detalle TEXT', 'mo_at TEXT']) {
+      try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
+    }
+  }
+  try {
+    await env.DB.batch([
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedidos_productor ON pedidos (productor_id)'),
+      env.DB.prepare('CREATE TABLE IF NOT EXISTS pedido_prod_fotos (id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, r2_key TEXT NOT NULL, subido_por TEXT, created_at TEXT)'),
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedido_prod_fotos_pedido ON pedido_prod_fotos (pedido_id)'),
+      env.DB.prepare('CREATE TABLE IF NOT EXISTS pedido_prod_log (id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER, campo TEXT, de TEXT, a TEXT, por TEXT, ts TEXT)'),
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedido_prod_log_pedido ON pedido_prod_log (pedido_id)')
+    ]);
+  } catch (_) { return false; }
+  _prodSchemaOk = true;
+  return true;
+}
+// Usuarios que NO pueden ser productores (ya existen con otro rol o son del equipo).
+const PROD_RESERVADOS = ['gaspar', 'admin', 'administrador', 'joaco', 'joaquin', 'facundo', 'facu', 'agustina', 'agus', 'abril', 'cursos', 'disenador', 'emma', 'emmanuel', 'logistica', 'anibal', 'neyen', 'nadia'];
+function prodSlug(s) { return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+// ¿La sesión es de un PRODUCTOR? {id, nombre, activo} o null. Mira users_panel con cualquier activo: un productor
+// dado de baja con una sesión vieja NO puede caer al rol por defecto ('comercial') y ver ventas. Cache 60 s por isolate.
+const _prodSesCache = new Map();
+async function productorDeSesion(env, userName) {
+  const slug = prodSlug(userName);
+  if (!slug || slug === 'gaspar' || PROD_RESERVADOS.includes(slug)) return null;
+  const c = _prodSesCache.get(slug);
+  if (c && Date.now() - c.at < 60000) return c.p;
+  let p = null;
+  try {
+    const u = await env.DB.prepare("SELECT id, nombre, activo FROM users_panel WHERE id = ? AND rol = 'productor' LIMIT 1").bind(slug).first();
+    if (u) p = { id: String(u.id), nombre: String(u.nombre || u.id), activo: +u.activo === 1 };
+  } catch (_) { return null; }
+  _prodSesCache.set(slug, { p, at: Date.now() });
+  return p;
+}
+async function prodLog(env, items) {
+  if (!items.length) return;
+  try { await env.DB.batch(items.map(x => env.DB.prepare('INSERT INTO pedido_prod_log (pedido_id, campo, de, a, por, ts) VALUES (?,?,?,?,?,?)').bind(x.pedido_id, x.campo, String(x.de ?? ''), String(x.a ?? ''), String(x.por || ''), new Date().toISOString()))); } catch (_) {}
+}
+// Fotos del cartel terminado que pide el estado 'terminado': una por cartel (cantidad), máximo 5.
+function prodFotosRequeridas(row) { return Math.min(5, Math.max(1, Math.round(+row.cantidad || 1))); }
+// Carteles de producción con lo que cada uno puede ver. paraProductor=true: SIN precio, teléfono, envío ni vendedor.
+async function prodCarteles(env, whereSql, args, paraProductor) {
+  await ensureProdSchema(env);
+  try { await ensureCorteNeonSchema(env); } catch (_) {}
+  const cols = paraProductor
+    ? 'p.id, p.numero, p.fecha, p.cartel, p.colores, p.alto, p.ancho, p.cm_neon, p.tramos, p.cantidad, p.base, p.dimer, p.tipo, p.aclaracion, p.productor_id, p.prod_estado, p.prod_estado_at, p.prod_asignado_at, p.prod_terminado_at, p.prod_pagado_at, p.mo_monto'
+    : 'p.id, p.numero, p.fecha, p.cartel, p.colores, p.alto, p.ancho, p.cm_neon, p.tramos, p.cantidad, p.base, p.dimer, p.tipo, p.aclaracion, p.precio, p.estado_pago, p.estado_pedido, p.comercial_id, p.cargado_por, p.productor, p.productor_id, p.prod_estado, p.prod_estado_at, p.prod_asignado_at, p.prod_terminado_at, p.prod_pagado_at, p.prod_pagado_por, p.mo_monto, p.mo_regla, p.mo_detalle';
+  const rows = (await env.DB.prepare(
+    `SELECT ${cols}, cp.foto_key AS diseno_key, cp.estado AS corte_estado
+       FROM pedidos p
+       LEFT JOIN (SELECT pedido_id, MAX(id) AS cid FROM corte_pedidos WHERE pedido_id IS NOT NULL GROUP BY pedido_id) cx ON cx.pedido_id = p.id
+       LEFT JOIN corte_pedidos cp ON cp.id = cx.cid
+      ${whereSql}`
+  ).bind(...args).all()).results || [];
+  if (rows.length) {
+    const ids = rows.map(r => r.id);
+    const fotos = {};
+    for (let i = 0; i < ids.length; i += 90) {
+      const sl = ids.slice(i, i + 90);
+      const fs = (await env.DB.prepare(`SELECT id, pedido_id, r2_key, created_at FROM pedido_prod_fotos WHERE pedido_id IN (${sl.map(() => '?').join(',')}) ORDER BY id`).bind(...sl).all()).results || [];
+      for (const f of fs) (fotos[f.pedido_id] = fotos[f.pedido_id] || []).push({ id: f.id, key: f.r2_key, at: f.created_at });
+    }
+    for (const r of rows) { r.fotos = fotos[r.id] || []; r.fotos_requeridas = prodFotosRequeridas(r); if (r.mo_detalle && typeof r.mo_detalle === 'string') { try { r.mo_detalle = JSON.parse(r.mo_detalle); } catch (_) {} } }
+  }
+  return rows;
+}
+async function prodProductores(env, soloActivos) {
+  const rs = await env.DB.prepare(`SELECT id, nombre, activo, CASE WHEN COALESCE(password_hash,'') <> '' THEN 1 ELSE 0 END AS tiene_pw FROM users_panel WHERE rol = 'productor'${soloActivos ? ' AND activo = 1' : ''} ORDER BY nombre`).all();
+  return rs.results || [];
+}
+// Cierra las sesiones abiertas de un usuario (al darlo de baja o cambiarle la contraseña).
+async function cerrarSesionesDe(env, userId) {
+  const ses = (await env.DB.prepare('SELECT token, user FROM sessions WHERE expires_at > ?').bind(new Date().toISOString()).all()).results || [];
+  const del = ses.filter(s => prodSlug(s.user) === userId).map(s => s.token);
+  if (del.length) await env.DB.batch(del.map(t => env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(t)));
+  _prodSesCache.delete(userId);
+  return del.length;
+}
+
+// ── Mano de obra y productor → 2026 v4 › Pedidos_Directo (columnas "MO" y "PRODUCTOR") ──
+// Solo los pedidos de neón desde mo_desde ("en los nuevos pedidos que se vayan anotando de acá en adelante"). El Apps
+// Script (acción directo_mo) ubica las columnas por su título en la fila 2 y escribe SOLO si la celda está vacía, tiene
+// una fórmula (la del 12% arrastrada) o todavía tiene lo que había puesto el CRM: nunca pisa lo cargado a mano.
+// kv 'pedido_mo:<id>' = JSON {mo, prod} del último valor aplicado ({err, at} si no se ubicó la fila: se reintenta en 1 h).
+async function directoMoDisponible(env) {
+  if (!env.APPS_SCRIPT_URL) return false;
+  const now = Date.now();
+  let st = null; try { st = JSON.parse((await kvGet(env, 'directo_mo_ping', null)) || 'null'); } catch (_) {}
+  if (st && now - (Number(st.at) || 0) < (st.ok ? 6 * 3600e3 : 15 * 60e3)) return !!st.ok;
+  let ok = false;
+  try {
+    const u = env.APPS_SCRIPT_URL + (env.APPS_SCRIPT_URL.indexOf('?') >= 0 ? '&' : '?') + 'action=directo_ping';
+    const r = await fetch(u, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
+    const j = await r.json().catch(() => null);
+    ok = !!(j && j.ok && j.directo === true && j.mo === true);
+  } catch (_) {}
+  await kvSet(env, 'directo_mo_ping', JSON.stringify({ ok, at: now }));
+  return ok;
+}
+async function barrerMoDirecto(env) {
+  if (!env.APPS_SCRIPT_URL) return { skipped: 'no url' };
+  try {
+    await ensureProdSchema(env);
+    const P = await moConfig(env);
+    const rs = await env.DB.prepare(
+      "SELECT p.id, p.numero, p.cartel, p.sheet_row, p.mo_monto, p.productor_id, u.nombre AS prod_nombre, k.v AS kv FROM pedidos p " +
+      "LEFT JOIN users_panel u ON u.id = p.productor_id AND u.rol = 'productor' LEFT JOIN kv_cache k ON k.k = 'pedido_mo:' || p.id " +
+      "WHERE p.es_corporeo = 0 AND p.fecha >= ? AND p.sheet_row > 1 AND p.mirror_dirty = 0 AND (p.mo_monto IS NOT NULL OR COALESCE(p.productor_id,'') <> '') ORDER BY p.id DESC LIMIT 400"
+    ).bind(P.desde).all();
+    const items = [];
+    for (const p of (rs.results || [])) {
+      const mo = p.mo_monto != null ? Math.round(+p.mo_monto) : '';
+      const prod = String(p.prod_nombre || '');
+      let prev = null; try { prev = p.kv ? JSON.parse(p.kv) : null; } catch (_) {}
+      if (prev && !prev.err && String(prev.mo) === String(mo) && String(prev.prod || '') === prod) continue;
+      if (prev && prev.err && Date.now() - (Number(prev.at) || 0) < 3600e3) continue;
+      items.push({ id: p.id, row: p.sheet_row, numero: p.numero, cartel: p.cartel, mo, prev_mo: prev && !prev.err ? prev.mo : '', productor: prod, prev_prod: prev && !prev.err ? (prev.prod || '') : '' });
+      if (items.length >= 60) break;
+    }
+    if (!items.length) return { sent: 0 };
+    if (!(await directoMoDisponible(env))) return { skipped: 'el Apps Script todavía no tiene directo_mo', pendientes: items.length };
+    const j = await appsScriptPost(env, { action: 'directo_mo', items });
+    if (!(j && j.ok && Array.isArray(j.items))) {
+      if (j && j.ok) await kvSet(env, 'directo_mo_ping', JSON.stringify({ ok: false, at: Date.now() }));
+      return { error: (j && j.error) || 'respuesta inesperada del Apps Script' };
+    }
+    const porId = {}; for (const r of j.items) porId[r.id] = r;
+    const res = { sent: items.length, escritos: 0, iguales: 0, manuales: [], errores: [] };
+    for (const x of items) {
+      const r = porId[x.id];
+      if (r && r.ok) {
+        await kvSet(env, 'pedido_mo:' + x.id, JSON.stringify({ mo: x.mo, prod: x.productor }));
+        if (r.mo === 'escrito' || r.prod === 'escrito') res.escritos++; else res.iguales++;
+        if (r.mo === 'manual' || r.prod === 'manual') res.manuales.push({ id: x.id, cartel: x.cartel, mo: r.mo === 'manual' ? r.mo_planilla : undefined, prod: r.prod === 'manual' ? r.prod_planilla : undefined });
+      } else {
+        await kvSet(env, 'pedido_mo:' + x.id, JSON.stringify({ err: (r && r.error) || 'sin respuesta', at: Date.now() }));
+        res.errores.push({ id: x.id, cartel: x.cartel, error: (r && r.error) || 'sin respuesta' });
+      }
+    }
+    return res;
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+
 const handler = {
   async fetch(request, env, ctx) {
     // Envoltorio anti-crash: cualquier excepción NO atrapada del handler (típico
@@ -18048,7 +18256,8 @@ const handler = {
       await env.DB.prepare(
         'INSERT INTO sessions (token, user, expires_at, created_at) VALUES (?, ?, ?, ?)'
       ).bind(token, userSes, expires.toISOString(), now.toISOString()).run();
-      return json({ token, user: userSes, expiresAt: expires.toISOString() });
+      // rol: el front lo usa para los usuarios de rol dinámico (productores de neón → solo su pantalla).
+      return json({ token, user: userSes, expiresAt: expires.toISOString(), rol: isAdminUser ? 'admin' : String((panelUser && panelUser.rol) || '') });
     }
 
     if (request.method === 'POST' && path === '/auth/logout') {
@@ -18060,7 +18269,9 @@ const handler = {
     if (request.method === 'GET' && path === '/auth/me') {
       const session = await getSession(env, request);
       if (!session) return unauthorized();
-      return json({ user: session.user });
+      const _pzMe = await productorDeSesion(env, session.user);
+      if (_pzMe && !_pzMe.activo) return unauthorized();
+      return json({ user: session.user, rol: _pzMe ? 'productor' : await getSessionRole(env, session.user) });
     }
 
     // ===== Agenda del equipo (calendario interno) =====
@@ -18091,7 +18302,7 @@ const handler = {
       const expires = new Date(now.getTime() + ((tRol === 'logistica' || esUsuarioLogistica(target)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS) * 86400000);
       const targetSes = canonSessionUser(target);
       await env.DB.prepare('INSERT INTO sessions (token, user, expires_at, created_at) VALUES (?, ?, ?, ?)').bind(token, targetSes, expires.toISOString(), now.toISOString()).run();
-      return json({ token, user: targetSes, expiresAt: expires.toISOString() });
+      return json({ token, user: targetSes, expiresAt: expires.toISOString(), rol: tslug === 'gaspar' ? 'admin' : tRol });
     }
 
     // ----- Reportes (vista Actividad del front; antes público) -----
@@ -18470,6 +18681,8 @@ const handler = {
       if (!session) return unauthorized();
       // Logística (usuario externo): SOLO sus endpoints. Todo lo demás del CRM → 403 aunque tenga sesión válida.
       if (esUsuarioLogistica(session.user) && !path.startsWith('/admin/logistica/')) return json({ error: 'forbidden' }, 403);
+      // Productores de neón (usuario propio): SOLO /admin/prod/* (sus carteles). Dado de baja → afuera aunque tenga sesión.
+      { const _pz = await productorDeSesion(env, session.user); if (_pz) { if (!_pz.activo) return unauthorized(); if (!path.startsWith('/admin/prod/')) return json({ error: 'forbidden' }, 403); } }
 
       // Registro de actividad por usuario (para el aviso de arranque del equipo): estampa
       // last_active SOLO para los vendedores/diseñador vigilados, throttled a 5 min, sin bloquear
@@ -22805,6 +23018,15 @@ const handler = {
         // + diseno_key / corte_estado / corte_id de la pieza de corte (foto del diseño final).
         const _pedRows = await pedidosConDiseno(env, _pedWhere, _pedArgs);
         if (_pedRole === 'comercial') for (const _r of _pedRows) delete _r.asistido_por; // marca interna de Gaspar
+        // Producción: fotos del cartel terminado (todos las ven: el vendedor se las puede mandar al cliente). La mano
+        // de obra y el pago al productor son internos de Gaspar.
+        try {
+          await ensureProdSchema(env);
+          const _fts = (await env.DB.prepare('SELECT pedido_id, r2_key FROM pedido_prod_fotos ORDER BY id').all()).results || [];
+          const _fPor = {}; for (const f of _fts) (_fPor[f.pedido_id] = _fPor[f.pedido_id] || []).push(f.r2_key);
+          for (const _r of _pedRows) { if (_fPor[_r.id]) _r.prod_fotos = _fPor[_r.id]; }
+        } catch (_) {}
+        if (_pedRole !== 'admin') for (const _r of _pedRows) { delete _r.mo_monto; delete _r.mo_regla; delete _r.mo_detalle; delete _r.mo_at; delete _r.prod_pagado_at; delete _r.prod_pagado_por; }
         return json({ pedidos: _pedRows });
       }
 
@@ -23161,6 +23383,8 @@ const handler = {
         // SOLO las filas recién creadas (mismo número + created_at de este alta): el N° se repite entre
         // vendedores, y antes la respuesta (y el trazado de ad de abajo) arrastraba pedidos de otro.
         const rs = { results: await pedidosConDiseno(env, 'WHERE pedidos.numero = ? AND pedidos.origen = ? AND pedidos.created_at = ? ORDER BY pedidos.id', [numero, 'crm', now]) };
+        // Mano de obra del productor (por tiempo desde mo_desde): queda guardada en cada cartel de neón.
+        try { await moActualizar(env, (rs.results || []).map(r => r.id)); } catch (_) {}
         // Red de seguridad: si el pedido quedó SIN ad (no se trazó en el front, o se cargó a mano),
         // intentar trazarlo server-side ya mismo. WPP por teléfono; IG por IGSID vía la OC del chat
         // (traceAdForPedido resuelve el phone del cliente aunque telefono venga como @usuario/vacío).
@@ -23249,6 +23473,8 @@ const handler = {
           if (['cartel', 'alto', 'ancho', 'cantidad', 'colores', 'base', 'aclaracion', 'cm_neon'].some(k => k in body)) {
             await syncCortePiezaDesdePedido(env, id);
           }
+          // Cambió algo que entra en la mano de obra → recalcularla (no si ya se le pagó al productor).
+          if (['precio', 'cantidad', 'alto', 'ancho', 'cm_neon', 'tramos'].some(k => k in body)) { try { await moActualizar(env, [id]); } catch (_) {} }
         }
 
         // 2) Campos del PEDIDO → UPDATE todas las filas del numero+fecha DEL MISMO VENDEDOR. Recalcula el
@@ -25525,6 +25751,232 @@ const handler = {
         return json({ id: result.meta.last_row_id, r2_key: r2Key, tipo: 'image', autor_id: autor, contenido: r2Key, created_at: now }, 201);
       }
 
+      // ===== Producción de NEÓN (/admin/prod/*) — productores con usuario propio (15-oct-2026) =====
+      // Los productores SOLO llegan acá (muro de /admin). Cada uno ve y toca únicamente SUS carteles; lo de Gaspar
+      // (alta de productores, asignar, pagar) exige rol admin. Ver productorDeSesion / calcManoObra.
+      if (path.startsWith('/admin/prod/')) {
+        if (!(await ensureProdSchema(env))) return json({ error: 'db' }, 500);
+        const _pzYo = await productorDeSesion(env, session.user);
+        const _rolP = _pzYo ? 'productor' : await getSessionRole(env, session.user);
+        const _esAdm = _rolP === 'admin';
+        const _quien = String(session.user || '');
+        const _soloAdmin = () => _esAdm ? null : json({ error: 'forbidden' }, 403);
+        // El cartel ¿es de este productor? (el admin puede todo). Devuelve la fila o una Response de error.
+        const _cartelDe = async (pid) => {
+          const r = await env.DB.prepare('SELECT id, productor_id, prod_estado, prod_pagado_at, cantidad, es_corporeo FROM pedidos WHERE id = ?').bind(pid).first();
+          if (!r || +r.es_corporeo) return json({ error: 'cartel no encontrado' }, 404);
+          if (!_esAdm && (!_pzYo || String(r.productor_id || '') !== _pzYo.id)) return json({ error: 'ese cartel no es tuyo' }, 403);
+          return r;
+        };
+
+        // GET /admin/prod/productores → productores (admin) con lo que tienen asignado, terminado y adeudado.
+        if (request.method === 'GET' && path === '/admin/prod/productores') {
+          const no = _soloAdmin(); if (no) return no;
+          const prods = await prodProductores(env, false);
+          const agg = (await env.DB.prepare(
+            "SELECT productor_id AS id, SUM(CASE WHEN prod_estado <> 'terminado' THEN 1 ELSE 0 END) AS en_curso, " +
+            "SUM(CASE WHEN prod_estado = 'terminado' AND prod_pagado_at IS NULL THEN 1 ELSE 0 END) AS sin_pagar, " +
+            "SUM(CASE WHEN prod_estado = 'terminado' AND prod_pagado_at IS NULL THEN COALESCE(mo_monto,0) ELSE 0 END) AS adeudado " +
+            "FROM pedidos WHERE COALESCE(productor_id,'') <> '' AND es_corporeo = 0 AND (prod_pagado_at IS NULL) GROUP BY productor_id"
+          ).all()).results || [];
+          const porId = {}; for (const a of agg) porId[a.id] = a;
+          return json({ productores: prods.map(p => ({ ...p, en_curso: +(porId[p.id] || {}).en_curso || 0, sin_pagar: +(porId[p.id] || {}).sin_pagar || 0, adeudado: Math.round(+(porId[p.id] || {}).adeudado || 0) })) });
+        }
+        // POST /admin/prod/productores {usuario, nombre, password} → crea un productor o le cambia nombre/contraseña (admin).
+        // usuario = con lo que entra (minúsculas, sin espacios). Nunca toma un usuario de otro rol.
+        if (request.method === 'POST' && path === '/admin/prod/productores') {
+          const no = _soloAdmin(); if (no) return no;
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const id = prodSlug(body.usuario).replace(/\s+/g, '');
+          const nombre = String(body.nombre || '').trim().slice(0, 40) || id;
+          const pw = String(body.password || '');
+          if (!/^[a-z0-9._-]{3,20}$/.test(id)) return json({ error: 'el usuario tiene que tener entre 3 y 20 letras o números, sin espacios' }, 400);
+          if (PROD_RESERVADOS.includes(id)) return json({ error: 'ese usuario ya es de alguien del equipo, elegí otro' }, 400);
+          const ex = await env.DB.prepare('SELECT rol FROM users_panel WHERE id = ?').bind(id).first();
+          if (ex && ex.rol !== 'productor') return json({ error: 'ese usuario ya existe con otro rol, elegí otro' }, 400);
+          if (!ex && pw.length < 8) return json({ error: 'la contraseña tiene que tener al menos 8 caracteres' }, 400);
+          if (pw && pw.length < 8) return json({ error: 'la contraseña tiene que tener al menos 8 caracteres' }, 400);
+          const now = new Date().toISOString();
+          if (!ex) {
+            await env.DB.prepare("INSERT INTO users_panel (id, nombre, rol, activo, password_hash, created_at) VALUES (?, ?, 'productor', 1, ?, ?)").bind(id, nombre, await sha256hex(pw), now).run();
+          } else {
+            if (pw) await env.DB.prepare("UPDATE users_panel SET nombre = ?, password_hash = ?, activo = 1 WHERE id = ? AND rol = 'productor'").bind(nombre, await sha256hex(pw), id).run();
+            else await env.DB.prepare("UPDATE users_panel SET nombre = ? WHERE id = ? AND rol = 'productor'").bind(nombre, id).run();
+            if (pw) await cerrarSesionesDe(env, id);
+          }
+          _prodSesCache.delete(id);
+          return json({ ok: true, productor: { id, nombre } });
+        }
+        // POST /admin/prod/productores/estado {usuario, activo} → dar de baja (cierra sus sesiones) o reactivar (admin).
+        if (request.method === 'POST' && path === '/admin/prod/productores/estado') {
+          const no = _soloAdmin(); if (no) return no;
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const id = prodSlug(body.usuario).replace(/\s+/g, '');
+          const act = body.activo ? 1 : 0;
+          const r = await env.DB.prepare("UPDATE users_panel SET activo = ? WHERE id = ? AND rol = 'productor'").bind(act, id).run();
+          if (!(r && r.meta && r.meta.changes)) return json({ error: 'productor no encontrado' }, 404);
+          _prodSesCache.delete(id);
+          if (!act) await cerrarSesionesDe(env, id);
+          return json({ ok: true });
+        }
+        // GET /admin/prod/tablero → todo lo de producción para Gaspar: carteles de neón de los últimos 120 días que
+        // siguen en curso o sin pagar (con precio y mano de obra), y los productores.
+        if (request.method === 'GET' && path === '/admin/prod/tablero') {
+          const no = _soloAdmin(); if (no) return no;
+          const desde = new Date(Date.now() - 120 * 864e5).toISOString().slice(0, 10);
+          const carteles = await prodCarteles(env,
+            "WHERE p.es_corporeo = 0 AND ((p.fecha >= ? AND (COALESCE(p.productor_id,'') <> '' OR COALESCE(p.estado_pedido,'') NOT IN ('Entregado','para enviar'))) OR (COALESCE(p.productor_id,'') <> '' AND p.prod_pagado_at IS NULL)) ORDER BY p.fecha DESC, p.id DESC LIMIT 600",
+            [desde], false);
+          return json({ carteles, productores: await prodProductores(env, false), mo: await moConfig(env) });
+        }
+        // POST /admin/prod/asignar {pedido_ids:[], productor_id} → asigna (o saca, con '') el productor de esos carteles (admin).
+        if (request.method === 'POST' && path === '/admin/prod/asignar') {
+          const no = _soloAdmin(); if (no) return no;
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const ids = (Array.isArray(body.pedido_ids) ? body.pedido_ids : []).map(Number).filter(n => n > 0).slice(0, 200);
+          const pid = prodSlug(body.productor_id).replace(/\s+/g, '');
+          if (!ids.length) return json({ error: 'faltan los carteles' }, 400);
+          let prod = null;
+          if (pid) {
+            prod = await env.DB.prepare("SELECT id, nombre, activo FROM users_panel WHERE id = ? AND rol = 'productor'").bind(pid).first();
+            if (!prod || !+prod.activo) return json({ error: 'ese productor no existe o está dado de baja' }, 400);
+          }
+          const rows = (await env.DB.prepare(`SELECT id, productor_id, prod_estado, prod_pagado_at, es_corporeo FROM pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
+          const now = new Date().toISOString(), stmts = [], log = [], saltados = [];
+          for (const r of rows) {
+            if (+r.es_corporeo) { saltados.push({ id: r.id, motivo: 'es corpóreo' }); continue; }
+            if (r.prod_pagado_at) { saltados.push({ id: r.id, motivo: 'ya está pagado' }); continue; }
+            if (String(r.productor_id || '') === pid) continue;
+            if (pid) stmts.push(env.DB.prepare("UPDATE pedidos SET productor_id = ?, productor = ?, prod_estado = CASE WHEN COALESCE(prod_estado,'') = '' THEN 'pendiente' ELSE prod_estado END, prod_estado_at = CASE WHEN COALESCE(prod_estado,'') = '' THEN ? ELSE prod_estado_at END, prod_asignado_at = ?, updated_at = ? WHERE id = ?").bind(pid, String(prod.nombre || pid), now, now, now, r.id));
+            else stmts.push(env.DB.prepare("UPDATE pedidos SET productor_id = '', productor = '', prod_estado = CASE WHEN prod_estado = 'terminado' THEN prod_estado ELSE '' END, prod_asignado_at = NULL, updated_at = ? WHERE id = ?").bind(now, r.id));
+            log.push({ pedido_id: r.id, campo: 'productor', de: r.productor_id || '', a: pid, por: _quien });
+          }
+          if (stmts.length) await env.DB.batch(stmts);
+          await prodLog(env, log);
+          try { await moActualizar(env, ids); } catch (_) {}
+          return json({ ok: true, cambiados: stmts.length, saltados, carteles: await prodCarteles(env, `WHERE p.id IN (${ids.map(() => '?').join(',')})`, ids, false) });
+        }
+        // POST /admin/prod/pagar {pedido_ids:[], pagado:true|false} → marca la producción como pagada (o lo deshace) (admin).
+        if (request.method === 'POST' && path === '/admin/prod/pagar') {
+          const no = _soloAdmin(); if (no) return no;
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const ids = (Array.isArray(body.pedido_ids) ? body.pedido_ids : []).map(Number).filter(n => n > 0).slice(0, 300);
+          if (!ids.length) return json({ error: 'faltan los carteles' }, 400);
+          const now = new Date().toISOString(), ph = ids.map(() => '?').join(',');
+          // Antes de congelar: que la mano de obra esté calculada con los datos de hoy.
+          if (body.pagado) { try { await moActualizar(env, ids); } catch (_) {} }
+          const r = body.pagado
+            ? await env.DB.prepare(`UPDATE pedidos SET prod_pagado_at = ?, prod_pagado_por = ?, updated_at = ? WHERE id IN (${ph}) AND COALESCE(productor_id,'') <> '' AND prod_pagado_at IS NULL`).bind(now, _quien, now, ...ids).run()
+            : await env.DB.prepare(`UPDATE pedidos SET prod_pagado_at = NULL, prod_pagado_por = '', updated_at = ? WHERE id IN (${ph}) AND prod_pagado_at IS NOT NULL`).bind(now, ...ids).run();
+          await prodLog(env, ids.map(id => ({ pedido_id: id, campo: 'pagado', de: body.pagado ? '' : 'si', a: body.pagado ? 'si' : '', por: _quien })));
+          return json({ ok: true, cambiados: (r && r.meta && r.meta.changes) || 0, carteles: await prodCarteles(env, `WHERE p.id IN (${ph})`, ids, false) });
+        }
+        // GET /admin/prod/mis → los carteles del productor (sin precio de venta): en curso, terminados sin pagar y lo
+        // pagado de los últimos 60 días. El admin puede ver los de cualquiera con ?productor=<usuario>.
+        if (request.method === 'GET' && path === '/admin/prod/mis') {
+          const quien = _esAdm ? prodSlug(url.searchParams.get('productor')).replace(/\s+/g, '') : (_pzYo && _pzYo.id);
+          if (!quien) return json({ error: _esAdm ? 'falta ?productor=' : 'forbidden' }, _esAdm ? 400 : 403);
+          const hace60 = new Date(Date.now() - 60 * 864e5).toISOString();
+          const carteles = await prodCarteles(env, "WHERE p.productor_id = ? AND p.es_corporeo = 0 AND (p.prod_pagado_at IS NULL OR p.prod_pagado_at >= ?) ORDER BY CASE p.prod_estado WHEN 'en_armado' THEN 0 WHEN 'pendiente' THEN 1 ELSE 2 END, p.fecha, p.id", [quien, hace60], true);
+          const prod = _pzYo || (await env.DB.prepare("SELECT id, nombre FROM users_panel WHERE id = ? AND rol = 'productor'").bind(quien).first());
+          return json({ productor: prod ? { id: prod.id, nombre: prod.nombre } : { id: quien, nombre: quien }, carteles });
+        }
+        // POST /admin/prod/estado {pedido_id, estado, forzar?} → el productor pone el estado de SU cartel. 'terminado'
+        // exige las fotos del cartel terminado (una por cartel); el admin puede forzarlo. Pagado = ya no se cambia.
+        if (request.method === 'POST' && path === '/admin/prod/estado') {
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const pidN = Number(body.pedido_id) || 0, est = String(body.estado || '');
+          if (!PROD_ESTADOS.includes(est)) return json({ error: 'estado inválido' }, 400);
+          const r = await _cartelDe(pidN); if (r instanceof Response) return r;
+          if (!String(r.productor_id || '')) return json({ error: 'ese cartel todavía no tiene productor' }, 400);
+          if (r.prod_pagado_at && !_esAdm) return json({ error: 'ese cartel ya está pagado, no se puede cambiar' }, 409);
+          if (est === 'terminado') {
+            const nf = +(await env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ?').bind(pidN).first()).n || 0;
+            const req = prodFotosRequeridas(r);
+            if (nf < req && !(_esAdm && body.forzar)) return json({ error: req > 1 ? `subí una foto de cada cartel terminado (${req}) antes de marcarlo` : 'subí la foto del cartel terminado antes de marcarlo', faltan: req - nf }, 400);
+          }
+          if (String(r.prod_estado || '') === est) return json({ ok: true, sin_cambios: true });
+          const now = new Date().toISOString();
+          await env.DB.prepare('UPDATE pedidos SET prod_estado = ?, prod_estado_at = ?, prod_terminado_at = CASE WHEN ? = \'terminado\' THEN ? ELSE NULL END, updated_at = ? WHERE id = ?').bind(est, now, est, now, now, pidN).run();
+          await prodLog(env, [{ pedido_id: pidN, campo: 'estado', de: r.prod_estado || '', a: est, por: _quien }]);
+          return json({ ok: true, carteles: await prodCarteles(env, 'WHERE p.id = ?', [pidN], !_esAdm) });
+        }
+        // PUT /admin/prod/foto?pedido_id=N (imagen cruda) → foto del cartel terminado (el productor de ese cartel o el admin).
+        if (request.method === 'PUT' && path === '/admin/prod/foto') {
+          const pidN = Number(url.searchParams.get('pedido_id')) || 0;
+          const r = await _cartelDe(pidN); if (r instanceof Response) return r;
+          if (r.prod_pagado_at && !_esAdm) return json({ error: 'ese cartel ya está pagado' }, 409);
+          if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+          let ct = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+          if (!ct.startsWith('image/')) ct = 'image/jpeg';
+          const cl = parseInt(request.headers.get('content-length') || '0', 10) || 0;
+          if (cl > 12 * 1024 * 1024) return json({ error: 'la foto pesa más de 12MB' }, 413);
+          const buf = await request.arrayBuffer().catch(() => null);
+          if (!buf || !buf.byteLength) return json({ error: 'la foto llegó vacía' }, 400);
+          if (buf.byteLength > 12 * 1024 * 1024) return json({ error: 'la foto pesa más de 12MB' }, 413);
+          const nYa = +(await env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ?').bind(pidN).first()).n || 0;
+          if (nYa >= 12) return json({ error: 'ya tiene 12 fotos' }, 400);
+          const ext = (ct.split('/')[1] || 'jpg').replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'jpg';
+          const ym = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 7).replace('-', '');
+          const key = `pedidos/prod/${ym}/${pidN}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+          try { await env.MEDIA.put(key, buf, { httpMetadata: { contentType: ct } }); } catch (e) { return json({ error: 'no se pudo guardar la foto' }, 500); }
+          await env.DB.prepare('INSERT INTO pedido_prod_fotos (pedido_id, r2_key, subido_por, created_at) VALUES (?,?,?,?)').bind(pidN, key, _quien, new Date().toISOString()).run();
+          return json({ ok: true, key, carteles: await prodCarteles(env, 'WHERE p.id = ?', [pidN], !_esAdm) });
+        }
+        // POST /admin/prod/foto/borrar {foto_id} → saca una foto (no si el cartel ya está terminado y quedaría sin las que pide).
+        if (request.method === 'POST' && path === '/admin/prod/foto/borrar') {
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const f = await env.DB.prepare('SELECT id, pedido_id, r2_key FROM pedido_prod_fotos WHERE id = ?').bind(Number(body.foto_id) || 0).first();
+          if (!f) return json({ error: 'foto no encontrada' }, 404);
+          const r = await _cartelDe(f.pedido_id); if (r instanceof Response) return r;
+          if (r.prod_pagado_at && !_esAdm) return json({ error: 'ese cartel ya está pagado' }, 409);
+          if (r.prod_estado === 'terminado' && !_esAdm) {
+            const nf = +(await env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ?').bind(f.pedido_id).first()).n || 0;
+            if (nf - 1 < prodFotosRequeridas(r)) return json({ error: 'el cartel está terminado: subí otra foto antes de sacar esta' }, 400);
+          }
+          await env.DB.prepare('DELETE FROM pedido_prod_fotos WHERE id = ?').bind(f.id).run();
+          try { if (env.MEDIA) await env.MEDIA.delete(f.r2_key); } catch (_) {}
+          return json({ ok: true, carteles: await prodCarteles(env, 'WHERE p.id = ?', [f.pedido_id], !_esAdm) });
+        }
+        // GET /admin/prod/img/<key>?token= → imagen de un cartel (diseño o terminado). El productor solo las de SUS carteles.
+        if (request.method === 'GET' && path.startsWith('/admin/prod/img/')) {
+          const key = decodeURIComponent(path.slice('/admin/prod/img/'.length));
+          if (!/^(pedidos|briefs)\/[\w\-./]+$/.test(key) || key.indexOf('..') >= 0) return json({ error: 'imagen inválida' }, 400);
+          if (!_esAdm) {
+            let ok = false;
+            if (_pzYo) {
+              const a = await env.DB.prepare('SELECT 1 AS x FROM pedido_prod_fotos f JOIN pedidos p ON p.id = f.pedido_id WHERE f.r2_key = ? AND p.productor_id = ? LIMIT 1').bind(key, _pzYo.id).first();
+              const b = a ? null : await env.DB.prepare('SELECT 1 AS x FROM corte_pedidos c JOIN pedidos p ON p.id = c.pedido_id WHERE c.foto_key = ? AND p.productor_id = ? LIMIT 1').bind(key, _pzYo.id).first();
+              ok = !!(a || b);
+            } else ok = ['comercial', 'disenador'].includes(_rolP); // vendedores: ven las fotos de producción en Pedidos
+            if (!ok) return json({ error: 'forbidden' }, 403);
+          }
+          if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+          const obj = await env.MEDIA.get(key);
+          if (!obj) return json({ error: 'not found' }, 404);
+          return new Response(obj.body, { headers: { ...cors(), 'Content-Type': (obj.httpMetadata && obj.httpMetadata.contentType) || 'image/jpeg', 'Cache-Control': 'private, max-age=86400' } });
+        }
+        // POST /admin/prod/recalcular-mo {pedido_ids?} → recalcula la mano de obra (admin). Sin ids: los carteles de neón
+        // en curso o sin pagar de los últimos 120 días (sirve tras cambiar los parámetros o al arrancar).
+        if (request.method === 'POST' && path === '/admin/prod/recalcular-mo') {
+          const no = _soloAdmin(); if (no) return no;
+          let body; try { body = await request.json(); } catch { body = {}; }
+          let ids = (Array.isArray(body.pedido_ids) ? body.pedido_ids : []).map(Number).filter(n => n > 0);
+          if (!ids.length) {
+            const desde = new Date(Date.now() - 120 * 864e5).toISOString().slice(0, 10);
+            ids = ((await env.DB.prepare("SELECT id FROM pedidos WHERE es_corporeo = 0 AND prod_pagado_at IS NULL AND fecha >= ? LIMIT 800").bind(desde).all()).results || []).map(r => r.id);
+          }
+          let n = 0; for (let i = 0; i < ids.length; i += 100) n += await moActualizar(env, ids.slice(i, i + 100));
+          return json({ ok: true, revisados: ids.length, cambiados: n });
+        }
+        // POST /admin/prod/excel-sync → corre YA el envío de mano de obra y productor al 2026 v4 (admin).
+        if (request.method === 'POST' && path === '/admin/prod/excel-sync') {
+          const no = _soloAdmin(); if (no) return no;
+          return json({ ok: true, ...(await barrerMoDirecto(env)) });
+        }
+        return json({ error: 'not found' }, 404);
+      }
+
       // GET /admin/users-panel  →  lista de usuarios del panel (comerciales/diseñadores/admin)
       if (request.method === 'GET' && path === '/admin/users-panel') {
         const rs = await env.DB.prepare(
@@ -25650,6 +26102,8 @@ const handler = {
       try { await ensureCortePiezasNeonPendientes(env); } catch (_) {}
       // Vendedor de los pedidos de neón → 2026 v4 (Pedidos_Directo col C): relleno + reintentos.
       try { await barrerVendedoresNeon(env); } catch (_) {}
+      // Mano de obra y productor de los pedidos de neón nuevos → 2026 v4 (Pedidos_Directo, columnas MO y PRODUCTOR).
+      try { await barrerMoDirecto(env); } catch (_) {}
     })());
     // 1×/hora: sincronizar la columna Ad al Excel desde D1 (match por nombre, drift-proof, solo huecos).
     if (new Date().getUTCMinutes() < 5) ctx.waitUntil(syncAdColumnToExcel(env));

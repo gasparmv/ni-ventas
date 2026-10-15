@@ -9,6 +9,9 @@
  * v4 (11-oct): Pedidos_Corporeo sumó la col Z "Caja" → estado pago / COBRO 1 pasan a AA:AB y el
  *   id_sync a AO. + acción directo_vendedor: vendedor de los pedidos de neón en el 2026 v4
  *   (Pedidos_Directo, col C), sin pisar nunca lo cargado a mano.
+ * v5 (15-oct): acción directo_mo: MANO DE OBRA (col "MO") y PRODUCTOR (col "PRODUCTOR") de los pedidos de neón
+ *   nuevos en Pedidos_Directo. Ubica las columnas por su título (fila 2) y escribe solo si la celda está vacía,
+ *   tiene fórmula o todavía tiene lo que había puesto el CRM. directo_ping devuelve mo:true.
  *   ⚠️ NO borres ni muevas esas columnas: son la clave del sync (si se pierden, degrada a
  *      matchear por numero+nombre, menos robusto).
  */
@@ -29,6 +32,7 @@ function doPost(e) {
     if (data.action === 'neon_dedupe') return jsonOut({ ok: true, deleted: neonDedupeRun() });
     if (data.action === 'set_ad_bulk') return setAdBulk(data);
     if (data.action === 'directo_vendedor') return directoVendedor(data);
+    if (data.action === 'directo_mo') return directoMo(data);
 
     const ss = SpreadsheetApp.openById(SHEET_ID);
     let sheet = ss.getSheetByName(SHEET_NAME);
@@ -383,7 +387,7 @@ function doGet(e) {
   const action = e && e.parameter && e.parameter.action;
   if (action === 'cogs') return getCogs(e);
   if (action === 'pedido_ping') return jsonOut({ ok: true, pong: true });
-  if (action === 'directo_ping') return jsonOut({ ok: true, directo: true });
+  if (action === 'directo_ping') return jsonOut({ ok: true, directo: true, mo: true });
   if (action === 'rows') {
     try {
       const sheetName = (e.parameter.sheet || SHEET_NAME);
@@ -439,6 +443,64 @@ function directoVendedor(data) {
       out.push({ id: it.id, ok: true, row: r, escrito: vend });
     }
     return jsonOut({ ok: true, base: base, items: out });
+  } catch (err) {
+    return jsonOut({ error: err.message });
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+// ── MANO DE OBRA y PRODUCTOR de los pedidos de NEÓN → 2026 v4 › Pedidos_Directo (15-oct) ──────────
+// El CRM calcula la mano de obra por tiempo (tramos, metros, tamaño) y asigna el productor. Solo los pedidos nuevos
+// (desde el 15-oct). Las columnas se ubican por su TÍTULO en la fila 2 ("MO" y "PRODUCTOR"), no por letra. Cada celda
+// se escribe SOLO si está vacía, tiene una fórmula (la del % arrastrada) o todavía tiene lo que había puesto el CRM
+// (prev): nunca pisa lo que cargaste a mano. Verifica N° + nombre del pedido antes de escribir (igual que el vendedor).
+function directoMo(data) {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+    var sh = SpreadsheetApp.openById(COGS_SHEET_ID).getSheetByName('Pedidos_Directo');
+    if (!sh) return jsonOut({ error: 'hoja Pedidos_Directo no encontrada' });
+    var fa = sh.getRange(1, 1, 300, 1).getFormulas(), base = 0;
+    for (var i = 0; i < fa.length; i++) { if (/2026!b2:b/i.test(fa[i][0])) { base = i + 1; break; } }
+    if (!base) return jsonOut({ error: 'no encontré el IMPORTRANGE de 2026!B2:B en la columna A' });
+    var nz = function (s) { return String(s == null ? '' : s).normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase(); };
+    var lastCol = sh.getLastColumn(), head = sh.getRange(2, 1, 1, lastCol).getValues()[0], colMo = 0, colProd = 0;
+    for (var c = 0; c < head.length; c++) { var h = nz(head[c]); if (h === 'mo' && !colMo) colMo = c + 1; if (h === 'productor' && !colProd) colProd = c + 1; }
+    if (!colMo || !colProd) return jsonOut({ error: 'no encontré las columnas "MO" y "PRODUCTOR" en la fila 2' });
+    var off = base - 2, last = sh.getLastRow();
+    var vals = sh.getRange(1, 1, last, 4).getValues();   // A..D: ID, Fecha, VENDEDOR, Nombre
+    var moR = sh.getRange(1, colMo, last, 1), moV = moR.getValues(), moF = moR.getFormulas();
+    var prR = sh.getRange(1, colProd, last, 1), prV = prR.getValues(), prF = prR.getFormulas();
+    var coincide = function (r, it) { return r >= base && r <= last && nz(vals[r - 1][0]) === nz(it.numero) && nz(vals[r - 1][3]) === nz(it.cartel); };
+    var num = function (x) { var n = Number(String(x).replace(/[^0-9.\-]/g, '')); return isFinite(n) ? n : NaN; };
+    var items = data.items || [], out = [];
+    for (var k = 0; k < items.length; k++) {
+      var it = items[k], r = (parseInt(it.row, 10) || 0) + off;
+      if (!coincide(r, it)) {
+        var hits = [];
+        for (var j = base; j <= last; j++) { if (coincide(j, it)) hits.push(j); }
+        if (hits.length !== 1) { out.push({ id: it.id, error: hits.length ? 'hay ' + hits.length + ' filas con ese N° y nombre' : 'no está en Pedidos_Directo' }); continue; }
+        r = hits[0];
+      }
+      var res = { id: it.id, ok: true, row: r, mo: '-', prod: '-' };
+      // MO (número)
+      if (it.mo !== '' && it.mo != null) {
+        var curMo = moV[r - 1][0], fMo = moF[r - 1][0], nCur = num(curMo), nNew = Number(it.mo), nPrev = (it.prev_mo === '' || it.prev_mo == null) ? NaN : Number(it.prev_mo);
+        if (!fMo && curMo !== '' && Math.abs(nCur - nNew) < 1) res.mo = 'igual';
+        else if (curMo === '' || fMo || (isFinite(nPrev) && Math.abs(nCur - nPrev) < 1)) { sh.getRange(r, colMo).setValue(nNew); moV[r - 1][0] = nNew; moF[r - 1][0] = ''; res.mo = 'escrito'; }
+        else { res.mo = 'manual'; res.mo_planilla = curMo; }
+      }
+      // PRODUCTOR (texto)
+      if (it.productor) {
+        var curP = prV[r - 1][0], fP = prF[r - 1][0];
+        if (!fP && nz(curP) === nz(it.productor)) res.prod = 'igual';
+        else if (curP === '' || fP || (it.prev_prod && nz(curP) === nz(it.prev_prod))) { sh.getRange(r, colProd).setValue(it.productor); prV[r - 1][0] = it.productor; prF[r - 1][0] = ''; res.prod = 'escrito'; }
+        else { res.prod = 'manual'; res.prod_planilla = curP; }
+      }
+      out.push(res);
+    }
+    return jsonOut({ ok: true, base: base, col_mo: colMo, col_prod: colProd, items: out });
   } catch (err) {
     return jsonOut({ error: err.message });
   } finally {

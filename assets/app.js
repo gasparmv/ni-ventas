@@ -103,6 +103,8 @@ const CONFIG = {
     nv_complejidad_coef: 0.018,
     nv_complejidad_pivote: 1.4,
     nv_complejidad_tope: 0.04,
+    // Mano de obra del productor por tiempo (worker: calcManoObra / MO_DEFAULTS). No toca el precio de venta.
+    mo_pct_precio: 0.058, mo_valor_min: 125, mo_min_fijo: 42, mo_min_tramo: 2.41, mo_min_metro: 4.44, mo_min_m2: 14.3, mo_tope_pct: 0.18,
     // Clamp final del margen
     nv_margen_min: 0.48,
     nv_margen_max: 0.72,
@@ -689,7 +691,7 @@ async function postAvisos(ruta, body, okMsg) {
 // ¿Este usuario cotiza? (Gaspar, vendedores y diseño). Abril, producción y logística NO: el worker les
 // niega /cotizador/* y acá no se pide ni se guarda en el navegador nada de costos ni sueldos.
 function usaCotizador() {
-  return !!STATE.token && tokenBelongsTo(STATE.user) && !isCursosOnly() && !isProduccionOnly() && !isLogisticaOnly();
+  return !!STATE.token && tokenBelongsTo(STATE.user) && !isCursosOnly() && !isProduccionOnly() && !isLogisticaOnly() && !isProductorOnly();
 }
 // Borra los COGS/params del navegador (costos internos): al cerrar sesión o si el usuario no cotiza.
 function olvidarCotizadorCache() {
@@ -1492,6 +1494,7 @@ function loadUser() {
   STATE.user = localStorage.getItem('niventas.user') || null;
   STATE.token = localStorage.getItem('niventas.token') || null;
   STATE.tokenUser = localStorage.getItem('niventas.tokenUser') || null;
+  STATE.tokenRol = localStorage.getItem('niventas.tokenRol') || '';
   STATE.adminToken = localStorage.getItem('niventas.adminToken') || null;  // token del admin (Gaspar) → habilita el switcher
   // Si el token cargado no corresponde al usuario activo (estado viejo/manipulado),
   // lo descartamos por seguridad: hay que re-autenticar.
@@ -1504,15 +1507,19 @@ function saveUser() {
   if (STATE.user) localStorage.setItem('niventas.user', STATE.user);
   else localStorage.removeItem('niventas.user');
 }
-function saveToken(t, owner) {
+function saveToken(t, owner, rol) {
   STATE.token = t;
   STATE.tokenUser = t ? (owner || STATE.user || null) : null;
+  // Rol del token (lo manda el login): los productores de neón tienen usuarios dinámicos → no se reconocen por nombre.
+  STATE.tokenRol = t ? String(rol || '') : '';
   if (t) {
     localStorage.setItem('niventas.token', t);
     localStorage.setItem('niventas.tokenUser', STATE.tokenUser || '');
+    localStorage.setItem('niventas.tokenRol', STATE.tokenRol);
   } else {
     localStorage.removeItem('niventas.token');
     localStorage.removeItem('niventas.tokenUser');
+    localStorage.removeItem('niventas.tokenRol');
   }
 }
 // El admin (Gaspar) guarda su token aparte para poder saltar entre usuarios SIN contraseña
@@ -1615,7 +1622,7 @@ async function loginPrompt(userName) {
     if (r.status === 401) { await showAlert('Contraseña incorrecta', { title: 'Login fallido', variant: 'warn' }); return false; }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    saveToken(j.token, userName || 'Gaspar');
+    saveToken(j.token, userName || 'Gaspar', j.rol);
     return true;
   } catch (e) {
     await showAlert(e.message, { title: 'Error de login', variant: 'warn' });
@@ -1639,7 +1646,7 @@ async function loginWithCreds(user, pass) {
       return false;
     }
     const j = await r.json();
-    saveToken(j.token, user);
+    saveToken(j.token, user, j.rol);
     if (isGasparUser(user)) saveAdminToken(j.token); else saveAdminToken(null);
     return true;
   } catch (e) { return false; }
@@ -1650,7 +1657,7 @@ async function loginWithCreds(user, pass) {
 async function switchUser(name) {
   if (!isImpersonatingAdmin()) return;
   if (_userKey(name) === _userKey(STATE.user)) return;
-  if (isGasparUser(name)) { saveToken(STATE.adminToken, 'Gaspar'); STATE.user = 'Gaspar'; saveUser(); afterUserSwitch(); return; }
+  if (isGasparUser(name)) { saveToken(STATE.adminToken, 'Gaspar', 'admin'); STATE.user = 'Gaspar'; saveUser(); afterUserSwitch(); return; }
   try {
     const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/auth/switch', {
       method: 'POST',
@@ -1659,7 +1666,7 @@ async function switchUser(name) {
     });
     if (!r.ok) { await showAlert('No se pudo cambiar a ' + displayUser(name), { title: 'Error', variant: 'warn' }); return; }
     const j = await r.json();
-    saveToken(j.token, name);   // token impersonado (adminToken queda intacto para volver)
+    saveToken(j.token, name, j.rol);   // token impersonado (adminToken queda intacto para volver)
     STATE.user = name; saveUser(); afterUserSwitch();
   } catch (e) { await showAlert('Error de red', { title: 'Error', variant: 'warn' }); }
 }
@@ -1682,6 +1689,7 @@ function afterUserSwitch() {
   repartoState = { data: null, loading: false, error: '', at: 0 };
   chatState.vigilados = null;  // 🔔 clientes vigilados: solo los ve el admin
   render();
+  if (isProductorOnly()) { STATE.prod = null; return; }   // productor de neón: solo su pantalla (nada de ventas, cotizador ni chats)
   try { fetchOcUrgenteStatus(); } catch (_) {}
   loadCotizadorParams();   // /cotizador/* pide sesión: recién ahora hay token (y si el nuevo no cotiza, borra el cache)
   loadAll().catch(() => {});
@@ -1697,7 +1705,7 @@ async function autoLogin(userName) {
     });
     if (!r.ok) return false;
     const j = await r.json();
-    saveToken(j.token, userName);
+    saveToken(j.token, userName, j.rol);
     return true;
   } catch (e) { return false; }
 }
@@ -2197,6 +2205,15 @@ function mapPedidoFromD1(row) {
     origen: row.origen || '',
     cargadoPor: row.cargado_por || '',
     asistidoPor: row.asistido_por || '', // venta que cerró el equipo (no suma en el panel de rendimiento)
+    // Producción de neón: productor asignado, estado y fotos del cartel terminado (todos); mano de obra y pago (solo admin).
+    productorId: row.productor_id || '',
+    productorNombre: row.productor_id ? (row.productor || row.productor_id) : '',
+    prodEstado: row.prod_estado || '',
+    prodTerminadoAt: row.prod_terminado_at || '',
+    prodFotos: Array.isArray(row.prod_fotos) ? row.prod_fotos : [],
+    moMonto: (row.mo_monto == null || row.mo_monto === '') ? null : Number(row.mo_monto),
+    moRegla: row.mo_regla || '',
+    prodPagadoAt: row.prod_pagado_at || '',
     mirrorError: row.mirror_error || '',
     // Corpóreos (letras 3D): flag + specs de producción propios.
     esCorporeo: row.es_corporeo || 0,
@@ -2236,6 +2253,7 @@ async function loadAll(opts) {
   // cotizador (11-oct) la pantalla quedaba trabada en el spinner. Los refrescos silenciosos no re-dibujan (cerrarían lo
   // desplegado o la nota a medio escribir; la vista de logística se refresca sola).
   if (isLogisticaUser(STATE.user)) { if (!(opts && opts.silent)) render(); return; }
+  if (isProductorOnly()) { if (!(opts && opts.silent)) render(); return; }   // productor: solo sus carteles (/admin/prod/mis)
   const silent = !!(opts && opts.silent);
   // Stale-while-revalidate: si tenemos caché y no se pidió refresh forzado,
   // mostramos data al toque y refrescamos en background.
@@ -3048,6 +3066,12 @@ function render() {
     bindUserPicker();
     return;
   }
+  // Productor de neón: pantalla propia (sus carteles), sin menú ni nada más del CRM.
+  if (isProductorOnly()) {
+    document.getElementById('app').innerHTML = renderProdApp();
+    bindProdApp();
+    return;
+  }
   // Diseñador queda confinado a Cotización; Abril (cursos) al Chat WA, aunque
   // la URL o el state digan otra cosa.
   if (isCursosOnly() && !['chat'].includes(STATE.view)) {
@@ -3104,6 +3128,7 @@ function render() {
   if (STATE.view === 'chat') document.getElementById('main').innerHTML = renderChat();
   else if (STATE.view === 'corte') document.getElementById('main').innerHTML = renderCorte(); // corte carga su propia data (no depende del Sheet ni de /admin/pedidos)
   else if (STATE.view === 'logistica') document.getElementById('main').innerHTML = renderLogistica(); // idem: su propia data
+  else if (STATE.view === 'produccion') document.getElementById('main').innerHTML = renderProduccion(); // producción de neón: su propia data
   else if (STATE.error)   document.getElementById('main').innerHTML = renderError();
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
   else {
@@ -3144,6 +3169,7 @@ function render() {
   if (STATE.view === 'corporeas')    bindCorporeas();
   if (STATE.view === 'corte')        bindCorte();
   if (STATE.view === 'logistica')    bindLogistica();
+  if (STATE.view === 'produccion')   bindProduccion();
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
     if (isAdmin()) bindBusinessPanel();
@@ -7087,6 +7113,7 @@ function renderShell() {
         ${rdPuedeVer() ? `<button class="nav-item ${v==='rendimiento'?'active':''}" data-view="rendimiento"><span class="icon">↗</span> ${isAdmin() ? 'Rendimiento' : 'Mi rendimiento'}</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='logistica'?'active':''}" data-view="logistica"><span class="icon">📦</span> Logística</button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${v==='produccion'?'active':''}" data-view="produccion"><span class="icon">🔧</span> Producción</button>` : ''}
         ${!isSecundario(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>` : ''}
@@ -9162,7 +9189,7 @@ function renderTablePedidos() {
           filtered.map(p => `
             <tr data-pid="${p.idx}">
               <td class="num">${fmtDate(p.fecha)}</td>
-              <td class="cliente">${escapeHtml(p.cartel)}${tcPedidoBtn(p)}${disenoBadgePedido(p)}</td>
+              <td class="cliente">${escapeHtml(p.cartel)}${tcPedidoBtn(p)}${disenoBadgePedido(p)}${prodPillPedido(p)}</td>
               <td>${baseSwatch(p.base)}</td>
               <td class="num">${fmtMoney(p.precio)}</td>
               <td>${dimerPillHtml(p.dimmer)}</td>
@@ -12009,6 +12036,7 @@ function openDrawerPedido(idx) {
         </dl>
       </div>
       ${disenoDrawerSection(p)}
+      ${prodDrawerSection(p)}
       <div class="drawer-section">
         <h4>Estado, pago y productor ${hermanos.length>1?`<span style="font-size:11px;color:var(--fg-subtle);font-weight:400">· aplica a los ${hermanos.length} carteles</span>`:''}</h4>
         <div style="display:flex;flex-direction:column;gap:10px">
@@ -12017,7 +12045,7 @@ function openDrawerPedido(idx) {
             <div style="flex:1"><label style="${lblD}">Estado del pago</label><select id="ped-edit-estadopago" style="${inpD}">${pagoOpts}</select></div>
             <div style="flex:1"><label style="${lblD}">Pagado</label><input id="ped-edit-pagado" type="number" value="${p.pagado||''}" style="${inpD}"></div>
           </div>
-          <div><label style="${lblD}">Productor</label><input id="ped-edit-productor" value="${escapeHtml(p.productor||'')}" placeholder="quién lo produce (lo cargás vos)" style="${inpD}"></div>
+          ${esCorp ? `<div><label style="${lblD}">Productor</label><input id="ped-edit-productor" value="${escapeHtml(p.productor||'')}" placeholder="quién lo produce (lo cargás vos)" style="${inpD}"></div>` : ''}
           ${isAdmin() ? `<div><label style="${lblD}">¿La cerró el equipo? (no suma en el panel de rendimiento del vendedor)</label><select id="ped-edit-asistido" style="${inpD}">${[['', 'No, la cerró el vendedor'], ['bruno', 'Sí, la cerró Bruno'], ['equipo', 'Sí, la cerró el equipo']].map(([k, l]) => `<option value="${k}" ${(p.asistidoPor || '') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
         </div>
       </div>
@@ -12087,6 +12115,7 @@ function openDrawerPedido(idx) {
   document.getElementById('drawer-bg').classList.add('open');
   document.getElementById('drawer-bg').onclick = closeDrawer;
   pedDisenoCargarSugerencias(p); // si le falta la foto del diseño, sugerir lo último que vio el cliente
+  try { bindProdDrawer(p); } catch (_) {}   // asignar productor (admin)
 }
 
 // Opciones del dropdown (SELECT) "de qué ad viene", agrupadas por vertical + un grupo
@@ -12899,6 +12928,15 @@ const COT_PARAM_GROUPS = [
     ['ext_25', 'm² ≤ 25'],
     ['ext_50', 'm² ≤ 50'],
     ['ext_99', 'm² > 50']
+  ]},
+  { title: 'Mano de obra del productor (por tiempo, desde el 15-oct)', keys: [
+    ['mo_pct_precio', '% del precio (0.058 = 5,8%)'],
+    ['mo_valor_min', '$ por minuto de armado (125)'],
+    ['mo_min_fijo', 'Minutos fijos por cartel (42)'],
+    ['mo_min_tramo', 'Minutos por tramo (2.41)'],
+    ['mo_min_metro', 'Minutos por metro de neón (4.44)'],
+    ['mo_min_m2', 'Minutos por m² de placa (14.3)'],
+    ['mo_tope_pct', 'Tope: % máximo del precio (0.18)']
   ]},
   { title: 'Corpóreos — complejidad (piezas por m², con luz + impreso)', keys: [
     ['corp_pm2_min', '$/m² muy simple (800000)'],
@@ -20764,6 +20802,386 @@ function showChatContactContextMenu(x, y, phone, name) {
 window.loadAll = loadAll;
 window.closeDrawer = closeDrawer;
 
+// ===== Producción de NEÓN: productores con usuario propio (15-oct-2026) =====
+// Pedido de Gaspar: asignar productores a los carteles de neón; cada productor entra con SU usuario y ve solo sus
+// carteles (sin el precio de venta): cuánto le corresponde, color, foto del diseño, aclaraciones; pone el estado y al
+// terminarlo sube sí o sí una foto de cada cartel. Gaspar marca qué trabajos ya les pagó. El worker es la barrera
+// (un productor solo llega a /admin/prod/*); acá solo se arma la pantalla.
+function isProductorOnly() { return !!STATE.token && STATE.tokenRol === 'productor' && tokenBelongsTo(STATE.user); }
+const PROD_ESTADO_LBL = { pendiente: 'Pendiente', en_armado: 'En armado', terminado: 'Terminado' };
+const PROD_ESTADO_COLOR = { pendiente: '#9aa0b4', en_armado: '#FFB020', terminado: '#2ECC71' };
+const PROD_CORTE_TXT = { pedido: 'Acrílico: falta diseñar la matriz', matriz_lista: 'Acrílico: falta cortar', cortado: 'Acrílico cortado', embalado: 'Acrílico listo para vos ✓' };
+const PROD_DIMER_LBL = { NO: 'Sin dimmer', SLIM: 'Dimmer slim', CONTROL: 'Control remoto', APP: 'Controlador por app', SI: 'Con controlador' };
+// Imagen de un cartel para el productor (el worker controla que sea de SUS carteles). Admin/vendedores usan mediaUrl.
+function prodImg(key) { return key ? CONFIG.trackerUrl + '/admin/prod/img/' + encodeURIComponent(key) + (STATE.token ? '?token=' + encodeURIComponent(STATE.token) : '') : ''; }
+function prodFechaCorta(s) { const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}` : '—'; }
+function prodFechaHora(s) { if (!s) return ''; try { const d = new Date(s); return d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }) + ' ' + d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } }
+function prodMedidas(c) { const a = Number(c.ancho) || 0, h = Number(c.alto) || 0; return (a && h) ? `${a}×${h} cm` : '—'; }
+function prodMetros(c) { const m = (Number(c.cm_neon) || 0) / 100; return m ? String(+m.toFixed(2)).replace('.', ',') + ' m' : '—'; }
+async function prodFetch(path, opts) {
+  const r = await fetch(CONFIG.trackerUrl + path, { ...(opts || {}), headers: { ...authHeaders(), ...((opts && opts.headers) || {}) } });
+  let j = null; try { j = await r.json(); } catch (_) {}
+  if (!r.ok || !j || j.error) throw new Error((j && j.error) || ('HTTP ' + r.status));
+  return j;
+}
+// Reemplaza en una lista los carteles que vinieron actualizados del worker.
+function prodMerge(lista, nuevos) { const m = {}; (nuevos || []).forEach(c => { m[c.id] = c; }); return (lista || []).map(c => m[c.id] ? { ...c, ...m[c.id] } : c); }
+// Achica la foto (≤1920 px JPEG) como la del diseño y la sube a ese cartel.
+async function prodSubirFotos(pedidoId, files) {
+  let ult = null;
+  for (const f of files) {
+    if (!f || !/^image\//.test(f.type || 'image/')) continue;
+    let blob = f; try { blob = await disenoDownscaleBlob(f); } catch (_) {}
+    const r = await fetch(CONFIG.trackerUrl + '/admin/prod/foto?pedido_id=' + pedidoId, { method: 'PUT', headers: { ...authHeaders(), 'Content-Type': blob.type || 'image/jpeg' }, body: blob });
+    let j = null; try { j = await r.json(); } catch (_) {}
+    if (!r.ok || !j || j.error) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    ult = j;
+  }
+  return ult;
+}
+
+// ---------- Pantalla del PRODUCTOR ----------
+function prodState() { if (!STATE.prod) STATE.prod = { data: null, loading: false, err: '', tab: 'hacer', busy: {} }; return STATE.prod; }
+async function prodCargar() {
+  const st = prodState(); if (st.loading) return;
+  st.loading = true; st.err = '';
+  try { st.data = await prodFetch('/admin/prod/mis'); } catch (e) { st.err = e.message; }
+  st.loading = false;
+  render();
+}
+function renderProdApp() {
+  const st = prodState(), d = st.data;
+  const nombre = (d && d.productor && d.productor.nombre) || STATE.user || '';
+  const head = `<div class="prod-top"><img src="assets/logo.svg" alt="Neon Infinito" style="height:26px"><div style="flex:1"><div style="font-weight:700">Producción</div><div style="font-size:12px;color:var(--fg-mute)">${escapeHtml(nombre)}</div></div>
+    <button class="btn btn-ghost" data-prod-refresh title="Actualizar" style="padding:6px 10px">↻</button><button class="btn btn-ghost" data-prod-salir style="padding:6px 10px">Salir</button></div>`;
+  if (!d) return `<div class="prod-app">${head}<div class="prod-body"><div class="muted" style="padding:30px;text-align:center">${st.err ? '⚠ ' + escapeHtml(st.err) + '<br><button class="btn btn-cyan" data-prod-refresh style="margin-top:10px">Reintentar</button>' : 'Cargando tus carteles…'}</div></div></div>`;
+  const cs = d.carteles || [];
+  const hacer = cs.filter(c => c.prod_estado !== 'terminado' && !c.prod_pagado_at);
+  const term = cs.filter(c => c.prod_estado === 'terminado' && !c.prod_pagado_at);
+  const pag = cs.filter(c => c.prod_pagado_at);
+  const suma = arr => arr.reduce((s, c) => s + (Number(c.mo_monto) || 0), 0);
+  const tabs = [['hacer', 'Para hacer', hacer.length], ['term', 'Terminados', term.length], ['pag', 'Cobrados', pag.length]];
+  const lista = st.tab === 'term' ? term : st.tab === 'pag' ? pag : hacer;
+  return `<div class="prod-app">${head}
+    <div class="prod-body">
+      <div class="prod-resumen">
+        <div><div class="k">Para hacer</div><div class="v">${hacer.length}</div></div>
+        <div><div class="k">Terminados sin cobrar</div><div class="v">${fmtMoney(suma(term))}</div></div>
+        <div><div class="k">Cobrado (60 días)</div><div class="v">${fmtMoney(suma(pag))}</div></div>
+      </div>
+      <div class="prod-tabs">${tabs.map(([k, l, n]) => `<button class="prod-tab ${st.tab === k ? 'on' : ''}" data-prod-tab="${k}">${l} <span>${n}</span></button>`).join('')}</div>
+      ${lista.length ? lista.map(c => prodCardHtml(c, false)).join('') : `<div class="muted" style="padding:28px;text-align:center">${st.tab === 'hacer' ? 'No tenés carteles pendientes.' : st.tab === 'term' ? 'No hay terminados sin cobrar.' : 'Todavía no hay cobrados en los últimos 60 días.'}</div>`}
+    </div></div>`;
+}
+// Tarjeta de un cartel. admin=true: la misma tarjeta vista por Gaspar (con forzar terminado).
+function prodCardHtml(c, admin) {
+  const st = prodState(), busy = !!(st.busy && st.busy[c.id]);
+  const img = admin ? (c.diseno_key ? mediaUrl(c.diseno_key) : '') : prodImg(c.diseno_key);
+  const fotoUrl = k => admin ? mediaUrl(k) : prodImg(k);
+  const req = c.fotos_requeridas || 1, nf = (c.fotos || []).length, pagado = !!c.prod_pagado_at;
+  const est = c.prod_estado || 'pendiente';
+  const chips = [
+    ['Medidas', prodMedidas(c)], ['Neón', prodMetros(c)], ['Tramos', c.tramos || '—'],
+    ['Colores', c.colores || '—'], ['Base', c.base === 'TRANS' ? 'Transparente' : (c.base === 'NEGRO' ? 'Negra' : (c.base || '—'))],
+    ['Dimmer', PROD_DIMER_LBL[String(c.dimer || 'NO').toUpperCase()] || c.dimer || '—']
+  ];
+  const alertas = [];
+  if ((Number(c.cantidad) || 1) > 1) alertas.push(`Son ${Number(c.cantidad)} carteles iguales`);
+  if (String(c.tipo || '').toUpperCase() === 'EXT') alertas.push('Para exterior');
+  const botones = pagado ? '' : (est === 'pendiente'
+    ? `<button class="btn btn-cyan" data-prod-estado="${c.id}|en_armado" ${busy ? 'disabled' : ''}>Empecé a armarlo</button>`
+    : est === 'en_armado'
+      ? `<button class="btn btn-ghost" data-prod-estado="${c.id}|pendiente" ${busy ? 'disabled' : ''}>Volver a pendiente</button><button class="btn btn-cyan" data-prod-estado="${c.id}|terminado" ${busy ? 'disabled' : ''}>Terminado ✓</button>`
+      : `<button class="btn btn-ghost" data-prod-estado="${c.id}|en_armado" ${busy ? 'disabled' : ''}>Reabrir</button>`);
+  return `<div class="prod-card" data-prod-card="${c.id}">
+    <div class="prod-card-img">${img ? `<img src="${escapeHtml(img)}" alt="" loading="lazy" data-prod-zoom="${escapeHtml(img)}">` : '<div class="muted" style="padding:30px 10px;text-align:center;font-size:12px">Sin foto del diseño</div>'}</div>
+    <div class="prod-card-body">
+      <div style="display:flex;gap:8px;align-items:flex-start">
+        <div style="flex:1;min-width:0"><div class="prod-card-title">${escapeHtml(c.cartel || '')}</div><div style="font-size:12px;color:var(--fg-mute)">N° ${escapeHtml(String(c.numero || '—'))} · ${prodFechaCorta(c.fecha)}${c.corte_estado ? ' · ' + escapeHtml(PROD_CORTE_TXT[c.corte_estado] || c.corte_estado) : ''}</div></div>
+        <span class="prod-pill" style="background:${PROD_ESTADO_COLOR[est]}22;color:${PROD_ESTADO_COLOR[est]};border-color:${PROD_ESTADO_COLOR[est]}66">${pagado ? 'Cobrado' : PROD_ESTADO_LBL[est]}</span>
+      </div>
+      ${alertas.length ? `<div class="prod-alerta">${alertas.map(escapeHtml).join(' · ')}</div>` : ''}
+      <div class="prod-chips">${chips.map(([k, v]) => `<div><span>${k}</span>${escapeHtml(String(v))}</div>`).join('')}</div>
+      ${c.aclaracion ? `<div class="prod-aclaracion"><b>Aclaración:</b> ${escapeHtml(c.aclaracion)}</div>` : ''}
+      <div class="prod-monto">${admin ? 'Mano de obra' : 'Te corresponde'}: <b>${c.mo_monto != null ? fmtMoney(c.mo_monto) : 'a calcular'}</b>${pagado ? ` <span style="color:#2ECC71;font-size:12px">· cobrado el ${prodFechaCorta(c.prod_pagado_at)}</span>` : ''}</div>
+      <div class="prod-fotos">
+        <div style="font-size:12px;color:var(--fg-mute);margin-bottom:6px">Fotos del cartel terminado: <b style="color:${nf >= req ? '#2ECC71' : 'var(--fg)'}">${nf} de ${req}</b>${req > 1 ? ' (una de cada cartel)' : ''}</div>
+        <div class="prod-fotos-grid">
+          ${(c.fotos || []).map(f => `<div class="prod-foto"><img src="${escapeHtml(fotoUrl(f.key))}" alt="" loading="lazy" data-prod-zoom="${escapeHtml(fotoUrl(f.key))}">${pagado ? '' : `<button data-prod-foto-borrar="${f.id}" title="Sacar esta foto">✕</button>`}</div>`).join('')}
+          ${pagado ? '' : `<label class="prod-foto-add ${busy ? 'busy' : ''}">${busy ? 'Subiendo…' : '📷 Subir foto'}<input type="file" accept="image/*" capture="environment" multiple data-prod-foto-input="${c.id}" style="display:none" ${busy ? 'disabled' : ''}></label>`}
+        </div>
+      </div>
+      ${c.prod_terminado_at && est === 'terminado' ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:6px">Terminado el ${prodFechaHora(c.prod_terminado_at)}</div>` : ''}
+      ${botones ? `<div class="prod-acciones">${botones}</div>` : ''}
+    </div></div>`;
+}
+function bindProdApp() {
+  const st = prodState();
+  if (!st.data && !st.loading && !st.err) prodCargar();
+  document.querySelectorAll('[data-prod-refresh]').forEach(b => b.onclick = () => { st.err = ''; prodCargar(); });
+  document.querySelectorAll('[data-prod-salir]').forEach(b => b.onclick = () => { STATE.prod = null; logout(); });
+  document.querySelectorAll('[data-prod-tab]').forEach(b => b.onclick = () => { st.tab = b.dataset.prodTab; render(); });
+  bindProdCards(document, false);
+}
+// Acciones de las tarjetas (las usa la pantalla del productor y la de Gaspar).
+function bindProdCards(root, admin) {
+  const st = prodState();
+  const actualizar = (carteles) => {
+    if (admin) { const a = prodAdmState(); if (a.data) a.data.carteles = prodMerge(a.data.carteles, carteles); }
+    else if (st.data) st.data.carteles = prodMerge(st.data.carteles, carteles);
+    render();
+  };
+  root.querySelectorAll('[data-prod-zoom]').forEach(el => el.onclick = (ev) => { ev.stopPropagation(); try { openImgLightbox(el.dataset.prodZoom); } catch (_) { window.open(el.dataset.prodZoom, '_blank'); } });
+  root.querySelectorAll('[data-prod-foto-input]').forEach(inp => inp.onchange = async () => {
+    const id = Number(inp.dataset.prodFotoInput), files = Array.from(inp.files || []);
+    if (!files.length) return;
+    st.busy[id] = true; render();
+    try { const j = await prodSubirFotos(id, files); if (j && j.carteles) { st.busy[id] = false; actualizar(j.carteles); } toast(files.length > 1 ? 'Fotos subidas' : 'Foto subida'); }
+    catch (e) { toast('No se pudo subir: ' + e.message); }
+    st.busy[id] = false; render();
+  });
+  root.querySelectorAll('[data-prod-foto-borrar]').forEach(b => b.onclick = async (ev) => {
+    ev.stopPropagation();
+    if (!(await showConfirm('¿Sacar esta foto?', { title: 'Foto del cartel', confirmLabel: 'Sacar', cancelLabel: 'No' }))) return;
+    try { const j = await prodFetch('/admin/prod/foto/borrar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foto_id: Number(b.dataset.prodFotoBorrar) }) }); actualizar(j.carteles); }
+    catch (e) { toast(e.message); }
+  });
+  root.querySelectorAll('[data-prod-estado]').forEach(b => b.onclick = async () => {
+    const [idS, est] = b.dataset.prodEstado.split('|'); const id = Number(idS);
+    const lista = admin ? ((prodAdmState().data || {}).carteles || []) : ((st.data || {}).carteles || []);
+    const c = lista.find(x => x.id === id) || {};
+    let forzar = false;
+    if (est === 'terminado') {
+      const req = c.fotos_requeridas || 1, nf = (c.fotos || []).length;
+      if (nf < req) {
+        if (!admin) { toast(req > 1 ? `Antes subí una foto de cada cartel terminado (${req})` : 'Antes subí la foto del cartel terminado'); const inp = document.querySelector(`[data-prod-foto-input="${id}"]`); if (inp) inp.click(); return; }
+        if (!(await showConfirm('Este cartel no tiene la foto del cartel terminado. ¿Marcarlo igual?', { title: 'Sin foto', confirmLabel: 'Marcar igual', cancelLabel: 'Cancelar', variant: 'warn' }))) return;
+        forzar = true;
+      } else if (!admin && !(await showConfirm(`¿Terminaste "${c.cartel || ''}"?`, { title: 'Cartel terminado', confirmLabel: 'Sí, terminado', cancelLabel: 'No' }))) return;
+    }
+    st.busy[id] = true; render();
+    try { const j = await prodFetch('/admin/prod/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_id: id, estado: est, forzar }) }); st.busy[id] = false; if (j.carteles) actualizar(j.carteles); }
+    catch (e) { toast(e.message); }
+    st.busy[id] = false; render();
+  });
+}
+
+// ---------- Pantalla PRODUCCIÓN de Gaspar (admin) ----------
+function prodAdmState() { if (!STATE.prodAdm) STATE.prodAdm = { data: null, loading: false, err: '', tab: 'sin', sel: {}, prods: null, abierto: null }; return STATE.prodAdm; }
+async function prodAdmCargar(silencioso) {
+  const a = prodAdmState(); if (a.loading) return;
+  a.loading = true; if (!silencioso) a.err = '';
+  try {
+    const [t, p] = await Promise.all([prodFetch('/admin/prod/tablero'), prodFetch('/admin/prod/productores')]);
+    a.data = t; a.prods = p.productores || [];
+  } catch (e) { a.err = e.message; }
+  a.loading = false;
+  if (STATE.view === 'produccion') render();
+}
+function prodAdmNombre(id) { const p = (prodAdmState().prods || []).find(x => x.id === id); return p ? p.nombre : id; }
+function prodAdmOpts(sel, conVacio) {
+  const prods = (prodAdmState().prods || []).filter(p => +p.activo);
+  return (conVacio ? `<option value="">— sin productor —</option>` : '') + prods.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === sel ? 'selected' : ''}>${escapeHtml(p.nombre)}</option>`).join('');
+}
+function renderProduccion() {
+  if (!isAdmin()) return `<div class="page-head"><h1>Producción</h1></div><div class="error">No autorizado.</div>`;
+  const a = prodAdmState(), d = a.data;
+  if (!d) return `<div class="page-head"><h1>Producción</h1></div><div class="muted" style="padding:30px">${a.err ? '⚠ ' + escapeHtml(a.err) : 'Cargando…'}</div>`;
+  const cs = d.carteles || [], prods = a.prods || [];
+  const sinAsignar = cs.filter(c => !c.productor_id && c.prod_estado !== 'terminado');
+  const tabs = [['sin', `Sin asignar`, sinAsignar.length]].concat(prods.filter(p => +p.activo || cs.some(c => c.productor_id === p.id && !c.prod_pagado_at)).map(p => [p.id, p.nombre, cs.filter(c => c.productor_id === p.id && !c.prod_pagado_at).length])).concat([['cfg', '⚙ Productores', null]]);
+  let cuerpo = '';
+  if (a.tab === 'cfg') cuerpo = prodAdmCfgHtml(prods);
+  else if (a.tab === 'sin') cuerpo = prodAdmSinHtml(sinAsignar);
+  else cuerpo = prodAdmProductorHtml(a.tab, cs.filter(c => c.productor_id === a.tab));
+  const P = d.mo || {};
+  return `<div class="page-head"><h1>Producción</h1><div class="muted" style="font-size:12px">Mano de obra desde ${prodFechaCorta(P.desde)}: ${String(+((P.mo_pct_precio || 0) * 100).toFixed(1)).replace('.', ',')}% del precio + ${fmtMoney(P.mo_valor_min)} por minuto de armado, tope ${Math.round((P.mo_tope_pct || 0) * 100)}% · se cambia en Admin → parámetros</div></div>
+    <div class="prod-tabs prod-tabs-adm">${tabs.map(([k, l, n]) => `<button class="prod-tab ${a.tab === k ? 'on' : ''}" data-prodadm-tab="${escapeHtml(k)}">${escapeHtml(l)}${n != null ? ` <span>${n}</span>` : ''}</button>`).join('')}
+      <button class="btn btn-ghost" data-prodadm-refresh style="margin-left:auto;padding:5px 10px">↻ Actualizar</button></div>
+    ${cuerpo}`;
+}
+function prodAdmFila(c, opciones) {
+  const a = prodAdmState();
+  const img = c.diseno_key ? mediaUrl(c.diseno_key) : '';
+  const est = c.prod_estado || '';
+  return `<tr data-prodadm-row="${c.id}">
+    ${opciones.check ? `<td><input type="checkbox" data-prodadm-sel="${c.id}" ${a.sel[c.id] ? 'checked' : ''}></td>` : ''}
+    <td style="width:54px">${img ? `<img src="${escapeHtml(disenoThumb(c.diseno_key, 120))}" data-prod-zoom="${escapeHtml(img)}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;cursor:zoom-in">` : '<span class="muted" style="font-size:11px">sin foto</span>'}</td>
+    <td><b>${escapeHtml(c.cartel || '')}</b><div class="muted" style="font-size:11px">N° ${escapeHtml(String(c.numero || '—'))} · ${prodFechaCorta(c.fecha)} · ${escapeHtml(prodMedidas(c))} · ${c.tramos ? c.tramos + ' tramos' : '<span style="color:#FF5566">sin tramos</span>'} · ${escapeHtml(prodMetros(c))}${(Number(c.cantidad) || 1) > 1 ? ' · x' + Number(c.cantidad) : ''}</div></td>
+    <td class="num">${c.mo_monto != null ? fmtMoney(c.mo_monto) : '<span class="muted" style="font-size:11px">falta dato</span>'}${c.mo_detalle && c.mo_detalle.en_tope ? '<div class="muted" style="font-size:10px">tope 18%</div>' : ''}<div class="muted" style="font-size:10px">venta ${fmtMoney(c.precio)}</div></td>
+    ${opciones.asignar ? `<td><select data-prodadm-asignar="${c.id}" style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:5px;color:var(--fg)">${prodAdmOpts(c.productor_id, true)}</select></td>` : ''}
+    ${opciones.estado ? `<td><select data-prodadm-estado="${c.id}" style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:5px;color:var(--fg)">${['pendiente', 'en_armado', 'terminado'].map(k => `<option value="${k}" ${est === k ? 'selected' : ''}>${PROD_ESTADO_LBL[k]}</option>`).join('')}</select>${c.prod_terminado_at && est === 'terminado' ? `<div class="muted" style="font-size:10px">${prodFechaHora(c.prod_terminado_at)}</div>` : ''}</td>` : ''}
+    ${opciones.fotos ? `<td>${(c.fotos || []).map(f => `<img src="${escapeHtml(mediaUrl(f.key))}" data-prod-zoom="${escapeHtml(mediaUrl(f.key))}" style="width:40px;height:40px;object-fit:cover;border-radius:5px;margin-right:3px;cursor:zoom-in">`).join('') || '<span class="muted" style="font-size:11px">—</span>'}</td>` : ''}
+    ${opciones.pagar ? `<td>${c.prod_pagado_at ? `<span style="color:#2ECC71;font-size:12px">Pagado ${prodFechaCorta(c.prod_pagado_at)}</span> <button class="btn btn-ghost" data-prodadm-pagar="${c.id}|0" style="padding:3px 8px;font-size:11px">Deshacer</button>` : `<button class="btn btn-cyan" data-prodadm-pagar="${c.id}|1" style="padding:4px 10px;font-size:12px">Marcar pagado</button>`}</td>` : ''}
+  </tr>`;
+}
+function prodAdmSinHtml(lista) {
+  const a = prodAdmState();
+  const nSel = lista.filter(c => a.sel[c.id]).length;
+  if (!lista.length) return '<div class="muted" style="padding:24px">No hay carteles de neón sin productor. 🎉</div>';
+  return `<div class="prod-bulk"><label><input type="checkbox" data-prodadm-todos> Todos</label>
+      <span class="muted" style="font-size:12px">${nSel} elegidos</span>
+      <select data-prodadm-bulk-prod style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:5px;color:var(--fg)">${prodAdmOpts('', false)}</select>
+      <button class="btn btn-cyan" data-prodadm-bulk-asignar ${nSel ? '' : 'disabled'} style="padding:5px 12px">Asignar elegidos</button></div>
+    <div class="table-wrap"><table class="t"><thead><tr><th></th><th></th><th>Cartel</th><th>Mano de obra</th><th>Productor</th></tr></thead>
+    <tbody>${lista.map(c => prodAdmFila(c, { check: true, asignar: true })).join('')}</tbody></table></div>`;
+}
+function prodAdmProductorHtml(pid, lista) {
+  const a = prodAdmState();
+  const curso = lista.filter(c => c.prod_estado !== 'terminado' && !c.prod_pagado_at);
+  const term = lista.filter(c => c.prod_estado === 'terminado' && !c.prod_pagado_at);
+  const pag = lista.filter(c => c.prod_pagado_at).sort((x, y) => String(y.prod_pagado_at).localeCompare(String(x.prod_pagado_at)));
+  const suma = arr => arr.reduce((s, c) => s + (Number(c.mo_monto) || 0), 0);
+  const selTerm = term.filter(c => a.sel[c.id]);
+  return `<div class="prod-resumen" style="max-width:720px">
+      <div><div class="k">En curso</div><div class="v">${curso.length} · ${fmtMoney(suma(curso))}</div></div>
+      <div><div class="k">Terminados sin pagar</div><div class="v" style="color:#FFB020">${term.length} · ${fmtMoney(suma(term))}</div></div>
+      <div><div class="k">Pagados (recientes)</div><div class="v">${pag.length} · ${fmtMoney(suma(pag))}</div></div>
+    </div>
+    <h3 class="prod-h3">Terminados sin pagar</h3>
+    ${term.length ? `<div class="prod-bulk"><label><input type="checkbox" data-prodadm-todos-term> Todos</label><span class="muted" style="font-size:12px">${selTerm.length} elegidos · ${fmtMoney(suma(selTerm))}</span><button class="btn btn-cyan" data-prodadm-bulk-pagar ${selTerm.length ? '' : 'disabled'} style="padding:5px 12px">Marcar elegidos como pagados</button></div>
+    <div class="table-wrap"><table class="t"><thead><tr><th></th><th></th><th>Cartel</th><th>Mano de obra</th><th>Estado</th><th>Fotos</th><th>Pago</th></tr></thead><tbody>${term.map(c => prodAdmFila(c, { check: true, estado: true, fotos: true, pagar: true })).join('')}</tbody></table></div>` : '<div class="muted" style="padding:10px 0">Nada para pagar.</div>'}
+    <h3 class="prod-h3">En curso</h3>
+    ${curso.length ? `<div class="table-wrap"><table class="t"><thead><tr><th></th><th>Cartel</th><th>Mano de obra</th><th>Productor</th><th>Estado</th><th>Fotos</th></tr></thead><tbody>${curso.map(c => prodAdmFila(c, { asignar: true, estado: true, fotos: true })).join('')}</tbody></table></div>` : '<div class="muted" style="padding:10px 0">No tiene carteles en curso.</div>'}
+    <h3 class="prod-h3">Pagados</h3>
+    ${pag.length ? `<div class="table-wrap"><table class="t"><thead><tr><th></th><th>Cartel</th><th>Mano de obra</th><th>Fotos</th><th>Pago</th></tr></thead><tbody>${pag.map(c => prodAdmFila(c, { fotos: true, pagar: true })).join('')}</tbody></table></div>` : '<div class="muted" style="padding:10px 0">—</div>'}`;
+}
+function prodAdmCfgHtml(prods) {
+  const inp = 'background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:7px 9px;color:var(--fg)';
+  return `<div class="card" style="padding:14px;max-width:760px">
+      <div style="font-weight:700;margin-bottom:4px">Nuevo productor</div>
+      <div class="muted" style="font-size:12px;margin-bottom:10px">Entra en neoninfinitosoftware.com con este usuario y contraseña, y ve solo los carteles que le asignes.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="prodcfg-usuario" placeholder="usuario (ej: octavio)" style="${inp};width:150px">
+        <input id="prodcfg-nombre" placeholder="nombre que se ve (ej: OCTAVIO)" style="${inp};width:200px">
+        <input id="prodcfg-pw" type="password" placeholder="contraseña (8+)" autocomplete="new-password" style="${inp};width:160px">
+        <button class="btn btn-cyan" data-prodcfg-crear>Crear</button>
+      </div></div>
+    <div class="table-wrap" style="max-width:760px;margin-top:12px"><table class="t"><thead><tr><th>Usuario</th><th>Nombre</th><th>En curso</th><th>Sin pagar</th><th></th></tr></thead><tbody>
+      ${prods.length ? prods.map(p => `<tr><td>${escapeHtml(p.id)}${+p.activo ? '' : ' <span class="muted" style="font-size:11px">(de baja)</span>'}</td><td>${escapeHtml(p.nombre)}</td><td class="num">${p.en_curso || 0}</td><td class="num">${p.sin_pagar || 0} · ${fmtMoney(p.adeudado || 0)}</td>
+        <td style="white-space:nowrap">${prodAdmState().pwEdit === p.id ? `<input id="prodcfg-pw-edit" type="password" placeholder="nueva contraseña (8+)" autocomplete="new-password" style="${inp};width:170px"> <button class="btn btn-cyan" data-prodcfg-pw-ok="${escapeHtml(p.id)}" style="padding:4px 8px;font-size:12px">Guardar</button> <button class="btn btn-ghost" data-prodcfg-pw-no style="padding:4px 8px;font-size:12px">Cancelar</button>` : `<button class="btn btn-ghost" data-prodcfg-pw="${escapeHtml(p.id)}" style="padding:4px 8px;font-size:12px">Contraseña</button>`} <button class="btn btn-ghost" data-prodcfg-activo="${escapeHtml(p.id)}|${+p.activo ? 0 : 1}" style="padding:4px 8px;font-size:12px">${+p.activo ? 'Dar de baja' : 'Reactivar'}</button></td></tr>`).join('') : '<tr class="empty-row"><td colspan="5">Todavía no hay productores. Creá el primero arriba.</td></tr>'}
+    </tbody></table></div>`;
+}
+function bindProduccion() {
+  const a = prodAdmState();
+  if (!a.data && !a.loading && !a.err) prodAdmCargar();
+  const main = document.getElementById('main'); if (!main) return;
+  main.querySelectorAll('[data-prodadm-tab]').forEach(b => b.onclick = () => { a.tab = b.dataset.prodadmTab; a.sel = {}; render(); });
+  main.querySelectorAll('[data-prodadm-refresh]').forEach(b => b.onclick = () => prodAdmCargar());
+  const asignar = async (ids, pid) => {
+    try { const j = await prodFetch('/admin/prod/asignar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: ids, productor_id: pid }) });
+      a.data.carteles = prodMerge(a.data.carteles, j.carteles); a.sel = {};
+      toast(pid ? `Asignado a ${prodAdmNombre(pid)}` : 'Productor sacado'); if (j.saltados && j.saltados.length) toast(`${j.saltados.length} no se cambiaron (${j.saltados[0].motivo})`);
+      render(); prodAdmCargar(true);
+    } catch (e) { toast(e.message); }
+  };
+  const pagar = async (ids, si) => {
+    try { const j = await prodFetch('/admin/prod/pagar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: ids, pagado: !!si }) });
+      a.data.carteles = prodMerge(a.data.carteles, j.carteles); a.sel = {}; toast(si ? 'Marcado como pagado' : 'Pago deshecho'); render(); prodAdmCargar(true);
+    } catch (e) { toast(e.message); }
+  };
+  main.querySelectorAll('[data-prodadm-asignar]').forEach(s => s.onchange = () => asignar([Number(s.dataset.prodadmAsignar)], s.value));
+  main.querySelectorAll('[data-prodadm-sel]').forEach(c => c.onchange = () => { a.sel[Number(c.dataset.prodadmSel)] = c.checked; render(); });
+  const todos = (sel, filtro) => main.querySelectorAll(sel).forEach(c => c.onchange = () => { (a.data.carteles || []).filter(filtro).forEach(x => { a.sel[x.id] = c.checked; }); render(); });
+  todos('[data-prodadm-todos]', x => !x.productor_id && x.prod_estado !== 'terminado');
+  todos('[data-prodadm-todos-term]', x => x.productor_id === a.tab && x.prod_estado === 'terminado' && !x.prod_pagado_at);
+  main.querySelectorAll('[data-prodadm-bulk-asignar]').forEach(b => b.onclick = () => {
+    const pid = (main.querySelector('[data-prodadm-bulk-prod]') || {}).value; if (!pid) { toast('Elegí el productor'); return; }
+    const ids = Object.keys(a.sel).filter(k => a.sel[k]).map(Number); if (ids.length) asignar(ids, pid);
+  });
+  main.querySelectorAll('[data-prodadm-bulk-pagar]').forEach(b => b.onclick = async () => {
+    const ids = (a.data.carteles || []).filter(x => a.sel[x.id] && x.productor_id === a.tab && x.prod_estado === 'terminado' && !x.prod_pagado_at).map(x => x.id);
+    if (!ids.length) return;
+    const tot = (a.data.carteles || []).filter(x => ids.includes(x.id)).reduce((s, x) => s + (Number(x.mo_monto) || 0), 0);
+    if (await showConfirm(`¿Marcar ${ids.length} cartel${ids.length > 1 ? 'es' : ''} como pagado${ids.length > 1 ? 's' : ''} a ${prodAdmNombre(a.tab)}? Total ${fmtMoney(tot)}.`, { title: 'Pago de producción', confirmLabel: 'Sí, pagados', cancelLabel: 'Cancelar' })) pagar(ids, true);
+  });
+  main.querySelectorAll('[data-prodadm-pagar]').forEach(b => b.onclick = () => { const [id, si] = b.dataset.prodadmPagar.split('|'); pagar([Number(id)], si === '1'); });
+  main.querySelectorAll('[data-prodadm-estado]').forEach(s => s.onchange = async () => {
+    const id = Number(s.dataset.prodadmEstado), est = s.value, c = (a.data.carteles || []).find(x => x.id === id) || {};
+    let forzar = false;
+    if (est === 'terminado' && (c.fotos || []).length < (c.fotos_requeridas || 1)) {
+      if (!(await showConfirm('No tiene la foto del cartel terminado. ¿Marcarlo igual?', { title: 'Sin foto', confirmLabel: 'Marcar igual', cancelLabel: 'Cancelar', variant: 'warn' }))) { render(); return; }
+      forzar = true;
+    }
+    try { const j = await prodFetch('/admin/prod/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_id: id, estado: est, forzar }) }); if (j.carteles) a.data.carteles = prodMerge(a.data.carteles, j.carteles); render(); }
+    catch (e) { toast(e.message); render(); }
+  });
+  main.querySelectorAll('[data-prod-zoom]').forEach(el => el.onclick = (ev) => { ev.stopPropagation(); try { openImgLightbox(el.dataset.prodZoom); } catch (_) {} });
+  // Productores: alta, contraseña y baja.
+  const crear = main.querySelector('[data-prodcfg-crear]');
+  if (crear) crear.onclick = async () => {
+    const usuario = (document.getElementById('prodcfg-usuario') || {}).value || '', nombre = (document.getElementById('prodcfg-nombre') || {}).value || '', password = (document.getElementById('prodcfg-pw') || {}).value || '';
+    try { await prodFetch('/admin/prod/productores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usuario, nombre, password }) }); toast('Productor creado'); prodAdmCargar(); }
+    catch (e) { toast(e.message); }
+  };
+  main.querySelectorAll('[data-prodcfg-pw]').forEach(b => b.onclick = () => { a.pwEdit = b.dataset.prodcfgPw; render(); setTimeout(() => { const i = document.getElementById('prodcfg-pw-edit'); if (i) i.focus(); }, 30); });
+  main.querySelectorAll('[data-prodcfg-pw-no]').forEach(b => b.onclick = () => { a.pwEdit = null; render(); });
+  main.querySelectorAll('[data-prodcfg-pw-ok]').forEach(b => b.onclick = async () => {
+    const id = b.dataset.prodcfgPwOk, pw = (document.getElementById('prodcfg-pw-edit') || {}).value || '';
+    try { await prodFetch('/admin/prod/productores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usuario: id, nombre: prodAdmNombre(id), password: pw }) }); a.pwEdit = null; toast('Contraseña cambiada (se cerraron sus sesiones)'); render(); }
+    catch (e) { toast(e.message); }
+  });
+  main.querySelectorAll('[data-prodcfg-activo]').forEach(b => b.onclick = async () => {
+    const [id, act] = b.dataset.prodcfgActivo.split('|');
+    if (act === '0' && !(await showConfirm(`¿Dar de baja a ${prodAdmNombre(id)}? No va a poder entrar más.`, { title: 'Productor', confirmLabel: 'Dar de baja', cancelLabel: 'Cancelar', variant: 'warn' }))) return;
+    try { await prodFetch('/admin/prod/productores/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usuario: id, activo: act === '1' }) }); prodAdmCargar(); }
+    catch (e) { toast(e.message); }
+  });
+}
+
+// ---------- En PEDIDOS: estado de producción para todos + asignar (admin) ----------
+function prodPillPedido(p) {
+  if (!p || p.esCorporeo) return '';
+  const est = p.prodEstado || '';
+  // "sin productor" solo en los que siguen en producción y son recientes (no en los cientos de pedidos viejos).
+  const _enProd = /produc/i.test(p.estadoPedido || 'En produccion') && p.fecha instanceof Date && (Date.now() - p.fecha.getTime()) < 45 * 864e5;
+  if (!est && !p.productorId) return (isAdmin() && _enProd) ? ' <span class="prod-mini" style="color:#9aa0b4;border-color:#9aa0b455">sin productor</span>' : '';
+  const col = PROD_ESTADO_COLOR[est] || '#9aa0b4';
+  return ` <span class="prod-mini" title="Producción${p.productorNombre ? ': ' + escapeHtml(p.productorNombre) : ''}" style="color:${col};border-color:${col}66">${escapeHtml(PROD_ESTADO_LBL[est] || 'Asignado')}${p.productorNombre ? ' · ' + escapeHtml(p.productorNombre) : ''}</span>`;
+}
+function prodDrawerSection(p) {
+  if (!p || p.esCorporeo) return '';
+  const est = p.prodEstado || '';
+  const fotos = p.prodFotos || [];
+  const adm = isAdmin();
+  const a = prodAdmState();
+  if (adm && !a.prods && !a._cargandoProds) { a._cargandoProds = true; prodFetch('/admin/prod/productores').then(j => { a.prods = j.productores || []; a._cargandoProds = false; if (document.getElementById('ped-prod-sel')) openDrawerPedido(p.idx); }).catch(() => { a._cargandoProds = false; }); }
+  return `<div class="drawer-section"><h4>Producción</h4>
+    <div style="display:flex;flex-direction:column;gap:8px;font-size:13px">
+      ${adm ? `<div><label style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em">Productor</label>
+        <select id="ped-prod-sel" data-ped-prod-asignar="${p.idx}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)" ${p.prodPagadoAt ? 'disabled' : ''}>${a.prods ? prodAdmOpts(p.productorId || '', true) : `<option>${escapeHtml(p.productorNombre || 'cargando…')}</option>`}</select></div>
+        <div>Mano de obra: <b>${p.moMonto != null ? fmtMoney(p.moMonto) : '—'}</b>${p.moRegla === 'pct_mes' ? ' <span class="muted" style="font-size:11px">(% del mes, pedido anterior al cambio)</span>' : (p.moMonto == null ? ' <span class="muted" style="font-size:11px">(faltan tramos o medidas)</span>' : '')}
+          ${p.productorId ? (p.prodPagadoAt ? ` · <span style="color:#2ECC71">pagado ${prodFechaCorta(p.prodPagadoAt)}</span>` : ' · <span style="color:#FFB020">sin pagar</span>') : ''}</div>`
+      : `<div>Productor: <b>${escapeHtml(p.productorNombre || '—')}</b></div>`}
+      <div>Estado: <b style="color:${PROD_ESTADO_COLOR[est] || 'var(--fg)'}">${escapeHtml(PROD_ESTADO_LBL[est] || (p.productorId ? 'Asignado' : 'Sin asignar'))}</b>${p.prodTerminadoAt && est === 'terminado' ? ` <span class="muted" style="font-size:12px">· ${prodFechaHora(p.prodTerminadoAt)}</span>` : ''}</div>
+      ${fotos.length ? `<div><div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Fotos del cartel terminado</div><div style="display:flex;gap:6px;flex-wrap:wrap">${fotos.map(k => `<img src="${escapeHtml(mediaUrl(k))}" onclick="openImgLightbox('${escapeHtml(mediaUrl(k))}')" style="width:74px;height:74px;object-fit:cover;border-radius:8px;cursor:zoom-in">`).join('')}</div></div>` : ''}
+    </div></div>`;
+}
+function bindProdDrawer(p) {
+  const s = document.querySelector('[data-ped-prod-asignar]');
+  if (!s) return;
+  s.onchange = async () => {
+    try {
+      const j = await prodFetch('/admin/prod/asignar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: [p.idx], productor_id: s.value }) });
+      const c = (j.carteles || [])[0];
+      if (c) { const x = STATE.pedidos.find(y => y.idx === p.idx); if (x) { x.productorId = c.productor_id || ''; x.productorNombre = c.productor || ''; x.prodEstado = c.prod_estado || ''; x.moMonto = c.mo_monto; x.moRegla = c.mo_regla || ''; } }
+      toast(s.value ? 'Productor asignado' : 'Productor sacado');
+      if (STATE.view === 'pedidos') renderTablePedidos();
+      openDrawerPedido(p.idx);
+      const a = prodAdmState(); a.data = null;   // la pantalla de Producción se recarga al entrar
+    } catch (e) { toast(e.message); }
+  };
+}
+// Mano de obra en el front (misma fórmula que el worker: calcManoObra), para el desglose de costos del cotizador.
+function calcManoObraFront(precio, tramos, metros, ancho, alto, cant) {
+  const P = getCotizadorParams();
+  const pct = +P.mo_pct_precio || 0.058, vm = +P.mo_valor_min || 125, tope = +P.mo_tope_pct || 0.18;
+  const t = +tramos || 0, m = +metros || 0, a = ((+ancho || 0) * (+alto || 0)) / 10000, q = +cant > 0 ? +cant : 1;
+  if (!(precio > 0) || !(t >= 1) || !(m > 0) || !(a > 0)) return null;
+  const min = (+P.mo_min_fijo || 42) + (+P.mo_min_tramo || 2.41) * t + (+P.mo_min_metro || 4.44) * m + (+P.mo_min_m2 || 14.3) * a;
+  return Math.round(Math.min(pct * precio + vm * q * min, tope * precio));
+}
+
 // ---------- INIT ----------
 loadUser();
 // Cargar done marks: localStorage inmediato + sync async desde Worker
@@ -20776,6 +21194,10 @@ const _isStandalone = !!(window.matchMedia && window.matchMedia('(display-mode: 
 const initView = location.hash.replace('#','') || ((_isStandalone && canAccessChat()) ? 'chat' : 'dashboard');
 STATE.view = initView;
 loadAll();
+// Rol del token (productores de neón = usuarios dinámicos): si el guardado no coincide con el del worker, se corrige.
+if (STATE.token && CONFIG.trackerUrl) fetch(CONFIG.trackerUrl + '/auth/me', { headers: authHeaders() }).then(r => r.ok ? r.json() : null).then(j => {
+  if (j && typeof j.rol === 'string' && j.rol !== (STATE.tokenRol || '') && tokenBelongsTo(STATE.user)) { STATE.tokenRol = j.rol; try { localStorage.setItem('niventas.tokenRol', j.rol); } catch (_) {} render(); }
+}).catch(() => {});
 // Sync done marks desde Worker (en background, re-render cuando llegue)
 loadDone().then(() => { if (STATE.loaded) render(); });
 // Pre-load chat unread counts for sidebar badge + arrancar el web worker de
@@ -24689,11 +25111,14 @@ function renderBriefCotizadorPopup() {
           const neon = metros * (+raw.costo_neon_mt || 0), fuente = r.fuente || 0;
           const anibal = m2r * (+raw.anibal || 0) * imag, emma = m2r * (+raw.emma || 0) * imag;
           const pT = r.transFinal || 0, pN = r.negroFinal || 0;
-          const moT = (+raw.mano_obra || 0) * pT, moN = (+raw.mano_obra || 0) * pN;
+          // Mano de obra del productor POR TIEMPO (15-oct, Gaspar: cambia el desglose, no el precio). Sin tramos → % del COGS.
+          const _moTt = calcManoObraFront(pT, f.tramos, metros, f.ancho, f.alto, 1), _moNt = calcManoObraFront(pN, f.tramos, metros, f.ancho, f.alto, 1);
+          const moT = _moTt != null ? _moTt : (+raw.mano_obra || 0) * pT, moN = _moNt != null ? _moNt : (+raw.mano_obra || 0) * pN;
+          const _moLbl = _moTt != null ? 'Mano de obra (por tiempo)' : 'Mano de obra (' + String(+((+raw.mano_obra || 0) * 100).toFixed(1)).replace('.', ',') + '%)';
           const joT = (+raw.joaquin || 0) * pT, joN = (+raw.joaquin || 0) * pN;
           const ctT = baseT + neon + fuente + anibal + emma + moT + joT;
           const ctN = baseN + neon + fuente + anibal + emma + moN + joN;
-          return `<div style="font-size:12px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);margin-bottom:var(--s-3)"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent-cyan);margin-bottom:6px">🔒 Desglose de COGS · solo admin <span style="color:var(--fg-mute);text-transform:none;letter-spacing:0">(transparente / negro)</span></div><table style="width:100%;font-family:ui-monospace,monospace;font-size:12px;color:var(--fg-subtle)">${dual('Base (acrílico)', baseT, baseN)}${dual('Neón', neon, null)}${dual('Fuente', fuente, null)}${dual('Aníbal (corte base, 15%)', anibal, null)}${dual('Emma (diseño, 5%)', emma, null)}${dual('Mano de obra (13.5%)', moT, moN)}${dual('Joaquín (comisión, 5%)', joT, joN)}<tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Costo total</b></td><td style="text-align:right;padding-top:5px;color:var(--fg)"><b>${fmtMoney(ctT)} <span style="color:var(--fg-mute)">/ ${fmtMoney(ctN)}</span></b></td></tr><tr><td>Precio</td><td style="text-align:right;color:var(--accent-cyan)">${fmtMoney(pT)} / ${fmtMoney(pN)}</td></tr><tr><td><b>Ganancia neta</b></td><td style="text-align:right;color:#4ade80"><b>${fmtMoney(pT - ctT)} / ${fmtMoney(pN - ctN)}</b></td></tr></table><div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Dimmer + envío se cotizan aparte. Joaco además cobra sueldo fijo mensual (${fmtMoney(+raw.joaquin_fijo || 0)}) — costo general del negocio, no por cartel.</div></div>`;
+          return `<div style="font-size:12px;background:rgba(255,255,255,.02);border:1px dashed var(--border);border-radius:var(--r-sm);padding:var(--s-3);margin-bottom:var(--s-3)"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent-cyan);margin-bottom:6px">🔒 Desglose de COGS · solo admin <span style="color:var(--fg-mute);text-transform:none;letter-spacing:0">(transparente / negro)</span></div><table style="width:100%;font-family:ui-monospace,monospace;font-size:12px;color:var(--fg-subtle)">${dual('Base (acrílico)', baseT, baseN)}${dual('Neón', neon, null)}${dual('Fuente', fuente, null)}${dual('Aníbal (corte base, 15%)', anibal, null)}${dual('Emma (diseño, 5%)', emma, null)}${dual(_moLbl, moT, moN)}${dual('Joaquín (comisión, 5%)', joT, joN)}<tr style="border-top:1px solid var(--border)"><td style="padding-top:5px"><b>Costo total</b></td><td style="text-align:right;padding-top:5px;color:var(--fg)"><b>${fmtMoney(ctT)} <span style="color:var(--fg-mute)">/ ${fmtMoney(ctN)}</span></b></td></tr><tr><td>Precio</td><td style="text-align:right;color:var(--accent-cyan)">${fmtMoney(pT)} / ${fmtMoney(pN)}</td></tr><tr><td><b>Ganancia neta</b></td><td style="text-align:right;color:#4ade80"><b>${fmtMoney(pT - ctT)} / ${fmtMoney(pN - ctN)}</b></td></tr></table><div style="font-size:10px;color:var(--fg-mute);margin-top:6px">Dimmer + envío se cotizan aparte. Joaco además cobra sueldo fijo mensual (${fmtMoney(+raw.joaquin_fijo || 0)}) — costo general del negocio, no por cartel.</div></div>`;
         })() : ''}
         <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Texto del presupuesto</label>
         <textarea id="brief-cot-popup-text" rows="14"

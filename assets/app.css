@@ -4484,3 +4484,47 @@ select.lb-sel.tr.sug, select.lb-sel.tr.vacio { color: var(--fg-subtle); font-sty
   .lb-meta { order: 5; flex: 1 1 100%; padding-left: 21px; }
   .lb-det { grid-template-columns: 1fr; padding-left: 14px; }
 }
+
+/* ===== Producción de neón: pantalla del productor (celular primero) + vista de Gaspar (15-oct-2026) ===== */
+.prod-app{min-height:100vh;background:var(--ink-0,#0b0b10);color:var(--fg)}
+.prod-top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--ink-50,#111118);border-bottom:1px solid var(--border)}
+.prod-body{max-width:760px;margin:0 auto;padding:12px 12px 40px}
+.prod-resumen{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:4px 0 12px}
+.prod-resumen>div{background:var(--ink-100);border:1px solid var(--border);border-radius:10px;padding:10px}
+.prod-resumen .k{font-size:11px;color:var(--fg-mute);text-transform:uppercase;letter-spacing:.05em}
+.prod-resumen .v{font-size:18px;font-weight:700;margin-top:2px}
+.prod-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.prod-tab{background:var(--ink-100);border:1px solid var(--border);color:var(--fg);border-radius:999px;padding:7px 13px;font-size:13px;cursor:pointer}
+.prod-tab span{opacity:.65;margin-left:4px}
+.prod-tab.on{background:var(--accent-cyan,#00d3e0);border-color:transparent;color:#000;font-weight:700}
+.prod-tabs-adm{align-items:center}
+.prod-card{display:flex;gap:12px;background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:10px;margin-bottom:12px}
+.prod-card-img{flex:0 0 38%;max-width:240px}
+.prod-card-img img{width:100%;border-radius:8px;display:block;cursor:zoom-in;background:#000}
+.prod-card-body{flex:1;min-width:0}
+.prod-card-title{font-size:16px;font-weight:700;line-height:1.2}
+.prod-pill{font-size:11px;font-weight:700;border:1px solid;border-radius:999px;padding:3px 9px;white-space:nowrap}
+.prod-mini{display:inline-block;font-size:10px;font-weight:600;border:1px solid;border-radius:999px;padding:1px 7px;margin-left:6px;white-space:nowrap;vertical-align:middle}
+.prod-alerta{margin-top:8px;font-size:12px;font-weight:700;color:#FFB020}
+.prod-chips{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:6px;margin-top:8px}
+.prod-chips>div{background:var(--ink-50,#111118);border:1px solid var(--border);border-radius:8px;padding:5px 8px;font-size:13px;overflow-wrap:anywhere}
+.prod-chips span{display:block;font-size:10px;color:var(--fg-mute);text-transform:uppercase;letter-spacing:.05em}
+.prod-aclaracion{margin-top:8px;font-size:13px;background:rgba(255,176,32,.08);border-left:3px solid #FFB020;padding:7px 9px;border-radius:0 8px 8px 0}
+.prod-monto{margin-top:10px;font-size:14px}
+.prod-monto b{font-size:17px}
+.prod-fotos{margin-top:10px}
+.prod-fotos-grid{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.prod-foto{position:relative}
+.prod-foto img{width:70px;height:70px;object-fit:cover;border-radius:8px;display:block;cursor:zoom-in}
+.prod-foto button{position:absolute;top:-6px;right:-6px;width:22px;height:22px;border-radius:50%;border:none;background:#FF5566;color:#fff;font-size:12px;cursor:pointer;line-height:22px;padding:0}
+.prod-foto-add{display:inline-flex;align-items:center;justify-content:center;height:70px;padding:0 14px;border:1px dashed var(--border);border-radius:8px;font-size:13px;cursor:pointer;color:var(--fg)}
+.prod-foto-add.busy{opacity:.6;cursor:wait}
+.prod-acciones{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.prod-acciones .btn{flex:1;min-width:130px;padding:10px 12px;font-size:14px}
+.prod-bulk{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0 10px}
+.prod-h3{font-size:14px;margin:18px 0 8px;color:var(--fg)}
+@media (max-width:560px){
+  .prod-card{flex-direction:column}
+  .prod-card-img{max-width:none;flex:none}
+  .prod-resumen .v{font-size:15px}
+}
