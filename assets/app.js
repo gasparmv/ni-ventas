@@ -6497,7 +6497,7 @@ function sfDetalleHtml(t) {
   const c = t.campos || {}, p = t.pedido || {};
   const fila = (l, v) => v ? `<div class="sf-dato"><span>${escapeHtml(l)}</span><b>${escapeHtml(v)}</b></div>` : '';
   const secs = (typeof TICKET_CORP_SECS !== 'undefined' ? TICKET_CORP_SECS : []).map(([sec, campos]) => {
-    const h = campos.map(x => fila(x.l, c[x.k])).join('');
+    const h = campos.map(x => fila(x.l, x.t === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(c[x.k] || '') ? c[x.k].split('-').reverse().join('/') : c[x.k])).join('');
     return h ? `<div class="lb-tit">${escapeHtml(sec)}</div>${h}` : '';
   }).join('');
   const SN = v => /^s/i.test(String(v || '')) ? 'Sí' : (v ? 'No' : '');
