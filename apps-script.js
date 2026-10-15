@@ -14,6 +14,13 @@
  *   tiene fórmula o todavía tiene lo que había puesto el CRM. directo_ping devuelve mo:true.
  *   ⚠️ NO borres ni muevas esas columnas: son la clave del sync (si se pierden, degrada a
  *      matchear por numero+nombre, menos robusto).
+ * v6 (15-oct): limpieza de duplicados SEGURA. Pedidos_Directo trae la hoja "2026" por IMPORTRANGE pero el vendedor
+ *   (C), productor (N), envío (Q), MO (V), Caja (Z) son valores en renglones fijos: BORRAR un renglón de "2026"
+ *   corría todo lo importado y dejaba esos valores (y las comisiones, que salen de C) al lado del pedido equivocado.
+ *   Ahora la limpieza VACÍA la fila duplicada en vez de borrarla, mira también el id_sync (dos pedidos con los
+ *   mismos datos ya no son "duplicados") e ignora filas sin N° ni nombre. Y ya no se puede disparar por POST
+ *   (acciones neon_dedupe / corporeo_dedupe quitadas): solo a mano desde el editor.
+ *   REGLA: en "2026" y en Pedidos_Directo (desde la fila 33) nunca borrar, insertar ni ordenar filas.
  */
 const SHEET_ID = '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ';
 const SHEET_NAME = '2026';
@@ -28,8 +35,6 @@ function doPost(e) {
     if (data.action === 'pedido_ping') return jsonOut({ ok: true, pong: true });
     if (data.action === 'pedido_upsert') return pedidoUpsert(data);
     if (data.action === 'corporeo_upsert') return corporeoUpsert(data);
-    if (data.action === 'corporeo_dedupe') return jsonOut({ ok: true, deleted: corporeoDedupeRun() });
-    if (data.action === 'neon_dedupe') return jsonOut({ ok: true, deleted: neonDedupeRun() });
     if (data.action === 'set_ad_bulk') return setAdBulk(data);
     if (data.action === 'directo_vendedor') return directoVendedor(data);
     if (data.action === 'directo_mo') return directoMo(data);
@@ -202,27 +207,34 @@ function corporeoUpsert(data) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LIMPIEZA DE DUPLICADOS — corré la función UNA VEZ desde el editor (botón ▶).
-// Duplicada = TODAS las columnas del CRM idénticas a otra (corpóreo A:O+AA:AB / neón A:N+P:U).
-// Conserva la fila con MÁS celdas llenas (la de tus costos), borra el resto. Nunca toca
-// filas manuales ni piezas distintas.
+// LIMPIEZA DE DUPLICADOS — solo a mano desde el editor (botón ▶); ya NO se puede llamar por POST.
+// Duplicada = TODAS las columnas del CRM idénticas a otra (corpóreo A:O+AA:AB / neón A:N+P:U) Y el mismo
+// id_sync (dos pedidos distintos del CRM con los mismos datos —ej. 2 BATHILDA iguales— NO son duplicados).
+// Filas sin N° ni nombre se ignoran (antes las filas vaciadas caían todas en un mismo grupo "duplicado").
+// Conserva la fila con MÁS celdas llenas (la de tus costos).
+//  · NEÓN ("2026"): la fila sobrante se VACÍA, nunca se borra. Pedidos_Directo la trae por IMPORTRANGE y tiene al
+//    lado valores en renglones fijos (vendedor C → comisiones, productor N, envío Q, MO V, Caja Z): borrar un renglón
+//    corría ~450 filas y dejaba esos valores pegados al pedido de al lado.
+//  · CORPÓREO (Pedidos_Corporeo): se puede borrar el renglón (todo lo manual está en la misma fila y se va con él).
 // ─────────────────────────────────────────────────────────────────────────────
 function corporeoDedupeRun() {
   var CORP_ID = '1PLG-vosgVtvhYYaBLi5Rh-LM6f2A_BvG3i6-a7NpNCE';
   var sheet = SpreadsheetApp.openById(CORP_ID).getSheetByName('Pedidos_Corporeo');
-  var n = _dedupeSheet_(sheet, [[1, 15], [27, 28]], 2);
+  var n = _dedupeSheet_(sheet, [[1, 15], [27, 28]], 3, CORP_ID_COL, [1, 5], 'borrar');
   Logger.log('Corpóreo: borradas ' + n + ' filas duplicadas');
   return n;
 }
 function neonDedupeRun() {
   var VENTAS_ID = '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg';
   var sheet = SpreadsheetApp.openById(VENTAS_ID).getSheetByName('2026');
-  var n = _dedupeSheet_(sheet, [[1, 14], [16, 21]], 2);
-  Logger.log('Neón: borradas ' + n + ' filas duplicadas');
+  var n = _dedupeSheet_(sheet, [[1, 14], [16, 21]], 2, NEON_ID_COL, [2, 3], 'vaciar');
+  Logger.log('Neón: vaciadas ' + n + ' filas duplicadas (no se borra ningún renglón)');
   return n;
 }
 function _cellKey_(v) { if (v instanceof Date) return 'D' + v.getTime(); return String(v == null ? '' : v).normalize('NFC').trim(); }
-function _dedupeSheet_(sheet, ranges, startRow) {
+// idCol: columna id_sync (entra en la clave). idCols: [col N°, col nombre] — si las dos están vacías la fila no cuenta.
+// modo: 'vaciar' (clearContent de la fila) | 'borrar' (deleteRow).
+function _dedupeSheet_(sheet, ranges, startRow, idCol, idCols, modo) {
   var last = sheet.getLastRow(), lastCol = sheet.getLastColumn();
   if (last < startRow) return 0;
   var full = sheet.getRange(startRow, 1, last - startRow + 1, lastCol).getValues();
@@ -232,26 +244,28 @@ function _dedupeSheet_(sheet, ranges, startRow) {
       for (var c = ranges[g][0]; c <= ranges[g][1]; c++) parts.push(_cellKey_(rowArr[c - 1]));
       parts.push('\u0002');
     }
+    parts.push(idCol && idCol <= rowArr.length ? _cellKey_(rowArr[idCol - 1]) : '');
     return parts.join('\u0001');
   }
   function fillCount(rowArr) { var n = 0; for (var c = 0; c < rowArr.length; c++) { if (String(rowArr[c] == null ? '' : rowArr[c]).trim() !== '') n++; } return n; }
   var groups = {};
   for (var i = 0; i < full.length; i++) {
+    if (_cellKey_(full[i][idCols[0] - 1]) === '' && _cellKey_(full[i][idCols[1] - 1]) === '') continue;
     var k = keyOf(full[i]);
-    if (k.replace(/[\u0001\u0002]/g, '').trim() === '') continue;
     (groups[k] = groups[k] || []).push(startRow + i);
   }
-  var toDelete = [];
+  var sobran = [];
   for (var key in groups) {
     var g = groups[key];
     if (g.length < 2) continue;
     var keep = g[0], keepFill = fillCount(full[keep - startRow]);
     for (var j = 1; j < g.length; j++) { var f = fillCount(full[g[j] - startRow]); if (f > keepFill) { keepFill = f; keep = g[j]; } }
-    for (var j2 = 0; j2 < g.length; j2++) { if (g[j2] !== keep) toDelete.push(g[j2]); }
+    for (var j2 = 0; j2 < g.length; j2++) { if (g[j2] !== keep) sobran.push(g[j2]); }
   }
-  toDelete.sort(function (a, b) { return a - b; });
-  for (var d = toDelete.length - 1; d >= 0; d--) sheet.deleteRow(toDelete[d]);
-  return toDelete.length;
+  sobran.sort(function (a, b) { return a - b; });
+  if (modo === 'borrar') { for (var d = sobran.length - 1; d >= 0; d--) sheet.deleteRow(sobran[d]); }
+  else { for (var v = 0; v < sobran.length; v++) sheet.getRange(sobran[v], 1, 1, lastCol).clearContent(); }
+  return sobran.length;
 }
 
 function setAdBulk(data) {

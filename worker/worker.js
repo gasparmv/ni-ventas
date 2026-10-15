@@ -5494,17 +5494,37 @@ function cajaCanon(v) {
 // nombra: la cuenta de la OC es la de Melina (TOGNOCCHI, Ualá, alias neoninfinito.ok) y el titular de las
 // cuentas puede salir como "Neon Infinito" (Ualá → Melina; Mercado Pago → Gaspar, alias neoninfinito.mp).
 // Ante la duda devuelve '' y el vendedor la elige a mano.
+// Caja según el TITULAR que recibió (y el banco). Armado con los titulares reales de wa_pago_proof (oct-2026) y
+// verificado contra los 238 comprobantes guardados. Poner una caja EQUIVOCADA es peor que dejarla vacía (va a la
+// contabilidad), así que pide NOMBRE + APELLIDO:
+//  · Mercado Pago pega y corta el nombre: "GASPARMARTINE", "MERPAGO*GASPARMARTINE 01/06" → se mira también el texto
+//    "aplastado" (solo letras). Con \bgaspar\b (corteCajaFromProof) esos ~45 comprobantes quedaban sin caja.
+//  · Los apellidos se repiten (Gaspar y Bruno: Martinez Villanueva; Favio: Favio Nery Martinez, Mercado Pago) y los
+//    nombres sueltos son de clientes (hay leads Bruno, Fabio, Melina, Gaspar; el OCR a veces pone al que PAGA como
+//    titular) → nunca por un nombre o un apellido solo.
+//  · Alias: neoninfinito.cartel = Favio (MP), neoninfinito.ok = Melina (Ualá), neoninfinito.mp = Gaspar. "Neon
+//    infinito" a secas en Mercado Pago es ambiguo (Gaspar y Favio) → sin caja; en Ualá es Melina.
+//  · Contradicción con el banco → sin caja (Bruno no tiene Mercado Pago; Gaspar no tiene Banco Nación / Cuenta DNI).
+// '' si no se ve claro (regla de Gaspar: si no se ve, no se pone ninguna; el vendedor la elige).
 function cajaDeComprobante(proof) {
   if (!proof) return '';
-  const c = corteCajaFromProof(proof);
-  if (c) return c;
-  const t = String(proof.titular_destino || '').toLowerCase();
-  const b = String(proof.banco || '').toLowerCase();
-  if (/tognocchi/.test(t)) return 'Melina';
-  if (/neon\s*infinito/.test(t) || /neoninfinito/.test(t)) {
-    if (/ual[aá]/.test(b)) return 'Melina';
-    if (/mercado\s*pago|mercadopago/.test(b)) return 'Gaspar';
-  }
+  const t = String(proof.titular_destino || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const sq = t.replace(/[^a-z]/g, '');
+  const w = t.split(/[^a-z]+/).filter(Boolean);
+  const tiene = (x) => w.includes(x);
+  const b = String(proof.banco || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const esMP = /mercado\s*(pago|libre)|mercadopago|mercadolibre|merpago|^mp$|\bmp\b/.test(b) || /^merpago/.test(sq);
+  const esNacion = /nacion|\bbna\b|cuenta\s*dni/.test(b);
+  if (sq.includes('neoninfinitocartel')) return 'Favio';
+  if (sq.includes('neoninfinitook')) return 'Melina';
+  if (sq.includes('neoninfinitomp')) return 'Gaspar';
+  if ((sq.includes('tognocchi') && (tiene('melina') || tiene('victoria'))) || (tiene('melina') && tiene('victoria'))) return 'Melina';
+  if (((tiene('favio') || tiene('fabio')) && (tiene('nery') || tiene('martinez'))) || /^(merpago)?(favio|fabio)(nery|martin)/.test(sq)) return 'Favio';
+  if ((tiene('gaspar') && (tiene('martinez') || tiene('villanueva'))) || /^(merpago)?gasparmartin/.test(sq)) return esNacion ? '' : 'Gaspar';
+  if ((tiene('bruno') && (tiene('martinez') || tiene('villanueva'))) || sq.includes('martinezvillanuevabr')) return esMP ? '' : 'Bruno';
+  if (sq === 'martinezvillanueva') return esNacion ? 'Bruno' : '';
+  if (sq.includes('neoninfinito') && /uala/.test(b)) return 'Melina';
+  if (!sq && String(proof.cuenta || '') === 'bna_bruno' && esNacion) return 'Bruno';
   return '';
 }
 // Cache del OCR de comprobantes de pedidos (tabla pago_ocr, mig. 054). cacheId = wamid del mensaje del chat, o
@@ -5522,7 +5542,14 @@ async function ensurePagoOcr(env) {
 }
 function pagoOcrFila(r) {
   if (!r) return null;
-  return { es_comprobante: r.es_comprobante == null ? null : !!r.es_comprobante, monto: r.monto == null ? null : Number(r.monto), titular: r.titular || '', banco: r.banco || '', caja: r.caja || '' };
+  // La caja se recalcula del titular/banco guardados: si mejora la regla (ej. Favio, "GASPARMARTINE"), los
+  // comprobantes ya analizados la aprovechan sin volver a pagar el OCR.
+  // Solo la recalculada: si la regla se endurece, una caja vieja guardada no vuelve a aparecer (la guardada se usa
+  // únicamente si no hay titular ni banco para recalcular).
+  const es = r.es_comprobante == null ? null : !!r.es_comprobante;
+  const sinDatos = !String(r.titular || '').trim() && !String(r.banco || '').trim();
+  const caja = es === false ? '' : (sinDatos ? cajaCanon(r.caja) : cajaDeComprobante({ titular_destino: r.titular, banco: r.banco, cuenta: r.cuenta }));
+  return { es_comprobante: es, monto: r.monto == null ? null : Number(r.monto), titular: r.titular || '', banco: r.banco || '', caja };
 }
 // Devuelve {es_comprobante, monto, titular, banco, caja} (del cache o analizando ahora), o null si el OCR falló
 // por algo transitorio (en ese caso NO se cachea: se reintenta la próxima vez, como el vigía del corte).
