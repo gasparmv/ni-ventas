@@ -2782,7 +2782,7 @@ function isDisenadorOnly() {
 function setView(v) {
   // Diseñador confinado a Cotización (+ puede ir a Corte); Abril (cursos) al Chat WA; produccion (Aníbal/Neyen) a Corte.
   if (isCursosOnly()) v = 'chat';
-  else if (isProduccionOnly()) v = 'corte';
+  else if (isProduccionOnly()) v = (v === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : 'corte';
   else if (isLogisticaOnly()) v = 'logistica';
   else if (isSinFronteraOnly()) v = v === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
   else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
@@ -2807,7 +2807,7 @@ document.addEventListener('click', (ev) => {
 window.addEventListener('hashchange', () => {
   let h = location.hash.replace('#','') || 'dashboard';
   if (isCursosOnly()) h = 'chat';
-  else if (isProduccionOnly()) h = 'corte';
+  else if (isProduccionOnly()) h = (h === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : 'corte';
   else if (isLogisticaOnly()) h = 'logistica';
   else if (isSinFronteraOnly()) h = h === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
   else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
@@ -3099,7 +3099,7 @@ function render() {
   if (isCursosOnly() && !['chat'].includes(STATE.view)) {
     STATE.view = 'chat';
     if (location.hash !== '#chat') location.hash = 'chat';
-  } else if (isProduccionOnly() && !['corte'].includes(STATE.view)) {
+  } else if (isProduccionOnly() && !['corte'].concat(isAnibalUser(STATE.user) ? ['mis-carteles'] : []).includes(STATE.view)) {
     STATE.view = 'corte';
     if (location.hash !== '#corte') location.hash = 'corte';
   } else if (isLogisticaOnly() && STATE.view !== 'logistica') {
@@ -3157,7 +3157,7 @@ function render() {
   else if (STATE.view === 'corte') document.getElementById('main').innerHTML = renderCorte(); // corte carga su propia data (no depende del Sheet ni de /admin/pedidos)
   else if (STATE.view === 'logistica') document.getElementById('main').innerHTML = renderLogistica(); // idem: su propia data
   else if (/^sf-/.test(STATE.view)) document.getElementById('main').innerHTML = renderSinFrontera(); // Sin Frontera: idem
-  else if (STATE.view === 'produccion') document.getElementById('main').innerHTML = renderProduccion(); // producción de neón: su propia data
+  else if (STATE.view === 'mis-carteles' && isAnibalUser(STATE.user)) document.getElementById('main').innerHTML = renderProdApp(true); // Aníbal también arma carteles: sus asignados
   else if (STATE.error)   document.getElementById('main').innerHTML = renderError();
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
   else {
@@ -3199,7 +3199,7 @@ function render() {
   if (STATE.view === 'corte')        bindCorte();
   if (STATE.view === 'logistica')    bindLogistica();
   if (/^sf-/.test(STATE.view))      bindSinFrontera();
-  if (STATE.view === 'produccion')   bindProduccion();
+  if (STATE.view === 'mis-carteles') bindProdApp();
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
     if (isAdmin()) bindBusinessPanel();
@@ -7587,6 +7587,7 @@ function renderShell() {
           </button>
         ` : isProduccionOnly() ? `
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
+          ${isAnibalUser(STATE.user) ? `<button class="nav-item ${v==='mis-carteles'?'active':''}" data-view="mis-carteles"><span class="icon">🔧</span> Mis carteles</button>` : ''}
         ` : isLogisticaOnly() ? `
           <button class="nav-item active" data-view="logistica"><span class="icon">📦</span> Envíos</button>
         ` : isSinFronteraOnly() ? `
@@ -7606,7 +7607,6 @@ function renderShell() {
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='logistica'?'active':''}" data-view="logistica"><span class="icon">📦</span> Logística</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${/^sf-/.test(v)?'active':''}" data-view="sf-produccion"><span class="icon">🏭</span> Sin Frontera</button>` : ''}
-        ${isAdmin() ? `<button class="nav-item ${v==='produccion'?'active':''}" data-view="produccion"><span class="icon">🔧</span> Producción</button>` : ''}
         ${!isSecundario(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
         </button>` : ''}
@@ -9556,7 +9556,7 @@ function drawVerticalCharts(key) {
 }
 
 // ---------- PEDIDOS ----------
-let pedidoFilter = { search: '', estadoPago: '', estadoPedido: '', canal: '', mes: '' };
+let pedidoFilter = { search: '', estadoPago: '', estadoPedido: '', canal: '', mes: '', prod: '', prodEstado: '' };
 let pedidoSort = { col: 'fecha', dir: -1 };
 function bindPedidos() {
   startPedidosPolling();
@@ -9633,8 +9633,10 @@ function renderPedidos() {
         <select data-pf="estadoPago"><option value="">Pago: todos</option>${estadosPago.map(s=>`<option ${pedidoFilter.estadoPago===s?'selected':''}>${escapeHtml(s)}</option>`).join('')}</select>
         <select data-pf="estadoPedido"><option value="">Pedido: todos</option>${estadosPed.map(s=>`<option ${pedidoFilter.estadoPedido===s?'selected':''}>${escapeHtml(s)}</option>`).join('')}</select>
         <select data-pf="canal"><option value="">Canal: todos</option>${canales.map(s=>`<option ${pedidoFilter.canal===s?'selected':''}>${escapeHtml(s)}</option>`).join('')}</select>
+        ${isAdmin() ? `<span id="prod-filtros" style="display:contents">${prodFiltrosHtml()}</span>` : ''}
         <div class="right"><span id="row-count">0</span> filas</div>
       </div>
+      <div id="prod-resumen-filtro"></div>
       <div id="table-pedidos"></div>
     </div>
     ${renderPedidoModal()}
@@ -9655,6 +9657,7 @@ function renderTablePedidos() {
     if (pedidoFilter.estadoPedido && p.estadoPedido !== pedidoFilter.estadoPedido) return false;
     if (pedidoFilter.canal && p.canalAd !== pedidoFilter.canal) return false;
     if (pedidoFilter.mes && getMonth(p.fecha) !== pedidoFilter.mes) return false;
+    if (!prodFiltroPasa(p)) return false;   // productor / estado de producción (admin)
     return true;
   });
   filtered.sort((a,b) => {
@@ -9671,7 +9674,7 @@ function renderTablePedidos() {
   const _pedAdmin = isAdmin(); // solo Gaspar ve quién cargó (los comerciales ven solo lo suyo)
   const headers = [
     ['fecha','Fecha'],['cartel','Cartel'],['base','Base'],['precio','Precio'],['dimmer','Dimer'],['envio','Envío'],['aclaracion','Aclar.'],['estadoPago','Pago'],['estadoPedido','Estado'],['canalAd','Ad'],
-    ...(_pedAdmin ? [['cargadoPor','Cargó']] : [])
+    ...(_pedAdmin ? [['cargadoPor','Cargó'], ['productorNombre','Productor']] : [])
   ];
   const trunc = (s, n) => { s = String(s||'').replace(/\s+/g,' ').trim(); return s ? (escapeHtml(s.slice(0,n)) + (s.length>n?'…':'')) : '—'; };
   wrap.innerHTML = `
@@ -9691,7 +9694,7 @@ function renderTablePedidos() {
               <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pago',p.estadoPago,PAGO_OPTS_TABLE)}${pagoCajaMini(p)}</td>
               <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pedido',p.estadoPedido,PED_OPTS_TABLE)}</td>
               <td><span class="muted" style="font-size:12px">${escapeHtml(p.canalAd||'—')}</span></td>
-              ${_pedAdmin ? `<td>${loaderCell(p)}</td>` : ''}
+              ${_pedAdmin ? `<td>${loaderCell(p)}</td><td onclick="event.stopPropagation()" style="min-width:130px">${prodCeldaPedido(p)}</td>` : ''}
             </tr>
           `).join('')}
       </tbody>
@@ -9707,6 +9710,7 @@ function renderTablePedidos() {
       renderTablePedidos();
     };
   });
+  bindProdTabla(filtered);   // columna Productor + resumen de producción (admin)
   // Traer qué corpóreos ya tienen ticket (una vez por sesión de vista) para pintar los chips.
   if (canCotizar() && !STATE.corpTicketsLoaded && !STATE.corpTicketsLoading && filtered.some(p => p.esCorporeo)) loadCorpTickets();
 }
@@ -14311,6 +14315,8 @@ function bindAdmin() {
   bindRepartoPanel();
   // Avisos internos (Etapa 1): KPIs, modo y lista de lo que se le avisó al equipo.
   bindAvisosPanel();
+  // Productores de neón: usuarios, contraseñas y bajas.
+  prodCfgPintar(); prodCargarProductores(true);
 
   const saveBtn = document.querySelector('[data-cot-save]');
   if (saveBtn) saveBtn.onclick = async () => {
@@ -14441,6 +14447,14 @@ function renderAdmin() {
         <span class="muted" style="font-size:12px">lo que el CRM le avisa al equipo · últimas 24 h</span>
       </div>
       <div id="avisos-panel"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:var(--s-4)">
+      <div class="card-h">
+        <h3>Productores</h3>
+        <span class="muted" style="font-size:12px">usuario de cada productor para ver sus carteles · los carteles se asignan desde Pedidos</span>
+      </div>
+      <div id="prodcfg-panel"><div class="loading"><div class="spinner"></div></div></div>
     </div>
 
     ${renderAdminCotizador()}
@@ -22451,10 +22465,12 @@ async function prodCargar() {
   st.loading = false;
   render();
 }
-function renderProdApp() {
+function renderProdApp(embebido) {
   const st = prodState(), d = st.data;
   const nombre = (d && d.productor && d.productor.nombre) || STATE.user || '';
-  const head = `<div class="prod-top"><img src="assets/logo.svg" alt="Neon Infinito" style="height:26px"><div style="flex:1"><div style="font-weight:700">Producción</div><div style="font-size:12px;color:var(--fg-mute)">${escapeHtml(nombre)}</div></div>
+  const head = embebido
+    ? `<div class="page-head"><h1>Mis carteles</h1><div class="actions"><button class="btn btn-ghost" data-prod-refresh>↻ Actualizar</button></div></div>`
+    : `<div class="prod-top"><img src="assets/logo.svg" alt="Neon Infinito" style="height:26px"><div style="flex:1"><div style="font-weight:700">Producción</div><div style="font-size:12px;color:var(--fg-mute)">${escapeHtml(nombre)}</div></div>
     <button class="btn btn-ghost" data-prod-refresh title="Actualizar" style="padding:6px 10px">↻</button><button class="btn btn-ghost" data-prod-salir style="padding:6px 10px">Salir</button></div>`;
   if (!d) return `<div class="prod-app">${head}<div class="prod-body"><div class="muted" style="padding:30px;text-align:center">${st.err ? '⚠ ' + escapeHtml(st.err) + '<br><button class="btn btn-cyan" data-prod-refresh style="margin-top:10px">Reintentar</button>' : 'Cargando tus carteles…'}</div></div></div>`;
   const cs = d.carteles || [];
@@ -22568,210 +22584,204 @@ function bindProdCards(root, admin) {
   });
 }
 
-// ---------- Pantalla PRODUCCIÓN de Gaspar (admin) ----------
-function prodAdmState() { if (!STATE.prodAdm) STATE.prodAdm = { data: null, loading: false, err: '', tab: 'sin', sel: {}, prods: null, abierto: null }; return STATE.prodAdm; }
-async function prodAdmCargar(silencioso) {
-  const a = prodAdmState(); if (a.loading) return;
-  a.loading = true; if (!silencioso) a.err = '';
-  try {
-    const [t, p] = await Promise.all([prodFetch('/admin/prod/tablero'), prodFetch('/admin/prod/productores')]);
-    a.data = t; a.prods = p.productores || [];
-  } catch (e) { a.err = e.message; }
-  a.loading = false;
-  if (STATE.view === 'produccion') render();
+// ---------- Productores (Gaspar): lista para asignar en Pedidos + alta / contraseña / baja en Admin ----------
+// Gaspar (15-oct): "no crees una nueva página, que yo los pueda asignar desde acá (Pedidos)". La asignación, el estado
+// y el pago de la producción viven en la tabla de Pedidos (columna Productor) y en el detalle del pedido.
+function prodAdmState() { if (!STATE.prodAdm) STATE.prodAdm = { prods: null, cargando: false, pwEdit: null }; return STATE.prodAdm; }
+async function prodCargarProductores(forzar) {
+  const a = prodAdmState();
+  if (a.cargando || (a.prods && !forzar) || !isAdmin()) return;
+  a.cargando = true;
+  try { a.prods = (await prodFetch('/admin/prod/productores')).productores || []; } catch (_) {}
+  a.cargando = false;
+  if (STATE.view === 'pedidos') {
+    const tb = document.getElementById('prod-filtros');
+    if (tb) { tb.innerHTML = prodFiltrosHtml(); tb.querySelectorAll('[data-pf]').forEach(el => { el.onchange = () => { pedidoFilter[el.dataset.pf] = el.value; renderTablePedidos(); }; }); }
+    renderTablePedidos();
+    const ds = document.querySelector('[data-ped-prod-asignar]'); if (ds) openDrawerPedido(Number(ds.dataset.pedProdAsignar));
+  }
+  if (STATE.view === 'admin') prodCfgPintar();
 }
 function prodAdmNombre(id) { const p = (prodAdmState().prods || []).find(x => x.id === id); return p ? p.nombre : id; }
+// Opciones del desplegable: los que se pueden asignar (no los dados de baja). Si el actual está de baja, igual se muestra.
 function prodAdmOpts(sel, conVacio) {
-  const prods = (prodAdmState().prods || []).filter(p => +p.activo);
-  return (conVacio ? `<option value="">— sin productor —</option>` : '') + prods.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === sel ? 'selected' : ''}>${escapeHtml(p.nombre)}</option>`).join('');
-}
-function renderProduccion() {
-  if (!isAdmin()) return `<div class="page-head"><h1>Producción</h1></div><div class="error">No autorizado.</div>`;
-  const a = prodAdmState(), d = a.data;
-  if (!d) return `<div class="page-head"><h1>Producción</h1></div><div class="muted" style="padding:30px">${a.err ? '⚠ ' + escapeHtml(a.err) : 'Cargando…'}</div>`;
-  const cs = d.carteles || [], prods = a.prods || [];
-  const sinAsignar = cs.filter(c => !c.productor_id && c.prod_estado !== 'terminado');
-  const tabs = [['sin', `Sin asignar`, sinAsignar.length]].concat(prods.filter(p => +p.activo || cs.some(c => c.productor_id === p.id && !c.prod_pagado_at)).map(p => [p.id, p.nombre, cs.filter(c => c.productor_id === p.id && !c.prod_pagado_at).length])).concat([['cfg', '⚙ Productores', null]]);
-  let cuerpo = '';
-  if (a.tab === 'cfg') cuerpo = prodAdmCfgHtml(prods);
-  else if (a.tab === 'sin') cuerpo = prodAdmSinHtml(sinAsignar);
-  else cuerpo = prodAdmProductorHtml(a.tab, cs.filter(c => c.productor_id === a.tab));
-  return `<div class="page-head"><h1>Producción</h1></div>
-    <div class="prod-tabs prod-tabs-adm">${tabs.map(([k, l, n]) => `<button class="prod-tab ${a.tab === k ? 'on' : ''}" data-prodadm-tab="${escapeHtml(k)}">${escapeHtml(l)}${n != null ? ` <span>${n}</span>` : ''}</button>`).join('')}
-      <button class="btn btn-ghost" data-prodadm-refresh style="margin-left:auto;padding:5px 10px">↻ Actualizar</button></div>
-    ${cuerpo}`;
-}
-function prodAdmFila(c, opciones) {
-  const a = prodAdmState();
-  const img = c.diseno_key ? mediaUrl(c.diseno_key) : '';
-  const est = c.prod_estado || '';
-  return `<tr data-prodadm-row="${c.id}">
-    ${opciones.check ? `<td><input type="checkbox" data-prodadm-sel="${c.id}" ${a.sel[c.id] ? 'checked' : ''}></td>` : ''}
-    <td style="width:54px">${img ? `<img src="${escapeHtml(disenoThumb(c.diseno_key, 120))}" data-prod-zoom="${escapeHtml(img)}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;cursor:zoom-in">` : '<span class="muted" style="font-size:11px">sin foto</span>'}</td>
-    <td><b>${escapeHtml(c.cartel || '')}</b><div class="muted" style="font-size:11px">N° ${escapeHtml(String(c.numero || '—'))} · ${prodFechaCorta(c.fecha)} · ${escapeHtml(prodMedidas(c))} · ${c.tramos ? c.tramos + ' tramos' : '<span style="color:#FF5566">sin tramos</span>'} · ${escapeHtml(prodMetros(c))}${(Number(c.cantidad) || 1) > 1 ? ' · x' + Number(c.cantidad) : ''}</div></td>
-    <td class="num">${c.mo_monto != null ? fmtMoney(c.mo_monto) : '<span class="muted" style="font-size:11px">falta dato</span>'}${c.mo_detalle && c.mo_detalle.en_tope ? '<div class="muted" style="font-size:10px">en el tope</div>' : ''}<div class="muted" style="font-size:10px">venta ${fmtMoney(c.precio)}</div></td>
-    ${opciones.asignar ? `<td><select data-prodadm-asignar="${c.id}" style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:5px;color:var(--fg)">${prodAdmOpts(c.productor_id, true)}</select></td>` : ''}
-    ${opciones.estado ? `<td><select data-prodadm-estado="${c.id}" style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:5px;color:var(--fg)">${['pendiente', 'en_armado', 'terminado'].map(k => `<option value="${k}" ${est === k ? 'selected' : ''}>${PROD_ESTADO_LBL[k]}</option>`).join('')}</select>${c.prod_terminado_at && est === 'terminado' ? `<div class="muted" style="font-size:10px">${prodFechaHora(c.prod_terminado_at)}</div>` : ''}</td>` : ''}
-    ${opciones.fotos ? `<td>${(c.fotos || []).map(f => `<img src="${escapeHtml(mediaUrl(f.key))}" data-prod-zoom="${escapeHtml(mediaUrl(f.key))}" style="width:40px;height:40px;object-fit:cover;border-radius:5px;margin-right:3px;cursor:zoom-in">`).join('') || '<span class="muted" style="font-size:11px">—</span>'}</td>` : ''}
-    ${opciones.pagar ? `<td>${c.prod_pagado_at ? `<span style="color:#2ECC71;font-size:12px">Pagado ${prodFechaCorta(c.prod_pagado_at)}</span> <button class="btn btn-ghost" data-prodadm-pagar="${c.id}|0" style="padding:3px 8px;font-size:11px">Deshacer</button>` : `<button class="btn btn-cyan" data-prodadm-pagar="${c.id}|1" style="padding:4px 10px;font-size:12px">Marcar pagado</button>`}</td>` : ''}
-  </tr>`;
-}
-function prodAdmSinHtml(lista) {
-  const a = prodAdmState();
-  const nSel = lista.filter(c => a.sel[c.id]).length;
-  if (!lista.length) return '<div class="muted" style="padding:24px">No hay carteles de neón sin productor. 🎉</div>';
-  return `<div class="prod-bulk"><label><input type="checkbox" data-prodadm-todos> Todos</label>
-      <span class="muted" style="font-size:12px">${nSel} elegidos</span>
-      <select data-prodadm-bulk-prod style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:5px;color:var(--fg)">${prodAdmOpts('', false)}</select>
-      <button class="btn btn-cyan" data-prodadm-bulk-asignar ${nSel ? '' : 'disabled'} style="padding:5px 12px">Asignar elegidos</button></div>
-    <div class="table-wrap"><table class="t"><thead><tr><th></th><th></th><th>Cartel</th><th>Mano de obra</th><th>Productor</th></tr></thead>
-    <tbody>${lista.map(c => prodAdmFila(c, { check: true, asignar: true })).join('')}</tbody></table></div>`;
-}
-function prodAdmProductorHtml(pid, lista) {
-  const a = prodAdmState();
-  const curso = lista.filter(c => c.prod_estado !== 'terminado' && !c.prod_pagado_at);
-  const term = lista.filter(c => c.prod_estado === 'terminado' && !c.prod_pagado_at);
-  const pag = lista.filter(c => c.prod_pagado_at).sort((x, y) => String(y.prod_pagado_at).localeCompare(String(x.prod_pagado_at)));
-  const suma = arr => arr.reduce((s, c) => s + (Number(c.mo_monto) || 0), 0);
-  const selTerm = term.filter(c => a.sel[c.id]);
-  return `<div class="prod-resumen" style="max-width:720px">
-      <div><div class="k">En curso</div><div class="v">${curso.length} · ${fmtMoney(suma(curso))}</div></div>
-      <div><div class="k">Terminados sin pagar</div><div class="v" style="color:#FFB020">${term.length} · ${fmtMoney(suma(term))}</div></div>
-      <div><div class="k">Pagados (recientes)</div><div class="v">${pag.length} · ${fmtMoney(suma(pag))}</div></div>
-    </div>
-    <h3 class="prod-h3">Terminados sin pagar</h3>
-    ${term.length ? `<div class="prod-bulk"><label><input type="checkbox" data-prodadm-todos-term> Todos</label><span class="muted" style="font-size:12px">${selTerm.length} elegidos · ${fmtMoney(suma(selTerm))}</span><button class="btn btn-cyan" data-prodadm-bulk-pagar ${selTerm.length ? '' : 'disabled'} style="padding:5px 12px">Marcar elegidos como pagados</button></div>
-    <div class="table-wrap"><table class="t"><thead><tr><th></th><th></th><th>Cartel</th><th>Mano de obra</th><th>Estado</th><th>Fotos</th><th>Pago</th></tr></thead><tbody>${term.map(c => prodAdmFila(c, { check: true, estado: true, fotos: true, pagar: true })).join('')}</tbody></table></div>` : '<div class="muted" style="padding:10px 0">Nada para pagar.</div>'}
-    <h3 class="prod-h3">En curso</h3>
-    ${curso.length ? `<div class="table-wrap"><table class="t"><thead><tr><th></th><th>Cartel</th><th>Mano de obra</th><th>Productor</th><th>Estado</th><th>Fotos</th></tr></thead><tbody>${curso.map(c => prodAdmFila(c, { asignar: true, estado: true, fotos: true })).join('')}</tbody></table></div>` : '<div class="muted" style="padding:10px 0">No tiene carteles en curso.</div>'}
-    <h3 class="prod-h3">Pagados</h3>
-    ${pag.length ? `<div class="table-wrap"><table class="t"><thead><tr><th></th><th>Cartel</th><th>Mano de obra</th><th>Fotos</th><th>Pago</th></tr></thead><tbody>${pag.map(c => prodAdmFila(c, { fotos: true, pagar: true })).join('')}</tbody></table></div>` : '<div class="muted" style="padding:10px 0">—</div>'}`;
+  const prods = (prodAdmState().prods || []).filter(p => !+p.baja || p.id === sel);
+  return (conVacio ? `<option value="">—</option>` : '') + prods.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === sel ? 'selected' : ''}>${escapeHtml(p.nombre)}</option>`).join('');
 }
 function prodAdmCfgHtml(prods) {
-  const inp = 'background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:7px 9px;color:var(--fg)';
-  return `<div class="card" style="padding:14px;max-width:760px">
-      <div style="font-weight:700;margin-bottom:4px">Nuevo productor</div>
-      <div class="muted" style="font-size:12px;margin-bottom:10px">Entra en neoninfinitosoftware.com con este usuario y contraseña, y ve solo los carteles que le asignes.</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <input id="prodcfg-usuario" placeholder="usuario (ej: octavio)" style="${inp};width:150px">
-        <input id="prodcfg-nombre" placeholder="nombre que se ve (ej: OCTAVIO)" style="${inp};width:200px">
-        <input id="prodcfg-pw" type="password" placeholder="contraseña (8+)" autocomplete="new-password" style="${inp};width:160px">
-        <button class="btn btn-cyan" data-prodcfg-crear>Crear</button>
-      </div></div>
-    <div class="table-wrap" style="max-width:760px;margin-top:12px"><table class="t"><thead><tr><th>Usuario</th><th>Nombre</th><th>En curso</th><th>Sin pagar</th><th></th></tr></thead><tbody>
-      ${prods.length ? prods.map(p => `<tr><td>${escapeHtml(p.id)}${+p.activo ? '' : ' <span class="muted" style="font-size:11px">(de baja)</span>'}</td><td>${escapeHtml(p.nombre)}</td><td class="num">${p.en_curso || 0}</td><td class="num">${p.sin_pagar || 0} · ${fmtMoney(p.adeudado || 0)}</td>
-        <td style="white-space:nowrap">${prodAdmState().pwEdit === p.id ? `<input id="prodcfg-pw-edit" type="password" placeholder="nueva contraseña (8+)" autocomplete="new-password" style="${inp};width:170px"> <button class="btn btn-cyan" data-prodcfg-pw-ok="${escapeHtml(p.id)}" style="padding:4px 8px;font-size:12px">Guardar</button> <button class="btn btn-ghost" data-prodcfg-pw-no style="padding:4px 8px;font-size:12px">Cancelar</button>` : `<button class="btn btn-ghost" data-prodcfg-pw="${escapeHtml(p.id)}" style="padding:4px 8px;font-size:12px">Contraseña</button>`} <button class="btn btn-ghost" data-prodcfg-activo="${escapeHtml(p.id)}|${+p.activo ? 0 : 1}" style="padding:4px 8px;font-size:12px">${+p.activo ? 'Dar de baja' : 'Reactivar'}</button></td></tr>`).join('') : '<tr class="empty-row"><td colspan="5">Todavía no hay productores. Creá el primero arriba.</td></tr>'}
-    </tbody></table></div>`;
-}
-function bindProduccion() {
   const a = prodAdmState();
-  if (!a.data && !a.loading && !a.err) prodAdmCargar();
-  const main = document.getElementById('main'); if (!main) return;
-  main.querySelectorAll('[data-prodadm-tab]').forEach(b => b.onclick = () => { a.tab = b.dataset.prodadmTab; a.sel = {}; render(); });
-  main.querySelectorAll('[data-prodadm-refresh]').forEach(b => b.onclick = () => prodAdmCargar());
-  const asignar = async (ids, pid) => {
-    try { const j = await prodFetch('/admin/prod/asignar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: ids, productor_id: pid }) });
-      a.data.carteles = prodMerge(a.data.carteles, j.carteles); a.sel = {};
-      toast(pid ? `Asignado a ${prodAdmNombre(pid)}` : 'Productor sacado'); if (j.saltados && j.saltados.length) toast(`${j.saltados.length} no se cambiaron (${j.saltados[0].motivo})`);
-      render(); prodAdmCargar(true);
-    } catch (e) { toast(e.message); }
-  };
-  const pagar = async (ids, si) => {
-    try { const j = await prodFetch('/admin/prod/pagar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: ids, pagado: !!si }) });
-      a.data.carteles = prodMerge(a.data.carteles, j.carteles); a.sel = {}; toast(si ? 'Marcado como pagado' : 'Pago deshecho'); render(); prodAdmCargar(true);
-    } catch (e) { toast(e.message); }
-  };
-  main.querySelectorAll('[data-prodadm-asignar]').forEach(s => s.onchange = () => asignar([Number(s.dataset.prodadmAsignar)], s.value));
-  main.querySelectorAll('[data-prodadm-sel]').forEach(c => c.onchange = () => { a.sel[Number(c.dataset.prodadmSel)] = c.checked; render(); });
-  const todos = (sel, filtro) => main.querySelectorAll(sel).forEach(c => c.onchange = () => { (a.data.carteles || []).filter(filtro).forEach(x => { a.sel[x.id] = c.checked; }); render(); });
-  todos('[data-prodadm-todos]', x => !x.productor_id && x.prod_estado !== 'terminado');
-  todos('[data-prodadm-todos-term]', x => x.productor_id === a.tab && x.prod_estado === 'terminado' && !x.prod_pagado_at);
-  main.querySelectorAll('[data-prodadm-bulk-asignar]').forEach(b => b.onclick = () => {
-    const pid = (main.querySelector('[data-prodadm-bulk-prod]') || {}).value; if (!pid) { toast('Elegí el productor'); return; }
-    const ids = Object.keys(a.sel).filter(k => a.sel[k]).map(Number); if (ids.length) asignar(ids, pid);
-  });
-  main.querySelectorAll('[data-prodadm-bulk-pagar]').forEach(b => b.onclick = async () => {
-    const ids = (a.data.carteles || []).filter(x => a.sel[x.id] && x.productor_id === a.tab && x.prod_estado === 'terminado' && !x.prod_pagado_at).map(x => x.id);
-    if (!ids.length) return;
-    const tot = (a.data.carteles || []).filter(x => ids.includes(x.id)).reduce((s, x) => s + (Number(x.mo_monto) || 0), 0);
-    if (await showConfirm(`¿Marcar ${ids.length} cartel${ids.length > 1 ? 'es' : ''} como pagado${ids.length > 1 ? 's' : ''} a ${prodAdmNombre(a.tab)}? Total ${fmtMoney(tot)}.`, { title: 'Pago de producción', confirmLabel: 'Sí, pagados', cancelLabel: 'Cancelar' })) pagar(ids, true);
-  });
-  main.querySelectorAll('[data-prodadm-pagar]').forEach(b => b.onclick = () => { const [id, si] = b.dataset.prodadmPagar.split('|'); pagar([Number(id)], si === '1'); });
-  main.querySelectorAll('[data-prodadm-estado]').forEach(s => s.onchange = async () => {
-    const id = Number(s.dataset.prodadmEstado), est = s.value, c = (a.data.carteles || []).find(x => x.id === id) || {};
-    let forzar = false;
-    if (est === 'terminado' && (c.fotos || []).length < (c.fotos_requeridas || 1)) {
-      if (!(await showConfirm('No tiene la foto del cartel terminado. ¿Marcarlo igual?', { title: 'Sin foto', confirmLabel: 'Marcar igual', cancelLabel: 'Cancelar', variant: 'warn' }))) { render(); return; }
-      forzar = true;
-    }
-    try { const j = await prodFetch('/admin/prod/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_id: id, estado: est, forzar }) }); if (j.carteles) a.data.carteles = prodMerge(a.data.carteles, j.carteles); render(); }
-    catch (e) { toast(e.message); render(); }
-  });
-  main.querySelectorAll('[data-prod-zoom]').forEach(el => el.onclick = (ev) => { ev.stopPropagation(); try { openImgLightbox(el.dataset.prodZoom); } catch (_) {} });
-  // Productores: alta, contraseña y baja.
-  const crear = main.querySelector('[data-prodcfg-crear]');
+  const inp = 'background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:7px 9px;color:var(--fg)';
+  const estado = p => +p.extra ? '<span class="muted" style="font-size:11px">usa su usuario de siempre</span>'
+    : +p.baja ? '<span style="color:#FF5566;font-size:11px">de baja</span>'
+    : !+p.tiene_pw ? '<span style="color:#FFB020;font-size:11px">sin contraseña: todavía no puede entrar</span>'
+    : '<span style="color:#2ECC71;font-size:11px">puede entrar</span>';
+  return `<div class="table-wrap"><table class="t"><thead><tr><th>Usuario</th><th>Nombre</th><th>Estado</th><th>En curso</th><th>Terminados sin pagar</th><th></th></tr></thead><tbody>
+      ${prods.length ? prods.map(p => `<tr><td>${escapeHtml(p.id)}</td><td>${escapeHtml(p.nombre)}</td><td>${estado(p)}</td><td class="num">${p.en_curso || 0}</td><td class="num">${p.sin_pagar || 0} · ${fmtMoney(p.adeudado || 0)}</td>
+        <td style="white-space:nowrap">${+p.extra ? '' : (a.pwEdit === p.id
+          ? `<input id="prodcfg-pw-edit" type="password" placeholder="contraseña (8+)" autocomplete="new-password" style="${inp};width:160px"> <button class="btn btn-cyan" data-prodcfg-pw-ok="${escapeHtml(p.id)}" style="padding:4px 8px;font-size:12px">Guardar</button> <button class="btn btn-ghost" data-prodcfg-pw-no style="padding:4px 8px;font-size:12px">Cancelar</button>`
+          : `<button class="btn btn-ghost" data-prodcfg-pw="${escapeHtml(p.id)}" style="padding:4px 8px;font-size:12px">${+p.tiene_pw ? 'Cambiar contraseña' : 'Poner contraseña'}</button>${+p.tiene_pw ? ` <button class="btn btn-ghost" data-prodcfg-activo="${escapeHtml(p.id)}|${+p.activo ? 0 : 1}" style="padding:4px 8px;font-size:12px">${+p.activo ? 'Dar de baja' : 'Reactivar'}</button>` : ''}`)}</td></tr>`).join('') : '<tr class="empty-row"><td colspan="6">Todavía no hay productores.</td></tr>'}
+    </tbody></table></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center">
+      <span class="muted" style="font-size:12px">Nuevo productor:</span>
+      <input id="prodcfg-usuario" placeholder="usuario (ej: octavio)" style="${inp};width:150px">
+      <input id="prodcfg-nombre" placeholder="nombre (ej: OCTAVIO)" style="${inp};width:170px">
+      <input id="prodcfg-pw" type="password" placeholder="contraseña (8+)" autocomplete="new-password" style="${inp};width:150px">
+      <button class="btn btn-cyan" data-prodcfg-crear>Crear</button>
+    </div>`;
+}
+// Tarjeta "Productores" de Admin: se pinta sola en #prodcfg-panel.
+function prodCfgPintar() {
+  const el = document.getElementById('prodcfg-panel'); if (!el) return;
+  const a = prodAdmState();
+  el.innerHTML = a.prods ? prodAdmCfgHtml(a.prods) : '<div class="loading"><div class="spinner"></div></div>';
+  bindProdCfg(el);
+}
+function bindProdCfg(root) {
+  const a = prodAdmState();
+  const crear = root.querySelector('[data-prodcfg-crear]');
   if (crear) crear.onclick = async () => {
     const usuario = (document.getElementById('prodcfg-usuario') || {}).value || '', nombre = (document.getElementById('prodcfg-nombre') || {}).value || '', password = (document.getElementById('prodcfg-pw') || {}).value || '';
-    try { await prodFetch('/admin/prod/productores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usuario, nombre, password }) }); toast('Productor creado'); prodAdmCargar(); }
+    try { await prodFetch('/admin/prod/productores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usuario, nombre, password }) }); toast('Productor creado'); prodCargarProductores(true); }
     catch (e) { toast(e.message); }
   };
-  main.querySelectorAll('[data-prodcfg-pw]').forEach(b => b.onclick = () => { a.pwEdit = b.dataset.prodcfgPw; render(); setTimeout(() => { const i = document.getElementById('prodcfg-pw-edit'); if (i) i.focus(); }, 30); });
-  main.querySelectorAll('[data-prodcfg-pw-no]').forEach(b => b.onclick = () => { a.pwEdit = null; render(); });
-  main.querySelectorAll('[data-prodcfg-pw-ok]').forEach(b => b.onclick = async () => {
+  root.querySelectorAll('[data-prodcfg-pw]').forEach(b => b.onclick = () => { a.pwEdit = b.dataset.prodcfgPw; prodCfgPintar(); setTimeout(() => { const i = document.getElementById('prodcfg-pw-edit'); if (i) i.focus(); }, 30); });
+  root.querySelectorAll('[data-prodcfg-pw-no]').forEach(b => b.onclick = () => { a.pwEdit = null; prodCfgPintar(); });
+  root.querySelectorAll('[data-prodcfg-pw-ok]').forEach(b => b.onclick = async () => {
     const id = b.dataset.prodcfgPwOk, pw = (document.getElementById('prodcfg-pw-edit') || {}).value || '';
-    try { await prodFetch('/admin/prod/productores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usuario: id, nombre: prodAdmNombre(id), password: pw }) }); a.pwEdit = null; toast('Contraseña cambiada (se cerraron sus sesiones)'); render(); }
+    try { await prodFetch('/admin/prod/productores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usuario: id, nombre: prodAdmNombre(id), password: pw }) }); a.pwEdit = null; toast('Listo: ya puede entrar con esa contraseña'); prodCargarProductores(true); }
     catch (e) { toast(e.message); }
   });
-  main.querySelectorAll('[data-prodcfg-activo]').forEach(b => b.onclick = async () => {
+  root.querySelectorAll('[data-prodcfg-activo]').forEach(b => b.onclick = async () => {
     const [id, act] = b.dataset.prodcfgActivo.split('|');
-    if (act === '0' && !(await showConfirm(`¿Dar de baja a ${prodAdmNombre(id)}? No va a poder entrar más.`, { title: 'Productor', confirmLabel: 'Dar de baja', cancelLabel: 'Cancelar', variant: 'warn' }))) return;
-    try { await prodFetch('/admin/prod/productores/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usuario: id, activo: act === '1' }) }); prodAdmCargar(); }
+    if (act === '0' && !(await showConfirm(`¿Dar de baja a ${prodAdmNombre(id)}? No va a poder entrar más ni se le pueden asignar carteles.`, { title: 'Productor', confirmLabel: 'Dar de baja', cancelLabel: 'Cancelar', variant: 'warn' }))) return;
+    try { await prodFetch('/admin/prod/productores/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usuario: id, activo: act === '1' }) }); prodCargarProductores(true); }
     catch (e) { toast(e.message); }
   });
 }
 
-// ---------- En PEDIDOS: estado de producción para todos + asignar (admin) ----------
+// ---------- En PEDIDOS: columna Productor (admin), estado de producción para todos y pago de la producción ----------
+// Pastilla en la celda del cartel: SOLO para vendedores (el admin tiene la columna Productor).
 function prodPillPedido(p) {
-  if (!p || p.esCorporeo) return '';
+  if (!p || p.esCorporeo || isAdmin()) return '';
   const est = p.prodEstado || '';
-  // "sin productor" solo en los que siguen en producción y son recientes (no en los cientos de pedidos viejos).
-  const _enProd = /produc/i.test(p.estadoPedido || 'En produccion') && p.fecha instanceof Date && (Date.now() - p.fecha.getTime()) < 45 * 864e5;
-  if (!est && !p.productorId) return (isAdmin() && _enProd) ? ' <span class="prod-mini" style="color:#9aa0b4;border-color:#9aa0b455">sin productor</span>' : '';
+  if (!est && !p.productorId) return '';
   const col = PROD_ESTADO_COLOR[est] || '#9aa0b4';
-  return ` <span class="prod-mini" title="Producción${p.productorNombre ? ': ' + escapeHtml(p.productorNombre) : ''}" style="color:${col};border-color:${col}66">${escapeHtml(PROD_ESTADO_LBL[est] || 'Asignado')}${p.productorNombre ? ' · ' + escapeHtml(p.productorNombre) : ''}</span>`;
+  return ` <span class="prod-mini" style="color:${col};border-color:${col}66">${escapeHtml(PROD_ESTADO_LBL[est] || 'Asignado')}${p.productorNombre ? ' · ' + escapeHtml(p.productorNombre) : ''}</span>`;
 }
+// Celda de la columna Productor (admin): desplegable para asignar + estado + mano de obra + pagar.
+function prodCeldaPedido(p) {
+  if (p.esCorporeo) return '<span class="muted" style="font-size:11px">—</span>';
+  const a = prodAdmState(), est = p.prodEstado || '', col = PROD_ESTADO_COLOR[est] || '#9aa0b4';
+  const sel = `<select class="prod-sel" data-ped-prod="${p.idx}" ${p.prodPagadoAt ? 'disabled title="Ya está pagado"' : ''}>${a.prods ? prodAdmOpts(p.productorId || '', true) : `<option>${escapeHtml(p.productorNombre || '—')}</option>`}</select>`;
+  if (!p.productorId) return sel;
+  const mo = p.moMonto != null ? fmtMoney(p.moMonto) : '';
+  const pago = p.prodPagadoAt ? ' · <span style="color:#2ECC71">pagado ✓</span>' : (est === 'terminado' ? ` · <button class="prod-pagar" data-ped-prod-pagar="${p.idx}">Pagar</button>` : '');
+  return sel + `<div class="prod-celda-linea"><span style="color:${col}">${escapeHtml(PROD_ESTADO_LBL[est] || 'Asignado')}</span>${mo ? ' · ' + mo : ''}${pago}</div>`;
+}
+// Filtros de producción del toolbar (admin): productor y estado de producción.
+function prodFiltrosHtml() {
+  if (!isAdmin()) return '';
+  const a = prodAdmState(), f = pedidoFilter;
+  const opts = (a.prods || []).map(p => `<option value="${escapeHtml(p.id)}" ${f.prod === p.id ? 'selected' : ''}>${escapeHtml(p.nombre)}</option>`).join('');
+  return `<select data-pf="prod"><option value="">Productor: todos</option><option value="__sin" ${f.prod === '__sin' ? 'selected' : ''}>Sin productor</option>${opts}</select>
+        <select data-pf="prodEstado"><option value="">Producción: todas</option>${[['pendiente', 'Pendiente'], ['en_armado', 'En armado'], ['sin_pagar', 'Terminado sin pagar'], ['pagado', 'Pagado']].map(([k, l]) => `<option value="${k}" ${f.prodEstado === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+}
+function prodFiltroPasa(p) {
+  const f = pedidoFilter;
+  if (!f.prod && !f.prodEstado) return true;
+  if (p.esCorporeo) return false;
+  if (f.prod === '__sin') { if (p.productorId) return false; }
+  else if (f.prod && p.productorId !== f.prod) return false;
+  if (f.prodEstado) {
+    const est = p.prodEstado || '';
+    if (f.prodEstado === 'sin_pagar') return est === 'terminado' && !p.prodPagadoAt;
+    if (f.prodEstado === 'pagado') return !!p.prodPagadoAt;
+    return est === f.prodEstado && !p.prodPagadoAt;
+  }
+  return true;
+}
+// Resumen de plata de lo filtrado (admin, con un filtro de producción puesto): lo que debés y lo pagado.
+function prodResumenFiltro(lista) {
+  const el = document.getElementById('prod-resumen-filtro'); if (!el) return;
+  if (!isAdmin() || (!pedidoFilter.prod && !pedidoFilter.prodEstado)) { el.innerHTML = ''; return; }
+  const suma = arr => arr.reduce((s, p) => s + (Number(p.moMonto) || 0), 0);
+  const debe = lista.filter(p => p.productorId && p.prodEstado === 'terminado' && !p.prodPagadoAt);
+  const curso = lista.filter(p => p.productorId && p.prodEstado !== 'terminado' && !p.prodPagadoAt);
+  const pag = lista.filter(p => p.prodPagadoAt);
+  const unProd = pedidoFilter.prod && pedidoFilter.prod !== '__sin';
+  el.innerHTML = `<div class="prod-resumen-filtro">Terminados sin pagar: <b>${debe.length} · ${fmtMoney(suma(debe))}</b>${unProd && debe.length > 1 ? ` <button class="btn btn-cyan" data-ped-prod-pagar-todos style="padding:3px 10px;font-size:12px;margin-left:6px">Marcar los ${debe.length} como pagados</button>` : ''}
+    <span class="muted">· En curso: ${curso.length} · ${fmtMoney(suma(curso))} · Pagados: ${pag.length} · ${fmtMoney(suma(pag))}</span></div>`;
+  const bt = el.querySelector('[data-ped-prod-pagar-todos]');
+  if (bt) bt.onclick = () => prodPagarPedidos(debe.map(p => p.idx), true);
+}
+// Pasa a STATE.pedidos lo que devolvió el worker de producción (asignar / pagar).
+function prodAplicarAPedidos(carteles) {
+  for (const c of (carteles || [])) {
+    const x = STATE.pedidos.find(y => y.idx === c.id); if (!x) continue;
+    x.productorId = c.productor_id || ''; x.productorNombre = c.productor_id ? (c.productor || c.productor_id) : '';
+    x.prodEstado = c.prod_estado || ''; x.prodTerminadoAt = c.prod_terminado_at || ''; x.prodPagadoAt = c.prod_pagado_at || '';
+    x.moMonto = (c.mo_monto == null || c.mo_monto === '') ? null : Number(c.mo_monto); x.moRegla = c.mo_regla || '';
+    if (Array.isArray(c.fotos)) x.prodFotos = c.fotos.map(f => f.key);
+  }
+}
+async function prodAsignarPedido(idx, pid) {
+  try {
+    const j = await prodFetch('/admin/prod/asignar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: [idx], productor_id: pid }) });
+    prodAplicarAPedidos(j.carteles);
+    if (j.saltados && j.saltados.length) toast('No se cambió: ' + j.saltados[0].motivo);
+    else toast(pid ? 'Asignado a ' + prodAdmNombre(pid) : 'Productor sacado');
+  } catch (e) { toast(e.message); }
+  if (STATE.view === 'pedidos') renderTablePedidos();
+}
+async function prodPagarPedidos(ids, si) {
+  ids = (ids || []).filter(Boolean); if (!ids.length) return;
+  const sel = STATE.pedidos.filter(p => ids.includes(p.idx));
+  const tot = sel.reduce((s, p) => s + (Number(p.moMonto) || 0), 0);
+  const quien = uniq(sel.map(p => p.productorNombre).filter(Boolean)).join(', ');
+  if (si && !(await showConfirm(`¿Marcar ${ids.length === 1 ? '"' + (sel[0] || {}).cartel + '"' : ids.length + ' carteles'} como pagado${ids.length > 1 ? 's' : ''}${quien ? ' a ' + quien : ''}? ${fmtMoney(tot)}.`, { title: 'Pago de producción', confirmLabel: 'Sí, pagado', cancelLabel: 'Cancelar' }))) return;
+  try {
+    const j = await prodFetch('/admin/prod/pagar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: ids, pagado: !!si }) });
+    prodAplicarAPedidos(j.carteles);
+    toast(si ? 'Pago de producción marcado' : 'Pago deshecho');
+  } catch (e) { toast(e.message); }
+  if (STATE.view === 'pedidos') renderTablePedidos();
+}
+// Bindings de la columna Productor y del resumen (se llama al final de renderTablePedidos).
+function bindProdTabla(filtered) {
+  if (!isAdmin()) return;
+  if (!prodAdmState().prods) prodCargarProductores();
+  prodResumenFiltro(filtered);
+  const wrap = document.getElementById('table-pedidos'); if (!wrap) return;
+  wrap.querySelectorAll('[data-ped-prod]').forEach(s => { s.onclick = (e) => e.stopPropagation(); s.onchange = () => prodAsignarPedido(Number(s.dataset.pedProd), s.value); });
+  wrap.querySelectorAll('[data-ped-prod-pagar]').forEach(b => b.onclick = (e) => { e.stopPropagation(); prodPagarPedidos([Number(b.dataset.pedProdPagar)], true); });
+}
+// Sección Producción del detalle del pedido (todos ven estado y fotos; asignar y pagar solo el admin).
 function prodDrawerSection(p) {
   if (!p || p.esCorporeo) return '';
-  const est = p.prodEstado || '';
-  const fotos = p.prodFotos || [];
-  const adm = isAdmin();
-  const a = prodAdmState();
-  if (adm && !a.prods && !a._cargandoProds) { a._cargandoProds = true; prodFetch('/admin/prod/productores').then(j => { a.prods = j.productores || []; a._cargandoProds = false; if (document.getElementById('ped-prod-sel')) openDrawerPedido(p.idx); }).catch(() => { a._cargandoProds = false; }); }
+  const est = p.prodEstado || '', fotos = p.prodFotos || [], adm = isAdmin(), a = prodAdmState();
+  if (adm && !a.prods) prodCargarProductores();
   return `<div class="drawer-section"><h4>Producción</h4>
     <div style="display:flex;flex-direction:column;gap:8px;font-size:13px">
       ${adm ? `<div><label style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em">Productor</label>
-        <select id="ped-prod-sel" data-ped-prod-asignar="${p.idx}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)" ${p.prodPagadoAt ? 'disabled' : ''}>${a.prods ? prodAdmOpts(p.productorId || '', true) : `<option>${escapeHtml(p.productorNombre || 'cargando…')}</option>`}</select></div>
-        <div>Mano de obra: <b>${p.moMonto != null ? fmtMoney(p.moMonto) : '—'}</b>${p.moRegla === 'pct_mes' ? ' <span class="muted" style="font-size:11px">(% del mes, pedido anterior al cambio)</span>' : (p.moMonto == null ? ' <span class="muted" style="font-size:11px">(faltan tramos o medidas)</span>' : '')}
-          ${p.productorId ? (p.prodPagadoAt ? ` · <span style="color:#2ECC71">pagado ${prodFechaCorta(p.prodPagadoAt)}</span>` : ' · <span style="color:#FFB020">sin pagar</span>') : ''}</div>`
+        <select data-ped-prod-asignar="${p.idx}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)" ${p.prodPagadoAt ? 'disabled' : ''}>${a.prods ? prodAdmOpts(p.productorId || '', true) : `<option>${escapeHtml(p.productorNombre || '—')}</option>`}</select></div>
+        <div>Mano de obra: <b>${p.moMonto != null ? fmtMoney(p.moMonto) : '—'}</b>${p.moMonto == null ? ' <span class="muted" style="font-size:11px">(faltan tramos o medidas)</span>' : ''}</div>
+        ${p.productorId ? `<div>${p.prodPagadoAt ? `<span style="color:#2ECC71">Producción pagada el ${prodFechaCorta(p.prodPagadoAt)}</span> <button class="btn btn-ghost" data-ped-prod-despagar="${p.idx}" style="padding:3px 9px;font-size:12px">Deshacer</button>` : `<span style="color:#FFB020">Producción sin pagar</span> <button class="btn btn-cyan" data-ped-prod-pagar-d="${p.idx}" style="padding:3px 10px;font-size:12px">Marcar pagado</button>`}</div>` : ''}`
       : `<div>Productor: <b>${escapeHtml(p.productorNombre || '—')}</b></div>`}
       <div>Estado: <b style="color:${PROD_ESTADO_COLOR[est] || 'var(--fg)'}">${escapeHtml(PROD_ESTADO_LBL[est] || (p.productorId ? 'Asignado' : 'Sin asignar'))}</b>${p.prodTerminadoAt && est === 'terminado' ? ` <span class="muted" style="font-size:12px">· ${prodFechaHora(p.prodTerminadoAt)}</span>` : ''}</div>
-      ${fotos.length ? `<div><div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Fotos del cartel terminado</div><div style="display:flex;gap:6px;flex-wrap:wrap">${fotos.map(k => `<img src="${escapeHtml(mediaUrl(k))}" onclick="openImgLightbox('${escapeHtml(mediaUrl(k))}')" style="width:74px;height:74px;object-fit:cover;border-radius:8px;cursor:zoom-in">`).join('')}</div></div>` : ''}
+      ${fotos.length ? `<div><div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Fotos del cartel terminado</div><div style="display:flex;gap:6px;flex-wrap:wrap">${fotos.map(k => `<img src="${escapeHtml(mediaUrl(k))}" data-ped-prod-zoom="${escapeHtml(mediaUrl(k))}" style="width:74px;height:74px;object-fit:cover;border-radius:8px;cursor:zoom-in">`).join('')}</div></div>` : ''}
     </div></div>`;
 }
 function bindProdDrawer(p) {
   const s = document.querySelector('[data-ped-prod-asignar]');
-  if (!s) return;
-  s.onchange = async () => {
-    try {
-      const j = await prodFetch('/admin/prod/asignar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_ids: [p.idx], productor_id: s.value }) });
-      const c = (j.carteles || [])[0];
-      if (c) { const x = STATE.pedidos.find(y => y.idx === p.idx); if (x) { x.productorId = c.productor_id || ''; x.productorNombre = c.productor || ''; x.prodEstado = c.prod_estado || ''; x.moMonto = c.mo_monto; x.moRegla = c.mo_regla || ''; } }
-      toast(s.value ? 'Productor asignado' : 'Productor sacado');
-      if (STATE.view === 'pedidos') renderTablePedidos();
-      openDrawerPedido(p.idx);
-      const a = prodAdmState(); a.data = null;   // la pantalla de Producción se recarga al entrar
-    } catch (e) { toast(e.message); }
+  if (s) s.onchange = async () => { await prodAsignarPedido(p.idx, s.value); openDrawerPedido(p.idx); };
+  const pg = document.querySelector('[data-ped-prod-pagar-d]');
+  if (pg) pg.onclick = async () => {
+    if (p.prodEstado !== 'terminado' && !(await showConfirm('Este cartel todavía no está marcado como terminado. ¿Marcar la producción como pagada igual?', { title: 'Pago de producción', confirmLabel: 'Seguir', cancelLabel: 'Cancelar', variant: 'warn' }))) return;
+    await prodPagarPedidos([p.idx], true); openDrawerPedido(p.idx);
   };
+  const dp = document.querySelector('[data-ped-prod-despagar]');
+  if (dp) dp.onclick = async () => { await prodPagarPedidos([p.idx], false); openDrawerPedido(p.idx); };
+  document.querySelectorAll('[data-ped-prod-zoom]').forEach(el => el.onclick = () => { try { openImgLightbox(el.dataset.pedProdZoom); } catch (_) {} });
 }
 // Mano de obra en el front (misma fórmula que el worker: calcManoObra), para el desglose de costos del cotizador.
 function calcManoObraFront(precio, tramos, metros, ancho, alto, cant) {

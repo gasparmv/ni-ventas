@@ -4558,3 +4558,9 @@ select.lb-sel.sf-sel { max-width: 200px; }
   .sf-det, .sf-cartel-b { grid-template-columns: 1fr; }
   .sf-dato > span { flex-basis: 110px; }
 }
+
+/* Producción en la tabla de Pedidos (columna Productor, admin) */
+.prod-sel{background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-pill,999px);padding:3px 8px;font-size:12px;color:var(--fg);max-width:140px}
+.prod-celda-linea{font-size:11px;margin-top:4px;color:var(--fg-mute);white-space:nowrap}
+.prod-pagar{background:rgba(46,204,113,.14);border:1px solid rgba(46,204,113,.45);color:#6ef0a0;border-radius:999px;padding:1px 8px;font-size:11px;cursor:pointer}
+.prod-resumen-filtro{font-size:13px;padding:8px 14px;border-bottom:1px solid var(--border);background:rgba(255,176,32,.05)}

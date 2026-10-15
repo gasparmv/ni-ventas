@@ -17710,9 +17710,29 @@ async function prodCarteles(env, whereSql, args, paraProductor) {
   }
   return rows;
 }
-async function prodProductores(env, soloActivos) {
-  const rs = await env.DB.prepare(`SELECT id, nombre, activo, CASE WHEN COALESCE(password_hash,'') <> '' THEN 1 ELSE 0 END AS tiene_pw FROM users_panel WHERE rol = 'productor'${soloActivos ? ' AND activo = 1' : ''} ORDER BY nombre`).all();
-  return rs.results || [];
+// Productores = usuarios rol 'productor' + "extras" de otro rol que también arman carteles (kv 'prod_extra' =
+// [{id, nombre}], ej. Aníbal, que ya tiene su usuario de corte). Un productor sin contraseña todavía (activo=0, sin
+// hash) se puede ASIGNAR pero no puede entrar; dado de baja = activo=0 con contraseña puesta (baja=1, no se asigna).
+async function prodExtras(env) {
+  try { const v = JSON.parse((await kvGet(env, 'prod_extra', null)) || '[]'); return Array.isArray(v) ? v.filter(x => x && x.id).map(x => ({ id: prodSlug(x.id), nombre: String(x.nombre || x.id) })) : []; } catch (_) { return []; }
+}
+async function prodProductores(env) {
+  const rs = await env.DB.prepare("SELECT id, nombre, activo, CASE WHEN COALESCE(password_hash,'') <> '' THEN 1 ELSE 0 END AS tiene_pw FROM users_panel WHERE rol = 'productor' ORDER BY nombre").all();
+  const lista = (rs.results || []).map(p => ({ ...p, baja: (!+p.activo && +p.tiene_pw) ? 1 : 0, extra: 0 }));
+  for (const x of await prodExtras(env)) {
+    if (lista.some(p => p.id === x.id)) continue;
+    const u = await env.DB.prepare("SELECT activo, CASE WHEN COALESCE(password_hash,'') <> '' THEN 1 ELSE 0 END AS tiene_pw FROM users_panel WHERE id = ?").bind(x.id).first();
+    if (u && +u.activo) lista.push({ id: x.id, nombre: x.nombre, activo: 1, tiene_pw: +u.tiene_pw, baja: 0, extra: 1 });
+  }
+  return lista.sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)));
+}
+// Productor "extra" (otro rol) de esta sesión: usa los endpoints de producción para SUS carteles, sin el muro del rol productor.
+async function prodExtraDeSesion(env, userName) {
+  const slug = prodSlug(userName);
+  const x = (await prodExtras(env)).find(e => e.id === slug);
+  if (!x) return null;
+  const u = await env.DB.prepare('SELECT activo FROM users_panel WHERE id = ?').bind(slug).first().catch(() => null);
+  return (u && +u.activo) ? { id: x.id, nombre: x.nombre, activo: true, extra: true } : null;
 }
 // Cierra las sesiones abiertas de un usuario (al darlo de baja o cambiarle la contraseña).
 async function cerrarSesionesDe(env, userId) {
@@ -17749,8 +17769,8 @@ async function barrerMoDirecto(env) {
     await ensureProdSchema(env);
     const P = (await moConfig(env)) || { desde: MO_DESDE_DEFAULT };
     const rs = await env.DB.prepare(
-      "SELECT p.id, p.numero, p.cartel, p.sheet_row, p.mo_monto, p.productor_id, u.nombre AS prod_nombre, k.v AS kv FROM pedidos p " +
-      "LEFT JOIN users_panel u ON u.id = p.productor_id AND u.rol = 'productor' LEFT JOIN kv_cache k ON k.k = 'pedido_mo:' || p.id " +
+      "SELECT p.id, p.numero, p.cartel, p.sheet_row, p.mo_monto, p.productor_id, CASE WHEN COALESCE(p.productor_id,'') <> '' THEN p.productor ELSE '' END AS prod_nombre, k.v AS kv FROM pedidos p " +
+      "LEFT JOIN kv_cache k ON k.k = 'pedido_mo:' || p.id " +
       "WHERE p.es_corporeo = 0 AND p.fecha >= ? AND p.sheet_row > 1 AND p.mirror_dirty = 0 AND (p.mo_monto IS NOT NULL OR COALESCE(p.productor_id,'') <> '') ORDER BY p.id DESC LIMIT 400"
     ).bind(P.desde).all();
     const items = [];
@@ -26502,8 +26522,8 @@ const handler = {
       // (alta de productores, asignar, pagar) exige rol admin. Ver productorDeSesion / calcManoObra.
       if (path.startsWith('/admin/prod/')) {
         if (!(await ensureProdSchema(env))) return json({ error: 'db' }, 500);
-        const _pzYo = await productorDeSesion(env, session.user);
-        const _rolP = _pzYo ? 'productor' : await getSessionRole(env, session.user);
+        const _pzYo = (await productorDeSesion(env, session.user)) || (await prodExtraDeSesion(env, session.user));
+        const _rolP = (_pzYo && !_pzYo.extra) ? 'productor' : await getSessionRole(env, session.user);
         const _esAdm = _rolP === 'admin';
         const _quien = String(session.user || '');
         const _soloAdmin = () => _esAdm ? null : json({ error: 'forbidden' }, 403);
@@ -26518,7 +26538,7 @@ const handler = {
         // GET /admin/prod/productores → productores (admin) con lo que tienen asignado, terminado y adeudado.
         if (request.method === 'GET' && path === '/admin/prod/productores') {
           const no = _soloAdmin(); if (no) return no;
-          const prods = await prodProductores(env, false);
+          const prods = await prodProductores(env);
           const agg = (await env.DB.prepare(
             "SELECT productor_id AS id, SUM(CASE WHEN prod_estado <> 'terminado' THEN 1 ELSE 0 END) AS en_curso, " +
             "SUM(CASE WHEN prod_estado = 'terminado' AND prod_pagado_at IS NULL THEN 1 ELSE 0 END) AS sin_pagar, " +
@@ -26559,8 +26579,11 @@ const handler = {
           let body; try { body = await request.json(); } catch { body = {}; }
           const id = prodSlug(body.usuario).replace(/\s+/g, '');
           const act = body.activo ? 1 : 0;
-          const r = await env.DB.prepare("UPDATE users_panel SET activo = ? WHERE id = ? AND rol = 'productor'").bind(act, id).run();
-          if (!(r && r.meta && r.meta.changes)) return json({ error: 'productor no encontrado' }, 404);
+          const ex = await env.DB.prepare("SELECT COALESCE(password_hash,'') AS h FROM users_panel WHERE id = ? AND rol = 'productor'").bind(id).first();
+          if (!ex) return json({ error: 'productor no encontrado' }, 404);
+          // Activo sin contraseña = entra sin contraseña: para reactivar hay que ponerle una.
+          if (act && !ex.h) return json({ error: 'primero ponele una contraseña (así se activa)' }, 400);
+          await env.DB.prepare("UPDATE users_panel SET activo = ? WHERE id = ? AND rol = 'productor'").bind(act, id).run();
           _prodSesCache.delete(id);
           if (!act) await cerrarSesionesDe(env, id);
           return json({ ok: true });
@@ -26573,7 +26596,7 @@ const handler = {
           const carteles = await prodCarteles(env,
             "WHERE p.es_corporeo = 0 AND ((p.fecha >= ? AND (COALESCE(p.productor_id,'') <> '' OR COALESCE(p.estado_pedido,'') NOT IN ('Entregado','para enviar'))) OR (COALESCE(p.productor_id,'') <> '' AND p.prod_pagado_at IS NULL)) ORDER BY p.fecha DESC, p.id DESC LIMIT 600",
             [desde], false);
-          return json({ carteles, productores: await prodProductores(env, false) });
+          return json({ carteles, productores: await prodProductores(env) });
         }
         // POST /admin/prod/asignar {pedido_ids:[], productor_id} → asigna (o saca, con '') el productor de esos carteles (admin).
         if (request.method === 'POST' && path === '/admin/prod/asignar') {
@@ -26584,8 +26607,8 @@ const handler = {
           if (!ids.length) return json({ error: 'faltan los carteles' }, 400);
           let prod = null;
           if (pid) {
-            prod = await env.DB.prepare("SELECT id, nombre, activo FROM users_panel WHERE id = ? AND rol = 'productor'").bind(pid).first();
-            if (!prod || !+prod.activo) return json({ error: 'ese productor no existe o está dado de baja' }, 400);
+            prod = (await prodProductores(env)).find(p => p.id === pid) || null;
+            if (!prod || prod.baja) return json({ error: 'ese productor no existe o está dado de baja' }, 400);
           }
           const rows = (await env.DB.prepare(`SELECT id, productor_id, prod_estado, prod_pagado_at, es_corporeo FROM pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
           const now = new Date().toISOString(), stmts = [], log = [], saltados = [];
@@ -26624,7 +26647,7 @@ const handler = {
           if (!quien) return json({ error: _esAdm ? 'falta ?productor=' : 'forbidden' }, _esAdm ? 400 : 403);
           const hace60 = new Date(Date.now() - 60 * 864e5).toISOString();
           const carteles = await prodCarteles(env, "WHERE p.productor_id = ? AND p.es_corporeo = 0 AND (p.prod_pagado_at IS NULL OR p.prod_pagado_at >= ?) ORDER BY CASE p.prod_estado WHEN 'en_armado' THEN 0 WHEN 'pendiente' THEN 1 ELSE 2 END, p.fecha, p.id", [quien, hace60], true);
-          const prod = _pzYo || (await env.DB.prepare("SELECT id, nombre FROM users_panel WHERE id = ? AND rol = 'productor'").bind(quien).first());
+          const prod = _pzYo || (await prodProductores(env)).find(p => p.id === quien) || null;
           return json({ productor: prod ? { id: prod.id, nombre: prod.nombre } : { id: quien, nombre: quien }, carteles });
         }
         // POST /admin/prod/estado {pedido_id, estado, forzar?} → el productor pone el estado de SU cartel. 'terminado'
