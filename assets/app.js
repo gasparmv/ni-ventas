@@ -2235,7 +2235,21 @@ function mapPedidoFromD1(row) {
     // Corpóreo cargado con "la subo después" ('' en la base; NULL = pedido anterior a la foto obligatoria).
     fotoDisenoPendiente: row.foto_diseno_key === '',
     corteEstado: row.corte_estado || '',
-    corteId: row.corte_id || null
+    corteId: row.corte_id || null,
+    // PAGO (oct-2026): nivel PEDIDO (se repite en cada fila-cartel). pagado = COBRO 1 (la seña); el 2do pago va
+    // aparte en cobro2 (no se suma a pagado). Solo keys de R2 / textos: esto va al cache de localStorage.
+    caja: row.caja || '',
+    pagoMetodo: row.pago_metodo || '',
+    comprobanteKey: row.comprobante_key || '',
+    comprobanteWamid: row.comprobante_wamid || '',
+    cobro2: Number(row.cobro2) || 0,
+    caja2: row.caja2 || '',
+    pago2Metodo: row.pago2_metodo || '',
+    comprobante2Key: row.comprobante2_key || '',
+    comprobante2Wamid: row.comprobante2_wamid || '',
+    cobro2At: row.cobro2_at || '',
+    cajaSync: row.caja_sync == null ? '' : String(row.caja_sync),
+    cajaSyncErr: row.caja_sync_err || ''
   };
 }
 
@@ -9674,7 +9688,7 @@ function renderTablePedidos() {
               <td>${dimerPillHtml(p.dimmer)}</td>
               <td title="${escapeHtml(p.envio||'')}"><span class="muted" style="font-size:12px">${trunc(p.envio,16)}</span></td>
               <td title="${escapeHtml(p.aclaracion||'')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion,16)}</span></td>
-              <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pago',p.estadoPago,PAGO_OPTS_TABLE)}</td>
+              <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pago',p.estadoPago,PAGO_OPTS_TABLE)}${pagoCajaMini(p)}</td>
               <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pedido',p.estadoPedido,PED_OPTS_TABLE)}</td>
               <td><span class="muted" style="font-size:12px">${escapeHtml(p.canalAd||'—')}</span></td>
               ${_pedAdmin ? `<td>${loaderCell(p)}</td>` : ''}
@@ -9741,6 +9755,18 @@ function tcPedidoBtn(p){
 // abrir el drawer (a nivel pedido: el worker lo aplica a los carteles del mismo pedido — ver pedidoHermanos).
 const PAGO_OPTS_TABLE = ['1er pago','2do pago'];
 const PED_OPTS_TABLE = ['En produccion','para enviar','Entregado'];
+// Cajas a las que transfiere el cliente (casing exacto: es el valor de la col Caja de la planilla). El pago en
+// efectivo va a la caja 'Efectivo' (fija, no se elige). Ver "PAGO DEL PEDIDO" más abajo.
+const PAGO_CAJAS = ['Melina', 'Gaspar', 'Favio', 'Bruno'];
+const PM_INP = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;color:var(--fg);font-size:13px';
+const PM_LBL = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
+// Caja del cobro debajo del select de pago de la tabla: "Melina", o "Melina → Bruno" si el saldo fue a otra caja.
+function pagoCajaMini(p) {
+  const a = (p && p.caja) || '', b = (p && p.caja2) || '';
+  if (!a && !b) return '';
+  const txt = (a || '?') + (b && b !== a ? ' → ' + b : '');
+  return `<div title="Caja del cobro${b ? ' (seña → saldo)' : ''}" style="font-size:10px;color:var(--fg-subtle);margin-top:2px;white-space:nowrap">${escapeHtml(txt)}</div>`;
+}
 function inlinePedidoSelect(idx, field, current, opts) {
   const col = PILL_HEX[(field === 'estado_pago' ? pagoColor(current) : pedidoEstadoColor(current))] || PILL_HEX.muted;
   const options = uniq([current, ...opts].filter(Boolean)).map(o => `<option style="background:var(--ink-100);color:var(--fg)" ${current===o?'selected':''}>${escapeHtml(o)}</option>`).join('');
@@ -9777,7 +9803,7 @@ function pedidoModalTotal() {
 }
 function openCargarPedidoModal() {
   if (!canCotizar()) return;
-  STATE.pedidoModal = { numero: suggestProximoNumero(), plataforma:'WPP', telefono:'', estadoPago:'1er pago', pagado:'', ad:'', sourceId:'', carteles:[nuevoCartelPedido()] };
+  STATE.pedidoModal = { numero: suggestProximoNumero(), plataforma:'WPP', telefono:'', estadoPago:'1er pago', pagado:'', ad:'', sourceId:'', carteles:[nuevoCartelPedido()], ...pmPagoDefaults() };
   STATE._pmBriefsTel = {};
   STATE.pedidoModalOpen = true;
   STATE.pedidoModalSaving = false;
@@ -9835,7 +9861,10 @@ function parseOcToPedido(body, phone, channel, igId) {
   const contacto = plataforma === 'IG'
     ? String(igId || phone || '')
     : (phone ? String(phone) : '');
-  return { numero, plataforma, telefono: contacto, estadoPago: '1er pago', pagado: senaN ? String(senaN) : '', ad: '', sourceId: '', carteles };
+  // Pago: caja/método/comprobante arrancan vacíos (se sugieren del chat). La seña de la OC queda marcada como
+  // fuente 'oc': si después se elige un comprobante con monto leído por OCR, ese monto la reemplaza.
+  return { numero, plataforma, telefono: contacto, estadoPago: '1er pago', pagado: senaN ? String(senaN) : '', ad: '', sourceId: '', carteles,
+           ...pmPagoDefaults(), _pagadoFuente: senaN ? 'oc' : '' };
 }
 // Trae el brief del cliente por NOMBRE del diseño/cartel. Es la vía que funciona SIEMPRE
 // (incl. pedidos por Instagram, que no tienen teléfono WA, y briefs sin cliente_wa_id): el
@@ -9942,7 +9971,8 @@ function pmAutoBrief() {
   }).catch(() => {});
 }
 // Abre el modal de cargar pedido pre-llenado desde una OC del chat (botón en el bubble).
-function cargarPedidoDesdeOC(wamid) {
+// opts.comp = {key, wamid, tipo, nombre}: comprobante ya elegido (menú "Usar como comprobante" de un mensaje).
+function cargarPedidoDesdeOC(wamid, opts) {
   if (!canCotizar()) return;
   const m = (chatState.messages || []).find(x => x.wamid === wamid);
   if (!m || !m.body) { toast('No pude leer la OC'); return; }
@@ -9956,6 +9986,7 @@ function cargarPedidoDesdeOC(wamid) {
   // IGSID numérico del cliente (m.phone en IG) → sirve para trazar el ad de IG (wa_ad_attributions
   // guarda la atribución de IG con phone=IGSID). El @usuario del campo NO sirve para eso.
   STATE.pedidoModal._igsid = channel === 'ig' ? String(m.phone || '') : '';
+  if (opts && opts.comp) pmPreseleccionarComp(STATE.pedidoModal, opts.comp);
   STATE._pmBriefsTel = {};
   STATE.pedidoModalSaving = false;
   STATE.pedidoModalOpen = true;
@@ -9991,6 +10022,9 @@ function pmRecalc() {
   const pagado = Number(STATE.pedidoModal.pagado) || 0;
   const tEl = document.getElementById('pm-total'); if (tEl) tEl.textContent = fmtMoney(total);
   const rEl = document.getElementById('pm-restante'); if (rEl) rEl.textContent = fmtMoney(Math.max(0, total - pagado));
+  // Pago: si el importe cubre el total se sugiere '2do pago' (pagó todo) + el aviso del monto del comprobante.
+  pmPagoAutoEstado(STATE.pedidoModal);
+  pmPagoHintRefresh(STATE.pedidoModal);
 }
 // Trae el ad por telefono (WPP) y lo pone en "de que ad viene" (override manual ok).
 async function pmTraceAd() {
@@ -10124,6 +10158,7 @@ function pmPickCotizacion(i, k) {
     if (p.telefono && !String(mm.telefono || '').trim()) mm.telefono = String(p.telefono).replace(/\D/g, '');
     render();
     pmTraceAd();
+    pmCargarComprobantes(); // el teléfono pudo venir del brief (sin blur): traer lo que mandó el cliente
     pmBriefFotos(i, p._brief); // sugiere las fotos del brief aunque el pedido no tenga chat del cliente
     toast('Prellenado desde el brief "' + p.nombre + '" — revisá los datos');
     return;
@@ -10137,6 +10172,7 @@ function pmPickCotizacion(i, k) {
   if (p.canal === 'WPP' || p.canal === 'IG') m.plataforma = p.canal;
   render();
   pmTraceAd(); // trazar el ad con el teléfono recién prellenado (WPP)
+  pmCargarComprobantes(); // ídem con los comprobantes que mandó el cliente por el chat
   toast('Prellenado desde la cotización "' + p.nombre + '" — revisá medidas y poné el precio');
   // La cotización del Sheet NO tiene tramos → lo buscamos en el brief (por nombre) y lo completamos.
   fetchBriefByName(p.nombre).then(brief => {
@@ -10230,7 +10266,7 @@ function pmFotoRepintar(m, c) {
   if (m._validated) pmApplyMarks(pmValidate());
 }
 function pmFotoBlobLibre(c) { try { if (c && c.foto_preview && c.foto_preview.indexOf('blob:') === 0) URL.revokeObjectURL(c.foto_preview); } catch (_) {} }
-function pmFotoLiberarTodo(m) { ((m && m.carteles) || []).forEach(pmFotoBlobLibre); }
+function pmFotoLiberarTodo(m) { ((m && m.carteles) || []).forEach(pmFotoBlobLibre); pmCompBlobLibre(m); }
 async function pmCargarSugerencias() {
   const m = STATE.pedidoModal; if (!m) return;
   const contacto = pmContactoSugerencias(m);
@@ -10577,7 +10613,6 @@ function renderPedidoModal() {
   if (!STATE.pedidoModalOpen || !STATE.pedidoModal) return '';
   const m = STATE.pedidoModal;
   const total = pedidoModalTotal();
-  const restante = Math.max(0, total - (Number(m.pagado)||0));
   const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;color:var(--fg);font-size:13px';
   const lbl = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
   const oBtn = (active) => active ? 'background:var(--accent-cyan,#8FD4DE);color:#000;border-color:var(--accent-cyan,#8FD4DE);' : 'background:transparent;color:var(--fg-subtle);border-color:var(--border);';
@@ -10605,11 +10640,7 @@ function renderPedidoModal() {
         <label style="${lbl}">Carteles del pedido</label>
         <div id="pm-carteles">${m.carteles.map((c,i)=>renderPedidoCartelBlock(c,i,m.carteles.length)).join('')}</div>
         <button id="pm-add-cartel" class="btn btn-ghost" style="width:100%;margin-bottom:var(--s-3);font-size:12px">＋ Agregar otro cartel a este pedido</button>
-        <div style="display:flex;gap:10px;margin-bottom:var(--s-3)">
-          <div style="flex:1"><label style="${lbl}">Estado del pago</label><select id="pm-estadopago" style="${inp}">${['1er pago','2do pago'].map(o=>`<option ${m.estadoPago===o?'selected':''}>${o}</option>`).join('')}</select></div>
-          <div style="flex:1"><label style="${lbl}">Pagado (seña)</label><input id="pm-pagado" type="number" value="${escapeHtml(String(m.pagado||''))}" placeholder="$" style="${inp}" data-pm-calc></div>
-          <div style="flex:1"><label style="${lbl}">Restante (auto)</label><div style="${inp};opacity:.7;display:flex;align-items:center;min-height:36px"><span id="pm-restante">${fmtMoney(restante)}</span></div></div>
-        </div>
+        ${pmPagoBlockHtml(m)}
         <div style="margin-bottom:var(--s-3)"><label style="${lbl}">De qué ad viene <span style="opacity:.6">(auto por teléfono en WPP · editable)</span></label><input id="pm-ad" value="${escapeHtml(m.ad||'')}" placeholder="se completa solo si vino de un ad" style="${inp}"></div>
         ${isAdmin() ? `<div style="margin-bottom:var(--s-3)"><label style="${lbl}">¿De quién es la venta? <span style="opacity:.6">(lo que cargás vos es tuyo, sin comisión, salvo que elijas un vendedor)</span></label><select id="pm-vendedor" style="${inp}">${[['gaspar', 'Mía (Gaspar, sin comisión)'], ['joaco', 'Joaco'], ['facundo', 'Facu'], ['agustina', 'Agus']].map(([k, l]) => `<option value="${k}" ${(m.vendedor || 'gaspar') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
         <div style="display:flex;justify-content:space-between;align-items:center;padding-top:var(--s-2);border-top:1px solid var(--border)">
@@ -10673,10 +10704,21 @@ function bindPedidoModal() {
   // Foto del diseño final (neón): subir archivo / usar una sugerida / quitar / cancelar / "la subo después".
   bindPmFotoSlots(document.getElementById('pm-backdrop'));
   // Sugerencias de foto: al tener el contacto del cliente (OC del chat ya lo trae; carga manual, al salir del teléfono).
-  if (tel) tel.addEventListener('blur', () => { readPedidoModalDOM(); pmCargarSugerencias(); });
+  if (tel) tel.addEventListener('blur', () => { readPedidoModalDOM(); pmCargarSugerencias(); pmCargarComprobantes(); });
   // Con el teléfono también se encuentran los briefs del cliente aunque el nombre del cartel no sea igual.
   if (tel) tel.addEventListener('blur', pmAutoBrief);
   if (STATE.pedidoModal && !STATE.pedidoModal._fotoSugDe) setTimeout(pmCargarSugerencias, 0);
+  // Pago (método / caja / comprobante / importe): bind del bloque y sugerencias de comprobante del chat (una vez
+  // por contacto: pmCargarComprobantes no repite si ya lo intentó para ese cliente).
+  bindPmPagoBlock(document.querySelector('#pm-backdrop [data-pmc-pago]'), false);
+  setTimeout(() => pmCargarComprobantes(), 0);
+  // Destino del Ctrl+V: tocando (o tabulando a) cualquier cosa del bloque de pago, la imagen pegada es el
+  // comprobante; en el resto del modal sigue siendo la foto del diseño.
+  if (bk) {
+    const destinoPegado = (e) => { const mm = STATE.pedidoModal; if (mm) mm._pasteTarget = (e.target && e.target.closest && e.target.closest('[data-pmc-pago]')) ? 'comp' : ''; };
+    bk.addEventListener('pointerdown', destinoPegado, true);
+    bk.addEventListener('focusin', destinoPegado);
+  }
   // Si el usuario edita el campo Ad a mano (ej. corrige el auto-trazado a "Frecuente"/"Directo"),
   // invalidamos el ad_id capturado: sin esto el pedido se guardaría con el texto manual PERO con el
   // source_id del ad viejo pegado, y el funnel prioriza el source_id → contaría mal esa venta.
@@ -10729,7 +10771,18 @@ function pmValidate() {
     if (c.foto_estado === 'subiendo') invalid.push({ sel:`[data-pm-foto-slot="${i}"]`, msg:`Cartel ${nro}: esperá que termine de subir la foto del diseño` });
     else if (!c.foto_key && !c.foto_despues) invalid.push({ sel:`[data-pm-foto-slot="${i}"]`, msg:`Cartel ${nro}: falta la foto del diseño final (o marcá "La subo después")` });
   }
+  // Pago (oct-2026): caja obligatoria; en transferencia, también el comprobante (en efectivo la caja es 'Efectivo').
+  if (m.pagoMetodo !== 'efectivo') {
+    if (!m.caja || m.caja === 'Efectivo') invalid.push({ sel:'[data-pmc-caja-row]', msg:'Elegí a qué caja pagó' });
+    if (m.comp_estado === 'subiendo') invalid.push({ sel:'[data-pmc-comp-slot]', msg:'Esperá que termine de subir el comprobante' });
+    else if (!m.comp_key) invalid.push({ sel:'[data-pmc-comp-slot]', msg:'Falta el comprobante de pago' });
+  }
   if (!(Number(m.pagado) > 0)) invalid.push({ id:'pm-pagado', msg:'Falta el monto de la seña (pagado)' });
+  // '2do pago' al cargar = pagó TODO de una: si el importe no cubre el total, el saldo quedaría sin registrar.
+  else if (m.estadoPago === '2do pago') {
+    const _tot = (m.carteles || []).reduce((s, c) => s + (Number(c.precio) || 0) + (Number(c.precioDimmer) || 0), 0);
+    if (_tot > 0 && Number(m.pagado) < _tot - 1) invalid.push({ id:'pm-estadopago', msg:'"2do pago" es si pagó el total. Si dejó seña, poné "1er pago" y el saldo se registra después' });
+  }
   return invalid;
 }
 function pmInvalidEl(it) { return it.id ? document.getElementById(it.id) : document.querySelector('#pm-backdrop ' + it.sel); }
@@ -10768,6 +10821,10 @@ async function confirmCargarPedido() {
     return '';
   }).filter(Boolean);
   if (raros.length && !(await showConfirm('Estos datos parecen un error de tipeo:\n\n' + raros.join('\n') + '\n\n¿Están bien así?', { title: 'Revisá antes de guardar', variant: 'warn', confirmLabel: 'Sí, están bien', cancelLabel: 'Corregir' }))) return;
+  const efectivo = m.pagoMetodo === 'efectivo';
+  // Comprobante que ya es el pago de otro pedido: casi siempre es un error (el mismo pago no puede contar dos veces).
+  const compUsado = (!efectivo && m._compOcr && Array.isArray(m._compOcr.usado_en)) ? m._compOcr.usado_en : [];
+  if (compUsado.length && !(await showConfirm('Ese comprobante ya está cargado en el pedido ' + compUsado.map(u => '#' + u.numero + (u.cartel ? ' (' + u.cartel + ')' : '')).join(', ') + '.\n\n¿Seguro que es el pago de este pedido?', { title: 'Comprobante repetido', variant: 'warn', confirmLabel: 'Sí, es este', cancelLabel: 'Cambiarlo' }))) return;
   const carteles = (m.carteles||[]).filter(c => String(c.cartel||'').trim());
   STATE.pedidoModalSaving = true; render();
   try {
@@ -10784,6 +10841,13 @@ async function confirmCargarPedido() {
       source_id: m.sourceId || '',
       // De quién es la venta (solo admin): lo que carga Gaspar es suyo (sin comisión) salvo que elija un vendedor.
       comercial_id: isAdmin() ? (m.vendedor || 'gaspar') : undefined,
+      // PAGO (oct-2026, pago_v 2 → el server exige caja, comprobante si es transferencia, y pagado > 0). pagado sigue
+      // siendo el importe del 1er pago (en efectivo, lo que pagó en efectivo).
+      pago_v: 2,
+      pago_metodo: efectivo ? 'efectivo' : 'transferencia',
+      caja: efectivo ? 'Efectivo' : (m.caja || ''),
+      comprobante_key: efectivo ? '' : (m.comp_key || ''),
+      comprobante_wamid: efectivo ? '' : (m.comp_wamid || ''),
       carteles: carteles.map(c => ({
         cartel: c.cartel, colores: c.colores, tipo: c.tipo, alto: c.alto, ancho: c.ancho, cm_neon: c.cmNeon,
         tramos: c.tramos, base: c.base, cantidad: c.cantidad, precio: c.precio, dimer: c.dimer, precio_dimmer: c.precioDimmer,
@@ -10797,8 +10861,8 @@ async function confirmCargarPedido() {
       }))
     };
     const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos', { method:'POST', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
-    const j = await r.json();
-    if (!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) { const err = new Error(j.error || ('HTTP '+r.status)); err.campo = j.campo || ''; throw err; }
     const nuevos = (j.pedidos||[]).map(mapPedidoFromD1);
     { const _ids = new Set(nuevos.map(x => x.idx)); STATE.pedidos = [...nuevos, ...STATE.pedidos.filter(x => !_ids.has(x.idx))]; } // sin duplicar si el poll ya los trajo
     pmFotoLiberarTodo(STATE.pedidoModal);
@@ -10808,8 +10872,1027 @@ async function confirmCargarPedido() {
     toast(`Pedido #${j.numero} cargado ✓ (${nuevos.length} cartel${nuevos.length>1?'es':''})`);
   } catch (e) {
     STATE.pedidoModalSaving = false; render();
+    // 400 {error, campo} del server (caja / comprobante / pagado): marcar ese campo en rojo como la validación local.
+    const itCampo = pmCampoServer(e && e.campo);
+    if (itCampo) {
+      pmApplyMarks([...pmValidate(), itCampo]);
+      const el = pmInvalidEl(itCampo); if (el) { try { el.scrollIntoView({ block:'center', behavior:'smooth' }); } catch (_) {} }
+    }
     toast('Error al cargar el pedido: ' + e.message);
   }
+}
+
+// ===================== PAGO DEL PEDIDO: caja + comprobante (oct-2026) =====================
+// Pedido de Gaspar: al cargar un pedido el vendedor carga SÍ O SÍ el comprobante del pago y la CAJA a la que pagó
+// el cliente (Melina / Gaspar / Favio / Bruno por transferencia; en efectivo la caja es 'Efectivo', sin comprobante
+// y con el importe). El sistema SUGIERE el comprobante: lo que el cliente mandó por el chat (imagen o PDF, antes o
+// después de la OC) con el monto y la caja que leyó el OCR → un clic. El 2do pago (saldo) se registra con su propio
+// modal (abrirSegundoPago), nunca con un PATCH de estado_pago.
+// Endpoints: GET /admin/pedidos/comprobante-sugerencias · PUT /admin/pedidos/comprobante · POST /admin/pedidos
+// (pago_v 2) · POST /admin/pedidos/:id/segundo-pago.
+// Atributos propios: data-pmc-* (modal Cargar pedido) y data-sp2-* (modal 2do pago). NO usar data-pm-body/ok/
+// cancel/t/total/nota ni name="pm-metodo" (pago manual del corte) ni data-pm-foto-* (fotos del diseño).
+function pmOBtn(active) { return active ? 'background:var(--accent-cyan,#8FD4DE);color:#000;border-color:var(--accent-cyan,#8FD4DE);' : 'background:transparent;color:var(--fg-subtle);border-color:var(--border);'; }
+// Tipo de un comprobante guardado a partir de su key: 'image' | 'pdf' | '' (desconocido → se abre en otra pestaña).
+function compTipoDeKey(key) {
+  const k = String(key || '').toLowerCase().split('?')[0];
+  if (/\.pdf$/.test(k)) return 'pdf';
+  if (/\.(jpe?g|png|webp|gif)$/.test(k)) return 'image';
+  return '';
+}
+// Comprobante en grande: imagen → lightbox; PDF → visor. Los dos quedan por encima de los modales.
+function compVer(key, tipo, nombre) {
+  if (!key) return;
+  const t = tipo || compTipoDeKey(key);
+  const url = mediaUrl(key);
+  if (t === 'pdf') showPdfPreview(url, nombre || 'Comprobante.pdf');
+  else if (t === 'image') showImageLightbox([url], 0);
+  else window.open(url, '_blank', 'noopener');
+}
+function compFechaCorta(ts) {
+  const d = ts ? new Date(ts) : null;
+  if (!d || isNaN(d.getTime())) return '';
+  try { return d.toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; }
+}
+// Lo que leyó el OCR de una sugerencia o de una subida, normalizado.
+function compOcrDe(it) {
+  if (!it) return null;
+  return {
+    monto: (it.monto == null || it.monto === '') ? null : (Number(it.monto) || null),
+    caja: it.caja || '',
+    es_comprobante: (it.es_comprobante === true || it.es_comprobante === false) ? it.es_comprobante : null,
+    usado_en: Array.isArray(it.usado_en) ? it.usado_en : [],
+    titular: it.titular || '', banco: it.banco || ''
+  };
+}
+function compCajaValida(c) { return PAGO_CAJAS.includes(c) ? c : ''; }
+// Contacto con el que buscar lo que mandó el cliente: '@usuario' de IG (lo resuelve el server) o ≥8 dígitos (tel / IGSID).
+function compContactoValido(c) {
+  const s = String(c || '').trim();
+  if (/^@|[a-z_.]/i.test(s)) return s.replace(/^@/, '').length >= 2;
+  return s.replace(/\D/g, '').length >= 8;
+}
+function compBlobLibre(url) { try { if (url && String(url).indexOf('blob:') === 0) URL.revokeObjectURL(url); } catch (_) {} }
+// Sube un comprobante (PUT raw, ≤12MB) y devuelve {key, tipo, es_comprobante, monto, caja} con el OCR del server.
+// Imagen → JPEG ≤1920px (disenoDownscaleBlob); PDF → crudo. Un reintento ante corte de red / 5xx.
+async function compSubirArchivo(file) {
+  const nombre = String((file && file.name) || '');
+  const esPdf = /pdf/i.test(file.type || '') || /\.pdf$/i.test(nombre);
+  const esImg = !esPdf && /^image\//.test(file.type || '');
+  if (!esPdf && !esImg) throw new Error('tiene que ser una foto o un PDF');
+  let blob = file, ct = 'application/pdf';
+  if (esImg) {
+    blob = (/^image\/(png|webp)$/i.test(file.type || '') && file.size <= 4 * 1024 * 1024) ? file : await disenoDownscaleBlob(file);
+    // Si el navegador no la pudo decodificar (p.ej. HEIC en Windows) el OCR tampoco la va a leer.
+    if (blob === file && !/^image\/(jpe?g|png|webp)$/i.test(file.type || '')) throw new Error('formato no soportado (' + (file.type || '?') + '): mandá una captura o un JPG/PNG');
+    ct = blob.type || file.type || 'image/jpeg';
+  }
+  if (blob.size > 12 * 1024 * 1024) throw new Error('el archivo pesa más de 12 MB');
+  let lastErr = null;
+  for (let intento = 0; intento < 2; intento++) {
+    try {
+      const r = await disenoFetch(CONFIG.trackerUrl + '/admin/pedidos/comprobante?ocr=1', { method: 'PUT', headers: { ...authHeaders(), 'Content-Type': ct }, body: blob }, 90000);
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.key) return { key: j.key, tipo: j.tipo || (esPdf ? 'pdf' : 'image'), ...compOcrDe({ monto: j.monto, caja: j.caja, es_comprobante: j.es_comprobante }) };
+      lastErr = new Error(j.error || ('HTTP ' + r.status));
+      if (r.status < 500) break; // error del pedido (tamaño, formato, permisos): reintentar no sirve
+    } catch (e) { lastErr = e; if (/tardó demasiado/.test(String(e && e.message))) break; }
+  }
+  throw lastErr || new Error('no se pudo subir');
+}
+// Recuadro del comprobante. Lo comparten el modal "Cargar pedido" (prefijo pmc) y el de 2do pago (sp2).
+// o = { pfx, sel:{key,tipo,nombre,preview,ocr}|null, estado:''|'subiendo'|'error', sug:[items del endpoint],
+//       sugEstado:''|'buscando'|'ok'|'error'|'sincontacto', ocTs, verOtros, buscable, sinContactoTxt }
+// Las miniaturas NO usan data-img-preview (la galería del chat junta todos los del documento).
+function compPickerHtml(o) {
+  const P = o.pfx;
+  const btn = 'background:transparent;border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);cursor:pointer;font-size:12px;padding:6px 10px';
+  const fileBtn = (txt) => `<label style="${btn};display:inline-block">${txt}<input type="file" accept="image/*,application/pdf" data-${P}-comp-file style="display:none"></label>`;
+  const pdfBox = (h) => `<span style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;width:${h}px;height:${h}px;border-radius:6px;background:var(--ink-200);border:1px solid var(--border);color:var(--fg);font-size:11px;font-weight:700"><span style="font-size:${Math.round(h / 2.8)}px;line-height:1">📄</span>PDF</span>`;
+  const sel = o.sel;
+  const avisosDe = (ocr) => {
+    const out = [];
+    if (!ocr) return out;
+    if (ocr.es_comprobante === false) out.push('⚠ El sistema no lo reconoce como comprobante: revisalo');
+    if ((ocr.usado_en || []).length) out.push('⚠ Ya está cargado en el pedido ' + ocr.usado_en.map(u => '#' + u.numero + (u.cartel ? ' (' + u.cartel + ')' : '')).join(', '));
+    return out;
+  };
+  const item = (it) => {
+    const ocr = compOcrDe(it) || {};
+    const elegido = !!(sel && sel.key && sel.key === it.key);
+    const usado = (ocr.usado_en || []).length > 0;
+    const noComp = ocr.es_comprobante === false;
+    const borde = elegido ? '#3DDC97' : (it.sugerido ? 'var(--accent-cyan,#8FD4DE)' : 'var(--border)');
+    const fecha = compFechaCorta(it.ts);
+    const rel = (o.ocTs && it.ts) ? (String(it.ts) >= String(o.ocTs) ? 'después de la OC' : 'antes de la OC') : '';
+    const tit = [fecha ? 'Lo mandó el ' + fecha : '', rel, it.nombre || '', ocr.titular ? 'a nombre de ' + ocr.titular : '', ocr.banco || '',
+      noComp ? 'el sistema no lo reconoce como comprobante' : '', usado ? 'ya usado en ' + ocr.usado_en.map(u => '#' + u.numero).join(', ') : '', 'tocalo para usarlo'].filter(Boolean).join(' · ');
+    const conMonto = Number(ocr.monto) > 0;
+    const cap1 = conMonto ? fmtMoney(ocr.monto) : (noComp ? 'no parece' : (fecha ? fecha.split(',')[0] : ''));
+    const cap2 = conMonto ? (ocr.caja || '') : (noComp ? 'comprobante' : '');
+    const media = it.tipo === 'pdf' ? pdfBox(68) : `<img src="${escapeHtml(disenoThumb(it.key, 160))}" loading="lazy" onerror="this.style.opacity='.25'" style="display:block;width:100%;height:100%;object-fit:cover">`;
+    return `<div style="position:relative;width:72px;flex:none${noComp && !elegido ? ';opacity:.55' : ''}">
+        <button type="button" data-${P}-comp-sug="${escapeHtml(it.key)}" title="${escapeHtml(tit)}" style="position:relative;display:block;width:72px;height:72px;border:2px solid ${borde};border-radius:8px;padding:0;background:#fff;cursor:pointer;overflow:hidden">${media}${elegido
+          ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(6,48,30,.9);color:#3DDC97;font-size:9px;font-weight:700;padding:1px 0;text-align:center">✓ ELEGIDO</span>'
+          : (it.sugerido ? '<span style="position:absolute;left:0;right:0;bottom:0;background:rgba(8,38,43,.88);color:#8FD4DE;font-size:9px;font-weight:700;padding:1px 0;text-align:center">SUGERIDO</span>' : '')}${usado
+          ? `<span style="position:absolute;left:0;right:0;top:0;background:rgba(110,55,0,.88);color:#FFD08A;font-size:9px;font-weight:700;padding:1px 2px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">usado #${escapeHtml(String(ocr.usado_en[0].numero))}</span>` : ''}</button>
+        <button type="button" data-${P}-comp-zoom="${escapeHtml(it.key)}" title="Ver en grande" style="position:absolute;top:${usado ? 15 : 3}px;right:3px;width:20px;height:20px;border-radius:50%;border:0;background:rgba(0,0,0,.6);color:#fff;font-size:10px;line-height:20px;padding:0;cursor:zoom-in">🔍</button>
+        ${cap1 ? `<div style="font-size:10px;line-height:1.25;margin-top:2px;text-align:center;color:var(--fg);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(cap1)}</div>` : ''}
+        ${cap2 ? `<div style="font-size:10px;line-height:1.2;text-align:center;color:var(--fg-subtle);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(cap2)}</div>` : ''}
+      </div>`;
+  };
+  const picker = () => {
+    const sug = Array.isArray(o.sug) ? o.sug : [];
+    const buscando = o.sugEstado === 'buscando'
+      ? '<div style="font-size:12px;color:var(--fg-subtle);margin-bottom:8px">🔎 Buscando comprobantes del chat… <span style="opacity:.7">(lee monto y caja, puede tardar unos segundos)</span></div>' : '';
+    let lista = '';
+    if (sug.length) {
+      lista = `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">¿Es alguno de estos? <span style="opacity:.7">(lo que mandó el cliente por el chat — tocá el comprobante · 🔍 para verlo grande)</span></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${sug.map(item).join('')}</div>`;
+    } else if (!buscando) {
+      if (o.sugEstado === 'error') lista = '<div style="font-size:11px;color:#FF5566;margin-bottom:8px">No se pudieron traer los comprobantes del chat.</div>';
+      else if (o.sugEstado === 'ok') lista = '<div style="font-size:11px;color:var(--fg-mute);margin-bottom:8px">El cliente no mandó fotos ni PDF por el chat: subí el comprobante.</div>';
+      else if (o.sugEstado === 'sincontacto') lista = `<div style="font-size:11px;color:var(--fg-mute);margin-bottom:8px">${escapeHtml(o.sinContactoTxt || 'Sin el contacto del cliente no puedo buscar lo que mandó por el chat: subí el comprobante.')}</div>`;
+    }
+    return `${buscando}${lista}
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        ${fileBtn('📎 Subir comprobante')}
+        ${o.buscable && o.sugEstado !== 'buscando' ? `<button type="button" data-${P}-buscar style="${btn}">↻ Buscar de nuevo</button>` : ''}
+        ${_isMobileViewport() ? '' : `<span style="font-size:11px;color:var(--fg-mute)">o pegalo con Ctrl+V</span>`}
+      </div>
+      ${o.estado === 'error' ? '<div style="font-size:11px;color:#FF5566;margin-top:4px">No se pudo subir el comprobante — probá de nuevo.</div>' : ''}`;
+  };
+  let inner;
+  if (o.estado === 'subiendo' && sel) {
+    const prev = sel.tipo === 'pdf' ? pdfBox(56) : (sel.preview ? `<img src="${escapeHtml(sel.preview)}" style="display:block;height:56px;max-width:110px;object-fit:contain;border-radius:6px;background:#fff">` : '');
+    inner = `<div style="display:flex;gap:10px;align-items:center"><span style="opacity:.5">${prev}</span><span style="font-size:12px;color:var(--fg-subtle)">Subiendo comprobante… <span style="opacity:.7">(leyendo monto y caja)</span></span><button type="button" data-${P}-comp-cancel style="${btn};margin-left:auto">Cancelar</button></div>`;
+  } else if (sel && sel.key) {
+    const ocr = sel.ocr;
+    const info = [];
+    if (sel.tipo === 'pdf' && sel.nombre) info.push(escapeHtml(sel.nombre));
+    if (ocr && Number(ocr.monto) > 0) info.push('dice <b style="color:var(--fg)">' + fmtMoney(ocr.monto) + '</b>');
+    if (ocr && ocr.caja) info.push('caja ' + escapeHtml(ocr.caja));
+    const media = sel.tipo === 'pdf' ? pdfBox(64) : `<img src="${escapeHtml(sel.preview || disenoThumb(sel.key, 240))}" onerror="this.style.opacity='.3'" style="display:block;height:64px;max-width:120px;object-fit:contain;border-radius:6px;background:#fff">`;
+    inner = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button type="button" data-${P}-comp-ver title="Ver en grande" style="border:0;padding:0;background:none;cursor:zoom-in;flex:none">${media}</button>
+        <div style="flex:1;min-width:150px"><div style="font-size:12px;color:#3DDC97;font-weight:700">✓ Comprobante elegido</div>${info.length ? `<div style="font-size:11px;color:var(--fg-subtle)">${info.join(' · ')}</div>` : ''}${avisosDe(ocr).map(a => `<div style="font-size:11px;color:#FFB020">${escapeHtml(a)}</div>`).join('')}</div>
+        <div style="display:flex;gap:6px"><button type="button" data-${P}-comp-cambiar style="${btn}">${o.verOtros ? 'Cerrar' : 'Cambiar'}</button><button type="button" data-${P}-comp-quitar style="${btn};color:#FF5566">Quitar</button></div>
+      </div>${o.verOtros ? `<div style="border-top:1px dashed var(--border);margin-top:8px;padding-top:8px">${picker()}</div>` : ''}`;
+  } else inner = picker();
+  return `<div data-${P}-comp-slot style="border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;background:var(--ink-100)">${inner}</div>`;
+}
+// h = { archivo(file), sugerida(key), items() → sugerencias, ver(), quitar(), cancelar(), cambiar(), buscar() }
+function bindCompPicker(root, P, h) {
+  if (!root || !root.querySelectorAll) return;
+  const q = (a) => root.querySelectorAll('[data-' + P + '-' + a + ']');
+  q('comp-file').forEach(inp => inp.onchange = () => { const f = inp.files && inp.files[0]; inp.value = ''; if (f) h.archivo(f); });
+  q('comp-sug').forEach(b => b.onclick = () => h.sugerida(b.getAttribute('data-' + P + '-comp-sug')));
+  q('comp-zoom').forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
+    const k = b.getAttribute('data-' + P + '-comp-zoom');
+    const it = (h.items() || []).find(x => x.key === k);
+    compVer(k, it && it.tipo, it && it.nombre);
+  });
+  q('comp-ver').forEach(b => b.onclick = () => h.ver());
+  q('comp-quitar').forEach(b => b.onclick = () => h.quitar());
+  q('comp-cancel').forEach(b => b.onclick = () => h.cancelar());
+  q('comp-cambiar').forEach(b => b.onclick = () => h.cambiar());
+  q('buscar').forEach(b => b.onclick = () => h.buscar());
+}
+
+// ----- Modal "Cargar pedido": bloque 💳 Pago (estado en STATE.pedidoModal: sobrevive a render()) -----
+function pmPagoDefaults() {
+  return {
+    pagoMetodo: 'transferencia', caja: '', _cajaManual: false, _cajaDeOcr: false, _cajaTransfer: '',
+    // Comprobante: key de R2 (wa/… o ig/… si salió del chat; pedidos/comprobante/… si se subió), wamid del mensaje,
+    // 'image'|'pdf', nombre del PDF, estado de la subida y preview local (blob:, se libera al cerrar).
+    comp_key: '', comp_wamid: '', comp_tipo: '', comp_nombre: '', comp_estado: '', comp_preview: '',
+    _compOcr: null, _compPrev: null, _compTok: 0, _compVerOtros: false,
+    _compSug: [], _compSugDe: '', _compSugIntentoDe: '', _compSugPidiendo: '', _compSugEstado: '', _compOcTs: '',
+    // De dónde salió el importe (#pm-pagado): 'oc' (seña de la OC) | 'ocr' (comprobante) | 'manual' (lo tipeó).
+    _pagadoFuente: '', _estadoManual: false, _pasteTarget: ''
+  };
+}
+// Comprobante ya elegido desde el chat ("Usar como comprobante"): la key wa/… o ig/… del mensaje va tal cual. El
+// monto / la caja del OCR llegan después, con las sugerencias (pmCargarComprobantes).
+function pmPreseleccionarComp(m, comp) {
+  if (!m || !comp || !comp.key) return;
+  m.pagoMetodo = 'transferencia';
+  m.comp_key = String(comp.key); m.comp_wamid = String(comp.wamid || '');
+  m.comp_tipo = comp.tipo || compTipoDeKey(comp.key) || 'image'; m.comp_nombre = comp.nombre || '';
+  m.comp_preview = ''; m.comp_estado = ''; m._compOcr = null;
+}
+// Contacto para los comprobantes: el de las sugerencias de foto (WPP = teléfono; IG = IGSID del chat) y, en IG
+// cargado a mano, el '@usuario' tal cual (el server lo resuelve, igual que en el drawer).
+function pmContactoComprobantes(m) {
+  if (!m) return '';
+  const c = pmContactoSugerencias(m);
+  if (c) return c;
+  const crudo = String(m.telefono || '').trim();
+  if (/^@/.test(crudo) || (m.plataforma === 'IG' && /[a-z_.]/i.test(crudo))) return '@' + crudo.replace(/^@/, '');
+  return crudo.replace(/\D/g, '');
+}
+function pmCompBlobLibre(m) { if (m) compBlobLibre(m.comp_preview); }
+function pmCompSlotHtml(m) {
+  const ok = compContactoValido(pmContactoComprobantes(m));
+  return compPickerHtml({
+    pfx: 'pmc',
+    sel: (m.comp_key || m.comp_estado === 'subiendo') ? { key: m.comp_key, tipo: m.comp_tipo, nombre: m.comp_nombre, preview: m.comp_preview, ocr: m._compOcr } : null,
+    estado: m.comp_estado || '', sug: m._compSug || [], sugEstado: ok ? (m._compSugEstado || '') : 'sincontacto', ocTs: m._compOcTs || '',
+    verOtros: !!m._compVerOtros, buscable: ok,
+    sinContactoTxt: m.plataforma === 'IG' ? 'Poné el @usuario del cliente para ver lo que mandó por el chat (o subí el comprobante).' : 'Poné el teléfono del cliente para ver lo que mandó por el chat (o subí el comprobante).'
+  });
+}
+function pmCajaWrapHtml(m) {
+  if (m.pagoMetodo === 'efectivo') {
+    return `<div data-pmc-caja-wrap style="margin-bottom:10px"><label style="${PM_LBL}">Caja</label><div data-pmc-caja-row style="display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;font-size:13px;color:var(--fg)">💵 <b>Efectivo</b> <span style="font-size:11px;color:var(--fg-subtle)">· en efectivo no hay comprobante: poné el importe</span></div></div>`;
+  }
+  const chips = PAGO_CAJAS.map(c => `<button type="button" data-pmc-caja="${c}" style="flex:1;min-width:72px;padding:8px 6px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${pmOBtn(m.caja === c)}">${c}</button>`).join('');
+  const nota = (m.caja && m._cajaDeOcr && !m._cajaManual) ? ' <span style="text-transform:none;letter-spacing:0;color:#3DDC97">— leída del comprobante</span>' : '';
+  return `<div data-pmc-caja-wrap style="margin-bottom:10px"><label style="${PM_LBL}">¿A qué caja pagó? *${nota}</label><div data-pmc-caja-row style="display:flex;gap:6px;flex-wrap:wrap;border:1px solid var(--border);border-radius:var(--r-sm);padding:4px">${chips}</div></div>`;
+}
+// Avisos debajo del importe: el monto del comprobante (si no coincide, con "usar") y "pagó todo".
+function pmPagadoHintHtml(m) {
+  if (!m) return '';
+  const parts = [];
+  const pag = Math.round(Number(m.pagado) || 0);
+  const ocr = (m.pagoMetodo !== 'efectivo' && m.comp_key) ? m._compOcr : null;
+  const monto = ocr ? Math.round(Number(ocr.monto) || 0) : 0;
+  if (monto > 0 && monto !== pag) parts.push(`<span style="color:#FFB020">El comprobante dice ${fmtMoney(monto)}</span> <button type="button" data-pmc-usar-monto style="background:none;border:0;padding:0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:11px">usar</button>`);
+  else if (monto > 0 && m._pagadoFuente === 'ocr') parts.push('<span style="color:var(--fg-subtle)">✓ importe leído del comprobante</span>');
+  else if (m._pagadoFuente === 'oc' && pag > 0) parts.push('<span style="color:var(--fg-subtle)">importe = la seña de la OC</span>');
+  const total = pedidoModalTotal();
+  if (total > 0 && pag >= total && m.estadoPago === '2do pago') parts.push('<span style="color:#3DDC97">pagó el total → queda como 2do pago</span>');
+  return parts.join(' · ');
+}
+// Bloque "💳 Pago" (reemplaza la vieja fila estado/pagado/restante: mantiene #pm-estadopago, #pm-pagado y
+// #pm-restante, que usan readPedidoModalDOM y pmRecalc).
+function pmPagoBlockHtml(m) {
+  pmPagoAutoEstado(m);
+  const ef = m.pagoMetodo === 'efectivo';
+  const restante = Math.max(0, pedidoModalTotal() - (Number(m.pagado) || 0));
+  const metBtn = (v, txt) => `<button type="button" data-pmc-metodo="${v}" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${pmOBtn(ef === (v === 'efectivo'))}">${txt}</button>`;
+  return `<div data-pmc-pago style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-3);background:var(--ink-050)">
+      <div style="font-size:11px;color:var(--accent-cyan);font-weight:700;margin-bottom:8px">💳 Pago</div>
+      <label style="${PM_LBL}">¿Cómo pagó?</label>
+      <div data-pmc-metodo-row style="display:flex;gap:8px;margin-bottom:10px">${metBtn('transferencia', '🏦 Transferencia')}${metBtn('efectivo', '💵 Efectivo')}</div>
+      ${pmCajaWrapHtml(m)}
+      ${ef ? '' : `<div style="margin-bottom:10px"><label style="${PM_LBL}">Comprobante de pago * <span style="opacity:.6;text-transform:none;letter-spacing:0">— lo que mandó el cliente (foto o PDF)</span></label>${pmCompSlotHtml(m)}</div>`}
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <div style="flex:1.2;min-width:140px"><label style="${PM_LBL}">${ef ? 'Importe en efectivo *' : 'Importe pagado (seña) *'}</label><input id="pm-pagado" type="number" value="${escapeHtml(String(m.pagado || ''))}" placeholder="$" style="${PM_INP}" data-pm-calc></div>
+        <div style="flex:1;min-width:120px"><label style="${PM_LBL}">Estado del pago</label><select id="pm-estadopago" style="${PM_INP}">${['1er pago', '2do pago'].map(o => `<option ${m.estadoPago === o ? 'selected' : ''}>${o}</option>`).join('')}</select></div>
+        <div style="flex:1;min-width:110px"><label style="${PM_LBL}">Restante (auto)</label><div style="${PM_INP};opacity:.7;display:flex;align-items:center;min-height:36px"><span id="pm-restante">${fmtMoney(restante)}</span></div></div>
+      </div>
+      <div data-pmc-pagado-hint style="font-size:11px;margin-top:5px">${pmPagadoHintHtml(m)}</div>
+    </div>`;
+}
+// parcial = el elemento se re-pintó suelto (sin render()): le suma lo que bindPedidoModal hace en el render
+// completo para todo el modal (recalcular total/restante y la validación en vivo).
+function bindPmPagoBlock(root, parcial) {
+  if (!root || !root.querySelectorAll) return;
+  const deRoot = (sel) => [...((root.matches && root.matches(sel)) ? [root] : []), ...root.querySelectorAll(sel)];
+  deRoot('[data-pmc-metodo]').forEach(b => b.onclick = () => pmSetMetodo(b.getAttribute('data-pmc-metodo')));
+  deRoot('[data-pmc-caja]').forEach(b => b.onclick = () => pmSetCaja(b.getAttribute('data-pmc-caja')));
+  deRoot('[data-pmc-usar-monto]').forEach(b => b.onclick = pmUsarMontoOcr);
+  bindCompPicker(root, 'pmc', {
+    archivo: (f) => pmCompSetArchivo(f),
+    sugerida: (k) => pmCompUsarSugerida(k),
+    items: () => (STATE.pedidoModal && STATE.pedidoModal._compSug) || [],
+    ver: () => { const m = STATE.pedidoModal; if (m && m.comp_key) compVer(m.comp_key, m.comp_tipo, m.comp_nombre); },
+    quitar: pmCompQuitar,
+    cancelar: pmCompCancelar,
+    cambiar: () => { const m = STATE.pedidoModal; if (!m) return; m._compVerOtros = !m._compVerOtros; pmCompRepintar(m); if (m._compVerOtros) pmCargarComprobantes(); },
+    buscar: () => pmCargarComprobantes(true)
+  });
+  const pag = deRoot('#pm-pagado')[0];
+  if (pag) { if (parcial) pag.addEventListener('input', pmRecalc); pag.addEventListener('input', pmPagadoInput); }
+  const est = deRoot('#pm-estadopago')[0];
+  if (est) est.addEventListener('change', () => { const m = STATE.pedidoModal; if (!m) return; m._estadoManual = true; readPedidoModalDOM(); pmPagoHintRefresh(m); });
+  if (parcial) deRoot('input, select').forEach(el => {
+    const h = () => { const m = STATE.pedidoModal; if (!m || !m._validated) return; readPedidoModalDOM(); pmApplyMarks(pmValidate()); };
+    el.addEventListener('input', h); el.addEventListener('change', h);
+  });
+}
+// Reemplaza SOLO un pedazo del bloque de pago (no un render() entero: no le saca el foco ni el scroll al vendedor).
+function pmPagoReemplazar(m, sel, html) {
+  if (!pmModalVivo(m)) return null;
+  const el = document.querySelector('#pm-backdrop ' + sel); if (!el) return null;
+  const tmp = document.createElement('div'); tmp.innerHTML = html;
+  const nuevo = tmp.firstElementChild; if (!nuevo) return null;
+  el.replaceWith(nuevo);
+  bindPmPagoBlock(nuevo, true);
+  return nuevo;
+}
+function pmPagoHintRefresh(m) {
+  if (!m || !pmModalVivo(m)) return;
+  const h = document.querySelector('#pm-backdrop [data-pmc-pagado-hint]'); if (!h) return;
+  h.innerHTML = pmPagadoHintHtml(m);
+  h.querySelectorAll('[data-pmc-usar-monto]').forEach(b => b.onclick = pmUsarMontoOcr);
+}
+// Re-pinta el recuadro del comprobante + los chips de caja (el OCR puede haberla sugerido) + el aviso del importe.
+function pmCompRepintar(m) {
+  if (!pmModalVivo(m)) return;
+  if (m.pagoMetodo !== 'efectivo') pmPagoReemplazar(m, '[data-pmc-comp-slot]', pmCompSlotHtml(m));
+  pmPagoReemplazar(m, '[data-pmc-caja-wrap]', pmCajaWrapHtml(m));
+  pmPagoHintRefresh(m);
+  if (m._validated) pmApplyMarks(pmValidate());
+}
+// Cambio de método: se re-pinta el bloque de pago entero (aparece/desaparece el comprobante, cambia el rótulo).
+function pmPagoRepintarTodo(m) {
+  if (!pmModalVivo(m)) return;
+  readPedidoModalDOM();
+  if (!pmPagoReemplazar(m, '[data-pmc-pago]', pmPagoBlockHtml(m))) return;
+  pmRecalc();
+  if (m._validated) pmApplyMarks(pmValidate());
+}
+function pmPagadoInput() {
+  const m = STATE.pedidoModal; if (!m) return;
+  readPedidoModalDOM();
+  m._pagadoFuente = String(m.pagado || '').trim() ? 'manual' : '';
+  pmPagoAutoEstado(m);
+  pmPagoHintRefresh(m);
+}
+// Si el importe cubre el total del pedido se sugiere '2do pago' (pagó todo); si después baja, vuelve a '1er pago'.
+// Si el vendedor tocó el select a mano, se respeta.
+function pmPagoAutoEstado(m) {
+  if (!m || m._estadoManual) return;
+  const total = pedidoModalTotal(), pag = Number(m.pagado) || 0;
+  const want = (total > 0 && pag >= total) ? '2do pago' : '1er pago';
+  if (m.estadoPago === want) return;
+  m.estadoPago = want;
+  if (pmModalVivo(m)) { const sel = document.getElementById('pm-estadopago'); if (sel) sel.value = want; }
+}
+function pmSetMetodo(v) {
+  const m = STATE.pedidoModal; if (!m) return;
+  v = v === 'efectivo' ? 'efectivo' : 'transferencia';
+  if (m.pagoMetodo === v) return;
+  if (v === 'efectivo') { m._cajaTransfer = m.caja === 'Efectivo' ? '' : m.caja; m.caja = 'Efectivo'; }
+  else m.caja = (m.caja === 'Efectivo') ? (m._cajaTransfer || '') : m.caja;
+  m.pagoMetodo = v;
+  pmPagoRepintarTodo(m);
+}
+function pmSetCaja(c) {
+  const m = STATE.pedidoModal; if (!m || !compCajaValida(c)) return;
+  m.caja = c; m._cajaManual = true; m._cajaDeOcr = false;
+  pmPagoReemplazar(m, '[data-pmc-caja-wrap]', pmCajaWrapHtml(m));
+  if (m._validated) pmApplyMarks(pmValidate());
+}
+function pmUsarMontoOcr() {
+  const m = STATE.pedidoModal; if (!m || !m._compOcr) return;
+  const monto = Math.round(Number(m._compOcr.monto) || 0); if (!(monto > 0)) return;
+  const el = document.getElementById('pm-pagado'); if (el) el.value = String(monto);
+  m.pagado = String(monto); m._pagadoFuente = 'ocr';
+  pmRecalc();
+  if (m._validated) pmApplyMarks(pmValidate());
+}
+// Aplica lo que leyó el OCR del comprobante elegido: la caja (si el vendedor no eligió una a mano) y el monto (si
+// el importe está vacío o vino de la OC / de otro comprobante; si lo tipeó él, solo se avisa "el comprobante dice").
+function pmCompAplicarOcr(m, ocr) {
+  if (!m) return;
+  const vivo = pmModalVivo(m);
+  const caja = ocr ? compCajaValida(ocr.caja) : '';
+  if (caja && !m._cajaManual && m.pagoMetodo !== 'efectivo') { m.caja = caja; m._cajaDeOcr = true; }
+  const monto = ocr ? Math.round(Number(ocr.monto) || 0) : 0;
+  if (!(monto > 0)) { pmPagadoOcrLimpiar(m); return; }   // el importe del comprobante ANTERIOR no queda colgado
+  if (vivo) readPedidoModalDOM();
+  if (!(Number(m.pagado) > 0) || m._pagadoFuente === 'oc' || m._pagadoFuente === 'ocr') {
+    m.pagado = String(monto); m._pagadoFuente = 'ocr';
+    const el = vivo ? document.getElementById('pm-pagado') : null;
+    if (el) el.value = m.pagado;
+    if (vivo) pmRecalc(); else pmPagoAutoEstado(m);
+  }
+}
+// El importe lo había puesto el OCR de un comprobante que ya no está (se quitó o se eligió otro sin monto legible):
+// se vacía para que el vendedor lo cargue (antes quedaba la seña de otro comprobante sin aviso).
+function pmPagadoOcrLimpiar(m) {
+  if (!m || m._pagadoFuente !== 'ocr') return;
+  const vivo = pmModalVivo(m);
+  if (vivo) readPedidoModalDOM();
+  m.pagado = ''; m._pagadoFuente = '';
+  const el = vivo ? document.getElementById('pm-pagado') : null;
+  if (el) el.value = '';
+  if (vivo) pmRecalc(); else pmPagoAutoEstado(m);
+}
+// Trae lo que mandó el cliente por el chat (fotos / PDF) con el OCR. Mismas guardas anti-carrera que
+// pmCargarSugerencias; una vez por contacto (force = "↻ Buscar de nuevo"), porque cada OCR nuevo cuesta.
+async function pmCargarComprobantes(force) {
+  const m = STATE.pedidoModal; if (!m || !STATE.pedidoModalOpen) return;
+  const contacto = pmContactoComprobantes(m);
+  if (m._compSugDe && m._compSugDe !== contacto) {
+    // Cambió el cliente: lo que mandó el anterior ya no es candidato.
+    m._compSug = []; m._compSugDe = ''; m._compOcTs = ''; m._compSugEstado = '';
+    pmCompRepintar(m);
+  }
+  if (!compContactoValido(contacto) || m._compSugPidiendo === contacto) return;
+  if (!force && m._compSugIntentoDe === contacto) return;
+  m._compSugPidiendo = contacto; m._compSugIntentoDe = contacto; m._compSugEstado = 'buscando';
+  pmCompRepintar(m);
+  try {
+    const r = await disenoFetch(CONFIG.trackerUrl + '/admin/pedidos/comprobante-sugerencias?phone=' + encodeURIComponent(contacto) + '&ocr=1', { headers: authHeaders() }, 60000);
+    const j = await r.json().catch(() => ({}));
+    if (STATE.pedidoModal !== m || pmContactoComprobantes(m) !== contacto) {
+      // Otro modal / cambió el cliente mientras buscaba: se descarta, pero sin dejar el recuadro trabado en "Buscando…"
+      // ni bloquear el reintento si vuelve a poner el mismo número.
+      if (STATE.pedidoModal === m) { m._compSugEstado = ''; if (m._compSugIntentoDe === contacto) m._compSugIntentoDe = ''; setTimeout(() => pmCargarComprobantes(), 0); }
+      return;
+    }
+    if (!r.ok || !j || j.error) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    m._compSug = Array.isArray(j.items) ? j.items : [];
+    m._compSugDe = contacto; m._compOcTs = j.oc_ts || ''; m._compSugEstado = 'ok';
+    // Comprobante elegido desde el chat antes de tener el OCR: si está entre las sugerencias, se usa su lectura.
+    if (m.comp_key && !m._compOcr) {
+      const it = m._compSug.find(x => x.key === m.comp_key);
+      if (it) { m._compOcr = compOcrDe(it); if (!m.comp_wamid) m.comp_wamid = it.wamid || ''; pmCompAplicarOcr(m, m._compOcr); }
+    }
+  } catch (_) {
+    if (STATE.pedidoModal === m && pmContactoComprobantes(m) === contacto) m._compSugEstado = 'error';
+  } finally {
+    if (m._compSugPidiendo === contacto) m._compSugPidiendo = '';
+    pmCompRepintar(m);
+  }
+}
+function pmCompUsarSugerida(key) {
+  const m = STATE.pedidoModal; if (!m) return;
+  const it = (m._compSug || []).find(x => x.key === key); if (!it) return;
+  m._compTok = (m._compTok || 0) + 1; // una subida en curso ya no cuenta
+  pmCompBlobLibre(m); if (m._compPrev) compBlobLibre(m._compPrev.preview);
+  m.comp_key = it.key; m.comp_wamid = it.wamid || ''; m.comp_tipo = it.tipo || compTipoDeKey(it.key) || 'image'; m.comp_nombre = it.nombre || '';
+  m.comp_preview = ''; m.comp_estado = ''; m._compPrev = null; m._compVerOtros = false;
+  m._compOcr = compOcrDe(it);
+  if (m._cajaDeOcr && !m._cajaManual) { m.caja = ''; m._cajaDeOcr = false; } // la había sugerido el comprobante anterior
+  pmCompAplicarOcr(m, m._compOcr);
+  pmCompRepintar(m);
+}
+// Sube y deja la key en el pedido. Token: si el vendedor cancela o elige otro mientras tanto, la respuesta vieja se
+// ignora. Si falla un "Cambiar", vuelve el comprobante que había.
+async function pmCompAsignar(preview, tipo, nombre, obtener) {
+  const m = STATE.pedidoModal; if (!m) return false;
+  const tok = (m._compTok || 0) + 1; m._compTok = tok;
+  if (m.comp_estado !== 'subiendo') m._compPrev = { key: m.comp_key, wamid: m.comp_wamid, tipo: m.comp_tipo, nombre: m.comp_nombre, preview: m.comp_preview, ocr: m._compOcr };
+  else pmCompBlobLibre(m); // reemplaza a una subida en curso: su preview ya no se usa
+  m.comp_preview = preview; m.comp_tipo = tipo; m.comp_nombre = nombre; m.comp_estado = 'subiendo';
+  m.comp_key = ''; m.comp_wamid = ''; m._compOcr = null; m._compVerOtros = false;
+  pmCompRepintar(m);
+  let res = null, err = null;
+  try { res = await obtener(); } catch (e) { err = e; }
+  if (m._compTok !== tok) return false; // cancelada o reemplazada
+  if (res && res.key) {
+    const prev = m._compPrev; if (prev && prev.preview && prev.preview !== m.comp_preview) compBlobLibre(prev.preview);
+    m.comp_key = res.key; m.comp_tipo = res.tipo || tipo; m.comp_wamid = ''; m.comp_estado = ''; m._compPrev = null;
+    m._compOcr = compOcrDe(res);
+    if (m._cajaDeOcr && !m._cajaManual) { m.caja = ''; m._cajaDeOcr = false; }
+    pmCompAplicarOcr(m, m._compOcr);
+  } else {
+    pmCompBlobLibre(m);
+    const prev = m._compPrev || {};
+    m.comp_key = prev.key || ''; m.comp_wamid = prev.wamid || ''; m.comp_tipo = prev.tipo || ''; m.comp_nombre = prev.nombre || '';
+    m.comp_preview = prev.preview || ''; m._compOcr = prev.ocr || null; m._compPrev = null;
+    m.comp_estado = m.comp_key ? '' : 'error';
+    if (STATE.pedidoModal === m && STATE.pedidoModalOpen) niToast('No se pudo subir el comprobante: ' + ((err && err.message) || err || ''), { error: true });
+  }
+  pmCompRepintar(m);
+  return !!(res && res.key);
+}
+async function pmCompSetArchivo(file) {
+  if (!file) return;
+  const esPdf = /pdf/i.test(file.type || '') || /\.pdf$/i.test(file.name || '');
+  if (!esPdf && !/^image\//.test(file.type || '')) { niToast('El comprobante tiene que ser una foto o un PDF', { error: true }); return; }
+  const m = STATE.pedidoModal; if (!m) return;
+  if (m.pagoMetodo === 'efectivo') { niToast('En efectivo no hace falta comprobante'); return; }
+  await pmCompAsignar(esPdf ? '' : URL.createObjectURL(file), esPdf ? 'pdf' : 'image', esPdf ? (file.name || 'comprobante.pdf') : '', () => compSubirArchivo(file));
+}
+// Cancelar una subida colgada: vuelve a como estaba.
+function pmCompCancelar() {
+  const m = STATE.pedidoModal; if (!m || m.comp_estado !== 'subiendo') return;
+  m._compTok = (m._compTok || 0) + 1;
+  pmCompBlobLibre(m);
+  const prev = m._compPrev || {};
+  m.comp_key = prev.key || ''; m.comp_wamid = prev.wamid || ''; m.comp_tipo = prev.tipo || ''; m.comp_nombre = prev.nombre || '';
+  m.comp_preview = prev.preview || ''; m._compOcr = prev.ocr || null; m._compPrev = null; m.comp_estado = '';
+  pmCompRepintar(m);
+}
+function pmCompQuitar() {
+  const m = STATE.pedidoModal; if (!m) return;
+  m._compTok = (m._compTok || 0) + 1;
+  pmCompBlobLibre(m); if (m._compPrev) compBlobLibre(m._compPrev.preview);
+  m.comp_key = ''; m.comp_wamid = ''; m.comp_tipo = ''; m.comp_nombre = ''; m.comp_preview = ''; m.comp_estado = '';
+  m._compOcr = null; m._compPrev = null; m._compVerOtros = false;
+  if (m._cajaDeOcr && !m._cajaManual) { m.caja = ''; m._cajaDeOcr = false; }
+  pmPagadoOcrLimpiar(m);
+  pmCompRepintar(m);
+}
+// Ctrl+V con el modal abierto: ¿la imagen pegada es el comprobante? Sí si el vendedor está en el bloque de pago
+// (lo tocó / tabuló ahí, o tiene el mouse encima) o si ya no queda ningún cartel sin foto del diseño.
+// Con el comprobante YA elegido y algún cartel sin foto, lo pegado es el diseño salvo que el foco o el mouse estén
+// DENTRO del recuadro del comprobante: si no, volver de WhatsApp con Alt+Tab y pegar el diseño pisaba el comprobante.
+function pmPegarAlComprobante(m) {
+  if (!m || m.pagoMetodo === 'efectivo') return false;
+  const sinFoto = pmCartelSinFoto() >= 0;
+  if (m.comp_key && sinFoto) {
+    try { const a = document.activeElement; if (a && a.closest && a.closest('[data-pmc-comp-slot]')) return true; } catch (_) {}
+    try { if (document.querySelector('#pm-backdrop [data-pmc-comp-slot]:hover')) return true; } catch (_) {}
+    return false;
+  }
+  if (m._pasteTarget === 'comp') return true;
+  try { if (document.querySelector('#pm-backdrop [data-pmc-pago]:hover')) return true; } catch (_) {}
+  return !sinFoto && !m.comp_key && m.comp_estado !== 'subiendo';
+}
+// Salir de la ventana (ir a copiar algo a WhatsApp) olvida el "estaba en el bloque de pago".
+window.addEventListener('blur', () => { if (STATE.pedidoModal) STATE.pedidoModal._pasteTarget = ''; });
+// 400 {error, campo} de POST /admin/pedidos → elemento a marcar en rojo.
+function pmCampoServer(campo) {
+  const c = String(campo || '').toLowerCase();
+  if (!c) return null;
+  if (c === 'caja') return { sel: '[data-pmc-caja-row]', msg: '' };
+  if (c.indexOf('comprobante') === 0) return { sel: '[data-pmc-comp-slot]', msg: '' };
+  if (c === 'pagado' || c === 'importe') return { id: 'pm-pagado', msg: '' };
+  if (c === 'pago_metodo') return { sel: '[data-pmc-metodo-row]', msg: '' };
+  if (c === 'telefono') return { id: 'pm-telefono', msg: '' };
+  return null;
+}
+
+// ----- Drawer del pedido: sección "💳 Pagos" -----
+function pedPagoCompHtml(key) {
+  if (!key) return '<span style="font-size:11px;color:var(--fg-mute)">sin comprobante</span>';
+  const t = compTipoDeKey(key);
+  if (t === 'image') return `<button type="button" data-k="${escapeHtml(key)}" onclick="compVer(this.dataset.k,'image')" title="Ver el comprobante" style="border:0;padding:0;background:none;cursor:zoom-in"><img src="${escapeHtml(disenoThumb(key, 160))}" onerror="this.style.opacity='.3'" style="display:block;height:56px;width:56px;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border)"></button>`;
+  return `<button type="button" class="btn btn-ghost" data-k="${escapeHtml(key)}" onclick="compVer(this.dataset.k,'${t}')" style="font-size:12px;padding:4px 10px">${t === 'pdf' ? '📄 PDF' : '🧾 Ver comprobante'}</button>`;
+}
+function pagosDrawerSection(p) {
+  const metodoTxt = (x) => x === 'efectivo' ? '💵 Efectivo' : (x === 'transferencia' ? '🏦 Transferencia' : '');
+  const cajaPill = (c) => c ? `<span class="pill ${c === 'Efectivo' ? 'amber' : 'cyan'}" style="font-size:11px">${escapeHtml(c)}</span>` : '<span style="font-size:11px;color:var(--fg-mute)">sin caja</span>';
+  const fila = (titulo, importe, caja, metodo, key, extra) => `<div style="display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px dashed var(--border)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.04em">${titulo}</div>
+        <div style="font-size:15px;font-weight:700;color:var(--fg)">${fmtMoney(importe)}</div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:3px">${cajaPill(caja)}${metodo ? `<span style="font-size:11px;color:var(--fg-subtle)">${metodoTxt(metodo)}</span>` : ''}${extra || ''}</div>
+      </div>
+      ${metodo === 'efectivo' ? '' : `<div style="flex:none">${pedPagoCompHtml(key)}</div>`}
+    </div>`;
+  const tiene2 = Number(p.cobro2) > 0 || !!p.comprobante2Key || !!p.caja2;
+  let html = fila('1er pago (seña)', p.pagado, p.caja, p.pagoMetodo, p.comprobanteKey, '');
+  if (tiene2) {
+    html += fila('2do pago (saldo)', p.cobro2, p.caja2, p.pago2Metodo, p.comprobante2Key, p.cobro2At ? `<span style="font-size:11px;color:var(--fg-mute)">${escapeHtml(compFechaCorta(p.cobro2At))}</span>` : '');
+    if (Number(p.restante) > 0) html += `<div style="font-size:12px;color:#FFB020;padding-top:6px">Queda debiendo ${fmtMoney(p.restante)}</div>`;
+  } else if (p.estadoPago === '2do pago') {
+    html += `<div style="font-size:12px;color:var(--fg-subtle);padding-top:8px;border-top:1px dashed var(--border)">${(Number(p.pagado) > 0 && !(Number(p.restante) > 0)) ? 'Pagó el total en el 1er pago' : 'Marcado como 2do pago (sin datos del cobro)'}</div>`;
+  } else if (canCotizar()) {
+    html += `<div style="padding-top:8px;border-top:1px dashed var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-cyan" onclick="abrirSegundoPago(${p.idx},{origen:'drawer'})" style="font-size:12px;padding:6px 12px">💳 Registrar 2do pago</button>${Number(p.restante) > 0 ? `<span style="font-size:12px;color:var(--fg-subtle)">saldo ${fmtMoney(p.restante)}</span>` : ''}</div>`;
+  }
+  if (isAdmin() && p.cajaSyncErr) html += `<div style="font-size:10.5px;color:#FFB020;margin-top:6px">planilla: ${escapeHtml(p.cajaSyncErr)}</div>`;
+  return `<div class="drawer-section" data-ped-pagos-idx="${p.idx}"><h4>💳 Pagos</h4>${html}</div>`;
+}
+// Select "Estado del pago" del drawer: pasar a '2do pago' abre el modal (el cobro se registra ahí, no con "Guardar");
+// volver de '2do pago' con un cobro registrado avisa que al guardar se borra.
+async function pedPagoSelectChange(idx, sel) {
+  const p = STATE.pedidos.find(x => x.idx === idx); if (!p || !sel) return;
+  const revertir = () => { if (document.body.contains(sel)) sel.value = p.estadoPago; };
+  if (sel.value === '2do pago' && p.estadoPago !== '2do pago') { abrirSegundoPago(idx, { origen: 'drawer', onCancel: revertir }); return; }
+  if (p.estadoPago === '2do pago' && sel.value !== '2do pago' && (Number(p.cobro2) > 0 || p.comprobante2Key)) {
+    const ok = await showConfirm(`Al guardar se borra el 2do pago registrado (${fmtMoney(p.cobro2)}${p.caja2 ? ' a ' + p.caja2 : ''}).\n\n¿Volver a 1er pago?`, { title: 'Volver a 1er pago', variant: 'warn', confirmLabel: 'Sí, volver', cancelLabel: 'No' }).catch(() => false);
+    if (!ok) revertir();
+  }
+}
+
+// ----- Modal "Registrar 2do pago" -----
+// Autónomo (colgado del body como los .modal-bg, z 300): anda con el drawer abierto desde Pedidos, el Dashboard o
+// Rendimiento, y desde el chat ("Usar como comprobante"). El 2do pago es UNO por pedido (todas las filas-cartel del
+// mismo N°): el server lo guarda en cobro2/caja2/comprobante2 y pasa el pedido a '2do pago'. Estado en un objeto
+// propio (STATE._sp2 mientras está abierto): render() no lo toca.
+function abrirSegundoPago(idx, opts) {
+  opts = opts || {};
+  const alCancelar = () => { if (typeof opts.onCancel === 'function') { try { opts.onCancel(); } catch (_) {} } };
+  if (!canCotizar()) { alCancelar(); return; }
+  const p = (STATE.pedidos || []).find(x => x.idx === idx);
+  if (!p) { niToast('No encontré ese pedido (refrescá la lista)', { error: true }); if (opts.origen === 'tabla') renderTablePedidos(); alCancelar(); return; }
+  if (STATE._sp2 && typeof STATE._sp2.cerrar === 'function') STATE._sp2.cerrar(false);
+  const grupo = pedidoHermanos(p);
+  const herm = grupo.length ? grupo : [p];
+  const total = herm.reduce((s, x) => s + (Number(x.precio) || 0) + (Number(x.precioDimmer) || 0), 0);
+  const sena = Number(p.pagado) || 0;
+  const saldo = Number(p.restante) > 0 ? Number(p.restante) : Math.max(0, total - sena - (Number(p.cobro2) || 0));
+  // Contacto para las sugerencias: el del chat (si viene de ahí) o el del pedido (WPP: dígitos; IG: '@usuario' tal cual).
+  const crudo = String(p.telefono || '').trim();
+  const esUsuarioIg = p.plataforma === 'IG' && /^@|[a-z_.]/i.test(crudo);
+  const st = {
+    idx, p, numero: p.numero, cartel: p.cartel || '', nCarteles: herm.length, total, sena, saldo, origen: opts.origen || '', onCancel: alCancelar,
+    contacto: String(opts.contacto || (esUsuarioIg ? crudo : crudo.replace(/\D/g, ''))),
+    metodo: 'transferencia', caja: '', cajaManual: false, cajaDeOcr: false,
+    comp: null, compEstado: '', compTok: 0, compPrev: null, verOtros: false,
+    sug: [], sugEstado: '', ocTs: '', pidiendo: false,
+    importe: saldo > 0 ? String(Math.round(saldo)) : '', importeFuente: saldo > 0 ? 'saldo' : '',
+    validado: false, enviando: false, err: '', errTipo: '', cerrado: false, bg: null, cerrar: null
+  };
+  if (opts.comp && opts.comp.key) st.comp = { key: String(opts.comp.key), wamid: String(opts.comp.wamid || ''), tipo: opts.comp.tipo || compTipoDeKey(opts.comp.key) || 'image', nombre: opts.comp.nombre || '', preview: '', ocr: null };
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg'; bg.id = 'sp2-modal';
+  bg.innerHTML = `<div class="modal modal--login" style="max-width:620px;max-height:92vh">
+      <div class="modal-h"><h3 style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Registrar 2do pago · ${escapeHtml(st.cartel || 'pedido')}${st.nCarteles > 1 ? ' +' + (st.nCarteles - 1) : ''} · #${escapeHtml(String(st.numero || '—'))}</h3></div>
+      <div class="modal-body" data-sp2-body></div>
+      <div class="modal-actions"><button class="btn btn-ghost" data-sp2-cancel>Cancelar</button><button class="btn btn-cyan" data-sp2-ok>✓ Registrar 2do pago</button></div>
+    </div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  st.bg = bg;
+  // Que el foco no quede en el cuadro de texto del chat de atrás (un Enter mandaría un mensaje al cliente).
+  try { if (document.activeElement && document.activeElement !== document.body && document.activeElement.blur) document.activeElement.blur(); } catch (_) {}
+  const onKey = (e) => {
+    if (e.key !== 'Escape' || st.enviando) return;
+    if (document.getElementById('img-lightbox')) return;
+    const capas = document.querySelectorAll('.modal-bg');
+    if (capas.length && capas[capas.length - 1] !== bg) return; // hay un visor de PDF / confirmación encima
+    cerrar(false);
+  };
+  // Ctrl+V de una foto / PDF = el comprobante. Captura en window: corre antes que el paste del chat (que mandaría
+  // la imagen al cliente) y que el de los otros modales, y los frena.
+  const onPaste = (ev) => {
+    if (st.cerrado) return;
+    const items = (ev.clipboardData && ev.clipboardData.items) || [];
+    const tgt = ev.target;
+    if (tgt && /^(INPUT|TEXTAREA)$/.test(tgt.tagName) && [...items].some(it => it.kind === 'string' && it.type === 'text/plain')) return;
+    let file = null;
+    for (const it of items) { if (it.kind === 'file' && /^(image\/|application\/pdf)/.test(it.type || '')) { file = it.getAsFile(); if (file) break; } }
+    if (!file) return;
+    ev.preventDefault(); ev.stopImmediatePropagation();
+    if (st.metodo === 'efectivo') { niToast('En efectivo no hace falta comprobante'); return; }
+    sp2SetArchivo(st, file);
+  };
+  const cerrar = (ok) => {
+    if (st.cerrado) return;
+    st.cerrado = true;
+    st.compTok++; // una subida en curso ya no toca nada
+    if (st.comp) compBlobLibre(st.comp.preview);
+    if (st.compPrev) compBlobLibre(st.compPrev.preview);
+    bg.classList.remove('open'); setTimeout(() => bg.remove(), 150);
+    document.removeEventListener('keydown', onKey);
+    window.removeEventListener('paste', onPaste, true);
+    if (STATE._sp2 === st) STATE._sp2 = null;
+    if (!ok) {
+      if (st.origen === 'tabla') renderTablePedidos(); // el select de la tabla vuelve a '1er pago'
+      st.onCancel();
+    }
+  };
+  st.cerrar = cerrar;
+  STATE._sp2 = st;
+  document.addEventListener('keydown', onKey);
+  window.addEventListener('paste', onPaste, true);
+  bg.addEventListener('click', (e) => { if (e.target === bg && !st.enviando) cerrar(false); });
+  bg.querySelector('[data-sp2-cancel]').onclick = () => { if (!st.enviando) cerrar(false); };
+  bg.querySelector('[data-sp2-ok]').onclick = () => sp2Confirmar(st);
+  sp2Pintar(st);
+  sp2CargarSug(st, false);
+}
+function sp2Vivo(st) { return !!st && !st.cerrado && !!st.bg && document.body.contains(st.bg); }
+function sp2HintHtml(st) {
+  if (st.metodo === 'efectivo') return '';
+  const ocr = (st.comp && st.comp.key) ? st.comp.ocr : null;
+  const monto = ocr ? Math.round(Number(ocr.monto) || 0) : 0;
+  const imp = Math.round(Number(st.importe) || 0);
+  if (monto > 0 && monto !== imp) return `<span style="color:#FFB020">El comprobante dice ${fmtMoney(monto)}</span> <button type="button" data-sp2-usar-monto style="background:none;border:0;padding:0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:11px">usar</button>`;
+  if (monto > 0 && st.importeFuente === 'ocr') return '<span style="color:var(--fg-subtle)">✓ importe leído del comprobante</span>';
+  if (st.importeFuente === 'saldo' && imp > 0) return '<span style="color:var(--fg-subtle)">= el saldo del pedido</span>';
+  return '';
+}
+// Avisos en vivo: caja distinta a la de la seña (informativo) y si el importe no cierra con el saldo.
+function sp2AvisosHtml(st) {
+  const out = [];
+  const caja1 = (st.p && st.p.caja) || '';
+  const caja2 = st.metodo === 'efectivo' ? 'Efectivo' : st.caja;
+  if (caja1 && caja2 && caja2 !== caja1) out.push({ c: 'var(--accent-cyan,#8FD4DE)', t: `ℹ Ojo: la seña fue a ${caja1}; en la planilla queda ${caja1}` });
+  const imp = Number(st.importe) || 0;
+  if (imp > 0 && st.saldo > 0 && Math.round(imp) !== Math.round(st.saldo)) out.push({ c: '#FFB020', t: imp < st.saldo ? `⚠ Queda debiendo ${fmtMoney(st.saldo - imp)}` : `⚠ Pagó ${fmtMoney(imp - st.saldo)} de más` });
+  if (imp > 0 && !(st.saldo > 0)) out.push({ c: '#FFB020', t: '⚠ Según el sistema este pedido ya no tiene saldo pendiente' });
+  return out.map(a => `<div style="font-size:12px;color:${a.c};margin-top:4px">${escapeHtml(a.t)}</div>`).join('');
+}
+function sp2Html(st) {
+  const ef = st.metodo === 'efectivo';
+  const cajaSena = (st.p && st.p.caja) || '';
+  const metBtn = (v, txt) => `<button type="button" data-sp2-metodo="${v}" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${pmOBtn(ef === (v === 'efectivo'))}">${txt}</button>`;
+  const cajaHtml = ef
+    ? `<div data-sp2-caja-row style="display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;font-size:13px;color:var(--fg)">💵 <b>Efectivo</b> <span style="font-size:11px;color:var(--fg-subtle)">· sin comprobante</span></div>`
+    : `<div data-sp2-caja-row style="display:flex;gap:6px;flex-wrap:wrap;border:1px solid var(--border);border-radius:var(--r-sm);padding:4px">${PAGO_CAJAS.map(c => `<button type="button" data-sp2-caja="${c}" style="flex:1;min-width:72px;padding:8px 6px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${pmOBtn(st.caja === c)}">${c}</button>`).join('')}</div>`;
+  const notaCaja = (!ef && st.caja && st.cajaDeOcr && !st.cajaManual) ? ' <span style="text-transform:none;letter-spacing:0;color:#3DDC97">— leída del comprobante</span>' : '';
+  const okContacto = compContactoValido(st.contacto);
+  const compHtml = ef ? '' : `<div style="margin-bottom:12px"><label style="${PM_LBL}">Comprobante del 2do pago *</label>${compPickerHtml({
+    pfx: 'sp2', sel: (st.comp && (st.comp.key || st.compEstado === 'subiendo')) ? st.comp : null, estado: st.compEstado, sug: st.sug,
+    sugEstado: okContacto ? st.sugEstado : 'sincontacto', ocTs: st.ocTs, verOtros: st.verOtros, buscable: okContacto,
+    sinContactoTxt: 'El pedido no tiene el teléfono / usuario del cliente: subí el comprobante.' })}</div>`;
+  return `
+    <div style="display:flex;gap:6px 14px;flex-wrap:wrap;font-size:13px;color:var(--fg-subtle);margin-bottom:12px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--ink-100)">
+      <span>Total <b style="color:var(--fg)">${fmtMoney(st.total)}</b></span>
+      <span>Seña <b style="color:var(--fg)">${fmtMoney(st.sena)}</b>${cajaSena ? ' (' + escapeHtml(cajaSena) + ')' : ''}</span>
+      <span>Saldo <b style="color:#FFB020">${fmtMoney(st.saldo)}</b></span>
+    </div>
+    <label style="${PM_LBL}">¿Cómo pagó el saldo?</label>
+    <div style="display:flex;gap:8px;margin-bottom:12px">${metBtn('transferencia', '🏦 Transferencia')}${metBtn('efectivo', '💵 Efectivo')}</div>
+    <div style="margin-bottom:12px"><label style="${PM_LBL}">${ef ? 'Caja' : '¿A qué caja pagó? *'}${notaCaja}</label>${cajaHtml}</div>
+    ${compHtml}
+    <div style="margin-bottom:4px"><label style="${PM_LBL}">${ef ? 'Importe en efectivo *' : 'Importe del 2do pago *'}</label><input data-sp2-importe type="number" inputmode="numeric" value="${escapeHtml(String(st.importe || ''))}" placeholder="$" style="${PM_INP}"></div>
+    <div data-sp2-hint style="font-size:11px">${sp2HintHtml(st)}</div>
+    <div data-sp2-avisos>${sp2AvisosHtml(st)}</div>
+    ${st.origen === 'chat' ? '<button type="button" data-sp2-nuevo style="background:none;border:0;padding:6px 0 0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:12px">¿No es el saldo de este pedido? Cargarlo como pedido nuevo →</button>' : ''}
+    ${st.err ? `<div style="margin-top:10px;font-size:12px;color:#FF5566;font-weight:600">${escapeHtml(st.err)}</div>` : ''}`;
+}
+// Re-pinta el cuerpo del modal conservando el scroll y el foco del importe (puede llegar el OCR mientras tipea).
+function sp2Pintar(st) {
+  if (!sp2Vivo(st)) return;
+  const body = st.bg.querySelector('[data-sp2-body]'); if (!body) return;
+  if (st.errTipo === 'val') { st.err = sp2Validar(st).map(x => x.msg).join(' · '); if (!st.err) st.errTipo = ''; }
+  const ae = document.activeElement;
+  const enImporte = !!(ae && body.contains(ae) && ae.hasAttribute && ae.hasAttribute('data-sp2-importe'));
+  const top = body.scrollTop;
+  body.innerHTML = sp2Html(st);
+  body.scrollTop = top;
+  sp2Bind(st, body);
+  if (enImporte) { const ni = body.querySelector('[data-sp2-importe]'); if (ni) { try { ni.focus({ preventScroll: true }); } catch (_) { ni.focus(); } } }
+  sp2Marcas(st);
+  const ok = st.bg.querySelector('[data-sp2-ok]');
+  if (ok) { ok.disabled = !!st.enviando; ok.textContent = st.enviando ? 'Guardando…' : '✓ Registrar 2do pago'; }
+  const cc = st.bg.querySelector('[data-sp2-cancel]'); if (cc) cc.disabled = !!st.enviando;
+}
+function sp2Bind(st, body) {
+  body.querySelectorAll('[data-sp2-metodo]').forEach(b => b.onclick = () => {
+    const v = b.getAttribute('data-sp2-metodo') === 'efectivo' ? 'efectivo' : 'transferencia';
+    if (st.metodo === v) return;
+    st.metodo = v; sp2Pintar(st);
+  });
+  body.querySelectorAll('[data-sp2-caja]').forEach(b => b.onclick = () => { st.caja = b.getAttribute('data-sp2-caja'); st.cajaManual = true; st.cajaDeOcr = false; sp2Pintar(st); });
+  const imp = body.querySelector('[data-sp2-importe]');
+  if (imp) imp.addEventListener('input', () => {
+    st.importe = imp.value; st.importeFuente = String(imp.value || '').trim() ? 'manual' : '';
+    sp2AvisosRefresh(st);
+    if (st.validado) sp2Marcas(st);
+  });
+  body.querySelectorAll('[data-sp2-usar-monto]').forEach(b => b.onclick = () => sp2UsarMonto(st));
+  const nuevo = body.querySelector('[data-sp2-nuevo]');
+  if (nuevo) nuevo.onclick = () => {
+    const c = (st.comp && st.comp.key) ? { key: st.comp.key, wamid: st.comp.wamid, tipo: st.comp.tipo, nombre: st.comp.nombre } : null;
+    st.cerrar(false);
+    cargarPedidoDesdeChat(c);
+  };
+  bindCompPicker(body, 'sp2', {
+    archivo: (f) => sp2SetArchivo(st, f),
+    sugerida: (k) => sp2UsarSugerida(st, k),
+    items: () => st.sug,
+    ver: () => { if (st.comp && st.comp.key) compVer(st.comp.key, st.comp.tipo, st.comp.nombre); },
+    quitar: () => sp2Quitar(st),
+    cancelar: () => sp2Cancelar(st),
+    cambiar: () => { st.verOtros = !st.verOtros; sp2Pintar(st); if (st.verOtros && st.sugEstado !== 'ok') sp2CargarSug(st, false); },
+    buscar: () => sp2CargarSug(st, true)
+  });
+}
+function sp2AvisosRefresh(st) {
+  if (!sp2Vivo(st)) return;
+  const a = st.bg.querySelector('[data-sp2-avisos]'); if (a) a.innerHTML = sp2AvisosHtml(st);
+  const h = st.bg.querySelector('[data-sp2-hint]');
+  if (h) { h.innerHTML = sp2HintHtml(st); h.querySelectorAll('[data-sp2-usar-monto]').forEach(b => b.onclick = () => sp2UsarMonto(st)); }
+}
+function sp2UsarMonto(st) {
+  const monto = Math.round(Number(st.comp && st.comp.ocr && st.comp.ocr.monto) || 0); if (!(monto > 0)) return;
+  st.importe = String(monto); st.importeFuente = 'ocr';
+  sp2Pintar(st);
+}
+function sp2Validar(st) {
+  const out = [];
+  if (st.metodo !== 'efectivo') {
+    if (!compCajaValida(st.caja)) out.push({ sel: '[data-sp2-caja-row]', msg: 'Elegí a qué caja pagó' });
+    if (st.compEstado === 'subiendo') out.push({ sel: '[data-sp2-comp-slot]', msg: 'Esperá que termine de subir el comprobante' });
+    else if (!st.comp || !st.comp.key) out.push({ sel: '[data-sp2-comp-slot]', msg: 'Falta el comprobante de pago' });
+  }
+  if (!(Number(st.importe) > 0)) out.push({ sel: '[data-sp2-importe]', msg: 'Poné el importe del 2do pago' });
+  return out;
+}
+function sp2Marcas(st) {
+  if (!sp2Vivo(st)) return;
+  st.bg.querySelectorAll('[data-sp2-invalid]').forEach(el => { el.style.borderColor = 'var(--border)'; el.style.boxShadow = ''; el.removeAttribute('data-sp2-invalid'); });
+  if (!st.validado) return;
+  for (const it of sp2Validar(st)) {
+    const el = st.bg.querySelector(it.sel); if (!el) continue;
+    el.style.borderColor = '#FF5566'; el.style.boxShadow = '0 0 0 2px rgba(255,85,102,.22)'; el.setAttribute('data-sp2-invalid', '1');
+  }
+}
+// OCR del comprobante elegido → caja (si no se eligió a mano) e importe (si no se tipeó a mano). Lo que había puesto
+// el comprobante anterior se deshace primero.
+function sp2AplicarOcr(st) {
+  const ocr = (st.comp && st.comp.key) ? st.comp.ocr : null;
+  if (st.cajaDeOcr && !st.cajaManual) { st.caja = ''; st.cajaDeOcr = false; }
+  const caja = ocr ? compCajaValida(ocr.caja) : '';
+  if (caja && !st.cajaManual) { st.caja = caja; st.cajaDeOcr = true; }
+  const monto = ocr ? Math.round(Number(ocr.monto) || 0) : 0;
+  if (monto > 0) { if (st.importeFuente !== 'manual') { st.importe = String(monto); st.importeFuente = 'ocr'; } }
+  else if (st.importeFuente === 'ocr') { st.importe = st.saldo > 0 ? String(Math.round(st.saldo)) : ''; st.importeFuente = st.saldo > 0 ? 'saldo' : ''; }
+}
+async function sp2CargarSug(st, force) {
+  if (!sp2Vivo(st) || !compContactoValido(st.contacto)) return; // sin contacto el recuadro ya dice "subí el comprobante"
+  if (st.pidiendo || (!force && st.sugEstado === 'ok')) return;
+  st.pidiendo = true; st.sugEstado = 'buscando'; sp2Pintar(st);
+  try {
+    const r = await disenoFetch(CONFIG.trackerUrl + '/admin/pedidos/comprobante-sugerencias?phone=' + encodeURIComponent(st.contacto) + '&ocr=1', { headers: authHeaders() }, 60000);
+    const j = await r.json().catch(() => ({}));
+    if (st.cerrado) return;
+    if (!r.ok || !j || j.error) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    st.sug = Array.isArray(j.items) ? j.items : []; st.ocTs = j.oc_ts || ''; st.sugEstado = 'ok';
+    // Comprobante que vino elegido desde el chat: si está entre las sugerencias, se usa su lectura del OCR.
+    if (st.comp && st.comp.key && !st.comp.ocr) {
+      const it = st.sug.find(x => x.key === st.comp.key);
+      if (it) { st.comp.ocr = compOcrDe(it); if (!st.comp.wamid) st.comp.wamid = it.wamid || ''; sp2AplicarOcr(st); }
+    }
+  } catch (_) { if (!st.cerrado) st.sugEstado = 'error'; }
+  finally { st.pidiendo = false; if (!st.cerrado) sp2Pintar(st); }
+}
+function sp2UsarSugerida(st, key) {
+  const it = (st.sug || []).find(x => x.key === key); if (!it) return;
+  st.compTok++;
+  if (st.comp) compBlobLibre(st.comp.preview);
+  if (st.compPrev) compBlobLibre(st.compPrev.preview);
+  st.comp = { key: it.key, wamid: it.wamid || '', tipo: it.tipo || compTipoDeKey(it.key) || 'image', nombre: it.nombre || '', preview: '', ocr: compOcrDe(it) };
+  st.compPrev = null; st.compEstado = ''; st.verOtros = false;
+  sp2AplicarOcr(st);
+  sp2Pintar(st);
+}
+async function sp2Asignar(st, preview, tipo, nombre, obtener) {
+  const tok = ++st.compTok;
+  if (st.compEstado !== 'subiendo') st.compPrev = st.comp;
+  else if (st.comp) compBlobLibre(st.comp.preview);
+  st.comp = { key: '', wamid: '', tipo, nombre, preview, ocr: null };
+  st.compEstado = 'subiendo'; st.verOtros = false;
+  sp2Pintar(st);
+  let res = null, err = null;
+  try { res = await obtener(); } catch (e) { err = e; }
+  if (st.compTok !== tok || st.cerrado) return; // cancelada, reemplazada o modal cerrado
+  if (res && res.key) {
+    const prev = st.compPrev; if (prev && prev.preview && prev.preview !== preview) compBlobLibre(prev.preview);
+    st.comp = { key: res.key, wamid: '', tipo: res.tipo || tipo, nombre, preview, ocr: compOcrDe(res) };
+    st.compPrev = null; st.compEstado = '';
+    sp2AplicarOcr(st);
+  } else {
+    compBlobLibre(preview);
+    st.comp = st.compPrev || null; st.compPrev = null;
+    st.compEstado = (st.comp && st.comp.key) ? '' : 'error';
+    niToast('No se pudo subir el comprobante: ' + ((err && err.message) || err || ''), { error: true });
+  }
+  sp2Pintar(st);
+}
+function sp2SetArchivo(st, file) {
+  if (!file || !sp2Vivo(st)) return;
+  const esPdf = /pdf/i.test(file.type || '') || /\.pdf$/i.test(file.name || '');
+  if (!esPdf && !/^image\//.test(file.type || '')) { niToast('El comprobante tiene que ser una foto o un PDF', { error: true }); return; }
+  if (st.metodo === 'efectivo') { niToast('En efectivo no hace falta comprobante'); return; }
+  sp2Asignar(st, esPdf ? '' : URL.createObjectURL(file), esPdf ? 'pdf' : 'image', esPdf ? (file.name || 'comprobante.pdf') : '', () => compSubirArchivo(file));
+}
+function sp2Cancelar(st) {
+  if (st.compEstado !== 'subiendo') return;
+  st.compTok++;
+  if (st.comp) compBlobLibre(st.comp.preview);
+  st.comp = st.compPrev || null; st.compPrev = null; st.compEstado = '';
+  sp2Pintar(st);
+}
+function sp2Quitar(st) {
+  st.compTok++;
+  if (st.comp) compBlobLibre(st.comp.preview);
+  if (st.compPrev) compBlobLibre(st.compPrev.preview);
+  st.comp = null; st.compPrev = null; st.compEstado = ''; st.verOtros = false;
+  sp2AplicarOcr(st);
+  sp2Pintar(st);
+}
+async function sp2Confirmar(st) {
+  if (st.enviando || !sp2Vivo(st)) return;
+  st.validado = true;
+  const inv = sp2Validar(st);
+  if (inv.length) { st.err = inv.map(x => x.msg).join(' · '); st.errTipo = 'val'; sp2Pintar(st); return; }
+  const ef = st.metodo === 'efectivo';
+  const usado = (!ef && st.comp && st.comp.ocr && Array.isArray(st.comp.ocr.usado_en)) ? st.comp.ocr.usado_en : [];
+  if (usado.length && !(await showConfirm('Ese comprobante ya está cargado en el pedido ' + usado.map(u => '#' + u.numero + (u.cartel ? ' (' + u.cartel + ')' : '')).join(', ') + '.\n\n¿Seguro que es el 2do pago de este pedido?', { title: 'Comprobante repetido', variant: 'warn', confirmLabel: 'Sí, es este', cancelLabel: 'Cambiarlo' }).catch(() => false))) return;
+  if (!sp2Vivo(st)) return;
+  st.enviando = true; st.err = ''; st.errTipo = ''; sp2Pintar(st);
+  const body = {
+    pago_metodo: ef ? 'efectivo' : 'transferencia',
+    caja: ef ? 'Efectivo' : st.caja,
+    importe: Math.round(Number(st.importe) || 0),
+    comprobante_key: ef ? '' : st.comp.key,
+    comprobante_wamid: ef ? '' : (st.comp.wamid || '')
+  };
+  let r = null, j = {};
+  try {
+    r = await disenoFetch(CONFIG.trackerUrl + '/admin/pedidos/' + st.idx + '/segundo-pago', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, 45000);
+    j = await r.json().catch(() => ({}));
+  } catch (e) { j = { error: (e && e.message) || 'error de red' }; }
+  if (st.cerrado) return;
+  if (!r || !r.ok || !j || !j.ok) {
+    st.enviando = false; st.errTipo = 'server';
+    st.err = (j && j.error) || (r && r.status === 403 ? 'Ese pedido es de otro vendedor' : ('No se pudo registrar el 2do pago' + (r ? ' (HTTP ' + r.status + ')' : '')));
+    sp2Pintar(st);
+    return;
+  }
+  const updated = (j.pedidos || []).map(mapPedidoFromD1);
+  if (updated.length) { const ids = new Set(updated.map(x => x.idx)); STATE.pedidos = STATE.pedidos.filter(x => !ids.has(x.idx)).concat(updated); }
+  st.enviando = false;
+  st.cerrar(true);
+  renderTablePedidos(); // no-op si la tabla no está en pantalla
+  refreshPanelSueldo(); // ficha abierta desde "Tu sueldo" del Dashboard → comisión al día
+  try { rendState.cache = {}; if (STATE.view === 'rendimiento') loadRendimiento(true); } catch (_) {}
+  // Drawer abierto en ese pedido (o en otro cartel del mismo): refrescarlo con el cobro registrado.
+  const d = document.getElementById('drawer');
+  const secP = (d && d.classList.contains('open')) ? d.querySelector('[data-ped-pagos-idx]') : null;
+  const enDrawer = secP ? parseInt(secP.getAttribute('data-ped-pagos-idx'), 10) : NaN;
+  if (secP && (enDrawer === st.idx || updated.some(x => x.idx === enDrawer))) openDrawerPedido(enDrawer);
+  const avisos = Array.isArray(j.avisos) ? j.avisos.filter(Boolean) : [];
+  niToast(`2do pago registrado ✓ · #${j.numero || st.numero}` + (avisos.length ? ' — ' + avisos.join(' · ') : ''), { ms: avisos.length ? 9000 : 3000 });
+}
+
+// ----- Agilidad desde el chat -----
+// Pedido del cliente en '1er pago' (el más nuevo): WPP por los últimos 8 dígitos; IG por IGSID o @usuario.
+// ¿Ese pedido es de este contacto del chat? WPP por los últimos 8 dígitos; IG por IGSID o @usuario.
+function pedidoDeContactoMatcher(phone) {
+  const ph = String(phone || '').trim(); if (!ph) return () => false;
+  const dig = ph.replace(/\D/g, '');
+  const contact = (chatState.contacts || []).find(c => c.phone === ph) || {};
+  const uname = String(contact.username || (chatState.waContactUsernames && chatState.waContactUsernames[ph]) || '').replace(/^@/, '').toLowerCase();
+  const esIg = contact.channel === 'ig' || dig.length >= 15;
+  return (p) => {
+    const t = String(p.telefono || '').trim(); if (!t) return false;
+    const td = t.replace(/\D/g, '');
+    if (uname && /^@|[a-z_.]/i.test(t) && t.replace(/^@/, '').toLowerCase() === uname) return true;
+    if (esIg) return !!td && td === dig;
+    return dig.length >= 8 && td.length >= 8 && td.slice(-8) === dig.slice(-8);
+  };
+}
+function pedidoEnPrimerPagoDe(phone) {
+  const ph = String(phone || '').trim(); if (!ph) return null;
+  const match = pedidoDeContactoMatcher(ph);
+  // Solo pedidos con saldo de verdad y recientes: un pedido viejo que nunca se pasó a '2do pago' no se lleva la seña
+  // de una compra nueva del mismo cliente.
+  const ahora = Date.now();
+  const vigente = (p) => !(Number(p.cobro2) > 0) && Number(p.restante) > 0 && (!(+p.fecha) || ahora - (+p.fecha) < 120 * 86400e3);
+  const cands = (STATE.pedidos || []).filter(p => /1er|primer/i.test(String(p.estadoPago || '')) && match(p) && vigente(p));
+  if (!cands.length) return null;
+  return cands.reduce((a, b) => ((+b.fecha || 0) > (+a.fecha || 0) || ((+b.fecha || 0) === (+a.fecha || 0) && b.idx > a.idx)) ? b : a);
+}
+// "📦 Cargar pedido" del header del chat: con la última OC que le mandamos (si hay) o vacío con el contacto puesto.
+// comp = comprobante ya elegido ("Usar como comprobante"). Como el modal solo vive en la vista Pedidos, navega ahí
+// (igual que cargarPedidoDesdeOC).
+async function cargarPedidoDesdeChat(comp) {
+  if (!canCotizar() || isCursosOnly()) return;
+  const phone = chatState.selectedPhone;
+  if (!phone) { toast('Abrí un chat primero'); return; }
+  // Hay un "Cargar pedido" a medio llenar (quedó oculto con el "atrás" del celular): no se pisa sin preguntar.
+  const prev = STATE.pedidoModalOpen ? STATE.pedidoModal : null;
+  if (prev && (prev.carteles || []).some(c => String(c.cartel || '').trim() || Number(c.precio) > 0 || c.foto_key || c.foto_preview)) {
+    const irAlModal = () => { STATE.view = 'pedidos'; if (location.hash !== '#pedidos') location.hash = 'pedidos'; render(); };
+    const mismo = String(prev.telefono || '').replace(/\D/g, '').slice(-8) === String(phone).replace(/\D/g, '').slice(-8) || String(prev._igsid || '') === String(phone);
+    if (comp && mismo) { pmPreseleccionarComp(prev, comp); irAlModal(); return; }
+    const ok = await showConfirm('Tenés un pedido a medio cargar' + (prev.telefono ? ' (' + prev.telefono + ')' : '') + '.\n\n¿Lo descartás y empezás uno con este chat?', { title: 'Pedido a medio cargar', variant: 'warn', confirmLabel: 'Descartar y empezar', cancelLabel: 'Seguir con el otro' }).catch(() => false);
+    if (!ok) { irAlModal(); return; }
+    pmFotoLiberarTodo(prev);
+  }
+  const ocs = (chatState.messages || []).filter(x => x && x.wamid && x.direction === 'outbound' && String(x.body || '').trimStart().startsWith('Orden de compra:'));
+  if (ocs.length) {
+    const oc = ocs.reduce((a, b) => (String(b.ts || '') > String(a.ts || '') ? b : a));
+    // ¿Esa OC ya tiene pedido? (un pedido de este cliente del mismo día de la OC o posterior, en fecha AR) → no duplicar sin preguntar.
+    const ocDia = oc.ts ? new Date(Date.parse(oc.ts) - 3 * 3600e3).toISOString().slice(0, 10) : '';
+    const match = pedidoDeContactoMatcher(phone);
+    const ya = ocDia ? (STATE.pedidos || []).find(p => match(p) && +p.fecha && new Date(+p.fecha - new Date(+p.fecha).getTimezoneOffset() * 60e3).toISOString().slice(0, 10) >= ocDia) : null;
+    let usarOc = true;
+    if (ya) usarOc = await showConfirm(`La última OC de este chat ya parece cargada (pedido #${ya.numero || '?'} · ${ya.cartel || ''}).\n\n¿Cargar otro pedido desde esa OC igual?`, { title: 'OC ya cargada', variant: 'warn', confirmLabel: 'Sí, desde la OC', cancelLabel: 'No, pedido vacío' }).catch(() => false);
+    if (usarOc) { cargarPedidoDesdeOC(oc.wamid, comp ? { comp } : undefined); return; }
+  }
+  const contact = (chatState.contacts || []).find(c => c.phone === phone);
+  const channel = (contact && contact.channel) || chatState.channel || 'wa';
+  const uname = (contact && contact.username) || (chatState.waContactUsernames && chatState.waContactUsernames[phone]) || '';
+  const m = {
+    numero: suggestProximoNumero(), plataforma: channel === 'ig' ? 'IG' : 'WPP',
+    telefono: channel === 'ig' ? (uname ? '@' + String(uname).replace(/^@/, '') : String(phone)) : String(phone),
+    estadoPago: '1er pago', pagado: '', ad: '', sourceId: '', carteles: [nuevoCartelPedido()], ...pmPagoDefaults()
+  };
+  m._igsid = channel === 'ig' ? String(phone) : '';
+  if (comp) pmPreseleccionarComp(m, comp);
+  STATE.pedidoModal = m;
+  STATE._pmBriefsTel = {};
+  STATE.pedidoModalSaving = false;
+  STATE.pedidoModalOpen = true;
+  STATE.view = 'pedidos';
+  if (location.hash !== '#pedidos') location.hash = 'pedidos';
+  render();
+  setTimeout(() => { try { pmTraceAd(); } catch (_) {} }, 250);
+  setTimeout(() => { const el = document.getElementById('pm-cartel-0'); if (el) el.focus(); }, 80);
+}
+// Menú de un mensaje ENTRANTE con foto / PDF → "🧾 Usar como comprobante": si el cliente tiene un pedido en
+// '1er pago' es el saldo (modal de 2do pago); si no, es la seña de un pedido nuevo (Cargar pedido).
+function usarComoComprobante(wamid) {
+  if (!canCotizar() || isCursosOnly()) return;
+  const msg = findMessageByWamid(wamid);
+  const key = String((msg && msg.media_url) || '');
+  if (!msg || !/^(wa|ig)\//.test(key)) { toast('Ese archivo no está disponible'); return; }
+  const esPdf = /\.pdf($|\?)/i.test(key) || (msg.msg_type === 'document' && /\.pdf$/i.test(String(msg.body || '').trim()));
+  if (msg.msg_type === 'document' && !esPdf) { toast('Como comprobante sirve una foto o un PDF'); return; }
+  const comp = { key, wamid: msg.wamid || wamid, tipo: esPdf ? 'pdf' : 'image', nombre: msg.msg_type === 'document' ? String(msg.body || '').slice(0, 80) : '' };
+  const phone = msg.phone || chatState.selectedPhone;
+  let ped = pedidoEnPrimerPagoDe(phone);
+  // Una OC mandada un día POSTERIOR al pedido = compra nueva: el comprobante es la seña de ese pedido nuevo.
+  const ultOc = (chatState.messages || []).filter(x => x && x.direction === 'outbound' && String(x.body || '').trimStart().startsWith('Orden de compra:'))
+    .reduce((a, b) => (String(b.ts || '') > a ? String(b.ts || '') : a), '');
+  if (ped && ultOc && +ped.fecha && new Date(ultOc).getTime() > (+ped.fecha) + 86400e3) ped = null;
+  if (ped) abrirSegundoPago(ped.idx, { origen: 'chat', comp, contacto: String(phone || '') });
+  else cargarPedidoDesdeChat(comp);
 }
 
 // ---------- PRESUPUESTOS ----------
@@ -12516,12 +13599,13 @@ function openDrawerPedido(idx) {
       </div>
       ${disenoDrawerSection(p)}
       ${prodDrawerSection(p)}${sfDrawerSection(p)}
+      ${pagosDrawerSection(p)}
       <div class="drawer-section">
         <h4>Estado, pago y productor ${hermanos.length>1?`<span style="font-size:11px;color:var(--fg-subtle);font-weight:400">· aplica a los ${hermanos.length} carteles</span>`:''}</h4>
         <div style="display:flex;flex-direction:column;gap:10px">
           <div><label style="${lblD}">Estado del pedido</label><select id="ped-edit-estadopedido" style="${inpD}">${pedOpts}</select></div>
           <div style="display:flex;gap:8px">
-            <div style="flex:1"><label style="${lblD}">Estado del pago</label><select id="ped-edit-estadopago" style="${inpD}">${pagoOpts}</select></div>
+            <div style="flex:1"><label style="${lblD}">Estado del pago</label><select id="ped-edit-estadopago" onchange="pedPagoSelectChange(${idx}, this)" style="${inpD}">${pagoOpts}</select></div>
             <div style="flex:1"><label style="${lblD}">Pagado</label><input id="ped-edit-pagado" type="number" value="${p.pagado||''}" style="${inpD}"></div>
           </div>
           ${esCorp ? `<div><label style="${lblD}">Productor</label><input id="ped-edit-productor" value="${escapeHtml(p.productor||'')}" placeholder="quién lo produce (lo cargás vos)" style="${inpD}"></div>` : ''}
@@ -12669,8 +13753,22 @@ async function verAnuncioPedido(idx) {
 // Cambio rápido de un solo campo (estado_pago / estado_pedido) desde el dropdown
 // inline de la tabla. PATCH a nivel pedido; refresca STATE + repinta la tabla.
 async function savePedidoField(idx, field, value) {
+  let revert2 = false;
+  if (field === 'estado_pago') {
+    const p0 = STATE.pedidos.find(x => x.idx === idx);
+    // Marcar '2do pago' = registrar el cobro del saldo: abre el modal (comprobante / caja / importe) en vez del PATCH.
+    // Si lo cancelan, el modal re-pinta la tabla y el select vuelve a como estaba.
+    if (value === '2do pago' && p0 && p0.estadoPago !== '2do pago') { abrirSegundoPago(idx, { origen: 'tabla' }); return; }
+    // Volver a '1er pago' borra el 2do pago registrado (lo hace el server, solo con pago2_revert): se confirma antes.
+    if (p0 && p0.estadoPago === '2do pago' && value !== '2do pago' && (Number(p0.cobro2) > 0 || p0.comprobante2Key)) {
+      const ok = await showConfirm(`Se borra el 2do pago registrado (${fmtMoney(p0.cobro2)}${p0.caja2 ? ' a ' + p0.caja2 : ''}).\n\n¿Volver a 1er pago?`, { title: 'Volver a 1er pago', variant: 'warn', confirmLabel: 'Sí, volver', cancelLabel: 'No' }).catch(() => false);
+      if (!ok) { renderTablePedidos(); return; }
+      revert2 = true;
+    }
+  }
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx, { method: 'PATCH', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ [field]: value }) });
+    const _body = { [field]: value }; if (revert2) _body.pago2_revert = true;
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx, { method: 'PATCH', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(_body) });
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
     const updated = (j.pedidos || []).map(mapPedidoFromD1);
@@ -12711,8 +13809,12 @@ async function savePedidoEdit(idx) {
     aclaracion:    document.getElementById('ped-edit-aclaracion')?.value,
     // Campos del pedido (aplican a todos los carteles del mismo pedido — ver pedidoHermanos).
     estado_pedido: document.getElementById('ped-edit-estadopedido')?.value,
-    estado_pago:   document.getElementById('ped-edit-estadopago')?.value,
-    pagado:        document.getElementById('ped-edit-pagado')?.value,
+    // '1er pago' → '2do pago' NUNCA por PATCH: el cobro del saldo se registra en su modal (abrirSegundoPago).
+    // Solo si CAMBIÓ: mandarlo siempre (con el valor de cuando se abrió la ficha) borraba un 2do pago que otro
+    // registró mientras tanto. Volver de un 2do pago registrado va con pago2_revert (ya confirmado en el select).
+    estado_pago:   (() => { const v = document.getElementById('ped-edit-estadopago')?.value; if (v == null || v === p.estadoPago) return undefined; return (v === '2do pago') ? undefined : v; })(),
+    pago2_revert:  (() => { const v = document.getElementById('ped-edit-estadopago')?.value; return (v != null && v !== '2do pago' && p.estadoPago === '2do pago' && (Number(p.cobro2) > 0 || p.comprobante2Key)) ? true : undefined; })(),
+    pagado:        (() => { const v = document.getElementById('ped-edit-pagado')?.value; if (v == null) return undefined; const a = v === '' ? null : Number(v), b = (p.pagado === '' || p.pagado == null) ? null : Number(p.pagado); return a === b ? undefined : v; })(),
     productor:     document.getElementById('ped-edit-productor')?.value,
     asistido_por:  (isAdmin() && document.getElementById('ped-edit-asistido') && document.getElementById('ped-edit-asistido').value !== (p.asistidoPor || '')) ? document.getElementById('ped-edit-asistido').value : undefined
   };
@@ -13641,10 +14743,16 @@ function bindCommon() {
       const tgt = ev.target;
       if (tgt && /^(INPUT|TEXTAREA)$/.test(tgt.tagName) && [...items].some(it => it.kind === 'string' && it.type === 'text/plain')) return;
       let file = null;
-      for (const it of items) { if (it.kind === 'file' && (it.type || '').startsWith('image/')) { file = it.getAsFile(); if (file) break; } }
+      for (const it of items) { if (it.kind === 'file' && /^(image\/|application\/pdf)/.test(it.type || '')) { file = it.getAsFile(); if (file) break; } }
       if (!file) return;
+      // Destino: el COMPROBANTE de pago si el vendedor está en el bloque "💳 Pago" (o ya no queda cartel sin foto);
+      // un PDF nunca es la foto del diseño. Si no, como siempre: la foto del diseño del primer cartel sin foto.
+      const esPdf = /pdf/i.test(file.type || '');
+      const alComp = pmPegarAlComprobante(STATE.pedidoModal) || (esPdf && STATE.pedidoModal && STATE.pedidoModal.pagoMetodo !== 'efectivo');
+      if (esPdf && !alComp) return;
       ev.preventDefault();
       ev.stopImmediatePropagation();
+      if (alComp) { pmCompSetArchivo(file); return; }
       const i = pmCartelSinFoto();
       if (i < 0) { toast('Todos los carteles ya tienen foto (usá "Cambiar")'); return; }
       pmFotoSetArchivo(i, file);
@@ -17816,6 +18924,7 @@ function renderChatConversation() {
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-oc" title="Crear la Orden de Compra y enviarla al cliente (se etiqueta POR PAGAR y quedás avisado)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 Crear OC</button>` : ''}
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-oc-corp" title="Crear la OC de un corpóreo (letra 3D) — pre-llena frente/laterales/color del brief; se etiqueta POR PAGAR y quedás avisado" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 OC corpórea</button>` : ''}
+        ${(canCotizar() && !isCursosOnly()) ? `<button class="btn btn-cyan" id="btn-chat-pedido" title="Cargar el pedido de este cliente: usa la última OC del chat (si hay) y te sugiere el comprobante que mandó" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📦 Cargar pedido</button>` : ''}
         ${(getUserRole() === 'comercial') ? (() => {
           const _lbls = chatState.labels || [];
           const _pre = _lbls.find(l => l.name === '🤖 Precotización');
@@ -18863,6 +19972,9 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
   document.getElementById('msg-action-menu')?.remove();
   const _m = findMessageByWamid(wamid);
   const _hasText = !!(_m && _m.body && String(_m.body).trim() && _m.msg_type !== 'reaction');
+  // Foto / PDF que MANDÓ el cliente → "Usar como comprobante" (seña de un pedido nuevo o saldo del que está en 1er pago).
+  const _puedeComp = !!(_m && _m.direction === 'inbound' && (msgType === 'image' || msgType === 'document')
+    && /^(wa|ig)\//.test(String(_m.media_url || '')) && canCotizar() && !isCursosOnly());
   const menu = document.createElement('div');
   menu.id = 'msg-action-menu';
   menu.className = 'chat-context-menu';
@@ -18889,6 +20001,11 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
       <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
       Copiar texto
     </button>` : ''}
+    ${_puedeComp ? `
+    <button class="ccm-item" data-action="usar-comprobante">
+      <span style="display:inline-block;width:16px;text-align:center;font-size:14px;line-height:16px">🧾</span>
+      Usar como comprobante
+    </button>` : ''}
   `;
   document.body.appendChild(menu);
   const rect = menu.getBoundingClientRect();
@@ -18902,6 +20019,8 @@ function showMessageActionsMenu(x, y, wamid, msgType) {
     document.addEventListener('click', closer, true);
     document.addEventListener('keydown', escer);
   }, 0);
+  const usarCompBtn = menu.querySelector('[data-action="usar-comprobante"]');
+  if (usarCompBtn) usarCompBtn.onclick = (ev) => { ev.stopPropagation(); close(); usarComoComprobante(wamid); };
   menu.querySelector('[data-action="forward"]').onclick = (ev) => {
     ev.stopPropagation();
     close();
@@ -19495,6 +20614,9 @@ function bindChatConversation() {
   if (chatOcBtn) chatOcBtn.onclick = () => openCrearOcModal(false);
   const chatOcCorpBtn = document.getElementById('btn-chat-oc-corp');
   if (chatOcCorpBtn) chatOcCorpBtn.onclick = () => openCrearOcModal(true);
+  // "📦 Cargar pedido": con la última OC del chat (si hay) o vacío con el contacto del chat ya puesto.
+  const chatPedidoBtn = document.getElementById('btn-chat-pedido');
+  if (chatPedidoBtn) chatPedidoBtn.onclick = () => cargarPedidoDesdeChat(null);
   const frenarBotBtn = document.getElementById('btn-frenar-bot');
   if (frenarBotBtn) frenarBotBtn.onclick = async () => {
     const _ph = chatState.selectedPhone;
@@ -19575,7 +20697,8 @@ function bindChatConversation() {
     // cuando toca el input.
     // Y nunca con el popup de OC sin pagar abierto: el teclado iría al compositor TAPADO por el overlay
     // (lo tipeado para el motivo terminaba en el borrador del cliente y un Enter se lo mandaba).
-    if (!_isMobileViewport() && !document.querySelector('[data-oc-bg]')) ta.focus();
+    // Con el modal de 2do pago abierto, no: lo que se tipea del importe iba al chat (y un Enter se lo mandaba al cliente).
+    if (!_isMobileViewport() && !document.querySelector('[data-oc-bg]') && !STATE._sp2) ta.focus();
   }
   if (btn) {
     btn.onclick = () => {
@@ -26155,7 +27278,8 @@ function startBriefsPolling() {
 function pedidosSignature() {
   // + foto del diseño / estado del corte: si la foto se sube desde otro dispositivo (o Emma avanza la
   // matriz), el poll tiene que redibujar la tabla (badge "SIN FOTO").
-  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}:${p.disenoKey || ''}:${p.corteEstado || ''}`).join('|');
+  // + caja / 2do pago / comprobantes: el chip de caja de la tabla tiene que reflejar un cobro cargado desde otro lado.
+  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}:${p.disenoKey || ''}:${p.corteEstado || ''}:${p.caja || ''}:${p.caja2 || ''}:${p.cobro2 || 0}:${p.comprobanteKey || ''}:${p.comprobante2Key || ''}`).join('|');
 }
 function startPedidosPolling() {
   if (STATE.pedidosPollTimer) return;
@@ -26168,7 +27292,7 @@ function startPedidosPolling() {
     const ae = document.activeElement;
     const editing = ae && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName);
     const drawerOpen = document.getElementById('drawer')?.classList.contains('open');
-    if (STATE.pedidoModalOpen || drawerOpen || STATE.imgLightboxUrl || editing) return;
+    if (STATE.pedidoModalOpen || drawerOpen || STATE.imgLightboxUrl || editing || STATE._sp2) return; // _sp2: modal "Registrar 2do pago" abierto
     const before = pedidosSignature();
     const fresh = await fetchPedidosFromD1();
     if (!fresh || !fresh.length) return;  // fetch falló o vino vacío → no pisar la tabla

@@ -24057,19 +24057,22 @@ const handler = {
         // marcar 'Entregado' el de un cliente se lo marcaba al otro (y su pieza sin diseñar salía de la cola
         // de Emma). Las filas del Excel/backfill no: ahí el teléfono suele estar solo en la primera fila.
         if (ref.origen === 'crm' && ref.tel) { _grp += " AND origen = 'crm' AND IFNULL(telefono,'') = ?"; _grpArgs.push(ref.tel); }
-        const oSets = [], oArgs = [];
-        if ('estado_pedido' in body) { oSets.push('estado_pedido = ?'); oArgs.push(String(body.estado_pedido || '')); }
-        if ('estado_pago' in body)   { oSets.push('estado_pago = ?');   oArgs.push(String(body.estado_pago || '')); }
-        if ('productor' in body)     { oSets.push('productor = ?');     oArgs.push(String(body.productor || '')); }
-        const pagadoInBody = ('pagado' in body);
         // Volver de '2do pago' a otro estado borra el 2do pago registrado (cobro2/caja2/comprobante2) y el saldo vuelve.
         // El paso a '2do pago' lo hace POST /admin/pedidos/:id/segundo-pago (modal con comprobante/importe); el front nuevo
         // no lo manda por acá, el viejo en caché sí (queda como antes: estado sin cobro2).
-        let pago2Revert = false;
+        // Con un 2do pago REGISTRADO (cobro2) solo se revierte con pago2_revert:true (el front lo manda tras confirmar):
+        // un drawer viejo/desactualizado manda estado_pago siempre, con el valor que tenía al abrirse, y borraba el cobro.
+        let pago2Revert = false, estadoPagoIgnorado = false;
         if (('estado_pago' in body) && String(body.estado_pago || '') !== '2do pago') {
           const _ep = await env.DB.prepare(`SELECT IFNULL(estado_pago,'') e, cobro2 FROM pedidos WHERE ${_grp} LIMIT 1`).bind(..._grpArgs).first();
-          pago2Revert = !!_ep && (_ep.e === '2do pago' || _ep.cobro2 != null);
+          if (_ep && _ep.cobro2 != null) { if (body.pago2_revert === true) pago2Revert = true; else estadoPagoIgnorado = true; }
+          else pago2Revert = !!_ep && _ep.e === '2do pago';
         }
+        const oSets = [], oArgs = [];
+        if ('estado_pedido' in body) { oSets.push('estado_pedido = ?'); oArgs.push(String(body.estado_pedido || '')); }
+        if (('estado_pago' in body) && !estadoPagoIgnorado) { oSets.push('estado_pago = ?'); oArgs.push(String(body.estado_pago || '')); }
+        if ('productor' in body)     { oSets.push('productor = ?');     oArgs.push(String(body.productor || '')); }
+        const pagadoInBody = ('pagado' in body);
         if (pagadoInBody || precioChanged || pago2Revert) {
           const cur = await env.DB.prepare(`SELECT pagado, cobro2 FROM pedidos WHERE ${_grp} LIMIT 1`).bind(..._grpArgs).first();
           let pagado;
@@ -24109,6 +24112,7 @@ const handler = {
           touched = true;
         }
 
+        if (!touched && estadoPagoIgnorado) return json({ error: 'Ese pedido ya tiene registrado el 2do pago. Recargá la app para volverlo a 1er pago.' }, 409);
         if (!touched) return json({ error: 'nada para actualizar' }, 400);
         const rs2 = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs) };
         return json({ ok: true, numero: ref.numero, pedidos: rs2.results || [] });
@@ -24146,7 +24150,12 @@ const handler = {
         let _grp = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?";
         const _grpArgs = [ref.numero, ref.fecha, ref.com];
         if (ref.origen === 'crm' && ref.tel) { _grp += " AND origen = 'crm' AND IFNULL(telefono,'') = ?"; _grpArgs.push(ref.tel); }
-        const g = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t, MAX(pagado) AS pagado, MAX(IFNULL(caja,'')) AS caja, MAX(cobro2) AS cobro2 FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
+        const g = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t, MAX(pagado) AS pagado, MAX(IFNULL(caja,'')) AS caja, MAX(cobro2) AS cobro2, MAX(IFNULL(comprobante_key,'')) AS ck1 FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
+        // El comprobante de la seña no puede ser también el del saldo (el caso típico de "Usar como comprobante" sobre la
+        // foto equivocada). Si ese archivo ya es comprobante de OTRO pedido, se registra igual pero se avisa.
+        if (compKey && g && g.ck1 === compKey) return json({ error: 'Ese comprobante es el de la seña de este pedido: elegí el del saldo', campo: 'comprobante' }, 400);
+        let _usadoEn = null;
+        if (compKey) { try { _usadoEn = await env.DB.prepare(`SELECT numero, cartel FROM pedidos WHERE (comprobante_key = ? OR comprobante2_key = ?) AND NOT (${_grp}) LIMIT 1`).bind(compKey, compKey, ..._grpArgs).first(); } catch (_) {} }
         const total = g ? Number(g.t) || 0 : 0;
         const pagado1 = g && g.pagado != null ? Number(g.pagado) || 0 : 0;
         const saldo = Math.max(0, total - pagado1);
@@ -24160,6 +24169,7 @@ const handler = {
         if (g && g.cobro2 != null && Number(g.cobro2) !== importe) avisos.push(`Se reemplazó el 2do pago anterior (${fm(Number(g.cobro2))})`);
         if (caja1 && caja1 !== caja) avisos.push(`La seña fue a ${caja1} y el saldo a ${caja}: en la planilla queda ${caja1}`);
         if (!caja1) avisos.push('Este pedido no tiene cargada la caja de la seña');
+        if (_usadoEn) avisos.push(`Ojo: ese comprobante también está cargado en el pedido #${_usadoEn.numero}${_usadoEn.cartel ? ' (' + String(_usadoEn.cartel).slice(0, 40) + ')' : ''}`);
         if (importe < saldo - 1) avisos.push(`Queda debiendo ${fm(saldo - importe)}`);
         else if (importe > saldo + 1) avisos.push(`Pagó ${fm(importe - saldo)} de más`);
         if (caja1 && caja1 !== caja) {
