@@ -17173,19 +17173,22 @@ async function maybeAdhocCleanup(env) {
 // Gaspar (15-oct): cada productor tiene su usuario y ve SOLO sus carteles asignados, sin el precio de venta: lo que
 // le corresponde, color, foto del diseño y aclaraciones; pone el estado de cada uno y al terminarlo sube sí o sí una
 // foto de cada cartel. Gaspar asigna los carteles desde Pedidos / Producción y marca qué trabajos ya les pagó.
-// Mano de obra desde kv 'mo_desde' (regla tiempo_v1): % del precio + $ por minuto de armado según los tiempos de
-// Bruno (42 min fijos + 2,41 por tramo + 4,44 por metro + 14,3 por m²), × cantidad, con tope % del precio. Calibrada
-// para no pagar más que el 12% de antes (memoria mano-obra-por-tiempo). Los pedidos anteriores: % del mes (pct_mes).
-// Params editables en Admin (cotizador_params mo_*). El monto queda guardado en el pedido y se congela al pagarlo.
-const MO_DEFAULTS = { mo_pct_precio: 0.058, mo_valor_min: 125, mo_min_fijo: 42, mo_min_tramo: 2.41, mo_min_metro: 4.44, mo_min_m2: 14.3, mo_tope_pct: 0.18 };
+// Mano de obra desde kv 'mo_desde' (regla tiempo_v1): % del precio + $ por minuto de armado según los tiempos medidos
+// (fijo + por tramo + por metro + por m²), × cantidad, con tope % del precio. Los pedidos anteriores: % del mes (pct_mes).
+// Los VALORES viven SOLO en D1 (cotizador_params mo_*, se editan en Admin). Gaspar (15-oct): "esto NUNCA se puede
+// mostrar, los productores solo tienen que saber su pago por producir" → nada de números en el código (el repo es
+// público) ni en lo que ve un productor o un vendedor. El monto queda guardado en el pedido y se congela al pagarlo.
+const MO_KEYS = ['mo_pct_precio', 'mo_valor_min', 'mo_min_fijo', 'mo_min_tramo', 'mo_min_metro', 'mo_min_m2', 'mo_tope_pct'];
 const MO_DESDE_DEFAULT = '2026-10-15';
 const PROD_ESTADOS = ['pendiente', 'en_armado', 'terminado'];
+// null si falta algún parámetro (o falla D1): entonces NO se calcula ni se borra nada.
 async function moConfig(env) {
-  const p = { ...MO_DEFAULTS, desde: MO_DESDE_DEFAULT };
+  const p = { desde: MO_DESDE_DEFAULT };
   try {
-    const rs = await env.DB.prepare("SELECT key, value FROM cotizador_params WHERE key IN ('mo_pct_precio','mo_valor_min','mo_min_fijo','mo_min_tramo','mo_min_metro','mo_min_m2','mo_tope_pct')").all();
+    const rs = await env.DB.prepare(`SELECT key, value FROM cotizador_params WHERE key IN (${MO_KEYS.map(() => '?').join(',')})`).bind(...MO_KEYS).all();
     for (const r of (rs.results || [])) { const n = Number(r.value); if (isFinite(n) && n >= 0) p[r.key] = n; }
-  } catch (_) {}
+  } catch (_) { return null; }
+  if (MO_KEYS.some(k => !(k in p))) return null;
   try { const d = await kvGet(env, 'mo_desde', null); if (d && /^\d{4}-\d{2}-\d{2}$/.test(String(d))) p.desde = String(d); } catch (_) {}
   return p;
 }
@@ -17206,7 +17209,7 @@ function calcManoObra(row, P) {
   const bruto = P.mo_pct_precio * precio + P.mo_valor_min * cant * min;
   const tope = P.mo_tope_pct * precio;
   const monto = Math.round(Math.min(bruto, tope));
-  return { monto, regla: 'tiempo_v1', detalle: { min: Math.round(min), cant, pct: P.mo_pct_precio, valor_min: P.mo_valor_min, tope_pct: P.mo_tope_pct, en_tope: bruto > tope } };
+  return { monto, regla: 'tiempo_v1', detalle: { min: Math.round(min), cant, en_tope: bruto > tope } };
 }
 // Recalcula y guarda la mano de obra de esos pedidos de neón (nunca la de un trabajo ya pagado al productor).
 async function moActualizar(env, ids) {
@@ -17214,6 +17217,7 @@ async function moActualizar(env, ids) {
   if (!ids.length) return 0;
   await ensureProdSchema(env);
   const P = await moConfig(env);
+  if (!P) return 0;
   const rows = (await env.DB.prepare(`SELECT id, fecha, precio, cantidad, tramos, cm_neon, alto, ancho, es_corporeo, prod_pagado_at, mo_monto FROM pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
   const now = new Date().toISOString(), stmts = [];
   for (const r of rows) {
@@ -17336,7 +17340,7 @@ async function barrerMoDirecto(env) {
   if (!env.APPS_SCRIPT_URL) return { skipped: 'no url' };
   try {
     await ensureProdSchema(env);
-    const P = await moConfig(env);
+    const P = (await moConfig(env)) || { desde: MO_DESDE_DEFAULT };
     const rs = await env.DB.prepare(
       "SELECT p.id, p.numero, p.cartel, p.sheet_row, p.mo_monto, p.productor_id, u.nombre AS prod_nombre, k.v AS kv FROM pedidos p " +
       "LEFT JOIN users_panel u ON u.id = p.productor_id AND u.rol = 'productor' LEFT JOIN kv_cache k ON k.k = 'pedido_mo:' || p.id " +
@@ -18420,7 +18424,8 @@ const handler = {
       if (si.error) return si.error;
       const rs = await env.DB.prepare('SELECT key, value FROM cotizador_params').all();
       const params = {};
-      for (const r of (rs.results || [])) params[r.key] = r.value;
+      // Los parámetros de mano de obra (mo_*) son solo de Gaspar: a vendedores y diseño no les llegan.
+      for (const r of (rs.results || [])) { if (si.role !== 'admin' && String(r.key).startsWith('mo_')) continue; params[r.key] = r.value; }
       return json({ params });
     }
 
@@ -25827,7 +25832,7 @@ const handler = {
           const carteles = await prodCarteles(env,
             "WHERE p.es_corporeo = 0 AND ((p.fecha >= ? AND (COALESCE(p.productor_id,'') <> '' OR COALESCE(p.estado_pedido,'') NOT IN ('Entregado','para enviar'))) OR (COALESCE(p.productor_id,'') <> '' AND p.prod_pagado_at IS NULL)) ORDER BY p.fecha DESC, p.id DESC LIMIT 600",
             [desde], false);
-          return json({ carteles, productores: await prodProductores(env, false), mo: await moConfig(env) });
+          return json({ carteles, productores: await prodProductores(env, false) });
         }
         // POST /admin/prod/asignar {pedido_ids:[], productor_id} → asigna (o saca, con '') el productor de esos carteles (admin).
         if (request.method === 'POST' && path === '/admin/prod/asignar') {

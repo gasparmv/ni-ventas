@@ -103,8 +103,6 @@ const CONFIG = {
     nv_complejidad_coef: 0.018,
     nv_complejidad_pivote: 1.4,
     nv_complejidad_tope: 0.04,
-    // Mano de obra del productor por tiempo (worker: calcManoObra / MO_DEFAULTS). No toca el precio de venta.
-    mo_pct_precio: 0.058, mo_valor_min: 125, mo_min_fijo: 42, mo_min_tramo: 2.41, mo_min_metro: 4.44, mo_min_m2: 14.3, mo_tope_pct: 0.18,
     // Clamp final del margen
     nv_margen_min: 0.48,
     nv_margen_max: 0.72,
@@ -12930,13 +12928,13 @@ const COT_PARAM_GROUPS = [
     ['ext_99', 'm² > 50']
   ]},
   { title: 'Mano de obra del productor (por tiempo, desde el 15-oct)', keys: [
-    ['mo_pct_precio', '% del precio (0.058 = 5,8%)'],
-    ['mo_valor_min', '$ por minuto de armado (125)'],
-    ['mo_min_fijo', 'Minutos fijos por cartel (42)'],
-    ['mo_min_tramo', 'Minutos por tramo (2.41)'],
-    ['mo_min_metro', 'Minutos por metro de neón (4.44)'],
-    ['mo_min_m2', 'Minutos por m² de placa (14.3)'],
-    ['mo_tope_pct', 'Tope: % máximo del precio (0.18)']
+    ['mo_pct_precio', '% del precio (0.05 = 5%)'],
+    ['mo_valor_min', '$ por minuto de armado'],
+    ['mo_min_fijo', 'Minutos fijos por cartel'],
+    ['mo_min_tramo', 'Minutos por tramo'],
+    ['mo_min_metro', 'Minutos por metro de neón'],
+    ['mo_min_m2', 'Minutos por m² de placa'],
+    ['mo_tope_pct', 'Tope: % máximo del precio (0.2 = 20%)']
   ]},
   { title: 'Corpóreos — complejidad (piezas por m², con luz + impreso)', keys: [
     ['corp_pm2_min', '$/m² muy simple (800000)'],
@@ -20994,8 +20992,7 @@ function renderProduccion() {
   if (a.tab === 'cfg') cuerpo = prodAdmCfgHtml(prods);
   else if (a.tab === 'sin') cuerpo = prodAdmSinHtml(sinAsignar);
   else cuerpo = prodAdmProductorHtml(a.tab, cs.filter(c => c.productor_id === a.tab));
-  const P = d.mo || {};
-  return `<div class="page-head"><h1>Producción</h1><div class="muted" style="font-size:12px">Mano de obra desde ${prodFechaCorta(P.desde)}: ${String(+((P.mo_pct_precio || 0) * 100).toFixed(1)).replace('.', ',')}% del precio + ${fmtMoney(P.mo_valor_min)} por minuto de armado, tope ${Math.round((P.mo_tope_pct || 0) * 100)}% · se cambia en Admin → parámetros</div></div>
+  return `<div class="page-head"><h1>Producción</h1></div>
     <div class="prod-tabs prod-tabs-adm">${tabs.map(([k, l, n]) => `<button class="prod-tab ${a.tab === k ? 'on' : ''}" data-prodadm-tab="${escapeHtml(k)}">${escapeHtml(l)}${n != null ? ` <span>${n}</span>` : ''}</button>`).join('')}
       <button class="btn btn-ghost" data-prodadm-refresh style="margin-left:auto;padding:5px 10px">↻ Actualizar</button></div>
     ${cuerpo}`;
@@ -21008,7 +21005,7 @@ function prodAdmFila(c, opciones) {
     ${opciones.check ? `<td><input type="checkbox" data-prodadm-sel="${c.id}" ${a.sel[c.id] ? 'checked' : ''}></td>` : ''}
     <td style="width:54px">${img ? `<img src="${escapeHtml(disenoThumb(c.diseno_key, 120))}" data-prod-zoom="${escapeHtml(img)}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;cursor:zoom-in">` : '<span class="muted" style="font-size:11px">sin foto</span>'}</td>
     <td><b>${escapeHtml(c.cartel || '')}</b><div class="muted" style="font-size:11px">N° ${escapeHtml(String(c.numero || '—'))} · ${prodFechaCorta(c.fecha)} · ${escapeHtml(prodMedidas(c))} · ${c.tramos ? c.tramos + ' tramos' : '<span style="color:#FF5566">sin tramos</span>'} · ${escapeHtml(prodMetros(c))}${(Number(c.cantidad) || 1) > 1 ? ' · x' + Number(c.cantidad) : ''}</div></td>
-    <td class="num">${c.mo_monto != null ? fmtMoney(c.mo_monto) : '<span class="muted" style="font-size:11px">falta dato</span>'}${c.mo_detalle && c.mo_detalle.en_tope ? '<div class="muted" style="font-size:10px">tope 18%</div>' : ''}<div class="muted" style="font-size:10px">venta ${fmtMoney(c.precio)}</div></td>
+    <td class="num">${c.mo_monto != null ? fmtMoney(c.mo_monto) : '<span class="muted" style="font-size:11px">falta dato</span>'}${c.mo_detalle && c.mo_detalle.en_tope ? '<div class="muted" style="font-size:10px">en el tope</div>' : ''}<div class="muted" style="font-size:10px">venta ${fmtMoney(c.precio)}</div></td>
     ${opciones.asignar ? `<td><select data-prodadm-asignar="${c.id}" style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:5px;color:var(--fg)">${prodAdmOpts(c.productor_id, true)}</select></td>` : ''}
     ${opciones.estado ? `<td><select data-prodadm-estado="${c.id}" style="background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:5px;color:var(--fg)">${['pendiente', 'en_armado', 'terminado'].map(k => `<option value="${k}" ${est === k ? 'selected' : ''}>${PROD_ESTADO_LBL[k]}</option>`).join('')}</select>${c.prod_terminado_at && est === 'terminado' ? `<div class="muted" style="font-size:10px">${prodFechaHora(c.prod_terminado_at)}</div>` : ''}</td>` : ''}
     ${opciones.fotos ? `<td>${(c.fotos || []).map(f => `<img src="${escapeHtml(mediaUrl(f.key))}" data-prod-zoom="${escapeHtml(mediaUrl(f.key))}" style="width:40px;height:40px;object-fit:cover;border-radius:5px;margin-right:3px;cursor:zoom-in">`).join('') || '<span class="muted" style="font-size:11px">—</span>'}</td>` : ''}
@@ -21175,10 +21172,13 @@ function bindProdDrawer(p) {
 // Mano de obra en el front (misma fórmula que el worker: calcManoObra), para el desglose de costos del cotizador.
 function calcManoObraFront(precio, tramos, metros, ancho, alto, cant) {
   const P = getCotizadorParams();
-  const pct = +P.mo_pct_precio || 0.058, vm = +P.mo_valor_min || 125, tope = +P.mo_tope_pct || 0.18;
+  // Los valores llegan del worker SOLO para el admin (cotizador_params mo_*); sin ellos, el desglose usa el % del COGS.
+  const K = ['mo_pct_precio', 'mo_valor_min', 'mo_min_fijo', 'mo_min_tramo', 'mo_min_metro', 'mo_min_m2', 'mo_tope_pct'];
+  if (K.some(k => P[k] === '' || P[k] == null || !(Number(P[k]) >= 0))) return null;
+  const pct = +P.mo_pct_precio, vm = +P.mo_valor_min, tope = +P.mo_tope_pct;
   const t = +tramos || 0, m = +metros || 0, a = ((+ancho || 0) * (+alto || 0)) / 10000, q = +cant > 0 ? +cant : 1;
   if (!(precio > 0) || !(t >= 1) || !(m > 0) || !(a > 0)) return null;
-  const min = (+P.mo_min_fijo || 42) + (+P.mo_min_tramo || 2.41) * t + (+P.mo_min_metro || 4.44) * m + (+P.mo_min_m2 || 14.3) * a;
+  const min = +P.mo_min_fijo + (+P.mo_min_tramo) * t + (+P.mo_min_metro) * m + (+P.mo_min_m2) * a;
   return Math.round(Math.min(pct * precio + vm * q * min, tope * precio));
 }
 
