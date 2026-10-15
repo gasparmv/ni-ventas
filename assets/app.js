@@ -20,7 +20,7 @@ const OFRECER_BASE_NEGRA = false;
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Diseñador', 'Abril', 'Aníbal', 'Neyen', 'Logística'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Diseñador', 'Abril', 'Aníbal', 'Neyen', 'Logística', 'Sin Frontera'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -689,7 +689,7 @@ async function postAvisos(ruta, body, okMsg) {
 // ¿Este usuario cotiza? (Gaspar, vendedores y diseño). Abril, producción y logística NO: el worker les
 // niega /cotizador/* y acá no se pide ni se guarda en el navegador nada de costos ni sueldos.
 function usaCotizador() {
-  return !!STATE.token && tokenBelongsTo(STATE.user) && !isCursosOnly() && !isProduccionOnly() && !isLogisticaOnly() && !isProductorOnly();
+  return !!STATE.token && tokenBelongsTo(STATE.user) && !isCursosOnly() && !isProduccionOnly() && !isLogisticaOnly() && !isProductorOnly() && !isSinFronteraOnly();
 }
 // Borra los COGS/params del navegador (costos internos): al cerrar sesión o si el usuario no cotiza.
 function olvidarCotizadorCache() {
@@ -1570,6 +1570,9 @@ function isNeyenUser(s) { return _userKey(s) === 'neyen'; }
 function isProduccionUser(s) { return isAnibalUser(s) || isNeyenUser(s); }
 // Logística (usuario EXTERNO, Siempre a Tiempo): solo ve su vista de envíos. El backend le niega todo lo demás.
 function isLogisticaUser(s) { return _userKey(s) === 'logistica'; }
+// Sin Frontera (usuario EXTERNO: fabrican los corpóreos y nos compran neón): solo Producción y Mis pedidos. El backend le niega
+// todo lo demás. Vale "Sin Frontera" o "sinfrontera".
+function isSinFronteraUser(s) { return _userKey(s).replace(/[\s._-]+/g, '') === 'sinfrontera'; }
 // El token cargado pertenece a este usuario? (evita reutilizar token de bajo
 // privilegio para pasar como admin).
 function tokenBelongsTo(name) {
@@ -1676,6 +1679,7 @@ function corteResetEstado() {
   STATE.corteSelected = null; STATE.corteSel = {}; STATE.corteCobrosView = false;
   // Logística: la lista, los borradores y la semana elegida no pueden pasar al próximo usuario del navegador.
   logiResetEstado();
+  sfResetEstado();   // Sin Frontera: idem
 }
 function afterUserSwitch() {
   try { localStorage.removeItem(CACHE_KEY); } catch (_) {}
@@ -1688,6 +1692,7 @@ function afterUserSwitch() {
   chatState.vigilados = null;  // 🔔 clientes vigilados: solo los ve el admin
   render();
   if (isProductorOnly()) { STATE.prod = null; return; }   // productor de neón: solo su pantalla (nada de ventas, cotizador ni chats)
+  if (isSinFronteraOnly()) return;   // Sin Frontera: solo sus dos pantallas (nada de ventas, cotizador ni chats)
   try { fetchOcUrgenteStatus(); } catch (_) {}
   loadCotizadorParams();   // /cotizador/* pide sesión: recién ahora hay token (y si el nuevo no cotiza, borra el cache)
   loadAll().catch(() => {});
@@ -1740,6 +1745,7 @@ function isCursosOnly() { return isCursosUser(STATE.user); }
 // Aníbal / Neyen (rol produccion): SOLO ven la sección Corte (su cola).
 function isProduccionOnly() { return isProduccionUser(STATE.user); }
 function isLogisticaOnly() { return isLogisticaUser(STATE.user); }
+function isSinFronteraOnly() { return isSinFronteraUser(STATE.user); }
 // Señal de actividad HUMANA para el "arranque"/horas del equipo: marcamos el último gesto real
 // del usuario (click/tecla/touch/scroll). Cada request lleva X-NI-Human=1 solo si hubo
 // interacción hace <5 min; si no (polls automáticos, app en segundo plano, celu dormido) va 0
@@ -2250,7 +2256,7 @@ async function loadAll(opts) {
   // su propia data): antes el primer render llegaba de rebote por loadCotizadorParams, y desde que logística no pide el
   // cotizador (11-oct) la pantalla quedaba trabada en el spinner. Los refrescos silenciosos no re-dibujan (cerrarían lo
   // desplegado o la nota a medio escribir; la vista de logística se refresca sola).
-  if (isLogisticaUser(STATE.user)) { if (!(opts && opts.silent)) render(); return; }
+  if (isLogisticaUser(STATE.user) || isSinFronteraUser(STATE.user)) { if (!(opts && opts.silent)) render(); return; }
   if (isProductorOnly()) { if (!(opts && opts.silent)) render(); return; }   // productor: solo sus carteles (/admin/prod/mis)
   const silent = !!(opts && opts.silent);
   // Stale-while-revalidate: si tenemos caché y no se pidió refresh forzado,
@@ -2764,8 +2770,10 @@ function setView(v) {
   if (isCursosOnly()) v = 'chat';
   else if (isProduccionOnly()) v = 'corte';
   else if (isLogisticaOnly()) v = 'logistica';
+  else if (isSinFronteraOnly()) v = v === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
   else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
   if (v === 'logistica' && !isLogisticaOnly() && !isAdmin()) v = 'dashboard';
+  if (/^sf-/.test(v) && !isSinFronteraOnly() && !isAdmin()) v = 'dashboard';
   const entraACorte = v === 'corte' && STATE.view !== 'corte';
   STATE.view = v;
   STATE.selected = null;
@@ -2787,8 +2795,10 @@ window.addEventListener('hashchange', () => {
   if (isCursosOnly()) h = 'chat';
   else if (isProduccionOnly()) h = 'corte';
   else if (isLogisticaOnly()) h = 'logistica';
+  else if (isSinFronteraOnly()) h = h === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
   else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
   if (h === 'logistica' && !isLogisticaOnly() && !isAdmin()) h = 'dashboard';
+  if (/^sf-/.test(h) && !isSinFronteraOnly() && !isAdmin()) h = 'dashboard';
   if (h !== STATE.view) { STATE.view = h; render(); if (h === 'corte' && STATE.cortePedidos !== undefined) corteCargar(true); }
 });
 
@@ -3081,6 +3091,12 @@ function render() {
   } else if (isLogisticaOnly() && STATE.view !== 'logistica') {
     STATE.view = 'logistica';
     if (location.hash !== '#logistica') location.hash = 'logistica';
+  } else if (isSinFronteraOnly() && !['sf-produccion', 'sf-pedidos'].includes(STATE.view)) {
+    STATE.view = 'sf-produccion';
+    if (location.hash !== '#sf-produccion') location.hash = 'sf-produccion';
+  } else if (/^sf-/.test(STATE.view) && !isSinFronteraOnly() && !isAdmin()) {
+    STATE.view = 'dashboard';
+    if (location.hash !== '#dashboard') location.hash = 'dashboard';
   } else if (STATE.view === 'logistica' && !isLogisticaOnly() && !isAdmin()) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
@@ -3126,6 +3142,7 @@ function render() {
   if (STATE.view === 'chat') document.getElementById('main').innerHTML = renderChat();
   else if (STATE.view === 'corte') document.getElementById('main').innerHTML = renderCorte(); // corte carga su propia data (no depende del Sheet ni de /admin/pedidos)
   else if (STATE.view === 'logistica') document.getElementById('main').innerHTML = renderLogistica(); // idem: su propia data
+  else if (/^sf-/.test(STATE.view)) document.getElementById('main').innerHTML = renderSinFrontera(); // Sin Frontera: idem
   else if (STATE.view === 'produccion') document.getElementById('main').innerHTML = renderProduccion(); // producción de neón: su propia data
   else if (STATE.error)   document.getElementById('main').innerHTML = renderError();
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
@@ -3152,7 +3169,7 @@ function render() {
   // Toggle main--chat class for full-height layout
   const mainEl = document.getElementById('main');
   if (mainEl) mainEl.classList.toggle('main--chat', STATE.view === 'chat');
-  if (mainEl) mainEl.classList.toggle('main--logi', STATE.view === 'logistica'); // logística: tabla a todo el ancho
+  if (mainEl) mainEl.classList.toggle('main--logi', STATE.view === 'logistica' || /^sf-/.test(STATE.view)); // logística: tabla a todo el ancho
   // Lock entire app shell height when chat is active
   const appEl = mainEl && mainEl.closest('.app');
   if (appEl) {
@@ -3167,6 +3184,7 @@ function render() {
   if (STATE.view === 'corporeas')    bindCorporeas();
   if (STATE.view === 'corte')        bindCorte();
   if (STATE.view === 'logistica')    bindLogistica();
+  if (/^sf-/.test(STATE.view))      bindSinFrontera();
   if (STATE.view === 'produccion')   bindProduccion();
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
@@ -3841,7 +3859,7 @@ function renderOcUrgenteModal() {
 // y de los popups de sin cotizar / OC, que tienen sus propios botones.
 let _avisosP1 = { items: [], off: false, user: null, busy: false, min: false, ids: new Set() };
 function initAvisosInternos() {
-  if (!STATE.token || isLogisticaOnly()) { if (_avisosP1.items.length) { _avisosP1.items = []; pintarBannerAvisos(); } return; }
+  if (!STATE.token || isLogisticaOnly() || isSinFronteraOnly()) { if (_avisosP1.items.length) { _avisosP1.items = []; pintarBannerAvisos(); } return; }
   if (_avisosP1.user !== STATE.user) { _avisosP1.user = STATE.user; _avisosP1.items = []; _avisosP1.ids = new Set(); _avisosP1.min = false; pintarBannerAvisos(); if (window._avisosWatch) fetchAvisosMios(); }
   if (window._avisosWatch) return;
   window._avisosWatch = true;
@@ -3871,7 +3889,7 @@ function initAvisosInternos() {
   setInterval(() => { if (!pollBackoffActive()) fetchAvisosMios(); }, 5 * 60000);
 }
 async function fetchAvisosMios() {
-  if (_avisosP1.off || !STATE.token || !CONFIG.trackerUrl || isLogisticaOnly()) return;
+  if (_avisosP1.off || !STATE.token || !CONFIG.trackerUrl || isLogisticaOnly() || isSinFronteraOnly()) return;
   const user = STATE.user;
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/avisos/mios?pend=1', { headers: authHeaders() });
@@ -6345,6 +6363,465 @@ async function logiPasswordUI() {
     toast(r && r.ok ? 'Listo: el usuario "logistica" ya puede entrar con esa contraseña' : ((r && r.error) || 'No se pudo guardar'));
   } catch (_) { toast('Error de red'); }
 }
+// ============ SIN FRONTERA (usuario externo) ============
+// Fabrican nuestros corpóreos y nos compran neón (Gaspar, 15-oct). Ven SOLO dos pantallas: Producción (los corpóreos con
+// ticket, sin precio ni datos del cliente, y les cambian el estado) y Mis pedidos (sus compras, como las ve Gaspar pero sin
+// lo interno). Gaspar entra por el menú "Sin Frontera": ve lo mismo + la contraseña del usuario + sus números y los pedidos
+// vinculados a mano. El backend (/admin/sinfrontera/*) es la barrera: acá solo se dibuja.
+const SF_ESTADOS = [['en_diseno', 'En diseño'], ['en_impresion', 'En impresión'], ['en_ensamble', 'En ensamble'], ['listo', 'Listo para entregar'], ['entregado', 'Entregado']];
+const SF_ESTADO_COLOR = { '': '#94a3b8', en_diseno: '#c4a0ff', en_impresion: '#38bdf8', en_ensamble: '#f59e0b', listo: '#22c55e', entregado: '#64748b' };
+const SF_FILTROS = [['curso', 'En curso'], ['listo', 'Listos para entregar'], ['entregado', 'Entregados'], ['todos', 'Todos']];
+const SF_OP_KEY = 'niventas.sfOperador';
+function sfEstadoLbl(e) { const x = SF_ESTADOS.find(y => y[0] === e); return x ? x[1] : 'Por empezar'; }
+function sfResetEstado() { STATE.sf = null; STATE.sfPed = null; STATE.sfOpen = {}; STATE.sfFiltro = 'curso'; STATE.sfQ = ''; STATE._sfCargando = false; }
+function sfOperador() { try { return localStorage.getItem(SF_OP_KEY) || ''; } catch (_) { return ''; } }
+function sfUrl(qs) { return CONFIG.trackerUrl + '/admin/sinfrontera/archivo?' + qs + '&token=' + encodeURIComponent(STATE.token || ''); }
+async function sfFetch(path, body) {
+  const r = await fetch(CONFIG.trackerUrl + path, body === undefined ? { headers: authHeaders() } : { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let j = {}; try { j = await r.json(); } catch (_) {}
+  if (!r.ok || j.ok === false) throw new Error(j.motivo || j.error || ('Error ' + r.status));
+  return j;
+}
+// Carga la pantalla actual (Producción o Mis pedidos). silent: refresco de fondo, no pisa lo que se está tocando.
+async function sfCargar(opts) {
+  const silent = !!(opts && opts.silent), ped = STATE.view === 'sf-pedidos';
+  if (STATE._sfCargando || (silent && STATE._sfGuardando)) return;
+  STATE._sfCargando = true;
+  const user = STATE.user;
+  try {
+    const j = await sfFetch(ped ? '/admin/sinfrontera/pedidos' : '/admin/sinfrontera/produccion');
+    if (STATE.user !== user) return;
+    if (ped) STATE.sfPed = { pedidos: j.pedidos || [], configurado: !!j.configurado, at: Date.now() };
+    else STATE.sf = { tickets: j.tickets || [], at: Date.now() };
+  } catch (e) {
+    if (STATE.user !== user) return;
+    if (!silent) { if (ped) STATE.sfPed = { error: e.message || 'No se pudo cargar' }; else STATE.sf = { error: e.message || 'No se pudo cargar' }; }
+  } finally { STATE._sfCargando = false; }
+  if (!/^sf-/.test(STATE.view)) return;
+  // Refresco de fondo: no redibujar si están eligiendo un estado o escribiendo en el buscador; si no, solo la lista (no salta
+  // el scroll ni se cierra lo abierto).
+  const act = document.activeElement;
+  if (silent && act && act.closest && act.closest('.sf-wrap') && /^(SELECT|INPUT|TEXTAREA)$/.test(act.tagName)) return;
+  if (silent && !ped && STATE.sf && !STATE.sf.error) {
+    const lista = document.querySelector('.sf-wrap [data-sf-list]'), chips = document.querySelector('.sf-wrap .logi-filtros .logi-chips'), upd = document.querySelector('[data-sf-upd]');
+    if (lista && chips) {
+      const ts = STATE.sf.tickets || [];
+      lista.innerHTML = sfOrdenar(sfFiltrar(ts)).map(sfFilaHtml).join('') || '<div class="logi-vacio-box">No hay corpóreos con ese filtro.</div>';
+      chips.innerHTML = sfChipsHtml(ts);
+      if (upd) upd.textContent = sfHace(STATE.sf.at);
+      return;
+    }
+  }
+  const m = document.getElementById('main');
+  if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
+}
+function renderSinFrontera() { return STATE.view === 'sf-pedidos' ? renderSfPedidos() : renderSfProduccion(); }
+function sfHace(at) {
+  if (!at) return '';
+  const s = Math.round((Date.now() - at) / 1000);
+  return s < 50 ? 'Actualizado recién' : 'Actualizado hace ' + Math.max(1, Math.round(s / 60)) + ' min';
+}
+function sfFecha(iso) { const d = iso ? new Date(String(iso).length === 10 ? iso + 'T12:00:00' : iso) : null; return d && !isNaN(d) ? d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }) : ''; }
+function sfFechaHora(iso) { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }) + ' ' + d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : ''; }
+// Días que faltan hasta la fecha de compromiso (negativo = vencida). NaN si no hay fecha.
+function sfDias(ymd) { const d = ymd ? new Date(ymd + 'T23:59:59') : null; return d && !isNaN(d) ? Math.floor((d - Date.now()) / 86400000) : NaN; }
+function sfAdminBarra() {
+  if (!isAdmin()) return '';
+  return `<button class="btn btn-ghost" data-sf-password title="Crear o cambiar la contraseña del usuario de Sin Frontera">Contraseña de Sin Frontera</button>`
+    + `<button class="btn btn-ghost" data-sf-config title="Con qué números te compran y qué pedidos ven en 'Mis pedidos'">Sus números y pedidos</button>`;
+}
+function sfTabs() {
+  // Gaspar no tiene estas pestañas en el menú (entra por "Sin Frontera"): se las damos arriba.
+  if (!isAdmin()) return '';
+  const v = STATE.view;
+  return `<div class="logi-chips" style="margin-bottom:2px">`
+    + `<button type="button" class="btn ${v === 'sf-produccion' ? '' : 'ghost'}" data-sf-vista="sf-produccion" style="padding:6px 12px;font-size:12px">Producción</button>`
+    + `<button type="button" class="btn ${v === 'sf-pedidos' ? '' : 'ghost'}" data-sf-vista="sf-pedidos" style="padding:6px 12px;font-size:12px">Sus pedidos</button>`
+    + `<span class="muted" style="font-size:12px;align-self:center;margin-left:6px">Así lo ve Sin Frontera</span></div>`;
+}
+
+// ---------- Producción ----------
+function sfFiltrar(ts) {
+  const f = STATE.sfFiltro || 'curso', q = _userKey(STATE.sfQ || '');
+  return ts.filter(t => {
+    if (f === 'curso' && (t.estado === 'listo' || t.estado === 'entregado')) return false;
+    if (f === 'listo' && t.estado !== 'listo') return false;
+    if (f === 'entregado' && t.estado !== 'entregado') return false;
+    if (q) { const txt = _userKey([t.empresa, '#' + t.ticket, t.campos.tipo_producto || '', t.campos.medidas || ''].join(' ')); if (!txt.includes(q)) return false; }
+    return true;
+  });
+}
+// En curso: lo urgente y lo que vence antes arriba; entregados: lo último arriba.
+function sfOrdenar(ts) {
+  const pr = { urgente: 0, alta: 1, media: 2, baja: 3 };
+  const p = t => { const x = _userKey(t.campos.prioridad || ''); return x in pr ? pr[x] : 4; };
+  const fc = t => t.campos.fecha_compromiso || '9999-99-99';
+  if (STATE.sfFiltro === 'entregado') return ts.slice().sort((a, b) => String(b.estado_at || b.creado).localeCompare(String(a.estado_at || a.creado)));
+  return ts.slice().sort((a, b) => (p(a) - p(b)) || fc(a).localeCompare(fc(b)) || (a.ticket - b.ticket));
+}
+function sfChipsHtml(ts) {
+  const act = STATE.sfFiltro || 'curso';
+  const cuenta = id => id === 'todos' ? ts.length : ts.filter(t => id === 'curso' ? (t.estado !== 'listo' && t.estado !== 'entregado') : t.estado === id).length;
+  return SF_FILTROS.map(([id, lab]) => { const n = cuenta(id); return `<button type="button" class="btn ${id === act ? '' : 'ghost'}" data-sf-filtro="${id}" style="padding:6px 12px;font-size:12px${!n && id !== act && id !== 'todos' ? ';opacity:.5' : ''}">${lab} <b style="margin-left:4px">${n}</b></button>`; }).join('');
+}
+function sfEstadoSelectHtml(t) {
+  const e = t.estado || '', col = SF_ESTADO_COLOR[e] || SF_ESTADO_COLOR[''];
+  return `<select class="lb-sel sf-sel" data-sf-estado="${t.pedido_id}" aria-label="Estado de producción" title="${t.estado_at ? 'Último cambio ' + escapeHtml(sfFechaHora(t.estado_at)) : 'Tocá para cambiar el estado'}" style="color:${col};background-color:color-mix(in srgb, ${col} 16%, transparent)">`
+    + (e ? '' : `<option value="" selected>Por empezar</option>`)
+    + SF_ESTADOS.map(([k, l]) => `<option value="${k}"${k === e ? ' selected' : ''}>${l}</option>`).join('')
+    + `</select>`;
+}
+function sfFilaHtml(t) {
+  const ab = !!(STATE.sfOpen || {})[t.pedido_id], c = t.campos || {};
+  const dias = sfDias(c.fecha_compromiso), terminado = t.estado === 'listo' || t.estado === 'entregado';
+  const chips = [];
+  if (/urgente/i.test(c.prioridad || '')) chips.push('<span class="logi-pill r">Urgente</span>');
+  else if (/alta/i.test(c.prioridad || '')) chips.push('<span class="logi-pill a">Prioridad alta</span>');
+  if (!terminado && dias < 0) chips.push('<span class="logi-pill r">Vencido</span>');
+  else if (!terminado && dias <= 2) chips.push('<span class="logi-pill a">' + (dias === 0 ? 'Vence hoy' : 'Vence en ' + dias + ' día' + (dias === 1 ? '' : 's')) + '</span>');
+  const cant = (t.pedido && t.pedido.cantidad) || 1;
+  const meta = [c.tipo_producto || '', c.medidas || (t.pedido && t.pedido.medidas) || '', cant > 1 ? cant + ' unidades' : ''].filter(Boolean).join(' · ');
+  return `<div class="lb-row sf-row${ab ? ' abierto' : ''}${t.estado === 'entregado' ? ' r-enviado' : ''}" data-sf-row="${t.pedido_id}">`
+    + `<div class="lb-head" data-sf-head title="Click para ver el ticket completo">`
+    + `<span class="lb-tog" aria-hidden="true">▸</span>`
+    + `<span class="lb-nom"><span class="sf-num">#${t.ticket}</span><span class="n">${escapeHtml(t.empresa || 'Sin nombre')}</span>${chips.join('')}</span>`
+    + `<span class="lb-meta">${escapeHtml(meta)}</span>`
+    + (c.fecha_compromiso ? `<span class="lb-meta" title="Fecha de compromiso">Entrega ${escapeHtml(sfFecha(c.fecha_compromiso))}</span>` : '')
+    + `<span class="sf-est">${sfEstadoSelectHtml(t)}</span>`
+    + `</div>`
+    + (ab ? sfDetalleHtml(t) : '')
+    + `</div>`;
+}
+// Detalle: el ticket por secciones (las del formulario de Gaspar), lo del pedido, las fotos y el historial de estados.
+function sfDetalleHtml(t) {
+  const c = t.campos || {}, p = t.pedido || {};
+  const fila = (l, v) => v ? `<div class="sf-dato"><span>${escapeHtml(l)}</span><b>${escapeHtml(v)}</b></div>` : '';
+  const secs = (typeof TICKET_CORP_SECS !== 'undefined' ? TICKET_CORP_SECS : []).map(([sec, campos]) => {
+    const h = campos.map(x => fila(x.l, c[x.k])).join('');
+    return h ? `<div class="lb-tit">${escapeHtml(sec)}</div>${h}` : '';
+  }).join('');
+  const SN = v => /^s/i.test(String(v || '')) ? 'Sí' : (v ? 'No' : '');
+  const ped = [
+    fila('Cantidad', String(p.cantidad || 1)), fila('Medidas', p.medidas), fila('Producto', p.producto), fila('Frente', p.frente),
+    fila('Laterales', p.laterales), fila('Fondo / base', p.fondo), fila('Iluminación', p.iluminacion),
+    fila('Bastidor', SN(p.bastidor) + (/^s/i.test(p.bastidor || '') && p.color_bastidor ? ' · ' + p.color_bastidor : '')), fila('Instalación', SN(p.instalacion)),
+  ].join('');
+  const fotos = Array.from({ length: t.fotos || 0 }, (_, i) => `<button type="button" class="sf-foto" data-sf-ver="${escapeHtml(sfUrl('t=' + t.tid + '&i=' + i))}" title="Ver grande"><img src="${escapeHtml(sfUrl('t=' + t.tid + '&i=' + i + '&w=300'))}" alt="Foto ${i + 1}" loading="lazy"></button>`).join('');
+  const hist = (t.historial || []).map(h => `<div class="sf-hist"><b style="color:${SF_ESTADO_COLOR[h.estado] || 'var(--fg)'}">${escapeHtml(sfEstadoLbl(h.estado))}</b> · ${escapeHtml(sfFechaHora(h.at))}${h.por ? ' · ' + escapeHtml(h.por) : ''}</div>`).join('');
+  return `<div class="lb-det sf-det">
+    <div>${secs || '<div class="muted">El ticket no tiene datos cargados.</div>'}</div>
+    <div>
+      <div class="lb-tit">Fotos del ticket</div>
+      ${fotos ? `<div class="sf-fotos">${fotos}</div>` : '<div class="muted" style="font-size:12.5px">Sin fotos.</div>'}
+      ${t.diseno ? `<div style="margin-top:8px"><a class="btn btn-ghost lb-mini" href="${escapeHtml(sfUrl('p=' + t.pedido_id))}" target="_blank" rel="noopener">Ver el diseño original</a></div>` : ''}
+      ${ped ? `<div class="lb-tit">Del pedido</div>${ped}` : ''}
+      <div class="lb-tit">Ticket</div>
+      <div class="sf-hist">#${t.ticket}${t.creado ? ' · armado el ' + escapeHtml(sfFecha(t.creado)) : ''}</div>
+      ${hist ? `<div class="lb-tit">Historial del estado</div>${hist}` : ''}
+    </div>
+  </div>`;
+}
+function renderSfProduccion() {
+  const D = STATE.sf;
+  if (!D) { setTimeout(() => sfCargar(), 0); return `<div class="sf-wrap" style="padding:24px;color:var(--fg-mute)">Cargando producción…</div>`; }
+  if (D.error) return `<div class="sf-wrap" style="padding:24px"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(D.error)}</div><button class="btn" data-sf-refresh>Reintentar</button></div>`;
+  const ts = D.tickets || [], vis = sfOrdenar(sfFiltrar(ts));
+  const op = sfOperador();
+  return `<div class="logi-wrap sf-wrap">
+    ${sfTabs()}
+    <div class="logi-head"><h1>Producción · corpóreos</h1></div>
+    <div class="logi-bar">
+      <span data-sf-upd>${escapeHtml(sfHace(D.at))}</span>
+      ${isSinFronteraOnly() ? `<span>· Usando: <b>${escapeHtml(op || 'sin nombre')}</b> <button type="button" class="logi-link" data-sf-op>${op ? 'cambiar' : 'poner nombre'}</button></span>` : ''}
+      <span style="flex:1"></span>
+      <button class="btn btn-ghost" data-sf-refresh>Actualizar</button>
+      ${sfAdminBarra()}
+    </div>
+    <div class="logi-filtros"><span class="logi-chips">${sfChipsHtml(ts)}</span><input id="sf-q" class="logi-q" type="search" autocomplete="off" spellcheck="false" placeholder="Buscar por nombre o número de ticket" value="${escapeHtml(STATE.sfQ || '')}"></div>
+    ${ts.length ? (vis.length ? `<div class="lb-list" data-sf-list>${vis.map(sfFilaHtml).join('')}</div>` : '<div class="logi-vacio-box">No hay corpóreos con ese filtro.</div>') : '<div class="logi-vacio-box">Todavía no hay corpóreos en producción.</div>'}
+    <div class="logi-ayuda">Click en el renglón para ver el ticket completo con las fotos · El estado se cambia desde la etiqueta y se guarda solo</div>
+  </div>`;
+}
+// Nombre de quien usa la compu (queda en el historial de cada cambio). Se pide una vez por dispositivo.
+function sfPedirOperador() {
+  return new Promise(resolve => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>¿Quién sos?</h3></div><div class="modal-body"><form class="login-form" novalidate>
+      <div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Queda anotado en cada cambio de estado, así sabemos quién lo movió. Se pide una sola vez en esta compu.</div>
+      <label class="nc-field"><span class="nc-label">Tu nombre</span><input class="nc-input" data-op maxlength="40" autocomplete="name" value="${escapeHtml(sfOperador())}"></label>
+      <button type="submit" class="btn btn-cyan" style="width:100%;margin-top:12px">Guardar</button>
+      <button type="button" class="btn btn-ghost" data-op-no style="width:100%;margin-top:8px">Seguir sin nombre</button></form></div></div>`;
+    document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+    const fin = v => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); resolve(v); };
+    const inp = bg.querySelector('[data-op]');
+    bg.querySelector('form').addEventListener('submit', e => { e.preventDefault(); const v = inp.value.replace(/\s+/g, ' ').trim(); if (v) { try { localStorage.setItem(SF_OP_KEY, v); } catch (_) {} } fin(v); });
+    bg.querySelector('[data-op-no]').onclick = () => fin('');
+    setTimeout(() => inp.focus(), 50);
+  });
+}
+async function sfCambiarEstado(pid, estado, sel) {
+  const cur = () => ((STATE.sf || {}).tickets || []).find(x => x.pedido_id === pid);
+  const t = cur();
+  if (!t || !estado || t.estado === estado) return;
+  if (sel) sel.blur(); // si no, el redibujo saltea el renglón enfocado
+  let quien = '';
+  if (isSinFronteraOnly()) { quien = sfOperador(); if (!quien && !STATE._sfOpPreguntado) { STATE._sfOpPreguntado = true; quien = await sfPedirOperador(); } }
+  const antes = { estado: t.estado, estado_at: t.estado_at };
+  t.estado = estado; t.estado_at = new Date().toISOString();
+  sfRedibujarFila(pid);
+  STATE._sfGuardando = (STATE._sfGuardando || 0) + 1;
+  try {
+    const j = await sfFetch('/admin/sinfrontera/estado', { pedido_id: pid, estado, quien });
+    const x = cur();
+    if (x) {
+      x.estado = estado; x.estado_at = j.at || x.estado_at;
+      if (!j.sin_cambios) (x.historial = x.historial || []).unshift({ estado, por: j.por || '', at: x.estado_at });
+    }
+    sfRedibujarFila(pid);
+    const chips = document.querySelector('.sf-wrap .logi-filtros .logi-chips'); if (chips) chips.innerHTML = sfChipsHtml(STATE.sf.tickets || []);
+    toast(sfEstadoLbl(estado) + ': guardado');
+  } catch (e) {
+    const x = cur(); if (x) { x.estado = antes.estado; x.estado_at = antes.estado_at; }
+    sfRedibujarFila(pid);
+    toast('No se guardó: ' + (e.message || 'error'));
+  } finally { STATE._sfGuardando = Math.max(0, (STATE._sfGuardando || 1) - 1); }
+}
+// Corpóreos en el detalle del pedido (Gaspar y vendedores): el estado que puso Sin Frontera.
+function sfDrawerSection(p) {
+  if (!p || !p.esCorporeo || !p.prodEstado || !SF_ESTADOS.some(e => e[0] === p.prodEstado)) return '';
+  const col = SF_ESTADO_COLOR[p.prodEstado];
+  return `<div class="drawer-section"><h4>Producción (Sin Frontera)</h4><div style="font-size:13px">Estado: <b style="color:${col}">${escapeHtml(sfEstadoLbl(p.prodEstado))}</b></div></div>`;
+}
+function sfRedibujarFila(pid) {
+  const t = ((STATE.sf || {}).tickets || []).find(x => x.pedido_id === pid);
+  const el = document.querySelector(`[data-sf-row="${pid}"]`);
+  if (t && el) el.outerHTML = sfFilaHtml(t);
+}
+function sfVerFoto(url) {
+  const bg = document.createElement('div');
+  bg.className = 'sf-lightbox';
+  bg.innerHTML = `<img src="${escapeHtml(url)}" alt="Foto"><button type="button" aria-label="Cerrar">✕</button>`;
+  const fin = () => { bg.remove(); document.removeEventListener('keydown', esc); };
+  const esc = e => { if (e.key === 'Escape') fin(); };
+  bg.addEventListener('click', e => { if (e.target.tagName !== 'IMG') fin(); });
+  document.addEventListener('keydown', esc);
+  document.body.appendChild(bg);
+}
+
+// ---------- Mis pedidos ----------
+// Un renglón por cartel, como la tabla de Pedidos de Gaspar (sin vendedor ni anuncio). Click → el detalle del pedido entero.
+function sfPedGrupoKey(p) { return String(p.numero || '') + '|' + String(p.fecha || ''); }
+function sfPedGrupo(p) { const k = sfPedGrupoKey(p); return ((STATE.sfPed || {}).pedidos || []).filter(x => sfPedGrupoKey(x) === k); }
+function sfProdNeonHtml(p) {
+  if (+p.es_corporeo === 1 || !p.prod_estado || typeof PROD_ESTADO_LBL === 'undefined') return '';
+  const col = PROD_ESTADO_COLOR[p.prod_estado] || '#9aa0b4';
+  return ` <span class="prod-mini" title="Estado de producción del cartel" style="color:${col};border-color:${col}66">${escapeHtml(PROD_ESTADO_LBL[p.prod_estado] || p.prod_estado)}</span>`;
+}
+function renderSfPedidos() {
+  const D = STATE.sfPed;
+  if (!D) { setTimeout(() => sfCargar(), 0); return `<div class="sf-wrap" style="padding:24px;color:var(--fg-mute)">Cargando pedidos…</div>`; }
+  if (D.error) return `<div class="sf-wrap" style="padding:24px"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(D.error)}</div><button class="btn" data-sf-refresh>Reintentar</button></div>`;
+  const ps = D.pedidos || [];
+  const grupos = [...new Set(ps.map(sfPedGrupoKey))].map(k => ps.filter(x => sfPedGrupoKey(x) === k));
+  const total = ps.reduce((s, p) => s + (+p.precio || 0) + (+p.precio_dimmer || 0), 0);
+  const saldo = grupos.reduce((s, g) => s + (+g[0].restante || 0), 0);
+  const trunc = (s, n) => { s = String(s || '').replace(/\s+/g, ' ').trim(); return s ? (escapeHtml(s.slice(0, n)) + (s.length > n ? '…' : '')) : '—'; };
+  const fecha = f => { const d = f ? new Date(String(f).slice(0, 10) + 'T12:00:00') : null; return d && !isNaN(d) ? fmtDate(d) : '—'; };
+  const filas = ps.map(p => `<tr data-sfp="${p.id}">
+      <td class="num">${fecha(p.fecha)}</td>
+      <td class="cliente">${escapeHtml(p.cartel || '—')}${p.diseno ? ' <span class="prod-mini" style="color:var(--neon-cyan);border-color:rgba(143,212,222,.4)">diseño</span>' : ''}${sfProdNeonHtml(p)}</td>
+      <td>${baseSwatch(p.base)}</td>
+      <td class="num">${fmtMoney(p.precio)}</td>
+      <td>${dimerPillHtml(p.dimer)}</td>
+      <td title="${escapeHtml(p.envio || '')}"><span class="muted" style="font-size:12px">${trunc(p.envio, 16)}</span></td>
+      <td title="${escapeHtml(p.aclaracion || '')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion, 16)}</span></td>
+      <td>${pillEstadoPago(p.estado_pago)}</td>
+      <td>${pillEstadoPedido(p.estado_pedido)}</td>
+    </tr>`).join('');
+  return `<div class="logi-wrap sf-wrap">
+    ${sfTabs()}
+    <div class="logi-head"><h1>${isAdmin() ? 'Pedidos de Sin Frontera' : 'Mis pedidos'}</h1></div>
+    <div class="logi-bar">
+      <span>${escapeHtml(sfHace(D.at))}</span>
+      ${ps.length ? `<span>· ${grupos.length} pedido${grupos.length === 1 ? '' : 's'} · ${ps.length} cartel${ps.length === 1 ? '' : 'es'} · total ${fmtMoney(total)}${saldo > 0 ? ' · saldo pendiente <b>' + fmtMoney(saldo) + '</b>' : ''}</span>` : ''}
+      <span style="flex:1"></span>
+      <button class="btn btn-ghost" data-sf-refresh>Actualizar</button>
+      ${sfAdminBarra()}
+    </div>
+    ${ps.length ? `<div class="table-wrap sf-tabla"><table class="t">
+      <thead><tr><th>Fecha</th><th>Cartel</th><th>Base</th><th>Precio</th><th>Dimer</th><th>Envío</th><th>Aclar.</th><th>Pago</th><th>Estado</th></tr></thead>
+      <tbody>${filas}</tbody></table></div>
+      <div class="logi-ayuda">Click en un cartel para ver el pedido completo</div>`
+    : `<div class="logi-vacio-box">${isAdmin() && !D.configurado ? 'Todavía no cargaste con qué números te compran: tocá "Sus números y pedidos".' : 'Todavía no hay pedidos.'}</div>`}
+  </div>`;
+}
+// Detalle de un pedido (todos sus carteles): solo lectura.
+function sfPedDetalle(id) {
+  const p0 = ((STATE.sfPed || {}).pedidos || []).find(x => x.id === id);
+  if (!p0) return;
+  const g = sfPedGrupo(p0);
+  const total = g.reduce((s, p) => s + (+p.precio || 0) + (+p.precio_dimmer || 0), 0);
+  const fila = (l, v) => (v || v === 0) && String(v).trim() !== '' ? `<div class="sf-dato"><span>${escapeHtml(l)}</span><b>${escapeHtml(String(v))}</b></div>` : '';
+  const cartel = p => {
+    const corp = +p.es_corporeo === 1;
+    const med = p.alto && p.ancho ? (p.alto + ' × ' + p.ancho + ' cm') : '';
+    const fotosT = Array.from({ length: p.fotos_terminado || 0 }, (_, i) => `<button type="button" class="sf-foto" data-sf-ver="${escapeHtml(sfUrl('p=' + p.id + '&f=' + i))}"><img src="${escapeHtml(sfUrl('p=' + p.id + '&f=' + i + '&w=300'))}" alt="Cartel terminado" loading="lazy"></button>`).join('');
+    return `<div class="sf-cartel">
+      <div class="sf-cartel-h"><b>${escapeHtml(p.cartel || 'Cartel')}</b>${sfProdNeonHtml(p)}<span style="flex:1"></span><b>${fmtMoney((+p.precio || 0) + (+p.precio_dimmer || 0))}</b></div>
+      <div class="sf-cartel-b">
+        <div>
+          ${fila('Medidas', med)}${fila('Cantidad', p.cantidad || 1)}
+          ${corp ? fila('Producto', p.producto) + fila('Frente', p.frente) + fila('Laterales', p.laterales) + fila('Fondo / base', p.espalda) + fila('Iluminación', p.iluminacion) : fila('Colores', p.colores) + fila('Base', p.base) + fila('Tipo', p.tipo) + fila('Dimmer', p.dimer) + (+p.precio_dimmer ? fila('Precio del dimmer', fmtMoney(p.precio_dimmer)) : '')}
+          ${fila('Aclaración', p.aclaracion)}
+        </div>
+        <div>
+          ${p.diseno ? `<div class="lb-tit" style="margin-top:0">Diseño</div><button type="button" class="sf-foto" data-sf-ver="${escapeHtml(sfUrl('p=' + p.id))}"><img src="${escapeHtml(sfUrl('p=' + p.id + '&w=300'))}" alt="Diseño" loading="lazy"></button>` : ''}
+          ${fotosT ? `<div class="lb-tit">Cartel terminado</div><div class="sf-fotos">${fotosT}</div>` : ''}
+        </div>
+      </div>
+    </div>`;
+  };
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal sf-modal"><div class="modal-h"><h3>Pedido${p0.numero ? ' N° ' + escapeHtml(String(p0.numero)) : ''} · ${escapeHtml(sfFecha(String(p0.fecha || '').slice(0, 10)))}</h3><button type="button" class="btn btn-ghost" data-x>Cerrar</button></div>
+    <div class="modal-body">
+      <div class="sf-resumen">
+        <div><span>Estado</span>${pillEstadoPedido(p0.estado_pedido)}</div>
+        <div><span>Pago</span>${pillEstadoPago(p0.estado_pago)}</div>
+        <div><span>Total</span><b>${fmtMoney(total)}</b></div>
+        <div><span>Pagado</span><b>${fmtMoney(p0.pagado)}</b></div>
+        <div><span>Saldo</span><b style="color:${+p0.restante > 0 ? '#ffc97a' : '#6ef0a0'}">${fmtMoney(p0.restante)}</b></div>
+      </div>
+      ${p0.envio ? `<div class="sf-dato" style="margin-top:10px"><span>Envío</span><b>${escapeHtml(p0.envio)}</b></div>` : ''}
+      ${g.map(cartel).join('')}
+    </div></div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  const fin = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  bg.querySelector('[data-x]').onclick = fin;
+  bg.addEventListener('click', e => { const f = e.target.closest('[data-sf-ver]'); if (f) { sfVerFoto(f.getAttribute('data-sf-ver')); return; } if (e.target === bg) fin(); });
+}
+
+// ---------- Gaspar: contraseña, números y pedidos vinculados ----------
+function sfPasswordModal() {
+  return new Promise(resolve => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>Contraseña del usuario de Sin Frontera</h3></div><div class="modal-body"><form class="login-form" novalidate>
+      <div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Entran con el usuario <b>Sin Frontera</b>. Mínimo 8 caracteres. Al cambiarla se cierran las sesiones abiertas de Sin Frontera.</div>
+      <label class="nc-field"><span class="nc-label">Contraseña nueva</span><input type="password" class="nc-input" data-p1 autocomplete="new-password"></label>
+      <label class="nc-field" style="margin-top:10px"><span class="nc-label">Repetila</span><input type="password" class="nc-input" data-p2 autocomplete="new-password"></label>
+      <div data-perr style="color:#ef4444;font-size:12px;min-height:16px;margin-top:6px"></div>
+      <button type="submit" class="btn btn-cyan" style="width:100%;margin-top:8px">Guardar</button>
+      <button type="button" class="btn btn-ghost" data-pcancel style="width:100%;margin-top:8px">Cancelar</button></form></div></div>`;
+    document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+    const fin = v => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); resolve(v); };
+    const p1 = bg.querySelector('[data-p1]'), p2 = bg.querySelector('[data-p2]'), err = bg.querySelector('[data-perr]');
+    bg.querySelector('form').addEventListener('submit', e => { e.preventDefault(); if (p1.value.length < 8) { err.textContent = 'Mínimo 8 caracteres'; return; } if (p1.value !== p2.value) { err.textContent = 'No coinciden'; return; } fin(p1.value); });
+    bg.querySelector('[data-pcancel]').onclick = () => fin(null);
+    bg.addEventListener('click', e => { if (e.target === bg) fin(null); });
+    setTimeout(() => p1.focus(), 50);
+  });
+}
+async function sfPasswordUI() {
+  const pw = await sfPasswordModal(); if (!pw) return;
+  try { await sfFetch('/admin/sinfrontera/password', { password: pw }); toast('Listo: Sin Frontera ya puede entrar con el usuario "Sin Frontera" y esa contraseña'); }
+  catch (e) { toast(e.message || 'No se pudo guardar'); }
+}
+// Sus números (cada pedido de esos números les aparece solo) + sumar/sacar pedidos a mano (los que entraron con otro número o
+// por el Excel). La lista de pedidos para sumar sale de los que ya tiene cargados Gaspar (STATE.pedidos).
+async function sfConfigUI() {
+  let cfg;
+  try { cfg = await sfFetch('/admin/sinfrontera/config'); } catch (e) { toast(e.message || 'No se pudo cargar'); return; }
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  const pedTxt = p => `${fmtDate(p.fecha)} · ${escapeHtml(p.cartel || '—')}${p.numero ? ' · N° ' + escapeHtml(String(p.numero)) : ''} · ${fmtMoney(p.precio)}`;
+  const pinta = () => {
+    const ver = new Set(cfg.pedidos_ids || []), vinc = new Set(cfg.vinculados || []);
+    const suyos = (STATE.pedidos || []).filter(p => ver.has(p.idx));
+    const q = _userKey(bg.querySelector('[data-sfc-q]') ? bg.querySelector('[data-sfc-q]').value : '');
+    const cand = q.length >= 2 ? (STATE.pedidos || []).filter(p => !ver.has(p.idx) && _userKey([p.cartel, p.numero, p.telefono, p.envio].join(' ')).includes(q)).slice(0, 12) : [];
+    bg.querySelector('[data-sfc-lista]').innerHTML = (suyos.length ? suyos.map(p => `<div class="sf-cfg-row"><span>${pedTxt(p)}</span>${vinc.has(p.idx) ? `<button type="button" class="btn btn-ghost lb-mini" data-sfc-quitar="${p.idx}">Quitar</button>` : '<span class="muted" style="font-size:11.5px">por su número</span>'}</div>`).join('') : '<div class="muted" style="font-size:12.5px">Ninguno todavía.</div>');
+    bg.querySelector('[data-sfc-cand]').innerHTML = cand.map(p => `<div class="sf-cfg-row"><span>${pedTxt(p)}</span><button type="button" class="btn btn-ghost lb-mini" data-sfc-sumar="${p.idx}">Sumar</button></div>`).join('') || (q.length >= 2 ? '<div class="muted" style="font-size:12.5px">No encontré pedidos con eso.</div>' : '');
+  };
+  bg.innerHTML = `<div class="modal sf-modal"><div class="modal-h"><h3>Sin Frontera: sus números y pedidos</h3><button type="button" class="btn btn-ghost" data-x>Cerrar</button></div><div class="modal-body">
+    <div style="font-size:12.5px;color:var(--fg-mute);margin-bottom:8px">Usuario: ${cfg.usuario && cfg.usuario.con_clave ? '<b style="color:#6ef0a0">activo</b> (entran como "Sin Frontera")' : '<b style="color:#ffc97a">sin contraseña todavía</b>: ponésela con "Contraseña de Sin Frontera"'}</div>
+    <label class="nc-field"><span class="nc-label">Números con los que te compran (uno por renglón; también @usuario de Instagram)</span><textarea class="nc-input" data-sfc-tels rows="3" style="resize:vertical">${escapeHtml((cfg.telefonos || []).join('\n'))}</textarea></label>
+    <button type="button" class="btn btn-cyan lb-mini" data-sfc-guardar style="margin-top:8px">Guardar números</button>
+    <div class="lb-tit">Pedidos que ven en "Mis pedidos"</div><div data-sfc-lista></div>
+    <div class="lb-tit">Sumar un pedido que entró con otro número</div>
+    <input class="logi-q" data-sfc-q type="search" placeholder="Buscar por cartel, número de pedido o teléfono" style="margin:0;width:100%;max-width:none">
+    <div data-sfc-cand style="margin-top:6px"></div>
+  </div></div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  pinta();
+  const fin = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); STATE.sfPed = null; if (STATE.view === 'sf-pedidos') { const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } } };
+  const post = async body => { try { cfg = await sfFetch('/admin/sinfrontera/config', body); pinta(); return true; } catch (e) { toast(e.message || 'No se pudo guardar'); return false; } };
+  bg.querySelector('[data-x]').onclick = fin;
+  bg.addEventListener('click', async e => {
+    if (e.target === bg) { fin(); return; }
+    const sm = e.target.closest('[data-sfc-sumar]'), qt = e.target.closest('[data-sfc-quitar]');
+    const grupo = idx => { const p = (STATE.pedidos || []).find(x => x.idx === idx); return p && typeof pedidoHermanos === 'function' ? pedidoHermanos(p).map(x => x.idx) : [idx]; };
+    if (sm) { if (await post({ vincular: grupo(+sm.dataset.sfcSumar) })) toast('Sumado: ya lo ven en "Mis pedidos"'); }
+    if (qt) { if (await post({ desvincular: grupo(+qt.dataset.sfcQuitar) })) toast('Quitado'); }
+  });
+  bg.querySelector('[data-sfc-guardar]').onclick = async () => { const tels = bg.querySelector('[data-sfc-tels]').value.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean); if (await post({ telefonos: tels })) { bg.querySelector('[data-sfc-tels]').value = (cfg.telefonos || []).join('\n'); toast('Números guardados'); } };
+  let tq = null; bg.querySelector('[data-sfc-q]').addEventListener('input', () => { clearTimeout(tq); tq = setTimeout(pinta, 200); });
+}
+
+// ---------- Eventos (todo delegado en .sf-wrap, que se crea en cada dibujo) ----------
+function bindSinFrontera() {
+  const root = document.querySelector('.sf-wrap');
+  if (!root) return;
+  root.addEventListener('click', async e => {
+    const el = e.target;
+    if (el.closest('[data-sf-refresh]')) { if (STATE.view === 'sf-pedidos') STATE.sfPed = null; else STATE.sf = null; const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } return; }
+    const vista = el.closest('[data-sf-vista]'); if (vista) { setView(vista.dataset.sfVista); return; }
+    if (el.closest('[data-sf-password]')) { sfPasswordUI(); return; }
+    if (el.closest('[data-sf-config]')) { sfConfigUI(); return; }
+    if (el.closest('[data-sf-op]')) { await sfPedirOperador(); const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } return; }
+    const fl = el.closest('[data-sf-filtro]');
+    if (fl) { STATE.sfFiltro = fl.dataset.sfFiltro; const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } return; }
+    const ver = el.closest('[data-sf-ver]'); if (ver) { sfVerFoto(ver.getAttribute('data-sf-ver')); return; }
+    const tr = el.closest('[data-sfp]'); if (tr) { sfPedDetalle(+tr.dataset.sfp); return; }
+    const head = el.closest('[data-sf-head]');
+    if (head && !el.closest('select') && !el.closest('a') && !el.closest('button')) {
+      const pid = +head.closest('[data-sf-row]').dataset.sfRow;
+      STATE.sfOpen = STATE.sfOpen || {};
+      if (STATE.sfOpen[pid]) delete STATE.sfOpen[pid]; else STATE.sfOpen[pid] = true;
+      sfRedibujarFila(pid);
+    }
+  });
+  root.addEventListener('change', e => {
+    const s = e.target.closest('[data-sf-estado]');
+    if (s) sfCambiarEstado(+s.dataset.sfEstado, s.value, s);
+  });
+  const q = root.querySelector('#sf-q');
+  if (q) {
+    let t = null;
+    q.addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        STATE.sfQ = q.value;
+        const ts = (STATE.sf || {}).tickets || [], vis = sfOrdenar(sfFiltrar(ts));
+        const lista = root.querySelector('[data-sf-list]');
+        if (lista) lista.innerHTML = vis.map(sfFilaHtml).join('') || '<div class="logi-vacio-box">No hay corpóreos con ese filtro.</div>';
+        else { const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); const nq = document.getElementById('sf-q'); if (nq) { nq.focus(); nq.setSelectionRange(nq.value.length, nq.value.length); } } }
+      }, 200);
+    });
+  }
+  // Refresco de fondo cada 60 s mientras la pantalla está a la vista (lo que cambia Gaspar o el otro turno).
+  if (!window._sfTick) {
+    window._sfTick = setInterval(() => {
+      if (!/^sf-/.test(STATE.view) || document.visibilityState !== 'visible' || !STATE.token) return;
+      const u = document.querySelector('[data-sf-upd]'); if (u && STATE.sf) u.textContent = sfHace(STATE.sf.at);
+      const D = STATE.view === 'sf-pedidos' ? STATE.sfPed : STATE.sf;
+      if (D && D.at && Date.now() - D.at > 85000) sfCargar({ silent: true });
+    }, 30000);
+  }
+}
+// En PEDIDOS (Gaspar y vendedores): el estado que puso Sin Frontera en cada corpóreo (la producción de neón tiene el suyo).
+function sfPillPedido(p) {
+  if (!p || !p.esCorporeo || !p.prodEstado || !SF_ESTADOS.some(e => e[0] === p.prodEstado)) return '';
+  const col = SF_ESTADO_COLOR[p.prodEstado];
+  return ` <span class="prod-mini" title="Producción en Sin Frontera" style="color:${col};border-color:${col}66">${escapeHtml(sfEstadoLbl(p.prodEstado))}</span>`;
+}
 // Tick de 30 s: actualiza el "actualizado hace X", reintenta las celdas que no se guardaron por la red, aplica un re-dibujo
 // pendiente si ya no está ocupado y cada ~90 s refresca de fondo (pausado mientras hay un POST en vuelo; solo con la vista
 // abierta y la pestaña visible).
@@ -7098,6 +7575,9 @@ function renderShell() {
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
         ` : isLogisticaOnly() ? `
           <button class="nav-item active" data-view="logistica"><span class="icon">📦</span> Envíos</button>
+        ` : isSinFronteraOnly() ? `
+          <button class="nav-item ${v==='sf-produccion'?'active':''}" data-view="sf-produccion"><span class="icon">🏭</span> Producción</button>
+          <button class="nav-item ${v==='sf-pedidos'?'active':''}" data-view="sf-pedidos"><span class="icon">▦</span> Mis pedidos</button>
         ` : isDisenadorOnly() ? `
           <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte ${corteBadgeHtml()}</button>
@@ -7111,6 +7591,7 @@ function renderShell() {
         ${rdPuedeVer() ? `<button class="nav-item ${v==='rendimiento'?'active':''}" data-view="rendimiento"><span class="icon">↗</span> ${isAdmin() ? 'Rendimiento' : 'Mi rendimiento'}</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='logistica'?'active':''}" data-view="logistica"><span class="icon">📦</span> Logística</button>` : ''}
+        ${isAdmin() ? `<button class="nav-item ${/^sf-/.test(v)?'active':''}" data-view="sf-produccion"><span class="icon">🏭</span> Sin Frontera</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='produccion'?'active':''}" data-view="produccion"><span class="icon">🔧</span> Producción</button>` : ''}
         ${!isSecundario(STATE.user) ? `<button class="nav-item ${v==='seguimientos'?'active':''}" data-view="seguimientos"><span class="icon">↻</span> Seguimientos
           ${sgts.length ? `<span class="badge">${sgts.length}</span>` : ''}
@@ -9187,7 +9668,7 @@ function renderTablePedidos() {
           filtered.map(p => `
             <tr data-pid="${p.idx}">
               <td class="num">${fmtDate(p.fecha)}</td>
-              <td class="cliente">${escapeHtml(p.cartel)}${tcPedidoBtn(p)}${disenoBadgePedido(p)}${prodPillPedido(p)}</td>
+              <td class="cliente">${escapeHtml(p.cartel)}${tcPedidoBtn(p)}${disenoBadgePedido(p)}${prodPillPedido(p)}${sfPillPedido(p)}</td>
               <td>${baseSwatch(p.base)}</td>
               <td class="num">${fmtMoney(p.precio)}</td>
               <td>${dimerPillHtml(p.dimmer)}</td>
@@ -12034,7 +12515,7 @@ function openDrawerPedido(idx) {
         </dl>
       </div>
       ${disenoDrawerSection(p)}
-      ${prodDrawerSection(p)}
+      ${prodDrawerSection(p)}${sfDrawerSection(p)}
       <div class="drawer-section">
         <h4>Estado, pago y productor ${hermanos.length>1?`<span style="font-size:11px;color:var(--fg-subtle);font-weight:400">· aplica a los ${hermanos.length} carteles</span>`:''}</h4>
         <div style="display:flex;flex-direction:column;gap:10px">
@@ -21394,6 +21875,7 @@ function getUserRole() {
   if (u === 'gaspar')                                   return 'admin';
   if (u === 'emma' || u === 'emmanuel' || u === 'disenador') return 'disenador';
   if (u === 'logistica') return 'logistica'; // externo: ningún permiso de "comercial" (cotizar, OC, chats…)
+  if (u.replace(/[\s._-]+/g, '') === 'sinfrontera') return 'sinfrontera'; // externo: idem
   return 'comercial'; // joaco, joaquin, default
 }
 function canCreateBriefs() { if (isCursosUser(STATE.user)) return false; const r = getUserRole(); return r === 'comercial' || r === 'admin'; }

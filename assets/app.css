@@ -4528,3 +4528,33 @@ select.lb-sel.tr.sug, select.lb-sel.tr.vacio { color: var(--fg-subtle); font-sty
   .prod-card-img{max-width:none;flex:none}
   .prod-resumen .v{font-size:15px}
 }
+/* ===== Sin Frontera (usuario externo): reusa el tablero de logística (.logi-*, .lb-*) ===== */
+.sf-num { font-size: 12px; font-weight: 700; color: var(--fg-subtle); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.sf-est { flex: 0 0 auto; display: inline-flex; align-items: center; }
+select.lb-sel.sf-sel { max-width: 200px; }
+.sf-det { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+.sf-dato { display: flex; gap: 10px; font-size: 13px; line-height: 1.45; padding: 2px 0; }
+.sf-dato > span { flex: 0 0 150px; color: var(--fg-subtle); font-size: 12px; }
+.sf-dato > b { font-weight: 600; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.sf-fotos { display: flex; gap: 8px; flex-wrap: wrap; }
+.sf-foto { padding: 0; width: 96px; height: 96px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--ink-200); cursor: zoom-in; }
+.sf-foto img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.sf-hist { font-size: 12px; color: var(--fg-muted); line-height: 1.6; }
+.sf-lightbox { position: fixed; inset: 0; z-index: 400; background: rgba(0,0,0,.92); display: flex; align-items: center; justify-content: center; padding: 24px; cursor: zoom-out; }
+.sf-lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; cursor: default; }
+.sf-lightbox button { position: fixed; top: 16px; right: 20px; width: 36px; height: 36px; border-radius: 50%; border: 0; background: rgba(255,255,255,.12); color: #fff; font-size: 16px; cursor: pointer; }
+.modal.sf-modal { max-width: 860px; max-height: 88vh; }
+.sf-modal .modal-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.sf-modal .modal-h .btn { font-size: 12.5px; padding: 6px 12px; }
+.sf-resumen { display: flex; gap: 18px; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--ink-100); }
+.sf-resumen > div { display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: var(--fg); }
+.sf-resumen > div > span { font-size: 10.5px; color: var(--fg-subtle); text-transform: uppercase; letter-spacing: .05em; }
+.sf-cartel { margin-top: 12px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.sf-cartel-h { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: var(--ink-100); font-size: 14px; color: var(--fg); }
+.sf-cartel-b { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 14px; padding: 10px 12px; }
+.sf-cfg-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12.5px; padding: 5px 0; border-bottom: 1px solid var(--border); color: var(--fg-muted); }
+.sf-tabla { overflow-x: auto; }
+@media (max-width: 760px) {
+  .sf-det, .sf-cartel-b { grid-template-columns: 1fr; }
+  .sf-dato > span { flex-basis: 110px; }
+}

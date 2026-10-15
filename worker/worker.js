@@ -2302,7 +2302,7 @@ async function ensureAgendaSchema(env) {
 async function agendaRoute(env, request, url, path) {
   const session = await getSession(env, request);
   if (!session) return unauthorized();
-  if (esUsuarioLogistica(session.user)) return json({ error: 'forbidden' }, 403); // usuario externo: no ve la agenda interna
+  if (esUsuarioLogistica(session.user) || esUsuarioSinFrontera(session.user)) return json({ error: 'forbidden' }, 403); // usuarios externos: no ven la agenda interna
   if (await productorDeSesion(env, session.user)) return json({ error: 'forbidden' }, 403); // productores: solo sus carteles
   await ensureAgendaSchema(env);
   const me = _agSlug(session.user);
@@ -16171,9 +16171,186 @@ async function getSession(env, request) {
 function userLookupIds(slug) {
   if (slug === 'joaquin' || slug === 'joaco') return ['joaquin', 'joaco'];
   if (slug === 'abril' || slug === 'cursos') return ['abril', 'cursos'];
+  if (String(slug || '').replace(/[\s._-]+/g, '') === 'sinfrontera') return ['sinfrontera']; // "Sin Frontera" (con espacio) → su id
   return [slug];
 }
 
+// ===================== SIN FRONTERA (usuario externo) =====================
+// Sin Frontera fabrica nuestros corpóreos y además nos compra neón. Tiene un usuario propio ('sinfrontera', lo crea Gaspar
+// poniéndole contraseña) que ve SOLO dos cosas: (1) Producción: los corpóreos con ticket, sin precio ni datos del cliente, y
+// les cambia el estado; (2) Mis pedidos: sus compras de neón (por sus números o vinculadas a mano) como las ve Gaspar pero
+// sin lo interno. Se reconoce por el NOMBRE, como logística (getSessionRole cae a 'comercial' si falla la base): el muro de
+// /admin/, la agenda y sesionInterna lo frenan fuera de /admin/sinfrontera/*. Vale "Sin Frontera", "sinfrontera", "sin-frontera".
+function esUsuarioSinFrontera(userName) { return String(userName || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[\s._-]+/g, '') === 'sinfrontera'; }
+// Estados del corpóreo que actualiza Sin Frontera (Gaspar, 15-oct). Se guardan en pedidos.prod_estado, la misma columna que la
+// producción de neón (allá: pendiente / en_armado / terminado; un pedido es neón o corpóreo, nunca los dos). '' = por empezar.
+const SF_ESTADOS = [['en_diseno', 'En diseño'], ['en_impresion', 'En impresión'], ['en_ensamble', 'En ensamble'], ['listo', 'Listo para entregar'], ['entregado', 'Entregado']];
+// Campos del ticket que ven: los del formulario actual (TICKET_CORP_SECS del front). Lista CERRADA: los tickets del 21-sep
+// tenían nombre, teléfono, mail y dirección del cliente, y eso no se muestra. Ningún campo del ticket tiene precio.
+const SF_TICKET_CAMPOS = ['empresa', 'fecha_sena', 'fecha_compromiso', 'producto', 'tipo_producto', 'carteleria', 'precisa_instalacion', 'prioridad', 'medidas', 'descripcion_cliente', 'requiere_estructura', 'desc_diseno', 'impresora', 'colores', 'desc_impresion', 'salida_cables', 'lado_cables', 'tipo_luz', 'desc_ensamble'];
+// Lo que ven de SUS pedidos: lo de la tabla de Pedidos menos lo interno (vendedor, quién cargó, comisión, anuncio y campaña,
+// productor y su mano de obra, origen, espejo a la planilla, cajas, comprobantes).
+const SF_PEDIDO_CAMPOS = ['id', 'numero', 'fecha', 'cartel', 'colores', 'alto', 'ancho', 'base', 'tipo', 'cantidad', 'dimer', 'precio', 'precio_dimmer', 'envio', 'aclaracion', 'estado_pago', 'pagado', 'restante', 'estado_pedido', 'es_corporeo', 'producto', 'frente', 'laterales', 'espalda', 'iluminacion', 'bastidor', 'color_bastidor', 'instalacion', 'prod_estado', 'prod_terminado_at'];
+let _sfSchemaOk = false;
+async function ensureSinFronteraSchema(env) {
+  if (_sfSchemaOk) return;
+  await ensureProdSchema(env); // pedidos.prod_estado / prod_estado_at y pedido_prod_log (producción de neón, migración 053)
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS sinfrontera_pedidos (pedido_id INTEGER PRIMARY KEY, por TEXT, at TEXT)').run();
+  _sfSchemaOk = true;
+}
+// Números con los que compra Sin Frontera (kv sinfrontera_tels, JSON): celular normalizado (549…) o @usuario de Instagram
+// (los pedidos que entran por IG guardan el @ en telefono).
+function sfNormTels(lista) {
+  const out = [];
+  for (const x of (Array.isArray(lista) ? lista : [])) {
+    const s = String(x || '').trim();
+    if (!s) continue;
+    let t = '';
+    if (/^@[\w.]{2,40}$/.test(s)) t = s.toLowerCase();
+    else { const d = s.replace(/\D/g, ''); if (d.length >= 10 && d.length <= 15) t = normalizeArPhone(s) || d; }
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out.slice(0, 20);
+}
+async function sfTels(env) { try { return sfNormTels(JSON.parse((await kvGet(env, 'sinfrontera_tels', '[]')) || '[]')); } catch (_) { return []; } }
+// Filtro de SUS pedidos: por sus números (últimos 10 dígitos: matchea con o sin 54/9) o @usuario, más los vinculados a mano
+// (sinfrontera_pedidos). Columnas calificadas con "pedidos." para pedidosConDiseno.
+function sfPedidosWhere(tels) {
+  const dig = [...new Set(tels.filter(t => !t.startsWith('@')).map(t => t.replace(/\D/g, '').slice(-10)).filter(t => t.length === 10))];
+  const ig = tels.filter(t => t.startsWith('@'));
+  const conds = ['pedidos.id IN (SELECT pedido_id FROM sinfrontera_pedidos)'], args = [];
+  const tel = "replace(replace(replace(IFNULL(pedidos.telefono, ''), '+', ''), ' ', ''), '-', '')";
+  if (dig.length) { conds.push(`(length(${tel}) BETWEEN 10 AND 13 AND ${tel} NOT GLOB '*[^0-9]*' AND substr(${tel}, -10) IN (${dig.map(() => '?').join(',')}))`); args.push(...dig); }
+  if (ig.length) { conds.push(`lower(IFNULL(pedidos.telefono, '')) IN (${ig.map(() => '?').join(',')})`); args.push(...ig); }
+  return { sql: '(' + conds.join(' OR ') + ')', args };
+}
+// Producción: un renglón por corpóreo con ticket (el último ticket de cada pedido). Del ticket, solo SF_TICKET_CAMPOS; del
+// pedido, lo que hace falta para fabricar. NUNCA precio, pago, teléfono, vendedor ni la aclaración libre del pedido (ya va en
+// el ticket como "Descripción del cliente"). Sin estado propio y el pedido ya figura Entregado → se muestra entregado.
+async function sfProduccion(env) {
+  let rows = [];
+  try {
+    rows = (await env.DB.prepare(
+      `SELECT t.id AS tid, t.numero, t.pedido_id, t.data, t.photo_keys, t.created_at,
+              p.fecha, p.cartel, p.alto, p.ancho, p.cantidad, p.producto, p.frente, p.laterales, p.espalda, p.iluminacion,
+              p.bastidor, p.color_bastidor, p.instalacion, p.foto_diseno_key, IFNULL(p.prod_estado, '') AS prod_estado, p.prod_estado_at,
+              IFNULL(p.estado_pedido, '') AS estado_pedido
+         FROM corporeo_tickets t
+         JOIN (SELECT pedido_id, MAX(id) AS mid FROM corporeo_tickets WHERE pedido_id IS NOT NULL GROUP BY pedido_id) u ON u.mid = t.id
+         JOIN pedidos p ON p.id = t.pedido_id AND IFNULL(p.es_corporeo, 0) = 1
+        ORDER BY t.numero DESC, t.id DESC LIMIT 300`).all()).results || [];
+  } catch (_) { return { ok: false, error: 'No se pudo leer la producción. Probá de nuevo en un momento.' }; }
+  const hist = {};
+  const ids = rows.map(r => r.pedido_id);
+  for (let i = 0; i < ids.length; i += 90) {
+    const lote = ids.slice(i, i + 90);
+    try {
+      const rs = (await env.DB.prepare(`SELECT pedido_id, a, por, ts FROM pedido_prod_log WHERE campo = 'estado' AND pedido_id IN (${lote.map(() => '?').join(',')}) ORDER BY ts DESC`).bind(...lote).all()).results || [];
+      for (const r of rs) { const h = (hist[r.pedido_id] = hist[r.pedido_id] || []); if (h.length < 15) h.push({ estado: r.a, por: r.por || '', at: r.ts || '' }); }
+    } catch (_) {}
+  }
+  const validos = new Set(SF_ESTADOS.map(e => e[0]));
+  const tickets = rows.map(r => {
+    let d = {}; try { d = JSON.parse(r.data || '{}') || {}; } catch (_) {}
+    const campos = {};
+    for (const k of SF_TICKET_CAMPOS) { const v = String(d[k] == null ? '' : d[k]).trim(); if (v && v !== '—') campos[k] = v.slice(0, 2000); }
+    let fotos = 0; try { const a = JSON.parse(r.photo_keys || '[]'); fotos = Array.isArray(a) ? Math.min(a.length, 10) : 0; } catch (_) {}
+    let estado = validos.has(r.prod_estado) ? r.prod_estado : '';
+    if (!estado && /entregad/i.test(r.estado_pedido)) estado = 'entregado';
+    return {
+      pedido_id: r.pedido_id, ticket: r.numero, tid: r.tid, creado: r.created_at || '', fecha: r.fecha || '',
+      empresa: campos.empresa || String(r.cartel || '').trim(), campos, fotos, diseno: !!String(r.foto_diseno_key || '').trim(),
+      pedido: {
+        medidas: (r.alto && r.ancho) ? `${r.alto} × ${r.ancho} cm` : '', cantidad: parseInt(r.cantidad, 10) || 1, producto: r.producto || '',
+        frente: r.frente || '', laterales: r.laterales || '', fondo: r.espalda || '', iluminacion: r.iluminacion || '',
+        bastidor: r.bastidor || '', color_bastidor: r.color_bastidor || '', instalacion: r.instalacion || '',
+      },
+      estado, estado_at: r.prod_estado_at || '', historial: hist[r.pedido_id] || [],
+    };
+  });
+  return { ok: true, tickets, estados: SF_ESTADOS };
+}
+// Mis pedidos: SUS compras (sfPedidosWhere), con precio y pagos, el estado de producción del neón y cuántas fotos del cartel
+// terminado hay (las sube el productor).
+async function sfPedidos(env) {
+  const tels = await sfTels(env);
+  const w = sfPedidosWhere(tels);
+  let rows = [];
+  try { rows = await pedidosConDiseno(env, `WHERE ${w.sql} ORDER BY pedidos.fecha DESC, pedidos.numero DESC, pedidos.id DESC LIMIT 500`, w.args); }
+  catch (_) { return { ok: false, error: 'No se pudieron leer los pedidos. Probá de nuevo en un momento.' }; }
+  const fotos = {};
+  const ids = rows.map(r => r.id);
+  for (let i = 0; i < ids.length; i += 90) {
+    const lote = ids.slice(i, i + 90);
+    try { for (const r of ((await env.DB.prepare(`SELECT pedido_id, COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id IN (${lote.map(() => '?').join(',')}) GROUP BY pedido_id`).bind(...lote).all()).results || [])) fotos[r.pedido_id] = Math.min(5, +r.n || 0); } catch (_) {}
+  }
+  const pedidos = rows.map(r => {
+    const o = {};
+    for (const k of SF_PEDIDO_CAMPOS) if (r[k] !== undefined) o[k] = r[k];
+    o.diseno = !!String(r.diseno_key || '').trim();
+    o.fotos_terminado = fotos[r.id] || 0;
+    return o;
+  });
+  return { ok: true, pedidos, configurado: tels.length > 0 };
+}
+// Archivos que pueden ver (R2): fotos del ticket VIGENTE de un corpóreo (?t=<id del ticket>&i=<n>), el diseño de un corpóreo en
+// producción o de un pedido suyo (?p=<id>) y las fotos del cartel terminado de un pedido suyo (?p=<id>&f=<n>). Devuelve la key
+// o '' si no le corresponde: nunca una key que venga del pedido de afuera.
+async function sfArchivoKey(env, qs) {
+  const t = parseInt(qs.get('t'), 10) || 0, i = parseInt(qs.get('i'), 10), p = parseInt(qs.get('p'), 10) || 0, fi = parseInt(qs.get('f'), 10);
+  try {
+    if (t) {
+      if (!(i >= 0 && i < 10)) return '';
+      const r = await env.DB.prepare(
+        `SELECT t.photo_keys FROM corporeo_tickets t JOIN pedidos p ON p.id = t.pedido_id AND IFNULL(p.es_corporeo, 0) = 1
+          WHERE t.id = ? AND t.id = (SELECT MAX(id) FROM corporeo_tickets WHERE pedido_id = t.pedido_id)`).bind(t).first();
+      let keys = []; try { keys = r ? JSON.parse(r.photo_keys || '[]') : []; } catch (_) {}
+      const k = Array.isArray(keys) ? String(keys[i] || '') : '';
+      return k.startsWith('corporeo-ticket/') ? k : '';
+    }
+    if (!p) return '';
+    if (!(fi >= 0)) {
+      // Corpóreo en producción (con ticket): el diseño original que cargó el vendedor.
+      const c = await env.DB.prepare("SELECT foto_diseno_key AS k FROM pedidos WHERE id = ? AND IFNULL(es_corporeo, 0) = 1 AND EXISTS (SELECT 1 FROM corporeo_tickets WHERE pedido_id = pedidos.id)").bind(p).first();
+      if (c && String(c.k || '').trim()) return String(c.k).trim();
+    }
+    await ensureSinFronteraSchema(env);
+    const w = sfPedidosWhere(await sfTels(env));
+    const rows = await pedidosConDiseno(env, `WHERE pedidos.id = ? AND ${w.sql}`, [p, ...w.args]);
+    if (!rows.length) return '';
+    if (fi >= 0) {
+      const f = await env.DB.prepare('SELECT r2_key FROM pedido_prod_fotos WHERE pedido_id = ? ORDER BY id LIMIT 1 OFFSET ?').bind(p, Math.min(fi, 20)).first();
+      return f ? String(f.r2_key || '') : '';
+    }
+    return String(rows[0].diseno_key || '').trim();
+  } catch (_) {}
+  return '';
+}
+// Sirve un archivo de R2 (con ?w= para miniaturas, como /admin/media/; ?dl=1 lo baja con nombre). Cache PRIVADO: la URL lleva
+// el token de la sesión.
+async function sfServirR2(env, key, url) {
+  if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+  const obj = await env.MEDIA.get(key);
+  if (!obj) return json({ error: 'not found' }, 404);
+  const ctype = obj.httpMetadata?.contentType || 'application/octet-stream';
+  const hdr = { ...cors(), 'Content-Type': ctype, 'Cache-Control': 'private, max-age=86400' };
+  if (url.searchParams.get('dl') === '1') hdr['Content-Disposition'] = 'attachment; filename="' + (key.split('/').pop() || 'archivo').replace(/[^\w.-]/g, '_') + '"';
+  const w = parseInt(url.searchParams.get('w') || '0', 10);
+  if (w >= 100 && w <= 2000 && env.IMAGES && /^image\/(jpe?g|png|webp)/i.test(ctype)) {
+    try {
+      const buf = await obj.arrayBuffer();
+      if (buf.byteLength > 60000) {
+        const res = await env.IMAGES.input(new Response(buf).body).transform({ width: w, fit: 'scale-down' }).output({ format: 'image/jpeg', quality: 76 });
+        return new Response(await res.response().arrayBuffer(), { headers: { ...hdr, 'Content-Type': 'image/jpeg' } });
+      }
+      return new Response(buf, { headers: hdr });
+    } catch (_) {
+      try { const o2 = await env.MEDIA.get(key); if (o2) return new Response(o2.body, { headers: hdr }); } catch (_) {}
+      return json({ error: 'media error' }, 500);
+    }
+  }
+  return new Response(obj.body, { headers: hdr });
+}
 // Usuario EXTERNO de logística (Siempre a Tiempo). Fuera de /admin/logistica/* no puede leer NADA del CRM (chats,
 // ventas, clientes, plata): lo frena el muro de /admin/ y la agenda. El front no es una barrera de seguridad.
 function esUsuarioLogistica(userName) { return String(userName || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '') === 'logistica'; }
@@ -16196,8 +16373,8 @@ async function getSessionRole(env, userName) {
 async function sesionInterna(env, request, roles) {
   const session = await getSession(env, request);
   if (!session) return { error: unauthorized() };
-  const role = esUsuarioLogistica(session.user) ? 'logistica' : ((await productorDeSesion(env, session.user)) ? 'productor' : await getSessionRole(env, session.user));
-  if (role === 'logistica' || role === 'productor' || (roles && !roles.includes(role))) return { error: json({ error: 'forbidden' }, 403) };
+  const role = esUsuarioLogistica(session.user) ? 'logistica' : (esUsuarioSinFrontera(session.user) ? 'sinfrontera' : ((await productorDeSesion(env, session.user)) ? 'productor' : await getSessionRole(env, session.user)));
+  if (role === 'logistica' || role === 'sinfrontera' || role === 'productor' || (roles && !roles.includes(role))) return { error: json({ error: 'forbidden' }, 403) };
   return { session, role };
 }
 // Quiénes usan el cotizador (COGS/params) y la vista Actividad: Gaspar, vendedores y diseño.
@@ -17483,7 +17660,7 @@ async function ensureProdSchema(env) {
   return true;
 }
 // Usuarios que NO pueden ser productores (ya existen con otro rol o son del equipo).
-const PROD_RESERVADOS = ['gaspar', 'admin', 'administrador', 'joaco', 'joaquin', 'facundo', 'facu', 'agustina', 'agus', 'abril', 'cursos', 'disenador', 'emma', 'emmanuel', 'logistica', 'anibal', 'neyen', 'nadia'];
+const PROD_RESERVADOS = ['gaspar', 'admin', 'administrador', 'joaco', 'joaquin', 'facundo', 'facu', 'agustina', 'agus', 'abril', 'cursos', 'disenador', 'emma', 'emmanuel', 'logistica', 'sinfrontera', 'anibal', 'neyen', 'nadia'];
 function prodSlug(s) { return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
 // ¿La sesión es de un PRODUCTOR? {id, nombre, activo} o null. Mira users_panel con cualquier activo: un productor
 // dado de baja con una sesión vieja NO puede caer al rol por defecto ('comercial') y ver ventas. Cache 60 s por isolate.
@@ -18483,8 +18660,8 @@ const handler = {
       }
       const token = randomToken();
       const now = new Date();
-      // Usuario externo de logística: sesión de 7 días (el resto, 30).
-      const sesDias = ((panelUser && panelUser.rol === 'logistica') || esUsuarioLogistica(user)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS;
+      // Usuarios externos (logística, Sin Frontera): sesión de 7 días (el resto, 30).
+      const sesDias = ((panelUser && ['logistica', 'sinfrontera'].includes(panelUser.rol)) || esUsuarioLogistica(user) || esUsuarioSinFrontera(user)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS;
       const expires = new Date(now.getTime() + sesDias * 86400000);
       const userSes = canonSessionUser(user);
       await env.DB.prepare(
@@ -18533,7 +18710,7 @@ const handler = {
       if (!okTarget) return json({ error: 'usuario desconocido' }, 404);
       const token = randomToken();
       const now = new Date();
-      const expires = new Date(now.getTime() + ((tRol === 'logistica' || esUsuarioLogistica(target)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS) * 86400000);
+      const expires = new Date(now.getTime() + ((tRol === 'logistica' || tRol === 'sinfrontera' || esUsuarioLogistica(target) || esUsuarioSinFrontera(target)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS) * 86400000);
       const targetSes = canonSessionUser(target);
       await env.DB.prepare('INSERT INTO sessions (token, user, expires_at, created_at) VALUES (?, ?, ?, ?)').bind(token, targetSes, expires.toISOString(), now.toISOString()).run();
       return json({ token, user: targetSes, expiresAt: expires.toISOString(), rol: tslug === 'gaspar' ? 'admin' : tRol });
@@ -18916,6 +19093,8 @@ const handler = {
       if (!session) return unauthorized();
       // Logística (usuario externo): SOLO sus endpoints. Todo lo demás del CRM → 403 aunque tenga sesión válida.
       if (esUsuarioLogistica(session.user) && !path.startsWith('/admin/logistica/')) return json({ error: 'forbidden' }, 403);
+      // Sin Frontera (usuario externo): SOLO /admin/sinfrontera/* (corpóreos en producción sin precio y sus propios pedidos).
+      if (esUsuarioSinFrontera(session.user) && !path.startsWith('/admin/sinfrontera/')) return json({ error: 'forbidden' }, 403);
       // Productores de neón (usuario propio): SOLO /admin/prod/* (sus carteles). Dado de baja → afuera aunque tenga sesión.
       { const _pz = await productorDeSesion(env, session.user); if (_pz) { if (!_pz.activo) return unauthorized(); if (!path.startsWith('/admin/prod/')) return json({ error: 'forbidden' }, 403); } }
 
@@ -25063,6 +25242,88 @@ const handler = {
           try { await env.DB.prepare("DELETE FROM kv_cache WHERE k = 'login_fail:logistica'").run(); } catch (_) {}
         } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         return json({ ok: true, usuario: 'logistica' });
+      }
+      // ===== SIN FRONTERA (usuario externo; ver esUsuarioSinFrontera) =====
+      // Ellos: Producción (corpóreos con ticket, sin precio) + Mis pedidos (sus compras) + los archivos de eso + el estado.
+      // Gaspar: lo mismo (para ver lo que ven) + contraseña del usuario + sus números + pedidos vinculados a mano.
+      if (path.startsWith('/admin/sinfrontera/')) {
+        const sfExt = esUsuarioSinFrontera(session.user);
+        if (!sfExt && (await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        try { await ensureSinFronteraSchema(env); } catch (_) { return json({ error: 'db', motivo: 'No se pudo preparar la base. Probá de nuevo.' }, 500); }
+        // GET /admin/sinfrontera/produccion → corpóreos en producción (sfProduccion).
+        if (request.method === 'GET' && path === '/admin/sinfrontera/produccion') return json(await sfProduccion(env));
+        // GET /admin/sinfrontera/pedidos → sus pedidos (sfPedidos).
+        if (request.method === 'GET' && path === '/admin/sinfrontera/pedidos') return json(await sfPedidos(env));
+        // GET /admin/sinfrontera/archivo?t=&i= | ?p=[&f=] [&w=] [&dl=1] → foto del ticket, diseño o foto del cartel terminado.
+        if (request.method === 'GET' && path === '/admin/sinfrontera/archivo') {
+          const key = await sfArchivoKey(env, url.searchParams);
+          return key ? await sfServirR2(env, key, url) : json({ error: 'not found' }, 404);
+        }
+        // POST /admin/sinfrontera/estado {pedido_id, estado, quien?} → estado de producción de un corpóreo con ticket
+        // (pedidos.prod_estado + pedido_prod_log). Cuando Sin Frontera lo deja listo o entregado, le avisa a Gaspar.
+        if (request.method === 'POST' && path === '/admin/sinfrontera/estado') {
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const pid = parseInt(body.pedido_id, 10) || 0, estado = String(body.estado || '');
+          if (!pid || !SF_ESTADOS.some(e => e[0] === estado)) return json({ error: 'datos', motivo: 'Elegí un estado de la lista.' }, 400);
+          let ped = null;
+          try { ped = await env.DB.prepare("SELECT p.cartel, IFNULL(p.prod_estado, '') AS prod_estado, (SELECT MAX(numero) FROM corporeo_tickets t WHERE t.pedido_id = p.id) AS ticket FROM pedidos p WHERE p.id = ? AND IFNULL(p.es_corporeo, 0) = 1").bind(pid).first(); } catch (_) {}
+          if (!ped || !ped.ticket) return json({ error: 'nada', motivo: 'Ese corpóreo no está en producción.' }, 404);
+          if (ped.prod_estado === estado) return json({ ok: true, estado, sin_cambios: true });
+          const quien = String(body.quien || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+          const por = sfExt ? (quien ? quien + ' · Sin Frontera' : 'Sin Frontera') : String(session.user || '');
+          const nowIso = new Date().toISOString();
+          // Sin tocar updated_at: el estado de producción no va a la planilla (y así no se cruza con el espejo de pedidos).
+          let ch = 0;
+          try { const u = await env.DB.prepare("UPDATE pedidos SET prod_estado = ?, prod_estado_at = ? WHERE id = ? AND IFNULL(es_corporeo, 0) = 1 AND IFNULL(prod_estado, '') = ?").bind(estado, nowIso, pid, ped.prod_estado).run(); ch = (u && u.meta && u.meta.changes) || 0; }
+          catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
+          if (!ch) return json({ error: 'cambio', motivo: 'Alguien lo cambió recién. Actualizá la lista y probá de nuevo.' }, 409);
+          await prodLog(env, [{ pedido_id: pid, campo: 'estado', de: ped.prod_estado, a: estado, por }]);
+          if (sfExt && (estado === 'listo' || estado === 'entregado')) {
+            const txt = 'Sin Frontera: el corpóreo "' + String(ped.cartel || '').trim() + '" (ticket #' + ped.ticket + ') ' + (estado === 'listo' ? 'está listo para entregar.' : 'ya está entregado.') + (quien ? ' Lo marcó ' + quien + '.' : '');
+            const pr = avisoAdmin(env, txt, { tipo: 'sinfrontera_estado', prioridad: 'P2', clave: 'sf:' + pid + ':' + estado }).catch(() => {});
+            try { ctx.waitUntil(pr); } catch (_) { await pr; }
+          }
+          return json({ ok: true, estado, at: nowIso, por });
+        }
+        // ---- De acá para abajo, solo Gaspar ----
+        if (sfExt) return json({ error: 'forbidden' }, 403);
+        // POST /admin/sinfrontera/password {password} → crea/actualiza el usuario "sinfrontera" con esa contraseña (hash) y lo
+        // activa. No existe hasta que se la pone Gaspar (un usuario activo sin hash entraría sin contraseña). Cambiarla cierra
+        // las sesiones abiertas de Sin Frontera.
+        if (request.method === 'POST' && path === '/admin/sinfrontera/password') {
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const pw = String(body.password || '');
+          if (pw.length < 8) return json({ error: 'la contraseña tiene que tener al menos 8 caracteres' }, 400);
+          const hash = await sha256hex(pw);
+          try {
+            await env.DB.prepare("INSERT INTO users_panel (id, nombre, rol, activo, password_hash, created_at) VALUES ('sinfrontera', 'Sin Frontera', 'sinfrontera', 1, ?, ?) ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash, rol='sinfrontera', activo=1").bind(hash, new Date().toISOString()).run();
+            const ses = (await env.DB.prepare('SELECT token, user FROM sessions WHERE expires_at > ?').bind(new Date().toISOString()).all()).results || [];
+            const del = ses.filter(s => esUsuarioSinFrontera(s.user)).map(s => s.token);
+            if (del.length) await env.DB.batch(del.map(t => env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(t)));
+            try { await env.DB.prepare("DELETE FROM kv_cache WHERE k = 'login_fail:sinfrontera'").run(); } catch (_) {}
+          } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+          return json({ ok: true, usuario: 'sinfrontera' });
+        }
+        // GET|POST /admin/sinfrontera/config → sus números (kv sinfrontera_tels), los pedidos vinculados a mano y si el usuario ya
+        // tiene contraseña. POST {telefonos?: [...], vincular?: [ids], desvincular?: [ids]}.
+        if (path === '/admin/sinfrontera/config' && (request.method === 'GET' || request.method === 'POST')) {
+          if (request.method === 'POST') {
+            let body; try { body = await request.json(); } catch { body = {}; }
+            if (Array.isArray(body.telefonos)) await kvSet(env, 'sinfrontera_tels', JSON.stringify(sfNormTels(body.telefonos)));
+            const lim = a => [...new Set((Array.isArray(a) ? a : []).map(x => parseInt(x, 10)).filter(x => x > 0))].slice(0, 100);
+            const nowIso = new Date().toISOString(), st = [];
+            for (const id of lim(body.vincular)) st.push(env.DB.prepare('INSERT OR IGNORE INTO sinfrontera_pedidos (pedido_id, por, at) VALUES (?, ?, ?)').bind(id, String(session.user || ''), nowIso));
+            for (const id of lim(body.desvincular)) st.push(env.DB.prepare('DELETE FROM sinfrontera_pedidos WHERE pedido_id = ?').bind(id));
+            if (st.length) { try { await env.DB.batch(st); } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); } }
+          }
+          let usr = null;
+          try { usr = await env.DB.prepare("SELECT activo, CASE WHEN IFNULL(password_hash, '') <> '' THEN 1 ELSE 0 END AS con_clave FROM users_panel WHERE id = 'sinfrontera'").first(); } catch (_) {}
+          let vinc = [];
+          try { vinc = ((await env.DB.prepare('SELECT pedido_id FROM sinfrontera_pedidos ORDER BY pedido_id').all()).results || []).map(r => r.pedido_id); } catch (_) {}
+          const ped = await sfPedidos(env);
+          return json({ ok: true, telefonos: await sfTels(env), vinculados: vinc, pedidos_ids: (ped.pedidos || []).map(p => p.id), usuario: { existe: !!usr, activo: !!(usr && +usr.activo === 1), con_clave: !!(usr && +usr.con_clave === 1) } });
+        }
+        return json({ error: 'not found' }, 404);
       }
       // POST /admin/corte/paquete {tanda_id, key, largo, ancho, alto, peso?, bultos?} → medidas REALES del paquete (Neyen al
       // embalar). Reemplazan a la estimación en la vista de logística.
