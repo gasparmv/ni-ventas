@@ -2251,7 +2251,8 @@ function mapPedidoFromD1(row) {
     comprobante2Wamid: row.comprobante2_wamid || '',
     cobro2At: row.cobro2_at || '',
     cajaSync: row.caja_sync == null ? '' : String(row.caja_sync),
-    cajaSyncErr: row.caja_sync_err || ''
+    cajaSyncErr: row.caja_sync_err || '',
+    cobrarEl: row.cobrar_el || ''   // pedido cargado SIN PAGO: día en que hay que cobrarlo ('AAAA-MM-DD')
   };
 }
 
@@ -10196,6 +10197,10 @@ const PM_INP = 'width:100%;background:var(--ink-100);border:1px solid var(--bord
 const PM_LBL = 'display:block;font-size:10px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
 // Caja del cobro debajo del select de pago de la tabla: "Melina", o "Melina → Bruno" si el saldo fue a otra caja.
 function pagoCajaMini(p) {
+  if (p && p.pagoMetodo === 'pendiente' && !(Number(p.pagado) > 0) && !(Number(p.cobro2) > 0)) {
+    const d = p.cobrarEl ? p.cobrarEl.slice(8, 10) + '/' + p.cobrarEl.slice(5, 7) : '';
+    return `<div title="Cargado sin pago: te llega el recordatorio para cobrarlo" style="font-size:10px;color:#FFB020;margin-top:2px;white-space:nowrap">⏳ cobrar ${escapeHtml(d)}</div>`;
+  }
   const a = (p && p.caja) || '', b = (p && p.caja2) || '';
   if (!a && !b) return '';
   const txt = (a || '?') + (b && b !== a ? ' → ' + b : '');
@@ -10453,7 +10458,7 @@ function pmRemoveCartel(i) { readPedidoModalDOM(); STATE.pedidoModal.carteles.sp
 function pmRecalc() {
   readPedidoModalDOM();
   const total = pedidoModalTotal();
-  const pagado = Number(STATE.pedidoModal.pagado) || 0;
+  const pagado = (STATE.pedidoModal.pagoMetodo === 'pendiente' && isAdmin()) ? 0 : (Number(STATE.pedidoModal.pagado) || 0);
   const tEl = document.getElementById('pm-total'); if (tEl) tEl.textContent = fmtMoney(total);
   const rEl = document.getElementById('pm-restante'); if (rEl) rEl.textContent = fmtMoney(Math.max(0, total - pagado));
   // Pago: si el importe cubre el total se sugiere '2do pago' (pagó todo) + el aviso del monto del comprobante.
@@ -11216,6 +11221,13 @@ function pmValidate() {
   // Pago (oct-2026): caja obligatoria; en transferencia, también el comprobante (en efectivo la caja es 'Efectivo').
   // Sin Frontera = cuenta corriente: nada de pago.
   if (pmCuentaSF(m)) return invalid;
+  // Sin pago (solo admin): alcanza con el día en que paga.
+  if (m.pagoMetodo === 'pendiente' && isAdmin()) {
+    const _hoy = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+    const _el = document.getElementById('pm-cobrar-el'); if (_el) m.cobrarEl = _el.value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(m.cobrarEl || '') || m.cobrarEl < _hoy) invalid.push({ id: 'pm-cobrar-el', msg: 'Poné cuándo te paga (hoy o más adelante)' });
+    return invalid;
+  }
   if (m.pagoMetodo !== 'efectivo') {
     if (!m.caja || m.caja === 'Efectivo') invalid.push({ sel:'[data-pmc-caja-row]', msg:'Elegí a qué caja pagó' });
     if (m.comp_estado === 'subiendo') invalid.push({ sel:'[data-pmc-comp-slot]', msg:'Esperá que termine de subir el comprobante' });
@@ -11267,7 +11279,7 @@ async function confirmCargarPedido() {
   if (raros.length && !(await showConfirm('Estos datos parecen un error de tipeo:\n\n' + raros.join('\n') + '\n\n¿Están bien así?', { title: 'Revisá antes de guardar', variant: 'warn', confirmLabel: 'Sí, están bien', cancelLabel: 'Corregir' }))) return;
   const efectivo = m.pagoMetodo === 'efectivo';
   // Comprobante que ya es el pago de otro pedido: casi siempre es un error (el mismo pago no puede contar dos veces).
-  const compUsado = (!efectivo && !pmCuentaSF(m) && m._compOcr && Array.isArray(m._compOcr.usado_en)) ? m._compOcr.usado_en : [];
+  const compUsado = (!efectivo && !pmCuentaSF(m) && !(m.pagoMetodo === 'pendiente' && isAdmin()) && m._compOcr && Array.isArray(m._compOcr.usado_en)) ? m._compOcr.usado_en : [];
   if (compUsado.length && !(await showConfirm('Ese comprobante ya está cargado en el pedido ' + compUsado.map(u => '#' + u.numero + (u.cartel ? ' (' + u.cartel + ')' : '')).join(', ') + '.\n\n¿Seguro que es el pago de este pedido?', { title: 'Comprobante repetido', variant: 'warn', confirmLabel: 'Sí, es este', cancelLabel: 'Cambiarlo' }))) return;
   const carteles = (m.carteles||[]).filter(c => String(c.cartel||'').trim());
   STATE.pedidoModalSaving = true; render();
@@ -11307,6 +11319,7 @@ async function confirmCargarPedido() {
       }))
     };
     if (pmCuentaSF(m)) Object.assign(payload, { estado_pago: 'Cuenta corriente', pagado: 0, pago_metodo: '', caja: '', comprobante_key: '', comprobante_wamid: '' });
+    else if (m.pagoMetodo === 'pendiente' && isAdmin()) Object.assign(payload, { estado_pago: '1er pago', pagado: 0, pago_metodo: 'pendiente', caja: '', comprobante_key: '', comprobante_wamid: '', cobrar_el: m.cobrarEl || '' });
     const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos', { method:'POST', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j.error) { const err = new Error(j.error || ('HTTP '+r.status)); err.campo = j.campo || ''; throw err; }
@@ -11317,6 +11330,7 @@ async function confirmCargarPedido() {
     STATE.pedidoModalSaving = false;
     render();
     toast(`Pedido #${j.numero} cargado ✓ (${nuevos.length} cartel${nuevos.length>1?'es':''})`);
+    if (m.pagoMetodo === 'pendiente' && isAdmin() && nuevos[0] && nuevos[0].cobrarEl) niToast(`Cargado sin pago: te recuerdo cobrarlo el ${nuevos[0].cobrarEl.slice(8, 10)}/${nuevos[0].cobrarEl.slice(5, 7)} por WhatsApp`);
     // Cliente Sin Frontera (solo admin): lo ven en su usuario, "Mis pedidos". El server ya lo vinculó en el alta
     // (sf_vinculado); si no (worker viejo o falló), se reintenta como antes.
     if (isAdmin() && m.clienteSF && nuevos.length) (j.sf_vinculado === true ? sfCargarVinculos(true).then(() => true) : sfVincular(nuevos.map(x => x.idx), true)).then(ok => {
@@ -11523,7 +11537,9 @@ function pmPagoDefaults() {
     _compOcr: null, _compPrev: null, _compTok: 0, _compVerOtros: false,
     _compSug: [], _compSugDe: '', _compSugIntentoDe: '', _compSugPidiendo: '', _compSugEstado: '', _compOcTs: '',
     // De dónde salió el importe (#pm-pagado): 'oc' (seña de la OC) | 'ocr' (comprobante) | 'manual' (lo tipeó).
-    _pagadoFuente: '', _estadoManual: false, _pasteTarget: ''
+    _pagadoFuente: '', _estadoManual: false, _pasteTarget: '',
+    // Sin pago (solo admin): día en que el cliente paga ('AAAA-MM-DD'); el server manda el recordatorio a Gaspar.
+    cobrarEl: ''
   };
 }
 // Comprobante ya elegido desde el chat ("Usar como comprobante"): la key wa/… o ig/… del mensaje va tal cual. El
@@ -11588,13 +11604,14 @@ function pmPagoBlockHtml(m) {
       <div style="font-size:13px">Cuenta corriente de Sin Frontera: no se carga seña ni comprobante, se cobra aparte.</div>
     </div>`;
   pmPagoAutoEstado(m);
+  if (m.pagoMetodo === 'pendiente' && isAdmin()) return pmPagoSinPagoHtml(m);
   const ef = m.pagoMetodo === 'efectivo';
   const restante = Math.max(0, pedidoModalTotal() - (Number(m.pagado) || 0));
-  const metBtn = (v, txt) => `<button type="button" data-pmc-metodo="${v}" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${pmOBtn(ef === (v === 'efectivo'))}">${txt}</button>`;
+  const metBtn = (v, txt) => `<button type="button" data-pmc-metodo="${v}" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${pmOBtn((m.pagoMetodo || 'transferencia') === v)}">${txt}</button>`;
   return `<div data-pmc-pago style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-3);background:var(--ink-050)">
       <div style="font-size:11px;color:var(--accent-cyan);font-weight:700;margin-bottom:8px">💳 Pago</div>
       <label style="${PM_LBL}">¿Cómo pagó?</label>
-      <div data-pmc-metodo-row style="display:flex;gap:8px;margin-bottom:10px">${metBtn('transferencia', '🏦 Transferencia')}${metBtn('efectivo', '💵 Efectivo')}</div>
+      <div data-pmc-metodo-row style="display:flex;gap:8px;margin-bottom:10px">${metBtn('transferencia', '🏦 Transferencia')}${metBtn('efectivo', '💵 Efectivo')}${isAdmin() ? metBtn('pendiente', '⏳ Sin pago') : ''}</div>
       ${pmCajaWrapHtml(m)}
       ${ef ? '' : `<div style="margin-bottom:10px"><label style="${PM_LBL}">Comprobante de pago * <span style="opacity:.6;text-transform:none;letter-spacing:0">— lo que mandó el cliente (foto o PDF)</span></label>${pmCompSlotHtml(m)}</div>`}
       <div style="display:flex;gap:10px;flex-wrap:wrap">
@@ -11605,6 +11622,25 @@ function pmPagoBlockHtml(m) {
       <div data-pmc-pagado-hint style="font-size:11px;margin-top:5px">${pmPagadoHintHtml(m)}</div>
     </div>`;
 }
+// Pedido SIN PAGO (solo admin, Gaspar 16-oct: "un cliente frecuente que me paga en unos días pero quiero cargarlo
+// igual"): sin caja, comprobante ni importe. Se elige cuándo paga y el server le manda a Gaspar un recordatorio por
+// WhatsApp (plantilla, "COBRAR …") el día antes, el día y todos los días después hasta que se registre el pago.
+function pmCobrarElDefault() { let d = Date.now() - 3 * 3600e3 + 3 * 86400e3; if (new Date(d).getUTCDay() === 0) d += 86400e3; return new Date(d).toISOString().slice(0, 10); }
+function pmPagoSinPagoHtml(m) {
+  if (!m.cobrarEl) m.cobrarEl = pmCobrarElDefault();
+  const hoy = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+  const metBtn = (v, txt) => `<button type="button" data-pmc-metodo="${v}" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${pmOBtn(m.pagoMetodo === v)}">${txt}</button>`;
+  return `<div data-pmc-pago style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-3);background:var(--ink-050)">
+      <div style="font-size:11px;color:var(--accent-cyan);font-weight:700;margin-bottom:8px">💳 Pago</div>
+      <label style="${PM_LBL}">¿Cómo pagó?</label>
+      <div data-pmc-metodo-row style="display:flex;gap:8px;margin-bottom:10px">${metBtn('transferencia', '🏦 Transferencia')}${metBtn('efectivo', '💵 Efectivo')}${metBtn('pendiente', '⏳ Sin pago')}</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <div style="flex:1;min-width:160px"><label style="${PM_LBL}">¿Cuándo te paga? *</label><input id="pm-cobrar-el" type="date" min="${hoy}" value="${escapeHtml(m.cobrarEl)}" style="${PM_INP}"></div>
+        <div style="flex:1;min-width:120px"><label style="${PM_LBL}">Debe</label><div style="${PM_INP};opacity:.7;display:flex;align-items:center;min-height:36px"><span id="pm-restante">${fmtMoney(pedidoModalTotal())}</span></div></div>
+      </div>
+      <div style="font-size:11.5px;color:var(--fg-subtle);margin-top:6px">Se carga sin seña ni comprobante. Te llega un recordatorio por WhatsApp a tu número ("COBRAR …") el día antes, el día y todos los días después, hasta que registres el pago desde el pedido.</div>
+    </div>`;
+}
 // parcial = el elemento se re-pintó suelto (sin render()): le suma lo que bindPedidoModal hace en el render
 // completo para todo el modal (recalcular total/restante y la validación en vivo).
 function bindPmPagoBlock(root, parcial) {
@@ -11612,6 +11648,7 @@ function bindPmPagoBlock(root, parcial) {
   const deRoot = (sel) => [...((root.matches && root.matches(sel)) ? [root] : []), ...root.querySelectorAll(sel)];
   deRoot('[data-pmc-metodo]').forEach(b => b.onclick = () => pmSetMetodo(b.getAttribute('data-pmc-metodo')));
   deRoot('[data-pmc-caja]').forEach(b => b.onclick = () => pmSetCaja(b.getAttribute('data-pmc-caja')));
+  deRoot('#pm-cobrar-el').forEach(el => { const h = () => { const m = STATE.pedidoModal; if (!m) return; m.cobrarEl = el.value; if (m._validated) pmApplyMarks(pmValidate()); }; el.addEventListener('input', h); el.addEventListener('change', h); });
   deRoot('[data-pmc-usar-monto]').forEach(b => b.onclick = pmUsarMontoOcr);
   bindCompPicker(root, 'pmc', {
     archivo: (f) => pmCompSetArchivo(f),
@@ -11683,7 +11720,7 @@ function pmPagoAutoEstado(m) {
 }
 function pmSetMetodo(v) {
   const m = STATE.pedidoModal; if (!m) return;
-  v = v === 'efectivo' ? 'efectivo' : 'transferencia';
+  v = (v === 'efectivo' || (v === 'pendiente' && isAdmin())) ? v : 'transferencia';
   if (m.pagoMetodo === v) return;
   if (v === 'efectivo') { m._cajaTransfer = m.caja === 'Efectivo' ? '' : m.caja; m.caja = 'Efectivo'; }
   else m.caja = (m.caja === 'Efectivo') ? (m._cajaTransfer || '') : m.caja;
@@ -11735,7 +11772,7 @@ function pmPagadoOcrLimpiar(m) {
 // Trae lo que mandó el cliente por el chat (fotos / PDF) con el OCR. Mismas guardas anti-carrera que
 // pmCargarSugerencias; una vez por contacto (force = "↻ Buscar de nuevo"), porque cada OCR nuevo cuesta.
 async function pmCargarComprobantes(force) {
-  const m = STATE.pedidoModal; if (!m || !STATE.pedidoModalOpen) return;
+  const m = STATE.pedidoModal; if (!m || !STATE.pedidoModalOpen || m.pagoMetodo === 'pendiente') return;
   const contacto = pmContactoComprobantes(m);
   if (m._compSugDe && m._compSugDe !== contacto) {
     // Cambió el cliente: lo que mandó el anterior ya no es candidato.
@@ -11818,6 +11855,7 @@ async function pmCompSetArchivo(file) {
   if (!esPdf && !/^image\//.test(file.type || '')) { niToast('El comprobante tiene que ser una foto o un PDF', { error: true }); return; }
   const m = STATE.pedidoModal; if (!m) return;
   if (m.pagoMetodo === 'efectivo') { niToast('En efectivo no hace falta comprobante'); return; }
+  if (m.pagoMetodo === 'pendiente') { niToast('Sin pago no lleva comprobante: el pago se registra después desde el pedido'); return; }
   await pmCompAsignar(esPdf ? '' : URL.createObjectURL(file), esPdf ? 'pdf' : 'image', esPdf ? (file.name || 'comprobante.pdf') : '', () => compSubirArchivo(file));
 }
 // Cancelar una subida colgada: vuelve a como estaba.
@@ -11845,7 +11883,7 @@ function pmCompQuitar() {
 // Con el comprobante YA elegido y algún cartel sin foto, lo pegado es el diseño salvo que el foco o el mouse estén
 // DENTRO del recuadro del comprobante: si no, volver de WhatsApp con Alt+Tab y pegar el diseño pisaba el comprobante.
 function pmPegarAlComprobante(m) {
-  if (!m || m.pagoMetodo === 'efectivo') return false;
+  if (!m || m.pagoMetodo === 'efectivo' || m.pagoMetodo === 'pendiente') return false;
   const sinFoto = pmCartelSinFoto() >= 0;
   if (m.comp_key && sinFoto) {
     try { const a = document.activeElement; if (a && a.closest && a.closest('[data-pmc-comp-slot]')) return true; } catch (_) {}
@@ -11877,6 +11915,24 @@ function pedPagoCompHtml(key) {
   if (t === 'image') return `<button type="button" data-k="${escapeHtml(key)}" onclick="compVer(this.dataset.k,'image')" title="Ver el comprobante" style="border:0;padding:0;background:none;cursor:zoom-in"><img src="${escapeHtml(disenoThumb(key, 160))}" onerror="this.style.opacity='.3'" style="display:block;height:56px;width:56px;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border)"></button>`;
   return `<button type="button" class="btn btn-ghost" data-k="${escapeHtml(key)}" onclick="compVer(this.dataset.k,'${t}')" style="font-size:12px;padding:4px 10px">${t === 'pdf' ? '📄 PDF' : '🧾 Ver comprobante'}</button>`;
 }
+// Posponer (nueva fecha) o cortar ('') el recordatorio de cobro de un pedido cargado sin pago. Solo admin.
+async function pedCobrarElGuardar(idx, cortar) {
+  const el = document.getElementById('ped-cobrar-el-' + idx);
+  const v = cortar ? '' : String((el && el.value) || '');
+  if (!cortar && !/^\d{4}-\d{2}-\d{2}$/.test(v)) { niToast('Elegí la fecha', { error: true }); return; }
+  if (cortar) { const ok = await showConfirm('¿Dejo de recordarte cobrar este pedido?', { title: 'Recordatorio de cobro', confirmLabel: 'Sí, dejar de recordar', cancelLabel: 'No' }).catch(() => false); if (!ok) return; }
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx, { method: 'PATCH', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ cobrar_el: v }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    const updated = (j.pedidos || []).map(mapPedidoFromD1);
+    const ids = new Set(updated.map(x => x.idx));
+    STATE.pedidos = STATE.pedidos.filter(x => !ids.has(x.idx)).concat(updated);
+    if (document.getElementById('table-pedidos')) renderTablePedidos();
+    openDrawerPedido(idx);
+    niToast(cortar ? 'Listo: no te recuerdo más este cobro' : `Listo: te recuerdo cobrarlo el ${v.slice(8, 10)}/${v.slice(5, 7)}`);
+  } catch (e) { niToast('Error: ' + e.message, { error: true }); }
+}
 function pagosDrawerSection(p) {
   const metodoTxt = (x) => x === 'efectivo' ? '💵 Efectivo' : (x === 'transferencia' ? '🏦 Transferencia' : '');
   const cajaPill = (c) => c ? `<span class="pill ${c === 'Efectivo' ? 'amber' : 'cyan'}" style="font-size:11px">${escapeHtml(c)}</span>` : '<span style="font-size:11px;color:var(--fg-mute)">sin caja</span>';
@@ -11889,14 +11945,28 @@ function pagosDrawerSection(p) {
       ${metodo === 'efectivo' ? '' : `<div style="flex:none">${pedPagoCompHtml(key)}</div>`}
     </div>`;
   const tiene2 = Number(p.cobro2) > 0 || !!p.comprobante2Key || !!p.caja2;
-  let html = fila('1er pago (seña)', p.pagado, p.caja, p.pagoMetodo, p.comprobanteKey, '');
+  const sinPago = p.pagoMetodo === 'pendiente' && !(Number(p.pagado) > 0) && !(Number(p.cobro2) > 0);
+  const ddmmC = p.cobrarEl ? p.cobrarEl.slice(8, 10) + '/' + p.cobrarEl.slice(5, 7) : '';
+  let html = sinPago
+    ? `<div style="padding:8px 0;border-top:1px dashed var(--border);font-size:13px;color:#FFB020">⏳ Cargado sin pago${ddmmC ? ' — cobrar el ' + escapeHtml(ddmmC) : ' — sin recordatorio'}. ${isAdmin() ? (ddmmC ? 'Te llega el recordatorio por WhatsApp hasta que registres el pago.' : '') : 'Gaspar recibe el recordatorio para cobrarlo.'}</div>`
+    : fila('1er pago (seña)', p.pagado, p.caja, p.pagoMetodo, p.comprobanteKey, '');
+  // Recordatorio de cobro (pedido cargado sin pago, o con saldo después de un pago parcial): posponer o cortarlo.
+  if (isAdmin() && p.estadoPago !== '2do pago' && !(Number(p.cobro2) > 0) && (p.cobrarEl || sinPago) && Number(p.restante) > 1) {
+    const hoyC = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+    html += `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:6px 0 2px">
+        <span style="font-size:11px;color:var(--fg-subtle)">${p.cobrarEl ? 'Recordar cobro el' : 'Recordarme cobrarlo el'}</span>
+        <input type="date" id="ped-cobrar-el-${p.idx}" min="${hoyC}" value="${escapeHtml(p.cobrarEl || '')}" style="background:var(--ink-100);color:var(--fg);border:1px solid var(--border);border-radius:var(--r-sm);padding:4px 6px;font-size:12px">
+        <button class="btn btn-ghost" style="font-size:12px;padding:4px 10px" onclick="pedCobrarElGuardar(${p.idx}, false)">${p.cobrarEl ? 'Posponer' : 'Activar'}</button>
+        ${p.cobrarEl ? `<button class="btn btn-ghost" style="font-size:12px;padding:4px 10px;color:var(--fg-subtle)" onclick="pedCobrarElGuardar(${p.idx}, true)">Dejar de recordar</button>` : ''}
+      </div>`;
+  }
   if (tiene2) {
     html += fila('2do pago (saldo)', p.cobro2, p.caja2, p.pago2Metodo, p.comprobante2Key, p.cobro2At ? `<span style="font-size:11px;color:var(--fg-mute)">${escapeHtml(compFechaCorta(p.cobro2At))}</span>` : '');
     if (Number(p.restante) > 0) html += `<div style="font-size:12px;color:#FFB020;padding-top:6px">Queda debiendo ${fmtMoney(p.restante)}</div>`;
   } else if (p.estadoPago === '2do pago') {
     html += `<div style="font-size:12px;color:var(--fg-subtle);padding-top:8px;border-top:1px dashed var(--border)">${(Number(p.pagado) > 0 && !(Number(p.restante) > 0)) ? 'Pagó el total en el 1er pago' : 'Marcado como 2do pago (sin datos del cobro)'}</div>`;
   } else if (canCotizar()) {
-    html += `<div style="padding-top:8px;border-top:1px dashed var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-cyan" onclick="abrirSegundoPago(${p.idx},{origen:'drawer'})" style="font-size:12px;padding:6px 12px">💳 Registrar 2do pago</button>${Number(p.restante) > 0 ? `<span style="font-size:12px;color:var(--fg-subtle)">saldo ${fmtMoney(p.restante)}</span>` : ''}</div>`;
+    html += `<div style="padding-top:8px;border-top:1px dashed var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-cyan" onclick="abrirSegundoPago(${p.idx},{origen:'drawer'})" style="font-size:12px;padding:6px 12px">💳 ${sinPago ? 'Registrar pago' : 'Registrar 2do pago'}</button>${Number(p.restante) > 0 ? `<span style="font-size:12px;color:var(--fg-subtle)">saldo ${fmtMoney(p.restante)}</span>` : ''}</div>`;
   }
   if (isAdmin() && p.cajaSyncErr) html += `<div style="font-size:10.5px;color:#FFB020;margin-top:6px">planilla: ${escapeHtml(p.cajaSyncErr)}</div>`;
   return `<div class="drawer-section" data-ped-pagos-idx="${p.idx}"><h4>💳 Pagos</h4>${html}</div>`;
@@ -11935,6 +12005,7 @@ function abrirSegundoPago(idx, opts) {
   const esUsuarioIg = p.plataforma === 'IG' && /^@|[a-z_.]/i.test(crudo);
   const st = {
     idx, p, numero: p.numero, cartel: p.cartel || '', nCarteles: herm.length, total, sena, saldo, origen: opts.origen || '', onCancel: alCancelar,
+    sinPago: p.pagoMetodo === 'pendiente' && !(sena > 0) && !(Number(p.cobro2) > 0),
     contacto: String(opts.contacto || (esUsuarioIg ? crudo : crudo.replace(/\D/g, ''))),
     metodo: 'transferencia', caja: '', cajaManual: false, cajaDeOcr: false,
     comp: null, compEstado: '', compTok: 0, compPrev: null, verOtros: false,
@@ -11946,9 +12017,9 @@ function abrirSegundoPago(idx, opts) {
   const bg = document.createElement('div');
   bg.className = 'modal-bg'; bg.id = 'sp2-modal';
   bg.innerHTML = `<div class="modal modal--login" style="max-width:620px;max-height:92vh">
-      <div class="modal-h"><h3 style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Registrar 2do pago · ${escapeHtml(st.cartel || 'pedido')}${st.nCarteles > 1 ? ' +' + (st.nCarteles - 1) : ''} · #${escapeHtml(String(st.numero || '—'))}</h3></div>
+      <div class="modal-h"><h3 style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${st.sinPago ? 'Registrar pago' : 'Registrar 2do pago'} · ${escapeHtml(st.cartel || 'pedido')}${st.nCarteles > 1 ? ' +' + (st.nCarteles - 1) : ''} · #${escapeHtml(String(st.numero || '—'))}</h3></div>
       <div class="modal-body" data-sp2-body></div>
-      <div class="modal-actions"><button class="btn btn-ghost" data-sp2-cancel>Cancelar</button><button class="btn btn-cyan" data-sp2-ok>✓ Registrar 2do pago</button></div>
+      <div class="modal-actions"><button class="btn btn-ghost" data-sp2-cancel>Cancelar</button><button class="btn btn-cyan" data-sp2-ok>✓ ${st.sinPago ? 'Registrar pago' : 'Registrar 2do pago'}</button></div>
     </div>`;
   document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
   st.bg = bg;
@@ -12031,21 +12102,21 @@ function sp2Html(st) {
     : `<div data-sp2-caja-row style="display:flex;gap:6px;flex-wrap:wrap;border:1px solid var(--border);border-radius:var(--r-sm);padding:4px">${PAGO_CAJAS.map(c => `<button type="button" data-sp2-caja="${c}" style="flex:1;min-width:72px;padding:8px 6px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${pmOBtn(st.caja === c)}">${c}</button>`).join('')}</div>`;
   const notaCaja = (!ef && st.caja && st.cajaDeOcr && !st.cajaManual) ? ' <span style="text-transform:none;letter-spacing:0;color:#3DDC97">— leída del comprobante</span>' : '';
   const okContacto = compContactoValido(st.contacto);
-  const compHtml = ef ? '' : `<div style="margin-bottom:12px"><label style="${PM_LBL}">Comprobante del 2do pago *</label>${compPickerHtml({
+  const compHtml = ef ? '' : `<div style="margin-bottom:12px"><label style="${PM_LBL}">${st.sinPago ? 'Comprobante del pago *' : 'Comprobante del 2do pago *'}</label>${compPickerHtml({
     pfx: 'sp2', sel: (st.comp && (st.comp.key || st.compEstado === 'subiendo')) ? st.comp : null, estado: st.compEstado, sug: st.sug,
     sugEstado: okContacto ? st.sugEstado : 'sincontacto', ocTs: st.ocTs, verOtros: st.verOtros, buscable: okContacto,
     sinContactoTxt: 'El pedido no tiene el teléfono / usuario del cliente: subí el comprobante.' })}</div>`;
   return `
     <div style="display:flex;gap:6px 14px;flex-wrap:wrap;font-size:13px;color:var(--fg-subtle);margin-bottom:12px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--ink-100)">
       <span>Total <b style="color:var(--fg)">${fmtMoney(st.total)}</b></span>
-      <span>Seña <b style="color:var(--fg)">${fmtMoney(st.sena)}</b>${cajaSena ? ' (' + escapeHtml(cajaSena) + ')' : ''}</span>
+      ${st.sinPago ? `<span>Sin seña${st.p && st.p.cobrarEl ? ' · era para el ' + escapeHtml(st.p.cobrarEl.slice(8, 10) + '/' + st.p.cobrarEl.slice(5, 7)) : ''}</span>` : `<span>Seña <b style="color:var(--fg)">${fmtMoney(st.sena)}</b>${cajaSena ? ' (' + escapeHtml(cajaSena) + ')' : ''}</span>`}
       <span>Saldo <b style="color:#FFB020">${fmtMoney(st.saldo)}</b></span>
     </div>
-    <label style="${PM_LBL}">¿Cómo pagó el saldo?</label>
+    <label style="${PM_LBL}">${st.sinPago ? '¿Cómo pagó?' : '¿Cómo pagó el saldo?'}</label>
     <div style="display:flex;gap:8px;margin-bottom:12px">${metBtn('transferencia', '🏦 Transferencia')}${metBtn('efectivo', '💵 Efectivo')}</div>
     <div style="margin-bottom:12px"><label style="${PM_LBL}">${ef ? 'Caja' : '¿A qué caja pagó? *'}${notaCaja}</label>${cajaHtml}</div>
     ${compHtml}
-    <div style="margin-bottom:4px"><label style="${PM_LBL}">${ef ? 'Importe en efectivo *' : 'Importe del 2do pago *'}</label><input data-sp2-importe type="number" inputmode="numeric" value="${escapeHtml(String(st.importe || ''))}" placeholder="$" style="${PM_INP}"></div>
+    <div style="margin-bottom:4px"><label style="${PM_LBL}">${ef ? 'Importe en efectivo *' : (st.sinPago ? 'Importe pagado *' : 'Importe del 2do pago *')}</label><input data-sp2-importe type="number" inputmode="numeric" value="${escapeHtml(String(st.importe || ''))}" placeholder="$" style="${PM_INP}"></div>
     <div data-sp2-hint style="font-size:11px">${sp2HintHtml(st)}</div>
     <div data-sp2-avisos>${sp2AvisosHtml(st)}</div>
     ${st.origen === 'chat' ? '<button type="button" data-sp2-nuevo style="background:none;border:0;padding:6px 0 0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:12px">¿No es el saldo de este pedido? Cargarlo como pedido nuevo →</button>' : ''}
@@ -12065,7 +12136,7 @@ function sp2Pintar(st) {
   if (enImporte) { const ni = body.querySelector('[data-sp2-importe]'); if (ni) { try { ni.focus({ preventScroll: true }); } catch (_) { ni.focus(); } } }
   sp2Marcas(st);
   const ok = st.bg.querySelector('[data-sp2-ok]');
-  if (ok) { ok.disabled = !!st.enviando; ok.textContent = st.enviando ? 'Guardando…' : '✓ Registrar 2do pago'; }
+  if (ok) { ok.disabled = !!st.enviando; ok.textContent = st.enviando ? 'Guardando…' : (st.sinPago ? '✓ Registrar pago' : '✓ Registrar 2do pago'); }
   const cc = st.bg.querySelector('[data-sp2-cancel]'); if (cc) cc.disabled = !!st.enviando;
 }
 function sp2Bind(st, body) {
@@ -12228,7 +12299,9 @@ async function sp2Confirmar(st) {
     caja: ef ? 'Efectivo' : st.caja,
     importe: Math.round(Number(st.importe) || 0),
     comprobante_key: ef ? '' : st.comp.key,
-    comprobante_wamid: ef ? '' : (st.comp.wamid || '')
+    comprobante_wamid: ef ? '' : (st.comp.wamid || ''),
+    // Pedido cargado sin pago: este es el 1er cobro (el server no lo registra dos veces si se reintenta).
+    ...(st.sinPago ? { primer_cobro: true } : {})
   };
   let r = null, j = {};
   try {
@@ -12255,7 +12328,7 @@ async function sp2Confirmar(st) {
   const enDrawer = secP ? parseInt(secP.getAttribute('data-ped-pagos-idx'), 10) : NaN;
   if (secP && (enDrawer === st.idx || updated.some(x => x.idx === enDrawer))) openDrawerPedido(enDrawer);
   const avisos = Array.isArray(j.avisos) ? j.avisos.filter(Boolean) : [];
-  niToast(`2do pago registrado ✓ · #${j.numero || st.numero}` + (avisos.length ? ' — ' + avisos.join(' · ') : ''), { ms: avisos.length ? 9000 : 3000 });
+  niToast(`${(st.sinPago || j.primer_cobro) ? 'Pago registrado' : '2do pago registrado'} ✓ · #${j.numero || st.numero}` + (avisos.length ? ' — ' + avisos.join(' · ') : ''), { ms: avisos.length ? 9000 : 3000 });
 }
 
 // ----- Agilidad desde el chat -----
@@ -14065,7 +14138,7 @@ function openDrawerPedido(idx) {
           <div><label style="${lblD}">Estado del pedido</label><select id="ped-edit-estadopedido" style="${inpD}">${pedOpts}</select></div>
           <div style="display:flex;gap:8px">
             <div style="flex:1"><label style="${lblD}">Estado del pago</label><select id="ped-edit-estadopago" onchange="pedPagoSelectChange(${idx}, this)" style="${inpD}">${pagoOpts}</select></div>
-            <div style="flex:1"><label style="${lblD}">Pagado</label><input id="ped-edit-pagado" type="number" value="${p.pagado||''}" style="${inpD}"></div>
+            <div style="flex:1"><label style="${lblD}">Pagado</label>${(p.pagoMetodo === 'pendiente' && !(Number(p.pagado) > 0)) ? `<div style="${inpD};opacity:.7;font-size:12px">Sin pago · usá "Registrar pago"</div>` : `<input id="ped-edit-pagado" type="number" value="${p.pagado||''}" style="${inpD}">`}</div>
           </div>
           ${esCorp ? `<div><label style="${lblD}">Productor</label><input id="ped-edit-productor" value="${escapeHtml(p.productor||'')}" placeholder="quién lo produce (lo cargás vos)" style="${inpD}"></div>` : ''}
           ${isAdmin() ? `<div><label style="${lblD}">¿La cerró el equipo? (no suma en el panel de rendimiento del vendedor)</label><select id="ped-edit-asistido" style="${inpD}">${[['', 'No, la cerró el vendedor'], ['bruno', 'Sí, la cerró Bruno'], ['equipo', 'Sí, la cerró el equipo']].map(([k, l]) => `<option value="${k}" ${(p.asistidoPor || '') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
@@ -15219,7 +15292,7 @@ function bindCommon() {
       // Destino: el COMPROBANTE de pago si el vendedor está en el bloque "💳 Pago" (o ya no queda cartel sin foto);
       // un PDF nunca es la foto del diseño. Si no, como siempre: la foto del diseño del primer cartel sin foto.
       const esPdf = /pdf/i.test(file.type || '');
-      const alComp = pmPegarAlComprobante(STATE.pedidoModal) || (esPdf && STATE.pedidoModal && STATE.pedidoModal.pagoMetodo !== 'efectivo');
+      const alComp = pmPegarAlComprobante(STATE.pedidoModal) || (esPdf && STATE.pedidoModal && STATE.pedidoModal.pagoMetodo !== 'efectivo' && STATE.pedidoModal.pagoMetodo !== 'pendiente');
       if (esPdf && !alComp) return;
       ev.preventDefault();
       ev.stopImmediatePropagation();

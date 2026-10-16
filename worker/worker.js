@@ -694,7 +694,10 @@ async function ensurePedidosSchema(env) {
     'cobro2 REAL', 'caja2 TEXT', 'pago2_metodo TEXT', 'comprobante2_key TEXT', 'comprobante2_wamid TEXT', 'cobro2_at TEXT',
     // Caja → col Z de Pedidos_Corporeo / Pedidos_Directo (syncCajaPedidos): último valor que el CRM escribió
     // (para no pisar lo que Gaspar cargó a mano), error y reintentos acotados (el IMPORTRANGE de neón tarda).
-    'caja_sync TEXT', 'caja_sync_err TEXT', 'caja_sync_attempts INTEGER NOT NULL DEFAULT 0']) {
+    'caja_sync TEXT', 'caja_sync_err TEXT', 'caja_sync_attempts INTEGER NOT NULL DEFAULT 0',
+    // Pedido cargado SIN PAGO por Gaspar (cliente frecuente que paga en unos días, 16-oct, mig. 056): pago_metodo
+    // 'pendiente' + cobrar_el = 'AAAA-MM-DD' en que tiene que cobrarlo (recordatorio: processCobrosPendientes).
+    'cobrar_el TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
   }
   // source_id = ad_id EXACTO de Meta que trajo la venta (auditable, no un título adivinado).
@@ -708,7 +711,7 @@ async function ensurePedidosSchema(env) {
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedidos_comercial ON pedidos(comercial_id)').run(); } catch (_) {}
   // Memo solo si las columnas nuevas existen de verdad: los ALTER se tragan cualquier error (también un timeout de
   // D1), y con el memo puesto y una columna faltante cada alta de ese isolate fallaría.
-  try { await env.DB.prepare('SELECT caja, pago_metodo, comprobante_key, cobro2, caja2, comprobante2_key, cobro2_at, caja_sync, caja_sync_attempts FROM pedidos LIMIT 0').all(); _pedidosSchemaOk = true; } catch (_) {}
+  try { await env.DB.prepare('SELECT caja, pago_metodo, comprobante_key, cobro2, caja2, comprobante2_key, cobro2_at, caja_sync, caja_sync_attempts, cobrar_el FROM pedidos LIMIT 0').all(); _pedidosSchemaOk = true; } catch (_) {}
 }
 // Nombre de diseño "aplastado" para comparar pedido ↔ brief: minúsculas, sin espacios ni puntuación
 // (. , - '). sqlNombreAplastado hace lo mismo en SQL (lower() de SQLite solo baja ASCII: alcanza).
@@ -13179,6 +13182,97 @@ async function processSinResponder(env) {
   } catch (_) {}
 }
 
+// ===== Recordatorio de COBRO de pedidos cargados SIN PAGO (Gaspar 16-oct) =====
+// "Haceme una alarma con plantilla a mi número que diga COBRAR take away y me recuerde bien": pedidos cargados con
+// '⏳ Sin pago' (cobrar_el = el día que paga). Mientras quede SALDO (restante > 0, sin '2do pago') le llega a Gaspar
+// la plantilla UTILITY recordatorio_agenda ({{1}} = "COBRAR <cartel> …"): el día anterior a las 10, el día a las 10 y
+// a las 18, y vencido todos los días a las 10. Si paga una parte, sigue avisando por lo que falta. Se pospone o se
+// corta desde la ficha del pedido (PATCH cobrar_el; '' = dejar de recordar). Lun-sáb: una fecha en domingo cuenta
+// como el lunes (y el "mañana" de un lunes sale el sábado). Cada aviso sale una sola vez por día y turno (claim en
+// cobro_avisos); si falla se reintenta cada 10 min dentro del turno (am 10-17 h, pm 18-20 h).
+// opts.forzar: ignora día/hora (prueba manual). opts.soloListar: no manda nada, devuelve la lista.
+async function cobrosPendientesLista(env) {
+  await ensurePedidosSchema(env);
+  const rows = (await env.DB.prepare(
+    "SELECT MIN(id) AS id, GROUP_CONCAT(id) AS ids, numero, fecha, IFNULL(telefono,'') AS tel, MAX(cobrar_el) AS cobrar_el, " +
+    "GROUP_CONCAT(cartel, ' + ') AS carteles, COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS total, " +
+    "MAX(IFNULL(pagado,0)) AS pagado, MAX(IFNULL(restante,0)) AS restante FROM pedidos " +
+    "WHERE IFNULL(cobrar_el,'') <> '' AND IFNULL(estado_pago,'') <> '2do pago' AND cobro2 IS NULL " +
+    "AND lower(IFNULL(estado_pedido,'')) NOT LIKE '%cancel%' " +
+    "GROUP BY numero, fecha, IFNULL(comercial_id,'joaco'), IFNULL(telefono,'') HAVING MAX(IFNULL(restante,0)) > 1 ORDER BY MAX(cobrar_el)"
+  ).all()).results || [];
+  const hoy = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+  const dia = (d) => Date.parse(d + 'T12:00:00Z');
+  // Fecha efectiva: un domingo (no se avisa) cuenta como el lunes.
+  const efectiva = (d) => (new Date(dia(d)).getUTCDay() === 0 ? new Date(dia(d) + 86400000).toISOString().slice(0, 10) : d);
+  return rows.map(r => { const ef = efectiva(r.cobrar_el); return { ...r, cobrar_ef: ef, dias: Math.round((dia(ef) - dia(hoy)) / 86400000) }; });   // dias > 0 faltan, 0 hoy, < 0 vencido
+}
+function cobroTexto(r) {
+  const fm = (n) => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR');
+  const ddmm = (d) => String(d || '').slice(8, 10) + '/' + String(d || '').slice(5, 7);
+  const que = String(r.carteles || 'pedido').replace(/\s+/g, ' ').trim().slice(0, 80);
+  const parcial = Number(r.pagado) > 0;
+  const base = `pedido #${r.numero} ${parcial ? 'falta ' + fm(r.restante) + ' (ya pagó ' + fm(r.pagado) + ')' : 'por ' + fm(r.restante || r.total)}`;
+  const cola = 'Cuando te pague, registralo en el pedido y dejo de avisarte.';
+  if (r.dias > 1) return `COBRAR ${que} el ${ddmm(r.cobrar_ef)} (en ${r.dias} días) — ${base}. ${cola}`;
+  if (r.dias === 1) return `COBRAR ${que} mañana (${ddmm(r.cobrar_ef)}) — ${base}. ${cola}`;
+  if (r.dias === 0) return `COBRAR ${que} HOY — ${base}. ${cola}`;
+  return `COBRAR ${que} — ${base}. Venció hace ${-r.dias} día${r.dias === -1 ? '' : 's'} (era para el ${ddmm(r.cobrar_ef)}). ${cola}`;
+}
+async function cobroEnviar(env, ph, linea) {
+  const E = { esAviso: true };
+  let r = null;
+  try { r = await waSendTemplate(env, ph, 'recordatorio_agenda', 'es_AR', [String(linea).replace(/\s+/g, ' ').trim().slice(0, 800)], null, E); } catch (_) {}
+  if (!r || !r.ok) { try { r = await waSendText(env, ph, '⏰ ' + linea, E); } catch (_) {} }
+  return r;
+}
+async function processCobrosPendientes(env, opts = {}) {
+  try {
+    const nowMs = Date.now();
+    const ar = new Date(nowMs - 3 * 3600 * 1000);
+    const hora = ar.getUTCHours(), hoy = ar.toISOString().slice(0, 10), dow = ar.getUTCDay();
+    if (!opts.forzar && !opts.soloListar) {
+      if (dow === 0) return { skipped: 'domingo' };
+      if (hora < 10 || hora >= 21) return { skipped: 'fuera de horario' };
+      // Corre en los dos crons: una pasada cada ~10 min alcanza (los claims evitan duplicados igual).
+      const prev = parseInt(await kvGet(env, 'cobros_last_run', '0'), 10) || 0;
+      if (nowMs - prev < 9 * 60 * 1000) return { skipped: 'throttle' };
+      await kvSet(env, 'cobros_last_run', String(nowMs));
+    }
+    const slot = hora < 18 ? 'am' : 'pm';
+    const lista = await cobrosPendientesLista(env);
+    if (opts.soloListar) return { ok: true, items: lista.map(r => ({ ...r, texto: cobroTexto(r) })) };
+    try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cobro_avisos (clave TEXT PRIMARY KEY, enviado_at TEXT)').run(); } catch (_) {}
+    const gaspar = env.ADMIN_NOTIFY_PHONE || AVISO_SLUGS_FIJOS.gaspar;
+    const res = { revisados: lista.length, enviados: 0, errores: 0 };
+    for (const r of lista) {
+      // Qué toca: "mañana" (turno am; el de un lunes sale el sábado), el día (am y pm), vencido (am).
+      let tipo = '';
+      if (slot === 'am' && (r.dias === 1 || (r.dias === 2 && dow === 6))) tipo = 'previo';
+      else if (r.dias === 0) tipo = 'dia';
+      else if (r.dias < 0 && slot === 'am') tipo = 'vencido';
+      if (opts.forzar) {
+        if (opts.id && !String(r.ids || '').split(',').map(Number).includes(Number(opts.id))) continue;
+        tipo = tipo || 'prueba';
+      } else if (!tipo) continue;
+      const clave = `cobro:${r.id}:${tipo}:${hoy}:${slot}${opts.forzar ? ':' + nowMs : ''}`;
+      let claim = null;
+      try { claim = await env.DB.prepare('INSERT OR IGNORE INTO cobro_avisos (clave, enviado_at) VALUES (?, ?)').bind(clave, new Date().toISOString()).run(); } catch (_) {}
+      if (!claim || !claim.meta || claim.meta.changes !== 1) continue;   // ya salió (u otra corrida lo tomó)
+      const linea = cobroTexto(r);
+      let out = null;
+      try {
+        // La clave de avisos_internos lleva el minuto: un reintento del mismo turno no choca con la fila del intento fallido.
+        out = await avisoInterno(env, { para: 'gaspar', tipo: 'cobro_pendiente', prioridad: 'P1', plata: true, clave: clave + ':' + new Date(nowMs).toISOString().slice(11, 16), texto: linea,
+          legacy: () => cobroEnviar(env, gaspar, linea), legacyDest: gaspar });
+      } catch (_) {}
+      if (out && out.ok) res.enviados++;
+      else { res.errores++; try { await env.DB.prepare('DELETE FROM cobro_avisos WHERE clave = ?').bind(clave).run(); } catch (_) {} }   // se reintenta en la próxima pasada del turno
+    }
+    return res;
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+
 // Avisos del centinela que NO esperan al resumen del día (oct-2026, auditoría de ruteo). desdeIso =
 // desde la corrida anterior (máx. 3 h atrás) → cada evento se avisa una sola vez. Un solo WhatsApp a
 // Gaspar con: (a) anuncios NUEVOS sin mapear a mano y cómo los está ruteando el sistema (1 vez por ad),
@@ -24035,10 +24129,24 @@ const handler = {
         // Cliente: Sin Frontera (solo admin) el alta va sin seña, caja ni comprobante, estado_pago 'Cuenta corriente' y restante 0
         // (la deuda se lleva aparte: no entra a "por cobrar" ni cierra la OC del chat).
         const esCuentaSF = !!body.cliente_sf && String(body.estado_pago || '') === 'Cuenta corriente' && (await getSessionRole(env, session.user)) === 'admin';
-        const pagado = esCuentaSF ? 0 : num(body.pagado);
+        // SIN PAGO (solo admin, Gaspar 16-oct: "un cliente frecuente que me paga en unos días pero quiero cargarlo igual"):
+        // sin seña, caja ni comprobante; queda '1er pago' con $0 (la hoja 2026 solo acepta 1er/2do pago) y cobrar_el =
+        // el día que tiene que cobrarlo → recordatorio por plantilla a Gaspar hasta que se registre el pago
+        // (processCobrosPendientes). NO cierra la OC del chat (sigue sin pagar). El pago se registra con el modal de
+        // pago (POST /admin/pedidos/:id/segundo-pago, que en un pedido sin seña lo toma como el 1er cobro).
+        const esSinPago = !esCuentaSF && String(body.pago_metodo || '').toLowerCase() === 'pendiente' && (await getSessionRole(env, session.user)) === 'admin';
+        let cobrarEl = '';
+        if (esSinPago) {
+          const hoyAR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+          const pedido = String(body.cobrar_el || '').trim();
+          let def = Date.parse(hoyAR + 'T12:00:00Z') + 3 * 86400000;
+          if (new Date(def).getUTCDay() === 0) def += 86400000;   // domingo → lunes
+          cobrarEl = (/^\d{4}-\d{2}-\d{2}$/.test(pedido) && !isNaN(Date.parse(pedido + 'T12:00:00Z')) && pedido >= hoyAR) ? pedido : new Date(def).toISOString().slice(0, 10);
+        }
+        const pagado = (esCuentaSF || esSinPago) ? 0 : num(body.pagado);
         const restante = esCuentaSF ? 0 : (pagado != null ? Math.max(0, total - pagado) : total);
         const plataforma = body.plataforma === 'IG' ? 'IG' : 'WPP';
-        const estadoPago = esCuentaSF ? 'Cuenta corriente' : String(body.estado_pago || '1er pago');
+        const estadoPago = esCuentaSF ? 'Cuenta corriente' : (esSinPago ? '1er pago' : String(body.estado_pago || '1er pago'));
         // PAGO (oct-2026): comprobante + caja OBLIGATORIOS. Se exigen solo si el front es el nuevo (pago_v ≥ 2): un
         // vendedor con la PWA vieja en caché no manda estos campos y no se le frena la venta (regla de la casa).
         // Efectivo ⇔ caja 'Efectivo' y sin comprobante (el importe es `pagado`).
@@ -24049,8 +24157,9 @@ const handler = {
         else if (caja === 'Efectivo') pagoMetodo = 'efectivo';
         let compKey = (pagoMetodo !== 'efectivo' && esKeyComprobantePedido(body.comprobante_key)) ? String(body.comprobante_key) : '';
         if (esCuentaSF) { caja = ''; compKey = ''; pagoMetodo = ''; }
+        if (esSinPago) { caja = ''; compKey = ''; pagoMetodo = 'pendiente'; }
         const compWamid = compKey ? String(body.comprobante_wamid || '').slice(0, 200) : '';
-        if (pagoV >= 2 && !esCuentaSF) {
+        if (pagoV >= 2 && !esCuentaSF && !esSinPago) {
           if (!caja) return json({ error: 'Falta a qué caja pagó', campo: 'caja' }, 400);
           if (!(pagado > 0)) return json({ error: 'Falta el importe pagado', campo: 'pagado' }, 400);
           if (!pagoMetodo) pagoMetodo = 'transferencia';
@@ -24119,8 +24228,8 @@ const handler = {
           const esCorp = _esCorpC(c);
           const mirrorDirty = 1;
           return env.DB.prepare(
-          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, producto, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at, source_id, foto_diseno_key, caja, pago_metodo, comprobante_key, comprobante_wamid)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO pedidos (numero, fecha, cartel, colores, alto, ancho, cm_neon, base, cantidad, precio, dimer, precio_dimmer, envio, aclaracion, tramos, tipo, productor, plataforma, estado_pago, pagado, restante, estado_pedido, ad, telefono, comercial_id, cargado_por, sheet_row, origen, mirror_dirty, es_corporeo, producto, frente, laterales, espalda, iluminacion, bastidor, color_bastidor, instalacion, created_at, updated_at, source_id, foto_diseno_key, caja, pago_metodo, comprobante_key, comprobante_wamid, cobrar_el)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '', ?, ?, ?, ?, 'En produccion', ?, ?, ?, ?, NULL, 'crm', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           numero, fecha, String(c.cartel || '').trim(), String(c.colores || '').trim(),
           num(c.alto), num(c.ancho), num(c.cm_neon), String(c.base || '').trim(),
@@ -24134,7 +24243,7 @@ const handler = {
           // Corpóreo: su foto del diseño queda en el pedido (key, o '' = "la subo después"). Neón: NULL (va a su pieza de corte).
           esCorp ? (esKeyDisenoPedido(c.foto_key) ? String(c.foto_key) : '') : null,
           // Pago a nivel PEDIDO (se repite en cada cartel, como pagado/estado_pago). La caja va a la col Z (syncCajaPedidos).
-          caja || null, pagoMetodo || null, compKey || null, compWamid || null
+          caja || null, pagoMetodo || null, compKey || null, compWamid || null, cobrarEl || null
         );
         });
         // Batch: cada INSERT de cartel de neón va seguido del INSERT de su pieza de corte, vinculada por
@@ -24202,7 +24311,7 @@ const handler = {
           }
         } catch (_) {}
         // OC de ese cliente → pagada (saca POR PAGAR, pone "Cartel primer pago", oc_enviadas.pagado_at). Ver ocCerrarPorPedido.
-        if (!esCuentaSF) await ocCerrarPorPedido(env, [telefono, igId], estadoPago);
+        if (!esCuentaSF && !esSinPago) await ocCerrarPorPedido(env, [telefono, igId], estadoPago);
         return json({ ok: true, numero, pedidos: rs.results || [], ...(body.cliente_sf ? { sf_vinculado: sfVinculado } : {}) });
       }
 
@@ -24319,6 +24428,22 @@ const handler = {
         if (('estado_pago' in body) && !estadoPagoIgnorado) { oSets.push('estado_pago = ?'); oArgs.push(String(body.estado_pago || '')); }
         // Texto libre del productor (corpóreos / pedidos viejos): nunca pisa el nombre de un cartel asignado desde Producción.
         if ('productor' in body)     { oSets.push("productor = CASE WHEN COALESCE(productor_id,'') <> '' THEN productor ELSE ? END"); oArgs.push(String(body.productor || '')); }
+        // Pedido "⏳ Sin pago": posponer el cobro (cobrar_el = otra fecha) o dejar de recordarlo (''). Solo admin, todo el
+        // pedido. No va al Excel (sin mirror_dirty ni updated_at).
+        if ('cobrar_el' in body) {
+          if (_pr !== 'admin') return json({ error: 'forbidden: solo Gaspar maneja los cobros pendientes' }, 403);
+          const ce = String(body.cobrar_el || '').trim();
+          const hoyCe = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+          if (ce && !(/^\d{4}-\d{2}-\d{2}$/.test(ce) && !isNaN(Date.parse(ce + 'T12:00:00Z')) && ce >= hoyCe)) return json({ error: 'Fecha de cobro inválida (tiene que ser hoy o más adelante)', campo: 'cobrar_el' }, 400);
+          await env.DB.prepare(`UPDATE pedidos SET cobrar_el = ? WHERE ${_grp}`).bind(ce || null, ..._grpArgs).run();
+          touched = true;
+        }
+        // El cobro de un pedido cargado sin pago se registra con "Registrar pago" (caja, comprobante, OC): tipeando
+        // Pagado quedaría sin caja ni comprobante y la OC en POR PAGAR.
+        if (('pagado' in body) && Number(body.pagado) > 0) {
+          const _pp = await env.DB.prepare(`SELECT MAX(IFNULL(pago_metodo,'')) AS pm, MAX(IFNULL(pagado,0)) AS pg FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
+          if (_pp && _pp.pm === 'pendiente' && !(Number(_pp.pg) > 0)) return json({ error: 'Este pedido se cargó sin pago: registrá el cobro con "Registrar pago" (así queda la caja y el comprobante)', campo: 'pagado' }, 409);
+        }
         const pagadoInBody = ('pagado' in body);
         if (pagadoInBody || precioChanged || pago2Revert) {
           const cur = await env.DB.prepare(`SELECT pagado, cobro2 FROM pedidos WHERE ${_grp} LIMIT 1`).bind(..._grpArgs).first();
@@ -24397,7 +24522,39 @@ const handler = {
         let _grp = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?";
         const _grpArgs = [ref.numero, ref.fecha, ref.com];
         if (ref.origen === 'crm' && ref.tel) { _grp += " AND origen = 'crm' AND IFNULL(telefono,'') = ?"; _grpArgs.push(ref.tel); }
-        const g = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t, MAX(pagado) AS pagado, MAX(IFNULL(caja,'')) AS caja, MAX(cobro2) AS cobro2, MAX(IFNULL(comprobante_key,'')) AS ck1 FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
+        const g = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t, MAX(pagado) AS pagado, MAX(IFNULL(caja,'')) AS caja, MAX(cobro2) AS cobro2, MAX(IFNULL(comprobante_key,'')) AS ck1, MAX(IFNULL(pago_metodo,'')) AS pm FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
+        // Pedido cargado SIN PAGO (pago_metodo 'pendiente', sin seña): este pago es el 1er COBRO, no un saldo. Va a pagado
+        // (COBRO 1 en la planilla), la caja a la col Z (syncCajaPedidos) y el comprobante como el de la seña; si cubre
+        // el total queda '2do pago' (pagó todo), si no '1er pago' con lo que falte. Corta el recordatorio de cobro solo.
+        // Reintento del front (se cortó la respuesta y el pago ya había entrado como 1er cobro): no se registra de nuevo.
+        if (body.primer_cobro === true && g && g.pm !== 'pendiente') {
+          if (Math.abs((Number(g.pagado) || 0) - importe) <= 1 && g.cobro2 == null) {
+            const rsI = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs, { interno: _pr === 'admin', fotos: true }) };
+            return json({ ok: true, numero: ref.numero, pedidos: rsI.results || [], avisos: ['Ese pago ya estaba registrado'], primer_cobro: true });
+          }
+          return json({ error: 'Ese pedido ya tiene un pago registrado: recargá la lista' }, 409);
+        }
+        if (g && g.pm === 'pendiente' && !(Number(g.pagado) > 0) && g.cobro2 == null) {
+          const totalSp = Number(g.t) || 0;
+          const restSp = Math.max(0, totalSp - importe);
+          const estadoSp = restSp <= 1 ? '2do pago' : '1er pago';
+          const nowSp = new Date().toISOString();
+          let usadoSp = null;
+          if (compKey) { try { usadoSp = await env.DB.prepare(`SELECT numero, cartel FROM pedidos WHERE (comprobante_key = ? OR comprobante2_key = ?) AND NOT (${_grp}) LIMIT 1`).bind(compKey, compKey, ..._grpArgs).first(); } catch (_) {} }
+          // Condicional: dos clics / un reintento a la vez no lo registran dos veces.
+          const upSp = await env.DB.prepare(`UPDATE pedidos SET estado_pago = ?, pagado = ?, restante = ?, caja = ?, pago_metodo = ?, comprobante_key = ?, comprobante_wamid = ?, caja_sync_attempts = 0, caja_sync_err = NULL, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE ${_grp} AND pago_metodo = 'pendiente' AND IFNULL(pagado,0) = 0`)
+            .bind(estadoSp, importe, restSp, caja, metodo, compKey || null, compWamid, nowSp, ..._grpArgs).run();
+          if (!(upSp && upSp.meta && upSp.meta.changes > 0)) return json({ error: 'Ese pedido ya tiene un pago registrado: recargá la lista' }, 409);
+          // La plata entró: la OC del chat deja de estar POR PAGAR (al cargarlo sin pago se había dejado abierta a propósito).
+          try { const igSp = /^@|[a-z_.]/i.test(ref.tel) ? await igsidDeUsuario(env, ref.tel) : ''; await ocCerrarPorPedido(env, [ref.tel, igSp], estadoSp); } catch (_) {}
+          const fmSp = (n) => '$' + Math.round(n).toLocaleString('es-AR');
+          const avisosSp = [restSp > 1 ? 'Pago registrado (el pedido se había cargado sin pago)' : 'Pago registrado: ya no te recuerdo cobrarlo'];
+          if (restSp > 1) avisosSp.push(`Queda debiendo ${fmSp(restSp)}${_pr === 'admin' ? ': te sigo recordando por el saldo' : ''}`);
+          else if (importe > totalSp + 1) avisosSp.push(`Pagó ${fmSp(importe - totalSp)} de más`);
+          if (usadoSp) avisosSp.push(`Ojo: ese comprobante también está cargado en el pedido #${usadoSp.numero}${usadoSp.cartel ? ' (' + String(usadoSp.cartel).slice(0, 40) + ')' : ''}`);
+          const rsSp = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs, { interno: _pr === 'admin', fotos: true }) };
+          return json({ ok: true, numero: ref.numero, pedidos: rsSp.results || [], avisos: avisosSp, primer_cobro: true });
+        }
         // El comprobante de la seña no puede ser también el del saldo (el caso típico de "Usar como comprobante" sobre la
         // foto equivocada). Si ese archivo ya es comprobante de OTRO pedido, se registra igual pero se avisa.
         if (compKey && g && g.ck1 === compKey) return json({ error: 'Ese comprobante es el de la seña de este pedido: elegí el del saldo', campo: 'comprobante' }, 400);
@@ -24495,6 +24652,18 @@ const handler = {
       // mano como orgánicos. Batched en un solo request. Solo Gaspar. Idempotente.
       // GET /admin/sin-responder/preview → qué avisaría AHORA la alarma "sin responder" (sin mandar nada): candidatos,
       // si el cliente espera respuesta (IA, cacheada por mensaje), urgencia, motivo y si ya se avisó. Solo Gaspar.
+      // GET /admin/cobros/pendientes → pedidos cargados SIN PAGO que hay que cobrar (con el texto del recordatorio).
+      // POST /admin/cobros/recordatorio-prueba?id=N → manda YA el recordatorio de ese pedido (o de todos) a Gaspar. Solo Gaspar.
+      if (path === '/admin/cobros/pendientes' && request.method === 'GET') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        return json(await processCobrosPendientes(env, { soloListar: true }));
+      }
+      if (path === '/admin/cobros/recordatorio-prueba' && request.method === 'POST') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const _cid = parseInt(url.searchParams.get('id') || '0', 10) || 0;
+        return json(await processCobrosPendientes(env, { forzar: true, id: _cid || null }));
+      }
+
       if (request.method === 'GET' && path === '/admin/sin-responder/preview') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         const items = await sinRespCandidatos(env, Date.now(), { clasificarMax: Math.min(60, parseInt(url.searchParams.get('ia') || '40', 10) || 40) });
@@ -27097,6 +27266,8 @@ const handler = {
     ctx.waitUntil(processGasparResendBackfill(env));
     ctx.waitUntil(processCentinelaRuteo(env));   // centinela de ruteo: cura/avisa perdidos·duplicados·mal-segmentados (self-throttle 30min)
     ctx.waitUntil(processSinResponder(env));     // alarma "sin responder": lead cotizado/con intención sin contestar +Nh → digest al vendedor + Gaspar (self-throttle 15min, gate sin_responder_on)
+    // Recordatorio de COBRO de los pedidos cargados sin pago (10 y 18 AR, lun-sáb; cada 10 min dentro de esa hora con claim).
+    if (new Date().getUTCMinutes() % 10 === 0) ctx.waitUntil(processCobrosPendientes(env));
     // Piloto de pre cotización automática (carteles): capta leads del 20% y los
     // releva con freno de mano. Gateado internamente (kill-switch OFF por defecto
     // + horario 8-22 AR). Corre en cada tick para responder en ~1-2 min.
