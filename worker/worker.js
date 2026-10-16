@@ -6306,10 +6306,63 @@ async function corteAutoCarga(env, ahora) {
 //  POST /corte/landing/cliente {telefono} → { conocido, tiene_direccion } (nada más: ni nombre ni dirección).
 //  POST /corte/landing/foto    (el archivo en el cuerpo; image/* o PDF; máx 15 MB) → { key }.
 //  POST /corte/landing/pedido  → crea el pedido (ver corteLandingPedido).
+// Medición de la página del corte (aviso por WhatsApp del 16-oct: "avisame cuántos tocan el botón y van a la página").
+// WhatsApp no informa los clics del botón, así que se cuenta desde la página: cada carga ('visita', IP hasheada) y cada
+// teléfono que escriben ('telefono'): ahí se sabe QUÉ cliente de la lista entró. Nunca frena la página.
+async function corteLandingVisita(env, request, tipo, tel) {
+  try {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS corte_landing_visitas (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, tipo TEXT, ipk TEXT, tel TEXT, ua TEXT)').run();
+    const ip = request.headers.get('CF-Connecting-IP') || '';
+    const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('corte:' + ip));
+    const ipk = [...new Uint8Array(h)].slice(0, 6).map(b => b.toString(16).padStart(2, '0')).join('');
+    const ua = String(request.headers.get('User-Agent') || '');
+    const uaCorto = (/whatsapp/i.test(ua) ? 'wa ' : '') + (/android/i.test(ua) ? 'android' : /iphone|ipad/i.test(ua) ? 'ios' : /windows|macintosh/i.test(ua) ? 'pc' : 'otro');
+    await env.DB.prepare('INSERT INTO corte_landing_visitas (ts, tipo, ipk, tel, ua) VALUES (?, ?, ?, ?, ?)').bind(new Date().toISOString(), tipo, ipk, tel || '', uaCorto).run();
+  } catch (_) {}
+}
+// Números del aviso: enviados, respondieron, visitas a la página, clientes de la lista que pusieron su número, pedidos.
+async function corteWebStats(env) {
+  const kind = await kvGet(env, 'corte_web_bc_kind', '');
+  if (!kind) return { ok: false, error: 'no hay aviso activo (kv corte_web_bc_kind)' };
+  const desde = await kvGet(env, 'corte_web_bc_desde', '') || '2026-10-16T00:00:00Z';
+  const q1 = async (sql, ...a) => { try { return await env.DB.prepare(sql).bind(...a).first(); } catch (_) { return null; } };
+  const env_ = await q1("SELECT SUM(status = 'sent') AS enviados, SUM(status = 'failed') AS fallidos, SUM(status IN ('queued', 'sending')) AS en_cola, COUNT(*) AS total FROM wa_autoreply_log WHERE kind = ?", kind);
+  const resp = await q1("SELECT COUNT(DISTINCT m.phone) AS n FROM wa_messages m JOIN wa_autoreply_log a ON a.phone = m.phone AND a.kind = ? AND a.status = 'sent' WHERE m.direction = 'inbound' AND m.ts >= a.sent_at AND m.msg_type NOT IN ('status', 'reaction')", kind);
+  const vis = await q1("SELECT COUNT(*) AS visitas, COUNT(DISTINCT ipk) AS unicos FROM corte_landing_visitas WHERE tipo = 'visita' AND ts >= ?", desde);
+  const tels = await q1("SELECT COUNT(DISTINCT v.tel) AS de_lista FROM corte_landing_visitas v JOIN wa_autoreply_log a ON substr(a.phone, -10) = substr(v.tel, -10) AND a.kind = ? WHERE v.tipo = 'telefono' AND v.ts >= ?", kind, desde);
+  const telsTot = await q1("SELECT COUNT(DISTINCT tel) AS n FROM corte_landing_visitas WHERE tipo = 'telefono' AND ts >= ?", desde);
+  let quienes = [];
+  try { quienes = ((await env.DB.prepare("SELECT DISTINCT a.sender_name AS nombre FROM corte_landing_visitas v JOIN wa_autoreply_log a ON substr(a.phone, -10) = substr(v.tel, -10) AND a.kind = ? WHERE v.tipo = 'telefono' AND v.ts >= ? LIMIT 30").bind(kind, desde).all()).results || []).map(r => r.nombre).filter(Boolean); } catch (_) {}
+  const ped = await q1("SELECT COUNT(*) AS n FROM corte_landing_envios WHERE IFNULL(prueba, 0) = 0 AND created_at >= ?", desde);
+  return { ok: true, kind, desde, enviados: Number(env_ && env_.enviados) || 0, fallidos: Number(env_ && env_.fallidos) || 0, en_cola: Number(env_ && env_.en_cola) || 0,
+    respondieron: Number(resp && resp.n) || 0, visitas: Number(vis && vis.visitas) || 0, visitantes: Number(vis && vis.unicos) || 0,
+    pusieron_numero: Number(telsTot && telsTot.n) || 0, de_la_lista: Number(tels && tels.de_lista) || 0, quienes, pedidos: Number(ped && ped.n) || 0 };
+}
+function corteWebStatsTexto(st) {
+  return `📊 Aviso del sitio del corte: enviados ${st.enviados}${st.fallidos ? ' (' + st.fallidos + ' no llegaron)' : ''}${st.en_cola ? ', ' + st.en_cola + ' en cola' : ''}. Respondieron ${st.respondieron}. Página: ${st.visitas} visitas (${st.visitantes} personas distintas). Pusieron su número ${st.pusieron_numero} (${st.de_la_lista} de la lista${st.quienes.length ? ': ' + st.quienes.slice(0, 12).join(', ') + (st.quienes.length > 12 ? '…' : '') : ''}). Pedidos por la página: ${st.pedidos}.`;
+}
+// Resúmenes automáticos a Gaspar en los horarios de kv corte_web_resumenes (JSON de ISO). Cada uno sale una vez.
+async function processCorteWebResumen(env) {
+  try {
+    let horas = []; try { horas = JSON.parse(await kvGet(env, 'corte_web_resumenes', '[]')) || []; } catch (_) {}
+    const now = Date.now();
+    for (const h of horas) {
+      const t = Date.parse(h); if (!t || now < t || now - t > 6 * 3600 * 1000) continue;
+      const k = 'corte_web_resumen_ok:' + h;
+      if ((await kvGet(env, k, '')) === '1') continue;
+      await kvSet(env, k, '1');
+      const st = await corteWebStats(env); if (!st.ok) return;
+      const txt = corteWebStatsTexto(st);
+      await avisoInterno(env, { para: 'gaspar', tipo: 'corte_web_resumen', prioridad: 'P2', clave: k, texto: txt,
+        legacy: () => avisoLanzamientoSendLegacy(env, AVISO_SLUGS_FIJOS.gaspar, txt), legacyDest: AVISO_SLUGS_FIJOS.gaspar });
+    }
+  } catch (_) {}
+}
 async function corteLandingRoute(request, env, ctx, url, path) {
   if (!env.DB) return json({ error: 'db' }, 500);
   const on = (await kvGet(env, 'corte_landing_on', '1')) === '1';
   if (request.method === 'GET' && path === '/corte/landing/config') {
+    if (ctx && ctx.waitUntil) ctx.waitUntil(corteLandingVisita(env, request, 'visita', ''));
     const pl = corteLandingPlazo(), pr = await corteLandingPrecios(env);
     return json({
       ok: true, on, plazo: { lunes: pl.lunesCorto, viernes: pl.viernesCorto, estado: pl.estado },
@@ -6325,6 +6378,7 @@ async function corteLandingRoute(request, env, ctx, url, path) {
     let body; try { body = await request.json(); } catch { body = {}; }
     const tel = corteTel(body.telefono);
     if (!tel) return json({ error: 'telefono', motivo: 'No reconocemos ese número. Escribilo con el código de área, por ejemplo 11 2345 6789 o 351 123 4567.' }, 400);
+    if (ctx && ctx.waitUntil) ctx.waitUntil(corteLandingVisita(env, request, 'telefono', tel));
     const c = await corteLandingCliente(env, tel);
     // Con un teléfono registrado se devuelve el nombre para autocompletar (lo mismo que ve cualquiera que tenga ese número en
     // WhatsApp). Al revés (nombre → teléfono) NO: la página es pública y expondría los números de los clientes.
@@ -12705,8 +12759,10 @@ const MINISUPER_LIVE_DAYS = 30;         // "chat vivo" = inbound en los últimos
 // Aviso del sitio de pedidos del corte (broadcast, 16-oct): quien CONTESTA ese aviso es cliente del corte → su chat
 // pasa a la bandeja 'corte' (la atiende Gaspar) con la etiqueta "Servicio de corte". Los que no contestan quedan
 // donde estaban (74 de los 145 son alumnos con chat activo con Abril en 'cursos': moverlos a todos le escondía
-// conversaciones de venta). Solo desde 'cursos' / 'general' / 'oculto' (nunca saca de 'privado') y dentro de los 10
-// días del envío. kv corte_web_bc_kind = 'bc_<id>' del broadcast (vacío = apagado).
+// conversaciones de venta). Antes del envío los destinatarios quedan en 'oculto' (Gaspar: "dejalos en oculto hasta
+// que respondan así no ensucian la bandeja"), salvo los chats activos con Abril en 'cursos' y el 'privado' de Gaspar.
+// Al responder: de 'oculto' / 'general' → 'corte' (nunca saca de 'cursos' ni de 'privado'); la etiqueta va a todos.
+// Dentro de los 10 días del envío. kv corte_web_bc_kind = 'bc_<id>' del broadcast (vacío = apagado).
 async function corteWebOnInbound(env, phone) {
   if (!phone) return;
   const kind = await kvGet(env, 'corte_web_bc_kind', '');
@@ -12715,7 +12771,7 @@ async function corteWebOnInbound(env, phone) {
     const got = await env.DB.prepare("SELECT sent_at FROM wa_autoreply_log WHERE phone = ? AND kind = ? AND status = 'sent' LIMIT 1").bind(phone, kind).first();
     if (!got || !got.sent_at || Date.now() - Date.parse(got.sent_at) > 10 * 86400000) return;
     const nowIso = new Date().toISOString();
-    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'corte', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'corte', updated_at = excluded.updated_at WHERE IFNULL(wa_chats_summary.inbox, 'general') IN ('cursos', 'general', 'oculto')").bind(phone, nowIso).run();
+    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'corte', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'corte', updated_at = excluded.updated_at WHERE IFNULL(wa_chats_summary.inbox, 'general') IN ('general', 'oculto')").bind(phone, nowIso).run();
     const lid = await ensureLabelId(env, 'Servicio de corte', '#14b8a6');
     if (lid) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, lid, nowIso).run();
   } catch (_) {}
@@ -24861,6 +24917,13 @@ const handler = {
         return json(await processCobrosPendientes(env, { forzar: true, id: _cid || null }));
       }
 
+      // GET /admin/corte/aviso-stats → números del aviso del sitio del corte (enviados, respondieron, visitas, quiénes
+      // pusieron su número, pedidos). Solo Gaspar.
+      if (request.method === 'GET' && path === '/admin/corte/aviso-stats') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const st = await corteWebStats(env);
+        return json(st.ok ? { ...st, texto: corteWebStatsTexto(st) } : st);
+      }
       if (request.method === 'GET' && path === '/admin/sin-responder/preview') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         const items = await sinRespCandidatos(env, Date.now(), { clasificarMax: Math.min(60, parseInt(url.searchParams.get('ia') || '40', 10) || 40) });
@@ -27565,6 +27628,8 @@ const handler = {
     ctx.waitUntil(processSinResponder(env));     // alarma "sin responder": lead cotizado/con intención sin contestar +Nh → digest al vendedor + Gaspar (self-throttle 15min, gate sin_responder_on)
     // Recordatorio de COBRO de los pedidos cargados sin pago (10 y 18 AR, lun-sáb; cada 10 min dentro de esa hora con claim).
     if (new Date().getUTCMinutes() % 10 === 0) ctx.waitUntil(processCobrosPendientes(env));
+    // Resúmenes del aviso del sitio del corte a Gaspar (kv corte_web_resumenes).
+    if (new Date().getUTCMinutes() % 5 === 0) ctx.waitUntil(processCorteWebResumen(env));
     // Piloto de pre cotización automática (carteles): capta leads del 20% y los
     // releva con freno de mano. Gateado internamente (kill-switch OFF por defecto
     // + horario 8-22 AR). Corre en cada tick para responder en ~1-2 min.
