@@ -1,0 +1,18 @@
+# GitHub Pages (build con Jekyll): el sitio público neoninfinitosoftware.com es SOLO el front del CRM (index.html,
+# assets/, sw.js, manifest, CNAME, robots.txt) y la página de pedidos del corte (corte/). Todo lo demás del repo
+# (backend del worker, migraciones, Apps Script, notas internas y páginas viejas con scripts de terceros) NO se
+# publica: antes se servía entero en el dominio (auditoría de seguridad del 16-oct-2026).
+exclude:
+  - worker/
+  - apps-script.js
+  - CLAUDE.md
+  - README.md
+  - HANDOFF.md
+  - "*.md"
+  - "*.sql"
+  - "*.py"
+  - "*.toml"
+  - "*.jsonc"
+  - link-whatsapp.html
+  - mock-panel.html
+  - nuevas-conversaciones-5d.html

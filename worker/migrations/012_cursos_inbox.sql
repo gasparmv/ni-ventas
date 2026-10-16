@@ -15,7 +15,7 @@
 ALTER TABLE wa_chats_summary ADD COLUMN inbox TEXT NOT NULL DEFAULT 'general';
 CREATE INDEX IF NOT EXISTS idx_wa_chats_summary_inbox ON wa_chats_summary(inbox, last_ts DESC);
 
--- 2) Usuario nuevo: Abril, rol 'cursos'. Password: cursosneon2026 (SHA-256).
+-- 2) Usuario nuevo: Abril, rol 'cursos'. La contraseña NO se versiona (repo público): se carga desde Admin → Usuarios.
 --    Solo podrá ver la sección Chat WA y, dentro, solo la bandeja 'cursos'.
 INSERT OR IGNORE INTO users_panel (id, nombre, rol, password_hash, activo, created_at)
-VALUES ('cursos', 'Abril', 'cursos', '0901bea95ee41e7332f5eacdf3c52bd7f363d4d53fd25416e223e5f859471ef6', 1, datetime('now'));
+VALUES ('cursos', 'Abril', 'cursos', 'REDACTADO', 1, datetime('now'));
