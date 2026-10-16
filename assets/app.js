@@ -6415,7 +6415,7 @@ async function sfCargar(opts) {
     if (STATE.user !== user) return;
     if (!ped && silent && ((STATE._sfMovGen || 0) !== gen || STATE._sfGuardando)) return; // vieja: el próximo tick recarga
     if (ped) STATE.sfPed = { pedidos: j.pedidos || [], configurado: !!j.configurado, at: Date.now() };
-    else STATE.sf = { tickets: j.tickets || [], at: Date.now() };
+    else STATE.sf = { tickets: j.tickets || [], excluidos: j.excluidos || null, at: Date.now() };
   } catch (e) {
     if (STATE.user !== user) return;
     if (!silent) { if (ped) STATE.sfPed = { error: e.message || 'No se pudo cargar' }; else STATE.sf = { error: e.message || 'No se pudo cargar' }; }
@@ -6621,7 +6621,24 @@ function renderSfProduccion() {
     </div>
     ${ts.length ? `<div data-sfk-zona data-sig="${escapeHtml(sfkBoardSig(ts, cel))}">${sfkTabsHtml(ts, cel)}${sfkBoardHtml(ts, cel)}</div><div class="logi-vacio-box sfk-nores" data-sfk-nores hidden></div>` : '<div class="logi-vacio-box">Todavía no hay corpóreos en producción.</div>'}
     <div class="logi-ayuda">Tocá una tarjeta para ver el ticket completo · El botón de abajo la pasa a la etapa siguiente${sfkFino() ? ' · También la podés arrastrar a otra columna' : ''} · Cada movida se puede deshacer</div>
+    ${sfkExcluidosHtml()}
   </div>`;
+}
+// Gaspar: corpóreos sacados del tablero ("No lo hace Sin Frontera"), con "Volver a sumar".
+function sfkExcluidosHtml() {
+  const xs = isAdmin() && STATE.sf && STATE.sf.excluidos;
+  if (!xs || !xs.length) return '';
+  return `<div class="sfk-excl" data-sfk-excl><b>No los hace Sin Frontera</b> (no los ven):${xs.map(x => ` <span class="sfk-excl-it">#${x.ticket || '?'} ${escapeHtml(x.empresa || 'Sin nombre')} <button type="button" class="logi-link" data-sfk-sumar="${x.pedido_id}">volver a sumar</button></span>`).join(' ·')}</div>`;
+}
+async function sfkSacar(pid, sacar) {
+  const t = sfkTicket(pid), nom = t ? '#' + t.ticket + ' ' + (t.empresa || '') : 'el corpóreo';
+  if (sacar && !(await showConfirm(`¿Sacar ${nom} del tablero de Sin Frontera? Lo dejan de ver (lo fabrica otro o se canceló). El pedido no cambia y lo podés volver a sumar.`, { title: 'No lo hace Sin Frontera', confirmLabel: 'Sacar', cancelLabel: 'Cancelar' }))) return;
+  try { await sfFetch('/admin/sinfrontera/excluir', { pedido_id: pid, sacar: !!sacar }); }
+  catch (e) { niToast('No se guardó: ' + String(e.message || 'error').replace(/[.\s]+$/, ''), { error: true }); return; }
+  if (sacar) sfkCerrar();
+  niToast(sacar ? nom + ' salió del tablero de Sin Frontera' : 'Volvió al tablero de Sin Frontera', sacar ? { undo: () => sfkSacar(pid, false), ms: 6000 } : {});
+  STATE.sf = null; // recarga con la lista nueva (tablero y sacados)
+  const m = document.getElementById('main'); if (m && STATE.view === 'sf-produccion') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
 }
 // Búsqueda y "Urgentes" EN EL LUGAR (sin redibujar): oculta tarjetas y pone los conteos "3/16".
 function sfkFiltrarDom() {
@@ -6827,7 +6844,7 @@ function sfkTicketHtml(t) {
       <div class="lb-tit">Recorrido</div>
       ${recorrido || '<div class="sf-hist muted">Todavía no se movió.</div>'}
       <div class="sf-hist muted">Ticket #${t.ticket}${t.creado ? ' · armado el ' + escapeHtml(sfFecha(t.creado)) : ''}</div>
-      ${enCrm ? `<div style="margin-top:10px"><button type="button" class="btn btn-ghost lb-mini" data-sfk-crm="${t.pedido_id}">Abrir el pedido en el CRM</button></div>` : ''}
+      ${isAdmin() ? `<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">${enCrm ? `<button type="button" class="btn btn-ghost lb-mini" data-sfk-crm="${t.pedido_id}">Abrir el pedido en el CRM</button>` : ''}<button type="button" class="btn btn-ghost lb-mini" data-sfk-sacar="${t.pedido_id}" title="Lo fabrica otro o se canceló: Sin Frontera deja de verlo">No lo hace Sin Frontera</button></div>` : ''}
     </div>
     <div class="sfd-acc" data-sfd-acc>
       ${sig !== null ? `<button type="button" class="sfk-pasar sfd-pasar" data-sfk-pasar="${t.pedido_id}" data-a="${sig}" style="--c:${sfkCol(sig)}">${escapeHtml(sfkPasarTxt(sig))}${SFK_CHEVRON}</button>` : ''}
@@ -6864,7 +6881,8 @@ function sfkPanelClick(e) {
   const pasar = el.closest('[data-sfk-pasar]'); if (pasar) { sfkMover(+pasar.dataset.sfkPasar, pasar.dataset.a, 'boton'); return; }
   const volver = el.closest('[data-sfk-volver]'); if (volver) { sfkMover(+volver.dataset.sfkVolver, volver.dataset.a, 'volver'); return; }
   const paso = el.closest('[data-sfk-step]'); if (paso && STATE.sfAbierto) { sfkMover(STATE.sfAbierto, paso.getAttribute('data-sfk-step'), 'paso'); return; }
-  const crm = el.closest('[data-sfk-crm]'); if (crm && typeof openDrawerPedido === 'function') { const id = +crm.getAttribute('data-sfk-crm'); sfkCerrar(); openDrawerPedido(id); }
+  const crm = el.closest('[data-sfk-crm]'); if (crm && typeof openDrawerPedido === 'function') { const id = +crm.getAttribute('data-sfk-crm'); sfkCerrar(); openDrawerPedido(id); return; }
+  const sacar = el.closest('[data-sfk-sacar]'); if (sacar) sfkSacar(+sacar.getAttribute('data-sfk-sacar'), true);
 }
 // Refresco de fondo con el panel abierto: si ESE ticket cambió (lo movió otro), se redibuja el panel.
 function sfkPanelRefrescar() {
@@ -7184,6 +7202,7 @@ function bindSinFrontera() {
     }
     const urg = el.closest('[data-sfk-urg]'); if (urg) { STATE.sfUrg = !STATE.sfUrg; urg.classList.toggle('on', STATE.sfUrg); sfkFiltrarDom(); return; }
     if (el.closest('[data-sfk-ent-todos]')) { sfkEntregadosModal(STATE.sfQ); return; }
+    const sumar = el.closest('[data-sfk-sumar]'); if (sumar) { sfkSacar(+sumar.getAttribute('data-sfk-sumar'), false); return; }
     // El encabezado de Entregado (y el riel plegado en pantallas medianas) abre la lista completa.
     if (el.closest('[data-sfk-rail]')) { sfkEntregadosModal(STATE.sfQ); return; }
     const card = el.closest('[data-sfk-card]'); if (card) { sfkAbrir(+card.getAttribute('data-sfk-card')); return; }

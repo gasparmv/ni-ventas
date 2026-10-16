@@ -4637,6 +4637,9 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
 /* El filtro oculta con [hidden]: sin esto, el display:flex/grid de la tarjeta le gana y quedan a la vista. */
 .sfk-wrap [data-sfk-card][hidden] { display: none !important; }
 .sfk-nores { margin-top: 4px; }
+.sfk-excl { font-size: 12px; color: var(--fg-subtle); line-height: 1.7; }
+.sfk-excl b { color: var(--fg-muted); }
+.sfk-excl-it { white-space: nowrap; }
 .logi-chip[disabled] { opacity: .45; cursor: default; }
 /* Celular en horizontal o notebooks con zoom: las columnas crecen y scrollea la página. */
 @media (min-width: 761px) and (max-height: 560px) { .sfk-col { max-height: none; } .sfk-col-list { overflow: visible; } }

@@ -16321,6 +16321,8 @@ async function ensureSinFronteraSchema(env) {
   if (_sfSchemaOk) return;
   await ensureProdSchema(env); // pedidos.prod_estado / prod_estado_at y pedido_prod_log (producción de neón, migración 053)
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS sinfrontera_pedidos (pedido_id INTEGER PRIMARY KEY, por TEXT, at TEXT)').run();
+  // Corpóreos que NO hace Sin Frontera (los fabrica otro o se cancelaron): Gaspar los saca de su tablero (16-oct, OMA pastilla).
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS sinfrontera_excluidos (pedido_id INTEGER PRIMARY KEY, por TEXT, at TEXT)').run();
   _sfSchemaOk = true;
 }
 // Números con los que compra Sin Frontera (kv sinfrontera_tels, JSON): celular normalizado (549…) o @usuario de Instagram
@@ -16352,7 +16354,7 @@ function sfPedidosWhere(tels) {
 // Producción: un renglón por corpóreo con ticket (el último ticket de cada pedido). Del ticket, solo SF_TICKET_CAMPOS; del
 // pedido, lo que hace falta para fabricar. NUNCA precio, pago, teléfono, vendedor ni la aclaración libre del pedido (ya va en
 // el ticket como "Descripción del cliente"). Sin estado propio y el pedido ya figura Entregado → se muestra entregado.
-async function sfProduccion(env) {
+async function sfProduccion(env, opts = {}) {
   let rows = [];
   try {
     rows = (await env.DB.prepare(
@@ -16363,8 +16365,19 @@ async function sfProduccion(env) {
          FROM corporeo_tickets t
          JOIN (SELECT pedido_id, MAX(id) AS mid FROM corporeo_tickets WHERE pedido_id IS NOT NULL GROUP BY pedido_id) u ON u.mid = t.id
          JOIN pedidos p ON p.id = t.pedido_id AND IFNULL(p.es_corporeo, 0) = 1
+        WHERE p.id NOT IN (SELECT pedido_id FROM sinfrontera_excluidos)
         ORDER BY t.numero DESC, t.id DESC LIMIT 300`).all()).results || [];
   } catch (_) { return { ok: false, error: 'No se pudo leer la producción. Probá de nuevo en un momento.' }; }
+  // Solo para Gaspar: los que sacó del tablero (para poder volver a sumarlos).
+  let excluidos;
+  if (opts.admin) {
+    try {
+      excluidos = ((await env.DB.prepare(
+        `SELECT x.pedido_id, x.por, x.at, p.cartel, (SELECT MAX(numero) FROM corporeo_tickets t WHERE t.pedido_id = x.pedido_id) AS ticket
+           FROM sinfrontera_excluidos x JOIN pedidos p ON p.id = x.pedido_id ORDER BY x.at DESC LIMIT 100`).all()).results || [])
+        .map(r => ({ pedido_id: r.pedido_id, ticket: r.ticket, empresa: String(r.cartel || '').trim(), por: r.por || '', at: r.at || '' }));
+    } catch (_) { excluidos = []; }
+  }
   const hist = {};
   const ids = rows.map(r => r.pedido_id);
   for (let i = 0; i < ids.length; i += 90) {
@@ -16393,7 +16406,7 @@ async function sfProduccion(env) {
       estado, estado_at: r.prod_estado_at || '', historial: hist[r.pedido_id] || [],
     };
   });
-  return { ok: true, tickets, estados: SF_ESTADOS };
+  return { ok: true, tickets, estados: SF_ESTADOS, ...(excluidos ? { excluidos } : {}) };
 }
 // Mis pedidos: SUS compras (sfPedidosWhere), con precio y pagos, el estado de producción del neón y cuántas fotos del cartel
 // terminado hay (las sube el productor).
@@ -16428,7 +16441,7 @@ async function sfArchivoKey(env, qs) {
       if (!(i >= 0 && i < 10)) return '';
       const r = await env.DB.prepare(
         `SELECT t.photo_keys FROM corporeo_tickets t JOIN pedidos p ON p.id = t.pedido_id AND IFNULL(p.es_corporeo, 0) = 1
-          WHERE t.id = ? AND t.id = (SELECT MAX(id) FROM corporeo_tickets WHERE pedido_id = t.pedido_id)`).bind(t).first();
+          WHERE t.id = ? AND t.id = (SELECT MAX(id) FROM corporeo_tickets WHERE pedido_id = t.pedido_id) AND p.id NOT IN (SELECT pedido_id FROM sinfrontera_excluidos)`).bind(t).first();
       let keys = []; try { keys = r ? JSON.parse(r.photo_keys || '[]') : []; } catch (_) {}
       const k = Array.isArray(keys) ? String(keys[i] || '') : '';
       return k.startsWith('corporeo-ticket/') ? k : '';
@@ -16436,7 +16449,7 @@ async function sfArchivoKey(env, qs) {
     if (!p) return '';
     if (!(fi >= 0)) {
       // Corpóreo en producción (con ticket): el diseño original que cargó el vendedor.
-      const c = await env.DB.prepare("SELECT foto_diseno_key AS k FROM pedidos WHERE id = ? AND IFNULL(es_corporeo, 0) = 1 AND EXISTS (SELECT 1 FROM corporeo_tickets WHERE pedido_id = pedidos.id)").bind(p).first();
+      const c = await env.DB.prepare("SELECT foto_diseno_key AS k FROM pedidos WHERE id = ? AND IFNULL(es_corporeo, 0) = 1 AND EXISTS (SELECT 1 FROM corporeo_tickets WHERE pedido_id = pedidos.id) AND id NOT IN (SELECT pedido_id FROM sinfrontera_excluidos)").bind(p).first();
       if (c && String(c.k || '').trim()) return String(c.k).trim();
     }
     await ensureSinFronteraSchema(env);
@@ -25429,7 +25442,7 @@ const handler = {
         if (!sfExt && (await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
         try { await ensureSinFronteraSchema(env); } catch (_) { return json({ error: 'db', motivo: 'No se pudo preparar la base. Probá de nuevo.' }, 500); }
         // GET /admin/sinfrontera/produccion → corpóreos en producción (sfProduccion).
-        if (request.method === 'GET' && path === '/admin/sinfrontera/produccion') return json(await sfProduccion(env));
+        if (request.method === 'GET' && path === '/admin/sinfrontera/produccion') return json(await sfProduccion(env, { admin: !sfExt }));
         // GET /admin/sinfrontera/pedidos → sus pedidos (sfPedidos).
         if (request.method === 'GET' && path === '/admin/sinfrontera/pedidos') return json(await sfPedidos(env));
         // GET /admin/sinfrontera/archivo?t=&i= | ?p=[&f=] [&w=] [&dl=1] → foto del ticket, diseño o foto del cartel terminado.
@@ -25445,7 +25458,7 @@ const handler = {
           // '' = Por empezar (volver al principio o deshacer la primera movida).
           if (!pid || !(estado === '' || SF_ESTADOS.some(e => e[0] === estado))) return json({ error: 'datos', motivo: 'Elegí un estado de la lista.' }, 400);
           let ped = null;
-          try { ped = await env.DB.prepare("SELECT p.cartel, IFNULL(p.prod_estado, '') AS prod_estado, p.numero, p.fecha, IFNULL(p.comercial_id, 'joaco') AS com, IFNULL(p.telefono, '') AS tel, IFNULL(p.estado_pedido, '') AS estado_pedido, (SELECT MAX(numero) FROM corporeo_tickets t WHERE t.pedido_id = p.id) AS ticket FROM pedidos p WHERE p.id = ? AND IFNULL(p.es_corporeo, 0) = 1").bind(pid).first(); } catch (_) {}
+          try { ped = await env.DB.prepare("SELECT p.cartel, IFNULL(p.prod_estado, '') AS prod_estado, p.numero, p.fecha, IFNULL(p.comercial_id, 'joaco') AS com, IFNULL(p.telefono, '') AS tel, IFNULL(p.estado_pedido, '') AS estado_pedido, (SELECT MAX(numero) FROM corporeo_tickets t WHERE t.pedido_id = p.id) AS ticket FROM pedidos p WHERE p.id = ? AND IFNULL(p.es_corporeo, 0) = 1 AND p.id NOT IN (SELECT pedido_id FROM sinfrontera_excluidos)").bind(pid).first(); } catch (_) {}
           if (!ped || !ped.ticket) return json({ error: 'nada', motivo: 'Ese corpóreo no está en producción.' }, 404);
           // Estado que ve el tablero: sin estado propio y el pedido ya Entregado (desde Pedidos) = entregado (igual que sfProduccion).
           const efPrev = ped.prod_estado || (/^entregad/i.test(ped.estado_pedido) ? 'entregado' : '');
@@ -25482,6 +25495,18 @@ const handler = {
         }
         // ---- De acá para abajo, solo Gaspar ----
         if (sfExt) return json({ error: 'forbidden' }, 403);
+        // POST /admin/sinfrontera/excluir {pedido_id, sacar: true|false} → "No lo hace Sin Frontera": lo saca de su tablero (no lo
+        // ven ni pueden moverlo ni bajar sus archivos) o lo vuelve a sumar. No toca el pedido ni su estado.
+        if (request.method === 'POST' && path === '/admin/sinfrontera/excluir') {
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const pid = parseInt(body.pedido_id, 10) || 0;
+          if (!pid) return json({ error: 'datos', motivo: 'Falta el pedido.' }, 400);
+          try {
+            if (body.sacar === false) await env.DB.prepare('DELETE FROM sinfrontera_excluidos WHERE pedido_id = ?').bind(pid).run();
+            else await env.DB.prepare('INSERT OR IGNORE INTO sinfrontera_excluidos (pedido_id, por, at) VALUES (?, ?, ?)').bind(pid, String(session.user || ''), new Date().toISOString()).run();
+          } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
+          return json({ ok: true, sacado: body.sacar !== false });
+        }
         // POST /admin/sinfrontera/password {password} → crea/actualiza el usuario "sinfrontera" con esa contraseña (hash) y lo
         // activa. No existe hasta que se la pone Gaspar (un usuario activo sin hash entraría sin contraseña). Cambiarla cierra
         // las sesiones abiertas de Sin Frontera.
