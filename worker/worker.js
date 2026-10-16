@@ -1164,7 +1164,9 @@ async function pushPedidoToVentas(env, row) {
     row.alto ?? '', row.ancho ?? '', row.cm_neon ?? '', row.base || '',
     row.cantidad ?? '', row.precio ?? '', row.dimer || '', row.precio_dimmer ?? '',
     row.envio || '', row.aclaracion || '', '', // O = Productor (placeholder, se respeta)
-    row.plataforma || '', row.estado_pago || '', row.pagado ?? '', row.restante ?? '',
+    // Q = estado de pago: la hoja 2026 tiene validación ("1er pago" / "2do pago") y rechaza el "Cuenta corriente" de Sin
+    // Frontera (el espejo de ribs #975 rebotaba 16-oct) → va vacío; la cuenta corriente se lleva en otro Excel.
+    row.plataforma || '', /^cuenta corriente$/i.test(String(row.estado_pago || '').trim()) ? '' : (row.estado_pago || ''), row.pagado ?? '', row.restante ?? '',
     row.estado_pedido || '', row.ad || ''
   ];
   try {
