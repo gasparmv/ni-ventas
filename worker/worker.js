@@ -5160,12 +5160,12 @@ async function corteTrasPagado(env, phone, piezas, nombre, total, proof, msgClie
   // la col R si el comprobante la muestra (gate kv corte_sheet_pago_on, default ON).
   let sheetMsg = '';
   if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') {
-    const caja = corteCajaFromProof(proof);
+    const caja = cajaDeComprobante(proof); // nombre + apellido, entiende el formato pegado de Mercado Pago ("GASPARMARTINE")
     try {
       const sr = await corteMarcarPagadoSheet(env, nombre, total, caja);
       if (sr.ok) sheetMsg = ' · planilla: ' + sr.marcadas + ' fila(s) → pagado' + (sr.caja ? ' (caja ' + sr.caja + ')' : ' (sin caja visible)');
       else { sheetMsg = ' · planilla NO marcada (' + sr.error + ')'; if (/token|HTTP/i.test(String(sr.error))) await corteSheetPendingAdd(env, phone, nombre, total, caja); }
-    } catch (e) { sheetMsg = ' · planilla error'; await corteSheetPendingAdd(env, phone, nombre, total, corteCajaFromProof(proof)); }
+    } catch (e) { sheetMsg = ' · planilla error'; await corteSheetPendingAdd(env, phone, nombre, total, cajaDeComprobante(proof)); }
   }
   return sheetMsg;
 }
@@ -25442,11 +25442,14 @@ const handler = {
         if (request.method === 'POST' && path === '/admin/sinfrontera/estado') {
           let body; try { body = await request.json(); } catch { body = {}; }
           const pid = parseInt(body.pedido_id, 10) || 0, estado = String(body.estado || '');
-          if (!pid || !SF_ESTADOS.some(e => e[0] === estado)) return json({ error: 'datos', motivo: 'Elegí un estado de la lista.' }, 400);
+          // '' = Por empezar (volver al principio o deshacer la primera movida).
+          if (!pid || !(estado === '' || SF_ESTADOS.some(e => e[0] === estado))) return json({ error: 'datos', motivo: 'Elegí un estado de la lista.' }, 400);
           let ped = null;
-          try { ped = await env.DB.prepare("SELECT p.cartel, IFNULL(p.prod_estado, '') AS prod_estado, (SELECT MAX(numero) FROM corporeo_tickets t WHERE t.pedido_id = p.id) AS ticket FROM pedidos p WHERE p.id = ? AND IFNULL(p.es_corporeo, 0) = 1").bind(pid).first(); } catch (_) {}
+          try { ped = await env.DB.prepare("SELECT p.cartel, IFNULL(p.prod_estado, '') AS prod_estado, p.numero, p.fecha, IFNULL(p.comercial_id, 'joaco') AS com, IFNULL(p.telefono, '') AS tel, IFNULL(p.estado_pedido, '') AS estado_pedido, (SELECT MAX(numero) FROM corporeo_tickets t WHERE t.pedido_id = p.id) AS ticket FROM pedidos p WHERE p.id = ? AND IFNULL(p.es_corporeo, 0) = 1").bind(pid).first(); } catch (_) {}
           if (!ped || !ped.ticket) return json({ error: 'nada', motivo: 'Ese corpóreo no está en producción.' }, 404);
-          if (ped.prod_estado === estado) return json({ ok: true, estado, sin_cambios: true });
+          // Estado que ve el tablero: sin estado propio y el pedido ya Entregado (desde Pedidos) = entregado (igual que sfProduccion).
+          const efPrev = ped.prod_estado || (/^entregad/i.test(ped.estado_pedido) ? 'entregado' : '');
+          if (efPrev === estado) return json({ ok: true, estado, sin_cambios: true });
           const quien = String(body.quien || '').replace(/\s+/g, ' ').trim().slice(0, 40);
           const por = sfExt ? (quien ? quien + ' · Sin Frontera' : 'Sin Frontera') : String(session.user || '');
           const nowIso = new Date().toISOString();
@@ -25455,13 +25458,27 @@ const handler = {
           try { const u = await env.DB.prepare("UPDATE pedidos SET prod_estado = ?, prod_estado_at = ? WHERE id = ? AND IFNULL(es_corporeo, 0) = 1 AND IFNULL(prod_estado, '') = ?").bind(estado, nowIso, pid, ped.prod_estado).run(); ch = (u && u.meta && u.meta.changes) || 0; }
           catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
           if (!ch) return json({ error: 'cambio', motivo: 'Alguien lo cambió recién. Actualizá la lista y probá de nuevo.' }, 409);
-          await prodLog(env, [{ pedido_id: pid, campo: 'estado', de: ped.prod_estado, a: estado, por }]);
-          if (sfExt && (estado === 'listo' || estado === 'entregado')) {
-            const txt = 'Sin Frontera: el corpóreo "' + String(ped.cartel || '').trim() + '" (ticket #' + ped.ticket + ') ' + (estado === 'listo' ? 'está listo para entregar.' : 'ya está entregado.') + (quien ? ' Lo marcó ' + quien + '.' : '');
+          await prodLog(env, [{ pedido_id: pid, campo: 'estado', de: efPrev, a: estado, por }]);
+          // Entregado = el pedido también queda Entregado (Gaspar, 15-oct); si lo vuelven atrás, vuelve a En produccion. Solo la
+          // fila del corpóreo (en un pedido mixto el neón sigue su camino) y sin tocar updated_at: estado_pedido de los
+          // corpóreos no va a la planilla. Queda en pedido_estado_log como cualquier cambio de estado.
+          let estadoPedido = null;
+          if (estado === 'entregado' && !/^entregad/i.test(ped.estado_pedido)) estadoPedido = 'Entregado';
+          else if (efPrev === 'entregado' && estado !== 'entregado' && /^entregad/i.test(ped.estado_pedido)) estadoPedido = 'En produccion';
+          if (estadoPedido) {
+            try {
+              await env.DB.prepare('UPDATE pedidos SET estado_pedido = ? WHERE id = ?').bind(estadoPedido, pid).run();
+              try { await env.DB.prepare('INSERT INTO pedido_estado_log (pedido_id, numero, fecha, comercial_id, telefono, de, a, por, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(pid, ped.numero, ped.fecha, ped.com, ped.tel, ped.estado_pedido, estadoPedido, por, nowIso).run(); } catch (_) {}
+            } catch (_) { estadoPedido = null; }
+          }
+          // Avisos a Gaspar: En ensamble = las piezas pasan a su taller; listo y entregado.
+          const _ord = ['', ...SF_ESTADOS.map(e => e[0])], _avanza = _ord.indexOf(estado) > _ord.indexOf(efPrev);
+          if (sfExt && _avanza && (estado === 'en_ensamble' || estado === 'listo' || estado === 'entregado')) {
+            const txt = 'Sin Frontera: el corpóreo "' + String(ped.cartel || '').trim() + '" (ticket #' + ped.ticket + ') ' + (estado === 'en_ensamble' ? 'pasó a ensamble: las piezas van a tu taller.' : estado === 'listo' ? 'está listo para entregar.' : 'ya está entregado.') + (quien ? ' Lo marcó ' + quien + '.' : '');
             const pr = avisoAdmin(env, txt, { tipo: 'sinfrontera_estado', prioridad: 'P2', clave: 'sf:' + pid + ':' + estado }).catch(() => {});
             try { ctx.waitUntil(pr); } catch (_) { await pr; }
           }
-          return json({ ok: true, estado, at: nowIso, por });
+          return json({ ok: true, estado, at: nowIso, por, estado_pedido: estadoPedido || '' });
         }
         // ---- De acá para abajo, solo Gaspar ----
         if (sfExt) return json({ error: 'forbidden' }, 403);

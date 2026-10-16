@@ -2790,6 +2790,7 @@ function setView(v) {
   else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
   if (v === 'logistica' && !isLogisticaOnly() && !isAdmin()) v = 'dashboard';
   if (/^sf-/.test(v) && !isSinFronteraOnly() && !isAdmin()) v = 'dashboard';
+  if (STATE.sfAbierto && v !== 'sf-produccion') sfkCerrar();
   const entraACorte = v === 'corte' && STATE.view !== 'corte';
   STATE.view = v;
   STATE.selected = null;
@@ -2815,6 +2816,7 @@ window.addEventListener('hashchange', () => {
   else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
   if (h === 'logistica' && !isLogisticaOnly() && !isAdmin()) h = 'dashboard';
   if (/^sf-/.test(h) && !isSinFronteraOnly() && !isAdmin()) h = 'dashboard';
+  if (STATE.sfAbierto && h !== 'sf-produccion') sfkCerrar();
   if (h !== STATE.view) { STATE.view = h; render(); if (h === 'corte' && STATE.cortePedidos !== undefined) corteCargar(true); }
 });
 
@@ -5196,7 +5198,8 @@ function niToast(msg, opts) {
   if (!t) { t = document.createElement('div'); t.id = 'ni-toast2'; t.setAttribute('role', 'status'); t.setAttribute('aria-live', 'polite'); document.body.appendChild(t); }
   const col = opts.error ? '#ef4444' : 'var(--neon-cyan, #8FD4DE)';
   const abajo = (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) ? 88 : 24; // en el celu, arriba de la barra de abajo
-  t.style.cssText = `position:fixed;left:50%;bottom:calc(${abajo}px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:400;display:flex;align-items:center;gap:14px;max-width:calc(100vw - 24px);background:var(--ink-200,#1a1a24);color:var(--fg,#fff);border:1px solid ${col};border-radius:14px;padding:12px 16px;font-size:14px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.5)`;
+  const pos = opts.bottom != null ? opts.bottom + 'px' : `calc(${abajo}px + env(safe-area-inset-bottom,0px))`;
+  t.style.cssText = `position:fixed;left:50%;bottom:${pos};transform:translateX(-50%);z-index:400;display:flex;align-items:center;gap:14px;max-width:calc(100vw - 24px);background:var(--ink-200,#1a1a24);color:var(--fg,#fff);border:1px solid ${col};border-radius:14px;padding:12px 16px;font-size:14px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.5)`;
   t.innerHTML = `<span style="min-width:0;overflow-wrap:anywhere${opts.error ? ';color:#fca5a5' : ''}">${escapeHtml(msg)}</span>${opts.undo ? '<button type="button" data-ni-toast-undo style="flex:0 0 auto;background:transparent;border:1px solid var(--neon-cyan,#8FD4DE);color:var(--neon-cyan,#8FD4DE);border-radius:9px;padding:8px 14px;font-weight:800;font-size:14px;cursor:pointer">Deshacer</button>' : ''}`;
   const ocultar = () => { t.style.display = 'none'; };
   clearTimeout(window.__niToastT); window.__niToastT = setTimeout(ocultar, opts.ms || (opts.undo ? 5000 : (opts.error ? 4500 : 2600)));
@@ -6386,10 +6389,13 @@ async function logiPasswordUI() {
 // vinculados a mano. El backend (/admin/sinfrontera/*) es la barrera: acá solo se dibuja.
 const SF_ESTADOS = [['en_diseno', 'En diseño'], ['en_impresion', 'En impresión'], ['en_ensamble', 'En ensamble'], ['listo', 'Listo para entregar'], ['entregado', 'Entregado']];
 const SF_ESTADO_COLOR = { '': '#94a3b8', en_diseno: '#c4a0ff', en_impresion: '#38bdf8', en_ensamble: '#f59e0b', listo: '#22c55e', entregado: '#64748b' };
-const SF_FILTROS = [['curso', 'En curso'], ['listo', 'Listos para entregar'], ['entregado', 'Entregados'], ['todos', 'Todos']];
 const SF_OP_KEY = 'niventas.sfOperador';
 function sfEstadoLbl(e) { const x = SF_ESTADOS.find(y => y[0] === e); return x ? x[1] : 'Por empezar'; }
-function sfResetEstado() { STATE.sf = null; STATE.sfPed = null; STATE.sfOpen = {}; STATE.sfFiltro = 'curso'; STATE.sfQ = ''; STATE._sfCargando = false; }
+function sfResetEstado() {
+  STATE.sf = null; STATE.sfPed = null; STATE.sfQ = ''; STATE.sfUrg = false; STATE.sfEtapaCel = null; STATE._sfCargando = false; STATE._sfkDrag = null;
+  STATE.sfVinc = null; STATE._sfVincFallo = 0;
+  if (STATE.sfAbierto) { STATE.sfAbierto = null; const bg = document.getElementById('sfd-bg'); if (bg) bg.remove(); }
+}
 function sfOperador() { try { return localStorage.getItem(SF_OP_KEY) || ''; } catch (_) { return ''; } }
 function sfUrl(qs) { return CONFIG.trackerUrl + '/admin/sinfrontera/archivo?' + qs + '&token=' + encodeURIComponent(STATE.token || ''); }
 async function sfFetch(path, body) {
@@ -6403,10 +6409,11 @@ async function sfCargar(opts) {
   const silent = !!(opts && opts.silent), ped = STATE.view === 'sf-pedidos';
   if (STATE._sfCargando || (silent && STATE._sfGuardando)) return;
   STATE._sfCargando = true;
-  const user = STATE.user;
+  const user = STATE.user, gen = STATE._sfMovGen || 0;
   try {
     const j = await sfFetch(ped ? '/admin/sinfrontera/pedidos' : '/admin/sinfrontera/produccion');
     if (STATE.user !== user) return;
+    if (!ped && silent && ((STATE._sfMovGen || 0) !== gen || STATE._sfGuardando)) return; // vieja: el próximo tick recarga
     if (ped) STATE.sfPed = { pedidos: j.pedidos || [], configurado: !!j.configurado, at: Date.now() };
     else STATE.sf = { tickets: j.tickets || [], at: Date.now() };
   } catch (e) {
@@ -6414,20 +6421,16 @@ async function sfCargar(opts) {
     if (!silent) { if (ped) STATE.sfPed = { error: e.message || 'No se pudo cargar' }; else STATE.sf = { error: e.message || 'No se pudo cargar' }; }
   } finally { STATE._sfCargando = false; }
   if (!/^sf-/.test(STATE.view)) return;
-  // Refresco de fondo: no redibujar si están eligiendo un estado o escribiendo en el buscador; si no, solo la lista (no salta
-  // el scroll ni se cierra lo abierto).
+  // Producción: repinta SOLO el tablero si algo cambió (no toca el buscador ni el scroll de las columnas) y el panel si es ese
+  // ticket. Mis pedidos: no redibujar mientras escriben o eligen algo.
+  if (!ped && STATE.sf && !STATE.sf.error && document.querySelector('.sfk-wrap [data-sfk-zona]')) {
+    sfkPintar(!silent);
+    sfkPanelRefrescar();
+    const upd = document.querySelector('[data-sf-upd]'); if (upd) upd.textContent = sfHace(STATE.sf.at);
+    return;
+  }
   const act = document.activeElement;
   if (silent && act && act.closest && act.closest('.sf-wrap') && /^(SELECT|INPUT|TEXTAREA)$/.test(act.tagName)) return;
-  if (silent && !ped && STATE.sf && !STATE.sf.error) {
-    const lista = document.querySelector('.sf-wrap [data-sf-list]'), chips = document.querySelector('.sf-wrap .logi-filtros .logi-chips'), upd = document.querySelector('[data-sf-upd]');
-    if (lista && chips) {
-      const ts = STATE.sf.tickets || [];
-      lista.innerHTML = sfOrdenar(sfFiltrar(ts)).map(sfFilaHtml).join('') || '<div class="logi-vacio-box">No hay corpóreos con ese filtro.</div>';
-      chips.innerHTML = sfChipsHtml(ts);
-      if (upd) upd.textContent = sfHace(STATE.sf.at);
-      return;
-    }
-  }
   const m = document.getElementById('main');
   if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
 }
@@ -6456,107 +6459,209 @@ function sfTabs() {
     + `<span class="muted" style="font-size:12px;align-self:center;margin-left:6px">Así lo ve Sin Frontera</span></div>`;
 }
 
-// ---------- Producción ----------
-function sfFiltrar(ts) {
-  const f = STATE.sfFiltro || 'curso', q = _userKey(STATE.sfQ || '');
-  return ts.filter(t => {
-    if (f === 'curso' && (t.estado === 'listo' || t.estado === 'entregado')) return false;
-    if (f === 'listo' && t.estado !== 'listo') return false;
-    if (f === 'entregado' && t.estado !== 'entregado') return false;
-    if (q) { const txt = _userKey([t.empresa, '#' + t.ticket, t.campos.tipo_producto || '', t.campos.medidas || ''].join(' ')); if (!txt.includes(q)) return false; }
-    return true;
-  });
+// ---------- Producción: tablero por etapa (kanban) ----------
+// Gaspar (16-oct): "más linda y más fácil de usar, tipo kanban por etapa productiva". Diseño elegido por un panel (3 propuestas +
+// 2 jueces): "una tarjeta, un botón". Seis columnas; cada tarjeta tiene UNA acción grande ("Pasar a …") y el resto (volver, saltar
+// etapas, el ticket completo, fotos, historial) vive en el panel de detalle. En la compu además se arrastra; en el celular cada
+// etapa es una pestaña. Cada movida se puede deshacer 6 s. Flujo: Sin Frontera diseña e imprime; las piezas pasan al taller de
+// Neon (Ensamble: ahí va a ir la hoja de trabajo, [data-sfd-hoja] / .sfk-extra / .sfk-col-slot) y Entregado es al cliente (el
+// pedido queda Entregado en el CRM).
+const SF_COLS = [['', 'Por empezar'], ...SF_ESTADOS];
+const SF_CORTO = { '': 'Por empezar', en_diseno: 'Diseño', en_impresion: 'Impresión', en_ensamble: 'Ensamble', listo: 'Listo', entregado: 'Entregado' };
+const SF_ETAPA_CEL_KEY = 'niventas.sfEtapaCel';
+const SFK_DIAS_ENT = 14; // Entregado muestra lo de las últimas 2 semanas (máx. 8); el resto, en "Ver todos"
+const SFK_CHEVRON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M9.3 5.3a1 1 0 0 1 1.4 0l6 6a1 1 0 0 1 0 1.4l-6 6a1 1 0 1 1-1.4-1.4L14.6 12 9.3 6.7a1 1 0 0 1 0-1.4z"/></svg>';
+function sfkFino() { return !!(window.matchMedia && window.matchMedia('(pointer: fine)').matches); }
+function sfkCel() { return !!(window.matchMedia && window.matchMedia('(max-width: 760px)').matches); }
+function sfkIdx(e) { return SF_COLS.findIndex(c => c[0] === (e || '')); }
+function sfkSig(e) { const i = sfkIdx(e); return i >= 0 && i < SF_COLS.length - 1 ? SF_COLS[i + 1][0] : null; }
+function sfkAnt(e) { const i = sfkIdx(e); return i > 0 ? SF_COLS[i - 1][0] : null; }
+function sfkCol(e) { return SF_ESTADO_COLOR[e || ''] || SF_ESTADO_COLOR['']; }
+function sfkTicket(pid) { return ((STATE.sf || {}).tickets || []).find(x => x.pedido_id === pid) || null; }
+function sfkPasarTxt(a) { return a === 'entregado' ? 'Marcar entregado' : 'Pasar a ' + SF_CORTO[a]; }
+// "lun 20/10": para el taller sirve más que dd/mm solo.
+function sfkFechaDia(ymd) {
+  const d = ymd ? new Date(ymd + 'T12:00:00') : null;
+  if (!d || isNaN(d)) return '';
+  return d.toLocaleDateString('es-AR', { weekday: 'short' }).replace('.', '') + ' ' + d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' });
 }
-// En curso: lo urgente y lo que vence antes arriba; entregados: lo último arriba.
-function sfOrdenar(ts) {
-  const pr = { urgente: 0, alta: 1, media: 2, baja: 3 };
-  const p = t => { const x = _userKey(t.campos.prioridad || ''); return x in pr ? pr[x] : 4; };
-  const fc = t => t.campos.fecha_compromiso || '9999-99-99';
-  if (STATE.sfFiltro === 'entregado') return ts.slice().sort((a, b) => String(b.estado_at || b.creado).localeCompare(String(a.estado_at || a.creado)));
-  return ts.slice().sort((a, b) => (p(a) - p(b)) || fc(a).localeCompare(fc(b)) || (a.ticket - b.ticket));
+// Desde cuándo está en la etapa actual (en Por empezar, desde que se armó el ticket).
+function sfkDesde(t) { return (t.estado ? t.estado_at : '') || t.creado || ''; }
+// Días calendario (no ventanas de 24 h): algo movido ayer a la tarde dice "ayer".
+function sfkDiasCal(iso) {
+  const d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d)) return NaN;
+  const h = new Date();
+  return Math.round((new Date(h.getFullYear(), h.getMonth(), h.getDate()) - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
 }
-function sfChipsHtml(ts) {
-  const act = STATE.sfFiltro || 'curso';
-  const cuenta = id => id === 'todos' ? ts.length : ts.filter(t => id === 'curso' ? (t.estado !== 'listo' && t.estado !== 'entregado') : t.estado === id).length;
-  return SF_FILTROS.map(([id, lab]) => { const n = cuenta(id); return `<button type="button" class="btn ${id === act ? '' : 'ghost'}" data-sf-filtro="${id}" style="padding:6px 12px;font-size:12px${!n && id !== act && id !== 'todos' ? ';opacity:.5' : ''}">${lab} <b style="margin-left:4px">${n}</b></button>`; }).join('');
+function sfkHaceTxt(iso) {
+  const dias = sfkDiasCal(iso);
+  if (isNaN(dias)) return '';
+  return dias <= 0 ? 'hoy' : dias === 1 ? 'ayer' : 'hace ' + dias + ' d';
 }
-function sfEstadoSelectHtml(t) {
-  const e = t.estado || '', col = SF_ESTADO_COLOR[e] || SF_ESTADO_COLOR[''];
-  return `<select class="lb-sel sf-sel" data-sf-estado="${t.pedido_id}" aria-label="Estado de producción" title="${t.estado_at ? 'Último cambio ' + escapeHtml(sfFechaHora(t.estado_at)) : 'Tocá para cambiar el estado'}" style="color:${col};background-color:color-mix(in srgb, ${col} 16%, transparent)">`
-    + (e ? '' : `<option value="" selected>Por empezar</option>`)
-    + SF_ESTADOS.map(([k, l]) => `<option value="${k}"${k === e ? ' selected' : ''}>${l}</option>`).join('')
-    + `</select>`;
-}
-function sfFilaHtml(t) {
-  const ab = !!(STATE.sfOpen || {})[t.pedido_id], c = t.campos || {};
-  const dias = sfDias(c.fecha_compromiso), terminado = t.estado === 'listo' || t.estado === 'entregado';
+function sfkDuracion(ms) { const h = Math.max(0, Math.round(ms / 3600000)); return h < 24 ? (h <= 1 ? 'menos de 1 h' : h + ' h') : Math.round(h / 24) + ' d'; }
+// Plazo, prioridad y cantidad → borde de la tarjeta, chips y si cuenta como "urgente" (Listo y Entregado nunca).
+function sfkUrg(t) {
+  const c = t.campos || {}, fin = t.estado === 'listo' || t.estado === 'entregado';
   const chips = [];
-  if (/urgente/i.test(c.prioridad || '')) chips.push('<span class="logi-pill r">Urgente</span>');
-  else if (/alta/i.test(c.prioridad || '')) chips.push('<span class="logi-pill a">Prioridad alta</span>');
-  if (!terminado && dias < 0) chips.push('<span class="logi-pill r">Vencido</span>');
-  else if (!terminado && dias <= 2) chips.push('<span class="logi-pill a">' + (dias === 0 ? 'Vence hoy' : 'Vence en ' + dias + ' día' + (dias === 1 ? '' : 's')) + '</span>');
+  let borde = '';
+  const dias = sfDias(c.fecha_compromiso);
+  if (c.fecha_compromiso && !isNaN(dias)) {
+    if (fin) chips.push(`<span class="logi-pill g">Entrega ${escapeHtml(sfFecha(c.fecha_compromiso))}</span>`);
+    else if (dias < 0) { chips.push(`<span class="logi-pill r">Vencido · ${escapeHtml(sfkFechaDia(c.fecha_compromiso))}</span>`); borde = 'u-roja'; }
+    else if (dias === 0) { chips.push('<span class="logi-pill r">Vence hoy</span>'); borde = 'u-roja'; }
+    else if (dias <= 2) { chips.push(`<span class="logi-pill a">Vence ${dias === 1 ? 'mañana' : 'en 2 días'}</span>`); borde = 'u-ambar'; }
+    else chips.push(`<span class="logi-pill g">Entrega ${escapeHtml(sfkFechaDia(c.fecha_compromiso))}</span>`);
+  } else if (!fin) chips.push('<span class="logi-pill g">Sin fecha</span>');
+  if (/urgente/i.test(c.prioridad || '')) { chips.push('<span class="logi-pill r">Urgente</span>'); if (!fin) borde = 'u-roja'; }
+  else if (/alta/i.test(c.prioridad || '')) { chips.push('<span class="logi-pill a">Prioridad alta</span>'); if (!fin && !borde) borde = 'u-ambar'; }
   const cant = (t.pedido && t.pedido.cantidad) || 1;
-  const meta = [c.tipo_producto || '', c.medidas || (t.pedido && t.pedido.medidas) || '', cant > 1 ? cant + ' unidades' : ''].filter(Boolean).join(' · ');
-  return `<div class="lb-row sf-row${ab ? ' abierto' : ''}${t.estado === 'entregado' ? ' r-enviado' : ''}" data-sf-row="${t.pedido_id}">`
-    + `<div class="lb-head" data-sf-head title="Click para ver el ticket completo">`
-    + `<span class="lb-tog" aria-hidden="true">▸</span>`
-    + `<span class="lb-nom"><span class="sf-num">#${t.ticket}</span><span class="n">${escapeHtml(t.empresa || 'Sin nombre')}</span>${chips.join('')}</span>`
-    + `<span class="lb-meta">${escapeHtml(meta)}</span>`
-    + (c.fecha_compromiso ? `<span class="lb-meta" title="Fecha de compromiso">Entrega ${escapeHtml(sfFecha(c.fecha_compromiso))}</span>` : '')
-    + `<span class="sf-est">${sfEstadoSelectHtml(t)}</span>`
+  if (cant > 1) chips.push(`<span class="logi-pill a">${cant} unidades</span>`);
+  return { borde: fin ? '' : borde, chips, urgente: !fin && !!borde };
+}
+function sfkTipoCorto(t) {
+  const c = t.campos || {}, tp = String(c.tipo_producto || ''), il = String((t.pedido && t.pedido.iluminacion) || '');
+  let s = /sin ilum/i.test(tp) ? 'Sin luz' : /frente de acr/i.test(tp) ? 'Frente acrílico' : /pastilla/i.test(tp) ? 'Pastilla doble faz' : /con ilum/i.test(tp) ? 'Con luz' : (il ? (/sin/i.test(il) ? 'Sin luz' : 'Con luz') : '');
+  if (/exterior|ambas/i.test(c.carteleria || '')) s += (s ? ' · ' : '') + 'Exterior';
+  if (/^s/i.test(c.requiere_estructura || '')) s += (s ? ' · ' : '') + 'Con bastidor';
+  return s;
+}
+// Orden fijo por columna: Urgente → Alta → compromiso más próximo → número. Entregado: lo último arriba.
+function sfkOrdenar(ts, col) {
+  if (col === 'entregado') return ts.slice().sort((a, b) => String(b.estado_at || b.creado || '').localeCompare(String(a.estado_at || a.creado || '')));
+  const pr = t => /urgente/i.test(t.campos.prioridad || '') ? 0 : /alta/i.test(t.campos.prioridad || '') ? 1 : 2;
+  const fc = t => t.campos.fecha_compromiso || '9999-99-99';
+  return ts.slice().sort((a, b) => (pr(a) - pr(b)) || fc(a).localeCompare(fc(b)) || (a.ticket - b.ticket));
+}
+function sfkDeColumna(ts, id) { return sfkOrdenar(ts.filter(t => (t.estado || '') === id), id); }
+// Miniatura: el diseño; si no carga (ej. un PDF), la 1ª foto del ticket; si tampoco, se saca el bloque (sin cuadro negro vacío).
+function sfkThumbHtml(t) {
+  const srcs = [];
+  if (t.diseno) srcs.push(sfUrl('p=' + t.pedido_id + '&w=300'));
+  if (t.fotos) srcs.push(sfUrl('t=' + t.tid + '&i=0&w=300'));
+  if (!srcs.length) return '';
+  const n = (t.fotos || 0) + (t.diseno ? 1 : 0);
+  return `<div class="sfk-thumb"><img src="${escapeHtml(srcs[0])}" alt="" data-sfk-alt="${escapeHtml(srcs.slice(1).join(' '))}" onerror="sfkImgError(this)">${n > 1 ? `<span class="sfk-thumb-n">${n} fotos</span>` : ''}</div>`;
+}
+function sfkImgError(img) {
+  const alt = String(img.getAttribute('data-sfk-alt') || '').split(' ').filter(Boolean);
+  if (alt.length) { img.setAttribute('data-sfk-alt', alt.slice(1).join(' ')); img.src = alt[0]; return; }
+  const b = img.closest('.sfk-thumb, .sfd-diseno, .sf-foto');
+  if (b) b.remove();
+}
+// Firma de lo que se ve en la tarjeta: el refresco de fondo solo repinta si algo cambió (incluye el día, por el "hace N d").
+function sfkCardSig(t) { return JSON.stringify([t.estado, t.estado_at, t.empresa, t.fotos, t.diseno, t.campos, t.pedido && t.pedido.cantidad, (t.historial || [])[0] || null]); }
+function sfkCardHtml(t) {
+  const u = sfkUrg(t), sig = sfkSig(t.estado), desde = sfkDesde(t);
+  const dias = desde ? (sfkDiasCal(desde) || 0) : 0, ult = (t.historial || [])[0];
+  const tit = t.estado ? 'En esta etapa desde ' + sfFechaHora(t.estado_at) + (ult && ult.por ? ' · lo movió ' + ult.por : '') : (t.creado ? 'Ticket armado el ' + sfFecha(t.creado) : '');
+  const med = (t.campos && t.campos.medidas) || (t.pedido && t.pedido.medidas) || '', tipo = sfkTipoCorto(t);
+  return `<article class="sfk-card ${u.borde}" data-sfk-card="${t.pedido_id}" tabindex="0"${sfkFino() ? ' draggable="true"' : ''} aria-label="#${t.ticket} ${escapeHtml(t.empresa || '')}, ${escapeHtml(sfEstadoLbl(t.estado))}">`
+    + sfkThumbHtml(t)
+    + `<div class="sfk-body">`
+    + `<div class="sfk-top"><span class="sfk-num">#${t.ticket}</span><span class="sfk-etq" style="--c:${sfkCol(t.estado)}">${escapeHtml(SF_CORTO[t.estado || ''])}</span><span class="sfk-hace${dias >= 5 ? ' viejo' : ''}" title="${escapeHtml(tit)}">${escapeHtml(sfkHaceTxt(desde))}</span></div>`
+    + `<div class="sfk-nom">${escapeHtml(t.empresa || 'Sin nombre')}</div>`
+    + (u.chips.length ? `<div class="sfk-chips">${u.chips.join('')}</div>` : '')
+    + (med ? `<div class="sfk-med">${escapeHtml(med)}</div>` : '')
+    + (tipo ? `<div class="sfk-tipo">${escapeHtml(tipo)}</div>` : '')
+    + `<div class="sfk-extra" data-sfk-extra></div>`
     + `</div>`
-    + (ab ? sfDetalleHtml(t) : '')
-    + `</div>`;
+    + (sig !== null ? `<button type="button" class="sfk-pasar" data-sfk-pasar="${t.pedido_id}" data-a="${sig}" style="--c:${sfkCol(sig)}">${escapeHtml(sfkPasarTxt(sig))}${SFK_CHEVRON}</button>` : '')
+    + `</article>`;
 }
-// Detalle: el ticket por secciones (las del formulario de Gaspar), lo del pedido, las fotos y el historial de estados.
-function sfDetalleHtml(t) {
-  const c = t.campos || {}, p = t.pedido || {};
-  const fila = (l, v) => v ? `<div class="sf-dato"><span>${escapeHtml(l)}</span><b>${escapeHtml(v)}</b></div>` : '';
-  const secs = (typeof TICKET_CORP_SECS !== 'undefined' ? TICKET_CORP_SECS : []).map(([sec, campos]) => {
-    const h = campos.map(x => fila(x.l, x.t === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(c[x.k] || '') ? c[x.k].split('-').reverse().join('/') : c[x.k])).join('');
-    return h ? `<div class="lb-tit">${escapeHtml(sec)}</div>${h}` : '';
-  }).join('');
-  const SN = v => /^s/i.test(String(v || '')) ? 'Sí' : (v ? 'No' : '');
-  const ped = [
-    fila('Cantidad', String(p.cantidad || 1)), fila('Medidas', p.medidas), fila('Producto', p.producto), fila('Frente', p.frente),
-    fila('Laterales', p.laterales), fila('Fondo / base', p.fondo), fila('Iluminación', p.iluminacion),
-    fila('Bastidor', SN(p.bastidor) + (/^s/i.test(p.bastidor || '') && p.color_bastidor ? ' · ' + p.color_bastidor : '')), fila('Instalación', SN(p.instalacion)),
-  ].join('');
-  const fotos = Array.from({ length: t.fotos || 0 }, (_, i) => `<button type="button" class="sf-foto" data-sf-ver="${escapeHtml(sfUrl('t=' + t.tid + '&i=' + i))}" title="Ver grande"><img src="${escapeHtml(sfUrl('t=' + t.tid + '&i=' + i + '&w=300'))}" alt="Foto ${i + 1}" loading="lazy"></button>`).join('');
-  const hist = (t.historial || []).map(h => `<div class="sf-hist"><b style="color:${SF_ESTADO_COLOR[h.estado] || 'var(--fg)'}">${escapeHtml(sfEstadoLbl(h.estado))}</b> · ${escapeHtml(sfFechaHora(h.at))}${h.por ? ' · ' + escapeHtml(h.por) : ''}</div>`).join('');
-  return `<div class="lb-det sf-det">
-    <div>${secs || '<div class="muted">El ticket no tiene datos cargados.</div>'}</div>
-    <div>
-      <div class="lb-tit">Fotos del ticket</div>
-      ${fotos ? `<div class="sf-fotos">${fotos}</div>` : '<div class="muted" style="font-size:12.5px">Sin fotos.</div>'}
-      ${t.diseno ? `<div style="margin-top:8px"><a class="btn btn-ghost lb-mini" href="${escapeHtml(sfUrl('p=' + t.pedido_id))}" target="_blank" rel="noopener">Ver el diseño original</a></div>` : ''}
-      ${ped ? `<div class="lb-tit">Del pedido</div>${ped}` : ''}
-      <div class="lb-tit">Ticket</div>
-      <div class="sf-hist">#${t.ticket}${t.creado ? ' · armado el ' + escapeHtml(sfFecha(t.creado)) : ''}</div>
-      ${hist ? `<div class="lb-tit">Historial del estado</div>${hist}` : ''}
-    </div>
-  </div>`;
+function sfkEntRowHtml(t) {
+  return `<button type="button" class="sfk-ent" data-sfk-card="${t.pedido_id}" title="Entregado ${escapeHtml(sfFechaHora(t.estado_at))}"><span class="sfk-num">#${t.ticket}</span><span class="n">${escapeHtml(t.empresa || 'Sin nombre')}</span><span class="f">${escapeHtml(sfFecha(t.estado_at))}</span></button>`;
 }
+function sfkColHtml(col, ts, cel) {
+  const [id, label] = col, c = sfkCol(id), lista = sfkDeColumna(ts, id), on = cel === id ? ' on-cel' : '';
+  if (id === 'entregado') {
+    const lim = Date.now() - SFK_DIAS_ENT * 86400000;
+    const rec = lista.filter(t => t.estado_at && new Date(t.estado_at).getTime() >= lim); // los entregados desde Pedidos (sin fecha propia) van a "Ver todos"
+    return `<section class="sfk-col sfk-col-ent${on}" data-sfk-col="entregado" style="--c:${c}">`
+      + `<header class="sfk-col-h" data-sfk-rail title="Ver todos los entregados"><i class="sfk-dot"></i><span class="t">${escapeHtml(label)}</span><span class="n" data-sfk-n data-total="${rec.length}">${rec.length}</span></header>`
+      + `<div class="sfk-sub">últimos ${SFK_DIAS_ENT} días</div>`
+      + `<div class="sfk-col-list" data-sfk-list="entregado">${rec.slice(0, 8).map(sfkEntRowHtml).join('')}<div class="sfk-vacio" data-txt="Nada entregado estos días"${rec.length ? ' hidden' : ''}>Nada entregado estos días</div>`
+      + (lista.length ? `<button type="button" class="btn btn-ghost lb-mini sfk-todos" data-sfk-ent-todos>Ver todos (${lista.length})</button>` : '')
+      + `</div></section>`;
+  }
+  return `<section class="sfk-col${on}" data-sfk-col="${id}" style="--c:${c}">`
+    + `<header class="sfk-col-h"><i class="sfk-dot"></i><span class="t">${escapeHtml(label)}</span><span class="n" data-sfk-n data-total="${lista.length}">${lista.length}</span><span class="sfk-col-slot"></span></header>`
+    + `<div class="sfk-col-list" data-sfk-list="${id}">${lista.map(sfkCardHtml).join('')}<div class="sfk-vacio" data-txt="Nada en ${escapeHtml(SF_CORTO[id].toLowerCase())}"${lista.length ? ' hidden' : ''}>Nada en ${escapeHtml(SF_CORTO[id].toLowerCase())}</div></div>`
+    + `</section>`;
+}
+// Pestaña del celular: la última usada; la primera vez, la primera etapa de trabajo con algo (si no, Por empezar).
+function sfkEtapaCel(ts) {
+  let e = STATE.sfEtapaCel;
+  if (e == null) { try { e = localStorage.getItem(SF_ETAPA_CEL_KEY); } catch (_) { e = null; } }
+  if (e == null || sfkIdx(e) < 0) e = ['en_diseno', 'en_impresion', 'en_ensamble', 'listo'].find(x => ts.some(t => t.estado === x)) || '';
+  return e;
+}
+function sfkTabsHtml(ts, cel) {
+  return `<div class="sfk-tabs" data-sfk-tabs>${SF_COLS.map(([id]) => { const n = ts.filter(t => (t.estado || '') === id).length; return `<button type="button" class="sfk-tab${id === cel ? ' on' : ''}${n ? '' : ' cero'}" data-sfk-tab="${id}" style="--c:${sfkCol(id)}">${escapeHtml(SF_CORTO[id])} <b>${n}</b></button>`; }).join('')}</div>`;
+}
+function sfkBoardSig(ts, cel) { return JSON.stringify([cel, new Date().toDateString(), ts.map(sfkCardSig)]); }
+function sfkBoardHtml(ts, cel) { return `<div class="sfk-board" data-sfk-board>${SF_COLS.map(c => sfkColHtml(c, ts, cel)).join('')}</div>`; }
 function renderSfProduccion() {
   const D = STATE.sf;
   if (!D) { setTimeout(() => sfCargar(), 0); return `<div class="sf-wrap" style="padding:24px;color:var(--fg-mute)">Cargando producción…</div>`; }
   if (D.error) return `<div class="sf-wrap" style="padding:24px"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(D.error)}</div><button class="btn" data-sf-refresh>Reintentar</button></div>`;
-  const ts = D.tickets || [], vis = sfOrdenar(sfFiltrar(ts));
-  const op = sfOperador();
-  return `<div class="logi-wrap sf-wrap">
+  const ts = D.tickets || [], op = sfOperador(), cel = sfkEtapaCel(ts);
+  const nUrg = ts.filter(t => sfkUrg(t).urgente).length;
+  return `<div class="logi-wrap sf-wrap sfk-wrap">
     ${sfTabs()}
     <div class="logi-head"><h1>Producción · corpóreos</h1></div>
-    <div class="logi-bar">
+    <div class="logi-bar sfk-bar">
       <span data-sf-upd>${escapeHtml(sfHace(D.at))}</span>
-      ${isSinFronteraOnly() ? `<span>· Usando: <b>${escapeHtml(op || 'sin nombre')}</b> <button type="button" class="logi-link" data-sf-op>${op ? 'cambiar' : 'poner nombre'}</button></span>` : ''}
+      ${isSinFronteraOnly() ? `<span>· Estás como <b>${escapeHtml(op || 'sin nombre')}</b> <button type="button" class="logi-link" data-sf-op>${op ? 'cambiar' : 'poner nombre'}</button></span>` : ''}
       <span style="flex:1"></span>
+      <input id="sf-q" class="logi-q sfk-q" type="search" autocomplete="off" spellcheck="false" placeholder="Buscar # o nombre" value="${escapeHtml(STATE.sfQ || '')}" aria-label="Buscar por número o nombre">
+      <button type="button" class="logi-chip${STATE.sfUrg ? ' on' : ''}${nUrg ? '' : ' cero'}" data-sfk-urg title="Vencidos, que vencen en 2 días o con prioridad urgente o alta"${!nUrg && !STATE.sfUrg ? ' disabled' : ''}>Urgentes<b data-sfk-nurg>${nUrg}</b></button>
       <button class="btn btn-ghost" data-sf-refresh>Actualizar</button>
       ${sfAdminBarra()}
     </div>
-    <div class="logi-filtros"><span class="logi-chips">${sfChipsHtml(ts)}</span><input id="sf-q" class="logi-q" type="search" autocomplete="off" spellcheck="false" placeholder="Buscar por nombre o número de ticket" value="${escapeHtml(STATE.sfQ || '')}"></div>
-    ${ts.length ? (vis.length ? `<div class="lb-list" data-sf-list>${vis.map(sfFilaHtml).join('')}</div>` : '<div class="logi-vacio-box">No hay corpóreos con ese filtro.</div>') : '<div class="logi-vacio-box">Todavía no hay corpóreos en producción.</div>'}
-    <div class="logi-ayuda">Click en el renglón para ver el ticket completo con las fotos · El estado se cambia desde la etiqueta y se guarda solo</div>
+    ${ts.length ? `<div data-sfk-zona data-sig="${escapeHtml(sfkBoardSig(ts, cel))}">${sfkTabsHtml(ts, cel)}${sfkBoardHtml(ts, cel)}</div><div class="logi-vacio-box sfk-nores" data-sfk-nores hidden></div>` : '<div class="logi-vacio-box">Todavía no hay corpóreos en producción.</div>'}
+    <div class="logi-ayuda">Tocá una tarjeta para ver el ticket completo · El botón de abajo la pasa a la etapa siguiente${sfkFino() ? ' · También la podés arrastrar a otra columna' : ''} · Cada movida se puede deshacer</div>
   </div>`;
+}
+// Búsqueda y "Urgentes" EN EL LUGAR (sin redibujar): oculta tarjetas y pone los conteos "3/16".
+function sfkFiltrarDom() {
+  const root = document.querySelector('.sfk-wrap');
+  if (!root) return;
+  const ts = (STATE.sf || {}).tickets || [];
+  const q = _userKey(String(STATE.sfQ || '').trim()).replace(/^#/, ''), urg = !!STATE.sfUrg, filtrando = !!(q || urg);
+  const exacto = /^\d+$/.test(q) ? ts.find(t => String(t.ticket) === q) || null : null;
+  const ver = new Set();
+  for (const t of ts) {
+    if (q && !(exacto === t) && !_userKey([t.empresa, '#' + t.ticket, (t.campos || {}).medidas || '', (t.campos || {}).tipo_producto || ''].join(' ')).includes(q)) continue;
+    if (urg && !sfkUrg(t).urgente) continue;
+    ver.add(t.pedido_id);
+  }
+  const dib = new Set();
+  root.querySelectorAll('.sfk-col [data-sfk-card]').forEach(el => {
+    const pid = +el.getAttribute('data-sfk-card');
+    dib.add(pid);
+    el.hidden = filtrando && !ver.has(pid);
+    el.classList.toggle('is-match', !!(exacto && exacto.pedido_id === pid));
+  });
+  // Entregados que coinciden pero no están en la columna (más de 14 días o del 9.º en adelante): se avisa y van en "Ver todos".
+  const faltan = q ? [...ver].filter(pid => !dib.has(pid)).length : 0;
+  let totVis = 0;
+  root.querySelectorAll('[data-sfk-col]').forEach(col => {
+    const n = col.querySelector('[data-sfk-n]'), total = +((n && n.getAttribute('data-total')) || 0);
+    const vis = col.querySelectorAll('[data-sfk-card]:not([hidden])').length, ent = col.getAttribute('data-sfk-col') === 'entregado';
+    totVis += vis;
+    if (n) n.textContent = filtrando ? vis + '/' + total : String(total);
+    const vacio = col.querySelector('.sfk-vacio');
+    if (vacio) {
+      if (ent && faltan && !vis) { vacio.hidden = false; vacio.textContent = faltan + (faltan === 1 ? ' entregado más coincide' : ' entregados más coinciden') + ': tocá "Ver todos"'; }
+      else { vacio.hidden = vis > 0; vacio.textContent = (filtrando && total) ? (urg && !q ? 'Nada urgente acá' : 'Sin resultados acá') : (vacio.getAttribute('data-txt') || ''); }
+    }
+    col.classList.toggle('sin-res', filtrando && !vis && !(ent && faltan));
+  });
+  const zona = root.querySelector('[data-sfk-zona]');
+  if (zona) zona.classList.toggle('buscando', filtrando);
+  const nr = root.querySelector('[data-sfk-nores]');
+  if (nr) { nr.hidden = !(filtrando && !totVis && !faltan); nr.textContent = (urg && !q) ? 'No hay urgentes.' : 'No encontré nada con "' + String(STATE.sfQ || '').trim() + '".'; }
 }
 // Nombre de quien usa la compu (queda en el historial de cada cambio). Se pide una vez por dispositivo.
 function sfPedirOperador() {
@@ -6575,43 +6680,312 @@ function sfPedirOperador() {
     setTimeout(() => inp.focus(), 50);
   });
 }
-async function sfCambiarEstado(pid, estado, sel) {
-  const cur = () => ((STATE.sf || {}).tickets || []).find(x => x.pedido_id === pid);
-  const t = cur();
-  if (!t || !estado || t.estado === estado) return;
-  if (sel) sel.blur(); // si no, el redibujo saltea el renglón enfocado
-  let quien = '';
-  if (isSinFronteraOnly()) { quien = sfOperador(); if (!quien && !STATE._sfOpPreguntado) { STATE._sfOpPreguntado = true; quien = await sfPedirOperador(); } }
-  const antes = { estado: t.estado, estado_at: t.estado_at };
-  t.estado = estado; t.estado_at = new Date().toISOString();
-  sfRedibujarFila(pid);
+// Repinta SOLO las pestañas y el tablero (no el buscador ni la barra) y conserva el scroll de cada columna. Sin `forzar`, solo
+// si cambió algo (firma). Nunca mientras se arrastra o se guarda una movida.
+function sfkPintar(forzar) {
+  if (STATE._sfkDrag) { STATE._sfkPend = true; return; } // al soltar se repinta (sfkFinDrag)
+  if (!forzar && STATE._sfGuardando) return;
+  STATE._sfkPend = false;
+  const zona = document.querySelector('.sfk-wrap [data-sfk-zona]');
+  if (!zona || !STATE.sf || STATE.sf.error) { const m = document.getElementById('main'); if (m && STATE.view === 'sf-produccion') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } return; }
+  const ts = STATE.sf.tickets || [], cel = sfkEtapaCel(ts), sig = sfkBoardSig(ts, cel);
+  if (forzar || zona.getAttribute('data-sig') !== sig) {
+    const scroll = {}, tb0 = zona.querySelector('[data-sfk-tabs]'), bd0 = zona.querySelector('[data-sfk-board]');
+    const tabsX = tb0 ? tb0.scrollLeft : 0, boardX = bd0 ? bd0.scrollLeft : 0;
+    zona.querySelectorAll('[data-sfk-list]').forEach(l => { scroll[l.getAttribute('data-sfk-list')] = l.scrollTop; });
+    zona.setAttribute('data-sig', sig);
+    zona.innerHTML = sfkTabsHtml(ts, cel) + sfkBoardHtml(ts, cel);
+    zona.querySelectorAll('[data-sfk-list]').forEach(l => { const s = scroll[l.getAttribute('data-sfk-list')]; if (s) l.scrollTop = s; });
+    const tb = zona.querySelector('[data-sfk-tabs]'), bd = zona.querySelector('[data-sfk-board]');
+    if (tb) tb.scrollLeft = tabsX;
+    if (bd) bd.scrollLeft = boardX;
+  }
+  const nu = document.querySelector('.sfk-wrap [data-sfk-nurg]'), nUrg = ts.filter(t => sfkUrg(t).urgente).length;
+  if (nu) { nu.textContent = nUrg; const chip = nu.closest('[data-sfk-urg]'); chip.classList.toggle('cero', !nUrg); chip.disabled = !nUrg && !STATE.sfUrg; }
+  sfkFiltrarDom();
+}
+// Mueve un corpóreo de etapa. origen: 'boton' (la siguiente, sin preguntar) | 'volver' (la anterior, sin preguntar) | 'arrastre'
+// o 'paso' (cualquier etapa: pregunta si salta o vuelve) | 'deshacer' (sin preguntar nada). Entregado siempre pregunta (cierra
+// el pedido en el CRM); sacar algo de Entregado también (el pedido vuelve a En produccion).
+async function sfkMover(pid, estado, origen) {
+  const t = sfkTicket(pid);
+  estado = estado || '';
+  if (!t || sfkIdx(estado) < 0) return;
+  const antes = t.estado || '';
+  if (antes === estado) return;
+  const mov = (STATE._sfkMoviendo = STATE._sfkMoviendo || {});
+  if (mov[pid]) return; // doble click: la primera movida todavía está en curso
+  mov[pid] = true;
+  try { await sfkMoverUna(pid, t, antes, estado, origen); } finally { delete mov[pid]; }
+}
+async function sfkMoverUna(pid, t, antes, estado, origen) {
+  const nom = '#' + t.ticket + ' ' + (t.empresa || '');
+  if (origen !== 'deshacer') {
+    let ok = true;
+    if (estado === 'entregado') ok = await showConfirm(`¿${nom} ya se entregó al cliente? El pedido también queda como Entregado en el CRM.`, { title: 'Marcar entregado', confirmLabel: 'Sí, entregado', cancelLabel: 'No' });
+    else if (antes === 'entregado') ok = await showConfirm(`¿Sacar ${nom} de Entregado y pasarlo a ${SF_CORTO[estado]}? El pedido vuelve a "En produccion" en el CRM.`, { title: 'Volver atrás', confirmLabel: 'Mover', cancelLabel: 'Cancelar' });
+    else if ((origen === 'arrastre' || origen === 'paso') && sfkIdx(estado) !== sfkIdx(antes) + 1) ok = await showConfirm(`¿Mover ${nom} de ${SF_CORTO[antes]} a ${SF_CORTO[estado]}?`, { title: 'Mover', confirmLabel: 'Mover', cancelLabel: 'Cancelar' });
+    if (!ok) return;
+  }
+  let quien = isSinFronteraOnly() ? sfOperador() : '';
+  if (isSinFronteraOnly() && !quien && origen !== 'deshacer' && !STATE._sfOpPreguntado) { STATE._sfOpPreguntado = true; quien = await sfPedirOperador(); }
+  const card = document.querySelector(`.sfk-wrap [data-sfk-card="${pid}"]`);
+  if (card) { card.classList.add('is-moviendo'); const b = card.querySelector('.sfk-pasar'); if (b) b.textContent = 'Guardando…'; }
+  const pie = document.querySelector('.sfd [data-sfd-acc]'); if (pie) pie.classList.add('is-moviendo');
   STATE._sfGuardando = (STATE._sfGuardando || 0) + 1;
-  try {
-    const j = await sfFetch('/admin/sinfrontera/estado', { pedido_id: pid, estado, quien });
-    const x = cur();
-    if (x) {
-      x.estado = estado; x.estado_at = j.at || x.estado_at;
-      if (!j.sin_cambios) (x.historial = x.historial || []).unshift({ estado, por: j.por || '', at: x.estado_at });
-    }
-    sfRedibujarFila(pid);
-    const chips = document.querySelector('.sf-wrap .logi-filtros .logi-chips'); if (chips) chips.innerHTML = sfChipsHtml(STATE.sf.tickets || []);
-    toast(sfEstadoLbl(estado) + ': guardado');
-  } catch (e) {
-    const x = cur(); if (x) { x.estado = antes.estado; x.estado_at = antes.estado_at; }
-    sfRedibujarFila(pid);
-    toast('No se guardó: ' + (e.message || 'error'));
-  } finally { STATE._sfGuardando = Math.max(0, (STATE._sfGuardando || 1) - 1); }
+  STATE._sfMovGen = (STATE._sfMovGen || 0) + 1; // un refresco que salió antes de esta movida no la puede pisar (sfCargar)
+  let r = null, j = {};
+  try { r = await fetch(CONFIG.trackerUrl + '/admin/sinfrontera/estado', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_id: pid, estado, quien }) }); try { j = await r.json(); } catch (_) {} } catch (_) {}
+  finally { STATE._sfGuardando = Math.max(0, (STATE._sfGuardando || 1) - 1); }
+  // En el celular el aviso va arriba del pie del panel (si no, tapa "Pasar a…" y el toque siguiente deshace).
+  const pieP = STATE.sfAbierto ? document.querySelector('#sfd-bg.open [data-sfd-acc]') : null, posT = pieP ? { bottom: pieP.offsetHeight + 8 } : {};
+  if (!r || !r.ok || !j.ok) {
+    if (r && r.status === 409) { niToast('Alguien lo movió recién. Actualicé el tablero.', { ...posT, error: true }); STATE._sfMovGen++; await sfCargar({ silent: true }); }
+    else niToast('No se guardó: ' + String((j && (j.motivo || j.error)) || 'sin conexión').replace(/[.s]+$/, '') + '. Probá de nuevo.', { ...posT, error: true });
+    sfkPintar(true);
+    if (STATE.sfAbierto === pid) sfkAbrir(pid);
+    return;
+  }
+  const x = sfkTicket(pid);
+  if (x) {
+    x.estado = estado; x.estado_at = j.at || new Date().toISOString();
+    if (!j.sin_cambios) (x.historial = x.historial || []).unshift({ estado, por: j.por || '', at: x.estado_at });
+  }
+  // Gaspar: que Pedidos se entere (el detalle abierto desde el panel y el próximo guardado no pisan el estado nuevo).
+  (STATE.pedidos || []).forEach(pp => { if (pp.idx === pid) { pp.prodEstado = estado; if (j.estado_pedido) pp.estadoPedido = j.estado_pedido; } });
+  sfkPintar(true);
+  // La tarjeta llega a su columna con un halo (en el celular titila la pestaña de destino).
+  const nueva = document.querySelector(`.sfk-wrap [data-sfk-card="${pid}"]`);
+  if (nueva) { nueva.classList.add('is-nueva'); try { nueva.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (_) {} setTimeout(() => nueva.classList.remove('is-nueva'), 1700); }
+  const tab = document.querySelector(`.sfk-wrap [data-sfk-tab="${estado}"]`); if (tab) { tab.classList.add('titila'); setTimeout(() => tab.classList.remove('titila'), 1200); }
+  if (STATE.sfAbierto === pid) sfkAbrir(pid);
+  if (origen === 'deshacer') niToast(nom + ' volvió a ' + SF_CORTO[estado], posT);
+  else niToast(nom + (estado === 'entregado' ? ' quedó entregado' : (estado ? ' pasó a ' + SF_CORTO[estado] : ' volvió a Por empezar')), { ...posT, undo: () => sfkMover(pid, antes, 'deshacer'), ms: 6000 });
 }
-// Corpóreos en el detalle del pedido (Gaspar y vendedores): el estado que puso Sin Frontera.
+
+// ---------- Panel de detalle (el ticket completo) ----------
+function sfkSecs() { return typeof TICKET_CORP_SECS !== 'undefined' ? TICKET_CORP_SECS : []; }
+// Lo que hace falta para la etapa en la que está, arriba y grande. En Ensamble va a ir la hoja de trabajo ([data-sfd-hoja]).
+const SFK_PARA_ETAPA = { '': 'Diseño', en_diseno: 'Diseño', en_impresion: 'Impresión', en_ensamble: 'Ensamble' };
+function sfkTicketHtml(t) {
+  const c = t.campos || {}, p = t.pedido || {}, e = t.estado || '', idx = sfkIdx(e), sig = sfkSig(e), ant = sfkAnt(e), u = sfkUrg(t);
+  const fila = (l, v) => v ? `<div class="sf-dato"><span>${escapeHtml(l)}</span><b>${escapeHtml(v)}</b></div>` : '';
+  const val = x => { const v = c[x.k]; return x.t === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v.split('-').reverse().join('/') : v; };
+  const SN = v => /^s/i.test(String(v || '')) ? 'Sí' : (v ? 'No' : '');
+  // Avisos
+  const avisos = u.chips.slice();
+  if (/^s/i.test(c.precisa_instalacion || '') || /^s/i.test(p.instalacion || '')) avisos.push('<span class="logi-pill a">Lleva instalación</span>');
+  if (/exterior|ambas/i.test(c.carteleria || '')) avisos.push('<span class="logi-pill g">Exterior</span>');
+  if (/^s/i.test(c.requiere_estructura || '')) avisos.push('<span class="logi-pill g">Con bastidor</span>');
+  // Diseño y fotos
+  const fotos = Array.from({ length: t.fotos || 0 }, (_, i) => `<button type="button" class="sf-foto" data-sf-ver="${escapeHtml(sfUrl('t=' + t.tid + '&i=' + i))}" title="Ver grande"><img src="${escapeHtml(sfUrl('t=' + t.tid + '&i=' + i + '&w=300'))}" alt="Foto ${i + 1}" onerror="sfkImgError(this)"></button>`).join('');
+  const media = (t.diseno ? `<button type="button" class="sfd-diseno" data-sf-ver="${escapeHtml(sfUrl('p=' + t.pedido_id))}" title="Ver grande"><img src="${escapeHtml(sfUrl('p=' + t.pedido_id + '&w=900'))}" alt="Diseño" onerror="sfkImgError(this)"></button>` : '')
+    + (fotos ? `<div class="sf-fotos">${fotos}</div>` : '')
+    + (t.diseno ? `<a class="logi-link sfd-orig" href="${escapeHtml(sfUrl('p=' + t.pedido_id))}" target="_blank" rel="noopener">Abrir el diseño original</a>` : '');
+  // "Para esta etapa"
+  const secEtapa = SFK_PARA_ETAPA[e];
+  const secDe = nombre => (sfkSecs().find(([s]) => s.includes(nombre)) || [null, []])[1];
+  let paraEtapa = '';
+  if (secEtapa) {
+    const extra = secEtapa === 'Diseño' ? fila('Medidas', c.medidas || p.medidas) + fila('Cantidad', String(p.cantidad || 1)) : '';
+    const datos = secDe(secEtapa).map(x => fila(x.l, val(x))).join('') + extra;
+    paraEtapa = `<div class="sfd-etapa" data-etapa="${e}" style="--c:${sfkCol(e || 'en_diseno')}"><div class="lb-tit">Para ${escapeHtml(SF_CORTO[e || 'en_diseno'].toLowerCase())}</div>${datos || '<div class="muted" style="font-size:12.5px">El ticket no trae datos para esta etapa.</div>'}${secEtapa === 'Ensamble' ? '<div data-sfd-hoja></div>' : ''}</div>`;
+  }
+  // Resto del ticket (sin la sección que ya salió arriba) + lo del pedido
+  const resto = sfkSecs().filter(([s]) => !(secEtapa && s.includes(secEtapa))).map(([s, campos]) => {
+    const h = campos.map(x => fila(x.l, val(x))).join('');
+    return h ? `<div class="lb-tit">${escapeHtml(s)}</div>${h}` : '';
+  }).join('');
+  const ped = [fila('Cantidad', String(p.cantidad || 1)), fila('Medidas', p.medidas), fila('Producto', p.producto), fila('Frente', p.frente), fila('Laterales', p.laterales),
+    fila('Fondo / base', p.fondo), fila('Iluminación', p.iluminacion), fila('Bastidor', SN(p.bastidor) + (/^s/i.test(p.bastidor || '') && p.color_bastidor ? ' · ' + p.color_bastidor : '')), fila('Instalación', SN(p.instalacion))].join('');
+  // Recorrido: cada cambio con cuánto estuvo en la etapa anterior.
+  const h = t.historial || [];
+  const recorrido = h.map((x, i) => {
+    const prev = h[i + 1], desde = prev ? prev.at : t.creado, dur = desde && x.at ? new Date(x.at) - new Date(desde) : NaN;
+    return `<div class="sf-hist"><b style="color:${sfkCol(x.estado)}">${escapeHtml(sfEstadoLbl(x.estado))}</b> · ${escapeHtml(sfFechaHora(x.at))}${x.por ? ' · ' + escapeHtml(x.por) : ''}${isNaN(dur) ? '' : ` <span class="muted">(después de ${sfkDuracion(dur)} en ${escapeHtml(SF_CORTO[prev ? prev.estado || '' : ''])})</span>`}</div>`;
+  }).join('');
+  // Pasos: la etapa actual rellena, las hechas con tilde. Tocar una mueve ahí (pregunta si salta o vuelve).
+  const pasos = SF_COLS.map(([id], i) => `<button type="button" class="sfd-step${i < idx ? ' hecho' : i === idx ? ' actual' : ''}" data-sfk-step="${id}" style="--c:${sfkCol(id)}"${i === idx ? ' aria-current="step"' : ''}>${i < idx ? '✓ ' : ''}${escapeHtml(SF_CORTO[id])}</button>`).join('');
+  // Navegar dentro de la misma columna sin cerrar.
+  const col = sfkDeColumna((STATE.sf || {}).tickets || [], e), pos = col.findIndex(x => x.pedido_id === t.pedido_id);
+  const prevT = pos > 0 ? col[pos - 1] : null, sigT = pos >= 0 && pos < col.length - 1 ? col[pos + 1] : null;
+  const enCrm = isAdmin() && (STATE.pedidos || []).some(x => x.idx === t.pedido_id);
+  return `<div class="sfd-h">
+      <div class="sfd-tit"><span class="sfk-num">#${t.ticket}</span><h2>${escapeHtml(t.empresa || 'Sin nombre')}</h2><span class="sfd-etq" style="--c:${sfkCol(e)}">${escapeHtml(sfEstadoLbl(e))}</span></div>
+      <div class="sfd-nav">
+        <button type="button" class="btn btn-ghost" data-sfk-nav="${prevT ? prevT.pedido_id : ''}"${prevT ? '' : ' disabled'} title="Anterior de ${escapeHtml(SF_CORTO[e])}" aria-label="Anterior">‹</button>
+        <button type="button" class="btn btn-ghost" data-sfk-nav="${sigT ? sigT.pedido_id : ''}"${sigT ? '' : ' disabled'} title="Siguiente de ${escapeHtml(SF_CORTO[e])}" aria-label="Siguiente">›</button>
+        <button type="button" class="btn btn-ghost" data-sfk-cerrar aria-label="Cerrar">✕</button>
+      </div>
+    </div>
+    <div class="sfd-body">
+      <div class="sfd-steps">${pasos}</div>
+      ${avisos.length ? `<div class="sfk-chips sfd-avisos">${avisos.join('')}</div>` : ''}
+      ${media ? `<div class="sfd-media">${media}</div>` : '<div class="muted" style="font-size:12.5px">Sin fotos ni diseño cargado.</div>'}
+      ${paraEtapa}
+      <div class="sfd-sec">${resto}${ped ? `<div class="lb-tit">Del pedido</div>${ped}` : ''}</div>
+      <div class="lb-tit">Recorrido</div>
+      ${recorrido || '<div class="sf-hist muted">Todavía no se movió.</div>'}
+      <div class="sf-hist muted">Ticket #${t.ticket}${t.creado ? ' · armado el ' + escapeHtml(sfFecha(t.creado)) : ''}</div>
+      ${enCrm ? `<div style="margin-top:10px"><button type="button" class="btn btn-ghost lb-mini" data-sfk-crm="${t.pedido_id}">Abrir el pedido en el CRM</button></div>` : ''}
+    </div>
+    <div class="sfd-acc" data-sfd-acc>
+      ${sig !== null ? `<button type="button" class="sfk-pasar sfd-pasar" data-sfk-pasar="${t.pedido_id}" data-a="${sig}" style="--c:${sfkCol(sig)}">${escapeHtml(sfkPasarTxt(sig))}${SFK_CHEVRON}</button>` : ''}
+      ${ant !== null ? `<button type="button" class="btn btn-ghost" data-sfk-volver="${t.pedido_id}" data-a="${ant}">Volver a ${escapeHtml(SF_CORTO[ant])}</button>` : ''}
+    </div>`;
+}
+function sfkAbrir(pid) {
+  const t = sfkTicket(pid);
+  if (!t) return;
+  STATE.sfAbierto = pid;
+  let bg = document.getElementById('sfd-bg');
+  if (!bg) {
+    bg = document.createElement('div'); bg.id = 'sfd-bg'; bg.className = 'sfd-bg';
+    document.body.appendChild(bg);
+    bg.addEventListener('click', sfkPanelClick);
+  }
+  const prevScroll = bg.querySelector('.sfd-body') ? bg.querySelector('.sfd-body').scrollTop : 0, mismo = bg.getAttribute('data-pid') === String(pid);
+  bg.setAttribute('data-pid', String(pid));
+  bg.setAttribute('data-sig', sfkCardSig(t));
+  bg.innerHTML = `<aside class="sfd" role="dialog" aria-modal="true" aria-label="Ticket #${t.ticket}">${sfkTicketHtml(t)}</aside>`;
+  if (mismo && prevScroll) { const b = bg.querySelector('.sfd-body'); if (b) b.scrollTop = prevScroll; }
+  void bg.offsetWidth; bg.classList.add('open');
+}
+function sfkCerrar() {
+  const bg = document.getElementById('sfd-bg');
+  STATE.sfAbierto = null;
+  if (bg) { bg.classList.remove('open'); setTimeout(() => { if (!STATE.sfAbierto && bg.parentNode) bg.remove(); }, 180); }
+}
+function sfkPanelClick(e) {
+  const el = e.target, bg = e.currentTarget;
+  if (el === bg || el.closest('[data-sfk-cerrar]')) { sfkCerrar(); return; }
+  const ver = el.closest('[data-sf-ver]'); if (ver) { sfVerFoto(ver.getAttribute('data-sf-ver')); return; }
+  const nav = el.closest('[data-sfk-nav]'); if (nav && nav.getAttribute('data-sfk-nav')) { sfkAbrir(+nav.getAttribute('data-sfk-nav')); return; }
+  const pasar = el.closest('[data-sfk-pasar]'); if (pasar) { sfkMover(+pasar.dataset.sfkPasar, pasar.dataset.a, 'boton'); return; }
+  const volver = el.closest('[data-sfk-volver]'); if (volver) { sfkMover(+volver.dataset.sfkVolver, volver.dataset.a, 'volver'); return; }
+  const paso = el.closest('[data-sfk-step]'); if (paso && STATE.sfAbierto) { sfkMover(STATE.sfAbierto, paso.getAttribute('data-sfk-step'), 'paso'); return; }
+  const crm = el.closest('[data-sfk-crm]'); if (crm && typeof openDrawerPedido === 'function') { const id = +crm.getAttribute('data-sfk-crm'); sfkCerrar(); openDrawerPedido(id); }
+}
+// Refresco de fondo con el panel abierto: si ESE ticket cambió (lo movió otro), se redibuja el panel.
+function sfkPanelRefrescar() {
+  const bg = document.getElementById('sfd-bg');
+  if (!bg || !STATE.sfAbierto) return;
+  const t = sfkTicket(STATE.sfAbierto);
+  if (!t) { sfkCerrar(); return; }
+  if (bg.getAttribute('data-sig') !== sfkCardSig(t) && !(document.activeElement && bg.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName))) sfkAbrir(STATE.sfAbierto);
+}
+
+// ---------- Arrastrar (solo compu con mouse) ----------
+function sfkFinDrag(root) {
+  STATE._sfkDrag = null;
+  root.querySelectorAll('.drop-ok, .arrastrada').forEach(x => x.classList.remove('drop-ok', 'arrastrada'));
+  const b = root.querySelector('[data-sfk-board]'); if (b) b.classList.remove('sfk-arrastrando');
+  if (STATE._sfkPend) { STATE._sfkPend = false; sfkPintar(true); } // algo cambió mientras se arrastraba
+}
+function sfkBindDrag(root) {
+  if (!sfkFino()) return;
+  root.addEventListener('dragstart', e => {
+    const c = e.target.closest && e.target.closest('article[data-sfk-card]');
+    if (!c) return;
+    STATE._sfkDrag = +c.getAttribute('data-sfk-card');
+    try { e.dataTransfer.setData('text/plain', String(STATE._sfkDrag)); e.dataTransfer.effectAllowed = 'move'; } catch (_) {}
+    c.classList.add('arrastrada');
+    const b = root.querySelector('[data-sfk-board]'); if (b) b.classList.add('sfk-arrastrando');
+  });
+  root.addEventListener('dragend', () => sfkFinDrag(root));
+  root.addEventListener('dragover', e => {
+    if (!STATE._sfkDrag) return;
+    const col = e.target.closest && e.target.closest('[data-sfk-col]');
+    root.querySelectorAll('.sfk-col.drop-ok').forEach(x => { if (x !== col) x.classList.remove('drop-ok'); });
+    if (!col) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = 'move'; } catch (_) {}
+    col.classList.add('drop-ok');
+  });
+  root.addEventListener('drop', e => {
+    if (!STATE._sfkDrag) return;
+    const col = e.target.closest && e.target.closest('[data-sfk-col]'), pid = STATE._sfkDrag;
+    e.preventDefault();
+    sfkFinDrag(root);
+    if (!col) return;
+    const t = sfkTicket(pid), destino = col.getAttribute('data-sfk-col');
+    if (t && (t.estado || '') !== destino) sfkMover(pid, destino, 'arrastre');
+  });
+}
+
+// ---------- Todos los entregados ----------
+function sfkEntregadosModal(q0) {
+  const lista = sfkDeColumna((STATE.sf || {}).tickets || [], 'entregado');
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal sf-modal"><div class="modal-h"><h3>Entregados (${lista.length})</h3><button type="button" class="btn btn-ghost" data-x>Cerrar</button></div><div class="modal-body">
+    <input class="logi-q" data-q type="search" placeholder="Buscar # o nombre" style="margin:0 0 10px;width:100%;max-width:none">
+    <div data-l class="sfk-ent-lista"></div></div></div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  const pinta = () => {
+    const q = _userKey(bg.querySelector('[data-q]').value.trim()).replace(/^#/, '');
+    const vis = q ? lista.filter(t => _userKey('#' + t.ticket + ' ' + (t.empresa || '')).includes(q)) : lista;
+    bg.querySelector('[data-l]').innerHTML = vis.map(sfkEntRowHtml).join('') || '<div class="muted" style="font-size:12.5px">No hay entregados con eso.</div>';
+  };
+  bg.querySelector('[data-q]').value = String(q0 || '');
+  pinta();
+  const fin = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  bg.querySelector('[data-x]').onclick = fin;
+  bg.querySelector('[data-q]').addEventListener('input', pinta);
+  bg.addEventListener('click', e => { if (e.target === bg) { fin(); return; } const r = e.target.closest('[data-sfk-card]'); if (r) { fin(); sfkAbrir(+r.getAttribute('data-sfk-card')); } });
+}
+// Detalle del pedido: el estado que puso Sin Frontera (corpóreos, todos lo ven) y, para Gaspar, si el pedido es de Sin Frontera
+// como CLIENTE (lo ven en "Mis pedidos") con el botón para marcarlo o quitarlo.
 function sfDrawerSection(p) {
-  if (!p || !p.esCorporeo || !p.prodEstado || !SF_ESTADOS.some(e => e[0] === p.prodEstado)) return '';
-  const col = SF_ESTADO_COLOR[p.prodEstado];
-  return `<div class="drawer-section"><h4>Producción (Sin Frontera)</h4><div style="font-size:13px">Estado: <b style="color:${col}">${escapeHtml(sfEstadoLbl(p.prodEstado))}</b></div></div>`;
+  if (!p) return '';
+  const est = p.esCorporeo && p.prodEstado && SF_ESTADOS.some(e => e[0] === p.prodEstado)
+    ? `<div>Producción: <b style="color:${SF_ESTADO_COLOR[p.prodEstado]}">${escapeHtml(sfEstadoLbl(p.prodEstado))}</b></div>` : '';
+  let cli = '';
+  if (isAdmin()) {
+    if (!STATE.sfVinc) sfCargarVinculos();
+    const v = STATE.sfVinc, ver = !!(v && v.ver.has(p.idx)), manual = !!(v && v.manual.has(p.idx));
+    cli = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">Cliente Sin Frontera: <b>${!v ? '…' : (ver ? 'Sí' : 'No')}</b>`
+      + (v && (!ver || manual) ? `<button type="button" class="btn btn-ghost" style="font-size:12px;padding:4px 10px" onclick="sfToggleCliente(${p.idx})">${ver ? 'Quitar' : 'Marcar como de Sin Frontera'}</button>` : (ver ? '<span class="muted" style="font-size:11.5px">(por su número)</span>' : ''))
+      + `</div>`;
+  }
+  if (!est && !cli) return '';
+  return `<div class="drawer-section" data-sf-drawer-idx="${p.idx}"><h4>Sin Frontera</h4><div style="font-size:13px;display:flex;flex-direction:column;gap:6px">${est}${cli}</div></div>`;
 }
-function sfRedibujarFila(pid) {
-  const t = ((STATE.sf || {}).tickets || []).find(x => x.pedido_id === pid);
-  const el = document.querySelector(`[data-sf-row="${pid}"]`);
-  if (t && el) el.outerHTML = sfFilaHtml(t);
+// Qué pedidos son de Sin Frontera como cliente (Gaspar): una vez por carga; se actualiza al marcar o quitar.
+function sfSetVinc(j) { STATE.sfVinc = { ver: new Set(j.pedidos_ids || []), manual: new Set(j.vinculados || []) }; }
+// Repinta SOLO la sección "Sin Frontera" del detalle abierto (no toca lo que se está editando en la ficha).
+function sfDrawerRefrescar(idx) {
+  const dr = document.getElementById('drawer');
+  if (!dr || !dr.classList.contains('open')) return;
+  const s = dr.querySelector(idx != null ? `[data-sf-drawer-idx="${idx}"]` : '[data-sf-drawer-idx]');
+  if (!s) return;
+  const p = (STATE.pedidos || []).find(x => x.idx === +s.getAttribute('data-sf-drawer-idx'));
+  if (p) s.outerHTML = sfDrawerSection(p) || '';
+}
+async function sfCargarVinculos(forzar) {
+  if (!isAdmin() || STATE._sfVincCargando || (STATE.sfVinc && !forzar)) return;
+  if (!forzar && STATE._sfVincFallo && Date.now() - STATE._sfVincFallo < 60000) return; // si falló, no reintentar en cada dibujo
+  STATE._sfVincCargando = true;
+  let ok = false;
+  try { sfSetVinc(await sfFetch('/admin/sinfrontera/config')); ok = true; STATE._sfVincFallo = 0; }
+  catch (_) { STATE._sfVincFallo = Date.now(); } finally { STATE._sfVincCargando = false; }
+  if (ok && STATE.view === 'pedidos' && document.getElementById('table-pedidos')) renderTablePedidos();
+  if (ok) sfDrawerRefrescar();
+}
+async function sfVincular(ids, on) {
+  try { sfSetVinc(await sfFetch('/admin/sinfrontera/config', on ? { vincular: ids } : { desvincular: ids })); return true; }
+  catch (_) { return false; }
+}
+// Botón del detalle: marca o quita TODO el pedido (sus carteles hermanos).
+async function sfToggleCliente(idx) {
+  const p = (STATE.pedidos || []).find(x => x.idx === idx); if (!p) return;
+  const ids = typeof pedidoHermanos === 'function' ? pedidoHermanos(p).map(x => x.idx) : [idx];
+  const on = !(STATE.sfVinc && STATE.sfVinc.ver.has(idx));
+  if (await sfVincular(ids, on)) {
+    const sigue = !on && STATE.sfVinc && STATE.sfVinc.ver.has(idx);
+    toast(on ? 'Listo: lo ven en "Mis pedidos" de Sin Frontera' : (sigue ? 'Ya no está vinculado a mano, pero lo siguen viendo por su número' : 'Quitado de Sin Frontera'));
+    sfDrawerRefrescar(idx);
+    if (document.getElementById('table-pedidos')) renderTablePedidos();
+  } else toast('No se pudo guardar. Probá de nuevo.');
 }
 function sfVerFoto(url) {
   const bg = document.createElement('div');
@@ -6745,7 +7119,7 @@ async function sfPasswordUI() {
 // por el Excel). La lista de pedidos para sumar sale de los que ya tiene cargados Gaspar (STATE.pedidos).
 async function sfConfigUI() {
   let cfg;
-  try { cfg = await sfFetch('/admin/sinfrontera/config'); } catch (e) { toast(e.message || 'No se pudo cargar'); return; }
+  try { cfg = await sfFetch('/admin/sinfrontera/config'); sfSetVinc(cfg); } catch (e) { toast(e.message || 'No se pudo cargar'); return; }
   const bg = document.createElement('div'); bg.className = 'modal-bg';
   const pedTxt = p => `${fmtDate(p.fecha)} · ${escapeHtml(p.cartel || '—')}${p.numero ? ' · N° ' + escapeHtml(String(p.numero)) : ''} · ${fmtMoney(p.precio)}`;
   const pinta = () => {
@@ -6768,7 +7142,7 @@ async function sfConfigUI() {
   document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
   pinta();
   const fin = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); STATE.sfPed = null; if (STATE.view === 'sf-pedidos') { const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } } };
-  const post = async body => { try { cfg = await sfFetch('/admin/sinfrontera/config', body); pinta(); return true; } catch (e) { toast(e.message || 'No se pudo guardar'); return false; } };
+  const post = async body => { try { cfg = await sfFetch('/admin/sinfrontera/config', body); sfSetVinc(cfg); pinta(); return true; } catch (e) { toast(e.message || 'No se pudo guardar'); return false; } };
   bg.querySelector('[data-x]').onclick = fin;
   bg.addEventListener('click', async e => {
     if (e.target === bg) { fin(); return; }
@@ -6785,58 +7159,93 @@ async function sfConfigUI() {
 function bindSinFrontera() {
   const root = document.querySelector('.sf-wrap');
   if (!root) return;
+  const redibujar = () => { const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } };
   root.addEventListener('click', async e => {
     const el = e.target;
-    if (el.closest('[data-sf-refresh]')) { if (STATE.view === 'sf-pedidos') STATE.sfPed = null; else STATE.sf = null; const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } return; }
+    if (el.closest('[data-sf-refresh]')) { if (STATE.view === 'sf-pedidos') STATE.sfPed = null; else STATE.sf = null; redibujar(); return; }
     const vista = el.closest('[data-sf-vista]'); if (vista) { setView(vista.dataset.sfVista); return; }
     if (el.closest('[data-sf-password]')) { sfPasswordUI(); return; }
     if (el.closest('[data-sf-config]')) { sfConfigUI(); return; }
-    if (el.closest('[data-sf-op]')) { await sfPedirOperador(); const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } return; }
-    const fl = el.closest('[data-sf-filtro]');
-    if (fl) { STATE.sfFiltro = fl.dataset.sfFiltro; const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); } return; }
+    if (el.closest('[data-sf-op]')) { await sfPedirOperador(); redibujar(); return; }
     const ver = el.closest('[data-sf-ver]'); if (ver) { sfVerFoto(ver.getAttribute('data-sf-ver')); return; }
     const tr = el.closest('[data-sfp]'); if (tr) { sfPedDetalle(+tr.dataset.sfp); return; }
-    const head = el.closest('[data-sf-head]');
-    if (head && !el.closest('select') && !el.closest('a') && !el.closest('button')) {
-      const pid = +head.closest('[data-sf-row]').dataset.sfRow;
-      STATE.sfOpen = STATE.sfOpen || {};
-      if (STATE.sfOpen[pid]) delete STATE.sfOpen[pid]; else STATE.sfOpen[pid] = true;
-      sfRedibujarFila(pid);
+    // Producción (tablero)
+    const pasar = el.closest('[data-sfk-pasar]'); if (pasar) { sfkMover(+pasar.dataset.sfkPasar, pasar.dataset.a, 'boton'); return; }
+    const tab = el.closest('[data-sfk-tab]');
+    if (tab) {
+      const id = tab.getAttribute('data-sfk-tab'), zona = root.querySelector('[data-sfk-zona]');
+      STATE.sfEtapaCel = id; try { localStorage.setItem(SF_ETAPA_CEL_KEY, id); } catch (_) {}
+      if (zona) {
+        zona.querySelectorAll('[data-sfk-tab]').forEach(b => b.classList.toggle('on', b === tab));
+        zona.querySelectorAll('[data-sfk-col]').forEach(c => c.classList.toggle('on-cel', c.getAttribute('data-sfk-col') === id));
+        zona.setAttribute('data-sig', sfkBoardSig((STATE.sf || {}).tickets || [], id));
+      }
+      return;
     }
+    const urg = el.closest('[data-sfk-urg]'); if (urg) { STATE.sfUrg = !STATE.sfUrg; urg.classList.toggle('on', STATE.sfUrg); sfkFiltrarDom(); return; }
+    if (el.closest('[data-sfk-ent-todos]')) { sfkEntregadosModal(STATE.sfQ); return; }
+    // El encabezado de Entregado (y el riel plegado en pantallas medianas) abre la lista completa.
+    if (el.closest('[data-sfk-rail]')) { sfkEntregadosModal(STATE.sfQ); return; }
+    const card = el.closest('[data-sfk-card]'); if (card) { sfkAbrir(+card.getAttribute('data-sfk-card')); return; }
   });
-  root.addEventListener('change', e => {
-    const s = e.target.closest('[data-sf-estado]');
-    if (s) sfCambiarEstado(+s.dataset.sfEstado, s.value, s);
+  root.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    const card = e.target.closest && e.target.closest('[data-sfk-card]');
+    if (card && e.target === card) { e.preventDefault(); sfkAbrir(+card.getAttribute('data-sfk-card')); }
   });
   const q = root.querySelector('#sf-q');
   if (q) {
-    let t = null;
-    q.addEventListener('input', () => {
-      clearTimeout(t);
-      t = setTimeout(() => {
-        STATE.sfQ = q.value;
-        const ts = (STATE.sf || {}).tickets || [], vis = sfOrdenar(sfFiltrar(ts));
-        const lista = root.querySelector('[data-sf-list]');
-        if (lista) lista.innerHTML = vis.map(sfFilaHtml).join('') || '<div class="logi-vacio-box">No hay corpóreos con ese filtro.</div>';
-        else { const m = document.getElementById('main'); if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); const nq = document.getElementById('sf-q'); if (nq) { nq.focus(); nq.setSelectionRange(nq.value.length, nq.value.length); } } }
-      }, 200);
+    let tq = null;
+    q.addEventListener('input', () => { clearTimeout(tq); tq = setTimeout(() => { STATE.sfQ = q.value; sfkFiltrarDom(); }, 150); });
+    q.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { q.value = ''; STATE.sfQ = ''; sfkFiltrarDom(); return; }
+      if (e.key === 'Enter') {
+        e.preventDefault(); clearTimeout(tq); STATE.sfQ = q.value; sfkFiltrarDom();
+        const txt = q.value.trim().replace(/^#/, ''), hay = !!txt;
+        const exT = /^\d+$/.test(txt) ? ((STATE.sf || {}).tickets || []).find(t => String(t.ticket) === txt) : null;
+        const vis = hay ? root.querySelectorAll('.sfk-col [data-sfk-card]:not([hidden])') : [];
+        const pid = exT ? exT.pedido_id : (vis.length === 1 ? +vis[0].getAttribute('data-sfk-card') : 0);
+        if (pid) sfkAbrir(pid); else q.blur();
+      }
     });
   }
-  // Refresco de fondo cada 60 s mientras la pantalla está a la vista (lo que cambia Gaspar o el otro turno).
+  sfkBindDrag(root);
+  if (STATE.view === 'sf-produccion') sfkFiltrarDom(); // la búsqueda y "Urgentes" sobreviven al redibujo
+  // Teclado global (una sola vez): "/" va al buscador; Esc cierra el panel.
+  if (!window._sfkTeclas) {
+    window._sfkTeclas = true;
+    document.addEventListener('keydown', e => {
+      if (STATE.view !== 'sf-produccion') return;
+      const a = document.activeElement, escribiendo = a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+      if (e.key === 'Escape' && STATE.sfAbierto && !document.querySelector('.modal-bg.open') && !document.querySelector('.sf-lightbox')) { sfkCerrar(); return; }
+      if (e.key === '/' && !escribiendo && !STATE.sfAbierto && !document.querySelector('.modal-bg.open')) { const s = document.getElementById('sf-q'); if (s) { e.preventDefault(); s.focus(); } }
+    });
+  }
+  // Refresco de fondo cada ~90 s mientras la pantalla está a la vista (lo que mueve Gaspar o el otro turno). No pisa un arrastre
+  // ni una movida en curso (sfCargar/sfkPintar lo respetan).
   if (!window._sfTick) {
     window._sfTick = setInterval(() => {
-      if (!/^sf-/.test(STATE.view) || document.visibilityState !== 'visible' || !STATE.token) return;
+      if (!/^sf-/.test(STATE.view) || document.visibilityState !== 'visible' || !STATE.token || STATE._sfkDrag) return;
       const u = document.querySelector('[data-sf-upd]'); if (u && STATE.sf) u.textContent = sfHace(STATE.sf.at);
       const D = STATE.view === 'sf-pedidos' ? STATE.sfPed : STATE.sf;
       if (D && D.at && Date.now() - D.at > 85000) sfCargar({ silent: true });
     }, 30000);
   }
 }
-// En PEDIDOS (Gaspar y vendedores): el estado que puso Sin Frontera en cada corpóreo (la producción de neón tiene el suyo).
+// En PEDIDOS: el estado que puso Sin Frontera en cada corpóreo (todos; la producción de neón tiene el suyo) y, para Gaspar, la
+// etiqueta "Sin Frontera" en los pedidos que les vendió (los que ven en "Mis pedidos").
 function sfPillPedido(p) {
-  if (!p || !p.esCorporeo || !p.prodEstado || !SF_ESTADOS.some(e => e[0] === p.prodEstado)) return '';
-  const col = SF_ESTADO_COLOR[p.prodEstado];
-  return ` <span class="prod-mini" title="Producción en Sin Frontera" style="color:${col};border-color:${col}66">${escapeHtml(sfEstadoLbl(p.prodEstado))}</span>`;
+  if (!p) return '';
+  let h = '';
+  if (p.esCorporeo && p.prodEstado && SF_ESTADOS.some(e => e[0] === p.prodEstado)) {
+    const col = SF_ESTADO_COLOR[p.prodEstado];
+    h += ` <span class="prod-mini" title="Producción en Sin Frontera" style="color:${col};border-color:${col}66">${escapeHtml(sfEstadoLbl(p.prodEstado))}</span>`;
+  }
+  if (isAdmin()) {
+    if (!STATE.sfVinc) sfCargarVinculos();
+    else if (STATE.sfVinc.ver.has(p.idx)) h += ' <span class="prod-mini" title="Cliente: Sin Frontera (lo ven en su usuario)" style="color:var(--neon-cyan);border-color:rgba(143,212,222,.45)">Sin Frontera</span>';
+  }
+  return h;
 }
 // Tick de 30 s: actualiza el "actualizado hace X", reintenta las celdas que no se guardaron por la red, aplica un re-dibujo
 // pendiente si ya no está ocupado y cada ~90 s refresca de fondo (pausado mientras hay un POST en vuelo; solo con la vista
@@ -10649,6 +11058,13 @@ function renderPedidoModal() {
         ${pmPagoBlockHtml(m)}
         <div style="margin-bottom:var(--s-3)"><label style="${lbl}">De qué ad viene <span style="opacity:.6">(auto por teléfono en WPP · editable)</span></label><input id="pm-ad" value="${escapeHtml(m.ad||'')}" placeholder="se completa solo si vino de un ad" style="${inp}"></div>
         ${isAdmin() ? `<div style="margin-bottom:var(--s-3)"><label style="${lbl}">¿De quién es la venta? <span style="opacity:.6">(lo que cargás vos es tuyo, sin comisión, salvo que elijas un vendedor)</span></label><select id="pm-vendedor" style="${inp}">${[['gaspar', 'Mía (Gaspar, sin comisión)'], ['joaco', 'Joaco'], ['facundo', 'Facu'], ['agustina', 'Agus']].map(([k, l]) => `<option value="${k}" ${(m.vendedor || 'gaspar') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
+        ${isAdmin() ? `<div style="margin-bottom:var(--s-3)"><label style="${lbl}">Cliente</label>
+          <div style="display:flex;gap:8px">
+            <button type="button" data-pm-sf="0" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(!m.clienteSF)}">Cliente final</button>
+            <button type="button" data-pm-sf="1" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(!!m.clienteSF)}">Sin Frontera</button>
+          </div>
+          ${m.clienteSF ? `<div style="font-size:11.5px;color:var(--fg-subtle);margin-top:4px">Lo van a ver en su usuario ("Mis pedidos"), con precio, pagos y estado.</div>` : ''}
+        </div>` : ''}
         <div style="display:flex;justify-content:space-between;align-items:center;padding-top:var(--s-2);border-top:1px solid var(--border)">
           <div style="font-size:13px;color:var(--fg-subtle)">Total: <b style="color:var(--fg)" id="pm-total">${fmtMoney(total)}</b></div>
           <div style="display:flex;gap:8px">
@@ -10666,6 +11082,7 @@ function bindPedidoModal() {
   const cc = document.getElementById('pm-cancel'); if (cc) cc.onclick = close;
   const bk = document.getElementById('pm-backdrop'); if (bk) bk.onclick = (e) => { if (e.target.id === 'pm-backdrop') close(); };
   document.querySelectorAll('[data-pm-plat]').forEach(b => b.onclick = () => { readPedidoModalDOM(); STATE.pedidoModal.plataforma = b.dataset.pmPlat; render(); });
+  document.querySelectorAll('[data-pm-sf]').forEach(b => b.onclick = () => { readPedidoModalDOM(); STATE.pedidoModal.clienteSF = b.dataset.pmSf === '1'; render(); });
   const add = document.getElementById('pm-add-cartel'); if (add) add.onclick = pmAddCartel;
   document.querySelectorAll('[data-pm-remove]').forEach(b => b.onclick = () => pmRemoveCartel(parseInt(b.dataset.pmRemove,10)));
   document.querySelectorAll('[data-pm-dimer]').forEach(sel => sel.onchange = () => {
@@ -10876,6 +11293,11 @@ async function confirmCargarPedido() {
     STATE.pedidoModalSaving = false;
     render();
     toast(`Pedido #${j.numero} cargado ✓ (${nuevos.length} cartel${nuevos.length>1?'es':''})`);
+    // Cliente Sin Frontera (solo admin): lo ven en su usuario, "Mis pedidos".
+    if (isAdmin() && m.clienteSF && nuevos.length) sfVincular(nuevos.map(x => x.idx), true).then(ok => {
+      toast(ok ? `Pedido #${j.numero}: ya lo ven en "Mis pedidos" de Sin Frontera` : 'Ojo: no se pudo marcar como de Sin Frontera. Marcalo desde el detalle del pedido.');
+      if (document.getElementById('table-pedidos')) renderTablePedidos();
+    });
   } catch (e) {
     STATE.pedidoModalSaving = false; render();
     // 400 {error, campo} del server (caja / comprobante / pagado): marcar ese campo en rojo como la validación local.
@@ -13814,7 +14236,9 @@ async function savePedidoEdit(idx) {
     envio:         document.getElementById('ped-edit-envio')?.value,
     aclaracion:    document.getElementById('ped-edit-aclaracion')?.value,
     // Campos del pedido (aplican a todos los carteles del mismo pedido — ver pedidoHermanos).
-    estado_pedido: document.getElementById('ped-edit-estadopedido')?.value,
+    // Solo si CAMBIÓ (como estado_pago): mandarlo siempre pisaba el Entregado que pone el tablero de Sin Frontera mientras la
+    // ficha estaba abierta, y en un pedido mixto el estado del corpóreo pasaba al neón hermano (o al revés).
+    estado_pedido: (() => { const v = document.getElementById('ped-edit-estadopedido')?.value; return (v == null || v === p.estadoPedido) ? undefined : v; })(),
     // '1er pago' → '2do pago' NUNCA por PATCH: el cobro del saldo se registra en su modal (abrirSegundoPago).
     // Solo si CAMBIÓ: mandarlo siempre (con el valor de cuando se abrió la ficha) borraba un 2do pago que otro
     // registró mientras tanto. Volver de un 2do pago registrado va con pago2_revert (ya confirmado en el select).
@@ -27335,7 +27759,9 @@ function startPedidosPolling() {
     const before = pedidosSignature();
     const fresh = await fetchPedidosFromD1();
     if (!fresh || !fresh.length) return;  // fetch falló o vino vacío → no pisar la tabla
+    const _prevIds = new Set((STATE.pedidos || []).map(x => x.idx));
     STATE.pedidos = fresh;
+    if (isAdmin() && STATE.sfVinc && fresh.some(x => !_prevIds.has(x.idx))) sfCargarVinculos(true); // ¿un pedido nuevo de Sin Frontera?
     if (pedidosSignature() !== before) {
       renderTablePedidos();
       const tc = document.getElementById('pedidos-total-count');
