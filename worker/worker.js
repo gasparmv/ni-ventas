@@ -16792,7 +16792,7 @@ function neonEtapas(rows, sfIds) {
     else if (g.every(term)) i = pagado ? 5 : 4;
     else if (term(r)) i = 3;
     else if (String(r.productor_id || '')) i = 2;
-    else if (['matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce) || (ce === 'pedido' && r.diseno_inicio_at)) i = 1;
+    else if (['matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce) || (ce === 'pedido' && String(r.corte_foto || '').trim())) i = 1;
     else i = 0;
     let motivo = '';
     if (i < 5 && pagado && /^para enviar/.test(ep) && String(r.fecha || '') < NEON_LEGACY_HASTA) { i = 5; motivo = 'estado'; }
@@ -16803,7 +16803,7 @@ function neonEtapas(rows, sfIds) {
     r._grupo_n = g.length; r._grupo_term = g.filter(term).length;
     r._desde = motivo === 'piso' ? r.neon_piso_at
       : i === 0 ? r.created_at
-      : i === 1 ? (r.diseno_inicio_at || r.disenado_at || r.created_at)
+      : i === 1 ? r.created_at
       : i === 2 ? r.prod_asignado_at
       : i === 3 ? r.prod_terminado_at
       : i === 4 ? maxF(g, 'prod_terminado_at')
@@ -25976,7 +25976,7 @@ const handler = {
       // ===== Tablero de producción de NEÓN (/admin/neon/*): todo el equipo menos productores, Sin Frontera y cursos =====
       if (path.startsWith('/admin/neon/')) {
         const ctx = await neonCtx(env, session);
-        if (!['admin', 'comercial', 'disenador', 'produccion', 'logistica'].includes(ctx.rol)) return json({ error: 'forbidden' }, 403);
+        if (!['admin', 'comercial', 'produccion', 'logistica'].includes(ctx.rol)) return json({ error: 'forbidden' }, 403);
         try { await ensureNeonTableroSchema(env); } catch (_) {}
         // GET /admin/neon/tablero → las tarjetas que le tocan ver a cada uno (vendedor: las suyas + cuántas hay del resto).
         if (request.method === 'GET' && path === '/admin/neon/tablero') {
@@ -26013,7 +26013,7 @@ const handler = {
           if (!ids.length) return json({ error: 'faltan los carteles' }, 400);
           const ph = ids.map(() => '?').join(',');
           if (acc === 'tomar' || acc === 'soltar') {
-            if (!['admin', 'disenador'].includes(ctx.rol)) return json({ error: 'Solo Emma o Gaspar' }, 403);
+            if (ctx.rol !== 'admin') return json({ error: 'Solo Gaspar' }, 403);
             const u = acc === 'tomar'
               ? await env.DB.prepare('UPDATE corte_pedidos SET diseno_inicio_at = COALESCE(diseno_inicio_at, ?), diseno_inicio_por = COALESCE(diseno_inicio_por, ?) WHERE pedido_id IN (' + ph + ") AND producto = 'NEON' AND estado = 'pedido'").bind(now, ctx.quien, ...ids).run()
               : await env.DB.prepare('UPDATE corte_pedidos SET diseno_inicio_at = NULL, diseno_inicio_por = NULL WHERE pedido_id IN (' + ph + ") AND producto = 'NEON' AND estado = 'pedido'").bind(...ids).run();

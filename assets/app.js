@@ -2789,7 +2789,7 @@ function setView(v) {
   else if (isProduccionOnly()) v = (v === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : (v === 'neon' ? 'neon' : 'corte');
   else if (isLogisticaOnly()) v = v === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) v = v === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
-  else if (isDisenadorOnly() && v !== 'corte' && v !== 'neon') v = 'cotizacion';
+  else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
   if (v === 'logistica' && !isLogisticaOnly() && !isAdmin()) v = 'dashboard';
   if (/^sf-/.test(v) && !isSinFronteraOnly() && !isAdmin()) v = 'dashboard';
   if (v === 'neon' && !nkbPuedeVer()) v = 'dashboard';
@@ -2817,7 +2817,7 @@ window.addEventListener('hashchange', () => {
   else if (isProduccionOnly()) h = (h === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : (h === 'neon' ? 'neon' : 'corte');
   else if (isLogisticaOnly()) h = h === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) h = h === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
-  else if (isDisenadorOnly() && h !== 'corte' && h !== 'neon') h = 'cotizacion';
+  else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
   if (h === 'logistica' && !isLogisticaOnly() && !isAdmin()) h = 'dashboard';
   if (/^sf-/.test(h) && !isSinFronteraOnly() && !isAdmin()) h = 'dashboard';
   if (h === 'neon' && !nkbPuedeVer()) h = 'dashboard';
@@ -3124,10 +3124,10 @@ function render() {
   } else if (STATE.view === 'logistica' && !isLogisticaOnly() && !isAdmin()) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
-  } else if (STATE.view === 'neon' && !nkbPuedeVer()) {
+  } else if (STATE.view === 'neon' && !nkbPuedeVer() && !isDisenadorOnly()) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
-  } else if (isDisenadorOnly() && !['cotizacion', 'corte', 'neon'].includes(STATE.view)) {
+  } else if (isDisenadorOnly() && !['cotizacion', 'corte'].includes(STATE.view)) {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
@@ -6976,7 +6976,8 @@ const NKB_ROJO_DIAS = { confirmado: 2, diseno: 7, montando: 10, pago: 5, enviar:
 const NKB_DESPACHO = { envio: 'Salió por envío', retira: 'Retiró en el taller', instalacion: 'Instalado', sinfrontera: 'Entregado a Sin Frontera' };
 const NKB_TAB_KEY = 'niventas.nkbEtapaCel';
 const NKB_DIAS_ENV = 14;
-function nkbPuedeVer() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isAdmin() || isJoaquinUser(STATE.user) || isSecundario(STATE.user) || isDisenadorUser(STATE.user) || isProduccionUser(STATE.user) || isLogisticaUser(STATE.user)); }
+// Emma no: trabaja en Corte como siempre (Gaspar 16-oct). Lo que hace ahí mueve las tarjetas.
+function nkbPuedeVer() { return !!STATE.token && tokenBelongsTo(STATE.user) && !isDisenadorOnly() && (isAdmin() || isJoaquinUser(STATE.user) || isSecundario(STATE.user) || isProduccionUser(STATE.user) || isLogisticaUser(STATE.user)); }
 function nkbUrl(qs) { return CONFIG.trackerUrl + '/admin/neon/archivo?' + qs + '&token=' + encodeURIComponent(STATE.token || ''); }
 function nkbRol() { return (STATE.nkb && STATE.nkb.rol) || ''; }
 function nkbCols() { return nkbRol() === 'logistica' ? ['enviar', 'enviado'] : NKB_KEYS; }
@@ -7040,11 +7041,9 @@ function nkbAccion(c) {
   switch (c.etapa) {
     case 'confirmado':
       if (!c.corte_id) return adm ? { t: 'Ubicar a mano', a: 'ubicar', to: 'confirmado' } : null;
-      if (!c.diseno) return (adm || c.mio) ? { t: 'Subir la foto del diseño', a: 'foto', to: 'confirmado' } : null;
-      return (adm || r === 'disenador') && c.corte_id ? { t: 'Pasar a Diseño', a: 'tomar', to: 'diseno' } : null;
+      return (adm || c.mio) ? { t: 'Subir la foto del diseño', a: 'foto', to: 'confirmado' } : null;
     case 'diseno':
       if (adm) return { t: 'Derivar a productor', a: 'derivar', to: 'montando' };
-      if (r === 'disenador' && ce === 'pedido') return { t: 'Matriz lista', a: 'matriz', to: 'diseno' };
       if (yo === 'anibal' && ce === 'matriz_lista') return { t: 'Marcar cortado', a: 'cortado', to: 'diseno' };
       if (yo === 'neyen' && ce === 'cortado') return { t: 'Separar la base', a: 'separado', to: 'diseno' };
       return null;
@@ -7061,7 +7060,6 @@ function nkbAccion(c) {
 function nkbSecundarios(c) {
   const r = nkbRol(), yo = (STATE.nkb && STATE.nkb.yo) || '', adm = r === 'admin', ce = c.corte_estado, prim = (nkbAccion(c) || {}).a, out = [];
   const add = (a, t) => { if (a !== prim && !out.some(x => x.a === a)) out.push({ a, t }); };
-  if ((adm || r === 'disenador') && c.etapa === 'diseno' && ce === 'pedido' && c.corte_id) { add('matriz', 'Matriz lista'); if (c.f.tomado) add('soltar', 'Volver a Confirmado'); }
   if (adm && c.etapa === 'diseno' && ce === 'matriz_lista') add('cortado', 'Marcar cortado');
   if (adm && c.etapa === 'diseno' && ce === 'cortado') add('separado', 'Separar la base');
   if (adm && c.etapa === 'montando') { add('derivar', 'Cambiar productor'); add('terminar', 'Marcar terminado'); }
@@ -7094,8 +7092,8 @@ function nkbEntrega(c) {
 function nkbChips(c, ficha) {
   const ch = [], ce = c.corte_estado, pr = c.productor || '';
   const P = (cls, t) => `<span class="logi-pill ${cls}">${escapeHtml(t)}</span>`;
-  if (c.etapa === 'confirmado') ch.push(!c.corte_id ? P('g', 'Anterior al circuito de corte') : c.diseno ? P('g', 'Para diseñar') : P('r', 'Falta la foto del diseño' + (c.vendedor ? ' · ' + c.vendedor : '')));
-  else if (c.etapa === 'diseno') ch.push(!c.corte_id ? P('g', 'Sin pieza de corte') : ce === 'pedido' ? P('a', 'Diseñando' + (c.f.tomado_por ? ' · ' + nkbNom(c.f.tomado_por) : '')) : ce === 'matriz_lista' ? P('a', 'Falta cortar') : ce === 'cortado' ? P('a', 'Cortado · falta separar') : P('v', 'Base lista · falta derivar'));
+  if (c.etapa === 'confirmado') ch.push(!c.corte_id ? P('g', 'Anterior al circuito de corte') : P('r', 'Falta la foto del diseño' + (c.vendedor ? ' · ' + c.vendedor : '')));
+  else if (c.etapa === 'diseno') ch.push(!c.corte_id ? P('g', 'Sin pieza de corte') : ce === 'pedido' ? P('a', 'Emma: por diseñar') : ce === 'matriz_lista' ? P('a', 'Falta cortar') : ce === 'cortado' ? P('a', 'Cortado · falta separar') : P('v', 'Base lista · falta derivar'));
   else if (c.etapa === 'montando') { ch.push(P(c.prod_estado === 'en_armado' ? 'v' : 'a', pr + (c.prod_estado === 'en_armado' ? ' · armando' : ' · sin empezar'))); if (c.corte_id && !['cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce)) ch.push(P('r', 'Falta la base')); }
   else if (c.etapa === 'terminado' && c.grupo_n > c.grupo_term) { const f = c.grupo_n - c.grupo_term; ch.push(P('a', f === 1 ? 'Espera al otro cartel' : 'Espera a ' + f + ' carteles más')); }
   if (['terminado', 'pago', 'enviar'].includes(c.etapa) && c.prod_estado === 'terminado') { if (c.f.recibido) ch.push(P('v', 'En el taller')); else if (pr) ch.push(P('a', 'Falta traer de ' + pr)); }
@@ -7280,7 +7278,7 @@ function nkbFichaHtml(c) {
   const fotos = Array.from({ length: c.fotos || 0 }, (_, i) => `<button type="button" class="sf-foto" data-sf-ver="${escapeHtml(nkbUrl('p=' + c.id + '&k=f&i=' + i))}" title="Ver grande"><img src="${escapeHtml(nkbUrl('p=' + c.id + '&k=f&i=' + i + '&w=300'))}" alt="Terminado ${i + 1}" onerror="sfkImgError(this)"></button>`).join('');
   const dis = (c.diseno && r !== 'logistica') ? `<button type="button" class="sfd-diseno" data-sf-ver="${escapeHtml(nkbUrl('p=' + c.id + '&k=d'))}" title="Ver grande"><img src="${escapeHtml(nkbUrl('p=' + c.id + '&k=d&w=900'))}" alt="Diseño" onerror="sfkImgError(this)"></button>` : '';
   const media = (fotos ? `<div class="lb-tit" style="margin-top:0">Terminado</div><div class="sf-fotos">${fotos}</div>` : '') + (dis ? `<div class="lb-tit"${fotos ? '' : ' style="margin-top:0"'}>Diseño</div>${dis}` : '');
-  const corteTxt = { pedido: c.f.tomado ? 'Emma lo está diseñando' : 'Falta diseñar la matriz', matriz_lista: 'Matriz lista · falta cortar', cortado: 'Cortado · falta separar', embalado: 'Base lista (separada)' }[c.corte_estado] || (c.corte_id ? String(c.corte_estado || '') : 'Sin pieza de corte');
+  const corteTxt = { pedido: c.diseno ? 'Emma: por diseñar la matriz' : 'Falta la foto del diseño', matriz_lista: 'Matriz lista · falta cortar', cortado: 'Cortado · falta separar', embalado: 'Base lista (separada)' }[c.corte_estado] || (c.corte_id ? String(c.corte_estado || '') : 'Sin pieza de corte');
   const prodTxt = c.productor ? c.productor + ' · ' + ({ pendiente: 'sin empezar', en_armado: 'armando', terminado: 'terminado' }[c.prod_estado] || c.prod_estado || '') : '';
   const salida = c.despacho ? (NKB_DESPACHO[c.despacho.modo] || 'Salió') + (c.despacho.transporte ? ' · ' + c.despacho.transporte : '') + (c.despacho.seguimiento ? ' · ' + c.despacho.seguimiento : '') : '';
   const datos = [fila('Medida', c.medida), fila('Cantidad', c.cantidad > 1 ? c.cantidad + ' unidades' : '1'), fila('Colores', c.colores), fila('Base', c.base), fila('Dimmer', c.dimer), fila('Tipo', c.tipo),
@@ -7288,7 +7286,7 @@ function nkbFichaHtml(c) {
     (adm && c.piso) ? fila('Ubicado a mano', (NKB_LARGO[c.piso.etapa] || c.piso.etapa) + (c.piso.motivo ? ' · ' + c.piso.motivo : '') + (c.piso.por ? ' · ' + c.piso.por : '')) : ''].join('');
   const herm = nkbGrupo(c).filter(x => x.id !== c.id);
   const hermHtml = herm.length ? `<div class="lb-tit">Otros carteles del pedido</div><div class="sfk-ent-lista">${herm.map(x => `<button type="button" class="sfk-ent" data-nkb-ir="${x.id}"><span class="n">${escapeHtml(x.cartel || 'Sin nombre')}</span><span class="f" style="color:${NKB_COLOR[x.etapa]}">${escapeHtml(NKB_CORTO[x.etapa])}</span></button>`).join('')}</div>` : '';
-  const ev = [['Cargado', c.f.creado], ['Emma lo tomó', c.f.tomado, c.f.tomado_por ? nkbNom(c.f.tomado_por) : ''], ['Matriz lista', c.f.matriz], ['Cortado', c.f.cortado], ['Base separada', c.f.separado],
+  const ev = [['Cargado', c.f.creado], ['Emma bajó el diseño', c.f.tomado], ['Matriz lista', c.f.matriz], ['Cortado', c.f.cortado], ['Base separada', c.f.separado],
     ['Derivado' + (c.productor ? ' a ' + c.productor : ''), c.f.asignado], [c.prod_estado === 'en_armado' ? 'Armando' : '', c.prod_estado === 'en_armado' ? c.f.prod : ''], ['Terminado', c.f.terminado],
     ['Llegó al taller', c.f.recibido, c.recibido_por ? nkbNom(c.recibido_por) : ''], ['Salió', c.f.despachado, c.despacho ? (NKB_DESPACHO[c.despacho.modo] || '') + (c.despacho.por ? ' · ' + nkbNom(c.despacho.por) : '') : '']]
     .filter(x => x[0] && x[1]).sort((a, b) => String(a[1]).localeCompare(String(b[1])));
@@ -8616,7 +8614,6 @@ function renderShell() {
         ` : isDisenadorOnly() ? `
           <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte ${corteBadgeHtml()}</button>
-          <button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">🔴</span> Producción neón</button>
         ` : `
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
