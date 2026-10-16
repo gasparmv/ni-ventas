@@ -12702,6 +12702,24 @@ const MINISUPER_LIVE_DAYS = 30;         // "chat vivo" = inbound en los últimos
 // reporte) y lo revela a la bandeja de Abril ('cursos'). Kind propio 'minisupernova'. Solo mueve
 // 'oculto'→'cursos' (candado WHERE inbox='oculto'), así no pisa un chat movido a mano ni uno vivo
 // que dejamos sin ocultar. Se llama en el webhook inbound.
+// Aviso del sitio de pedidos del corte (broadcast, 16-oct): quien CONTESTA ese aviso es cliente del corte → su chat
+// pasa a la bandeja 'corte' (la atiende Gaspar) con la etiqueta "Servicio de corte". Los que no contestan quedan
+// donde estaban (74 de los 145 son alumnos con chat activo con Abril en 'cursos': moverlos a todos le escondía
+// conversaciones de venta). Solo desde 'cursos' / 'general' / 'oculto' (nunca saca de 'privado') y dentro de los 10
+// días del envío. kv corte_web_bc_kind = 'bc_<id>' del broadcast (vacío = apagado).
+async function corteWebOnInbound(env, phone) {
+  if (!phone) return;
+  const kind = await kvGet(env, 'corte_web_bc_kind', '');
+  if (!kind) return;
+  try {
+    const got = await env.DB.prepare("SELECT sent_at FROM wa_autoreply_log WHERE phone = ? AND kind = ? AND status = 'sent' LIMIT 1").bind(phone, kind).first();
+    if (!got || !got.sent_at || Date.now() - Date.parse(got.sent_at) > 10 * 86400000) return;
+    const nowIso = new Date().toISOString();
+    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'corte', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'corte', updated_at = excluded.updated_at WHERE IFNULL(wa_chats_summary.inbox, 'general') IN ('cursos', 'general', 'oculto')").bind(phone, nowIso).run();
+    const lid = await ensureLabelId(env, 'Servicio de corte', '#14b8a6');
+    if (lid) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, lid, nowIso).run();
+  } catch (_) {}
+}
 async function miniSupernovaOnInbound(env, phone) {
   if (!phone) return;
   try {
@@ -18655,6 +18673,8 @@ const handler = {
                   // WHERE inbox='oculto' hace que el que corre 2do sea no-op.
                   try { await miniSupernovaOnInbound(env, phone); } catch (_) {}
                   try { await seminarioOnInbound(env, phone); } catch (_) {}
+                  // Respuesta al aviso del sitio del corte → bandeja 'corte' (después de MiniSupernova: gana corte).
+                  try { if (msgType !== 'reaction') await corteWebOnInbound(env, phone); } catch (_) {}
                   try { await lanzamientoLandingOnInbound(env, phone, msgBody); } catch (_) {}
                   // Reparto de leads de carteles a Facundo APENAS entra el lead (pedido Gaspar 3-sep):
                   // funciona igual que para Joaco, con su cuota/hash. Corre en CADA inbound EN VIVO (antes
