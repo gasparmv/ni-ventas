@@ -4569,3 +4569,18 @@ select.lb-sel.sf-sel { max-width: 200px; }
 .prod-visor{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;padding:16px;cursor:zoom-out}
 .prod-visor img{max-width:100%;max-height:100%;border-radius:8px;object-fit:contain}
 .prod-visor button{position:absolute;top:12px;right:14px;width:36px;height:36px;border-radius:50%;border:none;background:rgba(255,255,255,.15);color:#fff;font-size:16px;cursor:pointer}
+
+/* Tabla de Pedidos: más compacta para que entre con la columna Productor (16-oct). Si igual no entra (pantalla
+   chica), se desplaza de costado dentro de la tarjeta en vez de cortarse. */
+#table-pedidos { overflow-x: auto; }
+table.t.t-pedidos th, table.t.t-pedidos td { padding: 10px 8px; }
+table.t.t-pedidos th:first-child, table.t.t-pedidos td:first-child { padding-left: 14px; }
+table.t.t-pedidos th:last-child, table.t.t-pedidos td:last-child { padding-right: 14px; }
+table.t.t-pedidos td.cliente { max-width: 165px; }
+table.t.t-pedidos td.td-corta { max-width: 105px; }
+/* Desplegables de Pago y Estado más angostos (el estilo inline les pone padding 8px y letter-spacing) */
+table.t.t-pedidos td select { padding-left: 6px !important; padding-right: 4px !important; letter-spacing: 0 !important; }
+table.t.t-pedidos td.td-ad { max-width: 120px; }
+table.t.t-pedidos td.td-prod { min-width: 112px; }
+table.t.t-pedidos .prod-sel { max-width: 118px; }
+table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }

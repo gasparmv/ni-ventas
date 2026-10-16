@@ -9680,7 +9680,7 @@ function renderTablePedidos() {
   ];
   const trunc = (s, n) => { s = String(s||'').replace(/\s+/g,' ').trim(); return s ? (escapeHtml(s.slice(0,n)) + (s.length>n?'…':'')) : '—'; };
   wrap.innerHTML = `
-    <table class="t">
+    <table class="t t-pedidos">
       <thead><tr>${headers.map(([c,l]) => `<th data-sort="${c}" class="${pedidoSort.col===c?'sorted':''}">${l} <span class="sort">${pedidoSort.col===c?(pedidoSort.dir>0?'▲':'▼'):''}</span></th>`).join('')}</tr></thead>
       <tbody>
         ${filtered.length === 0 ? `<tr class="empty-row"><td colspan="${headers.length}">No hay pedidos con esos filtros</td></tr>` :
@@ -9691,12 +9691,12 @@ function renderTablePedidos() {
               <td>${baseSwatch(p.base)}</td>
               <td class="num">${fmtMoney(p.precio)}</td>
               <td>${dimerPillHtml(p.dimmer)}</td>
-              <td title="${escapeHtml(p.envio||'')}"><span class="muted" style="font-size:12px">${trunc(p.envio,16)}</span></td>
-              <td title="${escapeHtml(p.aclaracion||'')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion,16)}</span></td>
+              <td class="td-corta" title="${escapeHtml(p.envio||'')}"><span class="muted" style="font-size:12px">${trunc(p.envio,16)}</span></td>
+              <td class="td-corta" title="${escapeHtml(p.aclaracion||'')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion,16)}</span></td>
               <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pago',p.estadoPago,PAGO_OPTS_TABLE)}${pagoCajaMini(p)}</td>
               <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pedido',p.estadoPedido,PED_OPTS_TABLE)}</td>
-              <td><span class="muted" style="font-size:12px">${escapeHtml(p.canalAd||'—')}</span></td>
-              ${_pedAdmin ? `<td>${loaderCell(p)}</td><td onclick="event.stopPropagation()" style="min-width:130px">${prodCeldaPedido(p)}</td>` : ''}
+              <td class="td-ad"><span class="muted" style="font-size:12px">${escapeHtml(p.canalAd||'—')}</span></td>
+              ${_pedAdmin ? `<td>${loaderCell(p)}</td><td class="td-prod" onclick="event.stopPropagation()">${prodCeldaPedido(p)}</td>` : ''}
             </tr>
           `).join('')}
       </tbody>
