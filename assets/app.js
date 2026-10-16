@@ -11081,7 +11081,7 @@ function renderPedidoModal() {
             <button type="button" data-pm-sf="0" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(!m.clienteSF)}">Cliente final</button>
             <button type="button" data-pm-sf="1" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(!!m.clienteSF)}">Sin Frontera</button>
           </div>
-          ${m.clienteSF ? `<div style="font-size:11.5px;color:var(--fg-subtle);margin-top:4px">Lo van a ver en su usuario ("Mis pedidos"), con precio, pagos y estado.</div>` : ''}
+          ${m.clienteSF ? `<div style="font-size:11.5px;color:var(--fg-subtle);margin-top:4px">Lo van a ver en su usuario ("Mis pedidos") con precio y estado. Va en cuenta corriente: sin seña ni comprobante.</div>` : ''}
         </div>` : ''}
         <div style="display:flex;justify-content:space-between;align-items:center;padding-top:var(--s-2);border-top:1px solid var(--border)">
           <div style="font-size:13px;color:var(--fg-subtle)">Total: <b style="color:var(--fg)" id="pm-total">${fmtMoney(total)}</b></div>
