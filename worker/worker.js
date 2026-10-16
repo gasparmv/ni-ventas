@@ -12757,12 +12757,11 @@ const MINISUPER_LIVE_DAYS = 30;         // "chat vivo" = inbound en los últimos
 // 'oculto'→'cursos' (candado WHERE inbox='oculto'), así no pisa un chat movido a mano ni uno vivo
 // que dejamos sin ocultar. Se llama en el webhook inbound.
 // Aviso del sitio de pedidos del corte (broadcast, 16-oct): quien CONTESTA ese aviso es cliente del corte → su chat
-// pasa a la bandeja 'corte' (la atiende Gaspar) con la etiqueta "Servicio de corte". Los que no contestan quedan
-// donde estaban (74 de los 145 son alumnos con chat activo con Abril en 'cursos': moverlos a todos le escondía
-// conversaciones de venta). Antes del envío los destinatarios quedan en 'oculto' (Gaspar: "dejalos en oculto hasta
-// que respondan así no ensucian la bandeja"), salvo los chats activos con Abril en 'cursos' y el 'privado' de Gaspar.
-// Al responder: de 'oculto' / 'general' → 'corte' (nunca saca de 'cursos' ni de 'privado'); la etiqueta va a todos.
-// Dentro de los 10 días del envío. kv corte_web_bc_kind = 'bc_<id>' del broadcast (vacío = apagado).
+// vuelve a aparecer con la etiqueta "Servicio de corte". Antes del envío TODOS los destinatarios quedan en 'oculto'
+// (Gaspar: "dejalos en oculto hasta que respondan así no ensucian la bandeja") y la bandeja que tenían se guarda en
+// corte_web_prev. Al responder: si estaban en 'cursos' (alumnos de Abril) o en el 'privado' de Gaspar vuelven ahí;
+// el resto va a 'corte'. Corre ANTES que el hook de MiniSupernova (que sacaba de oculto a 'cursos' a cualquier
+// alumno). Dentro de los 10 días del envío. kv corte_web_bc_kind = 'bc_<id>' del broadcast (vacío = apagado).
 async function corteWebOnInbound(env, phone) {
   if (!phone) return;
   const kind = await kvGet(env, 'corte_web_bc_kind', '');
@@ -12771,7 +12770,10 @@ async function corteWebOnInbound(env, phone) {
     const got = await env.DB.prepare("SELECT sent_at FROM wa_autoreply_log WHERE phone = ? AND kind = ? AND status = 'sent' LIMIT 1").bind(phone, kind).first();
     if (!got || !got.sent_at || Date.now() - Date.parse(got.sent_at) > 10 * 86400000) return;
     const nowIso = new Date().toISOString();
-    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'corte', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'corte', updated_at = excluded.updated_at WHERE IFNULL(wa_chats_summary.inbox, 'general') IN ('general', 'oculto')").bind(phone, nowIso).run();
+    let prev = null;
+    try { prev = await env.DB.prepare('SELECT prev_inbox FROM corte_web_prev WHERE phone = ?').bind(phone).first(); } catch (_) {}
+    const destino = (prev && (prev.prev_inbox === 'cursos' || prev.prev_inbox === 'privado')) ? prev.prev_inbox : 'corte';
+    await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, ?, ?) ON CONFLICT(phone) DO UPDATE SET inbox = excluded.inbox, updated_at = excluded.updated_at WHERE IFNULL(wa_chats_summary.inbox, 'general') IN ('general', 'oculto')").bind(phone, destino, nowIso).run();
     const lid = await ensureLabelId(env, 'Servicio de corte', '#14b8a6');
     if (lid) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, lid, nowIso).run();
   } catch (_) {}
@@ -18935,10 +18937,10 @@ const handler = {
                   // seminario ya pasó, 29/08), cuando responde gana el reveal a 'cursos' (Abril,
                   // campaña activa) y NO el de seminario a 'privado' (que Abril no ve). El candado
                   // WHERE inbox='oculto' hace que el que corre 2do sea no-op.
+                  // Respuesta al aviso del sitio del corte → vuelve a su bandeja o a 'corte' (ANTES que MiniSupernova).
+                  try { if (msgType !== 'reaction') await corteWebOnInbound(env, phone); } catch (_) {}
                   try { await miniSupernovaOnInbound(env, phone); } catch (_) {}
                   try { await seminarioOnInbound(env, phone); } catch (_) {}
-                  // Respuesta al aviso del sitio del corte → bandeja 'corte' (después de MiniSupernova: gana corte).
-                  try { if (msgType !== 'reaction') await corteWebOnInbound(env, phone); } catch (_) {}
                   try { await lanzamientoLandingOnInbound(env, phone, msgBody); } catch (_) {}
                   // Reparto de leads de carteles a Facundo APENAS entra el lead (pedido Gaspar 3-sep):
                   // funciona igual que para Joaco, con su cuota/hash. Corre en CADA inbound EN VIVO (antes
