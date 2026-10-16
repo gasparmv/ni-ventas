@@ -23219,11 +23219,30 @@ function prodDrawerSection(p) {
         <div>Mano de obra: <b>${p.moMonto != null ? fmtMoney(p.moMonto) : '—'}</b>${p.moMonto == null ? ' <span class="muted" style="font-size:11px">(faltan tramos o medidas)</span>' : ''}</div>
         ${p.productorId ? `<div>${p.prodPagadoAt ? `<span style="color:#2ECC71">Producción pagada el ${prodFechaCorta(p.prodPagadoAt)}</span> <button class="btn btn-ghost" data-ped-prod-despagar="${p.idx}" style="padding:3px 9px;font-size:12px">Deshacer</button>` : `<span style="color:#FFB020">Producción sin pagar</span> <button class="btn btn-cyan" data-ped-prod-pagar-d="${p.idx}" style="padding:3px 10px;font-size:12px">Marcar pagado</button>`}</div>` : ''}`
       : `<div>Productor: <b>${escapeHtml(p.productorNombre || '—')}</b></div>`}
-      <div>Estado: <b style="color:${PROD_ESTADO_COLOR[est] || 'var(--fg)'}">${escapeHtml(PROD_ESTADO_LBL[est] || (p.productorId ? 'Asignado' : 'Sin asignar'))}</b>${p.prodTerminadoAt && est === 'terminado' ? ` <span class="muted" style="font-size:12px">· ${prodFechaHora(p.prodTerminadoAt)}</span>` : ''}</div>
+      ${adm && p.productorId && !p.prodPagadoAt
+        // Gaspar también puede corregir el estado (ej. carteles ya entregados que el productor no marcó, o sin foto).
+        ? `<div><label style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em">Estado de producción</label><select data-ped-prod-estado="${p.idx}" style="width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px;color:var(--fg)">${['pendiente', 'en_armado', 'terminado'].map(k => `<option value="${k}" ${(est || 'pendiente') === k ? 'selected' : ''}>${PROD_ESTADO_LBL[k]}</option>`).join('')}</select>${p.prodTerminadoAt && est === 'terminado' ? `<div class="muted" style="font-size:12px;margin-top:3px">Terminado el ${prodFechaHora(p.prodTerminadoAt)}</div>` : ''}</div>`
+        : `<div>Estado: <b style="color:${PROD_ESTADO_COLOR[est] || 'var(--fg)'}">${escapeHtml(PROD_ESTADO_LBL[est] || (p.productorId ? 'Asignado' : 'Sin asignar'))}</b>${p.prodTerminadoAt && est === 'terminado' ? ` <span class="muted" style="font-size:12px">· ${prodFechaHora(p.prodTerminadoAt)}</span>` : ''}</div>`}
       ${fotos.length ? `<div><div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Fotos del cartel terminado</div><div style="display:flex;gap:6px;flex-wrap:wrap">${fotos.map(k => `<img src="${escapeHtml(mediaUrl(k))}" data-ped-prod-zoom="${escapeHtml(mediaUrl(k))}" style="width:74px;height:74px;object-fit:cover;border-radius:8px;cursor:zoom-in">`).join('')}</div></div>` : ''}
     </div></div>`;
 }
 function bindProdDrawer(p) {
+  const se = document.querySelector('[data-ped-prod-estado]');
+  if (se) se.onchange = async () => {
+    const est = se.value;
+    let forzar = false;
+    if (est === 'terminado' && !(p.prodFotos || []).length) {
+      if (!(await showConfirm('Este cartel no tiene la foto del cartel terminado. ¿Marcarlo terminado igual?', { title: 'Sin foto', confirmLabel: 'Marcar igual', cancelLabel: 'Cancelar', variant: 'warn' }))) { openDrawerPedido(p.idx); return; }
+      forzar = true;
+    }
+    try {
+      const j = await prodFetch('/admin/prod/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pedido_id: p.idx, estado: est, forzar }) });
+      if (j.carteles) prodAplicarAPedidos(j.carteles);
+      toast('Estado de producción: ' + PROD_ESTADO_LBL[est]);
+    } catch (e) { toast(e.message); }
+    if (STATE.view === 'pedidos') renderTablePedidos();
+    openDrawerPedido(p.idx);
+  };
   const s = document.querySelector('[data-ped-prod-asignar]');
   if (s) s.onchange = async () => { await prodAsignarPedido(p.idx, s.value); openDrawerPedido(p.idx); };
   const pg = document.querySelector('[data-ped-prod-pagar-d]');
