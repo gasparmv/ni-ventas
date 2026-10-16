@@ -2785,13 +2785,15 @@ function isDisenadorOnly() {
 function setView(v) {
   // Diseñador confinado a Cotización (+ puede ir a Corte); Abril (cursos) al Chat WA; produccion (Aníbal/Neyen) a Corte.
   if (isCursosOnly()) v = 'chat';
-  else if (isProduccionOnly()) v = (v === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : 'corte';
-  else if (isLogisticaOnly()) v = 'logistica';
+  else if (isProduccionOnly()) v = (v === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : (v === 'neon' ? 'neon' : 'corte');
+  else if (isLogisticaOnly()) v = v === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) v = v === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
-  else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
+  else if (isDisenadorOnly() && v !== 'corte' && v !== 'neon') v = 'cotizacion';
   if (v === 'logistica' && !isLogisticaOnly() && !isAdmin()) v = 'dashboard';
   if (/^sf-/.test(v) && !isSinFronteraOnly() && !isAdmin()) v = 'dashboard';
+  if (v === 'neon' && !nkbPuedeVer()) v = 'dashboard';
   if (STATE.sfAbierto && v !== 'sf-produccion') sfkCerrar();
+  if (STATE.nkbAbierto && v !== 'neon') nkbCerrar();
   const entraACorte = v === 'corte' && STATE.view !== 'corte';
   STATE.view = v;
   STATE.selected = null;
@@ -2811,13 +2813,15 @@ document.addEventListener('click', (ev) => {
 window.addEventListener('hashchange', () => {
   let h = location.hash.replace('#','') || 'dashboard';
   if (isCursosOnly()) h = 'chat';
-  else if (isProduccionOnly()) h = (h === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : 'corte';
-  else if (isLogisticaOnly()) h = 'logistica';
+  else if (isProduccionOnly()) h = (h === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : (h === 'neon' ? 'neon' : 'corte');
+  else if (isLogisticaOnly()) h = h === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) h = h === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
-  else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
+  else if (isDisenadorOnly() && h !== 'corte' && h !== 'neon') h = 'cotizacion';
   if (h === 'logistica' && !isLogisticaOnly() && !isAdmin()) h = 'dashboard';
   if (/^sf-/.test(h) && !isSinFronteraOnly() && !isAdmin()) h = 'dashboard';
+  if (h === 'neon' && !nkbPuedeVer()) h = 'dashboard';
   if (STATE.sfAbierto && h !== 'sf-produccion') sfkCerrar();
+  if (STATE.nkbAbierto && h !== 'neon') nkbCerrar();
   if (h !== STATE.view) { STATE.view = h; render(); if (h === 'corte' && STATE.cortePedidos !== undefined) corteCargar(true); }
 });
 
@@ -3104,10 +3108,10 @@ function render() {
   if (isCursosOnly() && !['chat'].includes(STATE.view)) {
     STATE.view = 'chat';
     if (location.hash !== '#chat') location.hash = 'chat';
-  } else if (isProduccionOnly() && !['corte'].concat(isAnibalUser(STATE.user) ? ['mis-carteles'] : []).includes(STATE.view)) {
+  } else if (isProduccionOnly() && !['corte', 'neon'].concat(isAnibalUser(STATE.user) ? ['mis-carteles'] : []).includes(STATE.view)) {
     STATE.view = 'corte';
     if (location.hash !== '#corte') location.hash = 'corte';
-  } else if (isLogisticaOnly() && STATE.view !== 'logistica') {
+  } else if (isLogisticaOnly() && STATE.view !== 'logistica' && STATE.view !== 'neon') {
     STATE.view = 'logistica';
     if (location.hash !== '#logistica') location.hash = 'logistica';
   } else if (isSinFronteraOnly() && !['sf-produccion', 'sf-pedidos'].includes(STATE.view)) {
@@ -3119,7 +3123,10 @@ function render() {
   } else if (STATE.view === 'logistica' && !isLogisticaOnly() && !isAdmin()) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
-  } else if (isDisenadorOnly() && !['cotizacion', 'corte'].includes(STATE.view)) {
+  } else if (STATE.view === 'neon' && !nkbPuedeVer()) {
+    STATE.view = 'dashboard';
+    if (location.hash !== '#dashboard') location.hash = 'dashboard';
+  } else if (isDisenadorOnly() && !['cotizacion', 'corte', 'neon'].includes(STATE.view)) {
     STATE.view = 'cotizacion';
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
@@ -3131,7 +3138,7 @@ function render() {
   // Nadia (2da vendedora): set reducido por ahora. Views permitidas: dashboard (solo
   // su panel "Tu sueldo"), pedidos, presupuestos, cotizacion, chat. Si cae en otra
   // (seguimientos/actividad/etc. por hash directo), al dashboard.
-  if (isSecundario(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas','rendimiento'].includes(STATE.view)) {
+  if (isSecundario(STATE.user) && !['dashboard','pedidos','presupuestos','cotizacion','chat','corporeas','rendimiento','neon'].includes(STATE.view)) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
@@ -3162,6 +3169,7 @@ function render() {
   else if (STATE.view === 'corte') document.getElementById('main').innerHTML = renderCorte(); // corte carga su propia data (no depende del Sheet ni de /admin/pedidos)
   else if (STATE.view === 'logistica') document.getElementById('main').innerHTML = renderLogistica(); // idem: su propia data
   else if (/^sf-/.test(STATE.view)) document.getElementById('main').innerHTML = renderSinFrontera(); // Sin Frontera: idem
+  else if (STATE.view === 'neon') document.getElementById('main').innerHTML = renderNeonTablero(); // tablero de neón: idem
   else if (STATE.view === 'mis-carteles' && isAnibalUser(STATE.user)) document.getElementById('main').innerHTML = renderProdApp(true); // Aníbal también arma carteles: sus asignados
   else if (STATE.error)   document.getElementById('main').innerHTML = renderError();
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
@@ -3188,7 +3196,7 @@ function render() {
   // Toggle main--chat class for full-height layout
   const mainEl = document.getElementById('main');
   if (mainEl) mainEl.classList.toggle('main--chat', STATE.view === 'chat');
-  if (mainEl) mainEl.classList.toggle('main--logi', STATE.view === 'logistica' || /^sf-/.test(STATE.view)); // logística: tabla a todo el ancho
+  if (mainEl) mainEl.classList.toggle('main--logi', STATE.view === 'logistica' || /^sf-/.test(STATE.view) || STATE.view === 'neon'); // logística: tabla a todo el ancho
   // Lock entire app shell height when chat is active
   const appEl = mainEl && mainEl.closest('.app');
   if (appEl) {
@@ -3204,6 +3212,7 @@ function render() {
   if (STATE.view === 'corte')        bindCorte();
   if (STATE.view === 'logistica')    bindLogistica();
   if (/^sf-/.test(STATE.view))      bindSinFrontera();
+  if (STATE.view === 'neon')         bindNeonTablero();
   if (STATE.view === 'mis-carteles') bindProdApp();
   if (STATE.view === 'seguimientos') bindSeguimientos();
   if (STATE.view === 'dashboard') {
@@ -6952,6 +6961,557 @@ function sfkEntregadosModal(q0) {
   bg.querySelector('[data-q]').addEventListener('input', pinta);
   bg.addEventListener('click', e => { if (e.target === bg) { fin(); return; } const r = e.target.closest('[data-sfk-card]'); if (r) { fin(); sfkAbrir(+r.getAttribute('data-sfk-card')); } });
 }
+// ===================== Tablero de producción de NEÓN (Gaspar 16-oct-2026) =====================
+// 7 columnas: Confirmado → En diseño y corte → Montando neón → Terminado → Esperando pago → Para enviar → Enviado. La etapa la
+// calcula el worker (neonEtapas) con lo que cada uno ya marca: Emma toma el diseño y hace la matriz, Aníbal corta, Neyen separa la
+// base, Gaspar deriva al productor, el productor arma y sube la foto (su hoja), el vendedor registra el 2do pago y Neyen o logística
+// marcan la salida. Cada tarjeta tiene UN botón: la tarea que le toca a quien la mira. Nunca plata. Mismas piezas visuales que el
+// tablero de corpóreos (clases sfk-* / sfd-*). Ver memoria kanban-neon-produccion.
+const NKB_KEYS = ['confirmado', 'diseno', 'montando', 'terminado', 'pago', 'enviar', 'enviado'];
+const NKB_COLOR = { confirmado: '#94a3b8', diseno: '#c4a0ff', montando: '#f59e0b', terminado: '#22c55e', pago: '#fb7185', enviar: '#38bdf8', enviado: '#64748b' };
+const NKB_CORTO = { confirmado: 'Confirmado', diseno: 'Diseño y corte', montando: 'Montando', terminado: 'Terminado', pago: 'Esperando pago', enviar: 'Para enviar', enviado: 'Enviado' };
+const NKB_LARGO = { confirmado: 'Confirmado', diseno: 'En diseño y corte', montando: 'Montando neón', terminado: 'Terminado', pago: 'Esperando pago', enviar: 'Para enviar', enviado: 'Enviado' };
+const NKB_ROJO_DIAS = { confirmado: 2, diseno: 7, montando: 10, pago: 5, enviar: 3 };   // demorado después de N días en la etapa
+const NKB_DESPACHO = { envio: 'Salió por envío', retira: 'Retiró en el taller', instalacion: 'Instalado', sinfrontera: 'Entregado a Sin Frontera' };
+const NKB_TAB_KEY = 'niventas.nkbEtapaCel';
+const NKB_DIAS_ENV = 14;
+function nkbPuedeVer() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isAdmin() || isJoaquinUser(STATE.user) || isSecundario(STATE.user) || isDisenadorUser(STATE.user) || isProduccionUser(STATE.user) || isLogisticaUser(STATE.user)); }
+function nkbUrl(qs) { return CONFIG.trackerUrl + '/admin/neon/archivo?' + qs + '&token=' + encodeURIComponent(STATE.token || ''); }
+function nkbRol() { return (STATE.nkb && STATE.nkb.rol) || ''; }
+function nkbCols() { return nkbRol() === 'logistica' ? ['enviar', 'enviado'] : NKB_KEYS; }
+function nkbCartel(id) { return ((STATE.nkb || {}).carteles || []).find(c => c.id === id) || null; }
+function nkbGrupo(c) { return ((STATE.nkb || {}).carteles || []).filter(x => x.grupo === c.grupo); }
+function nkbTit(c) { return '#' + c.numero + ' ' + (c.cartel || ''); }
+function nkbNom(s) { const k = _userKey(s); return (k === 'emma' || k === 'disenador' || k === 'emmanuel') ? 'Emma' : k === 'gaspar' ? 'Gaspar' : String(s || ''); }
+async function nkbPost(path, body) {
+  let r = null, j = {};
+  try { r = await fetch(CONFIG.trackerUrl + path, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); try { j = await r.json(); } catch (_) {} } catch (_) {}
+  j = j || {};
+  return { ok: !!(r && r.ok && j.ok !== false && !j.error), status: r ? r.status : 0, j };
+}
+function nkbErr(r) { return String((r.j && (r.j.motivo || r.j.error)) || (r.status ? 'error ' + r.status : 'sin conexión')).replace(/[.\s]+$/, ''); }
+
+// ---------- Datos ----------
+async function nkbCargar(opts) {
+  const silent = !!(opts && opts.silent);
+  if (STATE._nkbCargando) return;
+  STATE._nkbCargando = true;
+  const user = STATE.user;
+  try {
+    const j = await sfFetch('/admin/neon/tablero');
+    if (STATE.user !== user) return;
+    STATE.nkb = { carteles: j.carteles || [], otros: j.otros || null, productores: j.productores || [], rol: j.rol || '', yo: j.yo || '', despacha: !!j.despacha, at: Date.now() };
+  } catch (e) {
+    if (STATE.user !== user) return;
+    if (!silent || !STATE.nkb || STATE.nkb.error) STATE.nkb = { error: e.message || 'No se pudo cargar' };
+  } finally { STATE._nkbCargando = false; }
+  if (STATE.view !== 'neon') return;
+  nkbPintar(!silent);
+  nkbPanelRefrescar();
+}
+function nkbPoll() {
+  if (STATE._nkbPoll) return;
+  STATE._nkbPoll = setInterval(() => {
+    if (STATE.view !== 'neon') { clearInterval(STATE._nkbPoll); STATE._nkbPoll = null; return; }
+    if (document.hidden || STATE._nkbGuardando || document.querySelector('.modal-bg.open')) return;
+    nkbCargar({ silent: true });
+  }, 150000);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && STATE.view === 'neon' && STATE.nkb && !STATE.nkb.error && Date.now() - (STATE.nkb.at || 0) > 60000) nkbCargar({ silent: true }); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && STATE.nkbAbierto && !document.querySelector('.modal-bg.open')) nkbCerrar(); });
+
+// ---------- Qué toca en cada tarjeta ----------
+// La tarea de quien mira (UN botón). null = no le toca nada en esa tarjeta.
+function nkbAccion(c) {
+  const r = nkbRol(), yo = (STATE.nkb && STATE.nkb.yo) || '', adm = r === 'admin', ce = c.corte_estado;
+  switch (c.etapa) {
+    case 'confirmado':
+      if (!c.diseno) return (adm || c.mio) ? { t: 'Subir la foto del diseño', a: 'foto', to: 'confirmado' } : null;
+      return (adm || r === 'disenador') && c.corte_id ? { t: 'Pasar a Diseño', a: 'tomar', to: 'diseno' } : null;
+    case 'diseno':
+      if (adm) return { t: 'Derivar a productor', a: 'derivar', to: 'montando' };
+      if (r === 'disenador' && ce === 'pedido') return { t: 'Matriz lista', a: 'matriz', to: 'diseno' };
+      if (yo === 'anibal' && ce === 'matriz_lista') return { t: 'Marcar cortado', a: 'cortado', to: 'diseno' };
+      if (yo === 'neyen' && ce === 'cortado') return { t: 'Separar la base', a: 'separado', to: 'diseno' };
+      return null;
+    case 'montando':
+      return adm ? (c.prod_estado === 'en_armado' ? { t: 'Marcar terminado', a: 'terminar', to: 'terminado' } : { t: 'Marcar armando', a: 'armando', to: 'montando' }) : null;
+    case 'pago': return (adm || c.mio) ? { t: 'Registrar 2do pago', a: 'pago', to: 'enviar' } : null;
+    case 'enviar': return STATE.nkb && STATE.nkb.despacha ? { t: 'Marcar enviado', a: 'despacho', to: 'enviado' } : null;
+    default: return null;
+  }
+}
+// Botones de la ficha además del principal.
+function nkbSecundarios(c) {
+  const r = nkbRol(), yo = (STATE.nkb && STATE.nkb.yo) || '', adm = r === 'admin', ce = c.corte_estado, prim = (nkbAccion(c) || {}).a, out = [];
+  const add = (a, t) => { if (a !== prim && !out.some(x => x.a === a)) out.push({ a, t }); };
+  if ((adm || r === 'disenador') && c.etapa === 'diseno' && ce === 'pedido' && c.corte_id) { add('matriz', 'Matriz lista'); if (c.f.tomado) add('soltar', 'Volver a Confirmado'); }
+  if (adm && c.etapa === 'diseno' && ce === 'matriz_lista') add('cortado', 'Marcar cortado');
+  if (adm && c.etapa === 'diseno' && ce === 'cortado') add('separado', 'Separar la base');
+  if (adm && c.etapa === 'montando') { add('derivar', 'Cambiar productor'); add('terminar', 'Marcar terminado'); }
+  if ((adm || yo === 'neyen') && ['terminado', 'pago', 'enviar'].includes(c.etapa) && c.prod_estado === 'terminado') add(c.f.recibido ? 'no_recibido' : 'recibido', c.f.recibido ? 'No llegó todavía' : 'Llegó al taller');
+  if (STATE.nkb && STATE.nkb.despacha && c.etapa === 'enviado' && c.despacho) add('deshacer_envio', 'Deshacer el envío');
+  if (adm && !['enviar', 'enviado'].includes(c.etapa)) add('despacho_forzar', 'Marcar enviado');
+  if ((adm || c.mio) && (STATE.pedidos || []).some(x => x.idx === c.id)) add('foto', 'Abrir el pedido');
+  if (adm) add('ubicar', 'Ubicar a mano');
+  return out;
+}
+function nkbUrg(c) {
+  const lim = NKB_ROJO_DIAS[c.etapa], dias = c.desde ? sfkDiasCal(c.desde) : NaN;
+  const demorado = !!lim && !isNaN(dias) && dias > lim;
+  const ambar = !!lim && !isNaN(dias) && !demorado && dias >= Math.max(1, lim - 1);
+  return { demorado, borde: demorado ? 'u-roja' : ambar ? 'u-ambar' : '' };
+}
+// Cómo sale (adivinado del texto de envío; lo define al final el botón de Neyen). '' = no ve la dirección.
+function nkbEntrega(c) {
+  if (c.sf) return 'Sin Frontera';
+  if (c.envio == null) return '';
+  const e = String(c.envio || '').toUpperCase();
+  if (/RETIR|BUSCA|TALLER|LOCAL/.test(e)) return 'Retira';
+  if (/INSTAL/.test(e)) return 'Instalación';
+  if (e.replace(/[\s.,\-]/g, '').length >= 4) return 'Envío';
+  return 'Entrega sin definir';
+}
+function nkbChips(c) {
+  const ch = [], ce = c.corte_estado, pr = c.productor || '';
+  const P = (cls, t) => `<span class="logi-pill ${cls}">${escapeHtml(t)}</span>`;
+  if (c.etapa === 'confirmado') ch.push(c.diseno ? P('g', 'Para diseñar') : P('r', 'Falta la foto del diseño' + (c.vendedor ? ' · ' + c.vendedor : '')));
+  else if (c.etapa === 'diseno') ch.push(!c.corte_id ? P('g', 'Sin pieza de corte') : ce === 'pedido' ? P('a', 'Diseñando' + (c.f.tomado_por ? ' · ' + nkbNom(c.f.tomado_por) : '')) : ce === 'matriz_lista' ? P('a', 'Falta cortar') : ce === 'cortado' ? P('a', 'Cortado · falta separar') : P('v', 'Base lista · falta derivar'));
+  else if (c.etapa === 'montando') { ch.push(P(c.prod_estado === 'en_armado' ? 'v' : 'a', pr + (c.prod_estado === 'en_armado' ? ' · armando' : ' · sin empezar'))); if (c.corte_id && !['cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce)) ch.push(P('r', 'Falta la base')); }
+  else if (c.etapa === 'terminado' && c.grupo_n > c.grupo_term) { const f = c.grupo_n - c.grupo_term; ch.push(P('a', f === 1 ? 'Espera al otro cartel' : 'Espera a ' + f + ' carteles más')); }
+  if (['terminado', 'pago', 'enviar'].includes(c.etapa) && c.prod_estado === 'terminado') { if (c.f.recibido) ch.push(P('v', 'En el taller')); else if (pr) ch.push(P('a', 'Falta traer de ' + pr)); }
+  if (c.etapa === 'enviar') { const e = nkbEntrega(c); if (e && !c.sf) ch.push(P(e === 'Entrega sin definir' ? 'r' : 'g', e)); }
+  if (c.etapa === 'enviado' && c.despacho) ch.push(P('g', NKB_DESPACHO[c.despacho.modo] || 'Salió'));
+  if (c.sf) ch.push(P('g', 'Sin Frontera'));
+  if (c.cantidad > 1) ch.push(P('a', c.cantidad + ' unidades'));
+  if (c.grupo_n > 1 && c.etapa !== 'terminado') ch.push(P('g', 'Pedido de ' + c.grupo_n + ' carteles'));
+  if (nkbRol() === 'admin' && c.motivo) ch.push(P('g', c.motivo === 'piso' ? 'Ubicado a mano' : 'Estado puesto en Pedidos'));
+  return ch;
+}
+
+// ---------- Tablero ----------
+function nkbCardSig(c) { return JSON.stringify([c.etapa, c.desde, c.corte_estado, c.prod_estado, c.productor, c.fotos, c.diseno, c.f, c.despacho, c.grupo_term, c.motivo, c.piso || null]); }
+function nkbDeColumna(cs, id) {
+  const l = cs.filter(c => c.etapa === id);
+  if (id === 'enviado') return l.sort((a, b) => String(b.desde || '').localeCompare(String(a.desde || '')));
+  // Lo que más espera, arriba (y los carteles del mismo pedido juntos).
+  return l.sort((a, b) => String(a.desde || '9').localeCompare(String(b.desde || '9')) || String(a.grupo).localeCompare(String(b.grupo)) || (a.id - b.id));
+}
+function nkbThumbHtml(c) {
+  const srcs = [];
+  if (c.fotos) srcs.push(nkbUrl('p=' + c.id + '&k=f&i=0&w=300'));
+  if (c.diseno && nkbRol() !== 'logistica') srcs.push(nkbUrl('p=' + c.id + '&k=d&w=300'));
+  if (!srcs.length) return '';
+  return `<div class="sfk-thumb"><img src="${escapeHtml(srcs[0])}" alt="" loading="lazy" data-sfk-alt="${escapeHtml(srcs.slice(1).join(' '))}" onerror="sfkImgError(this)">${c.fotos ? `<span class="sfk-thumb-n">${c.fotos > 1 ? c.fotos + ' fotos' : 'terminado'}</span>` : ''}</div>`;
+}
+function nkbCardHtml(c) {
+  const u = nkbUrg(c), acc = nkbAccion(c), chips = nkbChips(c);
+  const desc = [c.colores, c.base, c.dimer ? 'Dimmer ' + c.dimer : ''].filter(Boolean).join(' · ');
+  const quien = nkbRol() !== 'comercial' && c.vendedor ? c.vendedor : '';
+  return `<article class="sfk-card ${u.borde}" data-nkb-card="${c.id}" tabindex="0" aria-label="#${escapeHtml(String(c.numero || ''))} ${escapeHtml(c.cartel || '')}, ${escapeHtml(NKB_LARGO[c.etapa] || '')}">`
+    + nkbThumbHtml(c)
+    + `<div class="sfk-body">`
+    + `<div class="sfk-top"><span class="sfk-num">#${escapeHtml(String(c.numero || ''))}</span><span class="sfk-etq" style="--c:${NKB_COLOR[c.etapa]}">${escapeHtml(NKB_CORTO[c.etapa] || '')}</span><span class="sfk-hace${u.demorado ? ' viejo' : ''}" title="${escapeHtml(c.desde ? 'En esta etapa desde ' + sfFechaHora(c.desde) : '')}">${escapeHtml(c.desde ? sfkHaceTxt(c.desde) : '')}</span></div>`
+    + `<div class="sfk-nom">${escapeHtml(c.cartel || 'Sin nombre')}</div>`
+    + (chips.length ? `<div class="sfk-chips">${chips.join('')}</div>` : '')
+    + (c.medida ? `<div class="sfk-med">${escapeHtml(c.medida)}</div>` : '')
+    + ((desc || quien) ? `<div class="sfk-tipo">${escapeHtml([desc, quien].filter(Boolean).join(' · '))}</div>` : '')
+    + `</div>`
+    + (acc ? `<button type="button" class="sfk-pasar" data-nkb-acc="${c.id}" data-a="${acc.a}" style="--c:${NKB_COLOR[acc.to] || NKB_COLOR[c.etapa]}">${escapeHtml(acc.t)}${SFK_CHEVRON}</button>` : '')
+    + `</article>`;
+}
+function nkbEnvRowHtml(c) {
+  const m = c.despacho ? (NKB_DESPACHO[c.despacho.modo] || 'Salió') : 'Entregado';
+  return `<button type="button" class="sfk-ent" data-nkb-card="${c.id}" title="${escapeHtml(m + (c.desde ? ' · ' + sfFechaHora(c.desde) : ''))}"><span class="sfk-num">#${escapeHtml(String(c.numero || ''))}</span><span class="n">${escapeHtml(c.cartel || 'Sin nombre')}</span><span class="f">${escapeHtml(c.desde ? sfFecha(c.desde) : '')}</span></button>`;
+}
+function nkbColHtml(id, cs, cel) {
+  const col = NKB_COLOR[id], lista = nkbDeColumna(cs, id), on = cel === id ? ' on-cel' : '';
+  const otros = ((STATE.nkb && STATE.nkb.otros) || {})[id] || 0;
+  const sub = otros ? `<div class="sfk-sub">+${otros} de otros vendedores</div>` : '';
+  if (id === 'enviado') {
+    const lim = Date.now() - NKB_DIAS_ENV * 86400000;
+    const rec = lista.filter(x => x.desde && new Date(x.desde).getTime() >= lim);
+    return `<section class="sfk-col sfk-col-ent${on}" data-nkb-col="enviado" style="--c:${col}">`
+      + `<header class="sfk-col-h" data-nkb-env-todos title="Ver todos los enviados"><i class="sfk-dot"></i><span class="t">Enviado</span><span class="n" data-nkb-n data-total="${rec.length}">${rec.length}</span></header>`
+      + `<div class="sfk-sub">últimos ${NKB_DIAS_ENV} días</div>${sub}`
+      + `<div class="sfk-col-list" data-nkb-list="enviado">${rec.slice(0, 10).map(nkbEnvRowHtml).join('')}<div class="sfk-vacio" data-txt="Nada enviado estos días"${rec.length ? ' hidden' : ''}>Nada enviado estos días</div>`
+      + (lista.length ? `<button type="button" class="btn btn-ghost lb-mini sfk-todos" data-nkb-env-todos>Ver todos (${lista.length})</button>` : '')
+      + `</div></section>`;
+  }
+  return `<section class="sfk-col${on}" data-nkb-col="${id}" style="--c:${col}">`
+    + `<header class="sfk-col-h"><i class="sfk-dot"></i><span class="t">${escapeHtml(NKB_LARGO[id])}</span><span class="n" data-nkb-n data-total="${lista.length}">${lista.length}</span></header>${sub}`
+    + `<div class="sfk-col-list" data-nkb-list="${id}">${lista.map(nkbCardHtml).join('')}<div class="sfk-vacio" data-txt="Nada en ${escapeHtml(NKB_CORTO[id].toLowerCase())}"${lista.length ? ' hidden' : ''}>Nada en ${escapeHtml(NKB_CORTO[id].toLowerCase())}</div></div>`
+    + `</section>`;
+}
+// Pestaña del celular: la última usada; si no, la primera etapa donde a quien mira le toca algo.
+function nkbEtapaCel(cs) {
+  let e = STATE.nkbEtapaCel;
+  if (e == null) { try { e = localStorage.getItem(NKB_TAB_KEY); } catch (_) { e = null; } }
+  const cols = nkbCols();
+  if (!e || !cols.includes(e)) { const mia = cs.find(c => nkbAccion(c) && cols.includes(c.etapa)); e = mia ? mia.etapa : (cols.find(k => cs.some(c => c.etapa === k)) || cols[0]); }
+  return e;
+}
+function nkbTabsHtml(cs, cel) { return `<div class="sfk-tabs" data-nkb-tabs>${nkbCols().map(id => { const n = cs.filter(c => c.etapa === id).length; return `<button type="button" class="sfk-tab${id === cel ? ' on' : ''}${n ? '' : ' cero'}" data-nkb-tab="${id}" style="--c:${NKB_COLOR[id]}">${escapeHtml(NKB_CORTO[id])} <b>${n}</b></button>`; }).join('')}</div>`; }
+function nkbBoardHtml(cs, cel) { const cols = nkbCols(); return `<div class="sfk-board nkb-board n${cols.length}" data-nkb-board>${cols.map(id => nkbColHtml(id, cs, cel)).join('')}</div>`; }
+function nkbBoardSig(cs, cel) { return JSON.stringify([cel, new Date().toDateString(), cs.map(c => [c.id, nkbCardSig(c)]), (STATE.nkb && STATE.nkb.otros) || null]); }
+function renderNeonTablero() {
+  const D = STATE.nkb;
+  if (!D) { setTimeout(() => nkbCargar(), 0); return `<div class="logi-wrap nkb-wrap" style="padding:24px;color:var(--fg-mute)">Cargando el tablero…</div>`; }
+  if (D.error) return `<div class="logi-wrap nkb-wrap" style="padding:24px"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(D.error)}</div><button class="btn" data-nkb-refresh>Reintentar</button></div>`;
+  const cs = D.carteles || [], cel = nkbEtapaCel(cs);
+  const nDem = cs.filter(c => nkbUrg(c).demorado).length, nMias = cs.filter(c => nkbAccion(c)).length;
+  const chip = (k, on, n, txt, tit) => `<button type="button" class="logi-chip${on ? ' on' : ''}${n ? '' : ' cero'}" data-nkb-${k} title="${escapeHtml(tit)}"${!n && !on ? ' disabled' : ''}>${txt}<b data-nkb-n${k}>${n}</b></button>`;
+  const hay = cs.length || (D.otros && Object.keys(D.otros).length);
+  return `<div class="logi-wrap sfk-wrap nkb-wrap">
+    <div class="logi-head"><h1>Producción · neón</h1></div>
+    <div class="logi-bar sfk-bar">
+      <span data-nkb-upd>${escapeHtml(sfHace(D.at))}</span>
+      ${D.rol === 'comercial' ? '<span>· Ves tus pedidos; del resto, cuántos hay</span>' : ''}
+      <span style="flex:1"></span>
+      <input id="nkb-q" class="logi-q sfk-q" type="search" autocomplete="off" spellcheck="false" placeholder="Buscar # o nombre" value="${escapeHtml(STATE.nkbQ || '')}" aria-label="Buscar por número o nombre">
+      ${chip('mias', STATE.nkbMias, nMias, 'Mis tareas', 'Las tarjetas donde te toca hacer algo')}
+      ${chip('dem', STATE.nkbDem, nDem, 'Demorados', 'Llevan más días de lo normal en su etapa')}
+      <button class="btn btn-ghost" data-nkb-refresh>Actualizar</button>
+    </div>
+    ${hay ? `<div data-nkb-zona data-sig="${escapeHtml(nkbBoardSig(cs, cel))}">${nkbTabsHtml(cs, cel)}${nkbBoardHtml(cs, cel)}</div><div class="logi-vacio-box sfk-nores" data-nkb-nores hidden></div>` : '<div class="logi-vacio-box">No hay carteles de neón en el tablero.</div>'}
+    <div class="logi-ayuda">Tocá una tarjeta para ver la ficha completa · El botón de abajo es tu tarea en ese cartel · Las tarjetas avanzan solas cuando cada uno marca lo suyo</div>
+  </div>`;
+}
+function nkbRedibujar() { const m = document.getElementById('main'); if (m && STATE.view === 'neon') { m.innerHTML = renderNeonTablero(); bindNeonTablero(); } }
+// Repinta SOLO pestañas y tablero (no el buscador) y conserva el scroll de cada columna; sin `forzar`, solo si algo cambió.
+function nkbPintar(forzar) {
+  const zona = document.querySelector('.nkb-wrap [data-nkb-zona]');
+  if (!zona || !STATE.nkb || STATE.nkb.error) { nkbRedibujar(); return; }
+  const cs = STATE.nkb.carteles || [], cel = nkbEtapaCel(cs), sig = nkbBoardSig(cs, cel);
+  if (forzar || zona.getAttribute('data-sig') !== sig) {
+    const scroll = {}, tb0 = zona.querySelector('[data-nkb-tabs]'), bd0 = zona.querySelector('[data-nkb-board]');
+    const tabsX = tb0 ? tb0.scrollLeft : 0, boardX = bd0 ? bd0.scrollLeft : 0;
+    zona.querySelectorAll('[data-nkb-list]').forEach(l => { scroll[l.getAttribute('data-nkb-list')] = l.scrollTop; });
+    zona.setAttribute('data-sig', sig);
+    zona.innerHTML = nkbTabsHtml(cs, cel) + nkbBoardHtml(cs, cel);
+    zona.querySelectorAll('[data-nkb-list]').forEach(l => { const s = scroll[l.getAttribute('data-nkb-list')]; if (s) l.scrollTop = s; });
+    const tb = zona.querySelector('[data-nkb-tabs]'), bd = zona.querySelector('[data-nkb-board]');
+    if (tb) tb.scrollLeft = tabsX;
+    if (bd) bd.scrollLeft = boardX;
+  }
+  const upd = document.querySelector('.nkb-wrap [data-nkb-upd]'); if (upd) upd.textContent = sfHace(STATE.nkb.at);
+  for (const [k, n] of [['mias', cs.filter(c => nkbAccion(c)).length], ['dem', cs.filter(c => nkbUrg(c).demorado).length]]) {
+    const b = document.querySelector(`.nkb-wrap [data-nkb-n${k}]`); if (!b) continue;
+    b.textContent = n; const ch = b.closest(`[data-nkb-${k}]`), on = k === 'mias' ? STATE.nkbMias : STATE.nkbDem;
+    ch.classList.toggle('cero', !n); ch.disabled = !n && !on;
+  }
+  nkbFiltrarDom();
+}
+// Búsqueda, "Mis tareas" y "Demorados" en el lugar (sin redibujar).
+function nkbFiltrarDom() {
+  const root = document.querySelector('.nkb-wrap');
+  if (!root || !STATE.nkb || STATE.nkb.error) return;
+  const cs = STATE.nkb.carteles || [];
+  const q = _userKey(String(STATE.nkbQ || '').trim()).replace(/^#/, ''), mias = !!STATE.nkbMias, dem = !!STATE.nkbDem, filtrando = !!(q || mias || dem);
+  const ver = new Set();
+  for (const c of cs) {
+    if (q && !(String(c.numero) === q) && !_userKey(['#' + c.numero, c.cartel, c.productor, c.vendedor || ''].join(' ')).includes(q)) continue;
+    if (mias && !nkbAccion(c)) continue;
+    if (dem && !nkbUrg(c).demorado) continue;
+    ver.add(c.id);
+  }
+  root.querySelectorAll('.sfk-col [data-nkb-card]').forEach(el => { el.hidden = filtrando && !ver.has(+el.getAttribute('data-nkb-card')); });
+  let tot = 0;
+  root.querySelectorAll('[data-nkb-col]').forEach(col => {
+    const n = col.querySelector('[data-nkb-n]'), total = +((n && n.getAttribute('data-total')) || 0);
+    const vis = col.querySelectorAll('[data-nkb-card]:not([hidden])').length; tot += vis;
+    if (n) n.textContent = filtrando ? vis + '/' + total : String(total);
+    const v = col.querySelector('.sfk-vacio');
+    if (v) { v.hidden = vis > 0; v.textContent = (filtrando && total) ? 'Nada acá con ese filtro' : (v.getAttribute('data-txt') || ''); }
+    col.classList.toggle('sin-res', filtrando && !vis);
+  });
+  const zona = root.querySelector('[data-nkb-zona]'); if (zona) zona.classList.toggle('buscando', filtrando);
+  const nr = root.querySelector('[data-nkb-nores]'); if (nr) { nr.hidden = !(filtrando && !tot); nr.textContent = 'No hay tarjetas con ese filtro.'; }
+}
+function bindNeonTablero() {
+  const root = document.querySelector('.nkb-wrap');
+  if (!root) return;
+  const q = root.querySelector('#nkb-q');
+  if (q) q.addEventListener('input', () => { STATE.nkbQ = q.value; nkbFiltrarDom(); });
+  root.addEventListener('click', e => {
+    const el = e.target;
+    if (el.closest('[data-nkb-refresh]')) { if (STATE.nkb && STATE.nkb.error) STATE.nkb = null; nkbRedibujar(); if (STATE.nkb) nkbCargar(); return; }
+    const mias = el.closest('[data-nkb-mias]'); if (mias) { STATE.nkbMias = !STATE.nkbMias; mias.classList.toggle('on', STATE.nkbMias); nkbFiltrarDom(); return; }
+    const dem = el.closest('[data-nkb-dem]'); if (dem) { STATE.nkbDem = !STATE.nkbDem; dem.classList.toggle('on', STATE.nkbDem); nkbFiltrarDom(); return; }
+    const tab = el.closest('[data-nkb-tab]');
+    if (tab) { STATE.nkbEtapaCel = tab.getAttribute('data-nkb-tab'); try { localStorage.setItem(NKB_TAB_KEY, STATE.nkbEtapaCel); } catch (_) {} nkbPintar(true); return; }
+    if (el.closest('[data-nkb-env-todos]')) { nkbEnviadosModal(); return; }
+    const acc = el.closest('[data-nkb-acc]'); if (acc) { nkbHacer(+acc.getAttribute('data-nkb-acc'), acc.getAttribute('data-a')); return; }
+    const card = el.closest('[data-nkb-card]'); if (card) { nkbAbrir(+card.getAttribute('data-nkb-card')); return; }
+  });
+  root.addEventListener('keydown', e => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches && e.target.matches('article[data-nkb-card]')) { e.preventDefault(); nkbAbrir(+e.target.getAttribute('data-nkb-card')); }
+  });
+  nkbFiltrarDom();
+  nkbPoll();
+}
+
+// ---------- Ficha (panel al costado) ----------
+function nkbFichaHtml(c) {
+  const idx = NKB_KEYS.indexOf(c.etapa), acc = nkbAccion(c), r = nkbRol(), adm = r === 'admin';
+  const fila = (l, v) => v ? `<div class="sf-dato"><span>${escapeHtml(l)}</span><b>${escapeHtml(String(v))}</b></div>` : '';
+  const chips = nkbChips(c);
+  const fotos = Array.from({ length: c.fotos || 0 }, (_, i) => `<button type="button" class="sf-foto" data-sf-ver="${escapeHtml(nkbUrl('p=' + c.id + '&k=f&i=' + i))}" title="Ver grande"><img src="${escapeHtml(nkbUrl('p=' + c.id + '&k=f&i=' + i + '&w=300'))}" alt="Terminado ${i + 1}" onerror="sfkImgError(this)"></button>`).join('');
+  const dis = (c.diseno && r !== 'logistica') ? `<button type="button" class="sfd-diseno" data-sf-ver="${escapeHtml(nkbUrl('p=' + c.id + '&k=d'))}" title="Ver grande"><img src="${escapeHtml(nkbUrl('p=' + c.id + '&k=d&w=900'))}" alt="Diseño" onerror="sfkImgError(this)"></button>` : '';
+  const media = (fotos ? `<div class="lb-tit" style="margin-top:0">Terminado</div><div class="sf-fotos">${fotos}</div>` : '') + (dis ? `<div class="lb-tit"${fotos ? '' : ' style="margin-top:0"'}>Diseño</div>${dis}` : '');
+  const corteTxt = { pedido: c.f.tomado ? 'Emma lo está diseñando' : 'Falta diseñar la matriz', matriz_lista: 'Matriz lista · falta cortar', cortado: 'Cortado · falta separar', embalado: 'Base lista (separada)' }[c.corte_estado] || (c.corte_id ? String(c.corte_estado || '') : 'Sin pieza de corte');
+  const prodTxt = c.productor ? c.productor + ' · ' + ({ pendiente: 'sin empezar', en_armado: 'armando', terminado: 'terminado' }[c.prod_estado] || c.prod_estado || '') : '';
+  const salida = c.despacho ? (NKB_DESPACHO[c.despacho.modo] || 'Salió') + (c.despacho.transporte ? ' · ' + c.despacho.transporte : '') + (c.despacho.seguimiento ? ' · ' + c.despacho.seguimiento : '') : '';
+  const datos = [fila('Medida', c.medida), fila('Cantidad', c.cantidad > 1 ? c.cantidad + ' unidades' : '1'), fila('Colores', c.colores), fila('Base', c.base), fila('Dimmer', c.dimer), fila('Tipo', c.tipo),
+    fila('Aclaración', c.aclaracion), fila('Vendedor', c.vendedor), r === 'logistica' ? '' : fila('Acrílico', corteTxt), fila('Productor', prodTxt), fila('Envío', c.envio), fila('Salida', salida),
+    (adm && c.piso) ? fila('Ubicado a mano', (NKB_LARGO[c.piso.etapa] || c.piso.etapa) + (c.piso.motivo ? ' · ' + c.piso.motivo : '') + (c.piso.por ? ' · ' + c.piso.por : '')) : ''].join('');
+  const herm = nkbGrupo(c).filter(x => x.id !== c.id);
+  const hermHtml = herm.length ? `<div class="lb-tit">Otros carteles del pedido</div><div class="sfk-ent-lista">${herm.map(x => `<button type="button" class="sfk-ent" data-nkb-ir="${x.id}"><span class="n">${escapeHtml(x.cartel || 'Sin nombre')}</span><span class="f" style="color:${NKB_COLOR[x.etapa]}">${escapeHtml(NKB_CORTO[x.etapa])}</span></button>`).join('')}</div>` : '';
+  const ev = [['Cargado', c.f.creado], ['Emma lo tomó', c.f.tomado, c.f.tomado_por ? nkbNom(c.f.tomado_por) : ''], ['Matriz lista', c.f.matriz], ['Cortado', c.f.cortado], ['Base separada', c.f.separado],
+    ['Derivado' + (c.productor ? ' a ' + c.productor : ''), c.f.asignado], [c.prod_estado === 'en_armado' ? 'Armando' : '', c.prod_estado === 'en_armado' ? c.f.prod : ''], ['Terminado', c.f.terminado],
+    ['Llegó al taller', c.f.recibido, c.recibido_por ? nkbNom(c.recibido_por) : ''], ['Salió', c.f.despachado, c.despacho ? (NKB_DESPACHO[c.despacho.modo] || '') + (c.despacho.por ? ' · ' + nkbNom(c.despacho.por) : '') : '']]
+    .filter(x => x[0] && x[1]).sort((a, b) => String(a[1]).localeCompare(String(b[1])));
+  const rec = ev.map((x, i) => { const prev = ev[i - 1], dur = prev ? new Date(x[1]) - new Date(prev[1]) : NaN; return `<div class="sf-hist"><b>${escapeHtml(x[0])}</b> · ${escapeHtml(sfFechaHora(x[1]))}${x[2] ? ' · ' + escapeHtml(x[2]) : ''}${isNaN(dur) || dur < 0 ? '' : ` <span class="muted">(${sfkDuracion(dur)} después)</span>`}</div>`; }).join('');
+  const pasos = NKB_KEYS.map((id, i) => {
+    const cls = `sfd-step${i < idx ? ' hecho' : i === idx ? ' actual' : ''}`, txt = (i < idx ? '✓ ' : '') + escapeHtml(NKB_CORTO[id]);
+    return adm ? `<button type="button" class="${cls}" data-nkb-paso="${id}" style="--c:${NKB_COLOR[id]}"${i === idx ? ' aria-current="step"' : ''} title="Ubicar a mano en ${escapeHtml(NKB_LARGO[id])}">${txt}</button>` : `<span class="${cls} nkb-step-fijo" style="--c:${NKB_COLOR[id]}">${txt}</span>`;
+  }).join('');
+  const col = nkbDeColumna((STATE.nkb || {}).carteles || [], c.etapa), pos = col.findIndex(x => x.id === c.id);
+  const prevT = pos > 0 ? col[pos - 1] : null, sigT = pos >= 0 && pos < col.length - 1 ? col[pos + 1] : null;
+  const sec = nkbSecundarios(c);
+  return `<div class="sfd-h">
+      <div class="sfd-tit"><span class="sfk-num">#${escapeHtml(String(c.numero || ''))}</span><h2>${escapeHtml(c.cartel || 'Sin nombre')}</h2><span class="sfd-etq" style="--c:${NKB_COLOR[c.etapa]}">${escapeHtml(NKB_LARGO[c.etapa])}</span></div>
+      <div class="sfd-nav">
+        <button type="button" class="btn btn-ghost" data-nkb-nav="${prevT ? prevT.id : ''}"${prevT ? '' : ' disabled'} aria-label="Anterior">‹</button>
+        <button type="button" class="btn btn-ghost" data-nkb-nav="${sigT ? sigT.id : ''}"${sigT ? '' : ' disabled'} aria-label="Siguiente">›</button>
+        <button type="button" class="btn btn-ghost" data-nkb-cerrar aria-label="Cerrar">✕</button>
+      </div>
+    </div>
+    <div class="sfd-body">
+      <div class="sfd-steps nkb-steps">${pasos}</div>
+      ${chips.length ? `<div class="sfk-chips sfd-avisos">${chips.join('')}</div>` : ''}
+      ${media ? `<div class="sfd-media">${media}</div>` : '<div class="muted" style="font-size:12.5px">Sin diseño ni fotos todavía.</div>'}
+      <div class="sfd-sec">${datos}</div>
+      ${hermHtml}
+      <div class="lb-tit">Recorrido</div>
+      ${rec || '<div class="sf-hist muted">Sin movimientos registrados.</div>'}
+      ${c.desde ? `<div class="sf-hist muted">En ${escapeHtml(NKB_LARGO[c.etapa].toLowerCase())} desde ${escapeHtml(sfFechaHora(c.desde))}</div>` : ''}
+    </div>
+    <div class="sfd-acc" data-sfd-acc>${acc ? `<button type="button" class="sfk-pasar sfd-pasar" data-nkb-acc="${c.id}" data-a="${acc.a}" style="--c:${NKB_COLOR[acc.to] || NKB_COLOR[c.etapa]}">${escapeHtml(acc.t)}${SFK_CHEVRON}</button>` : ''}${sec.map(s => `<button type="button" class="btn btn-ghost" data-nkb-acc="${c.id}" data-a="${s.a}">${escapeHtml(s.t)}</button>`).join('')}</div>`;
+}
+function nkbAbrir(id) {
+  const c = nkbCartel(id);
+  if (!c) return;
+  STATE.nkbAbierto = id;
+  let bg = document.getElementById('nkd-bg');
+  if (!bg) { bg = document.createElement('div'); bg.id = 'nkd-bg'; bg.className = 'sfd-bg'; document.body.appendChild(bg); bg.addEventListener('click', nkbPanelClick); }
+  const body0 = bg.querySelector('.sfd-body'), prevScroll = body0 ? body0.scrollTop : 0, mismo = bg.getAttribute('data-pid') === String(id);
+  bg.setAttribute('data-pid', String(id));
+  bg.setAttribute('data-sig', nkbCardSig(c));
+  bg.innerHTML = `<aside class="sfd" role="dialog" aria-modal="true" aria-label="#${escapeHtml(String(c.numero || ''))} ${escapeHtml(c.cartel || '')}">${nkbFichaHtml(c)}</aside>`;
+  if (mismo && prevScroll) { const b = bg.querySelector('.sfd-body'); if (b) b.scrollTop = prevScroll; }
+  void bg.offsetWidth; bg.classList.add('open');
+}
+function nkbCerrar() {
+  const bg = document.getElementById('nkd-bg');
+  STATE.nkbAbierto = null;
+  if (bg) { bg.classList.remove('open'); setTimeout(() => { if (!STATE.nkbAbierto && bg.parentNode) bg.remove(); }, 180); }
+}
+function nkbPanelClick(e) {
+  const el = e.target, bg = e.currentTarget;
+  if (el === bg || el.closest('[data-nkb-cerrar]')) { nkbCerrar(); return; }
+  const ver = el.closest('[data-sf-ver]'); if (ver) { sfVerFoto(ver.getAttribute('data-sf-ver')); return; }
+  const nav = el.closest('[data-nkb-nav]'); if (nav && nav.getAttribute('data-nkb-nav')) { nkbAbrir(+nav.getAttribute('data-nkb-nav')); return; }
+  const ir = el.closest('[data-nkb-ir]'); if (ir) { nkbAbrir(+ir.getAttribute('data-nkb-ir')); return; }
+  const acc = el.closest('[data-nkb-acc]'); if (acc) { nkbHacer(+acc.getAttribute('data-nkb-acc'), acc.getAttribute('data-a')); return; }
+  const paso = el.closest('[data-nkb-paso]'); if (paso && STATE.nkbAbierto) { const c = nkbCartel(STATE.nkbAbierto); if (c && paso.getAttribute('data-nkb-paso') !== c.etapa) nkbUbicar(c, paso.getAttribute('data-nkb-paso')); }
+}
+function nkbPanelRefrescar() {
+  const bg = document.getElementById('nkd-bg');
+  if (!bg || !STATE.nkbAbierto) return;
+  const c = nkbCartel(STATE.nkbAbierto);
+  if (!c) { nkbCerrar(); return; }
+  if (bg.getAttribute('data-sig') !== nkbCardSig(c) && !(document.activeElement && bg.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName))) nkbAbrir(STATE.nkbAbierto);
+}
+function nkbEnviadosModal() {
+  const lista = nkbDeColumna((STATE.nkb || {}).carteles || [], 'enviado');
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal sf-modal"><div class="modal-h"><h3>Enviados (${lista.length})</h3><button type="button" class="btn btn-ghost" data-x>Cerrar</button></div><div class="modal-body">
+    <input class="logi-q" data-q type="search" placeholder="Buscar # o nombre" style="margin:0 0 10px;width:100%;max-width:none">
+    <div data-l class="sfk-ent-lista"></div></div></div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  const pinta = () => {
+    const q = _userKey(bg.querySelector('[data-q]').value.trim()).replace(/^#/, '');
+    const vis = q ? lista.filter(c => _userKey('#' + c.numero + ' ' + (c.cartel || '')).includes(q)) : lista;
+    bg.querySelector('[data-l]').innerHTML = vis.map(nkbEnvRowHtml).join('') || '<div class="muted" style="font-size:12.5px">No hay enviados con eso.</div>';
+  };
+  pinta();
+  const fin = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  bg.querySelector('[data-x]').onclick = fin;
+  bg.querySelector('[data-q]').addEventListener('input', pinta);
+  bg.addEventListener('click', e => { if (e.target === bg) { fin(); return; } const r = e.target.closest('[data-nkb-card]'); if (r) { fin(); nkbAbrir(+r.getAttribute('data-nkb-card')); } });
+}
+
+// ---------- Acciones ----------
+// Modal genérico: devuelve {b: botón elegido, f: campos [data-f]} o null si se cancela.
+function nkbModal({ titulo, cuerpo, botones, validar }) {
+  return new Promise(resolve => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>${escapeHtml(titulo)}</h3></div><div class="modal-body"><form novalidate>${cuerpo}<div data-nkb-err style="color:#ef4444;font-size:12px;min-height:16px;margin-top:6px"></div><div class="nkb-mbtns">${botones.map((b, i) => `<button type="${i === 0 ? 'submit' : 'button'}" class="btn ${b.cls || (i === 0 ? 'btn-cyan' : 'btn-ghost')}" data-b="${escapeHtml(b.v)}">${escapeHtml(b.t)}</button>`).join('')}</div></form></div></div>`;
+    document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+    const campos = () => { const o = {}; bg.querySelectorAll('[data-f]').forEach(x => { o[x.getAttribute('data-f')] = x.type === 'checkbox' ? x.checked : x.value; }); return o; };
+    const fin = v => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); resolve(v); };
+    const elegir = v => {
+      if (v === '__no') { fin(null); return; }
+      const f = campos(), err = validar ? validar(v, f) : '';
+      if (err) { bg.querySelector('[data-nkb-err]').textContent = err; return; }
+      fin({ b: v, f });
+    };
+    bg.querySelector('form').addEventListener('submit', e => { e.preventDefault(); elegir(botones[0].v); });
+    bg.querySelectorAll('button[data-b]').forEach(b => { if (b.type !== 'submit') b.onclick = () => elegir(b.getAttribute('data-b')); });
+    bg.addEventListener('click', e => { if (e.target === bg) fin(null); });
+    bg.addEventListener('keydown', e => { if (e.key === 'Escape') fin(null); });
+    setTimeout(() => { const i = bg.querySelector('input, select'); if (i) i.focus(); }, 50);
+  });
+}
+function nkbPosToast() { const pie = STATE.nkbAbierto ? document.querySelector('#nkd-bg.open [data-sfd-acc]') : null; return pie ? { bottom: pie.offsetHeight + 8 } : {}; }
+function nkbMarcar(id, on) {
+  const el = document.querySelector(`.nkb-wrap [data-nkb-card="${id}"]`);
+  if (el) { el.classList.toggle('is-moviendo', on); const b = el.querySelector('.sfk-pasar'); if (b && on) b.textContent = 'Guardando…'; }
+  const pie = document.querySelector('#nkd-bg [data-sfd-acc]'); if (pie) pie.classList.toggle('is-moviendo', on);
+}
+// Corre una escritura con la tarjeta en "Guardando…"; al terminar recarga el tablero y avisa (con deshacer si hay).
+async function nkbGuardar(c, fn, okMsg, undo) {
+  nkbMarcar(c.id, true);
+  STATE._nkbGuardando = (STATE._nkbGuardando || 0) + 1;
+  let r;
+  try { r = await fn(); } finally { STATE._nkbGuardando = Math.max(0, (STATE._nkbGuardando || 1) - 1); }
+  if (r && r.cancelado) { nkbMarcar(c.id, false); return false; }
+  if (!r || !r.ok) {
+    nkbMarcar(c.id, false);
+    if (STATE.nkb && !STATE.nkb.error) nkbPintar(true);
+    niToast('No se guardó: ' + (r ? nkbErr(r) : 'error') + '.', { ...nkbPosToast(), error: true });
+    return false;
+  }
+  await nkbCargar({ silent: true });
+  nkbMarcar(c.id, false);
+  const nueva = document.querySelector(`.nkb-wrap [data-nkb-card="${c.id}"]`);
+  if (nueva) { nueva.classList.add('is-nueva'); setTimeout(() => nueva.classList.remove('is-nueva'), 1700); }
+  if (okMsg) niToast(okMsg, undo ? { ...nkbPosToast(), undo, ms: 6000 } : nkbPosToast());
+  return true;
+}
+async function nkbHacer(id, a) {
+  const c = nkbCartel(id); if (!c) return;
+  const mov = (STATE._nkbMov = STATE._nkbMov || {});
+  if (mov[id]) return; // doble click
+  mov[id] = true;
+  try {
+    if (a === 'tomar') await nkbGuardar(c, () => nkbPost('/admin/neon/accion', { accion: 'tomar', ids: [c.id] }), nkbTit(c) + ' pasó a Diseño y corte', () => nkbHacer(id, 'soltar'));
+    else if (a === 'soltar') await nkbGuardar(c, () => nkbPost('/admin/neon/accion', { accion: 'soltar', ids: [c.id] }), nkbTit(c) + ' volvió a Confirmado');
+    else if (a === 'matriz') await nkbMatriz(c);
+    else if (a === 'cortado') await nkbCorte(c, 'cortado');
+    else if (a === 'separado') await nkbCorte(c, 'embalado');
+    else if (a === 'derivar') await nkbDerivar(c);
+    else if (a === 'armando' || a === 'terminar') await nkbProdEstado(c, a === 'armando' ? 'en_armado' : 'terminado');
+    else if (a === 'recibido' || a === 'no_recibido') await nkbGuardar(c, () => nkbPost('/admin/neon/accion', { accion: a, ids: [c.id] }), nkbTit(c) + (a === 'recibido' ? ' llegó al taller' : ': no llegó todavía'));
+    else if (a === 'pago') nkbPago(c);
+    else if (a === 'foto') nkbAbrirPedido(c);
+    else if (a === 'despacho') await nkbDespacho(c, false);
+    else if (a === 'despacho_forzar') await nkbDespacho(c, true);
+    else if (a === 'deshacer_envio') await nkbGuardar(c, () => nkbPost('/admin/neon/despacho', { pedido_id: c.id, deshacer: true }), nkbTit(c) + ' volvió a Para enviar');
+    else if (a === 'ubicar') await nkbUbicar(c);
+  } finally { delete mov[id]; }
+}
+async function nkbMatriz(c) {
+  if (!c.corte_id) { niToast('Este cartel no tiene pieza de corte.', { error: true }); return; }
+  const v = await nkbModal({
+    titulo: 'Matriz lista · ' + nkbTit(c),
+    cuerpo: `<div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Medida real de la matriz, en cm. Viene la del pedido: corregila si cambió.</div>
+      <div style="display:flex;gap:10px"><label class="nc-field" style="flex:1"><span class="nc-label">Ancho</span><input class="nc-input" data-f="ancho" inputmode="decimal" value="${c.ancho || ''}"></label>
+      <label class="nc-field" style="flex:1"><span class="nc-label">Alto</span><input class="nc-input" data-f="alto" inputmode="decimal" value="${c.alto || ''}"></label></div>`,
+    botones: [{ v: 'ok', t: 'Matriz lista' }, { v: '__no', t: 'Cancelar' }],
+    validar: (b, f) => (parseFloat(String(f.ancho).replace(',', '.')) > 0 && parseFloat(String(f.alto).replace(',', '.')) > 0) ? '' : 'Poné ancho y alto en cm',
+  });
+  if (!v) return;
+  await nkbGuardar(c, () => nkbPost('/admin/corte/pedido', { action: 'medidas', id: c.corte_id, ancho_real: v.f.ancho, alto_real: v.f.alto }), nkbTit(c) + ': matriz lista, le toca a Aníbal');
+}
+async function nkbCorte(c, estado) {
+  if (!c.corte_id) { niToast('Este cartel no tiene pieza de corte.', { error: true }); return; }
+  const prev = c.corte_estado, adm = nkbRol() === 'admin';
+  const undo = estado === 'embalado' ? () => nkbCorteVolver(c, 'cortado') : (adm && prev === 'matriz_lista' ? () => nkbCorteVolver(c, 'matriz_lista') : null);
+  await nkbGuardar(c, async () => { const r = await nkbPost('/admin/corte/pedido', { action: 'avanzar_bulk', ids: [c.corte_id], estado }); if (r.ok && !(r.j.n > 0)) return { ok: false, j: { error: 'esa base ya cambió de estado, actualizá' } }; return r; },
+    nkbTit(c) + (estado === 'cortado' ? ' quedó cortado' : ': base separada para el productor'), undo);
+}
+async function nkbCorteVolver(c, estado) {
+  const x = nkbCartel(c.id) || c;
+  await nkbGuardar(x, () => nkbPost('/admin/corte/pedido', { action: 'avanzar_bulk', ids: [x.corte_id], estado }), nkbTit(x) + ' volvió atrás');
+}
+async function nkbDerivar(c, forzar) {
+  const ps = (STATE.nkb && STATE.nkb.productores) || [];
+  if (!ps.length) { niToast('No hay productores cargados.', { error: true }); return; }
+  const base = ['cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(c.corte_estado);
+  const v = await nkbModal({
+    titulo: (c.productor_id ? 'Cambiar productor · ' : 'Derivar · ') + nkbTit(c),
+    cuerpo: `<div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">${!base && c.corte_id ? '<b style="color:#f59e0b">Ojo: la base todavía no está cortada.</b> ' : ''}Le aparece en su hoja.</div>
+      <label class="nc-field"><span class="nc-label">Productor</span><select class="nc-input" data-f="p">${ps.map(p => `<option value="${escapeHtml(p.id)}"${p.id === c.productor_id ? ' selected' : ''}>${escapeHtml(p.nombre || p.id)}${p.activo ? '' : ' (sin usuario)'}</option>`).join('')}</select></label>`,
+    botones: [{ v: 'ok', t: c.productor_id ? 'Cambiar' : 'Derivar' }, ...(c.productor_id ? [{ v: 'sacar', t: 'Sacarle el productor' }] : []), { v: '__no', t: 'Cancelar' }],
+  });
+  if (!v) return;
+  const pid = v.b === 'sacar' ? '' : v.f.p, nom = pid ? ((ps.find(p => p.id === pid) || {}).nombre || pid) : '';
+  const asignar = (fz) => nkbPost('/admin/prod/asignar', { pedido_ids: [c.id], productor_id: pid, ...(fz ? { forzar: true } : {}) });
+  await nkbGuardar(c, async () => {
+    let r = await asignar(forzar);
+    if (r.status === 409 && r.j.confirmar) {
+      if (!(await showConfirm(`${nkbTit(c)} ya lo está armando otro productor. ¿Pasárselo a ${nom || 'nadie'} igual? El trabajo y su pago pasan al nuevo.`, { title: 'Cambiar productor', confirmLabel: 'Sí, cambiar', cancelLabel: 'No' }))) return { ok: true, j: {}, cancelado: true };
+      r = await asignar(true);
+    }
+    return r;
+  }, pid ? nkbTit(c) + ' derivado a ' + nom : nkbTit(c) + ' quedó sin productor');
+}
+async function nkbProdEstado(c, est) {
+  if (est === 'terminado' && !c.fotos && !(await showConfirm(`${nkbTit(c)} no tiene foto del cartel terminado. ¿Marcarlo terminado igual?`, { title: 'Marcar terminado', confirmLabel: 'Sí, terminado', cancelLabel: 'No' }))) return;
+  await nkbGuardar(c, () => nkbPost('/admin/prod/estado', { pedido_id: c.id, estado: est, forzar: true }), nkbTit(c) + (est === 'terminado' ? ' quedó terminado' : ' quedó armando'));
+}
+function nkbPago(c) {
+  if (typeof abrirSegundoPago !== 'function' || !(STATE.pedidos || []).some(x => x.idx === c.id)) { niToast('Registralo desde Pedidos (no encuentro el pedido acá).', { error: true }); return; }
+  nkbCerrar();
+  abrirSegundoPago(c.id, { origen: 'neon' });
+  // Al cerrarse el modal del pago, el tablero se actualiza (si se pagó, pasa solo a Para enviar).
+  const t = setInterval(() => { if (!STATE._sp2) { clearInterval(t); if (STATE.view === 'neon') nkbCargar({ silent: true }); } }, 800);
+}
+function nkbAbrirPedido(c) {
+  if (typeof openDrawerPedido !== 'function' || !(STATE.pedidos || []).some(x => x.idx === c.id)) { niToast('No encuentro el pedido en Pedidos.', { error: true }); return; }
+  nkbCerrar();
+  openDrawerPedido(c.id);
+}
+async function nkbDespacho(c, forzar) {
+  const logi = nkbRol() === 'logistica';
+  if (forzar && !(await showConfirm(`${nkbTit(c)} está en ${NKB_LARGO[c.etapa]}, no en Para enviar. ¿Marcarlo enviado igual?`, { title: 'Marcar enviado', confirmLabel: 'Sí', cancelLabel: 'No' }))) return;
+  const modos = logi ? ['envio'] : (c.sf ? ['sinfrontera', 'envio', 'retira', 'instalacion'] : ['envio', 'retira', 'instalacion']);
+  const v = await nkbModal({
+    titulo: '¿Cómo salió ' + nkbTit(c) + '?',
+    cuerpo: `${c.envio ? `<div class="sf-dato" style="margin-bottom:8px"><span>Envío</span><b>${escapeHtml(c.envio)}</b></div>` : ''}${c.grupo_n > 1 ? `<div style="font-size:12.5px;color:var(--fg-mute);margin-bottom:8px">Sale el pedido entero (${c.grupo_n} carteles).</div>` : ''}
+      <label class="nc-field"><span class="nc-label">Transporte (si salió por envío)</span><input class="nc-input" data-f="transporte" maxlength="80" placeholder="Andreani, Vía Cargo, moto…"></label>
+      <label class="nc-field" style="margin-top:8px"><span class="nc-label">Seguimiento (opcional)</span><input class="nc-input" data-f="seguimiento" maxlength="120"></label>`,
+    botones: [...modos.map(m => ({ v: m, t: NKB_DESPACHO[m], cls: 'btn-cyan' })), { v: '__no', t: 'Cancelar' }],
+  });
+  if (!v) return;
+  const env = v.b === 'envio';
+  await nkbGuardar(c, () => nkbPost('/admin/neon/despacho', { pedido_id: c.id, modo: v.b, transporte: env ? v.f.transporte : '', seguimiento: env ? v.f.seguimiento : '', ...(forzar ? { forzar: true } : {}) }),
+    nkbTit(c) + ': ' + NKB_DESPACHO[v.b].toLowerCase(), () => nkbHacer(c.id, 'deshacer_envio'));
+}
+async function nkbUbicar(c, etapa0) {
+  const v = await nkbModal({
+    titulo: 'Ubicar a mano · ' + nkbTit(c),
+    cuerpo: `<div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Para los que el sistema no puede ubicar solo (ej. neones viejos sin pieza de corte). La tarjeta no baja de ahí; si después avanza sola, sigue avanzando.</div>
+      <label class="nc-field"><span class="nc-label">Etapa</span><select class="nc-input" data-f="e"><option value="">Automática (según lo que marcó cada uno)</option>${NKB_KEYS.map(k => `<option value="${k}"${k === (etapa0 || (c.piso && c.piso.etapa) || '') ? ' selected' : ''}>${escapeHtml(NKB_LARGO[k])}</option>`).join('')}</select></label>
+      <label class="nc-field" style="margin-top:8px"><span class="nc-label">Por qué (opcional)</span><input class="nc-input" data-f="m" maxlength="200" value="${escapeHtml((c.piso && c.piso.motivo) || '')}"></label>`,
+    botones: [{ v: 'ok', t: 'Guardar' }, { v: '__no', t: 'Cancelar' }],
+  });
+  if (!v) return;
+  await nkbGuardar(c, () => nkbPost('/admin/neon/accion', { accion: 'ubicar', ids: [c.id], etapa: v.f.e, motivo: v.f.m }), v.f.e ? nkbTit(c) + ' ubicado en ' + NKB_LARGO[v.f.e] : nkbTit(c) + ' vuelve a ubicarse solo');
+}
+
 // Detalle del pedido: el estado que puso Sin Frontera (corpóreos, todos lo ven) y, para Gaspar, si el pedido es de Sin Frontera
 // como CLIENTE (lo ven en "Mis pedidos") con el botón para marcarlo o quitarlo.
 function sfDrawerSection(p) {
@@ -7046,7 +7606,7 @@ function renderSfPedidos() {
       <td>${dimerPillHtml(p.dimer)}</td>
       <td title="${escapeHtml(p.envio || '')}"><span class="muted" style="font-size:12px">${trunc(p.envio, 16)}</span></td>
       <td title="${escapeHtml(p.aclaracion || '')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion, 16)}</span></td>
-      <td>${pillEstadoPedido(p.estado_pedido)}</td>
+      <td>${p.etapa && typeof NKB_LARGO !== 'undefined' && NKB_LARGO[p.etapa] ? `<span class="pill" style="color:${NKB_COLOR[p.etapa]};border-color:${NKB_COLOR[p.etapa]}66">${escapeHtml(NKB_LARGO[p.etapa])}</span>` : pillEstadoPedido(p.estado_pedido)}</td>
     </tr>`).join('');
   return `<div class="logi-wrap sf-wrap">
     ${sfTabs()}
@@ -8019,17 +8579,21 @@ function renderShell() {
         ` : isProduccionOnly() ? `
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
           ${isAnibalUser(STATE.user) ? `<button class="nav-item ${v==='mis-carteles'?'active':''}" data-view="mis-carteles"><span class="icon">🔧</span> Mis carteles</button>` : ''}
+          <button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">🔴</span> Producción neón</button>
         ` : isLogisticaOnly() ? `
-          <button class="nav-item active" data-view="logistica"><span class="icon">📦</span> Envíos</button>
+          <button class="nav-item ${v==='logistica'?'active':''}" data-view="logistica"><span class="icon">📦</span> Envíos</button>
+          <button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">🔴</span> Producción neón</button>
         ` : isSinFronteraOnly() ? `
           <button class="nav-item ${v==='sf-produccion'?'active':''}" data-view="sf-produccion"><span class="icon">🏭</span> Producción</button>
           <button class="nav-item ${v==='sf-pedidos'?'active':''}" data-view="sf-pedidos"><span class="icon">▦</span> Mis pedidos</button>
         ` : isDisenadorOnly() ? `
           <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte ${corteBadgeHtml()}</button>
+          <button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">🔴</span> Producción neón</button>
         ` : `
         <button class="nav-item ${v==='dashboard'?'active':''}" data-view="dashboard"><span class="icon">◊</span> Dashboard</button>
         <button class="nav-item ${v==='pedidos'?'active':''}" data-view="pedidos"><span class="icon">▦</span> Pedidos</button>
+        ${nkbPuedeVer() ? `<button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">🔴</span> Producción neón</button>` : ''}
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
         ${isAdmin() ? `<button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>` : ''}

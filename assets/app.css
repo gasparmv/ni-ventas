@@ -4722,3 +4722,29 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
   .sfd-acc .sfd-pasar { flex-basis: 100%; min-height: 52px; font-size: 16px; }
   .sfd-acc .btn { flex: 1; }
 }
+
+/* Tablero de producción de neón (nkb): mismas piezas que el de corpóreos (sfk-* / sfd-*), con 7 columnas. */
+.nkb-wrap [data-nkb-card][hidden] { display: none !important; }
+.sfk-board.nkb-board.n7 { grid-template-columns: repeat(6, minmax(164px, 1fr)) minmax(140px, .7fr); }
+.sfk-board.nkb-board.n2 { grid-template-columns: minmax(260px, 1fr) minmax(220px, .7fr); max-width: 820px; }
+@media (min-width: 761px) and (max-width: 1499px) { .sfk-board.nkb-board.n7 { grid-template-columns: repeat(6, minmax(176px, 1fr)) 56px; } }
+@media (min-width: 761px) and (max-width: 1279px) { .sfk-board.nkb-board.n7 { grid-template-columns: repeat(6, minmax(220px, 1fr)) 56px; } }
+@media (min-width: 761px) and (max-width: 1499px) {
+  .sfk-board.nkb-board.n2 .sfk-col-ent .sfk-col-h { flex-direction: row; padding: 10px 10px 8px; }
+  .sfk-board.nkb-board.n2 .sfk-col-ent .sfk-col-h .t { writing-mode: horizontal-tb; transform: none; }
+  .sfk-board.nkb-board.n2 .sfk-col-ent .sfk-col-h .n { margin-left: auto; }
+  .sfk-board.nkb-board.n2 .sfk-col-ent .sfk-sub, .sfk-board.nkb-board.n2 .sfk-col-ent .sfk-col-list { display: flex; }
+  .sfk-board.nkb-board.n2 .sfk-col-ent .sfk-sub { display: block; }
+}
+.nkb-steps { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.sfd-step.nkb-step-fijo { display: flex; align-items: center; justify-content: center; text-align: center; cursor: default; }
+.nkb-mbtns { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.nkb-mbtns .btn { width: 100%; min-height: 42px; }
+@media (max-width: 760px) {
+  .nkb-steps { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  [data-nkb-zona].buscando .sfk-tabs { display: none; }
+  [data-nkb-zona].buscando .sfk-col { display: flex; margin-bottom: 10px; }
+  [data-nkb-zona].buscando .sfk-col.sin-res { display: none; }
+  [data-nkb-zona].buscando .sfk-col-h { display: flex; padding: 4px 2px; }
+  [data-nkb-zona].buscando .sfk-etq { display: inline-block; }
+}
