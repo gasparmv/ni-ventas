@@ -16429,7 +16429,57 @@ async function sfPedidos(env) {
     o.fotos_terminado = fotos[r.id] || 0;
     return o;
   });
-  return { ok: true, pedidos, configurado: tels.length > 0 };
+  // Los neones que Gaspar les vende y anota en la planilla (Pedidos_Distris, Canal "Sin Frontera"). No están en la base.
+  const pl = await sfPlanillaPedidos(env);
+  const todos = pedidos.concat(pl.pedidos)
+    .sort((a, b) => String(b.fecha || '').slice(0, 10).localeCompare(String(a.fecha || '').slice(0, 10)) || ((parseInt(b.numero, 10) || 0) - (parseInt(a.numero, 10) || 0)));
+  return { ok: true, pedidos: todos, configurado: tels.length > 0, ...(pl.error ? { planilla_error: true } : {}) };
+}
+// Pedidos_Distris del 2026 v4: las filas con Canal "Sin Frontera" (la opción de Maping!A4). Solo lo que ve un cliente: ID, fecha,
+// cartel, cantidad, colores, medidas, base, dimmer, envío, aclaración, precio y pagos. NUNCA costos (P..X), Caja ni cálculos.
+// id negativo (-fila) para no chocar con los de la base; origen 'planilla'. Cache 2 min por isolate; si Google falla, la última
+// lectura (hasta 1 día) y planilla_error.
+const SF_PLANILLA_TTL = 2 * 60 * 1000;
+let _sfPlanilla = null;
+async function sfPlanillaPedidos(env) {
+  const ahora = Date.now();
+  if (_sfPlanilla && ahora - _sfPlanilla.at < SF_PLANILLA_TTL) return { pedidos: _sfPlanilla.pedidos };
+  const viejo = () => (_sfPlanilla && ahora - _sfPlanilla.at < 24 * 3600 * 1000) ? _sfPlanilla.pedidos : [];
+  let rows;
+  try {
+    const token = await sheetsAccessToken(env);
+    if (!token) return { pedidos: viejo(), error: 'sin token' };
+    const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values/${encodeURIComponent('Pedidos_Distris!A3:AA3000')}`, { headers: { Authorization: 'Bearer ' + token } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return { pedidos: viejo(), error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+    rows = j.values || [];
+  } catch (e) { return { pedidos: viejo(), error: String((e && e.message) || e) }; }
+  const canal = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z]/g, '');
+  const txt = (v, n) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n || 200);
+  const iso = s => { const m = String(s || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : ''; };
+  const lista = [];
+  rows.forEach((r, i) => {
+    if (canal(r[2]) !== 'sinfrontera' || !txt(r[3])) return;
+    lista.push({
+      id: -(i + 3), origen: 'planilla', numero: txt(r[0], 20), fecha: iso(r[1]), cartel: txt(r[3]), cantidad: parseInt(r[4], 10) || 1,
+      colores: txt(r[5]), alto: txt(r[6], 10), ancho: txt(r[7], 10), base: txt(r[9], 40), dimer: /^no$/i.test(txt(r[10])) ? '' : txt(r[10], 40),
+      envio: txt(r[11]), aclaracion: txt(r[12], 600), precio: parseAmt(r[13]), precio_dimmer: parseAmt(r[14]),
+      _pagado: parseAmt(r[25]), _restante: txt(r[26]) === '' ? null : parseAmt(r[26]),
+      es_corporeo: 0, prod_estado: '', estado_pedido: '', diseno: false, fotos_terminado: 0,
+    });
+  });
+  // Pagado/restante por pedido (mismo ID y fecha): la planilla reparte los pagos entre las filas del pedido.
+  const grupos = {};
+  for (const p of lista) (grupos[p.numero + '|' + p.fecha] = grupos[p.numero + '|' + p.fecha] || []).push(p);
+  for (const g of Object.values(grupos)) {
+    const total = g.reduce((s, p) => s + p.precio + p.precio_dimmer, 0);
+    const pagado = g.reduce((s, p) => s + p._pagado, 0);
+    const restante = g.some(p => p._restante != null) ? g.reduce((s, p) => s + (p._restante || 0), 0) : Math.max(0, total - pagado);
+    const estado_pago = total > 0 && restante <= 0 ? 'Pagado' : pagado > 0 ? 'Pago parcial' : 'Sin pagar';
+    for (const p of g) { delete p._pagado; delete p._restante; p.pagado = pagado; p.restante = restante; p.estado_pago = estado_pago; }
+  }
+  _sfPlanilla = { at: ahora, pedidos: lista };
+  return { pedidos: lista };
 }
 // Archivos que pueden ver (R2): fotos del ticket VIGENTE de un corpóreo (?t=<id del ticket>&i=<n>), el diseño de un corpóreo en
 // producción o de un pedido suyo (?p=<id>) y las fotos del cartel terminado de un pedido suyo (?p=<id>&f=<n>). Devuelve la key

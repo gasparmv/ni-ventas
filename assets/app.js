@@ -6414,7 +6414,7 @@ async function sfCargar(opts) {
     const j = await sfFetch(ped ? '/admin/sinfrontera/pedidos' : '/admin/sinfrontera/produccion');
     if (STATE.user !== user) return;
     if (!ped && silent && ((STATE._sfMovGen || 0) !== gen || STATE._sfGuardando)) return; // vieja: el próximo tick recarga
-    if (ped) STATE.sfPed = { pedidos: j.pedidos || [], configurado: !!j.configurado, at: Date.now() };
+    if (ped) STATE.sfPed = { pedidos: j.pedidos || [], configurado: !!j.configurado, planillaError: !!j.planilla_error, at: Date.now() };
     else STATE.sf = { tickets: j.tickets || [], excluidos: j.excluidos || null, at: Date.now() };
   } catch (e) {
     if (STATE.user !== user) return;
@@ -7018,7 +7018,7 @@ function sfVerFoto(url) {
 
 // ---------- Mis pedidos ----------
 // Un renglón por cartel, como la tabla de Pedidos de Gaspar (sin vendedor ni anuncio). Click → el detalle del pedido entero.
-function sfPedGrupoKey(p) { return String(p.numero || '') + '|' + String(p.fecha || ''); }
+function sfPedGrupoKey(p) { return (p.origen === 'planilla' ? 'pl|' : '') + String(p.numero || '') + '|' + String(p.fecha || ''); }
 function sfPedGrupo(p) { const k = sfPedGrupoKey(p); return ((STATE.sfPed || {}).pedidos || []).filter(x => sfPedGrupoKey(x) === k); }
 function sfProdNeonHtml(p) {
   if (+p.es_corporeo === 1 || !p.prod_estado || typeof PROD_ESTADO_LBL === 'undefined') return '';
@@ -7056,10 +7056,11 @@ function renderSfPedidos() {
       <button class="btn btn-ghost" data-sf-refresh>Actualizar</button>
       ${sfAdminBarra()}
     </div>
+    ${D.planillaError ? `<div class="logi-ayuda" style="color:#ffc97a">No se pudo leer la planilla: puede faltar algún pedido. Tocá Actualizar en un rato.</div>` : ''}
     ${ps.length ? `<div class="table-wrap sf-tabla"><table class="t">
       <thead><tr><th>Fecha</th><th>Cartel</th><th>Base</th><th>Precio</th><th>Dimer</th><th>Envío</th><th>Aclar.</th><th>Pago</th><th>Estado</th></tr></thead>
       <tbody>${filas}</tbody></table></div>
-      <div class="logi-ayuda">Click en un cartel para ver el pedido completo</div>`
+      <div class="logi-ayuda">Click en un cartel para ver el pedido completo${isAdmin() ? ' · los de la planilla salen de Pedidos_Distris con Canal "Sin Frontera"' : ''}</div>`
     : `<div class="logi-vacio-box">${isAdmin() && !D.configurado ? 'Todavía no cargaste con qué números te compran: tocá "Sus números y pedidos".' : 'Todavía no hay pedidos.'}</div>`}
   </div>`;
 }
