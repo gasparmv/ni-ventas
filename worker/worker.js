@@ -16315,7 +16315,7 @@ const SF_ESTADOS = [['en_diseno', 'En diseño'], ['en_impresion', 'En impresión
 const SF_TICKET_CAMPOS = ['empresa', 'fecha_sena', 'fecha_compromiso', 'producto', 'tipo_producto', 'carteleria', 'precisa_instalacion', 'prioridad', 'medidas', 'descripcion_cliente', 'requiere_estructura', 'desc_diseno', 'impresora', 'colores', 'desc_impresion', 'salida_cables', 'lado_cables', 'tipo_luz', 'desc_ensamble'];
 // Lo que ven de SUS pedidos: lo de la tabla de Pedidos menos lo interno (vendedor, quién cargó, comisión, anuncio y campaña,
 // productor y su mano de obra, origen, espejo a la planilla, cajas, comprobantes).
-const SF_PEDIDO_CAMPOS = ['id', 'numero', 'fecha', 'cartel', 'colores', 'alto', 'ancho', 'base', 'tipo', 'cantidad', 'dimer', 'precio', 'precio_dimmer', 'envio', 'aclaracion', 'estado_pago', 'pagado', 'restante', 'estado_pedido', 'es_corporeo', 'producto', 'frente', 'laterales', 'espalda', 'iluminacion', 'bastidor', 'color_bastidor', 'instalacion', 'prod_estado', 'prod_terminado_at'];
+const SF_PEDIDO_CAMPOS = ['id', 'numero', 'fecha', 'cartel', 'colores', 'alto', 'ancho', 'base', 'tipo', 'cantidad', 'dimer', 'precio', 'precio_dimmer', 'envio', 'aclaracion', 'estado_pedido', 'es_corporeo', 'producto', 'frente', 'laterales', 'espalda', 'iluminacion', 'bastidor', 'color_bastidor', 'instalacion', 'prod_estado', 'prod_terminado_at'];
 let _sfSchemaOk = false;
 async function ensureSinFronteraSchema(env) {
   if (_sfSchemaOk) return;
@@ -16410,7 +16410,7 @@ async function sfProduccion(env, opts = {}) {
 }
 // Mis pedidos: SUS compras (sfPedidosWhere), con precio y pagos, el estado de producción del neón y cuántas fotos del cartel
 // terminado hay (las sube el productor).
-async function sfPedidos(env) {
+async function sfPedidos(env, opts = {}) {
   const tels = await sfTels(env);
   const w = sfPedidosWhere(tels);
   let rows = [];
@@ -16430,15 +16430,16 @@ async function sfPedidos(env) {
     return o;
   });
   // Los neones que Gaspar les vende y anota en la planilla (Pedidos_Distris, Canal "Sin Frontera"). No están en la base.
-  const pl = await sfPlanillaPedidos(env);
+  const pl = opts.planilla === false ? { pedidos: [] } : await sfPlanillaPedidos(env);
   const todos = pedidos.concat(pl.pedidos)
     .sort((a, b) => String(b.fecha || '').slice(0, 10).localeCompare(String(a.fecha || '').slice(0, 10)) || ((parseInt(b.numero, 10) || 0) - (parseInt(a.numero, 10) || 0)));
   return { ok: true, pedidos: todos, configurado: tels.length > 0, ...(pl.error ? { planilla_error: true } : {}) };
 }
-// Pedidos_Distris del 2026 v4: las filas con Canal "Sin Frontera" (la opción de Maping!A4). Solo lo que ve un cliente: ID, fecha,
-// cartel, cantidad, colores, medidas, base, dimmer, envío, aclaración, precio y pagos. NUNCA costos (P..X), Caja ni cálculos.
-// id negativo (-fila) para no chocar con los de la base; origen 'planilla'. Cache 2 min por isolate; si Google falla, la última
-// lectura (hasta 1 día) y planilla_error.
+// HISTÓRICO (Gaspar 16-oct: desde ahora todos sus neones se cargan en el CRM; "leer Pedidos_Distris es solo un backfill"):
+// las filas de Pedidos_Distris (2026 v4) con Canal "Sin Frontera" (opción de Maping!A4). Solo ID, fecha, cartel, cantidad,
+// colores, medidas, base, dimmer, envío, aclaración y precio. NUNCA pagos (tienen cuenta corriente en otro Excel), costos (P..X),
+// Caja ni cálculos. id negativo correlativo; origen 'planilla'. Cache 2 min por isolate; si Google falla o tarda más de 6 s,
+// la última lectura (hasta 1 día) y planilla_error.
 const SF_PLANILLA_TTL = 2 * 60 * 1000;
 let _sfPlanilla = null;
 async function sfPlanillaPedidos(env) {
@@ -16449,7 +16450,7 @@ async function sfPlanillaPedidos(env) {
   try {
     const token = await sheetsAccessToken(env);
     if (!token) return { pedidos: viejo(), error: 'sin token' };
-    const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values/${encodeURIComponent('Pedidos_Distris!A3:AA3000')}`, { headers: { Authorization: 'Bearer ' + token } });
+    const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values/${encodeURIComponent('Pedidos_Distris!A3:O3000')}`, { headers: { Authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(6000) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) return { pedidos: viejo(), error: (j.error && j.error.message) || ('HTTP ' + r.status) };
     rows = j.values || [];
@@ -16458,26 +16459,15 @@ async function sfPlanillaPedidos(env) {
   const txt = (v, n) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n || 200);
   const iso = s => { const m = String(s || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : ''; };
   const lista = [];
-  rows.forEach((r, i) => {
+  rows.forEach(r => {
     if (canal(r[2]) !== 'sinfrontera' || !txt(r[3])) return;
     lista.push({
-      id: -(i + 3), origen: 'planilla', numero: txt(r[0], 20), fecha: iso(r[1]), cartel: txt(r[3]), cantidad: parseInt(r[4], 10) || 1,
+      id: -(lista.length + 1), origen: 'planilla', numero: txt(r[0], 20), fecha: iso(r[1]), cartel: txt(r[3]), cantidad: parseInt(r[4], 10) || 1,
       colores: txt(r[5]), alto: txt(r[6], 10), ancho: txt(r[7], 10), base: txt(r[9], 40), dimer: /^no$/i.test(txt(r[10])) ? '' : txt(r[10], 40),
       envio: txt(r[11]), aclaracion: txt(r[12], 600), precio: parseAmt(r[13]), precio_dimmer: parseAmt(r[14]),
-      _pagado: parseAmt(r[25]), _restante: txt(r[26]) === '' ? null : parseAmt(r[26]),
       es_corporeo: 0, prod_estado: '', estado_pedido: '', diseno: false, fotos_terminado: 0,
     });
   });
-  // Pagado/restante por pedido (mismo ID y fecha): la planilla reparte los pagos entre las filas del pedido.
-  const grupos = {};
-  for (const p of lista) (grupos[p.numero + '|' + p.fecha] = grupos[p.numero + '|' + p.fecha] || []).push(p);
-  for (const g of Object.values(grupos)) {
-    const total = g.reduce((s, p) => s + p.precio + p.precio_dimmer, 0);
-    const pagado = g.reduce((s, p) => s + p._pagado, 0);
-    const restante = g.some(p => p._restante != null) ? g.reduce((s, p) => s + (p._restante || 0), 0) : Math.max(0, total - pagado);
-    const estado_pago = total > 0 && restante <= 0 ? 'Pagado' : pagado > 0 ? 'Pago parcial' : 'Sin pagar';
-    for (const p of g) { delete p._pagado; delete p._restante; p.pagado = pagado; p.restante = restante; p.estado_pago = estado_pago; }
-  }
   _sfPlanilla = { at: ahora, pedidos: lista };
   return { pedidos: lista };
 }
@@ -24022,10 +24012,14 @@ const handler = {
         }
         const num = (v) => (v == null || v === '') ? null : (isNaN(Number(v)) ? null : Number(v));
         const total = carteles.reduce((s, c) => s + (num(c.precio) || 0) + (num(c.precio_dimmer) || 0), 0);
-        const pagado = num(body.pagado);
-        const restante = pagado != null ? Math.max(0, total - pagado) : total;
+        // Sin Frontera compra en CUENTA CORRIENTE (Gaspar 16-oct: "tenemos una cuenta corriente que está en otro Excel"): con
+        // Cliente: Sin Frontera (solo admin) el alta va sin seña, caja ni comprobante, estado_pago 'Cuenta corriente' y restante 0
+        // (la deuda se lleva aparte: no entra a "por cobrar" ni cierra la OC del chat).
+        const esCuentaSF = !!body.cliente_sf && String(body.estado_pago || '') === 'Cuenta corriente' && (await getSessionRole(env, session.user)) === 'admin';
+        const pagado = esCuentaSF ? 0 : num(body.pagado);
+        const restante = esCuentaSF ? 0 : (pagado != null ? Math.max(0, total - pagado) : total);
         const plataforma = body.plataforma === 'IG' ? 'IG' : 'WPP';
-        const estadoPago = String(body.estado_pago || '1er pago');
+        const estadoPago = esCuentaSF ? 'Cuenta corriente' : String(body.estado_pago || '1er pago');
         // PAGO (oct-2026): comprobante + caja OBLIGATORIOS. Se exigen solo si el front es el nuevo (pago_v ≥ 2): un
         // vendedor con la PWA vieja en caché no manda estos campos y no se le frena la venta (regla de la casa).
         // Efectivo ⇔ caja 'Efectivo' y sin comprobante (el importe es `pagado`).
@@ -24035,8 +24029,9 @@ const handler = {
         if (pagoMetodo === 'efectivo') caja = 'Efectivo';
         else if (caja === 'Efectivo') pagoMetodo = 'efectivo';
         let compKey = (pagoMetodo !== 'efectivo' && esKeyComprobantePedido(body.comprobante_key)) ? String(body.comprobante_key) : '';
+        if (esCuentaSF) { caja = ''; compKey = ''; pagoMetodo = ''; }
         const compWamid = compKey ? String(body.comprobante_wamid || '').slice(0, 200) : '';
-        if (pagoV >= 2) {
+        if (pagoV >= 2 && !esCuentaSF) {
           if (!caja) return json({ error: 'Falta a qué caja pagó', campo: 'caja' }, 400);
           if (!(pagado > 0)) return json({ error: 'Falta el importe pagado', campo: 'pagado' }, 400);
           if (!pagoMetodo) pagoMetodo = 'transferencia';
@@ -24153,6 +24148,16 @@ const handler = {
         const rs = { results: await pedidosConDiseno(env, 'WHERE pedidos.numero = ? AND pedidos.origen = ? AND pedidos.created_at = ? ORDER BY pedidos.id', [numero, 'crm', now], { interno: (await getSessionRole(env, session.user)) === 'admin', fotos: true }) };
         // Mano de obra del productor (por tiempo desde mo_desde): queda guardada en cada cartel de neón.
         try { await moActualizar(env, (rs.results || []).map(r => r.id)); } catch (_) {}
+        // Cliente Sin Frontera (solo Gaspar): queda vinculado en el MISMO alta (antes era un segundo POST del front que podía
+        // fallar suelto). Lo ven en su "Mis pedidos". Desde 16-oct todos sus neones se cargan acá (Pedidos_Distris = histórico).
+        let sfVinculado = false;
+        if (body.cliente_sf && (rs.results || []).length && (await getSessionRole(env, session.user)) === 'admin') {
+          try {
+            await ensureSinFronteraSchema(env);
+            await env.DB.batch(rs.results.map(r => env.DB.prepare('INSERT OR IGNORE INTO sinfrontera_pedidos (pedido_id, por, at) VALUES (?, ?, ?)').bind(r.id, String(session.user || ''), now)));
+            sfVinculado = true;
+          } catch (_) {}
+        }
         // Red de seguridad: si el pedido quedó SIN ad (no se trazó en el front, o se cargó a mano),
         // intentar trazarlo server-side ya mismo. WPP por teléfono; IG por IGSID vía la OC del chat
         // (traceAdForPedido resuelve el phone del cliente aunque telefono venga como @usuario/vacío).
@@ -24178,8 +24183,8 @@ const handler = {
           }
         } catch (_) {}
         // OC de ese cliente → pagada (saca POR PAGAR, pone "Cartel primer pago", oc_enviadas.pagado_at). Ver ocCerrarPorPedido.
-        await ocCerrarPorPedido(env, [telefono, igId], estadoPago);
-        return json({ ok: true, numero, pedidos: rs.results || [] });
+        if (!esCuentaSF) await ocCerrarPorPedido(env, [telefono, igId], estadoPago);
+        return json({ ok: true, numero, pedidos: rs.results || [], ...(body.cliente_sf ? { sf_vinculado: sfVinculado } : {}) });
       }
 
       // PATCH /admin/pedidos/:id → edita un pedido. Dos alcances:
@@ -25590,7 +25595,7 @@ const handler = {
           try { usr = await env.DB.prepare("SELECT activo, CASE WHEN IFNULL(password_hash, '') <> '' THEN 1 ELSE 0 END AS con_clave FROM users_panel WHERE id = 'sinfrontera'").first(); } catch (_) {}
           let vinc = [];
           try { vinc = ((await env.DB.prepare('SELECT pedido_id FROM sinfrontera_pedidos ORDER BY pedido_id').all()).results || []).map(r => r.pedido_id); } catch (_) {}
-          const ped = await sfPedidos(env);
+          const ped = await sfPedidos(env, { planilla: false });
           return json({ ok: true, telefonos: await sfTels(env), vinculados: vinc, pedidos_ids: (ped.pedidos || []).map(p => p.id), usuario: { existe: !!usr, activo: !!(usr && +usr.activo === 1), con_clave: !!(usr && +usr.con_clave === 1) } });
         }
         return json({ error: 'not found' }, 404);

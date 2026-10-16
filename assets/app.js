@@ -6980,17 +6980,20 @@ function sfDrawerRefrescar(idx) {
   if (p) s.outerHTML = sfDrawerSection(p) || '';
 }
 async function sfCargarVinculos(forzar) {
-  if (!isAdmin() || STATE._sfVincCargando || (STATE.sfVinc && !forzar)) return;
+  if (!isAdmin() || (STATE.sfVinc && !forzar)) return;
+  if (STATE._sfVincCargando) { if (forzar) STATE._sfVincOtra = true; return; }
   if (!forzar && STATE._sfVincFallo && Date.now() - STATE._sfVincFallo < 60000) return; // si falló, no reintentar en cada dibujo
-  STATE._sfVincCargando = true;
+  STATE._sfVincCargando = true; STATE._sfVincOtra = false;
+  const gen = STATE._sfVincGen = (STATE._sfVincGen || 0) + 1;
   let ok = false;
-  try { sfSetVinc(await sfFetch('/admin/sinfrontera/config')); ok = true; STATE._sfVincFallo = 0; }
+  try { const j = await sfFetch('/admin/sinfrontera/config'); if (gen === STATE._sfVincGen) { sfSetVinc(j); ok = true; } STATE._sfVincFallo = 0; }
   catch (_) { STATE._sfVincFallo = Date.now(); } finally { STATE._sfVincCargando = false; }
+  if (STATE._sfVincOtra) { STATE._sfVincOtra = false; return sfCargarVinculos(true); } // la pedida en vuelo relee (ya con el alta)
   if (ok && STATE.view === 'pedidos' && document.getElementById('table-pedidos')) renderTablePedidos();
   if (ok) sfDrawerRefrescar();
 }
 async function sfVincular(ids, on) {
-  try { sfSetVinc(await sfFetch('/admin/sinfrontera/config', on ? { vincular: ids } : { desvincular: ids })); return true; }
+  try { const j = await sfFetch('/admin/sinfrontera/config', on ? { vincular: ids } : { desvincular: ids }); STATE._sfVincGen = (STATE._sfVincGen || 0) + 1; sfSetVinc(j); return true; }
   catch (_) { return false; }
 }
 // Botón del detalle: marca o quita TODO el pedido (sus carteles hermanos).
@@ -7032,7 +7035,6 @@ function renderSfPedidos() {
   const ps = D.pedidos || [];
   const grupos = [...new Set(ps.map(sfPedGrupoKey))].map(k => ps.filter(x => sfPedGrupoKey(x) === k));
   const total = ps.reduce((s, p) => s + (+p.precio || 0) + (+p.precio_dimmer || 0), 0);
-  const saldo = grupos.reduce((s, g) => s + (+g[0].restante || 0), 0);
   const trunc = (s, n) => { s = String(s || '').replace(/\s+/g, ' ').trim(); return s ? (escapeHtml(s.slice(0, n)) + (s.length > n ? '…' : '')) : '—'; };
   const fecha = f => { const d = f ? new Date(String(f).slice(0, 10) + 'T12:00:00') : null; return d && !isNaN(d) ? fmtDate(d) : '—'; };
   const filas = ps.map(p => `<tr data-sfp="${p.id}">
@@ -7043,7 +7045,6 @@ function renderSfPedidos() {
       <td>${dimerPillHtml(p.dimer)}</td>
       <td title="${escapeHtml(p.envio || '')}"><span class="muted" style="font-size:12px">${trunc(p.envio, 16)}</span></td>
       <td title="${escapeHtml(p.aclaracion || '')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion, 16)}</span></td>
-      <td>${pillEstadoPago(p.estado_pago)}</td>
       <td>${pillEstadoPedido(p.estado_pedido)}</td>
     </tr>`).join('');
   return `<div class="logi-wrap sf-wrap">
@@ -7051,16 +7052,16 @@ function renderSfPedidos() {
     <div class="logi-head"><h1>${isAdmin() ? 'Pedidos de Sin Frontera' : 'Mis pedidos'}</h1></div>
     <div class="logi-bar">
       <span>${escapeHtml(sfHace(D.at))}</span>
-      ${ps.length ? `<span>· ${grupos.length} pedido${grupos.length === 1 ? '' : 's'} · ${ps.length} cartel${ps.length === 1 ? '' : 'es'} · total ${fmtMoney(total)}${saldo > 0 ? ' · saldo pendiente <b>' + fmtMoney(saldo) + '</b>' : ''}</span>` : ''}
+      ${ps.length ? `<span>· ${grupos.length} pedido${grupos.length === 1 ? '' : 's'} · ${ps.length} cartel${ps.length === 1 ? '' : 'es'} · total ${fmtMoney(total)}</span>` : ''}
       <span style="flex:1"></span>
       <button class="btn btn-ghost" data-sf-refresh>Actualizar</button>
       ${sfAdminBarra()}
     </div>
     ${D.planillaError ? `<div class="logi-ayuda" style="color:#ffc97a">No se pudo leer la planilla: puede faltar algún pedido. Tocá Actualizar en un rato.</div>` : ''}
     ${ps.length ? `<div class="table-wrap sf-tabla"><table class="t">
-      <thead><tr><th>Fecha</th><th>Cartel</th><th>Base</th><th>Precio</th><th>Dimer</th><th>Envío</th><th>Aclar.</th><th>Pago</th><th>Estado</th></tr></thead>
+      <thead><tr><th>Fecha</th><th>Cartel</th><th>Base</th><th>Precio</th><th>Dimer</th><th>Envío</th><th>Aclar.</th><th>Estado</th></tr></thead>
       <tbody>${filas}</tbody></table></div>
-      <div class="logi-ayuda">Click en un cartel para ver el pedido completo${isAdmin() ? ' · los de la planilla salen de Pedidos_Distris con Canal "Sin Frontera"' : ''}</div>`
+      <div class="logi-ayuda">Click en un cartel para ver el pedido completo${isAdmin() ? ' · los nuevos se cargan en Pedidos con Cliente: Sin Frontera; los viejos salen de la planilla (Pedidos_Distris, Canal "Sin Frontera")' : ''}</div>`
     : `<div class="logi-vacio-box">${isAdmin() && !D.configurado ? 'Todavía no cargaste con qué números te compran: tocá "Sus números y pedidos".' : 'Todavía no hay pedidos.'}</div>`}
   </div>`;
 }
@@ -7095,10 +7096,7 @@ function sfPedDetalle(id) {
     <div class="modal-body">
       <div class="sf-resumen">
         <div><span>Estado</span>${pillEstadoPedido(p0.estado_pedido)}</div>
-        <div><span>Pago</span>${pillEstadoPago(p0.estado_pago)}</div>
         <div><span>Total</span><b>${fmtMoney(total)}</b></div>
-        <div><span>Pagado</span><b>${fmtMoney(p0.pagado)}</b></div>
-        <div><span>Saldo</span><b style="color:${+p0.restante > 0 ? '#ffc97a' : '#6ef0a0'}">${fmtMoney(p0.restante)}</b></div>
       </div>
       ${p0.envio ? `<div class="sf-dato" style="margin-top:10px"><span>Envío</span><b>${escapeHtml(p0.envio)}</b></div>` : ''}
       ${g.map(cartel).join('')}
@@ -11215,6 +11213,8 @@ function pmValidate() {
     else if (!c.foto_key && !c.foto_despues) invalid.push({ sel:`[data-pm-foto-slot="${i}"]`, msg:`Cartel ${nro}: falta la foto del diseño final (o marcá "La subo después")` });
   }
   // Pago (oct-2026): caja obligatoria; en transferencia, también el comprobante (en efectivo la caja es 'Efectivo').
+  // Sin Frontera = cuenta corriente: nada de pago.
+  if (pmCuentaSF(m)) return invalid;
   if (m.pagoMetodo !== 'efectivo') {
     if (!m.caja || m.caja === 'Efectivo') invalid.push({ sel:'[data-pmc-caja-row]', msg:'Elegí a qué caja pagó' });
     if (m.comp_estado === 'subiendo') invalid.push({ sel:'[data-pmc-comp-slot]', msg:'Esperá que termine de subir el comprobante' });
@@ -11266,7 +11266,7 @@ async function confirmCargarPedido() {
   if (raros.length && !(await showConfirm('Estos datos parecen un error de tipeo:\n\n' + raros.join('\n') + '\n\n¿Están bien así?', { title: 'Revisá antes de guardar', variant: 'warn', confirmLabel: 'Sí, están bien', cancelLabel: 'Corregir' }))) return;
   const efectivo = m.pagoMetodo === 'efectivo';
   // Comprobante que ya es el pago de otro pedido: casi siempre es un error (el mismo pago no puede contar dos veces).
-  const compUsado = (!efectivo && m._compOcr && Array.isArray(m._compOcr.usado_en)) ? m._compOcr.usado_en : [];
+  const compUsado = (!efectivo && !pmCuentaSF(m) && m._compOcr && Array.isArray(m._compOcr.usado_en)) ? m._compOcr.usado_en : [];
   if (compUsado.length && !(await showConfirm('Ese comprobante ya está cargado en el pedido ' + compUsado.map(u => '#' + u.numero + (u.cartel ? ' (' + u.cartel + ')' : '')).join(', ') + '.\n\n¿Seguro que es el pago de este pedido?', { title: 'Comprobante repetido', variant: 'warn', confirmLabel: 'Sí, es este', cancelLabel: 'Cambiarlo' }))) return;
   const carteles = (m.carteles||[]).filter(c => String(c.cartel||'').trim());
   STATE.pedidoModalSaving = true; render();
@@ -11284,6 +11284,8 @@ async function confirmCargarPedido() {
       source_id: m.sourceId || '',
       // De quién es la venta (solo admin): lo que carga Gaspar es suyo (sin comisión) salvo que elija un vendedor.
       comercial_id: isAdmin() ? (m.vendedor || 'gaspar') : undefined,
+      // Cliente Sin Frontera (solo admin): el server lo vincula en el mismo alta.
+      cliente_sf: isAdmin() && m.clienteSF ? 1 : undefined,
       // PAGO (oct-2026, pago_v 2 → el server exige caja, comprobante si es transferencia, y pagado > 0). pagado sigue
       // siendo el importe del 1er pago (en efectivo, lo que pagó en efectivo).
       pago_v: 2,
@@ -11303,6 +11305,7 @@ async function confirmCargarPedido() {
         foto_key: c.foto_key || ''
       }))
     };
+    if (pmCuentaSF(m)) Object.assign(payload, { estado_pago: 'Cuenta corriente', pagado: 0, pago_metodo: '', caja: '', comprobante_key: '', comprobante_wamid: '' });
     const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos', { method:'POST', headers: { ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j.error) { const err = new Error(j.error || ('HTTP '+r.status)); err.campo = j.campo || ''; throw err; }
@@ -11313,8 +11316,9 @@ async function confirmCargarPedido() {
     STATE.pedidoModalSaving = false;
     render();
     toast(`Pedido #${j.numero} cargado ✓ (${nuevos.length} cartel${nuevos.length>1?'es':''})`);
-    // Cliente Sin Frontera (solo admin): lo ven en su usuario, "Mis pedidos".
-    if (isAdmin() && m.clienteSF && nuevos.length) sfVincular(nuevos.map(x => x.idx), true).then(ok => {
+    // Cliente Sin Frontera (solo admin): lo ven en su usuario, "Mis pedidos". El server ya lo vinculó en el alta
+    // (sf_vinculado); si no (worker viejo o falló), se reintenta como antes.
+    if (isAdmin() && m.clienteSF && nuevos.length) (j.sf_vinculado === true ? sfCargarVinculos(true).then(() => true) : sfVincular(nuevos.map(x => x.idx), true)).then(ok => {
       toast(ok ? `Pedido #${j.numero}: ya lo ven en "Mis pedidos" de Sin Frontera` : 'Ojo: no se pudo marcar como de Sin Frontera. Marcalo desde el detalle del pedido.');
       if (document.getElementById('table-pedidos')) renderTablePedidos();
     });
@@ -11575,7 +11579,13 @@ function pmPagadoHintHtml(m) {
 }
 // Bloque "💳 Pago" (reemplaza la vieja fila estado/pagado/restante: mantiene #pm-estadopago, #pm-pagado y
 // #pm-restante, que usan readPedidoModalDOM y pmRecalc).
+// Cliente Sin Frontera (solo admin) = cuenta corriente: sin seña, caja ni comprobante (Gaspar 16-oct).
+function pmCuentaSF(m) { return !!(m && m.clienteSF && isAdmin()); }
 function pmPagoBlockHtml(m) {
+  if (pmCuentaSF(m)) return `<div data-pmc-pago style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-2);margin-bottom:var(--s-3);background:var(--ink-050)">
+      <div style="font-size:11px;color:var(--accent-cyan);font-weight:700;margin-bottom:6px">💳 Pago</div>
+      <div style="font-size:13px">Cuenta corriente de Sin Frontera: no se carga seña ni comprobante, se cobra aparte.</div>
+    </div>`;
   pmPagoAutoEstado(m);
   const ef = m.pagoMetodo === 'efectivo';
   const restante = Math.max(0, pedidoModalTotal() - (Number(m.pagado) || 0));
