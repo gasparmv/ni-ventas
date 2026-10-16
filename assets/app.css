@@ -4486,7 +4486,8 @@ select.lb-sel.tr.sug, select.lb-sel.tr.vacio { color: var(--fg-subtle); font-sty
 }
 
 /* ===== Producción de neón: pantalla del productor (celular primero) + vista de Gaspar (15-oct-2026) ===== */
-.prod-app{min-height:100vh;background:var(--ink-0,#0b0b10);color:var(--fg)}
+.prod-app{min-height:100vh;background:var(--ink-0,#0b0b10);color:var(--fg);grid-column:1 / -1;width:100%;min-width:0}
+/* #app es una grilla de 2 columnas (menú + contenido): la pantalla del productor ocupa las dos (si no, quedaba en la del menú, 240 px) */
 .prod-top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--ink-50,#111118);border-bottom:1px solid var(--border)}
 .prod-body{max-width:760px;margin:0 auto;padding:12px 12px 40px}
 .prod-resumen{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:4px 0 12px}
