@@ -13010,15 +13010,128 @@ async function processCentinelaRuteo(env) {
 }
 
 // ===== ALARMA "SIN RESPONDER" (oct-2026) =====
-// Avisa cuando un lead de VENTA de carteles quedó con un mensaje SIN RESPONDER más de N horas.
+// Avisa cuando un lead de VENTA de carteles quedó con un mensaje SIN RESPONDER que de verdad espera respuesta.
 // Nació por el caso @_feerco/"Variopinto": un lead que Joaco YA había cotizado volvió caliente
 // ("quiero pagar... sino otro proveedor") y estuvo ~3 semanas sin que nadie contestara — estaba en
 // la bandeja de Joaco (inbox general sin asignar) con la etiqueta "Abandonado IA", y ninguna alarma
-// lo agarraba (el Centinela vigila RUTEO, no si lo respondieron). Manda un DIGEST por vendedor (a su
-// WhatsApp) + uno combinado a Gaspar. Solo leads YA COTIZADOS (presupuesto enviado) o con intención
-// de compra, para no hacer ruido. Kill-switch kv 'sin_responder_on' (def '1'); umbral de horas kv
-// 'sin_responder_horas' (def '3'); horario 9-21 AR lun-sáb; dedup 1 aviso por lead cada 3 h (o si
-// llega un mensaje nuevo). Self-throttle 15 min. Corre en el cron.
+// lo agarraba (el Centinela vigila RUTEO, no si lo respondieron).
+// v2 (16-oct, al prenderla): la v1 avisaba todo chat cotizado cuyo último mensaje fuera del cliente → al prenderla
+// eran 30 leads (24 a Joaco), casi todos "gracias" / "❤️" / "lo dejo para más adelante", repetidos cada 3 h = ruido
+// que nadie mira. Criterio v2:
+//  · Candidatos: bandeja de carteles (inbox 'general'), último mensaje del CLIENTE, entre 1 h y 48 h (kv
+//    sin_responder_floor_horas), sin teléfonos del equipo, y (ya cotizado = brief 'enviado' a ese chat, o el
+//    último mensaje habla de pagar/comprar/avanzar/coordinar/seña/otro proveedor).
+//  · Filtro: "¿el cliente espera respuesta?" — cortesía pura (gracias, emoji solo) se descarta sin IA; el resto lo
+//    decide Claude Haiku mirando los últimos mensajes (pregunta, pedido, objeción trabajable, foto/audio nuevo,
+//    reclamo → sí; cierre, "lo pienso / te aviso", rechazo definitivo → no). Se clasifica UNA vez por mensaje.
+//  · Cuándo: 3 h (kv sin_responder_horas) o 1 h si es urgente (quiere pagar/señar, datos de pago, fecha cercana,
+//    reclamo). Horario 9-21 AR lun-sáb. UN aviso por mensaje (si el cliente escribe otra cosa, cuenta de nuevo).
+//  · A quién: digest al vendedor dueño del chat (sin asignar = Joaco) + uno combinado a Gaspar, por avisoInterno
+//    (texto si la ventana de 24 h está abierta; si no, plantilla de servicio recordatorio_agenda).
+// Kill-switch kv 'sin_responder_on' (def '1'). Self-throttle 15 min. Vista previa: GET /admin/sin-responder/preview.
+const SIN_RESP_CORTESIA_RE = /^((muchas|mil|muchisimas|muchísimas) )?gracias( (a vos|igual|igualmente|por (todo|la info|la informacion|la información|tu tiempo)))?$|^(de nada|igualmente|saludos|un saludo|abrazo|un abrazo|buen (finde|fin de semana|dia|día)|buenas noches)$/i;
+function sinRespEsCortesia(body) {
+  const t = String(body || '').trim();
+  if (!t || /^\[(audio|imagen|image|video|documento|document|sticker)/i.test(t)) return false;   // media: que lo vea la IA
+  if (/[?¿]/.test(t)) return false;
+  const sinEmoji = t.replace(/[\p{Extended_Pictographic}\u{1F3FB}-\u{1F3FF}️‍]/gu, '').replace(/[\s.,;:!¡)(\-*~]+/g, ' ').trim();
+  if (!sinEmoji) return true;                                          // solo emojis / signos
+  if (sinEmoji.length > 60) return false;
+  return SIN_RESP_CORTESIA_RE.test(sinEmoji.toLowerCase().replace(/\s+/g, ' ').trim());
+}
+// {espera, urgente, motivo} o null si la IA no respondió (no se cachea: se reintenta en la próxima corrida).
+async function sinRespClasificar(env, phone, msgs) {
+  if (!env.ANTHROPIC_API_KEY || !msgs.length) return null;
+  const conv = msgs.map(m => (m.direction === 'inbound' ? 'CLIENTE' : 'NEGOCIO') + (m.msg_type && m.msg_type !== 'text' ? ' [' + m.msg_type + ']' : '') + ': ' + String(m.body || '').replace(/\s+/g, ' ').trim().slice(0, 400)).join('\n');
+  const system = 'Sos supervisor de ventas de un negocio de carteles de neón LED y letras corpóreas (Argentina). Te paso el final de un chat entre un CLIENTE y el NEGOCIO; el último mensaje es del cliente y nadie le contestó. Decidí si el vendedor TIENE que responderle. Devolvé SOLO un JSON: {"espera":true|false,"urgente":true|false,"motivo":"máximo 8 palabras"}.\n' +
+    'espera=true si el cliente: hace una pregunta o pide algo (precio, medidas, plazos, envío, datos de pago, una foto, un cambio); quiere avanzar, comprar, pagar o señar; plantea una objeción que un vendedor puede trabajar (le parece caro, no le alcanza el presupuesto, compara con otro proveedor, duda entre opciones); manda una foto, audio o idea nueva para cotizar; o reclama.\n' +
+    'espera=false si es solo cortesía o cierre (gracias, ok, emoji, "joya", "perfecto" sin pedir nada); si dice que lo piensa, que avisa él o que lo deja para más adelante sin preguntar nada; si rechaza en forma definitiva (no me interesa, ya compré en otro lado); o si es spam, número equivocado o un mensaje automático.\n' +
+    'urgente=true solo si quiere pagar o señar ya, pide los datos de pago, tiene una fecha límite cercana o reclama por un pedido. Ante la duda entre espera true y false, elegí true.';
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 80, system, messages: [{ role: 'user', content: conv.slice(-3500) }] }),
+      signal: AbortSignal.timeout(20000)
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j) return null;
+    try { await logAnthropicUsage(env, 'clasificador', 'claude-haiku-4-5', j, phone, 'sin_responder'); } catch (_) {}
+    const txt = String((j.content && j.content[0] && j.content[0].text) || '');
+    const m = /\{[\s\S]*\}/.exec(txt); if (!m) return null;
+    const o = JSON.parse(m[0]);
+    if (typeof o.espera !== 'boolean') return null;
+    return { espera: o.espera, urgente: o.espera && o.urgente === true, motivo: String(o.motivo || '').replace(/\s+/g, ' ').trim().slice(0, 80) };
+  } catch (_) { return null; }
+}
+// Envío de un aviso del equipo: texto si el destinatario le escribió al número del negocio en las últimas 23 h; si
+// no, la plantilla de SERVICIO recordatorio_agenda ({{1}} libre, una línea): el texto libre con la ventana cerrada
+// no llega (131047) y la MARKETING le rebota a Bruno (131049).
+async function sinRespEnviar(env, ph, texto) {
+  const E = { esAviso: true };
+  const dig = String(ph || '').replace(/\D/g, '');
+  try {
+    const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status', 'reaction') AND ts > ? LIMIT 1").bind(dig, isoHace(23 * 3600 * 1000)).first();
+    if (inb) { const r0 = await waSendText(env, dig, String(texto || '').slice(0, 3500), E); if (r0 && r0.ok) return r0; }
+  } catch (_) {}
+  let r = null;
+  try { r = await waSendTemplate(env, dig, 'recordatorio_agenda', 'es_AR', [String(texto || '').replace(/\s+/g, ' ').trim().slice(0, 800)], null, E); } catch (_) {}
+  return r;
+}
+async function ensureSinRespSchema(env) {
+  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS sin_responder_avisos (phone TEXT PRIMARY KEY, last_ts TEXT, alerted_at TEXT)').run(); } catch (_) {}
+  for (const c of ['clasif_ts TEXT', 'espera INTEGER', 'urgente INTEGER', 'motivo TEXT']) { try { await env.DB.prepare(`ALTER TABLE sin_responder_avisos ADD COLUMN ${c}`).run(); } catch (_) {} }
+}
+// Candidatos + clasificación (cacheada por mensaje). La usan el cron y la vista previa. Devuelve
+// [{ phone, owner, last_ts, last_body, contact_name, edad_h, espera, urgente, motivo, pendiente, avisado, alertar }].
+async function sinRespCandidatos(env, nowMs, opts = {}) {
+  await ensureSinRespSchema(env);
+  const horas = Math.max(1, parseInt(await kvGet(env, 'sin_responder_horas', '3'), 10) || 3);
+  const floorH = Math.max(horas + 1, parseInt(await kvGet(env, 'sin_responder_floor_horas', '48'), 10) || 48);
+  const cut1h = new Date(nowMs - 3600 * 1000).toISOString();
+  const cutFloor = new Date(nowMs - floorH * 3600 * 1000).toISOString();
+  let rows = [];
+  try {
+    rows = (await env.DB.prepare(
+      `SELECT s.phone, s.assigned_to, s.last_ts, s.last_body, s.contact_name
+         FROM wa_chats_summary s
+        WHERE s.inbox = 'general' AND s.last_direction = 'inbound'
+          AND s.last_ts <= ? AND s.last_ts >= ?
+          AND s.phone NOT IN (SELECT phone FROM wa_internal_phones)
+          AND ( s.phone IN (SELECT cliente_wa_id FROM briefs WHERE estado = 'enviado')
+             OR lower(s.last_body) LIKE '%pagar%' OR lower(s.last_body) LIKE '%comprar%'
+             OR lower(s.last_body) LIKE '%avanzar%' OR lower(s.last_body) LIKE '%coordinar%'
+             OR lower(s.last_body) LIKE '%seña%' OR lower(s.last_body) LIKE '%sena%'
+             OR lower(s.last_body) LIKE '%otro proveedor%' )
+        ORDER BY s.last_ts DESC LIMIT 80`
+    ).bind(cut1h, cutFloor).all()).results || [];
+  } catch (_) { rows = []; }
+  const maxIa = Math.max(0, opts.clasificarMax == null ? 25 : opts.clasificarMax);
+  let usadas = 0;
+  const out = [];
+  for (const r of rows) {
+    let p = null;
+    try { p = await env.DB.prepare('SELECT last_ts, alerted_at, clasif_ts, espera, urgente, motivo FROM sin_responder_avisos WHERE phone = ?').bind(r.phone).first(); } catch (_) {}
+    const cacheado = !!(p && p.clasif_ts === r.last_ts && p.espera != null);
+    let c = cacheado ? { espera: !!p.espera, urgente: !!p.urgente, motivo: p.motivo || '' } : null;
+    if (!c && sinRespEsCortesia(r.last_body)) c = { espera: false, urgente: false, motivo: 'cortesía / cierre' };
+    else if (!c && usadas < maxIa) {
+      usadas++;
+      let msgs = [];
+      try { msgs = ((await env.DB.prepare("SELECT direction, msg_type, body FROM wa_messages WHERE phone = ? AND msg_type NOT IN ('status', 'reaction') ORDER BY ts DESC LIMIT 8").bind(r.phone).all()).results || []).reverse(); } catch (_) {}
+      c = await sinRespClasificar(env, r.phone, msgs);
+    }
+    if (c && !cacheado) {
+      try { await env.DB.prepare('INSERT INTO sin_responder_avisos (phone, clasif_ts, espera, urgente, motivo) VALUES (?,?,?,?,?) ON CONFLICT(phone) DO UPDATE SET clasif_ts=excluded.clasif_ts, espera=excluded.espera, urgente=excluded.urgente, motivo=excluded.motivo').bind(r.phone, r.last_ts, c.espera ? 1 : 0, c.urgente ? 1 : 0, c.motivo).run(); } catch (_) {}
+    }
+    const edadH = (nowMs - new Date(r.last_ts).getTime()) / 3600000;
+    const avisado = !!(p && p.last_ts === r.last_ts && p.alerted_at);
+    const alertar = !!c && c.espera && !avisado && (edadH >= horas || (c.urgente && edadH >= 1));
+    out.push({ phone: r.phone, owner: (String(r.assigned_to || '').trim()) || 'joaquin', last_ts: r.last_ts, last_body: r.last_body || '', contact_name: r.contact_name || '',
+      edad_h: Math.round(edadH * 10) / 10, espera: c ? c.espera : null, urgente: c ? c.urgente : null, motivo: c ? c.motivo : '', pendiente: !c, avisado, alertar });
+  }
+  return out;
+}
 async function processSinResponder(env) {
   try {
     if ((await kvGet(env, 'sin_responder_on', '1')) !== '1') return;
@@ -13029,71 +13142,37 @@ async function processSinResponder(env) {
     const ar = new Date(nowMs - 3 * 3600 * 1000);
     if (ar.getUTCHours() < 9 || ar.getUTCHours() >= 21 || ar.getUTCDay() === 0) return;
     await kvSet(env, 'sin_responder_last_run', String(nowMs));
-    try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS sin_responder_avisos (phone TEXT PRIMARY KEY, last_ts TEXT, alerted_at TEXT)').run(); } catch (_) {}
-
-    const horas = Math.max(1, parseInt(await kvGet(env, 'sin_responder_horas', '3'), 10) || 3);
-    const cutOld = new Date(nowMs - horas * 3600 * 1000).toISOString();   // último inbound más viejo que esto
-    // Piso: la alarma agarra la ventana ACCIONABLE (def 48h). Más viejo ya está perdido (eso es
-    // limpieza aparte, no una alarma en vivo) y dumpear 10 días de backlog de golpe sería contraproducente.
-    const floorH = Math.max(horas + 1, parseInt(await kvGet(env, 'sin_responder_floor_horas', '48'), 10) || 48);
-    const cutFloor = new Date(nowMs - floorH * 3600 * 1000).toISOString();
-    let rows = [];
-    try {
-      rows = (await env.DB.prepare(
-        `SELECT s.phone, s.assigned_to, s.last_ts, s.last_body, s.contact_name
-           FROM wa_chats_summary s
-          WHERE s.inbox = 'general' AND s.last_direction = 'inbound'
-            AND s.last_ts <= ? AND s.last_ts >= ?
-            AND s.phone NOT IN (SELECT phone FROM wa_internal_phones)
-            AND ( s.phone IN (SELECT cliente_wa_id FROM briefs WHERE estado = 'enviado')
-               OR lower(s.last_body) LIKE '%pagar%' OR lower(s.last_body) LIKE '%comprar%'
-               OR lower(s.last_body) LIKE '%avanzar%' OR lower(s.last_body) LIKE '%coordinar%'
-               OR lower(s.last_body) LIKE '%seña%' OR lower(s.last_body) LIKE '%sena%'
-               OR lower(s.last_body) LIKE '%otro proveedor%' )
-          ORDER BY s.last_ts ASC LIMIT 30`
-      ).bind(cutOld, cutFloor).all()).results || [];
-    } catch (_) { rows = []; }
-
-    // Dedup: dejar solo los que no avisamos por el MISMO mensaje en las últimas 3 h.
-    const reAlertMs = 3 * 3600 * 1000;
-    const fresh = [];
-    for (const r of rows) {
-      let p = null;
-      try { p = await env.DB.prepare('SELECT last_ts, alerted_at FROM sin_responder_avisos WHERE phone = ?').bind(r.phone).first(); } catch (_) {}
-      if (p && p.last_ts === r.last_ts && p.alerted_at && (nowMs - new Date(p.alerted_at).getTime()) < reAlertMs) continue;
-      fresh.push(r);
-    }
+    const fresh = (await sinRespCandidatos(env, nowMs)).filter(x => x.alertar);
     if (!fresh.length) return;
 
     const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
     const nombreVend = o => o === 'joaquin' ? 'Joaco' : (o.charAt(0).toUpperCase() + o.slice(1));
     const line = r => {
-      const h = Math.max(1, Math.round((nowMs - new Date(r.last_ts).getTime()) / 3600000));
-      const nm = (r.contact_name && String(r.contact_name).trim()) || r.phone;
-      const b = String(r.last_body || '').replace(/\s+/g, ' ').trim().slice(0, 70);
-      return `· ${nm} (hace ${h}h)${b ? ': "' + b + '"' : ''}`;
+      const h = Math.max(1, Math.round(r.edad_h));
+      const nm = (r.contact_name && String(r.contact_name).trim()) || ('…' + String(r.phone).slice(-4));
+      const b = String(r.last_body || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+      return `${r.urgente ? '🔴' : '·'} ${nm} (hace ${h}h)${r.motivo ? ' — ' + r.motivo : ''}${b ? ': "' + b + '"' : ''}`;
     };
     const byOwner = {};
-    for (const r of fresh) { const o = (String(r.assigned_to || '').trim()) || 'joaquin'; (byOwner[o] = byOwner[o] || []).push(r); }
-
-    // Digest a cada vendedor dueño.
+    for (const r of fresh) (byOwner[r.owner] = byOwner[r.owner] || []).push(r);
+    const nowIso = new Date(nowMs).toISOString();
+    // Digest a cada vendedor dueño (por avisoInterno: en dry/off sale por sinRespEnviar).
     for (const o in byOwner) {
       let ophone = '';
       try { const op = await env.DB.prepare('SELECT phone FROM agenda_phones WHERE usuario = ?').bind(o).first(); ophone = op && op.phone; } catch (_) {}
       if (!ophone || ophone === gaspar) continue;
       const list = byOwner[o];
       const sh = list.slice(0, 12); const ex = list.length - sh.length;
-      const msg = `⏰ Tenés ${list.length} lead${list.length > 1 ? 's' : ''} sin responder (ya cotizado o pidiendo avanzar):\n` + sh.map(line).join('\n') + (ex > 0 ? `\n· …y ${ex} más` : '') + `\n\nContestales o pasalos, no los dejes enfriar.`;
-      try { await waSendText(env, ophone, msg); } catch (_) {}
+      const msg = `⏰ Tenés ${list.length} cliente${list.length > 1 ? 's' : ''} esperando respuesta:\n` + sh.map(line).join('\n') + (ex > 0 ? `\n· …y ${ex} más` : '') + `\n\nContestales o pasalos, no los dejes enfriar.`;
+      try { await avisoInterno(env, { para: o, tipo: 'sin_responder', prioridad: list.some(x => x.urgente) ? 'P1' : 'P2', clave: 'sinresp:' + o + ':' + nowIso.slice(0, 16), texto: msg, legacy: () => sinRespEnviar(env, ophone, msg), legacyDest: ophone }); } catch (_) {}
     }
     // Digest combinado a Gaspar.
-    const gMsg = `⏰ Leads sin responder (${fresh.length}):\n\n` + Object.keys(byOwner).map(o => { const L = byOwner[o]; const s = L.slice(0, 8); const e = L.length - s.length; return `*${nombreVend(o)}* (${L.length}):\n` + s.map(line).join('\n') + (e > 0 ? `\n· …y ${e} más` : ''); }).join('\n\n');
-    try { await waSendText(env, gaspar, gMsg); } catch (_) {}
+    const gMsg = `⏰ Clientes esperando respuesta (${fresh.length}):\n\n` + Object.keys(byOwner).map(o => { const L = byOwner[o]; const s = L.slice(0, 8); const e = L.length - s.length; return `*${nombreVend(o)}* (${L.length}):\n` + s.map(line).join('\n') + (e > 0 ? `\n· …y ${e} más` : ''); }).join('\n\n');
+    try { await avisoInterno(env, { para: 'gaspar', tipo: 'sin_responder', prioridad: 'P2', clave: 'sinresp:gaspar:' + nowIso.slice(0, 16), texto: gMsg, legacy: () => sinRespEnviar(env, gaspar, gMsg), legacyDest: gaspar }); } catch (_) {}
 
-    // Marcar avisados.
-    const nowIso = new Date(nowMs).toISOString();
+    // Marcar avisados (un aviso por mensaje: si el cliente escribe algo nuevo, vuelve a contar).
     for (const r of fresh) {
-      try { await env.DB.prepare('INSERT INTO sin_responder_avisos (phone, last_ts, alerted_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET last_ts=excluded.last_ts, alerted_at=excluded.alerted_at').bind(r.phone, r.last_ts, nowIso).run(); } catch (_) {}
+      try { await env.DB.prepare('UPDATE sin_responder_avisos SET last_ts = ?, alerted_at = ? WHERE phone = ?').bind(r.last_ts, nowIso, r.phone).run(); } catch (_) {}
     }
   } catch (_) {}
 }
@@ -24327,6 +24406,14 @@ const handler = {
       // POST /admin/pedidos/backfill-source → guarda el ad_id EXACTO (source_id/source_campaign) en
       // los pedidos ya trazados que no lo tienen. SEGURO: no cambia labels ni toca los marcados a
       // mano como orgánicos. Batched en un solo request. Solo Gaspar. Idempotente.
+      // GET /admin/sin-responder/preview → qué avisaría AHORA la alarma "sin responder" (sin mandar nada): candidatos,
+      // si el cliente espera respuesta (IA, cacheada por mensaje), urgencia, motivo y si ya se avisó. Solo Gaspar.
+      if (request.method === 'GET' && path === '/admin/sin-responder/preview') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const items = await sinRespCandidatos(env, Date.now(), { clasificarMax: Math.min(60, parseInt(url.searchParams.get('ia') || '40', 10) || 40) });
+        return json({ ok: true, on: (await kvGet(env, 'sin_responder_on', '1')) === '1', horas: parseInt(await kvGet(env, 'sin_responder_horas', '3'), 10) || 3, alertaria: items.filter(x => x.alertar).length, items });
+      }
+
       // POST /admin/pedidos/caja-sync[?id=N] → corre YA el pase de la caja de la seña a la col Z (Pedidos_Corporeo /
       // Pedidos_Directo) y devuelve el detalle (escritos / iguales / cargados a mano / sin fila). Solo Gaspar.
       // ?reintentar=1 vuelve a intentar los que quedaron sin fila o "manual" (resetea los intentos).
