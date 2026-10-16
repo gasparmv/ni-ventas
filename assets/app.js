@@ -10711,7 +10711,7 @@ function renderTablePedidos() {
               <td class="td-corta" title="${escapeHtml(p.envio||'')}"><span class="muted" style="font-size:12px">${trunc(p.envio,16)}</span></td>
               <td class="td-corta" title="${escapeHtml(p.aclaracion||'')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion,16)}</span></td>
               <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pago',p.estadoPago,PAGO_OPTS_TABLE)}${pagoCajaMini(p)}</td>
-              <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pedido',p.estadoPedido,PED_OPTS_TABLE)}</td>
+              <td onclick="event.stopPropagation()">${estadoNeonBloqueado(p) ? estadoNeonPill(p) : inlinePedidoSelect(p.idx,'estado_pedido',p.estadoPedido,PED_OPTS_TABLE)}</td>
               <td class="td-ad"><span class="muted" style="font-size:12px">${escapeHtml(p.canalAd||'—')}</span></td>
               ${_pedAdmin ? `<td>${loaderCell(p)}</td><td class="td-prod" onclick="event.stopPropagation()">${prodCeldaPedido(p)}</td>` : ''}
             </tr>
@@ -10793,6 +10793,14 @@ function pagoCajaMini(p) {
   if (!a && !b) return '';
   const txt = (a || '?') + (b && b !== a ? ' → ' + b : '');
   return `<div title="Caja del cobro${b ? ' (seña → saldo)' : ''}" style="font-size:10px;color:var(--fg-subtle);margin-top:2px;white-space:nowrap">${escapeHtml(txt)}</div>`;
+}
+// Neón: el estado lo mueve el tablero de producción; los vendedores lo ven pero no lo cambian (Gaspar 16-oct). Gaspar sí.
+// Solo los neones del tablero (desde el 1-sep, como el worker): los de antes los siguen cerrando los vendedores.
+function estadoNeonBloqueado(p) { return !!p && !isAdmin() && (typeof pedidoHermanos === 'function' ? pedidoHermanos(p) : [p]).some(x => !x.esCorporeo && pedidoFechaYmd(x) >= '2026-09-01'); }
+function pedidoFechaYmd(x) { const f = x && x.fecha; if (!f) return ''; if (f instanceof Date) return isNaN(f) ? '' : localDateKey(f); return String(f).slice(0, 10); }
+function estadoNeonPill(p) {
+  const col = PILL_HEX[pedidoEstadoColor(p.estadoPedido)] || PILL_HEX.muted;
+  return `<button type="button" onclick="setView('neon')" title="Lo mueve el tablero de Producción neón" style="background:${col.bg};color:${col.fg};border:1px solid ${col.bd};border-radius:var(--r-pill);padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">${escapeHtml(p.estadoPedido || '—')} 🔒</button>`;
 }
 function inlinePedidoSelect(idx, field, current, opts) {
   const col = PILL_HEX[(field === 'estado_pago' ? pagoColor(current) : pedidoEstadoColor(current))] || PILL_HEX.muted;
@@ -14723,7 +14731,7 @@ function openDrawerPedido(idx) {
       <div class="drawer-section">
         <h4>Estado, pago y productor ${hermanos.length>1?`<span style="font-size:11px;color:var(--fg-subtle);font-weight:400">· aplica a los ${hermanos.length} carteles</span>`:''}</h4>
         <div style="display:flex;flex-direction:column;gap:10px">
-          <div><label style="${lblD}">Estado del pedido</label><select id="ped-edit-estadopedido" style="${inpD}">${pedOpts}</select></div>
+          <div><label style="${lblD}">Estado del pedido</label>${estadoNeonBloqueado(p) ? `<div style="${inpD};display:flex;align-items:center;gap:8px">${escapeHtml(p.estadoPedido || '—')} <span style="font-size:11.5px;color:var(--fg-subtle)">· lo mueve el tablero de <a href="#neon" onclick="event.preventDefault();closeDrawer&&closeDrawer();setView('neon')" style="color:var(--neon-cyan)">Producción neón</a></span></div>` : `<select id="ped-edit-estadopedido" style="${inpD}">${pedOpts}</select>`}</div>
           <div style="display:flex;gap:8px">
             <div style="flex:1"><label style="${lblD}">Estado del pago</label><select id="ped-edit-estadopago" onchange="pedPagoSelectChange(${idx}, this)" style="${inpD}">${pagoOpts}</select></div>
             <div style="flex:1"><label style="${lblD}">Pagado</label>${(p.pagoMetodo === 'pendiente' && !(Number(p.pagado) > 0)) ? `<div style="${inpD};opacity:.7;font-size:12px">Sin pago · usá "Registrar pago"</div>` : `<input id="ped-edit-pagado" type="number" value="${p.pagado||''}" style="${inpD}">`}</div>

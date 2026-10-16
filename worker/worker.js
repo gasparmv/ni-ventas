@@ -11061,7 +11061,10 @@ async function kpiSnapshot(env) {
   const fer = await kpiFeriados(env);
   const desde7 = new Date(Date.now() - 7 * 864e5).toISOString();
   const [estR, pcR, ocAb] = await Promise.all([
-    q("SELECT id, numero, fecha, IFNULL(comercial_id, 'joaco') com, IFNULL(origen, '') origen, IFNULL(telefono, '') tel, IFNULL(cartel, '') cartel, COALESCE(es_corporeo, 0) ec, IFNULL(estado_pedido, '') est FROM pedidos WHERE fecha >= date('now', '-3 hours', '-75 days') AND (lower(IFNULL(estado_pedido, '')) LIKE 'en produc%' OR lower(IFNULL(estado_pedido, '')) LIKE 'para enviar%')"),
+    q("SELECT id, numero, fecha, IFNULL(comercial_id, 'joaco') com, IFNULL(origen, '') origen, IFNULL(telefono, '') tel, IFNULL(cartel, '') cartel, COALESCE(es_corporeo, 0) ec, IFNULL(estado_pedido, '') est, " +
+      // ¿El pedido (mismo grupo que el PATCH) tiene un neón del tablero? Entonces el estado lo mueve el tablero, no el vendedor.
+      "(fecha >= '" + NEON_TABLERO_DESDE + "' AND EXISTS (SELECT 1 FROM pedidos x WHERE x.numero = pedidos.numero AND x.fecha = pedidos.fecha AND IFNULL(x.comercial_id,'joaco') = IFNULL(pedidos.comercial_id,'joaco') AND IFNULL(x.es_corporeo,0) = 0 AND (IFNULL(pedidos.origen,'') <> 'crm' OR IFNULL(pedidos.telefono,'') = '' OR (x.origen = 'crm' AND IFNULL(x.telefono,'') = pedidos.telefono)))) AS hay_neon " +
+      "FROM pedidos WHERE fecha >= date('now', '-3 hours', '-75 days') AND (lower(IFNULL(estado_pedido, '')) LIKE 'en produc%' OR lower(IFNULL(estado_pedido, '')) LIKE 'para enviar%')"),
     q(`SELECT p.phone, p.completed_at c, IFNULL(p.producto, '') producto, COALESCE(s.assigned_to, '') asg,
               COALESCE((SELECT name FROM wa_contacts w WHERE w.phone = p.phone), s.contact_name, '') name,
               EXISTS (SELECT 1 FROM briefs b WHERE b.cliente_wa_id = p.phone AND b.estado = 'listo') listo
@@ -11080,6 +11083,7 @@ async function kpiSnapshot(env) {
     const v = funnelVendedor(r.com) || 'joaco'; if (!out[v]) continue;
     const dias = Math.round((Date.parse(hoy + 'T00:00:00Z') - Date.parse(String(r.fecha).slice(0, 10) + 'T00:00:00Z')) / 864e5);
     const e = _normTxt(r.est), corp = kpiEsCorp(r);
+    if (Number(r.hay_neon)) continue;   // pedido con neón del tablero: el estado lo mueve el tablero de producción (16-oct)
     // Días desde la VENTA (no hay historial de estados): en producción, neón 3 semanas / corpóreo 5; para enviar, 10 días más.
     const revisar = e.startsWith('en produc') ? dias > (corp ? 35 : 21) : dias > (corp ? 45 : 31);
     if (!revisar) continue;
@@ -16819,11 +16823,13 @@ function neonEtapas(rows, sfIds) {
 // El grupo completo de un cartel, con sus etapas (despacho, ubicar y las fotos para logística).
 async function neonGrupoDe(env, pid) {
   const base = (await neonTableroFilas(env, { ids: [pid] }))[0];
-  if (!base) return { base: null, fr: [], yo: null };
-  const cand = (await env.DB.prepare("SELECT id FROM pedidos WHERE numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ? AND IFNULL(es_corporeo,0) = 0").bind(base.numero, base.fecha, String(base.comercial_id || 'joaco')).all()).results || [];
+  if (!base) return { base: null, fr: [], serv: [], yo: null };
+  const cand = (await env.DB.prepare("SELECT id, numero, fecha, comercial_id, origen, telefono, cartel, alto, ancho, estado_pedido, despachado_at FROM pedidos WHERE numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ? AND IFNULL(es_corporeo,0) = 0").bind(base.numero, base.fecha, String(base.comercial_id || 'joaco')).all()).results || [];
   const k = neonGrupoKey(base);
   const fr = neonEtapas(await neonTableroFilas(env, { ids: cand.map(x => x.id) }), await neonSfIds(env)).filter(x => x._g === k);
-  return { base, fr, yo: fr.find(x => x.id === pid) || null };
+  // Líneas de servicio del pedido (no son tarjetas): acompañan al pedido en el estado.
+  const serv = cand.filter(x => neonGrupoKey(x) === k && neonNoCartel(x));
+  return { base, fr, serv, yo: fr.find(x => x.id === pid) || null };
 }
 // Lo que viaja al front: lista CERRADA, sin precio, pagos, teléfono ni la clave del grupo. La dirección (texto de envío) solo para
 // quien despacha (Gaspar, Neyen, logística) y para el vendedor del pedido.
@@ -16887,7 +16893,8 @@ async function neonSyncEstados(env) {
   for (const r of rows) {
     if (r._etapa !== 'enviar' || r._motivo || vistos.has(r._g) || !/^en produc/i.test(String(r.estado_pedido || ''))) continue;
     vistos.add(r._g);
-    const ids = rows.filter(x => x._g === r._g).map(x => x.id), now = new Date().toISOString();
+    let ids = rows.filter(x => x._g === r._g).map(x => x.id); const now = new Date().toISOString();
+    try { const gq = await neonGrupoDe(env, r.id); ids = ids.concat((gq.serv || []).filter(x => /^en produc/i.test(String(x.estado_pedido || ''))).map(x => x.id)); } catch (_) {}
     try {
       const u = await env.DB.prepare("UPDATE pedidos SET estado_pedido = 'para enviar', mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE id IN (" + ids.map(() => '?').join(',') + ") AND lower(IFNULL(estado_pedido,'')) LIKE 'en produc%'").bind(now, ...ids).run();
       if ((u.meta && u.meta.changes) || 0) {
@@ -24619,6 +24626,19 @@ const handler = {
         if (!ref) return json({ error: 'pedido no encontrado' }, 404);
         // Un vendedor solo edita SUS pedidos (mismo criterio que la lista que ve).
         if (_pr === 'comercial' && ref.com !== await resolveComercial(env, { sessionUser: session.user })) return json({ error: 'ese pedido es de otro vendedor' }, 403);
+        // Neón del tablero (desde NEON_TABLERO_DESDE): el estado lo mueve el tablero de producción (Gaspar 16-oct: "bloqueá que los
+        // vendedores cambien el estado de los neones"); solo Gaspar lo cambia a mano. Antes de escribir nada (no deja medio
+        // guardado). Mismo valor que el actual (pantalla vieja que manda todo): se ignora sin error. Los neones de antes del
+        // tablero siguen como antes (si no, nadie los podría cerrar).
+        if (('estado_pedido' in body) && _pr !== 'admin' && String(ref.fecha || '') >= NEON_TABLERO_DESDE) {
+          let _gq = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?"; const _ga = [ref.numero, ref.fecha, ref.com];
+          if (ref.origen === 'crm' && ref.tel) { _gq += " AND origen = 'crm' AND IFNULL(telefono,'') = ?"; _ga.push(ref.tel); }
+          const _neo = await env.DB.prepare('SELECT COUNT(*) AS n, MAX(IFNULL(estado_pedido,\'\')) AS e FROM pedidos WHERE ' + _gq + ' AND IFNULL(es_corporeo,0) = 0').bind(..._ga).first();
+          if (_neo && Number(_neo.n) > 0) {
+            if (_normTxt(String(body.estado_pedido || '')).trim() !== _normTxt(String(_neo.e || '')).trim()) return json({ error: 'El estado de los pedidos de neón lo mueve el tablero de Producción neón. Si hay que corregirlo, pedíselo a Gaspar.', campo: 'estado_pedido' }, 403);
+            delete body.estado_pedido;
+          }
+        }
         const now = new Date().toISOString();
         let touched = false, precioChanged = false;
 
@@ -26048,7 +26068,7 @@ const handler = {
           if (!ctx.despacha) return json({ error: 'Solo Neyen, logística o Gaspar' }, 403);
           const pid = ids[0];
           if (!pid) return json({ error: 'falta el cartel' }, 400);
-          const { base, fr, yo } = await neonGrupoDe(env, pid);
+          const { base, fr, serv, yo } = await neonGrupoDe(env, pid);
           if (!base || !yo) return json({ error: 'no encuentro ese cartel' }, 404);
           const adm = ctx.rol === 'admin', forzar = adm && !!body.forzar;
           if (body.deshacer) {
@@ -26056,7 +26076,7 @@ const handler = {
             if (ctx.rol === 'logistica' && String(yo.despacho_modo || '') !== 'envio') return json({ error: 'Logística solo deshace los que salieron por envío. Pedíselo a Gaspar o a Neyen.' }, 403);
             const hoyAR = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10), diaAR = new Date(new Date(yo.despachado_at).getTime() - 3 * 3600e3).toISOString().slice(0, 10);
             if (!adm && diaAR !== hoyAR) return json({ error: 'Solo se puede deshacer el mismo día. Pedíselo a Gaspar.' }, 409);
-            const dids = fr.filter(x => x.despachado_at).map(x => x.id);
+            const dids = fr.concat(serv || []).filter(x => x.despachado_at).map(x => x.id);
             await env.DB.prepare("UPDATE pedidos SET estado_pedido = CASE WHEN IFNULL(despacho_prev_estado,'') = '' OR lower(despacho_prev_estado) LIKE 'entregad%' THEN 'para enviar' ELSE despacho_prev_estado END, despachado_at = NULL, despachado_por = NULL, despacho_modo = NULL, despacho_transporte = NULL, despacho_seguimiento = NULL, despacho_prev_estado = NULL, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE id IN (" + dids.map(() => '?').join(',') + ')').bind(now, ...dids).run();
             try { await env.DB.prepare('INSERT INTO pedido_estado_log (pedido_id, numero, fecha, comercial_id, telefono, de, a, por, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(pid, base.numero, base.fecha, base.comercial_id || 'joaco', base.telefono || '', 'Entregado', String(yo.despacho_prev_estado || 'para enviar'), ctx.quien + ' (deshizo el envío)', now).run(); } catch (_) {}
             return json({ ok: true, deshecho: true });
@@ -26070,7 +26090,7 @@ const handler = {
           // Sale el pedido entero: si otro cartel del pedido no está para enviar, no sale ninguno (Gaspar puede forzar).
           const faltan = fr.filter(x => x.id !== yo.id && x._etapa !== 'enviar' && x._etapa !== 'enviado');
           if (faltan.length && !forzar) return json({ error: faltan.length === 1 ? 'Otro cartel del pedido todavía no está para enviar.' : faltan.length + ' carteles del pedido todavía no están para enviar.', etapa: yo._etapa }, 409);
-          const gids = fr.filter(x => x._etapa !== 'enviado').map(x => x.id), ph = gids.map(() => '?').join(',');
+          const gids = fr.filter(x => x._etapa !== 'enviado').map(x => x.id).concat((serv || []).filter(x => !/^entregad/i.test(String(x.estado_pedido || ''))).map(x => x.id)), ph = gids.map(() => '?').join(',');
           const trans = String(body.transporte || '').trim().slice(0, 80), seg = String(body.seguimiento || '').trim().slice(0, 120);
           await env.DB.prepare("UPDATE pedidos SET despacho_prev_estado = IFNULL(estado_pedido,''), despachado_at = ?, despachado_por = ?, despacho_modo = ?, despacho_transporte = ?, despacho_seguimiento = ?, estado_pedido = 'Entregado', mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE id IN (" + ph + ')').bind(now, ctx.quien, modo, trans || null, seg || null, now, ...gids).run();
           try { await env.DB.prepare('INSERT INTO pedido_estado_log (pedido_id, numero, fecha, comercial_id, telefono, de, a, por, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(pid, base.numero, base.fecha, base.comercial_id || 'joaco', base.telefono || '', base.estado_pedido || '', 'Entregado', ctx.quien + ' · ' + NEON_DESPACHO_MODOS[modo], now).run(); } catch (_) {}
