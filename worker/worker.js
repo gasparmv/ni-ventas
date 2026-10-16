@@ -24873,7 +24873,7 @@ const handler = {
         const restante = Math.max(0, total - pagado1 - importe);
         const now = new Date().toISOString();
         await env.DB.prepare(`UPDATE pedidos SET estado_pago = '2do pago', cobro2 = ?, caja2 = ?, pago2_metodo = ?, comprobante2_key = ?, comprobante2_wamid = ?, cobro2_at = ?, restante = ?, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE ${_grp}`)
-          .bind(importe, caja, metodo, compKey || null, compWamid, now, restante, now, now, ..._grpArgs).run();
+          .bind(importe, caja, metodo, compKey || null, compWamid, now, restante, now, ..._grpArgs).run();   // 8 ? + grupo (antes iba un now de más → "Wrong number of parameter bindings")
         const fm = (n) => '$' + Math.round(n).toLocaleString('es-AR');
         const avisos = [];
         const caja1 = String((g && g.caja) || '');
