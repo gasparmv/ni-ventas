@@ -17953,13 +17953,18 @@ async function barrerMoDirecto(env) {
   try {
     await ensureProdSchema(env);
     const P = (await moConfig(env)) || { desde: MO_DESDE_DEFAULT };
+    // Los de antes de mo_desde (desde kv 'mo_excel_desde', hoy el 1-oct) también van, pero SOLO los que tienen productor
+    // (Gaspar 16-oct: "si tienen productor asignado… solo en algunos pusiste pago de mano de obra"). Su MO es la de su regla
+    // (el % del mes); lo que no produce nadie (ej. una instalación de tira LED) no se escribe.
+    const exDesde = String((await kvGet(env, 'mo_excel_desde', null)) || '').trim();
+    const desdeQ = (/^\d{4}-\d{2}-\d{2}$/.test(exDesde) && exDesde < P.desde) ? exDesde : P.desde;
     // Nombre del productor desde su id (no desde pedidos.productor, que es texto libre heredado).
     const nombres = {}; for (const p of await prodProductores(env)) nombres[p.id] = p.nombre;
     const rs = await env.DB.prepare(
-      "SELECT p.id, p.numero, p.cartel, p.sheet_row, p.alto, p.ancho, p.cantidad, p.mo_monto, p.productor_id, k.v AS kv FROM pedidos p " +
+      "SELECT p.id, p.numero, p.cartel, p.fecha, p.sheet_row, p.alto, p.ancho, p.cantidad, p.mo_monto, p.productor_id, k.v AS kv FROM pedidos p " +
       "LEFT JOIN kv_cache k ON k.k = 'pedido_mo:' || p.id " +
       "WHERE p.es_corporeo = 0 AND p.fecha >= ? AND p.sheet_row > 1 AND p.mirror_dirty = 0 ORDER BY p.id DESC LIMIT 600"
-    ).bind(P.desde).all();
+    ).bind(desdeQ).all();
     // kv por pedido: {mo, prod} = lo que el CRM DEJÓ en la planilla (sirve de 'prev' para no tomarlo como manual);
     // {env_mo, env_prod} = lo último enviado (detecta cambios); at = última verificación; err = no se ubicó la fila.
     const ahora = Date.now(), items = [], kvs = {};
@@ -17967,6 +17972,7 @@ async function barrerMoDirecto(env) {
       const mo = p.mo_monto != null ? Math.round(+p.mo_monto) : '';
       const prod = p.productor_id ? String(nombres[p.productor_id] || '') : '';
       let k = null; try { k = p.kv ? JSON.parse(p.kv) : null; } catch (_) {}
+      if (String(p.fecha || '') < P.desde && !prod && !k) continue;   // de antes de mo_desde: solo con productor (o si el CRM ya escribió)
       if (mo === '' && !prod && (!k || (String(k.mo ?? '') === '' && !k.prod))) continue;   // nada que escribir ni nada del CRM en la planilla
       const cambio = !k || String(k.env_mo ?? k.mo ?? '') !== String(mo) || String(k.env_prod ?? k.prod ?? '') !== prod;
       const vence = k && (ahora - (Number(k.at) || 0)) > (k.err ? 3600e3 : 24 * 3600e3);   // reverifica 1×/día (fórmulas arrastradas encima)
