@@ -16543,6 +16543,14 @@ async function sfPedidos(env, opts = {}) {
     o.fotos_terminado = fotos[r.id] || 0;
     return o;
   });
+  // Etapa del tablero de neón (sin "esperando pago": van en cuenta corriente).
+  const neonIds = pedidos.filter(p => +p.es_corporeo !== 1).map(p => p.id);
+  if (neonIds.length) {
+    try {
+      const et = {}; for (const r of neonEtapas(await neonTableroFilas(env, { ids: neonIds }), new Set(neonIds))) et[r.id] = r._etapa === 'pago' ? 'terminado' : r._etapa;
+      for (const p of pedidos) if (et[p.id]) p.etapa = et[p.id];
+    } catch (_) {}
+  }
   // Los neones que Gaspar les vende y anota en la planilla (Pedidos_Distris, Canal "Sin Frontera"). No están en la base.
   const pl = opts.planilla === false ? { pedidos: [] } : await sfPlanillaPedidos(env);
   // Pedido viejo que Gaspar vuelve a cargar en el CRM (ej. ribs #1000 del 16-oct, con la fecha original): se esconde su fila de la
@@ -16631,6 +16639,175 @@ async function sfArchivoKey(env, qs) {
 }
 // Sirve un archivo de R2 (con ?w= para miniaturas, como /admin/media/; ?dl=1 lo baja con nombre). Cache PRIVADO: la URL lleva
 // el token de la sesión.
+// ===== Tablero de producción de NEÓN (Gaspar 16-oct-2026) =====
+// 7 etapas que pidió Gaspar. La etapa se CALCULA con lo que cada uno ya marca en su pantalla: la pieza de corte (Emma la
+// toma y hace la matriz, Aníbal corta, Neyen separa la base), el productor y su estado (su hoja), el 2do pago y la salida
+// que marca Neyen o logística. No hay una columna "etapa" que mantener al día. Lo único manual es neon_piso: Gaspar ubica a
+// mano un cartel que el sistema no puede ubicar solo (ej. neones viejos sin pieza de corte). Nunca plata en el tablero.
+// Ver memoria kanban-neon-produccion.
+const NEON_ETAPAS = [['confirmado', 'Confirmado'], ['diseno', 'En diseño y corte'], ['montando', 'Montando neón'], ['terminado', 'Terminado'], ['pago', 'Esperando pago'], ['enviar', 'Para enviar'], ['enviado', 'Enviado']];
+const NEON_IDX = Object.fromEntries(NEON_ETAPAS.map(([k], i) => [k, i]));
+const NEON_TABLERO_DESDE = '2026-09-01';
+const NEON_ENVIADO_DIAS = 30;      // los enviados vuelven al tablero 30 días (la columna muestra 14; el resto en "Ver todos")
+const NEON_DESPACHO_MODOS = { envio: 'Salió por envío', retira: 'Retiró en el taller', instalacion: 'Instalado', sinfrontera: 'Entregado a Sin Frontera' };
+const NEON_VEND = { joaco: 'Joaco', joaquin: 'Joaco', facundo: 'Facu', agustina: 'Agus', gaspar: 'Gaspar' };
+let _neonTabOk = false;
+async function ensureNeonTableroSchema(env) {
+  if (_neonTabOk) return;
+  try {
+    await env.DB.prepare('SELECT diseno_inicio_at, diseno_inicio_por, cortado_at, separado_at FROM corte_pedidos LIMIT 0').all();
+    await env.DB.prepare('SELECT recibido_at, recibido_por, despachado_at, despachado_por, despacho_modo, despacho_transporte, despacho_seguimiento, despacho_prev_estado, neon_piso, neon_piso_at, neon_piso_por, neon_piso_motivo FROM pedidos LIMIT 0').all();
+    _neonTabOk = true; return;
+  } catch (_) {}
+  const alters = [
+    ['corte_pedidos', ['diseno_inicio_at TEXT', 'diseno_inicio_por TEXT', 'cortado_at TEXT', 'separado_at TEXT']],
+    ['pedidos', ['recibido_at TEXT', 'recibido_por TEXT', 'despachado_at TEXT', 'despachado_por TEXT', 'despacho_modo TEXT', 'despacho_transporte TEXT', 'despacho_seguimiento TEXT', 'despacho_prev_estado TEXT', 'neon_piso TEXT', 'neon_piso_at TEXT', 'neon_piso_por TEXT', 'neon_piso_motivo TEXT']],
+  ];
+  for (const [t, cols] of alters) for (const c of cols) { try { await env.DB.prepare('ALTER TABLE ' + t + ' ADD COLUMN ' + c).run(); } catch (_) {} }
+  _neonTabOk = true;
+}
+// Fechas de corte para el recorrido (Aníbal y Neyen marcan en Corte; estas columnas solo guardan CUÁNDO, la primera vez).
+async function neonCorteStamp(env, ids, campo, por) {
+  const cond = { cortado_at: "estado IN ('cortado','embalado')", separado_at: "estado = 'embalado'", diseno_inicio_at: "estado = 'pedido'" }[campo];
+  if (!cond || !ids || !ids.length) return;
+  try {
+    await ensureNeonTableroSchema(env);
+    const now = new Date().toISOString(), ph = ids.map(() => '?').join(',');
+    if (campo === 'diseno_inicio_at') await env.DB.prepare('UPDATE corte_pedidos SET diseno_inicio_at = COALESCE(diseno_inicio_at, ?), diseno_inicio_por = COALESCE(diseno_inicio_por, ?) WHERE id IN (' + ph + ") AND producto = 'NEON' AND " + cond).bind(now, String(por || ''), ...ids).run();
+    else await env.DB.prepare('UPDATE corte_pedidos SET ' + campo + ' = COALESCE(' + campo + ', ?) WHERE id IN (' + ph + ") AND producto = 'NEON' AND " + cond).bind(now, ...ids).run();
+  } catch (_) {}
+}
+// Mismo grupo que el PATCH de pedidos: N° + fecha + vendedor y, en los del CRM con teléfono, el mismo cliente.
+function neonGrupoKey(r) { return [r.numero, r.fecha, String(r.comercial_id || 'joaco'), (r.origen === 'crm' && r.telefono) ? 'crm:' + r.telefono : ''].join('|'); }
+async function neonTableroFilas(env, opts = {}) {
+  await ensureNeonTableroSchema(env);
+  try { await ensureProdSchema(env); } catch (_) {}
+  try { await ensureCorteNeonSchema(env); } catch (_) {}
+  let where, args;
+  if (opts.ids) {
+    if (!opts.ids.length) return [];
+    where = 'p.id IN (' + opts.ids.map(() => '?').join(',') + ')'; args = opts.ids;
+  } else {
+    const hoy = Date.now();
+    where = "p.fecha >= ? AND NOT (IFNULL(p.despachado_at,'') <> '' AND p.despachado_at < ?) AND NOT (IFNULL(p.despachado_at,'') = '' AND lower(IFNULL(p.estado_pedido,'')) LIKE 'entregad%' AND p.fecha < ?)";
+    args = [NEON_TABLERO_DESDE, new Date(hoy - NEON_ENVIADO_DIAS * 86400000).toISOString(), new Date(hoy - 45 * 86400000).toISOString().slice(0, 10)];
+  }
+  return (await env.DB.prepare(
+    'SELECT p.id, p.numero, p.fecha, p.cartel, p.colores, p.alto, p.ancho, p.cantidad, p.base, p.dimer, p.tipo, p.envio, p.aclaracion, p.telefono, p.comercial_id, p.cargado_por, p.origen, ' +
+    'p.estado_pedido, p.estado_pago, p.cobro2_at, p.productor_id, p.productor, p.prod_estado, p.prod_estado_at, p.prod_asignado_at, p.prod_terminado_at, p.created_at, p.foto_diseno_key, ' +
+    'p.recibido_at, p.recibido_por, p.despachado_at, p.despachado_por, p.despacho_modo, p.despacho_transporte, p.despacho_seguimiento, p.despacho_prev_estado, p.neon_piso, p.neon_piso_at, p.neon_piso_por, p.neon_piso_motivo, ' +
+    'cp.id AS corte_id, cp.estado AS corte_estado, cp.foto_key AS corte_foto, cp.medida_declarada, cp.ancho_real, cp.alto_real, cp.disenado_at, cp.diseno_inicio_at, cp.diseno_inicio_por, cp.cortado_at, cp.separado_at, ' +
+    '(SELECT COUNT(*) FROM pedido_prod_fotos f WHERE f.pedido_id = p.id) AS fotos_n ' +
+    'FROM pedidos p ' +
+    'LEFT JOIN (SELECT pedido_id, MAX(id) AS cid FROM corte_pedidos WHERE pedido_id IS NOT NULL GROUP BY pedido_id) cx ON cx.pedido_id = p.id ' +
+    'LEFT JOIN corte_pedidos cp ON cp.id = cx.cid ' +
+    'WHERE IFNULL(p.es_corporeo, 0) = 0 AND ' + where + ' ORDER BY p.fecha DESC, p.id DESC LIMIT 800'
+  ).bind(...args).all()).results || [];
+}
+// Etapa de cada cartel (y de paso el grupo y desde cuándo). Las de pedido entero (esperando pago, para enviar, enviado)
+// miran a TODOS los carteles de neón del pedido: un pedido no se cobra ni se manda a medias.
+function neonEtapas(rows, sfIds) {
+  const grupos = {};
+  for (const r of rows) { r._g = neonGrupoKey(r); (grupos[r._g] = grupos[r._g] || []).push(r); }
+  const term = x => String(x.prod_estado || '') === 'terminado';
+  const maxF = (g, k) => g.map(x => x[k] || '').sort().pop() || '';
+  for (const r of rows) {
+    const g = grupos[r._g], ep = String(r.estado_pedido || '').trim().toLowerCase(), pago = String(r.estado_pago || '').trim().toLowerCase();
+    const ce = String(r.corte_estado || '');
+    const pagado = pago === '2do pago' || pago === 'cuenta corriente';
+    let i;
+    if (r.despachado_at || /^entregad/.test(ep)) i = 6;
+    else if (g.every(term)) i = pagado ? 5 : 4;
+    else if (term(r)) i = 3;
+    else if (String(r.productor_id || '')) i = 2;
+    else if (['matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce) || (ce === 'pedido' && r.diseno_inicio_at)) i = 1;
+    else i = 0;
+    let motivo = '';
+    if (i < 5 && /^para enviar/.test(ep)) { i = 5; motivo = 'estado'; }   // puesto a mano en Pedidos (los de antes del tablero)
+    const piso = NEON_IDX[String(r.neon_piso || '')];
+    if (piso != null && piso > i) { i = piso; motivo = 'piso'; }
+    r._i = i; r._etapa = NEON_ETAPAS[i][0]; r._motivo = motivo;
+    r._sf = !!(sfIds && sfIds.has(r.id)) || pago === 'cuenta corriente';
+    r._grupo_n = g.length; r._grupo_term = g.filter(term).length;
+    r._desde = motivo === 'piso' ? r.neon_piso_at
+      : i === 0 ? r.created_at
+      : i === 1 ? (r.diseno_inicio_at || r.disenado_at || r.created_at)
+      : i === 2 ? r.prod_asignado_at
+      : i === 3 ? r.prod_terminado_at
+      : i === 4 ? maxF(g, 'prod_terminado_at')
+      : i === 5 ? ([maxF(g, 'prod_terminado_at'), r.cobro2_at || ''].sort().pop() || '')
+      : (r.despachado_at || '');
+  }
+  return rows;
+}
+// Lo que viaja al front: lista CERRADA, sin precio, pagos ni teléfono. La dirección (texto de envío) solo para quien despacha
+// (Gaspar, Neyen, logística) y para el vendedor del pedido.
+function neonTarjeta(r, ctx) {
+  const med = (Number(r.alto) > 0 && Number(r.ancho) > 0) ? Number(r.alto) + ' × ' + Number(r.ancho) + ' cm' : '';
+  const com = String(r.comercial_id || 'joaco');
+  const propio = ctx.rol === 'comercial' && com === ctx.com;
+  const dir = ctx.rol === 'admin' || ctx.despacha || propio;
+  const o = {
+    id: r.id, numero: r.numero, fecha: r.fecha, cartel: String(r.cartel || '').trim(), colores: r.colores || '', medida: med, alto: Number(r.alto) || 0, ancho: Number(r.ancho) || 0,
+    cantidad: Math.max(1, parseInt(r.cantidad, 10) || 1), base: r.base || '', dimer: /^no$/i.test(String(r.dimer || '')) ? '' : (r.dimer || ''), tipo: r.tipo || '',
+    etapa: r._etapa, motivo: r._motivo, desde: r._desde || '', sf: r._sf, grupo: r._g, grupo_n: r._grupo_n, grupo_term: r._grupo_term,
+    productor_id: r.productor_id || '', productor: String(r.productor || r.productor_id || '').trim(), prod_estado: r.prod_estado || '',
+    corte_id: r.corte_id || null, corte_estado: r.corte_estado || '', diseno: !!(String(r.corte_foto || '').trim() || String(r.foto_diseno_key || '').trim()), fotos: Math.min(12, +r.fotos_n || 0),
+    f: { creado: r.created_at || '', tomado: r.diseno_inicio_at || '', tomado_por: r.diseno_inicio_por || '', matriz: r.disenado_at || '', cortado: r.cortado_at || '', separado: r.separado_at || '',
+      asignado: r.prod_asignado_at || '', prod: r.prod_estado_at || '', terminado: r.prod_terminado_at || '', recibido: r.recibido_at || '', despachado: r.despachado_at || '' },
+    recibido_por: r.recibido_por || '', despacho: r.despachado_at ? { modo: r.despacho_modo || '', transporte: r.despacho_transporte || '', seguimiento: r.despacho_seguimiento || '', por: r.despachado_por || '' } : null,
+    mio: propio,
+  };
+  if (ctx.rol !== 'logistica') { o.vendedor = NEON_VEND[com] || com; o.aclaracion = String(r.aclaracion || '').trim().slice(0, 300); }
+  if (dir) o.envio = String(r.envio || '').trim().slice(0, 400);
+  if (ctx.rol === 'admin' && r.neon_piso) o.piso = { etapa: r.neon_piso, motivo: r.neon_piso_motivo || '', por: r.neon_piso_por || '', at: r.neon_piso_at || '' };
+  return o;
+}
+// Quién es quién en el tablero. logística por nombre (es externo); el resto por su rol.
+async function neonCtx(env, session) {
+  const slug = String(session.user || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (esUsuarioLogistica(session.user)) return { rol: 'logistica', slug, despacha: true, quien: 'Logística' };
+  const rol = await getSessionRole(env, session.user);
+  const ctx = { rol, slug, despacha: rol === 'admin' || (rol === 'produccion' && slug === 'neyen'), quien: String(session.user || '') };
+  if (rol === 'comercial') ctx.com = await resolveComercial(env, { sessionUser: session.user });
+  return ctx;
+}
+async function neonSfIds(env) {
+  try { return new Set(((await env.DB.prepare('SELECT pedido_id FROM sinfrontera_pedidos').all()).results || []).map(r => r.pedido_id)); } catch (_) { return new Set(); }
+}
+async function neonTablero(env, ctx) {
+  const rows = neonEtapas(await neonTableroFilas(env), await neonSfIds(env));
+  let vis = rows, otros = null;
+  if (ctx.rol === 'comercial') {
+    vis = rows.filter(r => String(r.comercial_id || 'joaco') === ctx.com);
+    otros = {}; for (const r of rows) if (String(r.comercial_id || 'joaco') !== ctx.com) otros[r._etapa] = (otros[r._etapa] || 0) + 1;
+  } else if (ctx.rol === 'logistica') vis = rows.filter(r => r._i >= 5);
+  const out = { ok: true, etapas: NEON_ETAPAS, carteles: vis.map(r => neonTarjeta(r, ctx)), rol: ctx.rol, yo: ctx.slug, despacha: ctx.despacha, desde: NEON_TABLERO_DESDE };
+  if (otros) out.otros = otros;
+  if (ctx.rol === 'admin') { try { out.productores = (await prodProductores(env)).filter(p => !p.baja).map(p => ({ id: p.id, nombre: p.nombre, activo: !!p.activo })); } catch (_) { out.productores = []; } }
+  return out;
+}
+// Cuando el 2do pago completa un pedido terminado, el tablero lo pone "Para enviar" y la planilla tiene que decir lo mismo:
+// pasa estado_pedido de 'En produccion' a 'para enviar' (todo el grupo, con espejo y pedido_estado_log por='tablero'). Solo
+// para arriba y apagado hasta el OK de Gaspar (kv neon_estado_sync_on = '1').
+async function neonSyncEstados(env) {
+  if (String(await kvGet(env, 'neon_estado_sync_on', '0')) !== '1') return { off: true };
+  const rows = neonEtapas(await neonTableroFilas(env), await neonSfIds(env));
+  const vistos = new Set(); let n = 0;
+  for (const r of rows) {
+    if (r._etapa !== 'enviar' || r._motivo || vistos.has(r._g) || !/^en produc/i.test(String(r.estado_pedido || ''))) continue;
+    vistos.add(r._g);
+    const ids = rows.filter(x => x._g === r._g).map(x => x.id), now = new Date().toISOString();
+    try {
+      const u = await env.DB.prepare("UPDATE pedidos SET estado_pedido = 'para enviar', mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL WHERE id IN (" + ids.map(() => '?').join(',') + ") AND lower(IFNULL(estado_pedido,'')) LIKE 'en produc%'").bind(...ids).run();
+      if ((u.meta && u.meta.changes) || 0) {
+        n++;
+        try { await env.DB.prepare('INSERT INTO pedido_estado_log (pedido_id, numero, fecha, comercial_id, telefono, de, a, por, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(r.id, r.numero, r.fecha, r.comercial_id || 'joaco', r.telefono || '', r.estado_pedido || '', 'para enviar', 'tablero', now).run(); } catch (_) {}
+      }
+    } catch (_) {}
+  }
+  return { ok: true, n };
+}
 async function sfServirR2(env, key, url) {
   if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
   const obj = await env.MEDIA.get(key);
@@ -19442,7 +19619,7 @@ const handler = {
       }
       if (!session) return unauthorized();
       // Logística (usuario externo): SOLO sus endpoints. Todo lo demás del CRM → 403 aunque tenga sesión válida.
-      if (esUsuarioLogistica(session.user) && !path.startsWith('/admin/logistica/')) return json({ error: 'forbidden' }, 403);
+      if (esUsuarioLogistica(session.user) && !path.startsWith('/admin/logistica/') && !path.startsWith('/admin/neon/')) return json({ error: 'forbidden' }, 403);
       // Sin Frontera (usuario externo): SOLO /admin/sinfrontera/* (corpóreos en producción sin precio y sus propios pedidos).
       if (esUsuarioSinFrontera(session.user) && !path.startsWith('/admin/sinfrontera/')) return json({ error: 'forbidden' }, 403);
       // Productores de neón (usuario propio): SOLO /admin/prod/* (sus carteles). Dado de baja → afuera aunque tenga sesión.
@@ -25700,6 +25877,102 @@ const handler = {
       // ===== SIN FRONTERA (usuario externo; ver esUsuarioSinFrontera) =====
       // Ellos: Producción (corpóreos con ticket, sin precio) + Mis pedidos (sus compras) + los archivos de eso + el estado.
       // Gaspar: lo mismo (para ver lo que ven) + contraseña del usuario + sus números + pedidos vinculados a mano.
+      // ===== Tablero de producción de NEÓN (/admin/neon/*): todo el equipo menos productores, Sin Frontera y cursos =====
+      if (path.startsWith('/admin/neon/')) {
+        const ctx = await neonCtx(env, session);
+        if (!['admin', 'comercial', 'disenador', 'produccion', 'logistica'].includes(ctx.rol)) return json({ error: 'forbidden' }, 403);
+        try { await ensureNeonTableroSchema(env); } catch (_) {}
+        // GET /admin/neon/tablero → las tarjetas que le tocan ver a cada uno (vendedor: las suyas + cuántas hay del resto).
+        if (request.method === 'GET' && path === '/admin/neon/tablero') {
+          try { return json(await neonTablero(env, ctx)); } catch (e) { return json({ ok: false, error: 'No se pudo leer el tablero. Probá de nuevo en un momento.' }, 500); }
+        }
+        // GET /admin/neon/archivo?p=<id>&k=d|f[&i=n][&w=] → el diseño o una foto del terminado de un cartel que puede ver.
+        if (request.method === 'GET' && path === '/admin/neon/archivo') {
+          const pid = parseInt(url.searchParams.get('p'), 10) || 0, k = url.searchParams.get('k') === 'f' ? 'f' : 'd', i = Math.max(0, Math.min(20, parseInt(url.searchParams.get('i'), 10) || 0));
+          if (!pid) return json({ error: 'falta p' }, 400);
+          const fr = await neonTableroFilas(env, { ids: [pid] });
+          const r = fr[0];
+          if (!r) return json({ error: 'not found' }, 404);
+          if (ctx.rol === 'comercial' && String(r.comercial_id || 'joaco') !== ctx.com) return json({ error: 'forbidden' }, 403);
+          if (ctx.rol === 'logistica' && !(String(r.prod_estado || '') === 'terminado' || r.despachado_at)) return json({ error: 'forbidden' }, 403);
+          let key = '';
+          if (k === 'd') key = String(r.corte_foto || r.foto_diseno_key || '').trim();
+          else { const f = await env.DB.prepare('SELECT r2_key FROM pedido_prod_fotos WHERE pedido_id = ? ORDER BY id LIMIT 1 OFFSET ?').bind(pid, i).first(); key = f ? String(f.r2_key || '') : ''; }
+          if (!key) return json({ error: 'not found' }, 404);
+          return sfServirR2(env, key, url);
+        }
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const ids = [...new Set((Array.isArray(body.ids) ? body.ids : (body.pedido_id ? [body.pedido_id] : [])).map(x => parseInt(x, 10)).filter(n => n > 0))].slice(0, 200);
+        const now = new Date().toISOString();
+        // POST /admin/neon/accion {accion, ids, etapa?, motivo?}
+        //   tomar / soltar   (Emma o Gaspar): "lo tomo" = el cartel pasa a En diseño y corte (estampa diseno_inicio_at en su pieza).
+        //   recibido / no_recibido (Neyen o Gaspar): llegó al taller. Es un dato, no frena nada.
+        //   ubicar (Gaspar): neon_piso = etapa mínima donde mostrarlo ('' = lo calcula solo). Para los que no se pueden ubicar.
+        if (request.method === 'POST' && path === '/admin/neon/accion') {
+          const acc = String(body.accion || '');
+          if (!ids.length) return json({ error: 'faltan los carteles' }, 400);
+          const ph = ids.map(() => '?').join(',');
+          if (acc === 'tomar' || acc === 'soltar') {
+            if (!['admin', 'disenador'].includes(ctx.rol)) return json({ error: 'Solo Emma o Gaspar' }, 403);
+            const u = acc === 'tomar'
+              ? await env.DB.prepare('UPDATE corte_pedidos SET diseno_inicio_at = COALESCE(diseno_inicio_at, ?), diseno_inicio_por = COALESCE(diseno_inicio_por, ?) WHERE pedido_id IN (' + ph + ") AND producto = 'NEON' AND estado = 'pedido'").bind(now, ctx.quien, ...ids).run()
+              : await env.DB.prepare('UPDATE corte_pedidos SET diseno_inicio_at = NULL, diseno_inicio_por = NULL WHERE pedido_id IN (' + ph + ") AND producto = 'NEON' AND estado = 'pedido'").bind(...ids).run();
+            return json({ ok: true, n: (u.meta && u.meta.changes) || 0 });
+          }
+          if (acc === 'recibido' || acc === 'no_recibido') {
+            if (!(ctx.rol === 'admin' || (ctx.rol === 'produccion' && ctx.slug === 'neyen'))) return json({ error: 'Solo Neyen o Gaspar' }, 403);
+            const u = acc === 'recibido'
+              ? await env.DB.prepare('UPDATE pedidos SET recibido_at = COALESCE(recibido_at, ?), recibido_por = COALESCE(recibido_por, ?) WHERE id IN (' + ph + ') AND IFNULL(es_corporeo,0) = 0').bind(now, ctx.quien, ...ids).run()
+              : await env.DB.prepare('UPDATE pedidos SET recibido_at = NULL, recibido_por = NULL WHERE id IN (' + ph + ') AND IFNULL(es_corporeo,0) = 0').bind(...ids).run();
+            return json({ ok: true, n: (u.meta && u.meta.changes) || 0 });
+          }
+          if (acc === 'ubicar') {
+            if (ctx.rol !== 'admin') return json({ error: 'Solo Gaspar' }, 403);
+            const et = String(body.etapa || '');
+            if (et && NEON_IDX[et] == null) return json({ error: 'etapa inválida' }, 400);
+            const mot = String(body.motivo || '').trim().slice(0, 200);
+            const u = await env.DB.prepare('UPDATE pedidos SET neon_piso = ?, neon_piso_at = ?, neon_piso_por = ?, neon_piso_motivo = ? WHERE id IN (' + ph + ') AND IFNULL(es_corporeo,0) = 0').bind(et || null, et ? now : null, et ? ctx.quien : null, et ? mot : null, ...ids).run();
+            try { await prodLog(env, ids.map(id => ({ pedido_id: id, campo: 'etapa', de: '', a: et || '(automática)', por: ctx.quien + (mot ? ' · ' + mot : '') }))); } catch (_) {}
+            return json({ ok: true, n: (u.meta && u.meta.changes) || 0 });
+          }
+          return json({ error: 'acción inválida' }, 400);
+        }
+        // POST /admin/neon/despacho {pedido_id, modo, transporte?, seguimiento?, deshacer?} → salió (todo el pedido de neón).
+        // Neyen, logística (solo "salió por envío") y Gaspar. Pone estado_pedido 'Entregado' (va a la planilla). Deshacer:
+        // el mismo día (Gaspar siempre).
+        if (request.method === 'POST' && path === '/admin/neon/despacho') {
+          if (!ctx.despacha) return json({ error: 'Solo Neyen, logística o Gaspar' }, 403);
+          const pid = ids[0];
+          if (!pid) return json({ error: 'falta el cartel' }, 400);
+          const base = (await neonTableroFilas(env, { ids: [pid] }))[0];
+          if (!base) return json({ error: 'no encuentro ese cartel' }, 404);
+          // Los hermanos del pedido (mismo grupo): se despachan juntos.
+          const cand = (await env.DB.prepare("SELECT id FROM pedidos WHERE numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ? AND IFNULL(es_corporeo,0) = 0").bind(base.numero, base.fecha, String(base.comercial_id || 'joaco')).all()).results || [];
+          const fr = neonEtapas(await neonTableroFilas(env, { ids: cand.map(x => x.id) }), await neonSfIds(env)).filter(x => x._g === neonGrupoKey(base));
+          const yo = fr.find(x => x.id === pid);
+          const gids = fr.map(x => x.id), ph = gids.map(() => '?').join(',');
+          if (body.deshacer) {
+            if (!yo || !yo.despachado_at) return json({ error: 'ese pedido no está marcado como enviado' }, 409);
+            const hoyAR = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10), diaAR = new Date(new Date(yo.despachado_at).getTime() - 3 * 3600e3).toISOString().slice(0, 10);
+            if (ctx.rol !== 'admin' && diaAR !== hoyAR) return json({ error: 'Solo se puede deshacer el mismo día. Pedíselo a Gaspar.' }, 409);
+            const prev = String(yo.despacho_prev_estado || 'para enviar');
+            await env.DB.prepare('UPDATE pedidos SET despachado_at = NULL, despachado_por = NULL, despacho_modo = NULL, despacho_transporte = NULL, despacho_seguimiento = NULL, estado_pedido = ?, despacho_prev_estado = NULL, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL WHERE id IN (' + ph + ')').bind(prev, ...gids).run();
+            try { await env.DB.prepare('INSERT INTO pedido_estado_log (pedido_id, numero, fecha, comercial_id, telefono, de, a, por, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(pid, base.numero, base.fecha, base.comercial_id || 'joaco', base.telefono || '', 'Entregado', prev, ctx.quien + ' (deshizo el envío)', now).run(); } catch (_) {}
+            return json({ ok: true, deshecho: true });
+          }
+          const modo = String(body.modo || '');
+          if (!NEON_DESPACHO_MODOS[modo]) return json({ error: 'modo inválido' }, 400);
+          if (ctx.rol === 'logistica' && modo !== 'envio') return json({ error: 'logística solo marca "salió por envío"' }, 403);
+          if (!yo) return json({ error: 'no encuentro ese cartel' }, 404);
+          if (yo.despachado_at) return json({ ok: true, sin_cambios: true });
+          if (yo._etapa !== 'enviar' && !(ctx.rol === 'admin' && body.forzar)) return json({ error: yo._etapa === 'pago' ? 'Todavía no está pagado: no sale.' : 'Todavía no está para enviar.', etapa: yo._etapa }, 409);
+          const trans = String(body.transporte || '').trim().slice(0, 80), seg = String(body.seguimiento || '').trim().slice(0, 120);
+          await env.DB.prepare("UPDATE pedidos SET despacho_prev_estado = CASE WHEN lower(IFNULL(estado_pedido,'')) LIKE 'entregad%' THEN 'para enviar' ELSE IFNULL(estado_pedido,'') END, despachado_at = ?, despachado_por = ?, despacho_modo = ?, despacho_transporte = ?, despacho_seguimiento = ?, estado_pedido = 'Entregado', mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL WHERE id IN (" + ph + ')').bind(now, ctx.quien, modo, trans || null, seg || null, ...gids).run();
+          try { await env.DB.prepare('INSERT INTO pedido_estado_log (pedido_id, numero, fecha, comercial_id, telefono, de, a, por, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(pid, base.numero, base.fecha, base.comercial_id || 'joaco', base.telefono || '', base.estado_pedido || '', 'Entregado', ctx.quien + ' · ' + NEON_DESPACHO_MODOS[modo], now).run(); } catch (_) {}
+          return json({ ok: true, n: gids.length });
+        }
+        return json({ error: 'not found' }, 404);
+      }
       if (path.startsWith('/admin/sinfrontera/')) {
         const sfExt = esUsuarioSinFrontera(session.user);
         if (!sfExt && (await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
@@ -26105,6 +26378,8 @@ const handler = {
             if (est === 'embalado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='embalado', updated_at=? WHERE id IN (${ph}) AND estado='cortado'`).bind(est, nowIso, nowIso, ...ids).run();
             else if (est === 'cortado') { const d = _despSet('cortado'); rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='cortado', productor=?, updated_at=?${d.sql} WHERE id IN (${ph})${_noSalidas}`).bind(est, nowIso, _slug, nowIso, ...d.binds, ...ids).run(); }
             else { const d = _despSet(est); rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado=?, updated_at=?${d.sql} WHERE id IN (${ph})`).bind(est, nowIso, est, nowIso, ...d.binds, ...ids).run(); }
+            if (est === 'cortado' || est === 'embalado') await neonCorteStamp(env, ids, est === 'cortado' ? 'cortado_at' : 'separado_at');
+            if (est === 'embalado') await neonCorteStamp(env, ids, 'cortado_at');
             return json({ ok: true, action, estado: est, n: (rr.meta && rr.meta.changes) || 0 });
           } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         }
@@ -26151,6 +26426,7 @@ const handler = {
             const d = _despSet('cortado');
             const u = await env.DB.prepare(`UPDATE corte_pedidos SET estado='cortado', productor=?, updated_at=?${d.sql} WHERE id=?${_noSalidas}`).bind(_slug, nowIso, ...d.binds, id).run();
             if (!((u.meta && u.meta.changes) || 0)) return json({ error: 'esa pieza ya salió (despachada o entregada): no se puede volver atrás' }, 409);
+            await neonCorteStamp(env, [id], 'cortado_at');
             return json({ ok: true, id, estado: 'cortado' });
           }
           if (action === 'embalado') {
@@ -26453,6 +26729,7 @@ const handler = {
             ORDER BY created_at, id`
         ).bind(...ids).all()).results || [];
         if (!rows.length) return json({ error: 'esos diseños ya no están por diseñar (se actualizó la lista)' }, 409);
+        if (!esWeb && _r === 'disenador') await neonCorteStamp(env, rows.map(r => r.id), 'diseno_inicio_at', session.user);
         const nowD = new Date();
         const ar = new Date(nowD.getTime() - 3 * 3600 * 1000);
         const p2 = (n) => String(n).padStart(2, '0');
@@ -27357,6 +27634,8 @@ const handler = {
       try { await barrerVendedoresNeon(env); } catch (_) {}
       // Mano de obra y productor de los pedidos de neón nuevos → 2026 v4 (Pedidos_Directo, columnas MO y PRODUCTOR).
       try { await barrerMoDirecto(env); } catch (_) {}
+      // Tablero de neón: 'para enviar' en la planilla cuando el pedido está terminado y pagado (kv neon_estado_sync_on).
+      try { await neonSyncEstados(env); } catch (_) {}
       // Caja de la seña → col Z de Pedidos_Corporeo / Pedidos_Directo (reintentos, IMPORTRANGE atrasado, cambios).
       try { await syncCajaPedidos(env); } catch (_) {}
     })());
