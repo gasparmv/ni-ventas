@@ -6414,7 +6414,7 @@ async function sfCargar(opts) {
     const j = await sfFetch(ped ? '/admin/sinfrontera/pedidos' : '/admin/sinfrontera/produccion');
     if (STATE.user !== user) return;
     if (!ped && silent && ((STATE._sfMovGen || 0) !== gen || STATE._sfGuardando)) return; // vieja: el próximo tick recarga
-    if (ped) STATE.sfPed = { pedidos: j.pedidos || [], configurado: !!j.configurado, planillaError: !!j.planilla_error, at: Date.now() };
+    if (ped) STATE.sfPed = { pedidos: j.pedidos || [], configurado: !!j.configurado, planillaError: !!j.planilla_error, repetidos: j.repetidos || [], at: Date.now() };
     else STATE.sf = { tickets: j.tickets || [], excluidos: j.excluidos || null, at: Date.now() };
   } catch (e) {
     if (STATE.user !== user) return;
@@ -7058,6 +7058,7 @@ function renderSfPedidos() {
       ${sfAdminBarra()}
     </div>
     ${D.planillaError ? `<div class="logi-ayuda" style="color:#ffc97a">No se pudo leer la planilla: puede faltar algún pedido. Tocá Actualizar en un rato.</div>` : ''}
+    ${isAdmin() && (D.repetidos || []).length ? `<div class="logi-ayuda" style="color:#ffc97a">Cargados en el CRM y también en Pedidos_Distris: ${D.repetidos.map(r => escapeHtml(r.cartel) + ' (ID ' + escapeHtml(String(r.id_planilla)) + ' → #' + escapeHtml(String(r.numero_crm)) + ')').join(', ')}. Acá se muestran una sola vez, pero en el PnL suman dos veces: borralos de Pedidos_Distris.</div>` : ''}
     ${ps.length ? `<div class="table-wrap sf-tabla"><table class="t">
       <thead><tr><th>Fecha</th><th>Cartel</th><th>Base</th><th>Precio</th><th>Dimer</th><th>Envío</th><th>Aclar.</th><th>Estado</th></tr></thead>
       <tbody>${filas}</tbody></table></div>

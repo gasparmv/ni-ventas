@@ -16433,9 +16433,20 @@ async function sfPedidos(env, opts = {}) {
   });
   // Los neones que Gaspar les vende y anota en la planilla (Pedidos_Distris, Canal "Sin Frontera"). No están en la base.
   const pl = opts.planilla === false ? { pedidos: [] } : await sfPlanillaPedidos(env);
-  const todos = pedidos.concat(pl.pedidos)
+  // Pedido viejo que Gaspar vuelve a cargar en el CRM (ej. ribs #1000 del 16-oct, con la fecha original): se esconde su fila de la
+  // planilla. Uno a uno por nombre (hay dos "baños") y con la misma fecha o el mismo precio; si no, no se toca.
+  const nom = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+  const libres = pl.pedidos.slice(), repetidos = [];
+  for (const p of pedidos) {
+    if (+p.es_corporeo === 1 || !nom(p.cartel)) continue;
+    const cands = libres.filter(x => nom(x.cartel) === nom(p.cartel));
+    const f = String(p.fecha || '').slice(0, 10), pr = +p.precio || 0;
+    const x = cands.find(c => c.fecha === f) || cands.find(c => Math.abs(c.precio - pr) < 1);
+    if (x) { libres.splice(libres.indexOf(x), 1); repetidos.push({ id_planilla: x.numero, cartel: x.cartel, numero_crm: p.numero }); }
+  }
+  const todos = pedidos.concat(libres)
     .sort((a, b) => String(b.fecha || '').slice(0, 10).localeCompare(String(a.fecha || '').slice(0, 10)) || ((parseInt(b.numero, 10) || 0) - (parseInt(a.numero, 10) || 0)));
-  return { ok: true, pedidos: todos, configurado: tels.length > 0, ...(pl.error ? { planilla_error: true } : {}) };
+  return { ok: true, pedidos: todos, configurado: tels.length > 0, ...(pl.error ? { planilla_error: true } : {}), ...(opts.admin && repetidos.length ? { repetidos } : {}) };
 }
 // HISTÓRICO (Gaspar 16-oct: desde ahora todos sus neones se cargan en el CRM; "leer Pedidos_Distris es solo un backfill"):
 // las filas de Pedidos_Distris (2026 v4) con Canal "Sin Frontera" (opción de Maping!A4). Solo ID, fecha, cartel, cantidad,
@@ -25507,7 +25518,7 @@ const handler = {
         // GET /admin/sinfrontera/produccion → corpóreos en producción (sfProduccion).
         if (request.method === 'GET' && path === '/admin/sinfrontera/produccion') return json(await sfProduccion(env, { admin: !sfExt }));
         // GET /admin/sinfrontera/pedidos → sus pedidos (sfPedidos).
-        if (request.method === 'GET' && path === '/admin/sinfrontera/pedidos') return json(await sfPedidos(env));
+        if (request.method === 'GET' && path === '/admin/sinfrontera/pedidos') return json(await sfPedidos(env, { admin: !sfExt }));
         // GET /admin/sinfrontera/archivo?t=&i= | ?p=[&f=] [&w=] [&dl=1] → foto del ticket, diseño o foto del cartel terminado.
         if (request.method === 'GET' && path === '/admin/sinfrontera/archivo') {
           const key = await sfArchivoKey(env, url.searchParams);
