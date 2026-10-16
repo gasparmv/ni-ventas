@@ -7043,7 +7043,7 @@ function nkbAccion(c) {
       if (!c.corte_id) return adm ? { t: 'Ubicar a mano', a: 'ubicar', to: 'confirmado' } : null;
       return (adm || c.mio) ? { t: 'Subir la foto del diseño', a: 'foto', to: 'confirmado' } : null;
     case 'diseno':
-      if (adm) return { t: 'Derivar a productor', a: 'derivar', to: 'montando' };
+      if (adm) return { t: c.productor_id ? 'Cambiar productor' : 'Derivar a productor', a: 'derivar', to: 'montando' };
       if (yo === 'anibal' && ce === 'matriz_lista') return { t: 'Marcar cortado', a: 'cortado', to: 'diseno' };
       if (yo === 'neyen' && ce === 'cortado') return { t: 'Separar la base', a: 'separado', to: 'diseno' };
       return null;
@@ -7093,7 +7093,7 @@ function nkbChips(c, ficha) {
   const ch = [], ce = c.corte_estado, pr = c.productor || '';
   const P = (cls, t) => `<span class="logi-pill ${cls}">${escapeHtml(t)}</span>`;
   if (c.etapa === 'confirmado') ch.push(!c.corte_id ? P('g', 'Anterior al circuito de corte') : P('r', 'Falta la foto del diseño' + (c.vendedor ? ' · ' + c.vendedor : '')));
-  else if (c.etapa === 'diseno') ch.push(!c.corte_id ? P('g', 'Sin pieza de corte') : ce === 'pedido' ? P('a', 'Emma: por diseñar') : ce === 'matriz_lista' ? P('a', 'Falta cortar') : ce === 'cortado' ? P('a', 'Cortado · falta separar') : P('v', 'Base lista · falta derivar'));
+  else if (c.etapa === 'diseno') { ch.push(!c.corte_id ? P('g', 'Sin pieza de corte') : ce === 'pedido' ? P('a', 'Emma: por diseñar') : ce === 'matriz_lista' ? P('a', 'Falta cortar') : ce === 'cortado' ? P('a', 'Cortado · falta separar') : P('v', 'Base lista' + (pr ? '' : ' · falta derivar'))); if (pr) ch.push(P('g', 'Derivado a ' + pr)); }
   else if (c.etapa === 'montando') { ch.push(P(c.prod_estado === 'en_armado' ? 'v' : 'a', pr + (c.prod_estado === 'en_armado' ? ' · armando' : ' · sin empezar'))); if (c.corte_id && !['cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce)) ch.push(P('r', 'Falta la base')); }
   else if (c.etapa === 'terminado' && c.grupo_n > c.grupo_term) { const f = c.grupo_n - c.grupo_term; ch.push(P('a', f === 1 ? 'Espera al otro cartel' : 'Espera a ' + f + ' carteles más')); }
   if (['terminado', 'pago', 'enviar'].includes(c.etapa) && c.prod_estado === 'terminado') { if (c.f.recibido) ch.push(P('v', 'En el taller')); else if (pr) ch.push(P('a', 'Falta traer de ' + pr)); }

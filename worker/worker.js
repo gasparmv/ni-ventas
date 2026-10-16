@@ -16791,7 +16791,8 @@ function neonEtapas(rows, sfIds) {
     if (/^entregad/.test(ep)) i = 6;
     else if (g.every(term)) i = pagado ? 5 : 4;
     else if (term(r)) i = 3;
-    else if (String(r.productor_id || '')) i = 2;
+    // Derivado pero la base todavía no está cortada (está en la cola de Emma o de Aníbal): sigue en En diseño y corte.
+    else if (String(r.productor_id || '') && (String(r.prod_estado || '') === 'en_armado' || !r.corte_id || ['cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce))) i = 2;
     else if (['matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce) || (ce === 'pedido' && String(r.corte_foto || '').trim())) i = 1;
     else i = 0;
     let motivo = '';
