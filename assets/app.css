@@ -4748,3 +4748,10 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
   [data-nkb-zona].buscando .sfk-col-h { display: flex; padding: 4px 2px; }
   [data-nkb-zona].buscando .sfk-etq { display: inline-block; }
 }
+
+/* Chat: en la compu los filtros (Todos, No leídos, Para cotizar, Por cobrar, Etiquetas, Servicio de corte) bajan a otra fila
+   en vez de quedar cortados: la barra no tiene scroll visible y "Etiquetas" quedaba afuera (Gaspar 16-oct). En el celular
+   sigue deslizandose de costado. */
+@media (min-width: 769px) {
+  .label-filter-bar { flex-wrap: wrap; white-space: normal; overflow: visible; row-gap: 6px; }
+}
