@@ -7562,7 +7562,7 @@ function nkbAbrirPedido(c) {
 }
 async function nkbDespacho(c, forzar) {
   const logi = nkbRol() === 'logistica';
-  if (forzar && !(await showConfirm(`${nkbTit(c)} está en ${NKB_LARGO[c.etapa]}, no en Para enviar. ¿Marcarlo enviado igual?`, { title: 'Marcar enviado', confirmLabel: 'Sí', cancelLabel: 'No' }))) return;
+  if (forzar && !(await showConfirm(`${nkbTit(c)} está en ${NKB_LARGO[c.etapa]}, no en Para enviar. ¿Marcarlo enviado igual? (Si no está saldado no sale igual.)`, { title: 'Marcar enviado', confirmLabel: 'Sí', cancelLabel: 'No' }))) return;
   const modos = logi ? ['envio'] : (c.sf ? ['sinfrontera', 'envio', 'retira', 'instalacion'] : ['envio', 'retira', 'instalacion']);
   const v = await nkbModal({
     titulo: '¿Cómo salió ' + nkbTit(c) + '?',
@@ -12602,7 +12602,7 @@ function pagosDrawerSection(p) {
     ? `<div style="padding:8px 0;border-top:1px dashed var(--border);font-size:13px;color:#FFB020">⏳ Cargado sin pago${ddmmC ? ' — cobrar el ' + escapeHtml(ddmmC) : ' — sin recordatorio'}. ${isAdmin() ? (ddmmC ? 'Te llega el recordatorio por WhatsApp hasta que registres el pago.' : '') : 'Gaspar recibe el recordatorio para cobrarlo.'}</div>`
     : fila('1er pago (seña)', p.pagado, p.caja, p.pagoMetodo, p.comprobanteKey, '');
   // Recordatorio de cobro (pedido cargado sin pago, o con saldo después de un pago parcial): posponer o cortarlo.
-  if (isAdmin() && p.estadoPago !== '2do pago' && !(Number(p.cobro2) > 0) && (p.cobrarEl || sinPago) && Number(p.restante) > 1) {
+  if (isAdmin() && p.estadoPago !== '2do pago' && (p.cobrarEl || sinPago) && Number(p.restante) > 1) {
     const hoyC = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
     html += `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:6px 0 2px">
         <span style="font-size:11px;color:var(--fg-subtle)">${p.cobrarEl ? 'Recordar cobro el' : 'Recordarme cobrarlo el'}</span>
@@ -12614,6 +12614,10 @@ function pagosDrawerSection(p) {
   if (tiene2) {
     html += fila('2do pago (saldo)', p.cobro2, p.caja2, p.pago2Metodo, p.comprobante2Key, p.cobro2At ? `<span style="font-size:11px;color:var(--fg-mute)">${escapeHtml(compFechaCorta(p.cobro2At))}</span>` : '');
     if (Number(p.restante) > 0) html += `<div style="font-size:12px;color:#FFB020;padding-top:6px">Queda debiendo ${fmtMoney(p.restante)}</div>`;
+    // Pago parcial del saldo: sigue en 1er pago (no sale del taller hasta que pague todo).
+    if (p.estadoPago !== '2do pago' && !/^cuenta corriente$/i.test(String(p.estadoPago || '')) && Number(p.restante) > 1 && canCotizar()) html += `<div style="padding-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-cyan" onclick="abrirSegundoPago(${p.idx},{origen:'drawer'})" style="font-size:12px;padding:6px 12px">💳 Registrar el resto</button>${isAdmin() ? `<button class="btn btn-ghost" onclick="pedBorrarPagoSaldo(${p.idx})" style="font-size:12px;padding:6px 10px;color:var(--fg-subtle)">Borrar este pago</button>` : ''}</div>`;
+  } else if (/^cuenta corriente$/i.test(String(p.estadoPago || ''))) {
+    html += `<div style="font-size:12px;color:var(--fg-subtle);padding-top:8px;border-top:1px dashed var(--border)">Cuenta corriente (Sin Frontera): se cobra en su Excel</div>`;
   } else if (p.estadoPago === '2do pago') {
     html += `<div style="font-size:12px;color:var(--fg-subtle);padding-top:8px;border-top:1px dashed var(--border)">${(Number(p.pagado) > 0 && !(Number(p.restante) > 0)) ? 'Pagó el total en el 1er pago' : 'Marcado como 2do pago (sin datos del cobro)'}</div>`;
   } else if (canCotizar()) {
@@ -12621,6 +12625,20 @@ function pagosDrawerSection(p) {
   }
   if (isAdmin() && p.cajaSyncErr) html += `<div style="font-size:10.5px;color:#FFB020;margin-top:6px">planilla: ${escapeHtml(p.cajaSyncErr)}</div>`;
   return `<div class="drawer-section" data-ped-pagos-idx="${p.idx}"><h4>💳 Pagos</h4>${html}</div>`;
+}
+// Borra un pago PARCIAL del saldo (cobro2 con el pedido en 1er pago): el saldo vuelve a lo que faltaba. Solo Gaspar.
+async function pedBorrarPagoSaldo(idx) {
+  const p = (STATE.pedidos || []).find(x => x.idx === idx); if (!p || !isAdmin()) return;
+  if (!(await showConfirm(`Se borra el pago del saldo registrado (${fmtMoney(p.cobro2)}${p.caja2 ? ' a ' + p.caja2 : ''}).\n\n¿Seguro?`, { title: 'Borrar pago', variant: 'warn', confirmLabel: 'Sí, borrar', cancelLabel: 'No' }).catch(() => false))) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx, { method: 'PATCH', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ estado_pago: p.estadoPago || '1er pago', pago2_revert: true }) });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    const updated = (j.pedidos || []).map(mapPedidoFromD1), ids = new Set(updated.map(x => x.idx));
+    STATE.pedidos = STATE.pedidos.filter(x => !ids.has(x.idx)).concat(updated);
+    renderTablePedidos(); try { openDrawerPedido(idx); } catch (_) {}
+    toast('Pago borrado');
+  } catch (e) { toast('Error: ' + e.message); }
 }
 // Select "Estado del pago" del drawer: pasar a '2do pago' abre el modal (el cobro se registra ahí, no con "Guardar");
 // volver de '2do pago' con un cobro registrado avisa que al guardar se borra.
@@ -12649,13 +12667,19 @@ function abrirSegundoPago(idx, opts) {
   const grupo = pedidoHermanos(p);
   const herm = grupo.length ? grupo : [p];
   const total = herm.reduce((s, x) => s + (Number(x.precio) || 0) + (Number(x.precioDimmer) || 0), 0);
-  const sena = Number(p.pagado) || 0;
-  const saldo = Number(p.restante) > 0 ? Number(p.restante) : Math.max(0, total - sena - (Number(p.cobro2) || 0));
+  // Seña del pedido entero: en los del CRM se repite en cada fila (MAX); en los importados del Excel va repartida por fila (SUM, solo
+  // si cada fila cierra o si los montos difieren; si no, uno solo: del lado seguro).
+  const _pags = herm.map(x => Number(x.pagado) || 0);
+  const _cierra = herm.every(x => Math.abs((Number(x.pagado) || 0) + (Number(x.restante) || 0) - (Number(x.precio) || 0) - (Number(x.precioDimmer) || 0)) <= 1);
+  const sena = herm.every(x => x.origen === 'crm') ? Math.max(0, ..._pags) : ((_cierra || Math.min(..._pags) !== Math.max(..._pags)) ? _pags.reduce((s, v) => s + v, 0) : Math.max(0, ..._pags));
+  // El importe es TODO lo cobrado del saldo: si ya hubo un pago parcial (cobro2), este lo reemplaza → se propone el saldo entero.
+  const cobro2Prev = Math.max(0, ...herm.map(x => Number(x.cobro2) || 0));
+  const saldo = Math.max(0, total - sena);
   // Contacto para las sugerencias: el del chat (si viene de ahí) o el del pedido (WPP: dígitos; IG: '@usuario' tal cual).
   const crudo = String(p.telefono || '').trim();
   const esUsuarioIg = p.plataforma === 'IG' && /^@|[a-z_.]/i.test(crudo);
   const st = {
-    idx, p, numero: p.numero, cartel: p.cartel || '', nCarteles: herm.length, total, sena, saldo, origen: opts.origen || '', onCancel: alCancelar,
+    idx, p, numero: p.numero, cartel: p.cartel || '', nCarteles: herm.length, total, sena, saldo, cobro2Prev, origen: opts.origen || '', onCancel: alCancelar,
     sinPago: p.pagoMetodo === 'pendiente' && !(sena > 0) && !(Number(p.cobro2) > 0),
     contacto: String(opts.contacto || (esUsuarioIg ? crudo : crudo.replace(/\D/g, ''))),
     metodo: 'transferencia', caja: '', cajaManual: false, cajaDeOcr: false,
@@ -12740,7 +12764,8 @@ function sp2AvisosHtml(st) {
   const caja2 = st.metodo === 'efectivo' ? 'Efectivo' : st.caja;
   if (caja1 && caja2 && caja2 !== caja1) out.push({ c: 'var(--accent-cyan,#8FD4DE)', t: `ℹ Ojo: la seña fue a ${caja1}; en la planilla queda ${caja1}` });
   const imp = Number(st.importe) || 0;
-  if (imp > 0 && st.saldo > 0 && Math.round(imp) !== Math.round(st.saldo)) out.push({ c: '#FFB020', t: imp < st.saldo ? `⚠ Queda debiendo ${fmtMoney(st.saldo - imp)}` : `⚠ Pagó ${fmtMoney(imp - st.saldo)} de más` });
+  if (st.cobro2Prev > 0 && !st.sinPago) out.push({ c: 'var(--accent-cyan,#8FD4DE)', t: `ℹ Ya había registrado ${fmtMoney(st.cobro2Prev)} del saldo: poné TODO lo que pagó del saldo (reemplaza al anterior)` });
+  if (imp > 0 && st.saldo > 0 && Math.round(imp) !== Math.round(st.saldo)) out.push({ c: '#FFB020', t: imp < st.saldo ? `⚠ Queda debiendo ${fmtMoney(st.saldo - imp)}: sigue en 1er pago y no se puede mandar hasta que pague todo` : `⚠ Pagó ${fmtMoney(imp - st.saldo)} de más` });
   if (imp > 0 && !(st.saldo > 0)) out.push({ c: '#FFB020', t: '⚠ Según el sistema este pedido ya no tiene saldo pendiente' });
   return out.map(a => `<div style="font-size:12px;color:${a.c};margin-top:4px">${escapeHtml(a.t)}</div>`).join('');
 }
@@ -12859,7 +12884,8 @@ function sp2AplicarOcr(st) {
   const caja = ocr ? compCajaValida(ocr.caja) : '';
   if (caja && !st.cajaManual) { st.caja = caja; st.cajaDeOcr = true; }
   const monto = ocr ? Math.round(Number(ocr.monto) || 0) : 0;
-  if (monto > 0) { if (st.importeFuente !== 'manual') { st.importe = String(monto); st.importeFuente = 'ocr'; } }
+  // Con un pago parcial previo del saldo, el importe es TODO lo cobrado del saldo: lo anterior + este comprobante.
+  if (monto > 0) { if (st.importeFuente !== 'manual') { st.importe = String(monto + (st.cobro2Prev > 0 && !st.sinPago ? Math.round(st.cobro2Prev) : 0)); st.importeFuente = 'ocr'; } }
   else if (st.importeFuente === 'ocr') { st.importe = st.saldo > 0 ? String(Math.round(st.saldo)) : ''; st.importeFuente = st.saldo > 0 ? 'saldo' : ''; }
 }
 async function sp2CargarSug(st, force) {
@@ -13005,7 +13031,7 @@ function pedidoEnPrimerPagoDe(phone) {
   // Solo pedidos con saldo de verdad y recientes: un pedido viejo que nunca se pasó a '2do pago' no se lleva la seña
   // de una compra nueva del mismo cliente.
   const ahora = Date.now();
-  const vigente = (p) => !(Number(p.cobro2) > 0) && Number(p.restante) > 0 && (!(+p.fecha) || ahora - (+p.fecha) < 120 * 86400e3);
+  const vigente = (p) => Number(p.restante) > 0 && (!(+p.fecha) || ahora - (+p.fecha) < 120 * 86400e3);
   const cands = (STATE.pedidos || []).filter(p => /1er|primer/i.test(String(p.estadoPago || '')) && match(p) && vigente(p));
   if (!cands.length) return null;
   return cands.reduce((a, b) => ((+b.fecha || 0) > (+a.fecha || 0) || ((+b.fecha || 0) === (+a.fecha || 0) && b.idx > a.idx)) ? b : a);
