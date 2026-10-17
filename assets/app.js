@@ -7081,7 +7081,13 @@ function nkbAccion(c) {
       if (yo === 'neyen' && ce === 'cortado') return { t: 'Separar la base', a: 'separado', to: 'diseno' };
       return null;
     case 'montando':
-      return adm ? (c.prod_estado === 'en_armado' ? { t: 'Marcar terminado', a: 'terminar', to: 'terminado' } : { t: 'Marcar armando', a: 'armando', to: 'montando' }) : null;
+      // El productor arrancó con la base todavía en Corte: Aníbal y Neyen la terminan desde acá también.
+      if (yo === 'anibal' && ce === 'matriz_lista') return { t: 'Marcar cortado', a: 'cortado', to: 'montando' };
+      if (yo === 'neyen' && ce === 'cortado') return { t: 'Separar la base', a: 'separado', to: 'montando' };
+      if (!adm) return null;
+      if (!c.productor_id) return { t: 'Derivar a productor', a: 'derivar', to: 'montando' };   // ubicado a mano sin productor
+      return c.prod_estado === 'en_armado' ? { t: 'Marcar terminado', a: 'terminar', to: 'terminado' } : { t: 'Marcar armando', a: 'armando', to: 'montando' };
+    case 'terminado': return ((adm || yo === 'neyen') && !c.f.recibido) ? { t: 'Llegó al taller', a: 'recibido', to: 'pago' } : null;
     case 'pago': return (adm || c.mio) ? { t: 'Registrar 2do pago', a: 'pago', to: 'enviar' } : null;
     case 'enviar':
       if (r === 'logistica' && ['Retira', 'Instalación', 'Sin Frontera'].includes(nkbEntrega(c))) return null;
@@ -7093,10 +7099,13 @@ function nkbAccion(c) {
 function nkbSecundarios(c) {
   const r = nkbRol(), yo = (STATE.nkb && STATE.nkb.yo) || '', adm = r === 'admin', ce = c.corte_estado, prim = (nkbAccion(c) || {}).a, out = [];
   const add = (a, t) => { if (a !== prim && !out.some(x => x.a === a)) out.push({ a, t }); };
-  if (adm && c.etapa === 'diseno' && ce === 'matriz_lista') add('cortado', 'Marcar cortado');
-  if (adm && c.etapa === 'diseno' && ce === 'cortado') add('separado', 'Separar la base');
-  if (adm && c.etapa === 'montando') { add('derivar', 'Cambiar productor'); add('terminar', 'Marcar terminado'); }
-  if ((adm || yo === 'neyen') && ['terminado', 'pago', 'enviar'].includes(c.etapa) && c.prod_estado === 'terminado') add(c.f.recibido ? 'no_recibido' : 'recibido', c.f.recibido ? 'No llegó todavía' : 'Llegó al taller');
+  if (adm && ['diseno', 'montando'].includes(c.etapa) && ce === 'matriz_lista') add('cortado', 'Marcar cortado');
+  if (adm && ['diseno', 'montando'].includes(c.etapa) && ce === 'cortado') add('separado', 'Separar la base');
+  if (adm && c.etapa === 'montando') { add('derivar', c.productor_id ? 'Cambiar productor' : 'Derivar a productor'); if (c.productor_id) add('terminar', 'Marcar terminado'); }
+  // Ya está para cobrar / enviar / enviado (ubicado a mano o por el estado viejo) pero en la hoja del productor sigue sin terminar:
+  // Gaspar lo cierra acá (si no, el productor lo sigue viendo "para hacer" y su mano de obra no figura como deuda).
+  if (adm && c.productor_id && c.prod_estado !== 'terminado' && ['terminado', 'pago', 'enviar', 'enviado'].includes(c.etapa)) add('terminar', 'Marcar terminado (' + (c.productor || c.productor_id) + ')');
+  if ((adm || yo === 'neyen') && ['terminado', 'pago', 'enviar'].includes(c.etapa) && (c.prod_estado === 'terminado' || c.etapa === 'terminado')) add(c.f.recibido ? 'no_recibido' : 'recibido', c.f.recibido ? 'No llegó todavía' : 'Llegó al taller');
   const diaAR = t => new Date(new Date(t).getTime() - 3 * 3600e3).toISOString().slice(0, 10);
   if (STATE.nkb && STATE.nkb.despacha && c.etapa === 'enviado' && c.despacho && c.f.despachado && (adm || (diaAR(c.f.despachado) === diaAR(Date.now()) && (r !== 'logistica' || c.despacho.modo === 'envio')))) add('deshacer_envio', 'Deshacer el envío');
   if (adm && !['enviar', 'enviado'].includes(c.etapa)) add('despacho_forzar', 'Marcar enviado');
@@ -7127,15 +7136,20 @@ function nkbChips(c, ficha) {
   const P = (cls, t) => `<span class="logi-pill ${cls}">${escapeHtml(t)}</span>`;
   if (c.etapa === 'confirmado') ch.push(!c.corte_id ? P('g', 'Anterior al circuito de corte') : P('r', 'Falta la foto del diseño' + (c.vendedor ? ' · ' + c.vendedor : '')));
   else if (c.etapa === 'diseno') { ch.push(!c.corte_id ? P('g', 'Sin pieza de corte') : ce === 'pedido' ? P('a', 'Emma: por diseñar') : ce === 'matriz_lista' ? P('a', 'Falta cortar') : ce === 'cortado' ? P('a', 'Cortado · falta separar') : P('v', 'Base lista' + (pr ? '' : ' · falta derivar'))); if (pr) ch.push(P('g', 'Derivado a ' + pr)); }
-  else if (c.etapa === 'montando') { ch.push(P(c.prod_estado === 'en_armado' ? 'v' : 'a', pr + (c.prod_estado === 'en_armado' ? ' · armando' : ' · sin empezar'))); if (c.corte_id && !['cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce)) ch.push(P('r', 'Falta la base')); }
+  else if (c.etapa === 'montando') {
+    ch.push(pr ? P(c.prod_estado === 'en_armado' ? 'v' : 'a', pr + (c.prod_estado === 'en_armado' ? ' · armando' : ' · sin empezar')) : P('r', 'Sin productor'));
+    if (c.corte_id && ce === 'cortado') ch.push(P('a', 'Base cortada · falta separar'));
+    else if (c.corte_id && !['embalado', 'cobrado', 'despachado', 'entregado'].includes(ce)) ch.push(P('r', 'Falta la base'));
+  }
   else if (c.etapa === 'terminado' && c.grupo_n > c.grupo_term) { const f = c.grupo_n - c.grupo_term; ch.push(P('a', f === 1 ? 'Espera al otro cartel' : 'Espera a ' + f + ' carteles más')); }
-  if (['terminado', 'pago', 'enviar'].includes(c.etapa) && c.prod_estado === 'terminado') { if (c.f.recibido) ch.push(P('v', 'En el taller')); else if (pr) ch.push(P('a', 'Falta traer de ' + pr)); }
+  if (['terminado', 'pago', 'enviar'].includes(c.etapa) && c.motivo !== 'estado' && (c.prod_estado === 'terminado' || c.etapa === 'terminado')) { if (c.f.recibido) ch.push(P('v', 'En el taller')); else ch.push(P('a', pr ? 'Falta traer de ' + pr : 'Falta traerlo al taller')); }
+  if (nkbRol() === 'admin' && pr && c.prod_estado !== 'terminado' && ['pago', 'enviar', 'enviado'].includes(c.etapa)) ch.push(P('a', pr + ' no lo marcó terminado'));
   if (c.etapa === 'enviar') { const e = nkbEntrega(c); if (e && !c.sf) ch.push(P(e === 'Entrega sin definir' ? 'a' : 'g', e)); }
   if (c.etapa === 'enviado' && c.despacho) ch.push(P('g', NKB_DESPACHO[c.despacho.modo] || 'Salió'));
   if (c.sf) ch.push(P('g', 'Sin Frontera'));
   if (c.cantidad > 1) ch.push(P('a', c.cantidad + ' unidades'));
   if (c.grupo_n > 1 && c.etapa !== 'terminado') ch.push(P('g', 'Pedido de ' + c.grupo_n + ' carteles'));
-  if (ficha && nkbRol() === 'admin' && c.motivo) ch.push(P('g', c.motivo === 'piso' ? 'Ubicado a mano' : 'Para enviar puesto a mano en Pedidos'));
+  if (ficha && nkbRol() === 'admin' && (c.motivo || c.piso)) ch.push(P('g', c.motivo === 'estado' ? 'Para enviar puesto a mano en Pedidos' : 'Ubicado a mano'));
   return ch;
 }
 
@@ -7518,12 +7532,19 @@ async function nkbDerivar(c, forzar) {
       if (!(await showConfirm(`${nkbTit(c)} ya lo está armando otro productor. ¿Pasárselo a ${nom || 'nadie'} igual? El trabajo y su pago pasan al nuevo.`, { title: 'Cambiar productor', confirmLabel: 'Sí, cambiar', cancelLabel: 'No' }))) return { ok: true, j: {}, cancelado: true };
       r = await asignar(true);
     }
+    if (r.ok && r.j && !(r.j.cambiados > 0) && (r.j.saltados || []).length) return { ok: false, j: { error: 'no se cambió (' + r.j.saltados.map(s => s.motivo).join(', ') + ')' } };
+    if (r.ok && r.j && r.j.carteles && typeof prodAplicarAPedidos === 'function') prodAplicarAPedidos(r.j.carteles);
     return r;
   }, pid ? nkbTit(c) + ' derivado a ' + nom : nkbTit(c) + ' quedó sin productor');
 }
 async function nkbProdEstado(c, est) {
-  if (est === 'terminado' && !c.fotos && !(await showConfirm(`${nkbTit(c)} no tiene foto del cartel terminado. ¿Marcarlo terminado igual?`, { title: 'Marcar terminado', confirmLabel: 'Sí, terminado', cancelLabel: 'No' }))) return;
-  await nkbGuardar(c, () => nkbPost('/admin/prod/estado', { pedido_id: c.id, estado: est, forzar: true }), nkbTit(c) + (est === 'terminado' ? ' quedó terminado' : ' quedó armando'));
+  const req = Math.min(5, Math.max(1, Number(c.cantidad) || 1)), nf = Number(c.fotos) || 0;
+  if (est === 'terminado' && nf < req && !(await showConfirm(nf ? `${nkbTit(c)} tiene ${nf} de ${req} fotos del cartel terminado. ¿Marcarlo terminado igual?` : `${nkbTit(c)} no tiene foto del cartel terminado. ¿Marcarlo terminado igual?`, { title: 'Marcar terminado', confirmLabel: 'Sí, terminado', cancelLabel: 'No' }))) return;
+  await nkbGuardar(c, async () => {
+    const r = await nkbPost('/admin/prod/estado', { pedido_id: c.id, estado: est, forzar: true });
+    if (r.ok && r.j && r.j.carteles && typeof prodAplicarAPedidos === 'function') prodAplicarAPedidos(r.j.carteles);
+    return r;
+  }, nkbTit(c) + (est === 'terminado' ? ' quedó terminado' : ' quedó armando'));
 }
 function nkbPago(c) {
   if (typeof abrirSegundoPago !== 'function' || !(STATE.pedidos || []).some(x => x.idx === c.id)) { niToast('Registralo desde Pedidos (no encuentro el pedido acá).', { error: true }); return; }
@@ -14914,8 +14935,18 @@ async function verAnuncioPedido(idx) {
 }
 // Cambio rápido de un solo campo (estado_pago / estado_pedido) desde el dropdown
 // inline de la tabla. PATCH a nivel pedido; refresca STATE + repinta la tabla.
+// Desde el 17-oct el tablero de neón pasa a "Para enviar" solo con el cartel TERMINADO (lo marca el productor con la foto, o Gaspar
+// desde el tablero): poner 'para enviar' acá no lo mueve. Se avisa antes (los vendedores ya no cambian el estado de los neones).
+async function neonAvisoParaEnviar(p, value) {
+  if (!p || !isAdmin() || !/^para enviar/i.test(String(value || '')) || /^para enviar/i.test(String(p.estadoPedido || ''))) return true;
+  const sinTerm = (typeof pedidoHermanos === 'function' ? pedidoHermanos(p) : [p])
+    .filter(x => !x.esCorporeo && Number(x.alto) > 0 && Number(x.ancho) > 0 && pedidoFechaYmd(x) >= '2026-10-17' && x.prodEstado !== 'terminado');
+  if (!sinTerm.length) return true;
+  return await showConfirm(`En Producción neón no pasa a "Para enviar" hasta que esté terminado: ${sinTerm.map(x => x.cartel).join(', ')}.\n\nMarcalo terminado desde el tablero (o que el productor suba la foto). ¿Cambiar el estado acá igual?`, { title: 'Ojo con el tablero', variant: 'warn', confirmLabel: 'Cambiar igual', cancelLabel: 'No' }).catch(() => false);
+}
 async function savePedidoField(idx, field, value) {
   let revert2 = false;
+  if (field === 'estado_pedido' && !(await neonAvisoParaEnviar(STATE.pedidos.find(x => x.idx === idx), value))) { renderTablePedidos(); return; }
   if (field === 'estado_pago') {
     const p0 = STATE.pedidos.find(x => x.idx === idx);
     // Marcar '2do pago' = registrar el cobro del saldo: abre el modal (comprobante / caja / importe) en vez del PATCH.
@@ -14944,6 +14975,7 @@ async function savePedidoField(idx, field, value) {
 async function savePedidoEdit(idx) {
   const p = STATE.pedidos.find(x => x.idx === idx);
   if (!p) return;
+  { const _ep = document.getElementById('ped-edit-estadopedido')?.value; if (_ep && _ep !== p.estadoPedido && !(await neonAvisoParaEnviar(p, _ep))) return; }
   const body = {
     // Campos del cartel (esta fila): el worker los actualiza por id.
     cartel:        document.getElementById('ped-edit-cartel')?.value,
@@ -23586,7 +23618,7 @@ window.closeDrawer = closeDrawer;
 function isProductorOnly() { return !!STATE.token && STATE.tokenRol === 'productor' && tokenBelongsTo(STATE.user); }
 const PROD_ESTADO_LBL = { pendiente: 'Pendiente', en_armado: 'En armado', terminado: 'Terminado' };
 const PROD_ESTADO_COLOR = { pendiente: '#9aa0b4', en_armado: '#FFB020', terminado: '#2ECC71' };
-const PROD_CORTE_TXT = { pedido: 'Acrílico: falta diseñar la matriz', matriz_lista: 'Acrílico: falta cortar', cortado: 'Acrílico cortado', embalado: 'Acrílico listo para vos ✓' };
+const PROD_CORTE_TXT = { pedido: 'Acrílico: falta diseñar la matriz', matriz_lista: 'Acrílico: falta cortar', cortado: 'Acrílico cortado (falta separarlo)', embalado: 'Acrílico listo para vos ✓' };
 const PROD_DIMER_LBL = { NO: 'Sin dimmer', SLIM: 'Dimmer slim', CONTROL: 'Control remoto', APP: 'Controlador por app', SI: 'Con controlador' };
 // Imagen de un cartel para el productor (el worker controla que sea de SUS carteles). Admin/vendedores usan mediaUrl.
 function prodImg(key) { return key ? CONFIG.trackerUrl + '/admin/prod/img/' + encodeURIComponent(key) + (STATE.token ? '?token=' + encodeURIComponent(STATE.token) : '') : ''; }
@@ -23650,9 +23682,10 @@ function renderProdApp(embebido) {
   const toastDiv = embebido ? '' : '<div id="toast" class="toast"></div>';
   if (!d) return `<div class="prod-app">${toastDiv}${head}<div class="prod-body"><div class="muted" style="padding:30px;text-align:center">${st.err ? '⚠ ' + escapeHtml(st.err) + '<br><button class="btn btn-cyan" data-prod-refresh style="margin-top:10px">Reintentar</button>' : 'Cargando tus carteles…'}</div></div></div>`;
   const cs = d.carteles || [];
-  const hacer = cs.filter(c => c.prod_estado !== 'terminado' && !c.prod_pagado_at);
+  // Pagado por adelantado y sin terminar: sigue en "Para hacer" (lo tiene que marcar terminado con la foto).
+  const hacer = cs.filter(c => c.prod_estado !== 'terminado');
   const term = cs.filter(c => c.prod_estado === 'terminado' && !c.prod_pagado_at);
-  const pag = cs.filter(c => c.prod_pagado_at);
+  const pag = cs.filter(c => c.prod_estado === 'terminado' && c.prod_pagado_at);
   const suma = arr => arr.reduce((s, c) => s + (Number(c.mo_monto) || 0), 0);
   const tabs = [['hacer', 'Para hacer', hacer.length], ['term', 'Terminados', term.length], ['pag', 'Cobrados', pag.length]];
   const lista = st.tab === 'term' ? term : st.tab === 'pag' ? pag : hacer;
@@ -23661,7 +23694,7 @@ function renderProdApp(embebido) {
       <div class="prod-resumen">
         <div><div class="k">Para hacer</div><div class="v">${hacer.length}</div></div>
         <div><div class="k">Terminados sin cobrar</div><div class="v">${fmtMoney(suma(term))}</div></div>
-        <div><div class="k">Cobrado (60 días)</div><div class="v">${fmtMoney(suma(pag))}</div></div>
+        <div><div class="k">Cobrado (60 días)</div><div class="v">${fmtMoney(suma(cs.filter(c => c.prod_pagado_at)))}</div></div>
       </div>
       <div class="prod-tabs">${tabs.map(([k, l, n]) => `<button class="prod-tab ${st.tab === k ? 'on' : ''}" data-prod-tab="${k}">${l} <span>${n}</span></button>`).join('')}</div>
       ${lista.length ? lista.map(c => prodCardHtml(c, false)).join('') : `<div class="muted" style="padding:28px;text-align:center">${st.tab === 'hacer' ? 'No tenés carteles pendientes.' : st.tab === 'term' ? 'No hay terminados sin cobrar.' : 'Todavía no hay cobrados en los últimos 60 días.'}</div>`}
@@ -23674,6 +23707,7 @@ function prodCardHtml(c, admin) {
   const fotoUrl = k => admin ? mediaUrl(k) : prodImg(k);
   const req = c.fotos_requeridas || 1, nf = (c.fotos || []).length, pagado = !!c.prod_pagado_at;
   const est = c.prod_estado || 'pendiente';
+  const congelado = pagado && est === 'terminado';   // pagado y terminado: ya no se toca
   const chips = [
     ['Medidas', prodMedidas(c)], ['Neón', prodMetros(c)], ['Tramos', c.tramos || '—'],
     ['Colores', c.colores || '—'], ['Base', c.base === 'TRANS' ? 'Transparente' : (c.base === 'NEGRO' ? 'Negra' : (c.base || '—'))],
@@ -23682,7 +23716,7 @@ function prodCardHtml(c, admin) {
   const alertas = [];
   if ((Number(c.cantidad) || 1) > 1) alertas.push(`Son ${Number(c.cantidad)} carteles iguales`);
   if (String(c.tipo || '').toUpperCase() === 'EXT') alertas.push('Para exterior');
-  const botones = pagado ? '' : (est === 'pendiente'
+  const botones = congelado ? '' : pagado ? `<button class="btn btn-cyan" data-prod-estado="${c.id}|terminado" ${busy ? 'disabled' : ''}>Terminado ✓</button>` : (est === 'pendiente'
     ? `<button class="btn btn-cyan" data-prod-estado="${c.id}|en_armado" ${busy ? 'disabled' : ''}>Empecé a armarlo</button>`
     : est === 'en_armado'
       ? `<button class="btn btn-ghost" data-prod-estado="${c.id}|pendiente" ${busy ? 'disabled' : ''}>Volver a pendiente</button><button class="btn btn-cyan" data-prod-estado="${c.id}|terminado" ${busy ? 'disabled' : ''}>Terminado ✓</button>`
@@ -23692,7 +23726,7 @@ function prodCardHtml(c, admin) {
     <div class="prod-card-body">
       <div style="display:flex;gap:8px;align-items:flex-start">
         <div style="flex:1;min-width:0"><div class="prod-card-title">${escapeHtml(c.cartel || '')}</div><div style="font-size:12px;color:var(--fg-mute)">N° ${escapeHtml(String(c.numero || '—'))} · ${prodFechaCorta(c.fecha)}${c.corte_estado ? ' · ' + escapeHtml(PROD_CORTE_TXT[c.corte_estado] || c.corte_estado) : ''}</div></div>
-        <span class="prod-pill" style="background:${PROD_ESTADO_COLOR[est]}22;color:${PROD_ESTADO_COLOR[est]};border-color:${PROD_ESTADO_COLOR[est]}66">${pagado ? 'Cobrado' : PROD_ESTADO_LBL[est]}</span>
+        <span class="prod-pill" style="background:${PROD_ESTADO_COLOR[est]}22;color:${PROD_ESTADO_COLOR[est]};border-color:${PROD_ESTADO_COLOR[est]}66">${pagado ? (est === 'terminado' ? 'Cobrado' : 'Cobrado · falta terminar') : PROD_ESTADO_LBL[est]}</span>
       </div>
       ${alertas.length ? `<div class="prod-alerta">${alertas.map(escapeHtml).join(' · ')}</div>` : ''}
       <div class="prod-chips">${chips.map(([k, v]) => `<div><span>${k}</span>${escapeHtml(String(v))}</div>`).join('')}</div>
@@ -23701,8 +23735,8 @@ function prodCardHtml(c, admin) {
       <div class="prod-fotos">
         <div style="font-size:12px;color:var(--fg-mute);margin-bottom:6px">Fotos del cartel terminado: <b style="color:${nf >= req ? '#2ECC71' : 'var(--fg)'}">${nf} de ${req}</b>${req > 1 ? ' (una de cada cartel)' : ''}</div>
         <div class="prod-fotos-grid">
-          ${(c.fotos || []).map(f => `<div class="prod-foto"><img src="${escapeHtml(fotoUrl(f.key))}" alt="" loading="lazy" data-prod-zoom="${escapeHtml(fotoUrl(f.key))}">${pagado ? '' : `<button data-prod-foto-borrar="${f.id}" title="Sacar esta foto">✕</button>`}</div>`).join('')}
-          ${pagado ? '' : `<label class="prod-foto-add ${busy ? 'busy' : ''}">${busy ? 'Subiendo…' : '📷 Subir foto'}<input type="file" accept="image/*" capture="environment" multiple data-prod-foto-input="${c.id}" style="display:none" ${busy ? 'disabled' : ''}></label>`}
+          ${(c.fotos || []).map(f => `<div class="prod-foto"><img src="${escapeHtml(fotoUrl(f.key))}" alt="" loading="lazy" data-prod-zoom="${escapeHtml(fotoUrl(f.key))}">${congelado ? '' : `<button data-prod-foto-borrar="${f.id}" title="Sacar esta foto">✕</button>`}</div>`).join('')}
+          ${congelado ? '' : `<label class="prod-foto-add ${busy ? 'busy' : ''}">${busy ? 'Subiendo…' : '📷 Subir foto'}<input type="file" accept="image/*" capture="environment" multiple data-prod-foto-input="${c.id}" style="display:none" ${busy ? 'disabled' : ''}></label>`}
         </div>
       </div>
       ${c.prod_terminado_at && est === 'terminado' ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:6px">Terminado el ${prodFechaHora(c.prod_terminado_at)}</div>` : ''}

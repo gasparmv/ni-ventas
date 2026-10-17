@@ -16846,6 +16846,7 @@ async function neonTableroFilas(env, opts = {}) {
     // Total del pedido ENTERO (con los corpóreos del grupo): para saber si lo pagó todo con la seña.
     "(SELECT SUM(IFNULL(x.precio,0) + IFNULL(x.precio_dimmer,0)) FROM pedidos x WHERE x.numero = p.numero AND x.fecha = p.fecha AND IFNULL(x.comercial_id,'joaco') = IFNULL(p.comercial_id,'joaco') AND (IFNULL(p.origen,'') <> 'crm' OR IFNULL(p.telefono,'') = '' OR (x.origen = 'crm' AND x.telefono = p.telefono))) AS _tot, " +
     "(SELECT MAX(ts) FROM pedido_estado_log l WHERE l.pedido_id = p.id AND lower(l.a) LIKE 'para enviar%') AS env_log_at, " +
+    "(SELECT l.por FROM pedido_estado_log l WHERE l.pedido_id = p.id AND lower(l.a) LIKE 'para enviar%' ORDER BY l.ts DESC LIMIT 1) AS env_log_por, " +
     "(SELECT MAX(ts) FROM pedido_estado_log l WHERE l.pedido_id = p.id AND lower(l.a) LIKE 'entregad%') AS ent_log_at " +
     'FROM pedidos p ' +
     'LEFT JOIN (SELECT pedido_id, MAX(id) AS cid FROM corte_pedidos WHERE pedido_id IS NOT NULL GROUP BY pedido_id) cx ON cx.pedido_id = p.id ' +
@@ -16870,7 +16871,16 @@ function neonEtapas(rows, sfIds) {
   for (const r of rows) { r._g = neonGrupoKey(r); (grupos[r._g] = grupos[r._g] || []).push(r); }
   for (const k in grupos) { const gid = 'g' + Math.min(...grupos[k].map(x => +x.id)); for (const x of grupos[k]) x._gid = gid; }
   const term = x => String(x.prod_estado || '') === 'terminado';
+  // Producción lista: terminado por el productor, o Gaspar lo ubicó a mano en Terminado o más adelante (neones sin productor en el
+  // sistema). Sin esto, una tarjeta ubicada en Esperando pago no pasaba nunca a Para enviar aunque registraran el 2do pago (#351).
+  const listo = x => term(x) || (NEON_IDX[String(x.neon_piso || '')] ?? -1) >= NEON_IDX.terminado;
+  // Gaspar 17-oct: Terminado = "terminado, falta traerlo al taller". Sale de ahí (a Esperando pago o Para enviar) cuando Neyen o
+  // Gaspar marcan "Llegó al taller" (recibido_at), o si Gaspar lo ubicó a mano en Esperando pago o más adelante.
+  const llego = x => !!String(x.recibido_at || '').trim() || (NEON_IDX[String(x.neon_piso || '')] ?? -1) >= NEON_IDX.pago;
   const maxF = (g, k) => g.map(x => x[k] || '').sort().pop() || '';
+  // Quién escribió el último 'para enviar' del pedido (el log queda en UNA fila del grupo, no en cada cartel).
+  const envPor = {};
+  for (const k in grupos) { let b = null; for (const x of grupos[k]) if (x.env_log_at && (!b || String(x.env_log_at) > String(b.env_log_at))) b = x; envPor[k] = b ? String(b.env_log_por || '') : ''; }
   for (const r of rows) {
     const g = grupos[r._g], ep = String(r.estado_pedido || '').trim().toLowerCase(), pago = String(r.estado_pago || '').trim().toLowerCase();
     const ce = String(r.corte_estado || '');
@@ -16879,28 +16889,28 @@ function neonEtapas(rows, sfIds) {
       || (pago === '1er pago' && String(r.pago_metodo || '') !== 'pendiente' && Number(r._tot) > 0 && Number(r._pag) >= Number(r._tot) - 1);
     let i;
     if (/^entregad/.test(ep)) i = 6;
-    else if (g.every(term)) i = pagado ? 5 : 4;
-    else if (term(r)) i = 3;
+    else if (g.every(x => listo(x) && llego(x))) i = pagado ? 5 : 4;
+    else if (listo(r)) i = 3;   // terminado: falta traerlo al taller, o espera a otro cartel del pedido
     // Derivado pero la base todavía no está cortada (está en la cola de Emma o de Aníbal): sigue en En diseño y corte.
     else if (String(r.productor_id || '') && (String(r.prod_estado || '') === 'en_armado' || !r.corte_id || ['cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce))) i = 2;
     else if (['matriz_lista', 'cortado', 'embalado', 'cobrado', 'despachado', 'entregado'].includes(ce) || (ce === 'pedido' && String(r.corte_foto || '').trim())) i = 1;
     else i = 0;
     let motivo = '';
-    if (i < 5 && pagado && /^para enviar/.test(ep) && String(r.fecha || '') < NEON_LEGACY_HASTA) { i = 5; motivo = 'estado'; }
+    if (i < 5 && pagado && /^para enviar/.test(ep) && String(r.fecha || '') < NEON_LEGACY_HASTA && envPor[r._g] !== 'tablero') { i = 5; motivo = 'estado'; }
     const piso = NEON_IDX[String(r.neon_piso || '')];
     if (piso != null && piso > i) { i = piso; motivo = 'piso'; }
     r._i = i; r._etapa = NEON_ETAPAS[i][0]; r._motivo = motivo; r._pagado = pagado;
     r._sf = !!(sfIds && sfIds.has(r.id)) || pago === 'cuenta corriente';
-    r._grupo_n = g.length; r._grupo_term = g.filter(term).length;
+    r._grupo_n = g.length; r._grupo_term = g.filter(listo).length;
     r._desde = motivo === 'piso' ? r.neon_piso_at
       : i === 0 ? r.created_at
       : i === 1 ? r.created_at
       : i === 2 ? r.prod_asignado_at
       : i === 3 ? r.prod_terminado_at
-      : i === 4 ? maxF(g, 'prod_terminado_at')
-      : i === 5 ? (motivo === 'estado' ? (r.cobro2_at || maxF(g, 'env_log_at') || '') : ([maxF(g, 'prod_terminado_at'), r.cobro2_at || ''].sort().pop() || ''))
+      : i === 4 ? ([maxF(g, 'prod_terminado_at'), maxF(g, 'recibido_at')].sort().pop() || '')
+      : i === 5 ? (motivo === 'estado' ? (r.cobro2_at || maxF(g, 'env_log_at') || '') : ([maxF(g, 'prod_terminado_at'), maxF(g, 'recibido_at'), r.cobro2_at || ''].sort().pop() || ''))
       : (r.despachado_at || maxF(g, 'ent_log_at') || '');
-    r._desde = r._desde || '';
+    r._desde = r._desde || (r.neon_piso ? (r.neon_piso_at || '') : '');
     // Sin fecha propia (los de antes del tablero): se cuenta, aproximado, desde la fecha del pedido.
     r._desde_aprox = (!r._desde && i >= 5) ? String(r.fecha || '') : '';
   }
@@ -27618,7 +27628,7 @@ const handler = {
           const quien = _esAdm ? prodSlug(url.searchParams.get('productor')).replace(/\s+/g, '') : (_pzYo && _pzYo.id);
           if (!quien) return json({ error: _esAdm ? 'falta ?productor=' : 'forbidden' }, _esAdm ? 400 : 403);
           const hace60 = new Date(Date.now() - 60 * 864e5).toISOString();
-          const carteles = await prodCarteles(env, "WHERE p.productor_id = ? AND p.es_corporeo = 0 AND (p.prod_pagado_at IS NULL OR p.prod_pagado_at >= ?) ORDER BY CASE p.prod_estado WHEN 'en_armado' THEN 0 WHEN 'pendiente' THEN 1 ELSE 2 END, p.fecha, p.id", [quien, hace60], true);
+          const carteles = await prodCarteles(env, "WHERE p.productor_id = ? AND p.es_corporeo = 0 AND (p.prod_pagado_at IS NULL OR p.prod_pagado_at >= ? OR IFNULL(p.prod_estado,'') <> 'terminado') ORDER BY CASE p.prod_estado WHEN 'en_armado' THEN 0 WHEN 'pendiente' THEN 1 ELSE 2 END, p.fecha, p.id", [quien, hace60], true);
           const prod = _pzYo || (await prodProductores(env)).find(p => p.id === quien) || null;
           return json({ productor: prod ? { id: prod.id, nombre: prod.nombre } : { id: quien, nombre: quien }, carteles });
         }
@@ -27630,7 +27640,9 @@ const handler = {
           if (!PROD_ESTADOS.includes(est)) return json({ error: 'estado inválido' }, 400);
           const r = await _cartelDe(pidN); if (r instanceof Response) return r;
           if (!String(r.productor_id || '')) return json({ error: 'ese cartel todavía no tiene productor' }, 400);
-          if (r.prod_pagado_at && !_esAdm) return json({ error: 'ese cartel ya está pagado, no se puede cambiar' }, 409);
+          // Pagado: queda congelado para el productor, salvo marcarlo terminado si Gaspar le pagó por adelantado (si no, la tarjeta
+          // quedaba trabada en Montando).
+          if (r.prod_pagado_at && !_esAdm && !(est === 'terminado' && String(r.prod_estado || '') !== 'terminado')) return json({ error: 'ese cartel ya está pagado, no se puede cambiar' }, 409);
           if (est === 'terminado') {
             const nf = +(await env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ?').bind(pidN).first()).n || 0;
             const req = prodFotosRequeridas(r);
@@ -27640,13 +27652,28 @@ const handler = {
           const now = new Date().toISOString();
           await env.DB.prepare('UPDATE pedidos SET prod_estado = ?, prod_estado_at = ?, prod_terminado_at = CASE WHEN ? = \'terminado\' THEN ? ELSE NULL END WHERE id = ?').bind(est, now, est, now, pidN).run();
           await prodLog(env, [{ pedido_id: pidN, campo: 'estado', de: r.prod_estado || '', a: est, por: _quien }]);
+          // Reabrió un cartel terminado y el pedido estaba 'para enviar' porque lo puso el tablero (sync): vuelve a 'En produccion'
+          // (todo el grupo, con espejo y log) para que Pedidos y la planilla no digan 'para enviar' mientras lo rehacen.
+          if (String(r.prod_estado || '') === 'terminado' && est !== 'terminado') {
+            try {
+              const gq = await neonGrupoDe(env, pidN);
+              const ids = [...new Set([pidN, ...(gq.fr || []).map(x => x.id), ...(gq.serv || []).map(x => x.id)])];
+              const pe = await env.DB.prepare("SELECT estado_pedido FROM pedidos WHERE id = ?").bind(pidN).first();
+              const lg = await env.DB.prepare("SELECT por FROM pedido_estado_log WHERE pedido_id IN (" + ids.map(() => '?').join(',') + ") AND lower(a) LIKE 'para enviar%' ORDER BY ts DESC LIMIT 1").bind(...ids).first();
+              const sigueParaEnviar = (gq.fr || []).length && gq.fr.every(x => ['enviar', 'enviado'].includes(x._etapa));
+              if (pe && /^para enviar/i.test(String(pe.estado_pedido || '')) && lg && String(lg.por || '') === 'tablero' && !sigueParaEnviar) {
+                const u = await env.DB.prepare("UPDATE pedidos SET estado_pedido = 'En produccion', mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE id IN (" + ids.map(() => '?').join(',') + ") AND lower(IFNULL(estado_pedido,'')) LIKE 'para enviar%'").bind(now, ...ids).run();
+                if (((u.meta && u.meta.changes) || 0) && gq.base) await env.DB.prepare('INSERT INTO pedido_estado_log (pedido_id, numero, fecha, comercial_id, telefono, de, a, por, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(pidN, gq.base.numero, gq.base.fecha, gq.base.comercial_id || 'joaco', gq.base.telefono || '', 'para enviar', 'En produccion', 'tablero', now).run();
+              }
+            } catch (_) {}
+          }
           return json({ ok: true, carteles: await prodCarteles(env, 'WHERE p.id = ?', [pidN], !_esAdm) });
         }
         // PUT /admin/prod/foto?pedido_id=N (imagen cruda) → foto del cartel terminado (el productor de ese cartel o el admin).
         if (request.method === 'PUT' && path === '/admin/prod/foto') {
           const pidN = Number(url.searchParams.get('pedido_id')) || 0;
           const r = await _cartelDe(pidN); if (r instanceof Response) return r;
-          if (r.prod_pagado_at && !_esAdm) return json({ error: 'ese cartel ya está pagado' }, 409);
+          if (r.prod_pagado_at && !_esAdm && String(r.prod_estado || '') === 'terminado') return json({ error: 'ese cartel ya está pagado' }, 409);
           if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
           const cl = parseInt(request.headers.get('content-length') || '0', 10) || 0;
           if (cl > 12 * 1024 * 1024) return json({ error: 'la foto pesa más de 12MB' }, 413);
@@ -27676,7 +27703,7 @@ const handler = {
           const f = await env.DB.prepare('SELECT id, pedido_id, r2_key FROM pedido_prod_fotos WHERE id = ?').bind(Number(body.foto_id) || 0).first();
           if (!f) return json({ error: 'foto no encontrada' }, 404);
           const r = await _cartelDe(f.pedido_id); if (r instanceof Response) return r;
-          if (r.prod_pagado_at && !_esAdm) return json({ error: 'ese cartel ya está pagado' }, 409);
+          if (r.prod_pagado_at && !_esAdm && String(r.prod_estado || '') === 'terminado') return json({ error: 'ese cartel ya está pagado' }, 409);
           if (r.prod_estado === 'terminado' && !_esAdm) {
             const nf = +(await env.DB.prepare('SELECT COUNT(*) AS n FROM pedido_prod_fotos WHERE pedido_id = ?').bind(f.pedido_id).first()).n || 0;
             if (nf - 1 < prodFotosRequeridas(r)) return json({ error: 'el cartel está terminado: subí otra foto antes de sacar esta' }, 400);
