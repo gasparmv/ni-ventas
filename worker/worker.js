@@ -6012,11 +6012,54 @@ function corteLandingPlazo(nowMs) {
 function corteLandingCierreDe(fecha) { const f = corteFechaValida(fecha); return f ? Date.UTC(f.date.getUTCFullYear(), f.date.getUTCMonth(), f.date.getUTCDate(), 3) - 36 * 3600000 : 0; }
 // 'dd/mm/aaaa' o 'd/m/aaaa' → 'd/m/aaaa' (para comparar fechas de la planilla sin depender del formato de la celda).
 function corteFechaNorm(s) { const m = String(s || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); return m ? (+m[1]) + '/' + (+m[2]) + '/' + m[3] : ''; }
+// Precios de los insumos DESDE LA PLANILLA (Gaspar 17-oct: "que se actualice solo desde la planilla cada mes"): 2026 v4 › COGS,
+// fila Venta_<código> (Nitto: n4a_venta), columna del mes en curso (encabezado 1..12, hora AR). Es la misma tabla con la que la
+// col J de Venta_Insumos cobra los insumos. Se lee como máximo una vez por hora (y al cambiar el mes) desde el cron y queda en
+// kv corte_insumos_precios_sheet; el sitio usa eso sin esperar a Google. Prioridad: planilla → kv manual corte_insumos_precios
+// → el default del código.
+const CORTE_INSUMOS_FILA_COGS = { cable_025: 'Venta_cable_025', cable_035: 'Venta_cable_035', cable_05: 'Venta_cable_05', nitto_4a: 'n4a_venta' };
+function corteMesAR() { return new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 7); }
+async function corteInsumosPreciosSheet(env, opts = {}) {
+  const mes = corteMesAR();
+  let cache = null; try { cache = JSON.parse(await kvGet(env, 'corte_insumos_precios_sheet', 'null')); } catch (_) {}
+  const fresco = cache && cache.mes === mes && (Date.now() - (Date.parse(cache.at || '') || 0)) < 3600e3;
+  // Pedido del sitio: lo que haya (el cron lo refresca). Solo si nunca se leyó, se lee ahora.
+  if (cache && (!opts.refrescar || fresco)) return cache.precios || {};
+  try {
+    const token = await sheetsAccessToken(env);
+    if (!token) throw new Error('sin token de la planilla');
+    const r = await fetch('https://sheets.googleapis.com/v4/spreadsheets/' + CORTE_SHEET_ID + '/values/' + encodeURIComponent('COGS!A1:P140') + '?valueRenderOption=UNFORMATTED_VALUE', { headers: { Authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(6000) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+    const v = j.values || [], h = v[0] || [];
+    const col = h.findIndex(x => String(x == null ? '' : x).trim() === String(+mes.slice(5, 7)));
+    if (col < 0) throw new Error('COGS no tiene la columna del mes ' + mes);
+    const precios = {};
+    for (const [cod, fila] of Object.entries(CORTE_INSUMOS_FILA_COGS)) {
+      const row = v.find(x => String((x && x[1]) || '').trim() === fila);
+      const n = row ? Number(row[col]) : NaN;
+      if (n > 0 && n < 10000000) precios[cod] = Math.round(n);
+    }
+    if (!Object.keys(precios).length) throw new Error('COGS sin precios de insumos para ' + mes);
+    await kvSet(env, 'corte_insumos_precios_sheet', JSON.stringify({ mes, at: new Date().toISOString(), precios }));
+    return precios;
+  } catch (e) {
+    console.log('precios de insumos desde la planilla:', String((e && e.message) || e));
+    return (cache && cache.precios) || {};
+  }
+}
 async function corteLandingPrecios(env) {
   const m2 = parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000;
   let ov = {}; try { ov = JSON.parse(await kvGet(env, 'corte_insumos_precios', '{}')) || {}; } catch (_) {}
+  let sh = {}; try { sh = await corteInsumosPreciosSheet(env); } catch (_) {}
   const insOn = (await kvGet(env, 'corte_landing_insumos_on', '1')) === '1';
-  return { m2, insumos: insOn ? CORTE_LANDING_INSUMOS.map(x => ({ ...x, precio: parseInt(ov[x.codigo], 10) > 0 ? parseInt(ov[x.codigo], 10) : x.precio })) : [] };
+  return { m2, insumos: insOn ? CORTE_LANDING_INSUMOS.map(x => {
+    const p = parseInt(sh[x.codigo], 10) > 0 ? parseInt(sh[x.codigo], 10) : (parseInt(ov[x.codigo], 10) > 0 ? parseInt(ov[x.codigo], 10) : x.precio);
+    const o = { ...x, precio: p };
+    // Descuento por cantidad (Nitto): el mismo descuento en pesos sobre el precio de la planilla.
+    if (x.escala && p !== x.precio) o.escala = x.escala.map(([d, q]) => [d, Math.max(1, p - (x.precio - q))]);
+    return o;
+  }) : [] };
 }
 function corteLandingTxt(s, max) { return String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); }
 function corteLandingNombrePropio(s) { return corteLandingTxt(s, 60).toLowerCase().replace(/(^|[\s'-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase()); }
@@ -27763,6 +27806,8 @@ const handler = {
       try { await barrerMoDirecto(env); } catch (_) {}
       // Tablero de neón: 'para enviar' en la planilla cuando el pedido está terminado y pagado (kv neon_estado_sync_on).
       try { await neonSyncEstados(env); } catch (_) {}
+      // Precios de los insumos del sitio del corte desde la planilla (COGS, mes en curso).
+      try { await corteInsumosPreciosSheet(env, { refrescar: true }); } catch (_) {}
       // Caja de la seña → col Z de Pedidos_Corporeo / Pedidos_Directo (reintentos, IMPORTRANGE atrasado, cambios).
       try { await syncCajaPedidos(env); } catch (_) {}
     })());
