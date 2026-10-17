@@ -1528,6 +1528,36 @@ function saveAdminToken(t) {
   else localStorage.removeItem('niventas.adminToken');
 }
 function isImpersonatingAdmin() { return !!STATE.adminToken; }
+// Productores de neón en el switcher del admin (Gaspar 17-oct: "ver el usuario de cada uno de los productores y ver lo que
+// ellos ven"). La lista se pide con el token del ADMIN (aunque esté mirando como otro) y queda en localStorage para pintarla
+// al toque. Los que todavía no tienen contraseña salen apagados (/auth/switch exige usuario activo); los dados de baja, no.
+function swProdsLista() {
+  if (STATE.swProds === undefined) { try { STATE.swProds = JSON.parse(localStorage.getItem('niventas.swProds') || 'null'); } catch (_) { STATE.swProds = null; } }
+  return (Array.isArray(STATE.swProds) ? STATE.swProds : []).filter(p => !+p.extra && !+p.baja);
+}
+function swProdsGuardar(lista) {
+  STATE.swProds = (lista || []).map(p => ({ id: String(p.id || ''), nombre: String(p.nombre || p.id || ''), activo: +p.activo ? 1 : 0, baja: +p.baja ? 1 : 0, extra: +p.extra ? 1 : 0 })).filter(p => p.id);
+  try { localStorage.setItem('niventas.swProds', JSON.stringify(STATE.swProds)); } catch (_) {}
+  document.querySelectorAll('[data-sw-prods]').forEach(el => { el.innerHTML = swProdsChipsHtml(); bindSwitchUser(el); });
+}
+async function swProdsCargar() {
+  if (!STATE.adminToken || STATE._swProdsCargando || !CONFIG.trackerUrl) return;
+  STATE._swProdsCargando = true;
+  try {
+    const r = await fetch(CONFIG.trackerUrl.replace(/\/$/, '') + '/admin/prod/productores', { headers: { Authorization: 'Bearer ' + STATE.adminToken } });
+    const j = r.ok ? await r.json().catch(() => null) : null;
+    if (j && Array.isArray(j.productores)) swProdsGuardar(j.productores);
+  } catch (_) {}
+  STATE._swProdsCargando = false;
+}
+function swProdsChipsHtml() {
+  const ps = swProdsLista();
+  if (!ps.length) return '';
+  return `<div class="user-pick-label" style="margin-top:6px">Productores</div><div class="user-pick-chips">` + ps.map(p => +p.activo
+    ? `<button class="user-chip ${_userKey(STATE.user) === _userKey(p.id) ? 'active' : ''}" data-switch-user="${escapeHtml(p.id)}" title="Ver lo que ve ${escapeHtml(p.nombre)}">${escapeHtml(p.nombre)}</button>`
+    : `<button class="user-chip off" disabled title="Todavía no tiene contraseña: ponésela en Admin → Productores para poder entrar con su usuario">${escapeHtml(p.nombre)}</button>`).join('') + `</div>`;
+}
+function bindSwitchUser(root) { (root || document).querySelectorAll('[data-switch-user]').forEach(b => b.onclick = () => switchUser(b.dataset.switchUser)); }
 // Normaliza nombre de usuario para comparaciones tolerantes a tilde.
 // Soporta variantes históricas en localStorage (Joaquin / Joaquín).
 function _userKey(s) {
@@ -1648,7 +1678,7 @@ async function loginWithCreds(user, pass) {
     }
     const j = await r.json();
     saveToken(j.token, user, j.rol);
-    if (isGasparUser(user)) saveAdminToken(j.token); else saveAdminToken(null);
+    if (isGasparUser(user)) { saveAdminToken(j.token); swProdsCargar(); } else saveAdminToken(null);
     return true;
   } catch (e) { return false; }
 }
@@ -1729,6 +1759,7 @@ async function logout() {
   STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = '';
   saveToken(null);
   saveAdminToken(null);
+  STATE.swProds = undefined; try { localStorage.removeItem('niventas.swProds'); } catch (_) {}   // productores del switcher
   olvidarCotizadorCache();   // costos internos fuera del navegador al cerrar sesión
   teardownPollWorker();
   // Cerrar sesión = volver al formulario de login (para todos).
@@ -8595,6 +8626,7 @@ function renderShell() {
               : '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>'}
           </button>
         </div>
+        ${isImpersonatingAdmin() ? `<div data-sw-prods>${swProdsChipsHtml()}</div>` : ''}
       </div>
       <nav class="nav">
         ${isCursosOnly() ? `
@@ -15798,7 +15830,7 @@ function bindNav() {
   // Emma: badge de carteles de Neon Infinito para diseñar (se refresca solo, aunque esté en Cotización).
   if (STATE.token && isDisenadorOnly()) { corteStartPolling(); if (!STATE._corteResAt) { STATE._corteResAt = Date.now(); corteResumenFetch(); } }
   document.querySelectorAll('[data-set-user]').forEach(b => b.onclick = () => setUser(b.dataset.setUser));
-  document.querySelectorAll('[data-switch-user]').forEach(b => b.onclick = () => switchUser(b.dataset.switchUser));
+  bindSwitchUser(document);
   const addBtn = document.querySelector('[data-add-user]');
   if (addBtn) addBtn.onclick = () => addUser();
   const logoutBtn = document.querySelector('[data-logout]');
@@ -23605,11 +23637,14 @@ async function prodCargar() {
 }
 function renderProdApp(embebido) {
   const st = prodState(), d = st.data;
-  const nombre = (d && d.productor && d.productor.nombre) || STATE.user || '';
+  const nombre = (d && d.productor && d.productor.nombre) || (swProdsLista().find(p => _userKey(p.id) === _userKey(STATE.user)) || {}).nombre || STATE.user || '';
   const head = embebido
     ? `<div class="page-head"><h1>Mis carteles</h1><div class="actions"><button class="btn btn-ghost" data-prod-refresh>↻ Actualizar</button></div></div>`
     : `<div class="prod-top"><img src="assets/logo.svg" alt="Neon Infinito" style="height:26px"><div style="flex:1"><div style="font-weight:700">Producción</div><div style="font-size:12px;color:var(--fg-mute)">${escapeHtml(nombre)}</div></div>
-    <button class="btn btn-ghost" data-prod-refresh title="Actualizar" style="padding:6px 10px">↻</button><button class="btn btn-ghost" data-prod-salir style="padding:6px 10px">Salir</button></div>`;
+    <button class="btn btn-ghost" data-prod-refresh title="Actualizar" style="padding:6px 10px">↻</button>${isImpersonatingAdmin()
+      ? `<button class="btn btn-ghost" data-switch-user="Gaspar" style="padding:6px 10px">← Administrador</button></div>
+    <div class="prod-ver-como">Estás viendo lo que ve <b>${escapeHtml(nombre)}</b>. Lo que toques queda hecho a su nombre.<div data-sw-prods>${swProdsChipsHtml()}</div></div>`
+      : `<button class="btn btn-ghost" data-prod-salir style="padding:6px 10px">Salir</button></div>`}`;
   const toastDiv = embebido ? '' : '<div id="toast" class="toast"></div>';
   if (!d) return `<div class="prod-app">${toastDiv}${head}<div class="prod-body"><div class="muted" style="padding:30px;text-align:center">${st.err ? '⚠ ' + escapeHtml(st.err) + '<br><button class="btn btn-cyan" data-prod-refresh style="margin-top:10px">Reintentar</button>' : 'Cargando tus carteles…'}</div></div></div>`;
   const cs = d.carteles || [];
@@ -23677,6 +23712,7 @@ function bindProdApp() {
   if (!st.data && !st.loading && !st.err) prodCargar();
   document.querySelectorAll('[data-prod-refresh]').forEach(b => b.onclick = () => { st.err = ''; prodCargar(); });
   document.querySelectorAll('[data-prod-salir]').forEach(b => b.onclick = () => { STATE.prod = null; logout(); });
+  bindSwitchUser(document);   // Gaspar mirando como un productor: volver a Administrador o pasar a otro productor
   document.querySelectorAll('[data-prod-tab]').forEach(b => b.onclick = () => { st.tab = b.dataset.prodTab; render(); });
   bindProdCards(document, false);
 }
@@ -23731,7 +23767,7 @@ async function prodCargarProductores(forzar) {
   if (!forzar && a.falloAt && Date.now() - a.falloAt < 60000) return;   // falló hace poco: no reintentar en cada repintado
   a.cargando = true;
   let ok = false;
-  try { a.prods = (await prodFetch('/admin/prod/productores')).productores || []; ok = true; a.falloAt = 0; } catch (_) { a.falloAt = Date.now(); }
+  try { a.prods = (await prodFetch('/admin/prod/productores')).productores || []; ok = true; a.falloAt = 0; swProdsGuardar(a.prods); } catch (_) { a.falloAt = Date.now(); }
   a.cargando = false;
   if (!ok) return;
   if (STATE.view === 'pedidos') {
@@ -23970,6 +24006,7 @@ function calcManoObraFront(precio, tramos, metros, ancho, alto, cant) {
 
 // ---------- INIT ----------
 loadUser();
+if (STATE.adminToken) swProdsCargar();   // productores del switcher del admin
 // Cargar done marks: localStorage inmediato + sync async desde Worker
 STATE.done = loadDoneLocal();
 loadCotizadorParams();
