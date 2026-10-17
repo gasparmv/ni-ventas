@@ -2264,6 +2264,7 @@ const AGENDA_ROSTER = [
   { slug: 'joaquin', nombre: 'Joaco' },
   { slug: 'facundo', nombre: 'Facu' },
   { slug: 'agustina', nombre: 'Agus' },
+  { slug: 'debi', nombre: 'Debi' },
   { slug: 'disenador', nombre: 'Emma' },
   { slug: 'abril', nombre: 'Abril' },
   { slug: 'anibal', nombre: 'Aníbal' },
@@ -3640,8 +3641,9 @@ async function processPrecotizPilot(env) {
     }
     // Exterior sin techo (lo recomendó el bot o ya lo había hablado un humano): etiqueta 🔠 Corpóreo para
     // que el vendedor lo cotice como corpóreo.
-    if (res.sugerir_corporeo || res.techo === 'no') await corporeoTag(env, lead.phone, true);
+    // Primero el producto (si el bot dijo NEÓN, la 🔠 de 'exterior sin techo' no le saca el lead a una vendedora de solo neón).
     await precotizGuardarProducto(env, lead.phone, res, lead.producto); // neón/corpóreo detectado por la IA
+    if (res.sugerir_corporeo || res.techo === 'no') await corporeoTag(env, lead.phone, true);
     if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaPregunta(res, msgs)) { // ya tiene lo necesario (foto+medidas; el int/ext lo dio o dijo que no sabe; ya se preguntó la fecha y, si es exterior, el techo) → handoff a Joaco
       // Si en este turno recomendó el corpóreo (contestó que no tiene techo), ese mensaje sale antes de
       // cerrar: al completar no se envía nada más y la recomendación se perdía.
@@ -3837,8 +3839,8 @@ async function processPrecotizPilot(env) {
       await precotizNotifyGaspar(env, `freno de mano en la pre cotizacion de ${phone}\nmotivo: el bot iba a proponer una medida ("${_medida}") y el candado lo freno\nentra a verlo vos`);
       continue;
     }
+    await precotizGuardarProducto(env, phone, res, ''); // neón/corpóreo detectado por la IA (antes de la 🔠: ver arriba)
     if (res.sugerir_corporeo || res.techo === 'no') await corporeoTag(env, phone, true); // exterior sin techo → 🔠 Corpóreo
-    await precotizGuardarProducto(env, phone, res, ''); // neón/corpóreo detectado por la IA
     if (tF && tM && (tI || res.intext_no_sabe) && !precotizFaltaPregunta(res, msgs)) { // ya tiene lo necesario (foto+medidas; ya se preguntó la fecha y, si es exterior, el techo) → completo
       if (res.sugerir_corporeo && msgs.length && modo === 'auto') await precotizEmitir(env, phone, '', msgs, 'auto', nowIso);
       try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='completo', completed_at=?, updated_at=? WHERE phone=?").bind(nowIso, nowIso, phone).run(); } catch (_) {}
@@ -20401,7 +20403,7 @@ const handler = {
           catch (_) { return json({ error: 'base ocupada, probá en un ratito' }, 503); }
           if (u) miSec = COMERCIALES_SECUNDARIOS.find(c => c.slug === me) || null;
         }
-        if (!esAdm && !miSec) return json({ error: 'solo para Facu, Agus y Gaspar' }, 403);
+        if (!esAdm && !miSec) return json({ error: 'solo para las vendedoras con cupo y Gaspar' }, 403);
         if (request.method === 'GET') {
           if (esAdm) return json({ ok: true, secundarios: await Promise.all(COMERCIALES_SECUNDARIOS.map(c => estadoCuotaVendedor(env, c))) });
           return json({ ok: true, ...(await estadoCuotaVendedor(env, miSec)) });
