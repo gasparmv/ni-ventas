@@ -1934,6 +1934,7 @@ async function waSend(env, payload, opts = {}) {
     return { ok: false, status: r.status, code: errCodeAny, error: errText, raw: data, provider: wa.provider };
   }
   const id = data?.messages?.[0]?.id || null;
+  if (id) { try { await waEnviosLogar(env, payload, id); } catch (_) {} }
   // Una plantilla salió OK → si había un rechazo por pago registrado, se cierra el episodio y se avisa.
   // Si la plantilla que salió ERA un aviso (esAviso), el envío no avisa (un aviso nunca genera otro aviso, regla
   // anti-loop del plan de fondo): cierra el episodio y deja el "volvió" para el cron (waPayRejectCerrarPorAviso).
@@ -3881,6 +3882,48 @@ async function processPrecotizNudges(env) {
 }
 
 // opts se pasa tal cual a waSend ({esAviso:true} en todo envío que sea un aviso interno).
+// Registro de TODO lo que sale por waSend (wamid → texto legible). Muchos envíos automáticos (avisos internos, la lista diaria
+// de OC sin pagar, etc.) no guardan su texto en wa_messages: el webhook después crea una fila 'status' vacía y el chat mostraba
+// "Mensaje enviado (sin texto registrado)". GET /admin/wa/messages rellena esas burbujas con este registro. No toca
+// wa_messages (los que ya guardan su fila siguen igual). Se borra a los 120 días (cron).
+let _waEnvLogOk = false;
+async function waEnviosLogar(env, payload, wamid) {
+  if (!_waEnvLogOk) {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS wa_envios_log (wamid TEXT PRIMARY KEY, phone TEXT, tipo TEXT, texto TEXT, ts TEXT)').run();
+    await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_wa_envios_log_ts ON wa_envios_log(ts)').run();
+    _waEnvLogOk = true;
+  }
+  const t = String((payload && payload.type) || '');
+  let texto = '';
+  if (t === 'text') texto = String((payload.text && payload.text.body) || '');
+  else if (t === 'template') {
+    const tp = payload.template || {}, ps = [];
+    for (const c of (tp.components || [])) for (const p of (c.parameters || [])) ps.push(p.type === 'text' ? String(p.text || '') : '[' + (p.type || 'parámetro') + ']');
+    texto = '[plantilla: ' + (tp.name || '') + ']' + (ps.length ? ' ' + ps.join(' · ') : '');
+  } else if (t === 'interactive') texto = String((payload.interactive && payload.interactive.body && payload.interactive.body.text) || '[mensaje con botones]');
+  else if (['image', 'document', 'video', 'audio', 'sticker'].includes(t)) texto = '[' + t + ']' + (payload[t] && payload[t].caption ? ' ' + payload[t].caption : '');
+  else texto = '[' + (t || 'mensaje') + ']';
+  await env.DB.prepare('INSERT OR IGNORE INTO wa_envios_log (wamid, phone, tipo, texto, ts) VALUES (?, ?, ?, ?, ?)').bind(String(wamid), String((payload && payload.to) || ''), t, texto.slice(0, 4000), new Date().toISOString()).run();
+}
+// Burbujas salientes vacías (filas 'status' del webhook) → el texto que salió: primero el del aviso interno (avisos_internos),
+// después el del registro de envíos. Marca relleno:'aviso'|'envio' y automated=1.
+async function waRellenarSalientes(env, msgs) {
+  const vacias = msgs.filter(m => m && m.direction === 'outbound' && m.msg_type === 'status' && !String(m.body || '').trim() && m.wamid);
+  if (!vacias.length) return msgs;
+  const ids = [...new Set(vacias.map(m => String(m.wamid)))];
+  const aviso = new Map(), envio = new Map();
+  for (let i = 0; i < ids.length; i += 90) {
+    const l = ids.slice(i, i + 90), ph = l.map(() => '?').join(',');
+    try { for (const r of ((await env.DB.prepare('SELECT wamid, texto FROM avisos_internos WHERE wamid IN (' + ph + ')').bind(...l).all()).results || [])) if (String(r.texto || '').trim()) aviso.set(String(r.wamid), String(r.texto)); } catch (_) {}
+    try { for (const r of ((await env.DB.prepare('SELECT wamid, texto FROM wa_envios_log WHERE wamid IN (' + ph + ')').bind(...l).all()).results || [])) if (String(r.texto || '').trim()) envio.set(String(r.wamid), String(r.texto)); } catch (_) {}
+  }
+  for (const m of vacias) {
+    const w = String(m.wamid), tx = aviso.get(w) || envio.get(w);
+    if (!tx) continue;
+    m.body = tx; m.msg_type = 'text'; m.automated = 1; m.relleno = aviso.has(w) ? 'aviso' : 'envio';
+  }
+  return msgs;
+}
 async function waSendText(env, to, body, opts = {}) {
   const num = normalizeArPhone(to);
   if (!num) return { ok: false, status: 400, error: 'numero invalido' };
@@ -22391,6 +22434,9 @@ const handler = {
         if (!phone && _role !== 'admin' && _msgs.length) {
           try { const _I = await internosSet(env); _msgs = _msgs.filter(m => !_I.set.has(String(m.phone || '').replace(/\D/g, ''))); } catch (_) {}
         }
+        // Las burbujas "sin texto registrado" muestran lo que salió (aviso interno o registro de envíos).
+        // (También en el poll global: solo consulta si llegó alguna burbuja vacía, que es raro.)
+        if (_msgs.length) { try { _msgs = await waRellenarSalientes(env, _msgs); } catch (_) {} }
         return json({ messages: _msgs });
       }
 
@@ -27806,6 +27852,8 @@ const handler = {
       try { await barrerMoDirecto(env); } catch (_) {}
       // Tablero de neón: 'para enviar' en la planilla cuando el pedido está terminado y pagado (kv neon_estado_sync_on).
       try { await neonSyncEstados(env); } catch (_) {}
+      // Registro de envíos: se borra lo de más de 120 días.
+      try { await env.DB.prepare('DELETE FROM wa_envios_log WHERE ts < ?').bind(new Date(Date.now() - 120 * 864e5).toISOString()).run(); } catch (_) {}
       // Precios de los insumos del sitio del corte desde la planilla (COGS, mes en curso).
       try { await corteInsumosPreciosSheet(env, { refrescar: true }); } catch (_) {}
       // Caja de la seña → col Z de Pedidos_Corporeo / Pedidos_Directo (reintentos, IMPORTRANGE atrasado, cambios).
