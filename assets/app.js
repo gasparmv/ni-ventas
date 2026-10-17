@@ -1773,8 +1773,8 @@ async function logout() {
 // isAdmin requiere que el TOKEN sea de Gaspar (no solo el nombre activo). Sin esto,
 // un token de bajo privilegio podría usarse para mostrar la UI admin.
 function isAdmin() { return !!STATE.token && isGasparUser(STATE.tokenUser) && isGasparUser(STATE.user); }
-// Proforma en PDF (beta): Gaspar y Joaco (17-oct). Joaco ve solo las suyas (lo filtra el worker).
-function pfHabilitado() { return isAdmin() || (!!STATE.token && tokenBelongsTo(STATE.user) && isJoaquinUser(STATE.user)); }
+// Proforma en PDF (beta): Gaspar, Joaco y Facundo (17-oct). Cada vendedor ve solo las suyas (lo filtra el worker).
+function pfHabilitado() { return isAdmin() || (!!STATE.token && tokenBelongsTo(STATE.user) && (isJoaquinUser(STATE.user) || isFacundoUser(STATE.user))); }
 function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isSecundario(STATE.user) || isCursosUser(STATE.user)); }
 // Abril (rol cursos): SOLO ve la sección Chat WA, nada más.
 function isCursosOnly() { return isCursosUser(STATE.user); }

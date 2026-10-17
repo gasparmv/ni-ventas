@@ -18358,7 +18358,7 @@ async function prodCarteles(env, whereSql, args, paraProductor) {
     ? 'p.id, p.numero, p.fecha, p.cartel, p.colores, p.alto, p.ancho, p.cm_neon, p.tramos, p.cantidad, p.base, p.dimer, p.tipo, p.aclaracion, p.productor_id, p.prod_estado, p.prod_estado_at, p.prod_asignado_at, p.prod_terminado_at, p.prod_pagado_at, p.mo_monto'
     : 'p.id, p.numero, p.fecha, p.cartel, p.colores, p.alto, p.ancho, p.cm_neon, p.tramos, p.cantidad, p.base, p.dimer, p.tipo, p.aclaracion, p.precio, p.estado_pago, p.estado_pedido, p.comercial_id, p.cargado_por, p.productor, p.productor_id, p.prod_estado, p.prod_estado_at, p.prod_asignado_at, p.prod_terminado_at, p.prod_pagado_at, p.prod_pagado_por, p.mo_monto, p.mo_regla, p.mo_detalle';
   const rows = (await env.DB.prepare(
-    `SELECT ${cols}, cp.foto_key AS diseno_key, cp.estado AS corte_estado
+    `SELECT ${cols}, COALESCE(NULLIF(cp.foto_key, ''), NULLIF(p.foto_diseno_key, '')) AS diseno_key, cp.estado AS corte_estado
        FROM pedidos p
        LEFT JOIN (SELECT pedido_id, MAX(id) AS cid FROM corte_pedidos WHERE pedido_id IS NOT NULL GROUP BY pedido_id) cx ON cx.pedido_id = p.id
        LEFT JOIN corte_pedidos cp ON cp.id = cx.cid
@@ -20196,11 +20196,11 @@ const handler = {
         return json({ ok: true, ticket: { numero: t.numero, cliente: t.cliente, detalle: t.detalle, fields, created_by: t.created_by, created_at: t.created_at } });
       }
 
-      // ----- Proformas (beta): listar / abrir / guardar. Admin + Joaco (Gaspar 17-oct: "habilitale esta función a joaco").
-      // Joaco ve y edita SOLO las suyas (created_by); el admin, todas.
+      // ----- Proformas (beta): listar / abrir / guardar. Admin + Joaco + Facundo (Gaspar 17-oct: "habilitale esta función a
+      // joaco" / "habilitale también a facundo"). Cada vendedor ve y edita SOLO las suyas (created_by); el admin, todas.
       if (path === '/admin/proformas' || /^\/admin\/proformas\/\d+$/.test(path)) {
         const pfAdmin = (await getSessionRole(env, session.user)) === 'admin';
-        if (!pfAdmin && canonWorker(session.user) !== 'joaco') return json({ error: 'forbidden' }, 403);
+        if (!pfAdmin && !['joaco', 'facu'].includes(canonWorker(session.user))) return json({ error: 'forbidden' }, 403);
         const pfEsMia = (r) => pfAdmin || (!!r && canonWorker(r.created_by) === canonWorker(session.user));
         if (!(await ensureProformasSchema(env))) return json({ error: 'no se pudo preparar la tabla de proformas' }, 500);
         const pfId = path === '/admin/proformas' ? 0 : parseInt(path.split('/').pop(), 10);
@@ -27694,7 +27694,8 @@ const handler = {
             if (_pzYo) {
               const a = await env.DB.prepare('SELECT 1 AS x FROM pedido_prod_fotos f JOIN pedidos p ON p.id = f.pedido_id WHERE f.r2_key = ? AND p.productor_id = ? LIMIT 1').bind(key, _pzYo.id).first();
               const b = a ? null : await env.DB.prepare('SELECT 1 AS x FROM corte_pedidos c JOIN pedidos p ON p.id = c.pedido_id WHERE c.foto_key = ? AND p.productor_id = ? LIMIT 1').bind(key, _pzYo.id).first();
-              ok = !!(a || b);
+              const d = (a || b) ? null : await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE foto_diseno_key = ? AND productor_id = ? LIMIT 1').bind(key, _pzYo.id).first();
+              ok = !!(a || b || d);
             } else ok = ['comercial', 'disenador'].includes(_rolP); // vendedores: ven las fotos de producción en Pedidos
             if (!ok) return json({ error: 'forbidden' }, 403);
           }
