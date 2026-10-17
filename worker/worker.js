@@ -26137,6 +26137,8 @@ const handler = {
       if (path.startsWith('/admin/neon/')) {
         const ctx = await neonCtx(env, session);
         if (!['admin', 'comercial', 'produccion', 'logistica'].includes(ctx.rol)) return json({ error: 'forbidden' }, 403);
+        // De producción, el tablero es solo de Neyen (despachos). Aníbal no tiene nada que marcar acá (Gaspar 17-oct).
+        if (ctx.rol === 'produccion' && ctx.slug !== 'neyen') return json({ error: 'forbidden' }, 403);
         try { await ensureNeonTableroSchema(env); } catch (_) {}
         // GET /admin/neon/tablero → las tarjetas que le tocan ver a cada uno (vendedor: las suyas + cuántas hay del resto).
         if (request.method === 'GET' && path === '/admin/neon/tablero') {

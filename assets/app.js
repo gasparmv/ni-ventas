@@ -2819,7 +2819,7 @@ function isDisenadorOnly() {
 function setView(v) {
   // Diseñador confinado a Cotización (+ puede ir a Corte); Abril (cursos) al Chat WA; produccion (Aníbal/Neyen) a Corte.
   if (isCursosOnly()) v = 'chat';
-  else if (isProduccionOnly()) v = (v === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : (v === 'neon' ? 'neon' : 'corte');
+  else if (isProduccionOnly()) v = (v === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : ((v === 'neon' && isNeyenUser(STATE.user)) ? 'neon' : 'corte');
   else if (isLogisticaOnly()) v = v === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) v = v === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
   else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
@@ -3142,7 +3142,7 @@ function render() {
   if (isCursosOnly() && !['chat'].includes(STATE.view)) {
     STATE.view = 'chat';
     if (location.hash !== '#chat') location.hash = 'chat';
-  } else if (isProduccionOnly() && !['corte', 'neon'].concat(isAnibalUser(STATE.user) ? ['mis-carteles'] : []).includes(STATE.view)) {
+  } else if (isProduccionOnly() && !['corte'].concat(isAnibalUser(STATE.user) ? ['mis-carteles'] : [], isNeyenUser(STATE.user) ? ['neon'] : []).includes(STATE.view)) {
     STATE.view = 'corte';
     if (location.hash !== '#corte') location.hash = 'corte';
   } else if (isLogisticaOnly() && STATE.view !== 'logistica' && STATE.view !== 'neon') {
@@ -7010,7 +7010,7 @@ const NKB_DESPACHO = { envio: 'Salió por envío', retira: 'Retiró en el taller
 const NKB_TAB_KEY = 'niventas.nkbEtapaCel';
 const NKB_DIAS_ENV = 14;
 // Emma no: trabaja en Corte como siempre (Gaspar 16-oct). Lo que hace ahí mueve las tarjetas.
-function nkbPuedeVer() { return !!STATE.token && tokenBelongsTo(STATE.user) && !isDisenadorOnly() && (isAdmin() || isJoaquinUser(STATE.user) || isSecundario(STATE.user) || isProduccionUser(STATE.user) || isLogisticaUser(STATE.user)); }
+function nkbPuedeVer() { return !!STATE.token && tokenBelongsTo(STATE.user) && !isDisenadorOnly() && (isAdmin() || isJoaquinUser(STATE.user) || isSecundario(STATE.user) || isNeyenUser(STATE.user) || isLogisticaUser(STATE.user)); }
 function nkbUrl(qs) { return CONFIG.trackerUrl + '/admin/neon/archivo?' + qs + '&token=' + encodeURIComponent(STATE.token || ''); }
 function nkbRol() { return (STATE.nkb && STATE.nkb.rol) || ''; }
 // Neyen (Gaspar 17-oct): solo lo que pasa por sus manos en el taller: Terminado (marca "Llegó al taller"), Esperando pago (lo
@@ -8663,7 +8663,7 @@ function renderShell() {
         ` : isProduccionOnly() ? `
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
           ${isAnibalUser(STATE.user) ? `<button class="nav-item ${v==='mis-carteles'?'active':''}" data-view="mis-carteles"><span class="icon">🔧</span> Mis carteles</button>` : ''}
-          <button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">${isNeyenUser(STATE.user) ? '📦' : '🔴'}</span> ${isNeyenUser(STATE.user) ? 'Despachos' : 'Producción neón'}</button>
+          ${isNeyenUser(STATE.user) ? `<button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">📦</span> Despachos</button>` : ''}
         ` : isLogisticaOnly() ? `
           <button class="nav-item ${v==='logistica'?'active':''}" data-view="logistica"><span class="icon">📦</span> Envíos</button>
           <button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">🔴</span> Producción neón</button>
