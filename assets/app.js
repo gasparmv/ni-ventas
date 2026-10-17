@@ -4622,8 +4622,8 @@ function renderCorte() {
     const kSub = 'font-size:11.5px;color:var(--fg-mute);margin-top:2px';
     const kVacio = (txt) => cargando ? '' : `<div style="padding:16px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px;font-size:12.5px">${txt}</div>`;
     const kCol = (titulo, n, nota, body) => `<div style="min-width:0"><div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin-bottom:8px">${titulo} <span style="color:var(--fg-mute)">${n}</span>${nota ? ` <span style="text-transform:none;letter-spacing:0;color:var(--fg-mute)">· ${nota}</span>` : ''}</div>${body}</div>`;
-    const colEsperando = esperandoFoto.map(p => `<div style="${kCard}"><div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">${escapeHtml(p.medida_declarada || '—')}${p.vendedor ? ` · vendió ${escapeHtml(p.vendedor)}` : ''}</div></div></div>`).join('');
-    const colPorDisenar = porDisenarNeon.map(p => { const enPantalla = p.id === relevVisId; return `<div data-corte-relev-ir="${p.id}" role="button" tabindex="0" title="Traer a la línea de relevamiento" style="${kCard};cursor:pointer${enPantalla ? ';border-color:#ef4444' : ''}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">${escapeHtml(p.medida_declarada || '—')}${p.vendedor ? ` · vendió ${escapeHtml(p.vendedor)}` : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;color:${enPantalla ? '#ef4444' : 'var(--accent-cyan,#8FD4DE)'}">${enPantalla ? 'en pantalla' : 'Medir →'}</span></div>`; }).join('');
+    const colEsperando = esperandoFoto.map(p => `<div style="${kCard}"><div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">${escapeHtml(p.medida_declarada || '—')}</div></div></div>`).join('');
+    const colPorDisenar = porDisenarNeon.map(p => { const enPantalla = p.id === relevVisId; return `<div data-corte-relev-ir="${p.id}" role="button" tabindex="0" title="Traer a la línea de relevamiento" style="${kCard};cursor:pointer${enPantalla ? ';border-color:#ef4444' : ''}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">${escapeHtml(p.medida_declarada || '—')}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;color:${enPantalla ? '#ef4444' : 'var(--accent-cyan,#8FD4DE)'}">${enPantalla ? 'en pantalla' : 'Medir →'}</span></div>`; }).join('');
     const K_DIS_MAX = 10;
     const disVisibles = STATE.corteNeonDisAll ? disenadosNeon : disenadosNeon.slice(0, K_DIS_MAX);
     const colDisenados = disVisibles.map(p => { const paso = kPaso[p.estado] || ['', 'var(--fg-mute)']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span></div>`; }).join('')
@@ -24329,7 +24329,7 @@ function isBriefColgado(b) {
 // Motivo del cuelgue para mostrar en el card.
 function getColgadoMotivo(b) {
   if (b.estado === 'nuevo')  return 'Falta cotizar (Emma no diseñó)';
-  if (b.estado === 'listo')  return 'Falta enviar (Joaco no mandó al cliente)';
+  if (b.estado === 'listo')  return 'Falta enviar (no se mandó al cliente)';
   return '';
 }
 // Para filtrar columnas reales (vs virtuales):
@@ -24533,6 +24533,8 @@ async function handleBriefDelete(briefId, fromCard) {
 function autorNombre(autorId) {
   const k = _userKey(autorId);
   if (k === 'gaspar') return 'Gaspar';
+  if (k === 'disenador' || k === 'emma' || k === 'emmanuel') return 'Diseñador';
+  if (k === 'vendedor' || isDisenadorOnly()) return 'Vendedor';   // Emma no ve qué vendedor escribe (Gaspar 17-oct)
   if (k === 'joaquin' || k === 'joaco') return 'Joaco';
   if (k === 'disenador' || k === 'emma' || k === 'emmanuel') return 'Diseñador';
   return autorId || '?';
@@ -25032,10 +25034,10 @@ function renderBriefCard(b) {
           </div>
           <div style="display:flex;gap:3px;flex-shrink:0">
             ${(() => {
-              // Badge del VENDEDOR (de quién es el brief): SOLO lo ven Emma (diseñador) y Gaspar
-              // (admin) — así Emma sabe a quién le cotiza. Joaco/Nadia ven solo los suyos, no lo necesitan.
+              // Badge del VENDEDOR (de quién es el brief): SOLO Gaspar (admin). Emma nunca sabe de qué vendedor es
+              // (Gaspar 17-oct); los vendedores ven solo los suyos.
               const _r = getUserRole();
-              if (_r !== 'admin' && _r !== 'disenador') return '';
+              if (_r !== 'admin') return '';
               const _c = String(b.comercial_id || '').toLowerCase();
               const _nom = _c === 'facundo' ? 'Facundo' : (_c === 'agustina' ? 'Agustina' : (_c === 'debi' ? 'Debi' : (_c === 'joaco' ? 'Joaquín' : (_c || '—'))));
               const _col = _c === 'facundo' ? '#c084fc' : (_c === 'agustina' ? '#f472b6' : (_c === 'debi' ? '#4ade80' : '#8FD4DE'));
@@ -25297,7 +25299,7 @@ function renderBriefDrawer() {
 
         <!-- ========= ZONA 1: Pedido de Joaco ========= -->
         <fieldset id="brief-zone-chat" style="border:1px solid var(--border);border-radius:var(--r-sm);padding:var(--s-3)">
-          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">📋 Pedido de Joaco</legend>
+          <legend style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;padding:0 6px">📋 Pedido</legend>
 
           <label style="display:block;font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Título ${isCom ? '<span style="color:#FF5566">*</span>' : ''}</label>
           <input type="text" data-bf="cliente_nombre" id="brief-titulo-input" value="${escapeHtml(data.cliente_nombre || '')}"
@@ -25356,7 +25358,7 @@ function renderBriefDrawer() {
             📋 Pegá (Ctrl+V) o arrastrá capturas acá
             <input type="file" id="brief-file-input" accept="image/*" multiple style="display:none">
           </div>
-          ` : (chatImgs.length === 0 ? '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— Joaco aún no subió capturas —</div>' : '')}
+          ` : (chatImgs.length === 0 ? '<div style="font-size:11px;color:var(--fg-mute);text-align:center;padding:var(--s-2)">— todavía no subieron capturas —</div>' : '')}
           <div id="brief-images-grid-chat"
                style="margin-top:var(--s-2);display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px">
             ${renderBriefImagesGridFor('chat', isNew, isCom)}
@@ -25390,7 +25392,7 @@ function renderBriefDrawer() {
             const tieneBoceto = STATE.briefDetailImages.some(x => x.tipo === 'boceto');
             const tieneChat = chatImgs.length > 0;
             const hayInput = tieneBoceto || tieneChat;
-            const fuente = tieneBoceto ? 'el boceto' : 'las capturas de Joaco';
+            const fuente = tieneBoceto ? 'el boceto' : 'las capturas del chat';
             const generando = !!STATE.briefsGenerando[STATE.briefSelected];
             const disabled = generando || !hayInput;
             const label = generando
@@ -28210,7 +28212,7 @@ function refreshGenerarRenderButton() {
   const tieneBoceto = STATE.briefDetailImages.some(x => x.tipo === 'boceto');
   const tieneChat = STATE.briefDetailImages.some(x => (x.tipo || 'chat') === 'chat');
   const hayInput = tieneBoceto || tieneChat;
-  const fuente = tieneBoceto ? 'el boceto' : 'las capturas de Joaco';
+  const fuente = tieneBoceto ? 'el boceto' : 'las capturas del chat';
   const generando = !!STATE.briefsGenerando[STATE.briefSelected];
   btn.disabled = generando || !hayInput;
   btn.textContent = generando

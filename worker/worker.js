@@ -8027,9 +8027,8 @@ function cortePiezaDesdeCartel(c, numero, vendedor) {
     String(c.colores || '').trim() ? `colores: ${String(c.colores).trim()}` : '',
     String(c.tipo || '').trim() ? String(c.tipo).trim() : '',
     (cm && cm < 100000) ? `${cm} cm de neón` : '',
-    String(c.aclaracion || '').trim(),
-    vendedor ? `vendió ${vendedor}` : ''
-  ].filter(Boolean);
+    String(c.aclaracion || '').trim()
+  ].filter(Boolean);   // sin "vendió X": Emma y Corte no ven de qué vendedor es (Gaspar 17-oct); queda en la columna vendedor
   return {
     diseno_nombre: String(c.cartel || '').trim().slice(0, 200),
     medida_declarada: medida,
@@ -16648,6 +16647,12 @@ function userLookupIds(slug) {
   return [slug];
 }
 
+// Emma (diseñador) nunca ve de qué vendedor es un brief (Gaspar 17-oct): sin comercial_id, enviado_por ni la comisión (su
+// proporción con el precio delata al vendedor). Se usa en todas las respuestas de /admin/briefs* para el rol 'disenador'.
+function briefSinVendedor(b) { if (!b) return b; const o = { ...b }; delete o.comercial_id; delete o.enviado_por; delete o.comision_joaco; return o; }
+// Pieza de corte para quien no es admin: sin el vendedor (ni el "vendió X" que traían las aclaraciones viejas).
+function cortePiezaSinVendedor(r) { if (!r) return r; delete r.vendedor; if (r.aclaraciones) r.aclaraciones = String(r.aclaraciones).replace(/\s*·?\s*vendió [^·]*$/i, '').trim(); return r; }
+
 // ===================== SIN FRONTERA (usuario externo) =====================
 // Sin Frontera fabrica nuestros corpóreos y además nos compra neón. Tiene un usuario propio ('sinfrontera', lo crea Gaspar
 // poniéndole contraseña) que ve SOLO dos cosas: (1) Producción: los corpóreos con ticket, sin precio ni datos del cliente, y
@@ -24320,6 +24325,7 @@ const handler = {
         // al productor solo para Gaspar (pedidosConDiseno los saca si no es interno).
         const _pedRows = await pedidosConDiseno(env, _pedWhere, _pedArgs, { interno: _pedRole === 'admin', fotos: true });
         if (_pedRole === 'comercial') for (const _r of _pedRows) delete _r.asistido_por; // marca interna de Gaspar
+        if (_pedRole === 'disenador') for (const _r of _pedRows) { delete _r.comercial_id; delete _r.cargado_por; delete _r.asistido_por; }   // Emma: sin el vendedor
         return json({ pedidos: _pedRows });
       }
 
@@ -25412,6 +25418,7 @@ const handler = {
         // ver los del otro ni tocando la API a mano. Admin (Gaspar) y diseñador (Emma) ven TODOS.
         const _briefRole = await getSessionRole(env, session.user);
         if (_briefRole === 'comercial') comercialId = await resolveComercial(env, { sessionUser: session.user });
+        if (_briefRole === 'disenador') comercialId = null;   // Emma no filtra por vendedor (no sabe de quién es cada brief)
         const limit = Math.min(parseInt(url.searchParams.get('limit') || '500'), 2000);
         const where = [];
         const args = [];
@@ -25453,7 +25460,7 @@ const handler = {
         `;
         args.push(limit);
         const rs = await env.DB.prepare(sql).bind(...args).all();
-        return json({ briefs: rs.results || [] });
+        return json({ briefs: _briefRole === 'disenador' ? (rs.results || []).map(briefSinVendedor) : (rs.results || []) });
       }
 
       // GET /admin/briefs/:id  →  detalle + hilo interno + imágenes
@@ -25467,6 +25474,7 @@ const handler = {
         const imgs = await env.DB.prepare(
           'SELECT * FROM brief_imagenes WHERE brief_id = ? ORDER BY orden ASC, id ASC'
         ).bind(id).all();
+        if ((await getSessionRole(env, session.user)) === 'disenador') return json({ brief: briefSinVendedor(brief), messages: [], imagenes: imgs.results || [] });
         return json({ brief, messages: msgs.results || [], imagenes: imgs.results || [] });
       }
 
@@ -25503,7 +25511,7 @@ const handler = {
         ).bind(...vals).run();
         const id = result.meta.last_row_id;
         const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(id).first();
-        return json({ brief }, 201);
+        return json({ brief: (await getSessionRole(env, session.user)) === 'disenador' ? briefSinVendedor(brief) : brief }, 201);
       }
 
       // PATCH /admin/briefs/:id  →  editar specs / cambiar estado / asignar
@@ -25544,7 +25552,7 @@ const handler = {
         args.push(id);
         await env.DB.prepare(`UPDATE briefs SET ${sets.join(', ')} WHERE id = ?`).bind(...args).run();
         const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(id).first();
-        return json({ brief });
+        return json({ brief: (await getSessionRole(env, session.user)) === 'disenador' ? briefSinVendedor(brief) : brief });
       }
 
       // POST /admin/briefs/:id/messages  →  agregar mensaje al hilo interno (fase 3)
@@ -25596,7 +25604,7 @@ const handler = {
         // Quién lo mandó (mig. 048; aparte para que el envío no falle si la columna no está).
         try { await env.DB.prepare('UPDATE briefs SET enviado_por = ? WHERE id = ?').bind(autorSlug(session.user), id).run(); } catch (_) {}
         const brief = await env.DB.prepare('SELECT * FROM briefs WHERE id = ?').bind(id).first();
-        return json({ brief });
+        return json({ brief: (await getSessionRole(env, session.user)) === 'disenador' ? briefSinVendedor(brief) : brief });
       }
 
       // PUT /admin/briefs/:id/imagen?tipo=chat|boceto|render  →  sube imagen a R2 + inserta.
@@ -26014,6 +26022,7 @@ const handler = {
         // + la línea de logística de la tarjeta de Neyen (N°, contacto, envío pagado, cargado/despachado).
         try { await ensureCortePaquetesSchema(env); paquetes = (await env.DB.prepare("SELECT tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_at, contactado, cargado" + (_despOk ? ", numero, contacto_estado, contacto_at, envio_pagado, despachado_at" : "") + ((_despOk && await ensureLogiTablaSchema(env).catch(() => false)) ? ", transporte, transporte_conf" : "") + " FROM corte_paquetes WHERE tanda_id IN (SELECT id FROM corte_tandas ORDER BY id DESC LIMIT 4)").all()).results || []; } catch (_) {}
         const precio_m2 = parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000;
+        if (_cpRole !== 'admin') rows.forEach(cortePiezaSinVendedor);   // Emma/Corte: sin el vendedor
         return json({ ok: true, pedidos: rows, paquetes, precio_m2, role: _cpRole, user: String(session.user || '').toLowerCase() });
       }
       // ===== LOGÍSTICA =====
@@ -27627,7 +27636,10 @@ const handler = {
         const rs = await env.DB.prepare(
           'SELECT * FROM brief_messages WHERE brief_id = 0 ORDER BY created_at DESC LIMIT ?'
         ).bind(limit).all();
-        return json({ messages: (rs.results || []).reverse() });
+        const _msgs = (rs.results || []).reverse();
+        // Emma no ve qué vendedor escribe (podría deducir de quién es un brief): los vendedores salen como 'vendedor'.
+        if ((await getSessionRole(env, session.user)) === 'disenador') for (const m of _msgs) { const a = String(m.autor_id || '').toLowerCase(); if (!['gaspar', 'disenador', 'emma', 'emmanuel'].includes(a)) m.autor_id = 'vendedor'; }
+        return json({ messages: _msgs });
       }
       if (request.method === 'POST' && path === '/admin/team-chat') {
         let body;
