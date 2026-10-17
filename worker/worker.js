@@ -18268,6 +18268,8 @@ function moPctMes(fecha) { return String(fecha || '') < '2026-10-01' ? 0.135 : 0
 function calcManoObra(row, P) {
   const precio = +row.precio || 0;
   if (!(precio > 0)) return null;
+  // Instalación, envío, flete… cargados como línea del pedido (sin medidas): no los produce nadie, no llevan mano de obra (Gaspar 17-oct).
+  if (neonNoCartel(row)) return null;
   if (String(row.fecha || '') < P.desde) {
     const pct = moPctMes(row.fecha);
     return { monto: Math.round(pct * precio), regla: 'pct_mes', detalle: { pct } };
@@ -18289,7 +18291,7 @@ async function moActualizar(env, ids) {
   await ensureProdSchema(env);
   const P = await moConfig(env);
   if (!P) return 0;
-  const rows = (await env.DB.prepare(`SELECT id, fecha, precio, cantidad, tramos, cm_neon, alto, ancho, es_corporeo, prod_pagado_at, mo_monto FROM pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
+  const rows = (await env.DB.prepare(`SELECT id, fecha, cartel, precio, cantidad, tramos, cm_neon, alto, ancho, es_corporeo, prod_pagado_at, mo_monto FROM pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
   const now = new Date().toISOString(), stmts = [];
   for (const r of rows) {
     if (+r.es_corporeo || r.prod_pagado_at) continue;
