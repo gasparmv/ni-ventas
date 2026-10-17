@@ -4727,6 +4727,8 @@ table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
 .nkb-wrap [data-nkb-card][hidden] { display: none !important; }
 .sfk-board.nkb-board.n7 { grid-template-columns: repeat(6, minmax(164px, 1fr)) minmax(140px, .7fr); }
 .sfk-board.nkb-board.n2 { grid-template-columns: minmax(260px, 1fr) minmax(220px, .7fr); max-width: 820px; }
+/* Despachos de Neyen: Terminado · Esperando pago · Para enviar */
+.sfk-board.nkb-board.n3 { grid-template-columns: repeat(3, minmax(240px, 1fr)); max-width: 1200px; }
 @media (min-width: 761px) and (max-width: 1499px) { .sfk-board.nkb-board.n7 { grid-template-columns: repeat(6, minmax(176px, 1fr)) 56px; } }
 @media (min-width: 761px) and (max-width: 1279px) { .sfk-board.nkb-board.n7 { grid-template-columns: repeat(6, minmax(220px, 1fr)) 56px; } }
 @media (min-width: 761px) and (max-width: 1499px) {

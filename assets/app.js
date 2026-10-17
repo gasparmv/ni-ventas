@@ -7013,7 +7013,10 @@ const NKB_DIAS_ENV = 14;
 function nkbPuedeVer() { return !!STATE.token && tokenBelongsTo(STATE.user) && !isDisenadorOnly() && (isAdmin() || isJoaquinUser(STATE.user) || isSecundario(STATE.user) || isProduccionUser(STATE.user) || isLogisticaUser(STATE.user)); }
 function nkbUrl(qs) { return CONFIG.trackerUrl + '/admin/neon/archivo?' + qs + '&token=' + encodeURIComponent(STATE.token || ''); }
 function nkbRol() { return (STATE.nkb && STATE.nkb.rol) || ''; }
-function nkbCols() { return nkbRol() === 'logistica' ? ['enviar', 'enviado'] : NKB_KEYS; }
+// Neyen (Gaspar 17-oct): solo lo que pasa por sus manos en el taller: Terminado (marca "Llegó al taller"), Esperando pago (lo
+// cobra el vendedor) y Para enviar (lo manda y marca enviado). Gaspar entrando como Neyen ve lo mismo que él.
+function nkbEsDespacho() { return isNeyenUser(STATE.user) && !isAdmin(); }
+function nkbCols() { return nkbRol() === 'logistica' ? ['enviar', 'enviado'] : nkbEsDespacho() ? ['terminado', 'pago', 'enviar'] : NKB_KEYS; }
 function nkbCartel(id) { return ((STATE.nkb || {}).carteles || []).find(c => c.id === id) || null; }
 function nkbGrupo(c) { return ((STATE.nkb || {}).carteles || []).filter(x => x.grupo === c.grupo); }
 function nkbTit(c) { return '#' + c.numero + ' ' + (c.cartel || ''); }
@@ -7224,12 +7227,12 @@ function renderNeonTablero() {
   const D = STATE.nkb;
   if (!D) { setTimeout(() => nkbCargar(), 0); return `<div class="logi-wrap nkb-wrap" style="padding:24px;color:var(--fg-mute)">Cargando el tablero…</div>`; }
   if (D.error) return `<div class="logi-wrap nkb-wrap" style="padding:24px"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(D.error)}</div><button class="btn" data-nkb-refresh>Reintentar</button></div>`;
-  const cs = D.carteles || [], cel = nkbEtapaCel(cs);
-  const nDem = cs.filter(c => nkbUrg(c).demorado).length, nMias = cs.filter(c => nkbAccion(c)).length;
+  const cs = D.carteles || [], cel = nkbEtapaCel(cs), _cols = nkbCols(), csVis = cs.filter(c => _cols.includes(c.etapa));
+  const nDem = csVis.filter(c => nkbUrg(c).demorado).length, nMias = csVis.filter(c => nkbAccion(c)).length;
   const chip = (k, on, n, txt, tit) => `<button type="button" class="logi-chip${on ? ' on' : ''}${n ? '' : ' cero'}" data-nkb-${k} title="${escapeHtml(tit)}"${!n && !on ? ' disabled' : ''}>${txt}<b data-nkb-n${k}>${n}</b></button>`;
   const hay = cs.length || (D.otros && Object.keys(D.otros).length);
   return `<div class="logi-wrap sfk-wrap nkb-wrap">
-    <div class="logi-head"><h1>Producción · neón</h1></div>
+    <div class="logi-head"><h1>${nkbEsDespacho() ? 'Despachos · neón' : 'Producción · neón'}</h1></div>
     <div class="logi-bar sfk-bar">
       <span data-nkb-upd>${escapeHtml(sfHace(D.at))}</span>
       ${D.rol === 'comercial' ? '<span>· Ves tus pedidos; del resto, cuántos hay</span>' : ''}
@@ -7240,6 +7243,7 @@ function renderNeonTablero() {
       <button class="btn btn-ghost" data-nkb-refresh>Actualizar</button>
     </div>
     ${hay ? `<div data-nkb-zona data-sig="${escapeHtml(nkbBoardSig(cs, cel))}">${nkbTabsHtml(cs, cel)}${nkbBoardHtml(cs, cel)}</div><div class="logi-vacio-box sfk-nores" data-nkb-nores hidden></div>` : '<div class="logi-vacio-box">No hay carteles de neón en el tablero.</div>'}
+    ${nkbEsDespacho() ? '<div class="logi-ayuda">Cuando llega un cartel al taller, marcá "Llegó al taller" · El cobro lo registra el vendedor: recién saldado pasa a Para enviar · Al mandarlo, "Marcar enviado"</div>' : ''}
     <div class="logi-ayuda">Tocá una tarjeta para ver la ficha completa · El botón de abajo es tu tarea en ese cartel · Las tarjetas avanzan solas cuando cada uno marca lo suyo</div>
   </div>`;
 }
@@ -8659,7 +8663,7 @@ function renderShell() {
         ` : isProduccionOnly() ? `
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>
           ${isAnibalUser(STATE.user) ? `<button class="nav-item ${v==='mis-carteles'?'active':''}" data-view="mis-carteles"><span class="icon">🔧</span> Mis carteles</button>` : ''}
-          <button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">🔴</span> Producción neón</button>
+          <button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">${isNeyenUser(STATE.user) ? '📦' : '🔴'}</span> ${isNeyenUser(STATE.user) ? 'Despachos' : 'Producción neón'}</button>
         ` : isLogisticaOnly() ? `
           <button class="nav-item ${v==='logistica'?'active':''}" data-view="logistica"><span class="icon">📦</span> Envíos</button>
           <button class="nav-item ${v==='neon'?'active':''}" data-view="neon"><span class="icon">🔴</span> Producción neón</button>
