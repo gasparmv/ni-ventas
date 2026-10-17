@@ -1192,7 +1192,7 @@ async function pushPedidoToVentas(env, row) {
 //   Bloque 2 (AA:AB, 2): Estado pago, Pagado (COBRO 1)   ← el Apps Script v4 los escribe en AA:AB
 // Ya NO se mandan m²/Color bastidor/Aclaración/Restante (no existen en el layout nuevo).
 // El neón sigue yendo al Excel viejo por pushPedidoToVentas; esto es SOLO para corpóreos.
-const PEDIDO_VEND_MAP = { joaco: 'joaquin', joaquin: 'joaquin', facundo: 'facundo', agustina: 'agustina', gaspar: 'gaspar', bruno: 'gaspar', nadia: 'facundo', abril: 'abril' };
+const PEDIDO_VEND_MAP = { joaco: 'joaquin', joaquin: 'joaquin', facundo: 'facundo', agustina: 'agustina', debi: 'debi', debora: 'debi', gaspar: 'gaspar', bruno: 'gaspar', nadia: 'facundo', abril: 'abril' };
 async function pushPedidoCorporeoToV4(env, row) {
   if (!env.APPS_SCRIPT_URL) return { error: 'no APPS_SCRIPT_URL' };
   // Sin tildes: "Joaquín" quedaba "joaquín" y la COMISION (X) de la hoja buscaba "joaquín_CORP" en COGS → $0.
@@ -2796,6 +2796,9 @@ async function avisarClienteVigilado(env, m) {
 const COMERCIALES_SECUNDARIOS = [
   { slug: 'facundo',  nombre: 'Facu', cuotaKv: 'nadia_cuota_diaria',    probKv: 'facundo_reparto_prob', phoneKv: 'nadia_phone',    defProb: 0.25, maxCuota: 30 },
   { slug: 'agustina', nombre: 'Agus', cuotaKv: 'agustina_cuota_diaria', probKv: 'agustina_reparto_prob', phoneKv: 'agustina_phone', defProb: 0.30, maxCuota: 25 },
+  // Debi (17-oct): vende SOLO NEÓN (soloNeon) → el reparto no le da leads de corpóreo; si se le filtra uno, se lo saca solo
+  // (rebote al marcarse 🔠 antes de que ella escriba) o lo devuelve con el botón "No es neón" → sorteo entre el resto.
+  { slug: 'debi', nombre: 'Debi', cuotaKv: 'debi_cuota_diaria', probKv: 'debi_reparto_prob', phoneKv: 'debi_phone', defProb: 0.25, maxCuota: 20, soloNeon: true },
 ];
 
 // ===== REGULADOR DE CONSULTAS (oct-2026, pedido de Gaspar) =====
@@ -2821,7 +2824,7 @@ async function cuotaDelDia(env, c, fecha) {
 // Leads del reparto automático asignados HOY (día AR) a un secundario. Los chats que se trajo a mano
 // ("Traer de Joaco", chat_assign_log via='import') no cuentan.
 async function contarAsignadosHoy(env, slug) {
-  const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z') AND NOT EXISTS (SELECT 1 FROM chat_assign_log l WHERE l.phone = wa_chats_summary.phone AND l.via = 'import' AND l.ts = wa_chats_summary.assigned_at)").bind(slug).first();
+  const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z') AND NOT EXISTS (SELECT 1 FROM chat_assign_log l WHERE l.phone = wa_chats_summary.phone AND l.via IN ('import', 'no_neon', 'no_neon_auto') AND l.ts = wa_chats_summary.assigned_at)").bind(slug).first();
   return (r && r.n) || 0;
 }
 // Estado del regulador de un secundario (lo que ven el vendedor y Gaspar).
@@ -2860,10 +2863,14 @@ async function maybeRepartirANadia(env, phone) {
     if (['cursos', 'oculto', 'privado', 'corte', 'precotiz'].includes(s.inbox)) return;  // solo el pool de carteles ('general') se reparte; nunca pisar bandejas especiales
     // Lead que vino de un anuncio de CURSOS (por mapa, por la campaña de Meta o por el texto del ad):
     // no es para los vendedores de carteles aunque todavía esté en 'general' (le comía el cupo diario).
+    let _vert = '';
     try {
       const _a = await env.DB.prepare("SELECT source_id, headline, body FROM wa_ad_attributions WHERE phone = ? AND COALESCE(source_id, '') != '' ORDER BY ts DESC LIMIT 1").bind(phone).first();
-      if (_a && (await adVerticalForSource(env, _a.source_id, _a.headline, _a.body)) === 'cursos') return;
+      if (_a) _vert = String((await adVerticalForSource(env, _a.source_id, _a.headline, _a.body)) || '');
+      if (_vert === 'cursos') return;
     } catch (_) {}
+    // Lead que una vendedora de solo neón devolvió ("No es neón" / rebote): ya se sorteó entre el resto; no se vuelve a repartir.
+    try { if (await env.DB.prepare("SELECT 1 AS x FROM chat_assign_log WHERE phone = ? AND via LIKE 'no_neon%' LIMIT 1").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM reventa_leads WHERE phone = ? LIMIT 1").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM contact_labels WHERE phone = ? AND label_id = 2289 LIMIT 1").bind(phone).first()) return; } catch (_) {}
     try { if (await env.DB.prepare("SELECT 1 AS x FROM minicurso_landing WHERE phone = ? LIMIT 1").bind(phone).first()) return; } catch (_) {}
@@ -2875,10 +2882,17 @@ async function maybeRepartirANadia(env, phone) {
     // Hash determinístico por teléfono (base para rotar el orden y para el sorteo por vendedor).
     let _h = 0; const _ps = String(phone); for (let _i = 0; _i < _ps.length; _i++) _h = (_h * 31 + _ps.charCodeAt(_i)) >>> 0;
     // Rotar el orden de "primera opción" por teléfono así ninguno se lleva siempre los primeros del día.
-    const rot = COMERCIALES_SECUNDARIOS.length ? (_h % COMERCIALES_SECUNDARIOS.length) : 0;
-    const orden = COMERCIALES_SECUNDARIOS.slice(rot).concat(COMERCIALES_SECUNDARIOS.slice(0, rot));
+    // Solo los ACTIVOS entran a la rotación: sumar una vendedora inactiva (Debi antes de su contraseña) no cambia el orden de los demás.
+    let _act = null;
+    try { _act = new Set(((await env.DB.prepare("SELECT id FROM users_panel WHERE rol = 'comercial' AND activo = 1").all()).results || []).map(r => r.id)); } catch (_) {}
+    const _cands = _act ? COMERCIALES_SECUNDARIOS.filter(c => _act.has(c.slug)) : COMERCIALES_SECUNDARIOS;
+    const rot = _cands.length ? (_h % _cands.length) : 0;
+    const orden = _cands.slice(rot).concat(_cands.slice(0, rot));
     const hoyAR = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    let esCorp = null;   // se calcula una sola vez, recién si hay una candidata de solo neón
     for (const c of orden) {
+      // Vendedora de solo neón (Debi): nunca un lead de corpóreo.
+      if (c.soloNeon) { if (esCorp === null) esCorp = await leadEsCorporeo(env, phone, _vert); if (esCorp) continue; }
       // Pausa por día (kv reparto_pausa_<slug> = 'YYYY-MM-DD' AR, inclusive): "frenalo hoy" sin tocar la
       // cuota → el vendedor vuelve a recibir solo al día siguiente. Para frenar varios días, poner la última.
       const pausaHasta = await kvGet(env, 'reparto_pausa_' + c.slug, '');
@@ -2887,7 +2901,7 @@ async function maybeRepartirANadia(env, phone) {
       const cuota = (await cuotaDelDia(env, c, hoyAR)).cuota;
       if (cuota <= 0) continue;                                        // ese vendedor no recibe reparto automático (hoy)
       // No asignar a un vendedor dado de baja (activo=0) aunque su cuota haya quedado >0 por olvido.
-      try { const _av = await env.DB.prepare("SELECT activo FROM users_panel WHERE id = ?").bind(c.slug).first(); if (_av && _av.activo === 0) continue; } catch (_) {}
+      try { const _av = await env.DB.prepare("SELECT activo FROM users_panel WHERE id = ?").bind(c.slug).first(); if (!_av || +_av.activo !== 1) continue; } catch (_) {}
       // Los chats que la vendedora se TRAJO a mano ("Traer de Joaco", chat_assign_log via='import') no cuentan:
       // la cuota es del reparto automático (si no, traerse contactos le cortaba los leads nuevos del día).
       if ((await contarAsignadosHoy(env, c.slug)) >= cuota) continue;   // ya llegó a SU cuota del día
@@ -2904,6 +2918,68 @@ async function maybeRepartirANadia(env, phone) {
       if (notif) { try { await waSendText(env, notif, 'Tenés un lead nuevo de carteles para atender en el CRM 🙌'); } catch (_) {} }
       return;                                                          // asignado; no seguir con los demás
     }
+  } catch (_) {}
+}
+
+// ¿El lead es de CORPÓREO? (para las vendedoras de solo neón). Lo que ya se sabe en el momento: el anuncio (vertical), la etiqueta
+// 🔠 Corpóreo (anuncio, bot o a mano), el producto que relevó el bot, un presupuesto de corpóreo o el texto del cliente.
+async function leadEsCorporeo(env, phone, vert) {
+  if (vert === 'corporeo') return true;
+  try {
+    const r = await env.DB.prepare(
+      "SELECT (EXISTS (SELECT 1 FROM contact_labels cl JOIN labels l ON l.id = cl.label_id WHERE cl.phone = ?1 AND l.name = ?2)" +
+      " OR EXISTS (SELECT 1 FROM precotiz_pilot WHERE phone = ?1 AND producto = 'corporeo')" +
+      " OR EXISTS (SELECT 1 FROM briefs WHERE cliente_wa_id = ?1 AND IFNULL(tipo, '') = 'corporea')" +
+      " OR EXISTS (SELECT 1 FROM wa_messages WHERE phone = ?1 AND direction = 'inbound' AND (lower(body) LIKE '%corp_re%' OR lower(body) LIKE '%letras 3d%' OR lower(body) LIKE '%letra 3d%' OR lower(body) LIKE '%letras en 3d%'))) AS v"
+    ).bind(phone, CORPOREO_LABEL_NAME).first();
+    return !!(r && r.v);
+  } catch (_) { return false; }
+}
+// Devolver un lead que NO es de neón (Gaspar 17-oct: "si llega a filtrarse alguno de corpóreos, lo pueda mandar a la bandeja
+// general para que se reparta aleatoriamente al resto de vendedores"). Sorteo PAREJO entre Joaco y los secundarios que no son
+// solo neón, activos, sin pausa y con lugar en su cuota del día (Joaco siempre entra). Mueve el chat, la comisión de sus
+// presupuestos (briefs) y lo deja sin leer y sin archivar para el que lo recibe; log via 'no_neon' (botón) o 'no_neon_auto'
+// (rebote), así maybeRepartirANadia no lo vuelve a sortear ni le come la cuota a quien lo recibe. Todo en un batch condicional.
+async function repartirDevuelto(env, phone, o) {
+  const desde = String(o.desde || ''), hoyAR = fechasAR().hoy, cands = [''];
+  for (const c of COMERCIALES_SECUNDARIOS) {
+    if (c.soloNeon || c.slug === desde) continue;
+    const pausa = await kvGet(env, 'reparto_pausa_' + c.slug, '');
+    if (pausa && hoyAR <= pausa) continue;
+    try { const u = await env.DB.prepare("SELECT activo FROM users_panel WHERE id = ?").bind(c.slug).first(); if (!u || +u.activo !== 1) continue; } catch (_) { continue; }
+    const cuota = (await cuotaDelDia(env, c, hoyAR)).cuota;
+    if (cuota <= 0 || (await contarAsignadosHoy(env, c.slug)) >= cuota) continue;
+    cands.push(c.slug);
+  }
+  const to = cands[Math.floor(Math.random() * cands.length)];
+  const now = new Date().toISOString();
+  const guard = ' AND EXISTS (SELECT 1 FROM wa_chats_summary WHERE phone = ? AND IFNULL(assigned_to, \'\') = ? AND assigned_at = ?)';
+  let res;
+  try {
+    res = await env.DB.batch([
+      env.DB.prepare("UPDATE wa_chats_summary SET assigned_to = ?, assigned_at = ? WHERE phone = ? AND IFNULL(assigned_to, '') = ? AND COALESCE(NULLIF(inbox, ''), 'general') = 'general'").bind(to, now, phone, desde),
+      env.DB.prepare('UPDATE briefs SET comercial_id = ? WHERE cliente_wa_id = ?' + guard).bind(to || 'joaco', phone, phone, to, now),
+      env.DB.prepare('DELETE FROM archived_chats WHERE phone = ?' + guard).bind(phone, phone, to, now),
+      env.DB.prepare('DELETE FROM wa_read_cursor WHERE phone = ?' + guard).bind(phone, phone, to, now),
+      env.DB.prepare('INSERT INTO chat_assign_log (phone, from_asg, to_asg, via, by_user, ts) SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM wa_chats_summary WHERE phone = ? AND IFNULL(assigned_to, \'\') = ? AND assigned_at = ?)').bind(phone, desde, to, o.via, String(o.byUser || ''), now, phone, to, now),
+    ]);
+  } catch (_) { return { ok: false, error: 'La base no respondió. Probá de nuevo.' }; }
+  if (!res || !res[0] || !res[0].meta || !res[0].meta.changes) return { ok: false, error: 'El chat cambió recién. Actualizá y probá de nuevo.' };
+  const c = COMERCIALES_SECUNDARIOS.find(x => x.slug === to);
+  if (c) { const notif = await kvGet(env, c.phoneKv, ''); if (notif) { try { await waSendText(env, notif, 'Te pasaron un lead para atender en el CRM'); } catch (_) {} } }
+  return { ok: true, a: to, nombre: saludoVendedor(to) };
+}
+// Rebote automático: si un chat de una vendedora de solo neón se marca 🔠 Corpóreo ANTES de que ella le escriba a mano (y sin
+// pedido cargado), se lo saca sola y va al sorteo del resto. Si ya le escribió, decide ella con el botón "No es neón".
+async function reboteSoloNeon(env, phone) {
+  try {
+    const s = await env.DB.prepare("SELECT assigned_to, assigned_at, inbox FROM wa_chats_summary WHERE phone = ?").bind(phone).first();
+    const c = s && COMERCIALES_SECUNDARIOS.find(x => x.soloNeon && x.slug === String(s.assigned_to || ''));
+    if (!c || (String(s.inbox || '') || 'general') !== 'general') return;
+    if (await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status' AND ts >= ? LIMIT 1").bind(phone, String(s.assigned_at || '')).first()) return;
+    if (await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1').bind(phone).first()) return;
+    if (await env.DB.prepare("SELECT 1 AS x FROM precotiz_pilot WHERE phone = ? AND producto = 'neon' LIMIT 1").bind(phone).first()) return;
+    await repartirDevuelto(env, phone, { via: 'no_neon_auto', byUser: 'sistema', desde: c.slug });
   } catch (_) {}
 }
 
@@ -2958,6 +3034,7 @@ async function corporeoTag(env, phone, on) {
     if (on) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)").bind(phone, id, new Date().toISOString()).run();
     else await env.DB.prepare("DELETE FROM contact_labels WHERE phone = ? AND label_id = ?").bind(phone, id).run();
   } catch (_) {}
+  if (on) await reboteSoloNeon(env, phone);   // si estaba en la bandeja de una vendedora de solo neón y todavía no le escribió
 }
 // Supresión manual de etiquetas auto (📋 Para cotizar / 💰 Sin cotizar): si un vendedor
 // las quita a mano, se registra en label_overrides para que los reconciliadores NO las
@@ -4131,7 +4208,7 @@ async function buildReporteDiario(env) {
     out.ocEnviadas = (r && r.n) || 0;
     try {
       const ab = await buildOcAbiertas(env);
-      if (ab) out.ocAbiertas = { total: ab.total, joaco: ab.porVend.joaco.length, facundo: ab.porVend.facundo.length, agustina: ab.porVend.agustina.length };
+      if (ab) out.ocAbiertas = { total: ab.total, joaco: ab.porVend.joaco.length, facundo: ab.porVend.facundo.length, agustina: ab.porVend.agustina.length, debi: (ab.porVend.debi || []).length };
       // OC que los vendedores dieron de baja HOY (día AR) desde el popup.
       const d0 = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
       const rb = await env.DB.prepare("SELECT COUNT(*) AS n FROM oc_estado_log WHERE accion = 'baja' AND substr(datetime(julianday(at) - 0.125), 1, 10) = ?").bind(d0).first();
@@ -4151,10 +4228,10 @@ function formatReporteDiario(d) {
       : `   Carteles: ${d.carteles} · Cursos: ${d.cursos}\n\n`) +
     `🤖 Pasaron la precotización: ${d.precotiz}\n\n` +
     `👥 Chats asignados hoy:${repartoNota}\n` +
-    `   Joaco: ${d.chatsJoaco} · 2° (Facu/Agus): ${d.chatsNadia}\n\n` +
+    `   Joaco: ${d.chatsJoaco} · 2° (Facu/Agus/Debi): ${d.chatsNadia}\n\n` +
     `📋 Presupuestos enviados: ${d.presupTotal}\n` +
-    `   Joaco: ${d.presupJoaco} · 2° (Facu/Agus): ${d.presupNadia}\n\n` +
-    `🧾 Órdenes de compra: ${d.ocEnviadas}${d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina})` : ''}${d.ocAbiertas && d.ocAbiertas.bajasHoy ? ` · dadas de baja hoy ${d.ocAbiertas.bajasHoy}` : ''}`
+    `   Joaco: ${d.presupJoaco} · 2° (Facu/Agus/Debi): ${d.presupNadia}\n\n` +
+    `🧾 Órdenes de compra: ${d.ocEnviadas}${d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina}${d.ocAbiertas.debi ? ', Debi ' + d.ocAbiertas.debi : ''})` : ''}${d.ocAbiertas && d.ocAbiertas.bajasHoy ? ` · dadas de baja hoy ${d.ocAbiertas.bajasHoy}` : ''}`
   );
 }
 async function maybeReporteDiario(env) {
@@ -4170,7 +4247,7 @@ async function maybeReporteDiario(env) {
     // Var {{3}} (carteles): si hubo corpóreas, mostramos el desglose inline (ej "62 (39 corp)")
     // para que se vea en la plantilla SIN cambiarle las variables.
     const cartVar = d.corporeas > 0 ? `${d.cartelesNeon} (${d.corporeas} corp)` : String(d.carteles);
-    const ocVar = String(d.ocEnviadas) + (d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina})` : '') + (d.ocAbiertas && d.ocAbiertas.bajasHoy ? ` · dadas de baja hoy ${d.ocAbiertas.bajasHoy}` : '');
+    const ocVar = String(d.ocEnviadas) + (d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina}${d.ocAbiertas.debi ? ', Debi ' + d.ocAbiertas.debi : ''})` : '') + (d.ocAbiertas && d.ocAbiertas.bajasHoy ? ` · dadas de baja hoy ${d.ocAbiertas.bajasHoy}` : '');
     const params11 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia, ocVar].map(String);
     const params10 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
     const texto = formatReporteDiario(d);
@@ -4583,14 +4660,14 @@ async function maybeListaAgus(env, opts = {}) {
 // vendedor recibe a las 10 AR (lun-sáb) SUS OC abiertas por WhatsApp (plantilla UTILITY oc_pendientes_vendedor) y
 // Gaspar ve el total en el reporte de las 21 h. Kill-switch kv 'lista_oc_on' (default '0' = apagado).
 const OC_SEG_DIAS_MAX = 45;   // más viejas: solo se cuentan ("si se cayeron, sacales la etiqueta")
-const LISTA_OC_VEND = [{ slug: 'joaco', agenda: 'joaquin', nombre: 'Joaco' }, { slug: 'facundo', agenda: 'facundo', nombre: 'Facu' }, { slug: 'agustina', agenda: 'agustina', nombre: 'Agus' }];
+const LISTA_OC_VEND = [{ slug: 'joaco', agenda: 'joaquin', nombre: 'Joaco' }, { slug: 'facundo', agenda: 'facundo', nombre: 'Facu' }, { slug: 'agustina', agenda: 'agustina', nombre: 'Agus' }, { slug: 'debi', agenda: 'debi', nombre: 'Debi' }];
 // Dueño = el vendedor ACTUAL del chat (respeta reasignaciones y "Traer de Joaco"); si no es un vendedor, el de la OC.
 function ocDueno(asg, vend) {
   const a = String(asg || '').toLowerCase().trim();
   if (a === '' || a === 'joaco' || a === 'joaquin') return 'joaco';
-  if (a === 'facundo' || a === 'agustina') return a;
+  if (VENDEDORES_SECUNDARIOS.includes(a)) return a;
   const v = String(vend || '').toLowerCase().trim();
-  return (v === 'facundo' || v === 'agustina') ? v : 'joaco';
+  return VENDEDORES_SECUNDARIOS.includes(v) ? v : 'joaco';
 }
 // Estado que MARCA el vendedor desde el popup "OC sin pagar": 'reclamado' (dijo que pagó pero no se pudo confirmar →
 // sigue apareciendo) o 'baja' (se cayó, con motivo → se le saca POR PAGAR). oc_ts = la OC a la que aplica: si después
@@ -4632,7 +4709,9 @@ async function buildOcAbiertas(env) {
     } catch (_) {}
   }
   const now = Date.now();
-  const porVend = { joaco: [], facundo: [], agustina: [] }, viejas = { joaco: 0, facundo: 0, agustina: 0 };
+  const porVend = {}, viejas = {};
+  for (const v of LISTA_OC_VEND) { porVend[v.slug] = []; viejas[v.slug] = 0; }
+  for (const s of VENDEDORES_SECUNDARIOS) if (!porVend[s]) { porVend[s] = []; viejas[s] = 0; }
   for (const r of vivos) {
     const ref = r.ts_out || r.tag_at || null;
     const dias = ref ? Math.max(0, Math.floor((now - Date.parse(ref)) / 864e5)) : null;
@@ -4688,7 +4767,7 @@ async function maybeListaOC(env, opts = {}) {
     }
     if (dry) return { ok: true, dry: true, ...data };
     const phones = {};
-    try { for (const x of (await env.DB.prepare("SELECT usuario, phone FROM agenda_phones WHERE usuario IN ('joaquin','facundo','agustina')").all()).results || []) phones[x.usuario] = x.phone; } catch (_) {}
+    try { for (const x of (await env.DB.prepare("SELECT usuario, phone FROM agenda_phones WHERE usuario IN (" + LISTA_OC_VEND.map(v => "'" + v.agenda + "'").join(',') + ")").all()).results || []) phones[x.usuario] = x.phone; } catch (_) {}
     const fechaDisp = fechaAR.split('-').reverse().join('/');
     for (const v of LISTA_OC_VEND) {
       if (opts.vendedor && opts.vendedor !== v.slug) continue;
@@ -10707,9 +10786,10 @@ function funnelVendedor(s) {
   if (t === 'joaco' || t === 'joaquin') return 'joaco';
   if (t === 'facundo' || t === 'facu' || t === 'nadia') return 'facundo';
   if (t === 'agustina' || t === 'agus') return 'agustina';
+  if (t === 'debi' || t === 'debora') return 'debi';
   return t;
 }
-const FUNNEL_VENDEDOR_NOMBRE = { joaco: 'Joaco', facundo: 'Facu', agustina: 'Agus' };
+const FUNNEL_VENDEDOR_NOMBRE = { joaco: 'Joaco', facundo: 'Facu', agustina: 'Agus', debi: 'Debi' };
 // Textos precargados de anuncios: si un cliente sin referencia de Meta arrancó con uno, se avisa en
 // "Para revisar" (es un hecho: escribió el texto del anuncio; Meta no mandó la referencia).
 const FUNNEL_TEXTOS_AD = ['quiero cotizar un cartel corporeo', 'quiero cotizar un diseno', 'quiero hacer un neon personalizado'];
@@ -10727,14 +10807,14 @@ const FUNNEL_TEXTOS_AD = ['quiero cotizar un cartel corporeo', 'quiero cotizar u
 // mes, cuántas recibieron presupuesto en ≤14 días y cuántas compraron en ≤30, contando solo las que ya cumplieron
 // ese plazo ("maduras"); mezclar el presupuesto de un cliente de agosto con las consultas de septiembre inflaba o
 // daba vuelta el ranking.
-const KPI_VENDEDORES = [{ slug: 'joaco', nombre: 'Joaco' }, { slug: 'facundo', nombre: 'Facu' }, { slug: 'agustina', nombre: 'Agus' }];
-const KPI_CACHE_V = 'v5'; // subir si cambia el cálculo (invalida los meses guardados)
+const KPI_VENDEDORES = [{ slug: 'joaco', nombre: 'Joaco' }, { slug: 'facundo', nombre: 'Facu' }, { slug: 'agustina', nombre: 'Agus' }, { slug: 'debi', nombre: 'Debi' }];
+const KPI_CACHE_V = 'v6'; // subir si cambia el cálculo (invalida los meses guardados)
 const KPI_BANDEJAS_FUERA = ['cursos', 'oculto', 'privado', 'corte'];
 // +5% oculto del cotizador, desde cuándo existe (git): Facu neón 31-ago (3ddaa65), Facu corpóreo 06-oct 19:31 AR
 // (2a5eeeb), Agus neón 20-sep (f3111b7); Agus corpóreo nunca. Se descuenta solo si el último presupuesto antes de
 // la venta lo mandó el mismo vendedor y después de esa fecha (Ricci: lo cotizó Joaco, lo vendió Agus = sin
 // recargo). El dimmer nunca lo lleva.
-const KPI_MARKUP_DESDE = { facundo: { neon: '2026-08-31T12:57:00Z', corp: '2026-10-06T22:31:00Z' }, agustina: { neon: '2026-09-20T03:00:00Z' } };
+const KPI_MARKUP_DESDE = { facundo: { neon: '2026-08-31T12:57:00Z', corp: '2026-10-06T22:31:00Z' }, agustina: { neon: '2026-09-20T03:00:00Z' }, debi: { neon: '2026-10-17T03:00:00Z' } };
 const KPI_LABEL_DESCARTADO = 10482667; // 🤮
 const KPI_FERIADOS_DEF = '2026-08-17,2026-10-12,2026-11-23,2026-12-08,2026-12-25'; // kv feriados_ar (fechas AR separadas por coma) lo reemplaza
 // Misma expresión que el índice parcial idx_wa_messages_presup(_ts) (mig. 050): tiene que ser idéntica para que se use.
@@ -10834,6 +10914,7 @@ async function kpiMesVendedores(env, mes) {
   const consWaSql = `WITH fi AS (SELECT phone, MIN(ts) t0 FROM wa_messages WHERE direction = 'inbound' AND msg_type NOT IN ${NO_MSG} AND (channel IS NULL OR channel = 'wa') AND ts >= ? AND ts < ? GROUP BY phone)
     SELECT fi.phone, fi.t0, COALESCE(s.assigned_to, '') asg, COALESCE(s.assigned_at, '') asg_at, COALESCE(s.inbox, '') inbox,
            (SELECT l.via || '|' || IFNULL(l.from_asg, '') || '|' || IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = fi.phone AND l.via NOT LIKE 'auto_%' ORDER BY l.ts ASC LIMIT 1) primero,
+           (SELECT IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = fi.phone AND l.via LIKE 'no_neon%' ORDER BY l.ts ASC LIMIT 1) deriv,
            (SELECT MIN(m.ts) FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'outbound' AND m.automated = 0 AND m.msg_type NOT IN ('status','reaction') AND IFNULL(m.status, '') != 'failed' AND m.ts >= fi.t0) hum0
       FROM fi LEFT JOIN wa_chats_summary s ON s.phone = fi.phone
      WHERE NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'inbound' AND m.msg_type NOT IN ${NO_MSG} AND m.ts < ?)
@@ -10862,7 +10943,8 @@ async function kpiMesVendedores(env, mes) {
   // autorespuestas de otros negocios ni chats sin intención (solo una mención de historia o el saludo de ManyChat).
   const consIgSql = `WITH fi AS (SELECT phone, MIN(ts) t0 FROM wa_messages WHERE direction = 'inbound' AND msg_type NOT IN ${NO_MSG} AND channel = 'ig' AND ts >= ? AND ts < ? GROUP BY phone)
     SELECT fi.phone, COALESCE(s.assigned_to, '') asg, COALESCE(s.inbox, '') inbox,
-           (SELECT l.via || '|' || IFNULL(l.from_asg, '') || '|' || IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = fi.phone AND l.via NOT LIKE 'auto_%' ORDER BY l.ts ASC LIMIT 1) primero
+           (SELECT l.via || '|' || IFNULL(l.from_asg, '') || '|' || IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = fi.phone AND l.via NOT LIKE 'auto_%' ORDER BY l.ts ASC LIMIT 1) primero,
+           (SELECT IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = fi.phone AND l.via LIKE 'no_neon%' ORDER BY l.ts ASC LIMIT 1) deriv
       FROM fi LEFT JOIN wa_chats_summary s ON s.phone = fi.phone
      WHERE NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'inbound' AND m.msg_type NOT IN ${NO_MSG} AND m.ts < ?)
        AND NOT EXISTS (SELECT 1 FROM wa_messages m WHERE m.phone = fi.phone AND m.direction = 'inbound' AND m.ts < strftime('%Y-%m-%dT%H:%M:%SZ', fi.t0, '+7 days') AND (
@@ -10938,6 +11020,7 @@ async function kpiMesVendedores(env, mes) {
   const global = { presup_admin: 0, ventas_otros_n: 0, ventas_otros_monto: 0 };
   const quienRecibio = (r, conHum) => {
     let rec;
+    if (r.deriv != null) return funnelVendedor(r.deriv || 'joaco');   // devuelto por "No es neón": la consulta es del que la recibió
     if (r.primero) { const [via, fr, to] = String(r.primero).split('|'); rec = via === 'reparto' ? to : (fr || 'joaco'); }
     else {
       rec = r.asg || 'joaco';
@@ -13013,6 +13096,7 @@ function canonWorker(name) {
   if (s.includes('joaqu') || s === 'joaco') return 'joaco';
   if (s.includes('facu')) return 'facu';
   if (s.includes('agus')) return 'agustina';
+  if (s === 'debi' || s.includes('debor')) return 'debi';
   if (s.includes('abril') || s === 'cursos') return 'abril';
   if (s.includes('emma') || s.includes('emmanuel') || s.includes('disena')) return 'emma';
   return null;
@@ -13021,6 +13105,7 @@ const AVISO_WORKERS = [
   { id: 'joaco', nombre: 'Joaco' },
   { id: 'facu', nombre: 'Facu' },
   { id: 'agustina', nombre: 'Agus' },
+  { id: 'debi', nombre: 'Debi' },
   { id: 'abril', nombre: 'Abril' },
   { id: 'emma', nombre: 'Emma' },
 ];
@@ -15241,7 +15326,7 @@ async function processPaymentProof(env, m) {
               OR EXISTS (SELECT 1 FROM pedidos p WHERE substr(replace(IFNULL(p.telefono, ''), ' ', ''), -10) = substr(?1, -10) AND p.fecha >= date('now', '-120 days'))
               OR EXISTS (SELECT 1 FROM briefs b WHERE b.cliente_wa_id = ?1 AND b.estado = 'enviado' AND b.enviado_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-120 days'))
               OR EXISTS (SELECT 1 FROM contact_labels cl JOIN labels l ON l.id = cl.label_id WHERE cl.phone = ?1 AND l.name IN ('Cartel primer pago', 'Cartel 2do pago', '📋 Para cotizar', '🔠 Corpóreo'))
-              OR EXISTS (SELECT 1 FROM wa_chats_summary s WHERE s.phone = ?1 AND COALESCE(s.assigned_to, '') IN ('facundo', 'agustina'))) AS v`
+              OR EXISTS (SELECT 1 FROM wa_chats_summary s WHERE s.phone = ?1 AND COALESCE(s.assigned_to, '') IN (${VENDEDORES_SECUNDARIOS.map(x => "'" + x + "'").join(', ')}))) AS v`
       ).bind(m.phone).first();
       if (c && c.v) return;
     }
@@ -15460,6 +15545,7 @@ function avisoAutorSlug(sessionUser) {
   if (s === 'emma' || s === 'disenador') return 'disenador';
   if (s === 'nadia' || s === 'facu' || s === 'facundo') return 'facundo';   // Facu reemplazó a Nadia (mismo usuario)
   if (s === 'agus' || s === 'agustina') return 'agustina';
+  if (VENDEDORES_SECUNDARIOS.includes(s)) return s;
   return ['gaspar', 'bruno', 'neyen', 'anibal'].includes(s) ? s : '';
 }
 // ¿La ventana de 24 h del interno está abierta? (le escribió al número del negocio hace < 23 h; idx phone+ts).
@@ -16798,7 +16884,7 @@ const NEON_IDX = Object.fromEntries(NEON_ETAPAS.map(([k], i) => [k, i]));
 const NEON_TABLERO_DESDE = '2026-09-01';
 const NEON_ENVIADO_DIAS = 30;      // los enviados vuelven al tablero 30 días (la columna muestra 14; el resto en "Ver todos")
 const NEON_DESPACHO_MODOS = { envio: 'Salió por envío', retira: 'Retiró en el taller', instalacion: 'Instalado', sinfrontera: 'Entregado a Sin Frontera' };
-const NEON_VEND = { joaco: 'Joaco', joaquin: 'Joaco', facundo: 'Facu', agustina: 'Agus', gaspar: 'Gaspar' };
+const NEON_VEND = { joaco: 'Joaco', joaquin: 'Joaco', facundo: 'Facu', agustina: 'Agus', debi: 'Debi', gaspar: 'Gaspar' };
 let _neonTabOk = false;
 async function ensureNeonTableroSchema(env) {
   if (_neonTabOk) return;
@@ -18347,7 +18433,7 @@ async function ensureProdSchema(env) {
   return true;
 }
 // Usuarios que NO pueden ser productores (ya existen con otro rol o son del equipo).
-const PROD_RESERVADOS = ['gaspar', 'admin', 'administrador', 'joaco', 'joaquin', 'facundo', 'facu', 'agustina', 'agus', 'abril', 'cursos', 'disenador', 'emma', 'emmanuel', 'logistica', 'sinfrontera', 'anibal', 'neyen', 'nadia'];
+const PROD_RESERVADOS = ['gaspar', 'admin', 'administrador', 'joaco', 'joaquin', 'facundo', 'facu', 'agustina', 'agus', 'abril', 'cursos', 'disenador', 'emma', 'emmanuel', 'logistica', 'sinfrontera', 'anibal', 'neyen', 'nadia', 'debi', 'debora'];
 function prodSlug(s) { return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
 // ¿La sesión es de un PRODUCTOR? {id, nombre, activo} o null. Mira users_panel con cualquier activo: un productor
 // dado de baja con una sesión vieja NO puede caer al rol por defecto ('comercial') y ver ventas. Cache 60 s por isolate.
@@ -20410,7 +20496,7 @@ const handler = {
           for (const c of COMERCIALES_SECUNDARIOS) {
             const cu = parseInt(await kvGet(env, c.cuotaKv, '0'), 10) || 0;
             let hoy = 0;
-            try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z') AND NOT EXISTS (SELECT 1 FROM chat_assign_log l WHERE l.phone = wa_chats_summary.phone AND l.via = 'import' AND l.ts = wa_chats_summary.assigned_at)").bind(c.slug).first(); hoy = (nr && nr.n) || 0; } catch (_) {}   // sin los traídos a mano
+            try { const nr = await env.DB.prepare("SELECT COUNT(*) AS n FROM wa_chats_summary WHERE assigned_to = ? AND assigned_at >= (date('now','-3 hours') || 'T03:00:00Z') AND NOT EXISTS (SELECT 1 FROM chat_assign_log l WHERE l.phone = wa_chats_summary.phone AND l.via IN ('import', 'no_neon', 'no_neon_auto') AND l.ts = wa_chats_summary.assigned_at)").bind(c.slug).first(); hoy = (nr && nr.n) || 0; } catch (_) {}   // sin los traídos a mano
             const ph = await kvGet(env, c.phoneKv, '');
             // cuota = la POR DEFECTO (alimenta el input); cuota_hoy = la que de verdad corta hoy (regulador).
             const ef = await cuotaDelDia(env, c, fechasAR().hoy);
@@ -21456,7 +21542,7 @@ const handler = {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         const _b = (await request.json().catch(() => null)) || {};
         const _send = _b.send === true;
-        const _v = ['joaco', 'facundo', 'agustina'].includes(_b.vendedor) ? _b.vendedor : undefined;
+        const _v = LISTA_OC_VEND.some(v => v.slug === _b.vendedor) ? _b.vendedor : undefined;
         return json(await maybeListaOC(env, { force: _send, dry: !_send, again: _send && _b.again === true, vendedor: _v }));
       }
       // Forzar el aviso "leads para llamar" AHORA (para probarlo fuera del cron de las 9 AR).
@@ -22785,6 +22871,62 @@ const handler = {
         return json({ ok: true, phone, assigned_to: to });
       }
 
+      // POST /admin/wa/chat-derivar {phone} — "No es neón" (Gaspar 17-oct): la vendedora de solo neón (o Gaspar) saca de su
+      // bandeja un lead de corpóreo u otra cosa y va al sorteo parejo del resto (repartirDevuelto). Solo chats de la bandeja
+      // general asignados a una de solo neón; si ya tiene pedido cargado no se mueve (lo resuelve Gaspar).
+      if (request.method === 'POST' && path === '/admin/wa/chat-derivar') {
+        const role = await getSessionRole(env, session.user);
+        const meSlug = String(session.user || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+        const body = (await request.json().catch(() => null)) || {};
+        const ph = String(body.phone || '').replace(/\D/g, '');
+        if (!ph) return json({ error: 'Falta el teléfono.' }, 400);
+        let row = null;
+        try { row = await env.DB.prepare("SELECT assigned_to, inbox FROM wa_chats_summary WHERE phone = ?").bind(ph).first(); } catch (_) { return json({ error: 'No pude leer el chat. Probá de nuevo.' }, 503); }
+        const desde = String((row && row.assigned_to) || '');
+        const c = COMERCIALES_SECUNDARIOS.find(x => x.soloNeon && x.slug === desde);
+        if (!(role === 'admin' || (role === 'comercial' && c && meSlug === c.slug))) return json({ error: 'Ese chat no está en tu bandeja.' }, 403);
+        if (!c) return json({ error: 'Ese chat no es de una vendedora de solo neón.' }, 409);
+        if ((String(row.inbox || '') || 'general') !== 'general') return json({ error: 'Ese chat no está en la bandeja de carteles.' }, 409);
+        try { if (await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1').bind(ph).first()) return json({ error: 'Ya tiene un pedido cargado: hablalo con Gaspar.' }, 409); } catch (_) {}
+        const r = await repartirDevuelto(env, ph, { via: 'no_neon', byUser: session.user, desde });
+        if (!r.ok) return json({ error: r.error }, 409);
+        await invalidateChatsSummaryCache(request);
+        return json({ ok: true, phone: ph, a: r.nombre });
+      }
+
+      // POST /admin/vendedores/password {slug, password} → SOLO admin: pone la contraseña de una vendedora secundaria y la ACTIVA
+      // (nace inactiva: sin contraseña no entra ni recibe reparto). Cambiarla cierra sus sesiones abiertas.
+      if (request.method === 'POST' && path === '/admin/vendedores/password') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const c = COMERCIALES_SECUNDARIOS.find(x => x.slug === String(body.slug || '').toLowerCase().trim());
+        if (!c) return json({ error: 'vendedora desconocida' }, 400);
+        const pw = String(body.password || '');
+        if (pw.length < 8) return json({ error: 'la contraseña tiene que tener al menos 8 caracteres' }, 400);
+        const hash = await sha256hex(pw);
+        try {
+          await env.DB.prepare("INSERT INTO users_panel (id, nombre, rol, activo, password_hash, created_at) VALUES (?, ?, 'comercial', 1, ?, ?) ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash, activo = 1 WHERE users_panel.rol = 'comercial'").bind(c.slug, c.nombre, hash, new Date().toISOString()).run();
+          const u = await env.DB.prepare("SELECT rol, activo FROM users_panel WHERE id = ?").bind(c.slug).first();
+          if (!u || u.rol !== 'comercial' || +u.activo !== 1) return json({ error: 'ese usuario existe con otro rol' }, 409);
+          const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+          const ses = (await env.DB.prepare('SELECT token, user FROM sessions WHERE expires_at > ?').bind(new Date().toISOString()).all()).results || [];
+          const del = ses.filter(s => norm(s.user) === c.slug).map(s => s.token);
+          if (del.length) await env.DB.batch(del.map(t => env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(t)));
+          try { await env.DB.prepare('DELETE FROM kv_cache WHERE k = ?').bind('login_fail:' + c.slug).run(); } catch (_) {}
+        } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        return json({ ok: true, usuario: c.slug, nombre: c.nombre });
+      }
+      // GET /admin/vendedores → estado de las vendedoras secundarias (para la card de Admin): si tienen contraseña y están activas.
+      if (request.method === 'GET' && path === '/admin/vendedores') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        const out = [];
+        for (const c of COMERCIALES_SECUNDARIOS) {
+          let u = null; try { u = await env.DB.prepare("SELECT activo, CASE WHEN IFNULL(password_hash, '') NOT IN ('', 'REDACTADO') THEN 1 ELSE 0 END AS pw FROM users_panel WHERE id = ?").bind(c.slug).first(); } catch (_) {}
+          out.push({ slug: c.slug, nombre: c.nombre, soloNeon: !!c.soloNeon, existe: !!u, activo: !!(u && +u.activo === 1), contrasena: !!(u && +u.pw === 1) });
+        }
+        return json({ ok: true, vendedores: out });
+      }
+
       // POST /admin/wa/chat-import {phone, dry?} — "Traer de Joaco" (pedido de Gaspar, 1-oct): una vendedora
       // habilitada (hoy solo Agus) se trae a SU bandeja un chat que está en la de Joaco. Pasa el chat + la comisión
       // de sus presupuestos (briefs.comercial_id), igual que chat-assign. SOLO desde la bandeja de Joaco (inbox
@@ -22797,7 +22939,7 @@ const handler = {
       // dry:true = valida sin cambiar nada. Admin puede hacerlo en nombre de una importadora con {para:'agustina'}.
       // Review 1-oct: sin búsqueda "a ojo" por sufijo con área (traía el chat de OTRA persona de otra área).
       if (request.method === 'POST' && path === '/admin/wa/chat-import') {
-        const IMPORTADORAS = ['agustina'];
+        const IMPORTADORAS = ['agustina', 'debi'];
         const role = await getSessionRole(env, session.user);
         const esAdm = role === 'admin';
         const meSlug = String(session.user || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
@@ -22846,6 +22988,8 @@ const handler = {
         if (asg === para) return json({ ok: true, ya_era_tuyo: true, phone: ph, nombre, last_ts: row.last_ts || '' });
         if (asg !== '' && asg !== 'joaco') return no('Está asignado a ' + asg + '.');
         try { if (await env.DB.prepare("SELECT 1 AS x FROM precotiz_pilot WHERE phone = ? AND estado = 'activo' LIMIT 1").bind(ph).first()) return json({ error: 'El bot todavía le está pidiendo los datos a este lead. Traelo cuando termine.' }, 409); } catch (_) {}
+        // Vendedora de solo neón: nunca un lead de corpóreo.
+        if ((COMERCIALES_SECUNDARIOS.find(c => c.slug === para) || {}).soloNeon && (await leadEsCorporeo(env, ph, ''))) return json({ error: 'Ese cliente es de corpóreo: lo atiende otro vendedor.' }, 409);
         try {
           const cierre = FUP_CIERRE_MARKERS.map(() => 'lower(body) LIKE ?').join(' OR ');
           const yaCierre = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND (" + cierre + ") LIMIT 1").bind(ph, ...FUP_CIERRE_MARKERS.map(k => '%' + k.toLowerCase() + '%')).first();
@@ -24603,13 +24747,14 @@ const handler = {
         // Lo que carga Gaspar (admin) es venta SUYA, sin comisión para nadie (Gaspar 14-oct: "si se cargan desde admin
         // los cargué yo… no va la comisión a Joaquín, a mí tampoco porque soy el dueño"), salvo que elija un vendedor.
         const _vendElegido = funnelVendedor(String(body.comercial_id || ''));
-        const comercialId = (sessionUserKey === 'gaspar' && !['joaco', 'facundo', 'agustina'].includes(_vendElegido))
+        const _vendAlta = ['joaco', ...VENDEDORES_SECUNDARIOS];
+        const comercialId = (sessionUserKey === 'gaspar' && !_vendAlta.includes(_vendElegido))
           ? 'gaspar'
           : await resolveComercial(env, { bodyComercial: body.comercial_id, sessionUser: session.user, phone: (plataforma === 'IG' && igId) ? igId : telefono });
         // Usuario literal que cargó el pedido (para ver si lo cargó Facu/Joaco/Gaspar). Si Gaspar la cargó a nombre de un
         // vendedor, va el vendedor: la col C del Excel (comisiones) sale de cargado_por ("se corrige el cargado_por").
-        const cargadoPor = (sessionUserKey === 'gaspar' && ['joaco', 'facundo', 'agustina'].includes(_vendElegido))
-          ? ({ joaco: 'Joaquín', facundo: 'Facundo', agustina: 'Agustina' })[_vendElegido]
+        const cargadoPor = (sessionUserKey === 'gaspar' && _vendAlta.includes(_vendElegido))
+          ? (({ joaco: 'Joaquín', facundo: 'Facundo', agustina: 'Agustina' })[_vendElegido] || (COMERCIALES_SECUNDARIOS.find(c => c.slug === _vendElegido) || {}).nombre || _vendElegido)
           : String(session.user || '');
         // Tramos / cm de neón que falten (o vengan en 0/negativos) en un cartel de neón: se completan desde su
         // brief. Best-effort: si no hay brief claro el pedido se carga igual (nunca se frena una venta acá).
@@ -25650,7 +25795,7 @@ const handler = {
         const b = await buildOcAbiertas(env);
         if (!b) return json({ ok: true, items: [], urgent_max: '' });
         const slug = ocSlugSesion(session.user);
-        const items = role === 'admin' ? [].concat(b.porVend.joaco, b.porVend.facundo, b.porVend.agustina) : (b.porVend[slug] || []);
+        const items = role === 'admin' ? Object.values(b.porVend).flat() : (b.porVend[slug] || []);
         items.sort((x, y) => (y.urgente - x.urgente) || ((y.dias || 0) - (x.dias || 0)));
         const urg = items.filter(x => x.urgente3h).map(x => x.ref || '').sort();
         return json({ ok: true, items, urgent_max: urg.length ? urg[urg.length - 1] : '' });
@@ -25668,7 +25813,7 @@ const handler = {
         const motivo = String(body.motivo || '').replace(/\s+/g, ' ').trim().slice(0, 160);
         if (accion === 'baja' && !motivo) return json({ error: 'elegí el motivo' }, 400);
         const b = await buildOcAbiertas(env);
-        const it = b ? [].concat(b.porVend.joaco, b.porVend.facundo, b.porVend.agustina).find(x => x.phone === phone) : null;
+        const it = b ? Object.values(b.porVend).flat().find(x => x.phone === phone) : null;
         if (!it) return json({ ok: true, ya_cerrada: true });   // ya no tiene POR PAGAR (la cerró otro / el comprobante)
         const slug = ocSlugSesion(session.user);
         if (role !== 'admin' && it.dueno !== slug) return json({ error: 'esa OC es de otro vendedor' }, 403);

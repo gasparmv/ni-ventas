@@ -20,7 +20,7 @@ const OFRECER_BASE_NEGRA = false;
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Diseñador', 'Abril', 'Aníbal', 'Neyen', 'Logística', 'Sin Frontera'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Debi', 'Diseñador', 'Abril', 'Aníbal', 'Neyen', 'Logística', 'Sin Frontera'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -389,7 +389,7 @@ function panelConsultasHtml() {
   // Datos de OTRO usuario (cambió de usuario en la misma pestaña) → se muestran como "Cargando…".
   const d = (st.user && st.user !== STATE.user) ? null : st.data;
   const slug = _userKey(STATE.user);
-  const otro = slug === 'facundo' ? 'Agus' : 'Facu';
+  const otro = Object.keys(COMERCIALES_SECUNDARIOS).filter(k => k !== slug).map(k => COMERCIALES_SECUNDARIOS[k].nombre).join(', ') || 'otro vendedor';
   const head = `<div class="card-h"><h3>📥 Mis consultas</h3><span class="muted" style="font-size:12px">elegí cuántas querés recibir</span></div>`;
   if (!d) {
     return `<div id="panel-consultas" class="card" style="margin-bottom:var(--s-4)">${head}<div class="muted" style="font-size:12px">${st.error ? '⚠ ' + escapeHtml(st.error) : 'Cargando…'}</div></div>`;
@@ -495,6 +495,7 @@ async function loadRepartoPanel() {
     if (!isAdmin()) return;                       // cambió de usuario mientras cargaba
     if (r.ok && j.ok) { repartoState.data = j.secundarios || []; repartoState.error = ''; repartoState.at = Date.now(); }
     else repartoState.error = j.error || ('HTTP ' + r.status);
+    try { const rv = await fetch(CONFIG.trackerUrl + '/admin/vendedores', { headers: authHeaders() }); const jv = await rv.json().catch(() => ({})); if (rv.ok && jv.ok) repartoState.vend = jv.vendedores || []; } catch (_) {}
   } catch (_) { repartoState.error = 'sin conexión'; }
   finally { repartoState.loading = false; renderRepartoPanel(); }
 }
@@ -533,15 +534,49 @@ function renderRepartoPanel() {
         <th style="padding:4px 6px">Vendedor</th><th style="padding:4px 6px">Hoy ${d0.hoy ? fd(d0.hoy.fecha) : ''} (recibidas / tope)</th><th style="padding:4px 6px">Mañana ${d0.manana ? fd(d0.manana.fecha) : ''}</th>
       </tr></thead>
       <tbody>${repartoState.data.map(s => `<tr style="border-top:1px solid var(--border)"><td style="padding:8px 6px;vertical-align:top"><b>${escapeHtml(s.nombre)}</b><div class="muted" style="font-size:11px">por defecto ${s.cuota_default}</div></td>${celda(s, 'hoy')}${celda(s, 'manana')}</tr>`).join('')}
-        <tr style="border-top:1px solid var(--border)"><td style="padding:8px 6px"><b>Joaco</b></td><td colspan="2" class="muted" style="padding:8px 6px;font-size:12px">Sin tope: recibe todo lo que no toman Facu y Agus.</td></tr>
+        <tr style="border-top:1px solid var(--border)"><td style="padding:8px 6px"><b>Joaco</b></td><td colspan="2" class="muted" style="padding:8px 6px;font-size:12px">Sin tope: recibe todo lo que no toman los demás.</td></tr>
       </tbody></table>
     <div class="muted" style="font-size:11px;margin-top:6px">Es un tope: con días flojos puede que no lleguen. Si la fijás vos, ellos no la pueden cambiar ese día (tocá "liberar" para que vuelvan a decidir).</div>`;
   // Cada acción manda la FECHA que se ve en pantalla (el server rechaza si ya cambió el día).
   const fechaDe = (slug, dia) => { const s0 = (repartoState.data || []).find(r => r.slug === slug); return (s0 && s0[dia] && s0[dia].fecha) || ''; };
   const cuotaDe = (slug, dia) => { const s0 = (repartoState.data || []).find(r => r.slug === slug); return s0 && s0[dia] ? s0[dia].cuota : 0; };
   el.querySelectorAll('[data-reparto-dia]').forEach(s => s.onchange = () => postRepartoAdmin({ slug: s.dataset.repartoSlug, dia: s.dataset.repartoDia, cuota: parseInt(s.value, 10), fecha: fechaDe(s.dataset.repartoSlug, s.dataset.repartoDia) }));
+  // Contraseña: sin ella la vendedora no entra ni recibe consultas (nace inactiva).
+  el.querySelectorAll('tbody tr').forEach(tr => {
+    const sel = tr.querySelector('[data-reparto-slug]'); if (!sel) return;
+    const slug = sel.dataset.repartoSlug, v = (repartoState.vend || []).find(x => x.slug === slug); if (!v) return;
+    const td = tr.querySelector('td'); if (!td || td.querySelector('[data-vend-pw]')) return;
+    td.insertAdjacentHTML('beforeend', `<div style="margin-top:4px">${v.activo && v.contrasena ? '' : '<div style="color:#FFB020;font-size:11px">sin contraseña · no entra ni recibe</div>'}<button class="btn btn-ghost" data-vend-pw="${escapeHtml(slug)}" style="padding:1px 8px;font-size:11px;margin-top:2px">${v.activo && v.contrasena ? 'cambiar contraseña' : 'poner contraseña'}</button></div>`);
+  });
+  el.querySelectorAll('[data-vend-pw]').forEach(b => b.onclick = () => vendPasswordUI(b.dataset.vendPw));
   el.querySelectorAll('[data-reparto-reset]').forEach(b => b.onclick = () => { const [slug, dia] = b.dataset.repartoReset.split('|'); postRepartoAdmin({ slug, dia, reset: true, fecha: fechaDe(slug, dia) }); });
   el.querySelectorAll('[data-reparto-fijar]').forEach(b => b.onclick = () => { const [slug, dia] = b.dataset.repartoFijar.split('|'); postRepartoAdmin({ slug, dia, cuota: cuotaDe(slug, dia), fecha: fechaDe(slug, dia) }); });
+}
+async function vendPasswordUI(slug) {
+  const v = (repartoState.vend || []).find(x => x.slug === slug) || { slug, nombre: slug };
+  const pw = await new Promise(resolve => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>Contraseña de ${escapeHtml(v.nombre)}</h3></div><div class="modal-body"><form class="login-form" novalidate>
+      <div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Entra eligiendo <b>${escapeHtml(v.nombre)}</b> en el login. Mínimo 8 caracteres. Al ponerla queda activa y empieza a recibir consultas; si la cambiás, se cierran sus sesiones abiertas.</div>
+      <label class="nc-field"><span class="nc-label">Contraseña nueva</span><input type="password" class="nc-input" data-p1 autocomplete="new-password"></label>
+      <label class="nc-field" style="margin-top:10px"><span class="nc-label">Repetila</span><input type="password" class="nc-input" data-p2 autocomplete="new-password"></label>
+      <div data-perr style="color:#ef4444;font-size:12px;min-height:16px;margin-top:6px"></div>
+      <button type="submit" class="btn btn-cyan" style="width:100%;margin-top:8px">Guardar</button>
+      <button type="button" class="btn btn-ghost" data-pcancel style="width:100%;margin-top:8px">Cancelar</button></form></div></div>`;
+    document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+    const finish = x => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); resolve(x); };
+    const p1 = bg.querySelector('[data-p1]'), p2 = bg.querySelector('[data-p2]'), err = bg.querySelector('[data-perr]');
+    bg.querySelector('form').addEventListener('submit', e => { e.preventDefault(); if (p1.value.length < 8) { err.textContent = 'Mínimo 8 caracteres'; return; } if (p1.value !== p2.value) { err.textContent = 'No coinciden'; return; } finish(p1.value); });
+    bg.querySelector('[data-pcancel]').onclick = () => finish(null);
+    bg.addEventListener('click', e => { if (e.target === bg) finish(null); });
+    setTimeout(() => p1.focus(), 50);
+  });
+  if (!pw) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/vendedores/password', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ slug, password: pw }) }).then(x => x.json());
+    toast(r && r.ok ? `Listo: ${v.nombre} ya puede entrar y empieza a recibir consultas` : ((r && r.error) || 'No se pudo guardar'));
+    repartoState.at = 0; loadRepartoPanel();
+  } catch (_) { toast('Error de red'); }
 }
 async function postRepartoAdmin(body) {
   try {
@@ -1584,8 +1619,11 @@ const COMERCIALES_SECUNDARIOS = {
               // pedido quedó con fecha posterior) → media comisión igual (Gaspar, 08/10).
               mediaComisionHasta: '2026-10-03', comisionCompletaCarteles: ['Primero lo bueno'],
               mediaComisionCarteles: ['OMA corpóreo ochava', 'OMA pastilla'] },
+  // Debi (17-oct): vende SOLO NEÓN (soloNeon: sin Corpóreas; el reparto no le da corpóreos y tiene el botón "No es neón").
+  debi:     { nombre: 'Debi', rate: 0.10, rateCorp: 0.10, mas5: true, desde: '2026-10', color: 'green', soloNeon: true },
 };
 function isSecundario(s) { return Object.prototype.hasOwnProperty.call(COMERCIALES_SECUNDARIOS, _userKey(s)); }
+function isSoloNeonUser(s) { const c = COMERCIALES_SECUNDARIOS[_userKey(s)]; return !!(c && c.soloNeon); }
 function isGasparUser(s) { return _userKey(s) === 'gaspar'; }
 // SOLO DISPLAY: el user "Gaspar" se muestra como "Administrador" en la UI. El valor INTERNO
 // sigue siendo "Gaspar" (login, isAdmin, API, gates de rol) → no rompe nada, es solo el tag visible.
@@ -3165,7 +3203,7 @@ function render() {
     if (location.hash !== '#cotizacion') location.hash = 'cotizacion';
   }
   // Corpóreas: Joaquín + Gaspar + vendedores secundarios (Facu/Agus). Si otro cae acá (hash directo), al dashboard.
-  if (STATE.view === 'corporeas' && !(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isSecundario(STATE.user))) {
+  if (STATE.view === 'corporeas' && !(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || (isSecundario(STATE.user) && !isSoloNeonUser(STATE.user)))) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   }
@@ -3877,7 +3915,7 @@ function renderOcUrgenteModal() {
     return `
       <div style="padding:9px 10px;border:1px solid ${it.urgente ? '#ef4444' : 'var(--border)'};border-radius:var(--r-sm);margin-bottom:7px">
         <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
-          <div style="min-width:0;font-size:13px;font-weight:600;overflow-wrap:anywhere">${it.canal === 'ig' ? '📷 ' : ''}${nombre}${admin && it.dueno ? ` <span style="font-size:10px;font-weight:700;color:var(--fg-subtle);text-transform:uppercase">· ${escapeHtml(it.dueno === 'facundo' ? 'Facu' : it.dueno === 'agustina' ? 'Agus' : 'Joaco')}</span>` : ''}</div>
+          <div style="min-width:0;font-size:13px;font-weight:600;overflow-wrap:anywhere">${it.canal === 'ig' ? '📷 ' : ''}${nombre}${admin && it.dueno ? ` <span style="font-size:10px;font-weight:700;color:var(--fg-subtle);text-transform:uppercase">· ${escapeHtml((COMERCIALES_SECUNDARIOS[it.dueno] || {}).nombre || 'Joaco')}</span>` : ''}</div>
           <div style="font-size:13px;font-weight:700;white-space:nowrap">${escapeHtml(it.importe || '')}</div>
         </div>
         <div style="font-size:12px;color:var(--fg-mute);margin-top:2px">${[it.cartel ? `«${escapeHtml(it.cartel)}»` : '', dias, it.n_oc > 1 ? `${it.n_oc} OC` : ''].filter(Boolean).join(' · ') || 'sin OC registrada'}</div>
@@ -8680,7 +8718,7 @@ function renderShell() {
         <button class="nav-item ${v==='presupuestos'?'active':''}" data-view="presupuestos"><span class="icon">∑</span> Presupuestos</button>
         <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
         ${isAdmin() ? `<button class="nav-item ${v==='agenda'?'active':''}" data-view="agenda"><span class="icon">◷</span> Agenda</button>` : ''}
-        ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || isSecundario(STATE.user)) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
+        ${(isJoaquinUser(STATE.user) || isGasparUser(STATE.user) || (isSecundario(STATE.user) && !isSoloNeonUser(STATE.user))) ? `<button class="nav-item ${v==='corporeas'?'active':''}" data-view="corporeas"><span class="icon">▣</span> Corpóreas</button>` : ''}
         ${rdPuedeVer() ? `<button class="nav-item ${v==='rendimiento'?'active':''}" data-view="rendimiento"><span class="icon">↗</span> ${isAdmin() ? 'Rendimiento' : 'Mi rendimiento'}</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte</button>` : ''}
         ${isAdmin() ? `<button class="nav-item ${v==='logistica'?'active':''}" data-view="logistica"><span class="icon">📦</span> Logística</button>` : ''}
@@ -10818,8 +10856,8 @@ function dimerPillHtml(s){ if (!s) return '<span style="color:var(--fg-subtle)">
 function baseSwatch(s){ if (!s) return '<span style="color:var(--fg-subtle)">—</span>'; return `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:11px;height:11px;border-radius:50%;background:${baseHex(s)};border:1px solid var(--border);flex:none"></span><span style="font-size:12px">${escapeHtml(s)}</span></span>`; }
 // ¿Quién cargó el pedido? Normaliza el user (verbatim del login) a un nombre corto + color.
 function loaderNorm(u){ return String(u||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,''); }
-function loaderLabel(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'Facu'; if(s==='agustina'||s==='agus')return 'Agus'; if(s==='joaquin'||s==='joaco')return 'Joaco'; if(s==='gaspar'||s==='bruno')return 'Gaspar'; if(s==='abril')return 'Abril'; if(s==='emma'||s==='emmanuel')return 'Emma'; return u?(String(u).charAt(0).toUpperCase()+String(u).slice(1)):''; }
-function loaderColor(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'violet'; if(s==='agustina'||s==='agus')return 'rose'; if(s==='joaquin'||s==='joaco')return 'cyan'; if(s==='gaspar'||s==='bruno')return 'blue'; if(s==='abril')return 'amber'; return 'muted'; }
+function loaderLabel(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'Facu'; if(s==='agustina'||s==='agus')return 'Agus'; if(s==='debi'||s==='debora')return 'Debi'; if(s==='joaquin'||s==='joaco')return 'Joaco'; if(s==='gaspar'||s==='bruno')return 'Gaspar'; if(s==='abril')return 'Abril'; if(s==='emma'||s==='emmanuel')return 'Emma'; return u?(String(u).charAt(0).toUpperCase()+String(u).slice(1)):''; }
+function loaderColor(u){ const s=loaderNorm(u); if(s==='facundo'||s==='facu')return 'violet'; if(s==='agustina'||s==='agus')return 'rose'; if(s==='debi'||s==='debora')return 'green'; if(s==='joaquin'||s==='joaco')return 'cyan'; if(s==='gaspar'||s==='bruno')return 'blue'; if(s==='abril')return 'amber'; return 'muted'; }
 // Celda/píldora con quién cargó el pedido. cargado_por (user literal) y, si falta (histórico), comercial_id.
 function loaderCell(p){ const who=p.cargadoPor||p.comercial_id||''; const lbl=loaderLabel(who); if(!lbl)return '<span style="color:var(--fg-subtle)">—</span>'; return `<span class="pill ${loaderColor(who)}" style="font-size:11px">${escapeHtml(lbl)}</span>`; }
 // Chip 🎫 para pedidos corpóreos en la tabla: "Ver #N" (verde) si ya tiene ticket, o "Armar"
@@ -11736,7 +11774,7 @@ function renderPedidoModal() {
         <button id="pm-add-cartel" class="btn btn-ghost" style="width:100%;margin-bottom:var(--s-3);font-size:12px">＋ Agregar otro cartel a este pedido</button>
         ${pmPagoBlockHtml(m)}
         <div style="margin-bottom:var(--s-3)"><label style="${lbl}">De qué ad viene <span style="opacity:.6">(auto por teléfono en WPP · editable)</span></label><input id="pm-ad" value="${escapeHtml(m.ad||'')}" placeholder="se completa solo si vino de un ad" style="${inp}"></div>
-        ${isAdmin() ? `<div style="margin-bottom:var(--s-3)"><label style="${lbl}">¿De quién es la venta? <span style="opacity:.6">(lo que cargás vos es tuyo, sin comisión, salvo que elijas un vendedor)</span></label><select id="pm-vendedor" style="${inp}">${[['gaspar', 'Mía (Gaspar, sin comisión)'], ['joaco', 'Joaco'], ['facundo', 'Facu'], ['agustina', 'Agus']].map(([k, l]) => `<option value="${k}" ${(m.vendedor || 'gaspar') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
+        ${isAdmin() ? `<div style="margin-bottom:var(--s-3)"><label style="${lbl}">¿De quién es la venta? <span style="opacity:.6">(lo que cargás vos es tuyo, sin comisión, salvo que elijas un vendedor)</span></label><select id="pm-vendedor" style="${inp}">${[['gaspar', 'Mía (Gaspar, sin comisión)'], ['joaco', 'Joaco'], ['facundo', 'Facu'], ['agustina', 'Agus'], ['debi', 'Debi']].map(([k, l]) => `<option value="${k}" ${(m.vendedor || 'gaspar') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
         ${isAdmin() ? `<div style="margin-bottom:var(--s-3)"><label style="${lbl}">Cliente</label>
           <div style="display:flex;gap:8px">
             <button type="button" data-pm-sf="0" style="flex:1;padding:9px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${oBtn(!m.clienteSF)}">Cliente final</button>
@@ -18648,9 +18686,9 @@ window.rejectImprovement = rejectImprovement;
 // Facu/Agus sin el 5% del cotizador) y puede abrir el panel de cada uno. El servidor filtra: un vendedor nunca
 // recibe datos de otro. Consume GET /admin/kpis-vendedor y POST /admin/kpis-vendedor/meta. Sin comisiones.
 let rendState = { mes: '', tab: 'comparar', cache: {}, seq: 0 };
-const RD_VEND = [{ slug: 'joaco', nombre: 'Joaco', color: '#2E9BD6' }, { slug: 'facundo', nombre: 'Facu', color: '#8B2FD6' }, { slug: 'agustina', nombre: 'Agus', color: '#D6409F' }];
+const RD_VEND = [{ slug: 'joaco', nombre: 'Joaco', color: '#2E9BD6' }, { slug: 'facundo', nombre: 'Facu', color: '#8B2FD6' }, { slug: 'agustina', nombre: 'Agus', color: '#D6409F' }, { slug: 'debi', nombre: 'Debi', color: '#22A55E' }];
 const RD_NEON = '#B84DFF', RD_CORP = '#E4A33A';
-function rdSlugUsuario() { if (isJoaquinUser(STATE.user)) return 'joaco'; if (isFacundoUser(STATE.user)) return 'facundo'; if (isAgustinaUser(STATE.user)) return 'agustina'; return ''; }
+function rdSlugUsuario() { if (isJoaquinUser(STATE.user)) return 'joaco'; return isSecundario(STATE.user) ? _userKey(STATE.user) : ''; }
 function rdPuedeVer() { return isAdmin() || !!rdSlugUsuario(); }
 function rdColor(slug) { const v = RD_VEND.find(x => x.slug === slug); return v ? v.color : '#888'; }
 function rdPct(x) { return x == null ? '—' : Math.round(x * 100) + '%'; }
@@ -18685,7 +18723,7 @@ function renderRendimiento() {
   const st = rendState;
   if (!/^\d{4}-\d{2}$/.test(st.mes)) { const ms = faMonths(); st.mes = ms[ms.length - 1].key; }
   if (!isAdmin()) st.tab = rdSlugUsuario();
-  else if (!['comparar', 'joaco', 'facundo', 'agustina'].includes(st.tab)) st.tab = 'comparar';
+  else if (st.tab !== 'comparar' && !RD_VEND.some(v => v.slug === st.tab)) st.tab = 'comparar';
   const mesBtns = faMonths().map(m => `<button data-rd-mes="${m.key}" aria-pressed="${st.mes === m.key}">${m.label}</button>`).join('');
   const tabs = isAdmin() ? `<div class="rd-seg">${[['comparar', 'Comparar']].concat(RD_VEND.map(v => [v.slug, v.nombre])).map(([k, l]) => `<button data-rd-tab="${k}" aria-pressed="${st.tab === k}">${l}</button>`).join('')}</div>` : '';
   return `
@@ -18923,7 +18961,7 @@ function rdCompararHtml(d) {
   const cards = vs.map(v => {
     const a = v.actual, meta = v.meta || 0, crudo = a.facturado_crudo || 0;
     const pct = meta ? Math.min(100, crudo / meta * 100) : 0;
-    const sin5 = v.slug === 'facundo' ? ' (sin el 5%)' : (v.slug === 'agustina' ? ' (sin el 5% del neón)' : '');
+    const sin5 = v.slug === 'facundo' ? ' (sin el 5%)' : ((COMERCIALES_SECUNDARIOS[v.slug] || {}).mas5 ? ' (sin el 5% del neón)' : '');
     return `<div class="rd-card rd-vcard" style="--c:${rdColor(v.slug)}">
       <h3><span class="rd-sw" style="background:${rdColor(v.slug)}"></span>${escapeHtml(v.nombre)}</h3>
       <div class="fact mono">${fmtMoney(a.facturado)}</div><div class="rd-ref" style="font-size:12px">facturado${sin5} · ${rdVsAnt(a.facturado, v.anterior.facturado, mes, rdCorto)}</div>
@@ -18949,7 +18987,7 @@ function rdCompararHtml(d) {
   const ap = (v) => v.actual.aparte || {};
   const montoN = (n, m) => n ? `${n} · ${rdCorto(m)}` : '0';
   return `
-    <div class="rd-note">Cómo se cuenta: las consultas son las de WhatsApp (Instagram va aparte) y se le cuentan al que las recibió; los presupuestos y las OC al que los mandó; la venta al que la cerró. Las tasas siguen a cada consulta desde que entra (cohorte) y cuentan solo las que ya tuvieron el plazo. Los montos de Facu y Agus van sin el 5% que les suma el cotizador; la meta se mide contra lo que facturó cada uno de verdad. Lo que no se puede medir limpio no suma: está abajo en "Qué no se cuenta".</div>
+    <div class="rd-note">Cómo se cuenta: las consultas son las de WhatsApp (Instagram va aparte) y se le cuentan al que las recibió; los presupuestos y las OC al que los mandó; la venta al que la cerró. Las tasas siguen a cada consulta desde que entra (cohorte) y cuentan solo las que ya tuvieron el plazo. Los montos de Facu, Agus y Debi van sin el 5% que les suma el cotizador; la meta se mide contra lo que facturó cada uno de verdad. Lo que no se puede medir limpio no suma: está abajo en "Qué no se cuenta".</div>
     <div class="rd-vcards">${cards}</div>
     <div class="rd-grid2">
       <div class="rd-card"><h2>Conversión por etapa</h2><div class="cap">De cada 100 consultas o presupuestos, cuántos pasan al paso siguiente. Si el mes todavía no maduró, se usa el anterior (entre paréntesis).</div>
@@ -20159,7 +20197,7 @@ function renderChatConversation() {
       <div class="chat-header-meta">
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-brief" title="Crear brief para este contacto — se carga a Emma como 'A cotizar' (teléfono y WhatsApp ya quedan cargados)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📋 Crear brief</button>` : ''}
         ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-oc" title="Crear la Orden de Compra y enviarla al cliente (se etiqueta POR PAGAR y quedás avisado)" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 Crear OC</button>` : ''}
-        ${canCreateBriefs() ? `<button class="btn btn-cyan" id="btn-chat-oc-corp" title="Crear la OC de un corpóreo (letra 3D) — pre-llena frente/laterales/color del brief; se etiqueta POR PAGAR y quedás avisado" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 OC corpórea</button>` : ''}
+        ${(canCreateBriefs() && !isSoloNeonUser(STATE.user)) ? `<button class="btn btn-cyan" id="btn-chat-oc-corp" title="Crear la OC de un corpóreo (letra 3D) — pre-llena frente/laterales/color del brief; se etiqueta POR PAGAR y quedás avisado" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">🧾 OC corpórea</button>` : ''}
         ${(canCotizar() && !isCursosOnly()) ? `<button class="btn btn-cyan" id="btn-chat-pedido" title="Cargar el pedido de este cliente: usa la última OC del chat (si hay) y te sugiere el comprobante que mandó" style="padding:4px 11px;font-size:12px;font-weight:600;white-space:nowrap;line-height:1.3">📦 Cargar pedido</button>` : ''}
         ${(getUserRole() === 'comercial') ? (() => {
           const _lbls = chatState.labels || [];
@@ -20182,6 +20220,12 @@ function renderChatConversation() {
           // Abril (cursos) solo ve chats de su bandeja → siempre "Sacar de Cursos".
           return `<button class="btn-label-toggle${_enCursos ? ' has-note' : ''}" id="btn-cursos-toggle" data-en-cursos="${_enCursos ? '1' : '0'}" title="${_enCursos ? 'Sacar de la bandeja Cursos' : 'Derivar a la bandeja Cursos (Abril)'}" style="font-size:17px;line-height:1">🎓</button>`;
         })() : ''}
+        ${(() => {
+          const _c = (chatState.contacts || []).find(x => x.phone === phone);
+          const _asg = String((_c && _c.assigned_to) || '');
+          const _ok = _asg && COMERCIALES_SECUNDARIOS[_asg] && COMERCIALES_SECUNDARIOS[_asg].soloNeon && (getUserRole() === 'admin' || _userKey(STATE.user) === _asg);
+          return _ok ? `<button class="btn-label-toggle" id="btn-no-neon" title="No es de neón (ej. un corpóreo): se lo pasamos a otro vendedor al azar" style="font-size:12px;font-weight:700;line-height:1;white-space:nowrap">🔀 No es neón</button>` : '';
+        })()}
         ${getUserRole() === 'admin' ? (() => {
           const _c = (chatState.contacts || []).find(x => x.phone === phone);
           const _enNadia = _c && _c.assigned_to === 'facundo';
@@ -22076,6 +22120,8 @@ function bindChatConversation() {
   if (cursosBtn) cursosBtn.onclick = () => handleToggleCursos();
   const nadiaBtn = document.getElementById('btn-nadia-toggle');
   if (nadiaBtn) nadiaBtn.onclick = () => handleToggleNadia();
+  const noNeonBtn = document.getElementById('btn-no-neon');
+  if (noNeonBtn) noNeonBtn.onclick = () => handleNoNeon();
   const privadoBtn = document.getElementById('btn-privado-toggle');
   if (privadoBtn) privadoBtn.onclick = () => handleTogglePrivado();
   const vigilarBtn = document.getElementById('btn-vigilar-toggle');
@@ -22096,6 +22142,26 @@ function bindChatConversation() {
 }
 
 // Deriva (o saca) el chat activo a la bandeja de Cursos. Admin y comercial (Joaco).
+// "No es neón" (Debi, 17-oct): el lead no es de neón (un corpóreo, por ejemplo) → sale de su bandeja y se sortea entre el resto.
+async function handleNoNeon() {
+  const phone = chatState.selectedPhone;
+  if (!phone) return;
+  const c = (chatState.contacts || []).find(x => x.phone === phone);
+  const nombre = (c && (c.name || c.contact_name)) || formatPhoneDisplay(phone);
+  const ok = await showConfirm(`"${nombre}" no es de neón (por ejemplo, quiere un corpóreo).\n\nSe lo pasamos a otro vendedor al azar y sale de ${getUserRole() === 'admin' ? 'la bandeja de Debi' : 'tu bandeja'}.`, { title: 'No es neón', confirmLabel: '🔀 Pasarlo', cancelLabel: 'Cancelar' }).catch(() => false);
+  if (!ok) return;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/chat-derivar', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ phone }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    toast('🔀 Listo: se lo pasamos a ' + (j.a || 'otro vendedor'));
+    if (getUserRole() !== 'admin') { chatState.contacts = (chatState.contacts || []).filter(x => x.phone !== phone); chatState.selectedPhone = null; }
+    chatState.contactsLoaded = false;
+    loadChatContacts().then(() => { updateUnreadBadge(); render(); }).catch(() => render());
+  } catch (e) {
+    await showAlert('No se pudo pasar el chat: ' + (e.message || e), { title: 'No es neón', variant: 'warn' });
+  }
+}
 async function handleToggleCursos() {
   const phone = chatState.selectedPhone;
   const role = getUserRole();
@@ -22953,7 +23019,7 @@ function bindContactListInfiniteScroll() {
 // Cajita SOLO para Agus arriba de su lista de chats (pestaña WhatsApp): escribe el teléfono de un chat de la bandeja
 // de Joaco y se lo trae a la suya (POST /admin/wa/chat-import; las reglas viven en el worker). Va FUERA de
 // #chat-contact-list para que el polling (que solo redibuja la lista) no le borre lo que está escribiendo.
-function puedeTraerDeJoaco() { return isAgustinaUser(STATE.user) && tokenBelongsTo(STATE.user); }
+function puedeTraerDeJoaco() { return (isAgustinaUser(STATE.user) || _userKey(STATE.user) === 'debi') && tokenBelongsTo(STATE.user); }
 function renderTraerJoacoBox() {
   if (!puedeTraerDeJoaco() || chatState.showArchived || (chatState.channel || 'wa') !== 'wa') return '';
   return `<div style="padding:6px 10px;background:var(--ink-100);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;font-size:12px">
@@ -24971,8 +25037,8 @@ function renderBriefCard(b) {
               const _r = getUserRole();
               if (_r !== 'admin' && _r !== 'disenador') return '';
               const _c = String(b.comercial_id || '').toLowerCase();
-              const _nom = _c === 'facundo' ? 'Facundo' : (_c === 'agustina' ? 'Agustina' : (_c === 'joaco' ? 'Joaquín' : (_c || '—')));
-              const _col = _c === 'facundo' ? '#c084fc' : (_c === 'agustina' ? '#f472b6' : '#8FD4DE');
+              const _nom = _c === 'facundo' ? 'Facundo' : (_c === 'agustina' ? 'Agustina' : (_c === 'debi' ? 'Debi' : (_c === 'joaco' ? 'Joaquín' : (_c || '—'))));
+              const _col = _c === 'facundo' ? '#c084fc' : (_c === 'agustina' ? '#f472b6' : (_c === 'debi' ? '#4ade80' : '#8FD4DE'));
               return `<span title="Vendedor: ${escapeHtml(_nom)}" style="background:${_col}22;color:${_col};font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600">${escapeHtml(_nom)}</span>`;
             })()}
             ${(() => {
@@ -27275,6 +27341,7 @@ function openNuevoBriefModal() {
 function chooseBriefTypeFromChat() {
   if (!canCreateBriefs()) { toast('No tenés permiso para crear briefs'); return; }
   if (!chatState.selectedPhone) return;
+  if (isSoloNeonUser(STATE.user)) { openBriefFromChat(false); return; }   // Debi vende solo neón: sin brief de corpórea
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
   bg.innerHTML = `
