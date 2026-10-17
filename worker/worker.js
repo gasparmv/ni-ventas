@@ -22944,7 +22944,7 @@ const handler = {
       // dry:true = valida sin cambiar nada. Admin puede hacerlo en nombre de una importadora con {para:'agustina'}.
       // Review 1-oct: sin búsqueda "a ojo" por sufijo con área (traía el chat de OTRA persona de otra área).
       if (request.method === 'POST' && path === '/admin/wa/chat-import') {
-        const IMPORTADORAS = ['agustina', 'debi'];
+        const IMPORTADORAS = ['agustina'];   // Debi NO (Gaspar 17-oct: 'que no pueda traer de joaco')
         const role = await getSessionRole(env, session.user);
         const esAdm = role === 'admin';
         const meSlug = String(session.user || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();

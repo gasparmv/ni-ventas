@@ -23019,7 +23019,7 @@ function bindContactListInfiniteScroll() {
 // Cajita SOLO para Agus arriba de su lista de chats (pestaña WhatsApp): escribe el teléfono de un chat de la bandeja
 // de Joaco y se lo trae a la suya (POST /admin/wa/chat-import; las reglas viven en el worker). Va FUERA de
 // #chat-contact-list para que el polling (que solo redibuja la lista) no le borre lo que está escribiendo.
-function puedeTraerDeJoaco() { return (isAgustinaUser(STATE.user) || _userKey(STATE.user) === 'debi') && tokenBelongsTo(STATE.user); }
+function puedeTraerDeJoaco() { return isAgustinaUser(STATE.user) && tokenBelongsTo(STATE.user); }   // solo Agus (Debi no, Gaspar 17-oct)
 function renderTraerJoacoBox() {
   if (!puedeTraerDeJoaco() || chatState.showArchived || (chatState.channel || 'wa') !== 'wa') return '';
   return `<div style="padding:6px 10px;background:var(--ink-100);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;font-size:12px">
