@@ -20196,18 +20196,21 @@ const handler = {
         return json({ ok: true, ticket: { numero: t.numero, cliente: t.cliente, detalle: t.detalle, fields, created_by: t.created_by, created_at: t.created_at } });
       }
 
-      // ----- Proformas (beta, solo admin): listar / abrir / guardar -----
+      // ----- Proformas (beta): listar / abrir / guardar. Admin + Joaco (Gaspar 17-oct: "habilitale esta función a joaco").
+      // Joaco ve y edita SOLO las suyas (created_by); el admin, todas.
       if (path === '/admin/proformas' || /^\/admin\/proformas\/\d+$/.test(path)) {
-        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        const pfAdmin = (await getSessionRole(env, session.user)) === 'admin';
+        if (!pfAdmin && canonWorker(session.user) !== 'joaco') return json({ error: 'forbidden' }, 403);
+        const pfEsMia = (r) => pfAdmin || (!!r && canonWorker(r.created_by) === canonWorker(session.user));
         if (!(await ensureProformasSchema(env))) return json({ error: 'no se pudo preparar la tabla de proformas' }, 500);
         const pfId = path === '/admin/proformas' ? 0 : parseInt(path.split('/').pop(), 10);
         if (request.method === 'GET' && !pfId) {
-          const rs = await env.DB.prepare('SELECT id, numero, cliente, telefono, total, created_by, created_at, updated_at FROM proformas ORDER BY updated_at DESC, id DESC LIMIT 40').all();
-          return json({ ok: true, proformas: rs.results || [] });
+          const rs = await env.DB.prepare('SELECT id, numero, cliente, telefono, total, created_by, created_at, updated_at FROM proformas ORDER BY updated_at DESC, id DESC LIMIT ?').bind(pfAdmin ? 40 : 400).all();
+          return json({ ok: true, proformas: (rs.results || []).filter(pfEsMia).slice(0, 40) });
         }
         if (request.method === 'GET' && pfId) {
           const r = await env.DB.prepare('SELECT * FROM proformas WHERE id = ?').bind(pfId).first();
-          if (!r) return json({ error: 'no existe' }, 404);
+          if (!r || !pfEsMia(r)) return json({ error: 'no existe' }, 404);
           let data = null; try { data = JSON.parse(r.data_json || 'null'); } catch (_) {}
           return json({ ok: true, proforma: { id: r.id, numero: r.numero, data, created_by: r.created_by, created_at: r.created_at, updated_at: r.updated_at } });
         }
@@ -20223,6 +20226,7 @@ const handler = {
           const now = new Date().toISOString();
           const id = parseInt(body.id, 10) || 0;
           if (id) {
+            if (!pfEsMia(await env.DB.prepare('SELECT created_by FROM proformas WHERE id = ?').bind(id).first())) return json({ error: 'esa proforma ya no existe' }, 404);
             const r = await env.DB.prepare('UPDATE proformas SET cliente=?, telefono=?, total=?, data_json=?, updated_at=? WHERE id=? RETURNING id, numero').bind(cliente, tel, total, dataJson, now, id).first();
             if (!r) return json({ error: 'esa proforma ya no existe' }, 404);
             return json({ ok: true, id: r.id, numero: r.numero });

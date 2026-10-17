@@ -1773,6 +1773,8 @@ async function logout() {
 // isAdmin requiere que el TOKEN sea de Gaspar (no solo el nombre activo). Sin esto,
 // un token de bajo privilegio podría usarse para mostrar la UI admin.
 function isAdmin() { return !!STATE.token && isGasparUser(STATE.tokenUser) && isGasparUser(STATE.user); }
+// Proforma en PDF (beta): Gaspar y Joaco (17-oct). Joaco ve solo las suyas (lo filtra el worker).
+function pfHabilitado() { return isAdmin() || (!!STATE.token && tokenBelongsTo(STATE.user) && isJoaquinUser(STATE.user)); }
 function canAccessChat() { return !!STATE.token && tokenBelongsTo(STATE.user) && (isGasparUser(STATE.user) || isJoaquinUser(STATE.user) || isSecundario(STATE.user) || isCursosUser(STATE.user)); }
 // Abril (rol cursos): SOLO ve la sección Chat WA, nada más.
 function isCursosOnly() { return isCursosUser(STATE.user); }
@@ -13903,7 +13905,7 @@ figcaption .n { font-family: 'Archivo Black', 'Archivo', sans-serif; color: #FF1
 // ---- Editor (modal) ----
 function renderProformaModal() {
   const pf = STATE.pf;
-  if (!pf || !pf.open || !isAdmin()) return '';
+  if (!pf || !pf.open || !pfHabilitado()) return '';
   const d = pf.data, total = pfTotal(d);
   const inp = 'width:100%;background:var(--ink-100);border:1px solid var(--border);border-radius:8px;padding:8px 10px;color:var(--fg);font-size:13px';
   const lbl = 'display:block;font-size:10.5px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px';
@@ -14110,7 +14112,7 @@ function renderPresupuestos() {
         <button class="btn btn-cyan" data-cot-open>＋ Cotizador</button>
         <button class="btn btn-ghost" id="btn-pp-failures" title="Ver presupuestos del cotizador que fallaron en entregar por WhatsApp en las últimas 24hs">⚠ Fallos WA</button>
         <button class="btn btn-ghost" id="btn-pp-followups" title="Enviar follow-up a clientes que recibieron presupuesto hace +1hs y no respondieron">📱 Follow-ups</button>
-        ${isAdmin() ? '<button class="btn btn-ghost" id="btn-pp-proforma" title="Armar una proforma en PDF (corpóreos, neón, salientes…) con los briefs del cliente">📄 Proforma (beta)</button>' : ''}
+        ${pfHabilitado() ? '<button class="btn btn-ghost" id="btn-pp-proforma" title="Armar una proforma en PDF (corpóreos, neón, salientes…) con los briefs del cliente">📄 Proforma (beta)</button>' : ''}
         <button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button>
       </div>
     </div>
