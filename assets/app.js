@@ -8286,7 +8286,9 @@ function corteCorregirMedidaUI(id) {
     if (!r || !r.ok || !j.ok) { ok.disabled = false; ok.textContent = 'Guardar medida'; err.textContent = (j && (j.error || j.motivo)) || 'No se pudo guardar. Probá de nuevo.'; return; }
     fin();
     if (!j.sin_cambios) { STATE.cortePedidos = undefined; STATE._corteLoading = false; STATE._corteGen = (STATE._corteGen || 0) + 1; if (STATE.view === 'corte') render(); }
-    const plan = j.planilla === 'precio_a_mano' ? ' En Venta_Insumos tenía un precio cargado a mano: no lo toqué.' : (j.planilla && j.planilla !== 'ok' && j.planilla !== 'sin_fila' ? ' Ojo: la planilla no se pudo actualizar (' + j.planilla + '), corregila a mano.' : '');
+    const plan = !j.planilla || j.planilla === 'ok' || j.planilla === 'sin_fila' ? ''
+      : (!isAdmin() ? ' La planilla no se actualizó sola: le avisé a Gaspar.'
+        : (j.planilla === 'precio_a_mano' ? ' En Venta_Insumos tenía un precio cargado a mano: no lo toqué.' : ' Ojo: la planilla no se pudo actualizar (' + j.planilla + '), corregila a mano.'));
     toast(j.sin_cambios ? 'Quedó igual' : (j.cobro_salio ? 'Medida corregida. El cobro ya había salido: le avisé a Gaspar la diferencia.' : 'Medida corregida' + (+j.precio > 0 ? ' · precio ' + fmtMoney(j.precio) : '')) + plan);
   });
   setTimeout(() => { try { ia.focus(); ia.select(); } catch (_) {} }, 50);

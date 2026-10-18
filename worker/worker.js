@@ -6020,6 +6020,12 @@ function corteTelDeOtro(tel, nombre, duenios) {
 // Entrega desde "Servicio de cortes pedidos 2" (col B cliente, E "DATOS DE ENVIO", F fecha) → {fecha: {cliente_norm: 'retira'|'envio'}}.
 // Si alguna fila del cliente en esa fecha dice RETIRA → retira. Vacío = envío.
 async function corteEntregaHoja(env) {
+  // La col E es un VLOOKUP en la pestaña Clientes (QUERY de LTV_Alumnos): si está rota (#REF!, 16-oct), E da vacío para
+  // todos y pasaría a "envío" a los que retiran. En ese caso no se usa.
+  const cli = await corteSheetValues(env, CORTE_PEDIDOS_SHEET_ID, 'Clientes!A1:C2');
+  if (!cli.ok) return { error: cli.error };
+  const roto = ((cli.values || [])[0] || []).map(v => String(v || '').trim()).find(v => /^#[A-Z\/0-9!?]+/.test(v));
+  if (roto || !(cli.values || []).length) return { error: 'la pestaña Clientes de la planilla de cortes está rota (' + (roto || 'vacía') + ')' };
   const r = await corteSheetValues(env, CORTE_PEDIDOS_SHEET_ID, 'sheet1!A1:J');
   if (!r.ok) return { error: r.error };
   const byFecha = {};
@@ -6169,7 +6175,7 @@ async function corteCargarTanda(env, { fecha, dryRun = true, incluirSospechosas 
 //  · diseño → 'pedido' con su foto: Emma lo ve en su línea de relevamiento. Cuando carga la medida final, el cron
 //    escribe la fila en la planilla de Emma y Venta_Insumos la copia sola, como siempre.
 //  · insumo (cable, fuentes) → 'pedido' con su precio (Emma no lo ve): la fila se escribe al cierre.
-//  · cliente nuevo → corte_alumnos al toque; LTV_Alumnos y la pestaña Clientes cuando se escribe su primera fila.
+//  · cliente nuevo → corte_alumnos al toque; LTV_Alumnos cuando se escribe su primera fila (la pestaña Clientes lo trae sola).
 //  · la carga de la tanda (corteCargarTandaCompleta) le pone la tanda a las piezas web de ese lunes, pasa a 'cortado' las
 //    que ya tienen matriz y los insumos, y respeta la entrega que eligió el cliente. Corre sola sáb 21 h, dom 21 h y lun
 //    7:30 (kv corte_autocarga_on) además del botón "Cargar tanda".
@@ -6345,16 +6351,30 @@ const CORTE_PEDIDOS_SHEET1_GID = 1185472079;
 // Fecha 'd/m/aaaa' → número de serie de Sheets (días desde el 30/12/1899): se escribe RAW con formato d/m/yyyy, igual que
 // las filas de Emma (así Venta_Insumos la muestra igual y le saca el mes para el precio). 0 si no es válida.
 function corteHojaSerial(fecha) { const f = corteFechaValida(corteFechaNorm(fecha)); return f ? Math.round((Date.UTC(f.date.getUTCFullYear(), f.date.getUTCMonth(), f.date.getUTCDate()) - Date.UTC(1899, 11, 30)) / 86400000) : 0; }
-// Nombre del cliente TAL CUAL figura en la pestaña Clientes (lo exige la validación de la col B). Si no figura, lo suma
-// (B nombre, C "retira" o la dirección) y devuelve el nombre propuesto. `memo` = { cli } por pasada del cron.
-async function corteLandingNombreClientes(token, nombre, datosTxt, memo) {
-  const k = corteNormNombre(nombre); if (!k) throw new Error('cliente sin nombre');
-  if (!memo.cli) memo.cli = await corteHojaLeer(token, CORTE_PEDIDOS_SHEET_ID, 'Clientes!A1:C');
-  const hit = memo.cli.find((r, i) => i > 0 && corteNormNombre((r || [])[1]) === k);
+// Nombre del cliente TAL CUAL figura en LTV_Alumnos (2026 v4). La pestaña Clientes de la planilla de Emma es un QUERY de
+// LTV_Alumnos (A, B y E): de ahí salen la validación de la col B de sheet1 y la col E (RETIRA). En Clientes NO se escribe:
+// un valor fijo debajo del QUERY lo deja en #REF! (pasó el 16-oct con el primer cliente nuevo de la web). Busca por nombre
+// y, si no, por teléfono; si no figura, lo suma a LTV (B nombre, E "retira" o la dirección, F teléfono) y el QUERY lo trae
+// solo. `memo` = { ltv } por pasada del cron.
+async function corteLandingNombreLtv(token, nombre, tel, datosTxt, memo) {
+  const k = corteNormNombre(nombre);
+  const conNombre = (r, i) => i > 0 && String((r || [])[1] || '').trim();
+  const buscar = v => (k ? v.find((r, i) => conNombre(r, i) && corteNormNombre(r[1]) === k) : null)
+    || (tel ? v.find((r, i) => conNombre(r, i) && corteTel((r || [])[5]) === tel) : null);
+  if (!memo.ltv) memo.ltv = await corteHojaLeer(token, CORTE_SHEET_ID, 'LTV_Alumnos!A1:F');
+  // El nombre exacto de la celda, espacios incluidos (la VLOOKUP de la col E y las SUMIF de LTV comparan exacto).
+  let hit = buscar(memo.ltv);
   if (hit) return String(hit[1]);
-  const fila = corteHojaUltima(memo.cli, 1) + 1;
-  await corteHojaEscribir(token, CORTE_PEDIDOS_SHEET_ID, 'RAW', [{ range: `Clientes!B${fila}:C${fila}`, values: [[nombre, datosTxt || 'retira']] }]);
-  memo.cli[fila - 1] = ['', nombre, datosTxt || 'retira'];
+  if (!k) throw new Error('cliente sin nombre');
+  memo.ltv = await corteHojaLeer(token, CORTE_SHEET_ID, 'LTV_Alumnos!A1:F'); // última mirada antes de sumarlo
+  hit = buscar(memo.ltv);
+  if (hit) return String(hit[1]);
+  const fila = corteHojaUltima(memo.ltv, 1) + 1;
+  const telTxt = tel ? '54 9 ' + String(tel).slice(3) : '';
+  const escr = [{ range: `LTV_Alumnos!B${fila}`, values: [[nombre]] }, { range: `LTV_Alumnos!E${fila}`, values: [[datosTxt || 'retira']] }];
+  if (telTxt) escr.push({ range: `LTV_Alumnos!F${fila}`, values: [[telTxt]] });
+  await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', escr);
+  memo.ltv[fila - 1] = ['', nombre, '', '', datosTxt || 'retira', telTxt];
   return nombre;
 }
 // Una fila en sheet1 como la tipea Emma: B cliente, C diseño, D cantidad, F fecha, G ancho, H alto, I producto, J
@@ -6439,14 +6459,14 @@ async function corteLandingEscribirPendientes(env, ahora) {
   let ok = 0;
   for (const p of listas) {
     try {
-      // Nombre exacto de la pestaña Clientes (si no está, se suma con sus datos de envío).
+      // Nombre exacto de LTV_Alumnos, que es lo que muestra la pestaña Clientes (si no está, se suma con sus datos de envío).
       const tel = p.telefono || '';
       if (!nombres[tel + '|' + p.hoja_cliente]) {
         const c = tel ? await corteLandingCliente(env, tel) : { datos: '' };
         let datos = /^retira\b/i.test(String(c.datos || '').trim()) || !String(c.datos || '').trim() ? 'retira' : String(c.datos).replace(/\s+/g, ' ').trim().slice(0, 300);
         const e = tel ? await env.DB.prepare(`SELECT ${CORTE_LANDING_COLS} FROM corte_landing_envios WHERE telefono=? AND prueba=0 ORDER BY id DESC LIMIT 1`).bind(tel).first() : null;
         if (e && +e.nuevo === 1) { try { const d = JSON.parse(e.datos_json || '{}') || {}; datos = corteLandingDatosTxt(e.nombre_hoja, d.nuevo || {}, e.entrega); } catch (_) {} }
-        nombres[tel + '|' + p.hoja_cliente] = await corteLandingNombreClientes(token, p.hoja_cliente || p.cliente_nombre, datos, memo);
+        nombres[tel + '|' + p.hoja_cliente] = await corteLandingNombreLtv(token, p.hoja_cliente || p.cliente_nombre, tel, datos, memo);
       }
       const cliente = nombres[tel + '|' + p.hoja_cliente];
       const r = await corteHojaFilaPieza(token, {
@@ -6789,7 +6809,7 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
       const m = l && l.ok ? l.rows.filter(r => r.tel && r.tel !== tel && corteMismaPersona(r.nombre, nombre)).slice(0, 2) : [];
       if (m.length) otroNumero = '\nOjo: el nombre coincide con ' + m.map(r => r.nombre + ' (…' + r.tel.slice(-4) + ')').join(' y ') + ', registrado con otro número. Si cambió de número, avisame y lo unifico.';
     } catch (_) {}
-    const t = 'Corte · cliente nuevo por la web: ' + nombre + ' (…' + tel.slice(-4) + ')' + otroNumero + '\n' + (disenos.length ? disenos.length + ' diseño' + (disenos.length === 1 ? '' : 's') : '') + (insumos.length ? (disenos.length ? ' + ' : '') + insumos.length + ' insumo' + (insumos.length === 1 ? '' : 's') : '') + ' · ' + (entrega === 'envio' ? 'envío a ' + [nuevo.localidad, nuevo.provincia].filter(Boolean).join(', ') : 'retira') + ' · tanda del lunes ' + pl.lunesCorto + '\nLo sumo solo a LTV y a Clientes cuando Emma mida su primer diseño.';
+    const t = 'Corte · cliente nuevo por la web: ' + nombre + ' (…' + tel.slice(-4) + ')' + otroNumero + '\n' + (disenos.length ? disenos.length + ' diseño' + (disenos.length === 1 ? '' : 's') : '') + (insumos.length ? (disenos.length ? ' + ' : '') + insumos.length + ' insumo' + (insumos.length === 1 ? '' : 's') : '') + ' · ' + (entrega === 'envio' ? 'envío a ' + [nuevo.localidad, nuevo.provincia].filter(Boolean).join(', ') : 'retira') + ' · tanda del lunes ' + pl.lunesCorto + '\nLo sumo solo a LTV (la pestaña Clientes de Emma lo trae sola) cuando Emma mida su primer diseño.';
     try { await precotizNotifyGaspar(env, t, { tipo: 'corte_landing_nuevo', prioridad: 'P2', clave: 'corte_landing_nuevo:' + envioId, refPhone: tel }); } catch (_) {}
   }
   return [{ ok: true, id: envioId, lunes: pl.lunesCorto, estado: pl.estado, disenos: disenos.length, insumos: insumos.length, estimado, telefono: corteTelFmt(tel) }, 200];
@@ -27055,12 +27075,14 @@ const handler = {
             // Planilla de cortes (Emma): G=ANCHO, H=ALTO de su fila (verificando que sea la misma pieza). Venta_Insumos trae esas
             // columnas por IMPORTRANGE; su precio (col J) se pisa solo si lo había escrito el CRM (un número, no la fórmula).
             let planilla = ped.hoja_fila ? 'ok' : 'sin_fila';
+            let filaHoy = null, ghOk = false, jEra = '';
             if (ped.hoja_fila && !esNeonPropio) {
               try {
                 const token = await sheetsAccessToken(env);
                 if (!token) throw new Error('sin token');
                 const f = parseInt(ped.hoja_fila, 10);
                 const fila = ((await corteHojaLeer(token, CORTE_PEDIDOS_SHEET_ID, 'sheet1!A' + f + ':H' + f)) || [])[0] || [];
+                filaHoy = fila;
                 const cm = v => Math.round((parseFloat(String(v == null ? '' : v).replace(',', '.')) || 0) * 10) / 10;
                 const mismo = corteNormNombre(fila[2] || '') === corteNormNombre(ped.diseno_nombre || '') && [ped.hoja_cliente, ped.cliente_nombre].some(c => c && corteNormNombre(fila[1] || '') === corteNormNombre(c))
                   && cm(fila[6]) === cm(antes.ancho) && cm(fila[7]) === cm(antes.alto)
@@ -27069,8 +27091,10 @@ const handler = {
                 else {
                   const jv = (((await corteSheetsReq(token, 'GET', SHEETS_API_BASE + CORTE_SHEET_ID + '/values/' + encodeURIComponent('Venta_Insumos!J' + f + ':J' + f) + '?valueRenderOption=FORMULA')) || {}).values || [])[0] || [];
                   const jEsFormula = jv.length && String(jv[0]).startsWith('='), jNum = jv.length && !jEsFormula ? (parseFloat(String(jv[0]).replace(/\./g, '').replace(',', '.')) || 0) : 0;
+                  jEra = jEsFormula ? 'formula' : (jv.length && String(jv[0]).trim() !== '' ? 'numero' : 'vacio');
                   const esc = [{ range: 'sheet1!G' + f + ':H' + f, values: [[ancho, alto]] }];
                   await corteHojaEscribir(token, CORTE_PEDIDOS_SHEET_ID, 'RAW', esc);
+                  ghOk = true;
                   if (cobroSalio) {
                     // El precio cobrado no cambia: si J era la fórmula (cambiaría con la medida), queda fijo en lo cobrado.
                     if (jEsFormula && antes.precio > 0) await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', [{ range: 'Venta_Insumos!J' + f, values: [[Math.round(antes.precio * 100) / 100]] }]);
@@ -27081,9 +27105,28 @@ const handler = {
                 }
               } catch (e) { planilla = 'error: ' + String((e && e.message) || e).slice(0, 120); }
             }
-            if (cobroSalio) {
+            // Un solo aviso a Gaspar por corrección: el cobro que ya salió y, si la corrigió Emma (que ya no edita la planilla,
+            // Gaspar 18-oct), lo que no se pudo actualizar solo, diciendo qué quedó escrito y qué falta.
+            {
               const fm = n => '$' + Math.round(n).toLocaleString('es-AR');
-              try { await precotizNotifyGaspar(env, 'Corte: ' + (_slug === 'gaspar' ? 'corregiste' : 'Emma corrigió') + ' la medida de ' + (ped.cliente_nombre || 'un cliente') + ' · ' + (ped.diseno_nombre || 'diseño') + ': ' + antes.ancho + ' × ' + antes.alto + ' → ' + ancho + ' × ' + alto + ' cm.\nEl cobro ya había salido con ' + fm(antes.precio) + '; con la medida nueva es ' + fm(precioNuevo) + ' (diferencia ' + fm(precioNuevo - antes.precio) + '). El precio no lo cambié.', { tipo: 'corte_medida_corregida', prioridad: 'P2' }); } catch (_) {}
+              const lineas = [];
+              if (cobroSalio) lineas.push('El cobro ya había salido con ' + fm(antes.precio) + '; con la medida nueva es ' + fm(precioNuevo) + ' (diferencia ' + fm(precioNuevo - antes.precio) + '). El precio no lo cambié.');
+              if (planilla !== 'ok' && planilla !== 'sin_fila' && _slug !== 'gaspar' && !esNeonPropio) {
+                const fl = ped.hoja_fila;
+                if (planilla === 'precio_a_mano') lineas.push('En Venta_Insumos J' + fl + ' hay un precio cargado a mano y no lo toqué; en el CRM quedó ' + fm(precioFinal) + '.');
+                else if (planilla === 'no_coincide') {
+                  const fh = filaHoy || [];
+                  lineas.push('No toqué la planilla de cortes: la fila ' + fl + ' hoy dice ' + [fh[1], fh[2], fh[5], (fh[6] || '?') + ' × ' + (fh[7] || '?')].map(x => String(x == null ? '' : x).trim()).filter(Boolean).join(' · ') + ', y esperaba ' + (ped.hoja_cliente || ped.cliente_nombre || '') + ' · ' + (ped.diseno_nombre || '') + ' · ' + antes.ancho + ' × ' + antes.alto + '. Buscá la fila de esta pieza y poné ' + ancho + ' × ' + alto + ' en G/H' + (cobroSalio ? '' : ' y ' + fm(precioFinal) + ' en Venta_Insumos J') + '.');
+                } else {
+                  const gh = ghOk ? 'G/H de la fila ' + fl + ' ya quedaron en ' + ancho + ' × ' + alto : 'hay que poner ' + ancho + ' × ' + alto + ' en G/H de la fila ' + fl;
+                  const jj = cobroSalio ? (jEra === 'formula' ? '; dejá fijo ' + fm(antes.precio) + ' (lo cobrado) en Venta_Insumos J' + fl + ', que tiene la fórmula' : (jEra === '' ? '; si Venta_Insumos J' + fl + ' tiene la fórmula, dejá fijo ' + fm(antes.precio) + ' (lo cobrado)' : ''))
+                    : (jEra === 'formula' ? '' : '; en Venta_Insumos J' + fl + ' va ' + fm(precioFinal));
+                  lineas.push('No pude actualizar todo en la planilla (' + planilla + '): ' + gh + jj + '.');
+                }
+              }
+              if (lineas.length) {
+                try { await precotizNotifyGaspar(env, 'Corte: ' + (_slug === 'gaspar' ? 'corregiste' : 'Emma corrigió') + ' la medida de ' + (ped.cliente_nombre || 'un cliente') + ' · ' + (ped.diseno_nombre || 'diseño') + ': ' + antes.ancho + ' × ' + antes.alto + ' → ' + ancho + ' × ' + alto + ' cm.\n' + lineas.join('\n'), { tipo: cobroSalio ? 'corte_medida_corregida' : 'corte_medida_planilla', prioridad: 'P2' }); } catch (_) {}
+              }
             }
             return json({ ok: true, id, precio: precioFinal, precio_nuevo: precioNuevo, cobro_salio: cobroSalio, planilla });
           }
