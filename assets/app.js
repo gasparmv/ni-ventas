@@ -2233,6 +2233,7 @@ function saveCache() {
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify({
       ts: Date.now(),
+      user: STATE.user || '',   // pedidos y presupuestos van filtrados por usuario: la caché de otro no se muestra
       pedidos: STATE.pedidos,
       presupuestos: STATE.presupuestos
     }));
@@ -2352,7 +2353,7 @@ async function loadAll(opts) {
   // mostramos data al toque y refrescamos en background.
   if (!STATE.loaded && !silent) {
     const cached = loadCache();
-    if (cached && cached.pedidos && cached.presupuestos) {
+    if (cached && cached.pedidos && cached.presupuestos && cached.user === (STATE.user || '')) {
       STATE.pedidos = cached.pedidos;
       STATE.presupuestos = cached.presupuestos;
       matchPresupuestos();
@@ -2367,6 +2368,8 @@ async function loadAll(opts) {
     }
   }
   try {
+    // Qué presupuestos ve este usuario (vendedor: los de sus chats). Va en paralelo con la planilla.
+    const visP = fetchPresupuestosVisibilidad();
     // Cargar ventas + cotizador moderno + hojas históricas EN PARALELO.
     const cotizadorN = CONFIG.cotizadorSheets.length;
     const histN = (CONFIG.cotizadorHistoricalSheets || []).length;
@@ -2428,7 +2431,7 @@ async function loadAll(opts) {
         });
       }
     }
-    STATE.presupuestos = presupuestosAll;
+    STATE.presupuestos = filtrarPresupuestosPropios(presupuestosAll, await visP);
     matchPresupuestos();
     STATE.loaded = true;
     saveCache();
@@ -2439,6 +2442,34 @@ async function loadAll(opts) {
     if (!STATE.loaded) STATE.error = e.message;
   }
   render();
+}
+
+// La planilla del cotizador no guarda quién cotizó: el worker dice qué chats son del vendedor (misma regla que la
+// lista de chats) y acá se filtra por el contacto del presupuesto. Admin: todo. Si no se pudo saber, el vendedor no
+// ve ninguno (mejor vacío que los de todo el equipo) y la sección avisa.
+async function fetchPresupuestosVisibilidad() {
+  if (isAdmin()) return { modo: 'todo' };
+  try {
+    const r = await fetchWithTimeout(CONFIG.trackerUrl + '/admin/presupuestos/visibilidad', { headers: authHeaders() }, 20000);
+    if (r.ok) { const j = await r.json(); if (j && j.modo) return j; }
+  } catch (_) {}
+  return null;
+}
+function filtrarPresupuestosPropios(list, vis) {
+  STATE.pptoFiltroError = !vis;
+  if (!vis) return [];
+  if (vis.modo === 'todo') return list;
+  const phones = new Set((vis.phones || []).map(String));
+  const users = new Set((vis.users || []).map(u => String(u).toLowerCase()));
+  const delChat = (p) => {
+    const raw = String(p.telefono || '').trim();
+    if (!raw) return false;
+    const dig = raw.replace(/\D/g, '');
+    if (dig.length >= 15) return phones.has(dig);                                       // IGSID
+    if (/[a-z]/i.test(raw)) return users.has(raw.replace(/^@/, '').trim().toLowerCase()); // @usuario de IG
+    return phones.has(normalizeArPhoneFE(raw));
+  };
+  return list.filter(p => vis.modo === 'incluir' ? delChat(p) : !delChat(p));
 }
 
 function parseVentas(rows) {
@@ -14206,6 +14237,8 @@ function renderPresupuestos() {
       </div>
     </div>
     ${pptoShowCotizador ? renderCotizadorForm() : ''}
+    ${STATE.pptoFiltroError ? '<div class="card" style="margin-bottom:12px;padding:10px 14px;border-left:3px solid var(--amber,#f5a623)">No se pudo cargar cuáles presupuestos son de tus chats. Tocá ↻ Refrescar en un rato.</div>'
+      : !isAdmin() ? '<div style="font-size:12px;color:var(--muted,#8696a0);margin:-4px 0 10px">Ves los presupuestos de tus chats.</div>' : ''}
     <div class="table-wrap">
       <div class="table-toolbar">
         <input type="text" placeholder="Buscar por diseño / cliente…" data-pp-search value="${escapeHtml(pptoSearch)}">
@@ -16421,6 +16454,32 @@ function qrVerticalsForUser() {
   if (isGasparUser(STATE.user)) return null;
   return ['carteles'];
 }
+// Plantillas que un VENDEDOR le puede mandar a un cliente de carteles (menú "/", Nuevo chat, Programar seguimiento).
+// Afuera: avisos y reportes internos, cursos/comunidad/eventos, corte, difusiones, las de presupuesto con varios datos
+// (salen del cotizador), las de una variable que no es el nombre (precotiz_seguimiento) y las firmadas por otro del
+// equipo ("Por aca Joaco" solo la ve Joaco). Gaspar ve todas; Abril, las de cursos (sin este filtro).
+const TPL_NO_CLIENTE_RE = /^(aviso_|reporte_|minisupernova|comunidad_|corte_|oc_|nova|leadnova|lanzamiento_|recordatorio_|ranking_|disenos_|seminario|sorteo|minicurso|cupo_|ultimo_cupo|pack_|lead_|cursos|retomar_evento|seguimiento_evento|precotiz_|presupuesto_|bcast_|prueba|cambionro$|seguimiento$)/i;
+const TPL_FIRMAS = { joaco: /\bjoa(co|qu[ií]n)\b/i, abril: /\babril\b/i, bruno: /\bbruno\b/i, gaspar: /\bgaspar\b/i, facundo: /\bfacu(ndo)?\b/i, agustina: /\bagus(tina)?\b/i, debi: /\bdebi\b/i, nadia: /\bnadia\b/i };
+function tplAptaParaVendedor(t) {
+  if (TPL_NO_CLIENTE_RE.test(String(t.name || '')) || tplParamCount(t) > 1) return false;
+  const body = tplBodyText(t), yo = isJoaquinUser(STATE.user) ? 'joaco' : _userKey(STATE.user);
+  return !Object.keys(TPL_FIRMAS).some(k => k !== yo && TPL_FIRMAS[k].test(body));
+}
+function plantillasDelUsuario() {
+  const verts = qrVerticalsForUser();
+  const tpls = (chatState.templates || []).filter(t => !verts || verts.includes(templateVertical(t.name)));
+  return (isGasparUser(STATE.user) || isCursosUser(STATE.user)) ? tpls : tpls.filter(tplAptaParaVendedor);
+}
+// Primer nombre del cliente para el {{1}} (mismo criterio que el worker, primerNombrePersona): '' si el nombre del
+// chat no parece de persona (marca, número, emojis) → se usa la variante "_anon" de la plantilla si existe.
+function primerNombreCliente(nombre) {
+  const s = String(nombre || '').trim();
+  if (!s || /\b(studios?|estudio|tour|turismo|srl|store|shop|tienda|bar|resto|hotel|eventos?|ne[oó]n|local|grupo|club|sal[oó]n|empresa|inmobiliaria|agencia|propiedades|design|dise[ñn]os?|deco|marketing|oficial|argentina)\b/i.test(s)) return '';
+  const w = s.split(/\s+/)[0];
+  if (!/^\p{L}{2,20}$/u.test(w) || /^(el|la|los|las|un|una|mi|tu|de|del|yo)$/i.test(w)) return '';
+  const n = w === w.toUpperCase() ? w.toLowerCase() : w;
+  return n.charAt(0).toUpperCase() + n.slice(1);
+}
 // Manda una plantilla aprobada al chat actual (reabre conversaciones de +24h).
 async function sendTemplateToChat(phone, name, lang, params) {
   const r = await fetch(CONFIG.trackerUrl + '/admin/wa/template', {
@@ -16472,8 +16531,7 @@ function updateNewChatSuggest(value) {
 function showNewChatModal(prefillPhone) {
   document.getElementById('new-chat-modal')?.remove();
   loadChatTemplates(); // idempotente
-  const verts = qrVerticalsForUser(); // null = admin ve todas
-  const tpls = (chatState.templates || []).filter(t => !verts || verts.includes(templateVertical(t.name)));
+  const tpls = plantillasDelUsuario();
   const tplRows = tpls.map(t => _renderTplItem(t)).join('') || '<div class="nc-empty">No hay plantillas aprobadas para tu vertical.</div>';
   const bg = document.createElement('div');
   bg.id = 'new-chat-modal';
@@ -17766,18 +17824,24 @@ function updateChatInputState() {
 
 // ===== Scheduled messages =====
 function showScheduleModal(phone) {
+  const contact = (chatState.contacts || []).find(c => c.phone === phone);
+  if ((contact && contact.channel === 'ig') || String(phone || '').replace(/\D/g, '').length > 14) {
+    toast('Programar seguimiento funciona solo en chats de WhatsApp (en Instagram no hay plantillas para escribir fuera de las 24 h)');
+    return;
+  }
   const ta = document.getElementById('chat-input');
   const text = (ta?.value || '').trim();   // texto libre OPCIONAL (solo si la ventana sigue abierta)
   loadChatTemplates();                       // idempotente (por si no cargaron)
-  const contact = (chatState.contacts || []).find(c => c.phone === phone);
   const cname = (contact && contact.name) || chatState.selectedName || '';
-  const firstName = (cname.trim().split(/\s+/)[0] || '').replace(/^./, c => c.toUpperCase());
+  const firstName = primerNombreCliente(cname);
   const tplBody = (t) => { const b = (t.components || []).find(c => (c.type || '').toUpperCase() === 'BODY'); return (b && b.text) || ''; };
   const tplVars = (t) => (tplBody(t).match(/\{\{\d+\}\}/g) || []).length;
-  const fillTpl = (t) => tplBody(t).replace(/\{\{1\}\}/g, firstName || 'tu nombre').replace(/\{\{\d+\}\}/g, '…');
-  // Plantillas de re-enganche de carteles primero (las más útiles para seguimiento).
-  const prefer = ['seguimiento_presupuesto', 'retomar_carteles_v2', 'retomar_carteles'];
-  const ordered = [...(chatState.templates || [])].sort((a, b) => ((prefer.indexOf(a.name) + 1) || 99) - ((prefer.indexOf(b.name) + 1) || 99));
+  // Sin un nombre confiable del cliente, la plantilla con {{1}} sale en su variante sin nombre ("_anon") si existe.
+  const tplEfectiva = (t) => (t && tplVars(t) >= 1 && !firstName && (chatState.templates || []).find(x => x.name === t.name + '_anon')) || t;
+  const fillTpl = (t) => tplBody(tplEfectiva(t)).replace(/\{\{1\}\}/g, firstName || 'amigo/a').replace(/\{\{\d+\}\}/g, '…');
+  // Plantillas de re-enganche de carteles primero (las más útiles para seguimiento). Vendedor: solo las aptas para clientes.
+  const prefer = ['seguimiento_presupuesto', 'seguimiento_presupuesto_anon', 'retomar_carteles_v2', 'retomar_carteles'];
+  const ordered = [...plantillasDelUsuario()].sort((a, b) => ((prefer.indexOf(a.name) + 1) || 99) - ((prefer.indexOf(b.name) + 1) || 99));
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   const defaultDate = tomorrow.toISOString().slice(0, 10);
@@ -17841,7 +17905,7 @@ function showScheduleModal(phone) {
             body: JSON.stringify({ phone, body: '', template: name, params, lang: 'es_AR', scheduled_at: arDate.toISOString() })
           });
           const j = await r.json().catch(() => ({}));
-          if (r.ok) toast(`✓ Plantilla creada y seguimiento programado para ${date} ${time} AR. Se manda cuando Meta la apruebe, si el cliente no responde antes 🙌`);
+          if (r.ok && (j.created || []).some(c => c.id)) toast(`✓ Plantilla creada y seguimiento programado para ${date} ${time} AR. Se manda cuando Meta la apruebe, si el cliente no responde antes 🙌`);
           else toast('Plantilla creada, pero no se pudo programar: ' + (j.error || 'error'));
         } catch (e) { toast('Plantilla creada, pero falló programar: ' + (e.message || e)); }
       }
@@ -17858,16 +17922,17 @@ function showScheduleModal(phone) {
     if (!template && !text) { toast('Elegí una plantilla (o escribí un texto)'); return; }
     const arDate = new Date(`${date}T${time}:00-03:00`);
     if (isNaN(arDate.getTime()) || arDate <= new Date()) { toast('La fecha debe ser futura'); return; }
-    const tplObj = ordered.find(x => x.name === template);
-    const params = (tplObj && tplVars(tplObj) >= 1 && firstName) ? [firstName] : [];
+    const tplObj = tplEfectiva(ordered.find(x => x.name === template));
+    const params = (tplObj && tplVars(tplObj) >= 1) ? [firstName || 'amigo/a'] : [];
     try {
       const r = await fetch(CONFIG.trackerUrl + '/admin/wa/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ phone, body: text || '', template, params, lang: 'es_AR', scheduled_at: arDate.toISOString() })
+        body: JSON.stringify({ phone, body: text || '', template: tplObj ? tplObj.name : template, params, lang: 'es_AR', scheduled_at: arDate.toISOString() })
       });
-      const j = await r.json();
-      if (!r.ok) { toast('Error: ' + (j.error || 'fallo')); return; }
+      const j = await r.json().catch(() => ({}));
+      const _err = !r.ok ? (j.error || 'fallo') : (!(j.created || []).some(c => c.id) ? ((j.created && j.created[0] && j.created[0].error) || 'no se programó') : '');
+      if (_err) { toast('No se programó: ' + _err); return; }
       toast(`⏰ Seguimiento programado para ${date} ${time} AR — se cancela si responde antes`);
       if (ta) { ta.value = ''; ta.style.height = 'auto'; }
       modal.remove();
@@ -21893,6 +21958,9 @@ function bindChatConversation() {
       ta.placeholder = _igOpen ? 'Responder por Instagram…' : '🔒 Ventana de 24 h cerrada — esperá a que el cliente escriba para poder responder';
     }
     if (btn) btn.disabled = !_igOpen;
+    // Programar seguimiento: IG no tiene plantillas para escribir fuera de la ventana → no se puede programar.
+    const _schedIg = document.getElementById('btn-schedule');
+    if (_schedIg) { _schedIg.disabled = true; _schedIg.style.opacity = '.4'; _schedIg.title = 'Programar seguimiento funciona solo en chats de WhatsApp'; }
   }
   // Botón "Crear brief" del header → abre el mismo modal del panel de Cotización
   // (con teléfono + WhatsApp pre-cargados) por encima de la conversación. Y bindea
@@ -22363,7 +22431,7 @@ function handleQuickReplyInput(ta) {
   const query = val.slice(1).toLowerCase();
   const verts = qrVerticalsForUser(); // null = todas (admin)
   const qrs = (chatState.quickReplies || []).filter(q => !verts || verts.includes(q.vertical || 'carteles'));
-  const tpls = (chatState.templates || []).filter(t => !verts || verts.includes(templateVertical(t.name)));
+  const tpls = plantillasDelUsuario();
   let qrMatches, tplMatches;
   if (val === '/') {
     qrMatches = qrs.slice(0, 8);
@@ -22401,17 +22469,22 @@ async function pickQuickReply(ta, el) {
   // Plantilla → mandarla como template (reabre charlas de +24h). Pide confirmación.
   if (el.dataset.tplName) {
     if (dd) dd.style.display = 'none';
-    const name = el.dataset.tplName;
-    const lang = el.dataset.tplLang || 'es_AR';
-    const nParams = parseInt(el.dataset.tplParams || '0', 10) || 0;
-    const ok = await showConfirm(`¿Mandar la plantilla "${name}"?\n\nSe envía como mensaje aprobado por Meta — sirve para reabrir conversaciones de más de 24h.`, { title: 'Enviar plantilla', confirmLabel: 'Enviar' });
-    if (!ok) return;
-    let params = [];
-    if (nParams >= 1) {
-      const c = (chatState.contacts || []).find(x => x.phone === chatState.selectedPhone);
-      const first = ((c && c.name) || '').trim().split(/\s+/)[0] || 'amigo/a';
-      params = [first];
+    let name = el.dataset.tplName;
+    let lang = el.dataset.tplLang || 'es_AR';
+    let tpl = (chatState.templates || []).find(t => t.name === name);
+    const c = (chatState.contacts || []).find(x => x.phone === chatState.selectedPhone);
+    const first = primerNombreCliente(c && c.name);
+    // {{1}} = nombre y el cliente sin un nombre confiable → la variante sin nombre ("<plantilla>_anon") si está aprobada.
+    if (tpl && tplParamCount(tpl) >= 1 && !first) {
+      const anon = (chatState.templates || []).find(t => t.name === name + '_anon');
+      if (anon) { tpl = anon; name = anon.name; lang = anon.language || lang; }
     }
+    const nParams = tpl ? tplParamCount(tpl) : (parseInt(el.dataset.tplParams || '0', 10) || 0);
+    const params = nParams >= 1 ? [first || 'amigo/a'] : [];
+    // Vista previa: el vendedor ve el texto exacto antes de mandarlo.
+    const texto = tpl ? tplBodyText(tpl).replace(/\{\{\s*1\s*\}\}/g, params[0] || '') : '';
+    const ok = await showConfirm(`${texto ? 'Así le llega al cliente:\n\n' + texto + '\n\n' : ''}Sale como plantilla aprobada por Meta ("${name}"): sirve para reabrir conversaciones de más de 24 h.`, { title: 'Enviar plantilla', confirmLabel: 'Enviar' });
+    if (!ok) return;
     ta.value = ''; ta.dispatchEvent(new Event('input'));
     toast('Enviando plantilla…');
     const j = await sendTemplateToChat(chatState.selectedPhone, name, lang, params);
