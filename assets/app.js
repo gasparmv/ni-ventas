@@ -4637,12 +4637,22 @@ function renderCorte() {
     // (matriz_lista → Aníbal la corta → cortado → Neyen la separa → embalado).
     const _arNow = new Date(Date.now() - 3 * 3600e3);
     const _lunesAR = new Date(Date.UTC(_arNow.getUTCFullYear(), _arNow.getUTCMonth(), _arNow.getUTCDate() - ((_arNow.getUTCDay() + 6) % 7)) + 3 * 3600e3).toISOString();
+    // El lunes es el día del corte: "Diseñados" arranca el martes anterior, así siguen a mano (con su ✏️) las piezas que
+    // se cortan ese día, diseñadas de jueves a domingo (Gaspar 18-oct). De martes a domingo, desde el lunes 00:00 AR.
+    const _esLunesCorte = _arNow.getUTCDay() === 1;
+    const _desdeDis = _esLunesCorte ? new Date(Date.parse(_lunesAR) - 6 * 86400e3).toISOString() : _lunesAR;
+    const _notaDis = _esLunesCorte ? 'desde el martes' : 'esta semana';
+    // Fecha del lunes de corte de este ciclo ('aaaa-mm-dd'): hoy si es lunes, si no el próximo. Una pieza web de esa tanda
+    // (o de una posterior) va en "Diseñados" aunque se haya diseñado antes de que arranque la lista.
+    const _ymdAR = (ms) => new Date(ms - 3 * 3600e3).toISOString().slice(0, 10);
+    const _corteYmd = _ymdAR(Date.parse(_lunesAR) + (_esLunesCorte ? 0 : 7 * 86400e3));
+    const _hojaYmd = (p) => { const m = String(p.hoja_fecha || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); return m ? m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0') : ''; };
     const porDisenarNeon = colaEmma.filter(p => p.producto === 'NEON');
     const relevVisId = colaEmma.length ? (colaEmma.find(p => p.id === STATE.corteRelevId) || colaEmma[0]).id : null;
-    // Diseñados = lo que Emma diseñó ESTA SEMANA (desde el lunes 00:00 AR), por la fecha REAL de diseño
-    // (disenado_at, desde 6-oct-2026). Las piezas sin esa fecha (anteriores) no aparecen: ya están hechas.
+    // Diseñados = lo que Emma diseñó ESTA SEMANA (desde el lunes 00:00 AR; el lunes del corte, desde el martes anterior), por
+    // la fecha REAL de diseño (disenado_at, desde 6-oct-2026). Las piezas sin esa fecha (anteriores) no aparecen: ya están hechas.
     const disenadosNeon = pedidos
-      .filter(p => p.producto === 'NEON' && ['matriz_lista', 'cortado', 'embalado'].indexOf(p.estado) !== -1 && p.disenado_at && String(p.disenado_at) >= _lunesAR)
+      .filter(p => p.producto === 'NEON' && ['matriz_lista', 'cortado', 'embalado'].indexOf(p.estado) !== -1 && p.disenado_at && String(p.disenado_at) >= _desdeDis)
       .sort((a, b) => String(b.disenado_at).localeCompare(String(a.disenado_at)) || (b.id - a.id));
     const kDia = (iso) => { const d = new Date(iso); return isNaN(d.getTime()) ? '' : d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }); };
     const kTitulo = (p) => `${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> · ` : ''}${escapeHtml(p.diseno_nombre || 'cartel')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + escapeHtml(String(p.cantidad)) : ''}`;
@@ -4662,11 +4672,11 @@ function renderCorte() {
     const neonKanban = `
       <div style="margin-top:22px">
         <style>@media(max-width:900px){.corte-neon-cols{grid-template-columns:1fr!important}}</style>
-        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span style="font-size:15px;font-weight:800;color:#ef4444">🔴 Neón — tablero</span><span style="color:var(--fg-mute);font-size:12px">${porDisenarNeon.length} por diseñar · ${disenadosNeon.length} diseñado${disenadosNeon.length === 1 ? '' : 's'} esta semana${esperandoFoto.length ? ' · ' + esperandoFoto.length + ' esperando foto' : ''}${cargando ? ' · cargando…' : ''}</span></div>
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span style="font-size:15px;font-weight:800;color:#ef4444">🔴 Neón — tablero</span><span style="color:var(--fg-mute);font-size:12px">${porDisenarNeon.length} por diseñar · ${disenadosNeon.length} diseñado${disenadosNeon.length === 1 ? '' : 's'} ${_notaDis}${esperandoFoto.length ? ' · ' + esperandoFoto.length + ' esperando foto' : ''}${cargando ? ' · cargando…' : ''}</span></div>
         <div class="corte-neon-cols" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start">
           ${kCol('⏳ Esperando foto', esperandoFoto.length, 'falta que suban el diseño', colEsperando || kVacio('Nada esperando ✨'))}
           ${kCol('🎨 Por diseñar', porDisenarNeon.length, '', porDisenarNeon.length ? `<button type="button" class="btn" data-corte-disenos-pack="${porDisenarNeon.map(p => p.id).join(',')}" title="Baja un ZIP con las fotos y te manda las medidas por WhatsApp (a vos y a Gaspar)" style="width:100%;margin-bottom:8px;font-size:12.5px">⬇ Descargar diseños y recibir medidas</button>${colPorDisenar}` : kVacio('Todo diseñado ✨'))}
-          ${kCol('✅ Diseñados', disenadosNeon.length, 'esta semana', colDisenados || kVacio('Todavía nada diseñado esta semana'))}
+          ${kCol('✅ Diseñados', disenadosNeon.length, _notaDis, colDisenados || kVacio('Todavía nada diseñado ' + _notaDis))}
         </div>
       </div>`;
     // TABLERO DE PEDIDOS WEB (alumnos que piden por la landing /corte/): lo que espera la matriz y lo que Emma ya diseñó
@@ -4674,7 +4684,7 @@ function renderCorte() {
     // planilla se escribe sola.
     const porDisenarWeb = colaEmma.filter(p => p.producto !== 'NEON');
     const disenadosWeb = pedidos
-      .filter(p => p.origen === 'landing' && !corteEsInsumo(p) && ['matriz_lista', 'cortado', 'embalado', 'despachado', 'entregado'].indexOf(p.estado) !== -1 && p.disenado_at && String(p.disenado_at) >= _lunesAR)
+      .filter(p => p.origen === 'landing' && !corteEsInsumo(p) && ['matriz_lista', 'cortado', 'embalado', 'despachado', 'entregado'].indexOf(p.estado) !== -1 && p.disenado_at && (String(p.disenado_at) >= _desdeDis || (_hojaYmd(p) && _hojaYmd(p) >= _corteYmd)))
       .sort((a, b) => String(b.disenado_at).localeCompare(String(a.disenado_at)) || (b.id - a.id));
     const wLunes = (p) => p.hoja_fecha ? String(p.hoja_fecha).split('/').slice(0, 2).map(x => x.padStart(2, '0')).join('/') : '';
     const wMed = (p) => { const t = String(p.medida_declarada || ''), a = t.match(/ancho\s*([\d.,]+)/i), l = t.match(/alto\s*([\d.,]+)/i); return a && l ? 'pidió ' + a[1] + ' × ' + l[1] + ' cm' : (t || '—'); };
@@ -4685,10 +4695,10 @@ function renderCorte() {
     const webKanban = (porDisenarWeb.length || disenadosWeb.length) ? `
       <div style="margin-top:22px">
         <style>@media(max-width:900px){.corte-web-cols{grid-template-columns:1fr!important}}</style>
-        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span style="font-size:15px;font-weight:800;color:var(--accent-cyan,#8FD4DE)">🌐 Pedidos web — tablero</span><span style="color:var(--fg-mute);font-size:12px">${porDisenarWeb.length} por diseñar · ${disenadosWeb.length} diseñado${disenadosWeb.length === 1 ? '' : 's'} esta semana · al tocar "Matriz lista" se anotan solos en la planilla${cargando ? ' · cargando…' : ''}</span></div>
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span style="font-size:15px;font-weight:800;color:var(--accent-cyan,#8FD4DE)">🌐 Pedidos web — tablero</span><span style="color:var(--fg-mute);font-size:12px">${porDisenarWeb.length} por diseñar · ${disenadosWeb.length} diseñado${disenadosWeb.length === 1 ? '' : 's'} ${_notaDis} · al tocar "Matriz lista" se anotan solos en la planilla${cargando ? ' · cargando…' : ''}</span></div>
         <div class="corte-web-cols" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start">
           ${kCol('🎨 Por diseñar', porDisenarWeb.length, '', porDisenarWeb.length ? `${porDisenarWeb.some(p => p.foto_key) ? `<button type="button" class="btn" data-corte-disenos-pack="${porDisenarWeb.filter(p => p.foto_key).map(p => p.id).join(',')}" data-corte-disenos-tipo="web" title="Baja un ZIP con las fotos (cliente - diseño - medida) y un medidas.txt" style="width:100%;margin-bottom:8px;font-size:12.5px">⬇ Descargar diseños</button>` : ''}${colPorDisenarWeb}` : kVacio('Todo diseñado ✨'))}
-          ${kCol('✅ Diseñados', disenadosWeb.length, 'esta semana', colDisenadosWeb || kVacio('Todavía nada diseñado esta semana'))}
+          ${kCol('✅ Diseñados', disenadosWeb.length, _notaDis, colDisenadosWeb || kVacio('Todavía nada diseñado ' + _notaDis))}
         </div>
       </div>` : `
       <div style="margin-top:22px;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:15px;font-weight:800;color:var(--accent-cyan,#8FD4DE)">🌐 Pedidos web</span><span style="color:var(--fg-mute);font-size:12px">${cargando ? 'cargando…' : 'todavía no entró ninguno: cuando un alumno pida por la web, aparece acá con su foto'}</span></div>`;
