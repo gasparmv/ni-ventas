@@ -507,7 +507,7 @@ input:focus,select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(143,
     h+='<p>Le dan mas efectos y un encendido/apagado comodo. <b>No son RGB</b> (no cambian de color): regulan intensidad, efectos e intermitencia. Gran producto para sumarle valor al cartel y sumar ganancia facil con una <b>venta cruzada</b>.</p>';
     h+='<ul>';
     h+='<li><b>Slim</b> &mdash; regulador de intensidad + 5 efectos + on/off<br>tu costo <b>$7.800</b> &middot; venta sugerida <b>$18.700</b></li>';
-    h+='<li><b>Control remoto</b> &mdash; 8 efectos + regulador de velocidad + on/off<br>tu costo <b>$10.400</b> &middot; venta sugerida <b>$24.900</b></li>';
+    h+='<li><b>Control remoto</b> &mdash; 8 efectos + regulador de velocidad + on/off<br>tu costo <b>$10.400</b> &middot; venta sugerida <b>$25.000</b></li>';
     h+='<li><b>App</b> &mdash; control desde el celu, programas horarios, funcion audioritmica, compatible con Alexa/Google<br>tu costo <b>$21.000</b> &middot; venta sugerida <b>$38.000</b></li>';
     h+='</ul>';
     h+='<h2>4. Como cotizar</h2>';
@@ -1842,12 +1842,12 @@ function capitalizeName(s) {
 // mensaje (wa_chats_summary.contact_name, lo setea solo un inbound). NUNCA el sender_name de un outbound: ahí va el
 // slug del vendedor (el 17-oct el FUP salió "Hola Agustina! … Por aca Joaco"). '' si no hay nombre o no parece de
 // persona (marca, "ISSA-TOUR", emojis, números) → el que llama saluda sin nombre.
-const NOMBRE_NO_PERSONA_RE = /\b(studios?|estudio|tour|turismo|srl|store|shop|tienda|bar|resto|hotel|eventos?|ne[oó]n|local|grupo|club|sal[oó]n|empresa|inmobiliaria|agencia|propiedades|design|dise[ñn]os?|deco|marketing|oficial)\b/i;
+const NOMBRE_NO_PERSONA_RE = /\b(studios?|estudio|tour|turismo|srl|store|shop|tienda|bar|resto|hotel|eventos?|ne[oó]n|local|grupo|club|sal[oó]n|empresa|inmobiliaria|agencia|propiedades|design|dise[ñn]os?|deco|marketing|oficial|argentina)\b/i;
 function primerNombrePersona(nombre) {
   const s = String(nombre || '').trim();
   if (!s || NOMBRE_NO_PERSONA_RE.test(s)) return '';
   const w = s.split(/\s+/)[0];
-  if (!/^\p{L}{2,20}$/u.test(w)) return '';
+  if (!/^\p{L}{2,20}$/u.test(w) || /^(el|la|los|las|un|una|mi|tu|de|del|yo)$/i.test(w)) return '';
   return capitalizeName(w === w.toUpperCase() ? w.toLowerCase() : w);
 }
 async function primerNombreCliente(env, phone) {
@@ -3178,7 +3178,7 @@ CONSULTAS DE PRODUCTO — si el cliente pregunta algo del producto (precio, si s
 
 DATOS QUE NO IMPROVISÁS — el FAQ del playbook está pensado para la etapa de venta (la maneja Joaco), así que hay datos que NO tenés que afirmar con seguridad en el relevamiento aunque el playbook los mencione. NUNCA inventes ni confirmes:
 - COLORES: no tenés una lista de colores ni sabés si un color/estilo puntual (rosa, celeste, verde agua, degradé, multicolor) se puede hacer. No enumeres colores ni confirmes/niegues uno; decí que el color se define junto con el diseño.
-- MEDIOS DE PAGO: para carteles lo único cierto es la seña del 50% por transferencia y el saldo al entregar. NO afirmes tarjeta, cuotas ni Mercado Pago (los medios de pago que figuran en la parte de CURSOS del playbook NO aplican a carteles).
+- MEDIOS DE PAGO: para carteles lo único cierto es la seña del 50% por transferencia y el resto cuando el cartel está terminado, antes de despacharlo. NO afirmes tarjeta, cuotas ni Mercado Pago (los medios de pago que figuran en la parte de CURSOS del playbook NO aplican a carteles).
 - TIEMPOS: solo el tiempo general de producción (~15-20 días). NUNCA prometas una fecha exacta de calendario ni que "llega para tal día".
 - OTROS PRODUCTOS: solo sabés con certeza que hacemos carteles de neón LED personalizados y carteles CORPÓREOS (letras o logo en 3D, ver la regla de EXTERIOR). Si preguntan por otra cartelería (chapa, luminosos comunes, gigantografías, tótems, etc.), no afirmes ni niegues que lo hacemos: decí que el equipo lo confirma.
 - MEDIDAS — REGLA CRÍTICA, PROHIBIDO ROMPERLA: tu ÚNICA tarea con la medida es RELEVAR la que el cliente YA tiene en mente. TERMINANTEMENTE PROHIBIDO ofrecer, sugerir, listar, tirar de ejemplo o recomendar medidas — aunque el cliente no tenga una definida, aunque te pida que le tires opciones, y AUNQUE EL PLAYBOOK DIGA "ofrecele las medidas comunes" (ese consejo es para el humano; VOS no ofrecés medidas nunca). NUNCA le des medidas de ejemplo ni "las más comunes de tu rubro" (nada de "2 metros x 1 metro", "1.50 x 80", "1 metro x 60", ni NINGÚN número de tamaño puesto por vos), NUNCA armes una lista de opciones de tamaño, NUNCA opines que una medida "queda imponente / es ideal para exterior / se ve mejor / bien visible". Tampoco tenés criterio técnico: NUNCA afirmes una medida mínima ("tendrías que tener al menos X"), ni digas que un diseño entra / no entra / no se puede en tal medida. Qué hacés en cada caso: (a) si el cliente te da una medida (aunque sea aproximada) → la tomás y listo; (b) si NO tiene medida definida, o te PIDE que le recomiendes un tamaño, o pregunta cuál le conviene → NO le des ningún número: decile que igual lo cotizamos con una medida de referencia y que después se ajusta sin drama (ej: "no te compliques con la medida exacta ahora, pasame la que tengas en mente aunque sea muy aproximada y lo cotizamos igual, después la afinamos tranqui"); (c) si pregunta si su diseño entra / se puede hacer en tal medida → decile que eso lo define el equipo al armar el presupuesto.
@@ -24475,6 +24475,24 @@ const handler = {
       // ============================================================
       // Pedidos (migración del Excel de Ventas a D1 — fuente de verdad)
       // ============================================================
+
+      // GET /admin/presupuestos/visibilidad → qué presupuestos de la planilla del cotizador ve el vendedor. La planilla
+      // no guarda quién cotizó → se cruza el contacto (teléfono / IGSID / @usuario) con el dueño del chat, con la MISMA
+      // regla que la lista de chats: el secundario (Facu/Agus/Debi) ve los de los chats asignados a él; el principal
+      // (Joaco), todo lo que no es de un secundario. Admin y el resto: todo.
+      //   { modo: 'todo' } | { modo: 'incluir' | 'excluir', phones: [...], users: [@ig en minúscula] }
+      if (request.method === 'GET' && path === '/admin/presupuestos/visibilidad') {
+        if ((await getSessionRole(env, session.user)) !== 'comercial') return json({ modo: 'todo' });
+        const uslug = String(session.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+        const esSec = VENDEDORES_SECUNDARIOS.includes(uslug);
+        const duenos = esSec ? [uslug] : VENDEDORES_SECUNDARIOS;
+        const rs = await env.DB.prepare(
+          `SELECT s.phone AS phone, lower(IFNULL(c.username, '')) AS u FROM wa_chats_summary s LEFT JOIN wa_contacts c ON c.phone = s.phone
+            WHERE s.assigned_to IN (${duenos.map(() => '?').join(',')})`
+        ).bind(...duenos).all();
+        const rows = rs.results || [];
+        return json({ modo: esSec ? 'incluir' : 'excluir', phones: rows.map(r => r.phone), users: rows.map(r => r.u).filter(Boolean) });
+      }
 
       // GET /admin/pedidos → todas las filas de la tabla pedidos.
       if (request.method === 'GET' && path === '/admin/pedidos') {
