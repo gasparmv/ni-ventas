@@ -2730,7 +2730,8 @@ async function precotizSendIg(env, igId, body) {
   if (r && r.ok) {
     try {
       await env.DB.prepare(
-        "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, channel, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 'ig', 1)"
+        // Upsert: si el eco del webhook llegó antes, creó la fila como de una persona (automated=0) → la marcamos del bot.
+        "INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, channel, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 'ig', 1) ON CONFLICT(wamid) DO UPDATE SET automated = 1"
       ).bind(new Date().toISOString(), r.id || ('precotiz-ig:' + igId + ':' + Date.now()), igId, String(body || '')).run();
     } catch (_) {}
   }
@@ -3399,6 +3400,29 @@ function precotizMedidaInventada(msgs, fullText) {
   return '';
 }
 
+// Saca el nombre del vendedor de los mensajes del bot (el prompt se presenta como "Joaco"): "buenas, te habla Joaco de
+// neon infinito" → "buenas, te escribimos de neon infinito". Mayúscula solo al arrancar el mensaje o una oración.
+function precotizSinNombre(s) {
+  if (!/joaco/i.test(String(s))) return String(s);   // solo tocamos los mensajes que nombran al vendedor
+  const fr = t => (...a) => {
+    const off = a[a.length - 2], str = a[a.length - 1];
+    const g1 = typeof a[1] === 'string' ? a[1] : '';
+    const txt = t.replace('$1', g1);
+    return (off === 0 || /[.!?]\s*$/.test(str.slice(0, off))) ? txt[0].toUpperCase() + txt.slice(1) : txt;
+  };
+  return String(s)
+    .replace(/\b(?:por )?ac[aá] joaco (?:te )?(?:habla|escribe)\b/gi, fr('te escribimos'))
+    .replace(/\bjoaco( de ne[oó]n infinito)? te (?:habla|escribe)\b/gi, fr('te escribimos$1'))
+    .replace(/\b(?:te|le|les) habla joaco\b/gi, fr('te escribimos'))
+    .replace(/\b(?:por )?ac[aá] joaco\b/gi, fr('te escribimos'))
+    .replace(/\b(?:soy|me llamo|mi nombre es) joaco\b/gi, fr('te escribimos'))
+    .replace(/\ba joaco\b/gi, 'al equipo')
+    .replace(/\bde joaco\b/gi, 'del equipo')
+    .replace(/\bjoaco\b/gi, fr('el equipo'))
+    .replace(/\b(te escribimos),(\s*de ne[oó]n infinito)/gi, '$1$2')
+    .replace(/\b(te escribimos)\b(?!\s*de ne[oó]n infinito)/gi, '$1 de Neon Infinito');
+}
+
 async function precotizEmitir(env, phone, nombre, msgs, modo, nowIso) {
   // El bot se presenta como "Joaco" (hardcodeado en el prompt). Si el lead quedó asignado a Facu
   // (reparto), reemplazamos el nombre para que el saludo COINCIDA con la bandeja — pedido de Gaspar
@@ -3407,7 +3431,18 @@ async function precotizEmitir(env, phone, nombre, msgs, modo, nowIso) {
     const _s = await env.DB.prepare("SELECT assigned_to FROM wa_chats_summary WHERE phone = ?").bind(String(phone).replace(/\D/g, '')).first();
     const _asgP = _s && String(_s.assigned_to || '').toLowerCase();
     const _secP = _asgP && COMERCIALES_SECUNDARIOS.find(x => x.slug === _asgP);
-    if (_secP) {
+    // Vendedora solo neón (Debi) con un lead que el bot todavía no confirmó como neón: puede terminar siendo corpóreo y
+    // rebotar a otro vendedor → el bot no se presenta con su nombre (Gaspar 18-oct). Confirmado neón, como siempre.
+    let _anon = false;
+    if (_secP && _secP.soloNeon) {
+      try {
+        const _pp = await env.DB.prepare("SELECT producto FROM precotiz_pilot WHERE phone = ?").bind(String(phone).replace(/\D/g, '')).first();
+        _anon = !(_pp && _pp.producto === 'neon');
+      } catch (_) { _anon = true; }   // ante la duda, sin nombre
+    }
+    if (_anon) {
+      msgs = (msgs || []).map(m => precotizSinNombre(m));
+    } else if (_secP) {
       const _n = _secP.nombre;
       msgs = (msgs || []).map(m => String(m).replace(/Joaco/g, _n).replace(/joaco/g, _n.toLowerCase()));
     }
@@ -3493,7 +3528,8 @@ async function precotizSendTipografiasIg(env, igId) {
         sent++;
         try {
           await env.DB.prepare(
-            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, status, context_id, channel, automated) VALUES (?, ?, 'outbound', ?, '', 'image', '[imagen] tipografias', ?, 'sent', '', 'ig', 1)"
+            // Upsert (el eco puede llegar antes): queda del bot y con la key ig/out_tipografias (precotizYaMandoTipografias no las repite).
+            "INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, status, context_id, channel, automated) VALUES (?, ?, 'outbound', ?, '', 'image', '[imagen] tipografias', ?, 'sent', '', 'ig', 1) ON CONFLICT(wamid) DO UPDATE SET automated = 1, body = excluded.body, media_url = excluded.media_url"
           ).bind(new Date().toISOString(), r.id || ('precotiz-tipo-ig:' + igId + ':' + i + ':' + Date.now()), igId, igKey).run();
         } catch (_) {}
       }
@@ -3588,7 +3624,8 @@ async function processPrecotizPilot(env) {
     // FRENO ANTI-PISÓN: si un HUMANO contestó DESPUÉS del último mensaje del cliente, el bot
     // no manda (Joaco/Gaspar están atendiendo). Cuando el cliente vuelva a escribir (su mensaje
     // pasa a ser el último), el bot retoma el proceso de precotización si todavía falta relevar.
-    try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status'").bind(lead.phone).first(); if (lh && lh.t) { if (lh.t > lastInTs) continue; if (Date.now() - new Date(lastInTs).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
+    // automated != 1: un automático de ManyChat (automated=2, IG) también cuenta → el bot no repite su pedido de datos.
+    try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated != 1 AND msg_type != 'status'").bind(lead.phone).first(); if (lh && lh.t) { if (lh.t > lastInTs) continue; if (Date.now() - new Date(lastInTs).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
     // Si el lead PASÓ a un flujo de cursos estando en el piloto (Abril lo tomó o se
     // registró al minicurso), lo sacamos del precotiz (escalado) para no pisarnos con
     // esas automatizaciones — sin gastar la llamada de IA.
@@ -3787,7 +3824,8 @@ async function processPrecotizPilot(env) {
     // FRENO ANTI-PISÓN: si un HUMANO (Joaco/Gaspar) ya respondió DESPUÉS del último mensaje
     // del cliente, el bot no se mete. NO marcamos seen -> si el cliente sigue la charla, se
     // re-evalúa en los próximos ticks y el bot retoma el relevamiento si todavía falta un dato.
-    try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated = 0 AND msg_type != 'status'").bind(phone).first(); if (lh && lh.t) { if (lh.t > c.last_ts) continue; if (Date.now() - new Date(c.last_ts).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
+    // automated != 1: un automático de ManyChat (automated=2, IG) también cuenta → el bot no repite su pedido de datos.
+    try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated != 1 AND msg_type != 'status'").bind(phone).first(); if (lh && lh.t) { if (lh.t > c.last_ts) continue; if (Date.now() - new Date(c.last_ts).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
     await kvSet(env, 'precotiz_seen:' + phone, '1');                        // marcar visto pase lo que pase
     try { const intn = await env.DB.prepare('SELECT 1 AS x FROM wa_internal_phones WHERE phone = ?').bind(phone).first(); if (intn) continue; } catch (_) {}
     try { const ped = await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE telefono = ? LIMIT 1').bind(phone).first(); if (ped) continue; } catch (_) {} // cliente existente, no lead nuevo
@@ -11713,6 +11751,30 @@ const IG_MANYCHAT_WELCOME = 'Buenas! Te mandamos mensajito para darte la bienven
 // que el welcome; lo reponemos cuando el saliente viene justo después de ese postback.
 const IG_MANYCHAT_REGALO = 'Genial que quieras arrancar 🤜\nAcá te dejo el enlace para que veas nuestra formación gratuita de 2 clases! Para aprender de 0 TODO sobre el Neon LED 🇦🇷\n[Botón: Formación GRATUITA]';
 
+// Ecos de automatizaciones EXTERNAS de Instagram (ManyChat / respuestas instantáneas de Meta) que SÍ traen el
+// texto. Se guardan con automated=2 ("automatización externa"): no son de una persona, así que no frenan el reparto
+// (anti-pisón), no hacen "activo de carteles" un chat (ocultado de "Quiero el regalo") ni cuentan como que la
+// vendedora ya escribió (rebote de las soloNeon). Ojo: el bot de precotización SÍ los toma como "ya le respondieron"
+// (automated != 1) para no repetir el pedido de datos que manda ManyChat. Meta no manda app_id en los ecos de IG:
+// se reconocen por el texto (prefijo). Si ManyChat estrena un flujo nuevo, sumarlo acá (los vacíos ya se marcan solos).
+const IG_AUTOMATIZACION_RE = [
+  /^buenas! te mandamos mensajito para darte la bienvenida/i,
+  /^genial que quieras arrancar/i,
+  /^euu, vimos que no pudiste abrir el enlace/i,
+  /^buenaas! comentaste en un video nuestro/i,
+  /^holaa, c[oó]mo va\?\?\s*contanos (qu[eé] te pareci[oó] el minicurso|si te sirvi[oó] el video)/i,
+  /^geniaal! (dame 1 minuto|contame brevemente)/i,
+  /^(el|este es el) enlace para registrarte y desbloquear el acceso/i,
+  /^para cotizar un pedido personalizado al toque/i,
+  /^¿pudiste ver la clase\?/i,
+  /^🤖 mensaje automático \(manychat\)/i,
+  /^🚨 [^!\n]{1,60}! este es un mensaje autom[aá]tico/i,
+];
+function igEsAutomatizacionExterna(body) {
+  const t = String(body || '').trim();
+  return !!t && IG_AUTOMATIZACION_RE.some(re => re.test(t));
+}
+
 // Cuenta de IG de Neon Infinito: la ÚNICA que debe entrar al CRM.
 const IG_ACCOUNT_ID = '17841406783093240';
 
@@ -11786,6 +11848,7 @@ async function processIgWebhook(env, body) {
         // título del aviso, no como "imagen no disponible".
         const isAdRef = ['ig_post', 'share', 'story_mention', 'ig_reel'].includes(attType);
         let msgType, body, rawMediaUrl = '';
+        let extAuto = false;   // eco de una automatización externa (ManyChat) → automated=2
         if (isAdRef) {
           msgType = 'text';
           const adTitle = String(att?.payload?.title || '').replace(/\s+/g, ' ').trim();
@@ -11817,7 +11880,12 @@ async function processIgWebhook(env, body) {
           // arranca con la respuesta del lead sin el automático que la disparó. Lo
           // guardamos con un marcador para que se vea que hubo un saliente automático.
           // (Los mensajes propios del CRM llegan CON texto, así que no caen acá.)
-          if (isEcho) {
+          if (isEcho && msg.is_deleted) continue;
+          if (isEcho && ((msg.reply_to && msg.reply_to.story) || msg.is_unsupported)) {
+            // Desde la app de IG (una persona): reacción/respuesta a una historia o algo que la API no muestra. No es ManyChat.
+            body = msg.is_unsupported ? '📎 Mensaje que Instagram no deja ver (mandado desde la app)' : '↩️ Reaccionó o respondió a una historia (desde la app de Instagram)';
+            msgType = 'text';
+          } else if (isEcho) {
             // Reponemos el texto de los automáticos de ManyChat (llegan vacíos):
             //  - si el último mensaje fue el toque del botón "Quiero el regalo" -> es la
             //    respuesta al regalo (IG_MANYCHAT_REGALO);
@@ -11832,6 +11900,7 @@ async function processIgWebhook(env, body) {
               body = _tieneSaliente ? '🤖 Mensaje automático (ManyChat)' : IG_MANYCHAT_WELCOME;
             }
             msgType = 'text';
+            extAuto = true;   // eco vacío = mandado por otra app (ManyChat); los del CRM y de la app de IG llegan con texto
           } else {
             continue; // entrante vacío real (story/reacción sin contenido) -> se ignora
           }
@@ -11841,11 +11910,12 @@ async function processIgWebhook(env, body) {
         // El sender_name del mensaje va '' en echo (el remitente somos nosotros).
         const senderName = isEcho ? '' : await igResolveName(env, custId);
         if (isEcho) { try { await igResolveName(env, custId); } catch (_) {} }
+        if (isEcho && !extAuto && igEsAutomatizacionExterna(body)) extAuto = true;
         // 1) Guardar el mensaje (channel='ig'). El trigger arma resumen + nombre.
         try {
           await env.DB.prepare(
-            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', 'ig')"
-          ).bind(ts, mid, direction, custId, senderName, msgType, body, storedMedia).run();
+            "INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel, automated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', 'ig', ?)"
+          ).bind(ts, mid, direction, custId, senderName, msgType, body, storedMedia, extAuto ? 2 : 0).run();
           // Si el mensaje YA existía con una media_url vieja (key truncada que se
           // pisaba entre chats), la corregimos a la key nueva re-descargada. Esto
           // hace que /admin/ig/replay-logs RECUPERE las imágenes cuya URL de IG
@@ -12628,7 +12698,8 @@ async function corporeoAskOnInbound(env, phone, msgBody) {
   // el chat quedó asignado a él, Joaco si no (default). Pedido de Gaspar: que no arranque de golpe.
   let _asg = '';
   try { const s = await env.DB.prepare("SELECT assigned_to FROM wa_chats_summary WHERE phone = ?").bind(phone).first(); _asg = String((s && s.assigned_to) || '').toLowerCase(); } catch (_) {}
-  const _saludo = 'Holaa! Acá ' + saludoVendedor(_asg) + ' de Neon Infinito';
+  const _cAsg = COMERCIALES_SECUNDARIOS.find(x => x.slug === _asg);
+  const _saludo = (_cAsg && _cAsg.soloNeon) ? 'Holaa! Te escribimos de Neon Infinito' : 'Holaa! Acá ' + saludoVendedor(_asg) + ' de Neon Infinito';
   const msgs = [_saludo, ...CORPOREO_ASK_MSGS];
   let anyFail = false;
   for (const m of msgs) {
@@ -21704,7 +21775,7 @@ const handler = {
           const rs = await env.DB.prepare(
             "SELECT ts, payload FROM wa_webhook_log WHERE payload LIKE 'IG:%' AND payload LIKE '%is_echo%' AND payload NOT LIKE '%\"text\"%' AND payload NOT LIKE '%attachments%' ORDER BY ts ASC"
           ).all();
-          const insSql = env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, '', 'text', ?, '', '', '', 'ig')");
+          const insSql = env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, '', '', '', 'ig', 2)");
           const stmts = [];
           for (const row of (rs.results || [])) {
             let obj; try { const raw = String(row.payload || ''); obj = JSON.parse(raw.slice(raw.indexOf('{'))); } catch (_) { continue; }
@@ -21817,7 +21888,7 @@ const handler = {
           // sender_name = quién lo escribió (igual que /admin/wa/send). Upsert: si el eco del webhook llegó antes y
           // creó la fila sin autor, se lo completa (con INSERT OR IGNORE se perdía 1 de cada 9).
           await env.DB.prepare(
-            "INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, ?, 'text', ?, '', '', 'sent', 'ig') ON CONFLICT(wamid) DO UPDATE SET sender_name = excluded.sender_name WHERE IFNULL(wa_messages.sender_name, '') = ''"
+            "INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, ?, 'text', ?, '', '', 'sent', 'ig') ON CONFLICT(wamid) DO UPDATE SET sender_name = excluded.sender_name, automated = 0 WHERE IFNULL(wa_messages.sender_name, '') = ''"
           ).bind(new Date().toISOString(), r.id || ('ig-txt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)), igId, autorSlug(session.user), String(text)).run();
           // Aseguramos que el resumen quede marcado como IG (el trigger no toca channel).
           await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone=?").bind(igId).run();
@@ -21855,12 +21926,12 @@ const handler = {
         const ts = new Date().toISOString();
         const mtype = isAud ? 'audio' : 'image';
         try {
-          await env.DB.prepare("INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, ?, ?, '', ?, '', 'sent', 'ig') ON CONFLICT(wamid) DO UPDATE SET sender_name = excluded.sender_name WHERE IFNULL(wa_messages.sender_name, '') = ''").bind(ts, r.id || ('ig-med-' + Date.now()), igId, autorSlug(session.user), mtype, r2Key).run();
+          await env.DB.prepare("INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, ?, ?, '', ?, '', 'sent', 'ig') ON CONFLICT(wamid) DO UPDATE SET sender_name = excluded.sender_name, automated = 0 WHERE IFNULL(wa_messages.sender_name, '') = ''").bind(ts, r.id || ('ig-med-' + Date.now()), igId, autorSlug(session.user), mtype, r2Key).run();
           await env.DB.prepare("UPDATE wa_chats_summary SET channel='ig' WHERE phone=?").bind(igId).run();
         } catch (_) {}
         if (caption && String(caption).trim()) {
           const rc = await igSend(env, igId, String(caption));
-          if (rc && rc.ok) { try { await env.DB.prepare("INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, ?, 'text', ?, '', '', 'sent', 'ig') ON CONFLICT(wamid) DO UPDATE SET sender_name = excluded.sender_name WHERE IFNULL(wa_messages.sender_name, '') = ''").bind(new Date().toISOString(), rc.id || ('ig-cap-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)), igId, autorSlug(session.user), String(caption)).run(); } catch (_) {} }
+          if (rc && rc.ok) { try { await env.DB.prepare("INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, ?, 'text', ?, '', '', 'sent', 'ig') ON CONFLICT(wamid) DO UPDATE SET sender_name = excluded.sender_name, automated = 0 WHERE IFNULL(wa_messages.sender_name, '') = ''").bind(new Date().toISOString(), rc.id || ('ig-cap-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)), igId, autorSlug(session.user), String(caption)).run(); } catch (_) {} }
         }
         return json({ id: r.id, r2Key, media_url: r2Key });
       }
@@ -21892,7 +21963,7 @@ const handler = {
         const saveIg = async (wamid, mtype, bodyTxt, mediaKey) => {
           try {
             await env.DB.prepare(
-              "INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, ?, ?, ?, ?, '', 'sent', 'ig') ON CONFLICT(wamid) DO UPDATE SET sender_name = excluded.sender_name WHERE IFNULL(wa_messages.sender_name, '') = ''"
+              "INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, channel) VALUES (?, ?, 'outbound', ?, ?, ?, ?, ?, '', 'sent', 'ig') ON CONFLICT(wamid) DO UPDATE SET sender_name = excluded.sender_name, automated = 0 WHERE IFNULL(wa_messages.sender_name, '') = ''"
             ).bind(new Date().toISOString(), wamid || ('ig-brief-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)), igId, senderSlug, mtype, bodyTxt, mediaKey || '').run();
           } catch (_) {}
         };
