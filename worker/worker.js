@@ -1160,8 +1160,39 @@ async function appsScriptPost(env, payload) {
 // Empuja UNA fila de pedido al Excel de Ventas vía el Apps Script (action=
 // pedido_upsert). Con sheet_row → actualiza; sin él → agrega y devuelve el nuevo
 // nro de fila. La columna Productor (O) NO se toca (la maneja Gaspar en el Excel).
+// Pedido de VARIOS carteles (mismo N°, mismo cliente): la seña y el saldo son del pedido entero y en la base se repiten en cada
+// fila. En la planilla cada renglón suma (COBRO 1 = col R de "2026" / AB de Pedidos_Corporeo, y el Cash Flow resta el PENDIENTE
+// por renglón), así que se reparten en proporción al precio de cada cartel. Gaspar 18-oct: el #400 (7 carteles, seña $1.102.237)
+// figuraba con la seña ×7. Con toda la seña en un solo renglón, el PENDIENTE de ese renglón daba negativo. Solo los del CRM: los
+// importados del Excel ya tienen la seña repartida por fila. El último renglón (por id) absorbe el redondeo: la suma cierra exacta.
+async function pagoParaPlanilla(env, row) {
+  const base = { pagado: row.pagado, restante: row.restante };
+  if (String(row.origen || '') !== 'crm') return base;
+  try {
+    let grp = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?";
+    const args = [row.numero, row.fecha, String(row.comercial_id || 'joaco')];
+    if (row.telefono) { grp += " AND origen = 'crm' AND IFNULL(telefono,'') = ?"; args.push(row.telefono); }
+    const g = (await env.DB.prepare(`SELECT id, IFNULL(precio,0) + IFNULL(precio_dimmer,0) AS t FROM pedidos WHERE ${grp} ORDER BY id`).bind(...args).all()).results || [];
+    if (g.length < 2 || !g.some(x => x.id === row.id)) return base;
+    const total = g.reduce((s, x) => s + (Number(x.t) || 0), 0);
+    const reparte = (monto) => {
+      if (monto == null || monto === '') return monto;
+      const m = Number(monto) || 0;
+      if (!(total > 0)) return row.id === g[0].id ? m : 0;   // sin precios: todo en el primero
+      let acum = 0;
+      for (let i = 0; i < g.length; i++) {
+        const parte = i === g.length - 1 ? Math.round(m - acum) : Math.round(m * (Number(g[i].t) || 0) / total);
+        if (g[i].id === row.id) return parte;
+        acum += parte;
+      }
+      return 0;
+    };
+    return { pagado: reparte(row.pagado), restante: reparte(row.restante) };
+  } catch (_) { return base; }
+}
 async function pushPedidoToVentas(env, row) {
   if (!env.APPS_SCRIPT_URL) return { error: 'no APPS_SCRIPT_URL' };
+  const pp = await pagoParaPlanilla(env, row);   // seña / saldo de ESTE renglón (repartidos si el pedido tiene varios carteles)
   const arr = [
     pedidoFechaToExcel(row.fecha), row.numero ?? '', row.cartel || '', row.colores || '',
     row.alto ?? '', row.ancho ?? '', row.cm_neon ?? '', row.base || '',
@@ -1169,7 +1200,7 @@ async function pushPedidoToVentas(env, row) {
     row.envio || '', row.aclaracion || '', '', // O = Productor (placeholder, se respeta)
     // Q = estado de pago: la hoja 2026 tiene validación ("1er pago" / "2do pago") y rechaza el "Cuenta corriente" de Sin
     // Frontera (el espejo de ribs #975 rebotaba 16-oct) → va vacío; la cuenta corriente se lleva en otro Excel.
-    row.plataforma || '', /^cuenta corriente$/i.test(String(row.estado_pago || '').trim()) ? '' : (row.estado_pago || ''), row.pagado ?? '', row.restante ?? '',
+    row.plataforma || '', /^cuenta corriente$/i.test(String(row.estado_pago || '').trim()) ? '' : (row.estado_pago || ''), pp.pagado ?? '', pp.restante ?? '',
     row.estado_pedido || '', row.ad || ''
   ];
   try {
@@ -1195,6 +1226,7 @@ async function pushPedidoToVentas(env, row) {
 const PEDIDO_VEND_MAP = { joaco: 'joaquin', joaquin: 'joaquin', facundo: 'facundo', agustina: 'agustina', debi: 'debi', debora: 'debi', gaspar: 'gaspar', bruno: 'gaspar', nadia: 'facundo', abril: 'abril' };
 async function pushPedidoCorporeoToV4(env, row) {
   if (!env.APPS_SCRIPT_URL) return { error: 'no APPS_SCRIPT_URL' };
+  const pp = await pagoParaPlanilla(env, row);
   // Sin tildes: "Joaquín" quedaba "joaquín" y la COMISION (X) de la hoja buscaba "joaquín_CORP" en COGS → $0.
   const vk = String(row.cargado_por || row.comercial_id || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
   const vend = PEDIDO_VEND_MAP[vk] || vk;
@@ -1217,7 +1249,7 @@ async function pushPedidoCorporeoToV4(env, row) {
   ];
   const row_zaa = [
     row.estado_pago || '',           // AA Estado pago
-    row.pagado ?? ''                 // AB Pagado (COBRO 1)
+    pp.pagado ?? ''                  // AB Pagado (COBRO 1): repartido si el pedido tiene varios carteles (pagoParaPlanilla)
   ];
   try {
     const j = await appsScriptPost(env, { action: 'corporeo_upsert', pedido_id: row.id, sheet_row: row.sheet_row || 0, row_ao, row_zaa });
