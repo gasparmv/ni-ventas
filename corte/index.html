@@ -417,6 +417,18 @@
   });
 
   // ---------- Diseños ----------
+  // Nombres de archivo "de máquina" (WhatsApp, cámaras, conversores de PDF, ids): no sirven como nombre del diseño (Gaspar 18-oct:
+  // en la planilla quedaban "PDFReader Convert…", "inbound5789…"). La misma regla está en el worker (corteNombreDeMaquina).
+  function nombreDeMaquina(s) {
+    s = String(s || '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!s) return true;
+    if (/^(img|image|imagen pegada|dsc|dcim|pxl|mvimg|whatsapp|wa ?\d|screenshot|captura|inbou|outbou|pdf ?reader|convert|scan|cam ?scanner|escane|documento|document|file|archivo|descarga|download|photo|picture|untitled|sin t[ií]tulo|copia de|copy of)/i.test(s)) return true;
+    if (/[0-9a-f]{8} ?[0-9a-f]{4} ?[0-9a-f]{4}/i.test(s)) return true;
+    var letras = (s.match(/[a-záéíóúñü]/gi) || []).length, dig = (s.match(/\d/g) || []).length;
+    return letras < 2 || dig > letras;
+  }
+  // Nombre del archivo como sugerencia solo si parece escrito por una persona ("Logo cafetería.png"); si no, queda vacío.
+  function nombreDeArchivo(n) { var s = String(n || '').replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60); return nombreDeMaquina(s) ? '' : s; }
   function nuevoDiseno() { S.seq++; return { id: S.seq, key: '', estado: '', previa: '', nombreArchivo: '', nombre: '', ancho: '', alto: '', cantidad: '1', aclaraciones: '' }; }
   function disenoHtml(d, i) {
     var area = num(d.ancho) / 100 * num(d.alto) / 100, cant = Math.max(1, parseInt(d.cantidad, 10) || 1), est = area * cfg.precio_m2 * cant;
@@ -538,7 +550,7 @@
     d.estado = 'subiendo'; d.error = ''; d.key = ''; d.nombreArchivo = file.name || 'Foto del diseño';
     if (d.previa) { try { URL.revokeObjectURL(d.previa); } catch (_) {} }
     d.previa = /^image\//.test(file.type) && !/heic|heif/i.test(file.type) ? URL.createObjectURL(file) : '';
-    if (!d.nombre) d.nombre = String(file.name || '').replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[_-]+/g, ' ').replace(/^(img|image|imagen pegada|dsc|whatsapp image|screenshot|captura de pantalla)\b.*$/i, '').trim().slice(0, 60);
+    if (!d.nombre) d.nombre = nombreDeArchivo(file.name);
     pintarDisenos();
     var mio = d.id;
     achicar(file).then(function (blob) {
@@ -649,7 +661,7 @@
       if (!d.key && !d.nombre && !d.ancho && !d.alto && hayIns && S.disenos.length === 1) continue; // solo insumos
       if (d.estado === 'subiendo') return ['Esperá a que termine de subir la foto del diseño ' + (i + 1) + '.', card.querySelector('.foto')];
       if (!d.key) return ['Falta la foto del diseño ' + (i + 1) + '.', card.querySelector('.foto')];
-      if (!String(d.nombre).trim()) return ['Ponele un nombre al diseño ' + (i + 1) + '.', card.querySelector('[data-k=nombre]')];
+      if (!String(d.nombre).trim() || nombreDeMaquina(d.nombre)) return ['Ponele un nombre al diseño ' + (i + 1) + ' (lo que dice el cartel, por ejemplo).', card.querySelector('[data-k=nombre]')];
       var an = num(d.ancho), al = num(d.alto), cn = parseInt(d.cantidad, 10) || 1;
       if (cn < 1 || cn > 10) return ['La cantidad del diseño ' + (i + 1) + ' va de 1 a 10. Si necesitás más, sumalo como otro diseño.', card.querySelector('[data-k=cantidad]')];
       if (!(an >= 1 && an <= 400)) return ['Revisá el ancho del diseño ' + (i + 1) + ' (en centímetros).', card.querySelector('[data-k=ancho]')];

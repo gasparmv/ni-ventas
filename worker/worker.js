@@ -6278,6 +6278,16 @@ function corteLandingTxt(s, max) { return String(s == null ? '' : s).replace(/[\
 function corteLandingNombrePropio(s) { return corteLandingTxt(s, 60).toLowerCase().replace(/(^|[\s'-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase()); }
 // Nombre registrado para mostrar ("AgustinAcuña" → "Agustin Acuña", "tomas agustin rosas" → "Tomas Agustin Rosas").
 function corteLandingNombreLindo(s) { return corteLandingNombrePropio(String(s || '').replace(/([a-záéíóúñü])([A-ZÁÉÍÓÚÑÜ])/g, '$1 $2')); }
+// Misma regla que la landing (nombreDeMaquina): un nombre de archivo de WhatsApp, cámara, conversor de PDF o un id no sirve como
+// nombre del diseño (queda en la planilla de Emma y en Venta_Insumos). Gaspar 18-oct.
+function corteNombreDeMaquina(s) {
+  s = String(s || '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return true;
+  if (/^(img|image|imagen pegada|dsc|dcim|pxl|mvimg|whatsapp|wa ?\d|screenshot|captura|inbou|outbou|pdf ?reader|convert|scan|cam ?scanner|escane|documento|document|file|archivo|descarga|download|photo|picture|untitled|sin t[ií]tulo|copia de|copy of)/i.test(s)) return true;
+  if (/[0-9a-f]{8} ?[0-9a-f]{4} ?[0-9a-f]{4}/i.test(s)) return true;
+  const letras = (s.match(/[a-záéíóúñü]/gi) || []).length, dig = (s.match(/\d/g) || []).length;
+  return letras < 2 || dig > letras;
+}
 function corteLandingCm(v) { const n = parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) && n > 0 ? Math.round(n * 10) / 10 : 0; }
 function corteLandingPesos(n) { return '$' + Math.round(n || 0).toLocaleString('es-AR'); }
 // Tope por IP y por hora (contadores en kv_cache; la limpieza los borra al otro día).
@@ -6696,7 +6706,7 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
     const foto = String(d.foto_key || '');
     if (!foto.startsWith(CORTE_LANDING_PREFIX) || foto.includes('..') || foto.length > 120) return err('Falta la foto del diseño ' + n + '.', 'diseno' + n);
     const dn = corteLandingTxt(d.nombre, 60);
-    if (!dn) return err('Ponele un nombre al diseño ' + n + '.', 'diseno' + n);
+    if (!dn || corteNombreDeMaquina(dn)) return err('Ponele un nombre al diseño ' + n + ' (lo que dice el cartel, por ejemplo).', 'diseno' + n);
     const an = corteLandingCm(d.ancho), al = corteLandingCm(d.alto);
     if (!(an >= 1 && an <= 400 && al >= 1 && al <= 400)) return err('Revisá la medida del diseño ' + n + ' (ancho y alto en centímetros).', 'diseno' + n);
     const cant = Math.max(1, Math.min(10, parseInt(d.cantidad, 10) || 1)); // la planilla de Emma acepta 1 a 10
