@@ -27032,6 +27032,61 @@ const handler = {
             await env.DB.prepare("UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, matriz_key=?, matriz_drive_url=?, tanda_id=?, estado='matriz_lista', disenado_at=?, updated_at=? WHERE id=?").bind(ancho, alto, precio, matrizKey, matrizUrl, tandaId, nowIso, nowIso, id).run();
             return json({ ok: true, id, estado: 'matriz_lista', precio });
           }
+          // Corregir la medida de una matriz YA hecha (Gaspar 18-oct: "que Emma pueda modificar o revisar por más que ya lo haya
+          // diseñado, por si se equivocó en una medida"). Precio: se recalcula si el cobro todavía no salió; si ya salió, la medida
+          // se corrige igual, el precio queda y se le avisa a Gaspar la diferencia. La fila de la planilla de cortes (ancho/alto) y,
+          // en las web, el precio de Venta_Insumos se actualizan solos.
+          if (action === 'corregir_medidas') {
+            if (!['admin', 'disenador'].includes(_role)) return json({ error: 'solo el diseñador' }, 403);
+            if (ped.estado === 'pedido') return json({ error: 'esa pieza todavía no tiene matriz: medila desde el relevamiento' }, 409);
+            if (/^(cable_|nitto_|pack_|fuente)/i.test(String(ped.producto || ''))) return json({ error: 'eso es un insumo, no tiene medida' }, 400);
+            const ancho = parseFloat(String(body.ancho_real != null ? body.ancho_real : '').replace(',', '.')) || 0;
+            const alto = parseFloat(String(body.alto_real != null ? body.alto_real : '').replace(',', '.')) || 0;
+            if (!(ancho > 0 && alto > 0 && ancho <= 400 && alto <= 400)) return json({ error: 'ancho y alto (cm) requeridos' }, 400);
+            const antes = { ancho: +ped.ancho_real || 0, alto: +ped.alto_real || 0, precio: +ped.precio || 0 };
+            if (antes.ancho === ancho && antes.alto === alto) return json({ ok: true, id, sin_cambios: true, precio: antes.precio });
+            const cant = Math.max(1, parseInt(ped.cantidad, 10) || 1);
+            const esNeonPropio = String(ped.producto || '') === 'NEON';
+            const _m2 = esNeonPropio ? 0 : (parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000);
+            const precioNuevo = esNeonPropio ? 0 : (ancho / 100) * (alto / 100) * _m2 * cant;
+            const cobroSalio = !esNeonPropio && String(ped.estado_pago || 'pendiente') !== 'pendiente';
+            const precioFinal = cobroSalio ? antes.precio : precioNuevo;
+            await env.DB.prepare('UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, updated_at=? WHERE id=?').bind(ancho, alto, precioFinal, nowIso, id).run();
+            // Planilla de cortes (Emma): G=ANCHO, H=ALTO de su fila (verificando que sea la misma pieza). Venta_Insumos trae esas
+            // columnas por IMPORTRANGE; su precio (col J) se pisa solo si lo había escrito el CRM (un número, no la fórmula).
+            let planilla = ped.hoja_fila ? 'ok' : 'sin_fila';
+            if (ped.hoja_fila && !esNeonPropio) {
+              try {
+                const token = await sheetsAccessToken(env);
+                if (!token) throw new Error('sin token');
+                const f = parseInt(ped.hoja_fila, 10);
+                const fila = ((await corteHojaLeer(token, CORTE_PEDIDOS_SHEET_ID, 'sheet1!A' + f + ':H' + f)) || [])[0] || [];
+                const cm = v => Math.round((parseFloat(String(v == null ? '' : v).replace(',', '.')) || 0) * 10) / 10;
+                const mismo = corteNormNombre(fila[2] || '') === corteNormNombre(ped.diseno_nombre || '') && [ped.hoja_cliente, ped.cliente_nombre].some(c => c && corteNormNombre(fila[1] || '') === corteNormNombre(c))
+                  && cm(fila[6]) === cm(antes.ancho) && cm(fila[7]) === cm(antes.alto)
+                  && (!ped.hoja_fecha || corteFechaNorm(fila[5]) === corteFechaNorm(ped.hoja_fecha));
+                if (!mismo) planilla = 'no_coincide';
+                else {
+                  const jv = (((await corteSheetsReq(token, 'GET', SHEETS_API_BASE + CORTE_SHEET_ID + '/values/' + encodeURIComponent('Venta_Insumos!J' + f + ':J' + f) + '?valueRenderOption=FORMULA')) || {}).values || [])[0] || [];
+                  const jEsFormula = jv.length && String(jv[0]).startsWith('='), jNum = jv.length && !jEsFormula ? (parseFloat(String(jv[0]).replace(/\./g, '').replace(',', '.')) || 0) : 0;
+                  const esc = [{ range: 'sheet1!G' + f + ':H' + f, values: [[ancho, alto]] }];
+                  await corteHojaEscribir(token, CORTE_PEDIDOS_SHEET_ID, 'RAW', esc);
+                  if (cobroSalio) {
+                    // El precio cobrado no cambia: si J era la fórmula (cambiaría con la medida), queda fijo en lo cobrado.
+                    if (jEsFormula && antes.precio > 0) await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', [{ range: 'Venta_Insumos!J' + f, values: [[Math.round(antes.precio * 100) / 100]] }]);
+                  } else if (!jEsFormula && Math.abs(jNum - antes.precio) <= 1) {
+                    // J tiene el precio que puso el CRM: va el nuevo. Un precio especial cargado a mano no se toca.
+                    await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', [{ range: 'Venta_Insumos!J' + f, values: [[Math.round(precioNuevo * 100) / 100]] }]);
+                  } else if (!jEsFormula && jv.length && String(jv[0]).trim() !== '') planilla = 'precio_a_mano';
+                }
+              } catch (e) { planilla = 'error: ' + String((e && e.message) || e).slice(0, 120); }
+            }
+            if (cobroSalio) {
+              const fm = n => '$' + Math.round(n).toLocaleString('es-AR');
+              try { await precotizNotifyGaspar(env, 'Corte: ' + (_slug === 'gaspar' ? 'corregiste' : 'Emma corrigió') + ' la medida de ' + (ped.cliente_nombre || 'un cliente') + ' · ' + (ped.diseno_nombre || 'diseño') + ': ' + antes.ancho + ' × ' + antes.alto + ' → ' + ancho + ' × ' + alto + ' cm.\nEl cobro ya había salido con ' + fm(antes.precio) + '; con la medida nueva es ' + fm(precioNuevo) + ' (diferencia ' + fm(precioNuevo - antes.precio) + '). El precio no lo cambié.', { tipo: 'corte_medida_corregida', prioridad: 'P2' }); } catch (_) {}
+            }
+            return json({ ok: true, id, precio: precioFinal, precio_nuevo: precioNuevo, cobro_salio: cobroSalio, planilla });
+          }
           if (action === 'cortado') {
             if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
             const d = _despSet('cortado');

@@ -4657,7 +4657,7 @@ function renderCorte() {
     const colPorDisenar = porDisenarNeon.map(p => { const enPantalla = p.id === relevVisId; return `<div data-corte-relev-ir="${p.id}" role="button" tabindex="0" title="Traer a la línea de relevamiento" style="${kCard};cursor:pointer${enPantalla ? ';border-color:#ef4444' : ''}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">${escapeHtml(p.medida_declarada || '—')}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;color:${enPantalla ? '#ef4444' : 'var(--accent-cyan,#8FD4DE)'}">${enPantalla ? 'en pantalla' : 'Medir →'}</span></div>`; }).join('');
     const K_DIS_MAX = 10;
     const disVisibles = STATE.corteNeonDisAll ? disenadosNeon : disenadosNeon.slice(0, K_DIS_MAX);
-    const colDisenados = disVisibles.map(p => { const paso = kPaso[p.estado] || ['', 'var(--fg-mute)']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span></div>`; }).join('')
+    const colDisenados = disVisibles.map(p => { const paso = kPaso[p.estado] || ['', 'var(--fg-mute)']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span><button type="button" data-corte-corregir="${p.id}" title="Corregir la medida de la matriz" aria-label="Corregir la medida" style="flex:0 0 auto;margin-left:6px;background:none;border:1px solid var(--border);border-radius:7px;padding:2px 7px;color:var(--fg-mute);cursor:pointer;font-size:12px">✏️</button></div>`; }).join('')
       + (disenadosNeon.length > K_DIS_MAX ? `<button type="button" class="btn ghost" data-corte-neon-dis-all style="width:100%;font-size:12px;padding:6px 10px">${STATE.corteNeonDisAll ? 'ver solo las últimas ' + K_DIS_MAX : 'ver las ' + (disenadosNeon.length - K_DIS_MAX) + ' restantes'}</button>` : '');
     const neonKanban = `
       <div style="margin-top:22px">
@@ -4680,7 +4680,8 @@ function renderCorte() {
     const wMed = (p) => { const t = String(p.medida_declarada || ''), a = t.match(/ancho\s*([\d.,]+)/i), l = t.match(/alto\s*([\d.,]+)/i); return a && l ? 'pidió ' + a[1] + ' × ' + l[1] + ' cm' : (t || '—'); };
     const wTitulo = (p) => `<b>${escapeHtml(p.cliente_nombre || 'cliente')}</b> · ${escapeHtml(p.diseno_nombre || 'diseño')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + escapeHtml(String(p.cantidad)) : ''}`;
     const colPorDisenarWeb = porDisenarWeb.map(p => { const enPantalla = p.id === relevVisId; return `<div data-corte-relev-ir="${p.id}" role="button" tabindex="0" title="Traer a la línea de relevamiento" style="${kCard};cursor:pointer${enPantalla ? ';border-color:var(--accent-cyan,#8FD4DE)' : ''}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${wTitulo(p)}</div><div style="${kSub}">${escapeHtml(wMed(p))}${wLunes(p) ? ' · tanda del ' + wLunes(p) : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;color:var(--accent-cyan,#8FD4DE)">${enPantalla ? 'en pantalla' : 'Medir →'}</span></div>`; }).join('');
-    const colDisenadosWeb = disenadosWeb.slice(0, 20).map(p => { const paso = kPaso[p.estado] || ['✓ listo', '#22c55e']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${wTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}${p.hoja_fila ? ' · en la planilla' : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span></div>`; }).join('');
+    const colDisenadosWeb = (STATE.corteWebDisAll ? disenadosWeb : disenadosWeb.slice(0, 20)).map(p => { const paso = kPaso[p.estado] || ['✓ listo', '#22c55e']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${wTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}${p.hoja_fila ? ' · en la planilla' : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span><button type="button" data-corte-corregir="${p.id}" title="Corregir la medida de la matriz" aria-label="Corregir la medida" style="flex:0 0 auto;margin-left:6px;background:none;border:1px solid var(--border);border-radius:7px;padding:2px 7px;color:var(--fg-mute);cursor:pointer;font-size:12px">✏️</button></div>`; }).join('')
+      + (disenadosWeb.length > 20 ? `<button type="button" class="btn ghost" data-corte-web-dis-all style="width:100%;font-size:12px;padding:6px 10px">${STATE.corteWebDisAll ? 'ver solo los últimos 20' : 'ver los ' + (disenadosWeb.length - 20) + ' restantes'}</button>` : '');
     const webKanban = (porDisenarWeb.length || disenadosWeb.length) ? `
       <div style="margin-top:22px">
         <style>@media(max-width:900px){.corte-web-cols{grid-template-columns:1fr!important}}</style>
@@ -4838,6 +4839,7 @@ function corteSig(list) { return (list || []).map(p => [p.id, p.estado, p.foto_k
 // detalle de una pieza abierto (radio de entrega / select de estado) o con un archivo elegido sin subir.
 function corteRenderFondoOk() {
   if (STATE.view !== 'corte' || STATE.corteCobrosView || STATE.corteSelected) return false;
+  if (document.querySelector('.modal-bg.open')) return false;
   const ae = document.activeElement;
   if (ae && ae.closest && ae.closest('#main') && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return false;
   return ![...document.querySelectorAll('#main input[type=file]')].some(f => f.files && f.files.length);
@@ -8255,6 +8257,39 @@ async function corteSyncEntregaUI(btn) {
   } catch (_) { toast('Error de red'); }
   finally { if (btn) btn.disabled = false; render(); }
 }
+// Corregir la medida de una matriz ya diseñada (Emma o Gaspar). Gaspar 18-oct: "por si se equivocó en una medida".
+function corteCorregirMedidaUI(id) {
+  const p = (STATE.cortePedidos || []).find(x => x.id === id);
+  if (!p) return;
+  const f = v => (v == null || v === '') ? '' : String(v).replace('.', ',');
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>Corregir medida · ${escapeHtml(p.diseno_nombre || 'diseño')}</h3></div><div class="modal-body"><form novalidate>
+    <div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">${escapeHtml(p.cliente_nombre || (p.producto === 'NEON' ? 'Neon Infinito' : ''))}${p.medida_declarada ? ' · pidió ' + escapeHtml(p.medida_declarada) : ''}<br>Ahora: ${escapeHtml(f(p.ancho_real))} × ${escapeHtml(f(p.alto_real))} cm${+p.precio > 0 ? ' · ' + fmtMoney(p.precio) : ''}</div>
+    <div style="display:flex;gap:10px;align-items:center"><input data-c-a inputmode="decimal" placeholder="ancho" value="${escapeHtml(f(p.ancho_real))}" style="width:96px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px"><span style="color:var(--fg-mute)">×</span><input data-c-l inputmode="decimal" placeholder="alto" value="${escapeHtml(f(p.alto_real))}" style="width:96px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px"><span style="color:var(--fg-mute)">cm</span></div>
+    <div data-c-err style="color:#ef4444;font-size:12px;min-height:16px;margin-top:6px"></div>
+    <button type="submit" class="btn btn-cyan" data-c-ok style="width:100%;margin-top:6px">Guardar medida</button>
+    <button type="button" class="btn btn-ghost" data-c-no style="width:100%;margin-top:8px">Cancelar</button></form></div></div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  const fin = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  const ia = bg.querySelector('[data-c-a]'), il = bg.querySelector('[data-c-l]'), err = bg.querySelector('[data-c-err]'), ok = bg.querySelector('[data-c-ok]');
+  bg.querySelector('[data-c-no]').onclick = fin;
+  bg.addEventListener('click', e => { if (e.target === bg) fin(); });
+  bg.querySelector('form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const num = v => parseFloat(String(v || '').replace(',', '.')) || 0;
+    const a = num(ia.value), l = num(il.value);
+    if (!(a > 0 && l > 0)) { err.textContent = 'Poné ancho y alto en cm'; return; }
+    ok.disabled = true; ok.textContent = 'Guardando…';
+    let r = null, j = {};
+    try { r = await fetch(CONFIG.trackerUrl + '/admin/corte/pedido', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'corregir_medidas', id, ancho_real: a, alto_real: l }) }); j = await r.json().catch(() => ({})); } catch (_) {}
+    if (!r || !r.ok || !j.ok) { ok.disabled = false; ok.textContent = 'Guardar medida'; err.textContent = (j && (j.error || j.motivo)) || 'No se pudo guardar. Probá de nuevo.'; return; }
+    fin();
+    if (!j.sin_cambios) { STATE.cortePedidos = undefined; STATE._corteLoading = false; STATE._corteGen = (STATE._corteGen || 0) + 1; if (STATE.view === 'corte') render(); }
+    const plan = j.planilla === 'precio_a_mano' ? ' En Venta_Insumos tenía un precio cargado a mano: no lo toqué.' : (j.planilla && j.planilla !== 'ok' && j.planilla !== 'sin_fila' ? ' Ojo: la planilla no se pudo actualizar (' + j.planilla + '), corregila a mano.' : '');
+    toast(j.sin_cambios ? 'Quedó igual' : (j.cobro_salio ? 'Medida corregida. El cobro ya había salido: le avisé a Gaspar la diferencia.' : 'Medida corregida' + (+j.precio > 0 ? ' · precio ' + fmtMoney(j.precio) : '')) + plan);
+  });
+  setTimeout(() => { try { ia.focus(); ia.select(); } catch (_) {} }, 50);
+}
 async function corteCargar(silent) {
   if (silent ? (STATE._corteLoading || STATE._corteSilentLoading) : false) return;
   const gen = silent ? (STATE._corteGen || 0) : (STATE._corteGen = (STATE._corteGen || 0) + 1);
@@ -8404,14 +8439,18 @@ async function bindCorte() {
     };
     const rai = document.getElementById('corte-ancho'), rali = document.getElementById('corte-alto');
     const upd = () => { STATE.corteRelevDraft = { id: pid, ancho: rai ? rai.value : '', alto: rali ? rali.value : '' }; if (rp) cortePrecioPreview(rp); };
-    if (rai) { rai.oninput = upd; rai.onkeydown = (e) => { if (e.key === 'Enter' && rali) rali.focus(); }; try { rai.focus(); } catch (_) {} }
+    if (rai) { rai.oninput = upd; rai.onkeydown = (e) => { if (e.key === 'Enter' && rali) rali.focus(); }; try { if (!document.querySelector('.modal-bg')) rai.focus(); } catch (_) {} }
     if (rali) { rali.oninput = upd; rali.onkeydown = (e) => { if (e.key === 'Enter') relevOk.click(); }; }
   }
+  // Diseñados: corregir la medida de una matriz ya hecha.
+  document.querySelectorAll('[data-corte-corregir]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); corteCorregirMedidaUI(parseInt(b.getAttribute('data-corte-corregir'), 10)); }; });
   const relevSkip = document.querySelector('[data-corte-relev-skip]');
   if (relevSkip) relevSkip.onclick = () => { const n = parseInt(relevSkip.getAttribute('data-next') || '', 10); if (n) { STATE.corteRelevId = n; render(); } };
   document.querySelectorAll('[data-corte-disenos-pack]').forEach(b => { b.onclick = () => corteDisenosPack(b); });
   const disAll = document.querySelector('[data-corte-neon-dis-all]');
   // El bind del relevamiento enfoca "ancho" en cada render (salta arriba) → volver a mostrar el botón.
+  const webDisAll = document.querySelector('[data-corte-web-dis-all]');
+  if (webDisAll) webDisAll.onclick = () => { STATE.corteWebDisAll = !STATE.corteWebDisAll; render(); const b = document.querySelector('[data-corte-web-dis-all]'); if (b && b.scrollIntoView) b.scrollIntoView({ block: 'nearest' }); };
   if (disAll) disAll.onclick = () => { STATE.corteNeonDisAll = !STATE.corteNeonDisAll; render(); const b = document.querySelector('[data-corte-neon-dis-all]'); if (b && b.scrollIntoView) b.scrollIntoView({ block: 'nearest' }); };
   // Tablero de neón de Emma: tocar una pieza "por diseñar" la trae a la línea de relevamiento (arriba).
   document.querySelectorAll('[data-corte-relev-ir]').forEach(el => {
