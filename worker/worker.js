@@ -21745,10 +21745,11 @@ const handler = {
           for (const lead of leads.slice(0, limit)) {
             if ((await kvGet(env, 'wa_send_paused', '0')) === '1') break;
             let rt = null;
-            try { rt = await waSendTemplate(env, lead.phone, lead.nombre ? 'seguimiento_presupuesto' : FUP_TPL_SIN_NOMBRE, 'es_AR', lead.nombre ? [lead.nombre] : []); } catch (_) {}
+            try { rt = await waSendTemplate(env, lead.phone, lead.nombre ? FUP_TPL_CON_NOMBRE : FUP_TPL_SIN_NOMBRE, 'es_AR', lead.nombre ? [lead.nombre] : []); } catch (_) {}
             if (rt && rt.ok) {
               ok++;
-              try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', '[plantilla: seguimiento_presupuesto]', 'sent', '', 1)").bind(new Date().toISOString(), rt.id || ('fu-recover:' + lead.phone), lead.phone).run(); } catch (_) {}
+              const marker = '[plantilla: ' + (lead.nombre ? FUP_TPL_CON_NOMBRE + '] ' + lead.nombre : FUP_TPL_SIN_NOMBRE + ']');
+              try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1)").bind(new Date().toISOString(), rt.id || ('fu-recover:' + lead.phone), lead.phone, marker).run(); } catch (_) {}
             } else { fail++; }
             await new Promise(rs => setTimeout(rs, 500));
           }
@@ -28697,9 +28698,11 @@ const ALL_FOLLOWUP_PREFIXES_TEXT = [
   'Te quería avisar que estamos regalando',    // copa
   'Holaa, cómo estás? Pudiste chequear',       // < 300k
   'Buenas! Avisanos qué te pareció',           // ≥ 300k
-  '[plantilla: seguimiento_presupuesto]'       // contingencia ventana cerrada (template, con y sin nombre)
+  '[plantilla: seguimiento_presupuesto'        // contingencia ventana cerrada (template: la vieja, _v2 y _anon)
 ];
-// Variante sin {{1}} de seguimiento_presupuesto, para cuando no hay un nombre confiable del cliente (18-oct).
+// Plantillas del FUP con la ventana cerrada, SIN firma (Gaspar 18-oct: la vieja seguimiento_presupuesto dice "Por aca
+// Joaco" aunque el presupuesto sea de Agus/Facu/Debi). Con el nombre del cliente y, si no hay uno confiable, sin {{1}}.
+const FUP_TPL_CON_NOMBRE = 'seguimiento_presupuesto_v2';
 const FUP_TPL_SIN_NOMBRE = 'seguimiento_presupuesto_anon';
 
 function extractPresupuestoAmount(body) {
@@ -29010,20 +29013,20 @@ async function processPresupuestoFollowups(env, opts = {}) {
       // confiable → la variante sin nombre. Cada una con su propio estado de reintentos: si la sin nombre no
       // está aprobada, se pausa solo su flujo y la de nombre sigue saliendo.
       const firstName = await primerNombreCliente(env, p.phone);
-      const tplName = firstName ? 'seguimiento_presupuesto' : FUP_TPL_SIN_NOMBRE;
+      const tplName = firstName ? FUP_TPL_CON_NOMBRE : FUP_TPL_SIN_NOMBRE;
       const st = firstName ? tplSt : tplStAnon;
       if (campaignPaused(st)) continue;
       if ((await campaignRetryGate(env, st.kind, p.phone, p.ts)).skip) continue;
       const rt = await waSendTemplate(env, p.phone, tplName, 'es_AR', firstName ? [firstName] : []);
       if (rt.ok) {
-        // Marker 'sent' → dedup (body reconocido por ALL_FOLLOWUP_PREFIXES_TEXT). Las dos variantes guardan el
-        // mismo marker; la que salió de verdad queda en wa_envios_log.
+        // Marker 'sent' → dedup (body reconocido por ALL_FOLLOWUP_PREFIXES_TEXT). Guarda la plantilla que salió y
+        // el nombre, así el chat del CRM muestra el texto real (no el de la vieja con "Por aca Joaco").
         sent++;
         await campaignSendOk(env, st, p.phone, p.ts);
         try {
           await env.DB.prepare(
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, automated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)'
-          ).bind(new Date().toISOString(), rt.id || ('fu-tpl:' + p.phone), 'outbound', p.phone, '', 'template', '[plantilla: seguimiento_presupuesto]', '', '', 'sent').run();
+          ).bind(new Date().toISOString(), rt.id || ('fu-tpl:' + p.phone), 'outbound', p.phone, '', 'template', '[plantilla: ' + tplName + ']' + (firstName ? ' ' + firstName : ''), '', '', 'sent').run();
         } catch (_) {}
       } else {
         // Reintento ACOTADO (antes: sin marker → reintento cada 5' durante las ~25h de la ventana de
