@@ -16472,13 +16472,15 @@ function qrVerticalsForUser() {
 // Afuera: avisos y reportes internos, cursos/comunidad/eventos, corte, difusiones, las de presupuesto con varios datos
 // (salen del cotizador), las de una variable que no es el nombre (precotiz_seguimiento) y las firmadas por otro del
 // equipo ("Por aca Joaco" solo la ve Joaco). Gaspar ve todas; Abril, las de cursos (sin este filtro).
-const TPL_NO_CLIENTE_RE = /^(aviso_|reporte_|minisupernova|comunidad_|corte_|oc_|nova|leadnova|lanzamiento_|recordatorio_|ranking_|disenos_|seminario|sorteo|minicurso|cupo_|ultimo_cupo|pack_|lead_|cursos|retomar_evento|seguimiento_evento|precotiz_|presupuesto_|bcast_|prueba|cambionro$|seguimiento$)/i;
+const TPL_NO_CLIENTE_RE = /^(aviso_|reporte_|minisupernova|comunidad_|corte_|oc_|nova|leadnova|lanzamiento_|recordatorio_|ranking_|disenos_|seminario|sorteo|minicurso|cupo_|ultimo_cupo|pack_|lead_|cursos|retomar_evento|seguimiento_evento|precotiz_|presupuesto_|bcast_|prueba|cambionro$|seguimiento$|seguimiento_presupuesto$)/i;
 const TPL_FIRMAS = { joaco: /\bjoa(co|qu[ií]n)\b/i, abril: /\babril\b/i, bruno: /\bbruno\b/i, gaspar: /\bgaspar\b/i, facundo: /\bfacu(ndo)?\b/i, agustina: /\bagus(tina)?\b/i, debi: /\bdebi\b/i, nadia: /\bnadia\b/i };
 function tplAptaParaVendedor(t) {
   if (TPL_NO_CLIENTE_RE.test(String(t.name || '')) || tplParamCount(t) > 1) return false;
   const body = tplBodyText(t), yo = isJoaquinUser(STATE.user) ? 'joaco' : _userKey(STATE.user);
   return !Object.keys(TPL_FIRMAS).some(k => k !== yo && TPL_FIRMAS[k].test(body));
 }
+// Variante sin nombre de una plantilla: seguimiento_presupuesto_v2 → seguimiento_presupuesto_anon.
+function tplAnonDe(name) { return String(name || '').replace(/_v\d+$/, '') + '_anon'; }
 function plantillasDelUsuario() {
   const verts = qrVerticalsForUser();
   const tpls = (chatState.templates || []).filter(t => !verts || verts.includes(templateVertical(t.name)));
@@ -17851,10 +17853,10 @@ function showScheduleModal(phone) {
   const tplBody = (t) => { const b = (t.components || []).find(c => (c.type || '').toUpperCase() === 'BODY'); return (b && b.text) || ''; };
   const tplVars = (t) => (tplBody(t).match(/\{\{\d+\}\}/g) || []).length;
   // Sin un nombre confiable del cliente, la plantilla con {{1}} sale en su variante sin nombre ("_anon") si existe.
-  const tplEfectiva = (t) => (t && tplVars(t) >= 1 && !firstName && (chatState.templates || []).find(x => x.name === t.name + '_anon')) || t;
+  const tplEfectiva = (t) => (t && tplVars(t) >= 1 && !firstName && (chatState.templates || []).find(x => x.name === tplAnonDe(t.name))) || t;
   const fillTpl = (t) => tplBody(tplEfectiva(t)).replace(/\{\{1\}\}/g, firstName || 'amigo/a').replace(/\{\{\d+\}\}/g, '…');
   // Plantillas de re-enganche de carteles primero (las más útiles para seguimiento). Vendedor: solo las aptas para clientes.
-  const prefer = ['seguimiento_presupuesto', 'seguimiento_presupuesto_anon', 'retomar_carteles_v2', 'retomar_carteles'];
+  const prefer = ['seguimiento_presupuesto_v2', 'seguimiento_presupuesto_anon', 'seguimiento_presupuesto', 'retomar_carteles_v2', 'retomar_carteles'];
   const ordered = [...plantillasDelUsuario()].sort((a, b) => ((prefer.indexOf(a.name) + 1) || 99) - ((prefer.indexOf(b.name) + 1) || 99));
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
@@ -22490,7 +22492,7 @@ async function pickQuickReply(ta, el) {
     const first = primerNombreCliente(c && c.name);
     // {{1}} = nombre y el cliente sin un nombre confiable → la variante sin nombre ("<plantilla>_anon") si está aprobada.
     if (tpl && tplParamCount(tpl) >= 1 && !first) {
-      const anon = (chatState.templates || []).find(t => t.name === name + '_anon');
+      const anon = (chatState.templates || []).find(t => t.name === tplAnonDe(name));
       if (anon) { tpl = anon; name = anon.name; lang = anon.language || lang; }
     }
     const nParams = tpl ? tplParamCount(tpl) : (parseInt(el.dataset.tplParams || '0', 10) || 0);
