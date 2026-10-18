@@ -1838,6 +1838,25 @@ function capitalizeName(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
 }
 
+// Primer nombre del CLIENTE para el {{1}} de una plantilla: agenda (wa_contacts) > nombre de perfil de su último
+// mensaje (wa_chats_summary.contact_name, lo setea solo un inbound). NUNCA el sender_name de un outbound: ahí va el
+// slug del vendedor (el 17-oct el FUP salió "Hola Agustina! … Por aca Joaco"). '' si no hay nombre o no parece de
+// persona (marca, "ISSA-TOUR", emojis, números) → el que llama saluda sin nombre.
+const NOMBRE_NO_PERSONA_RE = /\b(studios?|estudio|tour|turismo|srl|store|shop|tienda|bar|resto|hotel|eventos?|ne[oó]n|local|grupo|club|sal[oó]n|empresa|inmobiliaria|agencia|propiedades|design|dise[ñn]os?|deco|marketing|oficial)\b/i;
+function primerNombrePersona(nombre) {
+  const s = String(nombre || '').trim();
+  if (!s || NOMBRE_NO_PERSONA_RE.test(s)) return '';
+  const w = s.split(/\s+/)[0];
+  if (!/^\p{L}{2,20}$/u.test(w)) return '';
+  return capitalizeName(w === w.toUpperCase() ? w.toLowerCase() : w);
+}
+async function primerNombreCliente(env, phone) {
+  try {
+    const r = await env.DB.prepare("SELECT (SELECT name FROM wa_contacts WHERE phone = ?1) AS agenda, (SELECT contact_name FROM wa_chats_summary WHERE phone = ?1) AS perfil").bind(String(phone || '')).first();
+    return primerNombrePersona(r && r.agenda) || primerNombrePersona(r && r.perfil);
+  } catch (_) { return ''; }
+}
+
 // Lee el Sheet de cursos y devuelve los leads parseados + normalizados.
 // { total, leads: [{ nombre, telRaw, tel, valido }] } (dedup por tel dentro del sheet).
 async function fetchCursosLeads(env) {
@@ -21697,7 +21716,8 @@ const handler = {
           "  WHERE direction='outbound' AND ts >= ? AND (substr(body,1,26)=? OR substr(body,1,26)=?) " +
           "    AND length(phone) BETWEEN 10 AND 14 GROUP BY phone) " +
           "SELECT pr.phone, pr.pts, " +
-          "  (SELECT x.sender_name FROM wa_messages x WHERE x.phone=pr.phone AND x.direction='outbound' AND x.ts=pr.pts LIMIT 1) AS nombre, " +
+          // Nombre del CLIENTE (agenda > perfil de su último mensaje); el sender_name del presupuesto es el vendedor.
+          "  (SELECT w.name FROM wa_contacts w WHERE w.phone=pr.phone) AS agenda, (SELECT s.contact_name FROM wa_chats_summary s WHERE s.phone=pr.phone) AS perfil, " +
           "  (SELECT x.body FROM wa_messages x WHERE x.phone=pr.phone AND x.direction='outbound' AND x.ts=pr.pts LIMIT 1) AS body " +
           "FROM presup pr " +
           "WHERE NOT EXISTS (SELECT 1 FROM wa_messages f WHERE f.phone=pr.phone AND f.direction='outbound' AND f.automated=1 AND IFNULL(f.status,'')!='failed' AND f.ts > pr.pts AND (" + fupLike + ")) " +
@@ -21708,15 +21728,14 @@ const handler = {
           "ORDER BY pr.pts DESC LIMIT 250";
         let rows = [];
         try { rows = (await env.DB.prepare(sql).bind(desde, pfx1, pfx2, ...fupParams, ...cierreParams, venc).all()).results || []; } catch (e) { return json({ error: 'query: ' + e.message }, 500); }
-        const leads = rows.map(r => ({ phone: r.phone, nombre: (r.nombre || '').split(/\s+/)[0] || '', fecha: (r.pts || '').slice(0, 10), monto: extractPresupuestoAmount(r.body) }));
+        const leads = rows.map(r => ({ phone: r.phone, nombre: primerNombrePersona(r.agenda) || primerNombrePersona(r.perfil), fecha: (r.pts || '').slice(0, 10), monto: extractPresupuestoAmount(r.body) }));
         if (request.method === 'POST' && body.ejecutar === true) {
           const limit = Math.max(1, Math.min(250, parseInt(body.limit, 10) || 50));
           let ok = 0, fail = 0;
           for (const lead of leads.slice(0, limit)) {
             if ((await kvGet(env, 'wa_send_paused', '0')) === '1') break;
-            const firstName = capitalizeName(lead.nombre) || 'amigo/a';
             let rt = null;
-            try { rt = await waSendTemplate(env, lead.phone, 'seguimiento_presupuesto', 'es_AR', [firstName]); } catch (_) {}
+            try { rt = await waSendTemplate(env, lead.phone, lead.nombre ? 'seguimiento_presupuesto' : FUP_TPL_SIN_NOMBRE, 'es_AR', lead.nombre ? [lead.nombre] : []); } catch (_) {}
             if (rt && rt.ok) {
               ok++;
               try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', '[plantilla: seguimiento_presupuesto]', 'sent', '', 1)").bind(new Date().toISOString(), rt.id || ('fu-recover:' + lead.phone), lead.phone).run(); } catch (_) {}
@@ -24393,13 +24412,20 @@ const handler = {
           // uno de los dos es obligatorio.
           if (!phone || !scheduled_at || (!text && !template)) { created.push({ error: 'missing phone, scheduled_at, or (body|template)' }); continue; }
           const num = normalizeArPhone(phone);
-          if (!num) { created.push({ error: 'numero invalido', phone }); continue; }
+          if (!num) {
+            // Instagram (IGSID, 15+ dígitos): no hay plantillas para escribir fuera de la ventana de 24 h → no se puede programar.
+            const esIg = String(phone).replace(/\D/g, '').length > 14;
+            created.push({ error: esIg ? 'Programar seguimiento funciona solo en chats de WhatsApp (este chat es de Instagram)' : 'Número inválido: no se pudo programar', phone });
+            continue;
+          }
           const now = new Date().toISOString();
           const rs = await env.DB.prepare(
             'INSERT INTO scheduled_messages (phone, body, scheduled_at, status, created_at, template, template_params, lang) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(num, text || '', scheduled_at, 'pending', now, template || null, params ? JSON.stringify(params) : null, lang || 'es_AR').run();
           created.push({ id: rs.meta?.last_row_id, phone: num, scheduled_at });
         }
+        // Si no se programó NADA, error (antes respondía 200 con el error adentro y el front mostraba "programado").
+        if (!created.some(c => c.id)) return json({ error: (created[0] && created[0].error) || 'No se programó nada', created }, 400);
         return json({ created });
       }
 
@@ -28643,8 +28669,10 @@ const ALL_FOLLOWUP_PREFIXES_TEXT = [
   'Te quería avisar que estamos regalando',    // copa
   'Holaa, cómo estás? Pudiste chequear',       // < 300k
   'Buenas! Avisanos qué te pareció',           // ≥ 300k
-  '[plantilla: seguimiento_presupuesto]'       // contingencia ventana cerrada (template)
+  '[plantilla: seguimiento_presupuesto]'       // contingencia ventana cerrada (template, con y sin nombre)
 ];
+// Variante sin {{1}} de seguimiento_presupuesto, para cuando no hay un nombre confiable del cliente (18-oct).
+const FUP_TPL_SIN_NOMBRE = 'seguimiento_presupuesto_anon';
 
 function extractPresupuestoAmount(body) {
   if (!body) return 0;
@@ -28811,6 +28839,7 @@ async function processPresupuestoFollowups(env, opts = {}) {
   // Reintentos acotados de la PLANTILLA de seguimiento (ver campaignSendFail). Solo frena la rama de
   // plantilla: en una caída de plantillas el FUP por texto libre (ventana abierta) sigue saliendo.
   const tplSt = await campaignState(env, 'pp-followup-tpl');
+  const tplStAnon = await campaignState(env, 'pp-followup-tpl-anon');
   await ensureSendRetryTable(env);
 
   for (const p of byPhone.values()) {
@@ -28949,14 +28978,20 @@ async function processPresupuestoFollowups(env, opts = {}) {
       // Flujo de plantilla pausado (caída de cuenta/plantilla) o este presupuesto en espera de
       // reintento / ya dado por perdido → no intentar en este tick. ref = ts del presupuesto: un
       // presupuesto NUEVO al mismo cliente arranca con intentos limpios.
-      if (campaignPaused(tplSt)) continue;
-      if ((await campaignRetryGate(env, 'pp-followup-tpl', p.phone, p.ts)).skip) continue;
-      const firstName = capitalizeName((p.sender_name || '').split(/\s+/)[0]) || 'amigo/a';
-      const rt = await waSendTemplate(env, p.phone, 'seguimiento_presupuesto', 'es_AR', [firstName]);
+      // {{1}} = primer nombre del CLIENTE (p.sender_name es el vendedor que mandó el presupuesto). Sin nombre
+      // confiable → la variante sin nombre. Cada una con su propio estado de reintentos: si la sin nombre no
+      // está aprobada, se pausa solo su flujo y la de nombre sigue saliendo.
+      const firstName = await primerNombreCliente(env, p.phone);
+      const tplName = firstName ? 'seguimiento_presupuesto' : FUP_TPL_SIN_NOMBRE;
+      const st = firstName ? tplSt : tplStAnon;
+      if (campaignPaused(st)) continue;
+      if ((await campaignRetryGate(env, st.kind, p.phone, p.ts)).skip) continue;
+      const rt = await waSendTemplate(env, p.phone, tplName, 'es_AR', firstName ? [firstName] : []);
       if (rt.ok) {
-        // Marker 'sent' → dedup (body reconocido por ALL_FOLLOWUP_PREFIXES_TEXT).
+        // Marker 'sent' → dedup (body reconocido por ALL_FOLLOWUP_PREFIXES_TEXT). Las dos variantes guardan el
+        // mismo marker; la que salió de verdad queda en wa_envios_log.
         sent++;
-        await campaignSendOk(env, tplSt, p.phone, p.ts);
+        await campaignSendOk(env, st, p.phone, p.ts);
         try {
           await env.DB.prepare(
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status, automated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)'
@@ -28967,7 +29002,7 @@ async function processPresupuestoFollowups(env, opts = {}) {
         // selección; el 25/26-sep 9 FUPs se perdieron tras 168 intentos c/u). Plantilla pending/pausada
         // o cuenta bloqueada → pausa sin gastar intentos (y sin avisar: es ruido). Agotado o
         // permanente → va al resumen al admin con el motivo real.
-        const f = await campaignSendFail(env, tplSt, { phone: p.phone, ref: p.ts, res: rt, logKind: 'pp-followup-tpl' });
+        const f = await campaignSendFail(env, st, { phone: p.phone, ref: p.ts, res: rt, logKind: st.kind });
         if (f.action === 'failed') failures.push({ phone: p.phone, name: p.sender_name || '', error: describeSendFailure(rt) + ' (plantilla, ' + f.attempts + ' intento' + (f.attempts === 1 ? '' : 's') + ')' });
       }
       await new Promise(rs => setTimeout(rs, 600));
