@@ -16514,6 +16514,17 @@ async function pinPrivadoBruno(env, phone) {
 }
 // Auto-heal de la columna wa_chats_summary.pin_privado (una vez por isolate): así el SELECT de la
 // lista de chats nunca rompe por 'no such column' si se deploya contra una D1 sin la migración.
+// labels.created_by (oct-2026): quién creó cada etiqueta (ver /admin/labels). Una vez por isolate: mira la
+// columna y la agrega si falta; si algo falla, el endpoint sigue con el SELECT viejo (sin created_by).
+let _labelsCreatedByOk = false;
+async function ensureLabelsCreatedBy(env) {
+  if (_labelsCreatedByOk) return;
+  try {
+    const c = await env.DB.prepare("SELECT 1 AS x FROM pragma_table_info('labels') WHERE name = 'created_by'").first();
+    if (!c) await env.DB.prepare("ALTER TABLE labels ADD COLUMN created_by TEXT NOT NULL DEFAULT ''").run();
+    _labelsCreatedByOk = true;
+  } catch (_) {}
+}
 let _pinPrivadoColOk = false;
 async function ensurePinPrivadoCol(env) {
   if (_pinPrivadoColOk) return;
@@ -23621,7 +23632,8 @@ const handler = {
         try {
           await env.DB.prepare('CREATE TABLE IF NOT EXISTS labels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, color TEXT NOT NULL, created_at TEXT NOT NULL)').run();
           await env.DB.prepare('CREATE TABLE IF NOT EXISTS contact_labels (phone TEXT NOT NULL, label_id INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (phone, label_id))').run();
-          const rs = await env.DB.prepare('SELECT id, name, color FROM labels ORDER BY name').all();
+          await ensureLabelsCreatedBy(env);
+          const rs = await env.DB.prepare(_labelsCreatedByOk ? 'SELECT id, name, color, created_by FROM labels ORDER BY name' : 'SELECT id, name, color FROM labels ORDER BY name').all();
           return json({ labels: rs.results || [] });
         } catch (e) { return json({ labels: [] }); }
       }
@@ -23631,14 +23643,32 @@ const handler = {
         const color = String((body || {}).color || '').trim();
         if (!name || !color) return json({ error: 'Falta el nombre o el color de la etiqueta' }, 400);
         await env.DB.prepare('CREATE TABLE IF NOT EXISTS labels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, color TEXT NOT NULL, created_at TEXT NOT NULL)').run();
-        // ON CONFLICT DO UPDATE (no OR REPLACE): no cambia el id de una etiqueta existente.
+        await ensureLabelsCreatedBy(env);
+        // ON CONFLICT (no OR REPLACE): no cambia el id de una etiqueta existente.
         // OR REPLACE borraba+reinsertaba -> id nuevo -> dejaba huerfanas las contact_labels.
-        await env.DB.prepare('INSERT INTO labels (name, color, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET color = excluded.color').bind(name, color, new Date().toISOString()).run();
-        const row = await env.DB.prepare('SELECT id, name, color FROM labels WHERE name = ?').bind(name).first();
+        // created_by = quién la creó (oct-2026): Abril ve siempre las suyas (su rol tiene una lista fija de
+        // etiquetas de cursos y las nuevas le quedaban invisibles) y solo se pueden borrar las propias. Si ya
+        // existía con ese nombre, solo el admin le cambia el color y nadie se adueña de una etiqueta ajena.
+        if (_labelsCreatedByOk) {
+          await env.DB.prepare('INSERT INTO labels (name, color, created_at, created_by) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO ' + (isAdminSession ? 'UPDATE SET color = excluded.color' : 'NOTHING'))
+            .bind(name, color, new Date().toISOString(), String(session.user || '')).run();
+        } else {
+          await env.DB.prepare('INSERT INTO labels (name, color, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET color = excluded.color').bind(name, color, new Date().toISOString()).run();
+        }
+        const row = await env.DB.prepare(_labelsCreatedByOk ? 'SELECT id, name, color, created_by FROM labels WHERE name = ?' : 'SELECT id, name, color FROM labels WHERE name = ?').bind(name).first();
         return json({ ok: true, id: row && row.id, label: row });
       }
       if (request.method === 'DELETE' && path.startsWith('/admin/labels/')) {
         const id = path.split('/').pop();
+        // Borrar una etiqueta la saca de TODOS los chats (y hay etiquetas que usan las automatizaciones:
+        // POR PAGAR, Para cotizar, Alumno...): el admin borra cualquiera; el resto, solo las que creó.
+        if (!isAdminSession) {
+          await ensureLabelsCreatedBy(env);
+          const own = _labelsCreatedByOk ? await env.DB.prepare('SELECT created_by FROM labels WHERE id = ?').bind(id).first() : null;
+          if (!own || !own.created_by || String(own.created_by).toLowerCase() !== String(session.user || '').toLowerCase()) {
+            return json({ error: 'Solo podés borrar las etiquetas que creaste vos' }, 403);
+          }
+        }
         await env.DB.prepare('DELETE FROM contact_labels WHERE label_id = ?').bind(id).run();
         await env.DB.prepare('DELETE FROM labels WHERE id = ?').bind(id).run();
         return json({ ok: true });

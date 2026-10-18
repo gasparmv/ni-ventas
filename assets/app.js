@@ -16843,7 +16843,9 @@ async function saveLabel(name, color) {
   return j.id;
 }
 async function deleteLabel(id) {
-  await fetch(CONFIG.trackerUrl + '/admin/labels/' + id, { method: 'DELETE', headers: authHeaders() });
+  const r = await fetch(CONFIG.trackerUrl + '/admin/labels/' + id, { method: 'DELETE', headers: authHeaders() });
+  if (!r.ok) { let j = {}; try { j = await r.json(); } catch (_) {} throw new Error(j.error || ('No se pudo eliminar la etiqueta (HTTP ' + r.status + ')')); }
+  forgetCreatedLabel(id);
   chatState.labels = chatState.labels.filter(l => l.id !== id);
   for (const ph of Object.keys(chatState.contactLabels)) {
     chatState.contactLabels[ph] = chatState.contactLabels[ph].filter(lid => lid !== id);
@@ -17988,7 +17990,14 @@ function visibleLabels() {
   const visibles = new Set((chatState.contacts || []).map(c => c.phone));
   const cl = chatState.contactLabels || {};
   for (const p in cl) { if (visibles.has(p)) for (const id of (cl[p] || [])) onHerChats.add(id); }
-  return all.filter(l => CURSOS_LABEL_IDS.includes(l.id) || created.has(l.id) || onHerChats.has(l.id));
+  const yo = String(STATE.user || '').toLowerCase();
+  return all.filter(l => CURSOS_LABEL_IDS.includes(l.id) || created.has(l.id) || onHerChats.has(l.id) || (l.created_by && String(l.created_by).toLowerCase() === yo));
+}
+// ¿Puede borrar esta etiqueta? Borrarla la saca de TODOS los chats: el admin cualquiera; el resto, solo las
+// que creó (el worker hace el mismo control y responde 403).
+function canDeleteLabel(l) {
+  if (isAdmin()) return true;
+  return !!(l && l.created_by && String(l.created_by).toLowerCase() === String(STATE.user || '').toLowerCase());
 }
 
 // Bandeja "Para cotizar": pre cotizaciones que el bot TERMINÓ y esperan que Joaco cotice.
@@ -18091,7 +18100,7 @@ function renderLabelFilterBar() {
               <span class="label-filter-item-dot" style="background:${l.color}"></span>
               <span class="label-filter-item-name">${escapeHtml(l.name)}</span>
               ${active ? '<span class="label-filter-item-check">✓</span>' : ''}
-              <span class="label-filter-item-del" data-del-label="${l.id}" title="Eliminar etiqueta" style="margin-left:auto;padding:0 4px 0 10px;color:#8696a0;font-size:17px;line-height:1;cursor:pointer">×</span>
+              ${canDeleteLabel(l) ? `<span class="label-filter-item-del" data-del-label="${l.id}" title="Eliminar etiqueta" style="margin-left:auto;padding:0 4px 0 10px;color:#8696a0;font-size:17px;line-height:1;cursor:pointer">×</span>` : ''}
             </button>`;
           }).join('')}
           ${labelsCount ? `<button class="label-filter-clear" id="clear-label-filter">Limpiar etiquetas</button>` : ''}
@@ -22662,7 +22671,7 @@ function bindChat() {
       if (!confirm('¿Eliminar la etiqueta "' + (lab ? lab.name : '') + '"? Se saca de todos los chats.')) return;
       forgetCreatedLabel(id);
       chatState.filterLabels = chatState.filterLabels.filter(l => l !== id);
-      deleteLabel(id).then(() => render()).catch(() => toast('✗ No se pudo eliminar la etiqueta'));
+      deleteLabel(id).then(() => render()).catch((e) => toast('✗ ' + ((e && e.message) || 'No se pudo eliminar la etiqueta')));
     };
   });
   // Click afuera del dropdown lo cierra.
@@ -23242,16 +23251,18 @@ function bindBulkSection() {
 
 function showManageLabelsModal() {
   const LABEL_COLORS = ['#ef5350','#ff7043','#ffa726','#ffca28','#66bb6a','#26a69a','#42a5f5','#5c6bc0','#ab47bc','#ec407a','#8d6e63','#78909c'];
+  // Abril (rol cursos) ve solo las de cursos y las suyas, no las de carteles.
+  const lista = isCursosOnly() ? visibleLabels() : chatState.labels;
   const content = `
     <div class="manage-labels">
       <div class="manage-labels-section">
-        <div class="manage-labels-section-h">${chatState.labels.length} etiqueta${chatState.labels.length === 1 ? '' : 's'}</div>
-        ${chatState.labels.length ? `
+        <div class="manage-labels-section-h">${lista.length} etiqueta${lista.length === 1 ? '' : 's'}</div>
+        ${lista.length ? `
           <div class="manage-labels-list">
-            ${chatState.labels.map(l => `
+            ${lista.map(l => `
               <div class="manage-label-row">
                 <span class="label-chip" style="background:${l.color}">${escapeHtml(l.name)}</span>
-                <button class="manage-label-del" data-del-label="${l.id}" title="Eliminar etiqueta">&times;</button>
+                ${canDeleteLabel(l) ? `<button class="manage-label-del" data-del-label="${l.id}" title="Eliminar etiqueta">&times;</button>` : ''}
               </div>
             `).join('')}
           </div>
@@ -23297,7 +23308,7 @@ function showManageLabelsModal() {
         { title: 'Eliminar etiqueta', variant: 'warn', confirmLabel: 'Eliminar' }
       );
       if (!ok) return;
-      await deleteLabel(lid);
+      try { await deleteLabel(lid); } catch (e) { toast('✗ ' + ((e && e.message) || 'No se pudo eliminar la etiqueta')); return; }
       showManageLabelsModal();
       render();
     };
@@ -23309,7 +23320,7 @@ function showManageLabelsModal() {
     if (!name) return;
     if (addBtn) { addBtn.disabled = true; addBtn.textContent = 'Creando…'; }
     try {
-      await saveLabel(name, selectedColor);
+      rememberCreatedLabel(await saveLabel(name, selectedColor));
       toast('✓ Etiqueta creada');
       showManageLabelsModal();
       render();
