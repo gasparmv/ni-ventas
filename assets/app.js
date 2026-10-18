@@ -4717,13 +4717,14 @@ function renderCorte() {
     const rfoto = rp.foto_key ? `<a href="${escapeHtml(mediaUrl(rp.foto_key))}" target="_blank" rel="noopener" title="Abrir en grande"><img src="${mediaUrl(rp.foto_key)}" style="max-width:100%;max-height:${rNeon ? 440 : 320}px;border-radius:10px;border:1px solid var(--border)${rNeon ? ';background:#fff' : ''}" loading="lazy"></a>` : '<div style="padding:40px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:10px">sin foto del diseño</div>';
     // Neón propio: la medida del pedido viene pre-cargada ("ancho 60 × alto 40 cm"); Emma la confirma o corrige.
     // Lo que ella ya tipeó para ESTA pieza (borrador) gana sobre el pre-llenado y sobrevive a los refrescos.
-    // Pedido web: la medida que cargó el alumno también viene pre-cargada (Emma la confirma o la corrige).
+    // La medida la ESCRIBE Emma: lo que mide la matriz que hizo (Gaspar 18-oct). Antes venía pre-cargada la del cliente y en 74 de 74
+    // piezas quedó igual: la "medida real" era la pedida y el precio no se corregía. La del cliente se ve arriba ("Pidió").
     const rWeb = rp.origen === 'landing';
     const rMedTxt = (rNeon || rWeb) ? String(rp.medida_declarada || '') : '';
     const rMA = rMedTxt.match(/ancho\s*([\d]+(?:[.,]\d+)?)/i), rML = rMedTxt.match(/alto\s*([\d]+(?:[.,]\d+)?)/i);
     const rDraft = (STATE.corteRelevDraft && STATE.corteRelevDraft.id === rp.id) ? STATE.corteRelevDraft : null;
-    const rAncho = rDraft ? rDraft.ancho : (rMA ? rMA[1].replace(',', '.') : '');
-    const rAlto = rDraft ? rDraft.alto : (rML ? rML[1].replace(',', '.') : '');
+    const rAncho = rDraft ? rDraft.ancho : '';
+    const rAlto = rDraft ? rDraft.alto : '';
     return `
       <div style="padding:var(--s-4);max-width:1040px">
        <div id="corte-relev-top" style="max-width:640px">
@@ -4738,7 +4739,7 @@ function renderCorte() {
           <div style="font-size:16px;font-weight:700">${escapeHtml(rNeon ? (rp.pedido_numero ? 'Pedido #' + rp.pedido_numero : 'Neon Infinito') : (rp.cliente_nombre || 'cliente'))} — ${escapeHtml(rp.diseno_nombre || 'diseño')}</div>
           <div style="font-size:13px;color:var(--fg-mute);margin-top:2px">${rNeon ? 'Medida del pedido' : 'Pidió'}: ${escapeHtml(rp.medida_declarada || '—')} · Cantidad: ${rcant}${rp.aclaraciones ? ' · ' + escapeHtml(rp.aclaraciones) : ''}</div>
           <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-            <span style="font-size:13px;font-weight:700">Medida real:</span>
+            <span style="font-size:13px;font-weight:700" title="Lo que mide la matriz que hiciste (no lo que pidió el cliente)">Medida real de la matriz:</span>
             <input id="corte-ancho" placeholder="ancho" inputmode="decimal" value="${escapeHtml(rAncho)}" style="width:88px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px">
             <span style="color:var(--fg-mute)">×</span>
             <input id="corte-alto" placeholder="alto" inputmode="decimal" value="${escapeHtml(rAlto)}" style="width:88px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px">
@@ -8387,7 +8388,20 @@ async function bindCorte() {
     const pid = parseInt(relevOk.getAttribute('data-ped'), 10);
     const rp = (STATE.cortePedidos || []).find(p => p.id === pid);
     const nextId = parseInt(relevOk.getAttribute('data-next') || '', 10) || null;
-    relevOk.onclick = () => { STATE._corteRelevNext = nextId; corteAccion('medidas', pid); };
+    relevOk.onclick = async () => {
+      // Muy distinta de lo que pidió el cliente (más de 25% en ancho o alto): se pregunta, por si fue un error de tipeo.
+      const num = v => parseFloat(String(v || '').replace(',', '.')) || 0;
+      const a = num((document.getElementById('corte-ancho') || {}).value), al = num((document.getElementById('corte-alto') || {}).value);
+      const mt = String((rp && rp.medida_declarada) || ''), ma = mt.match(/ancho\s*([\d]+(?:[.,]\d+)?)/i), ml = mt.match(/alto\s*([\d]+(?:[.,]\d+)?)/i);
+      const da = ma ? num(ma[1]) : 0, dl = ml ? num(ml[1]) : 0;
+      if (a > 0 && al > 0 && da > 0 && dl > 0 && (Math.abs(a - da) / da > 0.25 || Math.abs(al - dl) / dl > 0.25)) {
+        const inv = Math.abs(a - dl) / dl <= 0.05 && Math.abs(al - da) / da <= 0.05;
+        const f = x => String(x).replace('.', ',');
+        const ok = await showConfirm(`Pusiste ${f(a)} × ${f(al)} cm y el cliente pidió ${f(da)} × ${f(dl)} cm.${inv ? ' ¿Invertiste ancho y alto?' : ''} ¿Está bien así?`, { title: 'Medida muy distinta', confirmLabel: 'Sí, está bien', cancelLabel: 'Corregir' });
+        if (!ok) { const i = document.getElementById('corte-ancho'); if (i) { try { i.focus(); i.select(); } catch (_) {} } return; }
+      }
+      STATE._corteRelevNext = nextId; corteAccion('medidas', pid);
+    };
     const rai = document.getElementById('corte-ancho'), rali = document.getElementById('corte-alto');
     const upd = () => { STATE.corteRelevDraft = { id: pid, ancho: rai ? rai.value : '', alto: rali ? rali.value : '' }; if (rp) cortePrecioPreview(rp); };
     if (rai) { rai.oninput = upd; rai.onkeydown = (e) => { if (e.key === 'Enter' && rali) rali.focus(); }; try { rai.focus(); } catch (_) {} }
