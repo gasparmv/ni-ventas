@@ -1038,6 +1038,755 @@ async function traceAdForPedido(env, pedido) {
   }
   return { ad, telefono: phone, source_id: sourceId, source_campaign: sourceCamp };
 }
+// ===== ORIGEN DE CADA PEDIDO (oct-2026) =====
+// Gaspar (18-oct): "lo más importante del ads funnel es la trazabilidad". Cada pedido nace con su origen calculado con
+// DATO DURO (resolverOrigenPedido) y un estado:
+//   'auto'       → prueba clara (anuncio, Meta lo confirma, formulario, walink, IG, compra previa, cadena, frase de referido).
+//   'revisar'    → indicio, sin señal, lo eligió el vendedor o algo no cierra (teléfono interno o de otro, choque con lo
+//                  cargado a mano): fila ROJA para Gaspar hasta que lo confirme.
+//   'confirmado' → lo marcó Gaspar.
+//   'historico'  → venta anterior a ORIGEN_DESDE_RECIENTE sin prueba: mejor estimación, no se pinta.
+// Reglas de Gaspar (18-oct): recompra = cliente frecuente salvo anuncio nuevo antes del presupuesto; cadena (otro consultó y
+// compró alguien que trajo) = origen de quien consultó; el anuncio siempre gana; Meta confirma anuncio sin decir cuál →
+// campaña por el texto precargado. Ver memoria origen-pedidos-reglas.
+const ORIGEN_DESDE_RECIENTE = '2026-08-15';
+const ORIGEN_LABELS = {
+  ad_sin_ref: 'Anuncio sin referencia de Meta',
+  linkbio: 'Link bio perfil ig',
+  igdm: 'Instagram DM (no viene de ad)',
+  frecuente: 'Cliente frecuente (no viene de ad)',
+  referido: 'Referido (no viene de ad)',
+  directo: 'Directo (no viene de ad)',
+  web: 'Google / web',
+  sin_frontera: 'Sin Frontera (cuenta corriente)',
+  no_sabe: 'Sin trazar (no se sabe de dónde vino)'
+};
+const ORIGEN_CANALES = ['ad', 'form', 'ad_sin_ref', 'linkbio', 'igdm', 'frecuente', 'referido', 'directo', 'web', 'sin_frontera', 'no_sabe'];
+const ORIGEN_CANALES_ORGANICOS = ['linkbio', 'igdm', 'frecuente', 'referido', 'directo', 'web', 'sin_frontera'];
+// Textos (normalizados: minúsculas, sin acentos ni ¡¿) que delatan el origen.
+const ORIGEN_RX_WALINK = /^(hola!? ?)?quiero cotizar un pedido personalizado/;
+const ORIGEN_RX_IG_CODIGO = /^(hola!? ?)?vengo de instagram/;          // link wa.me que se manda desde los DM de IG
+const ORIGEN_RX_WEB_CODIGO = /\(ref [gw]-[a-z0-9]{2}/;                 // landings de Google / web
+const ORIGEN_RX_REFERIDO = /(me (lo |la )?pas(o|aron|aste|ó) (tu|el|su|este|tus) (contacto|numero|tel|telefono|whats|wsp|wpp|celu)|de parte de (?!(la|el|los|las|un|una|nuestra|nuestro|su|sus)\b)[a-z]{3}|me recomend(o|aron) (a )?(ustedes|uds|vos|este numero|tu numero)|me dieron (tu|el|este) (contacto|numero|telefono)|me dio (tu|el|este) (contacto|numero|telefono)|soy (un |una )?amig[oa] de [a-z]{3}|(un|una|mi) amig[oa] me (paso|pasaron|recomendo|dio))/;
+const ORIGEN_RX_IG_FRASE = /(habl(aba|e|amos|abamos|ando)|escrib(i|ia|imos|iendo)|estaba(mos)? hablando|charl(aba|abamos|e)|consult(e|aba)|nos contactamos).{0,30}(instagram|insta\b|\big\b)/;
+const ORIGEN_RX_FRECUENTE = /(ya (les |te )?(compre|hice|hicimos|pedi|encargue)|soy cliente|somos clientes|me hicieron (un|el|varios|unos)|(otro|el) cartel (que les|anterior))/;
+// Textos precargados de anuncios (Meta los manda sin referencia en ~15% de los clics desde iPhone). grupo 'corporeas' fijo;
+// '' = la campaña se deduce por las referencias que sí llegaron con ese texto en esos días.
+const ORIGEN_TEXTOS_AD = [
+  { rx: /quiero cotizar un cartel corporeo/, grupo: 'corporeas', txt: 'quiero cotizar un cartel corporeo' },
+  { rx: /quiero cotizar un diseno/, grupo: '', txt: 'quiero cotizar un dise' },
+  { rx: /quiero hacer un neon personalizado/, grupo: '', txt: 'quiero hacer un ne' },
+  { rx: /^(hola!? ?)?quiero mas informacion/, grupo: '', txt: 'quiero m' },
+  { rx: /^hacen envios\??$/, grupo: '', txt: 'hacen env' },
+  { rx: /^(hola!? ?)?quiero cotizar un cartel!?$/, grupo: '', txt: 'quiero cotizar un cartel', excluir: 'corpor' }
+];
+const ORIGEN_NOMBRES_GENERICOS = new Set(['logo', 'cartel', 'neon', 'abierto', 'open', 'pizza', 'helado', 'cafe', 'bar', 'hamburguesa', 'nombre', 'letras', 'carteles', 'corporeo', 'corporeos', 'isologo', 'local']);
+
+function _origNorm(s) { return _normTxt(s).replace(/[¡¿]/g, '').replace(/[^a-z0-9!?ñ\s]/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+let _origenSchemaOk = false;
+async function ensureOrigenSchema(env) {
+  if (_origenSchemaOk) return;
+  try { await ensurePedidosSchema(env); } catch (_) {}
+  for (const col of ['origen_canal TEXT', 'origen_estado TEXT', 'origen_regla TEXT', 'origen_evid TEXT', 'origen_grupo TEXT', 'origen_por TEXT', 'origen_at TEXT', 'ig_id TEXT', 'origen_intentos INTEGER']) {
+    try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
+  }
+  const stmts = [
+    "CREATE TABLE IF NOT EXISTS wa_conv_origen (conv_id TEXT PRIMARY KEY, phone TEXT, origin TEXT, ts TEXT)",
+    "CREATE INDEX IF NOT EXISTS idx_wa_conv_origen_phone ON wa_conv_origen (phone, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_pedidos_telefono ON pedidos (telefono)",
+    "CREATE INDEX IF NOT EXISTS idx_pedidos_ig_id ON pedidos (ig_id) WHERE ig_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_pedidos_origen_pend ON pedidos (origen_estado) WHERE origen_estado = 'revisar'",
+    "CREATE INDEX IF NOT EXISTS idx_briefs_created ON briefs (created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_wa_messages_contacts ON wa_messages (ts) WHERE msg_type = 'contacts'"
+  ];
+  for (const s of stmts) { try { await env.DB.prepare(s).run(); } catch (_) {} }
+  _origenSchemaOk = true;
+}
+
+// Marca de Meta en el STATUS de nuestras respuestas: conversation.origin.type = 'referral_conversion' = la conversación
+// la abrió un anuncio (aunque el mensaje no haya traído el referral). Se guarda 1 vez por conversación.
+const _convOrigenVistas = new Set();
+let _convTablaOk = false;
+async function guardarConvOrigen(env, st) {
+  try {
+    const c = st && st.conversation;
+    const tipo = c && c.origin && c.origin.type;
+    if (!c || !c.id || tipo !== 'referral_conversion') return false;
+    if (_convOrigenVistas.has(c.id)) return false;
+    if (!_convTablaOk) { await env.DB.prepare("CREATE TABLE IF NOT EXISTS wa_conv_origen (conv_id TEXT PRIMARY KEY, phone TEXT, origin TEXT, ts TEXT)").run(); _convTablaOk = true; }
+    const ts = st.timestamp ? new Date(parseInt(st.timestamp, 10) * 1000).toISOString() : new Date().toISOString();
+    const r = await env.DB.prepare('INSERT OR IGNORE INTO wa_conv_origen (conv_id, phone, origin, ts) VALUES (?,?,?,?)').bind(String(c.id), String(st.recipient_id || ''), tipo, ts).run();
+    if (_convOrigenVistas.size > 5000) _convOrigenVistas.clear();
+    _convOrigenVistas.add(c.id);
+    return !!(r && r.meta && r.meta.changes);
+  } catch (_) { return false; }
+}
+
+// Datos de un anuncio para el origen: nombres, campaña, si es de cursos (no cuenta) o de corpóreas. Memo por isolate (10 min).
+const _origenInfoMemo = new Map();
+async function origenInfoAnuncio(env, sid, headline) {
+  const mk = String(sid) + '|' + String(headline || '').slice(0, 80);
+  const hit = _origenInfoMemo.get(mk);
+  if (hit && Date.now() - hit.t < 600000) return Object.assign({}, hit.v);
+  const v = await _origenInfoAnuncio(env, sid, headline);
+  if (_origenInfoMemo.size > 800) _origenInfoMemo.clear();
+  _origenInfoMemo.set(mk, { t: Date.now(), v });
+  return Object.assign({}, v);
+}
+async function _origenInfoAnuncio(env, sid, headline) {
+  const out = { ad_name: '', campaign_name: '', campaign_id: '', cursos: false, corporeo: false, label: '' };
+  let m = null;
+  try { m = await env.DB.prepare('SELECT ad_name, ad_set_name, campaign_name, campaign_id FROM meta_ad_map WHERE ad_id = ?').bind(sid).first(); } catch (_) {}
+  if (!m) { try { await metaAdNombres(env, sid); m = await env.DB.prepare('SELECT ad_name, ad_set_name, campaign_name, campaign_id FROM meta_ad_map WHERE ad_id = ?').bind(sid).first(); } catch (_) {} }
+  let man = '';
+  try { const r = await env.DB.prepare('SELECT vertical FROM wa_ad_verticals WHERE ad_id = ?').bind(sid).first(); man = (r && r.vertical) || ''; } catch (_) {}
+  if (m) { out.ad_name = m.ad_name || ''; out.campaign_name = m.campaign_name || ''; out.campaign_id = String(m.campaign_id || ''); }
+  const vn = m ? verticalFromAdNames(m) : '';
+  if (man === 'cursos' || (man !== 'carteles' && man !== 'corporeo' && vn === 'cursos')) out.cursos = true;
+  if (!man && (!m || (vn === '' && headline)) && adLabelFromSource(sid, headline) === '') out.cursos = true;
+  out.corporeo = man === 'corporeo' || CORPOREAS_ADS.indexOf(sid) >= 0 || vn === 'corporeo';
+  out.label = m && (out.ad_name || out.campaign_name)
+    ? [out.ad_name, out.campaign_name].filter(Boolean).join(' · ') + (out.corporeo ? ' (corporeas)' : '')
+    : (adLabelFromSource(sid, headline) || ('Anuncio ' + sid));
+  return out;
+}
+
+// Campaña que corresponde a un texto precargado: la más común entre los chats que SÍ trajeron referral con ese texto
+// en ±10 días. Devuelve {grupo, nombre}: grupo = 'corporeas' | campaign_id | ''.
+const _origenCampTexto = new Map();
+async function origenCampanaPorTexto(env, txt, centroIso, excluir) {
+  const dia = String(centroIso || '').slice(0, 10);
+  const key = txt + '|' + (excluir || '') + '|' + dia;
+  if (_origenCampTexto.has(key)) return _origenCampTexto.get(key);
+  const c = Date.parse(centroIso || new Date().toISOString());
+  let out = { grupo: '', nombre: '' };
+  try {
+    const rs = (await env.DB.prepare(
+      "SELECT a.source_id sid, COUNT(*) n FROM wa_ad_attributions a JOIN wa_messages w ON w.wamid = a.wamid WHERE a.ts BETWEEN ? AND ? AND COALESCE(a.source_id,'') != '' AND w.direction = 'inbound' AND lower(w.body) LIKE ?" +
+      (excluir ? " AND lower(w.body) NOT LIKE ?" : '') + " GROUP BY a.source_id ORDER BY n DESC LIMIT 25"
+    ).bind(new Date(c - 10 * 86400000).toISOString(), new Date(c + 10 * 86400000).toISOString(), '%' + txt + '%', ...(excluir ? ['%' + excluir + '%'] : [])).all()).results || [];
+    const cuenta = {}, nombres = {};
+    for (const r of rs) {
+      const info = await origenInfoAnuncio(env, String(r.sid), '');
+      if (info.cursos) continue;
+      const g = info.corporeo ? 'corporeas' : info.campaign_id;
+      if (!g) continue;
+      cuenta[g] = (cuenta[g] || 0) + (Number(r.n) || 1); nombres[g] = info.corporeo ? 'Corpóreas' : info.campaign_name;
+    }
+    const top = Object.keys(cuenta).sort((a, b) => cuenta[b] - cuenta[a])[0];
+    if (top) out = { grupo: top, nombre: nombres[top] || '' };
+  } catch (_) {}
+  _origenCampTexto.set(key, out);
+  if (_origenCampTexto.size > 200) _origenCampTexto.clear();
+  return out;
+}
+
+function _origMedidasIguales(a1, b1, a2, b2) {
+  const n = (v) => Number(v) || 0;
+  const A1 = n(a1), B1 = n(b1), A2 = n(a2), B2 = n(b2);
+  if (!(A1 > 0 && B1 > 0 && A2 > 0 && B2 > 0)) return false;
+  const ok = (x, y) => Math.abs(x - y) <= 3;
+  return (ok(A1, A2) && ok(B1, B2)) || (ok(A1, B2) && ok(B1, A2));
+}
+function _origNombreIgual(a, b) {
+  const x = _origNorm(a).replace(/[!?]/g, ''), y = _origNorm(b).replace(/[!?]/g, '');
+  if (x.length < 3 || y.length < 3 || ORIGEN_NOMBRES_GENERICOS.has(x) || ORIGEN_NOMBRES_GENERICOS.has(y)) return false;
+  if (x === y) return true;
+  const corto = x.length < y.length ? x : y, largo = x.length < y.length ? y : x;
+  return largo.indexOf(corto) >= 0 && corto.length / largo.length >= 0.6;
+}
+
+// "Mismo trato" (cadena): el mismo cartel con las mismas medidas se le cotizó antes a OTRO chat, o ese chat nos mandó la
+// tarjeta de contacto del comprador. Devuelve {phone, via, nombre} o null.
+async function origenCadena(env, keys, carteles, cutIso, antesDeIso) {
+  const cut = Date.parse(cutIso), desde = new Date(cut - 60 * 86400000).toISOString();
+  const hasta = antesDeIso && antesDeIso < cutIso ? antesDeIso : cutIso;
+  const otros = (p) => p && keys.indexOf(String(p)) < 0;
+  try {
+    const bs = (await env.DB.prepare("SELECT cliente_wa_id ph, cliente_nombre n, alto_cm a, ancho_cm b, created_at t FROM briefs WHERE created_at BETWEEN ? AND ? AND COALESCE(cliente_wa_id,'') != '' ORDER BY created_at DESC LIMIT 1500").bind(desde, hasta).all()).results || [];
+    for (const c of carteles) {
+      for (const b of bs) {
+        const ph = String(b.ph).replace(/\D/g, '');
+        if (!otros(ph)) continue;
+        if (_origNombreIgual(c.cartel, b.n) && _origMedidasIguales(c.alto, c.ancho, b.a, b.b)) return { phone: ph, via: 'presupuesto', nombre: String(b.n || '') };
+      }
+    }
+  } catch (_) {}
+  try {
+    for (const k of keys) {
+      const ult8 = k.slice(-8);
+      if (ult8.length < 8) continue;
+      const r = await env.DB.prepare("SELECT phone FROM wa_messages WHERE msg_type = 'contacts' AND direction = 'inbound' AND ts BETWEEN ? AND ? AND body LIKE ? LIMIT 1").bind(desde, cutIso, '%' + ult8.slice(0, 4) + '%' + ult8.slice(4) + '%').first();
+      if (r && otros(r.phone)) return { phone: String(r.phone), via: 'tarjeta de contacto', nombre: '' };
+    }
+  } catch (_) {}
+  return null;
+}
+
+// Canal que representa un texto viejo de pedidos.ad (cargado a mano o por la traza anterior).
+function canalDeLabel(ad, sid, scamp) {
+  if (String(sid || '').trim()) return 'ad';
+  if (String(scamp || '').replace(/\D/g, '')) return 'form';
+  let t = _normTxt(ad).trim();
+  if (!t) return '';
+  t = t.replace(/^revisar:?\s*/, '');
+  if (t.indexOf('instagram dm') >= 0) return 'igdm';
+  if (t.indexOf('sin referencia') >= 0) return 'ad_sin_ref';
+  if (t.indexOf('link bio') >= 0) return 'linkbio';
+  if (t.indexOf('frecuente') >= 0) return 'frecuente';
+  if (t.indexOf('referido') >= 0) return 'referido';
+  if (t.indexOf('sin frontera') >= 0) return 'sin_frontera';
+  if (t.indexOf('google') >= 0) return 'web';
+  if (t.indexOf('no pudimos') >= 0 || t.indexOf('sin trazar') >= 0) return 'no_sabe';
+  if (t.indexOf('directo') >= 0) return 'directo';
+  if (verticalOfAdText(ad) || t.indexOf('ig ad') === 0 || t.indexOf('fb ad') === 0 || t.indexOf(' · ') > 0) return 'ad';
+  if (t.indexOf('anuncio') >= 0 || t.indexOf('facebook') >= 0 || /\bmeta\b/.test(t)) return 'ad_sin_ref';
+  if (t.indexOf('instagram') >= 0) return 'igdm';
+  return '';
+}
+
+// Calcula el origen de una venta. o = { telefono, igId, carteles:[{cartel, alto, ancho}], cutIso, clienteSf, excluirIds, sinCadena }.
+// Nunca tira: ante un error devuelve no_sabe/revisar con el motivo.
+async function resolverOrigenPedido(env, o) {
+  const cut = o.cutIso || new Date().toISOString();
+  const cutMs = Date.parse(cut);
+  const DAY = 86400000;
+  const iso = (ms) => new Date(ms).toISOString();
+  const res = (canal, estado, regla, evid, extra) => Object.assign({ canal, estado, regla, evid: evid || {}, source_id: '', source_campaign: '', grupo: '', label: ORIGEN_LABELS[canal] || '' }, extra || {});
+  try {
+    await ensureOrigenSchema(env);
+    if (o.clienteSf) return res('sin_frontera', 'auto', 'sin_frontera', {});
+    let I = { set: new Set() };
+    try { I = await internosSet(env); } catch (_) {}
+    const avisos = [];
+    const keys = [];
+    let waPhone = '';
+    const dig = String(o.telefono || '').replace(/\D/g, '');
+    if (dig.length >= 15) keys.push(dig);
+    else if (dig.length >= 8) {
+      const tel = await telefonoDelChat(env, dig);
+      if (I.set && I.set.has(_avDig(tel))) avisos.push('telefono_interno');
+      else { waPhone = tel; keys.push(tel); }
+    }
+    const ig = String(o.igId || '').replace(/\D/g, '');
+    if (ig.length >= 15 && keys.indexOf(ig) < 0) keys.push(ig);
+    if (!keys.length) return res('no_sabe', 'revisar', avisos[0] || 'sin_telefono', { avisos: avisos.length ? avisos : ['sin_telefono'] });
+    const ph = keys.map(() => '?').join(',');
+    // El mismo cliente en pedidos: teléfono, IGSID (ig_id) o el @usuario guardado en telefono (ventas por Instagram).
+    const alias = String(o.alias || '').trim().toLowerCase();
+    const igKeys = keys.filter(k => k.length >= 15);
+    const cliW = '(telefono IN (' + ph + ')' + (igKeys.length ? ' OR ig_id IN (' + igKeys.map(() => '?').join(',') + ')' : '') + (alias ? ' OR lower(telefono) = ?' : '') + ')';
+    const cliB = [...keys, ...igKeys, ...(alias ? [alias] : [])];
+    const fallos = [];
+
+    // Canal y primer mensaje de cada chat (sanity: un teléfono cuyo chat arranca DESPUÉS de la venta es de otro cliente).
+    const chats = {};
+    try {
+      for (const r of ((await env.DB.prepare(`SELECT phone, channel, contact_name FROM wa_chats_summary WHERE phone IN (${ph})`).bind(...keys).all()).results || [])) chats[String(r.phone)] = { ch: r.channel || '', nombre: r.contact_name || '' };
+    } catch (_) {}
+    if (waPhone) {
+      try {
+        const f = await env.DB.prepare('SELECT MIN(ts) t FROM wa_messages WHERE phone = ?').bind(waPhone).first();
+        if (f && f.t && f.t > iso(cutMs + 3600e3)) avisos.push('telefono_dudoso');
+      } catch (_) {}
+    }
+    const esIg = (k) => k.length >= 15 || (chats[k] && chats[k].ch === 'ig');
+
+    // Compra anterior del mismo cliente (no la de esta misma carga).
+    const exc = Array.isArray(o.excluirIds) ? o.excluirIds.map(Number).filter(Boolean) : [];
+    // Hora de cada venta: la del alta si es del CRM; las del Excel/backfill tienen la hora de importación → fin del día AR.
+    const T_SQL = "(CASE WHEN IFNULL(origen,'') = 'crm' AND IFNULL(created_at,'') != '' THEN created_at ELSE strftime('%Y-%m-%dT%H:%M:%fZ', fecha || 'T03:00:00Z', '+1 day') END)";
+    let prev = null;
+    try {
+      prev = await env.DB.prepare(
+        `SELECT id, fecha, ${T_SQL} t, origen_canal, origen_estado, origen_grupo, ad, source_id, source_campaign FROM pedidos WHERE ${cliW}${exc.length ? ' AND id NOT IN (' + exc.map(() => '?').join(',') + ')' : ''} AND ${T_SQL} < ? ORDER BY ${T_SQL} DESC, id DESC LIMIT 1`
+      ).bind(...cliB, ...exc, iso(cutMs - 12 * 3600e3)).first();
+    } catch (_) { fallos.push('compra anterior'); }
+    const tPrev = prev ? Date.parse(prev.t) || 0 : 0;
+
+    // "Consulta actual": si la charla tuvo un hueco de 30+ días, lo de después es una consulta nueva.
+    let iniConsulta = 0;
+    try {
+      const g = await env.DB.prepare(`SELECT MAX(ts) t FROM (SELECT ts, LAG(ts) OVER (ORDER BY ts) p FROM wa_messages WHERE phone IN (${ph}) AND msg_type != 'status' AND ts > ? AND ts <= ?) WHERE p IS NOT NULL AND julianday(ts) - julianday(p) >= 30`).bind(...keys, iso(Math.max(tPrev, cutMs - 75 * DAY)), cut).first();
+      if (g && g.t) iniConsulta = Date.parse(g.t) - 1000;
+    } catch (_) { fallos.push('charla'); }
+
+    // Primer presupuesto u OC de la venta (después de la compra anterior, hasta 75 días antes) → ventana del anuncio.
+    const primerPresup = async (desdeMs) => {
+      const lo = iso(Math.max(tPrev, cutMs - 75 * DAY, desdeMs || 0));
+      const q1 = await env.DB.prepare(`SELECT MIN(ts) t FROM wa_messages WHERE phone IN (${ph}) AND direction = 'outbound' AND ${KPI_PRESUP_SQL} AND ts > ? AND ts <= ?`).bind(...keys, lo, cut).first();
+      const q2 = await env.DB.prepare(`SELECT MIN(ts) t FROM wa_messages WHERE phone IN (${ph}) AND direction = 'outbound' AND body LIKE 'Orden de compra%' AND ts > ? AND ts <= ?`).bind(...keys, lo, cut).first();
+      return [q1 && q1.t, q2 && q2.t].filter(Boolean).sort()[0] || cut;
+    };
+    let tq = cut;
+    try { tq = await primerPresup(0); } catch (_) { fallos.push('presupuesto'); }
+    const w0 = iso(Math.max(tPrev, Date.parse(tq) - 28 * DAY));
+    const fin = (r) => { if (avisos.length && r.estado === 'auto') { r.estado = 'revisar'; r.evid = Object.assign({}, r.evid, { avisos }); } return r; };
+
+    // 1) ANUNCIO del propio cliente (CTWA / anuncio de IG / post promocionado / formulario): el último antes del presupuesto.
+    //    Primero en la consulta actual (un anuncio que reactivó a un lead dormido gana); si ahí no hay, en toda la ventana.
+    const buscarAnuncio = async (desde, hasta) => {
+      let mejor = null;
+      try {
+        const ts = (await env.DB.prepare(
+          `SELECT a.source_id sid, a.source_type st, a.ts, a.headline, g.ad_id ig_ad FROM wa_ad_attributions a LEFT JOIN ig_ad_map g ON a.source_type = 'ig_post' AND g.media_id = a.source_id WHERE a.phone IN (${ph}) AND COALESCE(a.source_id,'') != '' AND a.ts > ? AND a.ts <= ? ORDER BY a.ts DESC LIMIT 10`
+        ).bind(...keys, desde, hasta).all()).results || [];
+        for (const t of ts) {
+          let sid = String(t.sid);
+          if (t.st === 'ig_post') { if (!t.ig_ad) continue; sid = String(t.ig_ad); }
+          else if (['ig_reel', 'story_mention', 'share'].indexOf(String(t.st || '')) >= 0) continue;
+          const info = await origenInfoAnuncio(env, sid, t.headline);
+          if (info.cursos) continue;
+          mejor = { ts: t.ts, r: res('ad', 'auto', 'anuncio', { ts: t.ts, tipo: t.st || 'ad', anuncio: info.ad_name, campana: info.campaign_name }, { source_id: sid, source_campaign: info.campaign_id, grupo: info.corporeo ? 'corporeas' : info.campaign_id, label: info.label }) };
+          break;
+        }
+      } catch (_) { fallos.push('anuncios'); }
+      try {
+        const l = await env.DB.prepare(`SELECT ad_id, ad_name, campaign_id, received_at FROM wa_leads WHERE phone IN (${ph}) AND received_at > ? AND received_at <= ? ORDER BY received_at DESC LIMIT 1`).bind(...keys, desde, hasta).first();
+        if (l && (!mejor || l.received_at > mejor.ts)) {
+          const sid = String(l.ad_id || '').replace(/\D/g, ''), cid = String(l.campaign_id || '').replace(/\D/g, '');
+          const nom = String(l.ad_name || '').split(' - B2B')[0].trim();
+          mejor = { ts: l.received_at, r: res('form', 'auto', 'formulario', { ts: l.received_at, anuncio: nom }, { source_id: sid, source_campaign: cid, grupo: cid, label: (nom || 'Formulario de Meta') + ' (b2b form)' }) };
+        }
+      } catch (_) { fallos.push('formularios'); }
+      return mejor;
+    };
+    const ventanas = [];
+    let tqC = '';
+    if (iniConsulta > Date.parse(w0)) {
+      try { tqC = await primerPresup(iniConsulta); ventanas.push([iso(Math.max(tPrev, iniConsulta - DAY, Date.parse(tqC) - 28 * DAY)), tqC]); } catch (_) { fallos.push('presupuesto'); }
+    }
+    ventanas.push([w0, tq]);
+    for (const [a, b] of ventanas) {
+      const mejor = await buscarAnuncio(a, b);
+      if (mejor) return fin(mejor.r);
+    }
+    // Si una consulta clave falló, no se sigue con señales más débiles (se reintenta después).
+    if (fallos.length) return res('no_sabe', 'revisar', 'error', { error: 'falló: ' + [...new Set(fallos)].join(', ') });
+
+    // Primeros mensajes del cliente en esta charla (para textos precargados, frases y walink).
+    let primeros = [];
+    try {
+      primeros = ((await env.DB.prepare(`SELECT phone, ts, body FROM wa_messages WHERE phone IN (${ph}) AND direction = 'inbound' AND msg_type != 'status' AND ts > ? AND ts <= ? ORDER BY ts LIMIT 6`).bind(...keys, iso(Math.max(tPrev, cutMs - 120 * DAY)), cut).all()).results || []);
+    } catch (_) {}
+    const textos = primeros.map(m => _origNorm(m.body)).filter(Boolean);
+    const textoAd = (() => { for (const t of textos.slice(0, 3)) for (const x of ORIGEN_TEXTOS_AD) if (x.rx.test(t)) return x; return null; })();
+
+    // 2) META confirma que la conversación vino de un anuncio (aunque no dijo cuál): campaña por el texto precargado.
+    try {
+      const conv = await env.DB.prepare(`SELECT MIN(ts) t FROM wa_conv_origen WHERE phone IN (${ph}) AND origin = 'referral_conversion' AND ts > ? AND ts <= ?`).bind(...keys, w0, iso(Date.parse(tqC && tqC > tq ? tqC : tq) + DAY)).first();
+      let deCursos = false;
+      if (conv && conv.t) {
+        const ct = Date.parse(conv.t);
+        const cerca = (await env.DB.prepare(`SELECT source_id sid, source_type st, headline FROM wa_ad_attributions WHERE phone IN (${ph}) AND COALESCE(source_id,'') != '' AND ts BETWEEN ? AND ? LIMIT 5`).bind(...keys, iso(ct - DAY), iso(ct + 3600e3)).all()).results || [];
+        deCursos = cerca.length > 0;
+        for (const a of cerca) {
+          if (['ig_reel', 'story_mention', 'share', 'ig_post'].indexOf(String(a.st || '')) >= 0) { deCursos = false; break; }
+          if (!(await origenInfoAnuncio(env, String(a.sid), a.headline)).cursos) { deCursos = false; break; }
+        }
+      }
+      if (conv && conv.t && !deCursos) {
+        let grupo = '', nombre = '';
+        if (textoAd) {
+          if (textoAd.grupo) { grupo = textoAd.grupo; nombre = 'Corpóreas'; }
+          else { const c = await origenCampanaPorTexto(env, textoAd.txt, conv.t, textoAd.excluir); grupo = c.grupo; nombre = c.nombre; }
+        }
+        return fin(res('ad_sin_ref', 'auto', 'meta_sin_referencia', { conv_ts: conv.t, texto: textoAd ? textoAd.txt : '' },
+          { grupo, label: ORIGEN_LABELS.ad_sin_ref + (nombre ? ' · ' + nombre : '') }));
+      }
+    } catch (_) { return res('no_sabe', 'revisar', 'error', { error: 'falló: Meta' }); }
+
+    // 3) CADENA: lo consultó otro chat (mismo cartel y medidas, o nos mandó la tarjeta de este cliente) → su origen.
+    let cartelesCad = Array.isArray(o.carteles) ? o.carteles.slice(0, 20) : [];
+    if (!o.sinCadena) {
+      try {
+        const dAr = cutMs - 3 * 3600e3;
+        const sib = (await env.DB.prepare(`SELECT cartel, alto, ancho FROM pedidos WHERE ${cliW} AND fecha BETWEEN ? AND ?${exc.length ? ' AND id NOT IN (' + exc.map(() => '?').join(',') + ')' : ''} LIMIT 12`)
+          .bind(...cliB, iso(dAr - DAY).slice(0, 10), iso(dAr + DAY).slice(0, 10), ...exc).all()).results || [];
+        for (const x of sib) if (x.cartel) cartelesCad.push({ cartel: x.cartel, alto: x.alto, ancho: x.ancho });
+      } catch (_) {}
+    }
+    if (!o.sinCadena && cartelesCad.length) {
+      const antesDe = primeros[0] ? iso(Date.parse(primeros[0].ts) + DAY) : cut;
+      const cad = await origenCadena(env, keys, cartelesCad.slice(0, 24), cut, antesDe);
+      if (cad) {
+        const r2 = await resolverOrigenPedido(env, { telefono: cad.phone, igId: cad.phone.length >= 15 ? cad.phone : '', cutIso: cut, sinCadena: true });
+        if (r2.canal !== 'no_sabe' && r2.canal !== 'sin_frontera' && r2.regla !== 'error') {
+          const propio = (() => { for (const t of textos.slice(0, 3)) { if (ORIGEN_RX_WALINK.test(t)) return 'linkbio'; if (ORIGEN_RX_IG_CODIGO.test(t)) return 'igdm'; if (ORIGEN_RX_WEB_CODIGO.test(t)) return 'web'; } return ''; })();
+          const out = Object.assign({}, r2, { regla: 'cadena:' + r2.regla, evid: Object.assign({}, r2.evid, { cadena: cad }) });
+          if (propio && propio !== r2.canal) { out.estado = 'revisar'; out.evid.nota = 'El comprador escribió con su propio ' + (ORIGEN_LABELS[propio] || propio) + '.'; }
+          return fin(out);
+        }
+      }
+    }
+
+    // 4) COMPRA ANTERIOR: <30 días en la misma charla hereda su origen; si no, cliente frecuente.
+    if (prev) {
+      const dias = Math.round((cutMs - tPrev) / DAY);
+      const canalPrev = prev.origen_canal || canalDeLabel(prev.ad, prev.source_id, prev.source_campaign) || 'no_sabe';
+      if (dias < 30 && canalPrev !== 'sin_frontera') {
+        const estadoPrev = (canalPrev === 'no_sabe' || prev.origen_estado === 'revisar' || !prev.origen_estado) ? 'revisar' : 'auto';
+        return fin(res(canalPrev, estadoPrev, 'misma_charla', { pedido_previo: prev.id, fecha_previa: prev.fecha, dias },
+          { source_id: String(prev.source_id || ''), source_campaign: String(prev.source_campaign || ''), grupo: String(prev.origen_grupo || ''),
+            label: canalPrev === 'no_sabe' ? ORIGEN_LABELS.no_sabe : (prev.ad || ORIGEN_LABELS[canalPrev] || '') }));
+      }
+      return fin(res('frecuente', 'auto', 'compra_previa', { pedido_previo: prev.id, fecha_previa: prev.fecha, dias }));
+    }
+
+    // 5) REFERIDO por frase en tercera persona ("me pasó tu contacto", "de parte de", "amigo de").
+    for (const t of textos) {
+      const m = t.match(ORIGEN_RX_REFERIDO);
+      if (m) return fin(res('referido', 'auto', 'frase_referido', { frase: t.slice(Math.max(0, m.index - 20), m.index + 70) }));
+    }
+
+    // 6) INSTAGRAM: la venta se hizo en un chat de IG, o el cliente vino de IG al WhatsApp.
+    const kIg = keys.find(esIg);
+    if (kIg) {
+      if (textoAd) return fin(res('ad_sin_ref', 'revisar', 'ig_texto_anuncio', { texto: textoAd.txt, nota: 'IG no avisa si la charla vino de un anuncio' }, { grupo: textoAd.grupo || '' }));
+      return fin(res('igdm', 'auto', 'venta_por_ig', { ig: kIg }));
+    }
+    if (waPhone) {
+      for (const t of textos.slice(0, 3)) {
+        if (ORIGEN_RX_IG_CODIGO.test(t)) return fin(res('igdm', 'auto', 'codigo_ig', { texto: t.slice(0, 60) }));
+        if (ORIGEN_RX_WEB_CODIGO.test(t)) return fin(res('web', 'auto', 'codigo_web', { texto: t.slice(0, 80) }));
+      }
+      for (const t of textos) {
+        const m = t.match(ORIGEN_RX_IG_FRASE);
+        if (m) return fin(res('igdm', 'auto', 'frase_ig', { frase: t.slice(Math.max(0, m.index - 10), m.index + 60) }));
+      }
+      const waIni = primeros.find(m => m.phone === waPhone);
+      if (waIni) {
+        const t0 = Date.parse(waIni.ts);
+        try {
+          // El cliente escribió su número en un DM de IG (hasta 7 días antes).
+          const ult8 = waPhone.slice(-8);
+          const r = await env.DB.prepare("SELECT phone FROM wa_messages WHERE ts BETWEEN ? AND ? AND direction = 'inbound' AND channel = 'ig' AND (body LIKE ? OR body LIKE ?) LIMIT 1")
+            .bind(iso(t0 - 7 * DAY), iso(t0 + DAY), '%' + ult8 + '%', '%' + ult8.slice(0, 4) + '%' + ult8.slice(4) + '%').first();
+          if (r && r.phone) return fin(res('igdm', 'auto', 'numero_en_dm', { ig: String(r.phone) }));
+        } catch (_) {}
+        try {
+          // Mismo texto largo en el DM de IG y en el WhatsApp (±24 h): es la misma consulta.
+          const largo = primeros.filter(m => m.phone === waPhone).map(m => String(m.body || '').trim()).find(b => b.length >= 40);
+          if (largo) {
+            const r = await env.DB.prepare("SELECT phone FROM wa_messages WHERE ts BETWEEN ? AND ? AND direction = 'inbound' AND channel = 'ig' AND body = ? LIMIT 1").bind(iso(t0 - DAY), iso(t0 + 3600e3), largo).first();
+            if (r && r.phone) return fin(res('igdm', 'auto', 'mismo_texto_ig', { ig: String(r.phone) }));
+          }
+        } catch (_) {}
+        try {
+          // Le pasamos nuestro número por IG poco antes de que escribiera al WhatsApp.
+          const r = await env.DB.prepare("SELECT phone, ts FROM wa_messages WHERE ts BETWEEN ? AND ? AND direction = 'outbound' AND channel = 'ig' AND (body LIKE '%3370-8544%' OR body LIKE '%33708544%' OR body LIKE '%3370 8544%') ORDER BY ts DESC LIMIT 5").bind(iso(t0 - 120 * 60e3), iso(t0)).all();
+          const cand = ((r && r.results) || []).map(x => String(x.phone));
+          if (cand.length) {
+            const nomWa = _origNorm((chats[waPhone] || {}).nombre).split(' ')[0];
+            let igNom = '';
+            try { const c = await env.DB.prepare(`SELECT contact_name FROM wa_chats_summary WHERE phone IN (${cand.map(() => '?').join(',')})`).bind(...cand).all(); igNom = ((c && c.results) || []).map(x => _origNorm(x.contact_name)).join(' '); } catch (_) {}
+            if (nomWa && nomWa.length >= 3 && igNom.indexOf(nomWa) >= 0) return fin(res('igdm', 'auto', 'numero_pasado_por_ig', { ig: cand[0] }));
+            var sugIg = { canal: 'igdm', motivo: 'Le pasamos el número por Instagram ' + Math.round((t0 - Date.parse((r.results[0] || {}).ts || t0)) / 60e3) + ' min antes, pero el nombre no coincide' };
+          }
+        } catch (_) {}
+      }
+    }
+
+    // 7) WALINK de la bio de IG (primer mensaje con el texto precargado del link, también editado).
+    for (const t of textos.slice(0, 2)) {
+      if (ORIGEN_RX_WALINK.test(t)) return fin(res('linkbio', 'auto', 'walink', { texto: t.slice(0, 70) }));
+    }
+
+    // 8) Sin prueba: sugerencias para que el vendedor/Gaspar elija.
+    if (textoAd) return fin(res('ad_sin_ref', 'revisar', 'texto_anuncio_sin_meta', { texto: textoAd.txt, nota: 'Escribió con el texto de un anuncio pero Meta no lo confirmó' }, { grupo: textoAd.grupo || '' }));
+    for (const t of textos) {
+      if (ORIGEN_RX_FRECUENTE.test(t)) return fin(res('frecuente', 'revisar', 'frase_cliente_vuelve', { frase: t.slice(0, 90) }));
+    }
+    if (typeof sugIg !== 'undefined' && sugIg) return fin(res('igdm', 'revisar', 'sugerencia_ig', { nota: sugIg.motivo }));
+    return fin(res('no_sabe', 'revisar', 'sin_senal', { primer: textos[0] ? textos[0].slice(0, 90) : '', avisos }));
+  } catch (e) {
+    return res('no_sabe', 'revisar', 'error', { error: String((e && e.message) || e).slice(0, 200) });
+  }
+}
+
+// Escribe el origen en TODAS las filas de una venta. r = resultado del resolver (o de una confirmación).
+async function guardarOrigenPedido(env, ids, r, por, opts) {
+  if (!ids || !ids.length) return;
+  const espejar = !(opts && opts.sinEspejo);
+  const now = new Date().toISOString();
+  const ev = Object.assign({}, r.evid || {});
+  if (!ev.txt) ev.txt = origenExplicacion(r);
+  // Nunca un JSON cortado (rompe json_extract): primero se acortan los textos largos.
+  let evid = JSON.stringify(ev);
+  if (evid.length > 1800) { for (const k of Object.keys(ev)) if (typeof ev[k] === 'string' && ev[k].length > 160) ev[k] = ev[k].slice(0, 160); evid = JSON.stringify(ev); }
+  if (evid.length > 1800) evid = JSON.stringify({ txt: String(ev.txt || '').slice(0, 300), recortado: true });
+  const label = r.label || '';
+  const esAd = r.canal === 'ad' || r.canal === 'form';
+  // Al Excel (col Ad) solo filas que cargó el CRM, de neón, y cuyo label cambió; el barrido no re-empuja nada.
+  const SUCIO = "(? = 1 AND IFNULL(es_corporeo,0) = 0 AND IFNULL(origen,'') = 'crm' AND ? != '' AND IFNULL(ad,'') != ?)";
+  const S = [espejar ? 1 : 0, label, label];
+  const stmts = ids.map(id => env.DB.prepare(
+    "UPDATE pedidos SET origen_canal = ?, origen_estado = ?, origen_regla = ?, origen_evid = ?, origen_grupo = ?, origen_por = ?, origen_at = ?, origen_intentos = 0, " +
+    "mirror_dirty = CASE WHEN " + SUCIO + " THEN 1 ELSE mirror_dirty END, mirror_attempts = CASE WHEN " + SUCIO + " THEN 0 ELSE mirror_attempts END, " +
+    "mirror_error = CASE WHEN " + SUCIO + " THEN NULL ELSE mirror_error END, updated_at = CASE WHEN " + SUCIO + " THEN ? ELSE updated_at END, " +
+    "ad = CASE WHEN ? != '' THEN ? ELSE ad END, source_id = ?, source_campaign = ? WHERE id = ?"
+  ).bind(r.canal, r.estado, r.regla || '', evid, r.grupo || '', por || '', now, ...S, ...S, ...S, ...S, now, label, label,
+    esAd ? (r.source_id || null) : null, esAd ? (r.source_campaign || null) : null, id));
+  for (let i = 0; i < stmts.length; i += 40) await env.DB.batch(stmts.slice(i, i + 40));
+}
+
+// Ventas que dependen del origen de estas (recompras que lo heredan, otras del mismo cliente ±1 día): se recalculan
+// (nunca las confirmadas por Gaspar). Lo usan el alta y "Confirmar origen". Devuelve cuántas ventas recalculó.
+async function origenRecalcularRelacionadas(env, ids) {
+  if (!ids || !ids.length) return 0;
+  const ph = ids.map(() => '?').join(',');
+  const rel = new Set();
+  try {
+    for (const r of ((await env.DB.prepare(`SELECT id FROM pedidos WHERE origen_regla = 'misma_charla' AND IFNULL(origen_estado,'') != 'confirmado' AND CAST(CASE WHEN json_valid(origen_evid) THEN json_extract(origen_evid, '$.pedido_previo') END AS INTEGER) IN (${ph}) LIMIT 20`).bind(...ids).all()).results || [])) rel.add(r.id);
+    const b = await env.DB.prepare('SELECT telefono, fecha FROM pedidos WHERE id = ?').bind(ids[0]).first();
+    if (b && String(b.telefono || '').replace(/\D/g, '').length >= 8) {
+      for (const r of ((await env.DB.prepare(`SELECT id FROM pedidos WHERE telefono = ? AND fecha BETWEEN date(?, '-1 day') AND date(?, '+1 day') AND origen_canal IS NOT NULL AND IFNULL(origen_estado,'') != 'confirmado' AND id NOT IN (${ph}) LIMIT 20`).bind(b.telefono, b.fecha, b.fecha, ...ids).all()).results || [])) rel.add(r.id);
+    }
+  } catch (_) {}
+  const lst = [...rel].filter(i => ids.indexOf(i) < 0);
+  if (lst.length) { try { await origenBarrer(env, { limit: 6, soloIds: lst }); } catch (_) {} }
+  return lst.length;
+}
+
+// Campaña elegida a mano para un origen de anuncio: 'corporeas' o un campaign_id de Meta → { label, grupo, scamp }.
+async function origenCampanaElegida(env, canal, camp) {
+  const pre = canal === 'ad_sin_ref' ? ORIGEN_LABELS.ad_sin_ref : 'Anuncio';
+  if (camp === 'corporeas') return { label: pre + ' · Corpóreas (corporeas)', grupo: 'corporeas', scamp: '' };
+  if (!/^\d+$/.test(camp)) return null;
+  let nom = ''; try { const c = await env.DB.prepare('SELECT campaign_name FROM meta_campaigns WHERE campaign_id = ?').bind(camp).first(); nom = (c && c.campaign_name) || ''; } catch (_) {}
+  return { label: pre + (nom ? ' · ' + nom : ''), grupo: camp, scamp: canal === 'ad_sin_ref' ? '' : camp };
+}
+
+// Filas que forman la MISMA venta que el pedido id (mismo número, fecha, vendedor y teléfono).
+async function idsDeLaVenta(env, id) {
+  const p = await env.DB.prepare("SELECT numero, fecha, IFNULL(comercial_id,'joaco') com, COALESCE(telefono,'') tel, IFNULL(origen,'') origen FROM pedidos WHERE id = ?").bind(id).first();
+  if (!p) return [];
+  const rs = p.origen === 'crm'
+    ? await env.DB.prepare("SELECT id FROM pedidos WHERE numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ? AND COALESCE(telefono,'') = ? LIMIT 60").bind(p.numero, p.fecha, p.com, p.tel).all()
+    : await env.DB.prepare("SELECT id FROM pedidos WHERE numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ? AND IFNULL(origen,'') = ? LIMIT 60").bind(p.numero, p.fecha, p.com, p.origen).all();
+  const ids = ((rs && rs.results) || []).map(r => r.id);
+  return ids.length ? ids : [id];
+}
+
+// Decide qué se guarda en una venta YA cargada (barrido / histórico), cuidando lo que se cargó a mano:
+// - En lo reciente (desde ORIGEN_DESDE_RECIENTE) cualquier choque con lo cargado a mano o falta de prueba queda 'revisar'.
+// - En lo viejo la prueba dura corrige lo cargado; sin prueba queda 'historico' (no se pinta).
+function origenPoliticaExistente(row, r) {
+  const humano = canalDeLabel(row.ad, row.source_id, row.source_campaign);
+  const reciente = String(row.fecha || '') >= ORIGEN_DESDE_RECIENTE;
+  const out = Object.assign({}, r, { evid: Object.assign({}, r.evid) });
+  if (row.ad) out.evid.antes = String(row.ad).slice(0, 120);
+  if (row.source_id) out.evid.antes_sid = String(row.source_id);
+  const humanoOrg = ['frecuente', 'referido', 'sin_frontera', 'directo'].indexOf(humano) >= 0;
+  if (r.estado === 'auto') {
+    if (!humano || humano === r.canal || humano === 'no_sabe') return out;
+    if (r.canal === 'sin_frontera' || humano === 'directo') return out;
+    const pauta = (c) => c === 'ad' || c === 'form' || c === 'ad_sin_ref';
+    if (pauta(r.canal) && (pauta(humano) || ['linkbio', 'igdm', 'web'].indexOf(humano) >= 0)) return out;
+    if (reciente) {
+      out.estado = 'revisar'; out.regla = 'choque:' + humano + '>' + r.canal; out.label = '';
+      Object.assign(out.evid, { propuesta: r.canal, propuesta_label: r.label || ORIGEN_LABELS[r.canal] || '', propuesta_sid: r.source_id || '', propuesta_scamp: r.source_campaign || '', propuesta_grupo: r.grupo || '' });
+      out.canal = humano;
+      const esAdH = humano === 'ad' || humano === 'form';
+      out.source_id = esAdH ? String(row.source_id || '') : ''; out.source_campaign = esAdH ? String(row.source_campaign || '') : '';
+      out.grupo = esAdH ? (verticalOfAdText(row.ad) === 'corporeas' ? 'corporeas' : String(row.source_campaign || '')) : '';
+      return out;
+    }
+    if (humanoOrg && ORIGEN_CANALES_ORGANICOS.indexOf(r.canal) >= 0) { out.canal = humano; out.estado = 'historico'; out.regla = 'mano_vieja'; out.label = ''; out.evid.propuesta = r.canal; return out; }
+    return out;
+  }
+  if (humano && humano !== 'no_sabe') {
+    out.evid.sugerencia = r.canal;
+    out.canal = humano; out.label = '';
+    out.estado = reciente ? 'revisar' : 'historico';
+    out.regla = 'cargado_a_mano';
+    if (humano === 'ad' || humano === 'form') { out.source_id = String(row.source_id || ''); out.source_campaign = String(row.source_campaign || ''); out.grupo = verticalOfAdText(row.ad) === 'corporeas' ? 'corporeas' : ''; }
+    else out.grupo = '';
+    return out;
+  }
+  if (!reciente) out.estado = 'historico';
+  return out;
+}
+
+// Barre ventas sin origen calculado (las del CRM nuevas ya nacen con origen; esto agarra las del Excel, las viejas y las
+// que se cargaron antes del cambio). Agrupa por venta. Devuelve {ventas, filas}.
+async function origenBarrer(env, opts = {}) {
+  await ensureOrigenSchema(env);
+  const lim = Math.max(1, Math.min(Number(opts.limit) || 15, opts.dry ? 40 : 25));
+  let ventas = 0, filas = 0, errores = 0;
+  const vistos = new Set(), hechos = [];
+  const soloIds = Array.isArray(opts.soloIds) ? opts.soloIds.map(Number).filter(Boolean).slice(0, 80) : [];
+  const COLS = 'id, numero, fecha, cartel, alto, ancho, telefono, ad, source_id, source_campaign, created_at, plataforma, ig_id, comercial_id, origen, origen_canal, origen_estado, origen_regla, origen_evid, origen_intentos';
+  const rows = (soloIds.length
+    ? await env.DB.prepare(`SELECT ${COLS} FROM pedidos WHERE id IN (${soloIds.map(() => '?').join(',')})${opts.forzar ? '' : " AND IFNULL(origen_estado,'') != 'confirmado'"} ORDER BY fecha, id LIMIT ?`).bind(...soloIds, lim * 4).all()
+    : await env.DB.prepare(`SELECT ${COLS} FROM pedidos WHERE origen_canal IS NULL AND IFNULL(origen_intentos,0) < 5 AND fecha >= ? AND fecha <= ? ORDER BY fecha, id LIMIT ?`).bind(opts.desde || '2026-01-01', opts.hasta || '2099-12-31', lim * 4).all()
+  ).results || [];
+  for (const row of rows) {
+    if (ventas >= lim) break;
+    if (vistos.has(row.id)) continue;
+    let ids = [row.id];
+    vistos.add(row.id);
+    try {
+      ids = await idsDeLaVenta(env, row.id);
+      ids.forEach(i => vistos.add(i));
+      const grupo = (await env.DB.prepare(`SELECT id, cartel, alto, ancho, telefono, ig_id, ad, source_id, source_campaign, fecha, created_at FROM pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [row];
+      let sf = false;
+      try { sf = !!(await env.DB.prepare(`SELECT 1 FROM sinfrontera_pedidos WHERE pedido_id IN (${ids.map(() => '?').join(',')}) LIMIT 1`).bind(...ids).first()); } catch (_) {}
+      // Corte = hora de la venta: created_at si es del alta del CRM; si la fila vino del Excel (se importó días después) o no
+      // tiene created_at, el fin del día AR de la fecha del pedido. Fecha rota → se usa lo que haya.
+      const tFecha = /^\d{4}-\d{2}-\d{2}$/.test(String(row.fecha || '')) ? Date.parse(String(row.fecha) + 'T03:00:00Z') : NaN;
+      const finDia = isNaN(tFecha) ? '' : new Date(tFecha + 86400000).toISOString();
+      const cutIso = (row.created_at && (!finDia || String(row.created_at) < finDia)) ? String(row.created_at) : (finDia || String(row.created_at || '') || new Date().toISOString());
+      // Teléfono de la venta: el primero que tenga alguna de sus filas (en el Excel suele estar solo en la primera).
+      let tel = String(row.telefono || '').trim() || String((grupo.find(g => String(g.telefono || '').trim()) || {}).telefono || '').trim();
+      const igRow = String(row.ig_id || '') || String((grupo.find(g => g.ig_id) || {}).ig_id || '');
+      let telInf = null;
+      if (!tel && !igRow) { telInf = await origenTelefonoInferido(env, row, grupo); if (telInf) tel = telInf.tel; }
+      const alias = /^@/.test(tel) ? tel.toLowerCase() : '';
+      const r = await resolverOrigenPedido(env, {
+        telefono: alias ? '' : tel, igId: igRow || (alias ? await igsidDeUsuario(env, tel) : ''), alias,
+        carteles: grupo.map(g => ({ cartel: g.cartel, alto: g.alto, ancho: g.ancho })), cutIso, clienteSf: sf, excluirIds: ids
+      });
+      if (telInf) {
+        r.evid = Object.assign({}, r.evid, { tel_inferido: telInf.tel, tel_por: telInf.via });
+        if (telInf.via === 'presupuesto' && r.estado === 'auto') { r.estado = 'revisar'; r.evid.avisos = (r.evid.avisos || []).concat('telefono_por_nombre'); }
+      }
+      // Falló una consulta: no se graba (próxima pasada); a los 5 intentos queda a confirmar.
+      if (r.regla === 'error' && !opts.dry && (Number(row.origen_intentos) || 0) < 4) {
+        await env.DB.prepare(`UPDATE pedidos SET origen_intentos = IFNULL(origen_intentos,0) + 1 WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
+        errores++; continue;
+      }
+      // Lo "cargado a mano" contra lo que se compara: si ya tenía origen calculado, el label actual lo escribió el sistema →
+      // vale el que había antes (evid.antes); si lo eligió el vendedor o lo confirmó Gaspar, esa elección.
+      let hAd = row.ad || '', hSid = row.source_id || '', hScamp = row.source_campaign || '';
+      if (row.origen_canal) {
+        let ev0 = {}; try { ev0 = JSON.parse(row.origen_evid || '{}') || {}; } catch (_) {}
+        if (row.origen_regla === 'vendedor' || row.origen_estado === 'confirmado') {
+          if (row.origen_canal !== 'ad' && row.origen_canal !== 'form') { hAd = ORIGEN_LABELS[row.origen_canal] || hAd; hSid = ''; hScamp = ''; }
+        } else { hAd = String(ev0.antes || ''); hSid = String(ev0.antes_sid || ''); hScamp = ''; }
+      }
+      const fin = origenPoliticaExistente(Object.assign({}, row, { ad: hAd, source_id: hSid, source_campaign: hScamp }), r);
+      if (opts.dry) { (opts.out = opts.out || []).push({ ids, fecha: row.fecha, tel, cartel: grupo.map(g => g.cartel).join(' + '), antes: hAd, canal: fin.canal, estado: fin.estado, regla: fin.regla, label: fin.label, evid: fin.evid }); }
+      else { await guardarOrigenPedido(env, ids, fin, 'sistema', { sinEspejo: true }); hechos.push(...ids); }
+      ventas++; filas += ids.length;
+    } catch (e) {
+      errores++;
+      if (!opts.dry) { try { await env.DB.prepare(`UPDATE pedidos SET origen_intentos = IFNULL(origen_intentos,0) + 1 WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run(); } catch (_) {} }
+    }
+  }
+  // Recompras que heredaban de estas ventas cuando todavía no tenían origen (quedaron a confirmar): se recalculan.
+  if (!opts.dry && !opts.sinHijos && hechos.length) {
+    try {
+      const h = hechos.slice(0, 90);
+      const ch = (await env.DB.prepare(`SELECT id FROM pedidos WHERE origen_regla = 'misma_charla' AND origen_estado = 'revisar' AND CAST(CASE WHEN json_valid(origen_evid) THEN json_extract(origen_evid, '$.pedido_previo') END AS INTEGER) IN (${h.map(() => '?').join(',')}) LIMIT 10`).bind(...h).all()).results || [];
+      if (ch.length) await origenBarrer(env, { limit: 5, soloIds: ch.map(x => x.id), sinHijos: true });
+    } catch (_) {}
+  }
+  return { ventas, filas, errores, out: opts.out };
+}
+
+// Teléfono de una venta cargada sin él (filas del Excel): la OC que se le mandó al cliente (cartel + Nro) o, si no, el único
+// presupuesto con ese nombre en los 90 días anteriores (este último deja la venta a confirmar). {tel, via} o null.
+async function origenTelefonoInferido(env, row, grupo) {
+  const carteles = [...new Set((grupo || [row]).map(g => String(g.cartel || '').trim()).filter(c => c.length > 2))].slice(0, 6);
+  const t0 = /^\d{4}-\d{2}-\d{2}$/.test(String(row.fecha || '')) ? Date.parse(String(row.fecha) + 'T03:00:00Z') : NaN;
+  if (!carteles.length || isNaN(t0)) return null;
+  const desde = new Date(t0 - 90 * 86400000).toISOString(), hasta = new Date(t0 + 2 * 86400000).toISOString();
+  const dig = (p) => String(p || '').replace(/\D/g, '');
+  for (const cartel of carteles) {
+    try {
+      const like = '%' + cartel.toLowerCase() + '%';
+      let phones = [...new Set(((await env.DB.prepare("SELECT DISTINCT phone FROM wa_messages WHERE direction = 'outbound' AND body LIKE 'Orden de compra%' AND lower(body) LIKE ? AND ts BETWEEN ? AND ? LIMIT 6").bind(like, desde, hasta).all()).results || []).map(x => dig(x.phone)).filter(Boolean))];
+      if (phones.length > 1 && row.numero) {
+        const r2 = await env.DB.prepare("SELECT phone FROM wa_messages WHERE direction = 'outbound' AND body LIKE 'Orden de compra%' AND lower(body) LIKE ? AND body LIKE ? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 1").bind(like, '%Nro%' + row.numero + '%', desde, hasta).first();
+        if (r2 && r2.phone) phones = [dig(r2.phone)];
+      }
+      if (phones.length === 1) return { tel: phones[0], via: 'oc' };
+    } catch (_) {}
+  }
+  for (const cartel of carteles) {
+    try {
+      const phones = [...new Set(((await env.DB.prepare("SELECT DISTINCT cliente_wa_id ph FROM briefs WHERE lower(trim(cliente_nombre)) = lower(trim(?)) AND COALESCE(cliente_wa_id,'') != '' AND created_at BETWEEN ? AND ? LIMIT 3").bind(cartel, desde, hasta).all()).results || []).map(x => dig(x.ph)).filter(Boolean))];
+      if (phones.length === 1) return { tel: phones[0], via: 'presupuesto' };
+    } catch (_) {}
+  }
+  return null;
+}
+
+// Texto corto que explica de dónde salió el origen (se guarda en origen_evid.txt y se muestra a Gaspar / en el alta).
+function origenExplicacion(r) {
+  const e = r.evid || {};
+  const fch = (t) => t ? String(t).slice(8, 10) + '/' + String(t).slice(5, 7) : '';
+  const regla = String(r.regla || '');
+  if (regla.indexOf('cadena:') === 0) {
+    const c = e.cadena || {};
+    const base = origenExplicacion(Object.assign({}, r, { regla: regla.slice(7), evid: Object.assign({}, e, { cadena: null }) }));
+    return 'Lo consultó antes otro chat' + (c.nombre ? ' ("' + c.nombre + '")' : '') + ' por ' + (c.via || 'presupuesto') + '. Ese chat: ' + base;
+  }
+  if (regla.indexOf('choque:') === 0) { const p = regla.slice(7).split('>'); return 'Estaba cargado como "' + (e.antes || p[0]) + '", pero los datos dicen ' + (ORIGEN_LABELS[p[1]] || p[1]) + '. Confirmá cuál es.'; }
+  const m = {
+    anuncio: () => 'Tocó el anuncio "' + (e.anuncio || '?') + '"' + (e.campana ? ' (' + e.campana + ')' : '') + (e.ts ? ' el ' + fch(e.ts) : '') + ', antes del presupuesto.',
+    formulario: () => 'Llenó el formulario de Meta "' + (e.anuncio || '') + '"' + (e.ts ? ' el ' + fch(e.ts) : '') + '.',
+    meta_sin_referencia: () => 'Meta confirma que la charla la abrió un anuncio (no dice cuál)' + (e.texto ? '; escribió "' + e.texto + '…"' : '') + '.',
+    misma_charla: () => 'Recompra en la misma charla: hereda el origen del pedido del ' + (e.fecha_previa || '') + (r.estado === 'revisar' ? ', que está a confirmar (confirmá ese y este se acomoda solo).' : '.'),
+    compra_previa: () => 'Ya había comprado (pedido del ' + (e.fecha_previa || '') + ') y no tocó un anuncio nuevo: cliente frecuente.',
+    frase_referido: () => 'Dijo: "' + (e.frase || '') + '".',
+    venta_por_ig: () => 'La venta se hizo por un chat de Instagram, sin anuncio.',
+    codigo_ig: () => 'Escribió con el link de WhatsApp que mandamos por Instagram.',
+    frase_ig: () => 'Dice que venía hablando por Instagram: "' + (e.frase || '') + '".',
+    numero_en_dm: () => 'Pasó su número por un DM de Instagram antes de escribir al WhatsApp.',
+    mismo_texto_ig: () => 'Mandó la misma consulta por Instagram antes de escribir al WhatsApp.',
+    numero_pasado_por_ig: () => 'Le pasamos el WhatsApp por Instagram justo antes de que escribiera.',
+    walink: () => 'Escribió con el link de la bio de Instagram.',
+    codigo_web: () => 'Escribió desde la web / Google.',
+    sin_frontera: () => 'Pedido de Sin Frontera (cuenta corriente).',
+    ig_texto_anuncio: () => 'Escribió por Instagram con el texto de un anuncio, pero IG no avisa si vino de un anuncio.',
+    texto_anuncio_sin_meta: () => 'Escribió con el texto de un anuncio ("' + (e.texto || '') + '…"), pero Meta no lo confirmó.',
+    frase_cliente_vuelve: () => 'Dice que ya es cliente: "' + (e.frase || '') + '", pero no encuentro la compra anterior.',
+    sugerencia_ig: () => e.nota || 'Puede venir de Instagram.',
+    sin_senal: () => 'No hay ningún rastro' + (e.primer ? ': el primer mensaje fue "' + e.primer + '"' : '') + '.',
+    telefono_interno: () => 'Está cargado con un teléfono del equipo: no se puede rastrear.',
+    sin_telefono: () => 'No tiene el teléfono del cliente: no se puede rastrear.',
+    vendedor: () => 'Lo eligió el vendedor (no había prueba).',
+    cargado_a_mano: () => 'Estaba cargado a mano y no hay prueba que lo confirme.',
+    mano_vieja: () => 'Cargado a mano (venta vieja).',
+    gaspar: () => 'Confirmado por Gaspar.',
+    error: () => 'No se pudo calcular (' + (e.error || '') + ').'
+  };
+  let txt = (m[regla] || (() => ''))();
+  const av = Array.isArray(e.avisos) ? e.avisos : [];
+  if (av.indexOf('telefono_dudoso') >= 0) txt += ' Ojo: el chat de ese teléfono empieza después de la venta (¿es el teléfono correcto?).';
+  if (av.indexOf('telefono_interno') >= 0 && regla !== 'telefono_interno') txt += ' Ojo: el teléfono cargado es del equipo.';
+  if (av.indexOf('telefono_por_nombre') >= 0) txt += ' Ojo: la venta no tenía teléfono; lo saqué del presupuesto con el mismo nombre.';
+  if (e.nota && regla.indexOf('cadena:') === 0) txt += ' ' + e.nota;
+  return txt.trim();
+}
+function origenExplicacionVendedor(r) {
+  const g = String(r.regla || '');
+  if (g.indexOf('cadena:') === 0) return 'Lo consultó antes otro chat por el mismo cartel: la venta hereda ese origen.';
+  if (g === 'compra_previa') return 'Ya nos había comprado y no tocó un anuncio nuevo: cliente frecuente.';
+  if (g === 'misma_charla') return 'Recompra en la misma charla: hereda el origen de la compra anterior.';
+  return origenExplicacion(r);
+}
+// Origen de una venta NUEVA: lo calculado manda si es prueba dura; si no, vale lo que eligió el vendedor (queda a confirmar)
+// o lo que marcó Gaspar (confirmado). 'ad' elegido sin datos = anuncio sin referencia.
+function origenPoliticaAlta(r, elegido, esAdmin) {
+  const e = ORIGEN_CANALES.indexOf(elegido) >= 0 ? (elegido === 'ad' || elegido === 'form' ? 'ad_sin_ref' : elegido) : '';
+  if (r.estado === 'auto') {
+    if (esAdmin && e && e !== r.canal && !(e === 'ad_sin_ref' && (r.canal === 'ad' || r.canal === 'form'))) {
+      return Object.assign({}, r, { canal: e, estado: 'confirmado', regla: 'gaspar', label: ORIGEN_LABELS[e] || '', source_id: '', source_campaign: '', grupo: e === 'ad_sin_ref' ? (r.grupo || '') : '', evid: Object.assign({}, r.evid, { auto: r.canal, auto_txt: origenExplicacion(r) }) });
+    }
+    return r;
+  }
+  if (e) {
+    return Object.assign({}, r, { canal: e, estado: esAdmin ? 'confirmado' : 'revisar', regla: esAdmin ? 'gaspar' : 'vendedor', label: ORIGEN_LABELS[e] || '',
+      grupo: e === 'ad_sin_ref' ? (r.grupo || '') : '', source_id: '', source_campaign: '',
+      evid: Object.assign({}, r.evid, { sugerencia: r.canal, sugerencia_txt: origenExplicacion(r) }) });
+  }
+  return r;
+}
+
 // Cron: barre los pedidos de carteles SIN ad y los traza automáticamente (cliente -> atribución).
 // Rellena pedidos.ad + pedidos.telefono en D1. Devuelve {n, scanned}.
 //   opts.allDates = true → sin límite de fecha (para el backfill histórico). Default: últimos 120 días.
@@ -1101,7 +1850,7 @@ async function backfillPedidoSources(env, limit = 60) {
 async function syncAdColumnToExcel(env) {
   if (!env.APPS_SCRIPT_URL) return { skipped: 'no url' };
   try {
-    const d1 = await env.DB.prepare("SELECT cartel, ad FROM pedidos WHERE COALESCE(ad,'')!='' AND cartel NOT LIKE '%orpore%'").all();
+    const d1 = await env.DB.prepare("SELECT cartel, ad FROM pedidos WHERE COALESCE(ad,'')!='' AND cartel NOT LIKE '%orpore%' AND (origen_canal IS NULL OR (IFNULL(origen_estado,'') IN ('auto','confirmado') AND origen_canal != 'no_sabe'))").all();
     const byCartel = {};
     for (const r of (d1.results || [])) { const k = String(r.cartel || '').trim().toLowerCase(); if (k && !byCartel[k]) byCartel[k] = r.ad; }
     const rows = await fetchVentas2026Rows();
@@ -8162,7 +8911,7 @@ function cortePiezaDesdeCartel(c, numero, vendedor) {
 // corte_id) para el front: badge "SIN FOTO" en la tabla y el bloque de diseño del drawer. whereSql usa
 // columnas calificadas con "pedidos." (por el JOIN). La vista Pedidos es crítica: si el JOIN falla por
 // lo que sea, cae al SELECT de siempre (sin los campos de diseño) en vez de romper la lista.
-const PEDIDO_CAMPOS_INTERNOS = ['mo_monto', 'mo_regla', 'mo_detalle', 'mo_at', 'prod_pagado_at', 'prod_pagado_por'];
+const PEDIDO_CAMPOS_INTERNOS = ['mo_monto', 'mo_regla', 'mo_detalle', 'mo_at', 'prod_pagado_at', 'prod_pagado_por', 'origen_evid', 'origen_regla', 'origen_por'];
 async function pedidosConDiseno(env, whereSql, args, opts) {
   const rows = await _pedidosConDisenoRaw(env, whereSql, args);
   const o = opts || {};
@@ -11509,7 +12258,7 @@ async function buildAdsFunnel(env, opts = {}) {
     q('presup_link', ATTR_SQL + " AND a.ts>=? AND a.ts<? AND a.phone IN (SELECT cliente_wa_id FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<? UNION SELECT phone FROM oc_enviadas WHERE ts_out>=? AND ts_out<?) ORDER BY a.phone, a.ts DESC", sinceWideUTC, untilExUTC, sinceUTC, untilExUTC, sinceUTC, untilExUTC),
     q('formularios', "SELECT phone, campaign_id, ad_id, received_at FROM wa_leads WHERE COALESCE(phone,'')!='' AND received_at>=? AND received_at<? ORDER BY received_at DESC", sinceWideUTC, untilExUTC),
     q('presup', "SELECT cliente_wa_id, comercial_id, COALESCE(precio_final,0) pf FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<?", sinceUTC, untilExUTC),
-    q('ventas', "SELECT id, ad, cartel, numero, fecha, telefono, source_id, source_campaign, comercial_id, COALESCE(es_corporeo,0) es_corporeo, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto FROM pedidos WHERE fecha>=? AND fecha<?", since, untilEx),
+    q('ventas', "SELECT id, ad, cartel, numero, fecha, telefono, source_id, source_campaign, comercial_id, COALESCE(es_corporeo,0) es_corporeo, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto, origen_canal, origen_estado, origen_grupo, origen_regla, origen_evid FROM pedidos WHERE fecha>=? AND fecha<?", since, untilEx),
     q('oc', "SELECT phone, vendedor FROM oc_enviadas WHERE ts_out>=? AND ts_out<?", sinceUTC, untilExUTC),
     q('duenos', "SELECT phone, COALESCE(assigned_to,'') asg, COALESCE(inbox,'') inbox FROM wa_chats_summary WHERE phone IN (SELECT phone FROM wa_ad_attributions WHERE ts>=? AND ts<? AND COALESCE(source_id,'')!='')", sinceUTC, untilExUTC)
   ]);
@@ -11641,7 +12390,8 @@ async function buildAdsFunnel(env, opts = {}) {
   }
 
   // ---- VENTAS ----
-  const ORG = { linkbio: 'Link bio IG', directo: 'Directo', frecuente: 'Frecuente', referido: 'Referido' };
+  const ORG = { linkbio: 'Link bio IG', igdm: 'Instagram DM', frecuente: 'Frecuente', referido: 'Referido', directo: 'Directo', web: 'Google / web', sin_frontera: 'Sin Frontera (cta. cte.)' };
+  const aConfirmar = new Set();
   const mixN = {}, mixIng = {};
   const ctxCat = { ad: { o: 0, i: 0 }, organico: { o: 0, i: 0 }, sintrazar: { o: 0, i: 0 } };
   const ordSeen = new Set(), ordCorp = new Set();
@@ -11653,8 +12403,32 @@ async function buildAdsFunnel(env, opts = {}) {
     const esCorp = r.es_corporeo == 1 || /corpor/.test(_normTxt(r.cartel)) || verticalOfAdText(r.ad) === 'corporeas';
     const interno = tel && internos[tel] ? internos[tel] : '';
     const sid = String(r.source_id || ''), scamp = norm(r.source_campaign);
-    let grupo = '', adId = '';
-    if (!interno) {
+    let grupo = '', adId = '', dudoso = false;
+    const oc = String(r.origen_canal || '');
+    if (oc) {
+      // Origen calculado (oct-2026): manda sobre el texto. "Lo dudoso no suma": a confirmar (o carga vieja sin prueba) va a
+      // "sin trazar" hasta que Gaspar lo confirme. ad/form por su anuncio o campaña; ad_sin_ref por la campaña del texto.
+      const og = String(r.origen_grupo || ''), est = String(r.origen_estado || ''), regla = String(r.origen_regla || '');
+      dudoso = est === 'revisar' || (est === 'historico' && /^(texto_anuncio_sin_meta|ig_texto_anuncio|sugerencia_ig|frase_cliente_vuelve|sin_senal|sin_telefono|telefono_interno|telefono_dudoso|error)/.test(regla));
+      // Solo campañas que el funnel cuenta como carteles: una de cursos o sin clasificar NO es pauta de carteles.
+      const porGrupo = (g) => g === 'corporeas' ? 'corporeas' : !g ? 'sin_campana' : (funnelClaseCampana(g, ctx).clase === 'carteles' ? g : '');
+      const porLabel = () => {
+        const vt = verticalOfAdText(r.ad);
+        if (vt === 'corporeas') return 'corporeas';
+        if (vt && !esCorp) { const lc = labelCamp[_normTxt(r.ad).trim()]; return lc && funnelClaseCampana(lc, ctx).clase === 'carteles' ? lc : 'sin_campana'; }
+        return '';
+      };
+      if (interno && est !== 'confirmado') dudoso = true; // teléfono del equipo: no se puede rastrear
+      else if (!dudoso && (oc === 'ad' || oc === 'form')) {
+        if (sid) { const g = funnelGrupoAd(sid, '', ctx).grupo; adId = sid; grupo = (g === 'sin_campana' && og) ? (porGrupo(og) || g) : g; }
+        else if (scamp) grupo = funnelClaseCampana(scamp, ctx).clase === 'carteles' ? scamp : '';
+        else if (og) grupo = porGrupo(og);
+        else grupo = porLabel() || (esCorp ? 'corporeas' : 'sin_campana');
+      } else if (!dudoso && oc === 'ad_sin_ref') grupo = porGrupo(og);
+      // Un corpóreo sin el anuncio exacto nunca suma a la pauta de neón.
+      if (grupo && grupo !== 'corporeas' && esCorp && (oc === 'ad_sin_ref' || !sid)) grupo = 'corporeas';
+      if (est === 'revisar') aConfirmar.add(k);
+    } else if (!interno) {
       if (sid) { grupo = funnelGrupoAd(sid, '', ctx).grupo; adId = sid; }
       else if (scamp) grupo = funnelClaseCampana(scamp, ctx).clase === 'carteles' ? scamp : '';
       else {
@@ -11671,6 +12445,10 @@ async function buildAdsFunnel(env, opts = {}) {
     const t = String(r.ad || '').toLowerCase();
     let cat, mk;
     if (grupo) { cat = 'ad'; mk = grupo; }
+    else if (oc && dudoso) { cat = 'sintrazar'; mk = 'revisar'; }
+    else if (oc && ORG[oc]) { cat = 'organico'; mk = oc; }
+    else if (oc) { cat = 'sintrazar'; mk = 'revisar'; }
+    else if (t.indexOf('no pudimos') >= 0) { cat = 'sintrazar'; mk = 'revisar'; }
     else if (t.indexOf('link bio') >= 0) { cat = 'organico'; mk = 'linkbio'; }
     else if (t.indexOf('frecuente') >= 0) { cat = 'organico'; mk = 'frecuente'; }
     else if (t.indexOf('referido') >= 0) { cat = 'organico'; mk = 'referido'; }
@@ -11686,8 +12464,9 @@ async function buildAdsFunnel(env, opts = {}) {
     ctxCat[cat].i += monto; mixIng[mk] = (mixIng[mk] || 0) + monto;
     if (esCorp) ordCorp.add(k);
     if (!ordSeen.has(k)) { ordSeen.add(k); ctxCat[cat].o++; mixN[mk] = (mixN[mk] || 0) + 1; }
-    if (cat === 'sintrazar' || interno) {
-      const x = revisarVentas[k] || (revisarVentas[k] = { fecha: r.fecha, numero: r.numero, carteles: [], telefono: String(r.telefono || ''), tel, vendedor: FUNNEL_VENDEDOR_NOMBRE[vend] || vend || '', monto: 0, ad: String(r.ad || ''), interno, sid });
+    let evTxt = ''; if (r.origen_evid) { try { evTxt = String(JSON.parse(r.origen_evid).txt || ''); } catch (_) {} }
+    if (cat === 'sintrazar' || r.origen_estado === 'revisar' || (interno && !oc)) {
+      const x = revisarVentas[k] || (revisarVentas[k] = { fecha: r.fecha, numero: r.numero, carteles: [], telefono: String(r.telefono || ''), tel, vendedor: FUNNEL_VENDEDOR_NOMBRE[vend] || vend || '', monto: 0, ad: String(r.ad || ''), interno, sid, evTxt, pendiente: r.origen_estado === 'revisar', id: r.id });
       x.carteles.push(String(r.cartel || '')); x.monto += monto;
     }
   }
@@ -11704,13 +12483,14 @@ async function buildAdsFunnel(env, opts = {}) {
     const info = revInfo[x.tel] || {};
     const primer = String(info.primer || '').replace(/\s+/g, ' ').trim();
     let motivo;
-    if (x.interno) motivo = 'Cargado con el teléfono de ' + x.interno + ' (interno): poné el del cliente.';
+    if (x.evTxt) motivo = (x.pendiente ? 'A confirmar: ' : '') + x.evTxt;
+    else if (x.interno) motivo = 'Cargado con el teléfono de ' + x.interno + ' (interno): poné el del cliente.';
     else if (!x.tel) motivo = 'Sin teléfono del cliente: no se puede trazar.';
     else if (x.sid) motivo = 'El anuncio que tiene cargado no es de carteles.';
     else if (info.toques > 0) motivo = 'Vino de un anuncio que no es de carteles (cursos).';
     else if (FUNNEL_TEXTOS_AD.some(tx => _normTxt(primer).indexOf(tx) >= 0)) motivo = 'Escribió con el texto de un anuncio, pero Meta no mandó la referencia.';
     else motivo = 'El chat no tiene referencia de anuncio: si es directo, referido o frecuente, marcalo en el pedido.';
-    return { fecha: x.fecha, numero: x.numero, cartel: x.carteles.join(' + '), telefono: x.telefono, vendedor: x.vendedor, monto: Math.round(x.monto), ad: x.ad, motivo, primer: primer.slice(0, 90) };
+    return { id: x.id, pendiente: !!x.pendiente, fecha: x.fecha, numero: x.numero, cartel: x.carteles.join(' + '), telefono: x.telefono, vendedor: x.vendedor, monto: Math.round(x.monto), ad: x.ad, motivo, primer: x.evTxt ? '' : primer.slice(0, 90) };
   }).sort((a, b) => b.monto - a.monto);
 
   // ---- filas por campaña ----
@@ -11781,6 +12561,7 @@ async function buildAdsFunnel(env, opts = {}) {
       total: { ordenes: ventasTot, ingresos: Math.round(ctxCat.ad.i + ctxCat.organico.i + ctxCat.sintrazar.i) },
       corporeos: ordCorp.size
     },
+    origen_a_confirmar: aConfirmar.size,
     presup_enviados: presupTotal, presup_monto_enviados: Math.round(presupMontoTotal),
     presup_sin_tel: presupSinTel, presup_sin_atrib: sinAtrib.size, presup_interno: presupInterno,
     gasto_excluido_usd: Math.round(gastoExcluido * 100) / 100,
@@ -19401,6 +20182,7 @@ const handler = {
                 if (value.statuses.some(s => s && s.status === 'failed')) { try { _avModo = (await avisoCfg(env)).modo; } catch (_) {} }
               }
               for (const st of (value?.statuses || [])) {
+                await guardarConvOrigen(env, st);   // ¿la charla la abrió un anuncio? (aunque el mensaje no traiga referral)
                 const wamid = st.id || '';
                 const status = st.status || ''; // sent | delivered | read | failed
                 const phone = st.recipient_id || '';
@@ -24581,6 +25363,11 @@ const handler = {
           const _ref = await env.DB.prepare("SELECT COUNT(*) AS n FROM corte_pedidos c JOIN pedidos p ON p.id = c.pedido_id WHERE p.origen = 'backfill'").first();
           if (_ref && _ref.n > 0) return json({ error: `hay ${_ref.n} pieza(s) de corte vinculadas a pedidos del backfill; re-importar las dejaría huérfanas` }, 409);
         } catch (_) {}
+        try {
+          await ensureOrigenSchema(env);
+          const _oc = await env.DB.prepare("SELECT COUNT(*) AS n FROM pedidos WHERE origen = 'backfill' AND origen_estado = 'confirmado'").first();
+          if (_oc && _oc.n > 0) return json({ error: `hay ${_oc.n} venta(s) del backfill con el origen confirmado por Gaspar; re-importar lo borraría` }, 409);
+        } catch (_) {}
         const rows = await fetchVentas2026Rows();
         if (!rows) return json({ error: 'no se pudo leer el Excel de Ventas (export de la hoja 2026)' }, 502);
         if (rows.length < 2) return json({ error: 'el Excel de Ventas vino vacío' }, 502);
@@ -24872,6 +25659,93 @@ const handler = {
       // numero = max+1 (server-side); fecha = hoy si no viene; estado_pedido fijo
       // 'En produccion'; pagado/restante a nivel pedido (restante = total − pagado)
       // replicados en cada fila. origen='crm' (lo distingue del backfill del Excel).
+      // GET /admin/pedidos/origen-preview?telefono=&ig_id=&carteles=[{cartel,alto,ancho}]&cliente_sf=1 → origen que tendría la
+      // venta si se carga ahora (el modal "Cargar pedido" lo muestra; si no hay prueba, el vendedor tiene que elegir).
+      if (request.method === 'GET' && path === '/admin/pedidos/origen-preview') {
+        if (!['admin', 'comercial'].includes(await getSessionRole(env, session.user))) return json({ error: 'forbidden' }, 403);
+        let _cs = []; try { _cs = JSON.parse(url.searchParams.get('carteles') || '[]'); } catch (_) {}
+        const _tel = String(url.searchParams.get('telefono') || '');
+        const _ig = String(url.searchParams.get('ig_id') || '').replace(/\D/g, '') || (/^@/.test(_tel) ? await igsidDeUsuario(env, _tel) : '');
+        const _gas = session.user === 'Gaspar';
+        const r = await resolverOrigenPedido(env, { telefono: /^@/.test(_tel) ? '' : _tel, igId: _ig, alias: /^@/.test(_tel) ? _tel.toLowerCase() : '', cutIso: new Date().toISOString(), clienteSf: _gas && url.searchParams.get('cliente_sf') === '1', carteles: Array.isArray(_cs) ? _cs.slice(0, 20) : [] });
+        return json({ ok: true, canal: r.canal, estado: r.estado, regla: _gas || ['sin_telefono', 'telefono_interno'].indexOf(r.regla) >= 0 ? r.regla : '', label: r.label, explicacion: _gas ? origenExplicacion(r) : origenExplicacionVendedor(r), source_id: _gas ? (r.source_id || '') : '', grupo: _gas ? (r.grupo || '') : '' });
+      }
+      // POST /admin/pedidos/:id/origen {canal, campaign_id?} → Gaspar confirma o corrige el origen de TODA la venta (deja de estar roja).
+      if (request.method === 'POST' && /^\/admin\/pedidos\/\d+\/origen$/.test(path)) {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        await ensureOrigenSchema(env);
+        const _id = parseInt(path.split('/')[3], 10);
+        let b = {}; try { b = await request.json(); } catch (_) {}
+        const canal = String(b.canal || '');
+        if (ORIGEN_CANALES.indexOf(canal) < 0) return json({ error: 'origen inválido' }, 400);
+        const cur = await env.DB.prepare('SELECT ad, source_id, source_campaign, origen_canal, origen_grupo, origen_evid FROM pedidos WHERE id = ?').bind(_id).first();
+        if (!cur) return json({ error: 'pedido no encontrado' }, 404);
+        let ev = {}; try { ev = JSON.parse(cur.origen_evid || '{}'); } catch (_) {}
+        const camp = String(b.campaign_id || '').trim();
+        const mismaFuente = (canal === 'ad' || canal === 'form') && cur.origen_canal === canal && !camp;
+        let label = ORIGEN_LABELS[canal] || '', grupo = '', sid = '', scamp = '';
+        if ((canal === 'ad' || canal === 'form') && b.usar_propuesta && ev.propuesta_sid) {
+          sid = String(ev.propuesta_sid); scamp = String(ev.propuesta_scamp || ''); grupo = String(ev.propuesta_grupo || ''); label = String(ev.propuesta_label || '');
+          if (!label) { try { label = (await origenInfoAnuncio(env, sid, '')).label || ''; } catch (_) {} }
+        } else if (canal === 'ad' || canal === 'form' || canal === 'ad_sin_ref') {
+          if (mismaFuente) {
+            label = cur.ad || ''; sid = String(cur.source_id || ''); scamp = String(cur.source_campaign || ''); grupo = String(cur.origen_grupo || '');
+            if (sid && ['ad', 'form'].indexOf(canalDeLabel(label, '', '')) < 0) { try { const inf = await origenInfoAnuncio(env, sid, ''); if (inf && inf.label) label = inf.label; } catch (_) {} }
+          }
+          else {
+            const ce = camp ? await origenCampanaElegida(env, canal, camp) : null;
+            if (ce) { label = ce.label; grupo = ce.grupo; scamp = ce.scamp; }
+            else if (canal !== 'ad_sin_ref') return json({ error: 'elegí la campaña del anuncio' }, 400);
+          }
+        }
+        const ids = await idsDeLaVenta(env, _id);
+        await guardarOrigenPedido(env, ids, { canal, estado: 'confirmado', regla: 'gaspar', label, grupo, source_id: sid, source_campaign: scamp,
+          evid: Object.assign({}, ev, { txt: '', antes_confirmar: cur.ad || '', nota: String(b.nota || '').slice(0, 200) }) }, String(session.user || ''));
+        const relacionadas = await origenRecalcularRelacionadas(env, ids);
+        const rsO = await pedidosConDiseno(env, `WHERE pedidos.id IN (${ids.map(() => '?').join(',')}) ORDER BY pedidos.id`, ids, { interno: true, fotos: true });
+        return json({ ok: true, pedidos: rsO, relacionadas });
+      }
+      // GET /admin/origen/campanas → campañas de Meta con gasto desde junio (la más reciente primero), para "Confirmar origen".
+      if (request.method === 'GET' && path === '/admin/origen/campanas') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let rows = [];
+        try {
+          rows = (await env.DB.prepare("SELECT s.campaign_id, MAX(s.day) ultimo, ROUND(SUM(s.spend_usd)) usd, c.campaign_name, v.vertical FROM meta_ad_spend s LEFT JOIN meta_campaigns c ON c.campaign_id = s.campaign_id LEFT JOIN meta_campaign_vertical v ON v.campaign_id = s.campaign_id WHERE s.day >= '2026-06-01' AND s.spend_usd > 0 AND s.campaign_id != 'corporeas' GROUP BY s.campaign_id ORDER BY ultimo DESC, usd DESC LIMIT 80").all()).results || [];
+        } catch (_) {}
+        return json({ ok: true, campanas: rows.map(r => ({ id: String(r.campaign_id), nombre: r.campaign_name || String(r.campaign_id), ultimo: r.ultimo, usd: r.usd, cursos: r.vertical === 'cursos' })) });
+      }
+      // POST /admin/pedidos/:id/origen-recalcular → vuelve a calcular el origen de la venta con los datos de hoy (solo Gaspar).
+      if (request.method === 'POST' && /^\/admin\/pedidos\/\d+\/origen-recalcular$/.test(path)) {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        await ensureOrigenSchema(env);
+        const _id = parseInt(path.split('/')[3], 10);
+        const ids = await idsDeLaVenta(env, _id);
+        await origenBarrer(env, { limit: 1, soloIds: ids, forzar: true });
+        const rsO = await pedidosConDiseno(env, `WHERE pedidos.id IN (${ids.map(() => '?').join(',')}) ORDER BY pedidos.id`, ids, { interno: true, fotos: true });
+        return json({ ok: true, pedidos: rsO });
+      }
+      // POST /admin/origen/barrer {limit, dry, desde} → calcula el origen de ventas que todavía no lo tienen (solo Gaspar).
+      if (request.method === 'POST' && path === '/admin/origen/barrer') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let b = {}; try { b = await request.json(); } catch (_) {}
+        const out = await origenBarrer(env, { limit: b.limit, dry: !!b.dry, desde: b.desde, hasta: b.hasta, out: [] });
+        return json({ ok: true, ventas: out.ventas, filas: out.filas, errores: out.errores, detalle: b.dry ? out.out : undefined });
+      }
+      // POST /admin/origen/conv-backfill {from_id, to_id} → completa wa_conv_origen con los status viejos del log crudo (solo Gaspar).
+      if (request.method === 'POST' && path === '/admin/origen/conv-backfill') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        await ensureOrigenSchema(env);
+        let b = {}; try { b = await request.json(); } catch (_) {}
+        const from = Math.max(1, parseInt(b.from_id, 10) || 1), to = Math.min(from + 20000, parseInt(b.to_id, 10) || from + 20000);
+        const rows = (await env.DB.prepare("SELECT id, payload FROM wa_webhook_log WHERE id BETWEEN ? AND ? AND instr(payload, 'referral_conversion') > 0").bind(from, to).all()).results || [];
+        let n = 0, ins = 0, malos = 0;
+        for (const r of rows) {
+          let j = null; try { j = JSON.parse(r.payload); } catch (_) { malos++; continue; }
+          for (const en of ((j && j.entry) || [])) for (const ch of (en.changes || [])) for (const st of ((ch.value && ch.value.statuses) || [])) { if (await guardarConvOrigen(env, st)) ins++; n++; }
+        }
+        return json({ ok: true, from, to, filas: rows.length, statuses: n, insertadas: ins, no_parseables: malos });
+      }
+
       if (request.method === 'POST' && path === '/admin/pedidos') {
         // Solo vendedores y admin cargan ventas (diseño/producción/cursos no: con un POST armado a mano
         // creaban pedidos + piezas para Emma y los espejaban al Excel).
@@ -25059,27 +25933,31 @@ const handler = {
             sfVinculado = true;
           } catch (_) {}
         }
-        // Red de seguridad: si el pedido quedó SIN ad (no se trazó en el front, o se cargó a mano),
-        // intentar trazarlo server-side ya mismo. WPP por teléfono; IG por IGSID vía la OC del chat
-        // (traceAdForPedido resuelve el phone del cliente aunque telefono venga como @usuario/vacío).
-        // Best-effort: si falla, el cron lo agarra igual en el próximo minuto.
+        // ORIGEN de la venta (oct-2026): se calcula acá con dato duro (resolverOrigenPedido) para TODAS las filas de esta
+        // venta. Si no hay prueba, vale lo que eligió el vendedor y queda a confirmar por Gaspar (fila roja). Nunca frena la venta.
         try {
-          for (const row of (rs.results || [])) {
-            const adTxt = String(row.ad || '').trim();
-            const hasSource = String(row.source_id || '').trim() !== '';
-            // Ya trazado (ad + source_id) → listo, no tocar.
-            if (adTxt && hasSource) continue;
-            // Con ad de texto pero SIN source_id: solo re-trazamos el label genérico que arma el
-            // front ("IG ad: ..."/"FB ad: ..."), que trae el nombre del ad pero DESCARTA el ad_id
-            // → sin source_id el funnel no lo puede clasificar. Los labels cargados a mano
-            // (directo/frecuente/referido/link bio) se respetan y NO se tocan.
-            const adl = adTxt.toLowerCase();
-            const esGenericoAd = adl.indexOf('ig ad') === 0 || adl.indexOf('fb ad') === 0;
-            if (adTxt && !esGenericoAd) continue;
-            const t = await traceAdForPedido(env, row);
-            if (t.ad) {
-              await env.DB.prepare("UPDATE pedidos SET ad=?, source_id=?, source_campaign=?, telefono=CASE WHEN COALESCE(telefono,'')='' THEN ? ELSE telefono END, mirror_dirty=1 WHERE id=?").bind(t.ad, t.source_id || '', t.source_campaign || '', t.telefono, row.id).run();
-              row.ad = t.ad;
+          const _ids = (rs.results || []).map(r => r.id);
+          if (_ids.length) {
+            await ensureOrigenSchema(env);
+            if (igId) await env.DB.prepare(`UPDATE pedidos SET ig_id = ? WHERE id IN (${_ids.map(() => '?').join(',')})`).bind(igId, ..._ids).run();
+            const _r = await resolverOrigenPedido(env, {
+              telefono: plataforma === 'IG' ? '' : telefono, igId, alias: /^@/.test(String(telefono || '')) ? String(telefono).toLowerCase() : '', cutIso: now, clienteSf: !!body.cliente_sf && sessionUserKey === 'gaspar', excluirIds: _ids,
+              carteles: carteles.map(c => ({ cartel: c.cartel, alto: c.alto, ancho: c.ancho }))
+            });
+            const _elegido = String(body.origen_canal || '') || canalDeLabel(body.ad, body.source_id, '');
+            let _fin = origenPoliticaAlta(_r, _elegido, sessionUserKey === 'gaspar');
+            if (sessionUserKey === 'gaspar' && String(body.origen_canal || '') === 'ad_sin_ref' && body.origen_campaign) {
+              const _ce = await origenCampanaElegida(env, 'ad_sin_ref', String(body.origen_campaign).trim());
+              if (_ce) _fin = Object.assign({}, _fin, { canal: 'ad_sin_ref', estado: 'confirmado', regla: 'gaspar', label: _ce.label, grupo: _ce.grupo, source_id: '', source_campaign: '' });
+            }
+            await guardarOrigenPedido(env, _ids, _fin, String(session.user || ''));
+            if (telefono) await origenRecalcularRelacionadas(env, _ids);
+            const _ev = Object.assign({}, _fin.evid || {}); if (!_ev.txt) _ev.txt = origenExplicacion(_fin);
+            for (const row of (rs.results || [])) {
+              row.origen_canal = _fin.canal; row.origen_estado = _fin.estado; row.origen_grupo = _fin.grupo || '';
+              if (_fin.label) row.ad = _fin.label;
+              row.source_id = (_fin.canal === 'ad' || _fin.canal === 'form') ? (_fin.source_id || null) : null;
+              if (sessionUserKey === 'gaspar') { row.origen_regla = _fin.regla; row.origen_evid = JSON.stringify(_ev); }
             }
           }
         } catch (_) {}
@@ -25149,7 +26027,17 @@ const handler = {
         if ('cartel' in body)     { cSets.push('cartel = ?');     cArgs.push(String(body.cartel || '').trim()); }
         if ('base' in body)       { cSets.push('base = ?');       cArgs.push(String(body.base || '').trim()); }
         if ('dimer' in body)      { cSets.push('dimer = ?');      cArgs.push(String(body.dimer || '').trim()); }
-        if ('ad' in body)         { cSets.push('ad = ?');         cArgs.push(String(body.ad || '').trim()); }
+        // ad = ORIGEN de la venta: no se edita por cartel. Igual que antes (pantalla vieja que manda todo): si no cambió, se ignora.
+        let _origenNuevo = null, _origenSinCambio = false;
+        if ('ad' in body) {
+          const _nuevoAd = String(body.ad || '').trim();
+          const _curO = await env.DB.prepare("SELECT IFNULL(ad,'') AS ad, IFNULL(origen_estado,'') AS est FROM pedidos WHERE id = ?").bind(id).first();
+          if (_curO && _nuevoAd !== String(_curO.ad || '').trim()) {
+            if (!_curO.est) { cSets.push('ad = ?'); cArgs.push(_nuevoAd); }
+            else if (sessionUserKey === 'gaspar' || _curO.est === 'revisar' || _curO.est === 'historico') _origenNuevo = _nuevoAd;
+            else return json({ error: 'El origen de esta venta se calculó con datos (anuncio, Instagram, link de la bio, etc.): si está mal, avisale a Gaspar.', campo: 'ad' }, 403);
+          } else _origenSinCambio = true;
+        }
         if ('envio' in body)      { cSets.push('envio = ?');      cArgs.push(String(body.envio || '').trim()); }
         if ('aclaracion' in body) { cSets.push('aclaracion = ?'); cArgs.push(String(body.aclaracion || '').trim()); }
         if ('precio' in body) {
@@ -25281,6 +26169,21 @@ const handler = {
           touched = true;
         }
 
+        if (_origenNuevo !== null) {
+          await ensureOrigenSchema(env);
+          const _idsV = await idsDeLaVenta(env, id);
+          const _canal = canalDeLabel(_origenNuevo, '', '') || 'no_sabe';
+          const _cur = await env.DB.prepare('SELECT source_id, source_campaign, origen_grupo, origen_evid FROM pedidos WHERE id = ?').bind(id).first();
+          let _ev0 = {}; try { _ev0 = JSON.parse((_cur && _cur.origen_evid) || '{}'); } catch (_) {}
+          const _esAd = _canal === 'ad' || _canal === 'form';
+          await guardarOrigenPedido(env, _idsV, {
+            canal: _canal, estado: sessionUserKey === 'gaspar' ? 'confirmado' : 'revisar', regla: sessionUserKey === 'gaspar' ? 'gaspar' : 'vendedor',
+            evid: Object.assign({}, _ev0, { txt: '', elegido: _origenNuevo }), label: _origenNuevo || ORIGEN_LABELS.no_sabe,
+            source_id: _esAd ? String((_cur && _cur.source_id) || '') : '', source_campaign: _esAd ? String((_cur && _cur.source_campaign) || '') : '',
+            grupo: (_esAd || _canal === 'ad_sin_ref') ? String((_cur && _cur.origen_grupo) || '') : ''
+          }, String(session.user || ''));
+          touched = true;
+        } else if (_origenSinCambio) touched = true;
         if (!touched && estadoPagoIgnorado) return json({ error: 'Ese pedido ya tiene registrado el 2do pago. Recargá la app para volverlo a 1er pago.' }, 409);
         if (!touched) return json({ error: 'nada para actualizar' }, 400);
         const rs2 = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs, { interno: _pr === 'admin', fotos: true }) };
@@ -28359,7 +29262,7 @@ const handler = {
     // Cada ~15 min: importar los pedidos nuevos del Excel -> trazarles el ad automáticamente.
     if (new Date().getUTCMinutes() % 15 < 5) ctx.waitUntil((async () => {
       try { await importNewPedidosFromVentas(env); } catch (_) {}
-      try { await traceUntaggedPedidos(env); } catch (_) {}
+      try { await origenBarrer(env, { limit: 8 }); } catch (_) {}   // origen de lo que entra por el Excel / filas sin calcular
       // Red de seguridad de la matriz de Emma: carteles de neón del CRM sin pieza de corte → se crea.
       try { await ensureCortePiezasNeonPendientes(env); } catch (_) {}
       // Vendedor de los pedidos de neón → 2026 v4 (Pedidos_Directo col C): relleno + reintentos.

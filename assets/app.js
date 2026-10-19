@@ -1751,7 +1751,7 @@ function corteResetEstado() {
   if (typeof nkbResetEstado === 'function') nkbResetEstado();   // tablero de neón: idem
 }
 function afterUserSwitch() {
-  STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = '';   // producción: nada del usuario anterior
+  STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = ''; pedidoFilter.origenPend = false;   // producción: nada del usuario anterior
   try { localStorage.removeItem(CACHE_KEY); } catch (_) {}
   corteResetEstado();
   STATE.loaded = false; STATE.pedidos = [];
@@ -1794,7 +1794,7 @@ async function logout() {
   STATE.consultas = {};
   repartoState = { data: null, loading: false, error: '', at: 0 };
   chatState.vigilados = null;
-  STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = '';
+  STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = ''; pedidoFilter.origenPend = false;
   saveToken(null);
   saveAdminToken(null);
   STATE.swProds = undefined; try { localStorage.removeItem('niventas.swProds'); } catch (_) {}   // productores del switcher
@@ -2277,6 +2277,13 @@ function mapPedidoFromD1(row) {
     canalAd: row.ad || '',
     sourceId: row.source_id || '',
     sourceCampaign: row.source_campaign || '',
+    // ORIGEN de la venta (oct-2026): canal + estado ('auto' por datos, 'revisar' = a confirmar, 'confirmado' por Gaspar,
+    // 'historico' = carga vieja). regla/evid (por qué) solo vienen para Gaspar.
+    origenCanal: row.origen_canal || '',
+    origenEstado: row.origen_estado || '',
+    origenGrupo: row.origen_grupo || '',
+    origenRegla: row.origen_regla || '',
+    origenEvid: (() => { if (!row.origen_evid) return null; if (typeof row.origen_evid === 'object') return row.origen_evid; try { return JSON.parse(row.origen_evid); } catch (_) { return null; } })(),
     telefono: row.telefono || '',
     tramos: row.tramos || '',
     tipo: row.tipo || '',
@@ -10769,8 +10776,173 @@ function drawVerticalCharts(key) {
 }
 
 // ---------- PEDIDOS ----------
-let pedidoFilter = { search: '', estadoPago: '', estadoPedido: '', canal: '', mes: '', prod: '', prodEstado: '' };
+let pedidoFilter = { search: '', estadoPago: '', estadoPedido: '', canal: '', mes: '', prod: '', prodEstado: '', origenPend: false };
 let pedidoSort = { col: 'fecha', dir: -1 };
+// ── ORIGEN de la venta (oct-2026) ──
+// Lo calcula el worker con datos (anuncio de Meta, Meta confirma que fue un anuncio sin decir cuál, link de la bio, Instagram,
+// compra anterior, frase de referido…). Sin prueba queda 'revisar': la fila se pinta ROJA solo para Gaspar hasta que la confirma.
+// Las etiquetas son las mismas del worker (ORIGEN_LABELS): el PATCH las reconoce por el texto.
+const ORIGEN_LABEL_SRV = { ad_sin_ref: 'Anuncio sin referencia de Meta', linkbio: 'Link bio perfil ig', igdm: 'Instagram DM (no viene de ad)', frecuente: 'Cliente frecuente (no viene de ad)', referido: 'Referido (no viene de ad)', directo: 'Directo (no viene de ad)', web: 'Google / web', sin_frontera: 'Sin Frontera (cuenta corriente)', no_sabe: 'Sin trazar (no se sabe de dónde vino)' };
+const ORIGEN_OPC = [
+  ['ad_sin_ref', 'Anuncio de Meta'],
+  ['linkbio', 'Link de la bio de Instagram'],
+  ['igdm', 'Instagram DM (no vino de un anuncio)'],
+  ['frecuente', 'Cliente frecuente (ya nos había comprado)'],
+  ['referido', 'Referido (lo mandó alguien)'],
+  ['directo', 'Directo (nos encontró solo, no por un anuncio)'],
+  ['web', 'Google / página web'],
+  ['sin_frontera', 'Sin Frontera (cuenta corriente)'],
+  ['no_sabe', 'No se sabe']
+];
+const ORIGEN_NOMBRE = { ad: 'Anuncio de Meta', form: 'Formulario de Meta', ad_sin_ref: 'Anuncio de Meta (sin referencia)', linkbio: 'Link de la bio de IG', igdm: 'Instagram DM', frecuente: 'Cliente frecuente', referido: 'Referido', directo: 'Directo', web: 'Google / web', sin_frontera: 'Sin Frontera', no_sabe: 'Sin trazar' };
+function pedOrigenPend(p) { return !!p && p.origenEstado === 'revisar' && isAdmin(); }
+function origenTxt(p) { const e = (p && p.origenEvid) || {}; return String(e.txt || e.auto_txt || e.sugerencia_txt || ''); }
+function origenOpcSugerida(canal) { return !canal || canal === 'no_sabe' ? '' : (canal === 'ad' || canal === 'form') ? 'ad_sin_ref' : canal; }
+// Celda "Ad" de la tabla: el label de siempre; si está a confirmar (Gaspar), el botón rojo + lo que propone el sistema.
+function pedOrigenCelda(p) {
+  const lbl = `<span class="muted" style="font-size:12px">${escapeHtml(p.canalAd || '—')}</span>`;
+  if (!pedOrigenPend(p)) return lbl;
+  const pc = (/^choque:/.test(p.origenRegla || '') && p.origenEvid && p.origenEvid.propuesta) || p.origenCanal;
+  const prop = pc && pc !== 'no_sabe' ? ('¿' + (ORIGEN_NOMBRE[pc] || pc) + '?') : 'sin pista';
+  return `<button type="button" data-origen-conf="${p.idx}" onclick="event.stopPropagation()" title="${escapeHtml(origenTxt(p) || 'No encontramos de dónde vino: confirmalo')}" style="background:rgba(255,40,60,.16);color:#ff6b7a;border:1px solid rgba(255,40,60,.45);border-radius:var(--r-pill);padding:2px 8px;font-size:10.5px;font-weight:700;cursor:pointer;white-space:nowrap">⚠ Confirmar origen</button><div style="font-size:11px;color:var(--fg-subtle);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(prop)}</div>`;
+}
+// Ventas (no filas) con el origen a confirmar.
+function origenPendVentas() {
+  const m = new Map();
+  for (const p of (STATE.pedidos || [])) if (p.origenEstado === 'revisar') { const k = p.numero + '|' + pedidoFechaYmd(p) + '|' + (p.telefono || ('id' + p.idx)); if (!m.has(k)) m.set(k, p); }
+  return [...m.values()];
+}
+function renderOrigenBanner() {
+  const el = document.getElementById('origen-banner'); if (!el) return;
+  const v = isAdmin() ? origenPendVentas() : [];
+  if (!v.length && !pedidoFilter.origenPend) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div style="margin:0 0 12px;padding:10px 14px;background:rgba(255,40,60,.10);border:1px solid rgba(255,40,60,.45);border-radius:8px;color:var(--fg);font-size:13px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <span style="flex:1;min-width:220px">${v.length ? `⚠ <b>${v.length} venta${v.length > 1 ? 's' : ''}</b> con el origen a confirmar: no encontramos de dónde vino el cliente (o lo cargado choca con los datos). Quedan en rojo hasta que lo confirmes, y el funnel las muestra aparte.` : 'No quedan ventas con el origen a confirmar.'}</span>
+    <button type="button" class="btn btn-ghost" data-origen-filtro style="font-size:12px">${pedidoFilter.origenPend ? 'Ver todas' : 'Ver solo esas'}</button></div>`;
+  const b = el.querySelector('[data-origen-filtro]');
+  if (b) b.onclick = () => { pedidoFilter.origenPend = !pedidoFilter.origenPend; renderTablePedidos(); };
+}
+// Campañas de Meta para elegir a cuál va una venta de anuncio (solo Gaspar). Cache por sesión.
+async function origenCampanas() {
+  if (STATE.origenCampanas && !STATE.origenCampanasErr) return STATE.origenCampanas;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/origen/campanas', { headers: authHeaders() });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    STATE.origenCampanas = j.campanas || []; STATE.origenCampanasErr = false;
+  } catch (_) { STATE.origenCampanas = STATE.origenCampanas || []; STATE.origenCampanasErr = true; }
+  return STATE.origenCampanas;
+}
+function origenCampanaSelectHtml(id, valor, campanas, estilo) {
+  const opt = (v, l) => `<option value="${escapeHtml(v)}" ${String(valor || '') === String(v) ? 'selected' : ''}>${escapeHtml(l)}</option>`;
+  const cs = (campanas || []).filter(c => !c.cursos);
+  const conocida = !valor || valor === 'corporeas' || cs.some(c => String(c.id) === String(valor));
+  return `<select id="${id}" style="${estilo}">${opt('', '— campaña (si la sabés) —')}${opt('corporeas', 'Corpóreas')}${conocida ? '' : opt(valor, 'Campaña ' + valor)}${cs.map(c => opt(c.id, c.nombre + (c.ultimo ? ' · últ. ' + String(c.ultimo).slice(8, 10) + '/' + String(c.ultimo).slice(5, 7) : ''))).join('')}</select>`;
+}
+// Ventana "Confirmar origen" (Gaspar): desde la fila roja, el drawer o el funnel. Aplica a TODA la venta.
+async function abrirConfirmarOrigen(idx) {
+  if (!isAdmin()) return;
+  const p = (STATE.pedidos || []).find(x => x.idx === idx);
+  if (!p) { toast('No encontré ese pedido en la lista: refrescá'); return; }
+  const herm = (typeof pedidoHermanos === 'function' ? pedidoHermanos(p) : [p]);
+  const ev = p.origenEvid || {};
+  const inp = PM_INP, lbl = PM_LBL;
+  const txtEv = origenTxt(p);
+  // Ya tiene un anuncio (con o sin ad_id): se puede confirmar ese mismo sin perder su campaña. En un CHOQUE (lo cargado
+  // contra lo que dicen los datos) queda lo cargado y lo del sistema viene en evid.propuesta: Gaspar elige, nada preelegido.
+  const choque = /^choque:/.test(p.origenRegla || '');
+  const tieneAd = p.origenCanal === 'ad' || p.origenCanal === 'form';
+  const propAd = (ev.propuesta === 'ad' || ev.propuesta === 'form') && !!ev.propuesta_sid;
+  const sug = origenOpcSugerida(choque ? ev.propuesta : p.origenCanal);
+  const st = { elegido: choque ? '' : (tieneAd ? 'actual' : sug), camp: p.origenGrupo || '', nota: '', enviando: false, err: '', avisoRecalc: false };
+  let campanas = STATE.origenCampanas || null;
+  const old = document.getElementById('origen-conf-bk'); if (old) old.remove();
+  const bk = document.createElement('div');
+  bk.id = 'origen-conf-bk';
+  bk.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:320;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)';
+  document.body.appendChild(bk);
+  const onKey = (e) => { if (e.key === 'Escape' && !st.enviando) cerrar(); };
+  const cerrar = () => { bk.remove(); document.removeEventListener('keydown', onKey); };
+  document.addEventListener('keydown', onKey);
+  bk.onclick = (e) => { if (e.target === bk && !st.enviando) cerrar(); };
+  const traerCampanas = () => { if (campanas) return; origenCampanas().then(c => { campanas = c; if (document.body.contains(bk)) pinta(); }); };
+  const pinta = () => {
+    const delSistema = ev.anuncio ? ev.anuncio + (ev.campana ? ' · ' + ev.campana : '') : '';
+    const opts = [];
+    if (tieneAd) opts.push(['actual', choque ? 'Lo que estaba cargado: ' + (p.canalAd || 'anuncio') : (delSistema ? 'El anuncio que encontró el sistema: ' + delSistema : 'El anuncio que ya tiene: ' + (p.canalAd || ORIGEN_NOMBRE[p.origenCanal] || 'anuncio'))]);
+    if (propAd) opts.push(['propuesta', 'El anuncio que encontró el sistema: ' + (ev.propuesta_label || delSistema || 'anuncio')]);
+    ORIGEN_OPC.forEach(x => opts.push(x));
+    const filas = [];
+    if (txtEv) filas.push(`<div><b>Por qué:</b> ${escapeHtml(txtEv)}</div>`);
+    if (ev.antes && ev.antes !== p.canalAd) filas.push(`<div><b>Estaba cargado como:</b> ${escapeHtml(ev.antes)}</div>`);
+    if (ev.elegido) filas.push(`<div><b>El vendedor eligió:</b> ${escapeHtml(ev.elegido)}</div>`);
+    if (choque && ev.propuesta) filas.push(`<div><b>Los datos dicen:</b> ${escapeHtml(ev.propuesta_label || ORIGEN_NOMBRE[ev.propuesta] || ev.propuesta)}</div>`);
+    if (ev.sugerencia && ev.sugerencia !== p.origenCanal) filas.push(`<div><b>El sistema sugería:</b> ${escapeHtml(ORIGEN_NOMBRE[ev.sugerencia] || ev.sugerencia)}${ev.sugerencia_txt ? ' — ' + escapeHtml(ev.sugerencia_txt) : ''}</div>`);
+    if (ev.primer) filas.push(`<div><b>Primer mensaje del cliente:</b> «${escapeHtml(ev.primer)}»</div>`);
+    const campHtml = st.elegido !== 'ad_sin_ref' ? '' : `<label style="${lbl}">Campaña</label>${campanas
+      ? origenCampanaSelectHtml('oc-camp', st.camp, campanas, inp + ';margin-bottom:8px') + (STATE.origenCampanasErr ? '<div style="font-size:11.5px;color:#ffc97a;margin:-4px 0 8px">No se pudieron traer las campañas de Meta: elegí Corpóreas o dejala sin campaña.</div>' : '')
+      : '<div style="font-size:12px;color:var(--fg-subtle);margin-bottom:8px">Cargando campañas…</div>'}`;
+    const dis = st.enviando ? 'disabled' : '';
+    bk.innerHTML = `<div style="background:var(--ink-50,#111);border:1px solid var(--border);border-radius:12px;max-width:520px;width:100%;padding:18px;margin-top:40px;color:var(--fg)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><b style="font-size:15px">¿De dónde vino esta venta?</b><button type="button" data-oc-x class="btn btn-ghost" style="padding:2px 8px" ${dis}>✕</button></div>
+      <div style="font-size:13px;margin-bottom:8px"><b>${escapeHtml(herm.map(x => x.cartel).filter(Boolean).join(' + ') || p.cartel || '')}</b> · #${escapeHtml(String(p.numero || ''))} · ${fmtDate(p.fecha)} · ${fmtMoney(herm.reduce((a, x) => a + (Number(x.precio) || 0) + (Number(x.precioDimmer) || 0), 0))}${p.telefono ? ' · ' + escapeHtml(p.telefono) : ''}${(p.cargadoPor || p.comercial_id) ? ' · ' + escapeHtml(loaderLabel(p.cargadoPor || p.comercial_id)) : ''}</div>
+      <div style="font-size:12.5px;color:var(--fg-subtle);display:flex;flex-direction:column;gap:4px;margin-bottom:12px;background:var(--ink-100);border-radius:8px;padding:8px 10px">
+        <div><b>Ahora:</b> ${escapeHtml(p.canalAd || ORIGEN_NOMBRE[p.origenCanal] || '—')} ${p.origenEstado === 'revisar' ? '<span style="color:#ff6b7a">(a confirmar)</span>' : p.origenEstado === 'confirmado' ? '<span style="color:#8ab4ff">(confirmado)</span>' : p.origenEstado === 'auto' ? '<span style="color:#6ef0a0">(automático)</span>' : ''}</div>
+        ${filas.join('')}
+      </div>
+      <label style="${lbl}">Origen</label>
+      <select id="oc-canal" style="${inp};margin-bottom:8px" ${dis}>${st.elegido ? '' : '<option value="" selected>— elegí de dónde vino —</option>'}${opts.map(([k, l]) => `<option value="${k}" ${st.elegido === k ? 'selected' : ''}>${escapeHtml(l)}${k === sug && (!tieneAd || choque) ? ' (sugerido)' : ''}</option>`).join('')}</select>
+      ${campHtml}
+      <label style="${lbl}">Nota (opcional)</label>
+      <input id="oc-nota" style="${inp};margin-bottom:12px" placeholder="ej. me lo dijo el cliente por teléfono" value="${escapeHtml(st.nota)}" ${dis}>
+      ${st.err ? `<div style="color:#ff6b7a;font-size:12.5px;margin:-4px 0 10px">${escapeHtml(st.err)}</div>` : ''}
+      ${st.avisoRecalc ? '<div style="color:#ffc97a;font-size:12.5px;margin:-4px 0 10px">Esta venta ya la confirmaste: si recalculás y no hay prueba, vuelve a quedar a confirmar. Tocá ↻ Recalcular otra vez para seguir.</div>' : ''}
+      <div style="display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap">
+        <div style="display:flex;gap:8px">${(p.telefono && typeof canAccessChat === 'function' && canAccessChat()) ? `<button type="button" class="btn btn-ghost" data-oc-chat style="font-size:12px" ${dis}>💬 Ver el chat</button>` : ''}<button type="button" class="btn btn-ghost" data-oc-recalc style="font-size:12px" title="Vuelve a buscar con los datos de hoy" ${dis}>↻ Recalcular</button></div>
+        <div style="display:flex;gap:8px"><button type="button" class="btn btn-ghost" data-oc-x ${dis}>Cancelar</button><button type="button" class="btn btn-cyan" data-oc-ok ${dis}>${st.enviando ? 'Guardando…' : '✓ Confirmar'}</button></div>
+      </div>
+    </div>`;
+    bk.querySelectorAll('[data-oc-x]').forEach(b => b.onclick = () => { if (!st.enviando) cerrar(); });
+    const sel = bk.querySelector('#oc-canal');
+    if (sel) sel.onchange = () => { st.elegido = sel.value; st.err = ''; st.avisoRecalc = false; pinta(); if (st.elegido === 'ad_sin_ref') traerCampanas(); };
+    const cs = bk.querySelector('#oc-camp'); if (cs) cs.onchange = () => { st.camp = cs.value; };
+    const nt = bk.querySelector('#oc-nota'); if (nt) nt.oninput = () => { st.nota = nt.value; };
+    const ch = bk.querySelector('[data-oc-chat]'); if (ch) ch.onclick = () => { if (st.enviando) return; cerrar(); verConversacionPedido(idx); };
+    const rc = bk.querySelector('[data-oc-recalc]'); if (rc) rc.onclick = () => {
+      if (p.origenEstado === 'confirmado' && !st.avisoRecalc) { st.avisoRecalc = true; pinta(); return; }
+      enviar('/origen-recalcular', {});
+    };
+    const ok = bk.querySelector('[data-oc-ok]'); if (ok) ok.onclick = () => {
+      if (!st.elegido) { st.err = 'Elegí de dónde vino la venta.'; pinta(); return; }
+      const canal = st.elegido === 'actual' ? p.origenCanal : st.elegido === 'propuesta' ? ev.propuesta : st.elegido;
+      enviar('/origen', { canal, campaign_id: st.elegido === 'ad_sin_ref' ? st.camp : '', usar_propuesta: st.elegido === 'propuesta', nota: st.nota });
+    };
+  };
+  const enviar = async (ruta, body) => {
+    if (st.enviando) return;
+    st.enviando = true; st.err = ''; pinta();
+    try {
+      const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx + ruta, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+      const upd = (j.pedidos || []).map(mapPedidoFromD1);
+      const ids = new Set(upd.map(x => x.idx));
+      STATE.pedidos = STATE.pedidos.filter(x => !ids.has(x.idx)).concat(upd);
+      if (j.relacionadas) { const fresh = await fetchPedidosFromD1(); if (fresh && fresh.length) STATE.pedidos = fresh; }
+      cerrar();
+      if (STATE.view === 'pedidos') renderTablePedidos();
+      if (document.getElementById('drawer')?.classList.contains('open') && STATE.view === 'pedidos') openDrawerPedido(idx);
+      if (STATE.view === 'funnel-ads') { funnelState.dataKey = ''; loadFunnelAds(true); }
+      const u = upd.find(x => x.idx === idx) || upd[0];
+      toast(ruta === '/origen' ? 'Origen confirmado ✓' + (j.relacionadas ? ' (y se acomodaron ' + j.relacionadas + ' venta' + (j.relacionadas > 1 ? 's' : '') + ' relacionada' + (j.relacionadas > 1 ? 's' : '') + ')' : '') : ('Recalculado: ' + ((u && (u.canalAd || ORIGEN_NOMBRE[u.origenCanal])) || '—') + (u && u.origenEstado === 'revisar' ? ' (sigue a confirmar)' : '')));
+    } catch (e) {
+      st.enviando = false; st.err = 'No se pudo guardar: ' + e.message;
+      if (document.body.contains(bk)) pinta();
+    }
+  };
+  pinta();
+  if (st.elegido === 'ad_sin_ref') traerCampanas();
+}
 function bindPedidos() {
   startPedidosPolling();
   let _pedidoSearchTimer = null;
@@ -10813,15 +10985,15 @@ async function trazarAdsFaltantes() {
   const btn = document.getElementById('pedido-trace-ads');
   if (btn) { btn.disabled = true; btn.textContent = 'Trazando…'; }
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/trace-backfill', { method: 'POST', headers: authHeaders() });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/origen/barrer', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ limit: 40 }) });
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
-    toast(`Trazados ${j.trazados || 0} pedidos ✓`);
+    toast(j.ventas ? `Origen calculado en ${j.ventas} venta${j.ventas > 1 ? 's' : ''} ✓` : 'Todas las ventas ya tienen origen ✓');
     await loadAll();
   } catch (e) {
     toast('Error al trazar ads: ' + e.message);
     const b2 = document.getElementById('pedido-trace-ads');
-    if (b2) { b2.disabled = false; b2.textContent = '⛓ Trazar ads faltantes'; }
+    if (b2) { b2.disabled = false; b2.textContent = '⛓ Calcular orígenes faltantes'; }
   }
 }
 function renderPedidos() {
@@ -10832,13 +11004,14 @@ function renderPedidos() {
   return `
     <div class="page-head">
       <div><div class="eyebrow" id="pedidos-total-count">${STATE.pedidos.length} totales</div><h1>Pedidos</h1></div>
-      <div class="actions">${canCotizar() ? '<button class="btn btn-cyan" id="pedido-nuevo">＋ Cargar pedido</button>' : ''}${isAdmin() ? '<button class="btn btn-ghost" id="pedido-trace-ads" title="Traza el ad de los pedidos sin atribuir (histórico completo): WPP por teléfono, IG por IGSID vía la OC del chat">⛓ Trazar ads faltantes</button>' : ''}${canCotizar() ? '<button class="btn btn-ghost" id="pedido-ver-tickets" title="Ver todos los tickets de producción de corpóreos">🎫 Ver tickets</button>' : ''}<button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
+      <div class="actions">${canCotizar() ? '<button class="btn btn-cyan" id="pedido-nuevo">＋ Cargar pedido</button>' : ''}${isAdmin() ? '<button class="btn btn-ghost" id="pedido-trace-ads" title="Calcula de dónde vino cada venta que todavía no tiene origen (anuncio, link de la bio, Instagram, recompra, referido…)">⛓ Calcular orígenes faltantes</button>' : ''}${canCotizar() ? '<button class="btn btn-ghost" id="pedido-ver-tickets" title="Ver todos los tickets de producción de corpóreos">🎫 Ver tickets</button>' : ''}<button class="btn btn-ghost" onclick="loadAll()">↻ Refrescar</button></div>
     </div>
     ${(() => {
       const fallos = STATE.pedidos.filter(p => p.mirrorError);
       if (!fallos.length) return '';
       return `<div style="margin:0 0 12px;padding:10px 14px;background:rgba(255,90,90,.12);border:1px solid var(--neon-red,#ff5a5a);border-radius:8px;color:var(--fg);font-size:13px">⚠ <strong>${fallos.length} pedido${fallos.length>1?'s':''}</strong> no se sincronizó al Excel (un valor fue rechazado por la validación de la planilla). Revisá: ${fallos.slice(0,6).map(p=>'#'+p.numero+' '+escapeHtml(p.cartel)).join(', ')}${fallos.length>6?'…':''}</div>`;
     })()}
+    ${isAdmin() ? '<div id="origen-banner"></div>' : ''}
     <div class="table-wrap">
       <div class="table-toolbar">
         <input type="text" placeholder="Buscar (cliente, tel, número, canal, productor…)" data-pf="search" value="${escapeHtml(pedidoFilter.search)}">
@@ -10869,6 +11042,7 @@ function renderTablePedidos() {
     if (pedidoFilter.estadoPago && p.estadoPago !== pedidoFilter.estadoPago) return false;
     if (pedidoFilter.estadoPedido && p.estadoPedido !== pedidoFilter.estadoPedido) return false;
     if (pedidoFilter.canal && p.canalAd !== pedidoFilter.canal) return false;
+    if (pedidoFilter.origenPend && isAdmin() && p.origenEstado !== 'revisar') return false;
     if (pedidoFilter.mes && getMonth(p.fecha) !== pedidoFilter.mes) return false;
     if (!prodFiltroPasa(p)) return false;   // productor / estado de producción (admin)
     return true;
@@ -10896,7 +11070,7 @@ function renderTablePedidos() {
       <tbody>
         ${filtered.length === 0 ? `<tr class="empty-row"><td colspan="${headers.length}">No hay pedidos con esos filtros</td></tr>` :
           filtered.map(p => `
-            <tr data-pid="${p.idx}">
+            <tr data-pid="${p.idx}"${pedOrigenPend(p) ? ' class="ped-origen-pend"' : ''}>
               <td class="num">${fmtDate(p.fecha)}</td>
               <td class="cliente">${escapeHtml(p.cartel)}${tcPedidoBtn(p)}${disenoBadgePedido(p)}${prodPillPedido(p)}${sfPillPedido(p)}</td>
               <td>${baseSwatch(p.base)}</td>
@@ -10906,7 +11080,7 @@ function renderTablePedidos() {
               <td class="td-corta" title="${escapeHtml(p.aclaracion||'')}"><span class="muted" style="font-size:12px">${trunc(p.aclaracion,16)}</span></td>
               <td onclick="event.stopPropagation()">${inlinePedidoSelect(p.idx,'estado_pago',p.estadoPago,PAGO_OPTS_TABLE)}${pagoCajaMini(p)}</td>
               <td onclick="event.stopPropagation()">${estadoNeonBloqueado(p) ? estadoNeonPill(p) : inlinePedidoSelect(p.idx,'estado_pedido',p.estadoPedido,PED_OPTS_TABLE)}</td>
-              <td class="td-ad"><span class="muted" style="font-size:12px">${escapeHtml(p.canalAd||'—')}</span></td>
+              <td class="td-ad">${pedOrigenCelda(p)}</td>
               ${_pedAdmin ? `<td>${loaderCell(p)}</td><td class="td-prod" onclick="event.stopPropagation()">${prodCeldaPedido(p)}</td>` : ''}
             </tr>
           `).join('')}
@@ -10915,6 +11089,8 @@ function renderTablePedidos() {
   `;
   document.querySelectorAll('tr[data-pid]').forEach(el => el.onclick = () => openDrawerPedido(parseInt(el.dataset.pid)));
   document.querySelectorAll('[data-tc-pedido]').forEach(b => b.onclick = (e) => { e.stopPropagation(); openTicketFromPedido(parseInt(b.dataset.tcPedido, 10)); });
+  document.querySelectorAll('[data-origen-conf]').forEach(b => b.onclick = (e) => { e.stopPropagation(); abrirConfirmarOrigen(parseInt(b.dataset.origenConf, 10)); });
+  renderOrigenBanner();
   document.querySelectorAll('[data-sort]').forEach(el => {
     el.onclick = () => {
       const c = el.dataset.sort;
@@ -11232,7 +11408,9 @@ function cancelCargarPedido() { pmFotoLiberarTodo(STATE.pedidoModal); STATE.pedi
 function readPedidoModalDOM() {
   const m = STATE.pedidoModal; if (!m) return;
   const v = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
-  ['numero','telefono','pagado','ad'].forEach(f => { const x = v('pm-'+f); if (x !== undefined) m[f] = x; });
+  ['numero','telefono','pagado'].forEach(f => { const x = v('pm-'+f); if (x !== undefined) m[f] = x; });
+  const os = v('pm-origen-sel'); if (os !== undefined) m.origenElegido = os;
+  const oc = v('pm-origen-camp'); if (oc !== undefined) m.origenCampana = oc;
   const ep = v('pm-estadopago'); if (ep !== undefined) m.estadoPago = ep;
   const vd = v('pm-vendedor'); if (vd !== undefined) m.vendedor = vd;
   (m.carteles||[]).forEach((c,i) => {
@@ -11255,43 +11433,82 @@ function pmRecalc() {
   pmPagoAutoEstado(STATE.pedidoModal);
   pmPagoHintRefresh(STATE.pedidoModal);
 }
-// Trae el ad por telefono (WPP) y lo pone en "de que ad viene" (override manual ok).
+// ORIGEN en el alta: el worker calcula de dónde vino el cliente con el mismo resolver que usa al guardar (anuncio, Meta,
+// link de la bio, Instagram, recompra, referido). Si hay prueba se muestra en verde (el vendedor no lo toca); si no, el
+// vendedor TIENE que elegir (queda a confirmar por Gaspar). Reemplaza al viejo campo libre "de qué ad viene".
 async function pmTraceAd() {
   const m = STATE.pedidoModal; if (!m) return;
-  // WPP: se traza por el teléfono del campo. IG: por el IGSID numérico del cliente (guardado en
-  // _igsid al cargar desde el chat) — la atribución de IG vive en wa_ad_attributions con phone=IGSID.
-  let id;
+  if (document.getElementById('pm-backdrop')) readPedidoModalDOM();
+  let tel = '', ig = '';
   if (m.plataforma === 'WPP') {
-    id = (document.getElementById('pm-telefono')?.value || '').replace(/\D/g,'');
-    if (id.length < 8) return;
+    tel = String(m.telefono || '').replace(/\D/g, '');
+    if (tel.length < 8) { if (m.origen) { m.origen = null; m._origenKey = ''; pmOrigenPaint(); } return; }
   } else if (m.plataforma === 'IG') {
-    id = String(m._igsid || '').replace(/\D/g,'');
-    if (!id) return;
+    ig = String(m._igsid || '').replace(/\D/g, '');
+    const u = String(m.telefono || '').trim();
+    if (!ig) { if (/^\d{15,}$/.test(u)) ig = u; else if (u) tel = '@' + u.replace(/^@/, ''); }
+    if (!ig && !tel) { if (m.origen) { m.origen = null; m._origenKey = ''; pmOrigenPaint(); } return; }
   } else return;
-  const adEl = document.getElementById('pm-ad');
-  if (!adEl || adEl.value.trim()) return; // no pisar si ya hay algo cargado a mano
+  const carteles = (m.carteles || []).filter(c => String(c.cartel || '').trim()).slice(0, 10).map(c => ({ cartel: String(c.cartel).trim(), alto: c.alto || '', ancho: c.ancho || '' }));
+  const sf = isAdmin() && m.clienteSF ? '1' : '';
+  const key = [m.plataforma, tel, ig, sf, JSON.stringify(carteles)].join('|');
+  if (m._origenKey === key && m.origen && !m.origen.error) return m.origen.loading ? m._origenP : undefined;
+  // Otro cliente (cambió el teléfono / usuario): lo elegido a mano era para el anterior.
+  if (m._origenCliente !== tel + '|' + ig) { m._origenCliente = tel + '|' + ig; m.origenElegido = ''; m.origenCampana = ''; m.origenCambiar = false; }
+  m._origenKey = key; m.origen = { loading: true }; pmOrigenPaint();
+  m._origenP = pmOrigenFetch(m, key, tel, ig, carteles, sf);
+  return m._origenP;
+}
+async function pmOrigenFetch(m, key, tel, ig, carteles, sf) {
   try {
-    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/ad-attribution?phone=' + encodeURIComponent(id), { headers: authHeaders() });
-    if (!r.ok) return;
+    const qs = new URLSearchParams({ telefono: tel, ig_id: ig, carteles: JSON.stringify(carteles) });
+    if (sf) qs.set('cliente_sf', '1');
+    const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/origen-preview?' + qs.toString(), { headers: authHeaders() });
     const j = await r.json();
-    const a = j.attribution;
-    if (!a) return;
-    // El server ya resuelve el label de vertical (adLabelFromSource) + el source_id (ad_id de Meta)
-    // de la última atribución CON ad_id. Si vino source_id real Y su label, usamos ESO: el campo
-    // queda con el vertical ("Corpóreas (corporeas)"/"Carteles B2C (b2c)") y guardamos el ad_id para
-    // mandarlo al guardar → el pedido nace trazado. Si NO vino source_id (o ad_label='' de cursos),
-    // caemos al texto legible y dejamos m.sourceId='' → la red de seguridad del server lo re-traza.
-    if (j.source_id && j.ad_label) {
-      adEl.value = j.ad_label; m.ad = j.ad_label; m.sourceId = String(j.source_id);
-    } else {
-      const plat = ((a.source_url||'').includes('instagram') || (a.media_type||'').toLowerCase().includes('instagram')) ? 'IG ad' : 'FB ad';
-      const det = a.headline || (a.body ? a.body.slice(0,60) : '') || a.source_id || '';
-      const txt = det ? `${plat}: ${det}` : plat;
-      adEl.value = txt; m.ad = txt; m.sourceId = '';
-    }
-    adEl.style.borderColor = '#25D366';
-    setTimeout(() => { adEl.style.borderColor = 'var(--border)'; }, 1600);
-  } catch (e) {}
+    if (STATE.pedidoModal !== m || m._origenKey !== key) return; // cambió el teléfono/carteles mientras tanto
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    m.origen = j;
+  } catch (e) { if (STATE.pedidoModal === m && m._origenKey === key) m.origen = { error: true }; }
+  pmOrigenPaint();
+}
+function pmOrigenInner(m) {
+  const lbl = PM_LBL, inp = PM_INP;
+  const o = m && m.origen;
+  const head = `<label style="${lbl}">¿De dónde vino el cliente? <span style="opacity:.6">(lo busca el sistema en el chat)</span></label>`;
+  const caja = (bg, bd, html) => `<div style="background:${bg};border:1px solid ${bd};border-radius:var(--r-sm);padding:8px 10px;font-size:12.5px;line-height:1.4">${html}</div>`;
+  if (!o) return head + caja('transparent', 'var(--border)', `<span style="color:var(--fg-subtle)">${m && m.plataforma === 'IG' ? 'Poné el @usuario de Instagram y lo buscamos solo.' : 'Poné el teléfono del cliente y lo buscamos solo.'}</span>`);
+  if (o.loading) return head + caja('transparent', 'var(--border)', '<span style="color:var(--fg-subtle)">Buscando de dónde vino…</span>');
+  if (o.error) return head + caja('transparent', 'var(--border)', '<span style="color:var(--fg-subtle)">No se pudo calcular ahora: se calcula solo al crear el pedido.</span>');
+  if (o.estado === 'auto' && !m.origenCambiar) {
+    return head + caja('rgba(74,222,128,.08)', 'rgba(74,222,128,.35)', `<b style="color:#6ef0a0">✓ ${escapeHtml(o.label || ORIGEN_NOMBRE[o.canal] || o.canal)}</b><div style="color:var(--fg-subtle);margin-top:2px">${escapeHtml(o.explicacion || '')}</div>${isAdmin() ? '<button type="button" id="pm-origen-cambiar" style="margin-top:4px;background:none;border:none;color:var(--neon-cyan,#8FD4DE);font-size:11.5px;cursor:pointer;padding:0;text-decoration:underline">cambiar</button>' : ''}`);
+  }
+  const sug = origenOpcSugerida(o.canal);
+  const titulo = m.origenCambiar ? 'Elegí el origen correcto' : (o.regla === 'sin_telefono' ? 'Sin teléfono no podemos rastrearlo' : 'No encontramos de dónde vino este cliente');
+  const ayuda = `${escapeHtml(o.explicacion || '')}${sug && !m.origenCambiar ? ' Lo más probable: <b>' + escapeHtml((ORIGEN_OPC.find(x => x[0] === sug) || [])[1] || sug) + '</b>.' : ''} ${isAdmin() ? '' : 'Si no sabés, preguntale cómo nos conoció. Gaspar lo confirma después.'}`;
+  const sel = `<select id="pm-origen-sel" style="${inp};margin-top:6px"><option value="">— elegí de dónde vino —</option>${ORIGEN_OPC.map(([k, l]) => `<option value="${k}" ${m.origenElegido === k ? 'selected' : ''}>${escapeHtml(l)}${k === sug ? ' (sugerido)' : ''}</option>`).join('')}</select>`;
+  const camp = (isAdmin() && m.origenElegido === 'ad_sin_ref')
+    ? `<div style="margin-top:6px">${STATE.origenCampanas ? origenCampanaSelectHtml('pm-origen-camp', m.origenCampana || o.grupo || '', STATE.origenCampanas, inp) + (STATE.origenCampanasErr ? '<div style="font-size:11.5px;color:#ffc97a;margin-top:3px">No se pudieron traer las campañas: elegí Corpóreas, dejala sin campaña o confirmala después.</div>' : '') : '<span style="font-size:12px;color:var(--fg-subtle)">Cargando campañas…</span>'}</div>` : '';
+  return head + caja('rgba(255,184,77,.08)', 'rgba(255,184,77,.4)', `<b style="color:#ffc97a">⚠ ${titulo}</b><div style="color:var(--fg-subtle);margin-top:2px">${ayuda}</div>`) + sel + camp;
+}
+function pmOrigenPaint() {
+  const el = document.getElementById('pm-origen'); const m = STATE.pedidoModal;
+  if (!el || !m) return;
+  el.innerHTML = pmOrigenInner(m);
+  bindPmOrigen();
+  if (m._validated) pmApplyMarks(pmValidate());
+}
+function bindPmOrigen() {
+  const m = STATE.pedidoModal; if (!m) return;
+  const sel = document.getElementById('pm-origen-sel');
+  if (sel) sel.onchange = () => {
+    const antes = m.origenElegido; m.origenElegido = sel.value;
+    if (isAdmin() && (antes === 'ad_sin_ref') !== (sel.value === 'ad_sin_ref')) {
+      pmOrigenPaint();
+      if (sel.value === 'ad_sin_ref' && !STATE.origenCampanas) origenCampanas().then(() => { if (STATE.pedidoModal === m) pmOrigenPaint(); });
+    } else if (m._validated) pmApplyMarks(pmValidate());
+  };
+  const cs = document.getElementById('pm-origen-camp'); if (cs) cs.onchange = () => { m.origenCampana = cs.value; };
+  const cb = document.getElementById('pm-origen-cambiar'); if (cb) cb.onclick = () => { m.origenCambiar = true; m.origenElegido = ''; pmOrigenPaint(); };
 }
 // Paleta del muestrario (dropdown multi-color → chips).
 const PEDIDO_COLORES = ['Amarillo','Azul','Blanco cálido','Blanco frío','Celeste','Naranja','Rojo','Rosa','Verde','Violeta'];
@@ -11870,7 +12087,7 @@ function renderPedidoModal() {
         <div id="pm-carteles">${m.carteles.map((c,i)=>renderPedidoCartelBlock(c,i,m.carteles.length)).join('')}</div>
         <button id="pm-add-cartel" class="btn btn-ghost" style="width:100%;margin-bottom:var(--s-3);font-size:12px">＋ Agregar otro cartel a este pedido</button>
         ${pmPagoBlockHtml(m)}
-        <div style="margin-bottom:var(--s-3)"><label style="${lbl}">De qué ad viene <span style="opacity:.6">(auto por teléfono en WPP · editable)</span></label><input id="pm-ad" value="${escapeHtml(m.ad||'')}" placeholder="se completa solo si vino de un ad" style="${inp}"></div>
+        <div id="pm-origen" style="margin-bottom:var(--s-3)">${pmOrigenInner(m)}</div>
         ${isAdmin() ? `<div style="margin-bottom:var(--s-3)"><label style="${lbl}">¿De quién es la venta? <span style="opacity:.6">(lo que cargás vos es tuyo, sin comisión, salvo que elijas un vendedor)</span></label><select id="pm-vendedor" style="${inp}">${[['gaspar', 'Mía (Gaspar, sin comisión)'], ['joaco', 'Joaco'], ['facundo', 'Facu'], ['agustina', 'Agus'], ['debi', 'Debi']].map(([k, l]) => `<option value="${k}" ${(m.vendedor || 'gaspar') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
         ${isAdmin() ? `<div style="margin-bottom:var(--s-3)"><label style="${lbl}">Cliente</label>
           <div style="display:flex;gap:8px">
@@ -11938,6 +12155,9 @@ function bindPedidoModal() {
     render();
   });
   const tel = document.getElementById('pm-telefono'); if (tel) tel.addEventListener('blur', pmTraceAd);
+  bindPmOrigen();
+  document.querySelectorAll('#pm-backdrop [id^="pm-cartel-"]').forEach(el => el.addEventListener('blur', () => setTimeout(pmTraceAd, 0)));
+  if (STATE.pedidoModal && STATE.pedidoModal.origen && STATE.pedidoModal._origenKey) setTimeout(pmTraceAd, 0); // plataforma / Sin Frontera cambiaron
   // Foto del diseño final (neón): subir archivo / usar una sugerida / quitar / cancelar / "la subo después".
   bindPmFotoSlots(document.getElementById('pm-backdrop'));
   // Sugerencias de foto: al tener el contacto del cliente (OC del chat ya lo trae; carga manual, al salir del teléfono).
@@ -11979,6 +12199,8 @@ function pmValidate() {
   const named = (m.carteles||[]).map((c,i)=>({c,i})).filter(x => String(x.c.cartel||'').trim());
   if (!named.length) invalid.push({ id:'pm-cartel-0', msg:'Poné al menos un cartel con nombre' });
   if (m.plataforma === 'WPP' && String(m.telefono||'').replace(/\D/g,'').length < 8) invalid.push({ id:'pm-telefono', msg:'Falta el teléfono (obligatorio en WhatsApp)' });
+  if (m.origen && m.origen.loading) invalid.push({ id:'pm-origen', msg:'Esperá: estoy buscando de dónde vino el cliente' });
+  else if (m.origen && !m.origen.error && (m.origen.estado !== 'auto' || m.origenCambiar) && !m.origenElegido) invalid.push({ id:'pm-origen-sel', msg:'Elegí de dónde vino el cliente' });
   for (const { c, i } of named) {
     const nro = i + 1;
     if (c.es_corporeo) {
@@ -12048,6 +12270,10 @@ async function confirmCargarPedido() {
   if (STATE.pedidoModalSaving) return;
   readPedidoModalDOM();
   const m = STATE.pedidoModal;
+  // El origen se calcula con teléfono + carteles + medidas: si cambió algo (o sigue buscando), esperar el resultado.
+  try { await pmTraceAd(); } catch (_) {}
+  if (STATE.pedidoModal !== m) return;
+  readPedidoModalDOM();
   m._validated = true; // a partir de acá, la validación se re-aplica en vivo
   const invalid = pmValidate();
   if (invalid.length) {
@@ -12079,12 +12305,16 @@ async function confirmCargarPedido() {
       // Fecha en hora local Argentina (la máquina de Gaspar). Sin esto el worker cae a la fecha
       // UTC, que de noche en ART ya es el día siguiente → el pedido quedaba fechado un día después.
       fecha: localDateKey(new Date()),
-      plataforma: m.plataforma, telefono: m.telefono, estado_pago: m.estadoPago, pagado: m.pagado, ad: m.ad,
+      plataforma: m.plataforma, telefono: m.telefono, estado_pago: m.estadoPago, pagado: m.pagado, ad: '',
+      // ORIGEN: lo calcula el worker al guardar (resolverOrigenPedido). Solo viaja lo que se eligió a mano cuando no había
+      // prueba (o Gaspar lo cambió): el vendedor → queda a confirmar; Gaspar → confirmado (+ campaña si es un anuncio).
+      origen_canal: (m.origen && (m.origen.estado !== 'auto' || m.origenCambiar)) ? (m.origenElegido || '') : '',
+      origen_campaign: (isAdmin() && m.origenElegido === 'ad_sin_ref') ? (m.origenCampana || '') : '',
       // IGSID del chat (si vino de una OC de Instagram): el server lo usa para saber de qué vendedor es el chat.
       ig_id: m.plataforma === 'IG' ? String(m._igsid || '') : '',
       // ad_id de Meta capturado por pmTraceAd (vacío si se cargó a mano o no vino de un ad). El worker
       // lo persiste en pedidos.source_id → el pedido nace trazado en el funnel.
-      source_id: m.sourceId || '',
+      source_id: '',
       // De quién es la venta (solo admin): lo que carga Gaspar es suyo (sin comisión) salvo que elija un vendedor.
       comercial_id: isAdmin() ? (m.vendedor || 'gaspar') : undefined,
       // Cliente Sin Frontera (solo admin): el server lo vincula en el mismo alta.
@@ -14966,12 +15196,8 @@ function openDrawerPedido(idx) {
         <h4>Trazabilidad y envío</h4>
         <div style="display:flex;flex-direction:column;gap:10px">
           <div>
-            <label style="${lblD}">Trazabilidad (Ad)</label>
-            <select id="ped-edit-ad-sel" onchange="if(this.value){document.getElementById('ped-edit-ad').value=this.value;this.value='';}" style="${inpD};margin-bottom:6px">
-              <option value="">— elegí de la lista —</option>
-              ${adSelectOptions()}
-            </select>
-            <input id="ped-edit-ad" value="${escapeHtml(p.canalAd||'')}" placeholder="o escribí el ad a mano" style="${inpD}">
+            <label style="${lblD}">Origen de la venta (de dónde vino el cliente)</label>
+            ${pedOrigenDrawerHtml(p, inpD)}
             ${p.sourceId ? `
             <div style="background:rgba(139,47,214,.08);border-left:3px solid var(--accent,#8B2FD6);padding:8px 12px;margin-top:6px;border-radius:0 6px 6px 0;font-size:12px;display:flex;gap:10px;align-items:center">
               <div style="flex:1;min-width:0">
@@ -15037,6 +15263,20 @@ function openDrawerPedido(idx) {
 // lado (que es el valor que se guarda), así podés elegir de la lista O escribir libre.
 // (Antes era un <datalist>, que filtraba las opciones por el texto ya escrito y quedaba
 //  vacío cuando el valor no matcheaba nada — ej "REVISAR:..." — por eso "no andaba".)
+function pedOrigenDrawerHtml(p, inpD) {
+  const est = p.origenEstado || '';
+  const pill = est === 'auto' ? ['green', '✓ automático'] : est === 'confirmado' ? ['blue', '✓ confirmado por Gaspar'] : est === 'revisar' ? ['red', '⚠ a confirmar'] : est === 'historico' ? ['muted', 'carga vieja'] : ['muted', 'sin calcular'];
+  const lbl = escapeHtml(p.canalAd || ORIGEN_NOMBRE[p.origenCanal] || '—');
+  const cab = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px"><span style="font-size:13px">${lbl}</span><span class="pill ${pill[0]}" style="font-size:10.5px">${pill[1]}</span></div>`;
+  if (isAdmin()) {
+    const t = origenTxt(p);
+    return cab + (t ? `<div style="font-size:12px;color:var(--fg-subtle);margin-bottom:6px">${escapeHtml(t)}</div>` : '') +
+      `<button type="button" class="btn ${est === 'revisar' ? 'btn-cyan' : 'btn-ghost'}" style="font-size:12px" onclick="abrirConfirmarOrigen(${p.idx})">${est === 'revisar' ? '⚠ Confirmar origen' : 'Cambiar / confirmar origen'}</button>`;
+  }
+  if (est === 'auto' || est === 'confirmado') return cab + '<div style="font-size:12px;color:var(--fg-subtle)">Lo calculó el sistema con el chat. Si está mal, avisale a Gaspar.</div>';
+  const cur = Object.keys(ORIGEN_LABEL_SRV).find(k => ORIGEN_LABEL_SRV[k] === p.canalAd) || '';
+  return cab + `<select id="ped-edit-ad" style="${inpD}"><option value="">— elegí de dónde vino —</option>${ORIGEN_OPC.map(([k, l]) => `<option value="${escapeHtml(ORIGEN_LABEL_SRV[k])}" ${cur === k ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('')}</select><div style="font-size:11.5px;color:var(--fg-subtle);margin-top:4px">Si no sabés, preguntale al cliente cómo nos conoció. Gaspar lo confirma después.</div>`;
+}
 function adSelectOptions() {
   const groups = [
     ['Carteles B2C', ['El neon es una *** (b2c)', 'Locales nuevo - corto (b2c)', 'Te sobran 5 millones (b2c)', 'Locales (b2c)', 'Tenes que llamar la atencion (b2c)', 'Carteles B2C (b2c)']],
@@ -15165,7 +15405,8 @@ async function savePedidoEdit(idx) {
     bastidor:      document.getElementById('ped-edit-bastidor')?.value,
     color_bastidor:document.getElementById('ped-edit-colorbastidor')?.value,
     instalacion:   document.getElementById('ped-edit-instalacion')?.value,
-    ad:            document.getElementById('ped-edit-ad')?.value,
+    // Origen: solo si el vendedor lo eligió/cambió (Gaspar lo confirma con su ventana, no por acá).
+    ad:            (() => { const el = document.getElementById('ped-edit-ad'); return (el && el.value && el.value !== (p.canalAd || '')) ? el.value : undefined; })(),
     envio:         document.getElementById('ped-edit-envio')?.value,
     aclaracion:    document.getElementById('ped-edit-aclaracion')?.value,
     // Campos del pedido (aplican a todos los carteles del mismo pedido — ver pedidoHermanos).
@@ -19276,7 +19517,7 @@ function bindRendimientoBody() {
 // corrigen desde "Para revisar" (POST /admin/ads/campaign-vertical).
 let funnelState = { period: '', rate: 1400, data: null, dataKey: '', loadedAt: 0, loading: false, seq: 0, open: {}, syncing: false };
 
-const FA_ORG_COLOR = { linkbio: '#2E9BD6', directo: '#7A7291', frecuente: '#12A163', referido: '#33CF88', revisar: '#B67916' };
+const FA_ORG_COLOR = { linkbio: '#2E9BD6', igdm: '#C13584', directo: '#7A7291', frecuente: '#12A163', referido: '#33CF88', web: '#E0A526', sin_frontera: '#8B5CF6', revisar: '#B67916' };
 const FA_PAUTA_COLORS = ['#8B2FD6', '#B84DFF', '#6E2FB0', '#D6409F', '#9D5CE0', '#5B2A91', '#C77DFF'];
 const FA_TIPS = {
   gasto: ['Gasto', 'Lo invertido en el período (convertido a pesos con el tipo de cambio de arriba). Las campañas de cursos no cuentan.', 'Meta Ads, por anuncio y por día', ''],
@@ -19515,9 +19756,11 @@ function renderFaAll() {
       '. El funnel cuenta SOLO las de pauta (para que el ROAS sea real).';
     if (d.presup_enviados) h += '<br>Presupuestos: ' + d.presup_enviados + ' enviados en el período; ' + (d.presup_sin_atrib || 0) + ' clientes con presupuesto no vinieron de un anuncio' + (d.presup_sin_tel ? ' y ' + d.presup_sin_tel + ' no tienen teléfono' : '') + ' (no entran al L→P).';
     if (d.gasto_excluido_usd) h += '<br>Gasto de campañas que no son de carteles (cursos), fuera del funnel: ' + faUsd(d.gasto_excluido_usd) + '.';
+    if (d.origen_a_confirmar) h += '<br><span style="color:var(--fa-bad);font-weight:600">⚠ ' + d.origen_a_confirmar + ' venta' + (d.origen_a_confirmar > 1 ? 's' : '') + ' con el origen a confirmar</span> (en rojo en Pedidos): hasta que las confirmes, el ROAS y el CAC pueden cambiar. <a href="#" data-fa-origen-pend style="color:var(--fa-acc)">Confirmarlas →</a>';
     h += '<br><span style="color:var(--fa-fnt)">Gasto = Meta (real), por anuncio. Leads de WhatsApp e Instagram (anuncios; los posts orgánicos no cuentan). Días en hora Argentina.</span>';
     if (d.partial && (d.warnings || []).length) h = '<span style="color:var(--fa-bad);font-weight:600">⚠ Datos parciales — falló: ' + escapeHtml(d.warnings.join('; ')) + '</span><br>' + h;
     nt.innerHTML = h;
+    const op = nt.querySelector('[data-fa-origen-pend]'); if (op) op.onclick = (e) => { e.preventDefault(); pedidoFilter.origenPend = true; setView('pedidos'); };
   }
   faBindTips();
 }
@@ -19657,11 +19900,17 @@ function renderFaRev(d) {
     h += '<h3>Ventas sin trazar o mal cargadas · ' + vs.length + ' · ' + faMoney(sum) + '</h3>';
     vs.forEach(v => {
       h += '<div class="it"><div class="q"><b>' + escapeHtml(v.cartel || '(sin nombre)') + '</b> · ' + faMoney(v.monto) + ' · ' + escapeHtml(faFecha(v.fecha)) + (v.numero ? ' · #' + escapeHtml(v.numero) : '') + (v.vendedor ? ' · ' + escapeHtml(v.vendedor) : '') +
-        '<small>' + escapeHtml(v.motivo) + (v.primer ? ' Primer mensaje: «' + escapeHtml(v.primer) + '»' : '') + (v.telefono ? ' · Tel: ' + escapeHtml(v.telefono) : '') + '</small></div></div>';
+        '<small>' + escapeHtml(v.motivo) + (v.primer ? ' Primer mensaje: «' + escapeHtml(v.primer) + '»' : '') + (v.telefono ? ' · Tel: ' + escapeHtml(v.telefono) : '') + '</small></div>' +
+        (v.id && isAdmin() ? '<div class="acts"><button class="fa-btn' + (v.pendiente ? ' pri' : '') + '" data-fa-origen="' + escapeHtml(String(v.id)) + '">' + (v.pendiente ? '⚠ Confirmar origen' : 'Marcar origen') + '</button></div>' : '') + '</div>';
     });
   }
   if (!h) h = '<div style="color:var(--fa-mut);font-size:13px;padding:8px 0">Nada para revisar en el período.</div>';
   el.innerHTML = h;
+  el.querySelectorAll('[data-fa-origen]').forEach(b => b.onclick = async () => {
+    const id = parseInt(b.getAttribute('data-fa-origen'), 10);
+    if (!(STATE.pedidos || []).some(x => x.idx === id)) { const fresh = await fetchPedidosFromD1(); if (fresh && fresh.length) STATE.pedidos = fresh; }
+    abrirConfirmarOrigen(id);
+  });
 }
 
 // tooltips del panel (popover reusable)
@@ -28792,7 +29041,7 @@ function pedidosSignature() {
   // + foto del diseño / estado del corte: si la foto se sube desde otro dispositivo (o Emma avanza la
   // matriz), el poll tiene que redibujar la tabla (badge "SIN FOTO").
   // + caja / 2do pago / comprobantes: el chip de caja de la tabla tiene que reflejar un cobro cargado desde otro lado.
-  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}:${p.disenoKey || ''}:${p.corteEstado || ''}:${p.caja || ''}:${p.caja2 || ''}:${p.cobro2 || 0}:${p.comprobanteKey || ''}:${p.comprobante2Key || ''}:${p.productorId || ''}:${p.prodEstado || ''}:${p.prodPagadoAt || ''}:${p.moMonto == null ? '' : p.moMonto}:${(p.prodFotos || []).length}`).join('|');
+  return (STATE.pedidos || []).map(p => `${p.idx}:${p.estadoPago}:${p.estadoPedido}:${p.precio}:${p.precioDimmer}:${p.restante}:${p.disenoKey || ''}:${p.corteEstado || ''}:${p.caja || ''}:${p.caja2 || ''}:${p.cobro2 || 0}:${p.comprobanteKey || ''}:${p.comprobante2Key || ''}:${p.productorId || ''}:${p.prodEstado || ''}:${p.prodPagadoAt || ''}:${p.moMonto == null ? '' : p.moMonto}:${(p.prodFotos || []).length}:${p.origenEstado || ''}:${p.origenCanal || ''}:${p.canalAd || ''}`).join('|');
 }
 function startPedidosPolling() {
   if (STATE.pedidosPollTimer) return;

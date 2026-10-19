@@ -4582,6 +4582,9 @@ table.t.t-pedidos td.td-corta { max-width: 105px; }
 /* Desplegables de Pago y Estado más angostos (el estilo inline les pone padding 8px y letter-spacing) */
 table.t.t-pedidos td select { padding-left: 6px !important; padding-right: 4px !important; letter-spacing: 0 !important; }
 table.t.t-pedidos td.td-ad { max-width: 120px; }
+/* Origen de la venta a confirmar (solo Gaspar): la fila queda roja hasta que la confirma. */
+table.t.t-pedidos tbody tr.ped-origen-pend { background: rgba(255,40,60,.10); box-shadow: inset 3px 0 0 #ff4d5e; }
+table.t.t-pedidos tbody tr.ped-origen-pend:hover { background: rgba(255,40,60,.17); }
 table.t.t-pedidos td.td-prod { min-width: 112px; }
 table.t.t-pedidos .prod-sel { max-width: 118px; }
 table.t.t-pedidos .prod-celda-linea { white-space: normal; line-height: 1.35; }
