@@ -24289,31 +24289,38 @@ function calcManoObraFront(precio, tramos, metros, ancho, alto, cant) {
 }
 
 // ---------- INIT ----------
-loadUser();
-if (STATE.adminToken) swProdsCargar();   // productores del switcher del admin
-// Cargar done marks: localStorage inmediato + sync async desde Worker
-STATE.done = loadDoneLocal();
-loadCotizadorParams();
-// Al abrir la PWA instalada (standalone) sin hash explícito, arrancamos en el
-// Chat WA (lo más usado en el celu) para usuarios con acceso al chat. En el
-// navegador (tab) se mantiene el dashboard por defecto.
-const _isStandalone = !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true;
-const initView = location.hash.replace('#','') || ((_isStandalone && canAccessChat()) ? 'chat' : 'dashboard');
-STATE.view = initView;
-loadAll();
-// Rol del token (productores de neón = usuarios dinámicos): si el guardado no coincide con el del worker, se corrige.
-if (STATE.token && CONFIG.trackerUrl) fetch(CONFIG.trackerUrl + '/auth/me', { headers: authHeaders() }).then(r => r.ok ? r.json() : null).then(j => {
-  if (j && typeof j.rol === 'string' && j.rol !== (STATE.tokenRol || '') && tokenBelongsTo(STATE.user)) { STATE.tokenRol = j.rol; try { localStorage.setItem('niventas.tokenRol', j.rol); } catch (_) {} render(); }
-}).catch(() => {});
-// Sync done marks desde Worker (en background, re-render cuando llegue)
-loadDone().then(() => { if (STATE.loaded) render(); });
-// Pre-load chat unread counts for sidebar badge + arrancar el web worker de
-// notificaciones aunque el usuario no entre a la vista del Chat.
-if (canAccessChat()) {
-  loadChatContacts().then(() => updateUnreadBadge());
-  ensureNotificationPermission();
-  initPollWorker();
-}
+// Corre en un microtask = apenas termina de evaluarse TODO app.js. El primer render() lee let/const
+// top-level declarados más abajo de este bloque (briefSearch, briefProducto, BRIEF_COLUMNAS, CORP_*…)
+// y los STATE.brief* por defecto: corrido acá en sincrónico tiraba "Cannot access 'briefSearch' before
+// initialization" (TDZ) en Cotización y loadAll moría ANTES del fetch fresco (sin caché quedaba trabado en
+// "Conectando con Google Sheets…"; con caché, los datos viejos toda la sesión). 18-oct.
+queueMicrotask(() => {
+  loadUser();
+  if (STATE.adminToken) swProdsCargar();   // productores del switcher del admin
+  // Cargar done marks: localStorage inmediato + sync async desde Worker
+  STATE.done = loadDoneLocal();
+  loadCotizadorParams();
+  // Al abrir la PWA instalada (standalone) sin hash explícito, arrancamos en el
+  // Chat WA (lo más usado en el celu) para usuarios con acceso al chat. En el
+  // navegador (tab) se mantiene el dashboard por defecto.
+  const _isStandalone = !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true;
+  const initView = location.hash.replace('#','') || ((_isStandalone && canAccessChat()) ? 'chat' : 'dashboard');
+  STATE.view = initView;
+  loadAll();
+  // Rol del token (productores de neón = usuarios dinámicos): si el guardado no coincide con el del worker, se corrige.
+  if (STATE.token && CONFIG.trackerUrl) fetch(CONFIG.trackerUrl + '/auth/me', { headers: authHeaders() }).then(r => r.ok ? r.json() : null).then(j => {
+    if (j && typeof j.rol === 'string' && j.rol !== (STATE.tokenRol || '') && tokenBelongsTo(STATE.user)) { STATE.tokenRol = j.rol; try { localStorage.setItem('niventas.tokenRol', j.rol); } catch (_) {} render(); }
+  }).catch(() => {});
+  // Sync done marks desde Worker (en background, re-render cuando llegue)
+  loadDone().then(() => { if (STATE.loaded) render(); });
+  // Pre-load chat unread counts for sidebar badge + arrancar el web worker de
+  // notificaciones aunque el usuario no entre a la vista del Chat.
+  if (canAccessChat()) {
+    loadChatContacts().then(() => updateUnreadBadge());
+    ensureNotificationPermission();
+    initPollWorker();
+  }
+});
 
 // ===== Diseñador IA: medición CV del boceto en el navegador (modo comparación Emma vs IA) =====
 // ===== Medición CV del boceto IA en el navegador =====
