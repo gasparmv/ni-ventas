@@ -6074,6 +6074,13 @@ async function corteSendCableInfo(env, phone) {
 // Datos de transferencia para el cobro del corte.
 const CORTE_ALIAS = 'neoninfinito.mp';
 const CORTE_TITULAR = 'Gaspar Martinez';
+// Medida que va en el detalle del cobro: la REAL de la matriz (con la que se calculó el precio), no la que pidió el cliente.
+// Si la pieza no tiene medida real (insumos, filas viejas), la declarada. Gaspar 19-oct.
+function corteMedidaCobro(r) {
+  const f = v => { const n = Number(v); return n > 0 ? String(Math.round(n * 10) / 10).replace('.', ',') : ''; };
+  const a = f(r && r.ancho_real), l = f(r && r.alto_real);
+  return a && l ? 'ancho ' + a + ' × alto ' + l + ' cm' : String((r && r.medida_declarada) || '');
+}
 // Arma el mensaje de cobro de un cliente (g = {cliente_nombre, piezas:[{diseno,medida,cantidad,precio}], total}).
 function corteCobroMsg(g) {
   const nombre = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
@@ -6116,7 +6123,7 @@ async function corteTrasPagado(env, phone, piezas, nombre, total, proof, msgClie
     try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
     try { claimed = await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET sent_at=excluded.sent_at WHERE corte_detalle_sent.sent_at IS NULL OR corte_detalle_sent.sent_at='' RETURNING phone").bind(phone, nowD, nowD).first(); } catch (_) {}
     if (claimed) {
-      const gR = { cliente_nombre: piezas[0].cliente_nombre, piezas: piezas.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: piezas.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+      const gR = { cliente_nombre: piezas[0].cliente_nombre, piezas: piezas.map(r => ({ diseno: r.diseno_nombre, medida: corteMedidaCobro(r), cantidad: r.cantidad, precio: r.precio })), total: piezas.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
       await new Promise(rs => setTimeout(rs, 800)); // que llegue después del "recibido"
       let okd = false;
       try { const r = await corteSend(env, phone, corteReciboMsg(gR)); okd = !!(r && r.ok); } catch (_) {}
@@ -6188,7 +6195,7 @@ async function corteVigiaPago(env, phone, opts = {}) {
   if (total > 0 && monto >= total * 0.99) {
     // Piezas de ESTE cobro, leídas ANTES de la transición (después pasan a 'pagado') → para el recibo con detalle.
     let piezas = [];
-    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) {}
+    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) {}
     const ch = await transicion('pagado');
     if (ch === 0) return await ch0(); // no confirmar ni avisar dos veces (o reintentar si el pago quedó sin marcar)
     if (ch < 0) { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó comprobante por $' + monto.toLocaleString('es-AR') + ' pero falló marcarlo PAGADO en la base. Revisalo a mano.', { tipo: 'corte_pago', prioridad: 'P1', refPhone: phone, plata: true }); } catch (_) {} return true; }
@@ -6212,7 +6219,7 @@ async function corteAutoDetalle(env, phone, opts = {}) {
   const gapMs = Math.max(0, Number(opts.reenviarTrasMs) || 0);
   const cutoff = gapMs ? isoHace(gapMs) : '';
   let rows;
-  try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) { return false; }
+  try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) { return false; }
   if (!rows.length) return false;
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
   // DEDUP ROBUSTO: si YA le mandamos el detalle de este cobro (sent_at), NO reenviar — pase lo que pase.
@@ -6230,7 +6237,7 @@ async function corteAutoDetalle(env, phone, opts = {}) {
   let claimed = null;
   try { claimed = await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET sent_at=excluded.sent_at WHERE corte_detalle_sent.sent_at IS NULL OR corte_detalle_sent.sent_at='' OR (?<>'' AND corte_detalle_sent.sent_at < ?) RETURNING phone").bind(phone, now, now, cutoff, cutoff).first(); } catch (_) {}
   if (!claimed) return false;
-  const g ={ cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+  const g ={ cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: corteMedidaCobro(r), cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
   let ok = false;
   try { const r = await corteSend(env, phone, corteCobroMsg(g)); ok = !!(r && r.ok); } catch (_) {}
   // Si no salió, liberamos la reserva para que lo reintente el próximo tick.
@@ -6296,7 +6303,7 @@ async function corteVigiaParcial(env) {
     if (pagado < total * 0.99) { await avisar('mandó otro comprobante por ' + pesos(monto) + ': lleva ' + suma + ' de ' + pesos(total) + ' (faltan ' + pesos(total - pagado) + ').'); continue; }
     // Completó: mismas consecuencias que un pago de una vez. Piezas leídas ANTES de la transición (para el recibo).
     let piezas = [];
-    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='parcial' AND precio>0").bind(r.telefono).all()).results || []; } catch (_) {}
+    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='parcial' AND precio>0").bind(r.telefono).all()).results || []; } catch (_) {}
     let ch = -1;
     try { const u = await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pagado', updated_at=? WHERE telefono=? AND estado_pago='parcial'").bind(nowIso, r.telefono).run(); ch = (u && u.meta && u.meta.changes) || 0; } catch (_) {}
     if (ch < 0) { await avisar('completó el pago (' + suma + ', total ' + pesos(total) + ') pero no pude marcarlo PAGADO en la base: marcalo desde el tablero.'); continue; }
@@ -28067,12 +28074,12 @@ const handler = {
         let rows = [];
         // Las piezas de NEÓN PROPIO (producto='NEON') NO se cobran: sin este filtro aparecían como "clientes"
         // sin teléfono en "Cobrar la semana" (pasaba con las 15 filas 'neon' cargadas a mano el 28-sep).
-        try { rows = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio FROM corte_pedidos WHERE precio > 0 AND estado_pago='pendiente' AND estado IN ('cortado','embalado','despachado','entregado') AND IFNULL(producto,'TRANS')!='NEON' ORDER BY telefono, id").all()).results || []; } catch (_) {}
+        try { rows = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio FROM corte_pedidos WHERE precio > 0 AND estado_pago='pendiente' AND estado IN ('cortado','embalado','despachado','entregado') AND IFNULL(producto,'TRANS')!='NEON' ORDER BY telefono, id").all()).results || []; } catch (_) {}
         const grupos = {};
         for (const p of rows) {
           const k = p.telefono || ('id' + p.id);
           if (!grupos[k]) grupos[k] = { telefono: p.telefono || '', cliente_nombre: p.cliente_nombre || '', piezas: [], total: 0 };
-          grupos[k].piezas.push({ id: p.id, diseno: p.diseno_nombre, medida: p.medida_declarada, cantidad: p.cantidad, precio: p.precio });
+          grupos[k].piezas.push({ id: p.id, diseno: p.diseno_nombre, medida: corteMedidaCobro(p), cantidad: p.cantidad, precio: p.precio });
           grupos[k].total += Number(p.precio) || 0;
         }
         const nowMs = Date.now(); const out = [];
@@ -28131,7 +28138,7 @@ const handler = {
           // llegaba justo en ese hueco, el vigía no encontraba qué marcar y el pago se perdía.
           const estados = recobrarSet.has(tel) ? "('pendiente','cobrando')" : "('pendiente')";
           let rows = [];
-          try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio, estado_pago FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago IN " + estados + " AND estado IN ('cortado','embalado','despachado','entregado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
+          try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, estado_pago FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago IN " + estados + " AND estado IN ('cortado','embalado','despachado','entregado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
           if (!rows.length) { await soltarLock(); res.push({ tel, ok: false, error: recobrarSet.has(tel) ? 'nada para cobrar' : 'nada pendiente (si ya se le cobró, usá re-envío)' }); continue; }
           // Se controlan TODOS los nombres del cobro (si un teléfono tiene piezas de dos clientes, eso mismo es un conflicto)
           // contra todos los dueños conocidos del número (LTV + asignaciones + otros clientes del corte). Si LTV no se pudo
@@ -28148,7 +28155,7 @@ const handler = {
           }
           if (confl && !forzarSet.has(tel)) { await soltarLock(); res.push({ tel, ok: false, conflicto: confl.nombre, fuente: confl.fuente, nombre: nomConfl, error: 'NO SE MANDÓ: ese teléfono figura a nombre de ' + confl.nombre + ' (' + confl.fuente + ')' }); continue; }
           const esRecobro = rows.some(x => x.estado_pago === 'cobrando');
-          const g = { telefono: tel, cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+          const g = { telefono: tel, cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: corteMedidaCobro(r), cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
           let ventana = false;
           try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ventana = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 23 * 3600 * 1000); } catch (_) {}
           // El texto libre YA ES el desglose → marcamos el detalle como enviado ANTES de mandarlo: si el vigía corre
@@ -28213,7 +28220,7 @@ const handler = {
         const res = [];
         for (const tel of tels) {
           let rows = [];
-          try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, cantidad, precio, estado_pago FROM corte_pedidos WHERE telefono=? AND precio>0 AND IFNULL(producto,'TRANS')!='NEON' AND estado_pago IN ('pagado','cobrando','parcial')" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
+          try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, estado_pago FROM corte_pedidos WHERE telefono=? AND precio>0 AND IFNULL(producto,'TRANS')!='NEON' AND estado_pago IN ('pagado','cobrando','parcial')" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
           if (!rows.length) { res.push({ tel, ok: false, error: 'sin pedidos cobrados' }); continue; }
           let ventana = false;
           try { ventana = !!(await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type!='status' AND ts > ? LIMIT 1").bind(tel, isoHace(23 * 3600 * 1000)).first()); } catch (_) {}
@@ -28222,7 +28229,7 @@ const handler = {
           let claimed = null;
           try { claimed = await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET sent_at=excluded.sent_at WHERE corte_detalle_sent.sent_at IS NULL OR corte_detalle_sent.sent_at='' RETURNING phone").bind(tel, now, now).first(); } catch (_) {}
           if (!claimed) { res.push({ tel, ok: false, error: 'ya tenía el detalle' }); continue; }
-          const g = { cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: r.medida_declarada, cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+          const g = { cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: corteMedidaCobro(r), cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
           const pagado = rows.every(r => r.estado_pago === 'pagado');
           let ok = false;
           try { const r = await corteSend(env, tel, pagado ? corteReciboMsg(g) : corteCobroMsg(g)); ok = !!(r && r.ok); } catch (_) {}
