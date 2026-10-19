@@ -26420,15 +26420,23 @@ const IMG_TOOL_CFG = {
     resultLabel: 'Silueta B&N', loadingMsg: '⏳ Convirtiendo a B&N con IA…<br>(10-20s)',
     go: '✨ Generar silueta B&N', going: '⏳ Procesando…', again: '↻ Generar de nuevo',
     resetLabel: '↺ Otra imagen', endpoint: '/admin/img-tool?mode=vectorize', file: 'silueta-bn.png',
+    file4k: 'silueta-bn-4k.png',  // después del paso 4K local (Real-ESRGAN en el navegador)
   },
 };
 function _imgToolCfg() { return IMG_TOOL_CFG[(STATE.rectify && STATE.rectify.mode) || 'rectify'] || IMG_TOOL_CFG.rectify; }
+// Token de corrida: cerrar el modal, cambiar de imagen o generar de nuevo lo sube, y la
+// corrida vieja (Gemini o el paso 4K) se cancela sin pisar el estado nuevo.
+let _rectifyRun = 0;
 function _ensureRectifyListeners() {
   if (window._rectifyBound) return;
   window._rectifyBound = true;
   // El input file dispara 'change'; los botones 'click' (delegado, el modal se re-renderiza).
   document.addEventListener('change', (e) => {
     if (e.target && e.target.id === 'rectify-file') _rectifyPickFile(e.target.files && e.target.files[0]);
+    if (e.target && e.target.id === 'rectify-notes' && STATE.rectify) STATE.rectify.notes = e.target.value;
+  });
+  // La aclaración se guarda en cada tecla: si un render() rehace el modal (fin de Gemini o del 4K) no se pierde.
+  document.addEventListener('input', (e) => {
     if (e.target && e.target.id === 'rectify-notes' && STATE.rectify) STATE.rectify.notes = e.target.value;
   });
   // Pegar con Ctrl+V mientras el modal está abierto: agarra la imagen del portapapeles.
@@ -26443,22 +26451,53 @@ function _ensureRectifyListeners() {
     e.preventDefault();
     _rectifyPickFile(file);
   });
+  // El fondo cierra solo si el click EMPEZÓ en el fondo (arrastrar una selección del textarea y soltar afuera
+  // no cuenta) y no hay nada corriendo: cerrar cancela Gemini/4K, para eso está la ✕.
+  let downOnBg = false;
+  document.addEventListener('mousedown', (e) => { downOnBg = !!(e.target && e.target.matches && e.target.matches('[data-rectify-bg]')); }, true);
   document.addEventListener('click', (e) => {
     const t = e.target;
     if (!t || !t.closest) return;
-    if (t.matches && t.matches('[data-rectify-bg]')) return closeRectifyModal();
+    if (t.matches && t.matches('[data-rectify-bg]')) {
+      const st = STATE.rectify;
+      if (!downOnBg || (st && (st.loading || st.upscaling))) return;
+      return closeRectifyModal();
+    }
     if (t.closest('[data-rectify-close]')) return closeRectifyModal();
-    if (t.closest('[data-rectify-reset]')) { STATE.rectify = { ...(STATE.rectify || {}), open: true, origUrl: '', origFile: null, result: null, error: '' }; return render(); }
+    if (t.closest('[data-rectify-reset]')) {
+      if (STATE.rectify && STATE.rectify.loading) return;  // durante el 4K sí se puede: lo cancela
+      _rectifyRun++;
+      STATE.rectify = { ...(STATE.rectify || {}), open: true, origUrl: '', origFile: null, result: null, error: '', loading: false, upscaling: false, up4k: null, up4kErr: '', up4kSkip: false };
+      return render();
+    }
     if (t.closest('[data-rectify-download]')) return downloadRectify();
     if (t.closest('[data-rectify-go]')) return doRectify();
+    if (t.closest('[data-rectify-skip4k]')) return _rectifySkip4K();
+    if (t.closest('[data-rectify-retry4k]')) return _rectifyRetry4K();
   });
 }
 function openImgTool(mode) {
   _ensureRectifyListeners();
-  STATE.rectify = { open: true, mode: (mode === 'vectorize' ? 'vectorize' : 'rectify'), origUrl: '', origFile: null, result: null, loading: false, error: '' };
+  _rectifyRun++;
+  STATE.rectify = { open: true, mode: (mode === 'vectorize' ? 'vectorize' : 'rectify'), origUrl: '', origFile: null, result: null, loading: false, upscaling: false, up4k: null, up4kErr: '', up4kSkip: false, error: '' };
   render();
 }
+// render() que no le saca el foco ni el cursor a quien está escribiendo la aclaración (el fin del 4K
+// re-renderiza el modal justo cuando el usuario mira el resultado y escribe para "Generar de nuevo").
+function _rectifyRender() {
+  const a = document.activeElement;
+  const keep = (a && a.id === 'rectify-notes') ? { s: a.selectionStart, e: a.selectionEnd, top: a.scrollTop } : null;
+  if (keep && STATE.rectify) STATE.rectify.notes = a.value;
+  render();
+  if (!keep) return;
+  const n = document.getElementById('rectify-notes');
+  if (!n) return;
+  n.focus();
+  try { n.setSelectionRange(keep.s, keep.e); } catch (_) {}
+  n.scrollTop = keep.top;
+}
 function closeRectifyModal() {
+  _rectifyRun++;  // cancela el paso 4K si estaba corriendo
   if (STATE.rectify) STATE.rectify.open = false;
   render();
 }
@@ -26467,15 +26506,18 @@ function _rectifyPickFile(file) {
   if (file.size > 12 * 1024 * 1024) { toast('La imagen es muy grande (máx 12 MB)'); return; }
   const fr = new FileReader();
   fr.onload = () => {
-    STATE.rectify = { ...(STATE.rectify || {}), open: true, origUrl: fr.result, origFile: file, result: null, error: '' };
+    _rectifyRun++;
+    STATE.rectify = { ...(STATE.rectify || {}), open: true, origUrl: fr.result, origFile: file, result: null, error: '', loading: false, upscaling: false, up4k: null, up4kErr: '', up4kSkip: false };
     render();
   };
   fr.readAsDataURL(file);
 }
 async function doRectify() {
   const st = STATE.rectify;
-  if (!st || !st.origFile || st.loading) return;
-  st.loading = true; st.error = ''; render();
+  if (!st || !st.origFile || st.loading) return;  // si el 4K estaba corriendo, el ++_rectifyRun lo cancela
+  const run = ++_rectifyRun;
+  st.loading = true; st.error = ''; st.upscaling = false; st.up4k = null; st.up4kErr = ''; st.up4kSkip = false; render();
+  let go4k = false;
   try {
     const _notes = ((document.getElementById('rectify-notes') || {}).value || st.notes || '').trim();
     const resp = await fetch(CONFIG.trackerUrl + _imgToolCfg().endpoint + (_notes ? ('&notes=' + encodeURIComponent(_notes.slice(0, 600))) : ''), {
@@ -26485,20 +26527,96 @@ async function doRectify() {
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || !data.ok) st.error = data.error || ('HTTP ' + resp.status);
-    else st.result = { base64: data.base64, mime: data.mime || 'image/png' };
+    else {
+      st.result = { base64: data.base64, mime: data.mime || 'image/png' };
+      // Vectorizar: la silueta de Gemini viene a ~1-1,7K; la llevamos a 4K en el navegador.
+      if (st.mode === 'vectorize' && run === _rectifyRun && STATE.rectify === st && st.open) { go4k = true; st.upscaling = true; }
+    }
   } catch (e) {
     st.error = 'Error de red: ' + (e.message || e);
   } finally {
     st.loading = false; render();
   }
+  if (go4k) await _rectifyTo4K(st, run);
+}
+// Paso 4K (solo vectorizar): mientras corre se ve la silueta de Gemini + el progreso, y NADA queda
+// bloqueado: se puede bajar la silueta normal, saltear el 4K, generar de nuevo u otra imagen (eso lo
+// cancela). Si falla o se saltea, queda la silueta en resolución normal y se puede reintentar el 4K
+// sin volver a pagar Gemini.
+function _rectify4kMsg(st) {
+  const u = st.up4k || {};
+  // Tiempo que falta (lo estima el motor con los mosaicos ya hechos); hasta tenerlo, con WASM se avisa que tarda.
+  const eta = u.eta > 4000 ? (' · faltan ~' + (u.eta < 90000 ? (Math.ceil(u.eta / 5000) * 5 + ' s') : (Math.round(u.eta / 60000) + ' min'))) : '';
+  const via = u.ep === 'webgpu' ? ' · placa de video' : (u.ep === 'wasm' ? (' · procesador' + (eta || u.done ? '' : ' (puede tardar unos minutos)')) : '');
+  const prep = u.mb ? ('preparando (bajando el motor 4K: ' + u.mb + ' MB)') : 'preparando';
+  return '⏳ Llevando a 4K con Real-ESRGAN… ' + (u.total ? (u.done + '/' + u.total) : prep) + via + eta;
+}
+function _rectify4kWhy(e) {  // motivo corto y en castellano para el cartel
+  const k = e && e.kind;
+  const msg = String((e && e.message) || e || 'error');
+  if (k === 'stall' || k === 'engine' || k === 'net' || k === 'missing') return msg;
+  if (/memory|memoria|RangeError|allocation/i.test(msg) || (e && e.name === 'RangeError')) return 'sin memoria';
+  return msg.slice(0, 140);
+}
+// Qué hacer, después del motivo. Nunca "recargá" a secas: la silueta de Gemini (ya pagada) y la original viven
+// solo en memoria y un F5 las pierde; el motor ya arranca limpio en cada reintento.
+function _rectify4kHint(e) {
+  const k = e && e.kind;
+  if (k === 'missing') return '';
+  if (k === 'net') return 'Revisá la conexión y probá «Reintentar 4K».';
+  return 'Probá «Reintentar 4K». Si sigue fallando, antes de recargar la página bajá la silueta con «⬇ Descargar»: al recargar se pierde.';
+}
+async function _rectifyTo4K(st, run) {
+  // Viva = es la corrida actual y el modal sigue abierto con este mismo estado. Una corrida vieja
+  // (salteada, cancelada o reemplazada) no toca nada: ni el progreso, ni el resultado, ni los flags.
+  const alive = () => run === _rectifyRun && STATE.rectify === st && st.open;
+  st.up4k = { done: 0, total: 0, ep: '' };
+  try {
+    const r = await realesrganTo4K(st.result.base64, st.result.mime, {
+      cleanup: true,
+      isCancelled: () => !alive(),
+      onProgress: (done, total, ep, info) => {
+        if (!alive()) return;
+        st.up4k = { done, total, ep, mb: (info && info.mb) || 0, eta: (info && info.etaMs) || 0 };
+        // Solo el rótulo (sin render() entero en cada mosaico).
+        const el = document.getElementById('rectify-4k-status');
+        if (el) el.textContent = _rectify4kMsg(st);
+      },
+    });
+    if (!alive()) return;
+    st.result = { base64: r.base64, mime: r.mime, w: r.width, h: r.height, is4k: true };
+    console.log('[4K] Real-ESRGAN listo', r.width + '×' + r.height, r.ep, r.ms + ' ms');
+  } catch (e) {
+    if ((e && e.cancelled) || !alive()) return;
+    console.warn('[4K] Real-ESRGAN falló:', e);
+    st.up4kErr = _rectify4kWhy(e); st.up4kHint = _rectify4kHint(e);
+  } finally {
+    if (alive()) { st.upscaling = false; st.up4k = null; _rectifyRender(); }
+  }
+}
+function _rectifySkip4K() {  // corta el 4K y se queda con la silueta de Gemini (no se pierde nada)
+  const st = STATE.rectify;
+  if (!st || !st.upscaling) return;
+  _rectifyRun++;
+  st.upscaling = false; st.up4k = null; st.up4kErr = ''; st.up4kSkip = true;
+  _rectifyRender();
+}
+function _rectifyRetry4K() {  // vuelve a intentar el 4K sobre la misma silueta (sin volver a llamar a Gemini)
+  const st = STATE.rectify;
+  if (!st || !st.open || st.mode !== 'vectorize' || st.loading || st.upscaling || !st.result || st.result.is4k) return;
+  const run = ++_rectifyRun;
+  st.upscaling = true; st.up4kErr = ''; st.up4kSkip = false;
+  _rectifyRender();
+  _rectifyTo4K(st, run);
 }
 function downloadRectify() {
   const st = STATE.rectify;
-  if (!st || !st.result) return;
+  if (!st || !st.result) return;  // durante el 4K baja la silueta normal (st.result todavía no es la 4K)
+  const cfg = _imgToolCfg();
   const blob = b64ToBlob(st.result.base64, st.result.mime);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = _imgToolCfg().file; a.click();
+  a.href = url; a.download = (st.result.is4k && cfg.file4k) ? cfg.file4k : cfg.file; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 function renderRectifyModal() {
@@ -26507,6 +26625,13 @@ function renderRectifyModal() {
   const cfg = _imgToolCfg();
   const hasOrig = !!st.origUrl;
   const hasResult = !!(st.result && st.result.base64);
+  // Vectorizar con una silueta que no quedó en 4K (falló, se salteó, o falló un "Generar de nuevo" y quedó la
+  // anterior): siempre con el botón para llevarla a 4K sin volver a pagar Gemini. No depende de los flags.
+  const show4kNote = st.mode === 'vectorize' && !st.upscaling && !st.loading && hasResult && !st.result.is4k;
+  const note4k = st.up4kErr
+    ? `⚠ No pude llevarla a 4K (${escapeHtml(st.up4kErr)}); te dejo la silueta en resolución normal.${st.up4kHint ? ' ' + escapeHtml(st.up4kHint) : ''}`
+    : (st.up4kSkip ? '4K salteado: queda la silueta en resolución normal.' : 'Esta silueta está en resolución normal (sin 4K).');
+  const resLabel = cfg.resultLabel + ((hasResult && st.result.is4k) ? ` · 4K ${st.result.w}×${st.result.h}` : '');
   return `
     <div data-rectify-bg style="position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:6000;display:flex;align-items:center;justify-content:center;padding:16px">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);width:min(760px,96vw);max-height:92vh;overflow:auto;padding:var(--s-4)">
@@ -26528,10 +26653,12 @@ function renderRectifyModal() {
               <img src="${st.origUrl}" style="width:100%;border-radius:var(--r-sm);border:1px solid var(--border);display:block">
             </div>
             <div>
-              <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px">${cfg.resultLabel}</div>
+              <div style="font-size:11px;color:var(--fg-subtle);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px">${escapeHtml(resLabel)}</div>
               ${hasResult
                 ? `<img src="data:${st.result.mime};base64,${st.result.base64}" style="width:100%;border-radius:var(--r-sm);border:1px solid var(--accent-cyan);display:block">`
                 : `<div style="width:100%;aspect-ratio:1/1;border-radius:var(--r-sm);border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;color:var(--fg-mute);font-size:12px;text-align:center;padding:12px">${st.loading ? cfg.loadingMsg : 'Apretá el botón para generarla'}</div>`}
+              ${st.upscaling ? `<div style="margin-top:6px;font-size:12px;color:var(--fg-mute);display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span id="rectify-4k-status">${escapeHtml(_rectify4kMsg(st))}</span><button class="btn btn-ghost" data-rectify-skip4k style="padding:2px 8px;font-size:11px">Saltar 4K</button></div>` : ''}
+              ${show4kNote ? `<div style="margin-top:6px;font-size:12px;color:${st.up4kErr ? '#FFB020' : 'var(--fg-mute)'}">${note4k} <button class="btn btn-ghost" data-rectify-retry4k style="padding:2px 8px;font-size:11px">${st.up4kErr ? '↻ Reintentar 4K' : '↻ Llevar a 4K'}</button></div>` : ''}
             </div>
           </div>
           <div style="margin-top:var(--s-3)">
@@ -26541,13 +26668,498 @@ function renderRectifyModal() {
           ${st.error ? `<div style="margin-top:10px;color:#FF6B7A;font-size:12px">⚠ ${escapeHtml(st.error)}</div>` : ''}
           <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:var(--s-3)">
             <button class="btn btn-ghost" data-rectify-reset ${st.loading ? 'disabled' : ''}>${cfg.resetLabel}</button>
-            ${hasResult ? `<button class="btn btn-ghost" data-rectify-download>⬇ Descargar</button>` : ''}
+            ${hasResult ? `<button class="btn btn-ghost" data-rectify-download>${st.upscaling ? '⬇ Descargar sin 4K' : '⬇ Descargar'}</button>` : ''}
             <button class="btn btn-cyan" data-rectify-go ${st.loading ? 'disabled' : ''}>${st.loading ? cfg.going : (hasResult ? cfg.again : cfg.go)}</button>
           </div>
         `}
       </div>
     </div>`;
 }
+// ==== REALESRGAN-4K BEGIN ====
+// Paso 4K LOCAL de la silueta B&N: Gemini la devuelve a ~1-1,7K (pixelada para el Calco de Imagen
+// de Illustrator) y a Gemini NO se le pide 4K (nunca cumple). La agranda el navegador con Real-ESRGAN:
+// modelo realesr-animevideov3 x4 (BSD-3, xinntao/Real-ESRGAN), convertido a ONNX desde el release ncnn,
+// corriendo con onnxruntime-web (WebGPU si hay, si no WASM). Autocontenido: solo usa window/document
+// (nada de STATE/render/CONFIG) para poder extraerlo y probarlo aislado.
+// Entrada: realesrganTo4K(base64, mime, { onProgress(done,total,ep,info), isCancelled(), ep, targetLong, cleanup })
+//   -> { base64 (sin 'data:'), mime:'image/png', width, height, ep, ms }
+//   info: mientras prepara, { mb } (megas bajados del motor); con los mosaicos, { etaMs } (lo que falta, estimado
+//   con los mosaicos ya hechos; 0 = todavía sin datos). Los errores traen e.kind: 'net' (se cortó una bajada),
+//   'missing' (404), 'stall' (algo se colgó), 'engine' (ORT no arrancó); al cancelar, e.cancelled.
+// Robustez:
+//  - Nada se queda colgado: una bajada se corta si pasan 20 s sin recibir bytes (y se reintenta 2 veces),
+//    ort.min.js tiene 45 s, crear la sesión 60 s y un mosaico 4 veces lo que vienen tardando (mínimo 60 s; el
+//    primero de cada EP, sin medición, 2 min con WebGPU y 5 min con WASM: un celu lento NO es un cuelgue).
+//  - Esos plazos cuentan solo tiempo ACTIVO (pestaña visible y sin congelar, ver _resrActiveTimer): en segundo
+//    plano el navegador congela la página y el Worker, y al volver eso no es un falso "se colgó".
+//  - El runtime de ORT (.mjs + .wasm de ~25 MB) lo bajamos nosotros y se lo damos ya bajado (wasmPaths.mjs =
+//    blob: local, wasmBinary): ORT guarda PARA SIEMPRE cualquier falla de su propio arranque (backend 'aborted',
+//    "previous call to 'initWasm()' failed"), así que nunca le dejamos hacer esa bajada. Si igual una instancia
+//    queda rota o colgada, se tira entera y la próxima vez se carga un ort.min.js nuevo (estado limpio, sin F5).
+//  - La inferencia corre en el Worker de ORT (env.wasm.proxy): con WASM la pestaña no se congela. Si ese Worker
+//    no arranca, sigue en el hilo principal con mosaicos más chicos (cortes de 1-2 s; el resultado es el mismo).
+//    Ese Worker lo atrapamos al nacer (_resrCatchWorker) para cerrarlo cuando se tira su instancia: si no, quedaba
+//    vivo con su memoria wasm y cada reintento sumaba otro. Si no se lo pudo atrapar y se colgó con WASM, lo que
+//    sigue va al hilo principal (no se crean más Workers).
+//  - Las cuentas por píxel (entrada, clamp, Lanczos, niveles) van en funciones SINCRÓNICAS aparte: dentro de la
+//    async _resrTo4K V8 no las optimizaba (la misma pasada: 20 s contra 70 ms) y trababa la pestaña.
+//  - Un trabajo a la vez: el nuevo espera que el cancelado suelte su último mosaico.
+const RESR_ORT_VER = '1.24.3';  // fijada; su dist/ort.min.js registra los EPs 'webgpu' (JSEP) y 'wasm'
+const RESR_ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@' + RESR_ORT_VER + '/dist/';
+const RESR_ORT_RT = RESR_ORT_BASE + 'ort-wasm-simd-threaded.jsep';  // runtime que usa ort.min.js (.mjs + .wasm)
+const RESR_MODEL_URL = 'assets/models/realesr-animevideov3-x4.onnx';  // relativa: la app vive en / y en /ni-ventas/
+// Mosaicos de 256 px + margen de 20 px de imagen real por lado (campo receptivo del modelo = 18 px:
+// 18 convs 3x3) => el resultado por mosaicos es idéntico al de la imagen entera, con cualquier núcleo.
+// RESR_TILE_MAIN: núcleo para WASM en el hilo principal (solo si el Worker de ORT no anda): congela 1-2 s por
+// mosaico en vez de 4-7 s con 256 (medido en Edge, PC de escritorio), a cambio de ~30% más de tiempo total.
+const RESR_TILE = 256, RESR_TILE_MAIN = 128, RESR_PAD = 20, RESR_X = 4, RESR_MAX_IN = 2400;
+const RESR_NET_STALL_MS = 20000, RESR_SCRIPT_MS = 45000, RESR_STALL_MS = 60000;
+const RESR_FIRST_GPU_MS = 120000, RESR_FIRST_WASM_MS = 300000, RESR_TICK_MS = 1000;
+const RESR_PROXY_WORKER = 'ort-wasm-proxy-worker';  // name con el que ORT 1.24 crea su Worker (proxy-worker/main.ts)
+let _resrInstP = null, _resrInstCur = null;  // instancia de ORT: { ort, proxy, worker, sess: {ep: Promise<InferenceSession>}, ok }
+let _resrRt = {}, _resrModelP = null, _resrNoGpu = false, _resrNoProxy = false;  // _resrRt: 'mjs' | 'wasm' -> Promise
+let _resrJob = Promise.resolve(), _resrOnNet = null;
+let _resrRate = {};  // ms por píxel de entrada de un mosaico, el peor medido en esta página por EP (plazo del mosaico)
+let _resrVisAt = -1e9, _resrVisOn = false;  // último cambio visible/oculta de la pestaña
+function _resrErr(kind, msg, cause) { const e = new Error(msg); e.kind = kind; if (cause) e.cause = cause; return e; }
+// Como setTimeout(cb, ms), pero cuenta solo tiempo ACTIVO: pestaña visible y sin congelar. Con la pestaña oculta
+// (celular: pasar a WhatsApp) el navegador congela o frena la página y el Worker de ORT; con un reloj común, al
+// volver, el plazo ya vencido daba un falso "se colgó" aunque al Worker le faltara cómputo. No cuenta mientras
+// está oculta ni el tick justo después de volver; un salto grande entre ticks (página congelada, o el hilo ocupado
+// con un mosaico en el hilo principal) cuenta como 2 ticks y no como todo lo que pasó. Devuelve el cancelador.
+function _resrActiveTimer(ms, cb) {
+  if (!_resrVisOn) {
+    _resrVisOn = true;
+    try { document.addEventListener('visibilitychange', () => { _resrVisAt = performance.now(); }); } catch (_) {}
+  }
+  let used = 0, last = performance.now(), t = 0;
+  const tick = () => {
+    const now = performance.now(), dt = now - last;
+    last = now;
+    if (!document.hidden && now - _resrVisAt >= RESR_TICK_MS) used += Math.min(dt, 2 * RESR_TICK_MS);
+    if (used >= ms) cb(); else t = setTimeout(tick, Math.max(1, Math.min(RESR_TICK_MS, ms - used)));
+  };
+  t = setTimeout(tick, Math.max(1, Math.min(RESR_TICK_MS, ms)));
+  return () => clearTimeout(t);
+}
+function _resrTimeout(p, ms, what) {  // p, o error 'stall' a los ms de tiempo activo (p sigue, pero ya nadie lo espera)
+  let stop = null;
+  const to = new Promise((_, rej) => { stop = _resrActiveTimer(ms, () => rej(_resrErr('stall', what + ' tardó demasiado'))); });
+  return Promise.race([p, to]).finally(() => stop());
+}
+// fetch -> ArrayBuffer. Se corta si pasan RESR_NET_STALL_MS (activos) sin recibir bytes; 2 reintentos (no en 404/403).
+async function _resrFetch(url, what, onBytes) {
+  let last = null;
+  for (let i = 0; i < 3; i++) {
+    if (i) await new Promise((r) => setTimeout(r, 1500 * i));
+    const ac = new AbortController();
+    let stop = null;
+    const arm = () => { if (stop) stop(); stop = _resrActiveTimer(RESR_NET_STALL_MS, () => ac.abort()); };
+    try {
+      arm();
+      const r = await fetch(url, { signal: ac.signal });
+      if (!r.ok) throw Object.assign(new Error('HTTP ' + r.status), { status: r.status });
+      if (!r.body || !r.body.getReader) { stop(); stop = null; return await r.arrayBuffer(); }  // sin stream: sin vigía de bytes
+      const rd = r.body.getReader(), parts = [];
+      let n = 0;
+      for (;;) {
+        arm();
+        const { done, value } = await rd.read();
+        if (done) break;
+        parts.push(value); n += value.length;
+        if (onBytes) { try { onBytes(n); } catch (_) {} }
+      }
+      const out = new Uint8Array(n);
+      for (let j = 0, o = 0; j < parts.length; o += parts[j].length, j++) out.set(parts[j], o);
+      return out.buffer;
+    } catch (e) {
+      last = e;
+      if (e && (e.status === 404 || e.status === 403)) break;
+    } finally {
+      if (stop) stop();
+    }
+  }
+  const st = last && last.status;
+  const why = st ? ('HTTP ' + st) : ((last && last.name === 'AbortError') ? 'la conexión se quedó quieta' : 'se cortó la conexión');
+  throw _resrErr((st === 404 || st === 403) ? 'missing' : 'net', 'no pude bajar ' + what + ' (' + why + ')', last);
+}
+let _resrScriptFails = 0;
+function _resrScript() {  // ejecuta un ort.min.js NUEVO: cada ejecución es una instancia de ORT con estado limpio
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    let stop = null;
+    const end = (err) => {
+      if (stop) stop();
+      s.onload = s.onerror = null; s.remove();
+      const o = window.ort;
+      if (err) { _resrScriptFails++; rej(err); }
+      else if (o && o.InferenceSession && o.env) res(o);
+      else rej(_resrErr('engine', 'onnxruntime no cargó'));
+    };
+    stop = _resrActiveTimer(RESR_SCRIPT_MS, () => end(_resrErr('stall', 'bajar onnxruntime tardó demasiado')));
+    s.onload = () => end(null);
+    s.onerror = () => end(_resrErr('net', 'no pude bajar onnxruntime del CDN'));
+    // Después de una falla, URL distinta: si no, el navegador engancha el <script> nuevo al pedido colgado.
+    s.src = RESR_ORT_BASE + 'ort.min.js' + (_resrScriptFails ? ('?r=' + _resrScriptFails) : ''); s.async = true; s.crossOrigin = 'anonymous';
+    try { window.ort = undefined; } catch (_) {}
+    document.head.appendChild(s);
+  });
+}
+function _resrRtPart(ext) {  // cada parte se cachea sola: si falla una, la otra no se vuelve a bajar
+  if (!_resrRt[ext]) {
+    const p = _resrRt[ext] = (ext === 'mjs')
+      ? _resrFetch(RESR_ORT_RT + '.mjs', 'el motor 4K').then((b) => URL.createObjectURL(new Blob([b], { type: 'text/javascript' })))
+      : _resrFetch(RESR_ORT_RT + '.wasm', 'el motor 4K', (n) => { if (_resrOnNet) _resrOnNet(n); });
+    p.catch(() => { if (_resrRt[ext] === p) delete _resrRt[ext]; });
+  }
+  return _resrRt[ext];
+}
+function _resrRuntime() {  // runtime de ORT bajado por nosotros: el .mjs como blob: local + los bytes del .wasm
+  return Promise.all([_resrRtPart('mjs'), _resrRtPart('wasm')]).then(([mjs, wasm]) => ({ mjs, wasm }));
+}
+function _resrInst() {  // instancia viva de ORT (se crea una vez y se reusa; _resrKill la descarta)
+  if (_resrInstP) return _resrInstP;
+  const p = _resrInstP = Promise.all([_resrScript(), _resrRuntime()]).then(([ort, rt]) => {
+    const w = ort.env.wasm;
+    w.numThreads = 1;  // GitHub Pages no manda COOP/COEP => sin SharedArrayBuffer => un hilo (y el .mjs blob: no sirve para hilos)
+    w.proxy = !_resrNoProxy && typeof Worker !== 'undefined';  // la inferencia corre en el Worker de ORT: no congela la pestaña
+    w.wasmPaths = { mjs: rt.mjs };  // ORT no baja nada por su cuenta: el .mjs es un blob: local...
+    w.wasmBinary = rt.wasm;         // ...y el .wasm ya está en memoria
+    ort.env.logLevel = 'error';
+    const inst = { ort, proxy: w.proxy, worker: null, sess: {}, ok: false };
+    if (_resrInstP === p) _resrInstCur = inst;
+    return inst;
+  });
+  p.catch(() => { if (_resrInstP === p) _resrInstP = null; });
+  return p;
+}
+// La API pública de ORT no deja cerrar su Worker (env.wasm.proxy). ORT lo crea con new Worker(…, { name:
+// RESR_PROXY_WORKER }) al arrancar la primera sesión de la instancia: mientras arranca esa sesión, window.Worker es
+// una subclase que se comporta igual y se guarda ese Worker en inst.worker, para que _resrKill pueda terminarlo.
+// Devuelve con qué deshacer el cambio (o null si no hace falta / no se pudo).
+function _resrCatchWorker(inst) {
+  const W0 = window.Worker;
+  if (!inst.proxy || inst.worker || typeof W0 !== 'function' || W0._resrCatch) return null;
+  const W = class extends W0 {
+    constructor(url, o) {
+      super(url, o);
+      if (!inst.worker && o && o.name === RESR_PROXY_WORKER) inst.worker = this;
+    }
+  };
+  W._resrCatch = true;
+  try { window.Worker = W; } catch (_) { return null; }
+  return () => { if (window.Worker === W) window.Worker = W0; };
+}
+// ORT no se recupera de una falla de arranque ni de un cuelgue: la próxima vez, instancia nueva. Cierra su Worker
+// si lo tenemos. Devuelve true si no queda nada vivo de esa instancia (sin Worker, o Worker cerrado).
+function _resrKill(inst) {
+  if (!inst) return true;
+  inst.sess = {};
+  let clean = !inst.proxy;
+  if (inst.worker) { try { inst.worker.terminate(); clean = true; } catch (_) {} inst.worker = null; }
+  if (_resrInstCur === inst) { _resrInstCur = null; _resrInstP = null; }
+  return clean;
+}
+function _resrFreeRt(inst) {  // ya arrancó y ORT no vuelve a leer el runtime: se sueltan los ~25 MB (otra instancia lo re-baja, caché HTTP)
+  try { inst.ort.env.wasm.wasmBinary = undefined; } catch (_) {}
+  const m = _resrRt.mjs;
+  _resrRt = {};
+  if (m) m.then((u) => URL.revokeObjectURL(u), () => {});
+}
+function _resrModel() {  // bytes del .onnx (~2,5 MB), se bajan una sola vez
+  if (!_resrModelP) {
+    const p = _resrModelP = _resrFetch(RESR_MODEL_URL, 'el modelo');
+    p.catch(() => { if (_resrModelP === p) _resrModelP = null; });
+  }
+  return _resrModelP;
+}
+function _resrSession(inst, ep, model) {
+  if (!inst.sess[ep]) {
+    const undo = _resrCatchWorker(inst);
+    let p;
+    try {
+      // logSeverityLevel 3: sin los avisos nativos de ORT (VerifyEachNodeIsAssignedToAnEp) como console.error.
+      p = inst.sess[ep] = _resrTimeout(inst.ort.InferenceSession.create(new Uint8Array(model.slice(0)),
+        { executionProviders: [ep], graphOptimizationLevel: 'all', logSeverityLevel: 3 }), RESR_STALL_MS, 'arrancar el motor 4K');
+    } catch (e) {
+      if (undo) undo();
+      throw e;
+    }
+    if (undo) p.then(undo, undo);
+    p.then(() => { if (!inst.ok) { inst.ok = true; _resrFreeRt(inst); } }, () => { if (inst.sess[ep] === p) delete inst.sess[ep]; });
+  }
+  return inst.sess[ep];
+}
+// -> { inst, ep, sess }. WebGPU si hay; si no anda, WASM. A WebGPU solo se la culpa (y no se la vuelve a probar en
+// esta página) si se colgó o si WASM sí arranca en la misma instancia; si tampoco arranca WASM, la falla es del
+// motor: se tira la instancia y se prueba UNA vez con otra nueva (si era en el Worker, ahora en el hilo principal).
+async function _resrPick(forced, again) {
+  const [model, inst] = await Promise.all([_resrModel(), _resrInst()]);
+  let gpuErr = null;
+  if (forced === 'webgpu' || (!forced && !_resrNoGpu && navigator.gpu)) {
+    try { return { inst, ep: 'webgpu', sess: await _resrSession(inst, 'webgpu', model) }; } catch (e) {
+      if (e && e.kind === 'stall') _resrKill(inst);
+      if (forced === 'webgpu') throw e;
+      console.warn('[4K] WebGPU no anduvo, pruebo con WASM:', e);
+      if (e && e.kind === 'stall') { _resrNoGpu = true; return _resrPick('wasm', again); }
+      gpuErr = e;
+    }
+  }
+  try {
+    const sess = await _resrSession(inst, 'wasm', model);
+    if (gpuErr) _resrNoGpu = true;
+    return { inst, ep: 'wasm', sess };
+  } catch (e) {
+    _resrKill(inst);
+    if (again) throw (e && e.kind) ? e : _resrErr('engine', 'no pude arrancar el motor 4K (' + String((e && e.message) || e).slice(0, 90) + ')', e);
+    if (inst.proxy) _resrNoProxy = true;
+    console.warn('[4K] el motor no arrancó, pruebo con una instancia nueva' + (inst.proxy ? ' en el hilo principal' : '') + ':', e);
+    return _resrPick(forced, true);
+  }
+}
+function _resrB64Blob(b64, mime) {
+  const bin = atob(b64), u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return new Blob([u], { type: mime || 'image/png' });
+}
+function _resrLoadImg(blob) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(blob), img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); res(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('no pude leer la imagen')); };
+    img.src = url;
+  });
+}
+function _resrCanvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+// Mosaicos: núcleo [x0,x1)x[y0,y1) + margen de imagen real (px0,py0,pw,ph), recortado en los bordes (no se rellena).
+function _resrTiles(W, H, tile) { return _resrSplit([{ x0: 0, y0: 0, x1: W, y1: H }], tile, W, H); }
+// Parte cada núcleo de la lista en núcleos de 'tile' (mismo orden por filas), con su margen recalculado.
+function _resrSplit(list, tile, W, H) {
+  const t = [];
+  for (const b of list) for (let y0 = b.y0; y0 < b.y1; y0 += tile) for (let x0 = b.x0; x0 < b.x1; x0 += tile) {
+    const x1 = Math.min(b.x1, x0 + tile), y1 = Math.min(b.y1, y0 + tile);
+    const px0 = Math.max(0, x0 - RESR_PAD), py0 = Math.max(0, y0 - RESR_PAD);
+    t.push({ x0, y0, x1, y1, px0, py0, pw: Math.min(W, x1 + RESR_PAD) - px0, ph: Math.min(H, y1 + RESR_PAD) - py0 });
+  }
+  return t;
+}
+// Plazo (tiempo activo) de un mosaico de n píxeles de entrada: 4x lo peor medido para ese EP, mínimo 60 s; sin
+// medición todavía, RESR_FIRST_*_MS (el 1º de WebGPU compila shaders; con WASM puede ser un celu lento).
+function _resrTileMs(ep, n) {
+  const r = _resrRate[ep];
+  return r ? Math.max(RESR_STALL_MS, 4 * r * n) : (ep === 'webgpu' ? RESR_FIRST_GPU_MS : RESR_FIRST_WASM_MS);
+}
+// ---- Cuentas por píxel: funciones SINCRÓNICAS (dentro de la async _resrTo4K V8 no las optimizaba) ----
+function _resrPlanar(d, n) {  // RGBA uint8 -> NCHW float32 RGB 0..1 (nuevo en cada intento: el Worker de ORT se queda con el buffer)
+  const f = new Float32Array(3 * n);
+  for (let i = 0, j = 0; i < n; i++, j += 4) { f[i] = d[j] / 255; f[n + i] = d[j + 1] / 255; f[2 * n + i] = d[j + 2] / 255; }
+  return f;
+}
+// Clamp a 0..1 en el lugar. NaN -> 0, salvo con strict (WebGPU): ahí un NaN es una falla y devuelve false.
+function _resrClamp(y, strict) {
+  for (let i = 0; i < y.length; i++) {
+    const v = y[i];
+    if (v > 0) { if (v > 1) y[i] = 1; } else if (v === v) y[i] = 0;
+    else if (strict) return false;
+    else y[i] = 0;
+  }
+  return true;
+}
+// Pesos Lanczos3 (igual que el resize LANCZOS de PIL) para las posiciones de destino [d0,d1) de un eje.
+// s = escala destino/fuente; [lo,hi) = fuente disponible en coords globales (el mosaico x4 con su margen).
+// Devuelve inicios LOCALES (respecto de lo), cantidad de taps y pesos normalizados.
+function _resrAxis(d0, d1, s, lo, hi) {
+  const fs = Math.min(1, s), sup = 3 / fs, T = 2 * Math.ceil(sup) + 1, n = Math.max(0, d1 - d0);
+  const st = new Int32Array(n), ct = new Int32Array(n), w = new Float32Array(n * T);
+  for (let i = 0; i < n; i++) {
+    const c = (d0 + i + 0.5) / s;
+    const a = Math.max(lo, Math.floor(c - sup + 0.5)), b = Math.min(hi, Math.floor(c + sup + 0.5));
+    let sum = 0;
+    for (let j = a; j < b; j++) {
+      const x = Math.abs((j + 0.5 - c) * fs);
+      let v = 1;
+      if (x >= 3) v = 0; else if (x > 1e-7) { const px = Math.PI * x; v = 3 * Math.sin(px) * Math.sin(px / 3) / (px * px); }
+      w[i * T + j - a] = v; sum += v;
+    }
+    for (let j = 0; j < b - a; j++) w[i * T + j] /= (sum || 1);
+    st[i] = a - lo; ct[i] = Math.max(0, b - a);
+  }
+  return { st, ct, w, T };
+}
+// Salida x4 del mosaico (y: NCHW float 0..1, OW de ancho, N = OW*OH por canal) -> ImageData cw x chh del rectángulo
+// final, con Lanczos3 separable (ax/ay de _resrAxis) y, si cleanup, los niveles B&N para el Calco.
+function _resrResample(octx, y, N, OW, ax, ay, cw, chh, cleanup) {
+  const r0 = ay.st[0], nr = ay.st[chh - 1] + ay.ct[chh - 1] - r0, M = nr * cw;
+  const tmp = new Float32Array(3 * M);  // pasada horizontal (solo las filas que hacen falta)
+  for (let c = 0; c < 3; c++) for (let r = 0; r < nr; r++) {
+    const row = c * N + (r0 + r) * OW, to = c * M + r * cw;
+    for (let i = 0; i < cw; i++) {
+      const s = row + ax.st[i], wo = i * ax.T, e = ax.ct[i];
+      let acc = 0;
+      for (let t = 0; t < e; t++) acc += y[s + t] * ax.w[wo + t];
+      tmp[to + i] = acc;
+    }
+  }
+  const id = octx.createImageData(cw, chh), p = id.data;  // pasada vertical -> píxeles finales
+  for (let j = 0, o = 0; j < chh; j++) {
+    const s = ay.st[j] - r0, wo = j * ay.T, e = ay.ct[j];
+    for (let i = 0; i < cw; i++, o += 4) {
+      let R = 0, G = 0, B = 0;
+      for (let t = 0, q = s * cw + i; t < e; t++, q += cw) { const wt = ay.w[wo + t]; R += tmp[q] * wt; G += tmp[M + q] * wt; B += tmp[2 * M + q] * wt; }
+      // La salida ya viene clampeada a 0..1; Uint8ClampedArray solo recorta el sobrepico del propio
+      // Lanczos (igual que PIL) y redondea.
+      p[o] = R * 255; p[o + 1] = G * 255; p[o + 2] = B * 255; p[o + 3] = 255;
+      if (cleanup) {  // niveles B&N para el Calco (por píxel, da igual que hacerlo al final):
+        const L = 0.299 * p[o] + 0.587 * p[o + 1] + 0.114 * p[o + 2];  // gris; <=40 negro, >=215 blanco, lineal en el medio
+        p[o] = p[o + 1] = p[o + 2] = L <= 40 ? 0 : (L >= 215 ? 255 : (L - 40) * 255 / 175);
+      }
+    }
+  }
+  return id;
+}
+function realesrganTo4K(base64, mime, opts) {  // un trabajo a la vez (ver _resrJob)
+  opts = opts || {};
+  const prog = (d, t, ep, info) => { try { if (opts.onProgress) opts.onProgress(d, t, ep, info); } catch (_) {} };
+  let lastMb = -1;
+  const onNet = (n) => { const mb = Math.floor(n / 1048576); if (mb !== lastMb) { lastMb = mb; prog(0, 0, '', { mb }); } };
+  _resrOnNet = onNet;  // el avance de la bajada del motor lo ve el trabajo más nuevo (aunque esté esperando al anterior)
+  const prev = _resrJob;
+  let release;
+  _resrJob = new Promise((r) => { release = r; });
+  return prev.then(() => _resrTo4K(base64, mime, opts, prog)).finally(() => {
+    if (_resrOnNet === onNet) _resrOnNet = null;
+    release();
+  });
+}
+async function _resrTo4K(base64, mime, opts, prog) {
+  const t0 = performance.now();
+  const targetLong = Math.max(16, Math.round(opts.targetLong || 3840));
+  const cleanup = !!opts.cleanup;
+  const bail = () => { if (opts.isCancelled && opts.isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true }); };
+  bail();
+  const img = await _resrLoadImg(_resrB64Blob(base64, mime));
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  if (!iw || !ih) throw new Error('imagen vacía');
+  // Base de trabajo sobre fondo blanco (por si viene con transparencia); lado largo > 2400 => se achica a 2400.
+  const s0 = Math.min(1, RESR_MAX_IN / Math.max(iw, ih));
+  const W = Math.max(1, Math.round(iw * s0)), H = Math.max(1, Math.round(ih * s0));
+  const k = targetLong / Math.max(W, H);  // px finales por px de la base de trabajo
+  const FW = Math.max(1, Math.round(W * k)), FH = Math.max(1, Math.round(H * k));
+  const src = _resrCanvas(W, H), out = _resrCanvas(1, 1);
+  try {
+    const sctx = src.getContext('2d', { willReadFrequently: true });
+    if (!sctx) throw new Error('el navegador no tiene memoria para el lienzo');  // iOS devuelve null sin avisar
+    sctx.fillStyle = '#fff'; sctx.fillRect(0, 0, W, H);
+    sctx.imageSmoothingEnabled = true; sctx.imageSmoothingQuality = 'high';
+    sctx.drawImage(img, 0, 0, W, H);
+    bail();
+    let { inst, ep, sess } = await _resrPick(opts.ep); bail();
+    // Lienzo final con lado largo = targetLong. Nunca armamos el x4 entero (1680x639 -> 6720x2556 = 17 MP
+    // rompe Safari/iOS, tope ~16,7 MP): cada mosaico x4 se escala solo (Lanczos3 en JS, sobre la salida
+    // float del modelo) a su rectángulo final y se pega con putImageData. El drawImage escalado por
+    // mosaico de Chrome corría los bordes hasta ~1 px vs un resize de la imagen entera; esto da lo mismo
+    // que PIL en cualquier navegador. Si 4*lado largo < targetLong, el mismo camino escala hacia arriba.
+    out.width = FW; out.height = FH;
+    const octx = out.getContext('2d');
+    if (!octx) throw new Error('el navegador no tiene memoria para el lienzo de 4K');
+    const scx = FW / (RESR_X * W), scy = FH / (RESR_X * H);  // escala x4 -> final por eje (= resize a FWxFH)
+    // Núcleo 256; solo con WASM en el hilo principal (sin el Worker de ORT), 128 para no congelar la pestaña.
+    let tiles = _resrTiles(W, H, (ep === 'wasm' && !inst.proxy) ? RESR_TILE_MAIN : RESR_TILE), total = tiles.length;
+    let pxLeft = 0;
+    for (const b of tiles) pxLeft += b.pw * b.ph;
+    // Tiempo que falta: ms por píxel de los mosaicos ya hechos con este EP (sin el 1º, que arranca/compila, en
+    // cuanto hay otros) x píxeles que quedan. wasmRetry: un cuelgue de WASM con su Worker cerrado se reintenta acá.
+    let done = 0, fMs = 0, fPx = 0, sMs = 0, sPx = 0, wasmRetry = true;
+    prog(0, total, ep, { etaMs: 0 });
+    for (let ti = 0; ti < tiles.length; ti++) {
+      const b = tiles[ti];
+      const n = b.pw * b.ph, OW = RESR_X * b.pw, OH = RESR_X * b.ph, N = OW * OH;
+      const d = sctx.getImageData(b.px0, b.py0, b.pw, b.ph).data;
+      let y = null, tOk = 0, retile = false;
+      while (!y) {
+        try {
+          const feeds = { [sess.inputNames[0] || 'input']: new inst.ort.Tensor('float32', _resrPlanar(d, n), [1, 3, b.ph, b.pw]) };
+          tOk = performance.now();
+          const r = await _resrTimeout(sess.run(feeds), _resrTileMs(ep, n), 'un mosaico');
+          // Solo se mide si la pestaña estuvo visible todo el mosaico (oculta, el navegador lo frena).
+          if (!document.hidden && _resrVisAt < tOk) _resrRate[ep] = Math.max(_resrRate[ep] || 0, (performance.now() - tOk) / n);
+          const o = r[sess.outputNames[0] || 'output'];
+          y = o && o.data;
+          if (!y || y.length !== 3 * N) throw new Error('salida inesperada del modelo (' + ((o && o.dims) || []).join('x') + ')');
+          // Clamp a 0..1 ANTES del Lanczos (como la referencia: clip -> resize): el modelo se pasa de rango
+          // (~-0,24..1,15) y Lanczos tiene lóbulos negativos, así que clampear después NO da lo mismo.
+          // De paso detecta NaN (WebGPU roto => se sigue con WASM desde este mosaico).
+          if (!_resrClamp(y, ep === 'webgpu')) throw new Error('WebGPU devolvió NaN');
+        } catch (e) {
+          y = null;
+          if (e && e.cancelled) throw e;
+          const stall = !!(e && e.kind === 'stall');
+          const clean = stall ? _resrKill(inst) : true;  // colgada: esa instancia no se reusa (y se cierra su Worker)
+          if (ep === 'wasm') {
+            // Error de WASM que no es cuelgue (p. ej. sin memoria): esa instancia puede quedar rota, se descarta
+            // para que "Reintentar 4K" arranque una limpia.
+            if (!stall) { _resrKill(inst); throw e; }
+            // Con el plazo adaptado y en tiempo activo, esto es un cuelgue de verdad (p. ej. el Worker murió).
+            // Si su Worker NO se pudo cerrar, nada de Workers nuevos: el próximo intento va al hilo principal.
+            if (!clean) { _resrNoProxy = true; throw e; }
+            if (!wasmRetry) throw e;
+            wasmRetry = false;
+            console.warn('[4K] WASM se colgó en un mosaico; sigo con una instancia nueva:', e);
+            ({ inst, ep, sess } = await _resrPick('wasm')); bail();
+            continue;
+          }
+          if (opts.ep === 'webgpu') throw e;
+          // WebGPU se cayó (primera inferencia o a mitad de camino): sigo con WASM desde este mosaico.
+          _resrNoGpu = true; console.warn('[4K] WebGPU falló en la inferencia, sigo con WASM:', e);
+          // La sesión de WebGPU no se vuelve a usar en esta página: se suelta para liberar la memoria de la placa.
+          if (!stall && inst.sess.webgpu) {
+            const gs = inst.sess.webgpu; delete inst.sess.webgpu;
+            gs.then((s) => s.release(), () => {}).catch(() => {});
+          }
+          ({ inst, ep, sess } = await _resrPick('wasm')); bail();
+          fMs = fPx = sMs = sPx = 0;
+          // WASM en el hilo principal (sin el Worker de ORT): lo que falta, desde este mosaico, va en núcleos
+          // de 128 como si hubiera arrancado así (256 congela la pestaña ~4 s por mosaico).
+          if (!inst.proxy && (b.x1 - b.x0 > RESR_TILE_MAIN || b.y1 - b.y0 > RESR_TILE_MAIN)) {
+            tiles = tiles.slice(0, ti).concat(_resrSplit(tiles.slice(ti), RESR_TILE_MAIN, W, H));
+            total = tiles.length; pxLeft = 0;
+            for (let j = ti; j < tiles.length; j++) pxLeft += tiles[j].pw * tiles[j].ph;
+            retile = true; break;
+          }
+          prog(done, total, ep, { etaMs: 0 });
+        }
+      }
+      if (retile) { prog(done, total, ep, { etaMs: 0 }); ti--; continue; }  // vuelve a este índice, ya partido
+      // Rectángulo final del núcleo con coordenadas acumuladas redondeadas (dx0=round(x0*k), dx1=round(x1*k)):
+      // los vecinos se tocan sin huecos ni solapes. El filtro lee el margen real del mosaico en la costura.
+      const dx0 = Math.round(b.x0 * k), dx1 = Math.round(b.x1 * k), dy0 = Math.round(b.y0 * k), dy1 = Math.round(b.y1 * k);
+      const cw = dx1 - dx0, chh = dy1 - dy0;
+      if (cw > 0 && chh > 0) {
+        const ax = _resrAxis(dx0, dx1, scx, RESR_X * b.px0, RESR_X * b.px0 + OW);
+        const ay = _resrAxis(dy0, dy1, scy, RESR_X * b.py0, RESR_X * b.py0 + OH);
+        octx.putImageData(_resrResample(octx, y, N, OW, ax, ay, cw, chh, cleanup), dx0, dy0);
+      }
+      y = null;
+      done++; pxLeft -= n;
+      const dt = performance.now() - tOk;
+      if (!fPx) { fMs = dt; fPx = n; } else { sMs += dt; sPx += n; }
+      prog(done, total, ep, { etaMs: Math.round((sPx ? sMs / sPx : fMs / fPx) * pxLeft) });
+      await new Promise((r) => setTimeout(r, 0));  // ceder el hilo (UI + progreso)
+      bail();
+    }
+    const blob = await new Promise((res, rej) => out.toBlob((b) => b ? res(b) : rej(new Error('no pude exportar el PNG')), 'image/png'));
+    const b64 = await new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result).split(',')[1] || '');
+      fr.onerror = () => rej(fr.error || new Error('no pude leer el PNG'));
+      fr.readAsDataURL(blob);
+    });
+    return { base64: b64, mime: 'image/png', width: FW, height: FH, ep, ms: Math.round(performance.now() - t0) };
+  } finally {
+    out.width = out.height = 0; src.width = src.height = 0;  // libera memoria ya (iOS)
+  }
+}
+// ==== REALESRGAN-4K END ====
 // ============ Montaje / Mockup: cartel montado sobre la foto del local ============
 // Herramienta del diseñador + admin: 2 imágenes (foto del local marcada con un
 // recuadro + render del cartel) -> Gemini compone un montaje hiperrealista (sin el
