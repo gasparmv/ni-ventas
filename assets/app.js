@@ -4098,6 +4098,15 @@ function corteRolInfo() {
   if (isDisenadorUser(STATE.user)) return { estado: 'pedido', titulo: 'Para diseñar / matriz', accion: 'medidas' };
   return null;
 }
+// Una pieza en la tarjeta de Neyen: la foto del diseño (tocarla la abre grande) para reconocer qué embalar, y la medida real
+// de la matriz (lo que se cortó; si no está, la que pidió el cliente). Gaspar 19-oct. Las de la planilla no traen foto.
+function corteEmbItemHtml(p) {
+  const cm = v => { const n = Number(v); return n > 0 ? String(Math.round(n * 10) / 10).replace('.', ',') : ''; };
+  const med = (cm(p.ancho_real) && cm(p.alto_real)) ? cm(p.ancho_real) + ' × ' + cm(p.alto_real) + ' cm' : String(p.medida_declarada || '');
+  const cant = (parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + escapeHtml(String(p.cantidad)) : '';
+  const img = p.foto_key ? `<a href="${escapeHtml(mediaUrl(p.foto_key))}" target="_blank" rel="noopener" title="Ver el diseño grande" style="flex:0 0 auto;line-height:0"><img src="${escapeHtml(disenoThumb(p.foto_key, 200))}" loading="lazy" alt="" style="width:64px;height:64px;object-fit:contain;border-radius:6px;background:#fff;border:1px solid var(--border)"></a>` : '';
+  return `<div style="display:flex;align-items:center;gap:10px;font-size:13px;color:var(--fg-mute);padding:${img ? '4px' : '2px'} 0">${img}<span style="min-width:0;overflow-wrap:anywhere">${img ? '' : '• '}${escapeHtml(p.diseno_nombre || 'diseño')}${med ? ' — ' + escapeHtml(med) : ''}${cant}</span></div>`;
+}
 // Insumo (cable, fuentes, packs): todo lo que no es acrílico ni neón propio.
 function corteEsInsumo(p) { return !['TRANS', 'NEGRO', 'NEON'].includes(String((p && p.producto) || 'TRANS').toUpperCase()); }
 function cortePrecioPreview(ped) {
@@ -4587,7 +4596,7 @@ function renderCorte() {
         <div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
           <div style="font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${num ? `<span title="N° de paquete (va en la etiqueta)" style="font-size:14px;font-weight:900;padding:1px 8px;border:1px solid var(--fg-mute);border-radius:7px">N° ${num}</span>` : ''}${done ? '<span style="color:#22c55e">✓</span> ' : ''}${escapeHtml(g.nombre || 'cliente')} <span style="color:var(--fg-mute);font-weight:400;font-size:12px">· ${g.items.length} pieza${g.items.length === 1 ? '' : 's'}</span>${entregaBadge(g.entrega)}
             <button class="btn btn-ghost" ${corteEtiquetaAttrs(g, cortePaqInfo(g).key)} title="Reimprimir la etiqueta de este cliente" style="margin-left:auto;font-size:13px;padding:3px 9px">🏷</button></div>
-          ${g.items.map(p => `<div style="font-size:13px;color:var(--fg-mute);padding:2px 0">• ${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ' — ' + escapeHtml(p.medida_declarada) : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}</div>`).join('')}
+          ${g.items.map(corteEmbItemHtml).join('')}
           ${g.entrega === 'envio' ? cortePaqMedidasHtml(g) + corteLogiLineaHtml(lg) : ''}
           <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;align-items:center">
             ${done ? `<button class="btn ghost" data-corte-desembalar="${g.items.map(p => p.id).join(',')}" style="font-size:12px;padding:5px 11px">↩ Deshacer</button>${retiraIds.length ? `<button class="btn btn-cyan" data-corte-retiro data-corte-retiro-tel="${escapeHtml(g.tel || '')}" data-corte-retiro-nombre="${escapeHtml(g.nombre || '')}" data-corte-retiro-ids="${retiraIds.join(',')}" style="font-size:14px;padding:8px 16px;margin-left:auto">Retiró</button>` : ''}` : `<button class="btn" ${g.tel ? `data-corte-embalar-tel="${escapeHtml(g.tel)}"` : `data-corte-embalar-ids="${g.items.map(p => p.id).join(',')}"`} data-corte-entrega="${escapeHtml(g.entrega || '')}">📦 Marcar paquete embalado</button>`}
