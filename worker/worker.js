@@ -14783,9 +14783,9 @@ function sinRespEsCortesia(body) {
   return SIN_RESP_CORTESIA_RE.test(sinEmoji.toLowerCase().replace(/\s+/g, ' ').trim());
 }
 // {espera, urgente, motivo} o null si la IA no respondió (no se cachea: se reintenta en la próxima corrida).
-async function sinRespClasificar(env, phone, msgs) {
+async function sinRespClasificar(env, phone, msgs, rubro = 'carteles') {
   if (!env.ANTHROPIC_API_KEY || !msgs.length) return null;
-  const conv = msgs.map(m => (m.direction === 'inbound' ? 'CLIENTE' : 'NEGOCIO') + (m.msg_type && m.msg_type !== 'text' ? ' [' + m.msg_type + ']' : '') + ': ' + String(m.body || '').replace(/\s+/g, ' ').trim().slice(0, 400)).join('\n');
+  const conv = msgs.map(m => (m.direction === 'inbound' ? 'CLIENTE' : (rubro === 'cursos' && +m.automated > 0 ? 'AUTOMÁTICO' : 'NEGOCIO')) + (m.msg_type && m.msg_type !== 'text' ? ' [' + m.msg_type + ']' : '') + ': ' + String(m.body || '').replace(/\s+/g, ' ').trim().slice(0, 400)).join('\n');
   const system = 'Sos supervisor de ventas de un negocio de carteles de neón LED y letras corpóreas (Argentina). Te paso el final de un chat entre un CLIENTE y el NEGOCIO; el último mensaje es del cliente y nadie le contestó. Decidí si el vendedor TIENE que responderle. Devolvé SOLO un JSON: {"espera":true|false,"urgente":true|false,"motivo":"máximo 8 palabras"}.\n' +
     'espera=true si el cliente: hace una pregunta o pide algo (precio, medidas, plazos, envío, datos de pago, una foto, un cambio); quiere avanzar, comprar, pagar o señar; plantea una objeción que un vendedor puede trabajar (le parece caro, no le alcanza el presupuesto, compara con otro proveedor, duda entre opciones); manda una foto, audio o idea nueva para cotizar; o reclama.\n' +
     'espera=false si es solo cortesía o cierre (gracias, ok, emoji, "joya", "perfecto" sin pedir nada); si dice que lo piensa, que avisa él o que lo deja para más adelante sin preguntar nada; si rechaza en forma definitiva (no me interesa, ya compré en otro lado); o si es spam, número equivocado o un mensaje automático.\n' +
@@ -14794,7 +14794,7 @@ async function sinRespClasificar(env, phone, msgs) {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 80, system, messages: [{ role: 'user', content: conv.slice(-3500) }] }),
+      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 80, system: rubro === 'cursos' ? SIN_RESP_CURSOS_SYSTEM : system, messages: [{ role: 'user', content: conv.slice(-3500) }] }),
       signal: AbortSignal.timeout(20000)
     });
     const j = await r.json().catch(() => null);
@@ -14834,7 +14834,8 @@ async function sinRespCandidatos(env, nowMs, opts = {}) {
   const cut1h = new Date(nowMs - 3600 * 1000).toISOString();
   const cutFloor = new Date(nowMs - floorH * 3600 * 1000).toISOString();
   let rows = [];
-  try {
+  if (opts.bandeja === 'cursos') rows = await sinRespFilasCursos(env, cut1h, cutFloor);
+  else try {
     rows = (await env.DB.prepare(
       `SELECT s.phone, s.assigned_to, s.last_ts, s.last_body, s.contact_name
          FROM wa_chats_summary s
@@ -14861,8 +14862,8 @@ async function sinRespCandidatos(env, nowMs, opts = {}) {
     else if (!c && usadas < maxIa) {
       usadas++;
       let msgs = [];
-      try { msgs = ((await env.DB.prepare("SELECT direction, msg_type, body FROM wa_messages WHERE phone = ? AND msg_type NOT IN ('status', 'reaction') ORDER BY ts DESC LIMIT 8").bind(r.phone).all()).results || []).reverse(); } catch (_) {}
-      c = await sinRespClasificar(env, r.phone, msgs);
+      try { msgs = ((await env.DB.prepare("SELECT direction, msg_type, body, automated FROM wa_messages WHERE phone = ? AND msg_type NOT IN ('status', 'reaction') ORDER BY ts DESC LIMIT 8").bind(r.phone).all()).results || []).reverse(); } catch (_) {}
+      c = await sinRespClasificar(env, r.phone, msgs, opts.bandeja === 'cursos' ? 'cursos' : 'carteles');
     }
     if (c && !cacheado) {
       try { await env.DB.prepare('INSERT INTO sin_responder_avisos (phone, clasif_ts, espera, urgente, motivo) VALUES (?,?,?,?,?) ON CONFLICT(phone) DO UPDATE SET clasif_ts=excluded.clasif_ts, espera=excluded.espera, urgente=excluded.urgente, motivo=excluded.motivo').bind(r.phone, r.last_ts, c.espera ? 1 : 0, c.urgente ? 1 : 0, c.motivo).run(); } catch (_) {}
@@ -14875,6 +14876,61 @@ async function sinRespCandidatos(env, nowMs, opts = {}) {
   }
   return out;
 }
+// ===== ALARMA "SIN RESPONDER" para la bandeja de CURSOS (20-oct-2026) =====
+// El análisis de 395 chats de cursos mostró ventas perdidas por mensajes que nadie contestó ("Si me gustaría entrar a su
+// comunidad" quedó sin respuesta). Igual que la de carteles, con dos diferencias: (1) cuenta como "sin responder" todo
+// mensaje del cliente que no tuvo respuesta de una PERSONA después (los automáticos —minicurso, ManyChat, "esta línea no
+// responde consultas"— no cuentan como respuesta) y no pide "cotizado": lo decide la IA con un criterio de cursos;
+// (2) el aviso va a Abril (agenda_phones 'abril') con copia a Gaspar. Kill-switch kv 'sin_responder_cursos_on' (def '0',
+// APAGADO). Vista previa: GET /admin/sin-responder/preview?bandeja=cursos.
+const SIN_RESP_CURSOS_SYSTEM = 'Sos supervisor de ventas de un negocio que vende CURSOS online para aprender a armar y vender carteles de neón LED (Argentina). Te paso el final de un chat entre un CLIENTE y el NEGOCIO (AUTOMÁTICO = mensaje automático, no lo escribió una persona). El último mensaje del cliente no tuvo respuesta de una persona. Decidí si una vendedora TIENE que contestarle. Respondé SOLO un JSON: {"espera":true|false,"urgente":true|false,"motivo":"máx 8 palabras"}. ' +
+  'espera=true si el cliente: pregunta algo (precio, cuotas, seña, cómo pagar, qué incluye, el kit, el envío, accesos, la plataforma, el grupo); quiere sumarse, pagar o señar; mandó un comprobante; plantea una objeción que se puede trabajar (no tiene plata ahora, no sabe nada, no tiene tiempo, desconfía); avisa que ya vio la clase o que le interesa; o reclama algo. ' +
+  'espera=false si es solo cortesía o cierre (gracias, ok, emoji); si dice que lo piensa o que avisa sin preguntar nada; si rechaza en forma definitiva; si el mensaje del CLIENTE es una respuesta automática de otro negocio ("gracias por comunicarte con…", "en este momento no podemos responder"), spam o un número equivocado; o si un mensaje AUTOMÁTICO posterior ya le respondió exactamente lo que pedía (por ejemplo el link de la clase). ' +
+  'urgente=true solo si quiere pagar o señar ya, mandó un comprobante, espera los accesos después de pagar, o reclama. Ante la duda entre espera true y false, elegí true.';
+async function sinRespFilasCursos(env, cut1h, cutFloor) {
+  const out = [];
+  try {
+    const rs = (await env.DB.prepare(
+      `SELECT s.phone, s.contact_name,
+              (SELECT MAX(m.ts) FROM wa_messages m WHERE m.phone = s.phone AND m.direction = 'inbound' AND m.msg_type NOT IN ('status', 'reaction')) AS li,
+              (SELECT MAX(m.ts) FROM wa_messages m WHERE m.phone = s.phone AND m.direction = 'outbound' AND m.automated = 0 AND m.msg_type NOT IN ('status', 'reaction') AND IFNULL(m.status, '') != 'failed') AS lh
+         FROM wa_chats_summary s
+        WHERE s.inbox = 'cursos' AND s.last_ts >= ? AND s.phone NOT IN (SELECT phone FROM wa_internal_phones)
+        ORDER BY s.last_ts DESC LIMIT 200`
+    ).bind(cutFloor).all()).results || [];
+    const corteDesde = isoHace(14 * 86400000);
+    for (const r of rs) {
+      if (!r.li || r.li > cut1h || r.li < cutFloor) continue;      // el cliente escribió hace entre 1 h y el piso
+      if (r.lh && r.lh >= r.li) continue;                          // una persona ya le contestó después
+      let lb = '', lbTexto = '';
+      try {
+        const m = await env.DB.prepare("SELECT body, msg_type FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts = ? LIMIT 1").bind(r.phone, r.li).first();
+        if (m) { lbTexto = String(m.body || ''); lb = (m.msg_type && m.msg_type !== 'text' && !lbTexto.startsWith('[') ? '[' + m.msg_type + '] ' : '') + lbTexto; }
+      } catch (_) {}
+      // Corte de acrílico: muchos alumnos usan el corte y su chat está en esta bandeja; eso no lo atiende Abril.
+      // Fuera si tiene un pedido de corte de los últimos 14 días o si lo último que le mandamos antes era del corte.
+      try {
+        if (await env.DB.prepare('SELECT 1 AS x FROM corte_pedidos WHERE telefono = ? AND created_at >= ? LIMIT 1').bind(r.phone, corteDesde).first()) continue;
+        const prev = await env.DB.prepare("SELECT body FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND ts < ? AND msg_type NOT IN ('status', 'reaction') ORDER BY ts DESC LIMIT 1").bind(r.phone, r.li).first();
+        if (prev && /plantilla: corte_|tu corte|detalle de tu corte|corte (queda|confirmado)/i.test(String(prev.body || ''))) continue;
+      } catch (_) {}
+      // Lo que pasó después del mensaje del cliente: una reacción de una persona (❤️) o un automático que contestó al toque.
+      const sinPregunta = !/\?/.test(lbTexto) && !/precio|cu[aá]nto|pag|se[ñn]a|cuota|comprobante|transfer|kit|env[ií]o|acceso/i.test(lbTexto);
+      if (sinPregunta) {
+        try {
+          const desp = (await env.DB.prepare("SELECT msg_type, automated, IFNULL(status, '') st, ts FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND ts > ? ORDER BY ts ASC LIMIT 10").bind(r.phone, r.li).all()).results || [];
+          const liMs = new Date(r.li).getTime();
+          if (desp.some(d => d.msg_type === 'reaction' && +d.automated === 0)) continue;
+          if (desp.some(d => d.msg_type !== 'reaction' && +d.automated > 0 && d.st !== 'failed' && new Date(d.ts).getTime() - liMs <= 10 * 60000)) continue;
+        } catch (_) {}
+      }
+      out.push({ phone: r.phone, assigned_to: 'abril', last_ts: r.li, last_body: lb, contact_name: r.contact_name || '' });
+      if (out.length >= 80) break;
+    }
+  } catch (_) {}
+  return out;
+}
+
 async function processSinResponder(env) {
   try {
     if ((await kvGet(env, 'sin_responder_on', '1')) !== '1') return;
@@ -14918,6 +14974,161 @@ async function processSinResponder(env) {
       try { await env.DB.prepare('UPDATE sin_responder_avisos SET last_ts = ?, alerted_at = ? WHERE phone = ?').bind(r.last_ts, nowIso, r.phone).run(); } catch (_) {}
     }
   } catch (_) {}
+}
+
+// Cron de la alarma de CURSOS (mismo motor que la de carteles; ver el bloque de arriba).
+async function processSinResponderCursos(env) {
+  try {
+    if ((await kvGet(env, 'sin_responder_cursos_on', '0')) !== '1') return;
+    const nowMs = Date.now();
+    const prevRun = parseInt(await kvGet(env, 'sin_responder_cursos_last_run', '0'), 10) || 0;
+    if (nowMs - prevRun < 15 * 60 * 1000) return;
+    const ar = new Date(nowMs - 3 * 3600 * 1000);
+    if (ar.getUTCHours() < 9 || ar.getUTCHours() >= 21 || ar.getUTCDay() === 0) return;
+    await kvSet(env, 'sin_responder_cursos_last_run', String(nowMs));
+    const fresh = (await sinRespCandidatos(env, nowMs, { bandeja: 'cursos' })).filter(x => x.alertar);
+    if (!fresh.length) return;
+    const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+    const line = r => {
+      const h = Math.max(1, Math.round(r.edad_h));
+      const nm = (r.contact_name && String(r.contact_name).trim()) || ('…' + String(r.phone).slice(-4));
+      const b = String(r.last_body || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+      return `${r.urgente ? '🔴' : '·'} ${nm} (hace ${h}h)${r.motivo ? ' — ' + r.motivo : ''}${b ? ': "' + b + '"' : ''}`;
+    };
+    const nowIso = new Date(nowMs).toISOString();
+    const sh = fresh.slice(0, 12); const ex = fresh.length - sh.length;
+    const lista = sh.map(line).join('\n') + (ex > 0 ? `\n· …y ${ex} más` : '');
+    let ophone = '';
+    try { const op = await env.DB.prepare("SELECT phone FROM agenda_phones WHERE usuario = 'abril'").first(); ophone = op && op.phone; } catch (_) {}
+    if (ophone && ophone !== gaspar) {
+      const msg = `⏰ Cursos: tenés ${fresh.length} persona${fresh.length > 1 ? 's' : ''} esperando respuesta:\n` + lista + `\n\nContestales hoy, no los dejes enfriar.`;
+      try { await avisoInterno(env, { para: 'abril', tipo: 'sin_responder', prioridad: fresh.some(x => x.urgente) ? 'P1' : 'P2', clave: 'sinresp-cursos:abril:' + nowIso.slice(0, 16), texto: msg, legacy: () => sinRespEnviar(env, ophone, msg), legacyDest: ophone }); } catch (_) {}
+    }
+    if ((await kvGet(env, 'sin_responder_cursos_copia_gaspar', '1')) === '1') {
+      const gMsg = `⏰ Cursos — esperando respuesta (${fresh.length}):\n` + lista;
+      try { await avisoInterno(env, { para: 'gaspar', tipo: 'sin_responder', prioridad: 'P2', clave: 'sinresp-cursos:gaspar:' + nowIso.slice(0, 16), texto: gMsg, legacy: () => sinRespEnviar(env, gaspar, gMsg), legacyDest: gaspar }); } catch (_) {}
+    }
+    for (const r of fresh) {
+      try { await env.DB.prepare('UPDATE sin_responder_avisos SET last_ts = ?, alerted_at = ? WHERE phone = ?').bind(r.last_ts, nowIso, r.phone).run(); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+// ===== PENDIENTES de la bandeja de CURSOS (20-oct-2026) =====
+// Dos listas que hoy nadie ve hasta que el cliente reclama (accesos que salieron hasta 7 días y medio después del pago,
+// una seña 40 días sin cobrar el saldo):
+//  · "🎓 Espera accesos": pagó el curso completo y todavía no recibió el mensaje de accesos.
+//  · "⏳ Seña pendiente": pagó una seña o una parte y no completó.
+// Fuentes (solo chats de la bandeja de cursos, últimos 90 días):
+//  · comprobantes leídos por OCR (wa_pago_proof sena/full). OJO: el OCR solo corre en la ventana del lanzamiento, así que
+//    fuera de los lanzamientos esta fuente no ve pagos nuevos. Se descartan los reenvíos del mismo comprobante (mismo
+//    monto y fecha), los montos en 0 y los de más de $320.000 (no son del curso).
+//  · la etiqueta 'Venta Abril' (la pone Abril al vender) = pagó completo.
+// Sale de la lista quien ya recibió los accesos ("LEE BIEN A CONCIENCIA" o el link de la plataforma) o tiene Alumno.
+// Tipos sin etiqueta (solo se ven en el GET): 'caida' (pidió devolución, desistió, se le devolvió o tiene la etiqueta
+// "Seña caída") y 'verificar' (pagó desde otro número o para otra persona).
+// Con kv cursos_pendientes_on='1' el cron mantiene dos etiquetas (las pone y las saca solo) y el CRM muestra sus botones
+// de filtro; apagado no toca nada. Vista previa: GET /admin/cursos/pendientes.
+const CURSO_PRECIO_TOTAL = 175000;
+const CURSO_PAGO_MAX = 320000;   // el combo más caro del curso es $310.000: más que esto es un cartel o un corpóreo
+const CURSOS_PEND_LABELS = { accesos: { name: '🎓 Espera accesos', color: '#7c3aed' }, sena: { name: '⏳ Seña pendiente', color: '#f59e0b' } };
+// Seña caída: el cliente desiste o pide la plata, o le devolvimos. Una persona que después le extiende el plazo la reactiva.
+const CURSO_CAIDA_CLI_RE = /devolv|reembols|me lo pierdo|perd(er|o|eré)\b.{0,15}(la se[ñn]a|el dep[oó]sito|mi dep[oó]sito)|no voy a poder (pagar|completar|seguir)|lo voy a dejar/i;
+const CURSO_CAIDA_OUT_RE = /te devuelvo|te (la )?transfiri[oó]|transfiri[oó] la se[ñn]a|devoluci[oó]n/i;
+const CURSO_REACTIVA_RE = /exten|plazo|te espero|lo dejamos para/i;
+const CURSO_OTRO_NUM_RE = /otro n[uú]mero|n[uú]mero de mi|desde otro|mi (marido|esposo|esposa|novi[oa]|hij[oa]|herman[oa]|pareja)\b/i;
+async function cursosPendientesLista(env) {
+  const q = async (sql, ...b) => { try { return (await env.DB.prepare(sql).bind(...b).all()).results || []; } catch (_) { return []; } };
+  const desde = isoHace(90 * 86400000);
+  const pagos = await q("SELECT phone, monto, IFNULL(clasificacion, '') c, created_at, IFNULL(raw, '') raw FROM wa_pago_proof WHERE IFNULL(is_payment, 0) = 1 AND IFNULL(clasificacion, '') IN ('sena', 'full') AND created_at >= ? ORDER BY created_at", desde);
+  const ventas = await q("SELECT cl.phone, cl.created_at FROM contact_labels cl JOIN labels l ON l.id = cl.label_id WHERE l.name = 'Venta Abril' AND cl.created_at >= ?", desde);
+  const by = {};
+  const nuevo = (p, t) => by[p] || (by[p] = { phone: p, total: 0, pagos: [], vistos: new Set(), venta: '', desde: t || '' });
+  for (const p of pagos) {
+    const monto = Number(p.monto) || 0;
+    if (monto <= 0 || monto > CURSO_PAGO_MAX) continue;
+    // El mismo comprobante reenviado (el equipo lo pide seguido) llega con otro wamid: mismo monto + misma fecha del comprobante.
+    let fechaComp = '';
+    try { fechaComp = String(JSON.parse(p.raw).fecha || ''); } catch (_) { const m = /"fecha"\s*:\s*"([^"]*)"/.exec(p.raw); fechaComp = m ? m[1] : ''; }
+    const o = nuevo(p.phone, p.created_at);
+    const clave = Math.round(monto) + '|' + (fechaComp || String(p.created_at || '').slice(0, 10));
+    if (o.vistos.has(clave)) continue;
+    o.vistos.add(clave);
+    o.total += monto;
+    o.pagos.push({ fecha: String(p.created_at || '').slice(0, 10), monto, tipo: p.c });
+    if (p.created_at && (!o.desde || p.created_at < o.desde)) o.desde = p.created_at;
+  }
+  for (const v of ventas) {
+    const o = nuevo(v.phone, v.created_at);
+    o.venta = v.created_at || 'sí';
+    if (v.created_at && (!o.desde || v.created_at < o.desde)) o.desde = v.created_at;
+  }
+  const phones = Object.keys(by);
+  const out = [];
+  for (let i = 0; i < phones.length; i += 50) {
+    const lote = phones.slice(i, i + 50); const ph = lote.map(() => '?').join(',');
+    const alumnos = new Set((await q(`SELECT phone FROM contact_labels WHERE label_id = 26 AND phone IN (${ph})`, ...lote)).map(r => r.phone));
+    const conAcceso = new Set((await q(`SELECT DISTINCT phone FROM wa_messages WHERE phone IN (${ph}) AND direction = 'outbound' AND (body LIKE '%LEE BIEN A CONCIENCIA%' OR body LIKE '%alinfinito.app.clientclub.net%')`, ...lote)).map(r => r.phone));
+    const internos = new Set((await q(`SELECT phone FROM wa_internal_phones WHERE phone IN (${ph})`, ...lote)).map(r => r.phone));
+    const caidaManual = new Set((await q(`SELECT cl.phone FROM contact_labels cl JOIN labels l ON l.id = cl.label_id WHERE lower(l.name) LIKE '%seña caída%' AND cl.phone IN (${ph})`, ...lote)).map(r => r.phone));
+    const sm = {};
+    for (const s of await q(`SELECT phone, IFNULL(contact_name, '') n, IFNULL(inbox, '') ib, last_ts, last_direction FROM wa_chats_summary WHERE phone IN (${ph})`, ...lote)) sm[s.phone] = s;
+    for (const p of lote) {
+      if (alumnos.has(p) || conAcceso.has(p) || internos.has(p)) continue;
+      const o = by[p]; const s = sm[p] || {};
+      if (s.ib !== 'cursos') continue;   // carteles, corpóreos y corte no entran (comprobantes viejos sin el filtro de carteles)
+      if (!o.pagos.length && !o.venta) continue;
+      const completo = !!o.venta || o.total >= CURSO_PRECIO_TOTAL * 0.97;
+      let tipo = completo ? 'accesos' : 'sena', motivo = '';
+      // Lo que se habló después del primer pago: pagó desde otro número / para otra persona, o la seña se cayó.
+      const msgs = await q("SELECT direction, automated, IFNULL(body, '') body FROM wa_messages WHERE phone = ? AND ts >= ? AND msg_type NOT IN ('status', 'reaction') ORDER BY ts ASC LIMIT 300", p, o.desde || desde);
+      if (msgs.some(m => m.direction === 'inbound' && CURSO_OTRO_NUM_RE.test(m.body))) { tipo = 'verificar'; motivo = 'habla de otro número o de otra persona'; }
+      if (tipo === 'sena') {
+        let caida = caidaManual.has(p) ? 'etiqueta Seña caída' : '';
+        if (!caida) {
+          for (const m of msgs) {
+            const humano = m.direction === 'outbound' && +m.automated === 0;
+            if (!caida && ((m.direction === 'inbound' && CURSO_CAIDA_CLI_RE.test(m.body)) || (humano && CURSO_CAIDA_OUT_RE.test(m.body)))) caida = String(m.body).replace(/\s+/g, ' ').slice(0, 80);
+            else if (caida && humano && CURSO_REACTIVA_RE.test(m.body)) caida = '';
+          }
+        }
+        if (caida) { tipo = 'caida'; motivo = caida; }
+      }
+      out.push({
+        phone: p, nombre: s.n || '', bandeja: s.ib || '', tipo, motivo,
+        pagado: o.total, saldo: completo ? 0 : Math.max(0, CURSO_PRECIO_TOTAL - o.total), venta_abril: o.venta || '',
+        pagos: o.pagos, desde: o.desde, dias: o.desde ? Math.floor((Date.now() - new Date(o.desde).getTime()) / 86400000) : null,
+        ultimo_mensaje: s.last_ts || '', ultimo_de: s.last_direction || ''
+      });
+    }
+  }
+  return out.sort((a, b) => String(a.desde).localeCompare(String(b.desde)));
+}
+// Mantiene las dos etiquetas (pone y saca). opts.forzar: corre aunque el gate esté apagado (botón de admin).
+async function syncCursosPendientes(env, opts = {}) {
+  try {
+    if (!opts.forzar) {
+      if ((await kvGet(env, 'cursos_pendientes_on', '0')) !== '1') return { ok: true, skipped: 'apagado' };
+      const prev = parseInt(await kvGet(env, 'cursos_pendientes_last_run', '0'), 10) || 0;
+      if (Date.now() - prev < 8 * 60 * 1000) return { ok: true, skipped: 'throttle' };
+      await kvSet(env, 'cursos_pendientes_last_run', String(Date.now()));
+    }
+    const lista = await cursosPendientesLista(env);
+    const res = { ok: true, accesos: 0, sena: 0, puestas: 0, sacadas: 0 };
+    const now = new Date().toISOString();
+    for (const k of ['accesos', 'sena']) {
+      const id = await ensureLabelId(env, CURSOS_PEND_LABELS[k].name, CURSOS_PEND_LABELS[k].color);
+      if (!id) continue;
+      const want = new Set(lista.filter(r => r.tipo === k).map(r => r.phone));
+      res[k] = want.size;
+      const have = new Set(((await env.DB.prepare('SELECT phone FROM contact_labels WHERE label_id = ?').bind(id).all()).results || []).map(r => r.phone));
+      const stmts = [];
+      for (const p of want) if (!have.has(p)) { stmts.push(env.DB.prepare('INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)').bind(p, id, now)); res.puestas++; }
+      for (const p of have) if (!want.has(p)) { stmts.push(env.DB.prepare('DELETE FROM contact_labels WHERE phone = ? AND label_id = ?').bind(p, id)); res.sacadas++; }
+      for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
+    }
+    return res;
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 }
 
 // ===== Recordatorio de COBRO de pedidos cargados SIN PAGO (Gaspar 16-oct) =====
@@ -27207,10 +27418,23 @@ const handler = {
         const st = await corteWebStats(env);
         return json(st.ok ? { ...st, texto: corteWebStatsTexto(st) } : st);
       }
+      // GET /admin/cursos/pendientes → quién pagó y espera accesos y quién tiene una seña sin completar (admin y cursos).
+      // POST /admin/cursos/pendientes/sync → pone y saca YA las dos etiquetas aunque el gate esté apagado (solo Gaspar).
+      if (request.method === 'GET' && path === '/admin/cursos/pendientes') {
+        const _rolP = await getSessionRole(env, session.user);
+        if (_rolP !== 'admin' && _rolP !== 'cursos') return json({ error: 'forbidden' }, 403);
+        const lista = await cursosPendientesLista(env);
+        return json({ ok: true, on: (await kvGet(env, 'cursos_pendientes_on', '0')) === '1', espera_accesos: lista.filter(r => r.tipo === 'accesos'), sena_pendiente: lista.filter(r => r.tipo === 'sena'), a_verificar: lista.filter(r => r.tipo === 'verificar'), senas_caidas: lista.filter(r => r.tipo === 'caida'), nota: 'El OCR de comprobantes solo corre en los lanzamientos: fuera de eso, Espera accesos sale de la etiqueta Venta Abril.' });
+      }
+      if (request.method === 'POST' && path === '/admin/cursos/pendientes/sync') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        return json(await syncCursosPendientes(env, { forzar: true }));
+      }
       if (request.method === 'GET' && path === '/admin/sin-responder/preview') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
-        const items = await sinRespCandidatos(env, Date.now(), { clasificarMax: Math.min(60, parseInt(url.searchParams.get('ia') || '40', 10) || 40) });
-        return json({ ok: true, on: (await kvGet(env, 'sin_responder_on', '1')) === '1', horas: parseInt(await kvGet(env, 'sin_responder_horas', '3'), 10) || 3, alertaria: items.filter(x => x.alertar).length, items });
+        const _band = url.searchParams.get('bandeja') === 'cursos' ? 'cursos' : '';
+        const items = await sinRespCandidatos(env, Date.now(), { bandeja: _band, clasificarMax: Math.min(60, parseInt(url.searchParams.get('ia') || '40', 10) || 40) });
+        return json({ ok: true, bandeja: _band || 'carteles', on: _band ? (await kvGet(env, 'sin_responder_cursos_on', '0')) === '1' : (await kvGet(env, 'sin_responder_on', '1')) === '1', horas: parseInt(await kvGet(env, 'sin_responder_horas', '3'), 10) || 3, alertaria: items.filter(x => x.alertar).length, items });
       }
 
       // POST /admin/pedidos/caja-sync[?id=N] → corre YA el pase de la caja de la seña a la col Z (Pedidos_Corporeo /
@@ -30105,6 +30329,9 @@ const handler = {
     // se auto-apaga pasada la ventana, y si no hay pendientes no hace nada.
     ctx.waitUntil(processGasparResendBackfill(env));
     ctx.waitUntil(processCentinelaRuteo(env));   // centinela de ruteo: cura/avisa perdidos·duplicados·mal-segmentados (self-throttle 30min)
+    // Solo en el cron de cada minuto: en los múltiplos de 5 corren los dos a la vez y el throttle por kv no es atómico (aviso doble).
+    if (event.cron === '* * * * *') ctx.waitUntil(processSinResponderCursos(env));   // misma alarma para la bandeja de cursos → Abril + Gaspar (gate sin_responder_cursos_on, APAGADO por defecto)
+    if (event.cron === '* * * * *' && new Date().getUTCMinutes() % 10 === 0) ctx.waitUntil(syncCursosPendientes(env));   // etiquetas "Espera accesos" / "Seña pendiente" (gate cursos_pendientes_on, APAGADO)
     ctx.waitUntil(processSinResponder(env));     // alarma "sin responder": lead cotizado/con intención sin contestar +Nh → digest al vendedor + Gaspar (self-throttle 15min, gate sin_responder_on)
     // Recordatorio de COBRO de los pedidos cargados sin pago (10 y 18 AR, lun-sáb; cada 10 min dentro de esa hora con claim).
     if (new Date().getUTCMinutes() % 10 === 0) ctx.waitUntil(processCobrosPendientes(env));

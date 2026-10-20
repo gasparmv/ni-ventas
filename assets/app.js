@@ -18538,7 +18538,7 @@ function showScheduleModal(phone) {
   const tplEfectiva = (t) => (t && tplVars(t) >= 1 && !firstName && (chatState.templates || []).find(x => x.name === tplAnonDe(t.name))) || t;
   const fillTpl = (t) => tplBody(tplEfectiva(t)).replace(/\{\{1\}\}/g, firstName || 'amigo/a').replace(/\{\{\d+\}\}/g, '…');
   // Plantillas de re-enganche de carteles primero (las más útiles para seguimiento). Vendedor: solo las aptas para clientes.
-  const prefer = ['seguimiento_presupuesto_v2', 'seguimiento_presupuesto_anon', 'seguimiento_presupuesto', 'retomar_carteles_v2', 'retomar_carteles'];
+  const prefer = ['seguimiento_presupuesto_v2', 'seguimiento_presupuesto_anon', 'seguimiento_presupuesto', 'retomar_carteles_v2', 'retomar_carteles', 'cursos_retomar_v3', 'cursos_retomar_v2', 'cursos_reenganche'];
   const ordered = [...plantillasDelUsuario()].sort((a, b) => ((prefer.indexOf(a.name) + 1) || 99) - ((prefer.indexOf(b.name) + 1) || 99));
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
@@ -18796,6 +18796,19 @@ function porCobrarCount() {
   for (const c of (chatState.contacts || [])) { if ((c.channel || 'wa') === ch && (cl[c.phone] || []).includes(l.id)) n++; }
   return n;
 }
+// Bandejas rápidas de CURSOS (Abril + admin): etiquetas que mantiene el worker (syncCursosPendientes). "🎓 Espera accesos" =
+// pagó el curso completo y todavía no recibió los accesos; "⏳ Seña pendiente" = señó y no completó. Si el worker no las
+// creó todavía (gate apagado), los botones no aparecen.
+function cursosPendLabel(nombre) { return (chatState.labels || []).find(l => l.name === nombre) || null; }
+function cursosPendCount(l) {
+  if (!l) return 0;
+  const cl = chatState.contactLabels || {};
+  const ch = chatState.channel || 'wa';
+  let n = 0;
+  for (const c of (chatState.contacts || [])) { if ((c.channel || 'wa') === ch && (cl[c.phone] || []).includes(l.id)) n++; }
+  return n;
+}
+const CURSOS_PEND_CHIPS = [['esperaaccesos', '🎓 Espera accesos', 'Pagaron el curso completo y todavía no recibieron los accesos'], ['senapendiente', '⏳ Seña pendiente', 'Señaron y todavía no completaron el pago']];
 // Bandeja rápida "Servicio de corte" (admin): igual que "Para cotizar" pero por la etiqueta "Servicio de corte",
 // que el backend pone en cada cobro del corte.
 function servicioCorteLabel() {
@@ -18850,6 +18863,13 @@ function renderLabelFilterBar() {
       const active = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
       return `<button class="label-filter-pill${active ? ' active' : ''}" data-filter-fixed="porcobrar" title="Órdenes de compra enviadas que todavía no se pagaron">💰 Por cobrar${n ? ` (${n})` : ''}</button>`;
     })()}
+    ${(isCursosOnly() || isAdmin()) ? CURSOS_PEND_CHIPS.map(([kind, nombre, tit]) => {
+      const l = cursosPendLabel(nombre);
+      if (!l) return '';
+      const n = cursosPendCount(l);
+      const active = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
+      return `<button class="label-filter-pill${active ? ' active' : ''}" data-filter-fixed="${kind}" title="${tit}">${nombre}${n ? ` (${n})` : ''}</button>`;
+    }).join('') : ''}
     ${visibleLabels().length ? `
       <div class="label-filter-dd-wrap">
         <button class="label-filter-pill label-filter-dd-btn${labelsCount ? ' active' : ''}" id="label-filter-dd-btn" aria-expanded="${chatState.labelDropdownOpen ? 'true' : 'false'}">
@@ -23398,9 +23418,10 @@ function bindChat() {
         chatState.labelDropdownOpen = false;
       } else if (kind === 'unread') {
         chatState.filterUnreadOnly = !chatState.filterUnreadOnly;
-      } else if (kind === 'paracotizar' || kind === 'corte' || kind === 'porcobrar') {
+      } else if (kind === 'paracotizar' || kind === 'corte' || kind === 'porcobrar' || kind === 'esperaaccesos' || kind === 'senapendiente') {
         // Toggle: filtra por la etiqueta de la bandeja rápida (o la apaga si ya estaba sola).
-        const l = kind === 'corte' ? servicioCorteLabel() : (kind === 'porcobrar' ? porCobrarLabel() : paraCotizarLabel());
+        const _cp = CURSOS_PEND_CHIPS.find(x => x[0] === kind);
+        const l = _cp ? cursosPendLabel(_cp[1]) : (kind === 'corte' ? servicioCorteLabel() : (kind === 'porcobrar' ? porCobrarLabel() : paraCotizarLabel()));
         if (l) {
           const on = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
           chatState.filterLabels = on ? [] : [l.id];
