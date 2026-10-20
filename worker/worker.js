@@ -7807,7 +7807,9 @@ async function corteSinPagarLista(env, ahora) {
     let pagado = 0, cobroAt = '', ventana = false, recAt = null;
     if (c.telefono) {
       if (c.parcial) { try { const pp = await env.DB.prepare('SELECT pagado FROM corte_pago_parcial WHERE phone=?').bind(c.telefono).first(); pagado = Number(pp && pp.pagado) || 0; } catch (_) {} }
-      try { const d = await env.DB.prepare('SELECT cobro_at FROM corte_detalle_sent WHERE phone=?').bind(c.telefono).first(); cobroAt = (d && d.cobro_at) || ''; } catch (_) {}
+      // Cuándo salió el último cobro: el mensaje mismo (plantilla o texto con el detalle); si no, la marca del detalle.
+      try { const m = await env.DB.prepare("SELECT MAX(ts) AS ts FROM wa_messages WHERE phone=? AND direction='outbound' AND body NOT LIKE '%(recordatorio)%' AND (body LIKE '[plantilla corte_cobro_semanal]%' OR body LIKE '%te paso el detalle de tu corte%' OR body LIKE '%te paso el detalle de tu pedido%')").bind(c.telefono).first(); cobroAt = (m && m.ts) || ''; } catch (_) {}
+      if (!cobroAt) { try { const d = await env.DB.prepare('SELECT cobro_at FROM corte_detalle_sent WHERE phone=?').bind(c.telefono).first(); cobroAt = (d && d.cobro_at) || ''; } catch (_) {} }
       try { ventana = !!(await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type NOT IN ('status','reaction') AND ts > ? LIMIT 1").bind(c.telefono, t23).first()); } catch (_) {}
       try { const r = await env.DB.prepare('SELECT MAX(at) AS at FROM corte_recordatorios WHERE telefono=?').bind(c.telefono).first(); recAt = (r && r.at) || null; } catch (_) {}
     }
@@ -7815,7 +7817,7 @@ async function corteSinPagarLista(env, ahora) {
     out.clientes.push({
       telefono: c.telefono, nombre: c.nombre, total: Math.round(c.total * 100) / 100, pagado, debe: Math.max(0, Math.round((c.total - pagado) * 100) / 100),
       piezas: c.piezas, semanas: ts.map(id => fechaDe[id]).filter(Boolean), esta_semana: !!(actual && ts.length === 1 && ts[0] === actual.id),
-      entrega: c.envio ? 'envio' : 'retira', parcial: c.parcial, cobro_at: cobroAt || c.ult || null, ventana, recordado_at: recAt,
+      entrega: c.envio ? 'envio' : 'retira', parcial: c.parcial, cobro_at: cobroAt || null, ventana, recordado_at: recAt,
     });
   }
   out.clientes.sort((a, b) => b.debe - a.debe);
@@ -28875,7 +28877,7 @@ const handler = {
             } else {
               via = 'plantilla';
               try { r = await waSendTemplate(env, tel, 'corte_cobro_semanal', 'es_AR', [nom, monto]); } catch (_) {}
-              if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-recordar-tpl:' + tel + ':' + Date.now()), tel, '[plantilla corte_cobro_semanal] total ' + monto).run(); } catch (_) {} }
+              if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-recordar-tpl:' + tel + ':' + Date.now()), tel, '[plantilla corte_cobro_semanal] (recordatorio) total ' + monto).run(); } catch (_) {} }
             }
             if (r && r.ok) {
               try { await env.DB.prepare('INSERT INTO corte_recordatorios (telefono, at, via, monto, por) VALUES (?, ?, ?, ?, ?)').bind(tel, new Date().toISOString(), via, Number(c.debe) || 0, String(session.user || '')).run(); } catch (_) {}
