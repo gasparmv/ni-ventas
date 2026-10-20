@@ -16559,38 +16559,54 @@ async function processCoexistenceStateSync(env, data) {
 }
 
 // ===== Image analysis (Vision via Workers AI) =====
+// Describe cada imagen que entra por WhatsApp; el webhook la guarda como "[imagen] <descripción>" para el chat del
+// CRM y el historial que leen los bots. Gemma 4 sin razonamiento: ~1-2 s y ~5 neuronas (≈US$0,00006) por imagen;
+// si falla, Mistral Small 3.1. Hasta el 30-may usaba @cf/unum/uform-gen2-qwen-500m, que Cloudflare dio de baja (y
+// casi nunca devolvía algo útil), y el respaldo de Llama 3.2 visión pedía aceptar la licencia: desde el 1-jun
+// ninguna imagen tuvo descripción y el error solo iba a console.error.
+const IMG_DESC_MODELOS = ['@cf/google/gemma-4-26b-a4b-it', '@cf/mistralai/mistral-small-3.1-24b-instruct'];
+const IMG_DESC_SYSTEM = `Describís imágenes que un cliente manda por WhatsApp a Neon Infinito (carteles de neón LED y letras corpóreas), para que el equipo y el bot de ventas sepan qué mandó sin abrir la foto.
+Respondé en español, en 1 o 2 oraciones cortas, en texto plano (sin markdown ni listas).
+Si la imagen tiene texto, transcribilo tal cual (mayúsculas, acentos y números como están). Si hay mucho texto, transcribí lo principal: nombres, montos, fechas y medidas.
+Si es un logo, un diseño o un cartel, decí qué muestra (forma, colores, estilo). Si es un comprobante de pago, decí el banco o la billetera, el monto y la fecha.
+No inventes: lo que no se lee, no lo completes.`;
 async function analyzeImage(env, r2Key) {
   if (!env.AI || !env.MEDIA || !r2Key) return null;
   try {
     const obj = await env.MEDIA.get(r2Key);
     if (!obj) return null;
     const buf = await obj.arrayBuffer();
-    const uint8 = new Uint8Array(buf);
-    // Try uform-gen2 (image-to-text, simpler API)
-    let result;
-    try {
-      result = await env.AI.run('@cf/unum/uform-gen2-qwen-500m', {
-        image: [...uint8],
-        prompt: 'Describí esta imagen en español en 1-2 oraciones cortas. Si tiene texto o palabras, transcibilas exactamente. Si es un diseño, logo o cartel, describí qué muestra.',
-        max_tokens: 200
-      });
-    } catch (e1) {
-      // Fallback: llama vision with array format
+    if (!buf || buf.byteLength < 64 || buf.byteLength > 5 * 1024 * 1024) return null; // vacía o más grande que una foto de WhatsApp
+    const mime = sniffImageMime(buf); // por los bytes: el content-type guardado a veces miente
+    if (!mime) return null;
+    const imageUrl = `data:${mime};base64,${abToBase64(buf)}`;
+    const errs = [];
+    for (const model of IMG_DESC_MODELOS) {
+      let tm = null;
       try {
-        result = await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
-          image: [...uint8],
-          prompt: 'Describe this image in Spanish in 1-2 short sentences.',
-          max_tokens: 200
-        });
-      } catch (e2) {
-        console.error('both vision models failed:', e1.message, e2.message);
-        return null;
-      }
+        const r = await Promise.race([
+          env.AI.run(model, {
+            messages: [
+              { role: 'system', content: IMG_DESC_SYSTEM },
+              { role: 'user', content: [{ type: 'image_url', image_url: { url: imageUrl } }, { type: 'text', text: 'Describí esta imagen.' }] }
+            ],
+            max_tokens: 250,
+            // Gemma 4 razona por defecto: así tarda ~8 s y se queda sin tokens antes de contestar.
+            ...(model.includes('gemma-4') ? { chat_template_kwargs: { enable_thinking: false } } : {})
+          }),
+          new Promise((_, rej) => { tm = setTimeout(() => rej(new Error('timeout 10 s')), 10000); })
+        ]);
+        const txt = String((r && (r.response || r.choices?.[0]?.message?.content)) || '').replace(/\s+/g, ' ').trim();
+        if (txt) return txt.slice(0, 500);
+        errs.push(model + ': respuesta vacía');
+      } catch (e) {
+        errs.push(model + ': ' + String((e && e.message) || e).slice(0, 200));
+      } finally { if (tm) clearTimeout(tm); }
     }
-    // Extract text from whatever format the model returns
-    if (!result) return null;
-    if (typeof result === 'string') return result;
-    return result.description || result.response || result.text || result.output || JSON.stringify(result);
+    // Queda en wa_webhook_log (IMG_ERR, como el catch del webhook) para que una baja de modelo no vuelva a pasar meses sin verse.
+    console.error('vision models failed:', errs.join(' | '));
+    try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), ('IMG_ERR: ' + r2Key + ' — ' + errs.join(' | ')).slice(0, 4000)).run(); } catch (_) {}
+    return null;
   } catch (e) {
     console.error('image analysis error:', e);
     return null;
@@ -20456,11 +20472,15 @@ const handler = {
                     if (transcript) msgBody = '[audio] ' + transcript;
                   } catch (_) {}
                 }
-                // Analyze image messages
+                // Analyze image messages. La descripción va al body GUARDADO (chat del CRM + historial de los bots); los
+                // hooks de abajo siguen recibiendo msgBody = solo lo que escribió el cliente: la descripción transcribe el
+                // texto de la foto (una captura del anuncio, montos, medidas) y no tiene que disparar respuestas ni ruteos
+                // por palabra clave. Desde el 1-jun (modelo dado de baja) los hooks ya corrían sin descripción.
+                let bodyGuardado = msgBody;
                 if (msgType === 'image' && r2Key && env.AI) {
                   try {
                     const description = await analyzeImage(env, r2Key);
-                    if (description) msgBody = (msgBody ? msgBody + ' | ' : '') + '[imagen] ' + description;
+                    if (description) bodyGuardado = (msgBody ? msgBody + ' | ' : '') + '[imagen] ' + description;
                   } catch (imgErr) {
                     try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'IMG_ERR: ' + (imgErr?.message || String(imgErr))).run(); } catch(_){}
                   }
@@ -20480,7 +20500,7 @@ const handler = {
                        context_id = excluded.context_id,
                        ts = excluded.ts
                      WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'`
-                  ).bind(ts, wamid, direction, phone, senderName, msgType, msgBody, r2Key || mediaUrl, contextId, null).run();
+                  ).bind(ts, wamid, direction, phone, senderName, msgType, bodyGuardado, r2Key || mediaUrl, contextId, null).run();
                 } catch (_) {}
 
                 // ===== Auto-recovery de unreachable =====
