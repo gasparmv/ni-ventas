@@ -4127,6 +4127,106 @@ function corteNombre(p) {
 }
 // Pieza de neón de un pedido del CRM que todavía no tiene la foto del diseño → no entra a la cola de Emma.
 function corteEsperandoFoto(p) { return p.producto === 'NEON' && !p.foto_key && !!p.pedido_id; }
+// ===== Neón por color (Gaspar 19-oct): al diseñar la matriz de un cartel de Neon Infinito, Emma carga cuántos cm de
+// cada color lleva (obligatorio para "Matriz lista"; el worker también lo exige). Se guarda en la pieza como
+// cm_colores = [{c, cm}] por UN cartel. Las filas arrancan con los colores que anotó el vendedor; Emma pone los cm.
+function _cmColKey(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim(); }
+function cmColCanon(s) { const k = _cmColKey(s); return k ? (PEDIDO_COLORES.find(x => _cmColKey(x) === k) || '') : ''; }
+// "Rosa, Naranja" / "rojo y azul" / "blanco frio, naranja y celeste" → ['Rosa', 'Naranja'] (lo que no es un color se ignora).
+function cmColDeTexto(txt) {
+  const out = [];
+  String(txt || '').split(/\s*(?:,|\/|\+|;|\by\b)\s*/i).forEach(t => { const c = cmColCanon(t); if (c && out.indexOf(c) === -1) out.push(c); });
+  return out;
+}
+function cmColParse(v) {
+  let a = v;
+  if (!Array.isArray(a)) { try { a = JSON.parse(v || '[]'); } catch (_) { a = []; } }
+  return Array.isArray(a) ? a.filter(x => x && x.c && +x.cm > 0).map(x => ({ c: String(x.c), cm: +x.cm })) : [];
+}
+function cmColFmt(n) { return String(Math.round((Number(n) || 0) * 10) / 10).replace('.', ','); }
+// "Rosa 600 cm · Amarillo 300 cm" (enMetros: "Rosa 6 m · Amarillo 3 m").
+function cmColResumen(v, enMetros) { return cmColParse(v).map(x => x.c + ' ' + (enMetros ? String(Math.round(x.cm) / 100).replace('.', ',') + ' m' : cmColFmt(x.cm) + ' cm')).join(' · '); }
+// Filas iniciales del editor: lo ya guardado; si no, los colores del pedido (cm vacíos).
+function cmColFilasIni(p) {
+  const g = cmColParse(p && p.cm_colores);
+  return g.length ? g.map(x => ({ c: x.c, cm: cmColFmt(x.cm) })) : cmColDeTexto(p && p.ped_colores).map(c => ({ c, cm: '' }));
+}
+// Los cm de neón del pedido sirven de referencia solo si parecen cm (hay pedidos viejos cargados en metros: 1,4).
+function cmColRef(p) { const n = Number(p && p.ped_cm_neon) || 0; return n >= 50 ? n : 0; }
+function cmColFilaHtml(f) {
+  const inp = 'background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;color:var(--fg)';
+  return `<div data-cmc-fila style="display:flex;gap:8px;align-items:center;margin-top:8px">
+      <span data-cmc-dot style="width:14px;height:14px;border-radius:50%;flex:0 0 auto;border:1px solid rgba(255,255,255,.35);background:${PEDIDO_COLOR_HEX[f.c] || 'transparent'}"></span>
+      <select data-cmc-c aria-label="Color" style="flex:1;min-width:0;${inp};padding:9px 6px;font-size:14px"><option value="">color…</option>${PEDIDO_COLORES.map(x => `<option value="${escapeHtml(x)}"${x === f.c ? ' selected' : ''}>${escapeHtml(x)}</option>`).join('')}</select>
+      <input data-cmc-cm inputmode="decimal" placeholder="cm" aria-label="cm de neón" value="${escapeHtml(f.cm == null ? '' : String(f.cm))}" style="width:78px;${inp};padding:9px;font-size:15px">
+      <span style="color:var(--fg-mute);font-size:13px">cm</span>
+      <button type="button" data-cmc-del title="Quitar este color" aria-label="Quitar color" style="flex:0 0 auto;background:none;border:1px solid var(--border);border-radius:7px;padding:4px 8px;color:var(--fg-mute);cursor:pointer">✕</button>
+    </div>`;
+}
+function cmColEditorHtml(filas, refCm) {
+  return `<div data-cmc data-cmc-ref="${Number(refCm) || 0}">
+      ${(filas && filas.length ? filas : [{ c: '', cm: '' }]).map(cmColFilaHtml).join('')}
+      <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+        <button type="button" data-cmc-add class="btn ghost" style="font-size:12px;padding:5px 10px">+ otro color</button>
+        <span data-cmc-total style="font-size:12.5px;color:var(--fg-mute);margin-left:auto"></span>
+      </div>
+    </div>`;
+}
+function cmColLeer(box) { return [...box.querySelectorAll('[data-cmc-fila]')].map(r => ({ c: (r.querySelector('[data-cmc-c]') || {}).value || '', cm: (r.querySelector('[data-cmc-cm]') || {}).value || '' })); }
+// → { lista: [{c, cm}] } o { error, foco } (el control a enfocar). Filas vacías se ignoran; al menos un color.
+function cmColValidar(box) {
+  const lista = [], vistos = {};
+  for (const r of box.querySelectorAll('[data-cmc-fila]')) {
+    const s = r.querySelector('[data-cmc-c]'), i = r.querySelector('[data-cmc-cm]');
+    const c = s ? s.value : '', txt = String(i ? i.value : '').trim(), cm = parseFloat(txt.replace(',', '.')) || 0;
+    if (!c && !txt) continue;
+    if (!c) return { error: 'Elegí el color de cada fila', foco: s };
+    if (!(cm > 0)) return { error: 'Poné los cm de ' + c, foco: i };
+    if (vistos[c]) return { error: c + ' está dos veces: dejalo en una sola fila', foco: s };
+    vistos[c] = 1; lista.push({ c, cm: Math.round(cm * 10) / 10 });
+  }
+  if (!lista.length) return { error: 'Cargá cuántos cm de neón de cada color lleva el cartel', foco: box.querySelector('[data-cmc-cm]') };
+  return { lista };
+}
+// Engancha el editor: total en vivo, "+ otro color", quitar, y Enter en un cm pasa al siguiente (en el último → onEnterLast).
+function cmColBind(box, onChange, onEnterLast) {
+  if (!box || box._cmcOk) return;
+  box._cmcOk = true;
+  const upd = () => {
+    const filas = cmColLeer(box);
+    const tot = filas.reduce((a, f) => a + (parseFloat(String(f.cm).replace(',', '.')) || 0), 0);
+    const ref = Number(box.getAttribute('data-cmc-ref')) || 0;
+    const t = box.querySelector('[data-cmc-total]');
+    if (t) t.innerHTML = (tot > 0 ? `Total: <b style="color:var(--fg)">${cmColFmt(tot)} cm</b>` : '') + (ref > 0 ? `${tot > 0 ? ' · ' : ''}el pedido dice ${cmColFmt(ref)} cm` : '');
+    box.querySelectorAll('[data-cmc-fila]').forEach(r => { const d = r.querySelector('[data-cmc-dot]'), s = r.querySelector('[data-cmc-c]'); if (d && s) d.style.background = PEDIDO_COLOR_HEX[s.value] || 'transparent'; });
+    if (onChange) onChange(filas);
+  };
+  box.addEventListener('input', upd);
+  box.addEventListener('change', upd);
+  box.addEventListener('click', (e) => {
+    if (e.target.closest('[data-cmc-add]')) {
+      const tmp = document.createElement('div'); tmp.innerHTML = cmColFilaHtml({ c: '', cm: '' });
+      const nf = tmp.firstElementChild, filas = box.querySelectorAll('[data-cmc-fila]');
+      if (filas.length) filas[filas.length - 1].after(nf); else box.prepend(nf);
+      const s = nf.querySelector('[data-cmc-c]'); if (s) s.focus();
+      upd(); return;
+    }
+    const del = e.target.closest('[data-cmc-del]');
+    if (del) {
+      const r = del.closest('[data-cmc-fila]');
+      if (box.querySelectorAll('[data-cmc-fila]').length > 1) r.remove();
+      else { r.querySelector('[data-cmc-c]').value = ''; r.querySelector('[data-cmc-cm]').value = ''; }
+      upd();
+    }
+  });
+  box.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || !e.target.matches || !e.target.matches('[data-cmc-cm]')) return;
+    e.preventDefault();
+    const cms = [...box.querySelectorAll('[data-cmc-cm]')], i = cms.indexOf(e.target);
+    if (i >= 0 && i < cms.length - 1) cms[i + 1].focus(); else if (onEnterLast) onEnterLast();
+  });
+  upd();
+}
 // Pieza de neón sin diseñar cuyo pedido ya se entregó / está para enviar: el cartel ya existe, la matriz
 // ya no sirve → fuera de la línea de Emma, de "esperando foto" y del badge (el admin la sigue viendo).
 function corteNeonPedidoHecho(p) { return p.producto === 'NEON' && p.estado === 'pedido' && !!p.pedido_id && /^(entregado|para enviar)$/i.test(String(p.ped_estado || '').trim()); }
@@ -4677,13 +4777,15 @@ function renderCorte() {
     const kPaso = { matriz_lista: ['✂ para cortar', '#f59e0b'], cortado: ['🪚 cortado', '#38bdf8'], embalado: ['✅ separado', '#22c55e'] };
     const kCard = 'display:flex;gap:10px;align-items:center;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px;margin-bottom:8px;font-size:13px';
     const kSub = 'font-size:11.5px;color:var(--fg-mute);margin-top:2px';
+    // Neón por color de una pieza diseñada; las diseñadas antes del 19-oct no lo tienen → aviso para completarlo con ✏️.
+    const kColores = (p) => { const cc = cmColParse(p.cm_colores); return cc.length ? `<div style="${kSub}">🎨 ${escapeHtml(cmColResumen(cc))}</div>` : `<div style="${kSub};color:#f59e0b">⚠ faltan los cm por color · tocá ✏️</div>`; };
     const kVacio = (txt) => cargando ? '' : `<div style="padding:16px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px;font-size:12.5px">${txt}</div>`;
     const kCol = (titulo, n, nota, body) => `<div style="min-width:0"><div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin-bottom:8px">${titulo} <span style="color:var(--fg-mute)">${n}</span>${nota ? ` <span style="text-transform:none;letter-spacing:0;color:var(--fg-mute)">· ${nota}</span>` : ''}</div>${body}</div>`;
     const colEsperando = esperandoFoto.map(p => `<div style="${kCard}"><div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">${escapeHtml(p.medida_declarada || '—')}</div></div></div>`).join('');
     const colPorDisenar = porDisenarNeon.map(p => { const enPantalla = p.id === relevVisId; return `<div data-corte-relev-ir="${p.id}" role="button" tabindex="0" title="Traer a la línea de relevamiento" style="${kCard};cursor:pointer${enPantalla ? ';border-color:#ef4444' : ''}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">${escapeHtml(p.medida_declarada || '—')}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;color:${enPantalla ? '#ef4444' : 'var(--accent-cyan,#8FD4DE)'}">${enPantalla ? 'en pantalla' : 'Medir →'}</span></div>`; }).join('');
     const K_DIS_MAX = 10;
     const disVisibles = STATE.corteNeonDisAll ? disenadosNeon : disenadosNeon.slice(0, K_DIS_MAX);
-    const colDisenados = disVisibles.map(p => { const paso = kPaso[p.estado] || ['', 'var(--fg-mute)']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span><button type="button" data-corte-corregir="${p.id}" title="Corregir la medida de la matriz" aria-label="Corregir la medida" style="flex:0 0 auto;margin-left:6px;background:none;border:1px solid var(--border);border-radius:7px;padding:2px 7px;color:var(--fg-mute);cursor:pointer;font-size:12px">✏️</button></div>`; }).join('')
+    const colDisenados = disVisibles.map(p => { const paso = kPaso[p.estado] || ['', 'var(--fg-mute)']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}</div>${kColores(p)}</div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span><button type="button" data-corte-corregir="${p.id}" title="Corregir la medida de la matriz" aria-label="Corregir la medida" style="flex:0 0 auto;margin-left:6px;background:none;border:1px solid var(--border);border-radius:7px;padding:2px 7px;color:var(--fg-mute);cursor:pointer;font-size:12px">✏️</button></div>`; }).join('')
       + (disenadosNeon.length > K_DIS_MAX ? `<button type="button" class="btn ghost" data-corte-neon-dis-all style="width:100%;font-size:12px;padding:6px 10px">${STATE.corteNeonDisAll ? 'ver solo las últimas ' + K_DIS_MAX : 'ver las ' + (disenadosNeon.length - K_DIS_MAX) + ' restantes'}</button>` : '');
     const neonKanban = `
       <div style="margin-top:22px">
@@ -4752,6 +4854,8 @@ function renderCorte() {
     const rDraft = (STATE.corteRelevDraft && STATE.corteRelevDraft.id === rp.id) ? STATE.corteRelevDraft : null;
     const rAncho = rDraft ? rDraft.ancho : '';
     const rAlto = rDraft ? rDraft.alto : '';
+    // Neón propio: cm por color (obligatorio). Lo tipeado (borrador) gana sobre lo guardado / los colores del pedido.
+    const rColFilas = rNeon ? ((rDraft && Array.isArray(rDraft.colores)) ? rDraft.colores : cmColFilasIni(rp)) : [];
     return `
       <div style="padding:var(--s-4);max-width:1040px">
        <div id="corte-relev-top" style="max-width:640px">
@@ -4773,6 +4877,12 @@ function renderCorte() {
             <span style="color:var(--fg-mute)">cm</span>
             <span id="corte-precio-prev" style="font-size:14px;color:#22c55e;font-weight:700;margin-left:auto"></span>
           </div>
+          ${rNeon ? `<div style="margin-top:16px;padding-top:14px;border-top:1px dashed var(--border)">
+            <div style="font-size:13px;font-weight:700">🎨 Neón por color <span style="font-weight:400;color:var(--fg-mute)">· cuántos cm de cada color lleva ${rcant > 1 ? 'cada cartel (son ' + rcant + ' iguales)' : 'el cartel'}</span></div>
+            ${rp.ped_colores ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:2px">El vendedor anotó: ${escapeHtml(rp.ped_colores)}</div>` : ''}
+            <div id="corte-colores">${cmColEditorHtml(rColFilas, cmColRef(rp))}</div>
+            <div id="corte-colores-err" style="color:#ef4444;font-size:12px;min-height:14px;margin-top:4px"></div>
+          </div>` : ''}
           <div style="display:flex;gap:8px;margin-top:16px">
             <button class="btn" data-corte-relev-ok data-ped="${rp.id}" data-next="${rNext ? rNext.id : ''}" style="flex:1">Matriz lista → siguiente</button>
             <button class="btn ghost" data-corte-relev-skip data-next="${rNext ? rNext.id : ''}">Saltear</button>
@@ -7282,6 +7392,7 @@ function nkbCardHtml(c) {
     + (chips.length ? `<div class="sfk-chips">${chips.join('')}</div>` : '')
     + (c.medida ? `<div class="sfk-med">${escapeHtml(c.medida)}</div>` : '')
     + ((desc || quien) ? `<div class="sfk-tipo">${escapeHtml([desc, quien].filter(Boolean).join(' · '))}</div>` : '')
+    + (cmColParse(c.cm_colores).length ? `<div class="sfk-tipo" title="Neón por color de la matriz (lo cargó Emma)">🎨 ${escapeHtml(cmColResumen(c.cm_colores, true))}</div>` : '')
     + `</div>`
     + (acc ? `<button type="button" class="sfk-pasar" data-nkb-acc="${c.id}" data-a="${acc.a}" style="--c:${NKB_COLOR[acc.to] || NKB_COLOR[c.etapa]}">${escapeHtml(acc.t)}${SFK_CHEVRON}</button>` : '')
     + `</article>`;
@@ -8288,34 +8399,40 @@ function corteCorregirMedidaUI(id) {
   const p = (STATE.cortePedidos || []).find(x => x.id === id);
   if (!p) return;
   const f = v => (v == null || v === '') ? '' : String(v).replace('.', ',');
+  const esNeon = p.producto === 'NEON';   // neón propio: también los cm por color (completa los que faltan)
   const bg = document.createElement('div'); bg.className = 'modal-bg';
-  bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>Corregir medida · ${escapeHtml(p.diseno_nombre || 'diseño')}</h3></div><div class="modal-body"><form novalidate>
+  bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>Corregir ${esNeon ? 'medida y colores' : 'medida'} · ${escapeHtml(p.diseno_nombre || 'diseño')}</h3></div><div class="modal-body"><form novalidate>
     ${p.foto_key ? `<a href="${escapeHtml(mediaUrl(p.foto_key))}" target="_blank" rel="noopener" title="Abrir el diseño en grande" style="display:block;margin-bottom:10px"><img src="${escapeHtml(disenoThumb(p.foto_key, 900))}" alt="Diseño" style="width:100%;max-height:300px;object-fit:contain;border-radius:8px;background:#fff;border:1px solid var(--border)"></a>` : ''}
     <div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">${escapeHtml(p.cliente_nombre || (p.producto === 'NEON' ? 'Neon Infinito' : ''))}${p.medida_declarada ? ' · pidió ' + escapeHtml(p.medida_declarada) : ''}<br>Ahora: ${escapeHtml(f(p.ancho_real))} × ${escapeHtml(f(p.alto_real))} cm${+p.precio > 0 ? ' · ' + fmtMoney(p.precio) : ''}</div>
     <div style="display:flex;gap:10px;align-items:center"><input data-c-a inputmode="decimal" placeholder="ancho" value="${escapeHtml(f(p.ancho_real))}" style="width:96px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px"><span style="color:var(--fg-mute)">×</span><input data-c-l inputmode="decimal" placeholder="alto" value="${escapeHtml(f(p.alto_real))}" style="width:96px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px"><span style="color:var(--fg-mute)">cm</span></div>
+    ${esNeon ? `<div style="margin-top:14px;font-size:13px;font-weight:700">🎨 Neón por color <span style="font-weight:400;color:var(--fg-mute)">· cm de cada color por cartel</span></div><div data-c-col>${cmColEditorHtml(cmColFilasIni(p), cmColRef(p))}</div>` : ''}
     <div data-c-err style="color:#ef4444;font-size:12px;min-height:16px;margin-top:6px"></div>
-    <button type="submit" class="btn btn-cyan" data-c-ok style="width:100%;margin-top:6px">Guardar medida</button>
+    <button type="submit" class="btn btn-cyan" data-c-ok style="width:100%;margin-top:6px">${esNeon ? 'Guardar' : 'Guardar medida'}</button>
     <button type="button" class="btn btn-ghost" data-c-no style="width:100%;margin-top:8px">Cancelar</button></form></div></div>`;
   document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
   const fin = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
   const ia = bg.querySelector('[data-c-a]'), il = bg.querySelector('[data-c-l]'), err = bg.querySelector('[data-c-err]'), ok = bg.querySelector('[data-c-ok]');
   bg.querySelector('[data-c-no]').onclick = fin;
+  const cBox = bg.querySelector('[data-c-col] [data-cmc]');
+  if (cBox) cmColBind(cBox, () => { if (err.textContent) err.textContent = ''; }, () => bg.querySelector('form').requestSubmit());
   bg.addEventListener('click', e => { if (e.target === bg) fin(); });
   bg.querySelector('form').addEventListener('submit', async e => {
     e.preventDefault();
     const num = v => parseFloat(String(v || '').replace(',', '.')) || 0;
     const a = num(ia.value), l = num(il.value);
     if (!(a > 0 && l > 0)) { err.textContent = 'Poné ancho y alto en cm'; return; }
+    let cols = null;
+    if (cBox) { const v = cmColValidar(cBox); if (v.error) { err.textContent = v.error; try { if (v.foco) v.foco.focus(); } catch (_) {} return; } cols = v.lista; }
     ok.disabled = true; ok.textContent = 'Guardando…';
     let r = null, j = {};
-    try { r = await fetch(CONFIG.trackerUrl + '/admin/corte/pedido', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'corregir_medidas', id, ancho_real: a, alto_real: l }) }); j = await r.json().catch(() => ({})); } catch (_) {}
-    if (!r || !r.ok || !j.ok) { ok.disabled = false; ok.textContent = 'Guardar medida'; err.textContent = (j && (j.error || j.motivo)) || 'No se pudo guardar. Probá de nuevo.'; return; }
+    try { r = await fetch(CONFIG.trackerUrl + '/admin/corte/pedido', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ action: 'corregir_medidas', id, ancho_real: a, alto_real: l }, cols ? { cm_colores: cols } : {})) }); j = await r.json().catch(() => ({})); } catch (_) {}
+    if (!r || !r.ok || !j.ok) { ok.disabled = false; ok.textContent = esNeon ? 'Guardar' : 'Guardar medida'; err.textContent = (j && (j.error || j.motivo)) || 'No se pudo guardar. Probá de nuevo.'; return; }
     fin();
     if (!j.sin_cambios) { STATE.cortePedidos = undefined; STATE._corteLoading = false; STATE._corteGen = (STATE._corteGen || 0) + 1; if (STATE.view === 'corte') render(); }
     const plan = !j.planilla || j.planilla === 'ok' || j.planilla === 'sin_fila' ? ''
       : (!isAdmin() ? ' La planilla no se actualizó sola: le avisé a Gaspar.'
         : (j.planilla === 'precio_a_mano' ? ' En Venta_Insumos tenía un precio cargado a mano: no lo toqué.' : ' Ojo: la planilla no se pudo actualizar (' + j.planilla + '), corregila a mano.'));
-    toast(j.sin_cambios ? 'Quedó igual' : (j.cobro_salio ? 'Medida corregida. El cobro ya había salido: le avisé a Gaspar la diferencia.' : 'Medida corregida' + (+j.precio > 0 ? ' · precio ' + fmtMoney(j.precio) : '')) + plan);
+    toast(j.sin_cambios ? 'Quedó igual' : esNeon ? 'Guardado ✓' : (j.cobro_salio ? 'Medida corregida. El cobro ya había salido: le avisé a Gaspar la diferencia.' : 'Medida corregida' + (+j.precio > 0 ? ' · precio ' + fmtMoney(j.precio) : '')) + plan);
   });
   setTimeout(() => { try { ia.focus(); ia.select(); } catch (_) {} }, 50);
 }
@@ -8452,8 +8569,19 @@ async function bindCorte() {
     const pid = parseInt(relevOk.getAttribute('data-ped'), 10);
     const rp = (STATE.cortePedidos || []).find(p => p.id === pid);
     const nextId = parseInt(relevOk.getAttribute('data-next') || '', 10) || null;
+    // Neón propio: editor de cm por color (obligatorio). Solo existe en la tarjeta de una pieza NEON.
+    const cBox = document.querySelector('#corte-colores [data-cmc]');
+    const cErr = document.getElementById('corte-colores-err');
     relevOk.onclick = async () => {
-      // Muy distinta de lo que pidió el cliente (más de 25% en ancho o alto): se pregunta, por si fue un error de tipeo.
+      // 1) Neón: sin los cm de cada color no hay "Matriz lista".
+      let cols = null;
+      if (cBox) {
+        const v = cmColValidar(cBox);
+        if (v.error) { if (cErr) cErr.textContent = v.error; toast(v.error); try { if (v.foco) v.foco.focus(); } catch (_) {} return; }
+        if (cErr) cErr.textContent = '';
+        cols = v.lista;
+      }
+      // 2) Muy distinta de lo que pidió el cliente (más de 25% en ancho o alto): se pregunta, por si fue un error de tipeo.
       const num = v => parseFloat(String(v || '').replace(',', '.')) || 0;
       const a = num((document.getElementById('corte-ancho') || {}).value), al = num((document.getElementById('corte-alto') || {}).value);
       const mt = String((rp && rp.medida_declarada) || ''), ma = mt.match(/ancho\s*([\d]+(?:[.,]\d+)?)/i), ml = mt.match(/alto\s*([\d]+(?:[.,]\d+)?)/i);
@@ -8464,12 +8592,24 @@ async function bindCorte() {
         const ok = await showConfirm(`Pusiste ${f(a)} × ${f(al)} cm y el cliente pidió ${f(da)} × ${f(dl)} cm.${inv ? ' ¿Invertiste ancho y alto?' : ''} ¿Está bien así?`, { title: 'Medida muy distinta', confirmLabel: 'Sí, está bien', cancelLabel: 'Corregir' });
         if (!ok) { const i = document.getElementById('corte-ancho'); if (i) { try { i.focus(); i.select(); } catch (_) {} } return; }
       }
+      // 3) Neón: la suma muy distinta de los cm de neón del pedido (más de 30%): se pregunta, por si fue un error de tipeo.
+      if (cols) {
+        const tot = cols.reduce((s, x) => s + x.cm, 0), ref = Number(cBox.getAttribute('data-cmc-ref')) || 0;
+        if (ref > 0 && Math.abs(tot - ref) / ref > 0.3) {
+          const ok = await showConfirm(`Sumaste ${cmColFmt(tot)} cm de neón y el pedido dice ${cmColFmt(ref)} cm. ¿Está bien así?`, { title: 'Neón muy distinto del pedido', confirmLabel: 'Sí, está bien', cancelLabel: 'Corregir' });
+          if (!ok) { const i = cBox.querySelector('[data-cmc-cm]'); if (i) { try { i.focus(); i.select(); } catch (_) {} } return; }
+        }
+      }
       STATE._corteRelevNext = nextId; corteAccion('medidas', pid);
     };
     const rai = document.getElementById('corte-ancho'), rali = document.getElementById('corte-alto');
-    const upd = () => { STATE.corteRelevDraft = { id: pid, ancho: rai ? rai.value : '', alto: rali ? rali.value : '' }; if (rp) cortePrecioPreview(rp); };
+    // Borrador de la pieza en pantalla (medida + colores): sobrevive a los refrescos de fondo.
+    const guardarDraft = () => { STATE.corteRelevDraft = { id: pid, ancho: rai ? rai.value : '', alto: rali ? rali.value : '', colores: cBox ? cmColLeer(cBox) : undefined }; };
+    const upd = () => { guardarDraft(); if (rp) cortePrecioPreview(rp); };
     if (rai) { rai.oninput = upd; rai.onkeydown = (e) => { if (e.key === 'Enter' && rali) rali.focus(); }; try { if (!document.querySelector('.modal-bg')) rai.focus(); } catch (_) {} }
-    if (rali) { rali.oninput = upd; rali.onkeydown = (e) => { if (e.key === 'Enter') relevOk.click(); }; }
+    // Enter en el alto: en neón pasa al primer cm por color vacío; si no hay ninguno, avanza.
+    if (rali) { rali.oninput = upd; rali.onkeydown = (e) => { if (e.key !== 'Enter') return; const c1 = cBox && [...cBox.querySelectorAll('[data-cmc-cm]')].find(i => !String(i.value).trim()); if (c1) { e.preventDefault(); c1.focus(); } else relevOk.click(); }; }
+    if (cBox) cmColBind(cBox, () => { guardarDraft(); if (cErr && cErr.textContent) cErr.textContent = ''; }, () => relevOk.click());
   }
   // Diseñados: corregir la medida de una matriz ya hecha.
   document.querySelectorAll('[data-corte-corregir]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); corteCorregirMedidaUI(parseInt(b.getAttribute('data-corte-corregir'), 10)); }; });
@@ -8761,6 +8901,9 @@ async function corteAccion(accion, id) {
     const a = document.getElementById('corte-ancho'), al = document.getElementById('corte-alto');
     body.ancho_real = a ? a.value : ''; body.alto_real = al ? al.value : '';
     if (!(parseFloat(String(body.ancho_real).replace(',', '.')) > 0 && parseFloat(String(body.alto_real).replace(',', '.')) > 0)) { toast('Cargá ancho y alto (cm)'); return; }
+    // Neón propio: los cm por color (obligatorios; el worker también los exige).
+    const cb = document.querySelector('#corte-colores [data-cmc]');
+    if (cb) { const v = cmColValidar(cb); if (v.error) { toast(v.error); return; } body.cm_colores = v.lista; }
   }
   // Embalar no manda entrega: sale solo de la planilla de cortes (antes mandaba 'retira' por default).
   if (accion === 'estado') { const s = document.getElementById('corte-estado-manual'); body.estado = s ? s.value : ''; }
@@ -24216,7 +24359,7 @@ function prodCardHtml(c, admin) {
   const congelado = pagado && est === 'terminado';   // pagado y terminado: ya no se toca
   const chips = [
     ['Medidas', prodMedidas(c)], ['Neón', prodMetros(c)], ['Tramos', c.tramos || '—'],
-    ['Colores', c.colores || '—'], ['Base', c.base === 'TRANS' ? 'Transparente' : (c.base === 'NEGRO' ? 'Negra' : (c.base || '—'))],
+    ['Colores', cmColParse(c.cm_colores).length ? cmColResumen(c.cm_colores, true) : (c.colores || '—')], ['Base', c.base === 'TRANS' ? 'Transparente' : (c.base === 'NEGRO' ? 'Negra' : (c.base || '—'))],
     ['Dimmer', PROD_DIMER_LBL[String(c.dimer || 'NO').toUpperCase()] || c.dimer || '—']
   ];
   const alertas = [];

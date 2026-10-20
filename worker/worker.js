@@ -8848,7 +8848,9 @@ async function ensureCorteNeonSchema(env) {
   if (_corteNeonSchemaOk) return;
   // disenado_at: cuándo la pieza pasó la etapa de diseño (Emma marcó "Matriz lista", o el admin la movió
   // a mano desde 'pedido'). updated_at NO sirve para eso: lo pisan el corte, el embalado y el cambio de foto.
-  for (const col of ['pedido_id INTEGER', 'pedido_numero INTEGER', 'origen TEXT', 'base TEXT', 'vendedor TEXT', 'disenado_at TEXT']) {
+  // cm_colores: cm de neón de cada color de UN cartel de neón propio, los carga Emma al diseñar la matriz
+  // (Gaspar 19-oct). JSON [{c:'Rosa', cm:600}, …] con los colores de NEON_COLORES.
+  for (const col of ['pedido_id INTEGER', 'pedido_numero INTEGER', 'origen TEXT', 'base TEXT', 'vendedor TEXT', 'disenado_at TEXT', 'cm_colores TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE corte_pedidos ADD COLUMN ${col}`).run(); } catch (_) {} // tira si ya existe
   }
   // UNA pieza por cartel: índice único parcial (las manuales tienen pedido_id NULL) + INSERT OR IGNORE en
@@ -8856,7 +8858,36 @@ async function ensureCorteNeonSchema(env) {
   try { await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS uq_corte_pedidos_pedido ON corte_pedidos(pedido_id) WHERE pedido_id IS NOT NULL').run(); } catch (_) {}
   // Memoizar solo si las columnas existen de verdad (un ALTER que falló por un corte transitorio no
   // tiene que dejar el isolate entero sin la feature hasta que se recicle).
-  try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor, disenado_at FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
+  try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor, disenado_at, cm_colores FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
+}
+// Colores de neón: los mismos 10 del pedido (PEDIDO_COLORES del front).
+const NEON_COLORES = ['Amarillo', 'Azul', 'Blanco cálido', 'Blanco frío', 'Celeste', 'Naranja', 'Rojo', 'Rosa', 'Verde', 'Violeta'];
+function _neonColKey(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim(); }
+// Normaliza los cm por color que manda el front ([{c, cm}] o su JSON): color de la lista (sin importar mayúsculas ni
+// acentos), cm > 0 (tope 500 m), un color repetido se suma, filas vacías se ignoran. → { lista } o { error }.
+function neonCmColores(raw) {
+  let arr = raw;
+  if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch (_) { arr = null; } }
+  if (!Array.isArray(arr)) return { error: 'faltan los cm de neón por color' };
+  const out = [];
+  for (const it of arr.slice(0, 20)) {
+    const nombre = it && (it.c != null ? it.c : it.color);
+    const k = _neonColKey(nombre);
+    const cmTxt = String(it && it.cm != null ? it.cm : '').trim();
+    const cm = Math.round((parseFloat(cmTxt.replace(',', '.')) || 0) * 10) / 10;
+    if (!k && !cmTxt) continue;
+    const c = NEON_COLORES.find(x => _neonColKey(x) === k);
+    if (!c) return { error: k ? 'color desconocido: ' + String(nombre).slice(0, 30) : 'falta elegir el color de una fila' };
+    if (!(cm > 0 && cm <= 50000)) return { error: 'poné los cm de ' + c };
+    const prev = out.find(x => x.c === c);
+    if (prev) prev.cm = Math.round((prev.cm + cm) * 10) / 10; else out.push({ c, cm });
+  }
+  if (!out.length) return { error: 'faltan los cm de neón por color' };
+  return { lista: out };
+}
+// cm_colores guardado (JSON) → [{c, cm}] limpio para mandar al front ([] si no hay o está roto).
+function neonCmColoresLeer(v) {
+  try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a.filter(x => x && x.c && +x.cm > 0).map(x => ({ c: String(x.c), cm: +x.cm })) : []; } catch (_) { return []; }
 }
 // Teléfono WPP tipeado a mano (sin 549, con 0 o 15, con espacios) → el formato en que está el chat. Prueba
 // tal cual y normalizado AR contra wa_chats_summary; si no existe ninguno, normaliza solo lo que claramente
@@ -17885,7 +17916,7 @@ async function neonTableroFilas(env, opts = {}) {
   const sel = 'SELECT p.id, p.numero, p.fecha, p.cartel, p.colores, p.alto, p.ancho, p.cantidad, p.base, p.dimer, p.tipo, p.envio, p.aclaracion, p.telefono, p.comercial_id, p.cargado_por, p.origen, ' +
     'p.estado_pedido, p.estado_pago, p.pago_metodo, p.pagado AS _pag, p.cobro2_at, p.productor_id, p.productor, p.prod_estado, p.prod_estado_at, p.prod_asignado_at, p.prod_terminado_at, p.created_at, p.foto_diseno_key, ' +
     'p.recibido_at, p.recibido_por, p.despachado_at, p.despachado_por, p.despacho_modo, p.despacho_transporte, p.despacho_seguimiento, p.despacho_prev_estado, p.neon_piso, p.neon_piso_at, p.neon_piso_por, p.neon_piso_motivo, ' +
-    'cp.id AS corte_id, cp.estado AS corte_estado, cp.foto_key AS corte_foto, cp.medida_declarada, cp.ancho_real, cp.alto_real, cp.disenado_at, cp.diseno_inicio_at, cp.diseno_inicio_por, cp.cortado_at, cp.separado_at, ' +
+    'cp.id AS corte_id, cp.estado AS corte_estado, cp.foto_key AS corte_foto, cp.medida_declarada, cp.ancho_real, cp.alto_real, cp.disenado_at, cp.diseno_inicio_at, cp.diseno_inicio_por, cp.cortado_at, cp.separado_at, cp.cm_colores, ' +
     '(SELECT COUNT(*) FROM pedido_prod_fotos f WHERE f.pedido_id = p.id) AS fotos_n, ' +
     // Total del pedido ENTERO (con los corpóreos del grupo): para saber si lo pagó todo con la seña.
     "(SELECT SUM(IFNULL(x.precio,0) + IFNULL(x.precio_dimmer,0)) FROM pedidos x WHERE x.numero = p.numero AND x.fecha = p.fecha AND IFNULL(x.comercial_id,'joaco') = IFNULL(p.comercial_id,'joaco') AND (IFNULL(p.origen,'') <> 'crm' OR IFNULL(p.telefono,'') = '' OR (x.origen = 'crm' AND x.telefono = p.telefono))) AS _tot, " +
@@ -17997,6 +18028,7 @@ function neonTarjeta(r, ctx) {
     etapa: r._etapa, motivo: r._motivo, desde: r._desde || '', desde_aprox: r._desde_aprox || '', sf: r._sf, grupo: r._gid, grupo_n: r._grupo_n, grupo_term: r._grupo_term,
     productor_id: r.productor_id || '', productor: String(r.productor || r.productor_id || '').trim(), prod_estado: r.prod_estado || '',
     corte_id: r.corte_id || null, corte_estado: ce, diseno: !!(String(r.corte_foto || '').trim() || String(r.foto_diseno_key || '').trim()), fotos: Math.min(12, +r.fotos_n || 0),
+    cm_colores: neonCmColoresLeer(r.cm_colores),   // cm de neón por color (los carga Emma en la matriz)
     // Fechas del recorrido: solo las que el estado actual sostiene (un deshacer en Corte no las borra).
     f: { creado: r.created_at || '', tomado: (ce === 'pedido' || ['matriz_lista', 'cortado', 'embalado', ...post].includes(ce)) ? (r.diseno_inicio_at || '') : '', tomado_por: r.diseno_inicio_por || '',
       matriz: ['matriz_lista', 'cortado', 'embalado', ...post].includes(ce) ? (r.disenado_at || '') : '',
@@ -19423,7 +19455,7 @@ async function prodCarteles(env, whereSql, args, paraProductor) {
     ? 'p.id, p.numero, p.fecha, p.cartel, p.colores, p.alto, p.ancho, p.cm_neon, p.tramos, p.cantidad, p.base, p.dimer, p.tipo, p.aclaracion, p.productor_id, p.prod_estado, p.prod_estado_at, p.prod_asignado_at, p.prod_terminado_at, p.prod_pagado_at, p.mo_monto'
     : 'p.id, p.numero, p.fecha, p.cartel, p.colores, p.alto, p.ancho, p.cm_neon, p.tramos, p.cantidad, p.base, p.dimer, p.tipo, p.aclaracion, p.precio, p.estado_pago, p.estado_pedido, p.comercial_id, p.cargado_por, p.productor, p.productor_id, p.prod_estado, p.prod_estado_at, p.prod_asignado_at, p.prod_terminado_at, p.prod_pagado_at, p.prod_pagado_por, p.mo_monto, p.mo_regla, p.mo_detalle';
   const rows = (await env.DB.prepare(
-    `SELECT ${cols}, COALESCE(NULLIF(cp.foto_key, ''), NULLIF(p.foto_diseno_key, '')) AS diseno_key, cp.estado AS corte_estado
+    `SELECT ${cols}, COALESCE(NULLIF(cp.foto_key, ''), NULLIF(p.foto_diseno_key, '')) AS diseno_key, cp.estado AS corte_estado, cp.cm_colores
        FROM pedidos p
        LEFT JOIN (SELECT pedido_id, MAX(id) AS cid FROM corte_pedidos WHERE pedido_id IS NOT NULL GROUP BY pedido_id) cx ON cx.pedido_id = p.id
        LEFT JOIN corte_pedidos cp ON cp.id = cx.cid
@@ -19437,7 +19469,7 @@ async function prodCarteles(env, whereSql, args, paraProductor) {
       const fs = (await env.DB.prepare(`SELECT id, pedido_id, r2_key, created_at FROM pedido_prod_fotos WHERE pedido_id IN (${sl.map(() => '?').join(',')}) ORDER BY id`).bind(...sl).all()).results || [];
       for (const f of fs) (fotos[f.pedido_id] = fotos[f.pedido_id] || []).push({ id: f.id, key: f.r2_key, at: f.created_at });
     }
-    for (const r of rows) { r.fotos = fotos[r.id] || []; r.fotos_requeridas = prodFotosRequeridas(r); if (r.mo_detalle && typeof r.mo_detalle === 'string') { try { r.mo_detalle = JSON.parse(r.mo_detalle); } catch (_) {} } }
+    for (const r of rows) { r.fotos = fotos[r.id] || []; r.fotos_requeridas = prodFotosRequeridas(r); if (r.mo_detalle && typeof r.mo_detalle === 'string') { try { r.mo_detalle = JSON.parse(r.mo_detalle); } catch (_) {} } r.cm_colores = neonCmColoresLeer(r.cm_colores); }
   }
   return rows;
 }
@@ -27129,7 +27161,7 @@ const handler = {
           await ensureCorteNeonSchema(env);
           const desde = new Date(Date.now() - 180 * 86400000).toISOString();
           rows = (await env.DB.prepare(
-            `SELECT c.*, p.productor AS ped_productor, p.fecha AS ped_fecha, p.estado_pedido AS ped_estado
+            `SELECT c.*, p.productor AS ped_productor, p.fecha AS ped_fecha, p.estado_pedido AS ped_estado, p.colores AS ped_colores, p.cm_neon AS ped_cm_neon
                FROM corte_pedidos c LEFT JOIN pedidos p ON p.id = c.pedido_id
               WHERE (c.estado IN ('pedido','matriz_lista','cortado') OR c.updated_at >= ?) AND c.estado != 'prueba'
               ORDER BY c.updated_at DESC, c.id DESC LIMIT 3000`
@@ -27953,13 +27985,22 @@ const handler = {
             // Neón PROPIO: sin precio (no se cobra, decisión de Gaspar) y entra a la tanda de la semana en
             // que Emma la diseña (no a la de cuando se cargó el pedido) → cuenta en el corte real.
             const esNeonPropio = String(ped.producto || '') === 'NEON';
+            // Neón propio: OBLIGATORIO cuántos cm de cada color lleva el cartel (Gaspar 19-oct). Sin eso no pasa a Aníbal.
+            let cmColores = null;
+            if (esNeonPropio) {
+              // Pantalla vieja (app.js en caché, sin las filas de color): que actualice, si no queda trabada sin entender por qué.
+              if (body.cm_colores == null) return json({ error: 'Actualizá la página (Ctrl+Shift+R): ahora, antes de "Matriz lista", hay que cargar cuántos cm de neón de cada color lleva el cartel' }, 400);
+              const nc = neonCmColores(body.cm_colores);
+              if (nc.error) return json({ error: 'Cargá cuántos cm de neón de cada color lleva el cartel (' + nc.error + ')' }, 400);
+              cmColores = JSON.stringify(nc.lista);
+            }
             const _m2 = esNeonPropio ? 0 : (parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000); // el mismo de la landing
             const precio = esNeonPropio ? 0 : (ancho / 100) * (alto / 100) * _m2 * cant; // exacto, sin redondear
             const matrizKey = String(body.matriz_key != null ? body.matriz_key : (ped.matriz_key || ''));
             const matrizUrl = String(body.matriz_drive_url != null ? body.matriz_drive_url : (ped.matriz_drive_url || ''));
             let tandaId = ped.tanda_id;
             if (esNeonPropio) { const _t = await corteTandaActual(env); if (_t) tandaId = _t.id; }
-            await env.DB.prepare("UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, matriz_key=?, matriz_drive_url=?, tanda_id=?, estado='matriz_lista', disenado_at=?, updated_at=? WHERE id=?").bind(ancho, alto, precio, matrizKey, matrizUrl, tandaId, nowIso, nowIso, id).run();
+            await env.DB.prepare("UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, matriz_key=?, matriz_drive_url=?, tanda_id=?, cm_colores=COALESCE(?, cm_colores), estado='matriz_lista', disenado_at=?, updated_at=? WHERE id=?").bind(ancho, alto, precio, matrizKey, matrizUrl, tandaId, cmColores, nowIso, nowIso, id).run();
             return json({ ok: true, id, estado: 'matriz_lista', precio });
           }
           // Corregir la medida de una matriz YA hecha (Gaspar 18-oct: "que Emma pueda modificar o revisar por más que ya lo haya
@@ -27974,14 +28015,22 @@ const handler = {
             const alto = parseFloat(String(body.alto_real != null ? body.alto_real : '').replace(',', '.')) || 0;
             if (!(ancho > 0 && alto > 0 && ancho <= 400 && alto <= 400)) return json({ error: 'ancho y alto (cm) requeridos' }, 400);
             const antes = { ancho: +ped.ancho_real || 0, alto: +ped.alto_real || 0, precio: +ped.precio || 0 };
-            if (antes.ancho === ancho && antes.alto === alto) return json({ ok: true, id, sin_cambios: true, precio: antes.precio });
+            // Neón propio: también se corrigen (o completan, en las diseñadas antes del 19-oct) los cm por color.
+            let cmColores = null;
+            if (String(ped.producto || '') === 'NEON' && body.cm_colores != null) {
+              const nc = neonCmColores(body.cm_colores);
+              if (nc.error) return json({ error: 'Revisá los cm de neón por color (' + nc.error + ')' }, 400);
+              cmColores = JSON.stringify(nc.lista);
+            }
+            const colCambio = cmColores != null && cmColores !== String(ped.cm_colores || '');
+            if (antes.ancho === ancho && antes.alto === alto && !colCambio) return json({ ok: true, id, sin_cambios: true, precio: antes.precio });
             const cant = Math.max(1, parseInt(ped.cantidad, 10) || 1);
             const esNeonPropio = String(ped.producto || '') === 'NEON';
             const _m2 = esNeonPropio ? 0 : (parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000);
             const precioNuevo = esNeonPropio ? 0 : (ancho / 100) * (alto / 100) * _m2 * cant;
             const cobroSalio = !esNeonPropio && String(ped.estado_pago || 'pendiente') !== 'pendiente';
             const precioFinal = cobroSalio ? antes.precio : precioNuevo;
-            await env.DB.prepare('UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, updated_at=? WHERE id=?').bind(ancho, alto, precioFinal, nowIso, id).run();
+            await env.DB.prepare('UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, cm_colores=COALESCE(?, cm_colores), updated_at=? WHERE id=?').bind(ancho, alto, precioFinal, cmColores, nowIso, id).run();
             // Planilla de cortes (Emma): G=ANCHO, H=ALTO de su fila (verificando que sea la misma pieza). Venta_Insumos trae esas
             // columnas por IMPORTRANGE; su precio (col J) se pisa solo si lo había escrito el CRM (un número, no la fórmula).
             let planilla = ped.hoja_fila ? 'ok' : 'sin_fila';
