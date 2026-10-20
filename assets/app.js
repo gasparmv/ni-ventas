@@ -4860,9 +4860,11 @@ function renderCorte() {
     const _hace10 = new Date(Date.now() - 10 * 864e5).toISOString();
     const _faltaCol = (p) => !cmColParse(p.cm_colores).length;
     const disenadosNeon = pedidos
-      .filter(p => p.producto === 'NEON' && ['matriz_lista', 'cortado', 'embalado'].indexOf(p.estado) !== -1 && p.disenado_at
-        && (String(p.disenado_at) >= _desdeDis || (_faltaCol(p) && String(p.disenado_at) >= _hace10 && (p.estado === 'matriz_lista' || corteNeonPendienteEntrega(p)))))
-      .sort((a, b) => (_faltaCol(b) - _faltaCol(a)) || String(b.disenado_at).localeCompare(String(a.disenado_at)) || (b.id - a.id));
+      .filter(p => p.producto === 'NEON' && ['matriz_lista', 'cortado', 'embalado'].indexOf(p.estado) !== -1 && (p.disenado_at
+        ? (String(p.disenado_at) >= _desdeDis || (_faltaCol(p) && String(p.disenado_at) >= _hace10 && (p.estado === 'matriz_lista' || corteNeonPendienteEntrega(p))))
+        // sin fecha de diseño (anteriores al 6-oct): solo si les faltan los colores y la base sigue esperando al productor (fecha de corte)
+        : (_faltaCol(p) && corteNeonPendienteEntrega(p) && String(p.cortado_at || p.updated_at || '') >= _hace10)))
+      .sort((a, b) => (_faltaCol(b) - _faltaCol(a)) || String(b.disenado_at || '').localeCompare(String(a.disenado_at || '')) || (b.id - a.id));
     const nFaltaCol = disenadosNeon.filter(_faltaCol).length;
     const kDia = (iso) => { const d = new Date(iso); return isNaN(d.getTime()) ? '' : d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }); };
     const kTitulo = (p) => `${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> · ` : ''}${escapeHtml(p.diseno_nombre || 'cartel')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + escapeHtml(String(p.cantidad)) : ''}`;
