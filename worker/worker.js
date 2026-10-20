@@ -14822,15 +14822,15 @@ async function sinRespClasificar(env, phone, msgs, rubro = 'carteles') {
 // Envío de un aviso del equipo: texto si el destinatario le escribió al número del negocio en las últimas 23 h; si
 // no, la plantilla de SERVICIO recordatorio_agenda ({{1}} libre, una línea): el texto libre con la ventana cerrada
 // no llega (131047) y la MARKETING le rebota a Bruno (131049).
-async function sinRespEnviar(env, ph, texto) {
+async function sinRespEnviar(env, ph, texto, textoPlantilla) {
   const E = { esAviso: true };
-  const dig = String(ph || '').replace(/\D/g, '');
+  const dig = normalizeArPhone(ph) || String(ph || '').replace(/\D/g, '');
   try {
     const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status', 'reaction') AND ts > ? LIMIT 1").bind(dig, isoHace(23 * 3600 * 1000)).first();
     if (inb) { const r0 = await waSendText(env, dig, String(texto || '').slice(0, 3500), E); if (r0 && r0.ok) return r0; }
   } catch (_) {}
   let r = null;
-  try { r = await waSendTemplate(env, dig, 'recordatorio_agenda', 'es_AR', [String(texto || '').replace(/\s+/g, ' ').trim().slice(0, 800)], null, E); } catch (_) {}
+  try { r = await waSendTemplate(env, dig, 'recordatorio_agenda', 'es_AR', [String(textoPlantilla || texto || '').replace(/\s+/g, ' ').trim().slice(0, 800)], null, E); } catch (_) {}
   return r;
 }
 async function ensureSinRespSchema(env) {
@@ -14904,17 +14904,18 @@ async function sinRespFilasCursos(env, cut1h, cutFloor) {
   const out = [];
   try {
     const rs = (await env.DB.prepare(
-      `SELECT s.phone, s.contact_name,
+      `SELECT s.phone, s.contact_name, IFNULL(s.channel, '') ch,
               (SELECT MAX(m.ts) FROM wa_messages m WHERE m.phone = s.phone AND m.direction = 'inbound' AND m.msg_type NOT IN ('status', 'reaction')) AS li,
               (SELECT MAX(m.ts) FROM wa_messages m WHERE m.phone = s.phone AND m.direction = 'outbound' AND m.automated = 0 AND m.msg_type NOT IN ('status', 'reaction') AND IFNULL(m.status, '') != 'failed') AS lh
          FROM wa_chats_summary s
         WHERE s.inbox = 'cursos' AND s.last_ts >= ? AND s.phone NOT IN (SELECT phone FROM wa_internal_phones)
-        ORDER BY s.last_ts DESC LIMIT 200`
+        ORDER BY s.last_ts DESC LIMIT 400`
     ).bind(cutFloor).all()).results || [];
     const corteDesde = isoHace(14 * 86400000);
     for (const r of rs) {
       if (!r.li || r.li > cut1h || r.li < cutFloor) continue;      // el cliente escribió hace entre 1 h y el piso
       if (r.lh && r.lh >= r.li) continue;                          // una persona ya le contestó después
+      if (r.ch === 'ig' && r.li < isoHace(23 * 3600000)) continue;   // Instagram sin plantillas: pasadas 24 h ya no se le puede escribir
       let lb = '', lbTexto = '';
       try {
         const m = await env.DB.prepare("SELECT body, msg_type FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND ts = ? LIMIT 1").bind(r.phone, r.li).first();
@@ -14957,7 +14958,7 @@ async function processSinResponder(env) {
     const fresh = (await sinRespCandidatos(env, nowMs)).filter(x => x.alertar);
     if (!fresh.length) return;
 
-    const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+    const gaspar = normalizeArPhone(env.ADMIN_NOTIFY_PHONE) || '5491155604999';
     const nombreVend = o => o === 'joaquin' ? 'Joaco' : (o.charAt(0).toUpperCase() + o.slice(1));
     const line = r => {
       const h = Math.max(1, Math.round(r.edad_h));
@@ -14999,9 +15000,24 @@ async function processSinResponderCursos(env) {
     const ar = new Date(nowMs - 3 * 3600 * 1000);
     if (ar.getUTCHours() < 9 || ar.getUTCHours() >= 21 || ar.getUTCDay() === 0) return;
     await kvSet(env, 'sin_responder_cursos_last_run', String(nowMs));
-    const fresh = (await sinRespCandidatos(env, nowMs, { bandeja: 'cursos' })).filter(x => x.alertar);
+    const fresh = (await sinRespCandidatos(env, nowMs, { bandeja: 'cursos' })).filter(x => x.alertar)
+      .sort((a, b) => (b.urgente ? 1 : 0) - (a.urgente ? 1 : 0) || b.edad_h - a.edad_h);
     if (!fresh.length) return;
-    const gaspar = env.ADMIN_NOTIFY_PHONE || '5491155604999';
+    const gaspar = normalizeArPhone(env.ADMIN_NOTIFY_PHONE) || '5491155604999';
+    // Abril y Bruno casi nunca le escriben al número del negocio → les llega la plantilla recordatorio_agenda, que aplana
+    // el texto y corta a 800. Para eso va una versión corta: nombre + horas, urgentes primero, y "…y N más".
+    const corto = (titulo) => {
+      let t = titulo + ' (🔴 = urgente): ';
+      let n = 0;
+      for (const r of fresh) {
+        const nm = Array.from(((r.contact_name && String(r.contact_name).trim()) || ('…' + String(r.phone).slice(-4))).replace(/\s+/g, ' ')).slice(0, 28).join('');
+        const it = (r.urgente ? '🔴 ' : '') + nm + ' ' + Math.max(1, Math.round(r.edad_h)) + 'h';
+        if ((t + it).length > 720) break;
+        t += (n ? ', ' : '') + it; n++;
+      }
+      if (fresh.length > n) t += ' …y ' + (fresh.length - n) + ' más';
+      return t + '. El detalle está en la bandeja de cursos del CRM.';
+    };
     const line = r => {
       const h = Math.max(1, Math.round(r.edad_h));
       const nm = (r.contact_name && String(r.contact_name).trim()) || ('…' + String(r.phone).slice(-4));
@@ -15015,11 +15031,21 @@ async function processSinResponderCursos(env) {
     try { const op = await env.DB.prepare("SELECT phone FROM agenda_phones WHERE usuario = 'abril'").first(); ophone = op && op.phone; } catch (_) {}
     if (ophone && ophone !== gaspar) {
       const msg = `⏰ Cursos: tenés ${fresh.length} persona${fresh.length > 1 ? 's' : ''} esperando respuesta:\n` + lista + `\n\nContestales hoy, no los dejes enfriar.`;
-      try { await avisoInterno(env, { para: 'abril', tipo: 'sin_responder', prioridad: fresh.some(x => x.urgente) ? 'P1' : 'P2', clave: 'sinresp-cursos:abril:' + nowIso.slice(0, 16), texto: msg, legacy: () => sinRespEnviar(env, ophone, msg), legacyDest: ophone }); } catch (_) {}
+      const msgCorto = corto(`⏰ Cursos: tenés ${fresh.length} persona${fresh.length > 1 ? 's' : ''} esperando respuesta`);
+      try { await avisoInterno(env, { para: 'abril', tipo: 'sin_responder', prioridad: fresh.some(x => x.urgente) ? 'P1' : 'P2', clave: 'sinresp-cursos:abril:' + nowIso.slice(0, 16), texto: msg, textoPlantilla: msgCorto, legacy: () => sinRespEnviar(env, ophone, msg, msgCorto), legacyDest: ophone }); } catch (_) {}
     }
+    // Copias: Gaspar y Bruno (kv sin_responder_cursos_copia_gaspar / _copia_bruno, '0' = sin copia).
+    const gMsg = `⏰ Cursos — esperando respuesta (${fresh.length}):\n` + lista;
+    const gCorto = corto(`⏰ Cursos — ${fresh.length} esperando respuesta`);
     if ((await kvGet(env, 'sin_responder_cursos_copia_gaspar', '1')) === '1') {
-      const gMsg = `⏰ Cursos — esperando respuesta (${fresh.length}):\n` + lista;
-      try { await avisoInterno(env, { para: 'gaspar', tipo: 'sin_responder', prioridad: 'P2', clave: 'sinresp-cursos:gaspar:' + nowIso.slice(0, 16), texto: gMsg, legacy: () => sinRespEnviar(env, gaspar, gMsg), legacyDest: gaspar }); } catch (_) {}
+      try { await avisoInterno(env, { para: 'gaspar', tipo: 'sin_responder', prioridad: 'P2', clave: 'sinresp-cursos:gaspar:' + nowIso.slice(0, 16), texto: gMsg, textoPlantilla: gCorto, legacy: () => sinRespEnviar(env, gaspar, gMsg, gCorto), legacyDest: gaspar }); } catch (_) {}
+    }
+    if ((await kvGet(env, 'sin_responder_cursos_copia_bruno', '1')) === '1') {
+      let bphone = '';
+      try { const bp = await env.DB.prepare("SELECT phone FROM agenda_phones WHERE usuario = 'bruno'").first(); bphone = bp && bp.phone; } catch (_) {}
+      if (bphone && normalizeArPhone(bphone) !== gaspar && bphone !== ophone) {
+        try { await avisoInterno(env, { para: 'bruno', tipo: 'sin_responder', prioridad: 'P2', clave: 'sinresp-cursos:bruno:' + nowIso.slice(0, 16), texto: gMsg, textoPlantilla: gCorto, legacy: () => sinRespEnviar(env, bphone, gMsg, gCorto), legacyDest: bphone }); } catch (_) {}
+      }
     }
     for (const r of fresh) {
       try { await env.DB.prepare('UPDATE sin_responder_avisos SET last_ts = ?, alerted_at = ? WHERE phone = ?').bind(r.last_ts, nowIso, r.phone).run(); } catch (_) {}
@@ -15033,9 +15059,9 @@ async function processSinResponderCursos(env) {
 //  · "🎓 Espera accesos": pagó el curso completo y todavía no recibió el mensaje de accesos.
 //  · "⏳ Seña pendiente": pagó una seña o una parte y no completó.
 // Fuentes (solo chats de la bandeja de cursos, últimos 90 días):
-//  · comprobantes leídos por OCR (wa_pago_proof sena/full). OJO: el OCR solo corre en la ventana del lanzamiento, así que
-//    fuera de los lanzamientos esta fuente no ve pagos nuevos. Se descartan los reenvíos del mismo comprobante (mismo
-//    monto y fecha), los montos en 0 y los de más de $320.000 (no son del curso).
+//  · comprobantes leídos por OCR (wa_pago_proof sena/full): en la ventana del lanzamiento y, desde el 20-oct, todo el año
+//    en la bandeja de cursos (kv cursos_ocr_pagos_on). Se descartan los reenvíos del mismo comprobante (mismo monto y
+//    fecha), los montos en 0 y los de más de $320.000 (no son del curso).
 //  · la etiqueta 'Venta Abril' (la pone Abril al vender) = pagó completo.
 // Sale de la lista quien ya recibió los accesos ("LEE BIEN A CONCIENCIA" o el link de la plataforma) o tiene Alumno.
 // Tipos sin etiqueta (solo se ven en el GET): 'caida' (pidió devolución, desistió, se le devolvió o tiene la etiqueta
@@ -15043,6 +15069,35 @@ async function processSinResponderCursos(env) {
 // Con kv cursos_pendientes_on='1' el cron mantiene dos etiquetas (las pone y las saca solo) y el CRM muestra sus botones
 // de filtro; apagado no toca nada. Vista previa: GET /admin/cursos/pendientes.
 const CURSO_PRECIO_TOTAL = 175000;
+const _MESES_ES = { ene: 1, feb: 2, mar: 3, abr: 4, may: 5, jun: 6, jul: 7, ago: 8, sep: 9, set: 9, oct: 10, nov: 11, dic: 12 };
+function fechaComprobanteIso(raw) {
+  let f = '';
+  try { f = String(JSON.parse(raw).fecha || ''); } catch (_) { const m = /"fecha"\s*:\s*"([^"]*)"/.exec(String(raw || '')); f = m ? m[1] : ''; }
+  f = f.toLowerCase().trim();
+  let m = /(\d{4})-(\d{1,2})-(\d{1,2})/.exec(f);
+  if (m) return m[1] + '-' + m[2].padStart(2, '0') + '-' + m[3].padStart(2, '0');
+  m = /(\d{1,2})\s*(?:\/|-|\.|\s|de)\s*([a-zñ]{3,}|\d{1,2})\.?\s*(?:\/|-|\.|\s|de)\s*(\d{2,4})/.exec(f);
+  if (!m) return '';
+  const mes = /^\d+$/.test(m[2]) ? +m[2] : _MESES_ES[m[2].slice(0, 3)];
+  if (!mes) return '';
+  const anio = m[3].length === 2 ? '20' + m[3] : m[3];
+  return anio + '-' + String(mes).padStart(2, '0') + '-' + m[1].padStart(2, '0');
+}
+// rows: [{ monto, raw, created_at }] ordenadas por created_at → las que no son reenvíos del mismo comprobante.
+function dedupComprobantes(rows) {
+  const out = [], meta = [];
+  for (const r of rows) {
+    const monto = Math.round(Number(r.monto) || 0);
+    const fc = fechaComprobanteIso(r.raw);
+    const t = new Date(r.created_at).getTime();
+    // Mismo monto y misma fecha del comprobante; si a alguno de los dos le falta la fecha, mismo monto dentro de 48 h.
+    const dup = meta.some(o => o.monto === monto && (fc && o.fc ? o.fc === fc : Math.abs(o.t - t) <= 48 * 3600000));
+    if (dup) continue;
+    meta.push({ monto, fc, t });
+    out.push(r);
+  }
+  return out;
+}
 const CURSO_PAGO_MAX = 320000;   // el combo más caro del curso es $310.000: más que esto es un cartel o un corpóreo
 const CURSOS_PEND_LABELS = { accesos: { name: '🎓 Espera accesos', color: '#7c3aed' }, sena: { name: '⏳ Seña pendiente', color: '#f59e0b' } };
 // Seña caída: el cliente desiste o pide la plata, o le devolvimos. Una persona que después le extiende el plazo la reactiva.
@@ -15056,17 +15111,14 @@ async function cursosPendientesLista(env) {
   const pagos = await q("SELECT phone, monto, IFNULL(clasificacion, '') c, created_at, IFNULL(raw, '') raw FROM wa_pago_proof WHERE IFNULL(is_payment, 0) = 1 AND IFNULL(clasificacion, '') IN ('sena', 'full') AND created_at >= ? ORDER BY created_at", desde);
   const ventas = await q("SELECT cl.phone, cl.created_at FROM contact_labels cl JOIN labels l ON l.id = cl.label_id WHERE l.name = 'Venta Abril' AND cl.created_at >= ?", desde);
   const by = {};
-  const nuevo = (p, t) => by[p] || (by[p] = { phone: p, total: 0, pagos: [], vistos: new Set(), venta: '', desde: t || '' });
-  for (const p of pagos) {
+  const nuevo = (p, t) => by[p] || (by[p] = { phone: p, total: 0, pagos: [], venta: '', desde: t || '' });
+  // El mismo comprobante reenviado (el equipo lo pide seguido) llega con otro wamid → dedupComprobantes por teléfono.
+  const porTel = {};
+  for (const p of pagos) (porTel[p.phone] = porTel[p.phone] || []).push(p);
+  for (const p of Object.values(porTel).flatMap(dedupComprobantes)) {
     const monto = Number(p.monto) || 0;
     if (monto <= 0 || monto > CURSO_PAGO_MAX) continue;
-    // El mismo comprobante reenviado (el equipo lo pide seguido) llega con otro wamid: mismo monto + misma fecha del comprobante.
-    let fechaComp = '';
-    try { fechaComp = String(JSON.parse(p.raw).fecha || ''); } catch (_) { const m = /"fecha"\s*:\s*"([^"]*)"/.exec(p.raw); fechaComp = m ? m[1] : ''; }
     const o = nuevo(p.phone, p.created_at);
-    const clave = Math.round(monto) + '|' + (fechaComp || String(p.created_at || '').slice(0, 10));
-    if (o.vistos.has(clave)) continue;
-    o.vistos.add(clave);
     o.total += monto;
     o.pagos.push({ fecha: String(p.created_at || '').slice(0, 10), monto, tipo: p.c });
     if (p.created_at && (!o.desde || p.created_at < o.desde)) o.desde = p.created_at;
@@ -15083,12 +15135,16 @@ async function cursosPendientesLista(env) {
     const alumnos = new Set((await q(`SELECT phone FROM contact_labels WHERE label_id = 26 AND phone IN (${ph})`, ...lote)).map(r => r.phone));
     const conAcceso = new Set((await q(`SELECT DISTINCT phone FROM wa_messages WHERE phone IN (${ph}) AND direction = 'outbound' AND (body LIKE '%LEE BIEN A CONCIENCIA%' OR body LIKE '%alinfinito.app.clientclub.net%')`, ...lote)).map(r => r.phone));
     const internos = new Set((await q(`SELECT phone FROM wa_internal_phones WHERE phone IN (${ph})`, ...lote)).map(r => r.phone));
+    // Alumnos viejos (MiniSupernova, NOVA, pack, corte): sus pagos son de otros productos, no del curso → afuera.
+    const otrosAlumnos = new Set((await q(`SELECT DISTINCT cl.phone FROM contact_labels cl JOIN labels l ON l.id = cl.label_id WHERE cl.phone IN (${ph}) AND (lower(l.name) LIKE 'vender pack%' OR lower(l.name) LIKE 'nova%' OR lower(l.name) LIKE 'servicio de corte%' OR lower(l.name) LIKE 'lead minisupernova%')`, ...lote)).map(r => r.phone));
+    for (const r of await q(`SELECT phone FROM minisupernova WHERE phone IN (${ph})`, ...lote)) otrosAlumnos.add(r.phone);
     const caidaManual = new Set((await q(`SELECT cl.phone FROM contact_labels cl JOIN labels l ON l.id = cl.label_id WHERE lower(l.name) LIKE '%seña caída%' AND cl.phone IN (${ph})`, ...lote)).map(r => r.phone));
     const sm = {};
     for (const s of await q(`SELECT phone, IFNULL(contact_name, '') n, IFNULL(inbox, '') ib, last_ts, last_direction FROM wa_chats_summary WHERE phone IN (${ph})`, ...lote)) sm[s.phone] = s;
     for (const p of lote) {
       if (alumnos.has(p) || conAcceso.has(p) || internos.has(p)) continue;
       const o = by[p]; const s = sm[p] || {};
+      if (otrosAlumnos.has(p) && !o.venta) continue;
       if (s.ib !== 'cursos') continue;   // carteles, corpóreos y corte no entran (comprobantes viejos sin el filtro de carteles)
       if (!o.pagos.length && !o.venta) continue;
       const completo = !!o.venta || o.total >= CURSO_PRECIO_TOTAL * 0.97;
@@ -16959,9 +17015,14 @@ async function analyzePaymentProof(env, r2Key, mimeHint, meta) {
   if (!env.ANTHROPIC_API_KEY || !env.MEDIA || !r2Key) return null;
   let obj; try { obj = await env.MEDIA.get(r2Key); } catch (_) { return null; }
   if (!obj) return null;
+  const mime = (String(obj.httpMetadata?.contentType || mimeHint || '').split(';')[0].trim().toLowerCase()) || 'image/jpeg';
+  // Videos, audios, .ai, .docx o archivos de más de 10 MB no son comprobantes: no se mandan (Anthropic los rechaza y
+  // un archivo grande en base64 puede pasar la memoria del worker).
+  const NO_COMPROBANTE = { es_comprobante: false, monto: 0, moneda: 'ARS', cuenta: 'desconocida', titular_destino: '', banco: '', fecha: '', confianza: 0, motivo: 'tipo_no_soportado' };
+  if (/^(video|audio)\//.test(mime) || (/^application\//.test(mime) && !/pdf|octet-stream/.test(mime))) return NO_COMPROBANTE;
+  if (obj.size > 10 * 1024 * 1024) return NO_COMPROBANTE;
   let buf; try { buf = await obj.arrayBuffer(); } catch (_) { return null; }
   if (!buf || buf.byteLength < 64) return null;
-  const mime = (String(obj.httpMetadata?.contentType || mimeHint || '').split(';')[0].trim().toLowerCase()) || 'image/jpeg';
   const isPdf = mime.includes('pdf');
   const b64 = abToBase64(buf);
   const block = isPdf
@@ -17031,6 +17092,8 @@ function resolveCuenta(a) {
 
 // Procesa un comprobante entrante: dedup por wamid, OCR, respalda en D1 y etiqueta.
 // NO responde nada (eso lo hacen a mano). Corre en ctx.waitUntil (no bloquea el webhook).
+// m.modo = 'cursos' (bandeja de cursos fuera del lanzamiento): solo OCR + respaldo; sin etiqueta 'pago lanzamiento',
+// sin mover el chat de bandeja y sin aviso a Gaspar y Bruno.
 async function processPaymentProof(env, m) {
   if (!m || !m.wamid || !m.phone) return;
   // Los comprobantes de CARTELES (contacto con "POR PAGAR") los maneja processCartelPagos
@@ -17064,7 +17127,7 @@ async function processPaymentProof(env, m) {
     ).bind(m.wamid, m.phone, m.senderName || '', m.r2Key || '', String(m.caption || '').slice(0, 500), m.ts || new Date().toISOString(), new Date().toISOString()).run();
     if (!res?.meta?.changes) return; // ya procesado
   } catch (_) { return; }
-  const a = await analyzePaymentProof(env, m.r2Key, m.msgType === 'document' ? 'application/pdf' : '', { phone: m.phone, by: 'pago_lanzamiento' });
+  const a = await analyzePaymentProof(env, m.r2Key, m.msgType === 'document' ? 'application/pdf' : '', { phone: m.phone, by: m.modo === 'cursos' ? 'pago_cursos' : 'pago_lanzamiento' });
   const esPago = !!(a && a.es_comprobante);
   const monto = (a && +a.monto) || 0;
   const cuenta = resolveCuenta(a);
@@ -17072,7 +17135,7 @@ async function processPaymentProof(env, m) {
   if (esPago) {
     // (los carteles / POR PAGAR ya se filtraron arriba → acá solo llegan pagos del lanzamiento)
     clasificacion = (monto >= PAGO_SENA_MIN && monto <= PAGO_SENA_MAX) ? 'sena' : 'full';  // seña ~40k vs completo
-    labelName = 'pago lanzamiento';
+    if (m.modo !== 'cursos') labelName = 'pago lanzamiento';
   }
   try {
     await env.DB.prepare(
@@ -17475,7 +17538,7 @@ async function avisoEnviar(env, cfg, t, o, med = null) {
   }
   for (const tp of await elegirPlantillaAviso(env, cfg, t.slug, med)) {
     let r = null;
-    try { r = await waSendTemplate(env, t.phone, tp.name, 'es_AR', [unaLinea(o.texto, tp.max)], null, E); } catch (_) {}
+    try { r = await waSendTemplate(env, t.phone, tp.name, 'es_AR', [unaLinea(o.textoPlantilla || o.texto, tp.max)], null, E); } catch (_) {}
     if (r && r.ok) return { ok: true, via: 'plantilla:' + tp.name, wamid: r.id || null, fotos: 0 };
     if (r && r.error === 'wa_send_paused') return { ok: false, via: 'pausado', code: '', error: r.error };
     last = r;
@@ -19102,7 +19165,7 @@ REGLAS DURAS (no negociables):
 2. Si el cliente pregunta el precio o está por decidir, dale el precio y las formas de pago por escrito y completos. Nunca contestes solo con un link ni con "está en la clase 2".
 3. Si ofrecés seña, siempre con el saldo exacto y una fecha para completarlo.
 4. NUNCA prometas ingresos ni resultados ("recuperás la inversión", "se puede vivir de esto", "la venta llega rápido"), ni fechas del kit ("mañana despachamos"). NUNCA menciones Illustrator "sin licencia" o "craqueado". NUNCA digas que el envío del kit está incluido.
-5. PAGOS: vos no ves las imágenes ni los PDF, y el OCR de comprobantes casi nunca corre (solo en lanzamientos). Si el cliente mandó una [imagen] o un [documento] y dice que pagó, NO le pidas otro comprobante: contestá que lo recibiste y lo estás verificando ("recibido pablo, ya lo verifico y te paso todo") y poné en "missing_info": "verificar destinatario (onled.academia o Mercado Pago) y monto; si está ok, pegar el mensaje de accesos y el pedido de datos". NUNCA escribas que el pago está acreditado ni des la bienvenida o los accesos por tu cuenta. Si dice que pagó y no mandó nada, pedile el comprobante por acá. Nunca describas lo que muestra una imagen.
+5. PAGOS: vos no ves las imágenes ni los PDF. Los comprobantes que se pudieron leer aparecen en "Comprobantes leídos por OCR" del contexto (monto y a qué cuenta entró): usalos para saber cuánto pagó, pero igual una persona lo verifica. Si el cliente mandó una [imagen] o un [documento] y dice que pagó, NO le pidas otro comprobante: contestá que lo recibiste y lo estás verificando ("recibido pablo, ya lo verifico y te paso todo") y poné en "missing_info": "verificar destinatario (onled.academia o Mercado Pago) y monto; si está ok, pegar el mensaje de accesos y el pedido de datos". NUNCA escribas que el pago está acreditado ni des la bienvenida o los accesos por tu cuenta. Si dice que pagó y no mandó nada, pedile el comprobante por acá. Nunca describas lo que muestra una imagen.
 6. should_escalate=true (y un borrador prudente que no comprometa nada) si: pide una devolución o reclama, el tema está sin definir en la base, pregunta algo técnico que la base no cubre, quiere varios cursos o condiciones de empresa, ya pagó y hay un problema con accesos o kit que no podés resolver, abrió un reclamo en Mercado Pago, dice que ganó un sorteo y el contexto no lo confirma, o la charla está tensa.
 7. Usá el CONTEXTO DEL CHAT: si ya es alumno no le vendas el curso: ayudalo primero y, si corresponde, ofrecé el pack. Si el cliente dice que ya compró, tratalo como alumno aunque el contexto no lo registre (puede ser de antes del cambio de número) y, si hace falta verificarlo, ponelo en "missing_info". Si ya señó, el foco es el saldo con fecha. Lo que la base dice "en lanzamiento" vale SOLO si el contexto dice "Lanzamiento activo: SÍ". Usá la fecha de "Ahora" para calcular días ("el lunes", "el 18"). Si la ventana de 24 h está CERRADA: en WhatsApp poné en "missing_info" "ventana de 24 h cerrada: reabrir con plantilla"; en INSTAGRAM no hay plantillas: poné "IG con la ventana cerrada: no se puede enviar hasta que escriba el cliente" y confidence ≤ 0.3. En los dos casos el draft es la respuesta para cuando el cliente vuelva a escribir: nunca le hables de la ventana ni de que no le podés escribir.
 8. No repitas lo que un mensaje AUTOMÁTICO ya le dijo. Si un automático dijo algo fuera de lugar, aclaralo ("perdón, lo anterior fue un mensaje automático").
@@ -19168,9 +19231,9 @@ async function buildCursosContext(env, phone, maxMsgs = 50) {
     if (t === 'minicurso_landing' && r.vio_clase2 != null) d += ' · vio la clase 2: ' + (+r.vio_clase2 ? 'sí' : 'no');
     flujos.push(d);
   }
-  const CLASIF_PAGO = { sena: 'seña (~$40.000)', full: 'más de $50.000 (curso, combo, pack o NOVA)' };
-  const pagos = (await q("SELECT substr(created_at,1,10) f, monto, IFNULL(clasificacion,'') c, IFNULL(cuenta,'') cu, IFNULL(titular,'') ti FROM wa_pago_proof WHERE phone = ? AND IFNULL(is_payment,1) != 0 ORDER BY created_at", phone))
-    .map(r => `${r.f} $${r.monto != null ? r.monto : '?'}${r.c ? ' — ' + (CLASIF_PAGO[r.c] || r.c) : ''}${r.cu || r.ti ? ' · a ' + [r.cu, r.ti].filter(Boolean).join(' / ') : ''}`);
+  const rotuloPago = m => !(m > 0) ? 'monto ilegible' : m < 30000 ? 'pago chico (kit, envío u otra cosa)' : m <= 50000 ? 'seña (~$40.000)' : 'más de $50.000 (curso, combo, pack o NOVA)';
+  const pagos = dedupComprobantes(await q("SELECT substr(created_at,1,10) f, created_at, monto, IFNULL(clasificacion,'') c, IFNULL(cuenta,'') cu, IFNULL(titular,'') ti, IFNULL(raw,'') raw FROM wa_pago_proof WHERE phone = ? AND is_payment = 1 ORDER BY created_at", phone))
+    .map(r => `${r.f} $${r.monto != null ? r.monto : '?'} — ${r.c === 'cartel' ? 'pago de un cartel (no es del curso)' : r.c === 'corte' ? 'pago del servicio de corte (no es del curso)' : rotuloPago(+r.monto)}${r.cu || r.ti ? ' · a ' + [r.cu, r.ti].filter(Boolean).join(' / ') : ''}`);
   const acc = (await q("SELECT MIN(ts) t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND (body LIKE '%LEE BIEN A CONCIENCIA%' OR body LIKE '%alinfinito.app.clientclub.net%')", phone))[0];
   const lastIn = ((await q("SELECT MAX(ts) t FROM wa_messages WHERE phone = ? AND direction = 'inbound'", phone))[0] || {}).t;
   const ad = ((await q("SELECT IFNULL(headline,'') h FROM wa_ad_attributions WHERE phone = ? ORDER BY ts ASC LIMIT 1", phone))[0] || {}).h;
@@ -19184,7 +19247,7 @@ async function buildCursosContext(env, phone, maxMsgs = 50) {
   h += `Cliente: ${nombre || '(sin nombre)'}${nombreReg && nombreReg.toLowerCase() !== String(nombre).toLowerCase() ? ' · Nombre de registro: ' + nombreReg : ''} · canal: ${sum.ch === 'ig' ? 'Instagram' : 'WhatsApp'} · bandeja: ${sum.ib || '-'}\n`;
   h += `Etiquetas: ${labels.length ? labels.join(', ') : 'ninguna'}\n`;
   h += `De dónde viene: ${flujos.length ? flujos.join('; ') : 'sin flujo registrado'}${ad ? ' · anuncio: "' + String(ad).slice(0, 120) + '"' : ''}\n`;
-  h += `Comprobantes leídos por OCR: ${pagos.length ? pagos.join('; ') : 'ninguno (el OCR solo corre en lanzamientos: fijate si en la conversación hay una [imagen] o [documento] de pago)'}\n`;
+  h += `Comprobantes leídos por OCR: ${pagos.length ? pagos.join('; ') : 'ninguno (puede ser una imagen que no era un comprobante, que no se pudo leer o anterior al 20-oct: fijate si en la conversación hay una [imagen] o [documento] de pago)'}\n`;
   const ALUMNO_RE = /^(alumno|venta abril|vender pack|nova|servicio de corte|lead minisupernova)/i;
   h += (acc && acc.t) ? `YA ES ALUMNO: accesos enviados el ${ar(acc.t).slice(0, 10)}.\n`
     : (labels.some(n => ALUMNO_RE.test(String(n))) || enMiniSupernova) ? 'YA ES ALUMNO (por etiquetas o envíos a alumnos; los accesos no están en este chat).\n'
@@ -20959,6 +21022,21 @@ const handler = {
                 // ===== Lanzamiento junio: capturar comprobantes de pago =====
                 // En la ventana (11-15/06), todo inbound con imagen/PDF se OCRea,
                 // se clasifica, se etiqueta y se respalda en D1 (NO se responde nada).
+                // Fuera de la ventana, los comprobantes de la bandeja de CURSOS también se leen (20-oct, Gaspar: "todo ok"):
+                // solo OCR + respaldo en wa_pago_proof (lo usan los pendientes de cursos y el copiloto), sin etiqueta, sin
+                // aviso y sin reenvío (eso es del lanzamiento). Gate kv cursos_ocr_pagos_on.
+                if (direction === 'inbound' && (msgType === 'image' || msgType === 'document') && r2Key && !isPagoLanzamientoWindow(ts)) {
+                  const _pc = (async () => {
+                    try {
+                      if ((await kvGet(env, 'cursos_ocr_pagos_on', '0')) !== '1') return;
+                      const ib = await env.DB.prepare('SELECT inbox FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
+                      if (!ib || ib.inbox !== 'cursos') return;
+                      if (await esTelefonoInterno(env, phone)) return;
+                      await processPaymentProof(env, { wamid, phone, senderName, r2Key, msgType, caption: msgBody, ts, modo: 'cursos' });
+                    } catch (_) {}
+                  })();
+                  if (typeof ctx !== 'undefined' && ctx && ctx.waitUntil) ctx.waitUntil(_pc); else await _pc;
+                }
                 if (direction === 'inbound' && (msgType === 'image' || msgType === 'document') && r2Key && isPagoLanzamientoWindow(ts)) {
                   // 1) OCR + clasificación + backup en D1. 2) reenvío a Gaspar
                   // (solo hoy/mañana). El reenvío corre SIEMPRE tras el intento de
@@ -27444,7 +27522,7 @@ const handler = {
         const _rolP = await getSessionRole(env, session.user);
         if (_rolP !== 'admin' && _rolP !== 'cursos') return json({ error: 'forbidden' }, 403);
         const lista = await cursosPendientesLista(env);
-        return json({ ok: true, on: (await kvGet(env, 'cursos_pendientes_on', '0')) === '1', espera_accesos: lista.filter(r => r.tipo === 'accesos'), sena_pendiente: lista.filter(r => r.tipo === 'sena'), a_verificar: lista.filter(r => r.tipo === 'verificar'), senas_caidas: lista.filter(r => r.tipo === 'caida'), nota: 'El OCR de comprobantes solo corre en los lanzamientos: fuera de eso, Espera accesos sale de la etiqueta Venta Abril.' });
+        return json({ ok: true, on: (await kvGet(env, 'cursos_pendientes_on', '0')) === '1', espera_accesos: lista.filter(r => r.tipo === 'accesos'), sena_pendiente: lista.filter(r => r.tipo === 'sena'), a_verificar: lista.filter(r => r.tipo === 'verificar'), senas_caidas: lista.filter(r => r.tipo === 'caida'), ocr_cursos_on: (await kvGet(env, 'cursos_ocr_pagos_on', '0')) === '1' });
       }
       if (request.method === 'POST' && path === '/admin/cursos/pendientes/sync') {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
@@ -30352,7 +30430,7 @@ const handler = {
     // Solo en el cron de cada minuto: en los múltiplos de 5 corren los dos a la vez y el throttle por kv no es atómico (aviso doble).
     if (event.cron === '* * * * *') ctx.waitUntil(processSinResponderCursos(env));   // misma alarma para la bandeja de cursos → Abril + Gaspar (gate sin_responder_cursos_on, APAGADO por defecto)
     if (event.cron === '* * * * *' && new Date().getUTCMinutes() % 10 === 0) ctx.waitUntil(syncCursosPendientes(env));   // etiquetas "Espera accesos" / "Seña pendiente" (gate cursos_pendientes_on, APAGADO)
-    ctx.waitUntil(processSinResponder(env));     // alarma "sin responder": lead cotizado/con intención sin contestar +Nh → digest al vendedor + Gaspar (self-throttle 15min, gate sin_responder_on)
+    if (event.cron === '* * * * *') ctx.waitUntil(processSinResponder(env));     // (solo en el de cada minuto: con los dos crons a la vez el throttle por kv no alcanzaba y el aviso salía doble) alarma "sin responder": lead cotizado/con intención sin contestar +Nh → digest al vendedor + Gaspar (self-throttle 15min, gate sin_responder_on)
     // Recordatorio de COBRO de los pedidos cargados sin pago (10 y 18 AR, lun-sáb; cada 10 min dentro de esa hora con claim).
     if (new Date().getUTCMinutes() % 10 === 0) ctx.waitUntil(processCobrosPendientes(env));
     // Resúmenes del aviso del sitio del corte a Gaspar (kv corte_web_resumenes).
