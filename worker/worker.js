@@ -21837,8 +21837,8 @@ const handler = {
         if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'solo admin' }, 403);
         const dias = Math.min(Math.max(parseInt(url.searchParams.get('dias') || '30', 10) || 30, 1), 365);
         const desde = new Date(Date.now() - dias * 86400e3).toISOString();
-        const fb = (await env.DB.prepare("SELECT IFNULL(created_by,'') u, IFNULL(vertical,'') v, action, edit_distance ed, length(suggested_text) ls FROM suggestion_feedback WHERE created_at >= ?").bind(desde).all()).results || [];
-        const pedidas = (await env.DB.prepare("SELECT IFNULL(created_by,'') usuario, COUNT(*) pedidas, ROUND(SUM(cost_usd), 2) usd FROM copilot_usage WHERE kind = 'suggest' AND created_at >= ? GROUP BY 1 ORDER BY 2 DESC").bind(desde).all()).results || [];
+        const fb = (await env.DB.prepare("SELECT LOWER(IFNULL(created_by,'')) u, IFNULL(vertical,'') v, action, edit_distance ed, length(suggested_text) ls FROM suggestion_feedback WHERE created_at >= ?").bind(desde).all()).results || [];
+        const pedidas = (await env.DB.prepare("SELECT LOWER(IFNULL(created_by,'')) usuario, COUNT(*) pedidas, ROUND(SUM(cost_usd), 2) usd FROM copilot_usage WHERE kind = 'suggest' AND created_at >= ? GROUP BY 1 ORDER BY 2 DESC").bind(desde).all()).results || [];
         const agg = {};
         for (const r of fb) {
           const k = r.u + '|' + (r.v || '-');
