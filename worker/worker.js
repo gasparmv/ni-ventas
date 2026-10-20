@@ -18981,30 +18981,35 @@ async function suggestReply(env, phone, opts = {}) {
 
   // ¿Cliente del SERVICIO DE CORTE? (está en corte_alumnos o su chat está en la bandeja 'corte').
   // Si sí, el copiloto se apoya en la base de conocimiento / playbook del corte, NO en el de ventas.
-  let esCorte = false;
-  try { esCorte = !!(await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first()); } catch (_) {}
-  if (!esCorte) { try { const ci = await env.DB.prepare("SELECT inbox FROM wa_chats_summary WHERE phone=?").bind(phone).first(); if (ci && ci.inbox === 'corte') esCorte = true; } catch (_) {} }
-  // 3ª señal: ya tiene un pedido de corte cargado (cubre cobranzas que atiende el vigía con el bot apagado,
-  // y clientes fuera del seed de corte_alumnos).
-  if (!esCorte) { try { esCorte = !!(await env.DB.prepare("SELECT 1 AS x FROM corte_pedidos WHERE telefono=? LIMIT 1").bind(phone).first()); } catch (_) {} }
+  let inboxChat = '';
+  try { const ci = await env.DB.prepare("SELECT inbox FROM wa_chats_summary WHERE phone=?").bind(phone).first(); inboxChat = (ci && ci.inbox) || ''; } catch (_) {}
 
-  // Copiloto de CURSOS: chat de la bandeja de cursos o usuario de cursos. Gate kv copiloto_cursos_on (o preview de admin).
-  let esCursos = false, cursosKb = '', vendedora = '';
-  if (!esCorte) {
+  // Copiloto de CURSOS: chat de la bandeja de cursos (o usuario de cursos fuera de la bandeja de corte).
+  // Gate kv copiloto_cursos_on (o preview de admin). Va antes que el corte: muchos alumnos también usan el corte,
+  // pero si el chat está en la bandeja de cursos la charla es de cursos (NOVA, accesos, kit).
+  let esCursos = false, cursosKb = '', vendedora = '', cursosOn = false, rolUso = '';
+  try {
+    cursosOn = !!opts.previewCursos || (await kvGet(env, 'copiloto_cursos_on', '0')) === '1';
+    if (cursosOn) rolUso = opts.createdBy ? await getSessionRole(env, opts.createdBy) : '';
+  } catch (_) {}
+  const activarCursos = async () => {
     try {
-      const on = !!opts.previewCursos || (await kvGet(env, 'copiloto_cursos_on', '0')) === '1';
-      if (on) {
-        const ci = await env.DB.prepare('SELECT inbox FROM wa_chats_summary WHERE phone=?').bind(phone).first();
-        const rolUso = opts.createdBy ? await getSessionRole(env, opts.createdBy) : '';
-        if ((ci && ci.inbox === 'cursos') || rolUso === 'cursos') {
-          cursosKb = String(await kvGet(env, 'cursos_knowledge', '') || '').trim();
-          if (cursosKb) {
-            esCursos = true;
-            vendedora = opts.asUser ? cursosNombreVendedora(opts.asUser) : await cursosNombreDe(env, opts.createdBy);
-          }
-        }
-      }
+      cursosKb = String(await kvGet(env, 'cursos_knowledge', '') || '').trim();
+      if (!cursosKb) return;
+      esCursos = true;
+      vendedora = opts.asUser ? cursosNombreVendedora(opts.asUser) : await cursosNombreDe(env, opts.createdBy);
     } catch (_) {}
+  };
+  if (cursosOn && inboxChat === 'cursos') await activarCursos();
+
+  let esCorte = false;
+  if (!esCursos) {
+    try { esCorte = !!(await env.DB.prepare("SELECT 1 AS x FROM corte_alumnos WHERE telefono=? LIMIT 1").bind(phone).first()); } catch (_) {}
+    if (!esCorte && inboxChat === 'corte') esCorte = true;
+    // 3ª señal: ya tiene un pedido de corte cargado (cubre cobranzas que atiende el vigía con el bot apagado,
+    // y clientes fuera del seed de corte_alumnos).
+    if (!esCorte) { try { esCorte = !!(await env.DB.prepare("SELECT 1 AS x FROM corte_pedidos WHERE telefono=? LIMIT 1").bind(phone).first()); } catch (_) {} }
+    if (!esCorte && cursosOn && rolUso === 'cursos') await activarCursos();
   }
 
   let conv = null, examples = [], frameworkText = '', frameworkVersion = null, system, userContent;
@@ -19120,7 +19125,7 @@ async function suggestReply(env, phone, opts = {}) {
       suggestion: {
         vertical: esCursos ? 'cursos' : (parsed.vertical || (conv?.vertical || '')),
         intent: parsed.intent || '',
-        draft: String(parsed.draft || ''),
+        draft: esCursos ? String(parsed.draft || '').replace(/[¿¡]/g, '') : String(parsed.draft || ''),
         confidence: conf,
         low_confidence: lowConfidence,
         sources_used: Array.isArray(parsed.sources_used) ? parsed.sources_used : [],
