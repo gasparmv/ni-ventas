@@ -15082,7 +15082,7 @@ async function cursosPendientesLista(env) {
       let tipo = completo ? 'accesos' : 'sena', motivo = '';
       // Lo que se habló después del primer pago: pagó desde otro número / para otra persona, o la seña se cayó.
       const msgs = await q("SELECT direction, automated, IFNULL(body, '') body FROM wa_messages WHERE phone = ? AND ts >= ? AND msg_type NOT IN ('status', 'reaction') ORDER BY ts ASC LIMIT 300", p, o.desde || desde);
-      if (msgs.some(m => m.direction === 'inbound' && CURSO_OTRO_NUM_RE.test(m.body))) { tipo = 'verificar'; motivo = 'habla de otro número o de otra persona'; }
+      if (!o.venta && msgs.some(m => m.direction === 'inbound' && CURSO_OTRO_NUM_RE.test(m.body))) { tipo = 'verificar'; motivo = 'habla de otro número o de otra persona'; }
       if (tipo === 'sena') {
         let caida = caidaManual.has(p) ? 'etiqueta Seña caída' : '';
         if (!caida) {
