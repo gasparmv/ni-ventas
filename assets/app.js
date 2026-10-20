@@ -5032,6 +5032,7 @@ function renderCorte() {
         <span style="font-size:11px;background:rgba(124,58,237,.14);color:#7c3aed;padding:2px 8px;border-radius:10px;font-weight:700">Etapa 1 · operativo</span>
       </div>
       <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">Tu semana de un vistazo — una fila por cliente. Tocá un cliente para ver sus diseños; tocá un diseño para moverlo de etapa.</p>
+      ${corteSinPagarBtnHtml()}
       ${corteHerramientasHtml()}
       ${sel ? corteDetalleHtml(sel) : ''}
       ${corteWebPanelHtml(pedidosWeb)}
@@ -8533,6 +8534,89 @@ function corteCorregirMedidaUI(id) {
   });
   setTimeout(() => { try { ia.focus(); ia.select(); } catch (_) {} }, 50);
 }
+// ===== SIN PAGAR DESPUÉS DEL MARTES 16 h (Gaspar 20-oct: "un botón a la derecha bien notorio para los que no paguen hasta
+// el martes 16 h así les hago un seguimiento") =====
+function corteSinPagarFetch(force) {
+  if (!isAdmin()) return Promise.resolve();
+  if (!force && STATE._corteSPAt && Date.now() - STATE._corteSPAt < 3 * 60000) return Promise.resolve();
+  STATE._corteSPAt = Date.now();
+  return fetch(CONFIG.trackerUrl + '/admin/corte/sin-pagar', { headers: authHeaders() }).then(r => r.json()).then(j => {
+    if (!j || !j.ok) return;
+    const antes = JSON.stringify((STATE.corteSinPagar || {}).clientes || []);
+    STATE.corteSinPagar = j;
+    if (antes !== JSON.stringify(j.clientes || []) && STATE.view === 'corte') render();
+    if (document.querySelector('.modal-bg[data-sp-modal]')) corteSinPagarModalPintar();
+  }).catch(() => {});
+}
+function corteSinPagarBtnHtml() {
+  const sp = STATE.corteSinPagar;
+  if (!isAdmin() || !sp || !(sp.clientes || []).length) return '';
+  const n = sp.clientes.length, total = sp.clientes.reduce((s, c) => s + (Number(c.debe) || 0), 0);
+  return `<style>@keyframes corteSPpulse{0%,100%{box-shadow:0 8px 22px rgba(239,68,68,.45)}50%{box-shadow:0 8px 34px rgba(239,68,68,.9)}}</style>
+    <button type="button" data-corte-sinpagar title="Clientes con el cobro mandado que no pagaron después del martes 16 h" style="position:fixed;right:16px;top:42%;z-index:70;background:#ef4444;color:#fff;border:0;border-radius:16px;padding:14px 16px;cursor:pointer;text-align:center;line-height:1.25;animation:corteSPpulse 2s ease-in-out infinite;max-width:150px">
+      <div style="font-size:22px">💸</div>
+      <div style="font-size:16px;font-weight:900">${n} sin pagar</div>
+      <div style="font-size:12px;font-weight:700;opacity:.95">${fmtMoney(total)}</div>
+      <div style="font-size:11.5px;font-weight:800;margin-top:4px;text-decoration:underline">Hacer seguimiento</div>
+    </button>`;
+}
+function corteSinPagarModal() {
+  if (document.querySelector('.modal-bg[data-sp-modal]')) return;
+  const bg = document.createElement('div'); bg.className = 'modal-bg'; bg.setAttribute('data-sp-modal', '1');
+  bg.innerHTML = '<div class="modal" style="max-width:640px;width:calc(100vw - 32px)"><div class="modal-body" data-sp-body></div></div>';
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  bg.addEventListener('click', e => { if (e.target === bg) corteSinPagarModalCerrar(); });
+  corteSinPagarModalPintar();
+  corteSinPagarFetch(true);
+}
+function corteSinPagarModalCerrar() { const bg = document.querySelector('.modal-bg[data-sp-modal]'); if (!bg) return; bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); }
+function corteSinPagarModalPintar() {
+  const body = document.querySelector('.modal-bg[data-sp-modal] [data-sp-body]');
+  if (!body) return;
+  const cs = ((STATE.corteSinPagar || {}).clientes || []);
+  const hace = (iso) => { const ms = Date.now() - Date.parse(iso || ''); if (!(ms >= 0)) return ''; const h = Math.floor(ms / 3600000); return h < 1 ? 'hace ' + Math.max(1, Math.round(ms / 60000)) + ' min' : (h < 48 ? 'hace ' + h + ' h' : 'hace ' + Math.floor(h / 24) + ' días'); };
+  const dm = (f) => String(f || '').split('/').slice(0, 2).map(x => x.padStart(2, '0')).join('/');
+  const reciente = (c) => c.recordado_at && Date.now() - Date.parse(c.recordado_at) < 3 * 3600000;
+  const pend = cs.filter(c => c.telefono && !reciente(c));
+  const total = cs.reduce((s, c) => s + (Number(c.debe) || 0), 0);
+  body.innerHTML = `
+    <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:6px">
+      <div style="flex:1;min-width:0"><div style="font-size:18px;font-weight:900">💸 Sin pagar después del martes 16 h</div>
+        <div style="font-size:12.5px;color:var(--fg-mute);margin-top:2px">${cs.length} cliente${cs.length === 1 ? '' : 's'} · ${fmtMoney(total)} en total. El recordatorio va por mensaje si te escribieron en las últimas 24 h; si no, por la plantilla de cobro.</div></div>
+      <button type="button" class="btn btn-ghost" data-sp-cerrar style="padding:4px 10px">✕</button>
+    </div>
+    ${pend.length ? `<button type="button" class="btn" data-sp-todos style="width:100%;margin:6px 0 4px;background:#ef4444;border-color:#ef4444;color:#fff;font-weight:800">Recordarles a todos (${pend.length})</button>` : ''}
+    <div style="max-height:60vh;overflow:auto;margin-top:6px">${cs.length ? cs.map(c => `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--border)">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:800;overflow-wrap:anywhere">${escapeHtml(c.nombre || 'Cliente')} <span style="font-weight:700;color:#ef4444">debe ${fmtMoney(c.debe)}</span>${c.pagado > 0 ? ` <span style="font-size:12px;color:var(--fg-mute)">(pagó ${fmtMoney(c.pagado)})</span>` : ''}</div>
+          <div style="font-size:12px;color:var(--fg-mute);margin-top:2px">semana ${(c.semanas || []).map(dm).join(', ')} · ${c.entrega === 'retira' ? 'retira' : 'envío'}${c.cobro_at ? ' · cobro ' + hace(c.cobro_at) : ''} · ${c.ventana ? '💬 va por mensaje' : '📨 va por plantilla'}${c.recordado_at ? ' · <b style="color:var(--fg)">recordado ' + hace(c.recordado_at) + '</b>' : ''}${c.telefono ? '' : ' · sin teléfono'}</div>
+        </div>
+        ${c.telefono ? `<button type="button" class="btn btn-ghost" data-sp-chat="${escapeHtml(c.telefono)}" style="padding:6px 10px;font-size:12.5px">Chat</button>
+        <button type="button" class="btn" data-sp-rec="${escapeHtml(c.telefono)}" style="padding:6px 12px;font-size:12.5px;font-weight:800;${reciente(c) ? '' : 'background:#ef4444;border-color:#ef4444;color:#fff'}">${reciente(c) ? 'Recordar de nuevo' : 'Recordar'}</button>` : ''}
+      </div>`).join('') : '<div style="padding:18px;text-align:center;color:var(--fg-mute)">Todos pagaron ✨</div>'}</div>`;
+  body.querySelector('[data-sp-cerrar]').onclick = corteSinPagarModalCerrar;
+  const mandar = async (tels, forzar, btn) => {
+    if (btn) { btn.disabled = true; btn.textContent = 'Mandando…'; }
+    let j = {};
+    try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/recordar-pago', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ telefonos: tels, forzar: !!forzar }) }); j = await r.json().catch(() => ({})); } catch (_) {}
+    const rs = j.resultados || [], ok = rs.filter(x => x.ok).length, mal = rs.filter(x => !x.ok);
+    toast(ok ? 'Recordatorio enviado' + (ok > 1 ? ' a ' + ok : '') + (mal.length ? ' · ' + mal.length + ' no salieron: ' + mal.map(x => x.error).slice(0, 2).join('; ') : '') : ('No salió: ' + ((mal[0] && mal[0].error) || j.error || 'error')));
+    await corteSinPagarFetch(true);
+    corteSinPagarModalPintar();
+  };
+  const todos = body.querySelector('[data-sp-todos]');
+  if (todos) todos.onclick = async () => { if (!(await showConfirm('Les mando el recordatorio de pago a ' + pend.length + ' cliente' + (pend.length === 1 ? '' : 's') + '.', { title: 'Recordar a todos', confirmLabel: 'Mandar', cancelLabel: 'Cancelar' }))) return; mandar(pend.map(c => c.telefono), false, todos); };
+  body.querySelectorAll('[data-sp-rec]').forEach(b => { b.onclick = () => { const tel = b.getAttribute('data-sp-rec'); const c = cs.find(x => x.telefono === tel); mandar([tel], !!(c && reciente(c)), b); }; });
+  body.querySelectorAll('[data-sp-chat]').forEach(b => { b.onclick = () => {
+    const phone = b.getAttribute('data-sp-chat');
+    corteSinPagarModalCerrar();
+    STATE.view = 'chat'; chatState.selectedPhone = phone;
+    if (typeof enterMobileChatConversation === 'function') enterMobileChatConversation();
+    try { selectChatContact(phone); } catch (_) {}
+    location.hash = 'chat'; render();
+  }; });
+}
 async function corteCargar(silent) {
   if (silent ? (STATE._corteLoading || STATE._corteSilentLoading) : false) return;
   const gen = silent ? (STATE._corteGen || 0) : (STATE._corteGen = (STATE._corteGen || 0) + 1);
@@ -8605,12 +8689,14 @@ function corteStartPolling() {
   if (window._cortePollT) return;
   window._cortePollT = setInterval(() => {
     if (document.hidden || !STATE.token) return;
-    if (STATE.view === 'corte' && STATE.cortePedidos !== undefined) corteCargar(true);
+    if (STATE.view === 'corte' && STATE.cortePedidos !== undefined) { corteCargar(true); if (isAdmin()) corteSinPagarFetch(false); }
     else if (isDisenadorOnly() && (Date.now() - (STATE._corteResAt || 0)) > 4 * 60000) { STATE._corteResAt = Date.now(); corteResumenFetch(); }
   }, 60000);
 }
 async function bindCorte() {
   corteStartPolling();
+  // "Sin pagar" después del martes 16 h: el botón rojo de la derecha (solo admin).
+  if (isAdmin()) { corteSinPagarFetch(false); const spb = document.querySelector('[data-corte-sinpagar]'); if (spb) spb.onclick = corteSinPagarModal; }
   if (STATE.cortePedidos === undefined && !STATE._corteLoading) {
     await corteCargar(false);
     return;

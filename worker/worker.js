@@ -7778,6 +7778,49 @@ async function corteLandingDirNueva(env, ahora) {
     }
   }
 }
+// ===== SIN PAGAR DESPUÉS DEL MARTES 16 h (Gaspar 20-oct) =====
+// Clientes con el cobro mandado ('cobrando'/'parcial') en una tanda cuyo martes 16 h (AR) ya pasó (hasta 5 semanas atrás).
+// Por cliente: lo que debe (menos lo pagado en cuotas), semanas, cuándo salió el cobro, si tiene la ventana de 24 h y el
+// último recordatorio. Ordenados por lo que deben.
+async function corteSinPagarLista(env, ahora) {
+  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS corte_recordatorios (id INTEGER PRIMARY KEY AUTOINCREMENT, telefono TEXT, at TEXT, via TEXT, monto REAL, por TEXT)').run(); } catch (_) {}
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_corte_recordatorios_tel ON corte_recordatorios(telefono, at)').run(); } catch (_) {}
+  const tandas = (await env.DB.prepare("SELECT id, fecha_corte FROM corte_tandas WHERE fecha_corte IS NOT NULL AND fecha_corte!='' ORDER BY id DESC LIMIT 8").all()).results || [];
+  const limDe = (fecha) => { const f = corteFechaValida(fecha); return f ? Date.UTC(f.date.getUTCFullYear(), f.date.getUTCMonth(), f.date.getUTCDate() + 1, 19) : 0; }; // martes 16 h AR
+  const venc = tandas.filter(t => { const l = limDe(t.fecha_corte); return l && l <= ahora && ahora - l < 35 * 86400000; });
+  const actual = tandas[0] || null;
+  const out = { ok: true, clientes: [], vence_actual: actual && limDe(actual.fecha_corte) ? new Date(limDe(actual.fecha_corte)).toISOString() : null };
+  if (!venc.length) return out;
+  const fechaDe = {}; venc.forEach(t => { fechaDe[t.id] = t.fecha_corte; });
+  const rows = (await env.DB.prepare(`SELECT telefono, cliente_nombre, tanda_id, estado_pago, precio, entrega, updated_at FROM corte_pedidos WHERE tanda_id IN (${venc.map(() => '?').join(',')}) AND precio>0 AND estado_pago IN ('cobrando','parcial') AND IFNULL(producto,'TRANS')!='NEON' AND lower(IFNULL(cliente_nombre,''))!='neon'`).bind(...venc.map(t => t.id)).all()).results || [];
+  const g = {};
+  for (const p of rows) {
+    const k = p.telefono || ('n:' + corteNormNombre(p.cliente_nombre));
+    const c = (g[k] = g[k] || { telefono: p.telefono || '', nombre: p.cliente_nombre, total: 0, piezas: 0, tandas: new Set(), parcial: false, envio: false, ult: '' });
+    c.total += Number(p.precio) || 0; c.piezas++; c.tandas.add(p.tanda_id);
+    if (p.estado_pago === 'parcial') c.parcial = true;
+    if (p.entrega !== 'retira') c.envio = true;
+    if (String(p.updated_at || '') > c.ult) c.ult = String(p.updated_at || '');
+  }
+  const t23 = new Date(ahora - 23 * 3600000).toISOString();
+  for (const c of Object.values(g)) {
+    let pagado = 0, cobroAt = '', ventana = false, recAt = null;
+    if (c.telefono) {
+      if (c.parcial) { try { const pp = await env.DB.prepare('SELECT pagado FROM corte_pago_parcial WHERE phone=?').bind(c.telefono).first(); pagado = Number(pp && pp.pagado) || 0; } catch (_) {} }
+      try { const d = await env.DB.prepare('SELECT cobro_at FROM corte_detalle_sent WHERE phone=?').bind(c.telefono).first(); cobroAt = (d && d.cobro_at) || ''; } catch (_) {}
+      try { ventana = !!(await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type NOT IN ('status','reaction') AND ts > ? LIMIT 1").bind(c.telefono, t23).first()); } catch (_) {}
+      try { const r = await env.DB.prepare('SELECT MAX(at) AS at FROM corte_recordatorios WHERE telefono=?').bind(c.telefono).first(); recAt = (r && r.at) || null; } catch (_) {}
+    }
+    const ts = [...c.tandas];
+    out.clientes.push({
+      telefono: c.telefono, nombre: c.nombre, total: Math.round(c.total * 100) / 100, pagado, debe: Math.max(0, Math.round((c.total - pagado) * 100) / 100),
+      piezas: c.piezas, semanas: ts.map(id => fechaDe[id]).filter(Boolean), esta_semana: !!(actual && ts.length === 1 && ts[0] === actual.id),
+      entrega: c.envio ? 'envio' : 'retira', parcial: c.parcial, cobro_at: cobroAt || c.ult || null, ventana, recordado_at: recAt,
+    });
+  }
+  out.clientes.sort((a, b) => b.debe - a.debe);
+  return out;
+}
 // ---- Endpoints públicos de la landing (sin sesión; antes del muro de /admin/) ----
 //  GET  /corte/landing/config  → plazo, precios, insumos y video.
 //  POST /corte/landing/cliente {telefono} → { conocido, tiene_direccion } (nada más: ni nombre ni dirección).
@@ -28793,6 +28836,55 @@ const handler = {
       // (ej. pagaron directo con el comprobante). Si ya pagaron todo → recibo (sin pedir transferencia); si no → el
       // detalle de cobro. Solo con ventana abierta (inbound en 24h). Reserva atómica en corte_detalle_sent: no duplica
       // con el vigía ni si se llama dos veces. Admin.
+      // GET /admin/corte/sin-pagar → clientes con el cobro mandado ('cobrando'/'parcial') que no pagaron después del martes
+      // 16 h de su tanda (Gaspar 20-oct: "un botón bien notorio para los que no paguen hasta el martes 16 h"). Admin.
+      if (request.method === 'GET' && path === '/admin/corte/sin-pagar') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        try { return json(await corteSinPagarLista(env, Date.now())); } catch (e) { return json({ ok: false, error: 'No se pudo armar la lista. Probá de nuevo en un momento.' }, 500); }
+      }
+      // POST /admin/corte/recordar-pago {telefonos, forzar?} → recordatorio de pago a cada uno: texto si tiene la ventana de
+      // 24 h; si no, la plantilla aprobada corte_cobro_semanal (nombre + lo que falta). No toca el estado del cobro (el vigía
+      // sigue esperando el comprobante). Dedup: no repite dentro de 3 h salvo forzar. Admin.
+      if (request.method === 'POST' && path === '/admin/corte/recordar-pago') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const tels = Array.isArray(body.telefonos) ? [...new Set(body.telefonos.map(t => String(t).replace(/\D/g, '')).filter(Boolean))].slice(0, 40) : [];
+        if (!tels.length) return json({ error: 'sin telefonos' }, 400);
+        const lista = await corteSinPagarLista(env, Date.now());
+        const porTel = {}; (lista.clientes || []).forEach(c => { if (c.telefono) porTel[c.telefono] = c; });
+        try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_cobro_lock (phone TEXT PRIMARY KEY, ts TEXT)").run(); } catch (_) {}
+        const res = [];
+        for (const tel of tels) {
+          const c = porTel[tel];
+          if (!c) { res.push({ tel, ok: false, error: 'ya no figura sin pagar' }); continue; }
+          if (c.recordado_at && !body.forzar && Date.now() - Date.parse(c.recordado_at) < 3 * 3600000) { res.push({ tel, ok: false, error: 'ya se le recordó hace menos de 3 h' }); continue; }
+          const lockNow = new Date().toISOString(), lockStale = new Date(Date.now() - 90 * 1000).toISOString();
+          let lk = null;
+          try { lk = await env.DB.prepare("INSERT INTO corte_cobro_lock (phone, ts) VALUES (?, ?) ON CONFLICT(phone) DO UPDATE SET ts=excluded.ts WHERE corte_cobro_lock.ts < ? RETURNING phone").bind(tel, lockNow, lockStale).first(); } catch (_) {}
+          if (!lk) { res.push({ tel, ok: false, error: 'se le está mandando algo en este momento, probá en un minuto' }); continue; }
+          try {
+            const nom = corteNombreCap(String(c.nombre || '').split(/\s+/)[0] || '');
+            const monto = '$' + Number(c.debe || 0).toLocaleString('es-AR');
+            let r = null, via = '';
+            if (c.ventana) {
+              via = 'mensaje';
+              const texto = (nom ? 'Hola ' + nom + ', ' : 'Hola, ') + 'te escribo por el pago de tu corte' + (c.esta_semana ? ' de esta semana' : '') + ': quedó pendiente ' + monto
+                + (c.pagado > 0 ? ' (ya recibimos $' + Number(c.pagado).toLocaleString('es-AR') + ')' : '') + '. Transferí a ' + CORTE_ALIAS + ' (' + CORTE_TITULAR + ') y mandame el comprobante por acá, '
+                + (c.entrega === 'retira' ? 'así lo tenés listo para retirar.' : 'así lo despachamos.');
+              try { r = await corteSend(env, tel, texto); } catch (_) {}
+            } else {
+              via = 'plantilla';
+              try { r = await waSendTemplate(env, tel, 'corte_cobro_semanal', 'es_AR', [nom, monto]); } catch (_) {}
+              if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-recordar-tpl:' + tel + ':' + Date.now()), tel, '[plantilla corte_cobro_semanal] total ' + monto).run(); } catch (_) {} }
+            }
+            if (r && r.ok) {
+              try { await env.DB.prepare('INSERT INTO corte_recordatorios (telefono, at, via, monto, por) VALUES (?, ?, ?, ?, ?)').bind(tel, new Date().toISOString(), via, Number(c.debe) || 0, String(session.user || '')).run(); } catch (_) {}
+              res.push({ tel, ok: true, via, nombre: c.nombre, debe: c.debe });
+            } else res.push({ tel, ok: false, via, error: 'no salió: ' + ((r && (describeSendFailure ? describeSendFailure(r) : r.error)) || 'error de envío') });
+          } finally { try { await env.DB.prepare("DELETE FROM corte_cobro_lock WHERE phone=? AND ts=?").bind(tel, lockNow).run(); } catch (_) {} }
+        }
+        return json({ ok: true, resultados: res });
+      }
       if (request.method === 'POST' && path === '/admin/corte/enviar-detalle') {
         if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
         let body; try { body = await request.json(); } catch { body = {}; }
