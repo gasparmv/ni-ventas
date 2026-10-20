@@ -4311,6 +4311,7 @@ async function precotizSendTipografiasIg(env, igId) {
 // defecto) + horario 8-22 AR + bloqueo de billing de WA.
 async function processPrecotizPilot(env) {
   if (!(await precotizOn(env))) return;
+  const _tS = Date.now();   // diagnóstico 20-oct: dónde se va el tiempo de la vuelta ([precotiz] en wrangler tail)
 
   // Reconciliar la bandeja "Para cotizar" (idempotente). Corre SIEMPRE que el piloto esté
   // ON, aunque sea fuera de horario, porque Joaco puede cotizar a cualquier hora. Está
@@ -4370,6 +4371,7 @@ async function processPrecotizPilot(env) {
     }
   } catch (_) {}
 
+  console.log('[precotiz] reconciliacion', Date.now() - _tS, 'ms');
   if (!precotizEnHorario()) return;
   if (await isWaBillingBlocked(env)) return;
 
@@ -4383,14 +4385,21 @@ async function processPrecotizPilot(env) {
   // escribir entra solo, porque su chat se mueve). Antes eran ~800 activos × 4 consultas por minuto (Gaspar 20-oct).
   try {
     const _actDesde = new Date(Date.now() - 3 * 24 * 3600e3).toISOString();
-    const rs = await env.DB.prepare("SELECT p.* FROM precotiz_pilot p WHERE p.estado = 'activo' AND (p.updated_at >= ? OR EXISTS (SELECT 1 FROM wa_chats_summary s WHERE s.phone = p.phone AND s.last_ts >= ?))").bind(_actDesde, _actDesde).all();
+    // Con lo que antes se consultaba lead por lead (4 idas a D1 × activo, ~1 s por lead): freno manual, último inbound,
+    // último mensaje humano y si el chat pasó a cursos.
+    const rs = await env.DB.prepare(
+      "SELECT p.*, " +
+      "(SELECT k.v FROM kv_cache k WHERE k.k = 'precotiz_frozen:' || p.phone) AS _frozen, " +
+      "(SELECT MAX(m.ts) FROM wa_messages m WHERE m.phone = p.phone AND m.direction = 'inbound' AND m.msg_type != 'status') AS _last_in, " +
+      "(SELECT MAX(m.ts) FROM wa_messages m WHERE m.phone = p.phone AND m.direction = 'outbound' AND m.automated != 1 AND m.msg_type != 'status') AS _last_human, " +
+      "(SELECT s.inbox FROM wa_chats_summary s WHERE s.phone = p.phone) AS _inbox " +
+      "FROM precotiz_pilot p WHERE p.estado = 'activo' AND (p.updated_at >= ? OR EXISTS (SELECT 1 FROM wa_chats_summary s WHERE s.phone = p.phone AND s.last_ts >= ?))"
+    ).bind(_actDesde, _actDesde).all();
     activos = rs.results || [];
   } catch (_) {}
   for (const lead of activos) {
-    if (await precotizFrozen(env, lead.phone)) continue;                   // freno de mano MANUAL: el bot no habla más en este chat
-    let lastIn;
-    try { lastIn = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type != 'status'").bind(lead.phone).first(); } catch (_) { continue; }
-    const lastInTs = lastIn?.t || '';
+    if (String(lead._frozen || '') === '1') continue;                      // freno de mano MANUAL: el bot no habla más en este chat
+    const lastInTs = lead._last_in || '';
     if (!lastInTs) continue;
     // Debounce: el cliente manda foto + medidas en varios mensajes seguidos. No
     // respondemos apresurado — esperamos a que el último inbound tenga > DEBOUNCE
@@ -4400,13 +4409,12 @@ async function processPrecotizPilot(env) {
     // no manda (Joaco/Gaspar están atendiendo). Cuando el cliente vuelva a escribir (su mensaje
     // pasa a ser el último), el bot retoma el proceso de precotización si todavía falta relevar.
     // automated != 1: un automático de ManyChat (automated=2, IG) también cuenta → el bot no repite su pedido de datos.
-    try { const lh = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND automated != 1 AND msg_type != 'status'").bind(lead.phone).first(); if (lh && lh.t) { if (lh.t > lastInTs) continue; if (Date.now() - new Date(lastInTs).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; } } catch (_) {}
+    if (lead._last_human) { if (lead._last_human > lastInTs) continue; if (Date.now() - new Date(lastInTs).getTime() < PRECOTIZ_HUMAN_GRACE_MS) continue; }
     // Si el lead PASÓ a un flujo de cursos estando en el piloto (Abril lo tomó o se
     // registró al minicurso), lo sacamos del precotiz (escalado) para no pisarnos con
     // esas automatizaciones — sin gastar la llamada de IA.
     try {
-      const _cur = await env.DB.prepare("SELECT 1 AS x FROM wa_chats_summary WHERE phone = ? AND inbox = 'cursos' LIMIT 1").bind(lead.phone).first();
-      if (_cur) {
+      if (lead._inbox === 'cursos') {
         try { await env.DB.prepare("UPDATE precotiz_pilot SET estado='escalado', escalado_motivo='paso a cursos', last_processed_ts=?, updated_at=? WHERE phone=?").bind(lastInTs, nowIso, lead.phone).run(); } catch (_) {}
         await precotizTag(env, lead.phone, false);
         continue;
@@ -4534,6 +4542,7 @@ async function processPrecotizPilot(env) {
     }
   }
 
+  console.log('[precotiz] activos', activos.length, Date.now() - _tS, 'ms');
   // ---- A) Captar leads NUEVOS de carteles (si hay cupo) ----
   // Muestra (precotiz_sample %) y tope (precotiz_cap) configurables via kv para el rollout gradual.
   const cap = parseInt(await kvGet(env, 'precotiz_cap', String(PRECOTIZ_CAP)), 10) || PRECOTIZ_CAP;
@@ -4565,7 +4574,9 @@ async function processPrecotizPilot(env) {
     // "+phone" (no-op en el valor) le saca al planner la opción de agrupar recorriendo el índice
     // por phone, que leía las ~300k filas de wa_messages en cada tick. Así usa el índice de ts y
     // lee solo la ventana de 20 min (~100 filas). Mismo resultado.
-    const rs = await env.DB.prepare("SELECT phone, MAX(ts) AS last_ts FROM wa_messages WHERE direction='inbound' AND msg_type!='status' AND ts > ? GROUP BY +phone ORDER BY last_ts DESC LIMIT 15").bind(since).all();
+    // Sin los ya captados ni los ya vistos (el loop de abajo igual los salteaba): antes ocupaban el LIMIT 15 y en un rato
+    // movido podían dejar afuera a uno nuevo (20-oct).
+    const rs = await env.DB.prepare("SELECT phone, MAX(ts) AS last_ts FROM wa_messages m WHERE direction='inbound' AND msg_type!='status' AND ts > ? AND phone NOT IN (SELECT phone FROM precotiz_pilot) AND NOT EXISTS (SELECT 1 FROM kv_cache k WHERE k.k = 'precotiz_seen:' || m.phone) GROUP BY +phone ORDER BY last_ts DESC LIMIT 15").bind(since).all();
     cands = rs.results || [];
     // A las 8 AR SUMAMOS (no reemplazamos) el barrido de los que escribieron de noche.
     if (catchup) {
@@ -4593,7 +4604,8 @@ async function processPrecotizPilot(env) {
       const vistos3 = new Set(cands.map(c => c.phone));
       for (const c of (rs3.results || [])) { if (!vistos3.has(c.phone)) cands.push(c); }
     }
-  } catch (_) { return; }
+  } catch (e) { console.log('[precotiz] error candidatos', String((e && e.message) || e)); return; }
+  console.log('[precotiz] candidatos', cands.length, Date.now() - _tS, 'ms');
 
   for (const c of cands) {
     if (nPiloto >= cap) break;
@@ -4718,6 +4730,7 @@ async function processPrecotizPilot(env) {
       await precotizEmitir(env, phone, '', msgs, 'draft', nowIso);
     }
   }
+  console.log('[precotiz] fin', Date.now() - _tS, 'ms');
   // Vuelta completa: la usan la recuperación de arriba y el vigía (precotizVigia).
   try {
     await kvSet(env, 'precotiz_tick_ok', new Date().toISOString());
