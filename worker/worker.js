@@ -10035,8 +10035,11 @@ async function ensureBroadcastsSchema(env) {
     "followup_lang TEXT",
     "followup_param_mode TEXT",
     "followup_preview TEXT",
-    "reveal_inbox TEXT"
+    "reveal_inbox TEXT",
+    "send_hours TEXT"
   ]) { try { await env.DB.prepare("ALTER TABLE wa_broadcasts ADD COLUMN " + c).run(); } catch (_) {} }
+  // Variables POR CONTACTO (plantillas con {{2}}, {{3}}...): un JSON con el array de parámetros de cada uno.
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS bc_contact_params (kind TEXT NOT NULL, phone TEXT NOT NULL, params TEXT NOT NULL, PRIMARY KEY (kind, phone))").run(); } catch (_) {}
   // Estado por contacto del flujo: respondio / sentimiento / branch / followup.
   try {
     await env.DB.prepare(`CREATE TABLE IF NOT EXISTS wa_broadcast_events (
@@ -10076,9 +10079,15 @@ async function processCustomBroadcasts(env) {
     const nowIso = new Date().toISOString();
     const floorIso = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
     const rs = await env.DB.prepare(
-      "SELECT a.phone AS phone, a.sender_name AS sender_name, a.kind AS kind, b.template AS template, b.lang AS lang, b.param_mode AS param_mode, b.body_preview AS body_preview, b.reveal_inbox AS reveal_inbox FROM wa_autoreply_log a JOIN wa_broadcasts b ON ('bc_' || b.id) = a.kind WHERE a.status = 'queued' AND a.due_at <= ? AND a.due_at >= ? AND b.status = 'running' AND NOT EXISTS (SELECT 1 FROM template_status_cache t WHERE t.name = b.template AND upper(t.status) <> 'APPROVED') ORDER BY a.due_at ASC LIMIT 6"
+      "SELECT a.phone AS phone, a.sender_name AS sender_name, a.kind AS kind, b.template AS template, b.lang AS lang, b.param_mode AS param_mode, b.body_preview AS body_preview, b.reveal_inbox AS reveal_inbox, b.send_hours AS send_hours, (SELECT p.params FROM bc_contact_params p WHERE p.kind = a.kind AND p.phone = a.phone) AS params_json FROM wa_autoreply_log a JOIN wa_broadcasts b ON ('bc_' || b.id) = a.kind WHERE a.status = 'queued' AND a.due_at <= ? AND a.due_at >= ? AND b.status = 'running' AND NOT EXISTS (SELECT 1 FROM template_status_cache t WHERE t.name = b.template AND upper(t.status) <> 'APPROVED') ORDER BY a.due_at ASC LIMIT 30"
     ).bind(nowIso, floorIso).all();
     if (!rs.results?.length) return;
+    // Ventana horaria del broadcast (send_hours, hora AR, ej. "8-12,19-20" = de 8:00 a 11:59 y de 19:00 a 19:59):
+    // fuera de la ventana sus filas esperan sin ocupar los 6 lugares del tick de otro broadcast.
+    const _hAR = (new Date().getUTCHours() + 21) % 24;
+    const enHorario = (sh) => !sh || String(sh).split(',').some(r => { const m = /^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$/.exec(r); return !!m && _hAR >= +m[1] && _hAR < +m[2]; });
+    rs.results = rs.results.filter(r => enHorario(r.send_hours)).slice(0, 6);
+    if (!rs.results.length) return;
     // Reintentos ACOTADOS por broadcast (mismo mecanismo que comunidad/minisupernova, oct-2026): antes
     // una falla volvía a 'queued' con el mismo due_at → se reintentaba cada minuto hasta 72h y las 6
     // primeras fallidas trababan la cola.
@@ -10104,7 +10113,8 @@ async function processCustomBroadcasts(env) {
         try { await env.DB.prepare("INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'oculto', ?) ON CONFLICT(phone) DO NOTHING").bind(phone, new Date().toISOString()).run(); } catch (_) {}
       }
       const primerNombre = capitalizeName((row.sender_name || '').split(/\s+/)[0]) || 'amigo/a';
-      const params = (row.param_mode === 'none') ? [] : [primerNombre];
+      let params = (row.param_mode === 'none') ? [] : [primerNombre];
+      if (row.params_json) { try { const pj = JSON.parse(row.params_json); if (Array.isArray(pj) && pj.length) params = pj.map(String); } catch (_) {} }
       const tpl = await waSendTemplate(env, phone, row.template, row.lang || 'es', params);
       if (!tpl?.ok) {
         // Falla (plantilla no aprobada/pausada, sin saldo, límite, número muerto): reintento con espera
@@ -10129,7 +10139,9 @@ async function processCustomBroadcasts(env) {
       const ts = new Date().toISOString();
       const wamid = tpl.id || '';
       try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'sent', sent_at = ? WHERE phone = ? AND kind = ?").bind(ts, phone, kind).run(); } catch (_) {}
-      const previewBody = (row.body_preview || '').replace(/\{\{\s*1\s*\}\}/g, primerNombre);
+      const previewBody = row.params_json
+        ? (row.body_preview || '').replace(/\{\{\s*(\d+)\s*\}\}/g, (m0, n) => (params[+n - 1] != null ? params[+n - 1] : m0))
+        : (row.body_preview || '').replace(/\{\{\s*1\s*\}\}/g, primerNombre);
       if (wamid && previewBody) {
         try {
           await env.DB.prepare(
@@ -22898,7 +22910,10 @@ const handler = {
           if (!ph) { invalid++; continue; }
           if (seen.has(ph)) continue;
           seen.add(ph);
-          valid.push({ phone: ph, nombre: String((c && c.nombre) || '').slice(0, 80) });
+          // params (opcional): variables propias de ESTE contacto para la plantilla ({{1}}, {{2}}...). En una
+          // línea y cortas: Meta rechaza saltos de línea y 4+ espacios seguidos en los parámetros.
+          const prm = Array.isArray(c && c.params) ? c.params.slice(0, 10).map(v => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, 200)) : null;
+          valid.push({ phone: ph, nombre: String((c && c.nombre) || '').slice(0, 80), params: (prm && prm.length && prm.every(Boolean)) ? prm : null });
         }
         if (!valid.length) return json({ error: 'no hay contactos validos en el CSV', invalid }, 400);
         let startMs = Date.parse(body?.startTs || '');
@@ -22913,10 +22928,14 @@ const handler = {
         const id = ins?.meta?.last_row_id;
         if (!id) return json({ error: 'no se pudo crear el broadcast' }, 500);
         const kind = 'bc_' + id;
+        // Ventana horaria opcional (hora AR, "8-12,19-20"): fuera de ella el goteo espera.
+        const sendHours = String(body?.send_hours || '').replace(/\s+/g, '');
+        if (/^\d{1,2}-\d{1,2}(,\d{1,2}-\d{1,2})*$/.test(sendHours)) { try { await env.DB.prepare('UPDATE wa_broadcasts SET send_hours = ? WHERE id = ?').bind(sendHours, id).run(); } catch (_) {} }
         const stmts = [];
         for (let i = 0; i < valid.length; i++) {
           const dueAt = new Date(startMs + i * intervalSec * 1000).toISOString();
           stmts.push(env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, ?, '', 'queued', ?, ?)").bind(valid[i].phone, kind, dueAt, valid[i].nombre));
+          if (valid[i].params) stmts.push(env.DB.prepare("INSERT OR REPLACE INTO bc_contact_params (kind, phone, params) VALUES (?, ?, ?)").bind(kind, valid[i].phone, JSON.stringify(valid[i].params)));
         }
         for (let j = 0; j < stmts.length; j += 100) { try { await env.DB.batch(stmts.slice(j, j + 100)); } catch (_) {} }
         return json({ ok: true, id, kind, enqueued: valid.length, invalid, interval_sec: intervalSec, start: new Date(startMs).toISOString(), duration_min: durationMin });
