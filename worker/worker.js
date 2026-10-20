@@ -6143,7 +6143,7 @@ function corteMedidaCobro(r) {
 function corteCobroMsg(g) {
   const nombre = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
   const lineas = (g.piezas || []).map(p => '- ' + (p.diseno || 'diseño') + (p.medida ? ' (' + p.medida + ')' : '') + ((parseInt(p.cantidad, 10) || 1) > 1 ? ' x' + p.cantidad : '') + ': $' + Number(p.precio || 0).toLocaleString('es-AR')).join('\n');
-  return (nombre ? 'Hola ' + nombre + ', ' : 'Hola, ') + 'te paso el detalle de tu corte de esta semana:\n' + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR') + '\n\nPara confirmarlo transferí a ' + CORTE_ALIAS + ' (' + CORTE_TITULAR + ') y mandame el comprobante por acá.';
+  return (nombre ? 'Hola ' + nombre + ', ' : 'Hola, ') + (g.insumos ? 'te paso el detalle de tu pedido:\n' : 'te paso el detalle de tu corte de esta semana:\n') + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR') + '\n\nPara confirmarlo transferí a ' + CORTE_ALIAS + ' (' + CORTE_TITULAR + ') y mandame el comprobante por acá.' + (g.insumos ? ' Apenas se acredite lo preparamos para despachar.' : '');
 }
 // Recibo con el desglose, para quien PAGÓ sin haber recibido nunca el detalle (el cobro le llegó por plantilla, solo el
 // total, y contestó directo con el comprobante). Mismo detalle que el cobro pero sin pedir transferencia.
@@ -6253,11 +6253,11 @@ async function corteVigiaPago(env, phone, opts = {}) {
   if (total > 0 && monto >= total * 0.99) {
     // Piezas de ESTE cobro, leídas ANTES de la transición (después pasan a 'pagado') → para el recibo con detalle.
     let piezas = [];
-    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) {}
+    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) {}
     const ch = await transicion('pagado');
     if (ch === 0) return await ch0(); // no confirmar ni avisar dos veces (o reintentar si el pago quedó sin marcar)
     if (ch < 0) { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó comprobante por $' + monto.toLocaleString('es-AR') + ' pero falló marcarlo PAGADO en la base. Revisalo a mano.', { tipo: 'corte_pago', prioridad: 'P1', refPhone: phone, plata: true }); } catch (_) {} return true; }
-    const sheetMsg = await corteTrasPagado(env, phone, piezas, cobr.nombre, total, proof, 'recibido, gracias! tu corte queda confirmado');
+    const sheetMsg = await corteTrasPagado(env, phone, piezas, cobr.nombre, total, proof, (piezas.length && piezas.every(p => corteEsInsumoProd(p.producto)) ? 'recibido, gracias! tu pedido queda confirmado, ya lo preparamos para despachar' : 'recibido, gracias! tu corte queda confirmado'));
     try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' pagó $' + monto.toLocaleString('es-AR') + ' (total $' + total.toLocaleString('es-AR') + '). Lo marqué PAGADO.' + sheetMsg, { tipo: 'corte_pago_ok', prioridad: 'P2', refPhone: phone }); } catch (_) {}
   } else {
     const ch = await transicion('parcial');
@@ -6277,7 +6277,7 @@ async function corteAutoDetalle(env, phone, opts = {}) {
   const gapMs = Math.max(0, Number(opts.reenviarTrasMs) || 0);
   const cutoff = gapMs ? isoHace(gapMs) : '';
   let rows;
-  try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) { return false; }
+  try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) { return false; }
   if (!rows.length) return false;
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
   // DEDUP ROBUSTO: si YA le mandamos el detalle de este cobro (sent_at), NO reenviar — pase lo que pase.
@@ -6295,7 +6295,7 @@ async function corteAutoDetalle(env, phone, opts = {}) {
   let claimed = null;
   try { claimed = await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET sent_at=excluded.sent_at WHERE corte_detalle_sent.sent_at IS NULL OR corte_detalle_sent.sent_at='' OR (?<>'' AND corte_detalle_sent.sent_at < ?) RETURNING phone").bind(phone, now, now, cutoff, cutoff).first(); } catch (_) {}
   if (!claimed) return false;
-  const g ={ cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: corteMedidaCobro(r), cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+  const g ={ cliente_nombre: rows[0].cliente_nombre, insumos: rows.every(r => corteEsInsumoProd(r.producto)), piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: corteMedidaCobro(r), cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
   let ok = false;
   try { const r = await corteSend(env, phone, corteCobroMsg(g)); ok = !!(r && r.ok); } catch (_) {}
   // Si no salió, liberamos la reserva para que lo reintente el próximo tick.
@@ -6361,13 +6361,13 @@ async function corteVigiaParcial(env) {
     if (pagado < total * 0.99) { await avisar('mandó otro comprobante por ' + pesos(monto) + ': lleva ' + suma + ' de ' + pesos(total) + ' (faltan ' + pesos(total - pagado) + ').'); continue; }
     // Completó: mismas consecuencias que un pago de una vez. Piezas leídas ANTES de la transición (para el recibo).
     let piezas = [];
-    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio FROM corte_pedidos WHERE telefono=? AND estado_pago='parcial' AND precio>0").bind(r.telefono).all()).results || []; } catch (_) {}
+    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto FROM corte_pedidos WHERE telefono=? AND estado_pago='parcial' AND precio>0").bind(r.telefono).all()).results || []; } catch (_) {}
     let ch = -1;
     try { const u = await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pagado', updated_at=? WHERE telefono=? AND estado_pago='parcial'").bind(nowIso, r.telefono).run(); ch = (u && u.meta && u.meta.changes) || 0; } catch (_) {}
     if (ch < 0) { await avisar('completó el pago (' + suma + ', total ' + pesos(total) + ') pero no pude marcarlo PAGADO en la base: marcalo desde el tablero.'); continue; }
     try { await env.DB.prepare("DELETE FROM corte_pago_parcial WHERE phone=?").bind(r.telefono).run(); } catch (_) {}
     if (ch === 0) continue; // ya lo habían marcado a mano en el medio: no confirmar ni avisar de nuevo
-    const sheetMsg = await corteTrasPagado(env, r.telefono, piezas, r.nombre, total, proof, 'recibido, gracias! con esto queda completo el pago de tu corte');
+    const sheetMsg = await corteTrasPagado(env, r.telefono, piezas, r.nombre, total, proof, (piezas.length && piezas.every(p => corteEsInsumoProd(p.producto)) ? 'recibido, gracias! con esto queda completo el pago de tu pedido, ya lo preparamos para despachar' : 'recibido, gracias! con esto queda completo el pago de tu corte'));
     await avisar('completó el pago con otra transferencia: ' + suma + ' (total ' + pesos(total) + '). Lo marqué PAGADO.' + sheetMsg, true);
   }
 }
@@ -7019,9 +7019,10 @@ async function ensureCorteLandingSchema(env) {
   await ensureCorteHojaSchema(env); // hoja_cliente, hoja_fila, hoja_fecha
   try { await ensureCorteDespachoSchema(env); } catch (_) {} // entrega_manual
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_corte_pedidos_origen ON corte_pedidos(origen, hoja_fecha)').run(); } catch (_) {}
+  try { await ensureCorteExpressSchema(env); } catch (_) {} // express (corte_pedidos) y express_* / dir_ltv_at (envíos)
   try {
     await env.DB.prepare(`SELECT ${CORTE_LANDING_COLS} FROM corte_landing_envios LIMIT 0`).all();
-    await env.DB.prepare('SELECT origen, hoja_cliente, hoja_fila, hoja_fecha, entrega_manual FROM corte_pedidos LIMIT 0').all();
+    await env.DB.prepare('SELECT origen, hoja_cliente, hoja_fila, hoja_fecha, entrega_manual, express FROM corte_pedidos LIMIT 0').all();
     _corteLandingSchemaOk = true;
   } catch (_) {}
   return _corteLandingSchemaOk;
@@ -7242,7 +7243,12 @@ async function corteLandingCron(env) {
     try { lk = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('corte_landing_lock', ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at WHERE kv_cache.updated_at < ? RETURNING k").bind(lockId, new Date(ahora).toISOString(), new Date(ahora - 4 * 60000).toISOString()).first(); } catch (_) {}
     if (!lk) return;
     try {
+      const _paso = async (nom, fn) => { try { await fn(env, ahora); } catch (e) { try { console.log(nom + ': ' + String((e && e.message) || e)); } catch (_) {} } };
+      await _paso('corteExpressPreparar', corteExpressPreparar);   // exprés de insumos: detecta y prepara (19/20-oct)
+      await _paso('corteExpressLiberar', corteExpressLiberar);     // pagado → "Para embalar" de Neyen + aviso
       await corteLandingEscribirPendientes(env, ahora);
+      await _paso('corteLandingDirNueva', corteLandingDirNueva);   // dirección nueva de un cliente conocido → LTV
+      await _paso('corteExpressCobrar', corteExpressCobrar);       // cobro con el detalle (texto o plantilla)
       await corteLandingResumenes(env, ahora);
       await corteAutoCarga(env, ahora);
       if (new Date(ahora - 3 * 3600000).getUTCHours() === 4 && new Date(ahora).getUTCMinutes() < 5) { // 4 AR: contadores viejos
@@ -7253,7 +7259,7 @@ async function corteLandingCron(env) {
 }
 async function corteLandingEscribirPendientes(env, ahora) {
   if ((await kvGet(env, 'corte_hoja_auto_on', '1')) !== '1') return;
-  const cand = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, cantidad, ancho_real, alto_real, producto, estado, precio FROM corte_pedidos WHERE origen='landing' AND hoja_fila IS NULL AND IFNULL(hoja_fecha,'')!='' AND estado NOT IN ('prueba','cancelado') ORDER BY id LIMIT 60").all()).results || [];
+  const cand = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, cantidad, ancho_real, alto_real, producto, estado, precio, estado_pago FROM corte_pedidos WHERE origen='landing' AND hoja_fila IS NULL AND IFNULL(hoja_fecha,'')!='' AND estado NOT IN ('prueba','cancelado') ORDER BY IFNULL(express,0) DESC, id LIMIT 60").all()).results || [];
   // Diseño: cuando Emma ya cargó la medida final. Insumo: al cierre de su tanda (sábado 12 h).
   const listas = cand.filter(p => p.producto === 'TRANS' ? (p.estado !== 'pedido' && +p.ancho_real > 0 && +p.alto_real > 0) : ahora >= corteLandingCierreDe(p.hoja_fecha)).slice(0, 15);
   if (!listas.length) return;
@@ -7293,7 +7299,7 @@ async function corteLandingEscribirPendientes(env, ahora) {
       // hace Gaspar a mano con los precios especiales (la fórmula de COGS no conoce la escala de las fuentes ni los
       // precios nuevos). Si falla, la fila igual queda escrita: se avisa y no se reintenta (no se duplica nada).
       if (!r.vinculada && +p.precio > 0) {
-        try { await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', [{ range: `Venta_Insumos!I${r.fila}:J${r.fila}`, values: [['Pendiente de pago', Math.round(+p.precio * 100) / 100]] }]); }
+        try { await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', [{ range: `Venta_Insumos!I${r.fila}:J${r.fila}`, values: [[['pagado', 'interno'].includes(String(p.estado_pago || '')) ? 'pagado' : 'Pendiente de pago', Math.round(+p.precio * 100) / 100]] }]); }
         catch (err) { await corteLandingError(env, 'Venta_Insumos fila ' + r.fila + ' (pago/precio): ' + String((err && err.message) || err)); }
       }
       await env.DB.prepare("UPDATE corte_pedidos SET hoja_fila=?, hoja_cliente=?, updated_at=? WHERE id=? AND hoja_fila IS NULL").bind(r.fila, cliente, new Date().toISOString(), p.id).run();
@@ -7336,7 +7342,7 @@ async function corteLandingResumenes(env, ahora) {
     if (ins.length) { const tot = {}; ins.forEach(p => { const k = p.diseno_nombre || p.producto; tot[k] = (tot[k] || 0) + (parseInt(p.cantidad, 10) || 1); }); l.push('Insumos: ' + Object.entries(tot).map(([k, n]) => n + ' × ' + k).join(', ')); }
     l.push(sinMedir ? 'Emma: ' + (dis.length - sinMedir) + ' medidos, ' + sinMedir + ' por medir' : 'Emma ya midió todo');
     if (nuevos.length) l.push('Clientes nuevos: ' + nuevos.map(e => e.nombre_hoja + ' (…' + String(e.telefono).slice(-4) + ')').join(', '));
-    if (dirNuevas.length) l.push('Envío a una dirección nueva (pasásela a logística): ' + dirNuevas.map(e => { const d = dirDe(e) || {}; return e.nombre_hoja + ': ' + [d.calle, d.localidad, d.provincia, d.cp ? 'CP ' + d.cp : ''].filter(Boolean).join(', '); }).join(' · '));
+    if (dirNuevas.length) l.push(((await kvGet(env, 'corte_dir_ltv_on', '0')) === '1' ? 'Envío a una dirección nueva (ya la actualicé en LTV para logística): ' : 'Envío a una dirección nueva (pasásela a logística): ') + dirNuevas.map(e => { const d = dirDe(e) || {}; return e.nombre_hoja + ': ' + [d.calle, d.localidad, d.provincia, d.cp ? 'CP ' + d.cp : ''].filter(Boolean).join(', '); }).join(' · '));
     // Se marca aunque el envío falle: es un resumen, no se reintenta cada 5 minutos.
     try { await precotizNotifyGaspar(env, l.join('\n'), { tipo: 'corte_landing_resumen', prioridad: 'P2', clave: 'corte_landing_resumen:' + f }); } catch (_) {}
     await env.DB.prepare("UPDATE corte_landing_envios SET cierre_at=? WHERE hoja_fecha=? AND IFNULL(cierre_at,'')=''").bind(new Date().toISOString(), f).run();
@@ -7353,8 +7359,8 @@ async function corteLandingAsignarTanda(env, fecha) {
   const td = await corteTandaDeFecha(env, f, false);
   if (!td.tanda) return { error: 'no pude crear/encontrar la tanda' };
   const tid = td.tanda.id, nowIso = new Date().toISOString();
-  const a = await env.DB.prepare("UPDATE corte_pedidos SET tanda_id=?, updated_at=? WHERE origen='landing' AND hoja_fecha=? AND tanda_id IS NULL AND estado NOT IN ('prueba','cancelado')").bind(tid, nowIso, f.txt).run();
-  const c = await env.DB.prepare("UPDATE corte_pedidos SET estado='cortado', updated_at=? WHERE origen='landing' AND hoja_fecha=? AND tanda_id=? AND ((producto='TRANS' AND estado='matriz_lista') OR (producto!='TRANS' AND estado='pedido'))").bind(nowIso, f.txt, tid).run();
+  const a = await env.DB.prepare("UPDATE corte_pedidos SET tanda_id=?, updated_at=? WHERE origen='landing' AND hoja_fecha=? AND tanda_id IS NULL AND estado NOT IN ('prueba','cancelado') AND IFNULL(express,0)=0").bind(tid, nowIso, f.txt).run();
+  const c = await env.DB.prepare("UPDATE corte_pedidos SET estado='cortado', updated_at=? WHERE origen='landing' AND hoja_fecha=? AND tanda_id=? AND ((producto='TRANS' AND estado='matriz_lista') OR (producto!='TRANS' AND estado='pedido')) AND IFNULL(express,0)=0").bind(nowIso, f.txt, tid).run();
   const envs = (await env.DB.prepare("SELECT telefono, entrega FROM corte_landing_envios WHERE prueba=0 AND hoja_fecha=? ORDER BY id").bind(f.txt).all()).results || [];
   const ent = {}; envs.forEach(e => { if (e.telefono && (e.entrega === 'envio' || e.entrega === 'retira')) ent[e.telefono] = e.entrega; }); // el último envío manda
   for (const [tel, en] of Object.entries(ent)) {
@@ -7400,6 +7406,377 @@ async function corteAutoCarga(env, ahora) {
     try { await precotizNotifyGaspar(env, t, { tipo: 'corte_tanda', prioridad: 'P3', clave: 'corte_autocarga:' + clave }); } catch (_) {}
   }
   if (r.error && !/no hay|sin piezas/i.test(r.error)) { try { await precotizNotifyGaspar(env, 'Corte · la carga automática de la tanda ' + fecha + ' falló: ' + r.error, { tipo: 'corte_tanda', prioridad: 'P2', clave: 'corte_autocarga_err:' + clave }); } catch (_) {} }
+}
+// ===== DESPACHO EXPRÉS DE INSUMOS (Gaspar 19/20-oct) =====
+// Un pedido web SOLO de insumos (cables, fuentes) no espera la tanda: hay stock y no tiene proceso productivo ("solamente
+// tiene que esperar a que pague el cliente y así Neyen luego las embala y despacha"). Pasos (cron de la landing, cada 5 min):
+//  1) corteExpressPreparar: el envío sin diseños se marca exprés; si su fila de la planilla todavía no se escribió, pasa a
+//     la fecha de la tanda más nueva (así se escribe en el mismo tick, "Pendiente de pago"). Sin tanda_id todavía: Neyen y
+//     logística no lo ven. NO es exprés si el cliente tiene bases SIN HACER (van juntos, Gaspar 20-oct), otro cobro abierto
+//     o deuda: sigue el flujo de siempre y se le avisa a Gaspar.
+//  2) corteExpressCobrar: con la fila escrita le manda el cobro con el detalle: texto si tiene la ventana de 24 h; si no, una
+//     plantilla ad-hoc con el detalle de ese pedido (Gaspar: "hacé una plantilla para cada caso con el detalle del pedido")
+//     que manda processPendingTemplateSends apenas Meta la aprueba. Las piezas quedan 'cobrando' → el vigía de pagos.
+//  3) corteExpressLiberar: pagado → tanda más nueva + 'cortado' (= "Para embalar" de Neyen) + aviso por WhatsApp a Neyen
+//     (lun a sáb de 8 a 19) y a Gaspar. Logística lo ve con "Sale hoy".
+// kv corte_express_on: '0' no toma pedidos nuevos (los que ya están en curso terminan igual) · 'dry' solo avisa a Gaspar qué
+// haría · '1' prendido. kv corte_express_desde (ISO): los envíos anteriores no se tocan (sin desde, no toma ninguno).
+const CORTE_NEYEN_TEL = '5491162080023';
+function corteEsInsumoProd(producto) { return !['TRANS', 'NEGRO', 'NEON'].includes(String(producto || 'TRANS').toUpperCase()); }
+async function corteExpressOn(env) { return String(await kvGet(env, 'corte_express_on', '0')); }
+let _corteExpressSchemaOk = false;
+async function ensureCorteExpressSchema(env) {
+  if (_corteExpressSchemaOk) return true;
+  const verificar = async () => {
+    try {
+      await env.DB.prepare('SELECT express FROM corte_pedidos LIMIT 0').all();
+      await env.DB.prepare('SELECT express_estado, express_at, express_cobro_at, express_tpl, express_liberado_at, express_aviso_at, express_recordado_at, express_err, dir_ltv_at FROM corte_landing_envios LIMIT 0').all();
+      _corteExpressSchemaOk = true;
+    } catch (_) {}
+    return _corteExpressSchemaOk;
+  };
+  if (await verificar()) return true; // la migración 060 ya las creó: sin ALTER en cada isolate
+  for (const sql of [
+    'ALTER TABLE corte_pedidos ADD COLUMN express INTEGER DEFAULT 0',
+    'ALTER TABLE corte_landing_envios ADD COLUMN express_estado TEXT', 'ALTER TABLE corte_landing_envios ADD COLUMN express_at TEXT',
+    'ALTER TABLE corte_landing_envios ADD COLUMN express_cobro_at TEXT', 'ALTER TABLE corte_landing_envios ADD COLUMN express_tpl TEXT',
+    'ALTER TABLE corte_landing_envios ADD COLUMN express_liberado_at TEXT', 'ALTER TABLE corte_landing_envios ADD COLUMN express_aviso_at TEXT',
+    'ALTER TABLE corte_landing_envios ADD COLUMN express_recordado_at TEXT', 'ALTER TABLE corte_landing_envios ADD COLUMN express_err INTEGER DEFAULT 0',
+    'ALTER TABLE corte_landing_envios ADD COLUMN dir_ltv_at TEXT',
+  ]) { try { await env.DB.prepare(sql).run(); } catch (_) {} }
+  return await verificar();
+}
+// Tanda más nueva con fecha de corte (la misma que logística ve primero, logisticaTandas).
+async function corteTandaVigente(env) {
+  try { return await env.DB.prepare("SELECT id, fecha_corte FROM corte_tandas WHERE fecha_corte IS NOT NULL AND fecha_corte!='' ORDER BY id DESC LIMIT 1").first(); } catch (_) { return null; }
+}
+// Nombre con mayúscula inicial (un nombre cargado en MAYÚSCULAS hace que Meta rechace la plantilla).
+function corteNombreCap(s) { return String(s || '').trim().toLowerCase().replace(/(^|\s)\S/g, x => x.toUpperCase()); }
+function corteExpressIds(e) { return String((e && e.piezas_ids) || '').split(',').map(x => parseInt(x, 10)).filter(Boolean); }
+// Piezas vivas del envío (sin canceladas ni de prueba).
+async function corteExpressPiezas(env, ids) {
+  if (!ids.length) return [];
+  const rows = (await env.DB.prepare(`SELECT id, producto, estado, estado_pago, tanda_id, precio, cantidad, diseno_nombre, hoja_fila FROM corte_pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
+  return rows.filter(p => !['cancelado', 'prueba'].includes(String(p.estado || '')));
+}
+function corteExpressItems(piezas) {
+  const tot = {};
+  piezas.forEach(p => { const k = p.diseno_nombre || p.producto; tot[k] = (tot[k] || 0) + (parseInt(p.cantidad, 10) || 1); });
+  return Object.entries(tot).map(([k, n]) => n + ' × ' + k).join(', ');
+}
+function corteExpressVentana(env, tel) {
+  return env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type NOT IN ('status','reaction')").bind(tel).first()
+    .then(li => !!(li && li.t && (Date.now() - new Date(li.t).getTime()) < 23 * 3600 * 1000)).catch(() => false);
+}
+// ¿Por qué un pedido de insumos de este cliente NO sería exprés? '' = sí es exprés. La usan el cron y la página.
+async function corteExpressMotivoNo(env, tel, nombre, deudaCache) {
+  const bases = await env.DB.prepare("SELECT COUNT(*) AS n FROM corte_pedidos WHERE telefono=? AND IFNULL(producto,'TRANS') IN ('TRANS','NEGRO') AND estado IN ('pedido','matriz_lista')").bind(tel).first();
+  if (bases && bases.n > 0) return 'bases';
+  const otro = await env.DB.prepare("SELECT COUNT(*) AS n FROM corte_pedidos WHERE telefono=? AND estado_pago IN ('cobrando','parcial') AND precio>0").bind(tel).first();
+  if (otro && otro.n > 0) return 'cobro_abierto';
+  const deuda = deudaCache ? await deudaCache() : await corteDeudaKeys(env);
+  if (corteTieneDeuda(deuda, tel, [nombre])) return 'deuda';
+  return '';
+}
+const CORTE_EXPRESS_NO_TXT = { bases: 'tiene bases sin hacer todavía: los insumos van con las bases', cobro_abierto: 'tiene otro cobro abierto', deuda: 'tiene deuda de otra tanda' };
+function corteExpressCancelarTpl(env, tpl) {
+  if (!tpl) return Promise.resolve();
+  return env.DB.prepare("UPDATE wa_pending_template_send SET status='cancelada', updated_at=? WHERE template_name=? AND status='pending'").bind(new Date().toISOString(), tpl).run().catch(() => {});
+}
+async function corteExpressPreparar(env, ahora) {
+  const on = await corteExpressOn(env);
+  if (on !== '1' && on !== 'dry') return;
+  const desde = await kvGet(env, 'corte_express_desde', '');
+  if (!desde || !(await ensureCorteExpressSchema(env))) return;
+  // En 'dry' cada envío se avisa una vez y queda 'dry'; al prender '1' se toman también esos.
+  const envs = (await env.DB.prepare("SELECT id, created_at, telefono, nombre_hoja, entrega, piezas_ids, hoja_fecha, datos_json FROM corte_landing_envios WHERE prueba=0 AND IFNULL(n_disenos,0)=0 AND " + (on === '1' ? "(express_estado IS NULL OR express_estado='dry')" : 'express_estado IS NULL') + " AND created_at >= ? ORDER BY id LIMIT 10").bind(desde).all()).results || [];
+  if (!envs.length) return;
+  const T = await corteTandaVigente(env);
+  if (!T) return;
+  let _deuda;
+  const deudaCache = async () => (_deuda === undefined ? (_deuda = await corteDeudaKeys(env)) : _deuda);
+  for (const e of envs) {
+    const nowIso = new Date().toISOString();
+    const marcar = (estado) => env.DB.prepare("UPDATE corte_landing_envios SET express_estado=?, express_at=? WHERE id=? AND (express_estado IS NULL OR express_estado='dry')").bind(estado, nowIso, e.id).run().catch(() => {});
+    const ids = corteExpressIds(e);
+    if (!ids.length) { if (ahora - Date.parse(e.created_at) > 10 * 60000) await marcar('no:sin_piezas'); continue; } // el alta guarda piezas_ids al final
+    const piezas = await corteExpressPiezas(env, ids);
+    if (!piezas.length || piezas.some(p => !corteEsInsumoProd(p.producto) || p.estado !== 'pedido' || p.tanda_id)) { await marcar('no:piezas'); continue; }
+    const tel = e.telefono;
+    const total = piezas.reduce((s, p) => s + (Number(p.precio) || 0), 0);
+    const cab = 'Corte · pedido de insumos: ' + e.nombre_hoja + ' (…' + String(tel).slice(-4) + '): ' + corteExpressItems(piezas) + ' · $' + total.toLocaleString('es-AR') + ' · ' + (e.entrega === 'envio' ? 'envío' : 'retira');
+    const motivo = await corteExpressMotivoNo(env, tel, e.nombre_hoja, deudaCache);
+    // Con bases sin hacer: los insumos van a la MISMA tanda que las bases si esa tanda todavía no llegó (un pedido del sábado
+    // a la tarde caería si no en el lunes siguiente). Solo si la fila de los insumos todavía no se escribió.
+    let basesFecha = '';
+    if (motivo === 'bases' && !piezas.some(p => p.hoja_fila)) {
+      try {
+        const hoyAR = new Date(ahora - 3 * 3600000), hoy = Date.UTC(hoyAR.getUTCFullYear(), hoyAR.getUTCMonth(), hoyAR.getUTCDate());
+        const fs_ = ((await env.DB.prepare("SELECT DISTINCT hoja_fecha FROM corte_pedidos WHERE telefono=? AND IFNULL(producto,'TRANS') IN ('TRANS','NEGRO') AND estado IN ('pedido','matriz_lista') AND IFNULL(hoja_fecha,'')!=''").bind(tel).all()).results || [])
+          .map(r => corteFechaValida(r.hoja_fecha)).filter(f => f && Date.UTC(f.date.getUTCFullYear(), f.date.getUTCMonth(), f.date.getUTCDate()) > hoy).sort((a, b) => a.date - b.date);
+        if (fs_.length && fs_[0].txt !== corteFechaNorm(e.hoja_fecha)) basesFecha = fs_[0].txt;
+        else if (fs_.length) basesFecha = '='; // ya está en la misma tanda que las bases
+      } catch (_) {}
+    }
+    let dirLinea = '';
+    try { const d = (JSON.parse(e.datos_json || '{}') || {}).dir; if (d && d.calle && (await kvGet(env, 'corte_dir_ltv_on', '0')) !== '1') dirLinea = '\nDirección nueva: ' + [d.calle, d.localidad, d.provincia, d.cp ? 'CP ' + d.cp : ''].filter(Boolean).join(', ') + ' (pasásela a logística).'; } catch (_) {}
+    const basesTxt = basesFecha ? 'tiene bases sin hacer todavía: los insumos van con las bases' + (basesFecha !== '=' ? ' (los pasé a la tanda del ' + basesFecha.split('/').slice(0, 2).map(x => x.padStart(2, '0')).join('/') + ')' : '') : 'tiene bases sin hacer todavía';
+    const txt = cab + '\n' + (motivo ? 'No lo hago exprés porque ' + (motivo === 'bases' ? basesTxt : CORTE_EXPRESS_NO_TXT[motivo]) + ': sigue el flujo de siempre. Si lo querés despachar antes, avisame.' : 'Le mando el cobro solo (con el detalle) y cuando pague pasa a Neyen para despachar.') + dirLinea;
+    if (on === 'dry') {
+      await marcar('dry');
+      try { await precotizNotifyGaspar(env, '[prueba del exprés, no hice nada] ' + txt, { tipo: 'corte_express', prioridad: 'P3', refPhone: tel }); } catch (_) {}
+      continue;
+    }
+    if (motivo) {
+      if (basesFecha && basesFecha !== '=') {
+        try {
+          await env.DB.prepare(`UPDATE corte_pedidos SET hoja_fecha=?, updated_at=? WHERE id IN (${piezas.map(() => '?').join(',')}) AND hoja_fila IS NULL AND estado='pedido' AND tanda_id IS NULL`).bind(basesFecha, nowIso, ...piezas.map(p => p.id)).run();
+          await env.DB.prepare("UPDATE corte_landing_envios SET hoja_fecha=? WHERE id=?").bind(basesFecha, e.id).run();
+        } catch (_) {}
+      }
+      await marcar('no:' + motivo);
+      try { await precotizNotifyGaspar(env, txt, { tipo: 'corte_express', prioridad: motivo === 'bases' ? 'P3' : 'P2', clave: 'corte_express:' + e.id, refPhone: tel }); } catch (_) {}
+      continue;
+    }
+    // Si alguna fila ya se escribió en la planilla (con su fecha original), no se cambia la fecha: la carga de esa tanda
+    // reconoce la pieza por hoja_fecha y no la duplica.
+    const conFila = piezas.some(p => p.hoja_fila);
+    const fecha = conFila ? (e.hoja_fecha || piezas[0].hoja_fecha || T.fecha_corte) : T.fecha_corte;
+    await env.DB.prepare(`UPDATE corte_pedidos SET express=1, hoja_fecha=CASE WHEN hoja_fila IS NULL THEN ? ELSE hoja_fecha END, updated_at=? WHERE id IN (${piezas.map(() => '?').join(',')}) AND estado='pedido' AND tanda_id IS NULL`).bind(fecha, nowIso, ...piezas.map(p => p.id)).run();
+    // cierre_at: el resumen del sábado no lo vuelve a contar.
+    await env.DB.prepare("UPDATE corte_landing_envios SET express_estado='cobrar', express_at=?, hoja_fecha=?, cierre_at=COALESCE(NULLIF(cierre_at,''), ?) WHERE id=? AND (express_estado IS NULL OR express_estado='dry')").bind(nowIso, fecha, nowIso, e.id).run();
+    try { await precotizNotifyGaspar(env, txt, { tipo: 'corte_express', prioridad: 'P2', clave: 'corte_express:' + e.id, refPhone: tel }); } catch (_) {}
+  }
+}
+// Deja las piezas del cobro en 'cobrando' (para el vigía) + la etiqueta del corte. Si el cliente ya había mandado un
+// comprobante (pidió de noche y transfirió enseguida), el vigía lo busca desde que entró el pedido.
+async function corteExpressQuedaCobrando(env, e, ids, via) {
+  const nowIso = new Date().toISOString();
+  try { await env.DB.prepare(`UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE estado_pago='pendiente' AND id IN (${ids.map(() => '?').join(',')})`).bind(nowIso, ...ids).run(); } catch (_) {}
+  try { const lid = await ensureLabelId(env, 'Servicio de corte', '#14b8a6'); if (lid) await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, datetime('now'))").bind(e.telefono, lid).run(); } catch (_) {}
+  // El mensaje (texto o plantilla) YA ES el desglose: que el vigía no mande otro detalle cuando conteste.
+  try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET cobro_at=excluded.cobro_at, sent_at=excluded.sent_at").bind(e.telefono, nowIso, nowIso).run(); } catch (_) {}
+  try { await env.DB.prepare("UPDATE corte_landing_envios SET express_estado='cobrado', express_cobro_at=? WHERE id=?").bind(nowIso, e.id).run(); } catch (_) {}
+  try { await precotizNotifyGaspar(env, 'Corte · le mandé el cobro de insumos a ' + e.nombre_hoja + ' (' + via + ').', { tipo: 'corte_express', prioridad: 'P3', refPhone: e.telefono }); } catch (_) {}
+  try { const hrs = Math.min(72, Math.max(6, Math.ceil((Date.now() - Date.parse(e.created_at || nowIso)) / 3600000) + 1)); await corteVigiaPago(env, e.telefono, { hours: hrs }); } catch (_) {}
+}
+// El cobro automático no pudo salir: las piezas quedan 'cobrando' igual (el vigía toma el comprobante; si el cliente escribe,
+// corteAutoDetalle le manda el detalle) y Gaspar le manda el cobro a mano.
+async function corteExpressSinCobro(env, e, ids, motivo) {
+  try { await env.DB.prepare(`UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE estado_pago='pendiente' AND id IN (${ids.map(() => '?').join(',')})`).bind(new Date().toISOString(), ...ids).run(); } catch (_) {}
+  try { await env.DB.prepare("UPDATE corte_landing_envios SET express_estado='sin_cobro' WHERE id=?").bind(e.id).run(); } catch (_) {}
+  try { await precotizNotifyGaspar(env, 'Corte · no pude mandarle solo el cobro de insumos a ' + e.nombre_hoja + ' (' + motivo + '). Mandáselo vos desde el chat: ya quedó en cobrando, así el vigía toma el comprobante y cuando pague pasa solo a Neyen.', { tipo: 'corte_express', prioridad: 'P2', refPhone: e.telefono }); } catch (_) {}
+}
+function corteExpressTexto(e, piezas) {
+  const total = piezas.reduce((s, p) => s + (Number(p.precio) || 0), 0);
+  return corteCobroMsg({ cliente_nombre: corteNombreCap(e.nombre_hoja), insumos: true, total, piezas: piezas.map(p => ({ diseno: p.diseno_nombre || p.producto, medida: '', cantidad: p.cantidad, precio: p.precio })) });
+}
+// Corre aunque corte_express_on no esté en '1': termina los envíos que ya se marcaron exprés (si no, quedarían varados).
+async function corteExpressCobrar(env, ahora) {
+  if (!(await ensureCorteExpressSchema(env))) return;
+  const hh = new Date(ahora - 3 * 3600000).getUTCHours();
+  if (hh < 8 || hh >= 22) return; // de noche el cobro sale a las 8
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_cobro_lock (phone TEXT PRIMARY KEY, ts TEXT)").run(); } catch (_) {}
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
+  // Reserva vencida (el proceso murió entre la reserva y el envío): se libera para reintentar.
+  try { await env.DB.prepare("UPDATE corte_landing_envios SET express_cobro_at=NULL WHERE express_estado='cobrar' AND express_cobro_at IS NOT NULL AND express_cobro_at!='manual' AND express_cobro_at < ?").bind(new Date(ahora - 15 * 60000).toISOString()).run(); } catch (_) {}
+  // kv corte_express_cobro_on = '0' frena solo los cobros nuevos (los envíos quedan en 'cobrar' y salen al volver a '1').
+  const envs = (await kvGet(env, 'corte_express_cobro_on', '1')) !== '1' ? [] : ((await env.DB.prepare("SELECT id, created_at, telefono, nombre_hoja, entrega, piezas_ids, express_at, express_err FROM corte_landing_envios WHERE express_estado='cobrar' AND express_cobro_at IS NULL ORDER BY id LIMIT 5").all()).results || []);
+  for (const e of envs) {
+    const piezas = await corteExpressPiezas(env, corteExpressIds(e));
+    if (!piezas.length) { try { await env.DB.prepare("UPDATE corte_landing_envios SET express_estado='no:cancelado' WHERE id=?").bind(e.id).run(); } catch (_) {} continue; }
+    // Ya cobrado o pagado por otro lado (a mano): no se manda nada. Si es solo una parte, el resto queda 'cobrando' y aviso.
+    const pend = piezas.filter(p => p.estado_pago === 'pendiente');
+    if (pend.length < piezas.length) {
+      if (!pend.length) { try { await env.DB.prepare("UPDATE corte_landing_envios SET express_estado='cobrado', express_cobro_at='manual' WHERE id=?").bind(e.id).run(); } catch (_) {} }
+      else await corteExpressSinCobro(env, e, pend.map(p => p.id), 'una parte ya figuraba cobrada o pagada a mano');
+      continue;
+    }
+    const ids = piezas.map(p => p.id);
+    // Primero la fila de la planilla (así la marca de pagado la encuentra). Si no aparece en 30 min, aviso una vez.
+    if (piezas.some(p => !p.hoja_fila)) {
+      if (ahora - Date.parse(e.express_at || '') > 30 * 60000 && (await kvGet(env, 'corte_express_sinfila:' + e.id, '')) !== '1') {
+        await kvSet(env, 'corte_express_sinfila:' + e.id, '1');
+        try { await precotizNotifyGaspar(env, 'Corte · el cobro de insumos de ' + e.nombre_hoja + ' está esperando que se escriba su fila en la planilla de Emma (hace más de 30 min). Revisá la planilla.', { tipo: 'corte_express', prioridad: 'P2', refPhone: e.telefono }); } catch (_) {}
+      }
+      continue;
+    }
+    const tel = e.telefono;
+    // Candado por cliente (el mismo del cobro manual): nunca dos cobros a la vez. Fail-closed.
+    const lockNow = new Date().toISOString(), lockStale = new Date(Date.now() - 90 * 1000).toISOString();
+    let lk = null;
+    try { lk = await env.DB.prepare("INSERT INTO corte_cobro_lock (phone, ts) VALUES (?, ?) ON CONFLICT(phone) DO UPDATE SET ts=excluded.ts WHERE corte_cobro_lock.ts < ? RETURNING phone").bind(tel, lockNow, lockStale).first(); } catch (_) { continue; }
+    if (!lk) continue;
+    try {
+      // Reserva atómica del envío (aunque corran dos cron a la vez, uno solo cobra).
+      let res = null;
+      try { res = await env.DB.prepare("UPDATE corte_landing_envios SET express_cobro_at=? WHERE id=? AND express_cobro_at IS NULL AND express_estado='cobrar' RETURNING id").bind(lockNow, e.id).first(); } catch (_) {}
+      if (!res) continue;
+      // Otro cobro abierto que apareció después de preparar (el de la tanda, u otro exprés): el vigía suma todo lo
+      // 'cobrando' del teléfono, así que queda todo junto y lo maneja Gaspar.
+      const otro = await env.DB.prepare(`SELECT COUNT(*) AS n FROM corte_pedidos WHERE telefono=? AND estado_pago IN ('cobrando','parcial') AND precio>0 AND id NOT IN (${ids.map(() => '?').join(',')})`).bind(tel, ...ids).first();
+      if (otro && otro.n > 0) { await corteExpressSinCobro(env, e, ids, 'mientras tanto le salió otro cobro: quedó todo junto en cobrando, mandale vos el total'); continue; }
+      const liberar = async (motivo) => {
+        const n = (+e.express_err || 0) + 1;
+        try { await env.DB.prepare("UPDATE corte_landing_envios SET express_cobro_at=NULL, express_err=? WHERE id=? AND express_cobro_at=?").bind(n, e.id, lockNow).run(); } catch (_) {}
+        if (n >= 3) await corteExpressSinCobro(env, e, ids, '3 intentos: ' + motivo);
+      };
+      const texto = corteExpressTexto(e, piezas);
+      if (await corteExpressVentana(env, tel)) {
+        let r = null; try { r = await corteSend(env, tel, texto); } catch (_) {}
+        if (r && r.ok) await corteExpressQuedaCobrando(env, e, ids, 'mensaje');
+        else await liberar('no salió el mensaje');
+        continue;
+      }
+      // Sin ventana: plantilla ad-hoc con el detalle de este pedido (un solo uso; la limpieza de adhoc_ la borra a los 7 días).
+      const vErr = validateAdhocTemplate(texto);
+      if (vErr || (await kvGet(env, 'adhoc_send_enabled', '1')) === '0') { await corteExpressSinCobro(env, e, ids, 'no tiene la ventana de 24 h y no pude armar la plantilla: ' + (vErr || 'la creación de plantillas está pausada')); continue; }
+      const tplName = 'adhoc_' + Date.now();
+      let ok = false, err = '';
+      try {
+        const _waT = getWaClient(env);
+        const r = await fetch(_waT.templatesUrl(), { method: 'POST', headers: { ..._waT.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: tplName, category: 'UTILITY', allow_category_change: true, language: 'es_AR', components: [{ type: 'BODY', text: texto }] }) });
+        const data = await r.json().catch(() => ({}));
+        ok = r.ok; if (!ok) err = (data && data.error && data.error.message) || ('HTTP ' + r.status);
+      } catch (x) { err = String((x && x.message) || x); }
+      if (!ok) { await liberar('Meta no creó la plantilla: ' + String(err).slice(0, 120)); continue; }
+      await ensureAdhocSchema(env);
+      // Juntas: la plantilla en la cola de envío y el estado del exprés (si no, una reserva vencida crearía otra).
+      try {
+        await env.DB.batch([
+          env.DB.prepare("INSERT OR REPLACE INTO wa_pending_template_send (template_name, phone, body_preview, body_norm, created_by, created_at, status, updated_at) VALUES (?, ?, ?, ?, 'Corte exprés', ?, 'pending', ?)").bind(tplName, tel, texto.slice(0, 300), adhocBodyNorm(texto), lockNow, lockNow),
+          env.DB.prepare("UPDATE corte_landing_envios SET express_estado='plantilla', express_tpl=? WHERE id=?").bind(tplName, e.id),
+        ]);
+      } catch (x) { await liberar('no pude guardar la plantilla: ' + String((x && x.message) || x).slice(0, 80)); }
+    } finally { try { await env.DB.prepare("DELETE FROM corte_cobro_lock WHERE phone=? AND ts=?").bind(tel, lockNow).run(); } catch (_) {} }
+  }
+  // Cobros por plantilla en curso: aprobada y enviada → 'cobrando'. Rechazada/vencida → a mano. Si mientras tanto el cliente
+  // escribió (se abrió la ventana), va por texto y la plantilla se cancela. Si ya pagó o se canceló, la plantilla se cancela.
+  const enPl = (await env.DB.prepare("SELECT id, created_at, telefono, nombre_hoja, piezas_ids, express_tpl, express_err FROM corte_landing_envios WHERE express_estado='plantilla' ORDER BY id LIMIT 20").all()).results || [];
+  for (const e of enPl) {
+    const piezas = await corteExpressPiezas(env, corteExpressIds(e));
+    const pend = piezas.filter(p => p.estado_pago === 'pendiente');
+    if (!pend.length) {
+      // Cancelado o pagado por otro lado: que la plantilla no salga (si ya salió, no pasa nada: el vigía ya no la mira).
+      await corteExpressCancelarTpl(env, e.express_tpl);
+      try { await env.DB.prepare("UPDATE corte_landing_envios SET express_estado=?, express_cobro_at='manual' WHERE id=?").bind(piezas.length ? 'cobrado' : 'no:cancelado', e.id).run(); } catch (_) {}
+      continue;
+    }
+    const ids = pend.map(p => p.id);
+    let st = '';
+    try { const t = await env.DB.prepare("SELECT status FROM wa_pending_template_send WHERE template_name=?").bind(e.express_tpl).first(); st = String((t && t.status) || ''); } catch (_) { continue; }
+    if (st === 'sent') { await corteExpressQuedaCobrando(env, e, ids, 'plantilla'); continue; }
+    if (['rejected', 'expired', 'gone', ''].includes(st)) { await corteExpressSinCobro(env, e, ids, 'la plantilla con el cobro no salió, Meta: ' + (st || 'no la encuentro')); continue; }
+    if (st === 'pending' && await corteExpressVentana(env, e.telefono)) {
+      let can = null;
+      try { can = await env.DB.prepare("UPDATE wa_pending_template_send SET status='cancelada', updated_at=? WHERE template_name=? AND status='pending' RETURNING template_name").bind(new Date().toISOString(), e.express_tpl).first(); } catch (_) {}
+      if (!can) continue; // la está mandando processPendingTemplateSends ('enviando'): el próximo tick la ve 'sent'
+      let r = null; try { r = await corteSend(env, e.telefono, corteExpressTexto(e, pend)); } catch (_) {}
+      if (r && r.ok) await corteExpressQuedaCobrando(env, e, ids, 'mensaje');
+      else { try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='pending', updated_at=? WHERE template_name=? AND status='cancelada'").bind(new Date().toISOString(), e.express_tpl).run(); } catch (_) {} }
+    }
+  }
+}
+// Corre aunque corte_express_on no esté en '1' (termina los ya marcados).
+async function corteExpressLiberar(env, ahora) {
+  if (!(await ensureCorteExpressSchema(env))) return;
+  // Sin tope: un impago que nunca paga no puede tapar a los que vienen atrás.
+  const envs = (await env.DB.prepare("SELECT id, telefono, nombre_hoja, entrega, piezas_ids, express_cobro_at, express_tpl FROM corte_landing_envios WHERE express_at IS NOT NULL AND express_liberado_at IS NULL AND express_estado IN ('cobrar','plantilla','cobrado','sin_cobro') ORDER BY id").all()).results || [];
+  const T = envs.length ? await corteTandaVigente(env) : null;
+  for (const e of envs) {
+    if (!T) break;
+    const piezas = await corteExpressPiezas(env, corteExpressIds(e));
+    if (!piezas.length) { await corteExpressCancelarTpl(env, e.express_tpl); try { await env.DB.prepare("UPDATE corte_landing_envios SET express_estado='no:cancelado' WHERE id=?").bind(e.id).run(); } catch (_) {} continue; }
+    if (piezas.every(p => ['pagado', 'interno'].includes(String(p.estado_pago || '')))) {
+      const nowIso = new Date().toISOString();
+      await corteExpressCancelarTpl(env, e.express_tpl); // pagó antes de que saliera la plantilla: que no le llegue el cobro
+      const u = await env.DB.prepare(`UPDATE corte_pedidos SET tanda_id=?, estado='cortado', updated_at=? WHERE id IN (${piezas.map(() => '?').join(',')}) AND estado='pedido' AND tanda_id IS NULL AND estado_pago IN ('pagado','interno')`).bind(T.id, nowIso, ...piezas.map(p => p.id)).run();
+      await env.DB.prepare("UPDATE corte_landing_envios SET express_liberado_at=?, express_estado='pagado' WHERE id=? AND express_liberado_at IS NULL").bind(nowIso, e.id).run();
+      if ((u && u.meta && u.meta.changes) || 0) {
+        const sem = String(T.fecha_corte).split('/').slice(0, 2).map(x => x.padStart(2, '0')).join('/');
+        try { await precotizNotifyGaspar(env, 'Corte · ' + e.nombre_hoja + ' pagó los insumos (' + corteExpressItems(piezas) + '): ya está en "Para embalar" de Neyen (semana del ' + sem + ')' + (e.entrega === 'envio' ? ' y logística lo ve con "Sale hoy".' : '; lo retira en el taller.'), { tipo: 'corte_express', prioridad: 'P3', refPhone: e.telefono }); } catch (_) {}
+      }
+      continue;
+    }
+    // Cobro sin pagar después de 24 h → un aviso a Gaspar (nada se cancela solo).
+    if (e.express_cobro_at && e.express_cobro_at !== 'manual' && ahora - Date.parse(e.express_cobro_at) > 24 * 3600000) {
+      let rec = null;
+      try { rec = await env.DB.prepare("UPDATE corte_landing_envios SET express_recordado_at=? WHERE id=? AND express_recordado_at IS NULL RETURNING id").bind(new Date().toISOString(), e.id).first(); } catch (_) {}
+      if (rec) { try { await precotizNotifyGaspar(env, 'Corte · ' + e.nombre_hoja + ' todavía no pagó los insumos que pidió (' + corteExpressItems(piezas) + '). Le mandé el cobro hace más de 24 h.', { tipo: 'corte_express', prioridad: 'P3', refPhone: e.telefono }); } catch (_) {} }
+    }
+  }
+  // Aviso a Neyen por WhatsApp (lun a sáb de 8 a 19 AR; fuera de horario sale en la próxima franja).
+  const ar = new Date(ahora - 3 * 3600000);
+  if (ar.getUTCDay() === 0 || ar.getUTCHours() < 8 || ar.getUTCHours() >= 19) return;
+  const avisos = (await env.DB.prepare("SELECT id, nombre_hoja, entrega, piezas_ids FROM corte_landing_envios WHERE express_liberado_at IS NOT NULL AND express_aviso_at IS NULL ORDER BY id LIMIT 10").all()).results || [];
+  for (const e of avisos) {
+    let res = null;
+    const nowIso = new Date().toISOString();
+    try { res = await env.DB.prepare("UPDATE corte_landing_envios SET express_aviso_at=? WHERE id=? AND express_aviso_at IS NULL RETURNING id").bind(nowIso, e.id).first(); } catch (_) {}
+    if (!res) continue;
+    const piezas = await corteExpressPiezas(env, corteExpressIds(e));
+    const texto = 'Insumos pagados para despachar hoy: ' + e.nombre_hoja + ', ' + corteExpressItems(piezas) + (e.entrega === 'envio' ? ', con envío' : ', lo retira en el taller') + '. Ya está en Para embalar del corte.';
+    let r = null; try { r = await sinRespEnviar(env, CORTE_NEYEN_TEL, texto); } catch (_) {}
+    if (!(r && r.ok)) { try { await env.DB.prepare("UPDATE corte_landing_envios SET express_aviso_at=NULL WHERE id=? AND express_aviso_at=?").bind(e.id, nowIso).run(); } catch (_) {} }
+  }
+}
+// DIRECCIÓN NUEVA de un cliente conocido (cargó "mi dirección cambió" en la web) → se actualiza en LTV_Alumnos col E, que es
+// de donde la toma logística (Gaspar 20-oct: "Actualizar LTV"). Se conservan DNI y mail del texto anterior; el anterior queda
+// guardado en corte_dir_cambios. No se toca si LTV dice "retira" (su E es la que decide RETIRA en la planilla de cortes):
+// se le avisa a Gaspar. kv corte_dir_ltv_on ('1' prendido); solo envíos desde corte_express_desde.
+function corteDirLtvTxt(nombre, antes, d, tel) {
+  const a = String(antes || '');
+  const dni = (a.match(/\b(?:dni|cuit|cuil)\b[^0-9]{0,12}([\d.\-]{7,14})/i) || [])[1] || '';
+  const mail = (a.match(/[\w.+-]+@[\w-]+\.[\w.]+/) || [])[0] || '';
+  const recibe = String(d.recibe || '').trim();
+  const recibeOk = recibe && !/^(yo|yo mismo|yo misma|el mismo|la misma|mismo|misma)$/i.test(recibe) && corteNormNombre(recibe) !== corteNormNombre(nombre);
+  return [
+    'Nombre Apellido: ' + nombre, dni ? 'DNI o CUIT: ' + dni : '', 'Cel: ' + String(tel || '').replace(/^549/, ''), mail ? 'Mail: ' + mail : '',
+    'Localidad: ' + String(d.localidad || '').trim(), d.provincia ? 'Provincia: ' + String(d.provincia).trim() : '', d.cp ? 'CP: ' + String(d.cp).trim() : '',
+    'Dirección: ' + String(d.calle || '').trim(), recibeOk ? 'Recibe: ' + recibe : '',
+  ].filter(Boolean).join('\n');
+}
+async function corteLandingDirNueva(env, ahora) {
+  if ((await kvGet(env, 'corte_dir_ltv_on', '0')) !== '1') return;
+  const desde = await kvGet(env, 'corte_express_desde', '');
+  if (!desde || !(await ensureCorteExpressSchema(env))) return;
+  const envs = (await env.DB.prepare("SELECT id, telefono, nombre_hoja, datos_json FROM corte_landing_envios WHERE prueba=0 AND nuevo=0 AND entrega='envio' AND dir_ltv_at IS NULL AND created_at >= ? ORDER BY id LIMIT 5").bind(desde).all()).results || [];
+  if (!envs.length) return;
+  const token = await sheetsAccessToken(env);
+  if (!token) return;
+  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS corte_dir_cambios (id INTEGER PRIMARY KEY AUTOINCREMENT, envio_id INTEGER, telefono TEXT, fila INTEGER, antes TEXT, despues TEXT, at TEXT)').run(); } catch (_) {}
+  for (const e of envs) {
+    const nowIso = new Date().toISOString();
+    const marca = (v) => env.DB.prepare("UPDATE corte_landing_envios SET dir_ltv_at=? WHERE id=? AND dir_ltv_at IS NULL").bind(v, e.id).run().catch(() => {});
+    let d = null; try { d = (JSON.parse(e.datos_json || '{}') || {}).dir || null; } catch (_) {}
+    if (!d || !String(d.calle || '').trim()) { await marca('-'); continue; }
+    const dirTxt = [d.calle, d.localidad, d.provincia, d.cp ? 'CP ' + d.cp : ''].filter(Boolean).join(', ');
+    const avisar = (t, p) => precotizNotifyGaspar(env, 'Corte · ' + e.nombre_hoja + ' ' + t, { tipo: 'corte_dir', prioridad: p || 'P2', refPhone: e.telefono }).catch(() => {});
+    try {
+      const ltv = await corteHojaLeer(token, CORTE_SHEET_ID, 'LTV_Alumnos!A1:F');
+      // Por teléfono (corteTel, como el resto del CRM: entiende 15, 011, +54). Por nombre solo si hay UNA fila con ese
+      // nombre y su teléfono está vacío o es el mismo.
+      let i = ltv.findIndex((r, k) => k > 0 && String((r || [])[1] || '').trim() && corteTel((r || [])[5]) === e.telefono);
+      if (i < 1) {
+        const pn = ltv.map((r, k) => ({ r: r || [], k })).filter(x => x.k > 0 && corteNormNombre(x.r[1]) === corteNormNombre(e.nombre_hoja));
+        if (pn.length === 1 && (!String(pn[0].r[5] || '').trim() || corteTel(pn[0].r[5]) === e.telefono)) i = pn[0].k;
+      }
+      if (i < 1) { await marca('no_encontrado'); await avisar('cargó una dirección nueva (' + dirTxt + ') pero no lo encontré en LTV con su teléfono. Pasásela a logística.'); continue; }
+      const fila = i + 1, antes = String((ltv[i] || [])[4] || '');
+      if (/^\s*retir/i.test(antes)) { await marca('retira'); await avisar('pidió envío a ' + dirTxt + ', pero en LTV figura que retira. No toqué LTV: pasásela a logística.'); continue; }
+      const despues = corteDirLtvTxt(String(ltv[i][1]).trim() || e.nombre_hoja, antes, d, e.telefono);
+      // Última mirada: que la fila siga siendo la misma (nadie la movió mientras tanto).
+      const chk = ((await corteHojaLeer(token, CORTE_SHEET_ID, `LTV_Alumnos!B${fila}:E${fila}`)) || [])[0] || [];
+      if (String(chk[0] || '').trim() !== String(ltv[i][1] || '').trim() || String(chk[3] || '') !== antes) continue; // se reintenta el próximo tick
+      await env.DB.prepare('INSERT INTO corte_dir_cambios (envio_id, telefono, fila, antes, despues, at) VALUES (?, ?, ?, ?, ?, ?)').bind(e.id, e.telefono, fila, antes, despues, nowIso).run();
+      await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', [{ range: `LTV_Alumnos!E${fila}`, values: [[despues]] }]);
+      await marca(nowIso);
+      await avisar('cambió la dirección de envío: ' + dirTxt + '. La actualicé en LTV (fila ' + fila + ') para logística; la anterior quedó guardada.', 'P3');
+    } catch (err) {
+      await marca('error');
+      await avisar('cargó una dirección nueva (' + dirTxt + ') y no la pude pasar a LTV (' + String((err && err.message) || err).slice(0, 80) + '). Pasásela a logística.');
+    }
+  }
 }
 // ---- Endpoints públicos de la landing (sin sesión; antes del muro de /admin/) ----
 //  GET  /corte/landing/config  → plazo, precios, insumos y video.
@@ -7579,7 +7956,17 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
   const huella = (await sha256hex(JSON.stringify([tel, entrega, disenos.map(d => [d.foto, d.nombre, d.ancho, d.alto, d.cantidad]), insumos.map(x => [x.codigo, x.cantidad, x.color])]))).slice(0, 32);
   try {
     const prev = await env.DB.prepare("SELECT id, n_disenos, hoja_fecha FROM corte_landing_envios WHERE telefono=? AND huella=? AND created_at > ? ORDER BY id DESC LIMIT 1").bind(tel, huella, new Date(Date.now() - 30 * 60000).toISOString()).first();
-    if (prev) return [{ ok: true, id: prev.id, repetido: true, lunes: pl.lunesCorto, estado: pl.estado, disenos: prev.n_disenos, insumos: insumos.length, estimado, telefono: corteTelFmt(tel) }, 200];
+    if (prev) {
+      let expressR = false;
+      if (!prueba && !disenos.length) {
+        try {
+          const ex = await env.DB.prepare("SELECT express_estado FROM corte_landing_envios WHERE id=?").bind(prev.id).first();
+          const es = String((ex && ex.express_estado) || '');
+          expressR = es ? !(es.startsWith('no:') || es === 'dry') : ((await kvGet(env, 'corte_express_on', '0')) === '1' && !!(await kvGet(env, 'corte_express_desde', '')) && !(await corteExpressMotivoNo(env, tel, nombreHoja)));
+        } catch (_) {}
+      }
+      return [{ ok: true, id: prev.id, repetido: true, lunes: pl.lunesCorto, estado: pl.estado, disenos: prev.n_disenos, insumos: insumos.length, estimado, telefono: corteTelFmt(tel), express: expressR }, 200];
+    }
   } catch (_) {}
   const nowIso = new Date().toISOString();
   const datosJson = JSON.stringify({ nuevo: nuevo || undefined, dir: dir || undefined });
@@ -7626,7 +8013,12 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
     const t = 'Corte · cliente nuevo por la web: ' + nombre + ' (…' + tel.slice(-4) + ')' + otroNumero + '\n' + (disenos.length ? disenos.length + ' diseño' + (disenos.length === 1 ? '' : 's') : '') + (insumos.length ? (disenos.length ? ' + ' : '') + insumos.length + ' insumo' + (insumos.length === 1 ? '' : 's') : '') + ' · ' + (entrega === 'envio' ? 'envío a ' + [nuevo.localidad, nuevo.provincia].filter(Boolean).join(', ') : 'retira') + ' · tanda del lunes ' + pl.lunesCorto + '\nLo sumo solo a LTV (la pestaña Clientes de Emma lo trae sola) cuando Emma mida su primer diseño.';
     try { await precotizNotifyGaspar(env, t, { tipo: 'corte_landing_nuevo', prioridad: 'P2', clave: 'corte_landing_nuevo:' + envioId, refPhone: tel }); } catch (_) {}
   }
-  return [{ ok: true, id: envioId, lunes: pl.lunesCorto, estado: pl.estado, disenos: disenos.length, insumos: insumos.length, estimado, telefono: corteTelFmt(tel) }, 200];
+  // Solo insumos y sin bases pendientes → exprés (sale apenas paga): la página no dice "el lunes te escribimos".
+  let express = false;
+  if (!prueba && !disenos.length) {
+    try { if ((await kvGet(env, 'corte_express_on', '0')) === '1' && (await kvGet(env, 'corte_express_desde', ''))) express = !(await corteExpressMotivoNo(env, tel, nombreHoja)); } catch (_) {}
+  }
+  return [{ ok: true, id: envioId, lunes: pl.lunesCorto, estado: pl.estado, disenos: disenos.length, insumos: insumos.length, estimado, telefono: corteTelFmt(tel), express }, 200];
 }
 function corteEntregaCambiosTxt(cambios) {
   return 'Corte: actualicé la entrega desde la planilla de cortes:\n' + cambios.map(c => `· ${c.cliente} (${c.tanda}): ${c.de} → ${c.a}${c.ya_embalado ? ' ⚠ YA ESTABA EMBALADO, avisale a Neyen' : ''}`).join('\n');
@@ -7864,7 +8256,7 @@ async function logisticaTandas(env, rol) {
 async function logisticaArmar(env, tanda, opts = {}) {
   if (!(await ensureCorteDespachoSchema(env))) throw new Error('schema');
   const tablaOk = await ensureLogiTablaSchema(env); // columnas de la planilla de logística (si falla, sin ellas)
-  const COLS = 'id, tanda_id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, producto, estado, estado_pago, entrega, precio, despachado_at, entregado_at';
+  const COLS = 'id, tanda_id, telefono, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, producto, estado, estado_pago, entrega, precio, despachado_at, entregado_at, IFNULL(express,0) AS express';
   const NO_NEON = "IFNULL(producto,'')!='NEON' AND lower(IFNULL(cliente_nombre,''))!='neon'";
   const rows = (await env.DB.prepare(`SELECT ${COLS} FROM corte_pedidos WHERE tanda_id=? AND ${NO_NEON} ORDER BY cliente_nombre, id`).bind(tanda.id).all()).results || [];
   const origen = {}; // tanda_id anterior → fecha_corte (de dónde viene el arrastre)
@@ -7918,6 +8310,10 @@ async function logisticaArmar(env, tanda, opts = {}) {
     const pend = logi.filter(p => p.estado === 'cortado' || p.estado === 'embalado'); // lo que se puede cargar
     const desp = logi.filter(p => p.estado === 'despachado');
     const vivos = logi.filter(p => p.estado !== 'entregado');
+    // SEGUNDO VIAJE en la misma semana (p. ej. insumos exprés pagados después de que el paquete salió): las marcas de este
+    // paquete anteriores al despacho (envío pagado, contacto, medidas) fueron del primer viaje y no valen para lo nuevo.
+    const _despAt = (pend.length && desp.length && mkCur.despachado_at) ? String(mkCur.despachado_at) : '';
+    const _vale = (ts) => !_despAt || String(ts || '') > _despAt;
     // Marcas de la semana de ORIGEN (arrastre): si TODO lo pendiente viene de antes y esta semana el paquete todavía no se
     // tocó, vale el "envío pagado" de allá (ya lo pagó; quedó en el taller por otra cosa) y sus medidas (Neyen las guarda
     // en la tanda de las piezas). Con piezas nuevas de esta semana el paquete es otro: no se hereda nada. Tampoco se hereda
@@ -7928,9 +8324,9 @@ async function logisticaArmar(env, tanda, opts = {}) {
     const soloArrastre = pend.length > 0 && pend.every(p => p._arrastre);
     const virgen = !mkCur.contacto_estado && !(+mkCur.envio_pagado) && !(+mkCur.intentos);
     const her = (soloArrastre && virgen) ? (mkPrev.find(m => +m.envio_pagado) || null) : null;
-    const mkMed = medido(mkCur) ? mkCur : (soloArrastre ? (mkPrev.find(medido) || null) : null);
-    const envioPagado = her ? true : !!(+mkCur.envio_pagado);
-    const contactoEstado = her ? 'listo' : (mkCur.contacto_estado || '');
+    const mkMed = (medido(mkCur) && _vale(mkCur.medido_at)) ? mkCur : (soloArrastre ? (mkPrev.find(medido) || null) : null);
+    const envioPagado = her ? true : !!(+mkCur.envio_pagado && _vale(mkCur.envio_pagado_at));
+    const contactoEstado = her ? 'listo' : (_vale(mkCur.contacto_at) ? (mkCur.contacto_estado || '') : '');
     const pedidoPagado = !corteTieneDeuda(deuda, k, [...new Set(items.map(p => p.cliente_nombre))]);
     const despachado = !pend.length && desp.length > 0;
     const ests = new Set(pend.map(p => p.estado));
@@ -7963,7 +8359,7 @@ async function logisticaArmar(env, tanda, opts = {}) {
       estado, pago,
       paquete: mkMed ? { largo: mkMed.largo, ancho: mkMed.ancho, alto: mkMed.alto, peso: mkMed.peso || null, bultos: mkMed.bultos || 1, fuente: 'medido', medido_at: mkMed.medido_at } : { ...est, fuente: 'estimado' },
       pieza_mas_larga: est.pieza_mas_larga,
-      contactado: !!(+mkCur.contactado) || contactoEstado === 'listo' || contactoEstado === 'confirmado' || envioPagado, contactado_at: mkCur.contactado_at || '',
+      contactado: (!!(+mkCur.contactado) && _vale(mkCur.contactado_at)) || contactoEstado === 'listo' || contactoEstado === 'confirmado' || envioPagado, contactado_at: mkCur.contactado_at || '',
       cargado: despachado || (!!(+mkCur.cargado) && !pend.length), cargado_at: mkCur.cargado_at || '',
       nota: mkCur.nota || '', nota_at: mkCur.nota_at || '',
       contacto_estado: contactoEstado, contacto_at: (her ? her.contacto_at : mkCur.contacto_at) || null, intentos: +mkCur.intentos || 0,
@@ -7972,6 +8368,7 @@ async function logisticaArmar(env, tanda, opts = {}) {
       listo: pedidoPagado && envioPagado && entrega === 'envio' && pend.length > 0,
       bloqueo,
       arrastre: arrP.length ? arrP[0]._arrastre : null,
+      express: !despachado && pend.some(p => +p.express === 1), // insumos exprés ya pagados: sale hoy
       despachado, despachado_at: despachado ? (mkCur.despachado_at || desp.map(p => p.despachado_at).filter(Boolean).sort().pop() || null) : null,
       ids: pend.map(p => p.id),
       historial: [tanda.id, ...origenes].flatMap(t => logs[t + '|' + k] || []).sort((a, b) => String(b.ts).localeCompare(String(a.ts))).slice(0, 5),
@@ -8048,8 +8445,8 @@ const LOGI_ERR_DB = { error: 'db', motivo: 'No se pudo leer la base. Probá de n
 //  · deshacer_envio_tabla: como deshacer_envio, pero el contacto no vuelve a "escrito": en la tabla contacto y envío pagado
 //    son columnas separadas ('listo' = envío pagado → queda 'confirmado'; otro estado se conserva).
 function logiContactoStmt(env, accion, tandaId, key, nowIso, quienPor) {
-  if (accion === 'escrito') return env.DB.prepare("UPDATE corte_paquetes SET contacto_estado=CASE WHEN IFNULL(envio_pagado,0)=1 THEN 'listo' ELSE 'escrito' END, contacto_at=? WHERE tanda_id=? AND cliente_key=?").bind(nowIso, tandaId, key);
-  if (accion === 'no_contesta') return env.DB.prepare("UPDATE corte_paquetes SET intentos=IFNULL(intentos,0)+1, contacto_estado=CASE WHEN IFNULL(envio_pagado,0)=1 THEN 'listo' ELSE 'no_contesta' END, contacto_at=? WHERE tanda_id=? AND cliente_key=?").bind(nowIso, tandaId, key);
+  if (accion === 'escrito') return env.DB.prepare("UPDATE corte_paquetes SET contacto_estado=CASE WHEN IFNULL(envio_pagado,0)=1 AND (despachado_at IS NULL OR IFNULL(envio_pagado_at,'') > despachado_at) THEN 'listo' ELSE 'escrito' END, contacto_at=? WHERE tanda_id=? AND cliente_key=?").bind(nowIso, tandaId, key);
+  if (accion === 'no_contesta') return env.DB.prepare("UPDATE corte_paquetes SET intentos=IFNULL(intentos,0)+1, contacto_estado=CASE WHEN IFNULL(envio_pagado,0)=1 AND (despachado_at IS NULL OR IFNULL(envio_pagado_at,'') > despachado_at) THEN 'listo' ELSE 'no_contesta' END, contacto_at=? WHERE tanda_id=? AND cliente_key=?").bind(nowIso, tandaId, key);
   if (accion === 'envio_pagado') return env.DB.prepare("UPDATE corte_paquetes SET envio_pagado=1, envio_pagado_at=?, envio_pagado_por=?, contacto_estado='listo', contacto_at=?, contactado=1, contactado_at=?, contactado_por=? WHERE tanda_id=? AND cliente_key=?").bind(nowIso, quienPor, nowIso, nowIso, quienPor, tandaId, key);
   if (accion === 'deshacer_envio') return env.DB.prepare("UPDATE corte_paquetes SET envio_pagado=0, envio_pagado_at=NULL, envio_pagado_por=NULL, contacto_estado='escrito', contactado=0, contactado_at=NULL WHERE tanda_id=? AND cliente_key=?").bind(tandaId, key);
   if (accion === 'deshacer_envio_tabla') return env.DB.prepare("UPDATE corte_paquetes SET envio_pagado=0, envio_pagado_at=NULL, envio_pagado_por=NULL, contacto_estado=CASE WHEN contacto_estado='listo' THEN 'confirmado' ELSE contacto_estado END WHERE tanda_id=? AND cliente_key=?").bind(tandaId, key);
@@ -19277,6 +19674,7 @@ function adhocNotifyPhone(createdBy) {
 // Se llama SOLO en horario hábil AR para no escribir de madrugada.
 async function processPendingTemplateSends(env) {
   if (await isWaBillingBlocked(env)) return;
+  try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='pending', updated_at=? WHERE status='enviando' AND updated_at < ?").bind(new Date().toISOString(), new Date(Date.now() - 30 * 60000).toISOString()).run(); } catch (_) {}
   let pend;
   try {
     const rs = await env.DB.prepare(
@@ -19306,6 +19704,9 @@ async function processPendingTemplateSends(env) {
       // remitente), igual que el reuso inmediato. Antes quedaba automated=1 → badge "automático" y el
       // bot de precotización no la contaba como humano.
       const senderSlug = adhocSenderSlug(row.created_by);
+      let _claim = null;
+      try { _claim = await env.DB.prepare("UPDATE wa_pending_template_send SET status='enviando', updated_at=? WHERE template_name=? AND status='pending' RETURNING template_name").bind(new Date().toISOString(), row.template_name).first(); } catch (_) {}
+      if (!_claim) continue; // la canceló el exprés (el cliente escribió o pagó) o la tomó otra corrida
       const rt = await waSendTemplate(env, row.phone, row.template_name, 'es_AR', []);
       if (rt.ok) {
         await registrarPlantillaAdhocEnChat(env, { phone: row.phone, wamid: rt.id || '', texto: row.body_preview, senderSlug });
@@ -19314,15 +19715,15 @@ async function processPendingTemplateSends(env) {
         if (env.ADMIN_NOTIFY_PHONE) { try { await avisoAdmin(env, `✅ Plantilla aprobada y enviada a ${row.phone}:\n"${(row.body_preview || '').slice(0, 120)}"`, { tipo: 'plantilla_enviada', prioridad: 'P3', refPhone: row.phone }); } catch (_) {} }
         await new Promise(rs => setTimeout(rs, 400));
       }
-      // si el envío falla, queda 'pending' y reintenta el próximo tick
+      if (!rt.ok) { try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='pending', updated_at=? WHERE template_name=? AND status='enviando'").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {} } // falló: vuelve a 'pending' y reintenta el próximo tick
     } else if (st === 'rejected') {
       try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='rejected', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
       // Avisar AL VENDEDOR que la creó (antes solo a env.ADMIN_NOTIFY_PHONE, sin setear -> mudo).
-      try { await waSendText(env, adhocNotifyPhone(row.created_by), `❌ Meta rechazó tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Probá de nuevo con un texto más simple (sin links ni MAYÚSCULAS) o escribile a mano.`); } catch (_) {}
+      if (row.created_by !== 'Corte exprés') try { await waSendText(env, adhocNotifyPhone(row.created_by), `❌ Meta rechazó tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Probá de nuevo con un texto más simple (sin links ni MAYÚSCULAS) o escribile a mano.`); } catch (_) {}
     } else if ((now - new Date(row.created_at).getTime()) > 24 * 60 * 60 * 1000) {
       try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='expired', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
       // Avisar AL VENDEDOR: Meta no la aprobó en 24h -> NO salió (antes expiraba en silencio).
-      try { await waSendText(env, adhocNotifyPhone(row.created_by), `⌛ Meta no aprobó en 24h tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Reintentá (a veces aprueba al 2º intento) o escribile a mano.`); } catch (_) {}
+      if (row.created_by !== 'Corte exprés') try { await waSendText(env, adhocNotifyPhone(row.created_by), `⌛ Meta no aprobó en 24h tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Reintentá (a veces aprueba al 2º intento) o escribile a mano.`); } catch (_) {}
     }
   }
 }

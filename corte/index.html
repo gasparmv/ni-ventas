@@ -715,10 +715,10 @@
     primer = primer ? primer.charAt(0).toUpperCase() + primer.slice(1).toLowerCase() : '';
     $('listo-t').textContent = primer ? 'Listo, ' + primer : 'Listo';
     var nD = body.disenos.length, nI = body.insumos.length;
-    $('listo-p1').textContent = 'Recibimos tu pedido para la tanda del lunes ' + (j.lunes || '') + ': ' + (nD ? nD + ' diseño' + (nD === 1 ? '' : 's') : '') + (nD && nI ? ' y ' : '') + (nI ? 'insumos' : '') + '.';
+    $('listo-p1').textContent = j.express ? 'Recibimos tu pedido de insumos.' : 'Recibimos tu pedido para la tanda del lunes ' + (j.lunes || '') + ': ' + (nD ? nD + ' diseño' + (nD === 1 ? '' : 's') : '') + (nD && nI ? ' y ' : '') + (nI ? 'insumos' : '') + '.';
     $('listo-lista').innerHTML = body.disenos.map(function (d) { return '<li>' + esc(d.nombre) + ' · ' + esc(String(d.ancho).replace('.', ',')) + ' × ' + esc(String(d.alto).replace('.', ',')) + ' cm' + ((parseInt(d.cantidad, 10) || 1) > 1 ? ' · ' + parseInt(d.cantidad, 10) + ' unidades' : '') + '</li>'; }).join('')
       + body.insumos.map(function (x) { var def = (cfg.insumos || []).find(function (y) { return y.codigo === x.codigo; }); return '<li>' + x.cantidad + ' × ' + esc(def ? def.nombre : x.codigo) + (x.color ? ' ' + esc(x.color) : '') + '</li>'; }).join('');
-    $('listo-p2').textContent = (j.estado === 'margen' ? 'Llegó antes del sábado a las 12, así que entra en esta tanda. ' : '') + 'El lunes te escribimos por WhatsApp' + (j.telefono ? ' al ' + j.telefono : '') + ' con el total final' + (j.estimado ? ' (estimado: ' + pesos(j.estimado) + ')' : '') + '.';
+    $('listo-p2').textContent = j.express ? ('Te escribimos por WhatsApp' + (j.telefono ? ' al ' + j.telefono : '') + ' con el total' + (j.estimado ? ' (' + pesos(j.estimado) + ')' : '') + '. Apenas se acredite el pago lo preparamos para despachar.') : (j.estado === 'margen' ? 'Llegó antes del sábado a las 12, así que entra en esta tanda. ' : '') + 'El lunes te escribimos por WhatsApp' + (j.telefono ? ' al ' + j.telefono : '') + ' con el total final' + (j.estimado ? ' (estimado: ' + pesos(j.estimado) + ')' : '') + '.';
     $('f').hidden = true; $('listo').hidden = false;
     window.scrollTo({ top: $('listo').getBoundingClientRect().top + window.scrollY - 16, behavior: 'smooth' });
   }

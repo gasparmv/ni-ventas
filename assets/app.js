@@ -5887,6 +5887,7 @@ function logiBoardNomHtml(p) {
     if (f.length) chips.push(`<span class="logi-pill a" title="Le falta para poder enviarlo: abrí el renglón y completala">${(p.falta_direccion && !p.dir_editada) || f.length >= 3 ? 'Falta dirección' : 'Falta ' + escapeHtml(f.map(x => NOM[x] || x).join(', '))}</span>`);
   }
   if (p.arrastre) chips.push(`<span class="logi-pill g" title="Quedó en el taller desde la semana del ${escapeHtml(logiFechaCorteDDMM(p.arrastre))}">de la sem. ${escapeHtml(logiFechaCorteDDMM(p.arrastre))}</span>`);
+  if (p.express) chips.push('<span class="logi-pill r" title="Pedido de insumos ya pagado: despachalo hoy">Sale hoy</span>');
   return `<span class="lb-nom" data-lb-part="nom"><span class="n">${escapeHtml(logiNombre(p.cliente) || 'Cliente')}</span>${chips.join('')}</span>`;
 }
 function logiBoardMetaHtml(p) {
