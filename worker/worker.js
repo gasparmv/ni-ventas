@@ -20478,8 +20478,12 @@ const handler = {
                 // hooks de abajo siguen recibiendo msgBody = solo lo que escribió el cliente: la descripción transcribe el
                 // texto de la foto (una captura del anuncio, montos, medidas) y no tiene que disparar respuestas ni ruteos
                 // por palabra clave. Desde el 1-jun (modelo dado de baja) los hooks ya corrían sin descripción.
+                // Interruptor kv img_desc_on (apagado por defecto): con la descripción en el body, lo que lee
+                // wa_messages.body desde D1 la toma como texto del cliente (bot de precotización y su candado de
+                // medidas, leadEsCorporeo, alarma sin responder, clasificadores de cursos/minicurso). Apagado hasta
+                // que esos lectores la distingan.
                 let bodyGuardado = msgBody;
-                if (msgType === 'image' && r2Key && env.AI) {
+                if (msgType === 'image' && r2Key && env.AI && (await kvGet(env, 'img_desc_on', '0')) === '1') {
                   try {
                     const description = await analyzeImage(env, r2Key);
                     if (description) bodyGuardado = (msgBody ? msgBody + ' | ' : '') + '[imagen] ' + description;
@@ -20737,7 +20741,7 @@ const handler = {
                 if (msgType === 'audio' && r2Key && env.AI) {
                   try { const t = await transcribeAudio(env, r2Key); if (t) msgBody = '[audio] ' + t; } catch (_) {}
                 }
-                if (msgType === 'image' && r2Key && env.AI) {
+                if (msgType === 'image' && r2Key && env.AI && (await kvGet(env, 'img_desc_on', '0')) === '1') {
                   try { const desc = await analyzeImage(env, r2Key); if (desc) msgBody = (msgBody ? msgBody + ' | ' : '') + '[imagen] ' + desc; } catch (_) {}
                 }
                 try {
