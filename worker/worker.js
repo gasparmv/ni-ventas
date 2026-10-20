@@ -19909,10 +19909,12 @@ async function moActualizar(env, ids) {
   await ensureProdSchema(env);
   const P = await moConfig(env);
   if (!P) return 0;
-  const rows = (await env.DB.prepare(`SELECT id, fecha, cartel, precio, cantidad, tramos, cm_neon, alto, ancho, es_corporeo, prod_pagado_at, mo_monto FROM pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
+  const rows = (await env.DB.prepare(`SELECT id, fecha, cartel, precio, cantidad, tramos, cm_neon, alto, ancho, es_corporeo, prod_pagado_at, mo_monto, mo_regla FROM pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
   const now = new Date().toISOString(), stmts = [];
   for (const r of rows) {
     if (+r.es_corporeo || r.prod_pagado_at) continue;
+    // Mano de obra FIJA (mo_regla 'fija'): Gaspar la dejó como estaba a propósito (20-oct: ribs y chancho, viejos y sin tramos).
+    if (String(r.mo_regla || '') === 'fija') continue;
     const mo = calcManoObra(r, P);
     if (!mo) { if (r.mo_monto != null) stmts.push(env.DB.prepare("UPDATE pedidos SET mo_monto = NULL, mo_regla = '', mo_detalle = NULL, mo_at = ? WHERE id = ?").bind(now, r.id)); continue; }
     if (r.mo_monto != null && Math.round(+r.mo_monto) === mo.monto) continue;
