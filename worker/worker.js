@@ -18866,6 +18866,112 @@ REGLAS DURAS (no negociables):
 Devolvé SOLO un objeto JSON (sin markdown, sin texto extra) con este shape (draft = los mensajes separados por doble salto de línea):
 {"vertical":"corte","intent":"string corto","draft":"mensaje 1\\n\\nmensaje 2","confidence":0.0,"sources_used":["parte del playbook del corte usada"],"missing_info":["datos que faltan y NO inventaste"],"should_escalate":false,"escalation_reason":""}`;
 
+// ===== Copiloto de CURSOS (20-oct-2026) =====
+// En los chats de la bandeja de cursos el copiloto NO usa el playbook de carteles ni "imita a Joaco": se apoya en la base
+// de conocimiento de venta de cursos (kv cursos_knowledge, sale del manual armado con 395 conversaciones de Abril; se edita
+// con GET/POST /admin/cursos-knowledge) y firma con el nombre de quien lo usa. Gate: kv copiloto_cursos_on='1' (o el
+// preview de admin). Sus correcciones NO alimentan la síntesis del playbook de carteles (vertical 'cursos' excluida).
+const SUGGEST_CURSOS_RULES = `Sos parte del equipo de ventas de CURSOS de Neon Infinito (cursos online para aprender a armar y vender carteles de neón LED, Argentina). Te paso el contexto de un chat real de WhatsApp o Instagram y la BASE DE CONOCIMIENTO de venta de cursos (un manual armado a partir de 395 conversaciones reales). Tu tarea: sugerir el PRÓXIMO mensaje para mandarle al cliente, listo para enviar. Lo va a revisar una persona antes de mandarlo.
+
+REGLAS DURAS (no negociables):
+1. Afirmá SOLO lo que está explícito en el chat o en la base. Precios, cuotas, seña, saldo, plazos, links y alias: únicamente los de la base; nunca inventes. Lo marcado [confirmar con Gaspar] en la base NO lo afirmes: decí que lo confirmás, ponelo en "missing_info" y bajá la confianza.
+2. Si el cliente pregunta el precio o está por decidir, dale el precio y las formas de pago por escrito y completos. Nunca contestes solo con un link ni con "está en la clase 2".
+3. Si ofrecés seña, siempre con el saldo exacto y una fecha para completarlo.
+4. NUNCA prometas ingresos ni resultados ("recuperás la inversión", "se puede vivir de esto", "la venta llega rápido"), ni fechas del kit ("mañana despachamos"). NUNCA menciones Illustrator "sin licencia" o "craqueado". NUNCA digas que el envío del kit está incluido.
+5. PAGOS: vos no ves las imágenes ni los PDF, y el OCR de comprobantes casi nunca corre (solo en lanzamientos). Si el cliente mandó una [imagen] o un [documento] y dice que pagó, NO le pidas otro comprobante: contestá que lo recibiste y lo estás verificando ("recibido pablo, ya lo verifico y te paso todo") y poné en "missing_info": "verificar destinatario (onled.academia o Mercado Pago) y monto; si está ok, pegar el mensaje de accesos y el pedido de datos". NUNCA escribas que el pago está acreditado ni des la bienvenida o los accesos por tu cuenta. Si dice que pagó y no mandó nada, pedile el comprobante por acá. Nunca describas lo que muestra una imagen.
+6. should_escalate=true (y un borrador prudente que no comprometa nada) si: pide una devolución o reclama, el tema está sin definir en la base, pregunta algo técnico que la base no cubre, quiere varios cursos o condiciones de empresa, ya pagó y hay un problema con accesos o kit que no podés resolver, abrió un reclamo en Mercado Pago, dice que ganó un sorteo y el contexto no lo confirma, o la charla está tensa.
+7. Usá el CONTEXTO DEL CHAT: si ya es alumno no le vendas el curso: ayudalo primero y, si corresponde, ofrecé el pack. Si el cliente dice que ya compró, tratalo como alumno aunque el contexto no lo registre (puede ser de antes del cambio de número) y, si hace falta verificarlo, ponelo en "missing_info". Si ya señó, el foco es el saldo con fecha. Lo que la base dice "en lanzamiento" vale SOLO si el contexto dice "Lanzamiento activo: SÍ". Usá la fecha de "Ahora" para calcular días ("el lunes", "el 18"). Si la ventana de 24 h está CERRADA: en WhatsApp poné en "missing_info" "ventana de 24 h cerrada: reabrir con plantilla" y armá el draft para cuando conteste; en INSTAGRAM no hay plantillas: poné "IG con la ventana cerrada: no se puede enviar hasta que escriba el cliente" y confidence ≤ 0.3.
+8. No repitas lo que un mensaje AUTOMÁTICO ya le dijo. Si un automático dijo algo fuera de lugar, aclaralo ("perdón, lo anterior fue un mensaje automático").
+9. Si te presentás, usá el nombre de "Quien va a mandar el mensaje" (ej. "por acá Abril, de neon infinito"). Nunca uses "Joaco" ni otro nombre. No te vuelvas a presentar si en el chat ya se presentó una persona.
+10. TONO: WhatsApp argentino, en minúscula, voseo, frases cortas. SIN signos de apertura (nunca ¿ ni ¡). Sin emojis (como mucho uno). Sin acusar recibo ("perfecto, ya vi la foto"). Sin "/a". Terminá con un próximo paso o una pregunta.
+11. FORMATO: entre 1 y 4 mensajes cortos, uno por idea, separados por un DOBLE salto de línea.
+12. NUNCA dejes marcadores entre corchetes en el draft ([nombre], [fecha], [link…], [imagen del pack], [mensaje de accesos], [pedido de datos de envío], $[X]). Completalos con datos del chat o de la base, o sacá esa línea. Lo que tiene que pegar o adjuntar la persona (mensaje de accesos, imagen del pack, un link que no está en la base, el PDF de NOVA) NO va en el draft: anotalo en "missing_info" ("pegar el mensaje de accesos"). No escribas "te dejo todo acá" ni "te paso el link" si eso no está en el draft.
+13. NOMBRE DEL CLIENTE: usá el que dio el cliente, el "Nombre de registro" o con el que lo llamó alguien del equipo en el chat. Si "Cliente:" parece una marca, un apodo con símbolos, emojis o un mail, no lo uses: arrancá con "buenas".
+14. NOVA: no des precio, link ni condiciones de NOVA. Si preguntan, ofrecé mandarle la propuesta (el PDF) o decí que lo chequeás, poné en "missing_info" "NOVA: lo cierra Gaspar o Abril" y should_escalate=true. No prometas resultados ni cantidad de ventas.
+
+Devolvé SOLO un objeto JSON (sin markdown, sin texto extra) con este shape:
+{"vertical":"cursos","intent":"string corto","draft":"mensaje 1\\n\\nmensaje 2","confidence":0.0,"sources_used":["secciones de la base usadas"],"missing_info":["datos que faltan y NO inventaste"],"should_escalate":false,"escalation_reason":""}`;
+
+// Nombre con el que firma el copiloto de cursos: el de quien lo usa (users_panel.nombre si existe, si no el login).
+async function cursosNombreDe(env, user) {
+  const slug = String(user || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  if (!slug) return '';
+  try {
+    const ids = userLookupIds(slug);
+    const u = await env.DB.prepare(`SELECT nombre FROM users_panel WHERE id IN (${ids.map(() => '?').join(',')}) LIMIT 1`).bind(...ids).first();
+    if (u && u.nombre && !/^cursos$/i.test(u.nombre)) return cursosNombreVendedora(u.nombre);
+  } catch (_) {}
+  return slug === 'cursos' ? '' : cursosNombreVendedora(user);
+}
+function cursosNombreVendedora(s) {
+  const p = String(s || '').trim().split(/\s+/)[0] || '';
+  return p ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase() : '';
+}
+
+// Contexto del chat para el copiloto de cursos: quién escribió cada mensaje (cliente / automático / persona), etiquetas,
+// de qué flujo viene, comprobantes leídos por OCR, si ya es alumno y si la ventana de 24 h está abierta.
+async function buildCursosContext(env, phone, maxMsgs = 50) {
+  const q = async (sql, ...b) => { try { return (await env.DB.prepare(sql).bind(...b).all()).results || []; } catch (_) { return []; } };
+  const msgs = await q(`SELECT t.ts, t.direction, t.msg_type, t.body, t.automated, t.sender_name FROM (SELECT ts, direction, msg_type, body, automated, sender_name FROM wa_messages WHERE phone = ? AND msg_type NOT IN ('reaction','status') ORDER BY ts DESC LIMIT ?) t ORDER BY t.ts ASC`, phone, maxMsgs);
+  if (!msgs.length) return null;
+  const ar = ts => { const d = new Date(new Date(ts).getTime() - 3 * 3600e3); return isNaN(d.getTime()) ? String(ts) : d.toISOString().slice(0, 16).replace('T', ' '); };
+  const lines = msgs.map(m => {
+    let who;
+    if (m.direction === 'inbound') who = 'CLIENTE';
+    else if (+m.automated === 1 || +m.automated === 2) who = 'AUTOMÁTICO';
+    else who = 'NOSOTROS' + (m.sender_name ? ' (' + m.sender_name + ')' : '');
+    let c = String(m.body || '');
+    if (/LEE BIEN A CONCIENCIA ESTE MENSAJE/i.test(c)) c = '[MENSAJE DE ACCESOS AL CURSO: ya se le dieron los accesos]';
+    if (m.msg_type === 'image' && !c.startsWith('[imagen')) c = '[imagen] ' + c;
+    if (m.msg_type === 'audio' && !c.startsWith('[audio')) c = '[audio] ' + (c || '(sin transcripción)');
+    if (m.msg_type === 'document' && !c.startsWith('[documento')) c = '[documento] ' + c;
+    if (c.length > 700) c = c.slice(0, 700) + ' […]';
+    return `[${ar(m.ts)}] ${who}: ${c.replace(/\s*\n+\s*/g, ' / ')}`;
+  });
+  const sum = (await q("SELECT IFNULL(contact_name,'') n, IFNULL(channel,'') ch, IFNULL(inbox,'') ib FROM wa_chats_summary WHERE phone = ?", phone))[0] || {};
+  const ab = (await q('SELECT full_name FROM wa_address_book WHERE phone = ? LIMIT 1', phone))[0];
+  const nombre = (ab && ab.full_name) || sum.n || '';
+  const labels = (await q('SELECT l.name FROM contact_labels cl JOIN labels l ON l.id = cl.label_id WHERE cl.phone = ?', phone)).map(r => r.name);
+  const flujos = [];
+  let nombreReg = '', enMiniSupernova = false;
+  for (const [t, etiqueta] of [['minicurso_landing', 'minicurso gratuito (landing)'], ['lanzamiento_landing', 'lanzamiento con clases en vivo'], ['wa_cursos_flow', 'anuncio de cursos'], ['minisupernova', 'envío a alumnos (MiniSupernova)']]) {
+    const r = (await q(`SELECT * FROM ${t} WHERE phone = ? LIMIT 1`, phone))[0];
+    if (!r) continue;
+    if (t === 'minisupernova') enMiniSupernova = true;
+    if (!nombreReg && r.nombre) nombreReg = String(r.nombre).trim();
+    let d = etiqueta + (r.stage ? ' · etapa ' + r.stage : (r.status ? ' · ' + r.status : ''));
+    if (r.registered_at) d += ' · se registró el ' + ar(r.registered_at).slice(0, 10);
+    if (t === 'minicurso_landing' && r.vio_clase2 != null) d += ' · vio la clase 2: ' + (+r.vio_clase2 ? 'sí' : 'no');
+    flujos.push(d);
+  }
+  const CLASIF_PAGO = { sena: 'seña (~$40.000)', full: 'más de $50.000 (curso, combo, pack o NOVA)' };
+  const pagos = (await q("SELECT substr(created_at,1,10) f, monto, IFNULL(clasificacion,'') c, IFNULL(cuenta,'') cu, IFNULL(titular,'') ti FROM wa_pago_proof WHERE phone = ? AND IFNULL(is_payment,1) != 0 ORDER BY created_at", phone))
+    .map(r => `${r.f} $${r.monto != null ? r.monto : '?'}${r.c ? ' — ' + (CLASIF_PAGO[r.c] || r.c) : ''}${r.cu || r.ti ? ' · a ' + [r.cu, r.ti].filter(Boolean).join(' / ') : ''}`);
+  const acc = (await q("SELECT MIN(ts) t FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND (body LIKE '%LEE BIEN A CONCIENCIA%' OR body LIKE '%alinfinito.app.clientclub.net%')", phone))[0];
+  const lastIn = ((await q("SELECT MAX(ts) t FROM wa_messages WHERE phone = ? AND direction = 'inbound'", phone))[0] || {}).t;
+  const ad = ((await q("SELECT IFNULL(headline,'') h FROM wa_ad_attributions WHERE phone = ? ORDER BY ts ASC LIMIT 1", phone))[0] || {}).h;
+  const ahoraAR = new Date(Date.now() - 3 * 3600e3).toISOString();
+  const DIAS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+  let lanzOn = isPagoLanzamientoWindow(new Date().toISOString());
+  try { if (!lanzOn) lanzOn = (await kvGet(env, 'cursos_lanzamiento_activo', '0')) === '1'; } catch (_) {}
+  let h = '## CONTEXTO DEL CHAT\n';
+  h += `Ahora: ${DIAS[new Date(ahoraAR).getUTCDay()]} ${ahoraAR.slice(8, 10)}/${ahoraAR.slice(5, 7)} ${ahoraAR.slice(11, 16)} (hora AR)\n`;
+  h += `Lanzamiento activo: ${lanzOn ? 'SÍ' : 'NO (no apliques las reglas "en lanzamiento": el saldo NO vence el lunes)'}\n`;
+  h += `Cliente: ${nombre || '(sin nombre)'}${nombreReg && nombreReg.toLowerCase() !== String(nombre).toLowerCase() ? ' · Nombre de registro: ' + nombreReg : ''} · canal: ${sum.ch === 'ig' ? 'Instagram' : 'WhatsApp'} · bandeja: ${sum.ib || '-'}\n`;
+  h += `Etiquetas: ${labels.length ? labels.join(', ') : 'ninguna'}\n`;
+  h += `De dónde viene: ${flujos.length ? flujos.join('; ') : 'sin flujo registrado'}${ad ? ' · anuncio: "' + String(ad).slice(0, 120) + '"' : ''}\n`;
+  h += `Comprobantes leídos por OCR: ${pagos.length ? pagos.join('; ') : 'ninguno (el OCR solo corre en lanzamientos: fijate si en la conversación hay una [imagen] o [documento] de pago)'}\n`;
+  const ALUMNO_RE = /^(alumno|venta abril|vender pack|nova|servicio de corte|lead minisupernova)/i;
+  h += (acc && acc.t) ? `YA ES ALUMNO: accesos enviados el ${ar(acc.t).slice(0, 10)}.\n`
+    : (labels.some(n => ALUMNO_RE.test(String(n))) || enMiniSupernova) ? 'YA ES ALUMNO (por etiquetas o envíos a alumnos; los accesos no están en este chat).\n'
+    : 'Sin registro de accesos en este chat. OJO: puede ser alumno de antes del cambio de número (jul-2026) o haberlos recibido por otro lado.\n';
+  if (lastIn) {
+    const hs = (Date.now() - new Date(lastIn).getTime()) / 3600e3;
+    h += `Ventana de 24 h: ${hs < 24 ? 'ABIERTA' : 'CERRADA'} (el cliente escribió por última vez hace ${hs < 48 ? Math.round(hs) + ' h' : Math.round(hs / 24) + ' días'}).\n`;
+  } else h += 'Ventana de 24 h: CERRADA (el cliente nunca escribió).\n';
+  return { text: h + '\n## CONVERSACIÓN (hora de Argentina)\n' + lines.join('\n'), msgs: msgs.length };
+}
+
 // Genera una respuesta sugerida para el último mensaje de un chat. NO la envía.
 // opts.dry=true devuelve el contexto armado sin llamar a Claude (para test/inspección).
 async function suggestReply(env, phone, opts = {}) {
@@ -18881,6 +18987,25 @@ async function suggestReply(env, phone, opts = {}) {
   // 3ª señal: ya tiene un pedido de corte cargado (cubre cobranzas que atiende el vigía con el bot apagado,
   // y clientes fuera del seed de corte_alumnos).
   if (!esCorte) { try { esCorte = !!(await env.DB.prepare("SELECT 1 AS x FROM corte_pedidos WHERE telefono=? LIMIT 1").bind(phone).first()); } catch (_) {} }
+
+  // Copiloto de CURSOS: chat de la bandeja de cursos o usuario de cursos. Gate kv copiloto_cursos_on (o preview de admin).
+  let esCursos = false, cursosKb = '', vendedora = '';
+  if (!esCorte) {
+    try {
+      const on = !!opts.previewCursos || (await kvGet(env, 'copiloto_cursos_on', '0')) === '1';
+      if (on) {
+        const ci = await env.DB.prepare('SELECT inbox FROM wa_chats_summary WHERE phone=?').bind(phone).first();
+        const rolUso = opts.createdBy ? await getSessionRole(env, opts.createdBy) : '';
+        if ((ci && ci.inbox === 'cursos') || rolUso === 'cursos') {
+          cursosKb = String(await kvGet(env, 'cursos_knowledge', '') || '').trim();
+          if (cursosKb) {
+            esCursos = true;
+            vendedora = opts.asUser ? cursosNombreVendedora(opts.asUser) : await cursosNombreDe(env, opts.createdBy);
+          }
+        }
+      }
+    } catch (_) {}
+  }
 
   let conv = null, examples = [], frameworkText = '', frameworkVersion = null, system, userContent;
 
@@ -18902,6 +19027,15 @@ async function suggestReply(env, phone, opts = {}) {
     system = [
       { type: 'text', text: SUGGEST_CORTE_RULES },
       { type: 'text', text: '## BASE DE CONOCIMIENTO / PLAYBOOK DEL SERVICIO DE CORTE\n\n' + kb + '\n\n(NOTA: las instrucciones de salida en formato JSON del bot automático que aparecen arriba NO aplican al copiloto — seguí el shape de las REGLAS DURAS.)', cache_control: { type: 'ephemeral' } }
+    ];
+  } else if (esCursos) {
+    // Base de conocimiento de cursos + contexto propio del chat (quién escribió, etiquetas, pagos, ventana de 24 h).
+    const cc = await buildCursosContext(env, phone, 50);
+    frameworkText = cursosKb; frameworkVersion = 'cursos-kb';
+    userContent = (cc ? cc.text : ctx.fullText) + `\n\nQuien va a mandar el mensaje: ${vendedora || '(sin nombre; si te presentás, decí "del equipo de neon infinito")'}.\nSugerí el PRÓXIMO mensaje para mandarle al cliente ahora. Devolvé SOLO el JSON.`;
+    system = [
+      { type: 'text', text: SUGGEST_CURSOS_RULES },
+      { type: 'text', text: '## BASE DE CONOCIMIENTO DE VENTA DE CURSOS\n\n' + cursosKb.replace(/\{vendedora\}/g, vendedora || 'el equipo'), cache_control: { type: 'ephemeral' } }
     ];
   } else {
     conv = await env.DB.prepare(
@@ -18939,13 +19073,13 @@ async function suggestReply(env, phone, opts = {}) {
   }
 
   if (opts.dry) {
-    return { ok: true, dry: true, corte: esCorte, framework_version: frameworkVersion, framework_chars: frameworkText.length,
+    return { ok: true, dry: true, corte: esCorte, cursos: esCursos, vendedora, framework_version: frameworkVersion, framework_chars: frameworkText.length,
              examples: examples.length, has_analysis: !!conv, user_chars: userContent.length,
              user_preview: userContent.slice(0, 1400) };
   }
   if (!env.ANTHROPIC_API_KEY) return { ok: false, error: 'ANTHROPIC_API_KEY no configurada' };
 
-  if (!esCorte) system = [
+  if (!esCorte && !esCursos) system = [
     { type: 'text', text: SUGGEST_SYSTEM_RULES },
     { type: 'text', text: '## PLAYBOOK DE VENTAS\n\n' + frameworkText, cache_control: { type: 'ephemeral' } }
   ];
@@ -18963,9 +19097,12 @@ async function suggestReply(env, phone, opts = {}) {
     catch (e) { return { ok: false, error: 'JSON parse error', raw: text.slice(0, 1500) }; }
 
     const missing = Array.isArray(parsed.missing_info) ? parsed.missing_info : [];
+    // Cursos: la base trae modelos con [marcadores]; si alguno quedó en el draft, se marca para que no salga así.
+    const conMarcadores = esCursos && /\[[^\]\n]{2,40}\]/.test(String(parsed.draft || ''));
+    if (conMarcadores) missing.push('el draft tiene marcadores [entre corchetes] sin completar: completalos o sacalos antes de mandar');
     const sensitive = missing.some(m => /precio|plazo|garant|pago|cuota|tiempo|entrega|financ/i.test(String(m)));
     const conf = typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
-    const lowConfidence = conf < 0.7 || sensitive || parsed.should_escalate === true;
+    const lowConfidence = conf < 0.7 || sensitive || conMarcadores || parsed.should_escalate === true;
     const ti = j.usage?.input_tokens || 0;
     const tcw = j.usage?.cache_creation_input_tokens || 0;
     const tcr = j.usage?.cache_read_input_tokens || 0;
@@ -18981,7 +19118,7 @@ async function suggestReply(env, phone, opts = {}) {
     return {
       ok: true,
       suggestion: {
-        vertical: parsed.vertical || (conv?.vertical || ''),
+        vertical: esCursos ? 'cursos' : (parsed.vertical || (conv?.vertical || '')),
         intent: parsed.intent || '',
         draft: String(parsed.draft || ''),
         confidence: conf,
@@ -19092,12 +19229,12 @@ async function gatherSynthesisEvidence(env) {
   // playbook de ventas de carteles/cursos.
   const edits = await safe(
     `SELECT suggested_text, final_text, vertical, objection, edit_distance
-       FROM suggestion_feedback WHERE action='edited' AND edit_distance >= 3 AND COALESCE(vertical,'') != 'corte'
+       FROM suggestion_feedback WHERE action='edited' AND edit_distance >= 3 AND COALESCE(vertical,'') NOT IN ('corte','cursos')
        ORDER BY created_at DESC LIMIT 40`);
   // (b) Descartes: lo que NO había que sugerir.
   const discards = await safe(
     `SELECT suggested_text, vertical, objection
-       FROM suggestion_feedback WHERE action='ignored' AND COALESCE(vertical,'') != 'corte'
+       FROM suggestion_feedback WHERE action='ignored' AND COALESCE(vertical,'') NOT IN ('corte','cursos')
        ORDER BY created_at DESC LIMIT 25`);
   // (c) Ventas cerradas: qué funcionó (por vertical/producto).
   const wins = await safe(
@@ -19163,8 +19300,8 @@ async function synthesizeFrameworkImprovements(env, opts = {}) {
     try {
       const last = await env.DB.prepare('SELECT MAX(created_at) AS t FROM framework_improvements').first();
       const fbq = last?.t
-        ? await env.DB.prepare(`SELECT COUNT(*) AS n FROM suggestion_feedback WHERE action IN ('edited','ignored') AND created_at > ?`).bind(last.t).first()
-        : await env.DB.prepare(`SELECT COUNT(*) AS n FROM suggestion_feedback WHERE action IN ('edited','ignored')`).first();
+        ? await env.DB.prepare(`SELECT COUNT(*) AS n FROM suggestion_feedback WHERE action IN ('edited','ignored') AND COALESCE(vertical,'') NOT IN ('corte','cursos') AND created_at > ?`).bind(last.t).first()
+        : await env.DB.prepare(`SELECT COUNT(*) AS n FROM suggestion_feedback WHERE action IN ('edited','ignored') AND COALESCE(vertical,'') NOT IN ('corte','cursos')`).first();
       newSinceLast = fbq?.n || 0;
     } catch (_) {}
     if (!opts.force && newSinceLast != null && newSinceLast < 12) {
@@ -21671,13 +21808,55 @@ const handler = {
         return json({ ok: true, edit_distance: ed });
       }
 
+      // GET/POST /admin/cursos-knowledge → base de conocimiento del copiloto de cursos (kv cursos_knowledge). Solo admin.
+      // POST {text} la reemplaza entera; {on:true|false} prende/apaga el copiloto de cursos (kv copiloto_cursos_on).
+      if (path === '/admin/cursos-knowledge' && (request.method === 'GET' || request.method === 'POST')) {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'solo admin' }, 403);
+        if (request.method === 'POST') {
+          let kb; try { kb = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+          if (typeof kb?.on === 'boolean') await kvSet(env, 'copiloto_cursos_on', kb.on ? '1' : '0');
+          if (kb?.text != null) {
+            const t = String(kb.text || '').trim();
+            if (t.length < 500) return json({ error: 'texto muy corto' }, 400);
+            await kvSet(env, 'cursos_knowledge', t);
+          }
+        }
+        const t = String(await kvGet(env, 'cursos_knowledge', '') || '');
+        return json({ ok: true, on: (await kvGet(env, 'copiloto_cursos_on', '0')) === '1', chars: t.length, text: request.method === 'GET' ? t : undefined });
+      }
+
+      // GET /admin/copiloto/metricas?dias=30 → uso y calidad del copiloto por usuario y vertical (solo admin).
+      // "utiles_pct" = enviadas tal cual + editadas poco (cambió menos del 15% del texto) sobre las que tuvieron respuesta.
+      // Las pedidas que no tienen respuesta son sugerencias que nadie usó ni descartó con la ✕ (se cerró el chat).
+      if (request.method === 'GET' && path === '/admin/copiloto/metricas') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'solo admin' }, 403);
+        const dias = Math.min(Math.max(parseInt(url.searchParams.get('dias') || '30', 10) || 30, 1), 365);
+        const desde = new Date(Date.now() - dias * 86400e3).toISOString();
+        const fb = (await env.DB.prepare("SELECT IFNULL(created_by,'') u, IFNULL(vertical,'') v, action, edit_distance ed, length(suggested_text) ls FROM suggestion_feedback WHERE created_at >= ?").bind(desde).all()).results || [];
+        const pedidas = (await env.DB.prepare("SELECT IFNULL(created_by,'') usuario, COUNT(*) pedidas, ROUND(SUM(cost_usd), 2) usd FROM copilot_usage WHERE kind = 'suggest' AND created_at >= ? GROUP BY 1 ORDER BY 2 DESC").bind(desde).all()).results || [];
+        const agg = {};
+        for (const r of fb) {
+          const k = r.u + '|' + (r.v || '-');
+          const a = agg[k] || (agg[k] = { usuario: r.u, vertical: r.v || '-', con_respuesta: 0, enviadas_tal_cual: 0, editadas_poco: 0, editadas_mucho: 0, descartadas: 0 });
+          a.con_respuesta++;
+          if (r.action === 'sent') a.enviadas_tal_cual++;
+          else if (r.action === 'edited') { if ((r.ed || 0) / Math.max(1, r.ls || 1) <= 0.15) a.editadas_poco++; else a.editadas_mucho++; }
+          else if (r.action === 'ignored') a.descartadas++;
+        }
+        const filas = Object.values(agg).map(a => ({ ...a, utiles_pct: a.con_respuesta ? Math.round(100 * (a.enviadas_tal_cual + a.editadas_poco) / a.con_respuesta) : null }))
+          .sort((x, y) => y.con_respuesta - x.con_respuesta);
+        return json({ ok: true, dias, desde, copiloto_cursos_on: (await kvGet(env, 'copiloto_cursos_on', '0')) === '1', pedidas_por_usuario: pedidas, por_usuario_y_vertical: filas });
+      }
+
       // ----- Copiloto: respuesta sugerida (NO la envía; la muestra para revisar) -----
       if (request.method === 'POST' && path === '/admin/wa/suggest-reply') {
         let body;
         try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const num = String(body?.phone || '').replace(/\D/g, '');
         if (!num) return json({ error: 'missing phone' }, 400);
-        const res = await suggestReply(env, num, { dry: !!body?.dry, createdBy: session.user });
+        // Admin: preview_cursos fuerza la rama de cursos aunque el gate esté apagado; "as" simula quién firma (ej. "Abril").
+        const _admSug = (await getSessionRole(env, session.user)) === 'admin';
+        const res = await suggestReply(env, num, { dry: !!body?.dry, createdBy: session.user, previewCursos: _admSug && !!body?.preview_cursos, asUser: (_admSug && body?.as) ? String(body.as) : '' });
         if (!res.ok) return json({ error: res.error || 'failed', raw: res.raw }, res.error === 'ANTHROPIC_API_KEY no configurada' ? 503 : 500);
         return json(res);
       }
