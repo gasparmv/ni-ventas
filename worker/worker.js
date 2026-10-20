@@ -9740,6 +9740,10 @@ function matchMinicursoTrigger(text) {
 // ===== Campaña de cursos (broadcast lanzamiento mayo) =====
 const CURSOS_EVENTO_MSG = 'aah buenísimo! Te escribía para invitarte a un nuevo evento en vivo este próximo martes 9 y jueves 11 de junio, los chicos van a hacer algo muuy copado ahora que arranca el mundial\n\nTe gustaría participar?';
 
+// Fin de los dos eventos (mayo: martes 9 y jueves 11 de junio; junio: "mañana 19 hs" = jueves 11-jun). Después,
+// processCursosCampaignPending ya no los manda: salían con esas fechas a respuestas de julio, agosto y septiembre.
+const CURSOS_EVENTO_FIN_UTC = '2026-06-12T03:00:00.000Z';
+
 // Mensaje que se manda a los que responden POSITIVO a la plantilla del
 // lanzamiento de junio 2026 (mismo criterio IA que mayo).
 const JUNIO_VIVO_MSG = 'Perfectoo, acá vamos a transmitir en vivo mañana 19 hs. TODO sobre el modelo de negocio de los neones LED… y también abrimos inscripciones para la Comunidad Al Infinito 🙌🏼\nhttps://youtube.com/live/UbMdCzZhwxY?feature=share';
@@ -10960,6 +10964,13 @@ async function processCursosCampaignPending(env) {
         ).bind(phone).run();
       } catch (_) { continue; }
       if (!claim?.meta?.changes) continue;
+      // Evento ya pasado: sin IA ni mensaje. Solo se revela el chat a Abril si sigue oculto: si otra regla ya le puso
+      // bandeja (p. ej. el ruteo de un anuncio de carteles a 'general'), no se pisa. Antes iba a 'cursos' siempre.
+      if (nowIso >= CURSOS_EVENTO_FIN_UTC) {
+        try { await env.DB.prepare("UPDATE wa_cursos_campaign SET sentiment = 'fuera_de_fecha', revealed_at = ?, updated_at = ? WHERE phone = ?").bind(nowIso, nowIso, phone).run(); } catch (_) {}
+        try { await env.DB.prepare("UPDATE wa_chats_summary SET inbox = 'cursos' WHERE phone = ? AND inbox = 'oculto'").bind(phone).run(); } catch (_) {}
+        continue;
+      }
       // Juntar todos los msgs inbound del cliente desde sent_1_at.
       const anchor = row.sent_1_at || '';
       const msgs = await env.DB.prepare(
