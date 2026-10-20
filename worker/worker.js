@@ -1066,7 +1066,10 @@ const ORIGEN_CANALES_ORGANICOS = ['linkbio', 'igdm', 'frecuente', 'referido', 'd
 // Textos (normalizados: minúsculas, sin acentos ni ¡¿) que delatan el origen.
 const ORIGEN_RX_WALINK = /^(hola!? ?)?quiero cotizar un pedido personalizado/;
 const ORIGEN_RX_IG_CODIGO = /^(hola!? ?)?vengo de instagram/;          // link wa.me que se manda desde los DM de IG
-const ORIGEN_RX_WEB_CODIGO = /\(ref [gw]-[a-z0-9]{2}/;                 // landings de Google / web
+// Links de WhatsApp del sitio (carteleria-infinito): "… (web inicio|eventos|marcas|locales)"; página nueva = sumar el slug.
+// También el "(ref g-xx)" que se había previsto para Google. Ya normalizado no hay paréntesis ni guiones: antes
+// el regex los pedía y no matcheaba nunca.
+const ORIGEN_RX_WEB_CODIGO = /\bweb (inicio|eventos|marcas|locales)\b|\bref [gw] [a-z0-9]{2}/;
 const ORIGEN_RX_REFERIDO = /(me (lo |la )?pas(o|aron|aste|ó) (tu|el|su|este|tus) (contacto|numero|tel|telefono|whats|wsp|wpp|celu)|de parte de (?!(la|el|los|las|un|una|nuestra|nuestro|su|sus)\b)[a-z]{3}|me recomend(o|aron) (a )?(ustedes|uds|vos|este numero|tu numero)|me dieron (tu|el|este) (contacto|numero|telefono)|me dio (tu|el|este) (contacto|numero|telefono)|soy (un |una )?amig[oa] de [a-z]{3}|(un|una|mi) amig[oa] me (paso|pasaron|recomendo|dio))/;
 const ORIGEN_RX_IG_FRASE = /(habl(aba|e|amos|abamos|ando)|escrib(i|ia|imos|iendo)|estaba(mos)? hablando|charl(aba|abamos|e)|consult(e|aba)|nos contactamos).{0,30}(instagram|insta\b|\big\b)/;
 const ORIGEN_RX_FRECUENTE = /(ya (les |te )?(compre|hice|hicimos|pedi|encargue)|soy cliente|somos clientes|me hicieron (un|el|varios|unos)|(otro|el) cartel (que les|anterior))/;
