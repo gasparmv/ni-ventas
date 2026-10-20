@@ -17692,8 +17692,43 @@ function showMediaPreviewModal(initialFiles) {
 
 // Genérico: detecta tipo del file por mime y manda con el endpoint correcto.
 // type puede ser: image | audio | video | document | auto
+// WhatsApp acepta videos MP4/3GP de hasta 16 MB. Los más pesados (o los .mov del iPhone) se mandan como LINK: se suben
+// al CRM y al cliente le llega un link para verlo online (Gaspar 20-oct: a Abril no le salía el video de cómo ingresar).
+const WA_VIDEO_MAX = 16 * 1024 * 1024;
+async function chatVideoComoLink(phone, file, caption, type) {
+  const m = String(file.type || '').toLowerCase(), ext = (String(file.name || '').split('.').pop() || '').toLowerCase();
+  const esVideo = type === 'video' || (!type && (m.startsWith('video/') || /^(mp4|mov|m4v|3gp|webm|mkv)$/.test(ext)));
+  if (!esVideo) return false;
+  const c = (chatState.contacts || []).find(x => x.phone === phone);
+  if (c && c.channel === 'ig') return false;   // Instagram va por su propio caño
+  const okFmt = /^video\/(mp4|3gpp)$/.test(m);
+  if (okFmt && file.size <= WA_VIDEO_MAX) return false;   // entra en WhatsApp: va normal
+  const mb = (file.size / 1048576).toFixed(1).replace('.', ',');
+  if (file.size > 95 * 1048576) {
+    await showAlert(`El video pesa ${mb} MB: es demasiado grande para mandarlo (máximo 95 MB). Recortalo o mandá un link de YouTube o Drive.`, { title: 'Video muy pesado', variant: 'warn' });
+    return true;
+  }
+  const porque = okFmt ? `pesa ${mb} MB y WhatsApp acepta videos de hasta 16 MB` : `está en un formato que WhatsApp no acepta (${ext || m || 'desconocido'})`;
+  const ok = await showConfirm(`Este video ${porque}.\n\n¿Lo mando como link? Al cliente le llega un link y lo ve online.`, { title: 'Mandar el video como link', confirmLabel: 'Mandar link', cancelLabel: 'Cancelar' });
+  if (!ok) return true;
+  chatState.sending = true;
+  updateChatInputState();
+  toast('Subiendo el video…');
+  try {
+    const qs = new URLSearchParams({ to: phone, caption: caption || '', name: file.name || '' });
+    const r = await fetch(CONFIG.trackerUrl + '/admin/wa/video-link?' + qs.toString(), { method: 'PUT', headers: { ...authHeaders(), 'Content-Type': m || 'video/mp4' }, body: file });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { toast('No se pudo mandar el video: ' + (j.error || ('HTTP ' + r.status))); return true; }
+    chatState.messages.push({ ts: new Date().toISOString(), wamid: j.id || '', direction: 'outbound', phone, sender_name: '', msg_type: 'text', body: j.body || '', media_url: '', context_id: '', status: 'sent' });
+    renderChatMessages();
+    toast('Video enviado como link');
+  } catch (_) { toast('Error de red al subir el video'); }
+  finally { chatState.sending = false; updateChatInputState(); }
+  return true;
+}
 async function sendChatFile(phone, file, caption, type) {
   if (!phone || !file) return;
+  if (await chatVideoComoLink(phone, file, caption, type)) return;
   chatState.sending = true;
   updateChatInputState();
   // Detectar tipo si no fue pasado
@@ -18258,6 +18293,9 @@ async function loadChatMessages(phone, opts) {
     const r = await fetch(url, { headers: authHeaders() });
     if (!r.ok) return;
     const j = await r.json();
+    // Cambió de chat mientras volvía la respuesta: no mezclar (19-oct: el "Quiero cotizar un diseño" de un cliente apareció
+    // en el chat de otro, abierto justo después).
+    if (chatState.selectedPhone !== phone) return;
     // Las filas 'status' son ruido, SALVO las salientes: son mensajes que el cliente recibió pero cuyo
     // texto no quedó registrado (el webhook de Meta crea la fila vacía). Antes se descartaban y el
     // vendedor no veía que se había mandado algo (caso Agus→Pau 7-oct); se muestran con un aviso.
@@ -22979,14 +23017,16 @@ async function handleToggleVigilar() {
   }
 }
 
+// Respuesta rápida con video: sin <img> (no se ve), un ▶ en su lugar.
+function qrEsVideo(k) { return /\.(mp4|m4v|3gp|mov|webm)$/i.test(String(k || '')); }
 function _renderQRItem(q, i, active) {
   const hasMedia = !!q.media_r2_key;
-  const icon = hasMedia ? `<img class="qr-thumb" src="${mediaUrl(q.media_r2_key)}" alt="">` : '';
+  const icon = hasMedia ? (qrEsVideo(q.media_r2_key) ? '<div class="qr-thumb" style="display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.08)">▶</div>' : `<img class="qr-thumb" src="${mediaUrl(q.media_r2_key)}" alt="">`) : '';
   return `<div class="qr-item${i === 0 || active ? ' active' : ''}" data-qr-id="${q.id}" data-qr-body="${escapeHtml(q.body)}" data-qr-has-media="${hasMedia ? '1' : '0'}">
     ${icon}
     <div class="qr-item-text">
-      <span class="qr-shortcut">/${escapeHtml(q.shortcut)}${hasMedia ? ' <span style="opacity:.6;font-size:10px">📷</span>' : ''}</span>
-      <span class="qr-preview">${escapeHtml((q.body || '(solo imagen)').slice(0, 60))}</span>
+      <span class="qr-shortcut">/${escapeHtml(q.shortcut)}${hasMedia ? ` <span style="opacity:.6;font-size:10px">${qrEsVideo(q.media_r2_key) ? '🎬' : '📷'}</span>` : ''}</span>
+      <span class="qr-preview">${escapeHtml((q.body || (qrEsVideo(q.media_r2_key) ? '(solo video)' : '(solo imagen)')).slice(0, 60))}</span>
     </div>
   </div>`;
 }
@@ -24151,14 +24191,14 @@ function showManageQRModal() {
     : `<option value="${defVert}">${defVert === 'cursos' ? 'Cursos' : 'Carteles'}</option>`;
   const content = `
     <div class="manage-qr">
-      <p class="manage-qr-hint">Escribí <b>/</b> en el chat para ver tus respuestas guardadas y plantillas. Las que tienen foto la mandan junto con el texto como caption.</p>
+      <p class="manage-qr-hint">Escribí <b>/</b> en el chat para ver tus respuestas guardadas y plantillas. Las que tienen foto o video lo mandan junto con el texto como caption.</p>
       <div class="manage-qr-section">
         <div class="manage-qr-section-h">${visQR.length} respuesta${visQR.length === 1 ? '' : 's'}</div>
         ${visQR.length ? `
           <div class="manage-qr-list">
             ${visQR.map(q => `
               <div class="manage-qr-row">
-                ${q.media_r2_key ? `<img class="manage-qr-thumb" src="${mediaUrl(q.media_r2_key)}" alt="">` : '<div class="manage-qr-thumb-empty">📝</div>'}
+                ${q.media_r2_key ? (qrEsVideo(q.media_r2_key) ? '<div class="manage-qr-thumb-empty">🎬</div>' : `<img class="manage-qr-thumb" src="${mediaUrl(q.media_r2_key)}" alt="">`) : '<div class="manage-qr-thumb-empty">📝</div>'}
                 <div class="manage-qr-text">
                   <div class="manage-qr-shortcut">/${escapeHtml(q.shortcut)}</div>
                   <div class="manage-qr-body">${escapeHtml(q.body || '(sin texto)')}</div>
@@ -24174,8 +24214,8 @@ function showManageQRModal() {
         <input type="text" id="new-qr-shortcut" placeholder="Atajo (ej: saludo)" autocomplete="off">
         <textarea id="new-qr-body" placeholder="Texto del mensaje (o caption si adjuntás foto)…" rows="3"></textarea>
         <div class="manage-qr-image">
-          <input type="file" id="new-qr-image" accept="image/*" style="display:none">
-          <button class="btn btn-ghost" id="new-qr-image-btn" type="button">🖼 Adjuntar foto</button>
+          <input type="file" id="new-qr-image" accept="image/*,video/mp4" style="display:none">
+          <button class="btn btn-ghost" id="new-qr-image-btn" type="button">🖼 Adjuntar foto o video</button>
           <span id="new-qr-image-name" class="manage-qr-image-name"></span>
         </div>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--fg-subtle,#8696a0);margin:4px 0 8px">Sección:
@@ -24203,6 +24243,11 @@ function showManageQRModal() {
   if (imgBtn) imgBtn.onclick = () => imgInput.click();
   if (imgInput) imgInput.onchange = () => {
     pendingFile = imgInput.files[0] || null;
+    // Video: WhatsApp acepta MP4 de hasta 16 MB (una respuesta rápida no puede ir como link).
+    if (pendingFile && /^video\//.test(pendingFile.type || '') && (pendingFile.type !== 'video/mp4' || pendingFile.size > WA_VIDEO_MAX)) {
+      toast('El video tiene que ser MP4 de hasta 16 MB (este pesa ' + (pendingFile.size / 1048576).toFixed(1).replace('.', ',') + ' MB)');
+      pendingFile = null; imgInput.value = '';
+    }
     if (imgName) imgName.textContent = pendingFile ? '✓ ' + pendingFile.name : '';
   };
   const addBtn = document.getElementById('add-qr-btn');

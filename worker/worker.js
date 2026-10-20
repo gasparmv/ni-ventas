@@ -4376,9 +4376,16 @@ async function processPrecotizPilot(env) {
   const modo = await precotizModo(env);
   const nowIso = new Date().toISOString();
 
+  const _t0 = Date.now();
   // ---- B) Procesar leads ACTIVOS con un inbound nuevo sin responder ----
   let activos = [];
-  try { const rs = await env.DB.prepare("SELECT * FROM precotiz_pilot WHERE estado = 'activo'").all(); activos = rs.results || []; } catch (_) {}
+  // Solo los que tuvieron movimiento en los últimos 3 días: los demás no tienen nada nuevo que responder (el que vuelve a
+  // escribir entra solo, porque su chat se mueve). Antes eran ~800 activos × 4 consultas por minuto (Gaspar 20-oct).
+  try {
+    const _actDesde = new Date(Date.now() - 3 * 24 * 3600e3).toISOString();
+    const rs = await env.DB.prepare("SELECT p.* FROM precotiz_pilot p WHERE p.estado = 'activo' AND (p.updated_at >= ? OR EXISTS (SELECT 1 FROM wa_chats_summary s WHERE s.phone = p.phone AND s.last_ts >= ?))").bind(_actDesde, _actDesde).all();
+    activos = rs.results || [];
+  } catch (_) {}
   for (const lead of activos) {
     if (await precotizFrozen(env, lead.phone)) continue;                   // freno de mano MANUAL: el bot no habla más en este chat
     let lastIn;
@@ -4545,6 +4552,12 @@ async function processPrecotizPilot(env) {
   // internos, clientes, sample...) es la MISMA — sirve para todos los vendedores de carteles.
   const _hAR = (new Date().getUTCHours() - 3 + 24) % 24;
   const catchup = _hAR === 8;
+  // RECUPERACIÓN (Gaspar 20-oct): si la última vuelta completa fue hace más de 20 min en horario (el bot estuvo frenado, ej.
+  // domingo 19-oct 9:49-14:25 AR), la ventana de 20 min se perdía a los que escribieron en el medio. Se barren desde esa
+  // vuelta (máx. 3 h, el mismo tope de "primer contacto reciente"), solo los no vistos ni captados.
+  let _lastOk = ''; try { _lastOk = String((await kvGet(env, 'precotiz_tick_ok', '')) || ''); } catch (_) {}
+  const _recupDesde = (!catchup && _lastOk && Date.now() - Date.parse(_lastOk) > 20 * 60 * 1000)
+    ? new Date(Math.max(Date.parse(_lastOk) - 60 * 1000, Date.now() - 3 * 3600e3)).toISOString() : '';
   let cands = [];
   try {
     // SIEMPRE: leads frescos (últimos 20 min) — el flujo normal, no se toca.
@@ -4570,6 +4583,15 @@ async function processPrecotizPilot(env) {
       ).bind(desde).all();
       const vistos = new Set(cands.map(c => c.phone));
       for (const c of (rs2.results || [])) { if (!vistos.has(c.phone)) cands.push(c); }
+    }
+    if (_recupDesde) {
+      const rs3 = await env.DB.prepare(
+        "SELECT phone, MAX(ts) AS last_ts FROM wa_messages m WHERE direction='inbound' AND msg_type!='status' AND ts > ? " +
+        "AND phone NOT IN (SELECT phone FROM precotiz_pilot) AND NOT EXISTS (SELECT 1 FROM kv_cache k WHERE k.k = 'precotiz_seen:' || m.phone) " +
+        "GROUP BY +phone ORDER BY last_ts ASC LIMIT 15"
+      ).bind(_recupDesde).all();
+      const vistos3 = new Set(cands.map(c => c.phone));
+      for (const c of (rs3.results || [])) { if (!vistos3.has(c.phone)) cands.push(c); }
     }
   } catch (_) { return; }
 
@@ -4696,6 +4718,29 @@ async function processPrecotizPilot(env) {
       await precotizEmitir(env, phone, '', msgs, 'draft', nowIso);
     }
   }
+  // Vuelta completa: la usan la recuperación de arriba y el vigía (precotizVigia).
+  try {
+    await kvSet(env, 'precotiz_tick_ok', new Date().toISOString());
+    await kvSet(env, 'precotiz_tick_info', JSON.stringify({ ms: Date.now() - _t0, activos: activos.length, cands: cands.length }));
+  } catch (_) {}
+}
+// Vigía del bot de pre cotización (Gaspar 20-oct): en horario, si pasan 30 min sin una vuelta completa, aviso a Gaspar
+// (una vez por corte). El domingo 19-oct estuvo 4 h 36 min frenado sin que nadie se enterara.
+async function precotizVigia(env) {
+  try {
+    if (!(await precotizOn(env)) || !precotizEnHorario()) return;
+    const ar = new Date(Date.now() - 3 * 3600e3);
+    if (ar.getUTCHours() === 8 && ar.getUTCMinutes() < 35) return;   // recién arranca el día: la última vuelta es de anoche
+    if (await isWaBillingBlocked(env)) return;                        // ese corte ya avisa por su lado
+    const lastOk = String((await kvGet(env, 'precotiz_tick_ok', '')) || '');
+    if (!lastOk) return;
+    const min = Math.round((Date.now() - Date.parse(lastOk)) / 60000);
+    if (!(min >= 30)) return;
+    if (String((await kvGet(env, 'precotiz_vigia_avisado', '')) || '') === lastOk) return;
+    await kvSet(env, 'precotiz_vigia_avisado', lastOk);
+    await precotizNotifyGaspar(env, `el bot de pre cotizacion esta frenado: hace ${min} min que no completa una vuelta (la ultima fue a las ${_arHHMM(lastOk)}). Los leads nuevos no estan recibiendo respuesta automatica`,
+      { tipo: 'bot_frenado', prioridad: 'P1', para: 'gaspar', clave: 'precotiz_vigia:' + lastOk });
+  } catch (_) {}
 }
 
 // Datos que faltan en UNA frase ("x" | "x y y" | "x, y y z"). Compartido por el nudge de
@@ -19622,6 +19667,28 @@ const handler = {
     // ----- Health -----
     if (request.method === 'GET' && path === '/health') return json({ ok: true });
 
+    // Videos mandados como LINK (/admin/wa/video-link): públicos por nombre impredecible, con Range (se pueden adelantar).
+    if ((request.method === 'GET' || request.method === 'HEAD') && path.startsWith('/v/')) {
+      const name = path.slice(3);
+      if (!/^[a-z0-9]{16,64}\.(mp4|mov|m4v|3gp|webm|mkv)$/i.test(name) || !env.MEDIA) return new Response('No encontrado', { status: 404 });
+      const key = 'pub/v/' + name;
+      const hasRange = !!request.headers.get('range');
+      const obj = request.method === 'HEAD' ? await env.MEDIA.head(key) : await env.MEDIA.get(key, hasRange ? { range: request.headers } : undefined);
+      if (!obj) return new Response('No encontrado', { status: 404 });
+      const h = new Headers();
+      obj.writeHttpMetadata(h);
+      h.set('Accept-Ranges', 'bytes'); h.set('Cache-Control', 'public, max-age=604800'); h.set('X-Content-Type-Options', 'nosniff'); h.set('ETag', obj.httpEtag);
+      if (request.method === 'HEAD') { h.set('Content-Length', String(obj.size)); return new Response(null, { headers: h }); }
+      if (hasRange && obj.range) {
+        const off = obj.range.offset != null ? obj.range.offset : (obj.size - obj.range.suffix);
+        const len = obj.range.length != null ? obj.range.length : (obj.size - off);
+        h.set('Content-Range', `bytes ${off}-${off + len - 1}/${obj.size}`); h.set('Content-Length', String(len));
+        return new Response(obj.body, { status: 206, headers: h });
+      }
+      h.set('Content-Length', String(obj.size));
+      return new Response(obj.body, { headers: h });
+    }
+
     // ===== Meta Lead Ads Webhook (separado del de WhatsApp) =====
     // Se suscribe en la Meta App "agente neon nuevo" (866678322681866) al campo
     // `leadgen` de la Page que recibe los leads (100517509701851).
@@ -24119,6 +24186,40 @@ const handler = {
         return json({ id: r.id });
       }
 
+      // PUT /admin/wa/video-link?to=&caption=&name= (body = el video crudo) → los videos que WhatsApp no acepta (más de 16 MB
+      // o .mov del iPhone) se suben a R2 y al cliente le llega un LINK para verlo online (/v/<archivo>). Gaspar 20-oct.
+      if (request.method === 'PUT' && path === '/admin/wa/video-link') {
+        const to = String(url.searchParams.get('to') || '');
+        {
+          const _role = await getSessionRole(env, session.user);
+          if (!(await inboxAccessOk(env, _role, to.replace(/\D/g, ''), session.user))) return json({ error: 'forbidden: chat fuera de tu bandeja' }, 403);
+        }
+        const num = normalizeArPhone(to);
+        if (!num) return json({ error: 'numero invalido' }, 400);
+        if (!env.MEDIA) return json({ error: 'R2 not configured' }, 500);
+        const len = parseInt(request.headers.get('content-length') || '0', 10) || 0;
+        if (!len || !request.body) return json({ error: 'el video llegó vacío' }, 400);
+        if (len > 95 * 1024 * 1024) return json({ error: 'el video pesa más de 95 MB' }, 413);
+        const ctV = String(request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        const extN = (String(url.searchParams.get('name') || '').match(/\.([a-z0-9]{2,4})$/i) || [])[1] || '';
+        const ext = (/^(mp4|mov|m4v|3gp|webm|mkv)$/i.test(extN) ? extN : (ctV === 'video/quicktime' ? 'mov' : ctV === 'video/webm' ? 'webm' : 'mp4')).toLowerCase();
+        const mimeV = ctV.startsWith('video/') ? ctV : ({ mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', '3gp': 'video/3gpp' }[ext] || 'video/mp4');
+        const vid = randomToken().replace(/[^a-z0-9]/gi, '').slice(0, 24).toLowerCase() + '.' + ext;
+        try { await env.MEDIA.put('pub/v/' + vid, request.body, { httpMetadata: { contentType: mimeV } }); }
+        catch (e) { return json({ error: 'no se pudo subir el video: ' + String((e && e.message) || e) }, 500); }
+        const link = url.origin + '/v/' + vid;
+        const caption = String(url.searchParams.get('caption') || '').trim().slice(0, 900);
+        const body = (caption ? caption + '\n\n' : '') + 'Mirá el video acá: ' + link;
+        const r = await waSendText(env, num, body);
+        if (!r.ok) return json({ error: r.error || 'no se pudo mandar el mensaje' }, r.status || 500);
+        try {
+          await env.DB.prepare(
+            'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', 'text', body, '', '', 'sent').run();
+        } catch (_) {}
+        ctx.waitUntil(registrarAutorEnvio(env, r.id, session.user, num));   // autor real (avisos internos), después del INSERT
+        return json({ ok: true, id: r.id, body, link });
+      }
       if (request.method === 'POST' && path === '/admin/wa/send-media') {
         const ct = request.headers.get('Content-Type') || '';
         if (!ct.includes('multipart/form-data')) return json({ error: 'expected multipart/form-data' }, 400);
@@ -24556,18 +24657,20 @@ const handler = {
         });
         const upJ = await upR.json().catch(() => ({}));
         if (!upR.ok || !upJ.id) return json({ error: 'media upload failed', detail: upJ?.error?.message || '' }, 500);
+        // Foto o VIDEO (Gaspar 20-oct: el video de cómo ingresar a las clases, para Abril).
+        const qrTipo = /^video\//.test(mime) ? 'video' : 'image';
         const r = await waSend(env, {
-          messaging_product: 'whatsapp', to: num, type: 'image',
-          image: { id: upJ.id, caption: qr.body || undefined }
+          messaging_product: 'whatsapp', to: num, type: qrTipo,
+          [qrTipo]: { id: upJ.id, caption: qr.body || undefined }
         });
         if (!r.ok) return json({ error: r.error }, r.status || 500);
         try {
           await env.DB.prepare(
             'INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, media_url, context_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-          ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', 'image', qr.body || '[imagen]', qr.media_r2_key, '', 'sent').run();
+          ).bind(new Date().toISOString(), r.id || '', 'outbound', num, '', qrTipo, qr.body || (qrTipo === 'video' ? '[video]' : '[imagen]'), qr.media_r2_key, '', 'sent').run();
         } catch (_) {}
         ctx.waitUntil(registrarAutorEnvio(env, r.id, session.user, num));   // autor real (avisos internos), después del INSERT
-        return json({ ok: true, type: 'image', id: r.id });
+        return json({ ok: true, type: qrTipo, id: r.id });
       }
 
       // ===== Labels CRUD =====
@@ -29290,6 +29393,7 @@ const handler = {
       // OJO: usamos getUTCMinutes() INLINE, no la var `minute` (que recién se declara con const más
       // abajo, línea ~10932 -> referenciarla acá era ReferenceError por TDZ en cada tick */1).
       if (new Date().getUTCMinutes() % 15 === 0) ctx.waitUntil(processPrecotizNudges(env));
+      if (new Date().getUTCMinutes() % 5 === 0) ctx.waitUntil(precotizVigia(env));   // aviso si el bot no completa una vuelta en 30 min (Gaspar 20-oct)
     }
     // Landing del minicurso gratuito: opener a los 45 min (plantilla) + branch por
     // IA + follow-up 23h. Gateado (kill-switch OFF por defecto + horario 8-22 AR).
