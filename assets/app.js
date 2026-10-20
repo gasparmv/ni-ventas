@@ -6500,6 +6500,7 @@ function logiResetEstado() {
   STATE.logiSel = null; STATE._logiEd = null; STATE.logiOpen = {}; STATE._logiOtroKey = null; STATE._logiCel = {}; STATE._logiSeq = {}; STATE._logiFilaQ = {}; STATE._logiKeep = {}; STATE.logiPop = null; STATE._logiScroll = null;
   STATE.logiLoadedAt = 0; STATE._logiOpMem = ''; STATE._logiOpDraft = '';
   STATE._logiGen = (STATE._logiGen || 0) + 1; STATE._logiPendiente = false; STATE._logiDirty = false; STATE._logiRecargar = false;
+  STATE.logiNeon = undefined; STATE.logiNeonOpen = {}; STATE._logiNeonGen = (STATE._logiNeonGen || 0) + 1; STATE._logiNeonMarcando = null;
   const pop = document.getElementById('logi-pop'); if (pop) pop.remove();
 }
 function logiOperadorHtml() {
@@ -6514,8 +6515,10 @@ function logiOperadorHtml() {
 }
 function renderLogistica() {
   const L = STATE.logi;
-  if (!L) return `<div style="padding:24px;color:var(--fg-mute)">Cargando envíos…</div>`;
-  if (L.error) return `<div style="padding:24px"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(L.error)}</div><button class="btn" data-logi-refresh>Reintentar</button></div>`;
+  // Pestaña "🔴 Producción neón": no depende de la semana del corte (ni espera a que cargue).
+  if (logiTabAct() === 'neon') return logiOperador() ? logiNeonHtml() : logiOperadorHtml();
+  if (!L) return `<div style="padding:24px"><div style="margin-bottom:12px">${logiTabsHtml()}</div><div style="color:var(--fg-mute)">Cargando envíos…</div></div>`;
+  if (L.error) return `<div style="padding:24px"><div style="margin-bottom:12px">${logiTabsHtml()}</div><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(L.error)}</div><button class="btn" data-logi-refresh>Reintentar</button></div>`;
   if (!logiOperador()) return logiOperadorHtml();
   const t = L.tanda, tandas = L.tandas || [];
   const idx = t ? tandas.findIndex(x => x.id === t.id) : -1;
@@ -6530,6 +6533,7 @@ function renderLogistica() {
       <h1>${t ? `Envíos · semana del lunes ${escapeHtml(logiDDMM(fD) || t.fecha)} · sale el martes ${escapeHtml(martes)}` : 'Envíos'}</h1>
       ${t && tandas.length > 1 ? `<div class="logi-nav">${navBtn(prev, '‹', 'Semana anterior')}${navBtn(next, '›', 'Semana siguiente')}</div>` : ''}
     </div>
+    ${logiTabsHtml()}
     <div class="logi-bar">
       <span data-logi-upd>${escapeHtml(logiHaceTxt())}</span>
       <span>· Usando: <b>${escapeHtml(logiOperador())}</b> <button type="button" class="logi-link" data-logi-op-cambiar>cambiar</button></span>
@@ -6548,6 +6552,249 @@ function renderLogistica() {
     <datalist id="logi-provincias">${LOGI_PROVINCIAS.map(x => `<option value="${escapeHtml(x)}"></option>`).join('')}</datalist>
     <datalist id="logi-transportes">${logiTransportes().map(x => `<option value="${escapeHtml(x)}"></option>`).join('')}</datalist>`}
   </div>`;
+}
+// ===================== Pestañas de Envíos: alumnos (insumos) / producción neón (Gaspar 20-oct-2026) =====================
+// "📦 Alumnos (insumos)" = los paquetes del corte de la semana (lo de siempre). "🔴 Producción neón" = los carteles de neón
+// listos para enviar, separados igual que en el embalaje de Neyen. La de neón sale del tablero de neón (GET
+// /admin/neon/tablero: logística recibe Para enviar y Enviado, sin precios ni teléfonos) y "Salió por envío" es el mismo
+// despacho del tablero (POST /admin/neon/despacho): sale el pedido entero y el server lo frena si no está saldado.
+const LOGI_TAB_KEY = 'niventas.logiTab';
+const LOGI_NEON_DIAS_ENV = 14;   // enviados que se siguen viendo (como la columna Enviado del tablero)
+const LOGI_NEON_NO_ENVIO = ['Retira', 'Instalación', 'Sin Frontera'];   // no van por envío: no son de logística
+function logiTabAct() {
+  if (!STATE.logiTab) STATE.logiTab = logiLsGet(LOGI_TAB_KEY) || 'alumnos';
+  return STATE.logiTab === 'neon' ? 'neon' : 'alumnos';
+}
+// Mismo estilo que las pestañas de Neyen en Corte. El número es lo que queda por hacer: paquetes sin enviar / pedidos para enviar.
+function logiTabsHtml() {
+  const tab = logiTabAct(), L = STATE.logi;
+  const nA = L && !L.error && L.tanda ? logiPaquetes().filter(p => !logiEnv(p)).length : 0, nN = logiNeonPend().length;
+  return `<div class="logi-tabs">`
+    + `<button type="button" class="btn ${tab === 'neon' ? 'ghost' : 'btn-cyan'}" data-logi-tab="alumnos" title="Los paquetes del corte de la semana${nA ? ': ' + nA + ' sin enviar' : ''}">📦 Alumnos (insumos)${nA ? ' · ' + nA : ''}</button>`
+    + `<button type="button" class="btn ${tab === 'neon' ? 'btn-cyan' : 'ghost'}" data-logi-tab="neon" title="Los carteles de neón terminados y pagados${nN ? ': ' + nN + ' para enviar' : ''}">🔴 Producción neón${nN ? ' · ' + nN : ''}</button>`
+    + `</div>`;
+}
+// --- Neón: datos ---
+// Si ya hay una lectura en vuelo, devuelve esa (y si hace falta deja anotada otra, así el que espera ve lo nuevo).
+function logiNeonCargar(opts) {
+  opts = opts || {};
+  if (opts.silent && STATE._logiNeonMarcando) return Promise.resolve();   // marcando: el que marca recarga al terminar
+  if (STATE._logiNeonProm) { if (!opts.silent || opts.forzar) STATE._logiNeonOtraVez = true; return STATE._logiNeonProm; }
+  STATE._logiNeonProm = logiNeonCargarUna(opts).finally(() => {
+    STATE._logiNeonProm = null;
+    if (STATE._logiNeonOtraVez) { STATE._logiNeonOtraVez = false; return logiNeonCargar({ silent: true, forzar: true }); }
+  });
+  return STATE._logiNeonProm;
+}
+async function logiNeonCargarUna(opts) {
+  const silent = !!opts.silent, user = STATE.user, gen = STATE._logiNeonGen || 0, t0 = Date.now();
+  let j = null, err = '';
+  try { j = await sfFetch('/admin/neon/tablero'); } catch (e) { err = String((e && e.message) || 'No se pudo cargar'); }
+  // Otro usuario, o se marcó algo mientras tanto (esta lectura puede ser de antes): se descarta.
+  if (STATE.user !== user || gen !== (STATE._logiNeonGen || 0)) return;
+  const prev = STATE.logiNeon;
+  if (err) {
+    if (!silent) logiVigia('error', 'neon_cargar', err, { ms: Date.now() - t0 });
+    // Ya había datos: se conservan (un corte de red no vacía la lista).
+    // intentoAt: cuándo se probó por última vez (el tick espera desde ahí); "at" sigue siendo la última lectura buena.
+    if (prev && !prev.error && prev.user === user) { if (!silent) niToast('No se pudo actualizar: ' + err, { error: true }); prev.intentoAt = Date.now(); return; }
+    if (silent && prev && prev.error === err && prev.user === user) { prev.intentoAt = Date.now(); return; }
+    STATE.logiNeon = { error: err, at: Date.now(), user };
+  } else {
+    const cs = (j.carteles || []).filter(c => c && (c.etapa === 'enviar' || c.etapa === 'enviado'));
+    const cambio = !prev || !!prev.error || prev.user !== user || JSON.stringify(prev.carteles) !== JSON.stringify(cs);
+    STATE.logiNeon = { carteles: cs, at: Date.now(), user };
+    if (!cambio && silent && !opts.forzar) { const u = document.querySelector('[data-ln-upd]'); if (u) u.textContent = logiNeonHaceTxt(); return; }
+  }
+  if (STATE.view === 'logistica') logiRender();
+}
+function logiNeonOk() { const D = STATE.logiNeon; return !!(D && !D.error && D.user === STATE.user); }
+function logiNeonHaceTxt() { const a = logiNeonOk() ? STATE.logiNeon.at : 0; if (!a) return ''; const m = Math.floor((Date.now() - a) / 60000); return 'actualizado ' + (m < 1 ? 'recién' : 'hace ' + m + ' min'); }
+// Un renglón por pedido: los carteles del mismo pedido salen juntos. Los datos de envío son los del cartel que los tiene
+// (en un pedido de varios carteles suelen estar en uno solo y los otros dicen ".").
+function logiNeonGrupos() {
+  if (!logiNeonOk()) return [];
+  const gs = {};
+  for (const c of STATE.logiNeon.carteles) (gs[c.grupo] = gs[c.grupo] || []).push(c);
+  const peso = s => String(s || '').replace(/[\s.,\-]/g, '').length;
+  return Object.keys(gs).map(id => {
+    const cs = gs[id].slice().sort((a, b) => a.id - b.id);
+    const enviar = cs.filter(c => c.etapa === 'enviar');
+    const salidos = cs.filter(c => c.etapa === 'enviado' && c.despacho && c.f && c.f.despachado).sort((a, b) => String(b.f.despachado).localeCompare(String(a.f.despachado)));
+    const envio = cs.map(c => String(c.envio || '').trim()).sort((a, b) => peso(b) - peso(a))[0] || '';
+    const viejo = enviar.slice().sort((a, b) => String(nkbDesde(a) || '9').localeCompare(String(nkbDesde(b) || '9')))[0] || null;
+    return {
+      id, numero: cs[0].numero, cs, envio, enviar: enviar.length > 0,
+      entrega: nkbEntrega({ sf: cs.some(c => c.sf), envio }),
+      // Carteles del pedido que todavía no están para enviar (en producción o esperando el pago): el pedido sale entero.
+      faltan: Math.max(0, (Math.max(...cs.map(c => +c.grupo_n || 0)) || cs.length) - cs.length),
+      // Igual que el chip del tablero: terminado por el productor pero sin "Llegó al taller".
+      sinTraer: enviar.some(c => c.motivo !== 'estado' && c.prod_estado === 'terminado' && !(c.f && c.f.recibido)),
+      enTaller: enviar.length > 0 && enviar.every(c => c.f && c.f.recibido),
+      desde: viejo ? nkbDesde(viejo) : '', desdeAprox: !!(viejo && !viejo.desde),
+      salida: salidos.length ? Object.assign({}, salidos[0].despacho, { at: salidos[0].f.despachado, pid: salidos[0].id }) : null,
+    };
+  });
+}
+function logiNeonGrupo(gid) { return logiNeonGrupos().find(g => g.id === gid) || null; }
+function logiNeonPend() {
+  return logiNeonGrupos().filter(g => g.enviar && !LOGI_NEON_NO_ENVIO.includes(g.entrega))
+    .sort((a, b) => String(a.desde || '9').localeCompare(String(b.desde || '9')) || ((+a.numero || 0) - (+b.numero || 0)));
+}
+function logiNeonEnviados() {
+  const lim = Date.now() - LOGI_NEON_DIAS_ENV * 86400000;
+  return logiNeonGrupos().filter(g => !g.enviar && g.salida && g.salida.modo === 'envio' && new Date(g.salida.at).getTime() >= lim)
+    .sort((a, b) => String(b.salida.at).localeCompare(String(a.salida.at)));
+}
+function logiNeonEnvioOk(g) { return !!g.envio && g.entrega !== 'Entrega sin definir'; }
+function logiNeonNombre(g) { return g.cs.map(c => c.cartel || 'Sin nombre').join(' + '); }
+// Medida de cada cartel (alto × ancho, como en el tablero): "50×46 · 21×80 (×2) cm".
+function logiNeonMedidas(g) {
+  const n = v => String(v).replace('.', ',');
+  return g.cs.map(c => (c.alto && c.ancho ? n(c.alto) + '×' + n(c.ancho) : 'sin medida') + (c.cantidad > 1 ? ' (×' + c.cantidad + ')' : '')).join(' · ') + ' cm';
+}
+// --- Neón: lista ---
+function logiNeonHtml() {
+  const D = STATE.logiNeon, ok = logiNeonOk();
+  const top = `<div class="logi-head"><h1>Envíos · producción neón</h1></div>
+    ${logiTabsHtml()}
+    <div class="logi-bar">
+      <span data-ln-upd>${escapeHtml(logiNeonHaceTxt())}</span>
+      <span>· Usando: <b>${escapeHtml(logiOperador())}</b> <button type="button" class="logi-link" data-logi-op-cambiar>cambiar</button></span>
+      <span style="flex:1"></span>
+      <button class="btn btn-ghost" data-ln-refresh>Actualizar</button>
+      ${isAdmin() ? `<button class="btn btn-ghost" data-logi-password title="Crear o cambiar la contraseña del usuario 'logistica'">Contraseña de logística</button>` : ''}
+    </div>`;
+  if (!ok) {
+    const err = D && D.error && D.user === STATE.user ? D.error : '';
+    return `<div class="logi-wrap">${top}${err ? `<div class="logi-vacio-box"><div style="color:#ef4444;margin-bottom:10px">${escapeHtml(err)}</div><button class="btn" data-ln-refresh>Reintentar</button></div>` : '<div class="logi-vacio-box">Cargando carteles de neón…</div>'}</div>`;
+  }
+  const pend = logiNeonPend(), env = logiNeonEnviados();
+  const otros = logiNeonGrupos().filter(g => g.enviar && LOGI_NEON_NO_ENVIO.includes(g.entrega)).length;
+  const pl = (n, s, p) => n + ' ' + (n === 1 ? s : p);
+  const tot = [pl(pend.length, 'pedido para enviar', 'pedidos para enviar'), otros ? pl(otros, 'retira o se instala (no va por envío)', 'retiran o se instalan (no van por envío)') : '',
+    pl(env.length, 'enviado', 'enviados') + ' en los últimos ' + LOGI_NEON_DIAS_ENV + ' días'].filter(Boolean).join(' · ');
+  return `<div class="logi-wrap">${top}
+    <div class="logi-tot">${escapeHtml(tot)}</div>
+    <div class="lb-list" data-logi-neon aria-label="Carteles de neón para enviar">${pend.length ? pend.map(logiNeonFilaHtml).join('') : '<div class="lb-vacio">No hay carteles de neón para enviar</div>'}</div>
+    ${env.length ? `<div class="lb-tit ln-sub">Enviados · últimos ${LOGI_NEON_DIAS_ENV} días</div><div class="lb-list" data-logi-neon aria-label="Carteles de neón enviados">${env.map(logiNeonEnvFilaHtml).join('')}</div>` : ''}
+    <div class="logi-ayuda">Click en el renglón para ver los datos de envío y las fotos · "Salió por envío" lo marca enviado (sale el pedido entero) · Lo que se marca acá también queda en Producción neón</div>
+  </div>`;
+}
+function logiNeonFilaHtml(g) {
+  const abierto = !!(STATE.logiNeonOpen || {})[g.id], guardando = STATE._logiNeonMarcando === g.id, sinDir = g.entrega === 'Entrega sin definir';
+  const ch = [];
+  if (g.faltan) ch.push(`<span class="logi-pill a" title="Sale el pedido entero: espera a que el resto esté terminado y pagado">${g.faltan === 1 ? 'Falta 1 cartel del pedido' : 'Faltan ' + g.faltan + ' carteles del pedido'}</span>`);
+  if (sinDir) ch.push('<span class="logi-pill a" title="El pedido no tiene los datos de envío: pedíselos a Neon">Falta la dirección</span>');
+  if (g.sinTraer) ch.push('<span class="logi-pill a" title="El productor lo terminó pero todavía no llegó al taller">Falta traerlo al taller</span>');
+  else if (g.enTaller) ch.push('<span class="logi-pill v" title="Ya está en el taller">En el taller</span>');
+  if (g.cs.length > 1) ch.push(`<span class="logi-pill g">${g.cs.length} carteles</span>`);
+  const dias = g.desde ? sfkDiasCal(g.desde) : NaN, viejo = !isNaN(dias) && dias > (NKB_ROJO_DIAS.enviar || 3);
+  const hace = g.desde ? (g.desdeAprox ? '~' : '') + sfkHaceTxt(g.desde) : '';
+  const tit = g.desde && !g.desdeAprox ? 'Para enviar desde ' + sfFechaHora(g.desde) : 'Sin fecha de la etapa: cuenta desde la fecha del pedido';
+  return `<div class="lb-row ln-row${abierto ? ' abierto' : ''}${sinDir ? ' r-sindef' : ''}" data-ln-row="${escapeHtml(g.id)}">`
+    + `<div class="lb-head" data-ln-head title="Click para ver los datos de envío y las fotos">`
+    + `<span class="lb-tog" aria-hidden="true">▸</span>`
+    + `<span class="ln-num" title="N° de pedido">#${escapeHtml(String(g.numero || ''))}</span>`
+    + `<span class="lb-nom"><span class="n">${escapeHtml(logiNeonNombre(g))}</span>${ch.join('')}</span>`
+    + `<span class="lb-meta" title="Medida de cada cartel (alto × ancho)">${escapeHtml(logiNeonMedidas(g))}</span>`
+    + (hace ? `<span class="ln-hace${viejo ? ' viejo' : ''}" title="${escapeHtml(tit)}">${escapeHtml(hace)}</span>` : '')
+    + `<button type="button" class="btn btn-cyan ln-acc" data-ln="enviar"${guardando || g.faltan ? ' disabled' : ''} title="${g.faltan ? 'Todavía no sale: falta el resto del pedido' : 'Marcarlo enviado (sale el pedido entero)'}">${guardando ? 'Guardando…' : 'Salió por envío'}</button>`
+    + `</div>`
+    + (abierto ? logiNeonDetHtml(g) : '')
+    + `</div>`;
+}
+function logiNeonEnvFilaHtml(g) {
+  const abierto = !!(STATE.logiNeonOpen || {})[g.id], guardando = STATE._logiNeonMarcando === g.id, s = g.salida;
+  const diaAR = t => new Date(new Date(t).getTime() - 3 * 3600e3).toISOString().slice(0, 10);
+  // Deshacer: el mismo día (Gaspar siempre), igual que en el tablero.
+  const puede = isAdmin() || diaAR(s.at) === diaAR(Date.now());
+  const det = [s.transporte, s.seguimiento ? 'seguimiento ' + s.seguimiento : ''].filter(Boolean).join(' · ');
+  return `<div class="lb-row ln-row r-enviado${abierto ? ' abierto' : ''}" data-ln-row="${escapeHtml(g.id)}">`
+    + `<div class="lb-head" data-ln-head title="${escapeHtml('Salió ' + sfFechaHora(s.at) + (s.por ? ' · ' + nkbNom(s.por) : ''))}">`
+    + `<span class="lb-tog" aria-hidden="true">▸</span>`
+    + `<span class="ln-num">#${escapeHtml(String(g.numero || ''))}</span>`
+    + `<span class="lb-nom"><span class="n">${escapeHtml(logiNeonNombre(g))}</span><span class="logi-pill v">Enviado ${escapeHtml(sfFecha(s.at))}</span></span>`
+    + `<span class="lb-meta">${escapeHtml(det)}</span>`
+    + (puede ? `<button type="button" class="btn btn-ghost ln-acc" data-ln="deshacer"${guardando ? ' disabled' : ''} title="Volverlo a Para enviar (solo el mismo día)">${guardando ? 'Guardando…' : 'Deshacer'}</button>` : '')
+    + `</div>`
+    + (abierto ? logiNeonDetHtml(g) : '')
+    + `</div>`;
+}
+// Detalle (renglón abierto): los datos de envío tal como los pasó el cliente, los carteles y las fotos del terminado.
+function logiNeonDetHtml(g) {
+  const fotos = g.cs.map(c => Array.from({ length: Math.min(4, +c.fotos || 0) }, (_, i) => `<button type="button" class="sf-foto" data-sf-ver="${escapeHtml(nkbUrl('p=' + c.id + '&k=f&i=' + i))}" title="${escapeHtml((c.cartel || 'Cartel') + ' · ver grande')}"><img src="${escapeHtml(nkbUrl('p=' + c.id + '&k=f&i=' + i + '&w=300'))}" alt="${escapeHtml(c.cartel || 'Cartel')}" loading="lazy" onerror="sfkImgError(this)"></button>`).join('')).join('');
+  const linea = c => [c.cartel || 'Sin nombre', c.medida, c.cantidad > 1 ? c.cantidad + ' unidades' : '', c.dimer ? 'con dimmer' : ''].filter(Boolean).join(' · ');
+  return `<div class="lb-det" data-ln-det>
+    <div class="lb-det-dir">
+      <div class="lb-tit">Datos de envío</div>
+      ${logiNeonEnvioOk(g) ? `<pre>${escapeHtml(g.envio)}</pre><button type="button" class="btn btn-ghost lb-mini" data-ln="copiar">Copiar texto</button>` : '<div class="logi-mute">El pedido no tiene los datos de envío: pedíselos a Neon.</div>'}
+    </div>
+    <div class="lb-det-info">
+      <div class="lb-tit">${g.cs.length > 1 ? 'Carteles (salen juntos)' : 'Cartel'}</div>
+      ${g.cs.map(c => `<div class="ln-cartel">${escapeHtml(linea(c))}</div>`).join('')}
+      ${fotos ? `<div class="lb-tit">Fotos del cartel terminado</div><div class="sf-fotos">${fotos}</div>` : ''}
+      ${g.enviar && g.desde && !g.desdeAprox ? `<div class="lb-tit">Para enviar desde</div><div>${escapeHtml(sfFechaHora(g.desde))}</div>` : ''}
+    </div>
+  </div>`;
+}
+// --- Neón: acciones ---
+function logiNeonClick(e) {
+  const row = e.target.closest && e.target.closest('[data-ln-row]'); if (!row) return;
+  const gid = row.getAttribute('data-ln-row');
+  const ver = e.target.closest('[data-sf-ver]'); if (ver) { sfVerFoto(ver.getAttribute('data-sf-ver')); return; }
+  const b = e.target.closest('button[data-ln]');
+  if (b) {
+    const a = b.getAttribute('data-ln');
+    if (a === 'enviar') logiNeonEnviar(gid);
+    else if (a === 'deshacer') logiNeonDeshacer(gid, 0, true);
+    else if (a === 'copiar') { const g = logiNeonGrupo(gid); if (g) logiCopiar(g.envio, 'Texto copiado'); }
+    return;
+  }
+  if (e.target.closest('input, select, textarea, label, button, a, pre, [data-ln-det]')) return;
+  if (e.target.closest('[data-ln-head]')) { STATE.logiNeonOpen = STATE.logiNeonOpen || {}; STATE.logiNeonOpen[gid] = !STATE.logiNeonOpen[gid]; logiRender(); }
+}
+// "Salió por envío": transporte (de la misma lista que los alumnos) y seguimiento, los dos opcionales como en el tablero.
+async function logiNeonEnviar(gid) {
+  const g = logiNeonGrupo(gid); if (!g || !g.enviar || STATE._logiNeonMarcando) return;
+  const c = g.cs.find(x => x.etapa === 'enviar'); if (!c) return;
+  const nom = logiNeonNombre(g);
+  const v = await nkbModal({
+    titulo: 'Salió por envío · #' + g.numero,
+    cuerpo: `<div style="font-size:14px;font-weight:700;margin-bottom:2px">${escapeHtml(nom)}</div>`
+      + `<div style="font-size:12.5px;color:var(--fg-mute);margin-bottom:10px">${escapeHtml(logiNeonMedidas(g))}${g.cs.length > 1 ? ' · sale el pedido entero (' + g.cs.length + ' carteles)' : ''}</div>`
+      + (logiNeonEnvioOk(g) ? `<div class="sf-dato" style="margin-bottom:8px"><span>Envío</span><b>${escapeHtml(g.envio)}</b></div>` : '')
+      + `<label class="nc-field"><span class="nc-label">Transporte</span><input class="nc-input" data-f="transporte" maxlength="80" list="logi-neon-transp" autocomplete="off" placeholder="Elegí o escribí el transporte"></label>`
+      + `<datalist id="logi-neon-transp">${logiTransportes().map(x => `<option value="${escapeHtml(x)}"></option>`).join('')}</datalist>`
+      + `<label class="nc-field" style="margin-top:8px"><span class="nc-label">Seguimiento (opcional)</span><input class="nc-input" data-f="seguimiento" maxlength="120" autocomplete="off"></label>`,
+    botones: [{ v: 'envio', t: 'Salió por envío', cls: 'btn-cyan' }, { v: '__no', t: 'Cancelar' }],
+  });
+  if (!v || STATE._logiNeonMarcando) return;
+  const tr = logiTransporteNorm(v.f.transporte || '').slice(0, 80), seg = String(v.f.seguimiento || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  STATE._logiNeonMarcando = gid; STATE._logiNeonGen = (STATE._logiNeonGen || 0) + 1;
+  logiRender();
+  const r = await nkbPost('/admin/neon/despacho', { pedido_id: c.id, modo: 'envio', transporte: tr, seguimiento: seg });
+  STATE._logiNeonMarcando = null;
+  logiVigia(r.ok || (r.status && r.status < 500) ? 'uso' : 'error', r.ok ? 'neon_enviado' : 'neon_freno', '#' + g.numero + ' ' + nom + (r.ok ? (tr ? ' · ' + tr : '') : ': ' + nkbErr(r)));
+  await logiNeonCargar({ forzar: true });
+  if (r.ok) niToast('#' + g.numero + ' salió por envío', { undo: () => logiNeonDeshacer(gid, c.id), ms: 6000 });
+  else niToast('No se guardó: ' + nkbErr(r) + '.', { error: true });
+}
+// Deshacer (vuelve a Para enviar): el mismo día; lo frena el server si no corresponde. pid: el cartel que se marcó (el
+// deshacer del aviso, por si la lista todavía no se actualizó).
+async function logiNeonDeshacer(gid, pid, confirmar) {
+  if (STATE._logiNeonMarcando) return;
+  const g = logiNeonGrupo(gid), id = pid || (g && g.salida && g.salida.pid); if (!id) return;
+  const num = g ? '#' + g.numero : 'El pedido';
+  if (confirmar && !(await showConfirm(num + ' vuelve a Para enviar (como si no hubiera salido).', { title: 'Deshacer el envío', confirmLabel: 'Deshacer', cancelLabel: 'No' }).catch(() => false))) return;
+  if (STATE._logiNeonMarcando) return;
+  STATE._logiNeonMarcando = gid; STATE._logiNeonGen = (STATE._logiNeonGen || 0) + 1;
+  logiRender();
+  const r = await nkbPost('/admin/neon/despacho', { pedido_id: id, deshacer: true });
+  STATE._logiNeonMarcando = null;
+  logiVigia(r.ok || (r.status && r.status < 500) ? 'uso' : 'error', 'neon_deshacer', num + (r.ok ? '' : ': ' + nkbErr(r)));
+  await logiNeonCargar({ forzar: true });
+  niToast(r.ok ? num + ': se deshizo el envío' : 'No se deshizo: ' + nkbErr(r) + '.', r.ok ? {} : { error: true });
 }
 // --- Acciones ---
 async function logiPost(path, body) {
@@ -8232,6 +8479,10 @@ function logiTick() {
   });
   if (STATE._logiDirty && !logiOcupado()) logiRender();
   if (STATE.logi && Date.now() - (STATE.logiLoadedAt || 0) >= 85 * 1000) logisticaCargar({ silent: true });
+  const enNeon = logiTabAct() === 'neon';
+  if (enNeon) { const u = document.querySelector('[data-ln-upd]'); if (u) u.textContent = logiNeonHaceTxt(); }
+  const nd = STATE.logiNeon;
+  if (nd && nd.user === STATE.user && Date.now() - Math.max(nd.at || 0, nd.intentoAt || 0) >= (enNeon ? 150 : 600) * 1000) logiNeonCargar({ silent: true });
 }
 // Listeners de documento (una sola vez): cerrar el texto original al tocar afuera / Esc, Ctrl+V con una celda elegida,
 // y reacomodar el alto de la tabla al cambiar el tamaño de la ventana.
@@ -8270,9 +8521,27 @@ function logiBindGlobal() {
 }
 function bindLogistica() {
   if (!STATE.logi && !STATE._logiPendiente) logisticaCargar({});
+  // Neón: la primera lectura también desde Alumnos (para el número de la pestaña).
+  if ((!STATE.logiNeon || STATE.logiNeon.user !== STATE.user) && !STATE._logiNeonProm) logiNeonCargar({ silent: logiTabAct() !== 'neon' });
   if (!window._logiTimer) window._logiTimer = setInterval(logiTick, 30 * 1000);
   logiBindGlobal();
   const $$ = (sel, fn) => document.querySelectorAll(sel).forEach(fn);
+  $$('[data-logi-tab]', b => { b.onclick = () => {
+    const t = b.getAttribute('data-logi-tab') === 'neon' ? 'neon' : 'alumnos';
+    if (t === logiTabAct()) return;
+    if (STATE._logiEd) logiEdCerrar(true);
+    logiPopCerrar();
+    STATE.logiTab = t; logiLsSet(LOGI_TAB_KEY, t);
+    if (t === 'neon') {
+      logiVigia('uso', 'neon', '');
+      const D = STATE.logiNeon;
+      if (D && D.error) STATE.logiNeon = undefined;
+      if (!D || D.error || D.user !== STATE.user || Date.now() - (D.at || 0) > 60000) logiNeonCargar({ forzar: true });
+    }
+    render();
+  }; });
+  $$('[data-ln-refresh]', b => { b.onclick = () => { const err = !!(STATE.logiNeon && STATE.logiNeon.error); if (err) STATE.logiNeon = undefined; logiNeonCargar({ forzar: true }); if (err) render(); }; });
+  $$('[data-logi-neon]', el => { el.onclick = logiNeonClick; });
   $$('[data-logi-refresh]', b => { b.onclick = () => { const err = !!(STATE.logi && STATE.logi.error); if (err) STATE.logi = undefined; logisticaCargar({}); if (err) render(); }; });
   $$('[data-logi-tanda]', b => { b.onclick = () => {
     const id = parseInt(b.getAttribute('data-logi-tanda'), 10); if (!id) return;
