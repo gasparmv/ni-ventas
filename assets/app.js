@@ -4227,6 +4227,95 @@ function cmColBind(box, onChange, onEnterLast) {
   });
   upd();
 }
+// ===== Paquetes para productores (Neyen, Gaspar 19-oct) =====
+// Los lunes/martes Neyen arma el paquete de cada productor: sus bases de acrílico ya cortadas + el neón cortado por color.
+// El neón sale de lo que cargó Emma (cm de cada color por cartel × cantidad) + 5% de desperdicio para no quedarse corto.
+const NEON_DESPERDICIO = 0.05;
+// Bases separadas ANTES de este paso (16-oct) se dan por entregadas: si no, Neyen vería semanas de separadas viejas.
+const NEON_ENTREGA_DESDE = '2026-10-16T03:00:00.000Z';
+// ¿La base sigue en el taller esperando que el productor se la lleve? Cortada (sin separar) o separada y sin entregar.
+function corteNeonPendienteEntrega(p) {
+  if (!p || p.producto !== 'NEON' || p.prod_entregado_at) return false;
+  if (['en_armado', 'terminado'].indexOf(String(p.ped_prod_estado || '')) !== -1) return false;   // el productor ya arrancó: se la llevó
+  if (/^(entregad|para enviar)/i.test(String(p.ped_estado || '').trim())) return false;              // el cartel ya está hecho
+  if (p.estado === 'cortado') return true;
+  return p.estado === 'embalado' && String(p.separado_at || p.cortado_at || p.updated_at || '') >= NEON_ENTREGA_DESDE;
+}
+// Agrupa por productor y suma el neón por color (cm × cantidad de carteles) con el desperdicio (redondeado para arriba al cm).
+function corteNeonPaquetes(lista) {
+  const grupos = {};
+  lista.forEach(p => {
+    const nom = String(p.ped_productor || '').trim(), pid = String(p.ped_productor_id || '').trim();
+    const k = pid || (nom ? 'n:' + _cmColKey(nom) : '');
+    if (!grupos[k]) grupos[k] = { key: k, nombre: nom, items: [] };
+    if (!grupos[k].nombre && nom) grupos[k].nombre = nom;
+    grupos[k].items.push(p);
+  });
+  return Object.values(grupos).map(g => {
+    const porColor = {};
+    let sinCol = 0;
+    g.items.forEach(p => {
+      const cc = cmColParse(p.cm_colores), cant = Math.max(1, parseInt(p.cantidad, 10) || 1);
+      if (!cc.length) { sinCol++; return; }
+      cc.forEach(x => { porColor[x.c] = (porColor[x.c] || 0) + x.cm * cant; });
+    });
+    const orden = PEDIDO_COLORES.filter(c => porColor[c] > 0).concat(Object.keys(porColor).filter(c => PEDIDO_COLORES.indexOf(c) === -1));
+    const colores = orden.map(c => { const sin = Math.round(porColor[c] * 10) / 10, con = Math.ceil(+(sin * (1 + NEON_DESPERDICIO)).toFixed(6)); return { c, sin, con, desp: Math.round((con - sin) * 10) / 10 }; });
+    const tot = colores.reduce((a, x) => ({ sin: a.sin + x.sin, con: a.con + x.con, desp: a.desp + x.desp }), { sin: 0, con: 0, desp: 0 });
+    g.items.sort((a, b) => ((a.estado === 'embalado') - (b.estado === 'embalado')) || ((+a.pedido_numero || 0) - (+b.pedido_numero || 0)) || (a.id - b.id));
+    return Object.assign({}, g, { colores, tot, sinCol, sinSeparar: g.items.filter(p => p.estado !== 'embalado').length });
+  }).sort((a, b) => ((!a.key) - (!b.key)) || String(a.nombre).localeCompare(String(b.nombre)));
+}
+function _nmM(cm) { return (Math.round(Number(cm) || 0) / 100).toFixed(2).replace('.', ','); }   // cm → "12,60" (metros)
+// Pestaña "🔴 Productores · neón" de Neyen: una tarjeta por productor (neón para cortar + bases + "Entregado a X").
+function corteNeyenProductoresHtml(pedidos, cargando) {
+  const paqs = corteNeonPaquetes(pedidos.filter(corteNeonPendienteEntrega));
+  const pct = Math.round(NEON_DESPERDICIO * 100);
+  const dot = (c) => `<span style="width:12px;height:12px;border-radius:50%;flex:0 0 auto;display:inline-block;border:1px solid rgba(255,255,255,.35);background:${PEDIDO_COLOR_HEX[c] || '#888'}"></span>`;
+  const baseRow = (p) => {
+    const cc = cmColParse(p.cm_colores), cant = Math.max(1, parseInt(p.cantidad, 10) || 1);
+    const med = (+p.ancho_real > 0 && +p.alto_real > 0) ? cmColFmt(p.ancho_real) + ' × ' + cmColFmt(p.alto_real) + ' cm' : String(p.medida_declarada || '');
+    const sep = p.estado === 'embalado';
+    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px dashed var(--border);font-size:13px">
+        ${p.foto_key ? `<a href="${escapeHtml(mediaUrl(p.foto_key))}" target="_blank" rel="noopener" style="flex:0 0 auto"><img src="${escapeHtml(disenoThumb(p.foto_key, 200))}" loading="lazy" alt="" style="width:46px;height:46px;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border);display:block"></a>` : ''}
+        <div style="flex:1;min-width:0">
+          <div style="overflow-wrap:anywhere">${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> ` : ''}${escapeHtml(p.diseno_nombre || 'cartel')}${cant > 1 ? ` <b>×${cant}</b>` : ''}${med ? ` <span style="color:var(--fg-subtle)">${escapeHtml(med)}</span>` : ''}</div>
+          <div style="font-size:11.5px;margin-top:2px;color:${cc.length ? 'var(--fg-mute)' : '#f59e0b'}">${cc.length ? '🎨 ' + escapeHtml(cmColResumen(cc, true)) + (cant > 1 ? ' · cada uno' : '') : '⚠ faltan los colores (Emma)'}</div>
+        </div>
+        ${sep ? `<span style="font-size:11px;font-weight:700;color:#22c55e;white-space:nowrap">✓ separada</span><button class="btn ghost" data-corte-desembalar="${p.id}" title="Volver a 'sin separar'" aria-label="Deshacer separada" style="font-size:11px;padding:3px 8px">↩</button>` : `<button class="btn" data-corte-separar="${p.id}" style="font-size:12px;padding:5px 12px">Separar</button>`}
+      </div>`;
+  };
+  const card = (g) => {
+    const nom = g.nombre || 'el productor';
+    const neon = g.colores.length ? `
+        <div style="background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:10px 0 4px">
+          <div style="font-size:12px;color:var(--fg-subtle);margin-bottom:4px">✂ Neón para cortar <span style="color:var(--fg-mute)">· ya con ${pct}% de desperdicio</span></div>
+          ${g.colores.map(x => `<div data-paq-color="${escapeHtml(x.c)}" style="display:flex;align-items:center;gap:10px;padding:5px 0;font-size:14px">${dot(x.c)}<span style="flex:1;min-width:0">${escapeHtml(x.c)}</span><b style="white-space:nowrap">${_nmM(x.con)} m</b><span style="font-size:11.5px;color:var(--fg-mute);white-space:nowrap;min-width:104px;text-align:right">${_nmM(x.sin)} + ${_nmM(x.desp)} desp.</span></div>`).join('')}
+          <div style="display:flex;gap:10px;justify-content:space-between;flex-wrap:wrap;border-top:1px solid var(--border);margin-top:6px;padding-top:7px;font-size:12.5px;color:var(--fg-mute)"><span>Total: <b style="color:var(--fg)">${_nmM(g.tot.con)} m</b></span><span>desperdicio: <b style="color:var(--fg)">${_nmM(g.tot.desp)} m</b></span></div>
+        </div>` : `<div style="font-size:12.5px;color:#f59e0b;margin:10px 0 4px">⚠ Todavía no hay colores cargados para estas bases: falta que Emma ponga los cm de cada color.</div>`;
+    const aviso = (g.sinCol && g.colores.length) ? `<div style="font-size:12px;color:#f59e0b;margin:4px 0">⚠ ${g.sinCol === 1 ? '1 base no tiene' : g.sinCol + ' bases no tienen'} los colores cargados (Emma): su neón no está sumado.</div>` : '';
+    const pie = g.key
+      ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+          <button class="btn btn-cyan" data-corte-prod-entregar="${g.items.map(p => p.id).join(',')}" data-corte-prod-nombre="${escapeHtml(nom)}" data-corte-prod-sinsep="${g.sinSeparar}" data-corte-prod-sincol="${g.sinCol}" style="font-size:14px;padding:9px 16px">📦 Entregado a ${escapeHtml(nom)}</button>
+          <span style="font-size:12px;color:var(--fg-mute)">cuando se lleve las bases y el neón</span></div>`
+      : `<div style="font-size:12px;color:var(--fg-mute);margin-top:8px">Gaspar todavía no les asignó productor: separalas y esperá.</div>`;
+    return `<div data-paq="${escapeHtml(g.key || 'sin')}" style="background:var(--ink-100);border:1px solid ${g.key ? 'var(--border)' : 'rgba(245,158,11,.4)'};border-radius:12px;padding:14px 16px;margin-bottom:14px">
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:16px;font-weight:800">${g.key ? '👷 ' + escapeHtml(nom) : '❔ Sin productor todavía'}</span><span style="font-size:12.5px;color:var(--fg-mute)">${g.items.length} base${g.items.length === 1 ? '' : 's'}${g.sinSeparar ? ' · ' + g.sinSeparar + ' sin separar' : ' · todas separadas ✓'}${g.colores.length ? ' · ' + _nmM(g.tot.con) + ' m de neón' : ''}</span></div>
+        ${neon}${aviso}
+        <div style="margin-top:8px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle)">Bases de acrílico</div>
+        ${g.items.map(baseRow).join('')}
+        ${pie}
+      </div>`;
+  };
+  // Entregados en los últimos 7 días (para revisar o deshacer).
+  const hace7 = new Date(Date.now() - 7 * 864e5).toISOString();
+  const entregados = corteNeonPaquetes(pedidos.filter(p => p.producto === 'NEON' && p.prod_entregado_at && String(p.prod_entregado_at) >= hace7));
+  const fEnt = (g) => { const f = g.items.map(p => String(p.prod_entregado_at || '')).sort().pop(); const d = new Date(f); return isNaN(d.getTime()) ? '' : d.toLocaleDateString('es-AR', { weekday: 'short', day: '2-digit', month: '2-digit' }); };
+  const entHtml = entregados.length ? `<div style="margin-top:20px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:6px">✅ Entregados (últimos 7 días)</div>${entregados.map(g => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px dashed var(--border);font-size:13px"><span style="flex:1;min-width:0">👷 <b>${escapeHtml(g.nombre || 'productor')}</b> · ${g.items.length} base${g.items.length === 1 ? '' : 's'}${g.colores.length ? ' · ' + _nmM(g.tot.con) + ' m de neón' : ''} <span style="color:var(--fg-mute)">· ${fEnt(g)}</span></span><button class="btn ghost" data-corte-prod-desentregar="${g.items.map(p => p.id).join(',')}" title="Deshacer: vuelve a los paquetes" aria-label="Deshacer entrega" style="font-size:11px;padding:3px 9px">↩</button></div>`).join('')}</div>` : '';
+  const intro = `<p style="color:var(--fg-mute);font-size:13px;margin:0 0 14px">Cada productor se lleva sus bases y el neón cortado por color. El neón ya incluye el ${pct}% de desperdicio para no quedarte corto.${cargando ? ' · cargando…' : ''}</p>`;
+  const vacio = (!paqs.length && !cargando) ? '<div style="padding:26px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:10px">No hay bases de neón esperando a un productor ✨</div>' : '';
+  return intro + vacio + paqs.map(card).join('') + entHtml;
+}
 // Pieza de neón sin diseñar cuyo pedido ya se entregó / está para enviar: el cartel ya existe, la matriz
 // ya no sirve → fuera de la línea de Emma, de "esperando foto" y del badge (el admin la sigue viendo).
 function corteNeonPedidoHecho(p) { return p.producto === 'NEON' && p.estado === 'pedido' && !!p.pedido_id && /^(entregado|para enviar)$/i.test(String(p.ped_estado || '').trim()); }
@@ -4669,24 +4758,22 @@ function renderCorte() {
       const paraEmbalar = groupBy(pedidos.filter(p => p.estado === 'cortado' && !esNeon(p)));
       const embalados = groupBy(pedidos.filter(p => p.estado === 'embalado' && !esNeon(p)));
       const totalCort = pedidos.filter(p => p.estado === 'cortado' && !esNeon(p)).length, totalEmb = pedidos.filter(p => p.estado === 'embalado' && !esNeon(p)).length;
-      // Neón: producción propia (van al productor, no a un alumno). Neyen los separa a un costado.
-      const neonMatch = p => !q || String(p.diseno_nombre || '').toLowerCase().includes(q) || String(p.medida_declarada || '').toLowerCase().includes(q);
-      const neonPend = pedidos.filter(p => esNeon(p) && p.estado === 'cortado').filter(neonMatch);
-      // "Ya separados": solo las últimas 2 semanas (ahora entra un neón por cada cartel vendido; sin tope la lista crecía 180 días).
-      const _hace14 = new Date(Date.now() - 14 * 864e5).toISOString();
-      const neonSep = pedidos.filter(p => esNeon(p) && p.estado === 'embalado' && String(p.updated_at || '') >= _hace14).filter(neonMatch);
-      const neonRow = (p, done) => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px dashed var(--border);font-size:13px">
-          ${p.foto_key ? `<a href="${escapeHtml(mediaUrl(p.foto_key))}" target="_blank" rel="noopener" style="flex:0 0 auto"><img src="${escapeHtml(disenoThumb(p.foto_key, 200))}" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border);display:block"></a>` : ''}
-          <span style="flex:1;min-width:0">${done ? '<span style="color:#22c55e">✓</span> ' : ''}${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> ` : ''}${escapeHtml(p.diseno_nombre || 'diseño')}${p.medida_declarada ? ` <span style="color:var(--fg-subtle)">${escapeHtml(p.medida_declarada)}</span>` : ''}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + p.cantidad : ''}${p.ped_productor ? `<br><span style="font-size:11px;color:var(--fg-mute)">→ productor: ${escapeHtml(p.ped_productor)}</span>` : ''}</span>
-          ${done ? `<button class="btn ghost" data-corte-desembalar="${p.id}" style="font-size:11px;padding:3px 9px">↩</button>` : `<button class="btn" data-corte-separar="${p.id}" style="font-size:11px;padding:4px 11px">Separado</button>`}
+      // Neón: producción propia → va al productor. Vive en la pestaña "🔴 Productores · neón" (un paquete por productor: bases +
+      // neón por color con el desperdicio); en Alumnos queda solo un acceso (Gaspar 19-oct).
+      let neyenTab = STATE.corteNeyenTab;
+      if (!neyenTab) { try { neyenTab = localStorage.getItem('corte_neyen_tab') || 'alumnos'; } catch (_) { neyenTab = 'alumnos'; } }
+      const nNeonPend = pedidos.filter(corteNeonPendienteEntrega).length;
+      const neyenTabs = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 14px">
+          <button type="button" class="btn ${neyenTab === 'productores' ? 'ghost' : 'btn-cyan'}" data-corte-neyen-tab="alumnos" style="font-size:13px;padding:7px 14px">📦 Alumnos${totalCort ? ' · ' + totalCort : ''}</button>
+          <button type="button" class="btn ${neyenTab === 'productores' ? 'btn-cyan' : 'ghost'}" data-corte-neyen-tab="productores" style="font-size:13px;padding:7px 14px">🔴 Productores · neón${nNeonPend ? ' · ' + nNeonPend : ''}</button>
         </div>`;
-      const neonSection = (neonPend.length + neonSep.length) ? `
-        <div style="margin-top:22px;background:var(--ink-100);border:1px solid var(--border);border-radius:12px;padding:16px">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px"><span style="font-size:15px;font-weight:800;color:#ef4444">🔴 Neón — separar a un costado</span><span style="color:var(--fg-mute);font-size:12px">${neonPend.length} para separar${neonSep.length ? ' · ' + neonSep.length + ' separados' : ''}</span></div>
-          <div style="font-size:12px;color:var(--fg-mute);margin-bottom:6px">Cortes de neón (producción propia). Separalos y dejalos a un costado para el productor.</div>
-          ${neonPend.map(p => neonRow(p, false)).join('') || (q ? '' : '<div style="font-size:12px;color:var(--fg-mute);padding:8px 0">Todo separado ✨</div>')}
-          ${neonSep.length ? `<div style="margin-top:12px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle)">Ya separados</div>${neonSep.map(p => neonRow(p, true)).join('')}` : ''}
-        </div>` : '';
+      if (neyenTab === 'productores') return `
+        <div style="padding:var(--s-4);max-width:860px">
+          <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — Paquetes para productores</h1>
+          ${neyenTabs}
+          ${corteNeyenProductoresHtml(pedidos, cargando)}
+        </div>`;
+      const neonSection = nNeonPend ? `<button type="button" data-corte-neyen-tab="productores" style="margin-top:22px;width:100%;text-align:left;background:var(--ink-100);border:1px solid #ef4444;border-radius:12px;padding:14px 16px;color:var(--fg);cursor:pointer;font-size:14px"><b style="color:#ef4444">🔴 Neón:</b> ${nNeonPend} base${nNeonPend === 1 ? '' : 's'} para los productores → armar los paquetes</button>` : '';
       // Entrega: viene de la planilla de cortes. Vacía = SIN DEFINIR (nunca "retira" por default: Martin Guaragna, 5/10).
       const entregaBadge = (e) => (e === 'envio' || e === 'retira') ? `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:${e === 'envio' ? '#f59e0b' : '#22c55e'};background:color-mix(in srgb, ${e === 'envio' ? '#f59e0b' : '#22c55e'} 16%, transparent)">${e === 'envio' ? '📦 Envío' : '🏠 Retira'}</span>` : `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:#ef4444;background:color-mix(in srgb, #ef4444 14%, transparent)">⚠ Entrega sin definir — consultá a Gaspar</span>`;
       const cardHtml = (g, done) => {
@@ -4711,6 +4798,7 @@ function renderCorte() {
             <h1 style="margin:0;font-size:20px;flex:1;min-width:200px">✂ Corte — Para embalar</h1>
             <button class="btn btn-cyan" data-corte-etiquetas="" title="Una etiqueta por cliente y por bulto (impresora 100×150 o A4)" style="font-size:14px;padding:9px 14px">🏷 Etiquetas de la semana</button>
           </div>
+          ${neyenTabs}
           <p style="color:var(--fg-mute);font-size:13px;margin:0 0 12px">${totalCort} para embalar · ${totalEmb} ya embalado${cargando ? ' · cargando…' : ''}</p>
           <input id="corte-emb-q" placeholder="Buscar cliente o diseño…" value="${escapeHtml(STATE.corteEmbQuery || '')}" style="width:100%;max-width:360px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:9px 12px;color:var(--fg);font-size:13px;margin-bottom:16px">
           <div class="corte-emb-cols" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
@@ -4767,9 +4855,15 @@ function renderCorte() {
     const relevVisId = colaEmma.length ? (colaEmma.find(p => p.id === STATE.corteRelevId) || colaEmma[0]).id : null;
     // Diseñados = lo que Emma diseñó ESTA SEMANA (desde el lunes 00:00 AR; el lunes del corte, desde el martes anterior), por
     // la fecha REAL de diseño (disenado_at, desde 6-oct-2026). Las piezas sin esa fecha (anteriores) no aparecen: ya están hechas.
+    // + las que todavía no tienen los cm por color y siguen pendientes (sin cortar, o sin entregar al productor; diseñadas en los
+    // últimos 10 días): así no se le esconden a Emma al cambiar la semana (Gaspar 19-oct). Las que faltan van primero.
+    const _hace10 = new Date(Date.now() - 10 * 864e5).toISOString();
+    const _faltaCol = (p) => !cmColParse(p.cm_colores).length;
     const disenadosNeon = pedidos
-      .filter(p => p.producto === 'NEON' && ['matriz_lista', 'cortado', 'embalado'].indexOf(p.estado) !== -1 && p.disenado_at && String(p.disenado_at) >= _desdeDis)
-      .sort((a, b) => String(b.disenado_at).localeCompare(String(a.disenado_at)) || (b.id - a.id));
+      .filter(p => p.producto === 'NEON' && ['matriz_lista', 'cortado', 'embalado'].indexOf(p.estado) !== -1 && p.disenado_at
+        && (String(p.disenado_at) >= _desdeDis || (_faltaCol(p) && String(p.disenado_at) >= _hace10 && (p.estado === 'matriz_lista' || corteNeonPendienteEntrega(p)))))
+      .sort((a, b) => (_faltaCol(b) - _faltaCol(a)) || String(b.disenado_at).localeCompare(String(a.disenado_at)) || (b.id - a.id));
+    const nFaltaCol = disenadosNeon.filter(_faltaCol).length;
     const kDia = (iso) => { const d = new Date(iso); return isNaN(d.getTime()) ? '' : d.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' }); };
     const kTitulo = (p) => `${p.pedido_numero ? `<b>#${escapeHtml(String(p.pedido_numero))}</b> · ` : ''}${escapeHtml(p.diseno_nombre || 'cartel')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + escapeHtml(String(p.cantidad)) : ''}`;
     const kThumb = (p) => p.foto_key ? `<img src="${escapeHtml(disenoThumb(p.foto_key, 200))}" loading="lazy" alt="" style="width:46px;height:46px;flex:0 0 auto;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border)">` : '';
@@ -4784,9 +4878,9 @@ function renderCorte() {
     const colEsperando = esperandoFoto.map(p => `<div style="${kCard}"><div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">${escapeHtml(p.medida_declarada || '—')}</div></div></div>`).join('');
     const colPorDisenar = porDisenarNeon.map(p => { const enPantalla = p.id === relevVisId; return `<div data-corte-relev-ir="${p.id}" role="button" tabindex="0" title="Traer a la línea de relevamiento" style="${kCard};cursor:pointer${enPantalla ? ';border-color:#ef4444' : ''}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">${escapeHtml(p.medida_declarada || '—')}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;color:${enPantalla ? '#ef4444' : 'var(--accent-cyan,#8FD4DE)'}">${enPantalla ? 'en pantalla' : 'Medir →'}</span></div>`; }).join('');
     const K_DIS_MAX = 10;
-    const disVisibles = STATE.corteNeonDisAll ? disenadosNeon : disenadosNeon.slice(0, K_DIS_MAX);
+    const disVisibles = STATE.corteNeonDisAll ? disenadosNeon : disenadosNeon.slice(0, nFaltaCol + K_DIS_MAX);   // las que faltan, todas
     const colDisenados = disVisibles.map(p => { const paso = kPaso[p.estado] || ['', 'var(--fg-mute)']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${kTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}</div>${kColores(p)}</div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span><button type="button" data-corte-corregir="${p.id}" title="Corregir la medida de la matriz" aria-label="Corregir la medida" style="flex:0 0 auto;margin-left:6px;background:none;border:1px solid var(--border);border-radius:7px;padding:2px 7px;color:var(--fg-mute);cursor:pointer;font-size:12px">✏️</button></div>`; }).join('')
-      + (disenadosNeon.length > K_DIS_MAX ? `<button type="button" class="btn ghost" data-corte-neon-dis-all style="width:100%;font-size:12px;padding:6px 10px">${STATE.corteNeonDisAll ? 'ver solo las últimas ' + K_DIS_MAX : 'ver las ' + (disenadosNeon.length - K_DIS_MAX) + ' restantes'}</button>` : '');
+      + (disenadosNeon.length > nFaltaCol + K_DIS_MAX ? `<button type="button" class="btn ghost" data-corte-neon-dis-all style="width:100%;font-size:12px;padding:6px 10px">${STATE.corteNeonDisAll ? 'ver solo las últimas ' + K_DIS_MAX : 'ver las ' + (disenadosNeon.length - nFaltaCol - K_DIS_MAX) + ' restantes'}</button>` : '');
     const neonKanban = `
       <div style="margin-top:22px">
         <style>@media(max-width:900px){.corte-neon-cols{grid-template-columns:1fr!important}}</style>
@@ -4794,7 +4888,7 @@ function renderCorte() {
         <div class="corte-neon-cols" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start">
           ${kCol('⏳ Esperando foto', esperandoFoto.length, 'falta que suban el diseño', colEsperando || kVacio('Nada esperando ✨'))}
           ${kCol('🎨 Por diseñar', porDisenarNeon.length, '', porDisenarNeon.length ? `<button type="button" class="btn" data-corte-disenos-pack="${porDisenarNeon.map(p => p.id).join(',')}" title="Baja un ZIP con las fotos y te manda las medidas por WhatsApp (a vos y a Gaspar)" style="width:100%;margin-bottom:8px;font-size:12.5px">⬇ Descargar diseños y recibir medidas</button>${colPorDisenar}` : kVacio('Todo diseñado ✨'))}
-          ${kCol('✅ Diseñados', disenadosNeon.length, _notaDis, colDisenados || kVacio('Todavía nada diseñado ' + _notaDis))}
+          ${kCol('✅ Diseñados', disenadosNeon.length, _notaDis + (nFaltaCol ? ' · ⚠ ' + nFaltaCol + ' sin los cm por color' : ''), colDisenados || kVacio('Todavía nada diseñado ' + _notaDis))}
         </div>
       </div>`;
     // TABLERO DE PEDIDOS WEB (alumnos que piden por la landing /corte/): lo que espera la matriz y lo que Emma ya diseñó
@@ -8687,6 +8781,22 @@ async function bindCorte() {
   document.querySelectorAll('[data-corte-separar]').forEach(btn => {
     btn.onclick = () => corteBulk('avanzar_bulk', { ids: [parseInt(btn.getAttribute('data-corte-separar'), 10)], estado: 'embalado' });
   });
+  // Neyen: pestañas Alumnos / Productores, y entregar (o deshacer) el paquete de un productor.
+  document.querySelectorAll('[data-corte-neyen-tab]').forEach(b => { b.onclick = () => { STATE.corteNeyenTab = b.getAttribute('data-corte-neyen-tab'); try { localStorage.setItem('corte_neyen_tab', STATE.corteNeyenTab); } catch (_) {} render(); }; });
+  document.querySelectorAll('[data-corte-prod-entregar]').forEach(b => {
+    b.onclick = async () => {
+      const ids = String(b.getAttribute('data-corte-prod-entregar') || '').split(',').map(Number).filter(Boolean);
+      if (!ids.length) return;
+      const nom = b.getAttribute('data-corte-prod-nombre') || 'el productor';
+      const nSep = parseInt(b.getAttribute('data-corte-prod-sinsep'), 10) || 0, nCol = parseInt(b.getAttribute('data-corte-prod-sincol'), 10) || 0;
+      const msg = '¿' + nom + ' se llevó ' + (ids.length === 1 ? 'la base' : 'las ' + ids.length + ' bases') + ' y el neón?'
+        + (nSep ? '\n\n' + (nSep === 1 ? '1 base no estaba separada' : nSep + ' bases no estaban separadas') + ': quedan separadas y entregadas.' : '')
+        + (nCol ? '\n\n⚠ ' + (nCol === 1 ? '1 base no tiene' : nCol + ' bases no tienen') + ' los colores cargados: ese neón no estaba en la cuenta.' : '');
+      if (!await showConfirm(msg, { title: 'Entregar paquete', confirmLabel: 'Sí, se lo llevó', cancelLabel: 'Todavía no' }).catch(() => false)) return;
+      corteBulk('entregado_prod', { ids });
+    };
+  });
+  document.querySelectorAll('[data-corte-prod-desentregar]').forEach(b => { b.onclick = () => corteBulk('desentregar_prod', { ids: String(b.getAttribute('data-corte-prod-desentregar') || '').split(',').map(Number).filter(Boolean) }); });
   // Navegador de semanas del board admin: ‹ / › cambian la tanda seleccionada.
   document.querySelectorAll('[data-corte-week-to]').forEach(b => { b.onclick = () => { const t = b.getAttribute('data-corte-week-to'); if (t) { STATE.corteTandaSel = parseInt(t, 10); render(); } }; });
   // Aprendizaje del corte: buscar mejoras (síntesis) + aprobar/descartar propuestas al KB.

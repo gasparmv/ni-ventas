@@ -8850,7 +8850,8 @@ async function ensureCorteNeonSchema(env) {
   // a mano desde 'pedido'). updated_at NO sirve para eso: lo pisan el corte, el embalado y el cambio de foto.
   // cm_colores: cm de neón de cada color de UN cartel de neón propio, los carga Emma al diseñar la matriz
   // (Gaspar 19-oct). JSON [{c:'Rosa', cm:600}, …] con los colores de NEON_COLORES.
-  for (const col of ['pedido_id INTEGER', 'pedido_numero INTEGER', 'origen TEXT', 'base TEXT', 'vendedor TEXT', 'disenado_at TEXT', 'cm_colores TEXT']) {
+  // prod_entregado_at/por: Neyen le entregó al productor el paquete (la base + el neón cortado) — Gaspar 19-oct.
+  for (const col of ['pedido_id INTEGER', 'pedido_numero INTEGER', 'origen TEXT', 'base TEXT', 'vendedor TEXT', 'disenado_at TEXT', 'cm_colores TEXT', 'prod_entregado_at TEXT', 'prod_entregado_por TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE corte_pedidos ADD COLUMN ${col}`).run(); } catch (_) {} // tira si ya existe
   }
   // UNA pieza por cartel: índice único parcial (las manuales tienen pedido_id NULL) + INSERT OR IGNORE en
@@ -8858,7 +8859,7 @@ async function ensureCorteNeonSchema(env) {
   try { await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS uq_corte_pedidos_pedido ON corte_pedidos(pedido_id) WHERE pedido_id IS NOT NULL').run(); } catch (_) {}
   // Memoizar solo si las columnas existen de verdad (un ALTER que falló por un corte transitorio no
   // tiene que dejar el isolate entero sin la feature hasta que se recicle).
-  try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor, disenado_at, cm_colores FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
+  try { await env.DB.prepare('SELECT pedido_id, pedido_numero, origen, base, vendedor, disenado_at, cm_colores, prod_entregado_at, prod_entregado_por FROM corte_pedidos LIMIT 0').all(); _corteNeonSchemaOk = true; } catch (_) {}
 }
 // Colores de neón: los mismos 10 del pedido (PEDIDO_COLORES del front).
 const NEON_COLORES = ['Amarillo', 'Azul', 'Blanco cálido', 'Blanco frío', 'Celeste', 'Naranja', 'Rojo', 'Rosa', 'Verde', 'Violeta'];
@@ -27161,7 +27162,7 @@ const handler = {
           await ensureCorteNeonSchema(env);
           const desde = new Date(Date.now() - 180 * 86400000).toISOString();
           rows = (await env.DB.prepare(
-            `SELECT c.*, p.productor AS ped_productor, p.fecha AS ped_fecha, p.estado_pedido AS ped_estado, p.colores AS ped_colores, p.cm_neon AS ped_cm_neon
+            `SELECT c.*, p.productor AS ped_productor, p.fecha AS ped_fecha, p.estado_pedido AS ped_estado, p.colores AS ped_colores, p.cm_neon AS ped_cm_neon, p.productor_id AS ped_productor_id, p.prod_estado AS ped_prod_estado
                FROM corte_pedidos c LEFT JOIN pedidos p ON p.id = c.pedido_id
               WHERE (c.estado IN ('pedido','matriz_lista','cortado') OR c.updated_at >= ?) AND c.estado != 'prueba'
               ORDER BY c.updated_at DESC, c.id DESC LIMIT 3000`
@@ -27954,6 +27955,24 @@ const handler = {
             if (est === 'cortado' || est === 'embalado') await neonCorteStamp(env, ids, est === 'cortado' ? 'cortado_at' : 'separado_at');
             if (est === 'embalado') await neonCorteStamp(env, ids, 'cortado_at');
             return json({ ok: true, action, estado: est, n: (rr.meta && rr.meta.changes) || 0 });
+          } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+        }
+        // Paquete para el productor (Neyen, Gaspar 19-oct): {ids} de piezas de neón → 'entregado_prod' las deja separadas (si no
+        // lo estaban) y estampa la entrega (salen de "Paquetes para productores"); 'desentregar_prod' la deshace.
+        if (action === 'entregado_prod' || action === 'desentregar_prod') {
+          if (!['admin', 'produccion'].includes(_role)) return json({ error: 'forbidden' }, 403);
+          const ids = (Array.isArray(body.ids) ? body.ids : []).map(x => parseInt(x, 10)).filter(Boolean).slice(0, 200);
+          if (!ids.length) return json({ error: 'sin ids' }, 400);
+          const ph = ids.map(() => '?').join(',');
+          try {
+            let rr;
+            if (action === 'entregado_prod') {
+              rr = await env.DB.prepare(`UPDATE corte_pedidos SET estado='embalado', prod_entregado_at=COALESCE(prod_entregado_at, ?), prod_entregado_por=COALESCE(prod_entregado_por, ?), updated_at=? WHERE id IN (${ph}) AND producto='NEON' AND estado IN ('cortado','embalado')`).bind(nowIso, _slug, nowIso, ...ids).run();
+              await neonCorteStamp(env, ids, 'cortado_at'); await neonCorteStamp(env, ids, 'separado_at');
+            } else {
+              rr = await env.DB.prepare(`UPDATE corte_pedidos SET prod_entregado_at=NULL, prod_entregado_por=NULL, updated_at=? WHERE id IN (${ph}) AND producto='NEON' AND prod_entregado_at IS NOT NULL`).bind(nowIso, ...ids).run();
+            }
+            return json({ ok: true, action, n: (rr.meta && rr.meta.changes) || 0 });
           } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         }
         // Entrega a mano (SOLO admin) {ids, entrega:'envio'|'retira'} → entrega_manual=1: la sincronización con la planilla ya
