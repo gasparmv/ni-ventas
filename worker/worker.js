@@ -14785,7 +14785,7 @@ function sinRespEsCortesia(body) {
 // {espera, urgente, motivo} o null si la IA no respondió (no se cachea: se reintenta en la próxima corrida).
 async function sinRespClasificar(env, phone, msgs, rubro = 'carteles') {
   if (!env.ANTHROPIC_API_KEY || !msgs.length) return null;
-  const conv = msgs.map(m => (m.direction === 'inbound' ? 'CLIENTE' : (rubro === 'cursos' && +m.automated > 0 ? 'AUTOMÁTICO' : 'NEGOCIO')) + (m.msg_type && m.msg_type !== 'text' ? ' [' + m.msg_type + ']' : '') + ': ' + String(m.body || '').replace(/\s+/g, ' ').trim().slice(0, 400)).join('\n');
+  const conv = msgs.map(m => (m.direction === 'inbound' ? 'CLIENTE' : (rubro === 'cursos' && +m.automated > 0 ? 'AUTOMÁTICO' : 'NEGOCIO')) + (m.msg_type && m.msg_type !== 'text' ? ' [' + m.msg_type + ']' : '') + (rubro === 'cursos' && m.st === 'failed' ? ' (NO LE LLEGÓ: falló el envío)' : '') + ': ' + String(m.body || '').replace(/\s+/g, ' ').trim().slice(0, 400)).join('\n');
   const system = 'Sos supervisor de ventas de un negocio de carteles de neón LED y letras corpóreas (Argentina). Te paso el final de un chat entre un CLIENTE y el NEGOCIO; el último mensaje es del cliente y nadie le contestó. Decidí si el vendedor TIENE que responderle. Devolvé SOLO un JSON: {"espera":true|false,"urgente":true|false,"motivo":"máximo 8 palabras"}.\n' +
     'espera=true si el cliente: hace una pregunta o pide algo (precio, medidas, plazos, envío, datos de pago, una foto, un cambio); quiere avanzar, comprar, pagar o señar; plantea una objeción que un vendedor puede trabajar (le parece caro, no le alcanza el presupuesto, compara con otro proveedor, duda entre opciones); manda una foto, audio o idea nueva para cotizar; o reclama.\n' +
     'espera=false si es solo cortesía o cierre (gracias, ok, emoji, "joya", "perfecto" sin pedir nada); si dice que lo piensa, que avisa él o que lo deja para más adelante sin preguntar nada; si rechaza en forma definitiva (no me interesa, ya compré en otro lado); o si es spam, número equivocado o un mensaje automático.\n' +
@@ -14862,7 +14862,7 @@ async function sinRespCandidatos(env, nowMs, opts = {}) {
     else if (!c && usadas < maxIa) {
       usadas++;
       let msgs = [];
-      try { msgs = ((await env.DB.prepare("SELECT direction, msg_type, body, automated FROM wa_messages WHERE phone = ? AND msg_type NOT IN ('status', 'reaction') ORDER BY ts DESC LIMIT 8").bind(r.phone).all()).results || []).reverse(); } catch (_) {}
+      try { msgs = ((await env.DB.prepare("SELECT direction, msg_type, body, automated, IFNULL(status, '') st FROM wa_messages WHERE phone = ? AND msg_type NOT IN ('status', 'reaction') ORDER BY ts DESC LIMIT 8").bind(r.phone).all()).results || []).reverse(); } catch (_) {}
       c = await sinRespClasificar(env, r.phone, msgs, opts.bandeja === 'cursos' ? 'cursos' : 'carteles');
     }
     if (c && !cacheado) {
@@ -14886,6 +14886,7 @@ async function sinRespCandidatos(env, nowMs, opts = {}) {
 const SIN_RESP_CURSOS_SYSTEM = 'Sos supervisor de ventas de un negocio que vende CURSOS online para aprender a armar y vender carteles de neón LED (Argentina). Te paso el final de un chat entre un CLIENTE y el NEGOCIO (AUTOMÁTICO = mensaje automático, no lo escribió una persona). El último mensaje del cliente no tuvo respuesta de una persona. Decidí si una vendedora TIENE que contestarle. Respondé SOLO un JSON: {"espera":true|false,"urgente":true|false,"motivo":"máx 8 palabras"}. ' +
   'espera=true si el cliente: pregunta algo (precio, cuotas, seña, cómo pagar, qué incluye, el kit, el envío, accesos, la plataforma, el grupo); quiere sumarse, pagar o señar; mandó un comprobante; plantea una objeción que se puede trabajar (no tiene plata ahora, no sabe nada, no tiene tiempo, desconfía); avisa que ya vio la clase o que le interesa; o reclama algo. ' +
   'espera=false si es solo cortesía o cierre (gracias, ok, emoji); si dice que lo piensa o que avisa sin preguntar nada; si rechaza en forma definitiva; si el mensaje del CLIENTE es una respuesta automática de otro negocio ("gracias por comunicarte con…", "en este momento no podemos responder"), spam o un número equivocado; o si un mensaje AUTOMÁTICO posterior ya le respondió exactamente lo que pedía (por ejemplo el link de la clase). ' +
+  'Un mensaje marcado "NO LE LLEGÓ" no cuenta como respuesta. Un audio sin transcripción o un "?" solo: espera=true (alguien lo tiene que escuchar o retomar). ' +
   'urgente=true solo si quiere pagar o señar ya, mandó un comprobante, espera los accesos después de pagar, o reclama. Ante la duda entre espera true y false, elegí true.';
 async function sinRespFilasCursos(env, cut1h, cutFloor) {
   const out = [];
