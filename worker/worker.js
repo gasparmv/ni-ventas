@@ -6838,6 +6838,86 @@ async function corteLtv(env) {
   if (!r.ok) return { error: r.error };
   return { ok: true, rows: r.values.map(x => ({ nombre: String(x[1] || '').trim(), norm: corteNormNombre(x[1]), tel: corteTel(x[5]), datos: String(x[4] || '').trim() })).filter(x => x.norm) };
 }
+
+// ===== Aviso del corte del finde: todos los jueves a las 15 h (Gaspar 22-oct-2026) =====
+// "programa que todos los jueves se mande el aviso a las 15hs", desde el número de Neon Infinito (nunca el WhatsApp
+// personal de Gaspar) y "solo clientes de corte": LTV_Alumnos con teléfono válido + los que pidieron por la web.
+// Sale como un broadcast con la plantilla MARKETING corte_aviso_finde: uno cada 30 s, de 9 a 21 h; los que no tenían
+// chat aparecen en la bandeja Corte si responden. kv aviso_corte_semanal_on = '1' lo prende; aviso_corte_semanal_ultimo
+// es la fecha (AR) del último. GET/POST /admin/aviso-corte-semanal para ver a quiénes le llega, mandarlo a mano o apagarlo.
+const AVISO_CORTE_TPL = 'corte_aviso_finde';
+const AVISO_CORTE_TEXTO = 'Buenas {{1}} cómo va? Este finde se cortan bases acrílicas transparentes. Si querés sumar algún corte, cargalo en la página hasta el viernes a las 20 hs.';
+function avisoCortePrimerNombre(nombre) {
+  const w = String(nombre || '').replace(/([a-záéíóúüñ])([A-ZÁÉÍÓÚÜÑ])/g, '$1 $2').split(/\s+/)[0] || '';
+  return w ? w.charAt(0).toLocaleUpperCase('es') + w.slice(1).toLocaleLowerCase('es') : 'che';
+}
+// { ok, contactos: [{phone, nombre, params}], malos: ['Nombre (dígitos)'] } | { error }
+async function avisoCorteContactos(env) {
+  const r = await corteSheetValues(env, CORTE_SHEET_ID, 'LTV_Alumnos!A2:F');
+  if (!r.ok) return { error: 'no pude leer LTV_Alumnos (' + r.error + ')' };
+  const equipo = new Set();
+  try { for (const x of ((await env.DB.prepare('SELECT phone FROM wa_internal_phones').all()).results || [])) equipo.add(String(x.phone)); } catch (_) {}
+  const porTel = new Map(), malos = [];
+  const sumar = (tel, nombre) => { if (tel && !equipo.has(tel) && !porTel.has(tel)) porTel.set(tel, { phone: tel, nombre: String(nombre || '').slice(0, 80), params: [avisoCortePrimerNombre(nombre)] }); };
+  for (const x of r.values) {
+    const nombre = String(x[1] || '').trim();
+    if (!nombre || nombre.toLowerCase() === 'neon') continue;
+    // El teléfono de la col F; si no tiene, el que figure en "Datos envío" (col E), como el script de siempre. corteTel
+    // descarta lo que no es un celular: DNI, o el código postal pegado al número.
+    const f = String(x[5] || '').trim();
+    let crudo = f.replace(/\D/g, '').length >= 8 ? f : '';
+    if (!crudo) { const m = String(x[4] || '').match(/(?:Tel\s*)?(\d[\d\s\-]{7,})/i); if (m && m[1].replace(/\D/g, '').length >= 8) crudo = m[1]; }
+    if (!crudo) continue;
+    const tel = corteTel(crudo);
+    if (tel) sumar(tel, nombre); else malos.push(nombre + ' (' + crudo.replace(/\D/g, '') + ')');
+  }
+  // Los que pidieron por la web y no están en LTV con ese teléfono.
+  try {
+    for (const p of ((await env.DB.prepare("SELECT telefono, MAX(cliente_nombre) AS nombre FROM corte_pedidos WHERE telefono IS NOT NULL AND telefono <> '' GROUP BY telefono").all()).results || [])) sumar(corteTel(p.telefono), p.nombre);
+  } catch (_) {}
+  return { ok: true, contactos: [...porTel.values()], malos };
+}
+// Crea el broadcast (mismo formato que POST /admin/broadcasts, con las variables por contacto y la bandeja Corte).
+async function avisoCorteEncolar(env, contactos, nombre) {
+  await ensureBroadcastsSchema(env);
+  const ahora = Date.now(), intervalo = 30;
+  const ins = await env.DB.prepare("INSERT INTO wa_broadcasts (name, template, lang, param_mode, body_preview, status, total, created_at, created_by, reply_ai) VALUES (?, ?, 'es_AR', 'nombre', ?, 'running', ?, ?, 'aviso_corte_semanal', 0)")
+    .bind(nombre, AVISO_CORTE_TPL, AVISO_CORTE_TEXTO, contactos.length, new Date(ahora).toISOString()).run();
+  const id = ins && ins.meta && ins.meta.last_row_id;
+  if (!id) throw new Error('no se pudo crear el broadcast');
+  const kind = 'bc_' + id;
+  await env.DB.prepare("UPDATE wa_broadcasts SET send_hours = '9-21', reveal_inbox = 'corte' WHERE id = ?").bind(id).run();
+  const st = [];
+  contactos.forEach((c, i) => {
+    st.push(env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, ?, '', 'queued', ?, ?)").bind(c.phone, kind, new Date(ahora + i * intervalo * 1000).toISOString(), c.nombre));
+    st.push(env.DB.prepare("INSERT OR REPLACE INTO bc_contact_params (kind, phone, params) VALUES (?, ?, ?)").bind(kind, c.phone, JSON.stringify(c.params)));
+  });
+  for (let j = 0; j < st.length; j += 100) await env.DB.batch(st.slice(j, j + 100));
+  return { id, kind, total: contactos.length, minutos: Math.round(contactos.length * intervalo / 60) };
+}
+// Cron de cada minuto: el jueves a las 15 h (AR) lo manda una sola vez y le avisa a Gaspar cómo salió.
+async function avisoCorteSemanal(env) {
+  const ar = new Date(Date.now() - 3 * 3600e3);
+  if (ar.getUTCDay() !== 4 || ar.getUTCHours() !== 15) return;
+  if ((await kvGet(env, 'aviso_corte_semanal_on', '0')) !== '1') return;
+  const hoy = ar.toISOString().slice(0, 10);
+  // Reclamo atómico de la semana: el primer tick de las 15 h se lo lleva (si algo falla después, no se reintenta cada minuto).
+  let claim = null;
+  try { claim = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('aviso_corte_semanal_ultimo', ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at WHERE kv_cache.v <> excluded.v RETURNING k").bind(hoy, new Date().toISOString()).first(); } catch (_) {}
+  if (!claim) return;
+  let txt;
+  try {
+    const t = await env.DB.prepare('SELECT status FROM template_status_cache WHERE name = ?').bind(AVISO_CORTE_TPL).first();
+    const c = (t && String(t.status).toUpperCase() !== 'APPROVED') ? { error: 'la plantilla ' + AVISO_CORTE_TPL + ' está ' + String(t.status).toUpperCase() + ' en Meta' } : await avisoCorteContactos(env);
+    if (!c.ok) txt = 'No salió el aviso del corte de hoy: ' + c.error + '.';
+    else if (!c.contactos.length) txt = 'No salió el aviso del corte de hoy: no encontré clientes con teléfono.';
+    else {
+      const b = await avisoCorteEncolar(env, c.contactos, 'Aviso corte finde ' + hoy + ' (automático)');
+      txt = `Salió el aviso del corte del finde a ${b.total} clientes, uno cada 30 s (termina en unos ${b.minutos} min).` + (c.malos.length ? ` ${c.malos.length} de LTV tienen el teléfono mal cargado y no lo reciben.` : '');
+    }
+  } catch (e) { txt = 'No salió el aviso del corte de hoy: ' + String((e && e.message) || e).slice(0, 200); }
+  try { await avisoAdmin(env, txt, { tipo: 'aviso_corte_semanal', prioridad: 'P2', clave: 'aviso_corte:' + hoy }); } catch (_) {}
+}
 // Asignaciones manuales confirmadas (cliente → teléfono). Solo cuentan para nombres con nombre Y apellido: con un solo
 // nombre ("mirna", "Eliana") sería volver al "teléfono por nombre de pila".
 async function corteTelOverrides(env) {
@@ -23520,6 +23600,34 @@ const handler = {
       }
       // Crear un broadcast custom desde el panel (Fase 2): CSV de contactos +
       // plantilla elegida + goteo. dryRun=true valida sin encolar (preview seguro).
+      // Aviso del corte de los jueves (avisoCorteSemanal). GET: cómo está y a quiénes le llega (?todos=1, la lista entera);
+      // POST {accion}: 'on' / 'off' prende o apaga el automático, 'enviar' lo manda ya a todos.
+      if (path === '/admin/aviso-corte-semanal' && (request.method === 'GET' || request.method === 'POST')) {
+        if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
+        if (request.method === 'GET') {
+          const c = await avisoCorteContactos(env);
+          const lista = c.ok ? c.contactos.map(x => x.params[0] + ' · ' + x.nombre + ' (' + x.phone + ')') : [];
+          return json({
+            on: (await kvGet(env, 'aviso_corte_semanal_on', '0')) === '1', ultimo: await kvGet(env, 'aviso_corte_semanal_ultimo', ''),
+            plantilla: AVISO_CORTE_TPL, texto: AVISO_CORTE_TEXTO, error: c.error || null, total: lista.length, malos: c.malos || [],
+            contactos: url.searchParams.get('todos') === '1' ? lista : lista.slice(0, 5),
+          });
+        }
+        let body = {};
+        try { body = await request.json(); } catch (_) {}
+        if (body.accion === 'on' || body.accion === 'off') {
+          await kvSet(env, 'aviso_corte_semanal_on', body.accion === 'on' ? '1' : '0');
+          return json({ ok: true, on: body.accion === 'on' });
+        }
+        if (body.accion === 'enviar') {
+          const c = await avisoCorteContactos(env);
+          if (!c.ok) return json({ error: c.error }, 500);
+          if (!c.contactos.length) return json({ error: 'no hay clientes con teléfono' }, 400);
+          const b = await avisoCorteEncolar(env, c.contactos, 'Aviso corte finde ' + new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10) + ' (a mano)');
+          return json({ ok: true, ...b, malos: c.malos });
+        }
+        return json({ error: "accion: 'on' | 'off' | 'enviar'" }, 400);
+      }
       if (request.method === 'POST' && path === '/admin/broadcasts') {
         if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
         await ensureBroadcastsSchema(env);
@@ -31228,6 +31336,7 @@ const handler = {
     if (event.cron === '* * * * *') ctx.waitUntil(processSinResponderCursos(env));   // misma alarma para la bandeja de cursos → Abril + Gaspar (gate sin_responder_cursos_on, APAGADO por defecto)
     if (event.cron === '* * * * *' && new Date().getUTCMinutes() % 10 === 0) ctx.waitUntil(syncCursosPendientes(env));   // etiquetas "Espera accesos" / "Seña pendiente" (gate cursos_pendientes_on, APAGADO)
     if (event.cron === '* * * * *') ctx.waitUntil(avisoTandaFlush(env));   // un solo "Falló envío" / "Plantilla enviada" por ráfaga (Gaspar 22-oct)
+    if (event.cron === '* * * * *') ctx.waitUntil(avisoCorteSemanal(env));   // aviso del corte del finde, jueves 15 h AR (Gaspar 22-oct; kv aviso_corte_semanal_on)
     if (event.cron === '* * * * *') ctx.waitUntil(processSinResponder(env));     // (solo en el de cada minuto: con los dos crons a la vez el throttle por kv no alcanzaba y el aviso salía doble) alarma "sin responder": lead cotizado/con intención sin contestar +Nh → digest al vendedor + Gaspar (self-throttle 15min, gate sin_responder_on)
     // Recordatorio de COBRO de los pedidos cargados sin pago (10 y 18 AR, lun-sáb; cada 10 min dentro de esa hora con claim).
     if (new Date().getUTCMinutes() % 10 === 0) ctx.waitUntil(processCobrosPendientes(env));
