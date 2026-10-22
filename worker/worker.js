@@ -3112,7 +3112,7 @@ async function ensureAgendaSchema(env) {
 async function agendaRoute(env, request, url, path) {
   const session = await getSession(env, request);
   if (!session) return unauthorized();
-  if (esUsuarioLogistica(session.user) || esUsuarioSinFrontera(session.user)) return json({ error: 'forbidden' }, 403); // usuarios externos: no ven la agenda interna
+  if (esUsuarioLogistica(session.user) || esUsuarioSinFrontera(session.user) || esUsuarioFran(session.user)) return json({ error: 'forbidden' }, 403); // usuarios externos: no ven la agenda interna
   if (await productorDeSesion(env, session.user)) return json({ error: 'forbidden' }, 403); // productores (o no se pudo verificar): solo sus carteles
   await ensureAgendaSchema(env);
   const me = _agSlug(session.user);
@@ -18461,6 +18461,26 @@ function cortePiezaSinVendedor(r) { if (!r) return r; delete r.vendedor; if (r.a
 // les cambia el estado; (2) Mis pedidos: sus compras de neón (por sus números o vinculadas a mano) como las ve Gaspar pero
 // sin lo interno. Se reconoce por el NOMBRE, como logística (getSessionRole cae a 'comercial' si falla la base): el muro de
 // /admin/, la agenda y sesionInterna lo frenan fuera de /admin/sinfrontera/*. Vale "Sin Frontera", "sinfrontera", "sin-frontera".
+// ===== Fran (router y láser, Gaspar 22-oct-2026) =====
+// Se ocupa de los pedidos de corte que encarga Sin Frontera (no los hacen ni Emma ni Aníbal). Usuario propio 'fran' (rol
+// 'fran'; lo crea Gaspar poniéndole contraseña) que ve SOLO esa lista: los pedidos, sus archivos y el estado. Se reconoce por
+// el NOMBRE, como logística y Sin Frontera (getSessionRole cae a 'comercial' si falla la base).
+function esUsuarioFran(userName) { return String(userName || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '') === 'fran'; }
+// Lo único de /admin/ que puede usar Fran: la lista de pedidos de corte, su estado y sus archivos (?c=).
+function franRutaOk(request, path, url) {
+  if (request.method === 'GET' && path === '/admin/sinfrontera/cortes') return true;
+  if (request.method === 'GET' && path === '/admin/sinfrontera/archivo') return !!url.searchParams.get('c');
+  return request.method === 'POST' && path === '/admin/sinfrontera/corte/estado';
+}
+// Aviso a Fran de un pedido de corte (nuevo o cancelado), si Gaspar cargó su WhatsApp (agenda_phones 'fran'): texto si le
+// escribió al número del negocio en las últimas 23 h; si no, la plantilla de servicio (sinRespEnviar, como a Neyen).
+async function sfCorteAvisoFran(env, texto) {
+  try {
+    const t = await env.DB.prepare("SELECT phone FROM agenda_phones WHERE usuario = 'fran'").first();
+    const ph = t ? String(t.phone || '').replace(/\D/g, '') : '';
+    if (ph) await sinRespEnviar(env, ph, texto);
+  } catch (_) {}
+}
 function esUsuarioSinFrontera(userName) { return String(userName || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[\s._-]+/g, '') === 'sinfrontera'; }
 // Estados del corpóreo que actualiza Sin Frontera (Gaspar, 15-oct). Se guardan en pedidos.prod_estado, la misma columna que la
 // producción de neón (allá: pendiente / en_armado / terminado; un pedido es neón o corpóreo, nunca los dos). '' = por empezar.
@@ -19016,8 +19036,8 @@ async function getSessionRole(env, userName) {
 async function sesionInterna(env, request, roles) {
   const session = await getSession(env, request);
   if (!session) return { error: unauthorized() };
-  const role = esUsuarioLogistica(session.user) ? 'logistica' : (esUsuarioSinFrontera(session.user) ? 'sinfrontera' : ((await productorDeSesion(env, session.user)) ? 'productor' : await getSessionRole(env, session.user)));
-  if (role === 'logistica' || role === 'sinfrontera' || role === 'productor' || (roles && !roles.includes(role))) return { error: json({ error: 'forbidden' }, 403) };
+  const role = esUsuarioLogistica(session.user) ? 'logistica' : esUsuarioFran(session.user) ? 'fran' : (esUsuarioSinFrontera(session.user) ? 'sinfrontera' : ((await productorDeSesion(env, session.user)) ? 'productor' : await getSessionRole(env, session.user)));
+  if (role === 'logistica' || role === 'sinfrontera' || role === 'fran' || role === 'productor' || (roles && !roles.includes(role))) return { error: json({ error: 'forbidden' }, 403) };
   return { session, role };
 }
 // Quiénes usan el cotizador (COGS/params) y la vista Actividad: Gaspar, vendedores y diseño.
@@ -20454,7 +20474,7 @@ async function ensureProdSchema(env) {
   return true;
 }
 // Usuarios que NO pueden ser productores (ya existen con otro rol o son del equipo).
-const PROD_RESERVADOS = ['gaspar', 'admin', 'administrador', 'joaco', 'joaquin', 'facundo', 'facu', 'agustina', 'agus', 'abril', 'cursos', 'disenador', 'emma', 'emmanuel', 'logistica', 'sinfrontera', 'anibal', 'neyen', 'nadia', 'debi', 'debora'];
+const PROD_RESERVADOS = ['gaspar', 'admin', 'administrador', 'joaco', 'joaquin', 'facundo', 'facu', 'agustina', 'agus', 'abril', 'cursos', 'disenador', 'emma', 'emmanuel', 'logistica', 'sinfrontera', 'fran', 'anibal', 'neyen', 'nadia', 'debi', 'debora'];
 function prodSlug(s) { return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
 // ¿La sesión es de un PRODUCTOR? {id, nombre, activo} o null. Mira users_panel con cualquier activo: un productor
 // dado de baja con una sesión vieja NO puede caer al rol por defecto ('comercial') y ver ventas. Cache 60 s por isolate.
@@ -21981,6 +22001,8 @@ const handler = {
       if (esUsuarioLogistica(session.user) && !path.startsWith('/admin/logistica/') && !path.startsWith('/admin/neon/')) return json({ error: 'forbidden' }, 403);
       // Sin Frontera (usuario externo): SOLO /admin/sinfrontera/* (corpóreos en producción sin precio y sus propios pedidos).
       if (esUsuarioSinFrontera(session.user) && !path.startsWith('/admin/sinfrontera/')) return json({ error: 'forbidden' }, 403);
+      // Fran (router y láser): SOLO los pedidos de corte de Sin Frontera (franRutaOk).
+      if (esUsuarioFran(session.user) && !franRutaOk(request, path, url)) return json({ error: 'forbidden' }, 403);
       // Productores de neón (usuario propio): SOLO /admin/prod/* (sus carteles). Dado de baja → afuera aunque tenga sesión.
       { const _pz = await productorDeSesion(env, session.user); if (_pz) { if (_pz.error) return json({ error: 'No se pudo verificar el usuario. Probá de nuevo en un momento.' }, 503); if (!_pz.activo) return unauthorized(); if (!path.startsWith('/admin/prod/')) return json({ error: 'forbidden' }, 403); } }
 
@@ -28721,8 +28743,8 @@ const handler = {
         return json({ error: 'not found' }, 404);
       }
       if (path.startsWith('/admin/sinfrontera/')) {
-        const sfExt = esUsuarioSinFrontera(session.user);
-        if (!sfExt && (await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        const sfExt = esUsuarioSinFrontera(session.user), fran = esUsuarioFran(session.user);
+        if (fran ? !franRutaOk(request, path, url) : (!sfExt && (await getSessionRole(env, session.user)) !== 'admin')) return json({ error: 'forbidden' }, 403);
         try { await ensureSinFronteraSchema(env); } catch (_) { return json({ error: 'db', motivo: 'No se pudo preparar la base. Probá de nuevo.' }, 500); }
         // GET /admin/sinfrontera/produccion → corpóreos en producción (sfProduccion).
         if (request.method === 'GET' && path === '/admin/sinfrontera/produccion') return json(await sfProduccion(env, { admin: !sfExt }));
@@ -28825,11 +28847,13 @@ const handler = {
           const propio = !SF_CORTE_COLORES[col.color];
           if (propio) { try { await sfCorteColorGuardar(env, col.color, col.hex); } catch (_) {} }
           if (sfExt) {
-            const txt = 'Sin Frontera te encargó un corte (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + SF_CORTE_MATERIALES[material] + ' ' + col.nombre.toLowerCase() + (propio ? ' (color nuevo)' : '')
+            const det = SF_CORTE_MATERIALES[material] + ' ' + col.nombre.toLowerCase() + (propio ? ' (color nuevo)' : '')
               + ' de ' + espesor + ' mm, para el ' + fecha.slice(8, 10) + '/' + fecha.slice(5, 7) + ', ' + arch.length + (arch.length === 1 ? ' archivo' : ' archivos')
-              + (acl ? '. Aclaración: ' + acl.replace(/\s+/g, ' ').slice(0, 300) : '') + '. Lo ves en el CRM: Sin Frontera > Cortes.';
+              + (acl ? '. Aclaración: ' + acl.replace(/\s+/g, ' ').slice(0, 300) : '');
+            const txt = 'Sin Frontera te encargó un corte (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + det + '. Lo ves en el CRM: Sin Frontera > Cortes.';
             const pr = avisoAdmin(env, txt, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id }).catch(() => {});
-            try { ctx.waitUntil(pr); } catch (_) { await pr; }
+            const pf = sfCorteAvisoFran(env, 'Nuevo pedido de corte de Sin Frontera (#' + id + '): ' + det + '. Lo ves en el CRM, en Cortes de Sin Frontera.');
+            try { ctx.waitUntil(Promise.all([pr, pf])); } catch (_) { await Promise.all([pr, pf]); }
           }
           let row = null; try { row = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
           return json({ ok: true, corte: row ? sfCorteFila(row) : { id } });
@@ -28852,7 +28876,7 @@ const handler = {
           if (row.estado === estado) return json({ ok: true, corte: sfCorteFila(row), sin_cambios: true });
           if (sfExt && !(estado === 'cancelado' && row.estado === 'pedido')) return json({ error: 'forbidden', motivo: row.estado === 'pedido' ? 'Solo se puede cancelar.' : 'Ya se empezó a cortar: para cambiarlo, hablalo con Gaspar.' }, 403);
           const quien = String(body.quien || '').replace(/\s+/g, ' ').trim().slice(0, 40);
-          const por = sfExt ? (quien ? quien + ' · Sin Frontera' : 'Sin Frontera') : String(session.user || '');
+          const por = sfExt ? (quien ? quien + ' · Sin Frontera' : 'Sin Frontera') : (fran ? 'Fran' : String(session.user || ''));
           const nowIso = new Date().toISOString();
           let ch = 0;
           try { const u = await env.DB.prepare('UPDATE sf_cortes SET estado = ?, estado_at = ?, estado_por = ? WHERE id = ? AND estado = ?').bind(estado, nowIso, por, id, row.estado).run(); ch = (u && u.meta && u.meta.changes) || 0; }
@@ -28862,12 +28886,54 @@ const handler = {
             const txt = 'Sin Frontera canceló el pedido de corte #' + id + (quien ? ' (' + quien + ')' : '') + ': ' + (SF_CORTE_MATERIALES[row.material] || row.material) + ' '
               + String(SF_CORTE_COLORES[row.color] || row.color).toLowerCase() + ' de ' + row.espesor + ' mm.';
             const pr = avisoAdmin(env, txt, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id + ':cancelado' }).catch(() => {});
-            try { ctx.waitUntil(pr); } catch (_) { await pr; }
+            const pf = sfCorteAvisoFran(env, txt);
+            try { ctx.waitUntil(Promise.all([pr, pf])); } catch (_) { await Promise.all([pr, pf]); }
           }
           return json({ ok: true, corte: sfCorteFila(Object.assign({}, row, { estado, estado_at: nowIso, estado_por: por })) });
         }
         // ---- De acá para abajo, solo Gaspar ----
-        if (sfExt) return json({ error: 'forbidden' }, 403);
+        if (sfExt || fran) return json({ error: 'forbidden' }, 403);
+        // GET|POST /admin/sinfrontera/fran → el usuario de Fran (router y láser): si existe, si tiene contraseña y su WhatsApp para
+        // los avisos de pedidos de corte. POST {password?, telefono?}: la contraseña crea o actualiza el usuario 'fran' (rol 'fran')
+        // y lo activa (un usuario activo sin contraseña entraría sin ella: nunca se crea sin); cambiarla cierra sus sesiones.
+        // telefono va a agenda_phones ('fran'); vacío lo borra.
+        if (path === '/admin/sinfrontera/fran' && (request.method === 'GET' || request.method === 'POST')) {
+          if (request.method === 'POST') {
+            let body; try { body = await request.json(); } catch { body = {}; }
+            const pw = String(body.password || '');
+            if (!pw && body.telefono == null) return json({ error: 'datos', motivo: 'No hay nada para guardar.' }, 400);
+            let tel = null;
+            if (body.telefono != null) {
+              const raw = String(body.telefono).trim();
+              tel = raw ? (normalizeArPhone(raw) || '') : '';
+              if (raw && !tel) return json({ error: 'datos', motivo: 'Ese número no parece un celular: poné el código de área (por ejemplo 11 2345 6789).' }, 400);
+            }
+            if (pw) {
+              if (pw.length < 8) return json({ error: 'datos', motivo: 'La contraseña tiene que tener al menos 8 caracteres.' }, 400);
+              const hash = await sha256hex(pw);
+              try {
+                await env.DB.prepare("INSERT INTO users_panel (id, nombre, rol, activo, password_hash, created_at) VALUES ('fran', 'Fran', 'fran', 1, ?, ?) ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash, rol='fran', activo=1")
+                  .bind(hash, new Date().toISOString()).run();
+                const ses = (await env.DB.prepare('SELECT token, user FROM sessions WHERE expires_at > ?').bind(new Date().toISOString()).all()).results || [];
+                const del = ses.filter(s => esUsuarioFran(s.user)).map(s => s.token);
+                if (del.length) await env.DB.batch(del.map(t => env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(t)));
+                try { await env.DB.prepare("DELETE FROM kv_cache WHERE k = 'login_fail:fran'").run(); } catch (_) {}
+              } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar la contraseña. Probá de nuevo.' }, 500); }
+            }
+            if (tel !== null) {
+              try {
+                await env.DB.prepare('CREATE TABLE IF NOT EXISTS agenda_phones (usuario TEXT PRIMARY KEY, phone TEXT)').run();
+                if (tel) await env.DB.prepare("INSERT INTO agenda_phones (usuario, phone) VALUES ('fran', ?) ON CONFLICT(usuario) DO UPDATE SET phone = excluded.phone").bind(tel).run();
+                else await env.DB.prepare("DELETE FROM agenda_phones WHERE usuario = 'fran'").run();
+                _internosCache = null;   // su número pasa a ser del equipo (no es un lead)
+              } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar el número. Probá de nuevo.' }, 500); }
+            }
+          }
+          let usr = null, telActual = '';
+          try { usr = await env.DB.prepare("SELECT activo, CASE WHEN IFNULL(password_hash, '') <> '' THEN 1 ELSE 0 END AS con_clave FROM users_panel WHERE id = 'fran'").first(); } catch (_) {}
+          try { const t = await env.DB.prepare("SELECT phone FROM agenda_phones WHERE usuario = 'fran'").first(); telActual = (t && t.phone) || ''; } catch (_) {}
+          return json({ ok: true, usuario: { existe: !!usr, activo: !!(usr && +usr.activo === 1), con_clave: !!(usr && +usr.con_clave === 1) }, telefono: telActual });
+        }
         // POST /admin/sinfrontera/excluir {pedido_id, sacar: true|false} → "No lo hace Sin Frontera": lo saca de su tablero (no lo
         // ven ni pueden moverlo ni bajar sus archivos) o lo vuelve a sumar. No toca el pedido ni su estado.
         if (request.method === 'POST' && path === '/admin/sinfrontera/excluir') {

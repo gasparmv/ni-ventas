@@ -20,7 +20,7 @@ const OFRECER_BASE_NEGRA = false;
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Debi', 'Diseñador', 'Abril', 'Aníbal', 'Neyen', 'Logística', 'Sin Frontera'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Debi', 'Diseñador', 'Abril', 'Aníbal', 'Neyen', 'Fran', 'Logística', 'Sin Frontera'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -724,7 +724,7 @@ async function postAvisos(ruta, body, okMsg) {
 // ¿Este usuario cotiza? (Gaspar, vendedores y diseño). Abril, producción y logística NO: el worker les
 // niega /cotizador/* y acá no se pide ni se guarda en el navegador nada de costos ni sueldos.
 function usaCotizador() {
-  return !!STATE.token && tokenBelongsTo(STATE.user) && !isCursosOnly() && !isProduccionOnly() && !isLogisticaOnly() && !isProductorOnly() && !isSinFronteraOnly();
+  return !!STATE.token && tokenBelongsTo(STATE.user) && !isCursosOnly() && !isProduccionOnly() && !isLogisticaOnly() && !isProductorOnly() && !isSinFronteraOnly() && !isFranOnly();
 }
 // Borra los COGS/params del navegador (costos internos): al cerrar sesión o si el usuario no cotiza.
 function olvidarCotizadorCache() {
@@ -1641,6 +1641,8 @@ function isLogisticaUser(s) { return _userKey(s) === 'logistica'; }
 // Sin Frontera (usuario EXTERNO: fabrican los corpóreos y nos compran neón): solo Producción y Mis pedidos. El backend le niega
 // todo lo demás. Vale "Sin Frontera" o "sinfrontera".
 function isSinFronteraUser(s) { return _userKey(s).replace(/[\s._-]+/g, '') === 'sinfrontera'; }
+// Fran (router y láser, 22-oct): solo los pedidos de corte que encarga Sin Frontera (lista, archivos y estado).
+function isFranUser(s) { return _userKey(s) === 'fran'; }
 // El token cargado pertenece a este usuario? (evita reutilizar token de bajo
 // privilegio para pasar como admin).
 function tokenBelongsTo(name) {
@@ -1763,6 +1765,7 @@ function afterUserSwitch() {
   render();
   if (isProductorOnly()) { STATE.prod = null; return; }   // productor de neón: solo su pantalla (nada de ventas, cotizador ni chats)
   if (isSinFronteraOnly()) return;   // Sin Frontera: solo sus dos pantallas (nada de ventas, cotizador ni chats)
+  if (isFranOnly()) return;   // Fran: solo los pedidos de corte de Sin Frontera
   try { fetchOcUrgenteStatus(); } catch (_) {}
   loadCotizadorParams();   // /cotizador/* pide sesión: recién ahora hay token (y si el nuevo no cotiza, borra el cache)
   loadAll().catch(() => {});
@@ -1820,6 +1823,7 @@ function isCursosOnly() { return isCursosUser(STATE.user); }
 function isProduccionOnly() { return isProduccionUser(STATE.user); }
 function isLogisticaOnly() { return isLogisticaUser(STATE.user); }
 function isSinFronteraOnly() { return isSinFronteraUser(STATE.user); }
+function isFranOnly() { return isFranUser(STATE.user); }
 // Señal de actividad HUMANA para el "arranque"/horas del equipo: marcamos el último gesto real
 // del usuario (click/tecla/touch/scroll). Cada request lleva X-NI-Human=1 solo si hubo
 // interacción hace <5 min; si no (polls automáticos, app en segundo plano, celu dormido) va 0
@@ -2353,7 +2357,7 @@ async function loadAll(opts) {
   // su propia data): antes el primer render llegaba de rebote por loadCotizadorParams, y desde que logística no pide el
   // cotizador (11-oct) la pantalla quedaba trabada en el spinner. Los refrescos silenciosos no re-dibujan (cerrarían lo
   // desplegado o la nota a medio escribir; la vista de logística se refresca sola).
-  if (isLogisticaUser(STATE.user) || isSinFronteraUser(STATE.user)) { if (!(opts && opts.silent)) render(); return; }
+  if (isLogisticaUser(STATE.user) || isSinFronteraUser(STATE.user) || isFranUser(STATE.user)) { if (!(opts && opts.silent)) render(); return; }
   if (isProductorOnly()) { if (!(opts && opts.silent)) render(); return; }   // productor: solo sus carteles (/admin/prod/mis)
   const silent = !!(opts && opts.silent);
   // Stale-while-revalidate: si tenemos caché y no se pidió refresh forzado,
@@ -2898,9 +2902,10 @@ function setView(v) {
   else if (isProduccionOnly()) v = (v === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : ((v === 'neon' && isNeyenUser(STATE.user)) ? 'neon' : 'corte');
   else if (isLogisticaOnly()) v = v === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) v = (v === 'sf-pedidos' || v === 'sf-cortes') ? v : 'sf-produccion';
+  else if (isFranOnly()) v = 'sf-cortes';
   else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
   if (v === 'logistica' && !isLogisticaOnly() && !isAdmin()) v = 'dashboard';
-  if (/^sf-/.test(v) && !isSinFronteraOnly() && !isAdmin()) v = 'dashboard';
+  if (/^sf-/.test(v) && !isSinFronteraOnly() && !isFranOnly() && !isAdmin()) v = 'dashboard';
   if (v === 'neon' && !nkbPuedeVer()) v = 'dashboard';
   if (STATE.sfAbierto && v !== 'sf-produccion') sfkCerrar();
   if (STATE.nkbAbierto && v !== 'neon') nkbCerrar();
@@ -2926,9 +2931,10 @@ window.addEventListener('hashchange', () => {
   else if (isProduccionOnly()) h = (h === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : (h === 'neon' ? 'neon' : 'corte');
   else if (isLogisticaOnly()) h = h === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) h = (h === 'sf-pedidos' || h === 'sf-cortes') ? h : 'sf-produccion';
+  else if (isFranOnly()) h = 'sf-cortes';
   else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
   if (h === 'logistica' && !isLogisticaOnly() && !isAdmin()) h = 'dashboard';
-  if (/^sf-/.test(h) && !isSinFronteraOnly() && !isAdmin()) h = 'dashboard';
+  if (/^sf-/.test(h) && !isSinFronteraOnly() && !isFranOnly() && !isAdmin()) h = 'dashboard';
   if (h === 'neon' && !nkbPuedeVer()) h = 'dashboard';
   if (STATE.sfAbierto && h !== 'sf-produccion') sfkCerrar();
   if (STATE.nkbAbierto && h !== 'neon') nkbCerrar();
@@ -3227,7 +3233,10 @@ function render() {
   } else if (isSinFronteraOnly() && !['sf-produccion', 'sf-pedidos', 'sf-cortes'].includes(STATE.view)) {
     STATE.view = 'sf-produccion';
     if (location.hash !== '#sf-produccion') location.hash = 'sf-produccion';
-  } else if (/^sf-/.test(STATE.view) && !isSinFronteraOnly() && !isAdmin()) {
+  } else if (isFranOnly() && STATE.view !== 'sf-cortes') {
+    STATE.view = 'sf-cortes';
+    if (location.hash !== '#sf-cortes') location.hash = 'sf-cortes';
+  } else if (/^sf-/.test(STATE.view) && !isSinFronteraOnly() && !isFranOnly() && !isAdmin()) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
   } else if (STATE.view === 'logistica' && !isLogisticaOnly() && !isAdmin()) {
@@ -3997,7 +4006,7 @@ function renderOcUrgenteModal() {
 // y de los popups de sin cotizar / OC, que tienen sus propios botones.
 let _avisosP1 = { items: [], off: false, user: null, busy: false, min: false, ids: new Set() };
 function initAvisosInternos() {
-  if (!STATE.token || isLogisticaOnly() || isSinFronteraOnly()) { if (_avisosP1.items.length) { _avisosP1.items = []; pintarBannerAvisos(); } return; }
+  if (!STATE.token || isLogisticaOnly() || isSinFronteraOnly() || isFranOnly()) { if (_avisosP1.items.length) { _avisosP1.items = []; pintarBannerAvisos(); } return; }
   if (_avisosP1.user !== STATE.user) { _avisosP1.user = STATE.user; _avisosP1.items = []; _avisosP1.ids = new Set(); _avisosP1.min = false; pintarBannerAvisos(); if (window._avisosWatch) fetchAvisosMios(); }
   if (window._avisosWatch) return;
   window._avisosWatch = true;
@@ -4027,7 +4036,7 @@ function initAvisosInternos() {
   setInterval(() => { if (!pollBackoffActive()) fetchAvisosMios(); }, 5 * 60000);
 }
 async function fetchAvisosMios() {
-  if (_avisosP1.off || !STATE.token || !CONFIG.trackerUrl || isLogisticaOnly() || isSinFronteraOnly()) return;
+  if (_avisosP1.off || !STATE.token || !CONFIG.trackerUrl || isLogisticaOnly() || isSinFronteraOnly() || isFranOnly()) return;
   const user = STATE.user;
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/avisos/mios?pend=1', { headers: authHeaders() });
@@ -8452,19 +8461,19 @@ async function sfcCargar(opts) {
   if (STATE.view === 'sf-cortes') { sfcPintarLista(); if (STATE._sfcColoresCambio) { STATE._sfcColoresCambio = false; sfcPintarColores(true); } }
 }
 function renderSfCortes() {
-  const D = STATE.sfCortes, op = sfOperador(), adm = isAdmin();
+  const D = STATE.sfCortes, op = sfOperador(), adm = isAdmin(), gestiona = adm || isFranOnly();
   if (!D && !STATE._sfcCargando) setTimeout(() => sfcCargar(), 0);
   return `<div class="logi-wrap sf-wrap sfc-wrap">
     ${sfTabs()}
-    <div class="logi-head"><h1>${adm ? 'Cortes que encarga Sin Frontera' : 'Pedir corte'}</h1></div>
+    <div class="logi-head"><h1>${adm ? 'Cortes que encarga Sin Frontera' : gestiona ? 'Cortes de Sin Frontera' : 'Pedir corte'}</h1></div>
     <div class="logi-bar">
       <span data-sfc-upd>${escapeHtml(D && !D.error ? sfHace(D.at) : '')}</span>
       ${isSinFronteraOnly() ? `<span>· Estás como <b>${escapeHtml(op || 'sin nombre')}</b> <button type="button" class="logi-link" data-sf-op>${op ? 'cambiar' : 'poner nombre'}</button></span>` : ''}
       <span style="flex:1"></span>
       <button class="btn btn-ghost" data-sfc-refresh>Actualizar</button>
-      ${sfAdminBarra()}
+      ${sfAdminBarra()}${adm ? '<button class="btn btn-ghost" data-sfc-fran title="El usuario de Fran, que hace estos cortes, y su WhatsApp para los avisos">Usuario de Fran</button>' : ''}
     </div>
-    ${adm ? '' : sfcFormHtml()}
+    ${gestiona ? '' : sfcFormHtml()}
     <div data-sfc-lista>${sfcListaHtml()}</div>
   </div>`;
 }
@@ -8577,7 +8586,7 @@ async function sfcEnviar() {
 }
 // ----- Lista -----
 function sfcListaHtml() {
-  const D = STATE.sfCortes, adm = isAdmin();
+  const D = STATE.sfCortes, adm = isAdmin() || isFranOnly();
   if (!D) return '<div class="lb-tit sfc-tit">Pedidos de corte</div><div class="lb-list"><div class="lb-vacio">Cargando…</div></div>';
   if (D.error) return `<div class="lb-tit sfc-tit">Pedidos de corte</div><div class="lb-list"><div class="lb-vacio"><div style="color:#ef4444;margin-bottom:8px">${escapeHtml(D.error)}</div><button type="button" class="btn" data-sfc-refresh>Reintentar</button></div></div>`;
   const cs = D.cortes || [], enCurso = c => ['pedido', 'en_corte', 'listo'].includes(c.estado);
@@ -8588,7 +8597,7 @@ function sfcListaHtml() {
     ${fin.length ? `<div class="lb-tit sfc-tit">Entregados y cancelados</div><div class="lb-list">${fin.map(sfcFilaHtml).join('')}</div>` : ''}`;
 }
 function sfcFilaHtml(c) {
-  const adm = isAdmin(), E = sfcEstado(c.estado), cerrado = c.estado === 'entregado' || c.estado === 'cancelado', dias = sfDias(c.fecha);
+  const adm = isAdmin() || isFranOnly(), E = sfcEstado(c.estado), cerrado = c.estado === 'entregado' || c.estado === 'cancelado', dias = sfDias(c.fecha);
   const plazo = cerrado ? `<span class="logi-pill g">Para el ${escapeHtml(sfFecha(c.fecha))}</span>`
     : `<span class="logi-pill ${dias < 0 ? 'r' : dias <= 1 ? 'a' : 'g'}">${dias < 0 ? 'Vencido: era para el ' + escapeHtml(sfFecha(c.fecha)) : dias === 0 ? 'Es para hoy' : dias === 1 ? 'Para mañana' : 'Para el ' + escapeHtml(sfFecha(c.fecha)) + ' · faltan ' + dias + ' días'}</span>`;
   const arch = (c.archivos || []).map((a, i) => `<a class="sfc-arch" href="${escapeHtml(sfUrl('c=' + c.id + '&i=' + i + '&dl=1'))}" target="_blank" rel="noopener" title="Bajar ${escapeHtml(a.nombre)} (${sfcPeso(a.bytes)})">${/^image\//.test(a.tipo) ? '🖼' : '📄'} ${escapeHtml(a.nombre)}</a>`).join('');
@@ -8617,7 +8626,7 @@ async function sfcCambiarEstado(id, estado, el) {
   const D = STATE.sfCortes, c = D && D.cortes ? D.cortes.find(x => x.id === id) : null;
   if (!c || estado === c.estado) return;
   const volver = () => { if (el && el.tagName === 'SELECT') el.value = c.estado; };
-  if (estado === 'cancelado' && !(await showConfirm(isAdmin() ? '¿Cancelar el pedido de corte #' + id + '?' : '¿Cancelar el pedido #' + id + '? A Gaspar le llega el aviso.', { title: 'Cancelar pedido', confirmLabel: 'Sí, cancelar', cancelLabel: 'No' }).catch(() => false))) { volver(); return; }
+  if (estado === 'cancelado' && !(await showConfirm((isAdmin() || isFranOnly()) ? '¿Cancelar el pedido de corte #' + id + '?' : '¿Cancelar el pedido #' + id + '? A Gaspar le llega el aviso.', { title: 'Cancelar pedido', confirmLabel: 'Sí, cancelar', cancelLabel: 'No' }).catch(() => false))) { volver(); return; }
   if (el) el.disabled = true;
   try {
     const j = await sfFetch('/admin/sinfrontera/corte/estado', { id, estado, quien: isSinFronteraOnly() ? sfOperador() : '' });
@@ -8627,6 +8636,48 @@ async function sfcCambiarEstado(id, estado, el) {
   if (el) el.disabled = false;
   sfcPintarLista();
   sfcCargar({ silent: true });
+}
+// Usuario de Fran (router y láser; Gaspar 22-oct): la contraseña crea o cambia su usuario y el WhatsApp es para avisarle cada
+// pedido de corte nuevo. Solo Gaspar (el backend lo frena para el resto).
+async function sfcFranUI() {
+  let st;
+  try { st = await sfFetch('/admin/sinfrontera/fran'); } catch (e) { toast(e.message || 'No se pudo cargar'); return; }
+  const u = st.usuario || {}, telAntes = st.telefono ? corteFmtTel(st.telefono) : '';
+  const estado = !u.existe ? 'Todavía no tiene usuario: se crea cuando le ponés la contraseña.'
+    : (u.activo && u.con_clave ? 'Ya tiene usuario. Si le ponés otra contraseña, se le cierra la sesión.' : 'El usuario está desactivado: con una contraseña nueva se activa.');
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>Usuario de Fran</h3></div><div class="modal-body"><form class="login-form" novalidate>
+      <div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Entra con el usuario <b>Fran</b> y ve solo los pedidos de corte de Sin Frontera: los archivos y el estado. ${escapeHtml(estado)}</div>
+      <label class="nc-field"><span class="nc-label">Contraseña nueva${u.existe ? ' (vacía = no se cambia)' : ''}</span><input type="password" class="nc-input" data-p1 autocomplete="new-password"></label>
+      <label class="nc-field" style="margin-top:10px"><span class="nc-label">Repetila</span><input type="password" class="nc-input" data-p2 autocomplete="new-password"></label>
+      <label class="nc-field" style="margin-top:10px"><span class="nc-label">WhatsApp de Fran (le avisa cada pedido nuevo)</span><input class="nc-input" data-tel inputmode="tel" autocomplete="off" placeholder="11 2345 6789" value="${escapeHtml(telAntes)}"></label>
+      <div data-perr style="color:#ef4444;font-size:12px;min-height:16px;margin-top:6px"></div>
+      <button type="submit" class="btn btn-cyan" style="width:100%;margin-top:8px">Guardar</button>
+      <button type="button" class="btn btn-ghost" data-pcancel style="width:100%;margin-top:8px">Cancelar</button></form></div></div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  const $ = s => bg.querySelector(s), err = m => { $('[data-perr]').textContent = m; };
+  const fin = () => { bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  $('[data-pcancel]').onclick = fin;
+  bg.addEventListener('click', e => { if (e.target === bg) fin(); });
+  bg.addEventListener('keydown', e => { if (e.key === 'Escape') fin(); });
+  $('form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const p1 = $('[data-p1]').value, p2 = $('[data-p2]').value, tel = $('[data-tel]').value.trim();
+    if (!u.existe && !p1) return err('Poné una contraseña para crearle el usuario.');
+    if (p1 && p1.length < 8) return err('La contraseña tiene que tener al menos 8 caracteres.');
+    if (p1 !== p2) return err('Las contraseñas no coinciden.');
+    const body = {};
+    if (p1) body.password = p1;
+    if (tel !== telAntes) body.telefono = tel;
+    if (!Object.keys(body).length) { fin(); return; }
+    const b = $('button[type=submit]'); b.disabled = true; err('');
+    try {
+      await sfFetch('/admin/sinfrontera/fran', body);
+      fin();
+      toast(p1 ? 'Listo: Fran entra con el usuario "Fran" y esa contraseña' : 'Listo, guardado');
+    } catch (ex) { b.disabled = false; err(ex.message || 'No se pudo guardar'); }
+  });
+  setTimeout(() => { const i = $(u.existe ? '[data-tel]' : '[data-p1]'); if (i) i.focus(); }, 50);
 }
 function sfcMarcar(form, attr, v) { form.querySelectorAll('[' + attr + ']').forEach(b => { const on = b.getAttribute(attr) === v; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); }); }
 // Eventos de la pantalla (los llama bindSinFrontera con el contenedor recién dibujado).
@@ -8673,6 +8724,7 @@ function sfcBind(root) {
   }
   root.addEventListener('change', e => { const s = e.target.closest && e.target.closest('[data-sfc-estado]'); if (s) sfcCambiarEstado(+s.getAttribute('data-sfc-estado'), s.value, s); });
   root.addEventListener('click', e => {
+    if (e.target.closest('[data-sfc-fran]')) { sfcFranUI(); return; }
     if (e.target.closest('[data-sfc-refresh]')) { if (STATE.sfCortes && STATE.sfCortes.error) { STATE.sfCortes = null; sfcPintarLista(); } sfcCargar({}); return; }
     const c = e.target.closest('[data-sfc-cancelar]'); if (c) sfcCambiarEstado(+c.getAttribute('data-sfc-cancelar'), 'cancelado', c);
   });
@@ -9744,6 +9796,8 @@ function renderShell() {
           <button class="nav-item ${v==='sf-produccion'?'active':''}" data-view="sf-produccion"><span class="icon">🏭</span> Producción</button>
           <button class="nav-item ${v==='sf-pedidos'?'active':''}" data-view="sf-pedidos"><span class="icon">▦</span> Mis pedidos</button>
           <button class="nav-item ${v==='sf-cortes'?'active':''}" data-view="sf-cortes"><span class="icon">✂</span> Pedir corte</button>
+        ` : isFranOnly() ? `
+          <button class="nav-item active" data-view="sf-cortes"><span class="icon">✂</span> Cortes de Sin Frontera</button>
         ` : isDisenadorOnly() ? `
           <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte ${corteBadgeHtml()}</button>
@@ -25756,6 +25810,7 @@ function getUserRole() {
   if (u === 'emma' || u === 'emmanuel' || u === 'disenador') return 'disenador';
   if (u === 'logistica') return 'logistica'; // externo: ningún permiso de "comercial" (cotizar, OC, chats…)
   if (u.replace(/[\s._-]+/g, '') === 'sinfrontera') return 'sinfrontera'; // externo: idem
+  if (u === 'fran') return 'fran'; // solo los pedidos de corte de Sin Frontera
   return 'comercial'; // joaco, joaquin, default
 }
 function canCreateBriefs() { if (isCursosUser(STATE.user)) return false; const r = getUserRole(); return r === 'comercial' || r === 'admin'; }
