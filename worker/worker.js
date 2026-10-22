@@ -18355,6 +18355,90 @@ async function avisoPrioFalla(env, phone) {
   try { return (await hasPorPagarLabel(env, phone)) ? 'P1' : 'P2'; } catch (_) { return 'P2'; }
 }
 
+// ===== Avisos por tanda (Gaspar 22-oct-2026: "juntalos en un solo aviso por tanda") =====
+// "⚠ Falló envío WA" y "✅ Plantilla aprobada y enviada" llegan en ráfagas: el 22-oct fallaron 38 envíos del mismo
+// mensaje en un minuto y después salió una plantilla por cada uno, cada cosa un aviso (y con la ventana cerrada, una
+// plantilla paga). avisoTandaPush los guarda en avisos_tanda y avisoTandaFlush (cron de cada minuto) manda UNO por
+// tanda: cuando pasan 90 s sin que entre otro del mismo tipo, o a los 10 min del primero aunque sigan entrando. Si la
+// tanda quedó de uno, sale el aviso de siempre. Solo con los avisos internos en off/dry (en 'on' cada falla va al autor
+// del envío) y con kv aviso_tanda_on distinto de '0' (en '0', un aviso por cada uno, como antes).
+const AVISO_TANDA_TIPOS = ['falla_envio', 'plantilla_enviada'];
+const AVISO_TANDA_QUIETO_MS = 90 * 1000, AVISO_TANDA_MAX_MS = 10 * 60 * 1000;
+let _avisoTandaEsquema = false;
+async function ensureAvisoTandaSchema(env) {
+  if (_avisoTandaEsquema) return true;
+  try {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS avisos_tanda (id INTEGER PRIMARY KEY AUTOINCREMENT, tipo TEXT NOT NULL, clave TEXT UNIQUE, phone TEXT, detalle TEXT, preview TEXT, texto TEXT, created_at TEXT NOT NULL, flushed_at TEXT)").run();
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_avisos_tanda_pend ON avisos_tanda (flushed_at, tipo, created_at)").run();
+    _avisoTandaEsquema = true;
+  } catch (_) {}
+  return _avisoTandaEsquema;
+}
+// true = quedó en la tanda (el que llama no avisa); false = avisar ya, como siempre. d = { clave (dedup), phone,
+// detalle (el error), preview (el mensaje), texto (el aviso suelto de siempre), modo (el de avisoCfg, si ya se tiene) }.
+async function avisoTandaPush(env, tipo, d = {}) {
+  if (!AVISO_TANDA_TIPOS.includes(tipo)) return false;
+  try {
+    if ((await kvGet(env, 'aviso_tanda_on', '1')) === '0') return false;
+    if ((d.modo || (await avisoCfg(env)).modo) === 'on') return false;
+    if (!(await ensureAvisoTandaSchema(env))) return false;
+    await env.DB.prepare("INSERT INTO avisos_tanda (tipo, clave, phone, detalle, preview, texto, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(clave) DO NOTHING")
+      .bind(tipo, d.clave || null, String(d.phone || ''), String(d.detalle || '').slice(0, 300), String(d.preview || '').slice(0, 300), String(d.texto || '').slice(0, 2000), new Date().toISOString()).run();
+    return true;
+  } catch (_) { return false; }
+}
+// Cron de cada minuto: manda las tandas cerradas.
+async function avisoTandaFlush(env) {
+  try {
+    if (!(await ensureAvisoTandaSchema(env))) return;
+    const rs = await env.DB.prepare("SELECT tipo, MIN(created_at) AS desde, MAX(created_at) AS hasta, MAX(id) AS max_id FROM avisos_tanda WHERE flushed_at IS NULL GROUP BY tipo").all();
+    const ahora = Date.now();
+    for (const g of (rs.results || [])) {
+      if (ahora - Date.parse(g.hasta) < AVISO_TANDA_QUIETO_MS && ahora - Date.parse(g.desde) < AVISO_TANDA_MAX_MS) continue;
+      // Reclamar la tanda: si dos ticks se pisan, solo uno se lleva las filas.
+      const filas = ((await env.DB.prepare("UPDATE avisos_tanda SET flushed_at = ? WHERE tipo = ? AND flushed_at IS NULL AND id <= ? RETURNING id, phone, detalle, preview, texto, created_at")
+        .bind(new Date().toISOString(), g.tipo, g.max_id).all()).results || []).sort((a, b) => a.id - b.id);
+      if (!filas.length) continue;
+      const uno = filas.length === 1;
+      try {
+        await avisoAdmin(env, uno ? filas[0].texto : avisoTandaTexto(g.tipo, filas), {
+          tipo: g.tipo, prioridad: g.tipo === 'falla_envio' ? 'P2' : 'P3', refPhone: uno ? filas[0].phone : '',
+          clave: 'tanda:' + g.tipo + ':' + filas[0].id + (uno ? '' : '-' + filas[filas.length - 1].id),
+        });
+      } catch (_) {}
+    }
+    // Lo avisado hace más de 30 días se borra (una vez por hora).
+    if (new Date().getUTCMinutes() === 7) { try { await env.DB.prepare("DELETE FROM avisos_tanda WHERE flushed_at IS NOT NULL AND flushed_at < ?").bind(new Date(ahora - 30 * 86400e3).toISOString()).run(); } catch (_) {} }
+  } catch (_) {}
+}
+// El aviso de una tanda de varios. Con la ventana cerrada sale por plantilla en un renglón (hasta 800 caracteres), así
+// que va corto: hasta 3 errores, 3 mensajes y 10 números.
+function avisoTandaTexto(tipo, filas) {
+  const n = filas.length;
+  const hm = iso => new Date(Date.parse(iso) - 3 * 3600e3).toISOString().slice(11, 16);   // hora AR
+  const desde = hm(filas[0].created_at), hasta = hm(filas[n - 1].created_at);
+  const contar = campo => {
+    const m = new Map();
+    for (const f of filas) {
+      const s = String(f[campo] || '').replace(/\s+/g, ' ').trim();
+      const k = s.length > 60 ? s.slice(0, 60) + '…' : s;
+      if (k) m.set(k, (m.get(k) || 0) + 1);
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  };
+  const lista = (pares, comillas) => pares.slice(0, 3).map(([k, c]) => (comillas ? '"' + k + '"' : k) + (c < n ? ' (' + c + ')' : '')).join(' · ')
+    + (pares.length > 3 ? ' · y ' + (pares.length - 3) + ' más' : '');
+  const tels = [...new Set(filas.map(f => f.phone).filter(Boolean))];
+  const cuando = desde === hasta ? desde : desde + ' a ' + hasta;
+  const L = [tipo === 'falla_envio' ? `⚠ Fallaron ${n} envíos de WhatsApp (${cuando})` : `✅ ${n} plantillas aprobadas y enviadas (${cuando})`];
+  const errs = tipo === 'falla_envio' ? contar('detalle') : [];
+  if (errs.length) L.push('Error: ' + lista(errs, false));
+  const msgs = contar('preview');
+  if (msgs.length) L.push((msgs.length > 1 ? 'Mensajes: ' : 'Mensaje: ') + lista(msgs, true));
+  if (tels.length) L.push('A: ' + tels.slice(0, 10).join(', ') + (tels.length > 10 ? ' y ' + (tels.length - 10) + ' más' : ''));
+  return L.join('\n');
+}
+
 // ----- Endpoints /admin/avisos* (los llama el handler de /admin/ con la sesión ya validada) -----
 // GET  /admin/avisos              → (admin) KPIs del período (?horas=24), config, plantillas, freno de costo y los últimos avisos.
 // GET  /admin/avisos/mios?pend=1  → (cualquiera del equipo) sus P1 sin "Lo vi" de las últimas 48 h (banner del front).
@@ -20670,7 +20754,13 @@ async function processPendingTemplateSends(env) {
         await registrarPlantillaAdhocEnChat(env, { phone: row.phone, wamid: rt.id || '', texto: row.body_preview, senderSlug });
         try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='sent', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
         // [Etapa 1] avisoAdmin (legacy = el texto de siempre). Decisión 1 de §6: va al resumen (P3) con los avisos prendidos.
-        if (env.ADMIN_NOTIFY_PHONE) { try { await avisoAdmin(env, `✅ Plantilla aprobada y enviada a ${row.phone}:\n"${(row.body_preview || '').slice(0, 120)}"`, { tipo: 'plantilla_enviada', prioridad: 'P3', refPhone: row.phone }); } catch (_) {} }
+        // Por tanda (Gaspar 22-oct): cuando salen varias juntas, un solo aviso (avisoTandaFlush).
+        if (env.ADMIN_NOTIFY_PHONE) {
+          try {
+            const _txt = `✅ Plantilla aprobada y enviada a ${row.phone}:\n"${(row.body_preview || '').slice(0, 120)}"`;
+            if (!(await avisoTandaPush(env, 'plantilla_enviada', { clave: 'tpl_env:' + row.template_name, phone: row.phone, preview: row.body_preview, texto: _txt }))) await avisoAdmin(env, _txt, { tipo: 'plantilla_enviada', prioridad: 'P3', refPhone: row.phone });
+          } catch (_) {}
+        }
         await new Promise(rs => setTimeout(rs, 400));
       }
       if (!rt.ok) { try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='pending', updated_at=? WHERE template_name=? AND status='enviando'").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {} } // falló: vuelve a 'pending' y reintenta el próximo tick
@@ -21804,7 +21894,10 @@ const handler = {
                           // dueño del chat) + copia P3 a Gaspar. P2, o P1 si el chat tiene plata en juego.
                           try {
                             const _prio = _avModo === 'off' ? 'P2' : await avisoPrioFalla(env, phone);
-                            await avisoInterno(env, {
+                            // Por tanda (Gaspar 22-oct): salvo las P1 (plata en juego), las fallas se juntan y sale un solo
+                            // aviso por ráfaga (avisoTandaFlush).
+                            const _enTanda = _prio !== 'P1' && await avisoTandaPush(env, 'falla_envio', { clave: 'falla:' + wamid, phone, detalle: errMsg, preview: prevBody, texto: summary, modo: _avModo });
+                            if (!_enTanda) await avisoInterno(env, {
                               para: [{ autor: wamid, phone, prioridad: _prio }, { slug: 'gaspar', prioridad: 'P3' }],
                               tipo: 'falla_envio', prioridad: _prio, texto: summary, clave: 'falla:' + wamid, refPhone: phone,
                               legacy: () => waSendText(env, env.ADMIN_NOTIFY_PHONE, summary, { esAviso: true }),
@@ -31134,6 +31227,7 @@ const handler = {
     // Solo en el cron de cada minuto: en los múltiplos de 5 corren los dos a la vez y el throttle por kv no es atómico (aviso doble).
     if (event.cron === '* * * * *') ctx.waitUntil(processSinResponderCursos(env));   // misma alarma para la bandeja de cursos → Abril + Gaspar (gate sin_responder_cursos_on, APAGADO por defecto)
     if (event.cron === '* * * * *' && new Date().getUTCMinutes() % 10 === 0) ctx.waitUntil(syncCursosPendientes(env));   // etiquetas "Espera accesos" / "Seña pendiente" (gate cursos_pendientes_on, APAGADO)
+    if (event.cron === '* * * * *') ctx.waitUntil(avisoTandaFlush(env));   // un solo "Falló envío" / "Plantilla enviada" por ráfaga (Gaspar 22-oct)
     if (event.cron === '* * * * *') ctx.waitUntil(processSinResponder(env));     // (solo en el de cada minuto: con los dos crons a la vez el throttle por kv no alcanzaba y el aviso salía doble) alarma "sin responder": lead cotizado/con intención sin contestar +Nh → digest al vendedor + Gaspar (self-throttle 15min, gate sin_responder_on)
     // Recordatorio de COBRO de los pedidos cargados sin pago (10 y 18 AR, lun-sáb; cada 10 min dentro de esa hora con claim).
     if (new Date().getUTCMinutes() % 10 === 0) ctx.waitUntil(processCobrosPendientes(env));
