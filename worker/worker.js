@@ -697,7 +697,9 @@ async function ensurePedidosSchema(env) {
     'caja_sync TEXT', 'caja_sync_err TEXT', 'caja_sync_attempts INTEGER NOT NULL DEFAULT 0',
     // Pedido cargado SIN PAGO por Gaspar (cliente frecuente que paga en unos días, 16-oct, mig. 056): pago_metodo
     // 'pendiente' + cobrar_el = 'AAAA-MM-DD' en que tiene que cobrarlo (recordatorio: processCobrosPendientes).
-    'cobrar_el TEXT']) {
+    'cobrar_el TEXT',
+    // Varios comprobantes por pago (22-oct, mig. 066): los de más de la seña y del saldo, en JSON (compsExtraLeer).
+    'comprobantes_extra TEXT']) {
     try { await env.DB.prepare(`ALTER TABLE pedidos ADD COLUMN ${col}`).run(); } catch (_) {}
   }
   // source_id = ad_id EXACTO de Meta que trajo la venta (auditable, no un título adivinado).
@@ -711,7 +713,7 @@ async function ensurePedidosSchema(env) {
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_pedidos_comercial ON pedidos(comercial_id)').run(); } catch (_) {}
   // Memo solo si las columnas nuevas existen de verdad: los ALTER se tragan cualquier error (también un timeout de
   // D1), y con el memo puesto y una columna faltante cada alta de ese isolate fallaría.
-  try { await env.DB.prepare('SELECT caja, pago_metodo, comprobante_key, cobro2, caja2, comprobante2_key, cobro2_at, caja_sync, caja_sync_attempts, cobrar_el FROM pedidos LIMIT 0').all(); _pedidosSchemaOk = true; } catch (_) {}
+  try { await env.DB.prepare('SELECT caja, pago_metodo, comprobante_key, cobro2, caja2, comprobante2_key, cobro2_at, caja_sync, caja_sync_attempts, cobrar_el, comprobantes_extra FROM pedidos LIMIT 0').all(); _pedidosSchemaOk = true; } catch (_) {}
 }
 // Nombre de diseño "aplastado" para comparar pedido ↔ brief: minúsculas, sin espacios ni puntuación
 // (. , - '). sqlNombreAplastado hace lo mismo en SQL (lower() de SQLite solo baja ASCII: alcanza).
@@ -6719,6 +6721,43 @@ function esKeyComprobantePedido(k) {
   if (!k || k.length > 400 || k.indexOf('..') >= 0) return false;
   if (/^(wa|ig)\/out_/.test(k)) return false;
   return /^(wa|ig)\/[\w\-.]+$/.test(k) || /^pedidos\/comprobante\/\d{6}\/[\w\-.]+$/.test(k);
+}
+// Varios comprobantes para un mismo pago. Pedido de Gaspar el 22-oct-2026: el cliente de Avalon (#405) pagó la seña con 4
+// transferencias y quedó cargada una sola; después agregó "no es solo para la seña, para el saldo también".
+// - El primer comprobante de cada pago sigue en comprobante_key (seña) / comprobante2_key (saldo).
+// - Los demás van en pedidos.comprobantes_extra, a nivel PEDIDO (repetido en cada fila, como pagado), como JSON:
+//   [{ key, wamid, monto, pago: 1 = seña | 2 = saldo, at, por }].
+// El importe de cada pago sigue siendo uno solo (pagado / cobro2) y es la suma.
+function compsExtraLeer(v) {
+  try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a.filter(x => x && x.key) : []; } catch (_) { return []; }
+}
+// Valida los comprobantes de más que manda el front ([{ key, wamid, monto }]). Cada uno tiene que:
+// - ser un comprobante que exista en R2;
+// - tener monto > 0;
+// - no repetirse entre sí ni con `excluir` (los que ya tiene el pedido).
+// Devuelve { ok: [...] } o { error }.
+async function compsExtraValidar(env, lista, pago, excluir, por) {
+  const out = [], vistos = new Set((excluir || []).filter(Boolean));
+  const arr = Array.isArray(lista) ? lista : [];
+  if (arr.length > 12) return { error: 'Son demasiados comprobantes para un mismo pago (máximo 12)' };
+  for (const x of arr) {
+    const key = esKeyComprobantePedido(x && x.key) ? String(x.key) : '';
+    if (!key) return { error: 'Uno de los comprobantes no es válido: subilo de nuevo' };
+    if (vistos.has(key)) return { error: 'Ese comprobante ya está cargado en este pedido: elegí otro' };
+    const monto = Math.round(Number(x.monto) * 100) / 100;
+    if (!(monto > 0)) return { error: 'Falta el monto de uno de los comprobantes' };
+    let existe = null; try { existe = env.MEDIA ? await env.MEDIA.head(key) : true; } catch (_) { existe = true; }
+    if (!existe) return { error: 'No encuentro uno de los comprobantes: subilo de nuevo' };
+    vistos.add(key);
+    out.push({ key, wamid: String((x && x.wamid) || '').slice(0, 200), monto, pago: pago === 2 ? 2 : 1, at: new Date().toISOString(), por: String(por || '').slice(0, 40) });
+  }
+  return { ok: out };
+}
+// ¿Ese archivo es comprobante de un pedido FUERA de este grupo? Puede ser el de la seña, el del saldo o uno de los de más.
+// La key se busca entre comillas, para que wa/12.jpg no matchee wa/123.jpg.
+async function compUsadoFuera(env, key, grp, grpArgs) {
+  if (!key) return null;
+  try { return await env.DB.prepare(`SELECT numero, cartel FROM pedidos WHERE (comprobante_key = ? OR comprobante2_key = ? OR instr(IFNULL(comprobantes_extra, ''), ?) > 0) AND NOT (${grp}) LIMIT 1`).bind(key, key, '"' + key + '"', ...grpArgs).first(); } catch (_) { return null; }
 }
 // Marca "pagado" en la col I (Pago) de Venta_Insumos para las filas PENDIENTES del cliente, verificando
 // que la suma de precios (col J) coincida con el total esperado (±500) para no marcar filas equivocadas.
@@ -27449,8 +27488,8 @@ const handler = {
         if (keys.length) {
           const pk = keys.map(() => '?').join(',');
           try {
-            const rs = (await env.DB.prepare(`SELECT id, numero, cartel, comprobante_key, comprobante2_key FROM pedidos WHERE comprobante_key IN (${pk}) OR comprobante2_key IN (${pk})`).bind(...keys, ...keys).all()).results || [];
-            for (const r of rs) for (const k of [r.comprobante_key, r.comprobante2_key]) {
+            const rs = (await env.DB.prepare(`SELECT id, numero, cartel, comprobante_key, comprobante2_key, comprobantes_extra FROM pedidos WHERE comprobante_key IN (${pk}) OR comprobante2_key IN (${pk}) OR (comprobantes_extra IS NOT NULL AND (${keys.map(() => 'instr(comprobantes_extra, ?) > 0').join(' OR ')}))`).bind(...keys, ...keys, ...keys.map(k => '"' + k + '"')).all()).results || [];
+            for (const r of rs) for (const k of [r.comprobante_key, r.comprobante2_key, ...compsExtraLeer(r.comprobantes_extra).map(x => x.key)]) {
               if (!k || !keys.includes(k)) continue;
               const l = (usado[k] = usado[k] || []);
               if (!l.some(u => u.numero === r.numero)) l.push({ id: r.id, numero: r.numero, cartel: r.cartel || '' });
@@ -27691,6 +27730,13 @@ const handler = {
             if (!_existe) return json({ error: 'No encuentro ese comprobante: subilo de nuevo', campo: 'comprobante' }, 400);
           }
         }
+        // Pagó la seña con varias transferencias: los comprobantes de más (pagado ya es la suma; quedan en comprobantes_extra).
+        let _compsEx = [];
+        if (compKey && Array.isArray(body.comprobantes_extra) && body.comprobantes_extra.length) {
+          const _v = await compsExtraValidar(env, body.comprobantes_extra, 1, [compKey], session.user);
+          if (_v.error) return json({ error: _v.error, campo: 'comprobante' }, 400);
+          _compsEx = _v.ok;
+        }
         const ad = String(body.ad || '');
         // source_id = ad_id EXACTO de Meta que el modal capturó de la atribución (opcional). Se
         // guarda directo en el INSERT así el pedido nace trazado y el funnel lo clasifica al toque
@@ -27794,6 +27840,7 @@ const handler = {
             }
           }
         }
+        if (_compsEx.length) { try { await env.DB.prepare("UPDATE pedidos SET comprobantes_extra = ? WHERE numero = ? AND origen = 'crm' AND created_at = ?").bind(JSON.stringify(_compsEx), numero, now).run(); } catch (_) {} }
         // SOLO las filas recién creadas (mismo número + created_at de este alta): el N° se repite entre
         // vendedores, y antes la respuesta (y el trazado de ad de abajo) arrastraba pedidos de otro.
         const rs = { results: await pedidosConDiseno(env, 'WHERE pedidos.numero = ? AND pedidos.origen = ? AND pedidos.created_at = ? ORDER BY pedidos.id', [numero, 'crm', now], { interno: (await getSessionRole(env, session.user)) === 'admin', fotos: true }) };
@@ -28066,6 +28113,72 @@ const handler = {
         return json({ ok: true, numero: ref.numero, pedidos: rs2.results || [] });
       }
 
+      // POST /admin/pedidos/:id/sumar-sena → suma a la SEÑA comprobantes que no se cargaron en el alta (Gaspar 22-oct-2026:
+      // Avalon #405 pagó el 50 % en 4 transferencias y se cargó una). Body { pago_metodo, caja, importe (efectivo),
+      // comprobantes: [{ key, wamid, monto }] (transferencia) }. Van a comprobantes_extra (pago 1); si el pedido no tenía
+      // comprobante de la seña, el primero pasa a ser ese. pagado (COBRO 1) sube y el espejo reparte la seña nueva en la
+      // planilla. Solo pedidos del CRM: en los importados del Excel la seña va repartida por fila.
+      if (request.method === 'POST' && /^\/admin\/pedidos\/\d+\/sumar-sena$/.test(path)) {
+        const _pr = await getSessionRole(env, session.user);
+        if (!['admin', 'comercial'].includes(_pr)) return json({ error: 'forbidden' }, 403);
+        await ensurePedidosSchema(env);
+        const id = parseInt(path.split('/')[3], 10);
+        let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
+        const ref = await env.DB.prepare("SELECT numero, fecha, IFNULL(comercial_id,'joaco') AS com, origen, IFNULL(telefono,'') AS tel, IFNULL(cartel,'') AS cartel FROM pedidos WHERE id = ?").bind(id).first();
+        if (!ref) return json({ error: 'pedido no encontrado' }, 404);
+        if (_pr === 'comercial' && ref.com !== await resolveComercial(env, { sessionUser: session.user })) return json({ error: 'ese pedido es de otro vendedor' }, 403);
+        let metodo = String(body.pago_metodo || '').toLowerCase() === 'efectivo' ? 'efectivo' : 'transferencia';
+        let caja = cajaCanon(body.caja);
+        if (metodo === 'efectivo') caja = 'Efectivo';
+        else if (caja === 'Efectivo') metodo = 'efectivo';
+        if (!caja) return json({ error: 'Falta a qué caja pagó', campo: 'caja' }, 400);
+        let _grp = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?";
+        const _grpArgs = [ref.numero, ref.fecha, ref.com];
+        if (ref.origen === 'crm' && ref.tel) { _grp += " AND origen = 'crm' AND IFNULL(telefono,'') = ?"; _grpArgs.push(ref.tel); }
+        const g = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t, MAX(IFNULL(pagado,0)) AS pagado, MIN(IFNULL(pagado,0)) AS pagado_min, SUM(CASE WHEN IFNULL(origen,'') = 'crm' THEN 0 ELSE 1 END) AS no_crm, MAX(CASE WHEN lower(IFNULL(estado_pago,'')) = 'cuenta corriente' THEN 1 ELSE 0 END) AS cc, MAX(CASE WHEN estado_pago = '2do pago' THEN 1 ELSE 0 END) AS e2, MAX(IFNULL(caja,'')) AS caja, MAX(IFNULL(cobro2,0)) AS cobro2, MAX(IFNULL(comprobante_key,'')) AS ck1, MAX(IFNULL(comprobante2_key,'')) AS ck2, MAX(IFNULL(comprobantes_extra,'')) AS cx, MAX(IFNULL(pago_metodo,'')) AS pm FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
+        if (!g || g.t == null) return json({ error: 'pedido no encontrado' }, 404);
+        if (Number(g.cc) === 1) return json({ error: 'Es cuenta corriente (Sin Frontera): se cobra en su Excel, no acá' }, 409);
+        if (Number(g.no_crm) > 0) return json({ error: 'Este pedido vino del Excel (ahí la seña va repartida por fila): corregila en la planilla' }, 409);
+        if (g.pm === 'pendiente' && !(Number(g.pagado) > 0)) return json({ error: 'Este pedido se cargó sin pago: usá "Registrar pago"' }, 409);
+        if (Number(g.e2) === 1) return json({ error: 'Este pedido ya figura pagado completo' }, 409);
+        if (Number(g.pagado) !== Number(g.pagado_min)) return json({ error: 'La seña de este pedido no es igual en todos sus carteles: avisale a Gaspar' }, 409);
+        const cxPrev = compsExtraLeer(g.cx);
+        let nuevos = [];
+        if (metodo !== 'efectivo') {
+          const v = await compsExtraValidar(env, body.comprobantes, 1, [g.ck1, g.ck2, ...cxPrev.map(x => x.key)], session.user);
+          if (v.error) return json({ error: v.error, campo: 'comprobante' }, 400);
+          nuevos = v.ok;
+          if (!nuevos.length) return json({ error: 'Falta el comprobante', campo: 'comprobante' }, 400);
+        }
+        const suma = metodo === 'efectivo' ? Math.round(Number(body.importe) * 100) / 100 : nuevos.reduce((s, x) => s + x.monto, 0);
+        if (!(suma > 0)) return json({ error: 'Falta el importe', campo: 'importe' }, 400);
+        const total = Number(g.t) || 0, sena0 = Number(g.pagado) || 0, cobro2 = Number(g.cobro2) || 0;
+        const sena = Math.round((sena0 + suma) * 100) / 100;
+        const restante = Math.max(0, total - sena - cobro2);
+        const estado = restante <= 1 ? '2do pago' : '1er pago';
+        const usados = [];
+        for (const x of nuevos) { const u = await compUsadoFuera(env, x.key, _grp, _grpArgs); if (u) usados.push(`Ojo: un comprobante también está cargado en el pedido #${u.numero}${u.cartel ? ' (' + String(u.cartel).slice(0, 40) + ')' : ''}`); }
+        // Pedido cargado antes de que el comprobante fuera obligatorio: el primero pasa a ser EL comprobante de la seña.
+        let ck1 = g.ck1 || '', cw1 = null;
+        if (!ck1 && nuevos.length) { const p0 = nuevos.shift(); ck1 = p0.key; cw1 = p0.wamid || null; }
+        const cx = cxPrev.concat(nuevos);
+        const now = new Date().toISOString();
+        // Condicional (pagado = el leído): dos clics o un reintento no la suman dos veces.
+        const up = await env.DB.prepare(`UPDATE pedidos SET pagado = ?, restante = ?, estado_pago = ?, comprobante_key = ?, comprobante_wamid = CASE WHEN ? IS NULL THEN comprobante_wamid ELSE ? END, comprobantes_extra = ?, caja = CASE WHEN IFNULL(caja,'') = '' THEN ? ELSE caja END, pago_metodo = CASE WHEN IFNULL(pago_metodo,'') = '' THEN ? ELSE pago_metodo END, caja_sync_attempts = 0, caja_sync_err = NULL, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE ${_grp} AND IFNULL(pagado,0) = ?`)
+          .bind(sena, restante, estado, ck1 || null, cw1, cw1, cx.length ? JSON.stringify(cx) : null, caja, metodo, now, ..._grpArgs, sena0).run();
+        if (!(up && up.meta && up.meta.changes > 0)) return json({ error: 'Recién cambió la seña de este pedido: recargá la lista y fijate antes de cargarlo de nuevo' }, 409);
+        const fm = (n) => '$' + Math.round(n).toLocaleString('es-AR');
+        const avisos = [`La seña quedó en ${fm(sena)}`];
+        if (restante > 1) avisos.push(`debe ${fm(restante)}`);
+        else if (sena + cobro2 > total + 1) avisos.push(`pagó ${fm(sena + cobro2 - total)} de más`);
+        else avisos.push('ya pagó todo');
+        const caja1 = String(g.caja || '');
+        if (caja1 && caja1 !== caja) avisos.push(`la seña figura en ${caja1}: en la planilla queda ${caja1}`);
+        avisos.push(...usados);
+        const rsS = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs, { interno: _pr === 'admin', fotos: true }) };
+        return json({ ok: true, numero: ref.numero, pedidos: rsS.results || [], avisos });
+      }
+
       // POST /admin/pedidos/:id/segundo-pago → registra el 2do pago (el saldo) de TODO el pedido (mismo grupo que el PATCH).
       // Body { pago_metodo:'transferencia'|'efectivo', caja, importe, comprobante_key, comprobante_wamid }.
       // Transferencia exige comprobante; efectivo ⇒ caja 'Efectivo' + importe. No toca `pagado` (COBRO 1 en la planilla;
@@ -28098,9 +28211,21 @@ const handler = {
         let _grp = "numero = ? AND fecha = ? AND IFNULL(comercial_id,'joaco') = ?";
         const _grpArgs = [ref.numero, ref.fecha, ref.com];
         if (ref.origen === 'crm' && ref.tel) { _grp += " AND origen = 'crm' AND IFNULL(telefono,'') = ?"; _grpArgs.push(ref.tel); }
-        const g = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t, MAX(pagado) AS pagado, CASE WHEN SUM(CASE WHEN IFNULL(origen,'') = 'crm' THEN 0 ELSE 1 END) = 0 THEN MAX(IFNULL(pagado,0)) WHEN MAX(ABS(IFNULL(pagado,0) + IFNULL(restante,0) - IFNULL(precio,0) - IFNULL(precio_dimmer,0))) <= 1 OR MIN(IFNULL(pagado,0)) <> MAX(IFNULL(pagado,0)) THEN SUM(IFNULL(pagado,0)) ELSE MAX(IFNULL(pagado,0)) END AS sena, CASE WHEN SUM(CASE WHEN IFNULL(origen,'') = 'crm' THEN 0 ELSE 1 END) > 0 AND (MAX(ABS(IFNULL(pagado,0) + IFNULL(restante,0) - IFNULL(precio,0) - IFNULL(precio_dimmer,0))) <= 1 OR MIN(IFNULL(pagado,0)) <> MAX(IFNULL(pagado,0))) THEN 1 ELSE 0 END AS por_fila, MIN(id) AS min_id, MAX(CASE WHEN lower(IFNULL(estado_pago,'')) = 'cuenta corriente' THEN 1 ELSE 0 END) AS cc, MAX(IFNULL(caja,'')) AS caja, MAX(cobro2) AS cobro2, MAX(IFNULL(comprobante_key,'')) AS ck1, MAX(IFNULL(pago_metodo,'')) AS pm FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
+        const g = await env.DB.prepare(`SELECT COALESCE(SUM(precio),0) + COALESCE(SUM(precio_dimmer),0) AS t, MAX(pagado) AS pagado, CASE WHEN SUM(CASE WHEN IFNULL(origen,'') = 'crm' THEN 0 ELSE 1 END) = 0 THEN MAX(IFNULL(pagado,0)) WHEN MAX(ABS(IFNULL(pagado,0) + IFNULL(restante,0) - IFNULL(precio,0) - IFNULL(precio_dimmer,0))) <= 1 OR MIN(IFNULL(pagado,0)) <> MAX(IFNULL(pagado,0)) THEN SUM(IFNULL(pagado,0)) ELSE MAX(IFNULL(pagado,0)) END AS sena, CASE WHEN SUM(CASE WHEN IFNULL(origen,'') = 'crm' THEN 0 ELSE 1 END) > 0 AND (MAX(ABS(IFNULL(pagado,0) + IFNULL(restante,0) - IFNULL(precio,0) - IFNULL(precio_dimmer,0))) <= 1 OR MIN(IFNULL(pagado,0)) <> MAX(IFNULL(pagado,0))) THEN 1 ELSE 0 END AS por_fila, MIN(id) AS min_id, MAX(CASE WHEN lower(IFNULL(estado_pago,'')) = 'cuenta corriente' THEN 1 ELSE 0 END) AS cc, MAX(IFNULL(caja,'')) AS caja, MAX(cobro2) AS cobro2, MAX(IFNULL(comprobante_key,'')) AS ck1, MAX(IFNULL(pago_metodo,'')) AS pm, MAX(IFNULL(comprobante2_key,'')) AS ck2, MAX(IFNULL(comprobantes_extra,'')) AS cx FROM pedidos WHERE ${_grp}`).bind(..._grpArgs).first();
         // Cuenta corriente (Sin Frontera): se cobra en su Excel, acá no se registra (pasarlo a '1er pago' lo trababa en el tablero).
         if (g && Number(g.cc) === 1) return json({ error: 'Es cuenta corriente (Sin Frontera): se cobra en su Excel, no acá' }, 409);
+        // Varios comprobantes (pagó con varias transferencias): los de más van a comprobantes_extra. Si es el 1er cobro de un
+        // pedido cargado sin pago, cuentan como de la seña (pago 1); si no, del saldo (pago 2).
+        const _cxPrev = compsExtraLeer(g && g.cx);
+        const _primerCobro = !!(g && g.pm === 'pendiente' && !(Number(g.pagado) > 0) && g.cobro2 == null);
+        let _ex = [];
+        if (compKey && Array.isArray(body.comprobantes_extra) && body.comprobantes_extra.length) {
+          const _v = await compsExtraValidar(env, body.comprobantes_extra, _primerCobro ? 1 : 2, [compKey, g && g.ck1, ..._cxPrev.map(x => x.key)], session.user);
+          if (_v.error) return json({ error: _v.error, campo: 'comprobante' }, 400);
+          _ex = _v.ok;
+        }
+        const _usadosEx = [];
+        for (const x of _ex) { const u = await compUsadoFuera(env, x.key, _grp, _grpArgs); if (u) _usadosEx.push(`Ojo: un comprobante también está cargado en el pedido #${u.numero}${u.cartel ? ' (' + String(u.cartel).slice(0, 40) + ')' : ''}`); }
         // Pedido cargado SIN PAGO (pago_metodo 'pendiente', sin seña): este pago es el 1er COBRO, no un saldo. Va a pagado
         // (COBRO 1 en la planilla), la caja a la col Z (syncCajaPedidos) y el comprobante como el de la seña; si cubre
         // el total queda '2do pago' (pagó todo), si no '1er pago' con lo que falte. Corta el recordatorio de cobro solo.
@@ -28117,11 +28242,12 @@ const handler = {
           const restSp = Math.max(0, totalSp - importe);
           const estadoSp = restSp <= 1 ? '2do pago' : '1er pago';
           const nowSp = new Date().toISOString();
+          const _cxSp = _ex.length ? JSON.stringify(_cxPrev.concat(_ex)) : ((g && g.cx) || null);
           let usadoSp = null;
           if (compKey) { try { usadoSp = await env.DB.prepare(`SELECT numero, cartel FROM pedidos WHERE (comprobante_key = ? OR comprobante2_key = ?) AND NOT (${_grp}) LIMIT 1`).bind(compKey, compKey, ..._grpArgs).first(); } catch (_) {} }
           // Condicional: dos clics / un reintento a la vez no lo registran dos veces.
-          const upSp = await env.DB.prepare(`UPDATE pedidos SET estado_pago = ?, pagado = ?, restante = ?, caja = ?, pago_metodo = ?, comprobante_key = ?, comprobante_wamid = ?, caja_sync_attempts = 0, caja_sync_err = NULL, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE ${_grp} AND pago_metodo = 'pendiente' AND IFNULL(pagado,0) = 0`)
-            .bind(estadoSp, importe, restSp, caja, metodo, compKey || null, compWamid, nowSp, ..._grpArgs).run();
+          const upSp = await env.DB.prepare(`UPDATE pedidos SET estado_pago = ?, pagado = ?, restante = ?, caja = ?, pago_metodo = ?, comprobante_key = ?, comprobante_wamid = ?, comprobantes_extra = ?, caja_sync_attempts = 0, caja_sync_err = NULL, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE ${_grp} AND pago_metodo = 'pendiente' AND IFNULL(pagado,0) = 0`)
+            .bind(estadoSp, importe, restSp, caja, metodo, compKey || null, compWamid, _cxSp, nowSp, ..._grpArgs).run();
           if (!(upSp && upSp.meta && upSp.meta.changes > 0)) return json({ error: 'Ese pedido ya tiene un pago registrado: recargá la lista' }, 409);
           // La plata entró: la OC del chat deja de estar POR PAGAR (al cargarlo sin pago se había dejado abierta a propósito).
           try { const igSp = /^@|[a-z_.]/i.test(ref.tel) ? await igsidDeUsuario(env, ref.tel) : ''; await ocCerrarPorPedido(env, [ref.tel, igSp], estadoSp); } catch (_) {}
@@ -28130,14 +28256,15 @@ const handler = {
           if (restSp > 1) avisosSp.push(`Queda debiendo ${fmSp(restSp)}${_pr === 'admin' ? ': te sigo recordando por el saldo' : ''}`);
           else if (importe > totalSp + 1) avisosSp.push(`Pagó ${fmSp(importe - totalSp)} de más`);
           if (usadoSp) avisosSp.push(`Ojo: ese comprobante también está cargado en el pedido #${usadoSp.numero}${usadoSp.cartel ? ' (' + String(usadoSp.cartel).slice(0, 40) + ')' : ''}`);
+          avisosSp.push(..._usadosEx);
           const rsSp = { results: await pedidosConDiseno(env, 'WHERE ' + _grp.replace(/\b(numero|fecha|comercial_id|origen|telefono)\b/g, 'pedidos.$1') + ' ORDER BY pedidos.id', _grpArgs, { interno: _pr === 'admin', fotos: true }) };
           return json({ ok: true, numero: ref.numero, pedidos: rsSp.results || [], avisos: avisosSp, primer_cobro: true });
         }
         // El comprobante de la seña no puede ser también el del saldo (el caso típico de "Usar como comprobante" sobre la
         // foto equivocada). Si ese archivo ya es comprobante de OTRO pedido, se registra igual pero se avisa.
-        if (compKey && g && g.ck1 === compKey) return json({ error: 'Ese comprobante es el de la seña de este pedido: elegí el del saldo', campo: 'comprobante' }, 400);
+        if (compKey && g && (g.ck1 === compKey || _cxPrev.some(x => x.pago !== 2 && x.key === compKey))) return json({ error: 'Ese comprobante es el de la seña de este pedido: elegí el del saldo', campo: 'comprobante' }, 400);
         let _usadoEn = null;
-        if (compKey) { try { _usadoEn = await env.DB.prepare(`SELECT numero, cartel FROM pedidos WHERE (comprobante_key = ? OR comprobante2_key = ?) AND NOT (${_grp}) LIMIT 1`).bind(compKey, compKey, ..._grpArgs).first(); } catch (_) {} }
+        if (compKey) _usadoEn = await compUsadoFuera(env, compKey, _grp, _grpArgs);
         const total = g ? Number(g.t) || 0 : 0;
         // Seña del pedido entero: en los del CRM se repite en cada fila (MAX); en los importados del Excel va repartida por fila (SUM).
         const pagado1 = g && g.sena != null ? Number(g.sena) || 0 : 0;
@@ -28150,8 +28277,17 @@ const handler = {
         // Importado del Excel (seña por fila): el saldo va en UNA fila (repetido en cada una, el Dashboard lo sumaba N veces).
         // IFNULL(cobro2,-1) = lo leído: dos registros a la vez no se pisan sin aviso.
         const porFila = !!g && Number(g.por_fila) === 1;
-        const up2 = await env.DB.prepare(`UPDATE pedidos SET estado_pago = ?, cobro2 = ?, caja2 = ?, pago2_metodo = ?, comprobante2_key = ?, comprobante2_wamid = ?, cobro2_at = ?, restante = CASE WHEN ? = 0 OR id = ? THEN ? ELSE 0 END, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE ${_grp} AND IFNULL(cobro2, -1) = ?`)
-          .bind(estadoPago, importe, caja, metodo, compKey || null, compWamid, now, porFila ? 1 : 0, g ? Number(g.min_id) || 0 : 0, restante, now, ..._grpArgs, (g && g.cobro2 != null) ? Number(g.cobro2) : -1).run();
+        // El importe es TODO lo cobrado del saldo (reemplaza al anterior). El comprobante del pago parcial anterior no se
+        // pierde: pasa a la lista de los de más, con lo que había cubierto.
+        let _cxNuevo = _cxPrev.slice();
+        const _ck2Prev = String((g && g.ck2) || '');
+        if (_ck2Prev && _ck2Prev !== compKey && !_ex.some(x => x.key === _ck2Prev) && !_cxNuevo.some(x => x.key === _ck2Prev)) {
+          const _otros = _cxPrev.filter(x => x.pago === 2).reduce((s, x) => s + (Number(x.monto) || 0), 0);
+          _cxNuevo.push({ key: _ck2Prev, wamid: '', monto: Math.max(0, Math.round(((Number(g.cobro2) || 0) - _otros) * 100) / 100), pago: 2, at: now, por: 'pago anterior' });
+        }
+        _cxNuevo = _cxNuevo.concat(_ex);
+        const up2 = await env.DB.prepare(`UPDATE pedidos SET estado_pago = ?, cobro2 = ?, caja2 = ?, pago2_metodo = ?, comprobante2_key = ?, comprobante2_wamid = ?, cobro2_at = ?, comprobantes_extra = ?, restante = CASE WHEN ? = 0 OR id = ? THEN ? ELSE 0 END, mirror_dirty = 1, mirror_attempts = 0, mirror_error = NULL, updated_at = ? WHERE ${_grp} AND IFNULL(cobro2, -1) = ?`)
+          .bind(estadoPago, importe, caja, metodo, compKey || null, compWamid, now, _cxNuevo.length ? JSON.stringify(_cxNuevo) : null, porFila ? 1 : 0, g ? Number(g.min_id) || 0 : 0, restante, now, ..._grpArgs, (g && g.cobro2 != null) ? Number(g.cobro2) : -1).run();
         if (!(up2 && up2.meta && up2.meta.changes > 0)) return json({ error: 'Recién se registró otro pago de este pedido: recargá la lista y fijate antes de cargarlo de nuevo' }, 409);
         const fm = (n) => '$' + Math.round(n).toLocaleString('es-AR');
         const avisos = [];
@@ -28160,6 +28296,7 @@ const handler = {
         if (caja1 && caja1 !== caja) avisos.push(`La seña fue a ${caja1} y el saldo a ${caja}: en la planilla queda ${caja1}`);
         if (!caja1) avisos.push('Este pedido no tiene cargada la caja de la seña');
         if (_usadoEn) avisos.push(`Ojo: ese comprobante también está cargado en el pedido #${_usadoEn.numero}${_usadoEn.cartel ? ' (' + String(_usadoEn.cartel).slice(0, 40) + ')' : ''}`);
+        avisos.push(..._usadosEx);
         if (importe < saldo - 1) avisos.push(`Queda debiendo ${fm(saldo - importe)}: sigue en 1er pago y no se puede mandar hasta que pague todo`);
         else if (importe > saldo + 1) avisos.push(`Pagó ${fm(importe - saldo)} de más`);
         if (caja1 && caja1 !== caja) {

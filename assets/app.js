@@ -2338,6 +2338,7 @@ function mapPedidoFromD1(row) {
     pagoMetodo: row.pago_metodo || '',
     comprobanteKey: row.comprobante_key || '',
     comprobanteWamid: row.comprobante_wamid || '',
+    comprobantesExtra: compsExtraFront(row.comprobantes_extra),   // los de más de la seña / del saldo (pagó con varios)
     cobro2: Number(row.cobro2) || 0,
     caja2: row.caja2 || '',
     pago2Metodo: row.pago2_metodo || '',
@@ -13580,6 +13581,8 @@ function pmValidate() {
     if (!m.caja || m.caja === 'Efectivo') invalid.push({ sel:'[data-pmc-caja-row]', msg:'Elegí a qué caja pagó' });
     if (m.comp_estado === 'subiendo') invalid.push({ sel:'[data-pmc-comp-slot]', msg:'Esperá que termine de subir el comprobante' });
     else if (!m.comp_key) invalid.push({ sel:'[data-pmc-comp-slot]', msg:'Falta el comprobante de pago' });
+    if (m._extraSubiendo) invalid.push({ sel:'[data-pmx-extras]', msg:'Esperá que termine de subir el comprobante' });
+    else if ((m.compsExtra || []).some(e => !(Number(e.monto) > 0))) invalid.push({ sel:'[data-pmx-extras]', msg:'Poné el monto de cada comprobante' });
   }
   if (!(Number(m.pagado) > 0)) invalid.push({ id:'pm-pagado', msg:'Falta el monto de la seña (pagado)' });
   // '2do pago' al cargar = pagó TODO de una: si el importe no cubre el total, el saldo quedaría sin registrar.
@@ -13662,6 +13665,8 @@ async function confirmCargarPedido() {
       caja: efectivo ? 'Efectivo' : (m.caja || ''),
       comprobante_key: efectivo ? '' : (m.comp_key || ''),
       comprobante_wamid: efectivo ? '' : (m.comp_wamid || ''),
+      // Pagó con varias transferencias: los comprobantes de más (pagado ya es la suma).
+      comprobantes_extra: efectivo ? [] : (m.compsExtra || []).map(e => ({ key: e.key, wamid: e.wamid || '', monto: Math.round(Number(e.monto) || 0) })),
       carteles: carteles.map(c => ({
         cartel: c.cartel, colores: c.colores, tipo: c.tipo, alto: c.alto, ancho: c.ancho, cm_neon: c.cmNeon,
         tramos: c.tramos, base: c.base, cantidad: c.cantidad, precio: c.precio, dimer: c.dimer, precio_dimmer: c.precioDimmer,
@@ -13783,6 +13788,73 @@ async function compSubirArchivo(file) {
   }
   throw lastErr || new Error('no se pudo subir');
 }
+// ----- Varios comprobantes en un mismo pago (Gaspar 22-oct-2026) -----
+// Avalon #405 pagó la seña con 4 transferencias y quedó cargada una sola; Gaspar agregó "no es solo para la seña,
+// para el saldo también".
+// - El primer comprobante va en el recuadro de siempre; los demás, en esta lista.
+// - Cada uno lleva el monto que leyó el OCR, que se puede corregir. El importe del pago es la suma.
+// - La usan el modal "Cargar pedido" (prefijo pmx) y el de pagos (sx).
+// o = { pfx, items: [{key, wamid, tipo, nombre, monto, caja, ocr}], abierto, subiendo, sug, excluir: keys ya elegidas, puedeSumar }
+function compExtrasHtml(o) {
+  const P = o.pfx;
+  const btn = 'background:transparent;border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);cursor:pointer;font-size:12px;padding:6px 10px';
+  const mini = (key, tipo, h) => tipo === 'pdf'
+    ? `<span style="display:flex;align-items:center;justify-content:center;width:${h}px;height:${h}px;border-radius:6px;background:var(--ink-200);border:1px solid var(--border);font-size:${Math.round(h / 2.4)}px">📄</span>`
+    : `<img src="${escapeHtml(disenoThumb(key, 140))}" loading="lazy" onerror="this.style.opacity='.3'" style="display:block;width:${h}px;height:${h}px;object-fit:cover;border-radius:6px;background:#fff;border:1px solid var(--border)">`;
+  const items = Array.isArray(o.items) ? o.items : [];
+  const filas = items.map((e, i) => {
+    const usado = (e.ocr && Array.isArray(e.ocr.usado_en)) ? e.ocr.usado_en : [];
+    const avisos = [];
+    if (e.ocr && e.ocr.es_comprobante === false) avisos.push('⚠ el sistema no lo reconoce como comprobante');
+    if (usado.length) avisos.push('⚠ ya está cargado en el pedido ' + usado.map(u => '#' + u.numero).join(', '));
+    return `<div style="display:flex;gap:8px;align-items:center;padding:6px 0;border-top:1px dashed var(--border)">
+        <button type="button" data-${P}-x-ver="${i}" title="Ver en grande" style="border:0;padding:0;background:none;cursor:zoom-in;flex:none">${mini(e.key, e.tipo, 44)}</button>
+        <div style="flex:1;min-width:0;font-size:11px;color:var(--fg-subtle)">Comprobante ${i + 2}${e.caja ? ' · caja ' + escapeHtml(e.caja) : ''}${avisos.map(a => `<div style="color:#FFB020">${escapeHtml(a)}</div>`).join('')}</div>
+        <input type="number" inputmode="numeric" data-${P}-x-monto="${i}" value="${escapeHtml(String(e.monto || ''))}" placeholder="$ monto" title="Monto de este comprobante" style="${PM_INP};width:120px;flex:none">
+        <button type="button" data-${P}-x-quitar="${i}" title="Sacar este comprobante" style="${btn};color:#FF5566;flex:none">✕</button>
+      </div>`;
+  }).join('');
+  let abajo = '';
+  if (o.subiendo) abajo = '<div style="font-size:12px;color:var(--fg-subtle);padding:6px 0">Subiendo comprobante… <span style="opacity:.7">(leyendo el monto)</span></div>';
+  else if (o.abierto) {
+    const fuera = new Set((o.excluir || []).filter(Boolean));
+    const sug = (Array.isArray(o.sug) ? o.sug : []).filter(it => !fuera.has(it.key));
+    const thumbs = sug.map(it => {
+      const oc = compOcrDe(it) || {};
+      const cap = Number(oc.monto) > 0 ? fmtMoney(oc.monto) : (oc.es_comprobante === false ? 'no parece' : '');
+      const usado = (oc.usado_en || []).length ? `<span style="position:absolute;left:0;right:0;top:0;background:rgba(110,55,0,.88);color:#FFD08A;font-size:9px;font-weight:700;text-align:center">usado #${escapeHtml(String(oc.usado_en[0].numero))}</span>` : '';
+      const media = it.tipo === 'pdf' ? mini(it.key, 'pdf', 60) : `<img src="${escapeHtml(disenoThumb(it.key, 140))}" loading="lazy" onerror="this.style.opacity='.25'" style="display:block;width:100%;height:100%;object-fit:cover">`;
+      return `<div style="width:64px;flex:none${oc.es_comprobante === false ? ';opacity:.55' : ''}"><button type="button" data-${P}-x-sug="${escapeHtml(it.key)}" title="Sumar este comprobante" style="position:relative;display:block;width:64px;height:64px;border:2px solid var(--border);border-radius:8px;padding:0;background:#fff;cursor:pointer;overflow:hidden">${media}${usado}</button>${cap ? `<div style="font-size:10px;text-align:center;color:var(--fg);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(cap)}</div>` : ''}</div>`;
+    }).join('');
+    abajo = `<div style="border-top:1px dashed var(--border);padding-top:8px;margin-top:4px">
+        ${thumbs ? `<div style="font-size:11px;color:var(--fg-subtle);margin-bottom:4px">Tocá el otro comprobante que mandó el cliente:</div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${thumbs}</div>` : '<div style="font-size:11px;color:var(--fg-mute);margin-bottom:8px">No hay otros comprobantes en el chat: subilo.</div>'}
+        <div style="display:flex;gap:8px;flex-wrap:wrap"><label style="${btn};display:inline-block">📎 Subir comprobante<input type="file" accept="image/*,application/pdf" data-${P}-x-file style="display:none"></label><button type="button" data-${P}-x-cerrar style="${btn}">Cancelar</button></div>
+      </div>`;
+  } else if (o.puedeSumar) abajo = `<button type="button" data-${P}-x-abrir style="${btn};margin-top:6px">＋ Sumar otro comprobante <span style="opacity:.7">(si pagó con varios)</span></button>`;
+  return `<div data-${P}-extras${filas || abajo ? ' style="margin-top:6px"' : ''}>${filas}${abajo}</div>`;
+}
+// h = { abrir(), cerrar(), sugerida(key), archivo(file), quitar(i), monto(i, valor), ver(i) }
+function bindCompExtras(root, P, h) {
+  if (!root || !root.querySelectorAll) return;
+  const q = (a) => { const s = '[data-' + P + '-' + a + ']'; return [...((root.matches && root.matches(s)) ? [root] : []), ...root.querySelectorAll(s)]; };
+  q('x-abrir').forEach(b => b.onclick = () => h.abrir());
+  q('x-cerrar').forEach(b => b.onclick = () => h.cerrar());
+  q('x-sug').forEach(b => b.onclick = () => h.sugerida(b.getAttribute('data-' + P + '-x-sug')));
+  q('x-file').forEach(inp => inp.onchange = () => { const f = inp.files && inp.files[0]; inp.value = ''; if (f) h.archivo(f); });
+  q('x-quitar').forEach(b => b.onclick = () => h.quitar(parseInt(b.getAttribute('data-' + P + '-x-quitar'), 10)));
+  q('x-ver').forEach(b => b.onclick = () => h.ver(parseInt(b.getAttribute('data-' + P + '-x-ver'), 10)));
+  q('x-monto').forEach(inp => inp.oninput = () => h.monto(parseInt(inp.getAttribute('data-' + P + '-x-monto'), 10), inp.value));
+}
+function compExtrasSuma(items) { return (items || []).reduce((s, e) => s + Math.round(Number(e.monto) || 0), 0); }
+// Un comprobante de más, desde una sugerencia del chat o desde la respuesta de la subida (compSubirArchivo).
+function compExtraDe(it, nombre) {
+  const ocr = compOcrDe(it) || {};
+  return { key: it.key, wamid: it.wamid || '', tipo: it.tipo || compTipoDeKey(it.key) || 'image', nombre: it.nombre || nombre || '', monto: Number(ocr.monto) > 0 ? String(Math.round(ocr.monto)) : '', caja: ocr.caja || '', ocr };
+}
+// Lo que guarda la base (pedidos.comprobantes_extra) → [{ key, monto, pago: 1 seña | 2 saldo }].
+function compsExtraFront(v) {
+  try { const a = typeof v === 'string' ? JSON.parse(v || '[]') : v; return Array.isArray(a) ? a.filter(x => x && x.key).map(x => ({ key: String(x.key), monto: Number(x.monto) || 0, pago: Number(x.pago) === 2 ? 2 : 1 })) : []; } catch (_) { return []; }
+}
 // Recuadro del comprobante. Lo comparten el modal "Cargar pedido" (prefijo pmc) y el de 2do pago (sp2).
 // o = { pfx, sel:{key,tipo,nombre,preview,ocr}|null, estado:''|'subiendo'|'error', sug:[items del endpoint],
 //       sugEstado:''|'buscando'|'ok'|'error'|'sincontacto', ocTs, verOtros, buscable, sinContactoTxt }
@@ -13895,7 +13967,9 @@ function pmPagoDefaults() {
     // De dónde salió el importe (#pm-pagado): 'oc' (seña de la OC) | 'ocr' (comprobante) | 'manual' (lo tipeó).
     _pagadoFuente: '', _estadoManual: false, _pasteTarget: '',
     // Sin pago (solo admin): día en que el cliente paga ('AAAA-MM-DD'); el server manda el recordatorio a Gaspar.
-    cobrarEl: ''
+    cobrarEl: '',
+    // Comprobantes de más de la seña (pagó con varias transferencias): compExtrasHtml.
+    compsExtra: [], _extraAbierto: false, _extraSubiendo: false, _extraTok: 0
   };
 }
 // Comprobante ya elegido desde el chat ("Usar como comprobante"): la key wa/… o ig/… del mensaje va tal cual. El
@@ -13942,9 +14016,10 @@ function pmPagadoHintHtml(m) {
   const parts = [];
   const pag = Math.round(Number(m.pagado) || 0);
   const ocr = (m.pagoMetodo !== 'efectivo' && m.comp_key) ? m._compOcr : null;
-  const monto = ocr ? Math.round(Number(ocr.monto) || 0) : 0;
-  if (monto > 0 && monto !== pag) parts.push(`<span style="color:#FFB020">El comprobante dice ${fmtMoney(monto)}</span> <button type="button" data-pmc-usar-monto style="background:none;border:0;padding:0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:11px">usar</button>`);
-  else if (monto > 0 && m._pagadoFuente === 'ocr') parts.push('<span style="color:var(--fg-subtle)">✓ importe leído del comprobante</span>');
+  const nEx = (m.pagoMetodo !== 'efectivo' && m.comp_key) ? (m.compsExtra || []).length : 0;
+  const monto = (ocr ? Math.round(Number(ocr.monto) || 0) : 0) + (nEx ? compExtrasSuma(m.compsExtra) : 0);
+  if (monto > 0 && monto !== pag) parts.push(`<span style="color:#FFB020">${nEx ? 'Los ' + (nEx + 1) + ' comprobantes suman' : 'El comprobante dice'} ${fmtMoney(monto)}</span> <button type="button" data-pmc-usar-monto style="background:none;border:0;padding:0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:11px">usar</button>`);
+  else if (monto > 0 && m._pagadoFuente === 'ocr') parts.push(nEx ? '<span style="color:var(--fg-subtle)">✓ importe = la suma de los ' + (nEx + 1) + ' comprobantes</span>' : '<span style="color:var(--fg-subtle)">✓ importe leído del comprobante</span>');
   else if (m._pagadoFuente === 'oc' && pag > 0) parts.push('<span style="color:var(--fg-subtle)">importe = la seña de la OC</span>');
   const total = pedidoModalTotal();
   if (total > 0 && pag >= total && m.estadoPago === '2do pago') parts.push('<span style="color:#3DDC97">pagó el total → queda como 2do pago</span>');
@@ -13969,7 +14044,7 @@ function pmPagoBlockHtml(m) {
       <label style="${PM_LBL}">¿Cómo pagó?</label>
       <div data-pmc-metodo-row style="display:flex;gap:8px;margin-bottom:10px">${metBtn('transferencia', '🏦 Transferencia')}${metBtn('efectivo', '💵 Efectivo')}${isAdmin() ? metBtn('pendiente', '⏳ Sin pago') : ''}</div>
       ${pmCajaWrapHtml(m)}
-      ${ef ? '' : `<div style="margin-bottom:10px"><label style="${PM_LBL}">Comprobante de pago * <span style="opacity:.6;text-transform:none;letter-spacing:0">— lo que mandó el cliente (foto o PDF)</span></label>${pmCompSlotHtml(m)}</div>`}
+      ${ef ? '' : `<div style="margin-bottom:10px"><label style="${PM_LBL}">Comprobante de pago * <span style="opacity:.6;text-transform:none;letter-spacing:0">— lo que mandó el cliente (foto o PDF)</span></label>${pmCompSlotHtml(m)}${pmExtrasHtml(m)}</div>`}
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <div style="flex:1.2;min-width:140px"><label style="${PM_LBL}">${ef ? 'Importe en efectivo *' : 'Importe pagado (seña) *'}</label><input id="pm-pagado" type="number" value="${escapeHtml(String(m.pagado || ''))}" placeholder="$" style="${PM_INP}" data-pm-calc></div>
         <div style="flex:1;min-width:120px"><label style="${PM_LBL}">Estado del pago</label><select id="pm-estadopago" style="${PM_INP}">${['1er pago', '2do pago'].map(o => `<option ${m.estadoPago === o ? 'selected' : ''}>${o}</option>`).join('')}</select></div>
@@ -13997,6 +14072,52 @@ function pmPagoSinPagoHtml(m) {
       <div style="font-size:11.5px;color:var(--fg-subtle);margin-top:6px">Se carga sin seña ni comprobante. Te llega un recordatorio por WhatsApp a tu número ("COBRAR …") el día antes, el día y todos los días después, hasta que registres el pago desde el pedido.</div>
     </div>`;
 }
+// Los comprobantes de más de la seña (compExtrasHtml): solo en transferencia y con el primero ya elegido.
+function pmExtrasHtml(m) {
+  return compExtrasHtml({ pfx: 'pmx', items: m.compsExtra || [], abierto: !!m._extraAbierto, subiendo: !!m._extraSubiendo,
+    sug: m._compSug || [], excluir: [m.comp_key, ...(m.compsExtra || []).map(e => e.key)], puedeSumar: !!m.comp_key && m.comp_estado !== 'subiendo' });
+}
+function pmExtrasRepintar(m) {
+  if (!pmModalVivo(m) || m.pagoMetodo === 'efectivo') return;
+  pmPagoReemplazar(m, '[data-pmx-extras]', pmExtrasHtml(m));
+}
+// Cambió la lista: el importe vuelve a ser la suma (si no lo tipeó a mano). repintar=false mientras tipea un monto.
+function pmExtrasCambio(m, repintar) {
+  pmCompAplicarOcr(m, m._compOcr);
+  if (repintar !== false) pmExtrasRepintar(m);
+  pmPagoHintRefresh(m);
+  if (m._validated) pmApplyMarks(pmValidate());
+}
+function pmExtraAgregar(m, e) {
+  if (!m || !e || !e.key || e.key === m.comp_key || (m.compsExtra || []).some(x => x.key === e.key)) return;
+  m.compsExtra = (m.compsExtra || []).concat([e]);
+  m._extraAbierto = false;
+  pmExtrasCambio(m);
+}
+async function pmExtraArchivo(file) {
+  const m = STATE.pedidoModal; if (!m || !file) return;
+  const esPdf = /pdf/i.test(file.type || '') || /\.pdf$/i.test(file.name || '');
+  if (!esPdf && !/^image\//.test(file.type || '')) { niToast('El comprobante tiene que ser una foto o un PDF', { error: true }); return; }
+  const tok = (m._extraTok || 0) + 1; m._extraTok = tok;
+  m._extraSubiendo = true; pmExtrasRepintar(m);
+  let res = null, err = null;
+  try { res = await compSubirArchivo(file); } catch (e) { err = e; }
+  if (m._extraTok !== tok || STATE.pedidoModal !== m) return;
+  m._extraSubiendo = false;
+  if (res && res.key) pmExtraAgregar(m, compExtraDe(res, esPdf ? (file.name || 'comprobante.pdf') : ''));
+  else { pmExtrasRepintar(m); niToast('No se pudo subir el comprobante: ' + ((err && err.message) || err || ''), { error: true }); }
+}
+function pmBindExtras(root) {
+  bindCompExtras(root, 'pmx', {
+    abrir: () => { const m = STATE.pedidoModal; if (!m) return; m._extraAbierto = true; pmExtrasRepintar(m); if (m._compSugEstado !== 'ok') pmCargarComprobantes(); },
+    cerrar: () => { const m = STATE.pedidoModal; if (!m) return; m._extraAbierto = false; pmExtrasRepintar(m); },
+    sugerida: (k) => { const m = STATE.pedidoModal; if (!m) return; const it = (m._compSug || []).find(x => x.key === k); if (it) pmExtraAgregar(m, compExtraDe(it)); },
+    archivo: (f) => pmExtraArchivo(f),
+    quitar: (i) => { const m = STATE.pedidoModal; if (!m) return; m.compsExtra = (m.compsExtra || []).filter((_, j) => j !== i); pmExtrasCambio(m); },
+    monto: (i, v) => { const m = STATE.pedidoModal; if (!m || !(m.compsExtra || [])[i]) return; m.compsExtra[i].monto = v; pmExtrasCambio(m, false); },
+    ver: (i) => { const m = STATE.pedidoModal; const e = m && (m.compsExtra || [])[i]; if (e) compVer(e.key, e.tipo, e.nombre); }
+  });
+}
 // parcial = el elemento se re-pintó suelto (sin render()): le suma lo que bindPedidoModal hace en el render
 // completo para todo el modal (recalcular total/restante y la validación en vivo).
 function bindPmPagoBlock(root, parcial) {
@@ -14016,6 +14137,7 @@ function bindPmPagoBlock(root, parcial) {
     cambiar: () => { const m = STATE.pedidoModal; if (!m) return; m._compVerOtros = !m._compVerOtros; pmCompRepintar(m); if (m._compVerOtros) pmCargarComprobantes(); },
     buscar: () => pmCargarComprobantes(true)
   });
+  pmBindExtras(root);
   const pag = deRoot('#pm-pagado')[0];
   if (pag) { if (parcial) pag.addEventListener('input', pmRecalc); pag.addEventListener('input', pmPagadoInput); }
   const est = deRoot('#pm-estadopago')[0];
@@ -14045,6 +14167,7 @@ function pmPagoHintRefresh(m) {
 function pmCompRepintar(m) {
   if (!pmModalVivo(m)) return;
   if (m.pagoMetodo !== 'efectivo') pmPagoReemplazar(m, '[data-pmc-comp-slot]', pmCompSlotHtml(m));
+  if (m.pagoMetodo !== 'efectivo') pmPagoReemplazar(m, '[data-pmx-extras]', pmExtrasHtml(m));
   pmPagoReemplazar(m, '[data-pmc-caja-wrap]', pmCajaWrapHtml(m));
   pmPagoHintRefresh(m);
   if (m._validated) pmApplyMarks(pmValidate());
@@ -14090,8 +14213,8 @@ function pmSetCaja(c) {
   if (m._validated) pmApplyMarks(pmValidate());
 }
 function pmUsarMontoOcr() {
-  const m = STATE.pedidoModal; if (!m || !m._compOcr) return;
-  const monto = Math.round(Number(m._compOcr.monto) || 0); if (!(monto > 0)) return;
+  const m = STATE.pedidoModal; if (!m) return;
+  const monto = Math.round(Number(m._compOcr && m._compOcr.monto) || 0) + (m.pagoMetodo !== 'efectivo' && m.comp_key ? compExtrasSuma(m.compsExtra) : 0); if (!(monto > 0)) return;
   const el = document.getElementById('pm-pagado'); if (el) el.value = String(monto);
   m.pagado = String(monto); m._pagadoFuente = 'ocr';
   pmRecalc();
@@ -14104,7 +14227,8 @@ function pmCompAplicarOcr(m, ocr) {
   const vivo = pmModalVivo(m);
   const caja = ocr ? compCajaValida(ocr.caja) : '';
   if (caja && !m._cajaManual && m.pagoMetodo !== 'efectivo') { m.caja = caja; m._cajaDeOcr = true; }
-  const monto = ocr ? Math.round(Number(ocr.monto) || 0) : 0;
+  // Con varios comprobantes, el importe es la suma de todos (compExtrasHtml).
+  const monto = (ocr ? Math.round(Number(ocr.monto) || 0) : 0) + (m.pagoMetodo !== 'efectivo' && m.comp_key ? compExtrasSuma(m.compsExtra) : 0);
   if (!(monto > 0)) { pmPagadoOcrLimpiar(m); return; }   // el importe del comprobante ANTERIOR no queda colgado
   if (vivo) readPedidoModalDOM();
   if (!(Number(m.pagado) > 0) || m._pagadoFuente === 'oc' || m._pagadoFuente === 'ocr') {
@@ -14289,6 +14413,18 @@ async function pedCobrarElGuardar(idx, cortar) {
     niToast(cortar ? 'Listo: no te recuerdo más este cobro' : `Listo: te recuerdo cobrarlo el ${v.slice(8, 10)}/${v.slice(5, 7)}`);
   } catch (e) { niToast('Error: ' + e.message, { error: true }); }
 }
+// En la ficha: los comprobantes de más de la seña (pago 1) o del saldo (pago 2), chiquitos y con su monto.
+function pedExtrasFilaHtml(p, pago) {
+  const xs = (p.comprobantesExtra || []).filter(x => x.pago === pago);
+  if (!xs.length) return '';
+  const mini = (k) => compTipoDeKey(k) === 'image'
+    ? `<button type="button" data-k="${escapeHtml(k)}" onclick="compVer(this.dataset.k,'image')" title="Ver el comprobante" style="border:0;padding:0;background:none;cursor:zoom-in"><img src="${escapeHtml(disenoThumb(k, 120))}" onerror="this.style.opacity='.3'" style="display:block;height:36px;width:36px;object-fit:cover;border-radius:5px;background:#fff;border:1px solid var(--border)"></button>`
+    : `<button type="button" class="btn btn-ghost" data-k="${escapeHtml(k)}" onclick="compVer(this.dataset.k,'${compTipoDeKey(k)}')" style="font-size:11px;padding:3px 8px">📄</button>`;
+  return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 0 8px">
+      <span style="font-size:11px;color:var(--fg-subtle)">${pago === 1 ? 'La seña' : 'El saldo'} entró en ${xs.length + 1} comprobantes; además del de arriba:</span>
+      ${xs.map(x => `<span style="display:inline-flex;align-items:center;gap:4px">${mini(x.key)}<span style="font-size:11px;color:var(--fg);font-weight:600">${fmtMoney(x.monto)}</span></span>`).join('')}
+    </div>`;
+}
 function pagosDrawerSection(p) {
   const metodoTxt = (x) => x === 'efectivo' ? '💵 Efectivo' : (x === 'transferencia' ? '🏦 Transferencia' : '');
   const cajaPill = (c) => c ? `<span class="pill ${c === 'Efectivo' ? 'amber' : 'cyan'}" style="font-size:11px">${escapeHtml(c)}</span>` : '<span style="font-size:11px;color:var(--fg-mute)">sin caja</span>';
@@ -14305,7 +14441,7 @@ function pagosDrawerSection(p) {
   const ddmmC = p.cobrarEl ? p.cobrarEl.slice(8, 10) + '/' + p.cobrarEl.slice(5, 7) : '';
   let html = sinPago
     ? `<div style="padding:8px 0;border-top:1px dashed var(--border);font-size:13px;color:#FFB020">⏳ Cargado sin pago${ddmmC ? ' — cobrar el ' + escapeHtml(ddmmC) : ' — sin recordatorio'}. ${isAdmin() ? (ddmmC ? 'Te llega el recordatorio por WhatsApp hasta que registres el pago.' : '') : 'Gaspar recibe el recordatorio para cobrarlo.'}</div>`
-    : fila('1er pago (seña)', p.pagado, p.caja, p.pagoMetodo, p.comprobanteKey, '');
+    : fila('1er pago (seña)', p.pagado, p.caja, p.pagoMetodo, p.comprobanteKey, '') + pedExtrasFilaHtml(p, 1);
   // Recordatorio de cobro (pedido cargado sin pago, o con saldo después de un pago parcial): posponer o cortarlo.
   if (isAdmin() && p.estadoPago !== '2do pago' && (p.cobrarEl || sinPago) && Number(p.restante) > 1) {
     const hoyC = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
@@ -14318,6 +14454,7 @@ function pagosDrawerSection(p) {
   }
   if (tiene2) {
     html += fila('2do pago (saldo)', p.cobro2, p.caja2, p.pago2Metodo, p.comprobante2Key, p.cobro2At ? `<span style="font-size:11px;color:var(--fg-mute)">${escapeHtml(compFechaCorta(p.cobro2At))}</span>` : '');
+    html += pedExtrasFilaHtml(p, 2);
     if (Number(p.restante) > 0) html += `<div style="font-size:12px;color:#FFB020;padding-top:6px">Queda debiendo ${fmtMoney(p.restante)}</div>`;
     // Pago parcial del saldo: sigue en 1er pago (no sale del taller hasta que pague todo).
     if (p.estadoPago !== '2do pago' && !/^cuenta corriente$/i.test(String(p.estadoPago || '')) && Number(p.restante) > 1 && canCotizar()) html += `<div style="padding-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-cyan" onclick="abrirSegundoPago(${p.idx},{origen:'drawer'})" style="font-size:12px;padding:6px 12px">💳 Registrar el resto</button>${isAdmin() ? `<button class="btn btn-ghost" onclick="pedBorrarPagoSaldo(${p.idx})" style="font-size:12px;padding:6px 10px;color:var(--fg-subtle)">Borrar este pago</button>` : ''}</div>`;
@@ -14326,7 +14463,7 @@ function pagosDrawerSection(p) {
   } else if (p.estadoPago === '2do pago') {
     html += `<div style="font-size:12px;color:var(--fg-subtle);padding-top:8px;border-top:1px dashed var(--border)">${(Number(p.pagado) > 0 && !(Number(p.restante) > 0)) ? 'Pagó el total en el 1er pago' : 'Marcado como 2do pago (sin datos del cobro)'}</div>`;
   } else if (canCotizar()) {
-    html += `<div style="padding-top:8px;border-top:1px dashed var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-cyan" onclick="abrirSegundoPago(${p.idx},{origen:'drawer'})" style="font-size:12px;padding:6px 12px">💳 ${sinPago ? 'Registrar pago' : 'Registrar 2do pago'}</button>${Number(p.restante) > 0 ? `<span style="font-size:12px;color:var(--fg-subtle)">saldo ${fmtMoney(p.restante)}</span>` : ''}</div>`;
+    html += `<div style="padding-top:8px;border-top:1px dashed var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-cyan" onclick="abrirSegundoPago(${p.idx},{origen:'drawer'})" style="font-size:12px;padding:6px 12px">💳 ${sinPago ? 'Registrar pago' : 'Registrar 2do pago'}</button>${Number(p.restante) > 0 ? `<span style="font-size:12px;color:var(--fg-subtle)">saldo ${fmtMoney(p.restante)}</span>` : ''}${!sinPago && p.origen === 'crm' ? `<button class="btn btn-ghost" onclick="abrirSegundoPago(${p.idx},{origen:'drawer',modo:'sena'})" style="font-size:12px;padding:6px 10px">＋ Sumar comprobante a la seña</button>` : ''}</div>`;
   }
   if (isAdmin() && p.cajaSyncErr) html += `<div style="font-size:10.5px;color:#FFB020;margin-top:6px">planilla: ${escapeHtml(p.cajaSyncErr)}</div>`;
   return `<div class="drawer-section" data-ped-pagos-idx="${p.idx}"><h4>💳 Pagos</h4>${html}</div>`;
@@ -14390,16 +14527,18 @@ function abrirSegundoPago(idx, opts) {
     metodo: 'transferencia', caja: '', cajaManual: false, cajaDeOcr: false,
     comp: null, compEstado: '', compTok: 0, compPrev: null, verOtros: false,
     sug: [], sugEstado: '', ocTs: '', pidiendo: false,
-    importe: saldo > 0 ? String(Math.round(saldo)) : '', importeFuente: saldo > 0 ? 'saldo' : '',
+    modo: opts.modo === 'sena' ? 'sena' : 'saldo',
+    importe: (opts.modo !== 'sena' && saldo > 0) ? String(Math.round(saldo)) : '', importeFuente: (opts.modo !== 'sena' && saldo > 0) ? 'saldo' : '',
+    extras: [], extraAbierto: false, extraSubiendo: false, extraTok: 0,
     validado: false, enviando: false, err: '', errTipo: '', cerrado: false, bg: null, cerrar: null
   };
   if (opts.comp && opts.comp.key) st.comp = { key: String(opts.comp.key), wamid: String(opts.comp.wamid || ''), tipo: opts.comp.tipo || compTipoDeKey(opts.comp.key) || 'image', nombre: opts.comp.nombre || '', preview: '', ocr: null };
   const bg = document.createElement('div');
   bg.className = 'modal-bg'; bg.id = 'sp2-modal';
   bg.innerHTML = `<div class="modal modal--login" style="max-width:620px;max-height:92vh">
-      <div class="modal-h"><h3 style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${st.sinPago ? 'Registrar pago' : 'Registrar 2do pago'} · ${escapeHtml(st.cartel || 'pedido')}${st.nCarteles > 1 ? ' +' + (st.nCarteles - 1) : ''} · #${escapeHtml(String(st.numero || '—'))}</h3></div>
+      <div class="modal-h"><h3 style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sp2Titulo(st)} · ${escapeHtml(st.cartel || 'pedido')}${st.nCarteles > 1 ? ' +' + (st.nCarteles - 1) : ''} · #${escapeHtml(String(st.numero || '—'))}</h3></div>
       <div class="modal-body" data-sp2-body></div>
-      <div class="modal-actions"><button class="btn btn-ghost" data-sp2-cancel>Cancelar</button><button class="btn btn-cyan" data-sp2-ok>✓ ${st.sinPago ? 'Registrar pago' : 'Registrar 2do pago'}</button></div>
+      <div class="modal-actions"><button class="btn btn-ghost" data-sp2-cancel>Cancelar</button><button class="btn btn-cyan" data-sp2-ok>✓ ${sp2Titulo(st)}</button></div>
     </div>`;
   document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
   st.bg = bg;
@@ -14429,7 +14568,7 @@ function abrirSegundoPago(idx, opts) {
   const cerrar = (ok) => {
     if (st.cerrado) return;
     st.cerrado = true;
-    st.compTok++; // una subida en curso ya no toca nada
+    st.compTok++; st.extraTok++; // una subida en curso ya no toca nada
     if (st.comp) compBlobLibre(st.comp.preview);
     if (st.compPrev) compBlobLibre(st.compPrev.preview);
     bg.classList.remove('open'); setTimeout(() => bg.remove(), 150);
@@ -14452,13 +14591,56 @@ function abrirSegundoPago(idx, opts) {
   sp2CargarSug(st, false);
 }
 function sp2Vivo(st) { return !!st && !st.cerrado && !!st.bg && document.body.contains(st.bg); }
+// Modal de pagos: 'saldo' (2do pago / pago de un pedido cargado sin pago) o 'sena' (sumar comprobantes a la seña).
+function sp2Titulo(st) { return st.modo === 'sena' ? 'Sumar a la seña' : (st.sinPago ? 'Registrar pago' : 'Registrar 2do pago'); }
+function sp2ExtrasHtml(st) {
+  if (st.metodo === 'efectivo') return '';
+  return compExtrasHtml({ pfx: 'sx', items: st.extras, abierto: st.extraAbierto, subiendo: st.extraSubiendo, sug: st.sug,
+    excluir: [st.comp && st.comp.key, ...st.extras.map(e => e.key), st.p && st.p.comprobanteKey, st.p && st.p.comprobante2Key, ...((st.p && st.p.comprobantesExtra) || []).map(x => x.key)], puedeSumar: !!(st.comp && st.comp.key) && st.compEstado !== 'subiendo' });
+}
+function sp2ExtraAgregar(st, e) {
+  if (!e || !e.key || (st.comp && st.comp.key === e.key) || st.extras.some(x => x.key === e.key)) return;
+  st.extras = st.extras.concat([e]); st.extraAbierto = false;
+  sp2AplicarOcr(st); sp2Pintar(st);
+}
+async function sp2ExtraArchivo(st, file) {
+  if (!sp2Vivo(st) || !file) return;
+  const esPdf = /pdf/i.test(file.type || '') || /\.pdf$/i.test(file.name || '');
+  if (!esPdf && !/^image\//.test(file.type || '')) { niToast('El comprobante tiene que ser una foto o un PDF', { error: true }); return; }
+  const tok = ++st.extraTok;
+  st.extraSubiendo = true; sp2Pintar(st);
+  let res = null, err = null;
+  try { res = await compSubirArchivo(file); } catch (e) { err = e; }
+  if (st.extraTok !== tok || st.cerrado) return;
+  st.extraSubiendo = false;
+  if (res && res.key) sp2ExtraAgregar(st, compExtraDe(res, esPdf ? (file.name || 'comprobante.pdf') : ''));
+  else { sp2Pintar(st); niToast('No se pudo subir el comprobante: ' + ((err && err.message) || err || ''), { error: true }); }
+}
+function sp2BindExtras(st, body) {
+  bindCompExtras(body, 'sx', {
+    abrir: () => { st.extraAbierto = true; sp2Pintar(st); if (st.sugEstado !== 'ok') sp2CargarSug(st, false); },
+    cerrar: () => { st.extraAbierto = false; sp2Pintar(st); },
+    sugerida: (k) => { const it = (st.sug || []).find(x => x.key === k); if (it) sp2ExtraAgregar(st, compExtraDe(it)); },
+    archivo: (f) => sp2ExtraArchivo(st, f),
+    quitar: (i) => { st.extras = st.extras.filter((_, j) => j !== i); sp2AplicarOcr(st); sp2Pintar(st); },
+    // Mientras tipea el monto no se re-pinta (perdería el foco): solo el importe y los avisos.
+    monto: (i, v) => {
+      if (!st.extras[i]) return;
+      st.extras[i].monto = v; sp2AplicarOcr(st);
+      const ni = st.bg && st.bg.querySelector('[data-sp2-importe]'); if (ni) ni.value = st.importe;
+      sp2AvisosRefresh(st); if (st.validado) sp2Marcas(st);
+    },
+    ver: (i) => { const e = st.extras[i]; if (e) compVer(e.key, e.tipo, e.nombre); }
+  });
+}
 function sp2HintHtml(st) {
   if (st.metodo === 'efectivo') return '';
   const ocr = (st.comp && st.comp.key) ? st.comp.ocr : null;
-  const monto = ocr ? Math.round(Number(ocr.monto) || 0) : 0;
+  const nEx = (st.comp && st.comp.key) ? st.extras.length : 0;
+  const monto = (ocr ? Math.round(Number(ocr.monto) || 0) : 0) + (nEx ? compExtrasSuma(st.extras) : 0);
   const imp = Math.round(Number(st.importe) || 0);
-  if (monto > 0 && monto !== imp) return `<span style="color:#FFB020">El comprobante dice ${fmtMoney(monto)}</span> <button type="button" data-sp2-usar-monto style="background:none;border:0;padding:0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:11px">usar</button>`;
-  if (monto > 0 && st.importeFuente === 'ocr') return '<span style="color:var(--fg-subtle)">✓ importe leído del comprobante</span>';
+  if (monto > 0 && monto !== imp) return `<span style="color:#FFB020">${nEx ? 'Los ' + (nEx + 1) + ' comprobantes suman' : 'El comprobante dice'} ${fmtMoney(monto)}</span> <button type="button" data-sp2-usar-monto style="background:none;border:0;padding:0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:11px">usar</button>`;
+  if (monto > 0 && st.importeFuente === 'ocr') return nEx ? '<span style="color:var(--fg-subtle)">✓ importe = la suma de los ' + (nEx + 1) + ' comprobantes</span>' : '<span style="color:var(--fg-subtle)">✓ importe leído del comprobante</span>';
   if (st.importeFuente === 'saldo' && imp > 0) return '<span style="color:var(--fg-subtle)">= el saldo del pedido</span>';
   return '';
 }
@@ -14469,6 +14651,13 @@ function sp2AvisosHtml(st) {
   const caja2 = st.metodo === 'efectivo' ? 'Efectivo' : st.caja;
   if (caja1 && caja2 && caja2 !== caja1) out.push({ c: 'var(--accent-cyan,#8FD4DE)', t: `ℹ Ojo: la seña fue a ${caja1}; en la planilla queda ${caja1}` });
   const imp = Number(st.importe) || 0;
+  if (st.modo === 'sena') {
+    if (imp > 0) {
+      const nueva = st.sena + imp, debe = st.total - nueva - (st.cobro2Prev || 0);
+      out.push(debe > 1 ? { c: 'var(--fg-subtle)', t: `La seña queda en ${fmtMoney(nueva)} y debe ${fmtMoney(debe)}` } : (debe < -1 ? { c: '#FFB020', t: `⚠ Pagó ${fmtMoney(-debe)} de más` } : { c: '#3DDC97', t: '✓ Con esto queda pagado completo' }));
+    }
+    return out.map(a => `<div style="font-size:12px;color:${a.c};margin-top:4px">${escapeHtml(a.t)}</div>`).join('');
+  }
   if (st.cobro2Prev > 0 && !st.sinPago) out.push({ c: 'var(--accent-cyan,#8FD4DE)', t: `ℹ Ya había registrado ${fmtMoney(st.cobro2Prev)} del saldo: poné TODO lo que pagó del saldo (reemplaza al anterior)` });
   if (imp > 0 && st.saldo > 0 && Math.round(imp) !== Math.round(st.saldo)) out.push({ c: '#FFB020', t: imp < st.saldo ? `⚠ Queda debiendo ${fmtMoney(st.saldo - imp)}: sigue en 1er pago y no se puede mandar hasta que pague todo` : `⚠ Pagó ${fmtMoney(imp - st.saldo)} de más` });
   if (imp > 0 && !(st.saldo > 0)) out.push({ c: '#FFB020', t: '⚠ Según el sistema este pedido ya no tiene saldo pendiente' });
@@ -14483,24 +14672,24 @@ function sp2Html(st) {
     : `<div data-sp2-caja-row style="display:flex;gap:6px;flex-wrap:wrap;border:1px solid var(--border);border-radius:var(--r-sm);padding:4px">${PAGO_CAJAS.map(c => `<button type="button" data-sp2-caja="${c}" style="flex:1;min-width:72px;padding:8px 6px;border:1px solid;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;${pmOBtn(st.caja === c)}">${c}</button>`).join('')}</div>`;
   const notaCaja = (!ef && st.caja && st.cajaDeOcr && !st.cajaManual) ? ' <span style="text-transform:none;letter-spacing:0;color:#3DDC97">— leída del comprobante</span>' : '';
   const okContacto = compContactoValido(st.contacto);
-  const compHtml = ef ? '' : `<div style="margin-bottom:12px"><label style="${PM_LBL}">${st.sinPago ? 'Comprobante del pago *' : 'Comprobante del 2do pago *'}</label>${compPickerHtml({
+  const compHtml = ef ? '' : `<div style="margin-bottom:12px"><label style="${PM_LBL}">${st.modo === 'sena' ? 'Comprobante *' : (st.sinPago ? 'Comprobante del pago *' : 'Comprobante del 2do pago *')}</label>${compPickerHtml({
     pfx: 'sp2', sel: (st.comp && (st.comp.key || st.compEstado === 'subiendo')) ? st.comp : null, estado: st.compEstado, sug: st.sug,
     sugEstado: okContacto ? st.sugEstado : 'sincontacto', ocTs: st.ocTs, verOtros: st.verOtros, buscable: okContacto,
-    sinContactoTxt: 'El pedido no tiene el teléfono / usuario del cliente: subí el comprobante.' })}</div>`;
+    sinContactoTxt: 'El pedido no tiene el teléfono / usuario del cliente: subí el comprobante.' })}${sp2ExtrasHtml(st)}</div>`;
   return `
     <div style="display:flex;gap:6px 14px;flex-wrap:wrap;font-size:13px;color:var(--fg-subtle);margin-bottom:12px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--ink-100)">
       <span>Total <b style="color:var(--fg)">${fmtMoney(st.total)}</b></span>
       ${st.sinPago ? `<span>Sin seña${st.p && st.p.cobrarEl ? ' · era para el ' + escapeHtml(st.p.cobrarEl.slice(8, 10) + '/' + st.p.cobrarEl.slice(5, 7)) : ''}</span>` : `<span>Seña <b style="color:var(--fg)">${fmtMoney(st.sena)}</b>${cajaSena ? ' (' + escapeHtml(cajaSena) + ')' : ''}</span>`}
       <span>Saldo <b style="color:#FFB020">${fmtMoney(st.saldo)}</b></span>
     </div>
-    <label style="${PM_LBL}">${st.sinPago ? '¿Cómo pagó?' : '¿Cómo pagó el saldo?'}</label>
+    <label style="${PM_LBL}">${(st.sinPago || st.modo === 'sena') ? '¿Cómo pagó?' : '¿Cómo pagó el saldo?'}</label>
     <div style="display:flex;gap:8px;margin-bottom:12px">${metBtn('transferencia', '🏦 Transferencia')}${metBtn('efectivo', '💵 Efectivo')}</div>
     <div style="margin-bottom:12px"><label style="${PM_LBL}">${ef ? 'Caja' : '¿A qué caja pagó? *'}${notaCaja}</label>${cajaHtml}</div>
     ${compHtml}
-    <div style="margin-bottom:4px"><label style="${PM_LBL}">${ef ? 'Importe en efectivo *' : (st.sinPago ? 'Importe pagado *' : 'Importe del 2do pago *')}</label><input data-sp2-importe type="number" inputmode="numeric" value="${escapeHtml(String(st.importe || ''))}" placeholder="$" style="${PM_INP}"></div>
+    <div style="margin-bottom:4px"><label style="${PM_LBL}">${st.modo === 'sena' ? (ef ? 'Importe en efectivo que se suma a la seña *' : 'Importe que se suma a la seña *') : (ef ? 'Importe en efectivo *' : (st.sinPago ? 'Importe pagado *' : 'Importe del 2do pago *'))}</label><input data-sp2-importe type="number" inputmode="numeric" value="${escapeHtml(String(st.importe || ''))}" placeholder="$" style="${PM_INP}"></div>
     <div data-sp2-hint style="font-size:11px">${sp2HintHtml(st)}</div>
     <div data-sp2-avisos>${sp2AvisosHtml(st)}</div>
-    ${st.origen === 'chat' ? '<button type="button" data-sp2-nuevo style="background:none;border:0;padding:6px 0 0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:12px">¿No es el saldo de este pedido? Cargarlo como pedido nuevo →</button>' : ''}
+    ${st.origen === 'chat' && st.modo !== 'sena' ? '<button type="button" data-sp2-nuevo style="background:none;border:0;padding:6px 0 0;color:var(--accent-cyan,#8FD4DE);text-decoration:underline;cursor:pointer;font-size:12px">¿No es el saldo de este pedido? Cargarlo como pedido nuevo →</button>' : ''}
     ${st.err ? `<div style="margin-top:10px;font-size:12px;color:#FF5566;font-weight:600">${escapeHtml(st.err)}</div>` : ''}`;
 }
 // Re-pinta el cuerpo del modal conservando el scroll y el foco del importe (puede llegar el OCR mientras tipea).
@@ -14517,7 +14706,7 @@ function sp2Pintar(st) {
   if (enImporte) { const ni = body.querySelector('[data-sp2-importe]'); if (ni) { try { ni.focus({ preventScroll: true }); } catch (_) { ni.focus(); } } }
   sp2Marcas(st);
   const ok = st.bg.querySelector('[data-sp2-ok]');
-  if (ok) { ok.disabled = !!st.enviando; ok.textContent = st.enviando ? 'Guardando…' : (st.sinPago ? '✓ Registrar pago' : '✓ Registrar 2do pago'); }
+  if (ok) { ok.disabled = !!st.enviando; ok.textContent = st.enviando ? 'Guardando…' : '✓ ' + sp2Titulo(st); }
   const cc = st.bg.querySelector('[data-sp2-cancel]'); if (cc) cc.disabled = !!st.enviando;
 }
 function sp2Bind(st, body) {
@@ -14550,6 +14739,7 @@ function sp2Bind(st, body) {
     cambiar: () => { st.verOtros = !st.verOtros; sp2Pintar(st); if (st.verOtros && st.sugEstado !== 'ok') sp2CargarSug(st, false); },
     buscar: () => sp2CargarSug(st, true)
   });
+  sp2BindExtras(st, body);
 }
 function sp2AvisosRefresh(st) {
   if (!sp2Vivo(st)) return;
@@ -14558,7 +14748,7 @@ function sp2AvisosRefresh(st) {
   if (h) { h.innerHTML = sp2HintHtml(st); h.querySelectorAll('[data-sp2-usar-monto]').forEach(b => b.onclick = () => sp2UsarMonto(st)); }
 }
 function sp2UsarMonto(st) {
-  const monto = Math.round(Number(st.comp && st.comp.ocr && st.comp.ocr.monto) || 0); if (!(monto > 0)) return;
+  const monto = Math.round(Number(st.comp && st.comp.ocr && st.comp.ocr.monto) || 0) + (st.comp && st.comp.key ? compExtrasSuma(st.extras) : 0); if (!(monto > 0)) return;
   st.importe = String(monto); st.importeFuente = 'ocr';
   sp2Pintar(st);
 }
@@ -14569,7 +14759,13 @@ function sp2Validar(st) {
     if (st.compEstado === 'subiendo') out.push({ sel: '[data-sp2-comp-slot]', msg: 'Esperá que termine de subir el comprobante' });
     else if (!st.comp || !st.comp.key) out.push({ sel: '[data-sp2-comp-slot]', msg: 'Falta el comprobante de pago' });
   }
-  if (!(Number(st.importe) > 0)) out.push({ sel: '[data-sp2-importe]', msg: 'Poné el importe del 2do pago' });
+  if (st.metodo !== 'efectivo') {
+    if (st.extraSubiendo) out.push({ sel: '[data-sx-extras]', msg: 'Esperá que termine de subir el comprobante' });
+    else if (st.extras.some(e => !(Number(e.monto) > 0))) out.push({ sel: '[data-sx-extras]', msg: 'Poné el monto de cada comprobante' });
+  }
+  if (!(Number(st.importe) > 0)) out.push({ sel: '[data-sp2-importe]', msg: st.modo === 'sena' ? 'Poné el importe que se suma a la seña' : 'Poné el importe del 2do pago' });
+  // Sumar a la seña: el comprobante de arriba lleva lo que falta para llegar al importe (no puede quedar en cero).
+  else if (st.modo === 'sena' && st.metodo !== 'efectivo' && st.extras.length && Math.round(Number(st.importe)) - compExtrasSuma(st.extras) <= 0) out.push({ sel: '[data-sp2-importe]', msg: 'El importe tiene que ser la suma de los comprobantes' });
   return out;
 }
 function sp2Marcas(st) {
@@ -14588,10 +14784,14 @@ function sp2AplicarOcr(st) {
   if (st.cajaDeOcr && !st.cajaManual) { st.caja = ''; st.cajaDeOcr = false; }
   const caja = ocr ? compCajaValida(ocr.caja) : '';
   if (caja && !st.cajaManual) { st.caja = caja; st.cajaDeOcr = true; }
-  const monto = ocr ? Math.round(Number(ocr.monto) || 0) : 0;
+  // Con varios comprobantes, el monto es la suma de todos.
+  const monto = (ocr ? Math.round(Number(ocr.monto) || 0) : 0) + (st.metodo !== 'efectivo' && st.comp && st.comp.key ? compExtrasSuma(st.extras) : 0);
   // Con un pago parcial previo del saldo, el importe es TODO lo cobrado del saldo: lo anterior + este comprobante.
-  if (monto > 0) { if (st.importeFuente !== 'manual') { st.importe = String(monto + (st.cobro2Prev > 0 && !st.sinPago ? Math.round(st.cobro2Prev) : 0)); st.importeFuente = 'ocr'; } }
-  else if (st.importeFuente === 'ocr') { st.importe = st.saldo > 0 ? String(Math.round(st.saldo)) : ''; st.importeFuente = st.saldo > 0 ? 'saldo' : ''; }
+  if (monto > 0) { if (st.importeFuente !== 'manual') { st.importe = String(monto + (st.modo !== 'sena' && st.cobro2Prev > 0 && !st.sinPago ? Math.round(st.cobro2Prev) : 0)); st.importeFuente = 'ocr'; } }
+  else if (st.importeFuente === 'ocr') {
+    if (st.modo === 'sena') { st.importe = ''; st.importeFuente = ''; }
+    else { st.importe = st.saldo > 0 ? String(Math.round(st.saldo)) : ''; st.importeFuente = st.saldo > 0 ? 'saldo' : ''; }
+  }
 }
 async function sp2CargarSug(st, force) {
   if (!sp2Vivo(st) || !compContactoValido(st.contacto)) return; // sin contacto el recuadro ya dice "subí el comprobante"
@@ -14673,7 +14873,7 @@ async function sp2Confirmar(st) {
   if (inv.length) { st.err = inv.map(x => x.msg).join(' · '); st.errTipo = 'val'; sp2Pintar(st); return; }
   const ef = st.metodo === 'efectivo';
   const usado = (!ef && st.comp && st.comp.ocr && Array.isArray(st.comp.ocr.usado_en)) ? st.comp.ocr.usado_en : [];
-  if (usado.length && !(await showConfirm('Ese comprobante ya está cargado en el pedido ' + usado.map(u => '#' + u.numero + (u.cartel ? ' (' + u.cartel + ')' : '')).join(', ') + '.\n\n¿Seguro que es el 2do pago de este pedido?', { title: 'Comprobante repetido', variant: 'warn', confirmLabel: 'Sí, es este', cancelLabel: 'Cambiarlo' }).catch(() => false))) return;
+  if (usado.length && !(await showConfirm('Ese comprobante ya está cargado en el pedido ' + usado.map(u => '#' + u.numero + (u.cartel ? ' (' + u.cartel + ')' : '')).join(', ') + '.\n\n' + (st.modo === 'sena' ? '¿Seguro que es de este pedido?' : '¿Seguro que es el 2do pago de este pedido?'), { title: 'Comprobante repetido', variant: 'warn', confirmLabel: 'Sí, es este', cancelLabel: 'Cambiarlo' }).catch(() => false))) return;
   if (!sp2Vivo(st)) return;
   st.enviando = true; st.err = ''; st.errTipo = ''; sp2Pintar(st);
   const body = {
@@ -14685,15 +14885,19 @@ async function sp2Confirmar(st) {
     // Pedido cargado sin pago: este es el 1er cobro (el server no lo registra dos veces si se reintenta).
     ...(st.sinPago ? { primer_cobro: true } : {})
   };
+  // Pagó con varias transferencias: los comprobantes de más (el importe ya es la suma).
+  if (!ef) body.comprobantes_extra = st.extras.map(e => ({ key: e.key, wamid: e.wamid || '', monto: Math.round(Number(e.monto) || 0) }));
+  // Sumar a la seña: van todos; el de arriba lleva lo que falta para llegar al importe.
+  if (st.modo === 'sena' && !ef) body.comprobantes = [{ key: st.comp.key, wamid: st.comp.wamid || '', monto: Math.round(Number(st.importe) || 0) - compExtrasSuma(st.extras) }].concat(body.comprobantes_extra);
   let r = null, j = {};
   try {
-    r = await disenoFetch(CONFIG.trackerUrl + '/admin/pedidos/' + st.idx + '/segundo-pago', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, 45000);
+    r = await disenoFetch(CONFIG.trackerUrl + '/admin/pedidos/' + st.idx + (st.modo === 'sena' ? '/sumar-sena' : '/segundo-pago'), { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, 45000);
     j = await r.json().catch(() => ({}));
   } catch (e) { j = { error: (e && e.message) || 'error de red' }; }
   if (st.cerrado) return;
   if (!r || !r.ok || !j || !j.ok) {
     st.enviando = false; st.errTipo = 'server';
-    st.err = (j && j.error) || (r && r.status === 403 ? 'Ese pedido es de otro vendedor' : ('No se pudo registrar el 2do pago' + (r ? ' (HTTP ' + r.status + ')' : '')));
+    st.err = (j && j.error) || (r && r.status === 403 ? 'Ese pedido es de otro vendedor' : ((st.modo === 'sena' ? 'No se pudo sumar a la seña' : 'No se pudo registrar el 2do pago') + (r ? ' (HTTP ' + r.status + ')' : '')));
     sp2Pintar(st);
     return;
   }
@@ -14710,7 +14914,7 @@ async function sp2Confirmar(st) {
   const enDrawer = secP ? parseInt(secP.getAttribute('data-ped-pagos-idx'), 10) : NaN;
   if (secP && (enDrawer === st.idx || updated.some(x => x.idx === enDrawer))) openDrawerPedido(enDrawer);
   const avisos = Array.isArray(j.avisos) ? j.avisos.filter(Boolean) : [];
-  niToast(`${(st.sinPago || j.primer_cobro) ? 'Pago registrado' : '2do pago registrado'} ✓ · #${j.numero || st.numero}` + (avisos.length ? ' — ' + avisos.join(' · ') : ''), { ms: avisos.length ? 9000 : 3000 });
+  niToast(`${st.modo === 'sena' ? 'Seña actualizada' : ((st.sinPago || j.primer_cobro) ? 'Pago registrado' : '2do pago registrado')} ✓ · #${j.numero || st.numero}` + (avisos.length ? ' — ' + avisos.join(' · ') : ''), { ms: avisos.length ? 9000 : 3000 });
 }
 
 // ----- Agilidad desde el chat -----
