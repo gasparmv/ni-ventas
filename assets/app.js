@@ -1735,7 +1735,17 @@ async function switchUser(name) {
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + STATE.adminToken, 'X-NI-Human': '1' },
       body: JSON.stringify({ user: name })
     });
-    if (!r.ok) { await showAlert('No se pudo cambiar a ' + displayUser(name), { title: 'Error', variant: 'warn' }); return; }
+    if (!r.ok) {
+      // 404 = ese usuario todavía no existe o está desactivado. Fran se crea poniéndole la contraseña: se ofrece ahí mismo
+      // (con el token de Gaspar; si está viendo como otro, primero tiene que volver a Gaspar).
+      if (r.status === 404 && isFranUser(name)) {
+        if (!isGasparUser(STATE.user)) { await showAlert('Fran todavía no tiene usuario. Volvé a Administrador y creáselo en Sin Frontera → Cortes que encargan → Usuario de Fran.', { title: 'Usuario de Fran', variant: 'warn' }); return; }
+        if (await showConfirm('Fran todavía no tiene usuario. ¿Se lo creás ahora? Le ponés la contraseña y, si querés, su WhatsApp para avisarle de cada pedido.', { title: 'Usuario de Fran', confirmLabel: 'Crear usuario', cancelLabel: 'Ahora no' }).catch(() => false)) sfcFranUI();
+        return;
+      }
+      await showAlert(r.status === 404 ? displayUser(name) + ' todavía no tiene usuario (o está desactivado).' : 'No se pudo cambiar a ' + displayUser(name), { title: 'Error', variant: 'warn' });
+      return;
+    }
     const j = await r.json();
     saveToken(j.token, name, j.rol);   // token impersonado (adminToken queda intacto para volver)
     STATE.user = name; saveUser(); afterUserSwitch();
