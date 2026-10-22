@@ -18480,6 +18480,9 @@ async function ensureSinFronteraSchema(env) {
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS sinfrontera_excluidos (pedido_id INTEGER PRIMARY KEY, por TEXT, at TEXT)').run();
   // Pedidos de corte que encarga Sin Frontera (21-oct, migración 061).
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS sf_cortes (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, creado_por TEXT, material TEXT NOT NULL, color TEXT NOT NULL, espesor TEXT NOT NULL, fecha_necesita TEXT NOT NULL, aclaraciones TEXT, archivos TEXT NOT NULL DEFAULT '[]', estado TEXT NOT NULL DEFAULT 'pedido', estado_at TEXT, estado_por TEXT)").run();
+  // Color propio con su muestra (22-oct, migración 062).
+  try { await env.DB.prepare('SELECT color_hex FROM sf_cortes LIMIT 0').all(); }
+  catch (_) { try { await env.DB.prepare('ALTER TABLE sf_cortes ADD COLUMN color_hex TEXT').run(); } catch (_) {} }
   _sfSchemaOk = true;
 }
 // ----- Pedidos de corte de Sin Frontera (Gaspar 21-oct-2026) -----
@@ -18505,11 +18508,31 @@ function sfCorteEspesor(v) {
   const n = m ? parseFloat(m[1]) : NaN;
   return n >= 0.5 && n <= 50 ? String(n).replace('.', ',') : '';
 }
+// Color: uno de SF_CORTE_COLORES o uno propio (nombre + la muestra #rrggbb del selector; Gaspar 22-oct). Si el nombre propio es
+// uno de la lista ("negro") va como el de la lista. null si no sirve.
+function sfCorteNorm(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim(); }
+function sfCorteColor(color, hex) {
+  const c = String(color || '').replace(/\s+/g, ' ').trim();
+  if (SF_CORTE_COLORES[c]) return { color: c, hex: '', nombre: SF_CORTE_COLORES[c] };
+  const def = Object.keys(SF_CORTE_COLORES).find(k => sfCorteNorm(SF_CORTE_COLORES[k]) === sfCorteNorm(c));
+  if (def) return { color: def, hex: '', nombre: SF_CORTE_COLORES[def] };
+  if (c.length < 2 || c.length > 40 || !/[a-záéíóúñü]/i.test(c)) return null;
+  const nombre = c.charAt(0).toUpperCase() + c.slice(1), h = String(hex || '').trim().toLowerCase();
+  return { color: nombre, hex: /^#[0-9a-f]{6}$/.test(h) ? h : '', nombre };
+}
+// Colores propios que ya se usaron (kv sf_corte_colores, el último primero, hasta 12): salen como botones en el formulario.
+async function sfCorteColoresPropios(env) {
+  try { const a = JSON.parse((await kvGet(env, 'sf_corte_colores', '[]')) || '[]'); return Array.isArray(a) ? a.filter(x => x && x.nombre).slice(0, 12) : []; } catch (_) { return []; }
+}
+async function sfCorteColorGuardar(env, nombre, hex) {
+  const prev = await sfCorteColoresPropios(env);
+  await kvSet(env, 'sf_corte_colores', JSON.stringify([{ nombre, hex: hex || '' }].concat(prev.filter(x => sfCorteNorm(x.nombre) !== sfCorteNorm(nombre))).slice(0, 12)));
+}
 // Lo que ve el front (sin las claves de R2: los archivos se bajan por /admin/sinfrontera/archivo?c=&i=).
 function sfCorteFila(r) {
   let a = []; try { a = JSON.parse(r.archivos || '[]'); } catch (_) {}
   return {
-    id: r.id, created_at: r.created_at, creado_por: r.creado_por || '', material: r.material, color: r.color, espesor: r.espesor,
+    id: r.id, created_at: r.created_at, creado_por: r.creado_por || '', material: r.material, color: r.color, color_hex: r.color_hex || '', espesor: r.espesor,
     fecha: r.fecha_necesita, aclaraciones: r.aclaraciones || '', estado: r.estado, estado_at: r.estado_at || '', estado_por: r.estado_por || '',
     archivos: (Array.isArray(a) ? a : []).map(x => ({ nombre: String(x.nombre || ''), bytes: +x.bytes || 0, tipo: String(x.tipo || '') })),
   };
@@ -28773,11 +28796,11 @@ const handler = {
         // → el pedido. Si lo encarga Sin Frontera, le avisa a Gaspar por WhatsApp.
         if (request.method === 'POST' && path === '/admin/sinfrontera/corte') {
           let body; try { body = await request.json(); } catch { body = {}; }
-          const material = String(body.material || ''), color = String(body.color || ''), espesor = sfCorteEspesor(body.espesor);
+          const material = String(body.material || ''), col = sfCorteColor(body.color, body.color_hex), espesor = sfCorteEspesor(body.espesor);
           const fecha = String(body.fecha || '').trim();
           const acl = String(body.aclaraciones || '').replace(/\r\n?/g, '\n').trim().slice(0, 2000);
           if (!SF_CORTE_MATERIALES[material]) return json({ error: 'datos', motivo: 'Elegí el material: acrílico o PVC.' }, 400);
-          if (!SF_CORTE_COLORES[color]) return json({ error: 'datos', motivo: 'Elegí el color.' }, 400);
+          if (!col) return json({ error: 'datos', motivo: 'Elegí el color (o escribí el nombre del color nuevo).' }, 400);
           if (!espesor) return json({ error: 'datos', motivo: 'Poné el espesor en milímetros (por ejemplo 3).' }, 400);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha) || isNaN(Date.parse(fecha + 'T12:00:00Z'))) return json({ error: 'datos', motivo: 'Poné para cuándo lo necesitan.' }, 400);
           if (fecha < new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10)) return json({ error: 'datos', motivo: 'Esa fecha ya pasó.' }, 400);
@@ -28795,12 +28818,14 @@ const handler = {
           const nowIso = new Date().toISOString();
           let id = 0;
           try {
-            const r = await env.DB.prepare('INSERT INTO sf_cortes (created_at, creado_por, material, color, espesor, fecha_necesita, aclaraciones, archivos, estado, estado_at, estado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-              .bind(nowIso, por, material, color, espesor, fecha, acl, JSON.stringify(arch), 'pedido', nowIso, por).run();
+            const r = await env.DB.prepare('INSERT INTO sf_cortes (created_at, creado_por, material, color, color_hex, espesor, fecha_necesita, aclaraciones, archivos, estado, estado_at, estado_por) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+              .bind(nowIso, por, material, col.color, col.hex || null, espesor, fecha, acl, JSON.stringify(arch), 'pedido', nowIso, por).run();
             id = (r && r.meta && r.meta.last_row_id) || 0;
           } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar el pedido. Probá de nuevo.' }, 500); }
+          const propio = !SF_CORTE_COLORES[col.color];
+          if (propio) { try { await sfCorteColorGuardar(env, col.color, col.hex); } catch (_) {} }
           if (sfExt) {
-            const txt = 'Sin Frontera te encargó un corte (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + SF_CORTE_MATERIALES[material] + ' ' + SF_CORTE_COLORES[color].toLowerCase()
+            const txt = 'Sin Frontera te encargó un corte (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + SF_CORTE_MATERIALES[material] + ' ' + col.nombre.toLowerCase() + (propio ? ' (color nuevo)' : '')
               + ' de ' + espesor + ' mm, para el ' + fecha.slice(8, 10) + '/' + fecha.slice(5, 7) + ', ' + arch.length + (arch.length === 1 ? ' archivo' : ' archivos')
               + (acl ? '. Aclaración: ' + acl.replace(/\s+/g, ' ').slice(0, 300) : '') + '. Lo ves en el CRM: Sin Frontera > Cortes.';
             const pr = avisoAdmin(env, txt, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id }).catch(() => {});
@@ -28814,7 +28839,7 @@ const handler = {
           let rows = [];
           try { rows = (await env.DB.prepare('SELECT * FROM sf_cortes ORDER BY id DESC LIMIT 300').all()).results || []; }
           catch (_) { return json({ error: 'db', motivo: 'No se pudieron leer los pedidos. Probá de nuevo.' }, 500); }
-          return json({ ok: true, cortes: rows.map(sfCorteFila) });
+          return json({ ok: true, cortes: rows.map(sfCorteFila), colores: await sfCorteColoresPropios(env) });
         }
         // POST /admin/sinfrontera/corte/estado {id, estado, quien?} → Gaspar lo mueve entre SF_CORTE_ESTADOS; Sin Frontera solo
         // cancela uno que todavía está en 'pedido' (y a Gaspar le llega el aviso).

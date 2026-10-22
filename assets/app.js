@@ -8381,13 +8381,57 @@ async function sfConfigUI() {
 // sale con un toque. Gaspar los ve en Sin Frontera > Cortes y les cambia el estado. Sin precios (cuenta corriente aparte).
 const SFC_MATERIALES = [['acrilico', 'Acrílico'], ['pvc', 'PVC']];
 const SFC_COLORES = [['blanco_opalino', 'Blanco opalino'], ['transparente', 'Transparente'], ['negro', 'Negro']];
+// Muestra de cada color ("con colorcito", Gaspar 22-oct). Transparente va cuadriculado; un color propio, con el que eligieron
+// en el selector.
+const SFC_COLOR_MUESTRA = { blanco_opalino: '#f2f3ee', negro: '#111111' };
+function sfcNorm(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim(); }
+function sfcMuestra(color, hex) {
+  if (color === 'transparente') return '<span class="sfc-sw trans" aria-hidden="true"></span>';
+  const h = SFC_COLOR_MUESTRA[color] || (/^#[0-9a-f]{6}$/i.test(String(hex || '')) ? hex : '');
+  return h ? `<span class="sfc-sw" style="--sw:${h}" aria-hidden="true"></span>` : '<span class="sfc-sw nada" aria-hidden="true"></span>';
+}
+// Botones de color: los tres de siempre, los propios que ya se usaron (y el nuevo elegido, aunque todavía no se mandó) y
+// "＋ Otro color", que abre el selector con el nombre.
+function sfcColoresHtml() {
+  const F = sfcForm(), propios = ((STATE.sfCortes && STATE.sfCortes.colores) || []).slice();
+  if (F.color && !SFC_COLORES.some(x => x[0] === F.color) && !propios.some(p => sfcNorm(p.nombre) === sfcNorm(F.color))) propios.unshift({ nombre: F.color, hex: F.colorHex });
+  const chip = (v, t, hex) => `<button type="button" class="sfc-chip${F.color === v ? ' on' : ''}" data-sfc-color="${escapeHtml(v)}" data-hex="${escapeHtml(hex || '')}" aria-pressed="${F.color === v ? 'true' : 'false'}">${sfcMuestra(v, hex)}${escapeHtml(t)}</button>`;
+  return SFC_COLORES.map(([v, t]) => chip(v, t, '')).join('')
+    + propios.map(p => chip(p.nombre, p.nombre, p.hex)).join('')
+    + `<button type="button" class="sfc-chip sfc-chip-nuevo${F.creandoColor ? ' on' : ''}" data-sfc-color-nuevo aria-expanded="${F.creandoColor ? 'true' : 'false'}">＋ Otro color</button>`
+    + (F.creandoColor ? `<div class="sfc-nuevo">
+        <label class="sfc-picker" title="Elegí el color"><input type="color" data-sfc-nuevo-hex value="${escapeHtml(F.nuevoHex || '#e11d48')}" aria-label="Elegí el color"></label>
+        <input class="nc-input sfc-nuevo-nom" data-sfc-nuevo-nom maxlength="40" autocomplete="off" placeholder="Nombre del color (ej.: rojo, azul, dorado espejado)" value="${escapeHtml(F.nuevoNom || '')}">
+        <button type="button" class="btn btn-cyan sfc-nuevo-ok" data-sfc-nuevo-ok>Usar este color</button>
+      </div>` : '');
+}
+// deFondo: lo llama la recarga de la lista; si están escribiendo el nombre del color nuevo, no se les pisa el campo.
+function sfcPintarColores(deFondo) {
+  const el = document.querySelector('.sfc-wrap [data-sfc-colores]'); if (!el) return;
+  if (deFondo && el.contains(document.activeElement)) return;
+  el.innerHTML = sfcColoresHtml();
+}
+// "Usar este color": el nombre es obligatorio (al que corta le sirve el nombre, no el código). silencioso: lo llama Enviar.
+function sfcUsarColorNuevo(silencioso) {
+  const F = sfcForm(), nom = String(F.nuevoNom || '').replace(/\s+/g, ' ').trim();
+  if (nom.length < 2 || !/[a-záéíóúñü]/i.test(nom)) {
+    if (!silencioso) { const e = document.querySelector('.sfc-wrap [data-sfc-err]'); if (e) e.textContent = 'Poné el nombre del color (por ejemplo: rojo).'; const n = document.querySelector('.sfc-wrap [data-sfc-nuevo-nom]'); if (n) n.focus(); }
+    return false;
+  }
+  const def = SFC_COLORES.find(x => sfcNorm(x[1]) === sfcNorm(nom));
+  if (def) { F.color = def[0]; F.colorHex = ''; }
+  else { F.color = (nom.charAt(0).toUpperCase() + nom.slice(1)).slice(0, 40); F.colorHex = /^#[0-9a-f]{6}$/i.test(String(F.nuevoHex || '')) ? F.nuevoHex.toLowerCase() : ''; }
+  F.creandoColor = false; F.nuevoNom = '';
+  sfcPintarColores();
+  return true;
+}
 const SFC_ESPESORES = ['2', '3', '4', '5', '6', '8', '10'];
 const SFC_ESTADOS = [['pedido', 'Pedido', '#94a3b8'], ['en_corte', 'En corte', '#38bdf8'], ['listo', 'Listo', '#22c55e'], ['entregado', 'Entregado', '#64748b'], ['cancelado', 'Cancelado', '#ef4444']];
 const SFC_MAX_BYTES = 95 * 1024 * 1024;
 function sfcLbl(lista, v) { const x = lista.find(y => y[0] === v); return x ? x[1] : String(v || ''); }
 function sfcEstado(v) { return SFC_ESTADOS.find(y => y[0] === v) || SFC_ESTADOS[0]; }
 // El formulario vive en STATE (sobrevive a los redibujos y a cambiar de pantalla).
-function sfcForm() { return STATE.sfcForm || (STATE.sfcForm = { material: '', color: '', espesor: '', fecha: '', acl: '', archivos: [] }); }
+function sfcForm() { return STATE.sfcForm || (STATE.sfcForm = { material: '', color: '', colorHex: '', creandoColor: false, nuevoHex: '#e11d48', nuevoNom: '', espesor: '', fecha: '', acl: '', archivos: [] }); }
 function sfcPeso(b) { b = +b || 0; return b >= 1048576 ? (b / 1048576).toFixed(b >= 10485760 ? 0 : 1).replace('.', ',') + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; }
 function sfcHoyYmd() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 async function sfcCargar(opts) {
@@ -8398,12 +8442,14 @@ async function sfcCargar(opts) {
   try {
     const j = await sfFetch('/admin/sinfrontera/cortes');
     if (STATE.user !== user) return;
-    STATE.sfCortes = { cortes: j.cortes || [], at: Date.now() };
+    const antes = JSON.stringify((STATE.sfCortes && STATE.sfCortes.colores) || []);
+    STATE.sfCortes = { cortes: j.cortes || [], colores: Array.isArray(j.colores) ? j.colores : [], at: Date.now() };
+    if (antes !== JSON.stringify(STATE.sfCortes.colores)) STATE._sfcColoresCambio = true;
   } catch (e) {
     if (STATE.user !== user) return;
     if (!silent || !STATE.sfCortes || STATE.sfCortes.error) STATE.sfCortes = { error: e.message || 'No se pudo cargar', at: Date.now() };
   } finally { STATE._sfcCargando = false; }
-  if (STATE.view === 'sf-cortes') sfcPintarLista();
+  if (STATE.view === 'sf-cortes') { sfcPintarLista(); if (STATE._sfcColoresCambio) { STATE._sfcColoresCambio = false; sfcPintarColores(true); } }
 }
 function renderSfCortes() {
   const D = STATE.sfCortes, op = sfOperador(), adm = isAdmin();
@@ -8435,7 +8481,7 @@ function sfcFormHtml() {
     </div>
     <div class="sfc-files" data-sfc-files>${sfcArchivosHtml()}</div>
     <div class="sfc-campo"><span class="sfc-lbl">Material</span><div class="sfc-chips">${sfcChips('sfc-material', SFC_MATERIALES, F.material)}</div></div>
-    <div class="sfc-campo"><span class="sfc-lbl">Color</span><div class="sfc-chips">${sfcChips('sfc-color', SFC_COLORES, F.color)}</div></div>
+    <div class="sfc-campo"><span class="sfc-lbl">Color</span><div class="sfc-chips" data-sfc-colores>${sfcColoresHtml()}</div></div>
     <div class="sfc-campo"><span class="sfc-lbl">Espesor</span><div class="sfc-chips">${sfcChips('sfc-esp', SFC_ESPESORES.map(e => [e, e + ' mm']), espChip)}<input class="sfc-otro${F.espesor && !espChip ? ' on' : ''}" data-sfc-esp-otro inputmode="decimal" maxlength="6" placeholder="Otro (mm)" aria-label="Otro espesor en milímetros" value="${escapeHtml(espChip ? '' : F.espesor)}"></div></div>
     <div class="sfc-campo"><span class="sfc-lbl">¿Para cuándo lo necesitan?</span><input type="date" class="nc-input sfc-fecha" data-sfc-fecha min="${sfcHoyYmd()}" value="${escapeHtml(F.fecha)}"></div>
     <div class="sfc-campo"><span class="sfc-lbl">Aclaraciones <span class="muted">(opcional)</span></span><textarea class="nc-input sfc-acl" data-sfc-acl rows="3" maxlength="2000" placeholder="Cantidades, medidas, qué va en cada archivo, lo que haga falta">${escapeHtml(F.acl)}</textarea></div>
@@ -8503,7 +8549,8 @@ async function sfcEnviar() {
   if (F.archivos.some(a => a.estado === 'subiendo')) return err('Esperá a que terminen de subir los archivos.');
   if (F.archivos.some(a => a.estado === 'error')) return err('Hay un archivo que no se subió: reintentalo o quitalo.');
   if (!F.material) return err('Elegí el material: acrílico o PVC.');
-  if (!F.color) return err('Elegí el color.');
+  if (F.creandoColor && String(F.nuevoNom || '').trim()) sfcUsarColorNuevo(true);
+  if (!F.color) return err(F.creandoColor ? 'Poné el nombre del color nuevo y tocá "Usar este color".' : 'Elegí el color.');
   const esp = String(F.espesor || '').trim();
   if (!esp) return err('Elegí o escribí el espesor.');
   if (!/^\d{1,2}([.,]\d{1,2})?\s*(mm)?$/i.test(esp)) return err('El espesor va en milímetros, por ejemplo 3 o 2,5.');
@@ -8514,7 +8561,7 @@ async function sfcEnviar() {
   if (isSinFronteraOnly() && !quien && !STATE._sfOpPreguntado) { STATE._sfOpPreguntado = true; quien = await sfPedirOperador(); }
   STATE._sfcEnviando = true; sfcPintarArchivos();
   try {
-    const j = await sfFetch('/admin/sinfrontera/corte', { material: F.material, color: F.color, espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
+    const j = await sfFetch('/admin/sinfrontera/corte', { material: F.material, color: F.color, color_hex: F.colorHex || '', espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
       archivos: F.archivos.filter(a => a.estado === 'ok').map(a => ({ key: a.key, nombre: a.nombre })), quien });
     STATE.sfcForm = null;
     const D = STATE.sfCortes;
@@ -8552,7 +8599,7 @@ function sfcFilaHtml(c) {
   return `<div class="lb-row sfc-row${cerrado ? ' r-enviado' : ''}" data-sfc-row="${c.id}">
     <div class="lb-head sfc-head">
       <span class="ln-num">#${c.id}</span>
-      <span class="lb-nom"><span class="n">${escapeHtml(sfcLbl(SFC_MATERIALES, c.material) + ' ' + sfcLbl(SFC_COLORES, c.color).toLowerCase() + ' · ' + c.espesor + ' mm')}</span>${plazo}</span>
+      <span class="lb-nom"><span class="n">${escapeHtml(sfcLbl(SFC_MATERIALES, c.material))} ${sfcMuestra(c.color, c.color_hex)}${escapeHtml(sfcLbl(SFC_COLORES, c.color).toLowerCase() + ' · ' + c.espesor + ' mm')}</span>${plazo}</span>
       <span class="sfc-acc">${acc}</span>
     </div>
     <div class="sfc-det">
@@ -8596,7 +8643,9 @@ function sfcBind(root) {
     form.addEventListener('click', e => {
       const b = e.target.closest && e.target.closest('button'); if (!b || !form.contains(b)) return;
       if (b.hasAttribute('data-sfc-material')) { F.material = b.getAttribute('data-sfc-material'); sfcMarcar(form, 'data-sfc-material', F.material); }
-      else if (b.hasAttribute('data-sfc-color')) { F.color = b.getAttribute('data-sfc-color'); sfcMarcar(form, 'data-sfc-color', F.color); }
+      else if (b.hasAttribute('data-sfc-color')) { F.color = b.getAttribute('data-sfc-color'); F.colorHex = b.getAttribute('data-hex') || ''; F.creandoColor = false; sfcPintarColores(); }
+      else if (b.hasAttribute('data-sfc-color-nuevo')) { F.creandoColor = !F.creandoColor; sfcPintarColores(); if (F.creandoColor) { const n = form.querySelector('[data-sfc-nuevo-nom]'); if (n) n.focus(); } }
+      else if (b.hasAttribute('data-sfc-nuevo-ok')) sfcUsarColorNuevo();
       else if (b.hasAttribute('data-sfc-esp')) {
         F.espesor = b.getAttribute('data-sfc-esp'); sfcMarcar(form, 'data-sfc-esp', F.espesor);
         const o = form.querySelector('[data-sfc-esp-otro]'); if (o) { o.value = ''; o.classList.remove('on'); }
@@ -8611,6 +8660,13 @@ function sfcBind(root) {
     const acl = form.querySelector('[data-sfc-acl]');
     acl.addEventListener('input', () => { F.acl = acl.value; });
     form.addEventListener('submit', e => { e.preventDefault(); sfcEnviar(); });
+    // Color nuevo: el selector y el nombre quedan en el formulario; Enter en el nombre = "Usar este color" (no manda el pedido).
+    ['input', 'change'].forEach(ev => form.addEventListener(ev, e => {
+      const t = e.target;
+      if (t.matches && t.matches('[data-sfc-nuevo-hex]')) F.nuevoHex = t.value;
+      else if (t.matches && t.matches('[data-sfc-nuevo-nom]')) F.nuevoNom = t.value;
+    }));
+    form.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches && e.target.matches('[data-sfc-nuevo-nom]')) { e.preventDefault(); sfcUsarColorNuevo(); } });
     const limpiar = () => { const er = form.querySelector('[data-sfc-err]'); if (er && er.textContent) er.textContent = ''; };
     form.addEventListener('input', limpiar);
     form.addEventListener('click', e => { if (e.target.closest && e.target.closest('.sfc-chip')) limpiar(); });
