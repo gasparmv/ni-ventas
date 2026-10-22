@@ -93,9 +93,9 @@ Seña del 50%:
 ```
 **▶ Datos de pago** *(al confirmar la seña)*
 > Datos de pago:
-> **MELINA VICTORIA TOGNOCCHI**
-> CBU: **3840200500000051390011**
-> Alias: **neoninfinito.ok**
+> **BRUNO MARTINEZ VILLANUEVA**
+> CBU: **3840200500000050844502**
+> Alias: **neoninfinito.sign**
 > Banco: Ualá Bank S.A.U.
 >
 > Podés pasar a retirar por el taller (Colegiales, CABA) o lo despachamos por envío (tené en cuenta que puede tomar un poco más de tiempo) 🙌
@@ -185,7 +185,7 @@ Se dispara ~23 h después del presupuesto (lo más tarde DENTRO de la ventana de
 
 ## A7. Datos operativos (para que el agente complete)
 - **Taller / retiro:** Tte. Benjamín Matienzo 3059 (entre Zapiola y Freire), Colegiales, CABA, CP 1426.
-- **Cobro carteles:** Melina Victoria Tognocchi · Alias **neoninfinito.ok** · CBU 3840200500000051390011 · Ualá Bank S.A.U.
+- **Cobro carteles:** Bruno Martinez Villanueva · Alias **neoninfinito.sign** · CBU 3840200500000050844502 · Ualá Bank S.A.U.
 - **Logística:** **Siempre a Tiempo** es nuestra agencia logística (trabajamos con ellos hace +6 años). Ellos se ocupan de la entrega despachando por la empresa de mejor calidad/precio según el destino que les pasemos (OCA, Correo Argentino, Buspack, Vía Cargo, expresos, motoqueros, etc.). Envíos **gratis a todo el país**.
 - **Datos de remitente (envíos):** Gaspar Martínez Villanueva · contacto 11 5560 4999 · 🔒 *(DNI a uso interno).*
 - **Seña:** 50% para arrancar, 50% al entregar. **Producción:** ~15-20 días.

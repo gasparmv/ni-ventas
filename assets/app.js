@@ -3413,7 +3413,8 @@ function startSinCotizarWatch() {
 const OC_FONDO_OPTS = ['Transparente', 'Negro', 'Espejo', 'Transparente y vinilo'];
 const OC_CONTROLADOR_OPTS = ['no', 'slim', 'control remoto', 'app'];
 const OC_CONTROLADOR_PRECIO = { 'no': 0, 'slim': 18700, 'control remoto': 25000, 'app': 38000 };
-const OC_DATOS_PAGO = 'Datos de pago:\nMELINA VICTORIA TOGNOCCHI\nCBU: 3840200500000051390011\nAlias: neoninfinito.ok\nBanco: Ualá Bank S.A.U.';
+// Cuenta de cobro de las OC (corpóreos y neones). Gaspar 22-oct: antes Melina Victoria Tognocchi (neoninfinito.ok).
+const OC_DATOS_PAGO = 'Datos de pago:\nBRUNO MARTINEZ VILLANUEVA\nCBU: 3840200500000050844502\nAlias: neoninfinito.sign\nBanco: Ualá Bank S.A.U.';
 function ocMoney(n) { const x = Number(n) || 0; return '$' + String(x).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
 function nuevoOcCartel() { return { cartel: '', medidas: '', color: '', fondo: 'Transparente', precio: '', controlador: 'no' }; }
 // Ítem de OC corpórea (letra 3D): campos de producción propios (frente/laterales/fondo=espalda/

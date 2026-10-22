@@ -6057,7 +6057,7 @@ CORTE DESPACHADO / RETIRADO: si arriba ves una línea [CORTE DESPACHADO el dd/mm
 COBRO / PAGO PENDIENTE (importante): si arriba ves una línea [COBRO PENDIENTE (interno): ...], ese cliente YA tiene un corte de esta semana SIN pagar y estamos esperando su pago. En ese caso NO le insistas con un pedido nuevo, NO le pidas medida/nombre/foto: el foco es cerrar el pago. Manejalo así, y NO frenes por esto:
 - Si dice que ya pagó / transfirió / "ahí va" / "ahí te mando": agradecé cálido y decile que quedamos a la espera del comprobante (o que si ya lo mandó, lo estamos viendo). es_corte=false.
 - Si pregunta cuánto es, por qué, o PIDE el detalle de lo que está pagando: poné enviar_detalle_cobro=true (el sistema le manda el desglose completo con los diseños). Podés acompañar con una línea corta.
-- Si pregunta el ALIAS / a dónde transferir / cómo pagar: el alias es neoninfinito.mp a nombre de Gaspar Martinez — dáselo, NO frenes.
+- Si pregunta el ALIAS / a dónde transferir / cómo pagar: el alias es neoninfinito.cartel (CVU 0000003100039090135040) a nombre de Favio Nery Martinez — dáselo, NO frenes.
 - Si de verdad arranca OTRO pedido NUEVO distinto (una medida/diseño nuevo): ahí sí tomáselo normal, además del pago.
 Un "pago" solo se FRENA (lo atiende una persona) cuando NO hay línea [COBRO PENDIENTE] (ej. un tema de plata que no es este corte, o un comprobante suelto sin que le hayamos cobrado).
 
@@ -6132,9 +6132,23 @@ async function corteSendCableInfo(env, phone) {
   try { await corteSend(env, phone, CORTE_CABLE_MSG); } catch (_) {}
   return okv;
 }
-// Datos de transferencia para el cobro del corte.
-const CORTE_ALIAS = 'neoninfinito.mp';
-const CORTE_TITULAR = 'Gaspar Martinez';
+// Datos de transferencia para el cobro del corte (Gaspar 22-oct: antes neoninfinito.mp a nombre de Gaspar Martinez).
+const CORTE_ALIAS = 'neoninfinito.cartel';
+const CORTE_CVU = '0000003100039090135040';
+const CORTE_TITULAR = 'Favio Nery Martinez';
+// En renglones, para copiarlos fácil desde el celular.
+const CORTE_DATOS_PAGO = 'Alias: ' + CORTE_ALIAS + '\nCVU: ' + CORTE_CVU + '\nA nombre de: ' + CORTE_TITULAR;
+// Plantilla del cobro semanal (cuando no hay ventana de 24 h): la _v2 tiene los datos de pago nuevos y se usa apenas Meta la
+// aprueba (template_status_cache, lo actualiza el webhook); mientras tanto sale la vieja, que dice neoninfinito.mp (Gaspar).
+const CORTE_COBRO_TPL = 'corte_cobro_semanal_v2';
+const CORTE_COBRO_TPL_VIEJA = 'corte_cobro_semanal';
+async function corteCobroTpl(env) {
+  try {
+    const t = await env.DB.prepare('SELECT status FROM template_status_cache WHERE name = ?').bind(CORTE_COBRO_TPL).first();
+    if (t && String(t.status || '').toUpperCase() === 'APPROVED') return CORTE_COBRO_TPL;
+  } catch (_) {}
+  return CORTE_COBRO_TPL_VIEJA;
+}
 // Medida que va en el detalle del cobro: la REAL de la matriz (con la que se calculó el precio), no la que pidió el cliente.
 // Si la pieza no tiene medida real (insumos, filas viejas), la declarada. Gaspar 19-oct.
 function corteMedidaCobro(r) {
@@ -6146,7 +6160,7 @@ function corteMedidaCobro(r) {
 function corteCobroMsg(g) {
   const nombre = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
   const lineas = (g.piezas || []).map(p => '- ' + (p.diseno || 'diseño') + (p.medida ? ' (' + p.medida + ')' : '') + ((parseInt(p.cantidad, 10) || 1) > 1 ? ' x' + p.cantidad : '') + ': $' + Number(p.precio || 0).toLocaleString('es-AR')).join('\n');
-  return (nombre ? 'Hola ' + nombre + ', ' : 'Hola, ') + (g.insumos ? 'te paso el detalle de tu pedido:\n' : 'te paso el detalle de tu corte de esta semana:\n') + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR') + '\n\nPara confirmarlo transferí a ' + CORTE_ALIAS + ' (' + CORTE_TITULAR + ') y mandame el comprobante por acá.' + (g.insumos ? ' Apenas se acredite lo preparamos para despachar.' : '');
+  return (nombre ? 'Hola ' + nombre + ', ' : 'Hola, ') + (g.insumos ? 'te paso el detalle de tu pedido:\n' : 'te paso el detalle de tu corte de esta semana:\n') + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR') + '\n\nPara confirmarlo transferí a:\n' + CORTE_DATOS_PAGO + '\n\nY mandame el comprobante por acá.' + (g.insumos ? ' Apenas se acredite lo preparamos para despachar.' : '');
 }
 // Recibo con el desglose, para quien PAGÓ sin haber recibido nunca el detalle (el cobro le llegó por plantilla, solo el
 // total, y contestó directo con el comprobante). Mismo detalle que el cobro pero sin pedir transferencia.
@@ -6526,8 +6540,8 @@ function cajaCanon(v) {
 }
 // Caja sugerida para un comprobante de un PEDIDO. Parte de la regla del corte (nombre en titular_destino;
 // "si no se ve, no pongas ninguna") y suma los casos de las cuentas de cobro de carteles que el OCR no
-// nombra: la cuenta de la OC es la de Melina (TOGNOCCHI, Ualá, alias neoninfinito.ok) y el titular de las
-// cuentas puede salir como "Neon Infinito" (Ualá → Melina; Mercado Pago → Gaspar, alias neoninfinito.mp).
+// nombra: la cuenta de la OC es la de Bruno (Ualá, alias neoninfinito.sign; hasta el 22-oct, la de Melina, TOGNOCCHI,
+// neoninfinito.ok) y el titular de las cuentas puede salir como "Neon Infinito".
 // Ante la duda devuelve '' y el vendedor la elige a mano.
 // Caja según el TITULAR que recibió (y el banco). Armado con los titulares reales de wa_pago_proof (oct-2026) y
 // verificado contra los 238 comprobantes guardados. Poner una caja EQUIVOCADA es peor que dejarla vacía (va a la
@@ -6537,8 +6551,9 @@ function cajaCanon(v) {
 //  · Los apellidos se repiten (Gaspar y Bruno: Martinez Villanueva; Favio: Favio Nery Martinez, Mercado Pago) y los
 //    nombres sueltos son de clientes (hay leads Bruno, Fabio, Melina, Gaspar; el OCR a veces pone al que PAGA como
 //    titular) → nunca por un nombre o un apellido solo.
-//  · Alias: neoninfinito.cartel = Favio (MP), neoninfinito.ok = Melina (Ualá), neoninfinito.mp = Gaspar. "Neon
-//    infinito" a secas en Mercado Pago es ambiguo (Gaspar y Favio) → sin caja; en Ualá es Melina.
+//  · Alias: neoninfinito.cartel = Favio (MP, cobros del corte desde 22-oct), neoninfinito.sign = Bruno (Ualá, OC desde
+//    22-oct), neoninfinito.ok = Melina (Ualá, OC hasta 22-oct), neoninfinito.mp = Gaspar. "Neon infinito" a secas es
+//    ambiguo en Mercado Pago (Gaspar y Favio) y en Ualá (Melina y Bruno) → sin caja.
 //  · Contradicción con el banco → sin caja (Bruno no tiene Mercado Pago; Gaspar no tiene Banco Nación / Cuenta DNI).
 // '' si no se ve claro (regla de Gaspar: si no se ve, no se pone ninguna; el vendedor la elige).
 function cajaDeComprobante(proof) {
@@ -6551,6 +6566,7 @@ function cajaDeComprobante(proof) {
   const esMP = /mercado\s*(pago|libre)|mercadopago|mercadolibre|merpago|^mp$|\bmp\b/.test(b) || /^merpago/.test(sq);
   const esNacion = /nacion|\bbna\b|cuenta\s*dni/.test(b);
   if (sq.includes('neoninfinitocartel')) return 'Favio';
+  if (sq.includes('neoninfinitosign')) return 'Bruno';
   if (sq.includes('neoninfinitook')) return 'Melina';
   if (sq.includes('neoninfinitomp')) return 'Gaspar';
   if ((sq.includes('tognocchi') && (tiene('melina') || tiene('victoria'))) || (tiene('melina') && tiene('victoria'))) return 'Melina';
@@ -6558,7 +6574,9 @@ function cajaDeComprobante(proof) {
   if ((tiene('gaspar') && (tiene('martinez') || tiene('villanueva'))) || /^(merpago)?gasparmartin/.test(sq)) return esNacion ? '' : 'Gaspar';
   if ((tiene('bruno') && (tiene('martinez') || tiene('villanueva'))) || sq.includes('martinezvillanuevabr')) return esMP ? '' : 'Bruno';
   if (sq === 'martinezvillanueva') return esNacion ? 'Bruno' : '';
-  if (sq.includes('neoninfinito') && /uala/.test(b)) return 'Melina';
+  // "Neon Infinito" a secas en Ualá: desde el 22-oct hay dos cuentas ahí (Melina, la de antes, y Bruno, la nueva de las OC)
+  // → ambiguo, sin caja.
+  if (sq.includes('neoninfinito') && /uala/.test(b)) return '';
   if (!sq && String(proof.cuenta || '') === 'bna_bruno' && esNacion) return 'Bruno';
   return '';
 }
@@ -7811,7 +7829,7 @@ async function corteSinPagarLista(env, ahora) {
     if (c.telefono) {
       if (c.parcial) { try { const pp = await env.DB.prepare('SELECT pagado FROM corte_pago_parcial WHERE phone=?').bind(c.telefono).first(); pagado = Number(pp && pp.pagado) || 0; } catch (_) {} }
       // Cuándo salió el último cobro: el mensaje mismo (plantilla o texto con el detalle); si no, la marca del detalle.
-      try { const m = await env.DB.prepare("SELECT MAX(ts) AS ts FROM wa_messages WHERE phone=? AND direction='outbound' AND body NOT LIKE '%(recordatorio)%' AND (body LIKE '[plantilla corte_cobro_semanal]%' OR body LIKE '%te paso el detalle de tu corte%' OR body LIKE '%te paso el detalle de tu pedido%')").bind(c.telefono).first(); cobroAt = (m && m.ts) || ''; } catch (_) {}
+      try { const m = await env.DB.prepare("SELECT MAX(ts) AS ts FROM wa_messages WHERE phone=? AND direction='outbound' AND body NOT LIKE '%(recordatorio)%' AND (body LIKE '[plantilla corte_cobro_semanal%' OR body LIKE '%te paso el detalle de tu corte%' OR body LIKE '%te paso el detalle de tu pedido%')").bind(c.telefono).first(); cobroAt = (m && m.ts) || ''; } catch (_) {}
       if (!cobroAt) { try { const d = await env.DB.prepare('SELECT cobro_at FROM corte_detalle_sent WHERE phone=?').bind(c.telefono).first(); cobroAt = (d && d.cobro_at) || ''; } catch (_) {} }
       try { ventana = !!(await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone=? AND direction='inbound' AND msg_type NOT IN ('status','reaction') AND ts > ? LIMIT 1").bind(c.telefono, t23).first()); } catch (_) {}
       try { const r = await env.DB.prepare('SELECT MAX(at) AS at FROM corte_recordatorios WHERE telefono=?').bind(c.telefono).first(); recAt = (r && r.at) || null; } catch (_) {}
@@ -29578,8 +29596,9 @@ const handler = {
               const _nom = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
               const _tot = '$' + Number(g.total || 0).toLocaleString('es-AR');
               via = 'plantilla';
-              r = await waSendTemplate(env, tel, 'corte_cobro_semanal', 'es_AR', [_nom, _tot]);
-              if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-cobro-tpl:' + tel + ':' + Date.now()), tel, '[plantilla corte_cobro_semanal] total ' + _tot).run(); } catch (_) {} }
+              const _tpl = await corteCobroTpl(env);
+              r = await waSendTemplate(env, tel, _tpl, 'es_AR', [_nom, _tot]);
+              if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-cobro-tpl:' + tel + ':' + Date.now()), tel, '[plantilla ' + _tpl + '] total ' + _tot).run(); } catch (_) {} }
             }
           } catch (_) { r = { ok: false }; } // una excepción del envío no puede dejar el candado tomado
           if (r && r.ok) {
@@ -29638,13 +29657,14 @@ const handler = {
             if (c.ventana) {
               via = 'mensaje';
               const texto = (nom ? 'Hola ' + nom + ', ' : 'Hola, ') + 'te escribo por el pago de tu corte' + (c.esta_semana ? ' de esta semana' : '') + ': quedó pendiente ' + monto
-                + (c.pagado > 0 ? ' (ya recibimos $' + Number(c.pagado).toLocaleString('es-AR') + ')' : '') + '. Transferí a ' + CORTE_ALIAS + ' (' + CORTE_TITULAR + ') y mandame el comprobante por acá, '
+                + (c.pagado > 0 ? ' (ya recibimos $' + Number(c.pagado).toLocaleString('es-AR') + ')' : '') + '.\n\nTransferí a:\n' + CORTE_DATOS_PAGO + '\n\nY mandame el comprobante por acá, '
                 + (c.entrega === 'retira' ? 'así lo tenés listo para retirar.' : 'así lo despachamos.');
               try { r = await corteSend(env, tel, texto); } catch (_) {}
             } else {
               via = 'plantilla';
-              try { r = await waSendTemplate(env, tel, 'corte_cobro_semanal', 'es_AR', [nom, monto]); } catch (_) {}
-              if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-recordar-tpl:' + tel + ':' + Date.now()), tel, '[plantilla corte_cobro_semanal] (recordatorio) total ' + monto).run(); } catch (_) {} }
+              const _tpl = await corteCobroTpl(env);
+              try { r = await waSendTemplate(env, tel, _tpl, 'es_AR', [nom, monto]); } catch (_) {}
+              if (r && r.ok) { try { await env.DB.prepare("INSERT OR IGNORE INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'text', ?, 'sent', '', 1)").bind(new Date().toISOString(), r.id || ('corte-recordar-tpl:' + tel + ':' + Date.now()), tel, '[plantilla ' + _tpl + '] (recordatorio) total ' + monto).run(); } catch (_) {} }
             }
             if (r && r.ok) {
               try { await env.DB.prepare('INSERT INTO corte_recordatorios (telefono, at, via, monto, por) VALUES (?, ?, ?, ?, ?)').bind(tel, new Date().toISOString(), via, Number(c.debe) || 0, String(session.user || '')).run(); } catch (_) {}
@@ -31146,7 +31166,7 @@ const FOLLOWUP_AMOUNT_THRESHOLD = 300000;
 // Señales de que el cliente YA avanzó al cierre/compra → NO le mandamos follow-up
 // automático (no se spamea a quien está comprando). Solo aparecen en el cierre
 // (datos de pago / orden de compra), nunca en el presupuesto.
-const FUP_CIERRE_MARKERS = ['neoninfinito.ok', 'orden de compra', 'datos de pago', '3840200500000051390011'];
+const FUP_CIERRE_MARKERS = ['neoninfinito.ok', 'neoninfinito.sign', 'orden de compra', 'datos de pago', '3840200500000051390011', '3840200500000050844502'];
 
 // Prefijos de TODOS los possibles follow-ups (legacy + nuevos) para dedup.
 // Si conv contiene un outbound que comience con CUALQUIERA de estos, ya tuvo
