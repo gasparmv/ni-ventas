@@ -15459,6 +15459,87 @@ async function processSorteoDia2(env) {
 }
 
 // ============================================================================
+// Formulario de pago de /oferta (cursos) desde GoHighLevel (22-oct). GHL manda un POST a /webhook/ghl-oferta con
+// "Authorization: Bearer <GHL_OFERTA_SECRET>" y { evento, nombre, telefono, email, contact_id }. Le mandamos la
+// plantilla GHL_OFERTA_TPL ({{1}} = nombre) y el chat queda en la bandeja de cursos (Abril; el bot de carteles no
+// contesta ahí). Un envío por número cada 7 días. Todo queda en ghl_oferta_envios (los fallidos con el motivo) y a
+// GHL siempre se le responde 200 (si no, reintenta). Kill-switch: kv ghl_oferta_on ('0' = no manda, solo registra).
+// ============================================================================
+const GHL_OFERTA_TPL = 'oferta_formulario';
+const GHL_OFERTA_DEDUP_MS = 7 * 864e5;
+let _ghlOfertaOk = false;
+async function ensureGhlOfertaSchema(env) {
+  if (_ghlOfertaOk) return;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS ghl_oferta_envios (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', tel_raw TEXT, nombre TEXT, email TEXT, contact_id TEXT, evento TEXT, status TEXT NOT NULL, error TEXT, wamid TEXT)").run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_ghl_oferta_phone ON ghl_oferta_envios(phone, ts)').run();
+  _ghlOfertaOk = true;
+}
+// Teléfono → 549 + área sin 0 + número sin 15 (corteTel acepta +54 9, 011, 15 después del área, etc.). Un número de
+// otro país escrito con + y su código (no 54) se usa tal cual.
+function ghlOfertaTel(raw) {
+  const t = corteTel(raw);
+  if (t) return t;
+  const s = String(raw || '').trim(), d = s.replace(/\D/g, '');
+  if (/^(\+|00)/.test(s) && !/^(00)?54/.test(d) && d.replace(/^00/, '').length >= 10 && d.replace(/^00/, '').length <= 15) return d.replace(/^00/, '');
+  return '';
+}
+// Comparación de la clave sin cortar en el primer carácter distinto (no da pistas por el tiempo de respuesta).
+function timingSafeEqualStr(a, b) {
+  a = String(a); b = String(b);
+  let d = a.length ^ b.length;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) d |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  return d === 0;
+}
+async function processGhlOferta(env, body) {
+  await ensureGhlOfertaSchema(env);
+  const b = body || {};
+  const nowIso = new Date().toISOString();
+  const nombreRaw = String(b.nombre || '').trim().slice(0, 120);
+  const fila = [String(b.telefono || '').slice(0, 40), nombreRaw, String(b.email || '').slice(0, 160), String(b.contact_id || '').slice(0, 80), String(b.evento || '').slice(0, 80)];
+  const anotar = (phone, status, error) => env.DB.prepare('INSERT INTO ghl_oferta_envios (ts, phone, tel_raw, nombre, email, contact_id, evento, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .bind(nowIso, phone, ...fila, status, error || null).run();
+  const phone = ghlOfertaTel(b.telefono);
+  if (!phone) { await anotar('', 'failed', 'teléfono inválido: ' + fila[0]); return { status: 'failed', error: 'telefono invalido' }; }
+  // Reserva atómica: si ya salió uno a este número en los últimos 7 días (o hay uno saliendo ahora: GHL a veces manda
+  // el mismo evento dos veces seguidas), no se repite. Un 'sending' de más de 10 min es un envío cortado: no frena.
+  const desde = new Date(Date.now() - GHL_OFERTA_DEDUP_MS).toISOString();
+  const hace10 = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const ins = await env.DB.prepare(
+    "INSERT INTO ghl_oferta_envios (ts, phone, tel_raw, nombre, email, contact_id, evento, status) SELECT ?, ?, ?, ?, ?, ?, ?, 'sending' " +
+    "WHERE NOT EXISTS (SELECT 1 FROM ghl_oferta_envios WHERE phone = ? AND ((status = 'sent' AND ts >= ?) OR (status = 'sending' AND ts >= ?)))"
+  ).bind(nowIso, phone, ...fila, phone, desde, hace10).run();
+  if (!ins?.meta?.changes) { await anotar(phone, 'dedup', 'ya se le mandó en los últimos 7 días'); return { status: 'dedup', phone }; }
+  const id = ins.meta.last_row_id;
+  const fin = (status, error, wamid) => env.DB.prepare('UPDATE ghl_oferta_envios SET status = ?, error = ?, wamid = ? WHERE id = ?').bind(status, error || null, wamid || null, id).run();
+  if ((await kvGet(env, 'ghl_oferta_on', '1')) !== '1') { await fin('pausado', 'kv ghl_oferta_on apagado'); return { status: 'pausado', phone }; }
+  if (await isWaBillingBlocked(env)) { await fin('failed', 'WhatsApp bloqueado por pago'); return { status: 'failed', phone, error: 'whatsapp bloqueado' }; }
+  // Bandeja de cursos (Abril) ANTES de mandar, salvo que sea un chat de carteles activo (no se lo sacamos al vendedor).
+  try {
+    await env.DB.prepare(
+      "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at " +
+      "WHERE (wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('oculto', 'general', '')) AND NOT (" + chatCartelesActivoSql('wa_chats_summary.phone', 'wa_chats_summary.assigned_to') + ")"
+    ).bind(phone, nowIso).run();
+  } catch (_) {}
+  const nombre = primerNombrePersona(nombreRaw) || 'qué tal';
+  let res;
+  try { res = await waSendTemplate(env, phone, GHL_OFERTA_TPL, 'es_AR', [nombre]); } catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+  if (!res || !res.ok) {
+    const err = describeSendFailure(res);
+    await fin('failed', err);
+    try { await logWaEvent(env, { to: phone, kind: 'ghl-oferta', ref: 'ghl:' + (fila[3] || id), ok: false, error: err }); } catch (_) {}
+    return { status: 'failed', phone, error: err };
+  }
+  await fin('sent', null, res.id || '');
+  if (res.id) {
+    try {
+      await env.DB.prepare("INSERT INTO wa_messages (ts, wamid, direction, phone, sender_name, msg_type, body, status, context_id, automated) VALUES (?, ?, 'outbound', ?, '', 'template', ?, 'sent', '', 1) ON CONFLICT(wamid) DO UPDATE SET body = excluded.body, msg_type = 'template', automated = 1 WHERE wa_messages.body IS NULL OR wa_messages.body = '' OR wa_messages.msg_type = 'status'")
+        .bind(new Date().toISOString(), res.id, phone, '[plantilla: ' + GHL_OFERTA_TPL + '] ' + nombre).run();
+    } catch (_) {}
+  }
+  return { status: 'sent', phone };
+}
+
+// ============================================================================
 // Leads B2B de REVENTA (revendedores). Un App Script en el Sheet de reventa
 // reenvía cada fila nueva a POST /webhook/reventa-lead. Filtramos los
 // CUALIFICADOS (tiene experiencia en venta Y clientes) y a esos les mandamos la
@@ -20853,6 +20934,19 @@ const handler = {
       try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'REVENTA_LEAD: ' + JSON.stringify(body).slice(0, 2000)).run(); } catch (_) {}
       ctx.waitUntil(processReventaLead(env, body));
       return json({ ok: true });
+    }
+
+    // ===== Formulario de pago de /oferta desde GoHighLevel (ver processGhlOferta) =====
+    // Sin la clave → 401. Con la clave, SIEMPRE 200 (si no, GHL reintenta); el resultado va en el cuerpo y en ghl_oferta_envios.
+    if (request.method === 'POST' && path === '/webhook/ghl-oferta') {
+      const m = /^Bearer\s+(.+)$/i.exec(request.headers.get('authorization') || '');
+      if (!env.GHL_OFERTA_SECRET || !m || !timingSafeEqualStr(m[1].trim(), env.GHL_OFERTA_SECRET)) return json({ error: 'unauthorized' }, 401);
+      let body = null;
+      try { body = await request.json(); } catch (_) {}
+      try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'GHL_OFERTA: ' + JSON.stringify(body).slice(0, 2000)).run(); } catch (_) {}
+      if (!body || typeof body !== 'object') return json({ ok: true, status: 'failed', error: 'json invalido' });
+      try { return json({ ok: true, ...(await processGhlOferta(env, body)) }); }
+      catch (e) { return json({ ok: true, status: 'failed', error: String(e && e.message || e).slice(0, 200) }); }
     }
 
     // ----- WhatsApp Webhook (verificación + recepción de mensajes) -----
@@ -26542,6 +26636,15 @@ const handler = {
       // regla que la lista de chats: el secundario (Facu/Agus/Debi) ve los de los chats asignados a él; el principal
       // (Joaco), todo lo que no es de un secundario. Admin y el resto: todo.
       //   { modo: 'todo' } | { modo: 'incluir' | 'excluir', phones: [...], users: [@ig en minúscula] }
+      // GET /admin/ghl-oferta?status=failed → últimos envíos del formulario de /oferta de GHL (solo admin).
+      if (request.method === 'GET' && path === '/admin/ghl-oferta') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        await ensureGhlOfertaSchema(env);
+        const st = url.searchParams.get('status');
+        const rs = await env.DB.prepare('SELECT id, ts, phone, tel_raw, nombre, email, contact_id, evento, status, error, wamid FROM ghl_oferta_envios' + (st ? ' WHERE status = ?' : '') + ' ORDER BY id DESC LIMIT 100').bind(...(st ? [st] : [])).all();
+        return json({ on: (await kvGet(env, 'ghl_oferta_on', '1')) === '1', plantilla: GHL_OFERTA_TPL, envios: rs.results || [] });
+      }
+
       if (request.method === 'GET' && path === '/admin/presupuestos/visibilidad') {
         if ((await getSessionRole(env, session.user)) !== 'comercial') return json({ modo: 'todo' });
         const uslug = String(session.user || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
