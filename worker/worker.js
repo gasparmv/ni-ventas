@@ -2009,6 +2009,50 @@ async function pushPedidoCorporeoToV4(env, row) {
     return { error: (j && j.error) ? String(j.error) : 'el Apps Script no devolvió row' };
   } catch (e) { return { error: String((e && e.message) || e) }; }
 }
+// Al borrar un pedido CORPÓREO del CRM se borra también su fila de Pedidos_Corporeo (2026 v4) por la API de Sheets.
+// Lo pidió Gaspar el 22-oct-2026: "eliminé el pedido del corporeo del norte y no se borró del excel pero si del crm".
+// - Cómo se ubica la fila: por el id del pedido (col AO, id_sync). Sin id estampado se usa la pista sheet_row, y
+//   siempre se verifica N° + Diseño antes de borrar. Si algo no cierra, NO se toca nada y se avisa.
+// - Se borra la fila entera, también los costos que Gaspar cargó a mano, que eran de ese pedido.
+// - Las filas de abajo suben una, y su sheet_row en D1 se corre igual. El espejo y la caja ya las ubican por id, pero
+//   así la pista queda bien.
+// El NEÓN no se borra solo. En el Excel de Ventas la col O (productor) es una fórmula por POSICIÓN, y Pedidos_Directo
+// trae esa hoja por IMPORTRANGE con la caja cargada al lado: borrar una fila corre a todos. Se avisa para vaciarla a mano.
+// p = { id, es_corporeo, numero, cartel, sheet_row }. Devuelve { borrada: fila } o { aviso: texto para Gaspar }.
+async function pedidoBorrarDePlanilla(env, p) {
+  if (!p.es_corporeo) return p.sheet_row ? { aviso: `En el Excel de Ventas (hoja 2026) quedó su fila ${p.sheet_row}: vaciala a mano, sin borrar la fila.` } : {};
+  const token = await sheetsAccessToken(env);
+  if (!token) return { aviso: 'No pude entrar a Pedidos_Corporeo (sin token de Google): borrá su fila a mano.' };
+  const H = { Authorization: 'Bearer ' + token };
+  const api = SHEETS_API_BASE + CORTE_SHEET_ID;
+  const norm = (s) => String(s == null ? '' : s).normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
+  try {
+    const u = api + '/values:batchGet?' + ['Pedidos_Corporeo!A1:A', 'Pedidos_Corporeo!E1:E', 'Pedidos_Corporeo!AO1:AO'].map(r => 'ranges=' + encodeURIComponent(r)).join('&') + '&valueRenderOption=UNFORMATTED_VALUE';
+    const r = await fetch(u, { headers: H, signal: AbortSignal.timeout(25000) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+    const [cA = [], cE = [], cAO = []] = (j.valueRanges || []).map(v => v.values || []);
+    const cel = (c, f) => norm((c[f - 1] || [])[0]);
+    const porId = [];
+    cAO.forEach((rw, i) => { if (String(((rw || [])[0]) == null ? '' : rw[0]).trim() === String(p.id)) porId.push(i + 1); });
+    let fila = 0;
+    if (porId.length === 1) fila = porId[0];
+    else if (!porId.length && Number(p.sheet_row) >= 3 && !cel(cAO, Number(p.sheet_row))) fila = Number(p.sheet_row);
+    if (fila < 3) return { aviso: porId.length > 1 ? `En Pedidos_Corporeo hay ${porId.length} filas con el id ${p.id}: borralas a mano.` : 'No encontré su fila en Pedidos_Corporeo: ya no estaba.' };
+    if (cel(cA, fila) !== norm(p.numero) || cel(cE, fila) !== norm(p.cartel)) return { aviso: `La fila ${fila} de Pedidos_Corporeo no coincide con el pedido (N° o diseño distintos): no la toqué, revisala a mano.` };
+    const m = await fetch(api + '?fields=sheets(properties(sheetId,title))', { headers: H, signal: AbortSignal.timeout(25000) });
+    const mj = await m.json().catch(() => ({}));
+    const tab = ((mj.sheets || []).find(s => s.properties && s.properties.title === 'Pedidos_Corporeo') || {}).properties;
+    if (!tab) throw new Error('no encuentro la pestaña Pedidos_Corporeo');
+    const d = await fetch(api + ':batchUpdate', {
+      method: 'POST', headers: { ...H, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(25000),
+      body: JSON.stringify({ requests: [{ deleteDimension: { range: { sheetId: tab.sheetId, dimension: 'ROWS', startIndex: fila - 1, endIndex: fila } } }] }),
+    });
+    if (!d.ok) { const dj = await d.json().catch(() => ({})); throw new Error((dj.error && dj.error.message) || ('HTTP ' + d.status)); }
+    try { await env.DB.prepare('UPDATE pedidos SET sheet_row = sheet_row - 1 WHERE es_corporeo = 1 AND sheet_row > ?').bind(fila).run(); } catch (_) {}
+    return { borrada: fila };
+  } catch (e) { return { aviso: 'No pude borrar su fila de Pedidos_Corporeo (' + String((e && e.message) || e).slice(0, 120) + '): borrala a mano.' }; }
+}
 // ===== Vendedor de los pedidos de NEÓN → 2026 v4 › Pedidos_Directo, col C (VENDEDOR) =====
 // Pedido de Gaspar (10/10): "que los pedidos de neón se carguen con vendedor también, igual que en
 // corpóreos, de septiembre en adelante". Pedidos_Directo trae cada columna de la hoja "2026" de Ventas
@@ -27138,16 +27182,17 @@ const handler = {
       }
 
       // DELETE /admin/pedidos/{id} → borra UNA fila de pedido (ej: un duplicado como
-      // Dr Alvarez). Si vino del Excel (tiene sheet_row) deja un tombstone en
-      // pedidos_deleted para que importNewPedidosFromVentas NO la vuelva a traer.
-      // Las creadas en el CRM (sin sheet_row) se borran directo. Solo Gaspar.
+      // Dr Alvarez). Si es de neón y tiene sheet_row deja un tombstone en pedidos_deleted
+      // para que importNewPedidosFromVentas NO la vuelva a traer (ese importador lee solo
+      // la hoja de neón). Si es corpóreo, borra también su fila de Pedidos_Corporeo
+      // (pedidoBorrarDePlanilla). Solo Gaspar.
       if (request.method === 'DELETE' && /^\/admin\/pedidos\/\d+$/.test(path)) {
         if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
         const pid = parseInt(path.split('/').pop(), 10);
         try {
-          const prow = await env.DB.prepare('SELECT id, sheet_row FROM pedidos WHERE id = ?').bind(pid).first();
+          const prow = await env.DB.prepare('SELECT id, sheet_row, es_corporeo, numero, cartel FROM pedidos WHERE id = ?').bind(pid).first();
           if (!prow) return json({ error: 'pedido no encontrado' }, 404);
-          if (prow.sheet_row != null) {
+          if (prow.sheet_row != null && !prow.es_corporeo) {
             try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS pedidos_deleted (sheet_row INTEGER PRIMARY KEY, deleted_at TEXT)').run(); } catch (_) {}
             try { await env.DB.prepare('INSERT OR IGNORE INTO pedidos_deleted (sheet_row, deleted_at) VALUES (?, ?)').bind(Number(prow.sheet_row), new Date().toISOString()).run(); } catch (_) {}
           }
@@ -27162,8 +27207,23 @@ const handler = {
             _delStmts.push(env.DB.prepare("UPDATE corte_pedidos SET aclaraciones = '⚠ PEDIDO BORRADO · ' || IFNULL(aclaraciones,''), updated_at = ? WHERE pedido_id = ? AND IFNULL(aclaraciones,'') NOT LIKE '⚠ PEDIDO BORRADO%'").bind(new Date().toISOString(), pid));
           }
           await env.DB.batch(_delStmts);
-          return json({ ok: true, deleted: pid });
+          const _pl = await pedidoBorrarDePlanilla(env, prow);
+          return json({ ok: true, deleted: pid, planilla: _pl.borrada ? `También se borró de Pedidos_Corporeo (fila ${_pl.borrada}).` : (_pl.aviso || '') });
         } catch (e) { return json({ error: String(e && e.message || e) }, 500); }
+      }
+
+      // POST /admin/pedidos/planilla-borrar {id, numero, cartel} → borra de Pedidos_Corporeo la fila de un pedido corpóreo
+      // que ya no existe en el CRM (quedó de antes de que el DELETE la borrara). Solo por id (col AO) + N° + Diseño.
+      if (request.method === 'POST' && path === '/admin/pedidos/planilla-borrar') {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        let b = {};
+        try { b = await request.json(); } catch (_) {}
+        const id = parseInt(b.id, 10);
+        if (!id || b.numero == null || !String(b.cartel || '').trim()) return json({ error: 'faltan id, numero o cartel' }, 400);
+        const sigue = await env.DB.prepare('SELECT 1 AS x FROM pedidos WHERE id = ?').bind(id).first();
+        if (sigue) return json({ error: 'ese pedido sigue en el CRM: borralo desde el pedido' }, 409);
+        const r = await pedidoBorrarDePlanilla(env, { id, es_corporeo: 1, numero: b.numero, cartel: b.cartel, sheet_row: 0 });
+        return json(r.borrada ? { ok: true, fila: r.borrada } : { error: r.aviso || 'no se borró' }, r.borrada ? 200 : 409);
       }
 
       // POST /admin/pedidos/backfill → importa (idempotente) los pedidos del Excel

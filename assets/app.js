@@ -16645,7 +16645,8 @@ function verConversacionPedido(idx) {
 async function eliminarPedido(idx) {
   const p = STATE.pedidos.find(x => x.idx === idx);
   if (!p) return;
-  if (!confirm('¿Eliminar este cartel del pedido?\n\n' + (p.cartel || '') + ' · ' + fmtMoney(p.precio) + '\n\nSe borra del CRM. Si vino del Excel, no se vuelve a importar.')) return;
+  const dondeSale = +p.esCorporeo === 1 ? 'Se borra del CRM y su fila de Pedidos_Corporeo.' : 'Se borra del CRM. Si vino del Excel, no se vuelve a importar.';
+  if (!confirm('¿Eliminar este cartel del pedido?\n\n' + (p.cartel || '') + ' · ' + fmtMoney(p.precio) + '\n\n' + dondeSale)) return;
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/pedidos/' + idx, { method: 'DELETE', headers: authHeaders() });
     const j = await r.json();
@@ -16654,7 +16655,7 @@ async function eliminarPedido(idx) {
     closeDrawer();
     if (STATE.view === 'pedidos') renderTablePedidos();
     refreshPanelSueldo();
-    toast('Pedido eliminado ✓');
+    toast('Pedido eliminado ✓' + (j.planilla ? ' · ' + j.planilla : ''));
   } catch (e) { toast('Error al eliminar: ' + e.message); }
 }
 // Abre el anuncio del que vino el cliente: busca en vivo la atribución de ad por el
