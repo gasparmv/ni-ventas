@@ -4905,7 +4905,23 @@ async function waRellenarSalientes(env, msgs) {
 async function waSendText(env, to, body, opts = {}) {
   const num = normalizeArPhone(to);
   if (!num) return { ok: false, status: 400, error: 'numero invalido' };
+  // Aviso interno (Gaspar 22-oct: "pasá todos los avisos a ese esquema"): con la ventana de 24 h cerrada el texto libre
+  // rebota (131047, muchas veces en diferido: Meta lo acepta y después lo marca fallido) → va directo la plantilla de
+  // servicio recordatorio_agenda con el mismo texto en una línea. Los que ya eligen texto o plantilla por su cuenta
+  // (sinRespEnviar, cobros, reporte, lanzamiento, el modo "on" de avisos internos) pasan sinPlantilla: true.
+  if (opts && opts.esAviso && !opts.sinPlantilla && !(await waVentanaAbierta(env, num))) {
+    const linea = String(body || '').replace(/\s+/g, ' ').trim().slice(0, 800);
+    if (linea) return waSendTemplate(env, num, 'recordatorio_agenda', 'es_AR', [linea], null, Object.assign({}, opts, { sinPlantilla: true }));
+  }
   return waSend(env, { messaging_product: 'whatsapp', to: num, type: 'text', text: { body: String(body || '') } }, opts);
+}
+// ¿La persona le escribió al número del negocio en las últimas 23 h? (la ventana para mandarle texto libre). Si no se puede
+// saber, sí: como antes, va texto.
+async function waVentanaAbierta(env, num) {
+  try {
+    const r = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status', 'reaction') AND ts > ? LIMIT 1").bind(num, isoHace(23 * 3600 * 1000)).first();
+    return !!r;
+  } catch (_) { return true; }
 }
 
 async function waSendTemplate(env, to, name, lang = 'es', params = [], headerMediaId = null, opts = {}) {
@@ -5159,7 +5175,7 @@ async function maybeReporteDiario(env) {
     const params10 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
     const texto = formatReporteDiario(d);
     let anyOk = false;
-    const E = { esAviso: true };
+    const E = { esAviso: true, sinPlantilla: true };
     for (const ph of REPORTE_DIARIO_PHONES) {
       // Lo de hoy (legacy): la cadena v4 → v3 → base → texto, igual para los dos.
       const legacy = async () => {
@@ -14863,7 +14879,7 @@ async function sinRespClasificar(env, phone, msgs, rubro = 'carteles') {
 // no, la plantilla de SERVICIO recordatorio_agenda ({{1}} libre, una línea): el texto libre con la ventana cerrada
 // no llega (131047) y la MARKETING le rebota a Bruno (131049).
 async function sinRespEnviar(env, ph, texto, textoPlantilla) {
-  const E = { esAviso: true };
+  const E = { esAviso: true, sinPlantilla: true };
   const dig = normalizeArPhone(ph) || String(ph || '').replace(/\D/g, '');
   try {
     const inb = await env.DB.prepare("SELECT 1 AS x FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status', 'reaction') AND ts > ? LIMIT 1").bind(dig, isoHace(23 * 3600 * 1000)).first();
@@ -15278,7 +15294,7 @@ function cobroTexto(r) {
   return `COBRAR ${que} — ${base}. Venció hace ${-r.dias} día${r.dias === -1 ? '' : 's'} (era para el ${ddmm(r.cobrar_ef)}). ${cola}`;
 }
 async function cobroEnviar(env, ph, linea) {
-  const E = { esAviso: true };
+  const E = { esAviso: true, sinPlantilla: true };
   let r = null;
   try { r = await waSendTemplate(env, ph, 'recordatorio_agenda', 'es_AR', [String(linea).replace(/\s+/g, ' ').trim().slice(0, 800)], null, E); } catch (_) {}
   if (!r || !r.ok) { try { r = await waSendText(env, ph, '⏰ ' + linea, E); } catch (_) {} }
@@ -17844,7 +17860,7 @@ async function avisoEnviarMedia(env, phone, keys, caption) {
 // cadena de plantillas UTILITY con el texto en una línea. Un rechazo síncrono pasa a la siguiente opción.
 // Devuelve { ok, via, wamid, code, error, fotos }.
 async function avisoEnviar(env, cfg, t, o, med = null) {
-  const E = { esAviso: true };
+  const E = { esAviso: true, sinPlantilla: true };
   let last = null;
   for (const tp of (o.tpls || [])) {
     let r = null;
@@ -18143,7 +18159,7 @@ async function avisoInternoFlush(env, phone) {
       rows.sort((a, b) => a.id - b.id);
       const texto = rows.length === 1 ? rows[0].texto : 'Avisos que no te llegaron (' + rows.length + '):\n' + rows.map(r => '• ' + _avHoraTxt(r.created_at) + ' ' + unaLinea(r.texto, 350)).join('\n');
       let r = null;
-      try { r = await waSendText(env, dest, texto.slice(0, 4000), { esAviso: true }); } catch (_) {}
+      try { r = await waSendText(env, dest, texto.slice(0, 4000), { esAviso: true, sinPlantilla: true }); } catch (_) {}
       const ids = rows.map(x => x.id), ph = ids.map(() => '?').join(',');
       // El flush NO suma a intentos (contador del envío automático y su único reintento): queda marcado por
       // flushed_at y via 'flush'. Si sumara, un aviso que rebotó, se reintentó y después salió por acá daría 3 y
@@ -18489,7 +18505,7 @@ async function avisosRoute(env, request, url, path, session, esAdmin) {
 // Gaspar/Bruno casi siempre están FUERA de la ventana 24h) con fallback a texto libre.
 // [Etapa 1] Es el envío "de hoy" (legacy) que envuelve avisoLanzamientoSend. Todo sale con esAviso.
 async function avisoLanzamientoSendLegacy(env, ph, texto) {
-  const E = { esAviso: true };
+  const E = { esAviso: true, sinPlantilla: true };
   const t = String(texto || '').replace(/\s+/g, ' ').trim().slice(0, 300);  // 1 línea (Meta rechaza \n / 4+ espacios en params)
   // Ventana de 24h abierta (escribió al número del negocio hace <23h) → texto libre primero: llega seguro
   // y no choca con el tope de plantillas de marketing por usuario de Meta (131049: a Bruno se le perdían
