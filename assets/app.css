@@ -4502,6 +4502,61 @@ select.lb-sel.tr.sug, select.lb-sel.tr.vacio { color: var(--fg-subtle); font-sty
   .ln-row .ln-acc { order: 7; margin-left: auto; }
 }
 
+/* ===== Pedidos de corte de Sin Frontera (21-oct-2026): formulario rápido + lista (reusa .lb-*, .ln-num y .logi-pill) ===== */
+.sfc-form { display: flex; flex-direction: column; gap: 14px; max-width: 760px; background: var(--ink-100); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+.sfc-drop { border: 2px dashed var(--border); border-radius: 12px; padding: 22px 14px; text-align: center; cursor: pointer; transition: border-color .12s, background .12s; }
+.sfc-drop:hover, .sfc-drop:focus-visible, .sfc-drop.sobre { border-color: var(--neon-cyan); background: color-mix(in srgb, var(--neon-cyan) 7%, transparent); outline: none; }
+.sfc-drop-t { font-weight: 700; font-size: 15px; }
+.sfc-drop-s { font-size: 12px; color: var(--fg-subtle); margin-top: 4px; }
+.sfc-files { display: flex; flex-direction: column; gap: 6px; }
+.sfc-files:empty { display: none; }
+.sfc-file { position: relative; overflow: hidden; display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--ink-200); font-size: 13px; }
+.sfc-file-n { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.sfc-file-s { flex: 0 0 auto; font-size: 12px; color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
+.sfc-file.ok .sfc-file-s { color: #22c55e; }
+.sfc-file.error { border-color: #ef4444; }
+.sfc-file.error .sfc-file-s { color: #f87171; }
+.sfc-bar { position: absolute; left: 0; bottom: 0; width: 100%; height: 3px; }
+.sfc-bar i { display: block; height: 100%; background: var(--neon-cyan); transition: width .2s; }
+.sfc-x { flex: 0 0 auto; background: none; border: 0; color: var(--fg-subtle); font-size: 14px; cursor: pointer; padding: 2px 4px; }
+.sfc-x:hover { color: #f87171; }
+.sfc-campo { display: flex; flex-direction: column; gap: 6px; }
+.sfc-lbl { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--fg-subtle); font-weight: 700; }
+.sfc-lbl .muted { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.sfc-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.sfc-chip { border: 1px solid var(--border); background: var(--ink-200); color: var(--fg); border-radius: 999px; padding: 8px 14px; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+.sfc-chip:hover { border-color: var(--neon-cyan); }
+.sfc-chip.on { background: var(--neon-cyan); border-color: var(--neon-cyan); color: var(--ink-050); }
+.sfc-otro { width: 104px; height: 37px; box-sizing: border-box; border: 1px dashed var(--border); border-radius: 999px; background: transparent; color: var(--fg); font: inherit; font-size: 14px; padding: 0 12px; }
+.sfc-otro:focus, .sfc-otro.on { outline: none; border-style: solid; border-color: var(--neon-cyan); }
+.sfc-fecha { max-width: 220px; }
+.sfc-acl { resize: vertical; min-height: 70px; font: inherit; font-size: 14px; }
+.sfc-err { color: #f87171; font-size: 13px; }
+.sfc-err:empty { display: none; }
+.sfc-enviar { align-self: flex-start; font-size: 15px; padding: 11px 22px; }
+.lb-tit.sfc-tit { margin: 14px 0 0; }
+.sfc-head { cursor: default; }
+.sfc-head:hover { background: transparent; }
+.sfc-acc { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; }
+.sfc-est-pill { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 7px; color: var(--c); background: color-mix(in srgb, var(--c) 16%, transparent); white-space: nowrap; }
+select.lb-sel.sfc-est { color: var(--c); background-color: color-mix(in srgb, var(--c) 16%, transparent); }
+.sfc-cancelar { font-size: 12px !important; padding: 4px 10px !important; }
+.sfc-det { padding: 0 14px 12px 58px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.sfc-row.r-enviado .sfc-det { opacity: .62; }
+.sfc-archs { display: flex; flex-wrap: wrap; gap: 6px; }
+.sfc-arch { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--fg); text-decoration: none; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sfc-arch:hover { border-color: var(--neon-cyan); color: var(--neon-cyan); }
+.sfc-acl-txt { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-muted); }
+.sfc-meta { font-size: 11.5px; color: var(--fg-faint); }
+@media (max-width: 760px) {
+  .sfc-form { padding: 12px; }
+  .sfc-enviar { align-self: stretch; }
+  .sfc-row .lb-nom { flex: 1 1 calc(100% - 110px); flex-wrap: wrap; row-gap: 4px; }
+  .sfc-row .lb-nom .n { white-space: normal; }
+  .sfc-acc { margin-left: auto; }
+  .sfc-det { padding-left: 14px; }
+}
+
 /* ===== Producción de neón: pantalla del productor (celular primero) + vista de Gaspar (15-oct-2026) ===== */
 .prod-app{min-height:100vh;background:var(--ink-0,#0b0b10);color:var(--fg);grid-column:1 / -1;width:100%;min-width:0}
 /* #app es una grilla de 2 columnas (menú + contenido): la pantalla del productor ocupa las dos (si no, quedaba en la del menú, 240 px) */

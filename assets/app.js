@@ -2897,7 +2897,7 @@ function setView(v) {
   if (isCursosOnly()) v = 'chat';
   else if (isProduccionOnly()) v = (v === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : ((v === 'neon' && isNeyenUser(STATE.user)) ? 'neon' : 'corte');
   else if (isLogisticaOnly()) v = v === 'neon' ? 'neon' : 'logistica';
-  else if (isSinFronteraOnly()) v = v === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
+  else if (isSinFronteraOnly()) v = (v === 'sf-pedidos' || v === 'sf-cortes') ? v : 'sf-produccion';
   else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
   if (v === 'logistica' && !isLogisticaOnly() && !isAdmin()) v = 'dashboard';
   if (/^sf-/.test(v) && !isSinFronteraOnly() && !isAdmin()) v = 'dashboard';
@@ -2925,7 +2925,7 @@ window.addEventListener('hashchange', () => {
   if (isCursosOnly()) h = 'chat';
   else if (isProduccionOnly()) h = (h === 'mis-carteles' && isAnibalUser(STATE.user)) ? 'mis-carteles' : (h === 'neon' ? 'neon' : 'corte');
   else if (isLogisticaOnly()) h = h === 'neon' ? 'neon' : 'logistica';
-  else if (isSinFronteraOnly()) h = h === 'sf-pedidos' ? 'sf-pedidos' : 'sf-produccion';
+  else if (isSinFronteraOnly()) h = (h === 'sf-pedidos' || h === 'sf-cortes') ? h : 'sf-produccion';
   else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
   if (h === 'logistica' && !isLogisticaOnly() && !isAdmin()) h = 'dashboard';
   if (/^sf-/.test(h) && !isSinFronteraOnly() && !isAdmin()) h = 'dashboard';
@@ -3224,7 +3224,7 @@ function render() {
   } else if (isLogisticaOnly() && STATE.view !== 'logistica' && STATE.view !== 'neon') {
     STATE.view = 'logistica';
     if (location.hash !== '#logistica') location.hash = 'logistica';
-  } else if (isSinFronteraOnly() && !['sf-produccion', 'sf-pedidos'].includes(STATE.view)) {
+  } else if (isSinFronteraOnly() && !['sf-produccion', 'sf-pedidos', 'sf-cortes'].includes(STATE.view)) {
     STATE.view = 'sf-produccion';
     if (location.hash !== '#sf-produccion') location.hash = 'sf-produccion';
   } else if (/^sf-/.test(STATE.view) && !isSinFronteraOnly() && !isAdmin()) {
@@ -6991,6 +6991,7 @@ function sfEstadoLbl(e) { const x = SF_ESTADOS.find(y => y[0] === e); return x ?
 function sfResetEstado() {
   STATE.sf = null; STATE.sfPed = null; STATE.sfQ = ''; STATE.sfUrg = false; STATE.sfEtapaCel = null; STATE._sfCargando = false; STATE._sfkDrag = null;
   STATE.sfVinc = null; STATE._sfVincFallo = 0;
+  STATE.sfCortes = null; STATE.sfcForm = null; STATE._sfcEnviando = false;
   if (STATE.sfAbierto) { STATE.sfAbierto = null; const bg = document.getElementById('sfd-bg'); if (bg) bg.remove(); }
 }
 function sfOperador() { try { return localStorage.getItem(SF_OP_KEY) || ''; } catch (_) { return ''; } }
@@ -7026,12 +7027,13 @@ async function sfCargar(opts) {
     const upd = document.querySelector('[data-sf-upd]'); if (upd) upd.textContent = sfHace(STATE.sf.at);
     return;
   }
+  if (STATE.view !== (ped ? 'sf-pedidos' : 'sf-produccion')) return;   // se cambió de pantalla mientras cargaba
   const act = document.activeElement;
   if (silent && act && act.closest && act.closest('.sf-wrap') && /^(SELECT|INPUT|TEXTAREA)$/.test(act.tagName)) return;
   const m = document.getElementById('main');
   if (m) { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
 }
-function renderSinFrontera() { return STATE.view === 'sf-pedidos' ? renderSfPedidos() : renderSfProduccion(); }
+function renderSinFrontera() { return STATE.view === 'sf-pedidos' ? renderSfPedidos() : STATE.view === 'sf-cortes' ? renderSfCortes() : renderSfProduccion(); }
 function sfHace(at) {
   if (!at) return '';
   const s = Math.round((Date.now() - at) / 1000);
@@ -7053,7 +7055,8 @@ function sfTabs() {
   return `<div class="logi-chips" style="margin-bottom:2px">`
     + `<button type="button" class="btn ${v === 'sf-produccion' ? '' : 'ghost'}" data-sf-vista="sf-produccion" style="padding:6px 12px;font-size:12px">Producción</button>`
     + `<button type="button" class="btn ${v === 'sf-pedidos' ? '' : 'ghost'}" data-sf-vista="sf-pedidos" style="padding:6px 12px;font-size:12px">Sus pedidos</button>`
-    + `<span class="muted" style="font-size:12px;align-self:center;margin-left:6px">Así lo ve Sin Frontera</span></div>`;
+    + `<button type="button" class="btn ${v === 'sf-cortes' ? '' : 'ghost'}" data-sf-vista="sf-cortes" style="padding:6px 12px;font-size:12px">Cortes que encargan</button>`
+    + (v === 'sf-cortes' ? '' : `<span class="muted" style="font-size:12px;align-self:center;margin-left:6px">Así lo ve Sin Frontera</span>`) + `</div>`;
 }
 
 // ---------- Producción: tablero por etapa (kanban) ----------
@@ -8372,6 +8375,252 @@ async function sfConfigUI() {
 }
 
 // ---------- Eventos (todo delegado en .sf-wrap, que se crea en cada dibujo) ----------
+// ---------- Pedidos de corte (Gaspar 21-oct-2026) ----------
+// "Que los chicos de Sin Frontera me puedan encargar cortes de acrílico": el archivo en cualquier formato, material, color,
+// espesor, para cuándo y aclaraciones; "que sea bien rápido". Los archivos se suben apenas se eligen (con progreso) y el pedido
+// sale con un toque. Gaspar los ve en Sin Frontera > Cortes y les cambia el estado. Sin precios (cuenta corriente aparte).
+const SFC_MATERIALES = [['acrilico', 'Acrílico'], ['pvc', 'PVC']];
+const SFC_COLORES = [['blanco_opalino', 'Blanco opalino'], ['transparente', 'Transparente'], ['negro', 'Negro']];
+const SFC_ESPESORES = ['2', '3', '4', '5', '6', '8', '10'];
+const SFC_ESTADOS = [['pedido', 'Pedido', '#94a3b8'], ['en_corte', 'En corte', '#38bdf8'], ['listo', 'Listo', '#22c55e'], ['entregado', 'Entregado', '#64748b'], ['cancelado', 'Cancelado', '#ef4444']];
+const SFC_MAX_BYTES = 95 * 1024 * 1024;
+function sfcLbl(lista, v) { const x = lista.find(y => y[0] === v); return x ? x[1] : String(v || ''); }
+function sfcEstado(v) { return SFC_ESTADOS.find(y => y[0] === v) || SFC_ESTADOS[0]; }
+// El formulario vive en STATE (sobrevive a los redibujos y a cambiar de pantalla).
+function sfcForm() { return STATE.sfcForm || (STATE.sfcForm = { material: '', color: '', espesor: '', fecha: '', acl: '', archivos: [] }); }
+function sfcPeso(b) { b = +b || 0; return b >= 1048576 ? (b / 1048576).toFixed(b >= 10485760 ? 0 : 1).replace('.', ',') + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; }
+function sfcHoyYmd() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+async function sfcCargar(opts) {
+  const silent = !!(opts && opts.silent);
+  if (STATE._sfcCargando) return;
+  STATE._sfcCargando = true;
+  const user = STATE.user;
+  try {
+    const j = await sfFetch('/admin/sinfrontera/cortes');
+    if (STATE.user !== user) return;
+    STATE.sfCortes = { cortes: j.cortes || [], at: Date.now() };
+  } catch (e) {
+    if (STATE.user !== user) return;
+    if (!silent || !STATE.sfCortes || STATE.sfCortes.error) STATE.sfCortes = { error: e.message || 'No se pudo cargar', at: Date.now() };
+  } finally { STATE._sfcCargando = false; }
+  if (STATE.view === 'sf-cortes') sfcPintarLista();
+}
+function renderSfCortes() {
+  const D = STATE.sfCortes, op = sfOperador(), adm = isAdmin();
+  if (!D && !STATE._sfcCargando) setTimeout(() => sfcCargar(), 0);
+  return `<div class="logi-wrap sf-wrap sfc-wrap">
+    ${sfTabs()}
+    <div class="logi-head"><h1>${adm ? 'Cortes que encarga Sin Frontera' : 'Pedir corte'}</h1></div>
+    <div class="logi-bar">
+      <span data-sfc-upd>${escapeHtml(D && !D.error ? sfHace(D.at) : '')}</span>
+      ${isSinFronteraOnly() ? `<span>· Estás como <b>${escapeHtml(op || 'sin nombre')}</b> <button type="button" class="logi-link" data-sf-op>${op ? 'cambiar' : 'poner nombre'}</button></span>` : ''}
+      <span style="flex:1"></span>
+      <button class="btn btn-ghost" data-sfc-refresh>Actualizar</button>
+      ${sfAdminBarra()}
+    </div>
+    ${adm ? '' : sfcFormHtml()}
+    <div data-sfc-lista>${sfcListaHtml()}</div>
+  </div>`;
+}
+function sfcChips(attr, lista, sel) {
+  return lista.map(([v, t]) => `<button type="button" class="sfc-chip${sel === v ? ' on' : ''}" data-${attr}="${escapeHtml(v)}" aria-pressed="${sel === v ? 'true' : 'false'}">${escapeHtml(t)}</button>`).join('');
+}
+function sfcFormHtml() {
+  const F = sfcForm(), espChip = SFC_ESPESORES.includes(F.espesor) ? F.espesor : '';
+  return `<form class="sfc-form" data-sfc-form novalidate>
+    <input type="file" multiple data-sfc-file hidden>
+    <div class="sfc-drop" data-sfc-drop tabindex="0" role="button" aria-label="Elegir los archivos del corte">
+      <div class="sfc-drop-t">📎 Arrastrá el archivo acá o tocá para elegirlo</div>
+      <div class="sfc-drop-s">Cualquier formato (DXF, AI, CDR, PDF, SVG, foto…) · hasta 95 MB cada uno · podés subir varios</div>
+    </div>
+    <div class="sfc-files" data-sfc-files>${sfcArchivosHtml()}</div>
+    <div class="sfc-campo"><span class="sfc-lbl">Material</span><div class="sfc-chips">${sfcChips('sfc-material', SFC_MATERIALES, F.material)}</div></div>
+    <div class="sfc-campo"><span class="sfc-lbl">Color</span><div class="sfc-chips">${sfcChips('sfc-color', SFC_COLORES, F.color)}</div></div>
+    <div class="sfc-campo"><span class="sfc-lbl">Espesor</span><div class="sfc-chips">${sfcChips('sfc-esp', SFC_ESPESORES.map(e => [e, e + ' mm']), espChip)}<input class="sfc-otro${F.espesor && !espChip ? ' on' : ''}" data-sfc-esp-otro inputmode="decimal" maxlength="6" placeholder="Otro (mm)" aria-label="Otro espesor en milímetros" value="${escapeHtml(espChip ? '' : F.espesor)}"></div></div>
+    <div class="sfc-campo"><span class="sfc-lbl">¿Para cuándo lo necesitan?</span><input type="date" class="nc-input sfc-fecha" data-sfc-fecha min="${sfcHoyYmd()}" value="${escapeHtml(F.fecha)}"></div>
+    <div class="sfc-campo"><span class="sfc-lbl">Aclaraciones <span class="muted">(opcional)</span></span><textarea class="nc-input sfc-acl" data-sfc-acl rows="3" maxlength="2000" placeholder="Cantidades, medidas, qué va en cada archivo, lo que haga falta">${escapeHtml(F.acl)}</textarea></div>
+    <div class="sfc-err" data-sfc-err role="alert"></div>
+    <button type="submit" class="btn btn-cyan sfc-enviar" data-sfc-enviar>${sfcBotonTxt()}</button>
+  </form>`;
+}
+function sfcBotonTxt() { return STATE._sfcEnviando ? 'Enviando…' : sfcForm().archivos.some(a => a.estado === 'subiendo') ? 'Subiendo archivos…' : 'Enviar pedido'; }
+function sfcArchivosHtml() {
+  return sfcForm().archivos.map(a => `<div class="sfc-file ${a.estado}" data-sfc-fid="${a.id}">
+      <span class="sfc-file-n" title="${escapeHtml(a.nombre)}">${escapeHtml(a.nombre)}</span>
+      <span class="sfc-file-s">${a.estado === 'subiendo' ? 'subiendo ' + Math.round(a.pct || 0) + ' %' : a.estado === 'error' ? escapeHtml(a.err || 'no se subió') : sfcPeso(a.bytes) + ' ✓'}</span>
+      ${a.estado === 'subiendo' ? `<span class="sfc-bar"><i style="width:${Math.round(a.pct || 0)}%"></i></span>` : ''}
+      ${a.estado === 'error' && a.file ? `<button type="button" class="logi-link" data-sfc-reintentar="${a.id}">reintentar</button>` : ''}
+      <button type="button" class="sfc-x" data-sfc-quitar="${a.id}" aria-label="Quitar ${escapeHtml(a.nombre)}" title="Quitar">✕</button>
+    </div>`).join('');
+}
+function sfcPintarArchivos() {
+  const el = document.querySelector('.sfc-wrap [data-sfc-files]'); if (el) el.innerHTML = sfcArchivosHtml();
+  const b = document.querySelector('.sfc-wrap [data-sfc-enviar]'); if (b) { b.textContent = sfcBotonTxt(); b.disabled = !!STATE._sfcEnviando; }
+}
+// Sube un archivo apenas se elige (PUT crudo a R2 con progreso). Sin conexión o con error queda para reintentar.
+function sfcSubir(a) {
+  a.estado = 'subiendo'; a.pct = 0; a.err = '';
+  const xhr = new XMLHttpRequest();
+  a.xhr = xhr;
+  xhr.open('PUT', CONFIG.trackerUrl + '/admin/sinfrontera/corte/archivo?name=' + encodeURIComponent(a.nombre));
+  const h = authHeaders(); Object.keys(h).forEach(k => xhr.setRequestHeader(k, h[k]));
+  xhr.setRequestHeader('Content-Type', (a.file && a.file.type) || 'application/octet-stream');
+  let t = 0;
+  xhr.upload.onprogress = e => { if (!e.lengthComputable) return; a.pct = e.loaded / e.total * 100; const n = Date.now(); if (n - t > 250) { t = n; sfcPintarArchivos(); } };
+  xhr.onload = () => {
+    let j = {}; try { j = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+    if (xhr.status >= 200 && xhr.status < 300 && j.ok && j.key) { a.estado = 'ok'; a.key = j.key; a.pct = 100; a.file = null; }
+    else { a.estado = 'error'; a.err = j.motivo || (xhr.status === 413 ? 'pesa demasiado' : 'no se subió (error ' + xhr.status + ')'); }
+    a.xhr = null; sfcPintarArchivos();
+  };
+  xhr.onerror = () => { a.estado = 'error'; a.err = 'se cortó la conexión'; a.xhr = null; sfcPintarArchivos(); };
+  xhr.send(a.file);
+}
+function sfcAgregar(files) {
+  const F = sfcForm();
+  for (const f of Array.from(files || [])) {
+    if (F.archivos.length >= 20) { niToast('Hasta 20 archivos por pedido', { error: true }); break; }
+    const a = { id: 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), nombre: f.name || 'archivo', bytes: f.size || 0, file: f, estado: 'subiendo', pct: 0 };
+    F.archivos.push(a);
+    if (!f.size) { a.estado = 'error'; a.err = 'el archivo está vacío'; a.file = null; continue; }
+    if (f.size > SFC_MAX_BYTES) { a.estado = 'error'; a.err = 'pesa más de 95 MB: comprimilo'; a.file = null; continue; }
+    sfcSubir(a);
+  }
+  const e = document.querySelector('.sfc-wrap [data-sfc-err]'); if (e) e.textContent = '';
+  sfcPintarArchivos();
+}
+function sfcQuitar(id) {
+  const F = sfcForm(), a = F.archivos.find(x => x.id === id); if (!a) return;
+  if (a.xhr) { try { a.xhr.abort(); } catch (_) {} }
+  F.archivos = F.archivos.filter(x => x.id !== id);
+  sfcPintarArchivos();
+}
+async function sfcEnviar() {
+  const F = sfcForm();
+  const err = m => { const e = document.querySelector('.sfc-wrap [data-sfc-err]'); if (e) e.textContent = m; if (m) niToast(m, { error: true }); };
+  if (STATE._sfcEnviando) return;
+  if (!F.archivos.length) return err('Subí el archivo del corte.');
+  if (F.archivos.some(a => a.estado === 'subiendo')) return err('Esperá a que terminen de subir los archivos.');
+  if (F.archivos.some(a => a.estado === 'error')) return err('Hay un archivo que no se subió: reintentalo o quitalo.');
+  if (!F.material) return err('Elegí el material: acrílico o PVC.');
+  if (!F.color) return err('Elegí el color.');
+  const esp = String(F.espesor || '').trim();
+  if (!esp) return err('Elegí o escribí el espesor.');
+  if (!/^\d{1,2}([.,]\d{1,2})?\s*(mm)?$/i.test(esp)) return err('El espesor va en milímetros, por ejemplo 3 o 2,5.');
+  if (!F.fecha) return err('Poné para cuándo lo necesitan.');
+  if (F.fecha < sfcHoyYmd()) return err('Esa fecha ya pasó.');
+  err('');
+  let quien = isSinFronteraOnly() ? sfOperador() : '';
+  if (isSinFronteraOnly() && !quien && !STATE._sfOpPreguntado) { STATE._sfOpPreguntado = true; quien = await sfPedirOperador(); }
+  STATE._sfcEnviando = true; sfcPintarArchivos();
+  try {
+    const j = await sfFetch('/admin/sinfrontera/corte', { material: F.material, color: F.color, espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
+      archivos: F.archivos.filter(a => a.estado === 'ok').map(a => ({ key: a.key, nombre: a.nombre })), quien });
+    STATE.sfcForm = null;
+    const D = STATE.sfCortes;
+    if (D && !D.error && j.corte && j.corte.estado) D.cortes = [j.corte].concat((D.cortes || []).filter(c => c.id !== j.corte.id));
+    STATE._sfcEnviando = false;
+    const m = document.getElementById('main'); if (m && STATE.view === 'sf-cortes') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
+    niToast('Listo, pedido #' + ((j.corte && j.corte.id) || '') + ' enviado');
+    sfcCargar({ silent: true });
+  } catch (e) {
+    STATE._sfcEnviando = false; sfcPintarArchivos();
+    err(String((e && e.message) || 'No se pudo mandar el pedido. Probá de nuevo.'));
+  }
+}
+// ----- Lista -----
+function sfcListaHtml() {
+  const D = STATE.sfCortes, adm = isAdmin();
+  if (!D) return '<div class="lb-tit sfc-tit">Pedidos de corte</div><div class="lb-list"><div class="lb-vacio">Cargando…</div></div>';
+  if (D.error) return `<div class="lb-tit sfc-tit">Pedidos de corte</div><div class="lb-list"><div class="lb-vacio"><div style="color:#ef4444;margin-bottom:8px">${escapeHtml(D.error)}</div><button type="button" class="btn" data-sfc-refresh>Reintentar</button></div></div>`;
+  const cs = D.cortes || [], enCurso = c => ['pedido', 'en_corte', 'listo'].includes(c.estado);
+  const act = cs.filter(enCurso).sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)) || a.id - b.id);
+  const fin = cs.filter(c => !enCurso(c)).slice(0, 30);
+  return `<div class="lb-tit sfc-tit">${adm ? 'Pedidos de corte en curso' : 'Tus pedidos en curso'}${act.length ? ' · ' + act.length : ''}</div>
+    <div class="lb-list">${act.length ? act.map(sfcFilaHtml).join('') : `<div class="lb-vacio">${adm ? 'No hay pedidos de corte en curso.' : 'No tenés pedidos en curso.'}</div>`}</div>
+    ${fin.length ? `<div class="lb-tit sfc-tit">Entregados y cancelados</div><div class="lb-list">${fin.map(sfcFilaHtml).join('')}</div>` : ''}`;
+}
+function sfcFilaHtml(c) {
+  const adm = isAdmin(), E = sfcEstado(c.estado), cerrado = c.estado === 'entregado' || c.estado === 'cancelado', dias = sfDias(c.fecha);
+  const plazo = cerrado ? `<span class="logi-pill g">Para el ${escapeHtml(sfFecha(c.fecha))}</span>`
+    : `<span class="logi-pill ${dias < 0 ? 'r' : dias <= 1 ? 'a' : 'g'}">${dias < 0 ? 'Vencido: era para el ' + escapeHtml(sfFecha(c.fecha)) : dias === 0 ? 'Es para hoy' : dias === 1 ? 'Para mañana' : 'Para el ' + escapeHtml(sfFecha(c.fecha)) + ' · faltan ' + dias + ' días'}</span>`;
+  const arch = (c.archivos || []).map((a, i) => `<a class="sfc-arch" href="${escapeHtml(sfUrl('c=' + c.id + '&i=' + i + '&dl=1'))}" target="_blank" rel="noopener" title="Bajar ${escapeHtml(a.nombre)} (${sfcPeso(a.bytes)})">${/^image\//.test(a.tipo) ? '🖼' : '📄'} ${escapeHtml(a.nombre)}</a>`).join('');
+  const acc = adm
+    ? `<select class="lb-sel sfc-est" data-sfc-estado="${c.id}" style="--c:${E[2]}" aria-label="Estado del pedido #${c.id}">${SFC_ESTADOS.map(([v, t]) => `<option value="${v}"${v === c.estado ? ' selected' : ''}>${t}</option>`).join('')}</select>`
+    : `<span class="sfc-est-pill" style="--c:${E[2]}">${E[1]}</span>${c.estado === 'pedido' ? `<button type="button" class="btn btn-ghost sfc-cancelar" data-sfc-cancelar="${c.id}">Cancelar</button>` : ''}`;
+  const cambio = c.estado !== 'pedido' && c.estado_at ? ' · ' + E[1].toLowerCase() + ' ' + sfFechaHora(c.estado_at) + (c.estado_por ? ' (' + nkbNom(c.estado_por) + ')' : '') : '';
+  return `<div class="lb-row sfc-row${cerrado ? ' r-enviado' : ''}" data-sfc-row="${c.id}">
+    <div class="lb-head sfc-head">
+      <span class="ln-num">#${c.id}</span>
+      <span class="lb-nom"><span class="n">${escapeHtml(sfcLbl(SFC_MATERIALES, c.material) + ' ' + sfcLbl(SFC_COLORES, c.color).toLowerCase() + ' · ' + c.espesor + ' mm')}</span>${plazo}</span>
+      <span class="sfc-acc">${acc}</span>
+    </div>
+    <div class="sfc-det">
+      <div class="sfc-archs">${arch || '<span class="muted">Sin archivos</span>'}</div>
+      ${c.aclaraciones ? `<div class="sfc-acl-txt">${escapeHtml(c.aclaraciones)}</div>` : ''}
+      <div class="sfc-meta">Pedido el ${escapeHtml(sfFechaHora(c.created_at))}${c.creado_por ? ' por ' + escapeHtml(c.creado_por) : ''}${escapeHtml(cambio)}</div>
+    </div>
+  </div>`;
+}
+function sfcPintarLista() {
+  const l = document.querySelector('.sfc-wrap [data-sfc-lista]'); if (l) l.innerHTML = sfcListaHtml();
+  const u = document.querySelector('.sfc-wrap [data-sfc-upd]'); if (u) u.textContent = STATE.sfCortes && !STATE.sfCortes.error ? sfHace(STATE.sfCortes.at) : '';
+}
+async function sfcCambiarEstado(id, estado, el) {
+  const D = STATE.sfCortes, c = D && D.cortes ? D.cortes.find(x => x.id === id) : null;
+  if (!c || estado === c.estado) return;
+  const volver = () => { if (el && el.tagName === 'SELECT') el.value = c.estado; };
+  if (estado === 'cancelado' && !(await showConfirm(isAdmin() ? '¿Cancelar el pedido de corte #' + id + '?' : '¿Cancelar el pedido #' + id + '? A Gaspar le llega el aviso.', { title: 'Cancelar pedido', confirmLabel: 'Sí, cancelar', cancelLabel: 'No' }).catch(() => false))) { volver(); return; }
+  if (el) el.disabled = true;
+  try {
+    const j = await sfFetch('/admin/sinfrontera/corte/estado', { id, estado, quien: isSinFronteraOnly() ? sfOperador() : '' });
+    if (j.corte) Object.assign(c, j.corte);
+    niToast('#' + id + ': ' + sfcEstado(c.estado)[1].toLowerCase());
+  } catch (e) { volver(); niToast('No se guardó: ' + String((e && e.message) || 'error'), { error: true }); }
+  if (el) el.disabled = false;
+  sfcPintarLista();
+  sfcCargar({ silent: true });
+}
+function sfcMarcar(form, attr, v) { form.querySelectorAll('[' + attr + ']').forEach(b => { const on = b.getAttribute(attr) === v; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); }); }
+// Eventos de la pantalla (los llama bindSinFrontera con el contenedor recién dibujado).
+function sfcBind(root) {
+  const F = sfcForm(), form = root.querySelector('[data-sfc-form]');
+  if (form) {
+    const file = form.querySelector('[data-sfc-file]'), drop = form.querySelector('[data-sfc-drop]');
+    drop.addEventListener('click', () => file.click());
+    drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); file.click(); } });
+    file.addEventListener('change', () => { sfcAgregar(file.files); file.value = ''; });
+    ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('sobre'); }));
+    ['dragleave', 'dragend'].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove('sobre')));
+    drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('sobre'); if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) sfcAgregar(e.dataTransfer.files); });
+    form.addEventListener('click', e => {
+      const b = e.target.closest && e.target.closest('button'); if (!b || !form.contains(b)) return;
+      if (b.hasAttribute('data-sfc-material')) { F.material = b.getAttribute('data-sfc-material'); sfcMarcar(form, 'data-sfc-material', F.material); }
+      else if (b.hasAttribute('data-sfc-color')) { F.color = b.getAttribute('data-sfc-color'); sfcMarcar(form, 'data-sfc-color', F.color); }
+      else if (b.hasAttribute('data-sfc-esp')) {
+        F.espesor = b.getAttribute('data-sfc-esp'); sfcMarcar(form, 'data-sfc-esp', F.espesor);
+        const o = form.querySelector('[data-sfc-esp-otro]'); if (o) { o.value = ''; o.classList.remove('on'); }
+      }
+      else if (b.hasAttribute('data-sfc-quitar')) sfcQuitar(b.getAttribute('data-sfc-quitar'));
+      else if (b.hasAttribute('data-sfc-reintentar')) { const a = F.archivos.find(x => x.id === b.getAttribute('data-sfc-reintentar')); if (a && a.file) { sfcSubir(a); sfcPintarArchivos(); } }
+    });
+    const otro = form.querySelector('[data-sfc-esp-otro]');
+    otro.addEventListener('input', () => { F.espesor = otro.value.trim(); otro.classList.toggle('on', !!F.espesor); sfcMarcar(form, 'data-sfc-esp', ''); });
+    const fecha = form.querySelector('[data-sfc-fecha]');
+    ['input', 'change'].forEach(ev => fecha.addEventListener(ev, () => { F.fecha = fecha.value; }));
+    const acl = form.querySelector('[data-sfc-acl]');
+    acl.addEventListener('input', () => { F.acl = acl.value; });
+    form.addEventListener('submit', e => { e.preventDefault(); sfcEnviar(); });
+    const limpiar = () => { const er = form.querySelector('[data-sfc-err]'); if (er && er.textContent) er.textContent = ''; };
+    form.addEventListener('input', limpiar);
+    form.addEventListener('click', e => { if (e.target.closest && e.target.closest('.sfc-chip')) limpiar(); });
+  }
+  root.addEventListener('change', e => { const s = e.target.closest && e.target.closest('[data-sfc-estado]'); if (s) sfcCambiarEstado(+s.getAttribute('data-sfc-estado'), s.value, s); });
+  root.addEventListener('click', e => {
+    if (e.target.closest('[data-sfc-refresh]')) { if (STATE.sfCortes && STATE.sfCortes.error) { STATE.sfCortes = null; sfcPintarLista(); } sfcCargar({}); return; }
+    const c = e.target.closest('[data-sfc-cancelar]'); if (c) sfcCambiarEstado(+c.getAttribute('data-sfc-cancelar'), 'cancelado', c);
+  });
+}
 function bindSinFrontera() {
   const root = document.querySelector('.sf-wrap');
   if (!root) return;
@@ -8427,6 +8676,7 @@ function bindSinFrontera() {
     });
   }
   sfkBindDrag(root);
+  if (STATE.view === 'sf-cortes') sfcBind(root);
   if (STATE.view === 'sf-produccion') sfkFiltrarDom(); // la búsqueda y "Urgentes" sobreviven al redibujo
   // Teclado global (una sola vez): "/" va al buscador; Esc cierra el panel.
   if (!window._sfkTeclas) {
@@ -8444,6 +8694,11 @@ function bindSinFrontera() {
     window._sfTick = setInterval(() => {
       if (!/^sf-/.test(STATE.view) || document.visibilityState !== 'visible' || !STATE.token || STATE._sfkDrag) return;
       const u = document.querySelector('[data-sf-upd]'); if (u && STATE.sf) u.textContent = sfHace(STATE.sf.at);
+      if (STATE.view === 'sf-cortes') {
+        const uc = document.querySelector('[data-sfc-upd]'); if (uc && STATE.sfCortes && !STATE.sfCortes.error) uc.textContent = sfHace(STATE.sfCortes.at);
+        if (STATE.sfCortes && STATE.sfCortes.at && Date.now() - STATE.sfCortes.at > 85000) sfcCargar({ silent: true });
+        return;
+      }
       const D = STATE.view === 'sf-pedidos' ? STATE.sfPed : STATE.sf;
       if (D && D.at && Date.now() - D.at > 85000) sfCargar({ silent: true });
     }, 30000);
@@ -9432,6 +9687,7 @@ function renderShell() {
         ` : isSinFronteraOnly() ? `
           <button class="nav-item ${v==='sf-produccion'?'active':''}" data-view="sf-produccion"><span class="icon">🏭</span> Producción</button>
           <button class="nav-item ${v==='sf-pedidos'?'active':''}" data-view="sf-pedidos"><span class="icon">▦</span> Mis pedidos</button>
+          <button class="nav-item ${v==='sf-cortes'?'active':''}" data-view="sf-cortes"><span class="icon">✂</span> Pedir corte</button>
         ` : isDisenadorOnly() ? `
           <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte ${corteBadgeHtml()}</button>
