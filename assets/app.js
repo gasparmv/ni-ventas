@@ -8484,7 +8484,7 @@ function renderSfCortes() {
       <button class="btn btn-ghost" data-sfc-refresh>Actualizar</button>
       ${sfAdminBarra()}${adm ? '<button class="btn btn-ghost" data-sfc-fran title="El usuario de Fran, que hace estos cortes, y su WhatsApp para los avisos">Usuario de Fran</button>' : ''}
     </div>
-    ${gestiona ? '' : sfcFormHtml()}
+    ${gestiona ? sfcCargarHtml() : sfcFormHtml()}
     <div data-sfc-lista>${sfcListaHtml()}</div>
   </div>`;
 }
@@ -8508,6 +8508,11 @@ function sfcFormHtml() {
     <div class="sfc-err" data-sfc-err role="alert"></div>
     <button type="submit" class="btn btn-cyan sfc-enviar" data-sfc-enviar>${sfcBotonTxt()}</button>
   </form>`;
+}
+// Fran (y Gaspar) también cargan pedidos, por si Sin Frontera no lo hizo (Gaspar 22-oct): el formulario va plegado.
+function sfcCargarHtml() {
+  if (!STATE.sfcFormAbierto) return '<div><button type="button" class="btn btn-ghost sfc-abrir" data-sfc-abrir-form>＋ Cargar un pedido (si Sin Frontera no lo cargó)</button></div>';
+  return '<div class="sfc-cargar"><div class="sfc-cargar-h"><b>Cargar un pedido de Sin Frontera</b><button type="button" class="logi-link" data-sfc-cerrar-form>cerrar</button></div>' + sfcFormHtml() + '</div>';
 }
 function sfcBotonTxt() { return STATE._sfcEnviando ? 'Enviando…' : sfcForm().archivos.some(a => a.estado === 'subiendo') ? 'Subiendo archivos…' : 'Enviar pedido'; }
 function sfcArchivosHtml() {
@@ -8583,7 +8588,7 @@ async function sfcEnviar() {
   try {
     const j = await sfFetch('/admin/sinfrontera/corte', { material: F.material, color: F.color, color_hex: F.colorHex || '', espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
       archivos: F.archivos.filter(a => a.estado === 'ok').map(a => ({ key: a.key, nombre: a.nombre })), quien });
-    STATE.sfcForm = null;
+    STATE.sfcForm = null; STATE.sfcFormAbierto = false;
     const D = STATE.sfCortes;
     if (D && !D.error && j.corte && j.corte.estado) D.cortes = [j.corte].concat((D.cortes || []).filter(c => c.id !== j.corte.id));
     STATE._sfcEnviando = false;
@@ -8736,6 +8741,12 @@ function sfcBind(root) {
   root.addEventListener('change', e => { const s = e.target.closest && e.target.closest('[data-sfc-estado]'); if (s) sfcCambiarEstado(+s.getAttribute('data-sfc-estado'), s.value, s); });
   root.addEventListener('click', e => {
     if (e.target.closest('[data-sfc-fran]')) { sfcFranUI(); return; }
+    const abrir = e.target.closest('[data-sfc-abrir-form], [data-sfc-cerrar-form]');
+    if (abrir) {
+      STATE.sfcFormAbierto = abrir.hasAttribute('data-sfc-abrir-form');
+      const m = document.getElementById('main'); if (m && STATE.view === 'sf-cortes') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
+      return;
+    }
     if (e.target.closest('[data-sfc-refresh]')) { if (STATE.sfCortes && STATE.sfCortes.error) { STATE.sfCortes = null; sfcPintarLista(); } sfcCargar({}); return; }
     const c = e.target.closest('[data-sfc-cancelar]'); if (c) sfcCambiarEstado(+c.getAttribute('data-sfc-cancelar'), 'cancelado', c);
   });

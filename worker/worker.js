@@ -6149,6 +6149,22 @@ async function corteCobroTpl(env) {
   } catch (_) {}
   return CORTE_COBRO_TPL_VIEJA;
 }
+// "Avisame cuando aprueben la plantilla nueva" (Gaspar 22-oct): cuando corte_cobro_semanal_v2 figura APPROVED (o REJECTED)
+// en template_status_cache, un WhatsApp a Gaspar. Una sola vez por estado (kv corte_cobro_tpl_aviso). Cron */5.
+async function corteCobroTplAviso(env) {
+  try {
+    const t = await env.DB.prepare('SELECT status FROM template_status_cache WHERE name = ?').bind(CORTE_COBRO_TPL).first();
+    const st = String((t && t.status) || '').toUpperCase();
+    if (st !== 'APPROVED' && st !== 'REJECTED') return;
+    const marca = CORTE_COBRO_TPL + ':' + st;
+    if ((await kvGet(env, 'corte_cobro_tpl_aviso', '')) === marca) return;
+    await kvSet(env, 'corte_cobro_tpl_aviso', marca);
+    const txt = st === 'APPROVED'
+      ? 'Meta aprobó la plantilla nueva del cobro del corte. Desde ahora los cobros que salen por plantilla ya dicen ' + CORTE_ALIAS + ' a nombre de ' + CORTE_TITULAR + '.'
+      : 'Meta rechazó la plantilla nueva del cobro del corte (' + CORTE_COBRO_TPL + '). Los cobros por plantilla siguen saliendo con el alias viejo (neoninfinito.mp): hay que armar otra.';
+    await avisoAdmin(env, txt, { tipo: 'plantilla_interna', prioridad: 'P2', clave: 'tpl:' + marca });
+  } catch (_) {}
+}
 // Medida que va en el detalle del cobro: la REAL de la matriz (con la que se calculó el precio), no la que pidió el cliente.
 // Si la pieza no tiene medida real (insumos, filas viejas), la declarada. Gaspar 19-oct.
 function corteMedidaCobro(r) {
@@ -18488,7 +18504,9 @@ function esUsuarioFran(userName) { return String(userName || '').trim().toLowerC
 function franRutaOk(request, path, url) {
   if (request.method === 'GET' && path === '/admin/sinfrontera/cortes') return true;
   if (request.method === 'GET' && path === '/admin/sinfrontera/archivo') return !!url.searchParams.get('c');
-  return request.method === 'POST' && path === '/admin/sinfrontera/corte/estado';
+  // También carga pedidos, por si Sin Frontera no lo hizo (Gaspar 22-oct): subir el archivo y el alta.
+  if (request.method === 'PUT' && path === '/admin/sinfrontera/corte/archivo') return true;
+  return request.method === 'POST' && (path === '/admin/sinfrontera/corte/estado' || path === '/admin/sinfrontera/corte');
 }
 // Aviso a Fran de un pedido de corte (nuevo o cancelado), si Gaspar cargó su WhatsApp (agenda_phones 'fran'): texto si le
 // escribió al número del negocio en las últimas 23 h; si no, la plantilla de servicio (sinRespEnviar, como a Neyen).
@@ -28854,7 +28872,7 @@ const handler = {
           }
           if (!arch.length) return json({ error: 'datos', motivo: 'Subí el archivo del corte.' }, 400);
           const quien = String(body.quien || '').replace(/\s+/g, ' ').trim().slice(0, 40);
-          const por = sfExt ? (quien ? quien + ' · Sin Frontera' : 'Sin Frontera') : String(session.user || '');
+          const por = sfExt ? (quien ? quien + ' · Sin Frontera' : 'Sin Frontera') : (fran ? 'Fran' : String(session.user || ''));
           const nowIso = new Date().toISOString();
           let id = 0;
           try {
@@ -28864,13 +28882,14 @@ const handler = {
           } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar el pedido. Probá de nuevo.' }, 500); }
           const propio = !SF_CORTE_COLORES[col.color];
           if (propio) { try { await sfCorteColorGuardar(env, col.color, col.hex); } catch (_) {} }
-          if (sfExt) {
+          if (sfExt || fran) {
             const det = SF_CORTE_MATERIALES[material] + ' ' + col.nombre.toLowerCase() + (propio ? ' (color nuevo)' : '')
               + ' de ' + espesor + ' mm, para el ' + fecha.slice(8, 10) + '/' + fecha.slice(5, 7) + ', ' + arch.length + (arch.length === 1 ? ' archivo' : ' archivos')
               + (acl ? '. Aclaración: ' + acl.replace(/\s+/g, ' ').slice(0, 300) : '');
-            const txt = 'Sin Frontera te encargó un corte (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + det + '. Lo ves en el CRM: Sin Frontera > Cortes.';
+            const txt = fran ? 'Fran cargó un pedido de corte de Sin Frontera (#' + id + '): ' + det + '. Lo ves en el CRM: Sin Frontera > Cortes.'
+              : 'Sin Frontera te encargó un corte (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + det + '. Lo ves en el CRM: Sin Frontera > Cortes.';
             const pr = avisoAdmin(env, txt, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id }).catch(() => {});
-            const pf = sfCorteAvisoFran(env, 'Nuevo pedido de corte de Sin Frontera (#' + id + '): ' + det + '. Lo ves en el CRM, en Cortes de Sin Frontera.');
+            const pf = fran ? Promise.resolve() : sfCorteAvisoFran(env, 'Nuevo pedido de corte de Sin Frontera (#' + id + '): ' + det + '. Lo ves en el CRM, en Cortes de Sin Frontera.');
             try { ctx.waitUntil(Promise.all([pr, pf])); } catch (_) { await Promise.all([pr, pf]); }
           }
           let row = null; try { row = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
@@ -30832,6 +30851,7 @@ const handler = {
     // en el hub de 360dialog (lo manejamos abajo en notifyTemplateStatusChange).
     const minute = new Date(event.scheduledTime).getUTCMinutes();
     if (minute < 5) ctx.waitUntil(monitorTemplateStatus(env));
+    ctx.waitUntil(corteCobroTplAviso(env));   // aviso a Gaspar cuando Meta aprueba la plantilla nueva del cobro del corte
     // Alarma "sin cotizar": cada 5 min DESTILDA a los que Joaco ya cotizó (dinámico,
     // barato); a :00 y :30 (8-22 AR) además ESCANEA y etiqueta los nuevos con +20hs.
     if (minute % 5 === 0) ctx.waitUntil(syncSinCotizar(env, { addPass: (minute % 30 === 0 && hAR >= 8 && hAR <= 22) }));

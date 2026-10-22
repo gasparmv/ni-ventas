@@ -4547,6 +4547,10 @@ select.lb-sel.tr.sug, select.lb-sel.tr.vacio { color: var(--fg-subtle); font-sty
 .sfc-err { color: #f87171; font-size: 13px; }
 .sfc-err:empty { display: none; }
 .sfc-enviar { align-self: flex-start; font-size: 15px; padding: 11px 22px; }
+.sfc-abrir { font-size: 13px !important; padding: 7px 14px !important; }
+.sfc-cargar { display: flex; flex-direction: column; gap: 8px; }
+.sfc-cargar-h { display: flex; align-items: center; gap: 10px; max-width: 760px; }
+.sfc-cargar-h b { flex: 1; font-size: 14px; }
 .lb-tit.sfc-tit { margin: 14px 0 0; }
 .sfc-head { cursor: default; }
 .sfc-head:hover { background: transparent; }
