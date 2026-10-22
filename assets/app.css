@@ -4557,7 +4557,7 @@ select.lb-sel.tr.sug, select.lb-sel.tr.vacio { color: var(--fg-subtle); font-sty
 .sfc-acc { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; }
 .sfc-est-pill { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 7px; color: var(--c); background: color-mix(in srgb, var(--c) 16%, transparent); white-space: nowrap; }
 select.lb-sel.sfc-est { color: var(--c); background-color: color-mix(in srgb, var(--c) 16%, transparent); }
-.sfc-cancelar { font-size: 12px !important; padding: 4px 10px !important; }
+.sfc-cancelar, .sfc-editar { font-size: 12px !important; padding: 4px 10px !important; }
 .sfc-det { padding: 0 14px 12px 58px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .sfc-row.r-enviado .sfc-det { opacity: .62; }
 .sfc-archs { display: flex; flex-wrap: wrap; gap: 6px; }

@@ -18587,7 +18587,7 @@ function franRutaOk(request, path, url) {
   if (request.method === 'GET' && path === '/admin/sinfrontera/archivo') return !!url.searchParams.get('c');
   // También carga pedidos, por si Sin Frontera no lo hizo (Gaspar 22-oct): subir el archivo y el alta.
   if (request.method === 'PUT' && path === '/admin/sinfrontera/corte/archivo') return true;
-  return request.method === 'POST' && (path === '/admin/sinfrontera/corte/estado' || path === '/admin/sinfrontera/corte');
+  return request.method === 'POST' && (path === '/admin/sinfrontera/corte/estado' || path === '/admin/sinfrontera/corte' || path === '/admin/sinfrontera/corte/editar');
 }
 // Aviso a Fran de un pedido de corte (nuevo o cancelado), si Gaspar cargó su WhatsApp (agenda_phones 'fran'): texto si le
 // escribió al número del negocio en las últimas 23 h; si no, la plantilla de servicio (sinRespEnviar, como a Neyen).
@@ -18620,6 +18620,9 @@ async function ensureSinFronteraSchema(env) {
   // Color propio con su muestra (22-oct, migración 062).
   try { await env.DB.prepare('SELECT color_hex FROM sf_cortes LIMIT 0').all(); }
   catch (_) { try { await env.DB.prepare('ALTER TABLE sf_cortes ADD COLUMN color_hex TEXT').run(); } catch (_) {} }
+  // Edición (22-oct, migración 063): quién y cuándo lo cambió por última vez.
+  try { await env.DB.prepare('SELECT editado_at, editado_por FROM sf_cortes LIMIT 0').all(); }
+  catch (_) { for (const c of ['editado_at TEXT', 'editado_por TEXT']) { try { await env.DB.prepare('ALTER TABLE sf_cortes ADD COLUMN ' + c).run(); } catch (_) {} } }
   _sfSchemaOk = true;
 }
 // ----- Pedidos de corte de Sin Frontera (Gaspar 21-oct-2026) -----
@@ -18671,6 +18674,7 @@ function sfCorteFila(r) {
   return {
     id: r.id, created_at: r.created_at, creado_por: r.creado_por || '', material: r.material, color: r.color, color_hex: r.color_hex || '', espesor: r.espesor,
     fecha: r.fecha_necesita, aclaraciones: r.aclaraciones || '', estado: r.estado, estado_at: r.estado_at || '', estado_por: r.estado_por || '',
+    editado_at: r.editado_at || '', editado_por: r.editado_por || '',
     archivos: (Array.isArray(a) ? a : []).map(x => ({ nombre: String(x.nombre || ''), bytes: +x.bytes || 0, tipo: String(x.tipo || '') })),
   };
 }
@@ -29030,6 +29034,46 @@ const handler = {
             try { ctx.waitUntil(Promise.all([pr, pf])); } catch (_) { await Promise.all([pr, pf]); }
           }
           return json({ ok: true, corte: sfCorteFila(Object.assign({}, row, { estado, estado_at: nowIso, estado_por: por })) });
+        }
+        // POST /admin/sinfrontera/corte/editar {id, material, color, color_hex?, espesor, fecha, aclaraciones?, archivos: [{idx} | {key, nombre}]}
+        // → Gaspar o Fran corrigen un pedido de corte (Gaspar 22-oct: "permitime editar los pedidos"). En archivos, {idx} = uno que
+        // ya tenía (su posición en el pedido) y {key, nombre} = uno nuevo subido con corte/archivo; los que no vienen se sacan del
+        // pedido (el archivo queda en R2). El estado no se toca. Sin Frontera no edita.
+        if (request.method === 'POST' && path === '/admin/sinfrontera/corte/editar') {
+          if (sfExt) return json({ error: 'forbidden', motivo: 'Para cambiar un pedido, hablalo con Gaspar.' }, 403);
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const id = parseInt(body.id, 10) || 0;
+          let row = null; try { row = id ? await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first() : null; } catch (_) {}
+          if (!row) return json({ error: 'nada', motivo: 'Ese pedido no existe.' }, 404);
+          const material = String(body.material || ''), col = sfCorteColor(body.color, body.color_hex), espesor = sfCorteEspesor(body.espesor);
+          const fecha = String(body.fecha || '').trim();
+          const acl = String(body.aclaraciones || '').replace(/\r\n?/g, '\n').trim().slice(0, 2000);
+          if (!SF_CORTE_MATERIALES[material]) return json({ error: 'datos', motivo: 'Elegí el material: acrílico o PVC.' }, 400);
+          if (!col) return json({ error: 'datos', motivo: 'Elegí el color (o escribí el nombre del color nuevo).' }, 400);
+          if (!espesor) return json({ error: 'datos', motivo: 'Poné el espesor en milímetros (por ejemplo 3).' }, 400);
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha) || isNaN(Date.parse(fecha + 'T12:00:00Z'))) return json({ error: 'datos', motivo: 'Poné para cuándo lo necesitan.' }, 400);
+          // Una fecha pasada solo si ya era la del pedido (corregir otra cosa de un pedido vencido).
+          if (fecha !== row.fecha_necesita && fecha < new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10)) return json({ error: 'datos', motivo: 'Esa fecha ya pasó.' }, 400);
+          let prev = []; try { prev = JSON.parse(row.archivos || '[]'); } catch (_) {}
+          if (!Array.isArray(prev)) prev = [];
+          const arch = [];
+          for (const a of (Array.isArray(body.archivos) ? body.archivos : []).slice(0, 20)) {
+            if (a && Number.isInteger(a.idx)) { const p = prev[a.idx]; if (p && p.key && !arch.some(x => x.key === p.key)) arch.push(p); continue; }
+            const key = String((a && a.key) || '');
+            if (!key.startsWith(SF_CORTE_PREFIX) || key.includes('..') || arch.some(x => x.key === key)) continue;
+            let h = null; try { h = await env.MEDIA.head(key); } catch (_) {}
+            if (!h) continue;
+            arch.push({ key, nombre: String((a && a.nombre) || '').replace(/\s+/g, ' ').trim().slice(0, 150) || key.split('/').pop(), bytes: +h.size || 0, tipo: (h.httpMetadata && h.httpMetadata.contentType) || '' });
+          }
+          if (!arch.length) return json({ error: 'datos', motivo: 'El pedido tiene que tener al menos un archivo.' }, 400);
+          const por = fran ? 'Fran' : String(session.user || '');
+          try {
+            await env.DB.prepare('UPDATE sf_cortes SET material = ?, color = ?, color_hex = ?, espesor = ?, fecha_necesita = ?, aclaraciones = ?, archivos = ?, editado_at = ?, editado_por = ? WHERE id = ?')
+              .bind(material, col.color, col.hex || null, espesor, fecha, acl, JSON.stringify(arch), new Date().toISOString(), por, id).run();
+          } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
+          if (!SF_CORTE_COLORES[col.color]) { try { await sfCorteColorGuardar(env, col.color, col.hex); } catch (_) {} }
+          let r2 = null; try { r2 = await env.DB.prepare('SELECT * FROM sf_cortes WHERE id = ?').bind(id).first(); } catch (_) {}
+          return json({ ok: true, corte: r2 ? sfCorteFila(r2) : null });
         }
         // ---- De acá para abajo, solo Gaspar ----
         if (sfExt || fran) return json({ error: 'forbidden' }, 403);

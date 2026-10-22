@@ -7011,7 +7011,7 @@ function sfEstadoLbl(e) { const x = SF_ESTADOS.find(y => y[0] === e); return x ?
 function sfResetEstado() {
   STATE.sf = null; STATE.sfPed = null; STATE.sfQ = ''; STATE.sfUrg = false; STATE.sfEtapaCel = null; STATE._sfCargando = false; STATE._sfkDrag = null;
   STATE.sfVinc = null; STATE._sfVincFallo = 0;
-  STATE.sfCortes = null; STATE.sfcForm = null; STATE._sfcEnviando = false;
+  STATE.sfCortes = null; STATE.sfcForm = null; STATE._sfcEnviando = false; STATE.sfcEditId = null; STATE.sfcEditForm = null; STATE.sfcFormAbierto = false;
   if (STATE.sfAbierto) { STATE.sfAbierto = null; const bg = document.getElementById('sfd-bg'); if (bg) bg.remove(); }
 }
 function sfOperador() { try { return localStorage.getItem(SF_OP_KEY) || ''; } catch (_) { return ''; } }
@@ -8451,7 +8451,11 @@ const SFC_MAX_BYTES = 95 * 1024 * 1024;
 function sfcLbl(lista, v) { const x = lista.find(y => y[0] === v); return x ? x[1] : String(v || ''); }
 function sfcEstado(v) { return SFC_ESTADOS.find(y => y[0] === v) || SFC_ESTADOS[0]; }
 // El formulario vive en STATE (sobrevive a los redibujos y a cambiar de pantalla).
-function sfcForm() { return STATE.sfcForm || (STATE.sfcForm = { material: '', color: '', colorHex: '', creandoColor: false, nuevoHex: '#e11d48', nuevoNom: '', espesor: '', fecha: '', acl: '', archivos: [] }); }
+function sfcFormVacio() { return { material: '', color: '', colorHex: '', creandoColor: false, nuevoHex: '#e11d48', nuevoNom: '', espesor: '', fecha: '', acl: '', archivos: [] }; }
+function sfcForm() {
+  if (STATE.sfcEditId) return STATE.sfcEditForm || (STATE.sfcEditForm = sfcFormVacio());
+  return STATE.sfcForm || (STATE.sfcForm = sfcFormVacio());
+}
 function sfcPeso(b) { b = +b || 0; return b >= 1048576 ? (b / 1048576).toFixed(b >= 10485760 ? 0 : 1).replace('.', ',') + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; }
 function sfcHoyYmd() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 async function sfcCargar(opts) {
@@ -8503,18 +8507,36 @@ function sfcFormHtml() {
     <div class="sfc-campo"><span class="sfc-lbl">Material</span><div class="sfc-chips">${sfcChips('sfc-material', SFC_MATERIALES, F.material)}</div></div>
     <div class="sfc-campo"><span class="sfc-lbl">Color</span><div class="sfc-chips" data-sfc-colores>${sfcColoresHtml()}</div></div>
     <div class="sfc-campo"><span class="sfc-lbl">Espesor</span><div class="sfc-chips">${sfcChips('sfc-esp', SFC_ESPESORES.map(e => [e, e + ' mm']), espChip)}<input class="sfc-otro${F.espesor && !espChip ? ' on' : ''}" data-sfc-esp-otro inputmode="decimal" maxlength="6" placeholder="Otro (mm)" aria-label="Otro espesor en milímetros" value="${escapeHtml(espChip ? '' : F.espesor)}"></div></div>
-    <div class="sfc-campo"><span class="sfc-lbl">¿Para cuándo lo necesitan?</span><input type="date" class="nc-input sfc-fecha" data-sfc-fecha min="${sfcHoyYmd()}" value="${escapeHtml(F.fecha)}"></div>
+    <div class="sfc-campo"><span class="sfc-lbl">¿Para cuándo lo necesitan?</span><input type="date" class="nc-input sfc-fecha" data-sfc-fecha min="${F.fechaOrig && F.fechaOrig < sfcHoyYmd() ? F.fechaOrig : sfcHoyYmd()}" value="${escapeHtml(F.fecha)}"></div>
     <div class="sfc-campo"><span class="sfc-lbl">Aclaraciones <span class="muted">(opcional)</span></span><textarea class="nc-input sfc-acl" data-sfc-acl rows="3" maxlength="2000" placeholder="Cantidades, medidas, qué va en cada archivo, lo que haga falta">${escapeHtml(F.acl)}</textarea></div>
     <div class="sfc-err" data-sfc-err role="alert"></div>
     <button type="submit" class="btn btn-cyan sfc-enviar" data-sfc-enviar>${sfcBotonTxt()}</button>
   </form>`;
 }
+// Editar un pedido (Gaspar y Fran; Gaspar 22-oct: "permitime editar los pedidos"). Usa el mismo formulario, precargado: mientras
+// se edita, sfcForm() devuelve STATE.sfcEditForm (el pedido a medio cargar de STATE.sfcForm queda guardado aparte).
+function sfcEditar(id) {
+  const c = ((STATE.sfCortes && STATE.sfCortes.cortes) || []).find(x => x.id === id); if (!c) return;
+  STATE.sfcEditId = id;
+  STATE.sfcEditForm = Object.assign(sfcFormVacio(), {
+    material: c.material, color: c.color, colorHex: c.color_hex || '', espesor: String(c.espesor || ''), fecha: c.fecha || '', fechaOrig: c.fecha || '',
+    acl: c.aclaraciones || '', archivos: (c.archivos || []).map((a, i) => ({ id: 'e' + i, idx: i, nombre: a.nombre, bytes: a.bytes, estado: 'ok' })),
+  });
+  STATE.sfcFormAbierto = true;
+  const m = document.getElementById('main'); if (m && STATE.view === 'sf-cortes') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
+  const f = document.querySelector('.sfc-wrap .sfc-cargar'); if (f) { try { f.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) {} }
+}
+function sfcEditarCancelar() {
+  STATE.sfcEditId = null; STATE.sfcEditForm = null; STATE.sfcFormAbierto = false;
+  const m = document.getElementById('main'); if (m && STATE.view === 'sf-cortes') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
+}
 // Fran (y Gaspar) también cargan pedidos, por si Sin Frontera no lo hizo (Gaspar 22-oct): el formulario va plegado.
 function sfcCargarHtml() {
+  if (STATE.sfcEditId) return '<div class="sfc-cargar"><div class="sfc-cargar-h"><b>Editar el pedido #' + STATE.sfcEditId + '</b><button type="button" class="logi-link" data-sfc-cancelar-edit>cancelar</button></div>' + sfcFormHtml() + '</div>';
   if (!STATE.sfcFormAbierto) return '<div><button type="button" class="btn btn-ghost sfc-abrir" data-sfc-abrir-form>＋ Cargar un pedido (si Sin Frontera no lo cargó)</button></div>';
   return '<div class="sfc-cargar"><div class="sfc-cargar-h"><b>Cargar un pedido de Sin Frontera</b><button type="button" class="logi-link" data-sfc-cerrar-form>cerrar</button></div>' + sfcFormHtml() + '</div>';
 }
-function sfcBotonTxt() { return STATE._sfcEnviando ? 'Enviando…' : sfcForm().archivos.some(a => a.estado === 'subiendo') ? 'Subiendo archivos…' : 'Enviar pedido'; }
+function sfcBotonTxt() { const ed = !!STATE.sfcEditId; return STATE._sfcEnviando ? (ed ? 'Guardando…' : 'Enviando…') : sfcForm().archivos.some(a => a.estado === 'subiendo') ? 'Subiendo archivos…' : (ed ? 'Guardar cambios' : 'Enviar pedido'); }
 function sfcArchivosHtml() {
   return sfcForm().archivos.map(a => `<div class="sfc-file ${a.estado}" data-sfc-fid="${a.id}">
       <span class="sfc-file-n" title="${escapeHtml(a.nombre)}">${escapeHtml(a.nombre)}</span>
@@ -8580,10 +8602,28 @@ async function sfcEnviar() {
   if (!esp) return err('Elegí o escribí el espesor.');
   if (!/^\d{1,2}([.,]\d{1,2})?\s*(mm)?$/i.test(esp)) return err('El espesor va en milímetros, por ejemplo 3 o 2,5.');
   if (!F.fecha) return err('Poné para cuándo lo necesitan.');
-  if (F.fecha < sfcHoyYmd()) return err('Esa fecha ya pasó.');
+  if (F.fecha < sfcHoyYmd() && !(STATE.sfcEditId && F.fecha === F.fechaOrig)) return err('Esa fecha ya pasó.');
   err('');
   let quien = isSinFronteraOnly() ? sfOperador() : '';
   if (isSinFronteraOnly() && !quien && !STATE._sfOpPreguntado) { STATE._sfOpPreguntado = true; quien = await sfPedirOperador(); }
+  if (STATE.sfcEditId) {
+    const id = STATE.sfcEditId;
+    STATE._sfcEnviando = true; sfcPintarArchivos();
+    try {
+      const j = await sfFetch('/admin/sinfrontera/corte/editar', { id, material: F.material, color: F.color, color_hex: F.colorHex || '', espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
+        archivos: F.archivos.filter(a => a.estado === 'ok').map(a => a.idx != null ? { idx: a.idx } : { key: a.key, nombre: a.nombre }) });
+      const Dc = STATE.sfCortes;
+      if (Dc && !Dc.error && j.corte) Dc.cortes = (Dc.cortes || []).map(c => c.id === id ? j.corte : c);
+      STATE._sfcEnviando = false; STATE.sfcEditId = null; STATE.sfcEditForm = null; STATE.sfcFormAbierto = false;
+      const m = document.getElementById('main'); if (m && STATE.view === 'sf-cortes') { m.innerHTML = renderSinFrontera(); bindSinFrontera(); }
+      niToast('Listo, pedido #' + id + ' actualizado');
+      sfcCargar({ silent: true });
+    } catch (e) {
+      STATE._sfcEnviando = false; sfcPintarArchivos();
+      err(String((e && e.message) || 'No se pudo guardar. Probá de nuevo.'));
+    }
+    return;
+  }
   STATE._sfcEnviando = true; sfcPintarArchivos();
   try {
     const j = await sfFetch('/admin/sinfrontera/corte', { material: F.material, color: F.color, color_hex: F.colorHex || '', espesor: esp, fecha: F.fecha, aclaraciones: F.acl,
@@ -8618,9 +8658,10 @@ function sfcFilaHtml(c) {
     : `<span class="logi-pill ${dias < 0 ? 'r' : dias <= 1 ? 'a' : 'g'}">${dias < 0 ? 'Vencido: era para el ' + escapeHtml(sfFecha(c.fecha)) : dias === 0 ? 'Es para hoy' : dias === 1 ? 'Para mañana' : 'Para el ' + escapeHtml(sfFecha(c.fecha)) + ' · faltan ' + dias + ' días'}</span>`;
   const arch = (c.archivos || []).map((a, i) => `<a class="sfc-arch" href="${escapeHtml(sfUrl('c=' + c.id + '&i=' + i + '&dl=1'))}" target="_blank" rel="noopener" title="Bajar ${escapeHtml(a.nombre)} (${sfcPeso(a.bytes)})">${/^image\//.test(a.tipo) ? '🖼' : '📄'} ${escapeHtml(a.nombre)}</a>`).join('');
   const acc = adm
-    ? `<select class="lb-sel sfc-est" data-sfc-estado="${c.id}" style="--c:${E[2]}" aria-label="Estado del pedido #${c.id}">${SFC_ESTADOS.map(([v, t]) => `<option value="${v}"${v === c.estado ? ' selected' : ''}>${t}</option>`).join('')}</select>`
+    ? `<button type="button" class="btn btn-ghost sfc-editar" data-sfc-editar="${c.id}">Editar</button><select class="lb-sel sfc-est" data-sfc-estado="${c.id}" style="--c:${E[2]}" aria-label="Estado del pedido #${c.id}">${SFC_ESTADOS.map(([v, t]) => `<option value="${v}"${v === c.estado ? ' selected' : ''}>${t}</option>`).join('')}</select>`
     : `<span class="sfc-est-pill" style="--c:${E[2]}">${E[1]}</span>${c.estado === 'pedido' ? `<button type="button" class="btn btn-ghost sfc-cancelar" data-sfc-cancelar="${c.id}">Cancelar</button>` : ''}`;
-  const cambio = c.estado !== 'pedido' && c.estado_at ? ' · ' + E[1].toLowerCase() + ' ' + sfFechaHora(c.estado_at) + (c.estado_por ? ' (' + nkbNom(c.estado_por) + ')' : '') : '';
+  const cambio = (c.estado !== 'pedido' && c.estado_at ? ' · ' + E[1].toLowerCase() + ' ' + sfFechaHora(c.estado_at) + (c.estado_por ? ' (' + nkbNom(c.estado_por) + ')' : '') : '')
+    + (c.editado_at ? ' · editado ' + sfFechaHora(c.editado_at) + (c.editado_por ? ' (' + nkbNom(c.editado_por) + ')' : '') : '');
   return `<div class="lb-row sfc-row${cerrado ? ' r-enviado' : ''}" data-sfc-row="${c.id}">
     <div class="lb-head sfc-head">
       <span class="ln-num">#${c.id}</span>
@@ -8741,6 +8782,8 @@ function sfcBind(root) {
   root.addEventListener('change', e => { const s = e.target.closest && e.target.closest('[data-sfc-estado]'); if (s) sfcCambiarEstado(+s.getAttribute('data-sfc-estado'), s.value, s); });
   root.addEventListener('click', e => {
     if (e.target.closest('[data-sfc-fran]')) { sfcFranUI(); return; }
+    const ed = e.target.closest('[data-sfc-editar]'); if (ed) { sfcEditar(+ed.getAttribute('data-sfc-editar')); return; }
+    if (e.target.closest('[data-sfc-cancelar-edit]')) { sfcEditarCancelar(); return; }
     const abrir = e.target.closest('[data-sfc-abrir-form], [data-sfc-cerrar-form]');
     if (abrir) {
       STATE.sfcFormAbierto = abrir.hasAttribute('data-sfc-abrir-form');
