@@ -5116,6 +5116,12 @@ async function buildReporteDiario(env) {
       if (out.ocAbiertas) out.ocAbiertas.bajasHoy = (rb && rb.n) || 0;
     } catch (_) {}
   } catch (_) {}
+  // 6) Comunidad Al Infinito: formularios de pago de hoy (GHL) y los que siguen con POR PAGAR CURSO.
+  try {
+    const f = await env.DB.prepare(`SELECT COUNT(DISTINCT CASE WHEN phone != '' THEN phone ELSE tel_raw END) AS n FROM ghl_oferta_envios WHERE ts >= ${REPORTE_DIA_DESDE} AND ts < ${REPORTE_DIA_HASTA}`).first();
+    const cpp = await buildCursosPorPagar(env);
+    out.cursosPP = { hoy: (f && f.n) || 0, sinPagar: cpp ? cpp.total : 0 };
+  } catch (_) {}
   return out;
 }
 function formatReporteDiario(d) {
@@ -5132,7 +5138,7 @@ function formatReporteDiario(d) {
     `   Joaco: ${d.chatsJoaco} · 2° (Facu/Agus/Debi): ${d.chatsNadia}\n\n` +
     `📋 Presupuestos enviados: ${d.presupTotal}\n` +
     `   Joaco: ${d.presupJoaco} · 2° (Facu/Agus/Debi): ${d.presupNadia}\n\n` +
-    `🧾 Órdenes de compra: ${d.ocEnviadas}${d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina}${d.ocAbiertas.debi ? ', Debi ' + d.ocAbiertas.debi : ''})` : ''}${d.ocAbiertas && d.ocAbiertas.bajasHoy ? ` · dadas de baja hoy ${d.ocAbiertas.bajasHoy}` : ''}`
+    `🧾 Órdenes de compra: ${d.ocEnviadas}${d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina}${d.ocAbiertas.debi ? ', Debi ' + d.ocAbiertas.debi : ''})` : ''}${d.ocAbiertas && d.ocAbiertas.bajasHoy ? ` · dadas de baja hoy ${d.ocAbiertas.bajasHoy}` : ''}${(d.cursosPP && (d.cursosPP.hoy || d.cursosPP.sinPagar) ? ` · 💳 Comunidad: ${d.cursosPP.hoy} formulario${d.cursosPP.hoy === 1 ? '' : 's'} hoy, ${d.cursosPP.sinPagar} sin pagar` : '')}`
   );
 }
 async function maybeReporteDiario(env) {
@@ -5148,7 +5154,7 @@ async function maybeReporteDiario(env) {
     // Var {{3}} (carteles): si hubo corpóreas, mostramos el desglose inline (ej "62 (39 corp)")
     // para que se vea en la plantilla SIN cambiarle las variables.
     const cartVar = d.corporeas > 0 ? `${d.cartelesNeon} (${d.corporeas} corp)` : String(d.carteles);
-    const ocVar = String(d.ocEnviadas) + (d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina}${d.ocAbiertas.debi ? ', Debi ' + d.ocAbiertas.debi : ''})` : '') + (d.ocAbiertas && d.ocAbiertas.bajasHoy ? ` · dadas de baja hoy ${d.ocAbiertas.bajasHoy}` : '');
+    const ocVar = String(d.ocEnviadas) + (d.ocAbiertas && d.ocAbiertas.total ? ` · sin pagar ${d.ocAbiertas.total} (Joaco ${d.ocAbiertas.joaco}, Facu ${d.ocAbiertas.facundo}, Agus ${d.ocAbiertas.agustina}${d.ocAbiertas.debi ? ', Debi ' + d.ocAbiertas.debi : ''})` : '') + (d.ocAbiertas && d.ocAbiertas.bajasHoy ? ` · dadas de baja hoy ${d.ocAbiertas.bajasHoy}` : '') + (d.cursosPP && (d.cursosPP.hoy || d.cursosPP.sinPagar) ? ` · 💳 Comunidad: ${d.cursosPP.hoy} formulario${d.cursosPP.hoy === 1 ? '' : 's'} hoy, ${d.cursosPP.sinPagar} sin pagar` : '');
     const params11 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia, ocVar].map(String);
     const params10 = [fechaDisplay, d.total, cartVar, d.cursos, d.precotiz, d.chatsJoaco, d.chatsNadia, d.presupTotal, d.presupJoaco, d.presupNadia].map(String);
     const texto = formatReporteDiario(d);
@@ -15490,7 +15496,16 @@ function timingSafeEqualStr(a, b) {
   for (let i = 0; i < Math.max(a.length, b.length); i++) d |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
   return d === 0;
 }
-async function processGhlOferta(env, body) {
+// Formulario de GHL: WhatsApp al cliente + POR PAGAR CURSO y aviso al equipo (cursoPorPagarAlta), pase lo que pase con el WhatsApp.
+// Con ctx, la etiqueta y los avisos van en segundo plano (a GHL se le contesta enseguida).
+async function processGhlOferta(env, body, ctx = null) {
+  const r = await processGhlOfertaEnvio(env, body);
+  const b = body || {};
+  const alta = (async () => { try { await cursoPorPagarAlta(env, { phone: r.phone || '', nombre: String(b.nombre || '').slice(0, 120), email: String(b.email || '').slice(0, 160), contactId: String(b.contact_id || '').slice(0, 80), telRaw: b.telefono }, r); } catch (_) {} })();
+  if (ctx && ctx.waitUntil) ctx.waitUntil(alta); else await alta;
+  return r;
+}
+async function processGhlOfertaEnvio(env, body) {
   await ensureGhlOfertaSchema(env);
   const b = body || {};
   const nowIso = new Date().toISOString();
@@ -15513,9 +15528,10 @@ async function processGhlOferta(env, body) {
   const fin = (status, error, wamid) => env.DB.prepare('UPDATE ghl_oferta_envios SET status = ?, error = ?, wamid = ? WHERE id = ?').bind(status, error || null, wamid || null, id).run();
   if ((await kvGet(env, 'ghl_oferta_on', '1')) !== '1') { await fin('pausado', 'kv ghl_oferta_on apagado'); return { status: 'pausado', phone }; }
   if (await isWaBillingBlocked(env)) { await fin('failed', 'WhatsApp bloqueado por pago'); return { status: 'failed', phone, error: 'whatsapp bloqueado' }; }
-  // Bandeja de cursos (Abril) ANTES de mandar, salvo que sea un chat de carteles activo (no se lo sacamos al vendedor).
+  // Bandeja de cursos (Abril) ANTES de mandar, salvo que sea un chat de carteles activo (no se lo sacamos al vendedor) o
+  // del equipo (la prueba del 22-oct con el número de Bruno le movió su chat a cursos).
   try {
-    await env.DB.prepare(
+    if (!(await esTelefonoInterno(env, phone))) await env.DB.prepare(
       "INSERT INTO wa_chats_summary (phone, inbox, updated_at) VALUES (?, 'cursos', ?) ON CONFLICT(phone) DO UPDATE SET inbox = 'cursos', updated_at = excluded.updated_at " +
       "WHERE (wa_chats_summary.inbox IS NULL OR wa_chats_summary.inbox IN ('oculto', 'general', '')) AND NOT (" + chatCartelesActivoSql('wa_chats_summary.phone', 'wa_chats_summary.assigned_to') + ")"
     ).bind(phone, nowIso).run();
@@ -15537,6 +15553,202 @@ async function processGhlOferta(env, body) {
     } catch (_) {}
   }
   return { status: 'sent', phone };
+}
+
+// ===== POR PAGAR CURSO: la "orden de compra" de cursos (Gaspar 22-oct: "el mismo sistema que tienen los chicos de neón") =====
+// Cada formulario de pago de /oferta (GHL) deja el chat con la etiqueta POR PAGAR CURSO y avisa a Abril (a su WhatsApp),
+// con copia a Gaspar y Bruno. Fuente de verdad = la etiqueta. Se cierra SOLO con comprobante en el chat (Gaspar: "tiene
+// que pagar con comprobante"): el OCR de cursos (processPaymentProof) la saca cuando lee uno; "✓ Ya pagó" del popup busca
+// el comprobante y, si no lo encuentra, queda "falta el comprobante" y sigue apareciendo. "✕ Se cayó" (con motivo) la saca.
+// cursos_por_pagar = datos del formulario + estado marcado; cursos_por_pagar_log = historial.
+// kv: cursos_pp_aviso_on (avisos por formulario) y lista_cursos_pp_on (lista de las 10 AR), '0' = apagado.
+const CURSO_PP_LABEL_NAME = 'POR PAGAR CURSO';
+const CURSO_PP_LABEL_COLOR = '#f97316';
+const CURSO_PP_DIAS_MAX = 45;
+let _cursoPPOk = false;
+async function ensureCursoPorPagar(env) {
+  if (_cursoPPOk) return;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS cursos_por_pagar (phone TEXT PRIMARY KEY, nombre TEXT, email TEXT, contact_id TEXT, form_at TEXT, n_forms INTEGER NOT NULL DEFAULT 0, estado TEXT, motivo TEXT, estado_por TEXT, estado_at TEXT, pagado_at TEXT, pago_wamid TEXT, updated_at TEXT)").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS cursos_por_pagar_log (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, accion TEXT, resultado TEXT, motivo TEXT, por TEXT, at TEXT)").run();
+  _cursoPPOk = true;
+}
+async function cursoPorPagarTag(env, phone, on) {
+  const id = await ensureLabelId(env, CURSO_PP_LABEL_NAME, CURSO_PP_LABEL_COLOR);
+  if (!id) return;
+  if (on) await env.DB.prepare('INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, ?)').bind(phone, id, new Date().toISOString()).run();
+  else await env.DB.prepare('DELETE FROM contact_labels WHERE phone = ? AND label_id = ?').bind(phone, id).run();
+}
+async function hasCursoPorPagarLabel(env, phone) {
+  try {
+    const r = await env.DB.prepare('SELECT 1 AS x FROM contact_labels cl JOIN labels l ON l.id = cl.label_id WHERE cl.phone = ? AND l.name = ? LIMIT 1').bind(String(phone || '').replace(/\D/g, ''), CURSO_PP_LABEL_NAME).first();
+    return !!r;
+  } catch (_) { return false; }
+}
+function cursoPPLog(env, phone, accion, resultado, motivo, por) {
+  return env.DB.prepare('INSERT INTO cursos_por_pagar_log (phone, accion, resultado, motivo, por, at) VALUES (?, ?, ?, ?, ?, ?)').bind(phone, accion, resultado || '', motivo || '', por || '', new Date().toISOString()).run().catch(() => null);
+}
+// Aviso a Abril (su WhatsApp, agenda 'abril') con copia a Gaspar y Bruno. Mismo caño que la alarma de cursos: texto si
+// le escribieron al número del negocio en las últimas 23 h, si no la plantilla de servicio (una línea, 800 caracteres).
+async function cursoPPAvisar(env, clave, texto, corto) {
+  if ((await kvGet(env, 'cursos_pp_aviso_on', '1')) !== '1') return;
+  let tels = {};
+  try { for (const x of (await env.DB.prepare("SELECT usuario, phone FROM agenda_phones WHERE usuario IN ('abril', 'bruno')").all()).results || []) tels[x.usuario] = normalizeArPhone(x.phone) || ''; } catch (_) {}
+  const gaspar = normalizeArPhone(env.ADMIN_NOTIFY_PHONE) || '5491155604999';
+  const dest = [['abril', tels.abril], ['gaspar', gaspar], ['bruno', tels.bruno]];
+  const ya = new Set();
+  for (const [para, ph] of dest) {
+    if (!ph || ya.has(ph)) continue;
+    ya.add(ph);
+    try { await avisoInterno(env, { para, tipo: 'curso_por_pagar', prioridad: 'P2', clave: clave + ':' + para, texto, textoPlantilla: corto, legacy: () => sinRespEnviar(env, ph, texto, corto), legacyDest: ph }); } catch (_) {}
+  }
+}
+// Alta desde el formulario de GHL (lo llama processGhlOferta con el resultado del WhatsApp al cliente). phone = '' si el
+// teléfono vino mal: no hay chat que etiquetar, pero el aviso sale igual (con el mail).
+async function cursoPorPagarAlta(env, d, envio) {
+  await ensureCursoPorPagar(env);
+  const nowIso = new Date().toISOString();
+  const nombre = String(d.nombre || '').replace(/\s+/g, ' ').trim();
+  let prevForm = null;
+  if (d.phone) {
+    const prev = await env.DB.prepare('SELECT form_at, estado FROM cursos_por_pagar WHERE phone = ?').bind(d.phone).first();
+    prevForm = prev && prev.form_at;
+    const abierto = prev && (prev.estado === 'abierto' || prev.estado === 'reclamado');
+    await env.DB.prepare(
+      'INSERT INTO cursos_por_pagar (phone, nombre, email, contact_id, form_at, n_forms, estado, estado_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?) ' +
+      "ON CONFLICT(phone) DO UPDATE SET nombre = COALESCE(NULLIF(excluded.nombre, ''), nombre), email = COALESCE(NULLIF(excluded.email, ''), email), " +
+      "contact_id = COALESCE(NULLIF(excluded.contact_id, ''), contact_id), form_at = excluded.form_at, n_forms = n_forms + 1, updated_at = excluded.updated_at" +
+      (abierto ? '' : ", estado = 'abierto', estado_at = excluded.estado_at, motivo = NULL, estado_por = NULL, pagado_at = NULL, pago_wamid = NULL")
+    ).bind(d.phone, nombre, d.email || '', d.contactId || '', nowIso, 'abierto', nowIso, nowIso).run();
+    await cursoPorPagarTag(env, d.phone, true);
+    await cursoPPLog(env, d.phone, 'formulario', envio && envio.status, '', 'ghl');
+  }
+  // GHL a veces manda el mismo evento dos veces seguidas: un solo aviso cada 10 minutos por número.
+  if (prevForm && Date.now() - Date.parse(prevForm) < 10 * 60 * 1000) return;
+  const tel = d.phone ? (corteTelFmt(d.phone) || '+' + d.phone) : '';
+  const st = envio && envio.status;
+  const queWa = !d.phone ? `El teléfono vino mal ("${String(d.telRaw || '').slice(0, 30)}"): contactalo por mail.`
+    : st === 'sent' ? 'Le llegó tu mensaje de bienvenida por WhatsApp.'
+    : st === 'dedup' ? 'Volvió a completar el formulario (ya le habíamos escrito en la semana).'
+    : st === 'pausado' ? 'El mensaje automático está pausado: escribile vos.'
+    : `No le pudimos mandar el WhatsApp (${String((envio && envio.error) || 'error').slice(0, 80)}): escribile vos.`;
+  const quien = [nombre || 'Sin nombre', tel, d.email || ''].filter(Boolean).join(' · ');
+  const texto = `💳 Formulario de pago de la Comunidad Al Infinito\n${quien}\n${queWa}` + (d.phone ? '\nQuedó con la etiqueta POR PAGAR CURSO hasta que mande el comprobante.' : '');
+  const corto = `💳 Formulario de pago de la Comunidad Al Infinito: ${quien}. ${queWa}` + (d.phone ? ' Quedó con la etiqueta POR PAGAR CURSO hasta que mande el comprobante.' : '');
+  await cursoPPAvisar(env, 'curso-pp:' + (d.phone || d.email || d.contactId || 'x') + ':' + nowIso.slice(0, 16), texto, corto);
+}
+// Cierre por comprobante (OCR) o verificación del popup: saca la etiqueta y deja el registro. Solo si la tenía.
+async function cursoPorPagarCerrar(env, phone, o = {}) {
+  if (!(await hasCursoPorPagarLabel(env, phone))) return false;
+  await ensureCursoPorPagar(env);
+  const nowIso = new Date().toISOString();
+  await cursoPorPagarTag(env, phone, false);
+  await env.DB.prepare("UPDATE cursos_por_pagar SET estado = 'pagado', pagado_at = ?, pago_wamid = ?, estado_por = ?, estado_at = ?, updated_at = ? WHERE phone = ?").bind(nowIso, o.wamid || null, o.por || 'ocr', nowIso, nowIso, phone).run().catch(() => null);
+  await cursoPPLog(env, phone, 'pagado', o.via || 'comprobante', o.monto ? '$' + o.monto : '', o.por || 'ocr');
+  return true;
+}
+// Los chats con POR PAGAR CURSO, con el estado para el popup y la lista. Mismo criterio que buildOcAbiertas.
+async function buildCursosPorPagar(env) {
+  const lid = await ensureLabelId(env, CURSO_PP_LABEL_NAME, CURSO_PP_LABEL_COLOR);
+  if (!lid) return null;
+  await ensureCursoPorPagar(env);
+  const rows = (await env.DB.prepare(
+    `SELECT cl.phone, cl.created_at AS tag_at, s.contact_name, s.last_direction, s.last_msg_type,
+            c.nombre, c.email, c.form_at, c.n_forms, c.estado, c.estado_at, c.estado_por
+       FROM contact_labels cl
+       LEFT JOIN wa_chats_summary s ON s.phone = cl.phone
+       LEFT JOIN cursos_por_pagar c ON c.phone = cl.phone
+      WHERE cl.label_id = ?`
+  ).bind(lid).all()).results || [];
+  const ultIn = {};
+  for (let i = 0; i < rows.length; i += 40) {
+    const lote = rows.slice(i, i + 40);
+    try {
+      const rs = await env.DB.batch(lote.map(r => env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type NOT IN ('status','reaction','revoke','edit','errors','system','unsupported')").bind(r.phone)));
+      lote.forEach((r, k) => { const x = rs[k] && rs[k].results && rs[k].results[0]; ultIn[r.phone] = (x && x.t) || null; });
+    } catch (_) {}
+  }
+  const now = Date.now(), items = [];
+  let viejas = 0;
+  for (const r of rows) {
+    const ref = r.form_at || r.tag_at || null;
+    const dias = ref ? Math.max(0, Math.floor((now - Date.parse(ref)) / 864e5)) : null;
+    if (dias != null && dias > CURSO_PP_DIAS_MAX) { viejas++; continue; }
+    const reclamado = r.estado === 'reclamado' && r.estado_at && ref && Date.parse(r.estado_at) >= Date.parse(ref);
+    const ultEsDelCliente = String(r.last_direction || '') === 'inbound' && !['reaction', 'revoke', 'edit', 'errors', 'system', 'unsupported'].includes(String(r.last_msg_type || ''));
+    const ui = ultIn[r.phone];
+    const respondio = !!(ui && ref && Date.parse(ui) > Date.parse(ref));
+    const estado = reclamado ? 'marcaste que pagó: falta el comprobante (pedíselo)'
+      : (ultEsDelCliente ? 'te escribió, respondele' : (respondio ? 'respondió, falta que pague' : 'sin respuesta desde el formulario'));
+    const horas = ref ? (now - Date.parse(ref)) / 36e5 : null;
+    items.push({
+      phone: r.phone, name: String(r.nombre || r.contact_name || '').replace(/\s+/g, ' ').trim(), email: r.email || '', dias, ref, n_forms: r.n_forms || 0,
+      canal: String(r.phone).length > 14 ? 'ig' : 'wa', estado, urgente: !reclamado && ultEsDelCliente,
+      reclamado: reclamado ? { at: r.estado_at, por: r.estado_por || '' } : null,
+      urgente3h: !reclamado && !respondio && horas != null && horas >= 3 && horas <= 48,
+    });
+  }
+  items.sort((a, b) => (b.urgente - a.urgente) || ((b.dias || 0) - (a.dias || 0)));
+  return { items, viejas, total: items.length };
+}
+// "✓ Ya pagó": solo vale con comprobante. 1) uno ya leído desde 12 h antes del formulario; 2) se leen (OCR) las imágenes y
+// PDF que mandó desde entonces y todavía no se leyeron; si alguno es comprobante, processPaymentProof cierra solo.
+async function cursoPorPagarVerificar(env, it, por) {
+  const desde = new Date(Date.parse(it.ref || new Date().toISOString()) - 12 * 3600e3).toISOString();
+  const ya = async () => env.DB.prepare('SELECT wamid, monto FROM wa_pago_proof WHERE phone = ? AND is_payment = 1 AND ts >= ? ORDER BY ts DESC LIMIT 1').bind(it.phone, desde).first().catch(() => null);
+  let p = await ya();
+  if (!p) {
+    const imgs = (await env.DB.prepare("SELECT wamid, media_url AS r2Key, msg_type AS msgType, body, ts, sender_name FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type IN ('image','document') AND IFNULL(media_url, '') != '' AND ts >= ? AND wamid NOT IN (SELECT wamid FROM wa_pago_proof) ORDER BY ts DESC LIMIT 5").bind(it.phone, desde).all().catch(() => ({ results: [] }))).results || [];
+    for (const m of imgs) {
+      try { await processPaymentProof(env, { wamid: m.wamid, phone: it.phone, senderName: m.sender_name || '', r2Key: m.r2Key, msgType: m.msgType, caption: m.body || '', ts: m.ts, modo: 'cursos' }); } catch (_) {}
+    }
+    if (!(await hasCursoPorPagarLabel(env, it.phone))) return { verificado: true };   // lo cerró el OCR recién
+    p = await ya();
+  }
+  if (p) { await cursoPorPagarCerrar(env, it.phone, { via: 'comprobante (popup)', wamid: p.wamid, monto: p.monto, por }); return { verificado: true }; }
+  return { verificado: false };
+}
+function lineaCursoPP(r, i) {
+  const quien = r.canal === 'ig' ? `${r.name || 'cliente'} (IG)` : `${r.name || 'cliente'} ${corteTelFmt(r.phone) || '+' + r.phone}`;
+  const dias = r.dias == null ? '' : (r.dias === 0 ? ' · formulario de hoy' : ` · formulario hace ${r.dias} día${r.dias === 1 ? '' : 's'}`);
+  return `${i + 1}. ${quien}${dias} · ${r.estado}`;
+}
+// Lista de las 10 AR (lun-sáb) a Abril, con copia a Gaspar y Bruno: los que siguen sin mandar el comprobante. Una por día
+// (kv lista_cursos_pp_sent); hasta 3 intentos si no sale. opts.dry = solo armarla; opts.force = aunque esté apagada o ya salió.
+async function maybeListaCursosPP(env, opts = {}) {
+  const fechaAR = new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10);
+  const dow = new Date(fechaAR + 'T12:00:00Z').getUTCDay();
+  try {
+    if (!opts.dry && !opts.force) {
+      if ((await kvGet(env, 'lista_cursos_pp_on', '1')) !== '1' || dow === 0) return { skipped: 'off_o_domingo' };
+      if ((await kvGet(env, 'lista_cursos_pp_sent', '')) === fechaAR) return { skipped: 'ya_enviada' };
+      const kt = 'lista_cursos_pp_try:' + fechaAR, tries = parseInt(await kvGet(env, kt, '0'), 10) || 0;
+      if (tries >= 3) return { skipped: 'max_intentos' };
+      await kvSet(env, kt, String(tries + 1));
+    }
+    const b = await buildCursosPorPagar(env);
+    if (!b) return { error: 'query' };
+    const lines = b.items.map(lineaCursoPP);
+    if (b.viejas) lines.push(`(+${b.viejas} con más de ${CURSO_PP_DIAS_MAX} días: si se cayeron, sacales la etiqueta POR PAGAR CURSO)`);
+    if (opts.dry) return { ok: true, dry: true, total: b.total, lines };
+    if (!b.total) { await kvSet(env, 'lista_cursos_pp_sent', fechaAR); return { ok: true, total: 0, enviado: false }; }
+    const texto = `💳 Comunidad Al Infinito — completaron el formulario de pago y todavía no mandaron el comprobante (${b.total}):\n\n` + lines.join('\n') + '\n\nEn el CRM: bandeja de cursos → 💰 Por cobrar.';
+    let corto = `💳 Comunidad Al Infinito — ${b.total} sin mandar el comprobante: `;
+    let n = 0;
+    for (const r of b.items) {
+      const it = (r.name || '…' + String(r.phone).slice(-4)) + (r.dias ? ' ' + r.dias + 'd' : ' hoy') + (r.urgente ? ' (te escribió)' : '');
+      if ((corto + it).length > 700) break;
+      corto += (n ? ', ' : '') + it; n++;
+    }
+    if (b.total > n) corto += ' …y ' + (b.total - n) + ' más';
+    corto += '. El detalle está en la bandeja de cursos del CRM (💰 Por cobrar).';
+    if (opts.force && opts.dest) {   // prueba manual a un solo destinatario
+      const r = await sinRespEnviar(env, opts.dest, texto, corto);
+      return { ok: !!(r && r.ok), total: b.total, dest: opts.dest };
+    }
+    await cursoPPAvisar(env, 'lista-curso-pp:' + fechaAR, texto, corto);
+    await kvSet(env, 'lista_cursos_pp_sent', fechaAR);
+    return { ok: true, total: b.total };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
 }
 
 // ============================================================================
@@ -17214,18 +17426,21 @@ async function processPaymentProof(env, m) {
   // Los comprobantes de CARTELES (contacto con "POR PAGAR") los maneja processCartelPagos
   // (saca "POR PAGAR" + pone "Cartel primer pago"). Acá SOLO procesamos los del lanzamiento.
   try { if (await hasPorPagarLabel(env, m.phone)) return; } catch (_) {}
+  // Completó el formulario de pago de la Comunidad (POR PAGAR CURSO): su comprobante es del curso aunque sea cliente de
+  // corte o de carteles → no se filtra, y si es un pago se le saca la etiqueta (abajo).
+  const ppCurso = await hasCursoPorPagarLabel(env, m.phone);
   // Clientes del servicio de CORTE (alumnos o pedidos de corte): sus comprobantes los maneja el vigía de corte
   // (corteVigiaPago → corte_pago_check + caja). Antes se colaban como "Nuevo pago" del lanzamiento: el 12-oct
   // 3 cobros de corte ($7.700 a $18.375) se avisaron a Gaspar y Bruno como pagos del curso.
   try {
     const corte = await env.DB.prepare("SELECT (EXISTS (SELECT 1 FROM corte_alumnos WHERE telefono = ?1) OR EXISTS (SELECT 1 FROM corte_pedidos WHERE telefono = ?1)) AS v").bind(m.phone).first();
-    if (corte && corte.v) return;
+    if (corte && corte.v && !ppCurso) return;
   } catch (_) {}
   // Clientes de CARTELES sin "POR PAGAR" (pagan el 50% restante, o la seña sin OC): tampoco son del lanzamiento. Antes
   // se avisaban a Gaspar y Bruno como "pago lanzamiento" y el chat se iba a cursos, sacándole el cliente al vendedor
   // (oct: …8469 de Facu, …8787, …1070, …1296). Salvo que el cliente nombre el lanzamiento ("comunidad al infinito").
   try {
-    if (!(await hasLaunchKeyPhrase(env, m.phone, m.caption))) {
+    if (!ppCurso && !(await hasLaunchKeyPhrase(env, m.phone, m.caption))) {
       const c = await env.DB.prepare(
         `SELECT (EXISTS (SELECT 1 FROM oc_enviadas o WHERE o.phone = ?1 AND o.ts_out >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-120 days'))
               OR EXISTS (SELECT 1 FROM pedidos p WHERE substr(replace(IFNULL(p.telefono, ''), ' ', ''), -10) = substr(?1, -10) AND p.fecha >= date('now', '-120 days'))
@@ -17257,6 +17472,7 @@ async function processPaymentProof(env, m) {
       "UPDATE wa_pago_proof SET is_payment=?, clasificacion=?, monto=?, moneda=?, cuenta=?, titular=?, banco=?, confianza=?, raw=? WHERE wamid=?"
     ).bind(esPago ? 1 : 0, clasificacion, monto, (a && a.moneda) || 'ARS', cuenta, (a && a.titular_destino) || '', (a && a.banco) || '', (a && +a.confianza) || 0, JSON.stringify(a || {}).slice(0, 1500), m.wamid).run();
   } catch (_) {}
+  if (esPago && ppCurso) { try { await cursoPorPagarCerrar(env, m.phone, { via: 'comprobante', wamid: m.wamid, monto }); } catch (_) {} }
   if (labelName) {
     const color = '#22c55e';  // pago lanzamiento = verde
     const lid = await ensureLabelId(env, labelName, color);
@@ -20958,7 +21174,7 @@ const handler = {
       try { body = await request.json(); } catch (_) {}
       try { await env.DB.prepare('INSERT INTO wa_webhook_log (ts, payload) VALUES (?, ?)').bind(new Date().toISOString(), 'GHL_OFERTA: ' + JSON.stringify(body).slice(0, 2000)).run(); } catch (_) {}
       if (!body || typeof body !== 'object') return json({ ok: true, status: 'failed', error: 'json invalido' });
-      try { return json({ ok: true, ...(await processGhlOferta(env, body)) }); }
+      try { return json({ ok: true, ...(await processGhlOferta(env, body, ctx)) }); }
       catch (e) { return json({ ok: true, status: 'failed', error: String(e && e.message || e).slice(0, 200) }); }
     }
 
@@ -21257,9 +21473,11 @@ const handler = {
                   const _pc = (async () => {
                     try {
                       if ((await kvGet(env, 'cursos_ocr_pagos_on', '0')) !== '1') return;
+                      // POR PAGAR CURSO (formulario de pago de la Comunidad): se lee siempre, esté donde esté el chat.
+                      const ppc = await hasCursoPorPagarLabel(env, phone);
                       const ib = await env.DB.prepare('SELECT inbox FROM wa_chats_summary WHERE phone = ?').bind(phone).first();
-                      if (!ib || ib.inbox !== 'cursos') return;
-                      if (await esTelefonoInterno(env, phone)) return;
+                      if (!ppc && (!ib || ib.inbox !== 'cursos')) return;
+                      if (!ppc && await esTelefonoInterno(env, phone)) return;
                       await processPaymentProof(env, { wamid, phone, senderName, r2Key, msgType, caption: msgBody, ts, modo: 'cursos' });
                     } catch (_) {}
                   })();
@@ -28296,6 +28514,50 @@ const handler = {
       // mandó la OC, columna oc_enviadas.vendedor): secundario (Nadia) ve las suyas; principal
       // (Joaco) las no-secundarias; admin (Gaspar) todas. Filtra cartel!='' para excluir las
       // filas históricas seedeadas (sin parsear). Barato: lee oc_enviadas + un NOT EXISTS.
+      // Popup "💳 Comunidad sin pagar" (Abril = rol cursos, y admin): los chats con POR PAGAR CURSO (ver buildCursosPorPagar).
+      if (request.method === 'GET' && path === '/admin/cursos/por-pagar') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin' && role !== 'cursos') return json({ error: 'forbidden' }, 403);
+        const b = await buildCursosPorPagar(env);
+        if (!b) return json({ ok: true, items: [], urgent_max: '' });
+        const urg = b.items.filter(x => x.urgente3h).map(x => x.ref || '').sort();
+        return json({ ok: true, items: b.items, viejas: b.viejas, urgent_max: urg.length ? urg[urg.length - 1] : '' });
+      }
+      // {phone, accion:'pagado'|'baja', motivo?}. 'pagado' solo con comprobante (cursoPorPagarVerificar); si no aparece queda
+      // 'reclamado' y sigue en el popup. 'baja' (con motivo) saca POR PAGAR CURSO. Todo queda en cursos_por_pagar_log.
+      if (request.method === 'POST' && path === '/admin/cursos/por-pagar/marcar') {
+        const role = await getSessionRole(env, session.user);
+        if (role !== 'admin' && role !== 'cursos') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const phone = String(body.phone || '').replace(/\D/g, '');
+        const accion = String(body.accion || '');
+        if (!phone || !['pagado', 'baja'].includes(accion)) return json({ error: 'faltan datos' }, 400);
+        const motivo = String(body.motivo || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+        if (accion === 'baja' && !motivo) return json({ error: 'elegí el motivo' }, 400);
+        const b = await buildCursosPorPagar(env);
+        const it = b ? b.items.find(x => x.phone === phone) : null;
+        if (!it) return json({ ok: true, ya_cerrada: true });
+        const nowIso = new Date().toISOString(), por = String(session.user || '');
+        if (accion === 'baja') {
+          await cursoPorPagarTag(env, phone, false);
+          await env.DB.prepare("UPDATE cursos_por_pagar SET estado = 'baja', motivo = ?, estado_por = ?, estado_at = ?, updated_at = ? WHERE phone = ?").bind(motivo, por, nowIso, nowIso, phone).run();
+          await cursoPPLog(env, phone, 'baja', 'baja', motivo, por);
+          return json({ ok: true, baja: true });
+        }
+        const v = await cursoPorPagarVerificar(env, it, por);
+        if (v.verificado) return json({ ok: true, verificado: true, detalle: 'comprobante en el chat' });
+        await env.DB.prepare("INSERT INTO cursos_por_pagar (phone, form_at, estado, estado_por, estado_at, updated_at) VALUES (?, ?, 'reclamado', ?, ?, ?) ON CONFLICT(phone) DO UPDATE SET estado = 'reclamado', estado_por = excluded.estado_por, estado_at = excluded.estado_at, updated_at = excluded.updated_at").bind(phone, it.ref || nowIso, por, nowIso, nowIso).run();
+        await cursoPPLog(env, phone, 'pagado', 'reclamado_sin_comprobante', '', por);
+        return json({ ok: true, verificado: false });
+      }
+      // Lista de las 10 AR de POR PAGAR CURSO: {} = vista previa · {send:true} = manda a Abril + copias · {send:true, a:"549…"} = solo a ese número.
+      if (request.method === 'POST' && path === '/admin/lista-cursos-pp-test') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let b = {}; try { b = await request.json(); } catch (_) {}
+        if (!b.send) return json(await maybeListaCursosPP(env, { dry: true }));
+        return json(await maybeListaCursosPP(env, { force: true, dest: b.a ? (normalizeArPhone(b.a) || '') : '' }));
+      }
+
       // Popup "🧾 OC sin pagar": las OC abiertas del vendedor (admin: todas), con el estado y la marca "dijo que pagó".
       if (request.method === 'GET' && path === '/admin/oc/pendientes') {
         const role = await getSessionRole(env, session.user);
@@ -31002,6 +31264,7 @@ const handler = {
     if (hAR === 9) ctx.waitUntil((async () => { await maybeReporteLlamar(env); await maybeListaAgus(env); })());
     // 10 AR (lun-sáb): a cada vendedor, SUS órdenes de compra sin pagar (kv lista_oc_on; default apagado).
     if (hAR === 10) ctx.waitUntil(maybeListaOC(env));
+    if (hAR === 10) ctx.waitUntil(maybeListaCursosPP(env));   // POR PAGAR CURSO → Abril (+ Gaspar y Bruno)
     // Plantillas "al toque": mandar las que Meta ya aprobó (horario hábil AR 8-21).
     if (hAR >= 8 && hAR < 21) ctx.waitUntil(processPendingTemplateSends(env));
     if (hAR === 5) ctx.waitUntil(maybeAdhocCleanup(env));   // limpieza diaria de plantillas ad-hoc viejas (kv adhoc_cleanup_on/_days)
