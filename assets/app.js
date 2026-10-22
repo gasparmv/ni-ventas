@@ -3289,6 +3289,7 @@ function render() {
   if (_ocpTop) { const nl = document.querySelector('[data-ocp-list]'); if (nl) nl.scrollTop = _ocpTop; }
   try { startSinCotizarWatch(); } catch (_) {}
   try { startOcUrgenteWatch(); } catch (_) {}
+  try { startCursoPPWatch(); } catch (_) {}
   try { initAvisosInternos(); } catch (_) {}   // banner de avisos urgentes sin ver (Etapa 1)
   // El Chat WA carga su data del worker (no de Sheets), así que se renderiza
   // SIEMPRE — aunque Sheets siga cargando o haya fallado. Antes el gate de abajo
@@ -4003,6 +4004,185 @@ function renderOcUrgenteModal() {
         <div data-ocp-list style="overflow-y:auto;min-height:0;margin-bottom:10px">${rows}</div>
         <div style="display:flex;justify-content:center">
           <button class="btn btn-ghost" data-oc-dismiss style="padding:8px 16px">Después</button>
+        </div>
+      </div>
+    </div>`;
+}
+// ===== Popup "💳 Comunidad sin pagar" (Gaspar 22-oct: el mismo sistema que la OC de neón, para cursos) =====
+// Los que completaron el formulario de pago de la Comunidad (GHL) y siguen con POR PAGAR CURSO. Lo ven Abril (cursos) y
+// Gaspar. "✓ Ya pagó" solo vale con comprobante en el chat (lo busca el server); si no, queda "falta el comprobante" y
+// sigue apareciendo. "✕ Se cayó" con motivo. Aparece 1 vez por día y de nuevo si hay uno nuevo de 3-48 h sin respuesta.
+const CURSO_PP_BAJA_MOTIVOS = ['No le alcanzó la plata', 'Se arrepintió', 'Pagó por otro lado', 'Era una prueba', 'Otro'];
+function _canSeeCursoPP() { return !!STATE.token && (isCursosOnly() || isAdmin()); }
+function _cppAckKey() { return 'cursoPPAck:' + _userKey(STATE.user); }
+function _cppShouldShow() {
+  const p = STATE.cursoPP;
+  if (!p || !_canSeeCursoPP() || !(p.items || []).length) return false;
+  if (p.forzado) return true;
+  let ack = {}; try { ack = JSON.parse(localStorage.getItem(_cppAckKey()) || '{}') || {}; } catch (_) {}
+  if (ack.dia !== _ocPendHoy()) return true;
+  return !!p.urgentMax && p.urgentMax > (ack.urgent || '');
+}
+function _cppAck() {
+  try { localStorage.setItem(_cppAckKey(), JSON.stringify({ dia: _ocPendHoy(), urgent: (STATE.cursoPP && STATE.cursoPP.urgentMax) || '' })); } catch (_) {}
+  if (STATE.cursoPP) Object.assign(STATE.cursoPP, { forzado: false, baja: null, bajaMotivo: '', bajaOtro: '', flash: null });
+}
+async function fetchCursoPP() {
+  if (!STATE.token || !CONFIG.trackerUrl) return;
+  if (!_canSeeCursoPP()) { if (STATE.cursoPP) { STATE.cursoPP = null; render(); } return; }
+  const user = STATE.user;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/cursos/por-pagar', { headers: authHeaders() });
+    if (STATE.user !== user || !r.ok) return;
+    const j = await r.json();
+    if (!j.ok || STATE.user !== user) return;
+    const prev = STATE.cursoPP || {};
+    const antes = _cppShouldShow();
+    const sig = (j.items || []).map(x => x.phone + ':' + x.estado).join('|') + '#' + (j.urgent_max || '');
+    STATE.cursoPP = Object.assign(prev, { items: j.items || [], urgentMax: j.urgent_max || '' });
+    if (prev._sig === sig) return;
+    STATE.cursoPP._sig = sig;
+    const ahora = _cppShouldShow();
+    if (antes !== ahora || (ahora && !prev.busy && !prev.baja)) render();
+  } catch (_) {}
+}
+async function cursoPPMarcar(phone, accion, motivo) {
+  const p = STATE.cursoPP; if (!p || p.busy) return;
+  p.busy = phone; p.forzado = true; p.msg = p.msg || {}; delete p.msg[phone]; p.flash = null; render();
+  let flash = null, ok = false;
+  try {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/cursos/por-pagar/marcar', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, accion, motivo: motivo || '' }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { p.msg[phone] = { t: j.error || ('No se pudo (HTTP ' + r.status + ')'), c: '#ef4444' }; return; }
+    ok = true;
+    if (j.baja || j.ya_cerrada || j.verificado) {
+      const it = (p.items || []).find(x => x.phone === phone);
+      const quien = (it && it.name) || ('+' + phone);
+      p.items = (p.items || []).filter(x => x.phone !== phone);
+      p._sig = '';
+      flash = j.baja ? `✓ ${quien}: dado de baja` : (j.verificado ? `✓ ${quien}: pago confirmado con el comprobante` : `✓ ${quien}: ya estaba cerrado`);
+      p.flash = { t: flash, c: '#22c55e' };
+      if (!p.items.length) _cppAck();
+    } else {
+      const it = (p.items || []).find(x => x.phone === phone);
+      if (it) { it.reclamado = { at: new Date().toISOString(), por: '' }; it.estado = 'marcaste que pagó: falta el comprobante (pedíselo)'; it.urgente = false; }
+      p.msg[phone] = { t: 'No encontré el comprobante en el chat. Pedíselo: cuando lo mande se cierra solo; mientras tanto te va a seguir apareciendo.', c: '#f59e0b' };
+    }
+  } catch (_) { p.msg[phone] = { t: 'Error de red, probá de nuevo', c: '#ef4444' }; }
+  finally {
+    p.busy = null;
+    if (ok && p.baja === phone) { p.baja = null; p.bajaMotivo = ''; p.bajaOtro = ''; }
+    render();
+    if (flash) { try { toast(flash); } catch (_) {} }
+  }
+}
+function startCursoPPWatch() {
+  if (window._cursoPPWatch || !_canSeeCursoPP()) return;
+  window._cursoPPWatch = true;
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t || !t.closest) return;
+    const p = STATE.cursoPP;
+    const ver = t.closest('[data-cpp-ver]');
+    if (ver) {
+      const ph = ver.getAttribute('data-cpp-ver') || '';
+      const it = p && (p.items || []).find(x => x.phone === ph);
+      _cppAck();
+      STATE.view = 'chat';
+      chatState.channel = (it && it.canal === 'ig') ? 'ig' : 'wa';
+      chatState.selectedPhone = ph;
+      if (typeof enterMobileChatConversation === 'function') enterMobileChatConversation();
+      try { selectChatContact(ph); } catch (_) {}
+      location.hash = 'chat';
+      render();
+      return;
+    }
+    if (!p) return;
+    const pago = t.closest('[data-cpp-pago]');
+    if (pago) { if (!p.busy) cursoPPMarcar(pago.getAttribute('data-cpp-pago'), 'pagado'); return; }
+    const baja = t.closest('[data-cpp-baja]');
+    if (baja) {
+      if (p.busy) return;
+      p.baja = baja.getAttribute('data-cpp-baja'); p.bajaMotivo = ''; p.bajaOtro = ''; p.forzado = true;
+      if (p.msg) delete p.msg[p.baja];
+      render(); return;
+    }
+    const bajaOk = t.closest('[data-cpp-baja-ok]');
+    if (bajaOk) {
+      if (p.busy) return;
+      const ph = bajaOk.getAttribute('data-cpp-baja-ok');
+      let motivo = p.bajaMotivo || '';
+      if (motivo === 'Otro') motivo = 'Otro: ' + String(p.bajaOtro || '').trim();
+      if (!motivo || motivo === 'Otro: ') {
+        p.msg = p.msg || {};
+        p.msg[ph] = { t: motivo ? 'Contá qué pasó (en el campo de al lado)' : 'Elegí el motivo', c: '#ef4444' };
+        render(); return;
+      }
+      cursoPPMarcar(ph, 'baja', motivo);
+      return;
+    }
+    if (t.closest('[data-cpp-baja-cancel]')) { p.baja = null; p.bajaMotivo = ''; p.bajaOtro = ''; render(); return; }
+    if (t.closest('[data-cpp-dismiss]') || (t.matches && t.matches('[data-cpp-bg]'))) { if (p.busy) return; _cppAck(); render(); return; }
+  });
+  document.addEventListener('change', (e) => {
+    const sel = e.target && e.target.closest && e.target.closest('[data-cpp-motivo]');
+    if (!sel || !STATE.cursoPP) return;
+    STATE.cursoPP.bajaMotivo = sel.value;
+    if (STATE.cursoPP.msg) delete STATE.cursoPP.msg[sel.getAttribute('data-cpp-motivo')];
+    const otro = document.querySelector(`[data-cpp-motivo-otro="${sel.getAttribute('data-cpp-motivo')}"]`);
+    if (otro) { otro.style.display = sel.value === 'Otro' ? '' : 'none'; if (sel.value === 'Otro') otro.focus(); }
+  });
+  document.addEventListener('input', (e) => {
+    const otro = e.target && e.target.closest && e.target.closest('[data-cpp-motivo-otro]');
+    if (otro && STATE.cursoPP) STATE.cursoPP.bajaOtro = otro.value;
+  });
+  fetchCursoPP();
+  setInterval(() => { if (!pollBackoffActive()) fetchCursoPP(); }, 5 * 60000);
+}
+function renderCursoPPModal() {
+  if (!_cppShouldShow()) return '';
+  const p = STATE.cursoPP, items = p.items || [];
+  const chip = (it) => {
+    const [txt, col] = it.reclamado ? ['⏳ marcaste que pagó · falta el comprobante', '#f59e0b']
+      : it.urgente ? ['💬 te escribió, respondele', '#ef4444']
+      : /respondió/.test(it.estado) ? ['respondió, falta que pague', '#38bdf8'] : ['sin respuesta desde el formulario', 'var(--fg-subtle)'];
+    return `<span style="font-size:11px;font-weight:700;color:${col}">${txt}</span>`;
+  };
+  const rows = items.map(it => {
+    const nombre = escapeHtml(it.name || ('+' + it.phone));
+    const busy = p.busy === it.phone, anyBusy = !!p.busy, enBaja = p.baja === it.phone, msg = (p.msg || {})[it.phone];
+    const motSel = enBaja ? String(p.bajaMotivo || '') : '';
+    const dias = it.dias == null ? '' : (it.dias === 0 ? 'formulario de hoy' : `formulario hace ${it.dias} día${it.dias === 1 ? '' : 's'}`);
+    return `
+      <div style="padding:9px 10px;border:1px solid ${it.urgente ? '#ef4444' : 'var(--border)'};border-radius:var(--r-sm);margin-bottom:7px">
+        <div style="min-width:0;font-size:13px;font-weight:600;overflow-wrap:anywhere">${it.canal === 'ig' ? '📷 ' : ''}${nombre}</div>
+        <div style="font-size:12px;color:var(--fg-mute);margin-top:2px">${[dias, it.email ? escapeHtml(it.email) : '', it.n_forms > 1 ? `${it.n_forms} formularios` : ''].filter(Boolean).join(' · ')}</div>
+        <div style="margin-top:3px">${chip(it)}</div>
+        ${msg ? `<div style="font-size:12px;color:${msg.c};margin-top:5px;line-height:1.4">${escapeHtml(msg.t)}</div>` : ''}
+        ${enBaja ? `
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center">
+            <select data-cpp-motivo="${escapeHtml(it.phone)}" ${anyBusy ? 'disabled' : ''} style="flex:1 1 180px;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg);font-size:12.5px"><option value="">¿Por qué se cayó?</option>${CURSO_PP_BAJA_MOTIVOS.map(m => `<option${m === motSel ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select>
+            <input data-cpp-motivo-otro="${escapeHtml(it.phone)}" placeholder="Contá qué pasó" value="${escapeHtml(p.bajaOtro || '')}" ${anyBusy ? 'disabled' : ''} style="display:${motSel === 'Otro' ? '' : 'none'};flex:1 1 180px;background:var(--ink-100);border:1px solid var(--border);border-radius:6px;padding:6px 8px;color:var(--fg);font-size:12.5px">
+            <button class="btn btn-sm" data-cpp-baja-ok="${escapeHtml(it.phone)}" ${anyBusy ? 'disabled' : ''} style="background:#ef4444;color:#fff">${busy ? 'Dando de baja…' : 'Dar de baja'}</button>
+            <button class="btn btn-ghost btn-sm" data-cpp-baja-cancel ${anyBusy ? 'disabled' : ''}>Cancelar</button>
+          </div>` : `
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+            <button class="btn btn-cyan btn-sm" data-cpp-ver="${escapeHtml(it.phone)}">Ver chat →</button>
+            <button class="btn btn-ghost btn-sm" data-cpp-pago="${escapeHtml(it.phone)}" ${anyBusy ? 'disabled' : ''} title="Busco el comprobante en el chat">${busy ? 'Buscando el comprobante…' : '✓ Ya pagó'}</button>
+            <button class="btn btn-ghost btn-sm" data-cpp-baja="${escapeHtml(it.phone)}" ${anyBusy ? 'disabled' : ''}>✕ Se cayó</button>
+          </div>`}
+      </div>`;
+  }).join('');
+  return `
+    <div data-cpp-bg style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:7100;display:flex;align-items:center;justify-content:center;padding:16px">
+      <div style="background:var(--bg);border:1px solid #f97316;border-radius:var(--r-md);width:min(560px,96vw);max-height:90vh;display:flex;flex-direction:column;padding:var(--s-4);box-shadow:0 10px 40px rgba(0,0,0,.45)">
+        <div style="font-size:30px;text-align:center;margin-bottom:2px">💳</div>
+        <h2 style="margin:0 0 4px;font-size:17px;text-align:center">${items.length === 1 ? '1 inscripción a la Comunidad sin pagar' : items.length + ' inscripciones a la Comunidad sin pagar'}</h2>
+        <p style="margin:0 0 10px;font-size:12.5px;color:var(--fg-mute);text-align:center;line-height:1.5">Completaron el formulario de pago y todavía no mandaron el comprobante. Marcá qué pasó con cada uno: si decís que pagó, busco el comprobante en el chat.</p>
+        ${p.flash ? `<div style="font-size:12.5px;font-weight:600;color:${p.flash.c};background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.35);border-radius:6px;padding:6px 9px;margin:0 0 8px;overflow-wrap:anywhere">${escapeHtml(p.flash.t)}</div>` : ''}
+        <div style="overflow-y:auto;min-height:0;margin-bottom:10px">${rows}</div>
+        <div style="display:flex;justify-content:center">
+          <button class="btn btn-ghost" data-cpp-dismiss style="padding:8px 16px">Después</button>
         </div>
       </div>
     </div>`;
@@ -10006,7 +10186,7 @@ function renderShell() {
     <div id="drawer" class="drawer"></div>
     <div id="toast" class="toast"></div>
     ${renderSinCotizarModal()}
-    ${renderOcUrgenteModal()}
+    ${renderOcUrgenteModal() || renderCursoPPModal()}
     ${renderCrearOcModal()}
   `;
 }
@@ -19613,7 +19793,8 @@ function cursosPendCount(l) {
   for (const c of (chatState.contacts || [])) { if ((c.channel || 'wa') === ch && (cl[c.phone] || []).includes(l.id)) n++; }
   return n;
 }
-const CURSOS_PEND_CHIPS = [['esperaaccesos', '🎓 Espera accesos', 'Pagaron el curso completo y todavía no recibieron los accesos'], ['senapendiente', '⏳ Seña pendiente', 'Señaron y todavía no completaron el pago']];
+// [kind, nombre de la etiqueta, título, texto del botón (si no, el nombre)]
+const CURSOS_PEND_CHIPS = [['porpagarcurso', 'POR PAGAR CURSO', 'Completaron el formulario de pago de la Comunidad y todavía no mandaron el comprobante', '💳 Por cobrar curso'], ['esperaaccesos', '🎓 Espera accesos', 'Pagaron el curso completo y todavía no recibieron los accesos'], ['senapendiente', '⏳ Seña pendiente', 'Señaron y todavía no completaron el pago']];
 // Bandeja rápida "Servicio de corte" (admin): igual que "Para cotizar" pero por la etiqueta "Servicio de corte",
 // que el backend pone en cada cobro del corte.
 function servicioCorteLabel() {
@@ -19668,12 +19849,12 @@ function renderLabelFilterBar() {
       const active = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
       return `<button class="label-filter-pill${active ? ' active' : ''}" data-filter-fixed="porcobrar" title="Órdenes de compra enviadas que todavía no se pagaron">💰 Por cobrar${n ? ` (${n})` : ''}</button>`;
     })()}
-    ${(isCursosOnly() || isAdmin()) ? CURSOS_PEND_CHIPS.map(([kind, nombre, tit]) => {
+    ${(isCursosOnly() || isAdmin()) ? CURSOS_PEND_CHIPS.map(([kind, nombre, tit, boton]) => {
       const l = cursosPendLabel(nombre);
       if (!l) return '';
       const n = cursosPendCount(l);
       const active = chatState.filterLabels.length === 1 && chatState.filterLabels[0] === l.id;
-      return `<button class="label-filter-pill${active ? ' active' : ''}" data-filter-fixed="${kind}" title="${tit}">${nombre}${n ? ` (${n})` : ''}</button>`;
+      return `<button class="label-filter-pill${active ? ' active' : ''}" data-filter-fixed="${kind}" title="${tit}">${boton || nombre}${n ? ` (${n})` : ''}</button>`;
     }).join('') : ''}
     ${visibleLabels().length ? `
       <div class="label-filter-dd-wrap">
@@ -24223,7 +24404,7 @@ function bindChat() {
         chatState.labelDropdownOpen = false;
       } else if (kind === 'unread') {
         chatState.filterUnreadOnly = !chatState.filterUnreadOnly;
-      } else if (kind === 'paracotizar' || kind === 'corte' || kind === 'porcobrar' || kind === 'esperaaccesos' || kind === 'senapendiente') {
+      } else if (kind === 'paracotizar' || kind === 'corte' || kind === 'porcobrar' || CURSOS_PEND_CHIPS.some(x => x[0] === kind)) {
         // Toggle: filtra por la etiqueta de la bandeja rápida (o la apaga si ya estaba sola).
         const _cp = CURSOS_PEND_CHIPS.find(x => x[0] === kind);
         const l = _cp ? cursosPendLabel(_cp[1]) : (kind === 'corte' ? servicioCorteLabel() : (kind === 'porcobrar' ? porCobrarLabel() : paraCotizarLabel()));
