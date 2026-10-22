@@ -4120,6 +4120,93 @@ function corteRolInfo() {
 }
 // Una pieza en la tarjeta de Neyen: la foto del diseño (tocarla la abre grande) para reconocer qué embalar, y la medida real
 // de la matriz (lo que se cortó; si no está, la que pidió el cliente). Gaspar 19-oct. Las de la planilla no traen foto.
+// ===== Semanas anteriores (Neyen; Gaspar 22-oct: "que Neyen pueda ver las tandas anteriores, así vemos el historial") =====
+// Lo que tuvo cada semana, por cliente: piezas e INSUMOS aparte (cable, fuentes: "¿vio que tenía que mandarle cable?"),
+// cuándo se embaló y quién (desde el 22-oct; antes no se guardaba) y cómo salió: envío con el transporte, el seguimiento y
+// quién lo marcó en logística, o el retiro. Solo lectura. Sale de lo que ya trae /admin/corte/pedidos (180 días).
+function corteHistSemanaKey(p) { return +p.tanda_id ? 't' + (+p.tanda_id) : 'h' + String(p.hoja_fecha || ''); }
+function corteHistSemanas(pedidos) {
+  const sem = {};
+  for (const p of pedidos) {
+    if (p.producto === 'NEON' || !(+p.tanda_id || p.hoja_fecha)) continue;
+    const k = corteHistSemanaKey(p);
+    if (!sem[k]) sem[k] = { k, tanda: +p.tanda_id || 0, fecha: '' };
+    if (!sem[k].fecha && p.hoja_fecha) sem[k].fecha = String(p.hoja_fecha);
+  }
+  const ymd = f => { const m = String(f || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m ? m[3] + m[2].padStart(2, '0') + m[1].padStart(2, '0') : ''; };
+  const d = new Date(), hoy = '' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+  // Las semanas que todavía no llegaron (pedidos web para la tanda que viene) no son historial.
+  return Object.values(sem).filter(s => !ymd(s.fecha) || ymd(s.fecha) <= hoy).sort((a, b) => ymd(b.fecha).localeCompare(ymd(a.fecha)) || (b.tanda - a.tanda));
+}
+function corteHistSemanaTxt(s) { const m = String((s && s.fecha) || '').match(/^(\d{1,2})\/(\d{1,2})/); return m ? 'Lunes ' + m[1].padStart(2, '0') + '/' + m[2].padStart(2, '0') : (s && s.tanda ? 'Tanda ' + s.tanda : 'Sin fecha'); }
+function corteHistGrupos(list) {
+  const gr = {};
+  for (const p of list) {
+    const k = corteHistSemanaKey(p) + '|' + (p.telefono || ('n:' + String(p.cliente_nombre || '').trim().toLowerCase()));
+    if (!gr[k]) gr[k] = { nombre: p.cliente_nombre, tel: p.telefono || '', items: [], entrega: '' };
+    gr[k].items.push(p);
+    if (p.entrega && !gr[k].entrega) gr[k].entrega = p.entrega;
+  }
+  return Object.values(gr).sort((a, b) => String(a.nombre || '').localeCompare(String(b.nombre || ''), 'es', { sensitivity: 'base' }));
+}
+function corteHistCardHtml(g) {
+  const items = g.items.slice().sort((a, b) => a.id - b.id), piezas = items.filter(p => !corteEsInsumo(p)), insumos = items.filter(corteEsInsumo);
+  const t = Math.max(0, ...items.map(p => +p.tanda_id || 0)), key = corteClaveClienteFront(g.tel, g.nombre);
+  const paq = (STATE.cortePaquetes || []).find(x => (+x.tanda_id || 0) === t && x.cliente_key === key) || null;
+  const num = paq && parseInt(paq.numero, 10) > 0 ? logiN(paq.numero) : '';
+  const maxF = k => items.map(p => p[k]).filter(Boolean).sort().pop() || '';
+  const linea = (txt, col) => `<div style="font-size:12.5px;color:${col || 'var(--fg-mute)'};margin-top:4px">${escapeHtml(txt)}</div>`;
+  const est = [];
+  const emb = maxF('embalado_at');
+  if (emb) { const por = (items.find(p => p.embalado_at === emb) || {}).embalado_por || ''; est.push(linea('📦 Embalado ' + sfFechaHora(emb) + (por ? ' · ' + nkbNom(por) : ''))); }
+  else if (items.some(p => ['embalado', 'cobrado', 'despachado', 'entregado'].includes(p.estado))) est.push(linea('📦 Embalado (sin hora: antes del 22/10 no se guardaba)'));
+  else est.push(linea('⏳ Todavía sin embalar', '#f59e0b'));
+  if (g.entrega === 'envio') {
+    const desp = maxF('despachado_at') || (paq && paq.despachado_at) || '';
+    if (items.every(p => p.estado === 'despachado' || p.estado === 'entregado') && desp) {
+      const tr = paq && paq.transporte ? String(paq.transporte) : '', seg = paq && paq.seguimiento ? String(paq.seguimiento) : '', quien = paq && paq.cargado_por ? String(paq.cargado_por) : '';
+      est.push(linea('🚚 Salió ' + sfFechaHora(desp) + (tr ? ' · ' + tr : '') + (seg ? ' · seguimiento ' + seg : '') + (quien ? ' · lo marcó ' + quien : ''), '#22c55e'));
+    } else est.push(linea('🏠 Sigue en el taller'));
+  } else if (g.entrega === 'retira') {
+    const ent = maxF('entregado_at'), por = (items.find(p => p.entregado_at === ent) || {}).entregado_por || '';
+    est.push(items.every(p => p.estado === 'entregado') && ent ? linea('✅ Retiró ' + sfFechaHora(ent) + (por ? ' · ' + nkbNom(por) : ''), '#22c55e') : linea('🏠 Todavía no lo retiró'));
+  } else est.push(linea('Entrega sin definir', '#f59e0b'));
+  const badge = g.entrega === 'envio' ? '<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:#f59e0b;background:color-mix(in srgb, #f59e0b 16%, transparent)">📦 Envío</span>'
+    : g.entrega === 'retira' ? '<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:7px;color:#22c55e;background:color-mix(in srgb, #22c55e 16%, transparent)">🏠 Retira</span>' : '';
+  const ins = insumos.map(p => `<div style="font-size:13px;color:#f59e0b;padding:2px 0">🧵 ${escapeHtml(p.diseno_nombre || p.producto || 'insumo')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + escapeHtml(String(p.cantidad)) : ''}</div>`).join('');
+  return `<div style="background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;margin-bottom:12px">
+    <div style="font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">${num ? `<span title="N° de paquete" style="font-size:14px;font-weight:900;padding:1px 8px;border:1px solid var(--fg-mute);border-radius:7px">N° ${num}</span>` : ''}${escapeHtml(g.nombre || 'cliente')} <span style="font-size:12px;font-weight:400;color:var(--fg-mute)">· ${piezas.length} pieza${piezas.length === 1 ? '' : 's'}${insumos.length ? ' + ' + insumos.length + ' insumo' + (insumos.length === 1 ? '' : 's') : ''}</span>${badge}</div>
+    ${piezas.map(corteEmbItemHtml).join('')}
+    ${ins ? `<div style="margin-top:6px;padding:6px 10px;border:1px dashed color-mix(in srgb, #f59e0b 45%, transparent);border-radius:8px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-subtle);margin-bottom:2px">Insumos del paquete</div>${ins}</div>` : ''}
+    <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">${est.join('')}</div>
+  </div>`;
+}
+// La lista (se redibuja sola al buscar): con búsqueda, en TODAS las semanas; si no, la semana elegida.
+function corteNeyenHistorialListaHtml(pedidos) {
+  const semanas = corteHistSemanas(pedidos);
+  if (!semanas.length) return '<div style="padding:20px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px;font-size:13px">Todavía no hay semanas anteriores.</div>';
+  const q = String(STATE.corteHistQ || '').trim().toLowerCase();
+  const base = pedidos.filter(p => p.producto !== 'NEON' && (+p.tanda_id || p.hoja_fecha));
+  if (q.length >= 2) {
+    const hit = g => String(g.nombre || '').toLowerCase().includes(q) || String(g.tel || '').includes(q.replace(/\D/g, '') || '§') || g.items.some(p => String(p.diseno_nombre || '').toLowerCase().includes(q));
+    const out = semanas.map(s => ({ s, gs: corteHistGrupos(base.filter(p => corteHistSemanaKey(p) === s.k)).filter(hit) })).filter(x => x.gs.length);
+    if (!out.length) return '<div style="padding:20px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px;font-size:13px">No encontré nada con "' + escapeHtml(q) + '".</div>';
+    return out.map(x => `<div style="font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-subtle);margin:14px 0 8px">Semana del ${escapeHtml(corteHistSemanaTxt(x.s).replace(/^Lunes /, 'lunes '))}</div>` + x.gs.map(corteHistCardHtml).join('')).join('');
+  }
+  const sel = semanas.find(s => s.k === STATE.corteHistTanda) || semanas[0];
+  const gs = corteHistGrupos(base.filter(p => corteHistSemanaKey(p) === sel.k));
+  return gs.length ? gs.map(corteHistCardHtml).join('') : '<div style="padding:20px;text-align:center;color:var(--fg-mute);border:1px dashed var(--border);border-radius:8px;font-size:13px">Esa semana no tiene pedidos.</div>';
+}
+function corteNeyenHistorialHtml(pedidos, cargando) {
+  if (cargando) return '<div style="padding:20px;color:var(--fg-mute)">Cargando…</div>';
+  const semanas = corteHistSemanas(pedidos);
+  const sel = semanas.find(s => s.k === STATE.corteHistTanda) || semanas[0];
+  const chips = semanas.slice(0, 16).map(s => `<button type="button" class="btn ${sel && s.k === sel.k && !String(STATE.corteHistQ || '').trim() ? 'btn-cyan' : 'ghost'}" data-corte-hist-t="${escapeHtml(s.k)}" style="font-size:12px;padding:6px 12px">${escapeHtml(corteHistSemanaTxt(s))}</button>`).join('');
+  return `<p style="color:var(--fg-mute);font-size:13px;margin:0 0 10px">Lo que se armó cada semana: piezas, insumos, cuándo se embaló y cómo salió. Buscá un cliente para verlo en todas las semanas.</p>
+    <input id="corte-hist-q" placeholder="Buscar cliente o diseño (todas las semanas)…" value="${escapeHtml(STATE.corteHistQ || '')}" autocomplete="off" style="width:100%;max-width:420px;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:9px 12px;color:var(--fg);font-size:13px;margin-bottom:12px">
+    ${semanas.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${chips}</div>` : ''}
+    <div data-corte-hist-lista style="max-width:760px">${corteNeyenHistorialListaHtml(pedidos)}</div>`;
+}
 function corteEmbItemHtml(p) {
   const cm = v => { const n = Number(v); return n > 0 ? String(Math.round(n * 10) / 10).replace('.', ',') : ''; };
   const med = (cm(p.ancho_real) && cm(p.alto_real)) ? cm(p.ancho_real) + ' × ' + cm(p.alto_real) + ' cm' : String(p.medida_declarada || '');
@@ -4784,8 +4871,15 @@ function renderCorte() {
       if (!neyenTab) { try { neyenTab = localStorage.getItem('corte_neyen_tab') || 'alumnos'; } catch (_) { neyenTab = 'alumnos'; } }
       const nNeonPend = pedidos.filter(corteNeonPendienteEntrega).length;
       const neyenTabs = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 14px">
-          <button type="button" class="btn ${neyenTab === 'productores' ? 'ghost' : 'btn-cyan'}" data-corte-neyen-tab="alumnos" style="font-size:13px;padding:7px 14px">📦 Alumnos${totalCort ? ' · ' + totalCort : ''}</button>
+          <button type="button" class="btn ${neyenTab !== 'productores' && neyenTab !== 'historial' ? 'btn-cyan' : 'ghost'}" data-corte-neyen-tab="alumnos" style="font-size:13px;padding:7px 14px">📦 Alumnos${totalCort ? ' · ' + totalCort : ''}</button>
           <button type="button" class="btn ${neyenTab === 'productores' ? 'btn-cyan' : 'ghost'}" data-corte-neyen-tab="productores" style="font-size:13px;padding:7px 14px">🔴 Productores · neón${nNeonPend ? ' · ' + nNeonPend : ''}</button>
+          <button type="button" class="btn ${neyenTab === 'historial' ? 'btn-cyan' : 'ghost'}" data-corte-neyen-tab="historial" style="font-size:13px;padding:7px 14px">🕘 Semanas anteriores</button>
+        </div>`;
+      if (neyenTab === 'historial') return `
+        <div style="padding:var(--s-4);max-width:1040px">
+          <h1 style="margin:0 0 2px;font-size:20px">✂ Corte — Semanas anteriores</h1>
+          ${neyenTabs}
+          ${corteNeyenHistorialHtml(pedidos, cargando)}
         </div>`;
       if (neyenTab === 'productores') return `
         <div style="padding:var(--s-4);max-width:860px">
@@ -9569,6 +9663,17 @@ async function bindCorte() {
   });
   // Neyen: pestañas Alumnos / Productores, y entregar (o deshacer) el paquete de un productor.
   document.querySelectorAll('[data-corte-neyen-tab]').forEach(b => { b.onclick = () => { STATE.corteNeyenTab = b.getAttribute('data-corte-neyen-tab'); try { localStorage.setItem('corte_neyen_tab', STATE.corteNeyenTab); } catch (_) {} render(); }; });
+  // Semanas anteriores: la semana elegida y la búsqueda en todas (redibuja solo la lista, el campo no pierde el foco).
+  document.querySelectorAll('[data-corte-hist-t]').forEach(b => { b.onclick = () => { STATE.corteHistTanda = b.getAttribute('data-corte-hist-t'); STATE.corteHistQ = ''; render(); }; });
+  const _hq = document.getElementById('corte-hist-q');
+  if (_hq) _hq.oninput = () => {
+    STATE.corteHistQ = _hq.value; clearTimeout(STATE._corteHistT);
+    STATE._corteHistT = setTimeout(() => {
+      const z = document.querySelector('[data-corte-hist-lista]'); if (z) z.innerHTML = corteNeyenHistorialListaHtml(STATE.cortePedidos || []);
+      const buscando = !!String(STATE.corteHistQ || '').trim();
+      document.querySelectorAll('[data-corte-hist-t]').forEach(c => { const on = !buscando && c.getAttribute('data-corte-hist-t') === (STATE.corteHistTanda || (document.querySelector('[data-corte-hist-t]') || {}).getAttribute?.('data-corte-hist-t')); c.classList.toggle('btn-cyan', on); c.classList.toggle('ghost', !on); });
+    }, 150);
+  };
   document.querySelectorAll('[data-corte-prod-entregar]').forEach(b => {
     b.onclick = async () => {
       const ids = String(b.getAttribute('data-corte-prod-entregar') || '').split(',').map(Number).filter(Boolean);

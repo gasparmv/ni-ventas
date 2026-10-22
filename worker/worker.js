@@ -18913,6 +18913,15 @@ async function ensureNeonTableroSchema(env) {
   for (const [t, cols] of alters) for (const c of cols) { try { await env.DB.prepare('ALTER TABLE ' + t + ' ADD COLUMN ' + c).run(); } catch (_) {} }
   _neonTabOk = true;
 }
+// Quién y cuándo embaló cada pieza (Gaspar 22-oct: el historial de semanas de Neyen; antes solo cambiaba el estado y no se
+// podía saber si el paquete se armó con todo). Migración 064. Deshacer el embalado lo borra.
+let _corteEmbOk = false;
+async function ensureCorteEmbaladoSchema(env) {
+  if (_corteEmbOk) return true;
+  try { await env.DB.prepare('SELECT embalado_at, embalado_por FROM corte_pedidos LIMIT 0').all(); _corteEmbOk = true; return true; } catch (_) {}
+  for (const c of ['embalado_at TEXT', 'embalado_por TEXT']) { try { await env.DB.prepare('ALTER TABLE corte_pedidos ADD COLUMN ' + c).run(); } catch (_) {} }
+  try { await env.DB.prepare('SELECT embalado_at FROM corte_pedidos LIMIT 0').all(); _corteEmbOk = true; return true; } catch (_) { return false; }
+}
 // Fechas de corte para el recorrido (Aníbal y Neyen marcan en Corte; estas columnas solo guardan CUÁNDO, la primera vez).
 async function neonCorteStamp(env, ids, campo, por) {
   const cond = { cortado_at: "estado IN ('cortado','embalado')", separado_at: "estado = 'embalado'", diseno_inicio_at: "estado = 'pedido'" }[campo];
@@ -28496,6 +28505,7 @@ const handler = {
         // + datos del cartel del CRM para las piezas de neón propio (productor, fecha, estado del pedido).
         // Columnas del despacho (despachado_at, entregado_at, pago_metodo...) antes del SELECT c.* → el tablero las recibe.
         const _despOk = await ensureCorteDespachoSchema(env);
+        try { await ensureCorteEmbaladoSchema(env); } catch (_) {}   // embalado_at/_por para el historial de Neyen
         try {
           await ensureCorteNeonSchema(env);
           const desde = new Date(Date.now() - 180 * 86400000).toISOString();
@@ -28511,7 +28521,7 @@ const handler = {
         // Medidas reales de los paquetes (las carga Neyen al embalar; las ve logística) de las tandas recientes.
         let paquetes = [];
         // + la línea de logística de la tarjeta de Neyen (N°, contacto, envío pagado, cargado/despachado).
-        try { await ensureCortePaquetesSchema(env); paquetes = (await env.DB.prepare("SELECT tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_at, contactado, cargado" + (_despOk ? ", numero, contacto_estado, contacto_at, envio_pagado, despachado_at" : "") + ((_despOk && await ensureLogiTablaSchema(env).catch(() => false)) ? ", transporte, transporte_conf" : "") + " FROM corte_paquetes WHERE tanda_id IN (SELECT id FROM corte_tandas ORDER BY id DESC LIMIT 4)").all()).results || []; } catch (_) {}
+        try { await ensureCortePaquetesSchema(env); paquetes = (await env.DB.prepare("SELECT tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_at, contactado, cargado" + (_despOk ? ", numero, contacto_estado, contacto_at, envio_pagado, despachado_at, cargado_at, cargado_por" : "") + ((_despOk && await ensureLogiTablaSchema(env).catch(() => false)) ? ", transporte, transporte_conf, seguimiento" : "") + " FROM corte_paquetes WHERE tanda_id IN (SELECT id FROM corte_tandas ORDER BY id DESC LIMIT 12)").all()).results || []; } catch (_) {}
         const precio_m2 = parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000;
         if (_cpRole !== 'admin') rows.forEach(cortePiezaSinVendedor);   // Emma/Corte: sin el vendedor
         return json({ ok: true, pedidos: rows, paquetes, precio_m2, role: _cpRole, user: String(session.user || '').toLowerCase() });
@@ -29444,7 +29454,8 @@ const handler = {
           // Embalar NO toca la entrega: la única fuente es la planilla de cortes (sync). Antes mandaba 'retira' por default y
           // pisaba lo correcto (Martin Guaragna quedó "retira" yendo por envío, 5/10). Se ignora body.entrega a propósito
           // (también la de pestañas con el app.js viejo cacheado).
-          try { const rr = await env.DB.prepare("UPDATE corte_pedidos SET estado='embalado', updated_at=? WHERE estado='cortado' AND telefono=?").bind(nowIso, tel).run(); return json({ ok: true, action, n: (rr.meta && rr.meta.changes) || 0 }); } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
+          const _emb = await ensureCorteEmbaladoSchema(env);
+          try { const rr = await env.DB.prepare("UPDATE corte_pedidos SET estado='embalado', updated_at=?" + (_emb ? ', embalado_at=?, embalado_por=?' : '') + " WHERE estado='cortado' AND telefono=?").bind(...(_emb ? [nowIso, nowIso, String(session.user || '')] : [nowIso]), tel).run(); return json({ ok: true, action, n: (rr.meta && rr.meta.changes) || 0 }); } catch (e) { return json({ error: String((e && e.message) || e) }, 500); }
         }
         // Selección múltiple: mueve una LISTA de pedidos (ids) al estado destino. produccion solo puede
         // cortado/embalado; admin puede cualquier estado. Usado por la barra de acciones masivas del board.
@@ -29462,8 +29473,9 @@ const handler = {
             // (en SQLite los SET leen los valores VIEJOS → 'estado' en el CASE es el estado anterior al UPDATE).
             const _dis = `disenado_at = CASE WHEN estado='pedido' AND ?<>'pedido' THEN COALESCE(disenado_at, ?) ELSE disenado_at END`;
             // Embalar: solo piezas 'cortado' (no hace retroceder despachadas/entregadas) y sin tocar la entrega (ver embalado_bulk).
-            if (est === 'embalado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='embalado', updated_at=? WHERE id IN (${ph}) AND estado='cortado'`).bind(est, nowIso, nowIso, ...ids).run();
-            else if (est === 'cortado') { const d = _despSet('cortado'); rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='cortado', productor=?, updated_at=?${d.sql} WHERE id IN (${ph})${_noSalidas}`).bind(est, nowIso, _slug, nowIso, ...d.binds, ...ids).run(); }
+            const _emb = (est === 'embalado' || est === 'cortado') && await ensureCorteEmbaladoSchema(env);
+            if (est === 'embalado') rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='embalado', updated_at=?${_emb ? ', embalado_at=?, embalado_por=?' : ''} WHERE id IN (${ph}) AND estado='cortado'`).bind(est, nowIso, nowIso, ...(_emb ? [nowIso, String(session.user || '')] : []), ...ids).run();
+            else if (est === 'cortado') { const d = _despSet('cortado'); rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado='cortado', productor=?, updated_at=?${_emb ? ', embalado_at=NULL, embalado_por=NULL' : ''}${d.sql} WHERE id IN (${ph})${_noSalidas}`).bind(est, nowIso, _slug, nowIso, ...d.binds, ...ids).run(); }
             else { const d = _despSet(est); rr = await env.DB.prepare(`UPDATE corte_pedidos SET ${_dis}, estado=?, updated_at=?${d.sql} WHERE id IN (${ph})`).bind(est, nowIso, est, nowIso, ...d.binds, ...ids).run(); }
             if (est === 'cortado' || est === 'embalado') await neonCorteStamp(env, ids, est === 'cortado' ? 'cortado_at' : 'separado_at');
             if (est === 'embalado') await neonCorteStamp(env, ids, 'cortado_at');
