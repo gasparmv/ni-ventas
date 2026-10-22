@@ -6168,7 +6168,7 @@ async function corteCobroTplAviso(env) {
     const txt = st === 'APPROVED'
       ? 'Meta aprobó la plantilla nueva del cobro del corte. Desde ahora los cobros que salen por plantilla ya dicen ' + CORTE_ALIAS + ' a nombre de ' + CORTE_TITULAR + '.'
       : 'Meta rechazó la plantilla nueva del cobro del corte (' + CORTE_COBRO_TPL + '). Los cobros por plantilla siguen saliendo con el alias viejo (neoninfinito.mp): hay que armar otra.';
-    await avisoAdmin(env, txt, { tipo: 'plantilla_interna', prioridad: 'P2', clave: 'tpl:' + marca });
+    await avisoGasparServicio(env, txt, { tipo: 'plantilla_interna', prioridad: 'P2', clave: 'tpl:' + marca });
   } catch (_) {}
 }
 // Medida que va en el detalle del cobro: la REAL de la matriz (con la que se calculó el precio), no la que pidió el cliente.
@@ -18807,6 +18807,13 @@ function franRutaOk(request, path, url) {
 }
 // Aviso a Fran de un pedido de corte (nuevo o cancelado), si Gaspar cargó su WhatsApp (agenda_phones 'fran'): texto si le
 // escribió al número del negocio en las últimas 23 h; si no, la plantilla de servicio (sinRespEnviar, como a Neyen).
+// Avisos a Gaspar de Sin Frontera y de los cortes: el envío "de hoy" de avisoAdmin es texto libre y con la ventana de 24 h
+// cerrada rebota (131047: el 22-oct no llegaron "Fran cargó un pedido…" ni "Meta aprobó la plantilla…"). Acá va texto si
+// Gaspar escribió en las últimas 23 h; si no, la plantilla de servicio recordatorio_agenda (sinRespEnviar).
+function avisoGasparServicio(env, texto, opts) {
+  const to = env.ADMIN_NOTIFY_PHONE;
+  return avisoAdmin(env, texto, Object.assign({}, opts || {}, to ? { legacy: () => sinRespEnviar(env, to, texto) } : {}));
+}
 async function sfCorteAvisoFran(env, texto) {
   try {
     const t = await env.DB.prepare("SELECT phone FROM agenda_phones WHERE usuario = 'fran'").first();
@@ -29209,7 +29216,7 @@ const handler = {
           const _ord = ['', ...SF_ESTADOS.map(e => e[0])], _avanza = _ord.indexOf(estado) > _ord.indexOf(efPrev);
           if (sfExt && _avanza && (estado === 'en_ensamble' || estado === 'listo' || estado === 'entregado')) {
             const txt = 'Sin Frontera: el corpóreo "' + String(ped.cartel || '').trim() + '" (ticket #' + ped.ticket + ') ' + (estado === 'en_ensamble' ? 'pasó a ensamble: las piezas van a tu taller.' : estado === 'listo' ? 'está listo para entregar.' : 'ya está entregado.') + (quien ? ' Lo marcó ' + quien + '.' : '');
-            const pr = avisoAdmin(env, txt, { tipo: 'sinfrontera_estado', prioridad: 'P2', clave: 'sf:' + pid + ':' + estado }).catch(() => {});
+            const pr = avisoGasparServicio(env, txt, { tipo: 'sinfrontera_estado', prioridad: 'P2', clave: 'sf:' + pid + ':' + estado }).catch(() => {});
             try { ctx.waitUntil(pr); } catch (_) { await pr; }
           }
           return json({ ok: true, estado, at: nowIso, por, estado_pedido: estadoPedido || '' });
@@ -29267,7 +29274,7 @@ const handler = {
               + (acl ? '. Aclaración: ' + acl.replace(/\s+/g, ' ').slice(0, 300) : '');
             const txt = fran ? 'Fran cargó un pedido de corte de Sin Frontera (#' + id + '): ' + det + '. Lo ves en el CRM: Sin Frontera > Cortes.'
               : 'Sin Frontera te encargó un corte (#' + id + (quien ? ', lo pidió ' + quien : '') + '): ' + det + '. Lo ves en el CRM: Sin Frontera > Cortes.';
-            const pr = avisoAdmin(env, txt, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id }).catch(() => {});
+            const pr = avisoGasparServicio(env, txt, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id }).catch(() => {});
             const pf = fran ? Promise.resolve() : sfCorteAvisoFran(env, 'Nuevo pedido de corte de Sin Frontera (#' + id + '): ' + det + '. Lo ves en el CRM, en Cortes de Sin Frontera.');
             try { ctx.waitUntil(Promise.all([pr, pf])); } catch (_) { await Promise.all([pr, pf]); }
           }
@@ -29301,7 +29308,7 @@ const handler = {
           if (sfExt) {
             const txt = 'Sin Frontera canceló el pedido de corte #' + id + (quien ? ' (' + quien + ')' : '') + ': ' + (SF_CORTE_MATERIALES[row.material] || row.material) + ' '
               + String(SF_CORTE_COLORES[row.color] || row.color).toLowerCase() + ' de ' + row.espesor + ' mm.';
-            const pr = avisoAdmin(env, txt, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id + ':cancelado' }).catch(() => {});
+            const pr = avisoGasparServicio(env, txt, { tipo: 'sinfrontera_corte', prioridad: 'P2', clave: 'sfc:' + id + ':cancelado' }).catch(() => {});
             const pf = sfCorteAvisoFran(env, txt);
             try { ctx.waitUntil(Promise.all([pr, pf])); } catch (_) { await Promise.all([pr, pf]); }
           }
