@@ -6992,6 +6992,11 @@ async function avisoCorteEncolar(env, contactos, nombre, a = AVISOS_CORTE.semana
 // Cron de cada minuto: cada aviso sale una sola vez, en su día y su hora (AR), y le avisa a Gaspar cómo salió.
 async function avisoCorteSemanal(env) {
   const ar = new Date(Date.now() - 3 * 3600e3);
+  // El recordatorio del viernes dice "hoy hasta las 20 hs": lo que a las 20 sigue en cola (un reintento por un error de 360dialog
+  // queda para más tarde y send_hours lo pasaría al sábado a las 9) se corta. Pasó el 23-oct con 2 que fallaron con un 522.
+  if (ar.getUTCDay() === 5 && ar.getUTCHours() === 20) {
+    try { await env.DB.prepare("UPDATE wa_autoreply_log SET status = 'skipped' WHERE status = 'queued' AND kind IN (SELECT 'bc_' || id FROM wa_broadcasts WHERE template = ?)").bind(AVISO_CORTE_VIERNES_TPL).run(); } catch (_) {}
+  }
   for (const [clave, a] of Object.entries(AVISOS_CORTE)) {
     if (ar.getUTCDay() !== a.dia || ar.getUTCHours() !== a.hora) continue;
     if ((await kvGet(env, 'aviso_corte_' + clave + '_on', '0')) !== '1') continue;
