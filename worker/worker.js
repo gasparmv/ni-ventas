@@ -3158,7 +3158,7 @@ async function ensureAgendaSchema(env) {
 async function agendaRoute(env, request, url, path) {
   const session = await getSession(env, request);
   if (!session) return unauthorized();
-  if (esUsuarioLogistica(session.user) || esUsuarioSinFrontera(session.user) || esUsuarioFran(session.user)) return json({ error: 'forbidden' }, 403); // usuarios externos: no ven la agenda interna
+  if (esUsuarioLogistica(session.user) || esUsuarioSinFrontera(session.user) || esUsuarioFran(session.user) || esUsuarioLautaro(session.user)) return json({ error: 'forbidden' }, 403); // usuarios externos: no ven la agenda interna
   if (await productorDeSesion(env, session.user)) return json({ error: 'forbidden' }, 403); // productores (o no se pudo verificar): solo sus carteles
   await ensureAgendaSchema(env);
   const me = _agSlug(session.user);
@@ -12313,6 +12313,33 @@ async function metaInsightsAll(url, maxPages = 60) {
   return { rows, pages, error };
 }
 
+// Alcance y frecuencia de cada campaña en el período (funnel de carteles). El alcance NO se suma día por día (la misma
+// persona cuenta una vez), así que se pide a Meta para el rango entero. Cache 1 h en kv_cache. {campanas: {id: {alcance,
+// impresiones, frecuencia}}, error}.
+async function metaAlcancePeriodo(env, since, until) {
+  const k = 'meta_alcance:' + since + ':' + until, kErr = 'meta_alcance_err:' + since + ':' + until;
+  try {
+    const c = await env.DB.prepare('SELECT k, v, updated_at FROM kv_cache WHERE k IN (?, ?)').bind(k, kErr).all();
+    for (const row of ((c && c.results) || [])) {
+      const edad = Date.now() - Date.parse(row.updated_at || 0);
+      if (row.k === k && row.v && edad < 3600e3) return JSON.parse(row.v);
+      if (row.k === kErr && edad < 600e3) return { campanas: {}, error: String(row.v || 'Meta no respondió') };   // no martillar a Meta durante una falla
+    }
+  } catch (_) {}
+  const token = env.META_ADS_TOKEN || env.META_PAGE_ACCESS_TOKEN || env.IG_ACCESS_TOKEN || '';
+  if (!token) return { campanas: {}, error: 'sin token de Meta' };
+  const acct = String(env.META_AD_ACCOUNT_ID || '882517310728279').replace(/^act_/, '');
+  const tr = encodeURIComponent(JSON.stringify({ since, until }));
+  const r = await metaInsightsAll(`https://graph.facebook.com/v21.0/act_${acct}/insights?level=campaign&fields=campaign_id,reach,impressions,frequency&time_range=${tr}&limit=500&access_token=${encodeURIComponent(token)}`, 5);
+  const out = { campanas: {}, error: r.error || '' };
+  for (const row of r.rows) {
+    const cid = String(row.campaign_id || ''); if (!cid) continue;
+    out.campanas[cid] = { alcance: parseInt(row.reach || 0, 10) || 0, impresiones: parseInt(row.impressions || 0, 10) || 0, frecuencia: Math.round((parseFloat(row.frequency || 0) || 0) * 100) / 100 };
+  }
+  try { await env.DB.prepare('INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at').bind(r.error ? kErr : k, r.error ? String(r.error).slice(0, 300) : JSON.stringify(out), new Date().toISOString()).run(); } catch (_) {}
+  return out;
+}
+
 // Trae de Meta Ads (insights) el GASTO por día a nivel CAMPAÑA (meta_ad_spend + nombre en meta_campaigns)
 // y a nivel ANUNCIO (meta_ad_spend_ad + nombres en meta_ad_map, que también usan el ruteo y la
 // trazabilidad). Guarda TODO: el funnel decide qué es carteles. El detalle por anuncio separa corpóreas
@@ -13028,6 +13055,8 @@ async function buildAdsFunnel(env, opts = {}) {
   };
   const ATTR_SQL = "SELECT a.phone, CASE WHEN a.source_type='ig_post' THEN g.ad_id ELSE a.source_id END AS sid, a.headline, a.ts FROM wa_ad_attributions a LEFT JOIN ig_ad_map g ON a.source_type='ig_post' AND g.media_id=a.source_id WHERE COALESCE(a.source_id,'')!='' AND COALESCE(a.source_type,'') NOT IN ('ig_reel','story_mention','share')";
 
+  // Alcance/frecuencia de Meta en paralelo con las consultas (si Meta falla, el funnel sale igual sin esa columna).
+  const alcanceP = metaAlcancePeriodo(env, since, until > hoyAR ? hoyAR : until).catch(e => ({ campanas: {}, error: String((e && e.message) || e) }));
   const [adMapR, campR, campManR, adManR, internosR, spendAdR, spendCampR, lastCampR, lastAdR, leadAttR, presAttR, formsR, briefsR, pedidosR, ocR, ownersR] = await Promise.all([
     q('mapa', "SELECT ad_id, ad_name, ad_set_name, campaign_name, campaign_id FROM meta_ad_map"),
     q('campañas', "SELECT campaign_id, campaign_name FROM meta_campaigns"),
@@ -13041,10 +13070,18 @@ async function buildAdsFunnel(env, opts = {}) {
     q('leads', ATTR_SQL + " AND a.ts>=? AND a.ts<? ORDER BY a.phone, a.ts DESC", sinceUTC, untilExUTC),
     q('presup_link', ATTR_SQL + " AND a.ts>=? AND a.ts<? AND a.phone IN (SELECT cliente_wa_id FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<? UNION SELECT phone FROM oc_enviadas WHERE ts_out>=? AND ts_out<?) ORDER BY a.phone, a.ts DESC", sinceWideUTC, untilExUTC, sinceUTC, untilExUTC, sinceUTC, untilExUTC),
     q('formularios', "SELECT phone, campaign_id, ad_id, received_at FROM wa_leads WHERE COALESCE(phone,'')!='' AND received_at>=? AND received_at<? ORDER BY received_at DESC", sinceWideUTC, untilExUTC),
-    q('presup', "SELECT cliente_wa_id, comercial_id, COALESCE(precio_final,0) pf FROM briefs WHERE estado='enviado' AND enviado_at>=? AND enviado_at<?", sinceUTC, untilExUTC),
+    // prim = "quién|cuándo" del primer mensaje de presupuesto al cliente entre que se creó el brief (−1 h) y su enviado_at
+    // (+20 min): enviado_at y comercial_id se pisan (reenvíos, "Verificar enviados", "Traer de Joaco").
+    q('presup', "SELECT b.cliente_wa_id, b.comercial_id, COALESCE(b.precio_final,0) pf, IFNULL(b.enviado_por,'') por, " +
+      "(SELECT IFNULL(sender_name,'') || '|' || ts FROM wa_messages WHERE phone = b.cliente_wa_id AND direction = 'outbound' AND IFNULL(status,'') != 'failed' AND " + KPI_PRESUP_SQL +
+      " AND ts >= strftime('%Y-%m-%dT%H:%M:%SZ', IFNULL(NULLIF(b.created_at,''), b.enviado_at), '-1 hour') AND ts <= strftime('%Y-%m-%dT%H:%M:%SZ', b.enviado_at, '+20 minutes') ORDER BY ts LIMIT 1) prim " +
+      "FROM briefs b WHERE b.estado='enviado' AND b.enviado_at>=? AND b.enviado_at<?", sinceUTC, untilExUTC),
     q('ventas', "SELECT id, ad, cartel, numero, fecha, telefono, source_id, source_campaign, comercial_id, COALESCE(es_corporeo,0) es_corporeo, COALESCE(precio,0)+COALESCE(precio_dimmer,0) monto, origen_canal, origen_estado, origen_grupo, origen_regla, origen_evid FROM pedidos WHERE fecha>=? AND fecha<?", since, untilEx),
     q('oc', "SELECT phone, vendedor FROM oc_enviadas WHERE ts_out>=? AND ts_out<?", sinceUTC, untilExUTC),
-    q('duenos', "SELECT phone, COALESCE(assigned_to,'') asg, COALESCE(inbox,'') inbox FROM wa_chats_summary WHERE phone IN (SELECT phone FROM wa_ad_attributions WHERE ts>=? AND ts<? AND COALESCE(source_id,'')!='')", sinceUTC, untilExUTC)
+    q('duenos', "SELECT s.phone, COALESCE(s.assigned_to,'') asg, COALESCE(s.inbox,'') inbox, " +
+      "(SELECT l.via || '|' || IFNULL(l.from_asg, '') || '|' || IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = s.phone AND l.via NOT LIKE 'auto_%' ORDER BY l.ts ASC LIMIT 1) primero, " +
+      "(SELECT IFNULL(l.to_asg, '') FROM chat_assign_log l WHERE l.phone = s.phone AND l.via LIKE 'no_neon%' ORDER BY l.ts ASC LIMIT 1) deriv " +
+      "FROM wa_chats_summary s WHERE s.phone IN (SELECT phone FROM wa_ad_attributions WHERE ts>=? AND ts<? AND COALESCE(source_id,'')!='' UNION SELECT phone FROM wa_leads WHERE received_at>=? AND received_at<?)", sinceUTC, untilExUTC, sinceUTC, untilExUTC)
   ]);
 
   // ---- catálogo de anuncios/campañas ----
@@ -13139,9 +13176,17 @@ async function buildAdsFunnel(env, opts = {}) {
   const V = {};
   const vOf = (s) => V[s] || (V[s] = { slug: s, leads: 0, leadsPorGrupo: {}, presup_pauta: new Set(), presup_total: new Set(), oc_pauta: new Set(), oc_total: new Set(), ventas_pauta: new Set(), ventas_total: new Set(), ingresos_pauta: 0, ingresos_total: 0 });
   const duenos = {};
+  // El lead es del que lo RECIBIÓ (igual que el panel de rendimiento): si después se lo trajo otra vendedora ("Traer de
+  // Joaco") o se reasignó, sigue siendo del primero. Sin registro de asignación (antes del 12-oct), el dueño de hoy. Los que
+  // hoy están en bandejas no comerciales (cursos/oculto) no cuentan para nadie.
   for (const r of ownersR) {
-    const asg = funnelVendedor(r.asg), inbox = String(r.inbox || '');
-    duenos[norm(r.phone)] = asg ? asg : (BANDEJAS_NO_COMERCIALES.indexOf(inbox) >= 0 ? '' : 'joaco');
+    const inbox = String(r.inbox || '');
+    if (!funnelVendedor(r.asg) && BANDEJAS_NO_COMERCIALES.indexOf(inbox) >= 0) { duenos[norm(r.phone)] = ''; continue; }
+    let rec;
+    if (r.deriv != null) rec = r.deriv || 'joaco';
+    else if (r.primero) { const [via, fr, to] = String(r.primero).split('|'); rec = via === 'reparto' ? to : (fr || 'joaco'); }
+    else rec = r.asg || 'joaco';
+    duenos[norm(r.phone)] = funnelVendedor(rec) || 'joaco';
   }
   let otrosLeads = 0;
   for (const p in leadGrupo) {
@@ -13158,7 +13203,14 @@ async function buildAdsFunnel(env, opts = {}) {
     const ph = norm(r.cliente_wa_id);
     if (!ph) { presupSinTel++; continue; }
     if (internos[ph]) { presupInterno++; continue; }
-    const vend = funnelVendedor(r.comercial_id), g = phoneGrupo[ph];
+    // Quién lo mandó: el que firmó el primer mensaje del presupuesto; si no hay, enviado_por; si no, el comercial del brief.
+    // Si lo mandó alguien que no es vendedor (Gaspar), no suma a ningún vendedor. Un brief cuyo primer envío fue antes del
+    // período (reenviado ahora) no es un presupuesto de este período.
+    const [psnd, pts] = String(r.prim || '').split('|');
+    if (pts && pts < sinceUTC) { presupTotal--; presupMontoTotal -= (r.pf || 0); continue; }
+    const persona = (x) => { const k = autorSlug(x); return (k && k !== 'celular' && k !== 'app_ig') ? k : ''; };
+    const quien = persona(psnd) || persona(r.por);
+    const vend = quien ? adhocSenderSlug(quien) : funnelVendedor(r.comercial_id), g = phoneGrupo[ph];
     if (vend) vOf(vend).presup_total.add(ph);
     if (g) {
       const row = rowOf(g); row.presup.add(ph); row.presup_monto += (r.pf || 0);
@@ -13180,6 +13232,7 @@ async function buildAdsFunnel(env, opts = {}) {
   const ctxCat = { ad: { o: 0, i: 0 }, organico: { o: 0, i: 0 }, sintrazar: { o: 0, i: 0 } };
   const ordSeen = new Set(), ordCorp = new Set();
   const revisarVentas = {};
+  const _slugsVend = KPI_VENDEDORES.map(x => x.slug), negSet = new Set(); let negIng = 0;
   for (const r of pedidosR) {
     const tel = norm(r.telefono);
     const k = String(r.numero) + '|' + String(r.fecha) + '|' + (tel || String(r.telefono || '') || ('id' + r.id));
@@ -13239,6 +13292,7 @@ async function buildAdsFunnel(env, opts = {}) {
     else if (t.indexOf('directo') >= 0) { cat = 'organico'; mk = 'directo'; }
     else { cat = 'sintrazar'; mk = 'revisar'; }
     const vend = funnelVendedor(r.comercial_id);
+    if (grupo || _slugsVend.indexOf(vend) >= 0) { negSet.add(k); negIng += monto; }
     if (grupo) {
       const row = rowOf(grupo); row.ingresos += monto; row.ventas.add(k);
       if (adId) { const a = adOf(row, adId); a.ingresos += monto; a.ventas.add(k); }
@@ -13288,6 +13342,8 @@ async function buildAdsFunnel(env, opts = {}) {
       ingresos: Math.round(ing), roas: gA ? ing / gA : null
     };
   };
+  // Si Meta tarda más de 6 s, el funnel sale sin la columna de frecuencia (el resto está completo: no es "Datos parciales").
+  const alcance = await Promise.race([alcanceP, new Promise(res => setTimeout(() => res({ campanas: {}, error: 'Meta tardó más de 6 s' }), 6000))]);
   const rows = Object.values(R).filter(r => r.gasto_usd > 0 || r.leads || r.presup.size || r.ventas.size).map(r => {
     const esCampana = r.key !== 'corporeas' && r.key !== 'sin_campana';
     let ultimo = esCampana ? (ultimoCamp[r.key] || '') : '';
@@ -13301,7 +13357,12 @@ async function buildAdsFunnel(env, opts = {}) {
     return Object.assign({
       key: r.key, nombre: nombreGrupo(r.key), tipo: r.key === 'corporeas' ? 'corporeas' : (r.form || CARTELES_CAMPAIGNS[r.key] === 'b2b') ? 'formulario' : 'whatsapp',
       via: cc ? cc.via : '', activa: !!ultimo && ultimo >= ayerAR, ultimo_gasto: ultimo, sin_detalle: r.sin_detalle,
-      presup_monto: Math.round(r.presup_monto), ads
+      presup_monto: Math.round(r.presup_monto), ads,
+      // Frecuencia = impresiones ÷ personas alcanzadas en el período (solo campañas: Corpóreas mezcla varias).
+      ...((esCampana && alcance && alcance.campanas[r.key]) ? alcance.campanas[r.key] : { alcance: null, impresiones: null, frecuencia: null }),
+      // El alcance de Meta es de la campaña entera; si parte de su gasto va a otra fila (anuncios de corpóreos o de cursos), se avisa.
+      frecuencia_mixta: !!(esCampana && camps[r.key] && camps[r.key].gasto_usd - r.gasto_usd > 0.01 * camps[r.key].gasto_usd),
+      gasto_campana_usd: esCampana && camps[r.key] ? Math.round(camps[r.key].gasto_usd * 100) / 100 : null
     }, met(r.gasto_usd, r.leads, r.presup.size, r.ventas.size, r.ingresos));
   }).sort((x, y) => (y.gasto_usd - x.gasto_usd) || (y.leads - x.leads));
 
@@ -13322,6 +13383,12 @@ async function buildAdsFunnel(env, opts = {}) {
     };
   }).sort((a, b) => (b.leads - a.leads) || (b.ventas_total - a.ventas_total));
 
+  // ---- negocio: toda la pauta + lo que vendieron los vendedores por fuera (orgánico y sin trazar; sin lo que Gaspar
+  // carga para sí) vs el gasto. Cubre a los que vieron un anuncio y escribieron por su cuenta. ----
+  const negocio = { ventas: negSet.size, ingresos: Math.round(negIng) };
+  negocio.roas = total.gasto_ars ? negocio.ingresos / total.gasto_ars : null;
+  negocio.cac = negocio.ventas ? Math.round(total.gasto_ars / negocio.ventas) : null;
+
   // ---- mix de ventas ----
   const mix = [];
   for (const r of rows) if (mixN[r.key]) mix.push({ key: r.key, label: r.nombre, n: mixN[r.key], ingresos: Math.round(mixIng[r.key] || 0), pauta: true });
@@ -13337,7 +13404,7 @@ async function buildAdsFunnel(env, opts = {}) {
 
   const ventasTot = ctxCat.ad.o + ctxCat.organico.o + ctxCat.sintrazar.o;
   return {
-    ok: true, since, until, rate, hoy: hoyAR, rows, total, vendedores, otros_leads: otrosLeads, mix,
+    ok: true, since, until, rate, hoy: hoyAR, rows, total, negocio, vendedores, otros_leads: otrosLeads, mix,
     contexto: {
       ad: { ordenes: ctxCat.ad.o, ingresos: Math.round(ctxCat.ad.i) },
       organico: { ordenes: ctxCat.organico.o, ingresos: Math.round(ctxCat.organico.i) },
@@ -13350,7 +13417,7 @@ async function buildAdsFunnel(env, opts = {}) {
     presup_sin_tel: presupSinTel, presup_sin_atrib: sinAtrib.size, presup_interno: presupInterno,
     gasto_excluido_usd: Math.round(gastoExcluido * 100) / 100,
     revisar: { campanas: revisar_campanas, ventas: revisar_ventas },
-    warnings, partial: warnings.length > 0, spend_updated: spendUpdated
+    warnings, partial: warnings.length > 0, spend_updated: spendUpdated, frecuencia_error: (alcance && alcance.error) || ''
   };
 }
 
@@ -19059,6 +19126,18 @@ function cortePiezaSinVendedor(r) { if (!r) return r; delete r.vendedor; if (r.a
 // Se ocupa de los pedidos de corte que encarga Sin Frontera (no los hacen ni Emma ni Aníbal). Usuario propio 'fran' (rol
 // 'fran'; lo crea Gaspar poniéndole contraseña) que ve SOLO esa lista: los pedidos, sus archivos y el estado. Se reconoce por
 // el NOMBRE, como logística y Sin Frontera (getSessionRole cae a 'comercial' si falla la base).
+// Lautaro (publicista, 23-oct): usuario propio 'lautaro' (rol 'marketing'; lo crea Gaspar poniéndole contraseña) que ve SOLO
+// las métricas del Funnel Ads, sin datos de clientes (teléfonos, chats, nombres) ni acciones. Se reconoce por el nombre.
+let _lauActivoCache = { t: 0, ok: null };
+async function lautaroActivo(env) {
+  if (_lauActivoCache.ok !== null && Date.now() - _lauActivoCache.t < 60000) return _lauActivoCache.ok;
+  try {
+    const u = await env.DB.prepare("SELECT 1 AS ok FROM users_panel WHERE id = 'lautaro' AND rol = 'marketing' AND activo = 1 AND IFNULL(password_hash, '') <> ''").first();
+    _lauActivoCache = { t: Date.now(), ok: !!u };
+  } catch (_) { return null; }   // no se pudo verificar: el muro responde 503 (no lo deja pasar ni lo echa)
+  return _lauActivoCache.ok;
+}
+function esUsuarioLautaro(userName) { return String(userName || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '') === 'lautaro'; }
 function esUsuarioFran(userName) { return String(userName || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '') === 'fran'; }
 // Lo único de /admin/ que puede usar Fran: la lista de pedidos de corte, su estado y sus archivos (?c=).
 function franRutaOk(request, path, url) {
@@ -19652,8 +19731,8 @@ async function getSessionRole(env, userName) {
 async function sesionInterna(env, request, roles) {
   const session = await getSession(env, request);
   if (!session) return { error: unauthorized() };
-  const role = esUsuarioLogistica(session.user) ? 'logistica' : esUsuarioFran(session.user) ? 'fran' : (esUsuarioSinFrontera(session.user) ? 'sinfrontera' : ((await productorDeSesion(env, session.user)) ? 'productor' : await getSessionRole(env, session.user)));
-  if (role === 'logistica' || role === 'sinfrontera' || role === 'fran' || role === 'productor' || (roles && !roles.includes(role))) return { error: json({ error: 'forbidden' }, 403) };
+  const role = esUsuarioLogistica(session.user) ? 'logistica' : esUsuarioFran(session.user) ? 'fran' : esUsuarioLautaro(session.user) ? 'marketing' : (esUsuarioSinFrontera(session.user) ? 'sinfrontera' : ((await productorDeSesion(env, session.user)) ? 'productor' : await getSessionRole(env, session.user)));
+  if (role === 'logistica' || role === 'sinfrontera' || role === 'fran' || role === 'marketing' || role === 'productor' || (roles && !roles.includes(role))) return { error: json({ error: 'forbidden' }, 403) };
   return { session, role };
 }
 // Quiénes usan el cotizador (COGS/params) y la vista Actividad: Gaspar, vendedores y diseño.
@@ -21096,7 +21175,7 @@ async function ensureProdSchema(env) {
   return true;
 }
 // Usuarios que NO pueden ser productores (ya existen con otro rol o son del equipo).
-const PROD_RESERVADOS = ['gaspar', 'admin', 'administrador', 'joaco', 'joaquin', 'facundo', 'facu', 'agustina', 'agus', 'abril', 'cursos', 'disenador', 'emma', 'emmanuel', 'logistica', 'sinfrontera', 'fran', 'anibal', 'neyen', 'nadia', 'debi', 'debora'];
+const PROD_RESERVADOS = ['gaspar', 'admin', 'administrador', 'joaco', 'joaquin', 'facundo', 'facu', 'agustina', 'agus', 'abril', 'cursos', 'disenador', 'emma', 'emmanuel', 'logistica', 'sinfrontera', 'fran', 'lautaro', 'anibal', 'neyen', 'nadia', 'debi', 'debora'];
 function prodSlug(s) { return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
 // ¿La sesión es de un PRODUCTOR? {id, nombre, activo} o null. Mira users_panel con cualquier activo: un productor
 // dado de baja con una sesión vieja NO puede caer al rol por defecto ('comercial') y ver ventas. Cache 60 s por isolate.
@@ -22206,7 +22285,7 @@ const handler = {
       const token = randomToken();
       const now = new Date();
       // Usuarios externos (logística, Sin Frontera): sesión de 7 días (el resto, 30).
-      const sesDias = ((panelUser && ['logistica', 'sinfrontera'].includes(panelUser.rol)) || esUsuarioLogistica(user) || esUsuarioSinFrontera(user)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS;
+      const sesDias = ((panelUser && ['logistica', 'sinfrontera', 'marketing'].includes(panelUser.rol)) || esUsuarioLogistica(user) || esUsuarioSinFrontera(user) || esUsuarioLautaro(user)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS;
       const expires = new Date(now.getTime() + sesDias * 86400000);
       const userSes = canonSessionUser(user);
       await env.DB.prepare(
@@ -22256,7 +22335,7 @@ const handler = {
       if (!okTarget) return json({ error: 'usuario desconocido' }, 404);
       const token = randomToken();
       const now = new Date();
-      const expires = new Date(now.getTime() + ((tRol === 'logistica' || tRol === 'sinfrontera' || esUsuarioLogistica(target) || esUsuarioSinFrontera(target)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS) * 86400000);
+      const expires = new Date(now.getTime() + ((tRol === 'logistica' || tRol === 'sinfrontera' || tRol === 'marketing' || esUsuarioLogistica(target) || esUsuarioSinFrontera(target) || esUsuarioLautaro(target)) ? LOGISTICA_SESSION_DAYS : SESSION_DAYS) * 86400000);
       const targetSes = canonSessionUser(target);
       await env.DB.prepare('INSERT INTO sessions (token, user, expires_at, created_at) VALUES (?, ?, ?, ?)').bind(token, targetSes, expires.toISOString(), now.toISOString()).run();
       return json({ token, user: targetSes, expiresAt: expires.toISOString(), rol: tslug === 'gaspar' ? 'admin' : tRol });
@@ -22643,6 +22722,13 @@ const handler = {
       if (esUsuarioSinFrontera(session.user) && !path.startsWith('/admin/sinfrontera/')) return json({ error: 'forbidden' }, 403);
       // Fran (router y láser): SOLO los pedidos de corte de Sin Frontera (franRutaOk).
       if (esUsuarioFran(session.user) && !franRutaOk(request, path, url)) return json({ error: 'forbidden' }, 403);
+      // Lautaro (publicista): SOLO el Funnel Ads, en lectura.
+      if (esUsuarioLautaro(session.user)) {
+        const _la = await lautaroActivo(env);
+        if (_la === null) return json({ error: 'No se pudo verificar el usuario. Probá de nuevo en un momento.' }, 503);
+        if (!_la) return unauthorized();   // dado de baja (o nunca creado): afuera aunque tenga sesión
+        if (!(request.method === 'GET' && path === '/admin/ads/funnel')) return json({ error: 'forbidden' }, 403);
+      }
       // Productores de neón (usuario propio): SOLO /admin/prod/* (sus carteles). Dado de baja → afuera aunque tenga sesión.
       { const _pz = await productorDeSesion(env, session.user); if (_pz) { if (_pz.error) return json({ error: 'No se pudo verificar el usuario. Probá de nuevo en un momento.' }, 503); if (!_pz.activo) return unauthorized(); if (!path.startsWith('/admin/prod/')) return json({ error: 'forbidden' }, 403); } }
 
@@ -28460,16 +28546,48 @@ const handler = {
       }
 
       // GET /admin/ads/funnel?since=&until=&rate= → funnel de carteles por campaña de Meta (panel de control).
-      // Cruza el gasto de Meta con leads/presupuestos/ventas de D1, por campaña, anuncio y vendedor. Solo Gaspar.
+      // Cruza el gasto de Meta con leads/presupuestos/ventas de D1, por campaña, anuncio y vendedor. Gaspar, y Lautaro
+      // (publicista) en lectura y sin datos de clientes.
       if (request.method === 'GET' && path === '/admin/ads/funnel') {
-        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        const _lau = esUsuarioLautaro(session.user);
+        if (session.user !== 'Gaspar' && !_lau) return json({ error: 'forbidden' }, 403);
         const today = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
         const fecha = (v, def) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : def;
         const since = fecha(url.searchParams.get('since'), today.slice(0, 7) + '-01');
         const until = fecha(url.searchParams.get('until'), today);
         const rate = parseFloat(url.searchParams.get('rate') || '') || 1400;
         const data = await buildAdsFunnel(env, { since, until, rate });
+        if (_lau && data && data.revisar) data.revisar = { campanas: data.revisar.campanas || [], ventas: [] };
         return json(data);
+      }
+
+      // GET|POST /admin/usuarios/lautaro → el usuario de Lautaro (publicista): si existe y si tiene contraseña. POST {password}
+      // lo crea o le cambia la contraseña (y lo activa; nunca se crea sin contraseña); POST {desactivar:true} lo da de baja.
+      // Las dos cosas cierran sus sesiones abiertas. Solo Gaspar.
+      if (path === '/admin/usuarios/lautaro' && (request.method === 'GET' || request.method === 'POST')) {
+        if (session.user !== 'Gaspar') return json({ error: 'forbidden' }, 403);
+        if (request.method === 'POST') {
+          let body; try { body = await request.json(); } catch { body = {}; }
+          const pw = String(body.password || '');
+          if (!pw && !body.desactivar) return json({ error: 'datos', motivo: 'No hay nada para guardar.' }, 400);
+          if (pw && pw.length < 8) return json({ error: 'datos', motivo: 'La contraseña tiene que tener al menos 8 caracteres.' }, 400);
+          try {
+            if (pw) {
+              await env.DB.prepare("INSERT INTO users_panel (id, nombre, rol, activo, password_hash, created_at) VALUES ('lautaro', 'Lautaro', 'marketing', 1, ?, ?) ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash, rol='marketing', activo=1")
+                .bind(await sha256hex(pw), new Date().toISOString()).run();
+              try { await env.DB.prepare("DELETE FROM kv_cache WHERE k = 'login_fail:lautaro'").run(); } catch (_) {}
+            } else {
+              await env.DB.prepare("UPDATE users_panel SET activo = 0 WHERE id = 'lautaro'").run();
+            }
+            _lauActivoCache = { t: 0, ok: null };
+            const ses = (await env.DB.prepare('SELECT token, user FROM sessions WHERE expires_at > ?').bind(new Date().toISOString()).all()).results || [];
+            const del = ses.filter(x => esUsuarioLautaro(x.user)).map(x => x.token);
+            if (del.length) await env.DB.batch(del.map(t => env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(t)));
+          } catch (_) { return json({ error: 'db', motivo: 'No se pudo guardar. Probá de nuevo.' }, 500); }
+        }
+        let usr = null;
+        try { usr = await env.DB.prepare("SELECT activo, CASE WHEN IFNULL(password_hash, '') <> '' THEN 1 ELSE 0 END AS con_clave FROM users_panel WHERE id = 'lautaro'").first(); } catch (_) {}
+        return json({ ok: true, usuario: { existe: !!usr, activo: !!(usr && +usr.activo === 1), con_clave: !!(usr && +usr.con_clave === 1) } });
       }
 
       // GET /admin/kpis-vendedor?mes=YYYY-MM[&vendedor=slug] → panel de rendimiento. Un vendedor (Joaco/Facu/Agus)

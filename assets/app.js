@@ -20,7 +20,7 @@ const OFRECER_BASE_NEGRA = false;
 
 const CONFIG = {
   trackerUrl: 'https://ni-ventas-tracker.neoninfinito.workers.dev',  // URL pública del Worker. Vacío = sin tracking remoto, solo localStorage.
-  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Debi', 'Diseñador', 'Abril', 'Aníbal', 'Neyen', 'Fran', 'Logística', 'Sin Frontera'],
+  defaultUsers: ['Gaspar', 'Joaquín', 'Facundo', 'Agustina', 'Debi', 'Diseñador', 'Abril', 'Aníbal', 'Neyen', 'Fran', 'Logística', 'Sin Frontera', 'Lautaro'],
   ventasSheetId: '1qKUhSDDjBV4k8W0goPhOFzEhLz0Zeruq2slLpb9bWSg',
   cotizadorSheetId: '13I4OAwpFm4Z0DM81SzbwMpr1DvIjC2NF1BiB0njA1hQ',
   ventasSheetName: '2026',
@@ -724,7 +724,7 @@ async function postAvisos(ruta, body, okMsg) {
 // ¿Este usuario cotiza? (Gaspar, vendedores y diseño). Abril, producción y logística NO: el worker les
 // niega /cotizador/* y acá no se pide ni se guarda en el navegador nada de costos ni sueldos.
 function usaCotizador() {
-  return !!STATE.token && tokenBelongsTo(STATE.user) && !isCursosOnly() && !isProduccionOnly() && !isLogisticaOnly() && !isProductorOnly() && !isSinFronteraOnly() && !isFranOnly();
+  return !!STATE.token && tokenBelongsTo(STATE.user) && !isCursosOnly() && !isProduccionOnly() && !isLogisticaOnly() && !isProductorOnly() && !isSinFronteraOnly() && !isFranOnly() && !isMarketingOnly();
 }
 // Borra los COGS/params del navegador (costos internos): al cerrar sesión o si el usuario no cotiza.
 function olvidarCotizadorCache() {
@@ -1643,6 +1643,8 @@ function isLogisticaUser(s) { return _userKey(s) === 'logistica'; }
 function isSinFronteraUser(s) { return _userKey(s).replace(/[\s._-]+/g, '') === 'sinfrontera'; }
 // Fran (router y láser, 22-oct): solo los pedidos de corte que encarga Sin Frontera (lista, archivos y estado).
 function isFranUser(s) { return _userKey(s) === 'fran'; }
+// Lautaro (publicista): solo ve el Funnel Ads (métricas, sin datos de clientes ni acciones).
+function isLautaroUser(s) { return _userKey(s) === 'lautaro'; }
 // El token cargado pertenece a este usuario? (evita reutilizar token de bajo
 // privilegio para pasar como admin).
 function tokenBelongsTo(name) {
@@ -1738,6 +1740,11 @@ async function switchUser(name) {
     if (!r.ok) {
       // 404 = ese usuario todavía no existe o está desactivado. Fran se crea poniéndole la contraseña: se ofrece ahí mismo
       // (con el token de Gaspar; si está viendo como otro, primero tiene que volver a Gaspar).
+      if (r.status === 404 && isLautaroUser(name)) {
+        if (!isGasparUser(STATE.user)) { await showAlert('Lautaro todavía no tiene usuario. Volvé a Administrador y creáselo en Funnel Ads → Acceso de Lautaro.', { title: 'Usuario de Lautaro', variant: 'warn' }); return; }
+        if (await showConfirm('Lautaro todavía no tiene usuario. ¿Se lo creás ahora? Le ponés una contraseña y entra a ver solo el Funnel Ads.', { title: 'Usuario de Lautaro', confirmLabel: 'Crear usuario', cancelLabel: 'Ahora no' }).catch(() => false)) lautaroUsuarioUI();
+        return;
+      }
       if (r.status === 404 && isFranUser(name)) {
         if (!isGasparUser(STATE.user)) { await showAlert('Fran todavía no tiene usuario. Volvé a Administrador y creáselo en Sin Frontera → Cortes que encargan → Usuario de Fran.', { title: 'Usuario de Fran', variant: 'warn' }); return; }
         if (await showConfirm('Fran todavía no tiene usuario. ¿Se lo creás ahora? Le ponés la contraseña y, si querés, su WhatsApp para avisarle de cada pedido.', { title: 'Usuario de Fran', confirmLabel: 'Crear usuario', cancelLabel: 'Ahora no' }).catch(() => false)) sfcFranUI();
@@ -1763,7 +1770,7 @@ function corteResetEstado() {
   if (typeof nkbResetEstado === 'function') nkbResetEstado();   // tablero de neón: idem
 }
 function afterUserSwitch() {
-  STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = ''; pedidoFilter.origenPend = false;   // producción: nada del usuario anterior
+  STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = ''; pedidoFilter.origenPend = false; funnelReset();   // producción: nada del usuario anterior
   try { localStorage.removeItem(CACHE_KEY); } catch (_) {}
   corteResetEstado();
   STATE.loaded = false; STATE.pedidos = [];
@@ -1776,6 +1783,7 @@ function afterUserSwitch() {
   if (isProductorOnly()) { STATE.prod = null; return; }   // productor de neón: solo su pantalla (nada de ventas, cotizador ni chats)
   if (isSinFronteraOnly()) return;   // Sin Frontera: solo sus dos pantallas (nada de ventas, cotizador ni chats)
   if (isFranOnly()) return;   // Fran: solo los pedidos de corte de Sin Frontera
+  if (isMarketingOnly()) return;   // Lautaro: solo el Funnel Ads (lo carga su vista)
   try { fetchOcUrgenteStatus(); } catch (_) {}
   loadCotizadorParams();   // /cotizador/* pide sesión: recién ahora hay token (y si el nuevo no cotiza, borra el cache)
   loadAll().catch(() => {});
@@ -1807,7 +1815,7 @@ async function logout() {
   STATE.consultas = {};
   repartoState = { data: null, loading: false, error: '', at: 0 };
   chatState.vigilados = null;
-  STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = ''; pedidoFilter.origenPend = false;
+  STATE.prod = null; STATE.prodAdm = null; pedidoFilter.prod = ''; pedidoFilter.prodEstado = ''; pedidoFilter.origenPend = false; funnelReset();
   saveToken(null);
   saveAdminToken(null);
   STATE.swProds = undefined; try { localStorage.removeItem('niventas.swProds'); } catch (_) {}   // productores del switcher
@@ -1834,6 +1842,7 @@ function isProduccionOnly() { return isProduccionUser(STATE.user); }
 function isLogisticaOnly() { return isLogisticaUser(STATE.user); }
 function isSinFronteraOnly() { return isSinFronteraUser(STATE.user); }
 function isFranOnly() { return isFranUser(STATE.user); }
+function isMarketingOnly() { return isLautaroUser(STATE.user); }
 // Señal de actividad HUMANA para el "arranque"/horas del equipo: marcamos el último gesto real
 // del usuario (click/tecla/touch/scroll). Cada request lleva X-NI-Human=1 solo si hubo
 // interacción hace <5 min; si no (polls automáticos, app en segundo plano, celu dormido) va 0
@@ -2368,7 +2377,7 @@ async function loadAll(opts) {
   // su propia data): antes el primer render llegaba de rebote por loadCotizadorParams, y desde que logística no pide el
   // cotizador (11-oct) la pantalla quedaba trabada en el spinner. Los refrescos silenciosos no re-dibujan (cerrarían lo
   // desplegado o la nota a medio escribir; la vista de logística se refresca sola).
-  if (isLogisticaUser(STATE.user) || isSinFronteraUser(STATE.user) || isFranUser(STATE.user)) { if (!(opts && opts.silent)) render(); return; }
+  if (isLogisticaUser(STATE.user) || isSinFronteraUser(STATE.user) || isFranUser(STATE.user) || isLautaroUser(STATE.user)) { if (!(opts && opts.silent)) render(); return; }
   if (isProductorOnly()) { if (!(opts && opts.silent)) render(); return; }   // productor: solo sus carteles (/admin/prod/mis)
   const silent = !!(opts && opts.silent);
   // Stale-while-revalidate: si tenemos caché y no se pidió refresh forzado,
@@ -2914,7 +2923,9 @@ function setView(v) {
   else if (isLogisticaOnly()) v = v === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) v = (v === 'sf-pedidos' || v === 'sf-cortes') ? v : 'sf-produccion';
   else if (isFranOnly()) v = 'sf-cortes';
+  else if (isMarketingOnly()) v = 'funnel-ads';
   else if (isDisenadorOnly() && v !== 'corte') v = 'cotizacion';
+  if (v === 'funnel-ads' && !isAdmin() && !isMarketingOnly()) v = 'dashboard';
   if (v === 'logistica' && !isLogisticaOnly() && !isAdmin()) v = 'dashboard';
   if (/^sf-/.test(v) && !isSinFronteraOnly() && !isFranOnly() && !isAdmin()) v = 'dashboard';
   if (v === 'neon' && !nkbPuedeVer()) v = 'dashboard';
@@ -2943,7 +2954,9 @@ window.addEventListener('hashchange', () => {
   else if (isLogisticaOnly()) h = h === 'neon' ? 'neon' : 'logistica';
   else if (isSinFronteraOnly()) h = (h === 'sf-pedidos' || h === 'sf-cortes') ? h : 'sf-produccion';
   else if (isFranOnly()) h = 'sf-cortes';
+  else if (isMarketingOnly()) h = 'funnel-ads';
   else if (isDisenadorOnly() && h !== 'corte') h = 'cotizacion';
+  if (h === 'funnel-ads' && !isAdmin() && !isMarketingOnly()) h = 'dashboard';
   if (h === 'logistica' && !isLogisticaOnly() && !isAdmin()) h = 'dashboard';
   if (/^sf-/.test(h) && !isSinFronteraOnly() && !isFranOnly() && !isAdmin()) h = 'dashboard';
   if (h === 'neon' && !nkbPuedeVer()) h = 'dashboard';
@@ -3247,6 +3260,12 @@ function render() {
   } else if (isFranOnly() && STATE.view !== 'sf-cortes') {
     STATE.view = 'sf-cortes';
     if (location.hash !== '#sf-cortes') location.hash = 'sf-cortes';
+  } else if (isMarketingOnly() && STATE.view !== 'funnel-ads') {
+    STATE.view = 'funnel-ads';
+    if (location.hash !== '#funnel-ads') location.hash = 'funnel-ads';
+  } else if (STATE.view === 'funnel-ads' && !isAdmin() && !isMarketingOnly()) {
+    STATE.view = 'dashboard';
+    if (location.hash !== '#dashboard') location.hash = 'dashboard';
   } else if (/^sf-/.test(STATE.view) && !isSinFronteraOnly() && !isFranOnly() && !isAdmin()) {
     STATE.view = 'dashboard';
     if (location.hash !== '#dashboard') location.hash = 'dashboard';
@@ -3301,6 +3320,7 @@ function render() {
   else if (STATE.view === 'logistica') document.getElementById('main').innerHTML = renderLogistica(); // idem: su propia data
   else if (/^sf-/.test(STATE.view)) document.getElementById('main').innerHTML = renderSinFrontera(); // Sin Frontera: idem
   else if (STATE.view === 'neon') document.getElementById('main').innerHTML = renderNeonTablero(); // tablero de neón: idem
+  else if (STATE.view === 'funnel-ads') document.getElementById('main').innerHTML = renderFunnelAds(); // Funnel Ads: su propia data (Lautaro no carga ventas)
   else if (STATE.view === 'mis-carteles' && isAnibalUser(STATE.user)) document.getElementById('main').innerHTML = renderProdApp(true); // Aníbal también arma carteles: sus asignados
   else if (STATE.error)   document.getElementById('main').innerHTML = renderError();
   else if (!STATE.loaded) document.getElementById('main').innerHTML = renderLoading();
@@ -4198,7 +4218,7 @@ function renderCursoPPModal() {
 // y de los popups de sin cotizar / OC, que tienen sus propios botones.
 let _avisosP1 = { items: [], off: false, user: null, busy: false, min: false, ids: new Set() };
 function initAvisosInternos() {
-  if (!STATE.token || isLogisticaOnly() || isSinFronteraOnly() || isFranOnly()) { if (_avisosP1.items.length) { _avisosP1.items = []; pintarBannerAvisos(); } return; }
+  if (!STATE.token || isLogisticaOnly() || isSinFronteraOnly() || isFranOnly() || isMarketingOnly()) { if (_avisosP1.items.length) { _avisosP1.items = []; pintarBannerAvisos(); } return; }
   if (_avisosP1.user !== STATE.user) { _avisosP1.user = STATE.user; _avisosP1.items = []; _avisosP1.ids = new Set(); _avisosP1.min = false; pintarBannerAvisos(); if (window._avisosWatch) fetchAvisosMios(); }
   if (window._avisosWatch) return;
   window._avisosWatch = true;
@@ -4228,7 +4248,7 @@ function initAvisosInternos() {
   setInterval(() => { if (!pollBackoffActive()) fetchAvisosMios(); }, 5 * 60000);
 }
 async function fetchAvisosMios() {
-  if (_avisosP1.off || !STATE.token || !CONFIG.trackerUrl || isLogisticaOnly() || isSinFronteraOnly() || isFranOnly()) return;
+  if (_avisosP1.off || !STATE.token || !CONFIG.trackerUrl || isLogisticaOnly() || isSinFronteraOnly() || isFranOnly() || isMarketingOnly()) return;
   const user = STATE.user;
   try {
     const r = await fetch(CONFIG.trackerUrl + '/admin/avisos/mios?pend=1', { headers: authHeaders() });
@@ -10149,6 +10169,8 @@ function renderShell() {
           <button class="nav-item ${v==='sf-cortes'?'active':''}" data-view="sf-cortes"><span class="icon">✂</span> Pedir corte</button>
         ` : isFranOnly() ? `
           <button class="nav-item active" data-view="sf-cortes"><span class="icon">✂</span> Cortes de Sin Frontera</button>
+        ` : isMarketingOnly() ? `
+          <button class="nav-item active" data-view="funnel-ads"><span class="icon">▽</span> Funnel Ads</button>
         ` : isDisenadorOnly() ? `
           <button class="nav-item ${v==='cotizacion'?'active':''}" data-view="cotizacion"><span class="icon">◆</span> Cotización</button>
           <button class="nav-item ${v==='corte'?'active':''}" data-view="corte"><span class="icon">✂</span> Corte ${corteBadgeHtml()}</button>
@@ -21131,9 +21153,13 @@ const FA_TIPS = {
   roas: ['ROAS', 'Cuántos pesos facturás por cada peso de pauta: Ingresos ÷ Gasto.', 'CRM (precio real) ÷ Meta', '🟢 > 4×'],
   funnel: ['Embudo del período', 'Cómo se achica: del gasto salen leads, de los leads presupuestos y de esos las ventas. Los % entre pasos muestran dónde se cae la gente.', 'Meta + CRM', ''],
   mix: ['Origen de las ventas', 'Cada venta del período con su origen. Violeta = pauta (por campaña). El resto es orgánico o sin trazar (ver "Para revisar").', 'Pedidos del CRM', ''],
-  vend: ['Por vendedor', 'Leads = chats de anuncios del período según quién los tiene HOY (Joaco = bandeja general sin asignar). Presupuestos, OC y ventas = quién los hizo. "Pauta" = clientes que vinieron de un anuncio; "Total" suma los orgánicos.', 'Chats, presupuestos, OC y pedidos del CRM', ''],
+  vend: ['Por vendedor', 'Leads = chats de anuncios del período según quién los RECIBIÓ (Joaco = bandeja general): si después se los trajo otra vendedora, siguen siendo del que los recibió. Presupuestos = quién los mandó. OC y ventas = del vendedor del pedido. "Pauta" = clientes que vinieron de un anuncio; "Total" suma los orgánicos. No da igual que el panel de rendimiento: ahí entran también las consultas sin anuncio e Instagram va aparte.', 'Chats, presupuestos, OC y pedidos del CRM', ''],
+  vpresup: ['Presupuestos del vendedor', 'Clientes que vinieron de un anuncio y recibieron presupuesto en el período, según quién lo mandó. Cuenta clientes, no presupuestos: si a uno le mandaste tres, suma uno.', 'Presupuestos enviados del CRM', ''],
   costo: ['Costo de sus leads', 'Leads de cada campaña que tiene el vendedor × el CPL de esa campaña. Con el ROAS ves quién le saca más jugo a la pauta.', 'Meta ÷ CRM', ''],
-  vroas: ['ROAS del vendedor', 'Ingresos de sus ventas de pauta ÷ costo de sus leads.', 'CRM ÷ Meta', '🟢 > 4×']
+  vroas: ['ROAS del vendedor', 'Ingresos de sus ventas de pauta ÷ costo de sus leads.', 'CRM ÷ Meta', '🟢 > 4×'],
+  frec: ['Frecuencia', 'Cuántas veces en promedio vio el anuncio cada persona en el período (impresiones ÷ personas alcanzadas). En TOFU (público nuevo) no tiene que pasar de 2: si pasa, el público se está agotando y hay que buscar otra segmentación. En BOFU (retargeting) se busca que sea alta: que lo vean muchas veces.', 'Meta Ads (alcance del período)', 'TOFU: 🟢 ≤ 1,6 · 🔴 > 2'],
+  roasneg: ['ROAS del negocio', 'Toda la pauta más lo que vendieron Joaco, Facu, Agus y Debi por fuera de la pauta (orgánico y sin trazar; sin lo que cargás vos para vos) ÷ el gasto de pauta de carteles. Incluye a los que vieron un anuncio y escribieron por su cuenta, que no se pueden rastrear. El ROAS de al lado es solo lo probado con datos.', 'Pedidos del CRM ÷ Meta', '🟢 > 4×'],
+  leadsdia: ['Leads por día', 'Leads de pauta del período ÷ días transcurridos del período (el mes en curso, hasta hoy).', 'Referencia de Meta en el chat', '']
 };
 
 function faToday() {
@@ -21255,6 +21281,7 @@ function renderFunnelAds() {
       <div class="fa-ctrls">
         <div class="fa-seg" id="fa-period">${faMonths().map(mo => pBtn(mo.key, mo.label)).join('')}</div>
         <label class="fa-rate">USD→ARS <input id="fa-rate" type="number" step="10" value="${st.rate}"></label>
+        ${isAdmin() ? '<button class="fa-btn" data-fa-lautaro title="Usuario para Lautaro: ve solo este panel, sin datos de clientes">👤 Acceso de Lautaro</button>' : ''}
       </div>
     </div>
     <div class="fa-kpis" id="fa-kpis"></div>
@@ -21268,7 +21295,7 @@ function renderFunnelAds() {
       <div class="cap">Una fila por campaña de Meta (las corpóreas van aparte). Tocá una campaña para ver sus anuncios. Las campañas nuevas entran solas.</div>
       <div class="fa-tblw">
         <table class="fa-tbl">
-          <thead><tr>${th('Campaña')}${th('Gasto', 'gasto')}${th('Leads', 'leads')}${th('CPL', 'cpl')}${th('Presup.', 'presup')}${th('L→P', 'lp')}${th('Ventas', 'ventas')}${th('Cierre', 'pv')}${th('CAC', 'cac')}${th('ROAS', 'roas')}</tr></thead>
+          <thead><tr>${th('Campaña')}${th('Gasto', 'gasto')}${th('Frec.', 'frec')}${th('Leads', 'leads')}${th('CPL', 'cpl')}${th('Presup.', 'presup')}${th('L→P', 'lp')}${th('Ventas', 'ventas')}${th('Cierre', 'pv')}${th('CAC', 'cac')}${th('ROAS', 'roas')}</tr></thead>
           <tbody id="fa-tbody"></tbody>
         </table>
       </div>
@@ -21278,7 +21305,7 @@ function renderFunnelAds() {
       <div class="cap" id="fa-vendcap">Qué hace cada uno con los leads de pauta.</div>
       <div class="fa-tblw">
         <table class="fa-tbl">
-          <thead><tr>${th('Vendedor')}${th('Leads', 'leads')}${th('Costo leads', 'costo')}${th('Presup.', 'presup')}${th('L→P', 'lp')}${th('OC')}${th('Ventas', 'ventas')}${th('Cierre', 'pv')}${th('Ingresos')}${th('ROAS', 'vroas')}${th('Total ventas')}${th('Total ingresos')}</tr></thead>
+          <thead><tr>${th('Vendedor')}${th('Leads', 'leads')}${th('Costo leads', 'costo')}${th('Presup.', 'vpresup')}${th('L→P', 'lp')}${th('OC')}${th('Ventas', 'ventas')}${th('Cierre', 'pv')}${th('Ingresos')}${th('ROAS', 'vroas')}${th('Total ventas')}${th('Total ingresos')}</tr></thead>
           <tbody id="fa-vbody"></tbody>
         </table>
       </div>
@@ -21288,28 +21315,30 @@ function renderFunnelAds() {
       <div class="cap" id="fa-mixcap">Cada venta del período con su origen.</div>
       <div class="fa-mix"><div class="fa-mixbar" id="fa-mixbar"></div><div class="fa-mixleg" id="fa-mixleg"></div></div>
     </div>
-    <div class="fa-card">
+    ${isAdmin() ? `<div class="fa-card">
       <h2>Para revisar</h2>
       <div class="cap">Lo que el funnel no puede trazar solo. Corregilo acá o en el pedido.</div>
       <div class="fa-rev" id="fa-rev"></div>
-    </div>
+    </div>` : ''}
     <div class="fa-card"><div class="fa-legend">
       <span style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fa-fnt);font-weight:600">Semáforo</span>
       <span class="g"><span class="fa-dot good"></span> saludable</span>
       <span class="g"><span class="fa-dot warn"></span> mirar</span>
       <span class="g"><span class="fa-dot bad"></span> corregir / no escalar</span>
       <span style="margin-left:auto;color:var(--fa-fnt)" id="fa-spendfoot"></span>
-      <button class="fa-btn" data-fa-sync>↻ Traer gasto de Meta</button>
+      ${isAdmin() ? '<button class="fa-btn" data-fa-sync>↻ Traer gasto de Meta</button>' : ''}
     </div></div>
     <p class="fa-note" id="fa-note"></p>
   </div>
   <div class="fa-pop" id="fa-pop"></div>`;
 }
 
+// Al cambiar de usuario o cerrar sesión: nada del funnel del anterior (Lautaro recibe una versión recortada).
+function funnelReset() { try { Object.assign(funnelState, { data: null, dataKey: '', loadedAt: 0, loading: false, open: {} }); funnelState.seq++; } catch (_) {} }
 async function loadFunnelAds(force) {
   const st = funnelState;
   const [since, until] = faRange(st.period);
-  const key = since + '|' + until + '|' + st.rate;
+  const key = _userKey(STATE.user) + '|' + since + '|' + until + '|' + st.rate;
   if (!force && st.data && st.dataKey === key && Date.now() - st.loadedAt < 120000) { renderFaAll(); return; }
   const my = ++st.seq;
   st.loading = true;
@@ -21322,6 +21351,7 @@ async function loadFunnelAds(force) {
       const j = await r.json().catch(() => null);
       if (my !== st.seq) return; // llegó tarde: ya se pidió otro mes
       if (r.ok && j && j.ok) { st.data = j; st.dataKey = key; st.loadedAt = Date.now(); st.loading = false; renderFaAll(); return; }
+      if (r.status === 401 && isMarketingOnly()) { st.loading = false; await showAlert('Tu sesión venció. Volvé a entrar.', { title: 'Sesión', variant: 'warn' }).catch(() => {}); logout(); return; }
       err = (j && j.error) ? String(j.error) : ('HTTP ' + r.status);
       if (r.status === 401 || r.status === 403) break;
     } catch (_) {
@@ -21356,8 +21386,9 @@ function renderFaAll() {
       '. El funnel cuenta SOLO las de pauta (para que el ROAS sea real).';
     if (d.presup_enviados) h += '<br>Presupuestos: ' + d.presup_enviados + ' enviados en el período; ' + (d.presup_sin_atrib || 0) + ' clientes con presupuesto no vinieron de un anuncio' + (d.presup_sin_tel ? ' y ' + d.presup_sin_tel + ' no tienen teléfono' : '') + ' (no entran al L→P).';
     if (d.gasto_excluido_usd) h += '<br>Gasto de campañas que no son de carteles (cursos), fuera del funnel: ' + faUsd(d.gasto_excluido_usd) + '.';
-    if (d.origen_a_confirmar) h += '<br><span style="color:var(--fa-bad);font-weight:600">⚠ ' + d.origen_a_confirmar + ' venta' + (d.origen_a_confirmar > 1 ? 's' : '') + ' con el origen a confirmar</span> (en rojo en Pedidos): hasta que las confirmes, el ROAS y el CAC pueden cambiar. <a href="#" data-fa-origen-pend style="color:var(--fa-acc)">Confirmarlas →</a>';
+    if (d.origen_a_confirmar) h += '<br><span style="color:var(--fa-bad);font-weight:600">⚠ ' + d.origen_a_confirmar + ' venta' + (d.origen_a_confirmar > 1 ? 's' : '') + ' con el origen a confirmar</span> ' + (isAdmin() ? '(en rojo en Pedidos): hasta que las confirmes, el ROAS y el CAC pueden cambiar. <a href="#" data-fa-origen-pend style="color:var(--fa-acc)">Confirmarlas →</a>' : ': hasta que Gaspar las confirme, el ROAS y el CAC pueden cambiar.');
     h += '<br><span style="color:var(--fa-fnt)">Gasto = Meta (real), por anuncio. Leads de WhatsApp e Instagram (anuncios; los posts orgánicos no cuentan). Días en hora Argentina.</span>';
+    if (d.frecuencia_error && isAdmin()) h += '<br><span style="color:var(--fa-fnt)">Frecuencia no disponible ahora (' + escapeHtml(d.frecuencia_error) + ').</span>';
     if (d.partial && (d.warnings || []).length) h = '<span style="color:var(--fa-bad);font-weight:600">⚠ Datos parciales — falló: ' + escapeHtml(d.warnings.join('; ')) + '</span><br>' + h;
     nt.innerHTML = h;
     const op = nt.querySelector('[data-fa-origen-pend]'); if (op) op.onclick = (e) => { e.preventDefault(); pedidoFilter.origenPend = true; setView('pedidos'); };
@@ -21365,15 +21396,26 @@ function renderFaAll() {
   faBindTips();
 }
 
+// "≈ N por día": leads del período ÷ días transcurridos (el mes en curso se cuenta hasta hoy).
+function faLeadsDia(d) {
+  const enCurso = d.hoy && d.hoy >= d.since && d.hoy <= d.until;
+  const dias = enCurso
+    ? Math.max(1, (Date.now() - Date.parse(d.since + 'T03:00:00Z')) / 86400000)   // mes en curso: hasta este momento
+    : Math.round((Date.parse(d.until + 'T12:00:00Z') - Date.parse(d.since + 'T12:00:00Z')) / 86400000) + 1;
+  if (!(dias > 0)) return '';
+  const x = (d.total.leads || 0) / dias;
+  return '≈ ' + (x >= 10 ? Math.round(x) : x.toFixed(1).replace('.', ',')) + ' por día ' + faTipBtn('leadsdia');
+}
 function renderFaKpis(d) {
-  const t = d.total;
+  const t = d.total, n = d.negocio || {};
   const K = [
     ['Gasto', faMoney(t.gasto_ars), '<small> ARS</small>', '', faUsd(t.gasto_usd), 'gasto'],
-    ['Leads', (t.leads || 0).toLocaleString('es-AR'), '', faSem(t.cpl, 2500, 4000, true), 'CPL ' + (t.cpl == null ? '—' : faMoney(t.cpl)), 'leads'],
+    ['Leads', (t.leads || 0).toLocaleString('es-AR'), '', faSem(t.cpl, 2500, 4000, true), faLeadsDia(d), 'leads'],
     ['CPL', t.cpl == null ? '—' : faMoney(t.cpl), '', faSem(t.cpl, 2500, 4000, true), '', 'cpl'],
     ['Ventas', (t.ventas || 0), '', faSem(t.roas, 4, 2.5), (t.presup || 0) + ' presup.', 'ventas'],
     ['CAC', t.cac == null ? '—' : faMoney(t.cac), '', faSem(t.cac, 100000, 180000, true), '', 'cac'],
-    ['ROAS', faX(t.roas), '', faSem(t.roas, 4, 2.5), faMoney(t.ingresos) + ' fact.', 'roas']
+    ['ROAS', faX(t.roas), '', faSem(t.roas, 4, 2.5), faMoney(t.ingresos) + ' fact.', 'roas'],
+    ['ROAS negocio', faX(n.roas), '', faSem(n.roas, 4, 2.5), (n.ventas || 0) + ' ventas · ' + faMoney(n.ingresos), 'roasneg']
   ];
   const el = document.getElementById('fa-kpis'); if (!el) return;
   el.innerHTML = K.map(k => {
@@ -21396,8 +21438,15 @@ function renderFaFunnel(d) {
   const el = document.getElementById('fa-funnel'); if (el) el.innerHTML = html;
 }
 
+function faFrecCell(r) {
+  if (r.frecuencia == null || !(r.frecuencia > 0)) return '<td class="mono" style="color:var(--fa-fnt)">—</td>';
+  const f = Math.round(r.frecuencia * 10) / 10, tofu = /tofu/i.test(r.nombre || ''), txt = f.toFixed(1).replace('.', ',') + (r.frecuencia_mixta ? '*' : '');
+  let title = (r.alcance ? r.alcance.toLocaleString('es-AR') + ' personas · ' : '') + (r.impresiones ? r.impresiones.toLocaleString('es-AR') + ' impresiones' : '');
+  if (r.frecuencia_mixta) title += ' · * de la campaña entera: incluye anuncios que el funnel cuenta en otra fila (' + faUsd(r.gasto_usd) + ' de ' + faUsd(r.gasto_campana_usd) + ' de gasto)';
+  return '<td title="' + escapeHtml(title) + '">' + (tofu ? faPill(faSem(f, 1.6, 2, true), txt) : faPill('', txt)) + '</td>';
+}
 function faMetricCells(r) {
-  return '<td class="mono">' + faMoney(r.gasto_ars) + '</td>' +
+  return '<td class="mono">' + faMoney(r.gasto_ars) + '</td>' + faFrecCell(r) +
     '<td class="mono">' + (r.leads || 0) + '</td>' +
     '<td>' + faPill(faSem(r.cpl, 2500, 4000, true), r.cpl == null ? '—' : faMoney(r.cpl)) + '</td>' +
     '<td class="mono">' + (r.presup || 0) + '</td>' +
@@ -21430,10 +21479,10 @@ function renderFaTable(d) {
       });
     }
   });
-  if (!(d.rows || []).length) html = '<tr><td colspan="10" style="text-align:center;color:var(--fa-mut);padding:18px">Sin gasto ni leads de pauta en el período.</td></tr>';
+  if (!(d.rows || []).length) html = '<tr><td colspan="11" style="text-align:center;color:var(--fa-mut);padding:18px">Sin gasto ni leads de pauta en el período.</td></tr>';
   const t = d.total;
   html += '<tr class="tot"><td>TOTAL</td>' +
-    '<td class="mono">' + faMoney(t.gasto_ars) + '</td><td class="mono">' + (t.leads || 0) + '</td>' +
+    '<td class="mono">' + faMoney(t.gasto_ars) + '</td><td class="mono" style="color:var(--fa-fnt)">—</td><td class="mono">' + (t.leads || 0) + '</td>' +
     '<td class="mono">' + (t.cpl == null ? '—' : faMoney(t.cpl)) + '</td><td class="mono">' + (t.presup || 0) + '</td>' +
     '<td class="mono">' + faPct(t.lp) + '</td><td class="mono">' + (t.ventas || 0) + '</td>' +
     '<td class="mono">' + faPct(t.pv) + '</td><td class="mono">' + (t.cac == null ? '—' : faMoney(t.cac)) + '</td>' +
@@ -21459,7 +21508,7 @@ function renderFaVend(d) {
   if (!vs.length) html = '<tr><td colspan="12" style="text-align:center;color:var(--fa-mut);padding:18px">Sin datos de vendedores en el período.</td></tr>';
   tb.innerHTML = html;
   const cap = document.getElementById('fa-vendcap');
-  if (cap) cap.textContent = 'Leads, presupuestos, OC, ventas e ingresos de pauta; a la derecha, el total del vendedor (pauta + orgánico).' + (d.otros_leads ? ' ' + d.otros_leads + ' leads de pauta están hoy en otras bandejas (cursos/oculto) y no cuentan para nadie.' : '');
+  if (cap) cap.textContent = 'Solo lo que vino de anuncios: leads que le entraron a cada uno, clientes a los que les mandó presupuesto, OC, ventas e ingresos; a la derecha, el total del vendedor (pauta + orgánico). No da igual que el panel de rendimiento: ahí entran también las consultas sin anuncio.' + (d.otros_leads ? ' ' + d.otros_leads + ' leads de pauta están hoy en otras bandejas (cursos/oculto) y no cuentan para nadie.' : '');
 }
 
 function renderFaMix(d) {
@@ -21576,13 +21625,66 @@ function bindFunnelAds() {
   const wrap = document.getElementById('fa-wrap');
   if (wrap) wrap.addEventListener('click', (e) => {
     if (e.target.closest('.fa-i')) return;
-    const cv = e.target.closest('[data-fa-cv]'); if (cv) { faMarcarCampana(cv); return; }
-    const sy = e.target.closest('[data-fa-sync]'); if (sy) { faTraerGasto(sy); return; }
+    const cv = e.target.closest('[data-fa-cv]'); if (cv) { if (isAdmin()) faMarcarCampana(cv); return; }
+    const sy = e.target.closest('[data-fa-sync]'); if (sy) { if (isAdmin()) faTraerGasto(sy); return; }
+    if (e.target.closest('[data-fa-lautaro]')) { lautaroUsuarioUI(); return; }
     if (e.target.closest('[data-fa-retry]')) { loadFunnelAds(true); return; }
     const row = e.target.closest('tr[data-fa-row]');
     if (row && st.data) { const k = row.getAttribute('data-fa-row'); st.open[k] = !st.open[k]; renderFaTable(st.data); }
   });
   loadFunnelAds();
+}
+// Usuario de Lautaro (publicista): entra con el usuario "Lautaro" y ve solo el Funnel Ads, sin datos de clientes ni acciones.
+// Gaspar le pone la contraseña (crea o cambia el usuario) o lo da de baja.
+async function lautaroUsuarioUI() {
+  if (!isAdmin() || lautaroUsuarioUI._abierta) return;
+  lautaroUsuarioUI._abierta = true;
+  const api = async (body) => {
+    const r = await fetch(CONFIG.trackerUrl + '/admin/usuarios/lautaro', body ? { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(body) } : { headers: authHeaders() });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.motivo || j.error || ('HTTP ' + r.status));
+    return j;
+  };
+  let u;
+  try { u = (await api()).usuario || {}; } catch (e) { lautaroUsuarioUI._abierta = false; toast('No se pudo cargar: ' + e.message); return; }
+  const estado = !u.existe ? 'Todavía no tiene usuario: se crea cuando le ponés la contraseña.'
+    : (u.activo && u.con_clave ? 'Ya tiene usuario. Si le ponés otra contraseña, se le cierra la sesión.' : 'El usuario está dado de baja: con una contraseña nueva se activa.');
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal modal--login"><div class="modal-h"><h3>Acceso de Lautaro</h3></div><div class="modal-body"><form class="login-form" novalidate>
+      <div style="font-size:13px;color:var(--fg-mute);margin-bottom:10px">Entra con el usuario <b>Lautaro</b> y ve solo el Funnel Ads: gasto, frecuencia, leads, presupuestos y ventas por campaña y por vendedor. No ve chats, teléfonos ni nombres de clientes, y no puede cambiar nada. ${escapeHtml(estado)}</div>
+      <label class="nc-field"><span class="nc-label">Contraseña nueva (mínimo 8)</span><input type="password" class="nc-input" data-p1 autocomplete="new-password"></label>
+      <label class="nc-field" style="margin-top:10px"><span class="nc-label">Repetila</span><input type="password" class="nc-input" data-p2 autocomplete="new-password"></label>
+      <div data-perr style="color:#ef4444;font-size:12px;min-height:16px;margin-top:6px"></div>
+      <button type="submit" class="btn btn-cyan" style="width:100%;margin-top:8px">Guardar contraseña</button>
+      ${u.existe && u.activo ? '<button type="button" class="btn btn-ghost" data-pbaja style="width:100%;margin-top:8px;color:#ef4444">Dar de baja el acceso</button>' : ''}
+      <button type="button" class="btn btn-ghost" data-pcancel style="width:100%;margin-top:8px">Cancelar</button></form></div></div>`;
+  document.body.appendChild(bg); void bg.offsetWidth; bg.classList.add('open');
+  const $ = q => bg.querySelector(q), err = m => { $('[data-perr]').textContent = m; };
+  let ocupado = false;
+  const fin = () => { if (ocupado) return; lautaroUsuarioUI._abierta = false; bg.classList.remove('open'); setTimeout(() => bg.remove(), 150); };
+  const bloquear = (si) => { ocupado = si; bg.querySelectorAll('button').forEach(x => { x.disabled = si; }); };
+  $('[data-pcancel]').onclick = fin;
+  bg.addEventListener('click', e => { if (e.target === bg) fin(); });
+  bg.addEventListener('keydown', e => { if (e.key === 'Escape') fin(); });
+  const baja = $('[data-pbaja]');
+  if (baja) baja.onclick = async () => {
+    if (ocupado) return;
+    if (!(await showConfirm('¿Le cortás el acceso a Lautaro? Para que vuelva a entrar le vas a tener que poner otra contraseña.', { title: 'Acceso de Lautaro', confirmLabel: 'Dar de baja', cancelLabel: 'Cancelar' }).catch(() => false))) return;
+    bloquear(true); err('');
+    try { await api({ desactivar: true }); bloquear(false); fin(); toast('Listo: Lautaro ya no puede entrar'); } catch (ex) { bloquear(false); err(ex.message || 'No se pudo dar de baja'); }
+  };
+  $('form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const p1 = $('[data-p1]').value, p2 = $('[data-p2]').value;
+    if (!p1) return err('Poné una contraseña.');
+    if (p1.length < 8) return err('La contraseña tiene que tener al menos 8 caracteres.');
+    if (p1 !== p2) return err('Las contraseñas no coinciden.');
+    if (ocupado) return;
+    bloquear(true); err('');
+    try { await api({ password: p1 }); bloquear(false); fin(); toast('Listo: Lautaro entra con el usuario "Lautaro" y esa contraseña'); }
+    catch (ex) { bloquear(false); err(ex.message || 'No se pudo guardar'); }
+  });
+  setTimeout(() => { const i = $('[data-p1]'); if (i) i.focus(); }, 50);
 }
 window.renderFunnelAds = renderFunnelAds;
 window.bindFunnelAds = bindFunnelAds;
@@ -26367,6 +26469,7 @@ function getUserRole() {
   if (u === 'logistica') return 'logistica'; // externo: ningún permiso de "comercial" (cotizar, OC, chats…)
   if (u.replace(/[\s._-]+/g, '') === 'sinfrontera') return 'sinfrontera'; // externo: idem
   if (u === 'fran') return 'fran'; // solo los pedidos de corte de Sin Frontera
+  if (u === 'lautaro') return 'marketing'; // publicista: solo el Funnel Ads
   return 'comercial'; // joaco, joaquin, default
 }
 function canCreateBriefs() { if (isCursosUser(STATE.user)) return false; const r = getUserRole(); return r === 'comercial' || r === 'admin'; }
