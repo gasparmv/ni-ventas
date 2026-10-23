@@ -6960,16 +6960,27 @@ async function avisoCorteContactos(env) {
   } catch (_) {}
   return { ok: true, contactos: [...porTel.values()], malos };
 }
+// Los dos avisos automáticos del corte, desde el número de Neon Infinito y a los mismos clientes (avisoCorteContactos):
+// - El del JUEVES a las 15 h (Gaspar 22-oct-2026).
+// - El recordatorio del VIERNES a las 11 h, "hoy hasta las 20 hs" (Gaspar 23-oct: "sí, dale"). Nunca sale después de las
+//   20 (send_hours '9-20'): lo que no haya salido espera al viernes siguiente sin mandarse.
+// kv aviso_corte_<clave>_on / aviso_corte_<clave>_ultimo, por cada uno.
+const AVISO_CORTE_VIERNES_TPL = 'corte_aviso_viernes';
+const AVISO_CORTE_VIERNES_TEXTO = 'Buenas {{1}}, te recuerdo que hoy hasta las 20 hs podés cargar tu pedido de corte en la página para que entre en el corte de este finde.';
+const AVISOS_CORTE = {
+  semanal: { dia: 4, hora: 15, tpl: AVISO_CORTE_TPL, texto: AVISO_CORTE_TEXTO, horas: '9-21', nombre: 'Aviso corte finde', cual: 'el aviso del corte del finde' },
+  viernes: { dia: 5, hora: 11, tpl: AVISO_CORTE_VIERNES_TPL, texto: AVISO_CORTE_VIERNES_TEXTO, horas: '9-20', nombre: 'Aviso corte viernes', cual: 'el recordatorio del viernes del corte' },
+};
 // Crea el broadcast (mismo formato que POST /admin/broadcasts, con las variables por contacto y la bandeja Corte).
-async function avisoCorteEncolar(env, contactos, nombre) {
+async function avisoCorteEncolar(env, contactos, nombre, a = AVISOS_CORTE.semanal) {
   await ensureBroadcastsSchema(env);
   const ahora = Date.now(), intervalo = 30;
   const ins = await env.DB.prepare("INSERT INTO wa_broadcasts (name, template, lang, param_mode, body_preview, status, total, created_at, created_by, reply_ai) VALUES (?, ?, 'es_AR', 'nombre', ?, 'running', ?, ?, 'aviso_corte_semanal', 0)")
-    .bind(nombre, AVISO_CORTE_TPL, AVISO_CORTE_TEXTO, contactos.length, new Date(ahora).toISOString()).run();
+    .bind(nombre, a.tpl, a.texto, contactos.length, new Date(ahora).toISOString()).run();
   const id = ins && ins.meta && ins.meta.last_row_id;
   if (!id) throw new Error('no se pudo crear el broadcast');
   const kind = 'bc_' + id;
-  await env.DB.prepare("UPDATE wa_broadcasts SET send_hours = '9-21', reveal_inbox = 'corte' WHERE id = ?").bind(id).run();
+  await env.DB.prepare("UPDATE wa_broadcasts SET send_hours = ?, reveal_inbox = 'corte' WHERE id = ?").bind(a.horas, id).run();
   const st = [];
   contactos.forEach((c, i) => {
     st.push(env.DB.prepare("INSERT OR IGNORE INTO wa_autoreply_log (phone, kind, sent_at, status, due_at, sender_name) VALUES (?, ?, '', 'queued', ?, ?)").bind(c.phone, kind, new Date(ahora + i * intervalo * 1000).toISOString(), c.nombre));
@@ -6978,28 +6989,30 @@ async function avisoCorteEncolar(env, contactos, nombre) {
   for (let j = 0; j < st.length; j += 100) await env.DB.batch(st.slice(j, j + 100));
   return { id, kind, total: contactos.length, minutos: Math.round(contactos.length * intervalo / 60) };
 }
-// Cron de cada minuto: el jueves a las 15 h (AR) lo manda una sola vez y le avisa a Gaspar cómo salió.
+// Cron de cada minuto: cada aviso sale una sola vez, en su día y su hora (AR), y le avisa a Gaspar cómo salió.
 async function avisoCorteSemanal(env) {
   const ar = new Date(Date.now() - 3 * 3600e3);
-  if (ar.getUTCDay() !== 4 || ar.getUTCHours() !== 15) return;
-  if ((await kvGet(env, 'aviso_corte_semanal_on', '0')) !== '1') return;
-  const hoy = ar.toISOString().slice(0, 10);
-  // Reclamo atómico de la semana: el primer tick de las 15 h se lo lleva (si algo falla después, no se reintenta cada minuto).
-  let claim = null;
-  try { claim = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('aviso_corte_semanal_ultimo', ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at WHERE kv_cache.v <> excluded.v RETURNING k").bind(hoy, new Date().toISOString()).first(); } catch (_) {}
-  if (!claim) return;
-  let txt;
-  try {
-    const t = await env.DB.prepare('SELECT status FROM template_status_cache WHERE name = ?').bind(AVISO_CORTE_TPL).first();
-    const c = (t && String(t.status).toUpperCase() !== 'APPROVED') ? { error: 'la plantilla ' + AVISO_CORTE_TPL + ' está ' + String(t.status).toUpperCase() + ' en Meta' } : await avisoCorteContactos(env);
-    if (!c.ok) txt = 'No salió el aviso del corte de hoy: ' + c.error + '.';
-    else if (!c.contactos.length) txt = 'No salió el aviso del corte de hoy: no encontré clientes con teléfono.';
-    else {
-      const b = await avisoCorteEncolar(env, c.contactos, 'Aviso corte finde ' + hoy + ' (automático)');
-      txt = `Salió el aviso del corte del finde a ${b.total} clientes, uno cada 30 s (termina en unos ${b.minutos} min).` + (c.malos.length ? ` ${c.malos.length} de LTV tienen el teléfono mal cargado y no lo reciben.` : '');
-    }
-  } catch (e) { txt = 'No salió el aviso del corte de hoy: ' + String((e && e.message) || e).slice(0, 200); }
-  try { await avisoAdmin(env, txt, { tipo: 'aviso_corte_semanal', prioridad: 'P2', clave: 'aviso_corte:' + hoy }); } catch (_) {}
+  for (const [clave, a] of Object.entries(AVISOS_CORTE)) {
+    if (ar.getUTCDay() !== a.dia || ar.getUTCHours() !== a.hora) continue;
+    if ((await kvGet(env, 'aviso_corte_' + clave + '_on', '0')) !== '1') continue;
+    const hoy = ar.toISOString().slice(0, 10);
+    // Reclamo atómico de la semana: el primer tick de la hora se lo lleva (si algo falla después, no se reintenta cada minuto).
+    let claim = null;
+    try { claim = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at WHERE kv_cache.v <> excluded.v RETURNING k").bind('aviso_corte_' + clave + '_ultimo', hoy, new Date().toISOString()).first(); } catch (_) {}
+    if (!claim) continue;
+    let txt;
+    try {
+      const t = await env.DB.prepare('SELECT status FROM template_status_cache WHERE name = ?').bind(a.tpl).first();
+      const c = (t && String(t.status).toUpperCase() !== 'APPROVED') ? { error: 'la plantilla ' + a.tpl + ' está ' + String(t.status).toUpperCase() + ' en Meta' } : await avisoCorteContactos(env);
+      if (!c.ok) txt = `No salió ${a.cual} de hoy: ${c.error}.`;
+      else if (!c.contactos.length) txt = `No salió ${a.cual} de hoy: no encontré clientes con teléfono.`;
+      else {
+        const b = await avisoCorteEncolar(env, c.contactos, a.nombre + ' ' + hoy + ' (automático)', a);
+        txt = `Salió ${a.cual} a ${b.total} clientes, uno cada 30 s (termina en unos ${b.minutos} min).` + (c.malos.length ? ` ${c.malos.length} de LTV tienen el teléfono mal cargado y no lo reciben.` : '');
+      }
+    } catch (e) { txt = `No salió ${a.cual} de hoy: ` + String((e && e.message) || e).slice(0, 200); }
+    try { await avisoAdmin(env, txt, { tipo: 'aviso_corte_semanal', prioridad: 'P2', clave: 'aviso_corte_' + clave + ':' + hoy }); } catch (_) {}
+  }
 }
 // Asignaciones manuales confirmadas (cliente → teléfono). Solo cuentan para nombres con nombre Y apellido: con un solo
 // nombre ("mirna", "Eliana") sería volver al "teléfono por nombre de pila".
@@ -23769,31 +23782,35 @@ const handler = {
       }
       // Crear un broadcast custom desde el panel (Fase 2): CSV de contactos +
       // plantilla elegida + goteo. dryRun=true valida sin encolar (preview seguro).
-      // Aviso del corte de los jueves (avisoCorteSemanal). GET: cómo está y a quiénes le llega (?todos=1, la lista entera);
-      // POST {accion}: 'on' / 'off' prende o apaga el automático, 'enviar' lo manda ya a todos.
+      // Avisos automáticos del corte (avisoCorteSemanal): el del jueves (aviso 'semanal') y el recordatorio del viernes
+      // ('viernes'). GET: cómo están y a quiénes les llega (?todos=1, la lista entera). POST {accion, aviso}: 'on' / 'off'
+      // prende o apaga ese automático; 'enviar' lo manda ya a todos.
       if (path === '/admin/aviso-corte-semanal' && (request.method === 'GET' || request.method === 'POST')) {
         if (!isAdminSession) return json({ error: 'forbidden: admin only' }, 403);
         if (request.method === 'GET') {
           const c = await avisoCorteContactos(env);
           const lista = c.ok ? c.contactos.map(x => x.params[0] + ' · ' + x.nombre + ' (' + x.phone + ')') : [];
+          const avisos = {};
+          for (const [k, a] of Object.entries(AVISOS_CORTE)) avisos[k] = { on: (await kvGet(env, 'aviso_corte_' + k + '_on', '0')) === '1', ultimo: await kvGet(env, 'aviso_corte_' + k + '_ultimo', ''), plantilla: a.tpl, texto: a.texto, dia: a.dia, hora: a.hora };
           return json({
-            on: (await kvGet(env, 'aviso_corte_semanal_on', '0')) === '1', ultimo: await kvGet(env, 'aviso_corte_semanal_ultimo', ''),
-            plantilla: AVISO_CORTE_TPL, texto: AVISO_CORTE_TEXTO, error: c.error || null, total: lista.length, malos: c.malos || [],
+            on: avisos.semanal.on, ultimo: avisos.semanal.ultimo, plantilla: AVISO_CORTE_TPL, texto: AVISO_CORTE_TEXTO, avisos,
+            error: c.error || null, total: lista.length, malos: c.malos || [],
             contactos: url.searchParams.get('todos') === '1' ? lista : lista.slice(0, 5),
           });
         }
         let body = {};
         try { body = await request.json(); } catch (_) {}
+        const clave = body.aviso === 'viernes' ? 'viernes' : 'semanal', a = AVISOS_CORTE[clave];
         if (body.accion === 'on' || body.accion === 'off') {
-          await kvSet(env, 'aviso_corte_semanal_on', body.accion === 'on' ? '1' : '0');
-          return json({ ok: true, on: body.accion === 'on' });
+          await kvSet(env, 'aviso_corte_' + clave + '_on', body.accion === 'on' ? '1' : '0');
+          return json({ ok: true, aviso: clave, on: body.accion === 'on' });
         }
         if (body.accion === 'enviar') {
           const c = await avisoCorteContactos(env);
           if (!c.ok) return json({ error: c.error }, 500);
           if (!c.contactos.length) return json({ error: 'no hay clientes con teléfono' }, 400);
-          const b = await avisoCorteEncolar(env, c.contactos, 'Aviso corte finde ' + new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10) + ' (a mano)');
-          return json({ ok: true, ...b, malos: c.malos });
+          const b = await avisoCorteEncolar(env, c.contactos, a.nombre + ' ' + new Date(Date.now() - 3 * 3600e3).toISOString().slice(0, 10) + ' (a mano)', a);
+          return json({ ok: true, aviso: clave, ...b, malos: c.malos });
         }
         return json({ error: "accion: 'on' | 'off' | 'enviar'" }, 400);
       }
