@@ -6295,8 +6295,8 @@ async function corteTrasPagado(env, phone, piezas, nombre, total, proof, msgClie
   if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') {
     const caja = cajaDeComprobante(proof); // nombre + apellido, entiende el formato pegado de Mercado Pago ("GASPARMARTINE")
     try {
-      const sr = await corteMarcarPagadoSheet(env, nombre, total, caja);
-      if (sr.ok) sheetMsg = ' · planilla: ' + sr.marcadas + ' fila(s) → pagado' + (sr.caja ? ' (caja ' + sr.caja + ')' : ' (sin caja visible)');
+      const sr = await corteMarcarPagadoSheet(env, nombre, total, caja, '', piezas);
+      if (sr.ok) sheetMsg = corteSheetMsg(sr);
       else { sheetMsg = ' · planilla NO marcada (' + sr.error + ')'; if (/token|HTTP/i.test(String(sr.error))) await corteSheetPendingAdd(env, phone, nombre, total, caja); }
     } catch (e) { sheetMsg = ' · planilla error'; await corteSheetPendingAdd(env, phone, nombre, total, cajaDeComprobante(proof)); }
   }
@@ -6354,7 +6354,7 @@ async function corteVigiaPago(env, phone, opts = {}) {
   if (total > 0 && monto >= total * 0.99) {
     // Piezas de ESTE cobro, leídas ANTES de la transición (después pasan a 'pagado') → para el recibo con detalle.
     let piezas = [];
-    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) {}
+    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto, hoja_fila, hoja_cliente, hoja_fecha FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) {}
     const ch = await transicion('pagado');
     if (ch === 0) return await ch0(); // no confirmar ni avisar dos veces (o reintentar si el pago quedó sin marcar)
     if (ch < 0) { try { await precotizNotifyGaspar(env, 'Corte: ' + quien + ' mandó comprobante por $' + monto.toLocaleString('es-AR') + ' pero falló marcarlo PAGADO en la base. Revisalo a mano.', { tipo: 'corte_pago', prioridad: 'P1', refPhone: phone, plata: true }); } catch (_) {} return true; }
@@ -6378,7 +6378,7 @@ async function corteAutoDetalle(env, phone, opts = {}) {
   const gapMs = Math.max(0, Number(opts.reenviarTrasMs) || 0);
   const cutoff = gapMs ? isoHace(gapMs) : '';
   let rows;
-  try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) { return false; }
+  try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto, hoja_fila, hoja_cliente, hoja_fecha FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) { return false; }
   if (!rows.length) return false;
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
   // DEDUP ROBUSTO: si YA le mandamos el detalle de este cobro (sent_at), NO reenviar — pase lo que pase.
@@ -6462,7 +6462,7 @@ async function corteVigiaParcial(env) {
     if (pagado < total * 0.99) { await avisar('mandó otro comprobante por ' + pesos(monto) + ': lleva ' + suma + ' de ' + pesos(total) + ' (faltan ' + pesos(total - pagado) + ').'); continue; }
     // Completó: mismas consecuencias que un pago de una vez. Piezas leídas ANTES de la transición (para el recibo).
     let piezas = [];
-    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto FROM corte_pedidos WHERE telefono=? AND estado_pago='parcial' AND precio>0").bind(r.telefono).all()).results || []; } catch (_) {}
+    try { piezas = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto, hoja_fila, hoja_cliente, hoja_fecha FROM corte_pedidos WHERE telefono=? AND estado_pago='parcial' AND precio>0").bind(r.telefono).all()).results || []; } catch (_) {}
     let ch = -1;
     try { const u = await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pagado', updated_at=? WHERE telefono=? AND estado_pago='parcial'").bind(nowIso, r.telefono).run(); ch = (u && u.meta && u.meta.changes) || 0; } catch (_) {}
     if (ch < 0) { await avisar('completó el pago (' + suma + ', total ' + pesos(total) + ') pero no pude marcarlo PAGADO en la base: marcalo desde el tablero.'); continue; }
@@ -6507,7 +6507,10 @@ async function processCorteVigiaAuto(env) {
         try {
           // Los pendientes del pago manual tienen clave '<tel|clave>|<fecha de la hoja>': se reintenta sobre ESA semana.
           const pk = String(p.phone || ''), fRet = pk.includes('|') ? pk.slice(pk.lastIndexOf('|') + 1) : '';
-          const sr = await corteMarcarPagadoSheet(env, p.cliente, Number(p.total) || 0, p.caja || '', fRet);
+          const telR = pk.split('|')[0];
+          let pz = [];
+          if (/^\d{10,15}$/.test(telR)) { try { pz = (await env.DB.prepare("SELECT hoja_fila, hoja_cliente, cliente_nombre, hoja_fecha, precio FROM corte_pedidos WHERE telefono=? AND estado_pago IN ('pagado','interno') AND hoja_fila IS NOT NULL AND updated_at >= ?" + (fRet ? " AND hoja_fecha=?" : "")).bind(telR, new Date(new Date(p.created_at).getTime() - 3 * 86400000).toISOString(), ...(fRet ? [fRet] : [])).all()).results || []; } catch (_) {} }
+          const sr = await corteMarcarPagadoSheet(env, p.cliente, Number(p.total) || 0, p.caja || '', fRet, pz);
           if (sr.ok || /sin filas pendientes/i.test(String(sr.error || ''))) { try { await env.DB.prepare("DELETE FROM corte_sheet_pending WHERE phone=?").bind(p.phone).run(); } catch (_) {} }
         } catch (_) {}
       }
@@ -6759,7 +6762,151 @@ async function compUsadoFuera(env, key, grp, grpArgs) {
   if (!key) return null;
   try { return await env.DB.prepare(`SELECT numero, cartel FROM pedidos WHERE (comprobante_key = ? OR comprobante2_key = ? OR instr(IFNULL(comprobantes_extra, ''), ?) > 0) AND NOT (${grp}) LIMIT 1`).bind(key, key, '"' + key + '"', ...grpArgs).first(); } catch (_) { return null; }
 }
-// Marca "pagado" en la col I (Pago) de Venta_Insumos para las filas PENDIENTES del cliente, verificando
+// ===== Marca "pagado" en Venta_Insumos POR FILA (24-oct) =====
+// La fila de cada pieza (hoja_fila) es la misma en la planilla de Emma y en Venta_Insumos (que trae sheet1 por IMPORTRANGE de
+// columnas enteras), así que no hace falta adivinar la semana por el total. El método de antes ("la semana del cliente cuyas
+// filas 'Pendiente de pago' suman lo cobrado, ±500") falló en tres casos reales, que quedaron PAGADOS en el CRM y pendientes
+// en la hoja: un precio distinto en la planilla (cable a $54.000 en la hoja y $53.000 cobrado: Zeballos y Bautista Martinez,
+// 19-oct), un pago de dos semanas juntas (Ivan Pita, 23-oct) y una fila tipeada por Emma sin "Pendiente de pago" (Leonel
+// Alarcón, pagado a mano). Control: la col C de esa fila tiene que tener el nombre del cliente de la pieza (si alguien movió
+// filas, no se toca y se avisa). Las filas que ya dicen "pagado" no se reescriben. La caja va a la col R solo si es una de
+// las de la validación (si no se vio, no se pone ninguna).
+const CORTE_CAJAS_HOJA = ['Melina', 'Gaspar', 'Favio', 'Bruno', 'Efectivo'];
+// → { ok, marcadas, ya, distintas: [filas], caja } | { error }
+async function corteMarcarPagadoFilas(env, piezas, caja) {
+  const filas = [], vistas = new Set();
+  for (const p of piezas || []) {
+    const f = parseInt(p.hoja_fila, 10);
+    if (f > 1 && !vistas.has(f)) { vistas.add(f); filas.push({ fila: f, cliente: p.hoja_cliente || p.cliente_nombre || '' }); }
+  }
+  if (!filas.length) return { error: 'sin filas' };
+  if (filas.length > 150) return { error: 'demasiadas filas (' + filas.length + ')' };
+  const token = await sheetsAccessToken(env);
+  if (!token) return { error: 'sin token sheets' };
+  let rangos;
+  try {
+    const qs = filas.map(x => 'ranges=' + encodeURIComponent(`Venta_Insumos!C${x.fila}:I${x.fila}`)).join('&');
+    const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values:batchGet?${qs}`, { headers: { Authorization: 'Bearer ' + token } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+    rangos = j.valueRanges || [];
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+  const cajaOk = CORTE_CAJAS_HOJA.includes(caja) ? caja : '';
+  const data = [], distintas = [];
+  let ya = 0, marcadas = 0;
+  filas.forEach((x, i) => {
+    const v = ((rangos[i] && rangos[i].values) || [])[0] || []; // C..I → v[0] cliente, v[6] Pago
+    const nom = corteNormNombre(v[0]);
+    if (!nom || nom !== corteNormNombre(x.cliente)) { distintas.push(x.fila); return; }
+    if (/^pagado$/i.test(String(v[6] || '').trim())) { ya++; return; }
+    data.push({ range: `Venta_Insumos!I${x.fila}`, values: [['pagado']] });
+    if (cajaOk) data.push({ range: `Venta_Insumos!R${x.fila}`, values: [[cajaOk]] });
+    marcadas++;
+  });
+  if (data.length) {
+    try {
+      const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values:batchUpdate`, { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ valueInputOption: 'RAW', data }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+    } catch (e) { return { error: String((e && e.message) || e) }; }
+  }
+  return { ok: true, marcadas, ya, distintas, caja: cajaOk };
+}
+// Marca pagado lo cobrado. Con las piezas (`piezas`, con hoja_fila) marca POR FILA; las que no tienen fila (anteriores al
+// 12-oct, cuando el CRM empezó a guardarla) siguen con el método viejo, una vez por fecha de la hoja. Sin piezas, el viejo.
+// → { ok, marcadas, ya?, distintas?, caja, resto? } | { error }
+async function corteMarcarPagadoSheet(env, cliente, totalEsperado, caja, fecha, piezas) {
+  const lista = Array.isArray(piezas) ? piezas : [];
+  const conFila = lista.filter(p => parseInt(p.hoja_fila, 10) > 1);
+  if (!conFila.length) return corteMarcarPagadoPorTotal(env, cliente, totalEsperado, caja, fecha);
+  const r = await corteMarcarPagadoFilas(env, conFila, caja);
+  if (r.error) return r;
+  const grupos = {};
+  lista.filter(p => !(parseInt(p.hoja_fila, 10) > 1)).forEach(p => {
+    const f = String(p.hoja_fecha || fecha || '');
+    const g = (grupos[f] = grupos[f] || { total: 0, cliente: p.hoja_cliente || p.cliente_nombre || cliente });
+    g.total += Number(p.precio) || 0;
+  });
+  const resto = [];
+  for (const [f, g] of Object.entries(grupos)) {
+    let s;
+    try { s = await corteMarcarPagadoPorTotal(env, g.cliente, Math.round(g.total), caja, f); } catch (e) { s = { error: String((e && e.message) || e) }; }
+    if (s.ok) r.marcadas += s.marcadas;
+    else if (!/sin filas pendientes/i.test(String(s.error || ''))) resto.push((f || 'sin fecha') + ': ' + s.error);
+  }
+  if (resto.length) r.resto = resto.join('; ');
+  return r;
+}
+// Texto del resultado para el aviso a Gaspar.
+function corteSheetMsg(sr) {
+  if (!sr || !sr.ok) return ' · planilla NO marcada (' + ((sr && sr.error) || 'error') + ')';
+  const d = sr.distintas || [];
+  return ' · planilla: ' + sr.marcadas + ' fila(s) → pagado' + (sr.ya ? ' (' + sr.ya + ' ya lo estaba' + (sr.ya === 1 ? '' : 'n') + ')' : '') + (sr.caja ? ' (caja ' + sr.caja + ')' : ' (sin caja visible)')
+    + (d.length ? ' · ⚠ no toqué ' + (d.length === 1 ? 'la fila ' : 'las filas ') + d.join(', ') + ': en la planilla ' + (d.length === 1 ? 'tiene' : 'tienen') + ' otro nombre' : '')
+    + (sr.resto ? ' · ⚠ ' + sr.resto : '');
+}
+// RED DE SEGURIDAD: lo que el CRM tiene PAGADO y en Venta_Insumos sigue sin "pagado" (la marca automática falló, o el pago
+// se cargó por otro lado). Revisa las piezas con fila de las últimas `tandas` tandas, con el mismo control de nombre. La caja
+// no se adivina: solo la de `cajas` ({ telefono: caja }, para el arreglo a mano) y solo si la col R está vacía. También
+// anota las filas cuyo precio (col J) no coincide con lo cobrado. → { ok, revisadas, marcar: [...], distintas: [...] }
+async function corteSheetPagoReconciliar(env, { dry = true, cajas = {}, tandas = 3 } = {}) {
+  const piezas = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, hoja_cliente, hoja_fila, hoja_fecha, diseno_nombre, producto, precio, estado_pago FROM corte_pedidos WHERE hoja_fila IS NOT NULL AND estado_pago IN ('pagado','interno') AND estado NOT IN ('prueba','cancelado') AND IFNULL(producto,'')!='NEON' AND tanda_id IN (SELECT id FROM corte_tandas WHERE IFNULL(fecha_corte,'')!='' ORDER BY id DESC LIMIT ?) ORDER BY hoja_fila").bind(tandas).all()).results || [];
+  if (!piezas.length) return { ok: true, dry, revisadas: 0, marcar: [], distintas: [] };
+  const min = Math.min(...piezas.map(p => +p.hoja_fila)), max = Math.max(...piezas.map(p => +p.hoja_fila));
+  if (max - min > 5000) return { ok: false, error: 'rango de filas demasiado grande (' + min + ' a ' + max + ')' };
+  const token = await sheetsAccessToken(env);
+  if (!token) return { ok: false, error: 'sin token sheets' };
+  const v = await corteHojaLeer(token, CORTE_SHEET_ID, `Venta_Insumos!C${min}:R${max}`); // v[i][0] cliente C, [6] Pago I, [7] Precio J, [15] Caja R
+  const marcar = [], distintas = [], vistas = new Set();
+  for (const p of piezas) {
+    const f = +p.hoja_fila;
+    if (vistas.has(f)) continue;
+    vistas.add(f);
+    const r = v[f - min] || [];
+    const nom = corteNormNombre(p.hoja_cliente || p.cliente_nombre);
+    if (!corteNormNombre(r[0]) || corteNormNombre(r[0]) !== nom) { distintas.push({ fila: f, crm: p.hoja_cliente || p.cliente_nombre, hoja: String(r[0] || '') }); continue; }
+    if (/^pagado$/i.test(String(r[6] || '').trim())) continue;
+    const precioHoja = cortePrecioHoja(r[7]), cobrado = Math.round((Number(p.precio) || 0) * 100) / 100;
+    const caja = cajas[p.telefono] && !String(r[15] || '').trim() ? cajas[p.telefono] : '';
+    marcar.push({ fila: f, telefono: p.telefono || '', cliente: p.hoja_cliente || p.cliente_nombre, fecha: p.hoja_fecha, diseno: p.diseno_nombre || p.producto, pago_hoja: String(r[6] || ''), precio_hoja: precioHoja, cobrado, precio_distinto: Math.abs(precioHoja - cobrado) > 1, caja, marcada: false });
+  }
+  if (!dry && marcar.length) {
+    const data = [];
+    marcar.forEach(x => { data.push({ range: `Venta_Insumos!I${x.fila}`, values: [['pagado']] }); if (x.caja) data.push({ range: `Venta_Insumos!R${x.fila}`, values: [[x.caja]] }); });
+    await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', data);
+    marcar.forEach(x => { x.marcada = true; });
+  }
+  return { ok: true, dry, revisadas: vistas.size, marcar, distintas };
+}
+// Cron: una vez por día desde las 9 AR. Avisa a Gaspar solo si arregló algo (o si aparecen filas con otro nombre nuevas).
+async function corteSheetPagoReconAuto(env) {
+  try {
+    if ((await kvGet(env, 'corte_sheet_recon_on', '1')) !== '1' || (await kvGet(env, 'corte_sheet_pago_on', '1')) !== '1') return;
+    const ar = new Date(Date.now() - 3 * 3600000);
+    if (ar.getUTCHours() < 9) return;
+    const dia = ar.toISOString().slice(0, 10), nowIso = new Date().toISOString();
+    let lk = null;
+    try { lk = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES ('corte_sheet_recon_dia', ?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at WHERE kv_cache.v < excluded.v RETURNING k").bind(dia, nowIso).first(); } catch (_) {}
+    if (!lk) return; // ya corrió hoy
+    const r = await corteSheetPagoReconciliar(env, { dry: false });
+    if (!r.ok) { try { console.log('corteSheetPagoReconAuto: ' + r.error); } catch (_) {} return; }
+    const l = [];
+    if (r.marcar.length) {
+      const porCli = {};
+      r.marcar.forEach(x => { (porCli[x.cliente] = porCli[x.cliente] || []).push(x.fila); });
+      l.push('Corte · planilla: ' + r.marcar.length + ' fila' + (r.marcar.length === 1 ? '' : 's') + ' que el CRM tiene pagada' + (r.marcar.length === 1 ? '' : 's') + ' seguía' + (r.marcar.length === 1 ? '' : 'n') + ' sin "pagado" en Venta_Insumos. Ya las marqué (sin caja: ponela vos): ' + Object.entries(porCli).map(([c, fs]) => c + ' (fila' + (fs.length === 1 ? ' ' : 's ') + fs.join(', ') + ')').join(' · '));
+      const pd = r.marcar.filter(x => x.precio_distinto);
+      if (pd.length) l.push('Precio distinto en la planilla: ' + pd.map(x => 'fila ' + x.fila + ' ' + x.cliente + ' · ' + x.diseno + ': hoja $' + x.precio_hoja.toLocaleString('es-AR') + ', cobrado $' + x.cobrado.toLocaleString('es-AR')).join(' · '));
+    }
+    const dk = r.distintas.map(x => x.fila).join(',');
+    if (dk && dk !== (await kvGet(env, 'corte_sheet_recon_dist', ''))) {
+      await kvSet(env, 'corte_sheet_recon_dist', dk);
+      l.push('No toqué estas filas porque en Venta_Insumos tienen otro nombre que en el CRM (¿se movieron filas?): ' + r.distintas.slice(0, 8).map(x => x.fila + ' (CRM ' + x.crm + ', hoja ' + (x.hoja || 'vacía') + ')').join(' · '));
+    }
+    if (l.length) { try { await precotizNotifyGaspar(env, l.join('\n'), { tipo: 'corte_planilla', prioridad: 'P3', clave: 'corte_sheet_recon:' + dia }); } catch (_) {} }
+  } catch (e) { try { console.log('corteSheetPagoReconAuto: ' + String((e && e.message) || e)); } catch (_) {} }
+}
+// MÉTODO VIEJO (piezas sin hoja_fila, anteriores al 12-oct): marca "pagado" en la col I (Pago) de Venta_Insumos para las filas PENDIENTES del cliente, verificando
 // que la suma de precios (col J) coincida con el total esperado (±500) para no marcar filas equivocadas.
 // Si `caja` viene (Melina/Gaspar/Favio/Bruno), también la escribe en la col R (Caja) de esas mismas filas;
 // si viene '' NO toca la col R (regla: sin caja visible, no se pone nada). Match del cliente por col C
@@ -6767,7 +6914,7 @@ async function compUsadoFuera(env, key, grp, grpArgs) {
 // pendientes de ESA fecha, solo se considera esa semana (el pago manual sabe qué semana se pagó; sin esto, dos semanas con
 // el mismo total marcaban la primera de la hoja). Si esa fecha no aparece, se busca como siempre (por total).
 // Devuelve {ok,marcadas,caja} o {error}.
-async function corteMarcarPagadoSheet(env, cliente, totalEsperado, caja, fecha) {
+async function corteMarcarPagadoPorTotal(env, cliente, totalEsperado, caja, fecha) {
   if (!cliente || !(totalEsperado > 0)) return { error: 'faltan datos' };
   const token = await sheetsAccessToken(env);
   if (!token) return { error: 'sin token sheets' };
@@ -30323,7 +30470,7 @@ const handler = {
         const dry = body.dry_run === true;
         let rows;
         try {
-          rows = ((await env.DB.prepare('SELECT id, tanda_id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, producto, precio FROM corte_pedidos WHERE ' + sel.where + ' AND ' + CORTE_PAGABLE_SQL + (tandaIds.length ? ' AND tanda_id IN (' + tandaIds.map(() => '?').join(',') + ')' : '') + ' ORDER BY tanda_id, id').bind(...sel.binds, ...tandaIds).all()).results || []).filter(sel.match);
+          rows = ((await env.DB.prepare('SELECT id, tanda_id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, hoja_fila, diseno_nombre, producto, precio FROM corte_pedidos WHERE ' + sel.where + ' AND ' + CORTE_PAGABLE_SQL + (tandaIds.length ? ' AND tanda_id IN (' + tandaIds.map(() => '?').join(',') + ')' : '') + ' ORDER BY tanda_id, id').bind(...sel.binds, ...tandaIds).all()).results || []).filter(sel.match);
         } catch (e) { return json({ error: 'db', motivo: 'No se pudo leer la base. Probá de nuevo.' }, 500); }
         const fechaT = {};
         const tIds = [...new Set(rows.map(r => r.tanda_id).filter(Boolean))];
@@ -30364,8 +30511,9 @@ const handler = {
           const grupos = {};
           for (const r of hechas) {
             const f = r.hoja_fecha || fechaT[r.tanda_id] || '(sin fecha)';
-            const g = (grupos[f] = grupos[f] || { fecha: f, total: 0, nombres: {} });
+            const g = (grupos[f] = grupos[f] || { fecha: f, total: 0, nombres: {}, rows: [] });
             g.total += Number(r.precio) || 0;
+            g.rows.push(r);
             const nm = String(r.hoja_cliente || r.cliente_nombre || '').trim();
             if (nm) g.nombres[nm] = (g.nombres[nm] || 0) + 1;
           }
@@ -30373,8 +30521,8 @@ const handler = {
             const cliente = (Object.entries(g.nombres).sort((a, b) => b[1] - a[1])[0] || [''])[0];
             const tot = Math.round(g.total);
             let sr = null;
-            try { sr = await corteMarcarPagadoSheet(env, cliente, tot, caja, g.fecha === '(sin fecha)' ? '' : g.fecha); } catch (e) { sr = { error: 'error de planilla', _exc: true }; }
-            if (sr && sr.ok) planilla.push({ fecha: g.fecha, ok: true });
+            try { sr = await corteMarcarPagadoSheet(env, cliente, tot, caja, g.fecha === '(sin fecha)' ? '' : g.fecha, g.rows); } catch (e) { sr = { error: 'error de planilla', _exc: true }; }
+            if (sr && sr.ok) planilla.push({ fecha: g.fecha, ok: true, marcadas: sr.marcadas, distintas: sr.distintas || [] });
             else {
               const err = String((sr && sr.error) || 'error de planilla');
               planilla.push({ fecha: g.fecha, ok: false, error: err });
@@ -31312,6 +31460,17 @@ const handler = {
         } else err = 'sin token (falta GOOGLE_SA_KEY o firma falló)';
         return json({ ok: !!read, sa_email: email, header: read, error: err });
       }
+      // POST /admin/corte/planilla-reconciliar {dry?, cajas?: {telefono: caja}, tandas?} → lo que el CRM tiene pagado y en
+      // Venta_Insumos sigue sin "pagado" (por fila, con control de nombre). dry (por defecto) solo lista. La caja no se adivina:
+      // va solo para los teléfonos de `cajas`. Admin.
+      if (request.method === 'POST' && path === '/admin/corte/planilla-reconciliar') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body = {}; try { body = await request.json(); } catch (_) {}
+        const cajas = {};
+        Object.entries(body.cajas || {}).forEach(([t, c]) => { const tel = String(t).replace(/\D/g, ''); if (tel && CORTE_CAJAS_HOJA.includes(c)) cajas[tel] = c; });
+        try { return json(await corteSheetPagoReconciliar(env, { dry: body.dry !== false, cajas, tandas: Math.max(1, Math.min(8, parseInt(body.tandas, 10) || 3)) })); }
+        catch (e) { return json({ ok: false, error: String((e && e.message) || e) }, 500); }
+      }
       // POST /admin/corte/sheet-marcar {cliente,total} → prueba/forzado del marcado "pagado" en Venta_Insumos. Admin.
       if (request.method === 'POST' && path === '/admin/corte/sheet-marcar') {
         if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
@@ -31977,6 +32136,7 @@ const handler = {
       ctx.waitUntil(processCortePilot(env));   // bot de corte: cada minuto para responder rápido (gate corte_bot_on)
       ctx.waitUntil(processCorteVigiaAuto(env)); // vigía de pagos: corre SIEMPRE (aunque el bot esté off) para el día de cobro (gate corte_vigia_on)
       ctx.waitUntil(processCorteEntregaSync(env)); // entrega retira/envío desde la planilla de cortes (1×hora, 8-21 AR; kill-switch corte_entrega_sync_on)
+      ctx.waitUntil(corteSheetPagoReconAuto(env)); // pagado en el CRM y no en Venta_Insumos: 1×día desde las 9 AR (kill-switch corte_sheet_recon_on)
       // Nudge del piloto: persigue leads a medias que se callaron (cada 15 min; gate 9-21 AR adentro).
       // OJO: usamos getUTCMinutes() INLINE, no la var `minute` (que recién se declara con const más
       // abajo, línea ~10932 -> referenciarla acá era ReferenceError por TDZ en cada tick */1).
