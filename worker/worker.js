@@ -15209,7 +15209,7 @@ async function maybeAvisoArranque(env) {
         // Ping en tiempo real (una vez por día, en horario razonable 6-22 AR).
         if (hAR >= 6 && hAR < 22 && (await kvGet(env, 'arranque_ping_' + w.id, '')) !== fechaAR) {
           try {
-            const r = await waSendText(env, gaspar, w.nombre + ' arrancó a trabajar (' + _arHHMM(first) + ')');
+            const r = await waSendText(env, gaspar, w.nombre + ' arrancó a trabajar (' + _arHHMM(first) + ')', { esAviso: true });
             if (r && r.ok) await kvSet(env, 'arranque_ping_' + w.id, fechaAR);
           } catch (_) {}
         }
@@ -15225,7 +15225,7 @@ async function maybeAvisoArranque(env) {
       const texto = 'Equipo hoy ' + fechaDisplay + '\nYa arrancaron: ' + arrStr + '\nTodavía no arrancaron: ' + faltanStr;
       let ok = false;
       try { const r = await waSendTemplate(env, gaspar, 'aviso_arranque_equipo', 'es_AR', [fechaDisplay, arrStr, faltanStr]); ok = !!(r && r.ok); } catch (_) {}
-      if (!ok) { try { const r = await waSendText(env, gaspar, texto); ok = !!(r && r.ok); } catch (_) {} }
+      if (!ok) { try { const r = await waSendText(env, gaspar, texto, { esAviso: true }); ok = !!(r && r.ok); } catch (_) {} }
       if (ok) await kvSet(env, 'arranque_resumen_sent', fechaAR);
     }
   } catch (_) {}
@@ -15330,7 +15330,7 @@ async function processCentinelaRuteo(env) {
         if (cured.analisis_pegado) L.push('· ' + cured.analisis_pegado + ' análisis pegado → reseteado');
       }
       if (rev.length) L.push('A revisar (no lo toqué): ' + rev.join(' · '));
-      try { const r = await waSendText(env, gaspar, L.join('\n')); if (r && r.ok) await kvSet(env, 'centinela_aviso_dia', fechaAR); } catch (_) {}
+      try { const r = await waSendText(env, gaspar, L.join('\n'), { esAviso: true }); if (r && r.ok) await kvSet(env, 'centinela_aviso_dia', fechaAR); } catch (_) {}
     }
   } catch (_) {}
 }
@@ -15923,7 +15923,7 @@ async function maybeReporteHoras(env) {
     const texto = '⏱️ Horas del equipo ' + fechaDisplay + '\n\n' + lineas.join('\n') + '\n\nUna "pausa +1h" = 1h sin tocar el CRM.';
     let ok = false;
     try { const r = await waSendTemplate(env, gaspar, 'reporte_horas_equipo2', 'es_AR', params); ok = !!(r && r.ok); } catch (_) {}
-    if (!ok) { try { const r = await waSendText(env, gaspar, texto); ok = !!(r && r.ok); } catch (_) {} }
+    if (!ok) { try { const r = await waSendText(env, gaspar, texto, { esAviso: true }); ok = !!(r && r.ok); } catch (_) {} }
     if (ok) await kvSet(env, 'reporte_horas_sent', fechaAR);
   } catch (_) {}
 }
@@ -21294,11 +21294,11 @@ async function processPendingTemplateSends(env) {
     } else if (st === 'rejected') {
       try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='rejected', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
       // Avisar AL VENDEDOR que la creó (antes solo a env.ADMIN_NOTIFY_PHONE, sin setear -> mudo).
-      if (row.created_by !== 'Corte exprés') try { await waSendText(env, adhocNotifyPhone(row.created_by), `❌ Meta rechazó tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Probá de nuevo con un texto más simple (sin links ni MAYÚSCULAS) o escribile a mano.`); } catch (_) {}
+      if (row.created_by !== 'Corte exprés') try { await waSendText(env, adhocNotifyPhone(row.created_by), `❌ Meta rechazó tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Probá de nuevo con un texto más simple (sin links ni MAYÚSCULAS) o escribile a mano.`, { esAviso: true }); } catch (_) {}
     } else if ((now - new Date(row.created_at).getTime()) > 24 * 60 * 60 * 1000) {
       try { await env.DB.prepare("UPDATE wa_pending_template_send SET status='expired', updated_at=? WHERE template_name=?").bind(new Date().toISOString(), row.template_name).run(); } catch (_) {}
       // Avisar AL VENDEDOR: Meta no la aprobó en 24h -> NO salió (antes expiraba en silencio).
-      if (row.created_by !== 'Corte exprés') try { await waSendText(env, adhocNotifyPhone(row.created_by), `⌛ Meta no aprobó en 24h tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Reintentá (a veces aprueba al 2º intento) o escribile a mano.`); } catch (_) {}
+      if (row.created_by !== 'Corte exprés') try { await waSendText(env, adhocNotifyPhone(row.created_by), `⌛ Meta no aprobó en 24h tu plantilla para reflotar a ${row.phone}:\n"${(row.body_preview || '').slice(0, 100)}"\nNO salió. Reintentá (a veces aprueba al 2º intento) o escribile a mano.`, { esAviso: true }); } catch (_) {}
     }
   }
 }
