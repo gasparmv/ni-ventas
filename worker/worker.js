@@ -6833,6 +6833,40 @@ async function corteMarcarPagadoFilas(env, piezas, caja) {
   }
   return { ok: true, marcadas, ya, distintas, caja: cajaOk };
 }
+// Lo contrario, para "Deshacer pago": las filas de esas piezas que dicen "pagado" vuelven a "Pendiente de pago" y se les borra
+// la caja (col R). Mismo control de nombre. → { ok, desmarcadas, ya, distintas } | { error }
+async function corteDesmarcarPagadoFilas(env, piezas) {
+  const filas = [], vistas = new Set();
+  for (const p of piezas || []) { const f = parseInt(p.hoja_fila, 10); if (f > 1 && !vistas.has(f)) { vistas.add(f); filas.push({ fila: f, cliente: p.hoja_cliente || p.cliente_nombre || '' }); } }
+  if (!filas.length) return { ok: true, desmarcadas: 0, ya: 0, distintas: [] };
+  const token = await sheetsAccessToken(env);
+  if (!token) return { error: 'sin token sheets' };
+  let rangos;
+  try {
+    const qs = filas.map(x => 'ranges=' + encodeURIComponent(`Venta_Insumos!C${x.fila}:I${x.fila}`)).join('&');
+    const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values:batchGet?${qs}`, { headers: { Authorization: 'Bearer ' + token } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+    rangos = j.valueRanges || [];
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+  const data = [], distintas = [];
+  let ya = 0;
+  filas.forEach((x, i) => {
+    const v = ((rangos[i] && rangos[i].values) || [])[0] || [];
+    const nom = corteNormNombre(v[0]);
+    if (!nom || nom !== corteNormNombre(x.cliente)) { distintas.push(x.fila); return; }
+    if (!/^pagado$/i.test(String(v[6] || '').trim())) { ya++; return; }
+    data.push({ range: `Venta_Insumos!I${x.fila}`, values: [['Pendiente de pago']] }, { range: `Venta_Insumos!R${x.fila}`, values: [['']] });
+  });
+  if (data.length) {
+    try {
+      const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${CORTE_SHEET_ID}/values:batchUpdate`, { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ valueInputOption: 'RAW', data }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+    } catch (e) { return { error: String((e && e.message) || e) }; }
+  }
+  return { ok: true, desmarcadas: data.length / 2, ya, distintas };
+}
 // Marca pagado lo cobrado. Con las piezas (`piezas`, con hoja_fila) marca POR FILA; las que no tienen fila (anteriores al
 // 12-oct, cuando el CRM empezó a guardarla) siguen con el método viejo, una vez por fecha de la hoja. Sin piezas, el viejo.
 // → { ok, marcadas, ya?, distintas?, caja, resto? } | { error }
@@ -30834,6 +30868,39 @@ const handler = {
           }
         }
         return json({ ok: true, dry_run: false, piezas: hechas.map(pieza), total: totalDe(hechas), planilla });
+      }
+      // POST /admin/corte/pago-deshacer {ids, dry_run?} (SOLO admin) → "Deshacer pago" (Gaspar 24-oct: marcó pagado a Leonel sin
+      // querer). Las piezas pagadas de esos ids vuelven a 'cobrando' si ya se le mandó el cobro (el vigía toma el comprobante
+      // cuando llegue) o a 'pendiente' (entran en el próximo cobro); se borran el método, el comprobante y la marca del pago a
+      // mano (queda anotado en pago_nota). En Venta_Insumos esas filas vuelven a "Pendiente de pago" sin caja. No le escribe
+      // al cliente. dry_run → solo cuenta qué haría.
+      if (request.method === 'POST' && path === '/admin/corte/pago-deshacer') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body; try { body = await request.json(); } catch { body = {}; }
+        const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map(x => parseInt(x, 10)).filter(Boolean))].slice(0, 200);
+        if (!ids.length) return json({ error: 'ids', motivo: 'Faltan las piezas' }, 400);
+        if (!(await ensureCorteDespachoSchema(env))) return json({ error: 'db', motivo: 'No se pudo preparar la base. Probá de nuevo.' }, 500);
+        let rows = [];
+        try { rows = (await env.DB.prepare(`SELECT id, telefono, cliente_nombre, hoja_cliente, hoja_fila, hoja_fecha, precio, created_at FROM corte_pedidos WHERE id IN (${ids.map(() => '?').join(',')}) AND estado_pago = 'pagado'`).bind(...ids).all()).results || []; }
+        catch (_) { return json({ error: 'db', motivo: 'No se pudo leer la base. Probá de nuevo.' }, 500); }
+        if (!rows.length) return json({ error: 'nada', motivo: 'Esas piezas ya no figuran pagadas' }, 409);
+        const tels = [...new Set(rows.map(r => r.telefono).filter(Boolean))];
+        const desde = rows.map(r => String(r.created_at || '')).sort()[0] || '';
+        // ¿Ya se le mandó el cobro? (plantilla de cobro o el detalle por texto, después de que entraron las piezas)
+        let cobro = null;
+        if (tels.length === 1) { try { cobro = await env.DB.prepare("SELECT MAX(ts) AS ts FROM wa_messages WHERE phone = ? AND direction = 'outbound' AND ts >= ? AND (body LIKE '[plantilla corte_cobro_semanal%' OR body LIKE '%te paso el detalle de tu corte%' OR body LIKE '%te paso el detalle de tu pedido%')").bind(tels[0], desde).first(); } catch (_) {} }
+        const vuelve = cobro && cobro.ts ? 'cobrando' : 'pendiente';
+        const total = Math.round(rows.reduce((s, r) => s + (Number(r.precio) || 0), 0));
+        const conFila = rows.filter(r => parseInt(r.hoja_fila, 10) > 1).length;
+        if (body.dry_run === true) return json({ ok: true, dry_run: true, piezas: rows.length, total, vuelve, cobro_at: (cobro && cobro.ts) || null, con_fila: conFila });
+        const nowIso = new Date().toISOString(), quien = String(session.user || '');
+        const marcaAR = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 16).replace('T', ' ');
+        let ch = 0;
+        try { const u = await env.DB.prepare(`UPDATE corte_pedidos SET estado_pago = ?, pago_metodo = NULL, pago_manual_por = NULL, pago_manual_at = NULL, comprobante_key = NULL, pago_nota = ?, updated_at = ? WHERE id IN (${rows.map(() => '?').join(',')}) AND estado_pago = 'pagado'`).bind(vuelve, 'Pago deshecho por ' + quien + ' el ' + marcaAR + ' AR', nowIso, ...rows.map(r => r.id)).run(); ch = (u && u.meta && u.meta.changes) || 0; }
+        catch (_) { return json({ error: 'db', motivo: 'No se pudo deshacer. Probá de nuevo.' }, 500); }
+        let planilla = { ok: true, desmarcadas: 0 };
+        if (ch && (await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') { try { planilla = await corteDesmarcarPagadoFilas(env, rows); } catch (e) { planilla = { error: String((e && e.message) || e) }; } }
+        return json({ ok: true, piezas: ch, total, vuelve, planilla, sin_fila: rows.length - conFila });
       }
       // POST /admin/corte/retiro (admin|produccion) {telefono? | nombre?, ids?, deshacer?} → "Retiró" en el taller: las piezas
       // del cliente con entrega='retira' en 'cortado'/'embalado' (de cualquier tanda; o solo esos ids) pasan a 'entregado'.

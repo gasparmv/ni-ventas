@@ -4993,6 +4993,7 @@ function corteHybridBoard(pedidos) {
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
           ${g.items.some(p => p.estado === 'cortado') ? `<button class="btn ghost" ${g.tel ? `data-corte-embalar-tel="${escapeHtml(g.tel)}"` : `data-corte-embalar-ids="${g.items.filter(p => p.estado === 'cortado').map(p => p.id).join(',')}"`} data-corte-entrega="${escapeHtml(g.entrega || '')}" style="font-size:11px;padding:4px 10px">📦 Embalar paquete (${g.entrega === 'envio' ? 'envío' : (g.entrega === 'retira' ? 'retira' : '⚠ entrega sin definir')})</button>` : ''}
           ${g.deuda || g.debeOtra ? `<button class="btn" data-corte-pagar data-corte-pagar-tel="${escapeHtml(g.tel || '')}" data-corte-pagar-nombre="${escapeHtml(g.nombre || '')}" style="font-size:11px;padding:4px 10px">💵 Marcar pagado${g.debeOtra ? ' (debe de otra semana)' : ''}</button>` : ''}
+          ${isAdmin() && g.items.some(p => p.estado_pago === 'pagado') ? `<button class="btn btn-ghost" data-corte-despagar="${g.items.filter(p => p.estado_pago === 'pagado').map(p => p.id).join(',')}" data-corte-despagar-nombre="${escapeHtml(g.nombre || '')}" title="Si lo marcaste pagado por error: vuelve a cobrando o pendiente, también en la planilla" style="font-size:11px;padding:4px 10px">↩ Deshacer pago</button>` : ''}
           <button class="btn btn-ghost" ${corteEtiquetaAttrs(g, corteClaveClienteFront(g.tel, g.nombre))} title="Imprimir la etiqueta de este cliente" style="font-size:11px;padding:4px 10px">🏷 Etiqueta</button>
           ${(() => { // Entrega sin definir: el admin la fija a mano (entrega_manual=1, la planilla ya no la pisa) y logística deja de frenarla.
             const sd = g.items.filter(p => !p.entrega && p.producto !== 'NEON' && p.estado !== 'despachado' && p.estado !== 'entregado').map(p => p.id);
@@ -5666,6 +5667,26 @@ function cortePagoManualUI(tel, nombre) {
       }
     };
   }).catch(() => { body.innerHTML = '<div style="color:#ef4444">Error de red</div>'; });
+}
+// Admin: "↩ Deshacer pago" de un cliente (Gaspar 24-oct: lo marcó pagado sin querer). Primero pregunta qué va a pasar (dry_run).
+async function cortePagoDeshacerUI(ids, nombre, btn) {
+  if (!ids.length) return;
+  const post = extra => fetch(CONFIG.trackerUrl + '/admin/corte/pago-deshacer', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, ...extra }) }).then(r => r.json().catch(() => ({}))).catch(() => ({}));
+  const $ = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR');
+  if (btn) btn.disabled = true;
+  const d = await post({ dry_run: true });
+  if (btn) btn.disabled = false;
+  if (!d || !d.ok) { niToast((d && (d.motivo || d.error)) || 'No se pudo calcular', { error: true }); return; }
+  const vuelveTxt = d.vuelve === 'cobrando' ? '"Cobrando": el cobro ya se le mandó, así que si manda el comprobante lo toma el vigía' : '"Pendiente": entra en el próximo cobro';
+  const msg = (nombre || 'El cliente') + ': ' + d.piezas + ' pieza' + (d.piezas === 1 ? '' : 's') + ' por ' + $(d.total) + ' dejan de figurar pagadas y vuelven a ' + vuelveTxt + '.' + (d.con_fila ? ' En la planilla vuelven a "Pendiente de pago" y se borra la caja.' : '') + (d.piezas - d.con_fila > 0 ? ' Hay ' + (d.piezas - d.con_fila) + ' sin fila en la planilla: esas corregilas a mano.' : '') + ' No se le manda nada al cliente.';
+  if (!(await showConfirm(msg, { title: 'Deshacer pago', confirmLabel: 'Deshacer', cancelLabel: 'Cancelar' }))) return;
+  if (btn) btn.disabled = true;
+  const j = await post({});
+  if (!j || !j.ok) { if (btn) btn.disabled = false; niToast((j && (j.motivo || j.error)) || 'No se pudo deshacer', { error: true }); return; }
+  STATE.cortePedidos = undefined; STATE._corteLoading = false; render();
+  niToast('Listo: ' + j.piezas + ' pieza' + (j.piezas === 1 ? '' : 's') + ' de vuelta a ' + (j.vuelve === 'cobrando' ? 'cobrando' : 'pendiente'));
+  const pl = j.planilla || {};
+  if (pl.error || (pl.distintas || []).length) showAlert('Quedó deshecho en el sistema, pero en la planilla ' + (pl.error ? 'no se pudo corregir (' + pl.error + ')' : 'no toqué las filas ' + pl.distintas.join(', ') + ' porque tienen otro nombre') + '. Revisalo a mano.', { title: 'Planilla' });
 }
 async function cortePaqGuardar(key, tandaId, btn) {
   const get = f => { const el = document.querySelector(`[data-paq-k="${CSS.escape(key)}"][data-paq-f="${f}"]`); return el ? el.value.trim() : ''; };
@@ -9934,6 +9955,8 @@ async function bindCorte() {
   document.querySelectorAll('[data-corte-etiqueta-k]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); corteEtiquetasImprimir(parseInt(b.getAttribute('data-corte-etiqueta-t'), 10) || 0, b.getAttribute('data-corte-etiqueta-k') || '', parseInt(b.getAttribute('data-corte-etiqueta-t2'), 10) || 0); }; });
   // Admin: "💵 Marcar pagado" (efectivo / transferencia / otro).
   document.querySelectorAll('[data-corte-pagar]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); if (isAdmin()) cortePagoManualUI(b.getAttribute('data-corte-pagar-tel') || '', b.getAttribute('data-corte-pagar-nombre') || ''); }; });
+  // Admin: "↩ Deshacer pago" (lo marcó pagado por error).
+  document.querySelectorAll('[data-corte-despagar]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); if (isAdmin()) cortePagoDeshacerUI(String(b.getAttribute('data-corte-despagar') || '').split(',').map(Number).filter(Boolean), b.getAttribute('data-corte-despagar-nombre') || '', b); }; });
   // Admin: fijar a mano la entrega de piezas "sin definir" (POST /admin/corte/pedido action 'entrega' → entrega_manual=1).
   document.querySelectorAll('[data-corte-set-entrega]').forEach(b => {
     b.onclick = (e) => {
