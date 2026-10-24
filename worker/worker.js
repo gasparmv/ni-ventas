@@ -8120,6 +8120,273 @@ async function processCorteWebResumen(env) {
     }
   } catch (_) {}
 }
+// ===== Cuenta del alumno en la página del corte: "Mis pedidos" (Gaspar 24-oct-2026) =====
+// Pedido de Gaspar: "que los clientes puedan ver sus pedidos y editarlos, pero las medidas solo antes del sábado a las 10 am y que
+// quede registrado lo que hicieron (capaz Emma ya lo diseñó y la modificación la hicieron después); que cada alumno vea su
+// historial de pedidos; los de semanas anteriores no se editan". Eligió "número + contraseña".
+// - La cuenta es su WhatsApp (corteTel) y una contraseña (PBKDF2, como la de los revendedores).
+// - Crear la cuenta y "me olvidé la contraseña" piden un código de 6 dígitos que llega a ese WhatsApp: texto si su ventana
+//   de 24 h está abierta; si no, la plantilla de AUTENTICACIÓN corte_codigo. Solo pueden crearla los que ya son clientes del corte.
+// - Edita SOLO los diseños pedidos por la web (origen 'landing') de la semana en curso, hasta el sábado a las 10 h (AR) de su
+//   tanda: nombre, medidas, cantidad, aclaraciones y foto. Cada cambio queda en corte_pedidos_cambios (antes → después, cuándo y
+//   si fue con la matriz ya diseñada). Si Emma ya la había diseñado, la pieza queda marcada para ella (cliente_edit_tras_diseno)
+//   y a Gaspar le llega un aviso.
+// Kill-switch: kv corte_cuenta_on ('0' = la página dice que por ahora no está).
+const CORTE_CODIGO_TPL = 'corte_codigo';
+const CORTE_SESION_DIAS = 90;
+let _corteCuentaEsquema = false;
+async function ensureCorteCuentaSchema(env) {
+  if (_corteCuentaEsquema) return true;
+  try {
+    await env.DB.batch([
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_cuentas (telefono TEXT PRIMARY KEY, nombre TEXT, pass_hash TEXT NOT NULL, pass_salt TEXT NOT NULL, created_at TEXT, updated_at TEXT, ultimo_login TEXT, fallos INTEGER NOT NULL DEFAULT 0, bloqueado_hasta TEXT)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_cuenta_sesiones (token TEXT PRIMARY KEY, telefono TEXT NOT NULL, created_at TEXT, expires_at TEXT)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_corte_cuenta_ses_tel ON corte_cuenta_sesiones (telefono)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_cuenta_codigos (telefono TEXT PRIMARY KEY, proposito TEXT, codigo_hash TEXT, expires_at TEXT, intentos INTEGER NOT NULL DEFAULT 0, ultimo_envio TEXT)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pedidos_cambios (id INTEGER PRIMARY KEY AUTOINCREMENT, pieza_id INTEGER NOT NULL, telefono TEXT, campo TEXT, antes TEXT, despues TEXT, por TEXT, at TEXT, tras_diseno INTEGER NOT NULL DEFAULT 0)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_corte_cambios_pieza ON corte_pedidos_cambios (pieza_id)"),
+    ]);
+    for (const c of ['cliente_editado_at TEXT', 'cliente_edit_tras_diseno INTEGER NOT NULL DEFAULT 0', 'cliente_cambio_txt TEXT']) { try { await env.DB.prepare('ALTER TABLE corte_pedidos ADD COLUMN ' + c).run(); } catch (_) {} }
+    await env.DB.prepare('SELECT cliente_editado_at, cliente_edit_tras_diseno, cliente_cambio_txt FROM corte_pedidos LIMIT 0').all();
+    _corteCuentaEsquema = true;
+  } catch (_) {}
+  return _corteCuentaEsquema;
+}
+async function corteCuentaSesion(env, request) {
+  const m = (request.headers.get('Authorization') || '').match(/^Bearer\s+([A-Za-z0-9_-]{20,100})$/);
+  if (!m) return null;
+  try {
+    const r = await env.DB.prepare("SELECT s.telefono AS telefono, s.expires_at AS exp, c.nombre AS nombre FROM corte_cuenta_sesiones s JOIN corte_cuentas c ON c.telefono = s.telefono WHERE s.token = ?").bind(m[1]).first();
+    if (!r || !(Date.parse(r.exp) > Date.now())) return null;
+    return { telefono: r.telefono, nombre: r.nombre || '', token: m[1] };
+  } catch (_) { return null; }
+}
+async function corteCuentaNuevaSesion(env, tel) {
+  const token = revHex(crypto.getRandomValues(new Uint8Array(32)));
+  const now = Date.now();
+  await env.DB.prepare("INSERT INTO corte_cuenta_sesiones (token, telefono, created_at, expires_at) VALUES (?, ?, ?, ?)").bind(token, tel, new Date(now).toISOString(), new Date(now + CORTE_SESION_DIAS * 86400e3).toISOString()).run();
+  try { await env.DB.prepare("DELETE FROM corte_cuenta_sesiones WHERE expires_at < ?").bind(new Date(now).toISOString()).run(); } catch (_) {}
+  return token;
+}
+// El código se guarda hasheado, vence a los 10 min y se aceptan 5 intentos.
+async function corteCuentaCodigoHash(tel, codigo, proposito) { return sha256hex('corte-codigo|' + tel + '|' + proposito + '|' + codigo); }
+async function corteCuentaMandarCodigo(env, tel, codigo) {
+  const txt = `Tu código para tu cuenta de pedidos de corte de Neon Infinito es ${codigo}. Vence en 10 minutos. No se lo pases a nadie.`;
+  if (await waVentanaAbierta(env, tel)) { try { const r = await waSendText(env, tel, txt); if (r && r.ok) return { ok: true, via: 'texto' }; } catch (_) {} }
+  try {
+    const r = await waSend(env, { messaging_product: 'whatsapp', to: tel, type: 'template', template: { name: CORTE_CODIGO_TPL, language: { code: 'es_AR' }, components: [
+      { type: 'body', parameters: [{ type: 'text', text: codigo }] },
+      { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: codigo }] },
+    ] } });
+    if (r && r.ok) return { ok: true, via: 'plantilla' };
+    return { ok: false, error: (r && (r.error || r.status)) || 'no salió' };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+}
+// Hasta cuándo se puede editar una pieza de la tanda del lunes `hojaFecha`: sábado 10 h AR (ms reales).
+function corteCuentaLimite(hojaFecha) { const c = corteLandingCierreDe(hojaFecha); return c ? c - 2 * 3600e3 : 0; }
+function corteCuentaEditable(p, ahora) {
+  if (String(p.origen || '') !== 'landing') return { ok: false, motivo: 'Este diseño lo cargamos nosotros: para cambiarlo escribinos por WhatsApp.' };
+  if (corteEsInsumoProd(p.producto)) return { ok: false, motivo: 'Los insumos no se cambian desde acá: escribinos por WhatsApp.' };
+  if (!['pedido', 'matriz_lista'].includes(String(p.estado || ''))) return { ok: false, motivo: 'Ese diseño ya está en producción.' };
+  const lim = corteCuentaLimite(p.hoja_fecha);
+  if (!lim || (ahora || Date.now()) >= lim) return { ok: false, motivo: 'Los cambios se podían hacer hasta el sábado a las 10.' };
+  return { ok: true, hasta: lim };
+}
+// "ancho 20 × alto 30 cm" → { ancho: 20, alto: 30 }
+function corteMedidaDe(txt) {
+  const s = String(txt || ''), a = s.match(/ancho\s*([\d]+(?:[.,]\d+)?)/i), l = s.match(/alto\s*([\d]+(?:[.,]\d+)?)/i);
+  return { ancho: a ? parseFloat(a[1].replace(',', '.')) : 0, alto: l ? parseFloat(l[1].replace(',', '.')) : 0 };
+}
+function corteMedidaTxt(an, al) { return `ancho ${String(an).replace('.', ',')} × alto ${String(al).replace('.', ',')} cm`; }
+const CORTE_ESTADO_CLIENTE = { pedido: 'Recibido', matriz_lista: 'Diseñado', cortado: 'Cortado', separado: 'Cortado', embalado: 'Listo para entregar', despachado: 'Enviado', entregado: 'Entregado' };
+async function corteCuentaRoute(request, env, ctx, url, path) {
+  if (!env.DB) return json({ error: 'db' }, 500);
+  if ((await kvGet(env, 'corte_cuenta_on', '1')) === '0') return json({ error: 'cerrado', motivo: 'Por ahora esta sección no está disponible. Escribinos por WhatsApp.' }, 503);
+  if (!(await ensureCorteCuentaSchema(env)) || !(await ensureCorteLandingSchema(env))) return json({ error: 'db', motivo: 'No pudimos conectarnos. Probá de nuevo en un momento.' }, 500);
+  let body = {};
+  if (request.method === 'POST') { try { body = await request.json(); } catch (_) { body = {}; } }
+  const nowIso = new Date().toISOString();
+  const malTel = () => json({ error: 'telefono', motivo: 'No reconocemos ese número. Escribilo con el código de área, por ejemplo 11 2345 6789 o 351 123 4567.' }, 400);
+
+  // --- Código por WhatsApp: crear la cuenta o recuperar la contraseña ---
+  if (request.method === 'POST' && path === '/corte/cuenta/codigo') {
+    const rl = await corteLandingLimite(env, request, 'cod', 10);
+    if (!rl.ok) return json({ error: 'limite', motivo: 'Pediste muchos códigos. Probá de nuevo en un rato.' }, 429);
+    const tel = corteTel(body.telefono); if (!tel) return malTel();
+    const proposito = body.proposito === 'reset' ? 'reset' : 'alta';
+    const cuenta = await env.DB.prepare('SELECT telefono FROM corte_cuentas WHERE telefono = ?').bind(tel).first();
+    if (proposito === 'alta' && cuenta) return json({ error: 'existe', motivo: 'Ese número ya tiene cuenta: entrá con tu contraseña (o tocá "Me olvidé la contraseña").' }, 409);
+    if (proposito === 'reset' && !cuenta) return json({ error: 'no_existe', motivo: 'Ese número no tiene cuenta todavía: creala.' }, 404);
+    if (proposito === 'alta' && !(await corteLandingCliente(env, tel)).conocido) return json({ error: 'no_cliente', motivo: 'No encontramos pedidos con ese número. Si ya nos compraste, revisá que sea el mismo WhatsApp; si es tu primera vez, hacé tu pedido y después creá la cuenta.' }, 404);
+    const prev = await env.DB.prepare('SELECT ultimo_envio FROM corte_cuenta_codigos WHERE telefono = ?').bind(tel).first();
+    if (prev && Date.now() - (Date.parse(prev.ultimo_envio || '') || 0) < 60e3) return json({ error: 'espera', motivo: 'Ya te mandamos un código: esperá un minuto antes de pedir otro.' }, 429);
+    const dia = 'corte_cod:' + tel + ':' + nowIso.slice(0, 10);
+    let n = 0; try { const r = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?) ON CONFLICT(k) DO UPDATE SET v = CAST(CAST(kv_cache.v AS INTEGER) + 1 AS TEXT), updated_at = excluded.updated_at RETURNING v").bind(dia, nowIso).first(); n = parseInt(r && r.v, 10) || 0; } catch (_) {}
+    if (n > 6) return json({ error: 'limite', motivo: 'Pediste muchos códigos hoy. Escribinos por WhatsApp y te ayudamos.' }, 429);
+    const codigo = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
+    await env.DB.prepare("INSERT INTO corte_cuenta_codigos (telefono, proposito, codigo_hash, expires_at, intentos, ultimo_envio) VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(telefono) DO UPDATE SET proposito = excluded.proposito, codigo_hash = excluded.codigo_hash, expires_at = excluded.expires_at, intentos = 0, ultimo_envio = excluded.ultimo_envio")
+      .bind(tel, proposito, await corteCuentaCodigoHash(tel, codigo, proposito), new Date(Date.now() + 10 * 60e3).toISOString(), nowIso).run();
+    const env1 = await corteCuentaMandarCodigo(env, tel, codigo);
+    if (!env1.ok) {
+      try { await avisoAdmin(env, `Corte · no pude mandarle el código de su cuenta a …${tel.slice(-4)} (${String(env1.error).slice(0, 80)}).`, { tipo: 'corte_cuenta', prioridad: 'P2', clave: 'corte_cod_fallo:' + tel + ':' + nowIso.slice(0, 13) }); } catch (_) {}
+      return json({ error: 'envio', motivo: 'No pudimos mandarte el código por WhatsApp. Probá de nuevo en un rato o escribinos.' }, 502);
+    }
+    return json({ ok: true, telefono: corteTelFmt(tel) });
+  }
+
+  // Valida el código y lo consume. → null si está bien, o la respuesta de error.
+  const validarCodigo = async (tel, proposito) => {
+    const c = await env.DB.prepare('SELECT proposito, codigo_hash, expires_at, intentos FROM corte_cuenta_codigos WHERE telefono = ?').bind(tel).first();
+    if (!c || c.proposito !== proposito || !(Date.parse(c.expires_at) > Date.now())) return json({ error: 'codigo', motivo: 'El código venció. Pedí uno nuevo.' }, 400);
+    if (c.intentos >= 5) return json({ error: 'codigo', motivo: 'Probaste muchas veces. Pedí un código nuevo.' }, 400);
+    if (c.codigo_hash !== await corteCuentaCodigoHash(tel, String(body.codigo || '').replace(/\D/g, ''), proposito)) {
+      await env.DB.prepare('UPDATE corte_cuenta_codigos SET intentos = intentos + 1 WHERE telefono = ?').bind(tel).run();
+      return json({ error: 'codigo', motivo: 'El código no es correcto.' }, 400);
+    }
+    await env.DB.prepare('DELETE FROM corte_cuenta_codigos WHERE telefono = ?').bind(tel).run();
+    return null;
+  };
+  const passOk = (p) => typeof p === 'string' && p.length >= 6 && p.length <= 100;
+  const sesionResp = async (tel, nombre) => json({ ok: true, token: await corteCuentaNuevaSesion(env, tel), nombre: corteLandingNombreLindo(nombre || ''), telefono: corteTelFmt(tel) });
+
+  if (request.method === 'POST' && (path === '/corte/cuenta/alta' || path === '/corte/cuenta/reset')) {
+    const rl = await corteLandingLimite(env, request, 'alta', 20);
+    if (!rl.ok) return json({ error: 'limite', motivo: 'Demasiados intentos. Probá de nuevo en un rato.' }, 429);
+    const tel = corteTel(body.telefono); if (!tel) return malTel();
+    if (!passOk(body.password)) return json({ error: 'password', motivo: 'La contraseña tiene que tener al menos 6 caracteres.' }, 400);
+    const alta = path === '/corte/cuenta/alta';
+    const e = await validarCodigo(tel, alta ? 'alta' : 'reset'); if (e) return e;
+    const h = await revHashPassword(body.password);
+    if (alta) {
+      const cli = await corteLandingCliente(env, tel);
+      const nombre = cli.nombreHoja || cli.nombre || '';
+      try { await env.DB.prepare('INSERT INTO corte_cuentas (telefono, nombre, pass_hash, pass_salt, created_at, updated_at, ultimo_login) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(tel, nombre, h.hash, h.salt, nowIso, nowIso, nowIso).run(); }
+      catch (_) { return json({ error: 'existe', motivo: 'Ese número ya tiene cuenta: entrá con tu contraseña.' }, 409); }
+      return sesionResp(tel, nombre);
+    }
+    await env.DB.prepare('UPDATE corte_cuentas SET pass_hash = ?, pass_salt = ?, fallos = 0, bloqueado_hasta = NULL, updated_at = ?, ultimo_login = ? WHERE telefono = ?').bind(h.hash, h.salt, nowIso, nowIso, tel).run();
+    await env.DB.prepare('DELETE FROM corte_cuenta_sesiones WHERE telefono = ?').bind(tel).run();   // cambió la contraseña: se cierran las demás
+    const c = await env.DB.prepare('SELECT nombre FROM corte_cuentas WHERE telefono = ?').bind(tel).first();
+    return sesionResp(tel, c && c.nombre);
+  }
+
+  if (request.method === 'POST' && path === '/corte/cuenta/login') {
+    const rl = await corteLandingLimite(env, request, 'login', 30);
+    if (!rl.ok) return json({ error: 'limite', motivo: 'Demasiados intentos. Probá de nuevo en un rato.' }, 429);
+    const tel = corteTel(body.telefono); if (!tel) return malTel();
+    const c = await env.DB.prepare('SELECT nombre, pass_hash, pass_salt, fallos, bloqueado_hasta FROM corte_cuentas WHERE telefono = ?').bind(tel).first();
+    const mal = json({ error: 'login', motivo: 'El número o la contraseña no coinciden.' }, 401);
+    if (!c) { await revHashPassword(String(body.password || 'x')); return mal; }   // mismo tiempo exista o no la cuenta
+    if (c.bloqueado_hasta && Date.parse(c.bloqueado_hasta) > Date.now()) return json({ error: 'bloqueado', motivo: 'Por seguridad, esperá 15 minutos o recuperá la contraseña con un código.' }, 429);
+    const h = await revHashPassword(String(body.password || ''), c.pass_salt);
+    if (h.hash !== c.pass_hash) {
+      const f = (c.fallos || 0) + 1;
+      await env.DB.prepare('UPDATE corte_cuentas SET fallos = ?, bloqueado_hasta = ? WHERE telefono = ?').bind(f >= 5 ? 0 : f, f >= 5 ? new Date(Date.now() + 15 * 60e3).toISOString() : null, tel).run();
+      return mal;
+    }
+    await env.DB.prepare('UPDATE corte_cuentas SET fallos = 0, bloqueado_hasta = NULL, ultimo_login = ? WHERE telefono = ?').bind(nowIso, tel).run();
+    return sesionResp(tel, c.nombre);
+  }
+
+  // --- De acá para abajo, con la sesión del alumno ---
+  const ses = await corteCuentaSesion(env, request);
+  if (!ses) return json({ error: 'sesion', motivo: 'Tu sesión se cerró. Entrá de nuevo.' }, 401);
+
+  if (request.method === 'POST' && path === '/corte/cuenta/salir') {
+    await env.DB.prepare('DELETE FROM corte_cuenta_sesiones WHERE token = ?').bind(ses.token).run();
+    return json({ ok: true });
+  }
+
+  if (request.method === 'GET' && path === '/corte/cuenta/pedidos') {
+    const rows = (await env.DB.prepare("SELECT c.id, c.hoja_fecha, c.tanda_id, t.fecha_corte AS tanda_fecha, c.diseno_nombre, c.foto_key, c.medida_declarada, c.ancho_real, c.alto_real, c.cantidad, c.aclaraciones, c.producto, c.precio, c.estado, c.estado_pago, c.entrega, c.origen, c.created_at, c.cliente_editado_at FROM corte_pedidos c LEFT JOIN corte_tandas t ON t.id = c.tanda_id WHERE c.telefono = ? AND c.estado != 'prueba' AND IFNULL(c.producto, '') != 'NEON' ORDER BY c.id DESC LIMIT 400").bind(ses.telefono).all()).results || [];
+    const ids = rows.map(r => r.id), cambios = {};
+    for (let i = 0; i < ids.length; i += 90) {
+      const lote = ids.slice(i, i + 90);
+      for (const c of ((await env.DB.prepare(`SELECT pieza_id, campo, antes, despues, at, tras_diseno FROM corte_pedidos_cambios WHERE pieza_id IN (${lote.map(() => '?').join(',')}) ORDER BY id`).bind(...lote).all()).results || [])) (cambios[c.pieza_id] = cambios[c.pieza_id] || []).push({ campo: c.campo, antes: c.antes, despues: c.despues, at: c.at, tras_diseno: !!c.tras_diseno });
+    }
+    const m2 = (await corteLandingPrecios(env)).m2;
+    const ahora = Date.now(), semanas = new Map();
+    for (const r of rows) {
+      const clave = r.hoja_fecha || r.tanda_fecha || String(r.created_at || '').slice(0, 10);
+      const ed = corteCuentaEditable(r, ahora);
+      const med = corteMedidaDe(r.medida_declarada), insumo = corteEsInsumoProd(r.producto);
+      const cant = Math.max(1, parseInt(r.cantidad, 10) || 1);
+      const estimado = (!insumo && med.ancho && med.alto) ? Math.round((med.ancho / 100) * (med.alto / 100) * m2 * cant) : null;
+      if (!semanas.has(clave)) semanas.set(clave, { semana: clave, limite_edicion: corteCuentaLimite(r.hoja_fecha) || null, piezas: [] });
+      semanas.get(clave).piezas.push({
+        id: r.id, nombre: r.diseno_nombre || '', foto: !!r.foto_key, insumo, producto: insumo ? r.producto : '',
+        ancho: med.ancho || null, alto: med.alto || null, medida: r.medida_declarada || '',
+        medida_real: (+r.ancho_real && +r.alto_real) ? corteMedidaTxt(+r.ancho_real, +r.alto_real) : '',
+        cantidad: cant, aclaraciones: r.aclaraciones || '', estado: CORTE_ESTADO_CLIENTE[r.estado] || 'En proceso',
+        precio: (+r.precio > 0) ? Math.round(+r.precio) : null, estimado, pago: r.estado_pago || '', entrega: r.entrega || '',
+        editable: ed.ok, editable_hasta: ed.ok ? ed.hasta : null, motivo_no: ed.ok ? '' : ed.motivo, cambios: cambios[r.id] || [],
+      });
+    }
+    // Más nuevas primero (la clave es 'D/M/AAAA' o 'AAAA-MM-DD').
+    const orden = k => { const f = corteFechaValida(k); return f ? f.date.getTime() : (Date.parse(k) || 0); };
+    const lista = [...semanas.values()].sort((a, b) => orden(b.semana) - orden(a.semana));
+    return json({ ok: true, nombre: corteLandingNombreLindo(ses.nombre), telefono: corteTelFmt(ses.telefono), precio_m2: m2, semanas: lista });
+  }
+
+  // Foto de una pieza propia (la página la pide con la sesión y la muestra como blob).
+  if (request.method === 'GET' && path === '/corte/cuenta/foto') {
+    const id = parseInt(url.searchParams.get('id'), 10) || 0;
+    const p = await env.DB.prepare('SELECT foto_key FROM corte_pedidos WHERE id = ? AND telefono = ?').bind(id, ses.telefono).first();
+    if (!p || !p.foto_key || !env.MEDIA) return json({ error: 'no' }, 404);
+    const o = await env.MEDIA.get(p.foto_key);
+    if (!o) return json({ error: 'no' }, 404);
+    return new Response(o.body, { status: 200, headers: { ...cors(), 'Content-Type': (o.httpMetadata && o.httpMetadata.contentType) || 'image/jpeg', 'Cache-Control': 'private, max-age=600', 'X-Content-Type-Options': 'nosniff' } });
+  }
+
+  // Editar un diseño propio de la semana en curso.
+  if (request.method === 'POST' && path === '/corte/cuenta/pieza') {
+    const rl = await corteLandingLimite(env, request, 'edit', 60);
+    if (!rl.ok) return json({ error: 'limite', motivo: 'Demasiados cambios seguidos. Probá de nuevo en un rato.' }, 429);
+    const id = parseInt(body.id, 10) || 0;
+    const p = await env.DB.prepare('SELECT * FROM corte_pedidos WHERE id = ? AND telefono = ?').bind(id, ses.telefono).first();
+    if (!p) return json({ error: 'no', motivo: 'No encontramos ese diseño.' }, 404);
+    const ed = corteCuentaEditable(p);
+    if (!ed.ok) return json({ error: 'cerrado', motivo: ed.motivo }, 409);
+    const err = (motivo, campo) => json({ error: 'datos', motivo, campo: campo || '' }, 400);
+    const nombre = corteLandingTxt(body.nombre, 60);
+    if (!nombre || corteNombreDeMaquina(nombre)) return err('Ponele un nombre al diseño (lo que dice el cartel, por ejemplo).', 'nombre');
+    const an = corteLandingCm(body.ancho), al = corteLandingCm(body.alto);
+    if (!(an >= 1 && an <= 400 && al >= 1 && al <= 400)) return err('Revisá la medida (ancho y alto en centímetros).', 'medida');
+    const cant = Math.max(1, Math.min(10, parseInt(body.cantidad, 10) || 1));
+    const acl = corteLandingTxt(body.aclaraciones, 300);
+    let foto = p.foto_key || '';
+    if (body.foto_key && String(body.foto_key) !== foto) {
+      const k = String(body.foto_key);
+      if (!k.startsWith(CORTE_LANDING_PREFIX) || k.includes('..') || k.length > 120) return err('La foto nueva no se subió bien. Volvé a elegirla.', 'foto');
+      let h = null; try { h = await env.MEDIA.head(k); } catch (_) {}
+      if (!h) return err('La foto nueva no se subió bien. Volvé a elegirla.', 'foto');
+      foto = k;
+    }
+    const medNueva = corteMedidaTxt(an, al);
+    const cambios = [];
+    if (nombre !== (p.diseno_nombre || '')) cambios.push(['nombre', p.diseno_nombre || '', nombre]);
+    if (medNueva !== (p.medida_declarada || '')) cambios.push(['medida', p.medida_declarada || '', medNueva]);
+    if (cant !== (parseInt(p.cantidad, 10) || 1)) cambios.push(['cantidad', String(p.cantidad || 1), String(cant)]);
+    if (acl !== (p.aclaraciones || '')) cambios.push(['aclaraciones', p.aclaraciones || '', acl]);
+    if (foto !== (p.foto_key || '')) cambios.push(['foto', 'foto anterior', 'foto nueva']);
+    if (!cambios.length) return json({ ok: true, sin_cambios: true });
+    // ¿Emma ya la había diseñado? (matriz lista o con medida real cargada)
+    const trasDiseno = p.estado === 'matriz_lista' || !!p.disenado_at || (+p.ancho_real > 0);
+    const resumen = cambios.map(([c, a, d]) => c === 'foto' ? 'cambió la foto' : c === 'aclaraciones' ? 'cambió las aclaraciones' : `${c}: ${a || '—'} → ${d}`).join(' · ');
+    // Condicional sobre lo leído: si Emma la tocó en el medio (o el cliente desde dos pantallas), no se pisa.
+    const up = await env.DB.prepare("UPDATE corte_pedidos SET diseno_nombre = ?, medida_declarada = ?, cantidad = ?, aclaraciones = ?, foto_key = ?, cliente_editado_at = ?, cliente_edit_tras_diseno = CASE WHEN ? = 1 THEN 1 ELSE IFNULL(cliente_edit_tras_diseno, 0) END, cliente_cambio_txt = ?, updated_at = ? WHERE id = ? AND updated_at IS ? AND estado = ?")
+      .bind(nombre, medNueva, cant, acl, foto, nowIso, trasDiseno ? 1 : 0, resumen.slice(0, 300), nowIso, id, p.updated_at, p.estado).run();
+    if (!(up && up.meta && up.meta.changes > 0)) return json({ error: 'cambio', motivo: 'Ese diseño se acaba de actualizar. Recargá la página y volvé a intentar.' }, 409);
+    await env.DB.batch(cambios.map(([campo, antes, despues]) => env.DB.prepare('INSERT INTO corte_pedidos_cambios (pieza_id, telefono, campo, antes, despues, por, at, tras_diseno) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(id, ses.telefono, campo, String(antes).slice(0, 300), String(despues).slice(0, 300), 'cliente (web)', nowIso, trasDiseno ? 1 : 0)));
+    if (trasDiseno) {
+      const t = `✏ Corte: ${corteLandingNombreLindo(ses.nombre) || 'un cliente'} cambió "${nombre}" desde la web DESPUÉS de que Emma lo diseñó (${resumen}). Emma lo ve marcado en sus diseños de la semana.`;
+      try { await avisoAdmin(env, t, { tipo: 'corte_cliente_edita', prioridad: 'P2', clave: 'corte_edit:' + id + ':' + nowIso.slice(0, 16), refPhone: ses.telefono }); } catch (_) {}
+    }
+    return json({ ok: true, tras_diseno: trasDiseno, cambios: cambios.length });
+  }
+  return json({ error: 'not_found' }, 404);
+}
 async function corteLandingRoute(request, env, ctx, url, path) {
   if (!env.DB) return json({ error: 'db' }, 500);
   const on = (await kvGet(env, 'corte_landing_on', '1')) === '1';
@@ -22724,6 +22991,8 @@ const handler = {
 
     // Pedidos de corte por la web (landing pública neoninfinitosoftware.com/corte/): sin sesión, con sus propios topes.
     if (path.startsWith('/corte/landing/')) return await corteLandingRoute(request, env, ctx, url, path);
+    // Cuenta del alumno ("Mis pedidos"): número + contraseña, con su propia sesión (corteCuentaRoute).
+    if (path.startsWith('/corte/cuenta/')) return await corteCuentaRoute(request, env, ctx, url, path);
 
     if (path.startsWith('/admin/')) {
       // Allow token via query param for resources loaded by <img>, <audio>, etc.
@@ -26765,7 +27034,7 @@ const handler = {
       if (request.method === 'POST' && path === '/admin/wa/template-create') {
         let body; try { body = await request.json(); } catch { return json({ error: 'invalid json' }, 400); }
         const { name, category, language, body_text, example_params } = body || {};
-        if (!name || !category || !language || !body_text) return json({ error: 'missing fields' }, 400);
+        if (!name || !category || !language || (!body_text && !Array.isArray(body && body.components))) return json({ error: 'missing fields' }, 400);
         const _waT = getWaClient(env);
         if (_waT.provider === 'meta' && (!env.WA_BUSINESS_ACCOUNT_ID || !env.WA_TOKEN)) return json({ error: 'WA not configured (meta)' }, 500);
         const components = [{ type: 'BODY', text: body_text }];
@@ -26783,6 +27052,9 @@ const handler = {
         if (body.button_url && /^https?:\/\//i.test(String(body.button_url))) {
           components.push({ type: 'BUTTONS', buttons: [{ type: 'URL', text: String(body.button_text || 'Ver más').slice(0, 25), url: String(body.button_url) }] });
         }
+        // Componentes armados a mano (p. ej. la plantilla de AUTENTICACIÓN corte_codigo: BODY con add_security_recommendation y
+        // botón OTP COPY_CODE): reemplazan a los de arriba.
+        if (Array.isArray(body.components) && body.components.length) components.splice(0, components.length, ...body.components);
         const r = await fetch(_waT.templatesUrl(), {
           method: 'POST',
           headers: { ..._waT.headers, 'Content-Type': 'application/json' },
@@ -30340,6 +30612,11 @@ const handler = {
         const ped = await env.DB.prepare("SELECT * FROM corte_pedidos WHERE id=?").bind(id).first();
         if (!ped) return json({ error: 'pedido no existe' }, 404);
         try {
+          if (action === 'cliente_visto') {
+            if (!['admin', 'disenador'].includes(_role)) return json({ error: 'solo el diseñador' }, 403);
+            try { await env.DB.prepare('UPDATE corte_pedidos SET cliente_edit_tras_diseno = 0 WHERE id = ?').bind(id).run(); } catch (_) {}
+            return json({ ok: true, id });
+          }
           if (action === 'medidas') {
             if (!['admin', 'disenador'].includes(_role)) return json({ error: 'solo el diseñador' }, 403);
             // Solo piezas que esperan su matriz: un doble envío o una pantalla vieja no puede devolver a
@@ -30368,6 +30645,7 @@ const handler = {
             let tandaId = ped.tanda_id;
             if (esNeonPropio) { const _t = await corteTandaActual(env); if (_t) tandaId = _t.id; }
             await env.DB.prepare("UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, matriz_key=?, matriz_drive_url=?, tanda_id=?, cm_colores=COALESCE(?, cm_colores), estado='matriz_lista', disenado_at=?, updated_at=? WHERE id=?").bind(ancho, alto, precio, matrizKey, matrizUrl, tandaId, cmColores, nowIso, nowIso, id).run();
+            try { await env.DB.prepare('UPDATE corte_pedidos SET cliente_edit_tras_diseno = 0 WHERE id = ?').bind(id).run(); } catch (_) {}   // la midió con el cambio del cliente
             return json({ ok: true, id, estado: 'matriz_lista', precio });
           }
           // Corregir la medida de una matriz YA hecha (Gaspar 18-oct: "que Emma pueda modificar o revisar por más que ya lo haya
@@ -30398,6 +30676,7 @@ const handler = {
             const cobroSalio = !esNeonPropio && String(ped.estado_pago || 'pendiente') !== 'pendiente';
             const precioFinal = cobroSalio ? antes.precio : precioNuevo;
             await env.DB.prepare('UPDATE corte_pedidos SET ancho_real=?, alto_real=?, precio=?, cm_colores=COALESCE(?, cm_colores), updated_at=? WHERE id=?').bind(ancho, alto, precioFinal, cmColores, nowIso, id).run();
+            try { await env.DB.prepare('UPDATE corte_pedidos SET cliente_edit_tras_diseno = 0 WHERE id = ?').bind(id).run(); } catch (_) {}   // corrigió después del cambio del cliente
             // Planilla de cortes (Emma): G=ANCHO, H=ALTO de su fila (verificando que sea la misma pieza). Venta_Insumos trae esas
             // columnas por IMPORTRANGE; su precio (col J) se pisa solo si lo había escrito el CRM (un número, no la fórmula).
             let planilla = ped.hoja_fila ? 'ok' : 'sin_fila';

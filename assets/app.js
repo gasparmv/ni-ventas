@@ -5219,7 +5219,7 @@ function renderCorte() {
     const wMed = (p) => { const t = String(p.medida_declarada || ''), a = t.match(/ancho\s*([\d.,]+)/i), l = t.match(/alto\s*([\d.,]+)/i); return a && l ? 'pidió ' + a[1] + ' × ' + l[1] + ' cm' : (t || '—'); };
     const wTitulo = (p) => `<b>${escapeHtml(p.cliente_nombre || 'cliente')}</b> · ${escapeHtml(p.diseno_nombre || 'diseño')}${(parseInt(p.cantidad, 10) || 1) > 1 ? ' ×' + escapeHtml(String(p.cantidad)) : ''}`;
     const colPorDisenarWeb = porDisenarWeb.map(p => { const enPantalla = p.id === relevVisId; return `<div data-corte-relev-ir="${p.id}" role="button" tabindex="0" title="Traer a la línea de relevamiento" style="${kCard};cursor:pointer${enPantalla ? ';border-color:var(--accent-cyan,#8FD4DE)' : ''}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${wTitulo(p)}</div><div style="${kSub}">${escapeHtml(wMed(p))}${wLunes(p) ? ' · tanda del ' + wLunes(p) : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;color:var(--accent-cyan,#8FD4DE)">${enPantalla ? 'en pantalla' : 'Medir →'}</span></div>`; }).join('');
-    const colDisenadosWeb = (STATE.corteWebDisAll ? disenadosWeb : disenadosWeb.slice(0, 20)).map(p => { const paso = kPaso[p.estado] || ['✓ listo', '#22c55e']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${wTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}${p.hoja_fila ? ' · en la planilla' : ''}</div></div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span><button type="button" data-corte-corregir="${p.id}" title="Corregir la medida de la matriz" aria-label="Corregir la medida" style="flex:0 0 auto;margin-left:6px;background:none;border:1px solid var(--border);border-radius:7px;padding:2px 7px;color:var(--fg-mute);cursor:pointer;font-size:12px">✏️</button></div>`; }).join('')
+    const colDisenadosWeb = (STATE.corteWebDisAll ? disenadosWeb : disenadosWeb.slice(0, 20)).map(p => { const paso = kPaso[p.estado] || ['✓ listo', '#22c55e']; const med = (kFmtCm(p.ancho_real) && kFmtCm(p.alto_real)) ? `${kFmtCm(p.ancho_real)} × ${kFmtCm(p.alto_real)} cm` : escapeHtml(p.medida_declarada || '—'); return `<div style="${kCard}">${kThumb(p)}<div style="min-width:0;flex:1"><div style="overflow-wrap:anywhere">${wTitulo(p)}</div><div style="${kSub}">matriz ${med}${p.disenado_at && kDia(p.disenado_at) ? ' · diseñada ' + kDia(p.disenado_at) : ''}${p.hoja_fila ? ' · en la planilla' : ''}</div>${corteClienteFlagHtml(p)}</div><span style="font-size:11px;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:7px;color:${paso[1]};background:color-mix(in srgb, ${paso[1]} 16%, transparent)">${paso[0]}</span><button type="button" data-corte-corregir="${p.id}" title="Corregir la medida de la matriz" aria-label="Corregir la medida" style="flex:0 0 auto;margin-left:6px;background:none;border:1px solid var(--border);border-radius:7px;padding:2px 7px;color:var(--fg-mute);cursor:pointer;font-size:12px">✏️</button></div>`; }).join('')
       + (disenadosWeb.length > 20 ? `<button type="button" class="btn ghost" data-corte-web-dis-all style="width:100%;font-size:12px;padding:6px 10px">${STATE.corteWebDisAll ? 'ver solo los últimos 20' : 'ver los ' + (disenadosWeb.length - 20) + ' restantes'}</button>` : '');
     const webKanban = (porDisenarWeb.length || disenadosWeb.length) ? `
       <div style="margin-top:22px">
@@ -5280,6 +5280,7 @@ function renderCorte() {
           <div style="text-align:center;margin-bottom:14px">${rfoto}</div>
           <div style="font-size:16px;font-weight:700">${escapeHtml(rNeon ? (rp.pedido_numero ? 'Pedido #' + rp.pedido_numero : 'Neon Infinito') : (rp.cliente_nombre || 'cliente'))} — ${escapeHtml(rp.diseno_nombre || 'diseño')}</div>
           <div style="font-size:13px;color:var(--fg-mute);margin-top:2px">${rNeon ? 'Medida del pedido' : 'Pidió'}: ${escapeHtml(rp.medida_declarada || '—')} · Cantidad: ${rcant}${rp.aclaraciones ? ' · ' + escapeHtml(rp.aclaraciones) : ''}</div>
+          ${rp.cliente_cambio_txt ? `<div style="margin-top:6px;font-size:12.5px;color:#FFB020">✏ El cliente lo cambió desde la web${rp.cliente_editado_at ? ' (' + escapeHtml(corteClienteCuando(rp.cliente_editado_at)) + ')' : ''}: ${escapeHtml(rp.cliente_cambio_txt)}</div>` : ''}
           <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
             <span style="font-size:13px;font-weight:700" title="Lo que mide la matriz que hiciste (no lo que pidió el cliente)">Medida real de la matriz:</span>
             <input id="corte-ancho" placeholder="ancho" inputmode="decimal" value="${escapeHtml(rAncho)}" style="width:88px;background:var(--bg,#0d0d0d);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--fg);font-size:15px">
@@ -9526,6 +9527,24 @@ function corteCorregirMedidaUI(id) {
   });
   setTimeout(() => { try { ia.focus(); ia.select(); } catch (_) {} }, 50);
 }
+// ===== Cambios del cliente desde "Mis pedidos" (Gaspar 24-oct) =====
+// El alumno puede cambiar sus diseños de la semana hasta el sábado 10 h. Si ya estaba diseñado, la pieza queda marcada para Emma
+// hasta que la corrige (✏️) o toca "Ya lo vi".
+function corteClienteCuando(iso) {
+  const d = new Date(Date.parse(iso) - 3 * 3600e3);
+  return isNaN(d) ? '' : d.getUTCDate() + '/' + (d.getUTCMonth() + 1) + ' ' + String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+}
+function corteClienteFlagHtml(p) {
+  if (!p || !+p.cliente_edit_tras_diseno) return '';
+  return `<div style="margin-top:4px;font-size:11.5px;color:#ef4444;font-weight:700;overflow-wrap:anywhere">⚠ El cliente lo cambió después de tu diseño${p.cliente_editado_at ? ' (' + escapeHtml(corteClienteCuando(p.cliente_editado_at)) + ')' : ''}: ${escapeHtml(p.cliente_cambio_txt || '')} <button type="button" data-corte-cliente-visto="${p.id}" style="margin-left:4px;background:none;border:1px solid #ef4444;border-radius:6px;padding:1px 7px;color:#ef4444;cursor:pointer;font-size:11px;font-weight:700">Ya lo vi</button></div>`;
+}
+async function corteClienteVisto(id, btn) {
+  if (btn) btn.disabled = true;
+  let j = {};
+  try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/pedido', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'cliente_visto', id }) }); j = await r.json().catch(() => ({})); } catch (_) {}
+  if (!j.ok) { if (btn) btn.disabled = false; toast('No se pudo guardar. Probá de nuevo.'); return; }
+  STATE.cortePedidos = undefined; STATE._corteLoading = false; STATE._corteGen = (STATE._corteGen || 0) + 1; if (STATE.view === 'corte') render();
+}
 // ===== SIN PAGAR DESPUÉS DEL MARTES 16 h (Gaspar 20-oct: "un botón a la derecha bien notorio para los que no paguen hasta
 // el martes 16 h así les hago un seguimiento") =====
 function corteSinPagarFetch(force) {
@@ -9788,6 +9807,7 @@ async function bindCorte() {
   }
   // Diseñados: corregir la medida de una matriz ya hecha.
   document.querySelectorAll('[data-corte-corregir]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); corteCorregirMedidaUI(parseInt(b.getAttribute('data-corte-corregir'), 10)); }; });
+  document.querySelectorAll('[data-corte-cliente-visto]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); corteClienteVisto(parseInt(b.getAttribute('data-corte-cliente-visto'), 10), b); }; });
   const relevSkip = document.querySelector('[data-corte-relev-skip]');
   if (relevSkip) relevSkip.onclick = () => { const n = parseInt(relevSkip.getAttribute('data-next') || '', 10); if (n) { STATE.corteRelevId = n; render(); } };
   document.querySelectorAll('[data-corte-disenos-pack]').forEach(b => { b.onclick = () => corteDisenosPack(b); });

@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mis pedidos de corte · Neon Infinito</title>
+<meta name="description" content="Mirá tus pedidos de corte de bases acrílicas y cambiá los de esta semana hasta el sábado a las 10.">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#0A0A0F">
+<link rel="icon" href="../../assets/icon-app.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=Archivo+Black&display=swap">
+<style>
+  :root {
+    --bg: #0A0A0F; --raised: #101018; --card: #15151F; --field: #0D0D14;
+    --border: #262633; --border-strong: #3A3A4A;
+    --fg: #FFFFFF; --muted: #BFBFCF; --subtle: #8A8A9E; --faint: #5B5B6E;
+    --red: #FF1830; --red-glow: #FF4A5E; --cyan: #8FD4DE; --cyan-deep: #4FA9B6;
+    --ok: #3DDC97; --warn: #FFB547; --err: #FF5A6A;
+    --r: 14px; --r-sm: 10px;
+    --display: 'Archivo Black', 'Archivo', system-ui, sans-serif;
+    --sans: 'Archivo', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 var(--sans); }
+  body::before { content: ''; position: fixed; inset: -20% -10% auto; height: 70vh; pointer-events: none; z-index: 0;
+    background: radial-gradient(60% 50% at 20% 20%, rgba(255,24,48,.16), transparent 70%), radial-gradient(50% 45% at 85% 10%, rgba(143,212,222,.14), transparent 70%); }
+  a { color: var(--cyan); }
+  .wrap { position: relative; z-index: 1; max-width: 680px; margin: 0 auto; padding: 0 16px 48px; }
+  header.top { display: flex; align-items: center; gap: 10px; padding: 18px 0 8px; }
+  header.top img { width: 46px; height: 28px; object-fit: contain; }
+  header.top span { font-weight: 800; letter-spacing: .02em; font-size: 15px; }
+  header.top a { margin-left: auto; font-size: 14px; font-weight: 700; text-decoration: none; }
+  .eyebrow { margin: 28px 0 6px; font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--cyan); }
+  h1 { margin: 0; font: 400 clamp(30px, 8vw, 44px)/1.04 var(--display); text-transform: uppercase; letter-spacing: -.01em; }
+  h1 .glow { color: var(--red); text-shadow: 0 0 18px rgba(255,24,48,.55), 0 0 2px rgba(255,74,94,.9); }
+  .lead { color: var(--muted); font-size: 16px; margin: 12px 0 18px; }
+  .bloque { background: var(--card); border: 1px solid var(--border); border-radius: var(--r); padding: 18px 16px; margin: 0 0 14px; }
+  .bloque > h2 { margin: 0 0 4px; font-size: 19px; font-weight: 800; }
+  .sub { margin: 0 0 12px; color: var(--subtle); font-size: 14px; }
+  label.campo { display: block; margin: 12px 0 0; font-size: 14px; font-weight: 600; color: var(--muted); }
+  label.campo .hint { display: block; font-weight: 400; color: var(--subtle); font-size: 13px; margin-top: 1px; }
+  input[type=text], input[type=tel], input[type=number], input[type=password], textarea {
+    display: block; width: 100%; margin-top: 6px; background: var(--field); color: var(--fg); border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm); padding: 13px 12px; font: 16px var(--sans); min-height: 50px; outline: none; transition: border-color .15s, box-shadow .15s; }
+  textarea { min-height: 70px; resize: vertical; }
+  input::placeholder, textarea::placeholder { color: var(--faint); }
+  input:focus, textarea:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(143,212,222,.22); }
+  .fila2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .fila3 { display: grid; grid-template-columns: 1fr 1fr 88px; gap: 10px; }
+  @media (max-width: 380px) { .fila3 { grid-template-columns: 1fr 1fr; } .fila3 > :last-child { grid-column: 1 / -1; } }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border-radius: 12px; border: 0; font: 800 16px var(--sans); cursor: pointer; min-height: 52px; padding: 0 20px; text-decoration: none; }
+  .btn.pri { width: 100%; background: var(--red); color: #fff; box-shadow: 0 0 0 1px rgba(255,74,94,.6), 0 8px 28px rgba(255,24,48,.35); margin-top: 16px; }
+  .btn.sec { width: 100%; background: transparent; color: var(--cyan); border: 1.5px solid rgba(143,212,222,.5); margin-top: 10px; }
+  .btn.chico { min-height: 40px; padding: 0 14px; font-size: 14px; width: auto; margin: 0; }
+  .btn[disabled] { opacity: .55; cursor: wait; }
+  .link { background: none; border: 0; padding: 0; color: var(--cyan); font: 700 14.5px var(--sans); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+  .enlaces { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  .error { color: var(--err); font-weight: 600; margin: 12px 2px 0; min-height: 1px; }
+  .ok-msg { color: var(--ok); font-weight: 600; margin: 12px 2px 0; }
+  .aviso { margin-top: 12px; border-radius: var(--r-sm); padding: 10px 12px; font-size: 14px; background: rgba(143,212,222,.08); border: 1px solid rgba(143,212,222,.3); color: var(--muted); }
+  .quien { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin: 18px 0 6px; color: var(--muted); font-size: 14.5px; }
+  .quien b { color: var(--fg); }
+  .semana { margin: 22px 0 8px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .semana h2 { margin: 0; font-size: 18px; font-weight: 800; }
+  .semana .chip { font-size: 12px; font-weight: 800; letter-spacing: .04em; border-radius: 999px; padding: 3px 10px; }
+  .chip.abierta { color: var(--ok); background: rgba(61,220,151,.12); }
+  .chip.cerrada { color: var(--subtle); background: rgba(138,138,158,.14); }
+  .pieza { display: grid; grid-template-columns: 84px 1fr; gap: 14px; background: var(--card); border: 1px solid var(--border); border-radius: var(--r); padding: 14px; margin: 0 0 10px; }
+  .pieza .img { width: 84px; height: 84px; border-radius: 10px; background: #fff center / contain no-repeat; border: 1px solid var(--border); display: grid; place-items: center; color: #777; font-size: 12px; font-weight: 700; overflow: hidden; }
+  .pieza .img.ins { background: rgba(143,212,222,.08); color: var(--cyan); font-size: 28px; }
+  .pieza h3 { margin: 0; font-size: 16px; font-weight: 800; overflow-wrap: anywhere; }
+  .pieza .dato { color: var(--muted); font-size: 14px; margin-top: 2px; }
+  .pieza .dato b { color: var(--fg); }
+  .estado { display: inline-block; margin-top: 6px; font-size: 12px; font-weight: 800; letter-spacing: .03em; border-radius: 7px; padding: 2px 9px; color: var(--cyan); background: rgba(143,212,222,.12); }
+  .hasta { margin-top: 8px; font-size: 13px; color: var(--ok); }
+  .no-edit { margin-top: 8px; font-size: 13px; color: var(--subtle); }
+  .cambios { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; font-size: 13px; color: var(--subtle); }
+  .cambios li { margin: 2px 0; }
+  .cambios ul { margin: 4px 0 0; padding-left: 18px; }
+  .editor { grid-column: 1 / -1; border-top: 1px dashed var(--border); padding-top: 4px; }
+  .foto-btn { display: flex; gap: 12px; align-items: center; width: 100%; margin-top: 10px; border: 1.5px dashed var(--border-strong); background: var(--field); border-radius: var(--r-sm); padding: 10px 12px; color: var(--muted); font: 600 14.5px var(--sans); cursor: pointer; text-align: left; }
+  .foto-btn .est { display: block; font-weight: 400; font-size: 13px; color: var(--subtle); }
+  .foto-btn.lista { border-style: solid; border-color: rgba(61,220,151,.5); }
+  .foto-btn.lista .est { color: var(--ok); }
+  .acciones { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; margin-top: 14px; }
+  .acciones .btn { margin: 0; }
+  .vacio { color: var(--subtle); text-align: center; padding: 30px 10px; }
+  footer { text-align: center; color: var(--faint); font-size: 13px; padding: 24px 16px 40px; position: relative; z-index: 1; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top"><img src="../../assets/logo.svg" alt="" width="46" height="28"><span>Neon Infinito</span><a href="../">Hacer un pedido →</a></header>
+  <p class="eyebrow">Servicio de corte</p>
+  <h1>Mis <span class="glow">pedidos</span></h1>
+
+  <!-- Entrar -->
+  <section id="v-entrar" class="bloque" hidden>
+    <h2>Entrá a tu cuenta</h2>
+    <p class="sub">Mirá tus pedidos de todas las semanas y cambiá los de esta semana hasta el sábado a las 10.</p>
+    <form id="f-entrar" novalidate>
+      <label class="campo">Tu WhatsApp<input type="tel" id="e-tel" autocomplete="tel" inputmode="tel" placeholder="11 2345 6789"></label>
+      <label class="campo">Contraseña<input type="password" id="e-pass" autocomplete="current-password"></label>
+      <button type="submit" class="btn pri" id="e-btn">Entrar</button>
+      <p class="error" id="e-err" role="alert"></p>
+    </form>
+    <div class="enlaces"><button type="button" class="link" data-ir="alta">Crear mi cuenta</button><button type="button" class="link" data-ir="reset">Me olvidé la contraseña</button></div>
+  </section>
+
+  <!-- Crear cuenta / recuperar contraseña (código por WhatsApp) -->
+  <section id="v-codigo" class="bloque" hidden>
+    <h2 id="c-titulo">Crear mi cuenta</h2>
+    <p class="sub" id="c-sub">Te mandamos un código a tu WhatsApp para comprobar que el número es tuyo.</p>
+    <form id="f-pedir" novalidate>
+      <label class="campo">Tu WhatsApp<span class="hint">El mismo con el que hacés los pedidos.</span><input type="tel" id="c-tel" autocomplete="tel" inputmode="tel" placeholder="11 2345 6789"></label>
+      <button type="submit" class="btn pri" id="c-pedir">Mandarme el código</button>
+    </form>
+    <form id="f-codigo" novalidate hidden>
+      <div class="aviso" id="c-enviado"></div>
+      <label class="campo">Código<span class="hint">Los 6 números que te llegaron por WhatsApp.</span><input type="text" id="c-cod" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"></label>
+      <label class="campo">Contraseña nueva<span class="hint">Al menos 6 caracteres.</span><input type="password" id="c-pass" autocomplete="new-password"></label>
+      <label class="campo">Repetila<input type="password" id="c-pass2" autocomplete="new-password"></label>
+      <button type="submit" class="btn pri" id="c-btn">Crear cuenta</button>
+      <div class="enlaces"><button type="button" class="link" id="c-reenviar">Mandarme otro código</button></div>
+    </form>
+    <p class="error" id="c-err" role="alert"></p>
+    <div class="enlaces"><button type="button" class="link" data-ir="entrar">Ya tengo cuenta: entrar</button></div>
+  </section>
+
+  <!-- Pedidos -->
+  <section id="v-pedidos" hidden>
+    <div class="quien"><span>Hola, <b id="p-nombre"></b> · <span id="p-tel"></span></span><button type="button" class="link" id="p-salir">Salir</button></div>
+    <div class="aviso">Los diseños de esta semana los podés cambiar hasta el <b>sábado a las 10</b>. Cada cambio queda registrado. Si el diseñador ya había armado la matriz, la vuelve a revisar.</div>
+    <div id="p-lista"><p class="vacio">Cargando tus pedidos…</p></div>
+    <p class="error" id="p-err" role="alert"></p>
+  </section>
+</div>
+<footer>Neon Infinito · Servicio de corte de bases acrílicas<br><a href="https://wa.me/5491133708544?text=Hola%2C%20tengo%20una%20duda%20con%20mi%20pedido%20de%20corte" target="_blank" rel="noopener">Dudas? Escribinos por WhatsApp</a></footer>
+
+<script>
+(function () {
+  'use strict';
+  var API = 'https://ni-ventas-tracker.neoninfinito.workers.dev';
+  var $ = function (id) { return document.getElementById(id); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var pesos = function (n) { return '$' + Math.round(n || 0).toLocaleString('es-AR'); };
+  var num = function (v) { var n = parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) && n > 0 ? n : 0; };
+  var ls = { get: function (k) { try { return localStorage.getItem(k); } catch (_) { return null; } }, set: function (k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (_) {} } };
+  var S = { token: ls.get('corte_cuenta_token') || '', proposito: 'alta', tel: '', datos: null, editando: 0, ed: null, fotos: {} };
+
+  function api(path, opts) {
+    opts = opts || {};
+    var h = Object.assign({}, opts.headers || {});
+    if (S.token) h.Authorization = 'Bearer ' + S.token;
+    if (opts.body && typeof opts.body === 'string' && !h['Content-Type']) h['Content-Type'] = 'application/json';
+    return fetch(API + path, Object.assign({}, opts, { headers: h })).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) { j._status = r.status; return j; });
+    }).catch(function () { return { error: 'red', motivo: 'No hay conexión. Revisá internet y probá de nuevo.' }; });
+  }
+  function ver(v) { ['entrar', 'codigo', 'pedidos'].forEach(function (x) { $('v-' + x).hidden = x !== v; }); window.scrollTo(0, 0); }
+  function ocupado(btn, si, txt) { btn.disabled = si; if (txt) btn.textContent = txt; }
+
+  // ---------- Entrar ----------
+  $('f-entrar').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var b = $('e-btn'); $('e-err').textContent = '';
+    if (!$('e-tel').value.trim() || !$('e-pass').value) { $('e-err').textContent = 'Completá tu WhatsApp y la contraseña.'; return; }
+    ocupado(b, true, 'Entrando…');
+    api('/corte/cuenta/login', { method: 'POST', body: JSON.stringify({ telefono: $('e-tel').value, password: $('e-pass').value }) }).then(function (j) {
+      ocupado(b, false, 'Entrar');
+      if (j.ok && j.token) { entro(j); return; }
+      $('e-err').textContent = j.motivo || 'No pudimos entrar. Probá de nuevo.';
+    });
+  });
+  function entro(j) {
+    S.token = j.token; ls.set('corte_cuenta_token', j.token); ls.set('corte_landing_tel', j.telefono || '');
+    $('e-pass').value = ''; $('c-pass').value = ''; $('c-pass2').value = ''; $('c-cod').value = '';
+    cargar();
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-ir]'); if (!b) return;
+    var a = b.getAttribute('data-ir');
+    if (a === 'entrar') { ver('entrar'); return; }
+    S.proposito = a === 'reset' ? 'reset' : 'alta';
+    $('c-titulo').textContent = S.proposito === 'reset' ? 'Recuperar la contraseña' : 'Crear mi cuenta';
+    $('c-btn').textContent = S.proposito === 'reset' ? 'Cambiar la contraseña' : 'Crear cuenta';
+    $('c-tel').value = $('e-tel').value || $('c-tel').value;
+    $('f-pedir').hidden = false; $('f-codigo').hidden = true; $('c-err').textContent = '';
+    ver('codigo');
+  });
+
+  // ---------- Código por WhatsApp ----------
+  function pedirCodigo(btn) {
+    $('c-err').textContent = '';
+    if (!$('c-tel').value.trim()) { $('c-err').textContent = 'Escribí tu WhatsApp.'; return; }
+    var txt = btn.textContent; ocupado(btn, true, 'Mandando…');
+    api('/corte/cuenta/codigo', { method: 'POST', body: JSON.stringify({ telefono: $('c-tel').value, proposito: S.proposito }) }).then(function (j) {
+      ocupado(btn, false, txt);
+      if (!j.ok) { $('c-err').textContent = j.motivo || 'No pudimos mandarte el código.'; return; }
+      S.tel = $('c-tel').value;
+      $('c-enviado').innerHTML = 'Te mandamos un código por WhatsApp al <b>' + esc(j.telefono) + '</b>. Vence en 10 minutos.';
+      $('f-pedir').hidden = true; $('f-codigo').hidden = false; $('c-cod').focus();
+    });
+  }
+  $('f-pedir').addEventListener('submit', function (e) { e.preventDefault(); pedirCodigo($('c-pedir')); });
+  $('c-reenviar').addEventListener('click', function () { pedirCodigo($('c-reenviar')); });
+  $('f-codigo').addEventListener('submit', function (e) {
+    e.preventDefault(); $('c-err').textContent = '';
+    var cod = $('c-cod').value.replace(/\D/g, ''), p1 = $('c-pass').value, p2 = $('c-pass2').value;
+    if (cod.length !== 6) { $('c-err').textContent = 'El código tiene 6 números.'; return; }
+    if (p1.length < 6) { $('c-err').textContent = 'La contraseña tiene que tener al menos 6 caracteres.'; return; }
+    if (p1 !== p2) { $('c-err').textContent = 'Las dos contraseñas no coinciden.'; return; }
+    var b = $('c-btn'), txt = b.textContent; ocupado(b, true, 'Guardando…');
+    api(S.proposito === 'reset' ? '/corte/cuenta/reset' : '/corte/cuenta/alta', { method: 'POST', body: JSON.stringify({ telefono: S.tel, codigo: cod, password: p1 }) }).then(function (j) {
+      ocupado(b, false, txt);
+      if (j.ok && j.token) { entro(j); return; }
+      $('c-err').textContent = j.motivo || 'No pudimos guardar. Probá de nuevo.';
+    });
+  });
+
+  // ---------- Mis pedidos ----------
+  $('p-salir').addEventListener('click', function () {
+    api('/corte/cuenta/salir', { method: 'POST', body: '{}' });
+    S.token = ''; ls.set('corte_cuenta_token', null); S.datos = null; ver('entrar');
+  });
+  function cargar() {
+    ver('pedidos'); $('p-err').textContent = '';
+    api('/corte/cuenta/pedidos').then(function (j) {
+      if (j._status === 401) { S.token = ''; ls.set('corte_cuenta_token', null); ver('entrar'); return; }
+      if (!j.ok) { $('p-lista').innerHTML = ''; $('p-err').textContent = j.motivo || 'No pudimos traer tus pedidos. Probá de nuevo.'; return; }
+      S.datos = j; $('p-nombre').textContent = j.nombre || 'cliente'; $('p-tel').textContent = j.telefono || '';
+      pintar();
+    });
+  }
+  function fechaSemana(s) {
+    var m = String(s || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) return 'Tanda del lunes ' + m[1] + '/' + m[2];
+    var d = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return d ? 'Pedido del ' + (+d[3]) + '/' + (+d[2]) : 'Pedidos';
+  }
+  function horaLimite(ms) {
+    var d = new Date(ms - 3 * 3600e3), dias = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+    return dias[d.getUTCDay()] + ' ' + d.getUTCDate() + '/' + (d.getUTCMonth() + 1) + ' a las ' + d.getUTCHours() + ' h';
+  }
+  function cuando(iso) {
+    var d = new Date(Date.parse(iso) - 3 * 3600e3);
+    return d.getUTCDate() + '/' + (d.getUTCMonth() + 1) + ' ' + String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+  }
+  var CAMPO = { nombre: 'Nombre', medida: 'Medida', cantidad: 'Cantidad', aclaraciones: 'Aclaraciones', foto: 'Foto' };
+  function piezaHtml(p) {
+    var img = p.insumo ? '<div class="img ins" aria-hidden="true">🔌</div>' : '<div class="img" data-foto-id="' + p.id + '">' + (p.foto ? '…' : 'sin foto') + '</div>';
+    var med = p.insumo ? '' : '<div class="dato">Medida: <b>' + esc(p.medida || '—') + '</b>' + (p.medida_real && p.medida_real !== p.medida ? ' · matriz ' + esc(p.medida_real) : '') + '</div>';
+    var precio = p.precio ? '<div class="dato">Precio: <b>' + pesos(p.precio) + '</b>' + (p.pago === 'pagado' ? ' · pagado' : '') + '</div>' : (p.estimado ? '<div class="dato">Estimado: <b>' + pesos(p.estimado) + '</b></div>' : '');
+    var cambios = p.cambios.length ? '<div class="cambios">Cambios que hiciste:<ul>' + p.cambios.map(function (c) {
+      var que = c.campo === 'foto' ? 'cambiaste la foto' : c.campo === 'aclaraciones' ? 'aclaraciones: "' + esc(c.despues || '—') + '"' : esc(CAMPO[c.campo] || c.campo) + ': ' + esc(c.antes || '—') + ' → ' + esc(c.despues);
+      return '<li>' + esc(cuando(c.at)) + ' · ' + que + (c.tras_diseno ? ' <span style="color:var(--warn)">(después de armada la matriz)</span>' : '') + '</li>';
+    }).join('') + '</ul></div>' : '';
+    var edit = p.editable ? '<div class="hasta">Podés cambiarlo hasta el ' + esc(horaLimite(p.editable_hasta)) + '</div><button type="button" class="btn sec chico" style="margin-top:8px" data-editar="' + p.id + '">Cambiar este diseño</button>' : (p.insumo ? '' : '');
+    return '<div class="pieza" id="pieza-' + p.id + '">' + img + '<div>' +
+      '<h3>' + esc(p.nombre || 'Diseño') + (p.cantidad > 1 ? ' × ' + p.cantidad : '') + '</h3>' + med +
+      (p.aclaraciones && !p.insumo ? '<div class="dato">' + esc(p.aclaraciones) + '</div>' : '') + precio +
+      '<span class="estado">' + esc(p.estado) + '</span>' + edit + cambios + '</div>' +
+      (S.editando === p.id ? editorHtml(p) : '') + '</div>';
+  }
+  function editorHtml(p) {
+    var e = S.ed;
+    var est = e.subiendo ? 'Subiendo la foto…' : (e.foto_key ? 'Foto nueva lista ✓' : 'Tocá para elegir otra foto (opcional)');
+    return '<div class="editor">' +
+      '<label class="campo">Nombre del diseño<input type="text" id="x-nombre" maxlength="60" value="' + esc(e.nombre) + '"></label>' +
+      '<div class="fila3"><label class="campo">Ancho (cm)<input type="number" id="x-ancho" inputmode="decimal" min="1" max="400" step="0.1" value="' + esc(e.ancho) + '"></label>' +
+      '<label class="campo">Alto (cm)<input type="number" id="x-alto" inputmode="decimal" min="1" max="400" step="0.1" value="' + esc(e.alto) + '"></label>' +
+      '<label class="campo">Cantidad<input type="number" id="x-cant" inputmode="numeric" min="1" max="10" value="' + esc(e.cantidad) + '"></label></div>' +
+      '<label class="campo">Aclaraciones<textarea id="x-acl" maxlength="300">' + esc(e.aclaraciones) + '</textarea></label>' +
+      '<button type="button" class="foto-btn' + (e.foto_key ? ' lista' : '') + '" id="x-foto"><span>📷</span><span>Cambiar la foto<span class="est">' + esc(est) + '</span></span></button>' +
+      '<input type="file" id="x-file" accept="image/*,application/pdf" hidden>' +
+      '<div class="dato" id="x-estim" style="margin-top:10px"></div>' +
+      '<div class="acciones"><button type="button" class="btn sec" id="x-cancelar">Cancelar</button><button type="button" class="btn pri" id="x-guardar" style="margin:0">Guardar cambios</button></div>' +
+      '<p class="error" id="x-err" role="alert"></p></div>';
+  }
+  function pintar() {
+    var d = S.datos; if (!d) return;
+    if (!d.semanas.length) { $('p-lista').innerHTML = '<p class="vacio">Todavía no tenés pedidos con este número. <a href="../">Hacé tu primer pedido</a>.</p>'; return; }
+    $('p-lista').innerHTML = d.semanas.map(function (s) {
+      var abierta = s.limite_edicion && Date.now() < s.limite_edicion && s.piezas.some(function (p) { return p.editable; });
+      return '<div class="semana"><h2>' + esc(fechaSemana(s.semana)) + '</h2><span class="chip ' + (abierta ? 'abierta' : 'cerrada') + '">' + (abierta ? 'se puede cambiar' : 'cerrada') + '</span></div>' + s.piezas.map(piezaHtml).join('');
+    }).join('');
+    cargarFotos();
+    if (S.editando) bindEditor();
+  }
+  // Las fotos se piden con la sesión (no son públicas) y se muestran como blob.
+  function cargarFotos() {
+    document.querySelectorAll('[data-foto-id]').forEach(function (el) {
+      var id = el.getAttribute('data-foto-id');
+      if (S.fotos[id]) { el.style.backgroundImage = 'url(' + S.fotos[id] + ')'; el.textContent = ''; return; }
+      if (el.textContent !== '…') return;
+      fetch(API + '/corte/cuenta/foto?id=' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + S.token } }).then(function (r) {
+        if (!r.ok) throw 0;
+        var ct = r.headers.get('Content-Type') || '';
+        if (/pdf/.test(ct)) { el.textContent = 'PDF'; return null; }
+        return r.blob();
+      }).then(function (b) { if (!b) return; S.fotos[id] = URL.createObjectURL(b); document.querySelectorAll('[data-foto-id="' + id + '"]').forEach(function (x) { x.style.backgroundImage = 'url(' + S.fotos[id] + ')'; x.textContent = ''; }); })
+        .catch(function () { el.textContent = 'sin foto'; });
+    });
+  }
+  function pieza(id) { var r = null; (S.datos ? S.datos.semanas : []).forEach(function (s) { s.piezas.forEach(function (p) { if (p.id === id) r = p; }); }); return r; }
+  $('p-lista').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-editar]'); if (!b) return;
+    var p = pieza(parseInt(b.getAttribute('data-editar'), 10)); if (!p) return;
+    S.editando = p.id; S.ed = { nombre: p.nombre, ancho: p.ancho || '', alto: p.alto || '', cantidad: p.cantidad, aclaraciones: p.aclaraciones, foto_key: '', subiendo: false };
+    pintar();
+    var el = $('pieza-' + p.id); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  });
+  function leerEditor() { var e = S.ed; e.nombre = $('x-nombre').value; e.ancho = $('x-ancho').value; e.alto = $('x-alto').value; e.cantidad = $('x-cant').value; e.aclaraciones = $('x-acl').value; }
+  function estimar() {
+    var e = S.ed, a = num($('x-ancho').value), l = num($('x-alto').value), c = Math.max(1, parseInt($('x-cant').value, 10) || 1);
+    $('x-estim').innerHTML = a && l ? 'Estimado con la medida nueva: <b>' + pesos(a / 100 * l / 100 * (S.datos.precio_m2 || 0) * c) + '</b>' : '';
+  }
+  function bindEditor() {
+    ['x-ancho', 'x-alto', 'x-cant'].forEach(function (id) { $(id).addEventListener('input', estimar); });
+    estimar();
+    $('x-cancelar').onclick = function () { S.editando = 0; S.ed = null; pintar(); };
+    $('x-foto').onclick = function () { $('x-file').click(); };
+    $('x-file').onchange = function () { var f = this.files && this.files[0]; this.value = ''; if (f) subirFoto(f); };
+    $('x-guardar').onclick = guardar;
+  }
+  function achicar(file) {
+    return new Promise(function (resolve) {
+      if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return resolve(file);
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function () {
+        try {
+          var max = 2000, w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, max / Math.max(w, h));
+          if (k === 1 && file.size < 1.5e6 && file.type === 'image/jpeg') { URL.revokeObjectURL(url); return resolve(file); }
+          var c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k);
+          var ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0, c.width, c.height);
+          c.toBlob(function (b) { URL.revokeObjectURL(url); resolve(b && b.size ? b : file); }, 'image/jpeg', 0.86);
+        } catch (_) { URL.revokeObjectURL(url); resolve(file); }
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); resolve(file); };
+      img.src = url;
+    });
+  }
+  function subirFoto(file) {
+    leerEditor();
+    if (!(/^image\//.test(file.type) || file.type === 'application/pdf')) { $('x-err').textContent = 'Elegí una imagen o un PDF.'; return; }
+    S.ed.subiendo = true; S.ed.foto_key = ''; pintar();
+    achicar(file).then(function (blob) {
+      return fetch(API + '/corte/landing/foto', { method: 'POST', headers: { 'Content-Type': blob.type || file.type }, body: blob }).then(function (r) { return r.json(); });
+    }).then(function (j) {
+      if (!S.ed) return;
+      S.ed.subiendo = false;
+      if (j && j.ok && j.key) S.ed.foto_key = j.key;
+      pintar();
+      if (!(j && j.ok)) $('x-err').textContent = (j && j.motivo) || 'No se pudo subir la foto. Probá de nuevo.';
+    }).catch(function () { if (!S.ed) return; S.ed.subiendo = false; pintar(); $('x-err').textContent = 'No se pudo subir la foto. Revisá la conexión.'; });
+  }
+  function guardar() {
+    leerEditor();
+    var e = S.ed; $('x-err').textContent = '';
+    if (e.subiendo) { $('x-err').textContent = 'Esperá que termine de subir la foto.'; return; }
+    if (!num(e.ancho) || !num(e.alto)) { $('x-err').textContent = 'Poné el ancho y el alto en centímetros.'; return; }
+    var b = $('x-guardar'); ocupado(b, true, 'Guardando…');
+    api('/corte/cuenta/pieza', { method: 'POST', body: JSON.stringify({ id: S.editando, nombre: e.nombre, ancho: e.ancho, alto: e.alto, cantidad: e.cantidad, aclaraciones: e.aclaraciones, foto_key: e.foto_key || undefined }) }).then(function (j) {
+      if (!j.ok) { ocupado(b, false, 'Guardar cambios'); $('x-err').textContent = j.motivo || 'No pudimos guardar el cambio.'; return; }
+      var id = S.editando; S.editando = 0; S.ed = null; delete S.fotos[id];
+      cargar();
+    });
+  }
+
+  // ---------- Arranque ----------
+  var tel = ls.get('corte_landing_tel'); if (tel) { $('e-tel').value = tel; $('c-tel').value = tel; }
+  if (S.token) cargar(); else ver('entrar');
+})();
+</script>
+</body>
+</html>
