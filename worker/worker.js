@@ -7689,6 +7689,7 @@ async function corteLandingCron(env) {
       await _paso('corteExpressPreparar', corteExpressPreparar);   // exprés de insumos: detecta y prepara (19/20-oct)
       await _paso('corteExpressLiberar', corteExpressLiberar);     // pagado → "Para embalar" de Neyen + aviso
       await corteLandingEscribirPendientes(env, ahora);
+      await _paso('corteNeonEscribirPendientes', corteNeonEscribirPendientes); // carteles de Neon Infinito → planilla de Emma (24-oct)
       await _paso('corteLandingDirNueva', corteLandingDirNueva);   // dirección nueva de un cliente conocido → LTV
       await _paso('corteExpressCobrar', corteExpressCobrar);       // cobro con el detalle (texto o plantilla)
       await corteLandingResumenes(env, ahora);
@@ -7698,6 +7699,41 @@ async function corteLandingCron(env) {
       }
     } finally { try { await env.DB.prepare("DELETE FROM kv_cache WHERE k='corte_landing_lock' AND v=?").bind(lockId).run(); } catch (_) {} }
   } catch (e) { try { console.log('corteLandingCron: ' + String((e && e.message) || e)); } catch (_) {} }
+}
+// CARTELES DE NEON INFINITO → planilla de cortes de Emma (Emma 24-oct: "los carteles nuestros yo pongo las medidas pero no quedan
+// anotadas en el excel, como con los de los clientes"). Los tipeaba ella a mano y desde el 18-oct ya no edita la planilla: ahora,
+// cuando marca "Matriz lista" en una pieza NEON, el cron escribe la fila como las tipeaba ella: B "neon" (está en Clientes),
+// C el cartel, D la cantidad, F el lunes siguiente al día que la diseñó, G/H la medida, I TRANS. La carga de la tanda saltea las
+// filas "neon" (no se duplica nada). Si ya hay una fila tipeada igual (misma fecha, "neon" y diseño), la vincula.
+// kv corte_neon_hoja_on ('1') · corte_neon_hoja_desde (ISO de disenado_at): las diseñadas antes no se tocan.
+function corteNeonLunes(iso) {
+  const t = Date.parse(iso || ''); if (isNaN(t)) return '';
+  const ar = new Date(t - 3 * 3600000), dow = ar.getUTCDay();
+  const l = new Date(Date.UTC(ar.getUTCFullYear(), ar.getUTCMonth(), ar.getUTCDate() + (dow === 1 ? 7 : (8 - dow) % 7))); // lunes → el siguiente
+  return l.getUTCDate() + '/' + (l.getUTCMonth() + 1) + '/' + l.getUTCFullYear();
+}
+async function corteNeonEscribirPendientes(env, ahora) {
+  if ((await kvGet(env, 'corte_neon_hoja_on', '1')) !== '1' || (await kvGet(env, 'corte_hoja_auto_on', '1')) !== '1') return;
+  const desde = await kvGet(env, 'corte_neon_hoja_desde', '');
+  if (!desde) return;
+  const cand = (await env.DB.prepare("SELECT id, diseno_nombre, cantidad, ancho_real, alto_real, disenado_at FROM corte_pedidos WHERE producto='NEON' AND hoja_fila IS NULL AND estado NOT IN ('pedido','prueba','cancelado') AND ancho_real > 0 AND alto_real > 0 AND disenado_at >= ? ORDER BY disenado_at, id LIMIT 15").bind(desde).all()).results || [];
+  if (!cand.length) return;
+  const token = await sheetsAccessToken(env);
+  if (!token) return;
+  const ocupadas = new Set();
+  for (const f of new Set(cand.map(p => corteNeonLunes(p.disenado_at)).filter(Boolean))) { try { ((await env.DB.prepare('SELECT hoja_fila FROM corte_pedidos WHERE hoja_fecha=? AND hoja_fila IS NOT NULL').bind(f).all()).results || []).forEach(r => ocupadas.add(+r.hoja_fila)); } catch (_) {} }
+  let ok = 0;
+  for (const p of cand) {
+    const fecha = corteNeonLunes(p.disenado_at);
+    if (!fecha) continue;
+    try {
+      const r = await corteHojaFilaPieza(token, { cliente: 'neon', diseno: String(p.diseno_nombre || 'cartel').trim(), cantidad: Math.max(1, parseInt(p.cantidad, 10) || 1), fecha, ancho: +p.ancho_real, alto: +p.alto_real, producto: 'TRANS', aclaracion: '' }, ocupadas);
+      ocupadas.add(r.fila);
+      await env.DB.prepare("UPDATE corte_pedidos SET hoja_fila=?, hoja_cliente='neon', hoja_fecha=?, updated_at=? WHERE id=? AND hoja_fila IS NULL").bind(r.fila, fecha, new Date().toISOString(), p.id).run();
+      ok++;
+    } catch (err) { await corteLandingError(env, 'neón propio ' + p.id + ' (' + (p.diseno_nombre || '') + '): ' + String((err && err.message) || err)); }
+  }
+  if (ok) { try { await kvSet(env, 'corte_landing_err_n', '0'); } catch (_) {} }
 }
 async function corteLandingEscribirPendientes(env, ahora) {
   if ((await kvGet(env, 'corte_hoja_auto_on', '1')) !== '1') return;
@@ -31209,7 +31245,7 @@ const handler = {
             // columnas por IMPORTRANGE; su precio (col J) se pisa solo si lo había escrito el CRM (un número, no la fórmula).
             let planilla = ped.hoja_fila ? 'ok' : 'sin_fila';
             let filaHoy = null, ghOk = false, jEra = '';
-            if (ped.hoja_fila && !esNeonPropio) {
+            if (ped.hoja_fila) {
               try {
                 const token = await sheetsAccessToken(env);
                 if (!token) throw new Error('sin token');
