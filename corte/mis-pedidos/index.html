@@ -88,6 +88,11 @@
   .acciones { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; margin-top: 14px; }
   .acciones .btn { margin: 0; }
   .vacio { color: var(--subtle); text-align: center; padding: 30px 10px; }
+  .sena { margin: 16px 0 6px; padding: 14px; border-radius: var(--r); background: rgba(255,181,71,.07); border: 1px solid rgba(255,181,71,.4); }
+  .sena-t { font-weight: 800; font-size: 16px; }
+  .sena-monto { font-size: 26px; font-weight: 800; margin: 4px 0 2px; }
+  .sena .dato { color: var(--muted); font-size: 14px; margin-top: 4px; overflow-wrap: anywhere; }
+  .sena .dato b { color: var(--fg); }
   footer { text-align: center; color: var(--faint); font-size: 13px; padding: 24px 16px 40px; position: relative; z-index: 1; }
   [hidden] { display: none !important; }
 </style>
@@ -136,6 +141,8 @@
   <section id="v-pedidos" hidden>
     <div class="quien"><span>Hola, <b id="p-nombre"></b> · <span id="p-tel"></span></span><button type="button" class="link" id="p-salir">Salir</button></div>
     <div class="aviso">Los diseños de esta semana los podés cambiar hasta el <b>sábado a las 10</b>. Cada cambio queda registrado. Si el diseñador ya había armado la matriz, la vuelve a revisar.</div>
+    <div id="p-senas"></div>
+    <input type="file" id="sena-file" accept="image/*,application/pdf" hidden>
     <div id="p-lista"><p class="vacio">Cargando tus pedidos…</p></div>
     <p class="error" id="p-err" role="alert"></p>
   </section>
@@ -286,6 +293,8 @@
   }
   function pintar() {
     var d = S.datos; if (!d) return;
+    $('p-senas').innerHTML = (d.senas || []).map(senaHtml).join('');
+    document.querySelectorAll('[data-sena-subir]').forEach(function (b) { b.onclick = function () { S.senaTok = b.getAttribute('data-sena-subir'); $('sena-file').click(); }; });
     if (!d.semanas.length) { $('p-lista').innerHTML = '<p class="vacio">Todavía no tenés pedidos con este número. <a href="../">Hacé tu primer pedido</a>.</p>'; return; }
     $('p-lista').innerHTML = d.semanas.map(function (s) {
       var abierta = s.limite_edicion && Date.now() < s.limite_edicion && s.piezas.some(function (p) { return p.editable; });
@@ -347,6 +356,37 @@
       img.src = url;
     });
   }
+  // Seña sin acreditar (los que no son alumnos): arriba de todo, con los datos para transferir y el botón del comprobante.
+  function senaHtml(s) {
+    return '<div class="sena">' +
+      '<div class="sena-t">' + (s.tipo === 'insumos' ? 'Falta el pago de tu pedido de insumos' : 'Falta la seña de tu pedido' + (s.semana ? ' (' + esc(fechaSemana(s.semana).toLowerCase()) + ')' : '')) + '</div>' +
+      '<div class="sena-monto">' + pesos(s.falta || s.monto) + '</div>' +
+      '<div class="dato">' + (s.tipo === 'insumos' ? 'El total de los insumos.' : 'El 50 % del estimado (' + pesos(s.estimado) + '). Hasta que se acredite, el pedido no pasa al diseñador.') + (s.pagado > 0 ? ' Ya recibimos ' + pesos(s.pagado) + '.' : '') + '</div>' +
+      '<div class="dato">Alias <b>' + esc(s.alias) + '</b> · CVU <b>' + esc(s.cvu) + '</b> · a nombre de ' + esc(s.titular) + '</div>' +
+      (s.estado === 'revisar' ? '<div class="dato" style="color:var(--warn)">Recibimos tu comprobante y lo estamos revisando.</div>' : '') +
+      '<button type="button" class="btn pri chico" data-sena-subir="' + esc(s.token) + '" style="margin-top:12px">Subir el comprobante</button>' +
+      '<p class="error" data-sena-msg="' + esc(s.token) + '"></p></div>';
+  }
+  function subirComprobante(file) {
+    var tok = S.senaTok, b = document.querySelector('[data-sena-subir="' + tok + '"]'), msg = document.querySelector('[data-sena-msg="' + tok + '"]');
+    if (!tok || !b || !msg) return;
+    var fallo = function (m) { b.disabled = false; b.textContent = 'Subir el comprobante'; msg.className = 'error'; msg.textContent = m; };
+    if (!(/^image\//.test(file.type) || file.type === 'application/pdf')) { fallo('Elegí una imagen o un PDF.'); return; }
+    b.disabled = true; b.textContent = 'Subiendo…'; msg.textContent = '';
+    achicar(file).then(function (blob) {
+      return fetch(API + '/corte/landing/foto', { method: 'POST', headers: { 'Content-Type': blob.type || file.type }, body: blob }).then(function (r) { return r.json(); });
+    }).then(function (j) {
+      if (!j || !j.ok || !j.key) throw { motivo: (j && j.motivo) || 'No se pudo subir. Probá de nuevo.' };
+      b.textContent = 'Revisando el comprobante…';
+      return fetch(API + '/corte/landing/sena', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: tok, key: j.key }) }).then(function (r) { return r.json(); });
+    }).then(function (j) {
+      if (!j || !j.ok) { fallo((j && j.motivo) || 'No pudimos revisar el comprobante. Probá de nuevo.'); return; }
+      msg.className = 'ok-msg';
+      msg.textContent = j.resultado === 'pagada' ? 'Listo, recibimos el pago. Tu pedido ya está tomado.' : j.resultado === 'parcial' ? 'Recibimos ' + pesos(j.sena.pagado) + '. Te faltan ' + pesos(j.sena.falta) + '.' : 'Lo recibimos. Lo revisamos y te confirmamos por WhatsApp.';
+      setTimeout(cargar, 2500);
+    }).catch(function (e) { fallo((e && e.motivo) || 'No se pudo subir. Revisá la conexión y probá de nuevo.'); });
+  }
+  $('sena-file').onchange = function () { var f = this.files && this.files[0]; this.value = ''; if (f) subirComprobante(f); };
   function subirFoto(file) {
     leerEditor();
     if (!(/^image\//.test(file.type) || file.type === 'application/pdf')) { $('x-err').textContent = 'Elegí una imagen o un PDF.'; return; }

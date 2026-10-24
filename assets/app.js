@@ -5149,7 +5149,7 @@ function renderCorte() {
     // así un refresco que mete una pieza nueva no le cambia el cartel que está midiendo.
     const fifo = (a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')) || (a.id - b.id);
     const esperandoFoto = cola.filter(corteEsperandoFoto).sort(fifo);
-    const colaEmma = cola.filter(p => !corteEsperandoFoto(p)).sort(fifo);
+    const colaEmma = cola.filter(p => !corteEsperandoFoto(p) && p.sena_estado !== 'pendiente').sort(fifo); // esperando la seña web: todavía no
     // TABLERO DE NEÓN (estilo el de Neyen): Esperando foto → Por diseñar → Diseñados (últimas 2 semanas).
     // Es solo para VER el estado del neón propio; el trabajo se sigue haciendo en la línea de arriba. Tocar
     // una pieza "por diseñar" la trae a la línea (data-corte-relev-ir). Diseñado = ya pasó por Emma
@@ -5349,6 +5349,7 @@ function renderCorte() {
       </div>
       <p style="color:var(--fg-mute);font-size:13px;margin:0 0 16px">Tu semana de un vistazo — una fila por cliente. Tocá un cliente para ver sus diseños; tocá un diseño para moverlo de etapa.</p>
       ${corteSinPagarBtnHtml()}
+      ${corteSenasHtml()}
       ${corteHerramientasHtml()}
       ${sel ? corteDetalleHtml(sel) : ''}
       ${corteWebPanelHtml(pedidosWeb)}
@@ -9383,6 +9384,7 @@ function corteWebPanelHtml(web) {
         <div style="font-weight:700">${escapeHtml(g.nombre)}</div>
         <div style="font-size:12px;color:var(--fg-mute);margin-top:2px">tanda del ${escapeHtml(lunes(g.fecha))} · ${g.entrega === 'envio' ? 'envío' : (g.entrega === 'retira' ? 'retira' : 'entrega sin definir')} · ${escapeHtml(hora(g.llego))}</div>
         <div style="font-size:12px;margin-top:4px;color:${d.length && m === d.length ? '#22c55e' : 'var(--fg-subtle)'}">${d.length ? `Emma midió ${m} de ${d.length}` : 'solo insumos'}</div>
+        ${g.items.some(p => p.sena_estado === 'pendiente') ? '<div style="font-size:12px;margin-top:4px;color:#f59e0b;font-weight:700">💰 esperando la seña</div>' : ''}
         ${ins.length ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:2px">${ins.map(p => escapeHtml((parseInt(p.cantidad, 10) || 1) + ' × ' + (p.diseno_nombre || p.producto))).join('<br>')}</div>` : ''}
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0">${thumbs}</div>
@@ -9545,6 +9547,65 @@ async function corteClienteVisto(id, btn) {
   if (!j.ok) { if (btn) btn.disabled = false; toast('No se pudo guardar. Probá de nuevo.'); return; }
   STATE.cortePedidos = undefined; STATE._corteLoading = false; STATE._corteGen = (STATE._corteGen || 0) + 1; if (STATE.view === 'corte') render();
 }
+// ===== SEÑAS DE PEDIDOS WEB (Gaspar 24-oct): los que no son alumnos pagan una seña (50 % del estimado; el total si son
+// solo insumos) antes de que el pedido pase a Emma o a Neyen. El lector de comprobantes las acredita solo; las que no
+// cierran quedan "a revisar" y se confirman acá. =====
+function corteSenasHtml() {
+  if (!isAdmin()) return '';
+  const ss = STATE.corteSenas || [];
+  if (!ss.length) return '';
+  const abiertas = ss.filter(s => s.estado === 'pendiente' || s.estado === 'revisar');
+  const resueltas = ss.filter(s => !(s.estado === 'pendiente' || s.estado === 'revisar'));
+  const hace = (iso) => { const ms = Date.now() - Date.parse(iso || ''); if (!(ms >= 0)) return ''; const h = Math.floor(ms / 3600000); return h < 1 ? 'hace ' + Math.max(1, Math.round(ms / 60000)) + ' min' : (h < 48 ? 'hace ' + h + ' h' : 'hace ' + Math.floor(h / 24) + ' días'); };
+  const estTxt = s => s.estado === 'revisar' ? `<b style="color:#f59e0b">A revisar:</b> ${escapeHtml(s.motivo || '')}` : (s.pagado > 0 ? `Pagó ${fmtMoney(s.pagado)} de ${fmtMoney(s.monto)}` : 'Esperando el pago');
+  const comps = s => (s.comprobantes || []).map((c, i) => `<a href="${escapeHtml(mediaUrl(c.key))}" target="_blank" rel="noopener" style="font-size:12px">comprobante ${i + 1}${c.monto ? ' · ' + fmtMoney(c.monto) : ''}${c.caja ? ' · ' + escapeHtml(c.caja) : (c.titular ? ' · a ' + escapeHtml(c.titular) : '')}${c.via === 'whatsapp' ? ' · por WhatsApp' : ''}</a>`).join(' · ');
+  const RES = { pagada: 'pagada', aplicada: 'descontada en el cobro', liberada: 'sin seña', cancelada: 'cancelada' };
+  return `<div style="border:1px solid rgba(245,158,11,.45);background:rgba(245,158,11,.06);border-radius:12px;padding:12px 14px;margin:0 0 14px">
+    <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span style="font-size:15px;font-weight:800">💰 Señas web</span><span style="font-size:12px;color:var(--fg-mute)">${abiertas.length} sin acreditar · los que no son alumnos pagan antes: hasta entonces Emma y Neyen no ven el pedido</span></div>
+    ${abiertas.map(s => `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:9px 0 0;border-top:1px solid var(--border);margin-top:9px">
+      <div style="flex:1;min-width:220px">
+        <div style="font-weight:800;overflow-wrap:anywhere">${escapeHtml(s.nombre || 'Cliente')} <span style="font-weight:700">${fmtMoney(s.monto)}</span> <span style="font-size:12px;font-weight:400;color:var(--fg-mute)">${s.tipo === 'insumos' ? 'total de insumos' : '50 % de ' + fmtMoney(s.estimado)} · ${s.piezas} pieza${s.piezas === 1 ? '' : 's'} · ${hace(s.created_at)}${s.prueba ? ' · prueba' : ''}</span></div>
+        <div style="font-size:12.5px;margin-top:2px">${estTxt(s)}</div>${(s.comprobantes || []).length ? `<div style="margin-top:3px">${comps(s)}</div>` : ''}
+      </div>
+      <button type="button" class="btn btn-ghost" data-sena-chat="${escapeHtml(s.telefono)}" style="padding:6px 10px;font-size:12.5px">Chat</button>
+      <button type="button" class="btn" data-sena-acc="confirmar" data-sena-id="${s.id}" style="padding:6px 12px;font-size:12.5px;font-weight:800;background:#22c55e;border-color:#22c55e;color:#04140a">Confirmar seña</button>
+      <button type="button" class="btn btn-ghost" data-sena-acc="liberar" data-sena-id="${s.id}" style="padding:6px 10px;font-size:12.5px">Sin seña</button>
+      <button type="button" class="btn btn-ghost" data-sena-acc="cancelar" data-sena-id="${s.id}" style="padding:6px 10px;font-size:12.5px">Cancelar pedido</button>
+    </div>`).join('') || '<div style="font-size:12.5px;color:var(--fg-mute);margin-top:6px">Todas acreditadas ✨</div>'}
+    ${resueltas.length ? `<div style="font-size:12px;color:var(--fg-mute);margin-top:9px">Últimos días: ${resueltas.map(s => escapeHtml(s.nombre || 'cliente') + ' ' + fmtMoney(s.pagado || s.monto) + ' (' + (RES[s.estado] || s.estado) + ')').join(' · ')}</div>` : ''}
+  </div>`;
+}
+async function corteSenaAccion(id, acc, btn) {
+  const s = (STATE.corteSenas || []).find(x => x.id === id); if (!s) return;
+  const nom = s.nombre || 'el cliente';
+  const body = { accion: acc };
+  if (acc === 'confirmar') {
+    const leidos = (s.comprobantes || []).filter(c => c.leido && !c.repetido).reduce((a, c) => a + (Number(c.monto) || 0), 0);
+    if (!(await showConfirm(`Confirmo que la seña de ${nom} está acreditada (${fmtMoney(leidos || s.monto)}). El pedido pasa a ${s.tipo === 'insumos' ? 'Neyen para despachar' : 'Emma'} y el lunes el cobro se la descuenta.`, { title: 'Confirmar seña', confirmLabel: 'Confirmar', cancelLabel: 'Cancelar' }))) return;
+  } else if (acc === 'liberar') {
+    if (!(await showConfirm(`${nom} sigue sin seña: el pedido pasa igual a ${s.tipo === 'insumos' ? 'Neyen' : 'Emma'} y se cobra todo el lunes.`, { title: 'Sin seña', confirmLabel: 'Seguir sin seña', cancelLabel: 'Cancelar' }))) return;
+    body.alumno = await showConfirm(`¿${nom} es alumno? Si decís que sí, no se le pide seña nunca más.`, { title: '¿Es alumno?', confirmLabel: 'Sí, es alumno', cancelLabel: 'No, solo este pedido' });
+  } else if (acc === 'cancelar') {
+    if (!(await showConfirm(`Cancelo el pedido de ${nom}: las piezas que esperan la seña quedan canceladas.`, { title: 'Cancelar pedido', confirmLabel: 'Cancelar el pedido', cancelLabel: 'Volver' }))) return;
+  }
+  if (btn) btn.disabled = true;
+  let j = {};
+  try { const r = await fetch(CONFIG.trackerUrl + '/admin/corte/senas/' + id, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); j = await r.json().catch(() => ({})); } catch (_) {}
+  if (Array.isArray(j.senas)) STATE.corteSenas = j.senas;
+  toast(j.ok ? ({ confirmar: 'Seña confirmada: el pedido sigue', liberar: 'Listo: sigue sin seña', cancelar: 'Pedido cancelado' }[acc]) : (j.motivo || 'No se pudo. Probá de nuevo.'));
+  if (j.ok) { STATE.cortePedidos = undefined; STATE._corteLoading = false; STATE._corteGen = (STATE._corteGen || 0) + 1; }
+  if (STATE.view === 'corte') render();
+}
+function corteSenasBind() {
+  document.querySelectorAll('[data-sena-acc]').forEach(b => { b.onclick = () => corteSenaAccion(parseInt(b.getAttribute('data-sena-id'), 10), b.getAttribute('data-sena-acc'), b); });
+  document.querySelectorAll('[data-sena-chat]').forEach(b => { b.onclick = () => {
+    const phone = b.getAttribute('data-sena-chat');
+    STATE.view = 'chat'; chatState.selectedPhone = phone;
+    if (typeof enterMobileChatConversation === 'function') enterMobileChatConversation();
+    try { selectChatContact(phone); } catch (_) {}
+    location.hash = 'chat'; render();
+  }; });
+}
 // ===== SIN PAGAR DESPUÉS DEL MARTES 16 h (Gaspar 20-oct: "un botón a la derecha bien notorio para los que no paguen hasta
 // el martes 16 h así les hago un seguimiento") =====
 function corteSinPagarFetch(force) {
@@ -9633,7 +9694,7 @@ async function corteCargar(silent) {
   const gen = silent ? (STATE._corteGen || 0) : (STATE._corteGen = (STATE._corteGen || 0) + 1);
   if (silent) STATE._corteSilentLoading = true; else STATE._corteLoading = true;
   const admin = isAdmin() && !silent;
-  const prevSig = corteSig(STATE.cortePedidos), prevPaq = JSON.stringify(STATE.cortePaquetes || []);
+  const prevSig = corteSig(STATE.cortePedidos), prevPaq = JSON.stringify(STATE.cortePaquetes || []), prevSen = JSON.stringify(STATE.corteSenas || []);
   let res = [];
   try {
     const proms = [
@@ -9651,11 +9712,13 @@ async function corteCargar(silent) {
   if (silent) {
     if (res[0] && Array.isArray(res[0].pedidos)) STATE.cortePedidos = res[0].pedidos;
     if (res[0] && Array.isArray(res[0].paquetes)) STATE.cortePaquetes = res[0].paquetes;
+    if (res[0] && Array.isArray(res[0].senas)) STATE.corteSenas = res[0].senas;
     if (res[1] && res[1].ok) STATE.corteTanda = res[1];
   } else {
     STATE._corteLoading = false;
     STATE.cortePedidos = (res[0] && res[0].pedidos) || STATE.cortePedidos || [];
     STATE.cortePaquetes = (res[0] && res[0].paquetes) || STATE.cortePaquetes || [];
+    STATE.corteSenas = (res[0] && res[0].senas) || STATE.corteSenas || [];
     STATE.corteTanda = (res[1] && res[1].ok) ? res[1] : null;
     STATE.corteAlumnos = admin ? ((res[2] && res[2].alumnos) || []) : [];
     STATE.cortePropuestas = admin ? ((res[3] && res[3].propuestas) || []).filter(p => !(STATE._cortePropHechas || {})[p.id]) : [];
@@ -9664,7 +9727,7 @@ async function corteCargar(silent) {
   STATE._corteLoadedAt = Date.now();
   corteBadgePaint();
   if (silent) {
-    if (corteSig(STATE.cortePedidos) !== prevSig || JSON.stringify(STATE.cortePaquetes || []) !== prevPaq) STATE._corteDirty = true; // paquetes: la línea de logística de Neyen
+    if (corteSig(STATE.cortePedidos) !== prevSig || JSON.stringify(STATE.cortePaquetes || []) !== prevPaq || JSON.stringify(STATE.corteSenas || []) !== prevSen) STATE._corteDirty = true; // paquetes: la línea de logística de Neyen
     if (!STATE._corteDirty || !corteRenderFondoOk()) return; // queda pendiente para el próximo tick
   }
   STATE._corteDirty = false;
@@ -9708,6 +9771,7 @@ async function bindCorte() {
   corteStartPolling();
   // "Sin pagar" después del martes 16 h: el botón rojo de la derecha (solo admin).
   if (isAdmin()) { corteSinPagarFetch(false); const spb = document.querySelector('[data-corte-sinpagar]'); if (spb) spb.onclick = corteSinPagarModal; }
+  if (isAdmin()) corteSenasBind(); // señas de pedidos web
   if (STATE.cortePedidos === undefined && !STATE._corteLoading) {
     await corteCargar(false);
     return;

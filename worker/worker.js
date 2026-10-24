@@ -6244,7 +6244,7 @@ function corteMedidaCobro(r) {
 function corteCobroMsg(g) {
   const nombre = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
   const lineas = (g.piezas || []).map(p => '- ' + (p.diseno || 'diseño') + (p.medida ? ' (' + p.medida + ')' : '') + ((parseInt(p.cantidad, 10) || 1) > 1 ? ' x' + p.cantidad : '') + ': $' + Number(p.precio || 0).toLocaleString('es-AR')).join('\n');
-  return (nombre ? 'Hola ' + nombre + ', ' : 'Hola, ') + (g.insumos ? 'te paso el detalle de tu pedido:\n' : 'te paso el detalle de tu corte de esta semana:\n') + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR') + '\n\nPara confirmarlo transferí a:\n' + CORTE_DATOS_PAGO + '\n\nY mandame el comprobante por acá.' + (g.insumos ? ' Apenas se acredite lo preparamos para despachar.' : '');
+  return (nombre ? 'Hola ' + nombre + ', ' : 'Hola, ') + (g.insumos ? 'te paso el detalle de tu pedido:\n' : 'te paso el detalle de tu corte de esta semana:\n') + lineas + '\nTotal: $' + Number(g.total || 0).toLocaleString('es-AR') + (g.sena > 0 ? '\nSeña que ya pagaste: $' + Math.round(g.sena).toLocaleString('es-AR') + '\nTe queda: $' + Math.max(0, Math.round(g.total - g.sena)).toLocaleString('es-AR') : '') + '\n\nPara confirmarlo transferí a:\n' + CORTE_DATOS_PAGO + '\n\nY mandame el comprobante por acá.' + (g.insumos ? ' Apenas se acredite lo preparamos para despachar.' : '');
 }
 // Recibo con el desglose, para quien PAGÓ sin haber recibido nunca el detalle (el cobro le llegó por plantilla, solo el
 // total, y contestó directo con el comprobante). Mismo detalle que el cobro pero sin pedir transferencia.
@@ -6379,6 +6379,18 @@ async function corteAutoDetalle(env, phone, opts = {}) {
   const cutoff = gapMs ? isoHace(gapMs) : '';
   let rows;
   try { rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto, hoja_fila, hoja_cliente, hoja_fecha FROM corte_pedidos WHERE telefono=? AND estado_pago='cobrando' AND precio>0").bind(phone).all()).results || []; } catch (_) { return false; }
+  // Cobro con la seña web descontada: arranca en 'parcial' con la seña anotada y todavía sin comprobantes.
+  let sena = 0;
+  if (!rows.length) {
+    try {
+      const pp = await env.DB.prepare("SELECT pagado, montos FROM corte_pago_parcial WHERE phone=?").bind(phone).first();
+      const sx = await env.DB.prepare("SELECT COALESCE(SUM(pagado_monto), 0) AS s FROM corte_senas WHERE telefono=? AND estado='aplicada' AND tipo='disenos' AND aplicada_at >= ?").bind(phone, isoHace(10 * 86400000)).first();
+      if (pp && String(pp.montos || '[]') === '[]' && sx && +sx.s > 0 && Math.abs((+pp.pagado || 0) - (+sx.s)) <= 1) {
+        rows = (await env.DB.prepare("SELECT cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, producto FROM corte_pedidos WHERE telefono=? AND estado_pago='parcial' AND precio>0").bind(phone).all()).results || [];
+        sena = +sx.s;
+      }
+    } catch (_) {}
+  }
   if (!rows.length) return false;
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_detalle_sent (phone TEXT PRIMARY KEY, cobro_at TEXT, sent_at TEXT)").run(); } catch (_) {}
   // DEDUP ROBUSTO: si YA le mandamos el detalle de este cobro (sent_at), NO reenviar — pase lo que pase.
@@ -6397,6 +6409,7 @@ async function corteAutoDetalle(env, phone, opts = {}) {
   try { claimed = await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET sent_at=excluded.sent_at WHERE corte_detalle_sent.sent_at IS NULL OR corte_detalle_sent.sent_at='' OR (?<>'' AND corte_detalle_sent.sent_at < ?) RETURNING phone").bind(phone, now, now, cutoff, cutoff).first(); } catch (_) {}
   if (!claimed) return false;
   const g ={ cliente_nombre: rows[0].cliente_nombre, insumos: rows.every(r => corteEsInsumoProd(r.producto)), piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: corteMedidaCobro(r), cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+  if (sena > 0) g.sena = sena;
   let ok = false;
   try { const r = await corteSend(env, phone, corteCobroMsg(g)); ok = !!(r && r.ok); } catch (_) {}
   // Si no salió, liberamos la reserva para que lo reintente el próximo tick.
@@ -6458,7 +6471,8 @@ async function corteVigiaParcial(env) {
     let up = null;
     try { up = await env.DB.prepare("UPDATE corte_pago_parcial SET pagado=?, montos=?, wamids=?, updated_at=? WHERE phone=? AND pagado=?").bind(pagado, JSON.stringify(nuevos), JSON.stringify([...lista(cuenta.wamids), img.wamid]), nowIso, r.telefono, cuenta.pagado).run(); } catch (_) {}
     if (!up || !up.meta || !up.meta.changes) continue; // otra corrida tocó la cuenta en el medio
-    const suma = nuevos.map(pesos).join(' + ') + ' = ' + pesos(pagado);
+    const previo = (Number(cuenta.pagado) || 0) - montos.reduce((s, m) => s + (Number(m) || 0), 0); // lo anotado sin comprobante (la seña web)
+    const suma = (previo > 1 ? 'seña ' + pesos(previo) + ' + ' : '') + nuevos.map(pesos).join(' + ') + ' = ' + pesos(pagado);
     if (pagado < total * 0.99) { await avisar('mandó otro comprobante por ' + pesos(monto) + ': lleva ' + suma + ' de ' + pesos(total) + ' (faltan ' + pesos(total - pagado) + ').'); continue; }
     // Completó: mismas consecuencias que un pago de una vez. Piezas leídas ANTES de la transición (para el recibo).
     let piezas = [];
@@ -6499,6 +6513,13 @@ async function processCorteVigiaAuto(env) {
     }
     // Clientes en 'parcial' que mandan OTRO comprobante: se suma a lo que ya pagaron y, si completan, quedan PAGADOS.
     try { await corteVigiaParcial(env); } catch (_) {}
+    // Cobro con la seña web descontada (arranca en 'parcial'): si contesta la plantilla, le va el detalle con la seña.
+    try {
+      const sp = ((await env.DB.prepare("SELECT DISTINCT s.telefono FROM corte_senas s WHERE s.estado='aplicada' AND s.tipo='disenos' AND s.aplicada_at >= ? AND EXISTS (SELECT 1 FROM corte_pedidos c WHERE c.telefono=s.telefono AND c.estado_pago='parcial')").bind(isoHace(10 * 86400000)).all()).results || []).map(r => r.telefono);
+      for (const ph of sp) { try { await corteAutoDetalle(env, ph); } catch (_) {} }
+    } catch (_) {}
+    // Seña de un pedido web mandada por WhatsApp en vez de subirla a la página.
+    try { await corteSenaVigiaWa(env); } catch (_) {}
     // Reintento de marcados a la planilla que fallaron por algo transitorio (token/5xx). Idempotente.
     try {
       const pend = (await env.DB.prepare("SELECT phone, cliente, total, caja, created_at FROM corte_sheet_pending").all()).results || [];
@@ -7646,7 +7667,7 @@ async function corteLandingCron(env) {
 }
 async function corteLandingEscribirPendientes(env, ahora) {
   if ((await kvGet(env, 'corte_hoja_auto_on', '1')) !== '1') return;
-  const cand = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, cantidad, ancho_real, alto_real, producto, estado, precio, estado_pago FROM corte_pedidos WHERE origen='landing' AND hoja_fila IS NULL AND IFNULL(hoja_fecha,'')!='' AND estado NOT IN ('prueba','cancelado') ORDER BY IFNULL(express,0) DESC, id LIMIT 60").all()).results || [];
+  const cand = (await env.DB.prepare("SELECT id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, cantidad, ancho_real, alto_real, producto, estado, precio, estado_pago, sena_id FROM corte_pedidos WHERE origen='landing' AND hoja_fila IS NULL AND IFNULL(hoja_fecha,'')!='' AND estado NOT IN ('prueba','cancelado') AND IFNULL(sena_estado,'')!='pendiente' ORDER BY IFNULL(express,0) DESC, id LIMIT 60").all()).results || [];
   // Diseño: cuando Emma ya cargó la medida final. Insumo: al cierre de su tanda (sábado 12 h).
   const listas = cand.filter(p => p.producto === 'TRANS' ? (p.estado !== 'pedido' && +p.ancho_real > 0 && +p.alto_real > 0) : ahora >= corteLandingCierreDe(p.hoja_fecha)).slice(0, 15);
   if (!listas.length) return;
@@ -7686,7 +7707,13 @@ async function corteLandingEscribirPendientes(env, ahora) {
       // hace Gaspar a mano con los precios especiales (la fórmula de COGS no conoce la escala de las fuentes ni los
       // precios nuevos). Si falla, la fila igual queda escrita: se avisa y no se reintenta (no se duplica nada).
       if (!r.vinculada && +p.precio > 0) {
-        try { await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', [{ range: `Venta_Insumos!I${r.fila}:J${r.fila}`, values: [[['pagado', 'interno'].includes(String(p.estado_pago || '')) ? 'pagado' : 'Pendiente de pago', Math.round(+p.precio * 100) / 100]] }]); }
+        try {
+          const pagadoYa = ['pagado', 'interno'].includes(String(p.estado_pago || ''));
+          const escr = [{ range: `Venta_Insumos!I${r.fila}:J${r.fila}`, values: [[pagadoYa ? 'pagado' : 'Pendiente de pago', Math.round(+p.precio * 100) / 100]] }];
+          // Pagado con la seña web (solo insumos): la caja de ese comprobante.
+          if (pagadoYa && p.sena_id) { try { const sx = await env.DB.prepare('SELECT caja FROM corte_senas WHERE id = ?').bind(p.sena_id).first(); if (sx && CORTE_CAJAS_HOJA.includes(sx.caja)) escr.push({ range: `Venta_Insumos!R${r.fila}`, values: [[sx.caja]] }); } catch (_) {} }
+          await corteHojaEscribir(token, CORTE_SHEET_ID, 'RAW', escr);
+        }
         catch (err) { await corteLandingError(env, 'Venta_Insumos fila ' + r.fila + ' (pago/precio): ' + String((err && err.message) || err)); }
       }
       await env.DB.prepare("UPDATE corte_pedidos SET hoja_fila=?, hoja_cliente=?, updated_at=? WHERE id=? AND hoja_fila IS NULL").bind(r.fila, cliente, new Date().toISOString(), p.id).run();
@@ -7715,7 +7742,7 @@ async function corteLandingResumenes(env, ahora) {
     const cierre = corteLandingCierreDe(f);
     if (!cierre || ahora < cierre) continue;
     const envs = (await env.DB.prepare(`SELECT ${CORTE_LANDING_COLS} FROM corte_landing_envios WHERE prueba=0 AND hoja_fecha=? ORDER BY id`).bind(f).all()).results || [];
-    const piezas = (await env.DB.prepare("SELECT producto, estado, diseno_nombre, cantidad FROM corte_pedidos WHERE origen='landing' AND hoja_fecha=? AND estado NOT IN ('prueba','cancelado')").bind(f).all()).results || [];
+    const piezas = (await env.DB.prepare("SELECT producto, estado, diseno_nombre, cantidad FROM corte_pedidos WHERE origen='landing' AND hoja_fecha=? AND estado NOT IN ('prueba','cancelado') AND IFNULL(sena_estado,'')!='pendiente'").bind(f).all()).results || [];
     const dis = piezas.filter(p => p.producto === 'TRANS'), sinMedir = dis.filter(p => p.estado === 'pedido').length;
     const ins = piezas.filter(p => p.producto !== 'TRANS');
     const clientes = new Set(envs.map(e => e.telefono)).size;
@@ -7729,6 +7756,7 @@ async function corteLandingResumenes(env, ahora) {
     if (ins.length) { const tot = {}; ins.forEach(p => { const k = p.diseno_nombre || p.producto; tot[k] = (tot[k] || 0) + (parseInt(p.cantidad, 10) || 1); }); l.push('Insumos: ' + Object.entries(tot).map(([k, n]) => n + ' × ' + k).join(', ')); }
     l.push(sinMedir ? 'Emma: ' + (dis.length - sinMedir) + ' medidos, ' + sinMedir + ' por medir' : 'Emma ya midió todo');
     if (nuevos.length) l.push('Clientes nuevos: ' + nuevos.map(e => e.nombre_hoja + ' (…' + String(e.telefono).slice(-4) + ')').join(', '));
+    try { const sp = (await env.DB.prepare("SELECT nombre, monto, estado FROM corte_senas WHERE estado IN ('pendiente','revisar') AND IFNULL(prueba,0)=0 AND envio_id IN (SELECT id FROM corte_landing_envios WHERE hoja_fecha=?)").bind(f).all()).results || []; if (sp.length) l.push('Esperando la seña (no entran hasta que paguen; si pagan después, van a la semana siguiente): ' + sp.map(x => x.nombre + ' $' + Math.round(+x.monto).toLocaleString('es-AR') + (x.estado === 'revisar' ? ' (a revisar)' : '')).join(', ')); } catch (_) {}
     if (dirNuevas.length) l.push(((await kvGet(env, 'corte_dir_ltv_on', '0')) === '1' ? 'Envío a una dirección nueva (ya la actualicé en LTV para logística): ' : 'Envío a una dirección nueva (pasásela a logística): ') + dirNuevas.map(e => { const d = dirDe(e) || {}; return e.nombre_hoja + ': ' + [d.calle, d.localidad, d.provincia, d.cp ? 'CP ' + d.cp : ''].filter(Boolean).join(', '); }).join(' · '));
     // Se marca aunque el envío falle: es un resumen, no se reintenta cada 5 minutos.
     try { await precotizNotifyGaspar(env, l.join('\n'), { tipo: 'corte_landing_resumen', prioridad: 'P2', clave: 'corte_landing_resumen:' + f }); } catch (_) {}
@@ -7746,7 +7774,7 @@ async function corteLandingAsignarTanda(env, fecha) {
   const td = await corteTandaDeFecha(env, f, false);
   if (!td.tanda) return { error: 'no pude crear/encontrar la tanda' };
   const tid = td.tanda.id, nowIso = new Date().toISOString();
-  const a = await env.DB.prepare("UPDATE corte_pedidos SET tanda_id=?, updated_at=? WHERE origen='landing' AND hoja_fecha=? AND tanda_id IS NULL AND estado NOT IN ('prueba','cancelado') AND IFNULL(express,0)=0").bind(tid, nowIso, f.txt).run();
+  const a = await env.DB.prepare("UPDATE corte_pedidos SET tanda_id=?, updated_at=? WHERE origen='landing' AND hoja_fecha=? AND tanda_id IS NULL AND estado NOT IN ('prueba','cancelado') AND IFNULL(express,0)=0 AND IFNULL(sena_estado,'')!='pendiente'").bind(tid, nowIso, f.txt).run();
   const c = await env.DB.prepare("UPDATE corte_pedidos SET estado='cortado', updated_at=? WHERE origen='landing' AND hoja_fecha=? AND tanda_id=? AND ((producto='TRANS' AND estado='matriz_lista') OR (producto!='TRANS' AND estado='pedido')) AND IFNULL(express,0)=0").bind(nowIso, f.txt, tid).run();
   const envs = (await env.DB.prepare("SELECT telefono, entrega FROM corte_landing_envios WHERE prueba=0 AND hoja_fecha=? ORDER BY id").bind(f.txt).all()).results || [];
   const ent = {}; envs.forEach(e => { if (e.telefono && (e.entrega === 'envio' || e.entrega === 'retira')) ent[e.telefono] = e.entrega; }); // el último envío manda
@@ -7843,7 +7871,7 @@ function corteExpressIds(e) { return String((e && e.piezas_ids) || '').split(','
 // Piezas vivas del envío (sin canceladas ni de prueba).
 async function corteExpressPiezas(env, ids) {
   if (!ids.length) return [];
-  const rows = (await env.DB.prepare(`SELECT id, producto, estado, estado_pago, tanda_id, precio, cantidad, diseno_nombre, hoja_fila FROM corte_pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
+  const rows = (await env.DB.prepare(`SELECT id, producto, estado, estado_pago, tanda_id, precio, cantidad, diseno_nombre, hoja_fila, sena_estado FROM corte_pedidos WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results || [];
   return rows.filter(p => !['cancelado', 'prueba'].includes(String(p.estado || '')));
 }
 function corteExpressItems(piezas) {
@@ -7888,6 +7916,7 @@ async function corteExpressPreparar(env, ahora) {
     const ids = corteExpressIds(e);
     if (!ids.length) { if (ahora - Date.parse(e.created_at) > 10 * 60000) await marcar('no:sin_piezas'); continue; } // el alta guarda piezas_ids al final
     const piezas = await corteExpressPiezas(env, ids);
+    if (piezas.some(p => p.sena_estado === 'pendiente')) continue; // esperando la seña web: se mira de nuevo cuando pague
     if (!piezas.length || piezas.some(p => !corteEsInsumoProd(p.producto) || p.estado !== 'pedido' || p.tanda_id)) { await marcar('no:piezas'); continue; }
     const tel = e.telefono;
     const total = piezas.reduce((s, p) => s + (Number(p.precio) || 0), 0);
@@ -7908,7 +7937,7 @@ async function corteExpressPreparar(env, ahora) {
     let dirLinea = '';
     try { const d = (JSON.parse(e.datos_json || '{}') || {}).dir; if (d && d.calle && (await kvGet(env, 'corte_dir_ltv_on', '0')) !== '1') dirLinea = '\nDirección nueva: ' + [d.calle, d.localidad, d.provincia, d.cp ? 'CP ' + d.cp : ''].filter(Boolean).join(', ') + ' (pasásela a logística).'; } catch (_) {}
     const basesTxt = basesFecha ? 'tiene bases sin hacer todavía: los insumos van con las bases' + (basesFecha !== '=' ? ' (los pasé a la tanda del ' + basesFecha.split('/').slice(0, 2).map(x => x.padStart(2, '0')).join('/') + ')' : '') : 'tiene bases sin hacer todavía';
-    const txt = cab + '\n' + (motivo ? 'No lo hago exprés porque ' + (motivo === 'bases' ? basesTxt : CORTE_EXPRESS_NO_TXT[motivo]) + ': sigue el flujo de siempre. Si lo querés despachar antes, avisame.' : 'Le mando el cobro solo (con el detalle) y cuando pague pasa a Neyen para despachar.') + dirLinea;
+    const txt = cab + '\n' + (motivo ? 'No lo hago exprés porque ' + (motivo === 'bases' ? basesTxt : CORTE_EXPRESS_NO_TXT[motivo]) + ': sigue el flujo de siempre. Si lo querés despachar antes, avisame.' : (piezas.every(p => ['pagado', 'interno'].includes(String(p.estado_pago || ''))) ? 'Ya lo pagó en la web: pasa solo a "Para embalar" de Neyen.' : 'Le mando el cobro solo (con el detalle) y cuando pague pasa a Neyen para despachar.')) + dirLinea;
     if (on === 'dry') {
       await marcar('dry');
       try { await precotizNotifyGaspar(env, '[prueba del exprés, no hice nada] ' + txt, { tipo: 'corte_express', prioridad: 'P3', refPhone: tel }); } catch (_) {}
@@ -8453,7 +8482,7 @@ async function corteCuentaRoute(request, env, ctx, url, path) {
   }
 
   if (request.method === 'GET' && path === '/corte/cuenta/pedidos') {
-    const rows = (await env.DB.prepare("SELECT c.id, c.hoja_fecha, c.tanda_id, t.fecha_corte AS tanda_fecha, c.diseno_nombre, c.foto_key, c.medida_declarada, c.ancho_real, c.alto_real, c.cantidad, c.aclaraciones, c.producto, c.precio, c.estado, c.estado_pago, c.entrega, c.origen, c.created_at, c.cliente_editado_at FROM corte_pedidos c LEFT JOIN corte_tandas t ON t.id = c.tanda_id WHERE c.telefono = ? AND c.estado != 'prueba' AND IFNULL(c.producto, '') != 'NEON' ORDER BY c.id DESC LIMIT 400").bind(ses.telefono).all()).results || [];
+    const rows = (await env.DB.prepare("SELECT c.id, c.hoja_fecha, c.tanda_id, t.fecha_corte AS tanda_fecha, c.diseno_nombre, c.foto_key, c.medida_declarada, c.ancho_real, c.alto_real, c.cantidad, c.aclaraciones, c.producto, c.precio, c.estado, c.estado_pago, c.entrega, c.origen, c.created_at, c.cliente_editado_at, c.sena_estado FROM corte_pedidos c LEFT JOIN corte_tandas t ON t.id = c.tanda_id WHERE c.telefono = ? AND c.estado != 'prueba' AND IFNULL(c.producto, '') != 'NEON' ORDER BY c.id DESC LIMIT 400").bind(ses.telefono).all()).results || [];
     const ids = rows.map(r => r.id), cambios = {};
     for (let i = 0; i < ids.length; i += 90) {
       const lote = ids.slice(i, i + 90);
@@ -8472,7 +8501,7 @@ async function corteCuentaRoute(request, env, ctx, url, path) {
         id: r.id, nombre: r.diseno_nombre || '', foto: !!r.foto_key, insumo, producto: insumo ? r.producto : '',
         ancho: med.ancho || null, alto: med.alto || null, medida: r.medida_declarada || '',
         medida_real: (+r.ancho_real && +r.alto_real) ? corteMedidaTxt(+r.ancho_real, +r.alto_real) : '',
-        cantidad: cant, aclaraciones: r.aclaraciones || '', estado: CORTE_ESTADO_CLIENTE[r.estado] || 'En proceso',
+        cantidad: cant, aclaraciones: r.aclaraciones || '', estado: r.sena_estado === 'pendiente' ? 'Esperando la seña' : (CORTE_ESTADO_CLIENTE[r.estado] || 'En proceso'),
         precio: (+r.precio > 0) ? Math.round(+r.precio) : null, estimado, pago: r.estado_pago || '', entrega: r.entrega || '',
         editable: ed.ok, editable_hasta: ed.ok ? ed.hasta : null, motivo_no: ed.ok ? '' : ed.motivo, cambios: cambios[r.id] || [],
       });
@@ -8480,7 +8509,10 @@ async function corteCuentaRoute(request, env, ctx, url, path) {
     // Más nuevas primero (la clave es 'D/M/AAAA' o 'AAAA-MM-DD').
     const orden = k => { const f = corteFechaValida(k); return f ? f.date.getTime() : (Date.parse(k) || 0); };
     const lista = [...semanas.values()].sort((a, b) => orden(b.semana) - orden(a.semana));
-    return json({ ok: true, nombre: corteLandingNombreLindo(ses.nombre), telefono: corteTelFmt(ses.telefono), precio_m2: m2, semanas: lista });
+    // Señas sin acreditar: la página las muestra arriba con los datos para transferir y el botón para subir el comprobante.
+    let senas = [];
+    try { senas = ((await env.DB.prepare("SELECT s.*, e.hoja_fecha AS envio_fecha FROM corte_senas s LEFT JOIN corte_landing_envios e ON e.id = s.envio_id WHERE s.telefono = ? AND s.estado IN ('pendiente','revisar') AND IFNULL(s.prueba, 0) = 0 ORDER BY s.id DESC LIMIT 10").bind(ses.telefono).all()).results || []).map(s => ({ ...corteSenaPublica(s), semana: s.envio_fecha || '' })); } catch (_) {}
+    return json({ ok: true, nombre: corteLandingNombreLindo(ses.nombre), telefono: corteTelFmt(ses.telefono), precio_m2: m2, semanas: lista, senas });
   }
 
   // Foto de una pieza propia (la página la pide con la sesión y la muestra como blob).
@@ -8542,6 +8574,252 @@ async function corteCuentaRoute(request, env, ctx, url, path) {
   }
   return json({ error: 'not_found' }, 404);
 }
+// ===== SEÑA DE LOS PEDIDOS WEB (Gaspar 24-oct-2026) =====
+// "Los que no sean alumnos les vamos a pedir una seña del 50 % estimado en la web para poder tomarles el pedido y una vez que
+// tengamos el pago recién ahí Emma lo puede diseñar o Neyen despachar en el caso que sean solo insumos." Decisiones:
+//  · Alumno (sin seña) = ya compró en el corte (historial, corte_alumnos o LTV) o está en la comunidad (tabla minisupernova,
+//    ~730). El público queda marcado (corte_alumnos.publico=1) y se le pide seña en cada pedido hasta que Gaspar lo libere.
+//  · Con diseños: el 50 % del estimado (redondeado a $100 para arriba). Solo insumos: el total (el precio es exacto).
+//  · El comprobante lo sube en la página ("Listo" y Mis pedidos); si lo manda por WhatsApp, lo toma corteSenaVigiaWa. El
+//    lector revisa el monto (suma de los comprobantes) y la cuenta (una nuestra); si algo no cierra queda 'revisar' y Gaspar
+//    la confirma desde el CRM (Corte → Señas web).
+//  · Mientras tanto las piezas quedan retenidas (corte_pedidos.sena_estado='pendiente'): Emma no las ve, no se escriben en la
+//    planilla, no entran a la tanda ni al exprés. Pagada → flujo normal; si ya cerró su semana, pasan a la que está abierta.
+//  · El cobro del lunes descuenta la seña: el mensaje dice cuánto pagó y cuánto le queda, y las piezas quedan en 'parcial'
+//    con la seña anotada en corte_pago_parcial, así corteVigiaParcial suma el resto y las marca pagadas.
+// Estados de corte_senas: pendiente · revisar · pagada · aplicada (descontada del cobro) · liberada (sin seña) · cancelada.
+// kv corte_sena_on ('1' prendido).
+const CORTE_SENA_PCT = 0.5;
+const CORTE_SENA_CAJAS = ['Favio', 'Gaspar']; // cuentas que el lector acepta solo: la del corte y la de Gaspar
+let _corteSenaSchemaOk = false;
+async function ensureCorteSenaSchema(env) {
+  if (_corteSenaSchemaOk) return true;
+  const verificar = async () => {
+    try {
+      await env.DB.batch([
+        env.DB.prepare('SELECT id, envio_id, telefono, nombre, tipo, estimado, monto, estado, token, comprobantes, pagado_monto, caja, revisar_motivo, pagada_at, pagada_por, aplicada_at, aplicada_total, nota, prueba, created_at, updated_at FROM corte_senas LIMIT 0'),
+        env.DB.prepare('SELECT sena_id, sena_estado FROM corte_pedidos LIMIT 0'),
+        env.DB.prepare('SELECT publico FROM corte_alumnos LIMIT 0'),
+        env.DB.prepare('SELECT sena_id FROM corte_landing_envios LIMIT 0'),
+      ]);
+      _corteSenaSchemaOk = true;
+    } catch (_) {}
+    return _corteSenaSchemaOk;
+  };
+  if (await verificar()) return true; // la migración 068 ya lo creó
+  for (const sql of [
+    "CREATE TABLE IF NOT EXISTS corte_senas (id INTEGER PRIMARY KEY AUTOINCREMENT, envio_id INTEGER, telefono TEXT NOT NULL, nombre TEXT, tipo TEXT, estimado INTEGER, monto INTEGER NOT NULL, estado TEXT NOT NULL DEFAULT 'pendiente', token TEXT, comprobantes TEXT, pagado_monto INTEGER DEFAULT 0, caja TEXT, revisar_motivo TEXT, pagada_at TEXT, pagada_por TEXT, aplicada_at TEXT, aplicada_total INTEGER, nota TEXT, prueba INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT)",
+    'CREATE INDEX IF NOT EXISTS idx_corte_senas_tel ON corte_senas(telefono, estado)',
+    'CREATE INDEX IF NOT EXISTS idx_corte_senas_token ON corte_senas(token)',
+    'CREATE INDEX IF NOT EXISTS idx_corte_senas_estado ON corte_senas(estado, created_at)',
+    'ALTER TABLE corte_pedidos ADD COLUMN sena_id INTEGER', 'ALTER TABLE corte_pedidos ADD COLUMN sena_estado TEXT',
+    'ALTER TABLE corte_alumnos ADD COLUMN publico INTEGER DEFAULT 0', 'ALTER TABLE corte_landing_envios ADD COLUMN sena_id INTEGER',
+  ]) { try { await env.DB.prepare(sql).run(); } catch (_) {} }
+  return await verificar();
+}
+// ¿Le pedimos seña? No a los alumnos: los que ya compraron en el corte (cli.conocido, de corteLandingCliente) y los de la
+// comunidad. Un público lo sigue siendo en los pedidos siguientes (aunque ya figure en LTV) hasta que Gaspar lo libere.
+async function corteSenaEsPublico(env, tel, cli) {
+  if (!tel || (await kvGet(env, 'corte_sena_on', '1')) !== '1') return false;
+  if (!(await ensureCorteSenaSchema(env))) return false;
+  try { const a = await env.DB.prepare('SELECT MAX(IFNULL(publico, 0)) AS p FROM corte_alumnos WHERE telefono = ?').bind(tel).first(); if (a && +a.p === 1) return true; } catch (_) {}
+  if (cli && cli.conocido) return false;
+  try { if (await env.DB.prepare('SELECT 1 AS x FROM minisupernova WHERE phone = ? LIMIT 1').bind(tel).first()) return false; } catch (_) {}
+  return true;
+}
+function corteSenaMonto(estimado, soloInsumos) {
+  const e = Math.max(0, Math.round(Number(estimado) || 0));
+  return soloInsumos ? e : Math.ceil(e * CORTE_SENA_PCT / 100) * 100;
+}
+function corteSenaComps(s) { try { const a = JSON.parse((s && s.comprobantes) || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } }
+// Lo que cuenta para la seña: comprobantes leídos, a una cuenta nuestra, no repetidos y con lectura confiable.
+function corteSenaValidos(comps) { return comps.filter(c => c.leido && CORTE_SENA_CAJAS.includes(c.caja) && !c.repetido && !(c.confianza != null && +c.confianza < 0.6) && +c.monto > 0); }
+function corteSenaSuma(comps) { return Math.round(corteSenaValidos(comps).reduce((s, c) => s + (+c.monto || 0), 0)); }
+// Lo que ve el cliente (pantalla de "Listo" y Mis pedidos).
+function corteSenaPublica(s) {
+  const pagada = ['pagada', 'aplicada'].includes(s.estado);
+  const pagado = pagada ? Math.max(+s.pagado_monto || 0, +s.monto || 0) : corteSenaSuma(corteSenaComps(s));
+  return {
+    id: s.id, token: s.token, tipo: s.tipo, pct: s.tipo === 'insumos' ? 100 : Math.round(CORTE_SENA_PCT * 100), monto: +s.monto || 0, estimado: +s.estimado || 0,
+    pagado, falta: pagada ? 0 : Math.max(0, (+s.monto || 0) - pagado), comprobantes: corteSenaComps(s).length,
+    estado: pagada ? 'pagada' : s.estado, alias: CORTE_ALIAS, cvu: CORTE_CVU, titular: CORTE_TITULAR,
+  };
+}
+async function corteSenaPorToken(env, token) {
+  const t = String(token || '').replace(/[^a-f0-9]/gi, '');
+  if (t.length < 24) return null;
+  try { return await env.DB.prepare('SELECT * FROM corte_senas WHERE token = ?').bind(t).first(); } catch (_) { return null; }
+}
+async function corteSenaHashKey(env, key) {
+  try {
+    const o = await env.MEDIA.get(key); if (!o) return '';
+    const d = await crypto.subtle.digest('SHA-256', await o.arrayBuffer());
+    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+  } catch (_) { return ''; }
+}
+// Un comprobante nuevo para la seña `s0` (subido en la página o mandado por WhatsApp). Lo lee, lo suma y decide: pagada
+// (los comprobantes válidos cubren el monto), sigue pendiente (pagó una parte) o 'revisar' (no se pudo leer, no fue a una
+// cuenta nuestra, lectura dudosa o comprobante repetido: la confirma Gaspar). opts.proof: ya leído (vigía de WhatsApp).
+// → { status, body: { ok, resultado: 'pagada' | 'parcial' | 'revisar', sena } | { error, motivo } }
+async function corteSenaComprobante(env, s0, { key, via = 'web', wamid = '', mime = '', proof: proofIn } = {}) {
+  const proof = proofIn !== undefined ? proofIn : await analyzePaymentProof(env, key, mime, { phone: s0.telefono, by: 'sena_corte' });
+  if (proof && !proof.es_comprobante) return { status: 422, body: { error: 'no_comprobante', motivo: 'Eso no parece un comprobante de transferencia. Subí la captura donde se vea el monto y a quién se la mandaste.' } };
+  const hash = await corteSenaHashKey(env, key);
+  let repetido = false;
+  if (hash) { try { repetido = !!(await env.DB.prepare("SELECT 1 AS x FROM corte_senas WHERE id != ? AND instr(IFNULL(comprobantes, ''), ?) > 0 LIMIT 1").bind(s0.id, '"' + hash + '"').first()); } catch (_) {} }
+  const nowIso = new Date().toISOString();
+  const comp = {
+    key, hash, monto: proof ? Math.round(+proof.monto || 0) : 0, caja: proof ? cajaDeComprobante(proof) : '',
+    titular: proof ? String(proof.titular_destino || '').slice(0, 80) : '', banco: proof ? String(proof.banco || '').slice(0, 40) : '', fecha: proof ? String(proof.fecha || '').slice(0, 30) : '',
+    confianza: proof && proof.confianza != null ? +proof.confianza : null, via, wamid, at: nowIso, leido: !!proof, repetido,
+  };
+  // Escritura optimista (dos subidas a la vez): si otro la tocó en el medio, se relee y se reintenta.
+  for (let intento = 0; intento < 3; intento++) {
+    const s = intento ? await env.DB.prepare('SELECT * FROM corte_senas WHERE id = ?').bind(s0.id).first() : s0;
+    if (!s) return { status: 404, body: { error: 'no', motivo: 'No encontramos ese pedido.' } };
+    if (['pagada', 'aplicada'].includes(s.estado)) return { status: 200, body: { ok: true, resultado: 'pagada', sena: corteSenaPublica(s) } };
+    if (['cancelada', 'liberada'].includes(s.estado)) return { status: 409, body: { error: 'cerrada', motivo: s.estado === 'liberada' ? 'Ese pedido ya no necesita seña.' : 'Ese pedido ya no está activo. Escribinos por WhatsApp.' } };
+    const comps = corteSenaComps(s);
+    if (comps.some(c => c.key === key || (hash && c.hash === hash))) return { status: 200, body: { ok: true, resultado: s.estado === 'revisar' ? 'revisar' : 'parcial', sena: corteSenaPublica(s), repetido: true } };
+    comps.push(comp);
+    const suma = corteSenaSuma(comps), monto = +s.monto || 0;
+    let motivo = '';
+    if (!comp.leido) motivo = 'no pude leer el comprobante';
+    else if (comp.repetido) motivo = 'ese comprobante ya se usó en otra seña';
+    else if (!CORTE_SENA_CAJAS.includes(comp.caja)) motivo = 'no veo que haya ido a una cuenta nuestra (destino: ' + (comp.titular || 'no se ve') + (comp.banco ? ', ' + comp.banco : '') + ')';
+    else if (comp.confianza != null && comp.confianza < 0.6) motivo = 'la lectura salió dudosa';
+    const cubre = !motivo && suma >= monto * 0.99;
+    const estado = motivo ? 'revisar' : s.estado; // 'pagada' la pone corteSenaPagada (transición única)
+    const u = await env.DB.prepare("UPDATE corte_senas SET comprobantes = ?, pagado_monto = ?, estado = ?, revisar_motivo = CASE WHEN ? != '' THEN ? ELSE revisar_motivo END, updated_at = ? WHERE id = ? AND updated_at = ?")
+      .bind(JSON.stringify(comps), suma, estado, motivo, motivo, nowIso, s.id, s.updated_at).run();
+    if (!((u && u.meta && u.meta.changes) || 0)) continue;
+    const s2 = { ...s, comprobantes: JSON.stringify(comps), pagado_monto: suma, estado, updated_at: nowIso };
+    if (cubre) {
+      await corteSenaPagada(env, s2, { por: via === 'whatsapp' ? 'lector (WhatsApp)' : 'lector (página)', monto: suma, caja: comp.caja });
+      const s3 = await env.DB.prepare('SELECT * FROM corte_senas WHERE id = ?').bind(s.id).first();
+      return { status: 200, body: { ok: true, resultado: 'pagada', sena: corteSenaPublica(s3 || s2) } };
+    }
+    if (motivo) {
+      const t = 'Corte · seña para revisar' + (+s.prueba ? ' [prueba]' : '') + ': ' + (s.nombre || '') + ' (…' + String(s.telefono).slice(-4) + ') subió un comprobante' + (comp.monto ? ' por $' + comp.monto.toLocaleString('es-AR') : '') + ' para la seña de $' + monto.toLocaleString('es-AR') + ' (' + (via === 'whatsapp' ? 'por WhatsApp' : 'en la página') + '): ' + motivo + '.\nSi está bien, confirmala en Corte → Señas web y el pedido sigue.';
+      try { await precotizNotifyGaspar(env, t, { tipo: 'corte_sena', prioridad: 'P2', refPhone: s.telefono, plata: true }); } catch (_) {}
+      return { status: 200, body: { ok: true, resultado: 'revisar', sena: corteSenaPublica(s2) } };
+    }
+    return { status: 200, body: { ok: true, resultado: 'parcial', sena: corteSenaPublica(s2) } };
+  }
+  return { status: 409, body: { error: 'ocupado', motivo: 'Probá de nuevo en un momento.' } };
+}
+// Saca las piezas de la seña de la retención (nuevo = 'pagada' | 'liberada'). Las que todavía no se escribieron ni tienen
+// tanda y cuya semana ya cerró pasan a la semana abierta ahora (el envío también, así entra en el resumen del sábado).
+async function corteSenaLiberarPiezas(env, s, nuevo) {
+  const nowIso = new Date().toISOString(), pl = corteLandingPlazo(), ahora = Date.now();
+  let movidas = 0;
+  try {
+    const ps = (await env.DB.prepare("SELECT id, hoja_fecha FROM corte_pedidos WHERE sena_id = ? AND sena_estado = 'pendiente' AND hoja_fila IS NULL AND tanda_id IS NULL AND estado NOT IN ('prueba','cancelado')").bind(s.id).all()).results || [];
+    const viejas = ps.filter(p => { const c = corteLandingCierreDe(p.hoja_fecha); return c && ahora >= c && corteFechaNorm(p.hoja_fecha) !== corteFechaNorm(pl.lunes); });
+    if (viejas.length) {
+      const u = await env.DB.prepare(`UPDATE corte_pedidos SET hoja_fecha = ?, updated_at = ? WHERE id IN (${viejas.map(() => '?').join(',')}) AND hoja_fila IS NULL AND tanda_id IS NULL`).bind(pl.lunes, nowIso, ...viejas.map(p => p.id)).run();
+      movidas = (u && u.meta && u.meta.changes) || 0;
+      if (s.envio_id) await env.DB.prepare('UPDATE corte_landing_envios SET hoja_fecha = ?, plazo_estado = ?, cierre_at = NULL WHERE id = ?').bind(pl.lunes, pl.estado, s.envio_id).run();
+    }
+  } catch (_) {}
+  try { await env.DB.prepare("UPDATE corte_pedidos SET sena_estado = ?, updated_at = ? WHERE sena_id = ? AND sena_estado = 'pendiente'").bind(nuevo, nowIso, s.id).run(); } catch (_) {}
+  return { movidas, lunes: pl.lunesCorto };
+}
+// La seña quedó cubierta (lector o Gaspar). Transición condicional: una sola vez.
+async function corteSenaPagada(env, s, { por = '', monto = 0, caja = '' } = {}) {
+  const nowIso = new Date().toISOString();
+  const pagado = Math.round(monto || +s.pagado_monto || +s.monto || 0);
+  let ch = 0;
+  try { const u = await env.DB.prepare("UPDATE corte_senas SET estado = 'pagada', pagada_at = ?, pagada_por = ?, pagado_monto = ?, caja = ?, updated_at = ? WHERE id = ? AND estado IN ('pendiente', 'revisar')").bind(nowIso, String(por).slice(0, 60), pagado, caja || s.caja || '', nowIso, s.id).run(); ch = (u && u.meta && u.meta.changes) || 0; } catch (_) {}
+  if (!ch) return false;
+  // Solo insumos: era el total → las piezas quedan pagadas ANTES de soltarlas (si no, el exprés podría mandarles el cobro)
+  // y la seña, aplicada. El exprés (o la tanda) las pasa a Neyen.
+  if (s.tipo === 'insumos') {
+    try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago = 'pagado', pago_metodo = 'seña web', pago_nota = ?, updated_at = ? WHERE sena_id = ? AND estado_pago = 'pendiente'").bind('Pagado en la web (seña #' + s.id + ')', nowIso, s.id).run(); } catch (_) {}
+    try { await env.DB.prepare("UPDATE corte_senas SET estado = 'aplicada', aplicada_at = ?, aplicada_total = (SELECT ROUND(COALESCE(SUM(precio), 0)) FROM corte_pedidos WHERE sena_id = ?), updated_at = ? WHERE id = ? AND estado = 'pagada'").bind(nowIso, s.id, nowIso, s.id).run(); } catch (_) {}
+  }
+  const lib = await corteSenaLiberarPiezas(env, s, 'pagada');
+  const pesos = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR');
+  const t = 'Corte · seña pagada' + (+s.prueba ? ' [prueba]' : '') + ': ' + (s.nombre || '') + ' (…' + String(s.telefono).slice(-4) + ') ' + pesos(pagado) + (caja ? ' (caja ' + caja + ')' : '') + ' · ' + por + '.\n'
+    + (s.tipo === 'insumos' ? 'Era el total de los insumos: queda pagado y pasa a Neyen para despachar.' : 'Ya entra a la cola de Emma' + (lib.movidas ? ' (pagó después del cierre: pasa a la tanda del lunes ' + lib.lunes + ')' : '') + '. El cobro del lunes le descuenta la seña.');
+  try { await precotizNotifyGaspar(env, t, { tipo: 'corte_sena', prioridad: 'P3', refPhone: s.telefono }); } catch (_) {}
+  return true;
+}
+// Señas pagadas (con diseños) de las piezas de un cobro: lo que se descuenta. → { monto, ids, caja }
+async function corteSenaCredito(env, rows) {
+  const ids = [...new Set((rows || []).map(r => parseInt(r.sena_id, 10)).filter(Boolean))];
+  if (!ids.length) return { monto: 0, ids: [], caja: '' };
+  let ss = [];
+  try { ss = (await env.DB.prepare(`SELECT id, pagado_monto, monto, caja FROM corte_senas WHERE id IN (${ids.map(() => '?').join(',')}) AND estado = 'pagada' AND IFNULL(prueba, 0) = 0`).bind(...ids).all()).results || []; } catch (_) {}
+  return { monto: Math.round(ss.reduce((a, s) => a + (+s.pagado_monto || +s.monto || 0), 0)), ids: ss.map(s => s.id), caja: (ss.find(s => s.caja) || {}).caja || '' };
+}
+async function corteSenaAplicar(env, ids, total, nowIso) {
+  if (!ids || !ids.length) return;
+  try { await env.DB.prepare(`UPDATE corte_senas SET estado = 'aplicada', aplicada_at = ?, aplicada_total = ?, updated_at = ? WHERE id IN (${ids.map(() => '?').join(',')}) AND estado = 'pagada'`).bind(nowIso, Math.round(total || 0), nowIso, ...ids).run(); } catch (_) {}
+}
+// Seña mandada por WhatsApp en vez de subirla a la página: el comprobante que llega después del pedido se lee y se suma
+// igual. No si tiene un cobro en curso (ese comprobante es del cobro y lo ve el vigía de siempre). Tope de lecturas por corrida.
+async function corteSenaVigiaWa(env) {
+  if ((await kvGet(env, 'corte_sena_on', '1')) !== '1' || !(await ensureCorteSenaSchema(env))) return;
+  const ss = (await env.DB.prepare("SELECT * FROM corte_senas WHERE estado = 'pendiente' AND IFNULL(prueba, 0) = 0 AND created_at >= ? ORDER BY id LIMIT 30").bind(isoHace(14 * 86400000)).all()).results || [];
+  if (!ss.length) return;
+  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS corte_pago_check (wamid TEXT PRIMARY KEY, phone TEXT, monto REAL, es_comprobante INTEGER, checked_at TEXT)').run(); } catch (_) {}
+  let ocrs = 0;
+  for (const s of ss) {
+    if (ocrs >= 5) break;
+    try {
+      if (await env.DB.prepare("SELECT 1 AS x FROM corte_pedidos WHERE telefono = ? AND estado_pago IN ('cobrando','parcial') LIMIT 1").bind(s.telefono).first()) continue;
+      const img = await env.DB.prepare("SELECT wamid, media_url AS r2Key, msg_type AS msgType FROM wa_messages WHERE phone = ? AND direction = 'inbound' AND msg_type IN ('image','document') AND media_url IS NOT NULL AND media_url != '' AND ts > ? AND wamid NOT IN (SELECT wamid FROM corte_pago_check) ORDER BY ts DESC LIMIT 1").bind(s.telefono, s.created_at).first();
+      if (!img || !img.r2Key) continue;
+      ocrs++;
+      const proof = await analyzePaymentProof(env, img.r2Key, img.msgType === 'document' ? 'application/pdf' : '', { phone: s.telefono, by: 'sena_corte' });
+      if (!proof) continue; // fallo transitorio del lector: se reintenta
+      const ins = await env.DB.prepare('INSERT OR IGNORE INTO corte_pago_check (wamid, phone, monto, es_comprobante, checked_at) VALUES (?, ?, ?, ?, ?)').bind(img.wamid, s.telefono, +proof.monto || 0, proof.es_comprobante ? 1 : 0, new Date().toISOString()).run();
+      if (!ins || !ins.meta || !ins.meta.changes || !proof.es_comprobante) continue;
+      const b = (await corteSenaComprobante(env, s, { key: img.r2Key, via: 'whatsapp', wamid: img.wamid, proof })).body || {};
+      let txt = '';
+      if (b.resultado === 'pagada') txt = s.tipo === 'insumos' ? 'recibido, gracias! ya preparamos tu pedido para despachar' : 'recibido, gracias! con la seña ya tomamos tu pedido. El lunes te pasamos el total final con la seña descontada';
+      else if (b.resultado === 'parcial' && b.sena) txt = 'recibido, gracias! te faltan $' + Math.round(b.sena.falta).toLocaleString('es-AR') + ' para completar la seña';
+      else if (b.resultado === 'revisar') txt = 'recibido, gracias! lo revisamos y te confirmamos por acá';
+      if (txt) { try { await corteSend(env, s.telefono, txt); } catch (_) {} }
+    } catch (_) {}
+  }
+}
+// /corte/landing/sena (público): GET ?token= → estado · POST {token, key} → suma un comprobante (subido antes con
+// /corte/landing/foto). Sin cuenta: el token (lo devuelven el alta del pedido y Mis pedidos) prueba que el pedido es suyo.
+async function corteSenaRoute(request, env, url) {
+  if (!(await ensureCorteSenaSchema(env))) return json({ error: 'db', motivo: 'No pudimos revisar la seña. Probá de nuevo en un momento.' }, 500);
+  if (request.method === 'GET') {
+    const rl = await corteLandingLimite(env, request, 'senav', 60);
+    if (!rl.ok) return json({ error: 'limite', motivo: 'Demasiados intentos. Probá de nuevo en un rato.' }, 429);
+    const s = await corteSenaPorToken(env, url.searchParams.get('token'));
+    return s ? json({ ok: true, sena: corteSenaPublica(s) }) : json({ error: 'no', motivo: 'No encontramos ese pedido.' }, 404);
+  }
+  if (request.method !== 'POST') return json({ error: 'not_found' }, 404);
+  const rl = await corteLandingLimite(env, request, 'sena', 20);
+  if (!rl.ok) return json({ error: 'limite', motivo: 'Demasiados intentos. Si necesitás ayuda, escribinos por WhatsApp.' }, 429);
+  let body; try { body = await request.json(); } catch { body = {}; }
+  const s = await corteSenaPorToken(env, body.token);
+  if (!s) return json({ error: 'no', motivo: 'No encontramos ese pedido.' }, 404);
+  const key = String(body.key || '');
+  if (!key.startsWith(CORTE_LANDING_PREFIX) || key.includes('..') || key.length > 120) return json({ error: 'archivo', motivo: 'Volvé a elegir el comprobante.' }, 400);
+  let h = null; try { h = await env.MEDIA.head(key); } catch (_) {}
+  if (!h) return json({ error: 'archivo', motivo: 'El comprobante no se subió bien. Volvé a elegirlo.' }, 400);
+  if (corteSenaComps(s).length >= 6 && !['pagada', 'aplicada'].includes(s.estado)) return json({ error: 'limite', motivo: 'Ya subiste varios comprobantes. Escribinos por WhatsApp y lo vemos.' }, 429);
+  const r = await corteSenaComprobante(env, s, { key, via: 'web', mime: (h.httpMetadata && h.httpMetadata.contentType) || '' });
+  return json(r.body, r.status || 200);
+}
+// Panel "Señas web" del CRM: las que esperan pago o revisión + las resueltas de los últimos 3 días.
+async function corteSenasLista(env, { prueba = false } = {}) {
+  if (!(await ensureCorteSenaSchema(env))) return [];
+  const rs = (await env.DB.prepare("SELECT s.*, e.hoja_fecha AS envio_fecha, (SELECT COUNT(*) FROM corte_pedidos c WHERE c.sena_id = s.id AND c.estado != 'cancelado') AS piezas FROM corte_senas s LEFT JOIN corte_landing_envios e ON e.id = s.envio_id WHERE (s.estado IN ('pendiente','revisar') OR s.updated_at >= ?)" + (prueba ? '' : ' AND IFNULL(s.prueba, 0) = 0') + " ORDER BY CASE s.estado WHEN 'revisar' THEN 0 WHEN 'pendiente' THEN 1 ELSE 2 END, s.id DESC LIMIT 60").bind(isoHace(3 * 86400000)).all()).results || [];
+  return rs.map(s => ({
+    id: s.id, telefono: s.telefono, nombre: s.nombre || '', tipo: s.tipo, estimado: +s.estimado || 0, monto: +s.monto || 0, pagado: +s.pagado_monto || 0,
+    estado: s.estado, motivo: s.revisar_motivo || '', caja: s.caja || '', fecha: s.envio_fecha || '', piezas: +s.piezas || 0, prueba: +s.prueba || 0,
+    comprobantes: corteSenaComps(s).map(c => ({ key: c.key, monto: c.monto, caja: c.caja, titular: c.titular, via: c.via, at: c.at, leido: c.leido, repetido: c.repetido })),
+    created_at: s.created_at, pagada_at: s.pagada_at || '', pagada_por: s.pagada_por || '', aplicada_at: s.aplicada_at || '',
+  }));
+}
 async function corteLandingRoute(request, env, ctx, url, path) {
   if (!env.DB) return json({ error: 'db' }, 500);
   const on = (await kvGet(env, 'corte_landing_on', '1')) === '1';
@@ -8554,6 +8832,7 @@ async function corteLandingRoute(request, env, ctx, url, path) {
       video: await kvGet(env, 'corte_landing_video', ''), whatsapp: '5491133708544',
     });
   }
+  if (path === '/corte/landing/sena') return await corteSenaRoute(request, env, url); // la seña se puede pagar aunque la página esté cerrada
   if (request.method !== 'POST') return json({ error: 'not_found' }, 404);
   if (!on) return json({ error: 'cerrado', motivo: 'Por ahora los pedidos se toman por WhatsApp.' }, 503);
   if (path === '/corte/landing/cliente') {
@@ -8566,7 +8845,8 @@ async function corteLandingRoute(request, env, ctx, url, path) {
     const c = await corteLandingCliente(env, tel);
     // Con un teléfono registrado se devuelve el nombre para autocompletar (lo mismo que ve cualquiera que tenga ese número en
     // WhatsApp). Al revés (nombre → teléfono) NO: la página es pública y expondría los números de los clientes.
-    return json({ ok: true, conocido: c.conocido, tiene_direccion: c.tieneDireccion, nombre: c.conocido ? corteLandingNombreLindo(c.nombreHoja || c.nombre) : '', telefono: corteTelFmt(tel) });
+    let sena = false; try { sena = await corteSenaEsPublico(env, tel, c); } catch (_) {} // la página avisa antes de mandar que va a pedir seña
+    return json({ ok: true, conocido: c.conocido, tiene_direccion: c.tieneDireccion, nombre: c.conocido ? corteLandingNombreLindo(c.nombreHoja || c.nombre) : '', telefono: corteTelFmt(tel), sena });
   }
   if (path === '/corte/landing/foto') {
     const rl = await corteLandingLimite(env, request, 'foto', 80);
@@ -8659,6 +8939,9 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
   const pl = corteLandingPlazo();
   const nombreHoja = cli.conocido ? (cli.nombreHoja || nombre) : nombre;
   const estimado = Math.round(disenos.reduce((s, d) => s + (d.ancho / 100) * (d.alto / 100) * pr.m2 * d.cantidad, 0) + insumos.reduce((s, x) => s + x.precio * x.cantidad, 0));
+  // Seña (los que no son alumnos): el 50 % del estimado con diseños; el total si es solo de insumos.
+  const publico = await corteSenaEsPublico(env, tel, cli);
+  const senaMonto = publico ? corteSenaMonto(estimado, !disenos.length) : 0;
   // Doble envío (doble toque, red lenta): mismo pedido del mismo teléfono en los últimos 30 min → se devuelve el anterior.
   const huella = (await sha256hex(JSON.stringify([tel, entrega, disenos.map(d => [d.foto, d.nombre, d.ancho, d.alto, d.cantidad]), insumos.map(x => [x.codigo, x.cantidad, x.color])]))).slice(0, 32);
   try {
@@ -8672,7 +8955,9 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
           expressR = es ? !(es.startsWith('no:') || es === 'dry') : ((await kvGet(env, 'corte_express_on', '0')) === '1' && !!(await kvGet(env, 'corte_express_desde', '')) && !(await corteExpressMotivoNo(env, tel, nombreHoja)));
         } catch (_) {}
       }
-      return [{ ok: true, id: prev.id, repetido: true, lunes: pl.lunesCorto, estado: pl.estado, disenos: prev.n_disenos, insumos: insumos.length, estimado, telefono: corteTelFmt(tel), express: expressR }, 200];
+      let senaR = null;
+      try { const sx = await env.DB.prepare('SELECT * FROM corte_senas WHERE envio_id = ?').bind(prev.id).first(); if (sx) senaR = corteSenaPublica(sx); } catch (_) {}
+      return [{ ok: true, id: prev.id, repetido: true, lunes: pl.lunesCorto, estado: pl.estado, disenos: prev.n_disenos, insumos: insumos.length, estimado, telefono: corteTelFmt(tel), express: expressR && !senaR, sena: senaR }, 200];
     }
   } catch (_) {}
   const nowIso = new Date().toISOString();
@@ -8683,20 +8968,34 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
       .bind(nowIso, tel, nombre, nombreHoja, cli.conocido ? 0 : 1, entrega, datosJson, JSON.stringify(insumos), disenos.length, estimado, pl.lunes, pl.estado, huella, ipHash, prueba ? 1 : 0).first();
     envioId = r && r.id;
   } catch (e) { return [{ error: 'db', motivo: 'No pudimos guardar el pedido. Probá de nuevo en un momento.' }, 500]; }
+  // La seña va ANTES que las piezas: las piezas nacen retenidas (si no, el cron podría tomarlas en el medio).
+  let sena = null;
+  if (senaMonto > 0) {
+    const token = (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, '').slice(0, 40);
+    try {
+      sena = await env.DB.prepare("INSERT INTO corte_senas (envio_id, telefono, nombre, tipo, estimado, monto, estado, token, comprobantes, pagado_monto, prueba, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'pendiente', ?, '[]', 0, ?, ?, ?) RETURNING *")
+        .bind(envioId, tel, nombreHoja, disenos.length ? 'disenos' : 'insumos', estimado, senaMonto, token, prueba ? 1 : 0, nowIso, nowIso).first();
+      if (sena) await env.DB.prepare('UPDATE corte_landing_envios SET sena_id = ? WHERE id = ?').bind(sena.id, envioId).run();
+    } catch (_) { sena = null; }
+    if (!sena) {
+      try { await env.DB.prepare("DELETE FROM corte_landing_envios WHERE id=?").bind(envioId).run(); } catch (_) {}
+      return [{ error: 'db', motivo: 'No pudimos guardar el pedido. Probá de nuevo en un momento.' }, 500];
+    }
+  }
   // Ficha del cliente nuevo (las planillas, cuando se escribe su primera fila).
   let alumnoId = cli.alumnoId;
   if (!cli.conocido && !prueba) {
     try {
       const datos = corteLandingDatosTxt(nombre, nuevo, entrega);
-      const a = await env.DB.prepare("INSERT INTO corte_alumnos (nombre, telefono, datos_envio, direccion, provincia, cp, dni, origen, activo, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'landing', 1, ?, ?) RETURNING id")
-        .bind(nombre, tel, datos, nuevo.calle ? nuevo.calle + (nuevo.localidad ? ', ' + nuevo.localidad : '') : '', nuevo.provincia || '', nuevo.cp || '', nuevo.dni || '', nowIso, nowIso).first();
+      const a = await env.DB.prepare("INSERT INTO corte_alumnos (nombre, telefono, datos_envio, direccion, provincia, cp, dni, origen, activo, created_at, updated_at, publico) VALUES (?, ?, ?, ?, ?, ?, ?, 'landing', 1, ?, ?, ?) RETURNING id")
+        .bind(nombre, tel, datos, nuevo.calle ? nuevo.calle + (nuevo.localidad ? ', ' + nuevo.localidad : '') : '', nuevo.provincia || '', nuevo.cp || '', nuevo.dni || '', nowIso, nowIso, publico ? 1 : 0).first();
       alumnoId = a && a.id;
     } catch (_) {}
     if (corteTokens(nombre).length >= 2) { try { await env.DB.prepare("INSERT INTO corte_tel_override (nombre_norm, nombre, telefono, created_by, created_at) VALUES (?, ?, ?, 'landing', ?) ON CONFLICT(nombre_norm) DO NOTHING").bind(corteNormNombre(nombre), nombre, tel, nowIso).run(); } catch (_) {} }
   }
   // Piezas: diseños 'pedido' (Emma), insumos 'pedido' con precio (Emma no los ve). Sin tanda hasta la carga.
   const estado = prueba ? 'prueba' : 'pedido';
-  const ins = (vals) => env.DB.prepare("INSERT INTO corte_pedidos (alumno_id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, precio, estado, estado_pago, entrega, entrega_manual, origen, tanda_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, 1, 'landing', NULL, ?, ?) RETURNING id").bind(...vals);
+  const ins = (vals) => env.DB.prepare("INSERT INTO corte_pedidos (alumno_id, telefono, cliente_nombre, hoja_cliente, hoja_fecha, diseno_nombre, aclaraciones, foto_key, medida_declarada, cantidad, producto, precio, estado, estado_pago, entrega, entrega_manual, origen, tanda_id, created_at, updated_at, sena_id, sena_estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, 1, 'landing', NULL, ?, ?, ?, ?) RETURNING id").bind(...vals, sena ? sena.id : null, sena ? 'pendiente' : null);
   const stmts = [
     ...disenos.map(d => ins([alumnoId || null, tel, nombreHoja, nombreHoja, pl.lunes, d.nombre, d.aclaraciones, d.foto, `ancho ${String(d.ancho).replace('.', ',')} × alto ${String(d.alto).replace('.', ',')} cm`, d.cantidad, 'TRANS', null, estado, entrega, nowIso, nowIso])),
     ...insumos.flatMap(x => { const partes = []; for (let q = x.cantidad; q > 0; q -= 10) partes.push(Math.min(10, q)); return partes.map(c => ins([alumnoId || null, tel, nombreHoja, nombreHoja, pl.lunes, x.nombre, x.color, null, '', c, x.codigo, x.precio * c, estado, entrega, nowIso, nowIso])); }),
@@ -8705,6 +9004,7 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
   try { ids = (await env.DB.batch(stmts)).map(r => r.results && r.results[0] && r.results[0].id).filter(Boolean); }
   catch (e) {
     try { await env.DB.prepare("DELETE FROM corte_landing_envios WHERE id=?").bind(envioId).run(); } catch (_) {}
+    if (sena) { try { await env.DB.prepare('DELETE FROM corte_senas WHERE id = ?').bind(sena.id).run(); } catch (_) {} }
     return [{ error: 'db', motivo: 'No pudimos guardar el pedido. Probá de nuevo en un momento.' }, 500];
   }
   try { await env.DB.prepare("UPDATE corte_landing_envios SET piezas_ids=? WHERE id=?").bind(ids.join(','), envioId).run(); } catch (_) {}
@@ -8717,7 +9017,7 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
       const m = l && l.ok ? l.rows.filter(r => r.tel && r.tel !== tel && corteMismaPersona(r.nombre, nombre)).slice(0, 2) : [];
       if (m.length) otroNumero = '\nOjo: el nombre coincide con ' + m.map(r => r.nombre + ' (…' + r.tel.slice(-4) + ')').join(' y ') + ', registrado con otro número. Si cambió de número, avisame y lo unifico.';
     } catch (_) {}
-    const t = 'Corte · cliente nuevo por la web: ' + nombre + ' (…' + tel.slice(-4) + ')' + otroNumero + '\n' + (disenos.length ? disenos.length + ' diseño' + (disenos.length === 1 ? '' : 's') : '') + (insumos.length ? (disenos.length ? ' + ' : '') + insumos.length + ' insumo' + (insumos.length === 1 ? '' : 's') : '') + ' · ' + (entrega === 'envio' ? 'envío a ' + [nuevo.localidad, nuevo.provincia].filter(Boolean).join(', ') : 'retira') + ' · tanda del lunes ' + pl.lunesCorto + '\nLo sumo solo a LTV (la pestaña Clientes de Emma lo trae sola) cuando Emma mida su primer diseño.';
+    const t = 'Corte · cliente nuevo por la web: ' + nombre + ' (…' + tel.slice(-4) + ')' + otroNumero + '\n' + (disenos.length ? disenos.length + ' diseño' + (disenos.length === 1 ? '' : 's') : '') + (insumos.length ? (disenos.length ? ' + ' : '') + insumos.length + ' insumo' + (insumos.length === 1 ? '' : 's') : '') + ' · ' + (entrega === 'envio' ? 'envío a ' + [nuevo.localidad, nuevo.provincia].filter(Boolean).join(', ') : 'retira') + ' · tanda del lunes ' + pl.lunesCorto + '\nLo sumo solo a LTV (la pestaña Clientes de Emma lo trae sola) cuando Emma mida su primer diseño.' + (sena ? '\nLe pedí seña: $' + senaMonto.toLocaleString('es-AR') + ' (' + (disenos.length ? '50 % del estimado' : 'el total de los insumos') + '). Hasta que la pague no pasa a Emma ni a Neyen.' : '');
     try { await precotizNotifyGaspar(env, t, { tipo: 'corte_landing_nuevo', prioridad: 'P2', clave: 'corte_landing_nuevo:' + envioId, refPhone: tel }); } catch (_) {}
   }
   // Solo insumos y sin bases pendientes → exprés (sale apenas paga): la página no dice "el lunes te escribimos".
@@ -8725,7 +9025,7 @@ async function corteLandingPedido(env, body, { prueba = false, ipHash = '' } = {
   if (!prueba && !disenos.length) {
     try { if ((await kvGet(env, 'corte_express_on', '0')) === '1' && (await kvGet(env, 'corte_express_desde', ''))) express = !(await corteExpressMotivoNo(env, tel, nombreHoja)); } catch (_) {}
   }
-  return [{ ok: true, id: envioId, lunes: pl.lunesCorto, estado: pl.estado, disenos: disenos.length, insumos: insumos.length, estimado, telefono: corteTelFmt(tel), express }, 200];
+  return [{ ok: true, id: envioId, lunes: pl.lunesCorto, estado: pl.estado, disenos: disenos.length, insumos: insumos.length, estimado, telefono: corteTelFmt(tel), express: express && !sena, sena: sena ? corteSenaPublica(sena) : null }, 200];
 }
 function corteEntregaCambiosTxt(cambios) {
   return 'Corte: actualicé la entrega desde la planilla de cortes:\n' + cambios.map(c => `· ${c.cliente} (${c.tanda}): ${c.de} → ${c.a}${c.ya_embalado ? ' ⚠ YA ESTABA EMBALADO, avisale a Neyen' : ''}`).join('\n');
@@ -29773,8 +30073,11 @@ const handler = {
         // + la línea de logística de la tarjeta de Neyen (N°, contacto, envío pagado, cargado/despachado).
         try { await ensureCortePaquetesSchema(env); paquetes = (await env.DB.prepare("SELECT tanda_id, cliente_key, largo, ancho, alto, peso, bultos, medido_at, contactado, cargado" + (_despOk ? ", numero, contacto_estado, contacto_at, envio_pagado, despachado_at, cargado_at, cargado_por" : "") + ((_despOk && await ensureLogiTablaSchema(env).catch(() => false)) ? ", transporte, transporte_conf, seguimiento" : "") + " FROM corte_paquetes WHERE tanda_id IN (SELECT id FROM corte_tandas ORDER BY id DESC LIMIT 12)").all()).results || []; } catch (_) {}
         const precio_m2 = parseInt(await kvGet(env, 'corte_precio_m2', '175000'), 10) || 175000;
+        if (_cpRole !== 'admin') rows = rows.filter(r => r.sena_estado !== 'pendiente');   // esperando la seña web: solo lo ve Gaspar
         if (_cpRole !== 'admin') rows.forEach(cortePiezaSinVendedor);   // Emma/Corte: sin el vendedor
-        return json({ ok: true, pedidos: rows, paquetes, precio_m2, role: _cpRole, user: String(session.user || '').toLowerCase() });
+        let senas;
+        if (_cpRole === 'admin') { try { senas = await corteSenasLista(env); } catch (_) {} }
+        return json({ ok: true, pedidos: rows, paquetes, precio_m2, role: _cpRole, user: String(session.user || '').toLowerCase(), senas });
       }
       // ===== LOGÍSTICA =====
       // Errores con el contrato del circuito de despacho: {error:'<codigo>', motivo?:'<texto para mostrar>'}.
@@ -30989,7 +31292,7 @@ const handler = {
           // llegaba justo en ese hueco, el vigía no encontraba qué marcar y el pago se perdía.
           const estados = recobrarSet.has(tel) ? "('pendiente','cobrando')" : "('pendiente')";
           let rows = [];
-          try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, estado_pago FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago IN " + estados + " AND estado IN ('cortado','embalado','despachado','entregado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
+          try { rows = (await env.DB.prepare("SELECT id, cliente_nombre, diseno_nombre, medida_declarada, ancho_real, alto_real, cantidad, precio, estado_pago, sena_id, hoja_fila, hoja_cliente, hoja_fecha FROM corte_pedidos WHERE telefono=? AND precio>0 AND estado_pago IN " + estados + " AND estado IN ('cortado','embalado','despachado','entregado') AND IFNULL(producto,'TRANS')!='NEON'" + tf).bind(tel, ...tb).all()).results || []; } catch (_) {}
           if (!rows.length) { await soltarLock(); res.push({ tel, ok: false, error: recobrarSet.has(tel) ? 'nada para cobrar' : 'nada pendiente (si ya se le cobró, usá re-envío)' }); continue; }
           // Se controlan TODOS los nombres del cobro (si un teléfono tiene piezas de dos clientes, eso mismo es un conflicto)
           // contra todos los dueños conocidos del número (LTV + asignaciones + otros clientes del corte). Si LTV no se pudo
@@ -31007,6 +31310,25 @@ const handler = {
           if (confl && !forzarSet.has(tel)) { await soltarLock(); res.push({ tel, ok: false, conflicto: confl.nombre, fuente: confl.fuente, nombre: nomConfl, error: 'NO SE MANDÓ: ese teléfono figura a nombre de ' + confl.nombre + ' (' + confl.fuente + ')' }); continue; }
           const esRecobro = rows.some(x => x.estado_pago === 'cobrando');
           const g = { telefono: tel, cliente_nombre: rows[0].cliente_nombre, piezas: rows.map(r => ({ diseno: r.diseno_nombre, medida: corteMedidaCobro(r), cantidad: r.cantidad, precio: r.precio })), total: rows.reduce((s, r) => s + (Number(r.precio) || 0), 0) };
+          // SEÑA WEB (24-oct): lo que pagó de seña por estas piezas se descuenta. Si la seña cubre todo, no se le cobra nada.
+          const senaCr = await corteSenaCredito(env, rows);
+          if (senaCr.monto > 0) g.sena = senaCr.monto;
+          if (g.sena && g.sena >= g.total * 0.99) {
+            const cubIds = rows.map(x => x.id);
+            let ch = 0;
+            try { const u = await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='pagado', pago_metodo='seña web', pago_nota=?, updated_at=? WHERE estado_pago IN ('pendiente','cobrando') AND id IN (" + cubIds.map(() => '?').join(',') + ")").bind('Cubierto con la seña web', nowIso, ...cubIds).run(); ch = (u && u.meta && u.meta.changes) || 0; } catch (_) {}
+            if (ch) {
+              await corteSenaAplicar(env, senaCr.ids, g.total, nowIso);
+              let sheetMsg = '';
+              if ((await kvGet(env, 'corte_sheet_pago_on', '1')) === '1') { try { sheetMsg = corteSheetMsg(await corteMarcarPagadoSheet(env, g.cliente_nombre, Math.round(g.total), senaCr.caja, '', rows)); } catch (_) {} }
+              const nom = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
+              let ven = false; try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ven = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 23 * 3600 * 1000); } catch (_) {}
+              if (ven) { try { await corteSend(env, tel, (nom ? 'Hola ' + nom + ', ' : 'Hola, ') + 'tu corte de esta semana ($' + Math.round(g.total).toLocaleString('es-AR') + ') ya quedó cubierto con la seña que pagaste. Gracias!'); } catch (_) {} }
+              const sobra = Math.round(g.sena - g.total);
+              try { await precotizNotifyGaspar(env, 'Corte · ' + (g.cliente_nombre || tel) + ': el cobro de esta semana ($' + Math.round(g.total).toLocaleString('es-AR') + ') quedó cubierto con la seña web ($' + Math.round(g.sena).toLocaleString('es-AR') + '). Lo marqué PAGADO' + (ven ? ' y se lo avisé.' : ' (no le escribí: no tiene la ventana de 24 h abierta).') + (sobra > 1 ? ' Le sobran $' + sobra.toLocaleString('es-AR') + ' de seña: devolvelos o dejalos a cuenta.' : '') + sheetMsg, { tipo: 'corte_sena', prioridad: sobra > 1 ? 'P2' : 'P3', refPhone: tel }); } catch (_) {}
+            }
+            await soltarLock(); res.push({ tel, ok: !!ch, total: g.total, sena: g.sena, via: 'seña', error: ch ? undefined : 'no se pudo marcar' }); continue;
+          }
           let ventana = false;
           try { const li = await env.DB.prepare("SELECT MAX(ts) AS t FROM wa_messages WHERE phone=? AND direction='inbound'").bind(tel).first(); ventana = !!(li && li.t && (nowMs - new Date(li.t).getTime()) < 23 * 3600 * 1000); } catch (_) {}
           // El texto libre YA ES el desglose → marcamos el detalle como enviado ANTES de mandarlo: si el vigía corre
@@ -31030,7 +31352,7 @@ const handler = {
             if (ventana) { via = 'texto'; r = await corteSend(env, tel, corteCobroMsg(g)); }
             else {
               const _nom = String(g.cliente_nombre || '').trim().split(/\s+/)[0] || '';
-              const _tot = '$' + Number(g.total || 0).toLocaleString('es-AR');
+              const _tot = g.sena ? '$' + Math.round(g.total - g.sena).toLocaleString('es-AR') + ' (ya descontamos tu seña de $' + Math.round(g.sena).toLocaleString('es-AR') + ')' : '$' + Number(g.total || 0).toLocaleString('es-AR');
               via = 'plantilla';
               const _tpl = await corteCobroTpl(env);
               r = await waSendTemplate(env, tel, _tpl, 'es_AR', [_nom, _tot]);
@@ -31041,14 +31363,22 @@ const handler = {
             // Pasan a 'cobrando' EXACTAMENTE las filas que se cobraron en este mensaje (por id). Las que el vigía haya
             // marcado pagado/parcial mientras salía el mensaje NO se tocan.
             const cobIds = rows.map(x => x.id);
-            try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE estado_pago IN ('pendiente','cobrando') AND id IN (" + cobIds.map(() => '?').join(',') + ")").bind(nowIso, ...cobIds).run(); } catch (_) {}
+            if (g.sena) {
+              // Con seña: arranca como pago parcial con la seña anotada (sin comprobantes): corteVigiaParcial suma el resto.
+              try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='parcial', updated_at=? WHERE estado_pago IN ('pendiente','cobrando') AND id IN (" + cobIds.map(() => '?').join(',') + ")").bind(nowIso, ...cobIds).run(); } catch (_) {}
+              try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS corte_pago_parcial (phone TEXT PRIMARY KEY, total REAL, pagado REAL, montos TEXT, wamids TEXT, desde TEXT, updated_at TEXT)").run(); } catch (_) {}
+              try { await env.DB.prepare("INSERT INTO corte_pago_parcial (phone, total, pagado, montos, wamids, desde, updated_at) VALUES (?, ?, ?, '[]', '[]', ?, ?) ON CONFLICT(phone) DO UPDATE SET total=excluded.total, pagado=excluded.pagado, montos='[]', wamids='[]', desde=excluded.desde, updated_at=excluded.updated_at").bind(tel, g.total, g.sena, nowIso, nowIso).run(); } catch (_) {}
+              await corteSenaAplicar(env, senaCr.ids, g.total, nowIso);
+            } else {
+              try { await env.DB.prepare("UPDATE corte_pedidos SET estado_pago='cobrando', updated_at=? WHERE estado_pago IN ('pendiente','cobrando') AND id IN (" + cobIds.map(() => '?').join(',') + ")").bind(nowIso, ...cobIds).run(); } catch (_) {}
+            }
             // Dedup del DETALLE para este cobro:
             //  · salió como TEXTO → ya quedó marcado ANTES del envío (ese mensaje ES el desglose; caso Daniel, 5-oct).
             //  · salió como PLANTILLA (solo total) → borramos la marca: el desglose sale cuando conteste.
             if (via !== 'texto') { try { await env.DB.prepare("DELETE FROM corte_detalle_sent WHERE phone=?").bind(tel).run(); } catch (_) {} }
             else if (!detMarcado) { try { await env.DB.prepare("INSERT INTO corte_detalle_sent (phone, cobro_at, sent_at) VALUES (?,?,?) ON CONFLICT(phone) DO UPDATE SET cobro_at=excluded.cobro_at, sent_at=excluded.sent_at").bind(tel, nowIso, nowIso).run(); } catch (_) {} }
             if (corteLabelId) { try { await env.DB.prepare("INSERT OR IGNORE INTO contact_labels (phone, label_id, created_at) VALUES (?, ?, datetime('now'))").bind(tel, corteLabelId).run(); } catch (_) {} }
-            res.push({ tel, ok: true, total: g.total, via, recobro: esRecobro });
+            res.push({ tel, ok: true, total: g.total, via, recobro: esRecobro, sena: g.sena || 0 });
           } else { await restaurarDet(); await soltarLock(); res.push({ tel, ok: false, error: 'no se pudo enviar', total: g.total, via }); }
         }
         return res;
@@ -31065,6 +31395,41 @@ const handler = {
       if (request.method === 'GET' && path === '/admin/corte/sin-pagar') {
         if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
         try { return json(await corteSinPagarLista(env, Date.now())); } catch (e) { return json({ ok: false, error: 'No se pudo armar la lista. Probá de nuevo en un momento.' }, 500); }
+      }
+      // GET /admin/corte/senas → panel "Señas web" (pedidos web de los que no son alumnos que esperan la seña). Admin.
+      // POST /admin/corte/senas/:id {accion} → 'confirmar' {monto?, caja?} (acreditada: el pedido sigue) · 'liberar' {alumno?}
+      // (sigue sin seña; alumno:true = no se le pide más) · 'cancelar' (cancela las piezas retenidas). → {ok, senas}
+      if (request.method === 'GET' && path === '/admin/corte/senas') {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        try { return json({ ok: true, senas: await corteSenasLista(env, { prueba: url.searchParams.get('prueba') === '1' }) }); } catch (_) { return json({ ok: false, error: 'db' }, 500); }
+      }
+      const _senaM = request.method === 'POST' ? path.match(/^\/admin\/corte\/senas\/(\d+)$/) : null;
+      if (_senaM) {
+        if ((await getSessionRole(env, session.user)) !== 'admin') return json({ error: 'forbidden' }, 403);
+        let body = {}; try { body = await request.json(); } catch (_) {}
+        if (!(await ensureCorteSenaSchema(env))) return json({ error: 'db', motivo: 'No se pudo preparar la base. Probá de nuevo.' }, 500);
+        const s = await env.DB.prepare('SELECT * FROM corte_senas WHERE id = ?').bind(parseInt(_senaM[1], 10)).first();
+        if (!s) return json({ error: 'no', motivo: 'No encontré esa seña' }, 404);
+        if (!['pendiente', 'revisar'].includes(s.estado)) return json({ error: 'estado', motivo: 'Esa seña ya está ' + s.estado }, 409);
+        const quien = String(session.user || ''), nowIso = new Date().toISOString(), acc = String(body.accion || '');
+        let ok = false;
+        if (acc === 'confirmar') {
+          const comps = corteSenaComps(s).filter(c => c.leido && !c.repetido);
+          const leidos = Math.round(comps.reduce((a, c) => a + (+c.monto || 0), 0));
+          const monto = Math.round(Number(body.monto) || 0) || leidos || (+s.monto || 0);
+          const caja = CORTE_CAJAS_HOJA.includes(body.caja) ? body.caja : ((comps.find(c => CORTE_CAJAS_HOJA.includes(c.caja)) || {}).caja || '');
+          ok = await corteSenaPagada(env, s, { por: quien, monto, caja });
+        } else if (acc === 'liberar' || acc === 'cancelar') {
+          const u = await env.DB.prepare("UPDATE corte_senas SET estado = ?, nota = ?, updated_at = ? WHERE id = ? AND estado IN ('pendiente','revisar')").bind(acc === 'liberar' ? 'liberada' : 'cancelada', (acc === 'liberar' ? 'Sin seña' : 'Pedido cancelado') + ' (' + quien + ')', nowIso, s.id).run();
+          ok = !!((u && u.meta && u.meta.changes) || 0);
+          if (ok && acc === 'liberar') {
+            await corteSenaLiberarPiezas(env, s, 'liberada');
+            if (body.alumno === true) { try { await env.DB.prepare('UPDATE corte_alumnos SET publico = 0, updated_at = ? WHERE telefono = ?').bind(nowIso, s.telefono).run(); } catch (_) {} }
+          }
+          if (ok && acc === 'cancelar') { try { await env.DB.prepare("UPDATE corte_pedidos SET estado = 'cancelado', updated_at = ? WHERE sena_id = ? AND sena_estado = 'pendiente' AND estado = 'pedido' AND hoja_fila IS NULL AND tanda_id IS NULL").bind(nowIso, s.id).run(); } catch (_) {} }
+        } else return json({ error: 'accion', motivo: 'Acción desconocida' }, 400);
+        let senas = []; try { senas = await corteSenasLista(env); } catch (_) {}
+        return json({ ok, senas, motivo: ok ? '' : 'No se pudo: ¿ya la habían resuelto?' }, ok ? 200 : 409);
       }
       // POST /admin/corte/recordar-pago {telefonos, forzar?} → recordatorio de pago a cada uno: texto si tiene la ventana de
       // 24 h; si no, la plantilla aprobada corte_cobro_semanal (nombre + lo que falta). No toca el estado del cobro (el vigía

@@ -159,6 +159,19 @@
   .listo p { color: var(--muted); margin: 8px auto; max-width: 30em; }
   .listo ul { text-align: left; max-width: 26em; margin: 14px auto; padding: 0 0 0 18px; color: var(--muted); }
   .listo .acciones { display: grid; gap: 10px; max-width: 360px; margin: 22px auto 0; }
+  .sena { text-align: left; max-width: 420px; margin: 18px auto 0; padding: 16px; border-radius: var(--r-sm); background: rgba(255,181,71,.07); border: 1px solid rgba(255,181,71,.4); }
+  .sena-t { font-weight: 800; font-size: 16px; color: var(--fg); }
+  .sena-t.ok { color: var(--ok); }
+  .sena-monto { font: 400 34px/1.1 var(--display); margin: 6px 0 2px; color: var(--fg); }
+  .sena-sub { color: var(--muted); font-size: 14px; }
+  .sena-datos { margin: 12px 0 14px; display: grid; gap: 6px; }
+  .sena-dato { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14.5px; }
+  .sena-dato span { color: var(--subtle); min-width: 88px; }
+  .sena-dato b { color: var(--fg); overflow-wrap: anywhere; }
+  .sena-dato .copiar { margin-left: auto; background: transparent; border: 1px solid rgba(143,212,222,.5); color: var(--cyan); border-radius: 8px; padding: 4px 10px; font: 700 13px var(--sans); cursor: pointer; }
+  .sena-est { margin: 10px 0 0; font-size: 14px; color: var(--muted); min-height: 1px; }
+  .sena-est.mal { color: var(--err); font-weight: 600; }
+  .sena-nota { margin: 10px 0 0; font-size: 13px; color: var(--subtle); }
   footer { text-align: center; color: var(--faint); font-size: 13px; padding: 24px 16px 40px; position: relative; z-index: 1; }
   .cerrado { margin-top: 26px; }
   [hidden] { display: none !important; }
@@ -255,6 +268,7 @@
       <div style="font-size:14px;color:var(--muted);font-weight:600">Total estimado</div>
       <div class="monto" id="total">$0</div>
       <div class="desglose" id="desglose">Cargá la medida de tus diseños para ver el estimado.</div>
+      <div class="aviso warn" id="sena-aviso" hidden></div>
       <p class="letra">El precio final te lo confirmamos el lunes según las medidas finales que le dé el diseñador. Si armaste bien el diseño a escala, el precio que calculaste tendría que ser el mismo. Por eso es muy importante que pases las medidas correctas: si no coinciden con la matriz de corte final, el precio puede cambiar.</p>
       <label class="check"><input type="checkbox" id="acepta"><span>Entendido: el precio final se confirma el lunes con las medidas finales.</span></label>
     </section>
@@ -270,6 +284,7 @@
     <p id="listo-p1"></p>
     <ul id="listo-lista"></ul>
     <p id="listo-p2"></p>
+    <div id="listo-sena" hidden></div>
     <div class="acciones">
       <a class="btn sec" href="mis-pedidos/">Ver o cambiar mis pedidos</a>
       <button type="button" class="btn sec" id="otro">Hacer otro pedido</button>
@@ -569,6 +584,56 @@
     });
   }
 
+  // ---------- Seña (los que no son alumnos) ----------
+  // El pedido queda tomado cuando se acredita: 50 % del estimado con diseños, el total si son solo insumos. El comprobante se
+  // sube acá mismo (lo revisa el lector) o se manda por WhatsApp.
+  var SENA = null;
+  function pintarSena(sn) {
+    SENA = sn; var box = $('listo-sena');
+    if (!sn) { box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    if (sn.estado === 'pagada') { box.innerHTML = '<div class="sena"><div class="sena-t ok">' + (sn.tipo === 'insumos' ? 'Pago recibido. Ya preparamos tu pedido para despachar.' : 'Seña recibida. Tu pedido ya está tomado.') + '</div></div>'; return; }
+    box.innerHTML = '<div class="sena">' +
+      '<div class="sena-t">' + (sn.tipo === 'insumos' ? 'Falta el pago para tomar tu pedido' : 'Falta la seña para tomar tu pedido') + '</div>' +
+      '<div class="sena-monto">' + pesos(sn.falta || sn.monto) + '</div>' +
+      '<div class="sena-sub">' + (sn.tipo === 'insumos' ? 'El total de los insumos.' : 'El 50 % del estimado (' + pesos(sn.estimado) + '). El resto lo pagás cuando te confirmemos el total final.') + (sn.pagado > 0 ? ' Ya recibimos ' + pesos(sn.pagado) + '.' : '') + '</div>' +
+      '<div class="sena-datos">' + [['Alias', sn.alias, 1], ['CVU', sn.cvu, 1], ['A nombre de', sn.titular, 0]].map(function (x) {
+        return '<div class="sena-dato"><span>' + x[0] + '</span><b>' + esc(x[1]) + '</b>' + (x[2] ? '<button type="button" class="copiar" data-copiar="' + esc(x[1]) + '">Copiar</button>' : '') + '</div>';
+      }).join('') + '</div>' +
+      '<button type="button" class="btn pri" id="sena-subir">Subir el comprobante</button>' +
+      '<input type="file" id="sena-file" accept="image/*,application/pdf" hidden>' +
+      '<p class="sena-est" id="sena-est" aria-live="polite">' + (sn.estado === 'revisar' ? 'Recibimos tu comprobante y lo estamos revisando. Te confirmamos por WhatsApp.' : '') + '</p>' +
+      '<p class="sena-nota">' + (sn.tipo === 'insumos' ? 'Apenas se acredite lo preparamos para despachar.' : 'Hasta que se acredite, el pedido no pasa al diseñador. Si pagás después del sábado a las 12, entra en la tanda del lunes siguiente.') + ' También podés mandar el comprobante por WhatsApp.</p>' +
+      '</div>';
+    box.querySelectorAll('[data-copiar]').forEach(function (b) { b.onclick = function () { copiar(b.getAttribute('data-copiar'), b); }; });
+    $('sena-subir').onclick = function () { $('sena-file').click(); };
+    $('sena-file').onchange = function () { var f = this.files && this.files[0]; this.value = ''; if (f) subirComprobante(f); };
+  }
+  function copiar(txt, b) {
+    var listo = function () { var t = b.textContent; b.textContent = 'Copiado'; setTimeout(function () { b.textContent = t; }, 1500); };
+    try { navigator.clipboard.writeText(txt).then(listo, function () {}); } catch (_) {}
+  }
+  function subirComprobante(file) {
+    var est = $('sena-est'), b = $('sena-subir');
+    if (!(/^image\//.test(file.type) || file.type === 'application/pdf')) { est.className = 'sena-est mal'; est.textContent = 'Elegí una imagen o un PDF.'; return; }
+    b.disabled = true; b.textContent = 'Subiendo…'; est.className = 'sena-est'; est.textContent = '';
+    var fallo = function (m) { b.disabled = false; b.textContent = 'Subir el comprobante'; est.className = 'sena-est mal'; est.textContent = m; };
+    achicar(file).then(function (blob) {
+      if (blob.size > 15 * 1024 * 1024) throw { motivo: 'Pesa más de 15 MB. Probá con una captura de pantalla.' };
+      return api('/corte/landing/foto', { method: 'POST', headers: { 'Content-Type': blob.type || file.type }, body: blob });
+    }).then(function (j) {
+      if (!j || !j.ok || !j.key) throw { motivo: (j && j.motivo) || 'No se pudo subir. Probá de nuevo.' };
+      b.textContent = 'Revisando el comprobante…';
+      return api('/corte/landing/sena', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: SENA.token, key: j.key }) });
+    }).then(function (j) {
+      if (!j || !j.ok) { fallo((j && j.motivo) || 'No pudimos revisar el comprobante. Probá de nuevo.'); return; }
+      pintarSena(j.sena);
+      var e = $('sena-est'); if (!e) return;
+      if (j.resultado === 'parcial') e.textContent = 'Recibimos ' + pesos(j.sena.pagado) + '. Te faltan ' + pesos(j.sena.falta) + ': subí el otro comprobante cuando lo tengas.';
+      else if (j.resultado === 'revisar') e.textContent = 'Lo recibimos. Lo revisamos y te confirmamos por WhatsApp.';
+    }).catch(function (e) { fallo((e && e.motivo) || 'No se pudo subir. Revisá la conexión y probá de nuevo.'); });
+  }
+
   // ---------- Insumos ----------
   $('insumos').addEventListener('click', function (e) {
     var b = e.target.closest('[data-ins]'); if (!b) return;
@@ -588,6 +653,10 @@
     if (nD) partes.push(nD + ' diseño' + (nD === 1 ? '' : 's') + ' a ' + pesos(cfg.precio_m2) + ' el m²');
     if (ins) partes.push('insumos ' + pesos(ins));
     $('desglose').textContent = partes.length ? partes.join(' + ') : 'Cargá la medida de tus diseños para ver el estimado.';
+    // Los que no son alumnos: la seña se avisa antes de mandar el pedido.
+    var av = $('sena-aviso'), tot = dis + ins, conDis = nD > 0 || S.disenos.some(function (d) { return d.key; });
+    av.hidden = !(S.cliente && S.cliente.sena && tot > 0);
+    if (!av.hidden) av.textContent = conDis ? 'Para tomar tu pedido te pedimos una seña del 50 % del estimado: ' + pesos(Math.ceil(tot * 0.5 / 100) * 100) + '. El resto lo pagás cuando te confirmemos el total final. Al enviar el pedido te pasamos los datos para transferir.' : 'Para tomar tu pedido te pedimos el pago completo por adelantado: ' + pesos(tot) + '. Al enviar el pedido te pasamos los datos para transferir.';
   }
 
   // ---------- Cliente (por su WhatsApp) ----------
@@ -608,7 +677,7 @@
     api('/corte/landing/cliente', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ telefono: $('tel').value }) }).then(function (j) {
       if (t !== S.telChequeado) return;
       if (j && j.ok) {
-        S.cliente = { conocido: !!j.conocido, tieneDir: !!j.tiene_direccion }; $('tel').classList.remove('invalido');
+        S.cliente = { conocido: !!j.conocido, tieneDir: !!j.tiene_direccion, sena: !!j.sena }; $('tel').classList.remove('invalido');
         S.telMal = ''; telEco(j.telefono || '');
         // WhatsApp registrado → el nombre se completa solo (si no lo escribió la persona a mano).
         var nom = $('nombre');
@@ -616,8 +685,8 @@
         else if (!j.conocido && S.nombreAuto) { nom.value = ''; S.nombreAuto = false; }
       }
       else { S.cliente = null; if (j && j.error === 'telefono') { $('tel').classList.add('invalido'); S.telMal = j.motivo || 'No reconocemos ese número.'; telEco(S.telMal, true); } else telEco(''); }
-      pintarCliente();
-    }).catch(function () { S.cliente = null; pintarCliente(); });
+      pintarCliente(); total();
+    }).catch(function () { S.cliente = null; pintarCliente(); total(); });
   }
   function entrega() { var r = document.querySelector('input[name=entrega]:checked'); return r ? r.value : ''; }
   function pintarCliente() {
@@ -720,6 +789,8 @@
     $('listo-lista').innerHTML = body.disenos.map(function (d) { return '<li>' + esc(d.nombre) + ' · ' + esc(String(d.ancho).replace('.', ',')) + ' × ' + esc(String(d.alto).replace('.', ',')) + ' cm' + ((parseInt(d.cantidad, 10) || 1) > 1 ? ' · ' + parseInt(d.cantidad, 10) + ' unidades' : '') + '</li>'; }).join('')
       + body.insumos.map(function (x) { var def = (cfg.insumos || []).find(function (y) { return y.codigo === x.codigo; }); return '<li>' + x.cantidad + ' × ' + esc(def ? def.nombre : x.codigo) + (x.color ? ' ' + esc(x.color) : '') + '</li>'; }).join('');
     $('listo-p2').textContent = j.express ? ('Te escribimos por WhatsApp' + (j.telefono ? ' al ' + j.telefono : '') + ' con el total' + (j.estimado ? ' (' + pesos(j.estimado) + ')' : '') + '. Apenas se acredite el pago lo preparamos para despachar.') : (j.estado === 'margen' ? 'Llegó antes del sábado a las 12, así que entra en esta tanda. ' : '') + 'El lunes te escribimos por WhatsApp' + (j.telefono ? ' al ' + j.telefono : '') + ' con el total final' + (j.estimado ? ' (estimado: ' + pesos(j.estimado) + ')' : '') + '.';
+    if (j.sena) $('listo-p2').textContent = j.sena.tipo === 'insumos' ? 'Cuando se acredite el pago lo preparamos para despachar.' : 'Con la seña acreditada pasa al diseñador, y el lunes te escribimos por WhatsApp' + (j.telefono ? ' al ' + j.telefono : '') + ' con el total final y la seña descontada.';
+    pintarSena(j.sena || null);
     $('f').hidden = true; $('listo').hidden = false;
     window.scrollTo({ top: $('listo').getBoundingClientRect().top + window.scrollY - 16, behavior: 'smooth' });
   }
@@ -727,7 +798,7 @@
     S.disenos.forEach(function (d) { if (d.previa) { try { URL.revokeObjectURL(d.previa); } catch (_) {} } });
     S.disenos = [nuevoDiseno()]; S.insumos = {}; pintarDisenos(); pintarInsumos();
     $('acepta').checked = false; $('err').textContent = '';
-    $('listo').hidden = true; $('f').hidden = false; total();
+    $('listo').hidden = true; $('f').hidden = false; pintarSena(null); total();
     window.scrollTo({ top: $('f').getBoundingClientRect().top + window.scrollY - 16, behavior: 'smooth' });
   };
 })();
