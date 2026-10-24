@@ -8126,7 +8126,9 @@ async function processCorteWebResumen(env) {
 // historial de pedidos; los de semanas anteriores no se editan". Eligió "número + contraseña".
 // - La cuenta es su WhatsApp (corteTel) y una contraseña (PBKDF2, como la de los revendedores).
 // - Crear la cuenta y "me olvidé la contraseña" piden un código de 6 dígitos que llega a ese WhatsApp: texto si su ventana
-//   de 24 h está abierta; si no, la plantilla de AUTENTICACIÓN corte_codigo. Solo pueden crearla los que ya son clientes del corte.
+//   de 24 h está abierta; si no, la plantilla de AUTENTICACIÓN corte_codigo. La puede crear CUALQUIERA, no solo los clientes del
+//   corte (Gaspar 24-oct: "en breve quiero abrirlo para todo el público"); contra el gasto por números al azar hay un tope
+//   global de códigos por día (kv corte_cod_tope_dia, 150 por defecto) y al llegar se le avisa a Gaspar.
 // - Edita SOLO los diseños pedidos por la web (origen 'landing') de la semana en curso, hasta el sábado a las 10 h (AR) de su
 //   tanda: nombre, medidas, cantidad, aclaraciones y foto. Cada cambio queda en corte_pedidos_cambios (antes → después, cuándo y
 //   si fue con la matriz ya diseñada). Si Emma ya la había diseñado, la pieza queda marcada para ella (cliente_edit_tras_diseno)
@@ -8217,12 +8219,18 @@ async function corteCuentaRoute(request, env, ctx, url, path) {
     const cuenta = await env.DB.prepare('SELECT telefono FROM corte_cuentas WHERE telefono = ?').bind(tel).first();
     if (proposito === 'alta' && cuenta) return json({ error: 'existe', motivo: 'Ese número ya tiene cuenta: entrá con tu contraseña (o tocá "Me olvidé la contraseña").' }, 409);
     if (proposito === 'reset' && !cuenta) return json({ error: 'no_existe', motivo: 'Ese número no tiene cuenta todavía: creala.' }, 404);
-    if (proposito === 'alta' && !(await corteLandingCliente(env, tel)).conocido) return json({ error: 'no_cliente', motivo: 'No encontramos pedidos con ese número. Si ya nos compraste, revisá que sea el mismo WhatsApp; si es tu primera vez, hacé tu pedido y después creá la cuenta.' }, 404);
     const prev = await env.DB.prepare('SELECT ultimo_envio FROM corte_cuenta_codigos WHERE telefono = ?').bind(tel).first();
     if (prev && Date.now() - (Date.parse(prev.ultimo_envio || '') || 0) < 60e3) return json({ error: 'espera', motivo: 'Ya te mandamos un código: esperá un minuto antes de pedir otro.' }, 429);
     const dia = 'corte_cod:' + tel + ':' + nowIso.slice(0, 10);
     let n = 0; try { const r = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?) ON CONFLICT(k) DO UPDATE SET v = CAST(CAST(kv_cache.v AS INTEGER) + 1 AS TEXT), updated_at = excluded.updated_at RETURNING v").bind(dia, nowIso).first(); n = parseInt(r && r.v, 10) || 0; } catch (_) {}
     if (n > 6) return json({ error: 'limite', motivo: 'Pediste muchos códigos hoy. Escribinos por WhatsApp y te ayudamos.' }, 429);
+    // Tope global del día (todos los números juntos): la página es pública y cada código con la ventana cerrada se paga.
+    const topeDia = parseInt(await kvGet(env, 'corte_cod_tope_dia', '150'), 10) || 150;
+    let total = 0; try { const r = await env.DB.prepare("INSERT INTO kv_cache (k, v, updated_at) VALUES (?, '1', ?) ON CONFLICT(k) DO UPDATE SET v = CAST(CAST(kv_cache.v AS INTEGER) + 1 AS TEXT), updated_at = excluded.updated_at RETURNING v").bind('corte_cod_total:' + nowIso.slice(0, 10), nowIso).first(); total = parseInt(r && r.v, 10) || 0; } catch (_) {}
+    if (total > topeDia) {
+      if (total === topeDia + 1) { try { await avisoAdmin(env, `Corte · se llegó al tope de ${topeDia} códigos de cuenta por WhatsApp de hoy: los que pidan más esperan a mañana. Si es gente real, subí kv corte_cod_tope_dia; si no, alguien está abusando de la página.`, { tipo: 'corte_cuenta', prioridad: 'P2', clave: 'corte_cod_tope:' + nowIso.slice(0, 10) }); } catch (_) {} }
+      return json({ error: 'limite', motivo: 'Ahora no podemos mandar códigos. Probá más tarde o escribinos por WhatsApp.' }, 429);
+    }
     const codigo = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
     await env.DB.prepare("INSERT INTO corte_cuenta_codigos (telefono, proposito, codigo_hash, expires_at, intentos, ultimo_envio) VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(telefono) DO UPDATE SET proposito = excluded.proposito, codigo_hash = excluded.codigo_hash, expires_at = excluded.expires_at, intentos = 0, ultimo_envio = excluded.ultimo_envio")
       .bind(tel, proposito, await corteCuentaCodigoHash(tel, codigo, proposito), new Date(Date.now() + 10 * 60e3).toISOString(), nowIso).run();
@@ -8259,7 +8267,7 @@ async function corteCuentaRoute(request, env, ctx, url, path) {
     const h = await revHashPassword(body.password);
     if (alta) {
       const cli = await corteLandingCliente(env, tel);
-      const nombre = cli.nombreHoja || cli.nombre || '';
+      const nombre = cli.nombreHoja || cli.nombre || corteLandingNombrePropio(body.nombre);   // el que todavía no compró pone el suyo
       try { await env.DB.prepare('INSERT INTO corte_cuentas (telefono, nombre, pass_hash, pass_salt, created_at, updated_at, ultimo_login) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(tel, nombre, h.hash, h.salt, nowIso, nowIso, nowIso).run(); }
       catch (_) { return json({ error: 'existe', motivo: 'Ese número ya tiene cuenta: entrá con tu contraseña.' }, 409); }
       return sesionResp(tel, nombre);

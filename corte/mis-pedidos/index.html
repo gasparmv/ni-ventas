@@ -122,6 +122,7 @@
     <form id="f-codigo" novalidate hidden>
       <div class="aviso" id="c-enviado"></div>
       <label class="campo">Código<span class="hint">Los 6 números que te llegaron por WhatsApp.</span><input type="text" id="c-cod" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"></label>
+      <label class="campo" id="c-nombre-wrap">Tu nombre y apellido<input type="text" id="c-nombre" autocomplete="name" maxlength="60"></label>
       <label class="campo">Contraseña nueva<span class="hint">Al menos 6 caracteres.</span><input type="password" id="c-pass" autocomplete="new-password"></label>
       <label class="campo">Repetila<input type="password" id="c-pass2" autocomplete="new-password"></label>
       <button type="submit" class="btn pri" id="c-btn">Crear cuenta</button>
@@ -189,6 +190,8 @@
     $('c-titulo').textContent = S.proposito === 'reset' ? 'Recuperar la contraseña' : 'Crear mi cuenta';
     $('c-btn').textContent = S.proposito === 'reset' ? 'Cambiar la contraseña' : 'Crear cuenta';
     $('c-tel').value = $('e-tel').value || $('c-tel').value;
+    $('c-nombre-wrap').hidden = S.proposito === 'reset';
+    if (!$('c-nombre').value) $('c-nombre').value = ls.get('corte_landing_nombre') || '';
     $('f-pedir').hidden = false; $('f-codigo').hidden = true; $('c-err').textContent = '';
     ver('codigo');
   });
@@ -215,7 +218,7 @@
     if (p1.length < 6) { $('c-err').textContent = 'La contraseña tiene que tener al menos 6 caracteres.'; return; }
     if (p1 !== p2) { $('c-err').textContent = 'Las dos contraseñas no coinciden.'; return; }
     var b = $('c-btn'), txt = b.textContent; ocupado(b, true, 'Guardando…');
-    api(S.proposito === 'reset' ? '/corte/cuenta/reset' : '/corte/cuenta/alta', { method: 'POST', body: JSON.stringify({ telefono: S.tel, codigo: cod, password: p1 }) }).then(function (j) {
+    api(S.proposito === 'reset' ? '/corte/cuenta/reset' : '/corte/cuenta/alta', { method: 'POST', body: JSON.stringify({ telefono: S.tel, codigo: cod, password: p1, nombre: $('c-nombre').value }) }).then(function (j) {
       ocupado(b, false, txt);
       if (j.ok && j.token) { entro(j); return; }
       $('c-err').textContent = j.motivo || 'No pudimos guardar. Probá de nuevo.';
