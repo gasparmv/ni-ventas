@@ -23920,7 +23920,7 @@ const handler = {
           let f = {}; try { f = t.data ? JSON.parse(t.data) : {}; } catch (_) { f = {}; }
           const producto = clean(f.tipo_producto) || clean(f.producto);
           const medidas = clean(f.medidas);
-          return { id: t.id, numero: t.numero, cliente: t.cliente, pedido_id: t.pedido_id, detalle: t.detalle, producto, medidas, foto: keys[0] || null, fotos: keys.length, created_by: t.created_by, created_at: t.created_at };
+          return { id: t.id, numero: t.numero, cliente: t.cliente, pedido_id: t.pedido_id, detalle: t.detalle, producto, medidas, foto: keys[0] || null, fotos: keys.length, keys, created_by: t.created_by, created_at: t.created_at };
         });
         return json({ ok: true, tickets });
       }
@@ -23930,10 +23930,12 @@ const handler = {
         const pid = parseInt(url.searchParams.get('pedido_id'), 10) || 0;
         if (!pid) return json({ error: 'missing pedido_id' }, 400);
         let t = null;
-        try { t = await env.DB.prepare('SELECT numero, cliente, detalle, data, created_by, created_at FROM corporeo_tickets WHERE pedido_id=? ORDER BY id DESC LIMIT 1').bind(pid).first(); } catch (_) {}
+        try { t = await env.DB.prepare('SELECT numero, cliente, detalle, data, created_by, created_at, photo_keys FROM corporeo_tickets WHERE pedido_id=? ORDER BY id DESC LIMIT 1').bind(pid).first(); } catch (_) {}
         if (!t) return json({ ok: true, ticket: null });
         let fields = null; try { if (t.data) fields = JSON.parse(t.data); } catch (_) {}
-        return json({ ok: true, ticket: { numero: t.numero, cliente: t.cliente, detalle: t.detalle, fields, created_by: t.created_by, created_at: t.created_at } });
+        // Las fotos guardadas en R2 (las muestra "Ver ticket"; los tickets anteriores al 22-sep no tienen).
+        let fotos = []; try { fotos = t.photo_keys ? JSON.parse(t.photo_keys) : []; if (!Array.isArray(fotos)) fotos = []; } catch (_) { fotos = []; }
+        return json({ ok: true, ticket: { numero: t.numero, cliente: t.cliente, detalle: t.detalle, fields, fotos, created_by: t.created_by, created_at: t.created_at } });
       }
 
       // ----- Proformas (beta): listar / abrir / guardar. Admin + Joaco + Facundo (Gaspar 17-oct: "habilitale esta función a

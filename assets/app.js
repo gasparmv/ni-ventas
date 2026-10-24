@@ -29770,7 +29770,7 @@ function verTicketFromList(ticketId){
   // Tickets viejos sin pedido vinculado (o cuyo pedido no está en la lista) → vista read-only directa.
   tcNuevaApertura();
   STATE.ticketCorpPedidoId = t.pedido_id || null;
-  STATE.ticketCorpView = { numero: t.numero, cliente: t.cliente, detalle: t.detalle, created_by: t.created_by, created_at: t.created_at, fields: null, _ticketId: t.id };
+  STATE.ticketCorpView = { numero: t.numero, cliente: t.cliente, detalle: t.detalle, created_by: t.created_by, created_at: t.created_at, fields: null, fotos: t.keys || [], _ticketId: t.id };
   STATE.ticketCorpMode = 'view';
   STATE.ticketCorpModalOpen = true; STATE.ticketCorpSaving = false;
   render();
@@ -29847,6 +29847,12 @@ function renderTicketCorpView(){
   const det = escapeHtml(String(tk.detalle || '')).replace(/\*([^*\n]+)\*/g, '<b style="color:var(--accent-cyan,#8FD4DE)">$1</b>');
   const ca = String(tk.created_at || '');
   const fecha = ca.length >= 10 ? (ca.slice(8, 10) + '/' + ca.slice(5, 7) + '/' + ca.slice(0, 4)) : '';
+  // Fotos del ticket (las guardadas en R2 al generarlo). Si no tiene (tickets viejos), la foto del diseño del pedido.
+  const tok = encodeURIComponent(STATE.token || '');
+  const fUrl = (k, w) => CONFIG.trackerUrl + '/admin/media/' + encodeURIComponent(k) + '?token=' + tok + (w ? '&w=' + w : '');
+  let fotos = (Array.isArray(tk.fotos) ? tk.fotos : []).map(k => ({ full: fUrl(k), thumb: fUrl(k, 300) }));
+  if (!fotos.length) { const ped = (STATE.pedidos || []).find(x => x.idx === STATE.ticketCorpPedidoId); if (ped && ped.disenoKey) fotos = [{ full: mediaUrl(ped.disenoKey), thumb: mediaUrl(ped.disenoKey), diseno: true }]; }
+  const fotosHtml = fotos.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${fotos.map((f, i) => `<a href="${escapeHtml(f.full)}" target="_blank" rel="noopener" title="${f.diseno ? 'Diseño del pedido' : 'Foto ' + (i + 1)} · ver grande" style="line-height:0"><img src="${escapeHtml(f.thumb)}" alt="" loading="lazy" style="width:110px;height:110px;object-fit:cover;border-radius:8px;border:1px solid var(--border);background:#fff"></a>`).join('')}</div>${fotos[0].diseno ? '<p class="muted" style="margin:-4px 0 10px;font-size:11.5px">Este ticket no guardó fotos: es la del diseño del pedido.</p>' : ''}` : '';
   return `
     <div id="tc-backdrop" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:280;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto;backdrop-filter:blur(4px)">
       <div style="background:var(--bg,#0A0A0F);border:1px solid var(--accent-cyan,#8FD4DE);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.6);max-width:640px;width:100%;margin:auto;padding:var(--s-4)">
@@ -29855,6 +29861,7 @@ function renderTicketCorpView(){
           <button id="tc-close" class="btn btn-ghost btn-icon" style="font-size:16px">✕</button>
         </div>
         <p class="muted" style="margin:0 0 10px;font-size:12px">Generado${fecha ? ' ' + fecha : ''}${tk.created_by ? ' · ' + escapeHtml(tk.created_by) : ''}${tk.cliente ? ' · ' + escapeHtml(tk.cliente) : ''}</p>
+        ${fotosHtml}
         <div style="white-space:pre-wrap;font-size:13px;line-height:1.55;background:var(--ink-100);border:1px solid var(--border);border-radius:var(--r-sm);padding:12px 14px">${det || '<span class="muted">Sin detalle</span>'}</div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:var(--s-4);padding-top:var(--s-2);border-top:1px solid var(--border);flex-wrap:wrap">
           <button id="tc-close2" class="btn btn-ghost">Cerrar</button>
